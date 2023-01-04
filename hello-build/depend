@@ -2,6 +2,8 @@
 #
 #
 #
+#
+#
 hello.o: /home/slex/Scaricati/xMach-main/hello/hello.c \
  /home/slex/Scaricati/xMach-main/hello/hello.h \
  /home/slex/Scaricati/xMach-main/hello-build/../kernel/generic/include/mach/sa/stdio.h \

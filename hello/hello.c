@@ -3,7 +3,5 @@
 
 int main ()
 {
-    printf("Ninnu u cunnu server\n");
-
     return 0;
 }
