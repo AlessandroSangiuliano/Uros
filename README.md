@@ -66,4 +66,8 @@ https://arcan-fe.com/about/
 Points 5, 6, 7 and 8 are really far.
 The road is long, features will come :P
 
+# Socials
+
+Some socials will come, like Discord and others.
+
 
