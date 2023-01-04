@@ -1,0 +1,1 @@
+#define SYSVSHM 0

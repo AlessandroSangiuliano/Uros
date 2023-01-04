@@ -1,0 +1,1 @@
+#define DISKSLICE 0

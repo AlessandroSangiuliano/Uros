@@ -1,0 +1,1 @@
+#define NAMEI_MACROS 1

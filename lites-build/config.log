@@ -1,0 +1,15 @@
+This file contains any messages produced by compilers while
+running configure, to aid debugging if configure makes a mistake.
+
+configure:550: checking for gcc
+configure:663: checking whether the C compiler (gcc  ) works
+configure:679: gcc -o conftest    conftest.c  1>&5
+configure:676:1: warning: return type defaults to 'int' [-Wimplicit-int]
+configure:705: checking whether the C compiler (gcc  ) is a cross-compiler
+configure:710: checking whether we are using GNU C
+configure:738: checking whether gcc accepts -g
+configure:770: checking how to run the C preprocessor
+configure:858: checking for ranlib
+configure:899: gcc -pipe -c -g -O2  conftest.c 1>&5
+configure:928: checking for gawk
+configure:969: checking for a BSD compatible install

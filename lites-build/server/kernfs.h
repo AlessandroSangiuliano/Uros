@@ -1,0 +1,1 @@
+#define KERNFS 1

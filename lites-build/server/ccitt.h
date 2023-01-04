@@ -1,0 +1,1 @@
+#define CCITT 0

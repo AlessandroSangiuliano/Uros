@@ -1,0 +1,28 @@
+#include <sys/types.h>
+#include <sys/param.h>
+#include <sys/systm.h>
+#include <sys/time.h>
+#include <sys/vnode.h>
+#include <sys/socket.h>
+bogus() {
+asm ("
+* PATH_LENGTH mAgIc%0" : : "i" (roundup(MAXPATHLEN,sizeof(int))));
+asm ("
+* SMALL_ARRAY_LIMIT mAgIc%0" : : "i" (8192));
+asm ("
+* FD_SET_LIMIT mAgIc%0" : : "i" (howmany(FD_SETSIZE,NFDBITS)));
+asm ("
+* GROUPS_LIMIT mAgIc%0" : : "i" (NGROUPS));
+asm ("
+* HOST_NAME_LIMIT mAgIc%0" : : "i" (MAXHOSTNAMELEN));
+asm ("
+* VATTR_SIZE mAgIc%0" : : "i" (((sizeof(struct/**/vattr)+sizeof(int)-1)/sizeof(int))));
+asm ("
+* RUSAGE_SIZE mAgIc%0" : : "i" (((sizeof(struct/**/rusage)+sizeof(int)-1)/sizeof(int))));
+asm ("
+* SIGACTION_SIZE mAgIc%0" : : "i" (((sizeof(struct/**/sigaction)+sizeof(int)-1)/sizeof(int))));
+asm ("
+* SIGSTACK_SIZE mAgIc%0" : : "i" (((sizeof(struct/**/sigstack)+sizeof(int)-1)/sizeof(int))));
+asm ("
+* CTL_MAXNAME mAgIc%0" : : "i" (12));
+}

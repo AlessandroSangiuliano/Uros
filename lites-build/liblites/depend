@@ -1,0 +1,135 @@
+#
+exec_file.o: \
+ /home/slex/Scaricati/xMach-main/lites/liblites/exec_file.c \
+ /home/slex/xmach-installation/include/mach.h \
+ /home/slex/xmach-installation/include/mach/mach_types.h \
+ /home/slex/xmach-installation/include/mach/host_info.h \
+ /home/slex/xmach-installation/include/mach/machine.h \
+ /home/slex/xmach-installation/include/mach/machine/vm_types.h \
+ /home/slex/xmach-installation/include/mach/boolean.h \
+ /home/slex/xmach-installation/include/mach/machine/boolean.h \
+ /home/slex/xmach-installation/include/mach/memory_object.h \
+ /home/slex/xmach-installation/include/mach/port.h \
+ /home/slex/xmach-installation/include/mach/pc_sample.h \
+ /home/slex/xmach-installation/include/mach/processor_info.h \
+ /home/slex/xmach-installation/include/mach/task_info.h \
+ /home/slex/xmach-installation/include/mach/time_value.h \
+ /home/slex/xmach-installation/include/mach/task_special_ports.h \
+ /home/slex/xmach-installation/include/mach/thread_info.h \
+ /home/slex/xmach-installation/include/mach/policy.h \
+ /home/slex/xmach-installation/include/mach/thread_special_ports.h \
+ /home/slex/xmach-installation/include/mach/thread_status.h \
+ /home/slex/xmach-installation/include/mach/machine/thread_status.h \
+ /home/slex/xmach-installation/include/mach/machine/fp_reg.h \
+ /home/slex/xmach-installation/include/mach/vm_attributes.h \
+ /home/slex/xmach-installation/include/mach/vm_inherit.h \
+ /home/slex/xmach-installation/include/mach/vm_prot.h \
+ /home/slex/xmach-installation/include/mach/vm_statistics.h \
+ /home/slex/xmach-installation/include/mach/std_types.h \
+ /home/slex/xmach-installation/include/mach/kern_return.h \
+ /home/slex/xmach-installation/include/mach/machine/kern_return.h \
+ /home/slex/xmach-installation/include/mach/mach_interface.h \
+ /home/slex/xmach-installation/include/mach/message.h \
+ /home/slex/xmach-installation/include/mach/mach_port.h \
+ /home/slex/xmach-installation/include/mach_init.h \
+ /home/slex/xmach-installation/include/mach/error.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/types.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/endian.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/cdefs.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/ansi.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/types.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/exec_file.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/param.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/syslimits.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/signal.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/signal.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/trap.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/param.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/limits.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/aout.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/coff.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/som.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/elf.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/errno.h
+#
+in_cksum.o: \
+ /home/slex/Scaricati/xMach-main/lites/liblites/i386/in_cksum.c \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/param.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/types.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/endian.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/cdefs.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/ansi.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/types.h \
+ /home/slex/xmach-installation/include/mach/machine/vm_types.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/syslimits.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/signal.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/signal.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/trap.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/param.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/limits.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/mbuf.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/macro_help.h \
+ /home/slex/Scaricati/xMach-main/lites/server/serv/import_mach.h \
+ /home/slex/Scaricati/xMach-main/lites/include/string.h \
+ /home/slex/xmach-installation/include/mach.h \
+ /home/slex/xmach-installation/include/mach/mach_types.h \
+ /home/slex/xmach-installation/include/mach/host_info.h \
+ /home/slex/xmach-installation/include/mach/machine.h \
+ /home/slex/xmach-installation/include/mach/boolean.h \
+ /home/slex/xmach-installation/include/mach/machine/boolean.h \
+ /home/slex/xmach-installation/include/mach/memory_object.h \
+ /home/slex/xmach-installation/include/mach/port.h \
+ /home/slex/xmach-installation/include/mach/pc_sample.h \
+ /home/slex/xmach-installation/include/mach/processor_info.h \
+ /home/slex/xmach-installation/include/mach/task_info.h \
+ /home/slex/xmach-installation/include/mach/time_value.h \
+ /home/slex/xmach-installation/include/mach/task_special_ports.h \
+ /home/slex/xmach-installation/include/mach/thread_info.h \
+ /home/slex/xmach-installation/include/mach/policy.h \
+ /home/slex/xmach-installation/include/mach/thread_special_ports.h \
+ /home/slex/xmach-installation/include/mach/thread_status.h \
+ /home/slex/xmach-installation/include/mach/machine/thread_status.h \
+ /home/slex/xmach-installation/include/mach/machine/fp_reg.h \
+ /home/slex/xmach-installation/include/mach/vm_attributes.h \
+ /home/slex/xmach-installation/include/mach/vm_inherit.h \
+ /home/slex/xmach-installation/include/mach/vm_prot.h \
+ /home/slex/xmach-installation/include/mach/vm_statistics.h \
+ /home/slex/xmach-installation/include/mach/std_types.h \
+ /home/slex/xmach-installation/include/mach/kern_return.h \
+ /home/slex/xmach-installation/include/mach/machine/kern_return.h \
+ /home/slex/xmach-installation/include/mach/mach_interface.h \
+ /home/slex/xmach-installation/include/mach/message.h \
+ /home/slex/xmach-installation/include/mach/mach_port.h \
+ /home/slex/xmach-installation/include/mach_init.h \
+ /home/slex/xmach-installation/include/mach/mach_traps.h \
+ /home/slex/xmach-installation/include/mach/notify.h \
+ /home/slex/xmach-installation/include/mach/mig_errors.h \
+ /home/slex/xmach-installation/include/mach/mach_host.h \
+ /home/slex/xmach-installation/include/mach/error.h \
+ /home/slex/xmach-installation/include/mach/cthreads.h \
+ /home/slex/xmach-installation/include/mach/machine/cthreads.h \
+ /home/slex/xmach-installation/include/mach/macro_help.h \
+ /home/slex/xmach-installation/include/mach/machine/vm_param.h \
+ /home/slex/xmach-installation/include/mach/setjmp.h \
+ /home/slex/xmach-installation/include/device/device.h \
+ /home/slex/xmach-installation/include/device/device_types.h \
+ /home/slex/xmach-installation/include/device/net_status.h \
+ /home/slex/xmach-installation/include/device/bpf.h \
+ ../server/mutex_holder_assert.h ../server/osfmach3.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/zalloc.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/malloc.h \
+ /home/slex/Scaricati/xMach-main/lites/server/netinet/in.h \
+ /home/slex/Scaricati/xMach-main/lites/server/netinet/in_systm.h
+#
+memcmp.o: /home/slex/Scaricati/xMach-main/lites/liblites/memcmp.c \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/types.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/endian.h \
+ /home/slex/Scaricati/xMach-main/lites/include/sys/cdefs.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/ansi.h \
+ /home/slex/Scaricati/xMach-main/lites-build/include/machine/types.h \
+ /home/slex/xmach-installation/include/mach/machine/vm_types.h
+#
+ntoh.o: /home/slex/Scaricati/xMach-main/lites/liblites/i386/ntoh.s \
+ /home/slex/xmach-installation/include/mach/i386/asm.h
+#
+#

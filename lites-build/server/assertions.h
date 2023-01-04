@@ -1,0 +1,1 @@
+#define ASSERTIONS 0
