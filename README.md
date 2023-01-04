@@ -70,4 +70,7 @@ The road is long, features will come :P
 
 Some socials will come, like Discord and others.
 
+# Special Thanks
 
+Neozeed, helping me with historical things and other stuffs.
+https://github.com/neozeed/
