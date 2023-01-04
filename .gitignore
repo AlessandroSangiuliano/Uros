@@ -53,3 +53,5 @@ dkms.conf
 
 # Dirs
 .vscode
+kernel-build
+lites-build
