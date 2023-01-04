@@ -38,7 +38,8 @@ boot
 
 
 tell mach it's root is:
-/dev/hd0a/mach_servers```
+/dev/hd0a/mach_servers
+``` 
 
 I use Super Grub 2 iso image to boot the system as shown above. However the NetBSD bootloader is able to boot the Mach kernel without any proble, i booted it from NetBSD-9.3 without any problem, just tell it the kernel path.
 
