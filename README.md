@@ -43,7 +43,7 @@ tell mach it's root is:
 
 I use Super Grub 2 iso image to boot the system as shown above. However the NetBSD bootloader is able to boot the Mach kernel without any proble, i booted it from NetBSD-9.3 without any problem, just tell it the kernel path.
 
-#Goals
+# Goals
 
 As i said actually is nothing more than xMach, with some libc new stuff that are going on. Acutally libc is called libmach_c, the name will be changed to the usual ```libc```. 
 
@@ -61,7 +61,7 @@ https://arcan-fe.com/about/
 7) Mach4 needs clustered paging to gain a good amount of performances in the VM (virtual memory). OSF Mach has it and it is possible to port the features from there to Mach4 or switch to use osfmach?
 8) Actually Mach4 uses traps to enter the kernel. Drop the support for old processors ( i don't care for now about them) and switch to sysenter/sysexit will give another performance up! You want support of old CPUs, then we can talk about vDSO.
 
-#Roadmap
+# Roadmap
 
 Points 5, 6, 7 and 8 are really far.
 The road is long, features will come :P
