@@ -158,6 +158,7 @@ main(argc, argv)
 	printf_init(bootstrap_master_device_port);
 	panic_init(bootstrap_master_host_port);
 
+	printf("Master DEVICE port %d; Master HOST ports %d\n", bootstrap_master_device_port, bootstrap_master_host_port);
 	
 	if (root_name[0] == '\0') 
                 root_name = DEFAULT_ROOT;

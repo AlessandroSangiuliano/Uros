@@ -55,3 +55,6 @@ dkms.conf
 .vscode
 kernel-build
 lites-build
+hello-build/depend
+
+hello-build/hello
