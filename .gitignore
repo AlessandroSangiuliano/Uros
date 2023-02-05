@@ -58,3 +58,7 @@ lites-build
 hello-build/depend
 
 hello-build/hello
+
+hello/obj/
+
+hello/depend
