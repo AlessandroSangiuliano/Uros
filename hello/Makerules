@@ -9,11 +9,9 @@ LDFLAGS = -nostdlib -static -e _start
 CRT0 := $(wildcard ${INSTALL_LIBDIR}/mach[-_]crt0.o ${MACH_RELEASE_DIR}/lib/crt0.o ${MACH_RELEASE_DIR}/ccs/lib/crt0.o)
 CRT0 := $(firstword ${CRT0} crt0-not-found)
 
-$(info HOME is $(HOME))
+#$(info HOME is $(HOME))
 
 #$(info CPPFLAGS  is $(TARGET_CPPFLAGS))
-
-MACHC = /home/slex/xmach-installation/lib/libmach_c.a
 
 BUILD = ${OBJDIR}/obj
 
@@ -25,6 +23,9 @@ dir:
 ${BUILD}/hello: ${FILES}
 	@echo
 	${TARGET_CC} ${CRT0} ${LIBGCC} ${TARGET_CPPFLAGS} -I${SRCDIR} ${LDFLAGS} -o $@ $< -L${LIBDIR} ${LIBS}
+	@mv depend ${BUILD}
+	@mv *.d ${BUILD}
+	
 
 clean:
-	rm -f ${BUILD}/hello  ${BUILD}/hello.o
+	rm -f ${BUILD}/hello  ${BUILD}/hello.o ${BUILD}/hello.d ${BUILD}/depend
