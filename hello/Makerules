@@ -27,5 +27,5 @@ ${BUILD}/hello: ${FILES}
 	@mv *.d ${BUILD}
 	
 
-clean:
-	rm -f ${BUILD}/hello  ${BUILD}/hello.o ${BUILD}/hello.d ${BUILD}/depend
+#clean:
+#	rm -f ${BUILD}/hello  ${BUILD}/hello.o ${BUILD}/hello.d ${BUILD}/depend
