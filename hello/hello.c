@@ -11,11 +11,14 @@ mach_port_t	console_port;
 
 int main (int argc, char **argv)
 {
+	int err = 0;
     get_privileged_ports (&host_port, &device_port);
 
     console_init();
 
-    printf("Hello from Uros. I was born 'from' here!\n");
+    err = printf("Hello from Uros. I was born 'from' here!\n");
+
+	printf("Ciao Iolanda il valore di ritorno è: %d\n,", err);
 
     return 0;
 }
