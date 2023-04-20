@@ -247,10 +247,11 @@ int boot_load_program(master_host_port,
 	st.aout_symtab_size = 0;
 	st.aout_strtab_size = 0;
 	result = exec_load(prog_read, prog_read_exec, &st, &info);
+	
 	if (result)
 		panic("(bootstrap) exec_load %s: error %d", namebuf, result);
-
-printf("loaded; entrypoint %08x\n", info.entry);
+		
+	printf("loaded; entrypoint %08x\n", info.entry);
 	/*
 	 * Set up the stack and user registers.
 	 */

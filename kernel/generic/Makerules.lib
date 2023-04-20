@@ -1,6 +1,5 @@
-# Generated automatically from Makefile.in by configure.
 #
-# Copyright (c) 1994 The University of Utah and
+# Copyright (c) 1995 The University of Utah and
 # the Computer Systems Laboratory (CSL).  All rights reserved.
 #
 # Permission to use, copy, modify and distribute this software and its
@@ -18,18 +17,33 @@
 #
 #      Author: Bryan Ford, University of Utah CSL
 #
+ifndef _mach4_makerules_lib_
+_mach4_makerules_lib_ = yes
 
-#### Start of configuration section ####
+# This is a generic set of rules to be used for library targets.
+# TARGET must be set to the full library filename (e.g. `libmach.a').
 
-GSRCDIR	= /home/slex/Scaricati/xMach-main/kernel//home/slex/Scaricati/xMach-main/kernel/generic
-MSRCDIR = /home/slex/Scaricati/xMach-main/kernel
-OBJDIR	= /home/slex/Scaricati/xMach-main/kernel
 
-prefix = /usr/local
-exec_prefix = ${prefix}
+all: $(TARGET) $(OBJDIR)/lib/$(TARGET)
 
-include $(OBJDIR)/Makeconf
+CLEAN_FILES += $(TARGET)
 
-##### End of configuration section #####
 
-include $(MSRCDIR)/boot/bsd/Makerules
+include $(GSRCDIR)/Makerules
+
+
+$(TARGET): $(OBJFILES)
+	$(AR) $(ARFLAGS) $@ $?
+	$(RANLIB) $@
+
+$(OBJDIR)/lib/%: % $(OBJDIR)/lib
+	$(MKDIR) $(OBJDIR)/lib
+	cp $< $@
+
+$(OBJDIR)/lib:
+	$(MKDIR) $(OBJDIR)/lib
+
+install: $(INSTALL_LIBDIR)/$(TARGET)
+
+
+endif
