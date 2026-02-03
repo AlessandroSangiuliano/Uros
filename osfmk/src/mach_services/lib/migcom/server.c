@@ -434,9 +434,7 @@ WriteRoutineEntries(file, stats)
 }
 
 static void
-WriteArgDescriptorEntries(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteArgDescriptorEntries(FILE *file, statement_t *stats)
 {
     register u_int current = 0;
     register statement_t *stat;
@@ -459,10 +457,7 @@ WriteArgDescriptorEntries(file, stats)
  * Write out the description of this subsystem, for use in direct RPC
  */
 static void
-WriteSubsystem(file, stats, maxsize)
-    FILE *file;
-    statement_t *stats;
-    unsigned int maxsize;
+WriteSubsystem(FILE *file, statement_t *stats, unsigned int maxsize)
 {
     register statement_t *stat;
     int descr_count = 0;
@@ -503,10 +498,7 @@ WriteSubsystem(file, stats, maxsize)
 }
 
 static void
-WriteDispatcher(file, stats, maxsize)
-    FILE *file;
-    statement_t *stats;
-    unsigned int maxsize;
+WriteDispatcher(FILE *file, statement_t *stats, unsigned int maxsize)
 {
     fprintf(file, "\n");
 
@@ -616,16 +608,13 @@ WriteDispatcher(file, stats, maxsize)
  *  Suitable for "extern %s serverfunc()".
  */
 static char *
-ServerSideType(rt)
-    routine_t *rt;
+ServerSideType(routine_t *rt)
 {
     return rt->rtRetCode->argType->itTransType;
-}
+} 
 
 static void
-WriteRetCode(file, ret)
-    FILE *file;
-    register argument_t *ret;
+WriteRetCode(FILE *file, register argument_t *ret)
 {
     register ipc_type_t *it = ret->argType;
 
@@ -635,9 +624,7 @@ WriteRetCode(file, ret)
 }
 
 static void
-WriteLocalVarDecl(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteLocalVarDecl(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     register ipc_type_t *btype = it->itElement;
@@ -658,9 +645,7 @@ WriteLocalVarDecl(file, arg)
 }
 
 static void
-WriteServerArgDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteServerArgDecl(FILE *file, argument_t *arg)
 {
     fprintf(file, "%s %s%s",
 	    arg->argType->itTransType,
@@ -673,9 +658,7 @@ WriteServerArgDecl(file, arg)
  *  present:  InP, OutP, the server-side work function.
  */
 static void
-WriteVarDecls(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteVarDecls(FILE *file, routine_t *rt)
 {
     int i;
     boolean_t NeedMsghSize = FALSE;
@@ -731,9 +714,7 @@ WriteReplyInit(file, rt)
 }
 
 static void
-WriteRetCArgCheckError(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteRetCArgCheckError(FILE *file, routine_t *rt)
 {
     fprintf(file, "\tif (!(In0P->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&\n");
     fprintf(file, "\t    (In0P->Head.msgh_size == sizeof(mig_reply_error_t)))\n");
@@ -741,9 +722,7 @@ WriteRetCArgCheckError(file, rt)
 }
 
 static void
-WriteRetCArgFinishError(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteRetCArgFinishError(FILE *file, routine_t *rt)
 {
     argument_t *retcode = rt->rtRetCArg;
 
@@ -753,9 +732,7 @@ WriteRetCArgFinishError(file, rt)
 }
 
 static void
-WriteCheckHead(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteCheckHead(FILE *file, routine_t *rt)
 {
     fprintf(file, "#if\tTypeCheck\n");
     if (rt->rtNumRequestVar > 0)
@@ -801,9 +778,7 @@ WriteCheckHead(file, rt)
 }
 
 static void
-WriteCheckArgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteCheckArgSize(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argType;
     register ipc_type_t *btype = ptype->itElement;
