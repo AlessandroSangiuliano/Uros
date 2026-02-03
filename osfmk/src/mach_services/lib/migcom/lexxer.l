@@ -155,7 +155,7 @@ static int	oldYYBegin = 0;
 int lineno = 0;			/* Replaces lex yylineno */
 
 static void doSharp(); /* process body of # directives */
-extern void yyerror();
+extern void yyerror(char *);
 %}
 
 %Start	Normal String FileName QString SkipToEOL

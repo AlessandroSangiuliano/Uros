@@ -86,6 +86,10 @@
  *	Created.
  */
 
+%{
+extern void yyerror(char *);
+%}
+
 %token	sySkip
 %token	syRoutine
 %token	sySimpleRoutine
@@ -727,15 +731,13 @@ LookQString		:	/* empty */
 %%
 
 void
-yyerror(s)
-    char *s;
+yyerror(char *s)
 {
     error(s);
 }
 
 static char *
-import_name(sk)
-    statement_kind_t sk;
+import_name(statement_kind_t sk)
 {
     switch (sk)
     {
