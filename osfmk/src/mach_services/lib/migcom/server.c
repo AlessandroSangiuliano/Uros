@@ -797,9 +797,7 @@ WriteCheckArgSize(FILE *file, register argument_t *arg)
 }
 
 static void
-WriteCheckMsgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteCheckMsgSize(FILE *file, register argument_t *arg)
 {
     register routine_t *rt = arg->argRoutine;
 
@@ -857,8 +855,7 @@ WriteCheckMsgSize(file, arg)
 }
 
 static char *
-InArgMsgField(arg)
-    register argument_t *arg;
+InArgMsgField(register argument_t *arg)
 {
     static char buffer[MAX_STR_LEN];
     char who[20] = {0};
@@ -888,9 +885,7 @@ InArgMsgField(arg)
 }
 
 static void
-WriteExtractArgValue(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteExtractArgValue(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     string_t recast;
@@ -962,9 +957,7 @@ WriteExtractKPD_oolport(FILE *file, register argument_t *arg)
 }
 
 static void
-WriteInitializeCount(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteInitializeCount(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argParent->argType;
     register ipc_type_t *btype = ptype->itElement;
@@ -1003,9 +996,7 @@ WriteInitializeCount(file, arg)
 }
 
 static void
-WriteAdjustRequestMsgPtr(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteAdjustRequestMsgPtr(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argType;
 
@@ -1016,9 +1007,7 @@ WriteAdjustRequestMsgPtr(file, arg)
 }
 
 static void
-WriteRequestArgs(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRequestArgs(FILE *file, register routine_t *rt)
 {
     register argument_t *arg;
     register argument_t *lastVarArg;
@@ -1061,9 +1050,7 @@ WriteRequestArgs(file, rt)
 }
 
 static void
-WriteExtractArg(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteExtractArg(FILE *file, register argument_t *arg)
 {
     if (akCheckAll(arg->argKind, akbSendRcv|akbVarNeeded))
 	if (akCheck(arg->argKind, akbSendKPD))
@@ -1089,9 +1076,7 @@ WriteExtractArg(file, arg)
 }
 
 static void
-WriteServerCallArg(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteServerCallArg(FILE *file, register argument_t *arg)
 {
     ipc_type_t *it = arg->argType;
     boolean_t NeedClose = FALSE;
@@ -1147,9 +1132,7 @@ WriteServerCallArg(file, arg)
  * We know that we are a SimpleRoutine.
  */
 static void
-WriteConditionalCallArg(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteConditionalCallArg(FILE *file, register argument_t *arg)
 {
     ipc_type_t *it = arg->argType;
     boolean_t NeedClose = FALSE;
@@ -1179,9 +1162,7 @@ WriteConditionalCallArg(file, arg)
 }
 
 static void
-WriteDestroyArg(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteDestroyArg(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
