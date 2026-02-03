@@ -154,9 +154,7 @@ extern int yyparse();
 static FILE *myfopen(char *name, char *mode);
 
 static void
-parseArgs(argc, argv)
-    int argc;
-    char *argv[];
+parseArgs(int argc, char *argv[])
 {
     while (--argc > 0)
 	if ((++argv)[0][0] == '-') 
@@ -298,10 +296,8 @@ parseArgs(argc, argv)
 
 FILE *uheader, *server, *user;
 
-void
-main(argc, argv)
-    int argc;
-    char *argv[];
+int
+main(int argc, char *argv[])
 {
     FILE *iheader, *sheader, *dheader;
     time_t loc;
@@ -400,7 +396,7 @@ main(argc, argv)
     if (BeVerbose)
 	printf("done.\n");
 
-    exit(0);
+    return 0;
 }
 
 static FILE *

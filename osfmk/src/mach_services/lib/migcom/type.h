@@ -299,12 +299,12 @@ extern ipc_type_t *itZeroReplyPortType;
 extern ipc_type_t *itRealReplyPortType;
 extern ipc_type_t *itWaitTimeType;
 extern ipc_type_t *itMsgOptionType;
-extern ipc_type_t *itMakeCountType();
-extern ipc_type_t *itMakeSubCountType();
-extern ipc_type_t *itMakePolyType();
-extern ipc_type_t *itMakeDeallocType();
+extern ipc_type_t *itMakeCountType(void);
+extern ipc_type_t *itMakeSubCountType(int count, boolean_t varying, string_t name);
+extern ipc_type_t *itMakePolyType(void);
+extern ipc_type_t *itMakeDeallocType(void);
 
-extern void init_type();
+extern void init_type(void);
 
 extern void itCheckReturnType(identifier_t name, ipc_type_t *it);
 extern void itCheckRequestPortType(identifier_t name, ipc_type_t *it);

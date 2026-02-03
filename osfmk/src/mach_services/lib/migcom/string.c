@@ -73,8 +73,7 @@
 #include "strdefs.h"
 
 string_t
-strmake(string)
-    char *string;
+strmake(char *string)
 {
     register string_t saved;
 
@@ -85,8 +84,7 @@ strmake(string)
 }
 
 string_t
-strconcat(left, right)
-    string_t left, right;
+strconcat(string_t left, string_t right)
 {
     register string_t saved;
 
@@ -98,8 +96,7 @@ strconcat(left, right)
 }
 
 void
-strfree(string)
-    string_t string;
+strfree(string_t string)
 {
     free(string);
 }
@@ -123,8 +120,7 @@ strstring(string_t string)
 }
 
 char *
-toupperstr(p)
-    char *p;
+toupperstr(char *p)
 {
     register char *s = p;
     char c;

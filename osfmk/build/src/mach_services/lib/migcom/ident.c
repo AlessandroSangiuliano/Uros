@@ -1,0 +1,2 @@
+char *MigGenerationDate = "";
+char *MigMoreData = "@";

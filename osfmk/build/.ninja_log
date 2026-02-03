@@ -1,0 +1,24 @@
+# ninja log v7
+1	87	1770117062988979871	build.ninja	a2bcd406b4b0ebfa
+1	87	1770117062985112064	/home/slex/osfmk-mklinux/osfmk/build/cmake_install.cmake	a2bcd406b4b0ebfa
+1	87	1770117062985403435	/home/slex/osfmk-mklinux/osfmk/build/src/cmake_install.cmake	a2bcd406b4b0ebfa
+1	87	1770117062985876185	/home/slex/osfmk-mklinux/osfmk/build/src/mach_services/lib/cmake_install.cmake	a2bcd406b4b0ebfa
+1	87	1770117062986363509	/home/slex/osfmk-mklinux/osfmk/build/src/mach_services/lib/migcom/cmake_install.cmake	a2bcd406b4b0ebfa
+1	93	1770117062988979871	build.ninja	a2bcd406b4b0ebfa
+1	93	1770117062988979871	/home/slex/osfmk-mklinux/osfmk/build/cmake_install.cmake	a2bcd406b4b0ebfa
+1	93	1770117062988979871	/home/slex/osfmk-mklinux/osfmk/build/src/cmake_install.cmake	a2bcd406b4b0ebfa
+1	93	1770117062988979871	/home/slex/osfmk-mklinux/osfmk/build/src/mach_services/lib/cmake_install.cmake	a2bcd406b4b0ebfa
+1	93	1770117062988979871	/home/slex/osfmk-mklinux/osfmk/build/src/mach_services/lib/migcom/cmake_install.cmake	a2bcd406b4b0ebfa
+1	63	1770117062999365179	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/error.c.o	258c490fdd966a2a
+9	58	1770117120561557261	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/statement.c.o	39110b52e5f80f51
+1	47	1770117483336862712	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/global.c.o	e0fc8d1fee5304c6
+3	58	1770117483338585572	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/string.c.o	d442a432a9e67db8
+1	66	1770117483335689421	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/error.c.o	258c490fdd966a2a
+2	67	1770117483338007299	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/statement.c.o	39110b52e5f80f51
+1	98	1770117483337160935	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/header.c.o	2d0833f72bc0b78f
+2	66	1770117804070257766	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/global.c.o	e0fc8d1fee5304c6
+4	105	1770117804073083621	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/string.c.o	d442a432a9e67db8
+1	114	1770117804069257781	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/error.c.o	258c490fdd966a2a
+4	125	1770117804072780331	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/statement.c.o	39110b52e5f80f51
+3	147	1770117804071257751	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/header.c.o	2d0833f72bc0b78f
+2	142	1770117873009845353	src/mach_services/lib/migcom/CMakeFiles/migcom.dir/mig.c.o	ee9c17cc67a59733
