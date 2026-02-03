@@ -256,8 +256,7 @@ WriteKPD_Iterator(file, in, varying, arg, bracket)
 }
 
 static void
-WriteIncludes(file)
-    FILE *file;
+WriteIncludes(FILE *file)
 {
     if (ServerHeaderFileName != strNULL)
     {
@@ -297,8 +296,7 @@ WriteIncludes(file)
 }
 
 static void
-WriteGlobalDecls(file)
-    FILE *file;
+WriteGlobalDecls(FILE *file)
 {
     if (BeAnsiC) {
         fprintf(file, "#define novalue void\n");
@@ -347,9 +345,7 @@ WriteGlobalDecls(file)
 }
 
 static void
-WriteForwardDeclarations(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteForwardDeclarations(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
 
@@ -364,8 +360,7 @@ WriteForwardDeclarations(file, stats)
 }
 
 static void
-WriteProlog(file)
-    FILE *file;
+WriteProlog(FILE *file)
 {
     WriteIdentificationString(file);
     fprintf(file, "\n");
@@ -379,9 +374,7 @@ WriteProlog(file)
 
 
 static void
-WriteSymTabEntries(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteSymTabEntries(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     register u_int current = 0;
