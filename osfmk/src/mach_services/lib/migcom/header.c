@@ -122,9 +122,7 @@
 #include <stdlib.h>
 
 static void
-WriteIncludes(file, isuser)
-    FILE *file;
-    boolean_t	isuser;
+WriteIncludes(FILE *file, boolean_t isuser)
 {
     fprintf(file, "#include <string.h>\n");
     fprintf(file, "#include <mach/ndr.h>\n");
@@ -147,14 +145,12 @@ WriteIncludes(file, isuser)
 }
 
 static void
-WriteDefines(file)
-    FILE *file;
+WriteDefines(FILE *file)
 {
 }
 
 static void
-WriteMigExternal(file)
-    FILE *file;
+WriteMigExternal(FILE *file)
 {
     fprintf(file, "#ifdef\tmig_external\n");
     fprintf(file, "mig_external\n");
@@ -164,10 +160,7 @@ WriteMigExternal(file)
 }
 
 static void
-WriteProlog(file, protect, more, isuser)
-    FILE *file;
-    char *protect;
-    boolean_t more, isuser;
+WriteProlog(FILE *file, char *protect, boolean_t more, boolean_t isuser)
 {
     if (protect != strNULL) {
 	fprintf(file, "#ifndef\t_%s\n", protect);
@@ -185,9 +178,7 @@ WriteProlog(file, protect, more, isuser)
 }
 
 static void
-WriteEpilog(file, protect)
-    FILE *file;
-    char *protect;
+WriteEpilog(FILE *file, char *protect)
 {
     if (protect != strNULL) {
 	fprintf(file, "\n");
@@ -196,9 +187,7 @@ WriteEpilog(file, protect)
 }
 
 static void
-WriteUserRoutine(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteUserRoutine(FILE *file, routine_t *rt)
 {
     fprintf(file, "\n");
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
@@ -233,9 +222,7 @@ WriteUserRoutine(file, rt)
 }
 
 void
-WriteUserHeader(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteUserHeader(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     char *protect = strconcat(SubsystemName, "_user_");
@@ -261,9 +248,7 @@ WriteUserHeader(file, stats)
 }
 
 static void
-WriteDefinesRoutine(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteDefinesRoutine(FILE *file, routine_t *rt)
 {
     register char *up = (char *)malloc(strlen(rt->rtName)+1);
 
@@ -277,9 +262,7 @@ WriteDefinesRoutine(file, rt)
 }
 
 void
-WriteServerRoutine(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteServerRoutine(FILE *file, routine_t *rt)
 {
     fprintf(file, "\n");
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
@@ -317,8 +300,7 @@ WriteServerRoutine(file, rt)
 }
 
 static void
-WriteDispatcher(file)
-    FILE *file;
+WriteDispatcher(FILE *file)
 {
     register statement_t *stat;
     int descr_count = 0;
@@ -353,9 +335,7 @@ WriteDispatcher(file)
 }
 
 void
-WriteServerHeader(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteServerHeader(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     char *protect = strconcat(SubsystemName, "_server_");
@@ -382,18 +362,14 @@ WriteServerHeader(file, stats)
 }
 
 static void
-WriteInternalRedefine(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteInternalRedefine(FILE *file, routine_t *rt)
 {
     fprintf(file, "#define %s %s_external\n",
 	    rt->rtUserName, rt->rtUserName);
 }
 
 void
-WriteInternalHeader(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteInternalHeader(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
 
@@ -414,9 +390,7 @@ WriteInternalHeader(file, stats)
 }
 
 void
-WriteDefinesHeader(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteDefinesHeader(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     char *protect = strconcat(SubsystemName, "_defines");
