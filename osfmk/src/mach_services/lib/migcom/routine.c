@@ -514,8 +514,7 @@ rtRoutineKindToStr(routine_kind_t rk)
 } 
 
 static void
-rtPrintArg(arg)
-    register argument_t *arg;
+rtPrintArg(register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -595,8 +594,7 @@ rtPrintArg(arg)
 }
 
 void
-rtPrintRoutine(rt)
-    register routine_t *rt;
+rtPrintRoutine(register routine_t *rt)
 {
     register argument_t *arg;
 
@@ -616,10 +614,7 @@ rtPrintRoutine(rt)
  */
 
 static void
-rtCheckSimple(args, mask, simple)
-    argument_t *args;
-    u_int mask;
-    boolean_t *simple;
+rtCheckSimple(argument_t *args, u_int mask, boolean_t *simple)
 {
     register argument_t *arg;
     boolean_t MustBeComplex = FALSE;
@@ -637,10 +632,7 @@ rtCheckSimple(args, mask, simple)
 }
 
 static u_int
-rtFindSize(args, mask, ismax, simple)
-    argument_t *args;
-    u_int mask;
-    boolean_t ismax, simple;
+rtFindSize(argument_t *args, u_int mask, boolean_t ismax, boolean_t simple)
 {
     register argument_t *arg;
     u_int size = sizeof(mach_msg_header_t);
@@ -659,8 +651,7 @@ rtFindSize(args, mask, ismax, simple)
 }
 
 static void
-rtFindHowMany(rt)
-    routine_t *rt;
+rtFindHowMany(routine_t *rt)
 {
     register argument_t *arg;
     int multiplier = 1;
@@ -705,9 +696,7 @@ rtFindHowMany(rt)
 }
 
 boolean_t
-rtCheckMask(args, mask)
-    argument_t *args;
-    u_int mask;
+rtCheckMask(argument_t *args, u_int mask)
 {
     register argument_t *arg;
 
@@ -718,10 +707,7 @@ rtCheckMask(args, mask)
 }
 
 boolean_t
-rtCheckMaskFunction(args, mask, func)
-    argument_t *args;
-    u_int mask;
-    boolean_t (*func)(/* argument_t *arg */);
+rtCheckMaskFunction(argument_t *args, u_int mask, boolean_t (*func)(argument_t *arg))
 {
     register argument_t *arg;
 
@@ -734,9 +720,7 @@ rtCheckMaskFunction(args, mask, func)
 
 
 int
-rtCountKPDs(args, mask)
-    argument_t *args;
-    u_int mask;
+rtCountKPDs(argument_t *args, u_int mask)
 {
     register argument_t *arg;
     int count = 0;
@@ -748,9 +732,7 @@ rtCountKPDs(args, mask)
 }
 
 int
-rtCountFlags(args, flag)
-    argument_t *args;
-    u_int flag;
+rtCountFlags(argument_t *args, u_int flag)
 {
     register argument_t *arg;
     int count = 0;
@@ -762,9 +744,7 @@ rtCountFlags(args, flag)
 }
 
 int
-rtCountArgDescriptors(args, argcount)
-    argument_t *args;
-    int *argcount;
+rtCountArgDescriptors(argument_t *args, int *argcount)
 {
     register argument_t *arg;
     int count = 0;
@@ -799,9 +779,7 @@ rtCountArgDescriptors(args, argcount)
 }
 
 int
-rtCountMask(args, mask)
-    argument_t *args;
-    u_int mask;
+rtCountMask(argument_t *args, u_int mask)
 {
     register argument_t *arg;
     int count = 0;

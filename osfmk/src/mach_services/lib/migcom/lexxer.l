@@ -310,8 +310,7 @@ LookFileName()
 }
 
 static void
-doSharp(body)
-    char *body;
+doSharp(char *body)
 {
     register char *startName, *endName;
 

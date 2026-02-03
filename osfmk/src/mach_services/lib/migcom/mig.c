@@ -400,9 +400,7 @@ main(int argc, char *argv[])
 }
 
 static FILE *
-myfopen(name, mode)
-    char *name;
-    char *mode;
+myfopen(char *name, char *mode)
 {
     char *realname;
     FILE *file;
