@@ -165,8 +165,8 @@ extern void yyerror(char *);
 %token	<string>	syFileName
 %token	<flag>		syIPCFlag
 
-%left	syPlus,syMinus
-%left	syStar,syDiv
+%left	syPlus syMinus
+%left	syStar syDiv
 
 
 %type	<statement_kind> ImportIndicant
