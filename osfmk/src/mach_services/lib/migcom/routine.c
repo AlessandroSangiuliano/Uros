@@ -427,7 +427,8 @@ rtSkip()
 argument_t *
 argAlloc()
 {
-    extern void KPD_error();
+    extern void KPD_error(FILE *file, argument_t *arg);
+    extern void KPD_error_template(FILE *file, argument_t *arg, boolean_t in);
 
     static argument_t prototype =
     {
@@ -436,7 +437,7 @@ argAlloc()
 	akNone,			/* arg_kind_t argKind */
 	itNULL,			/* ipc_type_t *argType */
 	argKPD_NULL,		/* mach_msg_descriptor_type_t argKPD_Type */
-	KPD_error,		/* KPD discipline for templates */
+	KPD_error_template,	/* KPD discipline for templates */
 	KPD_error,		/* KPD discipline for initializing */
 	KPD_error,		/* KPD discipline for packing */
 	KPD_error,		/* KPD discipline for extracting */
@@ -1488,9 +1489,8 @@ rtCheckRoutineArgs(rt)
     }
 }
 
-static void
-rtCheckTrailerType(arg)
-    register argument_t *arg;
+static boolean_t
+rtCheckTrailerType(register argument_t *arg)
 {
     if (akIdent(arg->argKind) == akeSecToken) 
 	itCheckSecTokenType(arg->argVarName, arg->argType);
@@ -1502,6 +1502,7 @@ rtCheckTrailerType(arg)
      * the type/size of the desciption provided by the user
      * with the one defined in message.h.
      */
+    return FALSE;
 }
 
 static void

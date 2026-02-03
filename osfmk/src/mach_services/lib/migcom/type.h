@@ -102,6 +102,7 @@
 #define	_TYPE_H
 
 #include <mach/boolean.h>
+#include <mach/message.h>
 #include "strdefs.h"
 
 typedef unsigned int u_int;
@@ -274,20 +275,20 @@ typedef struct ipc_type
 
 #define	itNULL		((ipc_type_t *) 0)
 
-extern ipc_type_t *itLookUp(/* identifier_t name */);
-extern void itInsert(/* identifier_t name, ipc_type_t *it */);
-extern void itTypeDecl(/* identifier_t name, ipc_type_t *it */);
+extern ipc_type_t *itLookUp(identifier_t name);
+extern void itInsert(identifier_t name, ipc_type_t *it);
+extern void itTypeDecl(identifier_t name, ipc_type_t *it);
 
-extern ipc_type_t *itShortDecl(/* u_int inname, string_t instr,
-				  u_int outname, string_t outstr,
-				  u_int dfault */);
-extern ipc_type_t *itPrevDecl(/* identifier_t name */);
-extern ipc_type_t *itResetType(/* ipc_type_t *it */);
-extern ipc_type_t *itVarArrayDecl(/* u_int number, ipc_type_t *it */);
-extern ipc_type_t *itArrayDecl(/* u_int number, ipc_type_t *it */);
-extern ipc_type_t *itPtrDecl(/* ipc_type_t *it */);
-extern ipc_type_t *itStructDecl(/* u_int number, ipc_type_t *it */);
-extern ipc_type_t *itCStringDecl(/* u_int number, boolean_t varying */);
+extern ipc_type_t *itShortDecl(u_int inname, string_t instr,
+                  u_int outname, string_t outstr,
+                  u_int dfault);
+extern ipc_type_t *itPrevDecl(identifier_t name);
+extern ipc_type_t *itResetType(ipc_type_t *it);
+extern ipc_type_t *itVarArrayDecl(u_int number, ipc_type_t *it);
+extern ipc_type_t *itArrayDecl(u_int number, ipc_type_t *it);
+extern ipc_type_t *itPtrDecl(ipc_type_t *it);
+extern ipc_type_t *itStructDecl(u_int number, ipc_type_t *it);
+extern ipc_type_t *itCStringDecl(u_int number, boolean_t varying);
 
 extern ipc_type_t *itRetCodeType;
 extern ipc_type_t *itNdrCodeType;
@@ -305,10 +306,10 @@ extern ipc_type_t *itMakeDeallocType();
 
 extern void init_type();
 
-extern void itCheckReturnType(/* identifier_t name, ipc_type_t *it */);
-extern void itCheckRequestPortType(/* identifier_t name, ipc_type_t *it */);
-extern void itCheckReplyPortType(/* identifier_t name, ipc_type_t *it */);
-extern void itCheckIntType(/* identifier_t name, ipc_type_t *it */);
-extern void itCheckSecTokenType(/* identifier_t name, ipc_type_t *it */);
+extern void itCheckReturnType(identifier_t name, ipc_type_t *it);
+extern void itCheckRequestPortType(identifier_t name, ipc_type_t *it);
+extern void itCheckReplyPortType(identifier_t name, ipc_type_t *it);
+extern void itCheckIntType(identifier_t name, ipc_type_t *it);
+extern void itCheckSecTokenType(identifier_t name, ipc_type_t *it);
 
 #endif	/* _TYPE_H */

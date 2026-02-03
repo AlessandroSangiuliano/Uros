@@ -65,6 +65,7 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include "global.h"
 #include "error.h"
 

@@ -201,13 +201,14 @@
 #include "utils.h"
 #include "global.h"
 #include "error.h"
+#include <stdlib.h>
 
 #ifndef max
 #define max(a,b) (((a) > (b)) ? (a) : (b))
 #endif  /* max */
 
-void WriteLogDefines();
-void WriteIdentificationString();
+void WriteLogDefines(FILE *file, string_t who);
+void WriteIdentificationString(FILE *file);
 
 static void
 WriteKPD_Iterator(file, in, varying, arg, bracket)
@@ -946,9 +947,7 @@ WriteExtractArgValue(file, arg)
  * argKPD_Extract discipline for Port types.
  */
 static void
-WriteExtractKPD_port(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *recast = "";
@@ -965,9 +964,7 @@ WriteExtractKPD_port(file, arg)
  * argKPD_Extract discipline for out-of-line types.
  */
 static void
-WriteExtractKPD_ool(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_ool(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -980,9 +977,7 @@ WriteExtractKPD_ool(file, arg)
  * argKPD_Extract discipline for out-of-line Port types.
  */
 static void
-WriteExtractKPD_oolport(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_oolport(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -1362,9 +1357,7 @@ WriteCheckReturnValue(file, rt)
  * argKPD_Init discipline for Port types.
  */
 static void
-WriteInitKPD_port(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteInitKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *subindex = "";
@@ -1403,9 +1396,7 @@ WriteInitKPD_port(file, arg)
  * argKPD_Init discipline for out-of-line types.
  */
 static void
-WriteInitKPD_ool(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteInitKPD_ool(FILE *file, register argument_t *arg) 
 {
     register ipc_type_t *it = arg->argType;
     char firststring[MAX_STR_LEN];
@@ -1455,9 +1446,7 @@ WriteInitKPD_ool(file, arg)
  * argKPD_Init discipline for out-of-line Port types.
  */
 static void
-WriteInitKPD_oolport(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteInitKPD_oolport(FILE *file, register argument_t *arg) 
 {
     register ipc_type_t *it = arg->argType;
     boolean_t VarArray;
@@ -1543,9 +1532,7 @@ WriteAdjustMsgCircular(file, arg)
  * argKPD_Pack discipline for Port types.
  */
 static void
-WriteKPD_port(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *subindex = "";
@@ -1607,9 +1594,7 @@ WriteKPD_port(file, arg)
  * argKPD_Pack discipline for out-of-line types.
  */
 static void
-WriteKPD_ool(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteKPD_ool(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char string[MAX_STR_LEN];
@@ -1671,9 +1656,7 @@ WriteKPD_ool(file, arg)
  * argKPD_Pack discipline for out-of-line Port types.
  */
 static void
-WriteKPD_oolport(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteKPD_oolport(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     boolean_t VarArray;
@@ -1728,9 +1711,7 @@ WriteKPD_oolport(file, arg)
  * argKPD_TypeCheck discipline for Port types.
  */
 static void
-WriteTCheckKPD_port(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTCheckKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *tab = "";
@@ -1762,9 +1743,7 @@ WriteTCheckKPD_port(file, arg)
  * argKPD_TypeCheck discipline for out-of-line types.
  */
 static void
-WriteTCheckKPD_ool(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTCheckKPD_ool(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *tab, string[MAX_STR_LEN];
@@ -1802,9 +1781,7 @@ WriteTCheckKPD_ool(file, arg)
  * argKPD_TypeCheck discipline for out-of-line Port types.
  */
 static void
-WriteTCheckKPD_oolport(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTCheckKPD_oolport(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *tab, string[MAX_STR_LEN];
@@ -2113,10 +2090,10 @@ InitKPD_Disciplines(args)
 {
     argument_t *arg;
     extern void KPD_noop();
-    extern void KPD_error();
-    extern void WriteTemplateKPD_port();
-    extern void WriteTemplateKPD_ool();
-    extern void WriteTemplateKPD_oolport();
+    extern void KPD_error(FILE *file, argument_t *arg);
+    extern void WriteTemplateKPD_port(FILE *file, argument_t *arg, boolean_t in);
+    extern void WriteTemplateKPD_ool(FILE *file, argument_t *arg, boolean_t in);
+    extern void WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in);
 
     /*
      * WriteInitKPD_port, WriteKPD_port,  WriteExtractKPD_port, 
@@ -2233,15 +2210,14 @@ WriteRoutine(file, rt)
     if (rt->rtRetCArg != argNULL && !rt->rtSimpleRequest) { 
 	WriteRetCArgCheckError(file, rt);
 	if (rt->rtServerImpl)
-	    WriteCheckTrailerHead(file, rt, FALSE, "In0P");
+	    WriteCheckTrailerHead(file, rt, FALSE);
         WriteServerCall(file, rt, WriteConditionalCallArg);
 	WriteRetCArgFinishError(file, rt);
     }
 
     WriteCheckHead(file, rt);
     if (rt->rtServerImpl)
-        WriteCheckTrailerHead(file, rt, FALSE, "In0P");
-
+		WriteCheckTrailerHead(file, rt, FALSE);
     WriteList(file, rt->rtArgs, WriteTypeCheck, akbSendKPD, "\n", "\n");
 
     WriteRequestArgs(file, rt);

@@ -687,8 +687,8 @@ itStructDecl(number, old)
  * 'array[n] of (MSG_TYPE_STRING_C, 8)'
  */
 ipc_type_t *
-itCStringDecl(count, varying)
-    int	count;
+itCStringDecl(number, varying)
+    u_int	number;
     boolean_t varying;
 {
     register ipc_type_t *it;
@@ -702,7 +702,7 @@ itCStringDecl(count, varying)
     itCheckDecl("char", itElement);
 
     it = itResetType(itCopyType(itElement));
-    it->itNumber = count;
+    it->itNumber = number;
     it->itVarArray = varying;
     it->itStruct = FALSE;
     it->itString = TRUE;
@@ -710,7 +710,6 @@ itCStringDecl(count, varying)
     itCalculateSizeInfo(it);
     return it;
 }
-
 extern ipc_type_t *
 itMakeSubCountType(count, varying, name)
     int	count;

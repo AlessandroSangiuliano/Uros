@@ -228,6 +228,7 @@
 #include "error.h"
 #include "utils.h"
 #include "global.h"
+#include <stdlib.h>
 
 char *MessAllocRoutine = "mig_user_allocate";
 char *MessFreeRoutine = "mig_user_deallocate";
@@ -235,8 +236,8 @@ char *MessFreeRoutine = "mig_user_deallocate";
 char stRetCode[] = "ReturnValue";
 char stRetNone[] = "";
 
-void WriteLogDefines();
-void WriteIdentificationString();
+void WriteLogDefines(FILE *file, string_t who);
+void WriteIdentificationString(FILE *file);
 
 static void
 WriteKPD_Iterator(file, in, overwrite, varying, arg, bracket)
@@ -1756,9 +1757,7 @@ WriteAdjustReplyMsgPtr(file, arg)
  * argKPD_Extract discipline for Port types.
  */
 static void
-WriteExtractKPD_port(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t	*it = arg->argType;
     register char *ref = arg->argByReferenceUser ? "*" : "";
@@ -1803,9 +1802,7 @@ WriteExtractKPD_port(file, arg)
  * argKPD_Extract discipline for out-of-line types.
  */
 static void
-WriteExtractKPD_ool(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_ool(FILE *file, register argument_t *arg)
 {
     register char *ref = arg->argByReferenceUser ? "*" : "";
     register ipc_type_t	*it = arg->argType;
@@ -1830,9 +1827,7 @@ WriteExtractKPD_ool(file, arg)
  * argKPD_Extract discipline for out-of-line Port types.
  */
 static void
-WriteExtractKPD_oolport(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_oolport(FILE *file, register argument_t *arg)
 {
     register char *ref = arg->argByReferenceUser ? "*" : "";
     register ipc_type_t *it = arg->argType;
@@ -2670,10 +2665,10 @@ InitKPD_Disciplines(args)
 {
     argument_t *arg;
     extern void KPD_noop();
-    extern void KPD_error();
-    extern void WriteTemplateKPD_port();
-    extern void WriteTemplateKPD_ool();
-    extern void WriteTemplateKPD_oolport();
+    extern void KPD_error(FILE *file, argument_t *arg);
+    extern void WriteTemplateKPD_port(FILE *file, argument_t *arg, boolean_t in);
+    extern void WriteTemplateKPD_ool(FILE *file, argument_t *arg, boolean_t in);
+    extern void WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in);
 
     /*
      * WriteKPD_port,  WriteExtractKPD_port, 
@@ -2832,7 +2827,7 @@ WriteRoutine(file, rt)
 
 	WriteCheckIdentity(file, rt);
         if (rt->rtUserImpl)
-	    WriteCheckTrailerHead(file, TRUE);	
+WriteCheckTrailerHead(file, rt, TRUE);
 
 	/* If the reply message has no Out parameters or return values
 	   other than the return code, we can type-check it and

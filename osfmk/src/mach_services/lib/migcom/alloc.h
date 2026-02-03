@@ -66,8 +66,6 @@
 #ifndef	_ALLOC_H
 #define	_ALLOC_H
 
-extern char *malloc();
-extern char *calloc();
-extern void free();
+#include <stdlib.h>
 
 #endif	/* _ALLOC_H */

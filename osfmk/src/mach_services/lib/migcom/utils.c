@@ -104,6 +104,7 @@
 #include "type.h"
 #include <mach/message.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include "routine.h"
 #include "write.h"
 #include "global.h"
@@ -195,12 +196,9 @@ WriteBogusDefines(file)
 }
 
 void
-WriteList(file, args, func, mask, between, after)
-    FILE *file;
-    argument_t *args;
-    void (*func)();
-    u_int mask;
-    char *between, *after;
+WriteList(FILE *file, argument_t *args,
+          void (*func)(FILE *file, argument_t *arg),
+          u_int mask, char *between, char *after)
 {
     register argument_t *arg;
     register boolean_t sawone = FALSE;
@@ -220,12 +218,9 @@ WriteList(file, args, func, mask, between, after)
 }
 
 static boolean_t
-WriteReverseListPrim(file, arg, func, mask, between)
-    FILE *file;
-    register argument_t *arg;
-    void (*func)();
-    u_int mask;
-    char *between;
+WriteReverseListPrim(FILE *file, register argument_t *arg,
+                     void (*func)(FILE *file, argument_t *arg),
+                     u_int mask, char *between)
 {
     boolean_t sawone = FALSE;
 
@@ -247,12 +242,9 @@ WriteReverseListPrim(file, arg, func, mask, between)
 }
 
 void
-WriteReverseList(file, args, func, mask, between, after)
-    FILE *file;
-    argument_t *args;
-    void (*func)();
-    u_int mask;
-    char *between, *after;
+WriteReverseList(FILE *file, argument_t *args,
+                 void (*func)(FILE *file, argument_t *arg),
+                 u_int mask, char *between, char *after)
 {
     boolean_t sawone;
 
@@ -339,10 +331,8 @@ WriteTrailerDecl(file, trailer)
 }
 
 void
-WriteFieldDeclPrim(file, arg, tfunc)
-    FILE *file;
-    argument_t *arg;
-    char *(*tfunc)();
+WriteFieldDeclPrim(FILE *file, argument_t *arg,
+                   char *(*tfunc)(ipc_type_t *it))
 {
     register ipc_type_t *it = arg->argType;
 
@@ -388,14 +378,11 @@ WriteFieldDeclPrim(file, arg, tfunc)
 
 
 void
-WriteStructDecl(file, args, func, mask, name, simple, trailer, isuser, template_only)
-    FILE *file;
-    argument_t *args;
-    void (*func)();
-    u_int mask;
-    char *name;
-    boolean_t simple, trailer;
-    boolean_t isuser, template_only;
+WriteStructDecl(FILE *file, argument_t *args,
+                void (*func)(FILE *file, argument_t *arg),
+                u_int mask, char *name,
+                boolean_t simple, boolean_t trailer,
+                boolean_t isuser, boolean_t template_only)
 {
     fprintf(file, "\ttypedef struct {\n");
     fprintf(file, "\t\tmach_msg_header_t Head;\n");
@@ -423,26 +410,19 @@ WriteStructDecl(file, args, func, mask, name, simple, trailer, isuser, template_
 }
 
 void
-WriteTemplateDeclIn(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTemplateDeclIn(FILE *file, register argument_t *arg)
 {
     (*arg->argKPD_Template)(file, arg, TRUE);
 }
 
 void
-WriteTemplateDeclOut(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTemplateDeclOut(FILE *file, register argument_t *arg)
 {
     (*arg->argKPD_Template)(file, arg, FALSE);
 }
 
 void
-WriteTemplateKPD_port(file, arg, in)
-    FILE *file;
-    argument_t *arg;
-    boolean_t in;
+WriteTemplateKPD_port(FILE *file, register argument_t *arg, boolean_t in)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -461,10 +441,7 @@ WriteTemplateKPD_port(file, arg, in)
 }
 
 void
-WriteTemplateKPD_ool(file, arg, in)
-    FILE *file;
-    argument_t *arg;
-    boolean_t in;
+WriteTemplateKPD_ool(FILE *file, argument_t *arg, boolean_t in)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -494,10 +471,7 @@ WriteTemplateKPD_ool(file, arg, in)
 }
 
 void
-WriteTemplateKPD_oolport(file, arg, in)
-    FILE *file;
-    argument_t *arg;
-    boolean_t in;
+WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -628,7 +602,7 @@ WriteCopyType(FILE *file, ipc_type_t *it, char *left, char *right, ...)
     va_list pvar;
     va_start(pvar, right);
 
-    vWriteCopyType(file, it, left, right, pvar)
+    vWriteCopyType(file, it, left, right, pvar);
 
     va_end(pvar);
 }
@@ -662,19 +636,23 @@ WriteCopyArg(FILE *file, argument_t *arg, char *left, char *right, ...)
  * Global KPD disciplines 
  */
 void
-KPD_error(file, arg)
-    FILE *file;
-    argument_t *arg;
+KPD_error(FILE *file, argument_t *arg)
 {
     printf("MiG internal error: argument is %s\n", arg->argVarName);
     exit(1);
 }
 
 void
-KPD_noop(file, arg)
-    FILE *file;
-    argument_t *arg;
+KPD_noop(FILE *file, argument_t *arg)
 {
+}
+
+/* Wrapper for KPD_error matching the Template signature (takes 'in' flag). */
+void
+KPD_error_template(FILE *file, argument_t *arg, boolean_t in)
+{
+    /* 'in' parameter is ignored; forward to the common KPD_error handler */
+    KPD_error(file, arg);
 }
 
 static void

@@ -78,13 +78,13 @@
 #include <stdio.h>
 #include "statement.h"
 
-extern void WriteUserHeader(/* FILE *file, statement_t *stats */);
-extern void WriteServerHeader(/* FILE *file, statement_t *stats */);
-extern void WriteServerRoutine(/* FILE *file; routine_t *rt; */);
-extern void WriteInternalHeader(/* FILE *file, statement_t *stats */);
-extern void WriteDefinesHeader(/* FILE *file, statement_t *stats */);
-extern void WriteUser(/* FILE *file, statement_t *stats */);
-extern void WriteUserIndividual(/* statement_t *stats */);
-extern void WriteServer(/* FILE *file, statement_t *stats */);
+extern void WriteUserHeader(FILE *file, statement_t *stats);
+extern void WriteServerHeader(FILE *file, statement_t *stats);
+extern void WriteServerRoutine(FILE *file, routine_t *rt);
+extern void WriteInternalHeader(FILE *file, statement_t *stats);
+extern void WriteDefinesHeader(FILE *file, statement_t *stats);
+extern void WriteUser(FILE *file, statement_t *stats);
+extern void WriteUserIndividual(statement_t *stats);
+extern void WriteServer(FILE *file, statement_t *stats);
 
 #endif	/* _WRITE_H */

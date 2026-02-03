@@ -105,18 +105,16 @@ strfree(string)
 }
 
 char *
-strbool(bool)
-    boolean_t bool;
+strbool(boolean_t b)
 {
-    if (bool)
+    if (b)
 	return "TRUE";
     else
 	return "FALSE";
 }
 
 char *
-strstring(string)
-    string_t string;
+strstring(string_t string)
 {
     if (string == strNULL)
 	return "NULL";
