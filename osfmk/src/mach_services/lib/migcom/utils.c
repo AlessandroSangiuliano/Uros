@@ -113,8 +113,7 @@
 extern char *MessFreeRoutine;
 
 void
-WriteIdentificationString(file)
-    FILE *file;
+WriteIdentificationString(FILE *file)
 {
     extern char * GenerationDate;
     extern char * MigGenerationDate;
@@ -136,18 +135,13 @@ WriteIdentificationString(file)
 }
 
 void
-WriteImport(file, filename)
-    FILE *file;
-    string_t filename;
+WriteImport(FILE *file, string_t filename)
 {
     fprintf(file, "#include %s\n", filename);
 }
 
 void
-WriteRCSDecl(file, name, rcs)
-    FILE *file;
-    identifier_t name;
-    string_t rcs;
+WriteRCSDecl(FILE *file, identifier_t name, string_t rcs)
 {
     fprintf(file, "#ifndef\tlint\n");
     fprintf(file, "#if\tUseExternRCSId\n");
@@ -160,8 +154,7 @@ WriteRCSDecl(file, name, rcs)
 }
 
 void
-WriteBogusDefines(file)
-    FILE *file;
+WriteBogusDefines(FILE *file)
 {
     fprintf(file, "#ifndef\tmig_internal\n");
     fprintf(file, "#define\tmig_internal\tstatic\n");
@@ -255,17 +248,13 @@ WriteReverseList(FILE *file, argument_t *args,
 }
 
 void
-WriteNameDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteNameDecl(FILE *file, argument_t *arg)
 {
     fprintf(file, "%s", arg->argVarName);
 }
 
 void
-WriteUserVarDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteUserVarDecl(FILE *file, argument_t *arg)
 {
     char *ref = arg->argByReferenceUser ? "*" : "";
 
@@ -273,9 +262,7 @@ WriteUserVarDecl(file, arg)
 }
 
 void
-WriteServerVarDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteServerVarDecl(FILE *file, argument_t *arg)
 {
     char *ref = arg->argByReferenceServer ? "*" : "";
   
@@ -315,9 +302,7 @@ FetchServerKPDType(ipc_type_t *it)
 } 
 
 void
-WriteTrailerDecl(file, trailer)
-    FILE *file;
-    boolean_t trailer;
+WriteTrailerDecl(FILE *file, boolean_t trailer)
 {
     if (trailer)
 	fprintf(file, "\t\tmach_msg_format_0_trailer_t trailer;\n");
@@ -500,10 +485,7 @@ WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in)
  * and %f are recognized.
  */
 void
-SkipVFPrintf(file, fmt, pvar)
-    FILE *file;
-    register char *fmt;
-    va_list pvar;
+SkipVFPrintf(FILE *file, register char *fmt, va_list pvar)
 {
     if (*fmt == 0)
 	return;	/* degenerate case */
