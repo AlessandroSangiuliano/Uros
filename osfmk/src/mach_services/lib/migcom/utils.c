@@ -284,40 +284,35 @@ WriteServerVarDecl(file, arg)
 }
 
 char *
-ReturnTypeStr(rt)
-    routine_t *rt;
+ReturnTypeStr(routine_t *rt)
 {
     return rt->rtRetCode->argType->itUserType;
-}
+} 
 
 char *
-FetchUserType(it)
-    ipc_type_t *it;
+FetchUserType(ipc_type_t *it)
 {
     return it->itUserType;
-}
+} 
 
 char *
-FetchUserKPDType(it)
-    ipc_type_t *it;
+FetchUserKPDType(ipc_type_t *it)
 {
     return it->itUserKPDType;
-}
+} 
 
 char *
-FetchServerType(it)
-    ipc_type_t *it;
+FetchServerType(ipc_type_t *it)
 {
     return it->itServerType;
-}
+} 
 
 char *
-FetchServerKPDType(it)
-    ipc_type_t *it;
+FetchServerKPDType(ipc_type_t *it)
 {
     /* do we really need to differentiate User and Server ?? */
     return it->itServerKPDType;
-}
+} 
 
 void
 WriteTrailerDecl(file, trailer)

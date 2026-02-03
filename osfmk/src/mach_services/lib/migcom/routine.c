@@ -474,9 +474,7 @@ argAlloc()
 }
 
 routine_t *
-rtMakeRoutine(name, args)
-    identifier_t name;
-    argument_t *args;
+rtMakeRoutine(identifier_t name, argument_t *args)
 {
     register routine_t *rt = rtAlloc();
 
@@ -485,12 +483,10 @@ rtMakeRoutine(name, args)
     rt->rtArgs = args;
 
     return rt;
-}
+} 
 
 routine_t *
-rtMakeSimpleRoutine(name, args)
-    identifier_t name;
-    argument_t *args;
+rtMakeSimpleRoutine(identifier_t name, argument_t *args)
 {
     register routine_t *rt = rtAlloc();
 
@@ -499,11 +495,10 @@ rtMakeSimpleRoutine(name, args)
     rt->rtArgs = args;
 
     return rt;
-}
+} 
 
 char *
-rtRoutineKindToStr(rk)
-    routine_kind_t rk;
+rtRoutineKindToStr(routine_kind_t rk)
 {
     switch (rk)
     {
@@ -516,7 +511,7 @@ rtRoutineKindToStr(rk)
 	/*NOTREACHED*/
         return strNULL;
     }
-}
+} 
 
 static void
 rtPrintArg(arg)
