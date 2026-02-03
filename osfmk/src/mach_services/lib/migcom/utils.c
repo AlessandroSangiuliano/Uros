@@ -651,11 +651,7 @@ KPD_error_template(FILE *file, argument_t *arg, boolean_t in)
 }
 
 static void
-WriteStringDynArgs(args, mask, InPOutP, str_oolports, str_ool)
-    argument_t *args;
-    u_int	mask;
-    string_t 	InPOutP;
-    string_t 	*str_oolports, *str_ool;
+WriteStringDynArgs(argument_t *args, u_int mask, string_t InPOutP, string_t *str_oolports, string_t *str_ool)
 {
     argument_t *arg;
     char loc[100], sub[20];
@@ -704,10 +700,7 @@ WriteStringDynArgs(args, mask, InPOutP, str_oolports, str_ool)
  * Utilities for Logging Events that happen at the stub level
  */
 void
-WriteLogMsg(file, rt, where, what)
-    FILE *file;
-    routine_t *rt;
-    int where, what;
+WriteLogMsg(FILE *file, routine_t *rt, int where, int what)
 {
     string_t ptr_str;
     string_t StringOolPorts = strNULL;
@@ -783,9 +776,7 @@ WriteLogMsg(file, rt, where, what)
 }
 
 void
-WriteLogDefines(file, who)
-    FILE *file;
-    string_t who;
+WriteLogDefines(FILE *file, string_t who)
 {
     fprintf(file, "#if  MIG_DEBUG\n");
     fprintf(file, "#define LOG_W_E(X)\tLOG_ERRORS(%s, \\\n", who);
@@ -798,12 +789,7 @@ WriteLogDefines(file, who)
 
 /* common utility to report errors */
 void
-WriteReturnMsgError(file, rt, isuser, arg, error)
-    FILE *file;
-    routine_t *rt;
-    boolean_t isuser;
-    argument_t *arg;
-    string_t error;
+WriteReturnMsgError(FILE *file, routine_t *rt, boolean_t isuser, argument_t *arg, string_t error)
 {
     char space[MAX_STR_LEN];
     string_t string = &space[0];
@@ -827,10 +813,7 @@ WriteReturnMsgError(file, rt, isuser, arg, error)
 
 /* executed iff elements are defined */
 void
-WriteCheckTrailerHead(file, rt, isuser)
-    FILE *file;
-    routine_t *rt;
-    boolean_t isuser;
+WriteCheckTrailerHead(FILE *file, routine_t *rt, boolean_t isuser)
 {
     string_t who = (isuser) ? "Out0P" : "In0P";
 
@@ -848,10 +831,7 @@ WriteCheckTrailerHead(file, rt, isuser)
 
 /* executed iff elements are defined */
 void
-WriteCheckTrailerSize(file, isuser, arg)
-    FILE *file;
-    boolean_t isuser;
-    register argument_t *arg;
+WriteCheckTrailerSize(FILE *file, boolean_t isuser, argument_t *arg)
 {
     fprintf(file, "#if\tTypeCheck\n");
     if (akIdent(arg->argKind) == akeMsgSeqno) {
