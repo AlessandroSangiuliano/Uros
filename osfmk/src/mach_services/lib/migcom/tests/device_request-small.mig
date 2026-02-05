@@ -1,0 +1,8 @@
+subsystem SimpleGen 999;
+
+type mach_port_t = MACH_MSG_TYPE_COPY_SEND;
+
+simpleroutine foo(
+    request_port srv : mach_port_t;
+    in x : mach_port_t
+    );

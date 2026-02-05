@@ -109,6 +109,16 @@
 #include "write.h"
 #include "global.h"
 #include "utils.h"
+#include "safestr.h" /* SafeSnprintf */
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <execinfo.h>
+
+/* Forward declaration for SafeString to avoid implicit-declaration warnings */
+void SafeString(FILE *file, const char *s);
 
 extern char *MessFreeRoutine;
 
@@ -200,14 +210,11 @@ WriteList(FILE *file, argument_t *args,
 	if (akCheckAll(arg->argKind, mask))
 	{
 	    if (sawone)
-		fprintf(file, "%s", between);
-	    sawone = TRUE;
-
-	    (*func)(file, arg);
+            SafeString(file, between);
 	}
 
     if (sawone)
-	fprintf(file, "%s", after);
+	SafeString(file, after);
 }
 
 static boolean_t
@@ -224,7 +231,7 @@ WriteReverseListPrim(FILE *file, register argument_t *arg,
 	if (akCheckAll(arg->argKind, mask))
 	{
 	    if (sawone)
-		fprintf(file, "%s", between);
+		SafeString(file, between);
 	    sawone = TRUE;
 
 	    (*func)(file, arg);
@@ -244,13 +251,13 @@ WriteReverseList(FILE *file, argument_t *args,
     sawone = WriteReverseListPrim(file, args, func, mask, between);
 
     if (sawone)
-	fprintf(file, "%s", after);
+	SafeString(file, after);
 }
 
 void
 WriteNameDecl(FILE *file, argument_t *arg)
 {
-    fprintf(file, "%s", arg->argVarName);
+    SafeString(file, arg->argVarName);
 }
 
 void
@@ -258,7 +265,8 @@ WriteUserVarDecl(FILE *file, argument_t *arg)
 {
     char *ref = arg->argByReferenceUser ? "*" : "";
 
-    fprintf(file, "\t%s %s%s", arg->argType->itUserType, ref, arg->argVarName);
+    fprintf(file, "\t%s %s", arg->argType->itUserType, ref);
+	SafeString(file, arg->argVarName);
 }
 
 void
@@ -266,8 +274,8 @@ WriteServerVarDecl(FILE *file, argument_t *arg)
 {
     char *ref = arg->argByReferenceServer ? "*" : "";
   
-    fprintf(file, "\t%s %s%s",
-	    arg->argType->itTransType, ref, arg->argVarName);
+    fprintf(file, "\t%s %s", arg->argType->itTransType, ref);
+	SafeString(file, arg->argVarName);
 }
 
 char *
@@ -308,6 +316,25 @@ WriteTrailerDecl(FILE *file, boolean_t trailer)
 	fprintf(file, "\t\tmach_msg_format_0_trailer_t trailer;\n");
     else
 	fprintf(file, "\t\tmach_msg_trailer_t trailer;\n");
+}
+
+void
+SafeString(FILE *file, const char *s)
+{
+    if (s == NULL) {
+        fputs("(null)", file);
+        return;
+    }
+    const char *p = s;
+    for (; *p; p++) {
+        unsigned char c = (unsigned char) *p;
+        if (c < 32 || c > 126) {
+            fputs("/*<non-printable>*/", file);
+            fprintf(stderr, "SafeString: non-printable character detected in string: 0x%02x at position %ld\n", c, (long)(p - s));
+            return;
+        }
+    }
+    fputs(s, file);
 }
 
 void
@@ -484,59 +511,180 @@ WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in)
  * and skips the items that would be printed by it.  Only %s, %d,
  * and %f are recognized.
  */
-void
-SkipVFPrintf(FILE *file, register char *fmt, va_list pvar)
+/* Like vfprintf, but omits a leading comment in the format string
+ * and skips the items that would be printed by it.  Only %s, %d,
+ * and %f are recognized.
+ *
+ * Returns: the number of fields (and their types in types_out) skipped
+ * by the leading comment.  The caller should then advance its va_list
+ * by consuming the same types before further use.
+ */
+int
+SkipVFPrintf(FILE *file, register char *fmt, va_list pvar, char *types_out, int max_types)
 {
-    if (*fmt == 0)
-	return;	/* degenerate case */
-
-    if (fmt[0] == '/' && fmt[1] == '*') {
-	/* Format string begins with C comment.  Scan format
-	   string until end-comment delimiter, skipping the
-	   items in pvar that the enclosed format items would
-	   print. */
-
-	register int c;
-
-	fmt += 2;
-	for (;;) {
-	    c = *fmt++;
-	    if (c == 0)
-		return;	/* nothing to format */
-	    if (c == '*') {
-		if (*fmt == '/') {
-		    break;
-		}
-	    }
-	    else if (c == '%') {
-		/* Field to skip */
-		c = *fmt++;
-		switch (c) {
-		    case 's':
-			(void) va_arg(pvar, char *);
-			break;
-		    case 'd':
-			(void) va_arg(pvar, int);
-			break;
-		    case 'f':
-			(void) va_arg(pvar, double);
-			break;
-		    case '\0':
-			return; /* error - fmt ends with '%' */
-		    default:
-			break;
-		}
-	    }
-	}
-	/* End of comment.  To be pretty, skip
-	   the space that follows. */
-	fmt++;
-	if (*fmt == ' ')
-	    fmt++;
+    if (*fmt == 0) {
+        /* nothing to print */
+        return 0;
     }
 
-    /* Now format the string. */
-    (void) vfprintf(file, fmt, pvar);
+    if (fmt[0] == '/' && fmt[1] == '*') {
+        const char *p = fmt + 2;
+        int tcount = 0;
+        int c;
+
+        while (*p) {
+            c = *p++;
+            if (c == '*' && *p == '/') {
+                p++; /* skip '/' */
+                break;
+            }
+            if (c == '%') {
+                char t = *p++;
+                if ((t == 's' || t == 'd' || t == 'f') && tcount < max_types) {
+                    types_out[tcount++] = t;
+                }
+            }
+        }
+
+        /* Skip optional space after comment */
+        if (*p == ' ')
+            p++;
+
+        /* Call vfprintf on the remainder using a copy of the incoming va_list */
+        {
+            va_list ptmp;
+            va_copy(ptmp, pvar);
+            /* advance ptmp by the number/types of fields we recorded */
+            {
+                int i;
+                for (i = 0; i < tcount; ++i) {
+                    switch (types_out[i]) {
+                        case 's': (void) va_arg(ptmp, char *); break;
+                        case 'd': (void) va_arg(ptmp, int); break;
+                        case 'f': (void) va_arg(ptmp, double); break;
+                        default: break;
+                    }
+                }
+            }
+            /* Optional debug: dump the arguments that will be consumed by vfprintf */
+            if (getenv("MIG_DEBUG_SKIPVF")) {
+                va_list pdump;
+                va_copy(pdump, ptmp);
+                {
+                    int i;
+                    for (i = 0; i < tcount; ++i) {
+                        switch (types_out[i]) {
+                            case 's': {
+                                char *s = va_arg(pdump, char *);
+                                fprintf(stderr, "[SkipVFPrintf-debug] arg %d type %%s -> %p\n", i, (void*)s);
+                                break;
+                            }
+                            case 'd': {
+                                int d = va_arg(pdump, int);
+                                fprintf(stderr, "[SkipVFPrintf-debug] arg %d type %%d -> %d\n", i, d);
+                                break;
+                            }
+                            case 'f': {
+                                double f = va_arg(pdump, double);
+                                fprintf(stderr, "[SkipVFPrintf-debug] arg %d type %%f -> %g\n", i, f);
+                                break;
+                            }
+                            default:
+                                break;
+                        }
+                    }
+                }
+                va_end(pdump);
+            }
+            /* Optional in-process check: capture the exact bytes written by this vfprintf */
+            if (getenv("MIG_CHECK_WRITEBUF")) {
+                int fd = fileno(file);
+                off_t before = lseek(fd, 0, SEEK_END);
+                (void) vfprintf(file, (char *)p, ptmp);
+                fflush(file);
+                off_t after = lseek(fd, 0, SEEK_END);
+                if (after > before) {
+                    off_t sz = after - before;
+                    char *buf = malloc(sz);
+                    if (buf) {
+                        if (pread(fd, buf, sz, before) == sz) {
+                            /* scan for non-ASCII */
+                            off_t i;
+                            for (i = 0; i < sz; ++i) {
+                                unsigned char c = (unsigned char)buf[i];
+                                if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                                    fprintf(stderr, "[SkipVFPrintf-Check] non-ASCII byte 0x%02x at offset %lld (in emission)\n", c, (long long)i);
+                                    {
+                                        void *bt[32]; int n = backtrace(bt, 32);
+                                        backtrace_symbols_fd(bt, n, fileno(stderr));
+                                    }
+                                    /* dump context */
+                                    {
+                                        long start = (i > 64) ? i - 64 : 0;
+                                        long end = (i + 192 < sz) ? i + 192 : sz;
+                                        long j;
+                                        fprintf(stderr, "context hex:");
+                                        for (j = start; j < end; ++j) fprintf(stderr, " %02x", (unsigned char)buf[j]);
+                                        fprintf(stderr, "\n");
+                                    }
+                                    raise(SIGTRAP);
+                                    break;
+                                }
+                            }
+                        }
+                        free(buf);
+                    }
+                }
+                va_end(ptmp);
+            } else {
+                (void) vfprintf(file, (char *)p, ptmp);
+                va_end(ptmp);
+            }
+        }
+        return tcount;
+    }
+
+    /* No leading comment - just print */
+    if (getenv("MIG_CHECK_WRITEBUF")) {
+        int fd = fileno(file);
+        off_t before = lseek(fd, 0, SEEK_END);
+        (void) vfprintf(file, fmt, pvar);
+        fflush(file);
+        off_t after = lseek(fd, 0, SEEK_END);
+        if (after > before) {
+            off_t sz = after - before;
+            char *buf = malloc(sz);
+            if (buf) {
+                if (pread(fd, buf, sz, before) == sz) {
+                    off_t i;
+                    for (i = 0; i < sz; ++i) {
+                        unsigned char c = (unsigned char)buf[i];
+                        if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                            fprintf(stderr, "[SkipVFPrintf-Check] non-ASCII byte 0x%02x at offset %lld (in emission)\n", c, (long long)i);
+                            {
+                                void *bt[32]; int n = backtrace(bt, 32);
+                                backtrace_symbols_fd(bt, n, fileno(stderr));
+                            }
+                            {
+                                long start = (i > 64) ? i - 64 : 0;
+                                long end = (i + 192 < sz) ? i + 192 : sz;
+                                long j;
+                                fprintf(stderr, "context hex:");
+                                for (j = start; j < end; ++j) fprintf(stderr, " %02x", (unsigned char)buf[j]);
+                                fprintf(stderr, "\n");
+                            }
+                            raise(SIGTRAP);
+                            break;
+                        }
+                    }
+                }
+                free(buf);
+            }
+        }
+    } else {
+        (void) vfprintf(file, fmt, pvar);
+    }
+    return 0;
 }
 
 static void
@@ -545,17 +693,65 @@ vWriteCopyType(FILE *file, ipc_type_t *it, char *left, char *right, va_list pvar
     if (it->itStruct)
     {
 	fprintf(file, "\t");
-	(void) SkipVFPrintf(file, left, pvar);
+	{
+	    char __types[16];
+	    int __tcnt = SkipVFPrintf(file, left, pvar, __types, sizeof(__types));
+	    int __i;
+	    for (__i = 0; __i < __tcnt; ++__i) {
+		switch (__types[__i]) {
+		    case 's': (void) va_arg(pvar, char *); break;
+		    case 'd': (void) va_arg(pvar, int); break;
+		    case 'f': (void) va_arg(pvar, double); break;
+		    default: break;
+		}
+	    }
+	}
 	fprintf(file, " = ");
-	(void) SkipVFPrintf(file, right, pvar);
+	{
+	    char __types2[16];
+	    int __tcnt2 = SkipVFPrintf(file, right, pvar, __types2, sizeof(__types2));
+	    int __i2;
+	    for (__i2 = 0; __i2 < __tcnt2; ++__i2) {
+		switch (__types2[__i2]) {
+		    case 's': (void) va_arg(pvar, char *); break;
+		    case 'd': (void) va_arg(pvar, int); break;
+		    case 'f': (void) va_arg(pvar, double); break;
+		    default: break;
+		}
+	    }
+	}
 	fprintf(file, ";\n");
     }
     else if (it->itString)
     {
 	fprintf(file, "\t(void) mig_strncpy(");
-	(void) SkipVFPrintf(file, left, pvar);
+	{
+	    char __types[16];
+	    int __tcnt = SkipVFPrintf(file, left, pvar, __types, sizeof(__types));
+	    int __i;
+	    for (__i = 0; __i < __tcnt; ++__i) {
+		switch (__types[__i]) {
+		    case 's': (void) va_arg(pvar, char *); break;
+		    case 'd': (void) va_arg(pvar, int); break;
+		    case 'f': (void) va_arg(pvar, double); break;
+		    default: break;
+		}
+	    }
+	}
 	fprintf(file, ", ");
-	(void) SkipVFPrintf(file, right, pvar);
+	{
+	    char __types2[16];
+	    int __tcnt2 = SkipVFPrintf(file, right, pvar, __types2, sizeof(__types2));
+	    int __i2;
+	    for (__i2 = 0; __i2 < __tcnt2; ++__i2) {
+		switch (__types2[__i2]) {
+		    case 's': (void) va_arg(pvar, char *); break;
+		    case 'd': (void) va_arg(pvar, int); break;
+		    case 'f': (void) va_arg(pvar, double); break;
+		    default: break;
+		}
+	    }
+	}
 	fprintf(file, ", %d);\n", it->itTypeSize);
     }
     else
@@ -563,10 +759,83 @@ vWriteCopyType(FILE *file, ipc_type_t *it, char *left, char *right, va_list pvar
 	fprintf(file, "\t{   typedef struct { char data[%d]; } *sp;\n",
 		it->itTypeSize);
 	fprintf(file, "\t    * (sp) ");
-	(void) SkipVFPrintf(file, left, pvar);
+	{
+	    char __types[16];
+	    int __tcnt = SkipVFPrintf(file, left, pvar, __types, sizeof(__types));
+	    int __i;
+	    for (__i = 0; __i < __tcnt; ++__i) {
+		switch (__types[__i]) {
+		    case 's': (void) va_arg(pvar, char *); break;
+		    case 'd': (void) va_arg(pvar, int); break;
+		    case 'f': (void) va_arg(pvar, double); break;
+		    default: break;
+		}
+	    }
+	}
 	fprintf(file, " = * (sp) ");
-	(void) SkipVFPrintf(file, right, pvar);
+	{
+	    char __types2[16];
+	    int __tcnt2 = SkipVFPrintf(file, right, pvar, __types2, sizeof(__types2));
+	    int __i2;
+	    for (__i2 = 0; __i2 < __tcnt2; ++__i2) {
+		switch (__types2[__i2]) {
+		    case 's': (void) va_arg(pvar, char *); break;
+		    case 'd': (void) va_arg(pvar, int); break;
+		    case 'f': (void) va_arg(pvar, double); break;
+		    default: break;
+		}
+	    }
+	}
 	fprintf(file, ";\n\t}\n");
+    }
+}
+
+/* Simple, safe WriteCopyType that accepts fully-expanded left/right
+ * strings (no printf-style varargs).  This avoids varargs propagation
+ * and the associated uninitialized-memory risks when arguments are
+ * assembled across multiple layers.
+ */
+void
+WriteCopyTypeSimple(FILE *file, ipc_type_t *it, const char *left, const char *right)
+{
+    /* Optional check: ensure left/right strings are ASCII (detects embedded garbage) */
+    if (getenv("MIG_CHECK_WRITEBUF")) {
+        const unsigned char *l = (const unsigned char *)left;
+        const unsigned char *r = (const unsigned char *)right;
+        size_t i;
+        for (i = 0; l && l[i]; ++i) {
+            unsigned char c = l[i];
+            if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                fprintf(stderr, "[WriteCopyTypeSimple-Check] non-ASCII byte 0x%02x in left at offset %zu\n", c, i);
+                {
+                    void *bt[32]; int n = backtrace(bt, 32);
+                    backtrace_symbols_fd(bt, n, fileno(stderr));
+                }
+                raise(SIGTRAP);
+                break;
+            }
+        }
+        for (i = 0; r && r[i]; ++i) {
+            unsigned char c = r[i];
+            if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                fprintf(stderr, "[WriteCopyTypeSimple-Check] non-ASCII byte 0x%02x in right at offset %zu\n", c, i);
+                {
+                    void *bt[32]; int n = backtrace(bt, 32);
+                    backtrace_symbols_fd(bt, n, fileno(stderr));
+                }
+                raise(SIGTRAP);
+                break;
+            }
+        }
+    }
+
+    if (it->itStruct) {
+        fprintf(file, "\t%s = %s;\n", left, right);
+    } else if (it->itString) {
+        fprintf(file, "\t(void) mig_strncpy(%s, %s, %d);\n", left, right, it->itTypeSize);
+    } else {
+        fprintf(file, "\t{   typedef struct { char data[%d]; } *sp;\n", it->itTypeSize);
+        fprintf(file, "\t    * (sp) %s = * (sp) %s;\n\t}\n", left, right);
     }
 }
 
@@ -597,9 +866,33 @@ WriteCopyArg(FILE *file, argument_t *arg, char *left, char *right, ...)
 	ipc_type_t *it = arg->argType;
 	if (it->itVarArray && !it->itString) {
 	    fprintf(file, "\t    (void)memcpy(");
-	    (void) SkipVFPrintf(file, left, pvar);
+	    {
+	        char __types[16];
+	        int __tcnt = SkipVFPrintf(file, left, pvar, __types, sizeof(__types));
+	        int __i;
+	        for (__i = 0; __i < __tcnt; ++__i) {
+	            switch (__types[__i]) {
+	            case 's': (void) va_arg(pvar, char *); break;
+	            case 'd': (void) va_arg(pvar, int); break;
+	            case 'f': (void) va_arg(pvar, double); break;
+	            default: break;
+	            }
+	        }
+	    }
 	    fprintf(file, ", ");
-	    (void) SkipVFPrintf(file, right, pvar);
+	    {
+	        char __types2[16];
+	        int __tcnt2 = SkipVFPrintf(file, right, pvar, __types2, sizeof(__types2));
+	        int __i2;
+	        for (__i2 = 0; __i2 < __tcnt2; ++__i2) {
+	            switch (__types2[__i2]) {
+	            case 's': (void) va_arg(pvar, char *); break;
+	            case 'd': (void) va_arg(pvar, int); break;
+	            case 'f': (void) va_arg(pvar, double); break;
+	            default: break;
+	            }
+	        }
+	    }
 	    fprintf(file, ", %s);\n", arg->argCount->argVarName);
 	} else
 	    vWriteCopyType(file, it, left, right, pvar);
@@ -658,22 +951,65 @@ WriteStringDynArgs(argument_t *args, u_int mask, string_t InPOutP, string_t *str
 	cnt = multiplier;
 	while (cnt) {
 	    if (complex)
-		sprintf(sub, "[%d]", multiplier - cnt);
+		SafeSnprintf(sub, sizeof(sub), "[%d]", multiplier - cnt);
 	    if (akCheck(arg->argKind, mask) && 
 		it->itPortType && !it->itInLine && test) {
-		    sprintf(loc, " + %s->%s%s.count", InPOutP, arg->argMsgField,
+		    SafeSnprintf(loc, sizeof(loc), " + %s->%s%s.count", InPOutP, arg->argMsgField,
 		        complex ? sub : "");
 		    tmp_str1 = strconcat(tmp_str1, loc);
 	    }
 	    if (akCheck(arg->argKind, mask) && 
 		!it->itInLine && !it->itPortType && test) {
-	 	    sprintf(loc, " + %s->%s%s.size", InPOutP, arg->argMsgField,
+	 	    SafeSnprintf(loc, sizeof(loc), " + %s->%s%s.size", InPOutP, arg->argMsgField,
 		        complex ? sub : "");
 		    tmp_str2 = strconcat(tmp_str2, loc);
 	    }
 	    cnt--;
 	}
     }
+    /* Debugging checks: detect non-ASCII bytes in the constructed strings and print backtrace for diagnostics. */
+    if (tmp_str1 && tmp_str1[0]) {
+        size_t __len1 = strlen(tmp_str1);
+        size_t __i1;
+        for (__i1 = 0; __i1 < __len1; ++__i1) {
+            unsigned char __c = (unsigned char)tmp_str1[__i1];
+            if ((__c < 32 && __c != 9 && __c != 10 && __c != 13) || __c > 126) {
+                fprintf(stderr, "[DEBUG-WriteStringDynArgs] non-ASCII byte 0x%02x in tmp_str1 at offset %zu (len=%zu)\n", __c, __i1, __len1);
+                void *__bt[32]; int __n = backtrace(__bt, 32); backtrace_symbols_fd(__bt, __n, fileno(stderr));
+                /* also dump a small hex context */
+                size_t __start = (__i1 > 32) ? (__i1 - 32) : 0;
+                size_t __end = (__i1 + 128 < __len1) ? (__i1 + 128) : __len1;
+                fprintf(stderr, "context hex (tmp_str1):");
+                size_t __j;
+                for (__j = __start; __j < __end; ++__j) fprintf(stderr, " %02x", (unsigned char)tmp_str1[__j]);
+                fprintf(stderr, "\n");
+                break;
+            }
+        }
+        if (__len1 > 1024)
+            fprintf(stderr, "[DEBUG-WriteStringDynArgs] tmp_str1 length = %zu\n", __len1);
+    }
+    if (tmp_str2 && tmp_str2[0]) {
+        size_t __len2 = strlen(tmp_str2);
+        size_t __i2;
+        for (__i2 = 0; __i2 < __len2; ++__i2) {
+            unsigned char __c = (unsigned char)tmp_str2[__i2];
+            if ((__c < 32 && __c != 9 && __c != 10 && __c != 13) || __c > 126) {
+                fprintf(stderr, "[DEBUG-WriteStringDynArgs] non-ASCII byte 0x%02x in tmp_str2 at offset %zu (len=%zu)\n", __c, __i2, __len2);
+                void *__bt2[32]; int __n2 = backtrace(__bt2, 32); backtrace_symbols_fd(__bt2, __n2, fileno(stderr));
+                size_t __start2 = (__i2 > 32) ? (__i2 - 32) : 0;
+                size_t __end2 = (__i2 + 128 < __len2) ? (__i2 + 128) : __len2;
+                fprintf(stderr, "context hex (tmp_str2):");
+                size_t __j;
+                for (__j = __start2; __j < __end2; ++__j) fprintf(stderr, " %02x", (unsigned char)tmp_str2[__j]);
+                fprintf(stderr, "\n");
+                break;
+            }
+        }
+        if (__len2 > 1024)
+            fprintf(stderr, "[DEBUG-WriteStringDynArgs] tmp_str2 length = %zu\n", __len2);
+    }
+
     *str_oolports = tmp_str1;
     *str_ool = tmp_str2;  
 }
@@ -777,7 +1113,7 @@ WriteReturnMsgError(FILE *file, routine_t *rt, boolean_t isuser, argument_t *arg
     string_t string = &space[0];
 
     if (UseEventLogger && arg != argNULL) 
-	sprintf(string, "LOG_W_E(\"%s\"); ", arg->argVarName);
+	SafeSnprintf(string, MAX_STR_LEN, "LOG_W_E(\"%s\"); ", arg->argVarName);
     else
 	string = "";
 

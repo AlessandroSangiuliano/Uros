@@ -202,6 +202,7 @@
 #include "global.h"
 #include "error.h"
 #include <stdlib.h>
+#include "safestr.h" /* SafeSnprintf */
 
 #ifndef max
 #define max(a,b) (((a) > (b)) ? (a) : (b))
@@ -211,11 +212,7 @@ void WriteLogDefines(FILE *file, string_t who);
 void WriteIdentificationString(FILE *file);
 
 static void
-WriteKPD_Iterator(file, in, varying, arg, bracket)
-    FILE *file;
-    boolean_t in, varying;
-    argument_t *arg;
-    boolean_t bracket;
+WriteKPD_Iterator(FILE *file, boolean_t in, boolean_t varying, argument_t *arg, boolean_t bracket)
 {
     register ipc_type_t *it = arg->argType;
     char string[MAX_STR_LEN];
@@ -228,9 +225,9 @@ WriteKPD_Iterator(file, in, varying, arg, bracket)
     fprintf(file, ";\n\n");
 
     if (in)
-	sprintf(string, "In%dP", arg->argRequestPos);
+	SafeSnprintf(string, MAX_STR_LEN, "In%dP", arg->argRequestPos);
     else
-	sprintf(string, "OutP");
+	SafeSnprintf(string, MAX_STR_LEN, "OutP");
 
     fprintf(file, "\t    ptr = &%s->%s[0];\n", string, arg->argMsgField);
 
@@ -395,9 +392,7 @@ WriteSymTabEntries(FILE *file, statement_t *stats)
 }
 
 static void
-WriteRoutineEntries(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteRoutineEntries(FILE *file, statement_t *stats)
 {
     register u_int current = 0;
     register statement_t *stat;
@@ -415,8 +410,8 @@ WriteRoutineEntries(file, stats)
 	    rt_name = (char *) malloc(strlen(rt->rtName)+5);
 	    while (current++ < rt->rtNumber)
 		fprintf(file, "\t\t{0, 0, 0, 0, 0, 0},\n");
-	    sprintf(sig_array, "&%s.arg_descriptor[%d]", ServerSubsys, offset);
-	    sprintf(rt_name, "_X%s", rt->rtName);
+	    SafeSnprintf(sig_array, strlen(ServerSubsys)+50, "&%s.arg_descriptor[%d]", ServerSubsys, offset);
+	    SafeSnprintf(rt_name, strlen(rt->rtName)+5, "_X%s", rt->rtName);
 	    descr_count = rtCountArgDescriptors(rt->rtArgs, &arg_count);
 	    offset += descr_count;
 	    WriteRPCRoutineDescriptor(file, rt,
@@ -693,9 +688,7 @@ WriteVarDecls(FILE *file, routine_t *rt)
 }
 
 static void
-WriteReplyInit(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteReplyInit(FILE *file, routine_t *rt)
 {
     fprintf(file, "\n");
     if 	(rt->rtNumReplyVar > 1 || rt->rtMaxReplyPos) 
@@ -868,17 +861,17 @@ InArgMsgField(register argument_t *arg)
 
     if (!(arg->argFlags & flRetCode))
 	if (akCheck(arg->argKind, akbServerImplicit)) 
-	    sprintf(who, "TrailerP->");
+	    SafeSnprintf(who, sizeof(who), "TrailerP->");
 	else
-	    sprintf(who, "In%dP->", arg->argRequestPos);
+	    SafeSnprintf(who, sizeof(who), "In%dP->", arg->argRequestPos);
 
     if (IsKernelServer &&
 	((akIdent(arg->argKind) == akeRequestPort) ||
 	 (akIdent(arg->argKind) == akeReplyPort)))
-	sprintf(buffer, "(ipc_port_t) %s%s", who,
+	SafeSnprintf(buffer, MAX_STR_LEN, "(ipc_port_t) %s%s", who,
 		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
     else
-	sprintf(buffer, "%s%s", who,
+	SafeSnprintf(buffer, MAX_STR_LEN, "%s%s", who,
 		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
 
     return buffer;
@@ -919,7 +912,9 @@ WriteExtractKPD_port(FILE *file, register argument_t *arg)
     /* translation function do not apply to complex types */
     if (IsKernelServer)
 	recast = "(ipc_port_t)";
-    fprintf(file, "\t\t%s[i] = %sptr->name;\n", arg->argVarName, recast);
+    fprintf(file, "\t\t");
+	SafeString(file, arg->argVarName);
+	fprintf(file, "[i] = %sptr->name;\n", recast);
     fprintf(file, "\t}\n");
 }
 
@@ -1093,9 +1088,10 @@ WriteServerCallArg(FILE *file, register argument_t *arg)
 	NeedClose = TRUE;
     }
 
-    if (akCheckAll(arg->argKind, akbVarNeeded|akbServerArg))
-	fprintf(file, "%s%s", at, arg->argVarName);
-    else if (akCheckAll(arg->argKind, akbSendRcv|akbSendKPD)) { 
+    if (akCheckAll(arg->argKind, akbVarNeeded|akbServerArg)) {
+	fprintf(file, "%s", at);
+	SafeString(file, arg->argVarName);
+    } else if (akCheckAll(arg->argKind, akbSendRcv|akbSendKPD)) { 
 	if (!it->itInLine)
 	    /* recast the void *, although it is not necessary */
 	    fprintf(file, "(%s%s)%s(%s)", it->itTransType, 
@@ -1150,10 +1146,7 @@ WriteConditionalCallArg(FILE *file, register argument_t *arg)
     if (akCheck(arg->argKind, akbSendRcv)) {
 	if (akIdent(arg->argKind) == akeRequestPort ||
 	    akCheck(arg->argKind, akbServerImplicit)) 
-	        fprintf(file, "%s", InArgMsgField(arg));
-	else if (akIdent(arg->argKind) == akeRetCode)
-	    fprintf(file, "((mig_reply_error_t *)In0P)->RetCode");
-        else
+	    SafeString(file, InArgMsgField(arg));
 	    fprintf(file, "(%s)(0)", it->itTransType);
     }
 
@@ -1203,18 +1196,18 @@ WriteDestroyArg(FILE *file, register argument_t *arg)
 	fprintf(file, "\tIn%dP->%s.size = (mach_msg_size_t) 0;\n",
 	    arg->argRequestPos, arg->argMsgField); 
     } else {
-	if (akCheck(arg->argKind, akbVarNeeded))
-	    fprintf(file, "\t%s(%s);\n", it->itDestructor, arg->argVarName);
-	else
+	if (akCheck(arg->argKind, akbVarNeeded)) {
+	    fprintf(file, "\t%s(", it->itDestructor);
+	    SafeString(file, arg->argVarName);
+	    fprintf(file, ");\n");
+	} else
 	    fprintf(file, "\t%s(%s);\n", it->itDestructor,
 		InArgMsgField(arg));
     }
 }
 
 static void
-WriteDestroyPortArg(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteDestroyPortArg(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -1240,8 +1233,7 @@ WriteDestroyPortArg(file, arg)
  * Check whether WriteDestroyPortArg would generate any code for arg.
  */
 boolean_t
-CheckDestroyPortArg(arg)
-    register argument_t *arg;
+CheckDestroyPortArg(register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -1254,10 +1246,7 @@ CheckDestroyPortArg(arg)
 }
 
 static void
-WriteServerCall(file, rt, func)
-    FILE *file;
-    routine_t *rt;
-    void (*func)();
+WriteServerCall(FILE *file, routine_t *rt, void (*func)())
 {
     argument_t *arg = rt->rtRetCode;
     ipc_type_t *it = arg->argType;
@@ -1280,17 +1269,15 @@ WriteServerCall(file, rt, func)
 }
 
 static void
-WriteCheckReturnValue(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteCheckReturnValue(FILE *file, register routine_t *rt)
 {
     argument_t *arg = rt->rtRetCode;
     char string[MAX_STR_LEN];
 
     if (akCheck(arg->argKind, akbVarNeeded))
-	sprintf(string, "%s", arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "%s", arg->argMsgField);
     else 
-	sprintf(string, "OutP->%s", arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "OutP->%s", arg->argMsgField);
     fprintf(file, "\tif (%s != KERN_SUCCESS) {\n", string);
     fprintf(file, "\t\tMIG_RETURN_ERROR(OutP, %s);\n", string);
     fprintf(file, "\t}\n");
@@ -1316,13 +1303,13 @@ WriteInitKPD_port(FILE *file, register argument_t *arg)
 
     if (IS_MULTIPLE_KPD(it)) {
 	WriteKPD_Iterator(file, FALSE, FALSE, arg, TRUE);
-	(void)sprintf(firststring, "\t*ptr");
-	(void)sprintf(string, "\tptr->");
+	SafeSnprintf(firststring, MAX_STR_LEN, "\t*ptr");
+	SafeSnprintf(string, MAX_STR_LEN, "\tptr->");
 	subindex = "[i]";
 	close = TRUE;
     } else {
-	(void)sprintf(firststring, "OutP->%s", arg->argMsgField);
-	(void)sprintf(string, "OutP->%s.", arg->argMsgField);
+	SafeSnprintf(firststring, MAX_STR_LEN, "OutP->%s", arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "OutP->%s.", arg->argMsgField);
     }
 
     fprintf(file, "#if\tUseStaticTemplates\n");
@@ -1355,14 +1342,14 @@ WriteInitKPD_ool(FILE *file, register argument_t *arg)
 
     if (IS_MULTIPLE_KPD(it)) {
 	WriteKPD_Iterator(file, FALSE, FALSE, arg, TRUE);
-	(void)sprintf(firststring, "\t*ptr");
-	(void)sprintf(string, "\tptr->");
+	SafeSnprintf(firststring, MAX_STR_LEN, "\t*ptr");
+	SafeSnprintf(string, MAX_STR_LEN, "\tptr->");
 	VarArray = it->itElement->itVarArray;
 	howmany = it->itElement->itNumber;
 	howbig = it->itElement->itSize;
     } else {
-	(void)sprintf(firststring, "OutP->%s", arg->argMsgField);
-	(void)sprintf(string, "OutP->%s.", arg->argMsgField);
+	SafeSnprintf(firststring, MAX_STR_LEN, "OutP->%s", arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "OutP->%s.", arg->argMsgField);
 	VarArray = it->itVarArray;
 	howmany = it->itNumber;
 	howbig = it->itSize;
@@ -1406,14 +1393,14 @@ WriteInitKPD_oolport(FILE *file, register argument_t *arg)
 
     if (IS_MULTIPLE_KPD(it)) {
         WriteKPD_Iterator(file, FALSE, FALSE, arg, TRUE);
-	(void)sprintf(firststring, "\t*ptr");
-	(void)sprintf(string, "\tptr->");
+	SafeSnprintf(firststring, MAX_STR_LEN, "\t*ptr");
+	SafeSnprintf(string, MAX_STR_LEN, "\tptr->");
 	VarArray = it->itElement->itVarArray;
 	howmany = it->itElement->itNumber;
 	howit = it->itElement;
     } else {
-	(void)sprintf(firststring, "OutP->%s", arg->argMsgField);
-	(void)sprintf(string, "OutP->%s.", arg->argMsgField);
+	SafeSnprintf(firststring, MAX_STR_LEN, "OutP->%s", arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "OutP->%s.", arg->argMsgField);
 	VarArray = it->itVarArray;
 	howmany = it->itNumber;
 	howit = it;
@@ -1441,17 +1428,13 @@ WriteInitKPD_oolport(FILE *file, register argument_t *arg)
 }
 
 static void
-WriteInitKPDValue(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteInitKPDValue(FILE *file, register argument_t *arg)
 {
     (*arg->argKPD_Init)(file, arg);
 }
 
 static void
-WriteAdjustMsgCircular(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteAdjustMsgCircular(FILE *file, register argument_t *arg)
 {
     fprintf(file, "\n");
 
@@ -1493,12 +1476,12 @@ WriteKPD_port(FILE *file, register argument_t *arg)
     if (akCheck(arg->argKind, akbVarNeeded)) {
 	if (IS_MULTIPLE_KPD(it)) {
 	    WriteKPD_Iterator(file, FALSE, it->itVarArray, arg, TRUE);
-	    (void)sprintf(string, "\tptr->");
+	    SafeSnprintf(string, MAX_STR_LEN, "\tptr->");
 	    subindex = "[i]";
 	    close = TRUE;
 	    real_it = it->itElement;
 	} else {
-	    (void)sprintf(string, "OutP->%s.", arg->argMsgField);
+	    SafeSnprintf(string, MAX_STR_LEN, "OutP->%s.", arg->argMsgField);
 	    real_it = it;
 	}
 	if (IsKernelServer && streql(real_it->itTransType, "ipc_port_t"))
@@ -1554,13 +1537,13 @@ WriteKPD_ool(FILE *file, register argument_t *arg)
 
     if (IS_MULTIPLE_KPD(it)) {
 	WriteKPD_Iterator(file, FALSE, it->itVarArray, arg, TRUE);
-	(void)sprintf(string, "\tptr->");
+	SafeSnprintf(string, MAX_STR_LEN, "\tptr->");
 	VarArray = it->itElement->itVarArray;
 	count = arg->argSubCount;
 	howbig = it->itElement->itSize;
 	subindex = "[i]";
     } else {
-	(void)sprintf(string, "OutP->%s.", arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "OutP->%s.", arg->argMsgField);
 	VarArray = it->itVarArray;
 	count = arg->argCount;
 	howbig = it->itSize;
@@ -1614,12 +1597,12 @@ WriteKPD_oolport(FILE *file, register argument_t *arg)
 
     if (IS_MULTIPLE_KPD(it)) {
 	WriteKPD_Iterator(file, FALSE, it->itVarArray, arg, TRUE);
-	(void)sprintf(string, "\tptr->");
+	SafeSnprintf(string, MAX_STR_LEN, "\tptr->");
 	VarArray = it->itElement->itVarArray;
 	count = arg->argSubCount;
 	subindex = "[i]";
     } else {
-	(void)sprintf(string, "OutP->%s.", arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "OutP->%s.", arg->argMsgField);
 	VarArray = it->itVarArray;
 	count = arg->argCount;
 	subindex = "";
@@ -1669,11 +1652,11 @@ WriteTCheckKPD_port(FILE *file, register argument_t *arg)
 
     if (IS_MULTIPLE_KPD(it)) {
 	WriteKPD_Iterator(file, TRUE, FALSE, arg, TRUE);
-	(void)sprintf(string, "ptr->");
+	SafeSnprintf(string, MAX_STR_LEN, "ptr->");
 	tab = "\t";
 	close = TRUE;
     } else 
-	(void)sprintf(string, "In%dP->%s.", arg->argRequestPos, arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "In%dP->%s.", arg->argRequestPos, arg->argMsgField);
 
     fprintf(file, "\t%sif (%stype != MACH_MSG_PORT_DESCRIPTOR",
 	tab, string);
@@ -1702,13 +1685,13 @@ WriteTCheckKPD_ool(FILE *file, register argument_t *arg)
     if (IS_MULTIPLE_KPD(it)) {
 	WriteKPD_Iterator(file, TRUE, FALSE, arg, TRUE);
 	tab = "\t";
-	sprintf(string, "ptr->");
+	SafeSnprintf(string, MAX_STR_LEN, "ptr->");
 	howmany = it->itElement->itNumber;
 	howbig = it->itElement->itSize;
 	test = !it->itVarArray && !it->itElement->itVarArray;
     } else {
 	tab = "";
-	sprintf(string, "In%dP->%s.", arg->argRequestPos, arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "In%dP->%s.", arg->argRequestPos, arg->argMsgField);
 	howmany = it->itNumber;
 	howbig = it->itSize;
 	test = !it->itVarArray;
@@ -1741,13 +1724,13 @@ WriteTCheckKPD_oolport(FILE *file, register argument_t *arg)
     if (IS_MULTIPLE_KPD(it)) {
 	WriteKPD_Iterator(file, TRUE, FALSE, arg, TRUE);
 	tab = "\t";
-	sprintf(string, "ptr->");
+	SafeSnprintf(string, MAX_STR_LEN, "ptr->");
 	howmany = it->itElement->itNumber;
 	test = !it->itVarArray && !it->itElement->itVarArray;
 	howstr = it->itElement->itOutNameStr;
     } else {
 	tab = "";
-	sprintf(string, "In%dP->%s.", arg->argRequestPos, arg->argMsgField);
+	SafeSnprintf(string, MAX_STR_LEN, "In%dP->%s.", arg->argRequestPos, arg->argMsgField);
 	howmany = it->itNumber;
 	test = !it->itVarArray;
 	howstr = it->itOutNameStr;
@@ -1774,9 +1757,7 @@ WriteTCheckKPD_oolport(FILE *file, register argument_t *arg)
  *  WriteRoutine for each in && typed argument in the request message.
  *************************************************************/
 static void
-WriteTypeCheck(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTypeCheck(FILE *file, register argument_t *arg)
 {
     fprintf(file, "#if\tTypeCheck\n");
     (*arg->argKPD_TypeCheck)(file, arg);
@@ -1784,9 +1765,7 @@ WriteTypeCheck(file, arg)
 }
 
 static void
-WritePackArgValueNormal(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WritePackArgValueNormal(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -1834,9 +1813,7 @@ WritePackArgValueNormal(file, arg)
 }
 
 static void
-WritePackArgValueVariable(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WritePackArgValueVariable(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -1850,9 +1827,7 @@ WritePackArgValueVariable(file, arg)
 }
 
 static void
-WriteCopyArgValue(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteCopyArgValue(FILE *file, argument_t *arg)
 {
     fprintf(file, "\n");
     WriteCopyType(file, arg->argType, "/* %d */ OutP->%s", "In%dP->%s",
@@ -1860,21 +1835,19 @@ WriteCopyArgValue(file, arg)
 }
 
 static void
-WriteInitArgValue(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteInitArgValue(FILE *file, argument_t *arg)
 {
     fprintf(file, "\n");
-    fprintf(file, "\tOutP->%s = %s;\n\n", arg->argMsgField, arg->argVarName);
+    fprintf(file, "	OutP->%s = ", arg->argMsgField);
+	SafeString(file, arg->argVarName);
+	fprintf(file, ";\n\n");
 }
 
 /*
  * Calculate the size of a variable-length message field.
  */
 static void
-WriteArgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteArgSize(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argType;
     register int bsize = ptype->itElement->itTypeSize;
@@ -1888,7 +1861,7 @@ WriteArgSize(file, arg)
 	fprintf(file, "OutP->%s", count->argMsgField);
     else
 	/* get count from argument */
-	fprintf(file, "%s", count->argVarName);
+	SafeString(file, count->argVarName);
 
     /*
      * If the base type size is not a multiple of sizeof(int) [4],
@@ -1904,9 +1877,7 @@ WriteArgSize(file, arg)
  * has more arguments following.
  */
 static void
-WriteAdjustMsgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteAdjustMsgSize(FILE *file, register argument_t *arg)
 {
     register routine_t *rt = arg->argRoutine;
     register ipc_type_t *ptype = arg->argType;
@@ -1945,9 +1916,7 @@ WriteAdjustMsgSize(file, arg)
  * last argument has been packed.
  */
 static void
-WriteFinishMsgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteFinishMsgSize(FILE *file, register argument_t *arg)
 {
     /* No more Out arguments.  If this is the only variable Out
        argument, we can assign to msgh_size directly. */
@@ -1970,9 +1939,7 @@ WriteFinishMsgSize(file, arg)
  * that need to be copied.
  */
 static void
-WriteReplyArgs(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteReplyArgs(FILE *file, register routine_t *rt)
 {
     register argument_t *arg;
     register argument_t *lastVarArg;
@@ -2022,9 +1989,7 @@ WriteReplyArgs(file, rt)
 }
 
 static void
-WriteFieldDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteFieldDecl(FILE *file, argument_t *arg)
 {
     if (akCheck(arg->argKind, akbSendKPD) ||
 	akCheck(arg->argKind, akbReturnKPD))
@@ -2034,8 +1999,7 @@ WriteFieldDecl(file, arg)
 }
 
 static void
-InitKPD_Disciplines(args)
-    argument_t *args;
+InitKPD_Disciplines(argument_t *args)
 {
     argument_t *arg;
     extern void KPD_noop();
@@ -2043,6 +2007,7 @@ InitKPD_Disciplines(args)
     extern void WriteTemplateKPD_port(FILE *file, argument_t *arg, boolean_t in);
     extern void WriteTemplateKPD_ool(FILE *file, argument_t *arg, boolean_t in);
     extern void WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in);
+    extern void SafeString(FILE *file, const char *s);
 
     /*
      * WriteInitKPD_port, WriteKPD_port,  WriteExtractKPD_port, 
@@ -2103,9 +2068,7 @@ InitKPD_Disciplines(args)
 }
 
 static void
-WriteRoutine(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRoutine(FILE *file, register routine_t *rt)
 {
     /*  Declare the server work function: */
     if (ServerHeaderFileName == strNULL)
@@ -2228,9 +2191,7 @@ WriteRoutine(file, rt)
 }
 
 void
-WriteServer(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteServer(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     register size = 0;

@@ -120,6 +120,11 @@
 #include "strdefs.h"
 #include "error.h"
 #include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <fcntl.h>
 
 static void
 WriteIncludes(FILE *file, boolean_t isuser)
@@ -227,6 +232,50 @@ WriteUserHeader(FILE *file, statement_t *stats)
     register statement_t *stat;
     char *protect = strconcat(SubsystemName, "_user_");
 
+    /* Diagnostic: optionally scan the file contents for non-ASCII after writes */
+    {
+        const char *env = getenv("MIG_CHECK_FILEBUF");
+        if (env && env[0] == '1') {
+            /* local helper to scan file by fd */
+            int fd = fileno(file);
+            off_t cur = lseek(fd, 0, SEEK_CUR);
+            off_t sz = lseek(fd, 0, SEEK_END);
+            if (sz > 0) {
+                char *buf = malloc(sz);
+                if (buf) {
+                    if (pread(fd, buf, sz, 0) == sz) {
+                        off_t i;
+                        for (i = 0; i < sz; ++i) {
+                            unsigned char c = (unsigned char)buf[i];
+                            if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                                fprintf(stderr, "[WriteUserHeader-Check] non-ASCII byte 0x%02x at offset %lld\n", c, (long long)i);
+                                {
+                                    void *bt[32];
+                                    int n = backtrace(bt, 32);
+                                    backtrace_symbols_fd(bt, n, fileno(stderr));
+                                }
+                                /* dump surrounding hex */
+                                {
+                                    long start = (i > 64) ? i - 64 : 0;
+                                    long end = (i + 192 < sz) ? i + 192 : sz;
+                                    long j;
+                                    fprintf(stderr, "context hex:");
+                                    for (j = start; j < end; ++j) fprintf(stderr, " %02x", (unsigned char)buf[j]);
+                                    fprintf(stderr, "\n");
+                                }
+                                raise(SIGTRAP);
+                                break;
+                            }
+                        }
+                    }
+                    free(buf);
+                }
+            }
+            /* restore position */
+            lseek(fd, cur, SEEK_SET);
+        }
+    }
+
     WriteProlog(file, protect, TRUE, TRUE);
     for (stat = stats; stat != stNULL; stat = stat->stNext)
 	switch (stat->stKind)
@@ -245,6 +294,49 @@ WriteUserHeader(FILE *file, statement_t *stats)
 		  (int) stat->stKind);
 	}
     WriteEpilog(file, protect);
+
+    /* Diagnostic: optionally scan the file contents for non-ASCII after full write */
+    {
+        const char *env = getenv("MIG_CHECK_FILEBUF");
+        if (env && env[0] == '1') {
+            int fd = fileno(file);
+            off_t cur = lseek(fd, 0, SEEK_CUR);
+            off_t sz = lseek(fd, 0, SEEK_END);
+            if (sz > 0) {
+                char *buf = malloc(sz);
+                if (buf) {
+                    if (pread(fd, buf, sz, 0) == sz) {
+                        off_t i;
+                        for (i = 0; i < sz; ++i) {
+                            unsigned char c = (unsigned char)buf[i];
+                            if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                                fprintf(stderr, "[WriteUserHeader-Check-LATE] non-ASCII byte 0x%02x at offset %lld\n", c, (long long)i);
+                                {
+                                    void *bt[32];
+                                    int n = backtrace(bt, 32);
+                                    backtrace_symbols_fd(bt, n, fileno(stderr));
+                                }
+                                /* dump surrounding hex */
+                                {
+                                    long start = (i > 64) ? i - 64 : 0;
+                                    long end = (i + 192 < sz) ? i + 192 : sz;
+                                    long j;
+                                    fprintf(stderr, "context hex:");
+                                    for (j = start; j < end; ++j) fprintf(stderr, " %02x", (unsigned char)buf[j]);
+                                    fprintf(stderr, "\n");
+                                }
+                                raise(SIGTRAP);
+                                break;
+                            }
+                        }
+                    }
+                    free(buf);
+                }
+            }
+            lseek(fd, cur, SEEK_SET);
+        }
+    }
+    free(protect);
 }
 
 static void
@@ -259,6 +351,7 @@ WriteDefinesRoutine(FILE *file, routine_t *rt)
 	fprintf(file, "#define\tMACH_ID_%s_REPLY\t\t%d\t/* %s() */\n", 
 	    up, rt->rtNumber + SubsystemBase + 100, rt->rtName);
     fprintf(file, "\n");
+    free(up);
 }
 
 void
@@ -359,6 +452,7 @@ WriteServerHeader(FILE *file, statement_t *stats)
 	}
     WriteDispatcher(file);
     WriteEpilog(file, protect);
+    free(protect);
 }
 
 static void
@@ -412,4 +506,5 @@ WriteDefinesHeader(FILE *file, statement_t *stats)
 		  (int) stat->stKind);
 	}
     WriteEpilog(file, protect);
+    free(protect);
 }

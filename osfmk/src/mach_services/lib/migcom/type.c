@@ -132,6 +132,7 @@
 #include <mach/ndr.h>
 #include "routine.h"
 #include "error.h"
+#include "safestr.h"
 #include "alloc.h"
 #include "global.h"
 #include <stdio.h>
@@ -234,7 +235,7 @@ itNameToString(u_int name)
 {
     char buffer[100];
 
-    (void) sprintf(buffer, "%u", name);
+    SafeSnprintf(buffer, sizeof(buffer), "%u", name);
     return strmake(buffer);
 }
 

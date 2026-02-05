@@ -90,4 +90,7 @@ extern char *strbool(boolean_t b);
 extern char *strstring(string_t string);
 extern char *toupperstr(char *string);
 
+/* Check generated files for ASCII integrity */
+extern void CheckAsciiFile(const char *filename);
+
 #endif	/* STRDEFS_H */

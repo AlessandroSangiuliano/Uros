@@ -1267,9 +1267,14 @@ WritePackArgValueNormal(file, arg)
 	    fprintf(file, "%s%s);\n", countRef, count->argVarName);
 	}
     }
-    else
-	WriteCopyType(file, it, "InP->%s", "/* %s */ %s%s",
-		      arg->argMsgField, ref, arg->argVarName);
+    else {
+	/* Pre-format left/right strings to avoid passing varargs through layers */
+	char __left[128];
+	char __right[256];
+	snprintf(__left, sizeof(__left), "InP->%s", arg->argMsgField);
+	snprintf(__right, sizeof(__right), "/* %s */ %s%s", arg->argMsgField, ref, arg->argVarName);
+	WriteCopyTypeSimple(file, it, __left, __right);
+    }
     fprintf(file, "\n");
 }
 
