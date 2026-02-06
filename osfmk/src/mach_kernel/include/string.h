@@ -63,4 +63,11 @@ extern int bcmp(const char *a, const char *b, vm_size_t len);
 typedef vm_size_t size_t;
 #endif
 
+/*
+ * NULL pointer constant
+ */
+#ifndef NULL
+#define NULL ((void *)0)
+#endif
+
 #endif /* _KERNEL_STRING_H_ */

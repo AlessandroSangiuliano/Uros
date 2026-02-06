@@ -158,6 +158,9 @@
 int	 db_active = 0;
 int	 db_pass_thru[NCPUS];
 struct	 i386_saved_state *i386_last_saved_statep;
+
+/* ddb_regs definition (declared extern in db_machdep.h) */
+db_regs_t ddb_regs;
 struct	 i386_saved_state i386_nested_saved_state;
 unsigned i386_last_kdb_sp;
 

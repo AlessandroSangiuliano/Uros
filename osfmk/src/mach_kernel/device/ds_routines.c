@@ -124,6 +124,13 @@
 int	ndf_noise=0;
 #endif
 
+/* Zone definitions (declared extern in io_req.h) */
+zone_t	io_req_zone;
+zone_t	io_inband_zone;
+
+/* Device IO map (declared extern in ds_routines.h) */
+vm_map_t	device_io_map;
+
 /* Forward */
 
 #if	DEBUG

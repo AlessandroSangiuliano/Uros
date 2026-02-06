@@ -87,7 +87,7 @@
 /*
  * Map for device IO memory.
  */
-vm_map_t	device_io_map;
+extern vm_map_t	device_io_map;
 
 #define iodone(ior)	io_completed(ior, FALSE)
 

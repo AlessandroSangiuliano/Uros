@@ -80,13 +80,15 @@ set(KERNEL_DEFINES
     -DKERNEL_PRIVATE
     -DSTAT_TIME
     -DMACH_MACHINE_ROUTINES
-    -DMACH_PROF
+    # -DMACH_PROF  # Disabled - requires prof.defs MIG generation
     -DKERNEL_SERVER=1
     -DTASK_SWAPPER=1
     # ODE device configuration options
     -DEISA=1
     -DHIMEM=1
     -DNPCI=0
+    # GCC/ELF does not use underscore prefix for C symbols
+    -D__NO_UNDERSCORES__
 )
 
 # MIG-specific flags - disable type checking for kernel stubs
@@ -299,7 +301,8 @@ add_custom_command(
     COMMENT "MIG: memory_object -> device_pager (server)"
     VERBATIM
 )
-set(DEVICE_GENERATED ${DEVICE_GENERATED} ${KERNEL_BUILD_DIR}/device/device_pager_server.c)
+# NOTE: device_pager_server.c is NOT added to sources because
+# dev_pager.c does #include <device/device_pager_server.c>
 
 # memory_object_default_user.c - kernel sends default pager messages
 add_mig_user(${KERNEL_SRC_DIR}/mach/memory_object_default.defs
@@ -346,6 +349,7 @@ set(KERN_SOURCES
     kern/exception.c
     kern/eventcount.c
     kern/etap.c
+    kern/lock.c
     kern/host.c
     kern/ipc_clock.c
     kern/ipc_host.c
@@ -382,6 +386,8 @@ set(KERN_SOURCES
     kern/thread_pool.c
     kern/timer.c
     kern/posixtime.c
+    kern/thread_swap.c
+    kern/version.c
     kern/zalloc.c
 )
 
@@ -408,6 +414,7 @@ set(IPC_SOURCES
 # Virtual Memory subsystem
 set(VM_SOURCES
     vm/memory_object.c
+    vm/vm_external.c
     vm/vm_fault.c
     vm/vm_init.c
     vm/vm_kern.c
@@ -434,6 +441,7 @@ set(DEVICE_SOURCES
     device/subrs.c
     device/data_device.c
     device/net_device.c
+    device/test_device.c
 )
 
 # Kernel debugger
@@ -458,6 +466,7 @@ set(DDB_SOURCES
     ddb/db_watch.c
     ddb/db_write_cmd.c
     ddb/db_aout.c
+    ddb/tr.c
 )
 
 # Intel common code
@@ -492,22 +501,36 @@ set(I386_C_SOURCES
 )
 
 # AT386 platform-specific C sources
+# NOTE: fd.c removed - floppy driver obsolete in 2026
 set(AT386_SOURCES
     i386/AT386/autoconf.c
     i386/AT386/bbclock.c
+    i386/AT386/bios_label.c
+    i386/AT386/com.c
     i386/AT386/conf.c
+    i386/AT386/eisa.c
+    i386/AT386/hd.c
+    i386/AT386/himem.c
     i386/AT386/iopl.c
     i386/AT386/kd.c
     i386/AT386/kd_event.c
     i386/AT386/kd_mouse.c
     i386/AT386/kd_queue.c
     i386/AT386/model_dep.c
+    i386/AT386/physmem.c
     i386/AT386/pic_isa.c
+    i386/AT386/vga.c
 )
 
 # Chips/busses
 set(CHIPS_SOURCES
     chips/busses.c
+)
+
+# SCSI subsystem
+set(SCSI_SOURCES
+    # scsi/scsi_info.c  # Disabled - too many dependencies
+    device/device_stubs.c  # Stub implementations for missing device functions
 )
 
 # All C sources
@@ -521,6 +544,7 @@ set(KERNEL_C_SOURCES
     ${I386_C_SOURCES}
     ${AT386_SOURCES}
     ${CHIPS_SOURCES}
+    ${SCSI_SOURCES}
 )
 
 # =============================================================================
@@ -608,8 +632,10 @@ set(KERNEL_LINKER_SCRIPT ${KERNEL_SRC_DIR}/i386/AT386/kernel.ld)
 
 target_link_options(${KERNEL_TARGET} PRIVATE
     -m32
+    -static
     -nostdlib
     -nostartfiles
+    -no-pie
     -T ${KERNEL_LINKER_SCRIPT}
     -Wl,--build-id=none
 )

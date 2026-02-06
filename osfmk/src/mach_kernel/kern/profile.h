@@ -235,7 +235,7 @@ extern vm_map_t kernel_map;
 ** is shared by hardclock() and the sender_thread() 
 */
 
-mpqueue_head_t prof_queue; 
+extern mpqueue_head_t prof_queue; 
 
 #if DCI
 extern void	DCIprofile(
