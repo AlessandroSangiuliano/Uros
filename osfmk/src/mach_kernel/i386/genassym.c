@@ -154,7 +154,7 @@
 #include <i386/SQT/slic.h>
 #include <i386/SQT/intctl.h>
 #endif	/* SQT */
-#ifdef	CBUS
+#if	CBUS
 #include <busses/cbus/cbus.h>
 #endif	/* CBUS */
 
@@ -325,7 +325,7 @@ main(
 	DECLARE("KERNELBASEPDE",
 		(LINEAR_KERNEL_ADDRESS >> PDESHIFT) *
 		sizeof(pt_entry_t));
-#ifdef	CBUS
+#if	CBUS
 	DECLARE("CBUS_START_PDE",	
 		(CBUS_START >> PDESHIFT) *
 		sizeof(pt_entry_t));

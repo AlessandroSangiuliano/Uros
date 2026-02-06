@@ -27,6 +27,13 @@
 
 #include <mach/port.h>
 
+/*
+ * Forward declarations for kernel types.
+ * These allow headers to reference types without including their full definitions,
+ * breaking circular include dependencies.
+ */
+
+/* Thread and task types */
 typedef struct thread_shuttle		*thread_t;
 typedef	mach_port_t			*thread_array_t;
 typedef	mach_port_t			*thread_port_array_t;
@@ -37,5 +44,17 @@ typedef struct processor		*processor_t;
 typedef struct processor_set		*processor_set_t;
 typedef struct thread_activation	*thread_act_t;
 typedef struct subsystem		*subsystem_t;
+
+/* VM types - forward declarations to break circular dependencies */
+typedef struct vm_map			*vm_map_t;
+typedef struct vm_object		*vm_object_t;
+
+/* IPC types */
+typedef struct ipc_space		*ipc_space_t;
+typedef struct ipc_port			*ipc_port_t;
+typedef struct ipc_pset			*ipc_pset_t;
+
+/* Wait event type */
+typedef void				*event_t;
 
 #endif	/* _KERN_KERN_TYPES_H_ */

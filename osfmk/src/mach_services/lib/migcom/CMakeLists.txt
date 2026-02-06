@@ -57,6 +57,9 @@ target_include_directories(migcom PRIVATE
   ${SRC_DIR}
   ${CMAKE_CURRENT_BINARY_DIR} # for parser.h
   ${CMAKE_SOURCE_DIR}/export/powermac/include
+  # For mach/ndr.h and other kernel headers
+  ${CMAKE_SOURCE_DIR}/../../mach_kernel
+  /home/slex/Scrivania/osfmk-mklinux/osfmk/export/powermac/include
 )
 
 # link libfl or libl if available

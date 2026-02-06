@@ -84,22 +84,22 @@ typedef struct {
 /* Polymorphic message type */
 #define MACH_MSG_TYPE_POLYMORPHIC	((mach_msg_type_name_t) -1)
 
-/* Port type names */
-#define MACH_MSG_TYPE_PORT_RECEIVE	0
-#define MACH_MSG_TYPE_PORT_SEND		1
-#define MACH_MSG_TYPE_PORT_SEND_ONCE	2
+/* Port type names - aliases to MOVE_* equivalents (as in original Mach) */
+#define MACH_MSG_TYPE_PORT_RECEIVE	MACH_MSG_TYPE_MOVE_RECEIVE
+#define MACH_MSG_TYPE_PORT_SEND		MACH_MSG_TYPE_MOVE_SEND
+#define MACH_MSG_TYPE_PORT_SEND_ONCE	MACH_MSG_TYPE_MOVE_SEND_ONCE
 #define MACH_MSG_TYPE_PORT_NAME		15
 
-/* Helper macros used by mig */
-#define MACH_MSG_TYPE_PORT_ANY(x) \
-    (((x) == MACH_MSG_TYPE_PORT_RECEIVE) || \
-     ((x) == MACH_MSG_TYPE_PORT_SEND) || \
-     ((x) == MACH_MSG_TYPE_PORT_SEND_ONCE) || \
-     ((x) == MACH_MSG_TYPE_PORT_NAME))
+/* Helper macros used by mig - same as kernel's mach/message.h */
+/* Uses range check: MOVE_RECEIVE(16) to MAKE_SEND_ONCE(21) */
+/* PORT_NAME(15) is NOT included - it's just a name, not a right */
+#define MACH_MSG_TYPE_PORT_ANY(x)			\
+	(((x) >= MACH_MSG_TYPE_MOVE_RECEIVE) &&		\
+	 ((x) <= MACH_MSG_TYPE_MAKE_SEND_ONCE))
 
-#define MACH_MSG_TYPE_PORT_ANY_SEND(x) \
-    (((x) == MACH_MSG_TYPE_PORT_SEND) || \
-     ((x) == MACH_MSG_TYPE_PORT_SEND_ONCE))
+#define MACH_MSG_TYPE_PORT_ANY_SEND(x)			\
+	(((x) >= MACH_MSG_TYPE_MOVE_SEND) &&		\
+	 ((x) <= MACH_MSG_TYPE_MAKE_SEND_ONCE))
 
 #define MACH_MSG_TYPE_PORT_ANY_RIGHT(x) \
     (MACH_MSG_TYPE_PORT_ANY_SEND(x) || \

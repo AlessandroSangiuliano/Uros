@@ -215,8 +215,10 @@ rpc_subsystem_t mig_e[] = {
         (rpc_subsystem_t)&mach_host_subsystem,
         (rpc_subsystem_t)&clock_subsystem,
         (rpc_subsystem_t)&do_bootstrap_subsystem,
+#if 0  /* TODO: device.defs and memory_object.defs need MIG semicolon fixes */
         (rpc_subsystem_t)&ds_device_subsystem,
         (rpc_subsystem_t)&memory_object_subsystem,
+#endif
 	(rpc_subsystem_t)&sync_subsystem,
 	(rpc_subsystem_t)&ledger_subsystem,
 #if     MACH_DEBUG

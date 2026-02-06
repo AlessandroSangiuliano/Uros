@@ -889,12 +889,16 @@ WriteExtractArgValue(FILE *file, register argument_t *arg)
 	    recast = "(ipc_port_t)";
     else
 	recast = "";
-    if (it->itInTrans != strNULL)
-	WriteCopyType(file, it, "%s", "/* %s */ %s(%s%s)",
-	    arg->argVarName, it->itInTrans, recast, InArgMsgField(arg));
-    else
-	WriteCopyType(file, it, "%s", "/* %s */ %s%s",
-	    arg->argVarName, recast, InArgMsgField(arg));
+    {
+        char __left[256];
+        char __right[256];
+        snprintf(__left, sizeof(__left), "%s", arg->argVarName);
+        if (it->itInTrans != strNULL)
+            snprintf(__right, sizeof(__right), "/* %s */ %s(%s%s)", arg->argVarName, it->itInTrans, recast, InArgMsgField(arg));
+        else
+            snprintf(__right, sizeof(__right), "/* %s */ %s%s", arg->argVarName, recast, InArgMsgField(arg));
+        WriteCopyTypeSimple(file, it, __left, __right);
+    }
 
     fprintf(file, "\n");
 }
@@ -1804,12 +1808,16 @@ WritePackArgValueNormal(FILE *file, register argument_t *arg)
 	    fprintf(file, "%s);\n", newstr);
 	}
     }
-    else if (it->itOutTrans != strNULL)
-	WriteCopyType(file, it, "OutP->%s", "/* %s */ %s(%s)",
-		      arg->argMsgField, it->itOutTrans, arg->argVarName);
-    else
-	WriteCopyType(file, it, "OutP->%s", "/* %s */ %s",
-		      arg->argMsgField, arg->argVarName);
+    else {
+        char __left[256];
+        char __right[256];
+        snprintf(__left, sizeof(__left), "OutP->%s", arg->argMsgField);
+        if (it->itOutTrans != strNULL)
+            snprintf(__right, sizeof(__right), "/* %s */ %s(%s)", arg->argMsgField, it->itOutTrans, arg->argVarName);
+        else
+            snprintf(__right, sizeof(__right), "/* %s */ %s", arg->argMsgField, arg->argVarName);
+        WriteCopyTypeSimple(file, it, __left, __right);
+    }
 }
 
 static void
@@ -1829,9 +1837,14 @@ WritePackArgValueVariable(FILE *file, register argument_t *arg)
 static void
 WriteCopyArgValue(FILE *file, argument_t *arg)
 {
+    char __left[256];
+    char __right[256];
     fprintf(file, "\n");
-    WriteCopyType(file, arg->argType, "/* %d */ OutP->%s", "In%dP->%s",
-	arg->argRequestPos, (arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
+    snprintf(__left, sizeof(__left), "/* %d */ OutP->%s", arg->argRequestPos,
+             (arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
+    snprintf(__right, sizeof(__right), "In%dP->%s", arg->argRequestPos,
+             (arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
+    WriteCopyTypeSimple(file, arg->argType, __left, __right);
 }
 
 static void

@@ -323,7 +323,7 @@
  * This pseudo-assembler line is added so that there will be at least
  *	one N_SO entry in the symbol stable to define the current file name.
  */
-.stabs ,N_SO,0,0,Ltext0
+.stabs "",N_SO,0,0,Ltext0
 Ltext0:
 #endif	/* MACH_KDB */
 

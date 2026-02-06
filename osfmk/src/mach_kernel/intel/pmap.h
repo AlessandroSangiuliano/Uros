@@ -493,7 +493,7 @@ extern pmap_t	real_pmap[NCPUS];
 	pmap_t		*ppmap = &real_pmap[my_cpu];			\
 	vm_offset_t	pdirbase = pmap->pdirbase;			\
 									\
-	if (*ppmap == (vm_offset_t)NULL) {				\
+	if (*ppmap == (pmap_t)NULL) {					\
 		*ppmap = pmap;						\
 		PMAP_CPU_SET(pmap, my_cpu);				\
 		set_cr3(pdirbase);					\

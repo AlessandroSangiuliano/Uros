@@ -591,7 +591,7 @@ struct	bus_device	bus_device_init[] = {
 
 /* vvv MITCHEM vvv */
 #if NNE > 0
-  {&nedriver, "ne", 0, (intr_t)at3c501intr, (caddr_t)0x300, 0,(caddr_t)0x300,
+  {&nedriver, "ne", 0, (intr_t)neintr, (caddr_t)0x300, 0,(caddr_t)0x300,
      '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 10},
 #endif /* NNE > 0 */
 /* ^^^ MITCHEM ^^^ */ 

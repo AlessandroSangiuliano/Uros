@@ -99,8 +99,8 @@ subsystem
 
 serverprefix	ds_;
 
-type reply_port_t = MACH_MSG_TYPE_MAKE_SEND_ONCE | polymorphic
-	ctype: mach_port_t;
+/* Note: no spaces around | for polymorphic types to work with MIG parser */
+type reply_port_t = MACH_MSG_TYPE_MAKE_SEND_ONCE|polymorphic;
 
 skip;	/* nmk15: device_open */
 

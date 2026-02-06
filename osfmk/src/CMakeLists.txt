@@ -10,11 +10,12 @@ if(OSFMK_BUILD_TOOLS)
   add_subdirectory(mach_services/lib)
 endif()
 
+# Kernel build (requires migcom to be built first)
+if(OSFMK_BUILD_KERNEL)
+  add_subdirectory(mach_kernel)
+endif()
+
 # In futuro:
-# if(OSFMK_BUILD_KERNEL)
-#   add_subdirectory(mach_kernel)
-# endif()
-#
 # if(OSFMK_BUILD_BOOTSTRAP)
 #   add_subdirectory(bootstrap)
 # endif()
