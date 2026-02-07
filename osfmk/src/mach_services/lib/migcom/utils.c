@@ -674,7 +674,10 @@ WriteCopyArg(FILE *file, argument_t *arg, char *left, char *right, ...)
 	    (void) SkipVFPrintf(file, left, pvar);
 	    fprintf(file, ", ");
 	    (void) SkipVFPrintf(file, right, pvar);
-	    fprintf(file, ", %s);\n", arg->argCount->argVarName);
+	    if (arg->argCount != argNULL && arg->argCount->argVarName != strNULL)
+	        fprintf(file, ", %s);\n", arg->argCount->argVarName);
+	    else
+	        fprintf(file, ", 0 /* missing argCount */);\n");
 	} else
 	    vWriteCopyType(file, it, left, right, pvar);
     }

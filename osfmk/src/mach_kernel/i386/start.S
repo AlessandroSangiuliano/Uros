@@ -189,6 +189,19 @@
 #include <i386/proc_reg.h>
 #include <assym.S>
 
+/*
+ * Multiboot Header - MUST be in first 8KB of kernel image
+ * Placed in .multiboot section which linker script positions first
+ */
+	.section .multiboot, "a"
+	.align	4
+multiboot_header:
+	.long	0x1BADB002		/* magic */
+	.long	0x00000002		/* flags: memory info */
+	.long	-(0x1BADB002 + 0x00000002)	/* checksum */
+
+	.text				/* switch back to text section */
+
 #if	NCPUS > 1
 
 #ifdef	SYMMETRY
@@ -338,14 +351,6 @@ LEXT(pstart)
 	mov	$0,%ax			/* fs must be zeroed; */
 	mov	%ax,%fs			/* some bootstrappers don`t do this */
 	mov	%ax,%gs
-
-        jmp     multiboot_entry
-        .align  4
-multiboot_header:
-        .long   0x1BADB002
-        .long   0x00000002
-        .long   -(0x1BADB002 + 0x00000002)
-multiboot_entry:
 
 #if	NCPUS > 1
 	jmp	1f

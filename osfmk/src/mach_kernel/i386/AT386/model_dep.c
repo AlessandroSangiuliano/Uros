@@ -263,17 +263,20 @@ vm_offset_t	hole_start, hole_end;
 vm_offset_t	avail_next;
 unsigned int	avail_remaining;
 
-/* parameters passed from GRUB */
+/* parameters passed from GRUB/multiboot bootloader
+ * MUST be in .data section, not BSS, because BSS is zeroed AFTER
+ * start.S copies the multiboot_info structure here!
+ */
 int mb_info_size = sizeof(struct multiboot_info);
-struct multiboot_info mb_info = { 0 };
+struct multiboot_info mb_info __attribute__((section(".data"))) = { .flags = 0xDEADBEEF };
 extern vm_offset_t boot_start;
 extern vm_size_t boot_size;
 extern vm_offset_t exec_start;
 extern vm_size_t exec_size;
 extern pt_entry_t *kpde;
 
-int		cnvmem = 0;		/* must be in .data section */
-int		extmem = 0;
+int		cnvmem __attribute__((section(".data"))) = 0;	/* must be in .data section */
+int		extmem __attribute__((section(".data"))) = 0;
 
 extern char	edata, end;
 

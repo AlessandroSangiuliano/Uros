@@ -15,6 +15,29 @@ set(CMAKE_C_COMPILER_WORKS 1)
 set(CMAKE_ASM_COMPILER_WORKS 1)
 
 # =============================================================================
+# Build Type Configuration
+# =============================================================================
+# Usage: cmake -DCMAKE_BUILD_TYPE=Debug ..   (or Release)
+# Debug:   -O0 -g3 (full debug info, no optimization)
+# Release: -O2 -g  (optimized with basic debug info)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING 
+        "Build type: Debug or Release" FORCE)
+endif()
+
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
+# Set optimization and debug flags based on build type
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(KERNEL_OPT_FLAGS -O0 -g3 -DDEBUG=1)
+    message(STATUS "Debug build: -O0 -g3 (no optimization, full debug)")
+else()
+    set(KERNEL_OPT_FLAGS -O2 -g)
+    message(STATUS "Release build: -O2 -g (optimized)")
+endif()
+
+# =============================================================================
 # Kernel Configuration
 # =============================================================================
 
@@ -57,8 +80,7 @@ set(KERNEL_C_FLAGS
     -Wno-missing-braces
     -Wno-parentheses
     -Wno-format
-    -O2
-    -g
+    ${KERNEL_OPT_FLAGS}
 )
 
 set(KERNEL_ASM_FLAGS
@@ -332,6 +354,9 @@ set(MIG_GENERATED_SOURCES
     ${MACH_DEBUG_GENERATED}
     ${DEVICE_GENERATED}
 )
+
+# device_pager_server header needs to exist for ipc_kobject.c
+set(DEVICE_PAGER_HEADER ${KERNEL_BUILD_DIR}/device/device_pager_server.h)
 
 # =============================================================================
 # Step 3: Source file lists
@@ -607,6 +632,7 @@ add_executable(${KERNEL_TARGET}
     ${AT386_ASM_SOURCES}
     ${LOCORE_OUTPUT}
     ${MIG_GENERATED_SOURCES}
+    ${DEVICE_PAGER_HEADER}
 )
 
 # Ensure dependencies are built first

@@ -52,6 +52,7 @@ SECTIONS
         *(.data.*)
         *(.gnu.linkonce.d.*)
         _data_end = .;
+        edata = .;
     }
 
     /* BSS section (uninitialized data) */
@@ -66,6 +67,7 @@ SECTIONS
 
     /* End of kernel */
     _kernel_end = .;
+    end = .;
 
     /* Stabs debugging sections */
     .stab          0 : { *(.stab) }

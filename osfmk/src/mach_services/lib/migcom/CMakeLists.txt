@@ -84,11 +84,18 @@ set_target_properties(migcom PROPERTIES
 )
 
 # Use an older C dialect and relax some warnings to support K&R-style code
+# Also add ASAN to detect memory corruption bugs in this legacy code
 target_compile_options(migcom PRIVATE
   -std=gnu89
   -Wno-implicit-function-declaration
   -Wno-old-style-definition
   -Wno-implicit-int
+  -fsanitize=address
+  -g
+)
+
+target_link_options(migcom PRIVATE
+  -fsanitize=address
 )
 
 # Install into tools/<system>/hostbin similar to legacy layout
