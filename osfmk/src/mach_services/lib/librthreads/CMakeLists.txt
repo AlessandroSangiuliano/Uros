@@ -23,5 +23,5 @@ target_include_directories(librthreads PUBLIC
 
 set_target_properties(librthreads PROPERTIES
   OUTPUT_NAME "rthreads"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${CMAKE_SYSTEM_NAME}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )

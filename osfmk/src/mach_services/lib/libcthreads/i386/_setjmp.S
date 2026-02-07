@@ -78,7 +78,7 @@ END(_cthread_setjmp)
 ENTRY2(cthread_longjmp,_cthread_longjmp)
 #	call	EXT(_fpinit)		# reset coprocessor
 	movl	8(%esp),%eax		# return(v)
-	movl	4(%esp),%ecx		/ fetch buffer
+	movl	4(%esp),%ecx		# fetch buffer
 	movl	0(%ecx),%ebx
 	movl	4(%ecx),%esi
 	movl	8(%ecx),%edi

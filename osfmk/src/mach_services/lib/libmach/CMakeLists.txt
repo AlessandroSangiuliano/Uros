@@ -56,5 +56,5 @@ endforeach()
 # Metto gli archivi in export/<system>/lib per compatibilità con l'albero esistente
 set_target_properties(libmach PROPERTIES
   OUTPUT_NAME "mach"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${CMAKE_SYSTEM_NAME}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )

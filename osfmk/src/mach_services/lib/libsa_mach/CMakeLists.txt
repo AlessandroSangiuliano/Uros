@@ -44,5 +44,5 @@ target_include_directories(libsa_mach PUBLIC
 
 set_target_properties(libsa_mach PROPERTIES
   OUTPUT_NAME "sa_mach"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${CMAKE_SYSTEM_NAME}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )

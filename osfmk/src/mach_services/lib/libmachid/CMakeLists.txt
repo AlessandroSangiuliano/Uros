@@ -3,7 +3,9 @@ project(libmachid C)
 
 file(GLOB LIB_SOURCES CONFIGURE_DEPENDS "*.c" "*.S" "*.s")
 # Exclude vm tooling sources that depend on server-only headers when building for the host
-list(REMOVE_ITEM LIB_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/machid_vmstuff.c")
+if(NOT OSFMK_BUILD_KERNEL)
+  list(REMOVE_ITEM LIB_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/machid_vmstuff.c")
+endif()
 add_library(libmachid STATIC ${LIB_SOURCES})
 
 target_include_directories(libmachid PUBLIC
@@ -25,5 +27,5 @@ endforeach()
 
 set_target_properties(libmachid PROPERTIES
   OUTPUT_NAME "machid"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${CMAKE_SYSTEM_NAME}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )

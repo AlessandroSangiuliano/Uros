@@ -12,6 +12,17 @@ option(OSFMK_BUILD_KERNEL "Costruisci il kernel Mach" OFF)
 option(OSFMK_BUILD_BOOTSTRAP "Costruisci il bootstrap task" OFF)
 option(OSFMK_BUILD_DEFAULT_PAGER "Costruisci il default pager" OFF)
 
+# Export layout customization: platform name for exported artifacts (can be overridden by user)
+option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'osfmk' when building kernel)" "")
+if(NOT EXPORT_PLATFORM)
+  if(OSFMK_BUILD_KERNEL)
+    set(EXPORT_PLATFORM "osfmk")
+  else()
+    set(EXPORT_PLATFORM "${CMAKE_SYSTEM_NAME}")
+  endif()
+endif()
+message(STATUS "EXPORT_PLATFORM = ${EXPORT_PLATFORM}")
+
 # Directory sorgenti principale
 include(CTest)
 enable_testing()

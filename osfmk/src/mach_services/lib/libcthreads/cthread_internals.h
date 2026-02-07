@@ -144,9 +144,12 @@
 /*
  * Provide minimal fallbacks for building on user-space hosts
  */
+/* Ensure architecture-specific cthreads types are visible when available */
+#include <machine/cthreads.h>
+
 #ifndef cthread_context_t
-/* On hosts use vm_offset_t so context can be manipulated as expected by
-   cthread_filter() and stack base computations. */
+/* On hosts or when arch headers are missing, use vm_offset_t so context can
+   be manipulated as expected by cthread_filter() and stack base computations. */
 typedef vm_offset_t cthread_context_t;
 #endif
 
@@ -161,9 +164,7 @@ static inline int spin_lock_locked(spin_lock_t *x) { (void)x; return 0; }
 #define CTHREAD_STACK_OFFSET 0
 #endif
 
-#ifndef IN_KERNEL
-#define IN_KERNEL(x) (0)
-#endif
+/* IN_KERNEL fallback removed - architecture-specific implementations (e.g., in_kernel.c) provide IN_KERNEL(). */
 
 
 #ifdef SWITCH_OPTION_IDLE

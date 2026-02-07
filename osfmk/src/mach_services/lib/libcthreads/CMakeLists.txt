@@ -14,8 +14,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/POWERMAC" AND CMAKE_SYSTEM_PROCESSOR MATC
 endif()
 
 add_library(libcthreads STATIC ${LIB_SOURCES})
-# Ensure stdint is available for legacy headers
-target_compile_options(libcthreads PRIVATE -include stdint.h)
+# Ensure stdint is available for legacy headers (only for C compilation)
+target_compile_options(libcthreads PRIVATE $<$<COMPILE_LANGUAGE:C>:-include stdint.h>)
 
 target_include_directories(libcthreads PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -26,7 +26,35 @@ target_include_directories(libcthreads PUBLIC
   ${CMAKE_SOURCE_DIR}/include
 )
 
+# Define ASSEMBLER when preprocessing assembler sources so macros like ALIGN are available
+target_compile_definitions(libcthreads PRIVATE
+  $<$<COMPILE_LANGUAGE:ASM>:ASSEMBLER>
+  $<$<COMPILE_LANGUAGE:ASM-ATT>:ASSEMBLER>
+)
+
+# Expose build-mode to sources so they can use #ifdef OSFMK_BUILD_KERNEL
+target_compile_definitions(libcthreads PRIVATE $<$<BOOL:${OSFMK_BUILD_KERNEL}>:OSFMK_BUILD_KERNEL>)
+
+# For host builds only: build i386 objects in 32-bit mode to allow assembling legacy i386 asm
+if(NOT OSFMK_BUILD_KERNEL)
+  target_compile_options(libcthreads PRIVATE
+    $<$<COMPILE_LANGUAGE:ASM>:-m32>
+    $<$<COMPILE_LANGUAGE:ASM-ATT>:-m32>
+    $<$<COMPILE_LANGUAGE:C>:-m32>
+  )
+else()
+  # When building the kernel for i386, we still need -m32 to assemble/compile
+  # legacy i386 assembly and C code into 32-bit objects.
+  if(OSFMK_TARGET_AT386)
+    target_compile_options(libcthreads PRIVATE
+      $<$<COMPILE_LANGUAGE:ASM>:-m32>
+      $<$<COMPILE_LANGUAGE:ASM-ATT>:-m32>
+      $<$<COMPILE_LANGUAGE:C>:-m32>
+    )
+  endif()
+endif()
+
 set_target_properties(libcthreads PROPERTIES
   OUTPUT_NAME "cthreads"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${CMAKE_SYSTEM_NAME}/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )
