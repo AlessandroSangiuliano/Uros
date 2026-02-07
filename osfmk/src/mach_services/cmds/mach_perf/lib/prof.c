@@ -97,8 +97,7 @@ do_prof_reset(prof_port)
 	return(KERN_SUCCESS);
 }
 
-do_prof_start(port)
-mach_port_t port;
+do_prof_start(mach_port_t port)
 {
 	if (task_sample(kernel_task, prof_port) != KERN_SUCCESS) {
 		/* In case profiler has been interrupted */
@@ -108,8 +107,7 @@ mach_port_t port;
 	return(KERN_SUCCESS);
 }
 
-do_prof_stop(port)
-mach_port_t port;
+do_prof_stop(mach_port_t port)
 {
 	return(task_sample(kernel_task, MACH_PORT_NULL));
 }
@@ -121,8 +119,7 @@ prof_save()
 	}
 }
 
-do_prof_save(port)
-mach_port_t port;
+do_prof_save(mach_port_t port)
 {
 	if (debug)
 		printf("saved %d samples, count = %d\n", 
@@ -142,8 +139,7 @@ prof_drop()
 	}
 }
 
-do_prof_drop(port)
-mach_port_t port;
+do_prof_drop(mach_port_t port)
 {
 	if (debug)
 		printf("dropped %d samples, count = %d\n", 
@@ -242,8 +238,7 @@ prof_init()
 }
 
 sample_buf_t
-next_samples_buf(sbp)
-sample_buf_t sbp;
+next_samples_buf(sample_buf_t sbp)
 {
 	if (!sbp->next)
 		sbp->next = alloc_sample_buf();

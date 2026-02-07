@@ -52,6 +52,7 @@
 #include <stdarg.h>
 
 #include "externs.h"
+#include <string.h>
 
 /*
  *  Common code for printf et al.

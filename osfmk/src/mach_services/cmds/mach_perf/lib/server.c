@@ -124,8 +124,7 @@ boolean_t server_demux(in, out)
 	    return(bootstrap_server(in, out));
 }
 
-server_wait(bootstrap_port)
-mach_port_t bootstrap_port;
+server_wait(mach_port_t bootstrap_port)
 {
 	thread_malloc_state_t mallocs = save_mallocs(thread_self());
 	if (debug > 1)
@@ -142,9 +141,7 @@ mach_port_t bootstrap_port;
 	}
 }
 
-do_send_server_port(boostrap_port, server_port)
-mach_port_t boostrap_port;
-mach_port_t server_port;
+do_send_server_port(mach_port_t boostrap_port, mach_port_t server_port)
 {
 	server = server_port;
 	mach_longjmp(server_jmp_buf, 1);
@@ -170,8 +167,7 @@ mach_port_t *server_thread;
 	return(KERN_SUCCESS);
 }
 
-do_server_stop_test(server)
-mach_port_t server;
+do_server_stop_test(mach_port_t server)
 {
 	if (!(is_master_task || server_in_same_task)) {
 		resources_stop();
@@ -180,8 +176,7 @@ mach_port_t server;
 	return(KERN_SUCCESS);
 }
 
-do_server_print_time(server)
-mach_port_t	server;
+do_server_print_time(mach_port_t server)
 {
 	if (thread_stats) {
 		print_header(&server_test);
@@ -190,9 +185,7 @@ mach_port_t	server;
 	return(KERN_SUCCESS);
 }
 
-do_set_printer(server, printer)
-mach_port_t	server;
-mach_port_t printer;
+do_set_printer(mach_port_t server, mach_port_t printer)
 {
 	if (server_only && !debug) {
 		printf_port = printer;
@@ -201,8 +194,7 @@ mach_port_t printer;
 	return(KERN_SUCCESS);
 }
 
-do_stop_server(server)
-mach_port_t	server;
+do_stop_server(mach_port_t server)
 {
 	if (debug > 1)
 		printf("stop_server()\n");
@@ -213,9 +205,7 @@ mach_port_t	server;
 	return(KERN_SUCCESS);
 }
 
-do_start_server(server, new_count)
-mach_port_t	server;
-int new_count;
+do_start_server(mach_port_t server, int new_count)
 {
 	loops = server_count = new_count;
 	if (debug > 1)
@@ -223,8 +213,7 @@ int new_count;
 	return(KERN_SUCCESS);
 }
 
-do_kill_server(server)
-mach_port_t	server;
+do_kill_server(mach_port_t server)
 {
 	if (debug > 1)
 		printf("kill_server\n");

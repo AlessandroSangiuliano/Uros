@@ -15,10 +15,10 @@ if(OSFMK_BUILD_KERNEL)
   add_subdirectory(mach_kernel)
 endif()
 
-# In futuro:
-# if(OSFMK_BUILD_BOOTSTRAP)
-#   add_subdirectory(bootstrap)
-# endif()
+# Build bootstrap server
+if(OSFMK_BUILD_BOOTSTRAP)
+  add_subdirectory(bootstrap)
+endif()
 #
 # if(OSFMK_BUILD_DEFAULT_PAGER)
 #   add_subdirectory(default_pager)

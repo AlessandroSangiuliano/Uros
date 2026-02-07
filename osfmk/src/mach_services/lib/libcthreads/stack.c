@@ -141,7 +141,8 @@
  * 	C Thread stack allocation.
  *
  */
-
+
+
 #include <cthreads.h>
 #include "cthread_internals.h"
 #include <mach/vm_region.h>
@@ -236,9 +237,7 @@ staticf void size_stack(void);
  */
 
 void 
-setup_stack(p, base)
-	register cthread_t p;
-	register vm_address_t base;
+setup_stack(register cthread_t p, register vm_address_t base)
 {
 	p->stack_base = base;
 	/*
@@ -625,8 +624,7 @@ stack_wire(vm_address_t base, vm_size_t length)
  */
 
 void
-alloc_stack(p)
-	cthread_t p;
+alloc_stack(cthread_t p)
 {
 
 	vm_address_t	base = next_stack_base;

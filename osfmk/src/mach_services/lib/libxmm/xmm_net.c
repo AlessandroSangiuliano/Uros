@@ -227,8 +227,7 @@ unsigned long wid_counter = 1;
 xmm_obj_t xmm_net_obj_list;
 
 xmm_obj_t
-xmm_net_lookup_by_port(net_port)
-	mach_port_t net_port;
+xmm_net_lookup_by_port(mach_port_t net_port)
 {
 	xmm_obj_t mobj;
 
@@ -241,10 +240,7 @@ xmm_net_lookup_by_port(net_port)
 }
 
 xmm_obj_t
-kobj_lookup_by_addr(waddr, wid, is_destination)
-	net_addr_t waddr;
-	unsigned long wid;
-	boolean_t is_destination;
+kobj_lookup_by_addr(net_addr_t waddr, unsigned long wid, boolean_t is_destination)
 {
 	xmm_obj_t kobj;
 
@@ -271,10 +267,7 @@ kobj_lookup_by_addr(waddr, wid, is_destination)
 }
 
 xmm_obj_t
-mobj_lookup_by_addr(waddr, wid, is_destination)
-	net_addr_t waddr;
-	unsigned long wid;
-	boolean_t is_destination;
+mobj_lookup_by_addr(net_addr_t waddr, unsigned long wid, boolean_t is_destination)
 {
 	xmm_obj_t mobj;
 
@@ -382,12 +375,7 @@ xmm_net_import(net_port, new_mobj)
 }
 
 /* XXX reply_to not handled correctly */
-net_send_k(kobj, mobj, msg, data, length)
-	xmm_obj_t kobj;
-	xmm_obj_t mobj;
-	net_msg_t msg;
-	vm_offset_t data;
-	vm_size_t length;
+net_send_k(xmm_obj_t kobj, xmm_obj_t mobj, net_msg_t msg, vm_offset_t data, vm_size_t length)
 {
 	net_addr_t source_addr;
 	int source_id;
@@ -418,12 +406,7 @@ net_send_k(kobj, mobj, msg, data, length)
 	return KERN_SUCCESS;
 }
 
-net_send_m(mobj, kobj, msg, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	net_msg_t msg;
-	vm_offset_t data;
-	vm_size_t length;
+net_send_m(xmm_obj_t mobj, xmm_obj_t kobj, net_msg_t msg, vm_offset_t data, vm_size_t length)
 {
 	net_addr_t source_addr;
 	int source_id;
@@ -445,11 +428,7 @@ net_send_m(mobj, kobj, msg, data, length)
 	return KERN_SUCCESS;
 }
 
-m_net_init(mobj, k_kobj, memory_object_name, page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t page_size;
+m_net_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t page_size)
 {
 	struct net_msg msg;
 	xmm_obj_t kobj;
@@ -473,10 +452,7 @@ m_net_init(mobj, k_kobj, memory_object_name, page_size)
 	return net_send_m(mobj, kobj, &msg, 0, 0);
 }
 
-m_net_terminate(mobj, kobj, memory_object_name)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	mach_port_t memory_object_name;
+m_net_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t memory_object_name)
 {
 	struct net_msg msg;
 
@@ -488,12 +464,7 @@ m_net_terminate(mobj, kobj, memory_object_name)
 	return net_send_m(mobj, kobj, &msg, 0, 0);
 }
 
-m_net_copy(mobj, kobj, offset, length, new_mobj)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	xmm_obj_t new_mobj;
+m_net_copy(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, xmm_obj_t new_mobj)
 {
 	struct net_msg msg;
 
@@ -507,12 +478,7 @@ m_net_copy(mobj, kobj, offset, length, new_mobj)
 	return net_send_m(mobj, kobj, &msg, 0, 0);
 }
 
-m_net_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_net_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	struct net_msg msg;
 
@@ -530,12 +496,7 @@ m_net_data_request(mobj, kobj, offset, length, desired_access)
 	return net_send_m(mobj, kobj, &msg, 0, 0);
 }
 
-m_net_data_unlock(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_net_data_unlock(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	struct net_msg msg;
 
@@ -546,12 +507,7 @@ m_net_data_unlock(mobj, kobj, offset, length, desired_access)
 	return net_send_m(mobj, kobj, &msg, 0, 0);
 }
 
-m_net_data_write(mobj, kobj, offset, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
+m_net_data_write(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	struct net_msg msg;
 
@@ -561,11 +517,7 @@ m_net_data_write(mobj, kobj, offset, data, length)
 	return net_send_m(mobj, kobj, &msg, data, length);
 }
 
-m_net_lock_completed(mobj, kobj, offset, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+m_net_lock_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	struct net_msg msg;
 
@@ -575,13 +527,7 @@ m_net_lock_completed(mobj, kobj, offset, length)
 	return net_send_m(mobj, kobj, &msg, 0, 0);
 }
 
-m_net_supply_completed(mobj, kobj, offset, length, result, error_offset)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t result;
-	vm_offset_t error_offset;
+m_net_supply_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t result, vm_offset_t error_offset)
 {
 	struct net_msg msg;
 
@@ -593,12 +539,7 @@ m_net_supply_completed(mobj, kobj, offset, length, result, error_offset)
 	return net_send_m(mobj, kobj, &msg, 0, 0);
 }
 
-m_net_data_return(mobj, kobj, offset, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
+m_net_data_return(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	struct net_msg msg;
 
@@ -608,8 +549,7 @@ m_net_data_return(mobj, kobj, offset, data, length)
 	return net_send_m(mobj, kobj, &msg, data, length);
 }
 
-m_net_get_attributes_reply(kobj)
-	xmm_obj_t kobj;
+m_net_get_attributes_reply(xmm_obj_t kobj)
 {
 	boolean_t object_ready;
 	boolean_t may_cache;
@@ -619,12 +559,7 @@ m_net_get_attributes_reply(kobj)
 	/* XXX not yet implmented */
 }
 
-k_net_data_provided(kobj, offset, data, length, lock_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
-	vm_prot_t lock_value;
+k_net_data_provided(xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length, vm_prot_t lock_value)
 {
 	struct net_msg msg;
 
@@ -635,10 +570,7 @@ k_net_data_provided(kobj, offset, data, length, lock_value)
 	return net_send_k(kobj, XMM_OBJ_NULL, &msg, data, length);
 }
 
-k_net_data_unavailable(kobj, offset, length)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+k_net_data_unavailable(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	struct net_msg msg;
 
@@ -687,11 +619,7 @@ k_net_lock_request(kobj, offset, length, should_clean, should_flush,
 	return net_send_k(kobj, robj, &msg, 0, 0);
 }
 
-k_net_data_error(kobj, offset, length, error_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t error_value;
+k_net_data_error(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t error_value)
 {
 	struct net_msg msg;
 
@@ -702,11 +630,7 @@ k_net_data_error(kobj, offset, length, error_value)
 	return net_send_k(kobj, XMM_OBJ_NULL, &msg, 0, 0);
 }
 
-k_net_set_attributes(kobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t kobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_net_set_attributes(xmm_obj_t kobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	struct net_msg msg;
 
@@ -717,9 +641,7 @@ k_net_set_attributes(kobj, object_ready, may_cache, copy_strategy)
 	return net_send_k(kobj, XMM_OBJ_NULL, &msg, 0, 0);
 }
 
-k_net_destroy(kobj, reason)
-	xmm_obj_t kobj;
-	kern_return_t reason;
+k_net_destroy(xmm_obj_t kobj, kern_return_t reason)
 {
 	struct net_msg msg;
 
@@ -816,12 +738,7 @@ k_net_data_supply(kobj, offset, data, length, dealloc_data, lock_value,
 #define	P4	((vm_prot_t) ntohl(msg->arg4))
 #define	P5	((vm_prot_t) ntohl(msg->arg5))
 
-net_dispatch(mobj, kobj, msg, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	net_msg_t msg;
-	vm_offset_t data;
-	vm_size_t length;
+net_dispatch(xmm_obj_t mobj, xmm_obj_t kobj, net_msg_t msg, vm_offset_t data, vm_size_t length)
 {
 #if     lint
 	length++;

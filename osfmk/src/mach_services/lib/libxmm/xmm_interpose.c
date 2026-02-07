@@ -92,11 +92,7 @@ xmm_interpose_create(old_mobj, new_mobj)
 	return xmm_obj_allocate(&interpose_class, old_mobj, new_mobj);
 }
 
-m_interpose_init(mobj, k_kobj, memory_object_name, page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t page_size;
+m_interpose_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t page_size)
 {
 	xmm_obj_t kobj = mobj;
 
@@ -106,10 +102,7 @@ m_interpose_init(mobj, k_kobj, memory_object_name, page_size)
 	return M_INIT(mobj, kobj, memory_object_name, page_size);
 }
 
-m_interpose_terminate(mobj, kobj, memory_object_name)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	mach_port_t memory_object_name;
+m_interpose_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t memory_object_name)
 {
 	kern_return_t kr;
 
@@ -118,32 +111,17 @@ m_interpose_terminate(mobj, kobj, memory_object_name)
 	return kr;
 }
 
-m_interpose_copy(mobj, kobj, offset, length, new_mobj)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	xmm_obj_t new_mobj;
+m_interpose_copy(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, xmm_obj_t new_mobj)
 {
 	return M_COPY(mobj, kobj, offset, length, new_mobj);
 }
 
-m_interpose_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_interpose_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	return M_DATA_REQUEST(mobj, kobj, offset, length, desired_access);
 }
 
-m_interpose_data_unlock(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_interpose_data_unlock(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	return M_DATA_UNLOCK(mobj, kobj, offset, length, desired_access);
 }
@@ -158,51 +136,28 @@ m_interpose_data_write(mobj, kobj, offset, data, length)
 	return M_DATA_WRITE(mobj, kobj, offset, data, length);
 }
 
-m_interpose_lock_completed(mobj, kobj, offset, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+m_interpose_lock_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	return M_LOCK_COMPLETED(mobj, kobj, offset, length);
 }
 
-m_interpose_supply_completed(mobj, kobj, offset, length, result, error_offset)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t result;
-	vm_offset_t error_offset;
+m_interpose_supply_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t result, vm_offset_t error_offset)
 {
 	return M_SUPPLY_COMPLETED(mobj, kobj, offset, length, result,
 				  error_offset);
 }
 
-m_interpose_data_return(mobj, kobj, offset, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
+m_interpose_data_return(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	return M_DATA_RETURN(mobj, kobj, offset, data, length);
 }
 
-k_interpose_data_provided(kobj, offset, data, length, lock_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
-	vm_prot_t lock_value;
+k_interpose_data_provided(xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length, vm_prot_t lock_value)
 {
 	return K_DATA_PROVIDED(kobj, offset, data, length, lock_value);
 }
 
-k_interpose_data_unavailable(kobj, offset, length)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+k_interpose_data_unavailable(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	return K_DATA_UNAVAILABLE(kobj, offset, length);
 }
@@ -230,27 +185,17 @@ k_interpose_lock_request(kobj, offset, length, should_clean, should_flush,
 			      lock_value, mobj);
 }
 
-k_interpose_data_error(kobj, offset, length, error_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t error_value;
+k_interpose_data_error(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t error_value)
 {
 	return K_DATA_ERROR(kobj, offset, length, error_value);
 }
 
-k_interpose_set_attributes(kobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t kobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_interpose_set_attributes(xmm_obj_t kobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	return K_SET_ATTRIBUTES(kobj, object_ready, may_cache, copy_strategy);
 }
 
-k_interpose_destroy(kobj, reason)
-	xmm_obj_t kobj;
-	kern_return_t reason;
+k_interpose_destroy(xmm_obj_t kobj, kern_return_t reason)
 {
 	return K_DESTROY(kobj, reason);
 }

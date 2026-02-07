@@ -136,11 +136,7 @@ xmm_maycache_create(old_mobj, may_cache, new_mobj)
 	return KERN_SUCCESS;
 }
 
-m_maycache_init(mobj, k_kobj, memory_object_name, page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t page_size;
+m_maycache_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t page_size)
 {
 	xmm_obj_t kobj;
 
@@ -157,11 +153,7 @@ m_maycache_init(mobj, k_kobj, memory_object_name, page_size)
 	M_INIT(mobj, kobj, memory_object_name, page_size);
 }
 
-k_maycache_set_attributes(kobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t kobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_maycache_set_attributes(xmm_obj_t kobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 #if     lint
 	may_cache++;

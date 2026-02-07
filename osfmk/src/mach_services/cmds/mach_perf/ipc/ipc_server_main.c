@@ -46,8 +46,7 @@ jmp_buf saved_state;
 
 int ipc_debug;
 
-ipc_server_main(service_port)
-mach_port_t service_port;
+ipc_server_main(mach_port_t service_port)
 {
 	char **argv;
 	int argc = 0;
@@ -109,15 +108,13 @@ mach_port_t service_port;
 	}
 }
 
-int do_null_snd_rcv(server)
-mach_port_t	server;
+int do_null_snd_rcv(mach_port_t server)
 {
   	server_count--;
 	return;
 }
 
-int do_null_ipc(server)
-mach_port_t	server;
+int do_null_ipc(mach_port_t server)
 {
   	server_count--;
 	return;
@@ -137,33 +134,25 @@ mach_port_t	server, port;
 	return;
 }
 
-int do_inline_128_ipc(server, data)
-mach_port_t	server;
-inline_128_t	data;
+int do_inline_128_ipc(mach_port_t server, inline_128_t data)
 {
 	server_count--;
 	return;
 }
 
-int do_inline_1024_ipc(server, data)
-mach_port_t	server;
-inline_1024_t	data;
+int do_inline_1024_ipc(mach_port_t server, inline_1024_t data)
 {
 	server_count--;
 	return;
 }
 
-int do_inline_4096_ipc(server, data)
-mach_port_t	server;
-inline_4096_t	data;
+int do_inline_4096_ipc(mach_port_t server, inline_4096_t data)
 {
 	server_count--;
 	return;
 }
 
-int do_inline_8192_ipc(server, data)
-mach_port_t	server;
-inline_8192_t	data;
+int do_inline_8192_ipc(mach_port_t server, inline_8192_t data)
 {
 	server_count--;
 	return;

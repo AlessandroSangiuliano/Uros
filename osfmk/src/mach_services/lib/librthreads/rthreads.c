@@ -168,9 +168,7 @@ int (*_thread_init_routine)() = (int (*)()) rthread_init;
  */
 
 vm_offset_t
-rthread_stack_base(rthread, offset)
-	register rthread_t rthread;
-	register int offset;
+rthread_stack_base(register rthread_t rthread, register int offset)
 {
 #ifdef	STACK_GROWTH_UP
 	return (rthread->stack_base + offset);

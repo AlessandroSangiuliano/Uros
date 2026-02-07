@@ -28,11 +28,7 @@
 #include <mach/mach_migcalls.h>
 
 kern_return_t 
-vm_write(task, address, data, data_count)
-	mach_port_t		task;
-	vm_address_t		address;
-	vm_offset_t		data;
-	mach_msg_type_number_t	data_count;
+vm_write(mach_port_t task, vm_address_t address, vm_offset_t data, mach_msg_type_number_t data_count)
 {
 	kern_return_t result;
 

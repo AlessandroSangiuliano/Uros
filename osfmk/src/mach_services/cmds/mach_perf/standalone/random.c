@@ -198,7 +198,8 @@ static int rand_deg = DEG_3;
 static int rand_sep = SEP_3;
 
 static long int *end_ptr = &randtbl[sizeof(randtbl) / sizeof(randtbl[0])];
-
+
+
 /* Initialize the random number generator based on the given seed.  If the
    type is the trivial no-state-information type, just remember the seed.
    Otherwise, initializes state[] based on the given "seed" via a linear
@@ -208,8 +209,7 @@ static long int *end_ptr = &randtbl[sizeof(randtbl) / sizeof(randtbl[0])];
    introduced by the L.C.R.N.G.  Note that the initialization of randtbl[]
    for default usage relies on values produced by this routine.  */
 void
-srandom (x)
-  unsigned int x;
+srandom(unsigned int x)
 {
   state[0] = x;
   if (rand_type != TYPE_0)
@@ -223,7 +223,8 @@ srandom (x)
 	(void) random();
     }
 }
-
+
+
 /* Initialize the state information in the given array of N bytes for
    future random number generation.  Based on the number of bytes we
    are given, and the break values for the different R.N.G.'s, we choose
@@ -236,10 +237,7 @@ srandom (x)
    setstate so that it doesn't matter when initstate is called.
    Returns a pointer to the old state.  */
 PTR
-initstate (seed, arg_state, n)
-  unsigned int seed;
-  PTR arg_state;
-  unsigned long n;
+initstate(unsigned int seed, PTR arg_state, unsigned long n)
 {
   PTR ostate = (PTR) &state[-1];
 
@@ -293,7 +291,8 @@ initstate (seed, arg_state, n)
 
   return ostate;
 }
-
+
+
 /* Restore the state from the given state array.
    Note: It is important that we also remember the locations of the pointers
    in the current state information, and restore the locations of the pointers
@@ -304,8 +303,7 @@ initstate (seed, arg_state, n)
    Returns a pointer to the old state information.  */
 
 PTR
-setstate (arg_state)
-  PTR arg_state;
+setstate(PTR arg_state)
 {
   register long int *new_state = (long int *) arg_state;
   register int type = new_state[0] % MAX_TYPES;
@@ -344,7 +342,8 @@ setstate (arg_state)
 
   return ostate;
 }
-
+
+
 /* If we are using the trivial TYPE_0 R.N.G., just do the old linear
    congruential bit.  Otherwise, we do our fancy trinomial stuff, which is the
    same in all ther other cases due to all the global variables that have been

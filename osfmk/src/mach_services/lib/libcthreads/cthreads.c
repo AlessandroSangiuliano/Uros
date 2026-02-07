@@ -839,9 +839,7 @@ cthread_cpus()
  */
 
 vm_offset_t
-cthread_stack_base(cthread, offset)
-	register cthread_t cthread;
-	register vm_size_t offset;
+cthread_stack_base(register cthread_t cthread, register vm_size_t offset)
 {
 #ifdef	STACK_GROWTH_UP
 	return (cthread->stack_base + offset);

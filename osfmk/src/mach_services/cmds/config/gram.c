@@ -929,8 +929,7 @@ deverror(systemname, devtype)
  * take into account stuff wildcarded.
  */
 /*ARGSUSED*/
-finddev(dev)
-	dev_t dev;
+finddev(dev_t dev)
 {
 
 	/* punt on this right now */

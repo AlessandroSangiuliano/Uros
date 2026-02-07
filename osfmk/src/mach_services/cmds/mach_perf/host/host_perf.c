@@ -68,8 +68,7 @@ host_self_test()
 	MACH_CALL(mach_port_deallocate, (mach_task_self(), port));
 }
 
-host_statistics_test(flavor)
-int flavor;
+host_statistics_test(int flavor)
 {
 	register 		i;
 	mach_msg_type_number_t	count;

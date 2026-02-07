@@ -48,6 +48,24 @@ static char sccsid[] = "@(#)ctype_.c	5.6 (Berkeley) 6/1/90";
 #include <sa_mach.h>
 #include <ctype.h>
 
+/* Ensure we can provide function definitions even when <ctype.h> defines macros */
+#undef isdigit
+#undef islower
+#undef isspace
+#undef ispunct
+#undef isupper
+#undef isalpha
+#undef isxdigit
+#undef isalnum
+#undef isprint
+#undef isgraph
+#undef iscntrl
+#undef isascii
+#undef toupper
+#undef tolower
+#undef toascii
+
+
 /*
  * The following is included from the <ctype.h> header file
  */

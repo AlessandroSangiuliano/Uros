@@ -91,9 +91,7 @@ extern xmm_obj_t	mobj_lookup_by_addr();
 extern xmm_obj_t	kobj_lookup_by_addr();
 
 /* shared with tcp */
-sock_setbufsize(s, buf)
-	int s;
-	int buf;
+sock_setbufsize(int s, int buf)
 {
 	int optval, best;
 	char *ova = (char *) &optval;
@@ -118,8 +116,7 @@ sock_setbufsize(s, buf)
 }
 
 static int
-udp_setsockoptions(s)
-	int s;
+udp_setsockoptions(int s)
 {
 	/* set send buffer size */
 	sock_setbufsize(s, SO_SNDBUF);
@@ -225,10 +222,7 @@ udp_read_loop()
 }
 
 static int
-SEND(addr, data, length)
-	net_addr_t addr;
-	vm_offset_t data;
-	int length;
+SEND(net_addr_t addr, vm_offset_t data, int length)
 {
 	struct sockaddr_in sin;
 	int rv;
@@ -248,14 +242,7 @@ SEND(addr, data, length)
  *  Write data to remote obj.
  */
 static
-udp_send(daddr, did, saddr, sid, msg, data, length)
-	net_addr_t daddr;
-	int did;
-	net_addr_t saddr;
-	int sid;
-	net_msg_t msg;
-	vm_offset_t data;
-	vm_size_t length;
+udp_send(net_addr_t daddr, int did, net_addr_t saddr, int sid, net_msg_t msg, vm_offset_t data, vm_size_t length)
 {
 	int rv;
 	struct udp_header ih;
@@ -287,8 +274,7 @@ udp_send(daddr, did, saddr, sid, msg, data, length)
 }
 
 kern_return_t
-udp_init(np)
-	net_proto_t np;
+udp_init(net_proto_t np)
 {
 	struct sockaddr_in sin;
 	struct hostent *local, *gethostbyname();

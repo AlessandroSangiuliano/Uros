@@ -234,9 +234,7 @@ krealloc(old_buf_p, old_size, new_size, counter)
 }
 
 kern_return_t
-m_svm_extend(mobj, new_num_pages)
-	xmm_obj_t mobj;
-	int new_num_pages;
+m_svm_extend(xmm_obj_t mobj, int new_num_pages)
 {
 	xmm_obj_t kobj;
 
@@ -293,11 +291,7 @@ xmm_svm_create(old_mobj, new_mobj)
 	return KERN_SUCCESS;
 }
 
-m_svm_init(mobj, k_kobj, memory_object_name, memory_object_page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t memory_object_page_size;
+m_svm_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t memory_object_page_size)
 {
 	xmm_obj_t kobj;
 
@@ -339,10 +333,7 @@ m_svm_init(mobj, k_kobj, memory_object_name, memory_object_page_size)
 	return KERN_SUCCESS;
 }
 
-m_svm_terminate(mobj, kobj, memory_object_name)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	mach_port_t memory_object_name;
+m_svm_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t memory_object_name)
 {
 	xmm_obj_t kobj_terminated, *kp;
 
@@ -385,9 +376,7 @@ m_svm_terminate(mobj, kobj, memory_object_name)
 	return KERN_SUCCESS;
 }
 
-m_svm_request(mobj, r)
-	xmm_obj_t mobj;
-	request_t r;
+m_svm_request(xmm_obj_t mobj, request_t r)
 {
 Mcheck
 	if((unsigned long)atop(r->offset) >= MOBJ->num_pages) {
@@ -404,12 +393,7 @@ Mcheck
 	return KERN_SUCCESS;
 }
 
-m_svm_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_svm_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	request_t r;
 
@@ -434,12 +418,7 @@ Kcheck
 	return m_svm_request(mobj, r);
 }
 
-m_svm_data_unlock(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_svm_data_unlock(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	request_t r;
 
@@ -464,12 +443,7 @@ Kcheck
 	return m_svm_request(mobj, r);
 }
 
-m_svm_data_write(mobj, kobj, offset, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	int length;
+m_svm_data_write(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, int length)
 {
 Mcheck
 Kcheck
@@ -478,11 +452,7 @@ Kcheck
 	return KERN_SUCCESS;
 }
 
-m_svm_lock_completed(mobj, kobj, offset, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+m_svm_lock_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	request_t r;
 
@@ -503,12 +473,7 @@ Kcheck
 	return KERN_SUCCESS;
 }
 
-k_svm_data_provided(mobj, offset, data, length, lock_value)
-	xmm_obj_t mobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
-	vm_prot_t lock_value;
+k_svm_data_provided(xmm_obj_t mobj, vm_offset_t offset, vm_offset_t data, vm_size_t length, vm_prot_t lock_value)
 {
 	request_t r;
 
@@ -543,10 +508,7 @@ Mcheck
 	return KERN_SUCCESS;
 }
 
-k_svm_data_unavailable(mobj, offset, length)
-	xmm_obj_t mobj;
-	vm_offset_t offset;
-	vm_size_t length;
+k_svm_data_unavailable(xmm_obj_t mobj, vm_offset_t offset, vm_size_t length)
 {
 	request_t r;
 
@@ -695,11 +657,7 @@ if(xmm_svm_debug)printf("- only pager reqs\n");
 	return KERN_SUCCESS;
 }
 
-k_svm_data_error(mobj, offset, length, error_value)
-	xmm_obj_t mobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t error_value;
+k_svm_data_error(xmm_obj_t mobj, vm_offset_t offset, vm_size_t length, kern_return_t error_value)
 {
 	request_t r;
 
@@ -725,11 +683,7 @@ Mcheck
 	return KERN_SUCCESS;
 }
 
-k_svm_set_attributes(mobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t mobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_svm_set_attributes(xmm_obj_t mobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	xmm_obj_t kobj;
 
@@ -751,9 +705,7 @@ Mcheck
 	return KERN_SUCCESS;
 }
 
-k_svm_destroy(mobj, reason)
-	xmm_obj_t mobj;
-	kern_return_t reason;
+k_svm_destroy(xmm_obj_t mobj, kern_return_t reason)
 {
 Mcheck
 #if     lint
@@ -768,9 +720,7 @@ Mcheck
  * Return TRUE if first request in queue for this page.
  */
 boolean_t
-add_request(mobj, r0)
-	xmm_obj_t mobj;
-	request_t r0;
+add_request(xmm_obj_t mobj, request_t r0)
 {
 	request_t r, *rp;
 
@@ -796,9 +746,7 @@ if(xmm_svm_debug)printf("add_request: 0x%x 0x%x\n", r, r0);
  * since we expect to remove it soon.
  */
 request_t
-lookup_request(mobj, offset)
-	xmm_obj_t mobj;
-	vm_offset_t offset;
+lookup_request(xmm_obj_t mobj, vm_offset_t offset)
 {
 	request_t r, *rp;
 
@@ -819,9 +767,7 @@ Mcheck
  * Return next request for same offset, if any.
  */
 request_t
-remove_request(mobj, offset)
-	xmm_obj_t mobj;
-	vm_offset_t offset;
+remove_request(xmm_obj_t mobj, vm_offset_t offset)
 {
 	request_t r, *rp;
 
@@ -862,9 +808,7 @@ Mcheck
 /*
  * This routine does not worry about lock[page]; satisfy_request does.
  */
-process_kernel_request(mobj, r)
-	xmm_obj_t mobj;
-	request_t r;
+process_kernel_request(xmm_obj_t mobj, request_t r)
 {
 	int page;
 	xmm_obj_t kobj, k;
@@ -952,9 +896,7 @@ Mcheck
 	return KERN_SUCCESS;
 }
 
-process_pager_request(mobj, r)
-	xmm_obj_t mobj;
-	request_t r;
+process_pager_request(xmm_obj_t mobj, request_t r)
 {
 	int page;
 	xmm_obj_t k;
@@ -1041,9 +983,7 @@ Mcheck
 	return KERN_SUCCESS;
 }
 
-process_request(mobj, r)
-	xmm_obj_t mobj;
-	request_t r;
+process_request(xmm_obj_t mobj, request_t r)
 {
 Mcheck
 	if (r->is_kernel) {
@@ -1054,10 +994,7 @@ Mcheck
 }
 
 void
-satisfy_kernel_request(mobj, r, data)
-	xmm_obj_t mobj;
-	request_t r;
-	vm_offset_t data;
+satisfy_kernel_request(xmm_obj_t mobj, request_t r, vm_offset_t data)
 {
 	xmm_obj_t kobj;
 	request_t r_next;
@@ -1136,9 +1073,7 @@ Mcheck
 }
 
 void
-satisfy_pager_request(mobj, r)
-	xmm_obj_t mobj;
-	request_t r;
+satisfy_pager_request(xmm_obj_t mobj, request_t r)
 {
 	request_t r_next;
 
@@ -1183,10 +1118,7 @@ Mcheck
 }
 
 void
-satisfy_request(mobj, r, data)
-	xmm_obj_t mobj;
-	request_t r;
-	vm_offset_t data;
+satisfy_request(xmm_obj_t mobj, request_t r, vm_offset_t data)
 {
 Mcheck
 	if (r->is_kernel) {
@@ -1214,10 +1146,7 @@ xmm_svm_init()
  * XXX a smarter version of xmm_import that knows not to bother
  * XXX asking remote directory.
  */
-xmm_svm_set_access(mobj, kobj, access)
-	xmm_mobj_t mobj;
-	xmm_mobj_t kobj;
-	vm_prot_t access;
+xmm_svm_set_access(xmm_mobj_t mobj, xmm_mobj_t kobj, vm_prot_t access)
 {
 	
 }

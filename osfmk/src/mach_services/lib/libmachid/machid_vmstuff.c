@@ -55,6 +55,7 @@
 #include <servers/machid.h>
 #include <servers/machid_debug.h>
 #include <servers/machid_dpager.h>
+#include <mach/default_pager_object.h>
 #include <servers/machid_types.h>
 #include <servers/machid_lib.h>
 
@@ -271,8 +272,7 @@ fill_object_pages(o)
 }
 
 mhost_priv_t
-get_object_host(object)
-    mobject_name_t object;
+get_object_host(mobject_name_t object)
 {
     mhost_priv_t host_priv;
     kern_return_t kr;
@@ -286,8 +286,7 @@ get_object_host(object)
 }
 
 mdefault_pager_t
-get_host_dpager(host)
-    mhost_priv_t host;
+get_host_dpager(mhost_priv_t host)
 {
     static mdefault_pager_t cache_dpager;
     static mhost_priv_t cache_host;
@@ -309,8 +308,7 @@ get_host_dpager(host)
 }
 
 mdefault_pager_t
-get_object_dpager(object)
-    mobject_name_t object;
+get_object_dpager(mobject_name_t object)
 {
     mhost_priv_t host;
 

@@ -30,8 +30,7 @@ mach_port_t	printf_port = 0;
 
 extern int gen_printf(const char *format, ...);
 
-printf_thread_body(port)
-mach_port_t port;
+printf_thread_body(mach_port_t port)
 {
 	extern boolean_t printf_server();
 
@@ -64,8 +63,7 @@ _printf_init()
 	}
 }
 
-printf_enable(task)
-mach_port_t task;
+printf_enable(mach_port_t task)
 {
 	if (is_master_task) {
 		MACH_CALL( mach_port_insert_right, (task,

@@ -60,6 +60,7 @@ static char sccsid[] = "@(#)strtouq.c	8.1 (Berkeley) 6/4/93";
 
 
 #include <sys/types.h>
+#include "compat.h"
 
 #include <limits.h>
 #include <errno.h>

@@ -135,8 +135,7 @@ null_rpc_test()
 
 #ifdef	AUTOTEST
 kern_return_t
-client_null_rpc(server)
-	mach_port_t server;
+client_null_rpc(mach_port_t server)
 {
 	return KERN_SUCCESS;
 }
@@ -211,9 +210,7 @@ kern_return_t (*rpc)();
 				sizeof (inline_8192_t)));
 }
 
-ool_rpc_test(size, touch)
-int	size;
-int	touch;
+ool_rpc_test(int size, int touch)
 {
 	register int i;
 	char *buf;

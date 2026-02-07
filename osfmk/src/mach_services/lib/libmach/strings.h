@@ -48,9 +48,12 @@
  */
 
 /*
- * External function definitions
- * for routines described in string(3).
+ * Modernize: prefer the system <string.h> prototypes to avoid conflicts
  */
+#if defined(__STDC__) || defined(__cplusplus)
+# include <string.h>
+#else
+/* Fallback for old compilers */
 char	*strcat();
 char	*strncat();
 int	strcmp();
@@ -60,3 +63,4 @@ char	*strncpy();
 unsigned long	strlen();
 char	*index();
 char	*rindex();
+#endif

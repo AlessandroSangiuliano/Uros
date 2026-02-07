@@ -128,8 +128,7 @@ tcp_add_sin(sin, s)
 }
 
 static int
-tcp_setsockoptions(s)
-	int s;
+tcp_setsockoptions(int s)
 {
 	int optval;
 	char *ova = (char *) &optval;
@@ -155,8 +154,7 @@ tcp_setsockoptions(s)
  *  Returns a socket descriptor for sin; create one if necessary.
  */
 static socket_t
-tcp_lookup(addr)
-	net_addr_t addr;
+tcp_lookup(net_addr_t addr)
 {
 	socket_t so;
 	int s;
@@ -285,14 +283,7 @@ tcp_read_loop(ci)
  *  Write data to remote obj.
  */
 static
-tcp_send(daddr, did, saddr, sid, msg, data, length)
-	net_addr_t daddr;
-	int did;
-	net_addr_t saddr;
-	int sid;
-	net_msg_t msg;
-	vm_offset_t data;
-	vm_size_t length;
+tcp_send(net_addr_t daddr, int did, net_addr_t saddr, int sid, net_msg_t msg, vm_offset_t data, vm_size_t length)
 {
 	socket_t so;
 	int rv;
@@ -332,8 +323,7 @@ tcp_send(daddr, did, saddr, sid, msg, data, length)
 }
 
 static int
-tcp_accept_loop(s)
-	int s;
+tcp_accept_loop(int s)
 {
 	struct tcp_read_loop_args *ci;
 	
@@ -357,8 +347,7 @@ tcp_accept_loop(s)
 }
 
 kern_return_t
-tcp_init(np)
-	net_proto_t np;
+tcp_init(net_proto_t np)
 {
 	struct sockaddr_in sin;
 	struct hostent *local, *gethostbyname();

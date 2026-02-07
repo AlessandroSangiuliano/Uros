@@ -141,7 +141,8 @@
  * 	Real-Time Thread stack allocation.
  *
  */
-
+
+
 #include <rthreads.h>
 #include <rthread_internals.h>
 #include <mach/vm_region.h>
@@ -235,9 +236,7 @@ staticf void size_stack(void);
  */
 
 void 
-setup_stack(p, base)
-	register rthread_t p;
-	register vm_address_t base;
+setup_stack(register rthread_t p, register vm_address_t base)
 {
 	p->stack_base = base;
 	/*
@@ -631,8 +630,7 @@ stack_wire(vm_address_t base, vm_size_t length)
  */
 
 void
-alloc_stack(p)
-	rthread_t p;
+alloc_stack(rthread_t p)
 {
 
 	vm_address_t	base = next_stack_base;

@@ -229,8 +229,7 @@ nametodev(name, defunit, defpartition)
 }
 
 char *
-devtoname(dev)
-	dev_t dev;
+devtoname(dev_t dev)
 {
 	char buf[80]; 
 	register struct devdescription *dp;

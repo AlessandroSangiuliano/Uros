@@ -136,12 +136,7 @@ obj_init()
 	Proxy_init();/*XXX*/
 }
 
-k_atrium_data_provided(kobj, offset, data, length, lock_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
-	vm_prot_t lock_value;
+k_atrium_data_provided(xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length, vm_prot_t lock_value)
 {
 	kern_return_t kr;
 
@@ -151,10 +146,7 @@ k_atrium_data_provided(kobj, offset, data, length, lock_value)
 	return kr;
 }
 
-k_atrium_data_unavailable(kobj, offset, length)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+k_atrium_data_unavailable(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	kern_return_t kr;
 
@@ -201,11 +193,7 @@ k_atrium_lock_request(kobj, offset, length, should_clean, should_flush,
 	return kr;
 }
 
-k_atrium_data_error(kobj, offset, length, error_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t error_value;
+k_atrium_data_error(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t error_value)
 {
 	kern_return_t kr;
 
@@ -214,11 +202,7 @@ k_atrium_data_error(kobj, offset, length, error_value)
 	return kr;
 }
 
-k_atrium_set_attributes(kobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t kobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_atrium_set_attributes(xmm_obj_t kobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	kern_return_t kr;
 
@@ -227,9 +211,7 @@ k_atrium_set_attributes(kobj, object_ready, may_cache, copy_strategy)
 	return kr;
 }
 
-k_atrium_destroy(kobj, reason)
-	xmm_obj_t kobj;
-	kern_return_t reason;
+k_atrium_destroy(xmm_obj_t kobj, kern_return_t reason)
 {
 	kern_return_t kr;
 
@@ -333,10 +315,7 @@ memory_object_init(memory_object, memory_control, memory_object_name,
 	return KERN_SUCCESS;
 }
 
-memory_object_terminate(memory_object, memory_control, memory_object_name)
-	mach_port_t memory_object;
-	mach_port_t memory_control;
-	mach_port_t memory_object_name;
+memory_object_terminate(mach_port_t memory_object, mach_port_t memory_control, mach_port_t memory_object_name)
 {
 	xmm_obj_t mobj;
 	xmm_obj_t kobj;
@@ -435,11 +414,7 @@ memory_object_data_write(memory_object, memory_control, offset, data, length)
 	return KERN_SUCCESS;
 }
 
-memory_object_lock_completed(memory_object, memory_control, offset, length)
-	mach_port_t memory_object;
-	mach_port_t memory_control;
-	vm_offset_t offset;
-	vm_size_t length;
+memory_object_lock_completed(mach_port_t memory_object, mach_port_t memory_control, vm_offset_t offset, vm_size_t length)
 {
 	xmm_obj_t mobj;
 	xmm_obj_t kobj;
@@ -474,12 +449,7 @@ memory_object_supply_completed(memory_object, memory_control, offset, length,
 	return KERN_SUCCESS;
 }
 
-memory_object_data_return(memory_object, memory_control, offset, data, length)
-	memory_object_t memory_object;
-	memory_object_control_t memory_control;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
+memory_object_data_return(memory_object_t memory_object, memory_object_control_t memory_control, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	xmm_obj_t mobj;
 	xmm_obj_t kobj;
@@ -493,10 +463,7 @@ memory_object_data_return(memory_object, memory_control, offset, data, length)
 	return KERN_SUCCESS;
 }
 
-memory_object_change_completed(memory_object, may_cache, copy_strategy)
-	memory_object_t memory_object;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+memory_object_change_completed(memory_object_t memory_object, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	xmm_obj_t mobj;
 	xmm_obj_t kobj;

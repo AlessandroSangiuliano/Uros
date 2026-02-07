@@ -72,8 +72,7 @@ vm_allocate_dirty(page)
 	}
 }
 
-vm_deallocate_dirty(page)
-	vm_offset_t page;
+vm_deallocate_dirty(vm_offset_t page)
 {
 	if (dirty_page == 0) {
 		dirty_page = page;
@@ -95,8 +94,7 @@ vm_allocate_dirty(page)
 	return KERN_SUCCESS;
 }
 
-vm_deallocate_dirty(page)
-	vm_offset_t page;
+vm_deallocate_dirty(vm_offset_t page)
 {
 	kern_return_t kr;
 

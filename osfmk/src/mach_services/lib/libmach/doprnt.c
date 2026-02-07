@@ -49,6 +49,11 @@
 
 #include <mach/boolean.h>
 #include <stdarg.h>
+#include <string.h>
+
+/* Modernized prototypes */
+static void printnum(unsigned long u, int base, void (*putc)(char *, char), char *putc_arg);
+static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, char), char *putc_arg);
 
 /*
  *  Common code for printf et al.
@@ -144,32 +149,23 @@
 
 #define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
 
-static
-printnum(u, base, putc, putc_arg)
-	register unsigned long	u;	/* number to print */
-	register int		base;
-	void			(*putc)();
-	char			*putc_arg;
+static void
+printnum(unsigned long u, int base, void (*putc)(char *, char), char *putc_arg)
 {
-	char	buf[MAXBUF];	/* build number here */
-	register char *	p = &buf[MAXBUF-1];
-	static char digs[] = "0123456789abcdef";
+    char buf[MAXBUF]; /* build number here */
+    char *p = &buf[MAXBUF-1];
+    static const char digs[] = "0123456789abcdef";
 
-	do {
-	    *p-- = digs[u % base];
-	    u /= base;
-	} while (u != 0);
+    do {
+        *p-- = digs[u % base];
+        u /= base;
+    } while (u != 0);
 
-	while (++p != &buf[MAXBUF])
-	    (*putc)(putc_arg, *p);
+    while (++p != &buf[MAXBUF])
+        (*putc)(putc_arg, *p);
 }
 
-_doprnt(fmt, args, radix, putc, putc_arg)
-	register char	*fmt;
-	va_list		args;
-	int		radix;		/* default radix - for '%r' */
- 	void		(*putc)();	/* character output */
-	char		*putc_arg;	/* argument for putc */
+static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, char), char *putc_arg)
 {
 	int		length;
 	int		prec;

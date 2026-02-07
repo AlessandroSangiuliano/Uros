@@ -49,8 +49,7 @@ mach_port_t 	port_set;
 jmp_buf 	saved_state;
 int		pager_server_debug;
 
-pager_server_main(service_port)
-mach_port_t service_port;
+pager_server_main(mach_port_t service_port)
 {
         char **argv;
         int argc = 0;

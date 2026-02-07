@@ -99,12 +99,7 @@ xmm_write_create(old_mobj, new_mobj)
 	return xmm_obj_allocate(&write_class, old_mobj, new_mobj);
 }
 
-m_write_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_write_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 #if     lint
 	desired_access++;
@@ -112,12 +107,7 @@ m_write_data_request(mobj, kobj, offset, length, desired_access)
 	M_DATA_REQUEST(mobj, kobj, offset, length, VM_PROT_ALL);
 }
 
-m_write_data_unlock(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_write_data_unlock(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 #if     lint
 	desired_access++;

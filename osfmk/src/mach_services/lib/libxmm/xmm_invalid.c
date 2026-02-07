@@ -111,11 +111,7 @@ xmm_invalid_complain(name, from, to)
 }
 
 /* ARGSUSED */
-m_invalid_init(mobj, k_kobj, memory_object_name, page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t page_size;
+m_invalid_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t page_size)
 {
 	printf("m_invalid_init from xmm_%s to xmm_%s\n",
 	       k_kobj->class->c_name, mobj->class->c_name);
@@ -123,43 +119,25 @@ m_invalid_init(mobj, k_kobj, memory_object_name, page_size)
 }
 
 /* ARGSUSED */
-m_invalid_terminate(mobj, kobj, memory_object_name)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	mach_port_t memory_object_name;
+m_invalid_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t memory_object_name)
 {
 	return xmm_invalid_complain("terminate", kobj, mobj);
 }
 
 /* ARGSUSED */
-m_invalid_copy(mobj, kobj, offset, length, new_mobj)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	xmm_obj_t new_mobj;
+m_invalid_copy(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, xmm_obj_t new_mobj)
 {
 	return xmm_invalid_complain("copy", kobj, mobj);
 }
 
 /* ARGSUSED */
-m_invalid_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_invalid_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	return xmm_invalid_complain("data_request", kobj, mobj);
 }
 
 /* ARGSUSED */
-m_invalid_data_unlock(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_invalid_data_unlock(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	return xmm_invalid_complain("data_unlock", kobj, mobj);
 }
@@ -176,54 +154,31 @@ m_invalid_data_write(mobj, kobj, offset, data, length)
 }
 
 /* ARGSUSED */
-m_invalid_lock_completed(mobj, kobj, offset, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+m_invalid_lock_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	return xmm_invalid_complain("lock_completed", kobj, mobj);
 }
 
 /* ARGSUSED */
-m_invalid_supply_completed(mobj, kobj, offset, length, result, error_offset)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t result;
-	vm_offset_t error_offset;
+m_invalid_supply_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t result, vm_offset_t error_offset)
 {
 	return xmm_invalid_complain("supply_completed", kobj, mobj);
 }
 
 /* ARGSUSED */
-m_invalid_data_return(mobj, kobj, offset, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
+m_invalid_data_return(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	return xmm_invalid_complain("data_return", kobj, mobj);
 }
 
 /* ARGSUSED */
-k_invalid_data_provided(kobj, offset, data, length, lock_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
-	vm_prot_t lock_value;
+k_invalid_data_provided(xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length, vm_prot_t lock_value)
 {
 	return xmm_invalid_complain("data_provided", kobj, kobj);
 }
 
 /* ARGSUSED */
-k_invalid_data_unavailable(kobj, offset, length)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+k_invalid_data_unavailable(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	return xmm_invalid_complain("data_unavailable", kobj, kobj);
 }
@@ -253,29 +208,19 @@ k_invalid_lock_request(kobj, offset, length, should_clean, should_flush,
 }
 
 /* ARGSUSED */
-k_invalid_data_error(kobj, offset, length, error_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t error_value;
+k_invalid_data_error(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t error_value)
 {
 	return xmm_invalid_complain("data_error", kobj, kobj);
 }
 
 /* ARGSUSED */
-k_invalid_set_attributes(kobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t kobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_invalid_set_attributes(xmm_obj_t kobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	return xmm_invalid_complain("set_attributes", kobj, kobj);
 }
 
 /* ARGSUSED */
-k_invalid_destroy(kobj, reason)
-	xmm_obj_t kobj;
-	kern_return_t reason;
+k_invalid_destroy(xmm_obj_t kobj, kern_return_t reason)
 {
 	return xmm_invalid_complain("destroy", kobj, kobj);
 }

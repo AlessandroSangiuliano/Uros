@@ -136,8 +136,7 @@ console_sync_mode(boolean_t on) {
 	cons_sync_mode = on;
 }
 
-console_thread_body(port)
-mach_port_t port;
+console_thread_body(mach_port_t port)
 {
 	unsigned int count;
 	unsigned char c;

@@ -110,11 +110,7 @@ xmm_vm_create(data, length, new_mobj)
 	return KERN_SUCCESS;
 }
 
-m_vm_init(mobj, k_kobj, memory_object_name, page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t page_size;
+m_vm_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t page_size)
 {
 	xmm_obj_t kobj = mobj;
 
@@ -134,10 +130,7 @@ m_vm_init(mobj, k_kobj, memory_object_name, page_size)
 	K_SET_ATTRIBUTES(kobj, TRUE, FALSE, MEMORY_OBJECT_COPY_DELAY);
 }
 
-m_vm_terminate(mobj, kobj, memory_object_name)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	mach_port_t memory_object_name;
+m_vm_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t memory_object_name)
 {
 #if     lint
 	mobj++;
@@ -146,12 +139,7 @@ m_vm_terminate(mobj, kobj, memory_object_name)
 #endif  /* lint */
 }
 
-m_vm_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_vm_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 #if     lint
 	desired_access++;

@@ -152,11 +152,7 @@ xmm_buffer_create(old_mobj, buffer, new_mobj)
 }
 
 kern_return_t
-m_buffer_init(mobj, k_kobj, pager_name, page_size)
-	xmm_obj_t	mobj;
-	xmm_obj_t	k_kobj;
-	mach_port_t	pager_name;
-	vm_size_t	page_size;
+m_buffer_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t pager_name, vm_size_t page_size)
 {
 	if (mobj->k_kobj) {
 		printf("m_buffer_init: multiple users\n");
@@ -175,10 +171,7 @@ m_buffer_init(mobj, k_kobj, pager_name, page_size)
 }
 
 kern_return_t
-m_buffer_terminate(mobj, kobj, pager_name)
-	xmm_obj_t	mobj;
-	xmm_obj_t	kobj;
-	mach_port_t	pager_name;
+m_buffer_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t pager_name)
 {
 	page_t page, *pp;
 
@@ -214,12 +207,7 @@ m_buffer_terminate(mobj, kobj, pager_name)
 }
 
 kern_return_t
-m_buffer_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t	mobj;
-	xmm_obj_t	kobj;
-	vm_offset_t	offset;
-	vm_size_t	length;
-	vm_prot_t	desired_access;
+m_buffer_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	page_t page, *pp;
 	kern_return_t kr;
@@ -256,12 +244,7 @@ m_buffer_data_request(mobj, kobj, offset, length, desired_access)
 }
 
 kern_return_t
-m_buffer_data_write(mobj, kobj, offset, data, length)
-	xmm_obj_t	mobj;
-	xmm_obj_t	kobj;
-	vm_offset_t	offset;
-	vm_offset_t	data;
-	vm_size_t	length;
+m_buffer_data_write(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	page_t page, *pp;
 
@@ -310,11 +293,7 @@ m_buffer_data_write(mobj, kobj, offset, data, length)
 	return KERN_SUCCESS;
 }
 
-k_buffer_set_attributes(kobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t kobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_buffer_set_attributes(xmm_obj_t kobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	if (object_ready && ! KOBJ->ready) {
 		KOBJ->ready = TRUE;

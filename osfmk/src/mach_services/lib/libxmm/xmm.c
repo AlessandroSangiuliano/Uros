@@ -93,8 +93,7 @@ xmm_obj_allocate(class, old_mobj, new_mobj)
 	return KERN_SUCCESS;
 }
 
-xmm_obj_deallocate(mobj)
-	xmm_obj_t mobj;
+xmm_obj_deallocate(xmm_obj_t mobj)
 {
 	xmm_class_t class;
 	extern struct xmm_class invalid_mclass;

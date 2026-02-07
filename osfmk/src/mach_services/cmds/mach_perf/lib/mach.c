@@ -90,8 +90,7 @@ get_processor_set()
 }
 
 mach_port_t
-rename_to_gen_port(old_port)
-mach_port_t old_port;
+rename_to_gen_port(mach_port_t old_port)
 {
 	mach_port_t port;
 	MACH_CALL( mach_port_allocate, (mach_task_self(),

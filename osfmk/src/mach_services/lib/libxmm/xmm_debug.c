@@ -276,11 +276,7 @@ xmm_debug_create(old_mobj, new_mobj)
 	return KERN_SUCCESS;
 }
 
-m_debug_init(mobj, k_kobj, memory_object_name, page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t page_size;
+m_debug_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t page_size)
 {
 	xmm_obj_t kobj;
 
@@ -298,10 +294,7 @@ m_debug_init(mobj, k_kobj, memory_object_name, page_size)
 	return M_INIT(mobj, kobj, memory_object_name, page_size);
 }
 
-m_debug_terminate(mobj, kobj, memory_object_name)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	mach_port_t memory_object_name;
+m_debug_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t memory_object_name)
 {
 	kern_return_t kr;
 
@@ -314,36 +307,21 @@ m_debug_terminate(mobj, kobj, memory_object_name)
 	}
 }
 
-m_debug_copy(mobj, kobj, offset, length, new_mobj)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	xmm_obj_t new_mobj;
+m_debug_copy(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, xmm_obj_t new_mobj)
 {
 	m_printf("m_copy            (%M, %Z, %Z, 0x%x)\n",
 		 mobj, kobj, offset, length, new_mobj);
 	return M_COPY(mobj, kobj, offset, length, new_mobj);
 }
 
-m_debug_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_debug_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	m_printf("m_data_request    (%M, %Z, %Z, %P)\n",
 		 mobj, kobj, offset, length, desired_access);
 	return M_DATA_REQUEST(mobj, kobj, offset, length, desired_access);
 }
 
-m_debug_data_unlock(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_debug_data_unlock(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	m_printf("m_data_unlock     (%M, %Z, %Z, %P)\n",
 		 mobj, kobj, offset, length, desired_access);
@@ -362,24 +340,14 @@ m_debug_data_write(mobj, kobj, offset, data, length)
 	return M_DATA_WRITE(mobj, kobj, offset, data, length);
 }
 
-m_debug_lock_completed(mobj, kobj, offset, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+m_debug_lock_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	m_printf("m_lock_completed  (%M, %Z, %Z)\n",
 		 mobj, kobj, offset, length);
 	return M_LOCK_COMPLETED(mobj, kobj, offset, length);
 }
 
-m_debug_supply_completed(mobj, kobj, offset, length, result, error_offset)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t result;
-	vm_offset_t error_offset;
+m_debug_supply_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t result, vm_offset_t error_offset)
 {
 	m_printf("m_supply_completed(%M, %Z, %Z, 0x%x, %Z)\n",
 		 mobj, kobj, offset, length, result, error_offset);
@@ -387,34 +355,21 @@ m_debug_supply_completed(mobj, kobj, offset, length, result, error_offset)
 				  error_offset);
 }
 
-m_debug_data_return(mobj, kobj, offset, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
+m_debug_data_return(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	m_printf("m_data_return     (%M, %Z, 0x%x, %Z)\n",
 		 mobj, kobj, offset, data, length);
 	return M_DATA_RETURN(mobj, kobj, offset, data, length);
 }
 
-k_debug_data_provided(kobj, offset, data, length, lock_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
-	vm_prot_t lock_value;
+k_debug_data_provided(xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length, vm_prot_t lock_value)
 {
 	m_printf("k_data_provided   (%K, %Z, %Z, %P)\n",
 		 kobj, offset, length, lock_value);
 	return K_DATA_PROVIDED(kobj, offset, data, length, lock_value);
 }
 
-k_debug_data_unavailable(kobj, offset, length)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+k_debug_data_unavailable(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	m_printf("k_data_unavailable(%K, %Z, %Z)\n",
 		 kobj, offset, length);
@@ -449,31 +404,21 @@ k_debug_lock_request(kobj, offset, length, should_clean, should_flush,
 			      lock_value, robj);
 }
 
-k_debug_data_error(kobj, offset, length, error_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t error_value;
+k_debug_data_error(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t error_value)
 {
 	m_printf("k_data_error      (%K, %Z, %Z, 0x%x)\n",
 		 kobj, offset, length, error_value);
 	return K_DATA_ERROR(kobj, offset, length, error_value);
 }
 
-k_debug_set_attributes(kobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t kobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_debug_set_attributes(xmm_obj_t kobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	m_printf("k_set_attributes  (%K, %Nready, %Nmay_cache, %C)\n",
 		 kobj, object_ready, may_cache, copy_strategy);
 	return K_SET_ATTRIBUTES(kobj, object_ready, may_cache, copy_strategy);
 }
 
-k_debug_destroy(kobj, reason)
-	xmm_obj_t kobj;
-	kern_return_t reason;
+k_debug_destroy(xmm_obj_t kobj, kern_return_t reason)
 {
 	m_printf("k_destroy         (%K, 0x%x)\n",
 		 kobj, reason);

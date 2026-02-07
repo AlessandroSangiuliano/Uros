@@ -50,8 +50,7 @@
 #include <servers/machid_types.h>
 
 char *
-mach_type_string(type)
-    mach_type_t type;
+mach_type_string(mach_type_t type)
 {
     switch (type) {
       case MACH_TYPE_NONE:

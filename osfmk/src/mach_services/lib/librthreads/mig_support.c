@@ -72,8 +72,7 @@ private mach_port_t mig_reply_port = MACH_PORT_NULL;
  * called and again with initial rthread at end of rthread_init.
  */
 void
-mig_init(initial)
-	register rthread_t initial;
+mig_init(register rthread_t initial)
 {
 	if (initial == RTHREAD_NULL) {
 		/* called from mach_init before rthread_init,

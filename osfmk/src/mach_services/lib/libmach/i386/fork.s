@@ -57,8 +57,8 @@
 
 SYSCALL(fork)
 	orl	%edx,%edx
-	jz	LBf(parent,0)	/ parent, since r1 == 0 in parent, 1 in child
+	jz	LBf(parent,0)	# parent, since r1 == 0 in parent, 1 in child
 	call	_mach_init
 	xorl	%eax,%eax
 LB(parent,0):
-	ret		/ pid = fork()
+	ret		# pid = fork()
