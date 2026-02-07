@@ -237,8 +237,8 @@ extern struct rthread_control_struct rthread_control;
 #define staticf static
 #endif
 
-#if	defined(__i386)
-#define IN_KERNEL(addr)	(VM_MAX_ADDRESS < (unsigned)(addr))
+#if	defined(__i386) || defined(__x86_64__)
+#define IN_KERNEL(addr)	(VM_MAX_ADDRESS < (uintptr_t)(addr))
 #define IN_KERNEL_STACK_SIZE	(32 * 1024)
 #elif	defined(i860)
 #define IN_KERNEL(addr)	(VM_MAX_ADDRESS < (unsigned)(addr))

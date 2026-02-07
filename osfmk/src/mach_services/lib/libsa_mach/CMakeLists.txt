@@ -24,6 +24,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
     set_source_files_properties(${pp_output} PROPERTIES GENERATED TRUE)
     list(APPEND LIB_SOURCES ${pp_output})
   endforeach()
+
+
 endif()
 
 add_library(libsa_mach STATIC ${LIB_SOURCES})

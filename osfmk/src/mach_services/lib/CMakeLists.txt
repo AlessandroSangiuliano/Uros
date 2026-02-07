@@ -1,5 +1,20 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Ensure Mach-specific includes (e.g., sa_mach/stdio.h) are found before
+# the host's system headers so plain `#include <stdio.h>` will pick up the
+# project-provided Mach implementation when building mach_services.
+# This is a directory-level setting applied before adding subdirectories.
+include_directories(BEFORE "${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach")
+
+# Create small generated forwarding headers so legacy includes like
+# "machine/types.h" and <machine/va_list.h> resolve to the
+# architecture-specific headers (use i386 for libsa_mach builds).
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/machine")
+set(GEN_MACHINE_TYPES "${CMAKE_BINARY_DIR}/generated/include/machine/types.h")
+set(GEN_MACHINE_VALIST "${CMAKE_BINARY_DIR}/generated/include/machine/va_list.h")
+file(WRITE ${GEN_MACHINE_TYPES} "#ifndef _GEN_MACHINE_TYPES_H_\n#define _GEN_MACHINE_TYPES_H_\n#include <sa_mach/i386/types.h>\n#endif\n")
+file(WRITE ${GEN_MACHINE_VALIST} "#ifndef _GEN_MACHINE_VALIST_H_\n#define _GEN_MACHINE_VALIST_H_\n#include <sa_mach/i386/va_list.h>\n#endif\n")
+
 # Helper: genera i file MIG (.c/.h) usando il tool migcom costruito in questo progetto.
 # Uso: add_mig_defs(path/to/file.defs INCLUDES...)
 function(add_mig_defs DEFS_FILE)

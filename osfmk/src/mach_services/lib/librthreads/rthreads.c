@@ -62,6 +62,7 @@
 #include <mach/mach_traps.h>
 #include <mach/mach_host.h>
 #include <mach/sync_policy.h>
+#include <stdio.h>
 #include <stdarg.h>
 
 /*
@@ -771,12 +772,9 @@ static mach_port_t printer_waiting;
 
 #define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
 
-static
-printnum(u, base, putc, putc_arg)
-	register unsigned int	u;	/* number to print */
-	register int		base;
-	void			(*putc)();
-	char			*putc_arg;
+static void
+printnum(register unsigned int u, register int base,
+          void (*put)(void *, int), void *put_arg)
 {
 	char	buf[MAXBUF];	/* build number here */
 	register char *	p = &buf[MAXBUF-1];
@@ -788,15 +786,13 @@ printnum(u, base, putc, putc_arg)
 	} while (u != 0);
 
 	while (++p != &buf[MAXBUF])
-	    (*putc)(putc_arg, *p);
+	    (*put)(put_arg, *p);
 }
 
-rthread_doprnt(fmt, args, radix, putc, putc_arg)
-	register char	*fmt;
-	va_list		args;
-	int		radix;		/* default radix - for '%r' */
- 	void		(*putc)();	/* character output */
-	char		*putc_arg;	/* argument for putc */
+static void rthread_doprnt(char *fmt, va_list args, int radix, void (*put)(void *, int), void *put_arg)
+#define putc put
+#define putc_arg put_arg
+	/* argument for putc */
 {
 	int		length;
 	int		prec;
@@ -812,7 +808,7 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 
 	while (*fmt != '\0') {
 	    if (*fmt != '%') {
-		(*putc)(putc_arg, *fmt++);
+		(*put)(put_arg, *fmt++);
 		continue;
 	    }
 
@@ -1080,8 +1076,7 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 			    (*putc)(putc_arg, '0');
 		    }
 		    while (++p != &buf[MAXBUF])
-			(*putc)(putc_arg, *p);
-
+        (*put)(put_arg, *p);
 		    if (ladjust) {
 			while (--length >= 0)
 			    (*putc)(putc_arg, ' ');
@@ -1099,6 +1094,9 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 	fmt++;
 	}
 }
+
+#undef putc
+#undef putc_arg
 
 /*
  *  ROUTINE:	init_printing
