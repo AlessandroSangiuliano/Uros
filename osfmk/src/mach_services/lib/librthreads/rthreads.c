@@ -62,6 +62,7 @@
 #include <mach/mach_traps.h>
 #include <mach/mach_host.h>
 #include <mach/sync_policy.h>
+#include <mach/sync.h>
 #include <stdio.h>
 #include <stdarg.h>
 
@@ -1120,7 +1121,7 @@ init_rthread_printf()
 			       &printer_waiting, SYNC_POLICY_FIFO, 0), kr);
 }
 
-void sendchar(char *s, int c)
+void sendchar(void *s, int c)
 {
     kern_return_t kr;
     if (print_buffer_index == (PRINT_BUFFER_SIZE-1))
@@ -1138,7 +1139,7 @@ int vrprintf(char *fmt, va_list args)
 
     MACH_CALL(lock_acquire(print_lock, PRINT_LOCK_ID), kr);
     MACH_CALL(semaphore_wait(printer_ready), kr);
-    rthread_doprnt(fmt, args, 0, (void (*)(char *, int)) sendchar, (char *) 0);
+	rthread_doprnt(fmt, args, 0, (void (*)(void *, int)) sendchar, (void *) 0);
     MACH_CALL(semaphore_signal(printer_waiting) , kr);
     MACH_CALL(lock_release(print_lock, PRINT_LOCK_ID), kr);
 }

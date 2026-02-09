@@ -28,6 +28,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   endforeach()
 endif()
 
+
 add_library(libmach STATIC ${LIB_SOURCES})
 
 # Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
@@ -36,6 +37,10 @@ target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -D_BSD
 # Build assembly files and C as 32-bit where needed
 target_compile_options(libmach PRIVATE -m32 -march=i686)
 
+# Mach userspace headers (sa_mach) solo per questa libreria
+target_include_directories(libmach BEFORE PUBLIC
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
+)
 target_include_directories(libmach PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
@@ -45,7 +50,16 @@ target_include_directories(libmach PUBLIC
   ${CMAKE_SOURCE_DIR}/include
 )
 
-# Generazione MIG dalle .defs del kernel (mach/*.defs ecc.)
+
+
+# Forza la generazione di sync_user.c da sync.defs (Mach API sync)
+set(SYNC_DEFS "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/sync.defs")
+add_mig_defs(${SYNC_DEFS} ${CMAKE_SOURCE_DIR}/export/powermac/include)
+set(SYNC_USER_C "${CMAKE_BINARY_DIR}/generated/sync_user.c")
+set(SYNC_SERVER_C "${CMAKE_BINARY_DIR}/generated/sync_server.c")
+list(APPEND LIB_SOURCES ${SYNC_USER_C} ${SYNC_SERVER_C})
+
+# Mantieni anche la generazione per tutte le altre .defs kernel
 file(GLOB KERNEL_MIG_DEFS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/*.defs")
 foreach(DEFS IN LISTS KERNEL_MIG_DEFS)
   add_mig_defs(${DEFS} ${CMAKE_SOURCE_DIR}/src/mach_kernel ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach ${CMAKE_SOURCE_DIR}/export/powermac/include)

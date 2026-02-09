@@ -1,0 +1,7 @@
+#ifndef _RTHREAD_STACK_OFFSET_H_
+#define _RTHREAD_STACK_OFFSET_H_
+
+/* Minimal stub for RTHREAD_STACK_OFFSET */
+#define RTHREAD_STACK_OFFSET 0x1000
+
+#endif /* _RTHREAD_STACK_OFFSET_H_ */

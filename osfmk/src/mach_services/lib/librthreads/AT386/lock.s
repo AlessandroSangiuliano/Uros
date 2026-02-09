@@ -17,8 +17,8 @@
  * LOSS OF USE, DATA OR PROFITS, WHETHER IN ACTION OF CONTRACT, 
  * NEGLIGENCE, OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION 
  * WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. 
- */
-/* 
+ *# 
+# * 
  * Mach Operating System
  * Copyright (c) 1991,1990 Carnegie Mellon University
  * All Rights Reserved.
@@ -42,36 +42,36 @@
  * 
  * any improvements or extensions that they make and grant Carnegie Mellon
  * the rights to redistribute these changes.
- */
+ *# 
 /*
  * MkLinux
- */
+ *# 
 /*
  * File: lock.s
- */
+ *# 
 	
-#include <i386/asm.h>
+#include <i386# asm.h>
 
 /*
  * boolean_t spin_try_lock(int *m)
- */
+ *# 
 ENTRY(spin_try_lock)
-	movl	4(%esp),%ecx		/ point at mutex
-	movl	$1,%eax			/ set locked value in acc
-	xchg	%eax,(%ecx)		/ swap with mutex
-					/ xchg with memory is automatically
-					/ locked
-	xorl	$1,%eax			/ 1 (locked) => FALSE
-					/ 0 (locked) => TRUE
+	movl	4(%esp),%ecx		#  point at mutex
+	movl	$1,%eax			#  set locked value in acc
+	xchg	%eax,(%ecx)		#  swap with mutex
+					#  xchg with memory is automatically
+					#  locked
+	xorl	$1,%eax			#  1 (locked) => FALSE
+					#  0 (locked) => TRUE
 	ret
 
 /*
  * void spin_unlock(int *m)
- */
+ *# 
 ENTRY(spin_unlock)
-	movl	4(%esp),%ecx		/ point at mutex
-	xorl	%eax,%eax		/ set unlocked value in acc
-	xchg	%eax,(%ecx)		/ swap with mutex
-					/ xchg with memory is automatically
-					/ locked
+	movl	4(%esp),%ecx		#  point at mutex
+	xorl	%eax,%eax		#  set unlocked value in acc
+	xchg	%eax,(%ecx)		#  swap with mutex
+					#  xchg with memory is automatically
+					#  locked
 	ret

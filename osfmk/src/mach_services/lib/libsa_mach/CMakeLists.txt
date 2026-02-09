@@ -30,16 +30,27 @@ endif()
 
 add_library(libsa_mach STATIC ${LIB_SOURCES})
 
-# Apply C-only compatibility options and include stdint.h
-target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -D_BSD -fno-builtin -w -include stdint.h>)
-# Build 32-bit when needed
-target_compile_options(libsa_mach PRIVATE -m32 -march=i686)
 
-target_include_directories(libsa_mach PUBLIC
+# Apply C-only compatibility options and include math.h from project
+# math.h wrapper includes float.h and stdint.h
+# -m32 -march=i686 for cross-compilation
+# -w disables warnings
+# -fno-builtin disables builtins
+# -D_BSD for BSD compatibility
+# -std=gnu89 for legacy C
+#
+target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -D_BSD -fno-builtin -w -m32 -march=i686 -include math.h>)
+target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>)
+
+# Mach userspace headers (sa_mach) solo per questa libreria
+target_include_directories(libsa_mach BEFORE PUBLIC
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
+)
+# Prefer project includes first so project headers are used instead of system headers
+target_include_directories(libsa_mach BEFORE PUBLIC
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
-  ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/export/powermac/include
   ${CMAKE_SOURCE_DIR}/include
 )

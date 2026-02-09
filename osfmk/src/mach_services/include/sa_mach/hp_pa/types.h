@@ -26,7 +26,11 @@
 #ifndef	_MACH_MACHINE_TYPES_H_
 #define _MACH_MACHINE_TYPES_H_ 1
 
+/* Avoid type conflict with sys/types.h */
+#ifndef _DEV_T_DECLARED
 typedef long		dev_t;		/* device number (major+minor) */
+#define _DEV_T_DECLARED
+#endif
 
 typedef signed char	bit8_t;		/* signed 8-bit quantity */
 typedef unsigned char	u_bit8_t;	/* unsigned 8-bit quantity */

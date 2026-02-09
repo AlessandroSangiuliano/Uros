@@ -24,7 +24,6 @@
 
 #ifndef _MACH_TYPES_H_
 #define _MACH_TYPES_H_
-
 #include "machine/types.h"
 
 #ifndef	_SIZE_T
@@ -36,34 +35,34 @@ typedef unsigned long	size_t;
  * Common type definitions that lots of old files seem to want.
  */
 
-typedef	unsigned char	u_char;		/* unsigned char */
-typedef	unsigned short	u_short;	/* unsigned short */
-typedef	unsigned int	u_int;		/* unsigned int */
-typedef	unsigned long	u_long;		/* unsigned long */
+typedef unsigned char u_char;        /* unsigned char */
+typedef unsigned short u_short;    /* unsigned short */
+typedef unsigned int u_int;        /* unsigned int */
 
-typedef struct _quad_ {
-	unsigned int	val[2];		/* 2 32-bit values make... */
-} quad;					/* an 8-byte item */
-
-typedef	char *		caddr_t;	/* address of a (signed) char */
-
-typedef int		time_t;		/* a signed 32    */
-typedef unsigned int	daddr_t;	/* an unsigned 32 */
-typedef	unsigned int	off_t;		/* another unsigned 32 */
-
-
-#define	major(i)	(((i) >> 8) & 0xFF)
-#define	minor(i)	((i) & 0xFF)
-#define	makedev(i,j)	((((i) & 0xFF) << 8) | ((j) & 0xFF))
-
-#ifndef	NULL
-#define	NULL		((void *) 0)	/* the null pointer */
-#endif
-
+typedef unsigned long u_long;        /* unsigned long */
+typedef char * caddr_t;  /* address of a (signed) char */
 /*
- * Shorthand type definitions for unsigned storage classes
+ * Avoid type conflicts with system headers (e.g. sys/types.h from glibc)
+ * Only define these if not already defined by libc.
  */
-typedef	unsigned char	uchar_t;
+#ifndef _SYS_TYPES_H
+#ifndef _DEV_T_DECLARED
+typedef long            dev_t;          /* device number (major+minor) */
+#define _DEV_T_DECLARED
+#endif
+#ifndef _TIME_T_DECLARED
+typedef int             time_t;         /* a signed 32    */
+#define _TIME_T_DECLARED
+#endif
+#ifndef _DADDR_T_DECLARED
+typedef unsigned int    daddr_t;        /* an unsigned 32 */
+#define _DADDR_T_DECLARED
+#endif
+#ifndef _OFF_T_DECLARED
+typedef unsigned int    off_t;          /* another unsigned 32 */
+#define _OFF_T_DECLARED
+#endif
+#endif /* _SYS_TYPES_H */
 typedef	unsigned short	ushort_t;
 typedef	unsigned int	uint_t;
 typedef unsigned long	ulong_t;
@@ -71,4 +70,5 @@ typedef	volatile unsigned char	vuchar_t;
 typedef	volatile unsigned short	vushort_t;
 typedef	volatile unsigned int	vuint_t;
 typedef volatile unsigned long	vulong_t;
+
 #endif	/* _MACH_TYPES_H_ */

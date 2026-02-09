@@ -57,41 +57,41 @@
 
 #include <rthreads.h>
 #include <rthread_internals.h>
+#include <mach/sync.h>
+#include <stdlib.h>
 
-char *
-malloc(unsigned int size)
+void *
+malloc(size_t size)
 {
-	kern_return_t	r;
-	char *mem;
+	kern_return_t r;
+	void *mem;
 
 	rthread_control_lock();
 	mem = rthreads_malloc(size);
 	rthread_control_unlock();
 
-	return (mem);
+	return mem;
 }
 
 void
-free(char *base)
+free(void *base)
 {
-	kern_return_t	r;
+	kern_return_t r;
 
 	rthread_control_lock();
 	rthreads_free(base);
 	rthread_control_unlock();
-
-	return;
 }
 
-char *
-realloc(char *old_base, unsigned int new_size)
+void *
+realloc(void *old_base, size_t new_size)
 {
-	kern_return_t	r;
-	char 		*mem;
+	kern_return_t r;
+	void *mem;
 
 	rthread_control_lock();
 	mem = rthreads_realloc(old_base, new_size);
 	rthread_control_unlock();
 
-	return (mem);
+	return mem;
 }

@@ -35,6 +35,7 @@
 #include <trace.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_host.h>
+#include <mach/sync.h>
 
 /*
  *	Forward Internal Declarations

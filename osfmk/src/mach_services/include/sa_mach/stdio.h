@@ -26,6 +26,7 @@
 #ifndef _MACH_STDIO_H_
 #define _MACH_STDIO_H_
 
+#include <stdio.h>
 #include <stdarg.h>
 
 #ifndef NULL
@@ -34,8 +35,14 @@
 
 extern int	sprintf(char *, const char *, ...); 
 extern int	printf(const char *, ...); 
-extern int	vprintf(const char *, va_list );
-extern int	vsprintf(char *, const char *, va_list );
+#ifndef MACH_OVERRIDE_VPRINTF
+#define MACH_OVERRIDE_VPRINTF
+/* Override only if not already declared by system stdio */
+#if !defined(__GNUC__) || !defined(__USE_BSD)
+int vprintf(const char *, va_list);
+int vsprintf(char *, const char *, va_list);
+#endif
+#endif
 
 extern int 	getchar(void);
 

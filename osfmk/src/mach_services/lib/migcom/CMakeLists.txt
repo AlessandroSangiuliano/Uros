@@ -57,7 +57,6 @@ target_include_directories(migcom PRIVATE
   ${SRC_DIR}
   ${CMAKE_CURRENT_BINARY_DIR} # for parser.h
   ${CMAKE_SOURCE_DIR}/export/powermac/include
-  # For mach/ndr.h and other kernel headers
   ${CMAKE_SOURCE_DIR}/../../mach_kernel
   /home/slex/Scrivania/osfmk-mklinux/osfmk/export/powermac/include
 )
@@ -148,6 +147,9 @@ add_test(NAME migcom-advanced-self-contained
 
 # ASCII validation test for generated_user.c
 add_executable(test_ascii_generated_user tests/test_ascii_generated_user.c)
+target_include_directories(test_ascii_generated_user PRIVATE
+  ${SRC_DIR}
+  ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME ascii-check-generated-user
   COMMAND sh -c "${LSAN_SUPPRESS} $<TARGET_FILE:migcom> -V -user ${CMAKE_CURRENT_BINARY_DIR}/generated_user.ascii_check.c -server /dev/null -sheader /dev/null -dheader /dev/null < ${CMAKE_CURRENT_SOURCE_DIR}/tests/device_request-small.mig && ${CMAKE_CURRENT_BINARY_DIR}/test_ascii_generated_user ${CMAKE_CURRENT_BINARY_DIR}/generated_user.ascii_check.c"
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
@@ -155,7 +157,9 @@ add_test(NAME ascii-check-generated-user
 
 # Test for SafeSnprintf behavior
 add_executable(test_safestr tests/test_safestr.c ${SRC_DIR}/safestr.c)
-target_include_directories(test_safestr PRIVATE ${SRC_DIR})
+target_include_directories(test_safestr PRIVATE
+  ${SRC_DIR}
+  ${CMAKE_CURRENT_BINARY_DIR})
 add_test(NAME safestr-basic
   COMMAND ${CMAKE_CURRENT_BINARY_DIR}/test_safestr
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}

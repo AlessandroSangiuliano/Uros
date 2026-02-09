@@ -1,0 +1,6 @@
+#ifndef _MACH_I386_THREAD_STATE_H_
+#define _MACH_I386_THREAD_STATE_H_
+
+#define THREAD_STATE_MAX 32
+
+#endif /* _MACH_I386_THREAD_STATE_H_ */

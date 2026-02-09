@@ -95,7 +95,7 @@ typedef void *any_t;
 
 #define	RTHREAD_NULL	((rthread_t) 0)
 
-extern rthread_t	rthread_spawn(rthread_fn_t, void *);
+extern rthread_t	rthread_spawn(rthread_fn_t func, void *arg);
 extern rthread_t	rthread_spawn_priority(rthread_fn_t, void *, int);
 extern rthread_t	rthread_activation_create(mach_port_t);
 extern void 		rthread_fork_prepare(void);

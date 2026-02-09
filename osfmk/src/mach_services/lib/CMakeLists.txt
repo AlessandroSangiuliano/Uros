@@ -1,10 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Ensure Mach-specific includes (e.g., sa_mach/stdio.h) are found before
-# the host's system headers so plain `#include <stdio.h>` will pick up the
-# project-provided Mach implementation when building mach_services.
-# This is a directory-level setting applied before adding subdirectories.
-include_directories(BEFORE "${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach")
 
 # Create small generated forwarding headers so legacy includes like
 # "machine/types.h" and <machine/va_list.h> resolve to the

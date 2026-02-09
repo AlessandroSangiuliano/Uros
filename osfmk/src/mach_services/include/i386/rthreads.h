@@ -62,20 +62,19 @@
 
 #define RTHREAD_STACK_OFFSET 128
 
-extern int rthread_sp(void);
+extern intptr_t rthread_sp(void);
 
-#if	__GNUC__ && !defined(lint)
+#if __GNUC__ && !defined(lint)
 
-extern __inline__ int
+extern __inline__ intptr_t
 rthread_sp(void)
 {
-	int	_sp__;
-
-	__asm__ ("movl %%esp, %0" :	"=g" (_sp__) );
-	return(_sp__);
+    intptr_t _sp__;
+    __asm__("movl %%esp, %0" : "=g"(_sp__));
+    return _sp__;
 }
 
-#endif	/* __GNUC__ */
+#endif /* __GNUC__ */
 
 #define STATE_FLAVOR i386_THREAD_STATE
 #define STATE_COUNT i386_THREAD_STATE_COUNT

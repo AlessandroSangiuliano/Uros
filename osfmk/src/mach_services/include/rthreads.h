@@ -117,7 +117,8 @@ extern int		rthread_get_default_quantum(void);
 extern int		rthread_get_max_priority(void);
 
 #ifndef	rthread_sp
-extern int rthread_sp(void);
+#include <stdint.h>
+extern intptr_t rthread_sp(void);
 #endif
 
 extern int	 	rthread_stack_mask;

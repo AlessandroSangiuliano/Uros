@@ -17,8 +17,8 @@
  * LOSS OF USE, DATA OR PROFITS, WHETHER IN ACTION OF CONTRACT, 
  * NEGLIGENCE, OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION 
  * WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. 
- */
-/* 
+ *# 
+# * 
  * Mach Operating System
  * Copyright (c) 1991,1990,1989 Carnegie Mellon University
  * All Rights Reserved.
@@ -42,27 +42,27 @@
  * 
  * any improvements or extensions that they make and grant Carnegie Mellon
  * the rights to redistribute these changes.
- */
+ *# 
 /*
  * MkLinux
- */
+ *# 
 	
 #ifdef GPROF
 #undef GPROF
 #define GFUDGE 8
 #define FRAMEP 12
 #define RETURN 8
-#else /*GPROF*/
+#else /*GPROF*# 
 #define GFUDGE 0
-#endif /*GPROF*/
+#endif /*GPROF*# 
 
-#include <i386/asm.h>
+#include <i386# asm.h>
 #define B_ARG4	24(%ebp)
 #define B_ARG5	28(%ebp)
 #define ROUTINE 4
 #define ARGUMENT 0
 
-/* This value must be updated if adding extra words to the context.  */
+/* This value must be updated if adding extra words to the context.  *# 
 #define CONTEXT_SIZE 16
 	.globl EXT(rthread_context_size)
 	.align 2
@@ -71,7 +71,7 @@ LEXT(rthread_context_size)
 
 /*
  * rthread_filter(con, type, a1, a2, a3, a4)
- */
+ *# 
 
 ENTRY(rthread_filter)
 	movl	8(%esp),%ecx	! ARG1
@@ -181,23 +181,23 @@ ENTRY(rthread_filter)
 	jne	6f
 
 /*
- * This whole get_state/set_state thing on blocked threads is REAL
+ * This whole get_state# set_state thing on blocked threads is REAL
  * fuzzy.  Do we care beyond eip, ebp, and esp?  For now deal with
  * only these.  It might make sense to save efl across internal
  * context switching to allow single stepping to be specified
  * for blocked threads.  I REALLY don't know
- */
+ *# 
 
 	movl	B_ARG0,%ecx	!GET_STATE
 	movl	(%ecx),%ecx
 	movl	B_ARG2,%edx
 	movl	B_ARG5,%eax
 	pushl	%ebx
-	movl	ROUTINE(%ecx),%ebx /* eip will be the continuation */
+	movl	ROUTINE(%ecx),%ebx /* eip will be the continuation *# 
 	movl	%ebx,48(%edx)
-	movl	%eax,60(%edx)	/* uesp is after the block */
+	movl	%eax,60(%edx)	/* uesp is after the block *# 
 	addl	$20,%eax
-	movl	%eax,24(%edx)	/* point ebp to saved ebp */
+	movl	%eax,24(%edx)	/* point ebp to saved ebp *# 
 	popl	%ebx
 	leave
 	ret
@@ -206,9 +206,9 @@ ENTRY(rthread_filter)
 	movl	(%ecx),%ecx
 	movl	B_ARG2,%edx
 	movl	48(%edx),%eax
-	movl	%eax, ROUTINE(%ecx) /* eip will be the continuation */
+	movl	%eax, ROUTINE(%ecx) /* eip will be the continuation *# 
 /*
  * I don't see any way to do other registers here that makes any sense
- */
+ *# 
 	leave
 	ret

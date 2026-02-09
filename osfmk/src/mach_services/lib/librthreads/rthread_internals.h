@@ -52,6 +52,9 @@
  * Private definitions for the Real-Time Threads implementation.
  */
 
+
+/* Force Mach sync API header for lock/semaphore prototypes */
+#include "../../../../export/powermac/include/mach/sync.h"
 #include <options.h>
 #include <queue.h>
 #include <mach.h>
@@ -109,7 +112,7 @@ typedef struct rthread_control_struct {
 	int		default_quantum;
 	boolean_t	main_waiting;      /* T_MAIN wait flag  	     */
 	mach_port_t 	main_wait;	   /* semaphore T_MAIN blocks on if  */
-	                                   /* waiting for its children to    */
+					   /* waiting for its children to    */
 					   /* complete.			     */
 	struct rthread_queue  free_list;   /* exited rthread list: cached    */
 					   /* for reuse 		     */
@@ -269,4 +272,5 @@ extern void 		mig_init(rthread_t);
 extern void 		rthread_setup(rthread_t, thread_port_t, rthread_fn_t);
 extern void		rthread_policy_info(rthread_t, boolean_t);
 extern kern_return_t	rthread_set_default_policy_real(policy_t, boolean_t);
-extern void		rthread_set_default_attibutes(rthread_t);
+extern void		rthread_set_default_attributes(rthread_t);
+extern void		stack_fork_child(void);
