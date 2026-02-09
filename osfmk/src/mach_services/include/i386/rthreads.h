@@ -66,8 +66,7 @@ extern intptr_t rthread_sp(void);
 
 #if __GNUC__ && !defined(lint)
 
-extern __inline__ intptr_t
-rthread_sp(void)
+extern __inline__ intptr_t rthread_sp(void)
 {
     intptr_t _sp__;
     __asm__("movl %%esp, %0" : "=g"(_sp__));

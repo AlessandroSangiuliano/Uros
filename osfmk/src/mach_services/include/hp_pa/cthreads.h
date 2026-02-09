@@ -83,8 +83,7 @@ extern void *cthread_sp(void);
 
 #if __GNUC__ && !_NO_INLINE_SPINLOCKS && !defined(lint)
 
-extern __inline__ int
-spin_try_lock(spin_lock_t *p)
+extern __inline__ int spin_try_lock(spin_lock_t *p)
 {
 	int _r__;
 
@@ -93,8 +92,7 @@ spin_try_lock(spin_lock_t *p)
 	return (_r__ != 0);
 }
 
-extern __inline__ void *
-cthread_sp(void)
+extern __inline__ void *cthread_sp(void)
 {
 	void *_sp__;
 
