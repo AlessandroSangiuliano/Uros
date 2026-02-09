@@ -96,25 +96,24 @@ typedef void *any_t;
 #define	RTHREAD_NULL	((rthread_t) 0)
 
 extern rthread_t	rthread_spawn(rthread_fn_t func, void *arg);
-extern rthread_t	rthread_spawn_priority(rthread_fn_t, void *, int);
-extern rthread_t	rthread_activation_create(mach_port_t);
+extern rthread_t	rthread_spawn_priority(rthread_fn_t func, void *arg, int priority);
+extern rthread_t	rthread_activation_create(mach_port_t subsystem);
 extern void 		rthread_fork_prepare(void);
 extern void 		rthread_fork_child(void);
 extern void 		rthread_fork_parent(void);
-extern void		rthread_exit(int);
-extern void		rthread_terminate(rthread_t);
-extern int		rthread_wait(void);
-extern rthread_t	rthread_ptr(int sp);
-
-extern kern_return_t	rthread_set_default_policy(policy_t);
-extern policy_t		rthread_get_default_policy(void);
-extern kern_return_t	rthread_set_policy(rthread_t, policy_t);
-extern policy_t		rthread_get_policy(rthread_t);
-extern kern_return_t 	rthread_set_priority(rthread_t, int);
-extern int		rthread_get_priority(rthread_t);
-extern void		rthread_set_default_quantum(int);
-extern int		rthread_get_default_quantum(void);
-extern int		rthread_get_max_priority(void);
+extern void		    rthread_terminate(rthread_t th);
+extern void		    rthread_exit(int result);
+extern int		    rthread_wait(void);
+extern rthread_t	rthread_ptr(int stack_pointer);
+extern kern_return_t	rthread_set_default_policy(policy_t policy);
+extern policy_t		    rthread_get_default_policy(void);
+extern kern_return_t	rthread_set_policy(rthread_t th, policy_t policy);
+extern policy_t		    rthread_get_policy(rthread_t th);
+extern kern_return_t 	rthread_set_priority(rthread_t th, int priority);
+extern int		    rthread_get_priority(rthread_t th);
+extern void		    rthread_set_default_quantum(int quantum);
+extern int		    rthread_get_default_quantum(void);
+extern int		    rthread_get_max_priority(void);
 
 #ifndef	rthread_sp
 extern int rthread_sp(void);
@@ -125,20 +124,20 @@ extern vm_size_t 	rthread_stack_size;
 extern vm_size_t 	rthread_wait_stack_size;
 
 extern rthread_t 	rthread_self(void);
-extern vm_offset_t	rthread_stack_base(rthread_t, int);
-extern void		rthread_set_name(rthread_t, const char *);
-extern const char	*rthread_get_name(rthread_t);
+extern vm_offset_t	rthread_stack_base(rthread_t th, int offset);
+extern void		rthread_set_name(rthread_t th, const char *name);
+extern const char	*rthread_get_name(rthread_t th);
 extern int 		rthread_count(void);
 extern int		rthread_activation_count(void);
-extern mach_port_t	rthread_kernel_port(rthread_t);
-extern void 		rthread_set_data(rthread_t, void *);
-extern void 		*rthread_get_data(rthread_t);
+extern mach_port_t	rthread_kernel_port(rthread_t th);
+extern void 		rthread_set_data(rthread_t th, void *data);
+extern void 		*rthread_get_data(rthread_t th);
 
-extern kern_return_t 	rthread_abort(rthread_t);
-extern kern_return_t 	rthread_resume(rthread_t);
-extern kern_return_t 	rthread_suspend(rthread_t);
-extern kern_return_t	rthread_switch(rthread_t, int, int);
-extern kern_return_t	rthread_trace(rthread_t, boolean_t);
+extern kern_return_t 	rthread_abort(rthread_t th);
+extern kern_return_t 	rthread_resume(rthread_t th);
+extern kern_return_t 	rthread_suspend(rthread_t th);
+extern kern_return_t	rthread_switch(rthread_t th, int option, int result);
+extern kern_return_t	rthread_trace(rthread_t th, boolean_t trace);
 
 #define rthread_yield()	rthread_switch(RTHREAD_NULL, RSWITCH_OPTION_NONE, 0)
 
