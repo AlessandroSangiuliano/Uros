@@ -73,7 +73,7 @@ extern __inline__ void spin_unlock(spin_lock_t *p)
 			  : "=&r" (_u__), "=m" (*p) );
 }
 
-extern __inline__ int spin_try_lock(spin_lock_t *p);
+extern __inline__ int spin_try_lock(spin_lock_t *p)
 {
 	boolean_t _r__;
 

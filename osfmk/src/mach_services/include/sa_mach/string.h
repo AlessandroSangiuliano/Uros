@@ -25,7 +25,7 @@
 #ifndef	_MACH_STRING_H_
 #define	_MACH_STRING_H_	1
 
-#include <types.h>
+#include <sa_mach/types.h>
 
 #ifndef	NULL
 #define NULL	(void *)0

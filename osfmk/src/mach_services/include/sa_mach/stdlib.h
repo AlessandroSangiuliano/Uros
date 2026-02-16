@@ -26,7 +26,7 @@
 #ifndef _MACH_STDLIB_H_
 #define _MACH_STDLIB_H_
 
-#include <types.h>
+#include <sa_mach/types.h>
 
 #ifndef	NULL
 #define NULL	(void *)0
