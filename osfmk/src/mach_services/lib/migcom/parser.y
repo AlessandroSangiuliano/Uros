@@ -179,6 +179,7 @@ extern void yyerror(char *);
 %type	<direction> Direction TrExplKeyword TrImplKeyword
 %type	<argument> Argument Trailer Arguments ArgumentList
 %type	<flag> IPCFlags
+%type	<identifier> ArgumentName
 
 %{
 
@@ -640,7 +641,7 @@ ArgumentList		:	Argument
 }
 			;
 
-Argument		:	Direction syIdentifier ArgumentType IPCFlags
+Argument		:	Direction ArgumentName ArgumentType IPCFlags
 {
     $$ = argAlloc();
     $$->argKind = $1;
@@ -650,14 +651,14 @@ Argument		:	Direction syIdentifier ArgumentType IPCFlags
 }
 			;
 
-Trailer			:	TrExplKeyword syIdentifier ArgumentType	
+Trailer			:	TrExplKeyword ArgumentName ArgumentType
 {
     $$ = argAlloc();
     $$->argKind = $1;
     $$->argName = $2;
     $$->argType = $3;
 }
-			|	TrImplKeyword syIdentifier ArgumentType syComma syIdentifier
+			|	TrImplKeyword ArgumentName ArgumentType syComma ArgumentName
 {
     $$ = argAlloc();
     $$->argKind = $1;
@@ -678,6 +679,26 @@ Direction		:	/* empty */	{ $$ = akNone; }
 			|	syUReplyPort	{ $$ = akUReplyPort; }
 			|	syWaitTime	{ $$ = akWaitTime; }
 			|	syMsgOption	{ $$ = akMsgOption; }
+			;
+
+ArgumentName		:	syIdentifier	{ $$ = $1; }
+			|	syIn		{ $$ = strmake("in"); }
+			|	syOut		{ $$ = strmake("out"); }
+			|	syInOut		{ $$ = strmake("inout"); }
+			|	syRequestPort	{ $$ = strmake("request_port"); }
+			|	syReplyPort	{ $$ = strmake("reply_port"); }
+			|	sySReplyPort	{ $$ = strmake("sreply_port"); }
+			|	syUReplyPort	{ $$ = strmake("ureply_port"); }
+			|	syWaitTime	{ $$ = strmake("waittime"); }
+			|	syMsgOption	{ $$ = strmake("msgoption"); }
+			|	syMsgSeqno	{ $$ = strmake("msgseqno"); }
+			|	syType		{ $$ = strmake("type"); }
+			|	syArray		{ $$ = strmake("array"); }
+			|	syOf		{ $$ = strmake("of"); }
+			|	syServerImpl	{ $$ = strmake("serverimpl"); }
+			|	syUserImpl	{ $$ = strmake("userimpl"); }
+			|	syServerSecToken { $$ = strmake("serversectoken"); }
+			|	syUserSecToken	{ $$ = strmake("usersectoken"); }
 			;
 
 TrImplKeyword		:	syServerImpl	{ $$ = akServerImpl; }	
