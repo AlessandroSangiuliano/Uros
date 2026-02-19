@@ -97,7 +97,7 @@ maybe_add(libcthreads)
 maybe_add(libcthreads_p)
 maybe_add(librthreads)
 maybe_add(libpthreads)
-maybe_add(libxmm)
+#maybe_add(libxmm)  # excluded for now: needs K&R modernization
 maybe_add(libservice)
 maybe_add(libnetmemory)
 maybe_add(libnetname)

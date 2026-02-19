@@ -1,20 +1,43 @@
 cmake_minimum_required(VERSION 3.16)
-project(libpthreads C)
+project(libpthreads C ASM)
 
-file(GLOB LIB_SOURCES CONFIGURE_DEPENDS "*.c" "*.S" "*.s")
+# Library sources (mk_pthread_impl.c is excluded: it's a code generator tool, not library code)
+set(LIB_SOURCES
+  pthread.c
+  pthread_mutex.c
+  pthread_cond.c
+  pthread_tsd.c
+  fprintf.c
+)
 
+# AT386 (i386) architecture-specific sources
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/AT386")
-  file(GLOB ARCH_SOURCES CONFIGURE_DEPENDS "AT386/*.c" "AT386/*.s" "AT386/*.S")
-  list(APPEND LIB_SOURCES ${ARCH_SOURCES})
+  list(APPEND LIB_SOURCES
+    AT386/i386_thread.c
+    AT386/i386_lock.S
+    AT386/i386_stack.S
+  )
 endif()
 
 add_library(libpthreads STATIC ${LIB_SOURCES})
-# Ensure stdint is available for legacy headers
-target_compile_options(libpthreads PRIVATE -include stdint.h)
+
+target_compile_options(libpthreads PRIVATE
+  $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -fno-builtin -w -include stdint.h -m32 -march=i686>
+  $<$<COMPILE_LANGUAGE:ASM>:-m32>
+)
+
+target_compile_definitions(libpthreads PRIVATE
+  __POSIX_LIB__
+  MACH_IPC_COMPAT=0
+  __NO_UNDERSCORES__
+  $<$<COMPILE_LANGUAGE:ASM>:ASSEMBLER>
+)
 
 target_include_directories(libpthreads PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/AT386
   ${CMAKE_BINARY_DIR}/generated/include
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/export/powermac/include
