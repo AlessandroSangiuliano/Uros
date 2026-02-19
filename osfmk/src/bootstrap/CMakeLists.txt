@@ -1,74 +1,128 @@
-# Bootstrap server build with CMake
-
-cmake_minimum_required(VERSION 3.21)
+cmake_minimum_required(VERSION 3.16)
 project(bootstrap_server C)
 
-set(BOOTSTRAP_SRC
-    bootstrap.c
-    service.c
-    a_out.c
-    coff.c
-    elf.c
-    load.c
-    rose.c
-    som.c
-    strfcns.c
+# ===========================================================================
+# MIG: generate server-side stubs for the 4 subsystems
+# ===========================================================================
+
+set(MIG_INCLUDE_FLAGS
+  -I${CMAKE_SOURCE_DIR}/export/powermac/include
+  -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+  -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
 )
 
-add_library(bootstrap_server STATIC ${BOOTSTRAP_SRC})
+# Helper macro: run CPP | migcom to produce server .c and .h from a .defs
+macro(mig_server_stub DEFS_FILE STEM OUT_DIR)
+  set(_defs  "${DEFS_FILE}")
+  set(_srvC  "${OUT_DIR}/${STEM}Server.c")
+  set(_srvH  "${OUT_DIR}/${STEM}Server.h")
+  set(_usrC  "${OUT_DIR}/${STEM}User.c")
+  set(_hdr   "${OUT_DIR}/${STEM}.h")
+  add_custom_command(
+    OUTPUT ${_srvC} ${_usrC} ${_hdr} ${_srvH}
+    COMMAND ${CMAKE_C_COMPILER} -E -P -x c ${MIG_INCLUDE_FLAGS} ${_defs}
+      | $<TARGET_FILE:migcom>
+        -header ${_hdr}
+        -sheader ${_srvH}
+        -user   ${_usrC}
+        -server ${_srvC}
+    DEPENDS migcom ${_defs}
+    COMMENT "MIG: ${STEM}.defs -> ${STEM}Server.c"
+    VERBATIM
+  )
+endmacro()
 
-# Ensure bootstrap can find Mach headers (mach.h, mach_init.h)
-# Start with our local include dirs
+set(MIG_OUT "${CMAKE_BINARY_DIR}/generated/bootstrap_mig")
+file(MAKE_DIRECTORY "${MIG_OUT}")
+
+# 1) bootstrap.defs  (subsystem 999999, ServerPrefix do_)
+mig_server_stub(
+  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/bootstrap.defs"
+  bootstrap  ${MIG_OUT})
+
+# 2) exc.defs  (subsystem 2400, ServerPrefix catch_)
+mig_server_stub(
+  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/exc.defs"
+  exc  ${MIG_OUT})
+
+# 3) notify.defs  (subsystem 64, ServerPrefix do_)
+mig_server_stub(
+  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/notify.defs"
+  notify  ${MIG_OUT})
+
+# 4) service.defs  (subsystem 400, ServerPrefix do_)
+mig_server_stub(
+  "${CMAKE_SOURCE_DIR}/export/powermac/include/servers/service.defs"
+  service  ${MIG_OUT})
+
+set(MIG_SERVER_SOURCES
+  ${MIG_OUT}/bootstrapServer.c
+  ${MIG_OUT}/excServer.c
+  ${MIG_OUT}/notifyServer.c
+  ${MIG_OUT}/serviceServer.c
+)
+
+# ===========================================================================
+# Source files
+# ===========================================================================
+
+# Core sources (platform-independent)
+set(BOOTSTRAP_SOURCES
+  bootstrap.c
+  service.c
+  load.c
+  strfcns.c
+)
+
+# Executable format loaders
+# i386: a_out + elf (formats.c selects them; coff/rose/som are for other archs)
+list(APPEND BOOTSTRAP_SOURCES
+  a_out.c
+  elf.c
+)
+
+# Architecture-specific (i386)
+list(APPEND BOOTSTRAP_SOURCES
+  i386/boot_dep.c
+  i386/set_regs.c
+  i386/formats.c
+)
+
+# ===========================================================================
+# Build target: static executable (for now we compile, linking deferred)
+# ===========================================================================
+
+add_library(bootstrap_server STATIC
+  ${BOOTSTRAP_SOURCES}
+  ${MIG_SERVER_SOURCES}
+)
+
+target_compile_options(bootstrap_server PRIVATE
+  -std=gnu89 -fno-builtin -w -include stdint.h -m32 -march=i686
+)
+
+target_compile_definitions(bootstrap_server PRIVATE
+  MACH_IPC_COMPAT=0
+)
+
 target_include_directories(bootstrap_server PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../mach_services/include
-    ${CMAKE_SOURCE_DIR}/src/mach_kernel
+  # Local sources first (bootstrap.h, exec.h, elf.h)
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  # MIG generated output (bootstrapServer.h, excServer.h, etc.)
+  ${MIG_OUT}
+  # Generated includes (mach/machine -> i386 symlink created in src/CMakeLists.txt)
+  ${CMAKE_BINARY_DIR}/generated/include
+  # Mach services include (sa_mach.h, servers/, cthreads.h)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # Kernel headers (mach/, device/, ddb/, i386/)
+  ${CMAKE_SOURCE_DIR}/src/mach_kernel
+  # Pre-built export headers (mach/mach_interface.h, mach/fs/file_system.h, etc.)
+  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  # Top-level include
+  ${CMAKE_SOURCE_DIR}/include
 )
 
-# Prefer generated/installed export includes (platform-specific).  Try a couple of
-# likely locations and add the first one that contains mach/mach_interface.h.
-# This avoids hard-coding a platform like "powermac" when not needed.
-find_path(MACH_INTERFACE_DIR
-    NAMES mach/mach_interface.h
-    PATHS
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../export/powermac/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../export
-        ${CMAKE_SOURCE_DIR}/export/powermac/include
-        ${CMAKE_SOURCE_DIR}/export
+set_target_properties(bootstrap_server PROPERTIES
+  OUTPUT_NAME "bootstrap"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
 )
-
-if(MACH_INTERFACE_DIR)
-    target_include_directories(bootstrap_server PRIVATE ${MACH_INTERFACE_DIR})
-else()
-    message(WARNING "Could not locate 'mach/mach_interface.h' in export paths; if build fails, set OSFMK export include path or provide generated headers.")
-endif()
-
-# Some exported headers (e.g., <cthreads.h>) include <machine/cthreads.h> which
-# may not exist for host builds. If that header is missing, generate a minimal
-# stub in the build tree and add it to the include path so compilation succeeds.
-find_path(MACHINE_CTHREADS_PATH
-    NAMES machine/cthreads.h
-    PATHS
-        ${MACH_INTERFACE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../export/powermac/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/../../export
-        ${CMAKE_SOURCE_DIR}/export
-)
-
-if(NOT MACHINE_CTHREADS_PATH)
-    set(GEN_MACHINE_DIR ${CMAKE_BINARY_DIR}/generated/include/machine)
-    file(MAKE_DIRECTORY ${GEN_MACHINE_DIR})
-    set(GEN_CTHREADS ${GEN_MACHINE_DIR}/cthreads.h)
-    if(NOT EXISTS ${GEN_CTHREADS})
-        file(WRITE ${GEN_CTHREADS} "/* Auto-generated stub: machine/cthreads.h */\n#ifndef _MACHINE_CTHREADS_H_\n#define _MACHINE_CTHREADS_H_\ntypedef int spin_lock_t;\n#endif /* _MACHINE_CTHREADS_H_ */\n")
-    endif()
-    target_include_directories(bootstrap_server PRIVATE ${CMAKE_BINARY_DIR}/generated/include)
-endif()
-
-# Optional: Add platform-specific sources
-#if (CMAKE_SYSTEM_PROCESSOR STREQUAL "i386")
-#    target_sources(bootstrap_server PRIVATE i386/some_file.c)
-#endif
-
-# Optional: Export header
-# install(FILES bootstrap.h DESTINATION include)

@@ -4,6 +4,18 @@ cmake_minimum_required(VERSION 3.16)
 
 set(OSFMK_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
+# The ODE export directory uses pseudo-symlinks ("link ppc") for mach/machine.
+# We target i386, so create a real symlink: mach/machine -> mach/i386 headers.
+# This is shared by all subprojects via ${CMAKE_BINARY_DIR}/generated/include.
+set(GEN_MACH_MACHINE "${CMAKE_BINARY_DIR}/generated/include/mach/machine")
+if(NOT EXISTS "${GEN_MACH_MACHINE}")
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/mach")
+  file(CREATE_LINK
+    "${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/i386"
+    "${GEN_MACH_MACHINE}"
+    SYMBOLIC)
+endif()
+
 # Per ora costruiamo solo i tool host necessari (mig/migcom, librerie base).
 
 if(OSFMK_BUILD_TOOLS)
