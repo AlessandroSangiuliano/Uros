@@ -31,6 +31,9 @@ endif()
 
 add_library(libmach STATIC ${LIB_SOURCES})
 
+# Depend on MIG-generated device/device.h (defined in parent CMakeLists)
+add_dependencies(libmach mig_device_header)
+
 # Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
 # Apply C-only options (including -include stdint.h) only when compiling C sources
 target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -D_BSD -fno-builtin -w -include stdint.h>)
