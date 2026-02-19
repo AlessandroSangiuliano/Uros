@@ -26,6 +26,9 @@ Compiler used: gcc 15.2.1
 - **libcthreads**: fixed build (ANSI C modernization, architecture-specific thread support)
 - **libsa_mach**: replaced generated machine wrappers with static headers
 - **libflipc**: builds successfully (FLIPC - Fast Local IPC)
+- **libnetname**: builds successfully (MIG-generated stubs for Mach Network Name Service)
+- **libmachid**: builds successfully (Mach ID service client library)
+  - Note: `machid_vmstuff.c` is currently excluded from the build. This file depends on server-side headers (`default_pager_types.h` from the default pager, and types from the machid server itself) that are not yet available. It will be re-enabled once the machid server and default pager are ported and their headers are accessible during user-space library builds.
 
 ### Code Modernization
 - Converted old-style K&R function declarations to ANSI C prototypes
@@ -40,11 +43,13 @@ Compiler used: gcc 15.2.1
 - [ ] Investigate `cthread_filter.h` in export directory (possibly misplaced)
 - [ ] Build remaining user-space libraries (librthreads)
 - [ ] Generate all MIG stubs from `.defs` files at build time
+- [ ] Re-enable `machid_vmstuff.c` in libmachid once the machid server and default pager are built (requires `default_pager_types.h` and machid server headers)
 
 ### Medium Term
 - [ ] Build the osfmk microkernel with CMake/Ninja (Actually the kernel builds and boot. It should be tested with the bootstrap server and see where it fails.)
 - [ ] Port kernel bootstrap (bootstrap task)
-- [ ] Port default pager
+- [ ] Port default pager (also needed to unblock `machid_vmstuff.c` in libmachid)
+- [ ] Port machid server
 - [ ] Implement basic device drivers for target platform
 
 ### Long Term
@@ -66,6 +71,9 @@ osfmk/
 │   │   │   ├── libmach/       # Core Mach user-space library
 │   │   │   ├── libcthreads/   # C threads library
 │   │   │   ├── libsa_mach/    # Standalone Mach library
+│   │   │   ├── libflipc/      # Fast Local IPC library
+│   │   │   ├── libnetname/    # Network Name Service stubs
+│   │   │   ├── libmachid/     # Mach ID service client library
 │   │   │   ├── migcom/        # MIG compiler (Flex/Bison)
 │   │   │   └── ...
 │   │   └── include/           # Shared headers
