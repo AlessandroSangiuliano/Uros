@@ -25,6 +25,7 @@ Compiler used: gcc 15.2.1
 - **libmach**: builds successfully (112 compilation units)
 - **libcthreads**: fixed build (ANSI C modernization, architecture-specific thread support)
 - **libsa_mach**: replaced generated machine wrappers with static headers
+- **libflipc**: builds successfully (FLIPC - Fast Local IPC)
 
 ### Code Modernization
 - Converted old-style K&R function declarations to ANSI C prototypes
@@ -37,7 +38,7 @@ Compiler used: gcc 15.2.1
 - [ ] Fix `mach/machine` symlink (currently a file instead of a symlink to `ppc/`, however ppc suport actually is not planned)
 - [ ] Fix `#endif` warnings in `.defs` files (`std_types.defs`, `mach_types.defs`, `device_types.defs`)
 - [ ] Investigate `cthread_filter.h` in export directory (possibly misplaced)
-- [ ] Build remaining user-space libraries (libflipc, librthreads, libmach_maxonstack)
+- [ ] Build remaining user-space libraries (librthreads)
 - [ ] Generate all MIG stubs from `.defs` files at build time
 
 ### Medium Term
