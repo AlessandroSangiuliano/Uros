@@ -55,6 +55,29 @@ endfunction()
 # Tool host principali: migcom (e in seguito mig se necessario).
 add_subdirectory(migcom)
 
+# Generate device/device.h from device.defs via MIG (shared by libmach, libflipc, etc.)
+set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/powermac/include/device/device.defs")
+set(DEVICE_HEADER "${CMAKE_BINARY_DIR}/generated/include/device/device.h")
+set(DEVICE_USER_C "${CMAKE_BINARY_DIR}/generated/device_user.c")
+set(DEVICE_SERVER_C "${CMAKE_BINARY_DIR}/generated/device_server.c")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
+
+add_custom_command(
+  OUTPUT ${DEVICE_HEADER} ${DEVICE_USER_C} ${DEVICE_SERVER_C}
+  COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    ${DEVICE_DEFS}
+    | $<TARGET_FILE:migcom>
+    -header ${DEVICE_HEADER}
+    -user ${DEVICE_USER_C}
+    -server ${DEVICE_SERVER_C}
+  DEPENDS migcom ${DEVICE_DEFS}
+  COMMENT "MIG: device.defs -> device/device.h"
+  VERBATIM
+)
+add_custom_target(mig_device_header DEPENDS ${DEVICE_HEADER})
+
 # Librerie mach_services (ogni libreria è un target statico separato)
 
 # Aggiungi sottodirectory solo se esistono per non rompere la riconfigurazione
