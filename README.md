@@ -29,6 +29,8 @@ Compiler used: gcc 15.2.1
 - **libnetname**: builds successfully (MIG-generated stubs for Mach Network Name Service)
 - **libmachid**: builds successfully (Mach ID service client library)
   - Note: `machid_vmstuff.c` is currently excluded from the build. This file depends on server-side headers (`default_pager_types.h` from the default pager, and types from the machid server itself) that are not yet available. It will be re-enabled once the machid server and default pager are ported and their headers are accessible during user-space library builds.
+- **libpthreads**: builds successfully (POSIX threads - IEEE 1003.1c implementation over Mach primitives)
+- **libservice**: builds successfully (MIG-generated stubs for Mach bootstrap service checkin)
 
 ### Code Modernization
 - Converted old-style K&R function declarations to ANSI C prototypes
@@ -74,6 +76,8 @@ osfmk/
 │   │   │   ├── libflipc/      # Fast Local IPC library
 │   │   │   ├── libnetname/    # Network Name Service stubs
 │   │   │   ├── libmachid/     # Mach ID service client library
+│   │   │   ├── libpthreads/   # POSIX threads (over Mach primitives)
+│   │   │   ├── libservice/    # Bootstrap service checkin stubs
 │   │   │   ├── migcom/        # MIG compiler (Flex/Bison)
 │   │   │   └── ...
 │   │   └── include/           # Shared headers
