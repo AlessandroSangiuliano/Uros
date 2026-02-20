@@ -10,7 +10,10 @@ set(GEN_MACHINE_VALIST "${CMAKE_BINARY_DIR}/generated/include/machine/va_list.h"
 file(WRITE ${GEN_MACHINE_TYPES} "#ifndef _GEN_MACHINE_TYPES_H_\n#define _GEN_MACHINE_TYPES_H_\n#include <sa_mach/i386/types.h>\n#endif\n")
 file(WRITE ${GEN_MACHINE_VALIST} "#ifndef _GEN_MACHINE_VALIST_H_\n#define _GEN_MACHINE_VALIST_H_\n#include <sa_mach/i386/va_list.h>\n#endif\n")
 
-# Helper: genera i file MIG (.c/.h) usando il tool migcom costruito in questo progetto.
+# Path to the mig shell script (handles cc -E | migcom pipeline)
+set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
+
+# Helper: genera i file MIG (.c/.h) usando lo script mig originale.
 # Uso: add_mig_defs(path/to/file.defs INCLUDES...)
 function(add_mig_defs DEFS_FILE)
   get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
@@ -39,12 +42,20 @@ function(add_mig_defs DEFS_FILE)
 
   set(INC_FLAGS)
   foreach(inc IN LISTS ARGN)
-    list(APPEND INC_FLAGS "-I${inc}")
+    list(APPEND INC_FLAGS -I${inc})
   endforeach()
 
   add_custom_command(
     OUTPUT ${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H}
-    COMMAND ${CMAKE_C_COMPILER} -E -P -x c ${INC_FLAGS} ${DEFS_FILE} | $<TARGET_FILE:migcom> -header ${USER_H} -sheader ${SERVER_H} -server ${SERVER_C} -user ${USER_C}
+    COMMAND ${MIG_SCRIPT}
+      -cpp ${CMAKE_C_COMPILER}
+      -migcom $<TARGET_FILE:migcom>
+      ${INC_FLAGS}
+      -header ${USER_H}
+      -sheader ${SERVER_H}
+      -server ${SERVER_C}
+      -user ${USER_C}
+      ${DEFS_FILE}
     DEPENDS migcom ${DEFS_FILE}
     COMMENT "MIG: ${DEFS_NAME}"
     VERBATIM
@@ -68,19 +79,19 @@ set(DEVICE_USER_C "${CMAKE_BINARY_DIR}/generated/device_user.c")
 set(DEVICE_SERVER_C "${CMAKE_BINARY_DIR}/generated/device_server.c")
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
 
-# Generate both user and server headers; migcom makes _user.c include -header
-# and _server.c include -sheader automatically.
+# Generate both user and server headers using the mig script.
 add_custom_command(
   OUTPUT ${DEVICE_USER_H} ${DEVICE_SERVER_H} ${DEVICE_USER_C} ${DEVICE_SERVER_C}
-  COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/powermac/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    ${DEVICE_DEFS}
-    | $<TARGET_FILE:migcom>
     -header ${DEVICE_USER_H}
     -sheader ${DEVICE_SERVER_H}
     -user ${DEVICE_USER_C}
     -server ${DEVICE_SERVER_C}
+    ${DEVICE_DEFS}
   DEPENDS migcom ${DEVICE_DEFS}
   COMMENT "MIG: device.defs -> device.h + device_server.h"
   VERBATIM
@@ -118,5 +129,4 @@ maybe_add(libservice)
 maybe_add(libnetmemory)
 maybe_add(libnetname)
 maybe_add(libflipc)
-
 
