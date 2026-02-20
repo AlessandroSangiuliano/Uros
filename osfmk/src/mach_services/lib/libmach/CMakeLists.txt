@@ -111,7 +111,7 @@ add_dependencies(libmach mig_device_header)
 
 # Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
 # Apply C-only options (including -include stdint.h) only when compiling C sources
-target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -D_BSD -fno-builtin -w -include stdint.h -Dnull=0>)
+target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -D_BSD -fno-builtin -w -include stdint.h>)
 # Build assembly files and C as 32-bit where needed
 target_compile_options(libmach PRIVATE -m32 -march=i686)
 

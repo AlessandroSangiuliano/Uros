@@ -2252,7 +2252,8 @@ WriteShortCircInArgBefore(FILE *file, register argument_t *arg)
 		    arg->argTempOnStack = FALSE;
 		}
 		WriteCopyArg(file, arg, "_%sTemp_", "/* %s */ (char *) %s",
-				  arg->argVarName, arg->argVarName);
+				  arg->argVarName, arg->argVarName,
+				  arg->argVarName);
 		/* Point argument at temp: */
 		fprintf(file, "\t    *(char **)&%s%s = _%sTemp_;\n",
 					   (arg->argByReferenceUser ? "*" : ""),
