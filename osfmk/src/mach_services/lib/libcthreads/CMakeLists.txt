@@ -14,8 +14,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/POWERMAC" AND CMAKE_SYSTEM_PROCESSOR MATC
 endif()
 
 add_library(libcthreads STATIC ${LIB_SOURCES})
-# Ensure stdint is available for legacy headers (only for C compilation)
-target_compile_options(libcthreads PRIVATE $<$<COMPILE_LANGUAGE:C>:-include stdint.h>)
+# Legacy K&R/gnu89 code: suppress warnings, allow implicit declarations
+target_compile_options(libcthreads PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -fno-builtin -w -include stdint.h>)
 
 target_include_directories(libcthreads PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -26,10 +26,11 @@ target_include_directories(libcthreads PUBLIC
   ${CMAKE_SOURCE_DIR}/include
 )
 
-# Define ASSEMBLER when preprocessing assembler sources so macros like ALIGN are available
+# Define ASSEMBLER when preprocessing assembler sources so macros like ALIGN are available.
+# __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out).
 target_compile_definitions(libcthreads PRIVATE
-  $<$<COMPILE_LANGUAGE:ASM>:ASSEMBLER>
-  $<$<COMPILE_LANGUAGE:ASM-ATT>:ASSEMBLER>
+  $<$<COMPILE_LANGUAGE:ASM>:ASSEMBLER __NO_UNDERSCORES__>
+  $<$<COMPILE_LANGUAGE:ASM-ATT>:ASSEMBLER __NO_UNDERSCORES__>
 )
 
 # Expose build-mode to sources so they can use #ifdef OSFMK_BUILD_KERNEL
