@@ -96,12 +96,12 @@ static struct free_list malloc_free_list[NBUCKETS];
 static void
 cthread_more_memory(
 	int size,
-	register free_list_t fl)
+	free_list_t fl)
 {
-	register int amount;
-	register int n;
+	int amount;
+	int n;
 	vm_address_t where;
-	register header_t h;
+	header_t h;
 	kern_return_t r;
 
 	if (size <= vm_page_size) {
@@ -138,12 +138,12 @@ cthread_more_memory(
 
 void *
 cthread_malloc(
-	register vm_size_t size)
+	vm_size_t size)
 {
-	register int i;
-	register unsigned long n;
-	register free_list_t fl;
-	register header_t h;
+	int i;
+	unsigned long n;
+	free_list_t fl;
+	header_t h;
 
 	if ((int) size <= 0)		/* sanity check */
 		return 0;
@@ -200,9 +200,9 @@ void
 cthread_free(
 	void *base)
 {
-	register header_t h;
-	register free_list_t fl;
-	register int i;
+	header_t h;
+	free_list_t fl;
+	int i;
 
 	if (base == 0)
 		return;
@@ -239,9 +239,9 @@ cthread_realloc(
 	void *old_base,
 	vm_size_t new_size)
 {
-	register header_t h;
-	register free_list_t fl;
-	register int i;
+	header_t h;
+	free_list_t fl;
+	int i;
 	unsigned int old_size;
 	char *new_base;
 
@@ -282,10 +282,10 @@ cthread_realloc(
 void
 cthread_print_malloc_free_list(void)
 {
-  	register int i, size;
-	register free_list_t fl;
-	register int n;
-  	register header_t h;
+  	int i, size;
+	free_list_t fl;
+	int n;
+  	header_t h;
 	int total_used = 0;
 	int total_free = 0;
 
@@ -316,7 +316,7 @@ cthread_malloc_fork_prepare(void)
  * malloc critical section.
  */
 {
-    register int i;
+    int i;
     
     for (i = 0; i < NBUCKETS; i++) {
 	spin_lock(&malloc_free_list[i].lock);
@@ -329,7 +329,7 @@ cthread_malloc_fork_parent(void)
  * Called in the parent process after a fork() to resume normal operation.
  */
 {
-    register int i;
+    int i;
 
     for (i = NBUCKETS-1; i >= 0; i--) {
 	spin_unlock(&malloc_free_list[i].lock);
@@ -342,7 +342,7 @@ cthread_malloc_fork_child(void)
  * Called in the child process after a fork() to resume normal operation.
  */
 {
-    register int i;
+    int i;
 
     for (i = NBUCKETS-1; i >= 0; i--) {
 	spin_unlock(&malloc_free_list[i].lock);
@@ -352,7 +352,7 @@ cthread_malloc_fork_child(void)
 void
 cthread_malloc_init(void)
 {
-    register int i;
+    int i;
 
     for (i = 0; i < NBUCKETS; i++) {
 	spin_lock_init(&malloc_free_list[i].lock);

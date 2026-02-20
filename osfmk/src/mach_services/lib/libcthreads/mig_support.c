@@ -132,10 +132,10 @@ mig_init(cthread_t initial)
 mach_port_t
 mig_get_reply_port(void)
 {
-	register mach_port_t reply_port;
+	mach_port_t reply_port;
 
 	if (multithreaded) {
-		register cthread_t self;
+		cthread_t self;
 
 		self = _cthread_self();
 
@@ -157,10 +157,10 @@ void
 mig_dealloc_reply_port(
 	mach_port_t	port)
 {
-	register mach_port_t reply_port;
+	mach_port_t reply_port;
 
 	if (multithreaded) {
-		register cthread_t self;
+		cthread_t self;
 
 		self = _cthread_self();
 

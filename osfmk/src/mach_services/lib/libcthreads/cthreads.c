@@ -122,7 +122,7 @@ cthread_idle_first(void)
 staticf void
 cthread_idle_enter(cthread_t p)
 {
-	register cthread_dlq_entry_t prev, head;
+	cthread_dlq_entry_t prev, head;
 
 	head = &cthread_status.waiting_dlq;
 	prev = head->prev;
@@ -139,7 +139,7 @@ cthread_idle_enter(cthread_t p)
 staticf void
 cthread_idle_remove(cthread_t p)
 {
-	register cthread_dlq_entry_t	next, prev, head;
+	cthread_dlq_entry_t	next, prev, head;
 
 	head = &cthread_status.waiting_dlq;
 	next = p->dlq.next;
@@ -839,7 +839,7 @@ cthread_cpus()
  */
 
 vm_offset_t
-cthread_stack_base(register cthread_t cthread, register vm_size_t offset)
+cthread_stack_base(cthread_t cthread, vm_size_t offset)
 {
 #ifdef	STACK_GROWTH_UP
 	return (cthread->stack_base + offset);
@@ -1250,7 +1250,7 @@ cthread_name(cthread_t t)
 
 
 int
-cthread_count()
+cthread_count(void)
 {
     return cthread_status.cthread_cthreads;
 }
@@ -1287,8 +1287,8 @@ cthread_data(cthread_t t) {
  *	do not wired the existing cthreads.
  */
 
-int 
-cthread_kernel_limit()
+int
+cthread_kernel_limit(void)
 {
 
     /* Locking is not necessary here... */
@@ -1331,7 +1331,7 @@ cthread_set_kernel_limit(int n)
 }
 
 int
-cthread_limit()
+cthread_limit(void)
 {
     return cthread_kernel_limit();
 }
@@ -1947,7 +1947,7 @@ cthread_yield_real()
  */
 
 cthread_t 
-cthread_self() {
+cthread_self(void) {
     return (cthread_t)_cthread_self();
 }
 
@@ -1966,7 +1966,7 @@ cthread_self() {
  */
 
 void 
-cthread_wire()
+cthread_wire(void)
 {
     cthread_wire_other(_cthread_self(), mach_thread_self());
 }
@@ -1994,7 +1994,7 @@ cthread_wire_other(cthread_t p, mach_port_t port)
  */
 
 void 
-cthread_unwire()
+cthread_unwire(void)
 {
     cthread_t p = _cthread_self();
 
@@ -2035,7 +2035,7 @@ cthread_pstats(int file)
 }
 
 int *
-__mach_errno_addr()
+__mach_errno_addr(void)
 {
     return &_cthread_self()->err_no;
 }
