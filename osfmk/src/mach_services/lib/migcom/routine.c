@@ -799,6 +799,16 @@ rtDefaultArgKind(routine_t *rt, argument_t *arg)
 	(rt->rtRequestPort == argNULL))
 	arg->argKind = akRequestPort;
 
+    /*
+     * In reply subsystems, the first argument uses the reply_port
+     * direction but serves as the destination port for sending the
+     * reply message.  Promote it to akRequestPort so that code
+     * generation maps it to msgh_request_port (the remote port).
+     */
+    if ((arg->argKind == akReplyPort) &&
+	(rt->rtRequestPort == argNULL))
+	arg->argKind = akRequestPort;
+
     if (arg->argKind == akNone)
 	arg->argKind = akIn;
 }

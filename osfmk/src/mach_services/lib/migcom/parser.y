@@ -649,6 +649,38 @@ Argument		:	Direction ArgumentName ArgumentType IPCFlags
     $$->argType = $3;
     $$->argFlags = $4;
 }
+			|	syReplyPort ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akReplyPort;
+    $$->argName = strmake("reply_port");
+    $$->argType = $2;
+    $$->argFlags = $3;
+}
+			|	sySReplyPort ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akSReplyPort;
+    $$->argName = strmake("sreply_port");
+    $$->argType = $2;
+    $$->argFlags = $3;
+}
+			|	syUReplyPort ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akUReplyPort;
+    $$->argName = strmake("ureply_port");
+    $$->argType = $2;
+    $$->argFlags = $3;
+}
+			|	syRequestPort ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akRequestPort;
+    $$->argName = strmake("request_port");
+    $$->argType = $2;
+    $$->argFlags = $3;
+}
 			;
 
 Trailer			:	TrExplKeyword ArgumentName ArgumentType

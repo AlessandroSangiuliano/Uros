@@ -1149,8 +1149,9 @@ WriteConditionalCallArg(FILE *file, register argument_t *arg)
 
     if (akCheck(arg->argKind, akbSendRcv)) {
 	if (akIdent(arg->argKind) == akeRequestPort ||
-	    akCheck(arg->argKind, akbServerImplicit)) 
+	    akCheck(arg->argKind, akbServerImplicit))
 	    SafeString(file, InArgMsgField(arg));
+	else
 	    fprintf(file, "(%s)(0)", it->itTransType);
     }
 
