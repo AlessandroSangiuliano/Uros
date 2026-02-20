@@ -237,7 +237,7 @@ staticf void size_stack(void);
  */
 
 void 
-setup_stack(register cthread_t p, register vm_address_t base)
+setup_stack(cthread_t p, vm_address_t base)
 {
 	p->stack_base = base;
 	/*
@@ -266,11 +266,10 @@ setup_stack(register cthread_t p, register vm_address_t base)
  */
 
 vm_offset_t
-addr_range_check(start_addr, end_addr, desired_protection)
-	vm_offset_t	start_addr, end_addr;
-	vm_prot_t	desired_protection;
+addr_range_check(vm_offset_t start_addr, vm_offset_t end_addr,
+		 vm_prot_t desired_protection)
 {
-	register vm_offset_t	addr;
+	vm_offset_t	addr;
 
 	addr = start_addr;
 	while (addr < end_addr) {
@@ -325,9 +324,7 @@ addr_range_check(start_addr, end_addr, desired_protection)
 
 
 void
-probe_stack(stack_bottom, stack_top)
-	vm_offset_t	*stack_bottom;
-	vm_offset_t	*stack_top;
+probe_stack(vm_offset_t *stack_bottom, vm_offset_t *stack_top)
 {
 	/*
 	 * Since vm_region returns the region starting at
@@ -529,7 +526,7 @@ stack_init(cthread_t p, vm_offset_t *newstack)
  * the overall stack size is a power of 2.
  */
 void
-size_stack()
+size_stack(void)
 {
 	if (cthread_red_zone_size > 0) {
 		red_zone = TRUE;
@@ -713,7 +710,7 @@ alloc_stack(cthread_t p)
  */
 
 
-void stack_fork_child()
+void stack_fork_child(void)
 {
     next_stack_base = 0;
 }

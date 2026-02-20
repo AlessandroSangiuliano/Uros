@@ -94,8 +94,8 @@ print_malloc_free_list(void)
 }
 #endif	/* DEBUG */
 
-void 
-malloc_fork_prepare()
+void
+malloc_fork_prepare(void)
 /*
  * Prepare the malloc module for a fork by insuring that no thread is in a
  * malloc critical section.
@@ -104,8 +104,8 @@ malloc_fork_prepare()
 	cthread_malloc_fork_prepare();
 }
 
-void 
-malloc_fork_parent()
+void
+malloc_fork_parent(void)
 /*
  * Called in the parent process after a fork() to resume normal operation.
  */
@@ -113,8 +113,8 @@ malloc_fork_parent()
 	cthread_malloc_fork_parent();
 }
 
-void 
-malloc_fork_child()
+void
+malloc_fork_child(void)
 /*
  * Called in the child process after a fork() to resume normal operation.
  */
