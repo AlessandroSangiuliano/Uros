@@ -9,7 +9,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   file(GLOB ARCH_S_LOWER_S CONFIGURE_DEPENDS "i386/*.s")
   list(APPEND LIB_SOURCES ${ARCH_SOURCES})
   # Preprocess lowercase assembler files to generated/asm
-  set(ASM_PREPROCESS_INCLUDES "-I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/export/powermac/include -I${CMAKE_SOURCE_DIR}/include")
+  # __NO_UNDERSCORES__: ELF does not prefix symbols with '_'
+  set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/export/powermac/include -I${CMAKE_SOURCE_DIR}/include")
   foreach(sfile IN LISTS ARCH_S_LOWER_S)
     get_filename_component(sname ${sfile} NAME)
     set(pp_output "${CMAKE_CURRENT_BINARY_DIR}/generated/asm/${sname}.S")

@@ -17,20 +17,22 @@ function(add_mig_defs DEFS_FILE)
 
   set(USER_C ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_user.c)
   set(SERVER_C ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_server.c)
-  set(HEADER ${CMAKE_BINARY_DIR}/generated/include/${DEFS_NAME}.h)
-  file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated/include)
+  # Place MIG headers alongside the .c files (NOT in generated/include/)
+  # to avoid shadowing real userspace headers like mach.h.
+  # When both -header and -sheader are given, migcom makes _user.c include
+  # the -header file and _server.c include the -sheader file.
+  set(USER_H   ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}.h)
+  set(SERVER_H ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_server.h)
+  file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 
-  # Segnala a CMake che i file sorgente saranno generati (evita errori "cannot find source file")
-  set_source_files_properties(${USER_C} ${SERVER_C} ${HEADER} PROPERTIES GENERATED TRUE)
+  set_source_files_properties(${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H} PROPERTIES GENERATED TRUE)
 
   # Evita di registrare più volte lo stesso .defs (previene errori CMake)
   set(PROCESSED_VAR "MIG_PROCESSED_${DEFS_NAME}")
   if(DEFINED ${PROCESSED_VAR})
     message(VERBOSE "MIG: ${DEFS_NAME} already processed, reusing outputs")
-    # Espongo comunque la variabile _MIG_GENERATED nel contesto chiamante (i path sono deterministici)
     set(${DEFS_NAME}_MIG_GENERATED ${USER_C} ${SERVER_C} PARENT_SCOPE)
-    # Assicuro che le proprietà GENERATED siano visibili anche in altri scope
-    set_source_files_properties(${USER_C} ${SERVER_C} ${HEADER} PROPERTIES GENERATED TRUE)
+    set_source_files_properties(${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H} PROPERTIES GENERATED TRUE)
     return()
   endif()
   set(${PROCESSED_VAR} TRUE CACHE INTERNAL "MIG rules added for ${DEFS_NAME}")
@@ -41,8 +43,8 @@ function(add_mig_defs DEFS_FILE)
   endforeach()
 
   add_custom_command(
-    OUTPUT ${USER_C} ${SERVER_C} ${HEADER}
-    COMMAND ${CMAKE_C_COMPILER} -E -P -x c ${INC_FLAGS} ${DEFS_FILE} | $<TARGET_FILE:migcom> -sheader ${HEADER} -server ${SERVER_C} -user ${USER_C}
+    OUTPUT ${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H}
+    COMMAND ${CMAKE_C_COMPILER} -E -P -x c ${INC_FLAGS} ${DEFS_FILE} | $<TARGET_FILE:migcom> -header ${USER_H} -sheader ${SERVER_H} -server ${SERVER_C} -user ${USER_C}
     DEPENDS migcom ${DEFS_FILE}
     COMMENT "MIG: ${DEFS_NAME}"
     VERBATIM
@@ -57,24 +59,38 @@ add_subdirectory(migcom)
 
 # Generate device/device.h from device.defs via MIG (shared by libmach, libflipc, etc.)
 set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/powermac/include/device/device.defs")
+# Public header for #include <device/device.h>
 set(DEVICE_HEADER "${CMAKE_BINARY_DIR}/generated/include/device/device.h")
+# Co-located headers for MIG .c files (#include "device.h" / "device_server.h")
+set(DEVICE_USER_H "${CMAKE_BINARY_DIR}/generated/device.h")
+set(DEVICE_SERVER_H "${CMAKE_BINARY_DIR}/generated/device_server.h")
 set(DEVICE_USER_C "${CMAKE_BINARY_DIR}/generated/device_user.c")
 set(DEVICE_SERVER_C "${CMAKE_BINARY_DIR}/generated/device_server.c")
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
 
+# Generate both user and server headers; migcom makes _user.c include -header
+# and _server.c include -sheader automatically.
 add_custom_command(
-  OUTPUT ${DEVICE_HEADER} ${DEVICE_USER_C} ${DEVICE_SERVER_C}
+  OUTPUT ${DEVICE_USER_H} ${DEVICE_SERVER_H} ${DEVICE_USER_C} ${DEVICE_SERVER_C}
   COMMAND ${CMAKE_C_COMPILER} -E -P -x c
     -I${CMAKE_SOURCE_DIR}/export/powermac/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${DEVICE_DEFS}
     | $<TARGET_FILE:migcom>
-    -header ${DEVICE_HEADER}
+    -header ${DEVICE_USER_H}
+    -sheader ${DEVICE_SERVER_H}
     -user ${DEVICE_USER_C}
     -server ${DEVICE_SERVER_C}
   DEPENDS migcom ${DEVICE_DEFS}
-  COMMENT "MIG: device.defs -> device/device.h"
+  COMMENT "MIG: device.defs -> device.h + device_server.h"
   VERBATIM
+)
+# Copy the user header to the public include path so #include <device/device.h> works
+add_custom_command(
+  OUTPUT ${DEVICE_HEADER}
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DEVICE_USER_H} ${DEVICE_HEADER}
+  DEPENDS ${DEVICE_USER_H}
+  COMMENT "Copy device.h -> generated/include/device/device.h"
 )
 add_custom_target(mig_device_header DEPENDS ${DEVICE_HEADER})
 

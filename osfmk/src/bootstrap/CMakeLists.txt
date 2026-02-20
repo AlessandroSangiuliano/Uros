@@ -89,16 +89,19 @@ list(APPEND BOOTSTRAP_SOURCES
 )
 
 # ===========================================================================
-# Build target: static executable (for now we compile, linking deferred)
+# Build target: Mach standalone executable
 # ===========================================================================
 
-add_library(bootstrap_server STATIC
+# Stubs for symbols normally provided by host libc (-nostdlib build)
+list(APPEND BOOTSTRAP_SOURCES nostdlib_stubs.c)
+
+add_executable(bootstrap_server
   ${BOOTSTRAP_SOURCES}
   ${MIG_SERVER_SOURCES}
 )
 
 target_compile_options(bootstrap_server PRIVATE
-  -std=gnu89 -fno-builtin -w -include stdint.h -m32 -march=i686
+  -std=gnu89 -fno-builtin -fno-stack-protector -w -include stdint.h -m32 -march=i686
 )
 
 target_compile_definitions(bootstrap_server PRIVATE
@@ -122,7 +125,29 @@ target_include_directories(bootstrap_server PRIVATE
   ${CMAKE_SOURCE_DIR}/include
 )
 
+# Link against Mach userspace libraries.
+# Use --start-group/--end-group to resolve circular dependencies between
+# the Mach libraries (e.g. libsa_mach -> libmach for clock_sleep, libcthreads -> libmach
+# for MIG stubs, libmach -> libcthreads for mig_support).
+target_link_libraries(bootstrap_server PRIVATE
+  -Wl,--start-group
+  libsa_fs
+  libcthreads
+  libmach
+  libsa_mach
+  -Wl,--end-group
+)
+
+# Linker flags: 32-bit static Mach binary, no host libc
+# --allow-multiple-definition: cthreads inline functions (spin_unlock, spin_try_lock,
+# cthread_sp) are emitted into every .o that includes cthreads.h (C89 inline semantics).
+target_link_options(bootstrap_server PRIVATE
+  -m32 -static -nostdlib
+  -Wl,-e,__start_mach
+  -Wl,--allow-multiple-definition
+)
+
 set_target_properties(bootstrap_server PROPERTIES
   OUTPUT_NAME "bootstrap"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
 )
