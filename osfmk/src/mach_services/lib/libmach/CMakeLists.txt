@@ -83,9 +83,8 @@ set(EXPORT_MIG_DEFS
   ${_EXPORT}/mach/sync.defs
   ${_EXPORT}/mach_debug/mach_debug.defs
   ${_EXPORT}/device/device_request.defs
+  ${_EXPORT}/device/device_reply.defs
 )
-# device_reply.defs excluded: uses polymorphic|TYPE syntax unsupported by our migcom.
-# The bootstrap server uses synchronous device I/O, so reply stubs are not needed.
 foreach(DEFS IN LISTS EXPORT_MIG_DEFS)
   add_mig_defs(${DEFS} ${_MIG_INC})
   get_filename_component(DEFS_NAME ${DEFS} NAME_WE)

@@ -85,24 +85,41 @@ Profiling interfaces are not needed by userspace libraries.
 
 ---
 
-### 5. MIG bug: `polymorphic|TYPE` syntax unsupported
+### 5. MIG bugs with `device_reply.defs` (FIXED)
 
 **Symptom:** `syntax error` when processing `device_reply.defs`.
 
-**Root cause:** `device_reply.defs` uses the type declaration:
-```
-type reply_port_t = polymorphic|MACH_MSG_TYPE_PORT_SEND_ONCE
-    ctype: mach_port_t;
-```
-The `|` operator for combining a polymorphic type with a default
-message type is not recognized by our migcom's lexer/parser.  The
-lexer has no token for `|` (`BAR`/`PIPE`), and the parser grammar
-has no production rule for this syntax.
+**Root cause:** Three separate issues, not the `polymorphic|TYPE` syntax
+(the lexer already had `syBar` for `|` and the parser already had
+`PrimIPCType syBar PrimIPCType`):
 
-**Status:** `device_reply.defs` excluded.  The bootstrap server uses
-synchronous device I/O and does not need async reply stubs.
-This is a genuine migcom limitation that should be fixed to support
-the full set of MIG interfaces.
+1. **Parser: `reply_port` keyword as direction without explicit name.**
+   In `device_reply.defs`, the syntax `reply_port : reply_port_t;` uses
+   `reply_port` as a direction keyword with no separate argument name.
+   The lexer matches `reply_port` as `syReplyPort`, which is valid for
+   `Direction`, but YACC's shift preference prevents reducing empty
+   `Direction` to then use `syReplyPort` as `ArgumentName`.
+   **Fix:** Added alternative `Argument` productions in `parser.y` for
+   `syReplyPort`, `sySReplyPort`, `syUReplyPort`, `syRequestPort` where
+   the keyword serves as both direction and name.
+
+2. **Semantic: reply port as first argument in reply subsystems.**
+   After fixing parsing, `rtCheckArgTypes()` failed with "doesn't have
+   a server port argument" because the `akReplyPort` direction doesn't
+   set `rtRequestPort`.  In reply subsystems, the reply port IS the
+   destination port (same role as request port).
+   **Fix:** In `rtDefaultArgKind()` (`routine.c`), promote `akReplyPort`
+   to `akRequestPort` when no request port has been assigned yet.
+
+3. **Code generation: missing `else` in `WriteConditionalCallArg`.**
+   In `server.c`, the error-path code generator had a missing-braces bug
+   where `SafeString` (for request port) and `fprintf("(%s)(0)")` (for
+   default values) both executed, producing invalid C like
+   `msgh_request_port(mach_port_t)(0)` instead of `msgh_request_port`.
+   **Fix:** Added `else` to make the two branches mutually exclusive.
+
+**Status:** FIXED.  `device_reply.defs` now compiles and is included in
+the libmach MIG build list.
 
 ---
 
@@ -197,7 +214,7 @@ in libmach, libcthreads, and libsa_mach.
 
 | Bug | Severity | Workaround |
 |-----|----------|------------|
-| `polymorphic\|TYPE` syntax not supported | Medium | Exclude affected `.defs` |
+| `reply_port` keyword + reply subsystem bugs | Medium | FIXED (parser.y, routine.c, server.c) |
 | `null` (lowercase) emitted instead of `NULL`/`0` | Low | `-Dnull=0` |
 | `prof.defs` parse failure with prefix + simpleroutine | Low | Exclude (not needed) |
 | User/server header conflation (single `-sheader`) | Design | Use both `-header` and `-sheader` |
