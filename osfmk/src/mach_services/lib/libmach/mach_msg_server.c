@@ -73,8 +73,8 @@ mach_msg_server_once(
     mach_msg_options_t options)
 {
     mig_reply_error_t *bufRequest = 0, *bufReply = 0, *bufTemp;
-    register mach_msg_return_t mr;
-    register kern_return_t kr;
+    mach_msg_return_t mr;
+    kern_return_t kr;
 
     if ((kr = vm_allocate(mach_task_self(),
 		     (vm_address_t *)&bufRequest,
@@ -187,8 +187,8 @@ mach_msg_server(
     mach_msg_options_t options)
 {
     mig_reply_error_t *bufRequest = 0, *bufReply = 0, *bufTemp;
-    register mach_msg_return_t mr;
-    register kern_return_t kr;
+    mach_msg_return_t mr;
+    kern_return_t kr;
 
     if ((kr = vm_allocate(mach_task_self(),
 		     (vm_address_t *)&bufRequest,

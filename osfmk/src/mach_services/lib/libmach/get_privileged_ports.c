@@ -58,9 +58,8 @@
  */
 
 kern_return_t
-get_privileged_ports(privileged_host_port, device_server_port)
-	mach_port_t *privileged_host_port;
-	mach_port_t *device_server_port;
+get_privileged_ports(mach_port_t *privileged_host_port,
+		     mach_port_t *device_server_port)
 {
 	mach_port_t bootstrap_port;
 	mach_port_t reply_port;

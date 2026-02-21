@@ -32,9 +32,9 @@ extern int main(int, char **, char **);
 void _start(unsigned, char **, char **);
 
 void
-_start(register unsigned argc,
-       register char **argv,
-       register char **envp)
+_start(unsigned argc,
+       char **argv,
+       char **envp)
 {
 	if (_mach_init_routine)
 		(*_mach_init_routine)();

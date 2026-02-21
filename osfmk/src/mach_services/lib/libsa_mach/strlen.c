@@ -55,9 +55,9 @@
  */
 
 size_t
-strlen(register const char *s)
+strlen(const char *s)
 {
-	register size_t n;
+	size_t n;
 
 	n = 0;
 	while (*s++)

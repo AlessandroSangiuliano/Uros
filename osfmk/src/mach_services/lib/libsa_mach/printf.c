@@ -139,13 +139,13 @@
 #define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
 
 static void
-printnum(register unsigned long	u,	/* number to print */
-	 register int		base,
+printnum(unsigned long	u,	/* number to print */
+	 int		base,
 	 void			(*outc)(void *, int),
 	 void			*outc_arg)
 {
 	char	buf[MAXBUF];	/* build number here */
-	register char *	p = &buf[MAXBUF-1];
+	char *	p = &buf[MAXBUF-1];
 	static char digs[] = "0123456789abcdef";
 
 	do {
@@ -158,7 +158,7 @@ printnum(register unsigned long	u,	/* number to print */
 }
 
 static void
-_doprnt(register const char *fmt,
+_doprnt(const char *fmt,
 	va_list		args,
 	int		radix,			/* default radix - for '%r' */
  	void		(*outc)(void *, int),	/* character output */
@@ -252,9 +252,9 @@ _doprnt(register const char *fmt,
 		case 'b':
 		case 'B':
 		{
-		    register const char *p;
+		    const char *p;
 		    boolean_t	  any;
-		    register int  i;
+		    int  i;
 
 		    u = va_arg(args, unsigned long);
 		    p = va_arg(args, const char *);
@@ -270,7 +270,7 @@ _doprnt(register const char *fmt,
 			    /*
 			     * Bit field
 			     */
-			    register int j;
+			    int j;
 			    if (any)
 				(*outc)(outc_arg, ',');
 			    else {
@@ -310,8 +310,8 @@ _doprnt(register const char *fmt,
 
 		case 's':
 		{
-		    register const char *p;
-		    register const char *p2;
+		    const char *p;
+		    const char *p2;
 
 		    if (prec == -1)
 			prec = 0x7fffffff;	/* MAXINT */
@@ -411,7 +411,7 @@ _doprnt(register const char *fmt,
 		print_num:
 		{
 		    char	buf[MAXBUF];	/* build number here */
-		    register char *	p = &buf[MAXBUF-1];
+		    char *	p = &buf[MAXBUF-1];
 		    static char digits[] = "0123456789abcdef";
 		    const char *prefix = 0;
 

@@ -73,16 +73,13 @@ static char sccsid[] = "@(#)strtouq.c	8.1 (Berkeley) 6/4/93";
  * alphabets and digits are each contiguous.
  */
 u_quad_t
-strtouq(nptr, endptr, base)
-	const char *nptr;
-	char **endptr;
-	register int base;
+strtouq(const char *nptr, char **endptr, int base)
 {
-	register const char *s = nptr;
-	register u_quad_t acc;
-	register int c;
-	register u_quad_t qbase, cutoff;
-	register int neg, any, cutlim;
+	const char *s = nptr;
+	u_quad_t acc;
+	int c;
+	u_quad_t qbase, cutoff;
+	int neg, any, cutlim;
 
 	/*
 	 * See strtoq for comments as to the logic used.

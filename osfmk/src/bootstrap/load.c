@@ -148,7 +148,7 @@ void read_symtab_from_file(struct file *, mach_port_t, task_port_t,
 boolean_t	load_protect_text = TRUE;
 
 int
-load_program_file(register struct file	*fp,
+load_program_file(struct file	*fp,
 		  task_port_t		user_task,
 		  thread_port_t		user_thread,
 		  objfmt_t		ofmt)

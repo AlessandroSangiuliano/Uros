@@ -72,7 +72,7 @@ private mach_port_t mig_reply_port = MACH_PORT_NULL;
  * called and again with initial rthread at end of rthread_init.
  */
 void
-mig_init(register rthread_t initial)
+mig_init(rthread_t initial)
 {
 	if (initial == RTHREAD_NULL) {
 		/* called from mach_init before rthread_init,
@@ -95,10 +95,10 @@ mig_init(register rthread_t initial)
 mach_port_t
 mig_get_reply_port()
 {
-	register mach_port_t reply_port;
+	mach_port_t reply_port;
 
 	if (multithreaded) {
-		register rthread_t self;
+		rthread_t self;
 
 		self = _rthread_self();
 
@@ -120,10 +120,10 @@ void
 mig_dealloc_reply_port(
 	mach_port_t	port)
 {
-	register mach_port_t reply_port;
+	mach_port_t reply_port;
 
 	if (multithreaded) {
-		register rthread_t self;
+		rthread_t self;
 
 		self = _rthread_self();
 

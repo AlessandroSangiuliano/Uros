@@ -159,7 +159,7 @@ static boolean_t	kalloc_initialized = FALSE;
 static void
 kalloc_init(void)
 {
-	register int i;
+	int i;
 
 	/*
 	 * Support free lists for items up to vm_page_size or
@@ -264,7 +264,7 @@ get_allocsize(size_t size, union header **flp)
 void *
 malloc(size_t size)
 {
-	register vm_size_t allocsize;
+	vm_size_t allocsize;
 	union header *addr;
 	union header *fl;
 
@@ -309,7 +309,7 @@ malloc(size_t size)
 void
 free(void *data)
 {
-	register vm_size_t freesize;
+	vm_size_t freesize;
 	union header *fl;
 	union header *addr = ((union header *)data) - 1;
 

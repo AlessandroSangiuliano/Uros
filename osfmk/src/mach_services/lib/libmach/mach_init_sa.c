@@ -50,13 +50,13 @@
 #include <mach.h>
 #include <machine/ndr_def.h>
 
-extern void mig_init();
+extern void mig_init(void *);
 
 mach_port_t	mach_task_self_ = MACH_PORT_NULL;
 
 vm_size_t	vm_page_size;
 
-int		mach_init()
+int		mach_init(void)
 {
 	kern_return_t		kr;
 
@@ -84,5 +84,5 @@ int		mach_init()
 	return(0);
 }
 
-int		(*_mach_init_routine)() = mach_init;
+int		(*_mach_init_routine)(void) = mach_init;
 

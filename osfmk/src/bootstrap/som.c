@@ -52,7 +52,7 @@ som_load(struct file *fp, objfmt_t ofmt, void *hdr)
     struct loader_info *lp = &ofmt->info;
     struct header filehdr;
     struct som_exec_auxhdr x;
-    register int	result;
+    int	result;
 
     /*
      * first read in the hp file header, there is a pointer to the "exec"

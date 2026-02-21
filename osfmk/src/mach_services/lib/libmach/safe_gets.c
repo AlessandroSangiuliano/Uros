@@ -28,8 +28,8 @@
 void
 safe_gets(char *mod, char *str, int maxlen)
 {
-	register char *lp;
-	register int c;
+	char *lp;
+	int c;
 	char *strmax = str + maxlen - 1; /* allow space for trailing 0 */
 
 	lp = str;

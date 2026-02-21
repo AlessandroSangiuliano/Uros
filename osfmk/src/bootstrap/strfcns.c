@@ -77,7 +77,7 @@ char *
 strbuild(char *to, ...)
 {
 	va_list	argptr;
-	register char *from;
+	char *from;
 
 	va_start(argptr, to);
 	while ((from = va_arg(argptr, char *)) != (char *)0) {

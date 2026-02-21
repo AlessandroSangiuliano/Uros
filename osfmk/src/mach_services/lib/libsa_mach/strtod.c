@@ -491,9 +491,9 @@ s2b
 
 static int
 hi0bits
-	(register unsigned long x)
+	(unsigned long x)
 {
-	register int k = 0;
+	int k = 0;
 
 	if (!(x & 0xffff0000U)) {
 		k = 16;
@@ -523,8 +523,8 @@ static int
 lo0bits
 	(unsigned long *y)
 {
-	register int k;
-	register unsigned long x = *y;
+	int k;
+	unsigned long x = *y;
 
 	if (x & 7) {
 		if (x & 1)
@@ -857,7 +857,7 @@ diff
 ulp
 	(double x)
 {
-	register long L;
+	long L;
 	double a;
 
 	L = (word0(x) & Exp_mask) - (P-1)*Exp_msk1;

@@ -88,14 +88,12 @@ typedef	int word;		/* "word" used for optimal copy speed */
  * (the portable versions of) bcopy, memcpy, and memmove.
  */
 
-bcopy(src0, dst0, length)
-	char *dst0;
-	const char *src0;
-	register unsigned int length;
+void
+bcopy(const char *src0, char *dst0, unsigned int length)
 {
-	register char *dst = dst0;
-	register const char *src = src0;
-	register unsigned int t;
+	char *dst = dst0;
+	const char *src = src0;
+	unsigned int t;
 
 	if (length == 0 || dst == src)		/* nothing to do */
 		return;
@@ -152,5 +150,4 @@ bcopy(src0, dst0, length)
 		t = length & wmask;
 		TLOOP(*--dst = *--src);
 	}
-	return(0);
 }

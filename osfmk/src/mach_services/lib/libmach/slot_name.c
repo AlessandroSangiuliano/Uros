@@ -67,7 +67,7 @@ slot_name(
 	char		**cpu_name,
 	char		**cpu_subname)
 {
-	register const char *name, *subname;
+	const char *name, *subname;
 
 	switch (cpu_type) {
 	case CPU_TYPE_VAX:

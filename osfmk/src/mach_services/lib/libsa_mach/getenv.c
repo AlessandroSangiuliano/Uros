@@ -38,8 +38,7 @@ char *__findenv (const char *, int *);
  *	Returns ptr to value associated with name, if any, else NULL.
  */
 char *
-getenv(name)
-	const char *name;
+getenv(const char *name)
 {
 	int offset;
 
@@ -56,13 +55,11 @@ getenv(name)
  *	This routine *should* be a static; don't use it.
  */
 char *
-__findenv(name, offset)
-	register const char *name;
-	int *offset;
+__findenv(const char *name, int *offset)
 {
-	register int len;
-	register const char *np;
-	register char **p, *c;
+	int len;
+	const char *np;
+	char **p, *c;
 
 	if (name == NULL || __environment == NULL)
 		return (NULL);

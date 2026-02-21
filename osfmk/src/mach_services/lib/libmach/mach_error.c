@@ -61,9 +61,7 @@
 #include "externs.h"
 
 void
-mach_error( str, err )	
-	char	*str;
-	mach_error_t		err;
+mach_error(char *str, mach_error_t err)
 {
 	char * err_str;
 	char buf[1024];

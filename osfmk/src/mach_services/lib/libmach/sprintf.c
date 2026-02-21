@@ -55,6 +55,7 @@ savechar(char *arg, int c)
 	*(*(char **)arg)++ = c;
 }
 
+int
 vsprintf(char *s, char *fmt, va_list args)
 {
 	_doprnt(fmt, args, 0, (void (*)()) savechar, (char *) &s);
@@ -62,6 +63,7 @@ vsprintf(char *s, char *fmt, va_list args)
 }
 
 /*VARARGS2*/
+int
 sprintf(char *s, char *fmt, ...)
 {
 	va_list	args;

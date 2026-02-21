@@ -109,7 +109,7 @@ int
 rthread_init()
 {
 	static int 		rthreads_started = FALSE;
-	register rthread_t 	parent;
+	rthread_t 	parent;
 	vm_offset_t		stack;
 	kern_return_t		r;
 
@@ -170,7 +170,7 @@ int (*_thread_init_routine)() = (int (*)()) rthread_init;
  */
 
 vm_offset_t
-rthread_stack_base(register rthread_t rthread, register int offset)
+rthread_stack_base(rthread_t rthread, int offset)
 {
 #ifdef	STACK_GROWTH_UP
 	return (rthread->stack_base + offset);
@@ -191,7 +191,7 @@ rthread_stack_base(register rthread_t rthread, register int offset)
 private rthread_t
 rthread_alloc()
 {
-	register rthread_t th;
+	rthread_t th;
 
 	TR_DECL("rthread_alloc");
 	tr1("enter");
@@ -218,7 +218,7 @@ private rthread_t
 rthread_create(rthread_fn_t func, void *arg, int type)
 {
 	kern_return_t		r;	
-	register rthread_t 	child;
+	rthread_t 	child;
 
 	TR_DECL("rthread_create");
 	tr3("func = %x arg = %x",(int)func, (int)arg);
@@ -271,7 +271,7 @@ rthread_create(rthread_fn_t func, void *arg, int type)
 private void
 rthread_kernel_bind(rthread_t th, boolean_t resume)
 {
-	register kern_return_t r;
+	kern_return_t r;
 	thread_port_t kernel_thread;
 
 	TR_DECL("rthread_kernel_bind");
@@ -320,7 +320,7 @@ rthread_spawn(rthread_fn_t func, void *arg)
 rthread_t
 rthread_spawn_priority(rthread_fn_t func, void *arg, int priority)
 {
-	register rthread_t 	child;
+	rthread_t 	child;
 	kern_return_t		r;
 
 	TR_DECL("rthread_spawn_priority");
@@ -626,7 +626,7 @@ void
 rthread_fork_prepare()
 {
 	kern_return_t		r;
-	register rthread_t 	th = _rthread_self();
+	rthread_t 	th = _rthread_self();
 
 	rthread_control_lock();
 	rthread_control_policy_lock();
@@ -651,7 +651,7 @@ void
 rthread_fork_parent()
 {
 	kern_return_t		r;
-	register rthread_t 	th = _rthread_self();
+	rthread_t 	th = _rthread_self();
 	
 	rthread_control_unlock();
 	rthread_control_policy_unlock();
@@ -774,11 +774,11 @@ static mach_port_t printer_waiting;
 #define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
 
 static void
-printnum(register unsigned int u, register int base,
+printnum(unsigned int u, int base,
           void (*put)(void *, int), void *put_arg)
 {
 	char	buf[MAXBUF];	/* build number here */
-	register char *	p = &buf[MAXBUF-1];
+	char *	p = &buf[MAXBUF-1];
 	static char digs[] = "0123456789abcdef";
 
 	do {
@@ -883,9 +883,9 @@ static void rthread_doprnt(char *fmt, va_list args, int radix, void (*put)(void 
 		case 'b':
 		case 'B':
 		{
-		    register char *p;
+		    char *p;
 		    boolean_t	  any;
-		    register int  i;
+		    int  i;
 
 		    u = va_arg(args, unsigned int);
 		    p = va_arg(args, char *);
@@ -901,7 +901,7 @@ static void rthread_doprnt(char *fmt, va_list args, int radix, void (*put)(void 
 			    /*
 			     * Bit field
 			     */
-			    register int j;
+			    int j;
 			    if (any)
 				(*putc)(putc_arg, ',');
 			    else {
@@ -941,8 +941,8 @@ static void rthread_doprnt(char *fmt, va_list args, int radix, void (*put)(void 
 
 		case 's':
 		{
-		    register char *p;
-		    register char *p2;
+		    char *p;
+		    char *p2;
 
 		    if (prec == -1)
 			prec = 0x7fffffff;	/* MAXINT */
@@ -1039,7 +1039,7 @@ static void rthread_doprnt(char *fmt, va_list args, int radix, void (*put)(void 
 		print_num:
 		{
 		    char	buf[MAXBUF];	/* build number here */
-		    register char *	p = &buf[MAXBUF-1];
+		    char *	p = &buf[MAXBUF-1];
 		    static char digits[] = "0123456789abcdef";
 		    char *prefix = 0;
 

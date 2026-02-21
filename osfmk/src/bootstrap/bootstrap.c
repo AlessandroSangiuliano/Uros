@@ -174,7 +174,7 @@ boolean_t		io_in_progress;
 int
 main(int argc, char **argv)
 {
-	register kern_return_t	kr;
+	kern_return_t	kr;
 	task_port_t		user_task;
 	thread_port_t		user_thread;
 	mach_port_t		prev_port;
@@ -1244,7 +1244,7 @@ bootstrap_notify_dead_name(mach_port_t name)
  * bootstrap ports.
  */
 static void
-data_device_loop()
+data_device_loop(void)
 {
     io_buf_ptr_t local_addr;
     mach_msg_type_number_t local_size;

@@ -72,11 +72,11 @@ static char sccsid[] = "@(#)strtoul.c	8.1 (Berkeley) 6/4/93";
 unsigned long
 strtoul(const char *nptr, char **endptr, int base)
 {
-	register const char *s = nptr;
-	register unsigned long acc;
-	register int c;
-	register unsigned long cutoff;
-	register int neg = 0, any, cutlim;
+	const char *s = nptr;
+	unsigned long acc;
+	int c;
+	unsigned long cutoff;
+	int neg = 0, any, cutlim;
 
 	/*
 	 * See strtol for comments as to the logic used.

@@ -66,8 +66,8 @@ static char sccsid[] = "@(#)strspn.c	8.1 (Berkeley) 6/4/93";
 size_t
 strspn(const char *s1, const char *s2)
 {
-	register const char *p = s1, *spanp;
-	register char c, sc;
+	const char *p = s1, *spanp;
+	char c, sc;
 
 	/*
 	 * Skip any characters in s2, excluding the terminating \0.

@@ -255,9 +255,9 @@ static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *
 		case 'b':
 		case 'B':
 		{
-		    register char *p;
+		    char *p;
 		    boolean_t	  any;
-		    register int  i;
+		    int  i;
 
 		    u = va_arg(args, unsigned long);
 		    p = va_arg(args, char *);
@@ -273,7 +273,7 @@ static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *
 			    /*
 			     * Bit field
 			     */
-			    register int j;
+			    int j;
 			    if (any)
 				(*putc)(putc_arg, ',');
 			    else {
@@ -313,8 +313,8 @@ static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *
 
 		case 's':
 		{
-		    register char *p;
-		    register char *p2;
+		    char *p;
+		    char *p2;
 
 		    if (prec == -1)
 			prec = 0x7fffffff;	/* MAXINT */
@@ -411,7 +411,7 @@ static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *
 		print_num:
 		{
 		    char	buf[MAXBUF];	/* build number here */
-		    register char *	p = &buf[MAXBUF-1];
+		    char *	p = &buf[MAXBUF-1];
 		    static char digits[] = "0123456789abcdef";
 		    char *prefix = 0;
 

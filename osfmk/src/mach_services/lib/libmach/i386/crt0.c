@@ -62,8 +62,8 @@ void (*_pthread_init_routine)(void);
 void (*_pthread_exit_routine)(int);
 void (*_xti_tli_init_routine)(void);
 #ifdef	MACH3
-int  (*_cthread_init_routine)();
-void (*_cthread_exit_routine)();
+int  (*_cthread_init_routine)(void);
+void (*_cthread_exit_routine)(int);
 #endif	/* MACH3 */
 
 int _ldr_crt0_request = 1;
@@ -79,7 +79,8 @@ static int __inline__ Entry_sp(void)
 	return (sp);
 }
 
-__start()
+void
+__start(void)
 {
 	struct kframe {
 		int	kargc;
@@ -88,15 +89,12 @@ __start()
 		char	kenvstr[1];	/* size varies */
 		char	k_auxv[1];	/* size varies */
 	};
-	/*
-	 *	ALL REGISTER VARIABLES!!!
-	 */
-	register int r11;		/* needed for init */
-	register struct kframe *kfp;	/* r10 */
-	register char **targv;
-	register char **argv;
-	register int argc;
-	register char **argcp;
+	int r11;
+	struct kframe *kfp;
+	char **targv;
+	char **argv;
+	int argc;
+	char **argcp;
 
 	kfp = (struct kframe *)Entry_sp();
 
@@ -153,7 +151,7 @@ __start()
 
 	errno = 0;
 	if (_ldr_present) {
-		void (*entry_pt)();
+		void (*entry_pt)(void);
 
 		entry_pt = (void ((*)()))main(kfp->kargc, argv, environ, _auxv);
 		(*_ldr_jump_func)(entry_pt, argcp);

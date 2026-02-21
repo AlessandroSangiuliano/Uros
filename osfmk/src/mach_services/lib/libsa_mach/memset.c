@@ -79,24 +79,19 @@ static char sccsid[] = "@(#)memset.c	8.1 (Berkeley) 6/4/93";
 #define	WIDEVAL	0
 
 void
-bzero(dst0, length)
-	void *dst0;
-	register size_t length;
+bzero(void *dst0, size_t length)
 #else
 #define	RETURN	return (dst0)
 #define	VAL	c0
 #define	WIDEVAL	c
 
 void *
-memset(dst0, c0, length)
-	void *dst0;
-	register int c0;
-	register size_t length;
+memset(void *dst0, int c0, size_t length)
 #endif
 {
-	register size_t t;
-	register unsigned int c;
-	register void *dst;
+	size_t t;
+	unsigned int c;
+	void *dst;
 
 	dst = dst0;
 	/*

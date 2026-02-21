@@ -71,9 +71,9 @@ extern void bzero(void *, size_t);
 void
 rthread_setup(rthread_t child, thread_port_t thread, rthread_fn_t routine)
 {
-    register intptr_t top = (intptr_t)(child->stack_base + child->stack_size);
+    intptr_t top = (intptr_t)(child->stack_base + child->stack_size);
     struct i386_thread_state state;
-    register struct i386_thread_state *ts = &state;
+    struct i386_thread_state *ts = &state;
     kern_return_t r;
     unsigned int count;
 
