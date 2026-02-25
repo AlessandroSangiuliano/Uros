@@ -126,7 +126,8 @@
  *	All allocations of size less than kalloc_max are rounded to the
  *	next highest power of 2.
  */
-static vm_size_t	kalloc_max;	/* max before we use vm_allocate */
+#define	MAX_SMALL_ALLOC	(16*1024)	/* max before using vm_allocate */
+static vm_size_t	kalloc_max;
 #define		MINSIZE	8		/* minimum allocation size */
 
 union header {
@@ -166,8 +167,8 @@ kalloc_init(void)
 	 * 16Kbytes, whichever is less.
 	 */
 
-	if (vm_page_size > 16*1024)
-		kalloc_max = 16*1024;
+	if (vm_page_size > MAX_SMALL_ALLOC)
+		kalloc_max = MAX_SMALL_ALLOC;
 	else
 		kalloc_max = vm_page_size;
 

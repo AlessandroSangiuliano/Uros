@@ -25,6 +25,8 @@
 #include <mach.h>
 #include <stdio.h>
 
+#define	CTRL(c)	((c) & 037)
+
 void
 safe_gets(char *mod, char *str, int maxlen)
 {
@@ -59,7 +61,7 @@ safe_gets(char *mod, char *str, int maxlen)
 		    }
 		    continue;
 		case '@':
-		case 'u'&037:
+		case CTRL('u'):
 		    lp = str;
 		    printf("\n\r");
 		    continue;
@@ -70,7 +72,7 @@ safe_gets(char *mod, char *str, int maxlen)
 			    printf("%c", c);
 			}
 			else {
-			    printf("%c", '\007'); /* beep */
+			    printf("%c", '\a');
 			}
 		    }
 	    }

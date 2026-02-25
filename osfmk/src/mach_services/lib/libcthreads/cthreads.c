@@ -190,7 +190,8 @@ struct cthreads_tr_struct {
 } cthreads_tr_data;
 
 unsigned int cthreads_tr_print_now = 0;
-#define CLMS 80*4096
+#define CTHREADS_LOG_SIZE (80*4096)
+#define CLMS CTHREADS_LOG_SIZE
 char cthreads_log[CLMS];
 static int cthreads_log_ptr=0;
 

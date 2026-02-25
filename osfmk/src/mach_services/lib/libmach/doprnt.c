@@ -48,6 +48,7 @@
  */
 
 #include <mach/boolean.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -317,7 +318,7 @@ static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *
 		    char *p2;
 
 		    if (prec == -1)
-			prec = 0x7fffffff;	/* MAXINT */
+			prec = INT_MAX;
 
 		    p = va_arg(args, char *);
 

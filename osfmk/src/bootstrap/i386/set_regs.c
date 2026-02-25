@@ -52,7 +52,8 @@
 #include <mach/mach_host.h>
 #include <mach/machine/vm_param.h>
 
-#define	STACK_SIZE	(64*1024)
+#define	STACK_SIZE		(64*1024)
+#define	STACK_ALIGN_OFFSET	0x10	/* i386 ABI 16-byte stack alignment */
 
 void
 set_regs(mach_port_t		host_port,
@@ -89,7 +90,7 @@ set_regs(mach_port_t		host_port,
 				&reg_size);
 
 	regs.eip = lp->entry_1;
-	regs.uesp = stack_end-0x10; /* XXX */
+	regs.uesp = stack_end - STACK_ALIGN_OFFSET;
 
 	(void)thread_set_state(user_thread,
 				i386_THREAD_STATE,
