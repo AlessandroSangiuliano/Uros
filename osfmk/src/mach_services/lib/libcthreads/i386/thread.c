@@ -93,17 +93,4 @@ cthread_setup(
 				   i386_THREAD_STATE_COUNT), r);
 }
 
-#if 0
-void *
-cthread_sp(void)
-{
-	void *x;
-#ifdef __GNUC__
-         __asm__("movl %%esp,%0" : "=r" (x));
-	return x;
-#else
-	return (void *)&x;
-#endif
-}
-#endif
 

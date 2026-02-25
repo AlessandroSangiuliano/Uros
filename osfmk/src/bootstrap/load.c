@@ -162,15 +162,6 @@ load_program_file(struct file	*fp,
 				area_start,
 	                        zero_page_start;
 
-#if 0
-	if (!file_is_executable(fp)) {
-		BOOTSTRAP_IO_LOCK();
-		printf("server not executable\n");
-		BOOTSTRAP_IO_UNLOCK();
-		return (EX_NOT_EXECUTABLE);
-	}
-#endif
-
 	/*
          * Map page 0 so that the program doesn't get it as
 	 * the result of a vm_allocate() or whatever.

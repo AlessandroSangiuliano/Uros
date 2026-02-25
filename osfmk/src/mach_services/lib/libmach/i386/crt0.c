@@ -21,10 +21,6 @@
 /*
  * MkLinux
  */
-#if !defined(lint) && !defined(_NOIDENT)
-static char rcsid[] = "@(#)$RCSfile: crt0.c,v $ $Revision: 1.3.10.2 $ (OSF) $Date: 1995/01/26 22:12:43 $";
-#endif
-
 /*
  * Copyright (c) 1990 The Regents of the University of California.
  * All rights reserved.
@@ -66,10 +62,6 @@ int  (*_cthread_init_routine)(void);
 void (*_cthread_exit_routine)(int);
 #endif	/* MACH3 */
 
-int _ldr_crt0_request = 1;
-int _ldr_present;
-void (*_ldr_jump_func)();
-
 extern char etext;
 
 static int __inline__ Entry_sp(void)
@@ -109,24 +101,6 @@ __start(void)
                 /* void */ ;
         _auxv = targv;
 
-#ifdef GCRT0
-	_moninit = _gprof_moninit;
-	_monstop = _gprof_monstop;
-	_moncontrol = _gprof_moncontrol;
-	_monstartup = _gprof_monstartup;
-#endif
-
-#ifdef MCRT0
-	_moninit = _prof_moninit;
-	_monstop = _prof_monstop;
-	_moncontrol = _prof_moncontrol;
-	_monstartup = _prof_monstartup;
-#endif
-
-#if defined(MCRT0) || defined(GCRT0)
-        (*_monstartup)((char *)__start, (char *)&etext);
-#endif
-
 	if (_mach_init_routine)
 		(*_mach_init_routine)();
 
@@ -150,14 +124,7 @@ __start(void)
 		(*_xti_tli_init_routine)();
 
 	errno = 0;
-	if (_ldr_present) {
-		void (*entry_pt)(void);
-
-		entry_pt = (void ((*)()))main(kfp->kargc, argv, environ, _auxv);
-		(*_ldr_jump_func)(entry_pt, argcp);
-		/*NOTREACHED*/
-	} else
-		argc = (int)main(kfp->kargc, argv, environ, _auxv);
+	argc = (int)main(kfp->kargc, argv, environ, _auxv);
 
 #ifdef	MACH3
 	if (_cthread_exit_routine)

@@ -47,10 +47,6 @@
  * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-#if defined(SYSLIBC_SCCS) && !defined(lint)
-	.asciz "@(#)fork.s	5.5 (Berkeley) 6/27/88"
-#endif /* SYSLIBC_SCCS and not lint */
-
 #include	<machine/asm.h>
 #include	"SYS.h"
 #include	<syscall.h>

@@ -368,16 +368,6 @@ extern void exit(int ret);
  */
 extern void cthread_setup(cthread_t, thread_port_t, cthread_fn_t);
 
-#if 0	/* These functions don't really exist as such. */
-/* Cthread context functions (in machine/csw.s) */
-extern void  cthread_context_prepare(cthread_context_t *, cthread_fn_t, void *);
-extern void *cthread_context_user_build(cthread_context_t *, cthread_fn_t,
-                                        void *, void *);
-extern void  cthread_context_user_invoke(cthread_context_t *, void *);
-extern void  cthread_context_internal_build(cthread_context_t *, cthread_fn_t,
-                                        void *, spin_lock_t *, vm_offset_t *);
-#endif	/* 0 */
-
 /* Malloc functions (in malloc.c). */
 #ifdef DEBUG
 extern void cthread_print_malloc_free_list(void);

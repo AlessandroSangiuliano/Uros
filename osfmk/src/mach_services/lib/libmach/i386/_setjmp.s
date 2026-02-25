@@ -74,9 +74,6 @@ ENTRY2(mach_setjmp,_mach_setjmp)
         jmp     *%edx
 
 ENTRY2(mach_longjmp,_mach_longjmp)
-#if 0
-	call	EXT(_fpinit)		/* reset coprocessor */
-#endif
 	movl	8(%esp),%eax		/* return(v) */
 	movl	4(%esp),%ecx		/* fetch buffer */
 	movl	0(%ecx),%ebx

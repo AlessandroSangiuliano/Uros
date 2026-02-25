@@ -450,14 +450,6 @@ Retry_Server:
 
 	    parse_path(sp, newpath);
 
-#if 0
-	    /*
-	     * Check if we really want to load this server
-	     */
-	    if (!(sp->flags & LOAD_SERVER_F))
-		continue;
-#endif
-
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: loading %s\n", program_name, sp->server_name);
 	    BOOTSTRAP_IO_UNLOCK();
@@ -557,12 +549,8 @@ Retry_Server:
 	    if (kr != KERN_SUCCESS)
 		panic("thread_create 0x%x", kr);
 
-#if 0
-	    strbuild(pathname, sp->symtab_name, "_name", (char *)0);
-#else
 	    strlcpy(pathname, sp->symtab_name, sizeof(pathname));
 	    strlcat(pathname, "_name", sizeof(pathname));
-#endif
 	    if (ptr = getenv(pathname))
 		parse_path(sp, ptr);
 
