@@ -236,7 +236,8 @@ cthreads_sprint_tr(
     spin_lock(&lock);
     if (cte->file == (char *) 0 || cte->funcname == (char *) 0 ||
 	cte->lineno == 0 || cte->fmt == 0) {
-	sprintf(&cthreads_log[cthreads_log_ptr],"[%04x]\n", ti);
+	snprintf(&cthreads_log[cthreads_log_ptr], CLMS - cthreads_log_ptr,
+		 "[%04x]\n", ti);
 	while(cthreads_log[cthreads_log_ptr]!='\0')
 	    cthreads_log_ptr++;
 	spin_unlock(&lock);
@@ -246,23 +247,24 @@ cthreads_sprint_tr(
     for (cp = cte->file; *cp; ++cp)
 	if (*cp == '/')
 	    filename = cp + 1;
-    sprintf(&cthreads_log[cthreads_log_ptr],
-	    "[%8x][%04x] %s", (unsigned int) cte->sp,ti, cte->funcname);
+    snprintf(&cthreads_log[cthreads_log_ptr], CLMS - cthreads_log_ptr,
+	     "[%8x][%04x] %s", (unsigned int) cte->sp, ti, cte->funcname);
     while(cthreads_log[cthreads_log_ptr]!='\0')
 	cthreads_log_ptr++;
     if (show_extra)
-	sprintf(&cthreads_log[cthreads_log_ptr],
-		"(%s:%05d):\n\t", filename, cte->lineno);
+	snprintf(&cthreads_log[cthreads_log_ptr], CLMS - cthreads_log_ptr,
+		 "(%s:%05d):\n\t", filename, cte->lineno);
     else
-	sprintf(&cthreads_log[cthreads_log_ptr], ":  ");
+	snprintf(&cthreads_log[cthreads_log_ptr], CLMS - cthreads_log_ptr,
+		 ":  ");
     while(cthreads_log[cthreads_log_ptr]!='\0')
 	cthreads_log_ptr++;
-    sprintf(&cthreads_log[cthreads_log_ptr],
-	    cte->fmt, cte->tag1, cte->tag2, cte->tag3, cte->tag4);
+    snprintf(&cthreads_log[cthreads_log_ptr], CLMS - cthreads_log_ptr,
+	     cte->fmt, cte->tag1, cte->tag2, cte->tag3, cte->tag4);
     while(cthreads_log[cthreads_log_ptr]!='\0')
 	cthreads_log_ptr++;
-    sprintf(&cthreads_log[cthreads_log_ptr],
-	    "\n");
+    snprintf(&cthreads_log[cthreads_log_ptr], CLMS - cthreads_log_ptr,
+	     "\n");
     while(cthreads_log[cthreads_log_ptr]!='\0')
 	cthreads_log_ptr++;
     if (cthreads_log_ptr >= CLMS-200)
