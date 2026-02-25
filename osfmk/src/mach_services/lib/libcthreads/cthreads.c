@@ -193,6 +193,11 @@ unsigned int cthreads_tr_print_now = 0;
 #define CTHREADS_LOG_SIZE (80*4096)
 #define CLMS CTHREADS_LOG_SIZE
 char cthreads_log[CLMS];
+/*
+ * Note: cthreads_log_ptr is not synchronized.  This is acceptable
+ * for debug tracing where occasional lost or interleaved entries
+ * are tolerable.
+ */
 static int cthreads_log_ptr=0;
 
 static void
@@ -742,7 +747,18 @@ cthread_block(cthread_t p, cthread_fn_t f, void *a, cthread_t wakeup)
      */
 
     else {
-	cthread_wakeup(wakeup);/*XXX EVIL.  LOCK HELD XXX*/
+	/*
+	 * WARNING: cthread_wakeup() is called with the cthread lock held.
+	 * Its contract says "no locks held on entry."  The wired path
+	 * (cthread_block_wired) correctly unlocks first, but here we
+	 * cannot unlock because we need atomic access to the run_queue
+	 * immediately after.  This is safe only because cthread_wakeup()
+	 * calls thread_depress_abort() which is a Mach syscall that does
+	 * not acquire any userspace locks.  However, the retry loop in
+	 * cthread_wakeup (thread_switch) could yield the CPU while this
+	 * lock is held, increasing contention.
+	 */
+	cthread_wakeup(wakeup);
 	cthread_queue_deq(&cthread_status.run_queue, cthread_t, new);
 	if (new) {
 	    new->state = CTHREAD_RUNNING;
@@ -1180,7 +1196,8 @@ cthread_join_real(cthread_t p)
  * Return Value:
  *
  * Comments:
- *	Comment from rwd -- XXX Fix T_MAIN case XXX
+ *	When the main cthread exits while others are still running,
+ *	it blocks until they finish, then calls exit() with the result.
  */
 
 void
@@ -1788,8 +1805,12 @@ condition_broadcast(condition_t c)
     while (cthread_queue_head(&c->queue, cthread_t) != CTHREAD_NULL) {
 	mutex_t m;
 
+    /*
+     * WARNING: cthread_wakeup() called with cthread lock held.
+     * See comment in cthread_block() for rationale.
+     */
     if (waiter) {
-        cthread_wakeup(waiter);    /*XXX LOCK HELD XXX*/
+        cthread_wakeup(waiter);
         waiter = CTHREAD_NULL;
     }
 

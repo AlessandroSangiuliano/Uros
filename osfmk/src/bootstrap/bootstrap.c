@@ -270,7 +270,7 @@ main(int argc, char **argv)
 
 	/*
 	 *  Have a reply port for dead-name notification.
-	 *  XXX restart the service if it dies?
+	 *  TODO: implement automatic service restart on MACH_NOTIFY_DEAD_NAME.
 	 */
 	kr = mach_port_allocate(bootstrap_self, MACH_PORT_RIGHT_RECEIVE,
 				&bootstrap_notification_port);
@@ -601,7 +601,7 @@ Retry_Server:
 #endif	    
 
 	    /*
-	     *  XXX restart the service if it dies?
+	     *  TODO: implement automatic service restart on MACH_NOTIFY_DEAD_NAME.
 	     */
 	    kr = mach_port_request_notification(bootstrap_self,
 						sp->task_port,
@@ -1423,8 +1423,8 @@ data_device_loop(void)
 }
 
 /*
- * Load a file into the vm of the task argument
- * XXX For now, only the bootstrap_task uses it
+ * Load a file into the vm of the task argument.
+ * Currently only called for the bootstrap_task; extend if needed.
  */
 static kern_return_t
 data_device_load_file(
