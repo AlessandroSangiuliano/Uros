@@ -218,7 +218,7 @@ struct cthread {
     struct cthread 	*list;		/* List of all cthreads. */
     mutex_t		cond_mutex;	/* Event the thread is waiting for. */
 #ifdef	WAIT_DEBUG
-	int waiting_for;
+	uintptr_t waiting_for;
 #endif	/* WAIT_DEBUG */
     volatile int	state;		/* The current state (see below). */
     volatile int	flags;		/* The thread's flags (see below). */

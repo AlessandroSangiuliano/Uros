@@ -1019,9 +1019,9 @@ catch_exception_raise_state_identity(mach_port_t port,
 
 	/* copy input state to output state */
 	*ocnt = icnt;
-	memcpy((char *) out_state, (char *) in_state, icnt * sizeof (int));
+	memcpy(out_state, in_state, icnt * sizeof (int));
 	BOOTSTRAP_IO_LOCK();
-	printf("State is at 0x%x (count = %d)\n", (int) out_state, *ocnt);
+	printf("State is at %p (count = %d)\n", (void *) out_state, *ocnt);
 	for (i = 0; i < icnt; i++) {
 		if (i % 4)
 			printf("\n");

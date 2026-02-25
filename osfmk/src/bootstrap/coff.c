@@ -279,7 +279,7 @@ coff_symload(
 		return;
     	}
 
-	*(int*)symtab = symsize;
+	*(int32_t*)symtab = symsize;
 
 	/*
 	 * Get the strings after the symbol table

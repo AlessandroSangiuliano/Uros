@@ -661,8 +661,8 @@ alloc_stack(cthread_t p)
 	    int i;
 	    vm_address_t *loop = (vm_address_t *)base;
 	    for(i=1;i<cthread_stack_chunk_count;i++) {
-		loop = (vm_address_t *)((int)loop + cthread_status.stack_size);
-		*loop = (int)loop + cthread_status.stack_size;
+		loop = (vm_address_t *)((uintptr_t)loop + cthread_status.stack_size);
+		*loop = (uintptr_t)loop + cthread_status.stack_size;
 	    }
 	    if (loop != (vm_address_t *)base) {
 		spin_lock(&stack_pool_lock);

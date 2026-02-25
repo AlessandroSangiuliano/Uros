@@ -412,7 +412,7 @@ cthread_create(cthread_fn_t func, void *arg)
     thread_port_t n;
     
     TR_DECL("cthread_create");
-    tr3("func = %x arg = %x",(int)func, (int)arg);
+    tr3("func = %p arg = %p",(void *)func, (void *)arg);
     child = cthread_alloc();
     child->func = func;
     child->arg = arg;
@@ -489,7 +489,7 @@ cthread_idle(cthread_t p)
     kern_return_t r;
     
     TR_DECL("cthread_idle");
-    tr2("enter 0x%x", (int)p);
+    tr2("enter %p", (void *)p);
 #ifdef STATISTICS
     stats_lock(&cthread_stats.lock);
     cthread_stats.waiters++;
@@ -569,7 +569,7 @@ cthread_idle(cthread_t p)
 	}
     } while (!new);
 
-    tr3("waiter 0x%x got %8x", (int)p, (int)new);
+    tr3("waiter %p got %p", (void *)p, (void *)new);
 #ifdef STATISTICS
     cthread_stats.idle_exit++;
 #endif /*STATISTICS*/
@@ -627,7 +627,7 @@ cthread_wakeup(cthread_t waiter)
 
     /* If the waiter does not have a Mach thread, just return. */
     if ((waiter_thread_port = waiter->wired) == MACH_PORT_NULL) {
-	    tr2("!waiter->wired 0x%x", (int)waiter);
+	    tr2("!waiter->wired %p", (void *)waiter);
 	    return;
     }
     
@@ -636,7 +636,7 @@ cthread_wakeup(cthread_t waiter)
      * happen if a race occurred and someone else woke up the cthread.
      */
     if (waiter->undepress) {
-	    tr2("waiter->undepress 0x%x", (int)waiter);
+	    tr2("waiter->undepress %p", (void *)waiter);
 	    return;
     }
 
@@ -661,7 +661,7 @@ cthread_wakeup(cthread_t waiter)
 	 */
 	MACH_CALL(thread_switch(THREAD_NULL, SWITCH_OPTION_DEPRESS, 10), r);
     }
-    tr2("!waiter->flags & CTHREAD_DEPRESS 0x%x", (int)waiter);
+    tr2("!waiter->flags & CTHREAD_DEPRESS %p", (void *)waiter);
 }
 
 staticf void 
@@ -714,7 +714,7 @@ cthread_block(cthread_t p, cthread_fn_t f, void *a, cthread_t wakeup)
 #endif
     
     TR_DECL("cthread_block");
-    tr4("thread = %x func = %x arg = %x", (int)p, (int)f, (int)a);
+    tr4("thread = %p func = %p arg = %p", (void *)p, (void *)f, (void *)a);
 #ifdef STATISTICS
     cthread_stats.blocks++;
 #endif /*STATISTICS*/
@@ -1062,7 +1062,7 @@ cthread_fork(cthread_fn_t func, void *arg)
     cthread_t child;
 
     TR_DECL("cthread_fork");
-    tr3("func = %x arg = %x", (int)func, (int)arg);
+    tr3("func = %p arg = %p", (void *)func, (void *)arg);
 
     /*
      * Attempt to find a free cthread.  If there is one, then initialize its
@@ -1081,7 +1081,7 @@ cthread_fork(cthread_fn_t func, void *arg)
 	child->state |= CTHREAD_RUNNABLE;
 	waiter = cthread_idle_first();
 	cthread_unlock();
-	tr3("child = 0x%x waiter = 0x%x", (int)child, (int)waiter);
+	tr3("child = %p waiter = %p", (void *)child, (void *)waiter);
 	cthread_wakeup(waiter);
     } else {
 	child = cthread_create(func, arg);
@@ -1109,7 +1109,7 @@ cthread_detach(cthread_t t)
     cthread_t p = (cthread_t)t;
 
     TR_DECL("cthread_detach");
-    tr2("thread = %x",(int)t);
+    tr2("thread = %p",(void *)t);
     cthread_lock();
     if (p->status & T_RETURNED) {      /* If we returned we are all done... */
 	cthread_queue_enq(&cthread_status.cthreads, p);
@@ -1151,7 +1151,7 @@ cthread_join_real(cthread_t p)
     cthread_t self = _cthread_self();
 
     TR_DECL("cthread_join_real");
-    tr2("thread = %x",(int)p);
+    tr2("thread = %p",(void *)p);
     cthread_lock();
     if (! (p->status & T_RETURNED)) {
 #ifdef STATISTICS
@@ -1189,7 +1189,7 @@ cthread_exit(void *result)
     cthread_t p = _cthread_self();
 
     TR_DECL("cthread_exit");
-    tr3("thread = %x result = %x",(int)p, (int)result);
+    tr3("thread = %p result = %p",(void *)p, (void *)result);
     cthread_lock();
 
 
@@ -1446,7 +1446,7 @@ void
 mutex_init(mutex_t m)
 {
     TR_DECL("mutex_init");
-    tr2("mutex = %x", (int)m);
+    tr2("mutex = %p", (void *)m);
 
     cthread_queue_init(&(m)->queue);
     spin_lock_init(&(m)->held);
@@ -1576,7 +1576,7 @@ mutex_lock_real(mutex_t m)
     cthread_t p = _cthread_self();
     
     TR_DECL("mutex_lock_real");
-    tr2("mutex = %x", (int)m);
+    tr2("mutex = %p", (void *)m);
 
 #ifdef STATISTICS
     cthread_stats.mutex_miss++;
@@ -1641,7 +1641,7 @@ mutex_lock_real(mutex_t m)
     cthread_stats.mutex_block++;
 #endif /*STATISTICS*/
 #ifdef WAIT_DEBUG
-    p->waiting_for = (int)m;
+    p->waiting_for = (uintptr_t)m;
 #endif /*WAIT_DEBUG*/
     cthread_block(p, (cthread_fn_t) mutex_lock_real, m, CTHREAD_NULL);
     return; /* never reached */
@@ -1653,7 +1653,7 @@ mutex_unlock_solid(mutex_t m)
     cthread_t new, waiter = CTHREAD_NULL;
     
     TR_DECL("mutex_unlock_solid");
-    tr2("mutex = %x", (int)m);
+    tr2("mutex = %p", (void *)m);
 
 #ifdef STATISTICS
     cthread_stats.umutex_enter++;
@@ -1715,7 +1715,7 @@ condition_signal(condition_t c)
     cthread_t p, waiter = CTHREAD_NULL;
     
     TR_DECL("condition_signal");
-    tr2("cond = %x", (int)c);
+    tr2("cond = %p", (void *)c);
 
     /* If there are no waiters, then simply return. */
     if(cthread_queue_head(&c->queue, cthread_t) == CTHREAD_NULL)
@@ -1729,11 +1729,11 @@ condition_signal(condition_t c)
     cthread_queue_deq(&c->queue, cthread_t, p);
     if (p) {
 	mutex_t m = p->cond_mutex;
-	tr2("waking up %x",(int)p);
+	tr2("waking up %p",(void *)p);
 	m->trigger = TRUE;
 	if (spin_lock_locked(&m->held)) {
 #ifdef WAIT_DEBUG
-	    p->waiting_for = (int)m;
+	    p->waiting_for = (uintptr_t)m;
 #endif /*WAIT_DEBUG*/
 	    cthread_queue_enq(&m->queue, p);
 	} else {
@@ -1774,7 +1774,7 @@ condition_broadcast(condition_t c)
     cthread_t p, waiter = CTHREAD_NULL;
     
     TR_DECL("condition_broadcastl");
-    tr2("cond = %x", (int)c);
+    tr2("cond = %p", (void *)c);
 
     /* If there are no waiters, simply return. */
     if(cthread_queue_head(&c->queue, cthread_t) == CTHREAD_NULL)
@@ -1798,7 +1798,7 @@ condition_broadcast(condition_t c)
 	m->trigger = TRUE;
 	if (spin_lock_locked(&m->held)) {
 #ifdef WAIT_DEBUG
-	    p->waiting_for = (int)m;
+	    p->waiting_for = (uintptr_t)m;
 #endif /*WAIT_DEBUG*/
 	    cthread_queue_enq(&m->queue, p);
 	} else {
@@ -1824,7 +1824,7 @@ cond_wait(condition_t c, mutex_t m)
     cthread_t new, wakeup = CTHREAD_NULL;
     
     TR_DECL("condition_wait");
-    tr3("cond = %x mutex = %x", (int)c, (int)m);
+    tr3("cond = %p mutex = %p", (void *)c, (void *)m);
 
     /*
      * Lock the cthread data structures, and queue the current cthread on the
@@ -1858,7 +1858,7 @@ cond_wait(condition_t c, mutex_t m)
 	}
     }
 #ifdef WAIT_DEBUG
-    p->waiting_for = (int)c;
+    p->waiting_for = (uintptr_t)c;
 #endif /*WAIT_DEBUG*/
     cthread_block(p, (cthread_fn_t) mutex_lock_real, m, wakeup);
 }

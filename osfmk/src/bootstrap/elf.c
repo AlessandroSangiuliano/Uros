@@ -194,7 +194,7 @@ elf_symload(struct file *fp,
 	return;
     }
 
-    *(int*)symtab = lp->sym_size[0];
+    *(int32_t*)symtab = lp->sym_size[0];
 
     nl = (struct nlist *)(symtab + sizeof(int));
     symsize = lp->sym_size[0] / sizeof(struct nlist) * sizeof(Elf32_Sym);
@@ -246,7 +246,7 @@ elf_symload(struct file *fp,
 	case STT_HIPROC:
 	case STT_SECTION:
 	    /* Ignore symbol */
-	    *(int*)symtab -= sizeof(struct nlist);
+	    *(int32_t*)symtab -= sizeof(struct nlist);
 	    table_size -= sizeof(struct nlist);
 	    sstab++;
 	    continue;
@@ -277,7 +277,7 @@ elf_symload(struct file *fp,
     }
     free((void *)buf);
 
-    *(int*)nl = lp->str_size + sizeof(int);
+    *(int32_t*)nl = lp->str_size + sizeof(int32_t);
     strings = (vm_offset_t)nl + sizeof(int);
 
     /* 
