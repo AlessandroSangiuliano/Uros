@@ -418,7 +418,7 @@ main(int argc, char **argv)
 	    char newpath[PATH_MAX];
 
 	    retry = FALSE;
-Retry_Server:
+	    while (1) {
 	    sp = &servers[i];
 	    /* If -a was seen in bootstrap args then prompt for
 	     * the name and path of the server. 
@@ -471,7 +471,7 @@ Retry_Server:
 		       program_name, result);
 		BOOTSTRAP_IO_UNLOCK();
 		retry = TRUE;
-		goto Retry_Server;
+		continue;
 	    }
 	    result = ex_get_header(&f, &ofmt);
 	    close_file(&f);
@@ -481,7 +481,7 @@ Retry_Server:
 		       program_name, result);
 		BOOTSTRAP_IO_UNLOCK();
 		retry = TRUE;
-		goto Retry_Server;
+		continue;
 	    }
 
 	    /*
@@ -591,7 +591,7 @@ Retry_Server:
 		    BOOTSTRAP_IO_UNLOCK();
 		}
 		retry = TRUE;
-		goto Retry_Server;
+		continue;
 	    }
 #ifdef DEBUG
 	    BOOTSTRAP_IO_LOCK();
@@ -650,6 +650,8 @@ Retry_Server:
 #endif
 	    }
 	    (void) mach_port_deallocate(bootstrap_self, user_thread);
+	    break;
+	    } /* end retry loop */
 
 	} /* end foreach server */
 
