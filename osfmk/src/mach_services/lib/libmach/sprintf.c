@@ -63,7 +63,6 @@ vsprintf(char *s, const char *fmt, va_list args)
 	*s = 0;
 }
 
-/*VARARGS2*/
 int
 sprintf(char *s, const char *fmt, ...)
 {
@@ -104,7 +103,6 @@ vsnprintf(char *s, size_t n, const char *fmt, va_list args)
 	return (state.buf - s);
 }
 
-/*VARARGS3*/
 int
 snprintf(char *s, size_t n, const char *fmt, ...)
 {

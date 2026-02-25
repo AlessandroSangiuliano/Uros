@@ -72,7 +72,6 @@
  * the result string.
  * The list of strings ends with a '(char *)0'.
  */
-/*VARARGS1*/
 char *
 strbuild(char *to, ...)
 {
