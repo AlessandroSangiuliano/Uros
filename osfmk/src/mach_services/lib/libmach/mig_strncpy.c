@@ -70,7 +70,7 @@
 int
 mig_strncpy(
     char *dest,
-    char *src,
+    const char *src,
     int len)
 {
     int i;

@@ -47,20 +47,4 @@
  * MkLinux
  */
 
-/*
- * Modernize: prefer the system <string.h> prototypes to avoid conflicts
- */
-#if defined(__STDC__) || defined(__cplusplus)
-# include <string.h>
-#else
-/* Fallback for old compilers */
-char	*strcat();
-char	*strncat();
-int	strcmp();
-int	strncmp();
-char	*strcpy();
-char	*strncpy();
-unsigned long	strlen();
-char	*index();
-char	*rindex();
-#endif
+#include <string.h>

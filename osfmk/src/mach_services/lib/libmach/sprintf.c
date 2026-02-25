@@ -57,7 +57,7 @@ savechar(char *arg, int c)
 }
 
 int
-vsprintf(char *s, char *fmt, va_list args)
+vsprintf(char *s, const char *fmt, va_list args)
 {
 	_doprnt(fmt, args, 0, (void (*)()) savechar, (char *) &s);
 	*s = 0;
@@ -65,7 +65,7 @@ vsprintf(char *s, char *fmt, va_list args)
 
 /*VARARGS2*/
 int
-sprintf(char *s, char *fmt, ...)
+sprintf(char *s, const char *fmt, ...)
 {
 	va_list	args;
 
@@ -91,7 +91,7 @@ savechar_n(char *arg, int c)
 }
 
 int
-vsnprintf(char *s, size_t n, char *fmt, va_list args)
+vsnprintf(char *s, size_t n, const char *fmt, va_list args)
 {
 	struct snprintf_state state;
 
@@ -106,7 +106,7 @@ vsnprintf(char *s, size_t n, char *fmt, va_list args)
 
 /*VARARGS3*/
 int
-snprintf(char *s, size_t n, char *fmt, ...)
+snprintf(char *s, size_t n, const char *fmt, ...)
 {
 	va_list	args;
 	int ret;

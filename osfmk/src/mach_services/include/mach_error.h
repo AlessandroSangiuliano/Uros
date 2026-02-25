@@ -70,7 +70,7 @@ void		mach_error(
 /*
  *	Prints an appropriate message on the standard error stream
  */
-	char 		*str,
+	const char 	*str,
 	mach_error_t	error_value
 				);
 
