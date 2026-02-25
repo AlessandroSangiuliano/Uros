@@ -112,11 +112,11 @@ parse_args(int argc, char **argv, char *conf_file)
 			if (*argv[1] == '/') {
 				/* Full path name provided; don't do any
 				   defaulting.  */
-				strcpy(conf_file, argv[1]);
+				strlcpy(conf_file, argv[1], PATH_MAX);
 			} else {
 				/* Path is relative to default directory.  */
-				strcpy(conf_file, DEFAULT_CONF_DIRECTORY);
-				strcat(conf_file, argv[1]);
+				strlcpy(conf_file, DEFAULT_CONF_DIRECTORY, PATH_MAX);
+				strlcat(conf_file, argv[1], PATH_MAX);
 			}
 			conf_file_set = 1;
 			break;
@@ -132,8 +132,8 @@ parse_args(int argc, char **argv, char *conf_file)
 	}
 	if (!conf_file_set) {
 		/* Default bootstrap configuration.  */
-		strcpy(conf_file, DEFAULT_CONF_DIRECTORY);
-		strcat(conf_file, DEFAULT_BOOT_FILE);
+		strlcpy(conf_file, DEFAULT_CONF_DIRECTORY, PATH_MAX);
+		strlcat(conf_file, DEFAULT_BOOT_FILE, PATH_MAX);
         }
 }
 

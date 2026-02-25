@@ -48,6 +48,7 @@
  */
 
 #include <stdarg.h>
+#include <stddef.h>
 
 static void
 savechar(char *arg, int c)
@@ -71,4 +72,47 @@ sprintf(char *s, char *fmt, ...)
 	va_start(args, fmt);
 	vsprintf(s, fmt, args);
 	va_end(args);
+}
+
+struct snprintf_state {
+	char	*buf;
+	size_t	remaining;
+};
+
+static void
+savechar_n(char *arg, int c)
+{
+	struct snprintf_state *state = (struct snprintf_state *)arg;
+
+	if (state->remaining > 1) {
+		*state->buf++ = c;
+		state->remaining--;
+	}
+}
+
+int
+vsnprintf(char *s, size_t n, char *fmt, va_list args)
+{
+	struct snprintf_state state;
+
+	if (n == 0)
+		return 0;
+	state.buf = s;
+	state.remaining = n;
+	_doprnt(fmt, args, 0, (void (*)()) savechar_n, (char *) &state);
+	*state.buf = '\0';
+	return (state.buf - s);
+}
+
+/*VARARGS3*/
+int
+snprintf(char *s, size_t n, char *fmt, ...)
+{
+	va_list	args;
+	int ret;
+
+	va_start(args, fmt);
+	ret = vsnprintf(s, n, fmt, args);
+	va_end(args);
+	return ret;
 }

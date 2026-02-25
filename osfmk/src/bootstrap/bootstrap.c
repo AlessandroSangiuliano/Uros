@@ -339,7 +339,7 @@ main(int argc, char **argv)
 		    break;
 		}
 		if (newpath[0] != '\0')
-		    strcpy(pathname, newpath);
+		    strlcpy(pathname, newpath, sizeof(pathname));
 	    }
 	    memset((char *)&f, 0, sizeof(f));
 #if	PARAGON860
@@ -560,8 +560,8 @@ Retry_Server:
 #if 0
 	    strbuild(pathname, sp->symtab_name, "_name", (char *)0);
 #else
-	    strcpy(pathname, sp->symtab_name);
-	    strcat(pathname, "_name");
+	    strlcpy(pathname, sp->symtab_name, sizeof(pathname));
+	    strlcat(pathname, "_name", sizeof(pathname));
 #endif
 	    if (ptr = getenv(pathname))
 		parse_path(sp, ptr);
@@ -689,13 +689,14 @@ Retry_Server:
 void
 parse_path(struct server *sp, const char *np)
 {
-	char *newpath, *p, *slash;
+	char *newpath, *p, *endp, *slash;
 	const char *cp;
 	const char *op, *endop;
 
 	op = sp->server_name;
 	endop = sp->server_name + sp->args_size;
 	p = newpath = malloc(PATH_MAX);
+	endp = newpath + PATH_MAX - 1;
 
 	/* before parsing path, check for any per-server boot options */
 	np = parse_boot_args((char**) &np, &sp);
@@ -703,30 +704,30 @@ parse_path(struct server *sp, const char *np)
 	while (isspace(*np))
 	    np++;
 	if (*np == '-') {
-	    while (*p++ = *op++)
+	    while (p < endp && (*p++ = *op++))
 		;
 	} else if (*np) {
 	    if (*np == '/') {
 		if (strncmp(np, "/dev/", 5) != 0) {
 		    cp = "/dev/boot_device";
-		    while (*cp)
+		    while (*cp && p < endp)
 			*p++ = *cp++;
 		}
 		while (*op++)
 		    ;
 	    } else {
 		slash = p;
-		while (*p = *op++)
+		while (p < endp && (*p = *op++))
 		    if (*p++ == '/')
 			slash = p;
 		if (p == slash) {
 		    cp = "/dev/boot_device/mach_servers/";
-		    while (*cp)
+		    while (*cp && p < endp)
 			*p++ = *cp++;
 		} else
 		    p = slash;
 	    }
-	    while (*np && !isspace(*np))
+	    while (*np && !isspace(*np) && p < endp)
 		*p++ = *np++;
 	    *p++ = 0;
 	    while (isspace(*np))
@@ -734,12 +735,15 @@ parse_path(struct server *sp, const char *np)
 	}
 	if (*np == 0) {
 	    if (endop - op > 0) {
-		memcpy(p, op, endop - op);
-		p += endop - op;
+		size_t remain = endop - op;
+		if (remain > (size_t)(endp - p))
+		    remain = endp - p;
+		memcpy(p, op, remain);
+		p += remain;
 	    }
 	} else {
 	    for (;;) {
-		while (*np && !isspace(*np)) {
+		while (*np && !isspace(*np) && p < endp) {
 		    if (*np == '\\') {
 			/* Skip the backslash and take next char blindly */
 			np++;
@@ -748,7 +752,7 @@ parse_path(struct server *sp, const char *np)
 		    } else if (*np == '"') {
 			/* quoted string */
 			np++;
-			while (*np && *np != '"') {
+			while (*np && *np != '"' && p < endp) {
 			    *p++ = *np++;
 			}
 			np++;
@@ -760,7 +764,8 @@ parse_path(struct server *sp, const char *np)
 		    np++;
 		if (*np == 0)
 		    break;
-		*p++ = 0;
+		if (p < endp)
+		    *p++ = 0;
 	    }
 	}
 	sp->server_name = newpath;
@@ -1183,6 +1188,7 @@ do_bootstrap_environment(mach_port_t bootstrap,
 	kr = vm_allocate(mach_task_self(), env, alloc_size, TRUE);
 	if (kr != KERN_SUCCESS)
 		return kr;
+	/* Safe: buffer is vm_allocated to env_size which is the exact total */
 	p1 = (char *)(*env);
 	for (ep = __environment; *ep; ep++) {
 		p2 = *ep;

@@ -70,7 +70,7 @@ mach_error(char *str, mach_error_t err)
 	err_str=mach_error_string_int(err, &diag);
 
 	if ( diag ) {
-		sprintf( buf, "%s %s (%x)", mach_error_type(err), err_str, err );
+		snprintf( buf, sizeof(buf), "%s %s (%x)", mach_error_type(err), err_str, err );
 		err_str = buf;
 	}
 
