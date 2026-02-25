@@ -22,8 +22,8 @@
  * MkLinux
  */
 
-#ifndef _MACHINE_RTHREADS_H_
-#define _MACHINE_RTHREADS_H_
+#ifndef _PPC_RTHREADS_H_
+#define _PPC_RTHREADS_H_
 
 #ifndef RTHREADS
 #define RTHREADS 1
@@ -41,4 +41,4 @@ extern int rthread_sp(void);
 typedef struct ppc_thread_state thread_state;
 #define STATE_STACK(state) ((state)->r1)
 
-#endif /* _MACHINE_RTHREADS_H_ */
+#endif /* _PPC_RTHREADS_H_ */

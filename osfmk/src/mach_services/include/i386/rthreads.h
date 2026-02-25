@@ -50,8 +50,8 @@
  *  rthreads.h
  */
 
-#ifndef _MACHINE_RTHREADS_H_
-#define _MACHINE_RTHREADS_H_
+#ifndef _I386_RTHREADS_H_
+#define _I386_RTHREADS_H_
 
 #ifndef RTHREADS
 #define RTHREADS 1
@@ -80,4 +80,4 @@ extern __inline__ intptr_t rthread_sp(void)
 typedef struct i386_thread_state thread_state;
 #define STATE_STACK(state) ((state)->uesp)
 
-#endif /* _MACHINE_RTHREADS_H_ */
+#endif /* _I386_RTHREADS_H_ */
