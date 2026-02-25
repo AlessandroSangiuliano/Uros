@@ -60,7 +60,6 @@ panic_init(mach_port_t port)
 	master_host_port = port;
 }
 
-/*VARARGS1*/
 void
 panic(const char *s, ...)
 {

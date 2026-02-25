@@ -401,7 +401,6 @@ load_program_file(struct file	*fp,
 
 #define	isspace(c)	((c) == ' ' || (c) == '\t')
 
-/*VARARGS4*/
 int
 boot_load_program(mach_port_t master_host_port,
 		  mach_port_t master_device_port,
