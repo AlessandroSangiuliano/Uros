@@ -16,7 +16,7 @@ add_library(libflipc STATIC ${LIB_SOURCES})
 add_dependencies(libflipc mig_device_header)
 
 target_compile_options(libflipc PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -fno-builtin -w -include stdint.h -m32 -march=i686>
+  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
 )
 
 target_include_directories(libflipc PUBLIC

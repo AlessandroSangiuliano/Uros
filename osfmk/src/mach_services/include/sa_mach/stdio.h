@@ -28,19 +28,22 @@
 
 #include <stdio.h>
 #include <stdarg.h>
+#include <sa_mach/types.h>
 
 #ifndef NULL
 #define NULL ((void *) 0)
 #endif
 
-extern int	sprintf(char *, const char *, ...); 
-extern int	printf(const char *, ...); 
+extern int	sprintf(char *, const char *, ...);
+extern int	snprintf(char *, size_t, const char *, ...);
+extern int	printf(const char *, ...);
 #ifndef MACH_OVERRIDE_VPRINTF
 #define MACH_OVERRIDE_VPRINTF
 /* Override only if not already declared by system stdio */
 #if !defined(__GNUC__) || !defined(__USE_BSD)
 int vprintf(const char *, va_list);
 int vsprintf(char *, const char *, va_list);
+int vsnprintf(char *, size_t, const char *, va_list);
 #endif
 #endif
 

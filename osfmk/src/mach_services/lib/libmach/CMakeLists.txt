@@ -109,9 +109,17 @@ add_library(libmach STATIC ${LIB_SOURCES})
 # Depend on MIG-generated device/device.h (defined in parent CMakeLists)
 add_dependencies(libmach mig_device_header)
 
+# MIG-generated C files emit K&R patterns (implicit-int, implicit-function-declaration)
+# that are hard errors in gnu11 on GCC 14+.  Override those files back to gnu89.
+foreach(src IN LISTS LIB_SOURCES)
+  if(src MATCHES "${CMAKE_BINARY_DIR}.*\\.c$")
+    set_source_files_properties("${src}" PROPERTIES COMPILE_FLAGS "-std=gnu89")
+  endif()
+endforeach()
+
 # Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
 # Apply C-only options (including -include stdint.h) only when compiling C sources
-target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -D_BSD -fno-builtin -w -include stdint.h>)
+target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -include stdint.h>)
 # Build assembly files and C as 32-bit where needed
 target_compile_options(libmach PRIVATE -m32 -march=i686)
 

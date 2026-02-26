@@ -50,6 +50,9 @@
 #include <stdarg.h>
 #include <stddef.h>
 
+extern int _doprnt(const char *fmt, va_list args, int radix,
+                   void (*putc)(char *, int), char *putc_arg);
+
 static void
 savechar(char *arg, int c)
 {
@@ -59,7 +62,7 @@ savechar(char *arg, int c)
 int
 vsprintf(char *s, const char *fmt, va_list args)
 {
-	_doprnt(fmt, args, 0, (void (*)()) savechar, (char *) &s);
+	_doprnt(fmt, args, 0, (void (*)(char *, int)) savechar, (char *) &s);
 	*s = 0;
 }
 
@@ -98,7 +101,7 @@ vsnprintf(char *s, size_t n, const char *fmt, va_list args)
 		return 0;
 	state.buf = s;
 	state.remaining = n;
-	_doprnt(fmt, args, 0, (void (*)()) savechar_n, (char *) &state);
+	_doprnt(fmt, args, 0, (void (*)(char *, int)) savechar_n, (char *) &state);
 	*state.buf = '\0';
 	return (state.buf - s);
 }

@@ -27,7 +27,7 @@ add_custom_command(
 add_library(libnetname STATIC ${NETNAME_USER_C})
 
 target_compile_options(libnetname PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -fno-builtin -w -include stdint.h -m32 -march=i686>
+  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
 )
 
 target_include_directories(libnetname PUBLIC

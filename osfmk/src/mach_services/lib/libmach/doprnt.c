@@ -53,8 +53,8 @@
 #include <string.h>
 
 /* Modernized prototypes */
-static void printnum(unsigned long u, int base, void (*putc)(char *, char), char *putc_arg);
-static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, char), char *putc_arg);
+static void printnum(unsigned long u, int base, void (*putc)(char *, int), char *putc_arg);
+int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int), char *putc_arg);
 
 /*
  *  Common code for printf et al.
@@ -151,7 +151,7 @@ static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *
 #define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
 
 static void
-printnum(unsigned long u, int base, void (*putc)(char *, char), char *putc_arg)
+printnum(unsigned long u, int base, void (*putc)(char *, int), char *putc_arg)
 {
     char buf[MAXBUF]; /* build number here */
     char *p = &buf[MAXBUF-1];
@@ -166,7 +166,7 @@ printnum(unsigned long u, int base, void (*putc)(char *, char), char *putc_arg)
         (*putc)(putc_arg, *p);
 }
 
-static int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, char), char *putc_arg)
+int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int), char *putc_arg)
 {
 	int		length;
 	int		prec;

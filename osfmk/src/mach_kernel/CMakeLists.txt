@@ -69,7 +69,7 @@ set(KERNEL_C_FLAGS
     -fno-common
     -fno-strict-aliasing
     -fno-omit-frame-pointer
-    -std=gnu89
+    -std=gnu11
     -Wall
     -Wno-implicit-function-declaration
     -Wno-int-conversion  

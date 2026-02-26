@@ -44,6 +44,9 @@
  */
 
 #include <machine/asm.h>
+#include <stdlib.h>
+
+extern int main(int, char **, char **, char **);
 
 #define MACH3
 
