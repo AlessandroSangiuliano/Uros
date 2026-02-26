@@ -48,6 +48,8 @@
  */
 
 #include <mach.h>
+#include <mach/mach_traps.h>
+#include <mach/mach_host.h>
 #include <machine/ndr_def.h>
 
 extern void mig_init(void *);

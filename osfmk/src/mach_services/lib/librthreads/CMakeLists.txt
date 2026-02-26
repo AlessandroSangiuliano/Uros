@@ -13,7 +13,7 @@ endif()
 add_library(librthreads STATIC ${LIB_SOURCES})
 
 target_compile_options(librthreads PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -fno-builtin -w -include stdint.h -m32 -march=i686>
+  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
   $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>
 )
 

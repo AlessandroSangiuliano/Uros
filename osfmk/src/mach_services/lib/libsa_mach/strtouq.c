@@ -58,6 +58,7 @@
 // ...existing code...
 #include "compat.h"
 
+#include <ctype.h>
 #include <limits.h>
 #include <errno.h>
 #include <stdlib.h>

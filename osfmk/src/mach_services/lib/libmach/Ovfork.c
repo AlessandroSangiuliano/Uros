@@ -52,7 +52,9 @@
  *	mach_init for the child.
  */
 
-int vfork()
+extern int fork(void);
+
+int vfork(void)
 {
 	return(fork());
 }

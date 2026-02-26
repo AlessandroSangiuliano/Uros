@@ -41,9 +41,9 @@ add_dependencies(libsa_mach mig_device_header)
 # -w disables warnings
 # -fno-builtin disables builtins
 # -D_BSD for BSD compatibility
-# -std=gnu89 for legacy C
+# -std=gnu11 for legacy C
 #
-target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu89 -D_BSD -fno-builtin -w -m32 -march=i686 -include math.h>)
+target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -m32 -march=i686 -include math.h>)
 target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>)
 
 # Mach userspace headers (sa_mach) solo per questa libreria
