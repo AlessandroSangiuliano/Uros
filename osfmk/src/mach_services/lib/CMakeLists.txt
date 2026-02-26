@@ -30,15 +30,16 @@ function(add_mig_defs DEFS_FILE)
 
   set_source_files_properties(${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H} PROPERTIES GENERATED TRUE)
 
-  # Evita di registrare più volte lo stesso .defs (previene errori CMake)
-  set(PROCESSED_VAR "MIG_PROCESSED_${DEFS_NAME}")
-  if(DEFINED ${PROCESSED_VAR})
+  # Evita di registrare più volte lo stesso .defs (previene errori CMake).
+  # Usa GLOBAL PROPERTY (non CACHE) così si azzera a ogni cmake run.
+  get_property(_mig_processed GLOBAL PROPERTY MIG_PROCESSED_${DEFS_NAME})
+  if(_mig_processed)
     message(VERBOSE "MIG: ${DEFS_NAME} already processed, reusing outputs")
     set(${DEFS_NAME}_MIG_GENERATED ${USER_C} ${SERVER_C} PARENT_SCOPE)
     set_source_files_properties(${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H} PROPERTIES GENERATED TRUE)
     return()
   endif()
-  set(${PROCESSED_VAR} TRUE CACHE INTERNAL "MIG rules added for ${DEFS_NAME}")
+  set_property(GLOBAL PROPERTY MIG_PROCESSED_${DEFS_NAME} TRUE)
 
   set(INC_FLAGS)
   foreach(inc IN LISTS ARGN)

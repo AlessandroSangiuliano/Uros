@@ -219,7 +219,7 @@ WriteKPD_Iterator(FILE *file, boolean_t in, boolean_t varying, argument_t *arg, 
 
     fprintf(file, "\t{\n");
     fprintf(file, "\t    register\t%s\t*ptr;\n", it->itServerKPDType);
-    fprintf(file, "\t    register\ti");
+    fprintf(file, "\t    register int\ti");
     if (varying && !in)
 	fprintf(file, ", j");
     fprintf(file, ";\n\n");
