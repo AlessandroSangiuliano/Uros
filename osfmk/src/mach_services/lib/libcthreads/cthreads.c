@@ -1225,7 +1225,7 @@ cthread_exit(void *result)
 	    cthread_status.exit_thread = p;
 	    cthread_block(p, (cthread_fn_t) cthread_exit, result, CTHREAD_NULL);
 	}
-		exit((int) result);
+		exit((int)(uintptr_t) result);
     } 
 
     /*
