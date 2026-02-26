@@ -247,7 +247,7 @@ WriteKPD_Iterator(FILE *file, boolean_t in, boolean_t overwrite, boolean_t varyi
 
     fprintf(file, "\t{\n");
     fprintf(file, "\t    register\t%s\t*ptr;\n", it->itUserKPDType);
-    fprintf(file, "\t    register\ti");
+    fprintf(file, "\t    register int\ti");
     if (varying && !in)
 	fprintf(file, ", j");
     fprintf(file, ";\n\n");
@@ -324,6 +324,11 @@ WriteIncludes(FILE *file)
 	else
 	    cp++;	/* skip '/' */
 	fprintf(file, "#include \"%s\"\n", cp);
+	/* Always add userspace-trap and interface declarations for OOL support. */
+	if (!IsKernelUser) {
+	    fprintf(file, "#include <mach/mach_traps.h>\n");
+	    fprintf(file, "#include <mach/mach_interface.h>\n");
+	}
     } else {
 	fprintf(file, "#include <string.h>\n");
 	fprintf(file, "#include <mach/ndr.h>\n");
@@ -338,8 +343,11 @@ WriteIncludes(FILE *file)
 	if (IsKernelUser) {
 	    fprintf(file, "#include <ipc/ipc_port.h>\n");
 	    fprintf(file, "#include <kern/ipc_mig.h>\n");
-	} else
+	} else {
 	    fprintf(file, "#include <mach/port.h>\n");
+	    fprintf(file, "#include <mach/mach_traps.h>\n");
+	    fprintf(file, "#include <mach/mach_interface.h>\n");
+	}
 	fprintf(file, "\n");
     }
 
