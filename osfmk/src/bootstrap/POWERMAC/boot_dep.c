@@ -69,9 +69,9 @@ extern boolean_t prompt;
  * such as on a 36MB system.  The min address can be overridden by use of
  * -k#### and submap size can be set with -S###.
  */
-#define UNIX_MAPBASE_DEFAULT	VM_MIN_KERNEL_LOADED_ADDRESS /* XXX */
-#define UNIX_MAPEND_DEFAULT	VM_MAX_KERNEL_LOADED_ADDRESS /* XXX */
-#define UNIX_MAPSIZE_DEFAULT	(48 * 1024 * 1024)	/* XXX */
+#define UNIX_MAPBASE_DEFAULT	VM_MIN_KERNEL_LOADED_ADDRESS
+#define UNIX_MAPEND_DEFAULT	VM_MAX_KERNEL_LOADED_ADDRESS
+#define UNIX_MAPSIZE_DEFAULT	(48 * 1024 * 1024)
 
 /*
  * For the POWERMAC, we ask the kernel for the complete boot string
