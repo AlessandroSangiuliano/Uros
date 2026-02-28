@@ -270,7 +270,7 @@ boolean_t 	comfifo[NCOM];
 boolean_t 	comtimer_active;
 int 		comtimer_state[NCOM];
 
-int 		cons_is_com1 = 1;		/* set to 1 if no PC keyboard
+int 		cons_is_com1 = 0;		/* set to 1 if no PC keyboard
 						   in this case com1 is the
 						   console */
 char 		com_halt_char = '_' & 0x1f; 	/* CTRL(_) to enter ddb */
