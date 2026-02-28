@@ -293,6 +293,7 @@ main(int argc, char **argv)
 	 * task_set_exception_ports and task_set_bootstrap_port
 	 * both require a send right.
 	 */
+	printf("Try the printf init works!!");
 	(void) mach_port_insert_right(bootstrap_self, bootstrap_bootstrap_port,
 				      bootstrap_bootstrap_port,
 				      MACH_MSG_TYPE_MAKE_SEND);
