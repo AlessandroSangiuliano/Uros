@@ -94,9 +94,7 @@
 #define	fldcw(control) \
 	__asm__ volatile("fldcw %0" : : "m" (*(unsigned short *) &(control)) )
 
-extern unsigned short		fnstsw(void);
-
-extern __inline__ unsigned short fnstsw(void)
+static __inline__ unsigned short fnstsw(void)
 {
 	unsigned short status;
 	__asm__ volatile("fnstsw %0" : "=ma" (status));

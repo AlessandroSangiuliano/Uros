@@ -859,6 +859,11 @@ cnputc(
 	case K_LF:
 		(*cputc)(K_CR);
 		(*cputc)(K_LF);
+		/* Mirror to serial when VGA is the primary console. */
+		if (!cons_is_com1) {
+			com_putc(K_CR);
+			com_putc(K_LF);
+		}
 		break;
 /*
 	case K_HT:
@@ -868,6 +873,9 @@ cnputc(
 */
 	default:
 		(*cputc)(c);
+		/* Mirror to serial when VGA is the primary console. */
+		if (!cons_is_com1)
+			com_putc(c);
 		break;
 	}
 #if	NCPUS > 1 && defined(CBUS)

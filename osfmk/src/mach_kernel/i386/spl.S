@@ -223,9 +223,27 @@ Entry(splhi)
 	MP_DISABLE_PREEMPTION(%edx)
 	CPU_NUMBER(%edx)
 	movl	CX(EXT(curr_ipl), %edx), %eax
+	/* DEBUG: trap if curr_ipl already > IPLHI (corruption detection) */
+	cmpl	$(IPLHI), %eax
+	ja	splhi_corrupt
 	movl	$(IPLHI), CX(EXT(curr_ipl), %edx)
 	MP_ENABLE_PREEMPTION(%edx)
 	ret
+
+splhi_corrupt:
+	movl	0x00(%esp), %ecx		/* save return address */
+	pushl	CX(EXT(curr_ipl), %edx)	/* push curr_ipl (= bad value) */
+	pushl	%ecx				/* push caller */
+	pushl	%eax				/* push bad value in eax */
+	pushl	$splhi_corrupt_msg
+	call	EXT(panic)
+	hlt
+
+	.data
+splhi_corrupt_msg:
+	String	"splhi: curr_ipl=%x (caller %x, cur=%x) corrupt!\n"
+	.byte	0
+	.text
 
 Entry(getspl)
 	MP_DISABLE_PREEMPTION(%edx)
@@ -333,8 +351,14 @@ LEXT(set_spl)
 	jne	slave_set_spl
 #endif	/* NCPUS > 1 && AT386 && !MP_V1_1 */
 	movl	CX(EXT(curr_ipl), %edx), %edx	/* get OLD ipl level */
+	/* DEBUG: trap if OLD ipl is already corrupt (someone else wrote garbage) */
+	cmpl	$(IPLHI), %edx
+	ja	set_spl_old_ipl_corrupt
 	pushl	%edx			/* save old level for return */
 	CPU_NUMBER(%edx)
+	/* DEBUG: trap if new ipl > IPLHI */
+	cmpl	$(IPLHI), %eax
+	ja	set_spl_bad_new_ipl
 	movl	%eax,CX(EXT(curr_ipl),%edx)/* set NEW ipl level */
 #if	!MP_V1_1
 	cmpl	$(SPLHI), %eax		/* if SPLHI */
@@ -409,15 +433,17 @@ slave_set_spl:
 
 
 splxpanic:
+	movl	0x00(%esp), %ecx	/* save return address before any pushes */
 	MP_DISABLE_PREEMPTION(%edx)
 #if	NCPUS > 1 && AT386
 	CPU_NUMBER(%edx)
 	shl	$2, %edx
 	pushl	EXT(curr_ipl)(%edx)
 #else	/* NCPUS > 1 && AT386 */
-	pushl	EXT(curr_ipl)		/* current level */
+	pushl	EXT(curr_ipl)		/* current level (= "new") */
 #endif	/* NCPUS > 1 && AT386 */
-	pushl	%eax			/* new level */
+	pushl	%ecx			/* caller's return address */
+	pushl	%eax			/* bad spl value (= "old") */
 	pushl	$splxpanic2
 	MP_ENABLE_PREEMPTION(%edx)
 	call	EXT(panic)
@@ -425,10 +451,54 @@ splxpanic:
 
 	.data
 splxpanic2:
-	String	"splx(old %x, new %x): logic error in locore.s\n"
+	String	"splx(old %x, caller %x, new %x): logic error in locore.s\n"
 	.byte	0
 	.text
 
+set_spl_old_ipl_corrupt:
+	movl	0x04(%esp), %ecx	/* return addr (= caller of splx/spln) */
+	pushl	%eax			/* new ipl being requested */
+	pushl	%ecx			/* caller */
+	pushl	%edx			/* corrupt old curr_ipl value */
+	pushl	$set_spl_old_ipl_corrupt_msg
+	call	EXT(panic)
+	hlt
+
+	.data
+set_spl_old_ipl_corrupt_msg:
+	String	"set_spl: curr_ipl corrupt=%#x caller=%#x new_ipl=%#x\n"
+	.byte	0
+	.text
+
+set_spl_bad_new_ipl:
+	movl	0x04(%esp), %ecx	/* return addr into set_spl frame */
+	pushl	EXT(curr_ipl)		/* curr_ipl (old) */
+	pushl	%ecx			/* return address (= caller of spln/splx) */
+	pushl	%eax			/* bad new ipl */
+	pushl	$set_spl_bad_new_ipl_msg
+	call	EXT(panic)
+	hlt
+
+	.data
+set_spl_bad_new_ipl_msg:
+	String	"set_spl: bad new_ipl=%#x caller=%#x curr_ipl=%#x\n"
+	.byte	0
+	.text
+
+set_spl_noi_bad_ipl:
+	movl	0x00(%esp), %ecx	/* return address of set_spl_noi */
+	pushl	EXT(curr_ipl)		/* curr_ipl (old) */
+	pushl	%ecx			/* return address */
+	pushl	%eax			/* bad ipl */
+	pushl	$set_spl_noi_bad_ipl_msg
+	call	EXT(panic)
+	hlt
+
+	.data
+set_spl_noi_bad_ipl_msg:
+	String	"set_spl_noi: bad ipl=%#x caller=%#x curr_ipl=%#x\n"
+	.byte	0
+	.text
 
 /*
  * Set SPL, but leave interrupts disabled.  Called when returning
@@ -446,6 +516,9 @@ LEXT(set_spl_noi)
 	cmpl	$0, %edx
 	jne	slave_set_spl_noi
 #endif	/* NCPUS > 1 && AT386 && !MP_V1_1 */
+	/* DEBUG: trap if new ipl > IPLHI */
+	cmpl	$(IPLHI), %eax
+	ja	set_spl_noi_bad_ipl
 	movl	%eax,CX(EXT(curr_ipl),%edx)	/* set new SPL level */
 	movw	EXT(pic_mask)(,%eax,2), %ax	/* get new pic mask */
 	cmpw	EXT(curr_pic_mask),%ax	/* if different, */

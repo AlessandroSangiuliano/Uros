@@ -135,25 +135,25 @@ typedef	hw_lock_data_t	*hw_lock_t;
 								:	\
 			"r" (bit), "m" (*(volatile int *)(l)));
 
-extern __inline__ char	xchgb(volatile char * cp, char new);
+static __inline__ char	xchgb(volatile char * cp, char new);
 
-extern __inline__ void	atomic_incl(long * p, long delta);
-extern __inline__ void	atomic_incs(short * p, short delta);
-extern __inline__ void	atomic_incb(char * p, char delta);
+static __inline__ void	atomic_incl(long * p, long delta);
+static __inline__ void	atomic_incs(short * p, short delta);
+static __inline__ void	atomic_incb(char * p, char delta);
 
-extern __inline__ void	atomic_decl(long * p, long delta);
-extern __inline__ void	atomic_decs(short * p, short delta);
-extern __inline__ void	atomic_decb(char * p, char delta);
+static __inline__ void	atomic_decl(long * p, long delta);
+static __inline__ void	atomic_decs(short * p, short delta);
+static __inline__ void	atomic_decb(char * p, char delta);
 
-extern __inline__ long	atomic_getl(long * p);
-extern __inline__ short	atomic_gets(short * p);
-extern __inline__ char	atomic_getb(char * p);
+static __inline__ long	atomic_getl(long * p);
+static __inline__ short	atomic_gets(short * p);
+static __inline__ char	atomic_getb(char * p);
 
-extern __inline__ void	atomic_setl(long * p, long value);
-extern __inline__ void	atomic_sets(short * p, short value);
-extern __inline__ void	atomic_setb(char * p, char value);
+static __inline__ void	atomic_setl(long * p, long value);
+static __inline__ void	atomic_sets(short * p, short value);
+static __inline__ void	atomic_setb(char * p, char value);
 
-extern __inline__ char	xchgb(volatile char * cp, char new)
+static __inline__ char	xchgb(volatile char * cp, char new)
 {
 	register char	old = new;
 
@@ -163,7 +163,7 @@ extern __inline__ char	xchgb(volatile char * cp, char new)
 	return (old);
 }
 
-extern __inline__ void	atomic_incl(long * p, long delta)
+static __inline__ void	atomic_incl(long * p, long delta)
 {
 #if NEED_ATOMIC
 	__asm__ volatile ("	lock		\n		\
@@ -175,7 +175,7 @@ extern __inline__ void	atomic_incl(long * p, long delta)
 #endif /* NEED_ATOMIC */
 }
 
-extern __inline__ void	atomic_incs(short * p, short delta)
+static __inline__ void	atomic_incs(short * p, short delta)
 {
 #if NEED_ATOMIC
 	__asm__ volatile ("	lock		\n		\
@@ -187,7 +187,7 @@ extern __inline__ void	atomic_incs(short * p, short delta)
 #endif /* NEED_ATOMIC */
 }
 
-extern __inline__ void	atomic_incb(char * p, char delta)
+static __inline__ void	atomic_incb(char * p, char delta)
 {
 #if NEED_ATOMIC
 	__asm__ volatile ("	lock		\n		\
@@ -199,7 +199,7 @@ extern __inline__ void	atomic_incb(char * p, char delta)
 #endif /* NEED_ATOMIC */
 }
 
-extern __inline__ void	atomic_decl(long * p, long delta)
+static __inline__ void	atomic_decl(long * p, long delta)
 {
 #if NCPUS > 1
 	__asm__ volatile ("	lock		\n		\
@@ -211,7 +211,7 @@ extern __inline__ void	atomic_decl(long * p, long delta)
 #endif /* NCPUS > 1 */
 }
 
-extern __inline__ void	atomic_decs(short * p, short delta)
+static __inline__ void	atomic_decs(short * p, short delta)
 {
 #if NEED_ATOMIC
 	__asm__ volatile ("	lock		\n		\
@@ -223,7 +223,7 @@ extern __inline__ void	atomic_decs(short * p, short delta)
 #endif /* NEED_ATOMIC */
 }
 
-extern __inline__ void	atomic_decb(char * p, char delta)
+static __inline__ void	atomic_decb(char * p, char delta)
 {
 #if NEED_ATOMIC
 	__asm__ volatile ("	lock		\n		\
@@ -235,32 +235,32 @@ extern __inline__ void	atomic_decb(char * p, char delta)
 #endif /* NEED_ATOMIC */
 }
 
-extern __inline__ long	atomic_getl(long * p)
+static __inline__ long	atomic_getl(long * p)
 {
 	return (*p);
 }
 
-extern __inline__ short	atomic_gets(short * p)
+static __inline__ short	atomic_gets(short * p)
 {
 	return (*p);
 }
 
-extern __inline__ char	atomic_getb(char * p)
+static __inline__ char	atomic_getb(char * p)
 {
 	return (*p);
 }
 
-extern __inline__ void	atomic_setl(long * p, long value)
+static __inline__ void	atomic_setl(long * p, long value)
 {
 	*p = value;
 }
 
-extern __inline__ void	atomic_sets(short * p, short value)
+static __inline__ void	atomic_sets(short * p, short value)
 {
 	*p = value;
 }
 
-extern __inline__ void	atomic_setb(char * p, char value)
+static __inline__ void	atomic_setb(char * p, char value)
 {
 	*p = value;
 }

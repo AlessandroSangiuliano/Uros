@@ -69,6 +69,7 @@ set(KERNEL_C_FLAGS
     -fno-common
     -fno-strict-aliasing
     -fno-omit-frame-pointer
+    -fno-optimize-sibling-calls
     -std=gnu11
     -Wall
     -Wno-implicit-function-declaration
@@ -625,6 +626,18 @@ list(TRANSFORM KERNEL_C_SOURCES PREPEND ${KERNEL_SRC_DIR}/)
 list(TRANSFORM I386_ASM_SOURCES PREPEND ${KERNEL_SRC_DIR}/)
 list(TRANSFORM AT386_ASM_SOURCES PREPEND ${KERNEL_SRC_DIR}/)
 
+# Generate an empty mach_interface.h stub in the kernel build directory.
+# Needed because migcom emits #include <mach/mach_interface.h> in user stubs;
+# the kernel doesn't need its contents.  This file lives ONLY in the build dir
+# so it doesn't shadow the real export/powermac/include/mach/mach_interface.h
+# that the userspace build uses.
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/mach/mach_interface.h"
+    "#ifndef _MACH_MACH_INTERFACE_H_\n"
+    "#define _MACH_MACH_INTERFACE_H_\n"
+    "/* nothing needed here for in-kernel MIG user stubs */\n"
+    "#endif\n"
+)
+
 # Create kernel executable
 add_executable(${KERNEL_TARGET}
     ${KERNEL_C_SOURCES}
@@ -670,6 +683,7 @@ set_target_properties(${KERNEL_TARGET} PROPERTIES
     LINK_DEPENDS ${KERNEL_LINKER_SCRIPT}
     OUTPUT_NAME "mach_kernel"
     SUFFIX ""
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/osfmk/boot"
 )
 
 # =============================================================================
