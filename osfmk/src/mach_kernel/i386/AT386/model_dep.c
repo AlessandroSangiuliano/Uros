@@ -254,7 +254,7 @@ int		loadpt;
 
 vm_size_t	mem_size = 0; 
 vm_offset_t	first_addr = 0;	/* set by start.s - keep out of bss */
-vm_offset_t	first_avail = 0;/* first after page tables */
+vm_offset_t	first_avail = 1;/* set by start.s - keep out of bss */
 vm_offset_t	last_addr;
 
 vm_offset_t	avail_start, avail_end;
@@ -386,8 +386,10 @@ parse_multiboot(void)
  	boot_start = mb_module[0].mod_start;
  	boot_size = mb_module[0].mod_end - mb_module[0].mod_start;
  
- 	exec_start = mb_module[1].mod_start;
- 	exec_size = mb_module[1].mod_end - mb_module[1].mod_start;
+ 	if (mb_info.mods_count >= 2) {
+ 		exec_start = mb_module[1].mod_start;
+ 		exec_size  = mb_module[1].mod_end - mb_module[1].mod_start;
+ 	}
 
 
 	kern_args_start = mb_info.cmdline;
@@ -778,6 +780,18 @@ i386_init(void)
 	set_cr4(get_cr4() | CR4_PGE);
 	pmap_bootstrap(loadpt);
 
+	/*
+	 * pmap_bootstrap steals page-table pages from physical addresses
+	 * starting at avail_start, advancing it to a value inside the memory
+	 * hole (hole_start..hole_end covers BIOS/VGA area plus kernel text,
+	 * data and page tables).  pmap_next_page only skips the hole when
+	 * avail_next hits hole_start exactly; since avail_start lands above
+	 * hole_start the skip never fires, and kernel/page-table pages get
+	 * handed out as free physical memory.  Advance past the hole here.
+	 */
+	if (avail_start < hole_end)
+		avail_start = hole_end;
+
 	/* Steal the contiguous memory that's been requested by various
 	   kernel subsystems.  */
 
@@ -834,8 +848,9 @@ i386_init(void)
 	    panic("Couldn't allocate physical memory for pmem_reserve_ctl entry.");
 	}
 
-	avail_remaining = atop((avail_end - avail_start) -
-			       (hole_end - hole_start));
+	/* avail_start is now >= hole_end, so the hole is entirely below the
+	   available range; do not subtract it a second time. */
+	avail_remaining = atop(avail_end - avail_start);
 #if	MBUS
 	avail_remaining -= atop(MBUS_BIOS_REMAP_END-MBUS_BIOS_REMAP_START);
 #endif	/* MBUS */

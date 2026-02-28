@@ -1235,13 +1235,12 @@ bootstrap_create(void)
                losers, mb_info.mods_count);
     */
 
-    err = boot_script_parse_line (boot_start, boot_size, "ext2fs.static --multiboot-command-line=root=/dev/hd2s2 --host-priv-port=${host-port} --device-master-port=${device-port} --exec-server-task=${exec-task} -T typed device:hd2s2 $(task-create) $(task-resume)");
-    err = boot_script_parse_line (exec_start, exec_size, "exec.static $(exec-task=task-create)");
+    /* Load the bootstrap server (multiboot module 0) as the first user task.
+     * The buffer must be writable: boot_script_parse_line inserts null terminators. */
+    static char bootstrap_cmd[] = "/mach_servers/bootstrap $(task-create) $(task-resume)";
+    err = boot_script_parse_line(boot_start, boot_size, bootstrap_cmd);
     if (err)
-    {
-        printf ("\n\tERROR: %s", boot_script_error_string (err));
-        ++losers;
-    }
+        panic("bootstrap boot script parse: %s", boot_script_error_string(err));
     
     losers = boot_script_exec ();
     if (losers)

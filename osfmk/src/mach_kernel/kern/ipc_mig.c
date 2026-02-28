@@ -633,9 +633,9 @@ mig_put_reply_port(
  */
 int 
 mig_strncpy(
-	char	*dest,
-	char	*src,
-	int	len)
+	char		*dest,
+	const char	*src,
+	int		len)
 {
     int i;
 

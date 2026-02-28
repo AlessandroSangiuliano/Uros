@@ -40,6 +40,7 @@
 /*
  * Macros for network/external number representation conversion.
  */
+#if !defined(__GNUC__)
 #ifdef _NO_PROTO
 unsigned short	ntohs(), htons();
 unsigned long	ntohl(), htonl();
@@ -47,6 +48,7 @@ unsigned long	ntohl(), htonl();
 unsigned short	ntohs(unsigned short), htons(unsigned short);
 unsigned long	ntohl(unsigned long), htonl(unsigned long);
 #endif
+#endif /* !__GNUC__ */
 
 #if !defined(lint) && defined(__GNUC__)
 
@@ -55,7 +57,7 @@ unsigned long	ntohl(unsigned long), htonl(unsigned long);
  */
 
 #ifdef _NO_PROTO
-extern __inline__
+static __inline__
 unsigned short
 ntohs(w_int)
 int w_int;
@@ -66,7 +68,7 @@ int w_int;
 }
 
 #else	/* _NO_PROTO */
-extern __inline__
+static __inline__
 unsigned short
 ntohs(register unsigned short w)
 {
@@ -77,7 +79,7 @@ ntohs(register unsigned short w)
 #endif	/* _NO_PROTO */
 #define	htons	ntohs
 
-extern __inline__
+static __inline__
 unsigned long
 ntohl(register unsigned long l)
 {

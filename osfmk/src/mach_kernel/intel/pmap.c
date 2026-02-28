@@ -821,7 +821,7 @@ extern char end;
 /*
  * Page directory for kernel.
  */
-pt_entry_t	*kpde = 0;	/* set by start.s - keep out of bss */
+pt_entry_t	*kpde = (pt_entry_t *)1; /* set by start.s - keep out of bss */
 
 #if	i860
 int	paging_enabled = 0;			/* MMU turned on */
@@ -1223,6 +1223,8 @@ pmap_bootstrap(
 	kernel_pmap->dirbase = kpde;
 	printf("Kernel virtual space from 0x%x to 0x%x.\n",
 			VM_MIN_KERNEL_ADDRESS, virtual_end);
+	printf("pmap_bootstrap: kpde=0x%x kpde[800]=0x%08x\n",
+			(unsigned)kpde, (unsigned)kpde[800]);
 #endif	/* i860 */
 
 	printf("Available physical space from 0x%x to 0x%x\n",

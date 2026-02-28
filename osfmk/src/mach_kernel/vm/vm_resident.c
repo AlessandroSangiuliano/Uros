@@ -577,8 +577,14 @@ vm_page_bootstrap(
 	 *	Steal memory for the map and zone subsystems.
 	 */
 
+	printf("vm_page_bootstrap: dirbase[800]=0x%08x\n",
+		kernel_pmap->dirbase[800]);
 	vm_map_steal_memory();
+	printf("after vm_map_steal_memory: dirbase[800]=0x%08x\n",
+		kernel_pmap->dirbase[800]);
 	zone_steal_memory();
+	printf("after zone_steal_memory: dirbase[800]=0x%08x\n",
+		kernel_pmap->dirbase[800]);
 
 	/*
 	 *	Allocate (and initialize) the virtual-to-physical
@@ -621,6 +627,10 @@ vm_page_bootstrap(
 	vm_page_buckets = (vm_page_bucket_t *)
 		pmap_steal_memory(vm_page_bucket_count *
 				  sizeof(vm_page_bucket_t));
+
+	printf("vm_page_buckets=0x%x count=%u dirbase[800]=0x%08x\n",
+		(unsigned)vm_page_buckets, vm_page_bucket_count,
+		(unsigned)kernel_pmap->dirbase[800]);
 
 	for (i = 0; i < vm_page_bucket_count; i++) {
 		register vm_page_bucket_t *bucket = &vm_page_buckets[i];

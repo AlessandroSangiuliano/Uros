@@ -169,42 +169,26 @@
 #define	CR4_VME	0x00000001	/* p5:   Virtual-8086 Mode Extensions */
 
 #ifndef	ASSEMBLER
-extern unsigned int	get_cr0(void);
-extern void		set_cr0(
-				unsigned int		value);
-extern unsigned int	get_cr2(void);
-extern unsigned int	get_cr3(void);
-extern void		set_cr3(
-				unsigned int		value);
+/* get_cr4/set_cr4 are not inlined below; provided by locore or AT386 code */
 extern unsigned int	get_cr4(void);
-extern void		set_cr4(
-				unsigned int		value);
+extern void		set_cr4(unsigned int value);
 
 #define	set_ts() \
 	set_cr0(get_cr0() | CR0_TS)
-extern void		clear_ts(void);
-
-extern unsigned short	get_tr(void);
-extern void		set_tr(
-			       unsigned int		seg);
-
-extern unsigned short	get_ldt(void);
-extern void		set_ldt(
-				unsigned int		seg);
 #ifdef	__GNUC__
-extern __inline__ unsigned int get_cr0(void)
+static __inline__ unsigned int get_cr0(void)
 {
 	register unsigned int cr0; 
 	__asm__ volatile("mov %%cr0, %0" : "=r" (cr0));
 	return(cr0);
 }
 
-extern __inline__ void set_cr0(unsigned int value)
+static __inline__ void set_cr0(unsigned int value)
 {
 	__asm__ volatile("mov %0, %%cr0" : : "r" (value));
 }
 
-extern __inline__ unsigned int get_cr2(void)
+static __inline__ unsigned int get_cr2(void)
 {
 	register unsigned int cr2;
 	__asm__ volatile("mov %%cr2, %0" : "=r" (cr2));
@@ -217,44 +201,44 @@ extern __inline__ unsigned int get_cr2(void)
  * the cpu number gets stored. The MP versions live in locore.s
  */
 #else	/* NCPUS > 1 && AT386 */
-extern __inline__ unsigned int get_cr3(void)
+static __inline__ unsigned int get_cr3(void)
 {
 	register unsigned int cr3;
 	__asm__ volatile("mov %%cr3, %0" : "=r" (cr3));
 	return(cr3);
 }
 
-extern __inline__ void set_cr3(unsigned int value)
+static __inline__ void set_cr3(unsigned int value)
 {
 	__asm__ volatile("mov %0, %%cr3" : : "r" (value));
 }
 #endif	/* NCPUS > 1 && AT386 */
 
-extern __inline__ void clear_ts(void)
+static __inline__ void clear_ts(void)
 {
 	__asm__ volatile("clts");
 }
 
-extern __inline__ unsigned short get_tr(void)
+static __inline__ unsigned short get_tr(void)
 {
 	unsigned short seg; 
 	__asm__ volatile("str %0" : "=rm" (seg));
 	return(seg);
 }
 
-extern __inline__ void set_tr(unsigned int seg)
+static __inline__ void set_tr(unsigned int seg)
 {
 	__asm__ volatile("ltr %0" : : "rm" ((unsigned short)(seg)));
 }
 
-extern __inline__ unsigned short get_ldt(void)
+static __inline__ unsigned short get_ldt(void)
 {
 	unsigned short seg;
 	__asm__ volatile("sldt %0" : "=rm" (seg));
 	return(seg);
 }
 
-extern __inline__ void set_ldt(unsigned int seg)
+static __inline__ void set_ldt(unsigned int seg)
 {
 	__asm__ volatile("lldt %0" : : "rm" ((unsigned short)(seg)));
 }
