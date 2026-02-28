@@ -235,6 +235,13 @@ extern int		stpages;
 
 #include "boot_script.h"
 
+/* Debug-only tracing: compiled out in Release builds. */
+#if DEBUG
+#define dprintf(fmt, ...) printf(fmt, ##__VA_ARGS__)
+#else
+#define dprintf(fmt, ...) do {} while (0)
+#endif
+
 mach_port_t	bootstrap_host_security_port;	/* local name */
 mach_port_t	bootstrap_wired_ledger_port;	/* local name */
 mach_port_t	bootstrap_paged_ledger_port;	/* local name */
@@ -312,18 +319,18 @@ do_bootstrap_compat(void)
 	entry = (vm_offset_t) ehdr->e_entry;
 	phdr = (Elf32_Phdr *) (boot_start + ehdr->e_phoff);
 	
-	printf("entry: 0x%x\n", entry);
-	printf("ph offset: 0x%x\n", ehdr->e_phoff);
-	printf("phdr: 0x%x\n", phdr);
-        printf("Looking for program sections\n");
-	printf("Theorical number of sections: %d\n", ehdr->e_phnum);
+	dprintf("entry: 0x%x\n", entry);
+	dprintf("ph offset: 0x%x\n", ehdr->e_phoff);
+	dprintf("phdr: 0x%x\n", phdr);
+    dprintf("Looking for program sections\n");
+	dprintf("Theorical number of sections: %d\n", ehdr->e_phnum);
 
 	for (i = 0, ph = phdr; i < ehdr->e_phnum; i++, ph++) {
-		printf("Loop\n");
+		dprintf("Loop\n");
 		switch ((int)ph->p_type) {
 		case PT_LOAD:
 			if (ph->p_flags == (PF_R | PF_X)) {
-				printf("Found text region\n");
+				dprintf("Found text region\n");
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_EXECUTE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_filesz);
@@ -331,7 +338,7 @@ do_bootstrap_compat(void)
 				regions[boot_region_count].mapped = TRUE;
 			}
 			else if (ph->p_flags == (PF_R | PF_W)) {
-				printf("Found data region\n");
+				dprintf("Found data region\n");
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_WRITE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_memsz);
@@ -343,19 +350,19 @@ do_bootstrap_compat(void)
 				bss_size = ph->p_memsz - ph->p_filesz;
 			}
 			else {
-				printf("Found PT_LOAD region with unknown flags\n");
+				dprintf("Found PT_LOAD region with unknown flags\n");
 				continue;
 			}
 
 			boot_region_count++;
 			break;
 		default:
-			printf("Found unknown section: 0x%x\n", ph->p_type);
+			dprintf("Found unknown section: 0x%x\n", ph->p_type);
 			break;
 		}
 	}
 
-	printf("I've found: %d sections\n", boot_region_count);
+	dprintf("I've found: %d sections\n", boot_region_count);
 
 	regions[boot_region_count].addr = STACK_BASE;
 	regions[boot_region_count].size = STACK_SIZE;
@@ -521,20 +528,20 @@ exec_load(vm_offset_t start, vm_size_t size)
 	entry = (vm_offset_t) ehdr->e_entry;
 	phdr = (Elf32_Phdr *) (start + ehdr->e_phoff);
 	
-	printf("entry: 0x%x\n", entry);
-	printf("ph offset: 0x%x\n", ehdr->e_phoff);
-	printf("phdr: 0x%x\n", phdr);
-        printf("Looking for program sections\n");
-	printf("Theorical number of sections: %d\n", ehdr->e_phnum);
+	dprintf("entry: 0x%x\n", entry);
+	dprintf("ph offset: 0x%x\n", ehdr->e_phoff);
+	dprintf("phdr: 0x%x\n", phdr);
+        dprintf("Looking for program sections\n");
+	dprintf("Theorical number of sections: %d\n", ehdr->e_phnum);
 
     boot_region_count = 0;
 
 	for (i = 0, ph = phdr; i < ehdr->e_phnum; i++, ph++) {
-		printf("Loop\n");
+		dprintf("Loop\n");
 		switch ((int)ph->p_type) {
 		case PT_LOAD:
 			if (ph->p_flags == (PF_R | PF_X)) {
-				printf("Found text region\n");
+				dprintf("Found text region\n");
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_EXECUTE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_filesz);
@@ -542,7 +549,7 @@ exec_load(vm_offset_t start, vm_size_t size)
 				regions[boot_region_count].mapped = TRUE;
 			}
 			else if (ph->p_flags == (PF_R | PF_W)) {
-				printf("Found data region\n");
+				dprintf("Found data region\n");
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_WRITE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_memsz);
@@ -570,12 +577,12 @@ exec_load(vm_offset_t start, vm_size_t size)
 			boot_region_count++;
 			break;
 		default:
-			printf("Found unknown section: 0x%x\n", ph->p_type);
+			dprintf("Found unknown section: 0x%x\n", ph->p_type);
 			break;
 		}
 	}
 
-	printf("I've found: %d sections\n", boot_region_count);
+	dprintf("I've found: %d sections\n", boot_region_count);
 
 	regions[boot_region_count].addr = STACK_BASE;
 	regions[boot_region_count].size = STACK_SIZE;
@@ -835,7 +842,7 @@ user_bootstrap(void)
     //    panic ("Cannot load user executable module (error code %d): %s",
     //           err, info->argv[0]);
     
-    printf ("task loaded:");
+    dprintf("task loaded:");
   
     {
         //char *argv[] = { "serverboot",
@@ -849,7 +856,7 @@ user_bootstrap(void)
         //    printf (" %s", *av);
     }    
 
-    printf("check1\n");
+    dprintf("check1\n");
 	/*
 	 * set the bootstrap task thread state.
 	 */
@@ -858,11 +865,11 @@ user_bootstrap(void)
 			 boot_thread_state,
 			 boot_thread_state_count);
 
-    printf("check2\n");
+    dprintf("check2\n");
 
     task_suspend (current_task());
 
-    printf("check3\n");
+    dprintf("check3\n");
 
     simple_lock(&info->lock);
     assert (!info->done);
@@ -1161,12 +1168,12 @@ bootstrap_create(void)
 				    boot_start);
 
     /* Dump raw multiboot_info fields so we can verify what QEMU passed. */
-    printf("mb_info @ 0x%x  flags=0x%x\n", &mb_info, mb_info.flags);
-    printf("  mods_count=%d  mods_addr=0x%x\n",
+    dprintf("mb_info @ 0x%x  flags=0x%x\n", &mb_info, mb_info.flags);
+    dprintf("  mods_count=%d  mods_addr=0x%x\n",
            mb_info.mods_count, mb_info.mods_addr);
-    printf("  cmdline=0x%x  mem_lower=%u KB  mem_upper=%u KB\n",
+    dprintf("  cmdline=0x%x  mem_lower=%u KB  mem_upper=%u KB\n",
            mb_info.cmdline, mb_info.mem_lower, mb_info.mem_upper);
-    printf("parse_multiboot result: mb_module=0x%x  boot_start=0x%x  boot_size=0x%x\n",
+    dprintf("parse_multiboot result: mb_module=0x%x  boot_start=0x%x  boot_size=0x%x\n",
            mb_module, boot_start, boot_size);
 
     /* If parse_multiboot failed to read mods_addr (e.g. the physical address
@@ -1176,21 +1183,21 @@ bootstrap_create(void)
     if (boot_start == 0 && mb_info.mods_addr != 0) {
         struct multiboot_module *mods =
             (struct multiboot_module *) phystokv(mb_info.mods_addr);
-        printf("  late-read mods[0]: mod_start=0x%x  mod_end=0x%x\n",
+        dprintf("  late-read mods[0]: mod_start=0x%x  mod_end=0x%x\n",
                mods[0].mod_start, mods[0].mod_end);
         boot_start = mods[0].mod_start;
         boot_size  = mods[0].mod_end - mods[0].mod_start;
-        printf("  corrected: boot_start=0x%x  boot_size=0x%x\n",
+        dprintf("  corrected: boot_start=0x%x  boot_size=0x%x\n",
                boot_start, boot_size);
     }
 
     /* Peek at the first 4 bytes of the module to check for ELF magic. */
     if (boot_start != 0) {
         unsigned char *hdr = (unsigned char *) phystokv(boot_start);
-        printf("  module[0] header bytes: %02x %02x %02x %02x\n",
+        dprintf("  module[0] header bytes: %02x %02x %02x %02x\n",
                hdr[0], hdr[1], hdr[2], hdr[3]);
     }
-    printf("mods_count: %d\n", mb_info.mods_count);
+    dprintf("mods_count: %d\n", mb_info.mods_count);
 
     if (/*(mb_info.flags & MULTIBOOT_MODS)
           ||*/ (mb_info.mods_count == 0))
@@ -1335,14 +1342,14 @@ load_info_print(void)
 {
 	struct loader_info *lp = (struct loader_info *)load_info_start;
 
-	printf("Load info: text (%#x, %#x, %#x)\n",
+	dprintf("Load info: text (%#x, %#x, %#x)\n",
 		lp->text_start, lp->text_size, lp->text_offset);
-	printf("           data (%#x, %#x, %#x)\n",
+	dprintf("           data (%#x, %#x, %#x)\n",
 		lp->data_start, lp->data_size, lp->data_offset);
-	printf("           bss  (%#x)\n", lp->bss_size);
-	printf("           syms (%#x, %#x)\n",
+	dprintf("           bss  (%#x)\n", lp->bss_size);
+	dprintf("           syms (%#x, %#x)\n",
 		lp->sym_offset, lp->sym_size);
-	printf("	   entry(%#x, %#x)\n",
+	dprintf("	   entry(%#x, %#x)\n",
 		lp->entry_1, lp->entry_2);
 }
 #endif
@@ -1442,7 +1449,7 @@ int
 boot_script_task_create (struct cmd *cmd)
 {
     kern_return_t rc = task_create_local(TASK_NULL, FALSE, FALSE, &cmd->task);
-    printf("boot_script_task_create\n");
+    dprintf("boot_script_task_create\n");
   if (rc)
     {
       printf("boot_script_task_create failed with %x\n", rc);
@@ -1455,9 +1462,9 @@ int
 boot_script_task_resume (struct cmd *cmd)
 {
     kern_return_t rc;
-    printf("task_resume entry\n");
+    dprintf("task_resume entry\n");
     rc = task_resume (cmd->task);
-    printf("after task resume\n");
+    dprintf("after task resume\n");
   if (rc)
     {
       printf("boot_script_task_resume failed with %x\n", rc);
@@ -1516,7 +1523,7 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
   info.done = 0;
 
   for (i=0; i < argc; ++i) {
-      printf("argv[%d]: %s\n", i, argv[i]);
+      dprintf("argv[%d]: %s\n", i, argv[i]);
   }
 
   if (task != MACH_PORT_NULL)
