@@ -553,8 +553,17 @@ exec_load(vm_offset_t start, vm_size_t size)
 				bss_start = ph->p_vaddr + ph->p_filesz;
 				bss_size = ph->p_memsz - ph->p_filesz;
 			}
+			else if (ph->p_flags == PF_R) {
+				/* Read-only segment (.rodata, notes, etc.) */
+				regions[boot_region_count].prot = VM_PROT_READ;
+				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
+				regions[boot_region_count].size = round_page(ph->p_filesz);
+				regions[boot_region_count].offset = trunc_page(ph->p_offset);
+				regions[boot_region_count].mapped = TRUE;
+			}
 			else {
-				printf("Found PT_LOAD region with unknown flags\n");
+				printf("Found PT_LOAD region with unknown flags=0x%x (skipped)\n",
+					ph->p_flags);
 				continue;
 			}
 
@@ -1151,17 +1160,36 @@ bootstrap_create(void)
     struct multiboot_module *bmods = ((struct multiboot_module *)
 				    boot_start);
 
-    foobar = bmods->mod_start;
-    printf("mb_info: 0x%8x\n", &mb_info);
-    printf("mb_info.count: 0x%8x\n", &mb_info.mods_count);
-    printf("mb_info.mods_addr: 0x%8x\n", &mb_info.mods_addr);
-    printf("mb_module: 0x%8x\n", mb_module);
-    printf("mb_module->mod_start: 0x%8x\n", mb_module->mod_start);
-    printf("string: 0x%8x\n", bmods[0].string);
-    printf("mod_start: 0x%8x\n", bmods[0].mod_start);
-    printf("boot_start: 0x%8x\n", boot_start);
-    printf("boot_args_start: 0x%8x\n", boot_args_start);
-    printf("foobar: 0x%8x\n", foobar);
+    /* Dump raw multiboot_info fields so we can verify what QEMU passed. */
+    printf("mb_info @ 0x%x  flags=0x%x\n", &mb_info, mb_info.flags);
+    printf("  mods_count=%d  mods_addr=0x%x\n",
+           mb_info.mods_count, mb_info.mods_addr);
+    printf("  cmdline=0x%x  mem_lower=%u KB  mem_upper=%u KB\n",
+           mb_info.cmdline, mb_info.mem_lower, mb_info.mem_upper);
+    printf("parse_multiboot result: mb_module=0x%x  boot_start=0x%x  boot_size=0x%x\n",
+           mb_module, boot_start, boot_size);
+
+    /* If parse_multiboot failed to read mods_addr (e.g. the physical address
+     * was not yet mapped at early-boot time), read it here where the kernel VM
+     * is fully up.  mods_addr is a physical address; with KVTOPHYS=0 it equals
+     * the virtual address. */
+    if (boot_start == 0 && mb_info.mods_addr != 0) {
+        struct multiboot_module *mods =
+            (struct multiboot_module *) phystokv(mb_info.mods_addr);
+        printf("  late-read mods[0]: mod_start=0x%x  mod_end=0x%x\n",
+               mods[0].mod_start, mods[0].mod_end);
+        boot_start = mods[0].mod_start;
+        boot_size  = mods[0].mod_end - mods[0].mod_start;
+        printf("  corrected: boot_start=0x%x  boot_size=0x%x\n",
+               boot_start, boot_size);
+    }
+
+    /* Peek at the first 4 bytes of the module to check for ELF magic. */
+    if (boot_start != 0) {
+        unsigned char *hdr = (unsigned char *) phystokv(boot_start);
+        printf("  module[0] header bytes: %02x %02x %02x %02x\n",
+               hdr[0], hdr[1], hdr[2], hdr[3]);
+    }
     printf("mods_count: %d\n", mb_info.mods_count);
 
     if (/*(mb_info.flags & MULTIBOOT_MODS)
