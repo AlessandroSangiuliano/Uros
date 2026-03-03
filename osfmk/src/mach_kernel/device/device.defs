@@ -100,7 +100,7 @@ subsystem
 serverprefix	ds_;
 
 /* Note: no spaces around | for polymorphic types to work with MIG parser */
-type reply_port_t = MACH_MSG_TYPE_MAKE_SEND_ONCE|polymorphic;
+type reply_port_t = MACH_MSG_TYPE_MAKE_SEND_ONCE|polymorphic ctype: ipc_port_t;
 
 skip;	/* nmk15: device_open */
 

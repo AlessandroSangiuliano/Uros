@@ -340,10 +340,8 @@ add_mig_server(${KERNEL_SRC_DIR}/mach_debug/mach_debug.defs
                ${KERNEL_BUILD_DIR}/mach_debug MACH_DEBUG)
 
 # ---- Device subsystem ----
-# TODO: device.defs has multi-line type definitions that confuse migcom
-# Disabling for now - the device subsystem will need stub implementations
-#add_mig_server(${KERNEL_SRC_DIR}/device/device.defs
-#               ${KERNEL_BUILD_DIR}/device DEVICE)
+add_mig_server(${KERNEL_SRC_DIR}/device/device.defs
+               ${KERNEL_BUILD_DIR}/device DEVICE)
 
 # TODO: device_reply.defs may still have issues
 #add_mig_user(${KERNEL_SRC_DIR}/device/device_reply.defs

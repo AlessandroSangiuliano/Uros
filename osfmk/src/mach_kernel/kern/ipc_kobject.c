@@ -215,10 +215,7 @@ rpc_subsystem_t mig_e[] = {
         (rpc_subsystem_t)&mach_host_subsystem,
         (rpc_subsystem_t)&clock_subsystem,
         (rpc_subsystem_t)&do_bootstrap_subsystem,
-#if 0  /* TODO: device.defs and memory_object.defs need MIG semicolon fixes */
         (rpc_subsystem_t)&ds_device_subsystem,
-        (rpc_subsystem_t)&memory_object_subsystem,
-#endif
 	(rpc_subsystem_t)&sync_subsystem,
 	(rpc_subsystem_t)&ledger_subsystem,
 #if     MACH_DEBUG
@@ -256,29 +253,40 @@ mig_init(void)
 	    panic("the msgh_ids in mig_e[] aren't valid!");
 	mig_reply_size = max(mig_reply_size, mig_e[i]->maxsize);
 
-	for  (j = 0; j < range; j++) {
-	  if (mig_e[i]->routine[j].stub_routine) { 
-	    /* Only put real entries in the table */
-	    nentry = j + mig_e[i]->start;	
-	    for (pos = MIG_HASH(nentry) % MAX_MIG_ENTRIES, howmany = 1;
-		 mig_buckets[pos].num;
-		 pos = ++pos % MAX_MIG_ENTRIES, howmany++) {
-		    if (mig_buckets[pos].num == nentry)
-		 	panic("multiple entries with the same msgh_id");	
-		    if (howmany == MAX_MIG_ENTRIES)
-		       panic("the mig dispatch table is too small");
-	    }
-		
-	    mig_buckets[pos].num = nentry;
-	    mig_buckets[pos].routine = mig_e[i]->routine[j].stub_routine;
-	    if (mig_e[i]->routine[j].max_reply_msg)
-		    mig_buckets[pos].size = mig_e[i]->routine[j].max_reply_msg;
-	    else
-		    mig_buckets[pos].size = mig_e[i]->maxsize;
+	{
+	  /*
+	   * Use a plain struct pointer to bypass the one-element flexible-array
+	   * placeholder in struct rpc_subsystem::routine[1].  Without this,
+	   * GCC 9+ treats routine[j] for j>0 as undefined behaviour and silently
+	   * prunes the entire loop body, leaving all subsystem entries except
+	   * routine[0] unregistered in the MIG dispatch hash table.
+	   */
+	  struct routine_descriptor *rdp =
+	      (struct routine_descriptor *)&mig_e[i]->routine[0];
+	  for (j = 0; j < range; j++) {
+	    if (rdp[j].stub_routine) {
+	      /* Only put real entries in the table */
+	      nentry = j + mig_e[i]->start;
+	      for (pos = MIG_HASH(nentry) % MAX_MIG_ENTRIES, howmany = 1;
+		   mig_buckets[pos].num;
+		   pos = ++pos % MAX_MIG_ENTRIES, howmany++) {
+		  if (mig_buckets[pos].num == nentry)
+		      panic("multiple entries with the same msgh_id");
+		  if (howmany == MAX_MIG_ENTRIES)
+		      panic("the mig dispatch table is too small");
+	      }
 
-	    mig_table_max_displ = max(howmany, mig_table_max_displ);
+	      mig_buckets[pos].num = nentry;
+	      mig_buckets[pos].routine = rdp[j].stub_routine;
+	      if (rdp[j].max_reply_msg)
+		  mig_buckets[pos].size = rdp[j].max_reply_msg;
+	      else
+		  mig_buckets[pos].size = mig_e[i]->maxsize;
+
+	      mig_table_max_displ = max(howmany, mig_table_max_displ);
+	    }
 	  }
-	}
+	} /* end rdp block */
     }
 }
 
@@ -296,6 +304,10 @@ ipc_kmsg_t
 ipc_kobject_server(
 	ipc_kmsg_t	request)
 {
+	extern int kern_bootstrap_running;
+	if (kern_bootstrap_running)
+		printf("kobject: msgid=%d\n", request->ikm_header.msgh_id);
+	int _dbg_msgid = request->ikm_header.msgh_id;
 	mach_msg_size_t reply_size;
 	ipc_kmsg_t reply;
 	kern_return_t kr;
@@ -393,7 +405,7 @@ ipc_kobject_server(
 	 * to perform the kernel function
 	 */
 	{
-	    if (ptr)	
+	    if (ptr)
 		(*ptr->routine)(&request->ikm_header, &reply->ikm_header);
 	    else {
 		if (!ipc_kobject_notify(&request->ikm_header, &reply->ikm_header)){
@@ -406,6 +418,11 @@ ipc_kobject_server(
 		}
 	    }
 	}
+	if (kern_bootstrap_running)
+		printf("kobject: msgid=%d ret=%d bits=0x%x\n",
+		       _dbg_msgid,
+		       ((mig_reply_error_t *)&reply->ikm_header)->RetCode,
+		       reply->ikm_header.msgh_bits);
 
 	/*
 	 *	Destroy destination. The following code differs from

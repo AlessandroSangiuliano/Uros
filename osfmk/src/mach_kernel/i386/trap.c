@@ -331,6 +331,8 @@ user_page_fault_continue(
 	}
 #endif	/* MACH_KDB */
 
+	printf("user_page_fault_continue: FAILED eip=0x%x cr2=0x%x kr=%d\n",
+	       regs->eip, regs->cr2, kr);
 	i386_exception(EXC_BAD_ACCESS, kr, regs->cr2);
 	/*NOTREACHED*/
 }
@@ -788,6 +790,8 @@ user_trap(
 	}
 #endif	/* ETAP_EVENT_MONITOR */
 
+	printf("user_trap: type=%d eip=0x%x err=0x%x cr2=0x%x exc=%d code=%d sub=0x%x\n",
+	       type, regs->eip, regs->err, regs->cr2, exc, code, subcode);
 	i386_exception(exc, code, subcode);
 	/*NOTREACHED*/
 }

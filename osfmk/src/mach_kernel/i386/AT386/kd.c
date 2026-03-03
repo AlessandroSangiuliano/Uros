@@ -1819,6 +1819,9 @@ kdstart(
 		if ((tp->t_outq.c_cc <= 0) || (ch = getc(&tp->t_outq)) == -1)
 			break;
 		c = ch;
+		/* Mirror to serial when VGA is the primary console. */
+		if (!cons_is_com1)
+			com_putc(c);
 		/*
 		 * Drop priority for long screen updates. ttstart() calls us at
 		 * spltty.

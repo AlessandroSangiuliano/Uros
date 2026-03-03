@@ -68,6 +68,15 @@
 #include <device/device_types.h>
 #include <device/device.h>
 
+/*
+ * Override the cthread stack size for bootstrap server threads.
+ * probe_stack() may see only a small initial stack (the thread was created
+ * by the kernel via thread_create/thread_bootstrap_return and only the top
+ * page is touched before cthread_init runs).  MIG stubs such as
+ * device_set_status allocate ~4 KB of local vars; give every cthread 1 MB.
+ */
+vm_size_t cthread_stack_size = 1024 * 1024;
+
 #if	PARAGON860
 mach_port_t	bootstrap_root_device_port;	/* local name */
 #endif	/* PARAGON860 */
@@ -219,6 +228,8 @@ main(int argc, char **argv)
 	printf_init(bootstrap_master_device_port);
 	panic_init(bootstrap_master_host_port);
 
+	printf("Try the printf init works!!");
+
 	parse_args(argc, argv, pathname);
 
 	/*
@@ -293,7 +304,6 @@ main(int argc, char **argv)
 	 * task_set_exception_ports and task_set_bootstrap_port
 	 * both require a send right.
 	 */
-	printf("Try the printf init works!!");
 	(void) mach_port_insert_right(bootstrap_self, bootstrap_bootstrap_port,
 				      bootstrap_bootstrap_port,
 				      MACH_MSG_TYPE_MAKE_SEND);
@@ -335,9 +345,11 @@ main(int argc, char **argv)
 		    config_size = strlen(default_config);
 		    config_data = malloc(config_size+1);
 		    memcpy(config_data, default_config, config_size+1);
-		    if (parse_config_file(config_data, config_size) >= 0)
-                        panic("Error in bootstrap builtin configuration\n");
-		    break;
+		    
+			if (parse_config_file(config_data, config_size) >= 0)
+				panic("Error in bootstrap builtin configuration\n");
+		    
+			break;
 		}
 		if (newpath[0] != '\0')
 		    strlcpy(pathname, newpath, sizeof(pathname));

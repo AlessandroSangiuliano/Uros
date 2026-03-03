@@ -293,11 +293,16 @@ ds_device_open(
 	ipc_port_t		notify;
 	static int		mynode= -1; /* whoami ? */
 
+	printf("ds_device_open(\"%s\") open_port=%p master=%p\n",
+	       name, open_port, master_device_port);
+
 	/*
 	 * Open must be called on the master device port.
 	 */
-	if (open_port != master_device_port)
+	if (open_port != master_device_port) {
+	    printf("ds_device_open: port mismatch -> D_INVALID_OPERATION\n");
 	    return (D_INVALID_OPERATION);
+	}
 
 	/*
 	 * There must be a reply port.
