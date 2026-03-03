@@ -87,10 +87,14 @@ mach_port_t	security_port;
 mach_port_t	root_ledger_wired;
 mach_port_t	root_ledger_paged;
 
-const char default_config[] = "\
+/*const char default_config[] = "\
 name_server name_server\n\
 default_pager default_pager\n\
 unix startup -s\n\
+";*/
+
+const char default_config[] = "\
+default_pager default_pager hd0b\n\
 ";
 
 struct server *servers;
@@ -227,8 +231,6 @@ main(int argc, char **argv)
 	 */
 	printf_init(bootstrap_master_device_port);
 	panic_init(bootstrap_master_host_port);
-
-	printf("Try the printf init works!!");
 
 	parse_args(argc, argv, pathname);
 

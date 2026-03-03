@@ -778,15 +778,24 @@ bs_add_device(
 	unsigned int	rec_size;
 	recnum_t	count;
 	int		clsize;
+	kern_return_t	kr;
 
-	if (device_open(master, MACH_PORT_NULL, D_READ | D_WRITE,
-			null_security_token, dev_name, &device))
+	printf("(default_pager): bs_add_device: opening '%s'\n", dev_name);
+	kr = device_open(master, MACH_PORT_NULL, D_READ | D_WRITE,
+			null_security_token, dev_name, &device);
+	if (kr) {
+		printf("(default_pager): device_open('%s') FAILED: %d\n",
+		       dev_name, kr);
 		return FALSE;
+	}
+	printf("(default_pager): device_open('%s') OK\n", dev_name);
 
 	info_count = DEV_GET_SIZE_COUNT;
 	if (!device_get_status(device, DEV_GET_SIZE, info, &info_count)) {
 		rec_size = info[DEV_GET_SIZE_RECORD_SIZE];
 		count = info[DEV_GET_SIZE_DEVICE_SIZE] /  rec_size;
+		printf("(default_pager): '%s' size=%d records, rec_size=%d\n",
+		       dev_name, count, rec_size);
 		clsize = bs_get_global_clsize(0);
 		if (!default_pager_backing_store_create(
 					default_pager_default_port,

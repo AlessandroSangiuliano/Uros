@@ -241,6 +241,12 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     # Use _user.h suffix to avoid conflicts with source headers (e.g. mach/memory_object.h)
     set(USER_H ${OUTPUT_DIR}/${DEFS_NAME}_user.h)
     
+    # For KernelUser stubs: define KERNEL_USER=1 so .defs files enable
+    # the KernelUser subsystem modifier (generates mach_msg_send_from_kernel
+    # instead of mach_msg_overwrite). Undefine KERNEL_SERVER to prevent
+    # memory_object.defs (which has both guards) from also setting
+    # IsKernelServer, which would emit '#undef MACH_KERNEL' and cause
+    # type conflicts between user-space and kernel type definitions.
     add_custom_command(
         OUTPUT ${USER_C} ${USER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -P -x c
@@ -249,6 +255,8 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -I${KERNEL_SRC_DIR}/i386
                 -I${KERNEL_SRC_DIR}/i386/AT386
                 ${KERNEL_DEFINES}
+                -DKERNEL_USER=1
+                -UKERNEL_SERVER
                 ${DEFS_FILE} |
                 $<TARGET_FILE:migcom>
                 -header ${USER_H}
@@ -343,9 +351,9 @@ add_mig_server(${KERNEL_SRC_DIR}/mach_debug/mach_debug.defs
 add_mig_server(${KERNEL_SRC_DIR}/device/device.defs
                ${KERNEL_BUILD_DIR}/device DEVICE)
 
-# TODO: device_reply.defs may still have issues
-#add_mig_user(${KERNEL_SRC_DIR}/device/device_reply.defs
-#             ${KERNEL_BUILD_DIR}/device DEVICE)
+# device_reply_user.c - kernel sends async device replies
+add_mig_user(${KERNEL_SRC_DIR}/device/device_reply.defs
+             ${KERNEL_BUILD_DIR}/device DEVICE)
 
 # Collect all generated MIG sources
 set(MIG_GENERATED_SOURCES

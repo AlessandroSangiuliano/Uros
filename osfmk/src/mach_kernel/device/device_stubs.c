@@ -20,13 +20,7 @@ io_return_t scsi_info_setstatus(dev_t dev, dev_flavor_t flavor, dev_status_t dat
 kern_return_t thread_sample(void *thread, void *reply_port) { return KERN_FAILURE; }
 kern_return_t task_sample(void *task, void *reply_port) { return KERN_FAILURE; }
 
-/* ds_device reply stubs */
-kern_return_t ds_device_open_reply(mach_port_t reply_port, kern_return_t return_code, mach_port_t device_port) { return KERN_FAILURE; }
-kern_return_t ds_device_read_reply(mach_port_t reply_port, kern_return_t return_code, io_buf_ptr_t data, mach_msg_type_number_t data_count) { return KERN_FAILURE; }
-kern_return_t ds_device_read_reply_inband(mach_port_t reply_port, kern_return_t return_code, io_buf_ptr_inband_t data, mach_msg_type_number_t data_count) { return KERN_FAILURE; }
-kern_return_t ds_device_read_reply_overwrite(mach_port_t reply_port, kern_return_t return_code, mach_msg_type_number_t data_count) { return KERN_FAILURE; }
-kern_return_t ds_device_write_reply(mach_port_t reply_port, kern_return_t return_code, int bytes_written) { return KERN_FAILURE; }
-kern_return_t ds_device_write_reply_inband(mach_port_t reply_port, kern_return_t return_code, int bytes_written) { return KERN_FAILURE; }
+/* ds_device reply stubs are now MIG-generated from device_reply.defs */
 
 /* Profile stub (when MACH_PROF is disabled) */
 void profile(void) {}

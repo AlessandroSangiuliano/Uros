@@ -333,6 +333,25 @@ user_page_fault_continue(
 
 	printf("user_page_fault_continue: FAILED eip=0x%x cr2=0x%x kr=%d\n",
 	       regs->eip, regs->cr2, kr);
+	printf("  eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x\n",
+	       regs->eax, regs->ebx, regs->ecx, regs->edx);
+	printf("  esi=0x%x edi=0x%x ebp=0x%x esp=0x%x\n",
+	       regs->esi, regs->edi, regs->ebp, regs->uesp);
+	/* Walk user EBP frame chain to print backtrace */
+	{
+	    unsigned int frame[2]; /* [0]=saved_ebp [1]=return_addr */
+	    unsigned int ebp_val = regs->ebp;
+	    int i;
+	    printf("  backtrace:");
+	    for (i = 0; i < 8 && ebp_val > 0x1000 && ebp_val < 0x10000000; i++) {
+		if (copyin((const char *)(vm_offset_t)ebp_val,
+			   (char *)frame, sizeof(frame)))
+		    break;
+		printf(" 0x%x", frame[1]);
+		ebp_val = frame[0];
+	    }
+	    printf("\n");
+	}
 	i386_exception(EXC_BAD_ACCESS, kr, regs->cr2);
 	/*NOTREACHED*/
 }

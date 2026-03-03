@@ -53,6 +53,7 @@
 #include <machine/ndr_def.h>
 
 extern void mig_init(void *);
+extern void mach_init_ports(void);
 
 mach_port_t	mach_task_self_ = MACH_PORT_NULL;
 
@@ -82,6 +83,13 @@ int		mach_init(void)
 	 */
 
         (void) host_page_size(mach_host_self(), &vm_page_size);
+
+	/*
+	 *	Fetch the task's bootstrap port and well-known ports.
+	 *	The CRT (__start_mach) and servers like bootstrap need
+	 *	bootstrap_port set before main() is called.
+	 */
+	mach_init_ports();
 
 	return(0);
 }
