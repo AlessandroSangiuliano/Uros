@@ -115,8 +115,8 @@ target_compile_options(default_pager_server PRIVATE
   -std=gnu11
   -m32 -march=i686
   -fno-builtin
-  -fno-stack-protector
   -mno-sse
+  -mstack-protector-guard=global
   -w
   -include stdint.h
 )
