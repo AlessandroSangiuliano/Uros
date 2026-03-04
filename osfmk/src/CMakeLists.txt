@@ -32,9 +32,10 @@ endif()
 if(OSFMK_BUILD_BOOTSTRAP)
   add_subdirectory(bootstrap)
 endif()
-#
-# if(OSFMK_BUILD_DEFAULT_PAGER)
-#   add_subdirectory(default_pager)
-# endif()
+
+# Build default pager server
+if(OSFMK_BUILD_DEFAULT_PAGER)
+  add_subdirectory(default_pager)
+endif()
 
 

@@ -144,8 +144,6 @@ service_init(void)
      */
 
     kr = mach_ports_lookup(mach_task_self(), &ports, &portsCnt);
-    printf("DBG service_init: mach_ports_lookup kr=%d portsCnt=%u ports=%p\n",
-           kr, portsCnt, ports);
     if (kr != KERN_SUCCESS) {
 	panic("%s: mach_ports_lookup: %d\n",
 		program_name, kr);
@@ -182,8 +180,6 @@ service_init(void)
      */
 
     services = (service_record_t *) malloc(services_count * sizeof *services);
-    printf("DBG service_init: malloc(%u) -> %p\n",
-           (unsigned)(services_count * sizeof *services), services);
     if (services == NULL) {
 	panic("%s: can't allocate services array", program_name);
     }

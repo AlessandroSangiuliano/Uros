@@ -991,8 +991,13 @@ main(
 
 	norma_mk = (norma_node_self(default_pager_host_port,
 				    &my_node) == KERN_SUCCESS);
-	printf("(default_pager): started%s\n",
-	       norma_mk ? " on a NORMA kernel" : "");
+	printf("(default_pager): started%s, argc=%d\n",
+	       norma_mk ? " on a NORMA kernel" : "", argc);
+	{
+		int i;
+		for (i = 0; i < argc; i++)
+			printf("(default_pager): argv[%d]='%s'\n", i, argv[i]);
+	}
 
 	/*
 	 * Process arguments:

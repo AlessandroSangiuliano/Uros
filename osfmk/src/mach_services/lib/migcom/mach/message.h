@@ -33,7 +33,18 @@ typedef unsigned int mach_msg_descriptor_type_t;
 #define MACH_MSG_OOL_DESCRIPTOR		1
 #define MACH_MSG_OOL_PORTS_DESCRIPTOR	2
 
-/* Basic descriptor and body structures (simplified for host tools) */
+/*
+ * Basic descriptor and body structures (simplified for host tools).
+ *
+ * IMPORTANT: Use uint32_t instead of void* for address/pointer fields.
+ * MIG runs on the HOST (e.g. x86_64) but generates code for a 32-bit
+ * TARGET (i386).  If void* is used, sizeof(mach_msg_descriptor_t) is
+ * 16 on a 64-bit host but only 12 on i386, causing MIG to emit wrong
+ * msgh_size constants.  Using uint32_t keeps descriptors 12 bytes on
+ * any host, matching the 32-bit Mach IPC wire format.
+ */
+#include <stdint.h>
+
 typedef struct {
     mach_port_t name;
     mach_msg_size_t pad1;
@@ -43,7 +54,7 @@ typedef struct {
 } mach_msg_port_descriptor_t;
 
 typedef struct {
-    void *address;
+    uint32_t address;
     mach_msg_size_t size;
     unsigned int deallocate : 8;
     unsigned int copy : 8;
@@ -52,7 +63,7 @@ typedef struct {
 } mach_msg_ool_descriptor_t;
 
 typedef struct {
-    void *address;
+    uint32_t address;
     mach_msg_size_t count;
     unsigned int deallocate : 8;
     unsigned int copy : 8;

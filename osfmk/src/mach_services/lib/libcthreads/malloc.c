@@ -116,16 +116,20 @@ cthread_more_memory(
 	}
 	MACH_CALL(vm_allocate(mach_task_self(), &where,
 			      (vm_size_t) amount, TRUE), r);
+	if (r != KERN_SUCCESS)
+		return;
 	/* We mustn't allocate at address 0, since programs will then see
 	 * what appears to be a null pointer for valid data.
 	 */
-	if (r == KERN_SUCCESS && where == 0) {
+	if (where == 0) {
 		MACH_CALL(vm_allocate(mach_task_self(), &where,
 				      (vm_size_t) amount, TRUE), r);
 		if (r == KERN_SUCCESS) {
 			MACH_CALL(vm_deallocate(mach_task_self(),
 						(vm_address_t) 0,
 						(vm_size_t) amount), r);
+		} else {
+			return;
 		}
 	}
 	h = (header_t) where;

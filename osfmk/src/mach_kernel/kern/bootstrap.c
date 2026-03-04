@@ -243,7 +243,6 @@ extern int		stpages;
 #endif
 
 /* Set to 1 when the bootstrap task is resumed; gates ipc_kobject trace. */
-int kern_bootstrap_running = 0;
 
 mach_port_t	bootstrap_host_security_port;	/* local name */
 mach_port_t	bootstrap_wired_ledger_port;	/* local name */
@@ -1039,7 +1038,6 @@ do_bootstrap_ports(
         ipc_port_t *paged_ledgerp,
         ipc_port_t *host_securityp)
 {
-	printf("do_bootstrap_ports called\n");
 #ifdef	lint
     bootstrap = ipc_port_make_send(realhost.host_priv_self);
 #endif	/* lint */
@@ -1091,7 +1089,6 @@ do_bootstrap_arguments(
 	task->map = VM_MAP_NULL;
 #endif	/* lint */
 
-	printf("kern: do_bootstrap_arguments called\n");
 	if (boot_args_size == 0)
 		args_size = PAGE_SIZE;
 	else
@@ -1130,7 +1127,6 @@ do_bootstrap_environment(
 	bootstrap_port = (ipc_port_t) 0;
 #endif	/* lint */
 
-	printf("kern: do_bootstrap_environment called\n");
 	if (env_size == 0)
 		alloc_size = PAGE_SIZE;
 	else
@@ -1476,7 +1472,6 @@ boot_script_task_resume (struct cmd *cmd)
       printf("boot_script_task_resume failed with %x\n", rc);
       return BOOT_SCRIPT_MACH_ERROR;
     }
-  kern_bootstrap_running = 1;
   printf ("\nstart %s: ", cmd->path);
   return 0;
 }
@@ -1548,6 +1543,8 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       task_set_special_port(task,
                             TASK_BOOTSTRAP_PORT,
                             ipc_port_make_send(master_bootstrap_port));
+      printf("boot_script_exec_cmd: set BOOTSTRAP_PORT master=0x%x task=0x%x\n",
+             (unsigned int)master_bootstrap_port, (unsigned int)task);
       
       thread_act->thread->saved.other = (char *) &info;
       thread_start(thread_act->thread, user_bootstrap);

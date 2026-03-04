@@ -304,10 +304,6 @@ ipc_kmsg_t
 ipc_kobject_server(
 	ipc_kmsg_t	request)
 {
-	extern int kern_bootstrap_running;
-	if (kern_bootstrap_running)
-		printf("kobject: msgid=%d\n", request->ikm_header.msgh_id);
-	int _dbg_msgid = request->ikm_header.msgh_id;
 	mach_msg_size_t reply_size;
 	ipc_kmsg_t reply;
 	kern_return_t kr;
@@ -418,11 +414,6 @@ ipc_kobject_server(
 		}
 	    }
 	}
-	if (kern_bootstrap_running)
-		printf("kobject: msgid=%d ret=%d bits=0x%x\n",
-		       _dbg_msgid,
-		       ((mig_reply_error_t *)&reply->ikm_header)->RetCode,
-		       reply->ikm_header.msgh_bits);
 
 	/*
 	 *	Destroy destination. The following code differs from

@@ -70,8 +70,15 @@
 #include <mach/mig_errors.h>
 #include <mach/thread_switch.h>
 #include <mach/default_pager_object.h>
-#include <mach/memory_object_server.h>
-#include <mach/memory_object_default_server.h>
+/*
+ * MIG-generated server headers with seqnos_ prefix.
+ * We include from the build directory (generated/default_pager_mig/)
+ * instead of from the export tree, because the export tree headers
+ * were generated without -DSEQNOS and lack the seqnos_ wrappers
+ * that the default pager code expects.
+ */
+#include "memory_objectServer.h"
+#include "memory_object_defaultServer.h"
 #include <mach/policy.h>
 #include <mach/host_info.h>
 #include <device/device_types.h>
@@ -79,7 +86,6 @@
 #include <device/device_request.h>
 #include <device/device_reply.h>
 #include <device/param.h>
-#include <types.h>
 
 #ifdef	USER_PAGER
 #include <mach_error.h>

@@ -1958,6 +1958,16 @@ mach_msg_overwrite_trap(
 		send_size = hdr->msgh_size;
 		trailer = (mach_msg_format_0_trailer_t *) ((vm_offset_t) hdr +
 			round_msg(send_size));
+
+		/*
+		 * Initialize the trailer for the kernel reply.
+		 * ipc_kobject_server does NOT attach a trailer to
+		 * its reply kmsg, so we must do it here before
+		 * fast_copyout/slow_copyout reads trailer fields.
+		 */
+		bcopy((char *)&trailer_template,
+		      (char *)trailer, sizeof(trailer_template));
+
 		reply_port = (ipc_port_t) hdr->msgh_remote_port;
 		ip_lock(reply_port);
 
