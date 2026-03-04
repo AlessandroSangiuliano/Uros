@@ -363,6 +363,19 @@ main(int argc, char **argv)
 	    result = open_file(bootstrap_master_device_port, pathname, &f);
 #endif	/* PARAGON860 */
 	    if (result != 0) {
+		if (!retry && !prompt) {
+		    /*
+		     * First attempt failed and we are not interactive.
+		     * Fall back to the builtin configuration instead of
+		     * looping forever waiting for console input.
+		     */
+		    BOOTSTRAP_IO_LOCK();
+		    printf("Configuration file not found; using builtin\n");
+		    BOOTSTRAP_IO_UNLOCK();
+		    if (parse_config_file(config_data, config_size) >= 0)
+			panic("Error in bootstrap builtin configuration\n");
+		    break;
+		}
 	        BOOTSTRAP_IO_LOCK();
 		printf("\nERROR: bootstrap task cannot find configuration file, please make sure that\n");
 		printf("       your boot device and partition is correctly specified.\n");

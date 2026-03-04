@@ -51,7 +51,10 @@ QEMU_ARGS="-m 128M -kernel $KERNEL -initrd $BOOTSTRAP -no-reboot"
 
 if [ "$USE_DISK" = true ] && [ -f "$DISK_IMG" ]; then
     echo "Disco: $DISK_IMG"
-    QEMU_ARGS="$QEMU_ARGS -hda $DISK_IMG"
+    # The format=raw backend does not support CHS geometry options.
+    # The hd.c driver falls back to ATA IDENTIFY DEVICE data for CHS
+    # when the BIOS FDPT is empty, so no explicit geometry is needed.
+    QEMU_ARGS="$QEMU_ARGS -drive file=$DISK_IMG,format=raw,if=ide,index=0,media=disk"
 elif [ "$USE_DISK" = true ]; then
     echo "ATTENZIONE: immagine disco non trovata: $DISK_IMG"
     echo "  Crea con: ./scripts/make-disk-image.sh"

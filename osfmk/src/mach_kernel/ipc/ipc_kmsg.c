@@ -1886,6 +1886,14 @@ ipc_kmsg_copyin_body(
 		    complex_ool = TRUE;
 #endif	/* DIPC */
 		    dsc->address = (void *) 0;
+		    /*
+		     * Translate the disposition even for an empty
+		     * descriptor so that server-side TypeCheck
+		     * (which compares against the translated value)
+		     * does not spuriously fail.
+		     */
+		    dsc->disposition =
+			ipc_object_copyin_type(dsc->disposition);
 		    break;
 		}
 

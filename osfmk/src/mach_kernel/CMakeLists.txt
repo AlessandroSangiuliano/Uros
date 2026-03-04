@@ -665,6 +665,13 @@ target_compile_options(${KERNEL_TARGET} PRIVATE
 
 target_compile_definitions(${KERNEL_TARGET} PRIVATE
     ${KERNEL_DEFINES}
+    # MIG server stubs default to TypeCheck=1 via #ifndef guard.
+    # The original ODE build passed -DTypeCheck=0 in MIG_CFLAGS;
+    # replicate that here so the kernel skips MIG type-checking
+    # (which can fail spuriously, e.g. OOL-ports disposition not
+    # translated by ipc_kmsg_copyin when count==0).
+    TypeCheck=0
+    mig_internal=
 )
 
 # Include directories
