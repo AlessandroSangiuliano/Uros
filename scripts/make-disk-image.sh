@@ -60,10 +60,17 @@ done
 
 # --- Percorsi dei binari ---
 DEFAULT_PAGER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/default_pager"
+HELLO_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_server"
 
 if [ ! -f "$DEFAULT_PAGER" ]; then
     echo "ERRORE: default_pager non trovato: $DEFAULT_PAGER"
     echo "  Build con: cd $BUILD_DIR && ninja default_pager_server"
+    exit 1
+fi
+
+if [ ! -f "$HELLO_SERVER" ]; then
+    echo "ERRORE: hello_server non trovato: $HELLO_SERVER"
+    echo "  Build con: cd $BUILD_DIR && ninja hello_server_server"
     exit 1
 fi
 
@@ -75,6 +82,7 @@ fi
 BOOTSTRAP_CONF=$(mktemp)
 cat > "$BOOTSTRAP_CONF" <<'CONF'
 default_pager default_pager hd0b
+hello_server hello_server
 CONF
 
 # --- Calcoli geometria ---
@@ -126,10 +134,13 @@ mkdir mach_servers
 cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf
 write $DEFAULT_PAGER default_pager
+write $HELLO_SERVER hello_server
 DBGFS
 
 echo "  /mach_servers/bootstrap.conf → 'default_pager default_pager hd0b'"
+echo "  /mach_servers/bootstrap.conf → 'hello_server hello_server'"
 echo "  /mach_servers/default_pager  → $(stat -c%s "$DEFAULT_PAGER") bytes"
+echo "  /mach_servers/hello_server   → $(stat -c%s "$HELLO_SERVER") bytes"
 
 # --- 5. Inserimento partizione ext2 nell'immagine disco ---
 echo "[5/6] Assemblaggio partizione ext2..."
@@ -149,14 +160,16 @@ echo "  MBR:    settore 0"
 echo "  hd0a:   settori ${PART1_START_SECT}-$((PART1_START_SECT + FS_SIZE_SECTS - 1))  (ext2, ${FS_SIZE_MB} MB)"
 echo "    └── /mach_servers/"
 echo "        ├── bootstrap.conf"
-echo "        └── default_pager"
+echo "        ├── default_pager"
+echo "        └── hello_server"
 echo "  hd0b:   settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (swap, ${SWAP_SIZE_MB} MB)"
 echo ""
 echo "Flusso di boot:"
 echo "  1. Kernel boot_device → hd0a (d_partitions[0])"
 echo "  2. Bootstrap legge /dev/boot_device/mach_servers/bootstrap.conf"
 echo "  3. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
-echo "  4. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
+echo "  4. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
+echo "  5. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
 echo ""
 echo "Per avviare:"
 echo "  ./scripts/run-qemu.sh"

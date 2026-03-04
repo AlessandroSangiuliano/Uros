@@ -11,6 +11,7 @@ option(OSFMK_BUILD_TOOLS "Costruisci i tool host (mig, migcom, ecc.)" ON)
 option(OSFMK_BUILD_KERNEL "Costruisci il kernel Mach" ON)
 option(OSFMK_BUILD_BOOTSTRAP "Costruisci il bootstrap task" ON)
 option(OSFMK_BUILD_DEFAULT_PAGER "Costruisci il default pager" OFF)
+option(OSFMK_BUILD_HELLO_SERVER "Costruisci l'hello server (test server)" OFF)
 
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'osfmk' when building kernel)" "")
