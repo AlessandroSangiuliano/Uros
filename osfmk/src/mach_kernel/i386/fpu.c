@@ -168,6 +168,8 @@ extern int curr_ipl;
 #endif
 
 int		fp_kind = FP_FXSR;	/* FXSAVE/FXRSTOR with SSE support */
+unsigned int	xsave_area_size;	/* XSAVE area size from CPUID (0 if no XSAVE) */
+unsigned int	xcr0_value;		/* current XCR0 value (enabled state components) */
 zone_t		ifps_zone;		/* zone for FPU save area */
 
 #if	NCPUS == 1
@@ -202,11 +204,20 @@ extern void		fp_load(
 /*
  * Look for FPU and initialize it.
  * Called on each CPU.
+ *
+ * Detection order:
+ *   1. Check for x87 FPU presence
+ *   2. Enable FXSAVE/FXRSTOR (SSE) support
+ *   3. Probe CPUID for XSAVE capability; if present:
+ *      a. Enable CR4.OSXSAVE
+ *      b. Set XCR0 to enable detected features (AVX, AVX-512)
+ *      c. Read XSAVE area size from CPUID leaf 0Dh
  */
 void
 init_fpu(void)
 {
 	unsigned short	status, control;
+	unsigned int	eax, ebx, ecx, edx;
 
 #if !FPE
 	/*
@@ -234,6 +245,88 @@ init_fpu(void)
 	     */
 	    set_cr4(get_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
 	    set_cr0((get_cr0() & ~CR0_EM) | CR0_TS | CR0_MP);
+
+	    /*
+	     * Probe CPUID.1:ECX for XSAVE support (bit 26).
+	     */
+	    do_cpuid(1, 0, &eax, &ebx, &ecx, &edx);
+
+	    if (ecx & CPUID_ECX_XSAVE) {
+		unsigned int xcr0_lo, xcr0_hi;
+		unsigned int supported_xcr0;
+
+		/*
+		 * XSAVE is supported.  Enable CR4.OSXSAVE so that
+		 * XSAVE/XRSTOR and XGETBV/XSETBV instructions work.
+		 */
+		set_cr4(get_cr4() | CR4_OSXSAVE);
+
+		/*
+		 * Read the XCR0 mask of supported state components
+		 * from CPUID leaf 0Dh, sub-leaf 0.
+		 */
+		do_cpuid(0x0d, 0, &eax, &ebx, &ecx, &edx);
+		supported_xcr0 = eax;	/* lower 32 bits */
+
+		/*
+		 * Build our desired XCR0 value.
+		 * Always enable x87 + SSE (mandatory for XSAVE).
+		 */
+		xcr0_lo = XCR0_X87 | XCR0_SSE;
+
+		/* Enable AVX (YMM) if supported */
+		if (supported_xcr0 & XCR0_AVX) {
+		    xcr0_lo |= XCR0_AVX;
+		    printf("FPU: AVX (YMM, 256-bit) detected\n");
+		}
+
+		/*
+		 * Enable AVX-512 if all required components are supported.
+		 * AVX-512 requires opmask (bit 5) + ZMM_Hi256 (bit 6).
+		 * Hi16_ZMM (bit 7) is only for 64-bit mode (ZMM8-ZMM15),
+		 * but the CPU may still require it as a group — enable if
+		 * all three are supported.
+		 */
+		if ((supported_xcr0 & XCR0_AVX512) == XCR0_AVX512) {
+		    /* CPU supports all AVX-512 state bits */
+		    xcr0_lo |= XCR0_AVX512;
+		    printf("FPU: AVX-512 (ZMM, 512-bit) detected\n");
+		} else if ((supported_xcr0 & XCR0_AVX512_I386) ==
+			   XCR0_AVX512_I386) {
+		    /* i386 subset: opmask + ZMM_Hi256 without Hi16_ZMM */
+		    xcr0_lo |= XCR0_AVX512_I386;
+		    printf("FPU: AVX-512 (ZMM, i386 subset) detected\n");
+		}
+
+		xcr0_hi = 0;
+
+		/*
+		 * Write our chosen XCR0 value.
+		 */
+		xsetbv(0, xcr0_lo, xcr0_hi);
+		xcr0_value = xcr0_lo;
+
+		/*
+		 * Re-read CPUID leaf 0Dh to get the XSAVE area size
+		 * for the features we just enabled.
+		 * EBX = size required for currently enabled XCR0 features.
+		 * ECX = size required for all supported XCR0 features.
+		 */
+		do_cpuid(0x0d, 0, &eax, &ebx, &ecx, &edx);
+		xsave_area_size = ebx;
+
+		if (xsave_area_size > XSAVE_AREA_MAX_SIZE) {
+		    printf("FPU: WARNING: XSAVE area %u exceeds max %u,"
+			   " clamping\n",
+			   xsave_area_size, XSAVE_AREA_MAX_SIZE);
+		    xsave_area_size = XSAVE_AREA_MAX_SIZE;
+		}
+
+		fp_kind = FP_XSAVE;
+		printf("FPU: XSAVE enabled, area size %u bytes,"
+		       " XCR0=0x%x\n",
+		       xsave_area_size, xcr0_value);
+	    }
 	}
 	else
 #endif /* !FPE */
@@ -260,9 +353,28 @@ init_fpu(void)
 void
 fpu_module_init(void)
 {
-	ifps_zone = zinit(sizeof(struct i386_fpsave_state),
-			  THREAD_MAX * sizeof(struct i386_fpsave_state),
-			  THREAD_CHUNK * sizeof(struct i386_fpsave_state),
+	unsigned int fps_size;
+
+	/*
+	 * Choose zone element size based on FPU type.
+	 * For XSAVE, the save area is variable-size; use fp_pad + actual size.
+	 * For FXSAVE, use the full struct (which includes the max union).
+	 * Round up to 64-byte boundary so all elements in a zone page
+	 * maintain 64-byte alignment (required by XSAVE).
+	 */
+	if (fp_kind == FP_XSAVE && xsave_area_size > 0) {
+	    /* 64 bytes (fp_valid + fp_pad) + xsave_area_size */
+	    fps_size = 64 + xsave_area_size;
+	} else {
+	    /* 64 bytes (fp_valid + fp_pad) + 512 (fx_save_state) */
+	    fps_size = 64 + sizeof(struct i386_fx_save);
+	}
+	/* Round up to 64-byte alignment for zone element placement */
+	fps_size = (fps_size + 63) & ~63U;
+
+	ifps_zone = zinit(fps_size,
+			  THREAD_MAX * fps_size,
+			  THREAD_CHUNK * fps_size,
 			  "i386 fpsave state");
 }
 
@@ -368,7 +480,10 @@ ASSERT_IPL(SPL0);
 	    /*
 	     * Ensure that reserved parts of the environment are 0.
 	     */
-	    bzero((char *)&ifps->fx_save_state, sizeof(struct i386_fx_save));
+	    if (fp_kind == FP_XSAVE)
+		bzero((char *)&ifps->fx_save_state, xsave_area_size);
+	    else
+		bzero((char *)&ifps->fx_save_state, sizeof(struct i386_fx_save));
 
 	    ifps->fx_save_state.fx_control = user_fp_state->fp_control;
 	    ifps->fx_save_state.fx_status  = user_fp_state->fp_status;
@@ -407,6 +522,19 @@ ASSERT_IPL(SPL0);
 			  ifps->fx_save_state.fx_reg_word[i],
 			  10);
 		}
+	    }
+
+	    /*
+	     * For XSAVE: set xstate_bv to indicate which components
+	     * are present.  We set x87 + SSE since we initialized
+	     * the legacy area and MXCSR.
+	     */
+	    if (fp_kind == FP_XSAVE) {
+		struct i386_xsave_header *hdr =
+		    (struct i386_xsave_header *)
+		    ((unsigned char *)&ifps->fx_save_state + XSAVE_HDR_OFFSET);
+		hdr->xstate_bv_lo = XCR0_X87 | XCR0_SSE;
+		hdr->xstate_bv_hi = 0;
 	    }
 
 	    simple_unlock(&pcb->lock);
@@ -556,7 +684,7 @@ ASSERT_IPL(SPL0);
 	/*
 	 * Initialize MXCSR: mask all SSE exceptions (default safe state).
 	 */
-	if (fp_kind == FP_FXSR) {
+	if (fp_kind >= FP_FXSR) {
 	    unsigned int mxcsr = MXCSR_DEFAULT;
 	    __asm__ volatile("ldmxcsr %0" : : "m" (mxcsr));
 	}
@@ -735,7 +863,10 @@ fp_save(
 	if (ifps != 0 && !ifps->fp_valid) {
 	    /* registers are in FPU */
 	    ifps->fp_valid = TRUE;
-	    fxsave(&ifps->fx_save_state);
+	    if (fp_kind == FP_XSAVE)
+		xsave(&ifps->fx_save_state);
+	    else
+		fxsave(&ifps->fx_save_state);
 	}
 }
 
@@ -755,8 +886,15 @@ fp_load(
 ASSERT_IPL(SPL0);
 	ifps = pcb->ims.ifps;
 	if (ifps == 0) {
+	    unsigned int clear_size;
 	    ifps = (struct i386_fpsave_state *) zalloc(ifps_zone);
-	    bzero((char *)ifps, sizeof *ifps);
+	    /* Clear fp_valid + fp_pad + save area */
+	    clear_size = 64;  /* fp_valid + fp_pad */
+	    if (fp_kind == FP_XSAVE)
+		clear_size += xsave_area_size;
+	    else
+		clear_size += sizeof(struct i386_fx_save);
+	    bzero((char *)ifps, clear_size);
 	    pcb->ims.ifps = ifps;
 	    fpinit();
 #if 1
@@ -781,7 +919,10 @@ ASSERT_IPL(SPL0);
 		/*NOTREACHED*/
 #endif
 	} else {
-	    fxrstor(&ifps->fx_save_state);
+	    if (fp_kind == FP_XSAVE)
+		xrstor(&ifps->fx_save_state);
+	    else
+		fxrstor(&ifps->fx_save_state);
 	}
 	ifps->fp_valid = FALSE;		/* in FPU */
 }
@@ -799,7 +940,11 @@ fp_state_alloc(void)
 	struct i386_fpsave_state *ifps;
 
 	ifps = (struct i386_fpsave_state *)zalloc(ifps_zone);
-	bzero((char *)ifps, sizeof *ifps);
+	bzero((char *)ifps, sizeof(boolean_t) + 60);	/* fp_valid + fp_pad */
+	if (fp_kind == FP_XSAVE)
+	    bzero((char *)&ifps->fx_save_state, xsave_area_size);
+	else
+	    bzero((char *)&ifps->fx_save_state, sizeof(struct i386_fx_save));
 	pcb->ims.ifps = ifps;
 
 	ifps->fp_valid = TRUE;
@@ -809,6 +954,19 @@ fp_state_alloc(void)
 	ifps->fx_save_state.fx_status = 0;
 	ifps->fx_save_state.fx_tag = 0xff;	/* all empty (abridged: 1 bit per reg) */
 	ifps->fx_save_state.fx_MXCSR = MXCSR_DEFAULT;
+
+	/*
+	 * For XSAVE: initialize the XSAVE header.
+	 * Set xstate_bv to x87 + SSE to indicate those components
+	 * are present in the save area (initialized above).
+	 */
+	if (fp_kind == FP_XSAVE) {
+	    struct i386_xsave_header *hdr =
+		(struct i386_xsave_header *)
+		((unsigned char *)&ifps->fx_save_state + XSAVE_HDR_OFFSET);
+	    hdr->xstate_bv_lo = XCR0_X87 | XCR0_SSE;
+	    hdr->xstate_bv_hi = 0;
+	}
 }
 
 

@@ -154,6 +154,7 @@ struct i386_fp_regs {
 #define	FP_287		2		/* 80287 */
 #define	FP_387		3		/* 80387 or 80486 */
 #define	FP_FXSR		4		/* FXSAVE/FXRSTOR (SSE-capable) */
+#define	FP_XSAVE	5		/* XSAVE/XRSTOR (AVX/AVX-512) */
 
 /*
  *	FXSAVE/FXRSTOR save area (512 bytes, must be 16-byte aligned).
@@ -187,5 +188,92 @@ struct i386_fx_save {
  * Bit 15: FZ (Flush to Zero) - 0 (not set)
  */
 #define	MXCSR_DEFAULT	0x1f80
+
+/*
+ *	XSAVE/XRSTOR support structures.
+ *
+ *	The XSAVE area extends the 512-byte FXSAVE legacy region with
+ *	a 64-byte header at offset 512, followed by extended state
+ *	component regions at CPU-determined offsets (via CPUID leaf 0Dh).
+ *
+ *	The entire XSAVE area must be 64-byte aligned.
+ */
+
+/*
+ *	XCR0 (Extended Control Register 0) feature bits.
+ *	These control which state components are managed by XSAVE/XRSTOR.
+ */
+#define	XCR0_X87	0x00000001	/* x87 FPU state (always set) */
+#define	XCR0_SSE	0x00000002	/* SSE state (XMM registers + MXCSR) */
+#define	XCR0_AVX	0x00000004	/* AVX state (YMM_Hi128) */
+#define	XCR0_OPMASK	0x00000020	/* AVX-512 opmask registers (k0-k7) */
+#define	XCR0_ZMM_HI256	0x00000040	/* AVX-512 upper 256 bits of ZMM0-7 */
+#define	XCR0_HI16_ZMM	0x00000080	/* AVX-512 ZMM8-ZMM15 (64-bit only) */
+
+/* AVX-512 requires opmask + ZMM_Hi256 + Hi16_ZMM all enabled together */
+#define	XCR0_AVX512	(XCR0_OPMASK | XCR0_ZMM_HI256 | XCR0_HI16_ZMM)
+
+/* All AVX-512 bits usable in 32-bit (i386) mode */
+#define	XCR0_AVX512_I386 (XCR0_OPMASK | XCR0_ZMM_HI256)
+
+/*
+ *	CPUID feature bits for XSAVE detection.
+ */
+#define	CPUID_ECX_XSAVE	(1 << 26)	/* CPUID.1:ECX bit 26 */
+#define	CPUID_ECX_OSXSAVE	(1 << 27)	/* CPUID.1:ECX bit 27 */
+#define	CPUID_ECX_AVX		(1 << 28)	/* CPUID.1:ECX bit 28 */
+#define	CPUID_EBX_AVX512F	(1 << 16)	/* CPUID.7.0:EBX bit 16 */
+
+/*
+ *	XSAVE header (64 bytes, at offset 512 in the XSAVE area).
+ */
+struct i386_xsave_header {
+	unsigned int	xstate_bv_lo;	/* lower 32 bits of XSTATE_BV */
+	unsigned int	xstate_bv_hi;	/* upper 32 bits of XSTATE_BV */
+	unsigned int	xcomp_bv_lo;	/* lower 32 bits of XCOMP_BV */
+	unsigned int	xcomp_bv_hi;	/* upper 32 bits of XCOMP_BV */
+	unsigned char	reserved[48];	/* must be zero */
+};
+
+/*
+ *	AVX extended state: upper 128 bits of YMM0-YMM7 (i386).
+ *	XSAVE state component 2.  Typically at offset 576, size 256 bytes.
+ *	On i386 only YMM0-YMM7 are accessible (the area may still be
+ *	sized for 16 registers as reported by CPUID leaf 0Dh).
+ */
+struct i386_avx_state {
+	unsigned char	ymm_hi128[8][16];	/* upper halves of YMM0-YMM7 */
+};
+
+/*
+ *	AVX-512 opmask state: k0-k7 mask registers.
+ *	XSAVE state component 5.  8 registers x 8 bytes = 64 bytes.
+ */
+struct i386_opmask_state {
+	unsigned char	k_reg[8][8];	/* 64-bit opmask registers k0-k7 */
+};
+
+/*
+ *	AVX-512 ZMM_Hi256 state: upper 256 bits of ZMM0-ZMM7.
+ *	XSAVE state component 6.  8 registers x 32 bytes = 256 bytes.
+ */
+struct i386_zmm_hi256_state {
+	unsigned char	zmm_hi256[8][32];
+};
+
+/*
+ *	Maximum XSAVE area size for static buffer allocation (i386).
+ *	Generous upper bound covering: legacy (512) + header (64) +
+ *	AVX (256) + opmask (64) + ZMM_Hi256 (512) = 1408 typical.
+ *	Rounded up significantly for future extensions.
+ *	The actual runtime size is determined via CPUID leaf 0Dh.
+ */
+#define	XSAVE_AREA_MAX_SIZE	2048
+
+/*
+ *	Offset of the XSAVE header within the XSAVE area.
+ */
+#define	XSAVE_HDR_OFFSET	512
+#define	XSAVE_HDR_SIZE		64
 
 #endif	/* _I386_FP_SAVE_H_ */
