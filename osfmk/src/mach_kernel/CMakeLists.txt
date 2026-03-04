@@ -58,6 +58,7 @@ message(STATUS "GCC internal include path: ${GCC_INCLUDE_DIR}")
 set(KERNEL_C_FLAGS
     -m32
     -march=i686
+    -mno-sse
     -ffreestanding
     -fno-stack-protector
     -fno-pic

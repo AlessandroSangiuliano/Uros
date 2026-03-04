@@ -15,7 +15,7 @@ endif()
 
 add_library(libcthreads STATIC ${LIB_SOURCES})
 # Legacy K&R/gnu89 code: suppress warnings, allow implicit declarations
-target_compile_options(libcthreads PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -mno-sse -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686>)
+target_compile_options(libcthreads PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2>)
 
 target_include_directories(libcthreads PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}

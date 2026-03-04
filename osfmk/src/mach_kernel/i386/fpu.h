@@ -110,6 +110,12 @@ static __inline__ unsigned short fnstsw(void)
 #define	frstor(state) \
 	__asm__ volatile("frstor %0" : : "m" (state))
 
+#define	fxsave(state) \
+	__asm__ volatile("fxsave %0" : "=m" (*(state)))
+
+#define	fxrstor(state) \
+	__asm__ volatile("fxrstor %0" : : "m" (*(state)))
+
 #define fwait() \
     	__asm__("fwait");
 
@@ -160,7 +166,7 @@ extern void	enable_fpe(struct i386_fpsave_state *ifps);
 	if (ifps != 0 && !ifps->fp_valid) { \
 	    /* registers are in FPU - save to memory */ \
 	    ifps->fp_valid = TRUE; \
-	    fnsave(&ifps->fp_save_state); \
+	    fxsave(&ifps->fx_save_state); \
 	} \
 	set_ts(); \
     }

@@ -113,9 +113,8 @@ add_executable(default_pager_server
 
 target_compile_options(default_pager_server PRIVATE
   -std=gnu11
-  -m32 -march=i686
+  -m32 -march=i686 -msse -msse2
   -fno-builtin
-  -mno-sse
   -mstack-protector-guard=global
   -w
   -include stdint.h

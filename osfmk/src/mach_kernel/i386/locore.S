@@ -2417,20 +2417,20 @@ ENTRY(_clts)
 	ret
 
 /*
- * Save complete FPU state.  Save error for later.
+ * Save complete FPU state (FXSAVE format, 512 bytes, 16-byte aligned).
  */
 ENTRY(_fpsave)
 	movl	4(%esp),%eax		/* get save area pointer */
-	fnsave	(%eax)			/* save complete state, including */
-					/* errors */
+	fxsave	(%eax)			/* save complete state, including */
+					/* SSE and x87 */
 	ret
 
 /*
- * Restore FPU state.
+ * Restore FPU state (FXRSTOR format, 512 bytes, 16-byte aligned).
  */
 ENTRY(_fprestore)
 	movl	4(%esp),%eax		/* get save area pointer */
-	frstor	(%eax)			/* restore complete state */
+	fxrstor	(%eax)			/* restore complete state */
 	ret
 
 /*

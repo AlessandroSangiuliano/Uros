@@ -43,7 +43,7 @@ add_dependencies(libsa_mach mig_device_header)
 # -D_BSD for BSD compatibility
 # -std=gnu11 for legacy C
 #
-target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -mno-sse -w -m32 -march=i686 -mstack-protector-guard=global -include math.h>)
+target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -m32 -march=i686 -msse -msse2 -mstack-protector-guard=global -include math.h>)
 target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>)
 
 # Work around GCC constprop + SSP + va_list code generation bug on i386:

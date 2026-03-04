@@ -160,6 +160,8 @@
 /*
  * CR4
  */
+#define	CR4_OSXMMEXCPT	0x00000400	/* p6:   OS Support for Unmasked SIMD FP Exceptions */
+#define	CR4_OSFXSR	0x00000200	/* p6:   OS Support for FXSAVE/FXRSTOR */
 #define	CR4_PGE	0x00000080	/*       Page Global Extensions */
 #define	CR4_MCE	0x00000040	/* p5:   Machine Check Exceptions */
 #define	CR4_PSE	0x00000010	/* p5:   Page Size Extensions */
