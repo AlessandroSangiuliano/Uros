@@ -143,6 +143,7 @@ open_file(
 			 component, &fp->f_dev.dev_port);
 
 	if (rc) {
+		printf("open_file: device_open(%s) failed rc=%d\n", component, rc);
 		free(namebuf);
 		return rc;
 	}

@@ -1153,6 +1153,8 @@ exception_no_server(void)
 	 *	All else failed; terminate task.
 	 */
 
+	printf("exception_no_server: terminating task %p\n",
+	       (void *)self->top_act->task);
 	(void) task_terminate(self->top_act->task);
 	thread_terminate_self();
 	/*NOTREACHED*/

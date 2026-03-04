@@ -1401,6 +1401,23 @@ void hd_read_id (
 	parm.nsec   = *(unsigned char  *)(tbl+14);
 
 	parm.precomp= *(unsigned short *)(tbl+5);
+
+	/*
+	 * If BIOS FDPT has zero geometry (common with QEMU/SeaBIOS),
+	 * fall back to IDENTIFY DEVICE data.  Try "current" values
+	 * (words 54-56) first, then "default" values (words 1/3/6).
+	 */
+	if (parm.ncyl == 0 && parm.nheads == 0 && parm.nsec == 0) {
+		if (id.val_cur_values & 1) {
+			parm.ncyl   = id.cur_cyls;
+			parm.nheads = id.cur_heads;
+			parm.nsec   = id.cur_secs;
+		} else if (id.cyls && id.heads && id.spt) {
+			parm.ncyl   = id.cyls;
+			parm.nheads = id.heads;
+			parm.nsec   = id.spt;
+		}
+	}
 	hd_drive[unit]->cmos_parm = parm;
 	if (id.val_cur_values & 1) {
 		hd_drive[unit]->label.d_nsectors = id.cur_secs;
@@ -1413,7 +1430,7 @@ void hd_read_id (
 	}
 	printf(", stat = %x, spl = %d, pic = %d\n",
 		dev->address, dev->sysdep, dev->sysdep1);
-	if (unit < 2 || (id.val_cur_values & 1))
+	if (parm.ncyl && parm.nheads && parm.nsec)
 		printf(" hd%d: %d Meg, C:%d H:%d S:%d - ",
 		       unit,
 		       parm.ncyl*parm.nheads*parm.nsec * 512/1000000,
@@ -1421,7 +1438,8 @@ void hd_read_id (
 		       parm.nheads,
 		       parm.nsec);
 	else
-		printf("hd%d:   Capacity not available through bios\n",unit);
+		printf("hd%d:   Capacity not available (BIOS and IDENTIFY)\n",
+		       unit);
 
 	/* model is big endian byte ordered */
 	for (i=0; i < sizeof(id.model); i +=2) {

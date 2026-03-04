@@ -475,9 +475,22 @@ static security_token_t null_security_token;
 void
 printf_init(mach_port_t device_server_port)
 {
-	(void) device_open(device_server_port, MACH_PORT_NULL, D_WRITE,
-			   null_security_token, (char *)"console",
-			   &console_port);
+	kern_return_t kr;
+
+	/*
+	 * Try "com0" first (serial port) so we get output in QEMU -nographic.
+	 * The "console" device (kd) writes directly to VGA RAM which
+	 * QEMU does not relay to stdio under -nographic.
+	 * Use D_READ|D_WRITE as the kernel device layer expects both.
+	 */
+	kr = device_open(device_server_port, MACH_PORT_NULL, D_READ|D_WRITE,
+			 null_security_token, (char *)"com0",
+			 &console_port);
+	if (kr != KERN_SUCCESS) {
+		(void) device_open(device_server_port, MACH_PORT_NULL, D_READ|D_WRITE,
+				   null_security_token, (char *)"console",
+				   &console_port);
+	}
 }
 
 #define	PRINTF_BUFMAX	128

@@ -667,13 +667,8 @@ read_fs(
 	error = device_read(dev->dev_port, 0, 
 			    (recnum_t) dbtorec(dev, SBLOCK), SBSIZE,
 			    (char **) &buf, &buf_size);
-	if (error) {
-#ifdef	DEBUG
-		if (debug)
-			printf("ext2 read_fs: device_read return 0x%x\n", error);
-#endif
+	if (error)
 	    return (error);
-	}
 
 	/*
 	 * Check the superblock
@@ -681,11 +676,6 @@ read_fs(
 	raw_fs = *(struct ext2_super_block *)buf;
 	if (le16_to_cpu(raw_fs.s_magic) != EXT2_SUPER_MAGIC) {
 		(void) vm_deallocate(mach_task_self(), buf, buf_size);
-#ifdef	DEBUG
-		if (debug)
-			printf("ext2 read_fs: bad magic number 0x%x\n",
-			       le16_to_cpu(raw_fs.s_magic));
-#endif
 		return (FS_INVALID_FS);
 	}
 
@@ -837,10 +827,8 @@ ext2fs_open_file(
 	    return rc;
 
 	inumber = (ino_t) ROOTINO;
-	if ((rc = read_inode(inumber, fp)) != 0) {
-	    printf("can't read root inode\n");
+	if ((rc = read_inode(inumber, fp)) != 0)
 	    goto exit;
-	}
 
 	while (*cp) {
 

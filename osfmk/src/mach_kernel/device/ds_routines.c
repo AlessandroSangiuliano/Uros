@@ -296,15 +296,14 @@ ds_device_open(
 	/*
 	 * Open must be called on the master device port.
 	 */
-	if (open_port != master_device_port)
+	if (open_port != master_device_port) {
 	    return (D_INVALID_OPERATION);
+	}
 
 	/*
 	 * There must be a reply port.
 	 */
 	if (!IP_VALID(reply_port)) {
-	    printf("ds_* invalid reply port\n");
-	    Debugger("ds_* reply_port");
 	    return (MIG_NO_REPLY);	/* no sense in doing anything */
 	}
 

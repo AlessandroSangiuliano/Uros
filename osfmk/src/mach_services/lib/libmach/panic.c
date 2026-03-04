@@ -73,4 +73,14 @@ panic(const char *s, ...)
 
 #define RB_DEBUGGER	0x1000	/* enter debugger NOW */
 	(void) host_reboot(master_host_port, RB_DEBUGGER);
+
+	/*
+	 * host_reboot may return if the kernel debugger is not
+	 * compiled in.  Trigger a deliberate page fault with a
+	 * sentinel cr2 value (0xDEAD) so the kernel's fault handler
+	 * prints useful registers, then spin forever.
+	 */
+	*(volatile int *)0xDEAD = 0xDEAD;
+	for (;;)
+		;
 }

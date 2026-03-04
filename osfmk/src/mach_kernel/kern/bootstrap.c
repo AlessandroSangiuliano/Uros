@@ -242,6 +242,8 @@ extern int		stpages;
 #define dprintf(fmt, ...) do {} while (0)
 #endif
 
+/* Set to 1 when the bootstrap task is resumed; gates ipc_kobject trace. */
+
 mach_port_t	bootstrap_host_security_port;	/* local name */
 mach_port_t	bootstrap_wired_ledger_port;	/* local name */
 mach_port_t	bootstrap_paged_ledger_port;	/* local name */
@@ -282,10 +284,10 @@ vm_offset_t move_bootstrap(void);	 /* forward; */
 #define STACK_BASE		(USER_STACK_END-STACK_SIZE)
 extern void set_bootstrap_args(void);
 #else
-#define	STACK_SIZE		(64*1024)	/* 64k stack */
+#define	STACK_SIZE		(1024*1024)	/* 1MB stack — MIG stubs use large stack frames */
 #define STACK_BASE		(VM_MAX_ADDRESS-STACK_SIZE)
 #define STACK_PTR		(VM_MAX_ADDRESS-0x10) /* XXX */
-#endif 
+#endif
 
 int	startup_single_user = 0;
 
@@ -333,7 +335,7 @@ do_bootstrap_compat(void)
 				dprintf("Found text region\n");
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_EXECUTE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
-				regions[boot_region_count].size = round_page(ph->p_filesz);
+				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_filesz) - trunc_page(ph->p_vaddr);
 				regions[boot_region_count].offset = trunc_page(ph->p_offset);
 				regions[boot_region_count].mapped = TRUE;
 			}
@@ -341,7 +343,7 @@ do_bootstrap_compat(void)
 				dprintf("Found data region\n");
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_WRITE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
-				regions[boot_region_count].size = round_page(ph->p_memsz);
+				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_memsz) - trunc_page(ph->p_vaddr);
 				regions[boot_region_count].offset = trunc_page(ph->p_offset);
 				regions[boot_region_count].mapped = TRUE;
 				bzero((char *) (boot_start+ph->p_offset+ph->p_filesz),
@@ -544,7 +546,7 @@ exec_load(vm_offset_t start, vm_size_t size)
 				dprintf("Found text region\n");
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_EXECUTE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
-				regions[boot_region_count].size = round_page(ph->p_filesz);
+				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_filesz) - trunc_page(ph->p_vaddr);
 				regions[boot_region_count].offset = trunc_page(ph->p_offset);
 				regions[boot_region_count].mapped = TRUE;
 			}
@@ -552,7 +554,7 @@ exec_load(vm_offset_t start, vm_size_t size)
 				dprintf("Found data region\n");
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_WRITE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
-				regions[boot_region_count].size = round_page(ph->p_memsz);
+				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_memsz) - trunc_page(ph->p_vaddr);
 				regions[boot_region_count].offset = trunc_page(ph->p_offset);
 				regions[boot_region_count].mapped = TRUE;
 				bzero((char *) (start+ph->p_offset+ph->p_filesz),
@@ -564,7 +566,7 @@ exec_load(vm_offset_t start, vm_size_t size)
 				/* Read-only segment (.rodata, notes, etc.) */
 				regions[boot_region_count].prot = VM_PROT_READ;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
-				regions[boot_region_count].size = round_page(ph->p_filesz);
+				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_filesz) - trunc_page(ph->p_vaddr);
 				regions[boot_region_count].offset = trunc_page(ph->p_offset);
 				regions[boot_region_count].mapped = TRUE;
 			}
@@ -1541,6 +1543,8 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       task_set_special_port(task,
                             TASK_BOOTSTRAP_PORT,
                             ipc_port_make_send(master_bootstrap_port));
+      printf("boot_script_exec_cmd: set BOOTSTRAP_PORT master=0x%x task=0x%x\n",
+             (unsigned int)master_bootstrap_port, (unsigned int)task);
       
       thread_act->thread->saved.other = (char *) &info;
       thread_start(thread_act->thread, user_bootstrap);

@@ -44,7 +44,7 @@ add_library(libsa_fs STATIC ${SA_FS_SOURCES})
 add_dependencies(libsa_fs mig_device_header)
 
 target_compile_options(libsa_fs PRIVATE
-  -std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686
+  -std=gnu11 -fno-builtin -fno-stack-protector -mno-sse -w -include stdint.h -m32 -march=i686
 )
 
 target_compile_definitions(libsa_fs PRIVATE
