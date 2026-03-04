@@ -11,18 +11,6 @@
 #include <mach/port.h>
 #include <mach/message.h>
 
-/* GCC stack-smashing protector callback (called on stack overflow). */
-void __stack_chk_fail_local(void)
-{
-	extern void panic(const char *);
-	panic("stack smashing detected");
-}
-
-void __stack_chk_fail(void)
-{
-	__stack_chk_fail_local();
-}
-
 /*
  * thread_switch() — thin wrapper over the syscall_thread_switch() Mach trap.
  * The original ms_thread_switch.c checked _rpc_glue_vector for RPC

@@ -53,6 +53,7 @@ char **__environment = &__nullarg;
 
 extern int main(int, char **);
 extern void exit(int);
+extern void init_stack_guard(void);
 
 static void __setup_ptrs(vm_offset_t, vm_size_t, char ***, int *);
 static void __get_arguments(void);
@@ -60,10 +61,18 @@ static void __get_environment(void);
 
 void __start_mach(void);
 
-void
+/*
+ * __attribute__((optimize("no-stack-protector"))) ensures this function
+ * is not instrumented with canary checks — the guard is not yet
+ * initialized when we enter here.
+ */
+void __attribute__((no_stack_protector))
 __start_mach(void)
 {
 	int retval;
+
+	/* Must be first — initialize canary before any protected function. */
+	init_stack_guard();
 
 	if (*_mach_init_routine)
 		(*_mach_init_routine)();

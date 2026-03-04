@@ -43,8 +43,14 @@ add_dependencies(libsa_mach mig_device_header)
 # -D_BSD for BSD compatibility
 # -std=gnu11 for legacy C
 #
-target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -fno-stack-protector -mno-sse -w -m32 -march=i686 -include math.h>)
+target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -mno-sse -w -m32 -march=i686 -mstack-protector-guard=global -include math.h>)
 target_compile_options(libsa_mach PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>)
+
+# Work around GCC constprop + SSP + va_list code generation bug on i386:
+# GCC creates a constprop clone of _doprnt where the va_list calling
+# convention is inconsistent between the inlined printf and standalone
+# vprintf callers.  Disable SSP for printf.c until GCC is fixed.
+set_source_files_properties(printf.c PROPERTIES COMPILE_FLAGS -fno-stack-protector)
 
 # Mach userspace headers (sa_mach) solo per questa libreria
 target_include_directories(libsa_mach BEFORE PUBLIC
