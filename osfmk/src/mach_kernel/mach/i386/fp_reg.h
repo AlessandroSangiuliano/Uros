@@ -153,5 +153,39 @@ struct i386_fp_regs {
 #define	FP_SOFT		1		/* software FP emulator */
 #define	FP_287		2		/* 80287 */
 #define	FP_387		3		/* 80387 or 80486 */
+#define	FP_FXSR		4		/* FXSAVE/FXRSTOR (SSE-capable) */
+
+/*
+ *	FXSAVE/FXRSTOR save area (512 bytes, must be 16-byte aligned).
+ *	Used on Pentium III+ processors that support SSE.
+ */
+struct i386_fx_save {
+	unsigned short	fx_control;	/* 0: FPU control word */
+	unsigned short	fx_status;	/* 2: FPU status word */
+	unsigned char	fx_tag;		/* 4: abridged FPU tag word */
+	unsigned char	fx_rsv1;	/* 5: reserved */
+	unsigned short	fx_opcode;	/* 6: FPU opcode */
+	unsigned int	fx_eip;		/* 8: FPU instruction pointer offset */
+	unsigned short	fx_cs;		/* 12: FPU instruction pointer selector */
+	unsigned short	fx_rsv2;	/* 14: reserved */
+	unsigned int	fx_dp;		/* 16: FPU data pointer offset */
+	unsigned short	fx_ds;		/* 20: FPU data pointer selector */
+	unsigned short	fx_rsv3;	/* 22: reserved */
+	unsigned int	fx_MXCSR;	/* 24: MXCSR register */
+	unsigned int	fx_MXCSR_MASK;	/* 28: MXCSR mask */
+	unsigned char	fx_reg_word[8][16]; /* 32: 8 x87/MMX regs (10 bytes + 6 reserved) */
+	unsigned char	fx_xmm_reg[8][16];  /* 160: 8 XMM registers */
+	unsigned char	fx_reserved[224]; /* 288: reserved */
+};
+
+/*
+ * Default MXCSR value: mask all exceptions.
+ * Bits 0-5: exception flags (sticky, cleared to 0)
+ * Bit 6: DAZ (Denormals Are Zeros) - 0 (not set)
+ * Bits 7-12: exception masks (all set = all masked)
+ * Bits 13-14: rounding control (00 = round to nearest)
+ * Bit 15: FZ (Flush to Zero) - 0 (not set)
+ */
+#define	MXCSR_DEFAULT	0x1f80
 
 #endif	/* _I386_FP_SAVE_H_ */

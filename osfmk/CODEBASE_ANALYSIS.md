@@ -573,9 +573,16 @@ osfmk/
 
 ### 4.4 Flag di Compilazione (target i386)
 
+**Kernel:**
 ```
--std=gnu11 -m32 -march=i686 -ffreestanding -nostdlib -nostdinc
--fno-builtin -fno-stack-protector -mno-sse -w -include stdint.h
+-std=gnu11 -m32 -march=i686 -mno-sse -ffreestanding -nostdlib -nostdinc
+-fno-builtin -fno-stack-protector -w -include stdint.h
+```
+
+**Userspace (bootstrap, default_pager, libmach, etc.):**
+```
+-std=gnu11 -m32 -march=i686 -msse -msse2 -fno-builtin -w
+-mstack-protector-guard=global -include stdint.h
 ```
 
 ### 4.5 Comandi Rapidi

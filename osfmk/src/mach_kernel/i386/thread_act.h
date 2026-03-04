@@ -76,12 +76,17 @@
 /*
  *	Save area for user floating-point state.
  *	Allocated only when necessary.
+ *
+ *	Uses FXSAVE layout (512 bytes, 16-byte aligned) for SSE support.
+ *	The legacy i386_fp_save/i386_fp_regs fields are kept as aliases
+ *	to the corresponding FXSAVE sub-fields for backward compatibility
+ *	with code that only accesses x87 state.
  */
 
 struct i386_fpsave_state {
 	boolean_t		fp_valid;
-	struct i386_fp_save	fp_save_state;
-	struct i386_fp_regs	fp_regs;
+	unsigned char		fp_pad[12];	/* pad to 16-byte boundary */
+	struct i386_fx_save	fx_save_state __attribute__((aligned(16)));
 };
 
 /*

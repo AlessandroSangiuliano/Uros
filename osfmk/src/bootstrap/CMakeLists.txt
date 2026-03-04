@@ -101,7 +101,7 @@ add_executable(bootstrap_server
 )
 
 target_compile_options(bootstrap_server PRIVATE
-  -std=gnu11 -fno-builtin -mno-sse -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686
+  -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2
 )
 
 target_compile_definitions(bootstrap_server PRIVATE
