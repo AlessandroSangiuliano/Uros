@@ -150,7 +150,7 @@
 				 EXT2_GOOD_OLD_FIRST_INO : \
 				 (s)->s_first_ino)
 #endif
-#define	EXT2_INODES_PER_BLOCK(s)	(EXT2_BLOCK_SIZE(s) / sizeof (struct ext2_inode))
+#define	EXT2_INODES_PER_BLOCK(s)	(EXT2_BLOCK_SIZE(s) / EXT2_INODE_SIZE(s))
 
 /*
  * Macro-instructions used to manage fragments
@@ -339,8 +339,8 @@ struct ext2_super_block {
 	unsigned long  s_checkinterval;	/* max. time between checks */
 	unsigned long  s_creator_os;	/* OS */
 	unsigned long  s_rev_level;	/* Revision level */
-	unsigned long  s_def_resuid;	/* Default uid for reserved blocks */
-	unsigned long  s_def_resgid;	/* Default gid for reserved blocks */
+	unsigned short s_def_resuid;	/* Default uid for reserved blocks */
+	unsigned short s_def_resgid;	/* Default gid for reserved blocks */
 	/*
 	 * These fields are for EXT2_DYNAMIC_REV superblocks only.
 	 *
@@ -413,11 +413,37 @@ struct ext2_dir_entry {
 					 ~EXT2_DIR_ROUND)
 
 /*
- * Feature set definitions --- none are defined as of now
+ * Feature set definitions
+ */
+
+/* Compatible feature flags */
+#define EXT2_FEATURE_COMPAT_DIR_PREALLOC	0x0001
+#define EXT2_FEATURE_COMPAT_IMAGIC_INODES	0x0002
+#define EXT3_FEATURE_COMPAT_HAS_JOURNAL		0x0004
+#define EXT2_FEATURE_COMPAT_EXT_ATTR		0x0008
+#define EXT2_FEATURE_COMPAT_RESIZE_INO		0x0010
+#define EXT2_FEATURE_COMPAT_DIR_INDEX		0x0020
+
+/* Read-only compatible feature flags */
+#define EXT2_FEATURE_RO_COMPAT_SPARSE_SUPER	0x0001
+#define EXT2_FEATURE_RO_COMPAT_LARGE_FILE	0x0002
+#define EXT2_FEATURE_RO_COMPAT_BTREE_DIR	0x0004
+
+/* Incompatible feature flags */
+#define EXT2_FEATURE_INCOMPAT_COMPRESSION	0x0001
+#define EXT2_FEATURE_INCOMPAT_FILETYPE		0x0002
+#define EXT3_FEATURE_INCOMPAT_RECOVER		0x0004
+#define EXT3_FEATURE_INCOMPAT_JOURNAL_DEV	0x0008
+#define EXT2_FEATURE_INCOMPAT_META_BG		0x0010
+
+/*
+ * Features supported by this (read-only) bootstrap filesystem.
+ * Compatible and RO-compatible features are always safe to ignore when
+ * reading.  We only need to check incompatible features.
  */
 #define EXT2_FEATURE_COMPAT_SUPP	0
-#define EXT2_FEATURE_INCOMPAT_SUPP	0
 #define EXT2_FEATURE_RO_COMPAT_SUPP	0
+#define EXT2_FEATURE_INCOMPAT_SUPP	EXT2_FEATURE_INCOMPAT_FILETYPE
 
 #ifdef __KERNEL__
 /*
