@@ -43,4 +43,9 @@ if(OSFMK_BUILD_HELLO_SERVER)
   add_subdirectory(hello_server)
 endif()
 
+# Build IPC performance benchmark
+if(OSFMK_BUILD_IPC_BENCH)
+  add_subdirectory(ipc_bench)
+endif()
+
 

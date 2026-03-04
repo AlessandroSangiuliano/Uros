@@ -61,6 +61,7 @@ done
 # --- Percorsi dei binari ---
 DEFAULT_PAGER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/default_pager"
 HELLO_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_server"
+IPC_BENCH="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ipc_bench"
 
 if [ ! -f "$DEFAULT_PAGER" ]; then
     echo "ERRORE: default_pager non trovato: $DEFAULT_PAGER"
@@ -74,6 +75,12 @@ if [ ! -f "$HELLO_SERVER" ]; then
     exit 1
 fi
 
+if [ ! -f "$IPC_BENCH" ]; then
+    echo "ERRORE: ipc_bench non trovato: $IPC_BENCH"
+    echo "  Build con: cd $BUILD_DIR && ninja ipc_bench_server"
+    exit 1
+fi
+
 # --- File di configurazione del bootstrap ---
 # Formato: <symtab_name> <path> [args...]
 # Il path relativo viene risolto come /dev/boot_device/mach_servers/<path>
@@ -83,6 +90,7 @@ BOOTSTRAP_CONF=$(mktemp)
 cat > "$BOOTSTRAP_CONF" <<'CONF'
 default_pager default_pager hd0b
 hello_server hello_server
+ipc_bench ipc_bench
 CONF
 
 # --- Calcoli geometria ---
@@ -135,12 +143,15 @@ cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf
 write $DEFAULT_PAGER default_pager
 write $HELLO_SERVER hello_server
+write $IPC_BENCH ipc_bench
 DBGFS
 
 echo "  /mach_servers/bootstrap.conf → 'default_pager default_pager hd0b'"
 echo "  /mach_servers/bootstrap.conf → 'hello_server hello_server'"
+echo "  /mach_servers/bootstrap.conf → 'ipc_bench ipc_bench'"
 echo "  /mach_servers/default_pager  → $(stat -c%s "$DEFAULT_PAGER") bytes"
 echo "  /mach_servers/hello_server   → $(stat -c%s "$HELLO_SERVER") bytes"
+echo "  /mach_servers/ipc_bench      → $(stat -c%s "$IPC_BENCH") bytes"
 
 # --- 5. Inserimento partizione ext2 nell'immagine disco ---
 echo "[5/6] Assemblaggio partizione ext2..."
@@ -161,7 +172,8 @@ echo "  hd0a:   settori ${PART1_START_SECT}-$((PART1_START_SECT + FS_SIZE_SECTS 
 echo "    └── /mach_servers/"
 echo "        ├── bootstrap.conf"
 echo "        ├── default_pager"
-echo "        └── hello_server"
+echo "        ├── hello_server
+        └── ipc_bench"
 echo "  hd0b:   settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (swap, ${SWAP_SIZE_MB} MB)"
 echo ""
 echo "Flusso di boot:"
@@ -169,7 +181,8 @@ echo "  1. Kernel boot_device → hd0a (d_partitions[0])"
 echo "  2. Bootstrap legge /dev/boot_device/mach_servers/bootstrap.conf"
 echo "  3. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
 echo "  4. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
-echo "  5. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
+echo "  5. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
+echo "  6. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
 echo ""
 echo "Per avviare:"
 echo "  ./scripts/run-qemu.sh"
