@@ -265,8 +265,16 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	    struct ext2_inode *inode;
 	    unsigned long block;
 
-	    raw_inode = (struct ext2_inode *)buf;
-	    raw_inode += ext2_itoo(fs, inumber);
+	    /*
+	     * Locate the inode within the block.  We cannot simply
+	     * use pointer arithmetic on (struct ext2_inode *) because
+	     * sizeof(struct ext2_inode) is 128, while modern ext2
+	     * filesystems may use 256-byte (or larger) inodes.
+	     * Instead we compute the byte offset using the actual
+	     * on-disk inode size from the superblock.
+	     */
+	    raw_inode = (struct ext2_inode *)
+		((char *)buf + ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs));
 	    inode = &fp->i_ic;
 
 	    inode->i_mode = le16_to_cpu(raw_inode->i_mode);
@@ -705,8 +713,61 @@ read_fs(
 	fs->s_checkinterval = le32_to_cpu(raw_fs.s_checkinterval);
 	fs->s_creator_os = le32_to_cpu(raw_fs.s_creator_os);
 	fs->s_rev_level = le32_to_cpu(raw_fs.s_rev_level);
-	fs->s_def_resuid = le32_to_cpu(raw_fs.s_def_resuid);
-	fs->s_def_resgid = le32_to_cpu(raw_fs.s_def_resgid);
+	fs->s_def_resuid = le16_to_cpu(raw_fs.s_def_resuid);
+	fs->s_def_resgid = le16_to_cpu(raw_fs.s_def_resgid);
+
+	/*
+	 * Byte-swap dynamic revision fields.
+	 * For GOOD_OLD_REV these fields don't exist on disk but
+	 * EXT2_INODE_SIZE() / EXT2_FIRST_INO() will return the
+	 * old defaults (128 / 11) regardless.
+	 */
+	if (fs->s_rev_level >= EXT2_DYNAMIC_REV) {
+		fs->s_first_ino = le32_to_cpu(raw_fs.s_first_ino);
+		fs->s_inode_size = le16_to_cpu(raw_fs.s_inode_size);
+		fs->s_block_group_nr = le16_to_cpu(raw_fs.s_block_group_nr);
+		fs->s_feature_compat = le32_to_cpu(raw_fs.s_feature_compat);
+		fs->s_feature_incompat = le32_to_cpu(raw_fs.s_feature_incompat);
+		fs->s_feature_ro_compat = le32_to_cpu(raw_fs.s_feature_ro_compat);
+	} else {
+		fs->s_first_ino = EXT2_GOOD_OLD_FIRST_INO;
+		fs->s_inode_size = EXT2_GOOD_OLD_INODE_SIZE;
+		fs->s_feature_compat = 0;
+		fs->s_feature_incompat = 0;
+		fs->s_feature_ro_compat = 0;
+	}
+
+	/*
+	 * Validate inode size: must be a power of 2, at least 128 bytes,
+	 * and no larger than the block size.
+	 */
+	{
+		unsigned short isz = EXT2_INODE_SIZE(fs);
+		if (isz < EXT2_GOOD_OLD_INODE_SIZE ||
+		    isz > EXT2_BLOCK_SIZE(fs) ||
+		    (isz & (isz - 1)) != 0) {
+			printf("ext2: invalid inode size %d\n", isz);
+			(void) vm_deallocate(mach_task_self(), buf, buf_size);
+			return (FS_INVALID_FS);
+		}
+	}
+
+	/*
+	 * Reject incompatible features we do not understand.
+	 * Since this is a read-only filesystem, compatible and
+	 * read-only compatible features can be safely ignored.
+	 */
+	if (fs->s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_SUPP) {
+		printf("ext2: unsupported incompat features 0x%lx\n",
+		       fs->s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_SUPP);
+		(void) vm_deallocate(mach_task_self(), buf, buf_size);
+		return (FS_INVALID_FS);
+	}
+
+	printf("ext2: rev %ld, inode size %d, block size %ld\n",
+	       fs->s_rev_level,
+	       (int)EXT2_INODE_SIZE(fs),
+	       (long)EXT2_BLOCK_SIZE(fs));
 
 	/*
 	 * Compute the groups informations
