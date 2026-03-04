@@ -2417,19 +2417,42 @@ ENTRY(_clts)
 	ret
 
 /*
- * Save complete FPU state (FXSAVE format, 512 bytes, 16-byte aligned).
+ * Save complete FPU state.
+ * Uses XSAVE if fp_kind == FP_XSAVE, else FXSAVE.
+ * Argument: pointer to save area (64-byte aligned for XSAVE,
+ *           16-byte aligned for FXSAVE).
  */
 ENTRY(_fpsave)
 	movl	4(%esp),%eax		/* get save area pointer */
+	cmpl	$5,EXT(fp_kind)		/* FP_XSAVE == 5 */
+	jne	1f
+	/* XSAVE: set EDX:EAX mask to -1 (save all components) */
+	movl	%eax,%ecx		/* save area pointer in ECX */
+	movl	$-1,%eax		/* mask low */
+	movl	$-1,%edx		/* mask high */
+	.byte	0x0f, 0xae, 0x21	/* xsave (%ecx) */
+	ret
+1:
 	fxsave	(%eax)			/* save complete state, including */
 					/* SSE and x87 */
 	ret
 
 /*
- * Restore FPU state (FXRSTOR format, 512 bytes, 16-byte aligned).
+ * Restore FPU state.
+ * Uses XRSTOR if fp_kind == FP_XSAVE, else FXRSTOR.
+ * Argument: pointer to save area.
  */
 ENTRY(_fprestore)
 	movl	4(%esp),%eax		/* get save area pointer */
+	cmpl	$5,EXT(fp_kind)		/* FP_XSAVE == 5 */
+	jne	1f
+	/* XRSTOR: set EDX:EAX mask to -1 (restore all components) */
+	movl	%eax,%ecx		/* save area pointer in ECX */
+	movl	$-1,%eax		/* mask low */
+	movl	$-1,%edx		/* mask high */
+	.byte	0x0f, 0xae, 0x29	/* xrstor (%ecx) */
+	ret
+1:
 	fxrstor	(%eax)			/* restore complete state */
 	ret
 

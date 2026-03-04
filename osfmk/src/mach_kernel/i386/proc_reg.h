@@ -160,6 +160,7 @@
 /*
  * CR4
  */
+#define	CR4_OSXSAVE	0x00040000	/*       OS Support for XSAVE/XRSTOR */
 #define	CR4_OSXMMEXCPT	0x00000400	/* p6:   OS Support for Unmasked SIMD FP Exceptions */
 #define	CR4_OSFXSR	0x00000200	/* p6:   OS Support for FXSAVE/FXRSTOR */
 #define	CR4_PGE	0x00000080	/*       Page Global Extensions */
@@ -174,6 +175,38 @@
 /* get_cr4/set_cr4 are not inlined below; provided by locore or AT386 code */
 extern unsigned int	get_cr4(void);
 extern void		set_cr4(unsigned int value);
+
+/*
+ * Inline CPUID wrapper.
+ * On entry, leaf is placed in EAX and subleaf (count) in ECX.
+ */
+static __inline__ void do_cpuid(unsigned int leaf, unsigned int subleaf,
+	unsigned int *eax, unsigned int *ebx,
+	unsigned int *ecx, unsigned int *edx)
+{
+	__asm__ volatile("cpuid"
+		: "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
+		: "a" (leaf), "c" (subleaf));
+}
+
+/*
+ * Read/write Extended Control Register (XCR).
+ * Requires CR4.OSXSAVE to be set before use.
+ * Uses .byte encoding for compatibility with older assemblers.
+ */
+static __inline__ void xgetbv(unsigned int xcr,
+	unsigned int *lo, unsigned int *hi)
+{
+	__asm__ volatile(".byte 0x0f, 0x01, 0xd0" /* xgetbv */
+		: "=a" (*lo), "=d" (*hi) : "c" (xcr));
+}
+
+static __inline__ void xsetbv(unsigned int xcr,
+	unsigned int lo, unsigned int hi)
+{
+	__asm__ volatile(".byte 0x0f, 0x01, 0xd1" /* xsetbv */
+		: : "a" (lo), "d" (hi), "c" (xcr));
+}
 
 #define	set_ts() \
 	set_cr0(get_cr0() | CR0_TS)
