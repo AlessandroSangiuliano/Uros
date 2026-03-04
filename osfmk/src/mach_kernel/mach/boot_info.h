@@ -164,6 +164,24 @@ struct boot_info {
 #define ROSE_F 2
 #define COFF_F 3
 
+/*
+ * Maximum number of PT_LOAD segments the bootstrap loader can handle.
+ * Modern linkers with -z separate-code typically produce 4 segments
+ * (R, R+X, R, R+W); 8 provides headroom for future layouts.
+ */
+#define MAX_LOAD_SEGMENTS 8
+
+/*
+ * Describes one ELF PT_LOAD segment for the multi-segment loader.
+ */
+struct load_segment {
+    vm_offset_t	seg_vaddr;	/* virtual address */
+    vm_size_t	seg_filesz;	/* bytes to read from file */
+    vm_size_t	seg_memsz;	/* total in-memory size (memsz > filesz = BSS) */
+    vm_offset_t	seg_offset;	/* file offset */
+    vm_prot_t	seg_prot;	/* Mach VM protection (VM_PROT_*) */
+};
+
 struct loader_info {
     int         format;         /* symbol table format (A.OUT or ROSE) */  
     vm_offset_t	text_start;	/* text start in memory */
@@ -179,6 +197,15 @@ struct loader_info {
     vm_size_t	sym_size[4];	/* symbol table size */
     vm_offset_t	entry_1;	/* 2 words for entry address */
     vm_offset_t	entry_2;
+
+    /*
+     * Multi-segment ELF support.  When num_segments > 0 the loader
+     * uses segments[] instead of the text/data fields for memory
+     * layout.  text/data fields remain populated for symbol table
+     * classification in elf_symload().
+     */
+    int			num_segments;
+    struct load_segment	segments[MAX_LOAD_SEGMENTS];
 } ;
 
 #define	EX_NOT_EXECUTABLE	6000

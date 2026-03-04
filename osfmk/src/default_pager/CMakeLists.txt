@@ -159,12 +159,6 @@ target_link_options(default_pager_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,--allow-multiple-definition
-  # Produce a classic 2-segment ELF layout (text+rodata / data+bss).
-  # The OSFMK bootstrap ELF loader only understands R+X and R+W LOAD
-  # segments; modern linkers create separate read-only LOAD segments
-  # for .rodata, .eh_frame, etc. that the loader skips.
-  -Wl,-z,noseparate-code
-  -Wl,-z,norelro
   -Wl,--build-id=none
 )
 
