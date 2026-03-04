@@ -172,7 +172,112 @@ load_program_file(struct file	*fp,
 			VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_COPY);
 
 	/*
-	 * Allocate space.
+	 * Multi-segment ELF loading path.
+	 * Handles modern linker output with separate R / R+X / R+W
+	 * LOAD segments (e.g. -z separate-code).
+	 */
+	if (lp->num_segments > 0) {
+	    vm_offset_t seg_lo = ~(vm_offset_t)0;
+	    vm_offset_t seg_hi = 0;
+	    vm_offset_t alloc_start, alloc_end;
+	    int s;
+
+	    /* Compute the VA extent covering all segments */
+	    for (s = 0; s < lp->num_segments; s++) {
+		struct load_segment *seg = &lp->segments[s];
+		vm_offset_t lo = trunc_page(seg->seg_vaddr);
+		vm_offset_t hi = round_page(seg->seg_vaddr + seg->seg_memsz);
+		if (lo < seg_lo) seg_lo = lo;
+		if (hi > seg_hi) seg_hi = hi;
+	    }
+	    alloc_start = seg_lo;
+	    alloc_end   = seg_hi;
+
+	    /* Allocate a local buffer covering the entire range */
+	    result = vm_allocate(mach_task_self(), &area_start,
+				 (vm_size_t)(alloc_end - alloc_start), TRUE);
+	    if (result) {
+		BOOTSTRAP_IO_LOCK();
+		printf("allocate segment buffer failed\n");
+		BOOTSTRAP_IO_UNLOCK();
+		return (result);
+	    }
+
+	    /* Read each segment from file into the local buffer */
+	    for (s = 0; s < lp->num_segments; s++) {
+		struct load_segment *seg = &lp->segments[s];
+		if (seg->seg_filesz > 0) {
+		    result = read_file(fp, seg->seg_offset,
+				    area_start + (seg->seg_vaddr - alloc_start),
+				    seg->seg_filesz);
+		    if (result) {
+			BOOTSTRAP_IO_LOCK();
+			printf("read segment %d failed\n", s);
+			BOOTSTRAP_IO_UNLOCK();
+			return (result);
+		    }
+		}
+		/* Zero the BSS portion (memsz > filesz) */
+		if (seg->seg_memsz > seg->seg_filesz) {
+		    memset((char *)(area_start
+				  + (seg->seg_vaddr - alloc_start)
+				  + seg->seg_filesz),
+			   0,
+			   seg->seg_memsz - seg->seg_filesz);
+		}
+	    }
+
+	    /* Allocate the range in the user task at the exact VA */
+	    result = vm_allocate(user_task, &alloc_start,
+				 (vm_size_t)(alloc_end - alloc_start), FALSE);
+	    if (result) {
+		BOOTSTRAP_IO_LOCK();
+		printf("allocate user segments (%x,%x) failed\n",
+		       alloc_start, alloc_end);
+		BOOTSTRAP_IO_UNLOCK();
+		return (result);
+	    }
+
+	    /* Copy the data into the user task */
+	    result = vm_write(user_task, alloc_start,
+			      (pointer_t)area_start,
+			      (vm_size_t)(alloc_end - alloc_start));
+	    if (result) {
+		BOOTSTRAP_IO_LOCK();
+		printf("write segments failed\n");
+		BOOTSTRAP_IO_UNLOCK();
+		return (result);
+	    }
+
+	    /* Free the local buffer */
+	    (void) vm_deallocate(mach_task_self(), area_start,
+				 (vm_size_t)(alloc_end - alloc_start));
+
+	    /* Apply per-segment protection */
+	    if (load_protect_text) {
+		for (s = 0; s < lp->num_segments; s++) {
+		    struct load_segment *seg = &lp->segments[s];
+		    vm_offset_t prot_start = trunc_page(seg->seg_vaddr);
+		    vm_size_t   prot_size  = round_page(seg->seg_vaddr
+							+ seg->seg_memsz)
+					      - prot_start;
+		    result = vm_protect(user_task, prot_start, prot_size,
+				      FALSE, seg->seg_prot);
+		    if (result) {
+			BOOTSTRAP_IO_LOCK();
+			printf("protect segment %d failed\n", s);
+			BOOTSTRAP_IO_UNLOCK();
+			return (result);
+		    }
+		}
+	    }
+
+	    return (KERN_SUCCESS);
+	}
+
+	/*
+	 * Legacy 2-segment (text + data) loading path.
+	 * Used by a.out, COFF, ROSE, and old-style ELF binaries.
 	 */
 	text_page_start = trunc_page(lp->text_start);
 	text_page_end   = round_page(lp->text_start + lp->text_size);
