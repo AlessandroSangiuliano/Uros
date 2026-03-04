@@ -2,6 +2,8 @@
  * Copyright 2026 OSFMK Project
  * All Rights Reserved
  *
+ * Author: Slex (Alessandro Sangiuliano) <alex22_7@hotmail.com>
+ *
  * hello_server.c — Minimal Mach standalone server for OSFMK
  *
  * A port of the original Uros hello_server from Mach 4 to OSF Mach.
