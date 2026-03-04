@@ -38,4 +38,9 @@ if(OSFMK_BUILD_DEFAULT_PAGER)
   add_subdirectory(default_pager)
 endif()
 
+# Build hello server (test/demo server)
+if(OSFMK_BUILD_HELLO_SERVER)
+  add_subdirectory(hello_server)
+endif()
+
 
