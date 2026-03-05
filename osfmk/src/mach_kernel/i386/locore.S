@@ -1765,64 +1765,45 @@ Entry(syscall_int80)
  *   ecx = user stack pointer
  *   edx = user return address (instruction after SYSENTER)
  *
- * CRITICAL: SYSENTER hardcodes CS.base=0 and SS.base=0 in the
- * descriptor cache, regardless of the GDT entry values (Intel SDM
- * Vol. 2B, SYSENTER).  Because this kernel uses segment bases of
- * LINEAR_KERNEL_ADDRESS (0xC0000000), we must:
- *   1. Program MSRs with *linear* addresses (done in sysenter.c)
- *   2. Reload CS and SS with KERNEL_CS/KERNEL_DS immediately here
- *      before accessing any segment-relative kernel data.
+ * SYSENTER hardcodes CS.base=0 and SS.base=0 in the descriptor cache
+ * (Intel SDM Vol. 2B, SYSENTER).  With flat memory model (all segment
+ * bases=0), this matches KERNEL_CS/KERNEL_DS exactly — no address
+ * conversion is needed.  We still reload CS and SS to set the correct
+ * DPL and descriptor attributes.
  *
  * After SYSENTER:
- *   EIP = linear addr (MSR)     CS.base = 0 (hardcoded)
- *   ESP = linear addr (MSR)     SS.base = 0 (hardcoded)
+ *   EIP = kernel addr (MSR)     CS.base = 0 (matches flat kernel)
+ *   ESP = kernel addr (MSR)     SS.base = 0 (matches flat kernel)
  *   DS/ES/FS/GS = user values   EFLAGS unchanged (IF may be 1)
  */
 	.globl	EXT(sysenter_entry)
 LEXT(sysenter_entry)
 	/*
-	 * === Flat-to-segmented trampoline ===
-	 *
-	 * Must reload SS and CS with kernel descriptors (base 0xC0000000)
-	 * before any segment-relative data access or normal kernel code.
 	 * SYSENTER does NOT clear IF, so disable interrupts first.
+	 * SS.base=0 from SYSENTER matches our flat KERNEL_DS, and
+	 * ESP is already a valid kernel virtual address from the MSR.
 	 */
 	cli
 
-	/*
-	 * Save EAX (syscall number) on the flat-mode stack.
-	 * With SS.base=0 and ESP=linear address, push/pop work correctly.
-	 */
-	pushl	%eax
+	pushl	%eax			/* save syscall number */
 
 	/*
-	 * Reload SS with KERNEL_DS (base=0xC0000000).
-	 * MOV-to-SS inhibits interrupts for one instruction (the SS shadow),
-	 * which protects the immediately-following ESP adjustment.
+	 * Reload SS with KERNEL_DS to set DPL=0 descriptor attributes.
+	 * With flat model (base=0), no ESP adjustment is needed.
 	 */
 	movw	$(KERNEL_DS),%ax
 	movw	%ax,%ss
 
-	/*
-	 * Convert ESP from linear to segmented:
-	 *   old linear = 0 + ESP_linear
-	 *   new linear = 0xC0000000 + new_ESP  =>  new_ESP = ESP - 0xC0000000
-	 * The SS shadow from MOV-to-SS protects this instruction.
-	 */
-	subl	$LINEAR_KERNELBASE,%esp
-
 	popl	%eax			/* restore syscall number */
 
 	/*
-	 * Reload CS with KERNEL_CS (base=0xC0000000) via a far jump.
-	 * The target offset is the symbol (segmented) value of the
-	 * continuation label; KERNEL_CS.base + offset = correct linear addr.
+	 * Reload CS with KERNEL_CS (DPL=0) via a far jump.
 	 */
 	ljmp	$(KERNEL_CS),$1f
 1:
 	/*
-	 * CS=KERNEL_CS, SS=KERNEL_DS — both base=0xC0000000.
-	 * EIP and ESP are now normal kernel-virtual (segmented) values.
+	 * CS=KERNEL_CS, SS=KERNEL_DS — both base=0, DPL=0.
+	 * EIP and ESP are kernel-virtual addresses.
 	 * DS/ES/FS/GS still hold user values.
 	 * Interrupts are disabled (CLI above).
 	 *

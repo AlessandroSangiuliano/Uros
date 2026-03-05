@@ -8,7 +8,6 @@
 #include <i386/proc_reg.h>
 #include <i386/cpuid.h>
 #include <i386/seg.h>
-#include <mach/i386/vm_param.h>
 #include <kern/misc_protos.h>
 
 /*
@@ -35,22 +34,20 @@ extern void	sysenter_entry(void);
  *                                updated on every context switch in
  *                                act_machine_switch_pcb().
  *
- * IMPORTANT: SYSENTER hardcodes CS.base=0 and SS.base=0 in the
- * descriptor cache, regardless of the GDT entry values.  Because
- * this kernel uses segment bases of LINEAR_KERNEL_ADDRESS (0xC0000000),
- * the EIP and ESP MSRs must contain *linear* addresses (kernel virtual
- * address + LINEAR_KERNEL_ADDRESS), not segment-relative offsets.
- * The sysenter_entry trampoline in locore.S reloads CS and SS with
- * KERNEL_CS/KERNEL_DS to restore the correct segment bases.
+ * SYSENTER hardcodes CS.base=0 and SS.base=0 in the descriptor
+ * cache, regardless of the GDT entry values.  With the flat memory
+ * model (all segment bases=0), this matches the kernel segments
+ * exactly — no linear-to-segmented conversion is needed.
+ * The MSR values are plain kernel virtual addresses.
  */
 static void
 sysenter_setup_msrs(unsigned int pcb_stack_top)
 {
 	wrmsr(MSR_IA32_SYSENTER_CS,  SYSENTER_CS, 0);
 	wrmsr(MSR_IA32_SYSENTER_EIP,
-	      (unsigned int)&sysenter_entry + LINEAR_KERNEL_ADDRESS, 0);
+	      (unsigned int)&sysenter_entry, 0);
 	wrmsr(MSR_IA32_SYSENTER_ESP,
-	      pcb_stack_top + LINEAR_KERNEL_ADDRESS, 0);
+	      pcb_stack_top, 0);
 }
 
 /*
@@ -90,23 +87,21 @@ sysenter_init(void)
 	sysenter_available = 1;
 
 	printf("sysenter: fast syscall entry enabled "
-	       "(SYSENTER_CS=0x%x EIP=0x%x [linear] CR0=0x%x)\n",
+	       "(SYSENTER_CS=0x%x EIP=0x%x CR0=0x%x)\n",
 	       SYSENTER_CS,
-	       (unsigned int)&sysenter_entry + LINEAR_KERNEL_ADDRESS,
+	       (unsigned int)&sysenter_entry,
 	       get_cr0());
 }
 
 /*
  * Update IA32_SYSENTER_ESP for the current CPU.
  * Called from act_machine_switch_pcb() alongside TSS.esp0 update.
- * The MSR must contain the *linear* address (see sysenter_setup_msrs).
  */
 void
 sysenter_update_esp(unsigned int new_esp)
 {
 	if (sysenter_available)
-		wrmsr(MSR_IA32_SYSENTER_ESP,
-		      new_esp + LINEAR_KERNEL_ADDRESS, 0);
+		wrmsr(MSR_IA32_SYSENTER_ESP, new_esp, 0);
 }
 
 /*
