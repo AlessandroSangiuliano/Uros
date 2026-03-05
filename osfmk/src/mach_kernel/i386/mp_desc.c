@@ -88,6 +88,7 @@
 #include <i386/mp_desc.h>
 #include <i386/lock.h>
 #include <i386/misc_protos.h>
+#include <i386/sysenter.h>
 
 #include <kern/misc_protos.h>
 
@@ -259,6 +260,11 @@ mp_desc_init(
 
 	    mpt->ktss.ss0 = KERNEL_DS;
 	    mpt->ktss.io_bit_map_offset = 0x0FFF;	/* no IO bitmap */
+
+	    /*
+	     * Program SYSENTER MSRs for this AP.
+	     */
+	    sysenter_ap_init(0);
 
 	    return mpt;
 	}

@@ -92,6 +92,7 @@
 /*				15 */
 #define	T_FLOATING_POINT_ERROR	16
 #define	T_WATCHPOINT		17
+#define	T_SYSENTER		0x80		/* SYSENTER fast syscall entry */
 #define T_PREEMPT		255
 
 #define TRAP_NAMES "divide error", "debug trap", "NMI", "breakpoint", \

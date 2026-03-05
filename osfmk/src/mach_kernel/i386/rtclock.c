@@ -750,6 +750,8 @@ calibrate_delay(void)
 		 * rolls over
 		 */
  		val = measure_delay(microdata);
+		if (val == 0)
+			continue;	/* skip if PIT returned 0 (e.g. KVM) */
 		delaycount *= microdata;
 		delaycount += val-1; 	/* round up to upper us */
 		delaycount /= val;

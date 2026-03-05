@@ -87,6 +87,13 @@
 #define	MSR_P5_CTR0		0x12	/* Counter #0 */
 #define	MSR_P5_CTR1		0x13	/* Counter #1 */
 
+/*
+ * SYSENTER/SYSEXIT MSRs (Pentium II+)
+ */
+#define	MSR_IA32_SYSENTER_CS	0x174	/* SYSENTER CS selector */
+#define	MSR_IA32_SYSENTER_ESP	0x175	/* SYSENTER kernel stack pointer */
+#define	MSR_IA32_SYSENTER_EIP	0x176	/* SYSENTER kernel entry point */
+
 #define	MSR_P5_CESR_PC		0x0200	/* Pin Control */
 #define	MSR_P5_CESR_CC		0x01C0	/* Counter Control mask */
 #define	MSR_P5_CESR_ES		0x003F	/* Event Control mask */
@@ -206,6 +213,24 @@ static __inline__ void xsetbv(unsigned int xcr,
 {
 	__asm__ volatile(".byte 0x0f, 0x01, 0xd1" /* xsetbv */
 		: : "a" (lo), "d" (hi), "c" (xcr));
+}
+
+/*
+ * Read/write Model Specific Registers (MSR).
+ * Requires CPUID_FEATURE_MSR support.
+ */
+static __inline__ void rdmsr(unsigned int msr,
+	unsigned int *lo, unsigned int *hi)
+{
+	__asm__ volatile("rdmsr"
+		: "=a" (*lo), "=d" (*hi) : "c" (msr));
+}
+
+static __inline__ void wrmsr(unsigned int msr,
+	unsigned int lo, unsigned int hi)
+{
+	__asm__ volatile("wrmsr"
+		: : "c" (msr), "a" (lo), "d" (hi));
 }
 
 #define	set_ts() \

@@ -172,6 +172,9 @@ add_custom_command(
             -o ${GENASSYM_OUTPUT}
             ${GENASSYM_INPUT}
     DEPENDS ${GENASSYM_INPUT}
+            ${KERNEL_SRC_DIR}/i386/seg.h
+            ${KERNEL_SRC_DIR}/i386/thread.h
+            ${KERNEL_SRC_DIR}/i386/tss.h
     COMMENT "Generating genassym.s from genassym.c"
     VERBATIM
 )
@@ -529,6 +532,7 @@ set(I386_C_SOURCES
     i386/pic.c
     i386/i386_rpc.c
     i386/rtclock.c
+    i386/sysenter.c
     i386/trap.c
     i386/user_ldt.c
 )

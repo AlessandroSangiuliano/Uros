@@ -73,6 +73,7 @@
 #define LBb(x,n) ./**/x
 #define LBf(x,n) ./**/x
 
+#define	SVC_LCALL lcall $7,$0
 #define	SVC lcall $7,$0
 
 #define String .string
@@ -108,6 +109,7 @@
 #define LBf(x,n) n/**/f
 #endif	/* __STDC__ */
 
+#define SVC_LCALL .byte 0x9a; .long 0; .word 0x7
 #define SVC .byte 0x9a; .long 0; .word 0x7
 
 #define String	.ascii
