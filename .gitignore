@@ -3,3 +3,5 @@ osfmk/build*/
 MODERNIZATION_TRACKER.md
 
 .claude/
+
+osfmk/src/sysenter_test/sysenter_test.S
