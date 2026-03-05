@@ -153,13 +153,18 @@
 #define VM_MIN_ADDRESS		((vm_offset_t) 0)
 #define VM_MAX_ADDRESS		((vm_offset_t) 0xc0000000U)
 
-#define LINEAR_KERNEL_ADDRESS	((vm_offset_t) 0xc0000000)
+/*
+ * Flat memory model: all segment bases are 0.
+ * LINEAR_KERNEL_ADDRESS is kept as 0 for the transition period;
+ * kernel virtual addresses ARE linear addresses.
+ */
+#define LINEAR_KERNEL_ADDRESS	((vm_offset_t) 0)
 
-#define VM_MIN_KERNEL_ADDRESS	((vm_offset_t) 0x00000000U)
-#define VM_MAX_KERNEL_ADDRESS	((vm_offset_t) 0x3fffffffU)
+#define VM_MIN_KERNEL_ADDRESS	((vm_offset_t) 0xc0000000U)
+#define VM_MAX_KERNEL_ADDRESS	((vm_offset_t) 0xffffffffU)
 
-#define VM_MIN_KERNEL_LOADED_ADDRESS	((vm_offset_t) 0x20000000U)
-#define VM_MAX_KERNEL_LOADED_ADDRESS	((vm_offset_t) 0x3FFFFFFFU)
+#define VM_MIN_KERNEL_LOADED_ADDRESS	((vm_offset_t) 0xe0000000U)
+#define VM_MAX_KERNEL_LOADED_ADDRESS	((vm_offset_t) 0xffffffffU)
 
 #ifdef	MACH_KERNEL
 
