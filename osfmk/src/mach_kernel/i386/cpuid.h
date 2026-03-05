@@ -47,6 +47,7 @@
 #define	CPUID_FEATURE_MCE    0x00000080	/* Machine Check Exception */
 #define	CPUID_FEATURE_CX8    0x00000100	/* CMPXCHG8B */
 #define	CPUID_FEATURE_APIC   0x00000200	/* On-chip APIC */
+#define	CPUID_FEATURE_SEP    0x00000800	/* SYSENTER/SYSEXIT Present */
 #define	CPUID_FEATURE_MTRR   0x00001000	/* Memory Type Range Register */
 #define	CPUID_FEATURE_PGE    0x00002000	/* Page Global Enable */
 #define	CPUID_FEATURE_MCA    0x00004000	/* Machine Check Architecture */

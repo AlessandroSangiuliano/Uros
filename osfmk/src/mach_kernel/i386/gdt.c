@@ -126,6 +126,34 @@ struct fake_descriptor gdt[GDTSZ] = {
 		  sizeof(struct i386_tss)-1,
 		  0,
 		  ACC_P|ACC_PL_K|ACC_TSS
-		}			/* TSS for this processor */
+		},			/* TSS for this processor */
+#else
+/* 0x050 */	{ 0, 0, 0, 0 },		/* (reserved for DEBUG_TSS) */
 #endif	/* MACH_KDB */
+
+/*
+ * SYSENTER/SYSEXIT segment group (Feature #44).
+ * Four contiguous flat segments required by the SYSENTER/SYSEXIT mechanism.
+ * The CPU selects them as offsets from the IA32_SYSENTER_CS MSR value.
+ */
+/* 0x058 */	{ LINEAR_KERNEL_ADDRESS + VM_MIN_ADDRESS,
+		  (VM_MAX_KERNEL_ADDRESS-1-VM_MIN_KERNEL_ADDRESS)>>12,
+		  SZ_32|SZ_G,
+		  ACC_P|ACC_PL_K|ACC_CODE_R
+		},			/* SYSENTER_CS: kernel code (DPL 0) */
+/* 0x060 */	{ LINEAR_KERNEL_ADDRESS + VM_MIN_ADDRESS,
+		  (VM_MAX_KERNEL_ADDRESS-1-VM_MIN_KERNEL_ADDRESS)>>12,
+		  SZ_32|SZ_G,
+		  ACC_P|ACC_PL_K|ACC_DATA_W
+		},			/* SYSENTER_DS: kernel data (DPL 0) */
+/* 0x068 */	{ 0,
+		  (VM_MAX_ADDRESS-VM_MIN_ADDRESS-1)>>12,
+		  SZ_32|SZ_G,
+		  ACC_P|ACC_PL_U|ACC_CODE_R
+		},			/* SYSEXIT_CS: user code (DPL 3) */
+/* 0x070 */	{ 0,
+		  (VM_MAX_ADDRESS-VM_MIN_ADDRESS-1)>>12,
+		  SZ_32|SZ_G,
+		  ACC_P|ACC_PL_U|ACC_DATA_W
+		}			/* SYSEXIT_DS: user data (DPL 3) */
 };

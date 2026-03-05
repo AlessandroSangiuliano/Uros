@@ -253,7 +253,7 @@ main(
 
 	DECLARE("FP_VALID",	offsetof(struct i386_fpsave_state *,fp_valid));
 	DECLARE("FP_SAVE_STATE",
-		offsetof(struct i386_fpsave_state *, fp_save_state));
+		offsetof(struct i386_fpsave_state *, fx_save_state));
 
 	DECLARE("R_CS",		offsetof(struct i386_saved_state *, cs));
 	DECLARE("R_SS",		offsetof(struct i386_saved_state *, ss));

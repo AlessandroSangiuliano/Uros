@@ -237,6 +237,7 @@
 #if	NCPUS > 1
 #include <i386/mp_desc.h>
 #endif	/* NCPUS */
+#include <i386/sysenter.h>
 
 #if	HIMEM
 #include <i386/AT386/himem.h>
@@ -362,6 +363,13 @@ machine_startup(void)
 #if	NCPUS > 1
 	mp_desc_init(0);
 #endif	/* NCPUS */
+
+	/*
+	 * Initialise SYSENTER/SYSEXIT fast system calls (Feature #44).
+	 * Must be called after set_cpu_model() and mp_desc_init().
+	 */
+	sysenter_init();
+
 	setup_main();
 }
 

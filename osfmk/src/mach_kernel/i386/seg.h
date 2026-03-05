@@ -197,12 +197,27 @@ struct fake_descriptor {
 #define	CPU_DATA	0x48		/* per-cpu data */
 #if	MACH_KDB
 #define	DEBUG_TSS	0x50		/* debug TSS (uniprocessor) */
-
-#define	GDTSZ		11
-#else
-
-#define	GDTSZ		10
 #endif
+
+/*
+ * SYSENTER/SYSEXIT support (Feature #44).
+ *
+ * The SYSENTER/SYSEXIT mechanism requires four contiguous GDT entries
+ * forming a group: kernel CS, kernel DS, user CS (ring 3), user DS (ring 3).
+ * The CPU derives the four selectors from a single MSR value:
+ *
+ *   SYSENTER:  CS = IA32_SYSENTER_CS,      SS = IA32_SYSENTER_CS + 8
+ *   SYSEXIT:   CS = IA32_SYSENTER_CS + 16,  SS = IA32_SYSENTER_CS + 24
+ *
+ * We place the group at GDT indices 11-14 to avoid conflicting with
+ * existing descriptors (KERNEL_LDT at 0x18, KERNEL_TSS at 0x20).
+ */
+#define	SYSENTER_CS	0x58		/* GDT[11] kernel code for SYSENTER */
+#define	SYSENTER_DS	0x60		/* GDT[12] kernel data (SS on SYSENTER) */
+#define	SYSEXIT_CS	0x68		/* GDT[13] user code  (CS|3=0x6B on SYSEXIT) */
+#define	SYSEXIT_DS	0x70		/* GDT[14] user data  (SS|3=0x73 on SYSEXIT) */
+
+#define	GDTSZ		15
 
 /*
  * Interrupt table is always 256 entries long.

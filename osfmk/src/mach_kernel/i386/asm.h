@@ -169,7 +169,32 @@
 #define LBf(x,n) n/**/f
 #endif /* __STDC__ */
 
-#define SVC .byte 0x9a; .long 0; .word 0x7
+/*
+ * System call macros.
+ *
+ * SVC — fast path via SYSENTER (Pentium II+) unless USE_LCALL is defined.
+ * User contract: EAX = syscall number.  The macro sets
+ *   ECX = user ESP,  EDX = return address,  then issues SYSENTER.
+ * On return (via SYSEXIT or IRET) execution resumes after the macro.
+ *
+ * SVC_LCALL — legacy path through the LDT call gate (LCALL $0x7:$0).
+ * Kept for fallback / compatibility.  Define USE_LCALL to make SVC
+ * use the legacy LCALL path (e.g. for bootstrap).
+ *
+ * RPC_SVC — Mach RPC call gate (unchanged).
+ */
+#define SVC_LCALL .byte 0x9a; .long 0; .word 0x7
+
+
+#ifdef USE_LCALL
+#define SVC SVC_LCALL
+#else
+#define SVC \
+	movl %esp,%ecx; \
+	movl $8f,%edx; \
+	.byte 0x0f, 0x34; /* sysenter */ \
+	8:
+#endif
 
 #define RPC_SVC .byte 0x9a; .long 0; .word 0xf
 

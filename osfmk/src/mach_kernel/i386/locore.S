@@ -906,10 +906,48 @@ LEXT(return_to_user)
 #endif	/* MACH_RT */
 
 /*
- * Return from kernel mode to interrupted thread.
+ * SYSEXIT fast return path (Feature #44).
+ *
+ * Only used when the entry was via SYSENTER (marked by T_SYSENTER in
+ * the trap number slot).  LCALL, INT, and exception entries always
+ * return via the standard IRET path to preserve all user registers.
+ *
+ * SYSEXIT sets:
+ *   CS = IA32_SYSENTER_CS + 16 | RPL3   (SYSEXIT_CS | 3 = 0x6B)
+ *   SS = IA32_SYSENTER_CS + 24 | RPL3   (SYSEXIT_DS | 3 = 0x73)
+ *   EIP = EDX,  ESP = ECX
+ *
+ * SYSEXIT does NOT restore EFLAGS — we do that with popfl.
+ * EDX and ECX are clobbered (set to EIP and ESP), which is the
+ * expected convention for the SYSENTER/SYSEXIT pair.
  */
-
 LEXT(return_from_kernel)
+	cmpl	$0,EXT(sysenter_available)	/* SYSENTER/SYSEXIT support? */
+	je	sysexit_fallback		/* no — use IRET */
+	cmpl	$(T_SYSENTER),R_TRAPNO(%esp)	/* entry was via SYSENTER? */
+	jne	sysexit_fallback		/* no — use IRET */
+	testl	$(0x00020000),R_EFLAGS(%esp)	/* EFL_VM (V86 mode)? */
+	jnz	sysexit_fallback		/* yes — must use IRET */
+
+	/* --- Fast path: SYSEXIT return to user space --- */
+	popl	%gs				/* restore segment registers */
+	popl	%fs
+	popl	%es
+	popl	%ds
+	popa					/* restore general registers */
+	addl	$8,%esp				/* discard trap number and err */
+
+	/* Stack: EIP, CS, EFLAGS, UESP, SS */
+	popl	%edx				/* EDX = user EIP */
+	addl	$4,%esp				/* skip CS (SYSEXIT auto-loads) */
+	popfl					/* restore user EFLAGS */
+	popl	%ecx				/* ECX = user ESP */
+						/* skip SS (SYSEXIT auto-loads) */
+	sti					/* STI shadow protects SYSEXIT */
+	.byte	0x0f, 0x35			/* SYSEXIT */
+
+	/* --- Slow path: standard IRET return --- */
+sysexit_fallback:
 LEXT(kret_popl_gs)
 	popl	%gs			/* restore segment registers */
 LEXT(kret_popl_fs)
@@ -1718,6 +1756,110 @@ Entry(syscall_int80)
 	mov	%dx,%gs
 
 	jmp	syscall_entry_3
+
+/*
+ * SYSENTER fast system call entry (Feature #44).
+ *
+ * User-space contract (set up by the SVC macro):
+ *   eax = system call number (negative Mach trap number)
+ *   ecx = user stack pointer
+ *   edx = user return address (instruction after SYSENTER)
+ *
+ * CRITICAL: SYSENTER hardcodes CS.base=0 and SS.base=0 in the
+ * descriptor cache, regardless of the GDT entry values (Intel SDM
+ * Vol. 2B, SYSENTER).  Because this kernel uses segment bases of
+ * LINEAR_KERNEL_ADDRESS (0xC0000000), we must:
+ *   1. Program MSRs with *linear* addresses (done in sysenter.c)
+ *   2. Reload CS and SS with KERNEL_CS/KERNEL_DS immediately here
+ *      before accessing any segment-relative kernel data.
+ *
+ * After SYSENTER:
+ *   EIP = linear addr (MSR)     CS.base = 0 (hardcoded)
+ *   ESP = linear addr (MSR)     SS.base = 0 (hardcoded)
+ *   DS/ES/FS/GS = user values   EFLAGS unchanged (IF may be 1)
+ */
+	.globl	EXT(sysenter_entry)
+LEXT(sysenter_entry)
+	/*
+	 * === Flat-to-segmented trampoline ===
+	 *
+	 * Must reload SS and CS with kernel descriptors (base 0xC0000000)
+	 * before any segment-relative data access or normal kernel code.
+	 * SYSENTER does NOT clear IF, so disable interrupts first.
+	 */
+	cli
+
+	/*
+	 * Save EAX (syscall number) on the flat-mode stack.
+	 * With SS.base=0 and ESP=linear address, push/pop work correctly.
+	 */
+	pushl	%eax
+
+	/*
+	 * Reload SS with KERNEL_DS (base=0xC0000000).
+	 * MOV-to-SS inhibits interrupts for one instruction (the SS shadow),
+	 * which protects the immediately-following ESP adjustment.
+	 */
+	movw	$(KERNEL_DS),%ax
+	movw	%ax,%ss
+
+	/*
+	 * Convert ESP from linear to segmented:
+	 *   old linear = 0 + ESP_linear
+	 *   new linear = 0xC0000000 + new_ESP  =>  new_ESP = ESP - 0xC0000000
+	 * The SS shadow from MOV-to-SS protects this instruction.
+	 */
+	subl	$LINEAR_KERNELBASE,%esp
+
+	popl	%eax			/* restore syscall number */
+
+	/*
+	 * Reload CS with KERNEL_CS (base=0xC0000000) via a far jump.
+	 * The target offset is the symbol (segmented) value of the
+	 * continuation label; KERNEL_CS.base + offset = correct linear addr.
+	 */
+	ljmp	$(KERNEL_CS),$1f
+1:
+	/*
+	 * CS=KERNEL_CS, SS=KERNEL_DS — both base=0xC0000000.
+	 * EIP and ESP are now normal kernel-virtual (segmented) values.
+	 * DS/ES/FS/GS still hold user values.
+	 * Interrupts are disabled (CLI above).
+	 *
+	 * Build the i386_saved_state frame expected by syscall_entry_3.
+	 */
+
+	/*
+	 * Hardware-equivalent portion of the trap frame
+	 * (ss, uesp, eflags, cs, eip) that INT/LCALL would push.
+	 */
+	pushl	$(USER_DS)		/* R_SS   - user data segment */
+	pushl	%ecx			/* R_UESP - user ESP (from ECX) */
+	pushf				/* R_EFLAGS - current flags (IF=0 from CLI) */
+	orl	$(0x200),(%esp)		/* set IF in saved EFLAGS (EFL_IF) */
+	pushl	$(USER_CS)		/* R_CS   - normalize to LDT user CS */
+	pushl	%edx			/* R_EIP  - user return addr (from EDX) */
+
+	/* System call number and trap number */
+	pushl	%eax			/* save system call number */
+	pushl	$(T_SYSENTER)		/* mark entry as SYSENTER */
+
+	/* General and segment registers (same as INT 0x80 path) */
+	pusha				/* save the general registers */
+	pushl	%ds			/* and the segment registers */
+	pushl	%es
+	pushl	%fs
+	pushl	%gs
+
+	mov	$(KERNEL_DS),%dx	/* switch to kernel data segment */
+	mov	%dx,%ds
+	mov	%dx,%es
+	mov	$(CPU_DATA),%dx
+	mov	%dx,%gs
+
+	sti				/* re-enable interrupts */
+
+	jmp	syscall_entry_3		/* join common syscall dispatch */
 
 /*
  * System call enters through a call gate.  Flags are not saved -
