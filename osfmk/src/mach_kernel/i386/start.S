@@ -192,12 +192,17 @@
 /*
  * Multiboot Header - MUST be in first 8KB of kernel image
  * Placed in .multiboot section which linker script positions first
+ *
+ * Flat memory model: kernel linked at 0xC0100000 (virtual) but loaded
+ * at 0x00100000 (physical). The ELF program headers carry both VMA and
+ * LMA so the multiboot loader can compute the correct physical entry.
+ * Only MEMORY_INFO flag (bit 1) is requested.
  */
 	.section .multiboot, "a"
 	.align	4
 multiboot_header:
 	.long	0x1BADB002		/* magic */
-	.long	0x00000002		/* flags: memory info */
+	.long	0x00000002		/* flags: MEMORY_INFO (ELF hdrs used) */
 	.long	-(0x1BADB002 + 0x00000002)	/* checksum */
 
 	.text				/* switch back to text section */

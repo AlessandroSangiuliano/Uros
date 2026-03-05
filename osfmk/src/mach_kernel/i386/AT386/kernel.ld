@@ -3,32 +3,41 @@
  * Target: i386 (AT386)
  * 
  * This linker script is compatible with multiboot specification.
- * The kernel is loaded at physical address 0x100000 (1MB).
+ * The kernel is loaded at physical address 0x100000 (1MB) but
+ * linked at virtual address 0xC0100000 (KERNELBASE + 1MB).
  * 
- * Virtual address mapping:
- *   Physical 0x100000 -> Virtual 0x100000 (identity mapped initially)
- *   After paging: maps to LINEAR_KERNEL_ADDRESS (0xc0000000)
+ * The flat memory model uses segment base=0 for all segments.
+ * Kernel/user separation is done entirely via paging:
+ *   0x00000000 - 0xBFFFFFFF  user space (PTE U/S=1)
+ *   0xC0000000 - 0xFFFFFFFF  kernel space (PTE U/S=0)
  */
 
 OUTPUT_FORMAT("elf32-i386")
 OUTPUT_ARCH(i386)
-ENTRY(pstart)
 
-/* Kernel physical load address (TEXTORG from config) */
-TEXTORG = 0x100000;
+/* Physical load address (multiboot loads here) */
+PHYS_LOAD = 0x100000;
+
+/* Virtual base for kernel space */
+KERNELBASE = 0xC0000000;
+
+/* Virtual address = physical + KERNELBASE */
+TEXTORG = KERNELBASE + PHYS_LOAD;
+
+ENTRY(pstart)
 
 SECTIONS
 {
-    /* Start at 1MB physical address */
+    /* Start at virtual address TEXTORG, loaded at PHYS_LOAD */
     . = TEXTORG;
 
     /* Multiboot header must be in the first 8KB of the kernel image */
-    .multiboot ALIGN(4) : {
+    .multiboot ALIGN(4) : AT(ADDR(.multiboot) - KERNELBASE) {
         *(.multiboot)
     }
 
     /* Code section */
-    .text ALIGN(4096) : {
+    .text ALIGN(4096) : AT(ADDR(.text) - KERNELBASE) {
         _text_start = .;
         *(.text)
         *(.text.*)
@@ -37,7 +46,7 @@ SECTIONS
     }
 
     /* Read-only data */
-    .rodata ALIGN(4096) : {
+    .rodata ALIGN(4096) : AT(ADDR(.rodata) - KERNELBASE) {
         _rodata_start = .;
         *(.rodata)
         *(.rodata.*)
@@ -46,7 +55,7 @@ SECTIONS
     }
 
     /* Data section */
-    .data ALIGN(4096) : {
+    .data ALIGN(4096) : AT(ADDR(.data) - KERNELBASE) {
         _data_start = .;
         *(.data)
         *(.data.*)
@@ -56,7 +65,7 @@ SECTIONS
     }
 
     /* BSS section (uninitialized data) */
-    .bss ALIGN(4096) : {
+    .bss ALIGN(4096) : AT(ADDR(.bss) - KERNELBASE) {
         _bss_start = .;
         *(.bss)
         *(.bss.*)
