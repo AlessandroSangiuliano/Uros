@@ -311,7 +311,6 @@ io_tss_init(
 	io_bitmap_init(io_tss->bitmap);
 	io_tss->barrier = ~0;
 	queue_init(&io_tss->io_port_list);
-	addr += LINEAR_KERNEL_ADDRESS;
 	io_tss->iopb_desc[0] = ((size-1) & 0xffff)
 		| ((addr & 0xffff) << 16);
 	io_tss->iopb_desc[1] = ((addr & 0x00ff0000) >> 16)
