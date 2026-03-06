@@ -659,7 +659,7 @@ ipc_entry_grow_table(
 
 	do {
 		ipc_entry_t otable, table;
-		ipc_table_size_t oits, its, nits;
+		ipc_table_size_t oits = NULL, its, nits;
 		mach_port_index_t i, free_index;
 
 		assert(space->is_active);
