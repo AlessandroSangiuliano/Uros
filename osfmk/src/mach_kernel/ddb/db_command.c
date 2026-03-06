@@ -385,7 +385,7 @@ db_command(
 	char			*last_modifp,	/* IN_OUT */
 	struct db_command	*cmd_table)
 {
-	struct db_command	*cmd;
+	struct db_command	*cmd = NULL;
 	int		t;
 	char		modif[TOK_STRING_SIZE];
 	char		*modifp = &modif[0];

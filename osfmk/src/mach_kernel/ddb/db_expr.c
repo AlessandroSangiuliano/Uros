@@ -135,7 +135,7 @@ db_term(db_expr_t *valuep)
 		valid_symbol = TRUE;
 	    }
 	    if (db_allow_unprefixed_hexa && db_radix == 16 &&
-		db_tok_string) {
+		db_tok_string[0]) {
 		char *cp;
 		int value;
 		    

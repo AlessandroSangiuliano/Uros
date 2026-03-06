@@ -379,7 +379,7 @@ ipc_port_dngrow(
 	if (ip_active(port) &&
 	    (port->ip_dnrequests == otable) &&
 	    ((otable == IPR_NULL) || (otable->ipr_size+1 == its))) {
-		ipc_table_size_t oits;
+		ipc_table_size_t oits = NULL;
 		ipc_table_elems_t osize, nsize;
 		ipc_port_request_index_t free, i;
 

@@ -576,7 +576,7 @@ db_show_variable(void)
 	unsigned int len;
 	unsigned int sl;
 	unsigned int slen;
-	short h;
+	short h = 0;
 	short i;
 	short j;
 	short k;

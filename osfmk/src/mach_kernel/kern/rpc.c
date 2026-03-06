@@ -121,7 +121,7 @@ mach_rpc_trap(
 	int				rpc_arg_buf_data[RPC_KBUF_SIZE];
 	int				*rpc_arg_buf;
 	int				*new_argv, rc, argc;
-	vm_size_t			nbyte;
+	vm_size_t			nbyte = 0;
 	char				*argv;
 	routine_descriptor_t		routine;
         routine_arg_descriptor_t	dsc;
@@ -522,7 +522,7 @@ mach_rpc_return_trap(void)
         int                     	*svr_arg_buf;
 	unsigned int			uesp, ueip; 
 	unsigned int			type, offset;
-	vm_size_t			nbyte;
+	vm_size_t			nbyte = 0;
         copyfunc_t                      infunc;
         copyfunc_t                      outfunc;
 	etap_data_t			probe_data;

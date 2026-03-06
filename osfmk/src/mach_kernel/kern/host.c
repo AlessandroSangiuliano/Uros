@@ -157,7 +157,7 @@ host_processors(
 {
 	register int		i;
 	register processor_t	*tp;
-	vm_offset_t		addr;
+	vm_offset_t		addr = 0;
 	unsigned int		count;
 	boolean_t rt = FALSE; /* ### This boolean is FALSE, because there
 			       * currently exists no mechanism to determine
@@ -479,7 +479,7 @@ host_processor_sets(
 
 	vm_size_t size;
 	vm_size_t size_needed;
-	vm_offset_t addr;
+	vm_offset_t addr = 0;
 
 	if (host == HOST_NULL)
 		return KERN_INVALID_ARGUMENT;
@@ -570,7 +570,7 @@ host_processor_sets(
 	processor_set_name_array_t	*pset_list,
 	mach_msg_type_number_t		*count)
 {
-	vm_offset_t addr;
+	vm_offset_t addr = 0;
 	boolean_t rt = FALSE; /* ### This boolean is FALSE, because there
 			       * currently exists no mechanism to determine
 			       * whether or not the reply port is an RT port
