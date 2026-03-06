@@ -728,7 +728,6 @@ mach_msg_overwrite_trap(
 		 *		server finds waiting messages and can't block.
 		 */
 
-	    fast_get:
 		/*
 		 *	optimized ipc_kmsg_get
 		 *
@@ -2063,7 +2062,7 @@ mach_msg_overwrite_trap(
 		rcv_object = temp_rcv_object;
 		/* hold ref for rcv_object; rcv_mqueue is locked */
 
-	    slow_receive:
+	    /* slow_receive path */
 		/*
 		 *	Now we have sent the request and copied in rcv_name,
 		 *	so rcv_mqueue is locked and hold ref for rcv_object.
@@ -2158,7 +2157,7 @@ mach_msg_overwrite_trap(
 		HOT(c_mmot_getback_fast_put++);
 		goto fast_put;
 
-	    slow_put:
+	    /* slow_put path */
 		mr = ipc_kmsg_put((rcv_msg != MACH_MSG_NULL)?rcv_msg:msg,
 				  kmsg, 
 				  hdr->msgh_size + trailer->msgh_trailer_size);

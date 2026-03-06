@@ -894,7 +894,7 @@ host_get_boot_info(
 {
 	char *src = "";
 	extern char * machine_boot_info(
-				kernel_boot_info_t	boot_info,
+				char *			boot_info,
 				vm_size_t		buf_len);
 #if	DIPC && (NORMA_SCSI || DIPC_XKERN)
 	char *p;

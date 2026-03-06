@@ -468,7 +468,7 @@ hdslave(
 	caddr_t			xxx)
 {
 	int	i,
-		addr = hd_ctrl[dev->ctlr]->address;
+		addr = hd_ctrl[(int)dev->ctlr]->address;
 	u_char	*bios_magic = (u_char *)phystokv(0x475);
 
 	if (dev->ctlr == 0)	/* for now: believe DOS */
@@ -879,7 +879,7 @@ hdstart(
 	/* things should be quiet */
 	if (i = ctrl_p->need_set_controller) {
 		if (i&1) set_controller(ctrl<<1);
-		if (i&2) set_controller((ctrl<<1)||1);
+		if (i&2) set_controller((ctrl<<1)|1);
 		ctrl_p->need_set_controller= 0;
 	}
 	if ((drive = hd_drive[ctrl_p->state.curdrive^1]) &&

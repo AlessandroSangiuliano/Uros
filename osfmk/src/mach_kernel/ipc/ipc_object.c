@@ -647,7 +647,7 @@ ipc_object_copyout(
 	boolean_t		overflow,
 	mach_port_t		*namep)
 {
-	mach_port_t name;
+	mach_port_t name = MACH_PORT_NULL;
 	ipc_entry_t entry;
 	kern_return_t kr;
 
@@ -815,7 +815,7 @@ ipc_object_copyout_dest(
 	mach_msg_type_name_t	msgt_name,
 	mach_port_t		*namep)
 {
-	mach_port_t name;
+	mach_port_t name = MACH_PORT_NULL;
 
 	assert(IO_VALID(object));
 	assert(io_active(object));
@@ -833,7 +833,7 @@ ipc_object_copyout_dest(
 	    case MACH_MSG_TYPE_PORT_SEND: {
 		ipc_port_t port = (ipc_port_t) object;
 		ipc_port_t nsrequest = IP_NULL;
-		mach_port_mscount_t mscount;
+		mach_port_mscount_t mscount = 0;
 
 		if (port->ip_receiver == space)
 			name = port->ip_receiver_name;

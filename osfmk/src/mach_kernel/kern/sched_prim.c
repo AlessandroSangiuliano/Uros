@@ -1539,7 +1539,7 @@ thread_block_reason(
 	/* Unconditionally remove either | both */
 	ast_off(cpu_number(), (AST_QUANTUM|AST_BLOCK|AST_URGENT));
 
-      restart:
+      restart: (void)&&restart; /* suppress unused-label: goto inside #if FAST_IDLE */
 	new_thread = thread_select(myprocessor);
 	assert(new_thread);
 
@@ -3126,7 +3126,7 @@ dump_run_queues(
 		printf("[%u]",i);
 		for (t_cnt=0, e = q1->next; e != q1; e = e->next) {
 		    printf("\t0x%08x",e);
-		    if( (t_cnt = ++t_cnt%4) == 0 )
+		    if( (t_cnt = (t_cnt + 1) % 4) == 0 )
 			printf("\n");
 		}
 		if( t_cnt )

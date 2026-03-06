@@ -999,7 +999,7 @@ vm_object_deallocate(
 	register vm_object_t	object)
 {
 	boolean_t retry_cache_trim = FALSE;
-	vm_object_t shadow;
+	vm_object_t shadow = VM_OBJECT_NULL;
 
 	while (object != VM_OBJECT_NULL) {
 

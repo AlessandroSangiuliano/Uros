@@ -1182,7 +1182,7 @@ db_disasm(
 	char *	i_name;
 	int	i_size;
 	int	i_mode;
-	int	regmodrm;
+	int	regmodrm = 0;
 	boolean_t	first;
 	int	displ;
 	int	prefix;

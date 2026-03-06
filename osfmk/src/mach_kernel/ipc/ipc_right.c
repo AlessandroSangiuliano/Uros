@@ -517,7 +517,7 @@ ipc_right_clean(
 		ipc_port_t port = (ipc_port_t) entry->ie_object;
 		ipc_port_t dnrequest;
 		ipc_port_t nsrequest = IP_NULL;
-		mach_port_mscount_t mscount;
+		mach_port_mscount_t mscount = 0;
 
 		assert(port != IP_NULL);
 		ip_lock(port);
@@ -631,7 +631,7 @@ ipc_right_destroy(
 	    case MACH_PORT_TYPE_SEND_ONCE: {
 		ipc_port_t port = (ipc_port_t) entry->ie_object;
 		ipc_port_t nsrequest = IP_NULL;
-		mach_port_mscount_t mscount;
+		mach_port_mscount_t mscount = 0;
 		ipc_port_t dnrequest;
 #if	DIPC
 		ipc_port_t drop_port = IP_NULL; 
@@ -838,7 +838,7 @@ ipc_right_dealloc(
 		ipc_port_t port;
 		ipc_port_t dnrequest = IP_NULL;
 		ipc_port_t nsrequest = IP_NULL;
-		mach_port_mscount_t mscount;
+		mach_port_mscount_t mscount = 0;
 
 
 		assert(IE_BITS_UREFS(bits) > 0);
@@ -912,7 +912,7 @@ ipc_right_dealloc(
 	    case MACH_PORT_TYPE_SEND_RECEIVE: {
 		ipc_port_t port;
 		ipc_port_t nsrequest = IP_NULL;
-		mach_port_mscount_t mscount;
+		mach_port_mscount_t mscount = 0;
 
 		assert(IE_BITS_UREFS(bits) > 0);
 
@@ -1213,7 +1213,7 @@ ipc_right_delta(
 		ipc_port_t port;
 		ipc_port_t dnrequest = IP_NULL;
 		ipc_port_t nsrequest = IP_NULL;
-		mach_port_mscount_t mscount;
+		mach_port_mscount_t mscount = 0;
 #if	DIPC
 		boolean_t drop_port_ref = FALSE;
 #endif	/* DIPC */

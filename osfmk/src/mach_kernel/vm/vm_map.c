@@ -8523,14 +8523,14 @@ vm_remap(
 	vm_map_t		target_map;
 	struct vm_map_header	map_header;
 
-	if (src_task == MACH_PORT_NULL || !IP_VALID(src_task))
+	if (src_task == IP_NULL || !IP_VALID(src_task))
 		return KERN_INVALID_ARGUMENT;
 
 	switch (inheritance) {
 	    case VM_INHERIT_NONE:
 	    case VM_INHERIT_COPY:
 	    case VM_INHERIT_SHARE:
-		if (size != 0 && target_task != MACH_PORT_NULL &&
+		if (size != 0 && target_task != IP_NULL &&
 		    (target_map = convert_port_to_map(target_task)))
 			break;
 		/*FALL THRU*/

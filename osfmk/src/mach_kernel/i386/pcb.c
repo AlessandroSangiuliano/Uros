@@ -683,6 +683,8 @@ act_machine_set_state(
 		    return(KERN_INVALID_ARGUMENT);
 		}
 
+		state = (struct i386_thread_state *) tstate;
+
 		if (flavor == i386_REGS_SEGS_STATE) {
 		    /*
 		     * Code and stack selectors must not be null,
@@ -701,8 +703,6 @@ act_machine_set_state(
 		        || state->ss == 0 || (state->ss & SEL_PL) != SEL_PL_U))
 			return KERN_INVALID_ARGUMENT;
 		}
-
-		state = (struct i386_thread_state *) tstate;
 
 		saved_state = USER_REGS(thr_act);
 

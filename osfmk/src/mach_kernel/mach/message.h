@@ -672,7 +672,7 @@ typedef natural_t mach_msg_type_number_t;
  *  will be filled in later, dynamically.
  */
 
-#define MACH_MSG_TYPE_POLYMORPHIC	((mach_msg_type_name_t) -1)
+#define MACH_MSG_TYPE_POLYMORPHIC	((mach_msg_type_name_t) ~0U)
 
 /*
  *	Is a given item a port type?

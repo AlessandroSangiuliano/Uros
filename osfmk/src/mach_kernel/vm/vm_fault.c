@@ -2223,7 +2223,7 @@ FastPmapEnter:
 				PMAP_ENTER(vm_map_pmap(map), vaddr, m,
 					   prot, wired);
 				/* Sync I & D caches for new mapping */
-				pmap_attribute(vm_map_pmap(map),
+				(void)pmap_attribute(vm_map_pmap(map),
 					       vaddr,
 					       PAGE_SIZE,
 					       MATTR_CACHE,
@@ -2642,7 +2642,7 @@ FastPmapEnter:
 	PMAP_ENTER(map->pmap, vaddr, m, prot, wired);
 
 	/* Sync I & D caches for new mapping*/
-	pmap_attribute(map->pmap,
+	(void)pmap_attribute(map->pmap,
 		       vaddr,
 		       PAGE_SIZE,
 		       MATTR_CACHE,
@@ -2989,7 +2989,7 @@ vm_fault_wire_fast(
 
 	PMAP_ENTER(map->pmap, va, m, prot, TRUE);
 	/* Sync I & D caches for new mapping */
-	pmap_attribute(map->pmap,
+	(void)pmap_attribute(map->pmap,
 		       va,
 		       PAGE_SIZE,
 		       MATTR_CACHE,

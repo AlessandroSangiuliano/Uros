@@ -78,6 +78,10 @@
 #include <mach/mach_server.h>		/* For vm_deallocate() */
 #include <mach_debug/mach_debug_server.h>	/* For host_load_symbol_table */
 
+/* symtab_name_t is char[32] in MIG header but implementation uses char *.
+ * ABI-equivalent on i386; suppress the array-parameter mismatch warning. */
+#pragma GCC diagnostic ignored "-Warray-parameter="
+
 /*
  *	Loads a symbol table for an external file into the kernel debugger.
  *	The symbol table data is an array of characters.  It is assumed that

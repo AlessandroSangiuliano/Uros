@@ -2195,7 +2195,7 @@ vm_page_free_list_sort(void)
 	vm_page_t	sort_list;
 	vm_page_t	sort_list_end;
 	vm_page_t	m, m1, *prev, next_m;
-	vm_offset_t	addr;
+	vm_offset_t	addr = 0;
 #if	MACH_ASSERT
 	unsigned int	npages;
 	int		old_free_count;
@@ -2325,9 +2325,9 @@ static vm_page_t
 vm_page_find_contiguous(
 	int		npages)
 {
-	vm_page_t	m, *contig_prev, *prev_ptr;
+	vm_page_t	m, *contig_prev = NULL, *prev_ptr;
 	vm_offset_t	prev_addr;
-	unsigned int	contig_npages;
+	unsigned int	contig_npages = 0;
 	vm_page_t	list;
 
 	if (npages < 1)

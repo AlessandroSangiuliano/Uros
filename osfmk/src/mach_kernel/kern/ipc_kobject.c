@@ -269,7 +269,7 @@ mig_init(void)
 	      nentry = j + mig_e[i]->start;
 	      for (pos = MIG_HASH(nentry) % MAX_MIG_ENTRIES, howmany = 1;
 		   mig_buckets[pos].num;
-		   pos = ++pos % MAX_MIG_ENTRIES, howmany++) {
+		   pos = (pos + 1) % MAX_MIG_ENTRIES, howmany++) {
 		  if (mig_buckets[pos].num == nentry)
 		      panic("multiple entries with the same msgh_id");
 		  if (howmany == MAX_MIG_ENTRIES)

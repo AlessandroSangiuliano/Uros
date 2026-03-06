@@ -241,9 +241,9 @@ db_examine(
 	int		width;
 	int		leader;
 	int		items;
-	int		nitems;
+	int		nitems = 0;
 	char *		fp;
-	db_addr_t	next_addr;
+	db_addr_t	next_addr = addr;
 	int		sz;
 
 	db_examine_prev_addr = addr;

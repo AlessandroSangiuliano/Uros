@@ -154,8 +154,20 @@ extern	int	kdb_active[];
 
 #else	/* NCPUS > 1 */
 #define at386_io_lock_state()
-#define at386_io_lock(op)	(TRUE)
+#ifndef ASSEMBLER
+#define AT386_IO_LOCK_DEFINED 1
+static inline int at386_io_lock(int op __attribute__((unused))) { return 1; }
+#else
+#define at386_io_lock(op)	1
+#endif /* ASSEMBLER */
 #define at386_io_unlock()
+/* Keep op constants visible even on UP so callers can compile without guards */
+#define MP_DEV_OP_MAX	  4
+#define MP_DEV_WAIT	  MP_DEV_OP_MAX
+#define MP_DEV_OP_START	0
+#define MP_DEV_OP_INTR	1
+#define MP_DEV_OP_TIMEO	2
+#define MP_DEV_OP_CALLB	3
 #if	MP_V1_1
 #include	<i386/apic.h>
 #endif	/* MP_V1_1 */

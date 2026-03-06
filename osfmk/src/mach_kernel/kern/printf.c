@@ -698,9 +698,9 @@ printf(const char *fmt, ...)
 		}
 		_doprnt(fmt, &listp, cnputc, 16);
 		simple_unlock(&printf_lock);
-      } else 
+      } else
 #endif	/* MP_PRINTF */
-	_doprnt(fmt, &listp, cnputc, 16);
+      _doprnt(fmt, &listp, cnputc, 16);
 	va_end(listp);
 	enable_preemption();
 }
