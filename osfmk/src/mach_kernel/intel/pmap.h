@@ -326,17 +326,9 @@ typedef unsigned int	pt_entry_t;
 #define PTEMASK		0x3ff	/* mask for page table index */
 
 /*
- *	Convert kernel virtual address to linear address
- */
-
-#define kvtolinear(a)	((a)+LINEAR_KERNEL_ADDRESS)
-
-/*
  *	Convert address offset to page descriptor index
  */
-#define pdenum(pmap, a)	(((((pmap) == kernel_pmap) ?	\
-			   kvtolinear(a) : (a))		\
-			  >> PDESHIFT) & PDEMASK)
+#define pdenum(pmap, a)	(((a) >> PDESHIFT) & PDEMASK)
 
 /*
  *	Convert page descriptor index to user virtual address

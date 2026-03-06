@@ -153,13 +153,6 @@
 #define VM_MIN_ADDRESS		((vm_offset_t) 0)
 #define VM_MAX_ADDRESS		((vm_offset_t) 0xc0000000U)
 
-/*
- * Flat memory model: all segment bases are 0.
- * LINEAR_KERNEL_ADDRESS is kept as 0 for the transition period;
- * kernel virtual addresses ARE linear addresses.
- */
-#define LINEAR_KERNEL_ADDRESS	((vm_offset_t) 0)
-
 #define VM_MIN_KERNEL_ADDRESS	((vm_offset_t) 0xc0000000U)
 #define VM_MAX_KERNEL_ADDRESS	((vm_offset_t) 0xffffffffU)
 

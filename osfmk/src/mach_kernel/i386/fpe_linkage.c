@@ -196,7 +196,6 @@ fpe_init(void)
 	 * Build GDT entry for FP code segment.
 	 */
 	addr = (vm_offset_t) fpe_start;
-	addr += LINEAR_KERNEL_ADDRESS;
 	gdt_p = gdt_desc_p(cpu_number(), FPE_CS);
 	gdt_p->base_low   = addr & 0xffff;
 	gdt_p->base_med   = (addr >> 16) & 0xff;
@@ -297,7 +296,6 @@ enable_fpe(
 
 	dp = gdt_desc_p(cpu_number(), USER_FPREGS);
 	start_va = (vm_offset_t)&ifps->fp_save_state;
-	start_va += LINEAR_KERNEL_ADDRESS;
 
 	dp->base_low = start_va & 0xffff;
 	dp->base_med = (start_va >> 16) & 0xff;
