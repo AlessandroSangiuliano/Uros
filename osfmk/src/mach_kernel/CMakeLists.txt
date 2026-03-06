@@ -712,3 +712,57 @@ message(STATUS "Configuring Mach Kernel for i386/AT386")
 message(STATUS "  Load address: ${KERNEL_TEXTORG}")
 message(STATUS "  Source dir: ${KERNEL_SRC_DIR}")
 message(STATUS "  Build dir: ${KERNEL_BUILD_DIR}")
+
+# =============================================================================
+# Flat-model verification tests (#47/#51)
+# =============================================================================
+set(KERNEL_BIN "$<TARGET_FILE:${KERNEL_TARGET}>")
+
+# --- ELF property checks ---
+
+# 1. Kernel must be a 32-bit ELF
+add_test(NAME kernel_elf32
+  COMMAND sh -c "LANG=C readelf -h '${KERNEL_BIN}' | grep -q 'Class:.*ELF32'"
+)
+
+# 2. Entry point must be in kernel virtual space (0xC0xxxxxx)
+add_test(NAME kernel_entry_in_kernel_space
+  COMMAND sh -c "LANG=C readelf -h '${KERNEL_BIN}' | grep 'Entry point' | grep -q '0xc0'"
+)
+
+# 3. .text virtual address must start at 0xC0100000+ (KERNELBASE + 1MB)
+add_test(NAME kernel_text_vaddr
+  COMMAND sh -c "LANG=C readelf -S '${KERNEL_BIN}' | grep '\\.text' | awk 'BEGIN{r=1} {for(i=1;i<=NF;i++) if(\$i ~ /^c010/) r=0} END{exit r}'"
+)
+
+# 4. No LINEAR_KERNEL_ADDRESS symbol in kernel (legacy removed)
+add_test(NAME kernel_no_linear_kernel_addr_symbol
+  COMMAND sh -c "! LANG=C readelf -s '${KERNEL_BIN}' 2>/dev/null | grep -qi 'LINEAR_KERNEL'"
+)
+
+# --- QEMU boot smoke test ---
+find_program(QEMU_I386 qemu-system-i386)
+if(QEMU_I386)
+  add_test(NAME kernel_boot_smoke
+    COMMAND sh -c "
+      LOG=\$(mktemp)
+      ${QEMU_I386} -m 128 -no-reboot -display none \
+        -serial file:\$LOG \
+        -kernel '${KERNEL_BIN}' &
+      QPID=\$!
+      sleep 8
+      kill \$QPID 2>/dev/null; wait \$QPID 2>/dev/null
+      PASS=true
+      grep -q 'OSFMK'           \$LOG || PASS=false
+      grep -q 'sysenter.*fast'  \$LOG || PASS=false
+      grep -q 'vm_page_bootstrap' \$LOG || PASS=false
+      if grep -q 'panic.*freed zone' \$LOG; then PASS=false; fi
+      rm -f \$LOG
+      \$PASS
+    "
+  )
+  set_tests_properties(kernel_boot_smoke PROPERTIES
+    TIMEOUT 30
+    LABELS "boot;smoke"
+  )
+endif()
