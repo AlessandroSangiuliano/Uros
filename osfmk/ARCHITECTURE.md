@@ -8,6 +8,33 @@
 
 ---
 
+## Memory Model: Flat Segments (#47)
+
+The kernel uses a **flat memory model**: all GDT segment bases are zero
+and limits span the full 4 GB address space.  Kernel/user separation is
+done entirely via paging (PDE 768+ = kernel, U/S=0).
+
+| Property | Value |
+|----------|-------|
+| Segment bases (CS/DS/SS) | 0 |
+| Segment limits | 0xFFFFFFFF (4 GB) |
+| Kernel virtual range | 0xC0000000 – 0xFFFFFFFF |
+| User virtual range | 0x00000000 – 0xBFFFFFFF |
+| Physical load address | 0x100000 (1 MB) |
+| Virtual load address | 0xC0100000 |
+
+### Implications
+
+- **virtual == linear**: no address translation between segment-relative
+  and linear addresses.  The old `LINEAR_KERNEL_ADDRESS` / `kvtolinear()`
+  abstraction has been fully removed.
+- **SYSENTER/SYSEXIT**: CPU-hardcoded CS.base=0 matches KERNEL_CS exactly,
+  so the fast syscall entry needs no trampoline conversion.
+- **GDT descriptors** (LDT, TSS, CPU_DATA, IOPB, FPE): base fields
+  receive raw kernel virtual addresses — no offset needed.
+
+---
+
 ## Components
 
 ### 1. mach_kernel/ (20MB) - THE MICROKERNEL

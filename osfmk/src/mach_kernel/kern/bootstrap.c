@@ -1187,7 +1187,10 @@ bootstrap_create(void)
             (struct multiboot_module *) phystokv(mb_info.mods_addr);
         dprintf("  late-read mods[0]: mod_start=0x%x  mod_end=0x%x\n",
                mods[0].mod_start, mods[0].mod_end);
-        boot_start = mods[0].mod_start;
+        /* mod_start/mod_end are physical addresses from the multiboot loader.
+         * boot_start must be a kernel virtual address because exec_load(),
+         * exec_map() and do_bootstrap_compat() dereference it directly. */
+        boot_start = phystokv(mods[0].mod_start);
         boot_size  = mods[0].mod_end - mods[0].mod_start;
         dprintf("  corrected: boot_start=0x%x  boot_size=0x%x\n",
                boot_start, boot_size);
@@ -1195,7 +1198,7 @@ bootstrap_create(void)
 
     /* Peek at the first 4 bytes of the module to check for ELF magic. */
     if (boot_start != 0) {
-        unsigned char *hdr = (unsigned char *) phystokv(boot_start);
+        unsigned char *hdr = (unsigned char *) boot_start;
         dprintf("  module[0] header bytes: %02x %02x %02x %02x\n",
                hdr[0], hdr[1], hdr[2], hdr[3]);
     }
