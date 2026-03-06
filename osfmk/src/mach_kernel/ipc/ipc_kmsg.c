@@ -1052,7 +1052,7 @@ ipc_kmsg_copyin_header(
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 	ipc_object_t dest_port, reply_port;
 	ipc_port_t dest_soright, reply_soright;
-	ipc_port_t notify_port;
+	ipc_port_t notify_port = IP_NULL;
 
 	if (!MACH_MSG_TYPE_PORT_ANY_SEND(dest_type))
 		return MACH_SEND_INVALID_HEADER;
@@ -2580,7 +2580,7 @@ ipc_kmsg_copyout_body(
     mach_msg_return_t 		mr = MACH_MSG_SUCCESS;
     kern_return_t 		kr;
     vm_offset_t         	data;
-    mach_msg_descriptor_t 	*sstart, *send;
+    mach_msg_descriptor_t 	*sstart, *send = MACH_MSG_DESCRIPTOR_NULL;
 #if	MACH_RT
     boolean_t			rt;
 #endif	/* MACH_RT */

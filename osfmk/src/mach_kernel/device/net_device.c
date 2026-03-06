@@ -876,7 +876,7 @@ net_driver_input(
     net_device_t netp,
     net_done_t netd)
 {
-    boolean_t priority;
+    boolean_t priority = FALSE;
     io_req_t ior;
 
     switch (netp->net_itype) {
@@ -1032,9 +1032,9 @@ net_driver_loopback(
     net_device_t netp,
     net_done_t netd)
 {
-    unsigned short type;
+    unsigned short type = 0;
     unsigned int i;
-    char *addr;
+    char *addr = NULL;
 
     switch (netp->net_status.media_type) {
     case NET_MEDIA_OTHERS:
@@ -1284,7 +1284,7 @@ net_driver_copyout(
 	/*
 	 * Achieve minimum transmission length
 	 */
-	switch((*netp->net_bic_ops.bic_copyout)(netp, netd, (vm_offset_t)0,
+	switch((int)(*netp->net_bic_ops.bic_copyout)(netp, netd, (vm_offset_t)0,
 						(netp->net_status.
 						 min_packet_size -
 						 netd->netd_outlen),
@@ -1387,17 +1387,17 @@ net_driver_copy(
 {
     vm_offset_t to;
     vm_offset_t from;
-    unsigned char *addr;
+    unsigned char *addr = NULL;
     unsigned int atype;
     vm_size_t len;
     int receiver;
-    unsigned short type;
+    unsigned short type = 0;
     unsigned int header_type;
     int ret;
     net_done_t netd;
-    ipc_kmsg_t kmsg;
-    char *header;
+    ipc_kmsg_t kmsg = IKM_NULL;
     char header_array[NET_HDW_HDR_MAX];
+    char *header = header_array;
 
     /*
      * BIC chip must not be busy on output
@@ -1653,7 +1653,7 @@ net_driver_copy(
 	    switch (netp->net_status.header_format) {
 	    case HDR_ETHERNET:
 	    {
-		unsigned int offset;
+		unsigned int offset = 0;
 
 		switch (netp->net_status.media_type) {
 		case NET_MEDIA_OTHERS:

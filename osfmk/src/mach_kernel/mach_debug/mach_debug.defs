@@ -125,7 +125,7 @@
 subsystem
 #if	KERNEL_SERVER
 	  KernelServer
-#endif	KERNEL_SERVER
+#endif /* KERNEL_SERVER */
 		       mach_debug 3000;
 
 #include <mach/std_types.defs>
@@ -196,13 +196,13 @@ routine mach_port_dnrequest_info(
 	out	total		: unsigned;	/* total size of table */
 	out	used		: unsigned);	/* amount used */
 
-#else	!defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG
+#else /* !defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG */
 skip;	/* mach_port_get_srights */
 skip;	/* host_ipc_hash_info */
 skip;	/* obsolete host_ipc_marequest_info */
 skip;	/* mach_port_space_info */
 skip;	/* mach_port_dnrequest_info */
-#endif	!defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG
+#endif /* !defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG */
 
 #if	!defined(MACH_VM_DEBUG) || MACH_VM_DEBUG
 
@@ -221,10 +221,10 @@ routine	vm_mapped_pages_info(
 		task		: task_t;
 	out	pages		: page_address_array_t);
 
-#else	!defined(MACH_VM_DEBUG) || MACH_VM_DEBUG
+#else /* !defined(MACH_VM_DEBUG) || MACH_VM_DEBUG */
 skip;	/* mach_vm_region_info */
 skip;	/* vm_mapped_pages_info */
-#endif	!defined(MACH_VM_DEBUG) || MACH_VM_DEBUG
+#endif /* !defined(MACH_VM_DEBUG) || MACH_VM_DEBUG */
 
 
 /*
@@ -265,9 +265,9 @@ routine host_virtual_physical_table_info(
 	out	info		: hash_info_bucket_array_t,
 					Dealloc);
 
-#else	!defined(MACH_VM_DEBUG) || MACH_VM_DEBUG
+#else /* !defined(MACH_VM_DEBUG) || MACH_VM_DEBUG */
 skip;	/* host_virtual_physical_table_info */
-#endif	!defined(MACH_VM_DEBUG) || MACH_VM_DEBUG
+#endif /* !defined(MACH_VM_DEBUG) || MACH_VM_DEBUG */
 
 #if	!defined(MACH_KDB) || MACH_KDB
 /*
@@ -282,9 +282,9 @@ routine host_load_symbol_table(
 		name		: symtab_name_t;
 		symtab		: pointer_t);
 
-#else	!defined(MACH_KDB) || MACH_KDB
+#else /* !defined(MACH_KDB) || MACH_KDB */
 skip;	/* host_load_symbol_table */
-#endif	!defined(MACH_KDB) || MACH_KDB
+#endif /* !defined(MACH_KDB) || MACH_KDB */
 
 #if	!defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG
 
@@ -299,7 +299,7 @@ routine	mach_port_kernel_object(
 	out	object_type	: unsigned;
 	out	object_addr	: vm_offset_t);
 
-#else	!defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG
+#else /* !defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG */
 skip;	/* mach_port_kernel_object */
-#endif	!defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG
+#endif /* !defined(MACH_IPC_DEBUG) || MACH_IPC_DEBUG */
 

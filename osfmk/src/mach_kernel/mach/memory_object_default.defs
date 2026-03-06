@@ -124,14 +124,14 @@
 subsystem
 #if	KERNEL_USER
 	  KernelUser
-#endif	KERNEL_USER
+#endif /* KERNEL_USER */
 		     memory_object_default 2250;
 
 #ifdef	MACH_KERNEL
 #include <norma_vm.h>
 #if	NORMA_VM
 userprefix k_;
-#endif	NORMA_VM
+#endif /* NORMA_VM */
 #endif	/* MACH_KERNEL */
 
 #include <mach/std_types.defs>
@@ -155,7 +155,7 @@ simpleroutine	memory_object_create(
 						ctype: mach_port_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		new_memory_object	: memory_object_t =
 						MACH_MSG_TYPE_MOVE_RECEIVE
 						ctype: mach_port_t;
@@ -175,7 +175,7 @@ simpleroutine	memory_object_data_initialize(
 		memory_object		: memory_object_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control_port	: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;
@@ -192,12 +192,12 @@ simpleroutine	memory_object_data_terminate(
 		memory_object		: memory_object_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control_port	: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;
 		offset			: vm_offset_t;
 		size			: vm_size_t);
-#else	0
+#else /* 0 */
 skip;	/* memory_object_data_terminate */
-#endif	0
+#endif /* 0 */

@@ -542,8 +542,8 @@ i386_io_port_list(thread, list, list_count)
 {
 	register pcb_t	pcb;
 	register iopb_tss_t io_tss;
-	unsigned int	count, alloc_count;
-	device_t	*devices;
+	unsigned int	count = 0, alloc_count;
+	device_t	*devices = NULL;
 	vm_size_t	size_needed, size;
 	vm_offset_t	addr;
 	int		i;

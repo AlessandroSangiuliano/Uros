@@ -200,9 +200,11 @@
 #elif MP_V1_1
 #include <i386/AT386/mp/mp_v1_1.h>
 #else
+#ifndef AT386_IO_LOCK_DEFINED
 #define at386_io_lock_state()
-#define at386_io_lock(op)	(TRUE)
+static inline int at386_io_lock(int op __attribute__((unused))) { return 1; }
 #define at386_io_unlock()
+#endif
 #endif
 
 #include <kern/misc_protos.h>
@@ -1027,7 +1029,7 @@ int commctl(
     spl_t       s;
     int     unit;
     i386_ioport_t	dev_addr;
-    register int    b;
+    register int    b = 0;
 
     unit = minor(tp->t_dev);
 

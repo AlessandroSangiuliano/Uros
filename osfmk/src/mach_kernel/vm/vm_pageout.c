@@ -780,7 +780,7 @@ vm_pageout_setup(
 	vm_offset_t		offset;
 	register vm_page_t	holding_page;
 	register vm_page_t	new_m;
-	register vm_page_t	new_page;
+	register vm_page_t	new_page = VM_PAGE_NULL;
 	boolean_t		need_to_wire = FALSE;
 
 

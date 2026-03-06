@@ -605,7 +605,7 @@ void
 user_trap(
 	register struct i386_saved_state	*regs)
 {
-	int		exc;
+	int		exc = 0;
 	int		code;
 	int		subcode;
 	register int	type;

@@ -845,7 +845,7 @@ extern void		flush_tlb(void);
 #define	pmap_copy(dst_pmap,src_pmap,dst_addr,len,src_addr)
 #ifndef	PARAGON860
 #define	pmap_attribute(pmap,addr,size,attr,value) \
-					(KERN_INVALID_ADDRESS)
+					((void)(pmap),(void)(addr),(void)(size),(void)(attr),(void)(value),KERN_INVALID_ADDRESS)
 #endif	/* PARAGON860 */
 
 #endif	/* ASSEMBLER */

@@ -281,7 +281,7 @@ void thread_swapin(
 	thread_act_t	thr_act,
 	boolean_t	make_unswappable)
 {
-	spl_t		s;
+	spl_t		s = 0;
 
 	switch (thr_act->swap_state & TH_SW_STATE) {
 	    case TH_SW_OUT:
@@ -344,7 +344,7 @@ void thread_swapin(
 boolean_t thread_swapin_blocking(
 	thread_act_t	thr_act)
 {
-	spl_t		s;
+	spl_t		s = 0;
 	thread_t	thread, othread;
 
 #define lock_swap_state(thr_act)		\
@@ -1016,7 +1016,7 @@ void thread_swappable(
 	thread_act_t	thr_act,
 	boolean_t	is_swappable)
 {
-	int		s;
+	int		s = 0;
 	thread_t	thread;
 
 	thread = act_lock_thread(thr_act);
@@ -1088,7 +1088,7 @@ void
 thread_swap_disable(
 	thread_act_t	thr_act)
 {
-	spl_t		s;
+	spl_t		s = 0;
 	thread_t	thread;
 
 	/*

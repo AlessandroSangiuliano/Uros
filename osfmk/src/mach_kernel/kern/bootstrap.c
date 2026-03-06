@@ -1531,7 +1531,7 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       dprintf("argv[%d]: %s\n", i, argv[i]);
   }
 
-  if (task != MACH_PORT_NULL)
+  if (task != NULL)
     {
         simple_lock_init (&info.lock, ETAP_NO_TRACE);
         simple_lock(&info.lock);

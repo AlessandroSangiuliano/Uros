@@ -366,6 +366,12 @@ set(MIG_GENERATED_SOURCES
     ${DEVICE_GENERATED}
 )
 
+# MIG generates (mach_msg_type_name_t)-1 as a sentinel in static port
+# descriptor templates; the value intentionally overflows the 8-bit
+# disposition bitfield (truncates to 0xFF).  Suppress the noise.
+set_source_files_properties(${MIG_GENERATED_SOURCES}
+    PROPERTIES COMPILE_OPTIONS "-Wno-overflow")
+
 # device_pager_server header needs to exist for ipc_kobject.c
 set(DEVICE_PAGER_HEADER ${KERNEL_BUILD_DIR}/device/device_pager_server.h)
 

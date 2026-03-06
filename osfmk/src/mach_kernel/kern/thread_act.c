@@ -1619,7 +1619,7 @@ kern_return_t act_set_thread_pool(
 	thread_act_t	thr_act,
 	ipc_port_t	pool_port)
 {
-	thread_pool_t	thread_pool;
+	thread_pool_t	thread_pool = NULL;
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)
@@ -1699,7 +1699,7 @@ kern_return_t act_locked_act_set_thread_pool(
 	thread_act_t	thr_act,
 	ipc_port_t	pool_port)
 {
-	thread_pool_t	thread_pool;
+	thread_pool_t	thread_pool = NULL;
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)

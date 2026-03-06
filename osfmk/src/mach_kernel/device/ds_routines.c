@@ -120,6 +120,11 @@
 #include <dipc/special_ports.h>
 #endif
 
+/* MIG-generated headers use array typedefs (e.g. device_name_t = char[128],
+ * io_buf_ptr_t = char[2048]) but implementations use pointer parameters.
+ * The mismatch is intentional and harmless on i386 (same ABI). */
+#pragma GCC diagnostic ignored "-Warray-parameter="
+
 #if	PARAGON860 || iPSC386 || iPSC860
 int	ndf_noise=0;
 #endif
