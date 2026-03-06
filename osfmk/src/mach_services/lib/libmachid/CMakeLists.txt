@@ -12,8 +12,8 @@ target_include_directories(libmachid PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
 

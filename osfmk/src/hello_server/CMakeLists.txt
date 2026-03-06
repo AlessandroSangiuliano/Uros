@@ -35,10 +35,10 @@ target_include_directories(hello_server_server PRIVATE
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  # Kernel headers (mach/, device/, i386/)
-  ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/powermac/include
+  # Kernel headers (mach/, device/, i386/)
+  ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
 )

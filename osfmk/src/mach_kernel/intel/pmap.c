@@ -1556,7 +1556,7 @@ pmap_destroy(
 	 *	pmap structure.
 	 */
 	pdep = p->dirbase;
-	while (pdep < &p->dirbase[pdenum(p, LINEAR_KERNEL_ADDRESS)]) {
+	while (pdep < &p->dirbase[pdenum(p, VM_MIN_KERNEL_ADDRESS)]) {
 	    if (*pdep & INTEL_PTE_VALID) {
 		pa = pte_to_pa(*pdep);
 		vm_object_lock(pmap_object);
@@ -2742,7 +2742,7 @@ pmap_collect(
 	PMAP_UPDATE_TLBS(p, VM_MIN_ADDRESS, VM_MAX_ADDRESS);
 
 	for (pdp = p->dirbase;
-	     pdp < &p->dirbase[pdenum(p, LINEAR_KERNEL_ADDRESS)];
+	     pdp < &p->dirbase[pdenum(p, VM_MIN_KERNEL_ADDRESS)];
 	     pdp += ptes_per_vm_page)
 	{
 	    if (*pdp & INTEL_PTE_VALID) 

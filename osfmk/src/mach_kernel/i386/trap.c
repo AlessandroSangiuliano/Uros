@@ -454,9 +454,8 @@ kernel_trap(
 #endif	/* MACH_KDB */
 		subcode = regs->cr2;	/* get faulting address */
 
-		if (subcode > LINEAR_KERNEL_ADDRESS) {
+		if (subcode >= VM_MIN_KERNEL_ADDRESS) {
 		    map = kernel_map;
-		    subcode -= LINEAR_KERNEL_ADDRESS;
 		} else if (thr_act == THR_ACT_NULL || thread == THREAD_NULL)
 		    map = kernel_map;
 		else {
@@ -747,9 +746,8 @@ user_trap(
 			/* NOTREACHED */
 		}
 		else {
-			if (subcode > LINEAR_KERNEL_ADDRESS) {
+			if (subcode >= VM_MIN_KERNEL_ADDRESS) {
 			  	map = kernel_map;
-		    		subcode -= LINEAR_KERNEL_ADDRESS;
 			}
 			result = vm_fault(thr_act->map,
 				trunc_page((vm_offset_t)subcode),

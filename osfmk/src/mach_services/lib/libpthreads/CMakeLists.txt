@@ -39,8 +39,8 @@ target_include_directories(libpthreads PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
 
