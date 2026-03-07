@@ -21,6 +21,7 @@
  */
 
 #include <mach.h>
+#include <mach/mach_host.h>
 #include <mach/bootstrap.h>
 #include <mach/mach_port.h>
 #include <mach/mach_traps.h>
@@ -97,6 +98,44 @@ typedef struct {
     mach_msg_header_t	head;
     char		data[4096 + 64];
 } bench_recv_buf_t;
+
+/* ===================================================================
+ * kmsg cache statistics
+ * =================================================================== */
+
+typedef struct {
+    unsigned int tries;
+    unsigned int misses;
+} cache_snap_t;
+
+static int
+cache_snap(cache_snap_t *s)
+{
+    host_ipc_cache_info_data_t	info;
+    mach_msg_type_number_t		count = HOST_IPC_CACHE_INFO_COUNT;
+    kern_return_t			kr;
+
+    kr = host_info(host_port, HOST_IPC_CACHE_INFO,
+		   (host_info_t)&info, &count);
+    if (kr != KERN_SUCCESS)
+	return 0;
+    s->tries  = info.tries;
+    s->misses = info.misses;
+    return 1;
+}
+
+static void
+print_cache_stats(const char *label,
+		  const cache_snap_t *before, const cache_snap_t *after)
+{
+    unsigned int tries  = after->tries  - before->tries;
+    unsigned int misses = after->misses - before->misses;
+    unsigned int hits   = tries - misses;
+    unsigned int pct    = tries ? (hits * 100) / tries : 0;
+
+    printf("  [cache] %-30s tries=%-6u hits=%-6u misses=%-6u hit%%=%u%%\n",
+	   label, tries, hits, misses, pct);
+}
 
 /* ===================================================================
  * Timing helpers
@@ -188,6 +227,7 @@ echo_thread_func(void *arg)
 static void
 bench_intra_rpc(const char *label, int send_size, int iters)
 {
+    cache_snap_t	cs_before, cs_after;
     mach_port_t		echo_port, reply_port;
     kern_return_t	kr;
     tvalspec_t		t0, t1;
@@ -231,6 +271,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     }
 
     /* Timed run */
+    cache_snap(&cs_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
 	send_buf.head.msgh_bits =
@@ -247,8 +288,10 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
+    cache_snap(&cs_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
+    print_cache_stats(label, &cs_before, &cs_after);
 
     /* Cleanup: destroy ports (kills echo thread's receive) */
     mach_port_destroy(mach_task_self(), echo_port);
@@ -310,6 +353,7 @@ child_echo_entry(void)
 static void
 bench_inter_rpc(const char *label, int send_size, int iters)
 {
+    cache_snap_t		cs_before, cs_after;
     kern_return_t		kr;
     mach_port_t			child_task, child_thread;
     mach_port_t			child_recv_port;	/* child receives */
@@ -435,6 +479,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     /*
      * Step 8: Timed run.
      */
+    cache_snap(&cs_before);
     get_time(&t0);
     for (i = 0; i < iters; i++) {
 	send_buf.head.msgh_bits =
@@ -450,8 +495,10 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
+    cache_snap(&cs_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
+    print_cache_stats(label, &cs_before, &cs_after);
 
     /*
      * Step 9: Cleanup — destroy the child task.
@@ -558,7 +605,18 @@ main(int argc, char **argv)
 
     printf("\n");
     printf("=== OSFMK IPC Performance Benchmark ===\n");
-    printf("    %d iterations per test, %d warmup\n\n", BENCH_ITERS, WARMUP_ITERS);
+    printf("    %d iterations per test, %d warmup\n", BENCH_ITERS, WARMUP_ITERS);
+
+    {
+	host_ipc_cache_info_data_t	cinfo;
+	mach_msg_type_number_t		cc = HOST_IPC_CACHE_INFO_COUNT;
+	if (host_info(host_port, HOST_IPC_CACHE_INFO,
+		      (host_info_t)&cinfo, &cc) == KERN_SUCCESS)
+	    printf("    kmsg cache: %u slots/CPU, max msg size %u bytes\n\n",
+		   cinfo.stash, cinfo.saved_size);
+	else
+	    printf("    kmsg cache: stats unavailable\n\n");
+    }
 
     /*
      * Step 3: Get clock for timing.

@@ -136,6 +136,7 @@ typedef	integer_t	host_flavor_t;
 #define HOST_RESOURCE_SIZES	4	/* kernel struct sizes */
 #define HOST_PRIORITY_INFO	5	/* priority information */
 #define HOST_PAGING_INFO	6	/* VM/paging info */
+#define HOST_IPC_CACHE_INFO	7	/* kmsg pool cache statistics */
 
 struct host_basic_info {
 	integer_t	max_cpus;	/* max number of cpus possible */
@@ -248,5 +249,17 @@ typedef struct host_paging_info	host_paging_info_data_t;
 typedef struct host_paging_info	*host_paging_info_t;
 #define HOST_PAGING_INFO_COUNT \
 		(sizeof(host_paging_info_data_t)/sizeof(int))
+
+struct host_ipc_cache_info {
+	unsigned int	tries;		/* total ikm_cache_get() attempts */
+	unsigned int	misses;		/* cache misses (fell through to kalloc) */
+	unsigned int	stash;		/* cache slots per CPU (IKM_STASH) */
+	unsigned int	saved_size;	/* cached kmsg size in bytes (IKM_SAVED_KMSG_SIZE) */
+};
+
+typedef struct host_ipc_cache_info	host_ipc_cache_info_data_t;
+typedef struct host_ipc_cache_info	*host_ipc_cache_info_t;
+#define HOST_IPC_CACHE_INFO_COUNT \
+		(sizeof(host_ipc_cache_info_data_t)/sizeof(integer_t))
 
 #endif	/* _MACH_HOST_INFO_H_ */
