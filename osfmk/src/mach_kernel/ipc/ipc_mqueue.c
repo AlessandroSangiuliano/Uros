@@ -1011,6 +1011,14 @@ ipc_mqueue_receive(
 		imq_unlock(mqueue);
 		if (continuation != (void (*)(void)) 0) {
 			counter(c_ipc_mqueue_receive_block_user++);
+			self->ith_mqueue = (void *) mqueue;
+			{
+				spl_t _s = splsched();
+				thread_lock(self);
+				self->at_safe_point = SAFE_EXTERNAL_RECEIVE;
+				thread_unlock(self);
+				splx(_s);
+			}
 		} else {
 			counter(c_ipc_mqueue_receive_block_kernel++);
 		}

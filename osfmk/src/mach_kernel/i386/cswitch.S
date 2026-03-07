@@ -181,6 +181,15 @@ Entry(Switch_context)
 	CPU_NUMBER(%edx)
 	movl	CX(EXT(active_stacks),%edx),%ecx /* get old kernel stack */
 
+	/*
+	 * Check for explicit continuation (second argument).
+	 * If non-zero, skip callee-saved register save and set up
+	 * the old thread's kernel state to resume via Thread_continue.
+	 */
+	cmpl	$0,8(%esp)			/* continuation arg */
+	jne	2f
+
+	/* No continuation: save all callee-saved registers */
 	movl	%ebx,KSS_EBX(%ecx)		/* save registers */
 	movl	%ebp,KSS_EBP(%ecx)
 	movl	%edi,KSS_EDI(%ecx)
@@ -189,10 +198,28 @@ Entry(Switch_context)
 	movl	%esp,KSS_ESP(%ecx)		/* save SP */
 
 	movl	0(%esp),%eax			/* get old thread */
-	movl	4(%esp),%ebx			/* get continuation */
-	movl	%ebx,TH_CONTINUATION(%eax)	/* save continuation */
+	movl	$0,TH_CONTINUATION(%eax)	/* no continuation */
 
 	movl	8(%esp),%esi			/* get new thread */
+	jmp	3f
+
+2:	/* Has continuation: skip register save, set up Thread_continue */
+	addl	$4,%esp				/* pop return address */
+
+	movl	0(%esp),%eax			/* get old thread */
+	movl	4(%esp),%ebx			/* get continuation */
+	movl	%ebx,TH_CONTINUATION(%eax)	/* save in thread struct */
+
+	/* Set up kernel saved state so this thread resumes via
+	 * Thread_continue -> thread_continue -> (*continuation)() */
+	movl	$EXT(Thread_continue),KSS_EIP(%ecx)
+	movl	$EXT(thread_continue),KSS_EBX(%ecx)
+	lea	KERNEL_STACK_SIZE-IKS_SIZE-IEL_SIZE(%ecx),%ebx
+	movl	%ebx,KSS_ESP(%ecx)		/* reset to stack top */
+
+	movl	8(%esp),%esi			/* get new thread */
+
+3:	/* Common path: switch to new thread */
         movl    $CPD_ACTIVE_THREAD,%ecx
         movl    %esi,%gs:(%ecx)                 /* new thread is active */
 	movl	TH_KERNEL_STACK(%esi),%ecx	/* get its kernel stack */

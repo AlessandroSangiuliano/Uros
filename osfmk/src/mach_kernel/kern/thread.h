@@ -427,6 +427,10 @@ typedef struct thread_shuttle {
 			mach_msg_option_t option;
 			mach_msg_body_t *scatter_list;
 			mach_msg_size_t scatter_list_size;
+			void *mqueue;		/* saved ipc_mqueue_t */
+			void *msg;		/* saved user msg buffer */
+			void *object;		/* saved ipc_object_t */
+			mach_port_t notify;	/* saved notify port */
 		} receive;
 		char *other;		/* catch-all for other state */
 	} saved;
@@ -509,6 +513,10 @@ typedef struct thread_shuttle	*thread_shuttle_t;
 #define	ith_option		saved.receive.option
 #define ith_scatter_list	saved.receive.scatter_list
 #define ith_scatter_list_size	saved.receive.scatter_list_size
+#define	ith_mqueue		saved.receive.mqueue
+#define	ith_msg			saved.receive.msg
+#define	ith_object		saved.receive.object
+#define	ith_notify		saved.receive.notify
 
 #define ith_other		saved.other
 

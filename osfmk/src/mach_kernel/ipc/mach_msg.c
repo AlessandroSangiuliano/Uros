@@ -398,12 +398,15 @@ mach_msg_receive(
 	self->ith_option = option;
 	self->ith_scatter_list = slist;
 	self->ith_scatter_list_size = slist_size;
+	self->ith_msg = (void *) msg;
+	self->ith_object = (void *) object;
+	self->ith_notify = notify;
 
 	mr = ipc_mqueue_receive(mqueue, option & MACH_RCV_TIMEOUT, rcv_size,
 				timeout, FALSE,
-				(void(*)(void))SAFE_EXTERNAL_RECEIVE,
+				mach_msg_receive_continue,
 				&kmsg, &seqno);
-	
+
 	/* mqueue is unlocked */
 	ipc_object_release(object);
 
@@ -460,6 +463,186 @@ mach_msg_receive(
 	FREE_SCATTER_LIST(slist, slist_size, slist_rt);
 
 	return mr;
+}
+
+
+/*
+ *	Routine:	mach_msg_receive_continue
+ *	Purpose:
+ *		Continuation for mach_msg_receive after blocking
+ *		in ipc_mqueue_receive.  Replicates the post-block
+ *		processing from both ipc_mqueue_receive and
+ *		mach_msg_receive, then returns directly to userspace.
+ *	Conditions:
+ *		Called via Thread_continue -> thread_continue with
+ *		the kernel stack reset.  Cannot return normally.
+ */
+void
+mach_msg_receive_continue(void)
+{
+	ipc_thread_t self = current_thread();
+	ipc_mqueue_t mqueue = (ipc_mqueue_t) self->ith_mqueue;
+	mach_msg_option_t option = self->ith_option;
+	mach_msg_size_t max_size = self->ith_msize;
+	mach_msg_header_t *msg = (mach_msg_header_t *) self->ith_msg;
+	ipc_object_t object = (ipc_object_t) self->ith_object;
+	mach_port_t notify = self->ith_notify;
+	ipc_kmsg_t kmsg;
+	mach_port_seqno_t seqno = 0;
+	ipc_port_t port = IP_NULL;
+	mach_msg_return_t mr;
+	kern_return_t save_wait_result;
+	ipc_space_t space;
+	vm_map_t map;
+	mach_msg_format_0_trailer_t *trailer;
+	mach_msg_body_t *slist;
+	mach_msg_size_t slist_size;
+#if	MACH_RT
+	boolean_t slist_rt;
+#endif	/* MACH_RT */
+
+	/* === Post-block from ipc_mqueue_receive === */
+
+	if (option & MACH_RCV_TIMEOUT)
+		reset_timeout_check(&self->timer);
+
+	save_wait_result = self->wait_result;
+	imq_lock(mqueue);
+
+	if (self->ith_state == MACH_MSG_SUCCESS) {
+		/* pick up the message that was handed to us */
+		kmsg = self->ith_kmsg;
+		seqno = self->ith_seqno;
+		port = (ipc_port_t) kmsg->ikm_header.msgh_remote_port;
+		goto finish_receive;
+	}
+
+	switch (self->ith_state) {
+	    case MACH_RCV_PORT_DIED:
+	    case MACH_RCV_PORT_CHANGED:
+		imq_unlock(mqueue);
+		mr = self->ith_state;
+		goto out;
+
+	    case MACH_RCV_IN_PROGRESS:
+	    case MACH_RCV_IN_PROGRESS_TIMED:
+		ipc_thread_rmqueue(&mqueue->imq_threads, self);
+
+		switch (save_wait_result) {
+		    case THREAD_INTERRUPTED:
+			imq_unlock(mqueue);
+			mr = MACH_RCV_INTERRUPTED;
+			goto out;
+
+		    case THREAD_TIMED_OUT:
+			/*
+			 * Timeout: check queue once more (a message
+			 * may have arrived during the timeout window).
+			 */
+			{
+			    ipc_kmsg_queue_t kmsgs = &mqueue->imq_messages;
+			    kmsg = ipc_kmsg_queue_first(kmsgs);
+			    if (kmsg != IKM_NULL) {
+				ipc_kmsg_rmqueue_first_macro(kmsgs, kmsg);
+				port = (ipc_port_t)
+					kmsg->ikm_header.msgh_remote_port;
+				seqno = port->ip_seqno++;
+				goto finish_receive;
+			    }
+			}
+			imq_unlock(mqueue);
+			mr = MACH_RCV_TIMED_OUT;
+			goto out;
+
+		    case THREAD_RESTART:
+		    default:
+			panic("mach_msg_receive_continue: bad wait_result");
+		}
+		break;
+
+	    default:
+		panic("mach_msg_receive_continue: bad ith_state");
+	}
+
+finish_receive:
+	imq_unlock(mqueue);
+
+	mr = ipc_mqueue_finish_receive(&kmsg, port, option, max_size);
+
+	/* === Post-call from mach_msg_receive === */
+
+	ipc_object_release(object);
+
+	if (mr != MACH_MSG_SUCCESS) {
+		if (mr == MACH_RCV_TOO_LARGE || mr == MACH_RCV_SCATTER_SMALL
+#if	DIPC
+		    || mr == MACH_RCV_TRANSPORT_ERROR
+#endif	/* DIPC */
+		    ) {
+			space = current_space();
+			if (msg_receive_error(kmsg, msg, option, seqno, space)
+			    == MACH_RCV_INVALID_DATA)
+				mr = MACH_RCV_INVALID_DATA;
+		}
+		goto done;
+	}
+
+	trailer = (mach_msg_format_0_trailer_t *)
+		((vm_offset_t)&kmsg->ikm_header +
+		 round_msg(kmsg->ikm_header.msgh_size));
+	if (option & MACH_RCV_TRAILER_MASK) {
+		trailer->msgh_seqno = seqno;
+		trailer->msgh_trailer_size = REQUESTED_TRAILER_SIZE(option);
+	}
+
+	space = current_space();
+	map = current_map();
+
+	if (option & MACH_RCV_NOTIFY) {
+		if (notify == MACH_PORT_NULL)
+			mr = MACH_RCV_INVALID_NOTIFY;
+		else
+			mr = ipc_kmsg_copyout(kmsg, space, map, notify,
+					      self->ith_scatter_list);
+	} else {
+		mr = ipc_kmsg_copyout(kmsg, space, map, MACH_PORT_NULL,
+				      self->ith_scatter_list);
+	}
+
+	if (mr != MACH_MSG_SUCCESS) {
+		if ((mr &~ MACH_MSG_MASK) == MACH_RCV_BODY_ERROR
+#if	DIPC
+			|| mr == MACH_RCV_TRANSPORT_ERROR
+#endif	/* DIPC */
+		    ) {
+			if (ipc_kmsg_put(msg, kmsg,
+			    kmsg->ikm_header.msgh_size +
+			    trailer->msgh_trailer_size)
+					== MACH_RCV_INVALID_DATA)
+				mr = MACH_RCV_INVALID_DATA;
+		} else {
+			if (msg_receive_error(kmsg, msg, option, seqno, space)
+						== MACH_RCV_INVALID_DATA)
+				mr = MACH_RCV_INVALID_DATA;
+		}
+		goto done;
+	}
+
+	mr = ipc_kmsg_put(msg, kmsg,
+		kmsg->ikm_header.msgh_size + trailer->msgh_trailer_size);
+
+done:
+	slist = self->ith_scatter_list;
+	slist_size = self->ith_scatter_list_size;
+#if	MACH_RT
+	slist_rt = ipc_object_is_rt(object);
+#endif	/* MACH_RT */
+	FREE_SCATTER_LIST(slist, slist_size, slist_rt);
+
+out:
+	thread_set_syscall_return(self, mr);
+	thread_exception_return();
+	/*NOTREACHED*/
 }
 
 
