@@ -290,6 +290,24 @@ host_info(
 
 		/*
 		 */
+	case HOST_IPC_CACHE_INFO:
+		{ register host_ipc_cache_info_t	cache_info;
+		  extern unsigned int c_ipc_kmsg_cache_tries;
+		  extern unsigned int c_ipc_kmsg_cache_misses;
+
+		if (*count < HOST_IPC_CACHE_INFO_COUNT)
+			return(KERN_FAILURE);
+
+		cache_info = (host_ipc_cache_info_t) info;
+		cache_info->tries      = c_ipc_kmsg_cache_tries;
+		cache_info->misses     = c_ipc_kmsg_cache_misses;
+		cache_info->stash      = 16;	/* IKM_STASH */
+		cache_info->saved_size = 256;	/* IKM_SAVED_KMSG_SIZE */
+
+		*count = HOST_IPC_CACHE_INFO_COUNT;
+		return(KERN_SUCCESS);
+		}
+
 	default:
 		return(KERN_INVALID_ARGUMENT);
 	}

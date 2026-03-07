@@ -3172,43 +3172,37 @@ ipc_kmsg_check_scatter(
 #define IKM_STASH 16	/* # of cache entries per cpu */
 ipc_kmsg_t	ipc_kmsg_cache[ NCPUS ][ IKM_STASH ];
 unsigned int	ipc_kmsg_cache_avail[NCPUS];
-counter(unsigned int	c_ipc_kmsg_cache_tries = 0;)
-counter(unsigned int	c_ipc_kmsg_cache_misses = 0;)
+unsigned int	c_ipc_kmsg_cache_tries = 0;
+unsigned int	c_ipc_kmsg_cache_misses = 0;
 
 /*
  *	Routine:	ikm_cache_get
  *	Purpose:	Attempt to allocate from the per-cpu IKM cache.
  *	Conditions:	Nothing locked.
  *
- *	If the IKM cache for the current cpu is not empty, this routine
- *	will return the address of the block, nulling out the cache.
+ *	The cache is a LIFO stack: ipc_kmsg_cache_avail[cpu] is the
+ *	stack top (number of valid entries).  O(1) get and put.
  *	TRUE is returned for success, FALSE for failure.
- *	Preemption must be disabled while in here.
  */
 
 boolean_t
 ikm_cache_get(
 	ipc_kmsg_t	* kmsg)
 {
-	register unsigned int	cpu, i;
+	register unsigned int	cpu;
 
-	counter(++c_ipc_kmsg_cache_tries);
+	c_ipc_kmsg_cache_tries++;
 	disable_preemption();
 	cpu = cpu_number();
 
 	if (ipc_kmsg_cache_avail[cpu]) {
-		for (i = 0; i < IKM_STASH; i++) {
-			if ( *kmsg = ipc_kmsg_cache[cpu][i] ) {
-				ipc_kmsg_cache[cpu][i] = IKM_NULL;
-				ipc_kmsg_cache_avail[cpu]--;
-				enable_preemption();
-				return(TRUE);
-			}
-		}
+		*kmsg = ipc_kmsg_cache[cpu][--ipc_kmsg_cache_avail[cpu]];
+		enable_preemption();
+		return(TRUE);
 	}
 
 	enable_preemption();
-	counter(++c_ipc_kmsg_cache_misses);
+	c_ipc_kmsg_cache_misses++;
 	return(FALSE);
 }
 
@@ -3217,30 +3211,23 @@ ikm_cache_get(
  *	Purpose:	Attempt to free a block to the per-cpu IKM cache.
  *	Conditions:	Nothing locked.
  *
- *	If the IKM cache for the current cpu is empty, this routine
- *	will store its argument into the cache.
+ *	The cache is a LIFO stack: push onto the top if not full.
  *	TRUE is returned for success, FALSE for failure.
- *	Preemption must be disabled while in here.
  */
 
 boolean_t
 ikm_cache_put(
 	ipc_kmsg_t	kmsg)
 {
-	unsigned int	cpu, i;
+	unsigned int	cpu;
 
 	disable_preemption();
 	cpu = cpu_number();
 
 	if (ipc_kmsg_cache_avail[cpu] < IKM_STASH) {
-		for (i = 0; i < IKM_STASH; i++) {
-			if (ipc_kmsg_cache[cpu][i] == IKM_NULL) {
-				ipc_kmsg_cache[cpu][i] = kmsg;
-				ipc_kmsg_cache_avail[cpu]++;
-				enable_preemption();
-				return(TRUE);
-			}
-		}
+		ipc_kmsg_cache[cpu][ipc_kmsg_cache_avail[cpu]++] = kmsg;
+		enable_preemption();
+		return(TRUE);
 	}
 
 	enable_preemption();
@@ -3251,13 +3238,10 @@ ikm_cache_put(
 void
 ikm_cache_init()
 {
-	unsigned int	cpu, i;
+	unsigned int	cpu;
 
-	for (cpu = 0; cpu < NCPUS; ++cpu) {
+	for (cpu = 0; cpu < NCPUS; ++cpu)
 		ipc_kmsg_cache_avail[cpu] = 0;
-		for (i = 0; i < IKM_STASH; ++i)
-			ipc_kmsg_cache[cpu][i] = IKM_NULL;
-	}
 }
 
 

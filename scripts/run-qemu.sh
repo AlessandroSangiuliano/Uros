@@ -47,7 +47,7 @@ if [ ! -f "$BOOTSTRAP" ]; then
 fi
 
 # Costruisci la riga di comando QEMU
-QEMU_ARGS="-m 128M -kernel $KERNEL -initrd $BOOTSTRAP -no-reboot"
+QEMU_ARGS="-m 128M -enable-kvm -cpu host -kernel $KERNEL -initrd $BOOTSTRAP -no-reboot"
 
 if [ "$USE_DISK" = true ] && [ -f "$DISK_IMG" ]; then
     echo "Disco: $DISK_IMG"
