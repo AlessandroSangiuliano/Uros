@@ -598,6 +598,7 @@ ipc_right_destroy(
 	mach_port_type_t type = IE_BITS_TYPE(bits);
 
 	assert(space->is_active);
+	space->is_generation++;		/* invalidate per-thread port caches */
 
 	switch (type) {
 	    case MACH_PORT_TYPE_DEAD_NAME:
@@ -764,6 +765,7 @@ ipc_right_dealloc(
 #endif	/* DIPC */
 
 	assert(space->is_active);
+	space->is_generation++;		/* invalidate per-thread port caches */
 
 	switch (type) {
 	    case MACH_PORT_TYPE_DEAD_NAME: {

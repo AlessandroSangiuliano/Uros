@@ -997,6 +997,43 @@ mach_msg_overwrite_trap(
 			index = MACH_PORT_INDEX(reply_name);
 			gen = MACH_PORT_GEN(reply_name);
 
+			/* --- port name cache fast path --- */
+			{
+				natural_t _cgen = space->is_generation;
+				mach_port_t _dn = hdr->msgh_remote_port;
+				ipc_port_t _cr = IP_NULL, _cd = IP_NULL;
+				int _j;
+
+				for (_j = 0; _j < IPC_PORT_CACHE_N; _j++) {
+					if (self->ith_port_cache[_j].ipc_gen == _cgen &&
+					    self->ith_port_cache[_j].ipc_space == space) {
+						mach_port_t _cn =
+							self->ith_port_cache[_j].ipc_name;
+						if (_cn == reply_name)
+							_cr = self->ith_port_cache[_j].ipc_port;
+						else if (_cn == _dn)
+							_cd = self->ith_port_cache[_j].ipc_port;
+					}
+				}
+				if (_cr != IP_NULL && _cd != IP_NULL) {
+					reply_port = _cr;
+					dest_port  = _cd;
+					ip_lock(dest_port);
+					if (!ip_active(dest_port) ||
+					    !ip_lock_try(reply_port)) {
+						ip_unlock(dest_port);
+						/* Invalidate stale cache entries */
+						for (_j = 0; _j < IPC_PORT_CACHE_N; _j++)
+							self->ith_port_cache[_j].ipc_name =
+								MACH_PORT_NULL;
+						HOT(c_mmot_cold_010++);
+						goto slow_copyin;
+					}
+					counter(c_ipc_port_cache_hit++);
+					goto fast_copyin_cached;
+				}
+			}
+
 			is_read_lock(space);
 			assert(space->is_active);
 
@@ -1107,6 +1144,20 @@ mach_msg_overwrite_trap(
 			}
 			is_read_unlock(space);
 
+			/* Store resolved ports in thread cache (names still intact) */
+			{
+				natural_t _sgen = space->is_generation;
+				self->ith_port_cache[0].ipc_name  = hdr->msgh_local_port;
+				self->ith_port_cache[0].ipc_port  = reply_port;
+				self->ith_port_cache[0].ipc_space = space;
+				self->ith_port_cache[0].ipc_gen   = _sgen;
+				self->ith_port_cache[1].ipc_name  = hdr->msgh_remote_port;
+				self->ith_port_cache[1].ipc_port  = dest_port;
+				self->ith_port_cache[1].ipc_space = space;
+				self->ith_port_cache[1].ipc_gen   = _sgen;
+			}
+
+		    fast_copyin_cached:
 			assert(dest_port->ip_srights > 0);
 			dest_port->ip_srights++;
 			ip_reference(dest_port);

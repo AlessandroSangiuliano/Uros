@@ -435,6 +435,15 @@ typedef struct thread_shuttle {
 		char *other;		/* catch-all for other state */
 	} saved;
 
+	/* Per-thread IPC port name → port pointer cache */
+#define IPC_PORT_CACHE_N	4
+	struct {
+		mach_port_t	ipc_name;	/* MACH_PORT_NULL = empty */
+		ipc_port_t	ipc_port;
+		ipc_space_t	ipc_space;
+		natural_t	ipc_gen;
+	} ith_port_cache[IPC_PORT_CACHE_N];
+
 	/* Timing data structures */
 	timer_data_t	user_timer;	/* user mode timer */
 	timer_data_t	system_timer;	/* system mode timer */

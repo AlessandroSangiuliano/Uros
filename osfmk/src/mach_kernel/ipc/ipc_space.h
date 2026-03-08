@@ -130,6 +130,7 @@ struct ipc_space {
 	ipc_entry_num_t is_tree_small;	/* # of small entries in the tree */
 	ipc_entry_num_t is_tree_hash;	/* # of hashed entries in the tree */
 	boolean_t is_fast;              /* for is_fast_space() */
+	natural_t is_generation;	/* bumped on right removal/modification */
 };
 
 #define	IS_NULL			((ipc_space_t) 0)
