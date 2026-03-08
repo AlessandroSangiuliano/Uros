@@ -362,11 +362,16 @@ add_mig_server(${KERNEL_SRC_DIR}/device/device.defs
 add_mig_user(${KERNEL_SRC_DIR}/device/device_reply.defs
              ${KERNEL_BUILD_DIR}/device DEVICE)
 
+# ---- Device master subsystem (userspace driver primitives) ----
+add_mig_server(${KERNEL_SRC_DIR}/device/device_master.defs
+               ${KERNEL_BUILD_DIR}/device DEVICE_MASTER)
+
 # Collect all generated MIG sources
 set(MIG_GENERATED_SOURCES
     ${MACH_GENERATED}
     ${MACH_DEBUG_GENERATED}
     ${DEVICE_GENERATED}
+    ${DEVICE_MASTER_GENERATED}
 )
 
 # MIG generates (mach_msg_type_name_t)-1 as a sentinel in static port
@@ -479,6 +484,7 @@ set(DEVICE_SOURCES
     device/dev_name.c
     device/dev_pager.c
     device/device_init.c
+    device/device_master.c
     device/driver_lock.c
     device/ds_routines.c
     device/io_scatter.c
