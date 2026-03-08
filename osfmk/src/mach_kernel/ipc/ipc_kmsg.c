@@ -1052,7 +1052,7 @@ ipc_kmsg_copyin_header(
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 	ipc_object_t dest_port, reply_port;
 	ipc_port_t dest_soright, reply_soright;
-	ipc_port_t notify_port;
+	ipc_port_t notify_port = IP_NULL;
 
 	if (!MACH_MSG_TYPE_PORT_ANY_SEND(dest_type))
 		return MACH_SEND_INVALID_HEADER;
@@ -1564,24 +1564,11 @@ ipc_kmsg_copyin_body(
 		}
 #endif	/* DIPC */
 
-		if (sstart->out_of_line.copy == MACH_MSG_PHYSICAL_COPY && 
-		    sstart->out_of_line.size >= MSG_OOL_SIZE_SMALL(rt) &&
-		    !sstart->out_of_line.deallocate) {
-
-		     	/*
-		      	 * Out-of-line memory descriptor, accumulate kernel
-		      	 * memory requirements
-		      	 */
-		    	space_needed += round_page(sstart->out_of_line.size);
-		    	if (space_needed > ipc_kmsg_max_vm_space) {
-
-			    	/*
-			     	 * Per message kernel memory limit exceeded
-			     	 */
-			    	ipc_kmsg_clean_partial(kmsg,0,0,0);
-		            	return MACH_MSG_VM_KERNEL;
-		    	}
-	        }
+		/*
+		 * Large PHYSICAL_COPY without dealloc now uses
+		 * vm_map_copyin() directly from sender map (COW),
+		 * so no kernel copy map space is needed.
+		 */
 	}
     }
 
@@ -1790,39 +1777,20 @@ ipc_kmsg_copyin_body(
 		    if ((dsc->copy == MACH_MSG_PHYSICAL_COPY) && !dealloc) {
 
 		        /*
-		         * If the request is a physical copy and the source
-		         * is not being deallocated, then allocate space
-		         * in the kernel's pageable ipc copy map and copy
-		         * the data in.  The semantics guarantee that the
-			 * data will have been physically copied before
-			 * the send operation terminates.  Thus if the data
-			 * is not being deallocated, we must be prepared
-			 * to page if the region is sufficiently large.
+		         * Zero-copy path: use vm_map_copyin() directly
+		         * from the sender's map.  This creates a COW
+		         * VM_MAP_COPY_ENTRY_LIST — no physical data
+		         * copy occurs.  PHYSICAL_COPY semantics are
+		         * preserved: if the sender modifies the pages
+		         * after send, COW triggers a fault and the
+		         * receiver keeps the original data.
 		         */
-		     	if (copyin((const char *) addr, (char *) paddr, 
-								length)) {
-			        ipc_kmsg_clean_partial(kmsg, i, paddr, 
-							   space_needed);
-			        return MACH_SEND_INVALID_MEMORY;
-		        }	
-
-			/*
-			 * The kernel ipc copy map is marked no_zero_fill.
-			 * If the transfer is not a page multiple, we need
-			 * to zero fill the balance.
-			 */
-			if (!page_aligned(length)) {
-				(void) memset((void *) (paddr + length), 0,
-					round_page(length) - length);
-			}
-			if (vm_map_copyin(ipc_kernel_copy_map, paddr, length,
-					   TRUE, &copy) != KERN_SUCCESS) {
-			    ipc_kmsg_clean_partial(kmsg, i, paddr, 
+			if (vm_map_copyin(map, addr, length,
+					   FALSE, &copy) != KERN_SUCCESS) {
+			    ipc_kmsg_clean_partial(kmsg, i, paddr,
 						       space_needed);
-			    return MACH_MSG_VM_KERNEL;
+			    return MACH_SEND_INVALID_MEMORY;
 		        }
-			paddr += round_page(length);
-			space_needed -= round_page(length);
 		    } else {
 #if	DIPC
 			if (dsc->type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
@@ -1886,6 +1854,14 @@ ipc_kmsg_copyin_body(
 		    complex_ool = TRUE;
 #endif	/* DIPC */
 		    dsc->address = (void *) 0;
+		    /*
+		     * Translate the disposition even for an empty
+		     * descriptor so that server-side TypeCheck
+		     * (which compares against the translated value)
+		     * does not spuriously fail.
+		     */
+		    dsc->disposition =
+			ipc_object_copyin_type(dsc->disposition);
 		    break;
 		}
 
@@ -2572,7 +2548,7 @@ ipc_kmsg_copyout_body(
     mach_msg_return_t 		mr = MACH_MSG_SUCCESS;
     kern_return_t 		kr;
     vm_offset_t         	data;
-    mach_msg_descriptor_t 	*sstart, *send;
+    mach_msg_descriptor_t 	*sstart, *send = MACH_MSG_DESCRIPTOR_NULL;
 #if	MACH_RT
     boolean_t			rt;
 #endif	/* MACH_RT */
@@ -3164,43 +3140,37 @@ ipc_kmsg_check_scatter(
 #define IKM_STASH 16	/* # of cache entries per cpu */
 ipc_kmsg_t	ipc_kmsg_cache[ NCPUS ][ IKM_STASH ];
 unsigned int	ipc_kmsg_cache_avail[NCPUS];
-counter(unsigned int	c_ipc_kmsg_cache_tries = 0;)
-counter(unsigned int	c_ipc_kmsg_cache_misses = 0;)
+unsigned int	c_ipc_kmsg_cache_tries = 0;
+unsigned int	c_ipc_kmsg_cache_misses = 0;
 
 /*
  *	Routine:	ikm_cache_get
  *	Purpose:	Attempt to allocate from the per-cpu IKM cache.
  *	Conditions:	Nothing locked.
  *
- *	If the IKM cache for the current cpu is not empty, this routine
- *	will return the address of the block, nulling out the cache.
+ *	The cache is a LIFO stack: ipc_kmsg_cache_avail[cpu] is the
+ *	stack top (number of valid entries).  O(1) get and put.
  *	TRUE is returned for success, FALSE for failure.
- *	Preemption must be disabled while in here.
  */
 
 boolean_t
 ikm_cache_get(
 	ipc_kmsg_t	* kmsg)
 {
-	register unsigned int	cpu, i;
+	register unsigned int	cpu;
 
-	counter(++c_ipc_kmsg_cache_tries);
+	c_ipc_kmsg_cache_tries++;
 	disable_preemption();
 	cpu = cpu_number();
 
 	if (ipc_kmsg_cache_avail[cpu]) {
-		for (i = 0; i < IKM_STASH; i++) {
-			if ( *kmsg = ipc_kmsg_cache[cpu][i] ) {
-				ipc_kmsg_cache[cpu][i] = IKM_NULL;
-				ipc_kmsg_cache_avail[cpu]--;
-				enable_preemption();
-				return(TRUE);
-			}
-		}
+		*kmsg = ipc_kmsg_cache[cpu][--ipc_kmsg_cache_avail[cpu]];
+		enable_preemption();
+		return(TRUE);
 	}
 
 	enable_preemption();
-	counter(++c_ipc_kmsg_cache_misses);
+	c_ipc_kmsg_cache_misses++;
 	return(FALSE);
 }
 
@@ -3209,30 +3179,23 @@ ikm_cache_get(
  *	Purpose:	Attempt to free a block to the per-cpu IKM cache.
  *	Conditions:	Nothing locked.
  *
- *	If the IKM cache for the current cpu is empty, this routine
- *	will store its argument into the cache.
+ *	The cache is a LIFO stack: push onto the top if not full.
  *	TRUE is returned for success, FALSE for failure.
- *	Preemption must be disabled while in here.
  */
 
 boolean_t
 ikm_cache_put(
 	ipc_kmsg_t	kmsg)
 {
-	unsigned int	cpu, i;
+	unsigned int	cpu;
 
 	disable_preemption();
 	cpu = cpu_number();
 
 	if (ipc_kmsg_cache_avail[cpu] < IKM_STASH) {
-		for (i = 0; i < IKM_STASH; i++) {
-			if (ipc_kmsg_cache[cpu][i] == IKM_NULL) {
-				ipc_kmsg_cache[cpu][i] = kmsg;
-				ipc_kmsg_cache_avail[cpu]++;
-				enable_preemption();
-				return(TRUE);
-			}
-		}
+		ipc_kmsg_cache[cpu][ipc_kmsg_cache_avail[cpu]++] = kmsg;
+		enable_preemption();
+		return(TRUE);
 	}
 
 	enable_preemption();
@@ -3243,13 +3206,10 @@ ikm_cache_put(
 void
 ikm_cache_init()
 {
-	unsigned int	cpu, i;
+	unsigned int	cpu;
 
-	for (cpu = 0; cpu < NCPUS; ++cpu) {
+	for (cpu = 0; cpu < NCPUS; ++cpu)
 		ipc_kmsg_cache_avail[cpu] = 0;
-		for (i = 0; i < IKM_STASH; ++i)
-			ipc_kmsg_cache[cpu][i] = IKM_NULL;
-	}
 }
 
 

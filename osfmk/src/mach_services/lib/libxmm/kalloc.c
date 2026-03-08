@@ -61,16 +61,13 @@
  */
 
 vm_offset_t
-kalloc(size)
-	vm_size_t size;
+kalloc(vm_size_t size)
 {
 	return malloc(size);
 }
 
 void
-kfree(m, size)
-	vm_offset_t m;
-	int size;
+kfree(vm_offset_t m, int size)
 {
 	free((char *) m);
 }

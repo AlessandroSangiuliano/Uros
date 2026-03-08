@@ -56,11 +56,12 @@
 
 
 #include <mach.h>
+#include "../../libmach/strings.h"
 
 /*
  * Rthread library imports:
  */
-extern bzero();
+extern void bzero(void *, size_t);
 
 /*
  * Set up the initial state of a MACH thread
@@ -70,36 +71,39 @@ extern bzero();
 void
 rthread_setup(rthread_t child, thread_port_t thread, rthread_fn_t routine)
 {
-	register int *top = (int *) (child->stack_base + child->stack_size);
-	struct i386_thread_state state;
-	register struct i386_thread_state *ts = &state;
-	kern_return_t r;
-	unsigned int count;
+    intptr_t top = (intptr_t)(child->stack_base + child->stack_size);
+    struct i386_thread_state state;
+    struct i386_thread_state *ts = &state;
+    kern_return_t r;
+    unsigned int count;
 
-	/*
-	 * Set up i386 call frame and registers.
-	 * Read registers first to get correct segment values.
-	 */
-	count = i386_THREAD_STATE_COUNT;
-	MACH_CALL(thread_get_state(thread,i386_THREAD_STATE,(thread_state_t) &state,&count),r);
+    /*
+     * Set up i386 call frame and registers.
+     * Read registers first to get correct segment values.
+     */
+    count = i386_THREAD_STATE_COUNT;
+    MACH_CALL(thread_get_state(thread,i386_THREAD_STATE,(thread_state_t) &state,&count),r);
 
-	ts->eip = (int) routine;
-	top = (int *)((int)top - RTHREAD_STACK_OFFSET);
-	*--top = (int) child;	/* argument to function */
-	*--top = 0;		/* fake return address */
-	ts->uesp = (int) top;	/* set stack pointer */
-	ts->ebp = 0;		/* clear frame pointer */
+    ts->eip = (intptr_t) routine;
+    top -= RTHREAD_STACK_OFFSET;
+    *((intptr_t *)--top) = (intptr_t) child;   /* argument to function */
+    *((intptr_t *)--top) = 0;                 /* fake return address */
+    ts->uesp = (intptr_t) top;                /* set stack pointer */
+    ts->ebp = 0;                             /* clear frame pointer */
 
-	MACH_CALL(thread_set_state(thread,i386_THREAD_STATE,(thread_state_t) &state,i386_THREAD_STATE_COUNT),r);
+    MACH_CALL(thread_set_state(thread,i386_THREAD_STATE,(thread_state_t) &state,i386_THREAD_STATE_COUNT),r);
 }
 
-#ifdef	rthread_sp
-#undef	rthread_sp
+#ifdef rthread_sp
+#undef rthread_sp
 #endif
 
-int
-rthread_sp()
-{	int x = (int)&x;
-	/* Indirect nonsense to avoid compiler warnings */
-	return(x);
+#include <stdint.h>
+
+intptr_t
+rthread_sp(void)
+{
+    intptr_t x = (intptr_t)&x;
+    /* Indirect nonsense to avoid compiler warnings */
+    return x;
 }

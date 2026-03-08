@@ -360,7 +360,7 @@ skip;	/* old thread_mutate */
  */
 #ifdef	EMULATOR
 skip;	/* the emulator redefines vm_allocate using vm_map */
-#else	EMULATOR
+#else /* EMULATOR */
 routine vm_allocate(
 		target_task	: vm_task_t;
 	inout	address		: vm_address_t;

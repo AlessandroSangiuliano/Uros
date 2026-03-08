@@ -76,12 +76,24 @@
 /*
  *	Save area for user floating-point state.
  *	Allocated only when necessary.
+ *
+ *	The save_area union holds either an FXSAVE (512 bytes) or XSAVE
+ *	(variable-size, up to XSAVE_AREA_MAX_SIZE bytes) state image.
+ *	It is 64-byte aligned for XSAVE compatibility (FXSAVE only
+ *	requires 16-byte alignment, which 64 satisfies).
+ *
+ *	The fx_save_state member overlays the first 512 bytes of the
+ *	XSAVE area (the "legacy region"), so existing code that accesses
+ *	x87/SSE state through fx_save_state continues to work unchanged.
  */
 
 struct i386_fpsave_state {
 	boolean_t		fp_valid;
-	struct i386_fp_save	fp_save_state;
-	struct i386_fp_regs	fp_regs;
+	unsigned char		fp_pad[60];	/* pad to 64-byte boundary */
+	union {
+	    struct i386_fx_save	fx_save_state;	/* FXSAVE: 512 bytes */
+	    unsigned char	xsave_state[XSAVE_AREA_MAX_SIZE];
+	} __attribute__((aligned(64)));
 };
 
 /*

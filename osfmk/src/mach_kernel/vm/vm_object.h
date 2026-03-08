@@ -347,7 +347,7 @@ typedef struct vm_object	*vm_object_t;
 extern
 vm_object_t	kernel_object;		/* the single kernel object */
 
-int		vm_object_absent_max;	/* maximum number of absent pages
+extern int		vm_object_absent_max;	/* maximum number of absent pages
 					   at a time for each object */
 
 # define	VM_MSYNC_INITIALIZED			0

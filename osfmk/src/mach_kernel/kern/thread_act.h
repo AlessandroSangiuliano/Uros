@@ -98,6 +98,7 @@
 #include <mach/vm_param.h>
 #include <mach/thread_info.h>
 #include <mach/exception.h>
+#include <kern/kern_types.h>
 #include <kern/lock.h>
 #include <kern/queue.h>
 #include <kern/etap_macros.h>

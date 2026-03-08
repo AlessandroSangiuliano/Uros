@@ -73,8 +73,7 @@ double copysign(double, double);
  *	customary for IEEE 754.  No other signal can be emitted.
  */
 double
-floor(x)
-double x;
+floor(double x)
 {
 	volatile double y;
 
@@ -92,8 +91,7 @@ double x;
 }
 
 double
-ceil(x)
-double x;
+ceil(double x)
 {
 	volatile double y;
 
@@ -131,8 +129,7 @@ double x;
  *	customary for IEEE 754.  No other signal can be emitted.
  */
 double
-rint(x)
-double x;
+rint(double x)
 {
 	double s;
 	volatile double t;

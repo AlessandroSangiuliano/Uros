@@ -86,6 +86,10 @@
  *	Created.
  */
 
+%{
+extern void yyerror(char *);
+%}
+
 %token	sySkip
 %token	syRoutine
 %token	sySimpleRoutine
@@ -161,8 +165,8 @@
 %token	<string>	syFileName
 %token	<flag>		syIPCFlag
 
-%left	syPlus,syMinus
-%left	syStar,syDiv
+%left	syPlus syMinus
+%left	syStar syDiv
 
 
 %type	<statement_kind> ImportIndicant
@@ -175,6 +179,7 @@
 %type	<direction> Direction TrExplKeyword TrImplKeyword
 %type	<argument> Argument Trailer Arguments ArgumentList
 %type	<flag> IPCFlags
+%type	<identifier> ArgumentName
 
 %{
 
@@ -636,7 +641,7 @@ ArgumentList		:	Argument
 }
 			;
 
-Argument		:	Direction syIdentifier ArgumentType IPCFlags
+Argument		:	Direction ArgumentName ArgumentType IPCFlags
 {
     $$ = argAlloc();
     $$->argKind = $1;
@@ -644,16 +649,48 @@ Argument		:	Direction syIdentifier ArgumentType IPCFlags
     $$->argType = $3;
     $$->argFlags = $4;
 }
+			|	syReplyPort ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akReplyPort;
+    $$->argName = strmake("reply_port");
+    $$->argType = $2;
+    $$->argFlags = $3;
+}
+			|	sySReplyPort ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akSReplyPort;
+    $$->argName = strmake("sreply_port");
+    $$->argType = $2;
+    $$->argFlags = $3;
+}
+			|	syUReplyPort ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akUReplyPort;
+    $$->argName = strmake("ureply_port");
+    $$->argType = $2;
+    $$->argFlags = $3;
+}
+			|	syRequestPort ArgumentType IPCFlags
+{
+    $$ = argAlloc();
+    $$->argKind = akRequestPort;
+    $$->argName = strmake("request_port");
+    $$->argType = $2;
+    $$->argFlags = $3;
+}
 			;
 
-Trailer			:	TrExplKeyword syIdentifier ArgumentType	
+Trailer			:	TrExplKeyword ArgumentName ArgumentType
 {
     $$ = argAlloc();
     $$->argKind = $1;
     $$->argName = $2;
     $$->argType = $3;
 }
-			|	TrImplKeyword syIdentifier ArgumentType syComma syIdentifier
+			|	TrImplKeyword ArgumentName ArgumentType syComma ArgumentName
 {
     $$ = argAlloc();
     $$->argKind = $1;
@@ -674,6 +711,26 @@ Direction		:	/* empty */	{ $$ = akNone; }
 			|	syUReplyPort	{ $$ = akUReplyPort; }
 			|	syWaitTime	{ $$ = akWaitTime; }
 			|	syMsgOption	{ $$ = akMsgOption; }
+			;
+
+ArgumentName		:	syIdentifier	{ $$ = $1; }
+			|	syIn		{ $$ = strmake("in"); }
+			|	syOut		{ $$ = strmake("out"); }
+			|	syInOut		{ $$ = strmake("inout"); }
+			|	syRequestPort	{ $$ = strmake("request_port"); }
+			|	syReplyPort	{ $$ = strmake("reply_port"); }
+			|	sySReplyPort	{ $$ = strmake("sreply_port"); }
+			|	syUReplyPort	{ $$ = strmake("ureply_port"); }
+			|	syWaitTime	{ $$ = strmake("waittime"); }
+			|	syMsgOption	{ $$ = strmake("msgoption"); }
+			|	syMsgSeqno	{ $$ = strmake("msgseqno"); }
+			|	syType		{ $$ = strmake("type"); }
+			|	syArray		{ $$ = strmake("array"); }
+			|	syOf		{ $$ = strmake("of"); }
+			|	syServerImpl	{ $$ = strmake("serverimpl"); }
+			|	syUserImpl	{ $$ = strmake("userimpl"); }
+			|	syServerSecToken { $$ = strmake("serversectoken"); }
+			|	syUserSecToken	{ $$ = strmake("usersectoken"); }
 			;
 
 TrImplKeyword		:	syServerImpl	{ $$ = akServerImpl; }	
@@ -727,15 +784,13 @@ LookQString		:	/* empty */
 %%
 
 void
-yyerror(s)
-    char *s;
+yyerror(char *s)
 {
     error(s);
 }
 
 static char *
-import_name(sk)
-    statement_kind_t sk;
+import_name(statement_kind_t sk)
 {
     switch (sk)
     {

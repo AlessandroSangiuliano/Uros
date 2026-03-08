@@ -379,7 +379,7 @@ ipc_port_dngrow(
 	if (ip_active(port) &&
 	    (port->ip_dnrequests == otable) &&
 	    ((otable == IPR_NULL) || (otable->ipr_size+1 == its))) {
-		ipc_table_size_t oits;
+		ipc_table_size_t oits = NULL;
 		ipc_table_elems_t osize, nsize;
 		ipc_port_request_index_t free, i;
 
@@ -1627,7 +1627,7 @@ ipc_port_print(
 		iprintf("timestamp=0x%x", port->ip_timestamp);
 	} else if (port->ip_receiver_name == MACH_PORT_NULL) {
 		iprintf("destination=0x%x (", port->ip_destination);
-		if (port->ip_destination != MACH_PORT_NULL &&
+		if (port->ip_destination != IP_NULL &&
 		    (task = db_task_from_space(port->ip_destination->
 					       ip_receiver, &task_id)))
 			printf("task%d at 0x%x", task_id, task);

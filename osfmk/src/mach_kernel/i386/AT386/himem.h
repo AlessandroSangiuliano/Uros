@@ -30,6 +30,7 @@
  * below 16 Megs.
  */
 
+#include <mach/vm_types.h>
 #include <platforms.h>
 #if	CBUS
 #include <busses/cbus/cbus.h>

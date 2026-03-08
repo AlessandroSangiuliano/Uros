@@ -237,6 +237,7 @@
 #if	NCPUS > 1
 #include <i386/mp_desc.h>
 #endif	/* NCPUS */
+#include <i386/sysenter.h>
 
 #if	HIMEM
 #include <i386/AT386/himem.h>
@@ -254,7 +255,7 @@ int		loadpt;
 
 vm_size_t	mem_size = 0; 
 vm_offset_t	first_addr = 0;	/* set by start.s - keep out of bss */
-vm_offset_t	first_avail = 0;/* first after page tables */
+vm_offset_t	first_avail = 1;/* set by start.s - keep out of bss */
 vm_offset_t	last_addr;
 
 vm_offset_t	avail_start, avail_end;
@@ -263,17 +264,20 @@ vm_offset_t	hole_start, hole_end;
 vm_offset_t	avail_next;
 unsigned int	avail_remaining;
 
-/* parameters passed from GRUB */
+/* parameters passed from GRUB/multiboot bootloader
+ * MUST be in .data section, not BSS, because BSS is zeroed AFTER
+ * start.S copies the multiboot_info structure here!
+ */
 int mb_info_size = sizeof(struct multiboot_info);
-struct multiboot_info mb_info = { 0 };
+struct multiboot_info mb_info __attribute__((section(".data"))) = { .flags = 0xDEADBEEF };
 extern vm_offset_t boot_start;
 extern vm_size_t boot_size;
 extern vm_offset_t exec_start;
 extern vm_size_t exec_size;
 extern pt_entry_t *kpde;
 
-int		cnvmem = 0;		/* must be in .data section */
-int		extmem = 0;
+int		cnvmem __attribute__((section(".data"))) = 0;	/* must be in .data section */
+int		extmem __attribute__((section(".data"))) = 0;
 
 extern char	edata, end;
 
@@ -359,6 +363,13 @@ machine_startup(void)
 #if	NCPUS > 1
 	mp_desc_init(0);
 #endif	/* NCPUS */
+
+	/*
+	 * Initialise SYSENTER/SYSEXIT fast system calls (Feature #44).
+	 * Must be called after set_cpu_model() and mp_desc_init().
+	 */
+	sysenter_init();
+
 	setup_main();
 }
 
@@ -383,8 +394,10 @@ parse_multiboot(void)
  	boot_start = mb_module[0].mod_start;
  	boot_size = mb_module[0].mod_end - mb_module[0].mod_start;
  
- 	exec_start = mb_module[1].mod_start;
- 	exec_size = mb_module[1].mod_end - mb_module[1].mod_start;
+ 	if (mb_info.mods_count >= 2) {
+ 		exec_start = mb_module[1].mod_start;
+ 		exec_size  = mb_module[1].mod_end - mb_module[1].mod_start;
+ 	}
 
 
 	kern_args_start = mb_info.cmdline;
@@ -775,6 +788,18 @@ i386_init(void)
 	set_cr4(get_cr4() | CR4_PGE);
 	pmap_bootstrap(loadpt);
 
+	/*
+	 * pmap_bootstrap steals page-table pages from physical addresses
+	 * starting at avail_start, advancing it to a value inside the memory
+	 * hole (hole_start..hole_end covers BIOS/VGA area plus kernel text,
+	 * data and page tables).  pmap_next_page only skips the hole when
+	 * avail_next hits hole_start exactly; since avail_start lands above
+	 * hole_start the skip never fires, and kernel/page-table pages get
+	 * handed out as free physical memory.  Advance past the hole here.
+	 */
+	if (avail_start < hole_end)
+		avail_start = hole_end;
+
 	/* Steal the contiguous memory that's been requested by various
 	   kernel subsystems.  */
 
@@ -831,8 +856,9 @@ i386_init(void)
 	    panic("Couldn't allocate physical memory for pmem_reserve_ctl entry.");
 	}
 
-	avail_remaining = atop((avail_end - avail_start) -
-			       (hole_end - hole_start));
+	/* avail_start is now >= hole_end, so the hole is entirely below the
+	   available range; do not subtract it a second time. */
+	avail_remaining = atop(avail_end - avail_start);
 #if	MBUS
 	avail_remaining -= atop(MBUS_BIOS_REMAP_END-MBUS_BIOS_REMAP_START);
 #endif	/* MBUS */

@@ -446,7 +446,10 @@ exception(
 			act_execute_returnhandlers();
 		}
 
-		server_func = subsystem->routine[ 2 ].impl_routine;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+		server_func = ((struct routine_descriptor *)subsystem->routine)[2].impl_routine;
+#pragma GCC diagnostic pop
 		assert(server_func);
 		assert(new_sp);
 
@@ -957,7 +960,10 @@ exception_try_task(
 			act_execute_returnhandlers();
 		}
 
-		server_func = subsystem->routine[ 2 ].impl_routine;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+		server_func = ((struct routine_descriptor *)subsystem->routine)[2].impl_routine;
+#pragma GCC diagnostic pop
 		assert(server_func);
 		assert(new_sp);
 
@@ -1153,6 +1159,8 @@ exception_no_server(void)
 	 *	All else failed; terminate task.
 	 */
 
+	printf("exception_no_server: terminating task %p\n",
+	       (void *)self->top_act->task);
 	(void) task_terminate(self->top_act->task);
 	thread_terminate_self();
 	/*NOTREACHED*/
@@ -1377,7 +1385,10 @@ alert_exception(
 			act_execute_returnhandlers();
 		}
 
-		server_func = subsystem->routine[ 2 ].impl_routine;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+		server_func = ((struct routine_descriptor *)subsystem->routine)[2].impl_routine;
+#pragma GCC diagnostic pop
 		assert(server_func != 0);
 
 		/* 

@@ -438,8 +438,7 @@ port_set_attributes_test(flavor)
 	MACH_CALL(mach_port_destroy, (task, port));
 }
 
-port_get_refs_test(right)
-mach_port_right_t right;
+port_get_refs_test(mach_port_right_t right)
 {
 	register i;
 	mach_port_t task = mach_task_self();
@@ -462,8 +461,7 @@ mach_port_right_t right;
 	MACH_CALL(mach_port_destroy, (task, port)); 
 }
 
-port_mod_refs_test(right)
-mach_port_right_t right;
+port_mod_refs_test(mach_port_right_t right)
 {
 	register i;
 	mach_port_t task = mach_task_self();
@@ -634,9 +632,7 @@ port_move_member_test(op)
 	MACH_CALL(mach_port_destroy, (task, port_set));
 }
 
-port_request_notification_test(variant, reply)
-mach_msg_id_t 	variant;
-boolean_t	reply;
+port_request_notification_test(mach_msg_id_t variant, boolean_t reply)
 {
 	register 		i;
 	mach_port_t 		task = mach_task_self();

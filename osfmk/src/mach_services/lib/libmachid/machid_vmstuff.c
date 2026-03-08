@@ -55,11 +55,57 @@
 #include <servers/machid.h>
 #include <servers/machid_debug.h>
 #include <servers/machid_dpager.h>
+#include <mach/default_pager_object.h>
 #include <servers/machid_types.h>
 #include <servers/machid_lib.h>
 
-static void fill_object_dpager();
-static void fill_object_pages();
+/* Avoid pulling the kernel's sys/types.h into the C library headers; declare
+ * the small set of libc functions we use locally to prevent conflicting type
+ * definitions with the kernel headers on the include path.  Use <stdint.h>
+ * for portable integer types and uintptr_t for pointer casts when
+ * deallocating memory via vm_deallocate.
+ */
+#include <stdint.h>
+#include <stddef.h>
+
+/* Minimal libc declarations used by this file to avoid pulling in the
+ * system <stdlib.h> (which may conflict with kernel headers on the
+ * include path).  The prototypes here match standard libc.
+ */
+void *malloc(size_t size);
+void free(void *ptr);
+void qsort(void *base, size_t nmemb, size_t size,
+           int (*compar)(const void *, const void *));
+
+extern void quit(int, const char *, ...);
+
+/* Forward declarations (ANSI prototypes) to avoid implicit declarations
+ * and to allow use before the definitions below. */
+static void fill_object_dpager(object_t *o);
+static void fill_object_pages(object_t *o);
+static mdefault_pager_t get_object_dpager(mobject_name_t object);
+void get_dpager_objects(mach_id_t default_pager,
+                        default_pager_object_t **objectsp,
+                        unsigned int *numobjectsp);
+default_pager_object_t *find_dpager_object(mobject_name_t object,
+                                           default_pager_object_t *objects,
+                                           unsigned int count);
+
+/* Declarations for MIG RPCs used by this file but not present in the
+ * generated headers in this build configuration.  These match the
+ * expected parameter lists used below.
+ */
+extern kern_return_t machid_vm_object_info(mach_port_t server, mach_port_t auth,
+                                          mobject_name_t name, struct voi_info *info);
+extern kern_return_t machid_vm_object_pages(mach_port_t server, mach_port_t auth,
+                                           mobject_name_t object, vm_page_info_t **pages,
+                                           unsigned int *pcount);
+extern kern_return_t machid_default_pager_object_pages(mach_port_t server, mach_port_t auth,
+                                                       mdefault_pager_t dpager, mobject_name_t object,
+                                                       default_pager_page_t **pages, unsigned int *pcount);
+extern kern_return_t machid_default_pager_objects(mach_port_t server, mach_port_t auth,
+                                                  mach_id_t default_pager, default_pager_object_t **objects,
+                                                  unsigned int *count);
 
 #define NUM_BUCKETS	1001
 
@@ -70,9 +116,7 @@ static object_t *buckets[NUM_BUCKETS];
 	 VOI_STATE_PAGER_READY|VOI_STATE_PAGER_INITIALIZED)
 
 object_t *
-get_object(name, dpager, pages)
-    mobject_name_t name;
-    boolean_t dpager, pages;
+get_object(mobject_name_t name, boolean_t dpager, boolean_t pages)
 {
     object_t **b;	/* bucket */
     object_t *o;	/* object */
@@ -123,8 +167,7 @@ get_object(name, dpager, pages)
 }
 
 static void
-fill_object_dpager(o)
-    object_t *o;
+fill_object_dpager(object_t *o)
 {
     mobject_name_t object = o->o_info.voi_object;
     mdefault_pager_t dpager;
@@ -148,11 +191,10 @@ fill_object_dpager(o)
 }
 
 static int
-pagecmp(one, two)
-    char *one, *two;
+pagecmp(const void *one, const void *two)
 {
-    vm_offset_t oone = ((vm_page_info_t *) one)->vpi_offset;
-    vm_offset_t otwo = ((vm_page_info_t *) two)->vpi_offset;
+    vm_offset_t oone = ((const vm_page_info_t *) one)->vpi_offset;
+    vm_offset_t otwo = ((const vm_page_info_t *) two)->vpi_offset;
 
     if (oone == otwo)
 	return 0;
@@ -163,11 +205,10 @@ pagecmp(one, two)
 }
 
 static int
-dppagecmp(one, two)
-    char *one, *two;
+dppagecmp(const void *one, const void *two)
 {
-    vm_offset_t oone = ((default_pager_page_t *) one)->dpp_offset;
-    vm_offset_t otwo = ((default_pager_page_t *) two)->dpp_offset;
+    vm_offset_t oone = ((const default_pager_page_t *) one)->dpp_offset;
+    vm_offset_t otwo = ((const default_pager_page_t *) two)->dpp_offset;
 
     if (oone == otwo)
 	return 0;
@@ -178,8 +219,7 @@ dppagecmp(one, two)
 }
 
 static void
-fill_object_pages(o)
-    object_t *o;
+fill_object_pages(object_t *o)
 {
     mobject_name_t object = o->o_info.voi_object;
     vm_page_info_t pages_buf[1024];
@@ -205,8 +245,7 @@ fill_object_pages(o)
 	    pages[i].vpi_offset += o->o_info.voi_paging_offset;
 	}
 
-	qsort((char *) pages, (int) pcount,
-	      (int) sizeof *pages, pagecmp);
+	qsort(pages, pcount, sizeof *pages, pagecmp);
     }
 
     if (o->o_dpager == 0)
@@ -219,8 +258,7 @@ fill_object_pages(o)
     if (kr != KERN_SUCCESS)
 	dpcount = 0;
     if (dpcount != 0) {
-	qsort((char *) dppages, (int) dpcount,
-	      (int) sizeof *dppages, dppagecmp);
+	qsort(dppages, dpcount, sizeof *dppages, dppagecmp);
     }
 
     /* merge the information into one array */
@@ -254,7 +292,7 @@ fill_object_pages(o)
     }
 
     if ((pages != pages_buf) && (pcount != 0)) {
-	kr = vm_deallocate(mach_task_self(), (vm_offset_t) pages,
+	kr = vm_deallocate(mach_task_self(), (vm_offset_t) (uintptr_t) pages,
 			   (vm_size_t) (pcount * sizeof *pages));
 	if (kr != KERN_SUCCESS)
 	    quit(1, "vmstuff: vm_deallocate: %s\n",
@@ -262,7 +300,7 @@ fill_object_pages(o)
     }
 
     if ((dppages != dppages_buf) && (dpcount != 0)) {
-	kr = vm_deallocate(mach_task_self(), (vm_offset_t) dppages,
+	kr = vm_deallocate(mach_task_self(), (vm_offset_t) (uintptr_t) dppages,
 			   (vm_size_t) (dpcount * sizeof *dppages));
 	if (kr != KERN_SUCCESS)
 	    quit(1, "vmstuff: vm_deallocate: %s\n",
@@ -271,8 +309,7 @@ fill_object_pages(o)
 }
 
 mhost_priv_t
-get_object_host(object)
-    mobject_name_t object;
+get_object_host(mobject_name_t object)
 {
     mhost_priv_t host_priv;
     kern_return_t kr;
@@ -286,8 +323,7 @@ get_object_host(object)
 }
 
 mdefault_pager_t
-get_host_dpager(host)
-    mhost_priv_t host;
+get_host_dpager(mhost_priv_t host)
 {
     static mdefault_pager_t cache_dpager;
     static mhost_priv_t cache_host;
@@ -309,8 +345,7 @@ get_host_dpager(host)
 }
 
 mdefault_pager_t
-get_object_dpager(object)
-    mobject_name_t object;
+get_object_dpager(mobject_name_t object)
 {
     mhost_priv_t host;
 
@@ -322,11 +357,10 @@ get_object_dpager(object)
 }
 
 static int
-dpobjectcmp(one, two)
-    char *one, *two;
+dpobjectcmp(const void *one, const void *two)
 {
-    mobject_name_t One = ((default_pager_object_t *) one)->dpo_object;
-    mobject_name_t Two = ((default_pager_object_t *) two)->dpo_object;
+    mobject_name_t One = ((const default_pager_object_t *) one)->dpo_object;
+    mobject_name_t Two = ((const default_pager_object_t *) two)->dpo_object;
 
     if (One == Two)
 	return 0;
@@ -337,10 +371,7 @@ dpobjectcmp(one, two)
 }
 
 void
-get_dpager_objects(default_pager, objectsp, numobjectsp)
-    mach_id_t default_pager;
-    default_pager_object_t **objectsp;
-    unsigned int *numobjectsp;
+get_dpager_objects(mach_id_t default_pager, default_pager_object_t **objectsp, unsigned int *numobjectsp)
 {
     static mach_id_t cache_default_pager;
     static default_pager_object_t *cache_objects;
@@ -350,7 +381,7 @@ get_dpager_objects(default_pager, objectsp, numobjectsp)
 	kern_return_t kr;
 
 	if (cache_numobjects != 0) {
-	    kr = vm_deallocate(mach_task_self(), (vm_offset_t) cache_objects,
+	    kr = vm_deallocate(mach_task_self(), (vm_offset_t) (uintptr_t) cache_objects,
 		    (vm_size_t) (cache_numobjects * sizeof *cache_objects));
 	    if (kr != KERN_SUCCESS)
 		quit(1, "ms: vm_deallocate: %s\n",
@@ -366,8 +397,8 @@ get_dpager_objects(default_pager, objectsp, numobjectsp)
 					  &cache_objects, &cache_numobjects);
 	if ((kr == KERN_SUCCESS) &&
 	    (cache_numobjects != 0)) {
-	    qsort((char *) cache_objects, (int) cache_numobjects,
-		  (int) sizeof *cache_objects, (int (*)()) dpobjectcmp);
+	    qsort(cache_objects, cache_numobjects,
+		  sizeof *cache_objects, dpobjectcmp);
 	}
     }
 
@@ -376,10 +407,7 @@ get_dpager_objects(default_pager, objectsp, numobjectsp)
 }
 
 default_pager_object_t *
-find_dpager_object(object, objects, count)
-    mobject_name_t object;
-    default_pager_object_t *objects;
-    unsigned int count;
+find_dpager_object(mobject_name_t object, default_pager_object_t *objects, unsigned int count)
 {
     if (count == 0) {
 	return 0;
@@ -402,9 +430,7 @@ find_dpager_object(object, objects, count)
 }
 
 vm_page_info_t *
-lookup_page_object_prim(o, offset)
-    object_t *o;
-    vm_offset_t offset;
+lookup_page_object_prim(object_t *o, vm_offset_t offset)
 {
     vm_page_info_t *p, *lastp;
 
@@ -432,11 +458,7 @@ lookup_page_object_prim(o, offset)
 }
 
 void
-lookup_page_object(object, offset, objectp, infop)
-    object_t *object;
-    vm_offset_t offset;
-    object_t **objectp;
-    vm_page_info_t **infop;
+lookup_page_object(object_t *object, vm_offset_t offset, object_t **objectp, vm_page_info_t **infop)
 {
     vm_page_info_t *info;
 
@@ -449,11 +471,7 @@ lookup_page_object(object, offset, objectp, infop)
 }
 
 void
-lookup_page_chain(chain, offset, objectp, infop)
-    object_t *chain;
-    vm_offset_t offset;
-    object_t **objectp;
-    vm_page_info_t **infop;
+lookup_page_chain(object_t *chain, vm_offset_t offset, object_t **objectp, vm_page_info_t **infop)
 {
     object_t *object;
     vm_page_info_t *info = 0;
@@ -472,13 +490,13 @@ lookup_page_chain(chain, offset, objectp, infop)
 }
 
 void
-get_object_bounds(object, startp, endp)
-    object_t *object;
-    vm_offset_t *startp, *endp;
+get_object_bounds(object_t *object, vm_offset_t *startp, vm_offset_t *endp)
 {
     vm_offset_t offset = object->o_info.voi_paging_offset;
     vm_offset_t start = 0 + offset;
-    vm_offset_t end = object->o_info.voi_size + offset;
+    /* 'voi_size' is not always present; initialize end to paging offset and
+       let page data extend it as necessary. */
+    vm_offset_t end = offset;
 
     if (object->o_num_pages != 0) {
 	vm_page_info_t *first = &object->o_pages[0];

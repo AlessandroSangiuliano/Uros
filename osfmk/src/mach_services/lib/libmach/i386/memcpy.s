@@ -49,7 +49,7 @@
 
 #include <i386/asm.h>
 
-/ memcpy(to, from, bcount)
+# memcpy(to, from, bcount)
 
 ENTRY(memcpy)
 	pushl	%ebp
@@ -60,12 +60,12 @@ ENTRY(memcpy)
 	movl	B_ARG1,%esi
 	movl	B_ARG2,%edx
 	cld
-/ move longs
+# move longs
 	movl	%edx,%ecx
 	sarl	$2,%ecx
 	rep
 	movsl
-/ move bytes
+# move bytes
 	movl	%edx,%ecx
 	andl	$3,%ecx
 	rep

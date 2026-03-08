@@ -92,22 +92,22 @@
 
 struct fake_descriptor gdt[GDTSZ] = {
 /* 0x000 */	{ 0, 0, 0, 0 },		/* always NULL */
-/* 0x008 */	{ LINEAR_KERNEL_ADDRESS + VM_MIN_ADDRESS,
-		  (VM_MAX_KERNEL_ADDRESS-1-VM_MIN_KERNEL_ADDRESS)>>12,
+/* 0x008 */	{ 0,
+		  0xFFFFF,
 		  SZ_32|SZ_G,
 		  ACC_P|ACC_PL_K|ACC_CODE_R
-		},			/* kernel code */
-/* 0x010 */	{ LINEAR_KERNEL_ADDRESS + VM_MIN_ADDRESS,
-		  (VM_MAX_KERNEL_ADDRESS-1-VM_MIN_KERNEL_ADDRESS)>>12,
+		},			/* kernel code: flat, base=0, limit=4GB */
+/* 0x010 */	{ 0,
+		  0xFFFFF,
 		  SZ_32|SZ_G,
 		  ACC_P|ACC_PL_K|ACC_DATA_W
-		},			/* kernel data */
-/* 0x018 */	{ LINEAR_KERNEL_ADDRESS + (unsigned int)ldt,
+		},			/* kernel data: flat, base=0, limit=4GB */
+/* 0x018 */	{ (unsigned int)ldt,
 		  LDTSZ*sizeof(struct fake_descriptor)-1,
 		  0,
 		  ACC_P|ACC_PL_K|ACC_LDT
 		},			/* local descriptor table */
-/* 0x020 */	{ LINEAR_KERNEL_ADDRESS + (unsigned int)&ktss,
+/* 0x020 */	{ (unsigned int)&ktss,
 		  sizeof(struct i386_tss)-1,
 		  0,
 		  ACC_P|ACC_PL_K|ACC_TSS
@@ -116,16 +116,43 @@ struct fake_descriptor gdt[GDTSZ] = {
 /* 0x030 */	{ 0, 0, 0, 0 },		/* per-thread TSS for IO bitmap */
 /* 0x038 */	{ 0, 0, 0, 0 },
 /* 0x040 */	{ 0, 0, 0, 0 },
-/* 0x048 */	{ LINEAR_KERNEL_ADDRESS + (unsigned int)&cpu_data[0],
+/* 0x048 */	{ (unsigned int)&cpu_data[0],
 		  sizeof(cpu_data)-1,
 		  SZ_32,
 		  ACC_P|ACC_PL_K|ACC_DATA_W
 		},			/* per-CPU current thread address */
 #if	MACH_KDB
-/* 0x050 */	{ LINEAR_KERNEL_ADDRESS + (unsigned int)&dbtss,
+/* 0x050 */	{ (unsigned int)&dbtss,
 		  sizeof(struct i386_tss)-1,
 		  0,
 		  ACC_P|ACC_PL_K|ACC_TSS
-		}			/* TSS for this processor */
+		},			/* TSS for this processor */
+#else
+/* 0x050 */	{ 0, 0, 0, 0 },		/* (reserved for DEBUG_TSS) */
 #endif	/* MACH_KDB */
+
+/*
+ * SYSENTER/SYSEXIT segment group (Feature #44).
+ * All flat (base=0) — no trampoline needed with flat memory model.
+ */
+/* 0x058 */	{ 0,
+		  0xFFFFF,
+		  SZ_32|SZ_G,
+		  ACC_P|ACC_PL_K|ACC_CODE_R
+		},			/* SYSENTER_CS: kernel code (DPL 0) */
+/* 0x060 */	{ 0,
+		  0xFFFFF,
+		  SZ_32|SZ_G,
+		  ACC_P|ACC_PL_K|ACC_DATA_W
+		},			/* SYSENTER_DS: kernel data (DPL 0) */
+/* 0x068 */	{ 0,
+		  0xFFFFF,
+		  SZ_32|SZ_G,
+		  ACC_P|ACC_PL_U|ACC_CODE_R
+		},			/* SYSEXIT_CS: user code (DPL 3) */
+/* 0x070 */	{ 0,
+		  0xFFFFF,
+		  SZ_32|SZ_G,
+		  ACC_P|ACC_PL_U|ACC_DATA_W
+		}			/* SYSEXIT_DS: user data (DPL 3) */
 };

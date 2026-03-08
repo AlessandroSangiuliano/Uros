@@ -83,10 +83,6 @@
  * SUCH DAMAGE.
  */
 
-#if defined(LIBC_SCCS) && !defined(lint)
-static char sccsid[] = "@(#)bcopy.c	8.1 (Berkeley) 6/4/93";
-#endif /* LIBC_SCCS and not lint */
-
 #include <string.h>
 
 /*
@@ -105,20 +101,20 @@ typedef	int word;		/* "word" used for optimal copy speed */
  */
 #ifdef MEMCOPY
 void *
-memcpy(void *dst0, const void *src0, register size_t length)
+memcpy(void *dst0, const void *src0, size_t length)
 #else
 #ifdef MEMMOVE
 void *
-memmove(void *dst0, const void *src0, register size_t length)
+memmove(void *dst0, const void *src0, size_t length)
 #else
 void
-bcopy(const void *src0, void *dst0, register size_t length)
+bcopy(const void *src0, void *dst0, size_t length)
 #endif
 #endif
 {
-	register char *dst = dst0;
-	register const char *src = src0;
-	register size_t t;
+	char *dst = dst0;
+	const char *src = src0;
+	size_t t;
 
 	if (length == 0 || dst == src)		/* nothing to do */
 		goto done;

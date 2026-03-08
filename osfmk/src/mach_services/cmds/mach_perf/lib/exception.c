@@ -43,8 +43,7 @@ mach_thread_t	sa_exc_thread;
 boolean_t	sa_exc_server();
 boolean_t	is_attached();
 
-exception_thread_body(port)
-mach_port_t port;
+exception_thread_body(mach_port_t port)
 {
 	if (debug)
 		printf("exception_thread_body\n");

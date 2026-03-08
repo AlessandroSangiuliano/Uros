@@ -54,10 +54,6 @@
  * SUCH DAMAGE.
  */
 
-#if defined(LIBC_SCCS) && !defined(lint)
-static char sccsid[] = "@(#)strtod.c	8.1 (Berkeley) 6/4/93";
-#endif /* LIBC_SCCS and not lint */
-
 /****************************************************************
  *
  * The author of this software is David M. Gay.
@@ -206,9 +202,7 @@ static char sccsid[] = "@(#)strtod.c	8.1 (Berkeley) 6/4/93";
 #include <float.h>
 #endif
 
-#if !defined(_MATH_H_)
-# include <math.h>
-#endif
+#include "../../include/sa_mach/i386/math.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -493,9 +487,9 @@ s2b
 
 static int
 hi0bits
-	(register unsigned long x)
+	(unsigned long x)
 {
-	register int k = 0;
+	int k = 0;
 
 	if (!(x & 0xffff0000U)) {
 		k = 16;
@@ -525,8 +519,8 @@ static int
 lo0bits
 	(unsigned long *y)
 {
-	register int k;
-	register unsigned long x = *y;
+	int k;
+	unsigned long x = *y;
 
 	if (x & 7) {
 		if (x & 1)
@@ -859,7 +853,7 @@ diff
 ulp
 	(double x)
 {
-	register long L;
+	long L;
 	double a;
 
 	L = (word0(x) & Exp_mask) - (P-1)*Exp_msk1;

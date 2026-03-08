@@ -48,9 +48,7 @@ static vm_offset_t	stack;
 static vm_size_t	stack_size;
 
 boolean_t
-rpc_demux(in, out)
-	mach_msg_header_t in;
-	mach_msg_header_t out;
+rpc_demux(mach_msg_header_t in, mach_msg_header_t out)
 {
 	/*
 	 * We still receive plain Mach messages for intertask
@@ -65,8 +63,7 @@ rpc_demux(in, out)
 }
 
 int
-rpc_server_main(service_port)
-	mach_port_t service_port;
+rpc_server_main(mach_port_t service_port)
 {
 	char **argv;
 	int argc = 0;
@@ -166,8 +163,7 @@ rpc_server_main(service_port)
 
 
 kern_return_t
-s_null_rpc(server)
-	mach_port_t	server;
+s_null_rpc(mach_port_t server)
 {
   	server_count--;
 	return_from_rpc(KERN_SUCCESS);
@@ -190,47 +186,35 @@ mach_port_t	server, port;
 }
 
 kern_return_t
-s_inline_128_rpc(server, data)
-mach_port_t	server;
-inline_128_t	data;
+s_inline_128_rpc(mach_port_t server, inline_128_t data)
 {
 	server_count--;
 	return_from_rpc(KERN_SUCCESS);
 }
 
 kern_return_t
-s_inline_1024_rpc(server, data)
-mach_port_t	server;
-inline_1024_t	data;
+s_inline_1024_rpc(mach_port_t server, inline_1024_t data)
 {
 	server_count--;
 	return_from_rpc(KERN_SUCCESS);
 }
 
 kern_return_t
-s_inline_4096_rpc(server, data)
-mach_port_t	server;
-inline_4096_t	data;
+s_inline_4096_rpc(mach_port_t server, inline_4096_t data)
 {
 	server_count--;
 	return_from_rpc(KERN_SUCCESS);
 }
 
 kern_return_t
-s_inline_8192_rpc(server, data)
-mach_port_t	server;
-inline_8192_t	data;
+s_inline_8192_rpc(mach_port_t server, inline_8192_t data)
 {
 	server_count--;
 	return_from_rpc(KERN_SUCCESS);
 }
 
 kern_return_t
-s_ool_rpc(server, touch, data, data_count)
-mach_port_t		server;
-int			touch;
-ool_t			data;
-mach_msg_type_number_t  data_count;
+s_ool_rpc(mach_port_t server, int touch, ool_t data, mach_msg_type_number_t data_count)
 {
 	int val; 
 	if (touch) {

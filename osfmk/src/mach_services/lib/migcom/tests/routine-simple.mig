@@ -1,0 +1,6 @@
+subsystem Simple 200;
+
+simpleroutine my_simple(
+    request_port srv : mach_port_t;
+    in x : mach_port_t
+    );

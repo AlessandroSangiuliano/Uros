@@ -228,6 +228,7 @@
 #include "error.h"
 #include "utils.h"
 #include "global.h"
+#include <stdlib.h>
 
 char *MessAllocRoutine = "mig_user_allocate";
 char *MessFreeRoutine = "mig_user_deallocate";
@@ -235,22 +236,18 @@ char *MessFreeRoutine = "mig_user_deallocate";
 char stRetCode[] = "ReturnValue";
 char stRetNone[] = "";
 
-void WriteLogDefines();
-void WriteIdentificationString();
+void WriteLogDefines(FILE *file, string_t who);
+void WriteIdentificationString(FILE *file);
 
 static void
-WriteKPD_Iterator(file, in, overwrite, varying, arg, bracket)
-    FILE *file;
-    boolean_t in, overwrite, varying;
-    argument_t *arg;
-    boolean_t bracket;
+WriteKPD_Iterator(FILE *file, boolean_t in, boolean_t overwrite, boolean_t varying, argument_t *arg, boolean_t bracket)
 {
     register ipc_type_t *it = arg->argType;
     char string[MAX_STR_LEN];
 
     fprintf(file, "\t{\n");
     fprintf(file, "\t    register\t%s\t*ptr;\n", it->itUserKPDType);
-    fprintf(file, "\t    register\ti");
+    fprintf(file, "\t    register int\ti");
     if (varying && !in)
 	fprintf(file, ", j");
     fprintf(file, ";\n\n");
@@ -291,8 +288,7 @@ WriteKPD_Iterator(file, in, overwrite, varying, arg, bracket)
  *	header:WriteHeader. Called by WriteProlog.
  *************************************************************/
 static void
-WriteIncludes(file)
-    FILE *file;
+WriteIncludes(FILE *file)
 {
     if (IsKernelServer)
     {
@@ -328,6 +324,11 @@ WriteIncludes(file)
 	else
 	    cp++;	/* skip '/' */
 	fprintf(file, "#include \"%s\"\n", cp);
+	/* Always add userspace-trap and interface declarations for OOL support. */
+	if (!IsKernelUser) {
+	    fprintf(file, "#include <mach/mach_traps.h>\n");
+	    fprintf(file, "#include <mach/mach_interface.h>\n");
+	}
     } else {
 	fprintf(file, "#include <string.h>\n");
 	fprintf(file, "#include <mach/ndr.h>\n");
@@ -342,8 +343,11 @@ WriteIncludes(file)
 	if (IsKernelUser) {
 	    fprintf(file, "#include <ipc/ipc_port.h>\n");
 	    fprintf(file, "#include <kern/ipc_mig.h>\n");
-	} else
+	} else {
 	    fprintf(file, "#include <mach/port.h>\n");
+	    fprintf(file, "#include <mach/mach_traps.h>\n");
+	    fprintf(file, "#include <mach/mach_interface.h>\n");
+	}
 	fprintf(file, "\n");
     }
 
@@ -363,7 +367,7 @@ WriteIncludes(file)
         fprintf(file, "#if\t%s\n", NewCDecl);
         fprintf(file, "#else\t/* %s */\n", NewCDecl);
         fprintf(file, "extern mach_port_t mig_get_reply_port();\n");
-        fprintf(file, "extern void mig_dealloc_reply_port();\n");
+        fprintf(file, "extern void mig_dealloc_reply_port(mach_port_t);\n");
 	fprintf(file, "extern char *%s();\n", MessAllocRoutine);
 	fprintf(file, "extern void %s();\n", MessFreeRoutine);
         fprintf(file, "#endif\t/* %s */\n", NewCDecl);
@@ -372,8 +376,7 @@ WriteIncludes(file)
 }
 
 static void
-WriteGlobalDecls(file)
-    FILE *file;
+WriteGlobalDecls(FILE *file)
 {
     if (RCSId != strNULL)
 	WriteRCSDecl(file, strconcat(SubsystemName, "_user"), RCSId);
@@ -391,8 +394,7 @@ WriteGlobalDecls(file)
  *	RCS declaration. Called by WriteUser.
  *************************************************************/
 static void
-WriteProlog(file)
-    FILE *file;
+WriteProlog(FILE *file)
 {
     WriteIdentificationString(file);
     WriteIncludes(file);
@@ -402,14 +404,12 @@ WriteProlog(file)
 
 /*ARGSUSED*/
 static void
-WriteEpilog(file)
-    FILE *file;
+WriteEpilog(FILE *file)
 {
 }
 
 static string_t
-WriteHeaderPortType(arg)
-    argument_t *arg;
+WriteHeaderPortType(argument_t *arg)
 {
     if (arg->argType->itInName == MACH_MSG_TYPE_POLYMORPHIC)
 	return arg->argPoly->argVarName;
@@ -418,9 +418,7 @@ WriteHeaderPortType(arg)
 }
 
 static void
-WriteRequestHead(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteRequestHead(FILE *file, routine_t *rt)
 {
     if (rt->rtRetCArg != argNULL && !rt->rtSimpleRequest) 
 	fprintf(file, "ready_to_send:\n");
@@ -486,9 +484,7 @@ WriteRequestHead(file, rt)
  *  and return  variable if needed. Called by WriteRoutine.
  *************************************************************/
 static void
-WriteVarDecls(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteVarDecls(FILE *file, routine_t *rt)
 {
     register i;
 
@@ -558,10 +554,7 @@ WriteVarDecls(file, rt)
 }
 
 static void
-WriteReturn(file, rt, before, value, after)
-    FILE *file;
-    routine_t *rt;
-    char *value;
+WriteReturn(FILE *file, routine_t *rt, char *before, char *value, char *after)
 {
     if (rt->rtMessOnStack && value != stRetCode)
     {
@@ -601,9 +594,7 @@ WriteReturn(file, rt, before, value, after)
 }
 
 static void
-WriteRetCodeArg(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRetCodeArg(FILE *file, register routine_t *rt)
 {
     if (rt->rtRetCArg != argNULL && !rt->rtSimpleRequest) {
 	register argument_t *arg = rt->rtRetCArg;
@@ -621,9 +612,7 @@ WriteRetCodeArg(file, rt)
  *   receive. Called by WriteRoutine SimpleRoutines
  *************************************************************/
 static void
-WriteMsgSend(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteMsgSend(FILE *file, routine_t *rt)
 {
     char *SendSize = "";
     char string[MAX_STR_LEN];
@@ -668,10 +657,7 @@ WriteMsgSend(file, rt)
  *  Called by WriteMsgSendReceive and WriteMsgRPC
  *************************************************************/
 static void
-WriteMsgCheckReceive(file, rt, success)
-    FILE *file;
-    routine_t *rt;
-    char *success;
+WriteMsgCheckReceive(FILE *file, routine_t *rt, char *success)
 {
     fprintf(file, "\tif (msg_result != %s) {\n", success);
     if (!akCheck(rt->rtReplyPort->argKind, akbUserArg) && !IsKernelUser)
@@ -680,7 +666,7 @@ WriteMsgCheckReceive(file, rt, success)
 	   deallocate the reply port when it is invalid or
 	   for TIMED_OUT errors. */
 #ifdef DeallocOnAnyError
-	fprintf(file, "\t\tmig_dealloc_reply_port();\n");
+	fprintf(file, "\t\tmig_dealloc_reply_port(InP->Head.msgh_reply_port);\n");
 #else
 	fprintf(file, "\t\tswitch (msg_result) {\n");
 	fprintf(file, "\t\tcase MACH_SEND_INVALID_REPLY:\n");
@@ -694,7 +680,7 @@ WriteMsgCheckReceive(file, rt, success)
 	fprintf(file, "\t\tcase MACH_SEND_MSG_TOO_SMALL:\n");
 	if (rt->rtWaitTime != argNULL)
 	    fprintf(file, "\t\tcase MACH_RCV_TIMED_OUT:\n");
-	fprintf(file, "\t\t\tmig_dealloc_reply_port();\n");
+	fprintf(file, "\t\t\tmig_dealloc_reply_port(InP->Head.msgh_reply_port);\n");
 	fprintf(file, "\t\t\t/*break;*/\n\t\t}\n");
 #endif
     }
@@ -710,9 +696,7 @@ WriteMsgCheckReceive(file, rt, success)
  *  WriteRoutine if UseMsgRPC option is false.
  *************************************************************/
 static void
-WriteMsgSendReceive(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteMsgSendReceive(FILE *file, routine_t *rt)
 {
     char *SendSize = "";
     char string[MAX_STR_LEN];
@@ -755,9 +739,7 @@ WriteMsgSendReceive(file, rt)
  *  for all routine types except SimpleRoutine.
  *************************************************************/
 static void
-WriteMsgRPC(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteMsgRPC(FILE *file, routine_t *rt)
 {
     char *SendSize = "";
     char string[MAX_STR_LEN];
@@ -796,9 +778,7 @@ WriteMsgRPC(file, rt)
  * argKPD_Pack discipline for Port types.
  */
 static void
-WriteKPD_port(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *subindex = "";
@@ -868,11 +848,7 @@ WriteKPD_port(file, arg)
 }
 
 static void
-WriteKPD_ool_varsize(file, arg, who, where, iscomplex)
-    FILE *file;
-    register argument_t *arg;
-    char *who, *where;
-    boolean_t iscomplex;
+WriteKPD_ool_varsize(FILE *file, register argument_t *arg, char *who, char *where, boolean_t iscomplex)
 {
     register ipc_type_t *it = arg->argType;
     register argument_t *count;
@@ -901,9 +877,7 @@ WriteKPD_ool_varsize(file, arg, who, where, iscomplex)
  * argKPD_Pack discipline for out-of-line types.
  */
 static void
-WriteKPD_ool(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteKPD_ool(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     register char *ref = arg->argByReferenceUser ? "*" : "";
@@ -999,9 +973,7 @@ WriteKPD_ool(file, arg)
  * argKPD_Pack discipline for out-of-line Port types.
  */
 static void
-WriteKPD_oolport(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteKPD_oolport(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     register char *ref = arg->argByReferenceUser ? "*" : "";
@@ -1106,9 +1078,7 @@ WriteKPD_oolport(file, arg)
 }
 
 static void
-WriteOverwriteTemplate(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteOverwriteTemplate(FILE *file, routine_t *rt)
 {
     register argument_t *arg;
     char string[MAX_STR_LEN];
@@ -1214,9 +1184,7 @@ WriteOverwriteTemplate(file, rt)
  *************************************************************/
 
 static void
-WritePackArgValueNormal(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WritePackArgValueNormal(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     register char *ref = arg->argByReferenceUser ? "*" : "";
@@ -1266,9 +1234,14 @@ WritePackArgValueNormal(file, arg)
 	    fprintf(file, "%s%s);\n", countRef, count->argVarName);
 	}
     }
-    else
-	WriteCopyType(file, it, "InP->%s", "/* %s */ %s%s",
-		      arg->argMsgField, ref, arg->argVarName);
+    else {
+	/* Pre-format left/right strings to avoid passing varargs through layers */
+	char __left[128];
+	char __right[256];
+	snprintf(__left, sizeof(__left), "InP->%s", arg->argMsgField);
+	snprintf(__right, sizeof(__right), "/* %s */ %s%s", arg->argMsgField, ref, arg->argVarName);
+	WriteCopyTypeSimple(file, it, __left, __right);
+    }
     fprintf(file, "\n");
 }
 
@@ -1276,9 +1249,7 @@ WritePackArgValueNormal(file, arg)
  * Calculate the size of a variable-length message field.
  */
 static void
-WriteArgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteArgSize(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argType;
     register int bsize = ptype->itElement->itTypeSize;
@@ -1309,9 +1280,7 @@ WriteArgSize(file, arg)
  * has more arguments following.
  */
 static void
-WriteAdjustMsgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteAdjustMsgSize(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argType;
 
@@ -1342,9 +1311,7 @@ WriteAdjustMsgSize(file, arg)
  * last argument has been packed.
  */
 static void
-WriteFinishMsgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteFinishMsgSize(FILE *file, register argument_t *arg)
 {
     /* No more In arguments.  If this is the only variable In
        argument, the previous msgh_size value is the minimum
@@ -1364,9 +1331,7 @@ WriteFinishMsgSize(file, arg)
 }
 
 static void
-WriteInitializeCount(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteInitializeCount(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argCInOut->argParent->argType;
     register ipc_type_t *btype = ptype->itElement;
@@ -1390,9 +1355,7 @@ WriteInitializeCount(file, arg)
  * message types.
  */
 static void
-WriteRequestArgs(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRequestArgs(FILE *file, register routine_t *rt)
 {
     register argument_t *arg;
     register argument_t *lastVarArg;
@@ -1445,9 +1408,7 @@ WriteRequestArgs(file, rt)
  *  WriteRoutine.
  *************************************************************/
 static void
-WriteCheckIdentity(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteCheckIdentity(FILE *file, routine_t *rt)
 {
     fprintf(file, "\tif (Out0P->Head.msgh_id != %d) {\n",
 	    rt->rtNumber + SubsystemBase + 100);
@@ -1515,9 +1476,7 @@ WriteCheckIdentity(file, rt)
  *  argument of a Routine is not KERN_SUCCESS.
  *************************************************************/
 static void
-WriteRetCodeCheck(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteRetCodeCheck(FILE *file, routine_t *rt)
 {
     if (rt->rtSimpleReply) {
 	fprintf(file, "\tif (Out0P->RetCode != KERN_SUCCESS)\n");
@@ -1534,9 +1493,7 @@ WriteRetCodeCheck(file, rt)
  * argKPD_TypeCheck discipline for Port types.
  */
 static void
-WriteTCheckKPD_port(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTCheckKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *tab = "";
@@ -1567,9 +1524,7 @@ WriteTCheckKPD_port(file, arg)
  * argKPD_TypeCheck discipline for out-of-line types.
  */
 static void
-WriteTCheckKPD_ool(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTCheckKPD_ool(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *tab, string[MAX_STR_LEN];
@@ -1606,9 +1561,7 @@ WriteTCheckKPD_ool(file, arg)
  * argKPD_TypeCheck discipline for out-of-line Port types.
  */
 static void
-WriteTCheckKPD_oolport(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTCheckKPD_oolport(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char *tab, string[MAX_STR_LEN];
@@ -1650,9 +1603,7 @@ WriteTCheckKPD_oolport(file, arg)
  *  WriteRoutine for each out && typed argument in the reply message.
  *************************************************************/
 static void
-WriteTypeCheck(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTypeCheck(FILE *file, register argument_t *arg)
 {
     fprintf(file, "#if\tTypeCheck\n");
     (*arg->argKPD_TypeCheck)(file, arg);
@@ -1660,9 +1611,7 @@ WriteTypeCheck(file, arg)
 }
 
 static void
-WriteCheckArgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteCheckArgSize(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argType;
     register ipc_type_t *btype = ptype->itElement;
@@ -1681,9 +1630,7 @@ WriteCheckArgSize(file, arg)
 }
 
 static void
-WriteCheckMsgSize(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteCheckMsgSize(FILE *file, register argument_t *arg)
 {
     register routine_t *rt = arg->argRoutine;
 
@@ -1741,9 +1688,7 @@ WriteCheckMsgSize(file, arg)
 }
 
 void
-WriteAdjustReplyMsgPtr(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteAdjustReplyMsgPtr(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *ptype = arg->argType;
 
@@ -1756,9 +1701,7 @@ WriteAdjustReplyMsgPtr(file, arg)
  * argKPD_Extract discipline for Port types.
  */
 static void
-WriteExtractKPD_port(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_port(FILE *file, register argument_t *arg)
 {
     register ipc_type_t	*it = arg->argType;
     register char *ref = arg->argByReferenceUser ? "*" : "";
@@ -1803,9 +1746,7 @@ WriteExtractKPD_port(file, arg)
  * argKPD_Extract discipline for out-of-line types.
  */
 static void
-WriteExtractKPD_ool(file, arg) 
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_ool(FILE *file, register argument_t *arg)
 {
     register char *ref = arg->argByReferenceUser ? "*" : "";
     register ipc_type_t	*it = arg->argType;
@@ -1830,9 +1771,7 @@ WriteExtractKPD_ool(file, arg)
  * argKPD_Extract discipline for out-of-line Port types.
  */
 static void
-WriteExtractKPD_oolport(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteExtractKPD_oolport(FILE *file, register argument_t *arg)
 {
     register char *ref = arg->argByReferenceUser ? "*" : "";
     register ipc_type_t *it = arg->argType;
@@ -1870,9 +1809,7 @@ WriteExtractKPD_oolport(file, arg)
  *************************************************************/
 
 static void
-WriteExtractArgValueNormal(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteExtractArgValueNormal(FILE *file, register argument_t *arg)
 {
     register ipc_type_t	*argType = arg->argType;
     register char *ref = arg->argByReferenceUser ? "*" : "";
@@ -1944,17 +1881,19 @@ WriteExtractArgValueNormal(file, arg)
 		count->argReplyPos, count->argMsgField);
 	}
     }
-    else
-	WriteCopyType(file, argType,
-		      "%s%s", "/* %s%s */ %s->%s",
-		      ref, arg->argVarName, who, arg->argMsgField);
+    else {
+	/* Pre-format left/right strings to avoid varargs issues */
+	char __left[256];
+	char __right[256];
+	snprintf(__left, sizeof(__left), "%s%s", ref, arg->argVarName);
+	snprintf(__right, sizeof(__right), "/* %s%s */ %s->%s", ref, arg->argVarName, who, arg->argMsgField);
+	WriteCopyTypeSimple(file, argType, __left, __right);
+    }
     fprintf(file, "\n");
 }
 
 static void
-WriteReplyArgs(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteReplyArgs(FILE *file, register routine_t *rt)
 {
     register argument_t *arg;
     register argument_t *lastVarArg;
@@ -2003,9 +1942,7 @@ WriteReplyArgs(file, rt)
  *  for routines and functions.
  *************************************************************/
 static void
-WriteReturnValue(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteReturnValue(FILE *file, routine_t *rt)
 {
     /* If returning RetCode, we have already checked that it is KERN_SUCCESS */
     WriteReturn(file, rt, "\t", "KERN_SUCCESS", "\n");
@@ -2019,9 +1956,7 @@ WriteReturnValue(file, rt)
  *  message first and then the reply message.
  *************************************************************/
 static void
-WriteFieldDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteFieldDecl(FILE *file, argument_t *arg)
 {
     if (akCheck(arg->argKind, akbSendKPD) ||
 	akCheck(arg->argKind, akbReturnKPD))
@@ -2034,9 +1969,7 @@ WriteFieldDecl(file, arg)
  * of the specified array:
  */
 static void
-GetArraySize(arg, size)
-    register argument_t *arg;
-    char *size;
+GetArraySize(register argument_t *arg, char *size)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -2052,9 +1985,7 @@ GetArraySize(arg, size)
 
 
 static void
-WriteRPCPortDisposition(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteRPCPortDisposition(FILE *file, register argument_t *arg)
 {
 
     /*
@@ -2092,10 +2023,7 @@ WriteRPCPortDisposition(file, arg)
 }
 
 static void
-WriteRPCArgDescriptor(file, arg, offset)
-    FILE *file;
-    register argument_t *arg;
-    int offset;
+WriteRPCArgDescriptor(FILE *file, register argument_t *arg, int offset)
 {
     fprintf(file, "            {\n                0 ");
     if (RPCPort(arg))
@@ -2151,9 +2079,7 @@ WriteRPCRoutineDescriptor(file, rt, arg_count, descr_count,
 }
 
 void
-WriteRPCRoutineArgDescriptor(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRPCRoutineArgDescriptor(FILE *file, register routine_t *rt)
 {
     register argument_t *arg;
     int offset = 0;
@@ -2184,9 +2110,7 @@ WriteRPCRoutineArgDescriptor(file, rt)
 
 
 static void
-WriteRPCSignature(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRPCSignature(FILE *file, register routine_t *rt)
 {
     int arg_count = 0;
     int descr_count = 0;
@@ -2207,9 +2131,7 @@ WriteRPCSignature(file, rt)
 }
 
 static void
-WriteRPCCall(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRPCCall(FILE *file, register routine_t *rt)
 {
     register argument_t *arg;
     register int i;
@@ -2239,8 +2161,7 @@ WriteRPCCall(file, rt)
 }
 
 static int
-CheckRPCCall(rt)
-    register routine_t *rt;
+CheckRPCCall(register routine_t *rt)
 {
     register argument_t *arg;
     register int i;
@@ -2262,9 +2183,7 @@ CheckRPCCall(rt)
 }
 
 static void
-WriteRPCRoutine(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRPCRoutine(FILE *file, register routine_t *rt)
 {
     if (CheckRPCCall(rt))
     {
@@ -2277,9 +2196,7 @@ WriteRPCRoutine(file, rt)
 
 /* Process an IN/INOUT arg before the short-circuited RPC */
 static void
-WriteShortCircInArgBefore(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteShortCircInArgBefore(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char size[128];
@@ -2343,7 +2260,8 @@ WriteShortCircInArgBefore(file, arg)
 		    arg->argTempOnStack = FALSE;
 		}
 		WriteCopyArg(file, arg, "_%sTemp_", "/* %s */ (char *) %s",
-				  arg->argVarName, arg->argVarName);
+				  arg->argVarName, arg->argVarName,
+				  arg->argVarName);
 		/* Point argument at temp: */
 		fprintf(file, "\t    *(char **)&%s%s = _%sTemp_;\n",
 					   (arg->argByReferenceUser ? "*" : ""),
@@ -2358,9 +2276,7 @@ WriteShortCircInArgBefore(file, arg)
 
 /* Process an INOUT/OUT arg before the short-circuited RPC */
 static void
-WriteShortCircOutArgBefore(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteShortCircOutArgBefore(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -2395,9 +2311,7 @@ WriteShortCircOutArgBefore(file, arg)
 
 /* Process an IN arg after the short-circuited RPC */
 static void
-WriteShortCircInArgAfter(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteShortCircInArgAfter(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char size[128];
@@ -2445,9 +2359,7 @@ WriteShortCircInArgAfter(file, arg)
 }
 
 static void
-WriteShortCircOutArgAfter(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteShortCircOutArgAfter(FILE *file, register argument_t *arg)
 {
     register ipc_type_t *it = arg->argType;
     char size[128];
@@ -2497,9 +2409,7 @@ WriteShortCircOutArgAfter(file, arg)
 
 
 static void
-WriteShortCircRPC(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteShortCircRPC(FILE *file, register routine_t *rt)
 {
     register argument_t *arg;
     register int server_argc, i;
@@ -2638,9 +2548,7 @@ WriteShortCircRPC(file, rt)
 }
 
 static void
-WriteStubDecl(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteStubDecl(FILE *file, register routine_t *rt)
 {
     fprintf(file, "\n");
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
@@ -2665,15 +2573,14 @@ WriteStubDecl(file, rt)
 }
 
 static void
-InitKPD_Disciplines(args)
-    argument_t *args;
+InitKPD_Disciplines(argument_t *args)
 {
     argument_t *arg;
     extern void KPD_noop();
-    extern void KPD_error();
-    extern void WriteTemplateKPD_port();
-    extern void WriteTemplateKPD_ool();
-    extern void WriteTemplateKPD_oolport();
+    extern void KPD_error(FILE *file, argument_t *arg);
+    extern void WriteTemplateKPD_port(FILE *file, argument_t *arg, boolean_t in);
+    extern void WriteTemplateKPD_ool(FILE *file, argument_t *arg, boolean_t in);
+    extern void WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in);
 
     /*
      * WriteKPD_port,  WriteExtractKPD_port, 
@@ -2735,9 +2642,7 @@ InitKPD_Disciplines(args)
  *  WriteUser for each routine.
  *************************************************************/
 static void
-WriteRoutine(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteRoutine(FILE *file, register routine_t *rt)
 {
     /* initialize the disciplines for the handling of KPDs */
 
@@ -2832,7 +2737,7 @@ WriteRoutine(file, rt)
 
 	WriteCheckIdentity(file, rt);
         if (rt->rtUserImpl)
-	    WriteCheckTrailerHead(file, TRUE);	
+WriteCheckTrailerHead(file, rt, TRUE);
 
 	/* If the reply message has no Out parameters or return values
 	   other than the return code, we can type-check it and
@@ -2861,9 +2766,7 @@ WriteRoutine(file, rt)
 }
 
 static void
-WriteRPCClientFunctions(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteRPCClientFunctions(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     char *fname;
@@ -2892,9 +2795,7 @@ WriteRPCClientFunctions(file, stats)
  *  Writes out the xxxUser.c file. Called by mig.c
  *************************************************************/
 void
-WriteUser(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteUser(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
 
@@ -2922,8 +2823,7 @@ WriteUser(file, stats)
  *  Writes out individual .c user files for each routine.  Called by mig.c
  *************************************************************/
 void
-WriteUserIndividual(stats)
-    statement_t *stats;
+WriteUserIndividual(statement_t *stats)
 {
     register statement_t *stat;
 

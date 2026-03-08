@@ -52,10 +52,10 @@
  * non-NULL bytes in string argument.
  */
 
-strlen(s)
-register char *s;
+int
+strlen(const char *s)
 {
-	register n;
+	int n;
 
 	n = 0;
 	while (*s++)

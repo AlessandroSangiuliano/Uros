@@ -146,10 +146,10 @@
 subsystem
 #if	KERNEL_USER
 	  KernelUser
-#endif	KERNEL_USER
+#endif /* KERNEL_USER */
 #if	KERNEL_SERVER
 	  KernelServer
-#endif	KERNEL_SERVER
+#endif /* KERNEL_SERVER */
 		     memory_object 2200;
 
 #ifdef	MACH_KERNEL
@@ -157,7 +157,7 @@ subsystem
 #include <advisory_pageout.h>
 #if	NORMA_VM
 userprefix k_;
-#endif	NORMA_VM
+#endif /* NORMA_VM */
 #endif	/* MACH_KERNEL */
 
 #include <mach/std_types.defs>
@@ -166,7 +166,7 @@ userprefix k_;
 #if	SEQNOS
 serverprefix seqnos_;
 serverdemux seqnos_memory_object_server;
-#endif	SEQNOS
+#endif /* SEQNOS */
 
 /*
  *	Initialize the specified memory object, providing
@@ -181,7 +181,7 @@ simpleroutine	memory_object_init(
 		memory_object		: memory_object_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control		: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;
@@ -205,7 +205,7 @@ simpleroutine	memory_object_terminate(
 						ctype: mach_port_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control		: memory_object_control_t =
 						MACH_MSG_TYPE_MOVE_RECEIVE
 						ctype: mach_port_t);
@@ -223,7 +223,7 @@ simpleroutine	memory_object_data_request(
 		memory_object		: memory_object_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control		: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;
@@ -242,7 +242,7 @@ simpleroutine	memory_object_data_unlock(
 		memory_object		: memory_object_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control		: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;
@@ -266,7 +266,7 @@ simpleroutine	memory_object_lock_completed(
 			ctype: mach_port_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control		: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;
@@ -297,7 +297,7 @@ simpleroutine	memory_object_supply_completed(
 			ctype: mach_port_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control		: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;
@@ -321,7 +321,7 @@ simpleroutine   memory_object_data_return(
 		memory_object		: memory_object_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control		: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;
@@ -336,7 +336,7 @@ simpleroutine memory_object_synchronize(
 		memory_object           : memory_object_t;
 #if	SEQNOS
 	msgseqno seqno                  : mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control          : memory_object_control_t =
 					  MACH_MSG_TYPE_MAKE_SEND
 					  ctype: mach_port_t;
@@ -358,7 +358,7 @@ simpleroutine   memory_object_change_completed(
                         	ctype: mach_port_t;
 #if     SEQNOS
         msgseqno seqno                  : mach_port_seqno_t;
-#endif  SEQNOS
+#endif /* SEQNOS */
                 memory_control          : memory_object_control_t =
                                 MACH_MSG_TYPE_MAKE_SEND
                                 ctype: mach_port_t;
@@ -381,7 +381,7 @@ simpleroutine   memory_object_discard_request(
 		memory_object		: memory_object_t;
 #if	SEQNOS
 	msgseqno seqno			: mach_port_seqno_t;
-#endif	SEQNOS
+#endif /* SEQNOS */
 		memory_control		: memory_object_control_t =
 						MACH_MSG_TYPE_MAKE_SEND
 						ctype: mach_port_t;

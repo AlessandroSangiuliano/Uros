@@ -68,10 +68,6 @@
  * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-#if defined(LIBC_SCCS) && !defined(lint)
-static char sccsid[] = "@(#)bcopy.c	5.8 (Berkeley) 6/23/90";
-#endif /* LIBC_SCCS and not lint */
-
 
 /*
  * sizeof(word) MUST BE A POWER OF TWO
@@ -88,14 +84,12 @@ typedef	int word;		/* "word" used for optimal copy speed */
  * (the portable versions of) bcopy, memcpy, and memmove.
  */
 
-bcopy(src0, dst0, length)
-	char *dst0;
-	const char *src0;
-	register unsigned int length;
+void
+bcopy(const char *src0, char *dst0, unsigned int length)
 {
-	register char *dst = dst0;
-	register const char *src = src0;
-	register unsigned int t;
+	char *dst = dst0;
+	const char *src = src0;
+	unsigned int t;
 
 	if (length == 0 || dst == src)		/* nothing to do */
 		return;
@@ -152,5 +146,4 @@ bcopy(src0, dst0, length)
 		t = length & wmask;
 		TLOOP(*--dst = *--src);
 	}
-	return(0);
 }

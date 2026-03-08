@@ -42,11 +42,7 @@ unsigned int pc, arg, stack, ssize;
 }
 
 void
-hp700_fork(parent_thread, child_thread, state, count)
-mach_port_t parent_thread;
-mach_port_t child_thread;
-thread_state_t state;
-mach_msg_type_number_t count;
+hp700_fork(mach_port_t parent_thread, mach_port_t child_thread, thread_state_t state, mach_msg_type_number_t count)
 {
 	struct hp700_thread_state old_state;
 	struct hp700_thread_state *new_state;
@@ -131,8 +127,7 @@ thread_self()
 }
 
 void
-set_thread_self(thread)
-mach_thread_t thread;
+set_thread_self(mach_thread_t thread)
 {
     mach_thread_t *th_pt;
 

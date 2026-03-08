@@ -369,9 +369,11 @@
 #elif MP_V1_1
 #include <i386/AT386/mp/mp_v1_1.h>
 #else	/* CBUS */
-#define at386_io_lock_state()	
-#define at386_io_lock(op)	(TRUE)
+#ifndef AT386_IO_LOCK_DEFINED
+#define at386_io_lock_state()
+static inline int at386_io_lock(int op __attribute__((unused))) { return 1; }
 #define at386_io_unlock()
+#endif
 #endif	/* CBUS */
 
 #include <evc.h>
@@ -859,6 +861,11 @@ cnputc(
 	case K_LF:
 		(*cputc)(K_CR);
 		(*cputc)(K_LF);
+		/* Mirror to serial when VGA is the primary console. */
+		if (!cons_is_com1) {
+			com_putc(K_CR);
+			com_putc(K_LF);
+		}
 		break;
 /*
 	case K_HT:
@@ -868,6 +875,9 @@ cnputc(
 */
 	default:
 		(*cputc)(c);
+		/* Mirror to serial when VGA is the primary console. */
+		if (!cons_is_com1)
+			com_putc(c);
 		break;
 	}
 #if	NCPUS > 1 && defined(CBUS)
@@ -1811,6 +1821,9 @@ kdstart(
 		if ((tp->t_outq.c_cc <= 0) || (ch = getc(&tp->t_outq)) == -1)
 			break;
 		c = ch;
+		/* Mirror to serial when VGA is the primary console. */
+		if (!cons_is_com1)
+			com_putc(c);
 		/*
 		 * Drop priority for long screen updates. ttstart() calls us at
 		 * spltty.

@@ -61,9 +61,7 @@
 #include "externs.h"
 
 void
-mach_error( str, err )	
-	char	*str;
-	mach_error_t		err;
+mach_error(const char *str, mach_error_t err)
 {
 	char * err_str;
 	char buf[1024];
@@ -72,7 +70,7 @@ mach_error( str, err )
 	err_str=mach_error_string_int(err, &diag);
 
 	if ( diag ) {
-		sprintf( buf, "%s %s (%x)", mach_error_type(err), err_str, err );
+		snprintf( buf, sizeof(buf), "%s %s (%x)", mach_error_type(err), err_str, err );
 		err_str = buf;
 	}
 

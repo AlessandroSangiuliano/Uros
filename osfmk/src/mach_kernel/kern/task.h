@@ -206,7 +206,8 @@
 #include <kern/lock.h>
 #include <kern/queue.h>
 #include <kern/syscall_emulation.h>
-#include <vm/vm_map.h>
+/* Note: vm_map.h NOT included here to break circular dependency.
+ * vm_map_t is forward-declared in kern_types.h */
 #include <machine/task.h>
 
 typedef struct task {

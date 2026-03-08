@@ -102,7 +102,7 @@ serverprefix	ds_;
 type reply_port_t = MACH_MSG_TYPE_MAKE_SEND_ONCE | polymorphic
 	ctype: mach_port_t;
 
-skip;	/* nmk15: device_open */
+skip; /* nmk15: device_open */
 
 routine device_close(
 		device		: device_t

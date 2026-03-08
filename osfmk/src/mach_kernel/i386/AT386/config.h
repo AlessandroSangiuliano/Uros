@@ -22,3 +22,19 @@
 /*
  * MkLinux
  */
+
+/*
+ * Kernel Configuration for AT386
+ */
+
+#ifndef _AT386_CONFIG_H_
+#define _AT386_CONFIG_H_
+
+/* Include all configuration headers */
+#include <platforms.h>
+#include <cpus.h>
+#include <mach_kdb.h>
+#include <mach_ldebug.h>
+#include <stat_time.h>
+
+#endif /* _AT386_CONFIG_H_ */

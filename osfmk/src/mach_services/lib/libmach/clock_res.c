@@ -35,9 +35,7 @@
 #include <mach/mach_syscalls.h>
 
 kern_return_t
-clock_get_res(clock, cur_res)
-	mach_port_t	clock;
-	clock_res_t	*cur_res;
+clock_get_res(mach_port_t clock, clock_res_t *cur_res)
 {
 	kern_return_t		result;
 	clock_attr_t		attr;
@@ -49,9 +47,7 @@ clock_get_res(clock, cur_res)
 }
 
 kern_return_t
-clock_set_res(clock, new_res)
-	mach_port_t	clock;
-	clock_res_t	new_res;
+clock_set_res(mach_port_t clock, clock_res_t new_res)
 {
 	kern_return_t		result;
 	clock_attr_t		attr;

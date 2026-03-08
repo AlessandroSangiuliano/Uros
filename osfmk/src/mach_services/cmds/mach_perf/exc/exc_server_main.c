@@ -34,8 +34,7 @@ mach_port_t simple_port, port_set, server_port;
 
 jmp_buf saved_state;
 
-exc_server_main(service_port)
-mach_port_t service_port;
+exc_server_main(mach_port_t service_port)
 {
 	char **argv;
 	int argc = 0;

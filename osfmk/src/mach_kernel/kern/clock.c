@@ -55,7 +55,7 @@
 #include <device/dev_hdr.h>	/* for device_t */
 #include <mach/mach_syscalls.h>
 
-#include <mach/clock_reply.h>
+#include <mach/clock_reply_user.h>
 
 /*
  * Exported interface
@@ -372,7 +372,7 @@ clock_alarm(
 	clock_t			clock,
 	alarm_type_t		alarm_type,
 	tvalspec_t		alarm_time,
-	ipc_port_t		alarm_port,
+	alarm_port_t		alarm_port,
 	mach_msg_type_name_t	alarm_port_type)
 {
 	int			chkstat;

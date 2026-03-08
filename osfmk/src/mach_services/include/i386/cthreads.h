@@ -65,8 +65,7 @@ extern void *cthread_sp(void);
 
 #if	__GNUC__ && !_NO_INLINE_SPINLOCKS && !defined(lint)
 
-extern __inline__ void
-spin_unlock(spin_lock_t *p)
+extern __inline__ void spin_unlock(spin_lock_t *p)
 {
 	register int _u__ ;
 
@@ -74,8 +73,7 @@ spin_unlock(spin_lock_t *p)
 			  : "=&r" (_u__), "=m" (*p) );
 }
 
-extern __inline__ int
-spin_try_lock(spin_lock_t *p)
+extern __inline__ int spin_try_lock(spin_lock_t *p)
 {
 	boolean_t _r__;
 
@@ -84,8 +82,7 @@ spin_try_lock(spin_lock_t *p)
 	return(!_r__);
 }
 
-extern __inline__ void *
-cthread_sp(void)
+extern __inline__ void *cthread_sp(void)
 {
 	void	*_sp__;
 

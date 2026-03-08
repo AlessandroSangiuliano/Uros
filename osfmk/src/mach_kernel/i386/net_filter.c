@@ -99,7 +99,7 @@ net_filter_alloc(
 	int		net_i;
 	unsigned	net_j;
 	unsigned	i;
-	unsigned	push;
+	unsigned	push = 0;
 	unsigned	false_pad;
 	struct net_opt	*pn;
 
@@ -1427,10 +1427,10 @@ net_filter_optimize(
 	unsigned	j;
 	unsigned	nbnet;
 	unsigned	avail;
-	unsigned	used;
+	unsigned	used = 0;
 	unsigned	first;
 	unsigned	max;
-	unsigned	last;
+	unsigned	last = 0;
 	struct net_opt	*p;
 	struct net_opt	*q;
 

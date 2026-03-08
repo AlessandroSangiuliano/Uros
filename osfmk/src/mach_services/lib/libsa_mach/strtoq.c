@@ -54,12 +54,10 @@
  * SUCH DAMAGE.
  */
 
-#if defined(LIBC_SCCS) && !defined(lint)
-static char sccsid[] = "@(#)strtoq.c	8.1 (Berkeley) 6/4/93";
-#endif /* LIBC_SCCS and not lint */
+// ...existing code...
+#include "compat.h"
 
-#include <sys/types.h>
-
+#include <ctype.h>
 #include <limits.h>
 #include <errno.h>
 #include <stdlib.h>
@@ -71,16 +69,13 @@ static char sccsid[] = "@(#)strtoq.c	8.1 (Berkeley) 6/4/93";
  * alphabets and digits are each contiguous.
  */
 quad_t
-strtoq(nptr, endptr, base)
-	const char *nptr;
-	char **endptr;
-	register int base;
+strtoq(const char *nptr, char **endptr, int base)
 {
-	register const char *s;
-	register u_quad_t acc;
-	register int c;
-	register u_quad_t qbase, cutoff;
-	register int neg, any, cutlim;
+	const char *s;
+	u_quad_t acc;
+	int c;
+	u_quad_t qbase, cutoff;
+	int neg, any, cutlim;
 
 	/*
 	 * Skip white space and pick up leading +/- sign if any.

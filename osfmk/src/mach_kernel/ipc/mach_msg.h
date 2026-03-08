@@ -86,4 +86,7 @@
 	((thread)->ith_state == MACH_RCV_IN_PROGRESS ||		\
 	 (thread)->ith_state == MACH_RCV_IN_PROGRESS_TIMED)
 
+/* Continuation for mach_msg_receive after blocking in ipc_mqueue_receive */
+extern void	mach_msg_receive_continue(void);
+
 #endif	/* _IPC_MACH_MSG_H_ */

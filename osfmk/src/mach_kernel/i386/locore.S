@@ -496,7 +496,7 @@ Entry(start_timer)
 	movl	MAP_PMAP(%ecx),%ecx	/* get map's pmap */		;\
 	cmpl	kernel_pmap, %ecx	/* If kernel loaded task */	;\
 	jz	1f			/* use kernel data segment */	;\
-	movl	$USER_DS,%cx		/* else use user data segment */;\
+	movw	$USER_DS,%cx		/* else use user data segment */;\
 	mov	%cx,%es							;\
 1:									;\
 	movl	$R_UESP,%ecx						;\
@@ -813,9 +813,9 @@ trap_push_segs:
 	pushl	%gs
 
 trap_set_segs:
-	movl	%ss,%ax
-	movl	%ax,%ds
-	movl	%ax,%es			# switch to kernel data seg
+	mov	%ss,%ax
+	mov	%ax,%ds
+	mov	%ax,%es			# switch to kernel data seg
 	cld				/* clear direction flag */
 	testl	$(EFL_VM),R_EFLAGS(%esp) /* in V86 mode? */
 	jnz	trap_from_user		/* user mode trap if so */
@@ -906,10 +906,48 @@ LEXT(return_to_user)
 #endif	/* MACH_RT */
 
 /*
- * Return from kernel mode to interrupted thread.
+ * SYSEXIT fast return path (Feature #44).
+ *
+ * Only used when the entry was via SYSENTER (marked by T_SYSENTER in
+ * the trap number slot).  LCALL, INT, and exception entries always
+ * return via the standard IRET path to preserve all user registers.
+ *
+ * SYSEXIT sets:
+ *   CS = IA32_SYSENTER_CS + 16 | RPL3   (SYSEXIT_CS | 3 = 0x6B)
+ *   SS = IA32_SYSENTER_CS + 24 | RPL3   (SYSEXIT_DS | 3 = 0x73)
+ *   EIP = EDX,  ESP = ECX
+ *
+ * SYSEXIT does NOT restore EFLAGS — we do that with popfl.
+ * EDX and ECX are clobbered (set to EIP and ESP), which is the
+ * expected convention for the SYSENTER/SYSEXIT pair.
  */
-
 LEXT(return_from_kernel)
+	cmpl	$0,EXT(sysenter_available)	/* SYSENTER/SYSEXIT support? */
+	je	sysexit_fallback		/* no — use IRET */
+	cmpl	$(T_SYSENTER),R_TRAPNO(%esp)	/* entry was via SYSENTER? */
+	jne	sysexit_fallback		/* no — use IRET */
+	testl	$(0x00020000),R_EFLAGS(%esp)	/* EFL_VM (V86 mode)? */
+	jnz	sysexit_fallback		/* yes — must use IRET */
+
+	/* --- Fast path: SYSEXIT return to user space --- */
+	popl	%gs				/* restore segment registers */
+	popl	%fs
+	popl	%es
+	popl	%ds
+	popa					/* restore general registers */
+	addl	$8,%esp				/* discard trap number and err */
+
+	/* Stack: EIP, CS, EFLAGS, UESP, SS */
+	popl	%edx				/* EDX = user EIP */
+	addl	$4,%esp				/* skip CS (SYSEXIT auto-loads) */
+	popfl					/* restore user EFLAGS */
+	popl	%ecx				/* ECX = user ESP */
+						/* skip SS (SYSEXIT auto-loads) */
+	sti					/* STI shadow protects SYSEXIT */
+	.byte	0x0f, 0x35			/* SYSEXIT */
+
+	/* --- Slow path: standard IRET return --- */
+sysexit_fallback:
 LEXT(kret_popl_gs)
 	popl	%gs			/* restore segment registers */
 LEXT(kret_popl_fs)
@@ -1720,6 +1758,91 @@ Entry(syscall_int80)
 	jmp	syscall_entry_3
 
 /*
+ * SYSENTER fast system call entry (Feature #44).
+ *
+ * User-space contract (set up by the SVC macro):
+ *   eax = system call number (negative Mach trap number)
+ *   ecx = user stack pointer
+ *   edx = user return address (instruction after SYSENTER)
+ *
+ * SYSENTER hardcodes CS.base=0 and SS.base=0 in the descriptor cache
+ * (Intel SDM Vol. 2B, SYSENTER).  With flat memory model (all segment
+ * bases=0), this matches KERNEL_CS/KERNEL_DS exactly — no address
+ * conversion is needed.  We still reload CS and SS to set the correct
+ * DPL and descriptor attributes.
+ *
+ * After SYSENTER:
+ *   EIP = kernel addr (MSR)     CS.base = 0 (matches flat kernel)
+ *   ESP = kernel addr (MSR)     SS.base = 0 (matches flat kernel)
+ *   DS/ES/FS/GS = user values   EFLAGS unchanged (IF may be 1)
+ */
+	.globl	EXT(sysenter_entry)
+LEXT(sysenter_entry)
+	/*
+	 * SYSENTER does NOT clear IF, so disable interrupts first.
+	 * SS.base=0 from SYSENTER matches our flat KERNEL_DS, and
+	 * ESP is already a valid kernel virtual address from the MSR.
+	 */
+	cli
+
+	pushl	%eax			/* save syscall number */
+
+	/*
+	 * Reload SS with KERNEL_DS to set DPL=0 descriptor attributes.
+	 * With flat model (base=0), no ESP adjustment is needed.
+	 */
+	movw	$(KERNEL_DS),%ax
+	movw	%ax,%ss
+
+	popl	%eax			/* restore syscall number */
+
+	/*
+	 * Reload CS with KERNEL_CS (DPL=0) via a far jump.
+	 */
+	ljmp	$(KERNEL_CS),$1f
+1:
+	/*
+	 * CS=KERNEL_CS, SS=KERNEL_DS — both base=0, DPL=0.
+	 * EIP and ESP are kernel-virtual addresses.
+	 * DS/ES/FS/GS still hold user values.
+	 * Interrupts are disabled (CLI above).
+	 *
+	 * Build the i386_saved_state frame expected by syscall_entry_3.
+	 */
+
+	/*
+	 * Hardware-equivalent portion of the trap frame
+	 * (ss, uesp, eflags, cs, eip) that INT/LCALL would push.
+	 */
+	pushl	$(USER_DS)		/* R_SS   - user data segment */
+	pushl	%ecx			/* R_UESP - user ESP (from ECX) */
+	pushf				/* R_EFLAGS - current flags (IF=0 from CLI) */
+	orl	$(0x200),(%esp)		/* set IF in saved EFLAGS (EFL_IF) */
+	pushl	$(USER_CS)		/* R_CS   - normalize to LDT user CS */
+	pushl	%edx			/* R_EIP  - user return addr (from EDX) */
+
+	/* System call number and trap number */
+	pushl	%eax			/* save system call number */
+	pushl	$(T_SYSENTER)		/* mark entry as SYSENTER */
+
+	/* General and segment registers (same as INT 0x80 path) */
+	pusha				/* save the general registers */
+	pushl	%ds			/* and the segment registers */
+	pushl	%es
+	pushl	%fs
+	pushl	%gs
+
+	mov	$(KERNEL_DS),%dx	/* switch to kernel data segment */
+	mov	%dx,%ds
+	mov	%dx,%es
+	mov	$(CPU_DATA),%dx
+	mov	%dx,%gs
+
+	sti				/* re-enable interrupts */
+
+	jmp	syscall_entry_3		/* join common syscall dispatch */
+
+/*
  * System call enters through a call gate.  Flags are not saved -
  * we must shuffle stack to look like trap save area.
  *
@@ -2065,7 +2188,7 @@ syscall_emul:
 	subl	$8,%edi			/* push space for new arguments */
 	cmpl	$(VM_MIN_ADDRESS),%edi	/* still in user space? */
 	jb	syscall_addr		/* error if not */
-	movl	$USER_DS,%ax		/* user data segment access */
+	movw	$USER_DS,%ax		/* user data segment access */
 1:
 	mov	%ax,%fs
 	movl	R_EFLAGS(%ebx),%eax	/* move flags */
@@ -2144,7 +2267,7 @@ ENTRY(copyin)
 	movl	MAP_PMAP(%ecx),%ecx		/* get map->pmap */
 	cmpl	kernel_pmap, %ecx
 	jz	1f
-	movl	$USER_DS,%cx		/* user data segment access */
+	movw	$USER_DS,%cx		/* user data segment access */
 	mov	%cx,%ds
 1:
 	cmpl	%esi,%eax
@@ -2200,7 +2323,7 @@ Entry(copyinstr)
 	mov	%ds,%cx			/* kernel data segment access */
 	jmp	1f
 0:
-	movl	$USER_DS,%cx		/* user data segment access */
+	movw	$USER_DS,%cx		/* user data segment access */
 1:
 	mov	%cx,%fs
 	xorl	%eax,%eax
@@ -2208,11 +2331,11 @@ Entry(copyinstr)
 	je	4f
 2:
 	RECOVER(copystr_fail)		/* copy bytes... */
-	movb	%fs:(%esi),%eax
+	movb	%fs:(%esi),%al
 	incl	%esi
 	testl	%edi,%edi		/* if kernel address is ... */
 	jz	3f			/* not NULL */
-	movb	%eax,(%edi)		/* copy the byte */
+	movb	%al,(%edi)		/* copy the byte */
 	incl	%edi
 3:
 	decl	%edx
@@ -2263,7 +2386,7 @@ ENTRY(copyout)
 	mov	%ds,%cx			/* else kernel data segment access */
 	jmp	1f
 0:
-	movl	$USER_DS,%cx
+	movw	$USER_DS,%cx
 1:
 	mov	%cx,%es
 
@@ -2290,7 +2413,7 @@ copyout_retry:
 	movl	%edi,%ebx		/* ebx = edi; */
 
 	mov	%es,%cx		
-	cmpl	$USER_DS,%cx		/* If kernel data segment */
+	cmpw	$USER_DS,%cx		/* If kernel data segment */
 	jnz	0f			/* skip check */
 
 #if	defined(AT386) && defined(i386)
@@ -2417,20 +2540,43 @@ ENTRY(_clts)
 	ret
 
 /*
- * Save complete FPU state.  Save error for later.
+ * Save complete FPU state.
+ * Uses XSAVE if fp_kind == FP_XSAVE, else FXSAVE.
+ * Argument: pointer to save area (64-byte aligned for XSAVE,
+ *           16-byte aligned for FXSAVE).
  */
 ENTRY(_fpsave)
 	movl	4(%esp),%eax		/* get save area pointer */
-	fnsave	(%eax)			/* save complete state, including */
-					/* errors */
+	cmpl	$5,EXT(fp_kind)		/* FP_XSAVE == 5 */
+	jne	1f
+	/* XSAVE: set EDX:EAX mask to -1 (save all components) */
+	movl	%eax,%ecx		/* save area pointer in ECX */
+	movl	$-1,%eax		/* mask low */
+	movl	$-1,%edx		/* mask high */
+	.byte	0x0f, 0xae, 0x21	/* xsave (%ecx) */
+	ret
+1:
+	fxsave	(%eax)			/* save complete state, including */
+					/* SSE and x87 */
 	ret
 
 /*
  * Restore FPU state.
+ * Uses XRSTOR if fp_kind == FP_XSAVE, else FXRSTOR.
+ * Argument: pointer to save area.
  */
 ENTRY(_fprestore)
 	movl	4(%esp),%eax		/* get save area pointer */
-	frstor	(%eax)			/* restore complete state */
+	cmpl	$5,EXT(fp_kind)		/* FP_XSAVE == 5 */
+	jne	1f
+	/* XRSTOR: set EDX:EAX mask to -1 (restore all components) */
+	movl	%eax,%ecx		/* save area pointer in ECX */
+	movl	$-1,%eax		/* mask low */
+	movl	$-1,%edx		/* mask high */
+	.byte	0x0f, 0xae, 0x29	/* xrstor (%ecx) */
+	ret
+1:
+	fxrstor	(%eax)			/* restore complete state */
 	ret
 
 /*
@@ -2874,13 +3020,13 @@ ENTRY(dr3)
 
 	movzbl	B_ARG1, %eax
 	andb	$3, %al
-	addb	$0x10, %ecx
+	addl	$0x10, %ecx
 	shll	%cl, %eax
 	orl	%eax, %edx
 
 	movzbl	B_ARG2, %eax
 	andb	$3, %al
-	addb	$0x2, %ecx
+	addl	$0x2, %ecx
 	shll	%cl, %eax
 	orl	%eax, %edx
 

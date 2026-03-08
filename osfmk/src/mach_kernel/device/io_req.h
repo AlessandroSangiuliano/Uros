@@ -288,7 +288,7 @@ extern void		disksort(
 				io_req_t	ior);
 extern vm_offset_t	block_io_mmap(dev_t, vm_offset_t, vm_prot_t);
 
-zone_t	io_req_zone;
+extern zone_t	io_req_zone;
 
 /*
  * Macros to allocate and free IORs
@@ -330,7 +330,7 @@ zone_t	io_req_zone;
 	(kfree((vm_offset_t)(sglist),				\
 	       IO_SGLIST_SIZE((sglist)->iosg_hdr.nentries)))
 
-zone_t	io_inband_zone; /* for inband reads */
+extern zone_t	io_inband_zone; /* for inband reads */
 
 #if CHAINED_IOS
 

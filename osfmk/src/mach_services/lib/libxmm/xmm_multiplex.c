@@ -232,11 +232,7 @@ xmm_multiplex_create(partition, new_mobj)
 }
 
 kern_return_t
-m_multiplex_init(mobj, k_kobj, pager_name, page_size)
-	xmm_obj_t	mobj;
-	xmm_obj_t	k_kobj;
-	mach_port_t	pager_name;
-	vm_size_t	page_size;
+m_multiplex_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t pager_name, vm_size_t page_size)
 {
 	xmm_obj_t kobj = MOBJ->kobj;
 
@@ -268,10 +264,7 @@ m_multiplex_init(mobj, k_kobj, pager_name, page_size)
 }
 
 kern_return_t
-m_multiplex_terminate(mobj, kobj, pager_name)
-	xmm_obj_t	mobj;
-	xmm_obj_t	kobj;
-	mach_port_t	pager_name;
+m_multiplex_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t pager_name)
 {
 	/*
 	 * As with all my other terminates, a lot more should happen here.
@@ -285,12 +278,7 @@ m_multiplex_terminate(mobj, kobj, pager_name)
 }
 
 kern_return_t
-m_multiplex_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t	mobj;
-	xmm_obj_t	kobj;
-	vm_offset_t	offset;
-	vm_size_t	length;
-	vm_prot_t	desired_access;
+m_multiplex_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	vm_offset_t	block;
 	request_t	r;
@@ -341,12 +329,7 @@ m_multiplex_data_request(mobj, kobj, offset, length, desired_access)
  * bottom-level memory manager will take care of it.
  */
 kern_return_t
-m_multiplex_data_write(mobj, kobj, offset, data, length)
-	xmm_obj_t	mobj;
-	xmm_obj_t	kobj;
-	vm_offset_t	offset;
-	vm_offset_t	data;
-	vm_size_t	length;
+m_multiplex_data_write(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	kern_return_t	kr;
 	vm_offset_t	block;
@@ -411,41 +394,25 @@ k_partition_reply(kobj, offset, data, length, lock_value, error_value)
 	return KERN_SUCCESS;
 }
 
-k_partition_data_provided(kobj, offset, data, length, lock_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
-	vm_prot_t lock_value;
+k_partition_data_provided(xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length, vm_prot_t lock_value)
 {
 	return k_partition_reply(kobj, offset, data, length, lock_value,
 				 KERN_SUCCESS);
 }
 
-k_partition_data_unavailable(kobj, offset, length)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+k_partition_data_unavailable(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	return k_partition_reply(kobj, offset, 0, length, VM_PROT_NONE,
 				 KERN_SUCCESS);
 }
 
-k_partition_data_error(kobj, offset, length, error_value)
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t error_value;
+k_partition_data_error(xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t error_value)
 {
 	return k_partition_reply(kobj, offset, 0, length, VM_PROT_NONE,
 				 error_value);
 }
 
-k_partition_set_attributes(kobj, object_ready, may_cache, copy_strategy)
-	xmm_obj_t kobj;
-	boolean_t object_ready;
-	boolean_t may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+k_partition_set_attributes(xmm_obj_t kobj, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	xmm_obj_t mobj;
 
@@ -466,8 +433,7 @@ k_partition_set_attributes(kobj, object_ready, may_cache, copy_strategy)
  * Allocate a page in a paging file
  */
 vm_offset_t
-pager_alloc_page(kobj)
-	xmm_obj_t kobj;
+pager_alloc_page(xmm_obj_t kobj)
 {
 	int	byte;
 	int	bit;
@@ -504,9 +470,7 @@ pager_alloc_page(kobj)
  * Deallocate a page in a paging file
  */
 void
-pager_dealloc_page(kobj, page)
-	xmm_obj_t kobj;
-	vm_offset_t page;
+pager_dealloc_page(xmm_obj_t kobj, vm_offset_t page)
 {
 	int bit, byte;
 	
@@ -639,9 +603,7 @@ pager_extend(mobj, new_size)
  * Return NO_BLOCK if none allocated.
  */
 vm_offset_t
-pager_read_offset(mobj, offset)
-	xmm_obj_t	mobj;
-	vm_offset_t	offset;
+pager_read_offset(xmm_obj_t mobj, vm_offset_t offset)
 {
 	vm_offset_t	f_page;
 	
@@ -681,9 +643,7 @@ pager_read_offset(mobj, offset)
  * without notice!
  */
 vm_offset_t
-pager_write_offset(mobj, offset)
-	xmm_obj_t	mobj;
-	vm_offset_t	offset;
+pager_write_offset(xmm_obj_t mobj, vm_offset_t offset)
 {
 	vm_offset_t	block, f_page;
 	vm_offset_t	*map;
@@ -734,8 +694,7 @@ pager_write_offset(mobj, offset)
  * Deallocate all of the blocks belonging to a paging object.
  */
 void
-pager_dealloc(mobj)
-	xmm_obj_t mobj;
+pager_dealloc(xmm_obj_t mobj)
 {
 	int i, j;
 	vm_offset_t block;
@@ -787,8 +746,7 @@ request_allocate()
 }
 
 static void
-request_deallocate(r)
-	request_t r;
+request_deallocate(request_t r)
 {
 	if (free_request) {
 		free((char *) r);

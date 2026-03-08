@@ -232,8 +232,7 @@ do_stop_prof_cmd(
 	return(KERN_SUCCESS);
 }
 
-prof_cmd_thread_body(port)
-mach_port_t port;
+prof_cmd_thread_body(mach_port_t port)
 {
 	extern boolean_t prof_ctrl_server();
 

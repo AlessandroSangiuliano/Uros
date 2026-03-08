@@ -104,16 +104,26 @@
 #include "type.h"
 #include <mach/message.h>
 #include <stdarg.h>
+#include <stdlib.h>
 #include "routine.h"
 #include "write.h"
 #include "global.h"
 #include "utils.h"
+#include "safestr.h" /* SafeSnprintf */
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <execinfo.h>
+
+/* Forward declaration for SafeString to avoid implicit-declaration warnings */
+void SafeString(FILE *file, const char *s);
 
 extern char *MessFreeRoutine;
 
 void
-WriteIdentificationString(file)
-    FILE *file;
+WriteIdentificationString(FILE *file)
 {
     extern char * GenerationDate;
     extern char * MigGenerationDate;
@@ -135,18 +145,13 @@ WriteIdentificationString(file)
 }
 
 void
-WriteImport(file, filename)
-    FILE *file;
-    string_t filename;
+WriteImport(FILE *file, string_t filename)
 {
     fprintf(file, "#include %s\n", filename);
 }
 
 void
-WriteRCSDecl(file, name, rcs)
-    FILE *file;
-    identifier_t name;
-    string_t rcs;
+WriteRCSDecl(FILE *file, identifier_t name, string_t rcs)
 {
     fprintf(file, "#ifndef\tlint\n");
     fprintf(file, "#if\tUseExternRCSId\n");
@@ -159,8 +164,7 @@ WriteRCSDecl(file, name, rcs)
 }
 
 void
-WriteBogusDefines(file)
-    FILE *file;
+WriteBogusDefines(FILE *file)
 {
     fprintf(file, "#ifndef\tmig_internal\n");
     fprintf(file, "#define\tmig_internal\tstatic\n");
@@ -195,12 +199,9 @@ WriteBogusDefines(file)
 }
 
 void
-WriteList(file, args, func, mask, between, after)
-    FILE *file;
-    argument_t *args;
-    void (*func)();
-    u_int mask;
-    char *between, *after;
+WriteList(FILE *file, argument_t *args,
+          void (*func)(FILE *file, argument_t *arg),
+          u_int mask, char *between, char *after)
 {
     register argument_t *arg;
     register boolean_t sawone = FALSE;
@@ -209,23 +210,19 @@ WriteList(file, args, func, mask, between, after)
 	if (akCheckAll(arg->argKind, mask))
 	{
 	    if (sawone)
-		fprintf(file, "%s", between);
-	    sawone = TRUE;
-
+            SafeString(file, between);
 	    (*func)(file, arg);
+	    sawone = TRUE;
 	}
 
     if (sawone)
-	fprintf(file, "%s", after);
+	SafeString(file, after);
 }
 
 static boolean_t
-WriteReverseListPrim(file, arg, func, mask, between)
-    FILE *file;
-    register argument_t *arg;
-    void (*func)();
-    u_int mask;
-    char *between;
+WriteReverseListPrim(FILE *file, register argument_t *arg,
+                     void (*func)(FILE *file, argument_t *arg),
+                     u_int mask, char *between)
 {
     boolean_t sawone = FALSE;
 
@@ -236,7 +233,7 @@ WriteReverseListPrim(file, arg, func, mask, between)
 	if (akCheckAll(arg->argKind, mask))
 	{
 	    if (sawone)
-		fprintf(file, "%s", between);
+		SafeString(file, between);
 	    sawone = TRUE;
 
 	    (*func)(file, arg);
@@ -247,90 +244,75 @@ WriteReverseListPrim(file, arg, func, mask, between)
 }
 
 void
-WriteReverseList(file, args, func, mask, between, after)
-    FILE *file;
-    argument_t *args;
-    void (*func)();
-    u_int mask;
-    char *between, *after;
+WriteReverseList(FILE *file, argument_t *args,
+                 void (*func)(FILE *file, argument_t *arg),
+                 u_int mask, char *between, char *after)
 {
     boolean_t sawone;
 
     sawone = WriteReverseListPrim(file, args, func, mask, between);
 
     if (sawone)
-	fprintf(file, "%s", after);
+	SafeString(file, after);
 }
 
 void
-WriteNameDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteNameDecl(FILE *file, argument_t *arg)
 {
-    fprintf(file, "%s", arg->argVarName);
+    SafeString(file, arg->argVarName);
 }
 
 void
-WriteUserVarDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteUserVarDecl(FILE *file, argument_t *arg)
 {
     char *ref = arg->argByReferenceUser ? "*" : "";
 
-    fprintf(file, "\t%s %s%s", arg->argType->itUserType, ref, arg->argVarName);
+    fprintf(file, "\t%s %s", arg->argType->itUserType, ref);
+	SafeString(file, arg->argVarName);
 }
 
 void
-WriteServerVarDecl(file, arg)
-    FILE *file;
-    argument_t *arg;
+WriteServerVarDecl(FILE *file, argument_t *arg)
 {
     char *ref = arg->argByReferenceServer ? "*" : "";
   
-    fprintf(file, "\t%s %s%s",
-	    arg->argType->itTransType, ref, arg->argVarName);
+    fprintf(file, "\t%s %s", arg->argType->itTransType, ref);
+	SafeString(file, arg->argVarName);
 }
 
 char *
-ReturnTypeStr(rt)
-    routine_t *rt;
+ReturnTypeStr(routine_t *rt)
 {
     return rt->rtRetCode->argType->itUserType;
-}
+} 
 
 char *
-FetchUserType(it)
-    ipc_type_t *it;
+FetchUserType(ipc_type_t *it)
 {
     return it->itUserType;
-}
+} 
 
 char *
-FetchUserKPDType(it)
-    ipc_type_t *it;
+FetchUserKPDType(ipc_type_t *it)
 {
     return it->itUserKPDType;
-}
+} 
 
 char *
-FetchServerType(it)
-    ipc_type_t *it;
+FetchServerType(ipc_type_t *it)
 {
     return it->itServerType;
-}
+} 
 
 char *
-FetchServerKPDType(it)
-    ipc_type_t *it;
+FetchServerKPDType(ipc_type_t *it)
 {
     /* do we really need to differentiate User and Server ?? */
     return it->itServerKPDType;
-}
+} 
 
 void
-WriteTrailerDecl(file, trailer)
-    FILE *file;
-    boolean_t trailer;
+WriteTrailerDecl(FILE *file, boolean_t trailer)
 {
     if (trailer)
 	fprintf(file, "\t\tmach_msg_format_0_trailer_t trailer;\n");
@@ -339,10 +321,19 @@ WriteTrailerDecl(file, trailer)
 }
 
 void
-WriteFieldDeclPrim(file, arg, tfunc)
-    FILE *file;
-    argument_t *arg;
-    char *(*tfunc)();
+SafeString(FILE *file, const char *s)
+{
+    if (s == NULL) {
+        fputs("(null)", file);
+        return;
+    }
+    /* Just output the string - identifiers should be clean */
+    fputs(s, file);
+}
+
+void
+WriteFieldDeclPrim(FILE *file, argument_t *arg,
+                   char *(*tfunc)(ipc_type_t *it))
 {
     register ipc_type_t *it = arg->argType;
 
@@ -388,14 +379,11 @@ WriteFieldDeclPrim(file, arg, tfunc)
 
 
 void
-WriteStructDecl(file, args, func, mask, name, simple, trailer, isuser, template_only)
-    FILE *file;
-    argument_t *args;
-    void (*func)();
-    u_int mask;
-    char *name;
-    boolean_t simple, trailer;
-    boolean_t isuser, template_only;
+WriteStructDecl(FILE *file, argument_t *args,
+                void (*func)(FILE *file, argument_t *arg),
+                u_int mask, char *name,
+                boolean_t simple, boolean_t trailer,
+                boolean_t isuser, boolean_t template_only)
 {
     fprintf(file, "\ttypedef struct {\n");
     fprintf(file, "\t\tmach_msg_header_t Head;\n");
@@ -423,26 +411,19 @@ WriteStructDecl(file, args, func, mask, name, simple, trailer, isuser, template_
 }
 
 void
-WriteTemplateDeclIn(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTemplateDeclIn(FILE *file, register argument_t *arg)
 {
     (*arg->argKPD_Template)(file, arg, TRUE);
 }
 
 void
-WriteTemplateDeclOut(file, arg)
-    FILE *file;
-    register argument_t *arg;
+WriteTemplateDeclOut(FILE *file, register argument_t *arg)
 {
     (*arg->argKPD_Template)(file, arg, FALSE);
 }
 
 void
-WriteTemplateKPD_port(file, arg, in)
-    FILE *file;
-    argument_t *arg;
-    boolean_t in;
+WriteTemplateKPD_port(FILE *file, register argument_t *arg, boolean_t in)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -461,10 +442,7 @@ WriteTemplateKPD_port(file, arg, in)
 }
 
 void
-WriteTemplateKPD_ool(file, arg, in)
-    FILE *file;
-    argument_t *arg;
-    boolean_t in;
+WriteTemplateKPD_ool(FILE *file, argument_t *arg, boolean_t in)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -494,10 +472,7 @@ WriteTemplateKPD_ool(file, arg, in)
 }
 
 void
-WriteTemplateKPD_oolport(file, arg, in)
-    FILE *file;
-    argument_t *arg;
-    boolean_t in;
+WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in)
 {
     register ipc_type_t *it = arg->argType;
 
@@ -529,59 +504,60 @@ WriteTemplateKPD_oolport(file, arg, in)
  * Like vfprintf, but omits a leading comment in the format string
  * and skips the items that would be printed by it.  Only %s, %d,
  * and %f are recognized.
+ *
+ * Note: On x86_64, va_list is an array type, so passing it to a function
+ * passes by reference. This means that va_arg advances in this function
+ * will be visible to the caller.
  */
-void
-SkipVFPrintf(file, fmt, pvar)
-    FILE *file;
-    register char *fmt;
-    va_list pvar;
+static void
+SkipVFPrintf(FILE *file, register char *fmt, va_list pvar)
 {
     if (*fmt == 0)
-	return;	/* degenerate case */
+        return; /* degenerate case */
 
     if (fmt[0] == '/' && fmt[1] == '*') {
-	/* Format string begins with C comment.  Scan format
-	   string until end-comment delimiter, skipping the
-	   items in pvar that the enclosed format items would
-	   print. */
+        /* Format string begins with C comment.  Scan format
+           string until end-comment delimiter, skipping the
+           items in pvar that the enclosed format items would
+           print. */
 
-	register int c;
+        register int c;
 
-	fmt += 2;
-	for (;;) {
-	    c = *fmt++;
-	    if (c == 0)
-		return;	/* nothing to format */
-	    if (c == '*') {
-		if (*fmt == '/') {
-		    break;
-		}
-	    }
-	    else if (c == '%') {
-		/* Field to skip */
-		c = *fmt++;
-		switch (c) {
-		    case 's':
-			(void) va_arg(pvar, char *);
-			break;
-		    case 'd':
-			(void) va_arg(pvar, int);
-			break;
-		    case 'f':
-			(void) va_arg(pvar, double);
-			break;
-		    case '\0':
-			return; /* error - fmt ends with '%' */
-		    default:
-			break;
-		}
-	    }
-	}
-	/* End of comment.  To be pretty, skip
-	   the space that follows. */
-	fmt++;
-	if (*fmt == ' ')
-	    fmt++;
+        fmt += 2;
+        for (;;) {
+            c = *fmt++;
+            if (c == 0)
+                return; /* nothing to format */
+            if (c == '*') {
+                if (*fmt == '/') {
+                    break;
+                }
+            }
+            else if (c == '%') {
+                /* Field to skip */
+                c = *fmt++;
+                switch (c) {
+                    case 's':
+                        (void) va_arg(pvar, char *);
+                        break;
+                    case 'd':
+                        (void) va_arg(pvar, int);
+                        break;
+                    case 'f':
+                        (void) va_arg(pvar, double);
+                        break;
+                    case '\0':
+                        return; /* error - fmt ends with '%' */
+                    default:
+                        break;
+                }
+            }
+        }
+        /* End of comment.  To be pretty, skip
+           the space that follows. */
+        fmt++;
+        if (*fmt == ' ')
+            fmt++;
     }
 
     /* Now format the string. */
@@ -619,6 +595,55 @@ vWriteCopyType(FILE *file, ipc_type_t *it, char *left, char *right, va_list pvar
     }
 }
 
+/* Simple, safe WriteCopyType that accepts fully-expanded left/right
+ * strings (no printf-style varargs).  This avoids varargs propagation
+ * and the associated uninitialized-memory risks when arguments are
+ * assembled across multiple layers.
+ */
+void
+WriteCopyTypeSimple(FILE *file, ipc_type_t *it, const char *left, const char *right)
+{
+    /* Optional check: ensure left/right strings are ASCII (detects embedded garbage) */
+    if (getenv("MIG_CHECK_WRITEBUF")) {
+        const unsigned char *l = (const unsigned char *)left;
+        const unsigned char *r = (const unsigned char *)right;
+        size_t i;
+        for (i = 0; l && l[i]; ++i) {
+            unsigned char c = l[i];
+            if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                fprintf(stderr, "[WriteCopyTypeSimple-Check] non-ASCII byte 0x%02x in left at offset %zu\n", c, i);
+                {
+                    void *bt[32]; int n = backtrace(bt, 32);
+                    backtrace_symbols_fd(bt, n, fileno(stderr));
+                }
+                raise(SIGTRAP);
+                break;
+            }
+        }
+        for (i = 0; r && r[i]; ++i) {
+            unsigned char c = r[i];
+            if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                fprintf(stderr, "[WriteCopyTypeSimple-Check] non-ASCII byte 0x%02x in right at offset %zu\n", c, i);
+                {
+                    void *bt[32]; int n = backtrace(bt, 32);
+                    backtrace_symbols_fd(bt, n, fileno(stderr));
+                }
+                raise(SIGTRAP);
+                break;
+            }
+        }
+    }
+
+    if (it->itStruct) {
+        fprintf(file, "\t%s = %s;\n", left, right);
+    } else if (it->itString) {
+        fprintf(file, "\t(void) mig_strncpy(%s, %s, %d);\n", left, right, it->itTypeSize);
+    } else {
+        fprintf(file, "\t{   typedef struct { char data[%d]; } *sp;\n", it->itTypeSize);
+        fprintf(file, "\t    * (sp) %s = * (sp) %s;\n\t}\n", left, right);
+    }
+}
+
 
 /*ARGSUSED*/
 /*VARARGS4*/
@@ -628,7 +653,7 @@ WriteCopyType(FILE *file, ipc_type_t *it, char *left, char *right, ...)
     va_list pvar;
     va_start(pvar, right);
 
-    vWriteCopyType(file, it, left, right, pvar)
+    vWriteCopyType(file, it, left, right, pvar);
 
     va_end(pvar);
 }
@@ -649,7 +674,10 @@ WriteCopyArg(FILE *file, argument_t *arg, char *left, char *right, ...)
 	    (void) SkipVFPrintf(file, left, pvar);
 	    fprintf(file, ", ");
 	    (void) SkipVFPrintf(file, right, pvar);
-	    fprintf(file, ", %s);\n", arg->argCount->argVarName);
+	    if (arg->argCount != argNULL && arg->argCount->argVarName != strNULL)
+	        fprintf(file, ", %s);\n", arg->argCount->argVarName);
+	    else
+	        fprintf(file, ", 0 /* missing argCount */);\n");
 	} else
 	    vWriteCopyType(file, it, left, right, pvar);
     }
@@ -662,27 +690,27 @@ WriteCopyArg(FILE *file, argument_t *arg, char *left, char *right, ...)
  * Global KPD disciplines 
  */
 void
-KPD_error(file, arg)
-    FILE *file;
-    argument_t *arg;
+KPD_error(FILE *file, argument_t *arg)
 {
     printf("MiG internal error: argument is %s\n", arg->argVarName);
     exit(1);
 }
 
 void
-KPD_noop(file, arg)
-    FILE *file;
-    argument_t *arg;
+KPD_noop(FILE *file, argument_t *arg)
 {
 }
 
+/* Wrapper for KPD_error matching the Template signature (takes 'in' flag). */
+void
+KPD_error_template(FILE *file, argument_t *arg, boolean_t in)
+{
+    /* 'in' parameter is ignored; forward to the common KPD_error handler */
+    KPD_error(file, arg);
+}
+
 static void
-WriteStringDynArgs(args, mask, InPOutP, str_oolports, str_ool)
-    argument_t *args;
-    u_int	mask;
-    string_t 	InPOutP;
-    string_t 	*str_oolports, *str_ool;
+WriteStringDynArgs(argument_t *args, u_int mask, string_t InPOutP, string_t *str_oolports, string_t *str_ool)
 {
     argument_t *arg;
     char loc[100], sub[20];
@@ -707,22 +735,65 @@ WriteStringDynArgs(args, mask, InPOutP, str_oolports, str_ool)
 	cnt = multiplier;
 	while (cnt) {
 	    if (complex)
-		sprintf(sub, "[%d]", multiplier - cnt);
+		SafeSnprintf(sub, sizeof(sub), "[%d]", multiplier - cnt);
 	    if (akCheck(arg->argKind, mask) && 
 		it->itPortType && !it->itInLine && test) {
-		    sprintf(loc, " + %s->%s%s.count", InPOutP, arg->argMsgField,
+		    SafeSnprintf(loc, sizeof(loc), " + %s->%s%s.count", InPOutP, arg->argMsgField,
 		        complex ? sub : "");
 		    tmp_str1 = strconcat(tmp_str1, loc);
 	    }
 	    if (akCheck(arg->argKind, mask) && 
 		!it->itInLine && !it->itPortType && test) {
-	 	    sprintf(loc, " + %s->%s%s.size", InPOutP, arg->argMsgField,
+	 	    SafeSnprintf(loc, sizeof(loc), " + %s->%s%s.size", InPOutP, arg->argMsgField,
 		        complex ? sub : "");
 		    tmp_str2 = strconcat(tmp_str2, loc);
 	    }
 	    cnt--;
 	}
     }
+    /* Debugging checks: detect non-ASCII bytes in the constructed strings and print backtrace for diagnostics. */
+    if (tmp_str1 && tmp_str1[0]) {
+        size_t __len1 = strlen(tmp_str1);
+        size_t __i1;
+        for (__i1 = 0; __i1 < __len1; ++__i1) {
+            unsigned char __c = (unsigned char)tmp_str1[__i1];
+            if ((__c < 32 && __c != 9 && __c != 10 && __c != 13) || __c > 126) {
+                fprintf(stderr, "[DEBUG-WriteStringDynArgs] non-ASCII byte 0x%02x in tmp_str1 at offset %zu (len=%zu)\n", __c, __i1, __len1);
+                void *__bt[32]; int __n = backtrace(__bt, 32); backtrace_symbols_fd(__bt, __n, fileno(stderr));
+                /* also dump a small hex context */
+                size_t __start = (__i1 > 32) ? (__i1 - 32) : 0;
+                size_t __end = (__i1 + 128 < __len1) ? (__i1 + 128) : __len1;
+                fprintf(stderr, "context hex (tmp_str1):");
+                size_t __j;
+                for (__j = __start; __j < __end; ++__j) fprintf(stderr, " %02x", (unsigned char)tmp_str1[__j]);
+                fprintf(stderr, "\n");
+                break;
+            }
+        }
+        if (__len1 > 1024)
+            fprintf(stderr, "[DEBUG-WriteStringDynArgs] tmp_str1 length = %zu\n", __len1);
+    }
+    if (tmp_str2 && tmp_str2[0]) {
+        size_t __len2 = strlen(tmp_str2);
+        size_t __i2;
+        for (__i2 = 0; __i2 < __len2; ++__i2) {
+            unsigned char __c = (unsigned char)tmp_str2[__i2];
+            if ((__c < 32 && __c != 9 && __c != 10 && __c != 13) || __c > 126) {
+                fprintf(stderr, "[DEBUG-WriteStringDynArgs] non-ASCII byte 0x%02x in tmp_str2 at offset %zu (len=%zu)\n", __c, __i2, __len2);
+                void *__bt2[32]; int __n2 = backtrace(__bt2, 32); backtrace_symbols_fd(__bt2, __n2, fileno(stderr));
+                size_t __start2 = (__i2 > 32) ? (__i2 - 32) : 0;
+                size_t __end2 = (__i2 + 128 < __len2) ? (__i2 + 128) : __len2;
+                fprintf(stderr, "context hex (tmp_str2):");
+                size_t __j;
+                for (__j = __start2; __j < __end2; ++__j) fprintf(stderr, " %02x", (unsigned char)tmp_str2[__j]);
+                fprintf(stderr, "\n");
+                break;
+            }
+        }
+        if (__len2 > 1024)
+            fprintf(stderr, "[DEBUG-WriteStringDynArgs] tmp_str2 length = %zu\n", __len2);
+    }
+
     *str_oolports = tmp_str1;
     *str_ool = tmp_str2;  
 }
@@ -731,10 +802,7 @@ WriteStringDynArgs(args, mask, InPOutP, str_oolports, str_ool)
  * Utilities for Logging Events that happen at the stub level
  */
 void
-WriteLogMsg(file, rt, where, what)
-    FILE *file;
-    routine_t *rt;
-    int where, what;
+WriteLogMsg(FILE *file, routine_t *rt, int where, int what)
 {
     string_t ptr_str;
     string_t StringOolPorts = strNULL;
@@ -810,9 +878,7 @@ WriteLogMsg(file, rt, where, what)
 }
 
 void
-WriteLogDefines(file, who)
-    FILE *file;
-    string_t who;
+WriteLogDefines(FILE *file, string_t who)
 {
     fprintf(file, "#if  MIG_DEBUG\n");
     fprintf(file, "#define LOG_W_E(X)\tLOG_ERRORS(%s, \\\n", who);
@@ -825,18 +891,13 @@ WriteLogDefines(file, who)
 
 /* common utility to report errors */
 void
-WriteReturnMsgError(file, rt, isuser, arg, error)
-    FILE *file;
-    routine_t *rt;
-    boolean_t isuser;
-    argument_t *arg;
-    string_t error;
+WriteReturnMsgError(FILE *file, routine_t *rt, boolean_t isuser, argument_t *arg, string_t error)
 {
     char space[MAX_STR_LEN];
     string_t string = &space[0];
 
     if (UseEventLogger && arg != argNULL) 
-	sprintf(string, "LOG_W_E(\"%s\"); ", arg->argVarName);
+	SafeSnprintf(string, MAX_STR_LEN, "LOG_W_E(\"%s\"); ", arg->argVarName);
     else
 	string = "";
 
@@ -854,10 +915,7 @@ WriteReturnMsgError(file, rt, isuser, arg, error)
 
 /* executed iff elements are defined */
 void
-WriteCheckTrailerHead(file, rt, isuser)
-    FILE *file;
-    routine_t *rt;
-    boolean_t isuser;
+WriteCheckTrailerHead(FILE *file, routine_t *rt, boolean_t isuser)
 {
     string_t who = (isuser) ? "Out0P" : "In0P";
 
@@ -875,10 +933,7 @@ WriteCheckTrailerHead(file, rt, isuser)
 
 /* executed iff elements are defined */
 void
-WriteCheckTrailerSize(file, isuser, arg)
-    FILE *file;
-    boolean_t isuser;
-    register argument_t *arg;
+WriteCheckTrailerSize(FILE *file, boolean_t isuser, argument_t *arg)
 {
     fprintf(file, "#if\tTypeCheck\n");
     if (akIdent(arg->argKind) == akeMsgSeqno) {

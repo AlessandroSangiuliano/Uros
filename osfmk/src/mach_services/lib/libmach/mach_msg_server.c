@@ -73,8 +73,8 @@ mach_msg_server_once(
     mach_msg_options_t options)
 {
     mig_reply_error_t *bufRequest = 0, *bufReply = 0, *bufTemp;
-    register mach_msg_return_t mr;
-    register kern_return_t kr;
+    mach_msg_return_t mr;
+    kern_return_t kr;
 
     if ((kr = vm_allocate(mach_task_self(),
 		     (vm_address_t *)&bufRequest,
@@ -187,8 +187,8 @@ mach_msg_server(
     mach_msg_options_t options)
 {
     mig_reply_error_t *bufRequest = 0, *bufReply = 0, *bufTemp;
-    register mach_msg_return_t mr;
-    register kern_return_t kr;
+    mach_msg_return_t mr;
+    kern_return_t kr;
 
     if ((kr = vm_allocate(mach_task_self(),
 		     (vm_address_t *)&bufRequest,
@@ -202,7 +202,6 @@ mach_msg_server(
       return kr;    
 
     for (;;) {
-      get_request:
 	mr = mach_msg_overwrite_trap(&bufRequest->Head, MACH_RCV_MSG|options,
 		      0, max_size, rcv_name,
 		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL,
@@ -215,7 +214,7 @@ mach_msg_server(
 	    if (!(bufReply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
 		bufReply->RetCode != KERN_SUCCESS) {
 		    if (bufReply->RetCode == MIG_NO_REPLY)
-			goto get_request;
+			break;
 
 		    /* don't destroy the reply port right,
 			so we can send an error message */
@@ -228,7 +227,7 @@ mach_msg_server(
 		if (bufReply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX)
 		    mach_msg_destroy(&bufReply->Head);
 
-		goto get_request;
+		break;
 	    }
 
 	    /* send reply and get next request */
@@ -255,6 +254,8 @@ mach_msg_server(
 			  bufRequest->Head.msgh_size, max_size, rcv_name,
 			  0, MACH_PORT_NULL, (mach_msg_header_t *) 0, 0);
 	}
+	if (mr == MACH_MSG_SUCCESS)
+	    continue;
 
 	/* a message error occurred */
 

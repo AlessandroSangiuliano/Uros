@@ -37,6 +37,12 @@
 #include <mach/clock_types.h>
 #include <kern/host.h>
 
+/* 
+ * alarm_port_t is ipc_port_t in the kernel server context.
+ * This typedef is needed for MIG-generated headers.
+ */
+typedef ipc_port_t	alarm_port_t;
+
 
 /*
  * Actual clock alarm structure. Used for user clock_sleep() and

@@ -255,7 +255,7 @@ task_set_emulation_vector_internal(
 	eml_dispatch_t	cur_eml, new_eml, old_eml;
 	vm_size_t	new_size;
 	int		cur_start, cur_end;
-	int		new_start, new_end;
+	int		new_start = 0, new_end = 0;
 	int		vector_end;
 
 	if (task == TASK_NULL)

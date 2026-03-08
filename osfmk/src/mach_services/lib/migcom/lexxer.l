@@ -111,6 +111,28 @@ FileName	({QString}|{AString})
 #include "global.h"
 #include "parser.h"
 #include "lexxer.h"
+#include <execinfo.h>
+#include <signal.h>
+
+static void SafeEcho(const char *buf, size_t len)
+{
+    size_t i;
+    for (i = 0; i < len; ++i) {
+        unsigned char b = (unsigned char)buf[i];
+        if ((b < 32 && b != 9 && b != 10 && b != 13) || b > 126) {
+            fprintf(stderr, "[lexxer-SafeEcho] non-ASCII byte 0x%02x at offset %zu\n", b, i);
+            void *bt[32];
+            int n = backtrace(bt, 32);
+            backtrace_symbols_fd(bt, n, fileno(stderr));
+            raise(SIGTRAP);
+        }
+    }
+    /* If no non-ASCII found, write out as before */
+    fwrite(buf, (size_t) len, 1, yyout);
+}
+
+#undef ECHO
+#define ECHO do { SafeEcho(yytext, yyleng); } while (0)
 
 #ifdef	__STDC__
 #define stringize(x)	#x
@@ -155,7 +177,7 @@ static int	oldYYBegin = 0;
 int lineno = 0;			/* Replaces lex yylineno */
 
 static void doSharp(); /* process body of # directives */
-extern void yyerror();
+extern void yyerror(char *);
 %}
 
 %Start	Normal String FileName QString SkipToEOL
@@ -177,9 +199,13 @@ extern void yyerror();
 <Normal>[Uu][Ss][Ee][Rr][Ss][Ee][Cc][Tt][Oo][Kk][Ee][Nn]	RETURN(syUserSecToken);
 <Normal>[Ii][Nn][Oo][Uu][Tt]			RETURN(syInOut);
 <Normal>[Rr][Ee][Qq][Uu][Ee][Ss][Tt][Pp][Oo][Rr][Tt]	RETURN(syRequestPort);
+<Normal>[Rr][Ee][Qq][Uu][Ee][Ss][Tt]_[Pp][Oo][Rr][Tt]	RETURN(syRequestPort);
 <Normal>[Rr][Ee][Pp][Ll][Yy][Pp][Oo][Rr][Tt]		RETURN(syReplyPort);
+<Normal>[Rr][Ee][Pp][Ll][Yy]_[Pp][Oo][Rr][Tt]		RETURN(syReplyPort);
 <Normal>[Uu][Rr][Ee][Pp][Ll][Yy][Pp][Oo][Rr][Tt]	RETURN(syUReplyPort);
+<Normal>[Uu][Rr][Ee][Pp][Ll][Yy]_[Pp][Oo][Rr][Tt]	RETURN(syUReplyPort);
 <Normal>[Ss][Rr][Ee][Pp][Ll][Yy][Pp][Oo][Rr][Tt]	RETURN(sySReplyPort);
+<Normal>[Ss][Rr][Ee][Pp][Ll][Yy]_[Pp][Oo][Rr][Tt]	RETURN(sySReplyPort);
 <Normal>[Aa][Rr][Rr][Aa][Yy]			RETURN(syArray);
 <Normal>[Oo][Ff]				RETURN(syOf);
 <Normal>[Ee][Rr][Rr][Oo][Rr]			RETURN(syErrorProc);
@@ -310,8 +336,7 @@ LookFileName()
 }
 
 static void
-doSharp(body)
-    char *body;
+doSharp(char *body)
 {
     register char *startName, *endName;
 

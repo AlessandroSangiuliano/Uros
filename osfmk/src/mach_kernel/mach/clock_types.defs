@@ -37,17 +37,19 @@ type clock_t = mach_port_t
 		ctype: mach_port_t
 #if	KERNEL_SERVER
 		intran: clock_t convert_port_to_clock(mach_port_t)
-		outtran: mach_port_t convert_clock_to_port(clock_t)
-#endif	/* KERNEL_SERVER */
+		outtran: mach_port_t convert_clock_to_port(clock_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 type clock_ctrl_t = mach_port_t
 		ctype: mach_port_t
 #if	KERNEL_SERVER
 		intran: clock_t convert_port_to_clock_ctrl(mach_port_t)
-		outtran: mach_port_t convert_clock_ctrl_to_port(clock_t)
-#endif	/* KERNEL_SERVER */
+		outtran: mach_port_t convert_clock_ctrl_to_port(clock_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 type clock_flavor_t = int;
 type clock_attr_t = array[*:1] of int;
@@ -58,8 +60,17 @@ type alarm_type_t = int;
 type clock_res_t = int;
 type clock_id_t = int;
 
+type alarm_port_t = mach_port_t
+#if	KERNEL_SERVER
+		ctype: ipc_port_t
+		intran: ipc_port_t null_conversion(mach_port_t) ;
+#else
+		ctype: mach_port_t ;
+#endif	/* KERNEL_SERVER */
+
 #if	KERNEL_SERVER
 simport <kern/clock.h>;		/* for clock_t */
+simport <kern/ipc_kobject.h>;	/* for null_conversion */
 #endif	/* KERNEL_SERVER */
 
 import <mach/mach_types.h>;

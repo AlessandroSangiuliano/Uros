@@ -172,6 +172,7 @@
 #include <i386/user_ldt.h>
 #include <i386/fpu.h>
 #include <i386/iopb_entries.h>
+#include <i386/sysenter.h>
 
 /*
  * Maps state flavor to number of words in the state:
@@ -305,6 +306,7 @@ act_machine_switch_pcb( thread_act_t new_act )
 	    if (!(gdt_desc_p(mycpu,KERNEL_TSS)->access & ACC_TSS_BUSY))
 		set_tr(KERNEL_TSS);
 	    curr_ktss(mycpu)->esp0 = pcb_stack_top;
+	    sysenter_update_esp(pcb_stack_top);
 	}
 	else {
 	    /*
@@ -313,6 +315,7 @@ act_machine_switch_pcb( thread_act_t new_act )
 	    *gdt_desc_p(mycpu,USER_TSS)
 	    	= *(struct real_descriptor *)tss->iopb_desc;
 	    tss->tss.esp0 = pcb_stack_top;
+	    sysenter_update_esp(pcb_stack_top);
 	    set_tr(USER_TSS);
 	    gdt_desc_p(mycpu,KERNEL_TSS)->access &= ~ ACC_TSS_BUSY;
 	}
@@ -680,6 +683,8 @@ act_machine_set_state(
 		    return(KERN_INVALID_ARGUMENT);
 		}
 
+		state = (struct i386_thread_state *) tstate;
+
 		if (flavor == i386_REGS_SEGS_STATE) {
 		    /*
 		     * Code and stack selectors must not be null,
@@ -698,8 +703,6 @@ act_machine_set_state(
 		        || state->ss == 0 || (state->ss & SEL_PL) != SEL_PL_U))
 			return KERN_INVALID_ARGUMENT;
 		}
-
-		state = (struct i386_thread_state *) tstate;
 
 		saved_state = USER_REGS(thr_act);
 

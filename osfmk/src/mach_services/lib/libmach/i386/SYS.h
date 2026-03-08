@@ -50,7 +50,7 @@
  */
 #define SYSCALL(x) \
 	ENTRY(x); \
-	movl	$(SYS_/**/x), %eax; \
+	movl	$(SYS_##x), %eax; \
 	SVC; \
 	jb	_cerror
 

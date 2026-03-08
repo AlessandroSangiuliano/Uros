@@ -167,7 +167,9 @@ extern int curr_ipl;
 #define ASSERT_IPL(L)
 #endif
 
-int		fp_kind = FP_387;	/* 80387 present */
+int		fp_kind = FP_FXSR;	/* FXSAVE/FXRSTOR with SSE support */
+unsigned int	xsave_area_size;	/* XSAVE area size from CPUID (0 if no XSAVE) */
+unsigned int	xcr0_value;		/* current XCR0 value (enabled state components) */
 zone_t		ifps_zone;		/* zone for FPU save area */
 
 #if	NCPUS == 1
@@ -202,11 +204,20 @@ extern void		fp_load(
 /*
  * Look for FPU and initialize it.
  * Called on each CPU.
+ *
+ * Detection order:
+ *   1. Check for x87 FPU presence
+ *   2. Enable FXSAVE/FXRSTOR (SSE) support
+ *   3. Probe CPUID for XSAVE capability; if present:
+ *      a. Enable CR4.OSXSAVE
+ *      b. Set XCR0 to enable detected features (AVX, AVX-512)
+ *      c. Read XSAVE area size from CPUID leaf 0Dh
  */
 void
 init_fpu(void)
 {
 	unsigned short	status, control;
+	unsigned int	eax, ebx, ecx, edx;
 
 #if !FPE
 	/*
@@ -223,32 +234,99 @@ init_fpu(void)
 	if ((status & 0xff) == 0 &&
 	    (control & 0x103f) == 0x3f)
 	{
+	    fp_kind = FP_FXSR;
+
 	    /*
-	     * We have a FPU of some sort.
-	     * Compare -infinity against +infinity
-	     * to check whether we have a 287 or a 387.
+	     * Enable SSE/SSE2 support:
+	     * - CR4.OSFXSR: tells CPU that OS supports FXSAVE/FXRSTOR
+	     * - CR4.OSXMMEXCPT: enables #XM exception for unmasked SIMD exceptions
+	     * - CR0.EM must be clear (no FPU emulation)
+	     * - CR0.MP + CR0.TS: trap on FPU use for lazy context switching
 	     */
-	    volatile double fp_infinity, fp_one, fp_zero;
-	    fp_one = 1.0;
-	    fp_zero = 0.0;
-	    fp_infinity = fp_one / fp_zero;
-	    if (fp_infinity == -fp_infinity) {
-		/*
-		 * We have an 80287.
-		 */
-		fp_kind = FP_287;
-		__asm__ volatile(".byte 0xdb; .byte 0xe4");	/* fnsetpm */
-	    }
-	    else {
-		/*
-		 * We have a 387.
-		 */
-		fp_kind = FP_387;
-	    }
+	    set_cr4(get_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT);
+	    set_cr0((get_cr0() & ~CR0_EM) | CR0_TS | CR0_MP);
+
 	    /*
-	     * Trap wait instructions.  Turn off FPU for now.
+	     * Probe CPUID.1:ECX for XSAVE support (bit 26).
 	     */
-	    set_cr0(get_cr0() | CR0_TS | CR0_MP);
+	    do_cpuid(1, 0, &eax, &ebx, &ecx, &edx);
+
+	    if (ecx & CPUID_ECX_XSAVE) {
+		unsigned int xcr0_lo, xcr0_hi;
+		unsigned int supported_xcr0;
+
+		/*
+		 * XSAVE is supported.  Enable CR4.OSXSAVE so that
+		 * XSAVE/XRSTOR and XGETBV/XSETBV instructions work.
+		 */
+		set_cr4(get_cr4() | CR4_OSXSAVE);
+
+		/*
+		 * Read the XCR0 mask of supported state components
+		 * from CPUID leaf 0Dh, sub-leaf 0.
+		 */
+		do_cpuid(0x0d, 0, &eax, &ebx, &ecx, &edx);
+		supported_xcr0 = eax;	/* lower 32 bits */
+
+		/*
+		 * Build our desired XCR0 value.
+		 * Always enable x87 + SSE (mandatory for XSAVE).
+		 */
+		xcr0_lo = XCR0_X87 | XCR0_SSE;
+
+		/* Enable AVX (YMM) if supported */
+		if (supported_xcr0 & XCR0_AVX) {
+		    xcr0_lo |= XCR0_AVX;
+		    printf("FPU: AVX (YMM, 256-bit) detected\n");
+		}
+
+		/*
+		 * Enable AVX-512 if all required components are supported.
+		 * AVX-512 requires opmask (bit 5) + ZMM_Hi256 (bit 6).
+		 * Hi16_ZMM (bit 7) is only for 64-bit mode (ZMM8-ZMM15),
+		 * but the CPU may still require it as a group — enable if
+		 * all three are supported.
+		 */
+		if ((supported_xcr0 & XCR0_AVX512) == XCR0_AVX512) {
+		    /* CPU supports all AVX-512 state bits */
+		    xcr0_lo |= XCR0_AVX512;
+		    printf("FPU: AVX-512 (ZMM, 512-bit) detected\n");
+		} else if ((supported_xcr0 & XCR0_AVX512_I386) ==
+			   XCR0_AVX512_I386) {
+		    /* i386 subset: opmask + ZMM_Hi256 without Hi16_ZMM */
+		    xcr0_lo |= XCR0_AVX512_I386;
+		    printf("FPU: AVX-512 (ZMM, i386 subset) detected\n");
+		}
+
+		xcr0_hi = 0;
+
+		/*
+		 * Write our chosen XCR0 value.
+		 */
+		xsetbv(0, xcr0_lo, xcr0_hi);
+		xcr0_value = xcr0_lo;
+
+		/*
+		 * Re-read CPUID leaf 0Dh to get the XSAVE area size
+		 * for the features we just enabled.
+		 * EBX = size required for currently enabled XCR0 features.
+		 * ECX = size required for all supported XCR0 features.
+		 */
+		do_cpuid(0x0d, 0, &eax, &ebx, &ecx, &edx);
+		xsave_area_size = ebx;
+
+		if (xsave_area_size > XSAVE_AREA_MAX_SIZE) {
+		    printf("FPU: WARNING: XSAVE area %u exceeds max %u,"
+			   " clamping\n",
+			   xsave_area_size, XSAVE_AREA_MAX_SIZE);
+		    xsave_area_size = XSAVE_AREA_MAX_SIZE;
+		}
+
+		fp_kind = FP_XSAVE;
+		printf("FPU: XSAVE enabled, area size %u bytes,"
+		       " XCR0=0x%x\n",
+		       xsave_area_size, xcr0_value);
+	    }
 	}
 	else
 #endif /* !FPE */
@@ -275,9 +353,28 @@ init_fpu(void)
 void
 fpu_module_init(void)
 {
-	ifps_zone = zinit(sizeof(struct i386_fpsave_state),
-			  THREAD_MAX * sizeof(struct i386_fpsave_state),
-			  THREAD_CHUNK * sizeof(struct i386_fpsave_state),
+	unsigned int fps_size;
+
+	/*
+	 * Choose zone element size based on FPU type.
+	 * For XSAVE, the save area is variable-size; use fp_pad + actual size.
+	 * For FXSAVE, use the full struct (which includes the max union).
+	 * Round up to 64-byte boundary so all elements in a zone page
+	 * maintain 64-byte alignment (required by XSAVE).
+	 */
+	if (fp_kind == FP_XSAVE && xsave_area_size > 0) {
+	    /* 64 bytes (fp_valid + fp_pad) + xsave_area_size */
+	    fps_size = 64 + xsave_area_size;
+	} else {
+	    /* 64 bytes (fp_valid + fp_pad) + 512 (fx_save_state) */
+	    fps_size = 64 + sizeof(struct i386_fx_save);
+	}
+	/* Round up to 64-byte alignment for zone element placement */
+	fps_size = (fps_size + 63) & ~63U;
+
+	ifps_zone = zinit(fps_size,
+			  THREAD_MAX * fps_size,
+			  THREAD_CHUNK * fps_size,
 			  "i386 fpsave state");
 }
 
@@ -383,49 +480,62 @@ ASSERT_IPL(SPL0);
 	    /*
 	     * Ensure that reserved parts of the environment are 0.
 	     */
-	    bzero((char *)&ifps->fp_save_state, sizeof(struct i386_fp_save));
+	    if (fp_kind == FP_XSAVE)
+		bzero((char *)&ifps->fx_save_state, xsave_area_size);
+	    else
+		bzero((char *)&ifps->fx_save_state, sizeof(struct i386_fx_save));
 
-	    ifps->fp_save_state.fp_control = user_fp_state->fp_control;
-	    ifps->fp_save_state.fp_status  = user_fp_state->fp_status;
-	    ifps->fp_save_state.fp_tag     = user_fp_state->fp_tag;
-	    ifps->fp_save_state.fp_eip     = user_fp_state->fp_eip;
-	    ifps->fp_save_state.fp_cs      = user_fp_state->fp_cs;
-	    ifps->fp_save_state.fp_opcode  = user_fp_state->fp_opcode;
-	    ifps->fp_save_state.fp_dp      = user_fp_state->fp_dp;
-	    ifps->fp_save_state.fp_ds      = user_fp_state->fp_ds;
+	    ifps->fx_save_state.fx_control = user_fp_state->fp_control;
+	    ifps->fx_save_state.fx_status  = user_fp_state->fp_status;
+	    /*
+	     * Convert full tag word (FSAVE, 16-bit, 2 bits per reg)
+	     * to abridged tag word (FXSAVE, 8-bit, 1 bit per reg).
+	     * In FXSAVE: bit=0 means empty, bit=1 means valid.
+	     * In FSAVE: 11 means empty, anything else means valid.
+	     */
+	    {
+		unsigned short full_tag = user_fp_state->fp_tag;
+		unsigned char abridged = 0;
+		int i;
+		for (i = 0; i < 8; i++) {
+		    if (((full_tag >> (i * 2)) & 3) != 3)
+			abridged |= (1 << i);
+		}
+		ifps->fx_save_state.fx_tag = abridged;
+	    }
+	    ifps->fx_save_state.fx_eip     = user_fp_state->fp_eip;
+	    ifps->fx_save_state.fx_cs      = user_fp_state->fp_cs;
+	    ifps->fx_save_state.fx_opcode  = user_fp_state->fp_opcode;
+	    ifps->fx_save_state.fx_dp      = user_fp_state->fp_dp;
+	    ifps->fx_save_state.fx_ds      = user_fp_state->fp_ds;
+	    ifps->fx_save_state.fx_MXCSR   = MXCSR_DEFAULT;
 
-#if	FPE
-	    if (fp_kind == FP_SOFT) {
-		/*
-		 * The emulator stores the registers by physical
-		 * register number, not from top-of-stack.
-		 * Shuffle the registers into the correct order.
-		 */
-		register char *src;	/* user regs */
-		register char *dst;	/* kernel regs */
-		int	i;
-
-		src = (char *)user_fp_regs;
-		dst = (char *)&ifps->fp_regs;
-		i = (ifps->fp_save_state.fp_status & FPS_TOS)
-			>> FPS_TOS_SHIFT;	/* physical register
-						   for st(0) */
-		if (i == 0)
-		    bcopy(src, dst, 8 * 10);
-		else {
-		    bcopy(src,
-			  dst + 10 * i,
-			  10 * (8 - i));
-		    bcopy(src + 10 * (8 - i),
-			  dst,
-			  10 * i);
+	    /*
+	     * Copy FP registers: FSAVE has 10 bytes per reg packed,
+	     * FXSAVE has 16 bytes per reg (10 used + 6 reserved).
+	     */
+	    {
+		int i;
+		unsigned char *src = (unsigned char *)user_fp_regs;
+		for (i = 0; i < 8; i++) {
+		    bcopy(src + i * 10,
+			  ifps->fx_save_state.fx_reg_word[i],
+			  10);
 		}
 	    }
-	    else
-		ifps->fp_regs = *user_fp_regs;
-#else	/* no FPE */
-	    ifps->fp_regs = *user_fp_regs;
-#endif	/* FPE */
+
+	    /*
+	     * For XSAVE: set xstate_bv to indicate which components
+	     * are present.  We set x87 + SSE since we initialized
+	     * the legacy area and MXCSR.
+	     */
+	    if (fp_kind == FP_XSAVE) {
+		struct i386_xsave_header *hdr =
+		    (struct i386_xsave_header *)
+		    ((unsigned char *)&ifps->fx_save_state + XSAVE_HDR_OFFSET);
+		hdr->xstate_bv_lo = XCR0_X87 | XCR0_SSE;
+		hdr->xstate_bv_hi = 0;
+	    }
 
 	    simple_unlock(&pcb->lock);
 	    if (new_ifps != 0)
@@ -498,47 +608,43 @@ ASSERT_IPL(SPL0);
 	     */
 	    bzero((char *)user_fp_state,  sizeof(struct i386_fp_save));
 
-	    user_fp_state->fp_control = ifps->fp_save_state.fp_control;
-	    user_fp_state->fp_status  = ifps->fp_save_state.fp_status;
-	    user_fp_state->fp_tag     = ifps->fp_save_state.fp_tag;
-	    user_fp_state->fp_eip     = ifps->fp_save_state.fp_eip;
-	    user_fp_state->fp_cs      = ifps->fp_save_state.fp_cs;
-	    user_fp_state->fp_opcode  = ifps->fp_save_state.fp_opcode;
-	    user_fp_state->fp_dp      = ifps->fp_save_state.fp_dp;
-	    user_fp_state->fp_ds      = ifps->fp_save_state.fp_ds;
+	    user_fp_state->fp_control = ifps->fx_save_state.fx_control;
+	    user_fp_state->fp_status  = ifps->fx_save_state.fx_status;
+	    /*
+	     * Convert abridged tag word (FXSAVE, 8-bit) back to
+	     * full tag word (FSAVE, 16-bit, 2 bits per reg).
+	     * Abridged: bit=0 means empty (11), bit=1 means valid (00).
+	     */
+	    {
+		unsigned char abridged = ifps->fx_save_state.fx_tag;
+		unsigned short full_tag = 0;
+		int i;
+		for (i = 0; i < 8; i++) {
+		    if (!(abridged & (1 << i)))
+			full_tag |= (3 << (i * 2));  /* empty */
+		    /* else: 00 = valid */
+		}
+		user_fp_state->fp_tag = full_tag;
+	    }
+	    user_fp_state->fp_eip     = ifps->fx_save_state.fx_eip;
+	    user_fp_state->fp_cs      = ifps->fx_save_state.fx_cs;
+	    user_fp_state->fp_opcode  = ifps->fx_save_state.fx_opcode;
+	    user_fp_state->fp_dp      = ifps->fx_save_state.fx_dp;
+	    user_fp_state->fp_ds      = ifps->fx_save_state.fx_ds;
 
-#if	FPE
-	    if (fp_kind == FP_SOFT) {
-		/*
-		 * The emulator stores the registers by physical
-		 * register number, not from top-of-stack.
-		 * Shuffle the registers into the correct order.
-		 */
-		register char *src;	/* kernel regs */
-		register char *dst;	/* user regs */
-		int	i;
-
-		src = (char *)&ifps->fp_regs;
-		dst = (char *)user_fp_regs;
-		i = (ifps->fp_save_state.fp_status & FPS_TOS)
-			>> FPS_TOS_SHIFT;	/* physical register
-						   for st(0) */
-		if (i == 0)
-		    bcopy(src, dst, 8 * 10);
-		else {
-		    bcopy(src + 10 * i,
-			  dst,
-			  10 * (8 - i));
-		    bcopy(src,
-			  dst + 10 * (8 - i),
-			  10 * i);
+	    /*
+	     * Copy FP registers: FXSAVE has 16 bytes per reg,
+	     * FSAVE expects 10 bytes per reg packed.
+	     */
+	    {
+		int i;
+		unsigned char *dst = (unsigned char *)user_fp_regs;
+		for (i = 0; i < 8; i++) {
+		    bcopy(ifps->fx_save_state.fx_reg_word[i],
+			  dst + i * 10,
+			  10);
 		}
 	    }
-	    else
-		*user_fp_regs = ifps->fp_regs;
-#else	/* no FPE */
-	    *user_fp_regs = ifps->fp_regs;
-#endif	/* FPE */
 	}
 	simple_unlock(&pcb->lock);
 
@@ -574,6 +680,14 @@ ASSERT_IPL(SPL0);
 			FPC_DE |	/* Allow denorms as operands  */
 			FPC_PE);	/* No trap for precision loss */
 	fldcw(control);
+
+	/*
+	 * Initialize MXCSR: mask all SSE exceptions (default safe state).
+	 */
+	if (fp_kind >= FP_FXSR) {
+	    unsigned int mxcsr = MXCSR_DEFAULT;
+	    __asm__ volatile("ldmxcsr %0" : : "m" (mxcsr));
+	}
 }
 
 /*
@@ -726,7 +840,7 @@ ASSERT_IPL(SPL0);
 	 */
 	i386_exception(EXC_ARITHMETIC,
 		       EXC_I386_EXTERR,
-		       thr_act->mact.pcb->ims.ifps->fp_save_state.fp_status);
+		       thr_act->mact.pcb->ims.ifps->fx_save_state.fx_status);
 	/*NOTREACHED*/
 }
 
@@ -749,7 +863,10 @@ fp_save(
 	if (ifps != 0 && !ifps->fp_valid) {
 	    /* registers are in FPU */
 	    ifps->fp_valid = TRUE;
-	    fnsave(&ifps->fp_save_state);
+	    if (fp_kind == FP_XSAVE)
+		xsave(&ifps->fx_save_state);
+	    else
+		fxsave(&ifps->fx_save_state);
 	}
 }
 
@@ -769,8 +886,15 @@ fp_load(
 ASSERT_IPL(SPL0);
 	ifps = pcb->ims.ifps;
 	if (ifps == 0) {
+	    unsigned int clear_size;
 	    ifps = (struct i386_fpsave_state *) zalloc(ifps_zone);
-	    bzero((char *)ifps, sizeof *ifps);
+	    /* Clear fp_valid + fp_pad + save area */
+	    clear_size = 64;  /* fp_valid + fp_pad */
+	    if (fp_kind == FP_XSAVE)
+		clear_size += xsave_area_size;
+	    else
+		clear_size += sizeof(struct i386_fx_save);
+	    bzero((char *)ifps, clear_size);
 	    pcb->ims.ifps = ifps;
 	    fpinit();
 #if 1
@@ -791,11 +915,14 @@ ASSERT_IPL(SPL0);
 		 */
 		i386_exception(EXC_ARITHMETIC,
 		       EXC_I386_EXTERR,
-		       thr_act->mact.pcb->ims.ifps->fp_save_state.fp_status);
+		       thr_act->mact.pcb->ims.ifps->fx_save_state.fx_status);
 		/*NOTREACHED*/
 #endif
 	} else {
-	    frstor(ifps->fp_save_state);
+	    if (fp_kind == FP_XSAVE)
+		xrstor(&ifps->fx_save_state);
+	    else
+		fxrstor(&ifps->fx_save_state);
 	}
 	ifps->fp_valid = FALSE;		/* in FPU */
 }
@@ -813,15 +940,33 @@ fp_state_alloc(void)
 	struct i386_fpsave_state *ifps;
 
 	ifps = (struct i386_fpsave_state *)zalloc(ifps_zone);
-	bzero((char *)ifps, sizeof *ifps);
+	bzero((char *)ifps, sizeof(boolean_t) + 60);	/* fp_valid + fp_pad */
+	if (fp_kind == FP_XSAVE)
+	    bzero((char *)&ifps->fx_save_state, xsave_area_size);
+	else
+	    bzero((char *)&ifps->fx_save_state, sizeof(struct i386_fx_save));
 	pcb->ims.ifps = ifps;
 
 	ifps->fp_valid = TRUE;
-	ifps->fp_save_state.fp_control = (0x037f
+	ifps->fx_save_state.fx_control = (0x037f
 			& ~(FPC_IM|FPC_ZM|FPC_OM|FPC_PC))
 			| (FPC_PC_53|FPC_IC_AFF);
-	ifps->fp_save_state.fp_status = 0;
-	ifps->fp_save_state.fp_tag = 0xffff;	/* all empty */
+	ifps->fx_save_state.fx_status = 0;
+	ifps->fx_save_state.fx_tag = 0xff;	/* all empty (abridged: 1 bit per reg) */
+	ifps->fx_save_state.fx_MXCSR = MXCSR_DEFAULT;
+
+	/*
+	 * For XSAVE: initialize the XSAVE header.
+	 * Set xstate_bv to x87 + SSE to indicate those components
+	 * are present in the save area (initialized above).
+	 */
+	if (fp_kind == FP_XSAVE) {
+	    struct i386_xsave_header *hdr =
+		(struct i386_xsave_header *)
+		((unsigned char *)&ifps->fx_save_state + XSAVE_HDR_OFFSET);
+	    hdr->xstate_bv_lo = XCR0_X87 | XCR0_SSE;
+	    hdr->xstate_bv_hi = 0;
+	}
 }
 
 

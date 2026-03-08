@@ -47,18 +47,14 @@
  * WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR A PARTICULAR PURPOSE.
  */
 
-#if defined(SYSLIBC_SCCS) && !defined(lint)
-	.asciz "@(#)fork.s	5.5 (Berkeley) 6/27/88"
-#endif /* SYSLIBC_SCCS and not lint */
-
 #include	<machine/asm.h>
 #include	"SYS.h"
 #include	<syscall.h>
 
 SYSCALL(fork)
 	orl	%edx,%edx
-	jz	LBf(parent,0)	/ parent, since r1 == 0 in parent, 1 in child
+	jz	LBf(parent,0)	# parent, since r1 == 0 in parent, 1 in child
 	call	_mach_init
 	xorl	%eax,%eax
 LB(parent,0):
-	ret		/ pid = fork()
+	ret		# pid = fork()

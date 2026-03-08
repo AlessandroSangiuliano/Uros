@@ -304,8 +304,7 @@ exception_behavior_t behavior;
 
 int exc_debug;
 
-exception_thread(port)
-mach_port_t port;
+exception_thread(mach_port_t port)
 {
 	mach_port_t thread = 0;
 	extern boolean_t exc_demux();
@@ -356,8 +355,7 @@ mach_msg_type_number_t in_count, *out_count;
 	return(KERN_SUCCESS);
 }
 
-catch_exception_raise_state_identity(port)
-mach_port_t port;
+catch_exception_raise_state_identity(mach_port_t port)
 {
 	return(KERN_SUCCESS);
 }

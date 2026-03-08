@@ -52,51 +52,13 @@
 #ifndef _SETJMP_H_PROCESSED_
 #define _SETJMP_H_PROCESSED_ 1
 
-#ifdef multimax
-typedef int jmp_buf[10];
-#endif /* multimax */
-
-#ifdef	balance
-typedef int jmp_buf[11];	/* 4 regs, ... */
-#endif	/* balance */
-
-#ifdef sun3
-typedef int jmp_buf[15];	/* pc, sigmask, onsstack, d2-7, a2-7 */
-#endif /* sun3 */
-
-#ifdef ibmrt
-typedef int jmp_buf[16];
-#endif /* imbrt */
-
-#ifdef vax
-typedef int jmp_buf[10];
-#endif /* vax */
-
-#ifdef mips
-typedef int jmp_buf[75];
-#endif /* mips */
-
 #ifdef i386
 typedef int jmp_buf[21];
 #endif /* i386 */
 
-#ifdef luna88k
-typedef int jmp_buf[19]; /* r1, r14-r31 */
-#endif /* luna88k */
-
-#ifdef i860
-typedef int jmp_buf[32];  /* f2 - f15, r1 - r16 registers */
-#endif /* i860 */
-
-#if	__alpha
-typedef long jmp_buf[84];
-#endif
-
-#if defined(CMUCS) && defined(__STDC__)
 extern int setjmp (jmp_buf);
 extern void longjmp (jmp_buf, int);
 extern int _setjmp (jmp_buf);
 extern void _longjmp (jmp_buf, int);
-#endif
 
 #endif /* _SETJMP_H_PROCESSED_ */

@@ -246,8 +246,7 @@ thread_set_state_test()
 }
 
 
-thread_info_test(flavor)
-int flavor;
+thread_info_test(int flavor)
 {
 	register i;
 	mach_port_t thread = mach_thread_self();
@@ -268,8 +267,7 @@ int flavor;
 	stop_time();
 }
 
-thread_sample_test(on)
-boolean_t on;
+thread_sample_test(boolean_t on)
 {
 	register i;
 	mach_port_t task = mach_task_self();

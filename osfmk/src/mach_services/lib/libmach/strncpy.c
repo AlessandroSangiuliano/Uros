@@ -54,11 +54,10 @@
  */
 
 char *
-strncpy(s1, s2, n)
-register char *s1, *s2;
+strncpy(char *s1, const char *s2, int n)
 {
-	register i;
-	register char *os1;
+	int i;
+	char *os1;
 
 	os1 = s1;
 	for (i = 0; i < n; i++)

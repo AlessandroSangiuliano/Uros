@@ -71,6 +71,7 @@
 #define	STRDEFS_H
 
 #include <string.h>
+#include <mach/boolean.h>
 
 typedef char *string_t;
 typedef string_t identifier_t;
@@ -79,14 +80,17 @@ typedef string_t identifier_t;
 
 #define	strNULL		((string_t) 0)
 
-extern string_t strmake(/* char *string */);
-extern string_t strconcat(/* string_t left, right */);
-extern void strfree(/* string_t string */);
+extern string_t strmake(char *string);
+extern string_t strconcat(string_t left, string_t right);
+extern void strfree(string_t string);
 
 #define	streql(a, b)	(strcmp((a), (b)) == 0)
 
-extern char *strbool(/* boolean_t bool */);
-extern char *strstring(/* string_t string */);
-extern char *toupperstr(/* char *string */);
+extern char *strbool(boolean_t b);
+extern char *strstring(string_t string);
+extern char *toupperstr(char *string);
+
+/* Check generated files for ASCII integrity */
+extern void CheckAsciiFile(const char *filename);
 
 #endif	/* STRDEFS_H */

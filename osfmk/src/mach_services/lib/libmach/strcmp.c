@@ -51,8 +51,8 @@
  * Compare strings:  s1>s2: >0  s1==s2: 0  s1<s2: <0
  */
 
-strcmp(s1, s2)
-register char *s1, *s2;
+int
+strcmp(const char *s1, const char *s2)
 {
 
 	while (*s1 == *s2++)

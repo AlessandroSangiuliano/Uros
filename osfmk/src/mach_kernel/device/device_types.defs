@@ -110,22 +110,19 @@ type io_buf_ptr_inband_t= array[*:128] of char;
 type filter_t		= short;
 type filter_array_t	= array[*:64] of filter_t;
 
-type device_t = mach_port_t
-		ctype: mach_port_t
+type device_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: device_t dev_port_lookup(mach_port_t)
-		outtran: mach_port_t convert_device_to_port(device_t)
-		destructor: device_deallocate(device_t)
+		intran: device_t dev_port_lookup(mach_port_t) outtran: mach_port_t convert_device_to_port(device_t) destructor: device_deallocate(device_t) ;
+#else
+		;
 #endif	/* KERNEL_SERVER */
-		;
 
-type io_done_queue_t	= mach_port_t
-		ctype: mach_port_t
+type io_done_queue_t	= mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: io_done_queue_t io_done_queue_port_lookup(mach_port_t)
-		outtran: mach_port_t convert_io_done_queue_to_port(io_done_queue_t)
-#endif	KERNEL_SERVER
+		intran: io_done_queue_t io_done_queue_port_lookup(mach_port_t) outtran: mach_port_t convert_io_done_queue_to_port(io_done_queue_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 import <device/device_types.h>;
 import <device/net_status.h>;

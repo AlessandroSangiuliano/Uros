@@ -104,6 +104,8 @@ extern mach_counter_t c_dev_io_tries;
 extern mach_counter_t c_idle_thread_block;
 extern mach_counter_t c_idle_thread_handoff;
 extern mach_counter_t c_io_done_thread_block;
+extern mach_counter_t c_ipc_mqueue_deliver_direct;
+extern mach_counter_t c_ipc_port_cache_hit;
 extern mach_counter_t c_ipc_mqueue_receive_block_kernel;
 extern mach_counter_t c_ipc_mqueue_receive_block_user;
 extern mach_counter_t c_ipc_mqueue_send_block;

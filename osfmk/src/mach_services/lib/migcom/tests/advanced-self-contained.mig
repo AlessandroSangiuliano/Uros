@@ -1,0 +1,8 @@
+subsystem Advanced 600;
+
+type int = MACH_MSG_TYPE_INTEGER_32;
+type mach_port_t = MACH_MSG_TYPE_COPY_SEND;
+type port_array_t = array[*:4] of mach_port_t;
+type my_struct = struct[2] of int;
+
+skip;

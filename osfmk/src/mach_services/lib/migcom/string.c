@@ -71,10 +71,10 @@
 #include "error.h"
 #include "alloc.h"
 #include "strdefs.h"
+#include <stdio.h>
 
 string_t
-strmake(string)
-    char *string;
+strmake(char *string)
 {
     register string_t saved;
 
@@ -85,8 +85,7 @@ strmake(string)
 }
 
 string_t
-strconcat(left, right)
-    string_t left, right;
+strconcat(string_t left, string_t right)
 {
     register string_t saved;
 
@@ -94,29 +93,39 @@ strconcat(left, right)
     if (saved == strNULL)
 	fatal("strconcat('%s', '%s'): %s",
 	      left, right, strerror(errno));
-    return strcat(strcpy(saved, left), right);
+    strcat(strcpy(saved, left), right);
+    /* Debug: scan saved for non-ASCII to catch corrupt concatenations */
+    {
+        size_t __len = strlen(saved);
+        size_t __i;
+        for (__i = 0; __i < __len; ++__i) {
+            unsigned char __c = (unsigned char)saved[__i];
+            if ((__c < 32 && __c != 9 && __c != 10 && __c != 13) || __c > 126) {
+                fprintf(stderr, "[DEBUG-strconcat] non-ASCII 0x%02x at pos %zu\n", __c, __i);
+                break;
+            }
+        }
+    }
+    return saved;
 }
 
 void
-strfree(string)
-    string_t string;
+strfree(string_t string)
 {
     free(string);
 }
 
 char *
-strbool(bool)
-    boolean_t bool;
+strbool(boolean_t b)
 {
-    if (bool)
+    if (b)
 	return "TRUE";
     else
 	return "FALSE";
 }
 
 char *
-strstring(string)
-    string_t string;
+strstring(string_t string)
 {
     if (string == strNULL)
 	return "NULL";
@@ -125,8 +134,7 @@ strstring(string)
 }
 
 char *
-toupperstr(p)
-    char *p;
+toupperstr(char *p)
 {
     register char *s = p;
     char c;

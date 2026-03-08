@@ -1204,7 +1204,7 @@ memory_object_update(
 	vm_offset_t		new_offset = 0;
 	vm_offset_t		last_offset = offset;
 	memory_object_lock_result_t	page_lock_result;
-	memory_object_lock_result_t	pageout_action;
+	memory_object_lock_result_t	pageout_action = MEMORY_OBJECT_LOCK_RESULT_DONE;
 	vm_page_t		holding_pages[DATA_WRITE_MAX];
 	boolean_t		data_returned = FALSE;
 

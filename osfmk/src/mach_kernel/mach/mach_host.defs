@@ -562,7 +562,7 @@ routine task_sample(
 		task		: task_t;
 		reply		: mach_port_make_send_t);
 
-#else	!defined(MACH_PROF) || MACH_PROF
+#else /* !defined(MACH_PROF) || MACH_PROF */
 skip; /* task_sample */
 skip; /* thread_sample */
 #endif	/* !defined(MACH_PROF) || MACH_PROF */

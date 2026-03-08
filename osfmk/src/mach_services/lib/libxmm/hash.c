@@ -77,8 +77,7 @@ struct xmm_hash {
 };
 
 xmm_hash_t
-xmm_hash_allocate(size)
-	unsigned long size;
+xmm_hash_allocate(unsigned long size)
 {
 	xmm_hash_t hash;
 
@@ -90,8 +89,7 @@ xmm_hash_allocate(size)
 }
 
 void
-xmm_hash_deallocate(hash)
-	xmm_hash_t hash;
+xmm_hash_deallocate(xmm_hash_t hash)
 {
 	int i;
 	xmm_hashelt_t he, *hep;
@@ -122,9 +120,7 @@ xmm_hash_enqueue(hash, elt, key)
 }
 
 void *
-xmm_hash_dequeue(hash, key)
-	xmm_hash_t hash;
-	unsigned long key;
+xmm_hash_dequeue(xmm_hash_t hash, unsigned long key)
 {
 	xmm_hashelt_t he, *hep;
 	void *elt;
@@ -141,9 +137,7 @@ xmm_hash_dequeue(hash, key)
 }
 
 void *
-xmm_hash_lookup(hash, key)
-	xmm_hash_t hash;
-	unsigned long key;
+xmm_hash_lookup(xmm_hash_t hash, unsigned long key)
 {
 	xmm_hashelt_t he, *hep;
 

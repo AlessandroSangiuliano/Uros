@@ -94,9 +94,7 @@
 #define	fldcw(control) \
 	__asm__ volatile("fldcw %0" : : "m" (*(unsigned short *) &(control)) )
 
-extern unsigned short		fnstsw(void);
-
-extern __inline__ unsigned short fnstsw(void)
+static __inline__ unsigned short fnstsw(void)
 {
 	unsigned short status;
 	__asm__ volatile("fnstsw %0" : "=ma" (status));
@@ -111,6 +109,35 @@ extern __inline__ unsigned short fnstsw(void)
 
 #define	frstor(state) \
 	__asm__ volatile("frstor %0" : : "m" (state))
+
+#define	fxsave(state) \
+	__asm__ volatile("fxsave %0" : "=m" (*(state)))
+
+#define	fxrstor(state) \
+	__asm__ volatile("fxrstor %0" : : "m" (*(state)))
+
+/*
+ * XSAVE/XRSTOR instructions.
+ * Save/restore all state components enabled in XCR0.
+ * Uses .byte encoding for assembler compatibility.
+ * EDX:EAX = component mask (-1 = all enabled components).
+ * ECX = pointer to save area (must be 64-byte aligned).
+ */
+#define	xsave(state) \
+	__asm__ volatile( \
+		".byte 0x0f, 0xae, 0x21\n" /* xsave (%ecx) */ \
+		: : "c" (state), \
+		    "a" ((unsigned int)(-1)), \
+		    "d" ((unsigned int)(-1)) \
+		: "memory")
+
+#define	xrstor(state) \
+	__asm__ volatile( \
+		".byte 0x0f, 0xae, 0x29\n" /* xrstor (%ecx) */ \
+		: : "c" (state), \
+		    "a" ((unsigned int)(-1)), \
+		    "d" ((unsigned int)(-1)) \
+		: "memory")
 
 #define fwait() \
     	__asm__("fwait");
@@ -162,7 +189,10 @@ extern void	enable_fpe(struct i386_fpsave_state *ifps);
 	if (ifps != 0 && !ifps->fp_valid) { \
 	    /* registers are in FPU - save to memory */ \
 	    ifps->fp_valid = TRUE; \
-	    fnsave(&ifps->fp_save_state); \
+	    if (fp_kind == FP_XSAVE) \
+		xsave(&ifps->fx_save_state); \
+	    else \
+		fxsave(&ifps->fx_save_state); \
 	} \
 	set_ts(); \
     }
@@ -178,6 +208,9 @@ extern void	enable_fpe(struct i386_fpsave_state *ifps);
 #endif	/* no FPE */
 
 extern int	fp_kind;
+
+extern unsigned int	xsave_area_size;	/* runtime XSAVE area size (0 if no XSAVE) */
+extern unsigned int	xcr0_value;		/* current XCR0 value (enabled state components) */
 
 extern void		init_fpu(void);
 extern void		fpu_module_init(void);

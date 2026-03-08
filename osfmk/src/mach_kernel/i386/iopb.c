@@ -311,7 +311,6 @@ io_tss_init(
 	io_bitmap_init(io_tss->bitmap);
 	io_tss->barrier = ~0;
 	queue_init(&io_tss->io_port_list);
-	addr += LINEAR_KERNEL_ADDRESS;
 	io_tss->iopb_desc[0] = ((size-1) & 0xffff)
 		| ((addr & 0xffff) << 16);
 	io_tss->iopb_desc[1] = ((addr & 0x00ff0000) >> 16)
@@ -543,8 +542,8 @@ i386_io_port_list(thread, list, list_count)
 {
 	register pcb_t	pcb;
 	register iopb_tss_t io_tss;
-	unsigned int	count, alloc_count;
-	device_t	*devices;
+	unsigned int	count = 0, alloc_count;
+	device_t	*devices = NULL;
 	vm_size_t	size_needed, size;
 	vm_offset_t	addr;
 	int		i;

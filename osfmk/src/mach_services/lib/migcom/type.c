@@ -132,6 +132,7 @@
 #include <mach/ndr.h>
 #include "routine.h"
 #include "error.h"
+#include "safestr.h"
 #include "alloc.h"
 #include "global.h"
 #include <stdio.h>
@@ -153,8 +154,7 @@ static ipc_type_t *list = itNULL;
  *  self-organizing linked list.
  */
 ipc_type_t *
-itLookUp(name)
-    identifier_t name;
+itLookUp(identifier_t name)
 {
     register ipc_type_t *it, **last;
 
@@ -177,9 +177,7 @@ itLookUp(name)
  *  our self-organizing linked list.
  */
 void
-itInsert(name, it)
-    identifier_t name;
-    ipc_type_t *it;
+itInsert(identifier_t name, ipc_type_t *it)
 {
     it->itName = name;
     it->itNext = list;
@@ -233,12 +231,11 @@ itAlloc()
  * Convert an IPC type-name into a string.
  */
 static char *
-itNameToString(name)
-    u_int name;
+itNameToString(u_int name)
 {
     char buffer[100];
 
-    (void) sprintf(buffer, "%u", name);
+    SafeSnprintf(buffer, sizeof(buffer), "%u", name);
     return strmake(buffer);
 }
 
@@ -248,8 +245,7 @@ itNameToString(name)
  * when itInLine, itNumber, or itSize changes.
  */
 static void
-itCalculateSizeInfo(it)
-    register ipc_type_t *it;
+itCalculateSizeInfo(register ipc_type_t *it)
 {
     if (!IS_KERN_PROC_DATA(it))
     {
@@ -302,8 +298,7 @@ itCalculateSizeInfo(it)
  * Every argument's type should have these values filled in.
  */
 static void
-itCalculateNameInfo(it)
-    register ipc_type_t *it;
+itCalculateNameInfo(register ipc_type_t *it)
 {
     if (it->itInNameStr == strNULL)
 	it->itInNameStr = strmake(itNameToString(it->itInName));
@@ -355,9 +350,7 @@ itCalculateNameInfo(it)
  *  is parsed.
  ******************************************************/
 static void
-itCheckDecl(name, it)
-    identifier_t name;
-    register ipc_type_t *it;
+itCheckDecl(identifier_t name, register ipc_type_t *it)
 {
     it->itName = name;
 
@@ -379,8 +372,7 @@ itCheckDecl(name, it)
  *  Pretty-prints translation/destruction/type information.
  */
 static void
-itPrintTrans(it)
-    register ipc_type_t *it;
+itPrintTrans(register ipc_type_t *it)
 {
     if (!streql(it->itName, it->itUserType))
 	printf("\tCUserType:\t%s\n", it->itUserType);
@@ -404,9 +396,7 @@ itPrintTrans(it)
  *  Pretty-prints type declarations.
  */
 static void
-itPrintDecl(name, it)
-    identifier_t name;
-    ipc_type_t *it;
+itPrintDecl(identifier_t name, ipc_type_t *it)
 {
     printf("Type %s = ", name);
     if (!it->itInLine)
@@ -441,9 +431,7 @@ itPrintDecl(name, it)
  *	routine foo(arg : bar = type-spec);	// itInsert won't get called
  */
 void
-itTypeDecl(name, it)
-    identifier_t name;
-    ipc_type_t *it;
+itTypeDecl(identifier_t name, ipc_type_t *it)
 {
     itCheckDecl(name, it);
 
@@ -457,12 +445,7 @@ itTypeDecl(name, it)
  *	type new = inname|outname;
  */
 ipc_type_t *
-itShortDecl(inname, instr, outname, outstr, defsize)
-    u_int inname;
-    string_t instr;
-    u_int outname;
-    string_t outstr;
-    u_int defsize;
+itShortDecl(u_int inname, string_t instr, u_int outname, string_t outstr, u_int defsize)
 {
     register ipc_type_t *it;
 
@@ -496,8 +479,7 @@ itShortDecl(inname, instr, outname, outstr, defsize)
 }
 
 static ipc_type_t *
-itCopyType(old)
-    ipc_type_t *old;
+itCopyType(ipc_type_t *old)
 {
     register ipc_type_t *new = itAlloc();
 
@@ -523,8 +505,7 @@ itCopyType(old)
  */
 
 ipc_type_t *
-itResetType(old)
-    ipc_type_t *old;
+itResetType(ipc_type_t *old)
 {
     /* reset all special translation/destruction/type info */
 
@@ -542,8 +523,7 @@ itResetType(old)
  *	type new = old;
  */
 ipc_type_t *
-itPrevDecl(name)
-    identifier_t name;
+itPrevDecl(identifier_t name)
 {
     register ipc_type_t *old;
 
@@ -563,9 +543,7 @@ itPrevDecl(name)
  *	type new = array[*:number] of old;
  */
 ipc_type_t *
-itVarArrayDecl(number, old)
-    u_int number;
-    register ipc_type_t *old;
+itVarArrayDecl(u_int number, register ipc_type_t *old)
 {
     register ipc_type_t *it = itResetType(itCopyType(old)); 
 
@@ -612,9 +590,7 @@ itVarArrayDecl(number, old)
  *	type new = array[number] of old;
  */
 ipc_type_t *
-itArrayDecl(number, old)
-    u_int number;
-    ipc_type_t *old;
+itArrayDecl(u_int number, ipc_type_t *old)
 {
     register ipc_type_t *it = itResetType(itCopyType(old)); 
 
@@ -646,8 +622,7 @@ itArrayDecl(number, old)
  *	type new = ^ old;
  */
 ipc_type_t *
-itPtrDecl(it)
-    ipc_type_t *it;
+itPtrDecl(ipc_type_t *it)
 {
     if (!it->itInLine && !it->itMigInLine)
 	error("IPC type decl is already defined to be Out-Of-Line");
@@ -666,9 +641,7 @@ itPtrDecl(it)
  *	type new = struct[number] of old;
  */
 ipc_type_t *
-itStructDecl(number, old)
-    u_int number;
-    ipc_type_t *old;
+itStructDecl(u_int number, ipc_type_t *old)
 {
     register ipc_type_t *it = itResetType(itCopyType(old));
 
@@ -687,9 +660,7 @@ itStructDecl(number, old)
  * 'array[n] of (MSG_TYPE_STRING_C, 8)'
  */
 ipc_type_t *
-itCStringDecl(count, varying)
-    int	count;
-    boolean_t varying;
+itCStringDecl(u_int number, boolean_t varying)
 {
     register ipc_type_t *it;
     register ipc_type_t *itElement;
@@ -702,7 +673,7 @@ itCStringDecl(count, varying)
     itCheckDecl("char", itElement);
 
     it = itResetType(itCopyType(itElement));
-    it->itNumber = count;
+    it->itNumber = number;
     it->itVarArray = varying;
     it->itStruct = FALSE;
     it->itString = TRUE;
@@ -710,12 +681,8 @@ itCStringDecl(count, varying)
     itCalculateSizeInfo(it);
     return it;
 }
-
-extern ipc_type_t *
-itMakeSubCountType(count, varying, name)
-    int	count;
-    boolean_t varying;
-    string_t  name;
+ipc_type_t *
+itMakeSubCountType(int count, boolean_t varying, string_t name)
 {
     register ipc_type_t *it;
     register ipc_type_t *itElement;
@@ -750,8 +717,8 @@ itMakeSubCountType(count, varying, name)
     return it;
 }
 
-extern ipc_type_t *
-itMakeCountType()
+ipc_type_t *
+itMakeCountType(void)
 {
     ipc_type_t *it = itAlloc();
 
@@ -767,8 +734,8 @@ itMakeCountType()
     return it;
 }
 
-extern ipc_type_t *
-itMakePolyType()
+ipc_type_t *
+itMakePolyType(void)
 {
     ipc_type_t *it = itAlloc();
 
@@ -784,8 +751,8 @@ itMakePolyType()
     return it;
 }
 
-extern ipc_type_t *
-itMakeDeallocType()
+ipc_type_t *
+itMakeDeallocType(void)
 {
     ipc_type_t *it = itAlloc();
 
@@ -805,7 +772,7 @@ itMakeDeallocType()
  *  Initializes the pre-defined types.
  */
 void
-init_type()
+init_type(void)
 {
     itRetCodeType = itAlloc();
     itRetCodeType->itName = "kern_return_t";
@@ -886,9 +853,7 @@ init_type()
  *  Make sure return values of functions are assignable.
  ******************************************************/
 void
-itCheckReturnType(name, it)
-    identifier_t name;
-    ipc_type_t *it;
+itCheckReturnType(identifier_t name, ipc_type_t *it)
 {
     if (!it->itStruct)
 	error("type of %s is too complicated", name);
@@ -903,9 +868,7 @@ itCheckReturnType(name, it)
  *  simple and correct ports with send rights.
  ******************************************************/
 void
-itCheckRequestPortType(name, it)
-    identifier_t name;
-    ipc_type_t *it;
+itCheckRequestPortType(identifier_t name, ipc_type_t *it)
 {
     if (((it->itOutName != MACH_MSG_TYPE_PORT_SEND) &&
 	 (it->itOutName != MACH_MSG_TYPE_PORT_SEND_ONCE) &&
@@ -924,9 +887,7 @@ itCheckRequestPortType(name, it)
  *  simple and correct ports with send rights.
  ******************************************************/
 void
-itCheckReplyPortType(name, it)
-    identifier_t name;
-    ipc_type_t *it;
+itCheckReplyPortType(identifier_t name, ipc_type_t *it)
 {
     if (((it->itOutName != MACH_MSG_TYPE_PORT_SEND) &&
 	 (it->itOutName != MACH_MSG_TYPE_PORT_SEND_ONCE) &&
@@ -946,9 +907,7 @@ itCheckReplyPortType(name, it)
  *  simple bit 32 integer.
  ******************************************************/
 void
-itCheckIntType(name, it)
-    identifier_t name;
-    ipc_type_t *it;
+itCheckIntType(identifier_t name, ipc_type_t *it)
 {
     if ((it->itInName != MACH_MSG_TYPE_INTEGER_32) ||
 	(it->itOutName != MACH_MSG_TYPE_INTEGER_32) ||
@@ -961,9 +920,7 @@ itCheckIntType(name, it)
 }
 
 void
-itCheckSecTokenType(name, it)
-    identifier_t name;
-    ipc_type_t *it;
+itCheckSecTokenType(identifier_t name, ipc_type_t *it)
 {
     if (it->itMigInLine || it->itNoOptArray || it->itString || 
         it->itTypeSize != 8 || !it->itInLine || !it->itStruct || 

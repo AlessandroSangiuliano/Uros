@@ -88,6 +88,7 @@
 #include <i386/mp_desc.h>
 #include <i386/lock.h>
 #include <i386/misc_protos.h>
+#include <i386/sysenter.h>
 
 #include <kern/misc_protos.h>
 
@@ -232,23 +233,23 @@ mp_desc_init(
 	     */
 	    mpt->gdt[sel_idx(KERNEL_LDT)] = ldt_desc_pattern;
 	    mpt->gdt[sel_idx(KERNEL_LDT)].offset =
-		LINEAR_KERNEL_ADDRESS + (unsigned int) mpt->ldt;
+		(unsigned int) mpt->ldt;
 	    fix_desc(&mpt->gdt[sel_idx(KERNEL_LDT)], 1);
 
 	    mpt->gdt[sel_idx(KERNEL_TSS)] = tss_desc_pattern;
 	    mpt->gdt[sel_idx(KERNEL_TSS)].offset =
-		LINEAR_KERNEL_ADDRESS + (unsigned int) &mpt->ktss;
+		(unsigned int) &mpt->ktss;
 	    fix_desc(&mpt->gdt[sel_idx(KERNEL_TSS)], 1);
 
 	    mpt->gdt[sel_idx(CPU_DATA)] = cpudata_desc_pattern;
 	    mpt->gdt[sel_idx(CPU_DATA)].offset =
-	    	LINEAR_KERNEL_ADDRESS + (unsigned int) &cpu_data[mycpu];
+	    	(unsigned int) &cpu_data[mycpu];
 	    fix_desc(&mpt->gdt[sel_idx(CPU_DATA)], 1);
 
 #if	MACH_KDB
 	    mpt->gdt[sel_idx(DEBUG_TSS)] = tss_desc_pattern;
 	    mpt->gdt[sel_idx(DEBUG_TSS)].offset =
-		    LINEAR_KERNEL_ADDRESS + (unsigned int) &mpt->dbtss;
+		    (unsigned int) &mpt->dbtss;
 	    fix_desc(&mpt->gdt[sel_idx(DEBUG_TSS)], 1);
 
 	    mpt->dbtss.esp0 = (int)(db_task_stack_store +
@@ -259,6 +260,11 @@ mp_desc_init(
 
 	    mpt->ktss.ss0 = KERNEL_DS;
 	    mpt->ktss.io_bit_map_offset = 0x0FFF;	/* no IO bitmap */
+
+	    /*
+	     * Program SYSENTER MSRs for this AP.
+	     */
+	    sysenter_ap_init(0);
 
 	    return mpt;
 	}

@@ -121,6 +121,7 @@
 #include <mach/message.h>
 #include <mach/boolean.h>
 #include <sys/types.h>
+#include <stdio.h>
 
 /* base kind arg */
 #define akeNone		(0)
@@ -380,11 +381,11 @@ typedef struct argument
     ipc_type_t *argType;
 						/* Kernel Processed Data */
     mach_msg_descriptor_type_t argKPD_Type; 	/* KPD type: port, ool, port+ool */
-    void  (* argKPD_Template)();		/* KPD discipline for static templates */
-    void  (* argKPD_Init)();			/* KPD discipline for initializing */
-    void  (* argKPD_Pack)();			/* KPD discipline for packing */
-    void  (* argKPD_Extract)();			/* KPD discipline for extracting */
-    void  (* argKPD_TypeCheck)();		/* KPD discipline for type checking */
+    void  (* argKPD_Template)(FILE *file, struct argument *arg, boolean_t in); /* KPD discipline for static templates */
+    void  (* argKPD_Init)(FILE *file, struct argument *arg);                    /* KPD discipline for initializing */
+    void  (* argKPD_Pack)(FILE *file, struct argument *arg);                    /* KPD discipline for packing */
+    void  (* argKPD_Extract)(FILE *file, struct argument *arg);                 /* KPD discipline for extracting */
+    void  (* argKPD_TypeCheck)(FILE *file, struct argument *arg);               /* KPD discipline for type checking */
 
     string_t argVarName;	/* local variable and argument names */
     string_t argMsgField;	/* message field's name */
@@ -528,23 +529,23 @@ extern void rtSkip();
 extern argument_t *argAlloc();
 
 extern boolean_t
-rtCheckMask(/* argument_t *args, u_int mask */);
+rtCheckMask(argument_t *args, u_int mask);
 
 extern boolean_t
-rtCheckMaskFunction(/* argument_t *args, u_int mask,
-		boolean_t (*func)(argument_t *arg) */);
+rtCheckMaskFunction(argument_t *args, u_int mask,
+		    boolean_t (*func)(argument_t *arg));
 
 extern routine_t *
-rtMakeRoutine(/* identifier_t name, argument_t *args */);
+rtMakeRoutine(identifier_t name, argument_t *args);
 extern routine_t *
-rtMakeSimpleRoutine(/* identifier_t name, argument_t *args */);
+rtMakeSimpleRoutine(identifier_t name, argument_t *args);
 
-extern void rtPrintRoutine(/* routine_t *rt */);
-extern void rtCheckRoutine(/* routine_t *rt */);
+extern void rtPrintRoutine(routine_t *rt);
+extern void rtCheckRoutine(routine_t *rt);
 
-extern char *rtRoutineKindToStr(/* routine_kind_t rk */);
+extern char *rtRoutineKindToStr(routine_kind_t rk);
 
-extern int rtCountArgDescriptors(/* argument_t *args, int *argcount */);
+extern int rtCountArgDescriptors(argument_t *args, int *argcount);
 
 #define RPCUserStruct(arg)    (arg->argType->itStruct && arg->argType->itInLine)
 

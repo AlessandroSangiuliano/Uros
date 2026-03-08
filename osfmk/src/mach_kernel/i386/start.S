@@ -189,6 +189,24 @@
 #include <i386/proc_reg.h>
 #include <assym.S>
 
+/*
+ * Multiboot Header - MUST be in first 8KB of kernel image
+ * Placed in .multiboot section which linker script positions first
+ *
+ * Flat memory model: kernel linked at 0xC0100000 (virtual) but loaded
+ * at 0x00100000 (physical). The ELF program headers carry both VMA and
+ * LMA so the multiboot loader can compute the correct physical entry.
+ * Only MEMORY_INFO flag (bit 1) is requested.
+ */
+	.section .multiboot, "a"
+	.align	4
+multiboot_header:
+	.long	0x1BADB002		/* magic */
+	.long	0x00000002		/* flags: MEMORY_INFO (ELF hdrs used) */
+	.long	-(0x1BADB002 + 0x00000002)	/* checksum */
+
+	.text				/* switch back to text section */
+
 #if	NCPUS > 1
 
 #ifdef	SYMMETRY
@@ -231,8 +249,6 @@
 
 
 #define KVTOPHYS	(-KERNELBASE)
-#define	KVTOLINEAR	LINEAR_KERNELBASE
-
 
 #define	PA(addr)	(addr)+KVTOPHYS
 #define	VA(addr)	(addr)-KVTOPHYS
@@ -286,19 +302,19 @@ EXT(kgdb_stack_store):
 
 
 /*
- * Pointers to GDT and IDT.  These contain linear addresses.
+ * Pointers to GDT and IDT.  With flat model, kernel virtual = linear.
  */
 	.align	ALIGN
 	.globl	EXT(gdtptr)
 LEXT(gdtptr)
 	.word	Times(8,GDTSZ)-1
-	.long	EXT(gdt)+KVTOLINEAR
+	.long	EXT(gdt)
 
 	.align	ALIGN
 	.globl	EXT(idtptr)
 LEXT(idtptr)
 	.word	Times(8,IDTSZ)-1
-	.long	EXT(idt)+KVTOLINEAR
+	.long	EXT(idt)
 
 #if	NCPUS > 1
 	.data
@@ -338,14 +354,6 @@ LEXT(pstart)
 	mov	$0,%ax			/* fs must be zeroed; */
 	mov	%ax,%fs			/* some bootstrappers don`t do this */
 	mov	%ax,%gs
-
-        jmp     multiboot_entry
-        .align  4
-multiboot_header:
-        .long   0x1BADB002
-        .long   0x00000002
-        .long   -(0x1BADB002 + 0x00000002)
-multiboot_entry:
 
 #if	NCPUS > 1
 	jmp	1f
@@ -689,14 +697,12 @@ LEXT(svstart)
 	CPU_NUMBER(%eax)
 	movw	$(GDTSZ*8-1),0(%esp)	/* set GDT size in GDT descriptor */
 	movl	CX(EXT(mp_gdt),%eax),%edx
-	addl	$KVTOLINEAR,%edx
-	movl	%edx,2(%esp)		/* point to local GDT (linear address) */
+	movl	%edx,2(%esp)		/* point to local GDT */
 	lgdt	0(%esp)			/* load new GDT */
 	
 	movw	$(IDTSZ*8-1),0(%esp)	/* set IDT size in IDT descriptor */
 	movl	CX(EXT(mp_idt),%eax),%edx
-	addl	$KVTOLINEAR,%edx
-	movl	%edx,2(%esp)		/* point to local IDT (linear address) */
+	movl	%edx,2(%esp)		/* point to local IDT */
 	lidt	0(%esp)			/* load new IDT */
 	
 	movw	$(KERNEL_LDT),%ax

@@ -132,8 +132,7 @@ double x; int N;
 }
 
 extern double logb(double);
-double logb(x)
-double x;
+double logb(double x)
 {
         short *px=(short *) &x, k;
 
@@ -151,8 +150,7 @@ double x;
 }
 
 extern int finite(double);
-finite(x)
-double x;
+finite(double x)
 {
         return( (*((short *) &x ) & mexp ) != mexp );
 }
@@ -212,8 +210,7 @@ double x,p;
 }
 
 extern double sqrt(double);
-double sqrt(x)
-double x;
+double sqrt(double x)
 {
         double q,s,b,r;
         double t;

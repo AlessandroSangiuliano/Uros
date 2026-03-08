@@ -61,60 +61,60 @@ extern cpu_data_t	cpu_data[NCPUS];
 #define extern static
 #endif
 
-extern struct thread_shuttle __inline__ *current_thread(void);
-extern int __inline__		get_preemption_level(void);
-extern int __inline__		get_simple_lock_count(void);
-extern int __inline__		get_interrupt_level(void);
+static struct thread_shuttle __inline__ *current_thread(void);
+static int __inline__		get_preemption_level(void);
+static int __inline__		get_simple_lock_count(void);
+static int __inline__		get_interrupt_level(void);
 
-extern void __inline__		disable_preemption(void);
-extern void __inline__		enable_preemption(void);
-extern void __inline__		enable_preemption_no_check(void);
+static void __inline__		disable_preemption(void);
+static void __inline__		enable_preemption(void);
+static void __inline__		enable_preemption_no_check(void);
 
-extern void __inline__		mp_disable_preemption(void);
-extern void __inline__		mp_enable_preemption(void);
-extern void __inline__		mp_enable_preemption_no_check(void);
+static void __inline__		mp_disable_preemption(void);
+static void __inline__		mp_enable_preemption(void);
+static void __inline__		mp_enable_preemption_no_check(void);
 
-extern struct thread_shuttle __inline__ *current_thread(void)
+static struct thread_shuttle __inline__ *current_thread(void)
 {
 	return (cpu_data[cpu_number()].active_thread);
 }
 
-extern int __inline__	get_preemption_level(void)
+static int __inline__	get_preemption_level(void)
 {
 	return (0);
 }
 
-extern int __inline__	get_simple_lock_count(void)
+static int __inline__	get_simple_lock_count(void)
 {
 	return (cpu_data[cpu_number()].simple_lock_count);
 }
 
-extern int __inline__	get_interrupt_level(void)
+static int __inline__	get_interrupt_level(void)
 {
 	return (cpu_data[cpu_number()].interrupt_level);
 }
 
-extern void __inline__	disable_preemption(void)
+static void __inline__	disable_preemption(void)
 {
 }
 
-extern void __inline__	enable_preemption(void)
+static void __inline__	enable_preemption(void)
 {
 }
 
-extern void __inline__	enable_preemption_no_check(void)
+static void __inline__	enable_preemption_no_check(void)
 {
 }
 
-extern void __inline__	mp_disable_preemption(void)
+static void __inline__	mp_disable_preemption(void)
 {
 }
 
-extern void __inline__	mp_enable_preemption(void)
+static void __inline__	mp_enable_preemption(void)
 {
 }
 
-extern void __inline__	mp_enable_preemption_no_check(void)
+static void __inline__	mp_enable_preemption_no_check(void)
 {
 }
 

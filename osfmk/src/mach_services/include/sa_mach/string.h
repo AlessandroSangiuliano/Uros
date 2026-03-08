@@ -25,7 +25,7 @@
 #ifndef	_MACH_STRING_H_
 #define	_MACH_STRING_H_	1
 
-#include <types.h>
+#include <sa_mach/types.h>
 
 #ifndef	NULL
 #define NULL	(void *)0
@@ -44,5 +44,7 @@ extern int	strcmp(const char *, const char *);
 extern int	strncmp(const char *,const char *, size_t);
 extern char	*strchr(const char *s, int c);
 extern size_t	strspn(const char *, const char *);
+extern size_t	strlcpy(char *, const char *, size_t);
+extern size_t	strlcat(char *, const char *, size_t);
 
 #endif	/* _MACH_STRING_H_ */

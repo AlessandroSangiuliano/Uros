@@ -1335,7 +1335,7 @@ processor_set_things(
 			       */
 
 	vm_size_t size, size_needed;
-	vm_offset_t addr;
+	vm_offset_t addr = 0;
 
 	if (pset == PROCESSOR_SET_NULL)
 		return KERN_INVALID_ARGUMENT;

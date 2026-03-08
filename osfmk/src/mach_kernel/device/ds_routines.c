@@ -120,9 +120,21 @@
 #include <dipc/special_ports.h>
 #endif
 
+/* MIG-generated headers use array typedefs (e.g. device_name_t = char[128],
+ * io_buf_ptr_t = char[2048]) but implementations use pointer parameters.
+ * The mismatch is intentional and harmless on i386 (same ABI). */
+#pragma GCC diagnostic ignored "-Warray-parameter="
+
 #if	PARAGON860 || iPSC386 || iPSC860
 int	ndf_noise=0;
 #endif
+
+/* Zone definitions (declared extern in io_req.h) */
+zone_t	io_req_zone;
+zone_t	io_inband_zone;
+
+/* Device IO map (declared extern in ds_routines.h) */
+vm_map_t	device_io_map;
 
 /* Forward */
 
@@ -289,15 +301,14 @@ ds_device_open(
 	/*
 	 * Open must be called on the master device port.
 	 */
-	if (open_port != master_device_port)
+	if (open_port != master_device_port) {
 	    return (D_INVALID_OPERATION);
+	}
 
 	/*
 	 * There must be a reply port.
 	 */
 	if (!IP_VALID(reply_port)) {
-	    printf("ds_* invalid reply port\n");
-	    Debugger("ds_* reply_port");
 	    return (MIG_NO_REPLY);	/* no sense in doing anything */
 	}
 

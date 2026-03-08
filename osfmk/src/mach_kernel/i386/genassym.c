@@ -154,7 +154,7 @@
 #include <i386/SQT/slic.h>
 #include <i386/SQT/intctl.h>
 #endif	/* SQT */
-#ifdef	CBUS
+#if	CBUS
 #include <busses/cbus/cbus.h>
 #endif	/* CBUS */
 
@@ -253,7 +253,7 @@ main(
 
 	DECLARE("FP_VALID",	offsetof(struct i386_fpsave_state *,fp_valid));
 	DECLARE("FP_SAVE_STATE",
-		offsetof(struct i386_fpsave_state *, fp_save_state));
+		offsetof(struct i386_fpsave_state *, fx_save_state));
 
 	DECLARE("R_CS",		offsetof(struct i386_saved_state *, cs));
 	DECLARE("R_SS",		offsetof(struct i386_saved_state *, ss));
@@ -281,7 +281,6 @@ main(
 	DECLARE("VM_MIN_ADDRESS",	VM_MIN_ADDRESS);
 	DECLARE("VM_MAX_ADDRESS",	VM_MAX_ADDRESS);
 	DECLARE("KERNELBASE",		VM_MIN_KERNEL_ADDRESS);
-	DECLARE("LINEAR_KERNELBASE",	LINEAR_KERNEL_ADDRESS);
 	DECLARE("KERNEL_STACK_SIZE",	KERNEL_STACK_SIZE);
 
 	DECLARE("PDESHIFT",	PDESHIFT);
@@ -323,9 +322,9 @@ main(
 	DECLARE("INTEL_PTE_KERNEL",	INTEL_PTE_VALID|INTEL_PTE_WRITE);
 
 	DECLARE("KERNELBASEPDE",
-		(LINEAR_KERNEL_ADDRESS >> PDESHIFT) *
+		(VM_MIN_KERNEL_ADDRESS >> PDESHIFT) *
 		sizeof(pt_entry_t));
-#ifdef	CBUS
+#if	CBUS
 	DECLARE("CBUS_START_PDE",	
 		(CBUS_START >> PDESHIFT) *
 		sizeof(pt_entry_t));

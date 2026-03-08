@@ -136,16 +136,14 @@ Proxy_init()
 }
 
 xmm_obj_t
-proxy_kobj_by_memory_control(memory_control)
-	mach_port_t memory_control;
+proxy_kobj_by_memory_control(mach_port_t memory_control)
 {
 	return (xmm_obj_t) xmm_hash_lookup(proxy_memory_object_hash,
 				       (unsigned long) memory_control);
 }
 
 xmm_obj_t
-proxy_mobj_by_memory_object(memory_object)
-	mach_port_t memory_object;
+proxy_mobj_by_memory_object(mach_port_t memory_object)
 {
 	xmm_obj_t mobj;
 
@@ -175,11 +173,7 @@ xmm_proxy_create(memory_object, new_mobj)
 	return KERN_SUCCESS;
 }
 
-m_proxy_init(mobj, k_kobj, memory_object_name, page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t page_size;
+m_proxy_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t page_size)
 {
 	kern_return_t kr;
 	xmm_obj_t kobj;
@@ -203,10 +197,7 @@ m_proxy_init(mobj, k_kobj, memory_object_name, page_size)
 	return KERN_SUCCESS;
 }
 
-m_proxy_terminate(mobj, kobj, memory_object_name)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	mach_port_t memory_object_name;
+m_proxy_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t memory_object_name)
 {
 	proxy_terminate(MOBJ->memory_object,
 			KOBJ->memory_control,
@@ -214,12 +205,7 @@ m_proxy_terminate(mobj, kobj, memory_object_name)
 	/* XXX garbage collection */
 }
 
-m_proxy_copy(mobj, kobj, offset, length, new_memory_object)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	mach_port_t new_memory_object;
+m_proxy_copy(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, mach_port_t new_memory_object)
 {
 	proxy_copy(MOBJ->memory_object,
 		   KOBJ->memory_control,
@@ -228,12 +214,7 @@ m_proxy_copy(mobj, kobj, offset, length, new_memory_object)
 		   new_memory_object);
 }
 
-m_proxy_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_proxy_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	proxy_data_request(MOBJ->memory_object,
 			   KOBJ->memory_control,
@@ -242,12 +223,7 @@ m_proxy_data_request(mobj, kobj, offset, length, desired_access)
 			   desired_access);
 }
 
-m_proxy_data_unlock(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_proxy_data_unlock(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 	proxy_data_unlock(MOBJ->memory_object,
 			  KOBJ->memory_control,
@@ -256,12 +232,7 @@ m_proxy_data_unlock(mobj, kobj, offset, length, desired_access)
 			  desired_access);
 }
 
-m_proxy_data_write(mobj, kobj, offset, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	int length;
+m_proxy_data_write(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, int length)
 {
 	proxy_data_write(MOBJ->memory_object,
 			 KOBJ->memory_control,
@@ -270,11 +241,7 @@ m_proxy_data_write(mobj, kobj, offset, data, length)
 			 length);
 }
 
-m_proxy_lock_completed(mobj, kobj, offset, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
+m_proxy_lock_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length)
 {
 	proxy_lock_completed(MOBJ->memory_object,
 			     KOBJ->memory_control,
@@ -282,13 +249,7 @@ m_proxy_lock_completed(mobj, kobj, offset, length)
 			     length);
 }
 
-m_proxy_supply_completed(mobj, kobj, offset, length, result, error_offset)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	kern_return_t result;
-	vm_offset_t error_offset;
+m_proxy_supply_completed(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, kern_return_t result, vm_offset_t error_offset)
 {
 	proxy_supply_completed(MOBJ->memory_object,
 			       KOBJ->memory_control,
@@ -298,12 +259,7 @@ m_proxy_supply_completed(mobj, kobj, offset, length, result, error_offset)
 			       error_offset);
 }
 
-m_proxy_data_return(mobj, kobj, offset, data, length)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_offset_t data;
-	vm_size_t length;
+m_proxy_data_return(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_offset_t data, vm_size_t length)
 {
 	proxy_data_return(MOBJ->memory_object,
 			  KOBJ->memory_control,
@@ -312,12 +268,7 @@ m_proxy_data_return(mobj, kobj, offset, data, length)
 			  length);
 }
 
-proxy_data_provided(memory_control, offset, data, length, lock_value)
-	mach_port_t	memory_control;
-	vm_offset_t	offset;
-	pointer_t	data;
-	unsigned int	length;
-	vm_prot_t	lock_value;
+proxy_data_provided(mach_port_t memory_control, vm_offset_t offset, pointer_t data, unsigned int length, vm_prot_t lock_value)
 {
 	xmm_obj_t kobj;
 
@@ -325,10 +276,7 @@ proxy_data_provided(memory_control, offset, data, length, lock_value)
 	K_DATA_PROVIDED(kobj, offset, data, length, lock_value);
 }
 
-proxy_data_unavailable(memory_control, offset, length)
-	mach_port_t	memory_control;
-	vm_offset_t	offset;
-	vm_size_t	length;
+proxy_data_unavailable(mach_port_t memory_control, vm_offset_t offset, vm_size_t length)
 {
 	xmm_obj_t kobj;
 
@@ -371,11 +319,7 @@ proxy_lock_request(memory_control, offset, length, should_clean, should_flush,
 		       prot, robj);
 }
 
-proxy_data_error(memory_control, offset, length, error_value)
-	mach_port_t	memory_control;
-	vm_offset_t	offset;
-	vm_size_t	length;
-	kern_return_t	error_value;
+proxy_data_error(mach_port_t memory_control, vm_offset_t offset, vm_size_t length, kern_return_t error_value)
 {
 	xmm_obj_t kobj;
 
@@ -383,11 +327,7 @@ proxy_data_error(memory_control, offset, length, error_value)
 	K_DATA_ERROR(kobj, offset, length, error_value);
 }
 
-proxy_set_attributes(memory_control, object_ready, may_cache, copy_strategy)
-	mach_port_t	memory_control;
-	boolean_t	object_ready;
-	boolean_t	may_cache;
-	memory_object_copy_strategy_t copy_strategy;
+proxy_set_attributes(mach_port_t memory_control, boolean_t object_ready, boolean_t may_cache, memory_object_copy_strategy_t copy_strategy)
 {
 	xmm_obj_t kobj;
 
@@ -395,9 +335,7 @@ proxy_set_attributes(memory_control, object_ready, may_cache, copy_strategy)
 	K_SET_ATTRIBUTES(kobj, object_ready, may_cache, copy_strategy);
 }
 
-proxy_destroy(memory_control, reason)
-	mach_port_t	memory_control;
-	kern_return_t	reason;
+proxy_destroy(mach_port_t memory_control, kern_return_t reason)
 {
 	xmm_obj_t kobj;
 

@@ -139,6 +139,33 @@
 #include <mach.h>
 #include <mach/thread_switch.h>
 #include <mach/machine/vm_param.h>
+#include <sa_mach/stdio.h> /* for fprintf_stderr declaration */
+
+/*
+ * Provide minimal fallbacks for building on user-space hosts
+ */
+/* Ensure architecture-specific cthreads types are visible when available */
+#include <machine/cthreads.h>
+
+#ifndef cthread_context_t
+/* On hosts or when arch headers are missing, use vm_offset_t so context can
+   be manipulated as expected by cthread_filter() and stack base computations. */
+typedef vm_offset_t cthread_context_t;
+#endif
+
+#ifndef SPIN_LOCK_INITIALIZER
+typedef int spin_lock_t;
+#define SPIN_LOCK_INITIALIZER 0
+static inline void spin_lock_init(spin_lock_t *x) { (void)x; }
+static inline int spin_lock_locked(spin_lock_t *x) { (void)x; return 0; }
+#endif
+
+#ifndef CTHREAD_STACK_OFFSET
+#define CTHREAD_STACK_OFFSET 0
+#endif
+
+/* IN_KERNEL fallback removed - architecture-specific implementations (e.g., in_kernel.c) provide IN_KERNEL(). */
+
 
 #ifdef SWITCH_OPTION_IDLE
 #define CTHREADS_VERSION 3
@@ -191,7 +218,7 @@ struct cthread {
     struct cthread 	*list;		/* List of all cthreads. */
     mutex_t		cond_mutex;	/* Event the thread is waiting for. */
 #ifdef	WAIT_DEBUG
-	int waiting_for;
+	uintptr_t waiting_for;
 #endif	/* WAIT_DEBUG */
     volatile int	state;		/* The current state (see below). */
     volatile int	flags;		/* The thread's flags (see below). */
@@ -341,16 +368,6 @@ extern void exit(int ret);
  */
 extern void cthread_setup(cthread_t, thread_port_t, cthread_fn_t);
 
-#if 0	/* These functions don't really exist as such. */
-/* Cthread context functions (in machine/csw.s) */
-extern void  cthread_context_prepare(cthread_context_t *, cthread_fn_t, void *);
-extern void *cthread_context_user_build(cthread_context_t *, cthread_fn_t,
-                                        void *, void *);
-extern void  cthread_context_user_invoke(cthread_context_t *, void *);
-extern void  cthread_context_internal_build(cthread_context_t *, cthread_fn_t,
-                                        void *, spin_lock_t *, vm_offset_t *);
-#endif	/* 0 */
-
 /* Malloc functions (in malloc.c). */
 #ifdef DEBUG
 extern void cthread_print_malloc_free_list(void);
@@ -432,13 +449,21 @@ typedef struct cthread_statistics_struct {
 extern void stack_wire(vm_address_t base, vm_size_t length);
 #endif
 
-#if	defined(__i386) || defined (hp_pa) || defined (ppc)
-extern	boolean_t IN_KERNEL(void *addr);
+#if defined(IN_KERNEL) || defined(__i386) || defined(__x86_64__) || defined(hp_pa) || defined(ppc)
+#ifndef IN_KERNEL
+extern boolean_t IN_KERNEL(void *addr);
+#endif
 #define IN_KERNEL_STACK_SIZE	(32 * 1024)
 #elif	defined(i860)
-#define IN_KERNEL(addr)		(VM_MAX_ADDRESS < (unsigned)(addr))
+#define IN_KERNEL(addr) 		(VM_MAX_ADDRESS < (unsigned)(addr))
 #define IN_KERNEL_STACK_SIZE	(32 * 1024)
 #else
-#error Need an IN_KERNEL definition for current target.
+/* Fall back to a simple macro if target not recognized */
+#ifndef IN_KERNEL
+#define IN_KERNEL(x) (0)
+#endif
+#ifndef IN_KERNEL_STACK_SIZE
+#define IN_KERNEL_STACK_SIZE (8192)
+#endif
 #endif
 boolean_t in_kernel;

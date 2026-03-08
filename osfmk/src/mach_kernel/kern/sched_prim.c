@@ -1302,11 +1302,14 @@ thread_invoke(
 	 */
 
 	disable_preemption();
-	old_thread = switch_context(old_thread, 0, new_thread);
+	old_thread = switch_context(old_thread, old_thread->continuation,
+				    new_thread);
 
 	/*
 	 *	We're back.  Now old_thread is the thread that resumed
 	 *	us, and we have to dispatch it.
+	 *	(Only reached when continuation was NULL — otherwise
+	 *	 the thread resumes via Thread_continue/thread_continue.)
 	 */
 #if	MACH_RT
 	if (old_thread->preempt == TH_NOT_PREEMPTABLE) {
@@ -1518,14 +1521,28 @@ thread_block_reason(
 	myprocessor = current_processor();
 
 	thread_lock(thread);
-	/* NB: dependency: NOT_AT_SAFE_POINT == (void (*)(void)) 0 */
-	thread->at_safe_point = (int) continuation;
+	/*
+	 * Distinguish safe-point sentinels from real continuations.
+	 * Sentinels (SAFE_*) are small negative values (-1..-7,
+	 * i.e. unsigned >= 0xFFFFFFF9): store in at_safe_point,
+	 * zero the continuation (it's not a real function pointer).
+	 * Real continuations are valid kernel addresses: the caller
+	 * must pre-set at_safe_point before calling thread_block().
+	 * NULL means no continuation and no safe-point.
+	 */
+	if ((unsigned int)continuation >= 0xFFFFFFF9u) {
+		/* Sentinel: use for at_safe_point, zero continuation */
+		thread->at_safe_point = (int) continuation;
+		continuation = (void (*)(void)) 0;
+	} else if (continuation == (void (*)(void)) 0) {
+		thread->at_safe_point = NOT_AT_SAFE_POINT;
+	}
+	/* else: real continuation — at_safe_point pre-set by caller */
+
 	aborted = (thread->state & TH_ABORT);
 	if( aborted )
 		clear_wait_locked( thread, THREAD_INTERRUPTED, TRUE );
 	thread_unlock(thread);
-
-	continuation = (void (*)(void)) 0;
 
 #if	FAST_TAS
 	{
@@ -1539,7 +1556,7 @@ thread_block_reason(
 	/* Unconditionally remove either | both */
 	ast_off(cpu_number(), (AST_QUANTUM|AST_BLOCK|AST_URGENT));
 
-      restart:
+      restart: (void)&&restart; /* suppress unused-label: goto inside #if FAST_IDLE */
 	new_thread = thread_select(myprocessor);
 	assert(new_thread);
 
@@ -1556,8 +1573,9 @@ thread_block_reason(
 	 *	because there are still good reasons to wind up in the
 	 *	real idle thread.
 	 */
-	assert(continuation == (void (*)(void)) 0);
-	if (new_thread->priority >= DEPRESSPRI &&
+	/* FAST_IDLE is incompatible with continuations (stack is discarded) */
+	if (continuation == (void (*)(void)) 0 &&
+	    new_thread->priority >= DEPRESSPRI &&
 	    thread->priority < DEPRESSPRI &&
 	    fast_idle_enabled &&
 	    fast_idle_allowed) {
@@ -1616,6 +1634,7 @@ thread_block_reason(
 
 	mp_enable_preemption();
 
+	thread->continuation = continuation;
 	thread_invoke(thread, new_thread, reason);
 
 	splx(s);
@@ -1657,9 +1676,16 @@ thread_run(
 #endif	/* MACH_ASSERT */
 
 	s = splsched();
-        thread_lock(thread);
-        thread->at_safe_point = (int) continuation;
-        thread_unlock(thread);
+	thread_lock(thread);
+	/* Apply same sentinel detection as thread_block_reason */
+	if ((unsigned int)continuation >= 0xFFFFFFF9u) {
+		thread->at_safe_point = (int) continuation;
+		continuation = (void (*)(void)) 0;
+	} else if (continuation == (void (*)(void)) 0) {
+		thread->at_safe_point = NOT_AT_SAFE_POINT;
+	}
+	thread_unlock(thread);
+	thread->continuation = continuation;
 	thread_invoke(thread, new_thread, 0);
 	splx(s);
 
@@ -1692,7 +1718,8 @@ thread_dispatch(
 	wake_lock(thread);
 	thread_lock(thread);
 
-	assert( thread->continuation == (void (*)(void)) 0 );
+	/* thread->continuation may be non-zero if the thread blocked
+	 * with a real continuation (it will resume via Thread_continue) */
 
 	switch (thread->state & (TH_RUN|TH_WAIT|TH_UNINT|TH_IDLE)) {
 	    case TH_RUN			    | TH_UNINT:
@@ -3126,7 +3153,7 @@ dump_run_queues(
 		printf("[%u]",i);
 		for (t_cnt=0, e = q1->next; e != q1; e = e->next) {
 		    printf("\t0x%08x",e);
-		    if( (t_cnt = ++t_cnt%4) == 0 )
+		    if( (t_cnt = (t_cnt + 1) % 4) == 0 )
 			printf("\n");
 		}
 		if( t_cnt )

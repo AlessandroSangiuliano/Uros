@@ -58,7 +58,7 @@ mach_port_t	mach_task_self_ = MACH_PORT_NULL;
 
 vm_size_t	vm_page_size;
 
-static struct rpc_glue_vector _rpc_glue_vector_data;
+static void* _rpc_glue_vector_data;
 rpc_glue_vector_t _rpc_glue_vector;
 
 /*

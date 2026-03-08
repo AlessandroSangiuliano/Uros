@@ -77,15 +77,12 @@ zone_t zinit(size, max, alloc, pageable, name)
 	return(z);
 }
 
-vm_offset_t zalloc(zone)
-	register zone_t	zone;
+vm_offset_t zalloc(register zone_t zone)
 {
 	return (vm_offset_t) malloc(zone->elem_size);
 }
 
-void zfree(zone, elem)
-	register zone_t	zone;
-	vm_offset_t	elem;
+void zfree(register zone_t zone, vm_offset_t elem)
 {
 	free(elem);
 }

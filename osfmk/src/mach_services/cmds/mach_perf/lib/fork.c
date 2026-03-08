@@ -57,8 +57,7 @@ int	is_child_task = 0;	/*
 				 *  temporary set to 1 during fork for child.
 				 */
 
-fork_slave(parent_thread)
-mach_port_t parent_thread;
+fork_slave(mach_port_t parent_thread)
 {
 	thread_state_t 		state;
 	mach_msg_type_number_t 	count;

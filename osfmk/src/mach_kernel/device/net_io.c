@@ -1728,7 +1728,7 @@ net_kmsg_create_pool(
 	net_pool_t *pool_result) /* New Pool Handle (OUT arg) */
 {
 	register net_pool_t p = NET_POOL_NULL;
-	vm_size_t kmsg_size;
+	vm_size_t kmsg_size = 0;
 	spl_t s;
 
 	switch (ptype) {
@@ -1929,7 +1929,7 @@ net_kmsg_alloc_buf(
 	net_pool_t	p)		/* Pool Handle */
 {
 	register struct io_sglist *sglist;
-        register ipc_kmsg_t kmsg;
+        register ipc_kmsg_t kmsg = IKM_NULL;
         vm_map_copy_t copy;
         kern_return_t ret;
         vm_size_t size;

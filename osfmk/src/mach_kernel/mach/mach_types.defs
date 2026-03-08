@@ -186,32 +186,26 @@ type mach_port_status_t = struct[10] of integer_t;	/* obsolete */
 type mach_port_flavor_t 	= int;
 type mach_port_info_t		= array[*:10] of integer_t;
 
-type task_t = mach_port_t
-		ctype: mach_port_t
+type task_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: task_t convert_port_to_task(mach_port_t)
-		outtran: mach_port_t convert_task_to_port(task_t)
-		destructor: task_deallocate(task_t)
+		intran: task_t convert_port_to_task(mach_port_t) outtran: mach_port_t convert_task_to_port(task_t) destructor: task_deallocate(task_t) ;
+#else
+		;
 #endif	/* KERNEL_SERVER */
-		;
 
-type thread_t = mach_port_t
-		ctype: mach_port_t
+type thread_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: thread_t convert_port_to_thread(mach_port_t)
-		outtran: mach_port_t convert_thread_to_port(thread_t)
-		destructor: thread_deallocate(thread_t)
+		intran: thread_t convert_port_to_thread(mach_port_t) outtran: mach_port_t convert_thread_to_port(thread_t) destructor: thread_deallocate(thread_t) ;
+#else
+		;
 #endif	/* KERNEL_SERVER */
-		;
 
-type thread_act_t = mach_port_t
-		ctype: mach_port_t
+type thread_act_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: thread_act_t convert_port_to_act(mach_port_t)
-		outtran: mach_port_t convert_act_to_port(thread_act_t)
-		destructor: act_deallocate(thread_act_t)
-#endif	KERNEL_SERVER
+		intran: thread_act_t convert_port_to_act(mach_port_t) outtran: mach_port_t convert_act_to_port(thread_act_t) destructor: act_deallocate(thread_act_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 		/* thread_state_t: This inline array can hold
 		 * a machine-dependent amount of data, defined in
@@ -227,21 +221,19 @@ type thread_port_array_t = ^array[] of thread_t;
 type thread_act_array_t = ^array[] of thread_act_t;
 type thread_act_port_array_t = ^array[] of thread_act_t;
 
-type vm_task_t = mach_port_t
-		ctype: mach_port_t
+type vm_task_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: vm_map_t convert_port_to_map(mach_port_t)
-		destructor: vm_map_deallocate(vm_map_t)
-#endif	/* KERNEL_SERVER */
+		intran: vm_map_t convert_port_to_map(mach_port_t) destructor: vm_map_deallocate(vm_map_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
-type ipc_space_t = mach_port_t
-		ctype: mach_port_t
+type ipc_space_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: ipc_space_t convert_port_to_space(mach_port_t)
-		destructor: space_deallocate(ipc_space_t)
-#endif	/* KERNEL_SERVER */
+		intran: ipc_space_t convert_port_to_space(mach_port_t) destructor: space_deallocate(ipc_space_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 type vm_address_t = natural_t;
 type vm_offset_t = natural_t;
@@ -279,45 +271,43 @@ type thread_info_t		= array[*:12] of integer_t;
 type task_flavor_t		= int;
 type task_info_t		= array[*:8] of integer_t;
 
-type memory_object_t = mach_port_t
-		ctype: mach_port_t
+type memory_object_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: ipc_port_t null_conversion(mach_port_t)
-#endif	/* KERNEL_SERVER */
+		intran: ipc_port_t null_conversion(mach_port_t) ;
+#else
 		;
-
-type memory_object_control_t = mach_port_t
-		ctype: mach_port_t
-#if	KERNEL_SERVER
-#if	NORMA_VM
-		intran: xmm_obj_t xmm_kobj_lookup(mach_port_t)
-#else	NORMA_VM
-		intran: vm_object_t vm_object_lookup(mach_port_t)
-#endif	/* NORMA_VM */
 #endif	/* KERNEL_SERVER */
-		;
 
-type memory_cache_control_t = mach_port_t
-		ctype: mach_port_t
+type memory_object_control_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
 #if	NORMA_VM
-		intran: xmm_obj_t xmm_kobj_lookup(mach_port_t)
-#else	NORMA_VM
-		intran: ipc_port_t null_conversion(mach_port_t)
+		intran: xmm_obj_t xmm_kobj_lookup(mach_port_t) ;
+#else	/* NORMA_VM */
+		intran: vm_object_t vm_object_lookup(mach_port_t) ;
 #endif	/* NORMA_VM */
+#else
+		;
 #endif	/* KERNEL_SERVER */
-		;
 
-type memory_object_name_t = mach_port_t
-		ctype: mach_port_t
+type memory_cache_control_t = mach_port_t ctype: mach_port_t
+#if	KERNEL_SERVER
+#if	NORMA_VM
+		intran: xmm_obj_t xmm_kobj_lookup(mach_port_t) ;
+#else	/* NORMA_VM */
+		intran: ipc_port_t null_conversion(mach_port_t) ;
+#endif	/* NORMA_VM */
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
-type memory_object_rep_t = mach_port_t
-		ctype: mach_port_t
+type memory_object_name_t = mach_port_t ctype: mach_port_t;
+
+type memory_object_rep_t = mach_port_t ctype: mach_port_t
 #if     KERNEL_SERVER
-                intran: ipc_port_t null_conversion(mach_port_t)
-#endif  /* KERNEL_SERVER */
+                intran: ipc_port_t null_conversion(mach_port_t) ;
+#else
                 ;
+#endif  /* KERNEL_SERVER */
 
 type memory_object_copy_strategy_t = int;
 type memory_object_return_t = int;
@@ -325,30 +315,28 @@ type memory_object_return_t = int;
 type machine_info_data_t = struct[5] of integer_t;
 type machine_slot_data_t = struct[8] of integer_t;
 
-type host_t = mach_port_t
-		ctype: mach_port_t
+type host_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: host_t convert_port_to_host(mach_port_t)
-		outtran: mach_port_t convert_host_to_port(host_t)
-#endif	/* KERNEL_SERVER */
+		intran: host_t convert_port_to_host(mach_port_t) outtran: mach_port_t convert_host_to_port(host_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
-type host_priv_t = mach_port_t
-		ctype: mach_port_t
+type host_priv_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: host_t convert_port_to_host_priv(mach_port_t)
-#endif	/* KERNEL_SERVER */
+		intran: host_t convert_port_to_host_priv(mach_port_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
-type host_paging_t = mach_port_t        /* XXX to build norm_internals.defs */
-                ctype: mach_port_t;
+type host_paging_t = mach_port_t ctype: mach_port_t;
 
-type security_port_t = mach_port_t
-		ctype: mach_port_t
+type security_port_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: host_t convert_port_to_host_security(mach_port_t)
-#endif	/* KERNEL_SERVER */
+		intran: host_t convert_port_to_host_security(mach_port_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 		/* host_info_t: variable-sized inline array that can contain:
 		 * host_basic_info_t (5 ints)
@@ -361,13 +349,12 @@ type security_port_t = mach_port_t
 type host_flavor_t		= int;
 type host_info_t 		= array[*:12] of integer_t;
 
-type processor_t = mach_port_t
-		ctype: mach_port_t
+type processor_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: processor_t convert_port_to_processor(mach_port_t)
-		outtran: mach_port_t convert_processor_to_port(processor_t)
-#endif	/* KERNEL_SERVER */
+		intran: processor_t convert_port_to_processor(mach_port_t) outtran: mach_port_t convert_processor_to_port(processor_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 type processor_port_array_t 	= ^array[] of processor_t;
 
@@ -381,25 +368,21 @@ type processor_info_t		= array[*:5] of integer_t;
 
 type processor_slot_t		= array[*:1024] of int;
 
-type processor_set_t = mach_port_t
-		ctype: mach_port_t
+type processor_set_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: processor_set_t convert_port_to_pset(mach_port_t)
-		outtran: mach_port_t convert_pset_to_port(processor_set_t)
-		destructor: pset_deallocate(processor_set_t)
-#endif	/* KERNEL_SERVER */
+		intran: processor_set_t convert_port_to_pset(mach_port_t) outtran: mach_port_t convert_pset_to_port(processor_set_t) destructor: pset_deallocate(processor_set_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 type processor_set_port_array_t = ^array[] of processor_set_t;
 
-type processor_set_name_t = mach_port_t
-		ctype: mach_port_t
+type processor_set_name_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: processor_set_t convert_port_to_pset_name(mach_port_t)
-		outtran: mach_port_t convert_pset_name_to_port(processor_set_t)
-		destructor: pset_deallocate(processor_set_t)
-#endif	/* KERNEL_SERVER */
+		intran: processor_set_t convert_port_to_pset_name(mach_port_t) outtran: mach_port_t convert_pset_name_to_port(processor_set_t) destructor: pset_deallocate(processor_set_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 type processor_set_name_port_array_t = ^array[] of processor_set_name_t;
 
@@ -426,13 +409,12 @@ type time_value_t = struct[2] of integer_t;
 
 type user_subsystem_t		= array[*:16384] of char;
 
-type subsystem_t = mach_port_t
-		ctype: mach_port_t
+type subsystem_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: subsystem_t convert_port_to_subsystem(mach_port_t)
-		outtran: mach_port_t convert_subsystem_to_port(subsystem_t)
-#endif	/* KERNEL_SERVER */
+		intran: subsystem_t convert_port_to_subsystem(mach_port_t) outtran: mach_port_t convert_subsystem_to_port(subsystem_t) ;
+#else
 		;
+#endif	/* KERNEL_SERVER */
 
 type mach_port_qos_t = struct[2] of integer_t;
 
@@ -449,13 +431,12 @@ type policy_base_t		= array[*:5] of integer_t;
 type policy_info_t		= array[*:2] of integer_t;
 type policy_limit_t		= array[*:1] of integer_t;
 
-type ledger_port_t = mach_port_t
-                ctype: mach_port_t
+type ledger_port_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: ledger_t convert_port_to_ledger(mach_port_t)
-		outtran: mach_port_t convert_ledger_to_port(ledger_t)
-#endif	/* KERNEL_SERVER */
+		intran: ledger_t convert_port_to_ledger(mach_port_t) outtran: mach_port_t convert_ledger_to_port(ledger_t) ;
+#else
                 ;
+#endif	/* KERNEL_SERVER */
 
 type ledger_port_array_t 	= ^array[] of ledger_port_t;
 type ledger_item_t		= integer_t;

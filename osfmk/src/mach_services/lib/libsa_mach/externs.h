@@ -23,6 +23,7 @@
  */
 
 #include <stdarg.h>		/* for va_list */
+#include <stddef.h>		/* for size_t */
 
 extern char	**__environment;
 
@@ -31,3 +32,8 @@ extern void	_doprnt(const char *,
 			int,			/* default radix - for '%r' */
 			void (*)(void *, int),	/* character output */
 			void *);
+
+extern size_t	strlcpy(char *, const char *, size_t);
+extern size_t	strlcat(char *, const char *, size_t);
+extern int	snprintf(char *, size_t, const char *, ...);
+extern int	vsnprintf(char *, size_t, const char *, va_list);

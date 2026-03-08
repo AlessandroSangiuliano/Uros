@@ -208,7 +208,7 @@ rose_symload(struct file *fp,
 	return;
     }
 
-    *(int*)symtab = lp->sym_size[0];
+    *(int32_t*)symtab = lp->sym_size[0];
 
     nl = (struct nlist *)(symtab + sizeof(int));
 
@@ -246,7 +246,7 @@ rose_symload(struct file *fp,
 	free((void *)buf);
     }
 
-    *(int*)nl = lp->str_size + sizeof(int);
+    *(int32_t*)nl = lp->str_size + sizeof(int32_t);
     strings = (vm_offset_t)nl + sizeof(int);
 
     /* 

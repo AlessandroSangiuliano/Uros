@@ -87,6 +87,13 @@
 #define	MSR_P5_CTR0		0x12	/* Counter #0 */
 #define	MSR_P5_CTR1		0x13	/* Counter #1 */
 
+/*
+ * SYSENTER/SYSEXIT MSRs (Pentium II+)
+ */
+#define	MSR_IA32_SYSENTER_CS	0x174	/* SYSENTER CS selector */
+#define	MSR_IA32_SYSENTER_ESP	0x175	/* SYSENTER kernel stack pointer */
+#define	MSR_IA32_SYSENTER_EIP	0x176	/* SYSENTER kernel entry point */
+
 #define	MSR_P5_CESR_PC		0x0200	/* Pin Control */
 #define	MSR_P5_CESR_CC		0x01C0	/* Counter Control mask */
 #define	MSR_P5_CESR_ES		0x003F	/* Event Control mask */
@@ -160,6 +167,9 @@
 /*
  * CR4
  */
+#define	CR4_OSXSAVE	0x00040000	/*       OS Support for XSAVE/XRSTOR */
+#define	CR4_OSXMMEXCPT	0x00000400	/* p6:   OS Support for Unmasked SIMD FP Exceptions */
+#define	CR4_OSFXSR	0x00000200	/* p6:   OS Support for FXSAVE/FXRSTOR */
 #define	CR4_PGE	0x00000080	/*       Page Global Extensions */
 #define	CR4_MCE	0x00000040	/* p5:   Machine Check Exceptions */
 #define	CR4_PSE	0x00000010	/* p5:   Page Size Extensions */
@@ -169,42 +179,76 @@
 #define	CR4_VME	0x00000001	/* p5:   Virtual-8086 Mode Extensions */
 
 #ifndef	ASSEMBLER
-extern unsigned int	get_cr0(void);
-extern void		set_cr0(
-				unsigned int		value);
-extern unsigned int	get_cr2(void);
-extern unsigned int	get_cr3(void);
-extern void		set_cr3(
-				unsigned int		value);
+/* get_cr4/set_cr4 are not inlined below; provided by locore or AT386 code */
 extern unsigned int	get_cr4(void);
-extern void		set_cr4(
-				unsigned int		value);
+extern void		set_cr4(unsigned int value);
+
+/*
+ * Inline CPUID wrapper.
+ * On entry, leaf is placed in EAX and subleaf (count) in ECX.
+ */
+static __inline__ void do_cpuid(unsigned int leaf, unsigned int subleaf,
+	unsigned int *eax, unsigned int *ebx,
+	unsigned int *ecx, unsigned int *edx)
+{
+	__asm__ volatile("cpuid"
+		: "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
+		: "a" (leaf), "c" (subleaf));
+}
+
+/*
+ * Read/write Extended Control Register (XCR).
+ * Requires CR4.OSXSAVE to be set before use.
+ * Uses .byte encoding for compatibility with older assemblers.
+ */
+static __inline__ void xgetbv(unsigned int xcr,
+	unsigned int *lo, unsigned int *hi)
+{
+	__asm__ volatile(".byte 0x0f, 0x01, 0xd0" /* xgetbv */
+		: "=a" (*lo), "=d" (*hi) : "c" (xcr));
+}
+
+static __inline__ void xsetbv(unsigned int xcr,
+	unsigned int lo, unsigned int hi)
+{
+	__asm__ volatile(".byte 0x0f, 0x01, 0xd1" /* xsetbv */
+		: : "a" (lo), "d" (hi), "c" (xcr));
+}
+
+/*
+ * Read/write Model Specific Registers (MSR).
+ * Requires CPUID_FEATURE_MSR support.
+ */
+static __inline__ void rdmsr(unsigned int msr,
+	unsigned int *lo, unsigned int *hi)
+{
+	__asm__ volatile("rdmsr"
+		: "=a" (*lo), "=d" (*hi) : "c" (msr));
+}
+
+static __inline__ void wrmsr(unsigned int msr,
+	unsigned int lo, unsigned int hi)
+{
+	__asm__ volatile("wrmsr"
+		: : "c" (msr), "a" (lo), "d" (hi));
+}
 
 #define	set_ts() \
 	set_cr0(get_cr0() | CR0_TS)
-extern void		clear_ts(void);
-
-extern unsigned short	get_tr(void);
-extern void		set_tr(
-			       unsigned int		seg);
-
-extern unsigned short	get_ldt(void);
-extern void		set_ldt(
-				unsigned int		seg);
 #ifdef	__GNUC__
-extern __inline__ unsigned int get_cr0(void)
+static __inline__ unsigned int get_cr0(void)
 {
 	register unsigned int cr0; 
 	__asm__ volatile("mov %%cr0, %0" : "=r" (cr0));
 	return(cr0);
 }
 
-extern __inline__ void set_cr0(unsigned int value)
+static __inline__ void set_cr0(unsigned int value)
 {
 	__asm__ volatile("mov %0, %%cr0" : : "r" (value));
 }
 
-extern __inline__ unsigned int get_cr2(void)
+static __inline__ unsigned int get_cr2(void)
 {
 	register unsigned int cr2;
 	__asm__ volatile("mov %%cr2, %0" : "=r" (cr2));
@@ -217,44 +261,44 @@ extern __inline__ unsigned int get_cr2(void)
  * the cpu number gets stored. The MP versions live in locore.s
  */
 #else	/* NCPUS > 1 && AT386 */
-extern __inline__ unsigned int get_cr3(void)
+static __inline__ unsigned int get_cr3(void)
 {
 	register unsigned int cr3;
 	__asm__ volatile("mov %%cr3, %0" : "=r" (cr3));
 	return(cr3);
 }
 
-extern __inline__ void set_cr3(unsigned int value)
+static __inline__ void set_cr3(unsigned int value)
 {
 	__asm__ volatile("mov %0, %%cr3" : : "r" (value));
 }
 #endif	/* NCPUS > 1 && AT386 */
 
-extern __inline__ void clear_ts(void)
+static __inline__ void clear_ts(void)
 {
 	__asm__ volatile("clts");
 }
 
-extern __inline__ unsigned short get_tr(void)
+static __inline__ unsigned short get_tr(void)
 {
 	unsigned short seg; 
 	__asm__ volatile("str %0" : "=rm" (seg));
 	return(seg);
 }
 
-extern __inline__ void set_tr(unsigned int seg)
+static __inline__ void set_tr(unsigned int seg)
 {
 	__asm__ volatile("ltr %0" : : "rm" ((unsigned short)(seg)));
 }
 
-extern __inline__ unsigned short get_ldt(void)
+static __inline__ unsigned short get_ldt(void)
 {
 	unsigned short seg;
 	__asm__ volatile("sldt %0" : "=rm" (seg));
 	return(seg);
 }
 
-extern __inline__ void set_ldt(unsigned int seg)
+static __inline__ void set_ldt(unsigned int seg)
 {
 	__asm__ volatile("lldt %0" : : "rm" ((unsigned short)(seg)));
 }

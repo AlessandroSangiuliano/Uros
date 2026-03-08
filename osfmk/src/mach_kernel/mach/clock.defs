@@ -107,5 +107,5 @@ routine clock_alarm(
 		clock		: clock_t;
 		alarm_type	: alarm_type_t;
 		alarm_time	: tvalspec_t;
-                alarm_port      : mach_port_t =
+                alarm_port      : alarm_port_t =
                         MACH_MSG_TYPE_MAKE_SEND_ONCE|polymorphic);

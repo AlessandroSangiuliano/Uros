@@ -472,8 +472,7 @@ mach_port_t *port_list;
 				  n*sizeof(mach_port_t)));
 }
 
-ipc_thread(port)
-mach_port_t port;
+ipc_thread(mach_port_t port)
 {
 	extern boolean_t ipc_demux();
 

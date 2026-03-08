@@ -333,9 +333,9 @@ int	vm_page_free_reserved;	/* How many pages reserved to do pageout */
 extern
 int	vm_page_laundry_count;	/* How many pages being laundered? */
 
-decl_mutex_data(,vm_page_queue_lock)
+decl_mutex_data(extern,vm_page_queue_lock)
 				/* lock on active and inactive page queues */
-decl_mutex_data(,vm_page_queue_free_lock)
+decl_mutex_data(extern,vm_page_queue_free_lock)
 				/* lock on free page queue */
 decl_simple_lock_data(extern,vm_page_preppin_lock)	/* lock for prep/pin */
 

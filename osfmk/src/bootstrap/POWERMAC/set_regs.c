@@ -52,7 +52,8 @@
 #include <mach/mach_host.h>
 #include <mach/machine/vm_param.h>
 
-#define	STACK_SIZE	(64*1024)
+#define	STACK_SIZE		(64*1024)
+#define	PPC_STACK_FRAME_SIZE	0x40	/* PPC ABI minimum stack frame */
 
 void
 set_regs(mach_port_t		host_port,
@@ -94,7 +95,7 @@ set_regs(mach_port_t		host_port,
 				&reg_size);
 
 	regs.srr0 = lp->entry_1;
-	regs.r1 = stack_end - 0x40; /* XXX not clean */
+	regs.r1 = stack_end - PPC_STACK_FRAME_SIZE;
 
 	(void)thread_set_state(user_thread,
 				PPC_THREAD_STATE,

@@ -56,8 +56,7 @@ thread_self()
 		return(&threads[0]);
 }
 
-set_thread_self(thread)
-mach_thread_t thread;
+set_thread_self(mach_thread_t thread)
 {
   	mach_thread_t *th_pt;
 

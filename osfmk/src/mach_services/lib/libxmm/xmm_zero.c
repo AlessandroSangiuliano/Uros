@@ -91,11 +91,7 @@ xmm_zero_create(new_mobj)
 	return xmm_obj_allocate(&zero_class, XMM_OBJ_NULL, new_mobj);
 }
 
-m_zero_init(mobj, k_kobj, memory_object_name, page_size)
-	xmm_obj_t mobj;
-	xmm_obj_t k_kobj;
-	mach_port_t memory_object_name;
-	vm_size_t page_size;
+m_zero_init(xmm_obj_t mobj, xmm_obj_t k_kobj, mach_port_t memory_object_name, vm_size_t page_size)
 {
 	xmm_obj_t kobj = mobj;
 
@@ -112,10 +108,7 @@ m_zero_init(mobj, k_kobj, memory_object_name, page_size)
 	K_SET_ATTRIBUTES(kobj, TRUE, FALSE, MEMORY_OBJECT_COPY_DELAY);
 }
 
-m_zero_terminate(mobj, kobj, memory_object_name)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	mach_port_t memory_object_name;
+m_zero_terminate(xmm_obj_t mobj, xmm_obj_t kobj, mach_port_t memory_object_name)
 {
 #if     lint
 	mobj++;
@@ -124,12 +117,7 @@ m_zero_terminate(mobj, kobj, memory_object_name)
 #endif  /* lint */
 }
 
-m_zero_data_request(mobj, kobj, offset, length, desired_access)
-	xmm_obj_t mobj;
-	xmm_obj_t kobj;
-	vm_offset_t offset;
-	vm_size_t length;
-	vm_prot_t desired_access;
+m_zero_data_request(xmm_obj_t mobj, xmm_obj_t kobj, vm_offset_t offset, vm_size_t length, vm_prot_t desired_access)
 {
 #if     lint
 	mobj++;

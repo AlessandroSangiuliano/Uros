@@ -54,7 +54,7 @@
  */
 
 int
-strcmp(register const char *s1, register const char *s2)
+strcmp(const char *s1, const char *s2)
 {
 
 	while (*s1 == *s2++)

@@ -50,7 +50,7 @@
  * Continuation Filter
  */
 
-extern rthread_filter(int *, int, void *, void *, void *, void *);
+extern int rthread_filter(int *, int, void *, void *, void *, void *);
 #define	RTHREAD_FILTER_USER_BUILD 0
 #define RTHREAD_FILTER_INTERNAL_BUILD 1
 #define RTHREAD_FILTER_INTERNAL_INVOKE 2

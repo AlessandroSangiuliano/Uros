@@ -62,6 +62,8 @@
 #include <mach/mach_traps.h>
 #include <mach/mach_host.h>
 #include <mach/sync_policy.h>
+#include <mach/sync.h>
+#include <stdio.h>
 #include <stdarg.h>
 
 /*
@@ -107,7 +109,7 @@ int
 rthread_init()
 {
 	static int 		rthreads_started = FALSE;
-	register rthread_t 	parent;
+	rthread_t 	parent;
 	vm_offset_t		stack;
 	kern_return_t		r;
 
@@ -168,9 +170,7 @@ int (*_thread_init_routine)() = (int (*)()) rthread_init;
  */
 
 vm_offset_t
-rthread_stack_base(rthread, offset)
-	register rthread_t rthread;
-	register int offset;
+rthread_stack_base(rthread_t rthread, int offset)
 {
 #ifdef	STACK_GROWTH_UP
 	return (rthread->stack_base + offset);
@@ -191,7 +191,7 @@ rthread_stack_base(rthread, offset)
 private rthread_t
 rthread_alloc()
 {
-	register rthread_t th;
+	rthread_t th;
 
 	TR_DECL("rthread_alloc");
 	tr1("enter");
@@ -218,7 +218,7 @@ private rthread_t
 rthread_create(rthread_fn_t func, void *arg, int type)
 {
 	kern_return_t		r;	
-	register rthread_t 	child;
+	rthread_t 	child;
 
 	TR_DECL("rthread_create");
 	tr3("func = %x arg = %x",(int)func, (int)arg);
@@ -271,7 +271,7 @@ rthread_create(rthread_fn_t func, void *arg, int type)
 private void
 rthread_kernel_bind(rthread_t th, boolean_t resume)
 {
-	register kern_return_t r;
+	kern_return_t r;
 	thread_port_t kernel_thread;
 
 	TR_DECL("rthread_kernel_bind");
@@ -320,7 +320,7 @@ rthread_spawn(rthread_fn_t func, void *arg)
 rthread_t
 rthread_spawn_priority(rthread_fn_t func, void *arg, int priority)
 {
-	register rthread_t 	child;
+	rthread_t 	child;
 	kern_return_t		r;
 
 	TR_DECL("rthread_spawn_priority");
@@ -626,7 +626,7 @@ void
 rthread_fork_prepare()
 {
 	kern_return_t		r;
-	register rthread_t 	th = _rthread_self();
+	rthread_t 	th = _rthread_self();
 
 	rthread_control_lock();
 	rthread_control_policy_lock();
@@ -651,7 +651,7 @@ void
 rthread_fork_parent()
 {
 	kern_return_t		r;
-	register rthread_t 	th = _rthread_self();
+	rthread_t 	th = _rthread_self();
 	
 	rthread_control_unlock();
 	rthread_control_policy_unlock();
@@ -773,15 +773,12 @@ static mach_port_t printer_waiting;
 
 #define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
 
-static
-printnum(u, base, putc, putc_arg)
-	register unsigned int	u;	/* number to print */
-	register int		base;
-	void			(*putc)();
-	char			*putc_arg;
+static void
+printnum(unsigned int u, int base,
+          void (*put)(void *, int), void *put_arg)
 {
 	char	buf[MAXBUF];	/* build number here */
-	register char *	p = &buf[MAXBUF-1];
+	char *	p = &buf[MAXBUF-1];
 	static char digs[] = "0123456789abcdef";
 
 	do {
@@ -790,15 +787,13 @@ printnum(u, base, putc, putc_arg)
 	} while (u != 0);
 
 	while (++p != &buf[MAXBUF])
-	    (*putc)(putc_arg, *p);
+	    (*put)(put_arg, *p);
 }
 
-rthread_doprnt(fmt, args, radix, putc, putc_arg)
-	register char	*fmt;
-	va_list		args;
-	int		radix;		/* default radix - for '%r' */
- 	void		(*putc)();	/* character output */
-	char		*putc_arg;	/* argument for putc */
+static void rthread_doprnt(char *fmt, va_list args, int radix, void (*put)(void *, int), void *put_arg)
+#define putc put
+#define putc_arg put_arg
+	/* argument for putc */
 {
 	int		length;
 	int		prec;
@@ -814,7 +809,7 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 
 	while (*fmt != '\0') {
 	    if (*fmt != '%') {
-		(*putc)(putc_arg, *fmt++);
+		(*put)(put_arg, *fmt++);
 		continue;
 	    }
 
@@ -888,9 +883,9 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 		case 'b':
 		case 'B':
 		{
-		    register char *p;
+		    char *p;
 		    boolean_t	  any;
-		    register int  i;
+		    int  i;
 
 		    u = va_arg(args, unsigned int);
 		    p = va_arg(args, char *);
@@ -906,7 +901,7 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 			    /*
 			     * Bit field
 			     */
-			    register int j;
+			    int j;
 			    if (any)
 				(*putc)(putc_arg, ',');
 			    else {
@@ -946,8 +941,8 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 
 		case 's':
 		{
-		    register char *p;
-		    register char *p2;
+		    char *p;
+		    char *p2;
 
 		    if (prec == -1)
 			prec = 0x7fffffff;	/* MAXINT */
@@ -1044,7 +1039,7 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 		print_num:
 		{
 		    char	buf[MAXBUF];	/* build number here */
-		    register char *	p = &buf[MAXBUF-1];
+		    char *	p = &buf[MAXBUF-1];
 		    static char digits[] = "0123456789abcdef";
 		    char *prefix = 0;
 
@@ -1082,8 +1077,7 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 			    (*putc)(putc_arg, '0');
 		    }
 		    while (++p != &buf[MAXBUF])
-			(*putc)(putc_arg, *p);
-
+        (*put)(put_arg, *p);
 		    if (ladjust) {
 			while (--length >= 0)
 			    (*putc)(putc_arg, ' ');
@@ -1101,6 +1095,9 @@ rthread_doprnt(fmt, args, radix, putc, putc_arg)
 	fmt++;
 	}
 }
+
+#undef putc
+#undef putc_arg
 
 /*
  *  ROUTINE:	init_printing
@@ -1124,7 +1121,7 @@ init_rthread_printf()
 			       &printer_waiting, SYNC_POLICY_FIFO, 0), kr);
 }
 
-void sendchar(char *s, int c)
+void sendchar(void *s, int c)
 {
     kern_return_t kr;
     if (print_buffer_index == (PRINT_BUFFER_SIZE-1))
@@ -1142,7 +1139,7 @@ int vrprintf(char *fmt, va_list args)
 
     MACH_CALL(lock_acquire(print_lock, PRINT_LOCK_ID), kr);
     MACH_CALL(semaphore_wait(printer_ready), kr);
-    rthread_doprnt(fmt, args, 0, (void (*)(char *, int)) sendchar, (char *) 0);
+	rthread_doprnt(fmt, args, 0, (void (*)(void *, int)) sendchar, (void *) 0);
     MACH_CALL(semaphore_signal(printer_waiting) , kr);
     MACH_CALL(lock_release(print_lock, PRINT_LOCK_ID), kr);
 }

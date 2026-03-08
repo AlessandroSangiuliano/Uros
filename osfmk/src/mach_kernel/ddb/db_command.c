@@ -306,7 +306,7 @@ db_cmd_search(
 	struct db_command *	table,
 	struct db_command **	cmdp)	/* out */
 {
-	struct db_command	*cmd;
+	struct db_command	*cmd = NULL;
 	int		result = CMD_NONE;
 
 	for (cmd = table; cmd->name != 0; cmd++) {
@@ -385,12 +385,12 @@ db_command(
 	char			*last_modifp,	/* IN_OUT */
 	struct db_command	*cmd_table)
 {
-	struct db_command	*cmd;
+	struct db_command	*cmd = NULL;
 	int		t;
 	char		modif[TOK_STRING_SIZE];
 	char		*modifp = &modif[0];
 	db_expr_t	addr, count;
-	boolean_t	have_addr;
+	boolean_t	have_addr = FALSE;
 	int		result;
 
 	t = db_read_token();

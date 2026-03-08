@@ -94,12 +94,12 @@ typedef struct free_list {
 static struct free_list malloc_free_list[NBUCKETS];
 
 static void
-rthreads_more_memory(int size, register free_list_t fl)
+rthreads_more_memory(int size, free_list_t fl)
 {
-	register int amount;
-	register int n;
+	int amount;
+	int n;
 	vm_address_t where;
-	register header_t h;
+	header_t h;
 	kern_return_t r;
 
 	if (size <= vm_page_size) {
@@ -143,11 +143,11 @@ rthreads_more_memory(int size, register free_list_t fl)
 }
 
 void *
-rthreads_malloc(register unsigned int size)
+rthreads_malloc(unsigned int size)
 {
-	register int i, n;
-	register free_list_t fl;
-	register header_t h;
+	int i, n;
+	free_list_t fl;
+	header_t h;
 
 	if ((int) size <= 0)		/* sanity check */
 		return 0;
@@ -210,9 +210,9 @@ rthreads_malloc(register unsigned int size)
 void
 rthreads_free(void *base)
 {
-	register header_t h;
-	register free_list_t fl;
-	register int i;
+	header_t h;
+	free_list_t fl;
+	int i;
 
 	if (base == 0)
 		return;
@@ -251,9 +251,9 @@ rthreads_free(void *base)
 void *
 rthreads_realloc(void *old_base, unsigned int new_size)
 {
-	register header_t h;
-	register free_list_t fl;
-	register int i;
+	header_t h;
+	free_list_t fl;
+	int i;
 	unsigned int old_size;
 	char *new_base;
 

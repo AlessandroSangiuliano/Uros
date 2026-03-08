@@ -322,9 +322,7 @@ extern  struct  bus_driver      gprof_driver;
 
 #include <vga.h>
 #if NVGA > 0
-extern	struct	bus_driver	PVGA1driver;
-extern	struct	bus_driver	ET4000driver;
-extern	struct	bus_driver	S3driver;
+/* PVGA1, ET4000, S3 drivers removed - obsolete SVGA cards */
 extern	struct	bus_driver	vgadriver;
 #endif /* NVGA */
 
@@ -591,7 +589,7 @@ struct	bus_device	bus_device_init[] = {
 
 /* vvv MITCHEM vvv */
 #if NNE > 0
-  {&nedriver, "ne", 0, (intr_t)at3c501intr, (caddr_t)0x300, 0,(caddr_t)0x300,
+  {&nedriver, "ne", 0, (intr_t)neintr, (caddr_t)0x300, 0,(caddr_t)0x300,
      '?',    0,   -1,    -1,    0,   0,        0,   SPL_SIX, 10},
 #endif /* NNE > 0 */
 /* ^^^ MITCHEM ^^^ */ 
@@ -641,12 +639,7 @@ struct	bus_device	bus_device_init[] = {
 #endif /* NWT > 0 */
 
 #if NVGA > 0
-  {&PVGA1driver, "pvga1", 0, NO_INTR, (caddr_t)0x3b0, 0, (caddr_t)0xa0000,
-     '?',    0,   -1,    -1,    0,   0,        0,   0, 0},
-  {&ET4000driver, "et4000", 0, NO_INTR, (caddr_t)0x3b0, 0, (caddr_t)0xa0000,
-     '?',    0,   -1,    -1,    0,   0,        0,   0, 0},
-  {&S3driver, "s3", 0, NO_INTR, (caddr_t)0x3b0, 0, (caddr_t)0xa0000,
-     '?',    0,   -1,    -1,    0,   0,        0,   0, 0},
+  /* Only standard VGA driver for QEMU compatibility */
   {&vgadriver, "vga", 0, NO_INTR, (caddr_t)0x3b0, 0, (caddr_t)0xa0000,
      '?',    0,   -1,    -1,    0,   0,        0,   0, 0},
 #endif /* NVGA > 0 */

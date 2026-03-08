@@ -68,6 +68,15 @@
 #include <device/device_types.h>
 #include <device/device.h>
 
+/*
+ * Override the cthread stack size for bootstrap server threads.
+ * probe_stack() may see only a small initial stack (the thread was created
+ * by the kernel via thread_create/thread_bootstrap_return and only the top
+ * page is touched before cthread_init runs).  MIG stubs such as
+ * device_set_status allocate ~4 KB of local vars; give every cthread 1 MB.
+ */
+vm_size_t cthread_stack_size = 1024 * 1024;
+
 #if	PARAGON860
 mach_port_t	bootstrap_root_device_port;	/* local name */
 #endif	/* PARAGON860 */
@@ -78,10 +87,14 @@ mach_port_t	security_port;
 mach_port_t	root_ledger_wired;
 mach_port_t	root_ledger_paged;
 
-const char default_config[] = "\
+/*const char default_config[] = "\
 name_server name_server\n\
 default_pager default_pager\n\
 unix startup -s\n\
+";*/
+
+const char default_config[] = "\
+default_pager default_pager hd0b\n\
 ";
 
 struct server *servers;
@@ -174,7 +187,7 @@ boolean_t		io_in_progress;
 int
 main(int argc, char **argv)
 {
-	register kern_return_t	kr;
+	kern_return_t	kr;
 	task_port_t		user_task;
 	thread_port_t		user_thread;
 	mach_port_t		prev_port;
@@ -270,7 +283,7 @@ main(int argc, char **argv)
 
 	/*
 	 *  Have a reply port for dead-name notification.
-	 *  XXX restart the service if it dies?
+	 *  TODO: implement automatic service restart on MACH_NOTIFY_DEAD_NAME.
 	 */
 	kr = mach_port_allocate(bootstrap_self, MACH_PORT_RIGHT_RECEIVE,
 				&bootstrap_notification_port);
@@ -334,12 +347,14 @@ main(int argc, char **argv)
 		    config_size = strlen(default_config);
 		    config_data = malloc(config_size+1);
 		    memcpy(config_data, default_config, config_size+1);
-		    if (parse_config_file(config_data, config_size) >= 0)
-                        panic("Error in bootstrap builtin configuration\n");
-		    break;
+		    
+			if (parse_config_file(config_data, config_size) >= 0)
+				panic("Error in bootstrap builtin configuration\n");
+		    
+			break;
 		}
 		if (newpath[0] != '\0')
-		    strcpy(pathname, newpath);
+		    strlcpy(pathname, newpath, sizeof(pathname));
 	    }
 	    memset((char *)&f, 0, sizeof(f));
 #if	PARAGON860
@@ -348,6 +363,19 @@ main(int argc, char **argv)
 	    result = open_file(bootstrap_master_device_port, pathname, &f);
 #endif	/* PARAGON860 */
 	    if (result != 0) {
+		if (!retry && !prompt) {
+		    /*
+		     * First attempt failed and we are not interactive.
+		     * Fall back to the builtin configuration instead of
+		     * looping forever waiting for console input.
+		     */
+		    BOOTSTRAP_IO_LOCK();
+		    printf("Configuration file not found; using builtin\n");
+		    BOOTSTRAP_IO_UNLOCK();
+		    if (parse_config_file(config_data, config_size) >= 0)
+			panic("Error in bootstrap builtin configuration\n");
+		    break;
+		}
 	        BOOTSTRAP_IO_LOCK();
 		printf("\nERROR: bootstrap task cannot find configuration file, please make sure that\n");
 		printf("       your boot device and partition is correctly specified.\n");
@@ -418,7 +446,7 @@ main(int argc, char **argv)
 	    char newpath[PATH_MAX];
 
 	    retry = FALSE;
-Retry_Server:
+	    while (1) {
 	    sp = &servers[i];
 	    /* If -a was seen in bootstrap args then prompt for
 	     * the name and path of the server. 
@@ -450,14 +478,6 @@ Retry_Server:
 
 	    parse_path(sp, newpath);
 
-#if 0
-	    /*
-	     * Check if we really want to load this server
-	     */
-	    if (!(sp->flags & LOAD_SERVER_F))
-		continue;
-#endif
-
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: loading %s\n", program_name, sp->server_name);
 	    BOOTSTRAP_IO_UNLOCK();
@@ -479,7 +499,7 @@ Retry_Server:
 		       program_name, result);
 		BOOTSTRAP_IO_UNLOCK();
 		retry = TRUE;
-		goto Retry_Server;
+		continue;
 	    }
 	    result = ex_get_header(&f, &ofmt);
 	    close_file(&f);
@@ -489,7 +509,7 @@ Retry_Server:
 		       program_name, result);
 		BOOTSTRAP_IO_UNLOCK();
 		retry = TRUE;
-		goto Retry_Server;
+		continue;
 	    }
 
 	    /*
@@ -557,12 +577,8 @@ Retry_Server:
 	    if (kr != KERN_SUCCESS)
 		panic("thread_create 0x%x", kr);
 
-#if 0
-	    strbuild(pathname, sp->symtab_name, "_name", (char *)0);
-#else
-	    strcpy(pathname, sp->symtab_name);
-	    strcat(pathname, "_name");
-#endif
+	    strlcpy(pathname, sp->symtab_name, sizeof(pathname));
+	    strlcat(pathname, "_name", sizeof(pathname));
 	    if (ptr = getenv(pathname))
 		parse_path(sp, ptr);
 
@@ -603,7 +619,7 @@ Retry_Server:
 		    BOOTSTRAP_IO_UNLOCK();
 		}
 		retry = TRUE;
-		goto Retry_Server;
+		continue;
 	    }
 #ifdef DEBUG
 	    BOOTSTRAP_IO_LOCK();
@@ -613,7 +629,7 @@ Retry_Server:
 #endif	    
 
 	    /*
-	     *  XXX restart the service if it dies?
+	     *  TODO: implement automatic service restart on MACH_NOTIFY_DEAD_NAME.
 	     */
 	    kr = mach_port_request_notification(bootstrap_self,
 						sp->task_port,
@@ -662,6 +678,8 @@ Retry_Server:
 #endif
 	    }
 	    (void) mach_port_deallocate(bootstrap_self, user_thread);
+	    break;
+	    } /* end retry loop */
 
 	} /* end foreach server */
 
@@ -689,13 +707,14 @@ Retry_Server:
 void
 parse_path(struct server *sp, const char *np)
 {
-	char *newpath, *p, *slash;
+	char *newpath, *p, *endp, *slash;
 	const char *cp;
 	const char *op, *endop;
 
 	op = sp->server_name;
 	endop = sp->server_name + sp->args_size;
 	p = newpath = malloc(PATH_MAX);
+	endp = newpath + PATH_MAX - 1;
 
 	/* before parsing path, check for any per-server boot options */
 	np = parse_boot_args((char**) &np, &sp);
@@ -703,30 +722,30 @@ parse_path(struct server *sp, const char *np)
 	while (isspace(*np))
 	    np++;
 	if (*np == '-') {
-	    while (*p++ = *op++)
+	    while (p < endp && (*p++ = *op++))
 		;
 	} else if (*np) {
 	    if (*np == '/') {
 		if (strncmp(np, "/dev/", 5) != 0) {
 		    cp = "/dev/boot_device";
-		    while (*cp)
+		    while (*cp && p < endp)
 			*p++ = *cp++;
 		}
 		while (*op++)
 		    ;
 	    } else {
 		slash = p;
-		while (*p = *op++)
+		while (p < endp && (*p = *op++))
 		    if (*p++ == '/')
 			slash = p;
 		if (p == slash) {
 		    cp = "/dev/boot_device/mach_servers/";
-		    while (*cp)
+		    while (*cp && p < endp)
 			*p++ = *cp++;
 		} else
 		    p = slash;
 	    }
-	    while (*np && !isspace(*np))
+	    while (*np && !isspace(*np) && p < endp)
 		*p++ = *np++;
 	    *p++ = 0;
 	    while (isspace(*np))
@@ -734,12 +753,15 @@ parse_path(struct server *sp, const char *np)
 	}
 	if (*np == 0) {
 	    if (endop - op > 0) {
-		memcpy(p, op, endop - op);
-		p += endop - op;
+		size_t remain = endop - op;
+		if (remain > (size_t)(endp - p))
+		    remain = endp - p;
+		memcpy(p, op, remain);
+		p += remain;
 	    }
 	} else {
 	    for (;;) {
-		while (*np && !isspace(*np)) {
+		while (*np && !isspace(*np) && p < endp) {
 		    if (*np == '\\') {
 			/* Skip the backslash and take next char blindly */
 			np++;
@@ -748,7 +770,7 @@ parse_path(struct server *sp, const char *np)
 		    } else if (*np == '"') {
 			/* quoted string */
 			np++;
-			while (*np && *np != '"') {
+			while (*np && *np != '"' && p < endp) {
 			    *p++ = *np++;
 			}
 			np++;
@@ -760,7 +782,8 @@ parse_path(struct server *sp, const char *np)
 		    np++;
 		if (*np == 0)
 		    break;
-		*p++ = 0;
+		if (p < endp)
+		    *p++ = 0;
 	    }
 	}
 	sp->server_name = newpath;
@@ -1026,9 +1049,9 @@ catch_exception_raise_state_identity(mach_port_t port,
 
 	/* copy input state to output state */
 	*ocnt = icnt;
-	memcpy((char *) out_state, (char *) in_state, icnt * sizeof (int));
+	memcpy(out_state, in_state, icnt * sizeof (int));
 	BOOTSTRAP_IO_LOCK();
-	printf("State is at 0x%x (count = %d)\n", (int) out_state, *ocnt);
+	printf("State is at %p (count = %d)\n", (void *) out_state, *ocnt);
 	for (i = 0; i < icnt; i++) {
 		if (i % 4)
 			printf("\n");
@@ -1183,6 +1206,7 @@ do_bootstrap_environment(mach_port_t bootstrap,
 	kr = vm_allocate(mach_task_self(), env, alloc_size, TRUE);
 	if (kr != KERN_SUCCESS)
 		return kr;
+	/* Safe: buffer is vm_allocated to env_size which is the exact total */
 	p1 = (char *)(*env);
 	for (ep = __environment; *ep; ep++) {
 		p2 = *ep;
@@ -1244,7 +1268,7 @@ bootstrap_notify_dead_name(mach_port_t name)
  * bootstrap ports.
  */
 static void
-data_device_loop()
+data_device_loop(void)
 {
     io_buf_ptr_t local_addr;
     mach_msg_type_number_t local_size;
@@ -1429,8 +1453,8 @@ data_device_loop()
 }
 
 /*
- * Load a file into the vm of the task argument
- * XXX For now, only the bootstrap_task uses it
+ * Load a file into the vm of the task argument.
+ * Currently only called for the bootstrap_task; extend if needed.
  */
 static kern_return_t
 data_device_load_file(

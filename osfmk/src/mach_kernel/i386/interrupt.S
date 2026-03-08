@@ -303,6 +303,16 @@ return_from_interrupt:
  */
 
 	popl	%eax			# get old IPL from stack
+
+/*
+ * Sanity-check: old_ipl must be <= IPLHI.  If not, curr_ipl was already
+ * corrupted before this interrupt fired.  Capture the interrupted EIP
+ * (STAT_TIME=1 layout: [%esp+4] = old_kernel_esp, [old_kernel_esp+20] = EIP)
+ * and panic to locate the corruption site.
+ */
+	cmpl	$(IPLHI), %eax
+	ja	ret_intr_corrupt
+
 	MP_DISABLE_PREEMPTION(%edx)
 	CPU_NUMBER(%edx)
 	cmpl	CX(EXT(curr_ipl),%edx), %eax
@@ -319,6 +329,32 @@ no_splx:
 
 interrupt_return:
 	ret
+
+ret_intr_corrupt:
+	/*
+	 * curr_ipl was already corrupted when this interrupt fired.
+	 * Stack layout (STAT_TIME=1, non-intstack path), after popl %eax:
+	 *   [%esp+0]  = RA back to return_to_iret in locore.S
+	 *   [%esp+4]  = old_kernel_esp (saved by all_intrs: pushl %ecx)
+	 * Kernel stack at old_kernel_esp:
+	 *   [+0]=%es [+4]=%ds [+8]=%edx [+12]=%ecx [+16]=old_%eax
+	 *   [+20]=EIP (interrupted instruction)
+	 */
+	movl	4(%esp), %ecx		/* old_kernel_esp */
+	movl	20(%ecx), %ecx		/* interrupted EIP */
+	CPU_NUMBER(%edx)
+	pushl	CX(EXT(curr_ipl),%edx)	/* curr_ipl now (set by set_spl in int_ok) */
+	pushl	%ecx			/* interrupted EIP */
+	pushl	%eax			/* bad old_ipl (= what curr_ipl was before intr) */
+	pushl	$ret_intr_corrupt_msg
+	call	EXT(panic)
+	hlt
+
+	.data
+ret_intr_corrupt_msg:
+	String	"intr_ret: bad old_ipl=%#x eip=%#x curr_ipl=%#x\n"
+	.byte	0
+	.text
 
 #if	MP_V1_1
 mpv1_intr:

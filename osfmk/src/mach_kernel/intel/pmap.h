@@ -326,17 +326,9 @@ typedef unsigned int	pt_entry_t;
 #define PTEMASK		0x3ff	/* mask for page table index */
 
 /*
- *	Convert kernel virtual address to linear address
- */
-
-#define kvtolinear(a)	((a)+LINEAR_KERNEL_ADDRESS)
-
-/*
  *	Convert address offset to page descriptor index
  */
-#define pdenum(pmap, a)	(((((pmap) == kernel_pmap) ?	\
-			   kvtolinear(a) : (a))		\
-			  >> PDESHIFT) & PDEMASK)
+#define pdenum(pmap, a)	(((a) >> PDESHIFT) & PDEMASK)
 
 /*
  *	Convert page descriptor index to user virtual address
@@ -493,7 +485,7 @@ extern pmap_t	real_pmap[NCPUS];
 	pmap_t		*ppmap = &real_pmap[my_cpu];			\
 	vm_offset_t	pdirbase = pmap->pdirbase;			\
 									\
-	if (*ppmap == (vm_offset_t)NULL) {				\
+	if (*ppmap == (pmap_t)NULL) {					\
 		*ppmap = pmap;						\
 		PMAP_CPU_SET(pmap, my_cpu);				\
 		set_cr3(pdirbase);					\
@@ -853,7 +845,7 @@ extern void		flush_tlb(void);
 #define	pmap_copy(dst_pmap,src_pmap,dst_addr,len,src_addr)
 #ifndef	PARAGON860
 #define	pmap_attribute(pmap,addr,size,attr,value) \
-					(KERN_INVALID_ADDRESS)
+					((void)(pmap),(void)(addr),(void)(size),(void)(attr),(void)(value),KERN_INVALID_ADDRESS)
 #endif	/* PARAGON860 */
 
 #endif	/* ASSEMBLER */

@@ -254,7 +254,7 @@ service_init(void)
 
     kr = mach_ports_register(mach_task_self(), ports, services_count);
     if (kr != KERN_SUCCESS) {
-	panic("%s: can't register ports", program_name);
+	panic("%s: can't ports", program_name);
     }
 
     kr = vm_deallocate(mach_task_self(), (vm_address_t) ports,

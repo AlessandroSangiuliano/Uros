@@ -22,7 +22,17 @@
  * MkLinux
  */
 
-#include <sys/timers.h>
+#if defined(__has_include)
+#  if __has_include(<sys/timers.h>)
+#    include <sys/timers.h>
+#  else
+/* provide minimal fallback types/macros needed when <sys/timers.h> is absent */
+struct timespec { long tv_sec; long tv_nsec; };
+#    define TIMEOFDAY 0
+#  endif
+#else
+#  include <sys/timers.h>
+#endif
 #include <errno.h>
 #include <mach.h>
 #include <mach/clock.h>

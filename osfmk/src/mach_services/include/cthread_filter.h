@@ -52,7 +52,7 @@
  */
 
 #ifndef cthread_filter
-extern cthread_filter(vm_offset_t *, int, void *, void *, void *, void *);
+extern int cthread_filter(vm_offset_t *, int, void *, void *, void *, void *);
 #endif
 #ifndef	CTHREAD_FILTER_MACRO
 #define	CTHREAD_FILTER_USER_BUILD 0

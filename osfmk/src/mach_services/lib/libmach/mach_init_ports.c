@@ -88,20 +88,3 @@ mach_init_ports(void)
 			     (vm_offset_t) ports,
 			     (vm_size_t) (ports_count * sizeof *ports));
 }
-
-
-#ifndef	lint
-/*
- *	Routines which our library must suck in, to avoid
- *	a later library from referencing them and getting
- *	the wrong version.
- */
-extern void _replacements(void);
-
-void
-_replacements(void)
-{
-	(void)sbrk(0);			/* Pull in our sbrk/brk */
-	(void)malloc(0);		/* Pull in our malloc package */
-}
-#endif	/* lint */

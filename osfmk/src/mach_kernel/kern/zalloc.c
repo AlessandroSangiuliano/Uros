@@ -569,7 +569,7 @@ zcram(
 	vm_size_t		size)
 {
 	register vm_size_t	elem_size;
-	spl_t s;
+	spl_t s = 0;
 
 	/* Basic sanity checks */
 	assert(zone != ZONE_NULL && newmem != (vm_offset_t)0);
@@ -796,7 +796,7 @@ zalloc(
 {
 	vm_offset_t	addr;
 	kern_return_t retval;
-	spl_t s;
+	spl_t s = 0;
 
 	assert(zone != ZONE_NULL);
 	check_simple_locks();
@@ -967,7 +967,7 @@ zget(
 	register zone_t	zone)
 {
 	register vm_offset_t	addr;
-	spl_t			s;
+	spl_t			s = 0;
 
 	assert( zone != ZONE_NULL );
 
@@ -1003,7 +1003,7 @@ zfree(
 	register zone_t	zone,
 	vm_offset_t	elem)
 {
-	spl_t	s;
+	spl_t	s = 0;
 
 #if MACH_ASSERT
 	/* Basic sanity checks */
@@ -1082,7 +1082,7 @@ zone_enable_spl(
 		zone_t		zone,
 		spl_t		(*spl_routine)(void))
 {
-        spl_t s;
+        spl_t s = 0;
 	assert( zone != ZONE_NULL );
 
 	assert(zone->spl_routine == ZONE_NO_SPL);
@@ -1137,7 +1137,7 @@ integer_t
 zone_free_count(zone_t zone)
 {
 	integer_t free_count;
-	spl_t s;
+	spl_t s = 0;
 
 	if (zone->spl_routine)
 		s = (*zone->spl_routine)();
@@ -1213,7 +1213,7 @@ zone_page_collectable(
 	vm_size_t	size)
 {
 	natural_t i, j;
-	spl_t s;
+	spl_t s = 0;
 
 #if MACH_ASSERT
 	if (!from_zone_map(addr) || !from_zone_map(addr+size-1))
@@ -1243,7 +1243,7 @@ zone_page_keep(
 	vm_size_t	size)
 {
 	natural_t i, j;
-	spl_t s;
+	spl_t s = 0;
 
 #if MACH_ASSERT
 	if (!from_zone_map(addr) || !from_zone_map(addr+size-1))
@@ -1267,7 +1267,7 @@ zone_page_in_use(
 	vm_size_t	size)
 {
 	natural_t i, j;
-	spl_t s;
+	spl_t s = 0;
 
 #if MACH_ASSERT
 	if (!from_zone_map(addr) || !from_zone_map(addr+size-1))
@@ -1292,7 +1292,7 @@ zone_page_free(
 	vm_size_t	size)
 {
 	natural_t i, j;
-	spl_t s;
+	spl_t s = 0;
 
 #if MACH_ASSERT
 	if (!from_zone_map(addr) || !from_zone_map(addr+size-1))
@@ -1318,7 +1318,7 @@ zone_page_init(
 	int		value)
 {
 	natural_t i, j;
-	spl_t s;
+	spl_t s = 0;
 
 #if MACH_ASSERT
 	if (!from_zone_map(addr) || !from_zone_map(addr+size-1))
@@ -1343,7 +1343,7 @@ zone_page_alloc(
 	vm_size_t	size)
 {
 	natural_t i, j;
-	spl_t s;
+	spl_t s = 0;
 
 #if MACH_ASSERT
 	if (!from_zone_map(addr) || !from_zone_map(addr+size-1))
@@ -1374,7 +1374,7 @@ zone_page_dealloc(
 	vm_size_t	size)
 {
 	natural_t i, j;
-	spl_t s;
+	spl_t s = 0;
 
 #if MACH_ASSERT
 	if (!from_zone_map(addr) || !from_zone_map(addr+size-1))
@@ -1399,7 +1399,7 @@ zone_add_free_page_list(
 	vm_size_t	size)
 {
 	natural_t i, j;
-	spl_t s;
+	spl_t s = 0;
 
 #if MACH_ASSERT
 	if (!from_zone_map(addr) || !from_zone_map(addr+size-1))
@@ -1446,7 +1446,7 @@ zone_gc(void)
 	unsigned int	i;
 	struct zone_page_table_entry	*freep;
 	struct zone_page_table_entry	*zone_free_page_list;
-	spl_t s;
+	spl_t s = 0;
 
 	mutex_lock(&zone_gc_lock);
 
@@ -1621,14 +1621,14 @@ host_zone_info(
 {
 	zone_name_t	*names;
 	vm_offset_t	names_addr;
-	vm_size_t	names_size;
+	vm_size_t	names_size = 0;
 	zone_info_t	*info;
 	vm_offset_t	info_addr;
-	vm_size_t	info_size;
+	vm_size_t	info_size = 0;
 	unsigned int	max_zones, i;
 	zone_t		z;
 	kern_return_t	kr;
-	spl_t s;
+	spl_t s = 0;
 
 	if (host == HOST_NULL)
 		return KERN_INVALID_HOST;

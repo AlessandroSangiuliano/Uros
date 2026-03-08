@@ -45,9 +45,6 @@
 void (*_mach_init_routine)(void);
 int  (*_threadlib_init_routine)(void);
 void (*_threadlib_exit_routine)(int);
-#if	OLD_COMPAT
-int (*_thread_init_routine)(void);
-#endif
 
 static char *__nullarg = 0;
 static char **__argv = &__nullarg;
@@ -56,88 +53,26 @@ char **__environment = &__nullarg;
 
 extern int main(int, char **);
 extern void exit(int);
+extern void init_stack_guard(void);
 
 static void __setup_ptrs(vm_offset_t, vm_size_t, char ***, int *);
 static void __get_arguments(void);
 static void __get_environment(void);
 
-#if	OLD_COMPAT
-#if	defined(i386) || defined (i860)
-void __start_mach(int);
-
-void
-__start_mach(int kframe)
-#endif	/* defined(i386) || defined (i860) */
-#if	defined(hp_pa) || defined(ppc)
-void __c_start_mach(int, char**);
-
-void __c_start_mach(int kargc, char **kargv)
-#endif	/* defined(hp_pa) || defined(ppc) */
-#else
 void __start_mach(void);
 
-void
+/*
+ * __attribute__((optimize("no-stack-protector"))) ensures this function
+ * is not instrumented with canary checks — the guard is not yet
+ * initialized when we enter here.
+ */
+void __attribute__((no_stack_protector))
 __start_mach(void)
-#endif
 {
 	int retval;
-#if	OLD_COMPAT
-#if	defined(i386) || defined (i860)
-	struct kframe {
-		int	kargc;
-		char	*kargv[1];	/* size depends on kargc */
-	};
-	struct kframe *kfp = (struct kframe *) (&kframe - 1);
 
-	if (kfp->kargv[0]) {
-	    __argc = kfp->kargc;
-	    __argv = kfp->kargv;
-#endif	/* defined(i386) || defined (i860) */
-#if	defined(hp_pa) || defined(ppc)
-	if (kargc) {
-	    __argc = kargc;
-	    __argv = kargv;
-#endif	/* defined(hp_pa) || defined(ppc) */
-
-	    if (*_mach_init_routine)
-		(*_mach_init_routine)();
-
-	    if (_thread_init_routine) {
-		int new_sp;
-
-		new_sp = (*_thread_init_routine)();
-		if (new_sp)
-#if	defined(i386)
-		    __asm__ volatile("movl %0, %%esp" : : "g" (new_sp) );
-#endif	/* defined(i386) */
-#if	defined(i860)
-		__setstack(new_sp);
-#endif	/* defined(i386) */
-#if     defined(hp_pa)
-		{
-			__asm__ volatile("ldo 7(%0),%0" : : "g"(new_sp));
-			__asm__ volatile("depi 0,31,3,%0" : : "g" (new_sp));
-			__asm__ volatile("copy %0,%%r30" : : "g" (new_sp): "r30");
-			__asm__ volatile("ldo 48(%%r30),%%r30" : : :"r30");
-		}
-#endif
-#if	defined(ppc)
-		{
-			/* Macros have been expanded by hand to avoid asm.h
-			 * is there any reason not to include
-			 * asm.h in this file?
-			 * DUPLICATE OF BELOW
-			 */
-			__asm__ volatile("mr 1,%0" : : "g"(new_sp));
-			__asm__ volatile("clrrwi 1, 1, 4");
-			__asm__ volatile("subi 1,1,16");
-			__asm__ volatile("li 0, 0");
-			__asm__ volatile("stw 0,0(1)");
-		}
-#endif
-	    }
-	} else {
-#endif
+	/* Must be first — initialize canary before any protected function. */
+	init_stack_guard();
 
 	if (*_mach_init_routine)
 		(*_mach_init_routine)();
@@ -151,37 +86,8 @@ __start_mach(void)
 		new_sp = (*_threadlib_init_routine)();
 
 		if (new_sp)
-#if	defined(i386)
 			__asm__ volatile("movl %0, %%esp" : : "g" (new_sp) );
-#elif	defined(i860)
-		__setstack(new_sp);
-#elif	defined(hp_pa)
-	{
-		__asm__ volatile("ldo 7(%0),%0" : : "g"(new_sp));
-		__asm__ volatile("depi 0,31,3,%0" : : "g" (new_sp));
-		__asm__ volatile("copy %0,%%r30" : : "g" (new_sp): "r30");
-		__asm__ volatile("ldo 48(%%r30),%%r30" : : :"r30");
 	}
-#elif	defined(ppc)
-	{
-		/* Macros have been expanded by hand to avoid asm.h
-                 * is there any reason not to include asm.h in this file?
-		 * DUPLICATE OF ABOVE
-                 */
-		__asm__ volatile("mr 1,%0" : : "g"(new_sp));
-		__asm__ volatile("clrrwi 1, 1, 4");
-		__asm__ volatile("subi 1,1,16");
-		__asm__ volatile("li 0, 0");
-		__asm__ volatile("stw 0,0(1)");
-	}
-#else
-#error Need code to initialise stack pointer on this architecture.
-#endif
-	}
-
-#if	OLD_COMPAT
-	}
-#endif
 
 	retval = main(__argc, __argv);
 
@@ -190,19 +96,6 @@ __start_mach(void)
 
 	exit(retval);
 }
-
-#if	defined(i860)
-__setstack_holder(
-	int	new_stack)
-{
-	asm("	.align	4		");
-	asm("___setstack::		");
-	asm("	bri	r1		");
-	asm("	 mov	r16,sp		");
-
-	return;
-}
-#endif	/* defined(i386) */
 
 static void
 __setup_ptrs(

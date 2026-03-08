@@ -47,16 +47,4 @@
  * MkLinux
  */
 
-/*
- * External function definitions
- * for routines described in string(3).
- */
-char	*strcat();
-char	*strncat();
-int	strcmp();
-int	strncmp();
-char	*strcpy();
-char	*strncpy();
-unsigned long	strlen();
-char	*index();
-char	*rindex();
+#include <string.h>

@@ -303,7 +303,10 @@ hardclock(
 		pc = (unsigned)regs->eip;
 	} else {
 		usermode = FALSE;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
 		pc = (unsigned)((struct i386_interrupt_state *)&old_ipl)->eip;
+#pragma GCC diagnostic pop
 	}
 
 #if	MACH_KPROF

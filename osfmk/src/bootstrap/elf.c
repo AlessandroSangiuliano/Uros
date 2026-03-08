@@ -73,38 +73,37 @@ elf_load(struct file *fp, objfmt_t ofmt, void *hdr)
     if (result)
 	return result;
 
+    lp->num_segments = 0;
+
     for (i = 0, ph = phdr; i < ehdr->e_phnum; i++, ph++) {
-	switch ((int)ph->p_type) {
-	case PT_LOAD:
-	    if (ph->p_flags == (PF_R | PF_X)) {
-		lp->text_start = trunc_page(ph->p_vaddr);
-		lp->text_size =
-		    (vm_size_t)ph->p_vaddr + ph->p_filesz - lp->text_start;
-		lp->text_offset = trunc_page(ph->p_offset);
-	    } else if (ph->p_flags == (PF_R | PF_W | PF_X) ||
-		       ph->p_flags == (PF_R | PF_W)) {
-		lp->data_start = trunc_page(ph->p_vaddr);
-		lp->data_size =
-		    (vm_size_t) ph->p_vaddr + ph->p_filesz - lp->data_start;
-		lp->bss_size = ph->p_memsz - ph->p_filesz;
-		lp->data_offset = trunc_page(ph->p_offset);
-	    } else {
-#ifndef ppc
-		    /* mklinux/ppc has a read-only section which is ignored */
-		BOOTSTRAP_IO_LOCK();
-		printf("ELF: Unknown program header flags 0x%x\n",
-		       (int)ph->p_flags);
-		BOOTSTRAP_IO_UNLOCK();
-#endif /* ppc */
-	    }
-	    break;
-	case PT_INTERP:
-	case PT_DYNAMIC:
-	case PT_NOTE:
-	case PT_SHLIB:
-	case PT_PHDR:
-	case PT_NULL:
-	    break;
+	if ((int)ph->p_type != PT_LOAD || ph->p_memsz == 0)
+	    continue;
+
+	/* Record every PT_LOAD segment for the multi-segment loader */
+	if (lp->num_segments < MAX_LOAD_SEGMENTS) {
+	    struct load_segment *seg = &lp->segments[lp->num_segments++];
+	    seg->seg_vaddr  = ph->p_vaddr;
+	    seg->seg_filesz = ph->p_filesz;
+	    seg->seg_memsz  = ph->p_memsz;
+	    seg->seg_offset = ph->p_offset;
+	    seg->seg_prot   = VM_PROT_NONE;
+	    if (ph->p_flags & PF_R) seg->seg_prot |= VM_PROT_READ;
+	    if (ph->p_flags & PF_W) seg->seg_prot |= VM_PROT_WRITE;
+	    if (ph->p_flags & PF_X) seg->seg_prot |= VM_PROT_EXECUTE;
+	}
+
+	/* Also fill legacy text/data fields for symbol classification */
+	if (ph->p_flags & PF_X) {
+	    lp->text_start  = trunc_page(ph->p_vaddr);
+	    lp->text_size   = (vm_size_t)ph->p_vaddr + ph->p_filesz
+				- lp->text_start;
+	    lp->text_offset = trunc_page(ph->p_offset);
+	} else if (ph->p_flags & PF_W) {
+	    lp->data_start  = trunc_page(ph->p_vaddr);
+	    lp->data_size   = (vm_size_t)ph->p_vaddr + ph->p_filesz
+				- lp->data_start;
+	    lp->bss_size    = ph->p_memsz - ph->p_filesz;
+	    lp->data_offset = trunc_page(ph->p_offset);
 	}
     }
     free(phdr);
@@ -194,7 +193,7 @@ elf_symload(struct file *fp,
 	return;
     }
 
-    *(int*)symtab = lp->sym_size[0];
+    *(int32_t*)symtab = lp->sym_size[0];
 
     nl = (struct nlist *)(symtab + sizeof(int));
     symsize = lp->sym_size[0] / sizeof(struct nlist) * sizeof(Elf32_Sym);
@@ -246,7 +245,7 @@ elf_symload(struct file *fp,
 	case STT_HIPROC:
 	case STT_SECTION:
 	    /* Ignore symbol */
-	    *(int*)symtab -= sizeof(struct nlist);
+	    *(int32_t*)symtab -= sizeof(struct nlist);
 	    table_size -= sizeof(struct nlist);
 	    sstab++;
 	    continue;
@@ -277,7 +276,7 @@ elf_symload(struct file *fp,
     }
     free((void *)buf);
 
-    *(int*)nl = lp->str_size + sizeof(int);
+    *(int32_t*)nl = lp->str_size + sizeof(int32_t);
     strings = (vm_offset_t)nl + sizeof(int);
 
     /* 

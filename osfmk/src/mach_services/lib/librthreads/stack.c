@@ -141,7 +141,8 @@
  * 	Real-Time Thread stack allocation.
  *
  */
-
+
+
 #include <rthreads.h>
 #include <rthread_internals.h>
 #include <mach/vm_region.h>
@@ -150,6 +151,7 @@
 #include <mach/mach_host.h>
 #include <mach/bootstrap.h>
 #include <stdio.h>
+#include <mach/sync.h>
 
 /*
  *			Rthread Stacks
@@ -235,9 +237,7 @@ staticf void size_stack(void);
  */
 
 void 
-setup_stack(p, base)
-	register rthread_t p;
-	register vm_address_t base;
+setup_stack(rthread_t p, vm_address_t base)
 {
 	p->stack_base = base;
 	/*
@@ -265,12 +265,9 @@ setup_stack(p, base)
  * end of the valid range is returned.
  */
 
-vm_offset_t
-addr_range_check(start_addr, end_addr, desired_protection)
-	vm_offset_t	start_addr, end_addr;
-	vm_prot_t	desired_protection;
+vm_offset_t addr_range_check(vm_offset_t start_addr, vm_offset_t end_addr, vm_prot_t desired_protection)
 {
-	register vm_offset_t	addr;
+	vm_offset_t	addr;
 
 	addr = start_addr;
 	while (addr < end_addr) {
@@ -312,9 +309,7 @@ addr_range_check(start_addr, end_addr, desired_protection)
  * 	stack_bottom - OUT - The bottom of the area found for the stack.
  * 	stack_top - OUT - The top of the area found for the stack.
  *
- * Return Value:
- *	None
- *
+		probe_stack(vm_offset_t *stack_bottom, vm_offset_t *stack_top)
  * Assume:
  * 1. There is an unallocated region below the stack.
  * 2. The initial stack pointer is in the highest page of the stack.
@@ -323,9 +318,7 @@ addr_range_check(start_addr, end_addr, desired_protection)
 
 
 void
-probe_stack(stack_bottom, stack_top)
-	vm_offset_t	*stack_bottom;
-	vm_offset_t	*stack_top;
+probe_stack(vm_offset_t *stack_bottom, vm_offset_t *stack_top)
 {
 	/*
 	 * Since vm_region returns the region starting at
@@ -344,7 +337,7 @@ probe_stack(stack_bottom, stack_top)
 	/*
 	 * Start with a page
 	 */
-	start_addr = (vm_offset_t)rthread_sp() & ~(vm_page_size - 1);
+	start_addr = (vm_offset_t)(intptr_t)rthread_sp() & ~(vm_page_size - 1);
 	end_addr   = start_addr + vm_page_size;
 
 	stack_size = vm_page_size;
@@ -479,11 +472,9 @@ stack_init(rthread_t p, vm_offset_t *newstack)
 
 	if (in_kernel)
 #ifdef	STACK_GROWTH_UP
-		next_stack_base = (unsigned)(&end + next_stack_base) &
-			rthread_control.stack_mask;
+		next_stack_base = (vm_address_t)((intptr_t)(&end) + next_stack_base) & rthread_control.stack_mask;
 #else	/* STACK_GROWTH_UP */
-		next_stack_base = (unsigned)(&end + next_stack_base) &
-			~rthread_control.stack_mask;
+		next_stack_base = (vm_address_t)((intptr_t)(&end) + next_stack_base) & ~rthread_control.stack_mask;
 #endif	/* STACK_GROWTH_UP */
 
 	/*
@@ -516,11 +507,12 @@ stack_init(rthread_t p, vm_offset_t *newstack)
 	 */
 
 #ifdef	STACK_GROWTH_UP
-	start = ((vm_offset_t)rthread_sp() | (vm_page_size - 1)) + 1 + vm_page_size;
-	size = stack_top - start;
+	start = ((vm_offset_t)(intptr_t)rthread_sp() | (vm_page_size - 1)) + 1 + vm_page_size;
+	size = ((vm_offset_t)(intptr_t)rthread_sp() & ~(vm_page_size - 1)) - 
+		stack_bottom - vm_page_size;
 #else	/*STACK_GROWTH_UP*/
 	start = stack_bottom;
-	size = ((vm_offset_t)rthread_sp() & ~(vm_page_size - 1)) - 
+	size = ((vm_offset_t)(intptr_t)rthread_sp() & ~(vm_page_size - 1)) - 
 		stack_bottom - vm_page_size;
 #endif	/*STACK_GROWTH_UP*/
 	MACH_CALL(vm_deallocate(mach_task_self(),start,size),r);
@@ -539,7 +531,7 @@ stack_init(rthread_t p, vm_offset_t *newstack)
  * the overall stack size is a power of 2.
  */
 void
-size_stack()
+size_stack(void)
 {
 	if (rthread_red_zone_size > 0) {
 		red_zone = TRUE;
@@ -631,80 +623,68 @@ stack_wire(vm_address_t base, vm_size_t length)
  */
 
 void
-alloc_stack(p)
-	rthread_t p;
+alloc_stack(rthread_t p)
 {
 
-	vm_address_t	base = next_stack_base;
-	kern_return_t	r;
+	intptr_t base = (intptr_t)next_stack_base;
+	kern_return_t r;
 
 	if (stack_pool) {
 	    stack_pool_lock();
 	    if (stack_pool) {
 		base = stack_pool;
-		stack_pool = *(vm_address_t *)stack_pool;
+		stack_pool = *(intptr_t *)stack_pool;
 		stack_pool_unlock();
 		goto got_stack;
 	    }
 	    stack_pool_unlock();
 	}
 		
-	for (base = next_stack_base;
+	for (base = (intptr_t)next_stack_base;
 	     base < VM_MAX_KERNEL_LOADED_ADDRESS  &&
 	     vm_allocate(mach_task_self(), 
-			 &base, 
-			 rthread_control.stack_size * rthread_stack_chunk_count, 
-			 FALSE) != KERN_SUCCESS;
+                         (vm_address_t *)&base, 
+                         rthread_control.stack_size * rthread_stack_chunk_count, 
+                         FALSE) != KERN_SUCCESS;
 	     base += rthread_control.stack_size*rthread_stack_chunk_count);
 	if (base >= VM_MAX_KERNEL_LOADED_ADDRESS) {
 		printf("rthreads: alloc_stack fails\n");
 		exit(1);
 	}
-	next_stack_base = base + rthread_control.stack_size*rthread_stack_chunk_count;
-#ifdef	WIRE_IN_KERNEL_STACKS
-	/*
-	 * If we're running in a kernel-loaded application, wire the stack
-	 * we just allocated.
-	 */
-	if (in_kernel)
-		stack_wire(base, rthread_control.stack_size*rthread_stack_chunk_count);
-#endif	/* WIRE_IN_KERNEL_STACKS */
+	next_stack_base = (vm_address_t)(base + rthread_control.stack_size*rthread_stack_chunk_count);
+#ifdef  WIRE_IN_KERNEL_STACKS
+        if (in_kernel)
+            stack_wire((vm_address_t)base, rthread_control.stack_size*rthread_stack_chunk_count);
+#endif  /* WIRE_IN_KERNEL_STACKS */
         {
-	    int i;
-	    vm_address_t *loop = (vm_address_t *)base;
-	    for(i=1;i<rthread_stack_chunk_count;i++) {
-		loop = (vm_address_t *)((int)loop + rthread_control.stack_size);
-		*loop = (int)loop + rthread_control.stack_size;
-	    }
-	    if (loop != (vm_address_t *)base) {
-		stack_pool_lock();
-		*loop = stack_pool;
-		stack_pool = base + rthread_control.stack_size;
-		stack_pool_unlock();
-	    }
-	}
-	
-      got_stack:
-
-	/*
-	 * Protect the red zone at far end of stack:
-         */
-	if (red_zone) {
-		kern_return_t   r;
-		vm_address_t red_zone_base;
-
-#ifdef	STACK_GROWTH_UP
-		red_zone_base = base + access_stack_size;
-#else	/*STACK_GROWTH_UP*/
-		red_zone_base = base;
-#endif	/*STACK_GROWTH_UP*/
-		MACH_CALL(vm_protect(mach_task_self(), 
-					red_zone_base,
-					rthread_red_zone_size,
-					FALSE, VM_PROT_NONE), r);
-	}
-
-	setup_stack(p, base);
+            int i;
+            intptr_t loop = base;
+            for(i=1;i<rthread_stack_chunk_count;i++) {
+                loop += rthread_control.stack_size;
+                *(intptr_t *)loop = loop + rthread_control.stack_size;
+            }
+            if (loop != base) {
+                stack_pool_lock();
+                *(intptr_t *)loop = (intptr_t)stack_pool;
+                stack_pool = base + rthread_control.stack_size;
+                stack_pool_unlock();
+            }
+        }
+    got_stack:
+        if (red_zone) {
+            kern_return_t   r;
+            vm_address_t red_zone_base;
+#ifdef  STACK_GROWTH_UP
+            red_zone_base = (vm_address_t)(base + access_stack_size);
+#else   /*STACK_GROWTH_UP*/
+            red_zone_base = (vm_address_t)base;
+#endif  /*STACK_GROWTH_UP*/
+            MACH_CALL(vm_protect(mach_task_self(), 
+                                red_zone_base,
+                                rthread_red_zone_size,
+                                FALSE, VM_PROT_NONE), r);
+        }
+        setup_stack(p, (vm_address_t)base);
 }
 
 /*

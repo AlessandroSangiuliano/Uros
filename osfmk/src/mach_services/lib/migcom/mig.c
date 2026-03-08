@@ -143,18 +143,18 @@
  */
 
 #include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
 #include "error.h"
 #include "lexxer.h"
 #include "global.h"
 #include "write.h"
 
 extern int yyparse();
-static FILE *myfopen();
+static FILE *myfopen(char *name, char *mode);
 
 static void
-parseArgs(argc, argv)
-    int argc;
-    char *argv[];
+parseArgs(int argc, char *argv[])
 {
     while (--argc > 0)
 	if ((++argv)[0][0] == '-') 
@@ -296,15 +296,11 @@ parseArgs(argc, argv)
 
 FILE *uheader, *server, *user;
 
-void
-main(argc, argv)
-    int argc;
-    char *argv[];
+int
+main(int argc, char *argv[])
 {
     FILE *iheader, *sheader, *dheader;
     time_t loc;
-    extern time_t time();
-    extern string_t ctime();
     extern string_t GenerationDate;
 
     set_program_name("mig");
@@ -400,13 +396,11 @@ main(argc, argv)
     if (BeVerbose)
 	printf("done.\n");
 
-    exit(0);
+    return 0;
 }
 
 static FILE *
-myfopen(name, mode)
-    char *name;
-    char *mode;
+myfopen(char *name, char *mode)
 {
     char *realname;
     FILE *file;

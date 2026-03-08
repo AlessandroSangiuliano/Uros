@@ -131,11 +131,13 @@
 #include <kern/cpu_number.h>
 #include <kern/macro_help.h>
 #include <kern/kalloc.h>
+#include <kern/kern_types.h>
 #if	MACH_RT
 #include <kern/rtalloc.h>
 #endif	/* MACH_RT */
 #include <ipc/ipc_object.h>
-#include <vm/vm_map.h>
+/* Note: vm_map.h NOT included here to break circular dependency.
+ * vm_map_t is forward-declared in kern_types.h */
 #if	DIPC
 #include <dipc/dipc_types.h>		/* for handle_t definition */
 #endif	/* DIPC */

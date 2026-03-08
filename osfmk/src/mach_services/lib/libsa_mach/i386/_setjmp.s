@@ -71,7 +71,9 @@ ENTRY2(mach_setjmp,_mach_setjmp)
 	movl	%esp,16(%ecx)		/* save stack pointer of caller */
 	movl	%edx,20(%ecx)		/* save pc of caller */
 	xorl	%eax,%eax
-        jmp     *%edx
+        movl	%edx,%eax
+        pushl	%eax
+        ret
 END(mach_setjmp)
 END(_mach_setjmp)
 
@@ -86,6 +88,9 @@ ENTRY2(mach_longjmp,_mach_longjmp)
 	movl	8(%ecx),%edi
 	movl	12(%ecx),%ebp
 	movl	16(%ecx),%esp
-	jmp	*20(%ecx)
+	popl	%edx
+	movl	%edx,%eax
+	pushl	%eax
+	ret
 END(mach_longjmp)
 END(_mach_longjmp)

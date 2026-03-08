@@ -23,8 +23,8 @@
  * MkLinux
  */
 
-#ifndef _MACHINE_RTHREADS_H_
-#define _MACHINE_RTHREADS_H_
+#ifndef _HP_PA_RTHREADS_H_
+#define _HP_PA_RTHREADS_H_
 
 #ifndef RTHREADS
 #define RTHREADS 1
@@ -42,4 +42,4 @@ extern int rthread_sp(void);
 typedef struct hp700_thread_state thread_state;
 #define STATE_STACK(state) ((state)->r30)
 
-#endif /* _MACHINE_RTHREADS_H_ */
+#endif /* _HP_PA_RTHREADS_H_ */

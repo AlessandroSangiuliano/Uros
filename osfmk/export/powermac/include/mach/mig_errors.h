@@ -168,7 +168,7 @@ extern void mig_user_deallocate(char *data, vm_size_t size);
 /* Bounded string copy */
 extern int mig_strncpy(
 	char	*dest,
-	char	*src,
+	const char	*src,
 	int	len);
 
 #endif	/* _MACH_MIG_ERRORS_H_ */

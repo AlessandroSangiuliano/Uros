@@ -75,7 +75,8 @@ typedef unsigned int mach_type_t;
 #define MACH_TYPE_MASTER_DEVICE		11
 #define MACH_TYPE_DEFAULT_PAGER		12
 
-extern char *mach_type_string(/* type */);
+/* Explicit prototype with type to avoid old-style declaration */
+extern char *mach_type_string(mach_type_t type);
 
 typedef mach_id_t mhost_t;
 typedef mach_id_t mhost_priv_t;

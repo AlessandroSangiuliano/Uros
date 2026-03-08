@@ -101,8 +101,7 @@ vm_offset_t arg;
 	*thread = th;
 }
 
-kill_thread(thread)
-mach_thread_t thread;
+kill_thread(mach_thread_t thread)
 {
 	register i;
 
@@ -197,8 +196,7 @@ stack_alloc()
 	return(stack);
 }
 
-void mig_init(first)
-int	first;
+void mig_init(int first)
 {
 	register i;
 
@@ -284,8 +282,7 @@ thread_cancel_malloc(
 	return(KERN_FAILURE);
 }
 
-dump_mallocs(thread)
-mach_thread_t thread;
+dump_mallocs(mach_thread_t thread)
 {
 	register i;
 
@@ -299,8 +296,7 @@ mach_thread_t thread;
 	}
 }
 
-clean_mallocs(thread)
-mach_thread_t thread;
+clean_mallocs(mach_thread_t thread)
 {
 	register i;
 
@@ -317,16 +313,13 @@ mach_thread_t thread;
 }
 
 thread_malloc_state_t
-save_mallocs(thread)
-mach_thread_t thread;
+save_mallocs(mach_thread_t thread)
 {
 	return(thread->malloc_seq);
 }
 
 kern_return_t
-restore_mallocs(thread, seq)
-mach_thread_t thread;
-thread_malloc_state_t seq;
+restore_mallocs(mach_thread_t thread, thread_malloc_state_t seq)
 {
 	register i;
 

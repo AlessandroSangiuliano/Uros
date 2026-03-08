@@ -157,7 +157,7 @@ host_processors(
 {
 	register int		i;
 	register processor_t	*tp;
-	vm_offset_t		addr;
+	vm_offset_t		addr = 0;
 	unsigned int		count;
 	boolean_t rt = FALSE; /* ### This boolean is FALSE, because there
 			       * currently exists no mechanism to determine
@@ -290,6 +290,24 @@ host_info(
 
 		/*
 		 */
+	case HOST_IPC_CACHE_INFO:
+		{ register host_ipc_cache_info_t	cache_info;
+		  extern unsigned int c_ipc_kmsg_cache_tries;
+		  extern unsigned int c_ipc_kmsg_cache_misses;
+
+		if (*count < HOST_IPC_CACHE_INFO_COUNT)
+			return(KERN_FAILURE);
+
+		cache_info = (host_ipc_cache_info_t) info;
+		cache_info->tries      = c_ipc_kmsg_cache_tries;
+		cache_info->misses     = c_ipc_kmsg_cache_misses;
+		cache_info->stash      = 16;	/* IKM_STASH */
+		cache_info->saved_size = 256;	/* IKM_SAVED_KMSG_SIZE */
+
+		*count = HOST_IPC_CACHE_INFO_COUNT;
+		return(KERN_SUCCESS);
+		}
+
 	default:
 		return(KERN_INVALID_ARGUMENT);
 	}
@@ -479,7 +497,7 @@ host_processor_sets(
 
 	vm_size_t size;
 	vm_size_t size_needed;
-	vm_offset_t addr;
+	vm_offset_t addr = 0;
 
 	if (host == HOST_NULL)
 		return KERN_INVALID_ARGUMENT;
@@ -570,7 +588,7 @@ host_processor_sets(
 	processor_set_name_array_t	*pset_list,
 	mach_msg_type_number_t		*count)
 {
-	vm_offset_t addr;
+	vm_offset_t addr = 0;
 	boolean_t rt = FALSE; /* ### This boolean is FALSE, because there
 			       * currently exists no mechanism to determine
 			       * whether or not the reply port is an RT port

@@ -76,9 +76,9 @@
  */
 
 char *
-strcat(register char *s1, register const char *s2)
+strcat(char *s1, const char *s2)
 {
-	register char *os1;
+	char *os1;
 
 	os1 = s1;
 	while (*s1++)

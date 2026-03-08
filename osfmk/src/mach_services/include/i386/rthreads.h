@@ -50,8 +50,8 @@
  *  rthreads.h
  */
 
-#ifndef _MACHINE_RTHREADS_H_
-#define _MACHINE_RTHREADS_H_
+#ifndef _I386_RTHREADS_H_
+#define _I386_RTHREADS_H_
 
 #ifndef RTHREADS
 #define RTHREADS 1
@@ -62,24 +62,11 @@
 
 #define RTHREAD_STACK_OFFSET 128
 
-extern int rthread_sp(void);
-
-#if	__GNUC__ && !defined(lint)
-
-extern __inline__ int
-rthread_sp(void)
-{
-	int	_sp__;
-
-	__asm__ ("movl %%esp, %0" :	"=g" (_sp__) );
-	return(_sp__);
-}
-
-#endif	/* __GNUC__ */
+extern intptr_t rthread_sp(void);
 
 #define STATE_FLAVOR i386_THREAD_STATE
 #define STATE_COUNT i386_THREAD_STATE_COUNT
 typedef struct i386_thread_state thread_state;
 #define STATE_STACK(state) ((state)->uesp)
 
-#endif /* _MACHINE_RTHREADS_H_ */
+#endif /* _I386_RTHREADS_H_ */

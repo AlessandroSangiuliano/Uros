@@ -429,15 +429,15 @@ db_show_one_variable(void)
 	struct db_variable *cur;
 	unsigned int len;
 	unsigned int sl;
-	unsigned int slen;
-	short h;
+	unsigned int slen = 0;
+	short h = 0;
 	short i;
 	short j;
 	short k;
 	short low;
-	int hidden_level;
+	int hidden_level = 0;
 	struct db_var_aux_param aux_param;
-	char *p;
+	char *p = NULL;
 	char *q;
 	char *name;
 	db_addr_t offset;
@@ -576,7 +576,7 @@ db_show_variable(void)
 	unsigned int len;
 	unsigned int sl;
 	unsigned int slen;
-	short h;
+	short h = 0;
 	short i;
 	short j;
 	short k;

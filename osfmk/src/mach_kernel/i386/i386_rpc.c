@@ -213,10 +213,10 @@ machine_rpc_simple(
 	 * for temporary storage; use a callee-saves register instead.
 	 */
 	__asm__ volatile(
-		"movl %0, %%ebx; xchgl %%ebx,%%esp; \
-			call %1; movl %%ebx,%%esp; movl %%eax,%2"
-		: /* no outputs */
-		: "g" (new_sp), "r" (server_func), "g" (kr)
+		"movl %1, %%ebx; xchgl %%ebx,%%esp; \
+			call *%2; movl %%ebx,%%esp; movl %%eax,%0"
+		: "=m" (kr)
+		: "g" (new_sp), "r" (server_func)
 		: "%ebx", "%eax", "%ecx", "%edx", "cc", "memory");
 	mp_enable_preemption();
 
@@ -305,10 +305,10 @@ vm_map_t port_name_to_map(mach_port_t);
 
 #define klkernel_call(entry, ksp, rv)                                   \
         __asm__ volatile(                                               \
-                "movl %0,%%ebx;                                         \
+                "movl %1,%%ebx;                                         \
                  xchgl %%ebx,%%esp;                                     \
                  call " CC_SYM_PREFIX entry ";                          \
-                 movl %%eax,%1;                                         \
+                 movl %%eax,%0;                                         \
               8: cmpl $0," CC_SYM_PREFIX "need_ast;                     \
                  je 9f;                                                 \
                  pushl $0;                                              \
@@ -316,8 +316,8 @@ vm_map_t port_name_to_map(mach_port_t);
                  addl $4,%%esp;                                         \
                  jmp 8b;                                                \
               9: movl %%ebx,%%esp"                                      \
-                : /* no outputs */                                      \
-                : "g" (ksp), "g" (rv)                                   \
+                : "=m" (rv)                                             \
+                : "g" (ksp)                                             \
                 : "%ebx", "%eax", "%ecx", "%edx", "cc", "memory")
 
 #else	/* NCPUS > 1 */

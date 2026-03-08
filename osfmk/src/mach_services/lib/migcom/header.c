@@ -120,11 +120,14 @@
 #include "strdefs.h"
 #include "error.h"
 #include <stdlib.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <fcntl.h>
 
 static void
-WriteIncludes(file, isuser)
-    FILE *file;
-    boolean_t	isuser;
+WriteIncludes(FILE *file, boolean_t isuser)
 {
     fprintf(file, "#include <string.h>\n");
     fprintf(file, "#include <mach/ndr.h>\n");
@@ -147,14 +150,12 @@ WriteIncludes(file, isuser)
 }
 
 static void
-WriteDefines(file)
-    FILE *file;
+WriteDefines(FILE *file)
 {
 }
 
 static void
-WriteMigExternal(file)
-    FILE *file;
+WriteMigExternal(FILE *file)
 {
     fprintf(file, "#ifdef\tmig_external\n");
     fprintf(file, "mig_external\n");
@@ -164,10 +165,7 @@ WriteMigExternal(file)
 }
 
 static void
-WriteProlog(file, protect, more, isuser)
-    FILE *file;
-    char *protect;
-    boolean_t more, isuser;
+WriteProlog(FILE *file, char *protect, boolean_t more, boolean_t isuser)
 {
     if (protect != strNULL) {
 	fprintf(file, "#ifndef\t_%s\n", protect);
@@ -185,9 +183,7 @@ WriteProlog(file, protect, more, isuser)
 }
 
 static void
-WriteEpilog(file, protect)
-    FILE *file;
-    char *protect;
+WriteEpilog(FILE *file, char *protect)
 {
     if (protect != strNULL) {
 	fprintf(file, "\n");
@@ -196,9 +192,7 @@ WriteEpilog(file, protect)
 }
 
 static void
-WriteUserRoutine(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteUserRoutine(FILE *file, routine_t *rt)
 {
     fprintf(file, "\n");
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
@@ -233,12 +227,54 @@ WriteUserRoutine(file, rt)
 }
 
 void
-WriteUserHeader(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteUserHeader(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     char *protect = strconcat(SubsystemName, "_user_");
+
+    /* Diagnostic: optionally scan the file contents for non-ASCII after writes */
+    {
+        const char *env = getenv("MIG_CHECK_FILEBUF");
+        if (env && env[0] == '1') {
+            /* local helper to scan file by fd */
+            int fd = fileno(file);
+            off_t cur = lseek(fd, 0, SEEK_CUR);
+            off_t sz = lseek(fd, 0, SEEK_END);
+            if (sz > 0) {
+                char *buf = malloc(sz);
+                if (buf) {
+                    if (pread(fd, buf, sz, 0) == sz) {
+                        off_t i;
+                        for (i = 0; i < sz; ++i) {
+                            unsigned char c = (unsigned char)buf[i];
+                            if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                                fprintf(stderr, "[WriteUserHeader-Check] non-ASCII byte 0x%02x at offset %lld\n", c, (long long)i);
+                                {
+                                    void *bt[32];
+                                    int n = backtrace(bt, 32);
+                                    backtrace_symbols_fd(bt, n, fileno(stderr));
+                                }
+                                /* dump surrounding hex */
+                                {
+                                    long start = (i > 64) ? i - 64 : 0;
+                                    long end = (i + 192 < sz) ? i + 192 : sz;
+                                    long j;
+                                    fprintf(stderr, "context hex:");
+                                    for (j = start; j < end; ++j) fprintf(stderr, " %02x", (unsigned char)buf[j]);
+                                    fprintf(stderr, "\n");
+                                }
+                                raise(SIGTRAP);
+                                break;
+                            }
+                        }
+                    }
+                    free(buf);
+                }
+            }
+            /* restore position */
+            lseek(fd, cur, SEEK_SET);
+        }
+    }
 
     WriteProlog(file, protect, TRUE, TRUE);
     for (stat = stats; stat != stNULL; stat = stat->stNext)
@@ -258,12 +294,53 @@ WriteUserHeader(file, stats)
 		  (int) stat->stKind);
 	}
     WriteEpilog(file, protect);
+
+    /* Diagnostic: optionally scan the file contents for non-ASCII after full write */
+    {
+        const char *env = getenv("MIG_CHECK_FILEBUF");
+        if (env && env[0] == '1') {
+            int fd = fileno(file);
+            off_t cur = lseek(fd, 0, SEEK_CUR);
+            off_t sz = lseek(fd, 0, SEEK_END);
+            if (sz > 0) {
+                char *buf = malloc(sz);
+                if (buf) {
+                    if (pread(fd, buf, sz, 0) == sz) {
+                        off_t i;
+                        for (i = 0; i < sz; ++i) {
+                            unsigned char c = (unsigned char)buf[i];
+                            if ((c < 32 && c != 9 && c != 10 && c != 13) || c > 126) {
+                                fprintf(stderr, "[WriteUserHeader-Check-LATE] non-ASCII byte 0x%02x at offset %lld\n", c, (long long)i);
+                                {
+                                    void *bt[32];
+                                    int n = backtrace(bt, 32);
+                                    backtrace_symbols_fd(bt, n, fileno(stderr));
+                                }
+                                /* dump surrounding hex */
+                                {
+                                    long start = (i > 64) ? i - 64 : 0;
+                                    long end = (i + 192 < sz) ? i + 192 : sz;
+                                    long j;
+                                    fprintf(stderr, "context hex:");
+                                    for (j = start; j < end; ++j) fprintf(stderr, " %02x", (unsigned char)buf[j]);
+                                    fprintf(stderr, "\n");
+                                }
+                                raise(SIGTRAP);
+                                break;
+                            }
+                        }
+                    }
+                    free(buf);
+                }
+            }
+            lseek(fd, cur, SEEK_SET);
+        }
+    }
+    free(protect);
 }
 
 static void
-WriteDefinesRoutine(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteDefinesRoutine(FILE *file, routine_t *rt)
 {
     register char *up = (char *)malloc(strlen(rt->rtName)+1);
 
@@ -274,12 +351,11 @@ WriteDefinesRoutine(file, rt)
 	fprintf(file, "#define\tMACH_ID_%s_REPLY\t\t%d\t/* %s() */\n", 
 	    up, rt->rtNumber + SubsystemBase + 100, rt->rtName);
     fprintf(file, "\n");
+    free(up);
 }
 
 void
-WriteServerRoutine(file, rt)
-    FILE *file;
-    routine_t *rt;
+WriteServerRoutine(FILE *file, routine_t *rt)
 {
     fprintf(file, "\n");
     fprintf(file, "/* %s %s */\n", rtRoutineKindToStr(rt->rtKind), rt->rtName);
@@ -317,8 +393,7 @@ WriteServerRoutine(file, rt)
 }
 
 static void
-WriteDispatcher(file)
-    FILE *file;
+WriteDispatcher(FILE *file)
 {
     register statement_t *stat;
     int descr_count = 0;
@@ -353,9 +428,7 @@ WriteDispatcher(file)
 }
 
 void
-WriteServerHeader(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteServerHeader(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     char *protect = strconcat(SubsystemName, "_server_");
@@ -379,21 +452,18 @@ WriteServerHeader(file, stats)
 	}
     WriteDispatcher(file);
     WriteEpilog(file, protect);
+    free(protect);
 }
 
 static void
-WriteInternalRedefine(file, rt)
-    FILE *file;
-    register routine_t *rt;
+WriteInternalRedefine(FILE *file, routine_t *rt)
 {
     fprintf(file, "#define %s %s_external\n",
 	    rt->rtUserName, rt->rtUserName);
 }
 
 void
-WriteInternalHeader(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteInternalHeader(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
 
@@ -414,9 +484,7 @@ WriteInternalHeader(file, stats)
 }
 
 void
-WriteDefinesHeader(file, stats)
-    FILE *file;
-    statement_t *stats;
+WriteDefinesHeader(FILE *file, statement_t *stats)
 {
     register statement_t *stat;
     char *protect = strconcat(SubsystemName, "_defines");
@@ -438,4 +506,5 @@ WriteDefinesHeader(file, stats)
 		  (int) stat->stKind);
 	}
     WriteEpilog(file, protect);
+    free(protect);
 }

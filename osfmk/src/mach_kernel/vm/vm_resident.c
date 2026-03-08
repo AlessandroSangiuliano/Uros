@@ -577,8 +577,14 @@ vm_page_bootstrap(
 	 *	Steal memory for the map and zone subsystems.
 	 */
 
+	printf("vm_page_bootstrap: dirbase[800]=0x%08x\n",
+		kernel_pmap->dirbase[800]);
 	vm_map_steal_memory();
+	printf("after vm_map_steal_memory: dirbase[800]=0x%08x\n",
+		kernel_pmap->dirbase[800]);
 	zone_steal_memory();
+	printf("after zone_steal_memory: dirbase[800]=0x%08x\n",
+		kernel_pmap->dirbase[800]);
 
 	/*
 	 *	Allocate (and initialize) the virtual-to-physical
@@ -621,6 +627,10 @@ vm_page_bootstrap(
 	vm_page_buckets = (vm_page_bucket_t *)
 		pmap_steal_memory(vm_page_bucket_count *
 				  sizeof(vm_page_bucket_t));
+
+	printf("vm_page_buckets=0x%x count=%u dirbase[800]=0x%08x\n",
+		(unsigned)vm_page_buckets, vm_page_bucket_count,
+		(unsigned)kernel_pmap->dirbase[800]);
 
 	for (i = 0; i < vm_page_bucket_count; i++) {
 		register vm_page_bucket_t *bucket = &vm_page_buckets[i];
@@ -2185,7 +2195,7 @@ vm_page_free_list_sort(void)
 	vm_page_t	sort_list;
 	vm_page_t	sort_list_end;
 	vm_page_t	m, m1, *prev, next_m;
-	vm_offset_t	addr;
+	vm_offset_t	addr = 0;
 #if	MACH_ASSERT
 	unsigned int	npages;
 	int		old_free_count;
@@ -2315,9 +2325,9 @@ static vm_page_t
 vm_page_find_contiguous(
 	int		npages)
 {
-	vm_page_t	m, *contig_prev, *prev_ptr;
+	vm_page_t	m, *contig_prev = NULL, *prev_ptr;
 	vm_offset_t	prev_addr;
-	unsigned int	contig_npages;
+	unsigned int	contig_npages = 0;
 	vm_page_t	list;
 
 	if (npages < 1)

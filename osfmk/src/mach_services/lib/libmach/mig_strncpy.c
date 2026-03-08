@@ -69,11 +69,11 @@
 
 int
 mig_strncpy(
-    register char *dest,
-    register char *src,
-    register int len)
+    char *dest,
+    const char *src,
+    int len)
 {
-    register int i;
+    int i;
 
     if (len <= 0)
 	return 0;

@@ -270,8 +270,7 @@ task_threads_deallocate_test()
 
 }
 
-task_info_test(flavor)
-int flavor;
+task_info_test(int flavor)
 {
 	register i;
 	mach_port_t task = mach_task_self();
@@ -292,8 +291,7 @@ int flavor;
 	stop_time();
 }
 
-task_sample_test(on)
-boolean_t on;
+task_sample_test(boolean_t on)
 {
 	register i, j;
 	mach_port_t task = mach_task_self();
