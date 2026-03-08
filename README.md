@@ -1,103 +1,131 @@
 # Uros
 
-Uros is a multiserver operating system based on the OSF variant of Mach, OSF Mach (osfmk).
+Uros is a multiserver operating system based on the OSF variant of Mach (osfmk) from the MkLinux DR3 project. The goal is to build a modern, secure, multiserver OS on top of the osfmk microkernel, originally developed by the Open Software Foundation (OSF) and Carnegie Mellon University (CMU).
 
-The goal is to build a modern, multiserver OS on top of the osfmk microkernel, originally developed by the Open Software Foundation (OSF) as part of the MkLinux DR3 project.
+**Target architecture:** i386 (32-bit x86)
+**Compiler:** GCC 15, `-std=gnu11`
+**Build system:** CMake / Ninja
 
-## Project Status
+## Current Status (v0.0.1)
 
-This project is in early development. The current focus is on modernizing the legacy codebase and porting the build system from the original ODE/Makefiles to CMake/Ninja.
-Compiler used: gcc 15.2.1
+The system boots on QEMU/KVM: kernel -> bootstrap server -> default pager -> user-space servers (hello_server, ipc_bench). IPC performance has been optimized to ~1.2 us/RPC round-trip on KVM.
 
-## What Has Been Done
+### What boots
 
-### Build System
-- New CMake/Ninja build system replacing the legacy ODE/Makefiles
-- Export directory layout with platform-specific includes (`osfmk/export/powermac/include/`) (the name of this path will be changed or adapted o the platform in the future)
-- Build support for cross-compilation targets
+```
+QEMU multiboot -> mach_kernel -> bootstrap server
+  -> default_pager (with swap on hd0b)
+  -> hello_server  (Mach4 port to OSF Mach)
+  -> ipc_bench     (IPC performance benchmark)
+```
 
-### MIG Compiler (migcom)
-- Ported migcom (Mach Interface Generator compiler) to build with modern Flex/Bison
-- Fixed parser bug: MIG keywords (e.g. `reply_port`, `sreplyport`) can now be used as argument names in `.defs` files
-- `device.h` is now generated at build time instead of being pre-built
+### Kernel features implemented
 
-### Libraries
-- **libmach**: builds successfully (112 compilation units)
-- **libcthreads**: fixed build (ANSI C modernization, architecture-specific thread support)
-- **libsa_mach**: replaced generated machine wrappers with static headers
-- **libflipc**: builds successfully (FLIPC - Fast Local IPC)
-- **libnetname**: builds successfully (MIG-generated stubs for Mach Network Name Service)
-- **libmachid**: builds successfully (Mach ID service client library)
-  - Note: `machid_vmstuff.c` is currently excluded from the build. This file depends on server-side headers (`default_pager_types.h` from the default pager, and types from the machid server itself) that are not yet available. It will be re-enabled once the machid server and default pager are ported and their headers are accessible during user-space library builds.
-- **libpthreads**: builds successfully (POSIX threads - IEEE 1003.1c implementation over Mach primitives)
-- **libservice**: builds successfully (MIG-generated stubs for Mach bootstrap service checkin)
+- **Flat memory model** — segment bases = 0, LINEAR_KERNEL_ADDRESS removed
+- **SYSENTER/SYSEXIT** — fast system call entry/exit
+- **SSE/SSE2** — FXSAVE/FXRSTOR for kernel + userspace
+- **XSAVE/XRSTOR** — AVX/AVX-512 state management
+- **GCC stack protector** — `-fstack-protector-strong`
+- **Modern ext2** — 256-byte inodes, rev 1
+- **ELF multi-segment** — supports modern GCC binaries
 
-### Code Modernization
-- Converted old-style K&R function declarations to ANSI C prototypes
-- Fixed duplicate return types and implicit declarations
-- Renamed `.s` assembly files to `.S` for preprocessor support
+### IPC optimizations
 
-## TODO
+| Optimization | Description |
+|---|---|
+| kmsg pool LIFO | O(1) lockless per-CPU message allocation for msg <= 256 bytes |
+| IPC continuations | Re-enabled `mach_msg_receive_continue`, avoids register save/restore on wakeup |
+| Direct Thread Switch | `thread_run(receiver)` in `ipc_mqueue_deliver`, skips scheduler |
+| Port lookup cache | 4-entry per-thread cache mapping port name -> port pointer, validated by generation counter |
+| Zero-copy OOL | COW `vm_map_copyin()` from sender map for large OOL data, ~2 us constant 4-64 KB |
 
-### Short Term
-- [ ] Fix `mach/machine` symlink (currently a file instead of a symlink to `ppc/`, however ppc suport actually is not planned)
-- [ ] Fix `#endif` warnings in `.defs` files (`std_types.defs`, `mach_types.defs`, `device_types.defs`)
-- [ ] Investigate `cthread_filter.h` in export directory (possibly misplaced)
-- [ ] Build remaining user-space libraries (librthreads)
-- [ ] Generate all MIG stubs from `.defs` files at build time
-- [ ] Re-enable `machid_vmstuff.c` in libmachid once the machid server and default pager are built (requires `default_pager_types.h` and machid server headers)
+### IPC benchmark results (KVM, single core)
 
-### Medium Term
-- [ ] Build the osfmk microkernel with CMake/Ninja (Actually the kernel builds and boot. It should be tested with the bootstrap server and see where it fails.)
-- [ ] Port kernel bootstrap (bootstrap task)
-- [ ] Port default pager (also needed to unblock `machid_vmstuff.c` in libmachid)
-- [ ] Port machid server
-- [ ] Implement basic device drivers for target platform
+| Test | Latency |
+|---|---|
+| Intra-task null RPC | ~1.2 us |
+| Inter-task null RPC | ~1.7 us |
+| 4 KB OOL (zero-copy) | ~2.0 us |
+| 64 KB OOL (zero-copy) | ~2.0 us |
 
-### Long Term
-- [ ] Design and implement multiserver architecture
-- [ ] Implement file server
-- [ ] Implement network server
-- [ ] Implement process server
-- [ ] Self-hosting capability
+### Build system
+
+- CMake/Ninja replacing the legacy ODE/Makefiles
+- MIG compiler (migcom) ported to modern Flex/Bison
+- All MIG stubs generated at build time
+- Transitive header dependency tracking via depfiles
+
+### User-space libraries
+
+libmach, libcthreads, libsa_mach, libflipc, libnetname, libmachid, libpthreads, libservice — all build successfully.
+
+## Building
+
+Requirements: CMake >= 3.16, Ninja, GCC (i686 multilib or cross-compiler), Flex, Bison.
+
+```sh
+cd osfmk/build
+cmake -DOSFMK_BUILD_KERNEL=ON -DOSFMK_BUILD_BOOTSTRAP=ON .. -G Ninja
+ninja
+```
+
+## Running on QEMU
+
+```sh
+# Create the disk image (needs: sfdisk, mke2fs, debugfs)
+./scripts/make-disk-image.sh
+
+# Boot with KVM (graphical)
+./scripts/run-qemu.sh
+
+# Boot headless
+./scripts/run-qemu.sh -nographic -serial mon:stdio
+```
+
+## Roadmap
+
+### Next steps
+- [ ] Userspace AHCI (SATA) driver — first userspace driver, needed for real hardware boot
+- [ ] Kernel primitives for userspace drivers (DMA allocation, interrupt forwarding, PCI config access)
+- [ ] SMP support
+
+### Future
+- [ ] x86-64 port (PCID for TLB optimization, `syscall` instruction)
+- [ ] Capability-based security system
+- [ ] Dual IPC: traditional Mach IPC + high-performance channel
+- [ ] Unix personality servers (VFS, networking, process server)
+- [ ] Self-hosting
 
 ## Project Structure
 
 ```
 osfmk/
-├── export/powermac/include/   # Exported headers for user-space
 ├── src/
 │   ├── mach_kernel/           # Microkernel source
-│   ├── mach_services/
-│   │   ├── lib/
-│   │   │   ├── libmach/       # Core Mach user-space library
-│   │   │   ├── libcthreads/   # C threads library
-│   │   │   ├── libsa_mach/    # Standalone Mach library
-│   │   │   ├── libflipc/      # Fast Local IPC library
-│   │   │   ├── libnetname/    # Network Name Service stubs
-│   │   │   ├── libmachid/     # Mach ID service client library
-│   │   │   ├── libpthreads/   # POSIX threads (over Mach primitives)
-│   │   │   ├── libservice/    # Bootstrap service checkin stubs
-│   │   │   ├── migcom/        # MIG compiler (Flex/Bison)
-│   │   │   └── ...
-│   │   └── include/           # Shared headers
-│   └── ...
+│   ├── bootstrap/             # Bootstrap server
+│   ├── default_pager/         # Default pager server
+│   ├── hello_server/          # Test server (Mach4 port)
+│   ├── ipc_bench/             # IPC performance benchmark
+│   └── mach_services/
+│       └── lib/
+│           ├── libmach/       # Core Mach user-space library
+│           ├── libcthreads/   # C threads (N:M threading)
+│           ├── libsa_mach/    # Standalone Mach library
+│           ├── libflipc/      # Fast Local IPC library
+│           ├── libpthreads/   # POSIX threads over Mach
+│           └── migcom/        # MIG compiler (Flex/Bison)
+├── build/                     # Build output directory
+│   └── export/osfmk/boot/    # mach_kernel binary
 scripts/
-└── mig                        # MIG wrapper script (cpp + migcom)
-```
-
-## Building
-
-Requirements: CMake, Ninja, GCC (cross-compiler for PowerPC), Flex, Bison.
-
-```sh
-cmake -B build -G Ninja
-ninja -C build
+├── run-qemu.sh                # QEMU launch script
+└── make-disk-image.sh         # Disk image builder
+docs/
+└── bench/                     # Benchmark results
 ```
 
 ## Origins
 
-This project is based on the osfmk code from MkLinux DR3, originally developed by the Open Software Foundation (OSF) and Carnegie Mellon University (CMU). The original code is licensed under the OSF and CMU open source licenses included in the source files.
+Based on the osfmk code from MkLinux DR3, originally developed by the Open Software Foundation (OSF) and Carnegie Mellon University (CMU).
 
 ## License
 
