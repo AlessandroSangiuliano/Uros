@@ -724,6 +724,171 @@ bench_port_names(int iters)
 }
 
 /* ===================================================================
+ * OOL (out-of-line) data benchmarks
+ *
+ * Sends a message with one OOL descriptor of the given size using
+ * MACH_MSG_PHYSICAL_COPY.  The echo thread receives the OOL data
+ * (kernel maps it into the receiver's address space), deallocates
+ * it, and sends a null reply.
+ *
+ * This exercises the copyin path in ipc_kmsg_copyin_body() and the
+ * copyout path in ipc_kmsg_copyout_body().  With the zero-copy
+ * optimisation, large OOL regions use vm_map_copyin() with COW
+ * instead of a physical copyin + vm_map_copyin(kernel_copy_map).
+ * =================================================================== */
+
+/*
+ * OOL message — one out-of-line region.
+ */
+typedef struct {
+    mach_msg_header_t		head;
+    mach_msg_body_t		body;
+    mach_msg_ool_descriptor_t	ool;
+} bench_ool_send_msg_t;
+
+typedef struct {
+    mach_msg_header_t		head;
+    mach_msg_body_t		body;
+    mach_msg_ool_descriptor_t	ool;
+    mach_msg_trailer_t		trailer;
+} bench_ool_recv_msg_t;
+
+/*
+ * Echo thread for OOL messages: receives OOL data, deallocates it,
+ * sends a null reply.
+ */
+static void *
+ool_echo_thread_func(void *arg)
+{
+    mach_port_t		port = (mach_port_t)(unsigned long)arg;
+    bench_ool_recv_msg_t msg;
+    bench_null_msg_t	reply;
+    kern_return_t	kr;
+
+    for (;;) {
+	kr = mach_msg(&msg.head,
+		      MACH_RCV_MSG,
+		      0,
+		      sizeof(msg),
+		      port,
+		      MACH_MSG_TIMEOUT_NONE,
+		      MACH_PORT_NULL);
+	if (kr != MACH_MSG_SUCCESS)
+	    continue;
+
+	/* Deallocate received OOL data to avoid leaking memory */
+	if ((msg.head.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+	    msg.body.msgh_descriptor_count == 1 &&
+	    msg.ool.address != 0 && msg.ool.size > 0) {
+	    vm_deallocate(mach_task_self(),
+			  (vm_offset_t)msg.ool.address,
+			  msg.ool.size);
+	}
+
+	reply.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	reply.head.msgh_size	    = sizeof(reply);
+	reply.head.msgh_remote_port = msg.head.msgh_remote_port;
+	reply.head.msgh_local_port  = MACH_PORT_NULL;
+	reply.head.msgh_id	    = msg.head.msgh_id + 100;
+
+	mach_msg(&reply.head,
+		 MACH_SEND_MSG,
+		 sizeof(reply),
+		 0,
+		 MACH_PORT_NULL,
+		 MACH_MSG_TIMEOUT_NONE,
+		 MACH_PORT_NULL);
+    }
+    return (void *)0;
+}
+
+#define OOL_BENCH_ITERS		5000
+
+static void
+bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
+{
+    mach_port_t		echo_port, reply_port;
+    kern_return_t	kr;
+    tvalspec_t		t0, t1;
+    int			i;
+    bench_ool_send_msg_t send_buf;
+    bench_null_msg_t	recv_buf;
+    vm_offset_t		data_buf;
+
+    /* Allocate OOL data buffer */
+    kr = vm_allocate(mach_task_self(), &data_buf, ool_size, TRUE);
+    if (kr) { printf("  %s: vm_allocate failed %d\n", label, kr); return; }
+
+    kr = mach_port_allocate(mach_task_self(),
+			    MACH_PORT_RIGHT_RECEIVE, &echo_port);
+    if (kr) { printf("  %s: port alloc failed %d\n", label, kr); return; }
+    kr = mach_port_insert_right(mach_task_self(),
+				echo_port, echo_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+    if (kr) { printf("  %s: insert right failed %d\n", label, kr); return; }
+    reply_port = mach_reply_port();
+
+    cthread_detach(cthread_fork(ool_echo_thread_func,
+				(void *)(unsigned long)echo_port));
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    /* Warmup */
+    for (i = 0; i < WARMUP_ITERS; i++) {
+	send_buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE) |
+	    MACH_MSGH_BITS_COMPLEX;
+	send_buf.head.msgh_size	      = sizeof(send_buf);
+	send_buf.head.msgh_remote_port = echo_port;
+	send_buf.head.msgh_local_port  = reply_port;
+	send_buf.head.msgh_id	      = 1;
+	send_buf.body.msgh_descriptor_count = 1;
+	send_buf.ool.address     = (void *)data_buf;
+	send_buf.ool.size        = ool_size;
+	send_buf.ool.deallocate  = FALSE;
+	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
+	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
+
+	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+
+    /* Timed run */
+    get_time(&t0);
+    for (i = 0; i < iters; i++) {
+	send_buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE) |
+	    MACH_MSGH_BITS_COMPLEX;
+	send_buf.head.msgh_size	      = sizeof(send_buf);
+	send_buf.head.msgh_remote_port = echo_port;
+	send_buf.head.msgh_local_port  = reply_port;
+	send_buf.head.msgh_id	      = 1;
+	send_buf.body.msgh_descriptor_count = 1;
+	send_buf.ool.address     = (void *)data_buf;
+	send_buf.ool.size        = ool_size;
+	send_buf.ool.deallocate  = FALSE;
+	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
+	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
+
+	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    get_time(&t1);
+
+    print_result(label, elapsed_ns(&t0, &t1), iters);
+
+    vm_deallocate(mach_task_self(), data_buf, ool_size);
+    mach_port_destroy(mach_task_self(), echo_port);
+    mach_port_destroy(mach_task_self(), reply_port);
+}
+
+/* ===================================================================
  * Main
  * =================================================================== */
 
@@ -833,6 +998,18 @@ main(int argc, char **argv)
 
     bench_port_alloc_destroy(BENCH_ITERS);
     bench_port_names(BENCH_ITERS);
+
+    /* ---------------------------------------------------------
+     * OOL (out-of-line) data benchmarks
+     * Measures OOL copyin/copyout cost for large data regions.
+     * Uses MACH_MSG_PHYSICAL_COPY — exercises the zero-copy COW path
+     * for regions >= MSG_OOL_SIZE_SMALL (2049 bytes).
+     * --------------------------------------------------------- */
+    printf("--- OOL data (intra-task, PHYSICAL_COPY) ---\n");
+
+    bench_ool_intra_rpc("4 KB OOL",   4096, OOL_BENCH_ITERS);
+    bench_ool_intra_rpc("16 KB OOL", 16384, OOL_BENCH_ITERS);
+    bench_ool_intra_rpc("64 KB OOL", 65536, OOL_BENCH_ITERS);
 
     printf("\n");
     printf("=== Benchmark complete ===\n");

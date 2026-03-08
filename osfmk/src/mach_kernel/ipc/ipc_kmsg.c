@@ -1564,24 +1564,11 @@ ipc_kmsg_copyin_body(
 		}
 #endif	/* DIPC */
 
-		if (sstart->out_of_line.copy == MACH_MSG_PHYSICAL_COPY && 
-		    sstart->out_of_line.size >= MSG_OOL_SIZE_SMALL(rt) &&
-		    !sstart->out_of_line.deallocate) {
-
-		     	/*
-		      	 * Out-of-line memory descriptor, accumulate kernel
-		      	 * memory requirements
-		      	 */
-		    	space_needed += round_page(sstart->out_of_line.size);
-		    	if (space_needed > ipc_kmsg_max_vm_space) {
-
-			    	/*
-			     	 * Per message kernel memory limit exceeded
-			     	 */
-			    	ipc_kmsg_clean_partial(kmsg,0,0,0);
-		            	return MACH_MSG_VM_KERNEL;
-		    	}
-	        }
+		/*
+		 * Large PHYSICAL_COPY without dealloc now uses
+		 * vm_map_copyin() directly from sender map (COW),
+		 * so no kernel copy map space is needed.
+		 */
 	}
     }
 
@@ -1790,39 +1777,20 @@ ipc_kmsg_copyin_body(
 		    if ((dsc->copy == MACH_MSG_PHYSICAL_COPY) && !dealloc) {
 
 		        /*
-		         * If the request is a physical copy and the source
-		         * is not being deallocated, then allocate space
-		         * in the kernel's pageable ipc copy map and copy
-		         * the data in.  The semantics guarantee that the
-			 * data will have been physically copied before
-			 * the send operation terminates.  Thus if the data
-			 * is not being deallocated, we must be prepared
-			 * to page if the region is sufficiently large.
+		         * Zero-copy path: use vm_map_copyin() directly
+		         * from the sender's map.  This creates a COW
+		         * VM_MAP_COPY_ENTRY_LIST — no physical data
+		         * copy occurs.  PHYSICAL_COPY semantics are
+		         * preserved: if the sender modifies the pages
+		         * after send, COW triggers a fault and the
+		         * receiver keeps the original data.
 		         */
-		     	if (copyin((const char *) addr, (char *) paddr, 
-								length)) {
-			        ipc_kmsg_clean_partial(kmsg, i, paddr, 
-							   space_needed);
-			        return MACH_SEND_INVALID_MEMORY;
-		        }	
-
-			/*
-			 * The kernel ipc copy map is marked no_zero_fill.
-			 * If the transfer is not a page multiple, we need
-			 * to zero fill the balance.
-			 */
-			if (!page_aligned(length)) {
-				(void) memset((void *) (paddr + length), 0,
-					round_page(length) - length);
-			}
-			if (vm_map_copyin(ipc_kernel_copy_map, paddr, length,
-					   TRUE, &copy) != KERN_SUCCESS) {
-			    ipc_kmsg_clean_partial(kmsg, i, paddr, 
+			if (vm_map_copyin(map, addr, length,
+					   FALSE, &copy) != KERN_SUCCESS) {
+			    ipc_kmsg_clean_partial(kmsg, i, paddr,
 						       space_needed);
-			    return MACH_MSG_VM_KERNEL;
+			    return MACH_SEND_INVALID_MEMORY;
 		        }
-			paddr += round_page(length);
-			space_needed -= round_page(length);
 		    } else {
 #if	DIPC
 			if (dsc->type == MACH_MSG_OOL_VOLATILE_DESCRIPTOR) {
