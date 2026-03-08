@@ -155,12 +155,17 @@ set(KERNEL_INCLUDES
 
 set(GENASSYM_INPUT ${KERNEL_SRC_DIR}/i386/genassym.c)
 set(GENASSYM_OUTPUT ${KERNEL_BUILD_DIR}/genassym.s)
+set(GENASSYM_DEPFILE ${KERNEL_BUILD_DIR}/genassym.d)
 set(ASSYM_OUTPUT ${KERNEL_BUILD_DIR}/assym.S)
 
-# Compile genassym.c to assembly (this produces offset definitions)
+# Compile genassym.c to assembly (this produces offset definitions).
+# -MD -MF generates a depfile so CMake tracks all transitively included
+# headers (kern/thread.h, kern/task.h, ipc/ipc_port.h, etc.) automatically.
+# Without this, changes to kernel structs silently produce stale offsets.
 add_custom_command(
     OUTPUT ${GENASSYM_OUTPUT}
-    COMMAND ${CMAKE_C_COMPILER} -m32 -S 
+    DEPFILE ${GENASSYM_DEPFILE}
+    COMMAND ${CMAKE_C_COMPILER} -m32 -S
             -nostdinc
             -ffreestanding
             -isystem ${GCC_INCLUDE_DIR}
@@ -169,12 +174,10 @@ add_custom_command(
             -I${KERNEL_SRC_DIR}/i386
             -I${KERNEL_SRC_DIR}/i386/AT386
             ${KERNEL_DEFINES}
+            -MD -MF ${GENASSYM_DEPFILE}
             -o ${GENASSYM_OUTPUT}
             ${GENASSYM_INPUT}
     DEPENDS ${GENASSYM_INPUT}
-            ${KERNEL_SRC_DIR}/i386/seg.h
-            ${KERNEL_SRC_DIR}/i386/thread.h
-            ${KERNEL_SRC_DIR}/i386/tss.h
     COMMENT "Generating genassym.s from genassym.c"
     VERBATIM
 )

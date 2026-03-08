@@ -511,6 +511,154 @@ bench_inter_rpc(const char *label, int send_size, int iters)
 }
 
 /* ===================================================================
+ * Slow-path receive benchmark
+ *
+ * Guarantees the continuation path is exercised on every iteration.
+ *
+ * On NCPUS=1, a thread_switch(YIELD) before each send forces the echo
+ * thread to run first, call mach_msg_receive, and block (no message
+ * pending).  When the sender then sends, the kernel must wake up the
+ * blocked receiver — this is the exact path where mach_msg_receive_
+ * continue fires instead of restoring callee-saved registers.
+ *
+ * Comparing this number against bench_intra_rpc (where the receiver
+ * may find the message already queued) isolates the slow-path cost.
+ * The difference between builds with and without continuations shows
+ * the continuation benefit directly.
+ * =================================================================== */
+
+/*
+ * Echo thread used by the slow-path benchmark.
+ * Identical to echo_thread_func but name distinguishes it for clarity.
+ */
+static void *
+slow_echo_thread_func(void *arg)
+{
+    mach_port_t		port = (mach_port_t)(unsigned long)arg;
+    bench_recv_buf_t	msg;
+    bench_null_msg_t	reply;
+    kern_return_t	kr;
+
+    for (;;) {
+	kr = mach_msg(&msg.head,
+		      MACH_RCV_MSG,
+		      0,
+		      sizeof(msg),
+		      port,
+		      MACH_MSG_TIMEOUT_NONE,
+		      MACH_PORT_NULL);
+	if (kr != MACH_MSG_SUCCESS)
+	    continue;
+
+	reply.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	reply.head.msgh_size	    = sizeof(reply);
+	reply.head.msgh_remote_port = msg.head.msgh_remote_port;
+	reply.head.msgh_local_port  = MACH_PORT_NULL;
+	reply.head.msgh_id	    = msg.head.msgh_id + 100;
+
+	mach_msg(&reply.head,
+		 MACH_SEND_MSG,
+		 sizeof(reply),
+		 0,
+		 MACH_PORT_NULL,
+		 MACH_MSG_TIMEOUT_NONE,
+		 MACH_PORT_NULL);
+    }
+    return (void *)0;
+}
+
+/*
+ * bench_slow_receive:
+ *
+ * Measures wakeup-from-blocked latency.  Before each send, yields the
+ * CPU so the echo thread runs and enters mach_msg_receive (blocking).
+ * The measured time is: yield + send + wakeup-via-continuation +
+ * echo-reply + receive-reply.
+ *
+ * The yield overhead is small (~0.1 us) and constant across builds.
+ * The wakeup cost is what changes: with continuations, the receiver
+ * resumes without restoring callee-saved registers (~50-100 cycles
+ * faster than without).
+ */
+static void
+bench_slow_receive(const char *label, int send_size, int iters)
+{
+    mach_port_t		echo_port, reply_port;
+    kern_return_t	kr;
+    tvalspec_t		t0, t1;
+    int			i;
+    bench_recv_buf_t	send_buf;
+    bench_recv_buf_t	recv_buf;
+
+    kr = mach_port_allocate(mach_task_self(),
+			    MACH_PORT_RIGHT_RECEIVE, &echo_port);
+    if (kr) { printf("  %s: port alloc failed %d\n", label, kr); return; }
+
+    kr = mach_port_insert_right(mach_task_self(),
+				echo_port, echo_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+    if (kr) { printf("  %s: insert right failed %d\n", label, kr); return; }
+
+    reply_port = mach_reply_port();
+
+    cthread_detach(cthread_fork(slow_echo_thread_func,
+				(void *)(unsigned long)echo_port));
+
+    /* Let echo thread start and block for the first time */
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+    /* Warmup — same yield-send-recv pattern */
+    for (i = 0; i < WARMUP_ITERS; i++) {
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+	send_buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	send_buf.head.msgh_size	      = send_size;
+	send_buf.head.msgh_remote_port = echo_port;
+	send_buf.head.msgh_local_port  = reply_port;
+	send_buf.head.msgh_id	      = 1;
+
+	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+
+    /* Timed run */
+    get_time(&t0);
+    for (i = 0; i < iters; i++) {
+	/*
+	 * Yield CPU: echo thread runs, calls mach_msg_receive, blocks.
+	 * On return here the echo thread is guaranteed to be sleeping.
+	 */
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+	send_buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	send_buf.head.msgh_size	      = send_size;
+	send_buf.head.msgh_remote_port = echo_port;
+	send_buf.head.msgh_local_port  = reply_port;
+	send_buf.head.msgh_id	      = 1;
+
+	/* Send wakes the blocked echo thread — continuation fires here */
+	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    get_time(&t1);
+
+    print_result(label, elapsed_ns(&t0, &t1), iters);
+
+    mach_port_destroy(mach_task_self(), echo_port);
+    mach_port_destroy(mach_task_self(), reply_port);
+}
+
+/* ===================================================================
  * Port-operation benchmarks
  * =================================================================== */
 
@@ -640,6 +788,25 @@ main(int argc, char **argv)
 		    (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
     bench_intra_rpc("4096B inline RPC",
 		    (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+
+    printf("\n");
+
+    /* ---------------------------------------------------------
+     * Slow-path receive: receiver always blocked before send.
+     * This is the path exercised by mach_msg_receive_continue.
+     * A thread_switch(YIELD) before each send guarantees the echo
+     * thread is sleeping in mach_msg_receive when the send fires.
+     * --------------------------------------------------------- */
+    printf("--- Slow-path receive (continuation path) ---\n");
+
+    bench_slow_receive("null RPC (receiver blocked)",
+		       (int)sizeof(bench_null_msg_t), BENCH_ITERS);
+    bench_slow_receive("128B inline RPC (receiver blocked)",
+		       (int)sizeof(bench_128_msg_t), BENCH_ITERS);
+    bench_slow_receive("1024B inline RPC (receiver blocked)",
+		       (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
+    bench_slow_receive("4096B inline RPC (receiver blocked)",
+		       (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
 
     printf("\n");
 
