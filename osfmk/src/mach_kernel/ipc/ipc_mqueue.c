@@ -214,6 +214,9 @@
 #define	dstat(foo)
 #endif	/* !DIPC */
 
+/* Forward declaration: continuation used by mach_msg_receive (mach_msg.c) */
+extern void mach_msg_receive_continue(void);
+
 /*
  *	Routine:	ipc_mqueue_init
  *	Purpose:
@@ -800,8 +803,43 @@ ipc_mqueue_deliver(
 
 	imq_unlock(mqueue);
 
-	thread_go(receiver);
-	enable_preemption();
+	/*
+	 * Direct Thread Switch (DTS): if we are in thread context and the
+	 * receiver blocked with mach_msg_receive_continue as its continuation,
+	 * switch to it immediately instead of putting it on the run queue.
+	 * The sender's kernel state is saved normally (continuation = NULL)
+	 * and it will be rescheduled by thread_dispatch when the receiver
+	 * runs via Thread_continue -> thread_continue.
+	 *
+	 * On single-core i386 we skip the SMP checks (always TRUE).
+	 */
+	if (thread_context &&
+	    receiver->continuation ==
+		    (void (*)(void)) mach_msg_receive_continue) {
+		spl_t _s = splsched();
+		thread_lock(receiver);
+		reset_timeout_check(&receiver->timer);
+		if ((receiver->state & TH_SCHED_STATE) == TH_WAIT) {
+			receiver->state =
+				(receiver->state & ~TH_WAIT) | TH_RUN;
+			receiver->wait_result = THREAD_AWAKENED;
+			thread_unlock(receiver);
+			splx(_s);
+			enable_preemption();
+			counter(c_ipc_mqueue_deliver_direct++);
+			thread_run((void (*)(void)) 0, receiver);
+			/* Sender resumes here when rescheduled */
+		} else {
+			/* Receiver state changed; fall back to normal wakeup */
+			thread_unlock(receiver);
+			splx(_s);
+			enable_preemption();
+			thread_go(receiver);
+		}
+	} else {
+		thread_go(receiver);
+		enable_preemption();
+	}
 
 	TR_IPC_MQEX("exit: wakeup 0x%x", receiver);
 	return MACH_MSG_SUCCESS;
