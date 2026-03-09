@@ -24,3 +24,6 @@ kern_return_t task_sample(void *task, void *reply_port) { return KERN_FAILURE; }
 
 /* Profile stub (when MACH_PROF is disabled) */
 void profile(void) {}
+
+/* DMA zone init stub (original is in dma_support.c, not needed for our use) */
+void dma_zones_init(void) {}

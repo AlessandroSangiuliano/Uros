@@ -48,4 +48,9 @@ if(OSFMK_BUILD_IPC_BENCH)
   add_subdirectory(ipc_bench)
 endif()
 
+# Build AHCI userspace driver
+if(OSFMK_BUILD_AHCI_DRIVER)
+  add_subdirectory(ahci_driver)
+endif()
+
 

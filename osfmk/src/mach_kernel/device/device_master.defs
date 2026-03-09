@@ -1,0 +1,86 @@
+/*
+ * device/device_master.defs
+ *
+ * MIG interface for kernel primitives needed by userspace drivers.
+ * These RPCs are sent to the master_device_port (privileged).
+ *
+ * Subsystem 2900 — separate from device (2800).
+ */
+
+subsystem
+#if	KERNEL_SERVER
+	  KernelServer
+#endif	/* KERNEL_SERVER */
+		       device_master 2900;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+#include <device/device_types.defs>
+
+serverprefix	ds_master_;
+
+/*
+ * PCI configuration space read.
+ * Returns a 32-bit value from the specified BDF + register.
+ */
+routine device_pci_config_read(
+		master_port	: mach_port_t;
+	in	bus		: natural_t;
+	in	slot		: natural_t;
+	in	func		: natural_t;
+	in	reg		: natural_t;
+	out	data		: natural_t
+	);
+
+/*
+ * PCI configuration space write.
+ * Writes a 32-bit value to the specified BDF + register.
+ */
+routine device_pci_config_write(
+		master_port	: mach_port_t;
+	in	bus		: natural_t;
+	in	slot		: natural_t;
+	in	func		: natural_t;
+	in	reg		: natural_t;
+	in	data		: natural_t
+	);
+
+/*
+ * Register an IRQ notification.
+ * When the specified IRQ fires, the kernel sends a simple
+ * notification message to notify_port.  Only one registration
+ * per IRQ is allowed.
+ */
+routine device_intr_register(
+		master_port	: mach_port_t;
+	in	irq		: natural_t;
+	in	notify_port	: mach_port_send_t
+	);
+
+/*
+ * Unregister an IRQ notification.
+ */
+routine device_intr_unregister(
+		master_port	: mach_port_t;
+	in	irq		: natural_t
+	);
+
+/*
+ * Allocate a physically contiguous DMA buffer.
+ * Returns the kernel virtual address and the physical address.
+ */
+routine device_dma_alloc(
+		master_port	: mach_port_t;
+	in	size		: natural_t;
+	out	vaddr		: natural_t;
+	out	paddr		: natural_t
+	);
+
+/*
+ * Free a previously allocated DMA buffer.
+ */
+routine device_dma_free(
+		master_port	: mach_port_t;
+	in	vaddr		: natural_t;
+	in	size		: natural_t
+	);

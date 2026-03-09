@@ -109,6 +109,7 @@
 #include <device/ds_routines.h>
 #include <device/dev_hdr.h>
 #include <device/data_device.h>
+#include <device/device_master.h>
 #
 #if XKMACHKERNEL && !DIPC_XKERN
 #include <uk_xkern/include/utils.h>
@@ -127,6 +128,7 @@ device_service_create(void)
 	ds_init();
 	net_io_init();
 	device_pager_init();
+	device_master_init();
 	datadev_init();
 
 	(void) kernel_thread(kernel_task, io_done_thread, (char *)0);

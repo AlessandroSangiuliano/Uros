@@ -110,7 +110,7 @@ set(KERNEL_DEFINES
     # ODE device configuration options
     -DEISA=1
     -DHIMEM=1
-    -DNPCI=0
+    -DNPCI=1
     # GCC/ELF does not use underscore prefix for C symbols
     -D__NO_UNDERSCORES__
 )
@@ -134,6 +134,16 @@ set(KERNEL_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR})
 # IMPORTANT: Source directories come FIRST so that original headers (e.g. mach/memory_object.h 
 # with type definitions) are found before MIG-generated headers with the same name.
 # The build directory is included for generated headers like *_server.h and *_user.c
+
+# ODE-style device config headers for PCI sub-drivers (all disabled).
+# The main pci.h lives in i386/AT386/pci.h with NPCI=1.
+foreach(_dev_hdr ncr810 ncr825 adsl fta tu)
+    if(NOT EXISTS "${KERNEL_SRC_DIR}/i386/AT386/${_dev_hdr}.h")
+        file(WRITE "${KERNEL_BUILD_DIR}/${_dev_hdr}.h"
+             "#ifndef _CONFIG_${_dev_hdr}_H_\n#define _CONFIG_${_dev_hdr}_H_\n"
+             "#define N${_dev_hdr} 0\n#endif\n")
+    endif()
+endforeach()
 
 set(KERNEL_INCLUDES
     ${KERNEL_SRC_DIR}
@@ -362,11 +372,16 @@ add_mig_server(${KERNEL_SRC_DIR}/device/device.defs
 add_mig_user(${KERNEL_SRC_DIR}/device/device_reply.defs
              ${KERNEL_BUILD_DIR}/device DEVICE)
 
+# ---- Device master subsystem (userspace driver primitives) ----
+add_mig_server(${KERNEL_SRC_DIR}/device/device_master.defs
+               ${KERNEL_BUILD_DIR}/device DEVICE_MASTER)
+
 # Collect all generated MIG sources
 set(MIG_GENERATED_SOURCES
     ${MACH_GENERATED}
     ${MACH_DEBUG_GENERATED}
     ${DEVICE_GENERATED}
+    ${DEVICE_MASTER_GENERATED}
 )
 
 # MIG generates (mach_msg_type_name_t)-1 as a sentinel in static port
@@ -479,6 +494,7 @@ set(DEVICE_SOURCES
     device/dev_name.c
     device/dev_pager.c
     device/device_init.c
+    device/device_master.c
     device/driver_lock.c
     device/ds_routines.c
     device/io_scatter.c
@@ -573,6 +589,14 @@ set(CHIPS_SOURCES
     chips/busses.c
 )
 
+# PCI subsystem
+set(PCI_SOURCES
+    busses/pci/pci.c
+    i386/pci/pcibios.c
+    i386/pci/i386_pci.c
+    i386/pci/pci_config.c
+)
+
 # SCSI subsystem
 set(SCSI_SOURCES
     # scsi/scsi_info.c  # Disabled - too many dependencies
@@ -590,6 +614,7 @@ set(KERNEL_C_SOURCES
     ${I386_C_SOURCES}
     ${AT386_SOURCES}
     ${CHIPS_SOURCES}
+    ${PCI_SOURCES}
     ${SCSI_SOURCES}
 )
 
