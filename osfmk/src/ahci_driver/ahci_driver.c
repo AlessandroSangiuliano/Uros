@@ -23,13 +23,13 @@
 /*
  * ahci_driver.c — Userspace AHCI (SATA) driver for Uros
  *
- * First userspace driver: uses device_master RPC primitives
- * (PCI config, interrupt forwarding, DMA allocation) to drive
- * an AHCI controller entirely from user space.
+ * Approach B: kernel provides PCI config, DMA alloc, MMIO mapping and
+ * IRQ forwarding via device_master RPCs; all AHCI logic runs here.
  *
  * Boot flow:
- *   bootstrap loads this server -> main() -> pci_scan() -> ahci_init()
- *   -> identify first SATA disk -> print model/capacity -> message loop
+ *   bootstrap → main() → pci_scan() → ahci_init()
+ *   → ahci_hba_reset() → ahci_port_find() → ahci_port_init()
+ *   → ahci_identify() → ahci_benchmark() → message loop
  */
 
 #include <mach.h>
@@ -41,8 +41,10 @@
 #include <device/device.h>
 #include <stdio.h>
 #include "device_master.h"
-
 #include "ahci.h"
+
+/* msgh_id base for IRQ notifications from device_intr_register */
+#define IRQ_NOTIFY_MSGH_BASE	3000
 
 /* ================================================================
  * Globals
@@ -50,99 +52,40 @@
 
 static mach_port_t	host_port;
 static mach_port_t	device_port;
-static mach_port_t	master_device;	/* master_device_port from bootstrap */
+static mach_port_t	master_device;
 static mach_port_t	security_port;
 static mach_port_t	root_ledger_wired;
 static mach_port_t	root_ledger_paged;
-static mach_port_t	irq_port;	/* notification port for AHCI IRQ */
+static mach_port_t	irq_port;
 
 /* PCI location of the AHCI controller */
 static unsigned int	ahci_bus, ahci_slot, ahci_func;
 static unsigned int	ahci_irq;
-static unsigned int	ahci_abar_phys;	/* BAR5 physical address */
-
-/* DMA buffers */
-static unsigned int	clb_va, clb_pa;		/* Command List Base (1 KB) */
-static unsigned int	fb_va, fb_pa;		/* FIS Base (256 bytes) */
-static unsigned int	ct_va, ct_pa;		/* Command Table (256 + PRDT) */
-static unsigned int	data_va, data_pa;	/* Data buffer (4 KB) */
-
-/* Number of ports implemented */
-static int		num_ports;
-static int		active_port = -1;	/* first port with a device */
+static unsigned int	ahci_abar_phys;
 
 /*
- * Note on MMIO access:
- * For now we use PCI config space to detect the controller and
- * allocate DMA buffers.  Actual MMIO register access requires
- * mapping the ABAR into our address space — needs a future
- * device_master_mmio_map() primitive.
+ * ABAR mapped into our address space via device_mmio_map.
+ * All AHCI register accesses go through ahci_read/ahci_write.
  */
+static volatile uint32_t *abar;
+
+/* Active SATA port */
+static int		active_port = -1;
+
+/*
+ * DMA buffers — each has:
+ *   kva  : kernel VA (from device_dma_alloc, used as handle for dma_free)
+ *   uva  : user VA   (from device_dma_map_user, CPU-accessible here)
+ *   pa   : physical address (programmed into AHCI registers)
+ */
+static unsigned int	clb_kva,  clb_uva,  clb_pa;	/* Command List Base  1 KB */
+static unsigned int	fb_kva,   fb_uva,   fb_pa;	/* FIS Base          256 B */
+static unsigned int	ct_kva,   ct_uva,   ct_pa;	/* Command Table     4 KB */
+static unsigned int	data_kva, data_uva, data_pa;	/* Data buffer       4 KB */
 
 /* ================================================================
- * PCI Scanning — find an AHCI controller
+ * MMIO accessors
  * ================================================================ */
-
-static int
-pci_scan_ahci(void)
-{
-	unsigned int bus, slot, func;
-	unsigned int vendor_device;
-	unsigned int class_rev;
-	kern_return_t kr;
-
-	printf("ahci: scanning PCI bus...\n");
-
-	for (bus = 0; bus < 256; bus++) {
-		for (slot = 0; slot < 32; slot++) {
-			for (func = 0; func < 8; func++) {
-				kr = device_pci_config_read(master_device,
-					bus, slot, func, PCI_VENDOR_ID,
-					&vendor_device);
-				if (kr != KERN_SUCCESS)
-					continue;
-
-				/* No device */
-				if (vendor_device == 0xFFFFFFFF ||
-				    vendor_device == 0)
-					continue;
-
-				/* Check class code */
-				kr = device_pci_config_read(master_device,
-					bus, slot, func, PCI_CLASS_REV,
-					&class_rev);
-				if (kr != KERN_SUCCESS)
-					continue;
-
-				unsigned int class = (class_rev >> 24) & 0xFF;
-				unsigned int subclass = (class_rev >> 16) & 0xFF;
-				unsigned int progif = (class_rev >> 8) & 0xFF;
-
-				if (class == PCI_CLASS_STORAGE &&
-				    subclass == PCI_SUBCLASS_SATA &&
-				    progif == PCI_PROGIF_AHCI) {
-					ahci_bus = bus;
-					ahci_slot = slot;
-					ahci_func = func;
-
-					printf("ahci: found controller at PCI 0x%X\n",
-					       (bus << 16) | (slot << 8) | func);
-					printf("ahci: vendor:device = 0x%08X\n", vendor_device);
-					return 1;
-				}
-			}
-		}
-	}
-
-	printf("ahci: no AHCI controller found\n");
-	return 0;
-}
-
-/* ================================================================
- * AHCI Controller Initialization
- * ================================================================ */
-
-static volatile uint32_t *abar;	/* mapped MMIO base */
 
 static inline uint32_t
 ahci_read(unsigned int reg)
@@ -168,35 +111,427 @@ port_write(int port, unsigned int reg, uint32_t val)
 	ahci_write(AHCI_PORT_BASE + port * AHCI_PORT_SIZE + reg, val);
 }
 
+/* ================================================================
+ * Timing — RDTSC
+ * ================================================================ */
+
+static inline uint64_t
+rdtsc(void)
+{
+	uint64_t tsc;
+	__asm__ volatile("rdtsc" : "=A" (tsc));
+	return tsc;
+}
+
+/* ================================================================
+ * PCI scan — find AHCI controller
+ * ================================================================ */
+
+static int
+pci_scan_ahci(void)
+{
+	unsigned int bus, slot, func;
+	unsigned int vendor_device, class_rev;
+	kern_return_t kr;
+
+	printf("ahci: scanning PCI bus...\n");
+
+	for (bus = 0; bus < 256; bus++) {
+		for (slot = 0; slot < 32; slot++) {
+			for (func = 0; func < 8; func++) {
+				kr = device_pci_config_read(master_device,
+					bus, slot, func, PCI_VENDOR_ID,
+					&vendor_device);
+				if (kr != KERN_SUCCESS)
+					continue;
+				if (vendor_device == 0xFFFFFFFF ||
+				    vendor_device == 0)
+					continue;
+
+				kr = device_pci_config_read(master_device,
+					bus, slot, func, PCI_CLASS_REV,
+					&class_rev);
+				if (kr != KERN_SUCCESS)
+					continue;
+
+				if (((class_rev >> 24) & 0xFF) == PCI_CLASS_STORAGE &&
+				    ((class_rev >> 16) & 0xFF) == PCI_SUBCLASS_SATA &&
+				    ((class_rev >>  8) & 0xFF) == PCI_PROGIF_AHCI) {
+					ahci_bus  = bus;
+					ahci_slot = slot;
+					ahci_func = func;
+					printf("ahci: found controller at PCI %u:%u.%u "
+					       "vendor:device=0x%08X\n",
+					       bus, slot, func, vendor_device);
+					return 1;
+				}
+			}
+		}
+	}
+
+	printf("ahci: no AHCI controller found\n");
+	return 0;
+}
+
+/* ================================================================
+ * Port start / stop helpers
+ * ================================================================ */
+
+static void
+port_stop(int port)
+{
+	int i;
+	uint32_t cmd;
+
+	/* Clear ST — stop command list processing */
+	cmd = port_read(port, PORT_CMD);
+	port_write(port, PORT_CMD, cmd & ~PORT_CMD_ST);
+	for (i = 0; i < 500; i++)
+		if (!(port_read(port, PORT_CMD) & PORT_CMD_CR))
+			break;
+
+	/* Clear FRE — stop FIS receive */
+	cmd = port_read(port, PORT_CMD);
+	port_write(port, PORT_CMD, cmd & ~PORT_CMD_FRE);
+	for (i = 0; i < 500; i++)
+		if (!(port_read(port, PORT_CMD) & PORT_CMD_FR))
+			break;
+}
+
+static void
+port_start(int port)
+{
+	uint32_t cmd;
+	int i;
+
+	/*
+	 * Enable FIS Receive first so the device can send its signature FIS.
+	 * Do NOT wait for BSY/DRQ here: right after HBA reset PORT_TFD may
+	 * show BSY until the device responds, causing an infinite spin.
+	 */
+	cmd = port_read(port, PORT_CMD);
+	port_write(port, PORT_CMD, cmd | PORT_CMD_FRE | PORT_CMD_SUD);
+
+	/* Wait up to 500 ms for BSY/DRQ to clear before starting DMA engine */
+	for (i = 0; i < 500000; i++)
+		if (!(port_read(port, PORT_TFD) &
+		      (PORT_TFD_STS_BSY | PORT_TFD_STS_DRQ)))
+			break;
+
+	/* Start command list processing */
+	cmd = port_read(port, PORT_CMD);
+	port_write(port, PORT_CMD, cmd | PORT_CMD_ST);
+}
+
+/* ================================================================
+ * HBA reset and global init
+ * ================================================================ */
+
+static int
+ahci_hba_reset(void)
+{
+	int i;
+
+	/* BIOS/OS handoff if supported */
+	if (ahci_read(AHCI_CAP2) & CAP2_BOH) {
+		ahci_write(AHCI_BOHC,
+			   ahci_read(AHCI_BOHC) | BOHC_OOS);
+		for (i = 0; i < 25000; i++)
+			if (!(ahci_read(AHCI_BOHC) & BOHC_BOS))
+				break;
+	}
+
+	/* Enable AHCI mode before reset */
+	ahci_write(AHCI_GHC, GHC_AE);
+
+	/* HBA reset */
+	ahci_write(AHCI_GHC, ahci_read(AHCI_GHC) | GHC_HR);
+	for (i = 0; i < 1000000; i++)
+		if (!(ahci_read(AHCI_GHC) & GHC_HR))
+			break;
+	if (ahci_read(AHCI_GHC) & GHC_HR) {
+		printf("ahci: HBA reset timed out\n");
+		return -1;
+	}
+
+	/* Re-enable AHCI after reset */
+	ahci_write(AHCI_GHC, GHC_AE);
+
+	printf("ahci: HBA reset OK  version=0x%08X  cap=0x%08X\n",
+	       ahci_read(AHCI_VS), ahci_read(AHCI_CAP));
+	return 0;
+}
+
+/* ================================================================
+ * Port discovery
+ * ================================================================ */
+
+static int
+ahci_port_find(void)
+{
+	uint32_t pi = ahci_read(AHCI_PI);
+	int port;
+
+	for (port = 0; port < AHCI_MAX_PORTS; port++) {
+		if (!(pi & (1u << port)))
+			continue;
+		if ((port_read(port, PORT_SSTS) & SSTS_DET_MASK)
+		    == SSTS_DET_PRESENT) {
+			printf("ahci: device on port %d  sig=0x%08X\n",
+			       port, port_read(port, PORT_SIG));
+			return port;
+		}
+	}
+
+	printf("ahci: no device found (PI=0x%08X)\n", pi);
+	return -1;
+}
+
+/* ================================================================
+ * Port initialisation
+ * ================================================================ */
+
+static int
+ahci_port_init(int port)
+{
+	port_stop(port);
+
+	/* Set command list and FIS receive areas */
+	port_write(port, PORT_CLB,  clb_pa);
+	port_write(port, PORT_CLBU, 0);
+	port_write(port, PORT_FB,   fb_pa);
+	port_write(port, PORT_FBU,  0);
+
+	/* Clear errors and interrupt status */
+	port_write(port, PORT_SERR, ~0u);
+	port_write(port, PORT_IS,   ~0u);
+
+	port_start(port);
+
+	printf("ahci: port %d initialised  cmd=0x%08X  tfd=0x%08X\n",
+	       port,
+	       port_read(port, PORT_CMD),
+	       port_read(port, PORT_TFD));
+	return 0;
+}
+
+/* ================================================================
+ * Command submission (polling, slot 0 only)
+ * ================================================================ */
+
+static int
+ahci_submit_cmd(int port, struct ata_fis_h2d *fis,
+		unsigned int buf_pa, unsigned int buf_size,
+		int write)
+{
+	struct ahci_cmd_hdr   *hdr = (struct ahci_cmd_hdr *)clb_uva;
+	struct ahci_cmd_table *tbl = (struct ahci_cmd_table *)ct_uva;
+	int i;
+
+	/* Wait for port idle */
+	for (i = 0; i < 1000000; i++)
+		if (!(port_read(port, PORT_TFD) &
+		      (PORT_TFD_STS_BSY | PORT_TFD_STS_DRQ)))
+			break;
+
+	/* Clear interrupt status */
+	port_write(port, PORT_IS, ~0u);
+
+	/* Fill command header for slot 0 */
+	hdr[0].opts  = CMD_HDR_CFL(5);
+	if (write)
+		hdr[0].opts |= CMD_HDR_W;
+	hdr[0].prdtl = (buf_size > 0) ? 1 : 0;
+	hdr[0].prdbc = 0;
+	hdr[0].ctba  = ct_pa;
+	hdr[0].ctbau = 0;
+	for (i = 0; i < 4; i++)
+		hdr[0].rsvd[i] = 0;
+
+	/* Fill command table */
+	memset(tbl, 0, sizeof(struct ahci_cmd_table));
+	memcpy(tbl->cfis, fis, 20);
+
+	if (buf_size > 0) {
+		tbl->prdt[0].dba  = buf_pa;
+		tbl->prdt[0].dbau = 0;
+		tbl->prdt[0].rsvd = 0;
+		tbl->prdt[0].dbc  = PRDT_DBC(buf_size) | PRDT_IOC;
+	}
+
+	/* Issue command on slot 0 */
+	port_write(port, PORT_CI, 1u);
+
+	/* Poll for completion (~5 s timeout) */
+	for (i = 0; i < 5000000; i++) {
+		uint32_t is = port_read(port, PORT_IS);
+		if (is & PORT_IS_TFES) {
+			printf("ahci: task file error  IS=0x%08X  TFD=0x%08X\n",
+			       is, port_read(port, PORT_TFD));
+			port_write(port, PORT_IS, PORT_IS_TFES);
+			return -1;
+		}
+		if (!(port_read(port, PORT_CI) & 1u))
+			return 0;
+	}
+
+	printf("ahci: command timed out  CI=0x%08X\n",
+	       port_read(port, PORT_CI));
+	return -1;
+}
+
+/* ================================================================
+ * IDENTIFY DEVICE
+ * ================================================================ */
+
+static int
+ahci_identify(int port)
+{
+	struct ata_fis_h2d fis;
+	uint16_t *buf = (uint16_t *)data_uva;
+	char model[41];
+	uint32_t lba28;
+	unsigned int i;
+
+	memset(&fis, 0, sizeof(fis));
+	fis.fis_type = FIS_TYPE_H2D;
+	fis.flags    = FIS_H2D_FLAG_CMD;
+	fis.command  = ATA_CMD_IDENTIFY;
+	fis.device   = 0;
+
+	if (ahci_submit_cmd(port, &fis, data_pa, 512, 0) < 0) {
+		printf("ahci: IDENTIFY failed\n");
+		return -1;
+	}
+
+	/* Model string: words 27-46, big-endian bytes within each word */
+	for (i = 0; i < 20; i++) {
+		uint16_t w = buf[27 + i];
+		model[i * 2]     = (char)((w >> 8) & 0xFF);
+		model[i * 2 + 1] = (char)(w & 0xFF);
+	}
+	model[40] = '\0';
+	for (i = 39; i > 0 && model[i] == ' '; i--)
+		model[i] = '\0';
+
+	/* LBA28 total addressable sectors (words 60-61) */
+	lba28 = ((uint32_t)buf[61] << 16) | buf[60];
+
+	printf("ahci: model    : %s\n", model);
+	printf("ahci: sectors  : %u  capacity: ~%u MB\n",
+	       lba28, lba28 / 2048);
+
+	return 0;
+}
+
+/* ================================================================
+ * READ DMA EXT (LBA48)
+ * ================================================================ */
+
+static int
+ahci_read_sectors(int port, uint32_t lba, uint16_t count)
+{
+	struct ata_fis_h2d fis;
+
+	memset(&fis, 0, sizeof(fis));
+	fis.fis_type         = FIS_TYPE_H2D;
+	fis.flags            = FIS_H2D_FLAG_CMD;
+	fis.command          = ATA_CMD_READ_DMA_EXT;
+	fis.device           = ATA_DEV_LBA;
+	fis.lba_lo           = (lba >>  0) & 0xFF;
+	fis.lba_mid          = (lba >>  8) & 0xFF;
+	fis.lba_hi           = (lba >> 16) & 0xFF;
+	fis.lba_lo_exp       = (lba >> 24) & 0xFF;
+	fis.lba_mid_exp      = 0;
+	fis.lba_hi_exp       = 0;
+	fis.sector_count     = count & 0xFF;
+	fis.sector_count_exp = (count >> 8) & 0xFF;
+
+	return ahci_submit_cmd(port, &fis, data_pa, (unsigned int)count * 512, 0);
+}
+
+/* ================================================================
+ * Sequential read benchmark
+ * ================================================================ */
+
+#define BENCH_SECTORS		256u	/* 128 KB total */
+#define BENCH_SECTORS_PER_CMD	8u	/* 4 KB per command (= data buf size) */
+
+static void
+ahci_benchmark(int port)
+{
+	uint64_t t0, t1, elapsed;
+	uint32_t lba, i;
+	unsigned int cmds = BENCH_SECTORS / BENCH_SECTORS_PER_CMD;
+	unsigned int bytes = BENCH_SECTORS * 512u;
+
+	printf("ahci: benchmark: %u sectors (%u KB) x %u-sector cmds\n",
+	       BENCH_SECTORS, BENCH_SECTORS / 2, BENCH_SECTORS_PER_CMD);
+
+	/* Warm-up: one command before measuring */
+	if (ahci_read_sectors(port, 0, BENCH_SECTORS_PER_CMD) < 0) {
+		printf("ahci: benchmark warm-up failed\n");
+		return;
+	}
+
+	t0 = rdtsc();
+	for (i = 0, lba = 0; i < cmds; i++, lba += BENCH_SECTORS_PER_CMD) {
+		if (ahci_read_sectors(port, lba, BENCH_SECTORS_PER_CMD) < 0) {
+			printf("ahci: benchmark read error at LBA %u\n", lba);
+			return;
+		}
+	}
+	t1 = rdtsc();
+
+	elapsed = t1 - t0;
+
+	/*
+	 * Use only the lower 32 bits for division — in QEMU, reading
+	 * 256 sectors takes well under 2^32 TSC cycles (~1 GHz TSC).
+	 */
+	{
+		unsigned int cyc = (unsigned int)(elapsed & 0xFFFFFFFFu);
+
+		printf("ahci: %u sectors (%u KB) in %u TSC cycles\n",
+		       BENCH_SECTORS, BENCH_SECTORS / 2, cyc);
+		printf("ahci: cycles/sector : %u\n", cyc / BENCH_SECTORS);
+		/* MB/s = bytes * 1000 / cycles  (1 GHz TSC assumed) */
+		if (cyc > 0)
+			printf("ahci: ~%u MB/s  (assumes 1 GHz TSC)\n",
+			       bytes * 1000u / cyc);
+	}
+}
+
+/* ================================================================
+ * Full AHCI initialisation
+ * ================================================================ */
+
 static int
 ahci_init(void)
 {
 	kern_return_t kr;
-	unsigned int bar5, irq_reg, cap, pi, vs;
-	int port;
+	unsigned int bar5, cmd_reg, irq_reg;
 
-	/* Read BAR5 (ABAR) */
+	/* Read and save BAR5 (ABAR physical address) */
 	kr = device_pci_config_read(master_device,
 		ahci_bus, ahci_slot, ahci_func, PCI_BAR5, &bar5);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: failed to read BAR5\n");
 		return -1;
 	}
+	ahci_abar_phys = bar5 & ~0xFu;
+	printf("ahci: ABAR phys = 0x%08X\n", ahci_abar_phys);
 
-	ahci_abar_phys = bar5 & ~0xF;	/* mask type bits */
-	printf("ahci: ABAR = 0x%08X\n", ahci_abar_phys);
-
-	/* Enable PCI bus master + memory access */
-	unsigned int cmd;
+	/* Enable PCI bus master + memory space */
 	kr = device_pci_config_read(master_device,
-		ahci_bus, ahci_slot, ahci_func, PCI_COMMAND, &cmd);
+		ahci_bus, ahci_slot, ahci_func, PCI_COMMAND, &cmd_reg);
 	if (kr == KERN_SUCCESS) {
-		cmd |= PCI_CMD_MEM_ENABLE | PCI_CMD_BUS_MASTER;
+		cmd_reg |= PCI_CMD_MEM_ENABLE | PCI_CMD_BUS_MASTER;
 		device_pci_config_write(master_device,
-			ahci_bus, ahci_slot, ahci_func, PCI_COMMAND, cmd);
+			ahci_bus, ahci_slot, ahci_func, PCI_COMMAND, cmd_reg);
 	}
 
-	/* Read IRQ line */
+	/* Read IRQ */
 	kr = device_pci_config_read(master_device,
 		ahci_bus, ahci_slot, ahci_func, PCI_INTERRUPT_LINE, &irq_reg);
 	if (kr == KERN_SUCCESS) {
@@ -204,67 +539,64 @@ ahci_init(void)
 		printf("ahci: IRQ = %u\n", ahci_irq);
 	}
 
-	/*
-	 * Map ABAR into our address space.
-	 * For the stub kernel approach, we use device_dma_alloc as a
-	 * placeholder. Real MMIO mapping needs device_map() on the
-	 * physical BAR address — this requires extending the kernel
-	 * to support mapping arbitrary physical pages.
-	 *
-	 * TODO: Add device_master_mmio_map(phys, size) -> va primitive.
-	 * For now, on i386 with flat memory model the kernel can access
-	 * MMIO at the physical address directly via phystokv().
-	 * We print the ABAR and demonstrate PCI enumeration + DMA alloc.
-	 */
-	printf("ahci: MMIO mapping not yet implemented (needs device_master_mmio_map)\n");
-	printf("ahci: controller detected, PCI config accessible\n");
-
-	/* Read AHCI version and capabilities via PCI config space
-	 * (AHCI spec allows reading VS at ABAR+0x10, but we can't
-	 *  MMIO yet — demonstrate the PCI path works) */
-
-	/* Allocate DMA buffers for when MMIO is available */
-	kr = device_dma_alloc(master_device, 4096, &clb_va, &clb_pa);
+	/* Map ABAR into our address space */
+	kr = device_mmio_map(master_device,
+		ahci_abar_phys, AHCI_ABAR_SIZE,
+		mach_task_self(), (unsigned int *)&abar);
 	if (kr != KERN_SUCCESS) {
-		printf("ahci: failed to allocate CLB DMA buffer\n");
+		printf("ahci: device_mmio_map failed (kr=%d)\n", kr);
 		return -1;
 	}
-	printf("ahci: CLB DMA va=0x%08X pa=0x%08X\n", clb_va, clb_pa);
+	printf("ahci: ABAR mapped at uva=0x%08X\n", (unsigned int)abar);
 
-	kr = device_dma_alloc(master_device, 4096, &fb_va, &fb_pa);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: failed to allocate FB DMA buffer\n");
+	/* Allocate DMA buffers and map them into our address space */
+	kr = device_dma_alloc(master_device, 4096, &clb_kva, &clb_pa);
+	if (kr != KERN_SUCCESS) { printf("ahci: CLB alloc failed\n"); return -1; }
+	kr = device_dma_map_user(master_device, clb_kva, 4096,
+				 mach_task_self(), &clb_uva);
+	if (kr != KERN_SUCCESS) { printf("ahci: CLB map failed\n"); return -1; }
+
+	kr = device_dma_alloc(master_device, 4096, &fb_kva, &fb_pa);
+	if (kr != KERN_SUCCESS) { printf("ahci: FB alloc failed\n"); return -1; }
+	kr = device_dma_map_user(master_device, fb_kva, 4096,
+				 mach_task_self(), &fb_uva);
+	if (kr != KERN_SUCCESS) { printf("ahci: FB map failed\n"); return -1; }
+
+	kr = device_dma_alloc(master_device, 4096, &ct_kva, &ct_pa);
+	if (kr != KERN_SUCCESS) { printf("ahci: CT alloc failed\n"); return -1; }
+	kr = device_dma_map_user(master_device, ct_kva, 4096,
+				 mach_task_self(), &ct_uva);
+	if (kr != KERN_SUCCESS) { printf("ahci: CT map failed\n"); return -1; }
+
+	kr = device_dma_alloc(master_device, 4096, &data_kva, &data_pa);
+	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
+	kr = device_dma_map_user(master_device, data_kva, 4096,
+				 mach_task_self(), &data_uva);
+	if (kr != KERN_SUCCESS) { printf("ahci: data map failed\n"); return -1; }
+
+	printf("ahci: DMA: clb pa=0x%08X fb pa=0x%08X ct pa=0x%08X data pa=0x%08X\n",
+	       clb_pa, fb_pa, ct_pa, data_pa);
+
+	/* HBA reset + AHCI enable */
+	if (ahci_hba_reset() < 0)
 		return -1;
-	}
-	printf("ahci: FB  DMA va=0x%08X pa=0x%08X\n", fb_va, fb_pa);
 
-	kr = device_dma_alloc(master_device, 4096, &ct_va, &ct_pa);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: failed to allocate CT DMA buffer\n");
+	/* Find first port with a device */
+	active_port = ahci_port_find();
+	if (active_port < 0)
 		return -1;
-	}
 
-	kr = device_dma_alloc(master_device, 4096, &data_va, &data_pa);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: failed to allocate data DMA buffer\n");
+	/* Initialise that port */
+	if (ahci_port_init(active_port) < 0)
 		return -1;
-	}
 
-	printf("ahci: DMA buffers allocated successfully\n");
-
-	/* Register IRQ */
+	/* Register IRQ notification */
 	if (ahci_irq > 0 && ahci_irq < 16) {
 		kr = device_intr_register(master_device, ahci_irq, irq_port,
-			MACH_MSG_TYPE_COPY_SEND);
-		if (kr == KERN_SUCCESS) {
-			printf("ahci: IRQ registered: %u\n", ahci_irq);
-		} else {
-			printf("ahci: IRQ registration failed (non-fatal)\n");
-		}
+					  MACH_MSG_TYPE_MAKE_SEND);
+		if (kr == KERN_SUCCESS)
+			printf("ahci: IRQ %u registered\n", ahci_irq);
 	}
-
-	printf("ahci: initialization complete\n");
-	printf("ahci: waiting for MMIO mapping support to proceed\n");
 
 	return 0;
 }
@@ -277,68 +609,69 @@ int
 main(int argc, char **argv)
 {
 	kern_return_t kr;
+	mach_msg_header_t msg;
 
-	/*
-	 * Get privileged ports from the bootstrap server.
-	 * bootstrap_ports() returns the host, device, ledger and
-	 * security ports.  The device_port is the master_device_port
-	 * needed for device_master RPCs.
-	 */
 	kr = bootstrap_ports(bootstrap_port,
-			     &host_port,
-			     &device_port,
-			     &root_ledger_wired,
-			     &root_ledger_paged,
+			     &host_port, &device_port,
+			     &root_ledger_wired, &root_ledger_paged,
 			     &security_port);
 	if (kr != KERN_SUCCESS)
 		_exit(1);
 
-	/* Initialize console I/O (device_open("console")) */
 	printf_init(device_port);
 	panic_init(host_port);
-
 	master_device = device_port;
 
-	printf("\n=== AHCI userspace driver starting ===\n");
+	printf("\n=== AHCI userspace driver (real I/O) ===\n");
 
-	/* Allocate IRQ notification port */
+	/* IRQ notification port */
 	kr = mach_port_allocate(mach_task_self(),
 		MACH_PORT_RIGHT_RECEIVE, &irq_port);
 	if (kr != KERN_SUCCESS) {
-		printf("ahci: failed to allocate IRQ port\n");
+		printf("ahci: irq port alloc failed\n");
 		return 1;
 	}
 	kr = mach_port_insert_right(mach_task_self(), irq_port, irq_port,
 		MACH_MSG_TYPE_MAKE_SEND);
 	if (kr != KERN_SUCCESS) {
-		printf("ahci: failed to insert send right for IRQ port\n");
+		printf("ahci: irq port right failed\n");
 		return 1;
 	}
 
-	/* Scan PCI for AHCI controller */
+	/* Find and initialise the controller */
 	if (!pci_scan_ahci()) {
 		printf("ahci: no controller, exiting\n");
 		return 1;
 	}
-
-	/* Initialize the controller */
 	if (ahci_init() < 0) {
-		printf("ahci: initialization failed\n");
+		printf("ahci: init failed\n");
 		return 1;
 	}
 
-	/*
-	 * In the future, this is where the message loop goes:
-	 * receive device RPCs and IRQ notifications, dispatch I/O.
-	 *
-	 * For now, the driver just demonstrates:
-	 * 1. PCI bus scan via device_pci_config_read
-	 * 2. DMA buffer allocation via device_dma_alloc
-	 * 3. IRQ registration via device_intr_register
-	 */
-	printf("ahci: driver idle (no message loop yet)\n");
+	/* Identify the attached disk */
+	ahci_identify(active_port);
 
-	/* Suspend ourselves — we have nothing more to do without MMIO */
-	task_suspend(mach_task_self());
+	/* Run sequential read benchmark */
+	ahci_benchmark(active_port);
+
+	printf("ahci: init complete, entering message loop\n");
+
+	/*
+	 * Message loop: receive IRQ notifications and future RPC requests.
+	 * For now we just drain IRQ notifications to keep the port clear.
+	 */
+	for (;;) {
+		kr = mach_msg(&msg,
+			      MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+			      0, sizeof(msg), irq_port,
+			      1000 /* 1 s */, MACH_PORT_NULL);
+		if (kr == MACH_MSG_SUCCESS &&
+		    msg.msgh_id >= IRQ_NOTIFY_MSGH_BASE) {
+			/* IRQ received — acknowledge and re-arm */
+			ahci_write(AHCI_IS, ~0u);
+			port_write(active_port, PORT_IS, ~0u);
+		}
+	}
+
 	return 0;
 }

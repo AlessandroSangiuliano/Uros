@@ -70,6 +70,13 @@
 #define CAP_NP_MASK		0x1F		/* Number of Ports - 1 */
 #define CAP_S64A		(1u << 31)	/* 64-bit Addressing */
 
+/* CAP2 bits */
+#define CAP2_BOH		(1u << 0)	/* BIOS/OS Handoff supported */
+
+/* BOHC bits */
+#define BOHC_BOS		(1u << 0)	/* BIOS-Owned Semaphore */
+#define BOHC_OOS		(1u << 1)	/* OS-Owned Semaphore */
+
 /* ================================================================
  * Port registers (offset from ABAR + 0x100 + port * 0x80)
  * ================================================================ */
@@ -198,8 +205,21 @@ struct ata_fis_h2d {
 	uint8_t		pad[4];
 } __attribute__((packed));
 
+/* ================================================================
+ * ATA H2D FIS flags
+ * ================================================================ */
+#define FIS_H2D_FLAG_CMD	(1u << 7)	/* C bit: this is a command */
+
+/* ATA device register bits */
+#define ATA_DEV_LBA		(1u << 6)	/* LBA addressing mode */
+
 /* ATA commands */
-#define ATA_CMD_IDENTIFY	0xEC
+#define ATA_CMD_IDENTIFY	0xEC		/* IDENTIFY DEVICE */
+#define ATA_CMD_READ_DMA_EXT	0x25		/* READ DMA EXT (LBA48) */
+#define ATA_CMD_WRITE_DMA_EXT	0x35		/* WRITE DMA EXT (LBA48) */
+
+/* AHCI ABAR size (covers 32 ports: 0x100 + 32*0x80 = 0x1100) */
+#define AHCI_ABAR_SIZE		8192		/* 8 KB, 2 pages */
 
 /* Maximum ports and command slots */
 #define AHCI_MAX_PORTS		32
