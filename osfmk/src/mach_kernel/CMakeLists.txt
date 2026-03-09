@@ -110,7 +110,7 @@ set(KERNEL_DEFINES
     # ODE device configuration options
     -DEISA=1
     -DHIMEM=1
-    -DNPCI=0
+    -DNPCI=1
     # GCC/ELF does not use underscore prefix for C symbols
     -D__NO_UNDERSCORES__
 )
@@ -134,6 +134,16 @@ set(KERNEL_BUILD_DIR ${CMAKE_CURRENT_BINARY_DIR})
 # IMPORTANT: Source directories come FIRST so that original headers (e.g. mach/memory_object.h 
 # with type definitions) are found before MIG-generated headers with the same name.
 # The build directory is included for generated headers like *_server.h and *_user.c
+
+# ODE-style device config headers for PCI sub-drivers (all disabled).
+# The main pci.h lives in i386/AT386/pci.h with NPCI=1.
+foreach(_dev_hdr ncr810 ncr825 adsl fta tu)
+    if(NOT EXISTS "${KERNEL_SRC_DIR}/i386/AT386/${_dev_hdr}.h")
+        file(WRITE "${KERNEL_BUILD_DIR}/${_dev_hdr}.h"
+             "#ifndef _CONFIG_${_dev_hdr}_H_\n#define _CONFIG_${_dev_hdr}_H_\n"
+             "#define N${_dev_hdr} 0\n#endif\n")
+    endif()
+endforeach()
 
 set(KERNEL_INCLUDES
     ${KERNEL_SRC_DIR}
@@ -579,6 +589,14 @@ set(CHIPS_SOURCES
     chips/busses.c
 )
 
+# PCI subsystem
+set(PCI_SOURCES
+    busses/pci/pci.c
+    i386/pci/pcibios.c
+    i386/pci/i386_pci.c
+    i386/pci/pci_config.c
+)
+
 # SCSI subsystem
 set(SCSI_SOURCES
     # scsi/scsi_info.c  # Disabled - too many dependencies
@@ -596,6 +614,7 @@ set(KERNEL_C_SOURCES
     ${I386_C_SOURCES}
     ${AT386_SOURCES}
     ${CHIPS_SOURCES}
+    ${PCI_SOURCES}
     ${SCSI_SOURCES}
 )
 

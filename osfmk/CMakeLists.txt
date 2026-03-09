@@ -13,6 +13,7 @@ option(OSFMK_BUILD_BOOTSTRAP "Costruisci il bootstrap task" ON)
 option(OSFMK_BUILD_DEFAULT_PAGER "Costruisci il default pager" OFF)
 option(OSFMK_BUILD_HELLO_SERVER "Costruisci l'hello server (test server)" OFF)
 option(OSFMK_BUILD_IPC_BENCH "Costruisci il benchmark IPC (ipc_bench)" OFF)
+option(OSFMK_BUILD_AHCI_DRIVER "Costruisci il driver AHCI userspace" OFF)
 
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'osfmk' when building kernel)" "")

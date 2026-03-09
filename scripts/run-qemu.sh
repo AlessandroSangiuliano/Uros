@@ -24,12 +24,14 @@ KERNEL="$BUILD_DIR/export/osfmk/boot/mach_kernel"
 BOOTSTRAP="$BUILD_DIR/export/osfmk/$(uname -m)/user/sbin/bootstrap"
 DISK_IMG="$BUILD_DIR/disk.img"
 
-# Parse --no-disk flag
+# Parse flags
 USE_DISK=true
+USE_AHCI=false
 EXTRA_ARGS=""
 for arg in "$@"; do
     case "$arg" in
         --no-disk) USE_DISK=false ;;
+        --ahci) USE_AHCI=true ;;
         *) EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
     esac
 done
@@ -60,6 +62,21 @@ elif [ "$USE_DISK" = true ]; then
     echo "  Crea con: ./scripts/make-disk-image.sh"
     echo "  Avvio senza disco (il bootstrap non troverà i server)."
     echo ""
+fi
+
+# Optionally add an ICH9 AHCI controller with a test disk.
+# The boot disk stays on IDE; the AHCI controller appears as a
+# separate PCI device that the ahci_driver can detect and probe.
+AHCI_DISK="$BUILD_DIR/ahci-test.img"
+if [ "$USE_AHCI" = true ]; then
+    if [ ! -f "$AHCI_DISK" ]; then
+        echo "Creazione disco AHCI di test (8 MB)..."
+        dd if=/dev/zero of="$AHCI_DISK" bs=1M count=8 status=none
+    fi
+    echo "AHCI: $AHCI_DISK (ICH9 controller)"
+    QEMU_ARGS="$QEMU_ARGS -device ich9-ahci,id=ahci0"
+    QEMU_ARGS="$QEMU_ARGS -drive id=ahcidisk0,file=$AHCI_DISK,format=raw,if=none"
+    QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=ahcidisk0,bus=ahci0.0"
 fi
 
 # shellcheck disable=SC2086

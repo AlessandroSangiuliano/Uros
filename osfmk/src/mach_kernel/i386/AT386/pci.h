@@ -5,6 +5,6 @@
 #ifndef _I386_AT386_PCI_H_
 #define _I386_AT386_PCI_H_
 
-#define NPCI 0
+#define NPCI 1
 
 #endif /* _I386_AT386_PCI_H_ */
