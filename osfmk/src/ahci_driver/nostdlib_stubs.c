@@ -44,3 +44,22 @@ cthread_sp(void)
 	__asm__ __volatile__("movl %%esp, %0" : "=r" (sp));
 	return sp;
 }
+
+void *
+memset(void *s, int c, unsigned int n)
+{
+	unsigned char *p = (unsigned char *)s;
+	while (n--)
+		*p++ = (unsigned char)c;
+	return s;
+}
+
+void *
+memcpy(void *dst, const void *src, unsigned int n)
+{
+	unsigned char *d = (unsigned char *)dst;
+	const unsigned char *s2 = (const unsigned char *)src;
+	while (n--)
+		*d++ = *s2++;
+	return dst;
+}

@@ -106,3 +106,37 @@ routine device_dma_free(
 	in	vaddr		: natural_t;
 	in	size		: natural_t
 	);
+
+/*
+ * Map a kernel DMA buffer (kernel VA from device_dma_alloc) into a
+ * user task's address space.  Returns the user virtual address.
+ */
+routine device_dma_map_user(
+		master_port	: mach_port_t;
+	in	kva		: natural_t;
+	in	size		: natural_t;
+	in	task_port	: mach_port_t;
+	out	uva		: natural_t
+	);
+
+/*
+ * Map a physical MMIO range (e.g. a PCI BAR) into a user task's
+ * address space.  Returns the user virtual address.
+ */
+routine device_mmio_map(
+		master_port	: mach_port_t;
+	in	phys_addr	: natural_t;
+	in	size		: natural_t;
+	in	task_port	: mach_port_t;
+	out	uva		: natural_t
+	);
+
+/*
+ * Unmap an MMIO range from a user task.
+ */
+routine device_mmio_unmap(
+		master_port	: mach_port_t;
+	in	uva		: natural_t;
+	in	size		: natural_t;
+	in	task_port	: mach_port_t
+	);
