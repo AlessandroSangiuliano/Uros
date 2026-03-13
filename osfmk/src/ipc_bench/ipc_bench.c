@@ -308,7 +308,7 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     cache_snap(&cs_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
-    print_cache_stats(label, &cs_before, &cs_after);
+    //print_cache_stats(label, &cs_before, &cs_after);
 
     /* Cleanup: destroy ports (kills echo thread's receive) */
     mach_port_destroy(mach_task_self(), echo_port);
@@ -515,7 +515,7 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     cache_snap(&cs_after);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
-    print_cache_stats(label, &cs_before, &cs_after);
+    //print_cache_stats(label, &cs_before, &cs_after);
 
     /*
      * Step 9: Cleanup — destroy the child task.
