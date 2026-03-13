@@ -53,11 +53,12 @@
 #include <mach.h>
 #include <mach/message.h>
 #include <mach/notify.h>
-#include <mach/notify_server.h>
-#include <servers/netname_server.h>
+#include <sa_mach.h>
+#include <mach_error.h>
 
-extern void panic(const char *, ...);
-extern char *mach_error_string(kern_return_t);
+#include "netname_server.h"
+#include "notify_server.h"
+
 extern void netname_init(void);
 
 extern boolean_t Debug;

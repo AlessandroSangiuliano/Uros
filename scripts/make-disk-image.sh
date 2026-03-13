@@ -59,10 +59,17 @@ for cmd in dd sfdisk mke2fs debugfs; do
 done
 
 # --- Percorsi dei binari ---
+NAME_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/name_server"
 DEFAULT_PAGER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/default_pager"
 HELLO_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_server"
 IPC_BENCH="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ipc_bench"
 AHCI_DRIVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ahci_driver"
+
+if [ ! -f "$NAME_SERVER" ]; then
+    echo "ERRORE: name_server non trovato: $NAME_SERVER"
+    echo "  Build con: cd $BUILD_DIR && ninja name_server_bin"
+    exit 1
+fi
 
 if [ ! -f "$DEFAULT_PAGER" ]; then
     echo "ERRORE: default_pager non trovato: $DEFAULT_PAGER"
@@ -95,6 +102,7 @@ fi
 # che lo apre con device_open() e lo usa come backing store di paging.
 BOOTSTRAP_CONF=$(mktemp)
 cat > "$BOOTSTRAP_CONF" <<'CONF'
+name_server name_server
 default_pager default_pager hd0b
 hello_server hello_server
 ipc_bench ipc_bench
@@ -149,16 +157,19 @@ debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 mkdir mach_servers
 cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf
+write $NAME_SERVER name_server
 write $DEFAULT_PAGER default_pager
 write $HELLO_SERVER hello_server
 write $IPC_BENCH ipc_bench
 write $AHCI_DRIVER ahci_driver
 DBGFS
 
+echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"
 echo "  /mach_servers/bootstrap.conf → 'default_pager default_pager hd0b'"
 echo "  /mach_servers/bootstrap.conf → 'hello_server hello_server'"
 echo "  /mach_servers/bootstrap.conf → 'ipc_bench ipc_bench'"
 echo "  /mach_servers/bootstrap.conf → 'ahci_driver ahci_driver'"
+echo "  /mach_servers/name_server    → $(stat -c%s "$NAME_SERVER") bytes"
 echo "  /mach_servers/default_pager  → $(stat -c%s "$DEFAULT_PAGER") bytes"
 echo "  /mach_servers/hello_server   → $(stat -c%s "$HELLO_SERVER") bytes"
 echo "  /mach_servers/ipc_bench      → $(stat -c%s "$IPC_BENCH") bytes"
@@ -182,6 +193,7 @@ echo "  MBR:    settore 0"
 echo "  hd0a:   settori ${PART1_START_SECT}-$((PART1_START_SECT + FS_SIZE_SECTS - 1))  (ext2, ${FS_SIZE_MB} MB)"
 echo "    └── /mach_servers/"
 echo "        ├── bootstrap.conf"
+echo "        ├── name_server"
 echo "        ├── default_pager"
 echo "        ├── hello_server"
 echo "        ├── ipc_bench"
@@ -191,11 +203,12 @@ echo ""
 echo "Flusso di boot:"
 echo "  1. Kernel boot_device → hd0a (d_partitions[0])"
 echo "  2. Bootstrap legge /dev/boot_device/mach_servers/bootstrap.conf"
-echo "  3. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
-echo "  4. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
-echo "  5. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
-echo "  6. Bootstrap carica /dev/boot_device/mach_servers/ahci_driver"
-echo "  7. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
+echo "  3. Bootstrap carica /dev/boot_device/mach_servers/name_server"
+echo "  4. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
+echo "  5. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
+echo "  6. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
+echo "  7. Bootstrap carica /dev/boot_device/mach_servers/ahci_driver"
+echo "  8. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
 echo ""
 echo "Per avviare:"
 echo "  ./scripts/run-qemu.sh"

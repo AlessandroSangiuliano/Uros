@@ -54,22 +54,14 @@
 #include <mach/message.h>
 #include <mach/bootstrap.h>
 #include <mach/notify.h>
-#include <servers/service.h>
+#include <sa_mach.h>
+#include <mach_error.h>
 
-#include <servers/netname_server.h>
+#include "service.h"
+#include "netname_server.h"
+#include "notify_server.h"
 
 extern void netname_init(void);
-extern void printf_init(mach_port_t);
-extern void panic_init(mach_port_t);
-extern void panic(const char *, ...);
-extern char *mach_error_string(kern_return_t);
-extern kern_return_t mach_msg_server(boolean_t (*)(mach_msg_header_t *,
-						   mach_msg_header_t *),
-				     mach_msg_size_t,
-				     mach_port_t,
-				     int);
-extern boolean_t netname_server(mach_msg_header_t *, mach_msg_header_t *);
-extern boolean_t notify_server(mach_msg_header_t *, mach_msg_header_t *);
 
 char *program = NULL;
 boolean_t Debug = FALSE;

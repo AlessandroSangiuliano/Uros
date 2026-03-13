@@ -53,4 +53,14 @@ if(OSFMK_BUILD_AHCI_DRIVER)
   add_subdirectory(ahci_driver)
 endif()
 
+# Build name server (netname)
+if(OSFMK_BUILD_NAME_SERVER)
+  add_subdirectory(mach_services/servers/netname)
+endif()
+
+# Build ext2 filesystem server
+if(OSFMK_BUILD_EXT2_SERVER)
+  add_subdirectory(ext2_server)
+endif()
+
 
