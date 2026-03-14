@@ -70,8 +70,16 @@ fi
 AHCI_DISK="$BUILD_DIR/ahci-test.img"
 if [ "$USE_AHCI" = true ]; then
     if [ ! -f "$AHCI_DISK" ]; then
-        echo "Creazione disco AHCI di test (8 MB)..."
+        echo "Creazione disco AHCI di test (8 MB, ext2)..."
         dd if=/dev/zero of="$AHCI_DISK" bs=1M count=8 status=none
+        mke2fs -t ext2 -q -F -b 1024 -I 256 -r 1 -O filetype "$AHCI_DISK"
+        HELLO_TXT=$(mktemp)
+        printf 'Hello from ext2 on AHCI!\n' > "$HELLO_TXT"
+        debugfs -w -f /dev/stdin "$AHCI_DISK" <<DBGFS 2>/dev/null
+write $HELLO_TXT hello.txt
+DBGFS
+        rm -f "$HELLO_TXT"
+        echo "  Disco AHCI formattato ext2 con /hello.txt"
     fi
     echo "AHCI: $AHCI_DISK (ICH9 controller)"
     QEMU_ARGS="$QEMU_ARGS -device ich9-ahci,id=ahci0"

@@ -38,6 +38,27 @@ set(AHCI_SOURCES
   ahci_driver.c
   nostdlib_stubs.c
   ${DM_USER_C}
+  ${CMAKE_BINARY_DIR}/generated/device_server.c
+)
+
+# Mark the generated device_server.c as generated so CMake doesn't
+# complain about missing sources at configure time.
+set_source_files_properties(
+  ${CMAKE_BINARY_DIR}/generated/device_server.c
+  PROPERTIES GENERATED TRUE
+)
+
+# Copy device_server.h to our local build dir so we can include it
+# without adding generated/ to the include path (which would shadow
+# the real mach.h with the MIG-generated one).
+set(LOCAL_DEVICE_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/device_server.h)
+add_custom_command(
+  OUTPUT ${LOCAL_DEVICE_SERVER_H}
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    ${CMAKE_BINARY_DIR}/generated/device_server.h
+    ${LOCAL_DEVICE_SERVER_H}
+  DEPENDS ${CMAKE_BINARY_DIR}/generated/device_server.h
+  COMMENT "Copy device_server.h for ahci_driver"
 )
 
 # ===========================================================================
@@ -46,6 +67,7 @@ set(AHCI_SOURCES
 
 add_executable(ahci_driver_server
   ${AHCI_SOURCES}
+  ${LOCAL_DEVICE_SERVER_H}
 )
 
 target_compile_options(ahci_driver_server PRIVATE
@@ -62,7 +84,7 @@ target_compile_definitions(ahci_driver_server PRIVATE
 )
 
 target_include_directories(ahci_driver_server PRIVATE
-  # MIG-generated headers for device_master
+  # MIG-generated headers (device_master.h, device_server.h)
   ${CMAKE_CURRENT_BINARY_DIR}
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
@@ -82,6 +104,7 @@ target_link_libraries(ahci_driver_server PRIVATE
   libcthreads
   libmach
   libsa_mach
+  libnetname
   -Wl,--end-group
 )
 
@@ -92,6 +115,9 @@ target_link_options(ahci_driver_server PRIVATE
   -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
+
+# Ensure MIG-generated device server stubs are built before us.
+add_dependencies(ahci_driver_server mig_device_header)
 
 set_target_properties(ahci_driver_server PROPERTIES
   OUTPUT_NAME "ahci_driver"

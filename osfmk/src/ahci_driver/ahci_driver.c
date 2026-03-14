@@ -37,10 +37,14 @@
 #include <mach/bootstrap.h>
 #include <mach/mach_port.h>
 #include <mach/message.h>
+#include <mach/mig_errors.h>
 #include <sa_mach.h>
 #include <device/device.h>
+#include <device/device_types.h>
+#include <servers/netname.h>
 #include <stdio.h>
 #include "device_master.h"
+#include "device_server.h"
 #include "ahci.h"
 
 /* msgh_id base for IRQ notifications from device_intr_register */
@@ -57,6 +61,8 @@ static mach_port_t	security_port;
 static mach_port_t	root_ledger_wired;
 static mach_port_t	root_ledger_paged;
 static mach_port_t	irq_port;
+static mach_port_t	ahci_service_port;	/* RPC port registered with netname */
+static mach_port_t	port_set;	/* IRQ + RPC combined receive set */
 
 /* PCI location of the AHCI controller */
 static unsigned int	ahci_bus, ahci_slot, ahci_func;
@@ -71,6 +77,9 @@ static volatile uint32_t *abar;
 
 /* Active SATA port */
 static int		active_port = -1;
+
+/* Total disk sectors (from IDENTIFY) */
+static uint32_t		disk_sectors;
 
 /*
  * DMA buffers — each has:
@@ -416,6 +425,7 @@ ahci_identify(int port)
 
 	/* LBA28 total addressable sectors (words 60-61) */
 	lba28 = ((uint32_t)buf[61] << 16) | buf[60];
+	disk_sectors = lba28;
 
 	printf("ahci: model    : %s\n", model);
 	printf("ahci: sectors  : %u  capacity: ~%u MB\n",
@@ -602,6 +612,189 @@ ahci_init(void)
 }
 
 /* ================================================================
+ * Device server — MIG server stubs for device.defs (subsystem 2800)
+ *
+ * The ahci_driver acts as a userspace device server: clients (e.g.
+ * ext2_server) obtain our service port via netname_look_up and send
+ * device_read / device_get_status RPCs.  The MIG-generated
+ * device_server() demux calls these ds_* implementations.
+ * ================================================================ */
+
+#define DATA_BUF_SIZE	4096u	/* DMA data buffer size */
+#define SECTOR_SIZE	512u
+
+kern_return_t
+ds_device_open(mach_port_t master, mach_port_t reply,
+	       mach_msg_type_name_t reply_poly,
+	       mach_port_t ledger, dev_mode_t mode,
+	       security_token_t sec_token, dev_name_t name,
+	       mach_port_t *device)
+{
+	if (active_port < 0)
+		return D_NO_SUCH_DEVICE;
+	*device = ahci_service_port;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_device_close(mach_port_t device)
+{
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_device_read(mach_port_t device, mach_port_t reply,
+	       mach_msg_type_name_t reply_poly,
+	       dev_mode_t mode, recnum_t recnum,
+	       io_buf_len_t bytes_wanted,
+	       io_buf_ptr_t *data, mach_msg_type_number_t *data_count)
+{
+	kern_return_t kr;
+	vm_offset_t buf;
+	unsigned int total, offset, lba, chunk, chunk_sects;
+
+	if (active_port < 0)
+		return D_NO_SUCH_DEVICE;
+	if (bytes_wanted <= 0)
+		return D_INVALID_SIZE;
+
+	/* Round up to sector boundary */
+	total = (unsigned int)bytes_wanted;
+	if (total % SECTOR_SIZE)
+		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+
+	kr = vm_allocate(mach_task_self(), &buf, total, TRUE);
+	if (kr != KERN_SUCCESS)
+		return D_NO_MEMORY;
+
+	/* Read in DATA_BUF_SIZE chunks via the single DMA buffer */
+	lba = recnum;
+	for (offset = 0; offset < total; offset += chunk) {
+		chunk = total - offset;
+		if (chunk > DATA_BUF_SIZE)
+			chunk = DATA_BUF_SIZE;
+		chunk_sects = chunk / SECTOR_SIZE;
+
+		if (ahci_read_sectors(active_port, lba, chunk_sects) < 0) {
+			vm_deallocate(mach_task_self(), buf, total);
+			return D_IO_ERROR;
+		}
+		memcpy((void *)(buf + offset), (void *)data_uva, chunk);
+		lba += chunk_sects;
+	}
+
+	*data = (io_buf_ptr_t)buf;
+	*data_count = (mach_msg_type_number_t)bytes_wanted;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_device_read_inband(mach_port_t device, mach_port_t reply,
+		      mach_msg_type_name_t reply_poly,
+		      dev_mode_t mode, recnum_t recnum,
+		      io_buf_len_t bytes_wanted,
+		      io_buf_ptr_inband_t data,
+		      mach_msg_type_number_t *data_count)
+{
+	return D_INVALID_OPERATION;
+}
+
+kern_return_t
+ds_device_write(mach_port_t device, mach_port_t reply,
+		mach_msg_type_name_t reply_poly,
+		dev_mode_t mode, recnum_t recnum,
+		io_buf_ptr_t data, mach_msg_type_number_t data_count,
+		io_buf_len_t *bytes_written)
+{
+	return D_INVALID_OPERATION;
+}
+
+kern_return_t
+ds_device_write_inband(mach_port_t device, mach_port_t reply,
+		       mach_msg_type_name_t reply_poly,
+		       dev_mode_t mode, recnum_t recnum,
+		       io_buf_ptr_inband_t data,
+		       mach_msg_type_number_t data_count,
+		       io_buf_len_t *bytes_written)
+{
+	return D_INVALID_OPERATION;
+}
+
+kern_return_t
+ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
+		     dev_status_t status,
+		     mach_msg_type_number_t *status_count)
+{
+	if (flavor == DEV_GET_SIZE) {
+		status[DEV_GET_SIZE_DEVICE_SIZE] = (int)disk_sectors;
+		status[DEV_GET_SIZE_RECORD_SIZE] = (int)SECTOR_SIZE;
+		*status_count = DEV_GET_SIZE_COUNT;
+		return KERN_SUCCESS;
+	}
+	return D_INVALID_OPERATION;
+}
+
+kern_return_t
+ds_device_set_status(mach_port_t device, dev_flavor_t flavor,
+		     dev_status_t status,
+		     mach_msg_type_number_t status_count)
+{
+	return D_INVALID_OPERATION;
+}
+
+kern_return_t
+ds_device_map(mach_port_t device, vm_prot_t prot,
+	      vm_offset_t offset, vm_size_t size,
+	      mach_port_t *pager, boolean_t unmap)
+{
+	return D_INVALID_OPERATION;
+}
+
+kern_return_t
+ds_device_set_filter(mach_port_t device, mach_port_t receive_port,
+		     int priority, filter_array_t filter,
+		     mach_msg_type_number_t filter_count)
+{
+	return D_INVALID_OPERATION;
+}
+
+kern_return_t
+ds_io_done_queue_create(mach_port_t host, mach_port_t *queue)
+{
+	return D_INVALID_OPERATION;
+}
+
+kern_return_t
+ds_io_done_queue_terminate(mach_port_t queue)
+{
+	return D_INVALID_OPERATION;
+}
+
+/* ================================================================
+ * Combined demux: device RPC + IRQ notifications
+ * ================================================================ */
+
+static boolean_t
+ahci_demux(mach_msg_header_t *in, mach_msg_header_t *out)
+{
+	/* Try MIG device server demux first */
+	if (device_server(in, out))
+		return TRUE;
+
+	/* IRQ notification — acknowledge, no reply */
+	if (in->msgh_id >= IRQ_NOTIFY_MSGH_BASE) {
+		ahci_write(AHCI_IS, ~0u);
+		port_write(active_port, PORT_IS, ~0u);
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+/* ================================================================
  * Main entry point
  * ================================================================ */
 
@@ -609,7 +802,6 @@ int
 main(int argc, char **argv)
 {
 	kern_return_t kr;
-	mach_msg_header_t msg;
 
 	kr = bootstrap_ports(bootstrap_port,
 			     &host_port, &device_port,
@@ -638,6 +830,31 @@ main(int argc, char **argv)
 		return 1;
 	}
 
+	/* Service port for device RPC (device_read, etc.) */
+	kr = mach_port_allocate(mach_task_self(),
+		MACH_PORT_RIGHT_RECEIVE, &ahci_service_port);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: service port alloc failed\n");
+		return 1;
+	}
+	kr = mach_port_insert_right(mach_task_self(),
+		ahci_service_port, ahci_service_port,
+		MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: service port right failed\n");
+		return 1;
+	}
+
+	/* Port set: receive on both IRQ and RPC ports */
+	kr = mach_port_allocate(mach_task_self(),
+		MACH_PORT_RIGHT_PORT_SET, &port_set);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: port set alloc failed\n");
+		return 1;
+	}
+	mach_port_move_member(mach_task_self(), irq_port, port_set);
+	mach_port_move_member(mach_task_self(), ahci_service_port, port_set);
+
 	/* Find and initialise the controller */
 	if (!pci_scan_ahci()) {
 		printf("ahci: no controller, exiting\n");
@@ -654,24 +871,25 @@ main(int argc, char **argv)
 	/* Run sequential read benchmark */
 	ahci_benchmark(active_port);
 
+	/* Register with the name server so other tasks can find us */
+	kr = netname_check_in(name_server_port, "ahci_driver",
+			      mach_task_self(), ahci_service_port);
+	if (kr != KERN_SUCCESS)
+		printf("ahci: netname_check_in failed (kr=%d) "
+		       "— continuing without registration\n", kr);
+	else
+		printf("ahci: registered as 'ahci_driver' with name server\n");
+
 	printf("ahci: init complete, entering message loop\n");
 
 	/*
-	 * Message loop: receive IRQ notifications and future RPC requests.
-	 * For now we just drain IRQ notifications to keep the port clear.
+	 * Message loop: combined demux handles both device RPCs
+	 * (device_read, device_get_status, etc.) and IRQ notifications.
 	 */
-	for (;;) {
-		kr = mach_msg(&msg,
-			      MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-			      0, sizeof(msg), irq_port,
-			      1000 /* 1 s */, MACH_PORT_NULL);
-		if (kr == MACH_MSG_SUCCESS &&
-		    msg.msgh_id >= IRQ_NOTIFY_MSGH_BASE) {
-			/* IRQ received — acknowledge and re-arm */
-			ahci_write(AHCI_IS, ~0u);
-			port_write(active_port, PORT_IS, ~0u);
-		}
-	}
+	mach_msg_server(ahci_demux, 8192, port_set,
+			MACH_MSG_OPTION_NONE);
 
-	return 0;
+	/* mach_msg_server never returns on success */
+	printf("ahci: mach_msg_server exited unexpectedly\n");
+	return 1;
 }
