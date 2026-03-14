@@ -461,6 +461,33 @@ ahci_read_sectors(int port, uint32_t lba, uint16_t count)
 }
 
 /* ================================================================
+ * WRITE DMA EXT (LBA48)
+ * ================================================================ */
+
+static int
+ahci_write_sectors(int port, uint32_t lba, uint16_t count)
+{
+	struct ata_fis_h2d fis;
+
+	memset(&fis, 0, sizeof(fis));
+	fis.fis_type         = FIS_TYPE_H2D;
+	fis.flags            = FIS_H2D_FLAG_CMD;
+	fis.command          = ATA_CMD_WRITE_DMA_EXT;
+	fis.device           = ATA_DEV_LBA;
+	fis.lba_lo           = (lba >>  0) & 0xFF;
+	fis.lba_mid          = (lba >>  8) & 0xFF;
+	fis.lba_hi           = (lba >> 16) & 0xFF;
+	fis.lba_lo_exp       = (lba >> 24) & 0xFF;
+	fis.lba_mid_exp      = 0;
+	fis.lba_hi_exp       = 0;
+	fis.sector_count     = count & 0xFF;
+	fis.sector_count_exp = (count >> 8) & 0xFF;
+
+	/* write=1: device reads from host memory (DMA write to disk) */
+	return ahci_submit_cmd(port, &fis, data_pa, (unsigned int)count * 512, 1);
+}
+
+/* ================================================================
  * Sequential read benchmark
  * ================================================================ */
 
@@ -706,7 +733,42 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 		io_buf_ptr_t data, mach_msg_type_number_t data_count,
 		io_buf_len_t *bytes_written)
 {
-	return D_INVALID_OPERATION;
+	unsigned int total, offset, lba, chunk, chunk_sects;
+
+	if (active_port < 0)
+		return D_NO_SUCH_DEVICE;
+	if (data_count <= 0)
+		return D_INVALID_SIZE;
+
+	/* Round up to sector boundary */
+	total = (unsigned int)data_count;
+	if (total % SECTOR_SIZE)
+		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+
+	/* Write in DATA_BUF_SIZE chunks via the single DMA buffer */
+	lba = recnum;
+	for (offset = 0; offset < total; offset += chunk) {
+		chunk = total - offset;
+		if (chunk > DATA_BUF_SIZE)
+			chunk = DATA_BUF_SIZE;
+		chunk_sects = chunk / SECTOR_SIZE;
+
+		memcpy((void *)data_uva, (void *)((vm_offset_t)data + offset),
+		       chunk);
+		if (ahci_write_sectors(active_port, lba, chunk_sects) < 0) {
+			/* Deallocate OOL data from sender */
+			vm_deallocate(mach_task_self(),
+				      (vm_offset_t)data, data_count);
+			return D_IO_ERROR;
+		}
+		lba += chunk_sects;
+	}
+
+	/* Deallocate OOL data from sender */
+	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
+
+	*bytes_written = (io_buf_len_t)data_count;
+	return KERN_SUCCESS;
 }
 
 kern_return_t

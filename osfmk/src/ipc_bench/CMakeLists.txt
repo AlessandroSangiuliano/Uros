@@ -2,12 +2,43 @@ cmake_minimum_required(VERSION 3.16)
 project(ipc_bench C)
 
 # ===========================================================================
+# MIG-generated ext2fs_server user stubs (for disk I/O benchmark)
+# ===========================================================================
+
+set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
+set(EXT2_DEFS ${CMAKE_SOURCE_DIR}/src/ext2_server/ext2fs_server.defs)
+
+set(EXT2_USER_C ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server_user.c)
+set(EXT2_USER_H ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server.h)
+set(EXT2_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server_server.c)
+set(EXT2_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server_server.h)
+
+add_custom_command(
+  OUTPUT ${EXT2_USER_C} ${EXT2_USER_H} ${EXT2_SERVER_C} ${EXT2_SERVER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -header ${EXT2_USER_H}
+    -sheader ${EXT2_SERVER_H}
+    -user ${EXT2_USER_C}
+    -server ${EXT2_SERVER_C}
+    ${EXT2_DEFS}
+  DEPENDS migcom ${EXT2_DEFS}
+  COMMENT "MIG: ext2fs_server.defs (user stubs for ipc_bench)"
+  VERBATIM
+)
+
+# ===========================================================================
 # Source files
 # ===========================================================================
 
 set(IPC_BENCH_SOURCES
   ipc_bench.c
+  disk_bench.c
   nostdlib_stubs.c
+  ${EXT2_USER_C}
 )
 
 # ===========================================================================
@@ -32,6 +63,10 @@ target_compile_definitions(ipc_bench_server PRIVATE
 )
 
 target_include_directories(ipc_bench_server PRIVATE
+  # MIG-generated headers (ext2fs_server.h)
+  ${CMAKE_CURRENT_BINARY_DIR}
+  # ext2fs_types.h (imported by MIG-generated code)
+  ${CMAKE_SOURCE_DIR}/src/ext2_server
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
@@ -51,6 +86,7 @@ target_link_libraries(ipc_bench_server PRIVATE
   libcthreads
   libmach
   libsa_mach
+  libnetname
   -Wl,--end-group
 )
 
