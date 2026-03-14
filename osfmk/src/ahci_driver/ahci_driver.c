@@ -51,6 +51,34 @@
 #define IRQ_NOTIFY_MSGH_BASE	3000
 
 /* ================================================================
+ * Batching constants
+ * ================================================================ */
+
+#define BATCH_SLOTS		8u	/* max concurrent AHCI commands */
+#define SLOT_DATA_SIZE		4096u	/* data buffer per slot (8 sectors) */
+#define BATCH_DATA_SIZE		(BATCH_SLOTS * SLOT_DATA_SIZE)	/* 32 KB */
+#define CT_STRIDE		256u	/* command table spacing (128-byte aligned) */
+#define SECTORS_PER_SLOT	(SLOT_DATA_SIZE / 512u)
+
+/* ================================================================
+ * Readahead cache
+ *
+ * When a sequential read pattern is detected (current LBA ==
+ * previous end LBA), we read extra sectors and cache them.
+ * The next ds_device_read for the continuation is served from
+ * the cache without hitting the disk.
+ * ================================================================ */
+
+#define RA_SECTORS	(BATCH_SLOTS * SECTORS_PER_SLOT)	/* 64 sectors = 32 KB */
+
+static struct {
+	uint32_t	lba_start;	/* first cached LBA */
+	uint32_t	lba_count;	/* number of cached sectors */
+	vm_offset_t	buf;		/* vm_allocate'd buffer (0 = invalid) */
+	unsigned int	buf_size;	/* allocated size */
+} ra_cache;
+
+/* ================================================================
  * Globals
  * ================================================================ */
 
@@ -488,6 +516,122 @@ ahci_write_sectors(int port, uint32_t lba, uint16_t count)
 }
 
 /* ================================================================
+ * Batched command submission
+ *
+ * Fills up to BATCH_SLOTS command headers/tables and issues them
+ * all with a single PORT_CI write.  Each slot transfers one
+ * SLOT_DATA_SIZE (4 KB) chunk.  The caller must ensure nsectors
+ * does not exceed BATCH_SLOTS * SECTORS_PER_SLOT.
+ *
+ * Data layout in the DMA data buffer:
+ *   slot i → data_pa + i * SLOT_DATA_SIZE
+ *            data_uva + i * SLOT_DATA_SIZE
+ *
+ * Command tables in the CT page:
+ *   slot i → ct_pa + i * CT_STRIDE
+ * ================================================================ */
+
+static int
+ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
+		  int write)
+{
+	struct ahci_cmd_hdr   *hdr = (struct ahci_cmd_hdr *)clb_uva;
+	unsigned int nslots, slot, sects_per_slot;
+	unsigned int ci_mask;
+	int i;
+
+	/* How many slots do we need? */
+	nslots = (nsectors + SECTORS_PER_SLOT - 1) / SECTORS_PER_SLOT;
+	if (nslots > BATCH_SLOTS)
+		nslots = BATCH_SLOTS;
+
+	/* Wait for port idle */
+	for (i = 0; i < 1000000; i++)
+		if (!(port_read(port, PORT_TFD) &
+		      (PORT_TFD_STS_BSY | PORT_TFD_STS_DRQ)))
+			break;
+
+	/* Clear interrupt status */
+	port_write(port, PORT_IS, ~0u);
+
+	/* Fill command headers and tables for each slot */
+	for (slot = 0; slot < nslots; slot++) {
+		struct ahci_cmd_table *tbl;
+		struct ata_fis_h2d *fis;
+		uint32_t lba;
+		unsigned int slot_pa, slot_bytes;
+
+		sects_per_slot = nsectors > SECTORS_PER_SLOT
+			? SECTORS_PER_SLOT : nsectors;
+		slot_bytes = sects_per_slot * 512u;
+		slot_pa = data_pa + slot * SLOT_DATA_SIZE;
+		lba = start_lba + slot * SECTORS_PER_SLOT;
+
+		/* Command header */
+		hdr[slot].opts  = CMD_HDR_CFL(5);
+		if (write)
+			hdr[slot].opts |= CMD_HDR_W;
+		hdr[slot].prdtl = 1;
+		hdr[slot].prdbc = 0;
+		hdr[slot].ctba  = ct_pa + slot * CT_STRIDE;
+		hdr[slot].ctbau = 0;
+		hdr[slot].rsvd[0] = 0;
+		hdr[slot].rsvd[1] = 0;
+		hdr[slot].rsvd[2] = 0;
+		hdr[slot].rsvd[3] = 0;
+
+		/* Command table */
+		tbl = (struct ahci_cmd_table *)(ct_uva + slot * CT_STRIDE);
+		memset(tbl, 0, CT_STRIDE);
+
+		fis = (struct ata_fis_h2d *)tbl->cfis;
+		fis->fis_type         = FIS_TYPE_H2D;
+		fis->flags            = FIS_H2D_FLAG_CMD;
+		fis->command          = write ? ATA_CMD_WRITE_DMA_EXT
+					      : ATA_CMD_READ_DMA_EXT;
+		fis->device           = ATA_DEV_LBA;
+		fis->lba_lo           = (lba >>  0) & 0xFF;
+		fis->lba_mid          = (lba >>  8) & 0xFF;
+		fis->lba_hi           = (lba >> 16) & 0xFF;
+		fis->lba_lo_exp       = (lba >> 24) & 0xFF;
+		fis->lba_mid_exp      = 0;
+		fis->lba_hi_exp       = 0;
+		fis->sector_count     = sects_per_slot & 0xFF;
+		fis->sector_count_exp = (sects_per_slot >> 8) & 0xFF;
+
+		/* PRDT: one entry per slot */
+		tbl->prdt[0].dba  = slot_pa;
+		tbl->prdt[0].dbau = 0;
+		tbl->prdt[0].rsvd = 0;
+		tbl->prdt[0].dbc  = PRDT_DBC(slot_bytes) | PRDT_IOC;
+
+		nsectors -= sects_per_slot;
+	}
+
+	/* Issue all slots at once */
+	ci_mask = (1u << nslots) - 1;
+	port_write(port, PORT_CI, ci_mask);
+
+	/* Poll for completion (~5 s timeout) */
+	for (i = 0; i < 5000000; i++) {
+		uint32_t is = port_read(port, PORT_IS);
+		if (is & PORT_IS_TFES) {
+			printf("ahci: batch task file error  IS=0x%08X  "
+			       "TFD=0x%08X\n",
+			       is, port_read(port, PORT_TFD));
+			port_write(port, PORT_IS, PORT_IS_TFES);
+			return -1;
+		}
+		if (!(port_read(port, PORT_CI) & ci_mask))
+			return 0;
+	}
+
+	printf("ahci: batch timed out  CI=0x%08X\n",
+	       port_read(port, PORT_CI));
+	return -1;
+}
+
+/* ================================================================
  * Sequential read benchmark
  * ================================================================ */
 
@@ -605,9 +749,9 @@ ahci_init(void)
 				 mach_task_self(), &ct_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT map failed\n"); return -1; }
 
-	kr = device_dma_alloc(master_device, 4096, &data_kva, &data_pa);
+	kr = device_dma_alloc(master_device, BATCH_DATA_SIZE, &data_kva, &data_pa);
 	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
-	kr = device_dma_map_user(master_device, data_kva, 4096,
+	kr = device_dma_map_user(master_device, data_kva, BATCH_DATA_SIZE,
 				 mach_task_self(), &data_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: data map failed\n"); return -1; }
 
@@ -647,7 +791,6 @@ ahci_init(void)
  * device_server() demux calls these ds_* implementations.
  * ================================================================ */
 
-#define DATA_BUF_SIZE	4096u	/* DMA data buffer size */
 #define SECTOR_SIZE	512u
 
 kern_return_t
@@ -678,7 +821,7 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 {
 	kern_return_t kr;
 	vm_offset_t buf;
-	unsigned int total, offset, lba, chunk, chunk_sects;
+	unsigned int total, nsectors, lba;
 
 	if (active_port < 0)
 		return D_NO_SUCH_DEVICE;
@@ -689,25 +832,124 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 	total = (unsigned int)bytes_wanted;
 	if (total % SECTOR_SIZE)
 		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	nsectors = total / SECTOR_SIZE;
+	lba = recnum;
 
 	kr = vm_allocate(mach_task_self(), &buf, total, TRUE);
 	if (kr != KERN_SUCCESS)
 		return D_NO_MEMORY;
 
-	/* Read in DATA_BUF_SIZE chunks via the single DMA buffer */
-	lba = recnum;
-	for (offset = 0; offset < total; offset += chunk) {
-		chunk = total - offset;
-		if (chunk > DATA_BUF_SIZE)
-			chunk = DATA_BUF_SIZE;
-		chunk_sects = chunk / SECTOR_SIZE;
+	/*
+	 * Check readahead cache: if the requested range [lba, lba+nsectors)
+	 * is fully contained in the cache, copy from there.
+	 */
+	if (ra_cache.buf != 0 &&
+	    lba >= ra_cache.lba_start &&
+	    lba + nsectors <= ra_cache.lba_start + ra_cache.lba_count) {
+		unsigned int cache_off =
+			(lba - ra_cache.lba_start) * SECTOR_SIZE;
+		memcpy((void *)buf,
+		       (void *)(ra_cache.buf + cache_off), total);
+		*data = (io_buf_ptr_t)buf;
+		*data_count = (mach_msg_type_number_t)bytes_wanted;
+		return KERN_SUCCESS;
+	}
 
-		if (ahci_read_sectors(active_port, lba, chunk_sects) < 0) {
-			vm_deallocate(mach_task_self(), buf, total);
-			return D_IO_ERROR;
+	/*
+	 * Cache miss — read from disk.
+	 * If the request is sequential (lba == end of last read) and
+	 * small enough, read extra sectors for readahead.
+	 */
+	{
+		unsigned int read_sects = nsectors;
+		unsigned int ra_extra = 0;
+		unsigned int offset, chunk;
+
+		/* Sequential detection: prefetch up to RA_SECTORS total */
+		if (ra_cache.buf != 0 &&
+		    lba == ra_cache.lba_start + ra_cache.lba_count &&
+		    nsectors <= RA_SECTORS / 2 &&
+		    lba + RA_SECTORS <= disk_sectors) {
+			read_sects = RA_SECTORS;
+			ra_extra = read_sects - nsectors;
 		}
-		memcpy((void *)(buf + offset), (void *)data_uva, chunk);
-		lba += chunk_sects;
+
+		/* Read in batches of up to BATCH_DATA_SIZE */
+		unsigned int read_bytes = read_sects * SECTOR_SIZE;
+		unsigned int ra_buf_needed = ra_extra * SECTOR_SIZE;
+		vm_offset_t ra_buf = 0;
+
+		/* Allocate readahead buffer if needed */
+		if (ra_extra > 0) {
+			kr = vm_allocate(mach_task_self(), &ra_buf,
+					 ra_buf_needed, TRUE);
+			if (kr != KERN_SUCCESS) {
+				/* Fall back to no readahead */
+				read_sects = nsectors;
+				read_bytes = total;
+				ra_extra = 0;
+			}
+		}
+
+		for (offset = 0; offset < read_bytes; offset += chunk) {
+			unsigned int batch_sects;
+
+			chunk = read_bytes - offset;
+			if (chunk > BATCH_DATA_SIZE)
+				chunk = BATCH_DATA_SIZE;
+			batch_sects = chunk / SECTOR_SIZE;
+
+			if (ahci_submit_batch(active_port,
+					      lba + offset / SECTOR_SIZE,
+					      batch_sects, 0) < 0) {
+				vm_deallocate(mach_task_self(), buf, total);
+				if (ra_buf)
+					vm_deallocate(mach_task_self(),
+						      ra_buf, ra_buf_needed);
+				return D_IO_ERROR;
+			}
+
+			/*
+			 * Copy data: the first 'total' bytes go to the
+			 * client buffer, any extra goes to readahead.
+			 */
+			if (offset < total) {
+				unsigned int client_chunk = total - offset;
+				if (client_chunk > chunk)
+					client_chunk = chunk;
+				memcpy((void *)(buf + offset),
+				       (void *)data_uva, client_chunk);
+
+				if (client_chunk < chunk && ra_buf) {
+					memcpy((void *)ra_buf,
+					       (void *)(data_uva + client_chunk),
+					       chunk - client_chunk);
+				}
+			} else if (ra_buf) {
+				unsigned int ra_off = offset - total;
+				memcpy((void *)(ra_buf + ra_off),
+				       (void *)data_uva, chunk);
+			}
+		}
+
+		/* Update readahead cache */
+		if (ra_cache.buf != 0)
+			vm_deallocate(mach_task_self(),
+				      ra_cache.buf, ra_cache.buf_size);
+
+		if (ra_extra > 0 && ra_buf != 0) {
+			ra_cache.lba_start = lba + nsectors;
+			ra_cache.lba_count = ra_extra;
+			ra_cache.buf       = ra_buf;
+			ra_cache.buf_size  = ra_buf_needed;
+		} else {
+			/* No readahead — just record position for
+			 * sequential detection on next call */
+			ra_cache.lba_start = lba;
+			ra_cache.lba_count = nsectors;
+			ra_cache.buf       = 0;
+			ra_cache.buf_size  = 0;
+		}
 	}
 
 	*data = (io_buf_ptr_t)buf;
@@ -733,35 +975,45 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 		io_buf_ptr_t data, mach_msg_type_number_t data_count,
 		io_buf_len_t *bytes_written)
 {
-	unsigned int total, offset, lba, chunk, chunk_sects;
+	unsigned int total, offset, lba, chunk;
 
 	if (active_port < 0)
 		return D_NO_SUCH_DEVICE;
 	if (data_count <= 0)
 		return D_INVALID_SIZE;
 
+	/* Invalidate readahead cache — disk content is changing */
+	if (ra_cache.buf != 0) {
+		vm_deallocate(mach_task_self(),
+			      ra_cache.buf, ra_cache.buf_size);
+		ra_cache.buf = 0;
+		ra_cache.lba_count = 0;
+	}
+
 	/* Round up to sector boundary */
 	total = (unsigned int)data_count;
 	if (total % SECTOR_SIZE)
 		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
 
-	/* Write in DATA_BUF_SIZE chunks via the single DMA buffer */
+	/* Write in batches of up to BATCH_DATA_SIZE (32 KB) */
 	lba = recnum;
 	for (offset = 0; offset < total; offset += chunk) {
+		unsigned int batch_sects;
+
 		chunk = total - offset;
-		if (chunk > DATA_BUF_SIZE)
-			chunk = DATA_BUF_SIZE;
-		chunk_sects = chunk / SECTOR_SIZE;
+		if (chunk > BATCH_DATA_SIZE)
+			chunk = BATCH_DATA_SIZE;
+		batch_sects = chunk / SECTOR_SIZE;
 
 		memcpy((void *)data_uva, (void *)((vm_offset_t)data + offset),
 		       chunk);
-		if (ahci_write_sectors(active_port, lba, chunk_sects) < 0) {
+		if (ahci_submit_batch(active_port, lba, batch_sects, 1) < 0) {
 			/* Deallocate OOL data from sender */
 			vm_deallocate(mach_task_self(),
 				      (vm_offset_t)data, data_count);
 			return D_IO_ERROR;
 		}
-		lba += chunk_sects;
+		lba += batch_sects;
 	}
 
 	/* Deallocate OOL data from sender */
