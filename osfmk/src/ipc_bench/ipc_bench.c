@@ -53,6 +53,8 @@
 #include <device/device_types.h>
 #include <stdio.h>
 
+#include "disk_bench.h"
+
 /* ===================================================================
  * Configuration
  * =================================================================== */
@@ -906,6 +908,185 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
 }
 
 /* ===================================================================
+ * OOL inter-task benchmark
+ *
+ * Creates a child task (like bench_inter_rpc), but the parent sends
+ * OOL data and the child deallocates it before replying.  This
+ * measures the real cross-address-space COW cost that every server
+ * pays when receiving data from a client.
+ * =================================================================== */
+
+/*
+ * Child echo entry for OOL messages.
+ * Receives OOL data, deallocates it, sends null reply.
+ * Runs in the child task — only raw mach_msg(), no MIG.
+ */
+/*
+ * Child echo entry for OOL messages.
+ * Receives OOL data and sends a null reply.
+ *
+ * We intentionally skip vm_deallocate() on the received OOL data:
+ * the child task has no cthread context (mig_get_reply_port crashes),
+ * and the child is terminated when the benchmark ends, so all its
+ * memory is reclaimed.  Only raw mach_msg() (direct SYSENTER) is safe.
+ */
+static void __attribute__((noreturn, used))
+child_ool_echo_entry(void)
+{
+    bench_ool_recv_msg_t	msg;
+    bench_null_msg_t		reply;
+
+    for (;;) {
+	mach_msg(&msg.head,
+		 MACH_RCV_MSG,
+		 0,
+		 sizeof(msg),
+		 CHILD_RECV_NAME,
+		 MACH_MSG_TIMEOUT_NONE,
+		 MACH_PORT_NULL);
+
+	reply.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	reply.head.msgh_size	    = sizeof(reply);
+	reply.head.msgh_remote_port = CHILD_SEND_NAME;
+	reply.head.msgh_local_port  = MACH_PORT_NULL;
+	reply.head.msgh_id	    = msg.head.msgh_id + 100;
+
+	mach_msg(&reply.head,
+		 MACH_SEND_MSG,
+		 sizeof(reply),
+		 0,
+		 MACH_PORT_NULL,
+		 MACH_MSG_TIMEOUT_NONE,
+		 MACH_PORT_NULL);
+    }
+}
+
+static void
+bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
+{
+    kern_return_t		kr;
+    mach_port_t			child_task, child_thread;
+    mach_port_t			child_recv_port;
+    mach_port_t			parent_recv_port;
+    vm_offset_t			child_stack;
+    struct i386_thread_state	state;
+    mach_msg_type_number_t	state_count;
+    tvalspec_t			t0, t1;
+    int				i;
+    bench_ool_send_msg_t	send_buf;
+    bench_null_msg_t		recv_buf;
+    vm_offset_t			data_buf;
+
+    /* Allocate OOL data buffer */
+    kr = vm_allocate(mach_task_self(), &data_buf, ool_size, TRUE);
+    if (kr) { printf("  %s: vm_allocate failed %d\n", label, kr); return; }
+
+    /* Allocate ports */
+    kr = mach_port_allocate(mach_task_self(),
+			    MACH_PORT_RIGHT_RECEIVE, &child_recv_port);
+    if (kr) { printf("  %s: alloc child_recv failed %d\n", label, kr); return; }
+    kr = mach_port_insert_right(mach_task_self(),
+				child_recv_port, child_recv_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+    if (kr) { printf("  %s: insert send right failed %d\n", label, kr); return; }
+    kr = mach_port_allocate(mach_task_self(),
+			    MACH_PORT_RIGHT_RECEIVE, &parent_recv_port);
+    if (kr) { printf("  %s: alloc parent_recv failed %d\n", label, kr); return; }
+    kr = mach_port_insert_right(mach_task_self(),
+				parent_recv_port, parent_recv_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+    if (kr) { printf("  %s: insert parent send right failed %d\n", label, kr); return; }
+
+    /* Create child task */
+    kr = task_create(mach_task_self(),
+		     (ledger_port_array_t)0, 0, TRUE, &child_task);
+    if (kr) { printf("  %s: task_create failed %d\n", label, kr); return; }
+
+    child_stack = 0;
+    kr = vm_allocate(child_task, &child_stack, CHILD_STACK_SIZE, TRUE);
+    if (kr) { printf("  %s: child stack alloc failed %d\n", label, kr); return; }
+
+    /* Insert port rights into child */
+    kr = mach_port_insert_right(child_task, CHILD_RECV_NAME,
+				child_recv_port, MACH_MSG_TYPE_MOVE_RECEIVE);
+    if (kr) { printf("  %s: insert child recv failed %d\n", label, kr); return; }
+    kr = mach_port_insert_right(child_task, CHILD_SEND_NAME,
+				parent_recv_port, MACH_MSG_TYPE_COPY_SEND);
+    if (kr) { printf("  %s: insert child send failed %d\n", label, kr); return; }
+
+    /* Create and start child thread */
+    kr = thread_create(child_task, &child_thread);
+    if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return; }
+
+    state_count = i386_THREAD_STATE_COUNT;
+    thread_get_state(child_thread, i386_THREAD_STATE,
+		     (thread_state_t)&state, &state_count);
+    state.eip  = (unsigned int)child_ool_echo_entry;
+    state.uesp = (unsigned int)(child_stack + CHILD_STACK_SIZE);
+    thread_set_state(child_thread, i386_THREAD_STATE,
+		     (thread_state_t)&state, i386_THREAD_STATE_COUNT);
+    thread_resume(child_thread);
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    /* Warmup */
+    for (i = 0; i < WARMUP_ITERS; i++) {
+	send_buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) |
+	    MACH_MSGH_BITS_COMPLEX;
+	send_buf.head.msgh_size	      = sizeof(send_buf);
+	send_buf.head.msgh_remote_port = child_recv_port;
+	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
+	send_buf.head.msgh_id	      = 1;
+	send_buf.body.msgh_descriptor_count = 1;
+	send_buf.ool.address     = (void *)data_buf;
+	send_buf.ool.size        = ool_size;
+	send_buf.ool.deallocate  = FALSE;
+	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
+	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
+
+	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+
+    /* Timed run */
+    get_time(&t0);
+    for (i = 0; i < iters; i++) {
+	send_buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) |
+	    MACH_MSGH_BITS_COMPLEX;
+	send_buf.head.msgh_size	      = sizeof(send_buf);
+	send_buf.head.msgh_remote_port = child_recv_port;
+	send_buf.head.msgh_local_port  = MACH_PORT_NULL;
+	send_buf.head.msgh_id	      = 1;
+	send_buf.body.msgh_descriptor_count = 1;
+	send_buf.ool.address     = (void *)data_buf;
+	send_buf.ool.size        = ool_size;
+	send_buf.ool.deallocate  = FALSE;
+	send_buf.ool.copy        = MACH_MSG_PHYSICAL_COPY;
+	send_buf.ool.type        = MACH_MSG_OOL_DESCRIPTOR;
+
+	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 parent_recv_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    get_time(&t1);
+
+    print_result(label, elapsed_ns(&t0, &t1), iters);
+
+    /* Cleanup */
+    task_terminate(child_task);
+    mach_port_deallocate(mach_task_self(), child_thread);
+    mach_port_deallocate(mach_task_self(), child_task);
+    mach_port_destroy(mach_task_self(), child_recv_port);
+    mach_port_destroy(mach_task_self(), parent_recv_port);
+    vm_deallocate(mach_task_self(), data_buf, ool_size);
+}
+
+/* ===================================================================
  * Main
  * =================================================================== */
 
@@ -1028,7 +1209,23 @@ main(int argc, char **argv)
     bench_ool_intra_rpc("16 KB OOL", 16384, OOL_BENCH_ITERS);
     bench_ool_intra_rpc("64 KB OOL", 65536, OOL_BENCH_ITERS);
 
-    printf("\n");
+    /* ---------------------------------------------------------
+     * OOL inter-task benchmarks
+     * Measures cross-address-space COW cost — the real cost that
+     * every server pays when receiving data from a client.
+     * --------------------------------------------------------- */
+    printf("--- OOL data (inter-task, PHYSICAL_COPY) ---\n");
+
+    bench_ool_inter_rpc("4 KB OOL inter",   4096, OOL_BENCH_ITERS);
+    bench_ool_inter_rpc("16 KB OOL inter", 16384, OOL_BENCH_ITERS);
+    bench_ool_inter_rpc("64 KB OOL inter", 65536, OOL_BENCH_ITERS);
+
+    /* ---------------------------------------------------------
+     * Disk I/O benchmarks (via ahci_driver + ext2_server)
+     * Discovers servers via netname; skips if not running.
+     * --------------------------------------------------------- */
+    bench_disk_run(host_port, clock_port);
+
     printf("=== Benchmark complete ===\n");
 
     /*
