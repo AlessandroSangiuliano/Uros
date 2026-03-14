@@ -68,6 +68,9 @@
 
 /* CAP bits */
 #define CAP_NP_MASK		0x1F		/* Number of Ports - 1 */
+#define CAP_SNCQ		(1u << 30)	/* Supports NCQ */
+#define CAP_NCS_SHIFT		8		/* Number of Command Slots - 1 */
+#define CAP_NCS_MASK		0x1F
 #define CAP_S64A		(1u << 31)	/* 64-bit Addressing */
 
 /* CAP2 bits */
@@ -214,9 +217,16 @@ struct ata_fis_h2d {
 #define ATA_DEV_LBA		(1u << 6)	/* LBA addressing mode */
 
 /* ATA commands */
-#define ATA_CMD_IDENTIFY	0xEC		/* IDENTIFY DEVICE */
-#define ATA_CMD_READ_DMA_EXT	0x25		/* READ DMA EXT (LBA48) */
-#define ATA_CMD_WRITE_DMA_EXT	0x35		/* WRITE DMA EXT (LBA48) */
+#define ATA_CMD_IDENTIFY	  0xEC		/* IDENTIFY DEVICE */
+#define ATA_CMD_READ_DMA_EXT	  0x25		/* READ DMA EXT (LBA48) */
+#define ATA_CMD_WRITE_DMA_EXT	  0x35		/* WRITE DMA EXT (LBA48) */
+#define ATA_CMD_READ_FPDMA_QUEUED 0x60		/* READ FPDMA QUEUED (NCQ) */
+#define ATA_CMD_WRITE_FPDMA_QUEUED 0x61		/* WRITE FPDMA QUEUED (NCQ) */
+
+/* IDENTIFY DEVICE words for NCQ */
+#define ATA_ID_SATA_CAP		76		/* SATA Capabilities */
+#define ATA_ID_SATA_CAP_NCQ	(1u << 8)	/* NCQ supported */
+#define ATA_ID_QUEUE_DEPTH	75		/* Queue depth - 1 */
 
 /* AHCI ABAR size (covers 32 ports: 0x100 + 32*0x80 = 0x1100) */
 #define AHCI_ABAR_SIZE		8192		/* 8 KB, 2 pages */

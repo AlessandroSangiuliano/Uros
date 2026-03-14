@@ -51,14 +51,21 @@
 #define IRQ_NOTIFY_MSGH_BASE	3000
 
 /* ================================================================
- * Batching constants
+ * Batching constants and runtime configuration
  * ================================================================ */
 
-#define BATCH_SLOTS		8u	/* max concurrent AHCI commands */
 #define SLOT_DATA_SIZE		4096u	/* data buffer per slot (8 sectors) */
-#define BATCH_DATA_SIZE		(BATCH_SLOTS * SLOT_DATA_SIZE)	/* 32 KB */
 #define CT_STRIDE		256u	/* command table spacing (128-byte aligned) */
 #define SECTORS_PER_SLOT	(SLOT_DATA_SIZE / 512u)
+
+/*
+ * batch_slots — determined at runtime from HBA CAP.NCS and (if NCQ)
+ * drive IDENTIFY queue depth.  Set by ahci_identify(), default 1
+ * until detection runs.
+ */
+static unsigned int	batch_slots = 1;
+static unsigned int	batch_data_size;	/* batch_slots * SLOT_DATA_SIZE */
+static unsigned int	ra_sectors;		/* batch_slots * SECTORS_PER_SLOT */
 
 /* ================================================================
  * Readahead cache
@@ -69,7 +76,7 @@
  * the cache without hitting the disk.
  * ================================================================ */
 
-#define RA_SECTORS	(BATCH_SLOTS * SECTORS_PER_SLOT)	/* 64 sectors = 32 KB */
+/* ra_sectors = batch_slots * SECTORS_PER_SLOT — set dynamically */
 
 static struct {
 	uint32_t	lba_start;	/* first cached LBA */
@@ -109,6 +116,10 @@ static int		active_port = -1;
 /* Total disk sectors (from IDENTIFY) */
 static uint32_t		disk_sectors;
 
+/* NCQ support: set by ahci_identify() if both HBA and drive support it */
+static int		ncq_supported;
+static unsigned int	ncq_depth;	/* max queue depth (1-32) */
+
 /*
  * DMA buffers — each has:
  *   kva  : kernel VA (from device_dma_alloc, used as handle for dma_free)
@@ -118,7 +129,7 @@ static uint32_t		disk_sectors;
 static unsigned int	clb_kva,  clb_uva,  clb_pa;	/* Command List Base  1 KB */
 static unsigned int	fb_kva,   fb_uva,   fb_pa;	/* FIS Base          256 B */
 static unsigned int	ct_kva,   ct_uva,   ct_pa;	/* Command Table     4 KB */
-static unsigned int	data_kva, data_uva, data_pa;	/* Data buffer       4 KB */
+static unsigned int	data_kva, data_uva, data_pa;	/* Data buffer (dynamic) */
 
 /* ================================================================
  * MMIO accessors
@@ -343,6 +354,10 @@ ahci_port_init(int port)
 	port_write(port, PORT_SERR, ~0u);
 	port_write(port, PORT_IS,   ~0u);
 
+	/* Enable interrupts: D2H FIS, SDB FIS (for NCQ), and error */
+	port_write(port, PORT_IE,
+		   PORT_IE_DHRE | PORT_IE_SDBE | PORT_IE_TFEE);
+
 	port_start(port);
 
 	printf("ahci: port %d initialised  cmd=0x%08X  tfd=0x%08X\n",
@@ -459,6 +474,50 @@ ahci_identify(int port)
 	printf("ahci: sectors  : %u  capacity: ~%u MB\n",
 	       lba28, lba28 / 2048);
 
+	/*
+	 * Detect HBA command slot count and NCQ support.
+	 *
+	 * CAP.NCS (bits 12:8): number of command slots - 1 (0-31).
+	 * This determines how many slots the HBA supports regardless
+	 * of NCQ.  For NCQ, the effective depth is further limited by
+	 * the drive's advertised queue depth (IDENTIFY word 75).
+	 *
+	 * batch_slots is set to the usable slot count; the caller
+	 * must reallocate DMA buffers accordingly.
+	 */
+	{
+		uint32_t cap = ahci_read(AHCI_CAP);
+		int hba_ncq = (cap & CAP_SNCQ) != 0;
+		unsigned int hba_slots =
+			((cap >> CAP_NCS_SHIFT) & CAP_NCS_MASK) + 1;
+		int dev_ncq = (buf[ATA_ID_SATA_CAP] & ATA_ID_SATA_CAP_NCQ) != 0;
+		unsigned int dev_qdepth = (buf[ATA_ID_QUEUE_DEPTH] & 0x1F) + 1;
+
+		if (hba_ncq && dev_ncq) {
+			ncq_supported = 1;
+			ncq_depth = hba_slots < dev_qdepth
+				    ? hba_slots : dev_qdepth;
+			batch_slots = ncq_depth;
+			printf("ahci: NCQ supported  depth=%u "
+			       "(hba=%u, dev=%u)\n",
+			       ncq_depth, hba_slots, dev_qdepth);
+		} else {
+			ncq_supported = 0;
+			batch_slots = hba_slots;
+			printf("ahci: NCQ not available "
+			       "(hba=%s, dev=%s)  slots=%u\n",
+			       hba_ncq ? "yes" : "no",
+			       dev_ncq ? "yes" : "no",
+			       hba_slots);
+		}
+
+		batch_data_size = batch_slots * SLOT_DATA_SIZE;
+		ra_sectors = batch_slots * SECTORS_PER_SLOT;
+		printf("ahci: batch_slots=%u  data=%u KB  "
+		       "readahead=%u sectors\n",
+		       batch_slots, batch_data_size / 1024, ra_sectors);
+	}
+
 	return 0;
 }
 
@@ -518,10 +577,10 @@ ahci_write_sectors(int port, uint32_t lba, uint16_t count)
 /* ================================================================
  * Batched command submission
  *
- * Fills up to BATCH_SLOTS command headers/tables and issues them
+ * Fills up to batch_slots command headers/tables and issues them
  * all with a single PORT_CI write.  Each slot transfers one
  * SLOT_DATA_SIZE (4 KB) chunk.  The caller must ensure nsectors
- * does not exceed BATCH_SLOTS * SECTORS_PER_SLOT.
+ * does not exceed batch_slots * SECTORS_PER_SLOT.
  *
  * Data layout in the DMA data buffer:
  *   slot i → data_pa + i * SLOT_DATA_SIZE
@@ -542,8 +601,8 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 
 	/* How many slots do we need? */
 	nslots = (nsectors + SECTORS_PER_SLOT - 1) / SECTORS_PER_SLOT;
-	if (nslots > BATCH_SLOTS)
-		nslots = BATCH_SLOTS;
+	if (nslots > batch_slots)
+		nslots = batch_slots;
 
 	/* Wait for port idle */
 	for (i = 0; i < 1000000; i++)
@@ -587,8 +646,6 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 		fis = (struct ata_fis_h2d *)tbl->cfis;
 		fis->fis_type         = FIS_TYPE_H2D;
 		fis->flags            = FIS_H2D_FLAG_CMD;
-		fis->command          = write ? ATA_CMD_WRITE_DMA_EXT
-					      : ATA_CMD_READ_DMA_EXT;
 		fis->device           = ATA_DEV_LBA;
 		fis->lba_lo           = (lba >>  0) & 0xFF;
 		fis->lba_mid          = (lba >>  8) & 0xFF;
@@ -596,8 +653,26 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 		fis->lba_lo_exp       = (lba >> 24) & 0xFF;
 		fis->lba_mid_exp      = 0;
 		fis->lba_hi_exp       = 0;
-		fis->sector_count     = sects_per_slot & 0xFF;
-		fis->sector_count_exp = (sects_per_slot >> 8) & 0xFF;
+
+		if (ncq_supported) {
+			/*
+			 * NCQ FPDMA: sector count in features field,
+			 * tag in sector_count bits 7:3.
+			 */
+			fis->command          = write
+				? ATA_CMD_WRITE_FPDMA_QUEUED
+				: ATA_CMD_READ_FPDMA_QUEUED;
+			fis->features         = sects_per_slot & 0xFF;
+			fis->features_exp     = (sects_per_slot >> 8) & 0xFF;
+			fis->sector_count     = (slot << 3);
+			fis->sector_count_exp = 0;
+		} else {
+			fis->command          = write
+				? ATA_CMD_WRITE_DMA_EXT
+				: ATA_CMD_READ_DMA_EXT;
+			fis->sector_count     = sects_per_slot & 0xFF;
+			fis->sector_count_exp = (sects_per_slot >> 8) & 0xFF;
+		}
 
 		/* PRDT: one entry per slot */
 		tbl->prdt[0].dba  = slot_pa;
@@ -610,6 +685,10 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 
 	/* Issue all slots at once */
 	ci_mask = (1u << nslots) - 1;
+	if (ncq_supported) {
+		/* NCQ: set SACT bits before CI */
+		port_write(port, PORT_SACT, ci_mask);
+	}
 	port_write(port, PORT_CI, ci_mask);
 
 	/* Poll for completion (~5 s timeout) */
@@ -622,12 +701,19 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 			port_write(port, PORT_IS, PORT_IS_TFES);
 			return -1;
 		}
-		if (!(port_read(port, PORT_CI) & ci_mask))
-			return 0;
+		if (ncq_supported) {
+			/* NCQ: SACT bits cleared by SDB FIS on completion */
+			if (!(port_read(port, PORT_SACT) & ci_mask))
+				return 0;
+		} else {
+			if (!(port_read(port, PORT_CI) & ci_mask))
+				return 0;
+		}
 	}
 
-	printf("ahci: batch timed out  CI=0x%08X\n",
-	       port_read(port, PORT_CI));
+	printf("ahci: batch timed out  CI=0x%08X  SACT=0x%08X\n",
+	       port_read(port, PORT_CI),
+	       port_read(port, PORT_SACT));
 	return -1;
 }
 
@@ -681,6 +767,72 @@ ahci_benchmark(int port)
 			printf("ahci: ~%u MB/s  (assumes 1 GHz TSC)\n",
 			       bytes * 1000u / cyc);
 	}
+}
+
+/* ================================================================
+ * Reallocate CT and data DMA buffers for detected batch_slots
+ *
+ * Called after ahci_identify() sets batch_slots.  Frees the initial
+ * 1-page CT and data buffers and allocates properly-sized ones:
+ *   CT:   batch_slots * CT_STRIDE bytes (256 * N)
+ *   Data: batch_slots * SLOT_DATA_SIZE bytes (4096 * N)
+ * ================================================================ */
+
+static int
+ahci_realloc_batch_buffers(void)
+{
+	kern_return_t kr;
+	unsigned int ct_size;
+
+	if (batch_slots <= 1)
+		return 0;	/* already sized for 1 slot */
+
+	ct_size = batch_slots * CT_STRIDE;
+	/* Round up to page boundary */
+	ct_size = (ct_size + 4095u) & ~4095u;
+
+	/* Free old CT buffer */
+	device_dma_free(master_device, ct_kva, 4096);
+
+	kr = device_dma_alloc(master_device, ct_size, &ct_kva, &ct_pa);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: CT realloc (%u bytes) failed\n", ct_size);
+		return -1;
+	}
+	kr = device_dma_map_user(master_device, ct_kva, ct_size,
+				 mach_task_self(), &ct_uva);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: CT remap failed\n");
+		return -1;
+	}
+
+	/* Free old data buffer */
+	device_dma_free(master_device, data_kva, 4096);
+
+	kr = device_dma_alloc(master_device, batch_data_size,
+			      &data_kva, &data_pa);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: data realloc (%u bytes) failed\n",
+		       batch_data_size);
+		return -1;
+	}
+	kr = device_dma_map_user(master_device, data_kva, batch_data_size,
+				 mach_task_self(), &data_uva);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: data remap failed\n");
+		return -1;
+	}
+
+	printf("ahci: DMA reallocated: ct=%u bytes  data=%u bytes "
+	       "(%u slots)\n",
+	       ct_size, batch_data_size, batch_slots);
+
+	/*
+	 * Re-program port CLB (unchanged) and update command header
+	 * CT base addresses — they now point into the new CT buffer.
+	 * The headers will be filled per-command in ahci_submit_batch().
+	 */
+	return 0;
 }
 
 /* ================================================================
@@ -749,9 +901,13 @@ ahci_init(void)
 				 mach_task_self(), &ct_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT map failed\n"); return -1; }
 
-	kr = device_dma_alloc(master_device, BATCH_DATA_SIZE, &data_kva, &data_pa);
+	/*
+	 * Initial data buffer: 1 page, enough for IDENTIFY DEVICE.
+	 * After ahci_identify() detects the slot count we reallocate.
+	 */
+	kr = device_dma_alloc(master_device, 4096, &data_kva, &data_pa);
 	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
-	kr = device_dma_map_user(master_device, data_kva, BATCH_DATA_SIZE,
+	kr = device_dma_map_user(master_device, data_kva, 4096,
 				 mach_task_self(), &data_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: data map failed\n"); return -1; }
 
@@ -865,16 +1021,16 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 		unsigned int ra_extra = 0;
 		unsigned int offset, chunk;
 
-		/* Sequential detection: prefetch up to RA_SECTORS total */
+		/* Sequential detection: prefetch up to ra_sectors total */
 		if (ra_cache.buf != 0 &&
 		    lba == ra_cache.lba_start + ra_cache.lba_count &&
-		    nsectors <= RA_SECTORS / 2 &&
-		    lba + RA_SECTORS <= disk_sectors) {
-			read_sects = RA_SECTORS;
+		    nsectors <= ra_sectors / 2 &&
+		    lba + ra_sectors <= disk_sectors) {
+			read_sects = ra_sectors;
 			ra_extra = read_sects - nsectors;
 		}
 
-		/* Read in batches of up to BATCH_DATA_SIZE */
+		/* Read in batches of up to batch_data_size */
 		unsigned int read_bytes = read_sects * SECTOR_SIZE;
 		unsigned int ra_buf_needed = ra_extra * SECTOR_SIZE;
 		vm_offset_t ra_buf = 0;
@@ -895,8 +1051,8 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 			unsigned int batch_sects;
 
 			chunk = read_bytes - offset;
-			if (chunk > BATCH_DATA_SIZE)
-				chunk = BATCH_DATA_SIZE;
+			if (chunk > batch_data_size)
+				chunk = batch_data_size;
 			batch_sects = chunk / SECTOR_SIZE;
 
 			if (ahci_submit_batch(active_port,
@@ -995,14 +1151,14 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 	if (total % SECTOR_SIZE)
 		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
 
-	/* Write in batches of up to BATCH_DATA_SIZE (32 KB) */
+	/* Write in batches of up to batch_data_size */
 	lba = recnum;
 	for (offset = 0; offset < total; offset += chunk) {
 		unsigned int batch_sects;
 
 		chunk = total - offset;
-		if (chunk > BATCH_DATA_SIZE)
-			chunk = BATCH_DATA_SIZE;
+		if (chunk > batch_data_size)
+			chunk = batch_data_size;
 		batch_sects = chunk / SECTOR_SIZE;
 
 		memcpy((void *)data_uva, (void *)((vm_offset_t)data + offset),
@@ -1179,8 +1335,16 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Identify the attached disk */
+	/* Identify the attached disk and detect slot count */
 	ahci_identify(active_port);
+
+	/* Reallocate DMA buffers for detected batch_slots */
+	if (ahci_realloc_batch_buffers() < 0) {
+		printf("ahci: DMA realloc failed, falling back to 1 slot\n");
+		batch_slots = 1;
+		batch_data_size = SLOT_DATA_SIZE;
+		ra_sectors = SECTORS_PER_SLOT;
+	}
 
 	/* Run sequential read benchmark */
 	ahci_benchmark(active_port);
