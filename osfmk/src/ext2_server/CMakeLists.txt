@@ -57,8 +57,11 @@ target_compile_options(ext2_server_bin PRIVATE
   -include stdint.h
 )
 
+option(OSFMK_EXT2_BENCH "Enable ext2 page cache benchmark at boot" OFF)
+
 target_compile_definitions(ext2_server_bin PRIVATE
   MACH_IPC_COMPAT=0
+  $<$<BOOL:${OSFMK_EXT2_BENCH}>:EXT2_BENCH>
 )
 
 target_include_directories(ext2_server_bin PRIVATE

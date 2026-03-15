@@ -1,0 +1,6 @@
+{
+    "clangd.arguments": [
+        "--compile-commands-dir=${workspaceFolder}/osfmk/build"
+    ],
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/osfmk/build/compile_commands.json"
+}

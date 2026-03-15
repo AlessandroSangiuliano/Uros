@@ -8,6 +8,7 @@ project(libsa_fs C)
 # Core filesystem abstraction
 set(SA_FS_SOURCES
   file_system.c
+  page_cache.c
 )
 
 # i386 (AT386) filesystem dispatcher: UFS, EXT2FS, MINIXFS
