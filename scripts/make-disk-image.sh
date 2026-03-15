@@ -64,6 +64,7 @@ DEFAULT_PAGER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/default_pager"
 HELLO_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_server"
 IPC_BENCH="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ipc_bench"
 AHCI_DRIVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ahci_driver"
+VIRTIO_BLK="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/virtio_blk"
 EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext2_server"
 
 if [ ! -f "$NAME_SERVER" ]; then
@@ -96,6 +97,12 @@ if [ ! -f "$AHCI_DRIVER" ]; then
     exit 1
 fi
 
+if [ ! -f "$VIRTIO_BLK" ]; then
+    echo "ERRORE: virtio_blk non trovato: $VIRTIO_BLK"
+    echo "  Build con: cd $BUILD_DIR && ninja virtio_blk_server"
+    exit 1
+fi
+
 if [ ! -f "$EXT2_SERVER" ]; then
     echo "ERRORE: ext2_server non trovato: $EXT2_SERVER"
     echo "  Build con: cd $BUILD_DIR && ninja ext2_server_bin"
@@ -114,6 +121,7 @@ default_pager default_pager hd0b
 hello_server hello_server
 ipc_bench ipc_bench
 ahci_driver ahci_driver
+virtio_blk virtio_blk
 ext2_server ext2_server
 CONF
 
@@ -170,6 +178,7 @@ write $DEFAULT_PAGER default_pager
 write $HELLO_SERVER hello_server
 write $IPC_BENCH ipc_bench
 write $AHCI_DRIVER ahci_driver
+write $VIRTIO_BLK virtio_blk
 write $EXT2_SERVER ext2_server
 DBGFS
 
@@ -178,12 +187,14 @@ echo "  /mach_servers/bootstrap.conf → 'default_pager default_pager hd0b'"
 echo "  /mach_servers/bootstrap.conf → 'hello_server hello_server'"
 echo "  /mach_servers/bootstrap.conf → 'ipc_bench ipc_bench'"
 echo "  /mach_servers/bootstrap.conf → 'ahci_driver ahci_driver'"
+echo "  /mach_servers/bootstrap.conf → 'virtio_blk virtio_blk'"
 echo "  /mach_servers/bootstrap.conf → 'ext2_server ext2_server'"
 echo "  /mach_servers/name_server    → $(stat -c%s "$NAME_SERVER") bytes"
 echo "  /mach_servers/default_pager  → $(stat -c%s "$DEFAULT_PAGER") bytes"
 echo "  /mach_servers/hello_server   → $(stat -c%s "$HELLO_SERVER") bytes"
 echo "  /mach_servers/ipc_bench      → $(stat -c%s "$IPC_BENCH") bytes"
 echo "  /mach_servers/ahci_driver    → $(stat -c%s "$AHCI_DRIVER") bytes"
+echo "  /mach_servers/virtio_blk     → $(stat -c%s "$VIRTIO_BLK") bytes"
 echo "  /mach_servers/ext2_server    → $(stat -c%s "$EXT2_SERVER") bytes"
 
 # --- 5. Inserimento partizione ext2 nell'immagine disco ---
@@ -209,6 +220,7 @@ echo "        ├── default_pager"
 echo "        ├── hello_server"
 echo "        ├── ipc_bench"
 echo "        ├── ahci_driver"
+echo "        ├── virtio_blk"
 echo "        └── ext2_server"
 echo "  hd0b:   settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (swap, ${SWAP_SIZE_MB} MB)"
 echo ""
@@ -220,8 +232,9 @@ echo "  4. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
 echo "  5. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
 echo "  6. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
 echo "  7. Bootstrap carica /dev/boot_device/mach_servers/ahci_driver"
-echo "  8. Bootstrap carica /dev/boot_device/mach_servers/ext2_server"
-echo "  9. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
+echo "  8. Bootstrap carica /dev/boot_device/mach_servers/virtio_blk"
+echo "  9. Bootstrap carica /dev/boot_device/mach_servers/ext2_server"
+echo " 10. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
 echo ""
 echo "Per avviare:"
 echo "  ./scripts/run-qemu.sh"

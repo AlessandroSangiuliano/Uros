@@ -27,11 +27,13 @@ DISK_IMG="$BUILD_DIR/disk.img"
 # Parse flags
 USE_DISK=true
 USE_AHCI=false
+USE_VIRTIO=false
 EXTRA_ARGS=""
 for arg in "$@"; do
     case "$arg" in
         --no-disk) USE_DISK=false ;;
         --ahci) USE_AHCI=true ;;
+        --virtio) USE_VIRTIO=true ;;
         *) EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
     esac
 done
@@ -49,7 +51,7 @@ if [ ! -f "$BOOTSTRAP" ]; then
 fi
 
 # Costruisci la riga di comando QEMU
-QEMU_ARGS="-m 128M -enable-kvm -cpu host -kernel $KERNEL -initrd $BOOTSTRAP -no-reboot"
+QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $BOOTSTRAP -no-reboot"
 
 if [ "$USE_DISK" = true ] && [ -f "$DISK_IMG" ]; then
     echo "Disco: $DISK_IMG"
@@ -85,6 +87,28 @@ DBGFS
     QEMU_ARGS="$QEMU_ARGS -device ich9-ahci,id=ahci0"
     QEMU_ARGS="$QEMU_ARGS -drive id=ahcidisk0,file=$AHCI_DISK,format=raw,if=none"
     QEMU_ARGS="$QEMU_ARGS -device ide-hd,drive=ahcidisk0,bus=ahci0.0"
+fi
+
+# Optionally add a virtio-blk-pci device with a test disk.
+# The boot disk stays on IDE; the virtio-blk controller appears as a
+# separate PCI device that the virtio_blk driver can detect and probe.
+VIRTIO_DISK="$BUILD_DIR/virtio-test.img"
+if [ "$USE_VIRTIO" = true ]; then
+    if [ ! -f "$VIRTIO_DISK" ]; then
+        echo "Creazione disco virtio-blk di test (8 MB, ext2)..."
+        dd if=/dev/zero of="$VIRTIO_DISK" bs=1M count=8 status=none
+        mke2fs -t ext2 -q -F -b 1024 -I 256 -r 1 -O filetype "$VIRTIO_DISK"
+        HELLO_TXT=$(mktemp)
+        printf 'Hello from ext2 on virtio-blk!\n' > "$HELLO_TXT"
+        debugfs -w -f /dev/stdin "$VIRTIO_DISK" <<DBGFS 2>/dev/null
+write $HELLO_TXT hello.txt
+DBGFS
+        rm -f "$HELLO_TXT"
+        echo "  Disco virtio-blk formattato ext2 con /hello.txt"
+    fi
+    echo "Virtio-blk: $VIRTIO_DISK"
+    QEMU_ARGS="$QEMU_ARGS -drive id=virtiodisk0,file=$VIRTIO_DISK,format=raw,if=none"
+    QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=virtiodisk0"
 fi
 
 # shellcheck disable=SC2086

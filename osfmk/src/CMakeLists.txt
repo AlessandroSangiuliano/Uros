@@ -53,6 +53,11 @@ if(OSFMK_BUILD_AHCI_DRIVER)
   add_subdirectory(ahci_driver)
 endif()
 
+# Build virtio-blk userspace driver
+if(OSFMK_BUILD_VIRTIO_BLK)
+  add_subdirectory(virtio_blk)
+endif()
+
 # Build name server (netname)
 if(OSFMK_BUILD_NAME_SERVER)
   add_subdirectory(mach_services/servers/netname)
