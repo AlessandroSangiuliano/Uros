@@ -54,7 +54,11 @@
  * Batching constants and runtime configuration
  * ================================================================ */
 
-#define SLOT_DATA_SIZE		4096u	/* data buffer per slot (8 sectors) */
+/*
+ * Scatter-gather: each slot uses PRDT_PER_SLOT pages (32 KB),
+ * allowing multi-entry PRDTs with non-contiguous physical pages.
+ */
+#define SLOT_DATA_SIZE		(PRDT_PER_SLOT * 4096u)	/* 32 KB per slot */
 #define CT_STRIDE		256u	/* command table spacing (128-byte aligned) */
 #define SECTORS_PER_SLOT	(SLOT_DATA_SIZE / 512u)
 
@@ -130,6 +134,15 @@ static unsigned int	clb_kva,  clb_uva,  clb_pa;	/* Command List Base  1 KB */
 static unsigned int	fb_kva,   fb_uva,   fb_pa;	/* FIS Base          256 B */
 static unsigned int	ct_kva,   ct_uva,   ct_pa;	/* Command Table     4 KB */
 static unsigned int	data_kva, data_uva, data_pa;	/* Data buffer (dynamic) */
+
+/*
+ * Scatter-gather PA list for the data buffer.
+ * After ahci_realloc_batch_buffers(), data_pa_list[i] holds the
+ * physical address of page i (4 KB).  data_pa is kept as alias
+ * for data_pa_list[0] for single-command paths (IDENTIFY, benchmark).
+ */
+static unsigned int	data_pa_list[256];
+static unsigned int	data_n_pages;
 
 /* ================================================================
  * MMIO accessors
@@ -575,18 +588,17 @@ ahci_write_sectors(int port, uint32_t lba, uint16_t count)
 }
 
 /* ================================================================
- * Batched command submission
+ * Batched command submission (scatter-gather)
  *
  * Fills up to batch_slots command headers/tables and issues them
- * all with a single PORT_CI write.  Each slot transfers one
- * SLOT_DATA_SIZE (4 KB) chunk.  The caller must ensure nsectors
- * does not exceed batch_slots * SECTORS_PER_SLOT.
+ * all with a single PORT_CI write.  Each slot transfers up to
+ * SLOT_DATA_SIZE (32 KB) using PRDT_PER_SLOT PRDT entries.
  *
- * Data layout in the DMA data buffer:
- *   slot i → data_pa + i * SLOT_DATA_SIZE
- *            data_uva + i * SLOT_DATA_SIZE
+ * Data layout (scatter-gather):
+ *   slot i, page p → data_pa_list[i * PRDT_PER_SLOT + p]  (PA)
+ *                     data_uva + (i * PRDT_PER_SLOT + p) * 4096 (VA)
  *
- * Command tables in the CT page:
+ * Command tables:
  *   slot i → ct_pa + i * CT_STRIDE
  * ================================================================ */
 
@@ -618,19 +630,26 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 		struct ahci_cmd_table *tbl;
 		struct ata_fis_h2d *fis;
 		uint32_t lba;
-		unsigned int slot_pa, slot_bytes;
+		unsigned int slot_bytes, n_prdt, p;
 
 		sects_per_slot = nsectors > SECTORS_PER_SLOT
 			? SECTORS_PER_SLOT : nsectors;
 		slot_bytes = sects_per_slot * 512u;
-		slot_pa = data_pa + slot * SLOT_DATA_SIZE;
 		lba = start_lba + slot * SECTORS_PER_SLOT;
+
+		/*
+		 * Build scatter-gather PRDT: one entry per 4 KB page.
+		 * Physical addresses come from data_pa_list[].
+		 */
+		n_prdt = (slot_bytes + 4095u) / 4096u;
+		if (n_prdt > PRDT_PER_SLOT)
+			n_prdt = PRDT_PER_SLOT;
 
 		/* Command header */
 		hdr[slot].opts  = CMD_HDR_CFL(5);
 		if (write)
 			hdr[slot].opts |= CMD_HDR_W;
-		hdr[slot].prdtl = 1;
+		hdr[slot].prdtl = n_prdt;
 		hdr[slot].prdbc = 0;
 		hdr[slot].ctba  = ct_pa + slot * CT_STRIDE;
 		hdr[slot].ctbau = 0;
@@ -674,11 +693,27 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 			fis->sector_count_exp = (sects_per_slot >> 8) & 0xFF;
 		}
 
-		/* PRDT: one entry per slot */
-		tbl->prdt[0].dba  = slot_pa;
-		tbl->prdt[0].dbau = 0;
-		tbl->prdt[0].rsvd = 0;
-		tbl->prdt[0].dbc  = PRDT_DBC(slot_bytes) | PRDT_IOC;
+		/* Scatter-gather PRDT: one entry per page */
+		for (p = 0; p < n_prdt; p++) {
+			unsigned int page_idx =
+				slot * PRDT_PER_SLOT + p;
+			unsigned int page_bytes = 4096u;
+
+			/* Last entry may be partial page */
+			if (p == n_prdt - 1) {
+				unsigned int rem =
+					slot_bytes - p * 4096u;
+				if (rem < 4096u)
+					page_bytes = rem;
+			}
+
+			tbl->prdt[p].dba  = data_pa_list[page_idx];
+			tbl->prdt[p].dbau = 0;
+			tbl->prdt[p].rsvd = 0;
+			tbl->prdt[p].dbc  = PRDT_DBC(page_bytes);
+			if (p == n_prdt - 1)
+				tbl->prdt[p].dbc |= PRDT_IOC;
+		}
 
 		nsectors -= sects_per_slot;
 	}
@@ -774,8 +809,8 @@ ahci_benchmark(int port)
  *
  * Called after ahci_identify() sets batch_slots.  Frees the initial
  * 1-page CT and data buffers and allocates properly-sized ones:
- *   CT:   batch_slots * CT_STRIDE bytes (256 * N)
- *   Data: batch_slots * SLOT_DATA_SIZE bytes (4096 * N)
+ *   CT:   batch_slots * CT_STRIDE bytes (contiguous, for HBA)
+ *   Data: batch_slots * PRDT_PER_SLOT pages (scatter-gather)
  * ================================================================ */
 
 static int
@@ -783,6 +818,8 @@ ahci_realloc_batch_buffers(void)
 {
 	kern_return_t kr;
 	unsigned int ct_size;
+	unsigned int n_pages;
+	mach_msg_type_number_t pa_count;
 
 	if (batch_slots <= 1)
 		return 0;	/* already sized for 1 slot */
@@ -806,32 +843,34 @@ ahci_realloc_batch_buffers(void)
 		return -1;
 	}
 
-	/* Free old data buffer */
+	/* Free old data buffer (contiguous, from initial alloc) */
 	device_dma_free(master_device, data_kva, 4096);
 
-	kr = device_dma_alloc(master_device, batch_data_size,
-			      &data_kva, &data_pa);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: data realloc (%u bytes) failed\n",
-		       batch_data_size);
-		return -1;
-	}
-	kr = device_dma_map_user(master_device, data_kva, batch_data_size,
-				 mach_task_self(), &data_uva);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: data remap failed\n");
-		return -1;
-	}
-
-	printf("ahci: DMA reallocated: ct=%u bytes  data=%u bytes "
-	       "(%u slots)\n",
-	       ct_size, batch_data_size, batch_slots);
-
 	/*
-	 * Re-program port CLB (unchanged) and update command header
-	 * CT base addresses — they now point into the new CT buffer.
-	 * The headers will be filled per-command in ahci_submit_batch().
+	 * Scatter-gather data buffer: allocate individually wired
+	 * pages (no physical contiguity needed).  Each slot gets
+	 * PRDT_PER_SLOT pages; the PRDT entries point to each page.
 	 */
+	n_pages = batch_slots * PRDT_PER_SLOT;
+	if (n_pages > 256)
+		n_pages = 256;
+
+	kr = device_dma_alloc_sg(master_device, n_pages,
+				 mach_task_self(),
+				 &data_kva, &data_uva,
+				 data_pa_list, &pa_count);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: scatter-gather alloc (%u pages) "
+		       "failed (kr=%d)\n", n_pages, kr);
+		return -1;
+	}
+	data_n_pages = n_pages;
+	data_pa = data_pa_list[0];	/* alias for single-cmd paths */
+
+	printf("ahci: DMA reallocated: ct=%u bytes  data=%u pages "
+	       "(%u KB, scatter-gather, %u slots)\n",
+	       ct_size, n_pages, n_pages * 4, batch_slots);
+
 	return 0;
 }
 
@@ -910,6 +949,10 @@ ahci_init(void)
 	kr = device_dma_map_user(master_device, data_kva, 4096,
 				 mach_task_self(), &data_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: data map failed\n"); return -1; }
+
+	/* Initial scatter-gather state: 1 page, contiguous is fine */
+	data_pa_list[0] = data_pa;
+	data_n_pages = 1;
 
 	printf("ahci: DMA: clb pa=0x%08X fb pa=0x%08X ct pa=0x%08X data pa=0x%08X\n",
 	       clb_pa, fb_pa, ct_pa, data_pa);

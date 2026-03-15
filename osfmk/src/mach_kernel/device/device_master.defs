@@ -142,6 +142,24 @@ routine device_mmio_unmap(
 	);
 
 /*
+ * Allocate a scatter-gather DMA buffer: n_pages individually wired
+ * pages mapped contiguously into the caller's address space.
+ * Returns the kernel VA (handle for free), user VA, and an array
+ * of physical addresses (one per page) for programming PRDTs.
+ * Unlike device_dma_alloc, pages need NOT be physically contiguous.
+ */
+type dma_sg_addr_t = array[*:256] of natural_t;
+
+routine device_dma_alloc_sg(
+		master_port	: mach_port_t;
+	in	n_pages		: natural_t;
+	in	task_port	: mach_port_t;
+	out	kva		: natural_t;
+	out	uva		: natural_t;
+	out	paddrs		: dma_sg_addr_t
+	);
+
+/*
  * I/O port read.
  * Reads 1, 2, or 4 bytes from the specified x86 I/O port.
  */

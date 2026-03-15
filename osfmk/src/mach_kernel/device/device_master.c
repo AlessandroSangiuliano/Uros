@@ -335,6 +335,92 @@ ds_master_device_dma_free(
 	return KERN_SUCCESS;
 }
 
+/* ---- Scatter-gather DMA allocation ---- */
+
+/*
+ * device_dma_alloc_sg — allocate n_pages individually wired pages,
+ * map them contiguously into a user task, and return per-page PAs.
+ *
+ * Unlike device_dma_alloc (kmem_alloc_contig), pages need NOT be
+ * physically contiguous.  kmem_alloc_wired gives contiguous kernel VA
+ * with individually allocated physical pages — perfect for building
+ * multi-entry PRDTs (scatter-gather DMA).
+ */
+kern_return_t
+ds_master_device_dma_alloc_sg(
+	ipc_port_t		master_port,
+	unsigned int		n_pages,
+	ipc_port_t		task_port,
+	unsigned int		*kva_out,
+	unsigned int		*uva_out,
+	unsigned int		*paddrs,
+	unsigned int		*paddrs_count)
+{
+	kern_return_t	kr;
+	task_t		task;
+	vm_offset_t	kva;
+	vm_size_t	size;
+	vm_map_t	map;
+	vm_offset_t	uva;
+	unsigned int	i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (n_pages == 0 || n_pages > 256)
+		return KERN_INVALID_ARGUMENT;
+
+	task = convert_port_to_task(task_port);
+	if (task == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	size = (vm_size_t)n_pages * PAGE_SIZE;
+
+	/*
+	 * Allocate wired kernel pages.  kmem_alloc_wired gives us
+	 * contiguous kernel VA but physical pages are allocated
+	 * individually — no contiguity requirement.
+	 */
+	kr = kmem_alloc_wired(kernel_map, &kva, size);
+	if (kr != KERN_SUCCESS) {
+		task_deallocate(task);
+		return kr;
+	}
+
+	/*
+	 * Map pages contiguously into the user task.
+	 * Reserve a VA range, then wire in each physical page.
+	 */
+	map = task->map;
+	uva = 0;
+	kr = vm_map_enter(map, &uva, size, 0, TRUE,
+			  VM_OBJECT_NULL, (vm_offset_t)0, FALSE,
+			  VM_PROT_READ | VM_PROT_WRITE,
+			  VM_PROT_READ | VM_PROT_WRITE,
+			  VM_INHERIT_NONE);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(kernel_map, kva, size);
+		task_deallocate(task);
+		return kr;
+	}
+
+	for (i = 0; i < n_pages; i++) {
+		vm_offset_t pa = pmap_extract(kernel_pmap,
+					      kva + i * PAGE_SIZE);
+		pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
+			   VM_PROT_READ | VM_PROT_WRITE, TRUE);
+		paddrs[i] = (unsigned int)pa;
+	}
+
+	task_deallocate(task);
+
+	*kva_out = (unsigned int)kva;
+	*uva_out = (unsigned int)uva;
+	*paddrs_count = n_pages;
+	return KERN_SUCCESS;
+}
+
 /* ---- User-space DMA and MMIO mapping ---- */
 
 /*
