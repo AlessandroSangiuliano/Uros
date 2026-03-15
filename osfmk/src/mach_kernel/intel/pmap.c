@@ -1169,25 +1169,36 @@ pmap_bootstrap(
 	 *		- limited by VM_MAX_KERNEL_ADDRESS
 	 */
 
-	morevm = 3*avail_end;
-	if (virtual_end + morevm > VM_MAX_KERNEL_ADDRESS)
-		morevm = virtual_end - VM_MAX_KERNEL_ADDRESS;
-
-/*
- *	startup requires additional virtual memory (for tables, buffers, 
- *	etc.).  The kd driver may also require some of that memory to
- *	access the graphics board.
- *
- */
-	*(int *)&template = 0;
-
 	/*
-	 * Leave room for kernel-loaded servers, which have been linked at
-	 * addresses from VM_MIN_KERNEL_LOADED_ADDRESS to
-	 * VM_MAX_KERNEL_LOADED_ADDRESS.
+	 * Compute overflow-safe: clamp morevm so that
+	 * virtual_end + morevm < VM_MAX_KERNEL_ADDRESS to prevent
+	 * the page table allocation loop from wrapping around 32-bit.
 	 */
-	if (virtual_end + morevm < VM_MAX_KERNEL_LOADED_ADDRESS + 1)
-		morevm = VM_MAX_KERNEL_LOADED_ADDRESS + 1 - virtual_end;
+	{
+		vm_size_t max_morevm =
+		    trunc_page(VM_MAX_KERNEL_ADDRESS) - virtual_end;
+
+		morevm = 3*avail_end;
+		if (morevm > max_morevm)
+			morevm = max_morevm;
+
+		/*
+		 * Leave room for kernel-loaded servers, which have been
+		 * linked at addresses from VM_MIN_KERNEL_LOADED_ADDRESS to
+		 * VM_MAX_KERNEL_LOADED_ADDRESS.
+		 */
+		if (VM_MAX_KERNEL_LOADED_ADDRESS > virtual_end) {
+			vm_size_t loaded_need =
+			    trunc_page(VM_MAX_KERNEL_LOADED_ADDRESS)
+			    - virtual_end;
+			if (morevm < loaded_need)
+				morevm = loaded_need;
+			if (morevm > max_morevm)
+				morevm = max_morevm;
+		}
+	}
+
+	*(int *)&template = 0;
 
 	virtual_end += morevm;
 	for (tva = va; tva < virtual_end; tva += INTEL_PGBYTES) {

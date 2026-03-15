@@ -147,7 +147,23 @@ vm_mem_bootstrap(void)
 	vm_map_init();
 	kmem_init(start, end);
 	pmap_init();
-	zone_init((vm_size_t)ptoa(vm_page_free_count));
+	{
+		/*
+		 * Cap zone map size so it doesn't consume the entire
+		 * kernel virtual address space.  On i386, the kernel VA
+		 * is limited (~1GB); with large physical RAM the 1:1
+		 * mapping can eat most of it, leaving little for submaps.
+		 * Reserve 32MB for kalloc_map, ipc_kernel_map, and others.
+		 */
+		vm_size_t zone_map_size = ptoa(vm_page_free_count);
+		vm_size_t kernel_va = end - start;
+		vm_size_t reserved = 32 * 1024 * 1024;
+
+		if (kernel_va > reserved &&
+		    zone_map_size > kernel_va - reserved)
+			zone_map_size = kernel_va - reserved;
+		zone_init(zone_map_size);
+	}
 	kalloc_init();
 #if	MACH_RT
 	rtalloc_init();

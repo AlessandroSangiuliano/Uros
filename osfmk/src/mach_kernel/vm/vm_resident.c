@@ -1411,7 +1411,6 @@ vm_page_grab(void)
 	}
 
 	while (vm_page_queue_free == VM_PAGE_NULL) {
-		printf("vm_page_grab: no free pages, trouble expected...\n");
 		mutex_unlock(&vm_page_queue_free_lock);
 		VM_PAGE_WAIT();
 		mutex_lock(&vm_page_queue_free_lock);

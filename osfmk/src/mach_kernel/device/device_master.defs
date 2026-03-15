@@ -140,3 +140,25 @@ routine device_mmio_unmap(
 	in	size		: natural_t;
 	in	task_port	: mach_port_t
 	);
+
+/*
+ * I/O port read.
+ * Reads 1, 2, or 4 bytes from the specified x86 I/O port.
+ */
+routine device_io_port_read(
+		master_port	: mach_port_t;
+	in	port		: natural_t;
+	in	size		: natural_t;
+	out	data		: natural_t
+	);
+
+/*
+ * I/O port write.
+ * Writes 1, 2, or 4 bytes to the specified x86 I/O port.
+ */
+routine device_io_port_write(
+		master_port	: mach_port_t;
+	in	port		: natural_t;
+	in	size		: natural_t;
+	in	data		: natural_t
+	);

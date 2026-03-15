@@ -54,6 +54,7 @@
 
 #include <chips/busses.h>
 #include <i386/ipl.h>
+#include <i386/pio.h>
 
 /* ================================================================
  * Interrupt forwarding
@@ -481,4 +482,64 @@ ds_master_device_mmio_unmap(
 			   FALSE);
 	task_deallocate(task);
 	return kr;
+}
+
+/* ---- I/O port access ---- */
+
+kern_return_t
+ds_master_device_io_port_read(
+	ipc_port_t		master_port,
+	unsigned int		port,
+	unsigned int		size,
+	unsigned int		*data_out)
+{
+	kern_return_t kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	switch (size) {
+	case 1:
+		*data_out = inb((i386_ioport_t)port);
+		break;
+	case 2:
+		*data_out = inw((i386_ioport_t)port);
+		break;
+	case 4:
+		*data_out = inl((i386_ioport_t)port);
+		break;
+	default:
+		return KERN_INVALID_ARGUMENT;
+	}
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_master_device_io_port_write(
+	ipc_port_t		master_port,
+	unsigned int		port,
+	unsigned int		size,
+	unsigned int		data)
+{
+	kern_return_t kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	switch (size) {
+	case 1:
+		outb((i386_ioport_t)port, (unsigned char)data);
+		break;
+	case 2:
+		outw((i386_ioport_t)port, (unsigned short)data);
+		break;
+	case 4:
+		outl((i386_ioport_t)port, (unsigned long)data);
+		break;
+	default:
+		return KERN_INVALID_ARGUMENT;
+	}
+	return KERN_SUCCESS;
 }
