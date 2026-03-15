@@ -37,9 +37,12 @@
 typedef struct fs_ops 	*fs_ops_t;
 typedef void 		*fs_private_t;
 
+struct page_cache;		/* page_cache.h */
+
 struct device {
 	mach_port_t	dev_port;	/* port to device */
 	unsigned int	rec_size;	/* record size */
+	struct page_cache *cache;	/* optional block cache (NULL = uncached) */
 };
 
 /*

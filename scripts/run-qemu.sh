@@ -77,11 +77,14 @@ if [ "$USE_AHCI" = true ]; then
         mke2fs -t ext2 -q -F -b 1024 -I 256 -r 1 -O filetype "$AHCI_DISK"
         HELLO_TXT=$(mktemp)
         printf 'Hello from ext2 on AHCI!\n' > "$HELLO_TXT"
+        BENCH_DAT=$(mktemp)
+        dd if=/dev/urandom of="$BENCH_DAT" bs=1K count=4096 status=none 2>/dev/null
         debugfs -w -f /dev/stdin "$AHCI_DISK" <<DBGFS 2>/dev/null
 write $HELLO_TXT hello.txt
+write $BENCH_DAT bench.dat
 DBGFS
-        rm -f "$HELLO_TXT"
-        echo "  Disco AHCI formattato ext2 con /hello.txt"
+        rm -f "$HELLO_TXT" "$BENCH_DAT"
+        echo "  Disco AHCI formattato ext2 con /hello.txt + /bench.dat (4 MB)"
     fi
     echo "AHCI: $AHCI_DISK (ICH9 controller)"
     QEMU_ARGS="$QEMU_ARGS -device ich9-ahci,id=ahci0"

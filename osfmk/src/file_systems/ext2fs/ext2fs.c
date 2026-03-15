@@ -144,6 +144,7 @@
 
 #include <device/device_types.h>
 #include <device/device.h>
+#include <page_cache.h>
 
 #define mutex_lock(a)
 #define mutex_unlock(a)
@@ -537,6 +538,34 @@ buf_read_file(
 				      TRUE);
 		    memset((void *)fp->f_buf, 0, block_size);
 		    fp->f_buf_size = block_size;
+		} else if (fp->f_dev.cache) {
+		    vm_offset_t cached;
+		    vm_size_t   cached_size;
+
+		    if (page_cache_lookup(fp->f_dev.cache, disk_block,
+					  &cached, &cached_size) == 0) {
+			/* Page cache hit — copy into f_buf */
+			(void)vm_allocate(mach_task_self(),
+					  &fp->f_buf,
+					  block_size, TRUE);
+			memcpy((void *)fp->f_buf, (void *)cached,
+			       block_size);
+			fp->f_buf_size = block_size;
+		    } else {
+			/* Page cache miss — read and insert */
+			rc = device_read(fp->f_dev.dev_port,
+				     0,
+				     (recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+				     (int) block_size,
+				     (char **) &fp->f_buf,
+				     (unsigned int *)&fp->f_buf_size);
+			if (rc)
+			    return (rc);
+			page_cache_insert(fp->f_dev.cache, disk_block,
+					  fp->f_buf, fp->f_buf_size);
+		    }
 		} else {
 		    rc = device_read(fp->f_dev.dev_port,
 				     0,
@@ -575,7 +604,33 @@ buf_read_file(
 			return 0;
 		}
 
-		rc = device_read_overwrite(fp->f_dev.dev_port,
+		if (fp->f_dev.cache) {
+			vm_offset_t cached;
+			vm_size_t   cached_size;
+
+			if (page_cache_lookup(fp->f_dev.cache, disk_block,
+					      &cached, &cached_size) == 0) {
+				/* Page cache hit — copy to caller */
+				memcpy((void *)*buf_p, (void *)cached,
+				       block_size);
+				*size_p = block_size;
+			} else {
+				/* Page cache miss — read and insert */
+				rc = device_read_overwrite(
+					fp->f_dev.dev_port, 0,
+					(recnum_t) dbtorec(&fp->f_dev,
+						ext2_fsbtodb(fs, disk_block)),
+					(int) block_size,
+					*buf_p,
+					(unsigned int *)size_p);
+				if (rc)
+					return (rc);
+				page_cache_insert(fp->f_dev.cache,
+						  disk_block,
+						  *buf_p, *size_p);
+			}
+		} else {
+			rc = device_read_overwrite(fp->f_dev.dev_port,
 				     0,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
@@ -583,8 +638,9 @@ buf_read_file(
 				     (int) block_size,
 				     *buf_p,
 				     (unsigned int *)size_p);
-	        if (rc)
-		    return (rc);
+			if (rc)
+				return (rc);
+		}
 	}
 
 	/*
@@ -764,10 +820,12 @@ read_fs(
 		return (FS_INVALID_FS);
 	}
 
+#ifdef	DEBUG
 	printf("ext2: rev %ld, inode size %d, block size %ld\n",
 	       fs->s_rev_level,
 	       (int)EXT2_INODE_SIZE(fs),
 	       (long)EXT2_BLOCK_SIZE(fs));
+#endif
 
 	/*
 	 * Compute the groups informations
