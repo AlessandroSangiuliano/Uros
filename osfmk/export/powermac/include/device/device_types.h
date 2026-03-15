@@ -160,6 +160,9 @@ typedef uint32		dev_flavor_t;
 typedef int		*dev_status_t;	/* Variable-length array of integers */
 #define	DEV_STATUS_MAX	(1024)		/* Maximum array size */
 
+typedef unsigned int	*dma_sg_addr_t;	/* Scatter-gather PA array (per-page) */
+#define	DMA_SG_ADDR_MAX	(256)		/* Maximum pages (1 MB) */
+
 typedef int		dev_status_data_t[DEV_STATUS_MAX];
 
 /*

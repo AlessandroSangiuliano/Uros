@@ -228,6 +228,12 @@ struct ata_fis_h2d {
 #define ATA_ID_SATA_CAP_NCQ	(1u << 8)	/* NCQ supported */
 #define ATA_ID_QUEUE_DEPTH	75		/* Queue depth - 1 */
 
+/*
+ * Scatter-gather: max PRDT entries per command slot.
+ * CT_STRIDE = 256 bytes: 128-byte header + 8 × 16-byte PRDT entries.
+ */
+#define PRDT_PER_SLOT		8
+
 /* AHCI ABAR size (covers 32 ports: 0x100 + 32*0x80 = 0x1100) */
 #define AHCI_ABAR_SIZE		8192		/* 8 KB, 2 pages */
 
