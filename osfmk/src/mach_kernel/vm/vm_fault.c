@@ -753,7 +753,7 @@ vm_fault_page(
 					 * need to allocate a real page.
 					 */
 
-					real_m = vm_page_grab();
+					real_m = vm_page_grab_any();
 					if (real_m == VM_PAGE_NULL) {
 						vm_fault_cleanup(object, first_m);
 						return(VM_FAULT_MEMORY_SHORTAGE);
@@ -1261,7 +1261,7 @@ retry_cluster_backw:
 					 * in the cluster and send off the
 					 * request for what we already have.
 					 */
-					if ((m = vm_page_grab())
+					if ((m = vm_page_grab_any())
 							== VM_PAGE_NULL) {
 					    cluster_start += PAGE_SIZE;
 					    cluster_end = offset + PAGE_SIZE;
@@ -1342,7 +1342,7 @@ retry_cluster_forw:
 					 * in the cluster and send off the
 					 * request for what we already have.
 					 */
-					if ((m = vm_page_grab())
+					if ((m = vm_page_grab_any())
 							== VM_PAGE_NULL) {
 					    break;
 					}
@@ -1596,7 +1596,7 @@ no_clustering:
 			/*
 			 *	Allocate a page for the copy
 			 */
-			copy_m = vm_page_grab();
+			copy_m = vm_page_grab_any();
 			if (copy_m == VM_PAGE_NULL) {
 				RELEASE_PAGE(m);
 				vm_fault_cleanup(object, first_m);
