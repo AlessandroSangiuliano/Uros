@@ -113,6 +113,12 @@ extern void		thread_depress_timeout( thread_t );
 extern kern_return_t 	thread_depress_abort( thread_act_t );
 extern kern_return_t 	thread_depress_abort_fast( thread_t );
 
+/* No-op system call for measuring raw trap cost */
+extern kern_return_t	mach_null(void);
+
+/* Print string to kernel console (debugging/benchmarking) */
+extern void		mach_print(const char *s);
+
 #include <machine/syscall_subr.h>
 
 #endif	/* _KERN_SYSCALL_SUBR_H_ */
