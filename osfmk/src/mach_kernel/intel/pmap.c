@@ -348,6 +348,7 @@
 
 #include <kern/misc_protos.h>			/* prototyping */
 #include <i386/misc_protos.h>
+#include <i386/kmap.h>
 
 #if	defined(AT386) && defined(i386)
 #include <i386/cpuid.h>
@@ -1118,9 +1119,18 @@ pmap_bootstrap(
 	/*
 	 * Start mapping virtual memory to physical memory, 1-1,
 	 * at end of mapped memory.
+	 *
+	 * HIGHMEM: only map physical RAM up to LOWMEM_LIMIT.
+	 * Pages above this threshold have vm_page entries but
+	 * no permanent kernel VA — use kmap() for access.
 	 */
-	virtual_avail = phystokv(avail_start);
-	virtual_end = phystokv(avail_end);
+	{
+		vm_offset_t map_end = avail_end;
+		if (map_end > LOWMEM_LIMIT)
+			map_end = LOWMEM_LIMIT;
+		virtual_avail = phystokv(avail_start);
+		virtual_end = phystokv(map_end);
+	}
 
 	pde = kpde;
 	pde += pdenum(kernel_pmap, virtual_avail);
@@ -1222,6 +1232,17 @@ pmap_bootstrap(
 	 *
 	 */
 	virtual_end = va + morevm;
+
+	/*
+	 * HIGHMEM: reserve a kmap window at the top of kernel VA space.
+	 * Page table entries are already allocated (zeroed) by the morevm
+	 * loop above.  Shrink virtual_end so the VM system won't use
+	 * these VAs for submaps.
+	 */
+	if (avail_end > LOWMEM_LIMIT) {
+		virtual_end -= KMAP_WINDOW_SIZE;
+		kmap_init(virtual_end);
+	}
 	while (pte < ptend)
 	    *pte++ = 0;
 
@@ -1234,12 +1255,14 @@ pmap_bootstrap(
 	kernel_pmap->dirbase = kpde;
 	printf("Kernel virtual space from 0x%x to 0x%x.\n",
 			VM_MIN_KERNEL_ADDRESS, virtual_end);
-	printf("pmap_bootstrap: kpde=0x%x kpde[800]=0x%08x\n",
-			(unsigned)kpde, (unsigned)kpde[800]);
 #endif	/* i860 */
 
 	printf("Available physical space from 0x%x to 0x%x\n",
 			avail_start, avail_end);
+	if (avail_end > LOWMEM_LIMIT)
+		printf("HIGHMEM: %d MB above lowmem limit (%d MB mapped 1:1)\n",
+			(avail_end - LOWMEM_LIMIT) / (1024*1024),
+			LOWMEM_LIMIT / (1024*1024));
 
 #if	i860
 	/*
@@ -1719,9 +1742,9 @@ pmap_remove_range(
 		register pv_entry_t	pv_h, prev, cur;
 
 		pv_h = pai_to_pvh(pai);
-		if (pv_h->pmap == PMAP_NULL) {
-		    panic("pmap_remove: null pv_list!");
-		}
+		if (pv_h->pmap == PMAP_NULL)
+		    panic("pmap_remove: null pv_list, pa 0x%x va 0x%x",
+			  pa, va);
 		if (pv_h->va == va && pv_h->pmap == pmap) {
 		    /*
 		     * Header is the pv_entry.  Copy the next one
@@ -1793,7 +1816,7 @@ pmap_remove(
 	pde = pmap_pde(map, s);
 	while (s < e) {
 	    l = (s + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE-1);
-	    if (l > e)
+	    if (l == 0 || l > e)
 		l = e;
 	    if (*pde & INTEL_PTE_VALID) {
 		spte = (pt_entry_t *)ptetokv(*pde);
@@ -2033,7 +2056,7 @@ pmap_protect(
 	pde = pmap_pde(map, s);
 	while (s < e) {
 	    l = (s + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE-1);
-	    if (l > e)
+	    if (l == 0 || l > e)
 		l = e;
 	    if (*pde & INTEL_PTE_VALID) {
 		spte = (pt_entry_t *)ptetokv(*pde);
@@ -2639,8 +2662,11 @@ pmap_expand(
 	/*
 	 *	Zero the page.
 	 */
-	memset((void *)phystokv(pa), 0, PAGE_SIZE);
-
+	{
+		vm_offset_t ptva = kmap(pa);
+		memset((void *)ptva, 0, PAGE_SIZE);
+		kunmap(pa);
+	}
 	PMAP_READ_LOCK(map, spl);
 	/*
 	 *	See if someone else expanded us first
@@ -3210,19 +3236,14 @@ pmap_modify_pages(
 	PMAP_UPDATE_TLBS(map, s, e);
 
 	pde = pmap_pde(map, s);
-	while (s && s < e) {
+	while (s < e) {
 	    l = (s + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE-1);
-	    if (l > e)
+	    if (l == 0 || l > e)
 		l = e;
 	    if (*pde & INTEL_PTE_VALID) {
 		spte = (pt_entry_t *)ptetokv(*pde);
-		if (l) {
-		   spte = &spte[ptenum(s)];
-		   epte = &spte[intel_btop(l-s)];
-	        } else {
-		   epte = &spte[intel_btop(PDE_MAPPED_SIZE)];
-		   spte = &spte[ptenum(s)];
-	        }
+		spte = &spte[ptenum(s)];
+		epte = &spte[intel_btop(l-s)];
 		while (spte < epte) {
 		    if (*spte & INTEL_PTE_VALID) {
 			*spte |= (INTEL_PTE_MOD | INTEL_PTE_WRITE);

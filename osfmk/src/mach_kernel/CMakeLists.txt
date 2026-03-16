@@ -554,6 +554,7 @@ set(I386_C_SOURCES
     i386/net_filter.c
     i386/pcb.c
     i386/phys.c
+    i386/kmap.c
     i386/pic.c
     i386/i386_rpc.c
     i386/rtclock.c

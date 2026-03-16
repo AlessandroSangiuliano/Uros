@@ -212,6 +212,7 @@ struct vm_page {
 			limbo:1,	/* page prepped then stolen (P) */
 			pageout:1,	/* page wired & busy for pageout (P) */
 			gobbled:1,      /* page used internally (P) */
+			highmem:1,	/* page is above LOWMEM_LIMIT (P) */
 			:0;		/* (force to 'long' boundary) */
 #ifdef	ns32000
 	int		pad;		/* extra space for ns32000 bit ops */
@@ -313,7 +314,9 @@ extern
 vm_offset_t	last_phys_addr;		/* physical address for last_page */
 
 extern
-int	vm_page_free_count;	/* How many pages are free? */
+int	vm_page_free_count;	/* How many pages are free? (total) */
+extern
+int	vm_page_free_count_lowmem; /* How many lowmem pages are free? */
 extern
 int	vm_page_fictitious_count;/* How many fictitious pages are free? */
 extern
@@ -375,6 +378,7 @@ extern void		vm_page_more_fictitious(void);
 extern int		vm_pool_low(void);
 
 extern vm_page_t	vm_page_grab(void);
+extern vm_page_t	vm_page_grab_any(void);
 
 extern void		vm_page_release(
 					vm_page_t	page);

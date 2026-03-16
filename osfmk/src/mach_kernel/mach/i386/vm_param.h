@@ -195,7 +195,20 @@
 
 /*
  *	Physical memory is mapped 1-1 with virtual memory starting
- *	at VM_MIN_KERNEL_ADDRESS.
+ *	at VM_MIN_KERNEL_ADDRESS, up to LOWMEM_LIMIT bytes of physical RAM.
+ *	Pages above LOWMEM_LIMIT are "highmem" — they have vm_page entries
+ *	but no permanent kernel VA.  Use kmap()/kunmap() for kernel access.
+ */
+#define LOWMEM_LIMIT		((vm_offset_t) 0x20000000)  /* 512 MB */
+
+/*
+ *	Check if a physical address is in lowmem (has permanent kernel VA).
+ */
+#define pa_is_lowmem(pa)	((vm_offset_t)(pa) < LOWMEM_LIMIT)
+
+/*
+ *	Convert a lowmem physical address to its kernel virtual address.
+ *	Only valid for addresses below LOWMEM_LIMIT.
  */
 #define phystokv(a)	((vm_offset_t)(a) + VM_MIN_KERNEL_ADDRESS)
 

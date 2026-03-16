@@ -90,16 +90,22 @@
 #include <vm/pmap.h>
 #include <vm/vm_page.h>
 #include <kern/misc_protos.h>
+#include <i386/kmap.h>
 
 /*
  *	pmap_zero_page zeros the specified (machine independent) page.
+ *	Uses kmap/kunmap to handle highmem pages above LOWMEM_LIMIT.
  */
 void
 pmap_zero_page(
 	vm_offset_t p)
 {
+	vm_offset_t va;
+
 	assert(p != vm_page_fictitious_addr);
-	bzero((char *)phystokv(p), PAGE_SIZE);
+	va = kmap(p);
+	bzero((char *)va, PAGE_SIZE);
+	kunmap(p);
 }
 
 /*
@@ -112,10 +118,14 @@ pmap_zero_part_page(
 	vm_offset_t     offset,
 	vm_size_t       len)
 {
+	vm_offset_t va;
+
 	assert(p != vm_page_fictitious_addr);
 	assert(offset + len <= PAGE_SIZE);
 
-	bzero((char *)phystokv(p) + offset, len);
+	va = kmap(p);
+	bzero((char *)va + offset, len);
+	kunmap(p);
 }
 
 /*
@@ -126,14 +136,20 @@ pmap_copy_page(
 	vm_offset_t src,
 	vm_offset_t dst)
 {
+	vm_offset_t sva, dva;
+
 	assert(src != vm_page_fictitious_addr);
 	assert(dst != vm_page_fictitious_addr);
 
-	memcpy((void *)phystokv(dst), (void *)phystokv(src), PAGE_SIZE);
+	sva = kmap(src);
+	dva = kmap(dst);
+	memcpy((void *)dva, (void *)sva, PAGE_SIZE);
+	kunmap(dst);
+	kunmap(src);
 }
 
 /*
- *	pmap_copy_page copies the specified (machine independent) pages.
+ *	pmap_copy_part_page copies part of one physical page to another.
  */
 void
 pmap_copy_part_page(
@@ -143,17 +159,23 @@ pmap_copy_part_page(
 	vm_offset_t	dst_offset,
 	vm_size_t	len)
 {
+	vm_offset_t sva, dva;
+
 	assert(src != vm_page_fictitious_addr);
 	assert(dst != vm_page_fictitious_addr);
 	assert(((dst & PAGE_MASK) + dst_offset + len) <= PAGE_SIZE);
 	assert(((src & PAGE_MASK) + src_offset + len) <= PAGE_SIZE);
 
-        memcpy((void *)(phystokv(dst) + dst_offset),
-	       (void *)(phystokv(src) + src_offset), len);
+	sva = kmap(src);
+	dva = kmap(dst);
+        memcpy((void *)(dva + dst_offset),
+	       (void *)(sva + src_offset), len);
+	kunmap(dst);
+	kunmap(src);
 }
 
 /*
- *      pmap_copy_part_lpage copies part of a virtually addressed page 
+ *      pmap_copy_part_lpage copies part of a virtually addressed page
  *      to a physically addressed page.
  */
 void
@@ -163,15 +185,19 @@ pmap_copy_part_lpage(
 	vm_offset_t	dst_offset,
 	vm_size_t	len)
 {
+	vm_offset_t dva;
+
 	assert(src != vm_page_fictitious_addr);
 	assert(dst != vm_page_fictitious_addr);
 	assert(((dst & PAGE_MASK) + dst_offset + len) <= PAGE_SIZE);
 
-        memcpy((void *)(phystokv(dst) + dst_offset), (void *)src, len);
+	dva = kmap(dst);
+        memcpy((void *)(dva + dst_offset), (void *)src, len);
+	kunmap(dst);
 }
 
 /*
- *      pmap_copy_part_rpage copies part of a physically addressed page 
+ *      pmap_copy_part_rpage copies part of a physically addressed page
  *      to a virtually addressed page.
  */
 void
@@ -181,11 +207,15 @@ pmap_copy_part_rpage(
 	vm_offset_t	dst,
 	vm_size_t	len)
 {
+	vm_offset_t sva;
+
 	assert(src != vm_page_fictitious_addr);
 	assert(dst != vm_page_fictitious_addr);
 	assert(((src & PAGE_MASK) + src_offset + len) <= PAGE_SIZE);
 
-        memcpy((void *)dst, (void *)(phystokv(src) + src_offset), len);
+	sva = kmap(src);
+        memcpy((void *)dst, (void *)(sva + src_offset), len);
+	kunmap(src);
 }
 
 /*
