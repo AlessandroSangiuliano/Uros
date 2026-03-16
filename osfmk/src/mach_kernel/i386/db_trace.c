@@ -276,7 +276,6 @@ db_i386_reg_value(
 		dp = vp->valuep;
 	    } else {
 	      if (thr_act->thread &&
-		  !(thr_act->thread->state & TH_STACK_HANDOFF) && 
 			thr_act->thread->kernel_stack) {
 		int cpu;
 
@@ -295,8 +294,9 @@ db_i386_reg_value(
 		if (dp == 0)
 		    dp = &null_reg;
 	      } else if (thr_act->thread &&
-			 (thr_act->thread->state&TH_STACK_HANDOFF)){
-		/* only EIP is valid */
+			 thr_act->thread->kernel_stack == 0 &&
+			 thr_act->thread->continuation) {
+		/* only EIP is valid (returns continuation) */
 		if (vp->valuep == (int *) &ddb_regs.eip) {
 		    dp = (int *)(&thr_act->thread->continuation);
 		} else {
@@ -622,17 +622,16 @@ db_stack_trace_cmd(
 		    goto thread_done;
 #endif
 		}
-		else if ((th->thread->state & TH_STACK_HANDOFF) ||
-			  th->thread->kernel_stack == 0) {
-		    register struct i386_saved_state *iss =
-						&th->mact.pcb->iss;
-
+		else if (th->thread->kernel_stack == 0) {
 		    db_printf("Continuation ");
 		    db_task_printsym((db_expr_t)th->thread->continuation,
 							DB_STGY_PROC, task);
 		    db_printf("\n");
-		    frame = (struct i386_frame *) (iss->ebp);
-		    callpc = (db_addr_t) (iss->eip);
+		    db_printf(">>>>> userspace state at syscall entry <<<<<\n");
+		    db_printf("  eip=0x%x ebp=0x%x\n",
+			      th->mact.pcb->iss.eip,
+			      th->mact.pcb->iss.ebp);
+		    goto thread_done;
 		} else {
 		    int cpu;
 
