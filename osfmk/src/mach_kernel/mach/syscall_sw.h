@@ -123,6 +123,8 @@
  *	table in <kern/syscall_sw.c>.
  */
 
+kernel_trap(mach_print,-14,1)
+kernel_trap(mach_null,-15,0)
 kernel_trap(evc_wait,-17,1)
 
 kernel_trap(mach_reply_port,-26,0)

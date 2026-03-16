@@ -573,3 +573,32 @@ thread_depress_abort_fast(
 
     return (kr);
 }
+
+/*
+ *	mach_null
+ *
+ *	No-op system call.  Returns immediately.
+ *	Used to measure the raw cost of a kernel trap (SYSENTER/SYSEXIT
+ *	round-trip) without any kernel work.
+ *  Used by ipc_bench to measure the cost of a null syscall.
+ */
+kern_return_t
+mach_null(void)
+{
+	return KERN_SUCCESS;
+}
+
+/*
+ *	mach_print
+ *
+ *	Display a null-terminated character string on the kernel console.
+ *	This system call is a debugging/benchmarking tool that bypasses
+ *	the IPC subsystem entirely.
+ *  Used by ipc_bench to measure the cost of a syscall that does some work 
+ *  in the kernel (printing a string) without IPC overhead.
+ */
+void
+mach_print(const char *s)
+{
+	printf("%s", s);
+}

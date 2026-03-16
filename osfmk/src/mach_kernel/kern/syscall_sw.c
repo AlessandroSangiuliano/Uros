@@ -289,8 +289,8 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(kern_invalid, 0),		/* 11 obs. thread_reply */
 	MACH_TRAP(kern_invalid, 0),		/* 12 obs. task_notify */
 	MACH_TRAP(kern_invalid, 0),		/* 13 obs. thread_self */
-	MACH_TRAP(kern_invalid, 0),		/* 14 */
-	MACH_TRAP(kern_invalid, 0),		/* 15 */
+	MACH_TRAP(mach_print, 1),		/* 14 */
+	MACH_TRAP(mach_null, 0),		/* 15 */
 	MACH_TRAP(kern_invalid, 0),		/* 16 */
 	MACH_TRAP_STACK(evc_wait, 1),		/* 17 */
 	MACH_TRAP(kern_invalid, 0),		/* 18 */
