@@ -70,4 +70,18 @@
 
 typedef char netname_name_t[80];
 
+/*
+ * Notification message sent by the name server to watchers when
+ * a service becomes available via netname_check_in().
+ * Contains the service port as a send right.
+ */
+#define NETNAME_NOTIFY_MSID	1099
+
+typedef struct {
+	mach_msg_header_t		head;
+	mach_msg_body_t			body;
+	mach_msg_port_descriptor_t	service;
+	mach_msg_trailer_t		trailer;
+} netname_notify_msg_t;
+
 #endif /* NETNAME_DEFS_ */

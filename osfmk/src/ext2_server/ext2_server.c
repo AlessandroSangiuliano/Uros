@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <servers/netname.h>
+#include <servers/netname_defs.h>
 
 #include <ext2fs/ext2fs.h>
 #include <file_system.h>
@@ -229,41 +230,41 @@ main(int argc, char **argv)
 
 	printf("\n=== ext2 filesystem server ===\n");
 
-	/* Look up the AHCI driver service port via netname.
-	 * The AHCI driver may still be initializing (PCI scan, DMA alloc),
-	 * so retry with mach_msg timeout to sleep properly between
-	 * attempts instead of busy-waiting.  See #72 for the future
-	 * name-server notification approach.
+	/* Wait for AHCI driver to register via name server notification.
+	 * netname_notify() blocks until the service calls check_in,
+	 * or returns immediately if already registered (#72).
 	 */
 	{
 		mach_port_t ahci_port;
-		mach_port_t sleep_port;
-		int retries;
+		mach_port_t notify_recv;
+		netname_notify_msg_t nmsg;
 
-		/* Dummy port for mach_msg timeout sleep */
-		mach_port_allocate(mach_task_self(),
-				   MACH_PORT_RIGHT_RECEIVE, &sleep_port);
-
-		for (retries = 0; retries < 60; retries++) {
-			kr = netname_look_up(name_server_port, "",
-					     "ahci_driver", &ahci_port);
-			if (kr == KERN_SUCCESS)
-				break;
-			/* Sleep ~100 ms via mach_msg receive timeout */
-			{
-				mach_msg_header_t msg;
-				mach_msg(&msg, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-					 0, sizeof(msg), sleep_port,
-					 100, MACH_PORT_NULL);
-			}
-		}
-		mach_port_destroy(mach_task_self(), sleep_port);
-
+		kr = mach_port_allocate(mach_task_self(),
+					MACH_PORT_RIGHT_RECEIVE, &notify_recv);
 		if (kr != KERN_SUCCESS) {
-			printf("ext2: ahci_driver not found after "
-			       "%d retries (kr=%d)\n", retries, kr);
+			printf("ext2: mach_port_allocate: %d\n", kr);
 			return 1;
 		}
+
+		kr = netname_notify(name_server_port, "ahci_driver",
+				    notify_recv);
+		if (kr != KERN_SUCCESS) {
+			printf("ext2: netname_notify failed: %d\n", kr);
+			return 1;
+		}
+
+		/* Block until the name server sends the notification */
+		kr = mach_msg(&nmsg.head, MACH_RCV_MSG,
+			      0, sizeof(nmsg), notify_recv,
+			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+		if (kr != KERN_SUCCESS) {
+			printf("ext2: notification recv failed: %d\n", kr);
+			return 1;
+		}
+
+		ahci_port = nmsg.service.name;
+		mach_port_destroy(mach_task_self(), notify_recv);
+
 		printf("ext2: connected to ahci_driver (port=%d)\n",
 		       ahci_port);
 		ahci_dev.dev_port = ahci_port;
