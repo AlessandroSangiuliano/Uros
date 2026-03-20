@@ -68,6 +68,13 @@ extern	mach_port_t	mach_task_self_;
 #define	current_task()	mach_task_self()
 
 /*
+ * Reinitialize the cached task port and MIG reply port.
+ * Must be called by child tasks created with task_create(inherit_memory)
+ * before making any MIG RPC calls.
+ */
+extern	void		mach_task_self_init(void);
+
+/*
  *	Other important ports in the Mach user environment
  */
 

@@ -139,8 +139,18 @@ mig_get_reply_port(void)
 
 		self = _cthread_self();
 
-		if ((reply_port = self->reply_port) == MACH_PORT_NULL)
-			self->reply_port = reply_port = mach_reply_port();
+		if (self != CTHREAD_NULL) {
+			if ((reply_port = self->reply_port) == MACH_PORT_NULL)
+				self->reply_port = reply_port =
+				    mach_reply_port();
+		} else {
+			/* No cthread context (e.g. child task with
+			   inherited memory but no cthread_init).
+			   Fall back to global reply port. */
+			if ((reply_port = mig_reply_port) == MACH_PORT_NULL)
+				mig_reply_port = reply_port =
+				    mach_reply_port();
+		}
 	} else {
 		if ((reply_port = mig_reply_port) == MACH_PORT_NULL)
 			mig_reply_port = reply_port = mach_reply_port();
@@ -164,8 +174,13 @@ mig_dealloc_reply_port(
 
 		self = _cthread_self();
 
-		reply_port = self->reply_port;
-		self->reply_port = MACH_PORT_NULL;
+		if (self != CTHREAD_NULL) {
+			reply_port = self->reply_port;
+			self->reply_port = MACH_PORT_NULL;
+		} else {
+			reply_port = mig_reply_port;
+			mig_reply_port = MACH_PORT_NULL;
+		}
 	} else {
 		reply_port = mig_reply_port;
 		mig_reply_port = MACH_PORT_NULL;
