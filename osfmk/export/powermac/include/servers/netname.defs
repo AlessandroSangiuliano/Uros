@@ -97,3 +97,14 @@ routine netname_debug_on(
 routine netname_debug_off(
 	server_port	: mach_port_t);
 
+/*
+ * Register for notification when a service name becomes available.
+ * If the service is already registered, the notification is sent
+ * immediately.  Otherwise, a one-shot notification is sent when
+ * the service calls netname_check_in().
+ */
+routine netname_notify(
+	server_port	: mach_port_t;
+	port_name	: netname_name_t;
+	notify_port	: mach_port_make_send_once_t);
+

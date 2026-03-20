@@ -83,7 +83,7 @@ target_compile_definitions(name_server_bin PRIVATE
 )
 
 target_include_directories(name_server_bin PRIVATE
-  # Local source (netname_defs.h)
+  # Local source
   ${CMAKE_CURRENT_SOURCE_DIR}
   # MIG-generated stubs
   ${MIG_OUT}
