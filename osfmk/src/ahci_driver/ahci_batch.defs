@@ -1,0 +1,44 @@
+/*
+ * Batch device write interface for Uros block device drivers.
+ *
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex)
+ * SPDX-License-Identifier: MIT
+ *
+ * Allows writing multiple non-contiguous blocks in a single IPC
+ * round-trip.  The caller supplies parallel arrays of sector numbers
+ * and byte counts plus a single OOL buffer that contains the data
+ * for all writes concatenated in order.
+ */
+
+subsystem ahci_batch 2950;
+
+#include <mach/std_types.defs>
+#include <device/device_types.defs>
+
+serverprefix	ds_;
+
+type reply_port_t = MACH_MSG_TYPE_MAKE_SEND_ONCE|polymorphic
+	ctype: mach_port_t;
+
+type batch_recnum_array_t = array[*:16] of recnum_t;
+type batch_size_array_t   = array[*:16] of unsigned32;
+
+import "ahci_batch_types.h";
+
+/*
+ * Write multiple blocks to the device in a single IPC message.
+ *
+ * recnums[i] = starting sector for write i
+ * sizes[i]   = byte count for write i
+ * data       = OOL buffer: first sizes[0] bytes go to recnums[0],
+ *              next sizes[1] bytes go to recnums[1], etc.
+ */
+routine device_write_batch(
+		device		: mach_port_t;
+	sreplyport reply_port	: reply_port_t;
+	in	mode		: dev_mode_t;
+	in	recnums		: batch_recnum_array_t;
+	in	sizes		: batch_size_array_t;
+	in	data		: io_buf_ptr_t, const;
+	out	bytes_written	: io_buf_len_t
+	);

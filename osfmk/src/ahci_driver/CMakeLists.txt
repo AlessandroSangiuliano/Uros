@@ -31,6 +31,35 @@ add_custom_command(
 )
 
 # ===========================================================================
+# MIG-generated ahci_batch server stubs (batch device writes)
+# ===========================================================================
+
+set(AHCI_BATCH_DEFS ${CMAKE_CURRENT_SOURCE_DIR}/ahci_batch.defs)
+
+set(AB_USER_C ${CMAKE_CURRENT_BINARY_DIR}/ahci_batch_user.c)
+set(AB_USER_H ${CMAKE_CURRENT_BINARY_DIR}/ahci_batch.h)
+set(AB_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/ahci_batch_server.c)
+set(AB_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/ahci_batch_server.h)
+
+add_custom_command(
+  OUTPUT ${AB_USER_C} ${AB_USER_H} ${AB_SERVER_C} ${AB_SERVER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_CURRENT_SOURCE_DIR}
+    -header ${AB_USER_H}
+    -sheader ${AB_SERVER_H}
+    -user ${AB_USER_C}
+    -server ${AB_SERVER_C}
+    ${AHCI_BATCH_DEFS}
+  DEPENDS migcom ${AHCI_BATCH_DEFS} ${CMAKE_CURRENT_SOURCE_DIR}/ahci_batch_types.h
+  COMMENT "MIG: ahci_batch.defs (batch write server stubs for ahci_driver)"
+  VERBATIM
+)
+
+# ===========================================================================
 # Source files
 # ===========================================================================
 
@@ -38,6 +67,7 @@ set(AHCI_SOURCES
   ahci_driver.c
   nostdlib_stubs.c
   ${DM_USER_C}
+  ${AB_SERVER_C}
   ${CMAKE_BINARY_DIR}/generated/device_server.c
 )
 
@@ -84,8 +114,10 @@ target_compile_definitions(ahci_driver_server PRIVATE
 )
 
 target_include_directories(ahci_driver_server PRIVATE
-  # MIG-generated headers (device_master.h, device_server.h)
+  # MIG-generated headers (device_master.h, device_server.h, ahci_batch_server.h)
   ${CMAKE_CURRENT_BINARY_DIR}
+  # ahci_batch_types.h
+  ${CMAKE_CURRENT_SOURCE_DIR}
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
