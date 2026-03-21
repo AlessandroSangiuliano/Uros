@@ -291,6 +291,15 @@ ds_ext2_sync(
 	int rc;
 	(void)fs_port_arg;
 
+	/* Flush dirty metadata (inode, group descriptors, superblock) */
+	for (int i = 0; i < MAX_OPEN_FILES; i++) {
+		if (open_files[i].in_use) {
+			rc = ext2fs_flush_metadata(open_files[i].private);
+			if (rc != 0)
+				return KERN_FAILURE;
+		}
+	}
+
 	/* Sync page cache to disk */
 	if (ahci_dev.cache) {
 		rc = page_cache_sync(ahci_dev.cache);

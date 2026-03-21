@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include "device_master.h"
 #include "device_server.h"
+#include "ahci_batch_server.h"
 #include "ahci.h"
 
 /* msgh_id base for IRQ notifications from device_intr_register */
@@ -1233,6 +1234,89 @@ ds_device_write_inband(mach_port_t device, mach_port_t reply,
 	return D_INVALID_OPERATION;
 }
 
+/* ================================================================
+ * Batch write: multiple non-contiguous blocks in one IPC message
+ * ================================================================ */
+
+kern_return_t
+ds_device_write_batch(mach_port_t device, mach_port_t reply,
+		      mach_msg_type_name_t reply_poly,
+		      dev_mode_t mode,
+		      recnum_t *recnums,
+		      mach_msg_type_number_t recnumsCnt,
+		      unsigned int *sizes,
+		      mach_msg_type_number_t sizesCnt,
+		      io_buf_ptr_t data,
+		      mach_msg_type_number_t data_count,
+		      io_buf_len_t *bytes_written)
+{
+	unsigned int i, data_off = 0, total_written = 0;
+
+	if (active_port < 0)
+		return D_NO_SUCH_DEVICE;
+	if (recnumsCnt != sizesCnt || recnumsCnt == 0)
+		return D_INVALID_SIZE;
+
+	/* Invalidate readahead cache — disk content is changing */
+	if (ra_cache.buf != 0) {
+		vm_deallocate(mach_task_self(),
+			      ra_cache.buf, ra_cache.buf_size);
+		ra_cache.buf = 0;
+		ra_cache.lba_count = 0;
+	}
+
+	for (i = 0; i < recnumsCnt; i++) {
+		unsigned int sz = sizes[i];
+		unsigned int total, lba, off, chunk;
+
+		if (sz == 0)
+			continue;
+		if (data_off + sz > data_count)
+			goto bad;
+
+		/* Round up to sector boundary */
+		total = (sz + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+		lba = recnums[i];
+
+		for (off = 0; off < total; off += chunk) {
+			unsigned int sects, cpy;
+
+			chunk = total - off;
+			if (chunk > batch_data_size)
+				chunk = batch_data_size;
+			sects = chunk / SECTOR_SIZE;
+
+			cpy = (off + chunk <= sz) ? chunk
+						  : (sz > off ? sz - off : 0);
+			if (cpy < chunk)
+				memset((void *)data_uva, 0, chunk);
+			if (cpy > 0)
+				memcpy((void *)data_uva,
+				       (void *)((vm_offset_t)data +
+						data_off + off),
+				       cpy);
+			if (ahci_submit_batch(active_port, lba,
+					      sects, 1) < 0)
+				goto io_err;
+			lba += sects;
+		}
+
+		data_off += sz;
+		total_written += sz;
+	}
+
+	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
+	*bytes_written = (io_buf_len_t)total_written;
+	return KERN_SUCCESS;
+
+bad:
+	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
+	return D_INVALID_SIZE;
+io_err:
+	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
+	return D_IO_ERROR;
+}
+
 kern_return_t
 ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
 		     dev_status_t status,
@@ -1292,6 +1376,10 @@ ahci_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
 	/* Try MIG device server demux first */
 	if (device_server(in, out))
+		return TRUE;
+
+	/* Try batch write subsystem */
+	if (ahci_batch_server(in, out))
 		return TRUE;
 
 	/* IRQ notification — acknowledge, no reply */

@@ -32,6 +32,33 @@ add_custom_command(
 )
 
 # ===========================================================================
+# MIG-generated ahci_batch user stubs (batch device writes)
+# ===========================================================================
+
+set(AHCI_BATCH_DEFS ${CMAKE_SOURCE_DIR}/src/ahci_driver/ahci_batch.defs)
+
+set(AB_USER_C ${CMAKE_CURRENT_BINARY_DIR}/ahci_batch_user.c)
+set(AB_USER_H ${CMAKE_CURRENT_BINARY_DIR}/ahci_batch.h)
+
+add_custom_command(
+  OUTPUT ${AB_USER_C} ${AB_USER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/ahci_driver
+    -header ${AB_USER_H}
+    -sheader /dev/null
+    -user ${AB_USER_C}
+    -server /dev/null
+    ${AHCI_BATCH_DEFS}
+  DEPENDS migcom ${AHCI_BATCH_DEFS} ${CMAKE_SOURCE_DIR}/src/ahci_driver/ahci_batch_types.h
+  COMMENT "MIG: ahci_batch.defs (user stubs for ext2_server)"
+  VERBATIM
+)
+
+# ===========================================================================
 # Source files
 # ===========================================================================
 
@@ -40,6 +67,7 @@ set(EXT2_SERVER_SOURCES
   device_read_overwrite.c
   nostdlib_stubs.c
   ${EXT2_SERVER_C}
+  ${AB_USER_C}
 )
 
 # ===========================================================================
@@ -65,8 +93,10 @@ target_compile_definitions(ext2_server_bin PRIVATE
 )
 
 target_include_directories(ext2_server_bin PRIVATE
-  # MIG-generated headers (ext2fs_server_server.h)
+  # MIG-generated headers (ext2fs_server_server.h, ahci_batch.h)
   ${CMAKE_CURRENT_BINARY_DIR}
+  # ahci_batch_types.h
+  ${CMAKE_SOURCE_DIR}/src/ahci_driver
   # ext2fs_types.h (imported by MIG-generated code)
   ${CMAKE_CURRENT_SOURCE_DIR}
   # Generated includes (mach/machine -> i386 symlink)

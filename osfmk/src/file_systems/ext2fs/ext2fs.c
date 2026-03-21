@@ -146,6 +146,19 @@
 #include <device/device.h>
 #include <page_cache.h>
 
+/*
+ * device_write_batch — MIG user stub from ahci_batch.defs (subsystem 2950).
+ * Weak: resolves to NULL for binaries that don't link the stub (e.g.
+ * bootstrap), causing a transparent fallback to individual writes.
+ */
+extern kern_return_t device_write_batch(
+	mach_port_t device,
+	dev_mode_t mode,
+	recnum_t *recnums, mach_msg_type_number_t recnumsCnt,
+	unsigned int *sizes, mach_msg_type_number_t sizesCnt,
+	io_buf_ptr_t data, mach_msg_type_number_t dataCnt,
+	io_buf_len_t *bytes_written) __attribute__((weak));
+
 #define mutex_lock(a)
 #define mutex_unlock(a)
 #define mutex_init(a)
@@ -228,6 +241,17 @@ free_file_buffers(register struct ext2fs_file *fp)
 	    fp->f_buf = 0;
 	}
 	fp->f_buf_blkno = -1;
+
+	/*
+	 * Free the cached inode block
+	 */
+	if (fp->f_inode_blk != 0) {
+	    (void) vm_deallocate(mach_task_self(),
+				 fp->f_inode_blk,
+				 fp->f_inode_blk_size);
+	    fp->f_inode_blk = 0;
+	    fp->f_inode_blk_size = 0;
+	}
 }
 
 /*
@@ -303,14 +327,19 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	    inode->i_fsize = raw_inode->i_fsize;
 	}
 
-	(void) vm_deallocate(mach_task_self(), buf, buf_size);
-
 	/*
-	 * Clear out the old buffers
+	 * Clear out the old buffers (this also frees the previous
+	 * f_inode_blk, so we must cache the new block afterwards).
 	 */
 	free_file_buffers(fp);
 
-	return (0);	 
+	/*
+	 * Cache the raw inode block for write-back without re-reading.
+	 */
+	fp->f_inode_blk = buf;
+	fp->f_inode_blk_size = buf_size;
+
+	return (0);
 }
 
 /*
@@ -1353,9 +1382,11 @@ block_alloc(struct ext2fs_file *fp, int goal_group)
 					gd[group].bg_free_blocks_count =
 						cpu_to_le16(
 						le16_to_cpu(gd[group].bg_free_blocks_count) - 1);
+					fp->f_gd_dirty = 1;
 
 					/* Update superblock */
 					fs->s_free_blocks_count--;
+					fp->f_super_dirty = 1;
 
 					alloc_block = fs->s_first_data_block +
 						(unsigned long)group * bits_per_group + bit;
@@ -1374,32 +1405,21 @@ block_alloc(struct ext2fs_file *fp, int goal_group)
 }
 
 /*
- * Write the inode back to disk.
+ * Serialize the in-core inode into the cached raw inode block.
+ * The block must already be in fp->f_inode_blk (populated by read_inode).
  */
-static int
-write_inode(ino_t inumber, struct ext2fs_file *fp)
+static void
+serialize_inode(struct ext2fs_file *fp)
 {
 	struct ext2_super_block *fs = fp->f_fs;
-	daddr_t disk_block;
-	vm_offset_t buf;
-	vm_size_t buf_size;
 	struct ext2_inode *raw_inode;
 	struct ext2_inode *inode = &fp->i_ic;
-	int rc;
 	unsigned long block;
 
-	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
-
-	/* Read the block containing the inode */
-	rc = read_disk_block(fp, disk_block, &buf, &buf_size);
-	if (rc != 0)
-		return rc;
-
-	/* Locate the inode within the block */
 	raw_inode = (struct ext2_inode *)
-		((char *)buf + ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs));
+		((char *)fp->f_inode_blk +
+		 ext2_itoo(fs, fp->f_ino) * EXT2_INODE_SIZE(fs));
 
-	/* Write back fields in little-endian */
 	raw_inode->i_mode = cpu_to_le16(inode->i_mode);
 	raw_inode->i_uid = cpu_to_le16(inode->i_uid);
 	raw_inode->i_size = cpu_to_le32(inode->i_size);
@@ -1418,11 +1438,26 @@ write_inode(ino_t inumber, struct ext2fs_file *fp)
 	raw_inode->i_faddr = cpu_to_le32(inode->i_faddr);
 	raw_inode->i_frag = inode->i_frag;
 	raw_inode->i_fsize = inode->i_fsize;
+}
 
-	/* Write the block back */
-	rc = write_disk_block(fp, disk_block, buf, EXT2_BLOCK_SIZE(fs));
-	vm_deallocate(mach_task_self(), buf, buf_size);
-	return rc;
+/*
+ * Write the inode back to disk using the cached inode block.
+ * No device_read needed — the block was cached by read_inode().
+ */
+static int
+write_inode(ino_t inumber, struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	daddr_t disk_block;
+
+	if (fp->f_inode_blk == 0)
+		return KERN_FAILURE;
+
+	serialize_inode(fp);
+
+	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
+	return write_disk_block(fp, disk_block,
+				fp->f_inode_blk, EXT2_BLOCK_SIZE(fs));
 }
 
 /*
@@ -1814,38 +1849,207 @@ ext2fs_write_file(
 	if (offset > fp->i_ic.i_size)
 		fp->i_ic.i_size = offset;
 
-	/* Mark metadata dirty — flushed on sync or close */
+	/* Mark inode dirty — flushed on sync or close.
+	 * gd and superblock are marked dirty in block_alloc() only
+	 * when new blocks are actually allocated. */
 	fp->f_inode_dirty = 1;
-	fp->f_gd_dirty = 1;
-	fp->f_super_dirty = 1;
 
 	return 0;
 }
 
 /*
- * Sync all dirty page cache entries to disk.
+ * Flush dirty metadata to disk.  When 2+ items are dirty, batch
+ * them into a single device_write_batch IPC to save round-trips.
  */
 int
 ext2fs_flush_metadata(fs_private_t private)
 {
 	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	struct ext2_super_block *fs = fp->f_fs;
+	int n_dirty = 0;
 	int rc;
 
-	if (fp->f_inode_dirty) {
-		rc = write_inode(fp->f_ino, fp);
-		if (rc != 0)
+	if (fp->f_inode_dirty) n_dirty++;
+	if (fp->f_gd_dirty) n_dirty++;
+	if (fp->f_super_dirty) n_dirty++;
+
+	if (n_dirty == 0)
+		return 0;
+
+	/* Single dirty item or no batch stub: unbatched path */
+	if (n_dirty == 1 || device_write_batch == NULL) {
+		if (fp->f_inode_dirty) {
+			rc = write_inode(fp->f_ino, fp);
+			if (rc != 0) return rc;
+			fp->f_inode_dirty = 0;
+		}
+		if (fp->f_gd_dirty) {
+			rc = write_gd(fp);
+			if (rc != 0) return rc;
+			fp->f_gd_dirty = 0;
+		}
+		if (fp->f_super_dirty) {
+			rc = write_super(fp);
+			if (rc != 0) return rc;
+			fp->f_super_dirty = 0;
+		}
+		return 0;
+	}
+
+	/*
+	 * Multiple dirty items — batch the writes into one IPC.
+	 * The inode block is cached in fp->f_inode_blk from read_inode(),
+	 * so no device_read is needed here.
+	 */
+	{
+		recnum_t recnums[3];
+		unsigned int sizes[3];
+		unsigned int n = 0;
+		unsigned int total_size = 0;
+		vm_offset_t concat;
+		unsigned int off;
+		io_buf_len_t bytes_written;
+		unsigned int inode_blk_size = EXT2_BLOCK_SIZE(fs);
+
+		/* --- Prepare inode block (serialize in-place) --- */
+		if (fp->f_inode_dirty) {
+			if (fp->f_inode_blk == 0)
+				return KERN_FAILURE;
+			serialize_inode(fp);
+
+			daddr_t inode_disk_block = ext2_ino2blk(fs,
+						fp->f_gd, fp->f_ino);
+			recnums[n] = (recnum_t)dbtorec(&fp->f_dev,
+				ext2_fsbtodb(fs, inode_disk_block));
+			sizes[n] = inode_blk_size;
+			total_size += inode_blk_size;
+			n++;
+		}
+
+		/* --- Prepare group descriptors --- */
+		if (fp->f_gd_dirty) {
+			int gd_loc = fs->s_first_data_block + 1;
+			int gd_sec = (gd_loc * EXT2_BLOCK_SIZE(fs))
+				     / DEV_BSIZE;
+			recnums[n] = (recnum_t)dbtorec(&fp->f_dev, gd_sec);
+			sizes[n] = fp->f_gd_size;
+			total_size += fp->f_gd_size;
+			n++;
+		}
+
+		/* --- Prepare superblock (little-endian raw copy) --- */
+		struct ext2_super_block raw_sb;
+		if (fp->f_super_dirty) {
+			memset(&raw_sb, 0, sizeof(raw_sb));
+			raw_sb.s_inodes_count =
+				cpu_to_le32(fs->s_inodes_count);
+			raw_sb.s_blocks_count =
+				cpu_to_le32(fs->s_blocks_count);
+			raw_sb.s_r_blocks_count =
+				cpu_to_le32(fs->s_r_blocks_count);
+			raw_sb.s_free_blocks_count =
+				cpu_to_le32(fs->s_free_blocks_count);
+			raw_sb.s_free_inodes_count =
+				cpu_to_le32(fs->s_free_inodes_count);
+			raw_sb.s_first_data_block =
+				cpu_to_le32(fs->s_first_data_block);
+			raw_sb.s_log_block_size =
+				cpu_to_le32(fs->s_log_block_size);
+			raw_sb.s_log_frag_size =
+				cpu_to_le32(fs->s_log_frag_size);
+			raw_sb.s_blocks_per_group =
+				cpu_to_le32(fs->s_blocks_per_group);
+			raw_sb.s_frags_per_group =
+				cpu_to_le32(fs->s_frags_per_group);
+			raw_sb.s_inodes_per_group =
+				cpu_to_le32(fs->s_inodes_per_group);
+			raw_sb.s_mtime =
+				cpu_to_le32(fs->s_mtime);
+			raw_sb.s_wtime =
+				cpu_to_le32(fs->s_wtime);
+			raw_sb.s_mnt_count =
+				cpu_to_le16(fs->s_mnt_count);
+			raw_sb.s_max_mnt_count =
+				cpu_to_le16(fs->s_max_mnt_count);
+			raw_sb.s_magic =
+				cpu_to_le16(fs->s_magic);
+			raw_sb.s_state =
+				cpu_to_le16(fs->s_state);
+			raw_sb.s_errors =
+				cpu_to_le16(fs->s_errors);
+			raw_sb.s_minor_rev_level =
+				cpu_to_le16(fs->s_minor_rev_level);
+			raw_sb.s_lastcheck =
+				cpu_to_le32(fs->s_lastcheck);
+			raw_sb.s_checkinterval =
+				cpu_to_le32(fs->s_checkinterval);
+			raw_sb.s_creator_os =
+				cpu_to_le32(fs->s_creator_os);
+			raw_sb.s_rev_level =
+				cpu_to_le32(fs->s_rev_level);
+			raw_sb.s_def_resuid =
+				cpu_to_le16(fs->s_def_resuid);
+			raw_sb.s_def_resgid =
+				cpu_to_le16(fs->s_def_resgid);
+			if (fs->s_rev_level >= EXT2_DYNAMIC_REV) {
+				raw_sb.s_first_ino =
+					cpu_to_le32(fs->s_first_ino);
+				raw_sb.s_inode_size =
+					cpu_to_le16(fs->s_inode_size);
+				raw_sb.s_block_group_nr =
+					cpu_to_le16(fs->s_block_group_nr);
+				raw_sb.s_feature_compat =
+					cpu_to_le32(fs->s_feature_compat);
+				raw_sb.s_feature_incompat =
+					cpu_to_le32(fs->s_feature_incompat);
+				raw_sb.s_feature_ro_compat =
+					cpu_to_le32(fs->s_feature_ro_compat);
+			}
+
+			recnums[n] = (recnum_t)dbtorec(&fp->f_dev, SBLOCK);
+			sizes[n] = SBSIZE;
+			total_size += SBSIZE;
+			n++;
+		}
+
+		/* --- Concatenate data into a single OOL buffer --- */
+		rc = vm_allocate(mach_task_self(), &concat, total_size, TRUE);
+		if (rc != KERN_SUCCESS)
 			return rc;
-		fp->f_inode_dirty = 0;
+
+		off = 0;
+		if (fp->f_inode_dirty) {
+			memcpy((void *)(concat + off),
+			       (void *)fp->f_inode_blk, inode_blk_size);
+			off += inode_blk_size;
+		}
+		if (fp->f_gd_dirty) {
+			memcpy((void *)(concat + off),
+			       (void *)fp->f_gd, fp->f_gd_size);
+			off += fp->f_gd_size;
+		}
+		if (fp->f_super_dirty) {
+			memcpy((void *)(concat + off),
+			       (void *)&raw_sb, SBSIZE);
+			off += SBSIZE;
+		}
+
+		/* --- Send batched write --- */
+		rc = device_write_batch(fp->f_dev.dev_port, 0,
+					recnums, n, sizes, n,
+					(io_buf_ptr_t)concat, total_size,
+					&bytes_written);
+
+		/* --- Cleanup --- */
+		vm_deallocate(mach_task_self(), concat, total_size);
+
+		if (rc == KERN_SUCCESS) {
+			fp->f_inode_dirty = 0;
+			fp->f_gd_dirty = 0;
+			fp->f_super_dirty = 0;
+		}
+		return rc;
 	}
-	if (fp->f_gd_dirty) {
-		write_gd(fp);
-		fp->f_gd_dirty = 0;
-	}
-	if (fp->f_super_dirty) {
-		write_super(fp);
-		fp->f_super_dirty = 0;
-	}
-	return 0;
 }
 
 int
