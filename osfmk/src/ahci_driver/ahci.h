@@ -230,9 +230,10 @@ struct ata_fis_h2d {
 
 /*
  * Scatter-gather: max PRDT entries per command slot.
- * CT_STRIDE = 256 bytes: 128-byte header + 8 × 16-byte PRDT entries.
+ * CT_STRIDE = 640 bytes: 128-byte header + 32 × 16-byte PRDT entries.
+ * Each slot can transfer up to 128 KB (32 × 4 KB pages).
  */
-#define PRDT_PER_SLOT		8
+#define PRDT_PER_SLOT		32
 
 /* AHCI ABAR size (covers 32 ports: 0x100 + 32*0x80 = 0x1100) */
 #define AHCI_ABAR_SIZE		8192		/* 8 KB, 2 pages */

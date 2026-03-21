@@ -56,11 +56,11 @@
  * ================================================================ */
 
 /*
- * Scatter-gather: each slot uses PRDT_PER_SLOT pages (32 KB),
+ * Scatter-gather: each slot uses PRDT_PER_SLOT pages (128 KB),
  * allowing multi-entry PRDTs with non-contiguous physical pages.
  */
-#define SLOT_DATA_SIZE		(PRDT_PER_SLOT * 4096u)	/* 32 KB per slot */
-#define CT_STRIDE		256u	/* command table spacing (128-byte aligned) */
+#define SLOT_DATA_SIZE		(PRDT_PER_SLOT * 4096u)	/* 128 KB per slot */
+#define CT_STRIDE		640u	/* command table spacing (128-byte aligned) */
 #define SECTORS_PER_SLOT	(SLOT_DATA_SIZE / 512u)
 
 /*
@@ -142,7 +142,7 @@ static unsigned int	data_kva, data_uva, data_pa;	/* Data buffer (dynamic) */
  * physical address of page i (4 KB).  data_pa is kept as alias
  * for data_pa_list[0] for single-command paths (IDENTIFY, benchmark).
  */
-static unsigned int	data_pa_list[256];
+static unsigned int	data_pa_list[1024];
 static unsigned int	data_n_pages;
 
 /* ================================================================
@@ -593,7 +593,7 @@ ahci_write_sectors(int port, uint32_t lba, uint16_t count)
  *
  * Fills up to batch_slots command headers/tables and issues them
  * all with a single PORT_CI write.  Each slot transfers up to
- * SLOT_DATA_SIZE (32 KB) using PRDT_PER_SLOT PRDT entries.
+ * SLOT_DATA_SIZE (128 KB) using PRDT_PER_SLOT PRDT entries.
  *
  * Data layout (scatter-gather):
  *   slot i, page p → data_pa_list[i * PRDT_PER_SLOT + p]  (PA)
@@ -820,7 +820,7 @@ ahci_realloc_batch_buffers(void)
 	kern_return_t kr;
 	unsigned int ct_size;
 	unsigned int n_pages;
-	mach_msg_type_number_t pa_count;
+	mach_msg_type_number_t pa_count = 1024;
 
 	if (batch_slots <= 1)
 		return 0;	/* already sized for 1 slot */
@@ -853,8 +853,8 @@ ahci_realloc_batch_buffers(void)
 	 * PRDT_PER_SLOT pages; the PRDT entries point to each page.
 	 */
 	n_pages = batch_slots * PRDT_PER_SLOT;
-	if (n_pages > 256)
-		n_pages = 256;
+	if (n_pages > 1024)
+		n_pages = 1024;
 
 	kr = device_dma_alloc_sg(master_device, n_pages,
 				 mach_task_self(),

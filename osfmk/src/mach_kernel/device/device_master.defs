@@ -148,7 +148,7 @@ routine device_mmio_unmap(
  * of physical addresses (one per page) for programming PRDTs.
  * Unlike device_dma_alloc, pages need NOT be physically contiguous.
  */
-type dma_sg_addr_t = array[*:256] of natural_t;
+type dma_sg_addr_t = array[*:1024] of natural_t;
 
 routine device_dma_alloc_sg(
 		master_port	: mach_port_t;
