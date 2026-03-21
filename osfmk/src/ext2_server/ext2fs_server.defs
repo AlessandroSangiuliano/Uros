@@ -77,6 +77,24 @@ routine ext2_read(
 	);
 
 /*
+ * Write data to an open file at byte offset.
+ * Data is passed out-of-line.
+ */
+routine ext2_write(
+		fs_port		: mach_port_t;
+	in	fid		: natural_t;
+	in	offset		: natural_t;
+	in	data		: pointer_t
+	);
+
+/*
+ * Flush all dirty cached blocks to disk.
+ */
+routine ext2_sync(
+		fs_port		: mach_port_t
+	);
+
+/*
  * Close an open file descriptor.
  */
 routine ext2_close(

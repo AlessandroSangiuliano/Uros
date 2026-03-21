@@ -148,6 +148,9 @@
 extern int ext2fs_open_file(struct device *, const char *, fs_private_t *);
 extern void ext2fs_close_file(fs_private_t);
 extern int ext2fs_read_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);
+extern int ext2fs_write_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);
+extern int ext2fs_sync(fs_private_t);
+extern int ext2fs_flush_metadata(fs_private_t);
 extern size_t ext2fs_file_size(fs_private_t);
 extern boolean_t ext2fs_file_is_directory(fs_private_t);
 extern boolean_t ext2fs_file_is_executable(fs_private_t);
@@ -162,6 +165,7 @@ struct ext2fs_file {
 	struct ext2_group_desc*	f_gd;		/* pointer to group
 						   descriptors */
 	vm_size_t		f_gd_size;	/* size of group descriptors */
+	ino_t			f_ino;		/* inode number (for write-back) */
 	struct ext2_inode	i_ic;		/* copy of on-disk inode */
 	int			f_nindir[NIADDR+1];
 						/* number of blocks mapped by
@@ -176,6 +180,9 @@ struct ext2fs_file {
 	vm_offset_t		f_buf;		/* buffer for data block */
 	vm_size_t		f_buf_size;	/* size of data block */
 	daddr_t			f_buf_blkno;	/* block number of data block */
+	int			f_inode_dirty;	/* inode needs writeback */
+	int			f_gd_dirty;	/* group descriptors dirty */
+	int			f_super_dirty;	/* superblock dirty */
 };
 
 #define file_is_structured(_fp_)	((_fp_)->f_fs != 0)

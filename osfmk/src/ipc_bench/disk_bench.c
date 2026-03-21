@@ -27,8 +27,11 @@
  * driver stack:
  *
  *   Raw read:  ipc_bench → device_read RPC → ahci_driver → AHCI DMA
+ *   Raw write: ipc_bench → device_write RPC → ahci_driver → AHCI DMA
  *   FS read:   ipc_bench → ext2_read RPC → ext2_server
  *                        → device_read RPC → ahci_driver → AHCI DMA
+ *   FS write:  ipc_bench → ext2_write RPC → ext2_server
+ *                        → device_write RPC → ahci_driver → AHCI DMA
  *
  * Both ahci_driver and ext2_server are discovered via netname_look_up.
  * If either server is not running, the corresponding benchmarks are
@@ -369,6 +372,360 @@ bench_ext2_file_read(const char *label, char *filename,
 }
 
 /* ===================================================================
+ * ext2 write correctness test
+ *
+ * Opens hello.txt, saves original content, writes a test pattern,
+ * reads back and verifies, then restores the original content and
+ * syncs to disk.  This is a functional test, not a benchmark.
+ * =================================================================== */
+
+static void
+test_ext2_write_verify(void)
+{
+	kern_return_t	kr;
+	natural_t	fid, file_size;
+	pointer_t	orig_data;
+	mach_msg_type_number_t orig_count;
+	vm_offset_t	write_buf, read_data;
+	mach_msg_type_number_t read_count;
+	unsigned int	i, errors;
+
+	printf("  ext2 write test:\n");
+
+	/* Open hello.txt */
+	kr = ext2_open(ext2_port, "hello.txt", &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: ext2_open failed kr=%d\n", kr);
+		return;
+	}
+
+	/* Get file size */
+	kr = ext2_stat(ext2_port, fid, &file_size);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: ext2_stat failed kr=%d\n", kr);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+	printf("    file size = %u bytes\n", file_size);
+
+	if (file_size == 0) {
+		printf("    FAIL: file is empty\n");
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	/* Save original content */
+	kr = ext2_read(ext2_port, fid, 0, file_size,
+		       &orig_data, &orig_count);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: ext2_read (save original) failed kr=%d\n",
+		       kr);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	/* Prepare test pattern */
+	kr = vm_allocate(mach_task_self(), &write_buf,
+			 (vm_size_t)file_size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: vm_allocate failed\n");
+		vm_deallocate(mach_task_self(), orig_data, orig_count);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+	for (i = 0; i < file_size; i++)
+		((char *)write_buf)[i] = (char)(0x41 + (i % 26)); /* A-Z */
+
+	/* Write test pattern */
+	kr = ext2_write(ext2_port, fid, 0,
+			write_buf, (mach_msg_type_number_t)file_size);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: ext2_write failed kr=%d\n", kr);
+		vm_deallocate(mach_task_self(), write_buf,
+			      (vm_size_t)file_size);
+		vm_deallocate(mach_task_self(), orig_data, orig_count);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+	printf("    write %u bytes OK\n", file_size);
+
+	/* Read back and verify */
+	kr = ext2_read(ext2_port, fid, 0, file_size,
+		       &read_data, &read_count);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: ext2_read (readback) failed kr=%d\n", kr);
+		vm_deallocate(mach_task_self(), write_buf,
+			      (vm_size_t)file_size);
+		vm_deallocate(mach_task_self(), orig_data, orig_count);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	errors = 0;
+	for (i = 0; i < file_size && i < read_count; i++) {
+		if (((char *)read_data)[i] != ((char *)write_buf)[i])
+			errors++;
+	}
+
+	if (errors == 0 && read_count == file_size)
+		printf("    readback verify OK (%u bytes match)\n", file_size);
+	else
+		printf("    FAIL: readback mismatch (%u errors, "
+		       "got %u bytes expected %u)\n",
+		       errors, read_count, file_size);
+
+	vm_deallocate(mach_task_self(), read_data, read_count);
+
+	/* Restore original content */
+	kr = ext2_write(ext2_port, fid, 0,
+			orig_data, (mach_msg_type_number_t)orig_count);
+	if (kr != KERN_SUCCESS)
+		printf("    WARNING: restore write failed kr=%d\n", kr);
+
+	/* Sync to disk */
+	kr = ext2_sync(ext2_port);
+	if (kr != KERN_SUCCESS)
+		printf("    WARNING: ext2_sync failed kr=%d\n", kr);
+	else
+		printf("    sync OK (restored original)\n");
+
+	vm_deallocate(mach_task_self(), write_buf, (vm_size_t)file_size);
+	vm_deallocate(mach_task_self(), orig_data, orig_count);
+	ext2_close(ext2_port, fid);
+}
+
+/* ===================================================================
+ * ext2 write latency benchmark
+ *
+ * Writes a fixed-size buffer to offset 0 of hello.txt repeatedly,
+ * then restores the original content and syncs.
+ * =================================================================== */
+
+#define WRITE_BENCH_ITERS	50
+
+static void
+bench_ext2_write(const char *label, char *filename)
+{
+	tvalspec_t	t0, t1;
+	unsigned long	total_ns;
+	kern_return_t	kr;
+	natural_t	fid, file_size;
+	pointer_t	orig_data;
+	mach_msg_type_number_t orig_count;
+	vm_offset_t	write_buf;
+	int		i;
+
+	/* Open */
+	kr = ext2_open(ext2_port, filename, &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("  %s: ext2_open(\"%s\") failed kr=%d\n",
+		       label, filename, kr);
+		return;
+	}
+
+	/* Get file size */
+	kr = ext2_stat(ext2_port, fid, &file_size);
+	if (kr != KERN_SUCCESS || file_size == 0) {
+		printf("  %s: ext2_stat failed or empty\n", label);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	/* Save original */
+	kr = ext2_read(ext2_port, fid, 0, file_size,
+		       &orig_data, &orig_count);
+	if (kr != KERN_SUCCESS) {
+		printf("  %s: save original failed kr=%d\n", label, kr);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	/* Allocate write buffer */
+	kr = vm_allocate(mach_task_self(), &write_buf,
+			 (vm_size_t)file_size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		vm_deallocate(mach_task_self(), orig_data, orig_count);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+	memset((void *)write_buf, 0xBB, file_size);
+
+	/* Warmup: 4 writes */
+	for (i = 0; i < 4; i++) {
+		ext2_write(ext2_port, fid, 0,
+			   write_buf, (mach_msg_type_number_t)file_size);
+	}
+
+	/* Timed writes */
+	dget_time(&t0);
+	for (i = 0; i < WRITE_BENCH_ITERS; i++) {
+		kr = ext2_write(ext2_port, fid, 0,
+				write_buf,
+				(mach_msg_type_number_t)file_size);
+		if (kr != KERN_SUCCESS)
+			break;
+	}
+	dget_time(&t1);
+
+	/* Restore original and sync */
+	ext2_write(ext2_port, fid, 0,
+		   orig_data, (mach_msg_type_number_t)orig_count);
+	ext2_sync(ext2_port);
+
+	vm_deallocate(mach_task_self(), write_buf, (vm_size_t)file_size);
+	vm_deallocate(mach_task_self(), orig_data, orig_count);
+	ext2_close(ext2_port, fid);
+
+	total_ns = delapsed_ns(&t0, &t1);
+
+	{
+		unsigned long us_per_op = (total_ns / i) / 1000;
+		unsigned long us_frac = ((total_ns / i) % 1000) / 10;
+		unsigned long total_us = total_ns / 1000;
+
+		printf("  %-28s %5lu.%02lu us/write "
+		       "(%u bytes, %d writes, %lu us total)\n",
+		       label, us_per_op, us_frac,
+		       file_size, i, total_us);
+	}
+}
+
+/* ===================================================================
+ * ext2 sync latency benchmark
+ * =================================================================== */
+
+#define SYNC_BENCH_ITERS	20
+
+static void
+bench_ext2_sync(const char *label)
+{
+	tvalspec_t	t0, t1;
+	unsigned long	total_ns;
+	kern_return_t	kr;
+	int		i;
+
+	/* Warmup */
+	for (i = 0; i < 4; i++)
+		ext2_sync(ext2_port);
+
+	/* Timed syncs */
+	dget_time(&t0);
+	for (i = 0; i < SYNC_BENCH_ITERS; i++) {
+		kr = ext2_sync(ext2_port);
+		if (kr != KERN_SUCCESS)
+			break;
+	}
+	dget_time(&t1);
+
+	total_ns = delapsed_ns(&t0, &t1);
+
+	{
+		unsigned long us_per_op = (total_ns / i) / 1000;
+		unsigned long us_frac = ((total_ns / i) % 1000) / 10;
+		unsigned long total_us = total_ns / 1000;
+
+		printf("  %-28s %5lu.%02lu us/sync  (%d iters, %lu us total)\n",
+		       label, us_per_op, us_frac, i, total_us);
+	}
+}
+
+/* ===================================================================
+ * ext2 write+sync benchmark (end-to-end with disk persistence)
+ *
+ * Each iteration does write + sync, measuring the real cost of a
+ * durable write: IPC + page cache + metadata writeback + disk flush.
+ * =================================================================== */
+
+#define WRITE_SYNC_ITERS	20
+
+static void
+bench_ext2_write_sync(const char *label, char *filename)
+{
+	tvalspec_t	t0, t1;
+	unsigned long	total_ns;
+	kern_return_t	kr;
+	natural_t	fid, file_size;
+	pointer_t	orig_data;
+	mach_msg_type_number_t orig_count;
+	vm_offset_t	write_buf;
+	int		i;
+
+	/* Open */
+	kr = ext2_open(ext2_port, filename, &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("  %s: ext2_open failed kr=%d\n", label, kr);
+		return;
+	}
+
+	kr = ext2_stat(ext2_port, fid, &file_size);
+	if (kr != KERN_SUCCESS || file_size == 0) {
+		printf("  %s: ext2_stat failed or empty\n", label);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	/* Save original */
+	kr = ext2_read(ext2_port, fid, 0, file_size,
+		       &orig_data, &orig_count);
+	if (kr != KERN_SUCCESS) {
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	kr = vm_allocate(mach_task_self(), &write_buf,
+			 (vm_size_t)file_size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		vm_deallocate(mach_task_self(), orig_data, orig_count);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+	memset((void *)write_buf, 0xCC, file_size);
+
+	/* Warmup: 2 write+sync */
+	for (i = 0; i < 2; i++) {
+		ext2_write(ext2_port, fid, 0,
+			   write_buf, (mach_msg_type_number_t)file_size);
+		ext2_sync(ext2_port);
+	}
+
+	/* Timed write+sync */
+	dget_time(&t0);
+	for (i = 0; i < WRITE_SYNC_ITERS; i++) {
+		kr = ext2_write(ext2_port, fid, 0,
+				write_buf,
+				(mach_msg_type_number_t)file_size);
+		if (kr != KERN_SUCCESS)
+			break;
+		kr = ext2_sync(ext2_port);
+		if (kr != KERN_SUCCESS)
+			break;
+	}
+	dget_time(&t1);
+
+	/* Restore and sync */
+	ext2_write(ext2_port, fid, 0,
+		   orig_data, (mach_msg_type_number_t)orig_count);
+	ext2_sync(ext2_port);
+
+	vm_deallocate(mach_task_self(), write_buf, (vm_size_t)file_size);
+	vm_deallocate(mach_task_self(), orig_data, orig_count);
+	ext2_close(ext2_port, fid);
+
+	total_ns = delapsed_ns(&t0, &t1);
+
+	{
+		unsigned long us_per_op = (total_ns / i) / 1000;
+		unsigned long us_frac = ((total_ns / i) % 1000) / 10;
+		unsigned long total_us = total_ns / 1000;
+
+		printf("  %-28s %5lu.%02lu us/op   "
+		       "(%u bytes, %d iters, %lu us total)\n",
+		       label, us_per_op, us_frac,
+		       file_size, i, total_us);
+	}
+}
+
+/* ===================================================================
  * ext2 open/close latency benchmark
  *
  * Measures the cost of ext2_open + ext2_close for a small file.
@@ -418,6 +775,397 @@ bench_ext2_open_close(const char *label, char *filename)
 		printf("  %-28s %5lu.%02lu us/op  (%d iters, %lu us total)\n",
 		       label, us_per_op, us_frac, i, total_us);
 	}
+}
+
+/* ===================================================================
+ * ext2 write stress tests
+ *
+ * Exercises edge cases and resilience of the write path:
+ *  1. Overwrite storm — same offset N times, verify last value
+ *  2. Partial block write — write at mid-block offset
+ *  3. Cross-block write — write spanning two blocks
+ *  4. File extension — grow file beyond original size into indirect
+ *  5. Persist across close — write, close, reopen, verify
+ *  6. Write burst + sync — many writes then sync, verify all
+ * =================================================================== */
+
+static int
+verify_pattern(mach_port_t port, natural_t fid,
+	       unsigned int offset, unsigned int size,
+	       unsigned char expected)
+{
+	pointer_t data;
+	mach_msg_type_number_t count;
+	kern_return_t kr;
+	unsigned int i, errors = 0;
+
+	kr = ext2_read(port, fid, offset, size, &data, &count);
+	if (kr != KERN_SUCCESS) {
+		printf("      verify read failed kr=%d\n", kr);
+		return -1;
+	}
+	for (i = 0; i < count && i < size; i++) {
+		if (((unsigned char *)data)[i] != expected)
+			errors++;
+	}
+	vm_deallocate(mach_task_self(), data, count);
+	if (errors || count != size) {
+		printf("      FAIL: %u/%u errors (got %u bytes)\n",
+		       errors, size, count);
+		return -1;
+	}
+	return 0;
+}
+
+static void
+stress_ext2_write(void)
+{
+	kern_return_t	kr;
+	natural_t	fid, file_size;
+	pointer_t	orig_data;
+	mach_msg_type_number_t orig_count;
+	vm_offset_t	buf;
+	unsigned int	i, pass, fail;
+
+	printf("  ext2 write stress tests:\n");
+
+	/* Open and save original */
+	kr = ext2_open(ext2_port, "hello.txt", &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: ext2_open failed kr=%d\n", kr);
+		return;
+	}
+	ext2_stat(ext2_port, fid, &file_size);
+	kr = ext2_read(ext2_port, fid, 0, file_size,
+		       &orig_data, &orig_count);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: save original failed\n");
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	pass = 0;
+	fail = 0;
+
+	/* --- Test 1: Overwrite storm ---
+	 * Write 100 times at offset 0, each with a different byte.
+	 * Only the last value should remain. */
+	{
+		kr = vm_allocate(mach_task_self(), &buf, file_size, TRUE);
+		if (kr != KERN_SUCCESS) goto restore;
+
+		for (i = 0; i < 100; i++) {
+			memset((void *)buf, (unsigned char)(i + 1), file_size);
+			kr = ext2_write(ext2_port, fid, 0, buf,
+					(mach_msg_type_number_t)file_size);
+			if (kr != KERN_SUCCESS) {
+				printf("    1-overwrite: FAIL write %u kr=%d\n",
+				       i, kr);
+				vm_deallocate(mach_task_self(), buf, file_size);
+				fail++;
+				goto test2;
+			}
+		}
+		vm_deallocate(mach_task_self(), buf, file_size);
+
+		if (verify_pattern(ext2_port, fid, 0, file_size, 100) == 0) {
+			printf("    1-overwrite-storm:   PASS (100 writes)\n");
+			pass++;
+		} else {
+			printf("    1-overwrite-storm:   FAIL\n");
+			fail++;
+		}
+	}
+
+test2:
+	/* --- Test 2: Partial block write ---
+	 * Write 10 bytes at offset 5 (mid-block), verify surrounding
+	 * data is unchanged. */
+	{
+		unsigned char pat = 0xEE;
+		pointer_t rdata;
+		mach_msg_type_number_t rcount;
+		int ok = 1;
+
+		/* First fill the whole file with 0xAA */
+		kr = vm_allocate(mach_task_self(), &buf, file_size, TRUE);
+		if (kr != KERN_SUCCESS) goto restore;
+		memset((void *)buf, 0xAA, file_size);
+		ext2_write(ext2_port, fid, 0, buf,
+			   (mach_msg_type_number_t)file_size);
+		vm_deallocate(mach_task_self(), buf, file_size);
+
+		/* Write 10 bytes of 0xEE at offset 5 */
+		kr = vm_allocate(mach_task_self(), &buf, 10, TRUE);
+		if (kr != KERN_SUCCESS) goto restore;
+		memset((void *)buf, pat, 10);
+		ext2_write(ext2_port, fid, 5, buf, 10);
+		vm_deallocate(mach_task_self(), buf, 10);
+
+		/* Read whole file and check */
+		kr = ext2_read(ext2_port, fid, 0, file_size,
+			       &rdata, &rcount);
+		if (kr != KERN_SUCCESS) {
+			printf("    2-partial-block:     FAIL read kr=%d\n",
+			       kr);
+			fail++;
+			goto test3;
+		}
+		for (i = 0; i < rcount; i++) {
+			unsigned char expected = (i >= 5 && i < 15) ?
+				pat : 0xAA;
+			if (((unsigned char *)rdata)[i] != expected) {
+				ok = 0;
+				break;
+			}
+		}
+		vm_deallocate(mach_task_self(), rdata, rcount);
+		if (ok) {
+			printf("    2-partial-block:     PASS\n");
+			pass++;
+		} else {
+			printf("    2-partial-block:     FAIL at byte %u\n",
+			       i);
+			fail++;
+		}
+	}
+
+test3:
+	/* --- Test 3: Cross-block write ---
+	 * Extend file to 2048 bytes (2 blocks @ 1024), write 128 bytes
+	 * straddling the block boundary (offset 960..1088). */
+	{
+		unsigned int big = 2048;
+		unsigned int woff = 960, wlen = 128;
+		pointer_t rdata;
+		mach_msg_type_number_t rcount;
+		int ok = 1;
+
+		/* Fill 2048 bytes with 0x11 */
+		kr = vm_allocate(mach_task_self(), &buf, big, TRUE);
+		if (kr != KERN_SUCCESS) goto restore;
+		memset((void *)buf, 0x11, big);
+		kr = ext2_write(ext2_port, fid, 0, buf,
+				(mach_msg_type_number_t)big);
+		vm_deallocate(mach_task_self(), buf, big);
+		if (kr != KERN_SUCCESS) {
+			printf("    3-cross-block:       FAIL extend kr=%d\n",
+			       kr);
+			fail++;
+			goto test4;
+		}
+
+		/* Write 0xFF across block boundary */
+		kr = vm_allocate(mach_task_self(), &buf, wlen, TRUE);
+		if (kr != KERN_SUCCESS) goto restore;
+		memset((void *)buf, 0xFF, wlen);
+		kr = ext2_write(ext2_port, fid, woff, buf,
+				(mach_msg_type_number_t)wlen);
+		vm_deallocate(mach_task_self(), buf, wlen);
+		if (kr != KERN_SUCCESS) {
+			printf("    3-cross-block:       FAIL write kr=%d\n",
+			       kr);
+			fail++;
+			goto test4;
+		}
+
+		/* Verify: 0..959 = 0x11, 960..1087 = 0xFF, 1088..2047 = 0x11 */
+		kr = ext2_read(ext2_port, fid, 0, big, &rdata, &rcount);
+		if (kr != KERN_SUCCESS || rcount != big) {
+			printf("    3-cross-block:       FAIL read kr=%d\n",
+			       kr);
+			if (kr == KERN_SUCCESS)
+				vm_deallocate(mach_task_self(), rdata, rcount);
+			fail++;
+			goto test4;
+		}
+		for (i = 0; i < big; i++) {
+			unsigned char expected =
+				(i >= woff && i < woff + wlen) ? 0xFF : 0x11;
+			if (((unsigned char *)rdata)[i] != expected) {
+				ok = 0;
+				break;
+			}
+		}
+		vm_deallocate(mach_task_self(), rdata, rcount);
+		if (ok) {
+			printf("    3-cross-block:       PASS (960..1088)\n");
+			pass++;
+		} else {
+			printf("    3-cross-block:       FAIL at byte %u\n",
+			       i);
+			fail++;
+		}
+	}
+
+test4:
+	/* --- Test 4: File extension to indirect blocks ---
+	 * Grow file to 14 KB (>12 direct blocks), verify data. */
+	{
+		unsigned int big = 14 * 1024;
+		int ok = 1;
+		pointer_t rdata;
+		mach_msg_type_number_t rcount;
+
+		kr = vm_allocate(mach_task_self(), &buf, big, TRUE);
+		if (kr != KERN_SUCCESS) goto restore;
+		for (i = 0; i < big; i++)
+			((unsigned char *)buf)[i] = (unsigned char)(i & 0xFF);
+		kr = ext2_write(ext2_port, fid, 0, buf,
+				(mach_msg_type_number_t)big);
+		if (kr != KERN_SUCCESS) {
+			printf("    4-indirect-extend:   FAIL write kr=%d\n",
+			       kr);
+			vm_deallocate(mach_task_self(), buf, big);
+			fail++;
+			goto test5;
+		}
+
+		/* Sync to disk */
+		ext2_sync(ext2_port);
+
+		/* Read back and verify */
+		kr = ext2_read(ext2_port, fid, 0, big, &rdata, &rcount);
+		if (kr != KERN_SUCCESS || rcount != big) {
+			printf("    4-indirect-extend:   FAIL read kr=%d "
+			       "count=%u\n", kr, rcount);
+			if (kr == KERN_SUCCESS)
+				vm_deallocate(mach_task_self(), rdata, rcount);
+			vm_deallocate(mach_task_self(), buf, big);
+			fail++;
+			goto test5;
+		}
+		for (i = 0; i < big; i++) {
+			if (((unsigned char *)rdata)[i] !=
+			    ((unsigned char *)buf)[i]) {
+				ok = 0;
+				break;
+			}
+		}
+		vm_deallocate(mach_task_self(), rdata, rcount);
+		vm_deallocate(mach_task_self(), buf, big);
+		if (ok) {
+			printf("    4-indirect-extend:   PASS (14 KB)\n");
+			pass++;
+		} else {
+			printf("    4-indirect-extend:   FAIL at byte %u\n",
+			       i);
+			fail++;
+		}
+	}
+
+test5:
+	/* --- Test 5: Persist across close/reopen ---
+	 * Write pattern, sync, close, reopen, verify. */
+	{
+		unsigned int sz = 64;
+		int ok;
+
+		kr = vm_allocate(mach_task_self(), &buf, sz, TRUE);
+		if (kr != KERN_SUCCESS) goto restore;
+		memset((void *)buf, 0x55, sz);
+		ext2_write(ext2_port, fid, 0, buf, (mach_msg_type_number_t)sz);
+		vm_deallocate(mach_task_self(), buf, sz);
+		ext2_sync(ext2_port);
+		ext2_close(ext2_port, fid);
+
+		/* Reopen */
+		kr = ext2_open(ext2_port, "hello.txt", &fid);
+		if (kr != KERN_SUCCESS) {
+			printf("    5-persist-reopen:    FAIL reopen kr=%d\n",
+			       kr);
+			fail++;
+			/* Can't continue — fid invalid */
+			printf("  stress: %u PASS, %u FAIL\n", pass, fail);
+			vm_deallocate(mach_task_self(), orig_data, orig_count);
+			return;
+		}
+
+		ok = (verify_pattern(ext2_port, fid, 0, sz, 0x55) == 0);
+		if (ok) {
+			printf("    5-persist-reopen:    PASS\n");
+			pass++;
+		} else {
+			printf("    5-persist-reopen:    FAIL\n");
+			fail++;
+		}
+	}
+
+	/* --- Test 6: Write burst + sync ---
+	 * 200 sequential 32-byte writes at different offsets, sync,
+	 * then verify all. */
+	{
+		unsigned int chunk = 32;
+		unsigned int total = 200 * chunk; /* 6400 bytes */
+		int ok = 1;
+		pointer_t rdata;
+		mach_msg_type_number_t rcount;
+
+		for (i = 0; i < 200; i++) {
+			unsigned char val = (unsigned char)(i + 1);
+			kr = vm_allocate(mach_task_self(), &buf, chunk, TRUE);
+			if (kr != KERN_SUCCESS) goto restore;
+			memset((void *)buf, val, chunk);
+			kr = ext2_write(ext2_port, fid, i * chunk, buf,
+					(mach_msg_type_number_t)chunk);
+			vm_deallocate(mach_task_self(), buf, chunk);
+			if (kr != KERN_SUCCESS) {
+				printf("    6-burst+sync:        FAIL write "
+				       "%u kr=%d\n", i, kr);
+				fail++;
+				goto restore;
+			}
+		}
+
+		ext2_sync(ext2_port);
+
+		/* Verify all 200 chunks */
+		kr = ext2_read(ext2_port, fid, 0, total, &rdata, &rcount);
+		if (kr != KERN_SUCCESS || rcount != total) {
+			printf("    6-burst+sync:        FAIL read kr=%d "
+			       "count=%u\n", kr, rcount);
+			if (kr == KERN_SUCCESS)
+				vm_deallocate(mach_task_self(), rdata, rcount);
+			fail++;
+			goto restore;
+		}
+		for (i = 0; i < 200 && ok; i++) {
+			unsigned char expected = (unsigned char)(i + 1);
+			unsigned int j;
+			for (j = 0; j < chunk; j++) {
+				if (((unsigned char *)rdata)[i * chunk + j] !=
+				    expected) {
+					ok = 0;
+					printf("    6-burst+sync:        FAIL "
+					       "chunk %u byte %u "
+					       "(got 0x%02x want 0x%02x)\n",
+					       i, j,
+					       ((unsigned char *)rdata)
+						   [i * chunk + j],
+					       expected);
+					break;
+				}
+			}
+		}
+		vm_deallocate(mach_task_self(), rdata, rcount);
+		if (ok) {
+			printf("    6-burst+sync:        PASS "
+			       "(200 x 32B)\n");
+			pass++;
+		} else {
+			fail++;
+		}
+	}
+
+restore:
+	/* Restore original content and size */
+	ext2_write(ext2_port, fid, 0, orig_data,
+		   (mach_msg_type_number_t)orig_count);
+	ext2_sync(ext2_port);
+	vm_deallocate(mach_task_self(), orig_data, orig_count);
+	ext2_close(ext2_port, fid);
+
+	printf("  stress: %u PASS, %u FAIL\n", pass, fail);
 }
 
 /* ===================================================================
@@ -472,6 +1220,18 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		bench_ext2_open_close("ext2 open+close", "hello.txt");
 		bench_ext2_file_read("ext2 read (hello.txt)", "hello.txt",
 				     4096);
+
+		/* Write correctness test */
+		test_ext2_write_verify();
+
+		/* Write benchmarks */
+		bench_ext2_write("ext2 write (cached)", "hello.txt");
+		bench_ext2_sync("ext2 sync (clean)");
+		bench_ext2_write_sync("ext2 write+sync (durable)",
+				      "hello.txt");
+
+		/* Stress tests */
+		stress_ext2_write();
 	}
 
 	if (have_ahci && have_ext2) {

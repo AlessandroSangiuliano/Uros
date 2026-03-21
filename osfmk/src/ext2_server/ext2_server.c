@@ -50,6 +50,7 @@
 #include <servers/netname_defs.h>
 
 #include <ext2fs/ext2fs.h>
+#include <ext2fs/defs.h>
 #include <file_system.h>
 #include <page_cache.h>
 
@@ -73,6 +74,47 @@ static mach_port_t	fs_port;
  * rec_size = 512 (sector size) so dbtorec() is identity.
  */
 static struct device	ahci_dev;
+
+/* ================================================================
+ * Page cache writeback
+ * ================================================================ */
+
+/*
+ * Context for the page cache writeback callback.
+ * Stores the device port and the fs-block-to-sector multiplier.
+ */
+struct writeback_ctx {
+	mach_port_t	dev_port;
+	unsigned int	blk_to_sec;	/* EXT2_BLOCK_SIZE / DEV_BSIZE */
+	unsigned int	rec_size;
+};
+
+static struct writeback_ctx	wb_ctx;
+
+/*
+ * Flush a dirty page cache block to disk via device_write().
+ * Called by page_cache on eviction, sync, or flush.
+ */
+static int
+ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size)
+{
+	struct writeback_ctx *wb = (struct writeback_ctx *)ctx;
+	io_buf_len_t bytes_written;
+	recnum_t recnum = (recnum_t)(block * wb->blk_to_sec *
+				     DEV_BSIZE / wb->rec_size);
+	kern_return_t rc;
+
+	rc = device_write(wb->dev_port, 0, recnum,
+			  (io_buf_ptr_t)data,
+			  (mach_msg_type_number_t)size,
+			  &bytes_written);
+	if (rc != KERN_SUCCESS) {
+		printf("ext2: writeback block %ld failed: %d\n",
+		       (long)block, rc);
+		return -1;
+	}
+	return 0;
+}
 
 /* ================================================================
  * Open file table
@@ -208,6 +250,60 @@ ds_ext2_close(
 	return KERN_SUCCESS;
 }
 
+kern_return_t
+ds_ext2_write(
+	mach_port_t		fs_port_arg,
+	natural_t		fid,
+	natural_t		offset,
+	pointer_t		data,
+	mach_msg_type_number_t	data_count)
+{
+	int idx = (int)fid - 1;
+	fs_private_t priv;
+	int rc;
+	(void)fs_port_arg;
+
+	if (idx < 0 || idx >= MAX_OPEN_FILES || !open_files[idx].in_use)
+		return KERN_INVALID_ARGUMENT;
+
+	priv = open_files[idx].private;
+
+	rc = ext2fs_write_file(priv, (vm_offset_t)offset,
+			       (vm_offset_t)data, (vm_size_t)data_count);
+
+	/* MIG OOL data must be deallocated by the server */
+	vm_deallocate(mach_task_self(), (vm_offset_t)data,
+		      (vm_size_t)data_count);
+
+	if (rc != 0) {
+		printf("ext2: write fid=%u offset=%u count=%u failed: %d\n",
+		       fid, offset, data_count, rc);
+		return KERN_FAILURE;
+	}
+
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_ext2_sync(
+	mach_port_t	fs_port_arg)
+{
+	int rc;
+	(void)fs_port_arg;
+
+	/* Sync page cache to disk */
+	if (ahci_dev.cache) {
+		rc = page_cache_sync(ahci_dev.cache);
+		if (rc != 0) {
+			printf("ext2: sync failed, %d blocks not written\n",
+			       rc);
+			return KERN_FAILURE;
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
 /* ================================================================
  * Main entry point
  * ================================================================ */
@@ -272,20 +368,44 @@ main(int argc, char **argv)
 	ahci_dev.rec_size = 512;
 
 	/* Create page cache: 8192 entries = 8 MB with 1 KB blocks */
-	ahci_dev.cache = page_cache_create(8192);
+	ahci_dev.cache = page_cache_create(8192, NULL, NULL);
 	if (!ahci_dev.cache)
 		printf("ext2: warning: page cache alloc failed, "
 		       "running uncached\n");
 	else
 		printf("ext2: page cache enabled (8192 blocks)\n");
 
-	/* Verify ext2 superblock by opening a known test file. */
+	/* Verify ext2 superblock by opening a known test file.
+	 * Also use the first open to discover the block size and
+	 * configure the page cache writeback callback.
+	 */
 	{
 		fs_private_t priv;
 		int rc = ext2fs_open_file(&ahci_dev, "hello.txt", &priv);
 		if (rc == 0) {
-			printf("ext2: mounted, /hello.txt size=%u bytes\n",
-			       (unsigned int)ext2fs_file_size(priv));
+			struct ext2fs_file *fp =
+				(struct ext2fs_file *)priv;
+
+			{
+				int blksz = EXT2_BLOCK_SIZE(fp->f_fs);
+				printf("ext2: mounted, /hello.txt size=%u bytes"
+				       " (blk=%d)\n",
+				       (unsigned int)ext2fs_file_size(priv),
+				       blksz);
+
+				/* Set up writeback callback */
+				if (ahci_dev.cache) {
+					wb_ctx.dev_port = ahci_dev.dev_port;
+					wb_ctx.blk_to_sec = blksz / DEV_BSIZE;
+					wb_ctx.rec_size = ahci_dev.rec_size;
+					ahci_dev.cache->pc_writeback =
+						ext2_writeback;
+					ahci_dev.cache->pc_writeback_ctx =
+						&wb_ctx;
+					printf("ext2: writeback enabled\n");
+				}
+			}
+
 			ext2fs_close_file(priv);
 			free(priv);
 		} else {
