@@ -82,6 +82,24 @@ entry_free_data(struct page_cache_entry *e)
 	}
 }
 
+/* Write back a dirty entry via the writeback callback */
+static int
+entry_writeback(struct page_cache *pc, struct page_cache_entry *e)
+{
+	if (!e->pc_dirty)
+		return 0;
+	if (pc->pc_writeback) {
+		int ret = pc->pc_writeback(pc->pc_writeback_ctx,
+					   e->pc_block, e->pc_data,
+					   e->pc_size);
+		if (ret != 0)
+			return ret;
+	}
+	e->pc_dirty = 0;
+	pc->pc_writebacks++;
+	return 0;
+}
+
 /* Evict the LRU entry, returning it to the free list */
 static struct page_cache_entry *
 evict_lru(struct page_cache *pc)
@@ -91,6 +109,9 @@ evict_lru(struct page_cache *pc)
 	/* Don't evict the head sentinel */
 	if (victim == &pc->pc_lru_head)
 		return NULL;
+
+	/* Write back dirty data before evicting */
+	entry_writeback(pc, victim);
 
 	lru_remove(victim);
 	hash_remove(pc, victim);
@@ -102,7 +123,8 @@ evict_lru(struct page_cache *pc)
 }
 
 struct page_cache *
-page_cache_create(unsigned int max_entries)
+page_cache_create(unsigned int max_entries,
+		  page_cache_writeback_fn writeback, void *ctx)
 {
 	struct page_cache *pc;
 	unsigned int i;
@@ -113,6 +135,8 @@ page_cache_create(unsigned int max_entries)
 
 	memset(pc, 0, sizeof(*pc));
 	pc->pc_max_entries = max_entries;
+	pc->pc_writeback = writeback;
+	pc->pc_writeback_ctx = ctx;
 
 	/* Initialize LRU sentinels (empty list: head <-> tail) */
 	pc->pc_lru_head.pc_lru_next = &pc->pc_lru_tail;
@@ -147,9 +171,14 @@ page_cache_destroy(struct page_cache *pc)
 	if (!pc)
 		return;
 
-	/* Free all cached data buffers */
-	for (i = 0; i < pc->pc_max_entries; i++)
-		entry_free_data(&pc->pc_pool[i]);
+	/* Flush dirty blocks to disk before destroying */
+	for (i = 0; i < pc->pc_max_entries; i++) {
+		struct page_cache_entry *e = &pc->pc_pool[i];
+		if (e->pc_data) {
+			entry_writeback(pc, e);
+			entry_free_data(e);
+		}
+	}
 
 	free(pc->pc_pool);
 	free(pc);
@@ -217,6 +246,7 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	e->pc_block = block;
 	e->pc_data = buf;
 	e->pc_size = size;
+	e->pc_dirty = 0;
 
 	/* Insert into hash chain */
 	e->pc_hash_next = pc->pc_hash[h];
@@ -235,6 +265,7 @@ page_cache_invalidate(struct page_cache *pc, daddr_t block)
 
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
+			entry_writeback(pc, e);
 			lru_remove(e);
 			hash_remove(pc, e);
 			entry_free_data(e);
@@ -256,6 +287,7 @@ page_cache_flush(struct page_cache *pc)
 	for (i = 0; i < pc->pc_max_entries; i++) {
 		struct page_cache_entry *e = &pc->pc_pool[i];
 		if (e->pc_data) {
+			entry_writeback(pc, e);
 			lru_remove(e);
 			hash_remove(pc, e);
 			entry_free_data(e);
@@ -267,6 +299,74 @@ page_cache_flush(struct page_cache *pc)
 	pc->pc_count = 0;
 }
 
+int
+page_cache_mark_dirty(struct page_cache *pc, daddr_t block)
+{
+	unsigned int h = PC_HASH(block);
+	struct page_cache_entry *e;
+
+	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
+		if (e->pc_block == block) {
+			e->pc_dirty = 1;
+			return 0;
+		}
+	}
+	return -1;
+}
+
+void
+page_cache_update(struct page_cache *pc, daddr_t block,
+		  vm_offset_t data, vm_size_t size)
+{
+	unsigned int h = PC_HASH(block);
+	struct page_cache_entry *e;
+	vm_offset_t buf;
+
+	/* If block is already cached, update in place */
+	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
+		if (e->pc_block == block) {
+			if (e->pc_size == size) {
+				memcpy((void *)e->pc_data,
+				       (void *)data, size);
+			} else {
+				entry_free_data(e);
+				if (vm_allocate(mach_task_self(), &buf,
+						size, TRUE) != KERN_SUCCESS)
+					return;
+				memcpy((void *)buf, (void *)data, size);
+				e->pc_data = buf;
+				e->pc_size = size;
+			}
+			e->pc_dirty = 1;
+			lru_remove(e);
+			lru_insert_mru(pc, e);
+			return;
+		}
+	}
+
+	/* Not cached — insert as new dirty entry */
+	page_cache_insert(pc, block, data, size);
+	page_cache_mark_dirty(pc, block);
+}
+
+int
+page_cache_sync(struct page_cache *pc)
+{
+	struct page_cache_entry *e;
+	int failures = 0;
+
+	/* Walk LRU list from LRU to MRU */
+	for (e = pc->pc_lru_tail.pc_lru_prev;
+	     e != &pc->pc_lru_head;
+	     e = e->pc_lru_prev) {
+		if (e->pc_dirty) {
+			if (entry_writeback(pc, e) != 0)
+				failures++;
+		}
+	}
+	return failures;
+}
+
 void
 page_cache_print_stats(struct page_cache *pc)
 {
@@ -274,7 +374,7 @@ page_cache_print_stats(struct page_cache *pc)
 	unsigned int hit_pct = total ? (pc->pc_hits * 100) / total : 0;
 
 	printf("page cache: %u entries, %u/%u hits/misses (%u%%), "
-	       "%u evictions\n",
+	       "%u evictions, %u writebacks\n",
 	       pc->pc_count, pc->pc_hits, pc->pc_misses,
-	       hit_pct, pc->pc_evictions);
+	       hit_pct, pc->pc_evictions, pc->pc_writebacks);
 }

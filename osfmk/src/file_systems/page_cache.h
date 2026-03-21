@@ -28,7 +28,7 @@
  * via device_read() can use this cache to avoid repeated IPC round-trips.
  *
  * Usage:
- *   struct page_cache *pc = page_cache_create(256);  // 256 blocks max
+ *   struct page_cache *pc = page_cache_create(256, my_writeback, dev);
  *   dev->cache = pc;
  *   // ... filesystem reads will check/populate the cache ...
  *   page_cache_destroy(pc);
@@ -42,10 +42,19 @@
 
 #define PAGE_CACHE_HASH_BUCKETS	128
 
+/*
+ * Writeback callback: called when a dirty block must be flushed to disk.
+ * Arguments: opaque context, block number, data pointer, data size.
+ * Returns 0 on success, non-zero on failure.
+ */
+typedef int (*page_cache_writeback_fn)(void *ctx, daddr_t block,
+				       vm_offset_t data, vm_size_t size);
+
 struct page_cache_entry {
 	daddr_t			pc_block;	/* disk block number (key) */
 	vm_offset_t		pc_data;	/* cached block data */
 	vm_size_t		pc_size;	/* size of cached data */
+	int			pc_dirty;	/* block has been modified */
 	struct page_cache_entry	*pc_hash_next;	/* hash chain */
 	struct page_cache_entry	*pc_lru_next;	/* toward MRU */
 	struct page_cache_entry	*pc_lru_prev;	/* toward LRU */
@@ -57,6 +66,9 @@ struct page_cache {
 	unsigned int		pc_hits;
 	unsigned int		pc_misses;
 	unsigned int		pc_evictions;
+	unsigned int		pc_writebacks;
+	page_cache_writeback_fn	pc_writeback;	/* dirty block flush callback */
+	void			*pc_writeback_ctx; /* opaque context for callback */
 	struct page_cache_entry	*pc_pool;	/* pre-allocated entry array */
 	struct page_cache_entry	*pc_free;	/* singly-linked free list */
 	struct page_cache_entry	*pc_hash[PAGE_CACHE_HASH_BUCKETS];
@@ -67,9 +79,14 @@ struct page_cache {
 
 /*
  * Create a page cache with the given maximum number of cached blocks.
+ * 'writeback' is called when a dirty block must be flushed (eviction or sync).
+ * 'ctx' is passed as-is to the callback (typically the device port).
+ * If writeback is NULL, dirty blocks are silently discarded on eviction.
  * Returns NULL on allocation failure.
  */
-struct page_cache *page_cache_create(unsigned int max_entries);
+struct page_cache *page_cache_create(unsigned int max_entries,
+				     page_cache_writeback_fn writeback,
+				     void *ctx);
 
 /*
  * Destroy a page cache, freeing all cached data and the cache itself.
@@ -104,7 +121,28 @@ void page_cache_invalidate(struct page_cache *pc, daddr_t block);
 void page_cache_flush(struct page_cache *pc);
 
 /*
- * Print cache statistics (hits, misses, evictions, hit rate).
+ * Mark a cached block as dirty.  Returns 0 on success, -1 if the
+ * block is not in the cache.
+ */
+int page_cache_mark_dirty(struct page_cache *pc, daddr_t block);
+
+/*
+ * Update data in a cached block (or insert it) and mark it dirty.
+ * Used for write operations: the caller provides new data, the cache
+ * copies it, and the block is marked dirty for later writeback.
+ */
+void page_cache_update(struct page_cache *pc, daddr_t block,
+		       vm_offset_t data, vm_size_t size);
+
+/*
+ * Synchronize all dirty blocks to disk via the writeback callback.
+ * Dirty blocks remain cached (clean) after successful writeback.
+ * Returns the number of blocks that failed to write back.
+ */
+int page_cache_sync(struct page_cache *pc);
+
+/*
+ * Print cache statistics (hits, misses, evictions, writebacks, hit rate).
  */
 void page_cache_print_stats(struct page_cache *pc);
 

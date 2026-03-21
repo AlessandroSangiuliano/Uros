@@ -249,6 +249,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 		printf("read_inode(%d)\n", i);
 #endif 
 	fs = fp->f_fs;
+	fp->f_ino = inumber;
 	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
 
 	rc = device_read(fp->f_dev.dev_port,
@@ -1139,6 +1140,11 @@ ext2fs_close_file(
 	register struct ext2fs_file *fp = (struct ext2fs_file *)private;
 
 	/*
+	 * Flush dirty metadata before closing.
+	 */
+	ext2fs_flush_metadata(private);
+
+	/*
 	 * Free the disk super-block.
 	 */
 	unmount_fs(fp);
@@ -1223,4 +1229,636 @@ ext2fs_file_is_executable(fs_private_t private)
 		return (FALSE);
 	}
 	return(TRUE);
+}
+
+/* ================================================================
+ * Write support
+ * ================================================================ */
+
+/*
+ * Write a raw disk block (in fs block units) to the device.
+ */
+static int
+write_disk_block(
+	struct ext2fs_file	*fp,
+	daddr_t			disk_block,
+	vm_offset_t		data,
+	vm_size_t		size)
+{
+	io_buf_len_t bytes_written;
+	kern_return_t rc;
+
+	rc = device_write(fp->f_dev.dev_port, 0,
+			  (recnum_t) dbtorec(&fp->f_dev,
+					     ext2_fsbtodb(fp->f_fs,
+							 disk_block)),
+			  (io_buf_ptr_t) data,
+			  (mach_msg_type_number_t) size,
+			  &bytes_written);
+	if (rc != KERN_SUCCESS)
+		return rc;
+	if ((vm_size_t)bytes_written != size)
+		return KERN_FAILURE;
+	return 0;
+}
+
+/*
+ * Read a raw disk block (in fs block units) from the device.
+ */
+static int
+read_disk_block(
+	struct ext2fs_file	*fp,
+	daddr_t			disk_block,
+	vm_offset_t		*data_out,
+	vm_size_t		*size_out)
+{
+	return device_read(fp->f_dev.dev_port, 0,
+			   (recnum_t) dbtorec(&fp->f_dev,
+					      ext2_fsbtodb(fp->f_fs,
+							  disk_block)),
+			   (int) EXT2_BLOCK_SIZE(fp->f_fs),
+			   (char **) data_out,
+			   (unsigned int *) size_out);
+}
+
+/*
+ * Allocate a free block from the filesystem.
+ * Prefers the block group 'goal_group' (or 0 for any).
+ * Returns the allocated disk block number, or 0 on failure.
+ *
+ * Updates: block bitmap on disk, group descriptor free count,
+ * superblock free count.
+ */
+static daddr_t
+block_alloc(struct ext2fs_file *fp, int goal_group)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int ngroups;
+	int group, g;
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int bits_per_group = fs->s_blocks_per_group;
+	int rc;
+	daddr_t alloc_block;
+
+	ngroups = (fs->s_blocks_count - fs->s_first_data_block +
+		   fs->s_blocks_per_group - 1) / fs->s_blocks_per_group;
+
+	/* Search from goal_group, wrapping around */
+	for (g = 0; g < ngroups; g++) {
+		group = (goal_group + g) % ngroups;
+
+		if (le16_to_cpu(gd[group].bg_free_blocks_count) == 0)
+			continue;
+
+		/* Read block bitmap for this group */
+		rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_block_bitmap),
+				     &bitmap, &bitmap_size);
+		if (rc != 0)
+			continue;
+
+		/* Scan bitmap for a free bit */
+		{
+			unsigned char *bm = (unsigned char *)bitmap;
+			int bit;
+			int max_bit = bits_per_group;
+
+			/* Last group may have fewer blocks */
+			if (group == ngroups - 1) {
+				int remaining = fs->s_blocks_count -
+					fs->s_first_data_block -
+					(unsigned long)group * bits_per_group;
+				if (remaining < max_bit)
+					max_bit = remaining;
+			}
+
+			for (bit = 0; bit < max_bit; bit++) {
+				if (!(bm[bit >> 3] & (1 << (bit & 7)))) {
+					/* Found free block — mark as used */
+					bm[bit >> 3] |= (1 << (bit & 7));
+
+					/* Write bitmap back */
+					rc = write_disk_block(fp,
+						le32_to_cpu(gd[group].bg_block_bitmap),
+						bitmap, block_size);
+					if (rc != 0) {
+						vm_deallocate(mach_task_self(),
+							      bitmap, bitmap_size);
+						return 0;
+					}
+
+					/* Update group descriptor */
+					gd[group].bg_free_blocks_count =
+						cpu_to_le16(
+						le16_to_cpu(gd[group].bg_free_blocks_count) - 1);
+
+					/* Update superblock */
+					fs->s_free_blocks_count--;
+
+					alloc_block = fs->s_first_data_block +
+						(unsigned long)group * bits_per_group + bit;
+
+					vm_deallocate(mach_task_self(),
+						      bitmap, bitmap_size);
+					return alloc_block;
+				}
+			}
+		}
+
+		vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+	}
+
+	return 0;	/* no space */
+}
+
+/*
+ * Write the inode back to disk.
+ */
+static int
+write_inode(ino_t inumber, struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	daddr_t disk_block;
+	vm_offset_t buf;
+	vm_size_t buf_size;
+	struct ext2_inode *raw_inode;
+	struct ext2_inode *inode = &fp->i_ic;
+	int rc;
+	unsigned long block;
+
+	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
+
+	/* Read the block containing the inode */
+	rc = read_disk_block(fp, disk_block, &buf, &buf_size);
+	if (rc != 0)
+		return rc;
+
+	/* Locate the inode within the block */
+	raw_inode = (struct ext2_inode *)
+		((char *)buf + ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs));
+
+	/* Write back fields in little-endian */
+	raw_inode->i_mode = cpu_to_le16(inode->i_mode);
+	raw_inode->i_uid = cpu_to_le16(inode->i_uid);
+	raw_inode->i_size = cpu_to_le32(inode->i_size);
+	raw_inode->i_atime = cpu_to_le32(inode->i_atime);
+	raw_inode->i_ctime = cpu_to_le32(inode->i_ctime);
+	raw_inode->i_mtime = cpu_to_le32(inode->i_mtime);
+	raw_inode->i_dtime = cpu_to_le32(inode->i_dtime);
+	raw_inode->i_gid = cpu_to_le16(inode->i_gid);
+	raw_inode->i_links_count = cpu_to_le16(inode->i_links_count);
+	raw_inode->i_blocks = cpu_to_le32(inode->i_blocks);
+	raw_inode->i_flags = cpu_to_le32(inode->i_flags);
+	for (block = 0; block < EXT2_N_BLOCKS; block++)
+		raw_inode->i_block[block] = cpu_to_le32(inode->i_block[block]);
+	raw_inode->i_file_acl = cpu_to_le32(inode->i_file_acl);
+	raw_inode->i_dir_acl = cpu_to_le32(inode->i_dir_acl);
+	raw_inode->i_faddr = cpu_to_le32(inode->i_faddr);
+	raw_inode->i_frag = inode->i_frag;
+	raw_inode->i_fsize = inode->i_fsize;
+
+	/* Write the block back */
+	rc = write_disk_block(fp, disk_block, buf, EXT2_BLOCK_SIZE(fs));
+	vm_deallocate(mach_task_self(), buf, buf_size);
+	return rc;
+}
+
+/*
+ * Write the group descriptors back to disk.
+ */
+static int
+write_gd(struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	int gd_location = fs->s_first_data_block + 1;
+	int gd_sector = (gd_location * EXT2_BLOCK_SIZE(fs)) / DEV_BSIZE;
+	io_buf_len_t bytes_written;
+
+	return device_write(fp->f_dev.dev_port, 0,
+			    (recnum_t) dbtorec(&fp->f_dev, gd_sector),
+			    (io_buf_ptr_t) fp->f_gd,
+			    (mach_msg_type_number_t) fp->f_gd_size,
+			    &bytes_written);
+}
+
+/*
+ * Write the superblock back to disk.
+ */
+static int
+write_super(struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_super_block raw;
+	io_buf_len_t bytes_written;
+
+	/* Convert to little-endian for on-disk format */
+	memset(&raw, 0, sizeof(raw));
+	raw.s_inodes_count = cpu_to_le32(fs->s_inodes_count);
+	raw.s_blocks_count = cpu_to_le32(fs->s_blocks_count);
+	raw.s_r_blocks_count = cpu_to_le32(fs->s_r_blocks_count);
+	raw.s_free_blocks_count = cpu_to_le32(fs->s_free_blocks_count);
+	raw.s_free_inodes_count = cpu_to_le32(fs->s_free_inodes_count);
+	raw.s_first_data_block = cpu_to_le32(fs->s_first_data_block);
+	raw.s_log_block_size = cpu_to_le32(fs->s_log_block_size);
+	raw.s_log_frag_size = cpu_to_le32(fs->s_log_frag_size);
+	raw.s_blocks_per_group = cpu_to_le32(fs->s_blocks_per_group);
+	raw.s_frags_per_group = cpu_to_le32(fs->s_frags_per_group);
+	raw.s_inodes_per_group = cpu_to_le32(fs->s_inodes_per_group);
+	raw.s_mtime = cpu_to_le32(fs->s_mtime);
+	raw.s_wtime = cpu_to_le32(fs->s_wtime);
+	raw.s_mnt_count = cpu_to_le16(fs->s_mnt_count);
+	raw.s_max_mnt_count = cpu_to_le16(fs->s_max_mnt_count);
+	raw.s_magic = cpu_to_le16(fs->s_magic);
+	raw.s_state = cpu_to_le16(fs->s_state);
+	raw.s_errors = cpu_to_le16(fs->s_errors);
+	raw.s_minor_rev_level = cpu_to_le16(fs->s_minor_rev_level);
+	raw.s_lastcheck = cpu_to_le32(fs->s_lastcheck);
+	raw.s_checkinterval = cpu_to_le32(fs->s_checkinterval);
+	raw.s_creator_os = cpu_to_le32(fs->s_creator_os);
+	raw.s_rev_level = cpu_to_le32(fs->s_rev_level);
+	raw.s_def_resuid = cpu_to_le16(fs->s_def_resuid);
+	raw.s_def_resgid = cpu_to_le16(fs->s_def_resgid);
+	if (fs->s_rev_level >= EXT2_DYNAMIC_REV) {
+		raw.s_first_ino = cpu_to_le32(fs->s_first_ino);
+		raw.s_inode_size = cpu_to_le16(fs->s_inode_size);
+		raw.s_block_group_nr = cpu_to_le16(fs->s_block_group_nr);
+		raw.s_feature_compat = cpu_to_le32(fs->s_feature_compat);
+		raw.s_feature_incompat = cpu_to_le32(fs->s_feature_incompat);
+		raw.s_feature_ro_compat = cpu_to_le32(fs->s_feature_ro_compat);
+	}
+
+	return device_write(fp->f_dev.dev_port, 0,
+			    (recnum_t) dbtorec(&fp->f_dev, SBLOCK),
+			    (io_buf_ptr_t) &raw,
+			    (mach_msg_type_number_t) SBSIZE,
+			    &bytes_written);
+}
+
+/*
+ * Get or allocate an indirect block, then store 'value' at 'idx'.
+ * *ind_blk_p is the indirect block number (0 = must allocate).
+ * On success, *ind_blk_p is updated (if allocated), and the indirect
+ * block is written back to disk.  fp->i_ic.i_blocks is updated for
+ * newly allocated indirect blocks.
+ */
+static int
+indirect_set(struct ext2fs_file *fp, daddr_t *ind_blk_p,
+	     int idx, daddr_t value, int block_size)
+{
+	vm_offset_t ind_buf;
+	vm_size_t ind_size;
+	int rc;
+
+	if (*ind_blk_p == 0) {
+		/* Allocate the indirect block */
+		*ind_blk_p = block_alloc(fp, 0);
+		if (*ind_blk_p == 0)
+			return KERN_RESOURCE_SHORTAGE;
+		fp->i_ic.i_blocks += block_size / DEV_BSIZE;
+
+		if (vm_allocate(mach_task_self(), &ind_buf,
+				block_size, TRUE) != KERN_SUCCESS)
+			return KERN_RESOURCE_SHORTAGE;
+		memset((void *)ind_buf, 0, block_size);
+		ind_size = block_size;
+	} else {
+		rc = read_disk_block(fp, *ind_blk_p, &ind_buf, &ind_size);
+		if (rc != 0)
+			return rc;
+	}
+
+	((daddr_t *)ind_buf)[idx] = cpu_to_le32(value);
+	rc = write_disk_block(fp, *ind_blk_p, ind_buf, block_size);
+	vm_deallocate(mach_task_self(), ind_buf, ind_size);
+	return rc;
+}
+
+/*
+ * Invalidate cached indirect block at the given level if it matches blk.
+ */
+static void
+invalidate_ind_cache(struct ext2fs_file *fp, int level, daddr_t blk)
+{
+	if (level < NIADDR && fp->f_blkno[level] == blk) {
+		fp->f_blkno[level] = -1;
+		if (fp->f_blk[level]) {
+			vm_deallocate(mach_task_self(),
+				      fp->f_blk[level],
+				      fp->f_blksize[level]);
+			fp->f_blk[level] = 0;
+			fp->f_blksize[level] = 0;
+		}
+	}
+}
+
+/*
+ * Write data to a file at the given offset.
+ * Allocates new blocks as needed, extends file size.
+ */
+int
+ext2fs_write_file(
+	fs_private_t		private,
+	vm_offset_t		offset,
+	vm_offset_t		data,
+	vm_size_t		size)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	struct ext2_super_block *fs = fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int rc;
+
+	while (size > 0) {
+		daddr_t file_block = ext2_lblkno(fs, offset);
+		int off = ext2_blkoff(fs, offset);
+		vm_size_t chunk = block_size - off;
+		daddr_t disk_block;
+
+		if (chunk > size)
+			chunk = size;
+
+		/* Resolve file block → disk block */
+		rc = block_map(fp, file_block, &disk_block);
+		if (rc != 0)
+			return rc;
+
+		if (disk_block == 0) {
+			int nindir = NINDIR(fs);
+
+			disk_block = block_alloc(fp, 0);
+			if (disk_block == 0)
+				return KERN_RESOURCE_SHORTAGE;
+
+			if (file_block < NDADDR) {
+				/* Direct block */
+				fp->i_ic.i_block[file_block] = disk_block;
+
+			} else if (file_block < NDADDR + nindir) {
+				/* Single indirect */
+				int idx = file_block - NDADDR;
+				daddr_t ind = fp->i_ic.i_block[EXT2_IND_BLOCK];
+
+				rc = indirect_set(fp, &ind, idx,
+						  disk_block, block_size);
+				if (rc != 0) return rc;
+				fp->i_ic.i_block[EXT2_IND_BLOCK] = ind;
+				invalidate_ind_cache(fp, 0, ind);
+
+			} else if (file_block < NDADDR + nindir +
+				   nindir * nindir) {
+				/* Double indirect */
+				int rem = file_block - NDADDR - nindir;
+				int idx1 = rem / nindir;
+				int idx2 = rem % nindir;
+				daddr_t dind =
+					fp->i_ic.i_block[EXT2_DIND_BLOCK];
+				daddr_t sind;
+				vm_offset_t dind_buf;
+				vm_size_t dind_size;
+
+				/* Get/alloc double-indirect block */
+				if (dind == 0) {
+					dind = block_alloc(fp, 0);
+					if (dind == 0)
+						return KERN_RESOURCE_SHORTAGE;
+					fp->i_ic.i_block[EXT2_DIND_BLOCK] =
+						dind;
+					fp->i_ic.i_blocks +=
+						block_size / DEV_BSIZE;
+				}
+
+				/* Read it to find single-indirect pointer */
+				rc = read_disk_block(fp, dind,
+						     &dind_buf, &dind_size);
+				if (rc != 0) return rc;
+				sind = le32_to_cpu(
+					((daddr_t *)dind_buf)[idx1]);
+				vm_deallocate(mach_task_self(),
+					      dind_buf, dind_size);
+
+				/* Set data block in single-indirect */
+				rc = indirect_set(fp, &sind, idx2,
+						  disk_block, block_size);
+				if (rc != 0) return rc;
+
+				/* Update double-indirect entry if sind
+				 * was just allocated */
+				rc = indirect_set(fp, &dind, idx1,
+						  sind, block_size);
+				if (rc != 0) return rc;
+				fp->i_ic.i_block[EXT2_DIND_BLOCK] = dind;
+				invalidate_ind_cache(fp, 0, sind);
+				invalidate_ind_cache(fp, 1, dind);
+
+			} else {
+				/* Triple indirect */
+				long rem = file_block - NDADDR - nindir -
+					   (long)nindir * nindir;
+				int idx1 = rem / ((long)nindir * nindir);
+				int idx2 = (rem / nindir) % nindir;
+				int idx3 = rem % nindir;
+				daddr_t tind =
+					fp->i_ic.i_block[EXT2_TIND_BLOCK];
+				daddr_t dind, sind;
+				vm_offset_t tbuf, dbuf;
+				vm_size_t tsize, dsize;
+
+				/* Get/alloc triple-indirect block */
+				if (tind == 0) {
+					tind = block_alloc(fp, 0);
+					if (tind == 0)
+						return KERN_RESOURCE_SHORTAGE;
+					fp->i_ic.i_block[EXT2_TIND_BLOCK] =
+						tind;
+					fp->i_ic.i_blocks +=
+						block_size / DEV_BSIZE;
+				}
+
+				/* Read triple to find double pointer */
+				rc = read_disk_block(fp, tind,
+						     &tbuf, &tsize);
+				if (rc != 0) return rc;
+				dind = le32_to_cpu(
+					((daddr_t *)tbuf)[idx1]);
+				vm_deallocate(mach_task_self(),
+					      tbuf, tsize);
+
+				/* Get/alloc double-indirect */
+				if (dind == 0) {
+					dind = block_alloc(fp, 0);
+					if (dind == 0)
+						return KERN_RESOURCE_SHORTAGE;
+					fp->i_ic.i_blocks +=
+						block_size / DEV_BSIZE;
+				}
+
+				/* Read double to find single pointer */
+				rc = read_disk_block(fp, dind,
+						     &dbuf, &dsize);
+				if (rc != 0) return rc;
+				sind = le32_to_cpu(
+					((daddr_t *)dbuf)[idx2]);
+				vm_deallocate(mach_task_self(),
+					      dbuf, dsize);
+
+				/* Set data block in single-indirect */
+				rc = indirect_set(fp, &sind, idx3,
+						  disk_block, block_size);
+				if (rc != 0) return rc;
+
+				/* Update double → single */
+				rc = indirect_set(fp, &dind, idx2,
+						  sind, block_size);
+				if (rc != 0) return rc;
+
+				/* Update triple → double */
+				rc = indirect_set(fp, &tind, idx1,
+						  dind, block_size);
+				if (rc != 0) return rc;
+				fp->i_ic.i_block[EXT2_TIND_BLOCK] = tind;
+				invalidate_ind_cache(fp, 0, sind);
+				invalidate_ind_cache(fp, 1, dind);
+				invalidate_ind_cache(fp, 2, tind);
+			}
+			fp->i_ic.i_blocks += block_size / DEV_BSIZE;
+		}
+
+		/* Invalidate f_buf so read path re-fetches from cache */
+		if (fp->f_buf_blkno == file_block) {
+			if (fp->f_buf) {
+				vm_deallocate(mach_task_self(),
+					      fp->f_buf, fp->f_buf_size);
+				fp->f_buf = 0;
+			}
+			fp->f_buf_blkno = -1;
+		}
+
+		if (off == 0 && chunk == (vm_size_t)block_size) {
+			/* Full block write — use page cache */
+			if (fp->f_dev.cache)
+				page_cache_update(fp->f_dev.cache,
+						  disk_block, data, chunk);
+			else {
+				rc = write_disk_block(fp, disk_block,
+						      data, chunk);
+				if (rc != 0)
+					return rc;
+			}
+		} else {
+			/* Partial block — read-modify-write */
+			vm_offset_t blkbuf;
+			vm_size_t blkbuf_size;
+
+			if (fp->f_dev.cache) {
+				vm_offset_t cached;
+				vm_size_t cached_size;
+
+				if (page_cache_lookup(fp->f_dev.cache,
+						      disk_block,
+						      &cached,
+						      &cached_size) == 0) {
+					/* Modify in-place via update */
+					vm_offset_t tmp;
+					if (vm_allocate(mach_task_self(),
+							&tmp, block_size,
+							TRUE) != KERN_SUCCESS)
+						return KERN_RESOURCE_SHORTAGE;
+					memcpy((void *)tmp, (void *)cached,
+					       block_size);
+					memcpy((void *)(tmp + off),
+					       (void *)data, chunk);
+					page_cache_update(fp->f_dev.cache,
+							  disk_block,
+							  tmp, block_size);
+					vm_deallocate(mach_task_self(),
+						      tmp, block_size);
+					goto next;
+				}
+			}
+
+			/* Read existing block from disk */
+			rc = read_disk_block(fp, disk_block,
+					     &blkbuf, &blkbuf_size);
+			if (rc != 0) {
+				/* New block: zero-fill */
+				if (vm_allocate(mach_task_self(), &blkbuf,
+						block_size, TRUE) != KERN_SUCCESS)
+					return KERN_RESOURCE_SHORTAGE;
+				memset((void *)blkbuf, 0, block_size);
+				blkbuf_size = block_size;
+			}
+
+			memcpy((void *)(blkbuf + off), (void *)data, chunk);
+
+			if (fp->f_dev.cache)
+				page_cache_update(fp->f_dev.cache,
+						  disk_block,
+						  blkbuf, block_size);
+			else {
+				rc = write_disk_block(fp, disk_block,
+						      blkbuf, block_size);
+			}
+			vm_deallocate(mach_task_self(), blkbuf, blkbuf_size);
+			if (rc != 0)
+				return rc;
+		}
+
+	next:
+		offset += chunk;
+		data += chunk;
+		size -= chunk;
+	}
+
+	/* Update file size if extended */
+	if (offset > fp->i_ic.i_size)
+		fp->i_ic.i_size = offset;
+
+	/* Mark metadata dirty — flushed on sync or close */
+	fp->f_inode_dirty = 1;
+	fp->f_gd_dirty = 1;
+	fp->f_super_dirty = 1;
+
+	return 0;
+}
+
+/*
+ * Sync all dirty page cache entries to disk.
+ */
+int
+ext2fs_flush_metadata(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	int rc;
+
+	if (fp->f_inode_dirty) {
+		rc = write_inode(fp->f_ino, fp);
+		if (rc != 0)
+			return rc;
+		fp->f_inode_dirty = 0;
+	}
+	if (fp->f_gd_dirty) {
+		write_gd(fp);
+		fp->f_gd_dirty = 0;
+	}
+	if (fp->f_super_dirty) {
+		write_super(fp);
+		fp->f_super_dirty = 0;
+	}
+	return 0;
+}
+
+int
+ext2fs_sync(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	int rc;
+
+	rc = ext2fs_flush_metadata(private);
+	if (rc != 0)
+		return rc;
+
+	if (fp->f_dev.cache)
+		return page_cache_sync(fp->f_dev.cache);
+	return 0;
 }
