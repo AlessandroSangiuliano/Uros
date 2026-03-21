@@ -1221,6 +1221,11 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		bench_ext2_file_read("ext2 read (hello.txt)", "hello.txt",
 				     4096);
 
+		/* Sequential read: bench.dat (~4 MB) at different chunk sizes */
+		bench_ext2_file_read("ext2 seq read 1K", "bench.dat", 1024);
+		bench_ext2_file_read("ext2 seq read 4K", "bench.dat", 4096);
+		bench_ext2_file_read("ext2 seq read 32K", "bench.dat", 32768);
+
 		/* Write correctness test */
 		test_ext2_write_verify();
 

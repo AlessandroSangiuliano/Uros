@@ -241,6 +241,7 @@ free_file_buffers(register struct ext2fs_file *fp)
 	    fp->f_buf = 0;
 	}
 	fp->f_buf_blkno = -1;
+	fp->f_ra_last_block = -1;
 
 	/*
 	 * Free the cached inode block
@@ -516,6 +517,82 @@ block_map(
 }
 
 /*
+ * Readahead: on sequential cache miss, prefetch up to RA_BLOCKS
+ * contiguous disk blocks in a single device_read IPC and insert
+ * them all into the page cache.
+ */
+#define EXT2_RA_BLOCKS	32
+
+static void
+ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
+	       daddr_t disk_block)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	daddr_t max_file_block;
+	int n_contig;
+	int i, rc;
+	vm_offset_t ra_buf;
+	vm_size_t ra_buf_size;
+	vm_offset_t cached;
+	vm_size_t cached_size;
+
+	if (!fp->f_dev.cache)
+		return;
+
+	max_file_block = (fp->i_ic.i_size + block_size - 1) / block_size;
+
+	/*
+	 * Find the longest run of physically contiguous blocks
+	 * starting from disk_block+1 that are not yet cached.
+	 */
+	n_contig = 1;  /* include current block */
+	for (i = 1; i < EXT2_RA_BLOCKS; i++) {
+		daddr_t fb = file_block + i;
+		daddr_t db;
+
+		if (fb >= max_file_block)
+			break;
+
+		rc = block_map(fp, fb, &db);
+		if (rc != 0 || db == 0)
+			break;
+
+		/* Must be physically contiguous */
+		if (db != disk_block + i)
+			break;
+
+		/* Stop if already cached */
+		if (page_cache_lookup(fp->f_dev.cache, db,
+				      &cached, &cached_size) == 0)
+			break;
+
+		n_contig++;
+	}
+
+	if (n_contig <= 1)
+		return;
+
+	/* Single large device_read for the whole run */
+	rc = device_read(fp->f_dev.dev_port, 0,
+			 (recnum_t) dbtorec(&fp->f_dev,
+					    ext2_fsbtodb(fs, disk_block)),
+			 n_contig * block_size,
+			 (char **)&ra_buf, (unsigned int *)&ra_buf_size);
+	if (rc != 0)
+		return;
+
+	/* Insert each block into page cache */
+	for (i = 0; i < n_contig; i++) {
+		page_cache_insert(fp->f_dev.cache, disk_block + i,
+				  ra_buf + i * block_size,
+				  (vm_size_t)block_size);
+	}
+
+	(void)vm_deallocate(mach_task_self(), ra_buf, ra_buf_size);
+}
+
+/*
  * Read a portion of a file into an internal buffer.  Return
  * the location in the buffer and the amount in the buffer.
  */
@@ -582,19 +659,34 @@ buf_read_file(
 			       block_size);
 			fp->f_buf_size = block_size;
 		    } else {
-			/* Page cache miss — read and insert */
-			rc = device_read(fp->f_dev.dev_port,
-				     0,
-				     (recnum_t) dbtorec(&fp->f_dev,
+			/* Page cache miss — readahead if sequential */
+			if (file_block == fp->f_ra_last_block + 1)
+				ext2_readahead(fp, file_block, disk_block);
+
+			/* Re-check cache (readahead may have populated it) */
+			if (page_cache_lookup(fp->f_dev.cache, disk_block,
+					      &cached, &cached_size) == 0) {
+				(void)vm_allocate(mach_task_self(),
+						  &fp->f_buf,
+						  block_size, TRUE);
+				memcpy((void *)fp->f_buf, (void *)cached,
+				       block_size);
+				fp->f_buf_size = block_size;
+			} else {
+				/* Single block read (fallback) */
+				rc = device_read(fp->f_dev.dev_port,
+					     0,
+					     (recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
-				     (int) block_size,
-				     (char **) &fp->f_buf,
-				     (unsigned int *)&fp->f_buf_size);
-			if (rc)
-			    return (rc);
-			page_cache_insert(fp->f_dev.cache, disk_block,
-					  fp->f_buf, fp->f_buf_size);
+					     (int) block_size,
+					     (char **) &fp->f_buf,
+					     (unsigned int *)&fp->f_buf_size);
+				if (rc)
+				    return (rc);
+				page_cache_insert(fp->f_dev.cache, disk_block,
+						  fp->f_buf, fp->f_buf_size);
+			}
 		    }
 		} else {
 		    rc = device_read(fp->f_dev.dev_port,
@@ -645,19 +737,34 @@ buf_read_file(
 				       block_size);
 				*size_p = block_size;
 			} else {
-				/* Page cache miss — read and insert */
-				rc = device_read_overwrite(
-					fp->f_dev.dev_port, 0,
-					(recnum_t) dbtorec(&fp->f_dev,
-						ext2_fsbtodb(fs, disk_block)),
-					(int) block_size,
-					*buf_p,
-					(unsigned int *)size_p);
-				if (rc)
-					return (rc);
-				page_cache_insert(fp->f_dev.cache,
-						  disk_block,
-						  *buf_p, *size_p);
+				/* Page cache miss — readahead if sequential */
+				if (file_block == fp->f_ra_last_block + 1)
+					ext2_readahead(fp, file_block,
+						       disk_block);
+
+				/* Re-check cache after readahead */
+				if (page_cache_lookup(fp->f_dev.cache,
+						disk_block,
+						&cached, &cached_size) == 0) {
+					memcpy((void *)*buf_p,
+					       (void *)cached, block_size);
+					*size_p = block_size;
+				} else {
+					/* Single block read (fallback) */
+					rc = device_read_overwrite(
+						fp->f_dev.dev_port, 0,
+						(recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+						(int) block_size,
+						*buf_p,
+						(unsigned int *)size_p);
+					if (rc)
+						return (rc);
+					page_cache_insert(fp->f_dev.cache,
+							  disk_block,
+							  *buf_p, *size_p);
+				}
 			}
 		} else {
 			rc = device_read_overwrite(fp->f_dev.dev_port,
@@ -679,6 +786,7 @@ buf_read_file(
 	if (*size_p > fp->i_ic.i_size - offset)
 	    *size_p = fp->i_ic.i_size - offset;
 
+	fp->f_ra_last_block = file_block;
 	return (0);
 }
 
