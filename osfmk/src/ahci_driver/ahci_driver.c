@@ -753,6 +753,107 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 	return -1;
 }
 
+/*
+ * Submit a command using caller-provided physical addresses for PRDT.
+ * Used for zero-copy DMA: the caller owns the physical pages and the
+ * AHCI controller reads/writes directly to/from them.
+ * Uses a single command slot (slot 0).
+ */
+static int
+ahci_submit_phys(int port, uint32_t start_lba, unsigned int nsectors,
+		 int write, unsigned int *caller_pa, unsigned int n_pa,
+		 unsigned int total_bytes)
+{
+	struct ahci_cmd_hdr   *hdr = (struct ahci_cmd_hdr *)clb_uva;
+	struct ahci_cmd_table *tbl;
+	struct ata_fis_h2d    *fis;
+	unsigned int n_prdt, p, bytes_left;
+	int i;
+
+	if (nsectors == 0 || n_pa == 0)
+		return -1;
+
+	/* Wait for port idle */
+	for (i = 0; i < 1000000; i++)
+		if (!(port_read(port, PORT_TFD) &
+		      (PORT_TFD_STS_BSY | PORT_TFD_STS_DRQ)))
+			break;
+
+	port_write(port, PORT_IS, ~0u);
+
+	/* Build PRDT from caller's physical addresses */
+	n_prdt = n_pa;
+	if (n_prdt > PRDT_PER_SLOT)
+		n_prdt = PRDT_PER_SLOT;
+
+	/* Command header — single slot 0 */
+	hdr[0].opts  = CMD_HDR_CFL(5);
+	if (write)
+		hdr[0].opts |= CMD_HDR_W;
+	hdr[0].prdtl = n_prdt;
+	hdr[0].prdbc = 0;
+	hdr[0].ctba  = ct_pa;
+	hdr[0].ctbau = 0;
+	hdr[0].rsvd[0] = 0;
+	hdr[0].rsvd[1] = 0;
+	hdr[0].rsvd[2] = 0;
+	hdr[0].rsvd[3] = 0;
+
+	tbl = (struct ahci_cmd_table *)ct_uva;
+	memset(tbl, 0, CT_STRIDE);
+
+	fis = (struct ata_fis_h2d *)tbl->cfis;
+	fis->fis_type         = FIS_TYPE_H2D;
+	fis->flags            = FIS_H2D_FLAG_CMD;
+	fis->device           = ATA_DEV_LBA;
+	fis->lba_lo           = (start_lba >>  0) & 0xFF;
+	fis->lba_mid          = (start_lba >>  8) & 0xFF;
+	fis->lba_hi           = (start_lba >> 16) & 0xFF;
+	fis->lba_lo_exp       = (start_lba >> 24) & 0xFF;
+	fis->lba_mid_exp      = 0;
+	fis->lba_hi_exp       = 0;
+	fis->command          = write
+		? ATA_CMD_WRITE_DMA_EXT
+		: ATA_CMD_READ_DMA_EXT;
+	fis->sector_count     = nsectors & 0xFF;
+	fis->sector_count_exp = (nsectors >> 8) & 0xFF;
+
+	/* PRDT: one entry per caller PA */
+	bytes_left = total_bytes;
+	for (p = 0; p < n_prdt; p++) {
+		unsigned int chunk = bytes_left > 4096u ? 4096u : bytes_left;
+
+		tbl->prdt[p].dba  = caller_pa[p];
+		tbl->prdt[p].dbau = 0;
+		tbl->prdt[p].rsvd = 0;
+		tbl->prdt[p].dbc  = PRDT_DBC(chunk);
+		if (p == n_prdt - 1)
+			tbl->prdt[p].dbc |= PRDT_IOC;
+		bytes_left -= chunk;
+	}
+
+	/* Issue slot 0 */
+	port_write(port, PORT_CI, 1);
+
+	/* Poll for completion */
+	for (i = 0; i < 5000000; i++) {
+		uint32_t is = port_read(port, PORT_IS);
+		if (is & PORT_IS_TFES) {
+			printf("ahci: phys task file error  IS=0x%08X  "
+			       "TFD=0x%08X\n",
+			       is, port_read(port, PORT_TFD));
+			port_write(port, PORT_IS, PORT_IS_TFES);
+			return -1;
+		}
+		if (!(port_read(port, PORT_CI) & 1))
+			return 0;
+	}
+
+	printf("ahci: phys timed out  CI=0x%08X\n",
+	       port_read(port, PORT_CI));
+	return -1;
+}
+
 /* ================================================================
  * Sequential read benchmark
  * ================================================================ */
@@ -1315,6 +1416,72 @@ bad:
 io_err:
 	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 	return D_IO_ERROR;
+}
+
+/* ================================================================
+ * Zero-copy DMA: caller provides physical addresses for PRDT
+ * ================================================================ */
+
+kern_return_t
+ds_device_read_phys(mach_port_t device, mach_port_t reply,
+		    mach_msg_type_name_t reply_poly,
+		    dev_mode_t mode, recnum_t recnum,
+		    io_buf_len_t bytes_wanted,
+		    unsigned int *phys_addrs,
+		    mach_msg_type_number_t phys_addrsCnt,
+		    io_buf_len_t *bytes_read)
+{
+	unsigned int total, nsectors;
+
+	if (active_port < 0)
+		return D_NO_SUCH_DEVICE;
+	if (bytes_wanted == 0 || phys_addrsCnt == 0)
+		return D_INVALID_SIZE;
+
+	total = (bytes_wanted + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	nsectors = total / SECTOR_SIZE;
+
+	if (ahci_submit_phys(active_port, recnum, nsectors, 0,
+			     phys_addrs, phys_addrsCnt, total) < 0)
+		return D_IO_ERROR;
+
+	*bytes_read = bytes_wanted;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_device_write_phys(mach_port_t device, mach_port_t reply,
+		     mach_msg_type_name_t reply_poly,
+		     dev_mode_t mode, recnum_t recnum,
+		     io_buf_len_t bytes_to_write,
+		     unsigned int *phys_addrs,
+		     mach_msg_type_number_t phys_addrsCnt,
+		     io_buf_len_t *bytes_written)
+{
+	unsigned int total, nsectors;
+
+	if (active_port < 0)
+		return D_NO_SUCH_DEVICE;
+	if (bytes_to_write == 0 || phys_addrsCnt == 0)
+		return D_INVALID_SIZE;
+
+	/* Invalidate readahead cache — disk content is changing */
+	if (ra_cache.buf != 0) {
+		vm_deallocate(mach_task_self(),
+			      ra_cache.buf, ra_cache.buf_size);
+		ra_cache.buf = 0;
+		ra_cache.lba_count = 0;
+	}
+
+	total = (bytes_to_write + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	nsectors = total / SECTOR_SIZE;
+
+	if (ahci_submit_phys(active_port, recnum, nsectors, 1,
+			     phys_addrs, phys_addrsCnt, total) < 0)
+		return D_IO_ERROR;
+
+	*bytes_written = bytes_to_write;
+	return KERN_SUCCESS;
 }
 
 kern_return_t

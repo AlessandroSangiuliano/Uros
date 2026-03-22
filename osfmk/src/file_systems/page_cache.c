@@ -71,15 +71,21 @@ hash_remove(struct page_cache *pc, struct page_cache_entry *e)
 	}
 }
 
-/* Free the data buffer of a cache entry */
+/* Free the data buffer of a cache entry.
+ * In DMA mode the buffer is part of the pre-allocated pool —
+ * do NOT vm_deallocate individual entries. */
 static void
-entry_free_data(struct page_cache_entry *e)
+entry_free_data(struct page_cache *pc, struct page_cache_entry *e)
 {
-	if (e->pc_data) {
-		vm_deallocate(mach_task_self(), e->pc_data, e->pc_size);
-		e->pc_data = 0;
-		e->pc_size = 0;
+	if (!e->pc_data)
+		return;
+	if (pc->pc_dma_pool) {
+		/* DMA pool: buffer is permanent, just reset block key */
+		return;
 	}
+	vm_deallocate(mach_task_self(), e->pc_data, e->pc_size);
+	e->pc_data = 0;
+	e->pc_size = 0;
 }
 
 /* Write back a dirty entry via the writeback callback */
@@ -91,7 +97,7 @@ entry_writeback(struct page_cache *pc, struct page_cache_entry *e)
 	if (pc->pc_writeback) {
 		int ret = pc->pc_writeback(pc->pc_writeback_ctx,
 					   e->pc_block, e->pc_data,
-					   e->pc_size);
+					   e->pc_size, e->pc_phys);
 		if (ret != 0)
 			return ret;
 	}
@@ -115,7 +121,7 @@ evict_lru(struct page_cache *pc)
 
 	lru_remove(victim);
 	hash_remove(pc, victim);
-	entry_free_data(victim);
+	entry_free_data(pc, victim);
 	pc->pc_count--;
 	pc->pc_evictions++;
 
@@ -176,10 +182,17 @@ page_cache_destroy(struct page_cache *pc)
 	/* Flush dirty blocks to disk before destroying */
 	for (i = 0; i < pc->pc_max_entries; i++) {
 		struct page_cache_entry *e = &pc->pc_pool[i];
-		if (e->pc_data) {
+		if (e->pc_data && e->pc_block != (daddr_t)-1)
 			entry_writeback(pc, e);
-			entry_free_data(e);
-		}
+	}
+
+	if (pc->pc_dma_pool) {
+		/* Free the entire DMA pool at once */
+		vm_deallocate(mach_task_self(), pc->pc_dma_pool,
+			      pc->pc_dma_pool_size);
+	} else {
+		for (i = 0; i < pc->pc_max_entries; i++)
+			entry_free_data(pc, &pc->pc_pool[i]);
 	}
 
 	free(pc->pc_pool);
@@ -232,14 +245,6 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 		}
 	}
 
-	/* Allocate cache buffer and copy data (vm_allocate is safe unlocked,
-	 * but we hold the lock to keep the insert atomic) */
-	if (vm_allocate(mach_task_self(), &buf, size, TRUE) != KERN_SUCCESS) {
-		mutex_unlock(&pc->pc_lock);
-		return;
-	}
-	memcpy((void *)buf, (void *)data, size);
-
 	/* Get a free entry, evicting if necessary */
 	if (pc->pc_free) {
 		e = pc->pc_free;
@@ -249,15 +254,31 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 		e = evict_lru(pc);
 		if (!e) {
 			mutex_unlock(&pc->pc_lock);
-			vm_deallocate(mach_task_self(), buf, size);
 			return;
 		}
 	}
 
+	if (pc->pc_dma_pool) {
+		/* DMA mode: buffer is pre-allocated, just copy data in */
+		memcpy((void *)e->pc_data, (void *)data,
+		       size < e->pc_size ? size : e->pc_size);
+	} else {
+		/* Non-DMA: allocate a new buffer */
+		if (vm_allocate(mach_task_self(), &buf, size, TRUE)
+		    != KERN_SUCCESS) {
+			/* Return entry to free list */
+			e->pc_hash_next = pc->pc_free;
+			pc->pc_free = e;
+			mutex_unlock(&pc->pc_lock);
+			return;
+		}
+		memcpy((void *)buf, (void *)data, size);
+		e->pc_data = buf;
+		e->pc_size = size;
+	}
+
 	/* Fill entry */
 	e->pc_block = block;
-	e->pc_data = buf;
-	e->pc_size = size;
 	e->pc_dirty = 0;
 
 	/* Insert into hash chain */
@@ -283,7 +304,7 @@ page_cache_invalidate(struct page_cache *pc, daddr_t block)
 			entry_writeback(pc, e);
 			lru_remove(e);
 			hash_remove(pc, e);
-			entry_free_data(e);
+			entry_free_data(pc, e);
 			e->pc_block = -1;
 			/* Return to free list */
 			e->pc_hash_next = pc->pc_free;
@@ -304,11 +325,11 @@ page_cache_flush(struct page_cache *pc)
 	mutex_lock(&pc->pc_lock);
 	for (i = 0; i < pc->pc_max_entries; i++) {
 		struct page_cache_entry *e = &pc->pc_pool[i];
-		if (e->pc_data) {
+		if (e->pc_data && e->pc_block != (daddr_t)-1) {
 			entry_writeback(pc, e);
 			lru_remove(e);
 			hash_remove(pc, e);
-			entry_free_data(e);
+			entry_free_data(pc, e);
 			e->pc_block = -1;
 			e->pc_hash_next = pc->pc_free;
 			pc->pc_free = e;
@@ -349,11 +370,14 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 	/* If block is already cached, update in place */
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
-			if (e->pc_size == size) {
+			if (pc->pc_dma_pool || e->pc_size == size) {
+				/* DMA: fixed-size slot; non-DMA: same size */
+				vm_size_t copy = size < e->pc_size
+						? size : e->pc_size;
 				memcpy((void *)e->pc_data,
-				       (void *)data, size);
+				       (void *)data, copy);
 			} else {
-				entry_free_data(e);
+				entry_free_data(pc, e);
 				if (vm_allocate(mach_task_self(), &buf,
 						size, TRUE) != KERN_SUCCESS) {
 					mutex_unlock(&pc->pc_lock);
@@ -390,6 +414,7 @@ struct sync_entry {
 	daddr_t		block;
 	vm_offset_t	data;
 	vm_size_t	size;
+	vm_offset_t	phys;
 };
 
 /* Sort batch by block number (insertion sort, N <= 64) */
@@ -450,6 +475,7 @@ page_cache_sync(struct page_cache *pc)
 				batch[n].block = e->pc_block;
 				batch[n].data  = e->pc_data;
 				batch[n].size  = e->pc_size;
+				batch[n].phys  = e->pc_phys;
 				n++;
 			}
 			e = e->pc_lru_prev;
@@ -490,7 +516,8 @@ page_cache_sync(struct page_cache *pc)
 				int ret = pc->pc_writeback(
 					pc->pc_writeback_ctx,
 					run_start,
-					batch[i].data, blksz);
+					batch[i].data, blksz,
+					batch[i].phys);
 				if (ret != 0)
 					failures++;
 				else
@@ -513,7 +540,8 @@ page_cache_sync(struct page_cache *pc)
 						    pc->pc_writeback_ctx,
 						    batch[i + j].block,
 						    batch[i + j].data,
-						    blksz);
+						    blksz,
+						    batch[i + j].phys);
 						if (ret != 0)
 							failures++;
 						else
@@ -533,7 +561,7 @@ page_cache_sync(struct page_cache *pc)
 
 				ret = pc->pc_writeback(
 					pc->pc_writeback_ctx,
-					run_start, mbuf, total);
+					run_start, mbuf, total, 0);
 
 				vm_deallocate(mach_task_self(), mbuf,
 					      total);
@@ -549,6 +577,102 @@ page_cache_sync(struct page_cache *pc)
 	} while (start != NULL);
 
 	return failures;
+}
+
+struct page_cache *
+page_cache_create_dma(unsigned int max_entries, vm_size_t block_size,
+		      vm_offset_t pool_va, unsigned int *pa_list,
+		      unsigned int n_pages,
+		      page_cache_writeback_fn writeback, void *ctx)
+{
+	struct page_cache *pc;
+	unsigned int entries_per_page, max_possible, i;
+
+	if (block_size == 0 || block_size > 4096 || n_pages == 0)
+		return NULL;
+
+	entries_per_page = 4096 / (unsigned int)block_size;
+	max_possible = n_pages * entries_per_page;
+	if (max_entries > max_possible)
+		max_entries = max_possible;
+
+	pc = page_cache_create(max_entries, writeback, ctx);
+	if (!pc)
+		return NULL;
+
+	/* Set up DMA pool metadata */
+	pc->pc_dma_pool = pool_va;
+	pc->pc_dma_pool_size = (vm_size_t)n_pages * 4096;
+	pc->pc_dma_n_pages = n_pages;
+	pc->pc_block_size = block_size;
+	if (n_pages > 1024)
+		n_pages = 1024;
+	memcpy(pc->pc_dma_pa, pa_list, n_pages * sizeof(unsigned int));
+
+	/* Pre-assign data buffers and physical addresses to each entry */
+	for (i = 0; i < max_entries; i++) {
+		unsigned int page_idx = i / entries_per_page;
+		unsigned int offset = (i % entries_per_page) *
+				      (unsigned int)block_size;
+
+		pc->pc_pool[i].pc_data = pool_va + page_idx * 4096 + offset;
+		pc->pc_pool[i].pc_phys = pa_list[page_idx] + offset;
+		pc->pc_pool[i].pc_size = block_size;
+	}
+
+	return pc;
+}
+
+struct page_cache_entry *
+page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
+{
+	unsigned int h;
+	struct page_cache_entry *e;
+
+	if (!pc->pc_dma_pool)
+		return NULL;
+
+	mutex_lock(&pc->pc_lock);
+
+	/* Check if already cached */
+	h = PC_HASH(block);
+	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
+		if (e->pc_block == block) {
+			lru_remove(e);
+			lru_insert_mru(pc, e);
+			pc->pc_hits++;
+			mutex_unlock(&pc->pc_lock);
+			return e;
+		}
+	}
+
+	pc->pc_misses++;
+
+	/* Get a free entry or evict */
+	if (pc->pc_free) {
+		e = pc->pc_free;
+		pc->pc_free = e->pc_hash_next;
+		e->pc_hash_next = NULL;
+	} else {
+		e = evict_lru(pc);
+		if (!e) {
+			mutex_unlock(&pc->pc_lock);
+			return NULL;
+		}
+	}
+
+	/* Set up the entry (data/phys already assigned from pool) */
+	e->pc_block = block;
+	e->pc_dirty = 0;
+
+	/* Insert into hash and LRU */
+	e->pc_hash_next = pc->pc_hash[h];
+	pc->pc_hash[h] = e;
+	lru_insert_mru(pc, e);
+	pc->pc_count++;
+
+	mutex_unlock(&pc->pc_lock);
+	return e;
 }
 
 void

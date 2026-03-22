@@ -183,6 +183,7 @@ struct ext2fs_file {
 	vm_offset_t		f_inode_blk;	/* cached raw inode block */
 	vm_size_t		f_inode_blk_size;
 	daddr_t			f_ra_last_block;/* last logical block read (readahead) */
+	int			f_buf_borrowed;	/* f_buf points into page cache */
 	int			f_inode_dirty;	/* inode needs writeback */
 	int			f_gd_dirty;	/* group descriptors dirty */
 	int			f_super_dirty;	/* superblock dirty */

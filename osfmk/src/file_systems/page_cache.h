@@ -45,16 +45,19 @@
 
 /*
  * Writeback callback: called when a dirty block must be flushed to disk.
- * Arguments: opaque context, block number, data pointer, data size.
+ * Arguments: opaque context, block number, data pointer, data size,
+ * physical address (non-zero for DMA-backed entries).
  * Returns 0 on success, non-zero on failure.
  */
 typedef int (*page_cache_writeback_fn)(void *ctx, daddr_t block,
-				       vm_offset_t data, vm_size_t size);
+				       vm_offset_t data, vm_size_t size,
+				       vm_offset_t phys);
 
 struct page_cache_entry {
 	daddr_t			pc_block;	/* disk block number (key) */
 	vm_offset_t		pc_data;	/* cached block data */
 	vm_size_t		pc_size;	/* size of cached data */
+	vm_offset_t		pc_phys;	/* physical addr (0 = vm_allocate'd) */
 	int			pc_dirty;	/* block has been modified */
 	struct page_cache_entry	*pc_hash_next;	/* hash chain */
 	struct page_cache_entry	*pc_lru_next;	/* toward MRU */
@@ -73,6 +76,12 @@ struct page_cache {
 	void			*pc_writeback_ctx; /* opaque context for callback */
 	struct page_cache_entry	*pc_pool;	/* pre-allocated entry array */
 	struct page_cache_entry	*pc_free;	/* singly-linked free list */
+	/* DMA pool: pre-allocated wired pages with known physical addrs */
+	vm_offset_t		pc_dma_pool;	  /* base VA (0 = no DMA) */
+	vm_size_t		pc_dma_pool_size; /* total pool bytes */
+	unsigned int		pc_dma_pa[1024];  /* per-page physical addrs */
+	unsigned int		pc_dma_n_pages;	  /* number of DMA pages */
+	vm_size_t		pc_block_size;	  /* block size for slot calc */
 	struct page_cache_entry	*pc_hash[PAGE_CACHE_HASH_BUCKETS];
 	/* LRU sentinels: head.pc_lru_next = MRU, tail.pc_lru_prev = LRU */
 	struct page_cache_entry	pc_lru_head;
@@ -147,5 +156,37 @@ int page_cache_sync(struct page_cache *pc);
  * Print cache statistics (hits, misses, evictions, writebacks, hit rate).
  */
 void page_cache_print_stats(struct page_cache *pc);
+
+/*
+ * Create a DMA-backed page cache.  The caller pre-allocates a pool of
+ * wired pages (e.g. via device_dma_alloc_sg) and passes the base VA,
+ * per-page physical addresses, and page count.  Each cache entry gets
+ * a fixed-size slot with a known physical address, enabling zero-copy
+ * I/O: the caller can pass pc_phys directly to a device driver PRDT.
+ *
+ * block_size: filesystem block size (e.g. 1024 or 4096).
+ * pool_va:    base userspace VA of the DMA pool.
+ * pa_list:    array of physical addresses, one per 4 KB page.
+ * n_pages:    number of pages in the pool.
+ * max_entries is capped to n_pages * (4096 / block_size).
+ * Returns NULL on failure.
+ */
+struct page_cache *page_cache_create_dma(unsigned int max_entries,
+					 vm_size_t block_size,
+					 vm_offset_t pool_va,
+					 unsigned int *pa_list,
+					 unsigned int n_pages,
+					 page_cache_writeback_fn writeback,
+					 void *ctx);
+
+/*
+ * Allocate a cache entry for 'block' without populating data.
+ * The entry is inserted into the hash/LRU and its pre-allocated
+ * DMA buffer (pc_data/pc_phys) is ready for direct device I/O.
+ * Returns NULL if the cache has no DMA pool or allocation fails.
+ * Caller must hold NO locks — this function locks internally.
+ */
+struct page_cache_entry *page_cache_alloc_entry(struct page_cache *pc,
+						daddr_t block);
 
 #endif /* _PAGE_CACHE_H_ */

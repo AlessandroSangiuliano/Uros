@@ -147,9 +147,9 @@
 #include <page_cache.h>
 
 /*
- * device_write_batch — MIG user stub from ahci_batch.defs (subsystem 2950).
- * Weak: resolves to NULL for binaries that don't link the stub (e.g.
- * bootstrap), causing a transparent fallback to individual writes.
+ * MIG user stubs from ahci_batch.defs (subsystem 2950).
+ * Weak: resolve to NULL for binaries that don't link the stubs (e.g.
+ * bootstrap), causing a transparent fallback to individual I/O.
  */
 extern kern_return_t device_write_batch(
 	mach_port_t device,
@@ -157,6 +157,20 @@ extern kern_return_t device_write_batch(
 	recnum_t *recnums, mach_msg_type_number_t recnumsCnt,
 	unsigned int *sizes, mach_msg_type_number_t sizesCnt,
 	io_buf_ptr_t data, mach_msg_type_number_t dataCnt,
+	io_buf_len_t *bytes_written) __attribute__((weak));
+
+extern kern_return_t device_read_phys(
+	mach_port_t device,
+	dev_mode_t mode, recnum_t recnum,
+	io_buf_len_t bytes_wanted,
+	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	io_buf_len_t *bytes_read) __attribute__((weak));
+
+extern kern_return_t device_write_phys(
+	mach_port_t device,
+	dev_mode_t mode, recnum_t recnum,
+	io_buf_len_t bytes_to_write,
+	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
 	io_buf_len_t *bytes_written) __attribute__((weak));
 
 #define mutex_lock(a)
@@ -232,13 +246,15 @@ free_file_buffers(register struct ext2fs_file *fp)
 	}
 
 	/*
-	 * Free the data block
+	 * Free the data block (skip if borrowed from page cache)
 	 */
 	if (fp->f_buf != 0) {
-	    (void) vm_deallocate(mach_task_self(),
-				 fp->f_buf,
-				 fp->f_buf_size);
+	    if (!fp->f_buf_borrowed)
+		(void) vm_deallocate(mach_task_self(),
+				     fp->f_buf,
+				     fp->f_buf_size);
 	    fp->f_buf = 0;
+	    fp->f_buf_borrowed = 0;
 	}
 	fp->f_buf_blkno = -1;
 	fp->f_ra_last_block = -1;
@@ -632,10 +648,12 @@ buf_read_file(
 		    return (rc);
 
 		if (fp->f_buf) {
-		    (void)vm_deallocate(mach_task_self(),
-					fp->f_buf,
-					fp->f_buf_size);
+		    if (!fp->f_buf_borrowed)
+			(void)vm_deallocate(mach_task_self(),
+					    fp->f_buf,
+					    fp->f_buf_size);
 		    fp->f_buf = 0;
+		    fp->f_buf_borrowed = 0;
 		}
 
 		if (disk_block == 0) {
@@ -651,13 +669,10 @@ buf_read_file(
 
 		    if (page_cache_lookup(fp->f_dev.cache, disk_block,
 					  &cached, &cached_size) == 0) {
-			/* Page cache hit — copy into f_buf */
-			(void)vm_allocate(mach_task_self(),
-					  &fp->f_buf,
-					  block_size, TRUE);
-			memcpy((void *)fp->f_buf, (void *)cached,
-			       block_size);
+			/* Page cache hit — borrow pointer (zero-copy) */
+			fp->f_buf = cached;
 			fp->f_buf_size = block_size;
+			fp->f_buf_borrowed = 1;
 		    } else {
 			/* Page cache miss — readahead if sequential */
 			if (file_block == fp->f_ra_last_block + 1)
@@ -666,13 +681,36 @@ buf_read_file(
 			/* Re-check cache (readahead may have populated it) */
 			if (page_cache_lookup(fp->f_dev.cache, disk_block,
 					      &cached, &cached_size) == 0) {
-				(void)vm_allocate(mach_task_self(),
-						  &fp->f_buf,
-						  block_size, TRUE);
-				memcpy((void *)fp->f_buf, (void *)cached,
-				       block_size);
+				fp->f_buf = cached;
 				fp->f_buf_size = block_size;
+				fp->f_buf_borrowed = 1;
+			} else if (fp->f_dev.cache->pc_dma_pool &&
+				   device_read_phys != NULL) {
+				/* Zero-copy DMA path */
+				struct page_cache_entry *e;
+				e = page_cache_alloc_entry(fp->f_dev.cache,
+							   disk_block);
+				if (e) {
+					unsigned int pa =
+						(unsigned int)e->pc_phys;
+					io_buf_len_t br;
+					rc = device_read_phys(
+						fp->f_dev.dev_port, 0,
+						(recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+						(io_buf_len_t) block_size,
+						&pa, 1, &br);
+					if (rc)
+						return (rc);
+					fp->f_buf = e->pc_data;
+					fp->f_buf_size = block_size;
+					fp->f_buf_borrowed = 1;
+				} else {
+					goto fallback_read;
+				}
 			} else {
+fallback_read:
 				/* Single block read (fallback) */
 				rc = device_read(fp->f_dev.dev_port,
 					     0,
@@ -749,7 +787,35 @@ buf_read_file(
 					memcpy((void *)*buf_p,
 					       (void *)cached, block_size);
 					*size_p = block_size;
+				} else if (fp->f_dev.cache->pc_dma_pool &&
+					   device_read_phys != NULL) {
+					/* Zero-copy DMA into cache */
+					struct page_cache_entry *e;
+					e = page_cache_alloc_entry(
+						fp->f_dev.cache, disk_block);
+					if (e) {
+						unsigned int pa =
+							(unsigned int)e->pc_phys;
+						io_buf_len_t br;
+						rc = device_read_phys(
+							fp->f_dev.dev_port, 0,
+							(recnum_t) dbtorec(
+								&fp->f_dev,
+								ext2_fsbtodb(fs,
+									disk_block)),
+							(io_buf_len_t) block_size,
+							&pa, 1, &br);
+						if (rc)
+							return (rc);
+						memcpy((void *)*buf_p,
+						       (void *)e->pc_data,
+						       block_size);
+						*size_p = block_size;
+					} else {
+						goto fallback_read_direct;
+					}
 				} else {
+fallback_read_direct:
 					/* Single block read (fallback) */
 					rc = device_read_overwrite(
 						fp->f_dev.dev_port, 0,
@@ -1870,9 +1936,12 @@ ext2fs_write_file(
 		/* Invalidate f_buf so read path re-fetches from cache */
 		if (fp->f_buf_blkno == file_block) {
 			if (fp->f_buf) {
-				vm_deallocate(mach_task_self(),
-					      fp->f_buf, fp->f_buf_size);
+				if (!fp->f_buf_borrowed)
+					vm_deallocate(mach_task_self(),
+						      fp->f_buf,
+						      fp->f_buf_size);
 				fp->f_buf = 0;
+				fp->f_buf_borrowed = 0;
 			}
 			fp->f_buf_blkno = -1;
 		}

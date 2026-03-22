@@ -160,7 +160,7 @@ trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF"' EXIT
 
 dd if=/dev/zero of="$PART_IMG" bs="$SECT_SIZE" count="$FS_SIZE_SECTS" status=none
 mke2fs -t ext2 -q -F \
-    -b 1024 \
+    -b 4096 \
     -I 256 \
     -r 1 \
     -L "mach_servers" \

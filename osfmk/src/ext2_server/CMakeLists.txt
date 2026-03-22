@@ -59,6 +59,32 @@ add_custom_command(
 )
 
 # ===========================================================================
+# MIG-generated device_master user stubs (for device_dma_alloc_sg)
+# ===========================================================================
+
+set(DEVICE_MASTER_DEFS ${CMAKE_SOURCE_DIR}/src/mach_kernel/device/device_master.defs)
+
+set(DM_USER_C ${CMAKE_CURRENT_BINARY_DIR}/device_master_user.c)
+set(DM_USER_H ${CMAKE_CURRENT_BINARY_DIR}/device_master.h)
+
+add_custom_command(
+  OUTPUT ${DM_USER_C} ${DM_USER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -header ${DM_USER_H}
+    -sheader /dev/null
+    -user ${DM_USER_C}
+    -server /dev/null
+    ${DEVICE_MASTER_DEFS}
+  DEPENDS migcom ${DEVICE_MASTER_DEFS}
+  COMMENT "MIG: device_master.defs (user stubs for ext2_server)"
+  VERBATIM
+)
+
+# ===========================================================================
 # Source files
 # ===========================================================================
 
@@ -68,6 +94,7 @@ set(EXT2_SERVER_SOURCES
   nostdlib_stubs.c
   ${EXT2_SERVER_C}
   ${AB_USER_C}
+  ${DM_USER_C}
 )
 
 # ===========================================================================
