@@ -726,6 +726,106 @@ bench_ext2_write_sync(const char *label, char *filename)
 }
 
 /* ===================================================================
+ * ext2 merge-sync benchmark
+ *
+ * Writes a large file in 1 KB chunks (creating many dirty cache blocks),
+ * then syncs.  The page cache request merging should combine contiguous
+ * dirty blocks into fewer device_write calls.
+ * =================================================================== */
+
+#define MERGE_WRITE_SIZE	(64 * 1024)	/* 64 KB of 1 KB writes */
+
+static void
+bench_ext2_merge_sync(const char *label, char *filename)
+{
+	tvalspec_t	t0, t1;
+	unsigned long	total_ns;
+	kern_return_t	kr;
+	natural_t	fid, file_size;
+	pointer_t	orig_data;
+	mach_msg_type_number_t orig_count;
+	vm_offset_t	write_buf;
+	unsigned int	write_total;
+	unsigned int	off;
+
+	kr = ext2_open(ext2_port, filename, &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("  %s: open failed kr=%d\n", label, kr);
+		return;
+	}
+
+	kr = ext2_stat(ext2_port, fid, &file_size);
+	if (kr != KERN_SUCCESS || file_size == 0) {
+		printf("  %s: stat failed or empty\n", label);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	write_total = MERGE_WRITE_SIZE;
+	if (write_total > file_size)
+		write_total = file_size;
+
+	/* Save original data for restore */
+	kr = ext2_read(ext2_port, fid, 0, write_total,
+		       &orig_data, &orig_count);
+	if (kr != KERN_SUCCESS) {
+		printf("  %s: read %u bytes failed kr=%d\n",
+		       label, write_total, kr);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	/* Prepare 1 KB write buffer */
+	kr = vm_allocate(mach_task_self(), &write_buf, 1024, TRUE);
+	if (kr != KERN_SUCCESS) {
+		printf("  %s: vm_allocate failed kr=%d\n", label, kr);
+		vm_deallocate(mach_task_self(), orig_data, orig_count);
+		ext2_close(ext2_port, fid);
+		return;
+	}
+	memset((void *)write_buf, 0xDD, 1024);
+
+	/* Write 1 KB chunks across the file — dirtying many cache blocks */
+	for (off = 0; off < write_total; off += 1024) {
+		kr = ext2_write(ext2_port, fid, off,
+				write_buf, 1024);
+		if (kr != KERN_SUCCESS) {
+			printf("  %s: write at %u failed kr=%d\n",
+			       label, off, kr);
+			break;
+		}
+	}
+
+	/* Timed sync — this is where merging happens */
+	printf("  %s: %u dirty blocks, syncing...\n",
+	       label, write_total / 1024);
+	dget_time(&t0);
+	kr = ext2_sync(ext2_port);
+	dget_time(&t1);
+
+	/* Restore original and sync */
+	ext2_write(ext2_port, fid, 0,
+		   orig_data, (mach_msg_type_number_t)orig_count);
+	ext2_sync(ext2_port);
+
+	vm_deallocate(mach_task_self(), write_buf, 1024);
+	vm_deallocate(mach_task_self(), orig_data, orig_count);
+	ext2_close(ext2_port, fid);
+
+	total_ns = delapsed_ns(&t0, &t1);
+
+	{
+		unsigned long us = total_ns / 1000;
+		unsigned long us_frac = (total_ns % 1000) / 10;
+
+		printf("  %-28s %5lu.%02lu us "
+		       "(%u blocks)\n",
+		       label, us, us_frac,
+		       write_total / 1024);
+	}
+}
+
+/* ===================================================================
  * ext2 open/close latency benchmark
  *
  * Measures the cost of ext2_open + ext2_close for a small file.
@@ -1234,6 +1334,11 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		bench_ext2_sync("ext2 sync (clean)");
 		bench_ext2_write_sync("ext2 write+sync (durable)",
 				      "hello.txt");
+
+		/* Merge test: write many 1K blocks then sync */
+		printf("  ext2 merge test:\n");
+		bench_ext2_merge_sync("ext2 merge sync (bench.dat)",
+				      "bench.dat");
 
 		/* Stress tests */
 		stress_ext2_write();
