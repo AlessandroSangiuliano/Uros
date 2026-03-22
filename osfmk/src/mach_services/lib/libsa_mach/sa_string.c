@@ -1,24 +1,10 @@
 /*
- * Userspace C implementations for libsa_mach string/memory routines
+ * Userspace C implementations for libsa_mach string routines.
+ *
+ * memcpy, memmove, bcopy are provided by libmach (i386/memcpy.s, SSE2).
+ * memset, bzero are provided by i386/memset.s (SSE2).
  */
 #include <stddef.h>
-
-void *memcpy(void *dst, const void *src, size_t n) {
-    unsigned char *d = dst;
-    const unsigned char *s = src;
-    while (n--) *d++ = *s++;
-    return dst;
-}
-
-void *memset(void *dst, int c, size_t n) {
-    unsigned char *d = dst;
-    while (n--) *d++ = (unsigned char)c;
-    return dst;
-}
-
-void bzero(void *dst, size_t n) {
-    memset(dst, 0, n);
-}
 
 char *strcpy(char *dst, const char *src) {
     char *ret = dst;
@@ -50,10 +36,6 @@ char *strncat(char *dst, const char *src, size_t n) {
     while (n-- && (*dst++ = *src++));
     if (n == (size_t)-1) dst[-1] = '\0';
     return ret;
-}
-
-void bcopy(const void *src, void *dst, size_t n) {
-    memcpy(dst, src, n);
 }
 
 void __main(void) {

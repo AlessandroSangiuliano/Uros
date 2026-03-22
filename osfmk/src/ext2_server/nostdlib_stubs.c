@@ -45,21 +45,5 @@ cthread_sp(void)
 	return sp;
 }
 
-void *
-memset(void *s, int c, unsigned int n)
-{
-	unsigned char *p = (unsigned char *)s;
-	while (n--)
-		*p++ = (unsigned char)c;
-	return s;
-}
-
-void *
-memcpy(void *dst, const void *src, unsigned int n)
-{
-	unsigned char *d = (unsigned char *)dst;
-	const unsigned char *s2 = (const unsigned char *)src;
-	while (n--)
-		*d++ = *s2++;
-	return dst;
-}
+/* memset, memcpy, memmove, bcopy, bzero are provided by
+ * libsa_mach (i386/memset.s) and libmach (i386/memcpy.s) — SSE2. */
