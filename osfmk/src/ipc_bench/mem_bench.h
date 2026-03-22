@@ -20,30 +20,15 @@
  * SOFTWARE.
  */
 
-/*
- * Stubs for symbols normally provided by the host C library.
- * Same pattern as ipc_bench/nostdlib_stubs.c.
- */
+#ifndef MEM_BENCH_H
+#define MEM_BENCH_H
 
-#include <mach/kern_return.h>
 #include <mach/port.h>
-#include <mach/message.h>
 
-extern kern_return_t syscall_thread_switch(mach_port_t, int, mach_msg_timeout_t);
+/*
+ * Run memory bandwidth benchmarks (memcpy, memmove, memset, bzero).
+ * Measures throughput for various buffer sizes from 1 KB to 1 MB.
+ */
+void bench_mem_run(mach_port_t clock_port);
 
-kern_return_t
-thread_switch(mach_port_t thread, int option, mach_msg_timeout_t option_time)
-{
-	return syscall_thread_switch(thread, option, option_time);
-}
-
-void *
-cthread_sp(void)
-{
-	void *sp;
-	__asm__ __volatile__("movl %%esp, %0" : "=r" (sp));
-	return sp;
-}
-
-/* memset, memcpy, memmove, bcopy, bzero are provided by
- * libsa_mach (i386/memset.s) and libmach (i386/memcpy.s) — SSE2. */
+#endif /* MEM_BENCH_H */

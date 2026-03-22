@@ -37,6 +37,7 @@ add_custom_command(
 set(IPC_BENCH_SOURCES
   ipc_bench.c
   disk_bench.c
+  mem_bench.c
   nostdlib_stubs.c
   ${EXT2_USER_C}
 )

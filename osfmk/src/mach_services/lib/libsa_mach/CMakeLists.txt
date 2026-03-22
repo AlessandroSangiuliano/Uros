@@ -3,6 +3,9 @@ project(libsa_mach C)
 
 file(GLOB LIB_SOURCES CONFIGURE_DEPENDS "*.c" "*.S" )
 
+# Exclude C implementations replaced by SSE2 assembly in i386/
+list(FILTER LIB_SOURCES EXCLUDE REGEX "(bcopy|memcpy|memmove|memset)\\.c$")
+
 # Arch specific i386 sources, preprocess lowercase .s
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   file(GLOB ARCH_SOURCES CONFIGURE_DEPENDS "i386/*.c" "i386/*.S")
