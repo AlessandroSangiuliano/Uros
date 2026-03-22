@@ -38,11 +38,13 @@ typedef struct fs_ops 	*fs_ops_t;
 typedef void 		*fs_private_t;
 
 struct page_cache;		/* page_cache.h */
+struct blk_dev;			/* libblk/blk.h */
 
 struct device {
-	mach_port_t	dev_port;	/* port to device */
+	mach_port_t	dev_port;	/* port to device (legacy, use blk) */
 	unsigned int	rec_size;	/* record size */
 	struct page_cache *cache;	/* optional block cache (NULL = uncached) */
+	struct blk_dev	*blk;		/* block layer handle (NULL = direct) */
 };
 
 /*

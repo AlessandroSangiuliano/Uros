@@ -55,6 +55,8 @@ target_compile_definitions(libsa_fs PRIVATE
 target_include_directories(libsa_fs PUBLIC
   # Library headers (file_system.h, externs.h)
   ${CMAKE_CURRENT_SOURCE_DIR}
+  # libblk header (blk.h) — ext2fs.c uses the block I/O abstraction
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libblk
   # Filesystem-specific headers (each fs includes its own subdir)
   ${CMAKE_CURRENT_SOURCE_DIR}/ufs
   ${CMAKE_CURRENT_SOURCE_DIR}/ext2fs

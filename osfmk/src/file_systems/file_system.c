@@ -149,6 +149,8 @@ open_file(
 	}
 
 	fp->f_dev.rec_size = dev_rec_size(fp->f_dev.dev_port);
+	fp->f_dev.blk = NULL;
+	fp->f_dev.cache = NULL;
 
 	if (c == 0) {
 		free(namebuf);

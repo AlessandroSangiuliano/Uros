@@ -133,6 +133,7 @@ target_include_directories(bootstrap_server PRIVATE
 target_link_libraries(bootstrap_server PRIVATE
   -Wl,--start-group
   libsa_fs
+  libblk
   libcthreads
   libmach
   libsa_mach

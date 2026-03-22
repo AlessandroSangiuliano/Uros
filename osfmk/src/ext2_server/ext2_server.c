@@ -54,6 +54,7 @@
 #include <ext2fs/defs.h>
 #include <file_system.h>
 #include <page_cache.h>
+#include <blk.h>
 
 #include "ext2fs_server_server.h"
 #include "ahci_batch.h"
@@ -87,17 +88,16 @@ static struct device	ahci_dev;
  * Stores the device port and the fs-block-to-sector multiplier.
  */
 struct writeback_ctx {
-	mach_port_t	dev_port;
+	struct device	*dev;		/* device with blk handle */
 	unsigned int	blk_to_sec;	/* EXT2_BLOCK_SIZE / DEV_BSIZE */
-	unsigned int	rec_size;
 };
 
 static struct writeback_ctx	wb_ctx;
 
 /*
- * Flush a dirty page cache block to disk.
- * If phys != 0, use zero-copy device_write_phys (DMA from cache page).
- * Otherwise fall back to device_write with data copy.
+ * Flush a dirty page cache block to disk via libblk.
+ * If phys != 0, use zero-copy DMA write.
+ * Otherwise fall back to regular write with data copy.
  */
 static int
 ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
@@ -106,19 +106,19 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 	struct writeback_ctx *wb = (struct writeback_ctx *)ctx;
 	io_buf_len_t bytes_written;
 	recnum_t recnum = (recnum_t)(block * wb->blk_to_sec *
-				     DEV_BSIZE / wb->rec_size);
+				     DEV_BSIZE / wb->dev->rec_size);
 	kern_return_t rc;
 
-	if (phys && device_write_phys) {
+	if (phys && blk_has_phys(wb->dev->blk)) {
 		unsigned int pa = (unsigned int)phys;
-		rc = device_write_phys(wb->dev_port, 0, recnum,
-				       (io_buf_len_t)size,
-				       &pa, 1, &bytes_written);
+		rc = blk_write_phys(wb->dev->blk, recnum,
+				    (io_buf_len_t)size,
+				    &pa, 1, &bytes_written);
 	} else {
-		rc = device_write(wb->dev_port, 0, recnum,
-				  (io_buf_ptr_t)data,
-				  (mach_msg_type_number_t)size,
-				  &bytes_written);
+		rc = blk_write(wb->dev->blk, recnum,
+			       (io_buf_ptr_t)data,
+			       (mach_msg_type_number_t)size,
+			       &bytes_written);
 	}
 	if (rc != KERN_SUCCESS) {
 		printf("ext2: writeback block %ld failed: %d\n",
@@ -396,46 +396,20 @@ main(int argc, char **argv)
 
 	printf("\n=== ext2 filesystem server ===\n");
 
-	/* Wait for AHCI driver to register via name server notification.
-	 * netname_notify() blocks until the service calls check_in,
-	 * or returns immediately if already registered (#72).
-	 */
+	/* Open block device via libblk.
+	 * blk_open() discovers the driver via netname, waits for
+	 * registration, opens the device, and probes capabilities. */
 	{
-		mach_port_t ahci_port;
-		mach_port_t notify_recv;
-		netname_notify_msg_t nmsg;
-
-		kr = mach_port_allocate(mach_task_self(),
-					MACH_PORT_RIGHT_RECEIVE, &notify_recv);
-		if (kr != KERN_SUCCESS) {
-			printf("ext2: mach_port_allocate: %d\n", kr);
+		struct blk_dev *bd = blk_open(name_server_port,
+					      "ahci_driver");
+		if (!bd) {
+			printf("ext2: blk_open(ahci_driver) failed\n");
 			return 1;
 		}
-
-		kr = netname_notify(name_server_port, "ahci_driver",
-				    notify_recv);
-		if (kr != KERN_SUCCESS) {
-			printf("ext2: netname_notify failed: %d\n", kr);
-			return 1;
-		}
-
-		/* Block until the name server sends the notification */
-		kr = mach_msg(&nmsg.head, MACH_RCV_MSG,
-			      0, sizeof(nmsg), notify_recv,
-			      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-		if (kr != KERN_SUCCESS) {
-			printf("ext2: notification recv failed: %d\n", kr);
-			return 1;
-		}
-
-		ahci_port = nmsg.service.name;
-		mach_port_destroy(mach_task_self(), notify_recv);
-
-		printf("ext2: connected to ahci_driver (port=%d)\n",
-		       ahci_port);
-		ahci_dev.dev_port = ahci_port;
+		ahci_dev.blk = bd;
+		ahci_dev.dev_port = blk_port(bd);
+		ahci_dev.rec_size = blk_rec_size(bd);
 	}
-	ahci_dev.rec_size = 512;
 
 	/* Create initial page cache (non-DMA, no writeback yet).
 	 * After discovering the block size we upgrade to DMA-backed. */
@@ -465,9 +439,8 @@ main(int argc, char **argv)
 				       blksz);
 
 				/* Set up writeback context */
-				wb_ctx.dev_port = ahci_dev.dev_port;
+				wb_ctx.dev = &ahci_dev;
 				wb_ctx.blk_to_sec = blksz / DEV_BSIZE;
-				wb_ctx.rec_size = ahci_dev.rec_size;
 
 				/* Upgrade to DMA-backed page cache */
 				{
