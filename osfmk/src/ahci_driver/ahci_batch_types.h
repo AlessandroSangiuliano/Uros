@@ -16,5 +16,6 @@
 
 typedef recnum_t	*batch_recnum_array_t;
 typedef unsigned int	*batch_size_array_t;
+typedef unsigned int	*dma_sg_addr_t;
 
 #endif /* AHCI_BATCH_TYPES_H */

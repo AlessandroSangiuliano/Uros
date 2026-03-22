@@ -42,3 +42,40 @@ routine device_write_batch(
 	in	data		: io_buf_ptr_t, const;
 	out	bytes_written	: io_buf_len_t
 	);
+
+/*
+ * Physical-address scatter-gather types for zero-copy DMA.
+ * The caller pre-allocates wired pages (via device_dma_alloc_sg)
+ * and passes their physical addresses.  The driver programs these
+ * PAs directly into PRDT entries — no memcpy needed.
+ */
+type dma_sg_addr_t = array[*:1024] of natural_t;
+
+/*
+ * Read sectors from disk, DMA-ing directly into caller-owned
+ * physical pages.  phys_addrs[] lists one PA per 4 KB page
+ * (or one PA for sub-page transfers like 1 KB blocks).
+ */
+routine device_read_phys(
+		device		: mach_port_t;
+	sreplyport reply_port	: reply_port_t;
+	in	mode		: dev_mode_t;
+	in	recnum		: recnum_t;
+	in	bytes_wanted	: io_buf_len_t;
+	in	phys_addrs	: dma_sg_addr_t;
+	out	bytes_read	: io_buf_len_t
+	);
+
+/*
+ * Write sectors to disk, DMA-ing directly from caller-owned
+ * physical pages.  Same PA convention as device_read_phys.
+ */
+routine device_write_phys(
+		device		: mach_port_t;
+	sreplyport reply_port	: reply_port_t;
+	in	mode		: dev_mode_t;
+	in	recnum		: recnum_t;
+	in	bytes_to_write	: io_buf_len_t;
+	in	phys_addrs	: dma_sg_addr_t;
+	out	bytes_written	: io_buf_len_t
+	);

@@ -74,7 +74,7 @@ if [ "$USE_AHCI" = true ]; then
     if [ ! -f "$AHCI_DISK" ]; then
         echo "Creazione disco AHCI di test (8 MB, ext2)..."
         dd if=/dev/zero of="$AHCI_DISK" bs=1M count=8 status=none
-        mke2fs -t ext2 -q -F -b 1024 -I 256 -r 1 -O filetype "$AHCI_DISK"
+        mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -O filetype "$AHCI_DISK"
         HELLO_TXT=$(mktemp)
         printf 'Hello from ext2 on AHCI!\n' > "$HELLO_TXT"
         BENCH_DAT=$(mktemp)
@@ -100,7 +100,7 @@ if [ "$USE_VIRTIO" = true ]; then
     if [ ! -f "$VIRTIO_DISK" ]; then
         echo "Creazione disco virtio-blk di test (8 MB, ext2)..."
         dd if=/dev/zero of="$VIRTIO_DISK" bs=1M count=8 status=none
-        mke2fs -t ext2 -q -F -b 1024 -I 256 -r 1 -O filetype "$VIRTIO_DISK"
+        mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -O filetype "$VIRTIO_DISK"
         HELLO_TXT=$(mktemp)
         printf 'Hello from ext2 on virtio-blk!\n' > "$HELLO_TXT"
         debugfs -w -f /dev/stdin "$VIRTIO_DISK" <<DBGFS 2>/dev/null

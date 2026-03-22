@@ -56,6 +56,8 @@
 #include <page_cache.h>
 
 #include "ext2fs_server_server.h"
+#include "ahci_batch.h"
+#include "device_master.h"
 
 /* ================================================================
  * Global Mach ports
@@ -93,11 +95,13 @@ struct writeback_ctx {
 static struct writeback_ctx	wb_ctx;
 
 /*
- * Flush a dirty page cache block to disk via device_write().
- * Called by page_cache on eviction, sync, or flush.
+ * Flush a dirty page cache block to disk.
+ * If phys != 0, use zero-copy device_write_phys (DMA from cache page).
+ * Otherwise fall back to device_write with data copy.
  */
 static int
-ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size)
+ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
+	       vm_offset_t phys)
 {
 	struct writeback_ctx *wb = (struct writeback_ctx *)ctx;
 	io_buf_len_t bytes_written;
@@ -105,10 +109,17 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size)
 				     DEV_BSIZE / wb->rec_size);
 	kern_return_t rc;
 
-	rc = device_write(wb->dev_port, 0, recnum,
-			  (io_buf_ptr_t)data,
-			  (mach_msg_type_number_t)size,
-			  &bytes_written);
+	if (phys && device_write_phys) {
+		unsigned int pa = (unsigned int)phys;
+		rc = device_write_phys(wb->dev_port, 0, recnum,
+				       (io_buf_len_t)size,
+				       &pa, 1, &bytes_written);
+	} else {
+		rc = device_write(wb->dev_port, 0, recnum,
+				  (io_buf_ptr_t)data,
+				  (mach_msg_type_number_t)size,
+				  &bytes_written);
+	}
 	if (rc != KERN_SUCCESS) {
 		printf("ext2: writeback block %ld failed: %d\n",
 		       (long)block, rc);
@@ -426,7 +437,8 @@ main(int argc, char **argv)
 	}
 	ahci_dev.rec_size = 512;
 
-	/* Create page cache: 8192 entries = 8 MB with 1 KB blocks */
+	/* Create initial page cache (non-DMA, no writeback yet).
+	 * After discovering the block size we upgrade to DMA-backed. */
 	ahci_dev.cache = page_cache_create(8192, NULL, NULL);
 	if (!ahci_dev.cache)
 		printf("ext2: warning: page cache alloc failed, "
@@ -452,17 +464,75 @@ main(int argc, char **argv)
 				       (unsigned int)ext2fs_file_size(priv),
 				       blksz);
 
-				/* Set up writeback callback */
-				if (ahci_dev.cache) {
-					wb_ctx.dev_port = ahci_dev.dev_port;
-					wb_ctx.blk_to_sec = blksz / DEV_BSIZE;
-					wb_ctx.rec_size = ahci_dev.rec_size;
+				/* Set up writeback context */
+				wb_ctx.dev_port = ahci_dev.dev_port;
+				wb_ctx.blk_to_sec = blksz / DEV_BSIZE;
+				wb_ctx.rec_size = ahci_dev.rec_size;
+
+				/* Upgrade to DMA-backed page cache */
+				{
+					unsigned int kva, uva;
+					unsigned int pa_list[1024];
+					mach_msg_type_number_t pa_cnt = 1024;
+					unsigned int n_entries = 4096;
+					unsigned int n_pages;
+					struct page_cache *dma_pc;
+
+					n_pages = (n_entries * blksz + 4095)
+						  / 4096;
+					if (n_pages > 1024)
+						n_pages = 1024;
+
+					kr = device_dma_alloc_sg(
+						device_port, n_pages,
+						mach_task_self(),
+						&kva, &uva,
+						pa_list, &pa_cnt);
+					if (kr == KERN_SUCCESS) {
+						dma_pc = page_cache_create_dma(
+							n_entries,
+							(vm_size_t)blksz,
+							(vm_offset_t)uva,
+							pa_list, pa_cnt,
+							ext2_writeback,
+							&wb_ctx);
+						if (dma_pc) {
+							page_cache_destroy(
+								ahci_dev.cache);
+							ahci_dev.cache = dma_pc;
+							printf("ext2: DMA page "
+							       "cache (%u "
+							       "entries, %u "
+							       "pages)\n",
+							       dma_pc->pc_max_entries,
+							       pa_cnt);
+						} else {
+							printf("ext2: DMA cache "
+							       "create failed, "
+							       "using non-DMA\n");
+							vm_deallocate(
+								mach_task_self(),
+								(vm_offset_t)uva,
+								(vm_size_t)n_pages
+									* 4096);
+						}
+					} else {
+						printf("ext2: DMA alloc failed "
+						       "(kr=%d), using "
+						       "non-DMA cache\n", kr);
+					}
+				}
+
+				/* Set writeback on non-DMA cache if
+				 * DMA upgrade failed */
+				if (!ahci_dev.cache->pc_dma_pool &&
+				    ahci_dev.cache) {
 					ahci_dev.cache->pc_writeback =
 						ext2_writeback;
 					ahci_dev.cache->pc_writeback_ctx =
 						&wb_ctx;
-					printf("ext2: writeback enabled\n");
 				}
+				printf("ext2: writeback enabled\n");
 			}
 
 			ext2fs_close_file(priv);
