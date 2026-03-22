@@ -145,6 +145,7 @@
 #include <device/device_types.h>
 #include <device/device.h>
 #include <page_cache.h>
+#include <blk.h>
 
 /*
  * MIG user stubs from ahci_batch.defs (subsystem 2950).
@@ -172,6 +173,92 @@ extern kern_return_t device_write_phys(
 	io_buf_len_t bytes_to_write,
 	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
 	io_buf_len_t *bytes_written) __attribute__((weak));
+
+/* ================================================================
+ * Block I/O dispatch helpers
+ *
+ * If the device has a blk_dev handle, dispatch through libblk.
+ * Otherwise fall back to direct device_read/write (bootstrap path).
+ * ================================================================ */
+
+static inline kern_return_t
+ext2_dev_read(struct device *dev, recnum_t recnum,
+	      io_buf_len_t bytes_wanted,
+	      io_buf_ptr_t *data, mach_msg_type_number_t *bytes_read)
+{
+	if (dev->blk)
+		return blk_read(dev->blk, recnum, bytes_wanted,
+				data, bytes_read);
+	return device_read(dev->dev_port, 0, recnum,
+			   (int)bytes_wanted, data, bytes_read);
+}
+
+static inline kern_return_t
+ext2_dev_write(struct device *dev, recnum_t recnum,
+	       io_buf_ptr_t data, mach_msg_type_number_t data_count,
+	       io_buf_len_t *bytes_written)
+{
+	if (dev->blk)
+		return blk_write(dev->blk, recnum, data, data_count,
+				 bytes_written);
+	return device_write(dev->dev_port, 0, recnum,
+			    data, data_count, (int *)bytes_written);
+}
+
+static inline kern_return_t
+ext2_dev_read_overwrite(struct device *dev, recnum_t recnum,
+			io_buf_len_t bytes_wanted,
+			vm_offset_t buffer,
+			mach_msg_type_number_t *bytes_read)
+{
+	if (dev->blk)
+		return blk_read_overwrite(dev->blk, recnum, bytes_wanted,
+					  buffer, bytes_read);
+	return device_read_overwrite(dev->dev_port, 0, recnum,
+				     bytes_wanted, buffer, bytes_read);
+}
+
+static inline int
+ext2_dev_has_phys(struct device *dev)
+{
+	if (dev->blk)
+		return blk_has_phys(dev->blk);
+	return (device_read_phys != NULL);
+}
+
+static inline kern_return_t
+ext2_dev_read_phys(struct device *dev, recnum_t recnum,
+		   io_buf_len_t bytes_wanted,
+		   unsigned int *phys_addrs, unsigned int n_phys,
+		   io_buf_len_t *bytes_read)
+{
+	if (dev->blk)
+		return blk_read_phys(dev->blk, recnum, bytes_wanted,
+				     phys_addrs, n_phys, bytes_read);
+	return device_read_phys(dev->dev_port, 0, recnum, bytes_wanted,
+				phys_addrs, n_phys, bytes_read);
+}
+
+static inline kern_return_t
+ext2_dev_write_phys(struct device *dev, recnum_t recnum,
+		    io_buf_len_t bytes_to_write,
+		    unsigned int *phys_addrs, unsigned int n_phys,
+		    io_buf_len_t *bytes_written)
+{
+	if (dev->blk)
+		return blk_write_phys(dev->blk, recnum, bytes_to_write,
+				      phys_addrs, n_phys, bytes_written);
+	return device_write_phys(dev->dev_port, 0, recnum, bytes_to_write,
+				 phys_addrs, n_phys, bytes_written);
+}
+
+static inline int
+ext2_dev_has_batch(struct device *dev)
+{
+	if (dev->blk)
+		return blk_has_batch(dev->blk);
+	return (device_write_batch != NULL);
+}
 
 #define mutex_lock(a)
 #define mutex_unlock(a)
@@ -293,8 +380,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	fp->f_ino = inumber;
 	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
 
-	rc = device_read(fp->f_dev.dev_port,
-			 0,
+	rc = ext2_dev_read(&fp->f_dev,
 			 (recnum_t) dbtorec(&fp->f_dev,
 					    ext2_fsbtodb(fp->f_fs, disk_block)),
 			 (int) EXT2_BLOCK_SIZE(fs),
@@ -467,8 +553,7 @@ block_map(
 		 */
 		mutex_unlock(&fp->f_lock);
 
-		rc = device_read(fp->f_dev.dev_port,
-				 0,
+		rc = ext2_dev_read(&fp->f_dev,
 				 (recnum_t) dbtorec(&fp->f_dev,
 					    ext2_fsbtodb(fp->f_fs, ind_block_num)),
 				 EXT2_BLOCK_SIZE(fp->f_fs),
@@ -590,7 +675,7 @@ ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
 		return;
 
 	/* Single large device_read for the whole run */
-	rc = device_read(fp->f_dev.dev_port, 0,
+	rc = ext2_dev_read(&fp->f_dev,
 			 (recnum_t) dbtorec(&fp->f_dev,
 					    ext2_fsbtodb(fs, disk_block)),
 			 n_contig * block_size,
@@ -685,7 +770,7 @@ buf_read_file(
 				fp->f_buf_size = block_size;
 				fp->f_buf_borrowed = 1;
 			} else if (fp->f_dev.cache->pc_dma_pool &&
-				   device_read_phys != NULL) {
+				   ext2_dev_has_phys(&fp->f_dev)) {
 				/* Zero-copy DMA path */
 				struct page_cache_entry *e;
 				e = page_cache_alloc_entry(fp->f_dev.cache,
@@ -694,8 +779,8 @@ buf_read_file(
 					unsigned int pa =
 						(unsigned int)e->pc_phys;
 					io_buf_len_t br;
-					rc = device_read_phys(
-						fp->f_dev.dev_port, 0,
+					rc = ext2_dev_read_phys(
+						&fp->f_dev,
 						(recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
@@ -712,8 +797,7 @@ buf_read_file(
 			} else {
 fallback_read:
 				/* Single block read (fallback) */
-				rc = device_read(fp->f_dev.dev_port,
-					     0,
+				rc = ext2_dev_read(&fp->f_dev,
 					     (recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
@@ -727,8 +811,7 @@ fallback_read:
 			}
 		    }
 		} else {
-		    rc = device_read(fp->f_dev.dev_port,
-				     0,
+		    rc = ext2_dev_read(&fp->f_dev,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
@@ -788,7 +871,7 @@ fallback_read:
 					       (void *)cached, block_size);
 					*size_p = block_size;
 				} else if (fp->f_dev.cache->pc_dma_pool &&
-					   device_read_phys != NULL) {
+					   ext2_dev_has_phys(&fp->f_dev)) {
 					/* Zero-copy DMA into cache */
 					struct page_cache_entry *e;
 					e = page_cache_alloc_entry(
@@ -797,8 +880,8 @@ fallback_read:
 						unsigned int pa =
 							(unsigned int)e->pc_phys;
 						io_buf_len_t br;
-						rc = device_read_phys(
-							fp->f_dev.dev_port, 0,
+						rc = ext2_dev_read_phys(
+							&fp->f_dev,
 							(recnum_t) dbtorec(
 								&fp->f_dev,
 								ext2_fsbtodb(fs,
@@ -817,8 +900,8 @@ fallback_read:
 				} else {
 fallback_read_direct:
 					/* Single block read (fallback) */
-					rc = device_read_overwrite(
-						fp->f_dev.dev_port, 0,
+					rc = ext2_dev_read_overwrite(
+						&fp->f_dev,
 						(recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
@@ -833,8 +916,7 @@ fallback_read_direct:
 				}
 			}
 		} else {
-			rc = device_read_overwrite(fp->f_dev.dev_port,
-				     0,
+			rc = ext2_dev_read_overwrite(&fp->f_dev,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
@@ -932,7 +1014,7 @@ read_fs(
 	/*
 	 * Read the super block
 	 */
-	error = device_read(dev->dev_port, 0, 
+	error = ext2_dev_read(dev,
 			    (recnum_t) dbtorec(dev, SBLOCK), SBSIZE,
 			    (char **) &buf, &buf_size);
 	if (error)
@@ -1045,7 +1127,7 @@ read_fs(
 	/*
 	 * Read the groups descriptors
 	 */
-	error = device_read(dev->dev_port, 0, 
+	error = ext2_dev_read(dev,
 			    (recnum_t) dbtorec(dev, gd_sector), gd_size,
 			    (char **) &buf2, &buf2_size);
 	if (error) {
@@ -1237,8 +1319,7 @@ ext2fs_open_file(
 		    register struct ext2_super_block *fs = fp->f_fs;
 
 		    (void) block_map(fp, (daddr_t)0, &disk_block);
-		    rc = device_read(fp->f_dev.dev_port,
-				     0,
+		    rc = ext2_dev_read(&fp->f_dev,
 				     (recnum_t) dbtorec(&fp->f_dev,
 							ext2_fsbtodb(fs,
 								disk_block)),
@@ -1451,7 +1532,7 @@ write_disk_block(
 	io_buf_len_t bytes_written;
 	kern_return_t rc;
 
-	rc = device_write(fp->f_dev.dev_port, 0,
+	rc = ext2_dev_write(&fp->f_dev,
 			  (recnum_t) dbtorec(&fp->f_dev,
 					     ext2_fsbtodb(fp->f_fs,
 							 disk_block)),
@@ -1475,7 +1556,7 @@ read_disk_block(
 	vm_offset_t		*data_out,
 	vm_size_t		*size_out)
 {
-	return device_read(fp->f_dev.dev_port, 0,
+	return ext2_dev_read(&fp->f_dev,
 			   (recnum_t) dbtorec(&fp->f_dev,
 					      ext2_fsbtodb(fp->f_fs,
 							  disk_block)),
@@ -1645,7 +1726,7 @@ write_gd(struct ext2fs_file *fp)
 	int gd_sector = (gd_location * EXT2_BLOCK_SIZE(fs)) / DEV_BSIZE;
 	io_buf_len_t bytes_written;
 
-	return device_write(fp->f_dev.dev_port, 0,
+	return ext2_dev_write(&fp->f_dev,
 			    (recnum_t) dbtorec(&fp->f_dev, gd_sector),
 			    (io_buf_ptr_t) fp->f_gd,
 			    (mach_msg_type_number_t) fp->f_gd_size,
@@ -1698,7 +1779,7 @@ write_super(struct ext2fs_file *fp)
 		raw.s_feature_ro_compat = cpu_to_le32(fs->s_feature_ro_compat);
 	}
 
-	return device_write(fp->f_dev.dev_port, 0,
+	return ext2_dev_write(&fp->f_dev,
 			    (recnum_t) dbtorec(&fp->f_dev, SBLOCK),
 			    (io_buf_ptr_t) &raw,
 			    (mach_msg_type_number_t) SBSIZE,
@@ -2054,7 +2135,7 @@ ext2fs_flush_metadata(fs_private_t private)
 		return 0;
 
 	/* Single dirty item or no batch stub: unbatched path */
-	if (n_dirty == 1 || device_write_batch == NULL) {
+	if (n_dirty == 1 || !ext2_dev_has_batch(&fp->f_dev)) {
 		if (fp->f_inode_dirty) {
 			rc = write_inode(fp->f_ino, fp);
 			if (rc != 0) return rc;
@@ -2189,36 +2270,67 @@ ext2fs_flush_metadata(fs_private_t private)
 			n++;
 		}
 
-		/* --- Concatenate data into a single OOL buffer --- */
-		rc = vm_allocate(mach_task_self(), &concat, total_size, TRUE);
-		if (rc != KERN_SUCCESS)
-			return rc;
-
-		off = 0;
-		if (fp->f_inode_dirty) {
-			memcpy((void *)(concat + off),
-			       (void *)fp->f_inode_blk, inode_blk_size);
-			off += inode_blk_size;
-		}
-		if (fp->f_gd_dirty) {
-			memcpy((void *)(concat + off),
-			       (void *)fp->f_gd, fp->f_gd_size);
-			off += fp->f_gd_size;
-		}
-		if (fp->f_super_dirty) {
-			memcpy((void *)(concat + off),
-			       (void *)&raw_sb, SBSIZE);
-			off += SBSIZE;
-		}
-
 		/* --- Send batched write --- */
-		rc = device_write_batch(fp->f_dev.dev_port, 0,
-					recnums, n, sizes, n,
-					(io_buf_ptr_t)concat, total_size,
-					&bytes_written);
+		if (fp->f_dev.blk) {
+			/* libblk path: pass separate buffers */
+			io_buf_ptr_t data_bufs[3];
+			mach_msg_type_number_t data_sizes[3];
+			unsigned int bi = 0;
 
-		/* --- Cleanup --- */
-		vm_deallocate(mach_task_self(), concat, total_size);
+			if (fp->f_inode_dirty) {
+				data_bufs[bi] = (io_buf_ptr_t)fp->f_inode_blk;
+				data_sizes[bi] = inode_blk_size;
+				bi++;
+			}
+			if (fp->f_gd_dirty) {
+				data_bufs[bi] = (io_buf_ptr_t)fp->f_gd;
+				data_sizes[bi] = fp->f_gd_size;
+				bi++;
+			}
+			if (fp->f_super_dirty) {
+				data_bufs[bi] = (io_buf_ptr_t)&raw_sb;
+				data_sizes[bi] = SBSIZE;
+				bi++;
+			}
+
+			rc = blk_write_batch(fp->f_dev.blk,
+					     recnums, data_bufs,
+					     data_sizes, n,
+					     &bytes_written);
+		} else {
+			/* Direct device_write_batch path:
+			 * concatenate into a single OOL buffer */
+			rc = vm_allocate(mach_task_self(), &concat,
+					 total_size, TRUE);
+			if (rc != KERN_SUCCESS)
+				return rc;
+
+			off = 0;
+			if (fp->f_inode_dirty) {
+				memcpy((void *)(concat + off),
+				       (void *)fp->f_inode_blk,
+				       inode_blk_size);
+				off += inode_blk_size;
+			}
+			if (fp->f_gd_dirty) {
+				memcpy((void *)(concat + off),
+				       (void *)fp->f_gd, fp->f_gd_size);
+				off += fp->f_gd_size;
+			}
+			if (fp->f_super_dirty) {
+				memcpy((void *)(concat + off),
+				       (void *)&raw_sb, SBSIZE);
+				off += SBSIZE;
+			}
+
+			rc = device_write_batch(fp->f_dev.dev_port, 0,
+						recnums, n, sizes, n,
+						(io_buf_ptr_t)concat,
+						total_size,
+						&bytes_written);
+
+			vm_deallocate(mach_task_self(), concat, total_size);
+		}
 
 		if (rc == KERN_SUCCESS) {
 			fp->f_inode_dirty = 0;

@@ -148,6 +148,7 @@ target_link_libraries(ext2_server_bin PRIVATE
   libmach
   libsa_mach
   libsa_fs
+  libblk
   libnetname
   -Wl,--end-group
 )

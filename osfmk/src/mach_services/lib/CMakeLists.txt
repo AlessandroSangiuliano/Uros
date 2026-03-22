@@ -129,5 +129,6 @@ maybe_add(libpthreads)
 maybe_add(libservice)
 maybe_add(libnetmemory)
 maybe_add(libnetname)
+maybe_add(libblk)
 maybe_add(libflipc)
 
