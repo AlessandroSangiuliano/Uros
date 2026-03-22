@@ -39,6 +39,7 @@
 
 #include <mach.h>
 #include <mach/vm_types.h>
+#include <cthreads.h>
 
 #define PAGE_CACHE_HASH_BUCKETS	128
 
@@ -61,6 +62,7 @@ struct page_cache_entry {
 };
 
 struct page_cache {
+	struct mutex		pc_lock;	/* protects all fields below */
 	unsigned int		pc_max_entries;
 	unsigned int		pc_count;
 	unsigned int		pc_hits;

@@ -25,7 +25,7 @@
  *
  * Hash table with chaining for O(1) lookup, doubly-linked LRU list for
  * eviction.  All entries are pre-allocated at creation time (no dynamic
- * allocation on the hot path).  Single-threaded — no locking.
+ * allocation on the hot path).  Thread-safe via pc_lock mutex.
  */
 
 #include <stdio.h>
@@ -134,6 +134,8 @@ page_cache_create(unsigned int max_entries,
 		return NULL;
 
 	memset(pc, 0, sizeof(*pc));
+	mutex_init(&pc->pc_lock);
+	mutex_set_name(&pc->pc_lock, "page_cache");
 	pc->pc_max_entries = max_entries;
 	pc->pc_writeback = writeback;
 	pc->pc_writeback_ctx = ctx;
@@ -191,6 +193,7 @@ page_cache_lookup(struct page_cache *pc, daddr_t block,
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
+	mutex_lock(&pc->pc_lock);
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			/* Hit — move to MRU */
@@ -199,11 +202,13 @@ page_cache_lookup(struct page_cache *pc, daddr_t block,
 			*data_out = e->pc_data;
 			*size_out = e->pc_size;
 			pc->pc_hits++;
+			mutex_unlock(&pc->pc_lock);
 			return 0;
 		}
 	}
 
 	pc->pc_misses++;
+	mutex_unlock(&pc->pc_lock);
 	return -1;
 }
 
@@ -215,18 +220,24 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	struct page_cache_entry *e;
 	vm_offset_t buf;
 
+	mutex_lock(&pc->pc_lock);
+
 	/* Check if already cached (update data if so) */
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			lru_remove(e);
 			lru_insert_mru(pc, e);
+			mutex_unlock(&pc->pc_lock);
 			return;
 		}
 	}
 
-	/* Allocate cache buffer and copy data */
-	if (vm_allocate(mach_task_self(), &buf, size, TRUE) != KERN_SUCCESS)
+	/* Allocate cache buffer and copy data (vm_allocate is safe unlocked,
+	 * but we hold the lock to keep the insert atomic) */
+	if (vm_allocate(mach_task_self(), &buf, size, TRUE) != KERN_SUCCESS) {
+		mutex_unlock(&pc->pc_lock);
 		return;
+	}
 	memcpy((void *)buf, (void *)data, size);
 
 	/* Get a free entry, evicting if necessary */
@@ -237,6 +248,7 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	} else {
 		e = evict_lru(pc);
 		if (!e) {
+			mutex_unlock(&pc->pc_lock);
 			vm_deallocate(mach_task_self(), buf, size);
 			return;
 		}
@@ -255,6 +267,8 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	/* Insert at MRU */
 	lru_insert_mru(pc, e);
 	pc->pc_count++;
+
+	mutex_unlock(&pc->pc_lock);
 }
 
 void
@@ -263,6 +277,7 @@ page_cache_invalidate(struct page_cache *pc, daddr_t block)
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
+	mutex_lock(&pc->pc_lock);
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			entry_writeback(pc, e);
@@ -274,9 +289,11 @@ page_cache_invalidate(struct page_cache *pc, daddr_t block)
 			e->pc_hash_next = pc->pc_free;
 			pc->pc_free = e;
 			pc->pc_count--;
+			mutex_unlock(&pc->pc_lock);
 			return;
 		}
 	}
+	mutex_unlock(&pc->pc_lock);
 }
 
 void
@@ -284,6 +301,7 @@ page_cache_flush(struct page_cache *pc)
 {
 	unsigned int i;
 
+	mutex_lock(&pc->pc_lock);
 	for (i = 0; i < pc->pc_max_entries; i++) {
 		struct page_cache_entry *e = &pc->pc_pool[i];
 		if (e->pc_data) {
@@ -297,6 +315,7 @@ page_cache_flush(struct page_cache *pc)
 		}
 	}
 	pc->pc_count = 0;
+	mutex_unlock(&pc->pc_lock);
 }
 
 int
@@ -305,12 +324,15 @@ page_cache_mark_dirty(struct page_cache *pc, daddr_t block)
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
+	mutex_lock(&pc->pc_lock);
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			e->pc_dirty = 1;
+			mutex_unlock(&pc->pc_lock);
 			return 0;
 		}
 	}
+	mutex_unlock(&pc->pc_lock);
 	return -1;
 }
 
@@ -322,6 +344,8 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 	struct page_cache_entry *e;
 	vm_offset_t buf;
 
+	mutex_lock(&pc->pc_lock);
+
 	/* If block is already cached, update in place */
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
@@ -331,8 +355,10 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 			} else {
 				entry_free_data(e);
 				if (vm_allocate(mach_task_self(), &buf,
-						size, TRUE) != KERN_SUCCESS)
+						size, TRUE) != KERN_SUCCESS) {
+					mutex_unlock(&pc->pc_lock);
 					return;
+				}
 				memcpy((void *)buf, (void *)data, size);
 				e->pc_data = buf;
 				e->pc_size = size;
@@ -340,41 +366,111 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 			e->pc_dirty = 1;
 			lru_remove(e);
 			lru_insert_mru(pc, e);
+			mutex_unlock(&pc->pc_lock);
 			return;
 		}
 	}
 
-	/* Not cached — insert as new dirty entry */
+	mutex_unlock(&pc->pc_lock);
+
+	/* Not cached — insert as new dirty entry
+	 * (page_cache_insert and page_cache_mark_dirty acquire their own lock)
+	 */
 	page_cache_insert(pc, block, data, size);
 	page_cache_mark_dirty(pc, block);
 }
 
+/*
+ * Maximum dirty entries collected per sync pass.
+ * Kept small to limit stack usage (each slot = 12 bytes on i386).
+ */
+#define SYNC_BATCH	64
+
 int
 page_cache_sync(struct page_cache *pc)
 {
-	struct page_cache_entry *e;
-	int failures = 0;
+	struct {
+		daddr_t		block;
+		vm_offset_t	data;
+		vm_size_t	size;
+	} batch[SYNC_BATCH];
+	int n, i, failures = 0;
+	struct page_cache_entry *e, *start;
 
-	/* Walk LRU list from LRU to MRU */
-	for (e = pc->pc_lru_tail.pc_lru_prev;
-	     e != &pc->pc_lru_head;
-	     e = e->pc_lru_prev) {
-		if (e->pc_dirty) {
-			if (entry_writeback(pc, e) != 0)
-				failures++;
+	start = NULL;
+	do {
+		/* Phase 1: collect dirty entries under lock */
+		n = 0;
+		mutex_lock(&pc->pc_lock);
+
+		e = start ? start :  pc->pc_lru_tail.pc_lru_prev;
+		while (e != &pc->pc_lru_head && n < SYNC_BATCH) {
+			if (e->pc_dirty) {
+				batch[n].block = e->pc_block;
+				batch[n].data  = e->pc_data;
+				batch[n].size  = e->pc_size;
+				n++;
+			}
+			e = e->pc_lru_prev;
 		}
-	}
+		/* Remember where to resume (NULL = done) */
+		start = (e != &pc->pc_lru_head) ? e : NULL;
+
+		mutex_unlock(&pc->pc_lock);
+
+		/* Phase 2: write back outside the lock */
+		for (i = 0; i < n; i++) {
+			if (pc->pc_writeback) {
+				int ret = pc->pc_writeback(
+					pc->pc_writeback_ctx,
+					batch[i].block,
+					batch[i].data,
+					batch[i].size);
+				if (ret != 0) {
+					failures++;
+					continue;
+				}
+			}
+
+			/* Phase 3: mark clean under lock */
+			mutex_lock(&pc->pc_lock);
+			{
+				unsigned int h = PC_HASH(batch[i].block);
+				struct page_cache_entry *ce;
+				for (ce = pc->pc_hash[h]; ce;
+				     ce = ce->pc_hash_next) {
+					if (ce->pc_block == batch[i].block) {
+						ce->pc_dirty = 0;
+						pc->pc_writebacks++;
+						break;
+					}
+				}
+			}
+			mutex_unlock(&pc->pc_lock);
+		}
+	} while (start != NULL);
+
 	return failures;
 }
 
 void
 page_cache_print_stats(struct page_cache *pc)
 {
-	unsigned int total = pc->pc_hits + pc->pc_misses;
-	unsigned int hit_pct = total ? (pc->pc_hits * 100) / total : 0;
+	unsigned int count, hits, misses, evictions, writebacks;
+	unsigned int total, hit_pct;
+
+	mutex_lock(&pc->pc_lock);
+	count = pc->pc_count;
+	hits = pc->pc_hits;
+	misses = pc->pc_misses;
+	evictions = pc->pc_evictions;
+	writebacks = pc->pc_writebacks;
+	mutex_unlock(&pc->pc_lock);
+
+	total = hits + misses;
+	hit_pct = total ? (hits * 100) / total : 0;
 
 	printf("page cache: %u entries, %u/%u hits/misses (%u%%), "
 	       "%u evictions, %u writebacks\n",
-	       pc->pc_count, pc->pc_hits, pc->pc_misses,
-	       hit_pct, pc->pc_evictions, pc->pc_writebacks);
+	       count, hits, misses, hit_pct, evictions, writebacks);
 }
