@@ -386,14 +386,55 @@ page_cache_update(struct page_cache *pc, daddr_t block,
  */
 #define SYNC_BATCH	64
 
+struct sync_entry {
+	daddr_t		block;
+	vm_offset_t	data;
+	vm_size_t	size;
+};
+
+/* Sort batch by block number (insertion sort, N <= 64) */
+static void
+batch_sort(struct sync_entry *b, int n)
+{
+	int i, j;
+	struct sync_entry tmp;
+
+	for (i = 1; i < n; i++) {
+		tmp = b[i];
+		j = i - 1;
+		while (j >= 0 && b[j].block > tmp.block) {
+			b[j + 1] = b[j];
+			j--;
+		}
+		b[j + 1] = tmp;
+	}
+}
+
+/* Mark a range of blocks clean under lock */
+static void
+mark_range_clean(struct page_cache *pc, daddr_t first, int count)
+{
+	int i;
+
+	mutex_lock(&pc->pc_lock);
+	for (i = 0; i < count; i++) {
+		unsigned int h = PC_HASH(first + i);
+		struct page_cache_entry *ce;
+		for (ce = pc->pc_hash[h]; ce; ce = ce->pc_hash_next) {
+			if (ce->pc_block == first + i) {
+				ce->pc_dirty = 0;
+				pc->pc_writebacks++;
+				break;
+			}
+		}
+	}
+	mutex_unlock(&pc->pc_lock);
+}
+
 int
 page_cache_sync(struct page_cache *pc)
 {
-	struct {
-		daddr_t		block;
-		vm_offset_t	data;
-		vm_size_t	size;
-	} batch[SYNC_BATCH];
+	struct sync_entry batch[SYNC_BATCH];
 	int n, i, failures = 0;
 	struct page_cache_entry *e, *start;
 
@@ -403,7 +444,7 @@ page_cache_sync(struct page_cache *pc)
 		n = 0;
 		mutex_lock(&pc->pc_lock);
 
-		e = start ? start :  pc->pc_lru_tail.pc_lru_prev;
+		e = start ? start : pc->pc_lru_tail.pc_lru_prev;
 		while (e != &pc->pc_lru_head && n < SYNC_BATCH) {
 			if (e->pc_dirty) {
 				batch[n].block = e->pc_block;
@@ -418,35 +459,92 @@ page_cache_sync(struct page_cache *pc)
 
 		mutex_unlock(&pc->pc_lock);
 
-		/* Phase 2: write back outside the lock */
-		for (i = 0; i < n; i++) {
-			if (pc->pc_writeback) {
+		if (n == 0)
+			break;
+
+		if (!pc->pc_writeback) {
+			mark_range_clean(pc, batch[0].block, 1);
+			continue;
+		}
+
+		/* Phase 2: sort by block number to find contiguous runs */
+		batch_sort(batch, n);
+
+		/* Phase 3: merge contiguous runs and write back */
+		i = 0;
+		while (i < n) {
+			daddr_t run_start = batch[i].block;
+			vm_size_t blksz = batch[i].size;
+			int run_len = 1;
+
+			/* Extend run while blocks are contiguous and
+			 * same size */
+			while (i + run_len < n &&
+			       batch[i + run_len].block ==
+				   run_start + run_len &&
+			       batch[i + run_len].size == blksz)
+				run_len++;
+
+			if (run_len == 1) {
+				/* Single block — write directly */
 				int ret = pc->pc_writeback(
 					pc->pc_writeback_ctx,
-					batch[i].block,
-					batch[i].data,
-					batch[i].size);
-				if (ret != 0) {
+					run_start,
+					batch[i].data, blksz);
+				if (ret != 0)
 					failures++;
+				else
+					mark_range_clean(pc, run_start, 1);
+				i++;
+			} else {
+				/* Merged write: copy into contiguous
+				 * buffer */
+				vm_size_t total = (vm_size_t)run_len *
+						  blksz;
+				vm_offset_t mbuf;
+				int j, ret;
+
+				if (vm_allocate(mach_task_self(), &mbuf,
+						total, TRUE)
+				    != KERN_SUCCESS) {
+					/* Fallback: write one by one */
+					for (j = 0; j < run_len; j++) {
+						ret = pc->pc_writeback(
+						    pc->pc_writeback_ctx,
+						    batch[i + j].block,
+						    batch[i + j].data,
+						    blksz);
+						if (ret != 0)
+							failures++;
+						else
+							mark_range_clean(
+							    pc,
+							    batch[i+j].block,
+							    1);
+					}
+					i += run_len;
 					continue;
 				}
-			}
 
-			/* Phase 3: mark clean under lock */
-			mutex_lock(&pc->pc_lock);
-			{
-				unsigned int h = PC_HASH(batch[i].block);
-				struct page_cache_entry *ce;
-				for (ce = pc->pc_hash[h]; ce;
-				     ce = ce->pc_hash_next) {
-					if (ce->pc_block == batch[i].block) {
-						ce->pc_dirty = 0;
-						pc->pc_writebacks++;
-						break;
-					}
-				}
+				for (j = 0; j < run_len; j++)
+					memcpy((void *)(mbuf + j * blksz),
+					       (void *)batch[i + j].data,
+					       blksz);
+
+				ret = pc->pc_writeback(
+					pc->pc_writeback_ctx,
+					run_start, mbuf, total);
+
+				vm_deallocate(mach_task_self(), mbuf,
+					      total);
+
+				if (ret != 0)
+					failures += run_len;
+				else
+					mark_range_clean(pc, run_start,
+							 run_len);
+				i += run_len;
 			}
-			mutex_unlock(&pc->pc_lock);
 		}
 	} while (start != NULL);
 
