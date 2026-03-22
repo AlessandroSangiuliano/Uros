@@ -311,6 +311,15 @@ struct fs_ops ext2fs_ops = {
 };
 
 /*
+ * Cached superblock and group descriptors.
+ * Read once on first mount, reused for all subsequent opens.
+ */
+static struct ext2_super_block	*cached_fs;
+static struct ext2_group_desc	*cached_gd;
+static vm_size_t		 cached_gd_size;
+static int			 cached_nindir[NIADDR];
+
+/*
  * Free file buffers, but don't close file.
  */
 static void
@@ -1149,19 +1158,32 @@ read_fs(
 static int
 mount_fs(register struct ext2fs_file	*fp)
 {
-	register struct ext2_super_block *fs;
 	int error;
+
+	if (cached_fs) {
+		/* Reuse cached superblock and group descriptors */
+		fp->f_fs = cached_fs;
+		fp->f_gd = cached_gd;
+		fp->f_gd_size = cached_gd_size;
+		{
+		    register int level;
+		    for (level = 0; level < NIADDR; level++)
+			fp->f_nindir[level] = cached_nindir[level];
+		}
+		return (0);
+	}
 
 	error = read_fs(&fp->f_dev, &fp->f_fs, &fp->f_gd, &fp->f_gd_size);
 	if (error)
 	    return (error);
 
-	fs = fp->f_fs;
+	/* Cache for subsequent opens */
+	cached_fs = fp->f_fs;
+	cached_gd = fp->f_gd;
+	cached_gd_size = fp->f_gd_size;
 
-	/*
-	 * Calculate indirect block levels.
-	 */
 	{
+	    register struct ext2_super_block *fs = fp->f_fs;
 	    register int	mult;
 	    register int	level;
 
@@ -1169,6 +1191,7 @@ mount_fs(register struct ext2fs_file	*fp)
 	    for (level = 0; level < NIADDR; level++) {
 		mult *= NINDIR(fs);
 		fp->f_nindir[level] = mult;
+		cached_nindir[level] = mult;
 	    }
 	}
 
@@ -1179,12 +1202,15 @@ static void
 unmount_fs(register struct ext2fs_file *fp)
 {
 	if (file_is_structured(fp)) {
-	    (void) vm_deallocate(mach_task_self(),
-				 (vm_offset_t) fp->f_fs,
-				 SBSIZE);
-	    (void) vm_deallocate(mach_task_self(),
-				 (vm_offset_t) fp->f_gd,
-				 fp->f_gd_size);
+	    /* Don't free cached superblock/GD — they're shared */
+	    if (fp->f_fs != cached_fs) {
+		(void) vm_deallocate(mach_task_self(),
+				     (vm_offset_t) fp->f_fs,
+				     SBSIZE);
+		(void) vm_deallocate(mach_task_self(),
+				     (vm_offset_t) fp->f_gd,
+				     fp->f_gd_size);
+	    }
 	    fp->f_fs = 0;
 	}
 }
