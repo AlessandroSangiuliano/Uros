@@ -49,6 +49,7 @@
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
 
+#include <cthreads.h>
 #include <ext2fs/ext2fs.h>
 #include <ext2fs/defs.h>
 #include <file_system.h>
@@ -128,6 +129,55 @@ struct open_file {
 };
 
 static struct open_file	open_files[MAX_OPEN_FILES];
+
+/* ================================================================
+ * Background writeback thread
+ * ================================================================ */
+
+#define WRITEBACK_INTERVAL_MS	5000	/* flush dirty pages every 5 seconds */
+
+/*
+ * Background writeback thread.  Periodically flushes dirty metadata
+ * and page cache blocks to disk.  Uses mach_msg with timeout as sleep.
+ */
+static void *
+writeback_thread(void *arg)
+{
+	mach_port_t	sleep_port;
+	kern_return_t	kr;
+	mach_msg_header_t msg;
+
+	(void)arg;
+
+	/* Create a port nobody sends to — mach_msg(RCV) with timeout
+	 * gives us a portable sleep without busy-waiting. */
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &sleep_port);
+	if (kr != KERN_SUCCESS) {
+		printf("ext2: writeback thread: port alloc failed\n");
+		return NULL;
+	}
+
+	for (;;) {
+		/* Sleep for WRITEBACK_INTERVAL_MS */
+		(void)mach_msg(&msg, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+			       0, sizeof(msg), sleep_port,
+			       WRITEBACK_INTERVAL_MS, MACH_PORT_NULL);
+
+		/* Flush dirty metadata for all open files */
+		for (int i = 0; i < MAX_OPEN_FILES; i++) {
+			if (open_files[i].in_use)
+				ext2fs_flush_metadata(open_files[i].private);
+		}
+
+		/* Flush dirty page cache blocks */
+		if (ahci_dev.cache)
+			page_cache_sync(ahci_dev.cache);
+	}
+
+	/* NOTREACHED */
+	return NULL;
+}
 
 /* ================================================================
  * MIG server routines  (ds_ prefix from ext2fs_server.defs)
@@ -544,6 +594,16 @@ main(int argc, char **argv)
 		printf("ext2: netname_check_in failed (kr=%d)\n", kr);
 	else
 		printf("ext2: registered as \"ext2_server\"\n");
+
+	/* Start background writeback thread */
+	{
+		cthread_t wb_thread;
+		wb_thread = cthread_fork((cthread_fn_t)writeback_thread, NULL);
+		cthread_detach(wb_thread);
+		cthread_set_name(wb_thread, "writeback");
+		printf("ext2: writeback thread started (%d ms interval)\n",
+		       WRITEBACK_INTERVAL_MS);
+	}
 
 	printf("ext2: ready, entering message loop\n");
 
