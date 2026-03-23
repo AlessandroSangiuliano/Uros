@@ -1523,6 +1523,63 @@ done:
 }
 
 /* ===================================================================
+ * Negative dentry cache test
+ * =================================================================== */
+
+static void
+test_negative_dcache(void)
+{
+	kern_return_t	kr;
+	natural_t	fid;
+	tvalspec_t	t0, t1;
+	unsigned long	total_ns;
+	int		i, pass = 0, fail = 0;
+	const int	ITERS = 100;
+
+	printf("  negative dcache test:\n");
+
+	/* Correctness: open non-existent file should fail */
+	kr = ext2_open(ext2_port, "no_such_file.txt", &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("    open non-existent:   PASS (kr=%d)\n", kr);
+		pass++;
+	} else {
+		printf("    open non-existent:   FAIL (should not open)\n");
+		ext2_close(ext2_port, fid);
+		fail++;
+	}
+
+	/* Second attempt should hit negative cache (same result, faster) */
+	kr = ext2_open(ext2_port, "no_such_file.txt", &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("    neg cache hit:       PASS (kr=%d)\n", kr);
+		pass++;
+	} else {
+		printf("    neg cache hit:       FAIL (should not open)\n");
+		ext2_close(ext2_port, fid);
+		fail++;
+	}
+
+	printf("  negative dcache: %d PASS, %d FAIL\n", pass, fail);
+
+	/* Benchmark: repeated lookup of non-existent file */
+	for (i = 0; i < 4; i++)
+		ext2_open(ext2_port, "no_such_file.txt", &fid);
+
+	dget_time(&t0);
+	for (i = 0; i < ITERS; i++)
+		ext2_open(ext2_port, "no_such_file.txt", &fid);
+	dget_time(&t1);
+	total_ns = delapsed_ns(&t0, &t1);
+	{
+		unsigned long us = (total_ns / ITERS) / 1000;
+		unsigned long frac = ((total_ns / ITERS) % 1000) / 10;
+		printf("  %-28s %5lu.%02lu us/op  (%d iters)\n",
+		       "open non-existent (neg$)", us, frac, ITERS);
+	}
+}
+
+/* ===================================================================
  * Public entry point
  * =================================================================== */
 
@@ -1572,6 +1629,10 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 		/* File operations */
 		bench_ext2_open_close("ext2 open+close", "hello.txt");
+
+		/* Negative dentry cache test + benchmark */
+		test_negative_dcache();
+
 		bench_ext2_file_read("ext2 read (hello.txt)", "hello.txt",
 				     4096);
 

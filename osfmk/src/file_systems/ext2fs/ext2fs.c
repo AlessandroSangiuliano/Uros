@@ -361,13 +361,20 @@ icache_invalidate(ino_t ino)
 /*
  * Directory entry cache — maps (parent_ino, name) → child_ino.
  * Avoids re-reading and scanning directory blocks on repeated lookups.
+ * Supports negative entries (name not found) via DCACHE_NEGATIVE sentinel.
  */
 #define DCACHE_SIZE	32		/* must be power of 2 */
 #define DCACHE_NAME_MAX	60
+#define DCACHE_NEGATIVE	((ino_t)-1)	/* sentinel for "known absent" */
+
+/* dcache_lookup return codes */
+#define DCACHE_MISS	0	/* not in cache */
+#define DCACHE_HIT	1	/* positive hit, *ino_out set */
+#define DCACHE_NEG	2	/* negative hit, name does not exist */
 
 struct dcache_entry {
 	ino_t		dc_parent;	/* 0 = empty */
-	ino_t		dc_child;
+	ino_t		dc_child;	/* DCACHE_NEGATIVE = negative entry */
 	char		dc_name[DCACHE_NAME_MAX];
 };
 
@@ -382,13 +389,17 @@ dcache_hash(ino_t parent, const char *name)
 	return h & (DCACHE_SIZE - 1);
 }
 
-static ino_t
-dcache_lookup(ino_t parent, const char *name)
+static int
+dcache_lookup(ino_t parent, const char *name, ino_t *ino_out)
 {
 	struct dcache_entry *e = &dcache[dcache_hash(parent, name)];
-	if (e->dc_parent == parent && strcmp(e->dc_name, name) == 0)
-		return e->dc_child;
-	return 0;
+	if (e->dc_parent == parent && strcmp(e->dc_name, name) == 0) {
+		if (e->dc_child == DCACHE_NEGATIVE)
+			return DCACHE_NEG;
+		*ino_out = e->dc_child;
+		return DCACHE_HIT;
+	}
+	return DCACHE_MISS;
 }
 
 static void
@@ -1066,6 +1077,7 @@ search_directory(
 	kern_return_t	rc;
 	char		tmp_name[256];
 	ino_t		cached_ino;
+	int		cache_rc;
 
 #ifdef	DEBUG
 	if(debug)
@@ -1073,11 +1085,13 @@ search_directory(
 #endif
 
 	/* Check the directory entry cache first */
-	cached_ino = dcache_lookup(fp->f_ino, name);
-	if (cached_ino) {
+	cache_rc = dcache_lookup(fp->f_ino, name, &cached_ino);
+	if (cache_rc == DCACHE_HIT) {
 		*inumber_p = cached_ino;
 		return (0);
 	}
+	if (cache_rc == DCACHE_NEG)
+		return (FS_NO_ENTRY);
 
 	length = strlen(name);
 
@@ -1104,6 +1118,9 @@ search_directory(
 	    }
 	    offset += le16_to_cpu(dp->rec_len);
 	}
+
+	/* Cache the negative result */
+	dcache_insert(fp->f_ino, name, DCACHE_NEGATIVE);
 	return (FS_NO_ENTRY);
 }
 
