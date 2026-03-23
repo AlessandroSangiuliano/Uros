@@ -1327,13 +1327,15 @@ unmount_fs(register struct ext2fs_file *fp)
 }
 
 /*
- * Open a file.
+ * Open a file into a caller-supplied ext2fs_file struct.
+ * The caller is responsible for allocation and deallocation of fp.
  */
 int
-ext2fs_open_file(
+ext2fs_open_file_into(
 	struct device *dev,
 	const char *path,
-	fs_private_t *private)
+	fs_private_t *private,
+	struct ext2fs_file *fp)
 {
 #define	RETURN(code)	{ rc = (code); goto exit; }
 
@@ -1343,18 +1345,16 @@ ext2fs_open_file(
 	ino_t		inumber, parent_inumber;
 	int		nlinks = 0;
 	char	        *namebuf;
-	struct ext2fs_file *fp;
 
 #ifdef	DEBUG
 	if(debug)
 		printf("ext2fs_open_file(%s, %s)\n", dev, path);
-#endif 
+#endif
 	if (path == 0 || *path == '\0') {
 	    return FS_NO_ENTRY;
 	}
 
 	namebuf = (char*)malloc((size_t)(PATH_MAX+1));
-	fp = (struct ext2fs_file *)malloc(sizeof(struct ext2fs_file));
 	memset((void *)fp, '\0', sizeof(struct ext2fs_file));
 	fp->f_dev = *dev;
 	/*
@@ -1549,6 +1549,25 @@ ext2fs_open_file(
 	free(namebuf);
 	ext2fs_close_file((fs_private_t)fp);
 	return rc;
+}
+
+/*
+ * Open a file.  Allocates ext2fs_file via malloc.
+ * Caller must free() the returned private after ext2fs_close_file().
+ */
+int
+ext2fs_open_file(
+	struct device *dev,
+	const char *path,
+	fs_private_t *private)
+{
+	struct ext2fs_file *fp;
+
+	fp = (struct ext2fs_file *)malloc(sizeof(struct ext2fs_file));
+	if (!fp)
+		return FS_NO_ENTRY;
+
+	return ext2fs_open_file_into(dev, path, private, fp);
 }
 
 /*
