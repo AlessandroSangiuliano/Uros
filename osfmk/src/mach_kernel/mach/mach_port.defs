@@ -370,7 +370,18 @@ routine mach_port_set_attributes(
 		port_info	: mach_port_info_t);
 
 
-skip;	/* unused padding to avoid collisions w/ other work */
+/*
+ *	Associates a protected payload with a receive right.
+ *	When a message is delivered to this port, the kernel
+ *	writes the payload into msgh_local_port instead of the
+ *	port name, and sets MACH_MSGH_BITS_PROTECTED_PAYLOAD.
+ *	A payload of 0 disables the feature.
+ */
+routine mach_port_set_protected_payload(
+		task		: ipc_space_t;
+		name		: mach_port_name_t;
+		payload		: unsigned);
+
 skip;
 skip;
 skip;

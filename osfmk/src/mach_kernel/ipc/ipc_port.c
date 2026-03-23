@@ -691,6 +691,7 @@ ipc_port_init(
 	port->ip_subsystem = RPC_SUBSYSTEM_NULL;
 	
 	port->ip_flags = 0;
+	port->ip_protected_payload = 0;
 
 	/*
 	 *	Turn no more senders detection on
