@@ -320,6 +320,89 @@ static vm_size_t		 cached_gd_size;
 static int			 cached_nindir[NIADDR];
 
 /*
+ * Inode cache — avoids re-reading inodes from disk on repeated opens.
+ * Direct-mapped hash table keyed by inode number.
+ */
+#define ICACHE_SIZE	16		/* must be power of 2 */
+#define ICACHE_HASH(ino) ((ino) & (ICACHE_SIZE - 1))
+
+struct icache_entry {
+	ino_t			ic_ino;		/* 0 = empty */
+	struct ext2_inode	ic_inode;	/* cached inode data */
+};
+
+static struct icache_entry	icache[ICACHE_SIZE];
+
+static struct ext2_inode *
+icache_lookup(ino_t ino)
+{
+	struct icache_entry *e = &icache[ICACHE_HASH(ino)];
+	if (e->ic_ino == ino)
+		return &e->ic_inode;
+	return NULL;
+}
+
+static void
+icache_insert(ino_t ino, const struct ext2_inode *inode)
+{
+	struct icache_entry *e = &icache[ICACHE_HASH(ino)];
+	e->ic_ino = ino;
+	e->ic_inode = *inode;
+}
+
+static void
+icache_invalidate(ino_t ino)
+{
+	struct icache_entry *e = &icache[ICACHE_HASH(ino)];
+	if (e->ic_ino == ino)
+		e->ic_ino = 0;
+}
+
+/*
+ * Directory entry cache — maps (parent_ino, name) → child_ino.
+ * Avoids re-reading and scanning directory blocks on repeated lookups.
+ */
+#define DCACHE_SIZE	32		/* must be power of 2 */
+#define DCACHE_NAME_MAX	60
+
+struct dcache_entry {
+	ino_t		dc_parent;	/* 0 = empty */
+	ino_t		dc_child;
+	char		dc_name[DCACHE_NAME_MAX];
+};
+
+static struct dcache_entry	dcache[DCACHE_SIZE];
+
+static unsigned int
+dcache_hash(ino_t parent, const char *name)
+{
+	unsigned int h = parent;
+	while (*name)
+		h = h * 31 + (unsigned char)*name++;
+	return h & (DCACHE_SIZE - 1);
+}
+
+static ino_t
+dcache_lookup(ino_t parent, const char *name)
+{
+	struct dcache_entry *e = &dcache[dcache_hash(parent, name)];
+	if (e->dc_parent == parent && strcmp(e->dc_name, name) == 0)
+		return e->dc_child;
+	return 0;
+}
+
+static void
+dcache_insert(ino_t parent, const char *name, ino_t child)
+{
+	unsigned int idx = dcache_hash(parent, name);
+	struct dcache_entry *e = &dcache[idx];
+	e->dc_parent = parent;
+	e->dc_child = child;
+	strncpy(e->dc_name, name, DCACHE_NAME_MAX - 1);
+	e->dc_name[DCACHE_NAME_MAX - 1] = '\0';
+}
+
+/*
  * Free file buffers, but don't close file.
  */
 static void
@@ -369,6 +452,10 @@ free_file_buffers(register struct ext2fs_file *fp)
 
 /*
  * Read a new inode into a file structure.
+ *
+ * Checks the inode cache first; on hit, copies the cached inode
+ * directly without any device I/O.  On miss, reads from disk and
+ * populates the cache.
  */
 static int
 read_inode(ino_t inumber, register struct ext2fs_file *fp)
@@ -379,14 +466,25 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	struct ext2_super_block	*fs;
 	daddr_t			disk_block;
 	kern_return_t		rc;
+	struct ext2_inode	*cached;
 
 #ifdef	DEBUG
 	int	i = inumber;
 	if(debug)
 		printf("read_inode(%d)\n", i);
-#endif 
+#endif
 	fs = fp->f_fs;
 	fp->f_ino = inumber;
+
+	/* Check the inode cache first */
+	cached = icache_lookup(inumber);
+	if (cached) {
+		free_file_buffers(fp);
+		fp->i_ic = *cached;
+		return (0);
+	}
+
+	/* Cache miss — read from disk */
 	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
 
 	rc = ext2_dev_read(&fp->f_dev,
@@ -438,6 +536,9 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	    inode->i_frag = raw_inode->i_frag;
 	    inode->i_fsize = raw_inode->i_fsize;
 	}
+
+	/* Populate the inode cache */
+	icache_insert(inumber, &fp->i_ic);
 
 	/*
 	 * Clear out the old buffers (this also frees the previous
@@ -964,11 +1065,20 @@ search_directory(
 	int		length;
 	kern_return_t	rc;
 	char		tmp_name[256];
+	ino_t		cached_ino;
 
 #ifdef	DEBUG
 	if(debug)
 		printf("search_directory(%s)\n", name);
-#endif 
+#endif
+
+	/* Check the directory entry cache first */
+	cached_ino = dcache_lookup(fp->f_ino, name);
+	if (cached_ino) {
+		*inumber_p = cached_ino;
+		return (0);
+	}
+
 	length = strlen(name);
 
 	offset = 0;
@@ -986,8 +1096,9 @@ search_directory(
 		if (le16_to_cpu(dp->name_len) == length &&
 		    !strcmp(name, tmp_name))
 	    	{
-		    /* found entry */
+		    /* found entry — cache it */
 		    *inumber_p = le32_to_cpu(dp->inode);
+		    dcache_insert(fp->f_ino, name, *inumber_p);
 		    return (0);
 		}
 	    }
@@ -2135,8 +2246,10 @@ ext2fs_write_file(
 
 	/* Mark inode dirty — flushed on sync or close.
 	 * gd and superblock are marked dirty in block_alloc() only
-	 * when new blocks are actually allocated. */
+	 * when new blocks are actually allocated.
+	 * Invalidate inode cache so future opens re-read from disk. */
 	fp->f_inode_dirty = 1;
+	icache_invalidate(fp->f_ino);
 
 	return 0;
 }
