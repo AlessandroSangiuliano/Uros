@@ -152,6 +152,7 @@ extern int ext2fs_write_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);
 extern int ext2fs_sync(fs_private_t);
 extern int ext2fs_flush_metadata(fs_private_t);
 extern size_t ext2fs_file_size(fs_private_t);
+extern int ext2fs_is_dirty(fs_private_t);
 extern boolean_t ext2fs_file_is_directory(fs_private_t);
 extern boolean_t ext2fs_file_is_executable(fs_private_t);
 

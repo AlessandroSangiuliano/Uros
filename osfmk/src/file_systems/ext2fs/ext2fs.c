@@ -1638,6 +1638,13 @@ ext2fs_file_size(fs_private_t private)
 	return(fp->i_ic.i_size);
 }
 
+int
+ext2fs_is_dirty(fs_private_t private)
+{
+	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	return(fp->f_inode_dirty || fp->f_gd_dirty || fp->f_super_dirty);
+}
+
 boolean_t
 ext2fs_file_is_executable(fs_private_t private)
 {
