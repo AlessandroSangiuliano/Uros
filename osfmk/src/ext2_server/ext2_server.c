@@ -424,6 +424,60 @@ ds_ext2_sync(
 	return KERN_SUCCESS;
 }
 
+kern_return_t
+ds_ext2_open_read(
+	mach_port_t		fs_port_arg,
+	ext2_path_t		path,
+	natural_t		offset,
+	natural_t		count,
+	natural_t		*fid_out,
+	pointer_t		*data_out,
+	mach_msg_type_number_t	*data_count_out)
+{
+	kern_return_t kr;
+	natural_t fid;
+
+	/* Open */
+	kr = ds_ext2_open(fs_port_arg, path, &fid);
+	if (kr != KERN_SUCCESS) {
+		*data_out       = (pointer_t)0;
+		*data_count_out = 0;
+		return kr;
+	}
+
+	/* Read */
+	kr = ds_ext2_read(fs_port_arg, fid, offset, count,
+			  data_out, data_count_out);
+	if (kr != KERN_SUCCESS) {
+		ds_ext2_close(fs_port_arg, fid);
+		return kr;
+	}
+
+	*fid_out = fid;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_ext2_read_close(
+	mach_port_t		fs_port_arg,
+	natural_t		fid,
+	natural_t		offset,
+	natural_t		count,
+	pointer_t		*data_out,
+	mach_msg_type_number_t	*data_count_out)
+{
+	kern_return_t kr;
+
+	/* Read */
+	kr = ds_ext2_read(fs_port_arg, fid, offset, count,
+			  data_out, data_count_out);
+
+	/* Close regardless of read result */
+	ds_ext2_close(fs_port_arg, fid);
+
+	return kr;
+}
+
 /* ================================================================
  * Main entry point
  * ================================================================ */

@@ -101,3 +101,27 @@ routine ext2_close(
 		fs_port		: mach_port_t;
 	in	fid		: natural_t
 	);
+
+/*
+ * Open a file and read in a single RPC.
+ * Returns fid (for subsequent reads) and the first data chunk.
+ */
+routine ext2_open_read(
+		fs_port		: mach_port_t;
+	in	path		: ext2_path_t;
+	in	offset		: natural_t;
+	in	count		: natural_t;
+	out	fid		: natural_t;
+	out	data		: pointer_t
+	);
+
+/*
+ * Read the last chunk and close the file in a single RPC.
+ */
+routine ext2_read_close(
+		fs_port		: mach_port_t;
+	in	fid		: natural_t;
+	in	offset		: natural_t;
+	in	count		: natural_t;
+	out	data		: pointer_t
+	);
