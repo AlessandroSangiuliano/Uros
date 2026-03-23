@@ -60,6 +60,10 @@
 #include "ahci_batch.h"
 #include "device_master.h"
 
+/* MIG stub — generated from mach_port.defs */
+extern kern_return_t mach_port_set_protected_payload(
+	mach_port_t task, mach_port_t name, unsigned payload);
+
 /* ================================================================
  * Global Mach ports
  * ================================================================ */
@@ -245,7 +249,8 @@ ds_ext2_open(
 {
 	fs_private_t priv;
 	int fid, rc, i, donor;
-	(void)fs_port_arg;
+
+	/* fs_port_arg is the protected payload (unused — single device) */
 
 	/* Find a free slot (pool allocation) */
 	for (fid = 0; fid < MAX_OPEN_FILES; fid++)
@@ -301,7 +306,7 @@ ds_ext2_stat(
 	natural_t	*file_size_out)
 {
 	int idx = (int)fid - 1;
-	(void)fs_port_arg;
+	/* fs_port_arg is the protected payload (unused in this handler) */
 
 	if (idx < 0 || idx >= MAX_OPEN_FILES || !open_files[idx].in_use)
 		return KERN_INVALID_ARGUMENT;
@@ -325,7 +330,7 @@ ds_ext2_read(
 	vm_offset_t buf;
 	size_t fsize;
 	int rc;
-	(void)fs_port_arg;
+	/* fs_port_arg is the protected payload (unused in this handler) */
 
 	if (idx < 0 || idx >= MAX_OPEN_FILES || !open_files[idx].in_use)
 		return KERN_INVALID_ARGUMENT;
@@ -364,7 +369,7 @@ ds_ext2_close(
 	natural_t	fid)
 {
 	int idx = (int)fid - 1;
-	(void)fs_port_arg;
+	/* fs_port_arg is the protected payload (unused in this handler) */
 
 	if (idx < 0 || idx >= MAX_OPEN_FILES || !open_files[idx].in_use)
 		return KERN_INVALID_ARGUMENT;
@@ -390,7 +395,7 @@ ds_ext2_write(
 	int idx = (int)fid - 1;
 	fs_private_t priv;
 	int rc;
-	(void)fs_port_arg;
+	/* fs_port_arg is the protected payload (unused in this handler) */
 
 	if (idx < 0 || idx >= MAX_OPEN_FILES || !open_files[idx].in_use)
 		return KERN_INVALID_ARGUMENT;
@@ -420,8 +425,8 @@ kern_return_t
 ds_ext2_sync(
 	mach_port_t	fs_port_arg)
 {
+	/* fs_port_arg is the protected payload (unused — single device) */
 	int rc;
-	(void)fs_port_arg;
 
 	/* Flush dirty metadata — iterate only dirty files */
 	{
@@ -759,6 +764,19 @@ main(int argc, char **argv)
 		printf("ext2: port right failed\n");
 		return 1;
 	}
+
+	/* Set protected payload on service port.
+	 * The kernel writes this value into msgh_local_port on delivery,
+	 * so MIG handler stubs receive it as the first argument (fs_port_arg)
+	 * instead of the port name — zero-lookup dispatch. */
+	kr = mach_port_set_protected_payload(mach_task_self(),
+					     fs_port,
+					     (unsigned long)&ahci_dev);
+	if (kr != KERN_SUCCESS)
+		printf("ext2: set_protected_payload failed (kr=%d)\n", kr);
+	else
+		printf("ext2: protected payload set (dev=%p)\n",
+		       (void *)&ahci_dev);
 
 	/* Register with name server */
 	kr = netname_check_in(name_server_port, "ext2_server",
