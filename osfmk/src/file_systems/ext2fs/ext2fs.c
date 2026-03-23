@@ -1588,6 +1588,35 @@ ext2fs_open_file(
 }
 
 /*
+ * Clone an already-open file into a new ext2fs_file struct.
+ * Copies shared inode/superblock state from src; per-opener state
+ * (buffers, readahead) starts fresh.  No disk I/O is performed.
+ */
+void
+ext2fs_clone_file(struct ext2fs_file *dst, const struct ext2fs_file *src)
+{
+	int level;
+
+	memset(dst, 0, sizeof(*dst));
+	dst->f_dev = src->f_dev;
+
+	/* Shared filesystem metadata (cached — no allocation needed) */
+	dst->f_fs = src->f_fs;
+	dst->f_gd = src->f_gd;
+	dst->f_gd_size = src->f_gd_size;
+	for (level = 0; level < NIADDR; level++)
+		dst->f_nindir[level] = src->f_nindir[level];
+
+	/* Copy inode data */
+	dst->f_ino = src->f_ino;
+	dst->i_ic = src->i_ic;
+
+	/* Per-opener state: fresh */
+	dst->f_buf_blkno = -1;
+	dst->f_ra_last_block = -1;
+}
+
+/*
  * Close file - free all storage used.
  */
 void

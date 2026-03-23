@@ -138,6 +138,7 @@ struct open_file {
 	int		in_use;
 	fs_private_t	private;	/* opaque ext2fs state */
 	struct ext2fs_file file_data;	/* pre-allocated (object pool) */
+	char		path[256];	/* path for clone matching */
 	int		on_dirty_list;	/* non-zero if linked in dirty_head */
 	int		dirty_next;	/* index of next dirty, -1 = end */
 	int		dirty_prev;	/* index of prev dirty, -1 = head */
@@ -243,29 +244,53 @@ ds_ext2_open(
 	natural_t		*fid_out)
 {
 	fs_private_t priv;
-	int fid, rc;
+	int fid, rc, i, donor;
 	(void)fs_port_arg;
 
-	/* Find a free slot first (pool allocation) */
+	/* Find a free slot (pool allocation) */
 	for (fid = 0; fid < MAX_OPEN_FILES; fid++)
 		if (!open_files[fid].in_use)
 			break;
 	if (fid == MAX_OPEN_FILES)
 		return KERN_RESOURCE_SHORTAGE;
 
-	/* Open into pre-allocated struct (no malloc) */
-	rc = ext2fs_open_file_into(&ahci_dev, path, &priv,
-				   &open_files[fid].file_data);
-	if (rc != 0) {
-		printf("ext2: open \"%s\" failed (rc=%d)\n", path, rc);
-		return KERN_FAILURE;
+	/* Check for existing open with same path — clone inode data
+	 * instead of full path walk + disk I/O.  Each opener gets its
+	 * own fid with independent read state. */
+	donor = -1;
+	for (i = 0; i < MAX_OPEN_FILES; i++) {
+		if (open_files[i].in_use &&
+		    strcmp(open_files[i].path, path) == 0) {
+			donor = i;
+			break;
+		}
+	}
+
+	if (donor >= 0) {
+		/* Clone: copy inode, skip path walk */
+		ext2fs_clone_file(&open_files[fid].file_data,
+				  &open_files[donor].file_data);
+		priv = (fs_private_t)&open_files[fid].file_data;
+		printf("ext2: cloned \"%s\" -> fid=%u (from fid=%u)\n",
+		       path, fid + 1, donor + 1);
+	} else {
+		/* Full open with path walk */
+		rc = ext2fs_open_file_into(&ahci_dev, path, &priv,
+					   &open_files[fid].file_data);
+		if (rc != 0) {
+			printf("ext2: open \"%s\" failed (rc=%d)\n",
+			       path, rc);
+			return KERN_FAILURE;
+		}
+		printf("ext2: opened \"%s\" -> fid=%u\n", path, fid + 1);
 	}
 
 	open_files[fid].in_use  = 1;
 	open_files[fid].private = priv;
+	strncpy(open_files[fid].path, path, sizeof(open_files[fid].path) - 1);
+	open_files[fid].path[sizeof(open_files[fid].path) - 1] = '\0';
 
-	*fid_out = (natural_t)(fid + 1);	/* 1-based */
-	printf("ext2: opened \"%s\" -> fid=%u\n", path, fid + 1);
+	*fid_out = (natural_t)(fid + 1);
 	return KERN_SUCCESS;
 }
 
@@ -348,6 +373,7 @@ ds_ext2_close(
 	ext2fs_close_file(open_files[idx].private);
 	open_files[idx].private = NULL;
 	open_files[idx].in_use  = 0;
+	open_files[idx].path[0] = '\0';
 
 	printf("ext2: closed fid=%u\n", fid);
 	return KERN_SUCCESS;
