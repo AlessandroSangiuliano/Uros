@@ -146,6 +146,8 @@
  */
 
 extern int ext2fs_open_file(struct device *, const char *, fs_private_t *);
+extern int ext2fs_open_file_into(struct device *, const char *,
+				 fs_private_t *, struct ext2fs_file *);
 extern void ext2fs_close_file(fs_private_t);
 extern int ext2fs_read_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);
 extern int ext2fs_write_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);

@@ -137,6 +137,7 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 struct open_file {
 	int		in_use;
 	fs_private_t	private;	/* opaque ext2fs state */
+	struct ext2fs_file file_data;	/* pre-allocated (object pool) */
 	int		on_dirty_list;	/* non-zero if linked in dirty_head */
 	int		dirty_next;	/* index of next dirty, -1 = end */
 	int		dirty_prev;	/* index of prev dirty, -1 = head */
@@ -245,19 +246,19 @@ ds_ext2_open(
 	int fid, rc;
 	(void)fs_port_arg;
 
-	rc = ext2fs_open_file(&ahci_dev, path, &priv);
-	if (rc != 0) {
-		printf("ext2: open \"%s\" failed (rc=%d)\n", path, rc);
-		return KERN_FAILURE;
-	}
-
+	/* Find a free slot first (pool allocation) */
 	for (fid = 0; fid < MAX_OPEN_FILES; fid++)
 		if (!open_files[fid].in_use)
 			break;
-	if (fid == MAX_OPEN_FILES) {
-		ext2fs_close_file(priv);
-		free(priv);
+	if (fid == MAX_OPEN_FILES)
 		return KERN_RESOURCE_SHORTAGE;
+
+	/* Open into pre-allocated struct (no malloc) */
+	rc = ext2fs_open_file_into(&ahci_dev, path, &priv,
+				   &open_files[fid].file_data);
+	if (rc != 0) {
+		printf("ext2: open \"%s\" failed (rc=%d)\n", path, rc);
+		return KERN_FAILURE;
 	}
 
 	open_files[fid].in_use  = 1;
@@ -345,7 +346,6 @@ ds_ext2_close(
 
 	dirty_list_remove(idx);
 	ext2fs_close_file(open_files[idx].private);
-	free(open_files[idx].private);
 	open_files[idx].private = NULL;
 	open_files[idx].in_use  = 0;
 
