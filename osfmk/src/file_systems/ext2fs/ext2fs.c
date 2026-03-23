@@ -359,6 +359,86 @@ icache_invalidate(ino_t ino)
 }
 
 /*
+ * Vnode table — shared inodes for open files.
+ * One vnode per unique inode number, refcounted.
+ */
+#define VNODE_TABLE_SIZE	32
+
+static struct ext2_vnode	vnode_table[VNODE_TABLE_SIZE];
+
+/*
+ * Find an existing vnode by inode number (no refcount change).
+ */
+static struct ext2_vnode *
+vnode_find(ino_t ino)
+{
+	int i;
+	for (i = 0; i < VNODE_TABLE_SIZE; i++) {
+		if (vnode_table[i].v_ino == ino &&
+		    vnode_table[i].v_refcount > 0)
+			return &vnode_table[i];
+	}
+	return NULL;
+}
+
+/*
+ * Get or create a vnode for the given inode number.
+ * If an active vnode exists, bumps refcount and returns it.
+ * Otherwise allocates a new slot (evicting unreferenced entries if needed).
+ * Returns NULL if the table is full.
+ */
+static struct ext2_vnode *
+vnode_get(ino_t ino)
+{
+	int i, free_slot = -1;
+
+	for (i = 0; i < VNODE_TABLE_SIZE; i++) {
+		if (vnode_table[i].v_ino == ino &&
+		    vnode_table[i].v_refcount > 0) {
+			vnode_table[i].v_refcount++;
+			return &vnode_table[i];
+		}
+		if (free_slot < 0 && vnode_table[i].v_refcount == 0)
+			free_slot = i;
+	}
+
+	if (free_slot < 0)
+		return NULL;
+
+	/* Free old resources if slot was cached */
+	if (vnode_table[free_slot].v_inode_blk) {
+		vm_deallocate(mach_task_self(),
+			      vnode_table[free_slot].v_inode_blk,
+			      vnode_table[free_slot].v_inode_blk_size);
+	}
+	memset(&vnode_table[free_slot], 0, sizeof(struct ext2_vnode));
+	vnode_table[free_slot].v_ino = ino;
+	vnode_table[free_slot].v_refcount = 1;
+	return &vnode_table[free_slot];
+}
+
+/*
+ * Release a vnode reference.  When refcount drops to zero the vnode
+ * slot is recycled (inode block freed).
+ */
+static void
+vnode_put(struct ext2_vnode *vn)
+{
+	if (!vn)
+		return;
+	if (--vn->v_refcount <= 0) {
+		if (vn->v_inode_blk) {
+			vm_deallocate(mach_task_self(),
+				      vn->v_inode_blk,
+				      vn->v_inode_blk_size);
+			vn->v_inode_blk = 0;
+		}
+		vn->v_ino = 0;
+		vn->v_refcount = 0;
+	}
+}
+
+/*
  * Directory entry cache — maps (parent_ino, name) → child_ino.
  * Avoids re-reading and scanning directory blocks on repeated lookups.
  * Supports negative entries (name not found) via DCACHE_NEGATIVE sentinel.
@@ -491,7 +571,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	cached = icache_lookup(inumber);
 	if (cached) {
 		free_file_buffers(fp);
-		fp->i_ic = *cached;
+		*fp->f_ic = *cached;
 		return (0);
 	}
 
@@ -522,7 +602,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	     */
 	    raw_inode = (struct ext2_inode *)
 		((char *)buf + ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs));
-	    inode = &fp->i_ic;
+	    inode = fp->f_ic;
 
 	    inode->i_mode = le16_to_cpu(raw_inode->i_mode);
 	    inode->i_uid = le16_to_cpu(raw_inode->i_uid);
@@ -549,7 +629,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	}
 
 	/* Populate the inode cache */
-	icache_insert(inumber, &fp->i_ic);
+	icache_insert(inumber, fp->f_ic);
 
 	/*
 	 * Clear out the old buffers (this also frees the previous
@@ -620,7 +700,7 @@ block_map(
 
 	if (file_block < NDADDR) {
 	    /* Direct block. */
-	    *disk_block_p = fp->i_ic.i_block[file_block];
+	    *disk_block_p = fp->f_ic->i_block[file_block];
 	    mutex_unlock(&fp->f_lock);
 	    return (0);
 	}
@@ -644,7 +724,7 @@ block_map(
 	    return (FS_NOT_IN_FILE);
 	}
 
-	ind_block_num = fp->i_ic.i_block[level + NDADDR];
+	ind_block_num = fp->f_ic->i_block[level + NDADDR];
 
 	/*
 	 * Initialize array of blocks to free.
@@ -762,7 +842,7 @@ ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
 	if (!fp->f_dev.cache)
 		return;
 
-	max_file_block = (fp->i_ic.i_size + block_size - 1) / block_size;
+	max_file_block = (fp->f_ic->i_size + block_size - 1) / block_size;
 
 	/*
 	 * Find the longest run of physically contiguous blocks
@@ -837,7 +917,7 @@ buf_read_file(
 	if(debug)
 		printf("buf_read_file(%d, %d)\n", offset, *size_p);
 #endif 
-	if (offset >= fp->i_ic.i_size)
+	if (offset >= fp->f_ic->i_size)
 	    return (FS_NOT_IN_FILE);
 
 	fs = fp->f_fs;
@@ -1052,8 +1132,8 @@ fallback_read_direct:
 	/*
 	 * Truncate buffer at end of file.
 	 */
-	if (*size_p > fp->i_ic.i_size - offset)
-	    *size_p = fp->i_ic.i_size - offset;
+	if (*size_p > fp->f_ic->i_size - offset)
+	    *size_p = fp->f_ic->i_size - offset;
 
 	fp->f_ra_last_block = file_block;
 	return (0);
@@ -1096,7 +1176,7 @@ search_directory(
 	length = strlen(name);
 
 	offset = 0;
-	while (offset < fp->i_ic.i_size) {
+	while (offset < fp->f_ic->i_size) {
 	    buf = 0;
 	    buf_size = 0;
 	    rc = buf_read_file(fp, offset, &buf, &buf_size);
@@ -1374,6 +1454,7 @@ ext2fs_open_file_into(
 	namebuf = (char*)malloc((size_t)(PATH_MAX+1));
 	memset((void *)fp, '\0', sizeof(struct ext2fs_file));
 	fp->f_dev = *dev;
+	fp->f_ic = &fp->f_ic_scratch;	/* path walk uses scratch */
 	/*
 	 * Copy name into buffer to allow modifying it.
 	 */
@@ -1394,7 +1475,7 @@ ext2fs_open_file_into(
 	    /*
 	     * Check that current node is a directory.
 	     */
-	    if ((fp->i_ic.i_mode & IFMT) != IFDIR)
+	    if ((fp->f_ic->i_mode & IFMT) != IFDIR)
 		RETURN (FS_NOT_DIRECTORY);
 
 	    /*
@@ -1441,9 +1522,9 @@ ext2fs_open_file_into(
 	    /*
 	     * Check for symbolic link.
 	     */
-	    if ((fp->i_ic.i_mode & IFMT) == IFLNK) {
+	    if ((fp->f_ic->i_mode & IFMT) == IFLNK) {
 
-		int	link_len = fp->i_ic.i_size;
+		int	link_len = fp->f_ic->i_size;
 		int	len;
 
 		len = strlen(cp) + 1;
@@ -1457,9 +1538,9 @@ ext2fs_open_file_into(
 		ovbcopy(cp, &namebuf[link_len], len);
 
 #ifdef	IC_FASTLINK
-		if (fp->i_ic.i_blocks == 0) {
+		if (fp->f_ic->i_blocks == 0) {
 		    memcpy(namebuf,
-			   (char *)fp->i_ic.i_block, (unsigned)link_len);
+			   (char *)fp->f_ic->i_block, (unsigned)link_len);
 		}
 		else
 #endif	/* IC_FASTLINK */
@@ -1549,11 +1630,38 @@ ext2fs_open_file_into(
 	}
 
 	/*
-	 * Found terminal component.
+	 * Found terminal component — attach shared vnode.
 	 */
 #if MACH_DEV_LINK
     out_ok:
 #endif	/* MACH_DEV_LINK */
+	{
+		struct ext2_vnode *vn = vnode_get(fp->f_ino);
+		if (!vn) {
+			free(namebuf);
+			ext2fs_close_file((fs_private_t)fp);
+			return FS_NO_ENTRY;
+		}
+		if (vn->v_refcount == 1) {
+			/* New vnode — populate from scratch */
+			vn->v_ic = fp->f_ic_scratch;
+			vn->v_inode_blk = fp->f_inode_blk;
+			vn->v_inode_blk_size = fp->f_inode_blk_size;
+			fp->f_inode_blk = 0;
+			fp->f_inode_blk_size = 0;
+		} else {
+			/* Existing vnode — discard scratch data */
+			if (fp->f_inode_blk) {
+				vm_deallocate(mach_task_self(),
+					      fp->f_inode_blk,
+					      fp->f_inode_blk_size);
+				fp->f_inode_blk = 0;
+				fp->f_inode_blk_size = 0;
+			}
+		}
+		fp->f_vnode = vn;
+		fp->f_ic = &vn->v_ic;
+	}
 	mutex_init(&fp->f_lock);
 	free(namebuf);
 	*private = (fs_private_t) fp;
@@ -1589,8 +1697,8 @@ ext2fs_open_file(
 
 /*
  * Clone an already-open file into a new ext2fs_file struct.
- * Copies shared inode/superblock state from src; per-opener state
- * (buffers, readahead) starts fresh.  No disk I/O is performed.
+ * Shares the source's vnode (refcount bump) — changes by either
+ * opener are immediately visible to the other.  No disk I/O.
  */
 void
 ext2fs_clone_file(struct ext2fs_file *dst, const struct ext2fs_file *src)
@@ -1607,9 +1715,16 @@ ext2fs_clone_file(struct ext2fs_file *dst, const struct ext2fs_file *src)
 	for (level = 0; level < NIADDR; level++)
 		dst->f_nindir[level] = src->f_nindir[level];
 
-	/* Copy inode data */
 	dst->f_ino = src->f_ino;
-	dst->i_ic = src->i_ic;
+
+	/* Share the vnode — inode data is shared, not copied */
+	dst->f_vnode = src->f_vnode;
+	if (dst->f_vnode) {
+		dst->f_vnode->v_refcount++;
+		dst->f_ic = &dst->f_vnode->v_ic;
+	} else {
+		dst->f_ic = &dst->f_ic_scratch;
+	}
 
 	/* Per-opener state: fresh */
 	dst->f_buf_blkno = -1;
@@ -1628,7 +1743,8 @@ ext2fs_close_file(
 	/*
 	 * Flush dirty metadata before closing.
 	 */
-	ext2fs_flush_metadata(private);
+	if (fp->f_vnode)
+		ext2fs_flush_metadata(private);
 
 	/*
 	 * Free the disk super-block.
@@ -1639,6 +1755,22 @@ ext2fs_close_file(
 	 * Free the inode and data buffers.
 	 */
 	free_file_buffers(fp);
+
+	/*
+	 * Release vnode reference.
+	 */
+	if (fp->f_vnode) {
+		vnode_put(fp->f_vnode);
+		fp->f_vnode = NULL;
+		fp->f_ic = &fp->f_ic_scratch;
+	}
+}
+
+struct ext2_vnode *
+ext2fs_file_vnode(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	return fp->f_vnode;
 }
 
 /*
@@ -1693,30 +1825,32 @@ boolean_t
 ext2fs_file_is_directory(fs_private_t private)
 {
   	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
-	return((fp->i_ic.i_mode & IFMT) == IFDIR);
+	return((fp->f_ic->i_mode & IFMT) == IFDIR);
 }
 
 size_t
 ext2fs_file_size(fs_private_t private)
 {
   	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
-	return(fp->i_ic.i_size);
+	return(fp->f_ic->i_size);
 }
 
 int
 ext2fs_is_dirty(fs_private_t private)
 {
 	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
-	return(fp->f_inode_dirty || fp->f_gd_dirty || fp->f_super_dirty);
+	if (!fp->f_vnode)
+		return 0;
+	return(fp->f_vnode->v_inode_dirty || fp->f_vnode->v_gd_dirty || fp->f_vnode->v_super_dirty);
 }
 
 boolean_t
 ext2fs_file_is_executable(fs_private_t private)
 {
   	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
-	if ((fp->i_ic.i_mode & IFMT) != IFREG
+	if ((fp->f_ic->i_mode & IFMT) != IFREG
 #if 0
-	    || (fp->i_ic.i_mode & (IEXEC|IEXEC>>3|IEXEC>>6)) == 0
+	    || (fp->f_ic->i_mode & (IEXEC|IEXEC>>3|IEXEC>>6)) == 0
 #endif
 	    ) {
 		return (FALSE);
@@ -1846,11 +1980,11 @@ block_alloc(struct ext2fs_file *fp, int goal_group)
 					gd[group].bg_free_blocks_count =
 						cpu_to_le16(
 						le16_to_cpu(gd[group].bg_free_blocks_count) - 1);
-					fp->f_gd_dirty = 1;
+					fp->f_vnode->v_gd_dirty = 1;
 
 					/* Update superblock */
 					fs->s_free_blocks_count--;
-					fp->f_super_dirty = 1;
+					fp->f_vnode->v_super_dirty = 1;
 
 					alloc_block = fs->s_first_data_block +
 						(unsigned long)group * bits_per_group + bit;
@@ -1877,12 +2011,12 @@ serialize_inode(struct ext2fs_file *fp)
 {
 	struct ext2_super_block *fs = fp->f_fs;
 	struct ext2_inode *raw_inode;
-	struct ext2_inode *inode = &fp->i_ic;
+	struct ext2_inode *inode = fp->f_ic;
 	unsigned long block;
 
 	raw_inode = (struct ext2_inode *)
-		((char *)fp->f_inode_blk +
-		 ext2_itoo(fs, fp->f_ino) * EXT2_INODE_SIZE(fs));
+		((char *)fp->f_vnode->v_inode_blk +
+		 ext2_itoo(fs, fp->f_vnode->v_ino) * EXT2_INODE_SIZE(fs));
 
 	raw_inode->i_mode = cpu_to_le16(inode->i_mode);
 	raw_inode->i_uid = cpu_to_le16(inode->i_uid);
@@ -1912,16 +2046,17 @@ static int
 write_inode(ino_t inumber, struct ext2fs_file *fp)
 {
 	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_vnode *vn = fp->f_vnode;
 	daddr_t disk_block;
 
-	if (fp->f_inode_blk == 0)
+	if (!vn || vn->v_inode_blk == 0)
 		return KERN_FAILURE;
 
 	serialize_inode(fp);
 
 	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
 	return write_disk_block(fp, disk_block,
-				fp->f_inode_blk, EXT2_BLOCK_SIZE(fs));
+				vn->v_inode_blk, EXT2_BLOCK_SIZE(fs));
 }
 
 /*
@@ -1999,7 +2134,7 @@ write_super(struct ext2fs_file *fp)
  * Get or allocate an indirect block, then store 'value' at 'idx'.
  * *ind_blk_p is the indirect block number (0 = must allocate).
  * On success, *ind_blk_p is updated (if allocated), and the indirect
- * block is written back to disk.  fp->i_ic.i_blocks is updated for
+ * block is written back to disk.  fp->f_ic->i_blocks is updated for
  * newly allocated indirect blocks.
  */
 static int
@@ -2015,7 +2150,7 @@ indirect_set(struct ext2fs_file *fp, daddr_t *ind_blk_p,
 		*ind_blk_p = block_alloc(fp, 0);
 		if (*ind_blk_p == 0)
 			return KERN_RESOURCE_SHORTAGE;
-		fp->i_ic.i_blocks += block_size / DEV_BSIZE;
+		fp->f_ic->i_blocks += block_size / DEV_BSIZE;
 
 		if (vm_allocate(mach_task_self(), &ind_buf,
 				block_size, TRUE) != KERN_SUCCESS)
@@ -2091,17 +2226,17 @@ ext2fs_write_file(
 
 			if (file_block < NDADDR) {
 				/* Direct block */
-				fp->i_ic.i_block[file_block] = disk_block;
+				fp->f_ic->i_block[file_block] = disk_block;
 
 			} else if (file_block < NDADDR + nindir) {
 				/* Single indirect */
 				int idx = file_block - NDADDR;
-				daddr_t ind = fp->i_ic.i_block[EXT2_IND_BLOCK];
+				daddr_t ind = fp->f_ic->i_block[EXT2_IND_BLOCK];
 
 				rc = indirect_set(fp, &ind, idx,
 						  disk_block, block_size);
 				if (rc != 0) return rc;
-				fp->i_ic.i_block[EXT2_IND_BLOCK] = ind;
+				fp->f_ic->i_block[EXT2_IND_BLOCK] = ind;
 				invalidate_ind_cache(fp, 0, ind);
 
 			} else if (file_block < NDADDR + nindir +
@@ -2111,7 +2246,7 @@ ext2fs_write_file(
 				int idx1 = rem / nindir;
 				int idx2 = rem % nindir;
 				daddr_t dind =
-					fp->i_ic.i_block[EXT2_DIND_BLOCK];
+					fp->f_ic->i_block[EXT2_DIND_BLOCK];
 				daddr_t sind;
 				vm_offset_t dind_buf;
 				vm_size_t dind_size;
@@ -2121,9 +2256,9 @@ ext2fs_write_file(
 					dind = block_alloc(fp, 0);
 					if (dind == 0)
 						return KERN_RESOURCE_SHORTAGE;
-					fp->i_ic.i_block[EXT2_DIND_BLOCK] =
+					fp->f_ic->i_block[EXT2_DIND_BLOCK] =
 						dind;
-					fp->i_ic.i_blocks +=
+					fp->f_ic->i_blocks +=
 						block_size / DEV_BSIZE;
 				}
 
@@ -2146,7 +2281,7 @@ ext2fs_write_file(
 				rc = indirect_set(fp, &dind, idx1,
 						  sind, block_size);
 				if (rc != 0) return rc;
-				fp->i_ic.i_block[EXT2_DIND_BLOCK] = dind;
+				fp->f_ic->i_block[EXT2_DIND_BLOCK] = dind;
 				invalidate_ind_cache(fp, 0, sind);
 				invalidate_ind_cache(fp, 1, dind);
 
@@ -2158,7 +2293,7 @@ ext2fs_write_file(
 				int idx2 = (rem / nindir) % nindir;
 				int idx3 = rem % nindir;
 				daddr_t tind =
-					fp->i_ic.i_block[EXT2_TIND_BLOCK];
+					fp->f_ic->i_block[EXT2_TIND_BLOCK];
 				daddr_t dind, sind;
 				vm_offset_t tbuf, dbuf;
 				vm_size_t tsize, dsize;
@@ -2168,9 +2303,9 @@ ext2fs_write_file(
 					tind = block_alloc(fp, 0);
 					if (tind == 0)
 						return KERN_RESOURCE_SHORTAGE;
-					fp->i_ic.i_block[EXT2_TIND_BLOCK] =
+					fp->f_ic->i_block[EXT2_TIND_BLOCK] =
 						tind;
-					fp->i_ic.i_blocks +=
+					fp->f_ic->i_blocks +=
 						block_size / DEV_BSIZE;
 				}
 
@@ -2188,7 +2323,7 @@ ext2fs_write_file(
 					dind = block_alloc(fp, 0);
 					if (dind == 0)
 						return KERN_RESOURCE_SHORTAGE;
-					fp->i_ic.i_blocks +=
+					fp->f_ic->i_blocks +=
 						block_size / DEV_BSIZE;
 				}
 
@@ -2215,12 +2350,12 @@ ext2fs_write_file(
 				rc = indirect_set(fp, &tind, idx1,
 						  dind, block_size);
 				if (rc != 0) return rc;
-				fp->i_ic.i_block[EXT2_TIND_BLOCK] = tind;
+				fp->f_ic->i_block[EXT2_TIND_BLOCK] = tind;
 				invalidate_ind_cache(fp, 0, sind);
 				invalidate_ind_cache(fp, 1, dind);
 				invalidate_ind_cache(fp, 2, tind);
 			}
-			fp->i_ic.i_blocks += block_size / DEV_BSIZE;
+			fp->f_ic->i_blocks += block_size / DEV_BSIZE;
 		}
 
 		/* Invalidate f_buf so read path re-fetches from cache */
@@ -2313,14 +2448,14 @@ ext2fs_write_file(
 	}
 
 	/* Update file size if extended */
-	if (offset > fp->i_ic.i_size)
-		fp->i_ic.i_size = offset;
+	if (offset > fp->f_ic->i_size)
+		fp->f_ic->i_size = offset;
 
 	/* Mark inode dirty — flushed on sync or close.
 	 * gd and superblock are marked dirty in block_alloc() only
 	 * when new blocks are actually allocated.
 	 * Invalidate inode cache so future opens re-read from disk. */
-	fp->f_inode_dirty = 1;
+	fp->f_vnode->v_inode_dirty = 1;
 	icache_invalidate(fp->f_ino);
 
 	return 0;
@@ -2335,32 +2470,36 @@ ext2fs_flush_metadata(fs_private_t private)
 {
 	struct ext2fs_file *fp = (struct ext2fs_file *)private;
 	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_vnode *vn = fp->f_vnode;
 	int n_dirty = 0;
 	int rc;
 
-	if (fp->f_inode_dirty) n_dirty++;
-	if (fp->f_gd_dirty) n_dirty++;
-	if (fp->f_super_dirty) n_dirty++;
+	if (!vn)
+		return 0;
+
+	if (vn->v_inode_dirty) n_dirty++;
+	if (vn->v_gd_dirty) n_dirty++;
+	if (vn->v_super_dirty) n_dirty++;
 
 	if (n_dirty == 0)
 		return 0;
 
 	/* Single dirty item or no batch stub: unbatched path */
 	if (n_dirty == 1 || !ext2_dev_has_batch(&fp->f_dev)) {
-		if (fp->f_inode_dirty) {
-			rc = write_inode(fp->f_ino, fp);
+		if (vn->v_inode_dirty) {
+			rc = write_inode(vn->v_ino, fp);
 			if (rc != 0) return rc;
-			fp->f_inode_dirty = 0;
+			vn->v_inode_dirty = 0;
 		}
-		if (fp->f_gd_dirty) {
+		if (vn->v_gd_dirty) {
 			rc = write_gd(fp);
 			if (rc != 0) return rc;
-			fp->f_gd_dirty = 0;
+			vn->v_gd_dirty = 0;
 		}
-		if (fp->f_super_dirty) {
+		if (vn->v_super_dirty) {
 			rc = write_super(fp);
 			if (rc != 0) return rc;
-			fp->f_super_dirty = 0;
+			vn->v_super_dirty = 0;
 		}
 		return 0;
 	}
@@ -2381,13 +2520,13 @@ ext2fs_flush_metadata(fs_private_t private)
 		unsigned int inode_blk_size = EXT2_BLOCK_SIZE(fs);
 
 		/* --- Prepare inode block (serialize in-place) --- */
-		if (fp->f_inode_dirty) {
-			if (fp->f_inode_blk == 0)
+		if (vn->v_inode_dirty) {
+			if (vn->v_inode_blk == 0)
 				return KERN_FAILURE;
 			serialize_inode(fp);
 
 			daddr_t inode_disk_block = ext2_ino2blk(fs,
-						fp->f_gd, fp->f_ino);
+						fp->f_gd, vn->v_ino);
 			recnums[n] = (recnum_t)dbtorec(&fp->f_dev,
 				ext2_fsbtodb(fs, inode_disk_block));
 			sizes[n] = inode_blk_size;
@@ -2396,7 +2535,7 @@ ext2fs_flush_metadata(fs_private_t private)
 		}
 
 		/* --- Prepare group descriptors --- */
-		if (fp->f_gd_dirty) {
+		if (vn->v_gd_dirty) {
 			int gd_loc = fs->s_first_data_block + 1;
 			int gd_sec = (gd_loc * EXT2_BLOCK_SIZE(fs))
 				     / DEV_BSIZE;
@@ -2408,7 +2547,7 @@ ext2fs_flush_metadata(fs_private_t private)
 
 		/* --- Prepare superblock (little-endian raw copy) --- */
 		struct ext2_super_block raw_sb;
-		if (fp->f_super_dirty) {
+		if (vn->v_super_dirty) {
 			memset(&raw_sb, 0, sizeof(raw_sb));
 			raw_sb.s_inodes_count =
 				cpu_to_le32(fs->s_inodes_count);
@@ -2488,17 +2627,17 @@ ext2fs_flush_metadata(fs_private_t private)
 			mach_msg_type_number_t data_sizes[3];
 			unsigned int bi = 0;
 
-			if (fp->f_inode_dirty) {
-				data_bufs[bi] = (io_buf_ptr_t)fp->f_inode_blk;
+			if (vn->v_inode_dirty) {
+				data_bufs[bi] = (io_buf_ptr_t)vn->v_inode_blk;
 				data_sizes[bi] = inode_blk_size;
 				bi++;
 			}
-			if (fp->f_gd_dirty) {
+			if (vn->v_gd_dirty) {
 				data_bufs[bi] = (io_buf_ptr_t)fp->f_gd;
 				data_sizes[bi] = fp->f_gd_size;
 				bi++;
 			}
-			if (fp->f_super_dirty) {
+			if (vn->v_super_dirty) {
 				data_bufs[bi] = (io_buf_ptr_t)&raw_sb;
 				data_sizes[bi] = SBSIZE;
 				bi++;
@@ -2517,18 +2656,18 @@ ext2fs_flush_metadata(fs_private_t private)
 				return rc;
 
 			off = 0;
-			if (fp->f_inode_dirty) {
+			if (vn->v_inode_dirty) {
 				memcpy((void *)(concat + off),
-				       (void *)fp->f_inode_blk,
+				       (void *)vn->v_inode_blk,
 				       inode_blk_size);
 				off += inode_blk_size;
 			}
-			if (fp->f_gd_dirty) {
+			if (vn->v_gd_dirty) {
 				memcpy((void *)(concat + off),
 				       (void *)fp->f_gd, fp->f_gd_size);
 				off += fp->f_gd_size;
 			}
-			if (fp->f_super_dirty) {
+			if (vn->v_super_dirty) {
 				memcpy((void *)(concat + off),
 				       (void *)&raw_sb, SBSIZE);
 				off += SBSIZE;
@@ -2544,9 +2683,9 @@ ext2fs_flush_metadata(fs_private_t private)
 		}
 
 		if (rc == KERN_SUCCESS) {
-			fp->f_inode_dirty = 0;
-			fp->f_gd_dirty = 0;
-			fp->f_super_dirty = 0;
+			vn->v_inode_dirty = 0;
+			vn->v_gd_dirty = 0;
+			vn->v_super_dirty = 0;
 		}
 		return rc;
 	}

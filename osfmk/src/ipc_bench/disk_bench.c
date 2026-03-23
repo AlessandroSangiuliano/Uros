@@ -1685,6 +1685,118 @@ test_file_clone(void)
 }
 
 /* ===================================================================
+ * VFS vnode sharing test — two openers share inode state
+ * =================================================================== */
+
+static void
+test_vnode_sharing(void)
+{
+	kern_return_t	kr;
+	natural_t	fid1, fid2;
+	pointer_t	data;
+	mach_msg_type_number_t cnt;
+	int		pass = 0, fail = 0;
+	const char	*test_file = "hello.txt";
+
+	printf("  vnode sharing test:\n");
+
+	/* Open same file twice */
+	kr = ext2_open(ext2_port, test_file, &fid1);
+	if (kr != KERN_SUCCESS) {
+		printf("    open fid1:           FAIL (kr=%d)\n", kr);
+		fail++;
+		printf("  vnode sharing: %d PASS, %d FAIL\n", pass, fail);
+		return;
+	}
+
+	kr = ext2_open(ext2_port, test_file, &fid2);
+	if (kr != KERN_SUCCESS) {
+		printf("    open fid2:           FAIL (kr=%d)\n", kr);
+		fail++;
+		ext2_close(ext2_port, fid1);
+		printf("  vnode sharing: %d PASS, %d FAIL\n", pass, fail);
+		return;
+	}
+
+	/* Read original content via fid2 */
+	kr = ext2_read(ext2_port, fid2, 0, 4096, &data, &cnt);
+	if (kr != KERN_SUCCESS || cnt == 0) {
+		printf("    initial read fid2:   FAIL (kr=%d)\n", kr);
+		fail++;
+		ext2_close(ext2_port, fid1);
+		ext2_close(ext2_port, fid2);
+		printf("  vnode sharing: %d PASS, %d FAIL\n", pass, fail);
+		return;
+	}
+	printf("    initial read fid2:   PASS (%u bytes)\n", cnt);
+	pass++;
+
+	/* Save original content for restore */
+	unsigned char orig[512];
+	unsigned int orig_len = cnt < sizeof(orig) ? cnt : sizeof(orig);
+	memcpy(orig, (void *)data, orig_len);
+	vm_deallocate(mach_task_self(), data, cnt);
+
+	/* Write modified content via fid1 */
+	unsigned char mod[64];
+	memcpy(mod, orig, 64 < orig_len ? 64 : orig_len);
+	mod[0] ^= 0xFF;  /* flip first byte */
+
+	kr = ext2_write(ext2_port, fid1, 0,
+			(pointer_t)mod, 64);
+	if (kr != KERN_SUCCESS) {
+		printf("    write via fid1:      FAIL (kr=%d)\n", kr);
+		fail++;
+		ext2_close(ext2_port, fid1);
+		ext2_close(ext2_port, fid2);
+		printf("  vnode sharing: %d PASS, %d FAIL\n", pass, fail);
+		return;
+	}
+	printf("    write via fid1:      PASS\n");
+	pass++;
+
+	/* Read back via fid2 — must see the modification */
+	kr = ext2_read(ext2_port, fid2, 0, 64, &data, &cnt);
+	if (kr != KERN_SUCCESS || cnt == 0) {
+		printf("    read via fid2:       FAIL (kr=%d)\n", kr);
+		fail++;
+	} else {
+		unsigned char *p = (unsigned char *)data;
+		if (p[0] == mod[0]) {
+			printf("    shared write visible: PASS\n");
+			pass++;
+		} else {
+			printf("    shared write visible: FAIL (expected 0x%02x, got 0x%02x)\n",
+			       mod[0], p[0]);
+			fail++;
+		}
+		vm_deallocate(mach_task_self(), data, cnt);
+	}
+
+	/* Restore original content */
+	ext2_write(ext2_port, fid1, 0,
+		   (pointer_t)orig, 64 < orig_len ? 64 : orig_len);
+	ext2_sync(ext2_port);
+
+	/* Close first opener, second must still work */
+	ext2_close(ext2_port, fid1);
+
+	kr = ext2_read(ext2_port, fid2, 0, 4096, &data, &cnt);
+	if (kr == KERN_SUCCESS && cnt > 0) {
+		printf("    read after close 1:  PASS (%u bytes)\n", cnt);
+		pass++;
+		vm_deallocate(mach_task_self(), data, cnt);
+	} else {
+		printf("    read after close 1:  FAIL (kr=%d)\n", kr);
+		fail++;
+	}
+
+	ext2_close(ext2_port, fid2);
+
+	printf("  vnode sharing: %d PASS, %d FAIL\n", pass, fail);
+}
+
+/* ===================================================================
  * Batch open+read / read+close RPC test and benchmark
  * =================================================================== */
 
@@ -1895,6 +2007,9 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 		/* File clone test */
 		test_file_clone();
+
+		/* VFS vnode sharing test */
+		test_vnode_sharing();
 
 		/* Batch RPC test + benchmark */
 		test_batch_rpc();
