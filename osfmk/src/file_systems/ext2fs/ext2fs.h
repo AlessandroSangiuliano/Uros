@@ -150,6 +150,7 @@ extern int ext2fs_open_file_into(struct device *, const char *,
 				 fs_private_t *, struct ext2fs_file *);
 extern void ext2fs_clone_file(struct ext2fs_file *dst,
 			      const struct ext2fs_file *src);
+extern struct ext2_vnode *ext2fs_file_vnode(fs_private_t);
 extern void ext2fs_close_file(fs_private_t);
 extern int ext2fs_read_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);
 extern int ext2fs_write_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);
@@ -162,7 +163,24 @@ extern boolean_t ext2fs_file_is_executable(fs_private_t);
 
 
 /*
- * In-core open file.
+ * Shared vnode — one per unique inode, refcounted.
+ * All openers of the same file share the same vnode, so changes
+ * (size, blocks, dirty flags) are immediately visible to all.
+ */
+struct ext2_vnode {
+	int			v_refcount;	/* active openers */
+	ino_t			v_ino;		/* inode number */
+	struct ext2_inode	v_ic;		/* shared in-core inode */
+	vm_offset_t		v_inode_blk;	/* cached raw inode block */
+	vm_size_t		v_inode_blk_size;
+	int			v_inode_dirty;	/* inode needs writeback */
+	int			v_gd_dirty;	/* group descriptors dirty */
+	int			v_super_dirty;	/* superblock dirty */
+};
+
+/*
+ * In-core open file (per-opener state).
+ * Points to a shared vnode for the inode data.
  */
 struct ext2fs_file {
 	struct device		f_dev;		/* device */
@@ -170,8 +188,10 @@ struct ext2fs_file {
 	struct ext2_group_desc*	f_gd;		/* pointer to group
 						   descriptors */
 	vm_size_t		f_gd_size;	/* size of group descriptors */
-	ino_t			f_ino;		/* inode number (for write-back) */
-	struct ext2_inode	i_ic;		/* copy of on-disk inode */
+	ino_t			f_ino;		/* inode number (path walk) */
+	struct ext2_vnode	*f_vnode;	/* shared vnode (NULL during walk) */
+	struct ext2_inode	*f_ic;		/* -> vnode v_ic or f_ic_scratch */
+	struct ext2_inode	f_ic_scratch;	/* temp inode for path walk */
 	int			f_nindir[NIADDR+1];
 						/* number of blocks mapped by
 						   indirect block at level i */
@@ -185,13 +205,10 @@ struct ext2fs_file {
 	vm_offset_t		f_buf;		/* buffer for data block */
 	vm_size_t		f_buf_size;	/* size of data block */
 	daddr_t			f_buf_blkno;	/* block number of data block */
-	vm_offset_t		f_inode_blk;	/* cached raw inode block */
+	vm_offset_t		f_inode_blk;	/* cached raw inode block (scratch) */
 	vm_size_t		f_inode_blk_size;
 	daddr_t			f_ra_last_block;/* last logical block read (readahead) */
 	int			f_buf_borrowed;	/* f_buf points into page cache */
-	int			f_inode_dirty;	/* inode needs writeback */
-	int			f_gd_dirty;	/* group descriptors dirty */
-	int			f_super_dirty;	/* superblock dirty */
 };
 
 #define file_is_structured(_fp_)	((_fp_)->f_fs != 0)
