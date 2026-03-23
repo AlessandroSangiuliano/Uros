@@ -1580,6 +1580,111 @@ test_negative_dcache(void)
 }
 
 /* ===================================================================
+ * File handle clone test (two independent openers of the same file)
+ * =================================================================== */
+
+static void
+test_file_clone(void)
+{
+	kern_return_t	kr;
+	natural_t	fid1, fid2;
+	pointer_t	data1, data2;
+	mach_msg_type_number_t cnt1, cnt2;
+	int		pass = 0, fail = 0;
+
+	printf("  file clone test:\n");
+
+	/* Open same file twice — second should be cloned */
+	kr = ext2_open(ext2_port, "hello.txt", &fid1);
+	if (kr != KERN_SUCCESS) {
+		printf("    open 1:              FAIL (kr=%d)\n", kr);
+		fail++;
+		printf("  file clone: %d PASS, %d FAIL\n", pass, fail);
+		return;
+	}
+
+	kr = ext2_open(ext2_port, "hello.txt", &fid2);
+	if (kr != KERN_SUCCESS) {
+		printf("    open 2 (clone):      FAIL (kr=%d)\n", kr);
+		fail++;
+		ext2_close(ext2_port, fid1);
+		printf("  file clone: %d PASS, %d FAIL\n", pass, fail);
+		return;
+	}
+
+	/* Must get different fids */
+	if (fid1 != fid2) {
+		printf("    separate fids:       PASS (fid1=%u, fid2=%u)\n",
+		       fid1, fid2);
+		pass++;
+	} else {
+		printf("    separate fids:       FAIL (same fid=%u)\n", fid1);
+		fail++;
+	}
+
+	/* Read from both independently */
+	kr = ext2_read(ext2_port, fid1, 0, 4096, &data1, &cnt1);
+	if (kr == KERN_SUCCESS && cnt1 > 0) {
+		printf("    read fid1:           PASS (%u bytes)\n", cnt1);
+		pass++;
+	} else {
+		printf("    read fid1:           FAIL (kr=%d)\n", kr);
+		fail++;
+	}
+
+	kr = ext2_read(ext2_port, fid2, 0, 4096, &data2, &cnt2);
+	if (kr == KERN_SUCCESS && cnt2 > 0) {
+		printf("    read fid2:           PASS (%u bytes)\n", cnt2);
+		pass++;
+	} else {
+		printf("    read fid2:           FAIL (kr=%d)\n", kr);
+		fail++;
+	}
+
+	/* Data from both reads must match */
+	if (cnt1 == cnt2 && cnt1 > 0) {
+		unsigned int i;
+		int match = 1;
+		unsigned char *p1 = (unsigned char *)data1;
+		unsigned char *p2 = (unsigned char *)data2;
+		for (i = 0; i < cnt1; i++) {
+			if (p1[i] != p2[i]) {
+				match = 0;
+				break;
+			}
+		}
+		if (match) {
+			printf("    data match:          PASS\n");
+			pass++;
+		} else {
+			printf("    data match:          FAIL (mismatch at %u)\n", i);
+			fail++;
+		}
+	}
+
+	if (cnt1 > 0)
+		vm_deallocate(mach_task_self(), data1, cnt1);
+	if (cnt2 > 0)
+		vm_deallocate(mach_task_self(), data2, cnt2);
+
+	/* Close first, then read from second (must still work) */
+	ext2_close(ext2_port, fid1);
+	kr = ext2_read(ext2_port, fid2, 0, 4096, &data2, &cnt2);
+	if (kr == KERN_SUCCESS && cnt2 > 0) {
+		printf("    read after close 1:  PASS (%u bytes)\n", cnt2);
+		pass++;
+		vm_deallocate(mach_task_self(), data2, cnt2);
+	} else {
+		printf("    read after close 1:  FAIL (kr=%d)\n", kr);
+		fail++;
+	}
+
+	ext2_close(ext2_port, fid2);
+
+	printf("  file clone: %d PASS, %d FAIL\n", pass, fail);
+}
+
+/* ===================================================================
  * Batch open+read / read+close RPC test and benchmark
  * =================================================================== */
 
@@ -1787,6 +1892,9 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 		/* Negative dentry cache test + benchmark */
 		test_negative_dcache();
+
+		/* File clone test */
+		test_file_clone();
 
 		/* Batch RPC test + benchmark */
 		test_batch_rpc();
