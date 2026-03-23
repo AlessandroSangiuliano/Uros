@@ -1580,6 +1580,161 @@ test_negative_dcache(void)
 }
 
 /* ===================================================================
+ * Batch open+read / read+close RPC test and benchmark
+ * =================================================================== */
+
+static void
+test_batch_rpc(void)
+{
+	kern_return_t	kr;
+	natural_t	fid, file_size;
+	pointer_t	data;
+	mach_msg_type_number_t data_count;
+	tvalspec_t	t0, t1;
+	unsigned long	total_ns;
+	int		i, pass = 0, fail = 0;
+	const int	ITERS = 100;
+
+	printf("  batch RPC test:\n");
+
+	/* Correctness: ext2_open_read */
+	kr = ext2_open_read(ext2_port, "hello.txt", 0, 4096,
+			    &fid, &data, &data_count);
+	if (kr == KERN_SUCCESS && data_count > 0) {
+		printf("    open_read:           PASS (fid=%u, %u bytes)\n",
+		       fid, data_count);
+		pass++;
+		vm_deallocate(mach_task_self(), data, data_count);
+		ext2_close(ext2_port, fid);
+	} else {
+		printf("    open_read:           FAIL (kr=%d)\n", kr);
+		fail++;
+	}
+
+	/* Correctness: ext2_read_close */
+	kr = ext2_open(ext2_port, "hello.txt", &fid);
+	if (kr == KERN_SUCCESS) {
+		kr = ext2_read_close(ext2_port, fid, 0, 4096,
+				     &data, &data_count);
+		if (kr == KERN_SUCCESS && data_count > 0) {
+			printf("    read_close:          PASS (%u bytes)\n",
+			       data_count);
+			pass++;
+			vm_deallocate(mach_task_self(), data, data_count);
+		} else {
+			printf("    read_close:          FAIL (kr=%d)\n", kr);
+			fail++;
+		}
+	} else {
+		printf("    read_close:          FAIL (open kr=%d)\n", kr);
+		fail++;
+	}
+
+	/* Correctness: open_read non-existent file */
+	kr = ext2_open_read(ext2_port, "no_such.txt", 0, 4096,
+			    &fid, &data, &data_count);
+	if (kr != KERN_SUCCESS) {
+		printf("    open_read (absent):  PASS (kr=%d)\n", kr);
+		pass++;
+	} else {
+		printf("    open_read (absent):  FAIL (should not open)\n");
+		vm_deallocate(mach_task_self(), data, data_count);
+		ext2_close(ext2_port, fid);
+		fail++;
+	}
+
+	printf("  batch RPC: %d PASS, %d FAIL\n", pass, fail);
+
+	/* Benchmark: 3 RPC (open+read+close) vs 2 RPC (open_read+close) */
+
+	/* Warmup */
+	for (i = 0; i < 4; i++) {
+		kr = ext2_open(ext2_port, "hello.txt", &fid);
+		if (kr == KERN_SUCCESS) {
+			ext2_read(ext2_port, fid, 0, 4096,
+				  &data, &data_count);
+			vm_deallocate(mach_task_self(), data, data_count);
+			ext2_close(ext2_port, fid);
+		}
+	}
+
+	/* 3 RPC: open + read + close */
+	dget_time(&t0);
+	for (i = 0; i < ITERS; i++) {
+		kr = ext2_open(ext2_port, "hello.txt", &fid);
+		if (kr != KERN_SUCCESS) break;
+		ext2_read(ext2_port, fid, 0, 4096, &data, &data_count);
+		vm_deallocate(mach_task_self(), data, data_count);
+		ext2_close(ext2_port, fid);
+	}
+	dget_time(&t1);
+	total_ns = delapsed_ns(&t0, &t1);
+	{
+		unsigned long us = (total_ns / i) / 1000;
+		unsigned long frac = ((total_ns / i) % 1000) / 10;
+		printf("  %-28s %5lu.%02lu us/op  (%d iters)\n",
+		       "open+read+close (3 RPC)", us, frac, i);
+	}
+
+	/* Warmup */
+	for (i = 0; i < 4; i++) {
+		kr = ext2_open_read(ext2_port, "hello.txt", 0, 4096,
+				    &fid, &data, &data_count);
+		if (kr == KERN_SUCCESS) {
+			vm_deallocate(mach_task_self(), data, data_count);
+			ext2_close(ext2_port, fid);
+		}
+	}
+
+	/* 2 RPC: open_read + close */
+	dget_time(&t0);
+	for (i = 0; i < ITERS; i++) {
+		kr = ext2_open_read(ext2_port, "hello.txt", 0, 4096,
+				    &fid, &data, &data_count);
+		if (kr != KERN_SUCCESS) break;
+		vm_deallocate(mach_task_self(), data, data_count);
+		ext2_close(ext2_port, fid);
+	}
+	dget_time(&t1);
+	total_ns = delapsed_ns(&t0, &t1);
+	{
+		unsigned long us = (total_ns / i) / 1000;
+		unsigned long frac = ((total_ns / i) % 1000) / 10;
+		printf("  %-28s %5lu.%02lu us/op  (%d iters)\n",
+		       "open_read+close (2 RPC)", us, frac, i);
+	}
+
+	/* Warmup */
+	for (i = 0; i < 4; i++) {
+		kr = ext2_open_read(ext2_port, "hello.txt", 0, 4096,
+				    &fid, &data, &data_count);
+		if (kr == KERN_SUCCESS) {
+			vm_deallocate(mach_task_self(), data, data_count);
+			ext2_read_close(ext2_port, fid, 0, 0,
+					&data, &data_count);
+		}
+	}
+
+	/* 1 RPC: open_read (read all) + read_close (0 bytes, just close) */
+	dget_time(&t0);
+	for (i = 0; i < ITERS; i++) {
+		kr = ext2_open_read(ext2_port, "hello.txt", 0, 4096,
+				    &fid, &data, &data_count);
+		if (kr != KERN_SUCCESS) break;
+		vm_deallocate(mach_task_self(), data, data_count);
+		ext2_read_close(ext2_port, fid, 0, 0, &data, &data_count);
+	}
+	dget_time(&t1);
+	total_ns = delapsed_ns(&t0, &t1);
+	{
+		unsigned long us = (total_ns / i) / 1000;
+		unsigned long frac = ((total_ns / i) % 1000) / 10;
+		printf("  %-28s %5lu.%02lu us/op  (%d iters)\n",
+		       "open_read+read_close (2)", us, frac, i);
+	}
+}
+
+/* ===================================================================
  * Public entry point
  * =================================================================== */
 
@@ -1632,6 +1787,9 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 		/* Negative dentry cache test + benchmark */
 		test_negative_dcache();
+
+		/* Batch RPC test + benchmark */
+		test_batch_rpc();
 
 		bench_ext2_file_read("ext2 read (hello.txt)", "hello.txt",
 				     4096);
