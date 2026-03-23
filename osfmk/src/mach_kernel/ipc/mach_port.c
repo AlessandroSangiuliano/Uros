@@ -1026,6 +1026,47 @@ mach_port_set_seqno(
 }
 
 /*
+ *	Routine:	mach_port_set_protected_payload [kernel call]
+ *	Purpose:
+ *		Associates a protected payload with a receive right.
+ *		When a message is delivered to this port, the kernel
+ *		writes the payload into msgh_local_port instead of the
+ *		port name, and sets the MACH_MSGH_BITS_PROTECTED_PAYLOAD
+ *		bit.  A payload of 0 disables the feature.
+ *	Conditions:
+ *		Nothing locked.
+ *	Returns:
+ *		KERN_SUCCESS		Set protected payload.
+ *		KERN_INVALID_TASK	The space is null.
+ *		KERN_INVALID_TASK	The space is dead.
+ *		KERN_INVALID_NAME	The name doesn't denote a right.
+ *		KERN_INVALID_RIGHT	Name doesn't denote receive rights.
+ */
+
+kern_return_t
+mach_port_set_protected_payload(
+	ipc_space_t		space,
+	mach_port_t		name,
+	unsigned		payload)
+{
+	ipc_port_t port;
+	kern_return_t kr;
+
+	if (space == IS_NULL)
+		return KERN_INVALID_TASK;
+
+	kr = ipc_port_translate_receive(space, name, &port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	/* port is locked and active */
+
+	port->ip_protected_payload = payload;
+
+	ip_unlock(port);
+	return KERN_SUCCESS;
+}
+
+/*
  *	Routine:	mach_port_gst_helper
  *	Purpose:
  *		A helper function for mach_port_get_set_status.

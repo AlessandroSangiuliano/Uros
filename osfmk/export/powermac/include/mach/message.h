@@ -240,7 +240,8 @@ typedef natural_t mach_msg_timeout_t;
 #define	MACH_MSGH_DIPC_BITS		0x1fff0000	/* internal use only */
 #define	MACH_MSGH_BITS_UNUSED		0x00000000	/* internal use only */
 #else	/* DIPC */
-#define	MACH_MSGH_BITS_UNUSED		0x1fff0000
+#define	MACH_MSGH_BITS_PROTECTED_PAYLOAD 0x00010000
+#define	MACH_MSGH_BITS_UNUSED		0x1ffe0000
 #endif	/* DIPC */
 
 #define	MACH_MSGH_BITS_PORTS_MASK				\

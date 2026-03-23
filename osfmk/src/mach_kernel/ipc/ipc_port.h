@@ -230,6 +230,7 @@ struct ipc_port {
 	struct ipc_mqueue ip_messages;
 	struct ipc_thread_queue ip_blocked;
 	ipc_port_flags_t ip_flags;
+	unsigned long	ip_protected_payload;	/* receiver payload (0=none) */
 
 #if	NORMA_VM
 	/*

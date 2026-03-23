@@ -2180,6 +2180,7 @@ ipc_kmsg_copyout_header(
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 	ipc_port_t reply = (ipc_port_t) msg->msgh_local_port;
 	mach_port_t dest_name, reply_name;
+	unsigned long protected_payload = 0;
 
 	if (IP_VALID(reply)) {
 		ipc_port_t notify_port;
@@ -2431,6 +2432,10 @@ ipc_kmsg_copyout_header(
 
     copyout_dest:
 
+	/* Read protected payload while port is locked and active */
+	if (ip_active(dest))
+		protected_payload = dest->ip_protected_payload;
+
 	if (ip_active(dest)) {
 		ipc_object_copyout_dest(space, (ipc_object_t) dest,
 					dest_type, &dest_name);
@@ -2460,7 +2465,12 @@ ipc_kmsg_copyout_header(
 
 	msg->msgh_bits = (MACH_MSGH_BITS_OTHER(mbits) |
 			  MACH_MSGH_BITS(reply_type, dest_type));
-	msg->msgh_local_port = dest_name;
+	if (protected_payload != 0) {
+		msg->msgh_local_port = (mach_port_t) protected_payload;
+		msg->msgh_bits |= MACH_MSGH_BITS_PROTECTED_PAYLOAD;
+	} else {
+		msg->msgh_local_port = dest_name;
+	}
 	msg->msgh_remote_port = reply_name;
     }
 
