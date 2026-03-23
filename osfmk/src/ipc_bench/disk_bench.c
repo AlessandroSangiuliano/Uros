@@ -630,6 +630,83 @@ bench_ext2_sync(const char *label)
 }
 
 /* ===================================================================
+ * Dirty list sync benchmark
+ *
+ * Measures sync latency with 2 files open: both clean vs one dirty.
+ * Shows dirty list efficiency — only dirty files are flushed.
+ * =================================================================== */
+
+static void
+bench_dirty_list_sync(void)
+{
+	kern_return_t	kr;
+	natural_t	fid1, fid2;
+	tvalspec_t	t0, t1;
+	unsigned long	total_ns;
+	vm_offset_t	buf;
+	int		i;
+
+	kr = ext2_open(ext2_port, "hello.txt", &fid1);
+	if (kr != KERN_SUCCESS) return;
+	kr = ext2_open(ext2_port, "bench.dat", &fid2);
+	if (kr != KERN_SUCCESS) {
+		ext2_close(ext2_port, fid1);
+		return;
+	}
+
+	/* Both clean — sync iterates empty dirty list */
+	ext2_sync(ext2_port);  /* warmup */
+	dget_time(&t0);
+	for (i = 0; i < SYNC_BENCH_ITERS; i++)
+		ext2_sync(ext2_port);
+	dget_time(&t1);
+	total_ns = delapsed_ns(&t0, &t1);
+	{
+		unsigned long us_per = (total_ns / SYNC_BENCH_ITERS) / 1000;
+		unsigned long us_fr = ((total_ns / SYNC_BENCH_ITERS) % 1000) / 10;
+		unsigned long total_us = total_ns / 1000;
+		printf("  %-28s %5lu.%02lu us/sync  (%d iters, %lu us total)\n",
+		       "sync (2 open, 0 dirty)",
+		       us_per, us_fr, SYNC_BENCH_ITERS, total_us);
+	}
+
+	/* Write one file, sync — dirty list has 1 entry */
+	kr = vm_allocate(mach_task_self(), &buf, 4, TRUE);
+	if (kr == KERN_SUCCESS) {
+		((char *)buf)[0] = 'T';
+		((char *)buf)[1] = 'E';
+		((char *)buf)[2] = 'S';
+		((char *)buf)[3] = 'T';
+	}
+
+	/* warmup: write + sync cycle */
+	for (i = 0; i < 4; i++) {
+		ext2_write(ext2_port, fid1, 0, (pointer_t)buf, 4);
+		ext2_sync(ext2_port);
+	}
+
+	dget_time(&t0);
+	for (i = 0; i < SYNC_BENCH_ITERS; i++) {
+		ext2_write(ext2_port, fid1, 0, (pointer_t)buf, 4);
+		ext2_sync(ext2_port);
+	}
+	dget_time(&t1);
+	vm_deallocate(mach_task_self(), buf, 4);
+	total_ns = delapsed_ns(&t0, &t1);
+	{
+		unsigned long us_per = (total_ns / SYNC_BENCH_ITERS) / 1000;
+		unsigned long us_fr = ((total_ns / SYNC_BENCH_ITERS) % 1000) / 10;
+		unsigned long total_us = total_ns / 1000;
+		printf("  %-28s %5lu.%02lu us/op   (%d iters, %lu us total)\n",
+		       "write+sync (2 open, 1 dirty)",
+		       us_per, us_fr, SYNC_BENCH_ITERS, total_us);
+	}
+
+	ext2_close(ext2_port, fid1);
+	ext2_close(ext2_port, fid2);
+}
+
+/* ===================================================================
  * ext2 write+sync benchmark (end-to-end with disk persistence)
  *
  * Each iteration does write + sync, measuring the real cost of a
@@ -1269,6 +1346,183 @@ restore:
 }
 
 /* ===================================================================
+ * Dirty list test
+ *
+ * Opens multiple files, writes to all of them (making them dirty),
+ * then syncs and verifies all writes persisted.  Exercises the
+ * server-side dirty inode list with multiple entries.
+ * =================================================================== */
+
+static void
+test_dirty_list(void)
+{
+	kern_return_t	kr;
+	natural_t	fid1, fid2;
+	natural_t	size1, size2;
+	pointer_t	orig1, orig2;
+	mach_msg_type_number_t orig1_cnt, orig2_cnt;
+	pointer_t	rdata;
+	mach_msg_type_number_t rcount;
+	vm_offset_t	buf;
+	unsigned int	pass = 0, fail = 0;
+	const char	*pattern_a = "DIRTY_A_TEST_12345";
+	const char	*pattern_b = "DIRTY_B_TEST_67890";
+	unsigned int	len_a = 18, len_b = 18;
+
+	printf("  dirty list test:\n");
+
+	/* Open both files */
+	kr = ext2_open(ext2_port, "hello.txt", &fid1);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: open hello.txt kr=%d\n", kr);
+		return;
+	}
+	kr = ext2_open(ext2_port, "bench.dat", &fid2);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: open bench.dat kr=%d\n", kr);
+		ext2_close(ext2_port, fid1);
+		return;
+	}
+
+	/* Save originals */
+	ext2_stat(ext2_port, fid1, &size1);
+	kr = ext2_read(ext2_port, fid1, 0, size1, &orig1, &orig1_cnt);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: read hello.txt kr=%d\n", kr);
+		goto close_both;
+	}
+
+	/* Save first 64 bytes of bench.dat */
+	kr = ext2_read(ext2_port, fid2, 0, 64, &orig2, &orig2_cnt);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: read bench.dat kr=%d\n", kr);
+		vm_deallocate(mach_task_self(), orig1, orig1_cnt);
+		goto close_both;
+	}
+
+	/* Write pattern A to hello.txt */
+	kr = vm_allocate(mach_task_self(), &buf, len_a, TRUE);
+	if (kr == KERN_SUCCESS) {
+		memcpy((void *)buf, pattern_a, len_a);
+		kr = ext2_write(ext2_port, fid1, 0,
+				(pointer_t)buf, len_a);
+		vm_deallocate(mach_task_self(), buf, len_a);
+	}
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: write hello.txt kr=%d\n", kr);
+		fail++;
+		goto restore;
+	}
+
+	/* Write pattern B to bench.dat */
+	kr = vm_allocate(mach_task_self(), &buf, len_b, TRUE);
+	if (kr == KERN_SUCCESS) {
+		memcpy((void *)buf, pattern_b, len_b);
+		kr = ext2_write(ext2_port, fid2, 0,
+				(pointer_t)buf, len_b);
+		vm_deallocate(mach_task_self(), buf, len_b);
+	}
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: write bench.dat kr=%d\n", kr);
+		fail++;
+		goto restore;
+	}
+
+	/* Both files now dirty — sync should flush both via dirty list */
+	kr = ext2_sync(ext2_port);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: sync kr=%d\n", kr);
+		fail++;
+		goto restore;
+	}
+
+	/* Close and reopen to verify persistence */
+	ext2_close(ext2_port, fid1);
+	ext2_close(ext2_port, fid2);
+
+	kr = ext2_open(ext2_port, "hello.txt", &fid1);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: reopen hello.txt kr=%d\n", kr);
+		fail++;
+		goto done;
+	}
+	kr = ext2_open(ext2_port, "bench.dat", &fid2);
+	if (kr != KERN_SUCCESS) {
+		printf("    FAIL: reopen bench.dat kr=%d\n", kr);
+		fail++;
+		ext2_close(ext2_port, fid1);
+		goto done;
+	}
+
+	/* Verify pattern A in hello.txt */
+	kr = ext2_read(ext2_port, fid1, 0, len_a, &rdata, &rcount);
+	if (kr != KERN_SUCCESS || rcount < len_a) {
+		printf("    FAIL: readback hello.txt kr=%d cnt=%u\n",
+		       kr, rcount);
+		fail++;
+	} else {
+		unsigned int k, match = 1;
+		for (k = 0; k < len_a; k++) {
+			if (((char *)rdata)[k] != pattern_a[k]) {
+				match = 0;
+				break;
+			}
+		}
+		if (!match) {
+			printf("    FAIL: hello.txt data mismatch\n");
+			fail++;
+		} else {
+			printf("    dirty-list file 1:   PASS\n");
+			pass++;
+		}
+	}
+	if (rcount > 0)
+		vm_deallocate(mach_task_self(), rdata, rcount);
+
+	/* Verify pattern B in bench.dat */
+	kr = ext2_read(ext2_port, fid2, 0, len_b, &rdata, &rcount);
+	if (kr != KERN_SUCCESS || rcount < len_b) {
+		printf("    FAIL: readback bench.dat kr=%d cnt=%u\n",
+		       kr, rcount);
+		fail++;
+	} else {
+		unsigned int k, match = 1;
+		for (k = 0; k < len_b; k++) {
+			if (((char *)rdata)[k] != pattern_b[k]) {
+				match = 0;
+				break;
+			}
+		}
+		if (!match) {
+			printf("    FAIL: bench.dat data mismatch\n");
+			fail++;
+		} else {
+			printf("    dirty-list file 2:   PASS\n");
+			pass++;
+		}
+	}
+	if (rcount > 0)
+		vm_deallocate(mach_task_self(), rdata, rcount);
+
+restore:
+	/* Restore originals */
+	ext2_write(ext2_port, fid1, 0, orig1,
+		   (mach_msg_type_number_t)orig1_cnt);
+	ext2_write(ext2_port, fid2, 0, orig2,
+		   (mach_msg_type_number_t)orig2_cnt);
+	ext2_sync(ext2_port);
+	vm_deallocate(mach_task_self(), orig1, orig1_cnt);
+	vm_deallocate(mach_task_self(), orig2, orig2_cnt);
+
+close_both:
+	ext2_close(ext2_port, fid1);
+	ext2_close(ext2_port, fid2);
+
+done:
+	printf("  dirty list: %u PASS, %u FAIL\n", pass, fail);
+}
+
+/* ===================================================================
  * Public entry point
  * =================================================================== */
 
@@ -1335,6 +1589,9 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		bench_ext2_write_sync("ext2 write+sync (durable)",
 				      "hello.txt");
 
+		/* Dirty list sync benchmark */
+		bench_dirty_list_sync();
+
 		/* Merge test: write many 1K blocks then sync */
 		printf("  ext2 merge test:\n");
 		bench_ext2_merge_sync("ext2 merge sync (bench.dat)",
@@ -1342,6 +1599,9 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 		/* Stress tests */
 		stress_ext2_write();
+
+		/* Dirty list test — multiple dirty files + sync */
+		test_dirty_list();
 	}
 
 	if (have_ahci && have_ext2) {

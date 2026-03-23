@@ -137,9 +137,44 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 struct open_file {
 	int		in_use;
 	fs_private_t	private;	/* opaque ext2fs state */
+	int		on_dirty_list;	/* non-zero if linked in dirty_head */
+	int		dirty_next;	/* index of next dirty, -1 = end */
+	int		dirty_prev;	/* index of prev dirty, -1 = head */
 };
 
 static struct open_file	open_files[MAX_OPEN_FILES];
+static int		dirty_head = -1;	/* index of first dirty, -1 = empty */
+
+static void
+dirty_list_add(int idx)
+{
+	if (open_files[idx].on_dirty_list)
+		return;
+	open_files[idx].on_dirty_list = 1;
+	open_files[idx].dirty_prev = -1;
+	open_files[idx].dirty_next = dirty_head;
+	if (dirty_head >= 0)
+		open_files[dirty_head].dirty_prev = idx;
+	dirty_head = idx;
+}
+
+static void
+dirty_list_remove(int idx)
+{
+	if (!open_files[idx].on_dirty_list)
+		return;
+	open_files[idx].on_dirty_list = 0;
+	if (open_files[idx].dirty_prev >= 0)
+		open_files[open_files[idx].dirty_prev].dirty_next =
+		    open_files[idx].dirty_next;
+	else
+		dirty_head = open_files[idx].dirty_next;
+	if (open_files[idx].dirty_next >= 0)
+		open_files[open_files[idx].dirty_next].dirty_prev =
+		    open_files[idx].dirty_prev;
+	open_files[idx].dirty_next = -1;
+	open_files[idx].dirty_prev = -1;
+}
 
 /* ================================================================
  * Background writeback thread
@@ -175,10 +210,16 @@ writeback_thread(void *arg)
 			       0, sizeof(msg), sleep_port,
 			       WRITEBACK_INTERVAL_MS, MACH_PORT_NULL);
 
-		/* Flush dirty metadata for all open files */
-		for (int i = 0; i < MAX_OPEN_FILES; i++) {
-			if (open_files[i].in_use)
+		/* Flush dirty metadata — iterate only dirty files */
+		{
+			int i = dirty_head;
+			while (i >= 0) {
+				int next = open_files[i].dirty_next;
 				ext2fs_flush_metadata(open_files[i].private);
+				if (!ext2fs_is_dirty(open_files[i].private))
+					dirty_list_remove(i);
+				i = next;
+			}
 		}
 
 		/* Flush dirty page cache blocks */
@@ -302,6 +343,7 @@ ds_ext2_close(
 	if (idx < 0 || idx >= MAX_OPEN_FILES || !open_files[idx].in_use)
 		return KERN_INVALID_ARGUMENT;
 
+	dirty_list_remove(idx);
 	ext2fs_close_file(open_files[idx].private);
 	free(open_files[idx].private);
 	open_files[idx].private = NULL;
@@ -342,6 +384,9 @@ ds_ext2_write(
 		return KERN_FAILURE;
 	}
 
+	/* Write sets dirty flags — track for efficient sync */
+	dirty_list_add(idx);
+
 	return KERN_SUCCESS;
 }
 
@@ -352,12 +397,17 @@ ds_ext2_sync(
 	int rc;
 	(void)fs_port_arg;
 
-	/* Flush dirty metadata (inode, group descriptors, superblock) */
-	for (int i = 0; i < MAX_OPEN_FILES; i++) {
-		if (open_files[i].in_use) {
+	/* Flush dirty metadata — iterate only dirty files */
+	{
+		int i = dirty_head;
+		while (i >= 0) {
+			int next = open_files[i].dirty_next;
 			rc = ext2fs_flush_metadata(open_files[i].private);
 			if (rc != 0)
 				return KERN_FAILURE;
+			if (!ext2fs_is_dirty(open_files[i].private))
+				dirty_list_remove(i);
+			i = next;
 		}
 	}
 
