@@ -1096,13 +1096,9 @@ ahci_read_mbr(int port_idx)
 		ahci_parts[n_partitions].start_lba  = 0;
 		ahci_parts[n_partitions].num_sectors =
 			ahci_ports[port_idx].disk_sectors;
-		ahci_parts[n_partitions].name[0] = 'a';
-		ahci_parts[n_partitions].name[1] = 'h';
-		ahci_parts[n_partitions].name[2] = 'c';
-		ahci_parts[n_partitions].name[3] = 'i';
-		ahci_parts[n_partitions].name[4] = '0' + port_idx;
-		ahci_parts[n_partitions].name[5] = 'a';
-		ahci_parts[n_partitions].name[6] = '\0';
+		snprintf(ahci_parts[n_partitions].name,
+			 sizeof(ahci_parts[n_partitions].name),
+			 "ahci%d%c", port_idx, 'a');
 		n_partitions++;
 		return 0;
 	}
@@ -1125,15 +1121,9 @@ ahci_read_mbr(int port_idx)
 		ahci_parts[n_partitions].port_idx   = port_idx;
 		ahci_parts[n_partitions].start_lba  = p->relsect;
 		ahci_parts[n_partitions].num_sectors = p->numsect;
-		/* Build name manually — "ahciNx" where N=port, x=partition
-		 * (snprintf has issues in our environment) */
-		ahci_parts[n_partitions].name[0] = 'a';
-		ahci_parts[n_partitions].name[1] = 'h';
-		ahci_parts[n_partitions].name[2] = 'c';
-		ahci_parts[n_partitions].name[3] = 'i';
-		ahci_parts[n_partitions].name[4] = '0' + port_idx;
-		ahci_parts[n_partitions].name[5] = 'a' + i;
-		ahci_parts[n_partitions].name[6] = '\0';
+		snprintf(ahci_parts[n_partitions].name,
+			 sizeof(ahci_parts[n_partitions].name),
+			 "ahci%d%c", port_idx, 'a' + i);
 		n_partitions++;
 	}
 

@@ -12,6 +12,15 @@ file(GLOB TOP_S_LOWER_S CONFIGURE_DEPENDS "*.s")
 file(GLOB MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
 list(REMOVE_ITEM LIB_SOURCES ${MS_WRAPPERS})
 
+# Exclude sprintf.c and doprnt.c — the canonical implementations live in
+# libsa_mach.  The libmach copies have an incompatible _doprnt signature
+# (char * callback vs void *) which breaks snprintf when the linker picks
+# mismatched symbols with --allow-multiple-definition.  See issue #102.
+list(REMOVE_ITEM LIB_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/sprintf.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/doprnt.c
+)
+
 # __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out)
 set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/powermac/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/asm")
