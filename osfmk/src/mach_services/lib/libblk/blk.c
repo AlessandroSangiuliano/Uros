@@ -57,6 +57,10 @@ extern kern_return_t netname_notify(
 	mach_port_t serv, const char *name,
 	mach_port_t port) __attribute__((weak));
 
+extern kern_return_t netname_look_up(
+	mach_port_t serv, const char *host,
+	const char *name, mach_port_t *port) __attribute__((weak));
+
 #include "blk.h"
 
 /* ================================================================
@@ -185,6 +189,63 @@ blk_open(mach_port_t name_server_port, const char *driver_name)
 	}
 
 	/* Probe capabilities */
+	dev->bd_has_batch = (device_write_batch != NULL);
+	dev->bd_has_phys = (device_read_phys != NULL &&
+			    device_write_phys != NULL);
+	dev->bd_has_overwrite = (device_read_overwrite != NULL);
+
+	printf("blk: opened '%s' (port=%d, rec=%u, sectors=%u, "
+	       "batch=%d, phys=%d, overwrite=%d)\n",
+	       dev->bd_name, dev->bd_port, dev->bd_rec_size,
+	       dev->bd_capacity, dev->bd_has_batch,
+	       dev->bd_has_phys, dev->bd_has_overwrite);
+
+	return dev;
+}
+
+/* ================================================================
+ * blk_open_try — non-blocking variant of blk_open
+ *
+ * Uses netname_look_up (returns immediately) instead of
+ * netname_notify (blocks until the name appears).
+ * Returns NULL if the driver is not yet registered.
+ * ================================================================ */
+
+struct blk_dev *
+blk_open_try(mach_port_t name_server_port, const char *driver_name)
+{
+	struct blk_dev		*dev;
+	mach_port_t		drv_port;
+	kern_return_t		kr;
+	unsigned int		size_info[2];
+	mach_msg_type_number_t	info_cnt;
+
+	kr = netname_look_up(name_server_port, "",
+			     (char *)driver_name, &drv_port);
+	if (kr != KERN_SUCCESS)
+		return NULL;
+
+	/* Query device size */
+	info_cnt = 2;
+	kr = device_get_status(drv_port, DEV_GET_SIZE,
+			       (dev_status_t)size_info, &info_cnt);
+
+	dev = (struct blk_dev *)malloc(sizeof(struct blk_dev));
+	if (!dev)
+		return NULL;
+
+	dev->bd_port = drv_port;
+	strncpy(dev->bd_name, driver_name, BLK_NAME_MAX - 1);
+	dev->bd_name[BLK_NAME_MAX - 1] = '\0';
+
+	if (kr == KERN_SUCCESS && info_cnt >= 2) {
+		dev->bd_rec_size = size_info[1];
+		dev->bd_capacity = size_info[0] / size_info[1];
+	} else {
+		dev->bd_rec_size = 512;
+		dev->bd_capacity = 0;
+	}
+
 	dev->bd_has_batch = (device_write_batch != NULL);
 	dev->bd_has_phys = (device_read_phys != NULL &&
 			    device_write_phys != NULL);

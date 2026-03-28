@@ -1811,6 +1811,7 @@ mach_msg_overwrite_trap(
 			ipc_port_t reply_port =
 				(ipc_port_t) hdr->msgh_local_port;
 			mach_port_t dest_name, reply_name;
+			unsigned long fast_pp = 0;
 
 			/* receiving a request message */
 
@@ -1893,6 +1894,12 @@ mach_msg_overwrite_trap(
 			else
 				dest_name = MACH_PORT_NULL;
 
+			/*
+			 * Read protected payload while port is
+			 * still locked and active.
+			 */
+			fast_pp = dest_port->ip_protected_payload;
+
 			if ((--dest_port->ip_srights == 0) &&
 #if	DIPC
 			    (!DIPC_IS_DIPC_PORT(dest_port) || 
@@ -1915,8 +1922,15 @@ mach_msg_overwrite_trap(
 			hdr->msgh_bits =
 				MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE,
 					       MACH_MSG_TYPE_PORT_SEND);
+			if (fast_pp != 0) {
+				hdr->msgh_bits |=
+					MACH_MSGH_BITS_PROTECTED_PAYLOAD;
+				hdr->msgh_local_port =
+					(mach_port_t) fast_pp;
+			} else {
+				hdr->msgh_local_port = dest_name;
+			}
 			hdr->msgh_remote_port = reply_name;
-			hdr->msgh_local_port = dest_name;
 			HOT(c_mmot_hot_ok1++);
 			goto fast_put;
 

@@ -45,6 +45,7 @@ struct device {
 	unsigned int	rec_size;	/* record size */
 	struct page_cache *cache;	/* optional block cache (NULL = uncached) */
 	struct blk_dev	*blk;		/* block layer handle (NULL = direct) */
+	void		*mount_data;	/* FS-specific per-mount state (NULL = none) */
 };
 
 /*

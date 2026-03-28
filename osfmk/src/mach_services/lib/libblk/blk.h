@@ -56,6 +56,16 @@ struct blk_dev *blk_open(mach_port_t name_server_port,
 			 const char *driver_name);
 
 /*
+ * blk_open_try — Non-blocking variant of blk_open.
+ *
+ * Uses netname_look_up (immediate return) instead of netname_notify
+ * (blocks until name appears).  Returns NULL if the driver has not
+ * registered yet.  Useful for optional/conditional mounts.
+ */
+struct blk_dev *blk_open_try(mach_port_t name_server_port,
+			     const char *driver_name);
+
+/*
  * blk_close — Release all resources associated with a block device.
  */
 void blk_close(struct blk_dev *dev);

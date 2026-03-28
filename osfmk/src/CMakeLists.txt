@@ -63,9 +63,9 @@ if(OSFMK_BUILD_NAME_SERVER)
   add_subdirectory(mach_services/servers/netname)
 endif()
 
-# Build ext2 filesystem server
+# Build ext filesystem server (ext2/ext3/ext4)
 if(OSFMK_BUILD_EXT2_SERVER)
-  add_subdirectory(ext2_server)
+  add_subdirectory(ext_server)
 endif()
 
 

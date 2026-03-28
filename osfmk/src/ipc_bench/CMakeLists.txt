@@ -6,7 +6,7 @@ project(ipc_bench C)
 # ===========================================================================
 
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(EXT2_DEFS ${CMAKE_SOURCE_DIR}/src/ext2_server/ext2fs_server.defs)
+set(EXT2_DEFS ${CMAKE_SOURCE_DIR}/src/ext_server/ext2fs_server.defs)
 
 set(EXT2_USER_C ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server_user.c)
 set(EXT2_USER_H ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server.h)
@@ -67,7 +67,7 @@ target_include_directories(ipc_bench_server PRIVATE
   # MIG-generated headers (ext2fs_server.h)
   ${CMAKE_CURRENT_BINARY_DIR}
   # ext2fs_types.h (imported by MIG-generated code)
-  ${CMAKE_SOURCE_DIR}/src/ext2_server
+  ${CMAKE_SOURCE_DIR}/src/ext_server
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)

@@ -1963,20 +1963,24 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 	bench_clock_port = clock;
 
-	/* Discover servers via netname */
-	kr = netname_look_up(name_server_port, "", "ahci_driver", &ahci_port);
+	/* Discover servers via netname.
+	 * Try per-partition name (ahci0a) first, fall back to legacy name. */
+	kr = netname_look_up(name_server_port, "", "ahci0a", &ahci_port);
+	if (kr != KERN_SUCCESS)
+		kr = netname_look_up(name_server_port, "", "ahci_driver",
+				     &ahci_port);
 	if (kr == KERN_SUCCESS) {
 		have_ahci = 1;
 	}
 
-	kr = netname_look_up(name_server_port, "", "ext2_server", &ext2_port);
+	kr = netname_look_up(name_server_port, "", "ext_server", &ext2_port);
 	if (kr == KERN_SUCCESS) {
 		have_ext2 = 1;
 	}
 
 	if (!have_ahci && !have_ext2) {
 		printf("--- Disk I/O benchmark: skipped "
-		       "(no ahci_driver or ext2_server) ---\n");
+		       "(no ahci_driver or ext_server) ---\n");
 		return;
 	}
 
@@ -2051,6 +2055,68 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 	if (have_ahci && have_ext2) {
 		printf("  (ext2 reads go: ipc_bench -> ext2_server "
 		       "-> ahci_driver -> AHCI HW)\n");
+	}
+
+	/* Multi-mount test: try all ext_server instances */
+	{
+		static const char *mount_names[] = {
+			"ext_server", "ext_server:1",
+			"ext_server:2", "ext_server:3"
+		};
+		mach_port_t mport;
+		int found = 0, ok = 0;
+		int mi;
+
+		printf("--- Multi-mount test ---\n");
+
+		for (mi = 0; mi < 4; mi++) {
+			kr = netname_look_up(name_server_port, "",
+					     (char *)mount_names[mi], &mport);
+			if (kr != KERN_SUCCESS)
+				continue;
+			found++;
+
+			/* Open hello.txt, read, verify, close */
+			{
+				natural_t fid;
+				pointer_t data;
+				mach_msg_type_number_t cnt;
+
+				kr = ext2_open(mport, "hello.txt", &fid);
+				if (kr != KERN_SUCCESS) {
+					printf("  %s: open failed (kr=%d)\n",
+					       mount_names[mi], kr);
+					mach_port_deallocate(
+						mach_task_self(), mport);
+					continue;
+				}
+
+				kr = ext2_read(mport, fid, 0, 4096,
+					       &data, &cnt);
+				if (kr != KERN_SUCCESS) {
+					printf("  %s: read failed (kr=%d)\n",
+					       mount_names[mi], kr);
+					ext2_close(mport, fid);
+					mach_port_deallocate(
+						mach_task_self(), mport);
+					continue;
+				}
+
+				printf("  %s: \"%.*s\" (%u bytes)\n",
+				       mount_names[mi],
+				       cnt > 64 ? 64 : (int)cnt,
+				       (char *)data, cnt);
+
+				if (cnt > 0)
+					vm_deallocate(mach_task_self(),
+						      (vm_offset_t)data, cnt);
+				ext2_close(mport, fid);
+				ok++;
+			}
+			mach_port_deallocate(mach_task_self(), mport);
+		}
+
+		printf("  multi-mount: %d/%d OK\n", ok, found);
 	}
 
 	printf("\n");
