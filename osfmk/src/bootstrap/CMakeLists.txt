@@ -117,10 +117,13 @@ target_include_directories(bootstrap_server PRIVATE
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, servers/, cthreads.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # Filesystem headers — must come before export so the canonical file_system.h
+  # is used (export/powermac copy may be stale)
+  ${CMAKE_SOURCE_DIR}/src/file_systems
   # Kernel headers (mach/, device/, ddb/, i386/) — bootstrap needs kernel-internal
   # extensions (boot_info.h multi-segment support) so kernel must come BEFORE export
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
-  # Pre-built export headers (mach/mach_interface.h, mach/fs/file_system.h, etc.)
+  # Pre-built export headers (mach/mach_interface.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/powermac/include
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
