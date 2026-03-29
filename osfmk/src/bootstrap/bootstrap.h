@@ -58,7 +58,7 @@
 #include <stdio.h>
 #include <device/device_types.h>
 #include <mach/boot_info.h>
-#include <mach/fs/file_system.h>
+#include "file_system.h"
 #include <mach/boolean.h>
 #include <mach_debug/mach_debug.h>
 
