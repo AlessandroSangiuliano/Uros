@@ -301,19 +301,15 @@ static int mount_fs(
 static void unmount_fs(
 		struct ext2fs_file *);
 
-struct fs_ops ext2fs_ops = {
-	ext2fs_open_file,
-	ext2fs_close_file,
-	ext2fs_read_file,
-	ext2fs_file_size,
-	ext2fs_file_is_directory,
-	ext2fs_file_is_executable
-};
-
 /*
  * Per-mount filesystem state.
  * One instance per mounted partition, hung off struct device.mount_data.
  * Contains cached superblock, group descriptors, inode/vnode/dcache tables.
+ *
+ * Allocated dynamically by the filesystem dispatch layer (file_system.c)
+ * via vm_allocate using fs_ops.mount_size.  Callers that bypass the
+ * dispatch layer (e.g. ext_server) get an on-demand vm_allocate in
+ * ext2_get_mount().
  */
 
 #define ICACHE_SIZE	16		/* must be power of 2 */
@@ -351,24 +347,32 @@ struct ext2_mount {
 	struct dcache_entry	 m_dcache[DCACHE_SIZE];
 };
 
+struct fs_ops ext2fs_ops = {
+	ext2fs_open_file,
+	ext2fs_close_file,
+	ext2fs_read_file,
+	ext2fs_file_size,
+	ext2fs_file_is_directory,
+	ext2fs_file_is_executable,
+	sizeof(struct ext2_mount)
+};
+
 /*
- * Get the per-mount state from a device.
- * Creates it on first access (lazy init).
+ * Return the per-mount state for this device.
+ * The dispatch layer pre-allocates mount_data via fs_ops.mount_size;
+ * if called directly (ext_server), fall back to vm_allocate.
  */
 static struct ext2_mount *
 ext2_get_mount(struct device *dev)
 {
-	if (!dev->mount_data) {
-		struct ext2_mount *m;
-		vm_offset_t buf;
-		if (vm_allocate(mach_task_self(), &buf,
-				sizeof(struct ext2_mount), TRUE)
-		    != KERN_SUCCESS)
-			return NULL;
-		m = (struct ext2_mount *)buf;
-		memset(m, 0, sizeof(*m));
-		dev->mount_data = m;
-	}
+	if (dev->mount_data)
+		return (struct ext2_mount *)dev->mount_data;
+
+	if (vm_allocate(mach_task_self(),
+			(vm_address_t *)&dev->mount_data,
+			sizeof(struct ext2_mount), TRUE) != KERN_SUCCESS)
+		return NULL;
+
 	return (struct ext2_mount *)dev->mount_data;
 }
 
@@ -567,7 +571,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	struct ext2_super_block	*fs;
 	daddr_t			disk_block;
 	kern_return_t		rc;
-	struct ext2_inode	*cached;
+	struct ext2_inode	*cached = NULL;
 
 #ifdef	DEBUG
 	int	i = inumber;
@@ -1175,7 +1179,7 @@ search_directory(
 	kern_return_t	rc;
 	char		tmp_name[256];
 	ino_t		cached_ino;
-	int		cache_rc;
+	int		cache_rc = DCACHE_MISS;
 
 #ifdef	DEBUG
 	if(debug)
