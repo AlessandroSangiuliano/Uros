@@ -934,14 +934,14 @@ ahci_benchmark(int port_idx)
 	       BENCH_SECTORS, BENCH_SECTORS / 2, BENCH_SECTORS_PER_CMD);
 
 	/* Warm-up: one command before measuring */
-	if (ahci_read_sectors(port, 0, BENCH_SECTORS_PER_CMD) < 0) {
+	if (ahci_read_sectors(port_idx, 0, BENCH_SECTORS_PER_CMD) < 0) {
 		printf("ahci: benchmark warm-up failed\n");
 		return;
 	}
 
 	t0 = rdtsc();
 	for (i = 0, lba = 0; i < cmds; i++, lba += BENCH_SECTORS_PER_CMD) {
-		if (ahci_read_sectors(port, lba, BENCH_SECTORS_PER_CMD) < 0) {
+		if (ahci_read_sectors(port_idx, lba, BENCH_SECTORS_PER_CMD) < 0) {
 			printf("ahci: benchmark read error at LBA %u\n", lba);
 			return;
 		}
