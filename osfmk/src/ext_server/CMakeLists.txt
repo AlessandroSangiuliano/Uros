@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(ext2_server C)
+project(ext_server C)
 
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
 
@@ -89,7 +89,7 @@ add_custom_command(
 # ===========================================================================
 
 set(EXT2_SERVER_SOURCES
-  ext2_server.c
+  ext_server.c
   device_read_overwrite.c
   nostdlib_stubs.c
   ${EXT2_SERVER_C}
@@ -101,9 +101,9 @@ set(EXT2_SERVER_SOURCES
 # Build target
 # ===========================================================================
 
-add_executable(ext2_server_bin ${EXT2_SERVER_SOURCES})
+add_executable(ext_server_bin ${EXT2_SERVER_SOURCES})
 
-target_compile_options(ext2_server_bin PRIVATE
+target_compile_options(ext_server_bin PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2
   -fno-builtin
@@ -114,12 +114,12 @@ target_compile_options(ext2_server_bin PRIVATE
 
 option(OSFMK_EXT2_BENCH "Enable ext2 page cache benchmark at boot" OFF)
 
-target_compile_definitions(ext2_server_bin PRIVATE
+target_compile_definitions(ext_server_bin PRIVATE
   MACH_IPC_COMPAT=0
   $<$<BOOL:${OSFMK_EXT2_BENCH}>:EXT2_BENCH>
 )
 
-target_include_directories(ext2_server_bin PRIVATE
+target_include_directories(ext_server_bin PRIVATE
   # MIG-generated headers (ext2fs_server_server.h, ahci_batch.h)
   ${CMAKE_CURRENT_BINARY_DIR}
   # ahci_batch_types.h
@@ -142,7 +142,7 @@ target_include_directories(ext2_server_bin PRIVATE
 )
 
 # Link against Mach userspace libraries + filesystem library.
-target_link_libraries(ext2_server_bin PRIVATE
+target_link_libraries(ext_server_bin PRIVATE
   -Wl,--start-group
   libcthreads
   libmach
@@ -154,14 +154,14 @@ target_link_libraries(ext2_server_bin PRIVATE
 )
 
 # Linker flags: 32-bit static Mach binary, no host libc.
-target_link_options(ext2_server_bin PRIVATE
+target_link_options(ext_server_bin PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 
-set_target_properties(ext2_server_bin PROPERTIES
-  OUTPUT_NAME "ext2_server"
+set_target_properties(ext_server_bin PROPERTIES
+  OUTPUT_NAME "ext_server"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
 )

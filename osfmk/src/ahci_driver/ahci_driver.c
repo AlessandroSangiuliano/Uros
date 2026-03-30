@@ -48,6 +48,10 @@
 #include "ahci_batch_server.h"
 #include "ahci.h"
 
+/* Not yet in our exported headers */
+extern kern_return_t mach_port_set_protected_payload(
+    mach_port_t task, mach_port_t port, unsigned long payload);
+
 /* msgh_id base for IRQ notifications from device_intr_register */
 #define IRQ_NOTIFY_MSGH_BASE	3000
 
@@ -73,7 +77,42 @@ static unsigned int	batch_data_size;	/* batch_slots * SLOT_DATA_SIZE */
 static unsigned int	ra_sectors;		/* batch_slots * SECTORS_PER_SLOT */
 
 /* ================================================================
- * Readahead cache
+ * Per-port and per-partition state
+ * ================================================================ */
+
+#define MAX_AHCI_PORTS	4	/* practical limit for testing */
+#define MAX_MBR_PARTS	4	/* primary MBR partitions */
+#define MAX_PARTITIONS	(MAX_AHCI_PORTS * MAX_MBR_PARTS)
+
+/* Linux ext2/ext3/ext4 partition type */
+#define MBR_TYPE_LINUX	0x83
+
+struct ahci_port_info {
+	int		hba_port;	/* HBA port number (0-31) */
+	uint32_t	disk_sectors;	/* from IDENTIFY DEVICE */
+	int		ncq_supported;
+	unsigned int	ncq_depth;
+	unsigned int	clb_pa, clb_uva;  /* per-port CLB (1 KB in page) */
+	unsigned int	fb_pa,  fb_uva;   /* per-port FB  (256 B at +1024) */
+	unsigned int	dma_kva;	  /* kernel handle for dealloc */
+};
+
+struct ahci_partition {
+	int		port_idx;	/* index into ahci_ports[] */
+	uint32_t	start_lba;	/* partition start sector */
+	uint32_t	num_sectors;	/* partition size in sectors */
+	mach_port_t	recv_port;	/* receive right (PP-tagged) */
+	char		name[32];	/* netname registration name */
+};
+
+static struct ahci_port_info ahci_ports[MAX_AHCI_PORTS];
+static int n_ports;
+
+static struct ahci_partition ahci_parts[MAX_PARTITIONS];
+static int n_partitions;
+
+/* ================================================================
+ * Readahead cache (per-port aware)
  *
  * When a sequential read pattern is detected (current LBA ==
  * previous end LBA), we read extra sectors and cache them.
@@ -84,10 +123,11 @@ static unsigned int	ra_sectors;		/* batch_slots * SECTORS_PER_SLOT */
 /* ra_sectors = batch_slots * SECTORS_PER_SLOT — set dynamically */
 
 static struct {
-	uint32_t	lba_start;	/* first cached LBA */
+	uint32_t	lba_start;	/* first cached LBA (absolute) */
 	uint32_t	lba_count;	/* number of cached sectors */
 	vm_offset_t	buf;		/* vm_allocate'd buffer (0 = invalid) */
 	unsigned int	buf_size;	/* allocated size */
+	int		port_idx;	/* which port this cache belongs to */
 } ra_cache;
 
 /* ================================================================
@@ -101,8 +141,7 @@ static mach_port_t	security_port;
 static mach_port_t	root_ledger_wired;
 static mach_port_t	root_ledger_paged;
 static mach_port_t	irq_port;
-static mach_port_t	ahci_service_port;	/* RPC port registered with netname */
-static mach_port_t	port_set;	/* IRQ + RPC combined receive set */
+static mach_port_t	port_set;	/* IRQ + partition ports */
 
 /* PCI location of the AHCI controller */
 static unsigned int	ahci_bus, ahci_slot, ahci_func;
@@ -115,24 +154,14 @@ static unsigned int	ahci_abar_phys;
  */
 static volatile uint32_t *abar;
 
-/* Active SATA port */
-static int		active_port = -1;
-
-/* Total disk sectors (from IDENTIFY) */
-static uint32_t		disk_sectors;
-
-/* NCQ support: set by ahci_identify() if both HBA and drive support it */
-static int		ncq_supported;
-static unsigned int	ncq_depth;	/* max queue depth (1-32) */
-
 /*
- * DMA buffers — each has:
+ * Shared DMA buffers (CT + data) — I/O is serialized across ports.
+ * CLB and FB are per-port (in ahci_ports[]).
+ *
  *   kva  : kernel VA (from device_dma_alloc, used as handle for dma_free)
  *   uva  : user VA   (from device_dma_map_user, CPU-accessible here)
  *   pa   : physical address (programmed into AHCI registers)
  */
-static unsigned int	clb_kva,  clb_uva,  clb_pa;	/* Command List Base  1 KB */
-static unsigned int	fb_kva,   fb_uva,   fb_pa;	/* FIS Base          256 B */
 static unsigned int	ct_kva,   ct_uva,   ct_pa;	/* Command Table     4 KB */
 static unsigned int	data_kva, data_uva, data_pa;	/* Data buffer (dynamic) */
 
@@ -325,72 +354,112 @@ ahci_hba_reset(void)
 }
 
 /* ================================================================
- * Port discovery
+ * Port discovery — find all active ports
  * ================================================================ */
 
 static int
-ahci_port_find(void)
+ahci_port_scan(void)
 {
 	uint32_t pi = ahci_read(AHCI_PI);
 	int port;
 
+	n_ports = 0;
 	for (port = 0; port < AHCI_MAX_PORTS; port++) {
 		if (!(pi & (1u << port)))
 			continue;
 		if ((port_read(port, PORT_SSTS) & SSTS_DET_MASK)
-		    == SSTS_DET_PRESENT) {
-			printf("ahci: device on port %d  sig=0x%08X\n",
-			       port, port_read(port, PORT_SIG));
-			return port;
-		}
+		    != SSTS_DET_PRESENT)
+			continue;
+		if (n_ports >= MAX_AHCI_PORTS)
+			break;
+
+		printf("ahci: device on port %d  sig=0x%08X\n",
+		       port, port_read(port, PORT_SIG));
+		ahci_ports[n_ports].hba_port = port;
+		n_ports++;
 	}
 
-	printf("ahci: no device found (PI=0x%08X)\n", pi);
-	return -1;
+	if (n_ports == 0) {
+		printf("ahci: no device found (PI=0x%08X)\n", pi);
+		return -1;
+	}
+	printf("ahci: found %d port(s)\n", n_ports);
+	return 0;
 }
 
 /* ================================================================
- * Port initialisation
+ * Port initialisation — allocates per-port CLB+FB DMA page
  * ================================================================ */
 
 static int
-ahci_port_init(int port)
+ahci_port_init(int port_idx)
 {
-	port_stop(port);
+	struct ahci_port_info *pi = &ahci_ports[port_idx];
+	int hba_port = pi->hba_port;
+	kern_return_t kr;
+	unsigned int dma_kva, dma_uva, dma_pa;
+
+	/* Allocate 1 page: CLB at offset 0 (1 KB), FB at offset 1024 */
+	kr = device_dma_alloc(master_device, 4096, &dma_kva, &dma_pa);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: port %d CLB/FB alloc failed\n", hba_port);
+		return -1;
+	}
+	kr = device_dma_map_user(master_device, dma_kva, 4096,
+				 mach_task_self(), &dma_uva);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: port %d CLB/FB map failed\n", hba_port);
+		return -1;
+	}
+
+	pi->clb_pa  = dma_pa;
+	pi->clb_uva = dma_uva;
+	pi->fb_pa   = dma_pa  + 1024;
+	pi->fb_uva  = dma_uva + 1024;
+	pi->dma_kva = dma_kva;
+
+	/* Zero CLB+FB */
+	memset((void *)dma_uva, 0, 4096);
+
+	port_stop(hba_port);
 
 	/* Set command list and FIS receive areas */
-	port_write(port, PORT_CLB,  clb_pa);
-	port_write(port, PORT_CLBU, 0);
-	port_write(port, PORT_FB,   fb_pa);
-	port_write(port, PORT_FBU,  0);
+	port_write(hba_port, PORT_CLB,  pi->clb_pa);
+	port_write(hba_port, PORT_CLBU, 0);
+	port_write(hba_port, PORT_FB,   pi->fb_pa);
+	port_write(hba_port, PORT_FBU,  0);
 
 	/* Clear errors and interrupt status */
-	port_write(port, PORT_SERR, ~0u);
-	port_write(port, PORT_IS,   ~0u);
+	port_write(hba_port, PORT_SERR, ~0u);
+	port_write(hba_port, PORT_IS,   ~0u);
 
 	/* Enable interrupts: D2H FIS, SDB FIS (for NCQ), and error */
-	port_write(port, PORT_IE,
+	port_write(hba_port, PORT_IE,
 		   PORT_IE_DHRE | PORT_IE_SDBE | PORT_IE_TFEE);
 
-	port_start(port);
+	port_start(hba_port);
 
 	printf("ahci: port %d initialised  cmd=0x%08X  tfd=0x%08X\n",
-	       port,
-	       port_read(port, PORT_CMD),
-	       port_read(port, PORT_TFD));
+	       hba_port,
+	       port_read(hba_port, PORT_CMD),
+	       port_read(hba_port, PORT_TFD));
 	return 0;
 }
 
 /* ================================================================
  * Command submission (polling, slot 0 only)
+ *
+ * port_idx is an index into ahci_ports[], NOT the HBA port number.
  * ================================================================ */
 
 static int
-ahci_submit_cmd(int port, struct ata_fis_h2d *fis,
+ahci_submit_cmd(int port_idx, struct ata_fis_h2d *fis,
 		unsigned int buf_pa, unsigned int buf_size,
 		int write)
 {
-	struct ahci_cmd_hdr   *hdr = (struct ahci_cmd_hdr *)clb_uva;
+	int port = ahci_ports[port_idx].hba_port;
+	struct ahci_cmd_hdr   *hdr =
+		(struct ahci_cmd_hdr *)ahci_ports[port_idx].clb_uva;
 	struct ahci_cmd_table *tbl = (struct ahci_cmd_table *)ct_uva;
 	int i;
 
@@ -451,8 +520,9 @@ ahci_submit_cmd(int port, struct ata_fis_h2d *fis,
  * ================================================================ */
 
 static int
-ahci_identify(int port)
+ahci_identify(int port_idx)
 {
+	struct ahci_port_info *pi = &ahci_ports[port_idx];
 	struct ata_fis_h2d fis;
 	uint16_t *buf = (uint16_t *)data_uva;
 	char model[41];
@@ -465,8 +535,8 @@ ahci_identify(int port)
 	fis.command  = ATA_CMD_IDENTIFY;
 	fis.device   = 0;
 
-	if (ahci_submit_cmd(port, &fis, data_pa, 512, 0) < 0) {
-		printf("ahci: IDENTIFY failed\n");
+	if (ahci_submit_cmd(port_idx, &fis, data_pa, 512, 0) < 0) {
+		printf("ahci: IDENTIFY failed on port %d\n", pi->hba_port);
 		return -1;
 	}
 
@@ -482,22 +552,16 @@ ahci_identify(int port)
 
 	/* LBA28 total addressable sectors (words 60-61) */
 	lba28 = ((uint32_t)buf[61] << 16) | buf[60];
-	disk_sectors = lba28;
+	pi->disk_sectors = lba28;
 
-	printf("ahci: model    : %s\n", model);
-	printf("ahci: sectors  : %u  capacity: ~%u MB\n",
-	       lba28, lba28 / 2048);
+	printf("ahci: port %d model: %s\n", pi->hba_port, model);
+	printf("ahci: port %d sectors: %u  capacity: ~%u MB\n",
+	       pi->hba_port, lba28, lba28 / 2048);
 
 	/*
 	 * Detect HBA command slot count and NCQ support.
-	 *
-	 * CAP.NCS (bits 12:8): number of command slots - 1 (0-31).
-	 * This determines how many slots the HBA supports regardless
-	 * of NCQ.  For NCQ, the effective depth is further limited by
-	 * the drive's advertised queue depth (IDENTIFY word 75).
-	 *
-	 * batch_slots is set to the usable slot count; the caller
-	 * must reallocate DMA buffers accordingly.
+	 * NCQ depth is stored per-port but batch_slots (shared DMA
+	 * sizing) is set to the maximum across all ports.
 	 */
 	{
 		uint32_t cap = ahci_read(AHCI_CAP);
@@ -508,28 +572,19 @@ ahci_identify(int port)
 		unsigned int dev_qdepth = (buf[ATA_ID_QUEUE_DEPTH] & 0x1F) + 1;
 
 		if (hba_ncq && dev_ncq) {
-			ncq_supported = 1;
-			ncq_depth = hba_slots < dev_qdepth
+			pi->ncq_supported = 1;
+			pi->ncq_depth = hba_slots < dev_qdepth
 				    ? hba_slots : dev_qdepth;
-			batch_slots = ncq_depth;
-			printf("ahci: NCQ supported  depth=%u "
-			       "(hba=%u, dev=%u)\n",
-			       ncq_depth, hba_slots, dev_qdepth);
+			printf("ahci: port %d NCQ depth=%u\n",
+			       pi->hba_port, pi->ncq_depth);
 		} else {
-			ncq_supported = 0;
-			batch_slots = hba_slots;
-			printf("ahci: NCQ not available "
-			       "(hba=%s, dev=%s)  slots=%u\n",
-			       hba_ncq ? "yes" : "no",
-			       dev_ncq ? "yes" : "no",
-			       hba_slots);
+			pi->ncq_supported = 0;
+			pi->ncq_depth = 0;
 		}
 
-		batch_data_size = batch_slots * SLOT_DATA_SIZE;
-		ra_sectors = batch_slots * SECTORS_PER_SLOT;
-		printf("ahci: batch_slots=%u  data=%u KB  "
-		       "readahead=%u sectors\n",
-		       batch_slots, batch_data_size / 1024, ra_sectors);
+		/* batch_slots = max across all ports */
+		if (hba_slots > batch_slots)
+			batch_slots = hba_slots;
 	}
 
 	return 0;
@@ -540,7 +595,7 @@ ahci_identify(int port)
  * ================================================================ */
 
 static int
-ahci_read_sectors(int port, uint32_t lba, uint16_t count)
+ahci_read_sectors(int port_idx, uint32_t lba, uint16_t count)
 {
 	struct ata_fis_h2d fis;
 
@@ -558,7 +613,7 @@ ahci_read_sectors(int port, uint32_t lba, uint16_t count)
 	fis.sector_count     = count & 0xFF;
 	fis.sector_count_exp = (count >> 8) & 0xFF;
 
-	return ahci_submit_cmd(port, &fis, data_pa, (unsigned int)count * 512, 0);
+	return ahci_submit_cmd(port_idx, &fis, data_pa, (unsigned int)count * 512, 0);
 }
 
 /* ================================================================
@@ -566,7 +621,7 @@ ahci_read_sectors(int port, uint32_t lba, uint16_t count)
  * ================================================================ */
 
 static int
-ahci_write_sectors(int port, uint32_t lba, uint16_t count)
+ahci_write_sectors(int port_idx, uint32_t lba, uint16_t count)
 {
 	struct ata_fis_h2d fis;
 
@@ -585,7 +640,7 @@ ahci_write_sectors(int port, uint32_t lba, uint16_t count)
 	fis.sector_count_exp = (count >> 8) & 0xFF;
 
 	/* write=1: device reads from host memory (DMA write to disk) */
-	return ahci_submit_cmd(port, &fis, data_pa, (unsigned int)count * 512, 1);
+	return ahci_submit_cmd(port_idx, &fis, data_pa, (unsigned int)count * 512, 1);
 }
 
 /* ================================================================
@@ -604,10 +659,13 @@ ahci_write_sectors(int port, uint32_t lba, uint16_t count)
  * ================================================================ */
 
 static int
-ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
+ahci_submit_batch(int port_idx, uint32_t start_lba, unsigned int nsectors,
 		  int write)
 {
-	struct ahci_cmd_hdr   *hdr = (struct ahci_cmd_hdr *)clb_uva;
+	int port = ahci_ports[port_idx].hba_port;
+	int port_ncq = ahci_ports[port_idx].ncq_supported;
+	struct ahci_cmd_hdr   *hdr =
+		(struct ahci_cmd_hdr *)ahci_ports[port_idx].clb_uva;
 	unsigned int nslots, slot, sects_per_slot;
 	unsigned int ci_mask;
 	int i;
@@ -674,7 +732,7 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 		fis->lba_mid_exp      = 0;
 		fis->lba_hi_exp       = 0;
 
-		if (ncq_supported) {
+		if (port_ncq) {
 			/*
 			 * NCQ FPDMA: sector count in features field,
 			 * tag in sector_count bits 7:3.
@@ -721,7 +779,7 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 
 	/* Issue all slots at once */
 	ci_mask = (1u << nslots) - 1;
-	if (ncq_supported) {
+	if (port_ncq) {
 		/* NCQ: set SACT bits before CI */
 		port_write(port, PORT_SACT, ci_mask);
 	}
@@ -737,7 +795,7 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
 			port_write(port, PORT_IS, PORT_IS_TFES);
 			return -1;
 		}
-		if (ncq_supported) {
+		if (port_ncq) {
 			/* NCQ: SACT bits cleared by SDB FIS on completion */
 			if (!(port_read(port, PORT_SACT) & ci_mask))
 				return 0;
@@ -760,11 +818,13 @@ ahci_submit_batch(int port, uint32_t start_lba, unsigned int nsectors,
  * Uses a single command slot (slot 0).
  */
 static int
-ahci_submit_phys(int port, uint32_t start_lba, unsigned int nsectors,
+ahci_submit_phys(int port_idx, uint32_t start_lba, unsigned int nsectors,
 		 int write, unsigned int *caller_pa, unsigned int n_pa,
 		 unsigned int total_bytes)
 {
-	struct ahci_cmd_hdr   *hdr = (struct ahci_cmd_hdr *)clb_uva;
+	int port = ahci_ports[port_idx].hba_port;
+	struct ahci_cmd_hdr   *hdr =
+		(struct ahci_cmd_hdr *)ahci_ports[port_idx].clb_uva;
 	struct ahci_cmd_table *tbl;
 	struct ata_fis_h2d    *fis;
 	unsigned int n_prdt, p, bytes_left;
@@ -862,8 +922,9 @@ ahci_submit_phys(int port, uint32_t start_lba, unsigned int nsectors,
 #define BENCH_SECTORS_PER_CMD	8u	/* 4 KB per command (= data buf size) */
 
 static void
-ahci_benchmark(int port)
+ahci_benchmark(int port_idx)
 {
+	int port = ahci_ports[port_idx].hba_port;
 	uint64_t t0, t1, elapsed;
 	uint32_t lba, i;
 	unsigned int cmds = BENCH_SECTORS / BENCH_SECTORS_PER_CMD;
@@ -873,14 +934,14 @@ ahci_benchmark(int port)
 	       BENCH_SECTORS, BENCH_SECTORS / 2, BENCH_SECTORS_PER_CMD);
 
 	/* Warm-up: one command before measuring */
-	if (ahci_read_sectors(port, 0, BENCH_SECTORS_PER_CMD) < 0) {
+	if (ahci_read_sectors(port_idx, 0, BENCH_SECTORS_PER_CMD) < 0) {
 		printf("ahci: benchmark warm-up failed\n");
 		return;
 	}
 
 	t0 = rdtsc();
 	for (i = 0, lba = 0; i < cmds; i++, lba += BENCH_SECTORS_PER_CMD) {
-		if (ahci_read_sectors(port, lba, BENCH_SECTORS_PER_CMD) < 0) {
+		if (ahci_read_sectors(port_idx, lba, BENCH_SECTORS_PER_CMD) < 0) {
 			printf("ahci: benchmark read error at LBA %u\n", lba);
 			return;
 		}
@@ -969,9 +1030,102 @@ ahci_realloc_batch_buffers(void)
 	data_n_pages = n_pages;
 	data_pa = data_pa_list[0];	/* alias for single-cmd paths */
 
+	batch_data_size = batch_slots * SLOT_DATA_SIZE;
+	ra_sectors = batch_slots * SECTORS_PER_SLOT;
+
 	printf("ahci: DMA reallocated: ct=%u bytes  data=%u pages "
 	       "(%u KB, scatter-gather, %u slots)\n",
 	       ct_size, n_pages, n_pages * 4, batch_slots);
+
+	return 0;
+}
+
+/* ================================================================
+ * MBR partition parsing
+ *
+ * Reads sector 0 from the specified port, parses the four primary
+ * MBR entries, and populates ahci_parts[] for Linux (0x83) entries.
+ * ================================================================ */
+
+/* MBR structures — inline to avoid kernel header dependency */
+#define MBR_BOOTSZ	446
+#define MBR_NUMPART	4
+#define MBR_MAGIC	0xAA55
+
+struct mbr_part_entry {
+	unsigned char	bootid;
+	unsigned char	beghead;
+	unsigned char	begsect;
+	unsigned char	begcyl;
+	unsigned char	systid;
+	unsigned char	endhead;
+	unsigned char	endsect;
+	unsigned char	endcyl;
+	uint32_t	relsect;	/* LBA start (little-endian) */
+	uint32_t	numsect;	/* sector count (little-endian) */
+} __attribute__((packed));
+
+struct mbr_block {
+	char			bootinst[MBR_BOOTSZ];
+	struct mbr_part_entry	parts[MBR_NUMPART];
+	uint16_t		signature;
+} __attribute__((packed));
+
+static int
+ahci_read_mbr(int port_idx)
+{
+	struct mbr_block *mbr;
+	int i;
+
+	/* Read sector 0 */
+	if (ahci_read_sectors(port_idx, 0, 1) < 0) {
+		printf("ahci: port %d: failed to read MBR\n",
+		       ahci_ports[port_idx].hba_port);
+		return -1;
+	}
+
+	mbr = (struct mbr_block *)data_uva;
+	if (mbr->signature != MBR_MAGIC) {
+		/* No MBR — expose whole disk as single partition */
+		printf("ahci: port %d: no MBR (sig=0x%04X), "
+		       "exposing whole disk\n",
+		       ahci_ports[port_idx].hba_port, mbr->signature);
+		if (n_partitions >= MAX_PARTITIONS)
+			return 0;
+		ahci_parts[n_partitions].port_idx   = port_idx;
+		ahci_parts[n_partitions].start_lba  = 0;
+		ahci_parts[n_partitions].num_sectors =
+			ahci_ports[port_idx].disk_sectors;
+		snprintf(ahci_parts[n_partitions].name,
+			 sizeof(ahci_parts[n_partitions].name),
+			 "ahci%d%c", port_idx, 'a');
+		n_partitions++;
+		return 0;
+	}
+
+	printf("ahci: port %d MBR:\n", ahci_ports[port_idx].hba_port);
+	for (i = 0; i < MBR_NUMPART; i++) {
+		struct mbr_part_entry *p = &mbr->parts[i];
+		if (p->numsect == 0 || p->systid == 0)
+			continue;
+
+		printf("  part %d: type=0x%02X  start=%u  size=%u "
+		       "(%u MB)\n", i, p->systid,
+		       p->relsect, p->numsect, p->numsect / 2048);
+
+		if (p->systid != MBR_TYPE_LINUX)
+			continue;
+		if (n_partitions >= MAX_PARTITIONS)
+			break;
+
+		ahci_parts[n_partitions].port_idx   = port_idx;
+		ahci_parts[n_partitions].start_lba  = p->relsect;
+		ahci_parts[n_partitions].num_sectors = p->numsect;
+		snprintf(ahci_parts[n_partitions].name,
+			 sizeof(ahci_parts[n_partitions].name),
+			 "ahci%d%c", port_idx, 'a' + i);
+		n_partitions++;
+	}
 
 	return 0;
 }
@@ -985,6 +1139,7 @@ ahci_init(void)
 {
 	kern_return_t kr;
 	unsigned int bar5, cmd_reg, irq_reg;
+	int i;
 
 	/* Read and save BAR5 (ABAR physical address) */
 	kr = device_pci_config_read(master_device,
@@ -1023,19 +1178,7 @@ ahci_init(void)
 	}
 	printf("ahci: ABAR mapped at uva=0x%08X\n", (unsigned int)abar);
 
-	/* Allocate DMA buffers and map them into our address space */
-	kr = device_dma_alloc(master_device, 4096, &clb_kva, &clb_pa);
-	if (kr != KERN_SUCCESS) { printf("ahci: CLB alloc failed\n"); return -1; }
-	kr = device_dma_map_user(master_device, clb_kva, 4096,
-				 mach_task_self(), &clb_uva);
-	if (kr != KERN_SUCCESS) { printf("ahci: CLB map failed\n"); return -1; }
-
-	kr = device_dma_alloc(master_device, 4096, &fb_kva, &fb_pa);
-	if (kr != KERN_SUCCESS) { printf("ahci: FB alloc failed\n"); return -1; }
-	kr = device_dma_map_user(master_device, fb_kva, 4096,
-				 mach_task_self(), &fb_uva);
-	if (kr != KERN_SUCCESS) { printf("ahci: FB map failed\n"); return -1; }
-
+	/* Shared CT buffer (1 page initially, reallocated after identify) */
 	kr = device_dma_alloc(master_device, 4096, &ct_kva, &ct_pa);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_device, ct_kva, 4096,
@@ -1056,21 +1199,21 @@ ahci_init(void)
 	data_pa_list[0] = data_pa;
 	data_n_pages = 1;
 
-	printf("ahci: DMA: clb pa=0x%08X fb pa=0x%08X ct pa=0x%08X data pa=0x%08X\n",
-	       clb_pa, fb_pa, ct_pa, data_pa);
+	printf("ahci: DMA: ct pa=0x%08X data pa=0x%08X\n", ct_pa, data_pa);
 
 	/* HBA reset + AHCI enable */
 	if (ahci_hba_reset() < 0)
 		return -1;
 
-	/* Find first port with a device */
-	active_port = ahci_port_find();
-	if (active_port < 0)
+	/* Find all ports with devices */
+	if (ahci_port_scan() < 0)
 		return -1;
 
-	/* Initialise that port */
-	if (ahci_port_init(active_port) < 0)
-		return -1;
+	/* Initialise each port (allocates per-port CLB+FB) */
+	for (i = 0; i < n_ports; i++) {
+		if (ahci_port_init(i) < 0)
+			return -1;
+	}
 
 	/* Register IRQ notification */
 	if (ahci_irq > 0 && ahci_irq < 16) {
@@ -1101,9 +1244,13 @@ ds_device_open(mach_port_t master, mach_port_t reply,
 	       security_token_t sec_token, dev_name_t name,
 	       mach_port_t *device)
 {
-	if (active_port < 0)
-		return D_NO_SUCH_DEVICE;
-	*device = ahci_service_port;
+	/* Clients use netname to get partition ports directly;
+	 * device_open is a no-op but must return success. */
+	struct ahci_partition *part = (struct ahci_partition *)master;
+	if (part && part->recv_port != MACH_PORT_NULL)
+		*device = part->recv_port;
+	else
+		*device = MACH_PORT_NULL;
 	return KERN_SUCCESS;
 }
 
@@ -1120,12 +1267,12 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 	       io_buf_len_t bytes_wanted,
 	       io_buf_ptr_t *data, mach_msg_type_number_t *data_count)
 {
+	struct ahci_partition *part = (struct ahci_partition *)device;
+	int port_idx = part->port_idx;
 	kern_return_t kr;
 	vm_offset_t buf;
 	unsigned int total, nsectors, lba;
 
-	if (active_port < 0)
-		return D_NO_SUCH_DEVICE;
 	if (bytes_wanted <= 0)
 		return D_INVALID_SIZE;
 
@@ -1134,17 +1281,23 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 	if (total % SECTOR_SIZE)
 		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
-	lba = recnum;
+
+	/* Bounds check against partition */
+	if (recnum + nsectors > part->num_sectors)
+		return D_INVALID_SIZE;
+
+	/* Absolute LBA = partition start + relative recnum */
+	lba = part->start_lba + recnum;
 
 	kr = vm_allocate(mach_task_self(), &buf, total, TRUE);
 	if (kr != KERN_SUCCESS)
 		return D_NO_MEMORY;
 
 	/*
-	 * Check readahead cache: if the requested range [lba, lba+nsectors)
-	 * is fully contained in the cache, copy from there.
+	 * Check readahead cache: must match port and absolute LBA range.
 	 */
 	if (ra_cache.buf != 0 &&
+	    ra_cache.port_idx == port_idx &&
 	    lba >= ra_cache.lba_start &&
 	    lba + nsectors <= ra_cache.lba_start + ra_cache.lba_count) {
 		unsigned int cache_off =
@@ -1165,12 +1318,14 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 		unsigned int read_sects = nsectors;
 		unsigned int ra_extra = 0;
 		unsigned int offset, chunk;
+		uint32_t part_end = part->start_lba + part->num_sectors;
 
 		/* Sequential detection: prefetch up to ra_sectors total */
 		if (ra_cache.buf != 0 &&
+		    ra_cache.port_idx == port_idx &&
 		    lba == ra_cache.lba_start + ra_cache.lba_count &&
 		    nsectors <= ra_sectors / 2 &&
-		    lba + ra_sectors <= disk_sectors) {
+		    lba + ra_sectors <= part_end) {
 			read_sects = ra_sectors;
 			ra_extra = read_sects - nsectors;
 		}
@@ -1200,7 +1355,7 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 				chunk = batch_data_size;
 			batch_sects = chunk / SECTOR_SIZE;
 
-			if (ahci_submit_batch(active_port,
+			if (ahci_submit_batch(port_idx,
 					      lba + offset / SECTOR_SIZE,
 					      batch_sects, 0) < 0) {
 				vm_deallocate(mach_task_self(), buf, total);
@@ -1243,6 +1398,7 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 			ra_cache.lba_count = ra_extra;
 			ra_cache.buf       = ra_buf;
 			ra_cache.buf_size  = ra_buf_needed;
+			ra_cache.port_idx  = port_idx;
 		} else {
 			/* No readahead — just record position for
 			 * sequential detection on next call */
@@ -1250,6 +1406,7 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 			ra_cache.lba_count = nsectors;
 			ra_cache.buf       = 0;
 			ra_cache.buf_size  = 0;
+			ra_cache.port_idx  = port_idx;
 		}
 	}
 
@@ -1276,28 +1433,37 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 		io_buf_ptr_t data, mach_msg_type_number_t data_count,
 		io_buf_len_t *bytes_written)
 {
-	unsigned int total, offset, lba, chunk;
+	struct ahci_partition *part = (struct ahci_partition *)device;
+	int port_idx = part->port_idx;
+	unsigned int total, offset, lba, chunk, nsectors;
 
-	if (active_port < 0)
-		return D_NO_SUCH_DEVICE;
 	if (data_count <= 0)
 		return D_INVALID_SIZE;
 
-	/* Invalidate readahead cache — disk content is changing */
-	if (ra_cache.buf != 0) {
+	/* Round up to sector boundary */
+	total = (unsigned int)data_count;
+	if (total % SECTOR_SIZE)
+		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	nsectors = total / SECTOR_SIZE;
+
+	/* Bounds check */
+	if (recnum + nsectors > part->num_sectors) {
+		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
+		return D_INVALID_SIZE;
+	}
+
+	/* Invalidate readahead cache if it's for this port */
+	if (ra_cache.buf != 0 && ra_cache.port_idx == port_idx) {
 		vm_deallocate(mach_task_self(),
 			      ra_cache.buf, ra_cache.buf_size);
 		ra_cache.buf = 0;
 		ra_cache.lba_count = 0;
 	}
 
-	/* Round up to sector boundary */
-	total = (unsigned int)data_count;
-	if (total % SECTOR_SIZE)
-		total = (total + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	/* Absolute LBA */
+	lba = part->start_lba + recnum;
 
 	/* Write in batches of up to batch_data_size */
-	lba = recnum;
 	for (offset = 0; offset < total; offset += chunk) {
 		unsigned int batch_sects;
 
@@ -1308,8 +1474,7 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 
 		memcpy((void *)data_uva, (void *)((vm_offset_t)data + offset),
 		       chunk);
-		if (ahci_submit_batch(active_port, lba, batch_sects, 1) < 0) {
-			/* Deallocate OOL data from sender */
+		if (ahci_submit_batch(port_idx, lba, batch_sects, 1) < 0) {
 			vm_deallocate(mach_task_self(),
 				      (vm_offset_t)data, data_count);
 			return D_IO_ERROR;
@@ -1317,7 +1482,6 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 		lba += batch_sects;
 	}
 
-	/* Deallocate OOL data from sender */
 	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 
 	*bytes_written = (io_buf_len_t)data_count;
@@ -1351,15 +1515,15 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 		      mach_msg_type_number_t data_count,
 		      io_buf_len_t *bytes_written)
 {
+	struct ahci_partition *part = (struct ahci_partition *)device;
+	int port_idx = part->port_idx;
 	unsigned int i, data_off = 0, total_written = 0;
 
-	if (active_port < 0)
-		return D_NO_SUCH_DEVICE;
 	if (recnumsCnt != sizesCnt || recnumsCnt == 0)
 		return D_INVALID_SIZE;
 
-	/* Invalidate readahead cache — disk content is changing */
-	if (ra_cache.buf != 0) {
+	/* Invalidate readahead cache */
+	if (ra_cache.buf != 0 && ra_cache.port_idx == port_idx) {
 		vm_deallocate(mach_task_self(),
 			      ra_cache.buf, ra_cache.buf_size);
 		ra_cache.buf = 0;
@@ -1377,7 +1541,8 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 
 		/* Round up to sector boundary */
 		total = (sz + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
-		lba = recnums[i];
+		/* Apply partition offset */
+		lba = part->start_lba + recnums[i];
 
 		for (off = 0; off < total; off += chunk) {
 			unsigned int sects, cpy;
@@ -1396,7 +1561,7 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 				       (void *)((vm_offset_t)data +
 						data_off + off),
 				       cpy);
-			if (ahci_submit_batch(active_port, lba,
+			if (ahci_submit_batch(port_idx, lba,
 					      sects, 1) < 0)
 				goto io_err;
 			lba += sects;
@@ -1431,17 +1596,20 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		    mach_msg_type_number_t phys_addrsCnt,
 		    io_buf_len_t *bytes_read)
 {
+	struct ahci_partition *part = (struct ahci_partition *)device;
 	unsigned int total, nsectors;
 
-	if (active_port < 0)
-		return D_NO_SUCH_DEVICE;
 	if (bytes_wanted == 0 || phys_addrsCnt == 0)
 		return D_INVALID_SIZE;
 
 	total = (bytes_wanted + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
 	nsectors = total / SECTOR_SIZE;
 
-	if (ahci_submit_phys(active_port, recnum, nsectors, 0,
+	if (recnum + nsectors > part->num_sectors)
+		return D_INVALID_SIZE;
+
+	if (ahci_submit_phys(part->port_idx,
+			     part->start_lba + recnum, nsectors, 0,
 			     phys_addrs, phys_addrsCnt, total) < 0)
 		return D_IO_ERROR;
 
@@ -1458,25 +1626,29 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		     mach_msg_type_number_t phys_addrsCnt,
 		     io_buf_len_t *bytes_written)
 {
+	struct ahci_partition *part = (struct ahci_partition *)device;
+	int port_idx = part->port_idx;
 	unsigned int total, nsectors;
 
-	if (active_port < 0)
-		return D_NO_SUCH_DEVICE;
 	if (bytes_to_write == 0 || phys_addrsCnt == 0)
 		return D_INVALID_SIZE;
 
-	/* Invalidate readahead cache — disk content is changing */
-	if (ra_cache.buf != 0) {
+	total = (bytes_to_write + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
+	nsectors = total / SECTOR_SIZE;
+
+	if (recnum + nsectors > part->num_sectors)
+		return D_INVALID_SIZE;
+
+	/* Invalidate readahead cache */
+	if (ra_cache.buf != 0 && ra_cache.port_idx == port_idx) {
 		vm_deallocate(mach_task_self(),
 			      ra_cache.buf, ra_cache.buf_size);
 		ra_cache.buf = 0;
 		ra_cache.lba_count = 0;
 	}
 
-	total = (bytes_to_write + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
-	nsectors = total / SECTOR_SIZE;
-
-	if (ahci_submit_phys(active_port, recnum, nsectors, 1,
+	if (ahci_submit_phys(port_idx,
+			     part->start_lba + recnum, nsectors, 1,
 			     phys_addrs, phys_addrsCnt, total) < 0)
 		return D_IO_ERROR;
 
@@ -1489,8 +1661,10 @@ ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
 		     dev_status_t status,
 		     mach_msg_type_number_t *status_count)
 {
+	struct ahci_partition *part = (struct ahci_partition *)device;
+
 	if (flavor == DEV_GET_SIZE) {
-		status[DEV_GET_SIZE_DEVICE_SIZE] = (int)disk_sectors;
+		status[DEV_GET_SIZE_DEVICE_SIZE] = (int)part->num_sectors;
 		status[DEV_GET_SIZE_RECORD_SIZE] = (int)SECTOR_SIZE;
 		*status_count = DEV_GET_SIZE_COUNT;
 		return KERN_SUCCESS;
@@ -1549,10 +1723,12 @@ ahci_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	if (ahci_batch_server(in, out))
 		return TRUE;
 
-	/* IRQ notification — acknowledge, no reply */
+	/* IRQ notification — acknowledge on all active ports, no reply */
 	if (in->msgh_id >= IRQ_NOTIFY_MSGH_BASE) {
+		int pi;
 		ahci_write(AHCI_IS, ~0u);
-		port_write(active_port, PORT_IS, ~0u);
+		for (pi = 0; pi < n_ports; pi++)
+			port_write(ahci_ports[pi].hba_port, PORT_IS, ~0u);
 		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
 		((mig_reply_error_t *)out)->Head.msgh_size =
 			sizeof(mig_reply_error_t);
@@ -1570,6 +1746,7 @@ int
 main(int argc, char **argv)
 {
 	kern_return_t kr;
+	int i;
 
 	kr = bootstrap_ports(bootstrap_port,
 			     &host_port, &device_port,
@@ -1598,22 +1775,7 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Service port for device RPC (device_read, etc.) */
-	kr = mach_port_allocate(mach_task_self(),
-		MACH_PORT_RIGHT_RECEIVE, &ahci_service_port);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: service port alloc failed\n");
-		return 1;
-	}
-	kr = mach_port_insert_right(mach_task_self(),
-		ahci_service_port, ahci_service_port,
-		MACH_MSG_TYPE_MAKE_SEND);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: service port right failed\n");
-		return 1;
-	}
-
-	/* Port set: receive on both IRQ and RPC ports */
+	/* Port set: receive on IRQ + all partition ports */
 	kr = mach_port_allocate(mach_task_self(),
 		MACH_PORT_RIGHT_PORT_SET, &port_set);
 	if (kr != KERN_SUCCESS) {
@@ -1621,7 +1783,6 @@ main(int argc, char **argv)
 		return 1;
 	}
 	mach_port_move_member(mach_task_self(), irq_port, port_set);
-	mach_port_move_member(mach_task_self(), ahci_service_port, port_set);
 
 	/* Find and initialise the controller */
 	if (!pci_scan_ahci()) {
@@ -1633,8 +1794,15 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Identify the attached disk and detect slot count */
-	ahci_identify(active_port);
+	/* Identify all attached disks and detect slot count */
+	for (i = 0; i < n_ports; i++)
+		ahci_identify(i);
+
+	/* Set batch sizing from max slot count */
+	batch_data_size = batch_slots * SLOT_DATA_SIZE;
+	ra_sectors = batch_slots * SECTORS_PER_SLOT;
+	printf("ahci: batch_slots=%u  data=%u KB  readahead=%u sectors\n",
+	       batch_slots, batch_data_size / 1024, ra_sectors);
 
 	/* Reallocate DMA buffers for detected batch_slots */
 	if (ahci_realloc_batch_buffers() < 0) {
@@ -1644,19 +1812,64 @@ main(int argc, char **argv)
 		ra_sectors = SECTORS_PER_SLOT;
 	}
 
-	/* Run sequential read benchmark */
-	ahci_benchmark(active_port);
+	/* Run sequential read benchmark on first port */
+	ahci_benchmark(0);
 
-	/* Register with the name server so other tasks can find us */
-	kr = netname_check_in(name_server_port, "ahci_driver",
-			      mach_task_self(), ahci_service_port);
-	if (kr != KERN_SUCCESS)
-		printf("ahci: netname_check_in failed (kr=%d) "
-		       "— continuing without registration\n", kr);
-	else
-		printf("ahci: registered as 'ahci_driver' with name server\n");
+	/* Parse MBR on each port and create partitions */
+	n_partitions = 0;
+	for (i = 0; i < n_ports; i++)
+		ahci_read_mbr(i);
 
-	printf("ahci: init complete, entering message loop\n");
+	if (n_partitions == 0) {
+		printf("ahci: no partitions found\n");
+		return 1;
+	}
+
+	/* Register each partition: allocate port, set protected payload,
+	 * add to port set, register with name server. */
+	for (i = 0; i < n_partitions; i++) {
+		struct ahci_partition *part = &ahci_parts[i];
+
+		kr = mach_port_allocate(mach_task_self(),
+			MACH_PORT_RIGHT_RECEIVE, &part->recv_port);
+		if (kr != KERN_SUCCESS) {
+			printf("ahci: port alloc failed for %s\n", part->name);
+			continue;
+		}
+		kr = mach_port_insert_right(mach_task_self(),
+			part->recv_port, part->recv_port,
+			MACH_MSG_TYPE_MAKE_SEND);
+		if (kr != KERN_SUCCESS) {
+			printf("ahci: port right failed for %s\n", part->name);
+			continue;
+		}
+
+		kr = mach_port_set_protected_payload(mach_task_self(),
+			part->recv_port, (unsigned long)part);
+		if (kr != KERN_SUCCESS) {
+			printf("ahci: set_protected_payload failed for %s\n",
+			       part->name);
+			continue;
+		}
+
+		mach_port_move_member(mach_task_self(),
+			part->recv_port, port_set);
+
+		kr = netname_check_in(name_server_port, part->name,
+				      mach_task_self(), part->recv_port);
+		if (kr != KERN_SUCCESS)
+			printf("ahci: netname_check_in(%s) failed (kr=%d)\n",
+			       part->name, kr);
+		else
+			printf("ahci: registered '%s' "
+			       "(port %d, LBA %u+%u)\n",
+			       part->name,
+			       ahci_ports[part->port_idx].hba_port,
+			       part->start_lba, part->num_sectors);
+	}
+
+	printf("ahci: init complete, %d partition(s), "
+	       "entering message loop\n", n_partitions);
 
 	/*
 	 * Message loop: combined demux handles both device RPCs

@@ -91,7 +91,7 @@ savechar_n(void *arg, int c)
 	}
 }
 
-int
+int __attribute__((noinline))
 vsnprintf(char *s, size_t n, const char *fmt, va_list args)
 {
 	struct snprintf_state state;

@@ -301,28 +301,17 @@ static int mount_fs(
 static void unmount_fs(
 		struct ext2fs_file *);
 
-struct fs_ops ext2fs_ops = {
-	ext2fs_open_file,
-	ext2fs_close_file,
-	ext2fs_read_file,
-	ext2fs_file_size,
-	ext2fs_file_is_directory,
-	ext2fs_file_is_executable
-};
-
 /*
- * Cached superblock and group descriptors.
- * Read once on first mount, reused for all subsequent opens.
+ * Per-mount filesystem state.
+ * One instance per mounted partition, hung off struct device.mount_data.
+ * Contains cached superblock, group descriptors, inode/vnode/dcache tables.
+ *
+ * Allocated dynamically by the filesystem dispatch layer (file_system.c)
+ * via vm_allocate using fs_ops.mount_size.  Callers that bypass the
+ * dispatch layer (e.g. ext_server) get an on-demand vm_allocate in
+ * ext2_get_mount().
  */
-static struct ext2_super_block	*cached_fs;
-static struct ext2_group_desc	*cached_gd;
-static vm_size_t		 cached_gd_size;
-static int			 cached_nindir[NIADDR];
 
-/*
- * Inode cache — avoids re-reading inodes from disk on repeated opens.
- * Direct-mapped hash table keyed by inode number.
- */
 #define ICACHE_SIZE	16		/* must be power of 2 */
 #define ICACHE_HASH(ino) ((ino) & (ICACHE_SIZE - 1))
 
@@ -331,74 +320,119 @@ struct icache_entry {
 	struct ext2_inode	ic_inode;	/* cached inode data */
 };
 
-static struct icache_entry	icache[ICACHE_SIZE];
+#define VNODE_TABLE_SIZE	32
+
+#define DCACHE_SIZE	32		/* must be power of 2 */
+#define DCACHE_NAME_MAX	60
+#define DCACHE_NEGATIVE	((ino_t)-1)	/* sentinel for "known absent" */
+
+/* dcache_lookup return codes */
+#define DCACHE_MISS	0	/* not in cache */
+#define DCACHE_HIT	1	/* positive hit, *ino_out set */
+#define DCACHE_NEG	2	/* negative hit, name does not exist */
+
+struct dcache_entry {
+	ino_t		dc_parent;	/* 0 = empty */
+	ino_t		dc_child;	/* DCACHE_NEGATIVE = negative entry */
+	char		dc_name[DCACHE_NAME_MAX];
+};
+
+struct ext2_mount {
+	struct ext2_super_block	*m_fs;
+	struct ext2_group_desc	*m_gd;
+	vm_size_t		 m_gd_size;
+	int			 m_nindir[NIADDR];
+	struct icache_entry	 m_icache[ICACHE_SIZE];
+	struct ext2_vnode	 m_vnode_table[VNODE_TABLE_SIZE];
+	struct dcache_entry	 m_dcache[DCACHE_SIZE];
+};
+
+struct fs_ops ext2fs_ops = {
+	ext2fs_open_file,
+	ext2fs_close_file,
+	ext2fs_read_file,
+	ext2fs_file_size,
+	ext2fs_file_is_directory,
+	ext2fs_file_is_executable,
+	sizeof(struct ext2_mount)
+};
+
+/*
+ * Return the per-mount state for this device.
+ * The dispatch layer pre-allocates mount_data via fs_ops.mount_size;
+ * if called directly (ext_server), fall back to vm_allocate.
+ */
+static struct ext2_mount *
+ext2_get_mount(struct device *dev)
+{
+	if (dev->mount_data)
+		return (struct ext2_mount *)dev->mount_data;
+
+	if (vm_allocate(mach_task_self(),
+			(vm_address_t *)&dev->mount_data,
+			sizeof(struct ext2_mount), TRUE) != KERN_SUCCESS)
+		return NULL;
+
+	return (struct ext2_mount *)dev->mount_data;
+}
+
+/*
+ * Inode cache — per-mount, accessed via ext2_mount.
+ */
 
 static struct ext2_inode *
-icache_lookup(ino_t ino)
+icache_lookup(struct ext2_mount *m, ino_t ino)
 {
-	struct icache_entry *e = &icache[ICACHE_HASH(ino)];
+	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
 	if (e->ic_ino == ino)
 		return &e->ic_inode;
 	return NULL;
 }
 
 static void
-icache_insert(ino_t ino, const struct ext2_inode *inode)
+icache_insert(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
 {
-	struct icache_entry *e = &icache[ICACHE_HASH(ino)];
+	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
 	e->ic_ino = ino;
 	e->ic_inode = *inode;
 }
 
 static void
-icache_invalidate(ino_t ino)
+icache_invalidate(struct ext2_mount *m, ino_t ino)
 {
-	struct icache_entry *e = &icache[ICACHE_HASH(ino)];
+	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
 	if (e->ic_ino == ino)
 		e->ic_ino = 0;
 }
 
 /*
- * Vnode table — shared inodes for open files.
- * One vnode per unique inode number, refcounted.
+ * Vnode table — per-mount, accessed via ext2_mount.
  */
-#define VNODE_TABLE_SIZE	32
 
-static struct ext2_vnode	vnode_table[VNODE_TABLE_SIZE];
-
-/*
- * Find an existing vnode by inode number (no refcount change).
- */
 static struct ext2_vnode *
-vnode_find(ino_t ino)
+vnode_find(struct ext2_mount *m, ino_t ino)
 {
 	int i;
 	for (i = 0; i < VNODE_TABLE_SIZE; i++) {
-		if (vnode_table[i].v_ino == ino &&
-		    vnode_table[i].v_refcount > 0)
-			return &vnode_table[i];
+		if (m->m_vnode_table[i].v_ino == ino &&
+		    m->m_vnode_table[i].v_refcount > 0)
+			return &m->m_vnode_table[i];
 	}
 	return NULL;
 }
 
-/*
- * Get or create a vnode for the given inode number.
- * If an active vnode exists, bumps refcount and returns it.
- * Otherwise allocates a new slot (evicting unreferenced entries if needed).
- * Returns NULL if the table is full.
- */
 static struct ext2_vnode *
-vnode_get(ino_t ino)
+vnode_get(struct ext2_mount *m, ino_t ino)
 {
 	int i, free_slot = -1;
 
 	for (i = 0; i < VNODE_TABLE_SIZE; i++) {
-		if (vnode_table[i].v_ino == ino &&
-		    vnode_table[i].v_refcount > 0) {
-			vnode_table[i].v_refcount++;
-			return &vnode_table[i];
+		if (m->m_vnode_table[i].v_ino == ino &&
+		    m->m_vnode_table[i].v_refcount > 0) {
+			m->m_vnode_table[i].v_refcount++;
+			return &m->m_vnode_table[i];
 		}
-		if (free_slot < 0 && vnode_table[i].v_refcount == 0)
+		if (free_slot < 0 && m->m_vnode_table[i].v_refcount == 0)
 			free_slot = i;
 	}
 
@@ -406,21 +440,17 @@ vnode_get(ino_t ino)
 		return NULL;
 
 	/* Free old resources if slot was cached */
-	if (vnode_table[free_slot].v_inode_blk) {
+	if (m->m_vnode_table[free_slot].v_inode_blk) {
 		vm_deallocate(mach_task_self(),
-			      vnode_table[free_slot].v_inode_blk,
-			      vnode_table[free_slot].v_inode_blk_size);
+			      m->m_vnode_table[free_slot].v_inode_blk,
+			      m->m_vnode_table[free_slot].v_inode_blk_size);
 	}
-	memset(&vnode_table[free_slot], 0, sizeof(struct ext2_vnode));
-	vnode_table[free_slot].v_ino = ino;
-	vnode_table[free_slot].v_refcount = 1;
-	return &vnode_table[free_slot];
+	memset(&m->m_vnode_table[free_slot], 0, sizeof(struct ext2_vnode));
+	m->m_vnode_table[free_slot].v_ino = ino;
+	m->m_vnode_table[free_slot].v_refcount = 1;
+	return &m->m_vnode_table[free_slot];
 }
 
-/*
- * Release a vnode reference.  When refcount drops to zero the vnode
- * slot is recycled (inode block freed).
- */
 static void
 vnode_put(struct ext2_vnode *vn)
 {
@@ -439,26 +469,8 @@ vnode_put(struct ext2_vnode *vn)
 }
 
 /*
- * Directory entry cache — maps (parent_ino, name) → child_ino.
- * Avoids re-reading and scanning directory blocks on repeated lookups.
- * Supports negative entries (name not found) via DCACHE_NEGATIVE sentinel.
+ * Directory entry cache — per-mount, accessed via ext2_mount.
  */
-#define DCACHE_SIZE	32		/* must be power of 2 */
-#define DCACHE_NAME_MAX	60
-#define DCACHE_NEGATIVE	((ino_t)-1)	/* sentinel for "known absent" */
-
-/* dcache_lookup return codes */
-#define DCACHE_MISS	0	/* not in cache */
-#define DCACHE_HIT	1	/* positive hit, *ino_out set */
-#define DCACHE_NEG	2	/* negative hit, name does not exist */
-
-struct dcache_entry {
-	ino_t		dc_parent;	/* 0 = empty */
-	ino_t		dc_child;	/* DCACHE_NEGATIVE = negative entry */
-	char		dc_name[DCACHE_NAME_MAX];
-};
-
-static struct dcache_entry	dcache[DCACHE_SIZE];
 
 static unsigned int
 dcache_hash(ino_t parent, const char *name)
@@ -470,9 +482,10 @@ dcache_hash(ino_t parent, const char *name)
 }
 
 static int
-dcache_lookup(ino_t parent, const char *name, ino_t *ino_out)
+dcache_lookup(struct ext2_mount *m, ino_t parent, const char *name,
+	      ino_t *ino_out)
 {
-	struct dcache_entry *e = &dcache[dcache_hash(parent, name)];
+	struct dcache_entry *e = &m->m_dcache[dcache_hash(parent, name)];
 	if (e->dc_parent == parent && strcmp(e->dc_name, name) == 0) {
 		if (e->dc_child == DCACHE_NEGATIVE)
 			return DCACHE_NEG;
@@ -483,10 +496,11 @@ dcache_lookup(ino_t parent, const char *name, ino_t *ino_out)
 }
 
 static void
-dcache_insert(ino_t parent, const char *name, ino_t child)
+dcache_insert(struct ext2_mount *m, ino_t parent, const char *name,
+	      ino_t child)
 {
 	unsigned int idx = dcache_hash(parent, name);
-	struct dcache_entry *e = &dcache[idx];
+	struct dcache_entry *e = &m->m_dcache[idx];
 	e->dc_parent = parent;
 	e->dc_child = child;
 	strncpy(e->dc_name, name, DCACHE_NAME_MAX - 1);
@@ -557,7 +571,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	struct ext2_super_block	*fs;
 	daddr_t			disk_block;
 	kern_return_t		rc;
-	struct ext2_inode	*cached;
+	struct ext2_inode	*cached = NULL;
 
 #ifdef	DEBUG
 	int	i = inumber;
@@ -568,7 +582,11 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	fp->f_ino = inumber;
 
 	/* Check the inode cache first */
-	cached = icache_lookup(inumber);
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		cached = icache_lookup(m, inumber);
+	}
 	if (cached) {
 		free_file_buffers(fp);
 		*fp->f_ic = *cached;
@@ -629,7 +647,11 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
 	}
 
 	/* Populate the inode cache */
-	icache_insert(inumber, fp->f_ic);
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		icache_insert(m, inumber, fp->f_ic);
+	}
 
 	/*
 	 * Clear out the old buffers (this also frees the previous
@@ -1157,7 +1179,7 @@ search_directory(
 	kern_return_t	rc;
 	char		tmp_name[256];
 	ino_t		cached_ino;
-	int		cache_rc;
+	int		cache_rc = DCACHE_MISS;
 
 #ifdef	DEBUG
 	if(debug)
@@ -1165,7 +1187,11 @@ search_directory(
 #endif
 
 	/* Check the directory entry cache first */
-	cache_rc = dcache_lookup(fp->f_ino, name, &cached_ino);
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		cache_rc = dcache_lookup(m, fp->f_ino, name, &cached_ino);
+	}
 	if (cache_rc == DCACHE_HIT) {
 		*inumber_p = cached_ino;
 		return (0);
@@ -1192,7 +1218,12 @@ search_directory(
 	    	{
 		    /* found entry — cache it */
 		    *inumber_p = le32_to_cpu(dp->inode);
-		    dcache_insert(fp->f_ino, name, *inumber_p);
+		    {
+		    struct ext2_mount *m =
+			(struct ext2_mount *)fp->f_dev.mount_data;
+		    if (m)
+			dcache_insert(m, fp->f_ino, name, *inumber_p);
+		    }
 		    return (0);
 		}
 	    }
@@ -1200,7 +1231,11 @@ search_directory(
 	}
 
 	/* Cache the negative result */
-	dcache_insert(fp->f_ino, name, DCACHE_NEGATIVE);
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		dcache_insert(m, fp->f_ino, name, DCACHE_NEGATIVE);
+	}
 	return (FS_NO_ENTRY);
 }
 
@@ -1367,16 +1402,17 @@ static int
 mount_fs(register struct ext2fs_file	*fp)
 {
 	int error;
+	struct ext2_mount *m = ext2_get_mount(&fp->f_dev);
 
-	if (cached_fs) {
+	if (m && m->m_fs) {
 		/* Reuse cached superblock and group descriptors */
-		fp->f_fs = cached_fs;
-		fp->f_gd = cached_gd;
-		fp->f_gd_size = cached_gd_size;
+		fp->f_fs = m->m_fs;
+		fp->f_gd = m->m_gd;
+		fp->f_gd_size = m->m_gd_size;
 		{
 		    register int level;
 		    for (level = 0; level < NIADDR; level++)
-			fp->f_nindir[level] = cached_nindir[level];
+			fp->f_nindir[level] = m->m_nindir[level];
 		}
 		return (0);
 	}
@@ -1385,10 +1421,12 @@ mount_fs(register struct ext2fs_file	*fp)
 	if (error)
 	    return (error);
 
-	/* Cache for subsequent opens */
-	cached_fs = fp->f_fs;
-	cached_gd = fp->f_gd;
-	cached_gd_size = fp->f_gd_size;
+	/* Cache for subsequent opens in per-mount state */
+	if (m) {
+		m->m_fs = fp->f_fs;
+		m->m_gd = fp->f_gd;
+		m->m_gd_size = fp->f_gd_size;
+	}
 
 	{
 	    register struct ext2_super_block *fs = fp->f_fs;
@@ -1399,7 +1437,8 @@ mount_fs(register struct ext2fs_file	*fp)
 	    for (level = 0; level < NIADDR; level++) {
 		mult *= NINDIR(fs);
 		fp->f_nindir[level] = mult;
-		cached_nindir[level] = mult;
+		if (m)
+			m->m_nindir[level] = mult;
 	    }
 	}
 
@@ -1411,7 +1450,8 @@ unmount_fs(register struct ext2fs_file *fp)
 {
 	if (file_is_structured(fp)) {
 	    /* Don't free cached superblock/GD — they're shared */
-	    if (fp->f_fs != cached_fs) {
+	    struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	    if (!m || fp->f_fs != m->m_fs) {
 		(void) vm_deallocate(mach_task_self(),
 				     (vm_offset_t) fp->f_fs,
 				     SBSIZE);
@@ -1465,6 +1505,14 @@ ext2fs_open_file_into(
 	rc = mount_fs(fp);
 	if (rc)
 	    return rc;
+
+	/*
+	 * Propagate mount_data back to the original device struct.
+	 * ext2_get_mount() stores the new ext2_mount on fp->f_dev
+	 * (a copy), so the caller's device never gets updated.
+	 */
+	if (fp->f_dev.mount_data && !dev->mount_data)
+		dev->mount_data = fp->f_dev.mount_data;
 
 	inumber = (ino_t) ROOTINO;
 	if ((rc = read_inode(inumber, fp)) != 0)
@@ -1636,7 +1684,9 @@ ext2fs_open_file_into(
     out_ok:
 #endif	/* MACH_DEV_LINK */
 	{
-		struct ext2_vnode *vn = vnode_get(fp->f_ino);
+		struct ext2_mount *m =
+			(struct ext2_mount *)fp->f_dev.mount_data;
+		struct ext2_vnode *vn = m ? vnode_get(m, fp->f_ino) : NULL;
 		if (!vn) {
 			free(namebuf);
 			ext2fs_close_file((fs_private_t)fp);
@@ -2456,7 +2506,11 @@ ext2fs_write_file(
 	 * when new blocks are actually allocated.
 	 * Invalidate inode cache so future opens re-read from disk. */
 	fp->f_vnode->v_inode_dirty = 1;
-	icache_invalidate(fp->f_ino);
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		icache_invalidate(m, fp->f_ino);
+	}
 
 	return 0;
 }
