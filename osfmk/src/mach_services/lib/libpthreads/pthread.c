@@ -842,5 +842,19 @@ __mach_errno_addr(void)
 	return &pthread_self()->err_no;
 }
 
-/* This is the "magic" that gets the initialization routine called when the application starts */
+/*
+ * These function pointers are picked up by crt0.c (__start_mach):
+ *   _threadlib_init_routine — called before main(), returns new SP
+ *   _thread_init_routine    — legacy alias (some startup code uses this)
+ *   _threadlib_exit_routine — called after main() returns
+ */
 int (*_thread_init_routine)(void) = pthread_init;
+int (*_threadlib_init_routine)(void) = pthread_init;
+
+static void
+_pthread_exit_routine(int status)
+{
+	pthread_exit((void *)(long)status);
+}
+
+void (*_threadlib_exit_routine)(int) = _pthread_exit_routine;

@@ -8,6 +8,7 @@ set(LIB_SOURCES
   pthread_cond.c
   pthread_tsd.c
   fprintf.c
+  thread_switch.c
 )
 
 # AT386 (i386) architecture-specific sources
@@ -22,7 +23,7 @@ endif()
 add_library(libpthreads STATIC ${LIB_SOURCES})
 
 target_compile_options(libpthreads PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
+  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686 -mstack-protector-guard=global>
   $<$<COMPILE_LANGUAGE:ASM>:-m32>
 )
 
@@ -43,6 +44,11 @@ target_include_directories(libpthreads PUBLIC
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
+
+# Install the public header that clients need to #include <pthread.h>.
+# pthread.h includes <machine/pthread_impl.h> — copy into generated/include/machine/.
+file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/AT386/pthread_impl.h"
+     DESTINATION "${CMAKE_BINARY_DIR}/generated/include/machine")
 
 set_target_properties(libpthreads PROPERTIES
   OUTPUT_NAME "pthreads"

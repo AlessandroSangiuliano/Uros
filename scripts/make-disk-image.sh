@@ -66,6 +66,7 @@ IPC_BENCH="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ipc_bench"
 AHCI_DRIVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ahci_driver"
 VIRTIO_BLK="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/virtio_blk"
 EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
+PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 
 if [ ! -f "$NAME_SERVER" ]; then
     echo "ERRORE: name_server non trovato: $NAME_SERVER"
@@ -109,6 +110,12 @@ if [ ! -f "$EXT2_SERVER" ]; then
     exit 1
 fi
 
+if [ ! -f "$PTHREAD_TEST" ]; then
+    echo "ERRORE: pthread_test non trovato: $PTHREAD_TEST"
+    echo "  Build con: cd $BUILD_DIR && ninja pthread_test_server"
+    exit 1
+fi
+
 # --- File di configurazione del bootstrap ---
 # Formato: <symtab_name> <path> [args...]
 # Il path relativo viene risolto come /dev/boot_device/mach_servers/<path>
@@ -123,6 +130,7 @@ ipc_bench ipc_bench
 ahci_driver ahci_driver
 virtio_blk virtio_blk
 ext_server ext_server
+pthread_test pthread_test
 CONF
 
 # --- Calcoli geometria ---
@@ -180,6 +188,7 @@ write $IPC_BENCH ipc_bench
 write $AHCI_DRIVER ahci_driver
 write $VIRTIO_BLK virtio_blk
 write $EXT2_SERVER ext_server
+write $PTHREAD_TEST pthread_test
 DBGFS
 
 echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"
