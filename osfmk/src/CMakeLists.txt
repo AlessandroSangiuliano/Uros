@@ -68,4 +68,7 @@ if(OSFMK_BUILD_EXT2_SERVER)
   add_subdirectory(ext_server)
 endif()
 
-
+# Build pthread test server
+if(OSFMK_BUILD_PTHREAD_TEST)
+  add_subdirectory(pthread_test)
+endif()
