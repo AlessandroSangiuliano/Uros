@@ -39,6 +39,11 @@ set(IPC_BENCH_SOURCES
   disk_bench.c
   mem_bench.c
   flipc2_bench.c
+  flipc2_bench_common.c
+  flipc2_bench_throughput.c
+  flipc2_bench_rpc.c
+  flipc2_bench_inter.c
+  flipc2_bench_game.c
   nostdlib_stubs.c
   ${EXT2_USER_C}
 )
