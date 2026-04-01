@@ -89,6 +89,10 @@ typedef int flipc2_return_t;
 #define FLIPC2_ERR_SIZE_ALIGNMENT       -9
 #define FLIPC2_ERR_MAP_FAILED           -10
 #define FLIPC2_ERR_RING_CORRUPT         -11  /* prod_tail/cons_head inconsistent */
+#define FLIPC2_ERR_NAME_EXISTS          -12  /* endpoint name already registered */
+#define FLIPC2_ERR_NAME_NOT_FOUND       -13  /* endpoint name not found          */
+#define FLIPC2_ERR_MAX_CLIENTS          -14  /* endpoint client limit reached    */
+#define FLIPC2_ERR_PEER_DEAD            -15  /* peer task has died               */
 
 /*
  * Maximum consecutive spurious wakeups before declaring the channel dead.
@@ -216,6 +220,16 @@ typedef struct flipc2_channel {
      * considered compromised (DoS) and wait functions return NULL.
      */
     uint32_t    spurious_wakeups;
+
+    /*
+     * Per-handle semaphore port names (local IPC space).
+     * For intra-task handles these match hdr->wakeup_sem/wakeup_sem_prod.
+     * For inter-task handles the client receives its own send rights
+     * (different port names than the server) via MIG or insert_right.
+     * All inline fast-path functions use these instead of the header fields.
+     */
+    mach_port_t sem_port;           /* consumer wakeup semaphore  */
+    mach_port_t sem_port_prod;      /* producer wakeup semaphore  */
 } *flipc2_channel_t;
 
 /* ------------------------------------------------------------------ */
@@ -294,7 +308,7 @@ flipc2_produce_commit(flipc2_channel_t ch)
 
     FLIPC2_WRITE_FENCE();
     if (hdr->cons_sleeping) {
-        semaphore_signal(hdr->wakeup_sem);
+        semaphore_signal(ch->sem_port);
         hdr->wakeups++;
     }
 }
@@ -313,7 +327,7 @@ flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
 
     FLIPC2_WRITE_FENCE();
     if (hdr->cons_sleeping) {
-        semaphore_signal(hdr->wakeup_sem);
+        semaphore_signal(ch->sem_port);
         hdr->wakeups++;
     }
 }
@@ -361,7 +375,7 @@ flipc2_consume_release(flipc2_channel_t ch)
 
     FLIPC2_WRITE_FENCE();
     if (ch->hdr->prod_sleeping) {
-        semaphore_signal(ch->hdr->wakeup_sem_prod);
+        semaphore_signal(ch->sem_port_prod);
     }
 }
 
@@ -377,7 +391,7 @@ flipc2_consume_release_n(flipc2_channel_t ch, uint32_t n)
 
     FLIPC2_WRITE_FENCE();
     if (ch->hdr->prod_sleeping) {
-        semaphore_signal(ch->hdr->wakeup_sem_prod);
+        semaphore_signal(ch->sem_port_prod);
     }
 }
 
@@ -443,7 +457,7 @@ flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
     }
 
     /* Phase 3: block, then verify data actually arrived */
-    semaphore_wait(hdr->wakeup_sem);
+    semaphore_wait(ch->sem_port);
     hdr->cons_sleeping = 0;
 
     ch->cached_prod_tail = hdr->prod_tail;
@@ -518,7 +532,7 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
     /* Phase 3: block with timeout */
     ts.tv_sec  = timeout_ms / 1000;
     ts.tv_nsec = (timeout_ms % 1000) * 1000000;
-    kr = semaphore_timedwait(hdr->wakeup_sem, ts);
+    kr = semaphore_timedwait(ch->sem_port, ts);
     hdr->cons_sleeping = 0;
 
     if (kr != KERN_SUCCESS)
@@ -599,7 +613,7 @@ flipc2_produce_wait(flipc2_channel_t ch, uint32_t spin_count)
     }
 
     /* Phase 3: block on producer semaphore */
-    semaphore_wait(hdr->wakeup_sem_prod);
+    semaphore_wait(ch->sem_port_prod);
     hdr->prod_sleeping = 0;
 
     ch->cached_cons_head = hdr->cons_head;
@@ -771,5 +785,126 @@ flipc2_semaphore_share(
     mach_port_t         sem,
     mach_port_t         target_task,
     mach_port_t         target_name);
+
+/*
+ * Override the per-handle semaphore port names.
+ *
+ * For inter-task peers: after flipc2_channel_attach_remote(), call
+ * this with the semaphore send rights received via MIG to set the
+ * correct local IPC-space port names.
+ */
+void
+flipc2_channel_set_semaphores(
+    flipc2_channel_t    ch,
+    mach_port_t         sem,
+    mach_port_t         sem_prod);
+
+/* ------------------------------------------------------------------ */
+/*  Endpoint API (named channel discovery + connection handshake)       */
+/* ------------------------------------------------------------------ */
+
+/* Opaque endpoint handle */
+typedef struct flipc2_endpoint *flipc2_endpoint_t;
+
+/*
+ * Server-side: create and register a named endpoint.
+ *
+ * Registers a contact port with the Mach name server under the
+ * given name.  Clients connect via flipc2_endpoint_connect().
+ *
+ * name:           endpoint name (up to 128 chars)
+ * max_clients:    maximum simultaneous connections (1..64)
+ * channel_size:   default channel size for new connections
+ * ring_entries:   default ring entries for new connections
+ * ep:             [out] endpoint handle
+ */
+flipc2_return_t
+flipc2_endpoint_create(
+    const char         *name,
+    uint32_t            max_clients,
+    uint32_t            channel_size,
+    uint32_t            ring_entries,
+    flipc2_endpoint_t  *ep);
+
+/*
+ * Server-side: wait for a client to connect.
+ *
+ * Blocks until a client calls flipc2_endpoint_connect().
+ * Creates a dedicated SPSC channel pair (fwd: server→client,
+ * rev: client→server) and returns the server-side handles.
+ *
+ * ep:        endpoint handle
+ * fwd_ch:    [out] forward channel (server produces, client consumes)
+ * rev_ch:    [out] reverse channel (client produces, server consumes)
+ */
+flipc2_return_t
+flipc2_endpoint_accept(
+    flipc2_endpoint_t   ep,
+    flipc2_channel_t   *fwd_ch,
+    flipc2_channel_t   *rev_ch);
+
+/*
+ * Server-side: tear down endpoint, disconnect all clients.
+ *
+ * Unregisters from the name server, destroys all active connections'
+ * channels, and frees the endpoint handle.
+ */
+flipc2_return_t
+flipc2_endpoint_destroy(
+    flipc2_endpoint_t   ep);
+
+/*
+ * Server-side: get the endpoint's receive port.
+ *
+ * Useful for adding to a custom port set for multiplexed receive.
+ */
+mach_port_t
+flipc2_endpoint_port(
+    flipc2_endpoint_t   ep);
+
+/*
+ * Client-side: connect to a named endpoint.
+ *
+ * Looks up the endpoint by name via the Mach name server, then
+ * executes the connection handshake.  On success, returns a
+ * channel pair with per-handle semaphore ports already set.
+ *
+ * name:           endpoint name
+ * channel_size:   requested channel size (0 = use server default)
+ * ring_entries:   requested ring entries (0 = use server default)
+ * fwd_ch:         [out] forward channel (server→client, client consumes)
+ * rev_ch:         [out] reverse channel (client→server, client produces)
+ */
+flipc2_return_t
+flipc2_endpoint_connect(
+    const char         *name,
+    uint32_t            channel_size,
+    uint32_t            ring_entries,
+    flipc2_channel_t   *fwd_ch,
+    flipc2_channel_t   *rev_ch);
+
+/*
+ * Client-side: connect to an endpoint by port (no name lookup).
+ *
+ * Same as flipc2_endpoint_connect but takes a send right to
+ * the server's endpoint port directly.
+ */
+flipc2_return_t
+flipc2_endpoint_connect_port(
+    mach_port_t         server_port,
+    uint32_t            channel_size,
+    uint32_t            ring_entries,
+    flipc2_channel_t   *fwd_ch,
+    flipc2_channel_t   *rev_ch);
+
+/*
+ * Client-side: disconnect and detach from both channels.
+ *
+ * Detaches the channel pair and deallocates semaphore send rights.
+ */
+flipc2_return_t
+flipc2_endpoint_disconnect(
+    flipc2_channel_t    fwd_ch,
+    flipc2_channel_t    rev_ch);
 
 #endif /* _FLIPC2_H_ */

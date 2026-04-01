@@ -138,6 +138,10 @@ void bench_game_audio_buffer(void);
 void bench_game_mixed_frame(void);
 void bench_game_mixed_frame_inter(void);
 
+/* Endpoint benchmarks (flipc2_bench_endpoint.c) */
+void bench_flipc2_endpoint_setup(void);
+void bench_flipc2_endpoint_rpc(const char *label, int data_size, int iters);
+
 /* Main entry point */
 void bench_flipc2_run(mach_port_t clock_port);
 

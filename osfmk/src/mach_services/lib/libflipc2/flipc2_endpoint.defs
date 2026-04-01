@@ -1,0 +1,76 @@
+/*
+ * FLIPC v2 — Endpoint connection protocol.
+ *
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ */
+
+/*
+ * Subsystem 2960: FLIPC v2 endpoint handshake.
+ *
+ * The server registers a receive port via netname_check_in.
+ * Clients discover it via netname_look_up and then call
+ * flipc2_endpoint_connect to establish a pair of SPSC channels.
+ *
+ * The server creates two channels (fwd: server→client, rev:
+ * client→server), maps them into the client's address space via
+ * vm_remap, and returns the addresses + semaphore send rights.
+ */
+
+subsystem flipc2_endpoint 2960;
+
+#include <mach/std_types.defs>
+
+serverprefix ds_;
+
+import "flipc2_endpoint_types.h";
+
+/*
+ * Connect to an endpoint: the server creates a bidirectional SPSC
+ * channel pair, maps both into the client's address space, and
+ * returns the addresses plus semaphore send rights.
+ *
+ * client_task:     client's task port (for vm_remap)
+ * channel_size:    requested channel size (0 = server default)
+ * ring_entries:    requested ring entries (0 = server default)
+ * fwd_addr/rev_addr: channel base in CLIENT's address space
+ * fwd_sem/rev_sem: consumer wakeup semaphore send rights
+ * fwd_sem_prod/rev_sem_prod: producer wakeup semaphore send rights
+ * size_out/entries_out: actual parameters used by server
+ */
+routine flipc2_endpoint_connect_rpc(
+		server_port	: mach_port_t;
+	in	client_task	: mach_port_copy_send_t;
+	in	channel_size	: unsigned32;
+	in	ring_entries	: unsigned32;
+	out	fwd_addr	: unsigned32;
+	out	rev_addr	: unsigned32;
+	out	fwd_sem		: mach_port_copy_send_t;
+	out	fwd_sem_prod	: mach_port_copy_send_t;
+	out	rev_sem		: mach_port_copy_send_t;
+	out	rev_sem_prod	: mach_port_copy_send_t;
+	out	size_out	: unsigned32;
+	out	entries_out	: unsigned32
+	);
+
+/*
+ * Graceful disconnect: client notifies server before detaching.
+ * simpleroutine = fire-and-forget (no reply needed).
+ */
+simpleroutine flipc2_endpoint_disconnect_rpc(
+		server_port	: mach_port_t;
+	in	client_task	: mach_port_copy_send_t
+	);

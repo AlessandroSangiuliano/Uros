@@ -168,7 +168,7 @@ flipc2_stop_echo(struct flipc2_echo_args *args, flipc2_channel_t fwd_ch,
         d->status = 0;
         flipc2_produce_commit(fwd_ch);
     }
-    semaphore_signal(fwd_ch->hdr->wakeup_sem);
+    semaphore_signal(fwd_ch->sem_port);
 
     cthread_join(ct);
 }
