@@ -68,5 +68,11 @@ bench_flipc2_run(mach_port_t clock_port)
     printf("\n--- FLIPC2 game simulation (INTER-TASK, vm_remap) ---\n");
     bench_game_mixed_frame_inter();
 
+    /* --- Endpoint benchmarks --- */
+    printf("\n--- FLIPC2 endpoint benchmarks ---\n");
+    bench_flipc2_endpoint_setup();
+    bench_flipc2_endpoint_rpc("null RPC (endpoint)",    0, FLIPC2_BENCH_ITERS);
+    bench_flipc2_endpoint_rpc("128B RPC (endpoint)",  128, FLIPC2_BENCH_ITERS);
+
     printf("\n");
 }

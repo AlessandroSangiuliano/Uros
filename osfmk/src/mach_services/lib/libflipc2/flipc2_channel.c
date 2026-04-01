@@ -91,6 +91,8 @@ flipc2_init_handle(struct flipc2_channel *ch,
     ch->cached_prod_tail = 0;
     ch->mapped_size = 0;
     ch->spurious_wakeups = 0;
+    ch->sem_port = hdr->wakeup_sem;
+    ch->sem_port_prod = hdr->wakeup_sem_prod;
 }
 
 /*
@@ -432,4 +434,21 @@ flipc2_semaphore_share(
         return FLIPC2_ERR_KERNEL;
 
     return FLIPC2_SUCCESS;
+}
+
+/*
+ * flipc2_channel_set_semaphores — Override per-handle semaphore port names.
+ *
+ * For inter-task peers: after flipc2_channel_attach_remote(), call
+ * this to set the correct local IPC-space port names.  The inline
+ * fast-path functions use these port names for semaphore_signal/wait.
+ */
+void
+flipc2_channel_set_semaphores(
+    flipc2_channel_t    ch,
+    mach_port_t         sem,
+    mach_port_t         sem_prod)
+{
+    ch->sem_port      = sem;
+    ch->sem_port_prod = sem_prod;
 }
