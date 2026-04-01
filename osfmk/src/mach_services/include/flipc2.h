@@ -144,10 +144,12 @@ struct flipc2_channel_header {
     uint32_t    data_offset;        /* byte offset of data region        */
     uint32_t    data_size;          /* data region size in bytes         */
     uint32_t    desc_size;          /* sizeof(struct flipc2_desc)        */
-    mach_port_t wakeup_sem;         /* semaphore port for wakeup         */
-    uint32_t    _const_pad[2];      /* pad to 48 bytes                   */
+    mach_port_t wakeup_sem;         /* consumer wakeup semaphore         */
+    mach_port_t wakeup_sem_prod;    /* producer wakeup semaphore         */
+    uint32_t    _const_pad[1];      /* pad to 48 bytes                   */
     volatile uint32_t prod_tail;    /* next ring slot to write           */
-    uint32_t    _pad_prod[3];       /* pad to 64 bytes                   */
+    volatile uint32_t prod_sleeping;/* 1 = producer blocked on full ring */
+    uint32_t    _pad_prod[2];       /* pad to 64 bytes                   */
 
     /*
      * Cache line 1 (bytes 64–127): consumer-owned.
@@ -189,6 +191,14 @@ typedef struct flipc2_channel {
     uint32_t    cached_cons_head;
     /* consumer-side cached copy of prod_tail */
     uint32_t    cached_prod_tail;
+
+    /*
+     * mapped_size > 0: this handle owns a vm_remap'd mapping of this size.
+     * flipc2_channel_detach() will vm_deallocate the region.
+     * Set by flipc2_channel_attach_remote() for inter-task peers.
+     * 0 = intra-task peer, does not own the mapping.
+     */
+    uint32_t    mapped_size;
 } *flipc2_channel_t;
 
 /* ------------------------------------------------------------------ */
@@ -246,6 +256,12 @@ flipc2_produce_reserve(flipc2_channel_t ch)
 
 /*
  * Commit one descriptor: advance prod_tail, wake consumer if sleeping.
+ *
+ * Fence correctness: on x86 stores are naturally ordered, so the
+ * store to prod_tail is visible before the load of cons_sleeping.
+ * The compiler barrier (FLIPC2_WRITE_FENCE on x86) prevents the
+ * compiler from reordering.  On ARM/RISC-V the fallback
+ * __sync_synchronize() provides a full barrier.
  */
 static inline void
 flipc2_produce_commit(flipc2_channel_t ch)
@@ -311,7 +327,7 @@ flipc2_consume_peek(flipc2_channel_t ch)
 }
 
 /*
- * Release one descriptor: advance cons_head.
+ * Release one descriptor: advance cons_head, wake producer if blocked.
  */
 static inline void
 flipc2_consume_release(flipc2_channel_t ch)
@@ -319,10 +335,15 @@ flipc2_consume_release(flipc2_channel_t ch)
     FLIPC2_WRITE_FENCE();
     ch->hdr->cons_head++;
     ch->hdr->cons_total++;
+
+    FLIPC2_WRITE_FENCE();
+    if (ch->hdr->prod_sleeping) {
+        semaphore_signal(ch->hdr->wakeup_sem_prod);
+    }
 }
 
 /*
- * Release N descriptors in batch.
+ * Release N descriptors in batch, wake producer if blocked.
  */
 static inline void
 flipc2_consume_release_n(flipc2_channel_t ch, uint32_t n)
@@ -330,6 +351,11 @@ flipc2_consume_release_n(flipc2_channel_t ch, uint32_t n)
     FLIPC2_WRITE_FENCE();
     ch->hdr->cons_head += n;
     ch->hdr->cons_total += n;
+
+    FLIPC2_WRITE_FENCE();
+    if (ch->hdr->prod_sleeping) {
+        semaphore_signal(ch->hdr->wakeup_sem_prod);
+    }
 }
 
 /*
@@ -342,6 +368,11 @@ flipc2_consume_release_n(flipc2_channel_t ch, uint32_t n)
  *   3. Write fence + re-check (avoid lost wakeup)
  *   4. semaphore_wait()
  *   5. Clear cons_sleeping
+ *
+ * Lost wakeup safety: Mach semaphores are counting semaphores.
+ * If the producer calls semaphore_signal() between step 2 and step 4,
+ * the signal is not lost — it increments the semaphore count, so the
+ * subsequent semaphore_wait() returns immediately.
  */
 static inline struct flipc2_desc *
 flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
@@ -380,6 +411,113 @@ flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
 }
 
 /*
+ * Wait for a descriptor with timeout (milliseconds).
+ * Returns pointer to the descriptor, or NULL on timeout.
+ *
+ * Same adaptive protocol as flipc2_consume_wait, but uses
+ * semaphore_timedwait to avoid blocking indefinitely when
+ * the producer dies or is too slow.
+ */
+static inline struct flipc2_desc *
+flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
+                         uint32_t timeout_ms)
+{
+    struct flipc2_channel_header *hdr = ch->hdr;
+    uint32_t head = hdr->cons_head;
+    uint32_t i;
+    kern_return_t kr;
+    tvalspec_t ts;
+
+    /* Phase 1: spin-poll */
+    for (i = 0; i < spin_count; i++) {
+        FLIPC2_READ_FENCE();
+        ch->cached_prod_tail = hdr->prod_tail;
+        if (ch->cached_prod_tail != head)
+            return &ch->ring[flipc2_ring_idx(hdr, head)];
+        FLIPC2_PAUSE();
+    }
+
+    /* Phase 2: prepare to sleep */
+    hdr->cons_sleeping = 1;
+    FLIPC2_WRITE_FENCE();
+
+    ch->cached_prod_tail = hdr->prod_tail;
+    FLIPC2_READ_FENCE();
+    if (ch->cached_prod_tail != head) {
+        hdr->cons_sleeping = 0;
+        return &ch->ring[flipc2_ring_idx(hdr, head)];
+    }
+
+    /* Phase 3: block with timeout */
+    ts.tv_sec  = timeout_ms / 1000;
+    ts.tv_nsec = (timeout_ms % 1000) * 1000000;
+    kr = semaphore_timedwait(hdr->wakeup_sem, ts);
+    hdr->cons_sleeping = 0;
+
+    if (kr != KERN_SUCCESS)
+        return (struct flipc2_desc *)0;
+
+    ch->cached_prod_tail = hdr->prod_tail;
+    return &ch->ring[flipc2_ring_idx(hdr, head)];
+}
+
+/*
+ * Reserve a ring slot, blocking if the ring is full.
+ *
+ * Same adaptive protocol as flipc2_consume_wait but for the producer:
+ * spin-poll cons_head, then block on wakeup_sem_prod until the
+ * consumer releases a slot.  flipc2_consume_release() signals
+ * the producer semaphore when prod_sleeping is set.
+ */
+static inline struct flipc2_desc *
+flipc2_produce_wait(flipc2_channel_t ch, uint32_t spin_count)
+{
+    struct flipc2_channel_header *hdr = ch->hdr;
+    uint32_t tail = hdr->prod_tail;
+    uint32_t space;
+    uint32_t i;
+
+    /* Try fast path first */
+    space = hdr->ring_entries - (tail - ch->cached_cons_head);
+    if (space == 0) {
+        ch->cached_cons_head = hdr->cons_head;
+        FLIPC2_READ_FENCE();
+        space = hdr->ring_entries - (tail - ch->cached_cons_head);
+    }
+    if (space > 0)
+        return &ch->ring[flipc2_ring_idx(hdr, tail)];
+
+    /* Phase 1: spin-poll */
+    for (i = 0; i < spin_count; i++) {
+        FLIPC2_READ_FENCE();
+        ch->cached_cons_head = hdr->cons_head;
+        space = hdr->ring_entries - (tail - ch->cached_cons_head);
+        if (space > 0)
+            return &ch->ring[flipc2_ring_idx(hdr, tail)];
+        FLIPC2_PAUSE();
+    }
+
+    /* Phase 2: prepare to sleep */
+    hdr->prod_sleeping = 1;
+    FLIPC2_WRITE_FENCE();
+
+    ch->cached_cons_head = hdr->cons_head;
+    FLIPC2_READ_FENCE();
+    space = hdr->ring_entries - (tail - ch->cached_cons_head);
+    if (space > 0) {
+        hdr->prod_sleeping = 0;
+        return &ch->ring[flipc2_ring_idx(hdr, tail)];
+    }
+
+    /* Phase 3: block on producer semaphore */
+    semaphore_wait(hdr->wakeup_sem_prod);
+    hdr->prod_sleeping = 0;
+
+    ch->cached_cons_head = hdr->cons_head;
+    return &ch->ring[flipc2_ring_idx(hdr, tail)];
+}
+
+/*
  * How many descriptors are available for consumption?
  */
 static inline uint32_t
@@ -404,6 +542,22 @@ flipc2_available(flipc2_channel_t ch)
 static inline void *
 flipc2_data_ptr(flipc2_channel_t ch, uint64_t offset)
 {
+    return (void *)(ch->data + offset);
+}
+
+/*
+ * Bounds-checked data pointer.
+ * Returns NULL if offset + length exceeds the data region.
+ * Use this for untrusted inputs; the unchecked flipc2_data_ptr()
+ * is fine for hot paths with validated offsets.
+ */
+static inline void *
+flipc2_data_ptr_safe(flipc2_channel_t ch, uint64_t offset, uint64_t length)
+{
+    if (offset + length > ch->hdr->data_size)
+        return (void *)0;
+    if (offset + length < offset)  /* overflow check */
+        return (void *)0;
     return (void *)(ch->data + offset);
 }
 
@@ -438,6 +592,23 @@ flipc2_channel_create(
 flipc2_return_t
 flipc2_channel_attach(
     vm_address_t        base_addr,
+    flipc2_channel_t   *channel);
+
+/*
+ * Attach to a channel mapped via vm_remap (inter-task peer).
+ *
+ * Like flipc2_channel_attach, but records the mapped_size so that
+ * flipc2_channel_detach() will vm_deallocate the shared memory
+ * region.  Use this for inter-task peers that own their mapping.
+ *
+ * base_addr:     address of the channel header in this task's space
+ * mapped_size:   size of the vm_remap'd region (channel_size)
+ * channel:       [out] channel handle
+ */
+flipc2_return_t
+flipc2_channel_attach_remote(
+    vm_address_t        base_addr,
+    uint32_t            mapped_size,
     flipc2_channel_t   *channel);
 
 /*

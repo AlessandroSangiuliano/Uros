@@ -71,6 +71,7 @@ flipc2_init_header(struct flipc2_channel_header *hdr,
     hdr->desc_size    = FLIPC2_DESC_SIZE;
 
     hdr->prod_tail     = 0;
+    hdr->prod_sleeping = 0;
     hdr->cons_head     = 0;
     hdr->cons_sleeping = 0;
     hdr->prod_total    = 0;
@@ -88,6 +89,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
     ch->mem_port = MACH_PORT_NULL;
     ch->cached_cons_head = 0;
     ch->cached_prod_tail = 0;
+    ch->mapped_size = 0;
 }
 
 /*
@@ -142,17 +144,29 @@ flipc2_channel_create(
     (void)vm_wire(mach_host_self(), mach_task_self(), addr, channel_size,
                   VM_PROT_READ | VM_PROT_WRITE);
 
-    /* Create semaphore for adaptive wakeup */
+    /* Create semaphore for adaptive wakeup (consumer) */
     kr = semaphore_create(mach_task_self(), &sem, SYNC_POLICY_FIFO, 0);
     if (kr != KERN_SUCCESS) {
         vm_deallocate(mach_task_self(), addr, channel_size);
         return FLIPC2_ERR_KERNEL;
     }
 
-    /* Initialize header */
-    hdr = (struct flipc2_channel_header *)addr;
-    flipc2_init_header(hdr, channel_size, ring_entries);
-    hdr->wakeup_sem = sem;
+    /* Create semaphore for producer backpressure (ring full) */
+    {
+        mach_port_t sem_prod;
+        kr = semaphore_create(mach_task_self(), &sem_prod, SYNC_POLICY_FIFO, 0);
+        if (kr != KERN_SUCCESS) {
+            semaphore_destroy(mach_task_self(), sem);
+            vm_deallocate(mach_task_self(), addr, channel_size);
+            return FLIPC2_ERR_KERNEL;
+        }
+
+        /* Initialize header */
+        hdr = (struct flipc2_channel_header *)addr;
+        flipc2_init_header(hdr, channel_size, ring_entries);
+        hdr->wakeup_sem = sem;
+        hdr->wakeup_sem_prod = sem_prod;
+    }
 
     /* Allocate the handle */
     kr = vm_allocate(mach_task_self(), (vm_address_t *)&ch,
@@ -197,6 +211,25 @@ flipc2_channel_attach(
     if (hdr->magic != FLIPC2_MAGIC || hdr->version != FLIPC2_VERSION)
         return FLIPC2_ERR_NOT_CONNECTED;
 
+    /* Validate header field consistency */
+    if (!is_power_of_2(hdr->ring_entries) ||
+        hdr->ring_entries < FLIPC2_RING_ENTRIES_MIN ||
+        hdr->ring_entries > FLIPC2_RING_ENTRIES_MAX)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    if (hdr->ring_mask != hdr->ring_entries - 1)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    if (hdr->ring_offset != FLIPC2_HEADER_SIZE)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    if (hdr->data_offset != FLIPC2_HEADER_SIZE +
+        hdr->ring_entries * FLIPC2_DESC_SIZE)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    if (hdr->channel_size < hdr->data_offset)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
     /* Allocate the handle */
     kr = vm_allocate(mach_task_self(), (vm_address_t *)&ch,
                      sizeof(struct flipc2_channel), TRUE);
@@ -230,9 +263,15 @@ flipc2_channel_destroy(
     hdr  = channel->hdr;
     size = hdr->channel_size;
 
-    /* Destroy the semaphore */
+    /* Invalidate magic so stale handles detect a dead channel */
+    hdr->magic = 0;
+    FLIPC2_WRITE_FENCE();
+
+    /* Destroy the semaphores */
     if (hdr->wakeup_sem != MACH_PORT_NULL)
         semaphore_destroy(mach_task_self(), hdr->wakeup_sem);
+    if (hdr->wakeup_sem_prod != MACH_PORT_NULL)
+        semaphore_destroy(mach_task_self(), hdr->wakeup_sem_prod);
 
     /* Unmap shared memory */
     vm_deallocate(mach_task_self(), (vm_address_t)hdr, size);
@@ -248,8 +287,9 @@ flipc2_channel_destroy(
  * flipc2_channel_detach — Detach from a channel without destroying it.
  *
  * Peers (non-creators) call this to free their local handle.
- * For inter-task peers the shared memory should be unmapped separately;
- * for intra-task peers the creator owns the mapping.
+ * If the handle was created by flipc2_channel_attach_remote(), the
+ * shared memory is also unmapped (mapped_size > 0).
+ * For intra-task peers (mapped_size == 0), only the handle is freed.
  */
 flipc2_return_t
 flipc2_channel_detach(
@@ -258,13 +298,39 @@ flipc2_channel_detach(
     if (!channel)
         return FLIPC2_ERR_INVALID_ARGUMENT;
 
-    /* Free the handle only — do NOT unmap shared memory.
-     * For intra-task: creator and peer share the same mapping.
-     * For inter-task: the child owns its inherited copy, which
-     * is reclaimed when the child task terminates. */
+    /* Inter-task peer owns its mapping — unmap on detach */
+    if (channel->mapped_size > 0 && channel->hdr) {
+        vm_deallocate(mach_task_self(), (vm_address_t)channel->hdr,
+                      channel->mapped_size);
+    }
+
+    /* Free the handle */
     vm_deallocate(mach_task_self(), (vm_address_t)channel,
                   sizeof(struct flipc2_channel));
 
+    return FLIPC2_SUCCESS;
+}
+
+/*
+ * flipc2_channel_attach_remote — Attach for inter-task peers with owned mapping.
+ *
+ * Like flipc2_channel_attach, but records mapped_size so that
+ * flipc2_channel_detach() will vm_deallocate the shared memory.
+ * Use this when the peer has its own vm_remap'd mapping.
+ */
+flipc2_return_t
+flipc2_channel_attach_remote(
+    vm_address_t        base_addr,
+    uint32_t            mapped_size,
+    flipc2_channel_t   *channel)
+{
+    flipc2_return_t ret;
+
+    ret = flipc2_channel_attach(base_addr, channel);
+    if (ret != FLIPC2_SUCCESS)
+        return ret;
+
+    (*channel)->mapped_size = mapped_size;
     return FLIPC2_SUCCESS;
 }
 
@@ -327,6 +393,13 @@ flipc2_channel_share(
                   VM_INHERIT_SHARE);
     if (kr != KERN_SUCCESS)
         return FLIPC2_ERR_MAP_FAILED;
+
+    /* Verify the mapping has the protections we need */
+    if (!(cur_prot & VM_PROT_READ) || !(cur_prot & VM_PROT_WRITE)) {
+        vm_deallocate(target_task, target_addr,
+                      channel->hdr->channel_size);
+        return FLIPC2_ERR_MAP_FAILED;
+    }
 
     *out_addr = target_addr;
     return FLIPC2_SUCCESS;
