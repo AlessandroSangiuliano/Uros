@@ -286,3 +286,76 @@ flipc2_channel_map_pages(
     (void)region_id;
     return FLIPC2_ERR_INVALID_ARGUMENT;
 }
+
+/*
+ * flipc2_channel_share — Map a channel into another task via vm_remap.
+ *
+ * Creates a true shared memory mapping (not COW) of the channel's
+ * entire region in the target task.  After this call, both the creator
+ * and the target task read/write the same physical pages.
+ *
+ * The target task can then call flipc2_channel_attach() with the
+ * returned address to get a local handle.
+ */
+flipc2_return_t
+flipc2_channel_share(
+    flipc2_channel_t    channel,
+    mach_port_t         target_task,
+    vm_address_t       *out_addr)
+{
+    kern_return_t   kr;
+    vm_address_t    target_addr;
+    vm_prot_t       cur_prot, max_prot;
+
+    if (!channel || !channel->hdr || !out_addr)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    if (target_task == MACH_PORT_NULL)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    target_addr = 0;
+    kr = vm_remap(target_task,
+                  &target_addr,
+                  channel->hdr->channel_size,
+                  0,             /* mask */
+                  TRUE,          /* anywhere */
+                  mach_task_self(),
+                  (vm_address_t)channel->hdr,
+                  FALSE,         /* copy=FALSE: true shared memory */
+                  &cur_prot,
+                  &max_prot,
+                  VM_INHERIT_SHARE);
+    if (kr != KERN_SUCCESS)
+        return FLIPC2_ERR_MAP_FAILED;
+
+    *out_addr = target_addr;
+    return FLIPC2_SUCCESS;
+}
+
+/*
+ * flipc2_semaphore_share — Insert a semaphore port into another task.
+ *
+ * Gives the target task a send right to the semaphore under the
+ * specified port name.  Used during inter-task channel setup so
+ * the child task can call semaphore_signal/semaphore_wait.
+ */
+flipc2_return_t
+flipc2_semaphore_share(
+    mach_port_t         sem,
+    mach_port_t         target_task,
+    mach_port_t         target_name)
+{
+    kern_return_t   kr;
+
+    if (sem == MACH_PORT_NULL || target_task == MACH_PORT_NULL)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    kr = mach_port_insert_right(target_task,
+                                target_name,
+                                sem,
+                                MACH_MSG_TYPE_COPY_SEND);
+    if (kr != KERN_SUCCESS)
+        return FLIPC2_ERR_KERNEL;
+
+    return FLIPC2_SUCCESS;
+}

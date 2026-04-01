@@ -545,10 +545,10 @@ flipc2_inter_setup(flipc2_channel_t fwd_ch, flipc2_channel_t rev_ch,
                    mach_port_t *out_task, mach_port_t *out_thread)
 {
     kern_return_t       kr;
+    flipc2_return_t     ret;
     mach_port_t         child_task, child_thread;
     vm_offset_t         child_stack;
     vm_address_t        child_fwd_addr, child_rev_addr;
-    vm_prot_t           cur_prot, max_prot;
     struct i386_thread_state state;
     mach_msg_type_number_t state_count;
 
@@ -569,25 +569,17 @@ flipc2_inter_setup(flipc2_channel_t fwd_ch, flipc2_channel_t rev_ch,
         return -1;
     }
 
-    /* vm_remap channels as true shared memory (copy=FALSE) */
-    child_fwd_addr = 0;
-    kr = vm_remap(child_task, &child_fwd_addr,
-                  FLIPC2_BENCH_CHAN_SIZE, 0, TRUE,
-                  mach_task_self(), (vm_address_t)fwd_ch->hdr,
-                  FALSE, &cur_prot, &max_prot, VM_INHERIT_SHARE);
-    if (kr) {
-        printf("  %s: vm_remap fwd failed %d\n", label, kr);
+    /* Share channels as true shared memory via library API */
+    ret = flipc2_channel_share(fwd_ch, child_task, &child_fwd_addr);
+    if (ret != FLIPC2_SUCCESS) {
+        printf("  %s: channel_share fwd failed %d\n", label, ret);
         task_terminate(child_task);
         return -1;
     }
 
-    child_rev_addr = 0;
-    kr = vm_remap(child_task, &child_rev_addr,
-                  FLIPC2_BENCH_CHAN_SIZE, 0, TRUE,
-                  mach_task_self(), (vm_address_t)rev_ch->hdr,
-                  FALSE, &cur_prot, &max_prot, VM_INHERIT_SHARE);
-    if (kr) {
-        printf("  %s: vm_remap rev failed %d\n", label, kr);
+    ret = flipc2_channel_share(rev_ch, child_task, &child_rev_addr);
+    if (ret != FLIPC2_SUCCESS) {
+        printf("  %s: channel_share rev failed %d\n", label, ret);
         task_terminate(child_task);
         return -1;
     }
@@ -616,19 +608,17 @@ flipc2_inter_setup(flipc2_channel_t fwd_ch, flipc2_channel_t rev_ch,
         }
     }
 
-    /* Insert semaphore ports into child's IPC space */
-    kr = mach_port_insert_right(child_task, FLIPC2_CHILD_SEM_FWD,
-                                fwd_sem, MACH_MSG_TYPE_COPY_SEND);
-    if (kr) {
-        printf("  %s: insert fwd_sem failed %d\n", label, kr);
+    /* Share semaphore ports with child via library API */
+    ret = flipc2_semaphore_share(fwd_sem, child_task, FLIPC2_CHILD_SEM_FWD);
+    if (ret != FLIPC2_SUCCESS) {
+        printf("  %s: semaphore_share fwd failed %d\n", label, ret);
         task_terminate(child_task);
         return -1;
     }
 
-    kr = mach_port_insert_right(child_task, FLIPC2_CHILD_SEM_REV,
-                                rev_sem, MACH_MSG_TYPE_COPY_SEND);
-    if (kr) {
-        printf("  %s: insert rev_sem failed %d\n", label, kr);
+    ret = flipc2_semaphore_share(rev_sem, child_task, FLIPC2_CHILD_SEM_REV);
+    if (ret != FLIPC2_SUCCESS) {
+        printf("  %s: semaphore_share rev failed %d\n", label, ret);
         task_terminate(child_task);
         return -1;
     }

@@ -471,4 +471,37 @@ flipc2_channel_map_pages(
     vm_size_t           size,
     uint64_t           *region_id);
 
+/*
+ * Share a channel with another task via vm_remap (true shared memory).
+ *
+ * Maps the channel's shared memory region into target_task's address
+ * space with VM_INHERIT_SHARE (not COW).  Both tasks read/write the
+ * same physical pages.
+ *
+ * channel:       channel to share
+ * target_task:   task to map the channel into
+ * out_addr:      [out] address in target_task's space
+ */
+flipc2_return_t
+flipc2_channel_share(
+    flipc2_channel_t    channel,
+    mach_port_t         target_task,
+    vm_address_t       *out_addr);
+
+/*
+ * Insert a semaphore port into another task's IPC space.
+ *
+ * The target task receives a send right to the semaphore under
+ * the specified port name.
+ *
+ * sem:           semaphore port (send right)
+ * target_task:   task to insert the right into
+ * target_name:   port name in the target's IPC space
+ */
+flipc2_return_t
+flipc2_semaphore_share(
+    mach_port_t         sem,
+    mach_port_t         target_task,
+    mach_port_t         target_name);
+
 #endif /* _FLIPC2_H_ */
