@@ -45,6 +45,7 @@ set(IPC_BENCH_SOURCES
   flipc2_bench_inter.c
   flipc2_bench_game.c
   flipc2_bench_endpoint.c
+  flipc2_bench_bufgroup.c
   nostdlib_stubs.c
   ${EXT2_USER_C}
 )
