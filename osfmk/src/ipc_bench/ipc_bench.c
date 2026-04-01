@@ -55,6 +55,7 @@
 
 #include "disk_bench.h"
 #include "mem_bench.h"
+#include "flipc2_bench.h"
 
 /* MIG stub — generated from mach_port.defs */
 extern kern_return_t mach_port_set_protected_payload(
@@ -71,6 +72,12 @@ extern void		mach_print(const char *s);
 #define WARMUP_ITERS		100
 #define BENCH_ITERS		10000
 #define CHILD_STACK_SIZE	(64 * 1024)	/* 64 KB */
+
+/*
+ * Set to 1 to enable disk I/O and memory bandwidth benchmarks.
+ * Disabled by default to reduce execution time during FLIPC v2 dev.
+ */
+#define BENCH_DISK_AND_MEM	0
 
 /*
  * Well-known port names inserted into the child task's IPC space
@@ -1690,6 +1697,7 @@ main(int argc, char **argv)
     bench_ool_inter_rpc("16 KB OOL inter", 16384, OOL_BENCH_ITERS);
     bench_ool_inter_rpc("64 KB OOL inter", 65536, OOL_BENCH_ITERS);
 
+#if BENCH_DISK_AND_MEM
     /* ---------------------------------------------------------
      * Disk I/O benchmarks (via ahci_driver + ext2_server)
      * Discovers servers via netname; skips if not running.
@@ -1700,6 +1708,12 @@ main(int argc, char **argv)
      * Memory bandwidth benchmarks (memcpy, memmove, memset, bzero)
      * --------------------------------------------------------- */
     bench_mem_run(clock_port);
+#endif
+
+    /* ---------------------------------------------------------
+     * FLIPC v2 shared-memory channel benchmarks
+     * --------------------------------------------------------- */
+    bench_flipc2_run(clock_port);
 
     printf("=== Benchmark complete ===\n");
 

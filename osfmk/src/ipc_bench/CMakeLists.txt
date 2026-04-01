@@ -38,6 +38,7 @@ set(IPC_BENCH_SOURCES
   ipc_bench.c
   disk_bench.c
   mem_bench.c
+  flipc2_bench.c
   nostdlib_stubs.c
   ${EXT2_USER_C}
 )
@@ -88,6 +89,7 @@ target_link_libraries(ipc_bench_server PRIVATE
   libmach
   libsa_mach
   libnetname
+  libflipc2
   -Wl,--end-group
 )
 
