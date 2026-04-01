@@ -90,6 +90,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
     ch->cached_cons_head = 0;
     ch->cached_prod_tail = 0;
     ch->mapped_size = 0;
+    ch->spurious_wakeups = 0;
 }
 
 /*

@@ -88,6 +88,14 @@ typedef int flipc2_return_t;
 #define FLIPC2_ERR_DATA_REGION_FULL     -8
 #define FLIPC2_ERR_SIZE_ALIGNMENT       -9
 #define FLIPC2_ERR_MAP_FAILED           -10
+#define FLIPC2_ERR_RING_CORRUPT         -11  /* prod_tail/cons_head inconsistent */
+
+/*
+ * Maximum consecutive spurious wakeups before declaring the channel dead.
+ * A spurious wakeup means semaphore_wait returned but no data is available,
+ * typically caused by a malicious peer spamming semaphore_signal (DoS).
+ */
+#define FLIPC2_MAX_SPURIOUS_WAKEUPS     64
 
 /* ------------------------------------------------------------------ */
 /*  Memory fences                                                      */
@@ -199,6 +207,15 @@ typedef struct flipc2_channel {
      * 0 = intra-task peer, does not own the mapping.
      */
     uint32_t    mapped_size;
+
+    /*
+     * Spurious wakeup counter (consumer-side).
+     * Incremented when semaphore_wait returns but no data is available.
+     * Reset to zero on every successful consume.
+     * If this exceeds FLIPC2_MAX_SPURIOUS_WAKEUPS, the channel is
+     * considered compromised (DoS) and wait functions return NULL.
+     */
+    uint32_t    spurious_wakeups;
 } *flipc2_channel_t;
 
 /* ------------------------------------------------------------------ */
@@ -231,7 +248,7 @@ flipc2_ring_free(struct flipc2_channel_header *hdr,
 
 /*
  * Reserve the next ring slot for writing.
- * Returns pointer to the descriptor, or NULL if ring is full.
+ * Returns pointer to the descriptor, or NULL if ring is full or corrupt.
  */
 static inline struct flipc2_desc *
 flipc2_produce_reserve(flipc2_channel_t ch)
@@ -242,12 +259,15 @@ flipc2_produce_reserve(flipc2_channel_t ch)
 
     /* Check cached cons_head first (avoid volatile read) */
     space = hdr->ring_entries - (tail - ch->cached_cons_head);
-    if (space == 0) {
+    if (space == 0 || space > hdr->ring_entries) {
         /* Refresh from volatile */
         ch->cached_cons_head = hdr->cons_head;
         FLIPC2_READ_FENCE();
         space = hdr->ring_entries - (tail - ch->cached_cons_head);
         if (space == 0)
+            return (struct flipc2_desc *)0;
+        /* Ring corruption: cons_head was pushed past prod_tail */
+        if (space > hdr->ring_entries)
             return (struct flipc2_desc *)0;
     }
 
@@ -304,7 +324,7 @@ flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
 
 /*
  * Peek at the next available descriptor.
- * Returns pointer to the descriptor, or NULL if ring is empty.
+ * Returns pointer to the descriptor, or NULL if ring is empty or corrupt.
  */
 static inline struct flipc2_desc *
 flipc2_consume_peek(flipc2_channel_t ch)
@@ -315,11 +335,14 @@ flipc2_consume_peek(flipc2_channel_t ch)
 
     /* Check cached prod_tail first */
     avail = ch->cached_prod_tail - head;
-    if (avail == 0) {
+    if (avail == 0 || avail > hdr->ring_entries) {
         FLIPC2_READ_FENCE();
         ch->cached_prod_tail = hdr->prod_tail;
         avail = ch->cached_prod_tail - head;
         if (avail == 0)
+            return (struct flipc2_desc *)0;
+        /* Ring corruption: prod_tail jumped past ring capacity */
+        if (avail > hdr->ring_entries)
             return (struct flipc2_desc *)0;
     }
 
@@ -360,33 +383,46 @@ flipc2_consume_release_n(flipc2_channel_t ch, uint32_t n)
 
 /*
  * Wait for a descriptor: spin for spin_count iterations, then block
- * on the Mach semaphore.  Returns pointer to the descriptor.
+ * on the Mach semaphore.  Returns pointer to the descriptor, or NULL
+ * if the ring is corrupt or the peer is spamming spurious wakeups.
  *
  * This implements the adaptive wakeup protocol:
  *   1. Spin-poll prod_tail for spin_count iterations
  *   2. Set cons_sleeping = 1
  *   3. Write fence + re-check (avoid lost wakeup)
  *   4. semaphore_wait()
- *   5. Clear cons_sleeping
+ *   5. Verify data actually arrived (spurious wakeup defense)
+ *   6. Clear cons_sleeping
  *
  * Lost wakeup safety: Mach semaphores are counting semaphores.
  * If the producer calls semaphore_signal() between step 2 and step 4,
  * the signal is not lost — it increments the semaphore count, so the
  * subsequent semaphore_wait() returns immediately.
+ *
+ * DoS defense: if semaphore_wait returns but no data is available,
+ * this is a spurious wakeup (malicious semaphore_signal spam).
+ * After FLIPC2_MAX_SPURIOUS_WAKEUPS consecutive spurious wakeups,
+ * the channel is declared dead and NULL is returned.
  */
 static inline struct flipc2_desc *
 flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
 {
     struct flipc2_channel_header *hdr = ch->hdr;
     uint32_t head = hdr->cons_head;
+    uint32_t avail;
     uint32_t i;
 
     /* Phase 1: spin-poll */
     for (i = 0; i < spin_count; i++) {
         FLIPC2_READ_FENCE();
         ch->cached_prod_tail = hdr->prod_tail;
-        if (ch->cached_prod_tail != head)
+        if (ch->cached_prod_tail != head) {
+            avail = ch->cached_prod_tail - head;
+            if (avail > hdr->ring_entries)
+                return (struct flipc2_desc *)0;  /* ring corrupt */
+            ch->spurious_wakeups = 0;
             return &ch->ring[flipc2_ring_idx(hdr, head)];
+        }
         FLIPC2_PAUSE();
     }
 
@@ -399,20 +435,41 @@ flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
     FLIPC2_READ_FENCE();
     if (ch->cached_prod_tail != head) {
         hdr->cons_sleeping = 0;
+        avail = ch->cached_prod_tail - head;
+        if (avail > hdr->ring_entries)
+            return (struct flipc2_desc *)0;
+        ch->spurious_wakeups = 0;
         return &ch->ring[flipc2_ring_idx(hdr, head)];
     }
 
-    /* Phase 3: block */
+    /* Phase 3: block, then verify data actually arrived */
     semaphore_wait(hdr->wakeup_sem);
     hdr->cons_sleeping = 0;
 
     ch->cached_prod_tail = hdr->prod_tail;
+    FLIPC2_READ_FENCE();
+    avail = ch->cached_prod_tail - head;
+
+    if (avail == 0) {
+        /* Spurious wakeup — peer signaled without producing data */
+        ch->spurious_wakeups++;
+        if (ch->spurious_wakeups >= FLIPC2_MAX_SPURIOUS_WAKEUPS)
+            return (struct flipc2_desc *)0;  /* channel dead (DoS) */
+        /* Retry: re-enter wait (recursive tail call) */
+        return flipc2_consume_wait(ch, 0);
+    }
+
+    if (avail > hdr->ring_entries)
+        return (struct flipc2_desc *)0;  /* ring corrupt */
+
+    ch->spurious_wakeups = 0;
     return &ch->ring[flipc2_ring_idx(hdr, head)];
 }
 
 /*
  * Wait for a descriptor with timeout (milliseconds).
- * Returns pointer to the descriptor, or NULL on timeout.
+ * Returns pointer to the descriptor, or NULL on timeout, corruption,
+ * or DoS (spurious wakeup threshold exceeded).
  *
  * Same adaptive protocol as flipc2_consume_wait, but uses
  * semaphore_timedwait to avoid blocking indefinitely when
@@ -424,6 +481,7 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
 {
     struct flipc2_channel_header *hdr = ch->hdr;
     uint32_t head = hdr->cons_head;
+    uint32_t avail;
     uint32_t i;
     kern_return_t kr;
     tvalspec_t ts;
@@ -432,8 +490,13 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
     for (i = 0; i < spin_count; i++) {
         FLIPC2_READ_FENCE();
         ch->cached_prod_tail = hdr->prod_tail;
-        if (ch->cached_prod_tail != head)
+        if (ch->cached_prod_tail != head) {
+            avail = ch->cached_prod_tail - head;
+            if (avail > hdr->ring_entries)
+                return (struct flipc2_desc *)0;
+            ch->spurious_wakeups = 0;
             return &ch->ring[flipc2_ring_idx(hdr, head)];
+        }
         FLIPC2_PAUSE();
     }
 
@@ -445,6 +508,10 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
     FLIPC2_READ_FENCE();
     if (ch->cached_prod_tail != head) {
         hdr->cons_sleeping = 0;
+        avail = ch->cached_prod_tail - head;
+        if (avail > hdr->ring_entries)
+            return (struct flipc2_desc *)0;
+        ch->spurious_wakeups = 0;
         return &ch->ring[flipc2_ring_idx(hdr, head)];
     }
 
@@ -458,6 +525,20 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
         return (struct flipc2_desc *)0;
 
     ch->cached_prod_tail = hdr->prod_tail;
+    FLIPC2_READ_FENCE();
+    avail = ch->cached_prod_tail - head;
+
+    if (avail == 0) {
+        ch->spurious_wakeups++;
+        if (ch->spurious_wakeups >= FLIPC2_MAX_SPURIOUS_WAKEUPS)
+            return (struct flipc2_desc *)0;
+        return flipc2_consume_timedwait(ch, 0, timeout_ms);
+    }
+
+    if (avail > hdr->ring_entries)
+        return (struct flipc2_desc *)0;
+
+    ch->spurious_wakeups = 0;
     return &ch->ring[flipc2_ring_idx(hdr, head)];
 }
 
@@ -479,21 +560,25 @@ flipc2_produce_wait(flipc2_channel_t ch, uint32_t spin_count)
 
     /* Try fast path first */
     space = hdr->ring_entries - (tail - ch->cached_cons_head);
-    if (space == 0) {
+    if (space == 0 || space > hdr->ring_entries) {
         ch->cached_cons_head = hdr->cons_head;
         FLIPC2_READ_FENCE();
         space = hdr->ring_entries - (tail - ch->cached_cons_head);
     }
-    if (space > 0)
+    if (space > 0 && space <= hdr->ring_entries)
         return &ch->ring[flipc2_ring_idx(hdr, tail)];
+    if (space > hdr->ring_entries)
+        return (struct flipc2_desc *)0;  /* ring corrupt */
 
     /* Phase 1: spin-poll */
     for (i = 0; i < spin_count; i++) {
         FLIPC2_READ_FENCE();
         ch->cached_cons_head = hdr->cons_head;
         space = hdr->ring_entries - (tail - ch->cached_cons_head);
-        if (space > 0)
+        if (space > 0 && space <= hdr->ring_entries)
             return &ch->ring[flipc2_ring_idx(hdr, tail)];
+        if (space > hdr->ring_entries)
+            return (struct flipc2_desc *)0;
         FLIPC2_PAUSE();
     }
 
@@ -504,9 +589,13 @@ flipc2_produce_wait(flipc2_channel_t ch, uint32_t spin_count)
     ch->cached_cons_head = hdr->cons_head;
     FLIPC2_READ_FENCE();
     space = hdr->ring_entries - (tail - ch->cached_cons_head);
-    if (space > 0) {
+    if (space > 0 && space <= hdr->ring_entries) {
         hdr->prod_sleeping = 0;
         return &ch->ring[flipc2_ring_idx(hdr, tail)];
+    }
+    if (space > hdr->ring_entries) {
+        hdr->prod_sleeping = 0;
+        return (struct flipc2_desc *)0;
     }
 
     /* Phase 3: block on producer semaphore */
@@ -514,18 +603,26 @@ flipc2_produce_wait(flipc2_channel_t ch, uint32_t spin_count)
     hdr->prod_sleeping = 0;
 
     ch->cached_cons_head = hdr->cons_head;
+    space = hdr->ring_entries - (tail - ch->cached_cons_head);
+    if (space == 0 || space > hdr->ring_entries)
+        return (struct flipc2_desc *)0;
     return &ch->ring[flipc2_ring_idx(hdr, tail)];
 }
 
 /*
  * How many descriptors are available for consumption?
+ * Returns 0 if empty, or 0 if ring is corrupt (avail > ring_entries).
  */
 static inline uint32_t
 flipc2_available(flipc2_channel_t ch)
 {
+    uint32_t avail;
     FLIPC2_READ_FENCE();
     ch->cached_prod_tail = ch->hdr->prod_tail;
-    return ch->cached_prod_tail - ch->hdr->cons_head;
+    avail = ch->cached_prod_tail - ch->hdr->cons_head;
+    if (avail > ch->hdr->ring_entries)
+        return 0;  /* ring corrupt */
+    return avail;
 }
 
 /* ------------------------------------------------------------------ */
