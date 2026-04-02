@@ -1,6 +1,6 @@
 # FLIPC v2 — High-Performance IPC for Uros
 
-**Library version: 0.0.2**
+**Library version: 0.0.3**
 
 ## Table of Contents
 
@@ -200,9 +200,66 @@ Use buffer groups when:
 - You need dynamic allocation (channels' inline regions use bump allocation)
 - You want to decouple buffer lifetime from channel lifetime
 
----
+### 2.8 Page-Isolated Layout
 
-## 3. When to Use FLIPC v2 vs Mach IPC
+The **flat layout** (default) packs all channel data contiguously: header, ring,
+and inline data share the same virtual memory pages. This is fine for mutually
+trusted tasks, but a misbehaving peer could overwrite fields it shouldn't touch.
+
+The **isolated layout** (`FLIPC2_CREATE_ISOLATED` flag) splits the channel into
+page-aligned sections so that `vm_protect` can enforce per-role access:
+
+```
+Flat layout (default):                 Isolated layout:
+┌──────────────────────────────┐       ┌──────────────────────────────┐
+│  Header + Ring + Data        │       │  Page 0: Constants (4 KB)    │ RO both
+│  (contiguous, RW both)       │       │  magic, version, offsets     │
+└──────────────────────────────┘       ├──────────────────────────────┤
+                                       │  Page 1: Producer (4 KB)     │ RW producer
+                                       │  prod_tail, prod_sleeping,   │ RO consumer
+                                       │  prod_total, wakeups         │
+                                       ├──────────────────────────────┤
+                                       │  Page 2: Consumer (4 KB)     │ RO producer
+                                       │  cons_head, cons_sleeping,   │ RW consumer
+                                       │  cons_total                  │
+                                       ├──────────────────────────────┤
+                                       │  Page 3+: Ring + Data        │ RW producer
+                                       │  descriptor ring + inline    │ RO consumer
+                                       │  data region                 │
+                                       └──────────────────────────────┘
+```
+
+**Key properties:**
+- **Zero fast-path overhead**: the handle stores direct pointers to volatile
+  fields (`ch->prod_tail`, `ch->cons_head`), so inline functions work identically
+  for both flat and isolated layouts — no extra indirection.
+- **Opt-in**: pass `FLIPC2_CREATE_ISOLATED` to `flipc2_channel_create_ex()`.
+  Old code using `flipc2_channel_create()` continues to create flat channels.
+- **Minimum size**: 16 KB (3 metadata pages + 1+ ring/data page). The flat
+  layout minimum remains 4 KB.
+- **Auto-detected on attach**: `flipc2_channel_attach` reads `layout_flags`
+  from the header and sets up pointers accordingly.
+
+**Sharing with protections:**
+
+Use `flipc2_channel_share_isolated()` instead of `flipc2_channel_share()`:
+
+```c
+/* Share fwd channel: child is the consumer */
+flipc2_channel_share_isolated(fwd_ch, child_task,
+                               FLIPC2_ROLE_CONSUMER, &child_addr);
+
+/* Share rev channel: child is the producer */
+flipc2_channel_share_isolated(rev_ch, child_task,
+                               FLIPC2_ROLE_PRODUCER, &child_addr);
+```
+
+This performs one `vm_remap` for the full region, then four `vm_protect` calls
+to enforce per-section access based on the role.
+
+**Endpoint integration**: pass `FLIPC2_CREATE_ISOLATED` as flags to
+`flipc2_endpoint_create()` and connections will automatically use isolated
+channels with per-role protections.
 
 ### Decision Matrix
 
@@ -318,6 +375,14 @@ All API functions return `flipc2_return_t` (typedef for `int`):
 #define FLIPC2_BUFGROUP_POOL_SIZE_MIN   4096
 #define FLIPC2_BUFGROUP_POOL_SIZE_MAX   (16*1024*1024)
 #define FLIPC2_BUFGROUP_SLOT_NONE       0xFFFFFFFF
+
+/* Isolated layout */
+#define FLIPC2_LAYOUT_FLAT              0x00000000
+#define FLIPC2_LAYOUT_ISOLATED          0x00000001
+#define FLIPC2_CREATE_ISOLATED          0x00000001
+#define FLIPC2_ROLE_PRODUCER            1
+#define FLIPC2_ROLE_CONSUMER            2
+#define FLIPC2_CHANNEL_SIZE_MIN_ISOLATED 16384  /* 16 KB minimum */
 ```
 
 ### 4.4 Channel API
@@ -338,6 +403,18 @@ backpressure), initializes the channel header. `channel_size` must be in
 
 Returns the channel handle and consumer semaphore port. The creator is the
 **producer** of this channel.
+
+```c
+flipc2_return_t
+flipc2_channel_create_ex(uint32_t channel_size,
+                          uint32_t ring_entries,
+                          uint32_t flags,
+                          flipc2_channel_t *channel,
+                          mach_port_t *sem_port);
+```
+
+Extended version with flags. Pass `FLIPC2_CREATE_ISOLATED` for page-isolated
+layout (minimum 16 KB). Pass 0 for flat layout (same as `flipc2_channel_create`).
 
 ```c
 flipc2_return_t flipc2_channel_destroy(flipc2_channel_t channel);
@@ -386,6 +463,18 @@ flipc2_channel_share(flipc2_channel_t channel,
 Maps the channel's shared memory into `target_task` via `vm_remap` with
 `VM_INHERIT_SHARE` (true shared mapping, not COW). Returns the address in the
 target task. The target then calls `flipc2_channel_attach_remote()`.
+
+```c
+flipc2_return_t
+flipc2_channel_share_isolated(flipc2_channel_t channel,
+                               mach_port_t target_task,
+                               uint32_t target_role,
+                               vm_address_t *out_addr);
+```
+
+Same as `flipc2_channel_share`, but applies per-role page protections via
+`vm_protect`. `target_role` is `FLIPC2_ROLE_PRODUCER` or `FLIPC2_ROLE_CONSUMER`.
+Only works on channels created with `FLIPC2_CREATE_ISOLATED`.
 
 ```c
 flipc2_return_t
@@ -517,11 +606,13 @@ flipc2_endpoint_create(const char *name,
                        uint32_t max_clients,
                        uint32_t channel_size,
                        uint32_t ring_entries,
+                       uint32_t flags,
                        flipc2_endpoint_t *ep);
 ```
 Creates a named endpoint, registers it with the Mach name server. `max_clients`
 is the maximum simultaneous connections (1–64). `channel_size` and `ring_entries`
-are defaults for new connections.
+are defaults for new connections. Pass `FLIPC2_CREATE_ISOLATED` in `flags` for
+page-isolated channels with per-role protections; pass 0 for flat layout.
 
 ```c
 flipc2_return_t
@@ -782,6 +873,7 @@ void disk_io_server(void) {
         8,                 /* max simultaneous clients */
         256 * 1024,        /* default channel size */
         256,               /* default ring entries */
+        0,                 /* flags: 0=flat, FLIPC2_CREATE_ISOLATED=isolated */
         &ep
     );
     if (rc != FLIPC2_SUCCESS) return;
@@ -1025,7 +1117,19 @@ i686 target. Measured with `ipc_bench` on Uros.
 | 256B RPC (intra-task) | 1.70 µs |
 | 256B RPC (inter-task) | 2.24 µs |
 
-### 6.5 Application Scenarios
+### 6.5 Page-Isolated Channels
+
+| Test | Flat | Isolated | Delta |
+|------|------|----------|-------|
+| null RPC (intra-task) | 2.70 µs | 1.54 µs | Isolated 43% faster |
+| 128B RPC (intra-task) | 2.85 µs | 1.95 µs | Isolated 32% faster |
+| null RPC (inter-task) | 2.89 µs | 2.12 µs | Isolated 27% faster |
+| 128B RPC (inter-task) | 3.39 µs | 2.58 µs | Isolated 24% faster |
+
+The isolated layout is actually **faster** than flat — producer and consumer
+fields on separate pages eliminate false sharing on cache lines.
+
+### 6.6 Application Scenarios
 
 | Scenario | Latency |
 |----------|---------|
@@ -1035,7 +1139,7 @@ i686 target. Measured with `ipc_bench` on Uros.
 | Mixed frame (60 draw + tex + audio, intra) | 0.73 µs/frame |
 | Mixed frame (62 desc, inter-task) | 4.10 µs/frame |
 
-### 6.6 Comparison with Mach IPC
+### 6.7 Comparison with Mach IPC
 
 | Pattern | Mach IPC | FLIPC v2 | Ratio |
 |---------|----------|----------|-------|

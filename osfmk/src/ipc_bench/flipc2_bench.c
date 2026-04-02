@@ -81,5 +81,16 @@ bench_flipc2_run(mach_port_t clock_port)
     bench_flipc2_bufgroup_inter_rpc("256B RPC (bufgroup inter)", 256,
                                      FLIPC2_BENCH_ITERS);
 
+    /* --- Isolated channel benchmarks (page-protected layout) --- */
+    printf("\n--- FLIPC2 isolated channel benchmarks ---\n");
+    bench_flipc2_isolated_rpc("null RPC (isolated intra)",    0,
+                               FLIPC2_BENCH_ITERS);
+    bench_flipc2_isolated_rpc("128B RPC (isolated intra)",  128,
+                               FLIPC2_BENCH_ITERS);
+    bench_flipc2_isolated_inter_rpc("null RPC (isolated inter)",    0,
+                                     FLIPC2_BENCH_ITERS);
+    bench_flipc2_isolated_inter_rpc("128B RPC (isolated inter)",  128,
+                                     FLIPC2_BENCH_ITERS);
+
     printf("\n");
 }

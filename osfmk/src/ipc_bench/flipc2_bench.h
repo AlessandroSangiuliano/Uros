@@ -75,6 +75,8 @@ struct flipc2_pair {
 };
 
 int  flipc2_pair_create(struct flipc2_pair *p, const char *label);
+int  flipc2_pair_create_ex(struct flipc2_pair *p, uint32_t flags,
+                            const char *label);
 void flipc2_pair_destroy(struct flipc2_pair *p);
 
 /* Echo thread for intra-task RPC */
@@ -104,6 +106,9 @@ struct flipc2_child_args {
     mach_port_t     fwd_sem;
     mach_port_t     rev_sem;
     int             data_size;
+    /* Volatile field offsets (flat vs isolated layout) */
+    uint32_t        prod_tail_off;      /* offset from base to prod_tail */
+    uint32_t        cons_head_off;      /* offset from base to cons_head */
     /* Buffer group fields (used by flipc2_child_bg_echo_entry) */
     vm_address_t    bg_base;
     uint32_t        bg_data_offset;
@@ -157,6 +162,10 @@ void bench_flipc2_endpoint_rpc(const char *label, int data_size, int iters);
 void bench_flipc2_bufgroup_alloc_free(void);
 void bench_flipc2_bufgroup_rpc(const char *label, int data_size, int iters);
 void bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters);
+
+/* Isolated channel benchmarks (flipc2_bench_rpc.c, flipc2_bench_inter.c) */
+void bench_flipc2_isolated_rpc(const char *label, int data_size, int iters);
+void bench_flipc2_isolated_inter_rpc(const char *label, int data_size, int iters);
 
 /* Main entry point */
 void bench_flipc2_run(mach_port_t clock_port);

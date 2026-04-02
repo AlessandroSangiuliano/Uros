@@ -84,6 +84,7 @@ struct flipc2_endpoint {
     uint32_t            n_clients;
     uint32_t            channel_size;   /* default channel params */
     uint32_t            ring_entries;
+    uint32_t            flags;          /* FLIPC2_CREATE_ISOLATED etc. */
     int                 pending_conn_idx; /* set by MIG stub, read by accept */
     struct flipc2_ep_conn conns[FLIPC2_EP_MAX_CLIENTS_MAX];
 };
@@ -226,27 +227,39 @@ ds_flipc2_endpoint_connect_rpc(
         return KERN_RESOURCE_SHORTAGE;
 
     /* Create forward channel (server→client) */
-    ret = flipc2_channel_create(cs, re, &fwd_ch, &fwd_sem_port);
+    ret = flipc2_channel_create_ex(cs, re, ep->flags, &fwd_ch, &fwd_sem_port);
     if (ret != FLIPC2_SUCCESS)
         return KERN_RESOURCE_SHORTAGE;
 
     /* Create reverse channel (client→server) */
-    ret = flipc2_channel_create(cs, re, &rev_ch, &rev_sem_port);
+    ret = flipc2_channel_create_ex(cs, re, ep->flags, &rev_ch, &rev_sem_port);
     if (ret != FLIPC2_SUCCESS) {
         flipc2_channel_destroy(fwd_ch);
         return KERN_RESOURCE_SHORTAGE;
     }
 
-    /* Map forward channel into client's address space */
-    ret = flipc2_channel_share(fwd_ch, client_task, &fwd_client_addr);
+    /* Map forward channel into client (server=producer, client=consumer) */
+    if (ep->flags & FLIPC2_CREATE_ISOLATED) {
+        ret = flipc2_channel_share_isolated(fwd_ch, client_task,
+                                            FLIPC2_ROLE_CONSUMER,
+                                            &fwd_client_addr);
+    } else {
+        ret = flipc2_channel_share(fwd_ch, client_task, &fwd_client_addr);
+    }
     if (ret != FLIPC2_SUCCESS) {
         flipc2_channel_destroy(rev_ch);
         flipc2_channel_destroy(fwd_ch);
         return KERN_FAILURE;
     }
 
-    /* Map reverse channel into client's address space */
-    ret = flipc2_channel_share(rev_ch, client_task, &rev_client_addr);
+    /* Map reverse channel into client (client=producer, server=consumer) */
+    if (ep->flags & FLIPC2_CREATE_ISOLATED) {
+        ret = flipc2_channel_share_isolated(rev_ch, client_task,
+                                            FLIPC2_ROLE_PRODUCER,
+                                            &rev_client_addr);
+    } else {
+        ret = flipc2_channel_share(rev_ch, client_task, &rev_client_addr);
+    }
     if (ret != FLIPC2_SUCCESS) {
         vm_deallocate(client_task, fwd_client_addr, cs);
         flipc2_channel_destroy(rev_ch);
@@ -333,6 +346,7 @@ flipc2_endpoint_create(
     uint32_t            max_clients,
     uint32_t            channel_size,
     uint32_t            ring_entries,
+    uint32_t            flags,
     flipc2_endpoint_t  *ep_out)
 {
     kern_return_t       kr;
@@ -366,6 +380,7 @@ flipc2_endpoint_create(
     ep->max_clients   = max_clients;
     ep->channel_size  = channel_size;
     ep->ring_entries  = ring_entries;
+    ep->flags         = flags;
     ep->n_clients     = 0;
     ep->pending_conn_idx = -1;
 

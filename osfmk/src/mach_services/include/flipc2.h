@@ -52,8 +52,8 @@
 
 #define FLIPC2_LIB_VERSION_MAJOR    0
 #define FLIPC2_LIB_VERSION_MINOR    0
-#define FLIPC2_LIB_VERSION_PATCH    2
-#define FLIPC2_LIB_VERSION_STRING   "0.0.2"
+#define FLIPC2_LIB_VERSION_PATCH    3
+#define FLIPC2_LIB_VERSION_STRING   "0.0.3"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -74,6 +74,26 @@
 #define FLIPC2_DESC_SIZE            64
 
 #define FLIPC2_SPIN_DEFAULT         4096
+
+/* Layout flags (stored in header->layout_flags, auto-detected by attach) */
+#define FLIPC2_LAYOUT_FLAT          0x00000000
+#define FLIPC2_LAYOUT_ISOLATED      0x00000001
+
+/* Creation flags (passed to flipc2_channel_create_ex) */
+#define FLIPC2_CREATE_ISOLATED      0x00000001
+
+/* Sharing roles (passed to flipc2_channel_share_isolated) */
+#define FLIPC2_ROLE_PRODUCER        1
+#define FLIPC2_ROLE_CONSUMER        2
+
+/* Isolated layout page offsets (i386, PAGE_SIZE=4096) */
+#define FLIPC2_ISO_CONST_OFFSET     0
+#define FLIPC2_ISO_PROD_OFFSET      4096
+#define FLIPC2_ISO_CONS_OFFSET      8192
+#define FLIPC2_ISO_RING_OFFSET      12288
+
+/* Minimum channel size for isolated layout */
+#define FLIPC2_CHANNEL_SIZE_MIN_ISOLATED   16384
 
 /* Descriptor flags */
 #define FLIPC2_FLAG_DATA_INLINE     0x00000000  /* data in inline region    */
@@ -169,7 +189,7 @@ struct flipc2_channel_header {
     uint32_t    desc_size;          /* sizeof(struct flipc2_desc)        */
     mach_port_t wakeup_sem;         /* consumer wakeup semaphore         */
     mach_port_t wakeup_sem_prod;    /* producer wakeup semaphore         */
-    uint32_t    _const_pad[1];      /* pad to 48 bytes                   */
+    uint32_t    layout_flags;       /* 0=flat, FLIPC2_LAYOUT_ISOLATED    */
     volatile uint32_t prod_tail;    /* next ring slot to write           */
     volatile uint32_t prod_sleeping;/* 1 = producer blocked on full ring */
     uint32_t    _pad_prod[2];       /* pad to 64 bytes                   */
@@ -209,6 +229,24 @@ typedef struct flipc2_channel {
     struct flipc2_desc           *ring; /* &hdr + ring_offset            */
     uint8_t                      *data; /* &hdr + data_offset            */
     mach_port_t                   mem_port; /* memory object port        */
+
+    /*
+     * Direct pointers to volatile shared fields.
+     * Flat layout: point into the 256-byte header.
+     * Isolated layout: point to separate pages.
+     * All fast-path inline functions use these (layout-agnostic).
+     */
+    volatile uint32_t   *prod_tail;
+    volatile uint32_t   *prod_sleeping;
+    volatile uint64_t   *prod_total;
+    volatile uint64_t   *wakeups;
+    volatile uint32_t   *cons_head;
+    volatile uint32_t   *cons_sleeping;
+    volatile uint64_t   *cons_total;
+
+    /* Cached constants from header (avoid ch->hdr-> on fast path) */
+    uint32_t    ring_entries;
+    uint32_t    ring_mask;
 
     /* producer-side cached copy of cons_head (avoid false sharing) */
     uint32_t    cached_cons_head;
@@ -285,25 +323,25 @@ flipc2_ring_free(struct flipc2_channel_header *hdr,
 static inline struct flipc2_desc *
 flipc2_produce_reserve(flipc2_channel_t ch)
 {
-    struct flipc2_channel_header *hdr = ch->hdr;
-    uint32_t tail = hdr->prod_tail;
+    uint32_t tail = *ch->prod_tail;
+    uint32_t re = ch->ring_entries;
     uint32_t space;
 
     /* Check cached cons_head first (avoid volatile read) */
-    space = hdr->ring_entries - (tail - ch->cached_cons_head);
-    if (space == 0 || space > hdr->ring_entries) {
+    space = re - (tail - ch->cached_cons_head);
+    if (space == 0 || space > re) {
         /* Refresh from volatile */
-        ch->cached_cons_head = hdr->cons_head;
+        ch->cached_cons_head = *ch->cons_head;
         FLIPC2_READ_FENCE();
-        space = hdr->ring_entries - (tail - ch->cached_cons_head);
+        space = re - (tail - ch->cached_cons_head);
         if (space == 0)
             return (struct flipc2_desc *)0;
         /* Ring corruption: cons_head was pushed past prod_tail */
-        if (space > hdr->ring_entries)
+        if (space > re)
             return (struct flipc2_desc *)0;
     }
 
-    return &ch->ring[flipc2_ring_idx(hdr, tail)];
+    return &ch->ring[tail & ch->ring_mask];
 }
 
 /*
@@ -318,16 +356,14 @@ flipc2_produce_reserve(flipc2_channel_t ch)
 static inline void
 flipc2_produce_commit(flipc2_channel_t ch)
 {
-    struct flipc2_channel_header *hdr = ch->hdr;
+    FLIPC2_WRITE_FENCE();
+    (*ch->prod_tail)++;
+    (*ch->prod_total)++;
 
     FLIPC2_WRITE_FENCE();
-    hdr->prod_tail++;
-    hdr->prod_total++;
-
-    FLIPC2_WRITE_FENCE();
-    if (hdr->cons_sleeping) {
+    if (*ch->cons_sleeping) {
         semaphore_signal(ch->sem_port);
-        hdr->wakeups++;
+        (*ch->wakeups)++;
     }
 }
 
@@ -337,16 +373,14 @@ flipc2_produce_commit(flipc2_channel_t ch)
 static inline void
 flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
 {
-    struct flipc2_channel_header *hdr = ch->hdr;
+    FLIPC2_WRITE_FENCE();
+    *ch->prod_tail += n;
+    *ch->prod_total += n;
 
     FLIPC2_WRITE_FENCE();
-    hdr->prod_tail += n;
-    hdr->prod_total += n;
-
-    FLIPC2_WRITE_FENCE();
-    if (hdr->cons_sleeping) {
+    if (*ch->cons_sleeping) {
         semaphore_signal(ch->sem_port);
-        hdr->wakeups++;
+        (*ch->wakeups)++;
     }
 }
 
@@ -361,24 +395,24 @@ flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
 static inline struct flipc2_desc *
 flipc2_consume_peek(flipc2_channel_t ch)
 {
-    struct flipc2_channel_header *hdr = ch->hdr;
-    uint32_t head = hdr->cons_head;
+    uint32_t head = *ch->cons_head;
+    uint32_t re = ch->ring_entries;
     uint32_t avail;
 
     /* Check cached prod_tail first */
     avail = ch->cached_prod_tail - head;
-    if (avail == 0 || avail > hdr->ring_entries) {
+    if (avail == 0 || avail > re) {
         FLIPC2_READ_FENCE();
-        ch->cached_prod_tail = hdr->prod_tail;
+        ch->cached_prod_tail = *ch->prod_tail;
         avail = ch->cached_prod_tail - head;
         if (avail == 0)
             return (struct flipc2_desc *)0;
         /* Ring corruption: prod_tail jumped past ring capacity */
-        if (avail > hdr->ring_entries)
+        if (avail > re)
             return (struct flipc2_desc *)0;
     }
 
-    return &ch->ring[flipc2_ring_idx(hdr, head)];
+    return &ch->ring[head & ch->ring_mask];
 }
 
 /*
@@ -388,11 +422,11 @@ static inline void
 flipc2_consume_release(flipc2_channel_t ch)
 {
     FLIPC2_WRITE_FENCE();
-    ch->hdr->cons_head++;
-    ch->hdr->cons_total++;
+    (*ch->cons_head)++;
+    (*ch->cons_total)++;
 
     FLIPC2_WRITE_FENCE();
-    if (ch->hdr->prod_sleeping) {
+    if (*ch->prod_sleeping) {
         semaphore_signal(ch->sem_port_prod);
     }
 }
@@ -404,11 +438,11 @@ static inline void
 flipc2_consume_release_n(flipc2_channel_t ch, uint32_t n)
 {
     FLIPC2_WRITE_FENCE();
-    ch->hdr->cons_head += n;
-    ch->hdr->cons_total += n;
+    *ch->cons_head += n;
+    *ch->cons_total += n;
 
     FLIPC2_WRITE_FENCE();
-    if (ch->hdr->prod_sleeping) {
+    if (*ch->prod_sleeping) {
         semaphore_signal(ch->sem_port_prod);
     }
 }
@@ -439,46 +473,46 @@ flipc2_consume_release_n(flipc2_channel_t ch, uint32_t n)
 static inline struct flipc2_desc *
 flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
 {
-    struct flipc2_channel_header *hdr = ch->hdr;
-    uint32_t head = hdr->cons_head;
+    uint32_t head = *ch->cons_head;
+    uint32_t re = ch->ring_entries;
     uint32_t avail;
     uint32_t i;
 
     /* Phase 1: spin-poll */
     for (i = 0; i < spin_count; i++) {
         FLIPC2_READ_FENCE();
-        ch->cached_prod_tail = hdr->prod_tail;
+        ch->cached_prod_tail = *ch->prod_tail;
         if (ch->cached_prod_tail != head) {
             avail = ch->cached_prod_tail - head;
-            if (avail > hdr->ring_entries)
+            if (avail > re)
                 return (struct flipc2_desc *)0;  /* ring corrupt */
             ch->spurious_wakeups = 0;
-            return &ch->ring[flipc2_ring_idx(hdr, head)];
+            return &ch->ring[head & ch->ring_mask];
         }
         FLIPC2_PAUSE();
     }
 
     /* Phase 2: prepare to sleep */
-    hdr->cons_sleeping = 1;
+    *ch->cons_sleeping = 1;
     FLIPC2_WRITE_FENCE();
 
     /* Re-check to avoid lost wakeup */
-    ch->cached_prod_tail = hdr->prod_tail;
+    ch->cached_prod_tail = *ch->prod_tail;
     FLIPC2_READ_FENCE();
     if (ch->cached_prod_tail != head) {
-        hdr->cons_sleeping = 0;
+        *ch->cons_sleeping = 0;
         avail = ch->cached_prod_tail - head;
-        if (avail > hdr->ring_entries)
+        if (avail > re)
             return (struct flipc2_desc *)0;
         ch->spurious_wakeups = 0;
-        return &ch->ring[flipc2_ring_idx(hdr, head)];
+        return &ch->ring[head & ch->ring_mask];
     }
 
     /* Phase 3: block, then verify data actually arrived */
     semaphore_wait(ch->sem_port);
-    hdr->cons_sleeping = 0;
+    *ch->cons_sleeping = 0;
 
-    ch->cached_prod_tail = hdr->prod_tail;
+    ch->cached_prod_tail = *ch->prod_tail;
     FLIPC2_READ_FENCE();
     avail = ch->cached_prod_tail - head;
 
@@ -491,11 +525,11 @@ flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
         return flipc2_consume_wait(ch, 0);
     }
 
-    if (avail > hdr->ring_entries)
+    if (avail > re)
         return (struct flipc2_desc *)0;  /* ring corrupt */
 
     ch->spurious_wakeups = 0;
-    return &ch->ring[flipc2_ring_idx(hdr, head)];
+    return &ch->ring[head & ch->ring_mask];
 }
 
 /*
@@ -511,8 +545,8 @@ static inline struct flipc2_desc *
 flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
                          uint32_t timeout_ms)
 {
-    struct flipc2_channel_header *hdr = ch->hdr;
-    uint32_t head = hdr->cons_head;
+    uint32_t head = *ch->cons_head;
+    uint32_t re = ch->ring_entries;
     uint32_t avail;
     uint32_t i;
     kern_return_t kr;
@@ -521,42 +555,42 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
     /* Phase 1: spin-poll */
     for (i = 0; i < spin_count; i++) {
         FLIPC2_READ_FENCE();
-        ch->cached_prod_tail = hdr->prod_tail;
+        ch->cached_prod_tail = *ch->prod_tail;
         if (ch->cached_prod_tail != head) {
             avail = ch->cached_prod_tail - head;
-            if (avail > hdr->ring_entries)
+            if (avail > re)
                 return (struct flipc2_desc *)0;
             ch->spurious_wakeups = 0;
-            return &ch->ring[flipc2_ring_idx(hdr, head)];
+            return &ch->ring[head & ch->ring_mask];
         }
         FLIPC2_PAUSE();
     }
 
     /* Phase 2: prepare to sleep */
-    hdr->cons_sleeping = 1;
+    *ch->cons_sleeping = 1;
     FLIPC2_WRITE_FENCE();
 
-    ch->cached_prod_tail = hdr->prod_tail;
+    ch->cached_prod_tail = *ch->prod_tail;
     FLIPC2_READ_FENCE();
     if (ch->cached_prod_tail != head) {
-        hdr->cons_sleeping = 0;
+        *ch->cons_sleeping = 0;
         avail = ch->cached_prod_tail - head;
-        if (avail > hdr->ring_entries)
+        if (avail > re)
             return (struct flipc2_desc *)0;
         ch->spurious_wakeups = 0;
-        return &ch->ring[flipc2_ring_idx(hdr, head)];
+        return &ch->ring[head & ch->ring_mask];
     }
 
     /* Phase 3: block with timeout */
     ts.tv_sec  = timeout_ms / 1000;
     ts.tv_nsec = (timeout_ms % 1000) * 1000000;
     kr = semaphore_timedwait(ch->sem_port, ts);
-    hdr->cons_sleeping = 0;
+    *ch->cons_sleeping = 0;
 
     if (kr != KERN_SUCCESS)
         return (struct flipc2_desc *)0;
 
-    ch->cached_prod_tail = hdr->prod_tail;
+    ch->cached_prod_tail = *ch->prod_tail;
     FLIPC2_READ_FENCE();
     avail = ch->cached_prod_tail - head;
 
@@ -567,11 +601,11 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
         return flipc2_consume_timedwait(ch, 0, timeout_ms);
     }
 
-    if (avail > hdr->ring_entries)
+    if (avail > re)
         return (struct flipc2_desc *)0;
 
     ch->spurious_wakeups = 0;
-    return &ch->ring[flipc2_ring_idx(hdr, head)];
+    return &ch->ring[head & ch->ring_mask];
 }
 
 /*
@@ -585,60 +619,60 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
 static inline struct flipc2_desc *
 flipc2_produce_wait(flipc2_channel_t ch, uint32_t spin_count)
 {
-    struct flipc2_channel_header *hdr = ch->hdr;
-    uint32_t tail = hdr->prod_tail;
+    uint32_t tail = *ch->prod_tail;
+    uint32_t re = ch->ring_entries;
     uint32_t space;
     uint32_t i;
 
     /* Try fast path first */
-    space = hdr->ring_entries - (tail - ch->cached_cons_head);
-    if (space == 0 || space > hdr->ring_entries) {
-        ch->cached_cons_head = hdr->cons_head;
+    space = re - (tail - ch->cached_cons_head);
+    if (space == 0 || space > re) {
+        ch->cached_cons_head = *ch->cons_head;
         FLIPC2_READ_FENCE();
-        space = hdr->ring_entries - (tail - ch->cached_cons_head);
+        space = re - (tail - ch->cached_cons_head);
     }
-    if (space > 0 && space <= hdr->ring_entries)
-        return &ch->ring[flipc2_ring_idx(hdr, tail)];
-    if (space > hdr->ring_entries)
+    if (space > 0 && space <= re)
+        return &ch->ring[tail & ch->ring_mask];
+    if (space > re)
         return (struct flipc2_desc *)0;  /* ring corrupt */
 
     /* Phase 1: spin-poll */
     for (i = 0; i < spin_count; i++) {
         FLIPC2_READ_FENCE();
-        ch->cached_cons_head = hdr->cons_head;
-        space = hdr->ring_entries - (tail - ch->cached_cons_head);
-        if (space > 0 && space <= hdr->ring_entries)
-            return &ch->ring[flipc2_ring_idx(hdr, tail)];
-        if (space > hdr->ring_entries)
+        ch->cached_cons_head = *ch->cons_head;
+        space = re - (tail - ch->cached_cons_head);
+        if (space > 0 && space <= re)
+            return &ch->ring[tail & ch->ring_mask];
+        if (space > re)
             return (struct flipc2_desc *)0;
         FLIPC2_PAUSE();
     }
 
     /* Phase 2: prepare to sleep */
-    hdr->prod_sleeping = 1;
+    *ch->prod_sleeping = 1;
     FLIPC2_WRITE_FENCE();
 
-    ch->cached_cons_head = hdr->cons_head;
+    ch->cached_cons_head = *ch->cons_head;
     FLIPC2_READ_FENCE();
-    space = hdr->ring_entries - (tail - ch->cached_cons_head);
-    if (space > 0 && space <= hdr->ring_entries) {
-        hdr->prod_sleeping = 0;
-        return &ch->ring[flipc2_ring_idx(hdr, tail)];
+    space = re - (tail - ch->cached_cons_head);
+    if (space > 0 && space <= re) {
+        *ch->prod_sleeping = 0;
+        return &ch->ring[tail & ch->ring_mask];
     }
-    if (space > hdr->ring_entries) {
-        hdr->prod_sleeping = 0;
+    if (space > re) {
+        *ch->prod_sleeping = 0;
         return (struct flipc2_desc *)0;
     }
 
     /* Phase 3: block on producer semaphore */
     semaphore_wait(ch->sem_port_prod);
-    hdr->prod_sleeping = 0;
+    *ch->prod_sleeping = 0;
 
-    ch->cached_cons_head = hdr->cons_head;
-    space = hdr->ring_entries - (tail - ch->cached_cons_head);
-    if (space == 0 || space > hdr->ring_entries)
+    ch->cached_cons_head = *ch->cons_head;
+    space = re - (tail - ch->cached_cons_head);
+    if (space == 0 || space > re)
         return (struct flipc2_desc *)0;
-    return &ch->ring[flipc2_ring_idx(hdr, tail)];
+    return &ch->ring[tail & ch->ring_mask];
 }
 
 /*
@@ -650,9 +684,9 @@ flipc2_available(flipc2_channel_t ch)
 {
     uint32_t avail;
     FLIPC2_READ_FENCE();
-    ch->cached_prod_tail = ch->hdr->prod_tail;
-    avail = ch->cached_prod_tail - ch->hdr->cons_head;
-    if (avail > ch->hdr->ring_entries)
+    ch->cached_prod_tail = *ch->prod_tail;
+    avail = ch->cached_prod_tail - *ch->cons_head;
+    if (avail > ch->ring_entries)
         return 0;  /* ring corrupt */
     return avail;
 }
@@ -895,6 +929,27 @@ flipc2_channel_create(
     mach_port_t        *sem_port);
 
 /*
+ * Create a new channel with flags.
+ *
+ * channel_size:  total shared memory
+ * ring_entries:  descriptor ring slots (power of 2)
+ * flags:         FLIPC2_CREATE_ISOLATED or 0
+ * channel:       [out] channel handle
+ * sem_port:      [out] semaphore port
+ *
+ * When FLIPC2_CREATE_ISOLATED is set, the header is split into
+ * page-aligned sections for per-role protections.  Minimum size
+ * is FLIPC2_CHANNEL_SIZE_MIN_ISOLATED (16 KB).
+ */
+flipc2_return_t
+flipc2_channel_create_ex(
+    uint32_t            channel_size,
+    uint32_t            ring_entries,
+    uint32_t            flags,
+    flipc2_channel_t   *channel,
+    mach_port_t        *sem_port);
+
+/*
  * Attach to an existing channel via its base address.
  *
  * Used by peer threads (same task), child tasks (inherited mapping),
@@ -974,6 +1029,29 @@ flipc2_channel_share(
     vm_address_t       *out_addr);
 
 /*
+ * Share an isolated channel with per-role page protections.
+ *
+ * Maps the channel into target_task, then applies vm_protect per section:
+ *   - Constants page: RO for both roles
+ *   - Producer page: RW for producer, RO for consumer
+ *   - Consumer page: RO for producer, RW for consumer
+ *   - Ring + data: RW for producer, RO for consumer
+ *
+ * Requires channel created with FLIPC2_CREATE_ISOLATED.
+ *
+ * channel:       channel to share
+ * target_task:   task to map the channel into
+ * target_role:   FLIPC2_ROLE_PRODUCER or FLIPC2_ROLE_CONSUMER
+ * out_addr:      [out] address in target_task's space
+ */
+flipc2_return_t
+flipc2_channel_share_isolated(
+    flipc2_channel_t    channel,
+    mach_port_t         target_task,
+    uint32_t            target_role,
+    vm_address_t       *out_addr);
+
+/*
  * Insert a semaphore port into another task's IPC space.
  *
  * The target task receives a send right to the semaphore under
@@ -1019,6 +1097,7 @@ typedef struct flipc2_endpoint *flipc2_endpoint_t;
  * max_clients:    maximum simultaneous connections (1..64)
  * channel_size:   default channel size for new connections
  * ring_entries:   default ring entries for new connections
+ * flags:          FLIPC2_CREATE_ISOLATED or 0
  * ep:             [out] endpoint handle
  */
 flipc2_return_t
@@ -1027,6 +1106,7 @@ flipc2_endpoint_create(
     uint32_t            max_clients,
     uint32_t            channel_size,
     uint32_t            ring_entries,
+    uint32_t            flags,
     flipc2_endpoint_t  *ep);
 
 /*

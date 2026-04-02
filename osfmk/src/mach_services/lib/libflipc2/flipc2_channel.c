@@ -51,14 +51,26 @@ is_power_of_2(uint32_t n)
 static void
 flipc2_init_header(struct flipc2_channel_header *hdr,
                    uint32_t channel_size,
-                   uint32_t ring_entries)
+                   uint32_t ring_entries,
+                   uint32_t flags)
 {
-    uint32_t ring_offset = FLIPC2_HEADER_SIZE;
-    uint32_t ring_size   = ring_entries * FLIPC2_DESC_SIZE;
-    uint32_t data_offset = ring_offset + ring_size;
-    uint32_t data_size   = channel_size - data_offset;
+    uint32_t ring_offset;
+    uint32_t ring_size = ring_entries * FLIPC2_DESC_SIZE;
+    uint32_t data_offset;
+    uint32_t data_size;
+    uint32_t layout;
 
     memset(hdr, 0, channel_size);
+
+    if (flags & FLIPC2_CREATE_ISOLATED) {
+        layout      = FLIPC2_LAYOUT_ISOLATED;
+        ring_offset = FLIPC2_ISO_RING_OFFSET;
+    } else {
+        layout      = FLIPC2_LAYOUT_FLAT;
+        ring_offset = FLIPC2_HEADER_SIZE;
+    }
+    data_offset = ring_offset + ring_size;
+    data_size   = channel_size - data_offset;
 
     hdr->magic        = FLIPC2_MAGIC;
     hdr->version      = FLIPC2_VERSION;
@@ -69,24 +81,67 @@ flipc2_init_header(struct flipc2_channel_header *hdr,
     hdr->data_offset  = data_offset;
     hdr->data_size    = data_size;
     hdr->desc_size    = FLIPC2_DESC_SIZE;
+    hdr->layout_flags = layout;
 
-    hdr->prod_tail     = 0;
-    hdr->prod_sleeping = 0;
-    hdr->cons_head     = 0;
-    hdr->cons_sleeping = 0;
-    hdr->prod_total    = 0;
-    hdr->cons_total    = 0;
-    hdr->wakeups       = 0;
+    if (layout == FLIPC2_LAYOUT_ISOLATED) {
+        /*
+         * Volatile fields live on separate pages.
+         * Producer page at offset 4096, consumer page at 8192.
+         */
+        uint8_t *base = (uint8_t *)hdr;
+        volatile uint32_t *pp = (volatile uint32_t *)(base + FLIPC2_ISO_PROD_OFFSET);
+        volatile uint32_t *cp = (volatile uint32_t *)(base + FLIPC2_ISO_CONS_OFFSET);
+        pp[0] = 0;  /* prod_tail */
+        pp[1] = 0;  /* prod_sleeping */
+        cp[0] = 0;  /* cons_head */
+        cp[1] = 0;  /* cons_sleeping */
+    } else {
+        hdr->prod_tail     = 0;
+        hdr->prod_sleeping = 0;
+        hdr->cons_head     = 0;
+        hdr->cons_sleeping = 0;
+        hdr->prod_total    = 0;
+        hdr->cons_total    = 0;
+        hdr->wakeups       = 0;
+    }
 }
 
 static void
 flipc2_init_handle(struct flipc2_channel *ch,
                    struct flipc2_channel_header *hdr)
 {
+    uint8_t *base = (uint8_t *)hdr;
+
     ch->hdr  = hdr;
-    ch->ring = (struct flipc2_desc *)((uint8_t *)hdr + hdr->ring_offset);
-    ch->data = (uint8_t *)hdr + hdr->data_offset;
+    ch->ring = (struct flipc2_desc *)(base + hdr->ring_offset);
+    ch->data = base + hdr->data_offset;
     ch->mem_port = MACH_PORT_NULL;
+
+    /* Cache constants from header */
+    ch->ring_entries = hdr->ring_entries;
+    ch->ring_mask    = hdr->ring_mask;
+
+    /* Set up direct pointers based on layout */
+    if (hdr->layout_flags & FLIPC2_LAYOUT_ISOLATED) {
+        uint8_t *pp = base + FLIPC2_ISO_PROD_OFFSET;
+        uint8_t *cp = base + FLIPC2_ISO_CONS_OFFSET;
+        ch->prod_tail     = (volatile uint32_t *)(pp + 0);
+        ch->prod_sleeping = (volatile uint32_t *)(pp + 4);
+        ch->prod_total    = (volatile uint64_t *)(pp + 8);
+        ch->wakeups       = (volatile uint64_t *)(pp + 16);
+        ch->cons_head     = (volatile uint32_t *)(cp + 0);
+        ch->cons_sleeping = (volatile uint32_t *)(cp + 4);
+        ch->cons_total    = (volatile uint64_t *)(cp + 8);
+    } else {
+        ch->prod_tail     = &hdr->prod_tail;
+        ch->prod_sleeping = &hdr->prod_sleeping;
+        ch->prod_total    = &hdr->prod_total;
+        ch->wakeups       = &hdr->wakeups;
+        ch->cons_head     = &hdr->cons_head;
+        ch->cons_sleeping = &hdr->cons_sleeping;
+        ch->cons_total    = &hdr->cons_total;
+    }
+
     ch->cached_cons_head = 0;
     ch->cached_prod_tail = 0;
     ch->mapped_size = 0;
@@ -97,19 +152,16 @@ flipc2_init_handle(struct flipc2_channel *ch,
 }
 
 /*
- * flipc2_channel_create — Allocate and initialize a new channel.
+ * flipc2_channel_create_ex — Allocate and initialize a new channel with flags.
  *
- * Allocates a wired shared memory region and a Mach semaphore.
- * Returns the channel handle and the base address (for passing to
- * the peer via flipc2_channel_attach or Mach IPC).
- *
- * The semaphore port is embedded in the channel header, so any task
- * with the mapping can use it for wakeup.
+ * When FLIPC2_CREATE_ISOLATED is set, the channel header is split across
+ * page-aligned sections so that vm_protect can enforce per-role protections.
  */
 flipc2_return_t
-flipc2_channel_create(
+flipc2_channel_create_ex(
     uint32_t            channel_size,
     uint32_t            ring_entries,
+    uint32_t            flags,
     flipc2_channel_t   *channel,
     mach_port_t        *sem_port)
 {
@@ -119,6 +171,7 @@ flipc2_channel_create(
     struct flipc2_channel *ch;
     struct flipc2_channel_header *hdr;
     uint32_t            ring_size;
+    uint32_t            ring_offset;
     uint32_t            min_size;
 
     if (!channel || !sem_port)
@@ -134,7 +187,16 @@ flipc2_channel_create(
         return FLIPC2_ERR_INVALID_ARGUMENT;
 
     ring_size = ring_entries * FLIPC2_DESC_SIZE;
-    min_size  = FLIPC2_HEADER_SIZE + ring_size;
+
+    if (flags & FLIPC2_CREATE_ISOLATED) {
+        ring_offset = FLIPC2_ISO_RING_OFFSET;
+        if (channel_size < FLIPC2_CHANNEL_SIZE_MIN_ISOLATED)
+            return FLIPC2_ERR_SIZE_ALIGNMENT;
+    } else {
+        ring_offset = FLIPC2_HEADER_SIZE;
+    }
+
+    min_size = ring_offset + ring_size;
     if (channel_size < min_size)
         return FLIPC2_ERR_SIZE_ALIGNMENT;
 
@@ -167,7 +229,7 @@ flipc2_channel_create(
 
         /* Initialize header */
         hdr = (struct flipc2_channel_header *)addr;
-        flipc2_init_header(hdr, channel_size, ring_entries);
+        flipc2_init_header(hdr, channel_size, ring_entries, flags);
         hdr->wakeup_sem = sem;
         hdr->wakeup_sem_prod = sem_prod;
     }
@@ -187,6 +249,22 @@ flipc2_channel_create(
     *sem_port = sem;
 
     return FLIPC2_SUCCESS;
+}
+
+/*
+ * flipc2_channel_create — Allocate and initialize a new channel (flat layout).
+ *
+ * Convenience wrapper around flipc2_channel_create_ex with flags=0.
+ */
+flipc2_return_t
+flipc2_channel_create(
+    uint32_t            channel_size,
+    uint32_t            ring_entries,
+    flipc2_channel_t   *channel,
+    mach_port_t        *sem_port)
+{
+    return flipc2_channel_create_ex(channel_size, ring_entries, 0,
+                                    channel, sem_port);
 }
 
 /*
@@ -224,12 +302,22 @@ flipc2_channel_attach(
     if (hdr->ring_mask != hdr->ring_entries - 1)
         return FLIPC2_ERR_INVALID_ARGUMENT;
 
-    if (hdr->ring_offset != FLIPC2_HEADER_SIZE)
-        return FLIPC2_ERR_INVALID_ARGUMENT;
-
-    if (hdr->data_offset != FLIPC2_HEADER_SIZE +
-        hdr->ring_entries * FLIPC2_DESC_SIZE)
-        return FLIPC2_ERR_INVALID_ARGUMENT;
+    /* Validate offsets based on layout */
+    if (hdr->layout_flags & FLIPC2_LAYOUT_ISOLATED) {
+        if (hdr->ring_offset != FLIPC2_ISO_RING_OFFSET)
+            return FLIPC2_ERR_INVALID_ARGUMENT;
+        if (hdr->data_offset != FLIPC2_ISO_RING_OFFSET +
+            hdr->ring_entries * FLIPC2_DESC_SIZE)
+            return FLIPC2_ERR_INVALID_ARGUMENT;
+        if (hdr->channel_size < FLIPC2_CHANNEL_SIZE_MIN_ISOLATED)
+            return FLIPC2_ERR_INVALID_ARGUMENT;
+    } else {
+        if (hdr->ring_offset != FLIPC2_HEADER_SIZE)
+            return FLIPC2_ERR_INVALID_ARGUMENT;
+        if (hdr->data_offset != FLIPC2_HEADER_SIZE +
+            hdr->ring_entries * FLIPC2_DESC_SIZE)
+            return FLIPC2_ERR_INVALID_ARGUMENT;
+    }
 
     if (hdr->channel_size < hdr->data_offset)
         return FLIPC2_ERR_INVALID_ARGUMENT;
@@ -406,6 +494,100 @@ flipc2_channel_share(
     }
 
     *out_addr = target_addr;
+    return FLIPC2_SUCCESS;
+}
+
+/*
+ * flipc2_channel_share_isolated — Share with per-role page protections.
+ *
+ * Maps the entire channel into target_task (one vm_remap for contiguous
+ * mapping), then applies vm_protect per section:
+ *   - Constants page (page 0): VM_PROT_READ
+ *   - Producer page (page 1): RW for producer, RO for consumer
+ *   - Consumer page (page 2): RO for producer, RW for consumer
+ *   - Ring + data (page 3+):  RW for producer, RO for consumer
+ *
+ * Requires the channel was created with FLIPC2_CREATE_ISOLATED.
+ */
+flipc2_return_t
+flipc2_channel_share_isolated(
+    flipc2_channel_t    channel,
+    mach_port_t         target_task,
+    uint32_t            target_role,
+    vm_address_t       *out_addr)
+{
+    flipc2_return_t ret;
+    kern_return_t   kr;
+    vm_address_t    base;
+    uint32_t        cs;
+    vm_prot_t       prod_prot, cons_prot, ring_prot;
+
+    if (!channel || !channel->hdr || !out_addr)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    if (!(channel->hdr->layout_flags & FLIPC2_LAYOUT_ISOLATED))
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    if (target_role != FLIPC2_ROLE_PRODUCER &&
+        target_role != FLIPC2_ROLE_CONSUMER)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    /* First, map the entire channel (full RW) */
+    ret = flipc2_channel_share(channel, target_task, &base);
+    if (ret != FLIPC2_SUCCESS)
+        return ret;
+
+    cs = channel->hdr->channel_size;
+
+    /* Determine protections based on role */
+    if (target_role == FLIPC2_ROLE_PRODUCER) {
+        prod_prot = VM_PROT_READ | VM_PROT_WRITE;
+        cons_prot = VM_PROT_READ;
+        ring_prot = VM_PROT_READ | VM_PROT_WRITE;
+    } else {
+        prod_prot = VM_PROT_READ;
+        cons_prot = VM_PROT_READ | VM_PROT_WRITE;
+        ring_prot = VM_PROT_READ;
+    }
+
+    /* Constants page (page 0): read-only for both */
+    kr = vm_protect(target_task,
+                    base + FLIPC2_ISO_CONST_OFFSET,
+                    4096, FALSE, VM_PROT_READ);
+    if (kr != KERN_SUCCESS) {
+        vm_deallocate(target_task, base, cs);
+        return FLIPC2_ERR_MAP_FAILED;
+    }
+
+    /* Producer page (page 1) */
+    kr = vm_protect(target_task,
+                    base + FLIPC2_ISO_PROD_OFFSET,
+                    4096, FALSE, prod_prot);
+    if (kr != KERN_SUCCESS) {
+        vm_deallocate(target_task, base, cs);
+        return FLIPC2_ERR_MAP_FAILED;
+    }
+
+    /* Consumer page (page 2) */
+    kr = vm_protect(target_task,
+                    base + FLIPC2_ISO_CONS_OFFSET,
+                    4096, FALSE, cons_prot);
+    if (kr != KERN_SUCCESS) {
+        vm_deallocate(target_task, base, cs);
+        return FLIPC2_ERR_MAP_FAILED;
+    }
+
+    /* Ring + data (page 3 to end) */
+    kr = vm_protect(target_task,
+                    base + FLIPC2_ISO_RING_OFFSET,
+                    cs - FLIPC2_ISO_RING_OFFSET,
+                    FALSE, ring_prot);
+    if (kr != KERN_SUCCESS) {
+        vm_deallocate(target_task, base, cs);
+        return FLIPC2_ERR_MAP_FAILED;
+    }
+
+    *out_addr = base;
     return FLIPC2_SUCCESS;
 }
 
