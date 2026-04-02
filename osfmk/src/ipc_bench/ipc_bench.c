@@ -52,6 +52,7 @@
 #include <device/device.h>
 #include <device/device_types.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "disk_bench.h"
 #include "mem_bench.h"
@@ -72,12 +73,6 @@ extern void		mach_print(const char *s);
 #define WARMUP_ITERS		100
 #define BENCH_ITERS		10000
 #define CHILD_STACK_SIZE	(64 * 1024)	/* 64 KB */
-
-/*
- * Set to 1 to enable disk I/O and memory bandwidth benchmarks.
- * Disabled by default to reduce execution time during FLIPC v2 dev.
- */
-#define BENCH_DISK_AND_MEM	0
 
 /*
  * Well-known port names inserted into the child task's IPC space
@@ -1512,6 +1507,67 @@ bench_mach_print(int iters)
 }
 
 /* ===================================================================
+ * Test suite selection
+ *
+ * Without arguments: run all suites.
+ * With arguments: run only the named suites.
+ *
+ * Valid suite names (argv):
+ *   syscall  — mach_null / mach_print trap
+ *   intra    — intra-task Mach IPC RPC
+ *   slow     — slow-path receive (continuation)
+ *   inter    — inter-task Mach IPC RPC
+ *   port     — port alloc/destroy, mach_port_names
+ *   pp       — protected payload (test + intra + inter)
+ *   ool      — out-of-line data (intra + inter)
+ *   disk     — disk I/O (ahci + ext2)
+ *   mem      — memory bandwidth
+ *   flipc2   — all FLIPC v2 benchmarks
+ *   all      — everything (same as no arguments)
+ * =================================================================== */
+
+#define SUITE_SYSCALL	(1u <<  0)
+#define SUITE_INTRA	(1u <<  1)
+#define SUITE_SLOW	(1u <<  2)
+#define SUITE_INTER	(1u <<  3)
+#define SUITE_PORT	(1u <<  4)
+#define SUITE_PP	(1u <<  5)
+#define SUITE_OOL	(1u <<  6)
+#define SUITE_DISK	(1u <<  7)
+#define SUITE_MEM	(1u <<  8)
+#define SUITE_FLIPC2	(1u <<  9)
+#define SUITE_ALL	0xFFFFFFFFu
+
+static int
+streq(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+static unsigned int
+parse_suites(int argc, char **argv)
+{
+    unsigned int mask = 0;
+    int i;
+
+    for (i = 1; i < argc; i++) {
+	if (streq(argv[i], "all"))	    mask |= SUITE_ALL;
+	else if (streq(argv[i], "syscall")) mask |= SUITE_SYSCALL;
+	else if (streq(argv[i], "intra"))   mask |= SUITE_INTRA;
+	else if (streq(argv[i], "slow"))    mask |= SUITE_SLOW;
+	else if (streq(argv[i], "inter"))   mask |= SUITE_INTER;
+	else if (streq(argv[i], "port"))    mask |= SUITE_PORT;
+	else if (streq(argv[i], "pp"))	    mask |= SUITE_PP;
+	else if (streq(argv[i], "ool"))	    mask |= SUITE_OOL;
+	else if (streq(argv[i], "disk"))    mask |= SUITE_DISK;
+	else if (streq(argv[i], "mem"))	    mask |= SUITE_MEM;
+	else if (streq(argv[i], "flipc2"))  mask |= SUITE_FLIPC2;
+    }
+    return mask ? mask : SUITE_ALL;
+}
+
+/* ===================================================================
  * Main
  * =================================================================== */
 
@@ -1519,7 +1575,7 @@ int
 main(int argc, char **argv)
 {
     kern_return_t	kr;
-    int			i;
+    unsigned int	suites;
 
     /*
      * Step 1: Get privileged ports.
@@ -1538,6 +1594,8 @@ main(int argc, char **argv)
      */
     printf_init(device_port);
     panic_init(host_port);
+
+    suites = parse_suites(argc, argv);
 
     printf("\n");
     printf("=== OSFMK IPC Performance Benchmark ===\n");
@@ -1566,154 +1624,157 @@ main(int argc, char **argv)
     /* ---------------------------------------------------------
      * Raw syscall benchmarks — measure SYSENTER/SYSEXIT cost
      * --------------------------------------------------------- */
-    printf("--- Raw syscall (no IPC) ---\n");
+    if (suites & SUITE_SYSCALL) {
+	printf("--- Raw syscall (no IPC) ---\n");
 
-    bench_mach_null(SYSCALL_BENCH_ITERS);
-    bench_mach_print(SYSCALL_PRINT_ITERS);
+	bench_mach_null(SYSCALL_BENCH_ITERS);
+	bench_mach_print(SYSCALL_PRINT_ITERS);
 
-    printf("\n");
+	printf("\n");
+    }
 
     /* ---------------------------------------------------------
      * Intra-task benchmarks (thread-to-thread, same address space)
      * --------------------------------------------------------- */
-    printf("--- Intra-task (thread-to-thread) ---\n");
+    if (suites & SUITE_INTRA) {
+	printf("--- Intra-task (thread-to-thread) ---\n");
 
-    bench_intra_rpc("null RPC",
-		    (int)sizeof(bench_null_msg_t), BENCH_ITERS);
-    bench_intra_rpc("128B inline RPC",
-		    (int)sizeof(bench_128_msg_t), BENCH_ITERS);
-    bench_intra_rpc("1024B inline RPC",
-		    (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
-    bench_intra_rpc("4096B inline RPC",
-		    (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+	bench_intra_rpc("null RPC",
+			(int)sizeof(bench_null_msg_t), BENCH_ITERS);
+	bench_intra_rpc("128B inline RPC",
+			(int)sizeof(bench_128_msg_t), BENCH_ITERS);
+	bench_intra_rpc("1024B inline RPC",
+			(int)sizeof(bench_1024_msg_t), BENCH_ITERS);
+	bench_intra_rpc("4096B inline RPC",
+			(int)sizeof(bench_4096_msg_t), BENCH_ITERS);
 
-    printf("\n");
+	printf("\n");
+    }
 
     /* ---------------------------------------------------------
      * Slow-path receive: receiver always blocked before send.
-     * This is the path exercised by mach_msg_receive_continue.
-     * A thread_switch(YIELD) before each send guarantees the echo
-     * thread is sleeping in mach_msg_receive when the send fires.
      * --------------------------------------------------------- */
-    printf("--- Slow-path receive (continuation path) ---\n");
+    if (suites & SUITE_SLOW) {
+	printf("--- Slow-path receive (continuation path) ---\n");
 
-    bench_slow_receive("null RPC (receiver blocked)",
-		       (int)sizeof(bench_null_msg_t), BENCH_ITERS);
-    bench_slow_receive("128B inline RPC (receiver blocked)",
-		       (int)sizeof(bench_128_msg_t), BENCH_ITERS);
-    bench_slow_receive("1024B inline RPC (receiver blocked)",
-		       (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
-    bench_slow_receive("4096B inline RPC (receiver blocked)",
-		       (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+	bench_slow_receive("null RPC (receiver blocked)",
+			   (int)sizeof(bench_null_msg_t), BENCH_ITERS);
+	bench_slow_receive("128B inline RPC (receiver blocked)",
+			   (int)sizeof(bench_128_msg_t), BENCH_ITERS);
+	bench_slow_receive("1024B inline RPC (receiver blocked)",
+			   (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
+	bench_slow_receive("4096B inline RPC (receiver blocked)",
+			   (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
 
-    printf("\n");
+	printf("\n");
+    }
 
     /* ---------------------------------------------------------
      * Inter-task benchmarks (task-to-task, separate address spaces)
      * --------------------------------------------------------- */
-    printf("--- Inter-task (task-to-task) ---\n");
+    if (suites & SUITE_INTER) {
+	printf("--- Inter-task (task-to-task) ---\n");
 
-    bench_inter_rpc("null RPC",
-		    (int)sizeof(bench_null_msg_t), BENCH_ITERS);
-    bench_inter_rpc("128B inline RPC",
-		    (int)sizeof(bench_128_msg_t), BENCH_ITERS);
-    bench_inter_rpc("1024B inline RPC",
-		    (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
-    bench_inter_rpc("4096B inline RPC",
-		    (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+	bench_inter_rpc("null RPC",
+			(int)sizeof(bench_null_msg_t), BENCH_ITERS);
+	bench_inter_rpc("128B inline RPC",
+			(int)sizeof(bench_128_msg_t), BENCH_ITERS);
+	bench_inter_rpc("1024B inline RPC",
+			(int)sizeof(bench_1024_msg_t), BENCH_ITERS);
+	bench_inter_rpc("4096B inline RPC",
+			(int)sizeof(bench_4096_msg_t), BENCH_ITERS);
 
-    printf("\n");
+	printf("\n");
+    }
 
     /* ---------------------------------------------------------
      * Port operation benchmarks
      * --------------------------------------------------------- */
-    printf("--- Port operations ---\n");
+    if (suites & SUITE_PORT) {
+	printf("--- Port operations ---\n");
 
-    bench_port_alloc_destroy(BENCH_ITERS);
-    bench_port_names(BENCH_ITERS);
+	bench_port_alloc_destroy(BENCH_ITERS);
+	bench_port_names(BENCH_ITERS);
+    }
 
     /* ---------------------------------------------------------
-     * Protected payload test
+     * Protected payload test + benchmarks
      * --------------------------------------------------------- */
-    printf("--- Protected payload ---\n");
-    test_protected_payload();
+    if (suites & SUITE_PP) {
+	printf("--- Protected payload ---\n");
+	test_protected_payload();
 
-    printf("--- PP intra-task ---\n");
-    bench_pp_intra("null (no PP)",
-		   (int)sizeof(bench_null_msg_t), 0, BENCH_ITERS);
-    bench_pp_intra("null (w/ PP)",
-		   (int)sizeof(bench_null_msg_t), 1, BENCH_ITERS);
-    bench_pp_intra("128B (no PP)",
-		   (int)sizeof(bench_128_msg_t), 0, BENCH_ITERS);
-    bench_pp_intra("128B (w/ PP)",
-		   (int)sizeof(bench_128_msg_t), 1, BENCH_ITERS);
-    bench_pp_intra("1024B (no PP)",
-		   (int)sizeof(bench_1024_msg_t), 0, BENCH_ITERS);
-    bench_pp_intra("1024B (w/ PP)",
-		   (int)sizeof(bench_1024_msg_t), 1, BENCH_ITERS);
-    bench_pp_intra("4096B (no PP)",
-		   (int)sizeof(bench_4096_msg_t), 0, BENCH_ITERS);
-    bench_pp_intra("4096B (w/ PP)",
-		   (int)sizeof(bench_4096_msg_t), 1, BENCH_ITERS);
+	printf("--- PP intra-task ---\n");
+	bench_pp_intra("null (no PP)",
+		       (int)sizeof(bench_null_msg_t), 0, BENCH_ITERS);
+	bench_pp_intra("null (w/ PP)",
+		       (int)sizeof(bench_null_msg_t), 1, BENCH_ITERS);
+	bench_pp_intra("128B (no PP)",
+		       (int)sizeof(bench_128_msg_t), 0, BENCH_ITERS);
+	bench_pp_intra("128B (w/ PP)",
+		       (int)sizeof(bench_128_msg_t), 1, BENCH_ITERS);
+	bench_pp_intra("1024B (no PP)",
+		       (int)sizeof(bench_1024_msg_t), 0, BENCH_ITERS);
+	bench_pp_intra("1024B (w/ PP)",
+		       (int)sizeof(bench_1024_msg_t), 1, BENCH_ITERS);
+	bench_pp_intra("4096B (no PP)",
+		       (int)sizeof(bench_4096_msg_t), 0, BENCH_ITERS);
+	bench_pp_intra("4096B (w/ PP)",
+		       (int)sizeof(bench_4096_msg_t), 1, BENCH_ITERS);
 
-    printf("--- PP inter-task ---\n");
-    bench_pp_inter("null (no PP)",
-		   (int)sizeof(bench_null_msg_t), 0, BENCH_ITERS);
-    bench_pp_inter("null (w/ PP)",
-		   (int)sizeof(bench_null_msg_t), 1, BENCH_ITERS);
-    bench_pp_inter("128B (no PP)",
-		   (int)sizeof(bench_128_msg_t), 0, BENCH_ITERS);
-    bench_pp_inter("128B (w/ PP)",
-		   (int)sizeof(bench_128_msg_t), 1, BENCH_ITERS);
-    bench_pp_inter("1024B (no PP)",
-		   (int)sizeof(bench_1024_msg_t), 0, BENCH_ITERS);
-    bench_pp_inter("1024B (w/ PP)",
-		   (int)sizeof(bench_1024_msg_t), 1, BENCH_ITERS);
-    bench_pp_inter("4096B (no PP)",
-		   (int)sizeof(bench_4096_msg_t), 0, BENCH_ITERS);
-    bench_pp_inter("4096B (w/ PP)",
-		   (int)sizeof(bench_4096_msg_t), 1, BENCH_ITERS);
+	printf("--- PP inter-task ---\n");
+	bench_pp_inter("null (no PP)",
+		       (int)sizeof(bench_null_msg_t), 0, BENCH_ITERS);
+	bench_pp_inter("null (w/ PP)",
+		       (int)sizeof(bench_null_msg_t), 1, BENCH_ITERS);
+	bench_pp_inter("128B (no PP)",
+		       (int)sizeof(bench_128_msg_t), 0, BENCH_ITERS);
+	bench_pp_inter("128B (w/ PP)",
+		       (int)sizeof(bench_128_msg_t), 1, BENCH_ITERS);
+	bench_pp_inter("1024B (no PP)",
+		       (int)sizeof(bench_1024_msg_t), 0, BENCH_ITERS);
+	bench_pp_inter("1024B (w/ PP)",
+		       (int)sizeof(bench_1024_msg_t), 1, BENCH_ITERS);
+	bench_pp_inter("4096B (no PP)",
+		       (int)sizeof(bench_4096_msg_t), 0, BENCH_ITERS);
+	bench_pp_inter("4096B (w/ PP)",
+		       (int)sizeof(bench_4096_msg_t), 1, BENCH_ITERS);
+    }
 
     /* ---------------------------------------------------------
      * OOL (out-of-line) data benchmarks
-     * Measures OOL copyin/copyout cost for large data regions.
-     * Uses MACH_MSG_PHYSICAL_COPY — exercises the zero-copy COW path
-     * for regions >= MSG_OOL_SIZE_SMALL (2049 bytes).
      * --------------------------------------------------------- */
-    printf("--- OOL data (intra-task, PHYSICAL_COPY) ---\n");
+    if (suites & SUITE_OOL) {
+	printf("--- OOL data (intra-task, PHYSICAL_COPY) ---\n");
 
-    bench_ool_intra_rpc("4 KB OOL",   4096, OOL_BENCH_ITERS);
-    bench_ool_intra_rpc("16 KB OOL", 16384, OOL_BENCH_ITERS);
-    bench_ool_intra_rpc("64 KB OOL", 65536, OOL_BENCH_ITERS);
+	bench_ool_intra_rpc("4 KB OOL",   4096, OOL_BENCH_ITERS);
+	bench_ool_intra_rpc("16 KB OOL", 16384, OOL_BENCH_ITERS);
+	bench_ool_intra_rpc("64 KB OOL", 65536, OOL_BENCH_ITERS);
+
+	printf("--- OOL data (inter-task, PHYSICAL_COPY) ---\n");
+
+	bench_ool_inter_rpc("4 KB OOL inter",   4096, OOL_BENCH_ITERS);
+	bench_ool_inter_rpc("16 KB OOL inter", 16384, OOL_BENCH_ITERS);
+	bench_ool_inter_rpc("64 KB OOL inter", 65536, OOL_BENCH_ITERS);
+    }
 
     /* ---------------------------------------------------------
-     * OOL inter-task benchmarks
-     * Measures cross-address-space COW cost — the real cost that
-     * every server pays when receiving data from a client.
+     * Disk I/O benchmarks
      * --------------------------------------------------------- */
-    printf("--- OOL data (inter-task, PHYSICAL_COPY) ---\n");
-
-    bench_ool_inter_rpc("4 KB OOL inter",   4096, OOL_BENCH_ITERS);
-    bench_ool_inter_rpc("16 KB OOL inter", 16384, OOL_BENCH_ITERS);
-    bench_ool_inter_rpc("64 KB OOL inter", 65536, OOL_BENCH_ITERS);
-
-#if BENCH_DISK_AND_MEM
-    /* ---------------------------------------------------------
-     * Disk I/O benchmarks (via ahci_driver + ext2_server)
-     * Discovers servers via netname; skips if not running.
-     * --------------------------------------------------------- */
-    bench_disk_run(host_port, clock_port);
+    if (suites & SUITE_DISK)
+	bench_disk_run(host_port, clock_port);
 
     /* ---------------------------------------------------------
-     * Memory bandwidth benchmarks (memcpy, memmove, memset, bzero)
+     * Memory bandwidth benchmarks
      * --------------------------------------------------------- */
-    bench_mem_run(clock_port);
-#endif
+    if (suites & SUITE_MEM)
+	bench_mem_run(clock_port);
 
     /* ---------------------------------------------------------
      * FLIPC v2 shared-memory channel benchmarks
      * --------------------------------------------------------- */
-    bench_flipc2_run(clock_port);
+    if (suites & SUITE_FLIPC2)
+	bench_flipc2_run(clock_port);
 
     printf("=== Benchmark complete ===\n");
 

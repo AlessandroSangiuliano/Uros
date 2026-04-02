@@ -93,6 +93,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
     ch->spurious_wakeups = 0;
     ch->sem_port = hdr->wakeup_sem;
     ch->sem_port_prod = hdr->wakeup_sem_prod;
+    ch->bufgroup = (void *)0;
 }
 
 /*

@@ -35,16 +35,29 @@ PART1_START_SECT=2048       # ext2 filesystem — allineato a 1 MiB
 FS_SIZE_MB=4                # dimensione filesystem (piccola: solo server binari)
 # Il resto del disco diventa swap per il default_pager
 
+# ipc_bench suite selection (empty = all)
+BENCH_ARGS=""
+
 # --- Parse argomenti ---
-while getopts "o:s:h" opt; do
-    case "$opt" in
-        o) DISK_IMG="$OPTARG" ;;
-        s) IMG_SIZE_MB="$OPTARG" ;;
-        h)
-            echo "Uso: $0 [-o output.img] [-s size_mb]"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) DISK_IMG="$2"; shift 2 ;;
+        -s) IMG_SIZE_MB="$2"; shift 2 ;;
+        --bench)
+            shift
+            while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
+                BENCH_ARGS="$BENCH_ARGS $1"
+                shift
+            done
+            ;;
+        -h|--help)
+            echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...]"
+            echo ""
+            echo "  --bench suite ...   Passa suite names a ipc_bench"
+            echo "                      (syscall intra slow inter port pp ool flipc2 all)"
             exit 0
             ;;
-        *) echo "Opzione sconosciuta: -$opt" >&2; exit 1 ;;
+        *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
     esac
 done
 
@@ -122,11 +135,11 @@ fi
 # L'argomento "hd0b" dopo il path diventa argv[1] del default_pager,
 # che lo apre con device_open() e lo usa come backing store di paging.
 BOOTSTRAP_CONF=$(mktemp)
-cat > "$BOOTSTRAP_CONF" <<'CONF'
+cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 default_pager default_pager hd0b
 hello_server hello_server
-ipc_bench ipc_bench
+ipc_bench ipc_bench${BENCH_ARGS}
 ahci_driver ahci_driver
 virtio_blk virtio_blk
 ext_server ext_server

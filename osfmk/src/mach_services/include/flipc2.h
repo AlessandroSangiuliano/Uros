@@ -47,6 +47,15 @@
  */
 
 /* ------------------------------------------------------------------ */
+/*  Library version                                                     */
+/* ------------------------------------------------------------------ */
+
+#define FLIPC2_LIB_VERSION_MAJOR    0
+#define FLIPC2_LIB_VERSION_MINOR    0
+#define FLIPC2_LIB_VERSION_PATCH    2
+#define FLIPC2_LIB_VERSION_STRING   "0.0.2"
+
+/* ------------------------------------------------------------------ */
 /*  Constants                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -70,6 +79,7 @@
 #define FLIPC2_FLAG_DATA_INLINE     0x00000000  /* data in inline region    */
 #define FLIPC2_FLAG_DATA_MAPPED     0x00000001  /* data in page-mapped region */
 #define FLIPC2_FLAG_BATCH           0x00000002  /* more descriptors follow  */
+#define FLIPC2_FLAG_DATA_BUFGROUP   0x00000004  /* data in buffer group pool */
 
 /* ------------------------------------------------------------------ */
 /*  Return codes                                                       */
@@ -93,6 +103,7 @@ typedef int flipc2_return_t;
 #define FLIPC2_ERR_NAME_NOT_FOUND       -13  /* endpoint name not found          */
 #define FLIPC2_ERR_MAX_CLIENTS          -14  /* endpoint client limit reached    */
 #define FLIPC2_ERR_PEER_DEAD            -15  /* peer task has died               */
+#define FLIPC2_ERR_POOL_EMPTY           -16  /* buffer group pool exhausted      */
 
 /*
  * Maximum consecutive spurious wakeups before declaring the channel dead.
@@ -230,6 +241,13 @@ typedef struct flipc2_channel {
      */
     mach_port_t sem_port;           /* consumer wakeup semaphore  */
     mach_port_t sem_port_prod;      /* producer wakeup semaphore  */
+
+    /*
+     * Associated buffer group (or NULL).
+     * When set, flipc2_resolve_data() uses the buffer group pool
+     * for descriptors with FLIPC2_FLAG_DATA_BUFGROUP.
+     */
+    struct flipc2_bufgroup *bufgroup;
 } *flipc2_channel_t;
 
 /* ------------------------------------------------------------------ */
@@ -673,6 +691,191 @@ flipc2_data_ptr_safe(flipc2_channel_t ch, uint64_t offset, uint64_t length)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Buffer Group (shared memory pool for multi-channel data)           */
+/* ------------------------------------------------------------------ */
+
+#define FLIPC2_BUFGROUP_MAGIC           0x46425032  /* "FBP2" */
+#define FLIPC2_BUFGROUP_VERSION         1
+#define FLIPC2_BUFGROUP_SLOT_NONE       0xFFFFFFFF
+#define FLIPC2_BUFGROUP_HEADER_SIZE     64
+
+#define FLIPC2_BUFGROUP_SLOT_SIZE_MIN   64
+#define FLIPC2_BUFGROUP_SLOT_SIZE_MAX   65536
+#define FLIPC2_BUFGROUP_POOL_SIZE_MIN   4096
+#define FLIPC2_BUFGROUP_POOL_SIZE_MAX   (16*1024*1024)
+
+/*
+ * Buffer group header (64 bytes, at offset 0 of pool shared memory).
+ *
+ * Layout:
+ *   [0..63]   header
+ *   [64..]    next[] array (slot_count * 4 bytes)
+ *   [aligned] data region (slot_count * slot_stride bytes)
+ *
+ * The free list is a LIFO stack using a tagged pointer to prevent
+ * the ABA problem:  low 32 bits = slot index (or SLOT_NONE),
+ * high 32 bits = version counter.  On i686, CAS on the 64-bit
+ * free_head uses cmpxchg8b.
+ */
+struct flipc2_bufgroup_header {
+    uint32_t    magic;              /*  0: FLIPC2_BUFGROUP_MAGIC         */
+    uint32_t    version;            /*  4: FLIPC2_BUFGROUP_VERSION       */
+    uint32_t    pool_size;          /*  8: total shared memory size      */
+    uint32_t    slot_size;          /* 12: usable data bytes per slot    */
+    uint32_t    slot_count;         /* 16: total number of slots         */
+    uint32_t    next_offset;        /* 20: byte offset of next[] array   */
+    uint32_t    data_offset;        /* 24: byte offset of data region    */
+    uint32_t    slot_stride;        /* 28: aligned slot size (>= slot)   */
+
+    /* 32: Free list head — tagged pointer for ABA-safe CAS             */
+    /*     low 32 bits = slot index (or SLOT_NONE)                      */
+    /*     high 32 bits = version counter                               */
+    volatile uint64_t free_head;    /* naturally 8-byte aligned at 32    */
+
+    /* 40: Statistics (best-effort, not synchronized)                   */
+    volatile uint64_t alloc_total;
+    volatile uint64_t free_total;
+
+    /* 56: pad to 64 bytes                                              */
+    uint8_t     _reserved[8];
+};
+
+/* Compile-time check: header must be exactly 64 bytes */
+typedef char _flipc2_bufgroup_header_size_check
+    [(sizeof(struct flipc2_bufgroup_header) == FLIPC2_BUFGROUP_HEADER_SIZE) ? 1 : -1];
+
+/*
+ * Buffer group handle (userspace).
+ */
+typedef struct flipc2_bufgroup {
+    struct flipc2_bufgroup_header *hdr;   /* mapped shared memory base  */
+    uint32_t                     *next;   /* &hdr + next_offset         */
+    uint8_t                      *data;   /* &hdr + data_offset         */
+    uint32_t                      mapped_size; /* > 0: owns vm_remap    */
+} *flipc2_bufgroup_t;
+
+/* ------------------------------------------------------------------ */
+/*  Buffer group: inline fast-path                                     */
+/* ------------------------------------------------------------------ */
+
+static inline uint32_t
+flipc2_bufgroup_head_index(uint64_t tagged)
+{
+    return (uint32_t)(tagged & 0xFFFFFFFF);
+}
+
+static inline uint32_t
+flipc2_bufgroup_head_version(uint64_t tagged)
+{
+    return (uint32_t)(tagged >> 32);
+}
+
+static inline uint64_t
+flipc2_bufgroup_make_head(uint32_t index, uint32_t version)
+{
+    return ((uint64_t)version << 32) | (uint64_t)index;
+}
+
+/*
+ * Allocate a buffer slot from the pool (CAS-based LIFO pop).
+ * Returns byte offset into the data region, or (uint64_t)-1 if empty.
+ */
+static inline uint64_t
+flipc2_bufgroup_alloc(flipc2_bufgroup_t bg)
+{
+    struct flipc2_bufgroup_header *hdr = bg->hdr;
+
+    for (;;) {
+        uint64_t old_tagged = hdr->free_head;
+        uint32_t idx = flipc2_bufgroup_head_index(old_tagged);
+        uint32_t ver = flipc2_bufgroup_head_version(old_tagged);
+        uint32_t next_idx;
+        uint64_t new_tagged;
+
+        if (idx == FLIPC2_BUFGROUP_SLOT_NONE)
+            return (uint64_t)-1;
+
+        FLIPC2_READ_FENCE();
+        next_idx = bg->next[idx];
+        new_tagged = flipc2_bufgroup_make_head(next_idx, ver + 1);
+
+        if (__sync_val_compare_and_swap(&hdr->free_head,
+                                        old_tagged, new_tagged) == old_tagged) {
+            hdr->alloc_total++;
+            return (uint64_t)idx * (uint64_t)hdr->slot_stride;
+        }
+        FLIPC2_PAUSE();
+    }
+}
+
+/*
+ * Free a buffer slot back to the pool (CAS-based LIFO push).
+ */
+static inline void
+flipc2_bufgroup_free(flipc2_bufgroup_t bg, uint64_t offset)
+{
+    struct flipc2_bufgroup_header *hdr = bg->hdr;
+    uint32_t slot = (uint32_t)offset / hdr->slot_stride;
+
+    for (;;) {
+        uint64_t old_tagged = hdr->free_head;
+        uint32_t old_idx = flipc2_bufgroup_head_index(old_tagged);
+        uint32_t ver = flipc2_bufgroup_head_version(old_tagged);
+        uint64_t new_tagged;
+
+        bg->next[slot] = old_idx;
+        FLIPC2_WRITE_FENCE();
+
+        new_tagged = flipc2_bufgroup_make_head(slot, ver + 1);
+
+        if (__sync_val_compare_and_swap(&hdr->free_head,
+                                        old_tagged, new_tagged) == old_tagged) {
+            hdr->free_total++;
+            return;
+        }
+        FLIPC2_PAUSE();
+    }
+}
+
+/*
+ * Get data pointer for an allocated slot.
+ */
+static inline void *
+flipc2_bufgroup_data(flipc2_bufgroup_t bg, uint64_t offset)
+{
+    return (void *)(bg->data + offset);
+}
+
+/*
+ * Bounds-checked data pointer for buffer group.
+ */
+static inline void *
+flipc2_bufgroup_data_safe(flipc2_bufgroup_t bg, uint64_t offset, uint64_t length)
+{
+    uint32_t slot = (uint32_t)offset / bg->hdr->slot_stride;
+
+    if (slot >= bg->hdr->slot_count)
+        return (void *)0;
+    if (length > bg->hdr->slot_size)
+        return (void *)0;
+    if (offset + length < offset)
+        return (void *)0;
+    return (void *)(bg->data + offset);
+}
+
+/*
+ * Resolve data pointer based on descriptor flags.
+ * Dispatches to buffer group or inline data region.
+ */
+static inline void *
+flipc2_resolve_data(flipc2_channel_t ch, uint32_t flags, uint64_t offset)
+{
+    if (flags & FLIPC2_FLAG_DATA_BUFGROUP)
+        return flipc2_bufgroup_data(ch->bufgroup, offset);
+    return flipc2_data_ptr(ch, offset);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Setup API (slow path — implemented in libflipc2, uses Mach IPC)    */
 /* ------------------------------------------------------------------ */
 
@@ -906,5 +1109,66 @@ flipc2_return_t
 flipc2_endpoint_disconnect(
     flipc2_channel_t    fwd_ch,
     flipc2_channel_t    rev_ch);
+
+/* ------------------------------------------------------------------ */
+/*  Buffer Group API (shared memory pool, implemented in libflipc2)    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Create a buffer group with the given pool size and slot size.
+ */
+flipc2_return_t
+flipc2_bufgroup_create(
+    uint32_t            pool_size,
+    uint32_t            slot_size,
+    flipc2_bufgroup_t  *bg);
+
+/*
+ * Destroy a buffer group and release all resources.
+ */
+flipc2_return_t
+flipc2_bufgroup_destroy(
+    flipc2_bufgroup_t   bg);
+
+/*
+ * Attach to an existing buffer group via its base address.
+ */
+flipc2_return_t
+flipc2_bufgroup_attach(
+    vm_address_t        base_addr,
+    flipc2_bufgroup_t  *bg);
+
+/*
+ * Attach to a buffer group mapped via vm_remap (inter-task peer).
+ */
+flipc2_return_t
+flipc2_bufgroup_attach_remote(
+    vm_address_t        base_addr,
+    uint32_t            mapped_size,
+    flipc2_bufgroup_t  *bg);
+
+/*
+ * Detach from a buffer group without destroying it.
+ */
+flipc2_return_t
+flipc2_bufgroup_detach(
+    flipc2_bufgroup_t   bg);
+
+/*
+ * Share a buffer group with another task via vm_remap.
+ */
+flipc2_return_t
+flipc2_bufgroup_share(
+    flipc2_bufgroup_t   bg,
+    mach_port_t         target_task,
+    vm_address_t       *out_addr);
+
+/*
+ * Associate a buffer group with a channel handle.
+ */
+void
+flipc2_channel_set_bufgroup(
+    flipc2_channel_t    ch,
+    flipc2_bufgroup_t   bg);
 
 #endif /* _FLIPC2_H_ */

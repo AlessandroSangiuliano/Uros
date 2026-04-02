@@ -74,5 +74,12 @@ bench_flipc2_run(mach_port_t clock_port)
     bench_flipc2_endpoint_rpc("null RPC (endpoint)",    0, FLIPC2_BENCH_ITERS);
     bench_flipc2_endpoint_rpc("128B RPC (endpoint)",  128, FLIPC2_BENCH_ITERS);
 
+    /* --- Buffer group benchmarks --- */
+    printf("\n--- FLIPC2 buffer group benchmarks ---\n");
+    bench_flipc2_bufgroup_alloc_free();
+    bench_flipc2_bufgroup_rpc("256B RPC (bufgroup)", 256, FLIPC2_BENCH_ITERS);
+    bench_flipc2_bufgroup_inter_rpc("256B RPC (bufgroup inter)", 256,
+                                     FLIPC2_BENCH_ITERS);
+
     printf("\n");
 }

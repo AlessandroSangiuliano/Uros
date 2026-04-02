@@ -37,6 +37,7 @@ add_custom_command(
 
 set(LIB_SOURCES
   flipc2_channel.c
+  flipc2_bufgroup.c
   flipc2_endpoint.c
   ${EP_USER_C}
   ${EP_SERVER_C}

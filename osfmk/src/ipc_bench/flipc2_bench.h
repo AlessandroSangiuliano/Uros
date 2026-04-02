@@ -49,6 +49,10 @@
 #define GAME_AUDIO_CHUNK_SIZE     4096    /* 4 KB */
 #define GAME_FRAMES               1000
 
+/* Buffer group benchmark constants */
+#define FLIPC2_BENCH_BG_POOL_SIZE   (64 * 1024)   /* 64 KB pool */
+#define FLIPC2_BENCH_BG_SLOT_SIZE   256            /* 256 bytes/slot */
+
 /* ------------------------------------------------------------------ */
 /*  Shared helpers (flipc2_bench_common.c)                             */
 /* ------------------------------------------------------------------ */
@@ -100,6 +104,12 @@ struct flipc2_child_args {
     mach_port_t     fwd_sem;
     mach_port_t     rev_sem;
     int             data_size;
+    /* Buffer group fields (used by flipc2_child_bg_echo_entry) */
+    vm_address_t    bg_base;
+    uint32_t        bg_data_offset;
+    uint32_t        bg_slot_stride;
+    uint32_t        bg_slot_count;
+    uint32_t        bg_next_offset;
 };
 
 extern volatile struct flipc2_child_args flipc2_child_args_storage;
@@ -107,6 +117,7 @@ extern volatile struct flipc2_child_args flipc2_child_args_storage;
 /* Child entry points (noreturn, used from inter-task setup) */
 void flipc2_child_echo_entry(void);
 void flipc2_child_batch_echo_entry(void);
+void flipc2_child_bg_echo_entry(void);
 
 int  flipc2_inter_setup(flipc2_channel_t fwd_ch, flipc2_channel_t rev_ch,
                          mach_port_t fwd_sem, mach_port_t rev_sem,
@@ -141,6 +152,11 @@ void bench_game_mixed_frame_inter(void);
 /* Endpoint benchmarks (flipc2_bench_endpoint.c) */
 void bench_flipc2_endpoint_setup(void);
 void bench_flipc2_endpoint_rpc(const char *label, int data_size, int iters);
+
+/* Buffer group benchmarks (flipc2_bench_bufgroup.c) */
+void bench_flipc2_bufgroup_alloc_free(void);
+void bench_flipc2_bufgroup_rpc(const char *label, int data_size, int iters);
+void bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters);
 
 /* Main entry point */
 void bench_flipc2_run(mach_port_t clock_port);

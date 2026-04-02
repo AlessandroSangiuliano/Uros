@@ -29,16 +29,30 @@ USE_DISK=true
 USE_AHCI=false
 USE_AHCI2=false
 USE_VIRTIO=false
+BENCH_ARGS=""
 EXTRA_ARGS=""
-for arg in "$@"; do
-    case "$arg" in
-        --no-disk) USE_DISK=false ;;
-        --ahci2) USE_AHCI=true; USE_AHCI2=true ;;
-        --ahci) USE_AHCI=true ;;
-        --virtio) USE_VIRTIO=true ;;
-        *) EXTRA_ARGS="$EXTRA_ARGS $arg" ;;
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-disk) USE_DISK=false; shift ;;
+        --ahci2) USE_AHCI=true; USE_AHCI2=true; shift ;;
+        --ahci) USE_AHCI=true; shift ;;
+        --virtio) USE_VIRTIO=true; shift ;;
+        --bench)
+            shift
+            while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
+                BENCH_ARGS="$BENCH_ARGS $1"
+                shift
+            done
+            ;;
+        *) EXTRA_ARGS="$EXTRA_ARGS $1"; shift ;;
     esac
 done
+
+# Regenerate disk image if --bench was specified (pass suite selection)
+if [ -n "$BENCH_ARGS" ]; then
+    echo "Bench suites:$BENCH_ARGS"
+    "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS
+fi
 
 if [ ! -f "$KERNEL" ]; then
     echo "ERROR: kernel non trovato: $KERNEL"
