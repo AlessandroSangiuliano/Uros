@@ -59,7 +59,7 @@ flipc2_print_result(const char *label, unsigned long total_ns, int iters)
 int
 flipc2_pair_create(struct flipc2_pair *p, const char *label)
 {
-    return flipc2_pair_create_ex(p, 0, label);
+    return flipc2_pair_create_ex(p, FLIPC2_CREATE_ISOLATED, label);
 }
 
 int
