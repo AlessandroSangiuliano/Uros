@@ -233,8 +233,9 @@ Flat layout (default):                 Isolated layout:
 - **Zero fast-path overhead**: the handle stores direct pointers to volatile
   fields (`ch->prod_tail`, `ch->cons_head`), so inline functions work identically
   for both flat and isolated layouts — no extra indirection.
-- **Opt-in**: pass `FLIPC2_CREATE_ISOLATED` to `flipc2_channel_create_ex()`.
-  Old code using `flipc2_channel_create()` continues to create flat channels.
+- **Default since v0.0.3**: `flipc2_channel_create()` creates isolated channels
+  automatically. Use `flipc2_channel_create_ex()` with `FLIPC2_CREATE_FLAT` to
+  force flat layout (not recommended — flat has worse cache behavior).
 - **Minimum size**: 16 KB (3 metadata pages + 1+ ring/data page). The flat
   layout minimum remains 4 KB.
 - **Auto-detected on attach**: `flipc2_channel_attach` reads `layout_flags`
@@ -380,6 +381,7 @@ All API functions return `flipc2_return_t` (typedef for `int`):
 #define FLIPC2_LAYOUT_FLAT              0x00000000
 #define FLIPC2_LAYOUT_ISOLATED          0x00000001
 #define FLIPC2_CREATE_ISOLATED          0x00000001
+#define FLIPC2_CREATE_FLAT              0x00000002  /* force flat layout */
 #define FLIPC2_ROLE_PRODUCER            1
 #define FLIPC2_ROLE_CONSUMER            2
 #define FLIPC2_CHANNEL_SIZE_MIN_ISOLATED 16384  /* 16 KB minimum */
@@ -398,8 +400,8 @@ flipc2_channel_create(uint32_t channel_size,
 ```
 
 Allocates shared memory, creates two Mach semaphores (consumer wakeup + producer
-backpressure), initializes the channel header. `channel_size` must be in
-`[4KB, 16MB]`. `ring_entries` must be a power of 2 in `[16, 16384]`.
+backpressure), initializes the channel header. Uses **isolated layout by default**
+(minimum 16 KB, auto-adjusted). `ring_entries` must be a power of 2 in `[16, 16384]`.
 
 Returns the channel handle and consumer semaphore port. The creator is the
 **producer** of this channel.
@@ -413,8 +415,9 @@ flipc2_channel_create_ex(uint32_t channel_size,
                           mach_port_t *sem_port);
 ```
 
-Extended version with flags. Pass `FLIPC2_CREATE_ISOLATED` for page-isolated
-layout (minimum 16 KB). Pass 0 for flat layout (same as `flipc2_channel_create`).
+Extended version with explicit flags. Pass `FLIPC2_CREATE_ISOLATED` for
+page-isolated layout (minimum 16 KB). Pass `FLIPC2_CREATE_FLAT` for flat layout.
+Pass 0 for flat layout (backward compatible).
 
 ```c
 flipc2_return_t flipc2_channel_destroy(flipc2_channel_t channel);

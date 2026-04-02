@@ -81,6 +81,7 @@
 
 /* Creation flags (passed to flipc2_channel_create_ex) */
 #define FLIPC2_CREATE_ISOLATED      0x00000001
+#define FLIPC2_CREATE_FLAT          0x00000002  /* force flat layout */
 
 /* Sharing roles (passed to flipc2_channel_share_isolated) */
 #define FLIPC2_ROLE_PRODUCER        1

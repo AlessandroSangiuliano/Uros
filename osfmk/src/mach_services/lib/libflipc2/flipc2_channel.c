@@ -252,9 +252,10 @@ flipc2_channel_create_ex(
 }
 
 /*
- * flipc2_channel_create — Allocate and initialize a new channel (flat layout).
+ * flipc2_channel_create — Allocate and initialize a new channel.
  *
- * Convenience wrapper around flipc2_channel_create_ex with flags=0.
+ * Default is isolated layout (page-aligned sections, better cache behavior).
+ * Use flipc2_channel_create_ex with FLIPC2_CREATE_FLAT for flat layout.
  */
 flipc2_return_t
 flipc2_channel_create(
@@ -263,7 +264,10 @@ flipc2_channel_create(
     flipc2_channel_t   *channel,
     mach_port_t        *sem_port)
 {
-    return flipc2_channel_create_ex(channel_size, ring_entries, 0,
+    if (channel_size < FLIPC2_CHANNEL_SIZE_MIN_ISOLATED)
+        channel_size = FLIPC2_CHANNEL_SIZE_MIN_ISOLATED;
+    return flipc2_channel_create_ex(channel_size, ring_entries,
+                                    FLIPC2_CREATE_ISOLATED,
                                     channel, sem_port);
 }
 
