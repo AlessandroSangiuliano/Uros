@@ -46,7 +46,7 @@ bench_flipc2_endpoint_setup(void)
     for (i = 0; i < 5; i++) {
         ret = flipc2_endpoint_create("_bench_ep_warmup", 1,
                                      FLIPC2_BENCH_CHAN_SIZE,
-                                     FLIPC2_BENCH_RING_ENTRIES, &ep);
+                                     FLIPC2_BENCH_RING_ENTRIES, 0, &ep);
         if (ret != FLIPC2_SUCCESS) {
             printf("  ep setup: endpoint_create failed %d\n", ret);
             return;
@@ -58,7 +58,7 @@ bench_flipc2_endpoint_setup(void)
     for (i = 0; i < iters; i++) {
         ret = flipc2_endpoint_create("_bench_ep_test", 1,
                                      FLIPC2_BENCH_CHAN_SIZE,
-                                     FLIPC2_BENCH_RING_ENTRIES, &ep);
+                                     FLIPC2_BENCH_RING_ENTRIES, 0, &ep);
         if (ret != FLIPC2_SUCCESS) {
             printf("  ep setup: endpoint_create failed %d (iter %d)\n",
                    ret, i);

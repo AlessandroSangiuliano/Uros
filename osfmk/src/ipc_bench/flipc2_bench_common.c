@@ -59,19 +59,29 @@ flipc2_print_result(const char *label, unsigned long total_ns, int iters)
 int
 flipc2_pair_create(struct flipc2_pair *p, const char *label)
 {
-    flipc2_return_t ret;
+    return flipc2_pair_create_ex(p, 0, label);
+}
 
-    ret = flipc2_channel_create(FLIPC2_BENCH_CHAN_SIZE,
-                                FLIPC2_BENCH_RING_ENTRIES,
-                                &p->fwd_ch, &p->fwd_sem);
+int
+flipc2_pair_create_ex(struct flipc2_pair *p, uint32_t flags, const char *label)
+{
+    flipc2_return_t ret;
+    uint32_t cs = FLIPC2_BENCH_CHAN_SIZE;
+
+    /* Isolated layout needs at least 16KB + ring */
+    if (flags & FLIPC2_CREATE_ISOLATED)
+        cs = (cs < FLIPC2_CHANNEL_SIZE_MIN_ISOLATED)
+             ? FLIPC2_CHANNEL_SIZE_MIN_ISOLATED : cs;
+
+    ret = flipc2_channel_create_ex(cs, FLIPC2_BENCH_RING_ENTRIES,
+                                   flags, &p->fwd_ch, &p->fwd_sem);
     if (ret != FLIPC2_SUCCESS) {
         printf("  %s: fwd create failed %d\n", label, ret);
         return -1;
     }
 
-    ret = flipc2_channel_create(FLIPC2_BENCH_CHAN_SIZE,
-                                FLIPC2_BENCH_RING_ENTRIES,
-                                &p->rev_ch, &p->rev_sem);
+    ret = flipc2_channel_create_ex(cs, FLIPC2_BENCH_RING_ENTRIES,
+                                   flags, &p->rev_ch, &p->rev_sem);
     if (ret != FLIPC2_SUCCESS) {
         printf("  %s: rev create failed %d\n", label, ret);
         flipc2_channel_destroy(p->fwd_ch);

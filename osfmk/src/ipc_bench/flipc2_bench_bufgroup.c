@@ -291,6 +291,10 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
     flipc2_child_args_storage.bg_slot_stride  = bg->hdr->slot_stride;
     flipc2_child_args_storage.bg_slot_count   = bg->hdr->slot_count;
     flipc2_child_args_storage.bg_next_offset  = bg->hdr->next_offset;
+    flipc2_child_args_storage.prod_tail_off =
+        (uint32_t)((uint8_t *)fwd_ch->prod_tail - (uint8_t *)fwd_ch->hdr);
+    flipc2_child_args_storage.cons_head_off =
+        (uint32_t)((uint8_t *)fwd_ch->cons_head - (uint8_t *)fwd_ch->hdr);
 
     /* Create child task (inherits memory COW) */
     kr = task_create(mach_task_self(),
@@ -353,6 +357,10 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
         child_args.bg_slot_stride = bg->hdr->slot_stride;
         child_args.bg_slot_count  = bg->hdr->slot_count;
         child_args.bg_next_offset = bg->hdr->next_offset;
+        child_args.prod_tail_off =
+            (uint32_t)((uint8_t *)fwd_ch->prod_tail - (uint8_t *)fwd_ch->hdr);
+        child_args.cons_head_off =
+            (uint32_t)((uint8_t *)fwd_ch->cons_head - (uint8_t *)fwd_ch->hdr);
 
         kr = vm_write(child_task,
                       (vm_address_t)&flipc2_child_args_storage,
