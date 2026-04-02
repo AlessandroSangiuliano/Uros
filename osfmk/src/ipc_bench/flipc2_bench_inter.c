@@ -173,6 +173,95 @@ flipc2_child_batch_echo_entry(void)
 }
 
 /* ===================================================================
+ * Child echo with buffer group: reads data from shared bufgroup pool,
+ * frees the slot, sends null reply.
+ * No library API — direct struct access + CAS for bufgroup_free.
+ *
+ * NOTE: uses pure spin-wait instead of semaphore_wait/signal because
+ * semaphore_wait is a MIG stub that calls mig_get_reply_port(), and
+ * the child task has no cthread runtime.  For a benchmark this is fine.
+ * =================================================================== */
+
+void __attribute__((noreturn, used))
+flipc2_child_bg_echo_entry(void)
+{
+    volatile struct flipc2_child_args *args = &flipc2_child_args_storage;
+    struct flipc2_channel_header *fwd_hdr =
+        (struct flipc2_channel_header *)args->fwd_base;
+    struct flipc2_channel_header *rev_hdr =
+        (struct flipc2_channel_header *)args->rev_base;
+    struct flipc2_desc *fwd_ring =
+        (struct flipc2_desc *)((uint8_t *)fwd_hdr + args->ring_offset);
+    struct flipc2_desc *rev_ring =
+        (struct flipc2_desc *)((uint8_t *)rev_hdr + args->ring_offset);
+    uint32_t mask = args->ring_mask;
+
+    /* Buffer group pointers */
+    struct flipc2_bufgroup_header *bg_hdr =
+        (struct flipc2_bufgroup_header *)args->bg_base;
+    uint32_t *bg_next = (uint32_t *)((uint8_t *)bg_hdr + args->bg_next_offset);
+    uint8_t *bg_data = (uint8_t *)bg_hdr + args->bg_data_offset;
+    uint32_t bg_slot_stride = args->bg_slot_stride;
+
+    for (;;) {
+        uint32_t head = fwd_hdr->cons_head;
+
+        /* Pure spin-wait with yield (no semaphore — child has no cthread runtime) */
+        while (fwd_hdr->prod_tail == head)
+            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+
+        struct flipc2_desc *d = &fwd_ring[head & mask];
+
+        /*
+         * Read data from bufgroup pool (touch the memory to ensure
+         * the benchmark measures real access, not just descriptor passing).
+         */
+        if (d->flags & FLIPC2_FLAG_DATA_BUFGROUP) {
+            volatile uint8_t sink;
+            (void)sink;
+            sink = *(bg_data + (uint32_t)d->data_offset);
+
+            /*
+             * Free the bufgroup slot — inline CAS push (same algorithm
+             * as flipc2_bufgroup_free, but without library dependency).
+             */
+            uint32_t slot = (uint32_t)d->data_offset / bg_slot_stride;
+            for (;;) {
+                uint64_t old_tagged = bg_hdr->free_head;
+                uint32_t old_idx = (uint32_t)old_tagged;
+                uint32_t old_ver = (uint32_t)(old_tagged >> 32);
+                uint64_t new_tagged;
+
+                bg_next[slot] = old_idx;
+                FLIPC2_WRITE_FENCE();
+                new_tagged = ((uint64_t)(old_ver + 1) << 32) | slot;
+                if (__sync_val_compare_and_swap(&bg_hdr->free_head,
+                                                old_tagged, new_tagged) == old_tagged)
+                    break;
+                FLIPC2_PAUSE();
+            }
+        }
+
+        /* Produce null reply */
+        uint32_t tail = rev_hdr->prod_tail;
+        struct flipc2_desc *reply = &rev_ring[tail & mask];
+
+        reply->opcode = d->opcode + 100;
+        reply->cookie = d->cookie;
+        reply->flags = 0;
+        reply->status = 0;
+        reply->data_offset = 0;
+        reply->data_length = 0;
+
+        FLIPC2_WRITE_FENCE();
+        fwd_hdr->cons_head = head + 1;
+
+        FLIPC2_WRITE_FENCE();
+        rev_hdr->prod_tail = tail + 1;
+    }
+}
+
+/* ===================================================================
  * Setup child task with vm_remap'd channels.
  * Returns 0 on success and fills child_task/child_thread.
  * On failure returns -1, cleans up, and destroys channels.
