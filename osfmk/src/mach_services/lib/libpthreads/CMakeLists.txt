@@ -7,6 +7,9 @@ set(LIB_SOURCES
   pthread_mutex.c
   pthread_cond.c
   pthread_tsd.c
+  pthread_rwlock.c
+  pthread_barrier.c
+  pthread_spin.c
   fprintf.c
   thread_switch.c
 )

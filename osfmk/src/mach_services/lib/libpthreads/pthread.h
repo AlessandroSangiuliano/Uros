@@ -159,6 +159,45 @@ typedef struct { long sig; char opaque[__PTHREAD_ONCE_SIZE__]; } pthread_once_t;
 #define PTHREAD_ONCE_INIT {_PTHREAD_ONCE_SIG_init}
 
 /*
+ * Read-write lock attributes
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_RWLOCKATTR_SIZE__]; } pthread_rwlockattr_t;
+#endif
+
+/*
+ * Read-write lock variables
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_RWLOCK_SIZE__]; } pthread_rwlock_t;
+#endif
+
+#define PTHREAD_RWLOCK_INITIALIZER {_PTHREAD_RWLOCK_SIG}
+
+/*
+ * Barrier attributes
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_BARRIERATTR_SIZE__]; } pthread_barrierattr_t;
+#endif
+
+/*
+ * Barrier variables
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_BARRIER_SIZE__]; } pthread_barrier_t;
+#endif
+
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+
+/*
+ * Spinlock variables
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_SPIN_SIZE__]; } pthread_spinlock_t;
+#endif
+
+/*
  * Thread Specific Data - keys
  */
 typedef unsigned long pthread_key_t;    /* Opaque 'pointer' */
@@ -251,6 +290,34 @@ int       pthread_key_delete(pthread_key_t key);
 int       pthread_setspecific(pthread_key_t key,
 			      const void *value);
 void     *pthread_getspecific(pthread_key_t key);
+
+/* Read-write locks */
+int       pthread_rwlock_init(pthread_rwlock_t *rwlock,
+			       const pthread_rwlockattr_t *attr);
+int       pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlockattr_init(pthread_rwlockattr_t *attr);
+int       pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr);
+
+/* Barriers */
+int       pthread_barrier_init(pthread_barrier_t *barrier,
+				const pthread_barrierattr_t *attr,
+				unsigned count);
+int       pthread_barrier_destroy(pthread_barrier_t *barrier);
+int       pthread_barrier_wait(pthread_barrier_t *barrier);
+int       pthread_barrierattr_init(pthread_barrierattr_t *attr);
+int       pthread_barrierattr_destroy(pthread_barrierattr_t *attr);
+
+/* Spinlocks */
+int       pthread_spin_init(pthread_spinlock_t *lock, int pshared);
+int       pthread_spin_destroy(pthread_spinlock_t *lock);
+int       pthread_spin_lock(pthread_spinlock_t *lock);
+int       pthread_spin_trylock(pthread_spinlock_t *lock);
+int       pthread_spin_unlock(pthread_spinlock_t *lock);
 
 
 #endif /* _POSIX_PTHREAD_H */

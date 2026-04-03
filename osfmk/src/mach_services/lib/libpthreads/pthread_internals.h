@@ -143,11 +143,65 @@ typedef struct _pthread_cond
 /*
  * Initialization control (once) variables
  */
-typedef struct 
+typedef struct
 {
 	long	       sig;	      /* Unique signature for this structure */
 	pthread_lock_t lock;	      /* Used for internal mutex on structure */
 } pthread_once_t;
+
+/*
+ * Read-write lock attributes
+ */
+typedef struct
+{
+	long	       sig;
+	int	       pshared;
+} pthread_rwlockattr_t;
+
+/*
+ * Read-write lock variables
+ */
+typedef struct _pthread_rwlock
+{
+	long	       sig;	      /* Unique signature for this structure */
+	pthread_lock_t lock;	      /* Internal spinlock */
+	int	       readers;	      /* Number of active readers */
+	int	       writer;	      /* 1 if a writer holds the lock */
+	int	       blocked_writers; /* Writers waiting */
+	mach_port_t    reader_sem;    /* Semaphore for blocked readers */
+	mach_port_t    writer_sem;    /* Semaphore for blocked writers */
+} pthread_rwlock_t;
+
+/*
+ * Barrier attributes
+ */
+typedef struct
+{
+	long	       sig;
+	int	       pshared;
+} pthread_barrierattr_t;
+
+/*
+ * Barrier variables
+ */
+typedef struct _pthread_barrier
+{
+	long	       sig;	      /* Unique signature for this structure */
+	pthread_lock_t lock;	      /* Internal spinlock */
+	int	       count;	      /* Number of threads required */
+	int	       waiting;	      /* Threads currently blocked */
+	int	       phase;	      /* Toggles to prevent early reuse */
+	mach_port_t    sem;	      /* Semaphore for blocked threads */
+} pthread_barrier_t;
+
+/*
+ * Spinlock variables
+ */
+typedef struct
+{
+	long	       sig;
+	pthread_lock_t spinlock;
+} pthread_spinlock_t;
 
 #include "pthread.h"
 
@@ -167,6 +221,11 @@ typedef struct
 #define _PTHREAD_ONCE_SIG		0x4F4E4345  /* 'ONCE' */
 #define _PTHREAD_ONCE_SIG_init		0x30B1BCBA  /* [almost] ~'ONCE' */
 #define _PTHREAD_SIG			0x54485244  /* 'THRD' */
+#define _PTHREAD_RWLOCK_ATTR_SIG	0x52574C41  /* 'RWLA' */
+#define _PTHREAD_RWLOCK_SIG		0x52574C4B  /* 'RWLK' */
+#define _PTHREAD_BARRIER_ATTR_SIG	0x42415241  /* 'BARA' */
+#define _PTHREAD_BARRIER_SIG		0x42415252  /* 'BARR' */
+#define _PTHREAD_SPIN_SIG		0x5350494E  /* 'SPIN' */
 
 #define _PTHREAD_EXITED		     3
 #define _PTHREAD_CREATE_PARENT	     4
