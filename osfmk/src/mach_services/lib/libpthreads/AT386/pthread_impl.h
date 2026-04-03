@@ -28,8 +28,8 @@
  * These must match the internal structures in pthread_internals.h.
  */
 
-#define __PTHREAD_SIZE__           136
-#define __PTHREAD_ATTR_SIZE__      28
+#define __PTHREAD_SIZE__           132
+#define __PTHREAD_ATTR_SIZE__      32
 #define __PTHREAD_MUTEXATTR_SIZE__ 8
 #define __PTHREAD_MUTEX_SIZE__     40
 #define __PTHREAD_CONDATTR_SIZE__  4

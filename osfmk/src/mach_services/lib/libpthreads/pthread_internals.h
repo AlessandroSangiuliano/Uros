@@ -74,7 +74,6 @@ typedef struct _pthread
 	struct _pthread_handler_rec *cleanup_stack;
 	int		err_no;		/* thread-local errno */
 	void	       *tsd[_POSIX_THREAD_KEYS_MAX];  /* Thread specific data */
-	int I_dont_know_what_else_goes_here_yet;
 } *pthread_t;
 
 /*
@@ -88,7 +87,8 @@ typedef struct
 	int	       inherit;
 	int	       policy;
 	struct sched_param param;
-	int I_dont_know_what_else_goes_here_yet;
+	vm_size_t      stacksize;     /* User-requested stack size (0 = default) */
+	vm_address_t   stackaddr;     /* User-supplied stack base (0 = auto) */
 } pthread_attr_t;
 
 /*

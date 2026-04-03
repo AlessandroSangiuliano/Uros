@@ -42,7 +42,7 @@
 
 #define _POSIX_THREADS
 #undef  _POSIX_THREAD_ATTR_STACKADDR
-#undef  _POSIX_THREAD_ATTR_STACKSIZE
+#define _POSIX_THREAD_ATTR_STACKSIZE
 #define _POSIX_THREAD_PRIORITY_SCHEDULING
 #define _POSIX_THREAD_PRIO_INHERIT
 #define _POSIX_THREAD_PRIO_PROTECT
@@ -80,19 +80,19 @@ struct _pthread_handler_rec
  * they *MUST* occur in matched pairs!
  */
 
-#define pthread_cleanup_push(routine, arg) \
+#define pthread_cleanup_push(func, val) \
    { \
 	     struct _pthread_handler_rec __handler; \
-	     pthread_t __self; \
-	     __handler.routine = routine; \
-	     __handler.arg = arg; \
+	     pthread_t __self = pthread_self(); \
+	     __handler.routine = (func); \
+	     __handler.arg = (val); \
 	     __handler.next = __self->cleanup_stack; \
 	     __self->cleanup_stack = &__handler;
 
 #define pthread_cleanup_pop(execute) \
-	     /* Note: 'handler' must be in this same lexical context! */ \
+	     /* Note: '__handler' must be in this same lexical context! */ \
 	     __self->cleanup_stack = __handler.next; \
-	     if (execute) (handler.routine)(handler.arg); \
+	     if (execute) (__handler.routine)(__handler.arg); \
    }
 	
 /*
@@ -163,6 +163,7 @@ typedef struct { long sig; char opaque[__PTHREAD_ONCE_SIZE__]; } pthread_once_t;
  */
 typedef unsigned long pthread_key_t;    /* Opaque 'pointer' */
 
+#include <stddef.h>
 #include <sys/timers.h>
 
 /*
@@ -184,8 +185,12 @@ int       pthread_attr_setinheritsched(pthread_attr_t *attr,
 				       int inheritsched);
 int       pthread_attr_setschedparam(pthread_attr_t *attr, 
                                      const struct sched_param *param);
-int       pthread_attr_setschedpolicy(pthread_attr_t *attr, 
+int       pthread_attr_setschedpolicy(pthread_attr_t *attr,
 				      int policy);
+int       pthread_attr_setstacksize(pthread_attr_t *attr,
+				     size_t stacksize);
+int       pthread_attr_getstacksize(const pthread_attr_t *attr,
+				     size_t *stacksize);
 int       pthread_cancel(pthread_t thread);
 int       pthread_setcancelstate(int state, int *oldstate);
 int       pthread_setcanceltype(int type, int *oldtype);
