@@ -116,6 +116,7 @@ typedef struct _pthread_mutex
 	struct _pthread_cond *busy;   /* List of condition variables using this mutex */
 	int	       waiters;	      /* Count of threads waiting for this mutex */
 	mach_port_t    sem;	      /* Semaphore used for waiting */
+	int	       state;	      /* Fast-path: 0=unlocked, 1=locked, 2=contended */
 } pthread_mutex_t;
 
 /*

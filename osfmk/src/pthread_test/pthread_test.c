@@ -549,6 +549,71 @@ test_spinlock_func(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 11: thread-safe errno
+ * ---------------------------------------------------------------- */
+
+static int errno_ok;
+
+static void *
+thread_errno(void *arg)
+{
+	int id = (int)(long)arg;
+
+	/* Set errno to a unique value per thread */
+	errno = 100 + id;
+
+	/* Yield to let other thread run */
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+	/* Verify our errno wasn't clobbered */
+	if (errno != 100 + id)
+		errno_ok = 0;
+	return NULL;
+}
+
+static void
+test_errno_threadsafe(void)
+{
+	pthread_t t1, t2;
+
+	errno_ok = 1;
+	pthread_create(&t1, NULL, thread_errno, (void *)1);
+	pthread_create(&t2, NULL, thread_errno, (void *)2);
+	pthread_join(t1, NULL);
+	pthread_join(t2, NULL);
+
+	if (errno_ok)
+		test_ok("thread-safe errno");
+	else
+		test_fail("thread-safe errno", "errno clobbered across threads");
+}
+
+/* ----------------------------------------------------------------
+ * Test 12: mutex fast-path benchmark
+ * ---------------------------------------------------------------- */
+
+static void
+test_mutex_bench(void)
+{
+	pthread_mutex_t bench_mtx = PTHREAD_MUTEX_INITIALIZER;
+	unsigned int start, end;
+	int i;
+	int n = 100000;
+
+	/* rdtsc for timing */
+	__asm__ volatile("rdtsc" : "=a"(start) : : "edx");
+	for (i = 0; i < n; i++) {
+		pthread_mutex_lock(&bench_mtx);
+		pthread_mutex_unlock(&bench_mtx);
+	}
+	__asm__ volatile("rdtsc" : "=a"(end) : : "edx");
+
+	unsigned int cycles = end - start;
+	printf("  [%d] mutex uncontended: %u cycles / %d iters = %u cycles/pair\n",
+	       ++test_num, cycles, n, cycles / n);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -568,6 +633,8 @@ main(int argc, char **argv)
 	test_rwlock_func();
 	test_barrier_func();
 	test_spinlock_func();
+	test_errno_threadsafe();
+	test_mutex_bench();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
