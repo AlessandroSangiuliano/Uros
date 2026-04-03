@@ -22,36 +22,60 @@
  */
 
 /*
- * POSIX Threads - Machine implementation details (i386)
+ * POSIX Pthread Library
+ *   Spinlock support (POSIX.1-2001)
  *
- * Generated from mk_pthread_impl.c struct sizes.
- * These must match the internal structures in pthread_internals.h.
+ * Thin wrapper over the existing _spin_lock/_spin_unlock primitives
+ * from AT386/i386_lock.S.
  */
 
-#define __PTHREAD_SIZE__           132
-#define __PTHREAD_ATTR_SIZE__      32
-#define __PTHREAD_MUTEXATTR_SIZE__ 8
-#define __PTHREAD_MUTEX_SIZE__     40
-#define __PTHREAD_CONDATTR_SIZE__  4
-#define __PTHREAD_COND_SIZE__      24
-#define __PTHREAD_ONCE_SIZE__      4
-#define __PTHREAD_RWLOCKATTR_SIZE__ 4
-#define __PTHREAD_RWLOCK_SIZE__    24
-#define __PTHREAD_BARRIERATTR_SIZE__ 4
-#define __PTHREAD_BARRIER_SIZE__   20
-#define __PTHREAD_SPIN_SIZE__      4
-/*
- * [Internal] data structure signatures
- */
-#define _PTHREAD_MUTEX_SIG_init		0x32AAABA7
-#define _PTHREAD_COND_SIG_init		0x3CB0B1BB
-#define _PTHREAD_ONCE_SIG_init		0x30B1BCBA
-#define _PTHREAD_RWLOCK_SIG		0x52574C4B
-/*
- * POSIX scheduling policies
- */
+#include "pthread_internals.h"
 
-#define SCHED_OTHER      1
-#define SCHED_FIFO       4
-#define SCHED_RR         2
-#define __SCHED_PARAM_SIZE__       4
+int
+pthread_spin_init(pthread_spinlock_t *lock, int pshared)
+{
+	lock->sig = _PTHREAD_SPIN_SIG;
+	LOCK_INIT(lock->spinlock);
+	return (ESUCCESS);
+}
+
+int
+pthread_spin_destroy(pthread_spinlock_t *lock)
+{
+	if (lock->sig != _PTHREAD_SPIN_SIG)
+		return (EINVAL);
+	lock->sig = _PTHREAD_NO_SIG;
+	return (ESUCCESS);
+}
+
+int
+pthread_spin_lock(pthread_spinlock_t *lock)
+{
+	if (lock->sig != _PTHREAD_SPIN_SIG)
+		return (EINVAL);
+	LOCK(lock->spinlock);
+	return (ESUCCESS);
+}
+
+int
+pthread_spin_trylock(pthread_spinlock_t *lock)
+{
+	if (lock->sig != _PTHREAD_SPIN_SIG)
+		return (EINVAL);
+	/*
+	 * _spin_lock is blocking; for trylock we test atomically.
+	 * pthread_lock_t is an int — 0 means unlocked.
+	 */
+	if (__sync_lock_test_and_set(&lock->spinlock, 1) != 0)
+		return (EBUSY);
+	return (ESUCCESS);
+}
+
+int
+pthread_spin_unlock(pthread_spinlock_t *lock)
+{
+	if (lock->sig != _PTHREAD_SPIN_SIG)
+		return (EINVAL);
+	UNLOCK(lock->spinlock);
+	return (ESUCCESS);
+}

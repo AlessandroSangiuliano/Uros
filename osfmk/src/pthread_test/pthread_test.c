@@ -392,6 +392,163 @@ test_stacksize_attr(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 8: read-write lock
+ * ---------------------------------------------------------------- */
+
+#define NRW_READERS 3
+#define NRW_ITERS   500
+
+static pthread_rwlock_t test_rwlock;
+static int rwlock_shared_val;
+
+static void *
+thread_rwlock_reader(void *arg)
+{
+	int i;
+	for (i = 0; i < NRW_ITERS; i++) {
+		pthread_rwlock_rdlock(&test_rwlock);
+		/* Just read — no modification */
+		(void)rwlock_shared_val;
+		pthread_rwlock_unlock(&test_rwlock);
+	}
+	return NULL;
+}
+
+static void *
+thread_rwlock_writer(void *arg)
+{
+	int i;
+	for (i = 0; i < NRW_ITERS; i++) {
+		pthread_rwlock_wrlock(&test_rwlock);
+		rwlock_shared_val++;
+		pthread_rwlock_unlock(&test_rwlock);
+	}
+	return NULL;
+}
+
+static void
+test_rwlock_func(void)
+{
+	pthread_t readers[NRW_READERS], writer;
+	int i;
+
+	rwlock_shared_val = 0;
+	pthread_rwlock_init(&test_rwlock, NULL);
+
+	pthread_create(&writer, NULL, thread_rwlock_writer, NULL);
+	for (i = 0; i < NRW_READERS; i++)
+		pthread_create(&readers[i], NULL, thread_rwlock_reader, NULL);
+
+	pthread_join(writer, NULL);
+	for (i = 0; i < NRW_READERS; i++)
+		pthread_join(readers[i], NULL);
+
+	if (rwlock_shared_val == NRW_ITERS) {
+		test_ok("rwlock (readers+writer)");
+	} else {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "val=%d expected=%d",
+			 rwlock_shared_val, NRW_ITERS);
+		test_fail("rwlock", buf);
+	}
+	pthread_rwlock_destroy(&test_rwlock);
+}
+
+/* ----------------------------------------------------------------
+ * Test 9: barrier
+ * ---------------------------------------------------------------- */
+
+#define NBARRIER 4
+
+static pthread_barrier_t test_barrier;
+static int barrier_serial_count;
+
+static void *
+thread_barrier(void *arg)
+{
+	int rc = pthread_barrier_wait(&test_barrier);
+	if (rc == PTHREAD_BARRIER_SERIAL_THREAD)
+		__sync_fetch_and_add(&barrier_serial_count, 1);
+	return NULL;
+}
+
+static void
+test_barrier_func(void)
+{
+	pthread_t threads[NBARRIER];
+	int i;
+
+	barrier_serial_count = 0;
+	pthread_barrier_init(&test_barrier, NULL, NBARRIER);
+
+	for (i = 0; i < NBARRIER; i++)
+		pthread_create(&threads[i], NULL, thread_barrier, NULL);
+
+	for (i = 0; i < NBARRIER; i++)
+		pthread_join(threads[i], NULL);
+
+	/* Exactly one thread should get SERIAL_THREAD */
+	if (barrier_serial_count == 1)
+		test_ok("barrier");
+	else {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "serial_count=%d (expected 1)",
+			 barrier_serial_count);
+		test_fail("barrier", buf);
+	}
+	pthread_barrier_destroy(&test_barrier);
+}
+
+/* ----------------------------------------------------------------
+ * Test 10: spinlock
+ * ---------------------------------------------------------------- */
+
+#define NSPIN_THREADS 4
+#define NSPIN_ITERS   1000
+
+static pthread_spinlock_t test_spinlock;
+static int spin_counter;
+
+static void *
+thread_spinlock(void *arg)
+{
+	int i;
+	for (i = 0; i < NSPIN_ITERS; i++) {
+		pthread_spin_lock(&test_spinlock);
+		spin_counter++;
+		pthread_spin_unlock(&test_spinlock);
+	}
+	return NULL;
+}
+
+static void
+test_spinlock_func(void)
+{
+	pthread_t threads[NSPIN_THREADS];
+	int i;
+	int expected = NSPIN_THREADS * NSPIN_ITERS;
+
+	spin_counter = 0;
+	pthread_spin_init(&test_spinlock, 0);
+
+	for (i = 0; i < NSPIN_THREADS; i++)
+		pthread_create(&threads[i], NULL, thread_spinlock, NULL);
+
+	for (i = 0; i < NSPIN_THREADS; i++)
+		pthread_join(threads[i], NULL);
+
+	if (spin_counter == expected)
+		test_ok("spinlock");
+	else {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "counter=%d expected=%d",
+			 spin_counter, expected);
+		test_fail("spinlock", buf);
+	}
+	pthread_spin_destroy(&test_spinlock);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -408,6 +565,9 @@ main(int argc, char **argv)
 	test_once();
 	test_cancel();
 	test_stacksize_attr();
+	test_rwlock_func();
+	test_barrier_func();
+	test_spinlock_func();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
