@@ -73,9 +73,10 @@ pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
 	mutex->prev = (pthread_mutex_t *)NULL;
 	mutex->busy = (pthread_cond_t *)NULL;
 	mutex->waiters = 0;
-	MACH_CALL(semaphore_create(mach_task_self(), 
-				   &mutex->sem, 
-				   SYNC_POLICY_FIFO, 
+	mutex->state = 0;
+	MACH_CALL(semaphore_create(mach_task_self(),
+				   &mutex->sem,
+				   SYNC_POLICY_FIFO,
 				   0), kern_res);
 	if (kern_res != KERN_SUCCESS)
 	{
@@ -125,13 +126,25 @@ _pthread_mutex_remove(pthread_mutex_t *mutex)
 }
 
 /*
- * Lock a mutex.
- * TODO: Priority inheritance stuff
+ * Mutex state machine (futex-like):
+ *   0 = unlocked
+ *   1 = locked, no waiters
+ *   2 = locked, one or more waiters (contended)
+ *
+ * Uncontended lock:  CAS(0→1), no syscall
+ * Contended lock:    CAS(→2), then semaphore_wait
+ * Uncontended unlock: XCHG(→0), if old was 1 → no syscall
+ * Contended unlock:   XCHG(→0), if old was 2 → semaphore_signal
  */
-int       
+
+/*
+ * Lock a mutex.
+ */
+int
 pthread_mutex_lock(pthread_mutex_t *mutex)
 {
 	kern_return_t kern_res;
+	int old;
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
 		int res;
@@ -139,16 +152,28 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 			return (res);
 	}
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
-		return (EINVAL);	/* Not a mutex variable */
-	LOCK(mutex->lock);
-	while (mutex->owner != (pthread_t)NULL)
+		return (EINVAL);
+
+	/* Fast path: uncontended — CAS 0→1, zero syscalls */
+	old = 0;
+	if (__atomic_compare_exchange_n(&mutex->state, &old, 1,
+					0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
 	{
-		mutex->waiters++;
-		UNLOCK(mutex->lock);
-		MACH_CALL(semaphore_wait(mutex->sem), kern_res);
 		LOCK(mutex->lock);
-		mutex->waiters--;
+		_pthread_mutex_add(mutex);
+		UNLOCK(mutex->lock);
+		return (ESUCCESS);
 	}
+
+	/* Slow path: contended — mark state=2 and block */
+	if (old != 2)
+		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
+	while (old != 0)
+	{
+		MACH_CALL(semaphore_wait(mutex->sem), kern_res);
+		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
+	}
+	LOCK(mutex->lock);
 	_pthread_mutex_add(mutex);
 	UNLOCK(mutex->lock);
 	return (ESUCCESS);
@@ -157,9 +182,10 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 /*
  * Attempt to lock a mutex, but don't block if this isn't possible.
  */
-int       
+int
 pthread_mutex_trylock(pthread_mutex_t *mutex)
 {
+	int old;
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
 		int res;
@@ -167,29 +193,28 @@ pthread_mutex_trylock(pthread_mutex_t *mutex)
 			return (res);
 	}
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
-		return (EINVAL);	/* Not a mutex variable */
-	LOCK(mutex->lock);
-	if (mutex->owner != (pthread_t)NULL)
+		return (EINVAL);
+
+	old = 0;
+	if (__atomic_compare_exchange_n(&mutex->state, &old, 1,
+					0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
 	{
-		UNLOCK(mutex->lock);
-		return (EBUSY);
-	} else
-	{
+		LOCK(mutex->lock);
 		_pthread_mutex_add(mutex);
 		UNLOCK(mutex->lock);
 		return (ESUCCESS);
 	}
+	return (EBUSY);
 }
 
 /*
  * Unlock a mutex.
- * TODO: Priority inheritance stuff
  */
-int       
+int
 pthread_mutex_unlock(pthread_mutex_t *mutex)
 {
 	kern_return_t kern_res;
-	int waiters;
+	int old;
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
 		int res;
@@ -197,24 +222,26 @@ pthread_mutex_unlock(pthread_mutex_t *mutex)
 			return (res);
 	}
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
-		return (EINVAL);	/* Not a mutex variable */
+		return (EINVAL);
+
 	LOCK(mutex->lock);
 	if (mutex->owner != pthread_self())
 	{
 		UNLOCK(mutex->lock);
 		return (EPERM);
-	} else
-	{
-		_pthread_mutex_remove(mutex);
-		mutex->owner = (pthread_t)NULL;
-		waiters = mutex->waiters;
-		UNLOCK(mutex->lock);
-		if (waiters)
-		{
-			MACH_CALL(semaphore_signal(mutex->sem), kern_res);
-		}
-		return (ESUCCESS);
 	}
+	_pthread_mutex_remove(mutex);
+	mutex->owner = (pthread_t)NULL;
+	UNLOCK(mutex->lock);
+
+	/* Fast path: if state was 1 (no waiters), just store 0 — no syscall */
+	old = __atomic_exchange_n(&mutex->state, 0, __ATOMIC_RELEASE);
+	if (old == 2)
+	{
+		/* There were waiters — wake one */
+		MACH_CALL(semaphore_signal(mutex->sem), kern_res);
+	}
+	return (ESUCCESS);
 }
 
 /*
