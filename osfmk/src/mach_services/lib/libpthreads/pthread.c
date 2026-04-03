@@ -272,6 +272,8 @@ pthread_attr_init(pthread_attr_t *attr)
 	attr->policy = _PTHREAD_DEFAULT_POLICY;
 	attr->inherit = _PTHREAD_DEFAULT_INHERITSCHED;
 	attr->detached = PTHREAD_CREATE_JOINABLE;
+	attr->stacksize = 0;	/* 0 = use default */
+	attr->stackaddr = 0;	/* 0 = auto-allocate */
 	return (ESUCCESS);
 }
 
@@ -368,6 +370,35 @@ pthread_attr_setschedpolicy(pthread_attr_t *attr,
 	{
 		return (EINVAL); /* Not an attribute structure! */
 	}
+}
+
+/*
+ * Set the stack size attribute.
+ * The size must be a power of two and at least _PTHREAD_DEFAULT_STACKSIZE.
+ */
+int
+pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (stacksize < _PTHREAD_DEFAULT_STACKSIZE)
+		return (EINVAL);
+	if (stacksize & (stacksize - 1))
+		return (EINVAL);	/* Must be power of two */
+	attr->stacksize = stacksize;
+	return (ESUCCESS);
+}
+
+/*
+ * Get the stack size attribute.
+ */
+int
+pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	*stacksize = attr->stacksize ? attr->stacksize : _PTHREAD_DEFAULT_STACKSIZE;
+	return (ESUCCESS);
 }
 
 /*
