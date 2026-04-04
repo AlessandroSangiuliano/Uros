@@ -273,7 +273,7 @@ pthread_mutex_setprioceiling(pthread_mutex_t *mutex,
 {
 	if (mutex->sig == _PTHREAD_MUTEX_SIG)
 	{
-		if ((prioceiling >= -999) ||
+		if ((prioceiling >= -999) &&
 		    (prioceiling <= 999))
 		{
 			*old_prioceiling = mutex->prioceiling;
@@ -357,7 +357,7 @@ pthread_mutexattr_setprioceiling(pthread_mutexattr_t *attr,
 {
 	if (attr->sig == _PTHREAD_MUTEX_ATTR_SIG)
 	{
-		if ((prioceiling >= -999) ||
+		if ((prioceiling >= -999) &&
 		    (prioceiling <= 999))
 		{
 			attr->prioceiling = prioceiling;
