@@ -31,6 +31,8 @@
 #include <stdio.h>	/* For printf(). */
 #include <errno.h>	/* For __mach_errno_addr() prototype. */
 
+extern void mig_init(void *initial);
+
 /*
  * [Internal] stack support
  */
@@ -861,6 +863,8 @@ pthread_init(void)
 	thread = (pthread_t)STACK_SELF(new_stack);
 	_pthread_create(thread, attrs, mach_thread_self());
 	thread->detached = _PTHREAD_CREATE_PARENT;
+	/* Initialize MIG reply port support for multi-threaded mode */
+	mig_init((void *)thread);
 	return (new_stack);
 }
 

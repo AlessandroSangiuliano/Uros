@@ -13,13 +13,16 @@
  */
 
 #include "flipc2_bench.h"
+
+/* See flipc2_bench_inter.c — reset in child tasks */
+extern int _mig_multithreaded;
 #include <mach.h>
 #include <mach/mach_port.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_interface.h>
 #include <mach/thread_switch.h>
 #include <mach/i386/thread_status.h>
-#include <cthreads.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -132,7 +135,7 @@ bench_flipc2_bufgroup_rpc(const char *label, int data_size, int iters)
     flipc2_bufgroup_t           bg;
     flipc2_return_t             ret;
     struct flipc2_bg_echo_args  args;
-    cthread_t                   ct;
+    pthread_t                   ct;
     struct flipc2_desc          *d;
     tvalspec_t                  t0, t1;
     uint64_t                    offset;
@@ -160,7 +163,7 @@ bench_flipc2_bufgroup_rpc(const char *label, int data_size, int iters)
     args.running   = 1;
     args.data_size = data_size;
 
-    ct = cthread_fork((cthread_fn_t)flipc2_bg_echo_thread, (void *)&args);
+    pthread_create(&ct, NULL, (void *(*)(void *))flipc2_bg_echo_thread, (void *)&args);
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
 
     /* Warmup */
@@ -216,7 +219,7 @@ bench_flipc2_bufgroup_rpc(const char *label, int data_size, int iters)
         flipc2_produce_commit(pair.fwd_ch);
     }
     semaphore_signal(pair.fwd_ch->sem_port);
-    cthread_join(ct);
+    pthread_join(ct, NULL);
 
     flipc2_bufgroup_destroy(bg);
     flipc2_pair_destroy(&pair);
@@ -306,6 +309,13 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
         flipc2_channel_destroy(rev_ch);
         flipc2_channel_destroy(fwd_ch);
         return;
+    }
+
+    /* Reset _mig_multithreaded in child (see flipc2_bench_inter.c) */
+    {
+        int zero = 0;
+        vm_write(child_task, (vm_address_t)&_mig_multithreaded,
+                 (vm_address_t)&zero, sizeof(zero));
     }
 
     /* Share channels via vm_remap */
@@ -430,10 +440,10 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
 
     /*
-     * Parent uses spin-wait for rev channel because the child
-     * cannot call semaphore_signal (it is a MIG stub and the
-     * child has no cthread runtime).  On single-CPU this is fine:
-     * the RPC pattern means producer and consumer alternate rapidly.
+     * Both parent and child use semaphore-based wait/signal.
+     * The child can use MIG stubs because the parent resets
+     * _mig_multithreaded=0 via vm_write, so mig_get_reply_port
+     * falls back to the global reply port.
      */
 
     /* Warmup */
@@ -451,9 +461,7 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
 
         flipc2_produce_commit(fwd_ch);
 
-        /* Spin-wait for child reply with yield (no semaphore fallback) */
-        while (rev_ch->hdr->prod_tail == rev_ch->hdr->cons_head)
-            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
+        flipc2_consume_wait(rev_ch, FLIPC2_BENCH_SPIN);
         flipc2_consume_release(rev_ch);
     }
 
@@ -474,7 +482,7 @@ bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters)
         flipc2_produce_commit(fwd_ch);
 
         /* Spin-wait for child reply with yield */
-        while (rev_ch->hdr->prod_tail == rev_ch->hdr->cons_head)
+        while (*rev_ch->prod_tail == *rev_ch->cons_head)
             thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
         flipc2_consume_release(rev_ch);
     }

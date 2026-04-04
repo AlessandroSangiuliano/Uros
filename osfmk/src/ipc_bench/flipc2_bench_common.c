@@ -162,7 +162,7 @@ flipc2_echo_thread(void *arg)
  */
 void
 flipc2_stop_echo(struct flipc2_echo_args *args, flipc2_channel_t fwd_ch,
-                 cthread_t ct)
+                 pthread_t ct)
 {
     struct flipc2_desc *d;
 
@@ -180,5 +180,5 @@ flipc2_stop_echo(struct flipc2_echo_args *args, flipc2_channel_t fwd_ch,
     }
     semaphore_signal(fwd_ch->sem_port);
 
-    cthread_join(ct);
+    pthread_join(ct, NULL);
 }

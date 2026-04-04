@@ -17,7 +17,7 @@ bench_flipc2_rpc(const char *label, int data_size, int iters)
 {
     struct flipc2_pair p;
     struct flipc2_echo_args echo_args;
-    cthread_t           echo_ct;
+    pthread_t           echo_ct;
     struct flipc2_desc  *d;
     tvalspec_t          t0, t1;
     uint64_t            data_off = 0;
@@ -30,7 +30,7 @@ bench_flipc2_rpc(const char *label, int data_size, int iters)
     echo_args.send_ch  = p.rev_peer;
     echo_args.running  = 1;
     echo_args.data_size = data_size;
-    echo_ct = cthread_fork(flipc2_echo_thread, &echo_args);
+    pthread_create(&echo_ct, NULL, flipc2_echo_thread, &echo_args);
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
 
     /* Warmup */
@@ -91,7 +91,7 @@ bench_flipc2_isolated_rpc(const char *label, int data_size, int iters)
 {
     struct flipc2_pair p;
     struct flipc2_echo_args echo_args;
-    cthread_t           echo_ct;
+    pthread_t           echo_ct;
     struct flipc2_desc  *d;
     tvalspec_t          t0, t1;
     uint64_t            data_off = 0;
@@ -104,7 +104,7 @@ bench_flipc2_isolated_rpc(const char *label, int data_size, int iters)
     echo_args.send_ch  = p.rev_peer;
     echo_args.running  = 1;
     echo_args.data_size = data_size;
-    echo_ct = cthread_fork(flipc2_echo_thread, &echo_args);
+    pthread_create(&echo_ct, NULL, flipc2_echo_thread, &echo_args);
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
 
     /* Warmup */

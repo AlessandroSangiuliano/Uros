@@ -69,13 +69,11 @@
 #include <device/device.h>
 
 /*
- * Override the cthread stack size for bootstrap server threads.
- * probe_stack() may see only a small initial stack (the thread was created
- * by the kernel via thread_create/thread_bootstrap_return and only the top
- * page is touched before cthread_init runs).  MIG stubs such as
- * device_set_status allocate ~4 KB of local vars; give every cthread 1 MB.
+ * Override the pthread stack size for bootstrap server threads.
+ * MIG stubs such as device_set_status allocate ~4 KB of local vars;
+ * give every thread 1 MB.
  */
-vm_size_t cthread_stack_size = 1024 * 1024;
+int _pthread_stack_size = 1024 * 1024;
 
 #if	PARAGON860
 mach_port_t	bootstrap_root_device_port;	/* local name */
@@ -174,8 +172,8 @@ boolean_t       collocation_prohibit = FALSE;
 /*
  * I/O console synchronization
  */
-struct mutex		io_mutex;
-struct condition	io_condition;
+pthread_mutex_t		io_mutex;
+pthread_cond_t		io_condition;
 boolean_t		io_in_progress;
 
 /*
@@ -204,16 +202,10 @@ main(int argc, char **argv)
 	struct file		f;
 
 	/*
-	 * Initialize current cthread
-	 */
-	cthread_set_name(cthread_self(), "bootstrap_server");
-	cthread_wire();
-
-	/*
 	 * Initialize synchronization
 	 */
-	condition_init(&io_condition);
-	mutex_init(&io_mutex);
+	pthread_cond_init(&io_condition, NULL);
+	pthread_mutex_init(&io_mutex, NULL);
 
 	/*
 	 * Get master host and device ports
@@ -436,7 +428,12 @@ main(int argc, char **argv)
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: started\n", data_name);
 	    BOOTSTRAP_IO_UNLOCK();
-	    cthread_detach(cthread_fork((cthread_fn_t)data_device_loop, 0));
+	    {
+		pthread_t data_th;
+		pthread_create(&data_th, NULL,
+			       (void *(*)(void *))data_device_loop, (void *)0);
+		pthread_detach(data_th);
+	    }
 	}
 
 	/*
@@ -1283,12 +1280,6 @@ data_device_loop(void)
     mach_port_t device_port;
 
     /*
-     * Initialize current cthread
-     */
-    cthread_set_name(cthread_self(), "data_request");
-    cthread_wire();
-
-    /*
      * Loop through all data requests
      */
     local_addr = (io_buf_ptr_t)0;
@@ -1311,14 +1302,14 @@ data_device_loop(void)
 	    printf("%s: '/dev/data_device' not configured (fatal)\n",
 		   data_name);
 	    BOOTSTRAP_IO_UNLOCK();
-	    cthread_exit(0);
+	    pthread_exit(0);
 	}
 	if (kr != KERN_SUCCESS) {
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: '/dev/data_device' open returned %d (fatal)\n",
 		   data_name, kr);
 	    BOOTSTRAP_IO_UNLOCK();
-	    cthread_exit(0);
+	    pthread_exit(0);
 	}
 
 	/*
@@ -1352,7 +1343,7 @@ data_device_loop(void)
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: device_read returned %d (fatal)\n", data_name, kr);
 	    BOOTSTRAP_IO_UNLOCK();
-	    cthread_exit(0);
+	    pthread_exit(0);
 	}
 
 	/*
@@ -1450,7 +1441,7 @@ data_device_loop(void)
     printf("%s: device_close returned %d (fatal)\n",
 	   data_name, kr);
     BOOTSTRAP_IO_UNLOCK();
-    cthread_exit(0);
+    pthread_exit(0);
 }
 
 /*

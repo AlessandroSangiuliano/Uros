@@ -68,6 +68,13 @@ bench_flipc2_run(mach_port_t clock_port)
     printf("\n--- FLIPC2 game simulation (INTER-TASK, vm_remap) ---\n");
     bench_game_mixed_frame_inter();
 
+    /* --- Isolated channel RPC (per-role page protections) --- */
+    printf("\n--- FLIPC2 isolated channel RPC ---\n");
+    bench_flipc2_isolated_rpc("null RPC (isolated intra)",    0, FLIPC2_BENCH_ITERS);
+    bench_flipc2_isolated_rpc("128B RPC (isolated intra)",  128, FLIPC2_BENCH_ITERS);
+    bench_flipc2_isolated_inter_rpc("null RPC (isolated inter)",    0, FLIPC2_BENCH_ITERS);
+    bench_flipc2_isolated_inter_rpc("128B RPC (isolated inter)",  128, FLIPC2_BENCH_ITERS);
+
     /* --- Endpoint benchmarks --- */
     printf("\n--- FLIPC2 endpoint benchmarks ---\n");
     bench_flipc2_endpoint_setup();

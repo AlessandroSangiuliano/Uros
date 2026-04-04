@@ -271,18 +271,18 @@
 #include "default_pager_internal.h"
 
 char	my_name[] = "(default pager): ";
-struct mutex	dprintf_lock;
+pthread_mutex_t	dprintf_lock;
 #if	DEFAULT_PAGER_DEBUG
 int	debug_mask = 0;
 #endif	/* DEFAULT_PAGER_DEBUG */
 
 /*
  * Use 16 Kbyte stacks instead of the default 64K.
- * Use 4 Kbyte waiting stacks instead of the default 8K.
  */
+int	_pthread_stack_size = 16 * 1024;
 
-vm_size_t	cthread_stack_size = 16 *1024;
-extern vm_size_t cthread_wait_stack_size;
+/* Thread-specific key for default_pager_thread_t pointer */
+pthread_key_t	dpt_key;
 
 int		vm_page_mask;
 int		vm_page_shift;
@@ -339,7 +339,7 @@ dp_thread_id(void)
 {
 	default_pager_thread_t	*dpt;
 
-	dpt = (default_pager_thread_t *) cthread_data(cthread_self());
+	dpt = (default_pager_thread_t *) pthread_getspecific(dpt_key);
 	if (dpt != NULL)
 		return dpt->dpt_id;
 	else
@@ -543,7 +543,7 @@ default_pager_thread_privileges(void)
 	 * Set thread privileges.
 	 */
 
-	cthread_wire();		/* attach kernel thread to cthread */
+	/* pthreads are always 1:1 with kernel threads */
 	wire_thread();		/* grab a kernel stack and memory allocation
 				   privileges */
 
@@ -560,7 +560,7 @@ default_pager_thread(
 	mach_msg_options_t	server_options;
 
 	dpt = (default_pager_thread_t *)arg;
-	cthread_set_data(cthread_self(), (char *) dpt);
+	pthread_setspecific(dpt_key, (void *) dpt);
 
 	/*
 	 * Threads handling external objects cannot have
@@ -614,8 +614,9 @@ start_default_pager_thread(
 	wire_memory(dpt->dpt_buffer, vm_page_size,
 		    VM_PROT_READ | VM_PROT_WRITE);
 
-	dpt->dpt_thread = cthread_fork((cthread_fn_t) default_pager_thread,
-				       (void *) dpt);
+	pthread_create(&dpt->dpt_thread, NULL,
+		       (void *(*)(void *)) default_pager_thread,
+		       (void *) dpt);
 	return dpt;
 }
 
@@ -831,12 +832,12 @@ default_pager(void)
 
 	/* Setup my thread structure.  */
 	id = 0;
-	dpt.dpt_thread = cthread_self();
+	dpt.dpt_thread = pthread_self();
 	dpt.dpt_buffer = 0;
 	dpt.dpt_internal = FALSE;
 	dpt.dpt_id = id++;
 	dpt.dpt_initialized_p = TRUE;
-	cthread_set_data(cthread_self(), (char *) &dpt);
+	pthread_setspecific(dpt_key, (void *) &dpt);
 	dpt_array[0] = &dpt;
 
 	/*
@@ -857,7 +858,7 @@ default_pager(void)
 	/* Is everybody ready?  */
 	for (i = 0; i < id; i++)
 	    while (!dpt_array[i])
-		cthread_yield();
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 0);
 
 	/* Tell the bootstrap process to go ahead.  */
 	bootstrap_completed(bootstrap_port, mach_task_self());
@@ -975,10 +976,8 @@ main(
 	static char		here[] = "main";
 	int			need_dp_init = 1;
 
-	/*
-	 * Use 4Kbyte cthread wait stacks.
-	 */
-	cthread_wait_stack_size = 4 * 1024;
+	/* Initialize thread-specific key for dpt pointer */
+	pthread_key_create(&dpt_key, NULL);
 
 	if (bootstrap_ports(bootstrap_port, &default_pager_host_port,
 			    &master_device_port, &root_ledger_wired,

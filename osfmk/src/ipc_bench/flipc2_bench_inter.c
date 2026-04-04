@@ -26,6 +26,14 @@
 #include <stdio.h>
 #include <string.h>
 
+/*
+ * libpthreads mig_support.c: non-static so we can vm_write it to 0 in
+ * child tasks.  Without this, the child inherits _mig_multithreaded=1
+ * and pthread_self() returns garbage (no pthread control block on the
+ * child's raw stack), crashing in mig_get_reply_port.
+ */
+extern int _mig_multithreaded;
+
 /* ===================================================================
  * Shared child args (inherited via task_create + patched via vm_write)
  * =================================================================== */
@@ -34,7 +42,7 @@ volatile struct flipc2_child_args flipc2_child_args_storage;
 
 /* ===================================================================
  * Child echo: minimal FLIPC v2 loop using direct struct access.
- * No vm_allocate, no MIG, no cthreads — only raw memory + semaphore.
+ * No vm_allocate, no MIG, no pthreads — only raw memory + semaphore.
  * =================================================================== */
 
 void __attribute__((noreturn, used))
@@ -193,9 +201,9 @@ flipc2_child_batch_echo_entry(void)
  * frees the slot, sends null reply.
  * No library API — direct struct access + CAS for bufgroup_free.
  *
- * NOTE: uses pure spin-wait instead of semaphore_wait/signal because
- * semaphore_wait is a MIG stub that calls mig_get_reply_port(), and
- * the child task has no cthread runtime.  For a benchmark this is fine.
+ * NOTE: the child task has no pthread runtime, but the parent resets
+ * _mig_multithreaded=0 via vm_write before starting the child, so
+ * MIG stubs (semaphore_wait/signal) use the global reply port.
  * =================================================================== */
 
 void __attribute__((noreturn, used))
@@ -208,13 +216,19 @@ flipc2_child_bg_echo_entry(void)
         (volatile uint32_t *)(fwd_base + args->prod_tail_off);
     volatile uint32_t *fwd_cons_head =
         (volatile uint32_t *)(fwd_base + args->cons_head_off);
+    volatile uint32_t *fwd_cons_sleeping =
+        (volatile uint32_t *)(fwd_base + args->cons_head_off + 4);
     volatile uint32_t *rev_prod_tail =
         (volatile uint32_t *)(rev_base + args->prod_tail_off);
+    volatile uint32_t *rev_cons_sleeping =
+        (volatile uint32_t *)(rev_base + args->cons_head_off + 4);
     struct flipc2_desc *fwd_ring =
         (struct flipc2_desc *)(fwd_base + args->ring_offset);
     struct flipc2_desc *rev_ring =
         (struct flipc2_desc *)(rev_base + args->ring_offset);
     uint32_t mask = args->ring_mask;
+    mach_port_t fwd_sem = args->fwd_sem;
+    mach_port_t rev_sem = args->rev_sem;
 
     /* Buffer group pointers */
     struct flipc2_bufgroup_header *bg_hdr =
@@ -226,10 +240,17 @@ flipc2_child_bg_echo_entry(void)
     for (;;) {
         uint32_t head = *fwd_cons_head;
 
-        /* Pure spin-wait with yield (no semaphore — child has no cthread runtime) */
-        while (*fwd_prod_tail == head)
-            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
-
+        /* Adaptive wait: set sleeping flag, re-check, block */
+        while (*fwd_prod_tail == head) {
+            *fwd_cons_sleeping = 1;
+            FLIPC2_WRITE_FENCE();
+            if (*fwd_prod_tail != head) {
+                *fwd_cons_sleeping = 0;
+                break;
+            }
+            semaphore_wait(fwd_sem);
+            *fwd_cons_sleeping = 0;
+        }
         struct flipc2_desc *d = &fwd_ring[head & mask];
 
         /*
@@ -278,6 +299,10 @@ flipc2_child_bg_echo_entry(void)
 
         FLIPC2_WRITE_FENCE();
         *rev_prod_tail = tail + 1;
+
+        FLIPC2_WRITE_FENCE();
+        if (*rev_cons_sleeping)
+            semaphore_signal(rev_sem);
     }
 }
 
@@ -322,6 +347,22 @@ flipc2_inter_setup(flipc2_channel_t fwd_ch, flipc2_channel_t rev_ch,
     if (kr) {
         printf("  %s: task_create failed %d\n", label, kr);
         return -1;
+    }
+
+    /*
+     * The child inherits _mig_multithreaded=1 from the parent.
+     * Its raw thread has no pthread control block, so pthread_self()
+     * would return garbage and crash in mig_get_reply_port().
+     * Reset to 0 so MIG stubs use the global reply port instead.
+     */
+    {
+        int zero = 0;
+        kr = vm_write(child_task,
+                      (vm_address_t)&_mig_multithreaded,
+                      (vm_address_t)&zero, sizeof(zero));
+        if (kr)
+            printf("  %s: vm_write _mig_multithreaded failed %d\n",
+                   label, kr);
     }
 
     /* Share channels as true shared memory via library API */
@@ -673,6 +714,13 @@ bench_flipc2_isolated_inter_rpc(const char *label, int data_size, int iters)
         flipc2_channel_destroy(rev_ch);
         flipc2_channel_destroy(fwd_ch);
         return;
+    }
+
+    /* Reset _mig_multithreaded in child (see flipc2_inter_setup) */
+    {
+        int zero = 0;
+        vm_write(child_task, (vm_address_t)&_mig_multithreaded,
+                 (vm_address_t)&zero, sizeof(zero));
     }
 
     /* Share with per-role page protections:

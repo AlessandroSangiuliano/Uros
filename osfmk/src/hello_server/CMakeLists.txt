@@ -31,9 +31,12 @@ target_compile_definitions(hello_server_server PRIVATE
 )
 
 target_include_directories(hello_server_server PRIVATE
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
+  # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/powermac/include
@@ -47,7 +50,7 @@ target_include_directories(hello_server_server PRIVATE
 # Same circular dependency resolution as bootstrap: --start-group/--end-group.
 target_link_libraries(hello_server_server PRIVATE
   -Wl,--start-group
-  libcthreads
+  libpthreads
   libmach
   libsa_mach
   -Wl,--end-group
