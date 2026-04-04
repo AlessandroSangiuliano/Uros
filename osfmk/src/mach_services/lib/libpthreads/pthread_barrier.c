@@ -109,15 +109,19 @@ pthread_barrier_wait(pthread_barrier_t *barrier)
 	if (barrier->waiting == barrier->count) {
 		/* Last thread: release everyone */
 		barrier->waiting = 0;
-		barrier->phase = !my_phase;	/* Toggle for safe reuse */
+		__atomic_store_n(&barrier->phase, !my_phase,
+				 __ATOMIC_RELEASE);
 		UNLOCK(barrier->lock);
 		/* Wake all (count - 1) blocked threads */
 		MACH_CALL(semaphore_signal_all(barrier->sem), kr);
 		return (PTHREAD_BARRIER_SERIAL_THREAD);
 	}
 
-	/* Not last: block until phase changes */
+	/* Not last: block until phase changes (spurious-wakeup safe) */
 	UNLOCK(barrier->lock);
-	MACH_CALL(semaphore_wait(barrier->sem), kr);
+	do {
+		MACH_CALL(semaphore_wait(barrier->sem), kr);
+	} while (__atomic_load_n(&barrier->phase, __ATOMIC_ACQUIRE)
+		 == my_phase);
 	return (ESUCCESS);
 }
