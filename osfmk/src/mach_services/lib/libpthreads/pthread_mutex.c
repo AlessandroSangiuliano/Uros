@@ -254,7 +254,8 @@ pthread_mutex_getprioceiling(const pthread_mutex_t *mutex,
 {
 	if (mutex->sig == _PTHREAD_MUTEX_SIG)
 	{
-		*prioceiling = mutex->prioceiling;
+		if (prioceiling != (int *)NULL)
+			*prioceiling = mutex->prioceiling;
 		return (ESUCCESS);
 	} else
 	{
@@ -276,7 +277,8 @@ pthread_mutex_setprioceiling(pthread_mutex_t *mutex,
 		if ((prioceiling >= -999) &&
 		    (prioceiling <= 999))
 		{
-			*old_prioceiling = mutex->prioceiling;
+			if (old_prioceiling != (int *)NULL)
+				*old_prioceiling = mutex->prioceiling;
 			mutex->prioceiling = prioceiling;
 			return (ESUCCESS);
 		} else 
@@ -309,7 +311,8 @@ pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *attr,
 {
 	if (attr->sig == _PTHREAD_MUTEX_ATTR_SIG)
 	{
-		*prioceiling = attr->prioceiling;
+		if (prioceiling != (int *)NULL)
+			*prioceiling = attr->prioceiling;
 		return (ESUCCESS);
 	} else
 	{
@@ -327,7 +330,8 @@ pthread_mutexattr_getprotocol(const pthread_mutexattr_t *attr,
 {
 	if (attr->sig == _PTHREAD_MUTEX_ATTR_SIG)
 	{
-		*protocol = attr->protocol;
+		if (protocol != (int *)NULL)
+			*protocol = attr->protocol;
 		return (ESUCCESS);
 	} else
 	{
