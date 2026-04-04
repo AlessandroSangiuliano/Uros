@@ -731,19 +731,46 @@ pthread_self(void)
 
 /*
  * Execute a function exactly one time in a thread-safe fashion.
+ *
+ * Three-state protocol on sig (no spinlock held during init_routine):
+ *   _PTHREAD_ONCE_SIG_init  →  not yet started
+ *   _PTHREAD_NO_SIG         →  in progress (one thread running init)
+ *   _PTHREAD_ONCE_SIG       →  done
+ *
+ * CAS(init→0): winner runs init_routine, then publishes SIG.
+ * Losers spin until sig == _PTHREAD_ONCE_SIG.
+ * Reentrant call from init_routine sees in-progress and returns
+ * immediately (POSIX says behavior is undefined, but we avoid deadlock).
  */
-int       
-pthread_once(pthread_once_t *once_control, 
+int
+pthread_once(pthread_once_t *once_control,
 	     void (*init_routine)(void))
 {
-	LOCK(once_control->lock);
-	if (once_control->sig == _PTHREAD_ONCE_SIG_init)
+	long state = __atomic_load_n(&once_control->sig, __ATOMIC_ACQUIRE);
+	if (state == _PTHREAD_ONCE_SIG)
+		return (ESUCCESS);
+
+	if (state == _PTHREAD_ONCE_SIG_init)
 	{
-		(*init_routine)();
-		once_control->sig = _PTHREAD_ONCE_SIG;
+		long expected = _PTHREAD_ONCE_SIG_init;
+		if (__atomic_compare_exchange_n(&once_control->sig, &expected,
+						_PTHREAD_NO_SIG, 0,
+						__ATOMIC_ACQUIRE,
+						__ATOMIC_ACQUIRE))
+		{
+			(*init_routine)();
+			__atomic_store_n(&once_control->sig,
+					 _PTHREAD_ONCE_SIG,
+					 __ATOMIC_RELEASE);
+			return (ESUCCESS);
+		}
 	}
-	UNLOCK(once_control->lock);
-	return (ESUCCESS);  /* Spec defines no possible errors! */
+
+	/* Another thread is running init, or reentrant — spin until done */
+	while (__atomic_load_n(&once_control->sig, __ATOMIC_ACQUIRE)
+	       != _PTHREAD_ONCE_SIG)
+		;
+	return (ESUCCESS);
 }
 
 /*
