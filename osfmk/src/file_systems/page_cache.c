@@ -140,8 +140,7 @@ page_cache_create(unsigned int max_entries,
 		return NULL;
 
 	memset(pc, 0, sizeof(*pc));
-	mutex_init(&pc->pc_lock);
-	mutex_set_name(&pc->pc_lock, "page_cache");
+	pthread_mutex_init(&pc->pc_lock, NULL);
 	pc->pc_max_entries = max_entries;
 	pc->pc_writeback = writeback;
 	pc->pc_writeback_ctx = ctx;
@@ -206,7 +205,7 @@ page_cache_lookup(struct page_cache *pc, daddr_t block,
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			/* Hit — move to MRU */
@@ -215,13 +214,13 @@ page_cache_lookup(struct page_cache *pc, daddr_t block,
 			*data_out = e->pc_data;
 			*size_out = e->pc_size;
 			pc->pc_hits++;
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return 0;
 		}
 	}
 
 	pc->pc_misses++;
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 	return -1;
 }
 
@@ -233,14 +232,14 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	struct page_cache_entry *e;
 	vm_offset_t buf;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 
 	/* Check if already cached (update data if so) */
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			lru_remove(e);
 			lru_insert_mru(pc, e);
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return;
 		}
 	}
@@ -253,7 +252,7 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	} else {
 		e = evict_lru(pc);
 		if (!e) {
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return;
 		}
 	}
@@ -269,7 +268,7 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 			/* Return entry to free list */
 			e->pc_hash_next = pc->pc_free;
 			pc->pc_free = e;
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return;
 		}
 		memcpy((void *)buf, (void *)data, size);
@@ -289,7 +288,7 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	lru_insert_mru(pc, e);
 	pc->pc_count++;
 
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 }
 
 void
@@ -298,7 +297,7 @@ page_cache_invalidate(struct page_cache *pc, daddr_t block)
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			entry_writeback(pc, e);
@@ -310,11 +309,11 @@ page_cache_invalidate(struct page_cache *pc, daddr_t block)
 			e->pc_hash_next = pc->pc_free;
 			pc->pc_free = e;
 			pc->pc_count--;
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return;
 		}
 	}
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 }
 
 void
@@ -322,7 +321,7 @@ page_cache_flush(struct page_cache *pc)
 {
 	unsigned int i;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 	for (i = 0; i < pc->pc_max_entries; i++) {
 		struct page_cache_entry *e = &pc->pc_pool[i];
 		if (e->pc_data && e->pc_block != (daddr_t)-1) {
@@ -336,7 +335,7 @@ page_cache_flush(struct page_cache *pc)
 		}
 	}
 	pc->pc_count = 0;
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 }
 
 int
@@ -345,15 +344,15 @@ page_cache_mark_dirty(struct page_cache *pc, daddr_t block)
 	unsigned int h = PC_HASH(block);
 	struct page_cache_entry *e;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
 		if (e->pc_block == block) {
 			e->pc_dirty = 1;
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return 0;
 		}
 	}
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 	return -1;
 }
 
@@ -365,7 +364,7 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 	struct page_cache_entry *e;
 	vm_offset_t buf;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 
 	/* If block is already cached, update in place */
 	for (e = pc->pc_hash[h]; e; e = e->pc_hash_next) {
@@ -380,7 +379,7 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 				entry_free_data(pc, e);
 				if (vm_allocate(mach_task_self(), &buf,
 						size, TRUE) != KERN_SUCCESS) {
-					mutex_unlock(&pc->pc_lock);
+					pthread_mutex_unlock(&pc->pc_lock);
 					return;
 				}
 				memcpy((void *)buf, (void *)data, size);
@@ -390,12 +389,12 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 			e->pc_dirty = 1;
 			lru_remove(e);
 			lru_insert_mru(pc, e);
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return;
 		}
 	}
 
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 
 	/* Not cached — insert as new dirty entry
 	 * (page_cache_insert and page_cache_mark_dirty acquire their own lock)
@@ -441,7 +440,7 @@ mark_range_clean(struct page_cache *pc, daddr_t first, int count)
 {
 	int i;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 	for (i = 0; i < count; i++) {
 		unsigned int h = PC_HASH(first + i);
 		struct page_cache_entry *ce;
@@ -453,7 +452,7 @@ mark_range_clean(struct page_cache *pc, daddr_t first, int count)
 			}
 		}
 	}
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 }
 
 int
@@ -467,7 +466,7 @@ page_cache_sync(struct page_cache *pc)
 	do {
 		/* Phase 1: collect dirty entries under lock */
 		n = 0;
-		mutex_lock(&pc->pc_lock);
+		pthread_mutex_lock(&pc->pc_lock);
 
 		e = start ? start : pc->pc_lru_tail.pc_lru_prev;
 		while (e != &pc->pc_lru_head && n < SYNC_BATCH) {
@@ -483,7 +482,7 @@ page_cache_sync(struct page_cache *pc)
 		/* Remember where to resume (NULL = done) */
 		start = (e != &pc->pc_lru_head) ? e : NULL;
 
-		mutex_unlock(&pc->pc_lock);
+		pthread_mutex_unlock(&pc->pc_lock);
 
 		if (n == 0)
 			break;
@@ -632,7 +631,7 @@ page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
 	if (!pc->pc_dma_pool)
 		return NULL;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 
 	/* Check if already cached */
 	h = PC_HASH(block);
@@ -641,7 +640,7 @@ page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
 			lru_remove(e);
 			lru_insert_mru(pc, e);
 			pc->pc_hits++;
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return e;
 		}
 	}
@@ -656,7 +655,7 @@ page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
 	} else {
 		e = evict_lru(pc);
 		if (!e) {
-			mutex_unlock(&pc->pc_lock);
+			pthread_mutex_unlock(&pc->pc_lock);
 			return NULL;
 		}
 	}
@@ -671,7 +670,7 @@ page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
 	lru_insert_mru(pc, e);
 	pc->pc_count++;
 
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 	return e;
 }
 
@@ -681,13 +680,13 @@ page_cache_print_stats(struct page_cache *pc)
 	unsigned int count, hits, misses, evictions, writebacks;
 	unsigned int total, hit_pct;
 
-	mutex_lock(&pc->pc_lock);
+	pthread_mutex_lock(&pc->pc_lock);
 	count = pc->pc_count;
 	hits = pc->pc_hits;
 	misses = pc->pc_misses;
 	evictions = pc->pc_evictions;
 	writebacks = pc->pc_writebacks;
-	mutex_unlock(&pc->pc_lock);
+	pthread_mutex_unlock(&pc->pc_lock);
 
 	total = hits + misses;
 	hit_pct = total ? (hits * 100) / total : 0;

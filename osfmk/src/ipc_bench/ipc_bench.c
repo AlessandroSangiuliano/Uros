@@ -48,7 +48,7 @@
 #include <mach/thread_switch.h>
 #include <mach/i386/thread_status.h>
 #include <sa_mach.h>
-#include <cthreads.h>
+#include <pthread.h>
 #include <device/device.h>
 #include <device/device_types.h>
 #include <stdio.h>
@@ -277,9 +277,13 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 
     reply_port = mach_reply_port();
 
-    /* Spawn echo cthread */
-    cthread_detach(cthread_fork(echo_thread_func,
-				(void *)(unsigned long)echo_port));
+    /* Spawn echo thread */
+    {
+	pthread_t echo_th;
+	pthread_create(&echo_th, NULL, echo_thread_func,
+		       (void *)(unsigned long)echo_port);
+	pthread_detach(echo_th);
+    }
 
     /* Let echo thread start up */
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
@@ -632,8 +636,12 @@ bench_slow_receive(const char *label, int send_size, int iters)
 
     reply_port = mach_reply_port();
 
-    cthread_detach(cthread_fork(slow_echo_thread_func,
-				(void *)(unsigned long)echo_port));
+    {
+	pthread_t echo_th;
+	pthread_create(&echo_th, NULL, slow_echo_thread_func,
+		       (void *)(unsigned long)echo_port);
+	pthread_detach(echo_th);
+    }
 
     /* Let echo thread start and block for the first time */
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
@@ -945,8 +953,12 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 
     reply_port = mach_reply_port();
 
-    cthread_detach(cthread_fork(echo_thread_func,
-				(void *)(unsigned long)echo_port));
+    {
+	pthread_t echo_th;
+	pthread_create(&echo_th, NULL, echo_thread_func,
+		       (void *)(unsigned long)echo_port);
+	pthread_detach(echo_th);
+    }
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
 
     for (i = 0; i < WARMUP_ITERS; i++) {
@@ -1222,8 +1234,12 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
     if (kr) { printf("  %s: insert right failed %d\n", label, kr); return; }
     reply_port = mach_reply_port();
 
-    cthread_detach(cthread_fork(ool_echo_thread_func,
-				(void *)(unsigned long)echo_port));
+    {
+	pthread_t echo_th;
+	pthread_create(&echo_th, NULL, ool_echo_thread_func,
+		       (void *)(unsigned long)echo_port);
+	pthread_detach(echo_th);
+    }
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
 
     /* Warmup */

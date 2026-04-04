@@ -63,6 +63,9 @@ target_include_directories(libsa_fs PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/minixfs
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
+  # pthread.h and machine/pthread_impl.h (before system includes)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Mach services (mach.h, sa_mach.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # sa_mach standalone types (<types.h> -> sa_mach/types.h)

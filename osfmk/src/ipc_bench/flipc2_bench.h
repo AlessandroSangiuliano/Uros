@@ -26,7 +26,7 @@
 #include <flipc2.h>
 #include <mach/port.h>
 #include <mach/clock_types.h>
-#include <cthreads.h>
+#include <pthread.h>
 
 /* ------------------------------------------------------------------ */
 /*  Configuration                                                      */
@@ -89,7 +89,7 @@ struct flipc2_echo_args {
 
 void *flipc2_echo_thread(void *arg);
 void  flipc2_stop_echo(struct flipc2_echo_args *args, flipc2_channel_t fwd_ch,
-                        cthread_t ct);
+                        pthread_t ct);
 
 /* ------------------------------------------------------------------ */
 /*  Inter-task helpers (flipc2_bench_inter.c)                          */

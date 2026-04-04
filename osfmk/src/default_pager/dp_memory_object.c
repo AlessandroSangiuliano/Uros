@@ -112,7 +112,7 @@ vs_async_wait(
 
 	ASSERT(vs->vs_async_pending >= 0);
 	while (vs->vs_async_pending > 0) {
-		condition_wait(&vs->vs_waiting_async, &vs->vs_lock);
+		pthread_cond_wait(&vs->vs_waiting_async, &vs->vs_lock);
 	}
 	ASSERT(vs->vs_async_pending == 0);
 }
@@ -142,7 +142,7 @@ vs_lock(
 
 	while (vs->vs_seqno != seqno) {
 		default_pager_wait_seqno++;
-		condition_wait(&vs->vs_waiting_seqno, &vs->vs_lock);
+		pthread_cond_wait(&vs->vs_waiting_seqno, &vs->vs_lock);
 	}
 }
 
@@ -154,7 +154,7 @@ vs_unlock(vstruct_t vs)
 {
 	vs->vs_seqno++;
 	VS_UNLOCK(vs);
-	condition_broadcast(&vs->vs_waiting_seqno);
+	pthread_cond_broadcast(&vs->vs_waiting_seqno);
 }
 
 /* 
@@ -176,7 +176,7 @@ vs_wait_for_readers(
 {
 	while (vs->vs_readers != 0) {
 		default_pager_wait_read++;
-		condition_wait(&vs->vs_waiting_read, &vs->vs_lock);
+		pthread_cond_wait(&vs->vs_waiting_read, &vs->vs_lock);
 	}
 }
 
@@ -190,7 +190,7 @@ vs_finish_read(
 	VS_LOCK(vs);
 	if (--vs->vs_readers == 0) {
 		VS_UNLOCK(vs);
-		condition_broadcast(&vs->vs_waiting_read);
+		pthread_cond_broadcast(&vs->vs_waiting_read);
 	} else
 		VS_UNLOCK(vs);
 }
@@ -214,7 +214,7 @@ vs_wait_for_writers(
 {
 	while (vs->vs_writers != 0) {
 		default_pager_wait_write++;
-		condition_wait(&vs->vs_waiting_write, &vs->vs_lock);
+		pthread_cond_wait(&vs->vs_waiting_write, &vs->vs_lock);
 	}
 	vs_async_wait(vs);
 }
@@ -229,7 +229,7 @@ vs_finish_write(
 	VS_LOCK(vs);
 	if (--vs->vs_writers == 0) {
 		VS_UNLOCK(vs);
-		condition_broadcast(&vs->vs_waiting_write);
+		pthread_cond_broadcast(&vs->vs_waiting_write);
 	} else
 		VS_UNLOCK(vs);
 }
@@ -244,7 +244,7 @@ vs_wait_for_refs(
 {
 	while (vs->vs_name_refs == 0) {
 		default_pager_wait_refs++;
-		condition_wait(&vs->vs_waiting_refs, &vs->vs_lock);
+		pthread_cond_wait(&vs->vs_waiting_refs, &vs->vs_lock);
 	}
 }
 
@@ -255,7 +255,7 @@ void
 vs_finish_refs(
 	vstruct_t vs)
 {
-	condition_broadcast(&vs->vs_waiting_refs);
+	pthread_cond_broadcast(&vs->vs_waiting_refs);
 }
 
 #else	/* PARALLEL */

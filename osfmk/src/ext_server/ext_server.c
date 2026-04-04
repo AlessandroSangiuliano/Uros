@@ -50,7 +50,7 @@
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
 
-#include <cthreads.h>
+#include <pthread.h>
 #include <ext2fs/ext2fs.h>
 #include <ext2fs/defs.h>
 #include <file_system.h>
@@ -774,10 +774,10 @@ main(int argc, char **argv)
 
 	/* Start background writeback thread */
 	{
-		cthread_t wb_thread;
-		wb_thread = cthread_fork((cthread_fn_t)writeback_thread, NULL);
-		cthread_detach(wb_thread);
-		cthread_set_name(wb_thread, "writeback");
+		pthread_t wb_thread;
+		pthread_create(&wb_thread, NULL,
+			       (void *(*)(void *))writeback_thread, NULL);
+		pthread_detach(wb_thread);
 		printf("ext2: writeback thread started (%d ms interval)\n",
 		       WRITEBACK_INTERVAL_MS);
 	}

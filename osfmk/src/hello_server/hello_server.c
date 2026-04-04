@@ -39,7 +39,7 @@
 #include <mach/mach_port.h>
 #include <mach/message.h>
 #include <sa_mach.h>
-#include <cthreads.h>
+#include <pthread.h>
 #include <device/device.h>
 #include <device/device_types.h>
 #include <stdio.h>

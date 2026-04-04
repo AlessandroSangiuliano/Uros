@@ -131,8 +131,11 @@ target_include_directories(default_pager_server PRIVATE
   ${MIG_OUT}
   # Generated includes (mach/machine -> i386 symlink, device/device.h)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
+  # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/powermac/include
   # Kernel headers (mach/, device/, i386/)
@@ -143,18 +146,16 @@ target_include_directories(default_pager_server PRIVATE
 
 # Link against Mach userspace libraries.
 # Same circular dependency resolution as bootstrap: --start-group/--end-group.
-# The original Makefile links: -lcthreads -lmach -lsa_mach -lmach
+# The original Makefile links: -lpthreads -lmach -lsa_mach -lmach
 target_link_libraries(default_pager_server PRIVATE
   -Wl,--start-group
-  libcthreads
+  libpthreads
   libmach
   libsa_mach
   -Wl,--end-group
 )
 
 # Linker flags: 32-bit static Mach binary, no host libc.
-# --allow-multiple-definition: cthreads inline functions emitted in every .o
-# that includes cthreads.h (C89 extern inline semantics).
 target_link_options(default_pager_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach

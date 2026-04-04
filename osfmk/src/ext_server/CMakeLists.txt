@@ -128,8 +128,11 @@ target_include_directories(ext_server_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
+  # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, servers/netname.h)
   ${CMAKE_SOURCE_DIR}/export/powermac/include
   # Kernel headers (mach/, device/, i386/)
@@ -144,7 +147,7 @@ target_include_directories(ext_server_bin PRIVATE
 # Link against Mach userspace libraries + filesystem library.
 target_link_libraries(ext_server_bin PRIVATE
   -Wl,--start-group
-  libcthreads
+  libpthreads
   libmach
   libsa_mach
   libsa_fs

@@ -55,7 +55,7 @@
 #ifndef	_DEFAULT_PAGER_INTERNAL_H_
 #define _DEFAULT_PAGER_INTERNAL_H_
 
-#include <cthreads.h>
+#include <pthread.h>
 #include <mach.h>
 #include <sa_mach.h>
 #include <stdio.h>
@@ -120,10 +120,10 @@
 
 extern int norma_mk;		/* is the kernel configured with NORMA ? */
 
-extern struct mutex dprintf_lock;
-#define PRINTF_LOCK_INIT()	mutex_init(&dprintf_lock)
-#define PRINTF_LOCK()		mutex_lock(&dprintf_lock)
-#define PRINTF_UNLOCK()		mutex_unlock(&dprintf_lock)
+extern pthread_mutex_t dprintf_lock;
+#define PRINTF_LOCK_INIT()	pthread_mutex_init(&dprintf_lock, NULL)
+#define PRINTF_LOCK()		pthread_mutex_lock(&dprintf_lock)
+#define PRINTF_UNLOCK()		pthread_mutex_unlock(&dprintf_lock)
 
 #define dprintf(args)							\
 	do {								\
@@ -192,6 +192,7 @@ extern int		vm_page_shift;
 #define	atop(a)	((a)/vm_page_size)
 #define	howmany(a,b)	(((a) + (b) - 1)/(b))
 
+extern pthread_key_t	dpt_key;	/* TSD key for default_pager_thread_t */
 extern mach_port_t	default_pager_host_port;
 extern task_port_t	default_pager_self;
 extern mach_port_t	default_pager_internal_set;
@@ -200,7 +201,7 @@ extern mach_port_t	default_pager_default_port;
 extern mach_port_t	default_pager_default_set;
 
 typedef struct default_pager_thread {
-	cthread_t	dpt_thread;	/* Server thread. */
+	pthread_t	dpt_thread;	/* Server thread. */
 	vm_offset_t	dpt_buffer;	/* Read buffer. */
 	boolean_t	dpt_internal;	/* Do we handle internal objects? */
 	int		dpt_id;		/* thread id for printf */
@@ -259,7 +260,7 @@ struct {
  */
 struct backing_store {
 	queue_chain_t	bs_links;	/* link in backing_store_list */
-	struct mutex	bs_lock;	/* lock for the structure */
+	pthread_mutex_t	bs_lock;	/* lock for the structure */
 	mach_port_t	bs_port;	/* backing store port */
 	int		bs_priority;
 	int		bs_clsize;	/* cluster size in pages */
@@ -276,19 +277,19 @@ typedef struct backing_store 	*backing_store_t;
 #define	BACKING_STORE_NULL	((backing_store_t) 0)
 #define BS_STAT(bs, clause)	VSTATS_ACTION(&(bs)->bs_lock, (clause))
 
-#define BS_LOCK_INIT(bs)	mutex_init(&(bs)->bs_lock)
-#define BS_LOCK(bs)		mutex_lock(&(bs)->bs_lock)
-#define BS_UNLOCK(bs)		mutex_unlock(&(bs)->bs_lock)
+#define BS_LOCK_INIT(bs)	pthread_mutex_init(&(bs)->bs_lock, NULL)
+#define BS_LOCK(bs)		pthread_mutex_lock(&(bs)->bs_lock)
+#define BS_UNLOCK(bs)		pthread_mutex_unlock(&(bs)->bs_lock)
 
 struct backing_store_list_head {
 	queue_head_t	bsl_queue;
-	struct mutex 	bsl_lock;
+	pthread_mutex_t 	bsl_lock;
 };
 extern struct backing_store_list_head	backing_store_list;
 
-#define	BSL_LOCK_INIT()	mutex_init(&backing_store_list.bsl_lock)
-#define BSL_LOCK()	mutex_lock(&backing_store_list.bsl_lock)
-#define BSL_UNLOCK()	mutex_unlock(&backing_store_list.bsl_lock)
+#define	BSL_LOCK_INIT()	pthread_mutex_init(&backing_store_list.bsl_lock, NULL)
+#define BSL_LOCK()	pthread_mutex_lock(&backing_store_list.bsl_lock)
+#define BSL_UNLOCK()	pthread_mutex_unlock(&backing_store_list.bsl_lock)
 
 /*
  * 	Paging segment management.
@@ -310,7 +311,7 @@ struct paging_segment {
 	long		ps_hint;	/* Hint of where to look next. */
 
 	/* bitmap */
-	struct mutex	ps_lock;	/* Lock for contents of struct */
+	pthread_mutex_t	ps_lock;	/* Lock for contents of struct */
 	unsigned char	*ps_bmap;	/* Map of used clusters */
 	
 	/* backing store */
@@ -322,9 +323,9 @@ typedef struct paging_segment *paging_segment_t;
 
 #define PAGING_SEGMENT_NULL	((paging_segment_t) 0)
 
-#define PS_LOCK_INIT(ps)	mutex_init(&(ps)->ps_lock)
-#define PS_LOCK(ps)		mutex_lock(&(ps)->ps_lock)
-#define PS_UNLOCK(ps)		mutex_unlock(&(ps)->ps_lock)
+#define PS_LOCK_INIT(ps)	pthread_mutex_init(&(ps)->ps_lock, NULL)
+#define PS_LOCK(ps)		pthread_mutex_lock(&(ps)->ps_lock)
+#define PS_UNLOCK(ps)		pthread_mutex_unlock(&(ps)->ps_lock)
 
 typedef unsigned int	pseg_index_t;
 
@@ -339,14 +340,14 @@ typedef unsigned int	pseg_index_t;
 
 /* paging segments array */
 extern paging_segment_t	paging_segments[MAX_NUM_PAGING_SEGMENTS];
-extern struct mutex paging_segments_lock;
+extern pthread_mutex_t paging_segments_lock;
 extern int	paging_segment_count;	/* number of active paging segments */
 extern int	paging_segment_max;	/* highest used paging segment index */
 extern int ps_select_array[DEFAULT_PAGER_BACKING_STORE_MAXPRI+1];
 
-#define	PSL_LOCK_INIT()	mutex_init(&paging_segments_lock)
-#define PSL_LOCK()	mutex_lock(&paging_segments_lock)
-#define PSL_UNLOCK()	mutex_unlock(&paging_segments_lock)
+#define	PSL_LOCK_INIT()	pthread_mutex_init(&paging_segments_lock, NULL)
+#define PSL_LOCK()	pthread_mutex_lock(&paging_segments_lock)
+#define PSL_UNLOCK()	pthread_mutex_unlock(&paging_segments_lock)
 
 /*
  * Vstruct manipulation.  The vstruct is the pager's internal
@@ -480,7 +481,7 @@ struct clmap {
  */
 typedef struct vstruct {
 	queue_chain_t	vs_links;	/* Link in pager-port list */
-	struct mutex	vs_lock;	/* Lock for the structure */
+	pthread_mutex_t	vs_lock;	/* Lock for the structure */
 
 	memory_object_t	vs_mem_obj_port; /* Memory object port */
 	mach_port_seqno_t vs_seqno;	/* Pager port sequence number */
@@ -489,11 +490,11 @@ typedef struct vstruct {
 	mach_port_t	vs_object_name;	/* Name port */
 	mach_port_urefs_t vs_name_refs;	/* Name port user-refs */
 
-	struct condition vs_waiting_seqno;/* to wait on seqno */
-	struct condition vs_waiting_read; /* to wait on readers */
-	struct condition vs_waiting_write;/* to wait on writers */
-	struct condition vs_waiting_refs; /* to wait on refs */
-	struct condition vs_waiting_async;/* to wait on async_pending */
+	pthread_cond_t vs_waiting_seqno;/* to wait on seqno */
+	pthread_cond_t vs_waiting_read; /* to wait on readers */
+	pthread_cond_t vs_waiting_write;/* to wait on writers */
+	pthread_cond_t vs_waiting_refs; /* to wait on refs */
+	pthread_cond_t vs_waiting_async;/* to wait on async_pending */
 	unsigned int	vs_readers;	/* Reads in progress */
 	unsigned int	vs_writers;	/* Writes in progress */
 
@@ -503,7 +504,7 @@ typedef struct vstruct {
 	int		vs_size;	/* Object size in clusters */
 	int		vs_indirect:1;	/* Is the map indirect ? */
 	int		vs_async_pending; /* Count of pending async writes */
-	struct mutex	vs_map_lock;	/* to protect map below */
+	pthread_mutex_t	vs_map_lock;	/* to protect map below */
 	union {
 		struct vs_map	*vsu_dmap;	/* Direct map of clusters */
 		struct vs_map	**vsu_imap;	/* Indirect map of clusters */
@@ -516,14 +517,14 @@ typedef struct vstruct {
 
 #define VSTRUCT_NULL	((vstruct_t) 0)
 
-#define VS_LOCK_INIT(vs)	mutex_init(&(vs)->vs_lock)
-#define VS_LOCK(vs)		mutex_lock(&(vs)->vs_lock)
-#define VS_UNLOCK(vs)		mutex_unlock(&(vs)->vs_lock)
+#define VS_LOCK_INIT(vs)	pthread_mutex_init(&(vs)->vs_lock, NULL)
+#define VS_LOCK(vs)		pthread_mutex_lock(&(vs)->vs_lock)
+#define VS_UNLOCK(vs)		pthread_mutex_unlock(&(vs)->vs_lock)
 
-#define VS_MAP_LOCK_INIT(vs)	mutex_init(&(vs)->vs_map_lock)
-#define VS_MAP_LOCK(vs)		mutex_lock(&(vs)->vs_map_lock)
-#define VS_MAP_TRY_LOCK(vs)	mutex_try_lock(&(vs)->vs_map_lock)
-#define VS_MAP_UNLOCK(vs)	mutex_unlock(&(vs)->vs_map_lock)
+#define VS_MAP_LOCK_INIT(vs)	pthread_mutex_init(&(vs)->vs_map_lock, NULL)
+#define VS_MAP_LOCK(vs)		pthread_mutex_lock(&(vs)->vs_map_lock)
+#define VS_MAP_TRY_LOCK(vs)	(pthread_mutex_trylock(&(vs)->vs_map_lock) == 0)
+#define VS_MAP_UNLOCK(vs)	pthread_mutex_unlock(&(vs)->vs_map_lock)
 
 /*
  * Data structures and variables dealing with asynchronous
@@ -560,15 +561,15 @@ struct vs_async {
  */
 struct vstruct_list_head {
 	queue_head_t	vsl_queue;
-	struct mutex	vsl_lock;
+	pthread_mutex_t	vsl_lock;
 	int		vsl_count;	/* saves code */
 	queue_head_t	vsl_leak_queue;
 };
 extern struct vstruct_list_head	vstruct_list;
 
-#define VSL_LOCK_INIT()	mutex_init(&vstruct_list.vsl_lock)
-#define VSL_LOCK()	mutex_lock(&vstruct_list.vsl_lock)
-#define VSL_UNLOCK()	mutex_unlock(&vstruct_list.vsl_lock)
+#define VSL_LOCK_INIT()	pthread_mutex_init(&vstruct_list.vsl_lock, NULL)
+#define VSL_LOCK()	pthread_mutex_lock(&vstruct_list.vsl_lock)
+#define VSL_UNLOCK()	pthread_mutex_unlock(&vstruct_list.vsl_lock)
 
 /*
  * Create port alias for vstruct address.

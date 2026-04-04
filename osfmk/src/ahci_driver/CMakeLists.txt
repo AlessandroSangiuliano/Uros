@@ -120,8 +120,11 @@ target_include_directories(ahci_driver_server PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
+  # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/powermac/include
   # Kernel headers (mach/, device/, i386/)
@@ -133,7 +136,7 @@ target_include_directories(ahci_driver_server PRIVATE
 # Link against Mach userspace libraries.
 target_link_libraries(ahci_driver_server PRIVATE
   -Wl,--start-group
-  libcthreads
+  libpthreads
   libmach
   libsa_mach
   libnetname

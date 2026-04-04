@@ -115,8 +115,11 @@ target_include_directories(bootstrap_server PRIVATE
   ${MIG_OUT}
   # Generated includes (mach/machine -> i386 symlink created in src/CMakeLists.txt)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, servers/, cthreads.h)
+  # Mach services include (sa_mach.h, servers/)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Filesystem headers — must come before export so the canonical file_system.h
   # is used (export/powermac copy may be stale)
   ${CMAKE_SOURCE_DIR}/src/file_systems
@@ -131,21 +134,19 @@ target_include_directories(bootstrap_server PRIVATE
 
 # Link against Mach userspace libraries.
 # Use --start-group/--end-group to resolve circular dependencies between
-# the Mach libraries (e.g. libsa_mach -> libmach for clock_sleep, libcthreads -> libmach
-# for MIG stubs, libmach -> libcthreads for mig_support).
+# the Mach libraries (e.g. libsa_mach -> libmach for clock_sleep, libpthreads -> libmach
+# for MIG stubs, libmach -> libpthreads for mig_support).
 target_link_libraries(bootstrap_server PRIVATE
   -Wl,--start-group
   libsa_fs
   libblk
-  libcthreads
+  libpthreads
   libmach
   libsa_mach
   -Wl,--end-group
 )
 
 # Linker flags: 32-bit static Mach binary, no host libc
-# --allow-multiple-definition: cthreads inline functions (spin_unlock, spin_try_lock,
-# cthread_sp) are emitted into every .o that includes cthreads.h (C89 inline semantics).
 target_link_options(bootstrap_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
