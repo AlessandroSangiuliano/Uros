@@ -662,6 +662,8 @@ pthread_getschedparam(pthread_t thread,
 	{
 		if (policy != (int *)NULL)
 			*policy = thread->policy;
+		if (param != (struct sched_param *)NULL)
+			*param = thread->param;
 		switch (thread->policy)
 		{
 		case SCHED_OTHER:
