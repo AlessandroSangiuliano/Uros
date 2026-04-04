@@ -391,6 +391,8 @@ pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize)
 		return (EINVAL);
 	if (stacksize & (stacksize - 1))
 		return (EINVAL);	/* Must be power of two */
+	if (stacksize > (0x7FFFFFFF / 2))
+		return (EINVAL);	/* Would overflow GUARD_SIZE */
 	attr->stacksize = stacksize;
 	return (ESUCCESS);
 }
@@ -891,6 +893,9 @@ pthread_init(void)
 			_pthread_stack_size = _PTHREAD_DEFAULT_STACKSIZE;
 		}
 	}
+	/* Cap at INT_MAX/2 to prevent GUARD_SIZE(2*stacksize) overflow */
+	if (_pthread_stack_size > (0x7FFFFFFF / 2))
+		_pthread_stack_size = _PTHREAD_DEFAULT_STACKSIZE;
 	__pthread_stack_size = _pthread_stack_size;
 	__pthread_stack_mask = __pthread_stack_size - 1;
 	lowest_stack = STACK_LOWEST(_sp());
