@@ -202,7 +202,8 @@ pthread_attr_getdetachstate(const pthread_attr_t *attr,
 {
 	if (attr->sig == _PTHREAD_ATTR_SIG)
 	{
-		*detachstate = attr->detached;
+		if (detachstate != (int *)NULL)
+			*detachstate = attr->detached;
 		return (ESUCCESS);
 	} else
 	{
@@ -220,7 +221,8 @@ pthread_attr_getinheritsched(const pthread_attr_t *attr,
 {
 	if (attr->sig == _PTHREAD_ATTR_SIG)
 	{
-		*inheritsched = attr->inherit;
+		if (inheritsched != (int *)NULL)
+			*inheritsched = attr->inherit;
 		return (ESUCCESS);
 	} else
 	{
@@ -238,7 +240,8 @@ pthread_attr_getschedparam(const pthread_attr_t *attr,
 {
 	if (attr->sig == _PTHREAD_ATTR_SIG)
 	{
-		*param = attr->param;
+		if (param != (struct sched_param *)NULL)
+			*param = attr->param;
 		return (ESUCCESS);
 	} else
 	{
@@ -256,7 +259,8 @@ pthread_attr_getschedpolicy(const pthread_attr_t *attr,
 {
 	if (attr->sig == _PTHREAD_ATTR_SIG)
 	{
-		*policy = attr->policy;
+		if (policy != (int *)NULL)
+			*policy = attr->policy;
 		return (ESUCCESS);
 	} else
 	{
@@ -399,7 +403,8 @@ pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize)
 {
 	if (attr->sig != _PTHREAD_ATTR_SIG)
 		return (EINVAL);
-	*stacksize = attr->stacksize ? attr->stacksize : _PTHREAD_DEFAULT_STACKSIZE;
+	if (stacksize != (size_t *)NULL)
+		*stacksize = attr->stacksize ? attr->stacksize : _PTHREAD_DEFAULT_STACKSIZE;
 	return (ESUCCESS);
 }
 
@@ -655,8 +660,9 @@ pthread_getschedparam(pthread_t thread,
 {
 	if (thread->sig == _PTHREAD_SIG)
 	{
-		*policy = thread->policy;
-		switch (*policy)
+		if (policy != (int *)NULL)
+			*policy = thread->policy;
+		switch (thread->policy)
 		{
 		case SCHED_OTHER:
 			break;
@@ -786,7 +792,8 @@ pthread_setcancelstate(int state, int *oldstate)
 	pthread_t self = pthread_self();
 	int err = ESUCCESS;
 	LOCK(self->lock);
-	*oldstate = self->cancel_state & _PTHREAD_CANCEL_STATE_MASK;
+	if (oldstate != (int *)NULL)
+		*oldstate = self->cancel_state & _PTHREAD_CANCEL_STATE_MASK;
 	if ((state == PTHREAD_CANCEL_ENABLE) || (state == PTHREAD_CANCEL_DISABLE))
 	{
 		self->cancel_state = (self->cancel_state & _PTHREAD_CANCEL_STATE_MASK) | state;
@@ -808,7 +815,8 @@ pthread_setcanceltype(int type, int *oldtype)
 	pthread_t self = pthread_self();
 	int err = ESUCCESS;
 	LOCK(self->lock);
-	*oldtype = self->cancel_state & _PTHREAD_CANCEL_TYPE_MASK;
+	if (oldtype != (int *)NULL)
+		*oldtype = self->cancel_state & _PTHREAD_CANCEL_TYPE_MASK;
 	if ((type == PTHREAD_CANCEL_DEFERRED) || (type == PTHREAD_CANCEL_ASYNCHRONOUS))
 	{
 		self->cancel_state = (self->cancel_state & _PTHREAD_CANCEL_TYPE_MASK) | type;
