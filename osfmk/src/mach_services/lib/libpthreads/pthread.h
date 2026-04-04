@@ -134,6 +134,14 @@ typedef struct { long sig; char opaque[__PTHREAD_MUTEX_SIZE__]; } pthread_mutex_
 #define PTHREAD_MUTEX_INITIALIZER {_PTHREAD_MUTEX_SIG_init}
 
 /*
+ * Mutex types (POSIX.1-2001)
+ */
+#define PTHREAD_MUTEX_NORMAL		0
+#define PTHREAD_MUTEX_ERRORCHECK	1
+#define PTHREAD_MUTEX_RECURSIVE		2
+#define PTHREAD_MUTEX_DEFAULT		PTHREAD_MUTEX_NORMAL
+
+/*
  * Condition variable attributes
  */
 #ifndef __POSIX_LIB__
@@ -276,8 +284,12 @@ int       pthread_mutexattr_getprotocol(const pthread_mutexattr_t *attr,
 int       pthread_mutexattr_init(pthread_mutexattr_t *attr);
 int       pthread_mutexattr_setprioceiling(pthread_mutexattr_t *attr, 
                                            int prioceiling);
-int       pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr, 
+int       pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr,
                                         int protocol);
+int       pthread_mutexattr_gettype(const pthread_mutexattr_t *attr,
+                                    int *type);
+int       pthread_mutexattr_settype(pthread_mutexattr_t *attr,
+                                    int type);
 int       pthread_once(pthread_once_t *once_control, 
 		       void (*init_routine)(void));
 pthread_t pthread_self(void);

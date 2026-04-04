@@ -94,11 +94,12 @@ typedef struct
 /*
  * Mutex attributes
  */
-typedef struct 
+typedef struct
 {
 	long sig;		     /* Unique signature for this structure */
 	int prioceiling;
 	int protocol;
+	int type;		     /* PTHREAD_MUTEX_NORMAL, etc. */
 } pthread_mutexattr_t;
 
 /*
@@ -117,6 +118,8 @@ typedef struct _pthread_mutex
 	int	       waiters;	      /* Count of threads waiting for this mutex */
 	mach_port_t    sem;	      /* Semaphore used for waiting */
 	int	       state;	      /* Fast-path: 0=unlocked, 1=locked, 2=contended */
+	int	       type;	      /* PTHREAD_MUTEX_NORMAL, etc. */
+	int	       lock_count;    /* Recursion depth for RECURSIVE type */
 } pthread_mutex_t;
 
 /*

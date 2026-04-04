@@ -39,6 +39,7 @@ extern int *__mach_errno_addr(void);
 #define EPERM		1		/* Not owner */
 #define ESRCH		3		/* No such process */
 #define EIO		5		/* I/O error */
+#define EDEADLK		11		/* Resource deadlock would occur */
 #define ENOMEM		12		/* Not enough core */
 #define EBUSY		16		/* Mount device busy */
 #define EINVAL		22		/* Invalid argument */
