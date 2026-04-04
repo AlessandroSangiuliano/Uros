@@ -63,11 +63,14 @@ pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
 			return (EINVAL);
 		mutex->prioceiling = attr->prioceiling;
 		mutex->protocol = attr->protocol;
+		mutex->type = attr->type;
 	} else
 	{
 		mutex->prioceiling = _PTHREAD_DEFAULT_PRIOCEILING;
 		mutex->protocol = _PTHREAD_DEFAULT_PROTOCOL;
+		mutex->type = PTHREAD_MUTEX_DEFAULT;
 	}
+	mutex->lock_count = 0;
 	mutex->owner = (pthread_t)NULL;
 	mutex->next = (pthread_mutex_t *)NULL;
 	mutex->prev = (pthread_mutex_t *)NULL;
@@ -154,6 +157,24 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
 		return (EINVAL);
 
+	/* ERRORCHECK / RECURSIVE: check if already owned by this thread */
+	if (mutex->type != PTHREAD_MUTEX_NORMAL)
+	{
+		LOCK(mutex->lock);
+		if (mutex->owner == pthread_self())
+		{
+			if (mutex->type == PTHREAD_MUTEX_RECURSIVE)
+			{
+				mutex->lock_count++;
+				UNLOCK(mutex->lock);
+				return (ESUCCESS);
+			}
+			UNLOCK(mutex->lock);
+			return (EDEADLK);  /* ERRORCHECK */
+		}
+		UNLOCK(mutex->lock);
+	}
+
 	/* Fast path: uncontended — CAS 0→1, zero syscalls */
 	old = 0;
 	if (__atomic_compare_exchange_n(&mutex->state, &old, 1,
@@ -195,6 +216,19 @@ pthread_mutex_trylock(pthread_mutex_t *mutex)
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
 		return (EINVAL);
 
+	/* RECURSIVE: if already owned, just bump count */
+	if (mutex->type == PTHREAD_MUTEX_RECURSIVE)
+	{
+		LOCK(mutex->lock);
+		if (mutex->owner == pthread_self())
+		{
+			mutex->lock_count++;
+			UNLOCK(mutex->lock);
+			return (ESUCCESS);
+		}
+		UNLOCK(mutex->lock);
+	}
+
 	old = 0;
 	if (__atomic_compare_exchange_n(&mutex->state, &old, 1,
 					0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
@@ -230,8 +264,16 @@ pthread_mutex_unlock(pthread_mutex_t *mutex)
 		UNLOCK(mutex->lock);
 		return (EPERM);
 	}
+	/* RECURSIVE: decrement count; only truly unlock at zero */
+	if (mutex->type == PTHREAD_MUTEX_RECURSIVE && mutex->lock_count > 0)
+	{
+		mutex->lock_count--;
+		UNLOCK(mutex->lock);
+		return (ESUCCESS);
+	}
 	_pthread_mutex_remove(mutex);
 	mutex->owner = (pthread_t)NULL;
+	mutex->lock_count = 0;
 	UNLOCK(mutex->lock);
 
 	/* Fast path: if state was 1 (no waiters), just store 0 — no syscall */
@@ -347,6 +389,7 @@ pthread_mutexattr_init(pthread_mutexattr_t *attr)
 {
 	attr->prioceiling = _PTHREAD_DEFAULT_PRIOCEILING;
 	attr->protocol = _PTHREAD_DEFAULT_PROTOCOL;
+	attr->type = PTHREAD_MUTEX_DEFAULT;
 	attr->sig = _PTHREAD_MUTEX_ATTR_SIG;
 	return (ESUCCESS);
 }
@@ -392,12 +435,53 @@ pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr,
 		{
 			attr->protocol = protocol;
 			return (ESUCCESS);
-		} else 
+		} else
 		{
 			return (EINVAL); /* Invalid parameter */
 		}
 	} else
 	{
 		return (EINVAL); /* Not an initialized 'attribute' structure */
+	}
+}
+
+/*
+ * Get the mutex 'type' value from a mutex attribute structure.
+ */
+int
+pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type)
+{
+	if (attr->sig == _PTHREAD_MUTEX_ATTR_SIG)
+	{
+		if (type != (int *)NULL)
+			*type = attr->type;
+		return (ESUCCESS);
+	} else
+	{
+		return (EINVAL);
+	}
+}
+
+/*
+ * Set the mutex 'type' value in a mutex attribute structure.
+ */
+int
+pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type)
+{
+	if (attr->sig == _PTHREAD_MUTEX_ATTR_SIG)
+	{
+		if ((type == PTHREAD_MUTEX_NORMAL) ||
+		    (type == PTHREAD_MUTEX_ERRORCHECK) ||
+		    (type == PTHREAD_MUTEX_RECURSIVE))
+		{
+			attr->type = type;
+			return (ESUCCESS);
+		} else
+		{
+			return (EINVAL);
+		}
+	} else
+	{
+		return (EINVAL);
 	}
 }
