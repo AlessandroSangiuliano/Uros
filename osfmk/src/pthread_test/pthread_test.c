@@ -30,6 +30,7 @@
 
 #include <pthread.h>
 #include <stdio.h>
+#include <sys/timers.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/port.h>
@@ -589,7 +590,159 @@ test_errno_threadsafe(void)
 }
 
 /* ----------------------------------------------------------------
- * Test 12: mutex fast-path benchmark
+ * Test 12: mutex ERRORCHECK type
+ * ---------------------------------------------------------------- */
+
+static void
+test_mutex_errorcheck(void)
+{
+	pthread_mutex_t mtx;
+	pthread_mutexattr_t attr;
+	int rc;
+
+	pthread_mutexattr_init(&attr);
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+	pthread_mutex_init(&mtx, &attr);
+	pthread_mutexattr_destroy(&attr);
+
+	rc = pthread_mutex_lock(&mtx);
+	if (rc != 0) {
+		test_fail("errorcheck first lock", "unexpected error");
+		return;
+	}
+
+	/* Re-lock should return EDEADLK, not deadlock */
+	rc = pthread_mutex_lock(&mtx);
+	if (rc != EDEADLK) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "expected EDEADLK(%d), got %d",
+			 EDEADLK, rc);
+		test_fail("errorcheck re-lock", buf);
+		pthread_mutex_unlock(&mtx);
+		pthread_mutex_destroy(&mtx);
+		return;
+	}
+
+	pthread_mutex_unlock(&mtx);
+	pthread_mutex_destroy(&mtx);
+	test_ok("mutex ERRORCHECK");
+}
+
+/* ----------------------------------------------------------------
+ * Test 13: mutex RECURSIVE type
+ * ---------------------------------------------------------------- */
+
+static void
+test_mutex_recursive(void)
+{
+	pthread_mutex_t mtx;
+	pthread_mutexattr_t attr;
+	int i, rc;
+
+	pthread_mutexattr_init(&attr);
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+	pthread_mutex_init(&mtx, &attr);
+	pthread_mutexattr_destroy(&attr);
+
+	/* Lock 5 times recursively */
+	for (i = 0; i < 5; i++) {
+		rc = pthread_mutex_lock(&mtx);
+		if (rc != 0) {
+			char buf[80];
+			snprintf(buf, sizeof(buf), "lock %d failed rc=%d", i, rc);
+			test_fail("recursive lock", buf);
+			pthread_mutex_destroy(&mtx);
+			return;
+		}
+	}
+
+	/* Unlock 5 times — all should succeed */
+	for (i = 0; i < 5; i++) {
+		rc = pthread_mutex_unlock(&mtx);
+		if (rc != 0) {
+			char buf[80];
+			snprintf(buf, sizeof(buf), "unlock %d failed rc=%d", i, rc);
+			test_fail("recursive unlock", buf);
+			pthread_mutex_destroy(&mtx);
+			return;
+		}
+	}
+
+	/* Verify fully unlocked: trylock should succeed */
+	rc = pthread_mutex_trylock(&mtx);
+	if (rc != 0) {
+		test_fail("recursive fully unlocked", "trylock failed after full unlock");
+		pthread_mutex_destroy(&mtx);
+		return;
+	}
+	pthread_mutex_unlock(&mtx);
+
+	pthread_mutex_destroy(&mtx);
+	test_ok("mutex RECURSIVE");
+}
+
+/* ----------------------------------------------------------------
+ * Test 14: mutex timedlock (timeout)
+ * ---------------------------------------------------------------- */
+
+static pthread_mutex_t timedlock_mtx;
+
+static void *
+thread_timedlock_holder(void *arg)
+{
+	/* Hold the mutex for a while, then release */
+	pthread_mutex_lock(&timedlock_mtx);
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 50);
+	pthread_mutex_unlock(&timedlock_mtx);
+	return NULL;
+}
+
+static void
+test_mutex_timedlock(void)
+{
+	struct timespec deadline;
+	int rc;
+
+	pthread_mutex_init(&timedlock_mtx, NULL);
+
+	/* Test 1: timedlock on uncontended mutex — should succeed */
+	getclock(TIMEOFDAY, &deadline);
+	deadline.tv_sec += 5;
+	rc = pthread_mutex_timedlock(&timedlock_mtx, &deadline);
+	if (rc != 0) {
+		test_fail("timedlock uncontended", "unexpected error");
+		pthread_mutex_destroy(&timedlock_mtx);
+		return;
+	}
+	pthread_mutex_unlock(&timedlock_mtx);
+
+	/* Test 2: timedlock with expired deadline — should return ETIMEDOUT */
+	pthread_t holder;
+	pthread_create(&holder, NULL, thread_timedlock_holder, NULL);
+	/* Let holder grab the lock */
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+	/* Set deadline in the past */
+	deadline.tv_sec = 0;
+	deadline.tv_nsec = 0;
+	rc = pthread_mutex_timedlock(&timedlock_mtx, &deadline);
+	if (rc != ETIMEDOUT) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "expected ETIMEDOUT(%d), got %d",
+			 ETIMEDOUT, rc);
+		test_fail("timedlock expired", buf);
+		pthread_join(holder, NULL);
+		pthread_mutex_destroy(&timedlock_mtx);
+		return;
+	}
+
+	pthread_join(holder, NULL);
+	pthread_mutex_destroy(&timedlock_mtx);
+	test_ok("mutex timedlock");
+}
+
+/* ----------------------------------------------------------------
+ * Test 15: mutex fast-path benchmark
  * ---------------------------------------------------------------- */
 
 static void
@@ -634,6 +787,9 @@ main(int argc, char **argv)
 	test_barrier_func();
 	test_spinlock_func();
 	test_errno_threadsafe();
+	test_mutex_errorcheck();
+	test_mutex_recursive();
+	test_mutex_timedlock();
 	test_mutex_bench();
 
 	if (pass)
