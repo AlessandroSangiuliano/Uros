@@ -275,6 +275,8 @@ int       pthread_mutex_setprioceiling(pthread_mutex_t *mutex,
                                        int prioceiling, 
                                        int *old_prioceiling);
 int       pthread_mutex_trylock(pthread_mutex_t *mutex);
+int       pthread_mutex_timedlock(pthread_mutex_t *mutex,
+                                  const struct timespec *abstime);
 int       pthread_mutex_unlock(pthread_mutex_t *mutex);
 int       pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
 int       pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *attr, 
@@ -309,8 +311,12 @@ int       pthread_rwlock_init(pthread_rwlock_t *rwlock,
 int       pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
 int       pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
 int       pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_timedrdlock(pthread_rwlock_t *rwlock,
+                                     const struct timespec *abstime);
 int       pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
 int       pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock,
+                                     const struct timespec *abstime);
 int       pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
 int       pthread_rwlockattr_init(pthread_rwlockattr_t *attr);
 int       pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr);

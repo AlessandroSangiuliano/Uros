@@ -29,6 +29,7 @@
  */
 
 #include "pthread_internals.h"
+#include <sys/timers.h>		/* For struct timespec and getclock(). */
 
 /*
  * Destroy a mutex variable.
@@ -239,6 +240,85 @@ pthread_mutex_trylock(pthread_mutex_t *mutex)
 		return (ESUCCESS);
 	}
 	return (EBUSY);
+}
+
+/*
+ * Lock a mutex with a timeout (POSIX.1-2008).
+ * abstime is an absolute CLOCK_REALTIME deadline.
+ */
+int
+pthread_mutex_timedlock(pthread_mutex_t *mutex,
+			const struct timespec *abstime)
+{
+	kern_return_t kern_res;
+	int old;
+	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
+	{
+		int res;
+		if (res = pthread_mutex_init(mutex, NULL))
+			return (res);
+	}
+	if (mutex->sig != _PTHREAD_MUTEX_SIG)
+		return (EINVAL);
+
+	/* ERRORCHECK / RECURSIVE */
+	if (mutex->type != PTHREAD_MUTEX_NORMAL)
+	{
+		LOCK(mutex->lock);
+		if (mutex->owner == pthread_self())
+		{
+			if (mutex->type == PTHREAD_MUTEX_RECURSIVE)
+			{
+				mutex->lock_count++;
+				UNLOCK(mutex->lock);
+				return (ESUCCESS);
+			}
+			UNLOCK(mutex->lock);
+			return (EDEADLK);
+		}
+		UNLOCK(mutex->lock);
+	}
+
+	/* Fast path: uncontended */
+	old = 0;
+	if (__atomic_compare_exchange_n(&mutex->state, &old, 1,
+					0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+	{
+		LOCK(mutex->lock);
+		_pthread_mutex_add(mutex);
+		UNLOCK(mutex->lock);
+		return (ESUCCESS);
+	}
+
+	/* Slow path with timeout */
+	if (old != 2)
+		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
+	while (old != 0)
+	{
+		struct timespec now;
+		tvalspec_t then;
+		getclock(TIMEOFDAY, &now);
+		then.tv_nsec = abstime->tv_nsec - now.tv_nsec;
+		then.tv_sec = abstime->tv_sec - now.tv_sec;
+		if (then.tv_nsec < 0)
+		{
+			then.tv_nsec += 1000000000;
+			then.tv_sec--;
+		}
+		if (((int)then.tv_sec < 0) ||
+		    ((then.tv_sec == 0) && (then.tv_nsec == 0)))
+		{
+			return (ETIMEDOUT);
+		}
+		MACH_CALL(semaphore_timedwait(mutex->sem, then), kern_res);
+		if (kern_res == KERN_OPERATION_TIMED_OUT)
+			return (ETIMEDOUT);
+		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
+	}
+	LOCK(mutex->lock);
+	_pthread_mutex_add(mutex);
+	UNLOCK(mutex->lock);
+	return (ESUCCESS);
 }
 
 /*
