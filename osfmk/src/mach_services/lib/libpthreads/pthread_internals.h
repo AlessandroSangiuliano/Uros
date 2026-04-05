@@ -73,6 +73,7 @@ typedef struct _pthread
 	int	       cancel_state;  /* Whether thread can be cancelled */
 	struct _pthread_handler_rec *cleanup_stack;
 	int		err_no;		/* thread-local errno */
+	char	       name[16];      /* Thread name (NUL-terminated, 15 usable) */
 	void	       *tsd[_POSIX_THREAD_KEYS_MAX];  /* Thread specific data */
 } *pthread_t;
 

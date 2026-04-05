@@ -328,6 +328,8 @@ int       pthread_barrierattr_setpshared(pthread_barrierattr_t *attr,
 int       pthread_once(pthread_once_t *once_control, 
 		       void (*init_routine)(void));
 pthread_t pthread_self(void);
+int       pthread_setname_np(pthread_t thread, const char *name);
+int       pthread_getname_np(pthread_t thread, char *buf, int len);
 int       pthread_setschedparam(pthread_t thread, 
 				int policy,
                                 const struct sched_param *param);
