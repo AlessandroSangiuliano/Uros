@@ -134,6 +134,7 @@ typedef struct
 {
 	long	       sig;	     /* Unique signature for this structure */
 	int	       pshared;
+	int	       clock;	     /* CLOCK_REALTIME or CLOCK_MONOTONIC */
 } pthread_condattr_t;
 
 /*
@@ -147,6 +148,7 @@ typedef struct _pthread_cond
 	struct _pthread_cond *next, *prev;  /* List of condition variables using mutex */
 	struct _pthread_mutex *busy; /* mutex associated with variable */
 	int	       waiters;	     /* Number of threads waiting */
+	int	       clock;	     /* CLOCK_REALTIME or CLOCK_MONOTONIC */
 } pthread_cond_t;
 
 /*

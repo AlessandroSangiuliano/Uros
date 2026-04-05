@@ -48,6 +48,7 @@ _pthread_cond_lazy_init(pthread_cond_t *cond)
 		cond->prev = (pthread_cond_t *)NULL;
 		cond->busy = (pthread_mutex_t *)NULL;
 		cond->waiters = 0;
+		cond->clock = CLOCK_REALTIME;
 		MACH_CALL(semaphore_create(mach_task_self(),
 					   &cond->sem,
 					   SYNC_POLICY_FIFO,
@@ -110,9 +111,11 @@ pthread_cond_init(pthread_cond_t *cond,
 	cond->prev = (pthread_cond_t *)NULL;
 	cond->busy = (pthread_mutex_t *)NULL;
 	cond->waiters = 0;
-	MACH_CALL(semaphore_create(mach_task_self(), 
-				   &cond->sem, 
-				   SYNC_POLICY_FIFO, 
+	cond->clock = (attr && attr->sig == _PTHREAD_COND_ATTR_SIG)
+		      ? attr->clock : CLOCK_REALTIME;
+	MACH_CALL(semaphore_create(mach_task_self(),
+				   &cond->sem,
+				   SYNC_POLICY_FIFO,
 				   0), kern_res);
 	if (kern_res != KERN_SUCCESS)
 	{
@@ -348,6 +351,7 @@ pthread_condattr_init(pthread_condattr_t *attr)
 {
 	attr->sig = _PTHREAD_COND_ATTR_SIG;
 	attr->pshared = PTHREAD_PROCESS_PRIVATE;
+	attr->clock = CLOCK_REALTIME;
 	return (ESUCCESS);
 }
 
@@ -381,4 +385,25 @@ pthread_condattr_setpshared(pthread_condattr_t *attr, int pshared)
 	if (pshared == PTHREAD_PROCESS_SHARED)
 		return (ENOTSUP);
 	return (EINVAL);
+}
+
+int
+pthread_condattr_getclock(const pthread_condattr_t *attr, int *clock_id)
+{
+	if (attr->sig != _PTHREAD_COND_ATTR_SIG)
+		return (EINVAL);
+	if (clock_id != (int *)NULL)
+		*clock_id = attr->clock;
+	return (ESUCCESS);
+}
+
+int
+pthread_condattr_setclock(pthread_condattr_t *attr, int clock_id)
+{
+	if (attr->sig != _PTHREAD_COND_ATTR_SIG)
+		return (EINVAL);
+	if (clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC)
+		return (EINVAL);
+	attr->clock = clock_id;
+	return (ESUCCESS);
 }

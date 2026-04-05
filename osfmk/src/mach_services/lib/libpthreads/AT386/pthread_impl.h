@@ -32,8 +32,8 @@
 #define __PTHREAD_ATTR_SIZE__      32
 #define __PTHREAD_MUTEXATTR_SIZE__ 16
 #define __PTHREAD_MUTEX_SIZE__     64
-#define __PTHREAD_CONDATTR_SIZE__  4
-#define __PTHREAD_COND_SIZE__      24
+#define __PTHREAD_CONDATTR_SIZE__  8
+#define __PTHREAD_COND_SIZE__      28
 #define __PTHREAD_ONCE_SIZE__      4
 #define __PTHREAD_RWLOCKATTR_SIZE__ 4
 #define __PTHREAD_RWLOCK_SIZE__    24
