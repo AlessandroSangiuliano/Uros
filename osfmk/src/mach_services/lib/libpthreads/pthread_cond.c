@@ -338,3 +338,47 @@ pthread_cond_timedwait(pthread_cond_t *cond,
 {
 	return (_pthread_cond_wait(cond, mutex, abstime));
 }
+
+/*
+ * Condition variable attribute functions.
+ */
+
+int
+pthread_condattr_init(pthread_condattr_t *attr)
+{
+	attr->sig = _PTHREAD_COND_ATTR_SIG;
+	attr->pshared = PTHREAD_PROCESS_PRIVATE;
+	return (ESUCCESS);
+}
+
+int
+pthread_condattr_destroy(pthread_condattr_t *attr)
+{
+	attr->sig = _PTHREAD_NO_SIG;
+	return (ESUCCESS);
+}
+
+int
+pthread_condattr_getpshared(const pthread_condattr_t *attr, int *pshared)
+{
+	if (attr->sig != _PTHREAD_COND_ATTR_SIG)
+		return (EINVAL);
+	if (pshared != (int *)NULL)
+		*pshared = attr->pshared;
+	return (ESUCCESS);
+}
+
+int
+pthread_condattr_setpshared(pthread_condattr_t *attr, int pshared)
+{
+	if (attr->sig != _PTHREAD_COND_ATTR_SIG)
+		return (EINVAL);
+	if (pshared == PTHREAD_PROCESS_PRIVATE)
+	{
+		attr->pshared = pshared;
+		return (ESUCCESS);
+	}
+	if (pshared == PTHREAD_PROCESS_SHARED)
+		return (ENOTSUP);
+	return (EINVAL);
+}

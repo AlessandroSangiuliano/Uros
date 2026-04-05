@@ -711,3 +711,32 @@ pthread_mutex_consistent(pthread_mutex_t *mutex)
 	UNLOCK(mutex->lock);
 	return (ESUCCESS);
 }
+
+/*
+ * Get the process-shared attribute from a mutex attribute structure.
+ */
+int
+pthread_mutexattr_getpshared(const pthread_mutexattr_t *attr, int *pshared)
+{
+	if (attr->sig != _PTHREAD_MUTEX_ATTR_SIG)
+		return (EINVAL);
+	if (pshared != (int *)NULL)
+		*pshared = PTHREAD_PROCESS_PRIVATE;
+	return (ESUCCESS);
+}
+
+/*
+ * Set the process-shared attribute in a mutex attribute structure.
+ * Only PTHREAD_PROCESS_PRIVATE is supported; SHARED requires kernel support.
+ */
+int
+pthread_mutexattr_setpshared(pthread_mutexattr_t *attr, int pshared)
+{
+	if (attr->sig != _PTHREAD_MUTEX_ATTR_SIG)
+		return (EINVAL);
+	if (pshared == PTHREAD_PROCESS_PRIVATE)
+		return (ESUCCESS);
+	if (pshared == PTHREAD_PROCESS_SHARED)
+		return (ENOTSUP);
+	return (EINVAL);
+}
