@@ -142,6 +142,12 @@ typedef struct { long sig; char opaque[__PTHREAD_MUTEX_SIZE__]; } pthread_mutex_
 #define PTHREAD_MUTEX_DEFAULT		PTHREAD_MUTEX_NORMAL
 
 /*
+ * Mutex robustness (POSIX.1-2008)
+ */
+#define PTHREAD_MUTEX_STALLED		0
+#define PTHREAD_MUTEX_ROBUST		1
+
+/*
  * Condition variable attributes
  */
 #ifndef __POSIX_LIB__
@@ -292,6 +298,11 @@ int       pthread_mutexattr_gettype(const pthread_mutexattr_t *attr,
                                     int *type);
 int       pthread_mutexattr_settype(pthread_mutexattr_t *attr,
                                     int type);
+int       pthread_mutexattr_getrobust(const pthread_mutexattr_t *attr,
+                                      int *robust);
+int       pthread_mutexattr_setrobust(pthread_mutexattr_t *attr,
+                                      int robust);
+int       pthread_mutex_consistent(pthread_mutex_t *mutex);
 int       pthread_once(pthread_once_t *once_control, 
 		       void (*init_routine)(void));
 pthread_t pthread_self(void);

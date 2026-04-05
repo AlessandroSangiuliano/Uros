@@ -100,6 +100,7 @@ typedef struct
 	int prioceiling;
 	int protocol;
 	int type;		     /* PTHREAD_MUTEX_NORMAL, etc. */
+	int robust;		     /* PTHREAD_MUTEX_STALLED or _ROBUST */
 } pthread_mutexattr_t;
 
 /*
@@ -120,6 +121,9 @@ typedef struct _pthread_mutex
 	int	       state;	      /* Fast-path: 0=unlocked, 1=locked, 2=contended */
 	int	       type;	      /* PTHREAD_MUTEX_NORMAL, etc. */
 	int	       lock_count;    /* Recursion depth for RECURSIVE type */
+	int	       robust;	      /* PTHREAD_MUTEX_STALLED or _ROBUST */
+	int	       owner_dead;    /* Owner died while holding lock */
+	int	       unrecoverable; /* consistent() not called before unlock */
 } pthread_mutex_t;
 
 /*

@@ -46,3 +46,5 @@ extern int *__mach_errno_addr(void);
 #define EDOM		33		/* Argument too large */
 #define ERANGE		34		/* Result too large */
 #define ETIMEDOUT	60		/* Connection timed out */
+#define EOWNERDEAD	130		/* Owner died */
+#define ENOTRECOVERABLE	131		/* State not recoverable */
