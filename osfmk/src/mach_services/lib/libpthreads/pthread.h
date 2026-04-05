@@ -108,6 +108,12 @@ typedef struct { long sig; char opaque[__PTHREAD_ATTR_SIZE__]; } pthread_attr_t;
 #define PTHREAD_INHERIT_SCHED        1
 #define PTHREAD_EXPLICIT_SCHED       2
 
+/*
+ * Contention scope (POSIX.1-2001)
+ */
+#define PTHREAD_SCOPE_SYSTEM         0
+#define PTHREAD_SCOPE_PROCESS        1
+
 #define PTHREAD_CANCEL_ENABLE        0x01  /* Cancel takes place at next cancellation point */
 #define PTHREAD_CANCEL_DISABLE       0x00  /* Cancel postponed */
 #define PTHREAD_CANCEL_DEFERRED      0x02  /* Cancel waits until cancellation point */
@@ -264,6 +270,8 @@ int       pthread_attr_setguardsize(pthread_attr_t *attr,
 				     size_t guardsize);
 int       pthread_attr_getguardsize(const pthread_attr_t *attr,
 				     size_t *guardsize);
+int       pthread_attr_setscope(pthread_attr_t *attr, int scope);
+int       pthread_attr_getscope(const pthread_attr_t *attr, int *scope);
 int       pthread_cancel(pthread_t thread);
 int       pthread_setcancelstate(int state, int *oldstate);
 int       pthread_setcanceltype(int type, int *oldtype);

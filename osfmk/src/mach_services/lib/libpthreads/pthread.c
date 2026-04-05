@@ -474,6 +474,36 @@ pthread_attr_getguardsize(const pthread_attr_t *attr, size_t *guardsize)
 }
 
 /*
+ * Set contention scope (POSIX.1-2001).
+ * Only PTHREAD_SCOPE_SYSTEM is supported (1:1 threading model).
+ */
+int
+pthread_attr_setscope(pthread_attr_t *attr, int scope)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (scope == PTHREAD_SCOPE_SYSTEM)
+		return (ESUCCESS);
+	if (scope == PTHREAD_SCOPE_PROCESS)
+		return (ENOTSUP);
+	return (EINVAL);
+}
+
+/*
+ * Get contention scope (POSIX.1-2001).
+ * Always returns PTHREAD_SCOPE_SYSTEM.
+ */
+int
+pthread_attr_getscope(const pthread_attr_t *attr, int *scope)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (scope != (int *)NULL)
+		*scope = PTHREAD_SCOPE_SYSTEM;
+	return (ESUCCESS);
+}
+
+/*
  * Create and start execution of a new thread.
  */
 
