@@ -426,6 +426,8 @@ db_print_act(
 				DB_STGY_PROC, kernel_task);
 			}
 		    }
+		    if (athread->name[0] != '\0')
+			db_printf(" [%s]", athread->name);
 		}
 		db_printf("\n");
 	} else {

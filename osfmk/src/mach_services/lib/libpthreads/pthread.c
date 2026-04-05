@@ -33,6 +33,9 @@
 
 extern void mig_init(void *initial);
 
+/* Kernel trap to propagate thread name for DDB visibility */
+extern kern_return_t mach_thread_set_name(const char *name);
+
 /*
  * [Internal] stack support
  */
@@ -820,6 +823,9 @@ pthread_setname_np(pthread_t thread, const char *name)
 		thread->name[i] = name[i];
 	thread->name[i] = '\0';
 	UNLOCK(thread->lock);
+	/* Propagate to kernel for DDB visibility (best-effort, ignore errors) */
+	if (thread == pthread_self())
+		mach_thread_set_name(thread->name);
 	return (ESUCCESS);
 }
 

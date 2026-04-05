@@ -767,6 +767,55 @@ test_mutex_bench(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 16: thread name kernel propagation
+ * ---------------------------------------------------------------- */
+
+extern kern_return_t mach_thread_set_name(const char *name);
+
+static void *
+thread_set_own_name(void *arg)
+{
+	int rc = pthread_setname_np(pthread_self(), "worker-1");
+	return (void *)(long)rc;
+}
+
+static void
+test_thread_name_kernel(void)
+{
+	kern_return_t kr;
+
+	/* Direct trap call — set name on current thread */
+	kr = mach_thread_set_name("main-thread");
+	if (kr != KERN_SUCCESS) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "trap returned %d", kr);
+		test_fail("thread name kernel (direct)", buf);
+		return;
+	}
+
+	/* Verify userspace side still works after trap */
+	char readback[16];
+	pthread_setname_np(pthread_self(), "test-main");
+	pthread_getname_np(pthread_self(), readback, sizeof(readback));
+	if (readback[0] != 't' || readback[5] != 'm') {
+		test_fail("thread name kernel (readback)", readback);
+		return;
+	}
+
+	/* Test from child thread — pthread_setname_np should call the trap */
+	pthread_t th;
+	void *retval;
+	pthread_create(&th, NULL, thread_set_own_name, NULL);
+	pthread_join(th, &retval);
+	if ((int)(long)retval != 0) {
+		test_fail("thread name kernel (child)", "setname_np failed in child");
+		return;
+	}
+
+	test_ok("thread name kernel");
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -791,6 +840,7 @@ main(int argc, char **argv)
 	test_mutex_recursive();
 	test_mutex_timedlock();
 	test_mutex_bench();
+	test_thread_name_kernel();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
