@@ -29,7 +29,7 @@
  */
 
 #define __PTHREAD_SIZE__           148
-#define __PTHREAD_ATTR_SIZE__      32
+#define __PTHREAD_ATTR_SIZE__      36
 #define __PTHREAD_MUTEXATTR_SIZE__ 16
 #define __PTHREAD_MUTEX_SIZE__     64
 #define __PTHREAD_CONDATTR_SIZE__  8
