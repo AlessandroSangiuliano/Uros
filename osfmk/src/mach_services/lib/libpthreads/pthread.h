@@ -41,7 +41,7 @@
  */
 
 #define _POSIX_THREADS
-#undef  _POSIX_THREAD_ATTR_STACKADDR
+#define _POSIX_THREAD_ATTR_STACKADDR
 #define _POSIX_THREAD_ATTR_STACKSIZE
 #define _POSIX_THREAD_PRIORITY_SCHEDULING
 #define _POSIX_THREAD_PRIO_INHERIT
@@ -256,6 +256,14 @@ int       pthread_attr_setstacksize(pthread_attr_t *attr,
 				     size_t stacksize);
 int       pthread_attr_getstacksize(const pthread_attr_t *attr,
 				     size_t *stacksize);
+int       pthread_attr_setstack(pthread_attr_t *attr,
+				 void *stackaddr, size_t stacksize);
+int       pthread_attr_getstack(const pthread_attr_t *attr,
+				 void **stackaddr, size_t *stacksize);
+int       pthread_attr_setguardsize(pthread_attr_t *attr,
+				     size_t guardsize);
+int       pthread_attr_getguardsize(const pthread_attr_t *attr,
+				     size_t *guardsize);
 int       pthread_cancel(pthread_t thread);
 int       pthread_setcancelstate(int state, int *oldstate);
 int       pthread_setcanceltype(int type, int *oldtype);

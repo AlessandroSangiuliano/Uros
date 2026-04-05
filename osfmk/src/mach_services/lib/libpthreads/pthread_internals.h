@@ -90,6 +90,7 @@ typedef struct
 	struct sched_param param;
 	vm_size_t      stacksize;     /* User-requested stack size (0 = default) */
 	vm_address_t   stackaddr;     /* User-supplied stack base (0 = auto) */
+	vm_size_t      guardsize;     /* Guard page size (0 = default) */
 } pthread_attr_t;
 
 /*

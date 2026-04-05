@@ -280,6 +280,7 @@ pthread_attr_init(pthread_attr_t *attr)
 	attr->detached = PTHREAD_CREATE_JOINABLE;
 	attr->stacksize = 0;	/* 0 = use default */
 	attr->stackaddr = 0;	/* 0 = auto-allocate */
+	attr->guardsize = 0;	/* 0 = use default (page size) */
 	return (ESUCCESS);
 }
 
@@ -407,6 +408,68 @@ pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize)
 		return (EINVAL);
 	if (stacksize != (size_t *)NULL)
 		*stacksize = attr->stacksize ? attr->stacksize : _PTHREAD_DEFAULT_STACKSIZE;
+	return (ESUCCESS);
+}
+
+/*
+ * Set stack address and size together (POSIX.1-2001).
+ * The caller is responsible for allocating the stack memory.
+ */
+int
+pthread_attr_setstack(pthread_attr_t *attr, void *stackaddr, size_t stacksize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (stacksize < _PTHREAD_DEFAULT_STACKSIZE)
+		return (EINVAL);
+	if (stacksize > (0x7FFFFFFF / 2))
+		return (EINVAL);
+	attr->stackaddr = (vm_address_t)stackaddr;
+	attr->stacksize = stacksize;
+	return (ESUCCESS);
+}
+
+/*
+ * Get stack address and size together (POSIX.1-2001).
+ */
+int
+pthread_attr_getstack(const pthread_attr_t *attr, void **stackaddr,
+		      size_t *stacksize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (stackaddr != (void **)NULL)
+		*stackaddr = (void *)attr->stackaddr;
+	if (stacksize != (size_t *)NULL)
+		*stacksize = attr->stacksize ? attr->stacksize
+					     : _PTHREAD_DEFAULT_STACKSIZE;
+	return (ESUCCESS);
+}
+
+/*
+ * Set the guard area size attribute (POSIX.1-2001).
+ * The guard size is rounded up to a page boundary by the implementation.
+ * Setting guardsize to 0 disables the guard area.
+ */
+int
+pthread_attr_setguardsize(pthread_attr_t *attr, size_t guardsize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	attr->guardsize = guardsize;
+	return (ESUCCESS);
+}
+
+/*
+ * Get the guard area size attribute (POSIX.1-2001).
+ */
+int
+pthread_attr_getguardsize(const pthread_attr_t *attr, size_t *guardsize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (guardsize != (size_t *)NULL)
+		*guardsize = attr->guardsize;
 	return (ESUCCESS);
 }
 
