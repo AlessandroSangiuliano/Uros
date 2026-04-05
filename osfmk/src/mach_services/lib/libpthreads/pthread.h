@@ -365,6 +365,8 @@ int       pthread_key_delete(pthread_key_t key);
 int       pthread_setspecific(pthread_key_t key,
 			      const void *value);
 void     *pthread_getspecific(pthread_key_t key);
+int       pthread_setconcurrency(int level);
+int       pthread_getconcurrency(void);
 
 /* Read-write locks */
 int       pthread_rwlock_init(pthread_rwlock_t *rwlock,
