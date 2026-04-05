@@ -991,6 +991,27 @@ pthread_setcanceltype(int type, int *oldtype)
 }
 
 /*
+ * Concurrency level hint (POSIX.1-2001).
+ * With 1:1 threading this is a no-op; the value is stored but not used.
+ */
+static int _pthread_concurrency;
+
+int
+pthread_setconcurrency(int level)
+{
+	if (level < 0)
+		return (EINVAL);
+	_pthread_concurrency = level;
+	return (ESUCCESS);
+}
+
+int
+pthread_getconcurrency(void)
+{
+	return (_pthread_concurrency);
+}
+
+/*
  * Perform package initialization - called automatically when application starts
  */
 
