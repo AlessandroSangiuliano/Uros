@@ -154,6 +154,12 @@ typedef struct { long sig; char opaque[__PTHREAD_MUTEX_SIZE__]; } pthread_mutex_
 #define PTHREAD_PROCESS_SHARED		1
 
 /*
+ * Clock selection for condvar (POSIX.1-2008)
+ */
+#define CLOCK_REALTIME			0
+#define CLOCK_MONOTONIC			1
+
+/*
  * Condition variable attributes
  */
 #ifndef __POSIX_LIB__
@@ -317,6 +323,10 @@ int       pthread_condattr_getpshared(const pthread_condattr_t *attr,
                                       int *pshared);
 int       pthread_condattr_setpshared(pthread_condattr_t *attr,
                                       int pshared);
+int       pthread_condattr_getclock(const pthread_condattr_t *attr,
+                                    int *clock_id);
+int       pthread_condattr_setclock(pthread_condattr_t *attr,
+                                    int clock_id);
 int       pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *attr,
                                         int *pshared);
 int       pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attr,
