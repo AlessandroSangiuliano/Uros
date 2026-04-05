@@ -31,6 +31,7 @@
  */
 
 #include "pthread_internals.h"
+#include <sys/timers.h>		/* For struct timespec and getclock(). */
 
 int
 pthread_rwlockattr_init(pthread_rwlockattr_t *attr)
@@ -134,6 +135,90 @@ pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock)
 		return (EBUSY);
 	}
 	rwlock->readers++;
+	UNLOCK(rwlock->lock);
+	return (ESUCCESS);
+}
+
+/*
+ * Compute relative deadline from absolute timespec.
+ * Returns 0 if deadline already passed, 1 if 'then' is filled.
+ */
+static int
+_pthread_rwlock_deadline(const struct timespec *abstime, tvalspec_t *then)
+{
+	struct timespec now;
+	getclock(TIMEOFDAY, &now);
+	then->tv_nsec = abstime->tv_nsec - now.tv_nsec;
+	then->tv_sec = abstime->tv_sec - now.tv_sec;
+	if (then->tv_nsec < 0)
+	{
+		then->tv_nsec += 1000000000;
+		then->tv_sec--;
+	}
+	if (((int)then->tv_sec < 0) ||
+	    ((then->tv_sec == 0) && (then->tv_nsec == 0)))
+		return (0);
+	return (1);
+}
+
+int
+pthread_rwlock_timedrdlock(pthread_rwlock_t *rwlock,
+			   const struct timespec *abstime)
+{
+	kern_return_t kr;
+	tvalspec_t then;
+
+	if (rwlock->sig != _PTHREAD_RWLOCK_SIG)
+		return (EINVAL);
+
+	LOCK(rwlock->lock);
+	while (rwlock->writer || rwlock->blocked_writers > 0) {
+		UNLOCK(rwlock->lock);
+		if (!_pthread_rwlock_deadline(abstime, &then))
+			return (ETIMEDOUT);
+		MACH_CALL(semaphore_timedwait(rwlock->reader_sem, then), kr);
+		if (kr == KERN_OPERATION_TIMED_OUT)
+			return (ETIMEDOUT);
+		LOCK(rwlock->lock);
+	}
+	rwlock->readers++;
+	UNLOCK(rwlock->lock);
+	return (ESUCCESS);
+}
+
+int
+pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock,
+			   const struct timespec *abstime)
+{
+	kern_return_t kr;
+	tvalspec_t then;
+
+	if (rwlock->sig != _PTHREAD_RWLOCK_SIG)
+		return (EINVAL);
+
+	LOCK(rwlock->lock);
+	rwlock->blocked_writers++;
+	while (rwlock->writer || rwlock->readers > 0) {
+		UNLOCK(rwlock->lock);
+		if (!_pthread_rwlock_deadline(abstime, &then))
+		{
+			LOCK(rwlock->lock);
+			rwlock->blocked_writers--;
+			UNLOCK(rwlock->lock);
+			return (ETIMEDOUT);
+		}
+		MACH_CALL(semaphore_timedwait(rwlock->writer_sem, then), kr);
+		if (kr == KERN_OPERATION_TIMED_OUT)
+		{
+			LOCK(rwlock->lock);
+			rwlock->blocked_writers--;
+			UNLOCK(rwlock->lock);
+			return (ETIMEDOUT);
+		}
+		LOCK(rwlock->lock);
+	}
+	rwlock->blocked_writers--;
+	rwlock->writer = 1;
 	UNLOCK(rwlock->lock);
 	return (ESUCCESS);
 }
