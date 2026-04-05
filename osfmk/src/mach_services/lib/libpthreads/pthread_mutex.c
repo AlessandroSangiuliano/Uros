@@ -65,13 +65,17 @@ pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
 		mutex->prioceiling = attr->prioceiling;
 		mutex->protocol = attr->protocol;
 		mutex->type = attr->type;
+		mutex->robust = attr->robust;
 	} else
 	{
 		mutex->prioceiling = _PTHREAD_DEFAULT_PRIOCEILING;
 		mutex->protocol = _PTHREAD_DEFAULT_PROTOCOL;
 		mutex->type = PTHREAD_MUTEX_DEFAULT;
+		mutex->robust = PTHREAD_MUTEX_STALLED;
 	}
 	mutex->lock_count = 0;
+	mutex->owner_dead = 0;
+	mutex->unrecoverable = 0;
 	mutex->owner = (pthread_t)NULL;
 	mutex->next = (pthread_mutex_t *)NULL;
 	mutex->prev = (pthread_mutex_t *)NULL;
@@ -142,6 +146,29 @@ _pthread_mutex_remove(pthread_mutex_t *mutex)
  */
 
 /*
+ * Check if a robust mutex's owner thread has died.
+ * Must be called with mutex->lock held.
+ * Returns EOWNERDEAD if owner died (takes ownership), ENOTRECOVERABLE
+ * if mutex was not recovered after prior death, ESUCCESS otherwise.
+ */
+static int
+_pthread_mutex_robust_check(pthread_mutex_t *mutex)
+{
+	if (mutex->unrecoverable)
+		return (ENOTRECOVERABLE);
+	if (mutex->owner != (pthread_t)NULL &&
+	    mutex->owner->sig != _PTHREAD_SIG)
+	{
+		/* Owner thread is dead — take ownership */
+		mutex->owner_dead = 1;
+		_pthread_mutex_remove(mutex);
+		mutex->owner = (pthread_t)NULL;
+		return (EOWNERDEAD);
+	}
+	return (ESUCCESS);
+}
+
+/*
  * Lock a mutex.
  */
 int
@@ -157,6 +184,10 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 	}
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
 		return (EINVAL);
+
+	/* Robust: fail immediately if unrecoverable */
+	if (mutex->robust == PTHREAD_MUTEX_ROBUST && mutex->unrecoverable)
+		return (ENOTRECOVERABLE);
 
 	/* ERRORCHECK / RECURSIVE: check if already owned by this thread */
 	if (mutex->type != PTHREAD_MUTEX_NORMAL)
@@ -185,6 +216,27 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 		_pthread_mutex_add(mutex);
 		UNLOCK(mutex->lock);
 		return (ESUCCESS);
+	}
+
+	/* Robust: check if owner died before blocking */
+	if (mutex->robust == PTHREAD_MUTEX_ROBUST)
+	{
+		LOCK(mutex->lock);
+		int rc = _pthread_mutex_robust_check(mutex);
+		if (rc == EOWNERDEAD)
+		{
+			/* Force acquire — owner is dead, state is stale */
+			__atomic_store_n(&mutex->state, 1, __ATOMIC_ACQUIRE);
+			_pthread_mutex_add(mutex);
+			UNLOCK(mutex->lock);
+			return (EOWNERDEAD);
+		}
+		if (rc == ENOTRECOVERABLE)
+		{
+			UNLOCK(mutex->lock);
+			return (ENOTRECOVERABLE);
+		}
+		UNLOCK(mutex->lock);
 	}
 
 	/* Slow path: contended — mark state=2 and block */
@@ -261,6 +313,10 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
 		return (EINVAL);
 
+	/* Robust: fail immediately if unrecoverable */
+	if (mutex->robust == PTHREAD_MUTEX_ROBUST && mutex->unrecoverable)
+		return (ENOTRECOVERABLE);
+
 	/* ERRORCHECK / RECURSIVE */
 	if (mutex->type != PTHREAD_MUTEX_NORMAL)
 	{
@@ -288,6 +344,26 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 		_pthread_mutex_add(mutex);
 		UNLOCK(mutex->lock);
 		return (ESUCCESS);
+	}
+
+	/* Robust: check if owner died before blocking */
+	if (mutex->robust == PTHREAD_MUTEX_ROBUST)
+	{
+		LOCK(mutex->lock);
+		int rc = _pthread_mutex_robust_check(mutex);
+		if (rc == EOWNERDEAD)
+		{
+			__atomic_store_n(&mutex->state, 1, __ATOMIC_ACQUIRE);
+			_pthread_mutex_add(mutex);
+			UNLOCK(mutex->lock);
+			return (EOWNERDEAD);
+		}
+		if (rc == ENOTRECOVERABLE)
+		{
+			UNLOCK(mutex->lock);
+			return (ENOTRECOVERABLE);
+		}
+		UNLOCK(mutex->lock);
 	}
 
 	/* Slow path with timeout */
@@ -350,6 +426,12 @@ pthread_mutex_unlock(pthread_mutex_t *mutex)
 		mutex->lock_count--;
 		UNLOCK(mutex->lock);
 		return (ESUCCESS);
+	}
+	/* Robust: if owner_dead and not made consistent, mark unrecoverable */
+	if (mutex->robust == PTHREAD_MUTEX_ROBUST && mutex->owner_dead)
+	{
+		mutex->unrecoverable = 1;
+		mutex->owner_dead = 0;
 	}
 	_pthread_mutex_remove(mutex);
 	mutex->owner = (pthread_t)NULL;
@@ -470,6 +552,7 @@ pthread_mutexattr_init(pthread_mutexattr_t *attr)
 	attr->prioceiling = _PTHREAD_DEFAULT_PRIOCEILING;
 	attr->protocol = _PTHREAD_DEFAULT_PROTOCOL;
 	attr->type = PTHREAD_MUTEX_DEFAULT;
+	attr->robust = PTHREAD_MUTEX_STALLED;
 	attr->sig = _PTHREAD_MUTEX_ATTR_SIG;
 	return (ESUCCESS);
 }
@@ -564,4 +647,67 @@ pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type)
 	{
 		return (EINVAL);
 	}
+}
+
+/*
+ * Get the robustness value from a mutex attribute structure.
+ */
+int
+pthread_mutexattr_getrobust(const pthread_mutexattr_t *attr, int *robust)
+{
+	if (attr->sig == _PTHREAD_MUTEX_ATTR_SIG)
+	{
+		if (robust != (int *)NULL)
+			*robust = attr->robust;
+		return (ESUCCESS);
+	} else
+	{
+		return (EINVAL);
+	}
+}
+
+/*
+ * Set the robustness value in a mutex attribute structure.
+ */
+int
+pthread_mutexattr_setrobust(pthread_mutexattr_t *attr, int robust)
+{
+	if (attr->sig == _PTHREAD_MUTEX_ATTR_SIG)
+	{
+		if ((robust == PTHREAD_MUTEX_STALLED) ||
+		    (robust == PTHREAD_MUTEX_ROBUST))
+		{
+			attr->robust = robust;
+			return (ESUCCESS);
+		} else
+		{
+			return (EINVAL);
+		}
+	} else
+	{
+		return (EINVAL);
+	}
+}
+
+/*
+ * Mark a robust mutex as consistent after EOWNERDEAD recovery.
+ * Must be called by the thread that received EOWNERDEAD before unlocking.
+ */
+int
+pthread_mutex_consistent(pthread_mutex_t *mutex)
+{
+	if (mutex->sig != _PTHREAD_MUTEX_SIG)
+		return (EINVAL);
+	if (mutex->robust != PTHREAD_MUTEX_ROBUST)
+		return (EINVAL);
+
+	LOCK(mutex->lock);
+	if (mutex->owner != pthread_self() || !mutex->owner_dead)
+	{
+		UNLOCK(mutex->lock);
+		return (EINVAL);
+	}
+	mutex->owner_dead = 0;
+	UNLOCK(mutex->lock);
+	return (ESUCCESS);
 }
