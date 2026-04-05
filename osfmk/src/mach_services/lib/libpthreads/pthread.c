@@ -713,6 +713,43 @@ pthread_setschedparam(pthread_t thread,
 }
 
 /*
+ * Set the name of a thread (non-POSIX, de-facto standard).
+ * Name is truncated to 15 characters + NUL.
+ */
+int
+pthread_setname_np(pthread_t thread, const char *name)
+{
+	int i;
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	LOCK(thread->lock);
+	for (i = 0; i < 15 && name[i] != '\0'; i++)
+		thread->name[i] = name[i];
+	thread->name[i] = '\0';
+	UNLOCK(thread->lock);
+	return (ESUCCESS);
+}
+
+/*
+ * Get the name of a thread (non-POSIX, de-facto standard).
+ */
+int
+pthread_getname_np(pthread_t thread, char *buf, int len)
+{
+	int i;
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	if (len <= 0)
+		return (EINVAL);
+	LOCK(thread->lock);
+	for (i = 0; i < len - 1 && thread->name[i] != '\0'; i++)
+		buf[i] = thread->name[i];
+	buf[i] = '\0';
+	UNLOCK(thread->lock);
+	return (ESUCCESS);
+}
+
+/*
  * Determine if two thread identifiers represent the same thread.
  */
 int       
