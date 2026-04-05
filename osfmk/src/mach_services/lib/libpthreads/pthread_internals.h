@@ -132,7 +132,7 @@ typedef struct _pthread_mutex
 typedef struct 
 {
 	long	       sig;	     /* Unique signature for this structure */
-	int unsupported;
+	int	       pshared;
 } pthread_condattr_t;
 
 /*
@@ -223,6 +223,7 @@ typedef struct
 #define _PTHREAD_MUTEX_ATTR_SIG		0x4D545841  /* 'MTXA' */
 #define _PTHREAD_MUTEX_SIG		0x4D555458  /* 'MUTX' */
 #define _PTHREAD_MUTEX_SIG_init		0x32AAABA7  /* [almost] ~'MUTX' */
+#define _PTHREAD_COND_ATTR_SIG		0x434E4441  /* 'CNDA' */
 #define _PTHREAD_COND_SIG		0x434F4E44  /* 'COND' */
 #define _PTHREAD_COND_SIG_init		0x3CB0B1BB  /* [almost] ~'COND' */
 #define _PTHREAD_ATTR_SIG		0x54484441  /* 'THDA' */

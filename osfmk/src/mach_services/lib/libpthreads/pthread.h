@@ -148,6 +148,12 @@ typedef struct { long sig; char opaque[__PTHREAD_MUTEX_SIZE__]; } pthread_mutex_
 #define PTHREAD_MUTEX_ROBUST		1
 
 /*
+ * Process-shared attribute (POSIX.1-2001)
+ */
+#define PTHREAD_PROCESS_PRIVATE		0
+#define PTHREAD_PROCESS_SHARED		1
+
+/*
  * Condition variable attributes
  */
 #ifndef __POSIX_LIB__
@@ -303,6 +309,22 @@ int       pthread_mutexattr_getrobust(const pthread_mutexattr_t *attr,
 int       pthread_mutexattr_setrobust(pthread_mutexattr_t *attr,
                                       int robust);
 int       pthread_mutex_consistent(pthread_mutex_t *mutex);
+int       pthread_mutexattr_getpshared(const pthread_mutexattr_t *attr,
+                                       int *pshared);
+int       pthread_mutexattr_setpshared(pthread_mutexattr_t *attr,
+                                       int pshared);
+int       pthread_condattr_getpshared(const pthread_condattr_t *attr,
+                                      int *pshared);
+int       pthread_condattr_setpshared(pthread_condattr_t *attr,
+                                      int pshared);
+int       pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *attr,
+                                        int *pshared);
+int       pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attr,
+                                        int pshared);
+int       pthread_barrierattr_getpshared(const pthread_barrierattr_t *attr,
+                                         int *pshared);
+int       pthread_barrierattr_setpshared(pthread_barrierattr_t *attr,
+                                         int pshared);
 int       pthread_once(pthread_once_t *once_control, 
 		       void (*init_routine)(void));
 pthread_t pthread_self(void);

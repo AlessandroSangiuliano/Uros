@@ -49,6 +49,31 @@ pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr)
 }
 
 int
+pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *attr, int *pshared)
+{
+	if (attr->sig != _PTHREAD_RWLOCK_ATTR_SIG)
+		return (EINVAL);
+	if (pshared != (int *)NULL)
+		*pshared = attr->pshared;
+	return (ESUCCESS);
+}
+
+int
+pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attr, int pshared)
+{
+	if (attr->sig != _PTHREAD_RWLOCK_ATTR_SIG)
+		return (EINVAL);
+	if (pshared == PTHREAD_PROCESS_PRIVATE)
+	{
+		attr->pshared = pshared;
+		return (ESUCCESS);
+	}
+	if (pshared == PTHREAD_PROCESS_SHARED)
+		return (ENOTSUP);
+	return (EINVAL);
+}
+
+int
 pthread_rwlock_init(pthread_rwlock_t *rwlock,
 		    const pthread_rwlockattr_t *attr)
 {
