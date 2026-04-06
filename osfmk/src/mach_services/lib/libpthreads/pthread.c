@@ -181,6 +181,117 @@ _pthread_free_stack(pthread_t self)
 }
 
 /*
+ * [Internal] thread pool — recycle kernel threads instead of destroying them.
+ *
+ * When a pthread exits, its kernel thread parks on a semaphore instead of
+ * calling thread_terminate().  pthread_create() can then reuse a parked
+ * thread, avoiding the cost of thread_create() + thread_set_state() RPCs.
+ */
+
+#define _THREAD_POOL_MAX	8	/* Maximum cached kernel threads */
+
+struct _pool_entry {
+	thread_port_t	kernel_thread;	/* Mach thread port */
+	mach_port_t	wake_sem;	/* Semaphore to wake this thread */
+	vm_address_t	stack;		/* Stack assigned to this thread */
+	pthread_t	self;		/* pthread_t at base of stack */
+};
+
+static struct _pool_entry _thread_pool[_THREAD_POOL_MAX];
+static int _thread_pool_count;		/* Number of threads in pool */
+static pthread_lock_t _thread_pool_lock = 0;	/* Protects pool */
+
+/*
+ * _pthread_pool_trampoline — entry point for recycled threads.
+ *
+ * The thread wakes from the pool semaphore, runs the user function,
+ * then returns to the pool (or terminates if the pool is full).
+ */
+static void
+_pthread_pool_trampoline(pthread_t self)
+{
+	for (;;) {
+		/* Run the user function */
+		pthread_exit((self->fun)(self->arg));
+		/* NOT REACHED — pthread_exit either parks us or terminates */
+	}
+}
+
+/*
+ * _pthread_pool_park — try to park the current kernel thread in the pool.
+ *
+ * Returns 1 if parked (caller must NOT call thread_terminate),
+ * returns 0 if pool is full (caller should terminate).
+ * When the thread is woken, it starts executing _pthread_pool_trampoline.
+ */
+static int
+_pthread_pool_park(pthread_t self)
+{
+	kern_return_t kern_res;
+	mach_port_t sem;
+	int idx;
+
+	LOCK(_thread_pool_lock);
+	if (_thread_pool_count >= _THREAD_POOL_MAX) {
+		UNLOCK(_thread_pool_lock);
+		return 0;	/* Pool full — terminate */
+	}
+	idx = _thread_pool_count++;
+
+	/* Create wake semaphore if needed */
+	if (_thread_pool[idx].wake_sem == MACH_PORT_NULL) {
+		MACH_CALL(semaphore_create(mach_task_self(),
+					   &_thread_pool[idx].wake_sem,
+					   SYNC_POLICY_FIFO, 0), kern_res);
+		if (kern_res != KERN_SUCCESS) {
+			_thread_pool_count--;
+			UNLOCK(_thread_pool_lock);
+			return 0;
+		}
+	}
+
+	_thread_pool[idx].kernel_thread = self->kernel_thread;
+	_thread_pool[idx].stack = (vm_address_t)STACK_LOWEST((vm_address_t)self);
+	_thread_pool[idx].self = self;
+	sem = _thread_pool[idx].wake_sem;
+	UNLOCK(_thread_pool_lock);
+
+	/* Park: block until pthread_create wakes us */
+	MACH_CALL(semaphore_wait(sem), kern_res);
+
+	/* Woken up — self->fun and self->arg have been set by pthread_create */
+	_pthread_pool_trampoline(self);
+	/* NOT REACHED */
+	return 1;
+}
+
+/*
+ * _pthread_pool_get — try to get a recycled thread from the pool.
+ *
+ * On success, fills in *thread and *stack and returns 1.
+ * The kernel thread is still blocked on its semaphore.
+ */
+static int
+_pthread_pool_get(pthread_t *thread, vm_address_t *stack,
+		  thread_port_t *kernel_thread, mach_port_t *wake_sem)
+{
+	int idx;
+
+	LOCK(_thread_pool_lock);
+	if (_thread_pool_count == 0) {
+		UNLOCK(_thread_pool_lock);
+		return 0;
+	}
+	idx = --_thread_pool_count;
+	*thread = _thread_pool[idx].self;
+	*stack = _thread_pool[idx].stack;
+	*kernel_thread = _thread_pool[idx].kernel_thread;
+	*wake_sem = _thread_pool[idx].wake_sem;
+	UNLOCK(_thread_pool_lock);
+	return 1;
+}
+
+/*
  * Destroy a thread attribute structure
  */
 int       
@@ -611,6 +722,24 @@ pthread_create(pthread_t *thread,
 		pthread_attr_init(attrs);
 	}
 	res = ESUCCESS;
+
+	/* Try to reuse a pooled kernel thread first */
+	{
+		mach_port_t wake_sem;
+		if (_pthread_pool_get(&t, &stack, &kernel_thread, &wake_sem))
+		{
+			*thread = t;
+			if ((res = _pthread_create(t, attrs, kernel_thread)) != 0)
+				return (res);
+			t->arg = arg;
+			t->fun = start_routine;
+			/* Wake the parked thread — it will run _pthread_pool_trampoline */
+			MACH_CALL(semaphore_signal(wake_sem), kern_res);
+			return (ESUCCESS);
+		}
+	}
+
+	/* No pooled thread available — create a new one */
 	do
 	{
 		/* Allocate a stack for the thread */
@@ -716,12 +845,24 @@ pthread_exit(void *value_ptr)
 		MACH_CALL(semaphore_wait(self->death), kern_res);
 	} else
 		UNLOCK(self->lock);
-	/* Destroy thread & reclaim resources */
+	/* Destroy join/death semaphores */
 	if (self->death)
 	{
 		MACH_CALL(semaphore_destroy(mach_task_self(), self->joiners), kern_res);
 		MACH_CALL(semaphore_destroy(mach_task_self(), self->death), kern_res);
+		self->death = MACH_PORT_NULL;
+		self->joiners = MACH_PORT_NULL;
 	}
+	/* Destroy signal semaphore if allocated */
+	if (self->sig_sem != MACH_PORT_NULL)
+	{
+		MACH_CALL(semaphore_destroy(mach_task_self(), self->sig_sem), kern_res);
+		self->sig_sem = MACH_PORT_NULL;
+	}
+	/* Try to park this kernel thread in the pool for reuse */
+	if (_pthread_pool_park(self))
+		return;		/* NOT REACHED — park loops into trampoline */
+	/* Pool full — actually terminate */
 	_pthread_free_stack(self);
 	MACH_CALL(thread_terminate(mach_thread_self()), kern_res);
 }
