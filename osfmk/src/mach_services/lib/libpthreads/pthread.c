@@ -507,6 +507,27 @@ pthread_attr_getscope(const pthread_attr_t *attr, int *scope)
 }
 
 /*
+ * Query the actual attributes of a live thread (non-POSIX, de-facto standard).
+ * Fills in `attr` with the thread's current detach state, scheduling policy
+ * and parameters, stack address/size, and guard size.
+ */
+int
+pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
+{
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	attr->sig = _PTHREAD_ATTR_SIG;
+	attr->detached = thread->detached;
+	attr->inherit = thread->inherit;
+	attr->policy = thread->policy;
+	attr->param = thread->param;
+	attr->stackaddr = (vm_address_t)STACK_LOWEST((vm_address_t)thread);
+	attr->stacksize = __pthread_stack_size;
+	attr->guardsize = 0;
+	return (ESUCCESS);
+}
+
+/*
  * Create and start execution of a new thread.
  */
 
