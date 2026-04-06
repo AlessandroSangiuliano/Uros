@@ -374,6 +374,9 @@ int       pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
 int       pthread_kill(pthread_t thread, int sig);
 int       sigwait(const sigset_t *set, int *sig);
 
+/* Query live thread attributes (non-POSIX, de-facto standard) */
+int       pthread_getattr_np(pthread_t thread, pthread_attr_t *attr);
+
 /* Read-write locks */
 int       pthread_rwlock_init(pthread_rwlock_t *rwlock,
 			       const pthread_rwlockattr_t *attr);
