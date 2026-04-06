@@ -500,6 +500,8 @@ typedef struct thread_shuttle {
 	boolean_t	kthread;	/* thread is a kernel thread */
 #endif	/* MACH_LDEBUG */
 
+	char		name[16];	/* User-visible thread name (NUL-terminated) */
+
 	/*
 	 * End of thread_shuttle proper
 	 */

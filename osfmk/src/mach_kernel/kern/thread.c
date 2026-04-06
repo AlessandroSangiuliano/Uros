@@ -945,6 +945,8 @@ thread_init(
 	thr_sh_template.mutex_count = 0;
 #endif	/* MACH_LDEBUG */
 
+	thr_sh_template.name[0] = '\0';
+
 	/*
 	 *	Initialize any machine-dependent
 	 *	per-thread structures necessary.

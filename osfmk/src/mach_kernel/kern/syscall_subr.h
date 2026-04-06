@@ -119,6 +119,9 @@ extern kern_return_t	mach_null(void);
 /* Print string to kernel console (debugging/benchmarking) */
 extern void		mach_print(const char *s);
 
+/* Set current thread's name (visible in DDB) */
+extern kern_return_t	mach_thread_set_name(const char *name);
+
 #include <machine/syscall_subr.h>
 
 #endif	/* _KERN_SYSCALL_SUBR_H_ */

@@ -602,3 +602,21 @@ mach_print(const char *s)
 {
 	printf("%s", s);
 }
+
+/*
+ *	mach_thread_set_name
+ *
+ *	Copy a NUL-terminated name (max 16 bytes including NUL) from
+ *	user space into the current thread's shuttle.  Visible in DDB.
+ */
+kern_return_t
+mach_thread_set_name(const char *name)
+{
+	thread_t	thread = current_thread();
+	int		i;
+
+	for (i = 0; i < 15 && name[i] != '\0'; i++)
+		thread->name[i] = name[i];
+	thread->name[i] = '\0';
+	return KERN_SUCCESS;
+}
