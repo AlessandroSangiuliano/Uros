@@ -537,6 +537,9 @@ _pthread_create(pthread_t t,
 		LOCK_INIT(t->lock);
 		t->cancel_state = PTHREAD_CANCEL_ENABLE | PTHREAD_CANCEL_DEFERRED;
 		t->cleanup_stack = (struct _pthread_handler_rec *)NULL;
+		t->sigmask = 0;
+		t->sigpending = 0;
+		t->sig_sem = MACH_PORT_NULL;
 		/* Create control semaphores */
 		if (t->detached == PTHREAD_CREATE_JOINABLE)
 		{

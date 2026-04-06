@@ -33,6 +33,7 @@
 #include <sys/timers.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
+#include <signal.h>
 #include <mach/port.h>
 
 static int pass = 1;
@@ -816,6 +817,93 @@ test_thread_name_kernel(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 17: per-thread signals (sigmask + kill + sigwait)
+ * ---------------------------------------------------------------- */
+
+static void *
+thread_sigwait(void *arg)
+{
+	sigset_t wait_set;
+	int sig;
+
+	sigemptyset(&wait_set);
+	sigaddset(&wait_set, SIGUSR1);
+
+	/* Block until SIGUSR1 arrives */
+	int rc = sigwait(&wait_set, &sig);
+	if (rc != 0)
+		return (void *)(long)-1;
+	return (void *)(long)sig;
+}
+
+static void
+test_signals(void)
+{
+	sigset_t set, old;
+	int rc;
+
+	/* Test 1: pthread_sigmask SIG_BLOCK / SIG_UNBLOCK */
+	sigemptyset(&set);
+	sigaddset(&set, SIGUSR1);
+	rc = pthread_sigmask(SIG_BLOCK, &set, &old);
+	if (rc != 0) {
+		test_fail("sigmask block", "unexpected error");
+		return;
+	}
+	/* old should be 0 (no signals blocked initially) */
+	if (old != 0) {
+		test_fail("sigmask old", "expected empty old mask");
+		return;
+	}
+	/* Read back current mask */
+	rc = pthread_sigmask(SIG_BLOCK, (sigset_t *)NULL, &old);
+	if (rc != 0 || !sigismember(&old, SIGUSR1)) {
+		test_fail("sigmask readback", "SIGUSR1 not in mask");
+		return;
+	}
+	/* Unblock */
+	rc = pthread_sigmask(SIG_UNBLOCK, &set, (sigset_t *)NULL);
+	if (rc != 0) {
+		test_fail("sigmask unblock", "unexpected error");
+		return;
+	}
+
+	/* Test 2: pthread_kill(self, 0) — validity check */
+	rc = pthread_kill(pthread_self(), 0);
+	if (rc != 0) {
+		test_fail("kill sig=0", "validity check failed");
+		return;
+	}
+
+	/* Test 3: pthread_kill + sigwait across threads */
+	pthread_t th;
+	void *retval;
+	pthread_create(&th, NULL, thread_sigwait, NULL);
+
+	/* Give the waiter time to block in sigwait */
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+	/* Send SIGUSR1 to the waiting thread */
+	rc = pthread_kill(th, SIGUSR1);
+	if (rc != 0) {
+		test_fail("kill SIGUSR1", "pthread_kill failed");
+		pthread_join(th, NULL);
+		return;
+	}
+
+	pthread_join(th, &retval);
+	if ((int)(long)retval != SIGUSR1) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "expected sig=%d, got %d",
+			 SIGUSR1, (int)(long)retval);
+		test_fail("sigwait result", buf);
+		return;
+	}
+
+	test_ok("per-thread signals");
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -841,6 +929,7 @@ main(int argc, char **argv)
 	test_mutex_timedlock();
 	test_mutex_bench();
 	test_thread_name_kernel();
+	test_signals();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);

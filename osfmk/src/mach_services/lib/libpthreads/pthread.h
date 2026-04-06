@@ -368,6 +368,12 @@ void     *pthread_getspecific(pthread_key_t key);
 int       pthread_setconcurrency(int level);
 int       pthread_getconcurrency(void);
 
+/* Per-thread signals (POSIX.1-2001) */
+#include <signal.h>
+int       pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
+int       pthread_kill(pthread_t thread, int sig);
+int       sigwait(const sigset_t *set, int *sig);
+
 /* Read-write locks */
 int       pthread_rwlock_init(pthread_rwlock_t *rwlock,
 			       const pthread_rwlockattr_t *attr);
