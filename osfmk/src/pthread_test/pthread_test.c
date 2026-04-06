@@ -904,6 +904,43 @@ test_signals(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 18: thread pool benchmark (create/join cycles)
+ * ---------------------------------------------------------------- */
+
+static void *
+thread_noop(void *arg)
+{
+	return NULL;
+}
+
+static void
+test_thread_pool_bench(void)
+{
+	unsigned int start, end;
+	int i;
+	int n = 1000;
+	pthread_t th;
+
+	/* Warm up the pool with a few create/join cycles */
+	for (i = 0; i < 4; i++) {
+		pthread_create(&th, NULL, thread_noop, NULL);
+		pthread_join(th, NULL);
+	}
+
+	/* Benchmark: create+join with thread pool active */
+	__asm__ volatile("rdtsc" : "=a"(start) : : "edx");
+	for (i = 0; i < n; i++) {
+		pthread_create(&th, NULL, thread_noop, NULL);
+		pthread_join(th, NULL);
+	}
+	__asm__ volatile("rdtsc" : "=a"(end) : : "edx");
+
+	unsigned int cycles = end - start;
+	printf("  [%d] create/join (pooled): %u cycles / %d iters = %u cycles/pair\n",
+	       ++test_num, cycles, n, cycles / n);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -930,6 +967,7 @@ main(int argc, char **argv)
 	test_mutex_bench();
 	test_thread_name_kernel();
 	test_signals();
+	test_thread_pool_bench();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
