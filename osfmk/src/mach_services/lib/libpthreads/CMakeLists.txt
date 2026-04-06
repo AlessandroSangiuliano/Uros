@@ -10,6 +10,7 @@ set(LIB_SOURCES
   pthread_rwlock.c
   pthread_barrier.c
   pthread_spin.c
+  pthread_signal.c
   mig_support.c
   fprintf.c
   thread_switch.c

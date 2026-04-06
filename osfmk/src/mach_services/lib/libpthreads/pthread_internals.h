@@ -43,6 +43,7 @@
 #include <mach.h>			/* For generic MACH support */
 #include "posix_sched.h"		/* For POSIX scheduling policy & parameter */
 #include "pthread_machdep.h"		/* Machine-dependent definitions. */
+#include <signal.h>			/* For sigset_t, signal constants */
 
 /*
  * Compiled-in limits
@@ -74,6 +75,9 @@ typedef struct _pthread
 	struct _pthread_handler_rec *cleanup_stack;
 	int		err_no;		/* thread-local errno */
 	char	       name[16];      /* Thread name (NUL-terminated, 15 usable) */
+	unsigned long  sigmask;	      /* Blocked signal set */
+	unsigned long  sigpending;    /* Pending signal set */
+	mach_port_t    sig_sem;	      /* Semaphore for sigwait() wakeup */
 	void	       *tsd[_POSIX_THREAD_KEYS_MAX];  /* Thread specific data */
 } *pthread_t;
 
