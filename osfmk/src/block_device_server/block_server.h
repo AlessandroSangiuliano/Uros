@@ -242,13 +242,6 @@ rdtsc(void)
 	return tsc;
 }
 
-/* ================================================================
- * Module ops externs
- * ================================================================ */
-
-extern const struct block_driver_ops ahci_module_ops;
-extern const struct block_driver_ops virtio_blk_module_ops;
-
 /* Not yet in our exported headers */
 extern kern_return_t mach_port_set_protected_payload(
     mach_port_t task, mach_port_t port, unsigned long payload);

@@ -43,6 +43,7 @@
 #include "device_master.h"
 #include "device_server.h"
 #include "ahci_batch_server.h"
+#include "dl_loader.h"
 
 /* ================================================================
  * Global state
@@ -63,12 +64,25 @@ struct blk_partition	partitions[MAX_PARTITIONS];
 int			n_partitions;
 
 /* ================================================================
- * Module table — statically registered driver modules
+ * Module table — dynamically loaded driver modules
+ *
+ * Populated at boot by loading embedded .so blobs via dlopen().
+ * The table is NULL-terminated; MAX_MODULES must be large enough
+ * for all boot-time modules plus future hotplug additions.
  * ================================================================ */
 
-static const struct block_driver_ops *modules[] = {
-	&ahci_module_ops,
-	&virtio_blk_module_ops,
+#define MAX_MODULES	16
+
+static const struct block_driver_ops *modules[MAX_MODULES + 1];
+static int n_modules;
+
+/*
+ * Module paths for boot-time loading (embedded as binary blobs).
+ * Future: HAL server will notify us which modules to load.
+ */
+static const char *boot_module_paths[] = {
+	"ahci.so",
+	"virtio_blk.so",
 	NULL
 };
 
@@ -277,6 +291,24 @@ main(int argc, char **argv)
 		MACH_PORT_RIGHT_PORT_SET, &port_set);
 	if (kr != KERN_SUCCESS) {
 		printf("blk: port set alloc failed\n");
+		return 1;
+	}
+
+	/* Initialise dynamic module loader and load boot modules */
+	blk_dl_init();
+	{
+		int i;
+		for (i = 0; boot_module_paths[i] != NULL; i++) {
+			const struct block_driver_ops *ops;
+			ops = blk_dl_load_module(boot_module_paths[i]);
+			if (ops != NULL && n_modules < MAX_MODULES)
+				modules[n_modules++] = ops;
+		}
+		modules[n_modules] = NULL;
+	}
+
+	if (n_modules == 0) {
+		printf("blk: no driver modules loaded, exiting\n");
 		return 1;
 	}
 

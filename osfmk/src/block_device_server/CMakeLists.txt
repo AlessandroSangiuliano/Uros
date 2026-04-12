@@ -2,6 +2,44 @@ cmake_minimum_required(VERSION 3.16)
 project(block_device_server C)
 
 # ===========================================================================
+# Common compile options
+# ===========================================================================
+
+set(BLK_COMPILE_OPTIONS
+  -std=gnu11
+  -m32 -march=i686 -msse -msse2
+  -fno-builtin
+  -mstack-protector-guard=global
+  -w
+  -include stdint.h
+)
+
+set(BLK_INCLUDE_DIRS
+  # MIG-generated headers (device_master.h, device_server.h, ahci_batch_server.h)
+  ${CMAKE_CURRENT_BINARY_DIR}
+  # Module headers (ahci/, virtio_blk/)
+  ${CMAKE_CURRENT_SOURCE_DIR}/ahci
+  ${CMAKE_CURRENT_SOURCE_DIR}/virtio_blk
+  # Framework header
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  # libdl headers
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libdl
+  # Generated includes (mach/machine -> i386 symlink)
+  ${CMAKE_BINARY_DIR}/generated/include
+  # Mach services include (sa_mach.h, stdio.h, string.h)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
+  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  # Kernel headers (mach/, device/, i386/)
+  ${CMAKE_SOURCE_DIR}/src/mach_kernel
+  # Top-level include
+  ${CMAKE_SOURCE_DIR}/include
+)
+
+# ===========================================================================
 # MIG-generated device_master user stubs
 # ===========================================================================
 
@@ -60,17 +98,86 @@ add_custom_command(
 )
 
 # ===========================================================================
-# Source files
+# Driver modules — compiled as shared objects (.so)
+# ===========================================================================
+
+# --- AHCI module ---
+add_library(ahci_module SHARED
+  ahci/ahci_module.c
+  ahci/ahci_io.c
+  ssp_module_stub.c
+  ${DM_USER_C}
+)
+target_compile_options(ahci_module PRIVATE ${BLK_COMPILE_OPTIONS} -fPIC)
+target_compile_definitions(ahci_module PRIVATE MACH_IPC_COMPAT=0)
+target_include_directories(ahci_module PRIVATE ${BLK_INCLUDE_DIRS})
+set_target_properties(ahci_module PROPERTIES
+  OUTPUT_NAME "ahci"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+)
+
+# --- Virtio-blk module ---
+add_library(virtio_blk_module SHARED
+  virtio_blk/virtio_module.c
+  ssp_module_stub.c
+  ${DM_USER_C}
+)
+target_compile_options(virtio_blk_module PRIVATE ${BLK_COMPILE_OPTIONS} -fPIC)
+target_compile_definitions(virtio_blk_module PRIVATE MACH_IPC_COMPAT=0)
+target_include_directories(virtio_blk_module PRIVATE ${BLK_INCLUDE_DIRS})
+set_target_properties(virtio_blk_module PROPERTIES
+  OUTPUT_NAME "virtio_blk"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+)
+
+# ===========================================================================
+# Embed .so modules as binary blobs via objcopy
+# ===========================================================================
+
+set(AHCI_SO "${CMAKE_CURRENT_BINARY_DIR}/modules/ahci.so")
+set(AHCI_OBJ "${CMAKE_CURRENT_BINARY_DIR}/ahci_so_blob.o")
+
+add_custom_command(
+  OUTPUT ${AHCI_OBJ}
+  COMMAND objcopy -I binary -O elf32-i386 -B i386
+    --rename-section .data=.rodata,alloc,load,readonly,data,contents
+    ahci.so ${AHCI_OBJ}
+  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+  DEPENDS ahci_module
+  COMMENT "Embedding ahci.so as binary blob"
+  VERBATIM
+)
+
+set(VIRTIO_SO "${CMAKE_CURRENT_BINARY_DIR}/modules/virtio_blk.so")
+set(VIRTIO_OBJ "${CMAKE_CURRENT_BINARY_DIR}/virtio_blk_so_blob.o")
+
+add_custom_command(
+  OUTPUT ${VIRTIO_OBJ}
+  COMMAND objcopy -I binary -O elf32-i386 -B i386
+    --rename-section .data=.rodata,alloc,load,readonly,data,contents
+    virtio_blk.so ${VIRTIO_OBJ}
+  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+  DEPENDS virtio_blk_module
+  COMMENT "Embedding virtio_blk.so as binary blob"
+  VERBATIM
+)
+
+# ===========================================================================
+# Framework source files (block_device_server executable)
 # ===========================================================================
 
 set(BLK_SOURCES
   block_server.c
   block_partition.c
   block_device.c
+  dl_loader.c
   nostdlib_stubs.c
-  ahci/ahci_module.c
-  ahci/ahci_io.c
-  virtio_blk/virtio_module.c
   ${DM_USER_C}
   ${AB_SERVER_C}
   ${CMAKE_BINARY_DIR}/generated/device_server.c
@@ -94,52 +201,27 @@ add_custom_command(
 )
 
 # ===========================================================================
-# Build target
+# Build target — executable with embedded module blobs
 # ===========================================================================
 
 add_executable(block_device_server
   ${BLK_SOURCES}
   ${LOCAL_DEVICE_SERVER_H}
+  ${AHCI_OBJ}
+  ${VIRTIO_OBJ}
 )
 
-target_compile_options(block_device_server PRIVATE
-  -std=gnu11
-  -m32 -march=i686 -msse -msse2
-  -fno-builtin
-  -mstack-protector-guard=global
-  -w
-  -include stdint.h
-)
+target_compile_options(block_device_server PRIVATE ${BLK_COMPILE_OPTIONS})
 
 target_compile_definitions(block_device_server PRIVATE
   MACH_IPC_COMPAT=0
 )
 
-target_include_directories(block_device_server PRIVATE
-  # MIG-generated headers (device_master.h, device_server.h, ahci_batch_server.h)
-  ${CMAKE_CURRENT_BINARY_DIR}
-  # Module headers (ahci/, virtio_blk/)
-  ${CMAKE_CURRENT_SOURCE_DIR}/ahci
-  ${CMAKE_CURRENT_SOURCE_DIR}/virtio_blk
-  # Framework header
-  ${CMAKE_CURRENT_SOURCE_DIR}
-  # Generated includes (mach/machine -> i386 symlink)
-  ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, stdio.h, string.h)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  # pthread.h and machine/pthread_impl.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
-  # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
-  # Kernel headers (mach/, device/, i386/)
-  ${CMAKE_SOURCE_DIR}/src/mach_kernel
-  # Top-level include
-  ${CMAKE_SOURCE_DIR}/include
-)
+target_include_directories(block_device_server PRIVATE ${BLK_INCLUDE_DIRS})
 
 target_link_libraries(block_device_server PRIVATE
   -Wl,--start-group
+  libdl
   libpthreads
   libmach
   libsa_mach
