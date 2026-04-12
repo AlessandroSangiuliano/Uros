@@ -3075,8 +3075,7 @@ retry_entry:
 		assert(entry->wired_count == 0);
 		assert(entry->user_wired_count == 0);
 
-		if (!entry->is_sub_map &&
-		    entry->object.vm_object != kernel_object) {
+		if (!entry->is_sub_map) {
 			pmap_remove(map->pmap,
 				    entry->vme_start, entry->vme_end);
 		}

@@ -58,6 +58,11 @@ if(OSFMK_BUILD_VIRTIO_BLK)
   add_subdirectory(virtio_blk)
 endif()
 
+# Build modular block device server
+if(OSFMK_BUILD_BLOCK_SERVER)
+  add_subdirectory(block_device_server)
+endif()
+
 # Build name server (netname)
 if(OSFMK_BUILD_NAME_SERVER)
   add_subdirectory(mach_services/servers/netname)
