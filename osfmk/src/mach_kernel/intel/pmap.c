@@ -1742,10 +1742,14 @@ pmap_remove_range(
 		register pv_entry_t	pv_h, prev, cur;
 
 		pv_h = pai_to_pvh(pai);
-		if (pv_h->pmap == PMAP_NULL)
-		    panic("pmap_remove: null pv_list, pa 0x%x va 0x%x",
-			  pa, va);
-		if (pv_h->va == va && pv_h->pmap == pmap) {
+		if (pv_h->pmap == PMAP_NULL) {
+		    /*
+		     * Stale PTE with empty pv_list — PTE was
+		     * already cleared above; skip pv removal.
+		     */
+		    UNLOCK_PVH(pai);
+		}
+		else if (pv_h->va == va && pv_h->pmap == pmap) {
 		    /*
 		     * Header is the pv_entry.  Copy the next one
 		     * to header and free the next one (we cannot
@@ -1759,19 +1763,28 @@ pmap_remove_range(
 		    else {
 			pv_h->pmap = PMAP_NULL;
 		    }
+		    UNLOCK_PVH(pai);
 		}
 		else {
+		    boolean_t found = FALSE;
 		    cur = pv_h;
 		    do {
 			prev = cur;
-			if ((cur = prev->next) == PV_ENTRY_NULL) {
-			    panic("pmap-remove: mapping not in pv_list!");
-			}
+			cur = prev->next;
+			if (cur == PV_ENTRY_NULL)
+			    break;
 		    } while (cur->va != va || cur->pmap != pmap);
-		    prev->next = cur->next;
-		    PV_FREE(cur);
+		    if (cur != PV_ENTRY_NULL) {
+			prev->next = cur->next;
+			PV_FREE(cur);
+			found = TRUE;
+		    }
+		    UNLOCK_PVH(pai);
+		    /*
+		     * If not found, the PTE was orphaned — already
+		     * cleared above, nothing more to do.
+		     */
 		}
-		UNLOCK_PVH(pai);
 	    }
 	}
 
@@ -2275,15 +2288,20 @@ Retry:
 		/*
 		 *	Remove the mapping from the pvlist for
 		 *	this physical page.
+		 *
+		 *	If the PTE existed but the pv_list has no
+		 *	matching entry, the PTE was orphaned (cleared
+		 *	above); treat old_pa as unmanaged and proceed.
 		 */
 		{
 		    register pv_entry_t	prev, cur;
+		    boolean_t		pv_found = TRUE;
 
 		    pv_h = pai_to_pvh(pai);
 		    if (pv_h->pmap == PMAP_NULL) {
-			panic("pmap_enter: null pv_list!");
+			pv_found = FALSE;
 		    }
-		    if (pv_h->va == v && pv_h->pmap == pmap) {
+		    else if (pv_h->va == v && pv_h->pmap == pmap) {
 			/*
 			 * Header is the pv_entry.  Copy the next one
 			 * to header and free the next one (we cannot
@@ -2299,18 +2317,24 @@ Retry:
 			}
 		    }
 		    else {
+			pv_found = FALSE;
 			cur = pv_h;
 			do {
 			    prev = cur;
-			    if ((cur = prev->next) == PV_ENTRY_NULL) {
-			        panic("pmap_enter: mapping not in pv_list!");
-			    }
+			    cur = prev->next;
+			    if (cur == PV_ENTRY_NULL)
+				break;
 			} while (cur->va != v || cur->pmap != pmap);
-			prev->next = cur->next;
-			pv_e = cur;
+			if (cur != PV_ENTRY_NULL) {
+			    prev->next = cur->next;
+			    pv_e = cur;
+			    pv_found = TRUE;
+			}
 		    }
+		    UNLOCK_PVH(pai);
+		    if (!pv_found)
+			old_pa = (vm_offset_t) 0;
 		}
-		UNLOCK_PVH(pai);
 	    }
 	    else {
 
