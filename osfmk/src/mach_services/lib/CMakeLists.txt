@@ -132,4 +132,5 @@ maybe_add(libnetname)
 maybe_add(libblk)
 maybe_add(libflipc)
 maybe_add(libflipc2)
+maybe_add(libdl)
 
