@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Build every userspace static library in this subtree with -fPIC so they
+# can be linked into PIE (ET_DYN) servers.  See #164 / #166.  For plain
+# ET_EXEC servers the cost is negligible (a handful of extra instructions
+# in the rarely-executed prologue); we'll flip each server to -pie in
+# follow-up issues (Phase 3+ of #164).
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Create small generated forwarding headers so legacy includes like
 # "machine/types.h" and <machine/va_list.h> resolve to the

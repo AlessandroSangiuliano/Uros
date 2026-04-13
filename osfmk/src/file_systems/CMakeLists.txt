@@ -40,6 +40,8 @@ list(APPEND SA_FS_SOURCES
 # ===========================================================================
 
 add_library(libsa_fs STATIC ${SA_FS_SOURCES})
+# -fPIC so libsa_fs can link into PIE servers (#164 / #166).
+set_target_properties(libsa_fs PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ufs.c and ext2fs.c include <device/device.h> which is MIG-generated
 add_dependencies(libsa_fs mig_device_header)
