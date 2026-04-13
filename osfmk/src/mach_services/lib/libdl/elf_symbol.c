@@ -91,8 +91,9 @@ dl_symlook_obj(const char *name, unsigned long hash,
 }
 
 /* ================================================================
- * Resolve a symbol: first in the loaded object, then in the host
- * symbol table provided by the server that called dlopen().
+ * Resolve a symbol: walk the whole loaded-object list (which
+ * includes the main executable itself after dl_bootstrap_self()),
+ * then fall back to the host symbol table if any.
  *
  * Returns the resolved address, or NULL if not found.
  * ================================================================ */
@@ -102,15 +103,28 @@ dl_resolve_symbol(const char *name, const struct dl_object *obj)
 {
 	unsigned long hash;
 	const Elf32_Sym *sym;
+	const struct dl_object *o;
 	const struct dl_host_sym *hs;
 
-	/* 1. Try the object's own symbol table */
 	hash = dl_elf_hash(name);
-	sym = dl_symlook_obj(name, hash, obj);
-	if (sym != NULL)
-		return (void *)(obj->relocbase + sym->st_value);
 
-	/* 2. Try the host symbol table */
+	/* 1. Try the object's own symbol table first */
+	if (obj != NULL) {
+		sym = dl_symlook_obj(name, hash, obj);
+		if (sym != NULL)
+			return (void *)(obj->relocbase + sym->st_value);
+	}
+
+	/* 2. Walk every loaded object (dlopen'd .so's + main exe) */
+	for (o = dl_obj_list; o != NULL; o = o->next) {
+		if (o == obj)
+			continue;
+		sym = dl_symlook_obj(name, hash, o);
+		if (sym != NULL)
+			return (void *)(o->relocbase + sym->st_value);
+	}
+
+	/* 3. Legacy host symbol table fallback */
 	if (dl_host_symtab != NULL) {
 		for (hs = dl_host_symtab; hs->name != NULL; hs++) {
 			if (name[0] == hs->name[0] &&
