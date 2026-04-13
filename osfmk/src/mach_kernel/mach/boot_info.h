@@ -206,6 +206,17 @@ struct loader_info {
      */
     int			num_segments;
     struct load_segment	segments[MAX_LOAD_SEGMENTS];
+
+    /*
+     * ET_DYN (PIE) support.  For ET_EXEC binaries these are zero and
+     * the loader behaves exactly as before.  For ET_DYN:
+     *   load_bias  — offset added to every PT_LOAD vaddr and to e_entry
+     *   dyn_vaddr  — runtime VA (post-bias) of PT_DYNAMIC
+     *   dyn_filesz — size in bytes of the PT_DYNAMIC segment
+     */
+    vm_offset_t		load_bias;
+    vm_offset_t		dyn_vaddr;
+    vm_size_t		dyn_filesz;
 } ;
 
 #define	EX_NOT_EXECUTABLE	6000

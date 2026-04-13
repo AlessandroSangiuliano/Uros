@@ -133,8 +133,128 @@
  */
 
 #include "bootstrap.h"
+#include "elf.h"
 #include <stdarg.h>
 #include <ddb/nlist.h>
+
+/*
+ * Apply R_386_RELATIVE relocations to a position-independent (ET_DYN)
+ * executable image sitting in a local buffer, before it's written to
+ * the user task.
+ *
+ *   area_start  — local buffer holding the segment data
+ *   alloc_start — VA that area_start represents (= seg_lo, post-bias)
+ *   alloc_size  — size of the buffer
+ *   load_bias   — bias added to every PT_LOAD vaddr by elf_load()
+ *   dyn_vaddr   — runtime VA (post-bias) of the .dynamic array
+ *   dyn_size    — size of .dynamic in bytes
+ *
+ * Returns KERN_SUCCESS or an error code.  Fails loudly on any
+ * relocation type other than R_386_RELATIVE; static-PIE executables
+ * linked with -pie -Bsymbolic -Wl,--no-dynamic-linker should only
+ * emit RELATIVE relocations.
+ */
+static int
+apply_pie_relocations(vm_offset_t area_start,
+		      vm_offset_t alloc_start,
+		      vm_size_t   alloc_size,
+		      vm_offset_t load_bias,
+		      vm_offset_t dyn_vaddr,
+		      vm_size_t   dyn_size)
+{
+	const Elf32_Dyn *dyn;
+	vm_offset_t rel_vaddr = 0;
+	unsigned long rel_size = 0;
+	unsigned long rel_ent  = sizeof(Elf32_Rel);
+	unsigned long i, n;
+	const Elf32_Rel *rel;
+
+	if (dyn_vaddr < alloc_start
+	    || dyn_vaddr + dyn_size > alloc_start + alloc_size) {
+		BOOTSTRAP_IO_LOCK();
+		printf("PIE: PT_DYNAMIC outside mapped range\n");
+		BOOTSTRAP_IO_UNLOCK();
+		return EX_NOT_EXECUTABLE;
+	}
+
+	dyn = (const Elf32_Dyn *)(area_start + (dyn_vaddr - alloc_start));
+	for (i = 0; i < dyn_size / sizeof(Elf32_Dyn); i++) {
+		if (dyn[i].d_tag == DT_NULL)
+			break;
+		switch (dyn[i].d_tag) {
+		case DT_REL:
+			rel_vaddr = (vm_offset_t)dyn[i].d_un.d_ptr + load_bias;
+			break;
+		case DT_RELSZ:
+			rel_size = (unsigned long)dyn[i].d_un.d_val;
+			break;
+		case DT_RELENT:
+			rel_ent = (unsigned long)dyn[i].d_un.d_val;
+			break;
+		case DT_RELA:
+		case DT_RELASZ:
+			BOOTSTRAP_IO_LOCK();
+			printf("PIE: DT_RELA not supported on i386\n");
+			BOOTSTRAP_IO_UNLOCK();
+			return EX_NOT_EXECUTABLE;
+		default:
+			break;
+		}
+	}
+
+	if (rel_size == 0)
+		return KERN_SUCCESS;	/* no relocations — nothing to do */
+
+	if (rel_vaddr < alloc_start
+	    || rel_vaddr + rel_size > alloc_start + alloc_size) {
+		BOOTSTRAP_IO_LOCK();
+		printf("PIE: DT_REL table outside mapped range\n");
+		BOOTSTRAP_IO_UNLOCK();
+		return EX_NOT_EXECUTABLE;
+	}
+	if (rel_ent != sizeof(Elf32_Rel)) {
+		BOOTSTRAP_IO_LOCK();
+		printf("PIE: unexpected DT_RELENT %lu\n", rel_ent);
+		BOOTSTRAP_IO_UNLOCK();
+		return EX_NOT_EXECUTABLE;
+	}
+
+	rel = (const Elf32_Rel *)(area_start + (rel_vaddr - alloc_start));
+	n = rel_size / rel_ent;
+	for (i = 0; i < n; i++) {
+		unsigned char type = ELF32_R_TYPE(rel[i].r_info);
+		vm_offset_t target_vaddr;
+		unsigned long *slot;
+
+		if (type == R_386_NONE)
+			continue;
+		if (type != R_386_RELATIVE) {
+			BOOTSTRAP_IO_LOCK();
+			printf("PIE: unsupported reloc type %u at 0x%lx\n",
+			       (unsigned)type,
+			       (unsigned long)rel[i].r_offset);
+			BOOTSTRAP_IO_UNLOCK();
+			return EX_NOT_EXECUTABLE;
+		}
+
+		target_vaddr = (vm_offset_t)rel[i].r_offset + load_bias;
+		if (target_vaddr < alloc_start
+		    || target_vaddr + sizeof(unsigned long)
+		       > alloc_start + alloc_size) {
+			BOOTSTRAP_IO_LOCK();
+			printf("PIE: reloc target 0x%lx outside mapped range\n",
+			       (unsigned long)target_vaddr);
+			BOOTSTRAP_IO_UNLOCK();
+			return EX_NOT_EXECUTABLE;
+		}
+
+		slot = (unsigned long *)(area_start
+					 + (target_vaddr - alloc_start));
+		*slot += load_bias;
+	}
+
+	return KERN_SUCCESS;
+}
 
 int load_program_file(struct file *, task_port_t, thread_port_t, objfmt_t);
 void read_symtab_from_file(struct file *, mach_port_t, task_port_t,
@@ -224,6 +344,26 @@ load_program_file(struct file	*fp,
 				  + seg->seg_filesz),
 			   0,
 			   seg->seg_memsz - seg->seg_filesz);
+		}
+	    }
+
+	    /*
+	     * ET_DYN: apply R_386_RELATIVE relocations in the local
+	     * buffer before writing it to the user task.  For ET_EXEC
+	     * load_bias is 0 and this is a no-op.
+	     */
+	    if (lp->load_bias != 0) {
+		result = apply_pie_relocations(area_start,
+					       alloc_start,
+					       (vm_size_t)(alloc_end
+							   - alloc_start),
+					       lp->load_bias,
+					       lp->dyn_vaddr,
+					       lp->dyn_filesz);
+		if (result) {
+		    (void) vm_deallocate(mach_task_self(), area_start,
+					 (vm_size_t)(alloc_end - alloc_start));
+		    return (result);
 		}
 	    }
 
