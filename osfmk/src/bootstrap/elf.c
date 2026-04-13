@@ -63,7 +63,21 @@ elf_load(struct file *fp, objfmt_t ofmt, void *hdr)
     int i;
     int result;
 
-    lp->entry_1 = (vm_offset_t) ehdr->e_entry;
+    /*
+     * ET_DYN (PIE) support: pick a fixed load bias above the kernel's
+     * legacy static link base (1 MiB).  Every PT_LOAD vaddr, the entry
+     * point, and PT_DYNAMIC's VA are shifted by this bias.  Relocations
+     * are applied later by the loader (load.c) before vm_write.
+     */
+    if ((int)ehdr->e_type == ET_DYN) {
+	lp->load_bias = 0x40000000;
+    } else {
+	lp->load_bias = 0;
+    }
+    lp->dyn_vaddr  = 0;
+    lp->dyn_filesz = 0;
+
+    lp->entry_1 = (vm_offset_t) ehdr->e_entry + lp->load_bias;
     lp->entry_2 = 0;
 
     phsize = ehdr->e_phnum * ehdr->e_phentsize;
@@ -76,13 +90,20 @@ elf_load(struct file *fp, objfmt_t ofmt, void *hdr)
     lp->num_segments = 0;
 
     for (i = 0, ph = phdr; i < ehdr->e_phnum; i++, ph++) {
+	/* Record the post-bias VA of PT_DYNAMIC for later relocation */
+	if ((int)ph->p_type == PT_DYNAMIC) {
+	    lp->dyn_vaddr  = (vm_offset_t)ph->p_vaddr + lp->load_bias;
+	    lp->dyn_filesz = (vm_size_t)ph->p_filesz;
+	    continue;
+	}
+
 	if ((int)ph->p_type != PT_LOAD || ph->p_memsz == 0)
 	    continue;
 
 	/* Record every PT_LOAD segment for the multi-segment loader */
 	if (lp->num_segments < MAX_LOAD_SEGMENTS) {
 	    struct load_segment *seg = &lp->segments[lp->num_segments++];
-	    seg->seg_vaddr  = ph->p_vaddr;
+	    seg->seg_vaddr  = (vm_offset_t)ph->p_vaddr + lp->load_bias;
 	    seg->seg_filesz = ph->p_filesz;
 	    seg->seg_memsz  = ph->p_memsz;
 	    seg->seg_offset = ph->p_offset;
@@ -94,14 +115,16 @@ elf_load(struct file *fp, objfmt_t ofmt, void *hdr)
 
 	/* Also fill legacy text/data fields for symbol classification */
 	if (ph->p_flags & PF_X) {
-	    lp->text_start  = trunc_page(ph->p_vaddr);
-	    lp->text_size   = (vm_size_t)ph->p_vaddr + ph->p_filesz
-				- lp->text_start;
+	    lp->text_start  = trunc_page((vm_offset_t)ph->p_vaddr
+					 + lp->load_bias);
+	    lp->text_size   = (vm_size_t)ph->p_vaddr + lp->load_bias
+				+ ph->p_filesz - lp->text_start;
 	    lp->text_offset = trunc_page(ph->p_offset);
 	} else if (ph->p_flags & PF_W) {
-	    lp->data_start  = trunc_page(ph->p_vaddr);
-	    lp->data_size   = (vm_size_t)ph->p_vaddr + ph->p_filesz
-				- lp->data_start;
+	    lp->data_start  = trunc_page((vm_offset_t)ph->p_vaddr
+					 + lp->load_bias);
+	    lp->data_size   = (vm_size_t)ph->p_vaddr + lp->load_bias
+				+ ph->p_filesz - lp->data_start;
 	    lp->bss_size    = ph->p_memsz - ph->p_filesz;
 	    lp->data_offset = trunc_page(ph->p_offset);
 	}
