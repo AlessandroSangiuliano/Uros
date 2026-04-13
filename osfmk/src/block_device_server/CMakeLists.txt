@@ -211,7 +211,7 @@ add_executable(block_device_server
   ${VIRTIO_OBJ}
 )
 
-target_compile_options(block_device_server PRIVATE ${BLK_COMPILE_OPTIONS})
+target_compile_options(block_device_server PRIVATE ${BLK_COMPILE_OPTIONS} -fPIC)
 
 target_compile_definitions(block_device_server PRIVATE
   MACH_IPC_COMPAT=0
@@ -230,8 +230,11 @@ target_link_libraries(block_device_server PRIVATE
 )
 
 target_link_options(block_device_server PRIVATE
-  -m32 -static -nostdlib
+  -m32 -pie -nostdlib
   -Wl,-e,__start_mach
+  -Wl,--no-dynamic-linker
+  -Wl,--export-dynamic
+  -Wl,--hash-style=sysv
   -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )

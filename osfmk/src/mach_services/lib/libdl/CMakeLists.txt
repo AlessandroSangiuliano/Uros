@@ -6,6 +6,7 @@ set(LIB_SOURCES
   elf_load.c
   elf_reloc.c
   elf_symbol.c
+  dl_self.c
 )
 
 add_library(libdl STATIC ${LIB_SOURCES})

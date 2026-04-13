@@ -39,6 +39,21 @@ struct dl_host_sym;
 void	dl_set_io_ops(const struct dl_io_ops *ops);
 void	dl_set_host_symbols(const struct dl_host_sym *symtab);
 
+/*
+ * Bootstrap the running executable's own symbol table into libdl so
+ * that dlopen'd modules can resolve their undefined symbols against
+ * it, without a manually-maintained host symbol array.
+ *
+ * Requirements on the caller's executable:
+ *   - Linked as PIE (-pie -fPIC)
+ *   - --export-dynamic so symbols appear in .dynsym
+ *   - --hash-style=sysv (libdl uses SYSV DT_HASH)
+ *   - The bootstrap loader has applied R_386_RELATIVE to the image
+ *
+ * Returns 0 on success, -1 on failure (sets dlerror).
+ */
+int	dl_bootstrap_self(void);
+
 /* Standard POSIX API */
 void	*dlopen(const char *path, int mode);
 void	*dlsym(void *handle, const char *name);

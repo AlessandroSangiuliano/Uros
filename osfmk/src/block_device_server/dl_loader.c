@@ -23,9 +23,12 @@
 /*
  * dl_loader.c — Dynamic module loading for block_device_server.
  *
- * Integrates libdl into the block device server.  Provides the I/O
- * callback, host symbol table (MIG stubs + libc + Mach VM functions),
- * and a convenience API for loading driver modules.
+ * The BDS is linked as a PIE executable with --export-dynamic and
+ * --hash-style=sysv so every symbol it defines (MIG stubs, libc,
+ * Mach VM/port/IPC, stack-protector, etc.) shows up in its own .dynsym.
+ * dl_bootstrap_self() hooks the running image into libdl's loaded-
+ * object list; dlopen'd modules then resolve their undefined symbols
+ * against it automatically — no hand-maintained host symbol array.
  *
  * Phase 1 I/O: modules are embedded in the executable as binary blobs
  * via objcopy (symbols _binary_<name>_so_start / _binary_<name>_so_size).
@@ -33,16 +36,12 @@
  */
 
 #include <mach.h>
-#include <mach/mach_traps.h>
 #include <stdio.h>
 #include <string.h>
 #include "block_server.h"
 #include "dl_loader.h"
 #include "dlfcn.h"
 #include "dl_internal.h"
-
-/* MIG-generated device_master user stubs */
-#include "device_master.h"
 
 /* ================================================================
  * Embedded module blobs (from objcopy)
@@ -131,86 +130,6 @@ static const struct dl_io_ops embedded_io_ops = {
 };
 
 /* ================================================================
- * Host symbol table
- *
- * Symbols that loaded modules can resolve against.  Includes:
- * - MIG device_master stubs (DMA, PCI, IRQ, I/O port, MMIO)
- * - Mach VM functions
- * - Mach port functions
- * - C library basics (printf, memcpy, memset, strcmp, strlen)
- * ================================================================ */
-
-/* Forward declarations for symbols from other translation units */
-extern kern_return_t mach_msg_send(mach_msg_header_t *);
-extern kern_return_t mach_msg_receive(mach_msg_header_t *);
-extern mach_msg_return_t mach_msg_overwrite(mach_msg_header_t *, mach_msg_option_t,
-					    mach_msg_size_t, mach_msg_size_t,
-					    mach_port_t, mach_msg_timeout_t,
-					    mach_port_t, mach_msg_header_t *,
-					    mach_msg_size_t);
-extern mach_port_t mig_get_reply_port(void);
-extern void mig_dealloc_reply_port(mach_port_t);
-extern void __stack_chk_fail_local(void);
-extern void __stack_chk_fail(void);
-extern unsigned long __stack_chk_guard;
-/* NDR_record is declared in mach/std_types.h (pulled in via mach.h) */
-
-static const struct dl_host_sym host_symtab[] = {
-	/* MIG NDR record (used by MIG-generated stubs) */
-	{ "NDR_record",              (void *)&NDR_record },
-
-	/* MIG device_master stubs */
-	{ "device_pci_config_read",  (void *)device_pci_config_read },
-	{ "device_pci_config_write", (void *)device_pci_config_write },
-	{ "device_intr_register",    (void *)device_intr_register },
-	{ "device_intr_unregister",  (void *)device_intr_unregister },
-	{ "device_dma_alloc",        (void *)device_dma_alloc },
-	{ "device_dma_free",         (void *)device_dma_free },
-	{ "device_dma_map_user",     (void *)device_dma_map_user },
-	{ "device_dma_alloc_sg",     (void *)device_dma_alloc_sg },
-	{ "device_mmio_map",         (void *)device_mmio_map },
-	{ "device_mmio_unmap",       (void *)device_mmio_unmap },
-	{ "device_io_port_read",     (void *)device_io_port_read },
-	{ "device_io_port_write",    (void *)device_io_port_write },
-
-	/* Mach VM */
-	{ "vm_allocate",             (void *)vm_allocate },
-	{ "vm_deallocate",           (void *)vm_deallocate },
-	{ "vm_protect",              (void *)vm_protect },
-	{ "mach_task_self",          (void *)mach_task_self },
-	{ "mach_task_self_",         (void *)&mach_task_self_ },
-	{ "mach_host_self",          (void *)mach_host_self },
-	{ "mach_reply_port",         (void *)mach_reply_port },
-
-	/* Mach ports */
-	{ "mach_port_allocate",      (void *)mach_port_allocate },
-	{ "mach_port_insert_right",  (void *)mach_port_insert_right },
-	{ "mach_port_move_member",   (void *)mach_port_move_member },
-
-	/* Mach IPC */
-	{ "mach_msg_send",           (void *)mach_msg_send },
-	{ "mach_msg_receive",        (void *)mach_msg_receive },
-	{ "mach_msg_overwrite",      (void *)mach_msg_overwrite },
-	{ "mig_get_reply_port",      (void *)mig_get_reply_port },
-	{ "mig_dealloc_reply_port",  (void *)mig_dealloc_reply_port },
-
-	/* C library */
-	{ "printf",                  (void *)printf },
-	{ "snprintf",                (void *)snprintf },
-	{ "memcpy",                  (void *)memcpy },
-	{ "memset",                  (void *)memset },
-	{ "strcmp",                   (void *)strcmp },
-	{ "strlen",                  (void *)strlen },
-
-	/* Stack protector */
-	{ "__stack_chk_fail_local",  (void *)__stack_chk_fail_local },
-	{ "__stack_chk_fail",        (void *)__stack_chk_fail },
-	{ "__stack_chk_guard",       (void *)&__stack_chk_guard },
-
-	{ NULL, NULL }
-};
-
-/* ================================================================
  * Public API
  * ================================================================ */
 
@@ -218,9 +137,15 @@ void
 blk_dl_init(void)
 {
 	dl_set_io_ops(&embedded_io_ops);
-	dl_set_host_symbols(host_symtab);
+
+	if (dl_bootstrap_self() != 0) {
+		printf("blk: dl_bootstrap_self failed: %s\n", dlerror());
+		printf("blk: module symbol resolution will fail\n");
+		return;
+	}
+
 	printf("blk: dynamic module loader initialised "
-	       "(%d embedded modules)\n",
+	       "(%d embedded modules, self-bootstrap OK)\n",
 	       (int)(sizeof(embedded_modules) / sizeof(embedded_modules[0])) - 1);
 }
 
