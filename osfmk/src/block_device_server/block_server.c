@@ -43,7 +43,7 @@
 #include "device_master.h"
 #include "device_server.h"
 #include "ahci_batch_server.h"
-#include "dl_loader.h"
+#include "modload.h"
 
 /* ================================================================
  * Global state
@@ -287,8 +287,9 @@ main(int argc, char **argv)
 
 	/* Initialise dynamic module loader and pull every module in
 	 * the "block" class from the bootstrap over MIG. */
-	blk_dl_init();
-	n_modules = blk_dl_load_class("block", modules, MAX_MODULES);
+	modload_init("blk");
+	n_modules = modload_load_class("block", "_module_ops",
+				       (void **)modules, MAX_MODULES);
 	modules[n_modules] = NULL;
 
 	if (n_modules == 0) {

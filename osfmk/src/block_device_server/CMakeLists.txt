@@ -144,7 +144,6 @@ set(BLK_SOURCES
   block_server.c
   block_partition.c
   block_device.c
-  dl_loader.c
   nostdlib_stubs.c
   ${DM_USER_C}
   ${AB_SERVER_C}
@@ -192,6 +191,7 @@ target_include_directories(block_device_server PRIVATE ${BLK_INCLUDE_DIRS})
 
 target_link_libraries(block_device_server PRIVATE
   -Wl,--start-group
+  libmodload
   libdl
   libpthreads
   libmach

@@ -21,11 +21,11 @@
  */
 
 /*
- * dl_loader.c — Dynamic module loading for block_device_server.
+ * modload.c — runtime module loader for class servers.
  *
- * The BDS is linked as a PIE executable with --export-dynamic and
- * --hash-style=sysv so every symbol it defines (MIG stubs, libc,
- * Mach VM/port/IPC, stack-protector, etc.) shows up in its own .dynsym.
+ * The server is linked as a PIE executable with --export-dynamic and
+ * --hash-style=sysv so every symbol it defines (MIG stubs, libc, Mach
+ * VM/port/IPC, stack-protector, etc.) shows up in its own .dynsym.
  * dl_bootstrap_self() hooks the running image into libdl's loaded-
  * object list; dlopen'd modules then resolve their undefined symbols
  * against it automatically — no hand-maintained host symbol array.
@@ -45,13 +45,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "block_server.h"
-#include "dl_loader.h"
+#include "modload.h"
 #include "dlfcn.h"
 #include "dl_internal.h"
 
 /* ================================================================
- * Cache of modules fetched from the bootstrap over MIG
+ * Per-instance state (one class server = one modload context)
  * ================================================================ */
 
 #define MAX_CACHED_MODULES	16
@@ -64,6 +63,7 @@ struct cached_module {
 
 static struct cached_module	cached_modules[MAX_CACHED_MODULES];
 static int			n_cached_modules;
+static const char	       *log_tag = "modload";
 
 static struct cached_module *
 find_cached_module(const char *name)
@@ -100,7 +100,7 @@ cache_read_file(const char *path, void **buf, unsigned int *size)
 
 	cm = find_cached_module(basename);
 	if (cm == NULL) {
-		printf("blk: module \"%s\" not in cache\n", basename);
+		printf("%s: module \"%s\" not in cache\n", log_tag, basename);
 		return -1;
 	}
 
@@ -127,7 +127,7 @@ static const struct dl_io_ops cache_io_ops = {
 };
 
 /* ================================================================
- * Fetch the module pool for our class from the bootstrap
+ * Fetch the module pool for a class from the bootstrap
  * ================================================================ */
 
 static int
@@ -146,8 +146,8 @@ fetch_class(const char *class)
 	kr = bootstrap_list_modules(bootstrap_port, class_buf,
 				    &names, &names_count);
 	if (kr != KERN_SUCCESS) {
-		printf("blk: bootstrap_list_modules(\"%s\") failed: 0x%x\n",
-		       class, kr);
+		printf("%s: bootstrap_list_modules(\"%s\") failed: 0x%x\n",
+		       log_tag, class, kr);
 		return 0;
 	}
 
@@ -157,7 +157,8 @@ fetch_class(const char *class)
 			break;
 
 		if (n_cached_modules >= MAX_CACHED_MODULES) {
-			printf("blk: module cache full, dropping \"%s\"\n", p);
+			printf("%s: module cache full, dropping \"%s\"\n",
+			       log_tag, p);
 			break;
 		}
 
@@ -173,9 +174,9 @@ fetch_class(const char *class)
 			kr = bootstrap_get_module(bootstrap_port, class_buf,
 						  name_buf, &data, &data_count);
 			if (kr != KERN_SUCCESS) {
-				printf("blk: bootstrap_get_module"
+				printf("%s: bootstrap_get_module"
 				       "(\"%s\", \"%s\") failed: 0x%x\n",
-				       class, p, kr);
+				       log_tag, class, p, kr);
 				p += len + 1;
 				continue;
 			}
@@ -202,35 +203,39 @@ fetch_class(const char *class)
  * ================================================================ */
 
 void
-blk_dl_init(void)
+modload_init(const char *tag)
 {
+	if (tag != NULL)
+		log_tag = tag;
+
 	dl_set_io_ops(&cache_io_ops);
 
 	if (dl_bootstrap_self() != 0) {
-		printf("blk: dl_bootstrap_self failed: %s\n", dlerror());
-		printf("blk: module symbol resolution will fail\n");
+		printf("%s: dl_bootstrap_self failed: %s\n",
+		       log_tag, dlerror());
+		printf("%s: module symbol resolution will fail\n", log_tag);
 		return;
 	}
 
-	printf("blk: dynamic module loader initialised "
-	       "(self-bootstrap OK)\n");
+	printf("%s: dynamic module loader initialised "
+	       "(self-bootstrap OK)\n", log_tag);
 }
 
 int
-blk_dl_load_class(const char *class,
-		  const struct block_driver_ops **out_ops, int max_ops)
+modload_load_class(const char *class, const char *sym_suffix,
+		   void **out_ops, int max_ops)
 {
 	int fetched, loaded = 0, i;
 
 	fetched = fetch_class(class);
 	if (fetched == 0) {
-		printf("blk: no modules in class \"%s\"\n", class);
+		printf("%s: no modules in class \"%s\"\n", log_tag, class);
 		return 0;
 	}
 
 	for (i = 0; i < n_cached_modules && loaded < max_ops; i++) {
-		const struct block_driver_ops *ops;
-		ops = blk_dl_load_module(cached_modules[i].name);
+		void *ops = modload_load_module(cached_modules[i].name,
+						sym_suffix);
 		if (ops != NULL)
 			out_ops[loaded++] = ops;
 	}
@@ -238,63 +243,59 @@ blk_dl_load_class(const char *class,
 	return loaded;
 }
 
-const struct block_driver_ops *
-blk_dl_load_module(const char *path)
+void *
+modload_load_module(const char *name, const char *sym_suffix)
 {
 	void *handle;
-	const struct block_driver_ops *ops;
-	const char *sym_name;
+	void *ops;
 	const char *basename;
+	char sym_buf[96];
+	size_t base_len = 0;
+	size_t suf_len;
+	const char *p;
 
-	handle = dlopen(path, RTLD_NOW);
+	handle = dlopen(name, RTLD_NOW);
 	if (handle == NULL) {
-		printf("blk: dlopen(\"%s\") failed: %s\n",
-		       path, dlerror());
+		printf("%s: dlopen(\"%s\") failed: %s\n",
+		       log_tag, name, dlerror());
 		return NULL;
 	}
 
 	/*
-	 * Derive the ops symbol name from the module filename.
-	 * "ahci.so" → "ahci_module_ops"
-	 * "virtio_blk.so" → "virtio_blk_module_ops"
+	 * Derive the ops symbol name from the module filename:
+	 *   "ahci.so"       + "_module_ops"  → "ahci_module_ops"
+	 *   "virtio_blk.so" + "_module_ops"  → "virtio_blk_module_ops"
+	 *   "pci_scan.so"   + "_discovery_ops" → "pci_scan_discovery_ops"
 	 */
-	basename = path;
-	{
-		const char *p = path;
-		while (*p != '\0') {
-			if (*p == '/')
-				basename = p + 1;
-			p++;
-		}
+	basename = name;
+	for (p = name; *p != '\0'; p++) {
+		if (*p == '/')
+			basename = p + 1;
 	}
 
-	{
-		char sym_buf[64];
-		unsigned int len = 0;
-		const char *p = basename;
-
-		while (*p != '\0' && *p != '.' && len < sizeof(sym_buf) - 13) {
-			sym_buf[len++] = *p++;
-		}
-		memcpy(sym_buf + len, "_module_ops", 12); /* includes NUL */
-		sym_name = sym_buf;
-
-		ops = (const struct block_driver_ops *)dlsym(handle, sym_name);
-	}
-
-	if (ops == NULL) {
-		printf("blk: dlsym(\"%s\") failed: %s\n",
-		       sym_name, dlerror());
+	suf_len = strlen(sym_suffix);
+	if (suf_len + 1 >= sizeof(sym_buf)) {
+		printf("%s: sym_suffix too long\n", log_tag);
 		dlclose(handle);
 		return NULL;
 	}
 
-	printf("blk: loaded module \"%s\" (%s)\n", path, ops->name);
-	return ops;
-}
+	for (p = basename; *p != '\0' && *p != '.' &&
+			   base_len < sizeof(sym_buf) - suf_len - 1; p++) {
+		sym_buf[base_len++] = *p;
+	}
+	memcpy(sym_buf + base_len, sym_suffix, suf_len);
+	sym_buf[base_len + suf_len] = '\0';
 
-void
-blk_dl_unload_module(const char *path)
-{
-	(void)path;
+	ops = dlsym(handle, sym_buf);
+	if (ops == NULL) {
+		printf("%s: dlsym(\"%s\") failed: %s\n",
+		       log_tag, sym_buf, dlerror());
+		dlclose(handle);
+		return NULL;
+	}
+
+	printf("%s: loaded module \"%s\" (sym %s)\n",
+	       log_tag, name, sym_buf);
+	return ops;
 }
