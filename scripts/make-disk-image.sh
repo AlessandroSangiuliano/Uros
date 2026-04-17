@@ -77,6 +77,8 @@ DEFAULT_PAGER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/default_pager"
 HELLO_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_server"
 IPC_BENCH="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ipc_bench"
 BLOCK_DEVICE_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/block_device_server"
+AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
+VIRTIO_BLK_MODULE="$BUILD_DIR/src/block_device_server/modules/virtio_blk.so"
 EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
 PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 
@@ -107,6 +109,18 @@ fi
 if [ ! -f "$BLOCK_DEVICE_SERVER" ]; then
     echo "ERRORE: block_device_server non trovato: $BLOCK_DEVICE_SERVER"
     echo "  Build con: cd $BUILD_DIR && ninja block_device_server"
+    exit 1
+fi
+
+if [ ! -f "$AHCI_MODULE" ]; then
+    echo "ERRORE: ahci.so non trovato: $AHCI_MODULE"
+    echo "  Build con: cd $BUILD_DIR && ninja ahci_module"
+    exit 1
+fi
+
+if [ ! -f "$VIRTIO_BLK_MODULE" ]; then
+    echo "ERRORE: virtio_blk.so non trovato: $VIRTIO_BLK_MODULE"
+    echo "  Build con: cd $BUILD_DIR && ninja virtio_blk_module"
     exit 1
 fi
 
@@ -193,6 +207,12 @@ write $IPC_BENCH ipc_bench
 write $BLOCK_DEVICE_SERVER block_device_server
 write $EXT2_SERVER ext_server
 write $PTHREAD_TEST pthread_test
+mkdir modules
+cd modules
+mkdir block
+cd block
+write $AHCI_MODULE ahci.so
+write $VIRTIO_BLK_MODULE virtio_blk.so
 DBGFS
 
 echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"
@@ -206,6 +226,8 @@ echo "  /mach_servers/default_pager  → $(stat -c%s "$DEFAULT_PAGER") bytes"
 echo "  /mach_servers/hello_server   → $(stat -c%s "$HELLO_SERVER") bytes"
 echo "  /mach_servers/ipc_bench      → $(stat -c%s "$IPC_BENCH") bytes"
 echo "  /mach_servers/block_device_server → $(stat -c%s "$BLOCK_DEVICE_SERVER") bytes"
+echo "  /mach_servers/modules/block/ahci.so       → $(stat -c%s "$AHCI_MODULE") bytes"
+echo "  /mach_servers/modules/block/virtio_blk.so → $(stat -c%s "$VIRTIO_BLK_MODULE") bytes"
 echo "  /mach_servers/ext_server    → $(stat -c%s "$EXT2_SERVER") bytes"
 
 # --- 5. Inserimento partizione ext2 nell'immagine disco ---
@@ -231,7 +253,11 @@ echo "        ├── default_pager"
 echo "        ├── hello_server"
 echo "        ├── ipc_bench"
 echo "        ├── block_device_server"
-echo "        └── ext_server"
+echo "        ├── ext_server"
+echo "        └── modules/"
+echo "            └── block/"
+echo "                ├── ahci.so"
+echo "                └── virtio_blk.so"
 echo "  hd0b:   settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (swap, ${SWAP_SIZE_MB} MB)"
 echo ""
 echo "Flusso di boot:"

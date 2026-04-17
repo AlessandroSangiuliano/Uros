@@ -260,6 +260,17 @@ file_is_executable(struct file *fp)
 	return (*fp->f_ops->file_is_executable)(fp->f_private);
 }
 
+int
+readdir_file(struct file *fp, struct fs_dirent *out, unsigned int max,
+	     unsigned int *out_count)
+{
+	if (invalid_fp(fp) || out == NULL || out_count == NULL)
+		return FS_INVALID_PARAMETER;
+	if (fp->f_ops->readdir == NULL)
+		return FS_INVALID_PARAMETER;
+	return (*fp->f_ops->readdir)(fp->f_private, out, max, out_count);
+}
+
 /*
  * Return TRUE if string 2 is a prefix of string 1.
  */

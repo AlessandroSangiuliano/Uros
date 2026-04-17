@@ -102,7 +102,9 @@ struct fs_ops minixfs_ops = {
 	minixfs_read_file,
 	minixfs_file_size,
 	minixfs_file_is_directory,
-	minixfs_file_is_executable
+	minixfs_file_is_executable,
+	NULL,		/* readdir — not implemented for minixfs */
+	0		/* no per-mount state */
 };
 
 /*

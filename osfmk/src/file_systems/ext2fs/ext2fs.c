@@ -347,6 +347,9 @@ struct ext2_mount {
 	struct dcache_entry	 m_dcache[DCACHE_SIZE];
 };
 
+static int ext2fs_readdir(fs_private_t, struct fs_dirent *,
+			  unsigned int, unsigned int *);
+
 struct fs_ops ext2fs_ops = {
 	ext2fs_open_file,
 	ext2fs_close_file,
@@ -354,6 +357,7 @@ struct fs_ops ext2fs_ops = {
 	ext2fs_file_size,
 	ext2fs_file_is_directory,
 	ext2fs_file_is_executable,
+	ext2fs_readdir,
 	sizeof(struct ext2_mount)
 };
 
@@ -1876,6 +1880,66 @@ ext2fs_file_is_directory(fs_private_t private)
 {
   	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
 	return((fp->f_ic->i_mode & IFMT) == IFDIR);
+}
+
+/*
+ * ext2fs_readdir — iterate every directory entry and fill an array of
+ * fs_dirent.  Used by the bootstrap to enumerate module directories.
+ *
+ * Mirrors the block-walking loop in search_directory() but emits names
+ * instead of matching one.  Stops when max entries are written; the
+ * caller can detect truncation by comparing *out_count to what it
+ * expected or by re-reading with a larger buffer.
+ */
+static int
+ext2fs_readdir(fs_private_t private,
+	       struct fs_dirent *out,
+	       unsigned int max,
+	       unsigned int *out_count)
+{
+	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	vm_offset_t		buf;
+	vm_size_t		buf_size;
+	vm_offset_t		offset;
+	struct ext2_dir_entry	*dp;
+	unsigned int		n = 0;
+	int			rc;
+	unsigned int		nlen;
+
+	if ((fp->f_ic->i_mode & IFMT) != IFDIR)
+		return FS_NOT_DIRECTORY;
+
+	offset = 0;
+	while (offset < fp->f_ic->i_size && n < max) {
+		buf = 0;
+		buf_size = 0;
+		rc = buf_read_file(fp, offset, &buf, &buf_size);
+		if (rc != KERN_SUCCESS)
+			return rc;
+		if (buf_size == 0)
+			break;
+
+		dp = (struct ext2_dir_entry *)buf;
+		if (le16_to_cpu(dp->rec_len) == 0)
+			break;	/* corrupt — avoid infinite loop */
+
+		if (le32_to_cpu(dp->inode) != 0) {
+			nlen = dp->name_len;
+			if (nlen > FS_DIRENT_NAME_MAX)
+				nlen = FS_DIRENT_NAME_MAX;
+
+			out[n].ino  = le32_to_cpu(dp->inode);
+			out[n].type = dp->file_type;
+			memcpy(out[n].name, dp->name, nlen);
+			out[n].name[nlen] = '\0';
+			n++;
+		}
+
+		offset += le16_to_cpu(dp->rec_len);
+	}
+
+	*out_count = n;
+	return KERN_SUCCESS;
 }
 
 size_t
