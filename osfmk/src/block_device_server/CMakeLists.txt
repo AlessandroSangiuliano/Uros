@@ -137,38 +137,6 @@ set_target_properties(virtio_blk_module PROPERTIES
 )
 
 # ===========================================================================
-# Embed .so modules as binary blobs via objcopy
-# ===========================================================================
-
-set(AHCI_SO "${CMAKE_CURRENT_BINARY_DIR}/modules/ahci.so")
-set(AHCI_OBJ "${CMAKE_CURRENT_BINARY_DIR}/ahci_so_blob.o")
-
-add_custom_command(
-  OUTPUT ${AHCI_OBJ}
-  COMMAND objcopy -I binary -O elf32-i386 -B i386
-    --rename-section .data=.rodata,alloc,load,readonly,data,contents
-    ahci.so ${AHCI_OBJ}
-  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
-  DEPENDS ahci_module
-  COMMENT "Embedding ahci.so as binary blob"
-  VERBATIM
-)
-
-set(VIRTIO_SO "${CMAKE_CURRENT_BINARY_DIR}/modules/virtio_blk.so")
-set(VIRTIO_OBJ "${CMAKE_CURRENT_BINARY_DIR}/virtio_blk_so_blob.o")
-
-add_custom_command(
-  OUTPUT ${VIRTIO_OBJ}
-  COMMAND objcopy -I binary -O elf32-i386 -B i386
-    --rename-section .data=.rodata,alloc,load,readonly,data,contents
-    virtio_blk.so ${VIRTIO_OBJ}
-  WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
-  DEPENDS virtio_blk_module
-  COMMENT "Embedding virtio_blk.so as binary blob"
-  VERBATIM
-)
-
-# ===========================================================================
 # Framework source files (block_device_server executable)
 # ===========================================================================
 
@@ -201,15 +169,18 @@ add_custom_command(
 )
 
 # ===========================================================================
-# Build target — executable with embedded module blobs
+# Build target — .so modules are fetched at runtime from the bootstrap
+# over MIG, so nothing is embedded in the executable any more.
 # ===========================================================================
 
 add_executable(block_device_server
   ${BLK_SOURCES}
   ${LOCAL_DEVICE_SERVER_H}
-  ${AHCI_OBJ}
-  ${VIRTIO_OBJ}
 )
+
+# Ensure the .so modules are built when we build the server so the
+# disk-image script can pick them up.
+add_dependencies(block_device_server ahci_module virtio_blk_module)
 
 target_compile_options(block_device_server PRIVATE ${BLK_COMPILE_OPTIONS} -fPIC)
 

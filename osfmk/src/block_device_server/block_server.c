@@ -66,25 +66,16 @@ int			n_partitions;
 /* ================================================================
  * Module table — dynamically loaded driver modules
  *
- * Populated at boot by loading embedded .so blobs via dlopen().
- * The table is NULL-terminated; MAX_MODULES must be large enough
- * for all boot-time modules plus future hotplug additions.
+ * Populated at boot by blk_dl_load_class("block"), which fetches every
+ * .so in /mach_servers/modules/block/ from the bootstrap over MIG and
+ * dlopens each one.  NULL-terminated so the PCI scan loop can iterate
+ * without a separate count.
  * ================================================================ */
 
 #define MAX_MODULES	16
 
 static const struct block_driver_ops *modules[MAX_MODULES + 1];
 static int n_modules;
-
-/*
- * Module paths for boot-time loading (embedded as binary blobs).
- * Future: HAL server will notify us which modules to load.
- */
-static const char *boot_module_paths[] = {
-	"ahci.so",
-	"virtio_blk.so",
-	NULL
-};
 
 /* ================================================================
  * PCI configuration registers (common across all modules)
@@ -294,18 +285,11 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Initialise dynamic module loader and load boot modules */
+	/* Initialise dynamic module loader and pull every module in
+	 * the "block" class from the bootstrap over MIG. */
 	blk_dl_init();
-	{
-		int i;
-		for (i = 0; boot_module_paths[i] != NULL; i++) {
-			const struct block_driver_ops *ops;
-			ops = blk_dl_load_module(boot_module_paths[i]);
-			if (ops != NULL && n_modules < MAX_MODULES)
-				modules[n_modules++] = ops;
-		}
-		modules[n_modules] = NULL;
-	}
+	n_modules = blk_dl_load_class("block", modules, MAX_MODULES);
+	modules[n_modules] = NULL;
 
 	if (n_modules == 0) {
 		printf("blk: no driver modules loaded, exiting\n");

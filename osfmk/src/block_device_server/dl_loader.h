@@ -23,9 +23,10 @@
 /*
  * dl_loader.h — Dynamic module loading support for block_device_server.
  *
- * Provides the libdl I/O callback, host symbol table, and module
- * loading interface.  Phase 1: modules are embedded as binary blobs
- * in the server executable via objcopy.  Future: read from filesystem.
+ * Modules are fetched from the bootstrap over MIG
+ * (bootstrap_list_modules / bootstrap_get_module) as .so ELF images
+ * published under /mach_servers/modules/<class>/, cached in-memory,
+ * and resolved via libdl against the BDS's own dynamic symbol table.
  */
 
 #ifndef _DL_LOADER_H_
@@ -34,14 +35,25 @@
 #include "block_server.h"
 
 /*
- * Initialise libdl: set I/O callbacks and host symbol table.
- * Must be called before any dlopen() call.
+ * Initialise libdl: set the cache I/O callback and bootstrap the
+ * running image into libdl's loaded-object list so dlopen'd modules
+ * can resolve undefined symbols against it.  Must be called before
+ * any blk_dl_load_class() / blk_dl_load_module() call.
  */
 void	blk_dl_init(void);
 
 /*
- * Load a driver module by path and return its block_driver_ops.
- * Returns NULL on failure (prints error message).
+ * Fetch every module in <class> from the bootstrap (via MIG), dlopen
+ * each one and store its block_driver_ops in out_ops[].  Returns the
+ * number of modules successfully loaded (capped at max_ops).
+ */
+int	blk_dl_load_class(const char *class,
+			  const struct block_driver_ops **out_ops,
+			  int max_ops);
+
+/*
+ * Load a single module already present in the cache by name.  Returns
+ * NULL on failure (prints error message).
  */
 const struct block_driver_ops *blk_dl_load_module(const char *path);
 

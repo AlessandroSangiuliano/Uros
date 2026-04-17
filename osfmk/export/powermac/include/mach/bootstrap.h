@@ -125,12 +125,62 @@ kern_return_t bootstrap_completed
 );
 #endif	/* defined(LINTLIBRARY) */
 
+/* Routine bootstrap_list_modules */
+#ifdef	mig_external
+mig_external
+#else
+extern
+#endif	/* mig_external */
+kern_return_t bootstrap_list_modules
+#if	defined(LINTLIBRARY)
+    (bootstrap, class, names, namesCnt)
+	mach_port_t bootstrap;
+	module_name_t class;
+	vm_offset_t *names;
+	mach_msg_type_number_t *namesCnt;
+{ return bootstrap_list_modules(bootstrap, class, names, namesCnt); }
+#else
+(
+	mach_port_t bootstrap,
+	module_name_t class,
+	vm_offset_t *names,
+	mach_msg_type_number_t *namesCnt
+);
+#endif	/* defined(LINTLIBRARY) */
+
+/* Routine bootstrap_get_module */
+#ifdef	mig_external
+mig_external
+#else
+extern
+#endif	/* mig_external */
+kern_return_t bootstrap_get_module
+#if	defined(LINTLIBRARY)
+    (bootstrap, class, name, data, dataCnt)
+	mach_port_t bootstrap;
+	module_name_t class;
+	module_name_t name;
+	vm_offset_t *data;
+	mach_msg_type_number_t *dataCnt;
+{ return bootstrap_get_module(bootstrap, class, name, data, dataCnt); }
+#else
+(
+	mach_port_t bootstrap,
+	module_name_t class,
+	module_name_t name,
+	vm_offset_t *data,
+	mach_msg_type_number_t *dataCnt
+);
+#endif	/* defined(LINTLIBRARY) */
+
 #ifndef subsystem_to_name_map_bootstrap
 #define subsystem_to_name_map_bootstrap \
     { "bootstrap_ports", 1000001 },\
     { "bootstrap_arguments", 1000002 },\
     { "bootstrap_environment", 1000003 },\
-    { "bootstrap_completed", 1000004 }
+    { "bootstrap_completed", 1000004 },\
+    { "bootstrap_list_modules", 1000005 },\
+    { "bootstrap_get_module", 1000006 }
 #endif
 
 #endif	 /* _bootstrap_user_ */

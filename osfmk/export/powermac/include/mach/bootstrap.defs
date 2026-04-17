@@ -80,3 +80,32 @@ simpleroutine bootstrap_completed(
 		bootstrap		: mach_port_t;
 		task			: task_t);
 
+/*
+ *	Module pool: a class server (block_device_server, net_server, ...)
+ *	calls these to enumerate and fetch the plug-in modules the boot
+ *	filesystem publishes under /mach_servers/modules/<class>/.
+ *
+ *	bootstrap_list_modules returns the module names as one NUL-terminated
+ *	string per name, concatenated back-to-back (caller splits).
+ *	bootstrap_get_module returns the raw module bytes (a .so ELF image)
+ *	for the named module.  Both outputs are vm_allocate'd and returned
+ *	out-of-line; the caller must vm_deallocate them.
+ */
+#if	!KERNEL_SERVER
+type module_name_t = c_string[*:64];
+
+routine bootstrap_list_modules(
+		bootstrap		: mach_port_t;
+		class			: module_name_t;
+	out	names			: pointer_t, Dealloc);
+
+routine bootstrap_get_module(
+		bootstrap		: mach_port_t;
+		class			: module_name_t;
+		name			: module_name_t;
+	out	data			: pointer_t, Dealloc);
+#else
+skip;	/* bootstrap_list_modules — userspace only */
+skip;	/* bootstrap_get_module — userspace only */
+#endif
+

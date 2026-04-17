@@ -171,7 +171,9 @@ struct fs_ops ufs_ops = {
 	ufs_read_file,
 	ufs_file_size,
 	ufs_file_is_directory,
-	ufs_file_is_executable
+	ufs_file_is_executable,
+	NULL,		/* readdir — not implemented for ufs */
+	0		/* no per-mount state */
 };
 
 /*

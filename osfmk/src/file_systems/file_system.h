@@ -57,6 +57,23 @@ struct file {
 	struct device	f_dev;		/* device */
 };
 
+/*
+ * One directory entry returned by readdir_file().  Fixed-size so the
+ * bootstrap can enumerate module directories with a plain stack/VM
+ * buffer, no malloc.
+ */
+#define FS_DIRENT_NAME_MAX	255
+
+#define FS_DT_UNKNOWN	0
+#define FS_DT_REG	8
+#define FS_DT_DIR	4
+
+struct fs_dirent {
+	unsigned long	ino;				/* inode number */
+	unsigned char	type;				/* FS_DT_* */
+	char		name[FS_DIRENT_NAME_MAX + 1];	/* NUL-terminated */
+};
+
 struct fs_ops {
 	int		(*open_file)(struct device *,
 				     const char *,
@@ -69,6 +86,16 @@ struct fs_ops {
     	size_t 		(*file_size)(fs_private_t);
 	boolean_t 	(*file_is_directory)(fs_private_t);
 	boolean_t 	(*file_is_executable)(fs_private_t);
+	/*
+	 * Enumerate directory entries.  fp must be a directory opened
+	 * via open_file().  Fills up to max entries into out[], writes
+	 * the count into *out_count.  Returns 0 on success.  May be
+	 * NULL — caller should check.
+	 */
+	int		(*readdir)(fs_private_t,
+				   struct fs_dirent *out,
+				   unsigned int max,
+				   unsigned int *out_count);
 	vm_size_t	mount_size;	/* per-mount state size; 0 = none.
 					   When > 0, the dispatch layer
 					   vm_allocate's mount_data on
@@ -92,5 +119,7 @@ extern int read_file(struct file *, vm_offset_t, vm_offset_t, vm_size_t);
 extern size_t file_size(struct file *);
 extern boolean_t file_is_directory(struct file *);
 extern boolean_t file_is_executable(struct file *);
+extern int readdir_file(struct file *, struct fs_dirent *, unsigned int,
+			unsigned int *);
 
 #endif /* _FS_FILE_SYSTEM_H_ */

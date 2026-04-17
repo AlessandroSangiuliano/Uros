@@ -30,62 +30,64 @@
  * object list; dlopen'd modules then resolve their undefined symbols
  * against it automatically — no hand-maintained host symbol array.
  *
- * Phase 1 I/O: modules are embedded in the executable as binary blobs
- * via objcopy (symbols _binary_<name>_so_start / _binary_<name>_so_size).
- * Future: read from ext2 filesystem after mount.
+ * Module source: the bootstrap server publishes plug-in .so files under
+ *   /mach_servers/modules/<class>/
+ * on the boot filesystem.  At init time we call bootstrap_list_modules
+ * and bootstrap_get_module over MIG to pull the bytes into a small
+ * in-memory cache, which libdl's read_file callback then serves to
+ * dlopen().
  */
 
 #include <mach.h>
+#include <mach/mach_traps.h>
+#include <mach/bootstrap.h>
+#include <mach/module_pool.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 #include "block_server.h"
 #include "dl_loader.h"
 #include "dlfcn.h"
 #include "dl_internal.h"
 
 /* ================================================================
- * Embedded module blobs (from objcopy)
- *
- * For each .so, the linker provides:
- *   _binary_ahci_so_start, _binary_ahci_so_end, _binary_ahci_so_size
- *   _binary_virtio_blk_so_start, ...
+ * Cache of modules fetched from the bootstrap over MIG
  * ================================================================ */
 
-extern const char _binary_ahci_so_start[];
-extern const char _binary_ahci_so_end[];
-extern const char _binary_virtio_blk_so_start[];
-extern const char _binary_virtio_blk_so_end[];
+#define MAX_CACHED_MODULES	16
 
-struct embedded_module {
-	const char	*path;
-	const char	*data;
-	const char	*data_end;
+struct cached_module {
+	char		name[MODULE_NAME_MAX];
+	vm_offset_t	data;		/* vm_allocate'd by bootstrap */
+	vm_size_t	size;		/* bytes in .so */
 };
 
-static const struct embedded_module embedded_modules[] = {
-	{ "ahci.so",
-	  _binary_ahci_so_start,
-	  _binary_ahci_so_end },
-	{ "virtio_blk.so",
-	  _binary_virtio_blk_so_start,
-	  _binary_virtio_blk_so_end },
-	{ NULL, NULL, NULL }
-};
+static struct cached_module	cached_modules[MAX_CACHED_MODULES];
+static int			n_cached_modules;
+
+static struct cached_module *
+find_cached_module(const char *name)
+{
+	int i;
+	for (i = 0; i < n_cached_modules; i++) {
+		if (strcmp(cached_modules[i].name, name) == 0)
+			return &cached_modules[i];
+	}
+	return NULL;
+}
 
 /* ================================================================
- * I/O callback: read from embedded blobs
+ * I/O callback: serve dlopen() reads from the cache
  * ================================================================ */
 
 static int
-embedded_read_file(const char *path, void **buf, unsigned int *size)
+cache_read_file(const char *path, void **buf, unsigned int *size)
 {
-	const struct embedded_module *em;
 	const char *basename;
+	const struct cached_module *cm;
 	vm_offset_t copy;
-	vm_size_t blobsize;
 	kern_return_t kr;
 
-	/* Extract basename from path (e.g., "/modules/ahci.so" → "ahci.so") */
 	basename = path;
 	{
 		const char *p = path;
@@ -96,38 +98,104 @@ embedded_read_file(const char *path, void **buf, unsigned int *size)
 		}
 	}
 
-	for (em = embedded_modules; em->path != NULL; em++) {
-		if (strcmp(basename, em->path) == 0) {
-			blobsize = (vm_size_t)(em->data_end - em->data);
-
-			/* Allocate a copy — libdl needs a writable buffer */
-			copy = 0;
-			kr = vm_allocate(mach_task_self(), &copy,
-					 blobsize, TRUE);
-			if (kr != KERN_SUCCESS)
-				return -1;
-
-			memcpy((void *)copy, em->data, blobsize);
-			*buf = (void *)copy;
-			*size = (unsigned int)blobsize;
-			return 0;
-		}
+	cm = find_cached_module(basename);
+	if (cm == NULL) {
+		printf("blk: module \"%s\" not in cache\n", basename);
+		return -1;
 	}
 
-	printf("blk: module \"%s\" not found in embedded blobs\n", path);
-	return -1;
+	copy = 0;
+	kr = vm_allocate(mach_task_self(), &copy, cm->size, TRUE);
+	if (kr != KERN_SUCCESS)
+		return -1;
+
+	memcpy((void *)copy, (const void *)cm->data, cm->size);
+	*buf = (void *)copy;
+	*size = (unsigned int)cm->size;
+	return 0;
 }
 
 static void
-embedded_free_buf(void *buf, unsigned int size)
+cache_free_buf(void *buf, unsigned int size)
 {
 	vm_deallocate(mach_task_self(), (vm_offset_t)buf, size);
 }
 
-static const struct dl_io_ops embedded_io_ops = {
-	.read_file = embedded_read_file,
-	.free_buf  = embedded_free_buf,
+static const struct dl_io_ops cache_io_ops = {
+	.read_file = cache_read_file,
+	.free_buf  = cache_free_buf,
 };
+
+/* ================================================================
+ * Fetch the module pool for our class from the bootstrap
+ * ================================================================ */
+
+static int
+fetch_class(const char *class)
+{
+	kern_return_t kr;
+	vm_offset_t names = 0;
+	mach_msg_type_number_t names_count = 0;
+	module_name_t class_buf;
+	const char *p;
+	int added = 0;
+
+	strncpy(class_buf, class, sizeof(class_buf) - 1);
+	class_buf[sizeof(class_buf) - 1] = '\0';
+
+	kr = bootstrap_list_modules(bootstrap_port, class_buf,
+				    &names, &names_count);
+	if (kr != KERN_SUCCESS) {
+		printf("blk: bootstrap_list_modules(\"%s\") failed: 0x%x\n",
+		       class, kr);
+		return 0;
+	}
+
+	for (p = (const char *)names; p < (const char *)names + names_count; ) {
+		size_t len = strlen(p);
+		if (len == 0)
+			break;
+
+		if (n_cached_modules >= MAX_CACHED_MODULES) {
+			printf("blk: module cache full, dropping \"%s\"\n", p);
+			break;
+		}
+
+		{
+			module_name_t name_buf;
+			vm_offset_t data = 0;
+			mach_msg_type_number_t data_count = 0;
+			struct cached_module *cm;
+
+			strncpy(name_buf, p, sizeof(name_buf) - 1);
+			name_buf[sizeof(name_buf) - 1] = '\0';
+
+			kr = bootstrap_get_module(bootstrap_port, class_buf,
+						  name_buf, &data, &data_count);
+			if (kr != KERN_SUCCESS) {
+				printf("blk: bootstrap_get_module"
+				       "(\"%s\", \"%s\") failed: 0x%x\n",
+				       class, p, kr);
+				p += len + 1;
+				continue;
+			}
+
+			cm = &cached_modules[n_cached_modules++];
+			strncpy(cm->name, p, sizeof(cm->name) - 1);
+			cm->name[sizeof(cm->name) - 1] = '\0';
+			cm->data = data;
+			cm->size = data_count;
+			added++;
+		}
+
+		p += len + 1;
+	}
+
+	if (names != 0)
+		vm_deallocate(mach_task_self(), names, names_count);
+
+	return added;
+}
 
 /* ================================================================
  * Public API
@@ -136,7 +204,7 @@ static const struct dl_io_ops embedded_io_ops = {
 void
 blk_dl_init(void)
 {
-	dl_set_io_ops(&embedded_io_ops);
+	dl_set_io_ops(&cache_io_ops);
 
 	if (dl_bootstrap_self() != 0) {
 		printf("blk: dl_bootstrap_self failed: %s\n", dlerror());
@@ -145,8 +213,29 @@ blk_dl_init(void)
 	}
 
 	printf("blk: dynamic module loader initialised "
-	       "(%d embedded modules, self-bootstrap OK)\n",
-	       (int)(sizeof(embedded_modules) / sizeof(embedded_modules[0])) - 1);
+	       "(self-bootstrap OK)\n");
+}
+
+int
+blk_dl_load_class(const char *class,
+		  const struct block_driver_ops **out_ops, int max_ops)
+{
+	int fetched, loaded = 0, i;
+
+	fetched = fetch_class(class);
+	if (fetched == 0) {
+		printf("blk: no modules in class \"%s\"\n", class);
+		return 0;
+	}
+
+	for (i = 0; i < n_cached_modules && loaded < max_ops; i++) {
+		const struct block_driver_ops *ops;
+		ops = blk_dl_load_module(cached_modules[i].name);
+		if (ops != NULL)
+			out_ops[loaded++] = ops;
+	}
+
+	return loaded;
 }
 
 const struct block_driver_ops *
@@ -168,8 +257,6 @@ blk_dl_load_module(const char *path)
 	 * Derive the ops symbol name from the module filename.
 	 * "ahci.so" → "ahci_module_ops"
 	 * "virtio_blk.so" → "virtio_blk_module_ops"
-	 *
-	 * We build the symbol name in a small buffer.
 	 */
 	basename = path;
 	{
@@ -209,6 +296,5 @@ blk_dl_load_module(const char *path)
 void
 blk_dl_unload_module(const char *path)
 {
-	/* For future use — currently modules are never unloaded at boot */
 	(void)path;
 }
