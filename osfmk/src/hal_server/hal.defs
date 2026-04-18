@@ -1,0 +1,44 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * MIG interface of the HAL server.  Three RPCs:
+ *
+ *   hal_list_devices     — return the full device registry (OOL)
+ *   hal_get_device_info  — return one device entry by PCI BDF
+ *   hal_register_driver  — subscribe a driver server to a class mask;
+ *                          subsequent hotplug adds of matching devices
+ *                          will be notified on driver_port
+ *
+ * The out buffer of hal_list_devices is an array of struct
+ * hal_device_info laid out back-to-back (see hal_server.h).
+ */
+
+subsystem hal 2970;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+serverprefix hal_;
+userprefix  hal_;
+
+routine list_devices(
+		hal_port	: mach_port_t;
+	out	devices		: pointer_t, Dealloc;
+	out	n_devices	: unsigned);
+
+routine get_device_info(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	out	vendor_device	: unsigned;
+	out	class_rev	: unsigned;
+	out	irq		: unsigned;
+	out	status		: unsigned);
+
+routine register_driver(
+		hal_port	: mach_port_t;
+	in	class_mask	: unsigned;
+	in	class_match	: unsigned;
+	in	driver_port	: mach_port_t);
