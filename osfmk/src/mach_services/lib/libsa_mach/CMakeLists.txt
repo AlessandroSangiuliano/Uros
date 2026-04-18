@@ -35,7 +35,7 @@ endif()
 add_library(libsa_mach STATIC ${LIB_SOURCES})
 
 # printf.c includes <device/device.h> which is MIG-generated
-add_dependencies(libsa_mach mig_device_header)
+add_dependencies(libsa_mach mig_device_header mig_mach_public_headers)
 
 
 # Apply C-only compatibility options and include math.h from project

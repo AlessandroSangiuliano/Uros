@@ -26,6 +26,8 @@ add_custom_command(
 # Library only contains the user-side MIG stub
 add_library(libservice STATIC ${SERVICE_USER_C})
 
+add_dependencies(libservice mig_mach_public_headers)
+
 target_compile_options(libservice PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
 )

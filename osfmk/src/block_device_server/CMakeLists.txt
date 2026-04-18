@@ -161,6 +161,7 @@ add_library(ahci_module SHARED
   ssp_module_stub.c
   ${DM_USER_C}
 )
+add_dependencies(ahci_module mig_mach_public_headers)
 target_compile_options(ahci_module PRIVATE ${BLK_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(ahci_module PRIVATE MACH_IPC_COMPAT=0)
 target_include_directories(ahci_module PRIVATE ${BLK_INCLUDE_DIRS})
@@ -178,6 +179,7 @@ add_library(virtio_blk_module SHARED
   ssp_module_stub.c
   ${DM_USER_C}
 )
+add_dependencies(virtio_blk_module mig_mach_public_headers)
 target_compile_options(virtio_blk_module PRIVATE ${BLK_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(virtio_blk_module PRIVATE MACH_IPC_COMPAT=0)
 target_include_directories(virtio_blk_module PRIVATE ${BLK_INCLUDE_DIRS})
@@ -267,7 +269,7 @@ target_link_options(block_device_server PRIVATE
   -Wl,--build-id=none
 )
 
-add_dependencies(block_device_server mig_device_header)
+add_dependencies(block_device_server mig_device_header mig_mach_public_headers)
 
 set_target_properties(block_device_server PROPERTIES
   OUTPUT_NAME "block_device_server"

@@ -44,7 +44,7 @@ add_library(libsa_fs STATIC ${SA_FS_SOURCES})
 set_target_properties(libsa_fs PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # ufs.c and ext2fs.c include <device/device.h> which is MIG-generated
-add_dependencies(libsa_fs mig_device_header)
+add_dependencies(libsa_fs mig_device_header mig_mach_public_headers)
 
 target_compile_options(libsa_fs PRIVATE
   -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2

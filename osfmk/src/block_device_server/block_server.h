@@ -242,8 +242,6 @@ rdtsc(void)
 	return tsc;
 }
 
-/* Not yet in our exported headers */
-extern kern_return_t mach_port_set_protected_payload(
-    mach_port_t task, mach_port_t port, unsigned long payload);
+/* mach_port_set_protected_payload now comes from <mach/mach_port.h> (MIG-generated) */
 
 #endif /* _BLOCK_SERVER_H_ */

@@ -135,6 +135,7 @@ add_library(hal_pci_scan_module SHARED
   ssp_module_stub.c
   ${DM_USER_C}
 )
+add_dependencies(hal_pci_scan_module mig_mach_public_headers)
 target_compile_options(hal_pci_scan_module PRIVATE ${HAL_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(hal_pci_scan_module PRIVATE MACH_IPC_COMPAT=0)
 target_include_directories(hal_pci_scan_module PRIVATE ${HAL_INCLUDE_DIRS})
@@ -168,7 +169,7 @@ add_executable(hal_server
   ${HAL_NOTIFY_USER_H}
 )
 
-add_dependencies(hal_server hal_pci_scan_module mig_device_header)
+add_dependencies(hal_server hal_pci_scan_module mig_device_header mig_mach_public_headers)
 
 target_compile_options(hal_server PRIVATE ${HAL_COMPILE_OPTIONS} -fPIC)
 

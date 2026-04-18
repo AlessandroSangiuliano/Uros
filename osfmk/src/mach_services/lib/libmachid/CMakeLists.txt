@@ -8,6 +8,8 @@ if(NOT OSFMK_BUILD_KERNEL)
 endif()
 add_library(libmachid STATIC ${LIB_SOURCES})
 
+add_dependencies(libmachid mig_mach_public_headers)
+
 target_include_directories(libmachid PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include

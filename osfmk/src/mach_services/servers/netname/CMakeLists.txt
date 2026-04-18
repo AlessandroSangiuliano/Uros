@@ -69,6 +69,8 @@ set(NETNAME_SOURCES
 
 add_executable(name_server_bin ${NETNAME_SOURCES})
 
+add_dependencies(name_server_bin mig_mach_public_headers)
+
 target_compile_options(name_server_bin PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2

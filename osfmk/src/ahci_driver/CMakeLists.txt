@@ -152,7 +152,7 @@ target_link_options(ahci_driver_server PRIVATE
 )
 
 # Ensure MIG-generated device server stubs are built before us.
-add_dependencies(ahci_driver_server mig_device_header)
+add_dependencies(ahci_driver_server mig_device_header mig_mach_public_headers)
 
 set_target_properties(ahci_driver_server PROPERTIES
   OUTPUT_NAME "ahci_driver"

@@ -53,9 +53,7 @@
 #include "flipc2_endpoint.h"
 #include "flipc2_endpoint_server.h"
 
-/* Not yet in our exported headers */
-extern kern_return_t mach_port_set_protected_payload(
-    mach_port_t task, mach_port_t port, unsigned long payload);
+/* mach_port_set_protected_payload now comes from <mach/mach_port.h> (MIG-generated) */
 
 extern kern_return_t mach_msg_server_once(
     boolean_t (*demux)(mach_msg_header_t *, mach_msg_header_t *),
