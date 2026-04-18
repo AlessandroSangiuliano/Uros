@@ -1,0 +1,31 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * hal_notify.defs — MIG interface for HAL -> driver async notifications.
+ *
+ * When a driver subscribes via hal_register_driver(class_mask, class_match,
+ * driver_port), the HAL uses this subsystem to deliver "device matched"
+ * events on driver_port.  Today the HAL emits one device_added per existing
+ * registry entry that matches the subscription (replay at registration time);
+ * future hotplug work will reuse the same routine for runtime adds.
+ *
+ * Fire-and-forget: the server side uses simpleroutine so no reply message is
+ * generated.  Drivers implement hal_device_added() and plug the server demux
+ * (hal_notify_server) into their existing MIG dispatch.
+ */
+
+subsystem hal_notify 2975;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+simpleroutine hal_device_added(
+		driver_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	in	vendor_device	: unsigned;
+	in	class_rev	: unsigned;
+	in	irq		: unsigned;
+	in	status		: unsigned);

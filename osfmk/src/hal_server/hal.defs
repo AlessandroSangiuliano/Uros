@@ -20,6 +20,7 @@ subsystem hal 2970;
 #include <mach/mach_types.defs>
 
 serverprefix hal_;
+userprefix  hal_;
 
 routine list_devices(
 		hal_port	: mach_port_t;

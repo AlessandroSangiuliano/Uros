@@ -136,11 +136,15 @@ int  hal_registry_copy_all(struct hal_device_info *out, unsigned int max);
 int  hal_driver_reg_add(uint32_t class_mask, uint32_t class_match,
 			mach_port_t driver_port);
 /*
- * For each registered driver whose mask matches dev, send a match
- * notification on driver_port.  Phase 1: best-effort log only —
- * actual notification message is a stub (see hal_driver_reg.c).
+ * For each registered driver whose mask matches dev, send a
+ * hal_device_added() notification on driver_port.
  */
 void hal_driver_reg_notify_match(const struct hal_device_info *dev);
+/*
+ * Replay the full registry to one subscription (called once at register
+ * time so new subscribers see devices that were already discovered).
+ */
+void hal_driver_reg_replay(int reg_slot);
 
 /* ================================================================
  * Global state (defined in hal_server.c)

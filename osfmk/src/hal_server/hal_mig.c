@@ -99,5 +99,8 @@ hal_register_driver(mach_port_t hal_port,
 	slot = hal_driver_reg_add(class_mask, class_match, driver_port);
 	if (slot < 0)
 		return KERN_RESOURCE_SHORTAGE;
+
+	/* Replay existing registry to the new subscriber. */
+	hal_driver_reg_replay(slot);
 	return KERN_SUCCESS;
 }

@@ -97,6 +97,35 @@ add_custom_command(
 )
 
 # ===========================================================================
+# MIG: hal_notify.defs — user stubs (HAL sends async notifications to drivers)
+# ===========================================================================
+
+set(HAL_NOTIFY_DEFS ${CMAKE_CURRENT_SOURCE_DIR}/hal_notify.defs)
+
+set(HAL_NOTIFY_USER_C   ${CMAKE_CURRENT_BINARY_DIR}/hal_notify_user.c)
+set(HAL_NOTIFY_USER_H   ${CMAKE_CURRENT_BINARY_DIR}/hal_notify.h)
+set(HAL_NOTIFY_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/hal_notify_server.c)
+set(HAL_NOTIFY_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/hal_notify_server.h)
+
+add_custom_command(
+  OUTPUT ${HAL_NOTIFY_USER_C} ${HAL_NOTIFY_USER_H}
+         ${HAL_NOTIFY_SERVER_C} ${HAL_NOTIFY_SERVER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -header ${HAL_NOTIFY_USER_H}
+    -sheader ${HAL_NOTIFY_SERVER_H}
+    -user ${HAL_NOTIFY_USER_C}
+    -server ${HAL_NOTIFY_SERVER_C}
+    ${HAL_NOTIFY_DEFS}
+  DEPENDS migcom ${HAL_NOTIFY_DEFS}
+  COMMENT "MIG: hal_notify.defs (user stubs for hal_server)"
+  VERBATIM
+)
+
+# ===========================================================================
 # Discovery modules — compiled as .so and loaded at runtime
 # ===========================================================================
 
@@ -129,12 +158,14 @@ set(HAL_SOURCES
   nostdlib_stubs.c
   ${DM_USER_C}
   ${HAL_SERVER_C}
+  ${HAL_NOTIFY_USER_C}
 )
 
 add_executable(hal_server
   ${HAL_SOURCES}
   ${HAL_USER_H}   # marker — ensures MIG runs before compiling sources
   ${HAL_SERVER_H}
+  ${HAL_NOTIFY_USER_H}
 )
 
 add_dependencies(hal_server hal_pci_scan_module mig_device_header)

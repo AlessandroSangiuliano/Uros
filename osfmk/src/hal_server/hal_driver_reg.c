@@ -24,12 +24,16 @@
  * hal_driver_reg.c — driver subscription table.
  *
  * Drivers subscribe to a PCI class (mask + match) and get their port
- * recorded; the match notification is a stub today (logs only) and will
- * become an async Mach message in the hotplug phase.
+ * recorded.  When a matching device is added to the registry, the HAL
+ * delivers a hal_device_added() notification on the subscribed port
+ * (fire-and-forget MIG simpleroutine — see hal_notify.defs).
  */
 
+#include <mach.h>
+#include <mach/kern_return.h>
 #include <stdio.h>
 #include "hal_server.h"
+#include "hal_notify.h"
 
 static struct hal_driver_reg regs[HAL_MAX_DRIVER_REGS];
 
@@ -51,6 +55,29 @@ hal_driver_reg_add(uint32_t class_mask, uint32_t class_match,
 	return -1;
 }
 
+static void
+notify_one(const struct hal_driver_reg *reg,
+	   const struct hal_device_info *dev)
+{
+	kern_return_t kr;
+
+	kr = hal_device_added(reg->driver_port,
+			      dev->bus, dev->slot, dev->func,
+			      dev->vendor_device, dev->class_rev,
+			      dev->irq, dev->status);
+	if (kr != KERN_SUCCESS) {
+		printf("hal: notify %u:%u.%u on port 0x%x failed (kr=%d)\n",
+		       dev->bus, dev->slot, dev->func,
+		       (unsigned int)reg->driver_port, kr);
+		return;
+	}
+	printf("hal: notified %u:%u.%u (vendor=0x%08x class=0x%08x) "
+	       "on port 0x%x\n",
+	       dev->bus, dev->slot, dev->func,
+	       dev->vendor_device, dev->class_rev,
+	       (unsigned int)reg->driver_port);
+}
+
 void
 hal_driver_reg_notify_match(const struct hal_device_info *dev)
 {
@@ -64,15 +91,32 @@ hal_driver_reg_notify_match(const struct hal_device_info *dev)
 			continue;
 		if ((dev->class_rev & regs[i].class_mask) != regs[i].class_match)
 			continue;
+		notify_one(&regs[i], dev);
+	}
+}
 
-		/*
-		 * Phase 1: log only — the asynchronous match-notification
-		 * message is part of the hotplug work (separate issue).
-		 */
-		printf("hal: match — device %u:%u.%u (vendor=0x%08x, "
-		       "class=0x%08x) would be notified on port 0x%x\n",
-		       dev->bus, dev->slot, dev->func,
-		       dev->vendor_device, dev->class_rev,
-		       (unsigned int)regs[i].driver_port);
+/*
+ * Replay the current registry to a newly-registered driver: called from
+ * hal_register_driver after the subscription is stored so the driver gets
+ * one hal_device_added() per matching device that was already discovered.
+ */
+void
+hal_driver_reg_replay(int reg_slot)
+{
+	static struct hal_device_info snapshot[HAL_MAX_DEVICES];
+	const struct hal_driver_reg *reg;
+	int got, i;
+
+	if (reg_slot < 0 || reg_slot >= HAL_MAX_DRIVER_REGS)
+		return;
+	reg = &regs[reg_slot];
+	if (!reg->in_use)
+		return;
+
+	got = hal_registry_copy_all(snapshot, HAL_MAX_DEVICES);
+	for (i = 0; i < got; i++) {
+		if ((snapshot[i].class_rev & reg->class_mask) != reg->class_match)
+			continue;
+		notify_one(reg, &snapshot[i]);
 	}
 }
