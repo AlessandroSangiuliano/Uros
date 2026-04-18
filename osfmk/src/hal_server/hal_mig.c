@@ -29,6 +29,8 @@
 
 #include <mach.h>
 #include <mach/kern_return.h>
+#include <mach/notify.h>
+#include <stdio.h>
 #include <string.h>
 #include "hal_server.h"
 
@@ -100,7 +102,28 @@ hal_register_driver(mach_port_t hal_port,
 	if (slot < 0)
 		return KERN_RESOURCE_SHORTAGE;
 
-	/* Replay existing registry to the new subscriber. */
+	/*
+	 * Ask the kernel to tell us when driver_port becomes a dead
+	 * name (driver task exits or drops its receive right); the
+	 * handler in hal_driver_reg_handle_dead_name will release the
+	 * subscription slot so we stop sending notifications to it.
+	 */
+	{
+		mach_port_t prev = MACH_PORT_NULL;
+		kern_return_t kr;
+
+		kr = mach_port_request_notification(mach_task_self(),
+			driver_port, MACH_NOTIFY_DEAD_NAME, 0,
+			hal_service_port, MACH_MSG_TYPE_MAKE_SEND_ONCE,
+			&prev);
+		if (kr != KERN_SUCCESS)
+			printf("hal: request_notification(DEAD_NAME) on "
+			       "port 0x%x failed (kr=%d)\n",
+			       (unsigned int)driver_port, kr);
+		if (prev != MACH_PORT_NULL)
+			mach_port_deallocate(mach_task_self(), prev);
+	}
+
 	hal_driver_reg_replay(slot);
 	return KERN_SUCCESS;
 }

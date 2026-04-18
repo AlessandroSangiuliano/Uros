@@ -38,6 +38,7 @@
 #include <mach/mach_port.h>
 #include <mach/message.h>
 #include <mach/mig_errors.h>
+#include <mach/notify.h>
 #include <sa_mach.h>
 #include <servers/netname.h>
 #include <stdio.h>
@@ -136,6 +137,16 @@ dump_registry(void)
 static boolean_t
 hal_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
+		const mach_dead_name_notification_t *n =
+			(const mach_dead_name_notification_t *)in;
+		hal_driver_reg_handle_dead_name(n->not_port);
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
 	if (hal_server(in, out))
 		return TRUE;
 

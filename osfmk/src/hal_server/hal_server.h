@@ -145,6 +145,11 @@ void hal_driver_reg_notify_match(const struct hal_device_info *dev);
  * time so new subscribers see devices that were already discovered).
  */
 void hal_driver_reg_replay(int reg_slot);
+/*
+ * Release every subscription slot pointing at dead_port (invoked by
+ * the demux when the kernel delivers a MACH_NOTIFY_DEAD_NAME).
+ */
+void hal_driver_reg_handle_dead_name(mach_port_t dead_port);
 
 /* ================================================================
  * Global state (defined in hal_server.c)

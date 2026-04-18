@@ -96,6 +96,47 @@ hal_driver_reg_notify_match(const struct hal_device_info *dev)
 }
 
 /*
+ * Called from hal_demux when the kernel delivers a MACH_NOTIFY_DEAD_NAME
+ * for a port we subscribed to.  dead_port is the name that just became
+ * dead in our namespace — walk the subscription table, clear every slot
+ * that referred to it and drop our now-useless send right.
+ */
+void
+hal_driver_reg_handle_dead_name(mach_port_t dead_port)
+{
+	int i, cleared = 0;
+
+	for (i = 0; i < HAL_MAX_DRIVER_REGS; i++) {
+		if (!regs[i].in_use)
+			continue;
+		if (regs[i].driver_port != dead_port)
+			continue;
+
+		printf("hal: driver port 0x%x died — releasing slot %d "
+		       "(mask=0x%08x match=0x%08x)\n",
+		       (unsigned int)dead_port, i,
+		       regs[i].class_mask, regs[i].class_match);
+
+		regs[i].in_use      = 0;
+		regs[i].driver_port = MACH_PORT_NULL;
+		regs[i].class_mask  = 0;
+		regs[i].class_match = 0;
+		cleared++;
+	}
+
+	/*
+	 * Drop our dead-name reference regardless of whether we had a
+	 * matching subscription — the kernel handed us a right and
+	 * leaving it around would leak a slot in our port table.
+	 */
+	mach_port_deallocate(mach_task_self(), dead_port);
+
+	if (cleared == 0)
+		printf("hal: dead-name 0x%x with no matching "
+		       "subscription\n", (unsigned int)dead_port);
+}
+
+/*
  * Replay the current registry to a newly-registered driver: called from
  * hal_register_driver after the subscription is stored so the driver gets
  * one hal_device_added() per matching device that was already discovered.
