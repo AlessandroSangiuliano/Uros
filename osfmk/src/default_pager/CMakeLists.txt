@@ -56,7 +56,7 @@ endfunction()
 # which the default_pager source code expects.
 set(MIG_INCLUDES
   -DSEQNOS
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_CURRENT_SOURCE_DIR}/mach
 )
@@ -70,14 +70,14 @@ dp_mig_defs(
 
 # 2) memory_object_default.defs — kernel→pager interface (data_request, data_return, etc.)
 dp_mig_defs(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/memory_object_default.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/memory_object_default.defs"
   memory_object_default
   ${MIG_INCLUDES}
 )
 
 # 3) memory_object.defs — pager→kernel interface (data_supply, lock_request, etc.)
 dp_mig_defs(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/memory_object.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/memory_object.defs"
   memory_object
   ${MIG_INCLUDES}
 )
@@ -139,7 +139,7 @@ target_include_directories(default_pager_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include

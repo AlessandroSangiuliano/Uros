@@ -60,7 +60,7 @@ types in clock and memory_object stubs.
 contain kernel-internal definitions (`alarm_port_t`, `SEQNOS`
 conditionals, `KERNEL_SERVER` guards) that produce MIG output
 incompatible with userspace code.  The original build used the
-export tree's `.defs` (`export/powermac/include/`), which are the
+export tree's `.defs` (`export/include/`), which are the
 published userspace interfaces.
 
 **Fix:** Switched to an explicit list of 16 `.defs` files from the

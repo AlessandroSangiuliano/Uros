@@ -18,7 +18,7 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
-    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${EXT2_USER_H}
     -sheader ${EXT2_SERVER_H}
@@ -86,7 +86,7 @@ target_include_directories(ipc_bench_server PRIVATE
   # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include

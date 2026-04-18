@@ -76,7 +76,7 @@ endfunction()
 add_subdirectory(migcom)
 
 # Generate device/device.h from device.defs via MIG (shared by libmach, libflipc, etc.)
-set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/powermac/include/device/device.defs")
+set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/include/device/device.defs")
 # Public header for #include <device/device.h>
 set(DEVICE_HEADER "${CMAKE_BINARY_DIR}/generated/include/device/device.h")
 # Co-located headers for MIG .c files (#include "device.h" / "device_server.h")
@@ -92,7 +92,7 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
-    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DEVICE_USER_H}
     -sheader ${DEVICE_SERVER_H}

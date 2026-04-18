@@ -75,7 +75,7 @@ target_include_directories(libsa_fs PUBLIC
   # Kernel headers (device/, mach/, mach_debug/)
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Export headers (mach/mach_interface.h, mach/boot_info.h)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
 )
