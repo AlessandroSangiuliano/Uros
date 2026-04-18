@@ -14,6 +14,9 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/POWERMAC" AND CMAKE_SYSTEM_PROCESSOR MATC
 endif()
 
 add_library(libcthreads STATIC ${LIB_SOURCES})
+
+add_dependencies(libcthreads mig_mach_public_headers)
+
 # Legacy K&R/gnu89 code: suppress warnings, allow implicit declarations
 target_compile_options(libcthreads PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2>)
 

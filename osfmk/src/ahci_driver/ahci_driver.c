@@ -48,9 +48,7 @@
 #include "ahci_batch_server.h"
 #include "ahci.h"
 
-/* Not yet in our exported headers */
-extern kern_return_t mach_port_set_protected_payload(
-    mach_port_t task, mach_port_t port, unsigned long payload);
+/* mach_port_set_protected_payload now comes from <mach/mach_port.h> (MIG-generated) */
 
 /* msgh_id base for IRQ notifications from device_intr_register */
 #define IRQ_NOTIFY_MSGH_BASE	3000

@@ -12,6 +12,8 @@ endif()
 
 add_library(librthreads STATIC ${LIB_SOURCES})
 
+add_dependencies(librthreads mig_mach_public_headers)
+
 target_compile_options(librthreads PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
   $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>

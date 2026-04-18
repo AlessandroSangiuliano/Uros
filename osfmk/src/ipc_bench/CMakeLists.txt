@@ -58,6 +58,8 @@ add_executable(ipc_bench_server
   ${IPC_BENCH_SOURCES}
 )
 
+add_dependencies(ipc_bench_server mig_mach_public_headers)
+
 target_compile_options(ipc_bench_server PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2

@@ -88,6 +88,7 @@ set(EXPORT_MIG_DEFS
   ${_EXPORT}/mach/mach_norma.defs
   ${_EXPORT}/mach/mach_port.defs
   ${_EXPORT}/mach/memory_object.defs
+  ${_EXPORT}/mach/memory_object_default.defs
   ${_EXPORT}/mach/notify.defs
   ${_EXPORT}/mach/sync.defs
   ${_EXPORT}/mach_debug/mach_debug.defs
@@ -99,6 +100,65 @@ foreach(DEFS IN LISTS EXPORT_MIG_DEFS)
   get_filename_component(DEFS_NAME ${DEFS} NAME_WE)
   list(APPEND LIB_SOURCES ${${DEFS_NAME}_MIG_GENERATED})
 endforeach()
+
+# --- #169: publish MIG-generated user/server headers as <mach/NAME.h> --------
+# Single source of truth: .defs files generate headers into build/generated/
+# (done above by add_mig_defs).  Here we copy them into the public include
+# path build/generated/include/mach/ so every userspace target that has
+# generated/include in its include search path can resolve <mach/bootstrap.h>
+# etc. from the regenerated copy instead of a checked-in stale one.
+#
+# Rows: <build-generated filename>  <public filename under mach/>
+# Two renames preserve the legacy public names to avoid a source-wide rename:
+#   mach.h                       -> mach_interface.h
+#   memory_object_default_user.h -> memory_object_default.h
+set(_PUB_MACH_DIR "${CMAKE_BINARY_DIR}/generated/include/mach")
+file(MAKE_DIRECTORY "${_PUB_MACH_DIR}")
+
+set(_MIG_PUBLIC_MAP
+  # Build filename from add_mig_defs is <defs>.h / <defs>_server.h.
+  # Public filename is the legacy name consumers actually #include.
+  # user-mode
+  bootstrap.h                    bootstrap.h
+  clock.h                        clock.h
+  clock_reply.h                  clock_reply.h
+  default_pager_object.h         default_pager_object.h
+  exc.h                          exc_user.h
+  ledger.h                       ledger.h
+  mach_host.h                    mach_host.h
+  mach.h                         mach_interface.h
+  mach_norma.h                   mach_norma.h
+  mach_port.h                    mach_port.h
+  memory_object_default.h        memory_object_default.h
+  sync.h                         sync.h
+  # server-mode
+  bootstrap_server.h             bootstrap_server.h
+  exc_server.h                   exc_server.h
+  memory_object_default_server.h memory_object_default_server.h
+  memory_object_server.h         memory_object_server.h
+  notify_server.h                notify_server.h
+)
+
+set(_MIG_PUBLIC_HEADERS)
+list(LENGTH _MIG_PUBLIC_MAP _map_len)
+math(EXPR _map_last "${_map_len} - 1")
+foreach(_i RANGE 0 ${_map_last} 2)
+  math(EXPR _j "${_i} + 1")
+  list(GET _MIG_PUBLIC_MAP ${_i} _src_name)
+  list(GET _MIG_PUBLIC_MAP ${_j} _dst_name)
+  set(_src "${CMAKE_BINARY_DIR}/generated/${_src_name}")
+  set(_dst "${_PUB_MACH_DIR}/${_dst_name}")
+  add_custom_command(
+    OUTPUT ${_dst}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_src} ${_dst}
+    DEPENDS ${_src}
+    COMMENT "Publish mach/${_dst_name} (from ${_src_name})"
+    VERBATIM
+  )
+  list(APPEND _MIG_PUBLIC_HEADERS ${_dst})
+endforeach()
+
+add_custom_target(mig_mach_public_headers DEPENDS ${_MIG_PUBLIC_HEADERS})
 
 # device.defs: the parent CMakeLists already generates device_user.c / device_server.c
 # (and the public device/device.h header) via a standalone custom command, so we
@@ -116,7 +176,7 @@ set_source_files_properties(
 add_library(libmach STATIC ${LIB_SOURCES})
 
 # Depend on MIG-generated device/device.h (defined in parent CMakeLists)
-add_dependencies(libmach mig_device_header)
+add_dependencies(libmach mig_device_header mig_mach_public_headers)
 
 # Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
 # Apply C-only options (including -include stdint.h) only when compiling C sources

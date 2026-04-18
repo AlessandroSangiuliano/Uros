@@ -17,6 +17,8 @@ add_executable(hello_server_server
   ${HELLO_SERVER_SOURCES}
 )
 
+add_dependencies(hello_server_server mig_mach_public_headers)
+
 target_compile_options(hello_server_server PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2

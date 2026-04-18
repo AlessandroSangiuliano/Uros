@@ -103,6 +103,8 @@ set(EXT2_SERVER_SOURCES
 
 add_executable(ext_server_bin ${EXT2_SERVER_SOURCES})
 
+add_dependencies(ext_server_bin mig_mach_public_headers)
+
 target_compile_options(ext_server_bin PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2

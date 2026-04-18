@@ -30,6 +30,8 @@ add_custom_command(
 # Library only contains the user-side MIG stub
 add_library(libnetname STATIC ${NETNAME_USER_C})
 
+add_dependencies(libnetname mig_mach_public_headers)
+
 target_compile_options(libnetname PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686>
 )

@@ -11,6 +11,8 @@ set(LIB_SOURCES
 
 add_library(libdl STATIC ${LIB_SOURCES})
 
+add_dependencies(libdl mig_mach_public_headers)
+
 target_compile_options(libdl PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686>
 )

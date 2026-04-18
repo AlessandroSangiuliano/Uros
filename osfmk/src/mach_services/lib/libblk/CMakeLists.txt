@@ -3,7 +3,7 @@ project(libblk C)
 
 add_library(libblk STATIC blk.c)
 
-add_dependencies(libblk mig_device_header)
+add_dependencies(libblk mig_device_header mig_mach_public_headers)
 
 target_compile_options(libblk PRIVATE
   -std=gnu11 -fno-builtin -w -mstack-protector-guard=global

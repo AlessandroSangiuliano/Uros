@@ -107,7 +107,7 @@ target_link_options(virtio_blk_server PRIVATE
   -Wl,--build-id=none
 )
 
-add_dependencies(virtio_blk_server mig_device_header)
+add_dependencies(virtio_blk_server mig_device_header mig_mach_public_headers)
 
 set_target_properties(virtio_blk_server PROPERTIES
   OUTPUT_NAME "virtio_blk"

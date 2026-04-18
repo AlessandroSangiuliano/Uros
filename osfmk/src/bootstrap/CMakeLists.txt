@@ -100,6 +100,8 @@ add_executable(bootstrap_server
   ${MIG_SERVER_SOURCES}
 )
 
+add_dependencies(bootstrap_server mig_mach_public_headers)
+
 target_compile_options(bootstrap_server PRIVATE
   -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2
 )

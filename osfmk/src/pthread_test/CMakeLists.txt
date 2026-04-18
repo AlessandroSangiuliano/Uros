@@ -5,6 +5,8 @@ add_executable(pthread_test_server
   pthread_test.c
 )
 
+add_dependencies(pthread_test_server mig_mach_public_headers)
+
 target_compile_options(pthread_test_server PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2

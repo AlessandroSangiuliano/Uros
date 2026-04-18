@@ -111,6 +111,8 @@ add_executable(default_pager_server
   ${MIG_SERVER_SOURCES}
 )
 
+add_dependencies(default_pager_server mig_mach_public_headers)
+
 target_compile_options(default_pager_server PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2
