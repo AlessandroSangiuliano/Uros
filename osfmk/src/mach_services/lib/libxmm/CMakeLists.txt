@@ -10,7 +10,7 @@ target_include_directories(libxmm PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
@@ -18,7 +18,7 @@ target_include_directories(libxmm PUBLIC
 # Generazione automatica dei file MIG (.c e .h) a partire dai .defs nella cartella
 file(GLOB MIG_DEFS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.defs")
 foreach(DEFS IN LISTS MIG_DEFS)
-  add_mig_defs(${DEFS} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src/mach_kernel ${CMAKE_SOURCE_DIR}/export/powermac/include)
+  add_mig_defs(${DEFS} ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/src/mach_kernel ${CMAKE_SOURCE_DIR}/export/include)
   get_filename_component(DEFS_NAME ${DEFS} NAME_WE)
   list(APPEND LIB_SOURCES ${${DEFS_NAME}_MIG_GENERATED})
 endforeach()

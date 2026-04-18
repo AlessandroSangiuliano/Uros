@@ -18,7 +18,7 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
-    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DM_USER_H}
     -sheader ${DM_SERVER_H}
@@ -86,7 +86,7 @@ target_include_directories(virtio_blk_server PRIVATE
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )

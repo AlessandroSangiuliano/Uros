@@ -28,7 +28,7 @@ target_include_directories(pthread_test_server PRIVATE
   # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # Pre-built export headers (mach/mach_interface.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include

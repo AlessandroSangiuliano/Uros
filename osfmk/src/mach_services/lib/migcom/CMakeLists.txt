@@ -56,9 +56,9 @@ add_executable(migcom ${MIGCOM_SOURCES})
 target_include_directories(migcom PRIVATE
   ${SRC_DIR}
   ${CMAKE_CURRENT_BINARY_DIR} # for parser.h
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/../../mach_kernel
-  /home/slex/Scrivania/osfmk-mklinux/osfmk/export/powermac/include
+  /home/slex/Scrivania/osfmk-mklinux/osfmk/export/include
 )
 
 # link libfl or libl if available
@@ -129,7 +129,7 @@ add_test(NAME migcom-flag-K
 
 # Advanced tests using a real .defs file and file generation checks
 add_test(NAME migcom-device-request
-  COMMAND sh -c "${LSAN_SUPPRESS} cpp -P -I ${CMAKE_SOURCE_DIR}/export/powermac/include ${CMAKE_SOURCE_DIR}/export/powermac/include/device/device_request.defs | ${LSAN_SUPPRESS} $<TARGET_FILE:migcom> -V -user /dev/null -server /dev/null -sheader /dev/null -dheader /dev/null"
+  COMMAND sh -c "${LSAN_SUPPRESS} cpp -P -I ${CMAKE_SOURCE_DIR}/export/include ${CMAKE_SOURCE_DIR}/export/include/device/device_request.defs | ${LSAN_SUPPRESS} $<TARGET_FILE:migcom> -V -user /dev/null -server /dev/null -sheader /dev/null -dheader /dev/null"
 )
 
 add_test(NAME migcom-generate-user-file

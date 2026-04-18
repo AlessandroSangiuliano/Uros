@@ -22,7 +22,7 @@ list(REMOVE_ITEM LIB_SOURCES
 )
 
 # __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out)
-set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/powermac/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
+set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/asm")
 
 # Preprocess ALL lowercase .s files (they use #include and need CPP)
@@ -68,7 +68,7 @@ endif()
 # either fail MIG parsing or are not used by userspace.
 
 set(_KERNEL ${CMAKE_SOURCE_DIR}/src/mach_kernel)
-set(_EXPORT ${CMAKE_SOURCE_DIR}/export/powermac/include)
+set(_EXPORT ${CMAKE_SOURCE_DIR}/export/include)
 # MIG include path: export tree first (userspace .defs), then kernel for extras
 set(_MIG_INC ${_EXPORT} ${_KERNEL} ${_EXPORT}/mach_debug)
 
@@ -192,7 +192,7 @@ target_include_directories(libmach PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )

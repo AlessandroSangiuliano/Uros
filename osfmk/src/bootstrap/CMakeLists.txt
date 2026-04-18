@@ -6,7 +6,7 @@ project(bootstrap_server C)
 # ===========================================================================
 
 set(MIG_INCLUDE_FLAGS
-  -I${CMAKE_SOURCE_DIR}/export/powermac/include
+  -I${CMAKE_SOURCE_DIR}/export/include
   -I${CMAKE_SOURCE_DIR}/src/mach_kernel
   -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
 )
@@ -37,22 +37,22 @@ file(MAKE_DIRECTORY "${MIG_OUT}")
 
 # 1) bootstrap.defs  (subsystem 999999, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/bootstrap.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/bootstrap.defs"
   bootstrap  ${MIG_OUT})
 
 # 2) exc.defs  (subsystem 2400, ServerPrefix catch_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/exc.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/exc.defs"
   exc  ${MIG_OUT})
 
 # 3) notify.defs  (subsystem 64, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/notify.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/notify.defs"
   notify  ${MIG_OUT})
 
 # 4) service.defs  (subsystem 400, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/servers/service.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/servers/service.defs"
   service  ${MIG_OUT})
 
 set(MIG_SERVER_SOURCES
@@ -123,13 +123,13 @@ target_include_directories(bootstrap_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Filesystem headers — must come before export so the canonical file_system.h
-  # is used (export/powermac copy may be stale)
+  # is used (export/include copy may be stale)
   ${CMAKE_SOURCE_DIR}/src/file_systems
   # Kernel headers (mach/, device/, ddb/, i386/) — bootstrap needs kernel-internal
   # extensions (boot_info.h multi-segment support) so kernel must come BEFORE export
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Pre-built export headers (mach/mach_interface.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
 )

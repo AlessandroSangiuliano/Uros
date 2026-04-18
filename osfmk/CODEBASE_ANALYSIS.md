@@ -718,7 +718,7 @@ I file generati da MIG (es. `mach.h`) possono shadows gli header di sistema. Sol
 gli header MIG generati vanno in `generated/` e NON in `generated/include/` per evitare conflitti.
 
 ### 7.2 Export Tree vs Kernel .defs
-I `.defs` nell'export tree (`export/powermac/include/`) differiscono da quelli nel kernel
+I `.defs` nell'export tree (`export/include/`) differiscono da quelli nel kernel
 (`mach_kernel/mach/`). Le librerie userspace DEVONO usare quelli dall'export tree.
 
 ### 7.3 Dipendenze Circolari tra Librerie

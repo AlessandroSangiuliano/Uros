@@ -21,7 +21,7 @@ macro(mig_all DEFS_FILE STEM)
     COMMAND ${MIG_SCRIPT}
       -cpp ${CMAKE_C_COMPILER}
       -migcom $<TARGET_FILE:migcom>
-      -I${CMAKE_SOURCE_DIR}/export/powermac/include
+      -I${CMAKE_SOURCE_DIR}/export/include
       -I${CMAKE_SOURCE_DIR}/src/mach_kernel
       -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
       -header  ${_hdr}
@@ -37,17 +37,17 @@ endmacro()
 
 # 1) netname.defs — server stubs (netname_server demux)
 mig_all(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/servers/netname.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/servers/netname.defs"
   netname)
 
 # 2) notify.defs — server stubs (do_mach_notify_dead_name etc.)
 mig_all(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/notify.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/notify.defs"
   notify)
 
 # 3) service.defs — user stubs (service_checkin)
 mig_all(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/servers/service.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/servers/service.defs"
   service)
 
 # ===========================================================================
@@ -94,7 +94,7 @@ target_include_directories(name_server_bin PRIVATE
   # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # Pre-built export headers (mach/*, servers/*, device/*)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/)
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
