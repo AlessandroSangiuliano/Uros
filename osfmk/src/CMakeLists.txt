@@ -63,6 +63,11 @@ if(OSFMK_BUILD_BLOCK_SERVER)
   add_subdirectory(block_device_server)
 endif()
 
+# Build HAL server (hardware discovery + device registry)
+if(OSFMK_BUILD_HAL_SERVER)
+  add_subdirectory(hal_server)
+endif()
+
 # Build name server (netname)
 if(OSFMK_BUILD_NAME_SERVER)
   add_subdirectory(mach_services/servers/netname)

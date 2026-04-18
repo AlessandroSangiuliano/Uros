@@ -79,6 +79,8 @@ IPC_BENCH="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ipc_bench"
 BLOCK_DEVICE_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/block_device_server"
 AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
 VIRTIO_BLK_MODULE="$BUILD_DIR/src/block_device_server/modules/virtio_blk.so"
+HAL_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hal_server"
+HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
 EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
 PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 
@@ -124,6 +126,18 @@ if [ ! -f "$VIRTIO_BLK_MODULE" ]; then
     exit 1
 fi
 
+if [ ! -f "$HAL_SERVER" ]; then
+    echo "ERRORE: hal_server non trovato: $HAL_SERVER"
+    echo "  Build con: cd $BUILD_DIR && ninja hal_server"
+    exit 1
+fi
+
+if [ ! -f "$HAL_PCI_SCAN_MODULE" ]; then
+    echo "ERRORE: pci_scan.so non trovato: $HAL_PCI_SCAN_MODULE"
+    echo "  Build con: cd $BUILD_DIR && ninja hal_pci_scan_module"
+    exit 1
+fi
+
 if [ ! -f "$EXT2_SERVER" ]; then
     echo "ERRORE: ext_server non trovato: $EXT2_SERVER"
     echo "  Build con: cd $BUILD_DIR && ninja ext_server_bin"
@@ -145,6 +159,7 @@ BOOTSTRAP_CONF=$(mktemp)
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 default_pager default_pager hd0b
+hal_server hal_server
 hello_server hello_server
 ipc_bench ipc_bench${BENCH_ARGS}
 block_device_server block_device_server
@@ -205,6 +220,7 @@ write $DEFAULT_PAGER default_pager
 write $HELLO_SERVER hello_server
 write $IPC_BENCH ipc_bench
 write $BLOCK_DEVICE_SERVER block_device_server
+write $HAL_SERVER hal_server
 write $EXT2_SERVER ext_server
 write $PTHREAD_TEST pthread_test
 mkdir modules
@@ -213,6 +229,10 @@ mkdir block
 cd block
 write $AHCI_MODULE ahci.so
 write $VIRTIO_BLK_MODULE virtio_blk.so
+cd ..
+mkdir hal
+cd hal
+write $HAL_PCI_SCAN_MODULE pci_scan.so
 DBGFS
 
 echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"
@@ -228,6 +248,8 @@ echo "  /mach_servers/ipc_bench      → $(stat -c%s "$IPC_BENCH") bytes"
 echo "  /mach_servers/block_device_server → $(stat -c%s "$BLOCK_DEVICE_SERVER") bytes"
 echo "  /mach_servers/modules/block/ahci.so       → $(stat -c%s "$AHCI_MODULE") bytes"
 echo "  /mach_servers/modules/block/virtio_blk.so → $(stat -c%s "$VIRTIO_BLK_MODULE") bytes"
+echo "  /mach_servers/hal_server    → $(stat -c%s "$HAL_SERVER") bytes"
+echo "  /mach_servers/modules/hal/pci_scan.so     → $(stat -c%s "$HAL_PCI_SCAN_MODULE") bytes"
 echo "  /mach_servers/ext_server    → $(stat -c%s "$EXT2_SERVER") bytes"
 
 # --- 5. Inserimento partizione ext2 nell'immagine disco ---
@@ -253,11 +275,14 @@ echo "        ├── default_pager"
 echo "        ├── hello_server"
 echo "        ├── ipc_bench"
 echo "        ├── block_device_server"
+echo "        ├── hal_server"
 echo "        ├── ext_server"
 echo "        └── modules/"
-echo "            └── block/"
-echo "                ├── ahci.so"
-echo "                └── virtio_blk.so"
+echo "            ├── block/"
+echo "            │   ├── ahci.so"
+echo "            │   └── virtio_blk.so"
+echo "            └── hal/"
+echo "                └── pci_scan.so"
 echo "  hd0b:   settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (swap, ${SWAP_SIZE_MB} MB)"
 echo ""
 echo "Flusso di boot:"
