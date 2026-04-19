@@ -140,4 +140,5 @@ maybe_add(libflipc)
 maybe_add(libflipc2)
 maybe_add(libdl)
 maybe_add(libmodload)
+maybe_add(libcap)
 
