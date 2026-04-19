@@ -53,7 +53,12 @@ ENTRY(_spin_lock)
 	jne	.Llocked
 .Lret:	ret
 .Llocked:
-	movl	EXT(_spin_tries),%edx
+	/* PIE-safe load of _spin_tries: call/pop captures runtime EIP,
+	 * link-time constant offset reaches the symbol without R_386_32. */
+	call	2f
+2:	popl	%edx
+	addl	$(EXT(_spin_tries) - 2b),%edx
+	movl	(%edx),%edx
 .Ltry:	movl	$1,%eax
 	xchg	%eax,(%ecx)
 	testl	%eax,%eax

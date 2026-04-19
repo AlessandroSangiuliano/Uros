@@ -189,9 +189,17 @@
 #ifdef USE_LCALL
 #define SVC SVC_LCALL
 #else
+/*
+ * PC-relative resume address: `call 1f; 1: popl %edx` captures the runtime
+ * EIP, then `addl $(8f-1b), %edx` applies a link-time constant offset to
+ * reach label 8.  Avoids the R_386_32 relocation that `movl $8f,%edx`
+ * would emit inside .text, which forces DT_TEXTREL in PIE executables.
+ */
 #define SVC \
 	movl %esp,%ecx; \
-	movl $8f,%edx; \
+	call 1f; \
+1:	popl %edx; \
+	addl $(8f - 1b),%edx; \
 	.byte 0x0f, 0x34; /* sysenter */ \
 	8:
 #endif
