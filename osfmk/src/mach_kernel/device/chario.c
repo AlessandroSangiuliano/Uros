@@ -197,7 +197,7 @@
 #include <device/device_types.h>
 #include <device/io_req.h>
 #include <device/ds_routines.h>
-#include <device/device_reply.h>
+#include <device/device_reply_user.h>
 
 #include <device/tty.h>
 #include <machine/machparam.h>	/* for spl */
