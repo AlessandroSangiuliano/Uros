@@ -82,3 +82,8 @@ endif()
 if(OSFMK_BUILD_PTHREAD_TEST)
   add_subdirectory(pthread_test)
 endif()
+
+# Build capability server (Uros cap_server)
+if(OSFMK_BUILD_CAP_SERVER)
+  add_subdirectory(cap_server)
+endif()

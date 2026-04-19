@@ -1,0 +1,122 @@
+/*
+ * Copyright 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining
+ * a copy of this software and associated documentation files (the
+ * "Software"), to deal in the Software without restriction, including
+ * without limitation the rights to use, copy, modify, merge, publish,
+ * distribute, sublicense, and/or sell copies of the Software, and to
+ * permit persons to whom the Software is furnished to do so, subject to
+ * the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be
+ * included in all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+ */
+
+/*
+ *	cap_server.defs
+ *
+ *	MIG interface for the Uros capability server.  Clients use these
+ *	routines to request, delegate, and revoke capability tokens.  Token
+ *	payloads are carried as opaque byte arrays (cap_token_t): the on-wire
+ *	size is bounded by CAP_TOKEN_MAX so the MIG stubs are frozen even
+ *	when the internal struct uros_cap layout evolves.
+ *
+ *	Fast-path verification (urmach_cap_verify) does NOT go through this
+ *	subsystem; it is a kernel trap handled in the UrMach kernel.
+ */
+
+subsystem
+#if	KERNEL_USER
+	  KernelUser
+#endif	/* KERNEL_USER */
+#if	KERNEL_SERVER
+	  KernelServer
+#endif	/* KERNEL_SERVER */
+		cap_server 3500;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+/*
+ *	Prefix the MIG-generated user stubs with mig_ so libcap's public
+ *	wrappers (cap_request, cap_derive, cap_revoke, cap_verify) don't
+ *	collide with the stub names at link time.
+ */
+userprefix mig_;
+
+/*
+ *	Narrow MIG to C ctype mappings used below.  The ctype names here
+ *	appear verbatim in the generated .c files, so cap_types.h provides
+ *	matching typedefs (cap_u64_t -> uint64_t, cap_u32_t -> uint32_t,
+ *	cap_token_t -> char[CAP_TOKEN_MAX]).  The import below makes MIG
+ *	emit `#include <mach/cap_types.h>` in the generated sources so the
+ *	typedefs are visible there.
+ */
+type cap_u64_t = unsigned64 ctype: cap_u64_t;
+type cap_u32_t = unsigned    ctype: cap_u32_t;
+
+/*
+ *	Opaque token blob.  Bounded by CAP_TOKEN_MAX (= 256 bytes today);
+ *	the internal layout is private to libcap, cap_server, and the
+ *	UrMach kernel.  Keep this value in sync with cap_types.h and the
+ *	struct uros_cap wire-format.
+ */
+type cap_token_t = array[*:256] of char;
+
+import <mach/cap_types.h>;
+
+/*
+ *	cap_acquire — request a fresh capability for a resource.
+ *
+ *	The caller names the resource (type + id) and the ops it wants.
+ *	cap_server applies its policy and, on success, returns a newly
+ *	minted token signed with the UrMach HMAC key.
+ *
+ *	lifetime_ms: 0 means "never expires".
+ */
+routine cap_acquire(
+		cap_server	: mach_port_t;
+	in	resource_type	: cap_u32_t;
+	in	resource_id	: cap_u64_t;
+	in	ops		: cap_u64_t;
+	in	lifetime_ms	: cap_u32_t;
+	out	token		: cap_token_t, Dealloc);
+
+/*
+ *	cap_derive — delegate a reduced subset of a parent token's ops to
+ *	a child.  The returned child token's parent_cap_id links it to
+ *	the parent so cascade revocation works.
+ */
+routine cap_derive(
+		cap_server	: mach_port_t;
+	in	parent		: cap_token_t;
+	in	reduced_ops	: cap_u64_t;
+	in	lifetime_ms	: cap_u32_t;
+	out	child		: cap_token_t, Dealloc);
+
+/*
+ *	cap_revoke — revoke a capability and all its descendants.
+ *	The kernel revocation list is updated atomically; subsequent
+ *	urmach_cap_verify calls for any cascade member return
+ *	CAP_ERR_REVOKED.
+ */
+routine cap_revoke(
+		cap_server	: mach_port_t;
+	in	cap_id		: cap_u64_t);
+
+/*
+ *	cap_verify — RPC-based verification used in Issue A before the
+ *	UrMach fast-path (urmach_cap_verify) exists.  Returns KERN_SUCCESS
+ *	when the token's HMAC matches the server key AND op ∈ allowed_ops
+ *	AND the capability is not revoked/expired/exhausted.  Consumers
+ *	should migrate to urmach_cap_verify once Issue B lands; this
+ *	routine stays as a debugging/test entry point.
+ */
+routine cap_verify(
+		cap_server	: mach_port_t;
+	in	token		: cap_token_t;
+	in	op		: cap_u64_t;
+	in	resource_id	: cap_u64_t);
