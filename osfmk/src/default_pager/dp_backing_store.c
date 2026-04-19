@@ -83,7 +83,7 @@ int	async_requests_out;
 #define VS_ASYNC_REUSE 1
 struct vs_async *vs_async_free_list;
 
-struct mutex default_pager_async_lock;	/* Protects globals above */
+pthread_mutex_t default_pager_async_lock;	/* Protects globals above */
 
 int vs_alloc_async_failed = 0;			/* statistics */
 int vs_alloc_async_count = 0;			/* statistics */
@@ -93,9 +93,9 @@ void vs_free_async(struct vs_async *vsa);	/* forward */
 #define VS_ALLOC_ASYNC()	vs_alloc_async()
 #define VS_FREE_ASYNC(vsa)	vs_free_async(vsa)
 
-#define VS_ASYNC_LOCK()		mutex_lock(&default_pager_async_lock)
-#define VS_ASYNC_UNLOCK()	mutex_unlock(&default_pager_async_lock)
-#define VS_ASYNC_LOCK_INIT()	mutex_init(&default_pager_async_lock)
+#define VS_ASYNC_LOCK()		pthread_mutex_lock(&default_pager_async_lock)
+#define VS_ASYNC_UNLOCK()	pthread_mutex_unlock(&default_pager_async_lock)
+#define VS_ASYNC_LOCK_INIT()	pthread_mutex_init(&default_pager_async_lock, NULL)
 #define VS_ASYNC_LOCK_ADDR()	(&default_pager_async_lock)
 
 /*
@@ -109,7 +109,7 @@ vm_size_t	max_doubled_size = 4 * 1024 * 1024;	/* 4 meg */
  */
 struct backing_store_list_head backing_store_list;
 paging_segment_t	paging_segments[MAX_NUM_PAGING_SEGMENTS];
-struct mutex		paging_segments_lock;
+pthread_mutex_t		paging_segments_lock;
 int			paging_segment_max = 0;
 int			paging_segment_count = 0;
 int ps_select_array[BS_MAXPRI+1] = { -1,-1,-1,-1,-1 };
@@ -950,11 +950,11 @@ ps_vstruct_create(
 	vs->vs_object_name = MACH_PORT_NULL;
 	vs->vs_name_refs = 0;
 
-	condition_init(&vs->vs_waiting_seqno);
-	condition_init(&vs->vs_waiting_read);
-	condition_init(&vs->vs_waiting_write);
-	condition_init(&vs->vs_waiting_refs);
-	condition_init(&vs->vs_waiting_async);
+	pthread_cond_init(&vs->vs_waiting_seqno, NULL);
+	pthread_cond_init(&vs->vs_waiting_read, NULL);
+	pthread_cond_init(&vs->vs_waiting_write, NULL);
+	pthread_cond_init(&vs->vs_waiting_refs, NULL);
+	pthread_cond_init(&vs->vs_waiting_async, NULL);
 	vs->vs_readers = 0;
 	vs->vs_writers = 0;
 
@@ -1752,7 +1752,7 @@ vs_cl_write_complete(
 		vs->vs_async_pending -= size;
 		if (vs->vs_async_pending == 0) {
 			VS_UNLOCK(vs);
-			condition_broadcast(&vs->vs_waiting_async);
+			pthread_cond_broadcast(&vs->vs_waiting_async);
 		} else {
 			VS_UNLOCK(vs);
 		}
@@ -2040,7 +2040,7 @@ vs_object_data_provided(
 	ASSERT(size > 0);
 	GSTAT(global_stats.gs_pages_in += atop(size));
 
-	dpt = (default_pager_thread_t *) cthread_data(cthread_self());
+	dpt = (default_pager_thread_t *) pthread_getspecific(dpt_key);
 	if (buffer == dpt->dpt_buffer) {
 		dealloc = FALSE;
 	} else {
@@ -2160,7 +2160,7 @@ vs_cluster_read(
 			continue;
 		}
 
-		dpt = (default_pager_thread_t *) cthread_data(cthread_self());
+		dpt = (default_pager_thread_t *) pthread_getspecific(dpt_key);
 		buffer = dpt->dpt_buffer;
 		error = ps_read_device(ps, actual_offset,
 				       &buffer, size, &residual);

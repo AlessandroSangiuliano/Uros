@@ -190,6 +190,7 @@ mach_msg_size_t mig_reply_size;
 #include <mach/ledger_server.h>
 #include <mach/sync_server.h>
 #include <device/device_server.h>
+#include <device/device_master_server.h>
 #include <device/device_pager_server.h>
 #if     MACH_DEBUG
 #include <mach_debug/mach_debug_server.h>
@@ -216,6 +217,7 @@ rpc_subsystem_t mig_e[] = {
         (rpc_subsystem_t)&clock_subsystem,
         (rpc_subsystem_t)&do_bootstrap_subsystem,
         (rpc_subsystem_t)&ds_device_subsystem,
+	(rpc_subsystem_t)&ds_master_device_master_subsystem,
 	(rpc_subsystem_t)&sync_subsystem,
 	(rpc_subsystem_t)&ledger_subsystem,
 #if     MACH_DEBUG

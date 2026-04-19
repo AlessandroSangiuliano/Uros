@@ -48,4 +48,37 @@ if(OSFMK_BUILD_IPC_BENCH)
   add_subdirectory(ipc_bench)
 endif()
 
+# Build AHCI userspace driver
+if(OSFMK_BUILD_AHCI_DRIVER)
+  add_subdirectory(ahci_driver)
+endif()
 
+# Build virtio-blk userspace driver
+if(OSFMK_BUILD_VIRTIO_BLK)
+  add_subdirectory(virtio_blk)
+endif()
+
+# Build modular block device server
+if(OSFMK_BUILD_BLOCK_SERVER)
+  add_subdirectory(block_device_server)
+endif()
+
+# Build HAL server (hardware discovery + device registry)
+if(OSFMK_BUILD_HAL_SERVER)
+  add_subdirectory(hal_server)
+endif()
+
+# Build name server (netname)
+if(OSFMK_BUILD_NAME_SERVER)
+  add_subdirectory(mach_services/servers/netname)
+endif()
+
+# Build ext filesystem server (ext2/ext3/ext4)
+if(OSFMK_BUILD_EXT2_SERVER)
+  add_subdirectory(ext_server)
+endif()
+
+# Build pthread test server
+if(OSFMK_BUILD_PTHREAD_TEST)
+  add_subdirectory(pthread_test)
+endif()

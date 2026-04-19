@@ -35,16 +35,29 @@ PART1_START_SECT=2048       # ext2 filesystem — allineato a 1 MiB
 FS_SIZE_MB=4                # dimensione filesystem (piccola: solo server binari)
 # Il resto del disco diventa swap per il default_pager
 
+# ipc_bench suite selection (empty = all)
+BENCH_ARGS=""
+
 # --- Parse argomenti ---
-while getopts "o:s:h" opt; do
-    case "$opt" in
-        o) DISK_IMG="$OPTARG" ;;
-        s) IMG_SIZE_MB="$OPTARG" ;;
-        h)
-            echo "Uso: $0 [-o output.img] [-s size_mb]"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) DISK_IMG="$2"; shift 2 ;;
+        -s) IMG_SIZE_MB="$2"; shift 2 ;;
+        --bench)
+            shift
+            while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
+                BENCH_ARGS="$BENCH_ARGS $1"
+                shift
+            done
+            ;;
+        -h|--help)
+            echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...]"
+            echo ""
+            echo "  --bench suite ...   Passa suite names a ipc_bench"
+            echo "                      (syscall intra slow inter port pp ool flipc2 all)"
             exit 0
             ;;
-        *) echo "Opzione sconosciuta: -$opt" >&2; exit 1 ;;
+        *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
     esac
 done
 
@@ -59,9 +72,23 @@ for cmd in dd sfdisk mke2fs debugfs; do
 done
 
 # --- Percorsi dei binari ---
+NAME_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/name_server"
 DEFAULT_PAGER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/default_pager"
 HELLO_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_server"
 IPC_BENCH="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ipc_bench"
+BLOCK_DEVICE_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/block_device_server"
+AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
+VIRTIO_BLK_MODULE="$BUILD_DIR/src/block_device_server/modules/virtio_blk.so"
+HAL_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hal_server"
+HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
+EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
+PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
+
+if [ ! -f "$NAME_SERVER" ]; then
+    echo "ERRORE: name_server non trovato: $NAME_SERVER"
+    echo "  Build con: cd $BUILD_DIR && ninja name_server_bin"
+    exit 1
+fi
 
 if [ ! -f "$DEFAULT_PAGER" ]; then
     echo "ERRORE: default_pager non trovato: $DEFAULT_PAGER"
@@ -81,16 +108,63 @@ if [ ! -f "$IPC_BENCH" ]; then
     exit 1
 fi
 
+if [ ! -f "$BLOCK_DEVICE_SERVER" ]; then
+    echo "ERRORE: block_device_server non trovato: $BLOCK_DEVICE_SERVER"
+    echo "  Build con: cd $BUILD_DIR && ninja block_device_server"
+    exit 1
+fi
+
+if [ ! -f "$AHCI_MODULE" ]; then
+    echo "ERRORE: ahci.so non trovato: $AHCI_MODULE"
+    echo "  Build con: cd $BUILD_DIR && ninja ahci_module"
+    exit 1
+fi
+
+if [ ! -f "$VIRTIO_BLK_MODULE" ]; then
+    echo "ERRORE: virtio_blk.so non trovato: $VIRTIO_BLK_MODULE"
+    echo "  Build con: cd $BUILD_DIR && ninja virtio_blk_module"
+    exit 1
+fi
+
+if [ ! -f "$HAL_SERVER" ]; then
+    echo "ERRORE: hal_server non trovato: $HAL_SERVER"
+    echo "  Build con: cd $BUILD_DIR && ninja hal_server"
+    exit 1
+fi
+
+if [ ! -f "$HAL_PCI_SCAN_MODULE" ]; then
+    echo "ERRORE: pci_scan.so non trovato: $HAL_PCI_SCAN_MODULE"
+    echo "  Build con: cd $BUILD_DIR && ninja hal_pci_scan_module"
+    exit 1
+fi
+
+if [ ! -f "$EXT2_SERVER" ]; then
+    echo "ERRORE: ext_server non trovato: $EXT2_SERVER"
+    echo "  Build con: cd $BUILD_DIR && ninja ext_server_bin"
+    exit 1
+fi
+
+if [ ! -f "$PTHREAD_TEST" ]; then
+    echo "ERRORE: pthread_test non trovato: $PTHREAD_TEST"
+    echo "  Build con: cd $BUILD_DIR && ninja pthread_test_server"
+    exit 1
+fi
+
 # --- File di configurazione del bootstrap ---
 # Formato: <symtab_name> <path> [args...]
 # Il path relativo viene risolto come /dev/boot_device/mach_servers/<path>
 # L'argomento "hd0b" dopo il path diventa argv[1] del default_pager,
 # che lo apre con device_open() e lo usa come backing store di paging.
 BOOTSTRAP_CONF=$(mktemp)
-cat > "$BOOTSTRAP_CONF" <<'CONF'
+cat > "$BOOTSTRAP_CONF" <<CONF
+name_server name_server
 default_pager default_pager hd0b
+hal_server hal_server
 hello_server hello_server
-ipc_bench ipc_bench
+ipc_bench ipc_bench${BENCH_ARGS}
+block_device_server block_device_server
+ext_server ext_server
+pthread_test pthread_test
 CONF
 
 # --- Calcoli geometria ---
@@ -128,7 +202,7 @@ trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF"' EXIT
 
 dd if=/dev/zero of="$PART_IMG" bs="$SECT_SIZE" count="$FS_SIZE_SECTS" status=none
 mke2fs -t ext2 -q -F \
-    -b 1024 \
+    -b 4096 \
     -I 256 \
     -r 1 \
     -L "mach_servers" \
@@ -141,17 +215,42 @@ debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 mkdir mach_servers
 cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf
+write $NAME_SERVER name_server
 write $DEFAULT_PAGER default_pager
 write $HELLO_SERVER hello_server
 write $IPC_BENCH ipc_bench
+write $BLOCK_DEVICE_SERVER block_device_server
+write $HAL_SERVER hal_server
+write $EXT2_SERVER ext_server
+write $PTHREAD_TEST pthread_test
+mkdir modules
+cd modules
+mkdir block
+cd block
+write $AHCI_MODULE ahci.so
+write $VIRTIO_BLK_MODULE virtio_blk.so
+cd ..
+mkdir hal
+cd hal
+write $HAL_PCI_SCAN_MODULE pci_scan.so
 DBGFS
 
+echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"
 echo "  /mach_servers/bootstrap.conf → 'default_pager default_pager hd0b'"
 echo "  /mach_servers/bootstrap.conf → 'hello_server hello_server'"
 echo "  /mach_servers/bootstrap.conf → 'ipc_bench ipc_bench'"
+echo "  /mach_servers/bootstrap.conf → 'block_device_server block_device_server'"
+echo "  /mach_servers/bootstrap.conf → 'ext_server ext_server'"
+echo "  /mach_servers/name_server    → $(stat -c%s "$NAME_SERVER") bytes"
 echo "  /mach_servers/default_pager  → $(stat -c%s "$DEFAULT_PAGER") bytes"
 echo "  /mach_servers/hello_server   → $(stat -c%s "$HELLO_SERVER") bytes"
 echo "  /mach_servers/ipc_bench      → $(stat -c%s "$IPC_BENCH") bytes"
+echo "  /mach_servers/block_device_server → $(stat -c%s "$BLOCK_DEVICE_SERVER") bytes"
+echo "  /mach_servers/modules/block/ahci.so       → $(stat -c%s "$AHCI_MODULE") bytes"
+echo "  /mach_servers/modules/block/virtio_blk.so → $(stat -c%s "$VIRTIO_BLK_MODULE") bytes"
+echo "  /mach_servers/hal_server    → $(stat -c%s "$HAL_SERVER") bytes"
+echo "  /mach_servers/modules/hal/pci_scan.so     → $(stat -c%s "$HAL_PCI_SCAN_MODULE") bytes"
+echo "  /mach_servers/ext_server    → $(stat -c%s "$EXT2_SERVER") bytes"
 
 # --- 5. Inserimento partizione ext2 nell'immagine disco ---
 echo "[5/6] Assemblaggio partizione ext2..."
@@ -171,18 +270,32 @@ echo "  MBR:    settore 0"
 echo "  hd0a:   settori ${PART1_START_SECT}-$((PART1_START_SECT + FS_SIZE_SECTS - 1))  (ext2, ${FS_SIZE_MB} MB)"
 echo "    └── /mach_servers/"
 echo "        ├── bootstrap.conf"
+echo "        ├── name_server"
 echo "        ├── default_pager"
-echo "        ├── hello_server
-        └── ipc_bench"
+echo "        ├── hello_server"
+echo "        ├── ipc_bench"
+echo "        ├── block_device_server"
+echo "        ├── hal_server"
+echo "        ├── ext_server"
+echo "        └── modules/"
+echo "            ├── block/"
+echo "            │   ├── ahci.so"
+echo "            │   └── virtio_blk.so"
+echo "            └── hal/"
+echo "                └── pci_scan.so"
 echo "  hd0b:   settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (swap, ${SWAP_SIZE_MB} MB)"
 echo ""
 echo "Flusso di boot:"
 echo "  1. Kernel boot_device → hd0a (d_partitions[0])"
 echo "  2. Bootstrap legge /dev/boot_device/mach_servers/bootstrap.conf"
-echo "  3. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
-echo "  4. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
-echo "  5. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
-echo "  6. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
+echo "  3. Bootstrap carica /dev/boot_device/mach_servers/name_server"
+echo "  4. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
+echo "  5. Bootstrap carica /dev/boot_device/mach_servers/hal_server"
+echo "  6. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
+echo "  7. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
+echo "  8. Bootstrap carica /dev/boot_device/mach_servers/block_device_server"
+echo "  9. Bootstrap carica /dev/boot_device/mach_servers/ext_server"
+echo " 10. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
 echo ""
 echo "Per avviare:"
 echo "  ./scripts/run-qemu.sh"

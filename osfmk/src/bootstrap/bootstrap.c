@@ -63,19 +63,18 @@
 #include <mach/host_info.h>
 #include <mach/mach_host.h>
 #include <mach/exc_server.h>
+#include <mach/module_pool.h>
 #include <mach/bootstrap_server.h>
 
 #include <device/device_types.h>
 #include <device/device.h>
 
 /*
- * Override the cthread stack size for bootstrap server threads.
- * probe_stack() may see only a small initial stack (the thread was created
- * by the kernel via thread_create/thread_bootstrap_return and only the top
- * page is touched before cthread_init runs).  MIG stubs such as
- * device_set_status allocate ~4 KB of local vars; give every cthread 1 MB.
+ * Override the pthread stack size for bootstrap server threads.
+ * MIG stubs such as device_set_status allocate ~4 KB of local vars;
+ * give every thread 1 MB.
  */
-vm_size_t cthread_stack_size = 1024 * 1024;
+int _pthread_stack_size = 1024 * 1024;
 
 #if	PARAGON860
 mach_port_t	bootstrap_root_device_port;	/* local name */
@@ -94,6 +93,7 @@ unix startup -s\n\
 ";*/
 
 const char default_config[] = "\
+name_server name_server\n\
 default_pager default_pager hd0b\n\
 ";
 
@@ -173,8 +173,8 @@ boolean_t       collocation_prohibit = FALSE;
 /*
  * I/O console synchronization
  */
-struct mutex		io_mutex;
-struct condition	io_condition;
+pthread_mutex_t		io_mutex;
+pthread_cond_t		io_condition;
 boolean_t		io_in_progress;
 
 /*
@@ -203,16 +203,10 @@ main(int argc, char **argv)
 	struct file		f;
 
 	/*
-	 * Initialize current cthread
-	 */
-	cthread_set_name(cthread_self(), "bootstrap_server");
-	cthread_wire();
-
-	/*
 	 * Initialize synchronization
 	 */
-	condition_init(&io_condition);
-	mutex_init(&io_mutex);
+	pthread_cond_init(&io_condition, NULL);
+	pthread_mutex_init(&io_mutex, NULL);
 
 	/*
 	 * Get master host and device ports
@@ -435,7 +429,12 @@ main(int argc, char **argv)
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: started\n", data_name);
 	    BOOTSTRAP_IO_UNLOCK();
-	    cthread_detach(cthread_fork((cthread_fn_t)data_device_loop, 0));
+	    {
+		pthread_t data_th;
+		pthread_create(&data_th, NULL,
+			       (void *(*)(void *))data_device_loop, (void *)0);
+		pthread_detach(data_th);
+	    }
 	}
 
 	/*
@@ -1237,6 +1236,165 @@ do_bootstrap_completed(mach_port_t bootstrap,
 	return KERN_SUCCESS;
 }
 
+/*
+ * Module pool — serve plug-in modules (e.g. block device drivers)
+ * from /mach_servers/modules/<class>/ on the boot filesystem.
+ *
+ * The boot filesystem is mounted at /dev/boot_device in the open_file()
+ * namespace, so the real path is /dev/boot_device/mach_servers/modules/<class>/.
+ */
+#define MODULE_POOL_PREFIX	"/dev/boot_device/mach_servers/modules/"
+#define MODULE_POOL_MAX_ENTRIES	64
+
+static boolean_t
+valid_module_component(const char *s)
+{
+	const char *p;
+
+	if (s == NULL || *s == '\0')
+		return FALSE;
+	if (strcmp(s, ".") == 0 || strcmp(s, "..") == 0)
+		return FALSE;
+	for (p = s; *p != '\0'; p++)
+		if (*p == '/')
+			return FALSE;
+	return TRUE;
+}
+
+kern_return_t
+do_bootstrap_list_modules(mach_port_t bootstrap,
+			  module_name_t class,
+			  vm_offset_t *names,
+			  mach_msg_type_number_t *names_count)
+{
+	char pathname[128];
+	struct file f;
+	struct fs_dirent *dirents;
+	unsigned int n = 0, i;
+	int rc;
+	size_t total = 0, l;
+	vm_size_t alloc_size;
+	char *dst;
+	kern_return_t kr;
+
+	if (!valid_module_component(class))
+		return KERN_INVALID_ARGUMENT;
+
+	if (strlen(class) + sizeof(MODULE_POOL_PREFIX) >= sizeof(pathname))
+		return KERN_INVALID_ARGUMENT;
+	strcpy(pathname, MODULE_POOL_PREFIX);
+	strcat(pathname, class);
+
+	memset(&f, 0, sizeof(f));
+	rc = open_file(bootstrap_master_device_port, pathname, &f);
+	if (rc != 0) {
+		/* Absent class directory → empty list, not an error */
+		kr = vm_allocate(mach_task_self(), names, vm_page_size, TRUE);
+		if (kr != KERN_SUCCESS)
+			return kr;
+		*names_count = 0;
+		return KERN_SUCCESS;
+	}
+
+	dirents = (struct fs_dirent *)
+		malloc(sizeof(*dirents) * MODULE_POOL_MAX_ENTRIES);
+	if (dirents == NULL) {
+		close_file(&f);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	rc = readdir_file(&f, dirents, MODULE_POOL_MAX_ENTRIES, &n);
+	close_file(&f);
+	if (rc != 0) {
+		free(dirents);
+		return KERN_FAILURE;
+	}
+
+	for (i = 0; i < n; i++) {
+		if (!valid_module_component(dirents[i].name))
+			continue;
+		if (dirents[i].type == FS_DT_DIR)
+			continue;
+		total += strlen(dirents[i].name) + 1;
+	}
+
+	alloc_size = round_page(total == 0 ? 1 : total);
+	kr = vm_allocate(mach_task_self(), names, alloc_size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		free(dirents);
+		return kr;
+	}
+
+	dst = (char *)(*names);
+	for (i = 0; i < n; i++) {
+		if (!valid_module_component(dirents[i].name))
+			continue;
+		if (dirents[i].type == FS_DT_DIR)
+			continue;
+		l = strlen(dirents[i].name) + 1;
+		memcpy(dst, dirents[i].name, l);
+		dst += l;
+	}
+
+	free(dirents);
+	*names_count = total;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+do_bootstrap_get_module(mach_port_t bootstrap,
+			module_name_t class,
+			module_name_t name,
+			vm_offset_t *data,
+			mach_msg_type_number_t *data_count)
+{
+	char pathname[160];
+	struct file f;
+	int rc;
+	size_t fsize;
+	vm_size_t alloc_size;
+	kern_return_t kr;
+
+	if (!valid_module_component(class) || !valid_module_component(name))
+		return KERN_INVALID_ARGUMENT;
+
+	if (strlen(class) + strlen(name) + sizeof(MODULE_POOL_PREFIX) + 1
+	    >= sizeof(pathname))
+		return KERN_INVALID_ARGUMENT;
+	strcpy(pathname, MODULE_POOL_PREFIX);
+	strcat(pathname, class);
+	strcat(pathname, "/");
+	strcat(pathname, name);
+
+	memset(&f, 0, sizeof(f));
+	rc = open_file(bootstrap_master_device_port, pathname, &f);
+	if (rc != 0)
+		return KERN_INVALID_ARGUMENT;
+
+	fsize = file_size(&f);
+	if (fsize == 0) {
+		close_file(&f);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	alloc_size = round_page(fsize);
+	kr = vm_allocate(mach_task_self(), data, alloc_size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		close_file(&f);
+		return kr;
+	}
+
+	rc = read_file(&f, 0, *data, fsize);
+	close_file(&f);
+	if (rc != 0) {
+		vm_deallocate(mach_task_self(), *data, alloc_size);
+		return KERN_FAILURE;
+	}
+
+	*data_count = fsize;
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 bootstrap_notify_dead_name(mach_port_t name)
 {
@@ -1282,12 +1440,6 @@ data_device_loop(void)
     mach_port_t device_port;
 
     /*
-     * Initialize current cthread
-     */
-    cthread_set_name(cthread_self(), "data_request");
-    cthread_wire();
-
-    /*
      * Loop through all data requests
      */
     local_addr = (io_buf_ptr_t)0;
@@ -1310,14 +1462,14 @@ data_device_loop(void)
 	    printf("%s: '/dev/data_device' not configured (fatal)\n",
 		   data_name);
 	    BOOTSTRAP_IO_UNLOCK();
-	    cthread_exit(0);
+	    pthread_exit(0);
 	}
 	if (kr != KERN_SUCCESS) {
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: '/dev/data_device' open returned %d (fatal)\n",
 		   data_name, kr);
 	    BOOTSTRAP_IO_UNLOCK();
-	    cthread_exit(0);
+	    pthread_exit(0);
 	}
 
 	/*
@@ -1351,7 +1503,7 @@ data_device_loop(void)
 	    BOOTSTRAP_IO_LOCK();
 	    printf("%s: device_read returned %d (fatal)\n", data_name, kr);
 	    BOOTSTRAP_IO_UNLOCK();
-	    cthread_exit(0);
+	    pthread_exit(0);
 	}
 
 	/*
@@ -1449,7 +1601,7 @@ data_device_loop(void)
     printf("%s: device_close returned %d (fatal)\n",
 	   data_name, kr);
     BOOTSTRAP_IO_UNLOCK();
-    cthread_exit(0);
+    pthread_exit(0);
 }
 
 /*

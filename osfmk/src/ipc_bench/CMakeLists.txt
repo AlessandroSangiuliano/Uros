@@ -2,12 +2,52 @@ cmake_minimum_required(VERSION 3.16)
 project(ipc_bench C)
 
 # ===========================================================================
+# MIG-generated ext2fs_server user stubs (for disk I/O benchmark)
+# ===========================================================================
+
+set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
+set(EXT2_DEFS ${CMAKE_SOURCE_DIR}/src/ext_server/ext2fs_server.defs)
+
+set(EXT2_USER_C ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server_user.c)
+set(EXT2_USER_H ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server.h)
+set(EXT2_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server_server.c)
+set(EXT2_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server_server.h)
+
+add_custom_command(
+  OUTPUT ${EXT2_USER_C} ${EXT2_USER_H} ${EXT2_SERVER_C} ${EXT2_SERVER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_SOURCE_DIR}/export/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -header ${EXT2_USER_H}
+    -sheader ${EXT2_SERVER_H}
+    -user ${EXT2_USER_C}
+    -server ${EXT2_SERVER_C}
+    ${EXT2_DEFS}
+  DEPENDS migcom ${EXT2_DEFS}
+  COMMENT "MIG: ext2fs_server.defs (user stubs for ipc_bench)"
+  VERBATIM
+)
+
+# ===========================================================================
 # Source files
 # ===========================================================================
 
 set(IPC_BENCH_SOURCES
   ipc_bench.c
+  disk_bench.c
+  mem_bench.c
+  flipc2_bench.c
+  flipc2_bench_common.c
+  flipc2_bench_throughput.c
+  flipc2_bench_rpc.c
+  flipc2_bench_inter.c
+  flipc2_bench_game.c
+  flipc2_bench_endpoint.c
+  flipc2_bench_bufgroup.c
   nostdlib_stubs.c
+  ${EXT2_USER_C}
 )
 
 # ===========================================================================
@@ -17,6 +57,8 @@ set(IPC_BENCH_SOURCES
 add_executable(ipc_bench_server
   ${IPC_BENCH_SOURCES}
 )
+
+add_dependencies(ipc_bench_server mig_mach_public_headers)
 
 target_compile_options(ipc_bench_server PRIVATE
   -std=gnu11
@@ -32,12 +74,19 @@ target_compile_definitions(ipc_bench_server PRIVATE
 )
 
 target_include_directories(ipc_bench_server PRIVATE
+  # MIG-generated headers (ext2fs_server.h)
+  ${CMAKE_CURRENT_BINARY_DIR}
+  # ext2fs_types.h (imported by MIG-generated code)
+  ${CMAKE_SOURCE_DIR}/src/ext_server
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
+  # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
@@ -48,9 +97,11 @@ target_include_directories(ipc_bench_server PRIVATE
 # Same circular dependency resolution as bootstrap: --start-group/--end-group.
 target_link_libraries(ipc_bench_server PRIVATE
   -Wl,--start-group
-  libcthreads
+  libpthreads
   libmach
   libsa_mach
+  libnetname
+  libflipc2
   -Wl,--end-group
 )
 

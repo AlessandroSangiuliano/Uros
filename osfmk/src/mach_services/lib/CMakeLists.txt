@@ -1,5 +1,11 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Build every userspace static library in this subtree with -fPIC so they
+# can be linked into PIE (ET_DYN) servers.  See #164 / #166.  For plain
+# ET_EXEC servers the cost is negligible (a handful of extra instructions
+# in the rarely-executed prologue); we'll flip each server to -pie in
+# follow-up issues (Phase 3+ of #164).
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Create small generated forwarding headers so legacy includes like
 # "machine/types.h" and <machine/va_list.h> resolve to the
@@ -70,7 +76,7 @@ endfunction()
 add_subdirectory(migcom)
 
 # Generate device/device.h from device.defs via MIG (shared by libmach, libflipc, etc.)
-set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/powermac/include/device/device.defs")
+set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/include/device/device.defs")
 # Public header for #include <device/device.h>
 set(DEVICE_HEADER "${CMAKE_BINARY_DIR}/generated/include/device/device.h")
 # Co-located headers for MIG .c files (#include "device.h" / "device_server.h")
@@ -86,7 +92,7 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
-    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DEVICE_USER_H}
     -sheader ${DEVICE_SERVER_H}
@@ -129,5 +135,9 @@ maybe_add(libpthreads)
 maybe_add(libservice)
 maybe_add(libnetmemory)
 maybe_add(libnetname)
+maybe_add(libblk)
 maybe_add(libflipc)
+maybe_add(libflipc2)
+maybe_add(libdl)
+maybe_add(libmodload)
 

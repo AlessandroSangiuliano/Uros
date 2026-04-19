@@ -42,9 +42,9 @@ extern char	my_name[];
 #define VSTATS_UNLOCK(l)
 #define VSTATS_LOCK_INIT(l)
 #else
-#define VSTATS_LOCK_DECL(name)	struct mutex name;
-#define VSTATS_LOCK(l)		mutex_lock(l)
-#define VSTATS_UNLOCK(l)	mutex_unlock(l)
-#define VSTATS_LOCK_INIT(l)	mutex_init(l)
+#define VSTATS_LOCK_DECL(name)	pthread_mutex_t name;
+#define VSTATS_LOCK(l)		pthread_mutex_lock(l)
+#define VSTATS_UNLOCK(l)	pthread_mutex_unlock(l)
+#define VSTATS_LOCK_INIT(l)	pthread_mutex_init(l, NULL)
 #endif	/* VAGUE_STATS */
 

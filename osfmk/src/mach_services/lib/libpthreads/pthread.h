@@ -41,8 +41,8 @@
  */
 
 #define _POSIX_THREADS
-#undef  _POSIX_THREAD_ATTR_STACKADDR
-#undef  _POSIX_THREAD_ATTR_STACKSIZE
+#define _POSIX_THREAD_ATTR_STACKADDR
+#define _POSIX_THREAD_ATTR_STACKSIZE
 #define _POSIX_THREAD_PRIORITY_SCHEDULING
 #define _POSIX_THREAD_PRIO_INHERIT
 #define _POSIX_THREAD_PRIO_PROTECT
@@ -80,19 +80,19 @@ struct _pthread_handler_rec
  * they *MUST* occur in matched pairs!
  */
 
-#define pthread_cleanup_push(routine, arg) \
+#define pthread_cleanup_push(func, val) \
    { \
 	     struct _pthread_handler_rec __handler; \
-	     pthread_t __self; \
-	     __handler.routine = routine; \
-	     __handler.arg = arg; \
+	     pthread_t __self = pthread_self(); \
+	     __handler.routine = (func); \
+	     __handler.arg = (val); \
 	     __handler.next = __self->cleanup_stack; \
 	     __self->cleanup_stack = &__handler;
 
 #define pthread_cleanup_pop(execute) \
-	     /* Note: 'handler' must be in this same lexical context! */ \
+	     /* Note: '__handler' must be in this same lexical context! */ \
 	     __self->cleanup_stack = __handler.next; \
-	     if (execute) (handler.routine)(handler.arg); \
+	     if (execute) (__handler.routine)(__handler.arg); \
    }
 	
 /*
@@ -107,6 +107,12 @@ typedef struct { long sig; char opaque[__PTHREAD_ATTR_SIZE__]; } pthread_attr_t;
 
 #define PTHREAD_INHERIT_SCHED        1
 #define PTHREAD_EXPLICIT_SCHED       2
+
+/*
+ * Contention scope (POSIX.1-2001)
+ */
+#define PTHREAD_SCOPE_SYSTEM         0
+#define PTHREAD_SCOPE_PROCESS        1
 
 #define PTHREAD_CANCEL_ENABLE        0x01  /* Cancel takes place at next cancellation point */
 #define PTHREAD_CANCEL_DISABLE       0x00  /* Cancel postponed */
@@ -134,6 +140,32 @@ typedef struct { long sig; char opaque[__PTHREAD_MUTEX_SIZE__]; } pthread_mutex_
 #define PTHREAD_MUTEX_INITIALIZER {_PTHREAD_MUTEX_SIG_init}
 
 /*
+ * Mutex types (POSIX.1-2001)
+ */
+#define PTHREAD_MUTEX_NORMAL		0
+#define PTHREAD_MUTEX_ERRORCHECK	1
+#define PTHREAD_MUTEX_RECURSIVE		2
+#define PTHREAD_MUTEX_DEFAULT		PTHREAD_MUTEX_NORMAL
+
+/*
+ * Mutex robustness (POSIX.1-2008)
+ */
+#define PTHREAD_MUTEX_STALLED		0
+#define PTHREAD_MUTEX_ROBUST		1
+
+/*
+ * Process-shared attribute (POSIX.1-2001)
+ */
+#define PTHREAD_PROCESS_PRIVATE		0
+#define PTHREAD_PROCESS_SHARED		1
+
+/*
+ * Clock selection for condvar (POSIX.1-2008)
+ */
+#define CLOCK_REALTIME			0
+#define CLOCK_MONOTONIC			1
+
+/*
  * Condition variable attributes
  */
 #ifndef __POSIX_LIB__
@@ -159,10 +191,50 @@ typedef struct { long sig; char opaque[__PTHREAD_ONCE_SIZE__]; } pthread_once_t;
 #define PTHREAD_ONCE_INIT {_PTHREAD_ONCE_SIG_init}
 
 /*
+ * Read-write lock attributes
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_RWLOCKATTR_SIZE__]; } pthread_rwlockattr_t;
+#endif
+
+/*
+ * Read-write lock variables
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_RWLOCK_SIZE__]; } pthread_rwlock_t;
+#endif
+
+#define PTHREAD_RWLOCK_INITIALIZER {_PTHREAD_RWLOCK_SIG}
+
+/*
+ * Barrier attributes
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_BARRIERATTR_SIZE__]; } pthread_barrierattr_t;
+#endif
+
+/*
+ * Barrier variables
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_BARRIER_SIZE__]; } pthread_barrier_t;
+#endif
+
+#define PTHREAD_BARRIER_SERIAL_THREAD (-1)
+
+/*
+ * Spinlock variables
+ */
+#ifndef __POSIX_LIB__
+typedef struct { long sig; char opaque[__PTHREAD_SPIN_SIZE__]; } pthread_spinlock_t;
+#endif
+
+/*
  * Thread Specific Data - keys
  */
 typedef unsigned long pthread_key_t;    /* Opaque 'pointer' */
 
+#include <stddef.h>
 #include <sys/timers.h>
 
 /*
@@ -184,8 +256,22 @@ int       pthread_attr_setinheritsched(pthread_attr_t *attr,
 				       int inheritsched);
 int       pthread_attr_setschedparam(pthread_attr_t *attr, 
                                      const struct sched_param *param);
-int       pthread_attr_setschedpolicy(pthread_attr_t *attr, 
+int       pthread_attr_setschedpolicy(pthread_attr_t *attr,
 				      int policy);
+int       pthread_attr_setstacksize(pthread_attr_t *attr,
+				     size_t stacksize);
+int       pthread_attr_getstacksize(const pthread_attr_t *attr,
+				     size_t *stacksize);
+int       pthread_attr_setstack(pthread_attr_t *attr,
+				 void *stackaddr, size_t stacksize);
+int       pthread_attr_getstack(const pthread_attr_t *attr,
+				 void **stackaddr, size_t *stacksize);
+int       pthread_attr_setguardsize(pthread_attr_t *attr,
+				     size_t guardsize);
+int       pthread_attr_getguardsize(const pthread_attr_t *attr,
+				     size_t *guardsize);
+int       pthread_attr_setscope(pthread_attr_t *attr, int scope);
+int       pthread_attr_getscope(const pthread_attr_t *attr, int *scope);
 int       pthread_cancel(pthread_t thread);
 int       pthread_setcancelstate(int state, int *oldstate);
 int       pthread_setcanceltype(int type, int *oldtype);
@@ -223,6 +309,8 @@ int       pthread_mutex_setprioceiling(pthread_mutex_t *mutex,
                                        int prioceiling, 
                                        int *old_prioceiling);
 int       pthread_mutex_trylock(pthread_mutex_t *mutex);
+int       pthread_mutex_timedlock(pthread_mutex_t *mutex,
+                                  const struct timespec *abstime);
 int       pthread_mutex_unlock(pthread_mutex_t *mutex);
 int       pthread_mutexattr_destroy(pthread_mutexattr_t *attr);
 int       pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *attr, 
@@ -232,11 +320,42 @@ int       pthread_mutexattr_getprotocol(const pthread_mutexattr_t *attr,
 int       pthread_mutexattr_init(pthread_mutexattr_t *attr);
 int       pthread_mutexattr_setprioceiling(pthread_mutexattr_t *attr, 
                                            int prioceiling);
-int       pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr, 
+int       pthread_mutexattr_setprotocol(pthread_mutexattr_t *attr,
                                         int protocol);
+int       pthread_mutexattr_gettype(const pthread_mutexattr_t *attr,
+                                    int *type);
+int       pthread_mutexattr_settype(pthread_mutexattr_t *attr,
+                                    int type);
+int       pthread_mutexattr_getrobust(const pthread_mutexattr_t *attr,
+                                      int *robust);
+int       pthread_mutexattr_setrobust(pthread_mutexattr_t *attr,
+                                      int robust);
+int       pthread_mutex_consistent(pthread_mutex_t *mutex);
+int       pthread_mutexattr_getpshared(const pthread_mutexattr_t *attr,
+                                       int *pshared);
+int       pthread_mutexattr_setpshared(pthread_mutexattr_t *attr,
+                                       int pshared);
+int       pthread_condattr_getpshared(const pthread_condattr_t *attr,
+                                      int *pshared);
+int       pthread_condattr_setpshared(pthread_condattr_t *attr,
+                                      int pshared);
+int       pthread_condattr_getclock(const pthread_condattr_t *attr,
+                                    int *clock_id);
+int       pthread_condattr_setclock(pthread_condattr_t *attr,
+                                    int clock_id);
+int       pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *attr,
+                                        int *pshared);
+int       pthread_rwlockattr_setpshared(pthread_rwlockattr_t *attr,
+                                        int pshared);
+int       pthread_barrierattr_getpshared(const pthread_barrierattr_t *attr,
+                                         int *pshared);
+int       pthread_barrierattr_setpshared(pthread_barrierattr_t *attr,
+                                         int pshared);
 int       pthread_once(pthread_once_t *once_control, 
 		       void (*init_routine)(void));
 pthread_t pthread_self(void);
+int       pthread_setname_np(pthread_t thread, const char *name);
+int       pthread_getname_np(pthread_t thread, char *buf, int len);
 int       pthread_setschedparam(pthread_t thread, 
 				int policy,
                                 const struct sched_param *param);
@@ -246,6 +365,49 @@ int       pthread_key_delete(pthread_key_t key);
 int       pthread_setspecific(pthread_key_t key,
 			      const void *value);
 void     *pthread_getspecific(pthread_key_t key);
+int       pthread_setconcurrency(int level);
+int       pthread_getconcurrency(void);
+
+/* Per-thread signals (POSIX.1-2001) */
+#include <signal.h>
+int       pthread_sigmask(int how, const sigset_t *set, sigset_t *oldset);
+int       pthread_kill(pthread_t thread, int sig);
+int       sigwait(const sigset_t *set, int *sig);
+
+/* Query live thread attributes (non-POSIX, de-facto standard) */
+int       pthread_getattr_np(pthread_t thread, pthread_attr_t *attr);
+
+/* Read-write locks */
+int       pthread_rwlock_init(pthread_rwlock_t *rwlock,
+			       const pthread_rwlockattr_t *attr);
+int       pthread_rwlock_destroy(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_rdlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_timedrdlock(pthread_rwlock_t *rwlock,
+                                     const struct timespec *abstime);
+int       pthread_rwlock_wrlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock,
+                                     const struct timespec *abstime);
+int       pthread_rwlock_unlock(pthread_rwlock_t *rwlock);
+int       pthread_rwlockattr_init(pthread_rwlockattr_t *attr);
+int       pthread_rwlockattr_destroy(pthread_rwlockattr_t *attr);
+
+/* Barriers */
+int       pthread_barrier_init(pthread_barrier_t *barrier,
+				const pthread_barrierattr_t *attr,
+				unsigned count);
+int       pthread_barrier_destroy(pthread_barrier_t *barrier);
+int       pthread_barrier_wait(pthread_barrier_t *barrier);
+int       pthread_barrierattr_init(pthread_barrierattr_t *attr);
+int       pthread_barrierattr_destroy(pthread_barrierattr_t *attr);
+
+/* Spinlocks */
+int       pthread_spin_init(pthread_spinlock_t *lock, int pshared);
+int       pthread_spin_destroy(pthread_spinlock_t *lock);
+int       pthread_spin_lock(pthread_spinlock_t *lock);
+int       pthread_spin_trylock(pthread_spinlock_t *lock);
+int       pthread_spin_unlock(pthread_spinlock_t *lock);
 
 
 #endif /* _POSIX_PTHREAD_H */

@@ -147,7 +147,24 @@ vm_mem_bootstrap(void)
 	vm_map_init();
 	kmem_init(start, end);
 	pmap_init();
-	zone_init((vm_size_t)ptoa(vm_page_free_count));
+	{
+		/*
+		 * Cap zone_map to 60% of kernel VA.  The old formula
+		 * (ptoa(vm_page_free_count) minus a fixed 32 MB reserve)
+		 * made zone_map proportional to physical RAM, which on
+		 * i386 with 512 MB+ RAM left almost no kernel VA for
+		 * kmem_alloc_wired, kalloc_map, IPC maps, and userspace
+		 * driver DMA allocations.  The proportional cap works
+		 * correctly regardless of RAM size.
+		 */
+		vm_size_t zone_map_size = ptoa(vm_page_free_count);
+		vm_size_t kernel_va = end - start;
+		vm_size_t max_zone = (kernel_va * 3) / 5;
+
+		if (zone_map_size > max_zone)
+			zone_map_size = max_zone;
+		zone_init(zone_map_size);
+	}
 	kalloc_init();
 #if	MACH_RT
 	rtalloc_init();

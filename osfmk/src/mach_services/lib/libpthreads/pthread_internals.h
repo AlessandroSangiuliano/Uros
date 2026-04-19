@@ -43,6 +43,7 @@
 #include <mach.h>			/* For generic MACH support */
 #include "posix_sched.h"		/* For POSIX scheduling policy & parameter */
 #include "pthread_machdep.h"		/* Machine-dependent definitions. */
+#include <signal.h>			/* For sigset_t, signal constants */
 
 /*
  * Compiled-in limits
@@ -73,8 +74,11 @@ typedef struct _pthread
 	int	       cancel_state;  /* Whether thread can be cancelled */
 	struct _pthread_handler_rec *cleanup_stack;
 	int		err_no;		/* thread-local errno */
+	char	       name[16];      /* Thread name (NUL-terminated, 15 usable) */
+	unsigned long  sigmask;	      /* Blocked signal set */
+	unsigned long  sigpending;    /* Pending signal set */
+	mach_port_t    sig_sem;	      /* Semaphore for sigwait() wakeup */
 	void	       *tsd[_POSIX_THREAD_KEYS_MAX];  /* Thread specific data */
-	int I_dont_know_what_else_goes_here_yet;
 } *pthread_t;
 
 /*
@@ -88,17 +92,21 @@ typedef struct
 	int	       inherit;
 	int	       policy;
 	struct sched_param param;
-	int I_dont_know_what_else_goes_here_yet;
+	vm_size_t      stacksize;     /* User-requested stack size (0 = default) */
+	vm_address_t   stackaddr;     /* User-supplied stack base (0 = auto) */
+	vm_size_t      guardsize;     /* Guard page size (0 = default) */
 } pthread_attr_t;
 
 /*
  * Mutex attributes
  */
-typedef struct 
+typedef struct
 {
 	long sig;		     /* Unique signature for this structure */
 	int prioceiling;
 	int protocol;
+	int type;		     /* PTHREAD_MUTEX_NORMAL, etc. */
+	int robust;		     /* PTHREAD_MUTEX_STALLED or _ROBUST */
 } pthread_mutexattr_t;
 
 /*
@@ -116,6 +124,12 @@ typedef struct _pthread_mutex
 	struct _pthread_cond *busy;   /* List of condition variables using this mutex */
 	int	       waiters;	      /* Count of threads waiting for this mutex */
 	mach_port_t    sem;	      /* Semaphore used for waiting */
+	int	       state;	      /* Fast-path: 0=unlocked, 1=locked, 2=contended */
+	int	       type;	      /* PTHREAD_MUTEX_NORMAL, etc. */
+	int	       lock_count;    /* Recursion depth for RECURSIVE type */
+	int	       robust;	      /* PTHREAD_MUTEX_STALLED or _ROBUST */
+	int	       owner_dead;    /* Owner died while holding lock */
+	int	       unrecoverable; /* consistent() not called before unlock */
 } pthread_mutex_t;
 
 /*
@@ -124,7 +138,8 @@ typedef struct _pthread_mutex
 typedef struct 
 {
 	long	       sig;	     /* Unique signature for this structure */
-	int unsupported;
+	int	       pshared;
+	int	       clock;	     /* CLOCK_REALTIME or CLOCK_MONOTONIC */
 } pthread_condattr_t;
 
 /*
@@ -138,16 +153,71 @@ typedef struct _pthread_cond
 	struct _pthread_cond *next, *prev;  /* List of condition variables using mutex */
 	struct _pthread_mutex *busy; /* mutex associated with variable */
 	int	       waiters;	     /* Number of threads waiting */
+	int	       clock;	     /* CLOCK_REALTIME or CLOCK_MONOTONIC */
 } pthread_cond_t;
 
 /*
  * Initialization control (once) variables
  */
-typedef struct 
+typedef struct
 {
 	long	       sig;	      /* Unique signature for this structure */
 	pthread_lock_t lock;	      /* Used for internal mutex on structure */
 } pthread_once_t;
+
+/*
+ * Read-write lock attributes
+ */
+typedef struct
+{
+	long	       sig;
+	int	       pshared;
+} pthread_rwlockattr_t;
+
+/*
+ * Read-write lock variables
+ */
+typedef struct _pthread_rwlock
+{
+	long	       sig;	      /* Unique signature for this structure */
+	pthread_lock_t lock;	      /* Internal spinlock */
+	int	       readers;	      /* Number of active readers */
+	int	       writer;	      /* 1 if a writer holds the lock */
+	int	       blocked_writers; /* Writers waiting */
+	mach_port_t    reader_sem;    /* Semaphore for blocked readers */
+	mach_port_t    writer_sem;    /* Semaphore for blocked writers */
+} pthread_rwlock_t;
+
+/*
+ * Barrier attributes
+ */
+typedef struct
+{
+	long	       sig;
+	int	       pshared;
+} pthread_barrierattr_t;
+
+/*
+ * Barrier variables
+ */
+typedef struct _pthread_barrier
+{
+	long	       sig;	      /* Unique signature for this structure */
+	pthread_lock_t lock;	      /* Internal spinlock */
+	int	       count;	      /* Number of threads required */
+	int	       waiting;	      /* Threads currently blocked */
+	int	       phase;	      /* Toggles to prevent early reuse */
+	mach_port_t    sem;	      /* Semaphore for blocked threads */
+} pthread_barrier_t;
+
+/*
+ * Spinlock variables
+ */
+typedef struct
+{
+	long	       sig;
+	pthread_lock_t spinlock;
+} pthread_spinlock_t;
 
 #include "pthread.h"
 
@@ -161,12 +231,18 @@ typedef struct
 #define _PTHREAD_MUTEX_ATTR_SIG		0x4D545841  /* 'MTXA' */
 #define _PTHREAD_MUTEX_SIG		0x4D555458  /* 'MUTX' */
 #define _PTHREAD_MUTEX_SIG_init		0x32AAABA7  /* [almost] ~'MUTX' */
+#define _PTHREAD_COND_ATTR_SIG		0x434E4441  /* 'CNDA' */
 #define _PTHREAD_COND_SIG		0x434F4E44  /* 'COND' */
 #define _PTHREAD_COND_SIG_init		0x3CB0B1BB  /* [almost] ~'COND' */
 #define _PTHREAD_ATTR_SIG		0x54484441  /* 'THDA' */
 #define _PTHREAD_ONCE_SIG		0x4F4E4345  /* 'ONCE' */
 #define _PTHREAD_ONCE_SIG_init		0x30B1BCBA  /* [almost] ~'ONCE' */
 #define _PTHREAD_SIG			0x54485244  /* 'THRD' */
+#define _PTHREAD_RWLOCK_ATTR_SIG	0x52574C41  /* 'RWLA' */
+#define _PTHREAD_RWLOCK_SIG		0x52574C4B  /* 'RWLK' */
+#define _PTHREAD_BARRIER_ATTR_SIG	0x42415241  /* 'BARA' */
+#define _PTHREAD_BARRIER_SIG		0x42415252  /* 'BARR' */
+#define _PTHREAD_SPIN_SIG		0x5350494E  /* 'SPIN' */
 
 #define _PTHREAD_EXITED		     3
 #define _PTHREAD_CREATE_PARENT	     4

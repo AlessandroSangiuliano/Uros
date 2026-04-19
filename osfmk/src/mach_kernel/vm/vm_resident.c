@@ -269,6 +269,7 @@
 #include <kern/misc_protos.h>
 #include <zone_debug.h>
 #include <vm/cpm.h>
+#include <mach/machine/vm_param.h>	/* pa_is_lowmem */
 
 /*
  *	Associated with page of user-allocatable memory is a
@@ -373,11 +374,13 @@ struct vm_page	vm_page_template;
  *	Resident pages that represent real memory
  *	are allocated from a free list.
  */
-vm_page_t	vm_page_queue_free;
+vm_page_t	vm_page_queue_free;		/* lowmem free list */
+vm_page_t	vm_page_queue_free_highmem;	/* highmem free list */
 vm_page_t       vm_page_queue_fictitious;
 decl_mutex_data(,vm_page_queue_free_lock)
 unsigned int	vm_page_free_wanted;
-int		vm_page_free_count;
+int		vm_page_free_count;		/* total free (lowmem + highmem) */
+int		vm_page_free_count_lowmem;	/* lowmem free only */
 int		vm_page_fictitious_count;
 
 unsigned int	vm_page_free_count_minimum;	/* debugging */
@@ -551,6 +554,7 @@ vm_page_bootstrap(
 	m->restart = FALSE;
 	m->limbo = FALSE;
 
+	m->highmem = FALSE;
 	m->phys_addr = 0;		/* reset later */
 
 	m->page_lock = VM_PROT_NONE;
@@ -566,6 +570,7 @@ vm_page_bootstrap(
 	simple_lock_init(&vm_page_preppin_lock, ETAP_VM_PREPPIN);
 
 	vm_page_queue_free = VM_PAGE_NULL;
+	vm_page_queue_free_highmem = VM_PAGE_NULL;
 	vm_page_queue_fictitious = VM_PAGE_NULL;
 	queue_init(&vm_page_queue_active);
 	queue_init(&vm_page_queue_inactive);
@@ -577,14 +582,8 @@ vm_page_bootstrap(
 	 *	Steal memory for the map and zone subsystems.
 	 */
 
-	printf("vm_page_bootstrap: dirbase[800]=0x%08x\n",
-		kernel_pmap->dirbase[800]);
 	vm_map_steal_memory();
-	printf("after vm_map_steal_memory: dirbase[800]=0x%08x\n",
-		kernel_pmap->dirbase[800]);
 	zone_steal_memory();
-	printf("after zone_steal_memory: dirbase[800]=0x%08x\n",
-		kernel_pmap->dirbase[800]);
 
 	/*
 	 *	Allocate (and initialize) the virtual-to-physical
@@ -628,10 +627,6 @@ vm_page_bootstrap(
 		pmap_steal_memory(vm_page_bucket_count *
 				  sizeof(vm_page_bucket_t));
 
-	printf("vm_page_buckets=0x%x count=%u dirbase[800]=0x%08x\n",
-		(unsigned)vm_page_buckets, vm_page_bucket_count,
-		(unsigned)kernel_pmap->dirbase[800]);
-
 	for (i = 0; i < vm_page_bucket_count; i++) {
 		register vm_page_bucket_t *bucket = &vm_page_buckets[i];
 
@@ -667,7 +662,9 @@ vm_page_bootstrap(
 	 */
 	vm_page_wire_count = atop(mem_size) - vm_page_free_count;	/* initial value */
 
-	printf("vm_page_bootstrap: %d free pages\n", vm_page_free_count);
+	printf("vm_page_bootstrap: %d free pages (%d lowmem, %d highmem)\n",
+		vm_page_free_count, vm_page_free_count_lowmem,
+		vm_page_free_count - vm_page_free_count_lowmem);
 	vm_page_free_count_minimum = vm_page_free_count;
 }
 
@@ -769,6 +766,8 @@ pmap_startup(
 			break;
 
 		vm_page_init(&pages[i], paddr);
+		if (!pa_is_lowmem(paddr))
+			pages[i].highmem = TRUE;
 		vm_page_pages++;
 		pages_initialized++;
 	}
@@ -1411,7 +1410,6 @@ vm_page_grab(void)
 	}
 
 	while (vm_page_queue_free == VM_PAGE_NULL) {
-		printf("vm_page_grab: no free pages, trouble expected...\n");
 		mutex_unlock(&vm_page_queue_free_lock);
 		VM_PAGE_WAIT();
 		mutex_lock(&vm_page_queue_free_lock);
@@ -1421,7 +1419,11 @@ vm_page_grab(void)
 		vm_page_free_count_minimum = vm_page_free_count;
 	mem = vm_page_queue_free;
 	vm_page_queue_free = (vm_page_t) mem->pageq.next;
+	vm_page_free_count_lowmem--;
 	mem->free = FALSE;
+	if (mem->highmem)
+		panic("vm_page_grab: highmem page 0x%x on lowmem list!",
+		      mem->phys_addr);
 	mutex_unlock(&vm_page_queue_free_lock);
 
 	/*
@@ -1434,6 +1436,59 @@ vm_page_grab(void)
 	 *	We don't have the counts locked ... if they change a little,
 	 *	it doesn't really matter.
 	 */
+
+	if ((vm_page_free_count < vm_page_free_min) ||
+	    ((vm_page_free_count < vm_page_free_target) &&
+	     (vm_page_inactive_count < vm_page_inactive_target)))
+		thread_wakeup((event_t) &vm_page_free_wanted);
+
+	return mem;
+}
+
+/*
+ *	vm_page_grab_any:
+ *
+ *	Remove a page from the free lists, preferring highmem pages
+ *	to leave lowmem available for kernel allocations.
+ *	Returns VM_PAGE_NULL if the free list is too small.
+ *
+ *	Used by the fault handler for user-space page faults where
+ *	highmem pages are perfectly usable (mapped into user pmap).
+ */
+vm_page_t
+vm_page_grab_any(void)
+{
+	register vm_page_t	mem;
+
+	mutex_lock(&vm_page_queue_free_lock);
+
+	if ((vm_page_free_count < vm_page_free_reserved) &&
+	    !current_thread()->vm_privilege) {
+		mutex_unlock(&vm_page_queue_free_lock);
+		return VM_PAGE_NULL;
+	}
+
+	while (vm_page_queue_free == VM_PAGE_NULL &&
+	       vm_page_queue_free_highmem == VM_PAGE_NULL) {
+		mutex_unlock(&vm_page_queue_free_lock);
+		VM_PAGE_WAIT();
+		mutex_lock(&vm_page_queue_free_lock);
+	}
+
+	if (--vm_page_free_count < vm_page_free_count_minimum)
+		vm_page_free_count_minimum = vm_page_free_count;
+
+	/* Prefer highmem to preserve lowmem for kernel */
+	if (vm_page_queue_free_highmem != VM_PAGE_NULL) {
+		mem = vm_page_queue_free_highmem;
+		vm_page_queue_free_highmem = (vm_page_t) mem->pageq.next;
+	} else {
+		mem = vm_page_queue_free;
+		vm_page_queue_free = (vm_page_t) mem->pageq.next;
+		vm_page_free_count_lowmem--;
+	}
+	mem->free = FALSE;
+	mutex_unlock(&vm_page_queue_free_lock);
 
 	if ((vm_page_free_count < vm_page_free_min) ||
 	    ((vm_page_free_count < vm_page_free_target) &&
@@ -1459,8 +1514,14 @@ vm_page_release(
 	if (mem->free)
 		panic("vm_page_release");
 	mem->free = TRUE;
-	mem->pageq.next = (queue_entry_t) vm_page_queue_free;
-	vm_page_queue_free = mem;
+	if (mem->highmem) {
+		mem->pageq.next = (queue_entry_t) vm_page_queue_free_highmem;
+		vm_page_queue_free_highmem = mem;
+	} else {
+		mem->pageq.next = (queue_entry_t) vm_page_queue_free;
+		vm_page_queue_free = mem;
+		vm_page_free_count_lowmem++;
+	}
 	vm_page_free_count++;
 
 	/*
@@ -2208,10 +2269,10 @@ vm_page_free_list_sort(void)
 	npages = 0;
 	for (m = vm_page_queue_free; m != VM_PAGE_NULL; m = NEXT_PAGE(m))
 		++npages;
-	if (npages != vm_page_free_count)
+	if (npages != vm_page_free_count_lowmem)
 		panic("vm_sort_free_list:  prelim:  npages %d free_count %d",
-		      npages, vm_page_free_count);
-	old_free_count = vm_page_free_count;
+		      npages, vm_page_free_count_lowmem);
+	old_free_count = vm_page_free_count_lowmem;
 #endif	/* MACH_ASSERT */
 
 	sort_list = sort_list_end = vm_page_queue_free;
@@ -2261,12 +2322,12 @@ vm_page_free_list_sort(void)
 		addr = m->phys_addr;
 		++npages;
 	}
-	if (old_free_count != vm_page_free_count)
+	if (old_free_count != vm_page_free_count_lowmem)
 		panic("vm_sort_free_list:  old_free %d free_count %d",
-		      old_free_count, vm_page_free_count);
-	if (npages != vm_page_free_count)
+		      old_free_count, vm_page_free_count_lowmem);
+	if (npages != vm_page_free_count_lowmem)
 		panic("vm_sort_free_list:  npages %d free_count %d",
-		      npages, vm_page_free_count);
+		      npages, vm_page_free_count_lowmem);
 #endif	/* MACH_ASSERT */
 
 	vm_page_queue_free = sort_list;
@@ -2360,6 +2421,7 @@ vm_page_find_contiguous(
 				m->gobbled = TRUE;
 			}
 			vm_page_free_count -= npages;
+			vm_page_free_count_lowmem -= npages;
 			if (vm_page_free_count < vm_page_free_count_minimum)
 				vm_page_free_count_minimum = vm_page_free_count;
 			vm_page_gobble_count += npages;

@@ -12,8 +12,17 @@ file(GLOB TOP_S_LOWER_S CONFIGURE_DEPENDS "*.s")
 file(GLOB MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
 list(REMOVE_ITEM LIB_SOURCES ${MS_WRAPPERS})
 
+# Exclude sprintf.c and doprnt.c — the canonical implementations live in
+# libsa_mach.  The libmach copies have an incompatible _doprnt signature
+# (char * callback vs void *) which breaks snprintf when the linker picks
+# mismatched symbols with --allow-multiple-definition.  See issue #102.
+list(REMOVE_ITEM LIB_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/sprintf.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/doprnt.c
+)
+
 # __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out)
-set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/powermac/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
+set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/asm")
 
 # Preprocess ALL lowercase .s files (they use #include and need CPP)
@@ -59,7 +68,7 @@ endif()
 # either fail MIG parsing or are not used by userspace.
 
 set(_KERNEL ${CMAKE_SOURCE_DIR}/src/mach_kernel)
-set(_EXPORT ${CMAKE_SOURCE_DIR}/export/powermac/include)
+set(_EXPORT ${CMAKE_SOURCE_DIR}/export/include)
 # MIG include path: export tree first (userspace .defs), then kernel for extras
 set(_MIG_INC ${_EXPORT} ${_KERNEL} ${_EXPORT}/mach_debug)
 
@@ -79,6 +88,7 @@ set(EXPORT_MIG_DEFS
   ${_EXPORT}/mach/mach_norma.defs
   ${_EXPORT}/mach/mach_port.defs
   ${_EXPORT}/mach/memory_object.defs
+  ${_EXPORT}/mach/memory_object_default.defs
   ${_EXPORT}/mach/notify.defs
   ${_EXPORT}/mach/sync.defs
   ${_EXPORT}/mach_debug/mach_debug.defs
@@ -90,6 +100,65 @@ foreach(DEFS IN LISTS EXPORT_MIG_DEFS)
   get_filename_component(DEFS_NAME ${DEFS} NAME_WE)
   list(APPEND LIB_SOURCES ${${DEFS_NAME}_MIG_GENERATED})
 endforeach()
+
+# --- #169: publish MIG-generated user/server headers as <mach/NAME.h> --------
+# Single source of truth: .defs files generate headers into build/generated/
+# (done above by add_mig_defs).  Here we copy them into the public include
+# path build/generated/include/mach/ so every userspace target that has
+# generated/include in its include search path can resolve <mach/bootstrap.h>
+# etc. from the regenerated copy instead of a checked-in stale one.
+#
+# Rows: <build-generated filename>  <public filename under mach/>
+# Two renames preserve the legacy public names to avoid a source-wide rename:
+#   mach.h                       -> mach_interface.h
+#   memory_object_default_user.h -> memory_object_default.h
+set(_PUB_MACH_DIR "${CMAKE_BINARY_DIR}/generated/include/mach")
+file(MAKE_DIRECTORY "${_PUB_MACH_DIR}")
+
+set(_MIG_PUBLIC_MAP
+  # Build filename from add_mig_defs is <defs>.h / <defs>_server.h.
+  # Public filename is the legacy name consumers actually #include.
+  # user-mode
+  bootstrap.h                    bootstrap.h
+  clock.h                        clock.h
+  clock_reply.h                  clock_reply.h
+  default_pager_object.h         default_pager_object.h
+  exc.h                          exc_user.h
+  ledger.h                       ledger.h
+  mach_host.h                    mach_host.h
+  mach.h                         mach_interface.h
+  mach_norma.h                   mach_norma.h
+  mach_port.h                    mach_port.h
+  memory_object_default.h        memory_object_default.h
+  sync.h                         sync.h
+  # server-mode
+  bootstrap_server.h             bootstrap_server.h
+  exc_server.h                   exc_server.h
+  memory_object_default_server.h memory_object_default_server.h
+  memory_object_server.h         memory_object_server.h
+  notify_server.h                notify_server.h
+)
+
+set(_MIG_PUBLIC_HEADERS)
+list(LENGTH _MIG_PUBLIC_MAP _map_len)
+math(EXPR _map_last "${_map_len} - 1")
+foreach(_i RANGE 0 ${_map_last} 2)
+  math(EXPR _j "${_i} + 1")
+  list(GET _MIG_PUBLIC_MAP ${_i} _src_name)
+  list(GET _MIG_PUBLIC_MAP ${_j} _dst_name)
+  set(_src "${CMAKE_BINARY_DIR}/generated/${_src_name}")
+  set(_dst "${_PUB_MACH_DIR}/${_dst_name}")
+  add_custom_command(
+    OUTPUT ${_dst}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${_src} ${_dst}
+    DEPENDS ${_src}
+    COMMENT "Publish mach/${_dst_name} (from ${_src_name})"
+    VERBATIM
+  )
+  list(APPEND _MIG_PUBLIC_HEADERS ${_dst})
+endforeach()
+
+add_custom_target(mig_mach_public_headers DEPENDS ${_MIG_PUBLIC_HEADERS})
 
 # device.defs: the parent CMakeLists already generates device_user.c / device_server.c
 # (and the public device/device.h header) via a standalone custom command, so we
@@ -107,7 +176,7 @@ set_source_files_properties(
 add_library(libmach STATIC ${LIB_SOURCES})
 
 # Depend on MIG-generated device/device.h (defined in parent CMakeLists)
-add_dependencies(libmach mig_device_header)
+add_dependencies(libmach mig_device_header mig_mach_public_headers)
 
 # Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
 # Apply C-only options (including -include stdint.h) only when compiling C sources
@@ -123,7 +192,7 @@ target_include_directories(libmach PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )

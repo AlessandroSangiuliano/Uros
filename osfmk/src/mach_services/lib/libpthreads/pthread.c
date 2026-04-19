@@ -31,6 +31,11 @@
 #include <stdio.h>	/* For printf(). */
 #include <errno.h>	/* For __mach_errno_addr() prototype. */
 
+extern void mig_init(void *initial);
+
+/* Kernel trap to propagate thread name for DDB visibility */
+extern kern_return_t mach_thread_set_name(const char *name);
+
 /*
  * [Internal] stack support
  */
@@ -176,6 +181,117 @@ _pthread_free_stack(pthread_t self)
 }
 
 /*
+ * [Internal] thread pool — recycle kernel threads instead of destroying them.
+ *
+ * When a pthread exits, its kernel thread parks on a semaphore instead of
+ * calling thread_terminate().  pthread_create() can then reuse a parked
+ * thread, avoiding the cost of thread_create() + thread_set_state() RPCs.
+ */
+
+#define _THREAD_POOL_MAX	8	/* Maximum cached kernel threads */
+
+struct _pool_entry {
+	thread_port_t	kernel_thread;	/* Mach thread port */
+	mach_port_t	wake_sem;	/* Semaphore to wake this thread */
+	vm_address_t	stack;		/* Stack assigned to this thread */
+	pthread_t	self;		/* pthread_t at base of stack */
+};
+
+static struct _pool_entry _thread_pool[_THREAD_POOL_MAX];
+static int _thread_pool_count;		/* Number of threads in pool */
+static pthread_lock_t _thread_pool_lock = 0;	/* Protects pool */
+
+/*
+ * _pthread_pool_trampoline — entry point for recycled threads.
+ *
+ * The thread wakes from the pool semaphore, runs the user function,
+ * then returns to the pool (or terminates if the pool is full).
+ */
+static void
+_pthread_pool_trampoline(pthread_t self)
+{
+	for (;;) {
+		/* Run the user function */
+		pthread_exit((self->fun)(self->arg));
+		/* NOT REACHED — pthread_exit either parks us or terminates */
+	}
+}
+
+/*
+ * _pthread_pool_park — try to park the current kernel thread in the pool.
+ *
+ * Returns 1 if parked (caller must NOT call thread_terminate),
+ * returns 0 if pool is full (caller should terminate).
+ * When the thread is woken, it starts executing _pthread_pool_trampoline.
+ */
+static int
+_pthread_pool_park(pthread_t self)
+{
+	kern_return_t kern_res;
+	mach_port_t sem;
+	int idx;
+
+	LOCK(_thread_pool_lock);
+	if (_thread_pool_count >= _THREAD_POOL_MAX) {
+		UNLOCK(_thread_pool_lock);
+		return 0;	/* Pool full — terminate */
+	}
+	idx = _thread_pool_count++;
+
+	/* Create wake semaphore if needed */
+	if (_thread_pool[idx].wake_sem == MACH_PORT_NULL) {
+		MACH_CALL(semaphore_create(mach_task_self(),
+					   &_thread_pool[idx].wake_sem,
+					   SYNC_POLICY_FIFO, 0), kern_res);
+		if (kern_res != KERN_SUCCESS) {
+			_thread_pool_count--;
+			UNLOCK(_thread_pool_lock);
+			return 0;
+		}
+	}
+
+	_thread_pool[idx].kernel_thread = self->kernel_thread;
+	_thread_pool[idx].stack = (vm_address_t)STACK_LOWEST((vm_address_t)self);
+	_thread_pool[idx].self = self;
+	sem = _thread_pool[idx].wake_sem;
+	UNLOCK(_thread_pool_lock);
+
+	/* Park: block until pthread_create wakes us */
+	MACH_CALL(semaphore_wait(sem), kern_res);
+
+	/* Woken up — self->fun and self->arg have been set by pthread_create */
+	_pthread_pool_trampoline(self);
+	/* NOT REACHED */
+	return 1;
+}
+
+/*
+ * _pthread_pool_get — try to get a recycled thread from the pool.
+ *
+ * On success, fills in *thread and *stack and returns 1.
+ * The kernel thread is still blocked on its semaphore.
+ */
+static int
+_pthread_pool_get(pthread_t *thread, vm_address_t *stack,
+		  thread_port_t *kernel_thread, mach_port_t *wake_sem)
+{
+	int idx;
+
+	LOCK(_thread_pool_lock);
+	if (_thread_pool_count == 0) {
+		UNLOCK(_thread_pool_lock);
+		return 0;
+	}
+	idx = --_thread_pool_count;
+	*thread = _thread_pool[idx].self;
+	*stack = _thread_pool[idx].stack;
+	*kernel_thread = _thread_pool[idx].kernel_thread;
+	*wake_sem = _thread_pool[idx].wake_sem;
+	UNLOCK(_thread_pool_lock);
+	return 1;
+}
+
+/*
  * Destroy a thread attribute structure
  */
 int       
@@ -200,7 +316,8 @@ pthread_attr_getdetachstate(const pthread_attr_t *attr,
 {
 	if (attr->sig == _PTHREAD_ATTR_SIG)
 	{
-		*detachstate = attr->detached;
+		if (detachstate != (int *)NULL)
+			*detachstate = attr->detached;
 		return (ESUCCESS);
 	} else
 	{
@@ -218,7 +335,8 @@ pthread_attr_getinheritsched(const pthread_attr_t *attr,
 {
 	if (attr->sig == _PTHREAD_ATTR_SIG)
 	{
-		*inheritsched = attr->inherit;
+		if (inheritsched != (int *)NULL)
+			*inheritsched = attr->inherit;
 		return (ESUCCESS);
 	} else
 	{
@@ -236,7 +354,8 @@ pthread_attr_getschedparam(const pthread_attr_t *attr,
 {
 	if (attr->sig == _PTHREAD_ATTR_SIG)
 	{
-		*param = attr->param;
+		if (param != (struct sched_param *)NULL)
+			*param = attr->param;
 		return (ESUCCESS);
 	} else
 	{
@@ -254,7 +373,8 @@ pthread_attr_getschedpolicy(const pthread_attr_t *attr,
 {
 	if (attr->sig == _PTHREAD_ATTR_SIG)
 	{
-		*policy = attr->policy;
+		if (policy != (int *)NULL)
+			*policy = attr->policy;
 		return (ESUCCESS);
 	} else
 	{
@@ -272,6 +392,9 @@ pthread_attr_init(pthread_attr_t *attr)
 	attr->policy = _PTHREAD_DEFAULT_POLICY;
 	attr->inherit = _PTHREAD_DEFAULT_INHERITSCHED;
 	attr->detached = PTHREAD_CREATE_JOINABLE;
+	attr->stacksize = 0;	/* 0 = use default */
+	attr->stackaddr = 0;	/* 0 = auto-allocate */
+	attr->guardsize = 0;	/* 0 = use default (page size) */
 	return (ESUCCESS);
 }
 
@@ -371,6 +494,151 @@ pthread_attr_setschedpolicy(pthread_attr_t *attr,
 }
 
 /*
+ * Set the stack size attribute.
+ * The size must be a power of two and at least _PTHREAD_DEFAULT_STACKSIZE.
+ */
+int
+pthread_attr_setstacksize(pthread_attr_t *attr, size_t stacksize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (stacksize < _PTHREAD_DEFAULT_STACKSIZE)
+		return (EINVAL);
+	if (stacksize & (stacksize - 1))
+		return (EINVAL);	/* Must be power of two */
+	if (stacksize > (0x7FFFFFFF / 2))
+		return (EINVAL);	/* Would overflow GUARD_SIZE */
+	attr->stacksize = stacksize;
+	return (ESUCCESS);
+}
+
+/*
+ * Get the stack size attribute.
+ */
+int
+pthread_attr_getstacksize(const pthread_attr_t *attr, size_t *stacksize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (stacksize != (size_t *)NULL)
+		*stacksize = attr->stacksize ? attr->stacksize : _PTHREAD_DEFAULT_STACKSIZE;
+	return (ESUCCESS);
+}
+
+/*
+ * Set stack address and size together (POSIX.1-2001).
+ * The caller is responsible for allocating the stack memory.
+ */
+int
+pthread_attr_setstack(pthread_attr_t *attr, void *stackaddr, size_t stacksize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (stacksize < _PTHREAD_DEFAULT_STACKSIZE)
+		return (EINVAL);
+	if (stacksize > (0x7FFFFFFF / 2))
+		return (EINVAL);
+	attr->stackaddr = (vm_address_t)stackaddr;
+	attr->stacksize = stacksize;
+	return (ESUCCESS);
+}
+
+/*
+ * Get stack address and size together (POSIX.1-2001).
+ */
+int
+pthread_attr_getstack(const pthread_attr_t *attr, void **stackaddr,
+		      size_t *stacksize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (stackaddr != (void **)NULL)
+		*stackaddr = (void *)attr->stackaddr;
+	if (stacksize != (size_t *)NULL)
+		*stacksize = attr->stacksize ? attr->stacksize
+					     : _PTHREAD_DEFAULT_STACKSIZE;
+	return (ESUCCESS);
+}
+
+/*
+ * Set the guard area size attribute (POSIX.1-2001).
+ * The guard size is rounded up to a page boundary by the implementation.
+ * Setting guardsize to 0 disables the guard area.
+ */
+int
+pthread_attr_setguardsize(pthread_attr_t *attr, size_t guardsize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	attr->guardsize = guardsize;
+	return (ESUCCESS);
+}
+
+/*
+ * Get the guard area size attribute (POSIX.1-2001).
+ */
+int
+pthread_attr_getguardsize(const pthread_attr_t *attr, size_t *guardsize)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (guardsize != (size_t *)NULL)
+		*guardsize = attr->guardsize;
+	return (ESUCCESS);
+}
+
+/*
+ * Set contention scope (POSIX.1-2001).
+ * Only PTHREAD_SCOPE_SYSTEM is supported (1:1 threading model).
+ */
+int
+pthread_attr_setscope(pthread_attr_t *attr, int scope)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (scope == PTHREAD_SCOPE_SYSTEM)
+		return (ESUCCESS);
+	if (scope == PTHREAD_SCOPE_PROCESS)
+		return (ENOTSUP);
+	return (EINVAL);
+}
+
+/*
+ * Get contention scope (POSIX.1-2001).
+ * Always returns PTHREAD_SCOPE_SYSTEM.
+ */
+int
+pthread_attr_getscope(const pthread_attr_t *attr, int *scope)
+{
+	if (attr->sig != _PTHREAD_ATTR_SIG)
+		return (EINVAL);
+	if (scope != (int *)NULL)
+		*scope = PTHREAD_SCOPE_SYSTEM;
+	return (ESUCCESS);
+}
+
+/*
+ * Query the actual attributes of a live thread (non-POSIX, de-facto standard).
+ * Fills in `attr` with the thread's current detach state, scheduling policy
+ * and parameters, stack address/size, and guard size.
+ */
+int
+pthread_getattr_np(pthread_t thread, pthread_attr_t *attr)
+{
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	attr->sig = _PTHREAD_ATTR_SIG;
+	attr->detached = thread->detached;
+	attr->inherit = thread->inherit;
+	attr->policy = thread->policy;
+	attr->param = thread->param;
+	attr->stackaddr = (vm_address_t)STACK_LOWEST((vm_address_t)thread);
+	attr->stacksize = __pthread_stack_size;
+	attr->guardsize = 0;
+	return (ESUCCESS);
+}
+
+/*
  * Create and start execution of a new thread.
  */
 
@@ -401,6 +669,9 @@ _pthread_create(pthread_t t,
 		LOCK_INIT(t->lock);
 		t->cancel_state = PTHREAD_CANCEL_ENABLE | PTHREAD_CANCEL_DEFERRED;
 		t->cleanup_stack = (struct _pthread_handler_rec *)NULL;
+		t->sigmask = 0;
+		t->sigpending = 0;
+		t->sig_sem = MACH_PORT_NULL;
 		/* Create control semaphores */
 		if (t->detached == PTHREAD_CREATE_JOINABLE)
 		{
@@ -451,6 +722,24 @@ pthread_create(pthread_t *thread,
 		pthread_attr_init(attrs);
 	}
 	res = ESUCCESS;
+
+	/* Try to reuse a pooled kernel thread first */
+	{
+		mach_port_t wake_sem;
+		if (_pthread_pool_get(&t, &stack, &kernel_thread, &wake_sem))
+		{
+			*thread = t;
+			if ((res = _pthread_create(t, attrs, kernel_thread)) != 0)
+				return (res);
+			t->arg = arg;
+			t->fun = start_routine;
+			/* Wake the parked thread — it will run _pthread_pool_trampoline */
+			MACH_CALL(semaphore_signal(wake_sem), kern_res);
+			return (ESUCCESS);
+		}
+	}
+
+	/* No pooled thread available — create a new one */
 	do
 	{
 		/* Allocate a stack for the thread */
@@ -556,12 +845,24 @@ pthread_exit(void *value_ptr)
 		MACH_CALL(semaphore_wait(self->death), kern_res);
 	} else
 		UNLOCK(self->lock);
-	/* Destroy thread & reclaim resources */
+	/* Destroy join/death semaphores */
 	if (self->death)
 	{
 		MACH_CALL(semaphore_destroy(mach_task_self(), self->joiners), kern_res);
 		MACH_CALL(semaphore_destroy(mach_task_self(), self->death), kern_res);
+		self->death = MACH_PORT_NULL;
+		self->joiners = MACH_PORT_NULL;
 	}
+	/* Destroy signal semaphore if allocated */
+	if (self->sig_sem != MACH_PORT_NULL)
+	{
+		MACH_CALL(semaphore_destroy(mach_task_self(), self->sig_sem), kern_res);
+		self->sig_sem = MACH_PORT_NULL;
+	}
+	/* Try to park this kernel thread in the pool for reuse */
+	if (_pthread_pool_park(self))
+		return;		/* NOT REACHED — park loops into trampoline */
+	/* Pool full — actually terminate */
 	_pthread_free_stack(self);
 	MACH_CALL(thread_terminate(mach_thread_self()), kern_res);
 }
@@ -622,8 +923,11 @@ pthread_getschedparam(pthread_t thread,
 {
 	if (thread->sig == _PTHREAD_SIG)
 	{
-		*policy = thread->policy;
-		switch (*policy)
+		if (policy != (int *)NULL)
+			*policy = thread->policy;
+		if (param != (struct sched_param *)NULL)
+			*param = thread->param;
+		switch (thread->policy)
 		{
 		case SCHED_OTHER:
 			break;
@@ -670,6 +974,46 @@ pthread_setschedparam(pthread_t thread,
 }
 
 /*
+ * Set the name of a thread (non-POSIX, de-facto standard).
+ * Name is truncated to 15 characters + NUL.
+ */
+int
+pthread_setname_np(pthread_t thread, const char *name)
+{
+	int i;
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	LOCK(thread->lock);
+	for (i = 0; i < 15 && name[i] != '\0'; i++)
+		thread->name[i] = name[i];
+	thread->name[i] = '\0';
+	UNLOCK(thread->lock);
+	/* Propagate to kernel for DDB visibility (best-effort, ignore errors) */
+	if (thread == pthread_self())
+		mach_thread_set_name(thread->name);
+	return (ESUCCESS);
+}
+
+/*
+ * Get the name of a thread (non-POSIX, de-facto standard).
+ */
+int
+pthread_getname_np(pthread_t thread, char *buf, int len)
+{
+	int i;
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	if (len <= 0)
+		return (EINVAL);
+	LOCK(thread->lock);
+	for (i = 0; i < len - 1 && thread->name[i] != '\0'; i++)
+		buf[i] = thread->name[i];
+	buf[i] = '\0';
+	UNLOCK(thread->lock);
+	return (ESUCCESS);
+}
+
+/*
  * Determine if two thread identifiers represent the same thread.
  */
 int       
@@ -690,19 +1034,46 @@ pthread_self(void)
 
 /*
  * Execute a function exactly one time in a thread-safe fashion.
+ *
+ * Three-state protocol on sig (no spinlock held during init_routine):
+ *   _PTHREAD_ONCE_SIG_init  →  not yet started
+ *   _PTHREAD_NO_SIG         →  in progress (one thread running init)
+ *   _PTHREAD_ONCE_SIG       →  done
+ *
+ * CAS(init→0): winner runs init_routine, then publishes SIG.
+ * Losers spin until sig == _PTHREAD_ONCE_SIG.
+ * Reentrant call from init_routine sees in-progress and returns
+ * immediately (POSIX says behavior is undefined, but we avoid deadlock).
  */
-int       
-pthread_once(pthread_once_t *once_control, 
+int
+pthread_once(pthread_once_t *once_control,
 	     void (*init_routine)(void))
 {
-	LOCK(once_control->lock);
-	if (once_control->sig == _PTHREAD_ONCE_SIG_init)
+	long state = __atomic_load_n(&once_control->sig, __ATOMIC_ACQUIRE);
+	if (state == _PTHREAD_ONCE_SIG)
+		return (ESUCCESS);
+
+	if (state == _PTHREAD_ONCE_SIG_init)
 	{
-		(*init_routine)();
-		once_control->sig = _PTHREAD_ONCE_SIG;
+		long expected = _PTHREAD_ONCE_SIG_init;
+		if (__atomic_compare_exchange_n(&once_control->sig, &expected,
+						_PTHREAD_NO_SIG, 0,
+						__ATOMIC_ACQUIRE,
+						__ATOMIC_ACQUIRE))
+		{
+			(*init_routine)();
+			__atomic_store_n(&once_control->sig,
+					 _PTHREAD_ONCE_SIG,
+					 __ATOMIC_RELEASE);
+			return (ESUCCESS);
+		}
 	}
-	UNLOCK(once_control->lock);
-	return (ESUCCESS);  /* Spec defines no possible errors! */
+
+	/* Another thread is running init, or reentrant — spin until done */
+	while (__atomic_load_n(&once_control->sig, __ATOMIC_ACQUIRE)
+	       != _PTHREAD_ONCE_SIG)
+		;
+	return (ESUCCESS);
 }
 
 /*
@@ -753,7 +1124,8 @@ pthread_setcancelstate(int state, int *oldstate)
 	pthread_t self = pthread_self();
 	int err = ESUCCESS;
 	LOCK(self->lock);
-	*oldstate = self->cancel_state & _PTHREAD_CANCEL_STATE_MASK;
+	if (oldstate != (int *)NULL)
+		*oldstate = self->cancel_state & _PTHREAD_CANCEL_STATE_MASK;
 	if ((state == PTHREAD_CANCEL_ENABLE) || (state == PTHREAD_CANCEL_DISABLE))
 	{
 		self->cancel_state = (self->cancel_state & _PTHREAD_CANCEL_STATE_MASK) | state;
@@ -775,7 +1147,8 @@ pthread_setcanceltype(int type, int *oldtype)
 	pthread_t self = pthread_self();
 	int err = ESUCCESS;
 	LOCK(self->lock);
-	*oldtype = self->cancel_state & _PTHREAD_CANCEL_TYPE_MASK;
+	if (oldtype != (int *)NULL)
+		*oldtype = self->cancel_state & _PTHREAD_CANCEL_TYPE_MASK;
 	if ((type == PTHREAD_CANCEL_DEFERRED) || (type == PTHREAD_CANCEL_ASYNCHRONOUS))
 	{
 		self->cancel_state = (self->cancel_state & _PTHREAD_CANCEL_TYPE_MASK) | type;
@@ -786,6 +1159,27 @@ pthread_setcanceltype(int type, int *oldtype)
 	UNLOCK(self->lock);
 	_pthread_testcancel(self);  /* See if we need to 'die' now... */
 	return (err);
+}
+
+/*
+ * Concurrency level hint (POSIX.1-2001).
+ * With 1:1 threading this is a no-op; the value is stored but not used.
+ */
+static int _pthread_concurrency;
+
+int
+pthread_setconcurrency(int level)
+{
+	if (level < 0)
+		return (EINVAL);
+	_pthread_concurrency = level;
+	return (ESUCCESS);
+}
+
+int
+pthread_getconcurrency(void)
+{
+	return (_pthread_concurrency);
 }
 
 /*
@@ -821,6 +1215,9 @@ pthread_init(void)
 			_pthread_stack_size = _PTHREAD_DEFAULT_STACKSIZE;
 		}
 	}
+	/* Cap at INT_MAX/2 to prevent GUARD_SIZE(2*stacksize) overflow */
+	if (_pthread_stack_size > (0x7FFFFFFF / 2))
+		_pthread_stack_size = _PTHREAD_DEFAULT_STACKSIZE;
 	__pthread_stack_size = _pthread_stack_size;
 	__pthread_stack_mask = __pthread_stack_size - 1;
 	lowest_stack = STACK_LOWEST(_sp());
@@ -830,6 +1227,8 @@ pthread_init(void)
 	thread = (pthread_t)STACK_SELF(new_stack);
 	_pthread_create(thread, attrs, mach_thread_self());
 	thread->detached = _PTHREAD_CREATE_PARENT;
+	/* Initialize MIG reply port support for multi-threaded mode */
+	mig_init((void *)thread);
 	return (new_stack);
 }
 
@@ -842,5 +1241,19 @@ __mach_errno_addr(void)
 	return &pthread_self()->err_no;
 }
 
-/* This is the "magic" that gets the initialization routine called when the application starts */
+/*
+ * These function pointers are picked up by crt0.c (__start_mach):
+ *   _threadlib_init_routine — called before main(), returns new SP
+ *   _thread_init_routine    — legacy alias (some startup code uses this)
+ *   _threadlib_exit_routine — called after main() returns
+ */
 int (*_thread_init_routine)(void) = pthread_init;
+int (*_threadlib_init_routine)(void) = pthread_init;
+
+static void
+_pthread_exit_routine(int status)
+{
+	pthread_exit((void *)(long)status);
+}
+
+void (*_threadlib_exit_routine)(int) = _pthread_exit_routine;

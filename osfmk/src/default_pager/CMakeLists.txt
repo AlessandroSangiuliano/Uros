@@ -56,7 +56,7 @@ endfunction()
 # which the default_pager source code expects.
 set(MIG_INCLUDES
   -DSEQNOS
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_CURRENT_SOURCE_DIR}/mach
 )
@@ -70,14 +70,14 @@ dp_mig_defs(
 
 # 2) memory_object_default.defs — kernel→pager interface (data_request, data_return, etc.)
 dp_mig_defs(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/memory_object_default.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/memory_object_default.defs"
   memory_object_default
   ${MIG_INCLUDES}
 )
 
 # 3) memory_object.defs — pager→kernel interface (data_supply, lock_request, etc.)
 dp_mig_defs(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/memory_object.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/memory_object.defs"
   memory_object
   ${MIG_INCLUDES}
 )
@@ -111,6 +111,8 @@ add_executable(default_pager_server
   ${MIG_SERVER_SOURCES}
 )
 
+add_dependencies(default_pager_server mig_mach_public_headers)
+
 target_compile_options(default_pager_server PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2
@@ -131,10 +133,13 @@ target_include_directories(default_pager_server PRIVATE
   ${MIG_OUT}
   # Generated includes (mach/machine -> i386 symlink, device/device.h)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
+  # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
@@ -143,18 +148,16 @@ target_include_directories(default_pager_server PRIVATE
 
 # Link against Mach userspace libraries.
 # Same circular dependency resolution as bootstrap: --start-group/--end-group.
-# The original Makefile links: -lcthreads -lmach -lsa_mach -lmach
+# The original Makefile links: -lpthreads -lmach -lsa_mach -lmach
 target_link_libraries(default_pager_server PRIVATE
   -Wl,--start-group
-  libcthreads
+  libpthreads
   libmach
   libsa_mach
   -Wl,--end-group
 )
 
 # Linker flags: 32-bit static Mach binary, no host libc.
-# --allow-multiple-definition: cthreads inline functions emitted in every .o
-# that includes cthreads.h (C89 extern inline semantics).
 target_link_options(default_pager_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach

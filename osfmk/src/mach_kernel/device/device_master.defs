@@ -1,0 +1,182 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+/*
+ * device/device_master.defs
+ *
+ * MIG interface for kernel primitives needed by userspace drivers.
+ * These RPCs are sent to the master_device_port (privileged).
+ *
+ * Subsystem 2900 — separate from device (2800).
+ */
+
+subsystem
+#if	KERNEL_SERVER
+	  KernelServer
+#endif	/* KERNEL_SERVER */
+		       device_master 2900;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+#include <device/device_types.defs>
+
+serverprefix	ds_master_;
+
+/*
+ * PCI configuration space read.
+ * Returns a 32-bit value from the specified BDF + register.
+ */
+routine device_pci_config_read(
+		master_port	: mach_port_t;
+	in	bus		: natural_t;
+	in	slot		: natural_t;
+	in	func		: natural_t;
+	in	reg		: natural_t;
+	out	data		: natural_t
+	);
+
+/*
+ * PCI configuration space write.
+ * Writes a 32-bit value to the specified BDF + register.
+ */
+routine device_pci_config_write(
+		master_port	: mach_port_t;
+	in	bus		: natural_t;
+	in	slot		: natural_t;
+	in	func		: natural_t;
+	in	reg		: natural_t;
+	in	data		: natural_t
+	);
+
+/*
+ * Register an IRQ notification.
+ * When the specified IRQ fires, the kernel sends a simple
+ * notification message to notify_port.  Only one registration
+ * per IRQ is allowed.
+ */
+routine device_intr_register(
+		master_port	: mach_port_t;
+	in	irq		: natural_t;
+	in	notify_port	: mach_port_send_t
+	);
+
+/*
+ * Unregister an IRQ notification.
+ */
+routine device_intr_unregister(
+		master_port	: mach_port_t;
+	in	irq		: natural_t
+	);
+
+/*
+ * Allocate a physically contiguous DMA buffer.
+ * Returns the kernel virtual address and the physical address.
+ */
+routine device_dma_alloc(
+		master_port	: mach_port_t;
+	in	size		: natural_t;
+	out	vaddr		: natural_t;
+	out	paddr		: natural_t
+	);
+
+/*
+ * Free a previously allocated DMA buffer.
+ */
+routine device_dma_free(
+		master_port	: mach_port_t;
+	in	vaddr		: natural_t;
+	in	size		: natural_t
+	);
+
+/*
+ * Map a kernel DMA buffer (kernel VA from device_dma_alloc) into a
+ * user task's address space.  Returns the user virtual address.
+ */
+routine device_dma_map_user(
+		master_port	: mach_port_t;
+	in	kva		: natural_t;
+	in	size		: natural_t;
+	in	task_port	: mach_port_t;
+	out	uva		: natural_t
+	);
+
+/*
+ * Map a physical MMIO range (e.g. a PCI BAR) into a user task's
+ * address space.  Returns the user virtual address.
+ */
+routine device_mmio_map(
+		master_port	: mach_port_t;
+	in	phys_addr	: natural_t;
+	in	size		: natural_t;
+	in	task_port	: mach_port_t;
+	out	uva		: natural_t
+	);
+
+/*
+ * Unmap an MMIO range from a user task.
+ */
+routine device_mmio_unmap(
+		master_port	: mach_port_t;
+	in	uva		: natural_t;
+	in	size		: natural_t;
+	in	task_port	: mach_port_t
+	);
+
+/*
+ * Allocate a scatter-gather DMA buffer: n_pages individually wired
+ * pages mapped contiguously into the caller's address space.
+ * Returns the kernel VA (handle for free), user VA, and an array
+ * of physical addresses (one per page) for programming PRDTs.
+ * Unlike device_dma_alloc, pages need NOT be physically contiguous.
+ */
+type dma_sg_addr_t = array[*:1024] of natural_t;
+
+routine device_dma_alloc_sg(
+		master_port	: mach_port_t;
+	in	n_pages		: natural_t;
+	in	task_port	: mach_port_t;
+	out	kva		: natural_t;
+	out	uva		: natural_t;
+	out	paddrs		: dma_sg_addr_t
+	);
+
+/*
+ * I/O port read.
+ * Reads 1, 2, or 4 bytes from the specified x86 I/O port.
+ */
+routine device_io_port_read(
+		master_port	: mach_port_t;
+	in	port		: natural_t;
+	in	size		: natural_t;
+	out	data		: natural_t
+	);
+
+/*
+ * I/O port write.
+ * Writes 1, 2, or 4 bytes to the specified x86 I/O port.
+ */
+routine device_io_port_write(
+		master_port	: mach_port_t;
+	in	port		: natural_t;
+	in	size		: natural_t;
+	in	data		: natural_t
+	);

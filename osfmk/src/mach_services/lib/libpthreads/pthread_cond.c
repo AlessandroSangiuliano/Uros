@@ -30,6 +30,47 @@
 #include <sys/timers.h>              /* For struct timespec and getclock(). */
 
 /*
+ * Thread-safe lazy initialization for PTHREAD_COND_INITIALIZER.
+ * Uses CAS to ensure exactly one thread creates the semaphore;
+ * losers spin until the winner publishes _PTHREAD_COND_SIG.
+ */
+static int
+_pthread_cond_lazy_init(pthread_cond_t *cond)
+{
+	int expected = _PTHREAD_COND_SIG_init;
+	if (__atomic_compare_exchange_n(&cond->sig, &expected,
+					_PTHREAD_NO_SIG, 0,
+					__ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
+	{
+		kern_return_t kern_res;
+		LOCK_INIT(cond->lock);
+		cond->next = (pthread_cond_t *)NULL;
+		cond->prev = (pthread_cond_t *)NULL;
+		cond->busy = (pthread_mutex_t *)NULL;
+		cond->waiters = 0;
+		cond->clock = CLOCK_REALTIME;
+		MACH_CALL(semaphore_create(mach_task_self(),
+					   &cond->sem,
+					   SYNC_POLICY_FIFO,
+					   0), kern_res);
+		if (kern_res != KERN_SUCCESS)
+		{
+			__atomic_store_n(&cond->sig, _PTHREAD_COND_SIG_init,
+					 __ATOMIC_RELEASE);
+			return (ENOMEM);
+		}
+		__atomic_store_n(&cond->sig, _PTHREAD_COND_SIG,
+				 __ATOMIC_RELEASE);
+	} else
+	{
+		while (__atomic_load_n(&cond->sig, __ATOMIC_ACQUIRE)
+		       != _PTHREAD_COND_SIG)
+			;
+	}
+	return (ESUCCESS);
+}
+
+/*
  * Destroy a condition variable.
  */
 int       
@@ -70,9 +111,11 @@ pthread_cond_init(pthread_cond_t *cond,
 	cond->prev = (pthread_cond_t *)NULL;
 	cond->busy = (pthread_mutex_t *)NULL;
 	cond->waiters = 0;
-	MACH_CALL(semaphore_create(mach_task_self(), 
-				   &cond->sem, 
-				   SYNC_POLICY_FIFO, 
+	cond->clock = (attr && attr->sig == _PTHREAD_COND_ATTR_SIG)
+		      ? attr->clock : CLOCK_REALTIME;
+	MACH_CALL(semaphore_create(mach_task_self(),
+				   &cond->sem,
+				   SYNC_POLICY_FIFO,
 				   0), kern_res);
 	if (kern_res != KERN_SUCCESS)
 	{
@@ -92,15 +135,15 @@ pthread_cond_broadcast(pthread_cond_t *cond)
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
 		int res;
-		if (res = pthread_cond_init(cond, NULL))
+		if (res = _pthread_cond_lazy_init(cond))
 			return (res);
 	}
 	if (cond->sig == _PTHREAD_COND_SIG)
-	{ 
+	{
 		LOCK(cond->lock);
 		if (cond->waiters == 0)
 		{ /* Avoid kernel call since there are no waiters... */
-			UNLOCK(cond->lock);	
+			UNLOCK(cond->lock);
 			return (ESUCCESS);
 		}
 		UNLOCK(cond->lock);
@@ -120,14 +163,14 @@ pthread_cond_broadcast(pthread_cond_t *cond)
 /*
  * Signal a condition variable, waking only one thread.
  */
-int       
+int
 pthread_cond_signal(pthread_cond_t *cond)
 {
 	kern_return_t kern_res;
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
 		int res;
-		if (res = pthread_cond_init(cond, NULL))
+		if (res = _pthread_cond_lazy_init(cond))
 			return (res);
 	}
 	if (cond->sig == _PTHREAD_COND_SIG)
@@ -204,7 +247,7 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	tvalspec_t then;
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
-		if (res = pthread_cond_init(cond, NULL))
+		if (res = _pthread_cond_lazy_init(cond))
 			return (res);
 	}
 	if (cond->sig != _PTHREAD_COND_SIG)
@@ -297,4 +340,70 @@ pthread_cond_timedwait(pthread_cond_t *cond,
 		       const struct timespec *abstime)
 {
 	return (_pthread_cond_wait(cond, mutex, abstime));
+}
+
+/*
+ * Condition variable attribute functions.
+ */
+
+int
+pthread_condattr_init(pthread_condattr_t *attr)
+{
+	attr->sig = _PTHREAD_COND_ATTR_SIG;
+	attr->pshared = PTHREAD_PROCESS_PRIVATE;
+	attr->clock = CLOCK_REALTIME;
+	return (ESUCCESS);
+}
+
+int
+pthread_condattr_destroy(pthread_condattr_t *attr)
+{
+	attr->sig = _PTHREAD_NO_SIG;
+	return (ESUCCESS);
+}
+
+int
+pthread_condattr_getpshared(const pthread_condattr_t *attr, int *pshared)
+{
+	if (attr->sig != _PTHREAD_COND_ATTR_SIG)
+		return (EINVAL);
+	if (pshared != (int *)NULL)
+		*pshared = attr->pshared;
+	return (ESUCCESS);
+}
+
+int
+pthread_condattr_setpshared(pthread_condattr_t *attr, int pshared)
+{
+	if (attr->sig != _PTHREAD_COND_ATTR_SIG)
+		return (EINVAL);
+	if (pshared == PTHREAD_PROCESS_PRIVATE)
+	{
+		attr->pshared = pshared;
+		return (ESUCCESS);
+	}
+	if (pshared == PTHREAD_PROCESS_SHARED)
+		return (ENOTSUP);
+	return (EINVAL);
+}
+
+int
+pthread_condattr_getclock(const pthread_condattr_t *attr, int *clock_id)
+{
+	if (attr->sig != _PTHREAD_COND_ATTR_SIG)
+		return (EINVAL);
+	if (clock_id != (int *)NULL)
+		*clock_id = attr->clock;
+	return (ESUCCESS);
+}
+
+int
+pthread_condattr_setclock(pthread_condattr_t *attr, int clock_id)
+{
+	if (attr->sig != _PTHREAD_COND_ATTR_SIG)
+		return (EINVAL);
+	if (clock_id != CLOCK_REALTIME && clock_id != CLOCK_MONOTONIC)
+		return (EINVAL);
+	attr->clock = clock_id;
+	return (ESUCCESS);
 }

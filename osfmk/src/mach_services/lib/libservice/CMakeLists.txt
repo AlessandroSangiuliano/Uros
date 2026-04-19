@@ -10,7 +10,7 @@ set(SERVICE_HEADER "${CMAKE_BINARY_DIR}/generated/service.h")
 add_custom_command(
   OUTPUT ${SERVICE_USER_C} ${SERVICE_SERVER_C} ${SERVICE_HEADER}
   COMMAND ${CMAKE_C_COMPILER} -E -P -x c
-    -I${CMAKE_SOURCE_DIR}/export/powermac/include
+    -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
     ${SERVICE_DEFS}
@@ -26,6 +26,8 @@ add_custom_command(
 # Library only contains the user-side MIG stub
 add_library(libservice STATIC ${SERVICE_USER_C})
 
+add_dependencies(libservice mig_mach_public_headers)
+
 target_compile_options(libservice PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
 )
@@ -33,7 +35,7 @@ target_compile_options(libservice PRIVATE
 target_include_directories(libservice PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )

@@ -66,6 +66,14 @@
 
 #include <string.h>
 
+/*
+ * GCC's built-in limits.h needs freestanding mode; ensure UINT_MAX
+ * is available for the word-fill replication below.
+ */
+#ifndef UINT_MAX
+#define	UINT_MAX	0xFFFFFFFFU
+#endif
+
 #define	wsize	sizeof(unsigned int)
 #define	wmask	(wsize - 1)
 

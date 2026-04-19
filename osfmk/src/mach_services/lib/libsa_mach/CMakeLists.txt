@@ -3,6 +3,9 @@ project(libsa_mach C)
 
 file(GLOB LIB_SOURCES CONFIGURE_DEPENDS "*.c" "*.S" )
 
+# Exclude C implementations replaced by SSE2 assembly in i386/
+list(FILTER LIB_SOURCES EXCLUDE REGEX "(bcopy|memcpy|memmove|memset)\\.c$")
+
 # Arch specific i386 sources, preprocess lowercase .s
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   file(GLOB ARCH_SOURCES CONFIGURE_DEPENDS "i386/*.c" "i386/*.S")
@@ -10,7 +13,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   list(APPEND LIB_SOURCES ${ARCH_SOURCES})
   # Preprocess lowercase assembler files to generated/asm
   # __NO_UNDERSCORES__: ELF does not prefix symbols with '_'
-  set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/powermac/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
+  set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
   foreach(sfile IN LISTS ARCH_S_LOWER_S)
     get_filename_component(sname ${sfile} NAME)
     set(pp_output "${CMAKE_CURRENT_BINARY_DIR}/generated/asm/${sname}.S")
@@ -32,7 +35,7 @@ endif()
 add_library(libsa_mach STATIC ${LIB_SOURCES})
 
 # printf.c includes <device/device.h> which is MIG-generated
-add_dependencies(libsa_mach mig_device_header)
+add_dependencies(libsa_mach mig_device_header mig_mach_public_headers)
 
 
 # Apply C-only compatibility options and include math.h from project
@@ -61,7 +64,7 @@ target_include_directories(libsa_mach BEFORE PUBLIC
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/include
 )
 

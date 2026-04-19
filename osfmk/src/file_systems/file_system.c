@@ -149,6 +149,9 @@ open_file(
 	}
 
 	fp->f_dev.rec_size = dev_rec_size(fp->f_dev.dev_port);
+	fp->f_dev.blk = NULL;
+	fp->f_dev.cache = NULL;
+	fp->f_dev.mount_data = NULL;
 
 	if (c == 0) {
 		free(namebuf);
@@ -162,12 +165,27 @@ open_file(
 #if DEBUG
 		printf("open %x\n", (*fs_ops)->open_file);
 #endif
+		/* Allocate per-mount state if the FS needs it */
+		if ((*fs_ops)->mount_size > 0 && fp->f_dev.mount_data == NULL) {
+			vm_allocate(mach_task_self(),
+				    (vm_address_t *)&fp->f_dev.mount_data,
+				    (*fs_ops)->mount_size, TRUE);
+		}
+
 		rc = (*(*fs_ops)->open_file)(&fp->f_dev, cp, &fp->f_private);
 #if DEBUG
 		printf("open func returns %x\n", rc);
 #endif
 		if (rc == 0)
 			break;
+
+		/* FS probe failed — free mount_data if we allocated it */
+		if ((*fs_ops)->mount_size > 0 && fp->f_dev.mount_data != NULL) {
+			vm_deallocate(mach_task_self(),
+				      (vm_offset_t)fp->f_dev.mount_data,
+				      (*fs_ops)->mount_size);
+			fp->f_dev.mount_data = NULL;
+		}
 	}
 
 	if (rc == 0)
@@ -240,6 +258,17 @@ file_is_executable(struct file *fp)
 	if (invalid_fp(fp))
 		return(FALSE);
 	return (*fp->f_ops->file_is_executable)(fp->f_private);
+}
+
+int
+readdir_file(struct file *fp, struct fs_dirent *out, unsigned int max,
+	     unsigned int *out_count)
+{
+	if (invalid_fp(fp) || out == NULL || out_count == NULL)
+		return FS_INVALID_PARAMETER;
+	if (fp->f_ops->readdir == NULL)
+		return FS_INVALID_PARAMETER;
+	return (*fp->f_ops->readdir)(fp->f_private, out, max, out_count);
 }
 
 /*

@@ -284,7 +284,7 @@
 
 #define is_kernel_data_addr(a)						\
 		(!(a) || (a) >= VM_MIN_KERNEL_ADDRESS &&		\
-		    (a) < VM_MIN_KERNEL_LOADED_ADDRESS && !((a) & 0x3))
+		    (a) <= VM_MAX_KERNEL_ADDRESS && !((a) & 0x3))
 
 #endif /* defined(__alpha) */
 

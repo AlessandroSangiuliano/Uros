@@ -123,7 +123,7 @@
 
 #include <mach.h>
 #include <stdio.h>
-#include <cthreads.h>		/* for spin locks */
+#include <pthread.h>		/* for spin locks */
 #include "wiring.h"
 #include "externs.h"
 
@@ -135,7 +135,7 @@ vm_size_t	kalloc_max;		/* max before we use vm_allocate */
 #define		MINSIZE	4		/* minimum allocation size */
 
 struct free_list {
-	spin_lock_t	lock;
+	pthread_spinlock_t	lock;
 	vm_offset_t	head;		/* head of free list */
 };
 
@@ -145,7 +145,7 @@ struct free_list {
 						2048, 4096, 8192, 16384 */
 struct free_list	kfree_list[KLIST_MAX];
 
-spin_lock_t		kget_space_lock;
+pthread_spinlock_t		kget_space_lock;
 vm_offset_t		kalloc_next_space = 0;
 vm_offset_t		kalloc_end_of_space = 0;
 
@@ -177,10 +177,10 @@ kalloc_init(void)
 		kalloc_max = vm_page_size;
 
 	for (i = 0; i < KLIST_MAX; i++) {
-	    spin_lock_init(&kfree_list[i].lock);
+	    pthread_spin_init(&kfree_list[i].lock, 0);
 	    kfree_list[i].head = 0;
 	}
-	spin_lock_init(&kget_space_lock);
+	pthread_spin_init(&kget_space_lock, 0);
 
 	/*
 	 * Do not allocate memory at address 0.
@@ -199,7 +199,7 @@ kget_space(vm_offset_t size)
 	vm_offset_t	new_space = 0;
 	vm_offset_t	addr;
 
-	spin_lock(&kget_space_lock);
+	pthread_spin_lock(&kget_space_lock);
 	while (kalloc_next_space + size > kalloc_end_of_space) {
 	    /*
 	     * Add at least one page to allocation area.
@@ -212,7 +212,7 @@ kget_space(vm_offset_t size)
 		 * Try to make it contiguous with the last
 		 * allocation area.
 		 */
-		spin_unlock(&kget_space_lock);
+		pthread_spin_unlock(&kget_space_lock);
 
 		new_space = kalloc_end_of_space;
 		if (vm_map(mach_task_self(),
@@ -223,7 +223,7 @@ kget_space(vm_offset_t size)
 		    return 0;
 		wire_memory(new_space, space_to_add,
 			    VM_PROT_READ|VM_PROT_WRITE);
-		spin_lock(&kget_space_lock);
+		pthread_spin_lock(&kget_space_lock);
 		continue;
 	    }
 
@@ -248,7 +248,7 @@ kget_space(vm_offset_t size)
 
 	addr = kalloc_next_space;
 	kalloc_next_space += size;
-	spin_unlock(&kget_space_lock);
+	pthread_spin_unlock(&kget_space_lock);
 
 	if (new_space != 0)
 	    (void) vm_deallocate(mach_task_self(), new_space, space_to_add);
@@ -286,13 +286,13 @@ kalloc(size_t size)
 	 */
 
 	if (allocsize < kalloc_max) {
-	    spin_lock(&fl->lock);
+	    pthread_spin_lock(&fl->lock);
 	    if ((addr = fl->head) != 0) {
 		fl->head = *(vm_offset_t *)addr;
-		spin_unlock(&fl->lock);
+		pthread_spin_unlock(&fl->lock);
 	    }
 	    else {
-		spin_unlock(&fl->lock);
+		pthread_spin_unlock(&fl->lock);
 		addr = kget_space(allocsize);
 	    }
 	}
@@ -321,10 +321,10 @@ kfree(void *data, size_t size)
 	}
 
 	if (freesize < kalloc_max) {
-	    spin_lock(&fl->lock);
+	    pthread_spin_lock(&fl->lock);
 	    *(vm_offset_t *)data = fl->head;
 	    fl->head = (vm_offset_t) data;
-	    spin_unlock(&fl->lock);
+	    pthread_spin_unlock(&fl->lock);
 	}
 	else {
 	    (void) vm_deallocate(mach_task_self(), (vm_offset_t)data, freesize);

@@ -342,8 +342,11 @@ typedef struct {
 #define DT_TEXTREL	22
 #define DT_JMPREL	23
 
-/*
- *	Bootstrap doesn't need machine dependent extensions.
- */
+/* i386 relocation types — used for ET_DYN (PIE) relocation */
+
+#define R_386_NONE		0
+#define R_386_32		1
+#define R_386_PC32		2
+#define R_386_RELATIVE		8
 
 #endif /* _SYS_ELF_H_ */

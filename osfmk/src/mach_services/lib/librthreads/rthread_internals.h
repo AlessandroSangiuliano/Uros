@@ -54,7 +54,7 @@
 
 
 /* Force Mach sync API header for lock/semaphore prototypes */
-#include "../../../../export/powermac/include/mach/sync.h"
+#include <mach/sync.h>
 #include <options.h>
 #include <queue.h>
 #include <mach.h>

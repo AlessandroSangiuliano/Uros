@@ -313,12 +313,14 @@ db_act_stat(
 		*p++ = 'n',
 		*p++ = 'g';
 		*p++ = ' ';
+		*p++ = ' ';
 	} else if (!thr_act->thread) {
 		*p++ = 'E',
 		*p++ = 'm',
 		*p++ = 'p',
 		*p++ = 't',
 		*p++ = 'y';
+		*p++ = ' ';
 		*p++ = ' ';
 	} else {
 		thread_t athread = thr_act->thread;
@@ -328,8 +330,8 @@ db_act_stat(
 		*p++ = (athread->state & TH_SUSP) ? 'S' : '.';
 		*p++ = (athread->state & TH_SWAPPED_OUT) ? 'O' : '.';
 		*p++ = (athread->state & TH_UNINT) ? 'N' : '.';
-		/* show if the FPU has been used */
 		*p++ = db_act_fp_used(thr_act) ? 'F' : '.';
+		*p++ = athread->continuation ? 'C' : '.';
 	}
 	*p++ = 0;
 	return(status);
@@ -382,7 +384,7 @@ db_print_act(
 	int		flag)
 {
 	thread_t athread;
-	char status[8];
+	char status[9];
 	char swap_status[3];
 	char *indent = "";
 	int	 policy;
@@ -398,7 +400,7 @@ db_print_act(
 		if (flag & OPTION_INDENT)
 		    indent = "    ";
 		if (flag & OPTION_THREAD_TITLE) {
-		    db_printf("%s ID:   ACT     STAT  SW STACK    SHUTTLE", indent);
+		    db_printf("%s ID:   ACT     STAT   SW STACK    SHUTTLE", indent);
 		    db_printf("  SUS  PRI  WAIT_FUNC\n");
 		}
 		policy = (athread ? athread->policy : 2);
@@ -414,10 +416,18 @@ db_print_act(
 		    (athread ? athread->sched_pri : 666), /* XXX */
 		    policy_list[policy-1]);
 		if (athread) {
-		    /* no longer TH_SWAP, no continuation to print */
-		    if (athread->state & TH_WAIT)
+		    if (athread->state & TH_WAIT) {
 			db_task_printsym((db_addr_t)athread->wait_event,
 						DB_STGY_ANY, kernel_task);
+			if (athread->continuation) {
+			    db_printf(" C=");
+			    db_task_printsym(
+				(db_addr_t)athread->continuation,
+				DB_STGY_PROC, kernel_task);
+			}
+		    }
+		    if (athread->name[0] != '\0')
+			db_printf(" [%s]", athread->name);
 		}
 		db_printf("\n");
 	} else {
@@ -839,11 +849,17 @@ db_show_one_act(
 		      2*sizeof(vm_offset_t), thr_act->task, act_id);
 
 	if (db_option(modif, 'i') &&  thr_act->thread &&
-	    (thr_act->thread->state & TH_WAIT) && 
-	    thr_act->thread->kernel_stack == 0) {
+	    (thr_act->thread->state & TH_WAIT)) {
 
-	    db_printf("Wait State: option 0x%x",
-		thr_act->thread->ith_option);
+	    if (thr_act->thread->kernel_stack == 0)
+		db_printf("\nWait State: option 0x%x",
+		    thr_act->thread->ith_option);
+	    if (thr_act->thread->continuation) {
+		db_printf("\ncontinuation=");
+		db_task_printsym(
+		    (db_addr_t)thr_act->thread->continuation,
+		    DB_STGY_PROC, thr_act->task);
+	    }
 	}
 	if (flag & OPTION_LONG)
 		db_printf("\n");
@@ -910,7 +926,13 @@ db_show_shuttle(
 	    /*NOTREACHED*/
 	}
 
-	db_printf("shuttle %x:\n", shuttle);
+	db_printf("shuttle %x:", shuttle);
+	if (shuttle->continuation) {
+	    db_printf("  continuation=");
+	    db_task_printsym((db_addr_t)shuttle->continuation,
+			     DB_STGY_PROC, kernel_task);
+	}
+	db_printf("\n");
 	if (shuttle->top_act == THR_ACT_NULL)
 	    db_printf("  no activations\n");
 	else {

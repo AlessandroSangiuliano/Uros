@@ -179,3 +179,19 @@ static int		mach_init(void)
 }
 
 int	(*_mach_init_routine)(void) = mach_init;
+
+/*
+ * Lightweight reinit for child tasks created with
+ * task_create(inherit_memory=TRUE).  Resets the cached task port
+ * (which is stale — it still points to the parent) and the MIG
+ * reply port.  Does NOT re-register ports, query page size, or
+ * touch the RPC glue vector — the child inherits those from the
+ * parent's address space.
+ */
+#undef mach_task_self
+void
+mach_task_self_init(void)
+{
+	mach_task_self_ = mach_task_self();
+	mig_init(0);
+}

@@ -6,7 +6,7 @@ project(bootstrap_server C)
 # ===========================================================================
 
 set(MIG_INCLUDE_FLAGS
-  -I${CMAKE_SOURCE_DIR}/export/powermac/include
+  -I${CMAKE_SOURCE_DIR}/export/include
   -I${CMAKE_SOURCE_DIR}/src/mach_kernel
   -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
 )
@@ -37,22 +37,22 @@ file(MAKE_DIRECTORY "${MIG_OUT}")
 
 # 1) bootstrap.defs  (subsystem 999999, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/bootstrap.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/bootstrap.defs"
   bootstrap  ${MIG_OUT})
 
 # 2) exc.defs  (subsystem 2400, ServerPrefix catch_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/exc.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/exc.defs"
   exc  ${MIG_OUT})
 
 # 3) notify.defs  (subsystem 64, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/mach/notify.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/mach/notify.defs"
   notify  ${MIG_OUT})
 
 # 4) service.defs  (subsystem 400, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/powermac/include/servers/service.defs"
+  "${CMAKE_SOURCE_DIR}/export/include/servers/service.defs"
   service  ${MIG_OUT})
 
 set(MIG_SERVER_SOURCES
@@ -100,6 +100,8 @@ add_executable(bootstrap_server
   ${MIG_SERVER_SOURCES}
 )
 
+add_dependencies(bootstrap_server mig_mach_public_headers)
+
 target_compile_options(bootstrap_server PRIVATE
   -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2
 )
@@ -115,33 +117,38 @@ target_include_directories(bootstrap_server PRIVATE
   ${MIG_OUT}
   # Generated includes (mach/machine -> i386 symlink created in src/CMakeLists.txt)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, servers/, cthreads.h)
+  # Mach services include (sa_mach.h, servers/)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # pthread.h and machine/pthread_impl.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  # Filesystem headers — must come before export so the canonical file_system.h
+  # is used (export/include copy may be stale)
+  ${CMAKE_SOURCE_DIR}/src/file_systems
   # Kernel headers (mach/, device/, ddb/, i386/) — bootstrap needs kernel-internal
   # extensions (boot_info.h multi-segment support) so kernel must come BEFORE export
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
-  # Pre-built export headers (mach/mach_interface.h, mach/fs/file_system.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  # Pre-built export headers (mach/mach_interface.h, etc.)
+  ${CMAKE_SOURCE_DIR}/export/include
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
 )
 
 # Link against Mach userspace libraries.
 # Use --start-group/--end-group to resolve circular dependencies between
-# the Mach libraries (e.g. libsa_mach -> libmach for clock_sleep, libcthreads -> libmach
-# for MIG stubs, libmach -> libcthreads for mig_support).
+# the Mach libraries (e.g. libsa_mach -> libmach for clock_sleep, libpthreads -> libmach
+# for MIG stubs, libmach -> libpthreads for mig_support).
 target_link_libraries(bootstrap_server PRIVATE
   -Wl,--start-group
   libsa_fs
-  libcthreads
+  libblk
+  libpthreads
   libmach
   libsa_mach
   -Wl,--end-group
 )
 
 # Linker flags: 32-bit static Mach binary, no host libc
-# --allow-multiple-definition: cthreads inline functions (spin_unlock, spin_try_lock,
-# cthread_sp) are emitted into every .o that includes cthreads.h (C89 inline semantics).
 target_link_options(bootstrap_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach

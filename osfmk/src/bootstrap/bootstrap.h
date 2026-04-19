@@ -53,37 +53,37 @@
 #include <string.h>
 #include <mach.h>
 #include <sa_mach.h>
-#include <cthreads.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <device/device_types.h>
 #include <mach/boot_info.h>
-#include <mach/fs/file_system.h>
+#include "file_system.h"
 #include <mach/boolean.h>
 #include <mach_debug/mach_debug.h>
 
 /*
  * I/O console synchronization
  */
-extern struct mutex	io_mutex;
-extern struct condition	io_condition;
+extern pthread_mutex_t	io_mutex;
+extern pthread_cond_t	io_condition;
 extern boolean_t	io_in_progress;
 
 #define	BOOTSTRAP_IO_LOCK()					\
 {								\
-	mutex_lock(&io_mutex);					\
+	pthread_mutex_lock(&io_mutex);				\
 	while (io_in_progress)					\
-		condition_wait(&io_condition, &io_mutex);	\
+		pthread_cond_wait(&io_condition, &io_mutex);	\
 	io_in_progress = TRUE;					\
-	mutex_unlock(&io_mutex);				\
+	pthread_mutex_unlock(&io_mutex);			\
 }
 
 #define	BOOTSTRAP_IO_UNLOCK()					\
 {								\
-	mutex_lock(&io_mutex);					\
+	pthread_mutex_lock(&io_mutex);				\
 	io_in_progress = FALSE;					\
-	mutex_unlock(&io_mutex);				\
-	condition_signal(&io_condition);			\
+	pthread_mutex_unlock(&io_mutex);			\
+	pthread_cond_signal(&io_condition);			\
 }
 
 #define	HEADER_MAX	128

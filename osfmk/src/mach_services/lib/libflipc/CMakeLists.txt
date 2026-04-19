@@ -13,7 +13,7 @@ set(LIB_SOURCES
 add_library(libflipc STATIC ${LIB_SOURCES})
 
 # Depend on MIG-generated device/device.h (defined in parent CMakeLists)
-add_dependencies(libflipc mig_device_header)
+add_dependencies(libflipc mig_device_header mig_mach_public_headers)
 
 target_compile_options(libflipc PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
@@ -23,7 +23,7 @@ target_include_directories(libflipc PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/powermac/include
+  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
