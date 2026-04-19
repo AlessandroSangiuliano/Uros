@@ -108,7 +108,7 @@
 #include <device/net_status.h>
 #include <device/net_io.h>
 #include <device/device_port.h>
-#include <device/device_reply.h>
+#include <device/device_reply_user.h>
 #include <device/device_server.h>
 
 #include <sys/ioctl.h>

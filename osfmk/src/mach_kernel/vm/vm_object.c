@@ -405,7 +405,7 @@
 #include <task_swapper.h>
 
 #include <mach/memory_object.h>
-#include <mach/memory_object_default.h>
+#include <mach/memory_object_default_user.h>
 #include <mach/memory_object_user.h>
 #include <mach/mach_server.h>
 #include <mach/vm_param.h>

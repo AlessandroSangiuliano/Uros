@@ -179,7 +179,7 @@
 #include <kern/misc_protos.h>
 #include <kern/xpr.h>
 #include <mach/mach_server.h>
-#include <mach/memory_object_default.h>
+#include <mach/memory_object_default_user.h>
 #include <mach/memory_object_user.h>
 #include <xmm/xmm_obj.h>
 #include <xmm/xmm_methods.h>
