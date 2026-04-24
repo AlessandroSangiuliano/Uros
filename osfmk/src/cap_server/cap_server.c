@@ -334,6 +334,12 @@ main(int argc, char **argv)
     cap_table_init();
     printf("cap: hmac key initialized, table ready\n");
 
+    int ekr = cap_key_export_to_kernel();
+    if (ekr != KERN_SUCCESS)
+        printf("cap: urmach_cap_register (setup) failed (%d)\n", ekr);
+    else
+        printf("cap: kernel hmac key registered via urmach_cap_register\n");
+
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_RECEIVE,
                             &cap_port);

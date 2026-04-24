@@ -84,6 +84,7 @@ HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
 EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
 PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 CAP_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_server"
+CAP_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_test"
 
 if [ ! -f "$NAME_SERVER" ]; then
     echo "ERRORE: name_server non trovato: $NAME_SERVER"
@@ -163,6 +164,13 @@ CAP_SERVER_CONF_LINE=""
 if [ -f "$CAP_SERVER" ]; then
     CAP_SERVER_CONF_LINE="cap_server cap_server"
 fi
+# cap_test (if built) must run AFTER cap_server has registered the
+# HMAC key: the test's whole point is that a non-cap_server task
+# attempting urmach_cap_register must be rejected.
+CAP_TEST_CONF_LINE=""
+if [ -f "$CAP_TEST" ]; then
+    CAP_TEST_CONF_LINE="cap_test cap_test"
+fi
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
@@ -173,6 +181,7 @@ ipc_bench ipc_bench${BENCH_ARGS}
 block_device_server block_device_server
 ext_server ext_server
 pthread_test pthread_test
+${CAP_TEST_CONF_LINE}
 CONF
 
 # --- Calcoli geometria ---
@@ -218,11 +227,15 @@ mke2fs -t ext2 -q -F \
     "$PART_IMG"
 
 # --- 4. Copia file nel filesystem con debugfs ---
-# cap_server is optional: write only when the binary exists so boot
-# images still build when OSFMK_BUILD_CAP_SERVER is off.
+# cap_server and cap_test are optional: write only when the binaries
+# exist so boot images still build when the corresponding flags are off.
 CAP_SERVER_WRITE_LINE=""
 if [ -f "$CAP_SERVER" ]; then
     CAP_SERVER_WRITE_LINE="write $CAP_SERVER cap_server"
+fi
+CAP_TEST_WRITE_LINE=""
+if [ -f "$CAP_TEST" ]; then
+    CAP_TEST_WRITE_LINE="write $CAP_TEST cap_test"
 fi
 echo "[4/6] Copia file nel filesystem ext2..."
 debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
@@ -238,6 +251,7 @@ write $HAL_SERVER hal_server
 write $EXT2_SERVER ext_server
 write $PTHREAD_TEST pthread_test
 ${CAP_SERVER_WRITE_LINE}
+${CAP_TEST_WRITE_LINE}
 mkdir modules
 cd modules
 mkdir block

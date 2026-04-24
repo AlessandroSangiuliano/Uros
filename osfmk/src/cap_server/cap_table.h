@@ -78,4 +78,13 @@ int  cap_verify_hmac(const struct uros_cap *token);
  */
 void cap_key_init(void);
 
+/*
+ * Push the HMAC key to the UrMach kernel via urmach_cap_register with a
+ * setup token (cap_id == 0).  This establishes cap_server as the
+ * trusted capability-issuing task (TOFU) and enables the kernel-side
+ * verify/use/revoke fast paths.  Returns 0 on success or a kern_return_t
+ * error code.
+ */
+int cap_key_export_to_kernel(void);
+
 #endif /* _CAP_SERVER_CAP_TABLE_H_ */

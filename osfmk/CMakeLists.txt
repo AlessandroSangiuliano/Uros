@@ -21,6 +21,7 @@ option(OSFMK_BUILD_NAME_SERVER "Costruisci il name server (netname)" OFF)
 option(OSFMK_BUILD_EXT2_SERVER "Costruisci il server ext2 filesystem userspace" OFF)
 option(OSFMK_BUILD_PTHREAD_TEST "Build pthread test server" OFF)
 option(OSFMK_BUILD_CAP_SERVER "Build capability server (Uros cap_server + libcap)" OFF)
+option(OSFMK_BUILD_CAP_TEST "Build capability negative-test binary" OFF)
 
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'osfmk' when building kernel)" "")

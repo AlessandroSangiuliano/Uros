@@ -87,3 +87,8 @@ endif()
 if(OSFMK_BUILD_CAP_SERVER)
   add_subdirectory(cap_server)
 endif()
+
+# Build capability negative-test binary
+if(OSFMK_BUILD_CAP_TEST)
+  add_subdirectory(cap_test)
+endif()

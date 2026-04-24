@@ -148,3 +148,33 @@ cap_verify(const struct uros_cap *token, uint64_t op, uint64_t resource_id)
                           (mach_msg_type_number_t)sizeof(struct uros_cap),
                           op, resource_id);
 }
+
+/*
+ * libmach-emitted trap stubs for the UrMach capability fast path.
+ * Declared here because they are a private implementation detail of
+ * libcap — no kernel-facing header ships them to clients.
+ */
+extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
+                                       uint32_t op,
+                                       uint64_t resource_id);
+extern kern_return_t urmach_cap_use(const struct uros_cap *token,
+                                    uint32_t op,
+                                    uint64_t resource_id);
+
+kern_return_t
+cap_verify_local(const struct uros_cap *token,
+                 uint32_t op,
+                 uint64_t resource_id)
+{
+    if (token == NULL) return CAP_ERR_INVALID_TOKEN;
+    return urmach_cap_verify(token, op, resource_id);
+}
+
+kern_return_t
+cap_use_local(const struct uros_cap *token,
+              uint32_t op,
+              uint64_t resource_id)
+{
+    if (token == NULL) return CAP_ERR_INVALID_TOKEN;
+    return urmach_cap_use(token, op, resource_id);
+}

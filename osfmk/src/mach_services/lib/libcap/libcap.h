@@ -85,6 +85,26 @@ kern_return_t cap_verify(const struct uros_cap *token,
                          uint64_t op,
                          uint64_t resource_id);
 
+/*
+ * cap_verify_local() — Issue B fast path: go straight to the UrMach
+ * urmach_cap_verify trap (slot 37) without an RPC to cap_server.  Use
+ * this in hot paths where the caller already holds a token; use
+ * cap_verify() when cap_server-specific policy is needed.
+ */
+kern_return_t cap_verify_local(const struct uros_cap *token,
+                               uint32_t op,
+                               uint64_t resource_id);
+
+/*
+ * cap_use_local() — fast path for consume-one-use tokens.  Equivalent
+ * to cap_verify_local() plus atomic bookkeeping: when the token was
+ * issued with max_uses != 0, the kernel decrements a per-cap_id use
+ * counter and returns CAP_ERR_EXHAUSTED once it hits zero.
+ */
+kern_return_t cap_use_local(const struct uros_cap *token,
+                            uint32_t op,
+                            uint64_t resource_id);
+
 #ifdef __cplusplus
 }
 #endif

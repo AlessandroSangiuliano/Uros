@@ -33,6 +33,7 @@ foreach(sfile IN LISTS TOP_S_LOWER_S)
     OUTPUT ${pp_output}
     COMMAND /bin/sh -c "${CMAKE_C_COMPILER} -E -x assembler-with-cpp -D__ASSEMBLER__ ${ASM_PREPROCESS_INCLUDES} ${sfile} | sed -e 's#/ # #g' -e 's/\\.align ALIGN/.align 2/g' -e 's/^ \\+zero /# zero /g' > ${pp_output}"
     DEPENDS ${sfile}
+            ${CMAKE_SOURCE_DIR}/export/include/mach/syscall_sw.h
     COMMENT "Preprocessing asm ${sfile}"
     VERBATIM
   )
