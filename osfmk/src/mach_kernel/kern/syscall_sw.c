@@ -268,6 +268,7 @@ int kern_invalid_debug = 0;
 #include <mach/message.h>
 #include <mach/rpc.h>
 #include <mach/mach_syscalls.h>
+#include <kern/cap.h>
 #include <kern/syscall_subr.h>
 #include <platforms.h>
 #if	(iPSC860 || PARAGON860)
@@ -317,11 +318,11 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(not_implemented, 0),		/* 35 */
 	MACH_TRAP(not_implemented, 0),		/* 36 */
 #endif	/* i386 */
-	MACH_TRAP(not_implemented, 0),		/* 37 */
-	MACH_TRAP(not_implemented, 0),		/* 38 */
-	MACH_TRAP(not_implemented, 0),		/* 39 */
+	MACH_TRAP(urmach_cap_verify, 4),	/* 37 */
+	MACH_TRAP(urmach_cap_use, 4),		/* 38 */
+	MACH_TRAP(urmach_cap_revoke, 2),	/* 39 */
 
-	MACH_TRAP(not_implemented, 0),		/* 40 */
+	MACH_TRAP(urmach_cap_register, 1),	/* 40 */
 	MACH_TRAP(kern_invalid, 0),		/* 41 rsvd for init_process */
 	MACH_TRAP(not_implemented, 0),		/* 42 */
 	MACH_TRAP(not_implemented, 0),		/* 43 */

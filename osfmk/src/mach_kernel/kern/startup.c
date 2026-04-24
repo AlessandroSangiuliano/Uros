@@ -204,6 +204,7 @@
 #include <device/ds_routines.h>
 #include <ipc/ipc_init.h>
 #include <kern/assert.h>
+#include <kern/cap.h>
 #include <kern/misc_protos.h>
 #include <kern/clock.h>
 #include <kern/cpu_number.h>
@@ -327,6 +328,7 @@ setup_main(void)
 	act_init();
 	thread_init();
 	subsystem_init();
+	cap_init();
 #if	TASK_SWAPPER
 	task_swappable(&realhost, kernel_task, FALSE);
 #endif	/* TASK_SWAPPER */

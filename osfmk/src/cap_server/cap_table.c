@@ -178,3 +178,26 @@ void cap_key_init(void) {
 
     sha256(&seed, sizeof(seed), cap_hmac_key);
 }
+
+/*
+ * Trap stub from libmach (mach_traps.s) — slot 40.  The kernel accepts a
+ * full uros_cap blob: when cap_id == 0 it treats the first 32 bytes of
+ * hmac[] as the HMAC key and captures the caller as the trusted
+ * cap_server task (trust-on-first-use).
+ */
+extern kern_return_t urmach_cap_register(struct uros_cap *token);
+
+int cap_key_export_to_kernel(void) {
+    struct uros_cap setup;
+    for (size_t i = 0; i < sizeof(setup); i++)
+        ((uint8_t *)&setup)[i] = 0;
+
+    /* cap_id == 0 signals "setup token"; the kernel copies hmac[]
+     * into its own cap_hmac_key[] and accepts this caller as the
+     * single cap_server task. */
+    setup.cap_id = 0;
+    for (size_t i = 0; i < sizeof(cap_hmac_key); i++)
+        setup.hmac[i] = cap_hmac_key[i];
+
+    return (int)urmach_cap_register(&setup);
+}
