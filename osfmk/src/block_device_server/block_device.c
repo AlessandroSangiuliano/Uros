@@ -49,6 +49,15 @@ extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
                                        uint64_t resource_id);
 
 /*
+ * Linked list of every live blk_handle, used by the no-senders
+ * notification path to find the handle by Mach port name (the kernel
+ * does NOT substitute the protected payload on notification messages,
+ * so msgh_local_port is the receive-port name, not the payload).
+ * Single-threaded BDS — no locking yet.
+ */
+static struct blk_handle *blk_handles_head = NULL;
+
+/*
  * Resolve a device port to its underlying partition struct, but only
  * if the port is an authenticated handle.  Raw partition ports
  * (BLK_MAGIC_PART) — the ones published via netname for discovery —
@@ -180,12 +189,35 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 		free(h);
 		return kr;
 	}
-	(void)mach_port_insert_right(mach_task_self(), hport, hport,
-				     MACH_MSG_TYPE_MAKE_SEND);
 	(void)mach_port_set_protected_payload(mach_task_self(),
 					      hport, (unsigned long)h);
 	(void)mach_port_move_member(mach_task_self(), hport, port_set);
 	h->recv_port = hport;
+	h->next = blk_handles_head;
+	blk_handles_head = h;
+
+	/*
+	 * No-senders notification: when the client drops the last copy
+	 * of the send right MIG is about to mint for the reply, the
+	 * kernel posts a notification message to this same port; the
+	 * blk_demux dispatcher sees it (msgh_id == MACH_NOTIFY_NO_SENDERS)
+	 * and tears down the handle.  sync=1 delays arming until that
+	 * first send right is created (the one MIG returns to the
+	 * client), so we don't fire on our own intermediate state.
+	 */
+	mach_port_t prev_notify = MACH_PORT_NULL;
+	kern_return_t nkr = mach_port_request_notification(mach_task_self(),
+					     hport,
+					     MACH_NOTIFY_NO_SENDERS,
+					     1,
+					     hport,
+					     MACH_MSG_TYPE_MAKE_SEND_ONCE,
+					     &prev_notify);
+	if (nkr != KERN_SUCCESS) {
+		printf("blk: request_notification(NO_SENDERS) on %s failed: %d\n",
+		       part->name, nkr);
+		/* The handle still works for I/O — we just won't reap it. */
+	}
 
 	printf("blk: validated cap %llu op=0x%x for %s -> handle port=0x%x\n",
 	       (unsigned long long)token.cap_id, op, part->name,
@@ -193,6 +225,53 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 
 	*device = hport;
 	return KERN_SUCCESS;
+}
+
+/* ================================================================
+ * blk_handle_no_senders — release a per-client handle.
+ *
+ * Called from blk_demux when a MACH_NOTIFY_NO_SENDERS message lands
+ * on a handle port (i.e. the last client send right just disappeared,
+ * usually because the task exited or explicitly dropped it).  Frees
+ * the struct blk_handle and destroys the receive right; the next
+ * device_open_cap from the same or any other task allocates a fresh
+ * one.
+ * ================================================================ */
+
+boolean_t
+blk_handle_no_senders(mach_msg_header_t *in, mach_msg_header_t *out)
+{
+	if ((in->msgh_bits != MACH_MSGH_BITS(0, MACH_MSG_TYPE_PORT_SEND_ONCE))
+	    || (in->msgh_id != MACH_NOTIFY_NO_SENDERS))
+		return FALSE;
+
+	mach_port_t name = in->msgh_local_port;
+	struct blk_handle **pp = &blk_handles_head;
+	struct blk_handle *h = NULL;
+	while (*pp != NULL) {
+		if ((*pp)->recv_port == name) {
+			h = *pp;
+			*pp = h->next;
+			break;
+		}
+		pp = &(*pp)->next;
+	}
+
+	if (h != NULL) {
+		printf("blk: handle for %s released (cap %llu, port=0x%x)\n",
+		       h->part ? h->part->name : "(unknown)",
+		       (unsigned long long)h->cap_id,
+		       (unsigned)name);
+		h->magic = 0;        /* poison so a stray msg can't reuse it */
+		free(h);
+		(void)mach_port_destroy(mach_task_self(), name);
+	} else {
+		printf("blk: no-senders for unknown port 0x%x — ignored\n",
+		       (unsigned)name);
+	}
+
+	out->msgh_remote_port = MACH_PORT_NULL;
+	return TRUE;
 }
 
 /* ================================================================

@@ -214,5 +214,5 @@ routine device_open_cap(
 	in	sec_token	: security_token_t;
 	in	name		: dev_name_t;
 	in	token		: cap_token_t;
-	out	device		: device_t
+	out	device		: mach_port_make_send_t
 	);

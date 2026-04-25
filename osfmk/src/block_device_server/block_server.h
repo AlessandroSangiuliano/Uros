@@ -205,6 +205,7 @@ struct blk_handle {
 	struct blk_partition	*part;
 	mach_port_t		recv_port;
 	uint64_t		cap_id;		/* for logging / future revoke */
+	struct blk_handle	*next;		/* linked-list link, head in block_device.c */
 };
 
 /* ================================================================
