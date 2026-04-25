@@ -144,6 +144,8 @@ target_include_directories(ext_server_bin PRIVATE
   # libsa_fs headers (file_system.h, ext2fs/ext2fs.h, externs.h)
   ${CMAKE_SOURCE_DIR}/src/file_systems
   ${CMAKE_SOURCE_DIR}/src/file_systems/ext2fs
+  # libcap.h for capability-gated device_open_cap
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
 )
 
 # Link against Mach userspace libraries + filesystem library.
@@ -154,6 +156,7 @@ target_link_libraries(ext_server_bin PRIVATE
   libsa_mach
   libsa_fs
   libblk
+  libcap
   libnetname
   -Wl,--end-group
 )

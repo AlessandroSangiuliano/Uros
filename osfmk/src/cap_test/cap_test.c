@@ -34,11 +34,14 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 #include <mach.h>
 #include <mach/bootstrap.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/cap_types.h>
+#include <device/device.h>
+#include <device/device_types.h>
 
 /*
  * Trap stub emitted by libmach (mach_traps.s): slot 40.
@@ -115,15 +118,77 @@ main(int argc, char **argv)
 
     kr = urmach_cap_register(&setup);
 
+    int pass = 1;
     if (kr == CAP_ERR_UNAUTHORIZED) {
         printf("cap_test: [1] unauthorized register rejected: OK\n");
+    } else {
+        printf("cap_test: [1] unauthorized register FAIL — "
+               "expected CAP_ERR_UNAUTHORIZED (%d), got %d\n",
+               CAP_ERR_UNAUTHORIZED, (int)kr);
+        pass = 0;
+    }
+
+    /*
+     * Test [2]: device_open_cap with a zero-filled token must return
+     * KERN_NO_ACCESS from block_device_server.  Tries the AHCI and
+     * virtio-blk first-partition names in turn; if neither is
+     * registered in the name server the test is skipped without
+     * failing the suite (boot may not have published partitions yet
+     * when cap_test runs).
+     */
+    static const char * const candidates[] = { "ahci0a", "virtio_blk0a" };
+    mach_port_t part_port = MACH_PORT_NULL;
+    const char *found_name = NULL;
+    /* Poll up to ~20 s for a BDS partition to show up in the name
+     * server.  BDS publishes partitions only after HAL replay + MBR
+     * parse, and in parallel ipc_bench holds the CPU for a few
+     * seconds; the generous bound keeps the test stable across boot
+     * reordering without hanging forever when no disk is present. */
+    for (int tries = 0; tries < 400 && found_name == NULL; tries++) {
+        for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+            if (netname_look_up(name_server_port, "",
+                                (char *)candidates[i], &part_port) == KERN_SUCCESS) {
+                found_name = candidates[i];
+                break;
+            }
+        }
+        if (found_name == NULL)
+            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 50);
+    }
+
+    if (found_name == NULL) {
+        printf("cap_test: [2] device_open_cap negative — "
+               "SKIPPED (no BDS partition in name server)\n");
+    } else {
+        char zero_tok[CAP_TOKEN_MAX];
+        memset(zero_tok, 0, sizeof(zero_tok));
+
+        security_token_t null_sec = { { 0, 0 } };
+        mach_port_t dev = MACH_PORT_NULL;
+        kern_return_t dkr = device_open_cap(part_port,
+                                            MACH_PORT_NULL,
+                                            D_READ | D_WRITE,
+                                            null_sec,
+                                            (char *)found_name,
+                                            zero_tok,
+                                            (mach_msg_type_number_t)
+                                                sizeof(struct uros_cap),
+                                            &dev);
+        if (dkr == KERN_NO_ACCESS) {
+            printf("cap_test: [2] device_open_cap(%s) zero-token "
+                   "rejected: OK\n", found_name);
+        } else {
+            printf("cap_test: [2] device_open_cap(%s) zero-token FAIL — "
+                   "expected KERN_NO_ACCESS (%d), got %d\n",
+                   found_name, KERN_NO_ACCESS, (int)dkr);
+            pass = 0;
+        }
+    }
+
+    if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");
         return 0;
     }
-
-    printf("cap_test: [1] unauthorized register FAIL — "
-           "expected CAP_ERR_UNAUTHORIZED (%d), got %d\n",
-           CAP_ERR_UNAUTHORIZED, (int)kr);
     printf("cap_test: SOME TESTS FAILED\n");
     return 1;
 }

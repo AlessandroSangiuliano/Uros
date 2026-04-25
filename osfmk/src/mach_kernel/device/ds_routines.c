@@ -279,6 +279,33 @@ ds_find_ioip(device_t device)
 
 security_token_t NULL_SECURITY_TOKEN = { {0, 0} };
 
+/*
+ * ds_device_open_cap — kernel-side stub.  The Uros capability fast
+ * path is enforced by userspace servers (block_device_server in v1),
+ * not by the in-kernel device switch, so this routine simply rejects
+ * every caller.  Linked in because the MIG-generated device_server.c
+ * references it.
+ */
+io_return_t
+ds_device_open_cap(
+	ipc_port_t		open_port,
+	ipc_port_t		reply_port,
+	mach_msg_type_name_t 	reply_port_type,
+	ledger_t                ledger,
+	dev_mode_t		mode,
+	security_token_t        sec_token,
+	char *			name,
+	char *			token,
+	mach_msg_type_number_t	token_len,
+	device_t		*device_p)
+{
+	(void)open_port; (void)reply_port; (void)reply_port_type;
+	(void)ledger; (void)mode; (void)sec_token; (void)name;
+	(void)token; (void)token_len;
+	*device_p = DEVICE_NULL;
+	return D_INVALID_OPERATION;
+}
+
 /*ARGSUSED*/
 io_return_t
 ds_device_open(

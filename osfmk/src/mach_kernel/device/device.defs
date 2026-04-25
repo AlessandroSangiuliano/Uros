@@ -97,6 +97,8 @@ subsystem
 #include <mach/mach_types.defs>
 #include <device/device_types.defs>
 
+import <mach/cap_types.h>;
+
 serverprefix	ds_;
 
 /* Note: no spaces around | for polymorphic types to work with MIG parser */
@@ -195,4 +197,22 @@ routine io_done_queue_create(
 
 routine io_done_queue_terminate(
 		queue		: io_done_queue_t
+	);
+
+/*
+ * Uros capability-gated device_open.  Server-side (block_device_server)
+ * calls urmach_cap_verify on the supplied uros_cap token before opening.
+ * See osfmk/export/include/device/device.defs for documentation.
+ */
+type cap_token_t = array[*:256] of char;
+
+routine device_open_cap(
+		master_port	: mach_port_t;
+	sreplyport reply_port	: reply_port_t;
+	in	ledger		: ledger_port_t;
+	in	mode		: dev_mode_t;
+	in	sec_token	: security_token_t;
+	in	name		: dev_name_t;
+	in	token		: cap_token_t;
+	out	device		: device_t
 	);

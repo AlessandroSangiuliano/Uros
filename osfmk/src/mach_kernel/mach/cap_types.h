@@ -143,6 +143,22 @@ struct uros_cap {
 #define CAP_TOKEN_SIZE       (sizeof(struct uros_cap))
 
 /*
+ * Userspace-only helper (the kernel never hashes names).  Mirrors the
+ * definition in osfmk/export/include/mach/cap_types.h; kept in sync
+ * manually — see issue #179 for the UAPI-split fix.
+ */
+static inline uint64_t
+cap_name_hash(const char *name)
+{
+    uint64_t h = 0xcbf29ce484222325ULL;
+    while (*name) {
+        h ^= (uint8_t)(*name++);
+        h *= 0x100000001b3ULL;
+    }
+    return h;
+}
+
+/*
  * Error codes.  These live in the KERN_RETURN space (positive ints).
  * Keep in sync with libcap error translation and cap_server reply paths.
  */
