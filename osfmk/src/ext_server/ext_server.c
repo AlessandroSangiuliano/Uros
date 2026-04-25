@@ -606,8 +606,17 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 			       driver_name, ckr);
 			return -1;
 		}
-		printf("ext2: authenticated '%s' via cap %llu\n",
-		       driver_name, (unsigned long long)tok.cap_id);
+		/*
+		 * Per-(client, partition) handle (Issue #181): the I/O port
+		 * we must use from now on is the one BDS just minted, not
+		 * the master partition port we discovered via netname.  Raw
+		 * I/O on the master port is rejected by BDS regardless of
+		 * how many other clients have authenticated it.
+		 */
+		mnt->dev.dev_port = authed;
+		printf("ext2: authenticated '%s' via cap %llu (handle=0x%x)\n",
+		       driver_name, (unsigned long long)tok.cap_id,
+		       (unsigned)authed);
 	}
 
 	/* Create initial page cache (non-DMA, no writeback yet) */

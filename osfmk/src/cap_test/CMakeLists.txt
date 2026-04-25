@@ -27,12 +27,14 @@ target_include_directories(cap_test_server PRIVATE
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
 )
 
 target_link_libraries(cap_test_server PRIVATE
   -Wl,--start-group
   libpthreads
   libnetname
+  libcap
   libmach
   libsa_mach
   -Wl,--end-group

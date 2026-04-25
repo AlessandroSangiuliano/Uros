@@ -168,22 +168,44 @@ struct blk_controller {
  * Partition — one per MBR/GPT partition found on each disk
  * ================================================================ */
 
+/*
+ * Both struct blk_partition and struct blk_handle are reachable from a
+ * Mach port via the protected payload; ds_device_read / ds_device_write
+ * dispatch on the leading magic word to tell which one they got.
+ *
+ * BLK_MAGIC_PART  — published "discovery" port for a partition, returned
+ *                   by netname_look_up.  Callers must call
+ *                   device_open_cap on it to get an authenticated
+ *                   handle; raw read/write on this port are rejected.
+ * BLK_MAGIC_HANDLE — handle returned by a successful device_open_cap.
+ *                    Possession is the authentication: read/write
+ *                    succeed, no further token required.
+ */
+#define BLK_MAGIC_PART		0x424c4b50u	/* 'BLKP' */
+#define BLK_MAGIC_HANDLE	0x424c4b48u	/* 'BLKH' */
+
 struct blk_partition {
+	uint32_t	magic;			/* BLK_MAGIC_PART */
 	struct blk_controller	*ctrl;
 	int		disk_index;
 	uint32_t	start_lba;
 	uint32_t	num_sectors;
 	mach_port_t	recv_port;
 	char		name[32];
-	/*
-	 * Capability gate.  Set by a successful ds_device_open_cap call;
-	 * ds_device_read / ds_device_write refuse I/O until it is nonzero.
-	 * v1 is a one-shot per-port flag (no per-caller tracking): the first
-	 * client that presents a valid token unlocks the port for everyone
-	 * holding a send right.  Per-client enforcement would require
-	 * protected-payload-per-sender and is tracked for a later pass.
-	 */
-	int		cap_authenticated;
+};
+
+/*
+ * Per-(client, partition) authenticated handle.  Allocated by
+ * ds_device_open_cap after a successful urmach_cap_verify; lives until
+ * the client drops the last send right (cleanup via no-senders
+ * notification — see comment in ds_device_open_cap).
+ */
+struct blk_handle {
+	uint32_t		magic;		/* BLK_MAGIC_HANDLE */
+	struct blk_partition	*part;
+	mach_port_t		recv_port;
+	uint64_t		cap_id;		/* for logging / future revoke */
+	struct blk_handle	*next;		/* linked-list link, head in block_device.c */
 };
 
 /* ================================================================

@@ -307,9 +307,24 @@ find_controller_by_irq(mach_port_t local_port)
  * Combined demux: device RPC + batch RPC + HAL notify + IRQ
  * ================================================================ */
 
+/*
+ * Forward decl: handler in block_device.c that reaps a per-client
+ * struct blk_handle when its port runs out of senders.
+ */
+extern boolean_t blk_handle_no_senders(mach_msg_header_t *in,
+				       mach_msg_header_t *out);
+
 static boolean_t
 blk_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	/*
+	 * No-senders notifications are SEND_ONCE messages with a
+	 * recognisable msgh_id; check before MIG dispatchers since
+	 * none of them know about the notification subsystem id space.
+	 */
+	if (blk_handle_no_senders(in, out))
+		return TRUE;
+
 	if (device_server(in, out))
 		return TRUE;
 

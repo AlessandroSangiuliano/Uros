@@ -297,12 +297,12 @@ ds_device_open_cap(
 	char *			name,
 	char *			token,
 	mach_msg_type_number_t	token_len,
-	device_t		*device_p)
+	ipc_port_t		*device_p)
 {
 	(void)open_port; (void)reply_port; (void)reply_port_type;
 	(void)ledger; (void)mode; (void)sec_token; (void)name;
 	(void)token; (void)token_len;
-	*device_p = DEVICE_NULL;
+	*device_p = IP_NULL;
 	return D_INVALID_OPERATION;
 }
 

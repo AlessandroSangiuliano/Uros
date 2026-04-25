@@ -35,6 +35,7 @@
 #include <device/device.h>
 #include <device/device_types.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include "block_server.h"
 
@@ -46,6 +47,33 @@
 extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
                                        uint32_t op,
                                        uint64_t resource_id);
+
+/*
+ * Linked list of every live blk_handle, used by the no-senders
+ * notification path to find the handle by Mach port name (the kernel
+ * does NOT substitute the protected payload on notification messages,
+ * so msgh_local_port is the receive-port name, not the payload).
+ * Single-threaded BDS — no locking yet.
+ */
+static struct blk_handle *blk_handles_head = NULL;
+
+/*
+ * Resolve a device port to its underlying partition struct, but only
+ * if the port is an authenticated handle.  Raw partition ports
+ * (BLK_MAGIC_PART) — the ones published via netname for discovery —
+ * are NOT considered authenticated for I/O: callers must first invoke
+ * device_open_cap to obtain a handle.  Returns NULL on any other case.
+ */
+static struct blk_partition *
+blk_part_from_authed_handle(mach_port_t device)
+{
+	if (device == 0)
+		return NULL;
+	uint32_t magic = *(uint32_t *)(unsigned long)device;
+	if (magic != BLK_MAGIC_HANDLE)
+		return NULL;
+	return ((struct blk_handle *)(unsigned long)device)->part;
+}
 
 /* ================================================================
  * Readahead cache
@@ -101,13 +129,20 @@ ds_device_close(mach_port_t device)
 }
 
 /* ================================================================
- * ds_device_open_cap — capability-gated open (Uros Issue C)
+ * ds_device_open_cap — capability-gated open (Uros Issue #178)
  *
- * Verifies the supplied uros_cap token against the partition name via
- * urmach_cap_verify.  On success the partition is marked authenticated
- * and the same partition port is returned, so subsequent device_read /
- * device_write on that port are accepted.  On failure returns
- * KERN_NO_ACCESS and the device port is left MACH_PORT_NULL.
+ * Per-(client, partition) authentication (Issue #181): the master
+ * port published via netname is a "discovery" port that ds_device_*
+ * I/O routines refuse.  device_open_cap verifies the token, allocates
+ * a fresh receive port that BDS owns, attaches a struct blk_handle as
+ * the protected payload, and hands the port to the caller.  Possession
+ * of that port is the proof of authentication; raw I/O on the master
+ * port stays rejected even after this call succeeds.
+ *
+ * Lifetime: the struct blk_handle and its port currently leak when
+ * the client disconnects (no-senders cleanup is a follow-up — see
+ * issue #181 verification list).  For v1 the leak is bounded by the
+ * number of mounts (typically 2-4 per boot) and is acceptable.
  * ================================================================ */
 
 kern_return_t
@@ -118,16 +153,14 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 		   char *token_blob, mach_msg_type_number_t token_len,
 		   mach_port_t *device)
 {
-	struct blk_partition *part = (struct blk_partition *)master;
-	if (!part || part->recv_port == MACH_PORT_NULL) {
-		*device = MACH_PORT_NULL;
-		return D_NO_SUCH_DEVICE;
-	}
+	*device = MACH_PORT_NULL;
 
-	if (token_len != sizeof(struct uros_cap)) {
-		*device = MACH_PORT_NULL;
+	struct blk_partition *part = (struct blk_partition *)master;
+	if (!part || part->magic != BLK_MAGIC_PART)
+		return D_NO_SUCH_DEVICE;
+
+	if (token_len != sizeof(struct uros_cap))
 		return KERN_NO_ACCESS;
-	}
 
 	struct uros_cap token;
 	memcpy(&token, token_blob, sizeof(token));
@@ -139,16 +172,106 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	if (kr != KERN_SUCCESS) {
 		printf("blk: cap verify FAIL for %s (op=0x%x id=0x%llx): kr=%d\n",
 		       part->name, op, (unsigned long long)resource_id, kr);
-		*device = MACH_PORT_NULL;
 		return KERN_NO_ACCESS;
 	}
 
-	part->cap_authenticated = 1;
-	printf("blk: validated cap %llu op=0x%x for %s\n",
-	       (unsigned long long)token.cap_id, op, part->name);
+	struct blk_handle *h = (struct blk_handle *)malloc(sizeof(*h));
+	if (h == NULL)
+		return KERN_RESOURCE_SHORTAGE;
+	h->magic     = BLK_MAGIC_HANDLE;
+	h->part      = part;
+	h->cap_id    = token.cap_id;
 
-	*device = part->recv_port;
+	mach_port_t hport = MACH_PORT_NULL;
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &hport);
+	if (kr != KERN_SUCCESS) {
+		free(h);
+		return kr;
+	}
+	(void)mach_port_set_protected_payload(mach_task_self(),
+					      hport, (unsigned long)h);
+	(void)mach_port_move_member(mach_task_self(), hport, port_set);
+	h->recv_port = hport;
+	h->next = blk_handles_head;
+	blk_handles_head = h;
+
+	/*
+	 * No-senders notification: when the client drops the last copy
+	 * of the send right MIG is about to mint for the reply, the
+	 * kernel posts a notification message to this same port; the
+	 * blk_demux dispatcher sees it (msgh_id == MACH_NOTIFY_NO_SENDERS)
+	 * and tears down the handle.  sync=1 delays arming until that
+	 * first send right is created (the one MIG returns to the
+	 * client), so we don't fire on our own intermediate state.
+	 */
+	mach_port_t prev_notify = MACH_PORT_NULL;
+	kern_return_t nkr = mach_port_request_notification(mach_task_self(),
+					     hport,
+					     MACH_NOTIFY_NO_SENDERS,
+					     1,
+					     hport,
+					     MACH_MSG_TYPE_MAKE_SEND_ONCE,
+					     &prev_notify);
+	if (nkr != KERN_SUCCESS) {
+		printf("blk: request_notification(NO_SENDERS) on %s failed: %d\n",
+		       part->name, nkr);
+		/* The handle still works for I/O — we just won't reap it. */
+	}
+
+	printf("blk: validated cap %llu op=0x%x for %s -> handle port=0x%x\n",
+	       (unsigned long long)token.cap_id, op, part->name,
+	       (unsigned)hport);
+
+	*device = hport;
 	return KERN_SUCCESS;
+}
+
+/* ================================================================
+ * blk_handle_no_senders — release a per-client handle.
+ *
+ * Called from blk_demux when a MACH_NOTIFY_NO_SENDERS message lands
+ * on a handle port (i.e. the last client send right just disappeared,
+ * usually because the task exited or explicitly dropped it).  Frees
+ * the struct blk_handle and destroys the receive right; the next
+ * device_open_cap from the same or any other task allocates a fresh
+ * one.
+ * ================================================================ */
+
+boolean_t
+blk_handle_no_senders(mach_msg_header_t *in, mach_msg_header_t *out)
+{
+	if ((in->msgh_bits != MACH_MSGH_BITS(0, MACH_MSG_TYPE_PORT_SEND_ONCE))
+	    || (in->msgh_id != MACH_NOTIFY_NO_SENDERS))
+		return FALSE;
+
+	mach_port_t name = in->msgh_local_port;
+	struct blk_handle **pp = &blk_handles_head;
+	struct blk_handle *h = NULL;
+	while (*pp != NULL) {
+		if ((*pp)->recv_port == name) {
+			h = *pp;
+			*pp = h->next;
+			break;
+		}
+		pp = &(*pp)->next;
+	}
+
+	if (h != NULL) {
+		printf("blk: handle for %s released (cap %llu, port=0x%x)\n",
+		       h->part ? h->part->name : "(unknown)",
+		       (unsigned long long)h->cap_id,
+		       (unsigned)name);
+		h->magic = 0;        /* poison so a stray msg can't reuse it */
+		free(h);
+		(void)mach_port_destroy(mach_task_self(), name);
+	} else {
+		printf("blk: no-senders for unknown port 0x%x — ignored\n",
+		       (unsigned)name);
+	}
+
+	out->msgh_remote_port = MACH_PORT_NULL;
+	return TRUE;
 }
 
 /* ================================================================
@@ -162,16 +285,15 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 	       io_buf_len_t bytes_wanted,
 	       io_buf_ptr_t *data, mach_msg_type_number_t *data_count)
 {
-	struct blk_partition *part = (struct blk_partition *)device;
+	struct blk_partition *part = blk_part_from_authed_handle(device);
+	if (!part)
+		return KERN_NO_ACCESS;
 	struct blk_controller *ctrl = part->ctrl;
 	kern_return_t kr;
 	vm_offset_t buf, read_buf;
 	unsigned int total, nsectors, lba;
 	unsigned int read_buf_size;
 	unsigned int max_xfer;
-
-	if (!part->cap_authenticated)
-		return KERN_NO_ACCESS;
 
 	if (bytes_wanted <= 0)
 		return D_INVALID_SIZE;
@@ -323,15 +445,14 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 		io_buf_ptr_t data, mach_msg_type_number_t data_count,
 		io_buf_len_t *bytes_written)
 {
-	struct blk_partition *part = (struct blk_partition *)device;
-	struct blk_controller *ctrl = part->ctrl;
-	unsigned int total, nsectors, lba;
-	unsigned int offset, chunk, max_xfer;
-
-	if (!part->cap_authenticated) {
+	struct blk_partition *part = blk_part_from_authed_handle(device);
+	if (!part) {
 		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 		return KERN_NO_ACCESS;
 	}
+	struct blk_controller *ctrl = part->ctrl;
+	unsigned int total, nsectors, lba;
+	unsigned int offset, chunk, max_xfer;
 
 	if (data_count <= 0)
 		return D_INVALID_SIZE;
@@ -394,13 +515,12 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 		      mach_msg_type_number_t data_count,
 		      io_buf_len_t *bytes_written)
 {
-	struct blk_partition *part = (struct blk_partition *)device;
-	struct blk_controller *ctrl = part->ctrl;
-
-	if (!part->cap_authenticated) {
+	struct blk_partition *part = blk_part_from_authed_handle(device);
+	if (!part) {
 		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 		return KERN_NO_ACCESS;
 	}
+	struct blk_controller *ctrl = part->ctrl;
 
 	if (recnumsCnt != sizesCnt || recnumsCnt == 0)
 		return D_INVALID_SIZE;
@@ -503,12 +623,11 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		    mach_msg_type_number_t phys_addrsCnt,
 		    io_buf_len_t *bytes_read)
 {
-	struct blk_partition *part = (struct blk_partition *)device;
+	struct blk_partition *part = blk_part_from_authed_handle(device);
+	if (!part)
+		return KERN_NO_ACCESS;
 	struct blk_controller *ctrl = part->ctrl;
 	unsigned int total, nsectors;
-
-	if (!part->cap_authenticated)
-		return KERN_NO_ACCESS;
 
 	if (!ctrl->ops->read_sectors_phys)
 		return D_INVALID_OPERATION;
@@ -543,12 +662,11 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		     mach_msg_type_number_t phys_addrsCnt,
 		     io_buf_len_t *bytes_written)
 {
-	struct blk_partition *part = (struct blk_partition *)device;
+	struct blk_partition *part = blk_part_from_authed_handle(device);
+	if (!part)
+		return KERN_NO_ACCESS;
 	struct blk_controller *ctrl = part->ctrl;
 	unsigned int total, nsectors;
-
-	if (!part->cap_authenticated)
-		return KERN_NO_ACCESS;
 
 	if (!ctrl->ops->write_sectors_phys)
 		return D_INVALID_OPERATION;
@@ -585,7 +703,21 @@ ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
 		     dev_status_t status,
 		     mach_msg_type_number_t *status_count)
 {
-	struct blk_partition *part = (struct blk_partition *)device;
+	/*
+	 * get_status returns public metadata (size, sector size) and is
+	 * called by libblk during discovery, before any device_open_cap.
+	 * Accept both raw partition ports and authenticated handles.
+	 */
+	struct blk_partition *part;
+	if (device == 0)
+		return D_NO_SUCH_DEVICE;
+	uint32_t magic = *(uint32_t *)(unsigned long)device;
+	if (magic == BLK_MAGIC_HANDLE)
+		part = ((struct blk_handle *)(unsigned long)device)->part;
+	else if (magic == BLK_MAGIC_PART)
+		part = (struct blk_partition *)(unsigned long)device;
+	else
+		return D_NO_SUCH_DEVICE;
 
 	if (flavor == DEV_GET_SIZE) {
 		status[DEV_GET_SIZE_DEVICE_SIZE] = (int)part->num_sectors;

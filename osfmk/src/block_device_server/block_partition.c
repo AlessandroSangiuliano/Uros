@@ -132,6 +132,8 @@ blk_register_partitions(void)
 	for (i = 0; i < n_partitions; i++) {
 		struct blk_partition *part = &partitions[i];
 
+		part->magic = BLK_MAGIC_PART;
+
 		kr = mach_port_allocate(mach_task_self(),
 			MACH_PORT_RIGHT_RECEIVE, &part->recv_port);
 		if (kr != KERN_SUCCESS) {

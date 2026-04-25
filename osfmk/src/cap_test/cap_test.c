@@ -42,6 +42,7 @@
 #include <mach/cap_types.h>
 #include <device/device.h>
 #include <device/device_types.h>
+#include <libcap.h>
 
 /*
  * Trap stub emitted by libmach (mach_traps.s): slot 40.
@@ -139,12 +140,11 @@ main(int argc, char **argv)
     static const char * const candidates[] = { "ahci0a", "virtio_blk0a" };
     mach_port_t part_port = MACH_PORT_NULL;
     const char *found_name = NULL;
-    /* Poll up to ~20 s for a BDS partition to show up in the name
-     * server.  BDS publishes partitions only after HAL replay + MBR
-     * parse, and in parallel ipc_bench holds the CPU for a few
-     * seconds; the generous bound keeps the test stable across boot
-     * reordering without hanging forever when no disk is present. */
-    for (int tries = 0; tries < 400 && found_name == NULL; tries++) {
+    /* Poll patiently for a BDS partition: HAL replay + MBR parse runs
+     * in parallel with ipc_bench holding the CPU for several seconds.
+     * The generous bound keeps the test stable across boot reordering
+     * without hanging forever when no disk is present. */
+    for (int tries = 0; tries < 2000 && found_name == NULL; tries++) {
         for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
             if (netname_look_up(name_server_port, "",
                                 (char *)candidates[i], &part_port) == KERN_SUCCESS) {
@@ -182,6 +182,47 @@ main(int argc, char **argv)
                    "expected KERN_NO_ACCESS (%d), got %d\n",
                    found_name, KERN_NO_ACCESS, (int)dkr);
             pass = 0;
+        }
+    }
+
+    /*
+     * Test [3]: positive device_open_cap, then exit so BDS sees the
+     * last send right disappear and the no-senders cleanup fires.
+     * Looks like a leak by design — we never call device_close — but
+     * task termination drops the right and BDS reaps the handle.
+     */
+    if (found_name != NULL) {
+        struct uros_cap tok;
+        kern_return_t ckr = cap_request(RESOURCE_BLK_DEVICE,
+                                        cap_name_hash(found_name),
+                                        CAP_OP_BLK_READ | CAP_OP_BLK_WRITE,
+                                        0,
+                                        &tok);
+        if (ckr != KERN_SUCCESS) {
+            printf("cap_test: [3] cap_request(%s) failed (%d) — SKIPPED\n",
+                   found_name, ckr);
+        } else {
+            char ok_blob[CAP_TOKEN_MAX];
+            memcpy(ok_blob, &tok, sizeof(tok));
+            security_token_t null_sec = { { 0, 0 } };
+            mach_port_t handle = MACH_PORT_NULL;
+            kern_return_t okr = device_open_cap(part_port,
+                                                MACH_PORT_NULL,
+                                                D_READ | D_WRITE,
+                                                null_sec,
+                                                (char *)found_name,
+                                                ok_blob,
+                                                (mach_msg_type_number_t)sizeof(tok),
+                                                &handle);
+            if (okr == KERN_SUCCESS && handle != MACH_PORT_NULL) {
+                printf("cap_test: [3] positive open ok, handle=0x%x — "
+                       "exiting to trigger no-senders cleanup\n",
+                       (unsigned)handle);
+            } else {
+                printf("cap_test: [3] positive open FAIL — kr=%d\n",
+                       (int)okr);
+                pass = 0;
+            }
         }
     }
 

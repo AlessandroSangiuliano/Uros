@@ -219,5 +219,12 @@ routine device_open_cap(
 	in	sec_token	: security_token_t;
 	in	name		: dev_name_t;
 	in	token		: cap_token_t;
-	out	device		: device_t
+	/*
+	 * Disposition is MAKE_SEND so the kernel mints the client's send
+	 * right from the receive right held by BDS.  This means BDS does
+	 * NOT keep a send right of its own, which is required for the
+	 * no-senders notification (Issue #181 cleanup) to fire when the
+	 * client drops the last copy.
+	 */
+	out	device		: mach_port_make_send_t
 	);
