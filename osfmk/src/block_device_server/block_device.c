@@ -31,10 +31,21 @@
 
 #include <mach.h>
 #include <mach/mach_port.h>
+#include <mach/cap_types.h>
 #include <device/device.h>
 #include <device/device_types.h>
 #include <stdio.h>
+#include <string.h>
 #include "block_server.h"
+
+/*
+ * UrMach capability verify trap (slot 37).  Declared here to keep BDS
+ * from having to pull in the full libcap public header — we only need
+ * the fast-path syscall, not cap_server RPC.
+ */
+extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
+                                       uint32_t op,
+                                       uint64_t resource_id);
 
 /* ================================================================
  * Readahead cache
@@ -90,6 +101,57 @@ ds_device_close(mach_port_t device)
 }
 
 /* ================================================================
+ * ds_device_open_cap — capability-gated open (Uros Issue C)
+ *
+ * Verifies the supplied uros_cap token against the partition name via
+ * urmach_cap_verify.  On success the partition is marked authenticated
+ * and the same partition port is returned, so subsequent device_read /
+ * device_write on that port are accepted.  On failure returns
+ * KERN_NO_ACCESS and the device port is left MACH_PORT_NULL.
+ * ================================================================ */
+
+kern_return_t
+ds_device_open_cap(mach_port_t master, mach_port_t reply,
+		   mach_msg_type_name_t reply_poly,
+		   mach_port_t ledger, dev_mode_t mode,
+		   security_token_t sec_token, dev_name_t name,
+		   char *token_blob, mach_msg_type_number_t token_len,
+		   mach_port_t *device)
+{
+	struct blk_partition *part = (struct blk_partition *)master;
+	if (!part || part->recv_port == MACH_PORT_NULL) {
+		*device = MACH_PORT_NULL;
+		return D_NO_SUCH_DEVICE;
+	}
+
+	if (token_len != sizeof(struct uros_cap)) {
+		*device = MACH_PORT_NULL;
+		return KERN_NO_ACCESS;
+	}
+
+	struct uros_cap token;
+	memcpy(&token, token_blob, sizeof(token));
+
+	uint64_t resource_id = cap_name_hash(part->name);
+	uint32_t op = CAP_OP_BLK_READ | CAP_OP_BLK_WRITE;
+
+	kern_return_t kr = urmach_cap_verify(&token, op, resource_id);
+	if (kr != KERN_SUCCESS) {
+		printf("blk: cap verify FAIL for %s (op=0x%x id=0x%llx): kr=%d\n",
+		       part->name, op, (unsigned long long)resource_id, kr);
+		*device = MACH_PORT_NULL;
+		return KERN_NO_ACCESS;
+	}
+
+	part->cap_authenticated = 1;
+	printf("blk: validated cap %llu op=0x%x for %s\n",
+	       (unsigned long long)token.cap_id, op, part->name);
+
+	*device = part->recv_port;
+	return KERN_SUCCESS;
+}
+
+/* ================================================================
  * ds_device_read — main read path with readahead cache
  * ================================================================ */
 
@@ -107,6 +169,9 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 	unsigned int total, nsectors, lba;
 	unsigned int read_buf_size;
 	unsigned int max_xfer;
+
+	if (!part->cap_authenticated)
+		return KERN_NO_ACCESS;
 
 	if (bytes_wanted <= 0)
 		return D_INVALID_SIZE;
@@ -263,6 +328,11 @@ ds_device_write(mach_port_t device, mach_port_t reply,
 	unsigned int total, nsectors, lba;
 	unsigned int offset, chunk, max_xfer;
 
+	if (!part->cap_authenticated) {
+		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
+		return KERN_NO_ACCESS;
+	}
+
 	if (data_count <= 0)
 		return D_INVALID_SIZE;
 
@@ -326,6 +396,11 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 {
 	struct blk_partition *part = (struct blk_partition *)device;
 	struct blk_controller *ctrl = part->ctrl;
+
+	if (!part->cap_authenticated) {
+		vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
+		return KERN_NO_ACCESS;
+	}
 
 	if (recnumsCnt != sizesCnt || recnumsCnt == 0)
 		return D_INVALID_SIZE;
@@ -432,6 +507,9 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 	struct blk_controller *ctrl = part->ctrl;
 	unsigned int total, nsectors;
 
+	if (!part->cap_authenticated)
+		return KERN_NO_ACCESS;
+
 	if (!ctrl->ops->read_sectors_phys)
 		return D_INVALID_OPERATION;
 
@@ -468,6 +546,9 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 	struct blk_partition *part = (struct blk_partition *)device;
 	struct blk_controller *ctrl = part->ctrl;
 	unsigned int total, nsectors;
+
+	if (!part->cap_authenticated)
+		return KERN_NO_ACCESS;
 
 	if (!ctrl->ops->write_sectors_phys)
 		return D_INVALID_OPERATION;

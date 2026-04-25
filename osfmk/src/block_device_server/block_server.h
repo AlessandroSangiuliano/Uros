@@ -175,6 +175,15 @@ struct blk_partition {
 	uint32_t	num_sectors;
 	mach_port_t	recv_port;
 	char		name[32];
+	/*
+	 * Capability gate.  Set by a successful ds_device_open_cap call;
+	 * ds_device_read / ds_device_write refuse I/O until it is nonzero.
+	 * v1 is a one-shot per-port flag (no per-caller tracking): the first
+	 * client that presents a valid token unlocks the port for everyone
+	 * holding a send right.  Per-client enforcement would require
+	 * protected-payload-per-sender and is tracked for a later pass.
+	 */
+	int		cap_authenticated;
 };
 
 /* ================================================================

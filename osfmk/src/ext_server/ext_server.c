@@ -43,10 +43,12 @@
 #include <mach/bootstrap.h>
 #include <mach/mach_port.h>
 #include <mach/message.h>
+#include <mach/cap_types.h>
 #include <sa_mach.h>
 #include <device/device.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
 
@@ -56,6 +58,7 @@
 #include <file_system.h>
 #include <page_cache.h>
 #include <blk.h>
+#include <libcap.h>
 
 #include "ext2fs_server_server.h"
 #include "ahci_batch.h"
@@ -564,6 +567,48 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 	mnt->dev.dev_port = blk_port(bd);
 	mnt->dev.rec_size = blk_rec_size(bd);
 	mnt->dev.mount_data = NULL;
+
+	/*
+	 * Authenticate the partition port via the Uros capability system.
+	 * Without this, BDS rejects every device_read / device_write on
+	 * this port with KERN_NO_ACCESS.  The cap is one-shot per port:
+	 * once device_open_cap succeeds, all later I/O on the same port
+	 * passes the gate until the partition is reset.
+	 */
+	{
+		struct uros_cap tok;
+		kern_return_t ckr = cap_request(RESOURCE_BLK_DEVICE,
+						cap_name_hash(driver_name),
+						CAP_OP_BLK_READ | CAP_OP_BLK_WRITE,
+						0 /* no expiry */,
+						&tok);
+		if (ckr != KERN_SUCCESS) {
+			printf("ext2: cap_request(%s) failed (%d)\n",
+			       driver_name, ckr);
+			return -1;
+		}
+
+		char tok_blob[CAP_TOKEN_MAX];
+		memcpy(tok_blob, &tok, sizeof(tok));
+
+		security_token_t null_sec = { { 0, 0 } };
+		mach_port_t authed = MACH_PORT_NULL;
+		ckr = device_open_cap(mnt->dev.dev_port,
+				      MACH_PORT_NULL,
+				      D_READ | D_WRITE,
+				      null_sec,
+				      (char *)driver_name,
+				      tok_blob,
+				      (mach_msg_type_number_t)sizeof(tok),
+				      &authed);
+		if (ckr != KERN_SUCCESS) {
+			printf("ext2: device_open_cap(%s) failed (%d)\n",
+			       driver_name, ckr);
+			return -1;
+		}
+		printf("ext2: authenticated '%s' via cap %llu\n",
+		       driver_name, (unsigned long long)tok.cap_id);
+	}
 
 	/* Create initial page cache (non-DMA, no writeback yet) */
 	mnt->dev.cache = page_cache_create(8192, NULL, NULL);

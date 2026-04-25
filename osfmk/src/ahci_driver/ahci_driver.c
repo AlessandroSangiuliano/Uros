@@ -1258,6 +1258,24 @@ ds_device_close(mach_port_t device)
 	return KERN_SUCCESS;
 }
 
+/*
+ * ds_device_open_cap stub: the standalone ahci_driver binary is not a
+ * capability-gated entry point in v1 (block_device_server owns that
+ * role via loaded modules).  Linked in because the MIG-generated
+ * device_server.c references it.
+ */
+kern_return_t
+ds_device_open_cap(mach_port_t master, mach_port_t reply,
+		   mach_msg_type_name_t reply_poly,
+		   mach_port_t ledger, dev_mode_t mode,
+		   security_token_t sec_token, dev_name_t name,
+		   char *token, mach_msg_type_number_t token_len,
+		   mach_port_t *device)
+{
+	*device = MACH_PORT_NULL;
+	return D_INVALID_OPERATION;
+}
+
 kern_return_t
 ds_device_read(mach_port_t device, mach_port_t reply,
 	       mach_msg_type_name_t reply_poly,
