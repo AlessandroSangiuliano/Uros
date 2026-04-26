@@ -165,10 +165,22 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	struct uros_cap token;
 	memcpy(&token, token_blob, sizeof(token));
 
-	uint64_t resource_id = cap_name_hash(part->name);
 	uint32_t op = CAP_OP_BLK_READ | CAP_OP_BLK_WRITE;
 
+	/*
+	 * Per Issue #184 a partition is reachable under two names: the
+	 * driver-specific one ("ahci0a") and a driver-agnostic alias
+	 * ("disk0a").  The cap_id is hashed from whichever name the
+	 * client looked up, so try both.
+	 */
+	uint64_t resource_id = cap_name_hash(part->name);
 	kern_return_t kr = urmach_cap_verify(&token, op, resource_id);
+	if (kr != KERN_SUCCESS && part->stable_name[0] != '\0') {
+		uint64_t alias_id = cap_name_hash(part->stable_name);
+		kr = urmach_cap_verify(&token, op, alias_id);
+		if (kr == KERN_SUCCESS)
+			resource_id = alias_id;
+	}
 	if (kr != KERN_SUCCESS) {
 		printf("blk: cap verify FAIL for %s (op=0x%x id=0x%llx): kr=%d\n",
 		       part->name, op, (unsigned long long)resource_id, kr);
@@ -720,7 +732,16 @@ ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
 		return D_NO_SUCH_DEVICE;
 
 	if (flavor == DEV_GET_SIZE) {
-		status[DEV_GET_SIZE_DEVICE_SIZE] = (int)part->num_sectors;
+		/*
+		 * DEV_GET_SIZE_DEVICE_SIZE is in bytes (matches the kernel
+		 * IDE driver and what default_pager / libblk expect — both
+		 * compute capacity_sectors = DEVICE_SIZE / RECORD_SIZE).
+		 * Returning sectors here was a latent bug that bounded the
+		 * default_pager swap to a few KB once paging moved through
+		 * BDS in Issue #184.
+		 */
+		status[DEV_GET_SIZE_DEVICE_SIZE] =
+			(int)(part->num_sectors * SECTOR_SIZE);
 		status[DEV_GET_SIZE_RECORD_SIZE] = (int)SECTOR_SIZE;
 		*status_count = DEV_GET_SIZE_COUNT;
 		return KERN_SUCCESS;

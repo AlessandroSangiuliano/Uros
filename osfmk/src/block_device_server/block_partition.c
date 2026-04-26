@@ -44,7 +44,7 @@
 
 int
 blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
-	     const char *prefix)
+	     const char *prefix, int stable_disk_idx)
 {
 	vm_offset_t buf;
 	unsigned int buf_size;
@@ -78,6 +78,9 @@ blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		snprintf(partitions[n_partitions].name,
 			 sizeof(partitions[n_partitions].name),
 			 "%s%d%c", prefix, disk_idx, 'a');
+		snprintf(partitions[n_partitions].stable_name,
+			 sizeof(partitions[n_partitions].stable_name),
+			 "disk%d%c", stable_disk_idx, 'a');
 		n_partitions++;
 		vm_deallocate(mach_task_self(), buf, buf_size);
 		return 0;
@@ -94,7 +97,12 @@ blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		       "(%u MB)\n", i, p->systid,
 		       p->relsect, p->numsect, p->numsect / 2048);
 
-		if (p->systid != MBR_TYPE_LINUX)
+		/*
+		 * Issue #184: also accept Linux swap (0x82) — default_pager
+		 * opens its backing store as a raw partition via BDS.
+		 */
+		if (p->systid != MBR_TYPE_LINUX &&
+		    p->systid != MBR_TYPE_LINUX_SWAP)
 			continue;
 		if (n_partitions >= MAX_PARTITIONS)
 			break;
@@ -106,6 +114,9 @@ blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		snprintf(partitions[n_partitions].name,
 			 sizeof(partitions[n_partitions].name),
 			 "%s%d%c", prefix, disk_idx, 'a' + i);
+		snprintf(partitions[n_partitions].stable_name,
+			 sizeof(partitions[n_partitions].stable_name),
+			 "disk%d%c", stable_disk_idx, 'a' + i);
 		n_partitions++;
 	}
 
@@ -168,5 +179,25 @@ blk_register_partitions(void)
 			printf("blk: registered '%s' (LBA %u+%u)\n",
 			       part->name,
 			       part->start_lba, part->num_sectors);
+
+		/*
+		 * Driver-agnostic alias (Issue #184): publish the same
+		 * recv port under a stable "disk<N><letter>" name so
+		 * default_pager / bootstrap can address partitions without
+		 * caring whether AHCI or virtio-blk is the backing module.
+		 */
+		if (part->stable_name[0] != '\0') {
+			kr = netname_check_in(name_server_port,
+					      part->stable_name,
+					      mach_task_self(),
+					      part->recv_port);
+			if (kr != KERN_SUCCESS)
+				printf("blk: netname_check_in(%s) "
+				       "failed (kr=%d)\n",
+				       part->stable_name, kr);
+			else
+				printf("blk: registered alias '%s' -> '%s'\n",
+				       part->stable_name, part->name);
+		}
 	}
 }

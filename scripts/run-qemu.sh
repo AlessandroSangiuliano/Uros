@@ -90,24 +90,30 @@ fi
 # content so multi-mount can be verified.
 #
 # create_ahci_disk <path> <label_suffix>
-#   Creates a 16 MB disk with 2 x 4 MB ext2 partitions.
-#   Partition 0: hello.txt = "Hello from <label_suffix> partition 0"
-#   Partition 1: hello.txt = "Hello from <label_suffix> partition 1"
+#   Creates a 40 MB disk with:
+#     - partition 0 (4 MB ext2):  hello.txt = "Hello from <label_suffix> partition 0"
+#                                 (+ bench.dat on disk0)
+#     - partition 1 (4 MB ext2):  hello.txt = "Hello from <label_suffix> partition 1"
+#     - partition 2 (~32 MB raw): swap area for default_pager (Issue #184)
 create_ahci_disk() {
     _disk="$1"
     _label="$2"
 
     echo "  Creazione disco AHCI partitioned: $_disk"
-    dd if=/dev/zero of="$_disk" bs=1M count=16 status=none
+    dd if=/dev/zero of="$_disk" bs=1M count=40 status=none
 
-    # MBR: 2 partitions, each 4 MB (8192 sectors)
+    # MBR layout:
+    #   p0: 2048..10239   (8192 sectors = 4 MB, ext2)
+    #   p1: 10240..18431  (8192 sectors = 4 MB, ext2)
+    #   p2: 18432..end    (~64K sectors ≈ 32 MB, raw swap, type=82)
     sfdisk --quiet "$_disk" <<SFDISK
 label: dos
-start=2048, size=8192, type=83
-start=10240, size=8192, type=83
+start=2048,  size=8192,  type=83
+start=10240, size=8192,  type=83
+start=18432,             type=82
 SFDISK
 
-    # Format and populate each partition
+    # Format and populate the two ext2 partitions
     _pidx=0
     for _start in 2048 10240; do
         _part=$(mktemp /tmp/osfmk-ahci-part.XXXXXX.img)
@@ -137,7 +143,8 @@ DBGFS
         rm -f "$_part"
         _pidx=$((_pidx + 1))
     done
-    echo "    MBR + 2 ext2 partitions (4 MB each)"
+    # Partition 2 stays zero-filled (raw swap area for default_pager).
+    echo "    MBR + 2 ext2 partitions (4 MB each) + 32 MB raw swap"
 }
 
 AHCI_DISK0="$BUILD_DIR/ahci-test0.img"
@@ -162,20 +169,14 @@ fi
 # Optionally add a virtio-blk-pci device with a test disk.
 # The boot disk stays on IDE; the virtio-blk controller appears as a
 # separate PCI device that the virtio_blk driver can detect and probe.
+#
+# Same layout as the AHCI test disk (Issue #184): MBR + 4 MB ext2 + 4 MB
+# ext2 + ~32 MB raw swap, so default_pager finds "disk0c" regardless of
+# whether the backing module is AHCI or virtio-blk.
 VIRTIO_DISK="$BUILD_DIR/virtio-test.img"
 if [ "$USE_VIRTIO" = true ]; then
-    if [ ! -f "$VIRTIO_DISK" ]; then
-        echo "Creazione disco virtio-blk di test (8 MB, ext2)..."
-        dd if=/dev/zero of="$VIRTIO_DISK" bs=1M count=8 status=none
-        mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -O filetype "$VIRTIO_DISK"
-        HELLO_TXT=$(mktemp)
-        printf 'Hello from ext2 on virtio-blk!\n' > "$HELLO_TXT"
-        debugfs -w -f /dev/stdin "$VIRTIO_DISK" <<DBGFS 2>/dev/null
-write $HELLO_TXT hello.txt
-DBGFS
-        rm -f "$HELLO_TXT"
-        echo "  Disco virtio-blk formattato ext2 con /hello.txt"
-    fi
+    # Always recreate to ensure correct layout
+    create_ahci_disk "$VIRTIO_DISK" "disk0"
     echo "Virtio-blk: $VIRTIO_DISK"
     QEMU_ARGS="$QEMU_ARGS -drive id=virtiodisk0,file=$VIRTIO_DISK,format=raw,if=none"
     QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=virtiodisk0"

@@ -48,6 +48,7 @@
 #define MAX_PARTITIONS		32
 
 #define MBR_TYPE_LINUX		0x83
+#define MBR_TYPE_LINUX_SWAP	0x82
 
 #define IRQ_NOTIFY_MSGH_BASE	3000
 
@@ -191,7 +192,8 @@ struct blk_partition {
 	uint32_t	start_lba;
 	uint32_t	num_sectors;
 	mach_port_t	recv_port;
-	char		name[32];
+	char		name[32];		/* driver-specific: e.g. "ahci0a" */
+	char		stable_name[32];	/* driver-agnostic: e.g. "disk0a" */
 };
 
 /*
@@ -258,7 +260,7 @@ extern mach_port_t	port_set;
  * ================================================================ */
 
 int  blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
-		   const char *prefix);
+		   const char *prefix, int stable_disk_idx);
 void blk_register_partitions(void);
 
 /* ================================================================
