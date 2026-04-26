@@ -171,14 +171,21 @@ CAP_TEST_CONF_LINE=""
 if [ -f "$CAP_TEST" ]; then
     CAP_TEST_CONF_LINE="cap_test cap_test"
 fi
+#
+# Issue #184: default_pager ora apre la sua partizione di swap via BDS
+# (cap_request + device_open_cap) anziché via il driver IDE in-kernel.
+# Conseguenza sull'ordine: hal_server e block_device_server devono
+# partire PRIMA di default_pager, altrimenti blk_open("disk0c") bloccherebbe
+# su netname_notify in attesa che BDS pubblichi la partizione.
+#
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
-default_pager default_pager hd0b
 hal_server hal_server
+block_device_server block_device_server
+default_pager default_pager disk0c
 hello_server hello_server
 ipc_bench ipc_bench${BENCH_ARGS}
-block_device_server block_device_server
 ext_server ext_server
 pthread_test pthread_test
 ${CAP_TEST_CONF_LINE}
@@ -265,10 +272,12 @@ write $HAL_PCI_SCAN_MODULE pci_scan.so
 DBGFS
 
 echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"
-echo "  /mach_servers/bootstrap.conf → 'default_pager default_pager hd0b'"
+echo "  /mach_servers/bootstrap.conf → 'cap_server cap_server'"
+echo "  /mach_servers/bootstrap.conf → 'hal_server hal_server'"
+echo "  /mach_servers/bootstrap.conf → 'block_device_server block_device_server'"
+echo "  /mach_servers/bootstrap.conf → 'default_pager default_pager disk0c'"
 echo "  /mach_servers/bootstrap.conf → 'hello_server hello_server'"
 echo "  /mach_servers/bootstrap.conf → 'ipc_bench ipc_bench'"
-echo "  /mach_servers/bootstrap.conf → 'block_device_server block_device_server'"
 echo "  /mach_servers/bootstrap.conf → 'ext_server ext_server'"
 echo "  /mach_servers/name_server    → $(stat -c%s "$NAME_SERVER") bytes"
 echo "  /mach_servers/default_pager  → $(stat -c%s "$DEFAULT_PAGER") bytes"
@@ -286,9 +295,11 @@ echo "[5/6] Assemblaggio partizione ext2..."
 dd if="$PART_IMG" of="$DISK_IMG" bs="$SECT_SIZE" seek="$PART1_START_SECT" conv=notrunc status=none
 
 # --- 6. La partizione swap è già zero-filled (nessun formato necessario) ---
-# Il default_pager usa la partizione raw: chiama device_open("hd0b"),
-# ottiene la dimensione con DEV_GET_SIZE, e la usa come backing store.
-echo "[6/6] Partizione swap (hd0b) pronta (zero-filled)."
+# Issue #184: il default_pager non passa più dal driver IDE in-kernel.
+# Apre la partizione tramite block_device_server: blk_open("disk0c") +
+# cap_request(RESOURCE_BLK_DEVICE) + device_open_cap → handle autenticato
+# per-(client, partizione) che usa come backing store.
+echo "[6/6] Partizione swap (hd0b/disk0c) pronta (zero-filled)."
 
 echo ""
 echo "=== Immagine disco creata con successo ==="
@@ -318,13 +329,14 @@ echo "Flusso di boot:"
 echo "  1. Kernel boot_device → hd0a (d_partitions[0])"
 echo "  2. Bootstrap legge /dev/boot_device/mach_servers/bootstrap.conf"
 echo "  3. Bootstrap carica /dev/boot_device/mach_servers/name_server"
-echo "  4. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
+echo "  4. Bootstrap carica /dev/boot_device/mach_servers/cap_server"
 echo "  5. Bootstrap carica /dev/boot_device/mach_servers/hal_server"
-echo "  6. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
-echo "  7. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
-echo "  8. Bootstrap carica /dev/boot_device/mach_servers/block_device_server"
-echo "  9. Bootstrap carica /dev/boot_device/mach_servers/ext_server"
-echo " 10. default_pager argv[1]='hd0b' → device_open('hd0b') → ${SWAP_SIZE_MB} MB swap"
+echo "  6. Bootstrap carica /dev/boot_device/mach_servers/block_device_server"
+echo "  7. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
+echo "  8. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
+echo "  9. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
+echo " 10. Bootstrap carica /dev/boot_device/mach_servers/ext_server"
+echo " 11. default_pager argv[1]='disk0c' → device_open_cap via BDS → ${SWAP_SIZE_MB} MB swap"
 echo ""
 echo "Per avviare:"
 echo "  ./scripts/run-qemu.sh"

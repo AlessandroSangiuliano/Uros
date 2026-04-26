@@ -53,6 +53,10 @@
  */
 
 #include "default_pager_internal.h"
+#include <blk.h>
+#include <libcap.h>
+#include <mach/cap_types.h>
+#include <device/device.h>
 
 /*
  * 0 means no shift to pages, so == 1 page/cluster. 1 would mean
@@ -779,16 +783,51 @@ bs_add_device(
 	recnum_t	count;
 	int		clsize;
 	kern_return_t	kr;
+	struct blk_dev	*bd;
+	struct uros_cap	tok;
+	char		tok_blob[CAP_TOKEN_MAX];
 
-	printf("(default_pager): bs_add_device: opening '%s'\n", dev_name);
-	kr = device_open(master, MACH_PORT_NULL, D_READ | D_WRITE,
-			null_security_token, dev_name, &device);
-	if (kr) {
-		printf("(default_pager): device_open('%s') FAILED: %d\n",
+	(void)master;	/* legacy kernel master device port no longer used */
+
+	/*
+	 * Issue #184: paging traffic flows through the block_device_server
+	 * (BDS), gated by a Uros capability.  We discover the partition by
+	 * its BDS-published netname (typically "disk0b" — see the
+	 * driver-agnostic alias added in BDS), then exchange a one-shot
+	 * cap for an authenticated per-(client, partition) port.
+	 */
+	printf("(default_pager): bs_add_device: opening '%s' via BDS\n",
+	       dev_name);
+
+	bd = blk_open(name_server_port, dev_name);
+	if (!bd) {
+		printf("(default_pager): blk_open('%s') FAILED\n", dev_name);
+		return FALSE;
+	}
+
+	kr = cap_request(RESOURCE_BLK_DEVICE,
+			 cap_name_hash(dev_name),
+			 CAP_OP_BLK_READ | CAP_OP_BLK_WRITE,
+			 0 /* no expiry */,
+			 &tok);
+	if (kr != KERN_SUCCESS) {
+		printf("(default_pager): cap_request('%s') FAILED: %d\n",
 		       dev_name, kr);
 		return FALSE;
 	}
-	printf("(default_pager): device_open('%s') OK\n", dev_name);
+	memcpy(tok_blob, &tok, sizeof(tok));
+
+	kr = device_open_cap(blk_port(bd), MACH_PORT_NULL,
+			     D_READ | D_WRITE, null_security_token,
+			     dev_name, tok_blob,
+			     (mach_msg_type_number_t)sizeof(tok), &device);
+	if (kr) {
+		printf("(default_pager): device_open_cap('%s') FAILED: %d\n",
+		       dev_name, kr);
+		return FALSE;
+	}
+	printf("(default_pager): device_open_cap('%s') OK (cap=%llu)\n",
+	       dev_name, (unsigned long long)tok.cap_id);
 
 	info_count = DEV_GET_SIZE_COUNT;
 	if (!device_get_status(device, DEV_GET_SIZE, info, &info_count)) {

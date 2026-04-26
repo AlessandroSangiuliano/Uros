@@ -144,6 +144,9 @@ target_include_directories(default_pager_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
+  # Issue #184: paging via BDS (libblk) gated by Uros caps (libcap)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libblk
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
 )
 
 # Link against Mach userspace libraries.
@@ -154,6 +157,9 @@ target_link_libraries(default_pager_server PRIVATE
   libpthreads
   libmach
   libsa_mach
+  libblk
+  libcap
+  libnetname
   -Wl,--end-group
 )
 

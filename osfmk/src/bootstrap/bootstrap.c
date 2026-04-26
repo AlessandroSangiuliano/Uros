@@ -94,7 +94,7 @@ unix startup -s\n\
 
 const char default_config[] = "\
 name_server name_server\n\
-default_pager default_pager hd0b\n\
+default_pager default_pager disk0c\n\
 ";
 
 struct server *servers;

@@ -190,8 +190,15 @@ pci_probe_module(const struct block_driver_ops *ops,
 
 	n_controllers++;
 
+	/*
+	 * Stable disk numbering (Issue #184): give every disk a global
+	 * monotonically-increasing index that doesn't depend on which
+	 * driver (AHCI, virtio-blk, …) discovered it.  Used to publish
+	 * the "disk<N><letter>" netname aliases.
+	 */
+	static int next_stable_disk_idx = 0;
 	for (d = 0; d < nd; d++)
-		blk_read_mbr(ctrl, d, ops->name);
+		blk_read_mbr(ctrl, d, ops->name, next_stable_disk_idx++);
 }
 
 /* ================================================================
