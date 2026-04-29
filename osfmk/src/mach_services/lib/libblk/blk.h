@@ -152,6 +152,18 @@ kern_return_t blk_read_overwrite(struct blk_dev *dev,
 				 mach_msg_type_number_t *bytes_read);
 
 /*
+ * blk_set_port — replace the underlying device send right.
+ *
+ * After authenticating the partition with device_open_cap, the caller
+ * gets back a per-(client, partition) handle port; raw I/O on the
+ * original master port is rejected by BDS.  Use this to wire the
+ * authenticated port into the blk_dev so subsequent blk_read/blk_write
+ * RPCs go through the gate.  The previous bd_port send right is
+ * deallocated.
+ */
+void blk_set_port(struct blk_dev *dev, mach_port_t new_port);
+
+/*
  * Device properties.
  */
 mach_port_t	blk_port(struct blk_dev *dev);

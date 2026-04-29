@@ -614,6 +614,13 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 		 * how many other clients have authenticated it.
 		 */
 		mnt->dev.dev_port = authed;
+		/*
+		 * Re-route libblk through the authenticated handle too:
+		 * blk_read/blk_write use bd_port directly, so without this
+		 * swap every I/O still hits the master partition port and
+		 * BDS rejects it with KERN_NO_ACCESS (Issue #188).
+		 */
+		blk_set_port(bd, authed);
 		printf("ext2: authenticated '%s' via cap %llu (handle=0x%x)\n",
 		       driver_name, (unsigned long long)tok.cap_id,
 		       (unsigned)authed);
