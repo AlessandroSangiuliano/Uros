@@ -186,10 +186,14 @@ main(int argc, char **argv)
     }
 
     /*
-     * Test [3]: positive device_open_cap, then exit so BDS sees the
-     * last send right disappear and the no-senders cleanup fires.
-     * Looks like a leak by design — we never call device_close — but
-     * task termination drops the right and BDS reaps the handle.
+     * Test [3]: positive device_open_cap, then explicit device_close
+     * (Issue #182).  BDS must print "blk: handle ... closed" while the
+     * test is still running — i.e. before [4] runs — proving the
+     * release path is synchronous, not deferred to the no-senders
+     * notification.  Test [4] re-issues device_close on the same name
+     * and expects a graceful failure (the receive right is gone, so
+     * MIG returns a send error rather than a second server invocation):
+     * the protocol-level "second close is harmless" guarantee.
      */
     if (found_name != NULL) {
         struct uros_cap tok;
@@ -216,8 +220,32 @@ main(int argc, char **argv)
                                                 &handle);
             if (okr == KERN_SUCCESS && handle != MACH_PORT_NULL) {
                 printf("cap_test: [3] positive open ok, handle=0x%x — "
-                       "exiting to trigger no-senders cleanup\n",
+                       "calling device_close\n",
                        (unsigned)handle);
+                kern_return_t ckr2 = device_close(handle);
+                if (ckr2 == KERN_SUCCESS) {
+                    printf("cap_test: [3] device_close ok — "
+                           "BDS should have logged 'handle ... closed' above\n");
+                } else {
+                    printf("cap_test: [3] device_close FAIL — kr=%d\n",
+                           (int)ckr2);
+                    pass = 0;
+                }
+
+                /*
+                 * Test [4]: a second close on the same name is harmless.
+                 * The receive right is gone server-side, so the MIG send
+                 * is expected to fail (dead name / invalid dest) rather
+                 * than re-enter ds_device_close.  Either KERN_SUCCESS or
+                 * a send-side error counts as pass — what we must NOT
+                 * see is BDS logging a second "handle ... closed".
+                 */
+                kern_return_t ckr3 = device_close(handle);
+                printf("cap_test: [4] second device_close kr=%d (expected "
+                       "send-error or 0; must NOT trigger a second "
+                       "server-side release)\n", (int)ckr3);
+
+                (void)mach_port_deallocate(mach_task_self(), handle);
             } else {
                 printf("cap_test: [3] positive open FAIL — kr=%d\n",
                        (int)okr);
