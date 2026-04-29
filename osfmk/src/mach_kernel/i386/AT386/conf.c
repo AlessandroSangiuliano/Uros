@@ -148,12 +148,6 @@
 #define usermsgname		"usermsg"
 #endif /* FLIPC > 0 */
 
-#include <hd.h>
-#if	NHD > 0
-#include <i386/AT386/hd_entries.h>
-#define	hdname			"hd"
-#endif	/* NHD > 0 */
-
 #include <fd.h>
 #if	NFD > 0
 #include <i386/AT386/fd_entries.h>
@@ -358,13 +352,6 @@ struct dev_ops	dev_name_list[] =
 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
 	  NO_DINFO },
 #endif /* FLIPC > 0 */
-
-#if	NHD > 0
-	{ hdname,	hdopen,		hdclose,	hdread,
-	  hdwrite,	hdgetstat,	hdsetstat,	NULL_MMAP,
-	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	16,
-	  hddevinfo },
-#endif	/* NHD > 0 */
 
 #if	NFD > 0
 	{ fdname,	fdopen,		fdclose,	fdread,

@@ -77,6 +77,9 @@ set(BOOTSTRAP_SOURCES
   # MACH_SEND_INTERRUPTED and the mig_device_read fallback is missing in
   # this build, so override device_read_overwrite to call device_read.
   device_read_overwrite.c
+  # Issue #186: stage-1 multiboot bundle parser (early-stage server
+  # binaries pre-loaded into RAM, removing the need for kernel IDE).
+  bundle.c
 )
 
 # Executable format loaders

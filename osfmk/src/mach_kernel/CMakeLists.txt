@@ -575,7 +575,6 @@ set(AT386_SOURCES
     i386/AT386/com.c
     i386/AT386/conf.c
     i386/AT386/eisa.c
-    i386/AT386/hd.c
     i386/AT386/himem.c
     i386/AT386/iopl.c
     i386/AT386/kd.c
