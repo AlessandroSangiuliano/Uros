@@ -23,17 +23,20 @@ BUILD_DIR="$REPO_ROOT/osfmk/build"
 KERNEL="$BUILD_DIR/export/osfmk/boot/mach_kernel"
 BOOTSTRAP="$BUILD_DIR/export/osfmk/$(uname -m)/user/sbin/bootstrap"
 DISK_IMG="$BUILD_DIR/disk.img"
+BUNDLE_IMG="$BUILD_DIR/bootstrap.bundle"
 
 # Parse flags
 USE_DISK=true
 USE_AHCI=false
 USE_AHCI2=false
 USE_VIRTIO=false
+USE_BUNDLE=true     # Issue #186: stage-1 multiboot bundle (mod[1]) on by default
 BENCH_ARGS=""
 EXTRA_ARGS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; shift ;;
+        --no-bundle) USE_BUNDLE=false; shift ;;
         --ahci2) USE_AHCI=true; USE_AHCI2=true; shift ;;
         --ahci) USE_AHCI=true; shift ;;
         --virtio) USE_VIRTIO=true; shift ;;
@@ -54,6 +57,16 @@ if [ -n "$BENCH_ARGS" ]; then
     "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS
 fi
 
+# Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
+# binaries stay in sync with the on-disk copy (especially with --bench).
+if [ "$USE_BUNDLE" = true ]; then
+    if [ -n "$BENCH_ARGS" ]; then
+        "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS
+    else
+        "$REPO_ROOT/scripts/make-bundle.sh"
+    fi
+fi
+
 if [ ! -f "$KERNEL" ]; then
     echo "ERROR: kernel non trovato: $KERNEL"
     echo "Build con:"
@@ -66,8 +79,18 @@ if [ ! -f "$BOOTSTRAP" ]; then
     exit 1
 fi
 
-# Costruisci la riga di comando QEMU
-QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $BOOTSTRAP -no-reboot"
+# Costruisci la riga di comando QEMU.
+#
+# Issue #186: se è presente il bundle stage-1 lo passiamo come secondo
+# modulo multiboot via -initrd "<bootstrap>,<bundle>".  QEMU multiboot
+# accetta una lista comma-separated; il kernel (kern/bootstrap.c) mappa
+# mod[1] nello spazio del bootstrap server e gli passa --bundle=ADDR,SIZE.
+INITRD="$BOOTSTRAP"
+if [ "$USE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
+    INITRD="$BOOTSTRAP,$BUNDLE_IMG"
+    echo "Bundle:  $BUNDLE_IMG"
+fi
+QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $INITRD -no-reboot"
 
 if [ "$USE_DISK" = true ] && [ -f "$DISK_IMG" ]; then
     echo "Disco: $DISK_IMG"

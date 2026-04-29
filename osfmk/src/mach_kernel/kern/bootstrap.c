@@ -833,7 +833,7 @@ user_bootstrap(void)
 {
     struct user_bootstrap_info *info = (struct user_bootstrap_info *) current_thread()->saved.other;
     int err = 0;
-    
+
     exec_load(info->start, info->size);
     //    if (err)
     //    panic ("Cannot load user executable module (error code %d): %s",
@@ -843,14 +843,73 @@ user_bootstrap(void)
     //if (err)
     //    panic ("Cannot load user executable module (error code %d): %s",
     //           err, info->argv[0]);
-    
+
     dprintf("task loaded:");
-  
+
+    /*
+     * Issue #186: if a stage-1 bundle (mod[1]) was provided, vm_allocate
+     * a region inside the bootstrap task's address space, copy the
+     * bundle bytes into it, and inject "--bundle=<va>,<size>" right
+     * after argv[0] so the bootstrap server can find it via parse_args.
+     */
+    /*
+     * Issue #186: if mod[1] is a stage-1 bundle, vm_allocate a region
+     * inside the bootstrap task's address space, copyout the bundle
+     * bytes, and publish "<argv0>\0--bundle=ADDR,SIZE\0" via
+     * boot_args_start/boot_args_size — that's the channel
+     * do_bootstrap_arguments() answers from, which crt0's
+     * __get_arguments() reads at startup.
+     */
+    if (exec_size > 0 && exec_start != 0) {
+	vm_offset_t uaddr = 0x40000000;	/* hint: avoid VA 0 (null page) */
+	vm_size_t   usize = round_page(exec_size);
+	kern_return_t kr = vm_allocate(current_task()->map,
+				       &uaddr, usize, FALSE);
+	if (kr != KERN_SUCCESS) {
+	    uaddr = 0;
+	    kr = vm_allocate(current_task()->map, &uaddr, usize, TRUE);
+	    if (kr == KERN_SUCCESS && uaddr == 0) {
+		(void) vm_deallocate(current_task()->map, 0, usize);
+		uaddr = round_page(usize);
+		kr = vm_allocate(current_task()->map, &uaddr, usize, FALSE);
+	    }
+	}
+	if (kr == KERN_SUCCESS) {
+	    (void) copyout((char *)phystokv(exec_start),
+			   (char *)uaddr, exec_size);
+
+	    char bundle_arg[64];
+	    int alen = (int) sprintf(bundle_arg,
+				     "--bundle=0x%lx,0x%lx",
+				     (unsigned long)uaddr,
+				     (unsigned long)exec_size);
+	    const char *argv0 = (info->argv && info->argv[0])
+		? info->argv[0] : "bootstrap";
+	    int a0len = (int) strlen(argv0);
+	    vm_size_t  bsz = a0len + 1 + alen + 1;
+	    vm_offset_t bbuf = 0;
+	    kr = kmem_alloc(kernel_map, &bbuf, round_page(bsz));
+	    if (kr == KERN_SUCCESS) {
+		bcopy(argv0, (char *)bbuf, a0len + 1);
+		bcopy(bundle_arg, (char *)bbuf + a0len + 1, alen + 1);
+		boot_args_start = bbuf;
+		boot_args_size  = bsz;
+		dprintf("bundle: mapped 0x%lx bytes at user VA 0x%lx, arg='%s'\n",
+		        (unsigned long)exec_size, (unsigned long)uaddr,
+		        bundle_arg);
+	    } else {
+		printf("bundle: kmem_alloc args failed kr=0x%x\n", kr);
+	    }
+	} else {
+	    printf("bundle: vm_allocate failed (kr=0x%x), skipping\n", kr);
+	}
+    }
+
     {
         //char *argv[] = { "serverboot",
         //                 0 };
         char *envp[] = { 0, 0 };
-        
+
         /* Set up the stack with arguments.  */
         build_args_and_stack(info->argv, envp);
     
@@ -1203,6 +1262,21 @@ bootstrap_create(void)
                hdr[0], hdr[1], hdr[2], hdr[3]);
     }
     dprintf("mods_count: %d\n", mb_info.mods_count);
+
+    /*
+     * Issue #186: if the loader passed a stage-1 bundle as mod[1],
+     * stash its physical-base / size in exec_start/exec_size.  user_bootstrap()
+     * later vm_allocate's a region in the bootstrap task, copyout's the
+     * bytes, and injects "--bundle=ADDR,SIZE" into argv.
+     */
+    if (mb_info.mods_count >= 2 && mb_info.mods_addr != 0) {
+        struct multiboot_module *mods =
+            (struct multiboot_module *) phystokv(mb_info.mods_addr);
+        exec_start = mods[1].mod_start;
+        exec_size  = mods[1].mod_end - mods[1].mod_start;
+        dprintf("bundle: mod[1] phys=0x%lx size=0x%lx\n",
+                (unsigned long)exec_start, (unsigned long)exec_size);
+    }
 
     if (/*(mb_info.flags & MULTIBOOT_MODS)
           ||*/ (mb_info.mods_count == 0))

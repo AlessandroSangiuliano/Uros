@@ -64,6 +64,7 @@
 #include <mach/mach_host.h>
 #include <mach/exc_server.h>
 #include <mach/module_pool.h>
+#include "bundle.h"
 #include <mach/bootstrap_server.h>
 
 #include <device/device_types.h>
@@ -369,18 +370,41 @@ bootstrap_enter_stage2(void)
 }
 
 /*
+ * Issue #186: convert a bootstrap.conf-style absolute path into a
+ * stage-1 bundle key.  Bundle entries are stored without the boot
+ * filesystem prefix ("bootstrap.conf", "name_server",
+ * "modules/blk/ahci.so", ...).
+ */
+static const char *
+to_bundle_key(const char *path)
+{
+	static const char prefix[] = "/dev/boot_device/mach_servers/";
+	if (path == NULL)
+		return NULL;
+	if (strncmp(path, prefix, sizeof(prefix) - 1) == 0)
+		return path + sizeof(prefix) - 1;
+	if (path[0] != '/')
+		return path;
+	return NULL;
+}
+
+/*
  * boot_open_file — open a server binary by its bootstrap.conf path,
- * using whichever back end stage we're currently in.  Stage 1 goes via
- * the kernel master device port; stage 2 goes via the BDS handle.
+ * trying back ends in order: stage-0 multiboot bundle (Issue #186),
+ * stage-2 BDS handle (Issue #185), stage-1 kernel master device port.
  */
 int
 boot_open_file(const char *path, struct file *fp)
 {
+	if (bundle_active()) {
+		const char *key = to_bundle_key(path);
+		if (key != NULL && bundle_open(key, fp) == 0)
+			return 0;
+	}
 	if (stage2_active && bds_boot_handle != MACH_PORT_NULL) {
 		const char *rel = strip_dev_prefix(path);
 		if (rel != NULL)
 			return open_file_on_port(bds_boot_handle, rel, fp);
-		/* No /dev/ prefix to strip → fall through to stage 1. */
 	}
 	return open_file(bootstrap_master_device_port, path, fp);
 }
@@ -433,6 +457,31 @@ main(int argc, char **argv)
 	 */
 	printf_init(bootstrap_master_device_port);
 	panic_init(bootstrap_master_host_port);
+
+	/*
+	 * Issue #186: scan argv for --bundle=ADDR,SIZE injected by the
+	 * kernel when a stage-1 multiboot bundle (mod[1]) was provided.
+	 * Remove the option from argv before handing off to parse_args
+	 * so the legacy switch parser does not stumble on it.
+	 */
+	{
+		int j, k;
+		uint32_t baddr = 0, bsize = 0;
+		for (j = 1; j < argc; j++) {
+			if (strncmp(argv[j], "--bundle=", 9) != 0)
+				continue;
+			char *end = NULL;
+			baddr = (uint32_t) strtoul(argv[j] + 9, &end, 0);
+			if (end != NULL && *end == ',')
+				bsize = (uint32_t) strtoul(end + 1, NULL, 0);
+			for (k = j; k < argc - 1; k++)
+				argv[k] = argv[k + 1];
+			argv[--argc] = NULL;
+			break;
+		}
+		if (baddr != 0 && bsize != 0)
+			(void) bundle_init(baddr, bsize);
+	}
 
 	parse_args(argc, argv, pathname);
 
@@ -1530,6 +1579,31 @@ do_bootstrap_list_modules(mach_port_t bootstrap,
 	if (!valid_module_component(class))
 		return KERN_INVALID_ARGUMENT;
 
+	/*
+	 * Issue #186: prefer the in-memory stage-1 bundle when present.
+	 * The bundle stores modules under "modules/<class>/<name>".
+	 */
+	if (bundle_active()) {
+		char prefix[64];
+		uint32_t used = 0, count = 0;
+		if ((size_t)snprintf(prefix, sizeof(prefix),
+				     "modules/%s", class) < sizeof(prefix)) {
+			alloc_size = round_page(vm_page_size);
+			kr = vm_allocate(mach_task_self(), names, alloc_size,
+					 TRUE);
+			if (kr != KERN_SUCCESS)
+				return kr;
+			if (bundle_list(prefix, (char *)*names,
+					(uint32_t)alloc_size, &used,
+					&count) == 0) {
+				*names_count = used;
+				return KERN_SUCCESS;
+			}
+			(void) vm_deallocate(mach_task_self(), *names,
+					     alloc_size);
+		}
+	}
+
 	if (strlen(class) + sizeof(MODULE_POOL_PREFIX) >= sizeof(pathname))
 		return KERN_INVALID_ARGUMENT;
 	strcpy(pathname, MODULE_POOL_PREFIX);
@@ -1591,6 +1665,36 @@ do_bootstrap_list_modules(mach_port_t bootstrap,
 	return KERN_SUCCESS;
 }
 
+/*
+ * Issue #186: open a module either from the stage-1 bundle (preferred)
+ * or from the boot filesystem via the kernel master device port.
+ */
+static int
+open_module_file(const char *class, const char *name, struct file *fp)
+{
+	char pathname[160];
+
+	memset(fp, 0, sizeof(*fp));
+
+	if (bundle_active()) {
+		char key[160];
+		if ((size_t)snprintf(key, sizeof(key),
+				     "modules/%s/%s", class, name)
+		    < sizeof(key) &&
+		    bundle_open(key, fp) == 0)
+			return 0;
+	}
+
+	if (strlen(class) + strlen(name) + sizeof(MODULE_POOL_PREFIX) + 1
+	    >= sizeof(pathname))
+		return -1;
+	strcpy(pathname, MODULE_POOL_PREFIX);
+	strcat(pathname, class);
+	strcat(pathname, "/");
+	strcat(pathname, name);
+	return open_file(bootstrap_master_device_port, pathname, fp);
+}
+
 kern_return_t
 do_bootstrap_get_module(mach_port_t bootstrap,
 			module_name_t class,
@@ -1598,7 +1702,6 @@ do_bootstrap_get_module(mach_port_t bootstrap,
 			vm_offset_t *data,
 			mach_msg_type_number_t *data_count)
 {
-	char pathname[160];
 	struct file f;
 	int rc;
 	size_t fsize;
@@ -1608,16 +1711,7 @@ do_bootstrap_get_module(mach_port_t bootstrap,
 	if (!valid_module_component(class) || !valid_module_component(name))
 		return KERN_INVALID_ARGUMENT;
 
-	if (strlen(class) + strlen(name) + sizeof(MODULE_POOL_PREFIX) + 1
-	    >= sizeof(pathname))
-		return KERN_INVALID_ARGUMENT;
-	strcpy(pathname, MODULE_POOL_PREFIX);
-	strcat(pathname, class);
-	strcat(pathname, "/");
-	strcat(pathname, name);
-
-	memset(&f, 0, sizeof(f));
-	rc = open_file(bootstrap_master_device_port, pathname, &f);
+	rc = open_module_file(class, name, &f);
 	if (rc != 0)
 		return KERN_INVALID_ARGUMENT;
 

@@ -21,6 +21,7 @@ endif()
 if(OSFMK_BUILD_TOOLS)
   add_subdirectory(mach_services/lib)
   add_subdirectory(file_systems)
+  add_subdirectory(tools/mkbundle)
 endif()
 
 # Kernel build (requires migcom to be built first)
