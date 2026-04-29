@@ -110,8 +110,8 @@ ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
 ARGS+=("modules/hal/pci_scan.so:$HAL_PCI_SCAN_MODULE")
-ARGS+=("modules/blk/ahci.so:$AHCI_MODULE")
-ARGS+=("modules/blk/virtio_blk.so:$VIRTIO_BLK_MODULE")
+ARGS+=("modules/block/ahci.so:$AHCI_MODULE")
+ARGS+=("modules/block/virtio_blk.so:$VIRTIO_BLK_MODULE")
 
 "$MKBUNDLE" "${ARGS[@]}"
 

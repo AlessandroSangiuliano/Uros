@@ -575,7 +575,9 @@ set(AT386_SOURCES
     i386/AT386/com.c
     i386/AT386/conf.c
     i386/AT386/eisa.c
-    i386/AT386/hd.c
+    # Issue #186: i386/AT386/hd.c (in-kernel IDE driver) removed —
+    # stage-1 binaries come from the multiboot bundle and stage-2 reads
+    # go through BDS (AHCI/virtio).
     i386/AT386/himem.c
     i386/AT386/iopl.c
     i386/AT386/kd.c

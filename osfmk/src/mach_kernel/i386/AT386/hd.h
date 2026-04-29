@@ -5,6 +5,11 @@
 #ifndef _I386_AT386_HD_H_
 #define _I386_AT386_HD_H_
 
-#define NHD 4
+/*
+ * Issue #186: in-kernel IDE driver removed.  Stage-1 binaries come from
+ * the multiboot bundle; stage-2 reads go through BDS (AHCI/virtio).
+ * NHD is kept at 0 so the autoconf/conf gates compile out cleanly.
+ */
+#define NHD 0
 
 #endif /* _I386_AT386_HD_H_ */
