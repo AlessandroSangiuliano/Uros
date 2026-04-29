@@ -459,6 +459,15 @@ blk_port(struct blk_dev *dev)
 	return dev->bd_port;
 }
 
+void
+blk_set_port(struct blk_dev *dev, mach_port_t new_port)
+{
+	if (!dev || new_port == MACH_PORT_NULL || new_port == dev->bd_port)
+		return;
+	mach_port_deallocate(mach_task_self(), dev->bd_port);
+	dev->bd_port = new_port;
+}
+
 unsigned int
 blk_rec_size(struct blk_dev *dev)
 {
