@@ -122,9 +122,56 @@ ds_device_open(mach_port_t master, mach_port_t reply,
 	return KERN_SUCCESS;
 }
 
+/*
+ * Explicit per-handle close (Issue #182).
+ *
+ * Mirrors the no-senders cleanup but fires synchronously inside the
+ * client's RPC, so a long-running client can release a partition
+ * deterministically — e.g. before re-mounting — without having to
+ * exit or fabricate a port-rights drop.
+ *
+ * Idempotent on non-handle ports: callers may safely invoke
+ * device_close on the master ("discovery") partition port or on a
+ * port whose underlying handle has already been reaped — both return
+ * KERN_SUCCESS without touching state.  No-senders remains armed as
+ * the safety net for clients that forget to close.
+ */
 kern_return_t
 ds_device_close(mach_port_t device)
 {
+	if (device == 0)
+		return KERN_SUCCESS;
+
+	uint32_t magic = *(uint32_t *)(unsigned long)device;
+	if (magic != BLK_MAGIC_HANDLE)
+		return KERN_SUCCESS;
+
+	struct blk_handle *h = (struct blk_handle *)(unsigned long)device;
+	mach_port_t name = h->recv_port;
+
+	struct blk_handle **pp = &blk_handles_head;
+	while (*pp != NULL) {
+		if (*pp == h) {
+			*pp = h->next;
+			break;
+		}
+		pp = &(*pp)->next;
+	}
+
+	printf("blk: handle for %s closed (cap %llu, port=0x%x)\n",
+	       h->part ? h->part->name : "(unknown)",
+	       (unsigned long long)h->cap_id,
+	       (unsigned)name);
+
+	h->magic = 0;        /* poison so a stray msg can't reuse it */
+	free(h);
+
+	/*
+	 * Destroying the receive right also tears down the armed
+	 * MACH_NOTIFY_NO_SENDERS send-once we registered at open time,
+	 * so no explicit cancellation is needed.
+	 */
+	(void)mach_port_destroy(mach_task_self(), name);
 	return KERN_SUCCESS;
 }
 
@@ -139,10 +186,11 @@ ds_device_close(mach_port_t device)
  * of that port is the proof of authentication; raw I/O on the master
  * port stays rejected even after this call succeeds.
  *
- * Lifetime: the struct blk_handle and its port currently leak when
- * the client disconnects (no-senders cleanup is a follow-up — see
- * issue #181 verification list).  For v1 the leak is bounded by the
- * number of mounts (typically 2-4 per boot) and is acceptable.
+ * Lifetime: the handle is reaped on whichever happens first —
+ *   - explicit device_close from the client (Issue #182), or
+ *   - MACH_NOTIFY_NO_SENDERS when the last send right disappears
+ *     (Issue #181, kicks in when the client task exits or forgets
+ *     to close).
  * ================================================================ */
 
 kern_return_t

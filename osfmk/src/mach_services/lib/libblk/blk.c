@@ -269,6 +269,16 @@ blk_close(struct blk_dev *dev)
 {
 	if (!dev)
 		return;
+	/*
+	 * Issue #182: ask BDS to release the per-handle state synchronously
+	 * before we drop our send right.  When bd_port is an authenticated
+	 * handle this triggers ds_device_close (handle freed, receive port
+	 * destroyed); for any other port (e.g. a raw discovery port) the
+	 * server-side stub is a no-op.  We ignore the kr because the cleanup
+	 * must proceed either way — a dead-name reply just means the server
+	 * already tore the handle down.
+	 */
+	(void)device_close(dev->bd_port);
 	mach_port_deallocate(mach_task_self(), dev->bd_port);
 	free(dev);
 }
