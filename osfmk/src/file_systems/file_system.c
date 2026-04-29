@@ -202,6 +202,58 @@ open_file(
 }
 
 /*
+ * open_file_on_port — Issue #185 stage-2 entry point.
+ *
+ * Same as open_file() but takes an already-opened device port (typically
+ * a BDS handle minted by device_open_cap on a partition) and a path
+ * relative to that device.  No "/dev/<name>/" prefix, no device_open;
+ * the caller owns the port.  Used by the bootstrap server to load late
+ * binaries via block_device_server once the userspace stack is up.
+ */
+int
+open_file_on_port(
+	mach_port_t dev_port,
+	const char *path,
+	struct file *fp)
+{
+	fs_ops_t *fs_ops;
+	int rc = FS_NO_ENTRY;
+
+	if (path == NULL || *path == '\0')
+		return FS_NO_ENTRY;
+
+	fp->f_dev.dev_port  = dev_port;
+	fp->f_dev.rec_size  = dev_rec_size(dev_port);
+	fp->f_dev.blk       = NULL;
+	fp->f_dev.cache     = NULL;
+	fp->f_dev.mount_data = NULL;
+
+	for (fs_ops = fs_switch; *fs_ops; fs_ops++) {
+		if ((*fs_ops)->mount_size > 0 && fp->f_dev.mount_data == NULL) {
+			vm_allocate(mach_task_self(),
+				    (vm_address_t *)&fp->f_dev.mount_data,
+				    (*fs_ops)->mount_size, TRUE);
+		}
+
+		rc = (*(*fs_ops)->open_file)(&fp->f_dev, path, &fp->f_private);
+		if (rc == 0)
+			break;
+
+		if ((*fs_ops)->mount_size > 0 && fp->f_dev.mount_data != NULL) {
+			vm_deallocate(mach_task_self(),
+				      (vm_offset_t)fp->f_dev.mount_data,
+				      (*fs_ops)->mount_size);
+			fp->f_dev.mount_data = NULL;
+		}
+	}
+
+	if (rc == 0)
+		fp->f_ops = *fs_ops;
+
+	return rc;
+}
+
+/*
  * Close file - free all storage used.
  */
 void

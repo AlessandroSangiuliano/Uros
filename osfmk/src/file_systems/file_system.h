@@ -114,6 +114,7 @@ struct fs_ops {
 #define	FS_INVALID_PARAMETER	5006	/* bad parameter to a routine */
 
 extern int open_file(mach_port_t, const char *, struct file *);
+extern int open_file_on_port(mach_port_t, const char *, struct file *);
 extern void close_file(struct file *);
 extern int read_file(struct file *, vm_offset_t, vm_offset_t, vm_size_t);
 extern size_t file_size(struct file *);

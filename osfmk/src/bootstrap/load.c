@@ -667,7 +667,13 @@ boot_load_program(mach_port_t master_host_port,
 
 	memset((char *)&ofmt, 0, sizeof (ofmt));
 	memset((char *)&file, 0, sizeof(file));
-	result = open_file(master_device_port, file_name, &file);
+	/*
+	 * Issue #185: route through boot_open_file() so stage-2 loads
+	 * (after block_device_server is up) flow through BDS, while
+	 * stage-1 loads still use the kernel master device port.
+	 * master_device_port is preserved for set_regs/symload below.
+	 */
+	result = boot_open_file(file_name, &file);
 	if (result != 0) {
 	    BOOTSTRAP_IO_LOCK();
 	    printf("openi %d\n", result);
