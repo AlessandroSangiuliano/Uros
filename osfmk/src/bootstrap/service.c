@@ -102,6 +102,20 @@ typedef struct service_record {
 service_record_t *services;
 unsigned int services_count;
 
+/*
+ * Issue #185: bootstrap needs to talk to its own name_server child
+ * during stage-2 transition (it must netname_notify on "disk0a" while
+ * BDS is bringing up the boot partition).  libmach's name_server_port
+ * is never populated for bootstrap (mach_init_ports runs before
+ * service_init, and bootstrap is never given a TASK_BOOTSTRAP_PORT
+ * itself), so expose the slot directly.
+ */
+mach_port_t
+bootstrap_name_server_port(void)
+{
+	return services[NAME_SERVER_SLOT].service;
+}
+
 void
 service_init(void)
 {

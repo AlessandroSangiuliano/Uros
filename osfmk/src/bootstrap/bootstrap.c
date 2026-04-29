@@ -69,6 +69,14 @@
 #include <device/device_types.h>
 #include <device/device.h>
 
+/* Issue #185: stage-2 path — load late binaries via BDS, not kernel IDE. */
+#include <blk.h>
+#include <libcap.h>
+#include <mach/cap_types.h>
+#include <servers/netname.h>
+#include <servers/netname_defs.h>
+#include "file_system.h"
+
 /*
  * Override the pthread stack size for bootstrap server threads.
  * MIG stubs such as device_set_status allocate ~4 KB of local vars;
@@ -176,6 +184,206 @@ boolean_t       collocation_prohibit = FALSE;
 pthread_mutex_t		io_mutex;
 pthread_cond_t		io_condition;
 boolean_t		io_in_progress;
+
+/* ================================================================
+ * Stage-2 boot path (Issue #185)
+ *
+ * Once block_device_server has been launched and has published its
+ * partition aliases via netname, bootstrap can stop using the in-kernel
+ * IDE driver to load the remaining server binaries.  Instead it acquires
+ * a capability-authenticated handle on the boot partition through BDS
+ * and reads files through that handle for the rest of the boot.
+ *
+ * Stage 1 (== !stage2_active) keeps using `bootstrap_master_device_port`
+ * + the in-kernel IDE driver: same as before this issue.  Stage 2 uses
+ * `bds_boot_handle` + `open_file_on_port`.
+ * ================================================================ */
+static boolean_t   stage2_active = FALSE;
+static mach_port_t bds_boot_handle = MACH_PORT_NULL;
+
+/*
+ * BOOT_DEV_NAME — driver-agnostic netname of the partition that holds
+ * /mach_servers/.  BDS publishes this alongside the driver-specific name
+ * (ahci0a / virtio_blk0a), see Issue #184.
+ */
+#define BOOT_DEV_NAME	"disk0a"
+
+/*
+ * Strip the leading "/dev/<dev>/" component from a stage-1 path so it
+ * can be passed to open_file_on_port(), which expects a path relative
+ * to the device root.  Returns NULL if `path` doesn't start with
+ * "/dev/<something>/" — caller falls back to stage 1 in that case.
+ */
+static const char *
+strip_dev_prefix(const char *path)
+{
+	const char *p;
+
+	if (strncmp(path, "/dev/", 5) != 0)
+		return NULL;
+	p = path + 5;
+	while (*p && *p != '/')
+		p++;
+	if (*p != '/')
+		return NULL;
+	return p + 1;
+}
+
+/*
+ * service_thread — runs the bootstrap demux loop on bootstrap_set so
+ * the main thread can make synchronous RPCs (cap_request, netname_notify,
+ * device_open_cap …) without deadlocking against children that need
+ * bootstrap to answer their own bootstrap_ports / service_checkin /
+ * bootstrap_get_module requests.  Started once, right after service_init.
+ *
+ * SERVER_SERIALIZE_F flag's old in-line mach_msg_server_once at the
+ * bottom of the load loop is kept for code-path compatibility but isn't
+ * exercised by any current bootstrap.conf.
+ */
+static void *
+bootstrap_service_thread(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		(void)mach_msg_server(bootstrap_demux,
+				      bootstrap_msg_size,
+				      bootstrap_set,
+				      MACH_MSG_OPTION_NONE);
+	}
+	return NULL;
+}
+
+/*
+ * bootstrap_enter_stage2 — block until BDS publishes the boot partition,
+ * then acquire a long-lived capability-authenticated handle on it and
+ * switch boot_open_file() over to the BDS path.  Called once, right
+ * after the server whose symtab_name matches "block_device_server" is
+ * started.
+ *
+ * BDS is still booting at this point and will issue
+ * do_bootstrap_get_module RPCs to load its driver modules from the boot
+ * filesystem; cap_server is also still answering its first cap_request.
+ * Those RPCs are served by bootstrap_service_thread in parallel — the
+ * main thread is free to block on synchronous RPCs here.
+ *
+ * The notify port stays OUTSIDE bootstrap_set so the service thread
+ * doesn't race us for the netname notification message.
+ */
+static void
+bootstrap_enter_stage2(void)
+{
+	struct uros_cap	tok;
+	char		tok_blob[CAP_TOKEN_MAX];
+	security_token_t null_sec = { { 0, 0 } };
+	mach_port_t	authed = MACH_PORT_NULL;
+	mach_port_t	notify_port = MACH_PORT_NULL;
+	mach_port_t	disk_port = MACH_PORT_NULL;
+	mach_port_t	ns_port;
+	kern_return_t	kr;
+	netname_notify_msg_t nmsg;
+
+	if (stage2_active)
+		return;
+
+	ns_port = bootstrap_name_server_port();
+
+	/*
+	 * libcap's cap_server_port() looks up cap_server via the libmach
+	 * global `name_server_port`, which mach_init_ports never populates
+	 * for bootstrap (no TASK_BOOTSTRAP_PORT to inherit from).  Wire it
+	 * to our own name_server slot so cap_request() and friends reach
+	 * cap_server through netname_look_up().
+	 */
+	if (name_server_port == MACH_PORT_NULL)
+		name_server_port = ns_port;
+
+	kr = mach_port_allocate(bootstrap_self,
+				MACH_PORT_RIGHT_RECEIVE, &notify_port);
+	if (kr != KERN_SUCCESS) {
+		printf("%s: stage-2: notify port alloc failed (%d)\n",
+		       program_name, kr);
+		return;
+	}
+
+	BOOTSTRAP_IO_LOCK();
+	printf("%s: stage-2: waiting for '%s' to appear via BDS\n",
+	       program_name, BOOT_DEV_NAME);
+	BOOTSTRAP_IO_UNLOCK();
+
+	kr = netname_notify(ns_port, (char *)BOOT_DEV_NAME, notify_port);
+	if (kr != KERN_SUCCESS) {
+		printf("%s: stage-2: netname_notify('%s') failed (%d)\n",
+		       program_name, BOOT_DEV_NAME, kr);
+		(void)mach_port_destroy(bootstrap_self, notify_port);
+		return;
+	}
+
+	kr = mach_msg(&nmsg.head, MACH_RCV_MSG,
+		      0, sizeof(nmsg), notify_port,
+		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	if (kr != KERN_SUCCESS) {
+		printf("%s: stage-2: notification recv failed (%d)\n",
+		       program_name, kr);
+		(void)mach_port_destroy(bootstrap_self, notify_port);
+		return;
+	}
+	disk_port = nmsg.service.name;
+	(void)mach_port_destroy(bootstrap_self, notify_port);
+
+	kr = cap_request(RESOURCE_BLK_DEVICE,
+			 cap_name_hash(BOOT_DEV_NAME),
+			 CAP_OP_BLK_READ | CAP_OP_BLK_WRITE,
+			 0 /* never expires */,
+			 &tok);
+	if (kr != KERN_SUCCESS) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: stage-2: cap_request failed (%d) — staying on "
+		       "kernel-IDE path\n", program_name, kr);
+		BOOTSTRAP_IO_UNLOCK();
+		return;
+	}
+	memcpy(tok_blob, &tok, sizeof(tok));
+
+	kr = device_open_cap(disk_port, MACH_PORT_NULL,
+			     D_READ | D_WRITE, null_sec,
+			     (char *)BOOT_DEV_NAME,
+			     tok_blob, (mach_msg_type_number_t)sizeof(tok),
+			     &authed);
+	if (kr != KERN_SUCCESS) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: stage-2: device_open_cap failed (%d) — staying on "
+		       "kernel-IDE path\n", program_name, kr);
+		BOOTSTRAP_IO_UNLOCK();
+		return;
+	}
+
+	bds_boot_handle = authed;
+	stage2_active = TRUE;
+
+	BOOTSTRAP_IO_LOCK();
+	printf("%s: stage-2: '%s' acquired (cap=%llu, handle=0x%x) — "
+	       "subsequent loads via BDS\n",
+	       program_name, BOOT_DEV_NAME,
+	       (unsigned long long)tok.cap_id, (unsigned)bds_boot_handle);
+	BOOTSTRAP_IO_UNLOCK();
+}
+
+/*
+ * boot_open_file — open a server binary by its bootstrap.conf path,
+ * using whichever back end stage we're currently in.  Stage 1 goes via
+ * the kernel master device port; stage 2 goes via the BDS handle.
+ */
+int
+boot_open_file(const char *path, struct file *fp)
+{
+	if (stage2_active && bds_boot_handle != MACH_PORT_NULL) {
+		const char *rel = strip_dev_prefix(path);
+		if (rel != NULL)
+			return open_file_on_port(bds_boot_handle, rel, fp);
+		/* No /dev/ prefix to strip → fall through to stage 1. */
+	}
+	return open_file(bootstrap_master_device_port, path, fp);
+}
 
 /*
  * Bootstrap task.
@@ -354,7 +562,12 @@ main(int argc, char **argv)
 #if	PARAGON860
 	    result = open_file(bootstrap_root_device_port, pathname, &f);
 #else	/* PARAGON860 */
-	    result = open_file(bootstrap_master_device_port, pathname, &f);
+	    /*
+	     * Configuration file is read before any server has started, so
+	     * stage 2 is not yet active here.  boot_open_file() correctly
+	     * falls through to the kernel-IDE path.
+	     */
+	    result = boot_open_file(pathname, &f);
 #endif	/* PARAGON860 */
 	    if (result != 0) {
 		if (!retry && !prompt) {
@@ -438,6 +651,20 @@ main(int argc, char **argv)
 	}
 
 	/*
+	 * Issue #185: spin up the demuxer thread BEFORE launching any
+	 * server.  Children need bootstrap to answer bootstrap_ports /
+	 * service_checkin RPCs as part of their own startup; once the
+	 * main thread starts blocking on synchronous RPCs in stage 2
+	 * those answers must keep flowing in parallel.
+	 */
+	{
+		pthread_t svc_th;
+		pthread_create(&svc_th, NULL,
+			       bootstrap_service_thread, NULL);
+		pthread_detach(svc_th);
+	}
+
+	/*
 	 * Start all servers
 	 */
 	for (i = 0; i < nservers; i++) {
@@ -489,8 +716,11 @@ main(int argc, char **argv)
 	    result = open_file(bootstrap_root_device_port,
 			       sp->server_name, &f);
 #else	/* PARAGON860 */
-	    result = open_file(bootstrap_master_device_port,
-			       sp->server_name, &f);
+	    /*
+	     * Issue #185: stage-2 path kicks in once block_device_server
+	     * has been loaded — see end of this loop iteration.
+	     */
+	    result = boot_open_file(sp->server_name, &f);
 #endif	/* PARAGON860 */
 	    if (result != 0) {
 		BOOTSTRAP_IO_LOCK();
@@ -677,6 +907,19 @@ main(int argc, char **argv)
 #endif
 	    }
 	    (void) mach_port_deallocate(bootstrap_self, user_thread);
+
+	    /*
+	     * Issue #185: once block_device_server has been launched, stop
+	     * reading further server binaries via the in-kernel IDE driver.
+	     * bootstrap_enter_stage2() blocks until BDS publishes the boot
+	     * partition under the stable netname, then mints a long-lived
+	     * cap-authenticated handle that boot_open_file() will use for
+	     * every subsequent load in this loop.
+	     */
+	    if (!stage2_active &&
+		strcmp(sp->symtab_name, "block_device_server") == 0)
+		bootstrap_enter_stage2();
+
 	    break;
 	    } /* end retry loop */
 
@@ -691,15 +934,22 @@ main(int argc, char **argv)
 	BOOTSTRAP_IO_LOCK();
 	printf("%s: started\n", program_name);
 	BOOTSTRAP_IO_UNLOCK();
-	for (;;) {
-	    kr = mach_msg_server(bootstrap_demux,
-				 bootstrap_msg_size,
-				 bootstrap_set,
-				 MACH_MSG_OPTION_NONE);
-	    BOOTSTRAP_IO_LOCK();
-	    printf("%s: mach_msg_server returned 0x%x\n", program_name, kr);
-	    BOOTSTRAP_IO_UNLOCK();
-	    panic(my_name);
+
+	/*
+	 * Issue #185: the demuxer is now owned by bootstrap_service_thread.
+	 * Park the main thread on a private receive port that will never
+	 * see a message — running a second mach_msg_server loop here would
+	 * race the service thread for messages on bootstrap_set.
+	 */
+	{
+		mach_port_t park_port = MACH_PORT_NULL;
+		mach_msg_header_t hdr;
+		(void)mach_port_allocate(bootstrap_self,
+					 MACH_PORT_RIGHT_RECEIVE, &park_port);
+		for (;;)
+			(void)mach_msg(&hdr, MACH_RCV_MSG, 0, sizeof(hdr),
+				       park_port, MACH_MSG_TIMEOUT_NONE,
+				       MACH_PORT_NULL);
 	}
 }
 

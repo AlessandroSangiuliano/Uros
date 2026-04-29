@@ -124,6 +124,17 @@ extern boolean_t	collocation_prohibit;
 extern char *boot_device;
 #define BOOT_DEVICE_NAME "boot_device"
 
+/*
+ * Issue #185: stage-aware file opener.  Returns a struct file usable
+ * with read_file / file_size / close_file.  Routes via the kernel
+ * master device port until block_device_server is up; routes via a
+ * BDS handle (device_open_cap) afterwards.  Defined in bootstrap.c.
+ */
+extern int boot_open_file(const char *path, struct file *fp);
+
+/* Issue #185: send right to the name_server task bootstrap launched. */
+extern mach_port_t bootstrap_name_server_port(void);
+
 /* Attempt to load the server into the kernel's address space (collocate).  */
 #define SERVER_IN_KERNEL_F 0x1
 /* Wait for the server to indicate that it's done with startup processing

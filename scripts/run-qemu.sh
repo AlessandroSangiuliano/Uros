@@ -91,8 +91,11 @@ fi
 #
 # create_ahci_disk <path> <label_suffix>
 #   Creates a 40 MB disk with:
-#     - partition 0 (4 MB ext2):  hello.txt = "Hello from <label_suffix> partition 0"
-#                                 (+ bench.dat on disk0)
+#     - partition 0 (4 MB ext2):  for the disk0 image, cloned from the IDE
+#                                 boot partition (hd0a) so bootstrap stage 2
+#                                 (Issue #185) can re-read /mach_servers/
+#                                 binaries through BDS.  For other disks it
+#                                 stays a generic ext2 with hello.txt.
 #     - partition 1 (4 MB ext2):  hello.txt = "Hello from <label_suffix> partition 1"
 #     - partition 2 (~32 MB raw): swap area for default_pager (Issue #184)
 create_ahci_disk() {
@@ -113,18 +116,37 @@ start=10240, size=8192,  type=83
 start=18432,             type=82
 SFDISK
 
-    # Format and populate the two ext2 partitions
-    _pidx=0
-    for _start in 2048 10240; do
+    # Partition 0:
+    #   - For disk0 we clone the IDE boot partition's ext2 image so that
+    #     bootstrap stage 2 finds /mach_servers/ on disk0a via BDS.
+    #   - For any other disk we mke2fs a fresh ext2 with hello.txt.
+    if [ "$_label" = "disk0" ] && [ -f "$DISK_IMG" ]; then
+        echo "    p0: cloning IDE hd0a (/mach_servers/) for stage-2 bootstrap"
+        dd if="$DISK_IMG" of="$_disk" bs=512 skip=2048 seek=2048 \
+           count=8192 conv=notrunc status=none
+    else
         _part=$(mktemp /tmp/osfmk-ahci-part.XXXXXX.img)
         dd if=/dev/zero of="$_part" bs=512 count=8192 status=none
         mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -O filetype "$_part"
-
         _htxt=$(mktemp)
-        printf 'Hello from %s partition %d\n' "$_label" "$_pidx" > "$_htxt"
+        printf 'Hello from %s partition 0\n' "$_label" > "$_htxt"
+        debugfs -w -f /dev/stdin "$_part" <<DBGFS 2>/dev/null
+write $_htxt hello.txt
+DBGFS
+        rm -f "$_htxt"
+        dd if="$_part" of="$_disk" bs=512 seek=2048 conv=notrunc status=none
+        rm -f "$_part"
+    fi
 
-        # Add bench.dat only on first partition of first disk
-        if [ "$_pidx" = 0 ] && [ "$_label" = "disk0" ]; then
+    # Partition 1: ext2 with hello.txt (+ bench.dat on disk0 so ipc_bench
+    # can still find it after we replaced p0 content).
+    {
+        _part=$(mktemp /tmp/osfmk-ahci-part.XXXXXX.img)
+        dd if=/dev/zero of="$_part" bs=512 count=8192 status=none
+        mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -O filetype "$_part"
+        _htxt=$(mktemp)
+        printf 'Hello from %s partition 1\n' "$_label" > "$_htxt"
+        if [ "$_label" = "disk0" ]; then
             _bdat=$(mktemp)
             dd if=/dev/urandom of="$_bdat" bs=1K count=4096 status=none 2>/dev/null
             debugfs -w -f /dev/stdin "$_part" <<DBGFS 2>/dev/null
@@ -138,11 +160,9 @@ write $_htxt hello.txt
 DBGFS
         fi
         rm -f "$_htxt"
-
-        dd if="$_part" of="$_disk" bs=512 seek="$_start" conv=notrunc status=none
+        dd if="$_part" of="$_disk" bs=512 seek=10240 conv=notrunc status=none
         rm -f "$_part"
-        _pidx=$((_pidx + 1))
-    done
+    }
     # Partition 2 stays zero-filled (raw swap area for default_pager).
     echo "    MBR + 2 ext2 partitions (4 MB each) + 32 MB raw swap"
 }

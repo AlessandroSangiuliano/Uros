@@ -72,6 +72,11 @@ set(BOOTSTRAP_SOURCES
   service.c
   load.c
   strfcns.c
+  # Issue #185: stage-2 reads via BDS handle, which isn't a kernel device
+  # port — the libmach syscall_device_read_overwrite path returns
+  # MACH_SEND_INTERRUPTED and the mig_device_read fallback is missing in
+  # this build, so override device_read_overwrite to call device_read.
+  device_read_overwrite.c
 )
 
 # Executable format loaders
@@ -132,6 +137,9 @@ target_include_directories(bootstrap_server PRIVATE
   ${CMAKE_SOURCE_DIR}/export/include
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
+  # Issue #185: stage-2 reads via BDS (libblk) gated by Uros caps (libcap)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libblk
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
 )
 
 # Link against Mach userspace libraries.
@@ -142,6 +150,8 @@ target_link_libraries(bootstrap_server PRIVATE
   -Wl,--start-group
   libsa_fs
   libblk
+  libcap
+  libnetname
   libpthreads
   libmach
   libsa_mach
