@@ -221,12 +221,6 @@ extern  void intnull(int unit);
 #endif	/* NCPUS > 1 */
 #endif	/* CBUS */
 
-#include <hd.h>
-#if NHD > 0
-#include <i386/AT386/hd_entries.h>
-extern	struct	bus_driver	hddriver;
-#endif /* NHD */
-
 #include <fd.h>
 #if NFD > 0
 #include <i386/AT386/fd_entries.h>
@@ -336,14 +330,6 @@ struct	bus_ctlr	bus_master_init[] = {
      '?', 	0,  0,	 (caddr_t)CBUS_IPL, 10},
 #endif	/* CBUS */
 
-#if NHD > 0
-  {&hddriver, "hdc",  0, (intr_t)hdintr, (caddr_t)0x1f0, 8, (caddr_t)0x1f0,
-     '?',	0,  0,	 SPL_FIVE, 14},
-
-  {&hddriver, "hdc",  1, (intr_t)hdintr, (caddr_t)0x170, 8, (caddr_t)0x170,
-     '?',	0,  0,	 SPL_FIVE, 15},
-#endif	/* NHD > 0 */
-
 #if NHBA > 0
   {&hba_driver, "hbac",  0, (intr_t)NULL, (caddr_t)0, 0, (caddr_t)0,
      '?',	0,  0,	 SPL_FIVE, 0},
@@ -419,17 +405,6 @@ struct	bus_device	bus_device_init[] = {
 
   {&kddriver, "kd",     0, (intr_t)kdintr, (caddr_t)0x60, 5, (caddr_t)0x60,
        '?',    0,   -1,   -1,    0,   0,  0,  SPL_SIX, 1},
-
-#if NHD > 0
-  {&hddriver, "hd", 0, (intr_t)hdintr, (caddr_t)0x104, 8, (caddr_t)0x1f0,
-     '?',    0,   0,    0,    0,   0,  0,  SPL_FIVE, 14},
-  {&hddriver, "hd", 1, (intr_t)hdintr, (caddr_t)0x118, 8, (caddr_t)0x1f0,
-     '?',    0,   0,    1,    0,   0,  0,  SPL_FIVE, 14},
-  {&hddriver, "hd", 2, (intr_t)hdintr, (caddr_t)0x104, 8, (caddr_t)0x170,  /*??*/
-     '?',    0,   1,    0,    0,   0,  0,  SPL_FIVE, 15},
-  {&hddriver, "hd", 3, (intr_t)hdintr, (caddr_t)0x118, 8, (caddr_t)0x170,
-     '?',    0,   1,    1,    0,   0,  0,  SPL_FIVE, 15},
-#endif /* NHD > 0 */
 
 
 #if NHBA > 0

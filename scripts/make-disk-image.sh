@@ -245,7 +245,18 @@ if [ -f "$CAP_TEST" ]; then
     CAP_TEST_WRITE_LINE="write $CAP_TEST cap_test"
 fi
 echo "[4/6] Copia file nel filesystem ext2..."
+# ipc_bench's disk_bench tests open hello.txt / bench.dat at the root
+# of the default ext2 mount (ext_server → ahci0a / hd0a), so seed both
+# files here.  bench.dat only needs the first 64 bytes — a 1 KB blob
+# is plenty and keeps the partition small.
+HELLO_TXT=$(mktemp)
+BENCH_DAT=$(mktemp)
+printf 'Hello from /mach_servers/ root\n' > "$HELLO_TXT"
+dd if=/dev/urandom of="$BENCH_DAT" bs=1K count=1 status=none
+trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF" "$HELLO_TXT" "$BENCH_DAT"' EXIT
 debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
+write $HELLO_TXT hello.txt
+write $BENCH_DAT bench.dat
 mkdir mach_servers
 cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf
