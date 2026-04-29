@@ -9,17 +9,26 @@ set(CAP_SERVER_MIG_H "${CMAKE_BINARY_DIR}/generated/cap_server_server.h")
 set_source_files_properties(${CAP_SERVER_MIG_C} ${CAP_SERVER_MIG_H}
   PROPERTIES GENERATED TRUE)
 
+# Issue #183: cap_server is the *caller* of cap_revoke_notify, so it
+# pulls the MIG user stub directly (libcap doesn't ship it — see the
+# note in libcap/CMakeLists.txt).
+set(CAP_REVOKE_USER_MIG_C "${CMAKE_BINARY_DIR}/generated/cap_revoke_user.c")
+set(CAP_REVOKE_USER_MIG_H "${CMAKE_BINARY_DIR}/generated/cap_revoke.h")
+set_source_files_properties(${CAP_REVOKE_USER_MIG_C} ${CAP_REVOKE_USER_MIG_H}
+  PROPERTIES GENERATED TRUE)
+
 set(CAP_SERVER_SOURCES
   cap_server.c
   cap_table.c
   ${CAP_SERVER_MIG_C}
+  ${CAP_REVOKE_USER_MIG_C}
 )
 
 add_executable(cap_server_bin ${CAP_SERVER_SOURCES})
 
 # libcap owns the MIG generation target; depend on it so
 # cap_server_server.c/.h exist before this target compiles.
-add_dependencies(cap_server_bin mig_mach_public_headers libcap)
+add_dependencies(cap_server_bin mig_mach_public_headers libcap mig_cap_revoke)
 
 target_compile_options(cap_server_bin PRIVATE
   -std=gnu11

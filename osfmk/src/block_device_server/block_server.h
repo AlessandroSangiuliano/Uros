@@ -206,7 +206,8 @@ struct blk_handle {
 	uint32_t		magic;		/* BLK_MAGIC_HANDLE */
 	struct blk_partition	*part;
 	mach_port_t		recv_port;
-	uint64_t		cap_id;		/* for logging / future revoke */
+	uint64_t		cap_id;		/* matched against cap_revoke_notify */
+	int			revoked;	/* set by blk_cap_revoke_notify (#183) */
 	struct blk_handle	*next;		/* linked-list link, head in block_device.c */
 };
 

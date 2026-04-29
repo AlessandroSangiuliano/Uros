@@ -72,7 +72,41 @@ blk_part_from_authed_handle(mach_port_t device)
 	uint32_t magic = *(uint32_t *)(unsigned long)device;
 	if (magic != BLK_MAGIC_HANDLE)
 		return NULL;
-	return ((struct blk_handle *)(unsigned long)device)->part;
+	struct blk_handle *h = (struct blk_handle *)(unsigned long)device;
+	/*
+	 * Issue #183: a handle whose cap was revoked stays linked in the
+	 * list (so explicit close / no-senders can still find it) but
+	 * fails the auth check here, so subsequent ds_device_read /
+	 * ds_device_write return KERN_NO_ACCESS.
+	 */
+	if (h->revoked)
+		return NULL;
+	return h->part;
+}
+
+/*
+ * Mark every handle whose cap_id matches as revoked.  Called from
+ * blk_cap_revoke_notify in block_server.c when cap_server fans out a
+ * revocation event.  Multiple handles can share a cap_id only across
+ * different partitions today (one cap_request → one cap_id → one
+ * device_open_cap), but the loop is general anyway since #183
+ * envisages cascade revocation hitting child cap_ids.
+ */
+int
+blk_handles_revoke_by_cap_id(uint64_t cap_id)
+{
+	int n = 0;
+	for (struct blk_handle *h = blk_handles_head; h; h = h->next) {
+		if (h->cap_id == cap_id && !h->revoked) {
+			h->revoked = 1;
+			n++;
+			printf("blk: handle for %s revoked (cap %llu, port=0x%x)\n",
+			       h->part ? h->part->name : "(unknown)",
+			       (unsigned long long)cap_id,
+			       (unsigned)h->recv_port);
+		}
+	}
+	return n;
 }
 
 /* ================================================================
@@ -241,6 +275,7 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 	h->magic     = BLK_MAGIC_HANDLE;
 	h->part      = part;
 	h->cap_id    = token.cap_id;
+	h->revoked   = 0;
 
 	mach_port_t hport = MACH_PORT_NULL;
 	kr = mach_port_allocate(mach_task_self(),

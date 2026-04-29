@@ -49,6 +49,7 @@
 
 #include "cap_table.h"
 #include "cap_server_server.h"   /* MIG-generated demux prototype */
+#include "cap_revoke.h"          /* MIG-generated cap_revoke_notify user stub */
 
 /*
  * netname_check_in: publish our service port under "cap_server".
@@ -83,6 +84,58 @@ cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
     if (cap_server_server(in, out))
         return TRUE;
     return FALSE;
+}
+
+/* ============================================================
+ * Revocation subscribers (Issue #183).
+ *
+ * Resource servers (e.g. block_device_server) call cap_subscribe_revoke
+ * passing a send right to their notification port.  On every successful
+ * cap_revoke we fan out cap_revoke_notify(port, cap_id) to every entry.
+ * A send error means the subscriber died — we drop the entry and keep
+ * walking.  Single-threaded cap_server, no locking yet.
+ * ============================================================ */
+
+#define CAP_MAX_REVOKE_SUBSCRIBERS	8
+
+static mach_port_t revoke_subscribers[CAP_MAX_REVOKE_SUBSCRIBERS];
+static int         n_revoke_subscribers = 0;
+
+static int
+revoke_subscribers_contains(mach_port_t p)
+{
+    for (int i = 0; i < n_revoke_subscribers; i++)
+        if (revoke_subscribers[i] == p)
+            return 1;
+    return 0;
+}
+
+static void
+revoke_subscribers_remove_at(int i)
+{
+    (void)mach_port_deallocate(mach_task_self(), revoke_subscribers[i]);
+    revoke_subscribers[i] = revoke_subscribers[--n_revoke_subscribers];
+    revoke_subscribers[n_revoke_subscribers] = MACH_PORT_NULL;
+}
+
+/*
+ * Fan out a revocation event.  Iterates with index because the array
+ * is compacted in place when a subscriber goes away.
+ */
+static void
+fanout_revoke_notify(uint64_t cap_id)
+{
+    int i = 0;
+    while (i < n_revoke_subscribers) {
+        kern_return_t kr = cap_revoke_notify(revoke_subscribers[i], cap_id);
+        if (kr != KERN_SUCCESS) {
+            printf("cap: subscriber 0x%x dropped on revoke notify (kr=%d)\n",
+                   (unsigned)revoke_subscribers[i], (int)kr);
+            revoke_subscribers_remove_at(i);
+            continue;
+        }
+        i++;
+    }
 }
 
 /* ============================================================
@@ -277,6 +330,69 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
 
     printf("cap: revoked %d cap(s) in cascade rooted at %llu\n",
            revoked, (unsigned long long)cap_id);
+
+    /*
+     * Issue #183: notify every subscribed resource server so they can
+     * drop cap-gated state synchronously (e.g. block_device_server
+     * marks any blk_handle whose cap_id matches as revoked).  We fire
+     * one notification per cap in the cascade so a subscriber that
+     * only knows about a specific child can still react.
+     */
+    if (n_revoke_subscribers > 0 && revoked > 0) {
+        /* Re-walk the cascade to collect every revoked id.  Cheap:
+         * the set is already marked, so we just enumerate it once. */
+        uint64_t stack2[CAP_MAX_DEPTH + 1];
+        int top2 = 0;
+        stack2[top2++] = cap_id;
+        while (top2 > 0) {
+            uint64_t id = stack2[--top2];
+            struct cap_entry *e = cap_table_find_by_id(id);
+            if (!e) continue;
+            fanout_revoke_notify(id);
+
+            uint64_t child = e->token.first_child_cap_id;
+            while (child != 0 && top2 <= CAP_MAX_DEPTH) {
+                stack2[top2++] = child;
+                struct cap_entry *c = cap_table_find_by_id(child);
+                if (!c) break;
+                child = c->token.next_sibling_cap_id;
+            }
+        }
+    }
+
+    return KERN_SUCCESS;
+}
+
+/*
+ * cap_subscribe_revoke (Issue #183) — register a notify port.  We
+ * keep the send right; subsequent cap_revoke calls fan out
+ * cap_revoke_notify(notify_port, cap_id) on each subscriber.
+ */
+kern_return_t
+cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
+{
+    (void)server;
+
+    if (notify_port == MACH_PORT_NULL)
+        return CAP_ERR_INVALID_TOKEN;
+
+    if (revoke_subscribers_contains(notify_port)) {
+        /* Idempotent: already subscribed.  Drop the extra send right
+         * we just received so the refcount doesn't drift. */
+        (void)mach_port_deallocate(mach_task_self(), notify_port);
+        return KERN_SUCCESS;
+    }
+
+    if (n_revoke_subscribers >= CAP_MAX_REVOKE_SUBSCRIBERS) {
+        printf("cap: subscribe_revoke FAIL — table full (%d)\n",
+               n_revoke_subscribers);
+        (void)mach_port_deallocate(mach_task_self(), notify_port);
+        return CAP_ERR_NO_MEMORY;
+    }
+
+    revoke_subscribers[n_revoke_subscribers++] = notify_port;
+    printf("cap: subscribe_revoke ok — %d subscriber(s)\n",
+           n_revoke_subscribers);
     return KERN_SUCCESS;
 }
 

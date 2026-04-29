@@ -38,6 +38,52 @@ set_source_files_properties(
 set(CAP_SERVER_MIG_C ${CAP_SERVER_C} PARENT_SCOPE)
 set(CAP_SERVER_MIG_H ${CAP_SERVER_H} PARENT_SCOPE)
 
+# Issue #183: cap_revoke.defs — back-channel from cap_server to
+# subscribers.  cap_server uses the *user* stub (it fires the notify
+# RPC), subscribers (e.g. block_device_server) use the *server* demux.
+set(CAP_REVOKE_DEFS "${CMAKE_SOURCE_DIR}/export/include/mach/cap_revoke.defs")
+set(CAP_REVOKE_USER_C   "${CMAKE_BINARY_DIR}/generated/cap_revoke_user.c")
+set(CAP_REVOKE_SERVER_C "${CMAKE_BINARY_DIR}/generated/cap_revoke_server.c")
+set(CAP_REVOKE_USER_H   "${CMAKE_BINARY_DIR}/generated/cap_revoke.h")
+set(CAP_REVOKE_SERVER_H "${CMAKE_BINARY_DIR}/generated/cap_revoke_server.h")
+
+add_custom_command(
+  OUTPUT ${CAP_REVOKE_USER_C} ${CAP_REVOKE_SERVER_C}
+         ${CAP_REVOKE_USER_H} ${CAP_REVOKE_SERVER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_SOURCE_DIR}/export/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -header ${CAP_REVOKE_USER_H}
+    -sheader ${CAP_REVOKE_SERVER_H}
+    -user ${CAP_REVOKE_USER_C}
+    -server ${CAP_REVOKE_SERVER_C}
+    ${CAP_REVOKE_DEFS}
+  DEPENDS migcom ${CAP_REVOKE_DEFS}
+  COMMENT "MIG: cap_revoke.defs (libcap)"
+  VERBATIM
+)
+
+set_source_files_properties(
+  ${CAP_REVOKE_USER_C} ${CAP_REVOKE_SERVER_C}
+  ${CAP_REVOKE_USER_H} ${CAP_REVOKE_SERVER_H}
+  PROPERTIES GENERATED TRUE
+)
+
+set(CAP_REVOKE_USER_MIG_C   ${CAP_REVOKE_USER_C}   PARENT_SCOPE)
+set(CAP_REVOKE_USER_MIG_H   ${CAP_REVOKE_USER_H}   PARENT_SCOPE)
+set(CAP_REVOKE_SERVER_MIG_C ${CAP_REVOKE_SERVER_C} PARENT_SCOPE)
+set(CAP_REVOKE_SERVER_MIG_H ${CAP_REVOKE_SERVER_H} PARENT_SCOPE)
+
+# A phony target so cap_server / BDS can declare an order-only
+# dependency that forces MIG to run, even though they don't link any
+# of the cap_revoke artifacts that would otherwise pull them in.
+add_custom_target(mig_cap_revoke
+  DEPENDS ${CAP_REVOKE_USER_C} ${CAP_REVOKE_SERVER_C}
+          ${CAP_REVOKE_USER_H} ${CAP_REVOKE_SERVER_H}
+)
+
 add_library(libcap STATIC
   libcap.c
   sha256.c

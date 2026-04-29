@@ -120,3 +120,20 @@ routine cap_verify(
 	in	token		: cap_token_t;
 	in	op		: cap_u64_t;
 	in	resource_id	: cap_u64_t);
+
+/*
+ *	cap_subscribe_revoke — register a notify port for revocation
+ *	events.  Issue #183.  The caller passes a send right (typically
+ *	a copy of one of its receive ports already merged into the
+ *	server's main port set); cap_server retains it and, on every
+ *	successful cap_revoke, fires cap_revoke_notify(notify_port,
+ *	cap_id) to each registered subscriber.
+ *
+ *	Re-subscribing the same port is harmless (cap_server dedupes).
+ *	Subscriptions are released when cap_server detects a send error
+ *	on the notify port (subscriber died) — there is no explicit
+ *	unsubscribe in v1.
+ */
+routine cap_subscribe_revoke(
+		cap_server	: mach_port_t;
+	in	notify_port	: mach_port_send_t);

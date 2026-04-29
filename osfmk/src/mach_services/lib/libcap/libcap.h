@@ -86,6 +86,16 @@ kern_return_t cap_verify(const struct uros_cap *token,
                          uint64_t resource_id);
 
 /*
+ * cap_subscribe_revoke() — register a notify port to receive
+ * cap_revoke_notify(cap_id) messages from cap_server (Issue #183).
+ * The port must already be wired into the caller's message dispatch
+ * loop; cap_server fires cap_revoke_notify on every successful
+ * cap_revoke.  Used by resource servers (e.g. block_device_server)
+ * to drop cap-gated state synchronously when a token is revoked.
+ */
+kern_return_t cap_subscribe_revoke(mach_port_t notify_port);
+
+/*
  * cap_verify_local() — Issue B fast path: go straight to the UrMach
  * urmach_cap_verify trap (slot 37) without an RPC to cap_server.  Use
  * this in hot paths where the caller already holds a token; use
