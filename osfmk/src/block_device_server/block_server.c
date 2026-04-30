@@ -53,7 +53,10 @@
 #include "ahci_batch_server.h"
 #include "hal.h"
 #include "hal_notify_server.h"
+#include "cap_revoke_server.h"
 #include "modload.h"
+
+extern kern_return_t cap_subscribe_revoke(mach_port_t notify_port);
 
 /* ================================================================
  * Global state
@@ -321,6 +324,29 @@ find_controller_by_irq(mach_port_t local_port)
 extern boolean_t blk_handle_no_senders(mach_msg_header_t *in,
 				       mach_msg_header_t *out);
 
+/*
+ * Forward decl: handler in block_device.c that flips the revoked bit
+ * on every blk_handle whose cap_id matches.  Returns the number of
+ * handles affected (only used for diagnostics).
+ */
+extern int blk_handles_revoke_by_cap_id(uint64_t cap_id);
+
+/*
+ * MIG server-side handler for cap_revoke_notify (Issue #183).  This
+ * is invoked by the cap_revoke_server() demux when cap_server fires a
+ * notification on our subscription port.
+ */
+kern_return_t
+cap_revoke_notify(mach_port_t notify_port, uint64_t cap_id)
+{
+	(void)notify_port;
+	int n = blk_handles_revoke_by_cap_id(cap_id);
+	if (n == 0)
+		printf("blk: cap_revoke_notify cap=%llu — no live handle\n",
+		       (unsigned long long)cap_id);
+	return KERN_SUCCESS;
+}
+
 static boolean_t
 blk_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
@@ -339,6 +365,9 @@ blk_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 		return TRUE;
 
 	if (hal_notify_server(in, out))
+		return TRUE;
+
+	if (cap_revoke_server(in, out))
 		return TRUE;
 
 	if (in->msgh_id >= IRQ_NOTIFY_MSGH_BASE) {
@@ -405,6 +434,38 @@ main(int argc, char **argv)
 	}
 
 	blk_register_partitions();
+
+	/*
+	 * Issue #183: subscribe to cap_server's revocation back-channel
+	 * so we can drop authenticated handles synchronously when a cap
+	 * is revoked.  We share the main port_set: cap_revoke_notify
+	 * messages flow into blk_demux right alongside device I/O and
+	 * IRQs, no separate thread needed.
+	 */
+	{
+		mach_port_t notify_port = MACH_PORT_NULL;
+		kern_return_t skr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &notify_port);
+		if (skr == KERN_SUCCESS) {
+			(void)mach_port_move_member(mach_task_self(),
+						    notify_port, port_set);
+			mach_port_t send = MACH_PORT_NULL;
+			(void)mach_port_insert_right(mach_task_self(),
+				notify_port, notify_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+			send = notify_port;
+			skr = cap_subscribe_revoke(send);
+			if (skr == KERN_SUCCESS)
+				printf("blk: subscribed to cap_revoke_notify "
+				       "(port=0x%x)\n", (unsigned)notify_port);
+			else
+				printf("blk: cap_subscribe_revoke failed "
+				       "(kr=%d)\n", (int)skr);
+		} else {
+			printf("blk: notify port alloc failed (kr=%d)\n",
+			       (int)skr);
+		}
+	}
 
 	printf("blk: init complete, %d partition(s), "
 	       "entering message loop\n", n_partitions);

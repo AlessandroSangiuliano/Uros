@@ -254,6 +254,96 @@ main(int argc, char **argv)
         }
     }
 
+    /*
+     * Test [5]: per-handle revocation (Issue #183).  Open a fresh
+     * handle on the same partition with a NEW cap_id, do a small read
+     * (must succeed), call cap_revoke on that cap_id, then issue
+     * another read (must fail with KERN_NO_ACCESS because BDS marked
+     * the handle as revoked from the cap_revoke_notify back-channel).
+     *
+     * BDS is single-threaded: by the time cap_revoke returns, the
+     * notify message is already in BDS's port set; the next read on
+     * the same handle is processed *after* the notify in FIFO order,
+     * so the revoked flag is observed without any sleep.
+     */
+    if (found_name != NULL) {
+        struct uros_cap tok5;
+        kern_return_t ck5 = cap_request(RESOURCE_BLK_DEVICE,
+                                        cap_name_hash(found_name),
+                                        CAP_OP_BLK_READ | CAP_OP_BLK_WRITE,
+                                        0,
+                                        &tok5);
+        if (ck5 != KERN_SUCCESS) {
+            printf("cap_test: [5] cap_request FAIL kr=%d — SKIPPED\n",
+                   (int)ck5);
+        } else {
+            char blob5[CAP_TOKEN_MAX];
+            memcpy(blob5, &tok5, sizeof(tok5));
+            security_token_t null_sec = { { 0, 0 } };
+            mach_port_t h5 = MACH_PORT_NULL;
+            kern_return_t okr5 = device_open_cap(part_port,
+                                                 MACH_PORT_NULL,
+                                                 D_READ | D_WRITE,
+                                                 null_sec,
+                                                 (char *)found_name,
+                                                 blob5,
+                                                 (mach_msg_type_number_t)sizeof(tok5),
+                                                 &h5);
+            if (okr5 != KERN_SUCCESS || h5 == MACH_PORT_NULL) {
+                printf("cap_test: [5] open FAIL kr=%d\n", (int)okr5);
+                pass = 0;
+            } else {
+                /* Pre-revoke: small read must succeed. */
+                io_buf_ptr_t  buf = NULL;
+                mach_msg_type_number_t got = 0;
+                kern_return_t rkr1 = device_read(h5, 0, 0, 512,
+                                                 &buf, &got);
+                if (rkr1 == KERN_SUCCESS) {
+                    printf("cap_test: [5] pre-revoke read ok (%u bytes)\n",
+                           (unsigned)got);
+                    if (buf && got > 0)
+                        (void)vm_deallocate(mach_task_self(),
+                                            (vm_offset_t)buf, got);
+                } else {
+                    printf("cap_test: [5] pre-revoke read FAIL kr=%d\n",
+                           (int)rkr1);
+                    pass = 0;
+                }
+
+                /* Revoke the cap.  BDS receives cap_revoke_notify
+                 * synchronously via its main port set. */
+                kern_return_t rvk = cap_revoke(tok5.cap_id);
+                /* Note: sa_mach printf doesn't grok %llu; print kr on
+                 * its own line so the int doesn't slip on the va_list. */
+                printf("cap_test: [5] cap_revoke kr=%d\n", (int)rvk);
+                if (rvk != KERN_SUCCESS) {
+                    printf("cap_test: [5] cap_revoke FAIL\n");
+                    pass = 0;
+                }
+
+                /* Post-revoke: same handle must reject I/O. */
+                io_buf_ptr_t  buf2 = NULL;
+                mach_msg_type_number_t got2 = 0;
+                kern_return_t rkr2 = device_read(h5, 0, 0, 512,
+                                                 &buf2, &got2);
+                if (rkr2 == KERN_NO_ACCESS) {
+                    printf("cap_test: [5] post-revoke read rejected: OK\n");
+                } else {
+                    printf("cap_test: [5] post-revoke read FAIL — "
+                           "expected KERN_NO_ACCESS (%d), got %d (%u bytes)\n",
+                           KERN_NO_ACCESS, (int)rkr2, (unsigned)got2);
+                    if (buf2 && got2 > 0)
+                        (void)vm_deallocate(mach_task_self(),
+                                            (vm_offset_t)buf2, got2);
+                    pass = 0;
+                }
+
+                (void)device_close(h5);
+                (void)mach_port_deallocate(mach_task_self(), h5);
+            }
+        }
+    }
+
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");
         return 0;

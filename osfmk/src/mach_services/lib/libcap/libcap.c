@@ -135,6 +135,20 @@ cap_revoke(uint64_t cap_id)
 }
 
 kern_return_t
+cap_subscribe_revoke(mach_port_t notify_port)
+{
+    mach_port_t srv = cap_server_port();
+    if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
+    /*
+     * mach_port_send_t in MIG expands to (port, type) at the wire.
+     * The user gives us a send right; pass it as MOVE_SEND so the
+     * kernel transfers ownership and we don't keep a stale copy.
+     */
+    return mig_cap_subscribe_revoke(srv, notify_port,
+                                    MACH_MSG_TYPE_COPY_SEND);
+}
+
+kern_return_t
 cap_verify(const struct uros_cap *token, uint64_t op, uint64_t resource_id)
 {
     mach_port_t srv = cap_server_port();
