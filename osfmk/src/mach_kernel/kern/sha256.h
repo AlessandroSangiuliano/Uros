@@ -44,4 +44,19 @@ void sha256_update(struct sha256_ctx *ctx, const void *data, size_t len);
 void sha256_final(struct sha256_ctx *ctx, uint8_t out[SHA256_DIGEST_SIZE]);
 void sha256(const void *data, size_t len, uint8_t out[SHA256_DIGEST_SIZE]);
 
+/*
+ * Issue #180: runtime selection of the per-block compress primitive.
+ * sha256_dispatch_init() probes CPUID for SHA Extensions and, if
+ * present, swaps the internal compress pointer to the SHA-NI
+ * implementation.  Safe to call multiple times; idempotent.  Must be
+ * called after FPU/SSE init (the SHA-NI path uses XMM registers).
+ */
+void sha256_dispatch_init(void);
+
+/*
+ * Returns 1 if the SHA-NI fast path is currently selected, 0 otherwise.
+ * Useful for boot-time logging and self-test gating.
+ */
+int  sha256_using_sha_ni(void);
+
 #endif /* _KERN_SHA256_H_ */

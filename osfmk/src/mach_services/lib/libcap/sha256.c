@@ -49,7 +49,7 @@ static inline uint32_t rotr(uint32_t x, unsigned n) {
     return (x >> n) | (x << (32 - n));
 }
 
-static void sha256_compress(struct sha256_ctx *ctx, const uint8_t block[64]) {
+static void sha256_compress_c(struct sha256_ctx *ctx, const uint8_t block[64]) {
     uint32_t W[64];
     for (unsigned i = 0; i < 16; i++) {
         W[i] = ((uint32_t)block[4*i]   << 24)
@@ -85,7 +85,49 @@ static void sha256_compress(struct sha256_ctx *ctx, const uint8_t block[64]) {
     ctx->state[6] += g; ctx->state[7] += h;
 }
 
+/*
+ * Issue #180: per-block compress dispatch.  Defaults to the C
+ * reference; sha256_dispatch_init() may swap it for SHA-NI if CPUID
+ * leaf 7 reports the extensions.  Lazy init runs on first sha256_init()
+ * so callers get acceleration even if they never call dispatch_init
+ * explicitly.
+ */
+typedef void (*sha256_compress_fn)(struct sha256_ctx *, const uint8_t [64]);
+static sha256_compress_fn sha256_compress = sha256_compress_c;
+static int sha256_dispatch_done   = 0;
+static int sha256_sha_ni_active   = 0;
+
+extern void sha256_compress_shani(struct sha256_ctx *ctx,
+                                  const uint8_t block[64]);
+
+int sha256_using_sha_ni(void) { return sha256_sha_ni_active; }
+
+static inline void sha256_cpuid(unsigned int leaf, unsigned int subleaf,
+                                unsigned int *eax, unsigned int *ebx,
+                                unsigned int *ecx, unsigned int *edx)
+{
+    __asm__ volatile("cpuid"
+        : "=a" (*eax), "=b" (*ebx), "=c" (*ecx), "=d" (*edx)
+        : "a" (leaf), "c" (subleaf));
+}
+
+void sha256_dispatch_init(void) {
+    unsigned int eax, ebx, ecx, edx;
+
+    if (sha256_dispatch_done) return;
+    sha256_dispatch_done = 1;
+
+    sha256_cpuid(0, 0, &eax, &ebx, &ecx, &edx);
+    if (eax < 7) return;
+    sha256_cpuid(7, 0, &eax, &ebx, &ecx, &edx);
+    if (ebx & (1u << 29)) {
+        sha256_compress = sha256_compress_shani;
+        sha256_sha_ni_active = 1;
+    }
+}
+
 void sha256_init(struct sha256_ctx *ctx) {
+    if (!sha256_dispatch_done) sha256_dispatch_init();
     ctx->state[0] = 0x6a09e667; ctx->state[1] = 0xbb67ae85;
     ctx->state[2] = 0x3c6ef372; ctx->state[3] = 0xa54ff53a;
     ctx->state[4] = 0x510e527f; ctx->state[5] = 0x9b05688c;

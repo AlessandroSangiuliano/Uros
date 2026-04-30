@@ -31,6 +31,7 @@ USE_AHCI=false
 USE_AHCI2=false
 USE_VIRTIO=false
 USE_BUNDLE=true     # Issue #186: stage-1 multiboot bundle (mod[1]) on by default
+USE_SHA_NI=false    # Issue #180: --sha-ni → TCG + Icelake-Server,+sha-ni
 BENCH_ARGS=""
 EXTRA_ARGS=""
 while [ $# -gt 0 ]; do
@@ -40,6 +41,7 @@ while [ $# -gt 0 ]; do
         --ahci2) USE_AHCI=true; USE_AHCI2=true; shift ;;
         --ahci) USE_AHCI=true; shift ;;
         --virtio) USE_VIRTIO=true; shift ;;
+        --sha-ni) USE_SHA_NI=true; shift ;;
         --bench)
             shift
             while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
@@ -90,7 +92,16 @@ if [ "$USE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
     INITRD="$BOOTSTRAP,$BUNDLE_IMG"
     echo "Bundle:  $BUNDLE_IMG"
 fi
-QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $INITRD -no-reboot"
+# Issue #180: --sha-ni forces TCG with Icelake-Server,+sha-ni so the
+# kernel and libcap exercise the SHA-NI compress fast path even when
+# the host CPU (or KVM-restricted CPUID) doesn't expose it.  TCG is
+# slower than KVM but produces correct architectural behaviour.
+if [ "$USE_SHA_NI" = true ]; then
+    QEMU_ARGS="-m 512M -accel tcg -cpu Icelake-Server,+sha-ni -kernel $KERNEL -initrd $INITRD -no-reboot"
+    echo "Acceleration: TCG (--sha-ni: Icelake-Server,+sha-ni)"
+else
+    QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $INITRD -no-reboot"
+fi
 
 if [ "$USE_DISK" = true ] && [ -f "$DISK_IMG" ]; then
     echo "Disco: $DISK_IMG"

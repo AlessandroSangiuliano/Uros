@@ -545,6 +545,20 @@ machine_init(void)
 	 */
 	init_fpu();
 
+	/*
+	 * Issue #180: install the SHA-NI fast path for sha256_compress
+	 * if the CPU advertises Intel SHA Extensions in CPUID leaf 7.
+	 * Must run after init_fpu() (which enables CR4.OSFXSR / OSXMMEXCPT
+	 * — required before any XMM-using code can execute).
+	 */
+	{
+		extern void sha256_dispatch_init(void);
+		extern int  sha256_using_sha_ni(void);
+		sha256_dispatch_init();
+		if (sha256_using_sha_ni())
+			printf("SHA: Intel SHA Extensions enabled (HMAC fast path)\n");
+	}
+
 #if	NPCI > 0
 	dma_zones_init();
 #endif	/* NPCI > 0 */

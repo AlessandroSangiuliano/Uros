@@ -43,4 +43,14 @@ void sha256_update(struct sha256_ctx *ctx, const void *data, size_t len);
 void sha256_final(struct sha256_ctx *ctx, uint8_t out[SHA256_DIGEST_SIZE]);
 void sha256(const void *data, size_t len, uint8_t out[SHA256_DIGEST_SIZE]);
 
+/*
+ * Issue #180: probe CPUID for SHA Extensions and, if present, install
+ * the SHA-NI compress fast path.  Idempotent and safe to call multiple
+ * times.  sha256_init() lazily calls this on first use, so explicit
+ * invocation is only needed if the caller wants to query the result
+ * via sha256_using_sha_ni() before any hash work happens.
+ */
+void sha256_dispatch_init(void);
+int  sha256_using_sha_ni(void);
+
 #endif /* _LIBCAP_SHA256_H_ */

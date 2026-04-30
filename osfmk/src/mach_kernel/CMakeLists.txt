@@ -441,6 +441,7 @@ set(KERN_SOURCES
     kern/syscall_sw.c
     kern/cap.c
     kern/sha256.c
+    kern/sha256_shani.c
     kern/hmac_sha256.c
     kern/task.c
     kern/task_swap.c

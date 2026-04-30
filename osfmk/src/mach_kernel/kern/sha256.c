@@ -48,7 +48,7 @@ static inline uint32_t rotr(uint32_t x, unsigned n) {
     return (x >> n) | (x << (32 - n));
 }
 
-static void sha256_compress(struct sha256_ctx *ctx, const uint8_t block[64]) {
+static void sha256_compress_c(struct sha256_ctx *ctx, const uint8_t block[64]) {
     uint32_t W[64];
     for (unsigned i = 0; i < 16; i++) {
         W[i] = ((uint32_t)block[4*i]   << 24)
@@ -82,6 +82,40 @@ static void sha256_compress(struct sha256_ctx *ctx, const uint8_t block[64]) {
     ctx->state[2] += c; ctx->state[3] += d;
     ctx->state[4] += e; ctx->state[5] += f;
     ctx->state[6] += g; ctx->state[7] += h;
+}
+
+/*
+ * Issue #180: per-block compress is dispatched through a function
+ * pointer.  Default is the portable C implementation; sha256_dispatch_init()
+ * (called once at boot, after FPU/SSE setup) may swap it for the SHA-NI
+ * variant if CPUID leaf 7 reports the extensions.
+ */
+typedef void (*sha256_compress_fn)(struct sha256_ctx *, const uint8_t [64]);
+static sha256_compress_fn sha256_compress = sha256_compress_c;
+
+/* Defined in kern/sha256_shani.c, compiled with target("sha,ssse3,sse4.1"). */
+extern void sha256_compress_shani(struct sha256_ctx *ctx,
+                                  const uint8_t block[64]);
+
+#include <i386/proc_reg.h>      /* do_cpuid */
+
+static int sha256_sha_ni_active = 0;
+
+int sha256_using_sha_ni(void) { return sha256_sha_ni_active; }
+
+void sha256_dispatch_init(void) {
+    unsigned int eax, ebx, ecx, edx;
+
+    /* CPUID leaf 7, sub-leaf 0: EBX bit 29 = SHA Extensions. */
+    do_cpuid(0, 0, &eax, &ebx, &ecx, &edx);
+    if (eax < 7) {
+        return;     /* CPU too old to even report leaf 7 */
+    }
+    do_cpuid(7, 0, &eax, &ebx, &ecx, &edx);
+    if (ebx & (1u << 29)) {
+        sha256_compress = sha256_compress_shani;
+        sha256_sha_ni_active = 1;
+    }
 }
 
 void sha256_init(struct sha256_ctx *ctx) {
