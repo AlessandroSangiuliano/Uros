@@ -87,6 +87,7 @@ add_custom_target(mig_cap_revoke
 add_library(libcap STATIC
   libcap.c
   sha256.c
+  sha256_shani.c
   hmac_sha256.c
   ${CAP_USER_C}
 )

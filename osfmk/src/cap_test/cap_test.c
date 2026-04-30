@@ -43,6 +43,7 @@
 #include <device/device.h>
 #include <device/device_types.h>
 #include <libcap.h>
+#include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
 
 /*
  * Trap stub emitted by libmach (mach_traps.s): slot 40.
@@ -98,6 +99,37 @@ main(int argc, char **argv)
         return 1;
 
     printf_init(device_port);
+
+    /*
+     * Issue #180: report which SHA-256 path libcap selected and run a
+     * known-answer test against the FIPS 180-4 vector for "abc".  This
+     * proves the SHA-NI fast path (when active) produces the same
+     * digest as the C reference; if it doesn't, every HMAC-gated RPC
+     * after this would fail in confusing ways, so catch it up front.
+     */
+    sha256_dispatch_init();
+    {
+        static const uint8_t kat_in[] = { 'a', 'b', 'c' };
+        static const uint8_t kat_expected[32] = {
+            0xba,0x78,0x16,0xbf,0x8f,0x01,0xcf,0xea,
+            0x41,0x41,0x40,0xde,0x5d,0xae,0x22,0x23,
+            0xb0,0x03,0x61,0xa3,0x96,0x17,0x7a,0x9c,
+            0xb4,0x10,0xff,0x61,0xf2,0x00,0x15,0xad,
+        };
+        uint8_t got[32];
+        sha256(kat_in, sizeof kat_in, got);
+        printf("cap_test: SHA-256 path = %s\n",
+               sha256_using_sha_ni() ? "SHA-NI (CPU extension)" : "C reference");
+        int diff = 0;
+        for (unsigned ii = 0; ii < 32; ii++) {
+            if (got[ii] != kat_expected[ii]) { diff = 1; break; }
+        }
+        if (!diff) {
+            printf("cap_test: SHA-256 KAT(\"abc\") OK\n");
+        } else {
+            printf("cap_test: SHA-256 KAT(\"abc\") FAIL — digest mismatch\n");
+        }
+    }
 
     printf("cap_test: starting, waiting for cap_server netname\n");
     (void)wait_for_cap_server();
