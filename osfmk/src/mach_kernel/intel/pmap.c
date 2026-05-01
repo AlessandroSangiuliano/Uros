@@ -1367,6 +1367,39 @@ pmap_init(void)
 #endif	/* NCPUS > 1 */
 
 	/*
+	 *	Issue #190: pre-fill pv_free_list with a generous batch of
+	 *	pv_entry slots while pmap_initialized is still FALSE.  In
+	 *	this window pmap_enter() bypasses pv tracking (valid_page()
+	 *	returns FALSE), so kmem_alloc_wired below cannot recurse
+	 *	into zalloc(pv_list_zone).  Once pmap_initialized flips, the
+	 *	first pmap_enter that needs a pv_entry would otherwise have
+	 *	to grow the zone and that grow path itself calls pmap_enter
+	 *	for the new pages — a recursion that lands in zalloc's
+	 *	doing_alloc=TRUE wait branch and panics pre-scheduler.
+	 *	Under KVM the timing happened to keep enough entries around;
+	 *	under TCG it didn't.
+	 */
+	{
+		const vm_size_t	pv_prefill_bytes = 16 * 1024; /* ~1000 entries */
+		vm_offset_t	pv_addr;
+		if (kmem_alloc_wired(kernel_map, &pv_addr,
+				     pv_prefill_bytes) != KERN_SUCCESS) {
+			panic("pmap_init: pv_free_list prefill");
+		}
+		memset((char *)pv_addr, 0, pv_prefill_bytes);
+		{
+			vm_size_t off;
+			for (off = 0; off + sizeof(struct pv_entry) <=
+			     pv_prefill_bytes; off += sizeof(struct pv_entry)) {
+				pv_entry_t e =
+				    (pv_entry_t)(pv_addr + off);
+				e->next = pv_free_list;
+				pv_free_list = e;
+			}
+		}
+	}
+
+	/*
 	 *	Only now, when all of the data structures are allocated,
 	 *	can we set vm_first_phys and vm_last_phys.  If we set them
 	 *	too soon, the kmem_alloc_wired above will try to use these
