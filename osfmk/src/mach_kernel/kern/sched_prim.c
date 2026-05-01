@@ -666,7 +666,23 @@ __assert_wait(
 	spl_t			s;
 
 	thread = current_thread();
-	assert(thread);
+	if (!thread) {
+		/*
+		 * Issue #190: assert_wait was being reached during early
+		 * machine_init (before thread_init / scheduler) when the
+		 * vm_map_entry zone needed to grow recursively.  Bare
+		 * assert(thread) made this almost untriagable; surface the
+		 * event and the caller so future occurrences land closer to
+		 * their root cause.
+		 */
+		panic("assert_wait: no current_thread "
+		      "(event=0x%x ra1=0x%x ra2=0x%x ra3=0x%x) — caller "
+		      "invoked sleep before scheduler is up",
+		      (unsigned)event,
+		      (unsigned)(unsigned long)__builtin_return_address(0),
+		      (unsigned)(unsigned long)__builtin_return_address(1),
+		      (unsigned)(unsigned long)__builtin_return_address(2));
+	}
 	if (thread->wait_event != NO_EVENT) {
 		panic("assert_wait: already asserted event 0x%x\n",
 			thread->wait_event);

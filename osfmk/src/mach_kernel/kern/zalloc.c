@@ -814,7 +814,18 @@ zalloc(
 			/*
 			 *	Someone is allocating memory for this zone.
 			 *	Wait for it to show up, then try again.
+			 *	Issue #190: pre-scheduler we are single-threaded;
+			 *	doing_alloc==TRUE here means we recursed into the
+			 *	same zone from inside our own grow path — waiting
+			 *	would deadlock on ourselves.  Surface the zone name
+			 *	so the caller can be fixed (typically: pre-fill the
+			 *	zone earlier, or use a non-recursive allocator).
 			 */
+			if (current_thread() == THREAD_NULL) {
+				panic("zalloc: recursive grow on zone \"%s\" "
+				      "before scheduler is up",
+				      zone->zone_name ? zone->zone_name : "?");
+			}
 			assert_wait((event_t)zone, TRUE);
 			zone->waiting = TRUE;
 			unlock_zone(zone);
