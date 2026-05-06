@@ -1,0 +1,143 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * gpu_server.defs — MIG control plane for gpu_server.
+ *
+ * See docs/gpu_server_design.md §6.1.  This is the LOW-FREQUENCY
+ * synchronous control plane (open/query/configure).  The data hot
+ * path lives on FLIPC v2 channels handed back by gpu_context_create
+ * (added in 0.2 with #194's successor issue).
+ *
+ * 0.1.0 surface:
+ *   - text_puts        — simpleroutine, fire-and-forget character
+ *                        stream from console-style producers
+ *   - device_open      — open the lone display device
+ *   - query_devices    — enumerate gpu_device_info records
+ *   - the rest are stubs returning KERN_NOT_SUPPORTED until the
+ *     vga module / context machinery / FLIPC bring-up land.
+ */
+
+subsystem gpu_server 4000;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+serverprefix gpu_;
+userprefix   gpu_;
+
+/* MIG ctype mappings — gpu_server_types.h provides the matching C
+ * typedefs (gpu_u32_t -> uint32_t, gpu_u64_t -> uint64_t).  The
+ * import below makes MIG emit `#include <mach/gpu_server_types.h>`
+ * in the generated sources so the typedefs are visible there. */
+type gpu_u32_t   = unsigned    ctype: gpu_u32_t;
+type gpu_u64_t   = unsigned64  ctype: gpu_u64_t;
+type gpu_token_t = array[*:256] of char;
+type gpu_buf_t   = array[*:4096] of char;
+
+import <mach/gpu_server_types.h>;
+
+/* =================================================================
+ * Text plane (0.1.0)
+ *
+ * `text_puts` is a MIG simpleroutine — no reply, no return code.
+ * Producers (bootstrap log forwarder, panic-print path, future
+ * console_app) drop characters and never block.  Lost characters
+ * during gpu_server overload are accepted as best-effort log
+ * semantics (see docs/gpu_server_design.md §11.3 rule 2).
+ * ================================================================= */
+
+simpleroutine text_puts(
+		gpu_port	: mach_port_t;
+	in	buf		: gpu_buf_t);
+
+/* =================================================================
+ * Device control plane
+ * ================================================================= */
+
+/*
+ * query_devices — return all gpu_device records as an OOL array of
+ * `struct gpu_device_info` (gpu/gpu_types.h).
+ */
+routine query_devices(
+		gpu_port	: mach_port_t;
+	out	devices		: pointer_t, Dealloc;
+	out	n_devices	: gpu_u32_t);
+
+/*
+ * device_open — request a handle for a specific gpu_device.  The
+ * caller's capability token is checked against GPU_CAP_DEV_OPEN for
+ * resource_id == dev_id; on success the gpu_dev_id_t is returned for
+ * use in subsequent calls.  In 0.1.0 the only valid dev_id is 0
+ * (single VGA device).
+ */
+routine device_open(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	dev_id		: gpu_u32_t);
+
+/*
+ * query_displays — enumerate displays attached to dev_id.  Returns an
+ * OOL array of `struct gpu_mode` describing each display's current
+ * mode, indexed by gpu_disp_id_t.
+ */
+routine query_displays(
+		gpu_port	: mach_port_t;
+	in	dev_id		: gpu_u32_t;
+	out	displays	: pointer_t, Dealloc;
+	out	n_displays	: gpu_u32_t);
+
+/* =================================================================
+ * Display ops — stubs in 0.1.0 (only the implicit text scanout works)
+ * ================================================================= */
+
+routine display_set_mode(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	dev_id		: gpu_u32_t;
+	in	disp_id		: gpu_u32_t;
+	in	width		: gpu_u32_t;
+	in	height		: gpu_u32_t;
+	in	bpp		: gpu_u32_t);
+
+routine display_scanout(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	dev_id		: gpu_u32_t;
+	in	disp_id		: gpu_u32_t;
+	in	bo_id		: gpu_u32_t);
+
+/* =================================================================
+ * Buffer-object ops — stubs in 0.1.0
+ * ================================================================= */
+
+routine bo_alloc(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	dev_id		: gpu_u32_t;
+	in	size		: gpu_u32_t;
+	in	flags		: gpu_u32_t;
+	out	bo_id		: gpu_u32_t);
+
+routine bo_free(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	dev_id		: gpu_u32_t;
+	in	bo_id		: gpu_u32_t);
+
+/* =================================================================
+ * Context ops — stubs in 0.1.0; FLIPC v2 endpoint pair returned here
+ * in 0.2.
+ * ================================================================= */
+
+routine context_create(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	dev_id		: gpu_u32_t;
+	out	ctx_id		: gpu_u32_t);
+
+routine context_destroy(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	dev_id		: gpu_u32_t;
+	in	ctx_id		: gpu_u32_t);
