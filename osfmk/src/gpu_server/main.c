@@ -29,6 +29,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "gpu_server.h"
+#include "modload.h"
 
 /* ================================================================
  * Global ports
@@ -148,13 +149,34 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	hal_port = lookup_hal_optional();
-	if (hal_port == MACH_PORT_NULL)
-		printf("gpu_server: HAL not available (skeleton OK)\n");
-	else
-		printf("gpu_server: HAL port=0x%x\n", (unsigned int)hal_port);
+	/* Load back-end modules from /mach_servers/modules/gpu/ via
+	 * libmodload.  Same machinery block_device_server (#161) and
+	 * hal_server use: each .so exports `<basename>_module_ops` of
+	 * type `gpu_module_ops_t` and is dlopen'd into our address
+	 * space, with host-side symbols (`gpu_device_port`,
+	 * `device_mmio_map`, `printf`, ...) resolved via the
+	 * `--export-dynamic` symtab. */
+	{
+		const gpu_module_ops_t *modules[GPU_MAX_MODULES + 1];
+		int n_modules;
 
-	gpu_core_run_discovery(hal_port);
+		modload_init("gpu");
+		n_modules = modload_load_class("gpu", "_module_ops",
+					       (void **)modules,
+					       GPU_MAX_MODULES);
+		modules[n_modules] = NULL;
+
+		hal_port = lookup_hal_optional();
+		if (hal_port == MACH_PORT_NULL)
+			printf("gpu_server: HAL not available "
+			       "(legacy-VGA-only mode)\n");
+		else
+			printf("gpu_server: HAL port=0x%x\n",
+			       (unsigned int)hal_port);
+
+		gpu_core_run_discovery(modules, (unsigned int)n_modules,
+				       hal_port);
+	}
 
 	bootstrap_completed(bootstrap_port, mach_task_self());
 	printf("gpu_server: init complete, entering message loop\n");
