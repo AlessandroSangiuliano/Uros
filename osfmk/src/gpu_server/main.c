@@ -178,6 +178,14 @@ main(int argc, char **argv)
 				       hal_port);
 	}
 
+	/* Start the text rendering worker.  Must come AFTER discovery
+	 * so the worker sees an attached module on its first dequeue;
+	 * before mach_msg_server so any startup chatter from
+	 * bootstrap_completed routes through the queue. */
+	if (gpu_text_render_init() < 0)
+		printf("gpu_server: text_render init failed — text path "
+		       "will run inline on the dispatch thread\n");
+
 	bootstrap_completed(bootstrap_port, mach_task_self());
 	printf("gpu_server: init complete, entering message loop\n");
 

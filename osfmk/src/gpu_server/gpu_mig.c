@@ -41,7 +41,11 @@ gpu_text_puts(mach_port_t gpu_port,
 {
 	(void)gpu_port;
 
-	gpu_core_text_puts(buf, (size_t)buf_count);
+	/* Hand off to the text_render worker.  This is a MIG
+	 * simpleroutine, so any blocking here would push the cost of
+	 * VGA paint onto the producer — design doc §11.3 rule 2
+	 * forbids that. */
+	gpu_text_render_enqueue(buf, (size_t)buf_count);
 	return KERN_SUCCESS;
 }
 
