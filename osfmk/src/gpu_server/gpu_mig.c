@@ -37,9 +37,18 @@
 
 kern_return_t
 gpu_text_puts(mach_port_t gpu_port,
+	      char *cap, mach_msg_type_number_t cap_count,
 	      char *buf, mach_msg_type_number_t buf_count)
 {
 	(void)gpu_port;
+
+	/* Cap check up front so a forged token is rejected before we
+	 * touch the queue.  resource_id == 0 = "the system text
+	 * surface" (single VGA in 0.1.0); GPU_CAP_DISPLAY_SCANOUT is
+	 * the §5 op that authorises writes to a display. */
+	if (gpu_core_cap_check(cap, cap_count,
+			       GPU_CAP_DISPLAY_SCANOUT, 0) != 0)
+		return KERN_PROTECTION_FAILURE;
 
 	/* Hand off to the text_render worker.  This is a MIG
 	 * simpleroutine, so any blocking here would push the cost of

@@ -49,6 +49,7 @@ import <mach/gpu_server_types.h>;
 
 simpleroutine text_puts(
 		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
 	in	buf		: gpu_buf_t);
 
 /* =================================================================
