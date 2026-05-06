@@ -30,6 +30,8 @@
 #include <string.h>
 #include "gpu_server.h"
 #include "modload.h"
+#include "libcap.h"
+#include "cap_revoke_server.h"
 
 /* ================================================================
  * Global ports
@@ -41,6 +43,28 @@ mach_port_t	gpu_security_port;
 mach_port_t	gpu_root_ledger_wired;
 mach_port_t	gpu_root_ledger_paged;
 mach_port_t	gpu_service_port;
+static mach_port_t gpu_port_set;
+static mach_port_t gpu_cap_revoke_port;
+
+/* ================================================================
+ * cap_revoke_notify — server-side handler invoked when cap_server
+ * fans out a revocation event we subscribed to (#183).
+ *
+ * In 0.1.0 gpu_server holds no per-client state we need to tear
+ * down: gpu_device_open is a no-op handshake and bo_alloc /
+ * context_create still return KERN_FAILURE.  We log the event so
+ * the wiring is observable; once those ops become real (post-0.2)
+ * this is where bo handles / context rings get released by cap_id.
+ * ================================================================ */
+
+kern_return_t
+cap_revoke_notify(mach_port_t notify_port, uint64_t cap_id)
+{
+	(void)notify_port;
+	printf("gpu_server: cap_revoke_notify cap=%llu (no live state to "
+	       "release in 0.1.0)\n", (unsigned long long)cap_id);
+	return KERN_SUCCESS;
+}
 
 /* ================================================================
  * MIG demux
@@ -56,6 +80,9 @@ gpu_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	if (gpu_server_server(in, out))
 		return TRUE;
 
+	if (cap_revoke_server(in, out))
+		return TRUE;
+
 	return FALSE;
 }
 
@@ -69,11 +96,20 @@ publish_service_port(void)
 	kern_return_t kr;
 
 	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_PORT_SET, &gpu_port_set);
+	if (kr != KERN_SUCCESS) {
+		printf("gpu_server: port set alloc failed (kr=%d)\n", kr);
+		return -1;
+	}
+
+	kr = mach_port_allocate(mach_task_self(),
 				MACH_PORT_RIGHT_RECEIVE, &gpu_service_port);
 	if (kr != KERN_SUCCESS) {
 		printf("gpu_server: service port alloc failed (kr=%d)\n", kr);
 		return -1;
 	}
+	(void)mach_port_move_member(mach_task_self(),
+				    gpu_service_port, gpu_port_set);
 
 	kr = mach_port_insert_right(mach_task_self(),
 		gpu_service_port, gpu_service_port,
@@ -93,6 +129,50 @@ publish_service_port(void)
 		printf("gpu_server: registered service \"gpu\" in name_server\n");
 	}
 	return 0;
+}
+
+/* ================================================================
+ * cap_server back-channel subscription (#183 / #197)
+ *
+ * Allocate a notify port, drop it in the main port set so
+ * cap_revoke_notify messages flow through gpu_demux alongside
+ * gpu_server.defs RPCs, then ask cap_server to fire on it.
+ * ================================================================ */
+
+static void
+subscribe_to_cap_revoke(void)
+{
+	kern_return_t kr;
+	mach_port_t   send;
+
+	kr = mach_port_allocate(mach_task_self(),
+		MACH_PORT_RIGHT_RECEIVE, &gpu_cap_revoke_port);
+	if (kr != KERN_SUCCESS) {
+		printf("gpu_server: cap_revoke port alloc failed (kr=%d)\n",
+		       kr);
+		return;
+	}
+	(void)mach_port_move_member(mach_task_self(),
+				    gpu_cap_revoke_port, gpu_port_set);
+
+	kr = mach_port_insert_right(mach_task_self(),
+		gpu_cap_revoke_port, gpu_cap_revoke_port,
+		MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("gpu_server: cap_revoke send-right failed (kr=%d)\n",
+		       kr);
+		return;
+	}
+	send = gpu_cap_revoke_port;
+
+	kr = cap_subscribe_revoke(send);
+	if (kr != KERN_SUCCESS) {
+		printf("gpu_server: cap_subscribe_revoke failed (kr=%d) — "
+		       "revocation back-channel disabled\n", (int)kr);
+		return;
+	}
+	printf("gpu_server: subscribed to cap_revoke_notify (port=0x%x)\n",
+	       (unsigned)gpu_cap_revoke_port);
 }
 
 /* ================================================================
@@ -186,10 +266,12 @@ main(int argc, char **argv)
 		printf("gpu_server: text_render init failed — text path "
 		       "will run inline on the dispatch thread\n");
 
+	subscribe_to_cap_revoke();
+
 	bootstrap_completed(bootstrap_port, mach_task_self());
 	printf("gpu_server: init complete, entering message loop\n");
 
-	mach_msg_server(gpu_demux, 8192, gpu_service_port,
+	mach_msg_server(gpu_demux, 8192, gpu_port_set,
 			MACH_MSG_OPTION_NONE);
 
 	printf("gpu_server: mach_msg_server exited unexpectedly\n");

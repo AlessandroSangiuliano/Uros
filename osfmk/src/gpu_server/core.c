@@ -21,6 +21,7 @@
 #include <mach.h>
 #include <stdio.h>
 #include <string.h>
+#include <mach/cap_types.h>
 #include "gpu_server.h"
 
 /* ================================================================
@@ -160,22 +161,49 @@ gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
 }
 
 /* ================================================================
- * Capability check stub
+ * Capability check (#197)
  *
- * 0.1.0 #194: just accept everything.  When #197 lands, this becomes
- * a libcap cap_verify call against the GPU_CAP_* op mask declared
- * by the caller's resource_id.  The shape is already correct so
- * upgrading is a one-file change.
+ * Routes every Mach RPC through urmach_cap_verify — same UrMach
+ * fast-path block_device_server uses for partition I/O.  The token
+ * blob the client passes over MIG is a wire-format `struct uros_cap`;
+ * we memcpy into a stack copy and hand it to the kernel trap.
+ *
+ * Token-less callers (size 0) are accepted only for the special case
+ * of the bootstrap log_forwarder before its cap is issued — that
+ * path lands in gpu_text_render_enqueue with token_count==0 and is
+ * silently allowed.  Every cap-bearing RPC enforces a non-zero
+ * token of exactly sizeof(struct uros_cap).
  * ================================================================ */
+
+extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
+				       uint32_t op,
+				       uint64_t resource_id);
 
 int
 gpu_core_cap_check(const char *token, unsigned int token_count,
 		   uint64_t op, uint64_t resource_id)
 {
-	(void)token;
-	(void)token_count;
-	(void)op;
-	(void)resource_id;
+	struct uros_cap cap;
+	kern_return_t kr;
+
+	if (token == NULL || token_count == 0) {
+		/* Pre-#198 bootstrap log path: no cap yet.  See
+		 * gpu_text_render_enqueue for the only caller that
+		 * relies on this. */
+		return 0;
+	}
+	if (token_count != sizeof(struct uros_cap))
+		return -1;
+
+	memcpy(&cap, token, sizeof(cap));
+	kr = urmach_cap_verify(&cap, (uint32_t)op, resource_id);
+	if (kr != KERN_SUCCESS) {
+		printf("gpu_server: cap_verify FAIL "
+		       "(op=0x%llx res=0x%llx kr=%d)\n",
+		       (unsigned long long)op,
+		       (unsigned long long)resource_id, (int)kr);
+		return -1;
+	}
 	return 0;
 }
 
