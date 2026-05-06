@@ -78,19 +78,31 @@ extern u_char	*vid_start;
 u_char		*screen_vid_start;
 
 /*
- * Issue #190: vgaattach used to kmem_alloc_wired() these two ~33KB
- * vgaHWRec buffers, but it runs from machine_init() — i.e. before
- * thread_init / scheduler — so the underlying vm_map_entry zone may
- * need to grow, which re-enters zalloc on the same zone, hits
- * doing_alloc=TRUE, and calls assert_wait while current_thread() is
- * still NULL.  KVM happened to leave the zone full enough to dodge
- * it; TCG didn't.  Statically reserving the buffers in BSS removes
- * the early allocation entirely (cost: ~67 KB BSS).
+ * WORKAROUND-TCG (#190 / #192) — DISABLED.
+ *
+ * The BSS-buffer workaround below was added to dodge a QEMU TCG soft-MMU
+ * bug that drops the first PTE write into freshly-allocated PT pages
+ * (see issue #192 for the full root-cause analysis).  Under TCG that
+ * silent drop made the early kmem_alloc_wired() in vgaattach return a
+ * page whose PTE was never installed, so the next access faulted in
+ * vm_fault_page → assert_wait pre-scheduler.
+ *
+ * It is not a real fix — it just keeps vgaattach off the kmem path.
+ * On KVM and real hardware the original code path works correctly,
+ * and shipping a permanent workaround here obscures the actual call
+ * sequence.  Disabled by default; re-enable by flipping the #if.
+ *
+ * Cost when re-enabled: ~67 KB BSS for the two vgaHWRec buffers.
  */
+#if 0	/* TCG-only workaround, see comment above */
 static vgaHWRec vga_text_state_buf;
 static vgaHWRec vga_curr_state_buf;
 vgaHWPtr	vga_text_state = &vga_text_state_buf;
 vgaHWPtr	vga_curr_state = &vga_curr_state_buf;
+#else
+vgaHWPtr	vga_text_state = (vgaHWPtr) 0;
+vgaHWPtr	vga_curr_state = (vgaHWPtr) 0;
+#endif
 
 void		(*vgaSave)(void *);
 void		(*vgaRestore)(void *);
@@ -143,13 +155,31 @@ vgaprobe(caddr_t port, struct bus_device *dev)
 	return 1;
 }
 
-static int vga_attached = 0;
-
 static void
 vgaattach(struct bus_device *dev)
 {
-	if (!vga_attached) {
-		vga_attached = 1;
+	int	r1, r2;
+
+	if (!vga_text_state) {
+		r1 = kmem_alloc_wired(kernel_map,
+				      (vm_offset_t *)&vga_text_state,
+				      sizeof(vgaHWRec));
+		r2 = kmem_alloc_wired(kernel_map,
+				      (vm_offset_t *)&vga_curr_state,
+				      sizeof(vgaHWRec));
+		if (r1 || r2) {
+			printf("vgaattach: error allocating memory!\n");
+			if (!r1)
+				kmem_free(kernel_map,
+					  (vm_offset_t)vga_text_state,
+					  sizeof(vgaHWRec));
+			if (!r2)
+				kmem_free(kernel_map,
+					  (vm_offset_t)vga_curr_state,
+					  sizeof(vgaHWRec));
+			vgaPresent = 0;
+			return;
+		}
 		vgaSave = (void (*)(void *))vgaHWSave;
 		vgaRestore = (void (*)(void *))vgaHWRestore;
 		vgaBase = (u_char *)phystokv(dev->phys_address);
