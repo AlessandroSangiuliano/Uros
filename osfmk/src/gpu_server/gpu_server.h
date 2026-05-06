@@ -64,23 +64,24 @@ struct gpu_device_entry {
  * /mach_servers/modules/gpu/ replaces the static list.
  * ============================================================ */
 
-struct gpu_module_slot {
-	int				in_use;
-	const gpu_module_ops_t		*ops;
-	void				*dl_handle;	/* NULL if static */
-};
+/* No on-server module slot: gpu_server keeps a flat array of
+ * `gpu_module_ops_t *` returned by libmodload and walks it during
+ * discovery.  libmodload owns the dlopen handles. */
 
 /* ============================================================
  * Core API — exposed to modules and to the MIG handlers
  * ============================================================ */
 
 /*
- * core_init / core_run_discovery / core_register_static_module are
- * called from main.c during startup.  Modules never call these.
+ * core_init / core_run_discovery are called from main.c during
+ * startup.  Modules never call these.  `modules` is the array
+ * libmodload populated; entries are full gpu_module_ops_t pointers
+ * looked up via dlsym.
  */
 int  gpu_core_init(void);
-int  gpu_core_register_static_module(const gpu_module_ops_t *ops);
-void gpu_core_run_discovery(mach_port_t hal_port);
+void gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
+			    unsigned int n_modules,
+			    mach_port_t hal_port);
 
 /*
  * Resource lookup helpers used by the MIG handlers (gpu_mig.c).

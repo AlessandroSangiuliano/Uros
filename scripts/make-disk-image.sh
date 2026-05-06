@@ -81,6 +81,8 @@ AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
 VIRTIO_BLK_MODULE="$BUILD_DIR/src/block_device_server/modules/virtio_blk.so"
 HAL_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hal_server"
 HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
+GPU_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/gpu_server"
+GPU_VGA_MODULE="$BUILD_DIR/src/gpu_server/modules/vga.so"
 EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
 PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 CAP_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_server"
@@ -178,10 +180,14 @@ fi
 # partire PRIMA di default_pager, altrimenti blk_open("disk0c") bloccherebbe
 # su netname_notify in attesa che BDS pubblichi la partizione.
 #
+GPU_SERVER_CONF_LINE=""
+[ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
+
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
 hal_server hal_server
+${GPU_SERVER_CONF_LINE}
 block_device_server block_device_server
 default_pager default_pager disk0c
 hello_server hello_server
@@ -281,6 +287,20 @@ mkdir hal
 cd hal
 write $HAL_PCI_SCAN_MODULE pci_scan.so
 DBGFS
+
+# gpu_server is optional in 0.1.0 (OSFMK_BUILD_GPU_SERVER off by default)
+if [ -f "$GPU_SERVER" ] && [ -f "$GPU_VGA_MODULE" ]; then
+    debugfs -w -f - "$PART_IMG" >>"$DBGFS_LOG" 2>&1 <<DBGFS
+cd /mach_servers
+write $GPU_SERVER gpu_server
+cd modules
+mkdir gpu
+cd gpu
+write $GPU_VGA_MODULE vga.so
+DBGFS
+    echo "  /mach_servers/gpu_server                  → $(stat -c%s "$GPU_SERVER") bytes"
+    echo "  /mach_servers/modules/gpu/vga.so          → $(stat -c%s "$GPU_VGA_MODULE") bytes"
+fi
 
 echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"
 echo "  /mach_servers/bootstrap.conf → 'cap_server cap_server'"

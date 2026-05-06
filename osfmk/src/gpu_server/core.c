@@ -24,42 +24,6 @@
 #include "gpu_server.h"
 
 /* ================================================================
- * Module registry
- * ================================================================ */
-
-static struct gpu_module_slot module_slots[GPU_MAX_MODULES];
-static unsigned int            n_module_slots;
-
-int
-gpu_core_register_static_module(const gpu_module_ops_t *ops)
-{
-	unsigned int i;
-
-	if (ops == NULL || ops->name == NULL)
-		return -1;
-	if (ops->abi_version != GPU_MODULE_ABI_VERSION) {
-		printf("gpu_server: rejecting module \"%s\" — ABI %u != %u\n",
-		       ops->name, (unsigned)ops->abi_version,
-		       (unsigned)GPU_MODULE_ABI_VERSION);
-		return -1;
-	}
-	if (n_module_slots >= GPU_MAX_MODULES) {
-		printf("gpu_server: module table full, dropping \"%s\"\n",
-		       ops->name);
-		return -1;
-	}
-
-	i = n_module_slots++;
-	module_slots[i].in_use    = 1;
-	module_slots[i].ops       = ops;
-	module_slots[i].dl_handle = NULL;
-
-	printf("gpu_server: registered static module \"%s\" (priority=%u)\n",
-	       ops->name, (unsigned)ops->priority);
-	return 0;
-}
-
-/* ================================================================
  * Device table
  *
  * Slot 0 is reserved as "invalid handle"; live entries use ids 1..N.
@@ -119,30 +83,41 @@ gpu_core_dev_copy_all(struct gpu_device_info *out, unsigned int max)
  *
  * In 0.1.0 the vga module (#195) does not need HAL — it claims the
  * legacy VGA framebuffer unconditionally.  Future modules call
- * hal_list_devices on hal_port and probe each DISPLAY-class entry.
- *
- * The skeleton here just calls every registered module's probe() with
- * a NULL hal_device hint, matching what vga.c will accept.
+ * hal_list_devices on hal_port and probe each DISPLAY-class entry;
+ * for now we just call every loaded module's probe() with a NULL
+ * hint, matching the legacy-VGA fallback in design doc §8.1.
  * ================================================================ */
 
 void
-gpu_core_run_discovery(mach_port_t hal_port)
+gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
+		       unsigned int n_modules,
+		       mach_port_t hal_port)
 {
 	unsigned int m;
 
-	(void)hal_port;	/* used by future modules; silenced for skeleton */
+	(void)hal_port;	/* used by future modules; silenced for 0.1.0 */
 
-	if (n_module_slots == 0) {
-		printf("gpu_server: no back-end modules registered "
-		       "(skeleton run)\n");
+	if (modules == NULL || n_modules == 0) {
+		printf("gpu_server: no back-end modules loaded — discovery "
+		       "skipped\n");
 		return;
 	}
 
-	for (m = 0; m < n_module_slots; m++) {
-		const gpu_module_ops_t *ops = module_slots[m].ops;
+	for (m = 0; m < n_modules; m++) {
+		const gpu_module_ops_t *ops = modules[m];
 		void *priv;
 		struct gpu_device_entry *dev;
 
+		if (ops == NULL)
+			continue;
+		if (ops->abi_version != GPU_MODULE_ABI_VERSION) {
+			printf("gpu_server: rejecting module \"%s\" — "
+			       "ABI %u != %u\n",
+			       ops->name ? ops->name : "(unnamed)",
+			       (unsigned)ops->abi_version,
+			       (unsigned)GPU_MODULE_ABI_VERSION);
+			continue;
+		}
 		if (ops->probe == NULL)
 			continue;
 		priv = ops->probe(NULL);
@@ -212,9 +187,7 @@ int
 gpu_core_init(void)
 {
 	memset(devices, 0, sizeof(devices));
-	memset(module_slots, 0, sizeof(module_slots));
 	n_devices = 0;
-	n_module_slots = 0;
 	return 0;
 }
 
@@ -229,13 +202,34 @@ gpu_core_init(void)
 void
 gpu_core_text_puts(const char *buf, size_t len)
 {
-	char line[128];
-	size_t n;
+	unsigned int i;
 
 	if (buf == NULL || len == 0)
 		return;
-	n = (len < sizeof(line) - 1) ? len : sizeof(line) - 1;
-	memcpy(line, buf, n);
-	line[n] = '\0';
-	printf("gpu_server: text_puts(%u): %s\n", (unsigned)len, line);
+
+	/* Route to the first attached device whose module supports
+	 * text_puts.  In 0.1.0 that's the vga module on dev_id 1; in
+	 * 0.2+ a module may decline (text_puts == NULL) in which case
+	 * core falls back to the kernel console so we never lose
+	 * panic / log output. */
+	for (i = 1; i < GPU_MAX_DEVICES; i++) {
+		struct gpu_device_entry *dev = gpu_core_dev_lookup(i);
+		if (dev == NULL)
+			continue;
+		if (dev->module == NULL || dev->module->text_puts == NULL)
+			continue;
+		(void)dev->module->text_puts(dev->priv, buf, len);
+		return;
+	}
+
+	/* No back-end claimed text_puts — write through the bootstrap
+	 * console so log output still reaches the user.  This keeps the
+	 * skeleton observable when the build runs without modules. */
+	{
+		char line[128];
+		size_t n = (len < sizeof(line) - 1) ? len : sizeof(line) - 1;
+		memcpy(line, buf, n);
+		line[n] = '\0';
+		printf("gpu_server: text_puts(%u): %s\n", (unsigned)len, line);
+	}
 }

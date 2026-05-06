@@ -63,11 +63,18 @@ PTHREAD_TEST="$SBIN/pthread_test"
 HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
 AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
 VIRTIO_BLK_MODULE="$BUILD_DIR/src/block_device_server/modules/virtio_blk.so"
+GPU_SERVER="$SBIN/gpu_server"
+GPU_VGA_MODULE="$BUILD_DIR/src/gpu_server/modules/vga.so"
 
-for f in "$NAME_SERVER" "$HAL_SERVER" "$BLOCK_DEVICE_SERVER" \
-         "$DEFAULT_PAGER" "$HELLO_SERVER" "$IPC_BENCH" \
-         "$EXT2_SERVER" "$PTHREAD_TEST" \
-         "$HAL_PCI_SCAN_MODULE" "$AHCI_MODULE" "$VIRTIO_BLK_MODULE"; do
+REQUIRED_FILES=(
+    "$NAME_SERVER" "$HAL_SERVER" "$BLOCK_DEVICE_SERVER"
+    "$DEFAULT_PAGER" "$HELLO_SERVER" "$IPC_BENCH"
+    "$EXT2_SERVER" "$PTHREAD_TEST"
+    "$HAL_PCI_SCAN_MODULE" "$AHCI_MODULE" "$VIRTIO_BLK_MODULE"
+)
+# gpu_server is optional in 0.1.0 (OSFMK_BUILD_GPU_SERVER off by default)
+[ -f "$GPU_SERVER" ] && REQUIRED_FILES+=("$GPU_SERVER" "$GPU_VGA_MODULE")
+for f in "${REQUIRED_FILES[@]}"; do
     if [ ! -f "$f" ]; then
         echo "ERRORE: file mancante: $f"
         exit 1
@@ -84,10 +91,14 @@ CAP_SERVER_CONF_LINE=""
 CAP_TEST_CONF_LINE=""
 [ -f "$CAP_TEST" ] && CAP_TEST_CONF_LINE="cap_test cap_test"
 
+GPU_SERVER_CONF_LINE=""
+[ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
+
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
 hal_server hal_server
+${GPU_SERVER_CONF_LINE}
 block_device_server block_device_server
 default_pager default_pager disk0c
 hello_server hello_server
@@ -112,6 +123,10 @@ ARGS+=("pthread_test:$PTHREAD_TEST")
 ARGS+=("modules/hal/pci_scan.so:$HAL_PCI_SCAN_MODULE")
 ARGS+=("modules/block/ahci.so:$AHCI_MODULE")
 ARGS+=("modules/block/virtio_blk.so:$VIRTIO_BLK_MODULE")
+if [ -f "$GPU_SERVER" ]; then
+    ARGS+=("gpu_server:$GPU_SERVER")
+    ARGS+=("modules/gpu/vga.so:$GPU_VGA_MODULE")
+fi
 
 "$MKBUNDLE" "${ARGS[@]}"
 
