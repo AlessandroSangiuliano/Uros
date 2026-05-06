@@ -129,6 +129,7 @@ set(GPU_SOURCES
   main.c
   core.c
   gpu_mig.c
+  text_render.c
   ${GPU_SERVER_C}
 )
 

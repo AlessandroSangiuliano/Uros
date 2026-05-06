@@ -102,11 +102,44 @@ int gpu_core_cap_check(const char *token, unsigned int token_count,
 		       uint64_t op, uint64_t resource_id);
 
 /*
- * Text plane.  In #194 this just prints to the console / stderr so
- * the dispatch path is observable.  In #196 (text_render) it gets a
- * real implementation.
+ * Text plane.  Routes a chunk to the first attached module that
+ * implements text_puts (today: vga); falls back to the bootstrap
+ * console if no module is loaded.  Called from the text_render
+ * worker thread, NEVER directly from the MIG dispatch loop — the
+ * MIG handler enqueues into text_render and returns immediately.
  */
 void gpu_core_text_puts(const char *buf, size_t len);
+
+/* ============================================================
+ * Text render pipeline (text_render.c)
+ *
+ * Single worker thread + bounded SPSC queue per design doc §11.3
+ * rule 4.  Producers (gpu_text_puts MIG handler in 0.1.0; future
+ * panic / log_forwarder paths) enqueue and never block — the
+ * rendering thread serialises every cell write into vga so the
+ * cursor and scroll state cannot race.
+ *
+ * Returns 0 on success.  After init the worker is detached; gpu_server
+ * never joins it (the only termination path is task exit).
+ * ============================================================ */
+
+int  gpu_text_render_init(void);
+
+/*
+ * Enqueue a chunk of text into the render queue.  Drops silently if
+ * the queue is full (best-effort log semantics, design §11.3 rule
+ * 2): producers like simpleroutine MIG handlers must not block on
+ * VGA paint speed.  Up to GPU_BUF_MAX bytes are accepted per call;
+ * longer chunks get truncated.
+ */
+void gpu_text_render_enqueue(const char *buf, size_t len);
+
+/*
+ * Diagnostics — total dropped-chunk count since boot.  Exposed so a
+ * future "gpu_query_stats" RPC can surface it without coupling
+ * text_render's internals.
+ */
+unsigned int gpu_text_render_drops(void);
 
 /* ============================================================
  * MIG-side glue — implemented in gpu_mig.c
