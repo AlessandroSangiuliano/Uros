@@ -263,6 +263,7 @@ rtc_config(void)
 int
 rtc_init(void)
 {
+	vm_offset_t	*vp;
 #if	NCPUS > 1 && AT386
 	mp_disable_preemption();
 	if (cpu_number() != master_cpu) {
@@ -272,25 +273,32 @@ rtc_init(void)
 	mp_enable_preemption();
 #endif
 	/*
-	 * Issue #190: rtc_init runs from machine_init -> clock_config,
-	 * before the scheduler is up.  The original code did
-	 * kmem_alloc_wired() + bzero() of a fresh page; under TCG the
-	 * subsequent bzero faulted forever (vm_fault couldn't make
-	 * progress pre-scheduler — same systemic early-VM brittleness
-	 * that bit pv_list and the VGA buffers).  Use a BSS-resident
-	 * page-sized struct instead — same lifetime (lives forever),
-	 * no early-boot allocation needed.
+	 * WORKAROUND-TCG (#190 / #192) — DISABLED.
+	 *
+	 * The BSS storage variant below was added to dodge the QEMU TCG
+	 * bug that drops the first PTE write into freshly-allocated PT
+	 * pages (root cause documented in #192).  It is not a real fix —
+	 * on KVM and real hardware the original kmem_alloc_wired() works.
+	 * Disabled by default; flip the #if to re-enable for TCG runs.
 	 */
-	/* PAGE_SIZE expands to a runtime variable in this kernel; use
-	 * the literal i386 page size (4096) for the static reservation. */
+#if 0	/* TCG-only workaround */
 	{
 		static union {
 			mapped_tvalspec_t mt;
-			char pad[4096];
+			char pad[4096];	/* PAGE_SIZE is runtime here */
 		} rtc_mtime_storage;
 		rtclock.mtime = &rtc_mtime_storage.mt;
 		memset(&rtc_mtime_storage, 0, sizeof(rtc_mtime_storage));
 	}
+#else
+	/*
+	 * Allocate mapped time page.
+	 */
+	vp = (vm_offset_t *) &rtclock.mtime;
+	if (kmem_alloc_wired(kernel_map, vp, PAGE_SIZE) != KERN_SUCCESS)
+		panic("cannot allocate rtclock time page\n");
+	bzero((char *)rtclock.mtime, PAGE_SIZE);
+#endif
 	RtcTime = &rtclock.time;
 	simple_lock_init(&rtclock.lock, ETAP_NO_TRACE);
 	rtc_setvals( CLKNUM, RTC_MINRES );  /* compute constants */

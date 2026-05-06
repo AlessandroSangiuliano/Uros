@@ -1367,37 +1367,36 @@ pmap_init(void)
 #endif	/* NCPUS > 1 */
 
 	/*
-	 *	Issue #190: pre-fill pv_free_list with a generous batch of
-	 *	pv_entry slots while pmap_initialized is still FALSE.  In
-	 *	this window pmap_enter() bypasses pv tracking (valid_page()
-	 *	returns FALSE), so kmem_alloc_wired below cannot recurse
-	 *	into zalloc(pv_list_zone).  Once pmap_initialized flips, the
-	 *	first pmap_enter that needs a pv_entry would otherwise have
-	 *	to grow the zone and that grow path itself calls pmap_enter
-	 *	for the new pages — a recursion that lands in zalloc's
-	 *	doing_alloc=TRUE wait branch and panics pre-scheduler.
-	 *	Under KVM the timing happened to keep enough entries around;
-	 *	under TCG it didn't.
+	 * WORKAROUND-TCG (#190 / #192) — DISABLED.
+	 *
+	 * Under QEMU TCG the pv_list_zone would re-grow itself during
+	 * early boot and panic in zalloc("recursive grow ... before
+	 * scheduler is up").  The fix below pre-fills pv_free_list from
+	 * a 256 KB BSS buffer so the zone never needs to grow before
+	 * the scheduler is up.  An earlier variant used kmem_alloc_wired
+	 * for the prefill, but #192 showed the first 4 KB of any fresh
+	 * kmem region is a "ghost" page under TCG (writes silently
+	 * dropped) — using BSS sidesteps that.
+	 *
+	 * It's a TCG-only patch; on KVM and real HW the original code
+	 * works, and this BSS allocation is wasted.  Flip the #if to
+	 * re-enable for TCG runs.
 	 */
+#if 0	/* TCG-only workaround */
 	{
-		const vm_size_t	pv_prefill_bytes = 16 * 1024; /* ~1000 entries */
-		vm_offset_t	pv_addr;
-		if (kmem_alloc_wired(kernel_map, &pv_addr,
-				     pv_prefill_bytes) != KERN_SUCCESS) {
-			panic("pmap_init: pv_free_list prefill");
-		}
-		memset((char *)pv_addr, 0, pv_prefill_bytes);
-		{
-			vm_size_t off;
-			for (off = 0; off + sizeof(struct pv_entry) <=
-			     pv_prefill_bytes; off += sizeof(struct pv_entry)) {
-				pv_entry_t e =
-				    (pv_entry_t)(pv_addr + off);
-				e->next = pv_free_list;
-				pv_free_list = e;
-			}
+		static char pv_prefill_storage[256 * 1024];
+		const vm_size_t	pv_prefill_bytes = sizeof(pv_prefill_storage);
+		vm_offset_t	pv_addr = (vm_offset_t)pv_prefill_storage;
+		vm_size_t	off;
+		memset(pv_prefill_storage, 0, pv_prefill_bytes);
+		for (off = 0; off + sizeof(struct pv_entry) <=
+		     pv_prefill_bytes; off += sizeof(struct pv_entry)) {
+			pv_entry_t e = (pv_entry_t)(pv_addr + off);
+			e->next = pv_free_list;
+			pv_free_list = e;
 		}
 	}
+#endif
 
 	/*
 	 *	Only now, when all of the data structures are allocated,

@@ -155,12 +155,31 @@ MACRO_END
 void
 utime_init(void)
 {
-	vm_offset_t	*vp;
-
-	vp = (vm_offset_t *) &mtime;
-	if (kmem_alloc_wired(kernel_map, vp, PAGE_SIZE)	!= KERN_SUCCESS)
-		panic("mapable_time_init");
-	bzero((char *)mtime, PAGE_SIZE);
+	/*
+	 * WORKAROUND-TCG (#192) — DISABLED.  Same story as rtc_init
+	 * and vgaattach: BSS-page replacement to dodge the TCG PT-page
+	 * alias write drop.  Not a real fix; on KVM/real HW the original
+	 * kmem path works.  Flip the #if to re-enable for TCG.
+	 */
+#if 0	/* TCG-only workaround */
+	{
+		static union {
+			mapped_time_value_t mt;
+			char pad[4096];
+		} utime_mtime_storage;
+		mtime = &utime_mtime_storage.mt;
+		memset(&utime_mtime_storage, 0, sizeof(utime_mtime_storage));
+	}
+#else
+	{
+		vm_offset_t	*vp;
+		vp = (vm_offset_t *) &mtime;
+		if (kmem_alloc_wired(kernel_map, vp, PAGE_SIZE)
+		    != KERN_SUCCESS)
+			panic("mapable_time_init");
+		bzero((char *)mtime, PAGE_SIZE);
+	}
+#endif
 	(void)bbc_gettime((time_value_t *)&time);
 }
 
