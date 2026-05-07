@@ -128,6 +128,10 @@ io_reg_t iopl_port_list[] = {
 	0x40,
 	/* timer 2 */
 	0x42,
+	/* PS/2 controller (8042) — data + status/command.
+	 * Userspace char_server/ps2.so owns the keyboard; kd0's IRQ
+	 * is hijacked via device_intr_register at attach time. */
+	0x60, 0x64,
 	/* speaker output */
 	0x61,
 	/* configuration RAM */

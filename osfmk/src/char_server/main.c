@@ -26,6 +26,7 @@
 #include <mach/notify.h>
 #include <sa_mach.h>
 #include <servers/netname.h>
+#include <device/device.h>
 #include <stdio.h>
 #include <string.h>
 #include "char_server.h"
@@ -33,6 +34,8 @@
 #include "libcap.h"
 #include "gpu_console.h"
 #include "cap_revoke_server.h"
+
+static mach_port_t char_iopl_port = MACH_PORT_NULL;
 
 mach_port_t	char_host_port;
 mach_port_t	char_device_port;
@@ -217,6 +220,23 @@ main(int argc, char **argv)
 	if (char_core_irq_init(char_device_port, char_port_set) < 0) {
 		printf("char_server: irq init failed\n");
 		return 1;
+	}
+
+	/* Grant port-I/O privilege.  PS/2 (and future legacy back-ends like
+	 * uart) talk to the controller via inb/outb on fixed ISA ports —
+	 * device_open("iopl") gives the kernel's #GP trap-and-emulate path
+	 * the send right it checks for.  Holding the port is enough; no
+	 * further calls on it are needed. */
+	{
+		security_token_t tok = { { 0, 0 } };
+		kern_return_t kr;
+
+		kr = device_open(char_device_port, MACH_PORT_NULL, 0, tok,
+				 "iopl", &char_iopl_port);
+		if (kr != KERN_SUCCESS)
+			printf("char_server: device_open(\"iopl\") failed "
+			       "(kr=%d) — port-I/O modules will fault\n",
+			       (int)kr);
 	}
 
 	{
