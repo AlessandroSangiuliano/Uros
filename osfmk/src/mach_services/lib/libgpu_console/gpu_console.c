@@ -25,7 +25,10 @@
 #include <mach.h>
 #include <mach/mach_traps.h>
 #include <mach/mach_port.h>
+#include <pthread.h>
+#include <sa_mach.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <servers/netname.h>
@@ -144,4 +147,82 @@ void
 gpu_console_puts(const char *buf, size_t len)
 {
 	gc_send(buf, len);
+}
+
+/* ============================================================
+ * Async / retrying init (#209)
+ *
+ * Servers booted before gpu_server (today only cap_server) use
+ * this so they don't have to think about bootstrap.conf order.
+ * The worker thread is detached: nobody joins it, it exits as
+ * soon as gpu_console_init() succeeds or the retry budget runs
+ * out.
+ * ============================================================ */
+
+struct gpu_console_async_arg {
+	char		tag[GC_TAG_MAX + 1];
+	unsigned int	retry_us;
+	unsigned int	max_tries;
+};
+
+static void *
+gpu_console_async_worker(void *raw)
+{
+	struct gpu_console_async_arg *a = raw;
+	unsigned int n;
+
+	for (n = 0; n < a->max_tries; n++) {
+		if (gc_ready)
+			break;	/* somebody else won */
+		if (gpu_console_init(a->tag) == 0)
+			break;
+		usleep(a->retry_us);
+	}
+
+	free(a);
+	return NULL;
+}
+
+int
+gpu_console_init_async(const char *tag,
+		       unsigned int retry_ms,
+		       unsigned int max_tries)
+{
+	pthread_t       tid;
+	pthread_attr_t  attr;
+	struct gpu_console_async_arg *a;
+	int             rc;
+
+	if (gc_ready)
+		return 0;
+
+	a = malloc(sizeof(*a));
+	if (a == NULL)
+		return -1;
+
+	if (tag != NULL) {
+		size_t n = strlen(tag);
+		if (n > GC_TAG_MAX) n = GC_TAG_MAX;
+		memcpy(a->tag, tag, n);
+		a->tag[n] = '\0';
+	} else {
+		a->tag[0] = '\0';
+	}
+	a->retry_us  = (retry_ms ? retry_ms : 100u) * 1000u;
+	a->max_tries = (max_tries ? max_tries : 50u);
+
+	rc = pthread_attr_init(&attr);
+	if (rc == 0)
+		(void)pthread_attr_setdetachstate(&attr,
+				PTHREAD_CREATE_DETACHED);
+
+	rc = pthread_create(&tid, (rc == 0) ? &attr : NULL,
+			    gpu_console_async_worker, a);
+	(void)pthread_attr_destroy(&attr);
+
+	if (rc != 0) {
+		free(a);
+		return -1;
+	}
+	return 0;
 }

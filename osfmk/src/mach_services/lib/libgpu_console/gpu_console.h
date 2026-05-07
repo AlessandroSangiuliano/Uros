@@ -44,6 +44,25 @@ extern "C" {
 int  gpu_console_init(const char *tag);
 
 /*
+ * Async / retrying init (#209).  Spawns a short-lived detached
+ * pthread that retries gpu_console_init() every retry_ms, up to
+ * max_tries.  On success the printf hook is installed and the
+ * thread exits.  Returns 0 if the worker started, < 0 only on
+ * pthread_create failure.
+ *
+ * Use this from servers that boot before gpu_server (today
+ * cap_server) — sync init would just fail forever there.  Once a
+ * sync or async init has succeeded, every subsequent call is a
+ * no-op.
+ *
+ * Defaults if a value is 0: retry_ms = 100, max_tries = 50
+ * (~5 seconds of total retry budget).
+ */
+int  gpu_console_init_async(const char *tag,
+			    unsigned int retry_ms,
+			    unsigned int max_tries);
+
+/*
  * Push a chunk of text directly through the gpu mirror, bypassing
  * any libsa_mach hook.  Useful for tasks that don't use the libsa_mach
  * printf path (e.g. raw dumps from a custom logger).  No-op if init
