@@ -382,7 +382,15 @@ ps2_irq_handler(void *arg)
 			(void)inb(PS2_DATA);
 			continue;
 		}
-		ps2_handle_scancode(p, inb(PS2_DATA));
+		{
+			uint8_t sc = inb(PS2_DATA);
+#ifdef PS2_DEBUG_TRACE	/* set via -DPS2_DEBUG_TRACE for bring-up */
+			printf("ps2: sc=0x%02x %s\n",
+			       (unsigned)sc,
+			       (sc & 0x80) ? "rel" : "press");
+#endif
+			ps2_handle_scancode(p, sc);
+		}
 	}
 }
 

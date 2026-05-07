@@ -102,7 +102,10 @@ add_library(char_ps2_module SHARED
 )
 add_dependencies(char_ps2_module mig_mach_public_headers)
 target_compile_options(char_ps2_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
-target_compile_definitions(char_ps2_module PRIVATE MACH_IPC_COMPAT=0)
+target_compile_definitions(char_ps2_module PRIVATE MACH_IPC_COMPAT=0
+  # Bring-up trace: log every byte read from PS2_DATA in ps2_irq_handler.
+  # Remove when a real subscriber (tty / shell) consumes the events.
+  PS2_DEBUG_TRACE)
 target_include_directories(char_ps2_module PRIVATE ${CHAR_INCLUDE_DIRS})
 set_target_properties(char_ps2_module PROPERTIES
   OUTPUT_NAME "ps2"

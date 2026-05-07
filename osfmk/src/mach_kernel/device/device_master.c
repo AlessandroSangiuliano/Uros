@@ -55,6 +55,9 @@
 #include <chips/busses.h>
 #include <i386/ipl.h>
 #include <i386/pio.h>
+#include <kern/sched_prim.h>
+#include <kern/thread.h>
+#include <kern/kalloc.h>
 
 /* ================================================================
  * Interrupt forwarding
@@ -70,27 +73,118 @@ static int	irq_orig_unit[IRQ_FORWARD_MAX];
 static int	irq_orig_spl[IRQ_FORWARD_MAX];
 
 /*
- * IRQ handler installed by device_intr_register().
- * Sends a simple notification message to the registered port.
- * Runs at interrupt level — mach_msg_send_from_kernel is safe
- * here because it uses ipc_mqueue_send_always (no blocking).
+ * IRQ delivery is split in two halves:
+ *
+ *   top-half (irq_forward_handler):
+ *      Runs in interrupt context (SPL6).  Just bumps a per-IRQ
+ *      pending counter and wakes the bottom-half thread.
+ *
+ *   bottom-half (irq_forward_thread):
+ *      A normal kernel thread.  Drains pending counters and calls
+ *      mach_msg_send_from_kernel, which goes through the full IPC
+ *      machinery (zone alloc, locks, possibly direct-thread-switch
+ *      from #54).  None of that is safe from an IRQ handler — doing
+ *      it inline corrupted curr_ipl and panicked intr_ret as soon
+ *      as the keyboard fired its first scancode in #206.
+ *
+ * The userspace driver (e.g. ps2.so) drains the device on its own
+ * inside the notification handler, so a single notification per IRQ
+ * burst is enough — the counter is only there in case multiple IRQs
+ * fire before the bottom-half runs.
  */
+
+static volatile unsigned int	irq_pending[IRQ_FORWARD_MAX];
+static int			irq_thread_started;
+static int			irq_thread_wake_event;	/* address used as wait channel */
+
 static void
 irq_forward_handler(int irq)
 {
-	struct irq_forward *fwd = &irq_forward_table[irq];
-	mach_msg_header_t msg;
-
-	if (!fwd->active || fwd->notify_port == IP_NULL)
+	if (irq < 0 || irq >= IRQ_FORWARD_MAX)
+		return;
+	if (!irq_forward_table[irq].active ||
+	    irq_forward_table[irq].notify_port == IP_NULL)
 		return;
 
-	msg.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
-	msg.msgh_size = sizeof(msg);
-	msg.msgh_remote_port = fwd->notify_port;
-	msg.msgh_local_port = MACH_PORT_NULL;
-	msg.msgh_id = IRQ_NOTIFY_MSGH_BASE + irq;
+	irq_pending[irq]++;
+	thread_wakeup((event_t)&irq_thread_wake_event);
+}
 
-	mach_msg_send_from_kernel(&msg, sizeof(msg));
+static void
+irq_forward_thread(void)
+{
+	for (;;) {
+		int		irq;
+		boolean_t	any;
+
+		any = FALSE;
+		for (irq = 0; irq < IRQ_FORWARD_MAX; irq++) {
+			spl_t s;
+			ipc_port_t notify;
+			unsigned int pending;
+
+			s = splhigh();
+			pending = irq_pending[irq];
+			if (pending == 0 || !irq_forward_table[irq].active) {
+				splx(s);
+				continue;
+			}
+			irq_pending[irq] = 0;
+			notify = irq_forward_table[irq].notify_port;
+			splx(s);
+
+			if (notify == IP_NULL)
+				continue;
+			any = TRUE;
+
+			/*
+			 * One message per burst.  ps2.so / future modules
+			 * loop on PS2_STAT_OBF themselves, so there's no
+			 * value in firing N notifications for N IRQs.
+			 */
+			{
+				mach_msg_header_t msg;
+
+				msg.msgh_bits =
+				    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+				msg.msgh_size = sizeof(msg);
+				msg.msgh_remote_port = notify;
+				msg.msgh_local_port  = MACH_PORT_NULL;
+				msg.msgh_id = IRQ_NOTIFY_MSGH_BASE + irq;
+				(void)mach_msg_send_from_kernel(&msg,
+								sizeof(msg));
+			}
+		}
+
+		if (!any) {
+			spl_t s = splhigh();
+			/* Re-check under spl to avoid losing a wakeup. */
+			boolean_t empty = TRUE;
+			for (irq = 0; irq < IRQ_FORWARD_MAX; irq++) {
+				if (irq_pending[irq] != 0) {
+					empty = FALSE;
+					break;
+				}
+			}
+			if (empty) {
+				assert_wait((event_t)&irq_thread_wake_event,
+					    FALSE);	/* uninterruptible */
+				splx(s);
+				thread_block((void(*)(void))0);
+			} else {
+				splx(s);
+			}
+		}
+	}
+}
+
+static void
+irq_forward_thread_start(void)
+{
+	if (irq_thread_started)
+		return;
+	irq_thread_started = 1;
+	(void)kernel_thread(kernel_task, irq_forward_thread, NULL);
 }
 
 void
@@ -212,6 +306,9 @@ ds_master_device_intr_register(
 
 	if (irq_forward_table[irq].active)
 		return KERN_RESOURCE_SHORTAGE;	/* already registered */
+
+	/* Spawn the bottom-half kthread on first registration. */
+	irq_forward_thread_start();
 
 	/*
 	 * Save the original handler and install our forwarder.
