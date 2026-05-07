@@ -101,10 +101,12 @@ target_include_directories(name_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/include
 )
 
-# Link against Mach userspace libraries.
+# Link against Mach userspace libraries.  name_server is purely
+# single-threaded (one mach_msg_server loop, no cthread_fork /
+# pthread_create anywhere), so neither libcthreads nor libpthreads
+# is linked — the gratuitous libcthreads dep was just template inertia.
 target_link_libraries(name_server_bin PRIVATE
   -Wl,--start-group
-  libcthreads
   libmach
   libsa_mach
   -Wl,--end-group

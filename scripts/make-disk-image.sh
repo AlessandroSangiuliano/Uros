@@ -84,6 +84,7 @@ HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
 GPU_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/gpu_server"
 GPU_VGA_MODULE="$BUILD_DIR/src/gpu_server/modules/vga.so"
 CHAR_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/char_server"
+CHAR_PS2_MODULE="$BUILD_DIR/src/char_server/modules/ps2.so"
 EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
 PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 CAP_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_server"
@@ -317,6 +318,13 @@ cd modules
 mkdir char
 DBGFS
     echo "  /mach_servers/char_server                 → $(stat -c%s "$CHAR_SERVER") bytes"
+    if [ -f "$CHAR_PS2_MODULE" ]; then
+        debugfs -w -f - "$PART_IMG" >>"$DBGFS_LOG" 2>&1 <<DBGFS
+cd /mach_servers/modules/char
+write $CHAR_PS2_MODULE ps2.so
+DBGFS
+        echo "  /mach_servers/modules/char/ps2.so         → $(stat -c%s "$CHAR_PS2_MODULE") bytes"
+    fi
 fi
 
 echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"

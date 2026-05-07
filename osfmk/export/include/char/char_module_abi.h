@@ -77,4 +77,36 @@ typedef struct char_module_ops {
 
 #define CHAR_MODULE_ENTRY_SUFFIX	"_module_ops"
 
+/* ============================================================
+ * Module → core callbacks.
+ *
+ * char_server core exports these symbols via --export-dynamic;
+ * modules dlopen'd into the same process call them directly.
+ * Same wiring trick block_device_server modules use to reach
+ * device_master MIG stubs.
+ *
+ * A module's IRQ handler runs on char_server's main dispatch
+ * thread (the one inside mach_msg_server) when an IRQ
+ * notification arrives on the registered port.  Keep it short:
+ * read a few bytes, build an event, fan out, return.
+ * ============================================================ */
+
+/*
+ * Register an IRQ handler.  Core allocates a Mach port, adds it
+ * to the main port_set, calls device_intr_register on the kernel
+ * master_device.  When the IRQ notification arrives on that port,
+ * the demux invokes `handler(arg)`.  Returns 0 on success.
+ *
+ * Only one handler per IRQ line.
+ */
+extern int char_core_irq_register(uint32_t irq,
+				  void (*handler)(void *arg),
+				  void *arg);
+
+/*
+ * Unregister the handler installed by char_core_irq_register.
+ * Safe to call from detach().
+ */
+extern int char_core_irq_unregister(uint32_t irq);
+
 #endif /* _CHAR_CHAR_MODULE_ABI_H_ */

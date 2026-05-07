@@ -42,9 +42,21 @@
 #include <mach/bootstrap.h>
 
 
-void (*_mach_init_routine)(void);
-int  (*_threadlib_init_routine)(void);
-void (*_threadlib_exit_routine)(int);
+/*
+ * Weak NULL fallbacks: libpthreads / libmach / libcthreads override
+ * these with strong definitions (e.g. _threadlib_init_routine =
+ * pthread_init).  Originally they were tentative ("common") defs,
+ * which combined with -Wl,--allow-multiple-definition let the BSS
+ * copy win over the strong override — pthread_init never ran,
+ * __pthread_stack_size stayed 0, and the first pthread_create() in
+ * cap_server (via gpu_console_init_async) faulted in
+ * _pthread_allocate_stack.  Marking them weak makes any strong
+ * library def take precedence, while still building servers like
+ * name_server that don't link a thread library.
+ */
+__attribute__((weak)) int  (*_mach_init_routine)(void)      = 0;
+__attribute__((weak)) int  (*_threadlib_init_routine)(void) = 0;
+__attribute__((weak)) void (*_threadlib_exit_routine)(int)  = 0;
 
 static char *__nullarg = 0;
 static char **__argv = &__nullarg;

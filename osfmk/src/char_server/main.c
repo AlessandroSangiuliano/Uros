@@ -26,6 +26,7 @@
 #include <mach/notify.h>
 #include <sa_mach.h>
 #include <servers/netname.h>
+#include <device/device.h>
 #include <stdio.h>
 #include <string.h>
 #include "char_server.h"
@@ -33,6 +34,8 @@
 #include "libcap.h"
 #include "gpu_console.h"
 #include "cap_revoke_server.h"
+
+static mach_port_t char_iopl_port = MACH_PORT_NULL;
 
 mach_port_t	char_host_port;
 mach_port_t	char_device_port;
@@ -69,6 +72,16 @@ cap_revoke_notify(mach_port_t notify_port, uint64_t cap_id)
 static boolean_t
 char_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	/* IRQ notifications first: they outnumber everything else once a
+	 * keyboard / UART module is active, and they have a recognisable
+	 * msgh_id range, so the discriminator is cheap. */
+	if (char_core_dispatch_irq(in)) {
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
 	if (char_server_server(in, out))
 		return TRUE;
 	if (cap_revoke_server(in, out))
@@ -200,6 +213,30 @@ main(int argc, char **argv)
 	if (char_core_init() < 0) {
 		printf("char_server: core init failed\n");
 		return 1;
+	}
+
+	/* IRQ wiring: modules call char_core_irq_register() in their
+	 * attach().  Must be initialised before discovery runs. */
+	if (char_core_irq_init(char_device_port, char_port_set) < 0) {
+		printf("char_server: irq init failed\n");
+		return 1;
+	}
+
+	/* Grant port-I/O privilege.  PS/2 (and future legacy back-ends like
+	 * uart) talk to the controller via inb/outb on fixed ISA ports —
+	 * device_open("iopl") gives the kernel's #GP trap-and-emulate path
+	 * the send right it checks for.  Holding the port is enough; no
+	 * further calls on it are needed. */
+	{
+		security_token_t tok = { { 0, 0 } };
+		kern_return_t kr;
+
+		kr = device_open(char_device_port, MACH_PORT_NULL, 0, tok,
+				 "iopl", &char_iopl_port);
+		if (kr != KERN_SUCCESS)
+			printf("char_server: device_open(\"iopl\") failed "
+			       "(kr=%d) — port-I/O modules will fault\n",
+			       (int)kr);
 	}
 
 	{
