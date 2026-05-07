@@ -106,3 +106,16 @@ routine tty_set_attr(
 	in	data_bits	: chr_u32_t;
 	in	parity		: chr_u32_t;
 	in	stop_bits	: chr_u32_t);
+
+/*
+ * tty_subscribe — register a notify port for "data available"
+ * wake-ups.  tty_read is non-blocking (returns 0 bytes on empty),
+ * so clients that want to wait for input subscribe and then read
+ * after each notification.  The module sends a header-only Mach msg
+ * (msgh_id = CHAR_TTY_NOTIFY_ID) per RX-IRQ batch.
+ */
+routine tty_subscribe(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	notify_port	: mach_port_t);

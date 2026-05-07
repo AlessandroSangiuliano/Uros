@@ -115,6 +115,26 @@ set_target_properties(char_ps2_module PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
 )
 
+# --- 16550 UART module (#207) ---
+add_library(char_uart_module SHARED
+  modules/uart.c
+  modules/ssp_module_stub.c
+)
+add_dependencies(char_uart_module mig_mach_public_headers)
+target_compile_options(char_uart_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
+target_compile_definitions(char_uart_module PRIVATE MACH_IPC_COMPAT=0
+  # Bring-up trace: log every RX byte in uart_irq_handler.  Remove
+  # when a real subscriber (shell / getty) consumes the stream.
+  UART_DEBUG_TRACE)
+target_include_directories(char_uart_module PRIVATE ${CHAR_INCLUDE_DIRS})
+set_target_properties(char_uart_module PROPERTIES
+  OUTPUT_NAME "uart"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+)
+
 # ===========================================================================
 # char_server executable
 # ===========================================================================
@@ -144,7 +164,7 @@ add_executable(char_server
 )
 
 add_dependencies(char_server mig_mach_public_headers libcap mig_cap_revoke
-		 char_ps2_module)
+		 char_ps2_module char_uart_module)
 
 target_compile_options(char_server PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(char_server PRIVATE MACH_IPC_COMPAT=0)

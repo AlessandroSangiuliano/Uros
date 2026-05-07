@@ -67,6 +67,7 @@ GPU_SERVER="$SBIN/gpu_server"
 GPU_VGA_MODULE="$BUILD_DIR/src/gpu_server/modules/vga.so"
 CHAR_SERVER="$SBIN/char_server"
 CHAR_PS2_MODULE="$BUILD_DIR/src/char_server/modules/ps2.so"
+CHAR_UART_MODULE="$BUILD_DIR/src/char_server/modules/uart.so"
 
 REQUIRED_FILES=(
     "$NAME_SERVER" "$HAL_SERVER" "$BLOCK_DEVICE_SERVER"
@@ -134,8 +135,8 @@ if [ -f "$GPU_SERVER" ]; then
 fi
 if [ -f "$CHAR_SERVER" ]; then
     ARGS+=("char_server:$CHAR_SERVER")
-    [ -f "$CHAR_PS2_MODULE" ] && ARGS+=("modules/char/ps2.so:$CHAR_PS2_MODULE")
-    # uart.so lands with #207
+    [ -f "$CHAR_PS2_MODULE" ]  && ARGS+=("modules/char/ps2.so:$CHAR_PS2_MODULE")
+    [ -f "$CHAR_UART_MODULE" ] && ARGS+=("modules/char/uart.so:$CHAR_UART_MODULE")
 fi
 
 "$MKBUNDLE" "${ARGS[@]}"

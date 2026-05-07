@@ -1219,11 +1219,24 @@ com_putc(
 {
 	register int i;
 
-	outb(INTR_ENAB(COM0_ADDR), 0);
+	/*
+	 * Minimal polled write: wait THRE, drop the byte, return.
+	 *
+	 * #207 moved COM1 IRQ + RX into userspace (char_server/uart.so).
+	 * The original code save/restore-pattern here was actually
+	 * IER=0 then *hardcoded* restore to iTX_ENAB|iRX_ENAB, which
+	 * silently overwrote whatever userspace had programmed in IER
+	 * (uart.so wants RX_DATA + LSI, not THRE) and on top of that
+	 * blackholed any RX byte that landed in the IER=0 window — the
+	 * UART RX path never woke up.
+	 *
+	 * Now we just touch THR.  No IER, no IIR, no FIFO config.  The
+	 * UART belongs to userspace; this hook stays only for printf
+	 * during boot before char_server is up and for panic, where
+	 * we need a write that works no matter what.
+	 */
 	for (i=0; (!(inb(LINE_STAT(COM0_ADDR)) & iTHRE)) && (i < 1000); i++);
 	outb(TXRX(COM0_ADDR),  c);
-	for (i=0; (!(inb(LINE_STAT(COM0_ADDR)) & iTHRE)) && (i < 1000); i++);
-	outb(INTR_ENAB(COM0_ADDR), iTX_ENAB|iRX_ENAB);
 }
 
 int
