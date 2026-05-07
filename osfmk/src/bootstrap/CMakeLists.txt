@@ -55,11 +55,19 @@ mig_server_stub(
   "${CMAKE_SOURCE_DIR}/export/include/servers/service.defs"
   service  ${MIG_OUT})
 
+# 5) gpu_server.defs (subsystem 4000) — bootstrap is the gpu_text_puts
+#    client (#198 log_forwarder).  We only need the user stubs but the
+#    macro emits both; the server-side .c is left unused.
+mig_server_stub(
+  "${CMAKE_SOURCE_DIR}/src/gpu_server/gpu_server.defs"
+  gpu_server  ${MIG_OUT})
+
 set(MIG_SERVER_SOURCES
   ${MIG_OUT}/bootstrapServer.c
   ${MIG_OUT}/excServer.c
   ${MIG_OUT}/notifyServer.c
   ${MIG_OUT}/serviceServer.c
+  ${MIG_OUT}/gpu_serverUser.c
 )
 
 # ===========================================================================
@@ -80,6 +88,9 @@ set(BOOTSTRAP_SOURCES
   # Issue #186: stage-1 multiboot bundle parser (early-stage server
   # binaries pre-loaded into RAM, removing the need for kernel IDE).
   bundle.c
+  # Issue #198: forward bootstrap log output to gpu_server's userspace
+  # text path (replaces the kernel VGA console once #199 lands).
+  log_forwarder.c
 )
 
 # Executable format loaders

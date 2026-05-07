@@ -77,6 +77,7 @@
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
 #include "file_system.h"
+#include "log_forwarder.h"
 
 /*
  * Override the pthread stack size for bootstrap server threads.
@@ -983,6 +984,14 @@ main(int argc, char **argv)
 	BOOTSTRAP_IO_LOCK();
 	printf("%s: started\n", program_name);
 	BOOTSTRAP_IO_UNLOCK();
+
+	/*
+	 * Issue #198: with every bootstrap.conf server now up, hand off
+	 * on-screen logging to gpu_server.  No-op (and harmless) when
+	 * gpu_server isn't in the bundle — log_forwarder_init() returns
+	 * < 0 and subsequent log_forwarder_puts() calls become no-ops.
+	 */
+	(void)log_forwarder_init();
 
 	/*
 	 * Issue #185: the demuxer is now owned by bootstrap_service_thread.
