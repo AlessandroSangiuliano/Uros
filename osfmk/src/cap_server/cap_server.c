@@ -50,6 +50,7 @@
 #include "cap_table.h"
 #include "cap_server_server.h"   /* MIG-generated demux prototype */
 #include "cap_revoke.h"          /* MIG-generated cap_revoke_notify user stub */
+#include "gpu_console.h"         /* #209: async printf mirror */
 
 /*
  * netname_check_in: publish our service port under "cap_server".
@@ -478,6 +479,16 @@ main(int argc, char **argv)
         printf("cap: netname_check_in failed (%d)\n", kr);
     else
         printf("cap: registered as \"cap_server\"\n");
+
+    /* #209: cap_server boots before gpu_server in bootstrap.conf
+     * (gpu_server cap_subscribe_revoke's against us at startup), so
+     * a sync gpu_console_init would just fail.  Use the async
+     * variant: ~5 seconds of retries at 100 ms intervals — gpu_server
+     * is up well before then.  Once it succeeds, our runtime printfs
+     * (cap_revoke logs, policy hits, ...) appear on the VGA console
+     * with the [cap] tag.  Startup chatter above stays serial-only.
+     */
+    (void)gpu_console_init_async("cap", 100u, 50u);
 
     bootstrap_completed(bootstrap_port, mach_task_self());
 

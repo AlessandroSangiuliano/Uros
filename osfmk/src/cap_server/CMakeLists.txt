@@ -51,6 +51,8 @@ target_include_directories(cap_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # libcap headers (libcap.h, sha256.h, hmac_sha256.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  # libgpu_console headers (#209: async printf mirror to gpu_server)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
@@ -75,6 +77,7 @@ target_link_libraries(cap_server_bin PRIVATE
   libmach
   libsa_mach
   libnetname
+  libgpu_console
   -Wl,--end-group
 )
 

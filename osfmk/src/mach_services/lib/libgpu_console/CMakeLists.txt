@@ -58,7 +58,13 @@ target_include_directories(libgpu_console PUBLIC
   ${CMAKE_CURRENT_BINARY_DIR}        # gpu_server.h forwarding
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # libpthreads' pthread.h includes <sys/timers.h>, which lives under
+  # sa_mach/sys/.  Adding the sa_mach root to -I makes that resolve.
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  # pthread.h for #209 async init worker
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
