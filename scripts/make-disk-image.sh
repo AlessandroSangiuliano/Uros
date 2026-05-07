@@ -83,6 +83,7 @@ HAL_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hal_server"
 HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
 GPU_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/gpu_server"
 GPU_VGA_MODULE="$BUILD_DIR/src/gpu_server/modules/vga.so"
+CHAR_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/char_server"
 EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
 PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 CAP_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_server"
@@ -182,11 +183,14 @@ fi
 #
 GPU_SERVER_CONF_LINE=""
 [ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
+CHAR_SERVER_CONF_LINE=""
+[ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
 
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
+${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
@@ -300,6 +304,19 @@ write $GPU_VGA_MODULE vga.so
 DBGFS
     echo "  /mach_servers/gpu_server                  → $(stat -c%s "$GPU_SERVER") bytes"
     echo "  /mach_servers/modules/gpu/vga.so          → $(stat -c%s "$GPU_VGA_MODULE") bytes"
+fi
+
+# char_server is optional in 0.1.0 (OSFMK_BUILD_CHAR_SERVER off by default).
+# /mach_servers/modules/char/ is filled by #206 (ps2.so) + #207 (uart.so);
+# this skeleton ships only the executable.
+if [ -f "$CHAR_SERVER" ]; then
+    debugfs -w -f - "$PART_IMG" >>"$DBGFS_LOG" 2>&1 <<DBGFS
+cd /mach_servers
+write $CHAR_SERVER char_server
+cd modules
+mkdir char
+DBGFS
+    echo "  /mach_servers/char_server                 → $(stat -c%s "$CHAR_SERVER") bytes"
 fi
 
 echo "  /mach_servers/bootstrap.conf → 'name_server name_server'"

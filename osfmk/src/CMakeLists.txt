@@ -98,3 +98,8 @@ endif()
 if(OSFMK_BUILD_GPU_SERVER)
   add_subdirectory(gpu_server)
 endif()
+
+# Build char_server (#205 — userspace character device server)
+if(OSFMK_BUILD_CHAR_SERVER)
+  add_subdirectory(char_server)
+endif()

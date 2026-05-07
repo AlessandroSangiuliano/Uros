@@ -65,6 +65,7 @@ AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
 VIRTIO_BLK_MODULE="$BUILD_DIR/src/block_device_server/modules/virtio_blk.so"
 GPU_SERVER="$SBIN/gpu_server"
 GPU_VGA_MODULE="$BUILD_DIR/src/gpu_server/modules/vga.so"
+CHAR_SERVER="$SBIN/char_server"
 
 REQUIRED_FILES=(
     "$NAME_SERVER" "$HAL_SERVER" "$BLOCK_DEVICE_SERVER"
@@ -93,11 +94,14 @@ CAP_TEST_CONF_LINE=""
 
 GPU_SERVER_CONF_LINE=""
 [ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
+CHAR_SERVER_CONF_LINE=""
+[ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
 
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
+${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
@@ -127,6 +131,9 @@ if [ -f "$GPU_SERVER" ]; then
     ARGS+=("gpu_server:$GPU_SERVER")
     ARGS+=("modules/gpu/vga.so:$GPU_VGA_MODULE")
 fi
+# /mach_servers/modules/char/ filled by #206 (ps2.so) + #207 (uart.so);
+# nothing to ship here in #205 (skeleton-only).
+[ -f "$CHAR_SERVER" ] && ARGS+=("char_server:$CHAR_SERVER")
 
 "$MKBUNDLE" "${ARGS[@]}"
 

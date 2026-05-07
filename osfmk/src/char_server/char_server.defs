@@ -1,0 +1,108 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * char_server.defs — MIG control plane for char_server.
+ *
+ * Mirror of gpu_server.defs (subsystem 4000) for character devices.
+ * Cap-gated on every entry per design.  The MIG surface ships in
+ * #205 with stubs; #206 (ps2.so) wires up kbd_subscribe; #207
+ * (uart.so) wires up the tty_* family.
+ */
+
+subsystem char_server 4100;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+serverprefix char_;
+userprefix   char_;
+
+type chr_u32_t   = unsigned    ctype: chr_u32_t;
+type chr_u64_t   = unsigned64  ctype: chr_u64_t;
+type chr_token_t = array[*:256]  of char;
+type chr_buf_t   = array[*:4096] of char;
+
+import <mach/char_server_types.h>;
+
+/* =================================================================
+ * Device discovery / open
+ * ================================================================= */
+
+/*
+ * query_devices — return all char_device records as an OOL array of
+ * `struct char_device_info` (char/char_types.h).
+ */
+routine query_devices(
+		char_port	: mach_port_t;
+	out	devices		: pointer_t, Dealloc;
+	out	n_devices	: chr_u32_t);
+
+/*
+ * device_open — handshake.  Cap-checked against device_class:
+ *   keyboard → CHAR_CAP_KBD_READ
+ *   tty      → CHAR_CAP_TTY_RW
+ * Returns KERN_SUCCESS if allowed.  Today a no-op (no per-client
+ * state held); future #202-style handle table hooks here.
+ */
+routine device_open(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t);
+
+/* =================================================================
+ * Keyboard plane (#206 wires this up)
+ * ================================================================= */
+
+/*
+ * kbd_subscribe — register a notify port that receives keyboard
+ * events (one Mach msg per char_kbd_event_t).  The module retains
+ * the SEND right; subscriber tear-down by either revoking the cap
+ * (#197 cap_revoke_notify) or letting the port go dead (handled
+ * via no-senders notification once #202 lands).
+ */
+routine kbd_subscribe(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	notify_port	: mach_port_t);
+
+/* =================================================================
+ * TTY plane (#207 wires this up)
+ * ================================================================= */
+
+/*
+ * tty_read — block until at least one byte is available, return up
+ * to `max` bytes.  `len` is the actual number returned.
+ */
+routine tty_read(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	max		: chr_u32_t;
+	out	buf		: chr_buf_t);
+
+/*
+ * tty_write — fire-and-forget byte stream out to the UART.
+ * simpleroutine: producer never blocks on serial speed (the module
+ * absorbs the wait or drops on flow-control timeout).
+ */
+simpleroutine tty_write(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	buf		: chr_buf_t);
+
+/*
+ * tty_set_attr — line discipline params.  Cap-gated on
+ * CHAR_CAP_TTY_CONFIG (admin only — changing baud under another
+ * client mid-stream would corrupt their bytes).
+ */
+routine tty_set_attr(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	baud		: chr_u32_t;
+	in	data_bits	: chr_u32_t;
+	in	parity		: chr_u32_t;
+	in	stop_bits	: chr_u32_t);
