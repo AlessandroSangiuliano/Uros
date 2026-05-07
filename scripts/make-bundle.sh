@@ -97,8 +97,8 @@ GPU_SERVER_CONF_LINE=""
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
-hal_server hal_server
 ${GPU_SERVER_CONF_LINE}
+hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
 hello_server hello_server

@@ -146,6 +146,8 @@ target_include_directories(ext_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/file_systems/ext2fs
   # libcap.h for capability-gated device_open_cap
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  # libgpu_console (#199 prep)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
 )
 
 # Link against Mach userspace libraries + filesystem library.
@@ -158,6 +160,7 @@ target_link_libraries(ext_server_bin PRIVATE
   libblk
   libcap
   libnetname
+  libgpu_console
   -Wl,--end-group
 )
 

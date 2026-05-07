@@ -147,6 +147,8 @@ target_include_directories(default_pager_server PRIVATE
   # Issue #184: paging via BDS (libblk) gated by Uros caps (libcap)
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libblk
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  # libgpu_console (#199 prep)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
 )
 
 # Link against Mach userspace libraries.
@@ -160,6 +162,7 @@ target_link_libraries(default_pager_server PRIVATE
   libblk
   libcap
   libnetname
+  libgpu_console
   -Wl,--end-group
 )
 

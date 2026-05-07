@@ -154,6 +154,8 @@ target_include_directories(bootstrap_server PRIVATE
   # Issue #185: stage-2 reads via BDS (libblk) gated by Uros caps (libcap)
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libblk
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  # libgpu_console (#199 prep) — printf mirror to gpu_server
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
 )
 
 # Link against Mach userspace libraries.
@@ -165,6 +167,7 @@ target_link_libraries(bootstrap_server PRIVATE
   libsa_fs
   libblk
   libcap
+  libgpu_console
   libnetname
   libpthreads
   libmach

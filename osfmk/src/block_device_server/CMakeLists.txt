@@ -22,8 +22,9 @@ set(BLK_INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}/virtio_blk
   # Framework header
   ${CMAKE_CURRENT_SOURCE_DIR}
-  # libdl headers
+  # libdl + libgpu_console (#199 prep) headers
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libdl
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h) — MUST come before
@@ -270,6 +271,7 @@ target_link_libraries(block_device_server PRIVATE
   libsa_mach
   libnetname
   libcap
+  libgpu_console
   -Wl,--end-group
 )
 

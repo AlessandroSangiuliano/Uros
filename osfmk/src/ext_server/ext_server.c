@@ -59,6 +59,7 @@
 #include <page_cache.h>
 #include <blk.h>
 #include <libcap.h>
+#include <gpu_console.h>
 
 #include "ext2fs_server_server.h"
 #include "ahci_batch.h"
@@ -791,6 +792,10 @@ main(int argc, char **argv)
 
 	printf_init(device_port);
 	panic_init(host_port);
+
+	/* #199 prep: mirror printf to gpu_server's text plane.  No-op
+	 * if gpu_server isn't reachable; serial console keeps working. */
+	(void)gpu_console_init("ext");
 
 	printf("\n=== ext2 filesystem server ===\n");
 
