@@ -275,9 +275,10 @@
 #include <i386/AT386/iopl_entries.h>
 #define	ioplname		"iopl"
 
-#include <vga.h>
-#include <i386/AT386/vga_entries.h>
-#define vganame			"vga"
+/*
+ * VGA console driver removed in #199.  Userspace gpu_server now owns
+ * the display; kernel printf goes serial-only via cnputc → com_putc.
+ */
 
 #include <hi_res_clock.h>
 #include <cpus.h>
@@ -510,13 +511,7 @@ struct dev_ops	dev_name_list[] =
 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
 	  NO_DINFO },
 
-#if	NVGA > 0
-	/* must be AFTER kd */
-	{ vganame,	vgaopen,	vgaclose,	NO_READ,
-	  NO_WRITE,	vgagetstat,	vgasetstat,	vgammap,
-	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
-	  NO_DINFO },
-#endif
+	/* "vga" device entry removed in #199 — see header. */
 
 #if	HI_RES_CLOCK && NCPUS > 1
         { hi_res_clk_name, NULL_OPEN,	NULL_CLOSE,	NO_READ,

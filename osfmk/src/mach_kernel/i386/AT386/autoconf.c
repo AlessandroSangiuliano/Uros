@@ -314,11 +314,8 @@ extern	struct	bus_driver	wtdriver;
 extern  struct  bus_driver      gprof_driver;
 #endif /* GPROF */
 
-#include <vga.h>
-#if NVGA > 0
-/* PVGA1, ET4000, S3 drivers removed - obsolete SVGA cards */
-extern	struct	bus_driver	vgadriver;
-#endif /* NVGA */
+/* In-kernel VGA driver removed in #199 — userspace gpu_server owns
+ * the display from now on. */
 
 struct	bus_ctlr	bus_master_init[] = {
 
@@ -613,11 +610,7 @@ struct	bus_device	bus_device_init[] = {
      '?',    0,   -1,    -1,    0,   0,        0,   SPL_FIVE, 5},
 #endif /* NWT > 0 */
 
-#if NVGA > 0
-  /* Only standard VGA driver for QEMU compatibility */
-  {&vgadriver, "vga", 0, NO_INTR, (caddr_t)0x3b0, 0, (caddr_t)0xa0000,
-     '?',    0,   -1,    -1,    0,   0,        0,   0, 0},
-#endif /* NVGA > 0 */
+  /* "vga" bus_master_init entry removed in #199. */
   0
 };
 
