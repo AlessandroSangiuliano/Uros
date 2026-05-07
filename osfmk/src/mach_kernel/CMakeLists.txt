@@ -585,7 +585,8 @@ set(AT386_SOURCES
     i386/AT386/model_dep.c
     i386/AT386/physmem.c
     i386/AT386/pic_isa.c
-    i386/AT386/vga.c
+    # In-kernel VGA driver removed in #199 (vga.c, vga.h, vgareg.h,
+    # vga_entries.h gone; userspace gpu_server owns the display).
 )
 
 # Chips/busses

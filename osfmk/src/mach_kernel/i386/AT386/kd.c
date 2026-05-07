@@ -354,7 +354,10 @@
 #include <i386/AT386/kd_entries.h>
 #include <i386/AT386/kd_mouse_entries.h>
 
-#include <vga.h>
+/* In-kernel VGA driver removed in #199.  vid_start / kd_putc / kd_slmwd
+ * VGA-write paths in this file are now dead code (cnputc routes
+ * straight to com_putc) and will be excised together with the
+ * keyboard parts in #208 once char_server's ps2.so module is live. */
 #include <blit.h>
 #if	NBLIT > 0
 #include <i386/AT386/blitvar.h>
@@ -837,8 +840,6 @@ void
 cnputc(
 	char		c)
 {
-	int	i;
-
 #if	NCPUS > 1 && defined(CBUS)
 	mp_disable_preemption();
 	if (cpu_number() != master_cpu) {
@@ -848,37 +849,22 @@ cnputc(
 	}
 #endif	/* NCPUS > 1 && defined(CBUS) */
 
-#if	KD_NEEDS_VM
-	if (kernel_pmap == 0 || kernel_pmap->dirbase == 0) {
-#if	NCPUS > 1 && defined(CBUS)
-		mp_enable_preemption();
-#endif	/* NCPUS > 1 && defined(CBUS) */
-		return;
-	}
-#endif
-	kdinit();
-	switch(c) {
-	case K_LF:
-		(*cputc)(K_CR);
-		(*cputc)(K_LF);
-		/* Mirror to serial when VGA is the primary console. */
-		if (!cons_is_com1) {
-			com_putc(K_CR);
-			com_putc(K_LF);
-		}
-		break;
-/*
-	case K_HT:
-		for (i = 8 - (CURRENT_COLUMN(kd_curpos) % 8); i > 0; i--)
-			(*cputc)(' ');
-		break;
-*/
-	default:
-		(*cputc)(c);
-		/* Mirror to serial when VGA is the primary console. */
-		if (!cons_is_com1)
-			com_putc(c);
-		break;
+	/*
+	 * #199: in-kernel VGA gone.  cnputc routes straight to com_putc
+	 * (polled COM1).  The cputc / kd_putc indirection and the
+	 * VGA-mirror branch are dead.  Userspace screen output is owned
+	 * by gpu_server, reached from userspace tasks via libgpu_console
+	 * (printf mirror) — the kernel never paints VGA again.
+	 *
+	 * cnputc keeps CR/LF mapping so kernel printf("\n") still
+	 * advances the line on a tty receiver, matching the behaviour
+	 * the previous kd_putc + serial mirror provided.
+	 */
+	if (c == K_LF) {
+		com_putc(K_CR);
+		com_putc(K_LF);
+	} else {
+		com_putc(c);
 	}
 #if	NCPUS > 1 && defined(CBUS)
 	mp_enable_preemption();
@@ -1056,11 +1042,7 @@ char	c;
 #endif /* DEBUG */
 
 extern int	X_kdb_enter_len, X_kdb_exit_len;
-#if NVGA > 0
-extern int	vga_open;
-extern void	vga_kdb_enter(void);
-extern void	vga_kdb_exit(void);
-#endif
+/* vga_open / vga_kdb_enter / vga_kdb_exit removed with vga.c (#199) */
 extern int	mouse_in_use;
 int		old_mouse_in_use;
 int		old_kb_mode;
@@ -1094,10 +1076,7 @@ cnpollc(
 		kb_mode = KB_ASCII;
 		poll_splx(old_spl);
 
-#if NVGA > 0
-		if(vga_open)
-			vga_kdb_enter();
-#endif
+		/* vga_kdb_enter() call removed with vga.c (#199) */
 		if (X_kdb_enter_len)
 			X_kdb_enter();
 
@@ -1110,10 +1089,7 @@ cnpollc(
 		kb_mode = old_kb_mode;
 		poll_splx(old_spl);
 
-#if NVGA > 0
-		if (vga_open)
-			vga_kdb_exit();
-#endif	/* NVGA > 0 */
+		/* vga_kdb_exit() call removed with vga.c (#199) */
 
 		if (X_kdb_exit_len)
 			X_kdb_exit();
