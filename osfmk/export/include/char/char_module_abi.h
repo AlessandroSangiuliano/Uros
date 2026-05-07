@@ -26,7 +26,7 @@
 #include <mach.h>
 #include <char/char_types.h>
 
-#define CHAR_MODULE_ABI_VERSION		1u
+#define CHAR_MODULE_ABI_VERSION		2u	/* +tty_subscribe (#207) */
 
 /* ============================================================
  * Forward decls — module instance state is opaque to char_server
@@ -66,14 +66,29 @@ typedef struct char_module_ops {
 	 * event for that subscriber only, never block the IRQ thread. */
 	int		(*kbd_subscribe)(void *priv, mach_port_t notify_port);
 
-	/* TTY ops (CHAR_CLASS_TTY modules only). */
+	/* TTY ops (CHAR_CLASS_TTY modules only).
+	 *
+	 * tty_read is non-blocking — returns out_len=0 if the RX ring is
+	 * empty.  Clients that want to wait for data subscribe a notify
+	 * port via tty_subscribe; the module sends a wake-up message
+	 * (msgh_id = CHAR_TTY_NOTIFY_ID, no payload) when data arrives.
+	 * After the wake-up the client calls tty_read to drain.  Coarse
+	 * but matches the single-threaded server loop and avoids parking
+	 * MIG reply ports across the IRQ. */
 	int		(*tty_read)(void *priv, char *buf, size_t max,
 				    size_t *out_len);
 	int		(*tty_write)(void *priv, const char *buf, size_t len);
 	int		(*tty_set_attr)(void *priv, uint32_t baud,
 					uint32_t data_bits, uint32_t parity,
 					uint32_t stop_bits);
+	int		(*tty_subscribe)(void *priv, mach_port_t notify_port);
 } char_module_ops_t;
+
+/* msgh_id used for the data-available wake-up sent by a TTY module
+ * to subscribers registered via tty_subscribe.  Distinct from
+ * char_kbd_event_t messages so a client subscribed to both planes
+ * can disambiguate. */
+#define CHAR_TTY_NOTIFY_ID		3201u
 
 #define CHAR_MODULE_ENTRY_SUFFIX	"_module_ops"
 

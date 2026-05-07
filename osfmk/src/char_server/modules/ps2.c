@@ -500,4 +500,5 @@ const char_module_ops_t ps2_module_ops = {
 	.tty_read       = NULL,
 	.tty_write      = NULL,
 	.tty_set_attr   = NULL,
+	.tty_subscribe  = NULL,
 };

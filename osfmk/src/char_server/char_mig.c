@@ -213,3 +213,27 @@ char_tty_set_attr(mach_port_t char_port,
 					  parity, stop_bits) == 0)
 		? KERN_SUCCESS : KERN_FAILURE;
 }
+
+kern_return_t
+char_tty_subscribe(mach_port_t char_port,
+		   char *cap, mach_msg_type_number_t cap_count,
+		   uint32_t dev_id, mach_port_t notify_port)
+{
+	struct char_device_entry *dev;
+
+	(void)char_port;
+
+	dev = char_core_dev_lookup((char_dev_id_t)dev_id);
+	if (dev == NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (dev->info.class != CHAR_CLASS_TTY)
+		return KERN_INVALID_ARGUMENT;
+	if (char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_RW,
+				(uint64_t)dev_id) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	if (dev->module->tty_subscribe == NULL)
+		return KERN_FAILURE;
+	return (dev->module->tty_subscribe(dev->priv, notify_port) == 0)
+		? KERN_SUCCESS : KERN_FAILURE;
+}

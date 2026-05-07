@@ -132,6 +132,11 @@ io_reg_t iopl_port_list[] = {
 	 * Userspace char_server/ps2.so owns the keyboard; kd0's IRQ
 	 * is hijacked via device_intr_register at attach time. */
 	0x60, 0x64,
+	/* COM1 16550 — 8 register window starting at 0x3F8.
+	 * Userspace char_server/uart.so owns RX + IRQ 4; the kernel
+	 * still polled-writes here from cnputc → com_putc for printf
+	 * and panic, but userspace TX/RX happens here too (#207). */
+	0x3F8, 0x3F9, 0x3FA, 0x3FB, 0x3FC, 0x3FD, 0x3FE, 0x3FF,
 	/* speaker output */
 	0x61,
 	/* configuration RAM */
