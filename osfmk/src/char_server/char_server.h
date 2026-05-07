@@ -55,6 +55,24 @@ int                       char_core_dev_copy_all(struct char_device_info *out,
 int char_core_cap_check(const char *token, unsigned int token_count,
 			uint64_t op, uint64_t resource_id);
 
+/*
+ * IRQ wiring for back-end modules.  Implemented in core.c, exposed
+ * via the public ABI in <char/char_module_abi.h>.
+ *
+ * Demux entry point invoked by main.c when an IRQ notification
+ * arrives on the port set; returns TRUE if the message was an IRQ
+ * notification we recognised.
+ */
+boolean_t char_core_dispatch_irq(mach_msg_header_t *in);
+
+/*
+ * One-time init for the IRQ table.  Must be called before
+ * char_core_irq_register can succeed.  Needs the master_device port
+ * (for device_intr_register) and the port_set (to attach the IRQ
+ * receive port to it).
+ */
+int  char_core_irq_init(mach_port_t master_device, mach_port_t port_set);
+
 /* ============================================================
  * MIG-side glue
  * ============================================================ */

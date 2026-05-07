@@ -90,6 +90,29 @@ add_custom_command(
 )
 
 # ===========================================================================
+# Back-end modules — compiled as .so, loaded at runtime via libmodload
+# from /mach_servers/modules/char/.  Symbol convention:
+# `<name>_module_ops` of type char_module_ops_t.
+# ===========================================================================
+
+# --- PS/2 keyboard module (#206) ---
+add_library(char_ps2_module SHARED
+  modules/ps2.c
+  modules/ssp_module_stub.c
+)
+add_dependencies(char_ps2_module mig_mach_public_headers)
+target_compile_options(char_ps2_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
+target_compile_definitions(char_ps2_module PRIVATE MACH_IPC_COMPAT=0)
+target_include_directories(char_ps2_module PRIVATE ${CHAR_INCLUDE_DIRS})
+set_target_properties(char_ps2_module PROPERTIES
+  OUTPUT_NAME "ps2"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+)
+
+# ===========================================================================
 # char_server executable
 # ===========================================================================
 
@@ -98,6 +121,9 @@ set(CHAR_SOURCES
   core.c
   char_mig.c
   ${CHAR_SERVER_C}
+  # core.c calls device_intr_register / device_intr_unregister
+  # directly to wire module IRQs into the port set (#206).
+  ${DM_USER_C}
   ${CMAKE_BINARY_DIR}/generated/cap_revoke_server.c
 )
 
@@ -111,9 +137,11 @@ add_executable(char_server
   ${CHAR_SOURCES}
   ${CHAR_USER_H}
   ${CHAR_SERVER_H}
+  ${DM_USER_H}
 )
 
-add_dependencies(char_server mig_mach_public_headers libcap mig_cap_revoke)
+add_dependencies(char_server mig_mach_public_headers libcap mig_cap_revoke
+		 char_ps2_module)
 
 target_compile_options(char_server PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(char_server PRIVATE MACH_IPC_COMPAT=0)

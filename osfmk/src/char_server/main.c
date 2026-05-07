@@ -69,6 +69,16 @@ cap_revoke_notify(mach_port_t notify_port, uint64_t cap_id)
 static boolean_t
 char_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
+	/* IRQ notifications first: they outnumber everything else once a
+	 * keyboard / UART module is active, and they have a recognisable
+	 * msgh_id range, so the discriminator is cheap. */
+	if (char_core_dispatch_irq(in)) {
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
 	if (char_server_server(in, out))
 		return TRUE;
 	if (cap_revoke_server(in, out))
@@ -199,6 +209,13 @@ main(int argc, char **argv)
 
 	if (char_core_init() < 0) {
 		printf("char_server: core init failed\n");
+		return 1;
+	}
+
+	/* IRQ wiring: modules call char_core_irq_register() in their
+	 * attach().  Must be initialised before discovery runs. */
+	if (char_core_irq_init(char_device_port, char_port_set) < 0) {
+		printf("char_server: irq init failed\n");
 		return 1;
 	}
 
