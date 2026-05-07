@@ -141,4 +141,5 @@ maybe_add(libflipc2)
 maybe_add(libdl)
 maybe_add(libmodload)
 maybe_add(libcap)
+maybe_add(libgpu_console)
 

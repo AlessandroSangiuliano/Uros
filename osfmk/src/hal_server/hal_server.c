@@ -46,6 +46,7 @@
 #include "hal_server.h"
 #include "hal_server_mig.h"
 #include "modload.h"
+#include "gpu_console.h"
 
 /* ================================================================
  * Global state
@@ -196,6 +197,11 @@ main(int argc, char **argv)
 		printf("hal: netname_check_in(\"hal\") failed (kr=%d)\n", kr);
 	else
 		printf("hal: registered service \"hal\" in name_server\n");
+
+	/* #199 prep: mirror printf to gpu_server's text plane.  No-op
+	 * (and harmless) if gpu_server isn't up yet — kernel serial
+	 * console keeps working regardless. */
+	(void)gpu_console_init("hal");
 
 	/* Load discovery plug-ins from the bootstrap module pool. */
 	modload_init("hal");

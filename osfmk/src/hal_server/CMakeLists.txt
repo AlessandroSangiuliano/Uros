@@ -20,8 +20,10 @@ set(HAL_INCLUDE_DIRS
   # Framework header + module headers
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/pci_scan
-  # libdl + libmodload headers
+  # libdl + libmodload + libgpu_console (#199 prep) + libcap headers
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libdl
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libmodload
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
@@ -187,6 +189,8 @@ target_link_libraries(hal_server PRIVATE
   libmach
   libsa_mach
   libnetname
+  libcap
+  libgpu_console
   -Wl,--end-group
 )
 

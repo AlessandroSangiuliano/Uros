@@ -269,6 +269,7 @@
  */
 
 #include "default_pager_internal.h"
+#include "gpu_console.h"
 
 char	my_name[] = "(default pager): ";
 pthread_mutex_t	dprintf_lock;
@@ -986,6 +987,10 @@ main(
 
 	printf_init(master_device_port);
 	panic_init(default_pager_host_port);
+
+	/* #199 prep: mirror printf to gpu_server's text plane.  No-op
+	 * if gpu_server isn't reachable; serial console keeps working. */
+	(void)gpu_console_init("dpager");
 
 
 	norma_mk = (norma_node_self(default_pager_host_port,

@@ -54,6 +54,7 @@
 #include "hal.h"
 #include "hal_notify_server.h"
 #include "cap_revoke_server.h"
+#include "gpu_console.h"
 #include "modload.h"
 
 extern kern_return_t cap_subscribe_revoke(mach_port_t notify_port);
@@ -412,6 +413,10 @@ main(int argc, char **argv)
 		printf("blk: port set alloc failed\n");
 		return 1;
 	}
+
+	/* #199 prep: mirror printf to gpu_server's text plane.  No-op
+	 * if gpu_server isn't up yet; serial console keeps working. */
+	(void)gpu_console_init("blk");
 
 	modload_init("blk");
 	n_modules = modload_load_class("block", "_module_ops",

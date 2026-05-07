@@ -472,6 +472,28 @@ _doprnt(const char *fmt,
 mach_port_t console_port;
 static security_token_t null_security_token;
 
+/*
+ * Optional printf mirror hook (#199 prep).
+ *
+ * After the in-kernel VGA driver is removed, the "console" device is
+ * serial-only.  Userspace tasks that want their printf output to also
+ * appear on the VGA screen install a mirror via printf_set_mirror():
+ * libgpu_console (or anyone else) registers a callback that flush()
+ * invokes for every drained chunk.
+ *
+ * Hook invocation is non-blocking by contract — the hook is expected
+ * to be a MIG simpleroutine send (gpu_text_puts) or equivalent fire-
+ * and-forget primitive.  Failures inside the hook are silent: the
+ * primary serial path stays the source of truth for log output.
+ */
+static void (*printf_mirror_hook)(const char *buf, size_t len) = NULL;
+
+void
+printf_set_mirror(void (*hook)(const char *buf, size_t len))
+{
+	printf_mirror_hook = hook;
+}
+
 void
 printf_init(mach_port_t device_server_port)
 {
@@ -551,6 +573,13 @@ flush(struct printf_state *state)
 	 * the 'amt' return value and make sure all characters have
 	 * been written. 
 	 */
+	/* If a mirror hook is installed (e.g. libgpu_console), tee the
+	 * full buffer to it before draining to the serial console.
+	 * Sending the pre-tee buffer (instead of looping on amt below)
+	 * keeps the mirror's call rate independent of serial speed. */
+	if (printf_mirror_hook != NULL && state->index > 0)
+		(*printf_mirror_hook)(state->buf, state->index);
+
 	offset = 0;
 	count = state->index;
 	while (count) {
