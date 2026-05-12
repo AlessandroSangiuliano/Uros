@@ -94,6 +94,33 @@ static const unsigned char scset1_shift[128] = {
 };
 
 static int ddb_kbd_shift;	/* 1 while either Shift held */
+static int ddb_kbd_e0;		/* 1 while the next byte completes an
+				 * E0-prefixed extended scancode */
+
+/*
+ * E0-prefixed extended keys we care about — translated into the
+ * Ctrl-letter sequences DDB's line editor already understands
+ * (see db_input.c: Ctrl-P/N history, Ctrl-B/F cursor, Ctrl-A/E
+ * begin/end of line, Ctrl-D delete-char).  Anything else extended
+ * is dropped — DDB's prompt isn't a full readline, and the basic
+ * arrow + home/end + del set covers the practical needs.
+ */
+#define CTRL(c)	((c) - 'a' + 1)
+
+static int
+ddb_kbd_e0_map(unsigned char sc)
+{
+	switch (sc) {
+	case 0x48:	return CTRL('p');	/* Up    → previous history */
+	case 0x50:	return CTRL('n');	/* Down  → next history     */
+	case 0x4B:	return CTRL('b');	/* Left  → cursor back      */
+	case 0x4D:	return CTRL('f');	/* Right → cursor forward   */
+	case 0x47:	return CTRL('a');	/* Home  → start of line    */
+	case 0x4F:	return CTRL('e');	/* End   → end of line      */
+	case 0x53:	return CTRL('d');	/* Delete→ delete-char      */
+	default:	return 0;		/* drop */
+	}
+}
 
 static int
 ddb_kbd_poll(boolean_t wait)
@@ -117,8 +144,24 @@ ddb_kbd_poll(boolean_t wait)
 		}
 
 		sc = inb(KBD_DATA);
+
+		if (sc == 0xE0) {
+			ddb_kbd_e0 = 1;
+			continue;
+		}
+
 		pressed = (sc & 0x80) == 0;
 		sc &= 0x7F;
+
+		if (ddb_kbd_e0) {
+			ddb_kbd_e0 = 0;
+			if (!pressed)
+				continue;	/* drop release halves */
+			ch = (unsigned char)ddb_kbd_e0_map(sc);
+			if (ch == 0)
+				continue;
+			return (int)ch;
+		}
 
 		ch = ddb_kbd_shift ? scset1_shift[sc] : scset1_plain[sc];
 
