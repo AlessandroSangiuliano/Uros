@@ -217,7 +217,7 @@
 #include <i386/AT386/eisa.h>
 #include <i386/AT386/eisa_entries.h>
 #include <i386/AT386/misc_protos.h>
-#include <i386/AT386/kdsoft.h>
+/* #208: kdsoft.h removed with kd.c; no actual references here. */
 #if	DIPC
 #include <dipc/dipc_funcs.h>
 #endif	/* DIPC */
@@ -283,7 +283,7 @@ extern char	edata, end;
 
 extern char	version[];
 
-int		rebootflag = 0;	/* exported to kdintr */
+int		rebootflag = 0;	/* exported to com.c halt-char path */
 
 int		halt_in_debugger = 0;
 

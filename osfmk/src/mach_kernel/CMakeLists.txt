@@ -578,10 +578,11 @@ set(AT386_SOURCES
     i386/AT386/eisa.c
     i386/AT386/himem.c
     i386/AT386/iopl.c
-    i386/AT386/kd.c
-    i386/AT386/kd_event.c
-    i386/AT386/kd_mouse.c
-    i386/AT386/kd_queue.c
+    # In-kernel keyboard/mouse drivers retired in #208 (kd.c, kd_event.c,
+    # kd_mouse.c, kd_queue.c gone; ps2.so under char_server owns the
+    # keyboard, a future ps2_mouse.so will own the mouse).
+    i386/AT386/console_cdev.c
+    i386/AT386/ddb_kbd.c
     i386/AT386/model_dep.c
     i386/AT386/physmem.c
     i386/AT386/pic_isa.c

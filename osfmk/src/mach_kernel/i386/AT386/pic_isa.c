@@ -102,7 +102,7 @@
 #include <i386/hardclock_entries.h>
 #include <i386/misc_protos.h>
 #include <i386/AT386/misc_protos.h>
-#include <i386/AT386/kdsoft.h>
+/* #208: kdsoft.h removed with kd.c; no actual references here. */
 #include <platforms.h>
 #include <cpus.h>
 
@@ -112,7 +112,8 @@
 
 intr_t ivect[NINTR]= {
 	/* 00 */	(intr_t)hardclock,	/* always */
-	/* 01 */	(intr_t)kdintr,		/* kdintr, ... */
+	/* 01 */	(intr_t)intnull,	/* #208: ps2.so claims via
+						 * device_intr_register */
 	/* 02 */	(intr_t)intnull,
 	/* 03 */	(intr_t)intnull,	/* lnpoll, comintr, ... */
 

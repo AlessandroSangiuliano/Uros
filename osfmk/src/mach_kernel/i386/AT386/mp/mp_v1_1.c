@@ -698,8 +698,13 @@ mp_v1_1_init(void)
 	mp_v1_1_initialized = TRUE;
 
 	/*
-	 * We must setup kdintr first for printfs.
-	 * Hardclock is on irq2 on the ioapic instead of 0 on the pic
+	 * #208: IRQ 1 used to host kdintr (in-kernel keyboard) and was
+	 * routed first so kernel printf could still display.  ps2.so
+	 * owns IRQ 1 now via device_intr_register, and ivect[1] is
+	 * intnull at boot — the take_irq call below is harmless (it'll
+	 * just install intnull on the I/O APIC, and userspace will
+	 * override the vector when it registers).
+	 * Hardclock is on irq2 on the ioapic instead of 0 on the pic.
 	 * XXX We should get hardclock mapping from the MP Config Table
 	 */
 
