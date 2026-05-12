@@ -26,7 +26,7 @@
 #include <mach.h>
 #include <char/char_types.h>
 
-#define CHAR_MODULE_ABI_VERSION		2u	/* +tty_subscribe (#207) */
+#define CHAR_MODULE_ABI_VERSION		3u	/* +mouse_subscribe (#215) */
 
 /* ============================================================
  * Forward decls — module instance state is opaque to char_server
@@ -82,6 +82,14 @@ typedef struct char_module_ops {
 					uint32_t data_bits, uint32_t parity,
 					uint32_t stop_bits);
 	int		(*tty_subscribe)(void *priv, mach_port_t notify_port);
+
+	/* Mouse subscribe (CHAR_CLASS_MOUSE modules only).  Same
+	 * convention as kbd_subscribe: SEND right retained by module,
+	 * one Mach msg per packet carrying char_mouse_event_t inline.
+	 * Subscribers diff `buttons` against the previous packet to
+	 * derive press/release edges — the hardware reports state on
+	 * every packet, not events. */
+	int		(*mouse_subscribe)(void *priv, mach_port_t notify_port);
 } char_module_ops_t;
 
 /* msgh_id used for the data-available wake-up sent by a TTY module
