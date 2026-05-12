@@ -336,11 +336,10 @@ machine_startup(void)
 
 	/*
 	 * Cause a breakpoint trap to the debugger before proceeding
-	 * any further if the proper option bit was specified in
-	 * the boot flags.
+	 * any further if `-h` was passed on the multiboot cmdline
+	 * (parse_arguments() sets halt_in_debugger).  QEMU example:
 	 *
-	 * XXX use -a switch to invoke kdb, since there's no
-	 *     boot-program switch to turn on RB_HALT!
+	 *     run-qemu.sh -append "-h"
 	 */
 
 	if (halt_in_debugger) {
