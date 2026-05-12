@@ -217,7 +217,7 @@
 #include <i386/AT386/eisa.h>
 #include <i386/AT386/eisa_entries.h>
 #include <i386/AT386/misc_protos.h>
-#include <i386/AT386/kdsoft.h>
+/* #208: kdsoft.h removed with kd.c; no actual references here. */
 #if	DIPC
 #include <dipc/dipc_funcs.h>
 #endif	/* DIPC */
@@ -283,9 +283,12 @@ extern char	edata, end;
 
 extern char	version[];
 
-int		rebootflag = 0;	/* exported to kdintr */
+int		rebootflag = 0;	/* exported to com.c halt-char path */
 
-int		halt_in_debugger = 0;
+/* Forced into .data so parse_arguments() can set this BEFORE
+ * i386_init()'s bzero(&edata, &end-&edata) — which would otherwise
+ * wipe the BSS copy back to 0 and silently swallow -h. */
+int		halt_in_debugger __attribute__((section(".data"))) = 0;
 
 extern int	cons_is_com1;
 
@@ -336,11 +339,10 @@ machine_startup(void)
 
 	/*
 	 * Cause a breakpoint trap to the debugger before proceeding
-	 * any further if the proper option bit was specified in
-	 * the boot flags.
+	 * any further if `-h` was passed on the multiboot cmdline
+	 * (parse_arguments() sets halt_in_debugger).  QEMU example:
 	 *
-	 * XXX use -a switch to invoke kdb, since there's no
-	 *     boot-program switch to turn on RB_HALT!
+	 *     run-qemu.sh -append "-h"
 	 */
 
 	if (halt_in_debugger) {
@@ -414,17 +416,37 @@ void
 parse_arguments(void)
 {
 	char *p = (char *) kern_args_start;
-	char *endp = p + kern_args_size - 1;
+	char *endp;
 	char ch;
 
-	if (kern_args_start == 0)
+	if (kern_args_start == 0 || kern_args_size == 0)
 	    return;
 
+	endp = p + kern_args_size - 1;
+
+	/*
+	 * QEMU's multiboot cmdline starts with the kernel file path as
+	 * argv[0] (e.g. ".../osfmk-mklinux/.../mach_kernel -h").  The
+	 * historical parser scanned for any '-' anywhere — which then
+	 * happily matched 'h' inside "mach_kernel", 'm' inside "osfmk"
+	 * (parsing "mem=0"), and 'r' inside "Scrivania" (forcing serial
+	 * console).  Require the '-' to start a real argument: either
+	 * preceded by whitespace or sitting at the very beginning.
+	 *
+	 * Each flag is a single character; the inner loop terminates at
+	 * the next whitespace, so subsequent characters within the same
+	 * token are read by per-flag arg parsers (e.g. '-m128' lets the
+	 * atoi_term consumer pick up the digits).
+	 */
 	while (p < endp) {
-	    if (*p++ != '-') {
+	    char prev = (p == (char *)kern_args_start) ? ' ' : *(p - 1);
+	    if (*p != '-' || (prev != ' ' && prev != '\t')) {
+		p++;
 		continue;
 	    }
-	    while (ch = *p++) {
+	    p++;	/* skip the '-' */
+	    while ((ch = *p) && ch != ' ' && ch != '\t') {
+		p++;
 		switch (ch) {
 		case 'h':
 		    halt_in_debugger = 1;

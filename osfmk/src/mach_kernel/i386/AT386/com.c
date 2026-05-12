@@ -189,8 +189,11 @@
 #include <i386/misc_protos.h>
 #include <chips/busses.h>
 #include <i386/AT386/comreg.h>
-#include <i386/AT386/kd.h>
-#include <i386/AT386/kdsoft.h>
+/* #208: kd.h / kdsoft.h headers removed with kd.c.  Inline the two
+ * K_* character constants that com.c still uses for CR/LF mapping
+ * in com_getc — they had no business living in a keyboard header. */
+#define K_CR	'\r'
+#define K_LF	'\n'
 #include <i386/AT386/com_entries.h>
 #include <i386/AT386/misc_protos.h>
 
@@ -664,16 +667,10 @@ comsetstat(
 		simple_unlock(&tp->t_lock);
 		splx(s);
 		break;
-	case KDSKBENT:
-        case KDSETBELL:
-		if (cons_is_com1) {
-			at386_io_lock_state();
-			at386_io_lock(MP_DEV_WAIT);
-			result = kdsetstat(dev, flavor, data, count);
-			at386_io_unlock();
-			return result;
-		}
-		break;
+	/* #208: KDSKBENT / KDSETBELL forwarding to kdsetstat removed
+	 * with kd.c.  When the console is COM1 there is no keyboard
+	 * map to load and no bell to ring through it; the few callers
+	 * fail silently with the default `break`. */
 	default: 
 #if	!MP_V1_1
 		at386_io_lock(MP_DEV_WAIT);

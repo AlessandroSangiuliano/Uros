@@ -234,9 +234,14 @@
 #define	parname		"par"
 #endif /* NPAR > 0 */
 
-#include <i386/AT386/kd.h>
-#include <i386/AT386/kdsoft.h>
-#define	kdname			"kd"
+/* #208: kd.c retired — userspace char_server/ps2.so handles the
+ * keyboard.  Slot 0 of dev_name_list[] (still named "console" via
+ * dev_indirect_list) is now a minimal cnputc-based byte-pipe so
+ * userspace printf_init() (libsa_mach) keeps working through
+ * device_write_inband. */
+extern io_return_t consoleopen(dev_t, dev_mode_t, io_req_t);
+extern void        consoleclose(dev_t);
+extern io_return_t consolewrite(dev_t, io_req_t);
 
 #include <com.h>
 #if	NCOM > 0
@@ -266,11 +271,9 @@
 #define	blitname		"blit"
 #endif
 
-#include <i386/AT386/kbd_entries.h>
-#define	kbdname			"kbd"
-
-#include <i386/AT386/kd_mouse_entries.h>
-#define	mousename		"mouse"
+/* #208: kbd_entries.h and kd_mouse_entries.h retired together
+ * with kd_event.c / kd_mouse.c.  Both roles move to userspace
+ * char_server modules. */
 
 #include <i386/AT386/iopl_entries.h>
 #define	ioplname		"iopl"
@@ -332,9 +335,10 @@ struct dev_ops	dev_name_list[] =
 	  async_in,	reset,		port_death,	subdev,
 	  dev_info */
 
-	{ kdname,	kdopen,		kdclose,	kdread,
-	  kdwrite,	kdgetstat,	kdsetstat,	kdmmap,
-	  NO_ASYNC,	NULL_RESET,	kdportdeath,	0,
+	/* slot 0 = "console" indirect target; see header comment above. */
+	{ "console",	consoleopen,	consoleclose,	NULL_READ,
+	  consolewrite,	NULL_GETS,	NULL_SETS,	NO_MMAP,
+	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
 	  NO_DINFO },
 
 	{ timename,	NULL_OPEN,	NULL_CLOSE,	NULL_READ,
@@ -496,15 +500,12 @@ struct dev_ops	dev_name_list[] =
 	  NO_DINFO },
 #endif
 
-	{ mousename,	mouseopen,	mouseclose,	mouseread,
-	  NO_WRITE,	NULL_GETS,	NULL_SETS,	NO_MMAP,
-	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
-	  NO_DINFO },
+	/* #208: kd_mouse retired — a future ps2_mouse.so under
+	 * char_server / hid_server will own port 2 of the 8042. */
 
-	{ kbdname,	kbdopen,	kbdclose,	kbdread,
-	  NO_WRITE,	kbdgetstat,	kbdsetstat,	NO_MMAP,
-	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
-	  NO_DINFO },
+	/* #208: kd_event "kbd" event device retired — the same role
+	 * (raw-event keyboard for X-like clients) belongs to a future
+	 * char_server.kbd_subscribe consumer in userspace. */
 
 	{ ioplname,	ioplopen,	ioplclose,	NO_READ,
 	  NO_WRITE,	NO_GETS,	NO_SETS,	ioplmmap,

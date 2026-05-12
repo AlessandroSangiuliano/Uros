@@ -208,8 +208,8 @@
 #include <i386/pci/pci.h>
 #endif
 
-#include <i386/AT386/kdsoft.h>
-extern struct   bus_driver      kddriver;
+/* #208: kd.c retired — userspace char_server/ps2.so owns the PS/2
+ * keyboard.  No bus_device entry for "kd" anymore. */
 
 #ifdef	CBUS
 #include <busses/cbus/cbus.h>
@@ -400,9 +400,7 @@ struct	bus_device	bus_device_init[] = {
 /* driver     name unit intr    address       am   phys_address 
      adaptor alive ctlr slave flags *mi       *next  sysdep sysdep */
 
-  {&kddriver, "kd",     0, (intr_t)kdintr, (caddr_t)0x60, 5, (caddr_t)0x60,
-       '?',    0,   -1,   -1,    0,   0,  0,  SPL_SIX, 1},
-
+  /* PS/2 keyboard entry removed in #208 — ps2.so owns IRQ 1 now. */
 
 #if NHBA > 0
 { &hba_driver,	"rz",   0,  NO_INTR,  0x0,0,	0,    '?',     0,   0,   0,    0, },
