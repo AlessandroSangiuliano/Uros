@@ -285,7 +285,10 @@ extern char	version[];
 
 int		rebootflag = 0;	/* exported to com.c halt-char path */
 
-int		halt_in_debugger = 0;
+/* Forced into .data so parse_arguments() can set this BEFORE
+ * i386_init()'s bzero(&edata, &end-&edata) — which would otherwise
+ * wipe the BSS copy back to 0 and silently swallow -h. */
+int		halt_in_debugger __attribute__((section(".data"))) = 0;
 
 extern int	cons_is_com1;
 
@@ -413,17 +416,37 @@ void
 parse_arguments(void)
 {
 	char *p = (char *) kern_args_start;
-	char *endp = p + kern_args_size - 1;
+	char *endp;
 	char ch;
 
-	if (kern_args_start == 0)
+	if (kern_args_start == 0 || kern_args_size == 0)
 	    return;
 
+	endp = p + kern_args_size - 1;
+
+	/*
+	 * QEMU's multiboot cmdline starts with the kernel file path as
+	 * argv[0] (e.g. ".../osfmk-mklinux/.../mach_kernel -h").  The
+	 * historical parser scanned for any '-' anywhere — which then
+	 * happily matched 'h' inside "mach_kernel", 'm' inside "osfmk"
+	 * (parsing "mem=0"), and 'r' inside "Scrivania" (forcing serial
+	 * console).  Require the '-' to start a real argument: either
+	 * preceded by whitespace or sitting at the very beginning.
+	 *
+	 * Each flag is a single character; the inner loop terminates at
+	 * the next whitespace, so subsequent characters within the same
+	 * token are read by per-flag arg parsers (e.g. '-m128' lets the
+	 * atoi_term consumer pick up the digits).
+	 */
 	while (p < endp) {
-	    if (*p++ != '-') {
+	    char prev = (p == (char *)kern_args_start) ? ' ' : *(p - 1);
+	    if (*p != '-' || (prev != ' ' && prev != '\t')) {
+		p++;
 		continue;
 	    }
-	    while (ch = *p++) {
+	    p++;	/* skip the '-' */
+	    while ((ch = *p) && ch != ' ' && ch != '\t') {
+		p++;
 		switch (ch) {
 		case 'h':
 		    halt_in_debugger = 1;
