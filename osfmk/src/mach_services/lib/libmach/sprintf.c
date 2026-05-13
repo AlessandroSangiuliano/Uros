@@ -48,25 +48,24 @@
  */
 
 #include <stdarg.h>
-#include <stddef.h>
 
-extern int _doprnt(const char *fmt, va_list args, int radix,
-                   void (*putc)(char *, int), char *putc_arg);
+#include "externs.h"
 
 static void
-savechar(char *arg, int c)
+savechar(void *arg, int c)
 {
 	*(*(char **)arg)++ = c;
 }
 
-int
+void
 vsprintf(char *s, const char *fmt, va_list args)
 {
-	_doprnt(fmt, args, 0, (void (*)(char *, int)) savechar, (char *) &s);
+	_doprnt(fmt, args, 0, savechar, &s);
 	*s = 0;
 }
 
-int
+/*VARARGS2*/
+void
 sprintf(char *s, const char *fmt, ...)
 {
 	va_list	args;
@@ -82,7 +81,7 @@ struct snprintf_state {
 };
 
 static void
-savechar_n(char *arg, int c)
+savechar_n(void *arg, int c)
 {
 	struct snprintf_state *state = (struct snprintf_state *)arg;
 
@@ -92,7 +91,7 @@ savechar_n(char *arg, int c)
 	}
 }
 
-int
+int __attribute__((noinline))
 vsnprintf(char *s, size_t n, const char *fmt, va_list args)
 {
 	struct snprintf_state state;
@@ -101,11 +100,12 @@ vsnprintf(char *s, size_t n, const char *fmt, va_list args)
 		return 0;
 	state.buf = s;
 	state.remaining = n;
-	_doprnt(fmt, args, 0, (void (*)(char *, int)) savechar_n, (char *) &state);
+	_doprnt(fmt, args, 0, savechar_n, &state);
 	*state.buf = '\0';
 	return (state.buf - s);
 }
 
+/*VARARGS3*/
 int
 snprintf(char *s, size_t n, const char *fmt, ...)
 {

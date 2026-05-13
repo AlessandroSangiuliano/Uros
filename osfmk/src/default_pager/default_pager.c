@@ -280,7 +280,11 @@ int	debug_mask = 0;
 /*
  * Use 16 Kbyte stacks instead of the default 64K.
  */
-int	_pthread_stack_size = 16 * 1024;
+int	_pthread_stack_size = 16 * 1024;	/* override libpthreads default */
+
+/* Definition of the global statistics block declared in
+ * default_pager_internal.h (see #106). */
+struct global_stats_s global_stats;
 
 /* Thread-specific key for default_pager_thread_t pointer */
 pthread_key_t	dpt_key;
@@ -608,7 +612,7 @@ start_default_pager_thread(
 	dpt->dpt_id = id;
 	dpt->dpt_initialized_p = FALSE;
 
-	kr = vm_allocate(default_pager_self, &dpt->dpt_buffer,
+	kr = vm_allocate_wired(default_pager_self, &dpt->dpt_buffer,
 			 vm_page_size, TRUE);
 	if (kr != KERN_SUCCESS)
 		Panic("alloc thread buffer");

@@ -164,7 +164,7 @@ target_compile_definitions(gpu_server PRIVATE
 
 target_include_directories(gpu_server PRIVATE ${GPU_INCLUDE_DIRS})
 
-# Same start/end-group dance as hal_server for circular libmach/libsa_mach
+# Same start/end-group dance as hal_server for circular libmach/libpthreads
 # resolution.  libmodload + libdl provide the runtime module loader;
 # libnetname provides netname_check_in / netname_look_up.
 target_link_libraries(gpu_server PRIVATE
@@ -173,7 +173,6 @@ target_link_libraries(gpu_server PRIVATE
   libdl
   libpthreads
   libmach
-  libsa_mach
   libnetname
   libcap
   -Wl,--end-group
@@ -188,7 +187,6 @@ target_link_options(gpu_server PRIVATE
   -Wl,--no-dynamic-linker
   -Wl,--export-dynamic
   -Wl,--hash-style=sysv
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

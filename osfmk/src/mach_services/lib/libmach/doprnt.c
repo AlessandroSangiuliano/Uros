@@ -47,14 +47,12 @@
  * MkLinux
  */
 
+#define EXPORT_BOOLEAN
 #include <mach/boolean.h>
-#include <limits.h>
 #include <stdarg.h>
-#include <string.h>
 
-/* Modernized prototypes */
-static void printnum(unsigned long u, int base, void (*putc)(char *, int), char *putc_arg);
-int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int), char *putc_arg);
+#include "externs.h"
+#include <string.h>
 
 /*
  *  Common code for printf et al.
@@ -154,29 +152,37 @@ int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int),
 #define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
 
 static void
-printnum(unsigned long u, int base, void (*putc)(char *, int), char *putc_arg)
+printnum(unsigned int	u,	/* number to print */
+	 int		base,
+	 void			(*putc)(void *, int),
+	 void			*putc_arg)
 {
-    char buf[MAXBUF]; /* build number here */
-    char *p = &buf[MAXBUF-1];
-    static const char digs[] = "0123456789abcdef";
+	char	buf[MAXBUF];	/* build number here */
+	char *	p = &buf[MAXBUF-1];
+	static char digs[] = "0123456789abcdef";
 
-    do {
-        *p-- = digs[u % base];
-        u /= base;
-    } while (u != 0);
+	do {
+	    *p-- = digs[u % base];
+	    u /= base;
+	} while (u != 0);
 
-    while (++p != &buf[MAXBUF])
-        (*putc)(putc_arg, *p);
+	while (++p != &buf[MAXBUF])
+	    (*putc)(putc_arg, *p);
 }
 
-int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int), char *putc_arg)
+void
+_doprnt(const char *fmt,
+	va_list		args,
+	int		radix,			/* default radix - for '%r' */
+ 	void		(*putc)(void *, int),	/* character output */
+	void		*putc_arg)		/* argument for putc */
 {
 	int		length;
 	int		prec;
 	boolean_t	ladjust;
 	char		padc;
-	long		n;
-	unsigned long	u;
+	int		n;
+	unsigned int	u;
 	int		plus_sign;
 	int		sign_char;
 	boolean_t	altfmt;
@@ -259,12 +265,12 @@ int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int),
 		case 'b':
 		case 'B':
 		{
-		    char *p;
+		    const char *p;
 		    boolean_t	  any;
 		    int  i;
 
-		    u = va_arg(args, unsigned long);
-		    p = va_arg(args, char *);
+		    u = va_arg(args, unsigned int);
+		    p = va_arg(args, const char *);
 		    base = *p++;
 		    printnum(u, base, putc, putc_arg);
 
@@ -287,7 +293,7 @@ int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int),
 			    j = *p++;
 			    for (; (c = *p) > 32; p++)
 				(*putc)(putc_arg, c);
-			    printnum(( (u>>(j-1)) & ((2<<(i-j))-1)),
+			    printnum((unsigned)( (u>>(j-1)) & ((2<<(i-j))-1)),
 					base, putc, putc_arg);
 			}
 			else if (u & (1<<(i-1))) {
@@ -317,11 +323,11 @@ int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int),
 
 		case 's':
 		{
-		    char *p;
-		    char *p2;
+		    const char *p;
+		    const char *p2;
 
 		    if (prec == -1)
-			prec = INT_MAX;
+			prec = 0x7fffffff;	/* MAXINT */
 
 		    p = va_arg(args, char *);
 
@@ -397,7 +403,7 @@ int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int),
 		    goto print_unsigned;
 
 		print_signed:
-		    n = va_arg(args, long);
+		    n = va_arg(args, int);
 		    if (n >= 0) {
 			u = n;
 			sign_char = plus_sign;
@@ -409,7 +415,7 @@ int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int),
 		    goto print_num;
 
 		print_unsigned:
-		    u = va_arg(args, unsigned long);
+		    u = va_arg(args, unsigned int);
 		    goto print_num;
 
 		print_num:
@@ -417,7 +423,7 @@ int _doprnt(const char *fmt, va_list args, int radix, void (*putc)(char *, int),
 		    char	buf[MAXBUF];	/* build number here */
 		    char *	p = &buf[MAXBUF-1];
 		    static char digits[] = "0123456789abcdef";
-		    char *prefix = 0;
+		    const char *prefix = 0;
 
 		    if (u != 0 && altfmt) {
 			if (base == 8)

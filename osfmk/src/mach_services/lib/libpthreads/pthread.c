@@ -40,7 +40,10 @@ extern kern_return_t mach_thread_set_name(const char *name);
  * [Internal] stack support
  */
 
-int _pthread_stack_size;
+/* Weak so consumers (bootstrap, default_pager, ...) can override the
+ * default stack size with their own strong definition (#106 — used to be
+ * masked by --allow-multiple-definition). */
+int _pthread_stack_size __attribute__((weak));
 /* This 'shadow' stack size is used to prevent the user from changing the fundamental  
  * stack size after some threads have been created.  Since we use the stack for thread 
  * data structures, the stack size must be well known at all times and cannot vary from

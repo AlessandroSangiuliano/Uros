@@ -209,9 +209,9 @@ typedef struct default_pager_thread {
 } default_pager_thread_t;
 
 /*
- * Global statistics.
+ * Global statistics.  Definition lives in default_pager.c.
  */
-struct {
+struct global_stats_s {
 	unsigned int	gs_pageout_calls;	/* # pageout calls */
 	unsigned int	gs_pagein_calls;	/* # pagein calls */
 	unsigned int	gs_pages_in;		/* # pages paged in (total) */
@@ -220,7 +220,15 @@ struct {
 	unsigned int	gs_pages_init;		/* # page init requests */
 	unsigned int	gs_pages_init_writes;	/* # page init writes */
 	VSTATS_LOCK_DECL(gs_lock)
-} global_stats;
+};
+extern struct global_stats_s global_stats;
+
+/* default_pager-private wrapper around vm_allocate that wires memory in
+ * the local task — see wiring.c (#106). */
+extern kern_return_t vm_allocate_wired(mach_port_t task,
+				       vm_address_t *address,
+				       vm_size_t size,
+				       boolean_t anywhere);
 #define GSTAT(clause)	VSTATS_ACTION(&global_stats.gs_lock, (clause))
 
 /*

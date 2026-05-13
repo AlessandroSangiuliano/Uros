@@ -9,7 +9,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Create small generated forwarding headers so legacy includes like
 # "machine/types.h" and <machine/va_list.h> resolve to the
-# architecture-specific headers (use i386 for libsa_mach builds).
+# architecture-specific headers (use i386 for libmach builds).
 file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/machine")
 set(GEN_MACHINE_TYPES "${CMAKE_BINARY_DIR}/generated/include/machine/types.h")
 set(GEN_MACHINE_VALIST "${CMAKE_BINARY_DIR}/generated/include/machine/va_list.h")
@@ -124,8 +124,7 @@ endmacro()
 maybe_add(libmach)
 maybe_add(libmach_p)
 maybe_add(libmach_maxonstack)
-maybe_add(libsa_mach)
-maybe_add(libsa_mach_p)
+# libsa_mach merged into libmach (#106)
 maybe_add(libmachid)
 maybe_add(libcthreads)
 maybe_add(libcthreads_p)

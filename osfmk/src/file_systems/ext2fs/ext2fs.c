@@ -264,7 +264,7 @@ ext2_dev_has_batch(struct device *dev)
 #define mutex_unlock(a)
 #define mutex_init(a)
 
-security_token_t null_security_token;
+static security_token_t null_security_token;
 
 static void free_file_buffers(
 		struct ext2fs_file *);

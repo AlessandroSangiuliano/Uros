@@ -150,10 +150,12 @@ wire_all_memory(void)
 }
 
 /*
- * Alias for vm_allocate to return wired memory.
+ * Wrapper around vm_allocate that wires memory in the local task.
+ * Used to override libmach's vm_allocate; renamed in #106 to drop
+ * --allow-multiple-definition.
  */
 kern_return_t
-vm_allocate(mach_port_t task,
+vm_allocate_wired(mach_port_t task,
 	    vm_address_t *address,
 	    vm_size_t size,
 	    boolean_t anywhere)

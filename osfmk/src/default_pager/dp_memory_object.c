@@ -1016,7 +1016,7 @@ default_pager_objects(
 
 		newsize = 2 * round_page(actual * sizeof * objects);
 
-		kr = vm_allocate(default_pager_self, &newaddr, newsize, TRUE);
+		kr = vm_allocate_wired(default_pager_self, &newaddr, newsize, TRUE);
 		if (kr != KERN_SUCCESS)
 			goto nomemory;
 
@@ -1032,7 +1032,7 @@ default_pager_objects(
 
 		newsize = 2 * round_page(actual * sizeof * ports);
 
-		kr = vm_allocate(default_pager_self, &newaddr, newsize, TRUE);
+		kr = vm_allocate_wired(default_pager_self, &newaddr, newsize, TRUE);
 		if (kr != KERN_SUCCESS)
 			goto nomemory;
 
@@ -1274,7 +1274,7 @@ default_pager_object_pages(
 		if (pages != *pagesp)
 			(void) vm_deallocate(default_pager_self, addr, size);
 		size = round_page(actual * sizeof * pages);
-		kr = vm_allocate(default_pager_self, &addr, size, TRUE);
+		kr = vm_allocate_wired(default_pager_self, &addr, size, TRUE);
 		if (kr != KERN_SUCCESS)
 			return kr;
 		pages = (default_pager_page_t *)addr;

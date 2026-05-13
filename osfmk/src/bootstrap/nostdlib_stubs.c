@@ -60,19 +60,6 @@ cthread_sp(void)
 	return sp;
 }
 
-/*
- * device_read_overwrite() — another ms_*.c wrapper we excluded.
- * The original adds MACH_SEND_INTERRUPTED retry; for the bootstrap
- * server's simple synchronous reads, the direct trap suffices.
- */
-extern kern_return_t syscall_device_read_overwrite(
-	mach_port_t, int, int, int, unsigned int, unsigned int *);
-
-kern_return_t
-device_read_overwrite(mach_port_t device, int mode, int recnum,
-		      int bytes_wanted, unsigned int buffer,
-		      unsigned int *data_count)
-{
-	return syscall_device_read_overwrite(device, mode, recnum,
-					     bytes_wanted, buffer, data_count);
-}
+/* device_read_overwrite() lives in device_read_overwrite.c — see #106
+ * (the duplicate stub here used to be tolerated by --allow-multiple-
+ * definition).  Removed. */

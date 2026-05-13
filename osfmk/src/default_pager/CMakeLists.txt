@@ -158,7 +158,6 @@ target_link_libraries(default_pager_server PRIVATE
   -Wl,--start-group
   libpthreads
   libmach
-  libsa_mach
   libblk
   libcap
   libnetname
@@ -170,7 +169,6 @@ target_link_libraries(default_pager_server PRIVATE
 target_link_options(default_pager_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

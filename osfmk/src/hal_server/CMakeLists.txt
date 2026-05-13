@@ -187,7 +187,6 @@ target_link_libraries(hal_server PRIVATE
   libdl
   libpthreads
   libmach
-  libsa_mach
   libnetname
   libcap
   libgpu_console
@@ -200,7 +199,6 @@ target_link_options(hal_server PRIVATE
   -Wl,--no-dynamic-linker
   -Wl,--export-dynamic
   -Wl,--hash-style=sysv
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 
