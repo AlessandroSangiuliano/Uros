@@ -180,6 +180,7 @@ add_custom_command(
             -nostdinc
             -ffreestanding
             -isystem ${GCC_INCLUDE_DIR}
+            -I${CMAKE_SOURCE_DIR}/uapi
             -I${KERNEL_SRC_DIR}
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386
