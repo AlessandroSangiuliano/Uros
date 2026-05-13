@@ -228,11 +228,20 @@ int no_lookup_incomplete(
 
 /*
  * Initialization routine for ddb.
+ *
+ * X_db_init() under the default symtab_type macro only kicks the a.out
+ * backend, which is a no-op since the MkLinux boot_info pipeline isn't
+ * present under multiboot.  Call the ELF/ksyms backend explicitly so
+ * symbol-by-name lookups work when the kernel was booted with a "KSYM"
+ * multiboot module (#211).
  */
+#include <ddb/db_elf.h>
+
 void
 ddb_init(void)
 {
 	X_db_init();
+	elf_db_init();
 	db_machdep_init();
 }
 
@@ -1575,6 +1584,10 @@ struct db_sym_switch x_db[] = {
 	  coff_db_print_completion, coff_db_lookup_incomplete },
 #endif	/* DB_NO_COFF */
 
-	/* Machdep, not inited here */
-	NONE
+	/* Machdep slot reused by the ELF/ksyms.bin backend (#211).  Populated
+	 * via SYMTAB_MACHDEP from elf_db_init() if the kernel was booted with
+	 * a "KSYM" multiboot module. */
+	{ elf_db_init, elf_db_sym_init, elf_db_lookup, elf_db_search_symbol,
+	  elf_db_line_at_pc, elf_db_symbol_values, elf_db_search_by_addr,
+	  elf_db_print_completion, elf_db_lookup_incomplete }
 };

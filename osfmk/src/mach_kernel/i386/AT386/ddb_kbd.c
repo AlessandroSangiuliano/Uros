@@ -179,19 +179,71 @@ ddb_kbd_poll(boolean_t wait)
  * Public hooks consumed by DDB / kgdb (db_machdep.h, misc_protos.h).
  * ============================================================ */
 
+/*
+ * Serial terminals (-nographic + -serial mon:stdio) send VT100 escape
+ * sequences for arrows / Home / End / Del.  DDB's line editor doesn't
+ * speak ESC, so without this parser pressing Up just inserts "^[[A".
+ *
+ * We translate the canonical 3-byte sequences into the same Ctrl-letter
+ * shortcuts the PS/2 path emits (see ddb_kbd_e0_map above) so history
+ * recall works uniformly across graphic and serial consoles (#211).
+ *
+ * ESC alone (no follow-up) is rare in DDB usage; we fall through to
+ * delivering the literal 0x1B which db_input.c just ignores.
+ */
+static int
+ddb_com_getc(boolean_t wait)
+{
+	int c = com_getc(wait);
+	if (c != 0x1B)
+		return c;
+	{
+		int c2 = com_getc(TRUE);
+		if (c2 != '[')
+			return c2;	/* alt-key or stray ESC; eat it */
+	}
+	{
+		int c3 = com_getc(TRUE);
+		switch (c3) {
+		case 'A': return CTRL('p');	/* Up    */
+		case 'B': return CTRL('n');	/* Down  */
+		case 'C': return CTRL('f');	/* Right */
+		case 'D': return CTRL('b');	/* Left  */
+		case 'H': return CTRL('a');	/* Home  */
+		case 'F': return CTRL('e');	/* End   */
+		case '3': {
+			/* xterm Delete: ESC [ 3 ~ */
+			int t = com_getc(TRUE);
+			if (t == '~') return CTRL('d');
+			return 0;
+		}
+		default:
+			return 0;		/* drop unknown CSI */
+		}
+	}
+}
+
 int
 cngetc(void)
 {
 	if (cons_is_com1)
-		return com_getc(TRUE);
+		return ddb_com_getc(TRUE);
 	return ddb_kbd_poll(TRUE);
 }
 
 int
 cnmaygetc(void)
 {
-	if (cons_is_com1)
-		return com_getc(FALSE);
+	if (cons_is_com1) {
+		int c = com_getc(FALSE);
+		if (c == 0x1B) {
+			/* Don't block waiting for the rest of the CSI in
+			 * polling mode — the bytes will arrive on the next
+			 * poll if they're real escape sequences. */
+			return c;
+		}
+		return c;
+	}
 	return ddb_kbd_poll(FALSE);
 }
 
