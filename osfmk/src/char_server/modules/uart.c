@@ -447,4 +447,5 @@ const char_module_ops_t uart_module_ops = {
 	.tty_write      = uart_tty_write,
 	.tty_set_attr   = uart_tty_set_attr,
 	.tty_subscribe  = uart_tty_subscribe,
+	.mouse_subscribe = NULL,
 };

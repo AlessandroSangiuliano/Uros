@@ -37,6 +37,7 @@ typedef uint64_t	char_event_id_t;/* monotonic per-device event sequence */
 #define CHAR_CAP_TTY_RW			(1ull << 1)
 #define CHAR_CAP_TTY_CONFIG		(1ull << 2)
 #define CHAR_CAP_DEV_ADMIN		(1ull << 3)
+#define CHAR_CAP_MOUSE_READ		(1ull << 4)	/* #215 */
 
 #define CHAR_CAP_RESOURCE_TYPE		0x43485200u	/* 'CHR\0' */
 
@@ -76,6 +77,33 @@ typedef struct char_kbd_event {
 	uint8_t		pressed;	/* 1 = make, 0 = break */
 	uint8_t		_pad[3];
 } char_kbd_event_t;
+
+/* ============================================================
+ * Mouse event payload (#215).  IntelliMouse 4-byte semantics:
+ *
+ *   dx/dy:  signed relative motion since the last event.  Positive
+ *           Y is "down on screen" (the PS/2 hardware uses +Y = up;
+ *           ps2_mouse.so inverts to match the X11/Wayland convention
+ *           that's the de-facto standard for compositors).
+ *   wheel:  signed Z delta (positive = scroll up).  +/-1 per notch
+ *           on a standard wheel.
+ *   buttons: CHAR_MOUSE_BTN_* bitmask of currently-held buttons.
+ *            Edge events are derived by the subscriber by diffing
+ *            against the previous packet — the hardware reports
+ *            state-on-every-packet, not press/release.
+ * ============================================================ */
+
+#define CHAR_MOUSE_BTN_LEFT		(1u << 0)
+#define CHAR_MOUSE_BTN_RIGHT		(1u << 1)
+#define CHAR_MOUSE_BTN_MIDDLE		(1u << 2)	/* wheel click */
+
+typedef struct char_mouse_event {
+	int32_t		dx;		/* X delta (signed) */
+	int32_t		dy;		/* Y delta (signed, +Y = down) */
+	int32_t		wheel;		/* Z delta (signed, +1 per notch up) */
+	uint32_t	buttons;	/* CHAR_MOUSE_BTN_* bitmask */
+	uint32_t	flags;		/* reserved for future use */
+} char_mouse_event_t;
 
 /* ============================================================
  * Device info (returned by char_query_devices).  POD layout, OOL

@@ -30,6 +30,7 @@ class_to_open_op(uint32_t cls)
 	switch (cls) {
 	case CHAR_CLASS_KEYBOARD:	return CHAR_CAP_KBD_READ;
 	case CHAR_CLASS_TTY:		return CHAR_CAP_TTY_RW;
+	case CHAR_CLASS_MOUSE:		return CHAR_CAP_MOUSE_READ;
 	default:			return CHAR_CAP_DEV_ADMIN;
 	}
 }
@@ -235,5 +236,33 @@ char_tty_subscribe(mach_port_t char_port,
 	if (dev->module->tty_subscribe == NULL)
 		return KERN_FAILURE;
 	return (dev->module->tty_subscribe(dev->priv, notify_port) == 0)
+		? KERN_SUCCESS : KERN_FAILURE;
+}
+
+/* ============================================================
+ * Mouse plane (#215)
+ * ============================================================ */
+
+kern_return_t
+char_mouse_subscribe(mach_port_t char_port,
+		     char *cap, mach_msg_type_number_t cap_count,
+		     uint32_t dev_id, mach_port_t notify_port)
+{
+	struct char_device_entry *dev;
+
+	(void)char_port;
+
+	dev = char_core_dev_lookup((char_dev_id_t)dev_id);
+	if (dev == NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (dev->info.class != CHAR_CLASS_MOUSE)
+		return KERN_INVALID_ARGUMENT;
+	if (char_core_cap_check(cap, cap_count, CHAR_CAP_MOUSE_READ,
+				(uint64_t)dev_id) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	if (dev->module->mouse_subscribe == NULL)
+		return KERN_FAILURE;
+	return (dev->module->mouse_subscribe(dev->priv, notify_port) == 0)
 		? KERN_SUCCESS : KERN_FAILURE;
 }

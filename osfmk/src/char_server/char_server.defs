@@ -119,3 +119,19 @@ routine tty_subscribe(
 	in	cap		: chr_token_t;
 	in	dev_id		: chr_u32_t;
 	in	notify_port	: mach_port_t);
+
+/* =================================================================
+ * Mouse plane (#215 — ps2_mouse.so)
+ * ================================================================= */
+
+/*
+ * mouse_subscribe — register a notify port that receives mouse
+ * events (one Mach msg per char_mouse_event_t).  Same shape as
+ * kbd_subscribe: the module retains the SEND right; the subscriber
+ * tears down by revoking the cap or letting the port go dead.
+ */
+routine mouse_subscribe(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	notify_port	: mach_port_t);
