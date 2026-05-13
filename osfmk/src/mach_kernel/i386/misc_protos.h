@@ -40,6 +40,8 @@ extern void		fix_desc(
 extern void		cnpollc(
 				boolean_t	on);
 extern void		form_pic_mask(void);
+extern void		pic_irq_mask(unsigned int irq);
+extern void		pic_irq_unmask(unsigned int irq);
 extern void		intnull(
 				int		unit);
 extern char *		i386_boot_info(

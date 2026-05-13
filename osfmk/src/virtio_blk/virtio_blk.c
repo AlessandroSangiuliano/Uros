@@ -739,6 +739,7 @@ virtio_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	if (in->msgh_id >= IRQ_NOTIFY_MSGH_BASE) {
 		/* Read ISR to acknowledge (clears interrupt) */
 		vio_read8(VIRTIO_PCI_ISR);
+		(void)device_intr_enable(master_device, vblk_irq);
 		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
 		((mig_reply_error_t *)out)->Head.msgh_size =
 			sizeof(mig_reply_error_t);
