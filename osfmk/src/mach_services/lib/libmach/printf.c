@@ -672,27 +672,7 @@ savechar(void *arg, int c)
 	*(*(char **)arg)++ = c;
 }
 
-int
-vsprintf(char *s, const char *fmt, va_list args)
-{
-	char *ss = s;
-	_doprnt(fmt, args, 0, savechar, &s);
-	*s = 0;
-	return (s - ss);
-}
-
-/*VARARGS2*/
-int
-sprintf(char *s, const char *fmt, ...)
-{
-	int ret;
-	va_list	args;
-
-	va_start(args, fmt);
-	ret = vsprintf(s, fmt, args);
-	va_end(args);
-	return (ret);
-}
+/* sprintf / vsprintf live in sprintf.c (#106 — see libmach/CMakeLists.txt). */
 
 int
 getchar(void)

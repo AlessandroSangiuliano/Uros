@@ -108,7 +108,6 @@ target_include_directories(name_server_bin PRIVATE
 target_link_libraries(name_server_bin PRIVATE
   -Wl,--start-group
   libmach
-  libsa_mach
   -Wl,--end-group
 )
 
@@ -116,7 +115,6 @@ target_link_libraries(name_server_bin PRIVATE
 target_link_options(name_server_bin PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

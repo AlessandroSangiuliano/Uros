@@ -149,7 +149,7 @@
 #define mutex_unlock(a)
 #define mutex_init(a)
 
-security_token_t null_security_token;
+static security_token_t null_security_token;
 
 static void free_file_buffers(
 		struct bext2fs_file *);

@@ -12,14 +12,23 @@ file(GLOB TOP_S_LOWER_S CONFIGURE_DEPENDS "*.s")
 file(GLOB MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
 list(REMOVE_ITEM LIB_SOURCES ${MS_WRAPPERS})
 
-# Exclude sprintf.c and doprnt.c — the canonical implementations live in
-# libsa_mach.  The libmach copies have an incompatible _doprnt signature
-# (char * callback vs void *) which breaks snprintf when the linker picks
-# mismatched symbols with --allow-multiple-definition.  See issue #102.
-list(REMOVE_ITEM LIB_SOURCES
-  ${CMAKE_CURRENT_SOURCE_DIR}/sprintf.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/doprnt.c
-)
+# Exclude C implementations replaced by SSE2 assembly in i386/ (#106 import
+# from libsa_mach).
+list(FILTER LIB_SOURCES EXCLUDE REGEX "(bcopy|memcpy|memmove|memset)\\.c$")
+
+# sprintf.c (imported from libsa_mach) provides sprintf/vsprintf/snprintf/
+# vsnprintf.  printf.c (also from libsa_mach) used to also define sprintf/
+# vsprintf — now stripped from printf.c after #106 since the duplicates
+# collided once --allow-multiple-definition was removed.
+
+# strtod.c needs float.h macros (DBL_DIG, HUGE_VAL, ...) that our local
+# sa_mach/i386/float.h does not provide.  No userspace target calls strtod
+# today, so excluding it costs nothing.  Re-enable when the float.h gap is
+# closed (or when musl lands and replaces this file wholesale).
+list(REMOVE_ITEM LIB_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)
+
+# Per-file: strtod.c needs math.h (frexp, ldexp, modf, ...) — imported from
+# libsa_mach in #106.  Other files only need stdint.h.
 
 # __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out)
 set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
@@ -45,6 +54,9 @@ endforeach()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   file(GLOB ARCH_SOURCES CONFIGURE_DEPENDS "i386/*.c" "i386/*.S")
   file(GLOB ARCH_S_LOWER_S CONFIGURE_DEPENDS "i386/*.s")
+  # bzero.s is the legacy non-SSE bzero — memset.s (imported from libsa_mach
+  # in #106) provides both memset AND bzero with SSE2.  Drop the duplicate.
+  list(FILTER ARCH_S_LOWER_S EXCLUDE REGEX "/bzero\\.s$")
   list(APPEND LIB_SOURCES ${ARCH_SOURCES})
   foreach(sfile IN LISTS ARCH_S_LOWER_S)
     get_filename_component(sname ${sfile} NAME)
@@ -182,8 +194,17 @@ add_dependencies(libmach mig_device_header mig_mach_public_headers)
 # Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
 # Apply C-only options (including -include stdint.h) only when compiling C sources
 target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -mstack-protector-guard=global -include stdint.h>)
+
 # Build assembly files and C as 32-bit where needed
 target_compile_options(libmach PRIVATE -m32 -march=i686 -msse -msse2)
+target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>)
+
+# Work around GCC constprop + SSP + va_list code generation bug on i386:
+# GCC creates a constprop clone of _doprnt where the va_list calling
+# convention is inconsistent between the inlined printf and standalone
+# vprintf callers.  Disable SSP for printf.c until GCC is fixed.
+# (Imported from libsa_mach via #106.)
+set_source_files_properties(printf.c PROPERTIES COMPILE_FLAGS -fno-stack-protector)
 
 # Mach userspace headers (sa_mach) solo per questa libreria
 target_include_directories(libmach BEFORE PUBLIC

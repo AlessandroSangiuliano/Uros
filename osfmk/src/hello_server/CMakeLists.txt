@@ -54,7 +54,6 @@ target_link_libraries(hello_server_server PRIVATE
   -Wl,--start-group
   libpthreads
   libmach
-  libsa_mach
   -Wl,--end-group
 )
 
@@ -62,7 +61,6 @@ target_link_libraries(hello_server_server PRIVATE
 target_link_options(hello_server_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

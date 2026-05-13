@@ -21,7 +21,7 @@ set(CHAR_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
   ${CMAKE_BINARY_DIR}/generated/include
   # mach_services/include MUST come before build/generated so <mach.h>
-  # resolves to the libsa_mach version, not the MIG-emitted shim.
+  # resolves to the libmach userspace version, not the MIG-emitted shim.
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
@@ -196,7 +196,6 @@ target_link_libraries(char_server PRIVATE
   libdl
   libpthreads
   libmach
-  libsa_mach
   libnetname
   libcap
   libgpu_console
@@ -209,7 +208,6 @@ target_link_options(char_server PRIVATE
   -Wl,--no-dynamic-linker
   -Wl,--export-dynamic
   -Wl,--hash-style=sysv
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

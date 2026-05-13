@@ -130,7 +130,7 @@
 #include <device/device_types.h>
 #include <device/device.h>
 
-security_token_t null_security_token;
+static security_token_t null_security_token;
 
 static void	free_file_buffers(
 				  struct ufs_file *);

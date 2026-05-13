@@ -297,7 +297,7 @@ kalloc(size_t size)
 	    }
 	}
 	else {
-	    if (vm_allocate(mach_task_self(), &addr, allocsize, TRUE)
+	    if (vm_allocate_wired(mach_task_self(), &addr, allocsize, TRUE)
 			!= KERN_SUCCESS)
 		addr = 0;
 	}

@@ -27,9 +27,26 @@
 #include <mach/message.h>
 #include <mach/vm_types.h>
 
+#include <stdarg.h>		/* for va_list */
+#include <stddef.h>		/* for size_t */
+
 extern void mig_init(void *);
 extern void mach_init_ports(void);
 extern void mig_allocate(vm_address_t *, vm_size_t);
 extern void mig_deallocate(vm_address_t, vm_size_t);
 
 extern char *mach_error_string_int(mach_error_t, boolean_t *);
+
+/* libc-style globals/helpers imported from libsa_mach (#106). */
+extern char	**__environment;
+
+extern void	_doprnt(const char *,
+			va_list,
+			int,			/* default radix - for '%r' */
+			void (*)(void *, int),	/* character output */
+			void *);
+
+extern size_t	strlcpy(char *, const char *, size_t);
+extern size_t	strlcat(char *, const char *, size_t);
+extern int	snprintf(char *, size_t, const char *, ...);
+extern int	vsnprintf(char *, size_t, const char *, va_list);

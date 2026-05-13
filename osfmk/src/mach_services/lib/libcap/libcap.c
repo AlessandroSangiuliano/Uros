@@ -100,7 +100,7 @@ cap_request(uint32_t resource_type,
 }
 
 kern_return_t
-cap_derive(const struct uros_cap *parent,
+__attribute__((weak)) cap_derive(const struct uros_cap *parent,
            uint64_t reduced_ops,
            uint32_t lifetime_ms,
            struct uros_cap *out)
@@ -127,7 +127,7 @@ cap_derive(const struct uros_cap *parent,
 }
 
 kern_return_t
-cap_revoke(uint64_t cap_id)
+__attribute__((weak)) cap_revoke(uint64_t cap_id)
 {
     mach_port_t srv = cap_server_port();
     if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
@@ -135,7 +135,7 @@ cap_revoke(uint64_t cap_id)
 }
 
 kern_return_t
-cap_subscribe_revoke(mach_port_t notify_port)
+__attribute__((weak)) cap_subscribe_revoke(mach_port_t notify_port)
 {
     mach_port_t srv = cap_server_port();
     if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
@@ -149,7 +149,7 @@ cap_subscribe_revoke(mach_port_t notify_port)
 }
 
 kern_return_t
-cap_verify(const struct uros_cap *token, uint64_t op, uint64_t resource_id)
+__attribute__((weak)) cap_verify(const struct uros_cap *token, uint64_t op, uint64_t resource_id)
 {
     mach_port_t srv = cap_server_port();
     if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;

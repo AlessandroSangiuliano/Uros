@@ -155,7 +155,6 @@ target_link_libraries(ext_server_bin PRIVATE
   -Wl,--start-group
   libpthreads
   libmach
-  libsa_mach
   libsa_fs
   libblk
   libcap
@@ -168,7 +167,6 @@ target_link_libraries(ext_server_bin PRIVATE
 target_link_options(ext_server_bin PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

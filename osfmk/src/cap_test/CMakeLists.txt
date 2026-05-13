@@ -36,14 +36,12 @@ target_link_libraries(cap_test_server PRIVATE
   libnetname
   libcap
   libmach
-  libsa_mach
   -Wl,--end-group
 )
 
 target_link_options(cap_test_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

@@ -69,13 +69,12 @@ target_include_directories(cap_server_bin PRIVATE
 
 # Link order mirrors block_device_server: the MIG stubs and server
 # handlers are in the executable itself, libcap provides SHA-256/HMAC,
-# libnetname for netname_check_in, libmach/libsa_mach for Mach + libc.
+# libnetname for netname_check_in, libmach for Mach + libc (#106).
 target_link_libraries(cap_server_bin PRIVATE
   -Wl,--start-group
   libcap
   libpthreads
   libmach
-  libsa_mach
   libnetname
   libgpu_console
   -Wl,--end-group
@@ -87,7 +86,6 @@ target_link_options(cap_server_bin PRIVATE
   -Wl,--no-dynamic-linker
   -Wl,--export-dynamic
   -Wl,--hash-style=sysv
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

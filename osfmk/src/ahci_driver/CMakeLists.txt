@@ -138,7 +138,6 @@ target_link_libraries(ahci_driver_server PRIVATE
   -Wl,--start-group
   libpthreads
   libmach
-  libsa_mach
   libnetname
   -Wl,--end-group
 )
@@ -147,7 +146,6 @@ target_link_libraries(ahci_driver_server PRIVATE
 target_link_options(ahci_driver_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

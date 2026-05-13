@@ -41,14 +41,12 @@ target_link_libraries(pthread_test_server PRIVATE
   -Wl,--start-group
   libpthreads
   libmach
-  libsa_mach
   -Wl,--end-group
 )
 
 target_link_options(pthread_test_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
-  -Wl,--allow-multiple-definition
   -Wl,--build-id=none
 )
 

@@ -160,8 +160,8 @@ target_include_directories(bootstrap_server PRIVATE
 
 # Link against Mach userspace libraries.
 # Use --start-group/--end-group to resolve circular dependencies between
-# the Mach libraries (e.g. libsa_mach -> libmach for clock_sleep, libpthreads -> libmach
-# for MIG stubs, libmach -> libpthreads for mig_support).
+# the Mach libraries (libpthreads -> libmach for MIG stubs, libmach ->
+# libpthreads for mig_support).
 target_link_libraries(bootstrap_server PRIVATE
   -Wl,--start-group
   libsa_fs
@@ -171,7 +171,6 @@ target_link_libraries(bootstrap_server PRIVATE
   libnetname
   libpthreads
   libmach
-  libsa_mach
   -Wl,--end-group
 )
 
@@ -179,7 +178,6 @@ target_link_libraries(bootstrap_server PRIVATE
 target_link_options(bootstrap_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
-  -Wl,--allow-multiple-definition
 )
 
 set_target_properties(bootstrap_server PROPERTIES

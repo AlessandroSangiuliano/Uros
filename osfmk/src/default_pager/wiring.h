@@ -66,3 +66,10 @@ extern void	wire_setup(mach_port_t host_priv);
 extern void	wire_memory(vm_address_t, vm_size_t, vm_prot_t);
 extern void	wire_thread(void);
 extern void	wire_all_memory(void);
+
+/* default_pager-private wrapper around vm_allocate that wires memory in
+ * the local task — see wiring.c (#106). */
+extern kern_return_t vm_allocate_wired(mach_port_t task,
+				       vm_address_t *address,
+				       vm_size_t size,
+				       boolean_t anywhere);
