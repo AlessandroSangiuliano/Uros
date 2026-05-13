@@ -121,6 +121,24 @@ publish_service_port(void)
 		return -1;
 	}
 
+	/* Bump the message queue to MACH_PORT_QLIMIT_MAX (16) — every task
+	 * that links libgpu_console mirrors its printf onto this port via
+	 * a fire-and-forget simpleroutine, and the 5-slot default fills up
+	 * under bench bursts (~30 tasks, all printf'ing).  When the queue
+	 * is full the sender blocks on mach_msg(MACH_MSG_TIMEOUT_NONE) and
+	 * the bench output appears to "stop" mid-run.  Pair with the
+	 * libgpu_console drop-on-full path so the mirror degrades rather
+	 * than stalls the caller. */
+	{
+		mach_port_limits_t lim;
+		lim.mpl_qlimit = MACH_PORT_QLIMIT_MAX;
+		(void)mach_port_set_attributes(mach_task_self(),
+					       gpu_service_port,
+					       MACH_PORT_LIMITS_INFO,
+					       (mach_port_info_t)&lim,
+					       MACH_PORT_LIMITS_INFO_COUNT);
+	}
+
 	kr = netname_check_in(name_server_port, "gpu",
 			      mach_task_self(), gpu_service_port);
 	if (kr != KERN_SUCCESS) {

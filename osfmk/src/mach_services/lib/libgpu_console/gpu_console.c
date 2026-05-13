@@ -62,20 +62,79 @@ static char		gc_tag[GC_TAG_MAX + 2];	/* "[tag] " + NUL */
 static size_t		gc_tag_len;
 
 /* ============================================================
- * Internal: send a chunk to gpu_server via the simpleroutine.
+ * Internal: send a chunk to gpu_server.
+ *
+ * We hand-roll the MIG marshalling for gpu_text_puts (msgh_id=4000,
+ * simpleroutine, two inline arrays: cap[sizeof(uros_cap)] +
+ * buf[len]) so we can pass MACH_SEND_TIMEOUT with a 0 timeout.  The
+ * generated stub uses MACH_MSG_TIMEOUT_NONE which blocks the caller
+ * forever when gpu_server's port queue is full (default 5 slots, max
+ * 16) — that turns printf into a stall under bursty bench output.
+ * Drop-on-full is the right semantic for a log mirror: the real log
+ * still reaches the kernel console via the COM1 path.
  * ============================================================ */
+
+#define GC_MSGH_ID	4000	/* matches gpu_server.defs text_puts */
+
+struct gc_msg {
+	mach_msg_header_t	Head;
+	NDR_record_t		NDR;
+	mach_msg_type_number_t	capCnt;
+	char			cap[sizeof(struct uros_cap)];
+	mach_msg_type_number_t	bufCnt;
+	char			buf[GPU_BUF_MAX];
+};
 
 static void
 gc_send(const char *buf, size_t len)
 {
+	struct gc_msg msg;
+	mach_msg_size_t capCnt, bufCnt, capPad, bufPad, msgh_size;
+	char *p;
+
 	if (!gc_ready || buf == NULL || len == 0)
 		return;
 	if (len > GPU_BUF_MAX)
 		len = GPU_BUF_MAX;
 
-	(void)gpu_text_puts(gc_gpu_port,
-			    (char *)&gc_cap, sizeof(gc_cap),
-			    (char *)buf, (mach_msg_type_number_t)len);
+	capCnt = (mach_msg_size_t)sizeof(gc_cap);
+	bufCnt = (mach_msg_size_t)len;
+	capPad = (capCnt + 3u) & ~3u;
+	bufPad = (bufCnt + 3u) & ~3u;
+
+	/*
+	 * Layout (variable-size inline arrays packed back-to-back):
+	 *   [Head][NDR][capCnt][cap…padded][bufCnt][buf…padded]
+	 * Use a byte pointer to avoid relying on the struct's fixed
+	 * cap[] / buf[] offsets when the actual cap is shorter than the
+	 * struct slot.
+	 */
+	msg.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	msg.Head.msgh_remote_port = gc_gpu_port;
+	msg.Head.msgh_local_port  = MACH_PORT_NULL;
+	msg.Head.msgh_id          = GC_MSGH_ID;
+	msg.NDR = NDR_record;
+
+	p = (char *)&msg + sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+	*(mach_msg_type_number_t *)p = capCnt;
+	p += sizeof(mach_msg_type_number_t);
+	memcpy(p, &gc_cap, capCnt);
+	p += capPad;
+	*(mach_msg_type_number_t *)p = bufCnt;
+	p += sizeof(mach_msg_type_number_t);
+	memcpy(p, buf, bufCnt);
+	p += bufPad;
+
+	msgh_size = (mach_msg_size_t)(p - (char *)&msg);
+	msg.Head.msgh_size = msgh_size;
+
+	(void)mach_msg(&msg.Head,
+		       MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+		       msgh_size,
+		       0,			/* receive size */
+		       MACH_PORT_NULL,		/* receive name */
+		       0,			/* timeout: drop on full */
+		       MACH_PORT_NULL);
 }
 
 /* ============================================================
