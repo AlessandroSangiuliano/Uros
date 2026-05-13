@@ -92,26 +92,174 @@ libmach, libsa_mach, libpthreads, libdl, libmodload, libflipc, libflipc2, libnet
 
 ## Building
 
-Requirements: CMake >= 3.16, Ninja, GCC (i686 multilib or cross-compiler), Flex, Bison.
+### Requirements
+
+- CMake >= 3.16
+- Ninja
+- GCC (i686 multilib or cross-compiler; tested with GCC 15)
+- Flex, Bison (for the in-tree `migcom`)
+- `sfdisk`, `mke2fs`, `debugfs` (for the disk image)
+- QEMU (`qemu-system-i386`), optionally with KVM
+
+### Quick start — full system
+
+The shortest path to a booting system on QEMU:
 
 ```sh
-cd osfmk/build
-cmake -DOSFMK_BUILD_KERNEL=ON -DOSFMK_BUILD_BOOTSTRAP=ON .. -G Ninja
+mkdir -p osfmk/build && cd osfmk/build
+cmake -G Ninja \
+  -DOSFMK_BUILD_KERNEL=ON \
+  -DOSFMK_BUILD_BOOTSTRAP=ON \
+  -DOSFMK_BUILD_DEFAULT_PAGER=ON \
+  -DOSFMK_BUILD_NAME_SERVER=ON \
+  -DOSFMK_BUILD_HAL_SERVER=ON \
+  -DOSFMK_BUILD_BLOCK_SERVER=ON \
+  -DOSFMK_BUILD_AHCI_DRIVER=ON \
+  -DOSFMK_BUILD_VIRTIO_BLK=ON \
+  -DOSFMK_BUILD_EXT2_SERVER=ON \
+  -DOSFMK_BUILD_HELLO_SERVER=ON \
+  -DOSFMK_BUILD_IPC_BENCH=ON \
+  -DOSFMK_BUILD_PTHREAD_TEST=ON \
+  -DOSFMK_BUILD_CAP_SERVER=ON \
+  -DOSFMK_BUILD_CAP_TEST=ON \
+  -DOSFMK_BUILD_GPU_SERVER=ON \
+  -DOSFMK_BUILD_CHAR_SERVER=ON \
+  -DOSFMK_BUILD_GPUSTAT=ON \
+  ..
 ninja
+cd ../..
+./scripts/run-qemu.sh --fresh-disk --ahci          # graphical
+./scripts/run-qemu.sh --fresh-disk --ahci -nographic -serial mon:stdio
 ```
 
-## Running on QEMU
+`run-qemu.sh` rebuilds `disk.img` and `bootstrap.bundle` automatically when `--fresh-disk` or `--bench` is passed.
+
+### CMake configuration options
+
+Every userspace component is opt-in via a CMake flag.  Defaults keep a kernel-only build minimal; pass `-D<flag>=ON` to enable.
+
+| Flag | Default | Component |
+|---|---|---|
+| `OSFMK_TARGET_AT386` | `ON` | Target arch (currently only AT386 / i386) |
+| `OSFMK_BUILD_TOOLS` | `ON` | Host tools (`mig`, `migcom`, ...) |
+| `OSFMK_BUILD_KERNEL` | `ON` | Mach microkernel |
+| `OSFMK_BUILD_BOOTSTRAP` | `ON` | Bootstrap server |
+| `OSFMK_BUILD_DEFAULT_PAGER` | `OFF` | Default pager |
+| `OSFMK_BUILD_NAME_SERVER` | `OFF` | `name_server` (netname) |
+| `OSFMK_BUILD_HAL_SERVER` | `OFF` | HAL server (PCI discovery + device registry) |
+| `OSFMK_BUILD_BLOCK_SERVER` | `OFF` | Modular block device server |
+| `OSFMK_BUILD_AHCI_DRIVER` | `OFF` | AHCI/SATA userspace driver module |
+| `OSFMK_BUILD_VIRTIO_BLK` | `OFF` | virtio-blk userspace driver module |
+| `OSFMK_BUILD_EXT2_SERVER` | `OFF` | ext2 file server |
+| `OSFMK_BUILD_HELLO_SERVER` | `OFF` | Test server (Mach4 port) |
+| `OSFMK_BUILD_IPC_BENCH` | `OFF` | IPC + FLIPC v2 benchmark suite |
+| `OSFMK_BUILD_PTHREAD_TEST` | `OFF` | libpthreads test harness |
+| `OSFMK_BUILD_CAP_SERVER` | `OFF` | UrMach capability server + libcap |
+| `OSFMK_BUILD_CAP_TEST` | `OFF` | Capability negative-test binary |
+| `OSFMK_BUILD_GPU_SERVER` | `OFF` | userspace GPU/display server (#194) |
+| `OSFMK_BUILD_GPUSTAT` | `OFF` | Probe for `gpu_query_stats` (#203) |
+| `OSFMK_BUILD_CHAR_SERVER` | `OFF` | userspace character device server (#205) |
+
+To start from a clean configuration, just wipe the build tree:
 
 ```sh
-# Create the disk image (needs: sfdisk, mke2fs, debugfs)
-./scripts/make-disk-image.sh
-
-# Boot with KVM (graphical)
-./scripts/run-qemu.sh
-
-# Boot headless
-./scripts/run-qemu.sh -nographic -serial mon:stdio
+rm -rf osfmk/build && mkdir osfmk/build && cd osfmk/build
+cmake -G Ninja -D... ..
 ```
+
+### Building everything
+
+After configuration, build the full enabled tree:
+
+```sh
+cd osfmk/build && ninja
+```
+
+### Building a single component
+
+Each component has a Ninja target.  Useful when iterating on one server / library.  Always run from `osfmk/build/`.
+
+**Kernel + boot:**
+
+```sh
+ninja mach_kernel              # microkernel ELF (export/osfmk/boot/mach_kernel)
+ninja mach_kernel_ksyms        # ksyms.bin DDB symbol table (#211)
+ninja locore                   # boot asm objects
+ninja bootstrap                # bootstrap server (PIE)
+ninja default_pager            # default pager
+ninja mkbundle                 # tool: stage-1 bundle builder
+```
+
+**Userspace servers:**
+
+```sh
+ninja name_server_bin          # netname server
+ninja hal_server               # HAL: PCI discovery + registry
+ninja hal_pci_scan_module      # HAL module: pci_scan.so
+ninja block_device_server      # block server (loads AHCI/virtio modules)
+ninja ahci_module              # block module: ahci.so
+ninja virtio_blk_module        # block module: virtio_blk.so
+ninja ext_server_bin           # ext2 file server
+ninja cap_server_bin           # UrMach capability server
+ninja gpu_server               # GPU/display server (#194)
+ninja gpu_vga_module           # GPU module: vga.so
+ninja char_server              # character device server (#205)
+ninja char_uart_module         # char module: uart.so
+```
+
+**Test / bench binaries:**
+
+```sh
+ninja hello_server_server      # test server (Mach4 port)
+ninja ipc_bench_server         # IPC + FLIPC v2 benchmark
+ninja pthread_test_server      # libpthreads test harness
+ninja cap_test_server          # cap_server negative tests
+ninja gpustat_bin              # gpu_query_stats probe (#203)
+```
+
+**Libraries** (all `static .a`, output under `build/export/osfmk/<arch>/user/lib/`):
+
+```sh
+ninja libmach libsa_mach libpthreads libcthreads librthreads
+ninja libdl libmodload
+ninja libflipc libflipc2
+ninja libnetname libmachid libblk libservice libxmm libsa_fs
+ninja libcap libgpu_console
+```
+
+**Host tools:**
+
+```sh
+ninja migcom                   # MIG compiler (Flex/Bison)
+```
+
+### Disk image and stage-1 bundle
+
+The disk and bundle are built by scripts in `scripts/`, not by CMake.  Both pick up whatever binaries are present in `osfmk/build/export/.../user/sbin/`, so optional components are silently included only when their flag was enabled.
+
+```sh
+./scripts/make-disk-image.sh             # MBR + 3 partitions (ext2/ext2/raw swap)
+./scripts/make-bundle.sh                 # multiboot stage-1 bundle for -initrd
+./scripts/make-disk-image.sh --bench all # disk seeded for full ipc_bench suite
+```
+
+### Running on QEMU
+
+`scripts/run-qemu.sh` wraps the QEMU invocation and (re-)builds the disk/bundle as needed.
+
+```sh
+./scripts/run-qemu.sh                                 # graphical (default --ahci)
+./scripts/run-qemu.sh -nographic -serial mon:stdio    # headless
+./scripts/run-qemu.sh --fresh-disk                    # regenerate disk.img first
+./scripts/run-qemu.sh --bench all                     # full bench suite
+./scripts/run-qemu.sh --ahci2                         # add a second AHCI disk
+./scripts/run-qemu.sh --virtio                        # also expose a virtio-blk
+./scripts/run-qemu.sh --sha-ni                        # force TCG + Icelake +sha-ni
+./scripts/run-qemu.sh --no-disk                       # boot bundle only
+./scripts/run-qemu.sh --no-bundle                     # boot disk only
+```
+
+`--fresh-disk` is the safe default after a rebuild or an ungracefully-closed previous run — `disk.img` carries ext2 writeback state from the guest and a half-flushed image can cause spurious stage-2 hangs.
 
 ## Roadmap
 

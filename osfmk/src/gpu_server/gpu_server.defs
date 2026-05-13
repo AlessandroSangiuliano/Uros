@@ -34,8 +34,10 @@ type gpu_u32_t   = unsigned    ctype: gpu_u32_t;
 type gpu_u64_t   = unsigned64  ctype: gpu_u64_t;
 type gpu_token_t = array[*:256] of char;
 type gpu_buf_t   = array[*:4096] of char;
+type gpu_stats_blob_t = array[*:64] of char;	/* see mach/gpu_stats.h */
 
 import <mach/gpu_server_types.h>;
+import <mach/gpu_stats.h>;
 
 /* =================================================================
  * Text plane (0.1.0)
@@ -142,3 +144,19 @@ routine context_destroy(
 	in	cap		: gpu_token_t;
 	in	dev_id		: gpu_u32_t;
 	in	ctx_id		: gpu_u32_t);
+
+/* =================================================================
+ * Diagnostics (#203)
+ *
+ * query_stats returns a fixed-size `struct gpu_stats` (mach/gpu_stats.h)
+ * inline.  Cap-gated on GPU_CAP_DEV_ADMIN so only privileged probes
+ * can poll.  Wire payload is opaque to MIG — it's a sized char blob
+ * the caller casts.  The version field at offset 0 lets newer
+ * userspace tolerate older servers (any unknown trailing bytes stay
+ * zero from the server-side memset).
+ * ================================================================= */
+
+routine query_stats(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	out	stats		: gpu_stats_blob_t);

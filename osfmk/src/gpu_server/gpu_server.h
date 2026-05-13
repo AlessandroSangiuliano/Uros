@@ -89,6 +89,7 @@ void gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
  */
 struct gpu_device_entry *gpu_core_dev_lookup(gpu_dev_id_t id);
 unsigned int             gpu_core_dev_count(void);
+uint64_t                 gpu_core_sum_scrolls(void);	/* #203 */
 int                      gpu_core_dev_copy_all(struct gpu_device_info *out,
 					       unsigned int max);
 
@@ -135,11 +136,12 @@ int  gpu_text_render_init(void);
 void gpu_text_render_enqueue(const char *buf, size_t len);
 
 /*
- * Diagnostics — total dropped-chunk count since boot.  Exposed so a
- * future "gpu_query_stats" RPC can surface it without coupling
- * text_render's internals.
+ * Diagnostics — surfaced through gpu_query_stats (#203).  Drops counts
+ * chunks lost when the queue was full; chunks_processed counts those
+ * the worker actually handed to vga_text_puts.
  */
 unsigned int gpu_text_render_drops(void);
+uint64_t     gpu_text_render_chunks_processed(void);
 
 /* ============================================================
  * MIG-side glue — implemented in gpu_mig.c

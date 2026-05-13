@@ -52,6 +52,7 @@ SBIN="$BUILD_DIR/export/osfmk/$ARCH/user/sbin"
 NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
 CAP_TEST="$SBIN/cap_test"
+GPUSTAT="$SBIN/gpustat"
 HAL_SERVER="$SBIN/hal_server"
 BLOCK_DEVICE_SERVER="$SBIN/block_device_server"
 DEFAULT_PAGER="$SBIN/default_pager"
@@ -94,6 +95,8 @@ CAP_SERVER_CONF_LINE=""
 [ -f "$CAP_SERVER" ] && CAP_SERVER_CONF_LINE="cap_server cap_server"
 CAP_TEST_CONF_LINE=""
 [ -f "$CAP_TEST" ] && CAP_TEST_CONF_LINE="cap_test cap_test"
+GPUSTAT_CONF_LINE=""
+[ -f "$GPUSTAT" ] && GPUSTAT_CONF_LINE="gpustat gpustat"
 
 GPU_SERVER_CONF_LINE=""
 [ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
@@ -113,6 +116,7 @@ ipc_bench ipc_bench${BENCH_ARGS}
 ext_server ext_server
 pthread_test pthread_test
 ${CAP_TEST_CONF_LINE}
+${GPUSTAT_CONF_LINE}
 CONF
 
 ARGS=(-o "$BUNDLE_OUT")
@@ -127,6 +131,7 @@ ARGS+=("ipc_bench:$IPC_BENCH")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
+[ -f "$GPUSTAT" ] && ARGS+=("gpustat:$GPUSTAT")
 ARGS+=("modules/hal/pci_scan.so:$HAL_PCI_SCAN_MODULE")
 ARGS+=("modules/block/ahci.so:$AHCI_MODULE")
 ARGS+=("modules/block/virtio_blk.so:$VIRTIO_BLK_MODULE")

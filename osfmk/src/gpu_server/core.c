@@ -66,6 +66,24 @@ gpu_core_dev_count(void)
 	return n_devices;
 }
 
+uint64_t
+gpu_core_sum_scrolls(void)
+{
+	uint64_t total = 0;
+	unsigned int i;
+
+	for (i = 1; i < GPU_MAX_DEVICES; i++) {
+		if (!devices[i].in_use)
+			continue;
+		if (devices[i].module == NULL)
+			continue;
+		if (devices[i].module->get_scroll_count == NULL)
+			continue;
+		total += devices[i].module->get_scroll_count(devices[i].priv);
+	}
+	return total;
+}
+
 int
 gpu_core_dev_copy_all(struct gpu_device_info *out, unsigned int max)
 {

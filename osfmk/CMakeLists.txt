@@ -22,6 +22,7 @@ option(OSFMK_BUILD_EXT2_SERVER "Costruisci il server ext2 filesystem userspace" 
 option(OSFMK_BUILD_PTHREAD_TEST "Build pthread test server" OFF)
 option(OSFMK_BUILD_CAP_SERVER "Build capability server (Uros cap_server + libcap)" OFF)
 option(OSFMK_BUILD_CAP_TEST "Build capability negative-test binary" OFF)
+option(OSFMK_BUILD_GPUSTAT "Build gpustat userspace probe for gpu_query_stats (#203)" OFF)
 option(OSFMK_BUILD_GPU_SERVER "Build gpu_server (userspace GPU/display server, #194)" OFF)
 option(OSFMK_BUILD_CHAR_SERVER "Build char_server (userspace character device server, #205)" OFF)
 

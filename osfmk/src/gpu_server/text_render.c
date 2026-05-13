@@ -58,6 +58,7 @@ static struct text_chunk text_queue[TEXT_QUEUE_DEPTH];
 static unsigned int	q_head;	/* producer cursor (writes) */
 static unsigned int	q_tail;	/* consumer cursor (reads)  */
 static unsigned int	q_drops;	/* total chunks lost since boot */
+static uint64_t		q_processed;	/* total chunks handed to vga */
 static pthread_mutex_t	q_mutex;
 static pthread_cond_t	q_not_empty;
 static int		q_initialised;
@@ -84,6 +85,7 @@ text_render_worker(void *arg)
 
 		local = text_queue[q_tail % TEXT_QUEUE_DEPTH];
 		q_tail++;
+		q_processed++;
 		pthread_mutex_unlock(&q_mutex);
 
 		/* Off the lock for the actual paint — VGA writes are
@@ -126,6 +128,7 @@ gpu_text_render_init(void)
 	q_head = 0;
 	q_tail = 0;
 	q_drops = 0;
+	q_processed = 0;
 	q_initialised = 1;
 
 	rc = pthread_attr_init(&attr);
@@ -196,6 +199,20 @@ gpu_text_render_drops(void)
 
 	pthread_mutex_lock(&q_mutex);
 	v = q_drops;
+	pthread_mutex_unlock(&q_mutex);
+	return v;
+}
+
+uint64_t
+gpu_text_render_chunks_processed(void)
+{
+	uint64_t v;
+
+	if (!q_initialised)
+		return 0;
+
+	pthread_mutex_lock(&q_mutex);
+	v = q_processed;
 	pthread_mutex_unlock(&q_mutex);
 	return v;
 }

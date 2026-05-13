@@ -28,8 +28,10 @@ typedef uint64_t	gpu_u64_t;
  * directives. */
 #define GPU_TOKEN_MAX	256
 #define GPU_BUF_MAX	4096
+#define GPU_STATS_BLOB_MAX	64	/* see mach/gpu_stats.h */
 
 typedef char	gpu_token_t[GPU_TOKEN_MAX];
 typedef char	gpu_buf_t[GPU_BUF_MAX];
+typedef char	gpu_stats_blob_t[GPU_STATS_BLOB_MAX];
 
 #endif /* _MACH_GPU_SERVER_TYPES_H_ */

@@ -24,6 +24,7 @@
 
 #include <mach.h>
 #include <mach/kern_return.h>
+#include <mach/gpu_stats.h>
 #include <stdio.h>
 #include <string.h>
 #include "gpu_server.h"
@@ -262,4 +263,35 @@ gpu_context_destroy(mach_port_t gpu_port,
 			       (uint64_t)dev_id) != 0)
 		return KERN_PROTECTION_FAILURE;
 	return KERN_FAILURE;
+}
+
+/* ============================================================
+ * Diagnostics (#203)
+ * ============================================================ */
+
+kern_return_t
+gpu_query_stats(mach_port_t gpu_port,
+		char *cap, mach_msg_type_number_t cap_count,
+		char *stats, mach_msg_type_number_t *stats_count)
+{
+	struct gpu_stats s;
+
+	(void)gpu_port;
+
+	/* Cap-gated: this surface exposes internal counters, so we
+	 * restrict it to admin holders.  dev_id is irrelevant (the
+	 * stats are server-wide); use 0 for the policy match. */
+	if (gpu_core_cap_check(cap, cap_count, GPU_CAP_DEV_ADMIN, 0) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	memset(&s, 0, sizeof(s));
+	s.version			   = GPU_STATS_VERSION;
+	s.devices_attached		   = gpu_core_dev_count();
+	s.text_render_drops		   = gpu_text_render_drops();
+	s.text_render_chunks_processed = gpu_text_render_chunks_processed();
+	s.scroll_count			   = gpu_core_sum_scrolls();
+
+	memcpy(stats, &s, sizeof(s));
+	*stats_count = (mach_msg_type_number_t)sizeof(s);
+	return KERN_SUCCESS;
 }
