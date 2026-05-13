@@ -9,6 +9,11 @@
 #   ./scripts/run-qemu.sh                           # avvio standard
 #   ./scripts/run-qemu.sh -nographic -serial mon:stdio  # headless
 #   ./scripts/run-qemu.sh --no-disk                 # senza disco
+#   ./scripts/run-qemu.sh --fresh-disk              # rigenera disk.img prima
+#                                                   # del boot (utile dopo
+#                                                   # rebuild o se la run
+#                                                   # precedente è stata
+#                                                   # chiusa a metà writeback)
 #
 # L'immagine disco contiene /mach_servers/ con:
 #   bootstrap.conf   — configurazione del bootstrap
@@ -36,6 +41,9 @@ USE_AHCI2=false
 USE_VIRTIO=false
 USE_BUNDLE=true     # Issue #186: stage-1 multiboot bundle (mod[1]) on by default
 USE_SHA_NI=false    # Issue #180: --sha-ni → TCG + Icelake-Server,+sha-ni
+FRESH_DISK=false    # --fresh-disk: regen disk.img before launch (avoids stale
+                    # stage-2 binaries after rebuild + ext2 writeback corruption
+                    # from previous ungraceful QEMU exit)
 BENCH_ARGS=""
 EXTRA_ARGS=""
 while [ $# -gt 0 ]; do
@@ -46,6 +54,7 @@ while [ $# -gt 0 ]; do
         --ahci) USE_AHCI=true; shift ;;
         --virtio) USE_VIRTIO=true; shift ;;
         --sha-ni) USE_SHA_NI=true; shift ;;
+        --fresh-disk) FRESH_DISK=true; shift ;;
         --bench)
             shift
             while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
@@ -58,9 +67,13 @@ while [ $# -gt 0 ]; do
 done
 
 # Regenerate disk image if --bench was specified (pass suite selection)
+# or if --fresh-disk was explicitly requested.  --bench implies fresh.
 if [ -n "$BENCH_ARGS" ]; then
     echo "Bench suites:$BENCH_ARGS"
     "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS
+elif [ "$FRESH_DISK" = true ]; then
+    echo "Regenerating disk image (--fresh-disk)…"
+    "$REPO_ROOT/scripts/make-disk-image.sh"
 fi
 
 # Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
