@@ -513,6 +513,25 @@ start_kernel_threads(void)
 
 
 #endif	/* KERNEL_TEST */
+
+#if	MACH_KDB
+	/*
+	 * #213: `-H` halt-late entry-point.  By this point setup_main()
+	 * has completed and we are running in start_kernel_threads as a
+	 * real kernel thread — psets / tasks / IPC / scheduler are all
+	 * populated, so `show all threads`, `show ipc_port`, etc. won't
+	 * page-fault.
+	 */
+	{
+		extern int halt_in_debugger_late;
+		extern void Debugger(const char *);
+		if (halt_in_debugger_late) {
+			printf("inline call to debugger(start_kernel_threads) [-H]\n");
+			Debugger("");
+		}
+	}
+#endif	/* MACH_KDB */
+
 	/*
 	 *	Start the user bootstrap.
 	 */

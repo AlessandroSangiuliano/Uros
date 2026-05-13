@@ -531,6 +531,7 @@ set(DDB_SOURCES
     ddb/db_watch.c
     ddb/db_write_cmd.c
     ddb/db_aout.c
+    ddb/db_elf.c
     ddb/tr.c
 )
 
@@ -743,6 +744,38 @@ set_target_properties(${KERNEL_TARGET} PROPERTIES
     SUFFIX ""
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/osfmk/boot"
 )
+
+# =============================================================================
+# Issue #211 — DDB symbol table (debug builds only).
+#
+# .symtab/.strtab are non-allocated ELF sections, so the multiboot loader
+# does not load them.  Generate a self-describing binary (ksyms.bin) from
+# the linked kernel and ship it as a separate multiboot module
+# (run-qemu.sh appends it to -initrd if present).  The kernel locates
+# the module by its magic at boot and feeds it to DDB via db_elf.c.
+#
+# OSFMK_GEN_KSYMS defaults ON for Debug, OFF for Release — see the
+# top-level CMakeLists.  When OFF, the file is simply not produced;
+# run-qemu.sh boots without DDB symbol-by-name lookup, exactly as the
+# pre-#211 behaviour.
+# =============================================================================
+if(OSFMK_GEN_KSYMS)
+    set(KERNEL_KSYMS "${CMAKE_BINARY_DIR}/export/osfmk/boot/ksyms.bin")
+    add_custom_command(
+        OUTPUT ${KERNEL_KSYMS}
+        COMMAND ${CMAKE_SOURCE_DIR}/../scripts/gen-ksyms.py
+                $<TARGET_FILE:${KERNEL_TARGET}> ${KERNEL_KSYMS}
+        DEPENDS ${KERNEL_TARGET} ${CMAKE_SOURCE_DIR}/../scripts/gen-ksyms.py
+        COMMENT "Generating kernel ksyms.bin (DDB symbol table, #211)"
+        VERBATIM
+    )
+    add_custom_target(mach_kernel_ksyms ALL DEPENDS ${KERNEL_KSYMS})
+
+    # Stale ksyms.bin from a previous Debug build would silently mismatch
+    # the current kernel — wipe it on Release reconfigures.
+else()
+    file(REMOVE "${CMAKE_BINARY_DIR}/export/osfmk/boot/ksyms.bin")
+endif()
 
 # =============================================================================
 # Info

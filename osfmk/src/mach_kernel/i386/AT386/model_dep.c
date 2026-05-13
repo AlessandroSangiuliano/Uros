@@ -290,6 +290,11 @@ int		rebootflag = 0;	/* exported to com.c halt-char path */
  * wipe the BSS copy back to 0 and silently swallow -h. */
 int		halt_in_debugger __attribute__((section(".data"))) = 0;
 
+/* `-H` counterpart: enters DDB AFTER setup_main() has spun up psets,
+ * tasks, IPC, scheduler.  Same .data trick so it survives the BSS
+ * clear.  See setup_main() + #213. */
+int		halt_in_debugger_late __attribute__((section(".data"))) = 0;
+
 extern int	cons_is_com1;
 
 void		parse_arguments(void);
@@ -331,6 +336,34 @@ machine_startup(void)
 	cninit();
 
 #if	MACH_KDB
+
+	/*
+	 * Issue #211: scan multiboot modules for the "KSYM" magic and hand
+	 * the blob to the DDB ELF backend before ddb_init() runs.  Without
+	 * this DDB has no symbols and `b foo_func` falls back to numeric
+	 * addresses.  parse_multiboot() has already populated mb_info.
+	 */
+	{
+		extern struct multiboot_info mb_info;
+		extern boolean_t elf_db_register(const void *base, size_t size);
+		if (mb_info.mods_addr != 0) {
+			struct multiboot_module *mods =
+				(struct multiboot_module *)
+					phystokv(mb_info.mods_addr);
+			unsigned i;
+			for (i = 0; i < mb_info.mods_count; i++) {
+				const char *base =
+					(const char *)phystokv(mods[i].mod_start);
+				size_t sz = mods[i].mod_end - mods[i].mod_start;
+				if (sz < 4) continue;
+				if (base[0] == 'K' && base[1] == 'S' &&
+				    base[2] == 'Y' && base[3] == 'M') {
+					(void)elf_db_register(base, sz);
+					break;
+				}
+			}
+		}
+	}
 
 	/*
 	 * Initialize the kernel debugger.
@@ -450,6 +483,12 @@ parse_arguments(void)
 		switch (ch) {
 		case 'h':
 		    halt_in_debugger = 1;
+		    break;
+		case 'H':
+		    /* #213: enter DDB AFTER setup_main() — required for
+		     * `show all threads`, `show ipc_port`, anything that
+		     * walks scheduler / IPC state. */
+		    halt_in_debugger_late = 1;
 		    break;
 		case 'r':
 		    cons_is_com1 = 1;

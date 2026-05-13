@@ -92,6 +92,14 @@ if [ "$USE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
     INITRD="$BOOTSTRAP,$BUNDLE_IMG"
     echo "Bundle:  $BUNDLE_IMG"
 fi
+# Issue #211: ksyms.bin (kernel DDB symbol table) shipped as mod[2] when
+# present.  The kernel scans multiboot mods for the "KSYM" magic; the
+# module-position is not significant.
+KSYMS_IMG="$BUILD_DIR/export/osfmk/boot/ksyms.bin"
+if [ -f "$KSYMS_IMG" ]; then
+    INITRD="$INITRD,$KSYMS_IMG"
+    echo "DDB syms: $KSYMS_IMG"
+fi
 # Issue #180: --sha-ni forces TCG with Icelake-Server,+sha-ni so the
 # kernel and libcap exercise the SHA-NI compress fast path even when
 # the host CPU (or KVM-restricted CPUID) doesn't expose it.  TCG is

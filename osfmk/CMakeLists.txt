@@ -25,6 +25,21 @@ option(OSFMK_BUILD_CAP_TEST "Build capability negative-test binary" OFF)
 option(OSFMK_BUILD_GPU_SERVER "Build gpu_server (userspace GPU/display server, #194)" OFF)
 option(OSFMK_BUILD_CHAR_SERVER "Build char_server (userspace character device server, #205)" OFF)
 
+# Issue #211: kernel symbol table for DDB.  Default ON for Debug / unset
+# build types (developer build), OFF for Release where DDB lookup-by-name
+# is not needed and the ~88 KB blob would just be dead weight.
+if(NOT DEFINED OSFMK_GEN_KSYMS)
+  if(CMAKE_BUILD_TYPE STREQUAL "Release" OR
+     CMAKE_BUILD_TYPE STREQUAL "MinSizeRel")
+    set(OSFMK_GEN_KSYMS_DEFAULT OFF)
+  else()
+    set(OSFMK_GEN_KSYMS_DEFAULT ON)
+  endif()
+  option(OSFMK_GEN_KSYMS
+    "Generate ksyms.bin (DDB kernel symbol table) — debug builds only"
+    ${OSFMK_GEN_KSYMS_DEFAULT})
+endif()
+
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'osfmk' when building kernel)" "")
 if(NOT EXPORT_PLATFORM)
