@@ -316,10 +316,24 @@ void
 machine_startup(void)
 {
 	/*
+	 * #214: drain any byte the BIOS left sitting in the 8042 output
+	 * buffer.  Without this, IRQ 1 fires the moment the PIC unmasks
+	 * before ps2.so has had a chance to register a handler, and
+	 * intnull() prints a cosmetic "intnull(1)" line into the boot log.
+	 * The drain is cheap (at most a few inb's) and idempotent.
+	 */
+	{
+		extern unsigned char inb(unsigned short);
+		int i;
+		for (i = 0; i < 16 && (inb(0x64) & 0x01); i++)
+			(void)inb(0x60);
+	}
+
+	/*
 	 * Prepare multiboot information
 	 */
 	parse_multiboot();
-	
+
 	/*
 	 * Parse startup arguments
 	 */
