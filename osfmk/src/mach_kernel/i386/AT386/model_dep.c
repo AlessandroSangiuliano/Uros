@@ -290,6 +290,11 @@ int		rebootflag = 0;	/* exported to com.c halt-char path */
  * wipe the BSS copy back to 0 and silently swallow -h. */
 int		halt_in_debugger __attribute__((section(".data"))) = 0;
 
+/* `-H` counterpart: enters DDB AFTER setup_main() has spun up psets,
+ * tasks, IPC, scheduler.  Same .data trick so it survives the BSS
+ * clear.  See setup_main() + #213. */
+int		halt_in_debugger_late __attribute__((section(".data"))) = 0;
+
 extern int	cons_is_com1;
 
 void		parse_arguments(void);
@@ -478,6 +483,12 @@ parse_arguments(void)
 		switch (ch) {
 		case 'h':
 		    halt_in_debugger = 1;
+		    break;
+		case 'H':
+		    /* #213: enter DDB AFTER setup_main() — required for
+		     * `show all threads`, `show ipc_port`, anything that
+		     * walks scheduler / IPC state. */
+		    halt_in_debugger_late = 1;
 		    break;
 		case 'r':
 		    cons_is_com1 = 1;
