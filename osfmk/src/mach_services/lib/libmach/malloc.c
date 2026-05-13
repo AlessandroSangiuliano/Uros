@@ -239,6 +239,9 @@ malloc(size_t size)
 		return(0);
 	}
 
+	if (addr == NULL)
+		return NULL;
+
 	addr->size = allocsize;
 	return (void *) (addr + 1);
 }
@@ -248,11 +251,29 @@ free(void *data)
 {
 	vm_size_t freesize;
 	union header *fl;
-	union header *addr = ((union header *)data) - 1;
+	union header *addr;
+	union header *p;
 
+	if (data == NULL)
+		return;
+
+	addr = ((union header *)data) - 1;
 	freesize = get_allocsize(addr->size, &fl);
 
 	if (freesize < kalloc_max) {
+	    /*
+	     * Guard against double-free: walking the (small) freelist
+	     * is cheap compared to the silent heap corruption a
+	     * second push of the same block causes — addr would
+	     * appear twice on the chain and the next malloc returns
+	     * a block still in use elsewhere.  This is a band-aid;
+	     * the upstream callers leaking double frees still need
+	     * fixing (#223).
+	     */
+	    for (p = fl->next; p != NULL; p = p->next) {
+		if (p == addr)
+		    return;
+	    }
 	    addr->next = fl->next;
 	    fl->next = addr;
 	}
