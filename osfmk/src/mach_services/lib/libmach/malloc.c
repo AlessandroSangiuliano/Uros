@@ -252,7 +252,6 @@ free(void *data)
 	vm_size_t freesize;
 	union header *fl;
 	union header *addr;
-	union header *p;
 
 	if (data == NULL)
 		return;
@@ -261,19 +260,28 @@ free(void *data)
 	freesize = get_allocsize(addr->size, &fl);
 
 	if (freesize < kalloc_max) {
+#if 0
 	    /*
-	     * Guard against double-free: walking the (small) freelist
-	     * is cheap compared to the silent heap corruption a
-	     * second push of the same block causes — addr would
-	     * appear twice on the chain and the next malloc returns
-	     * a block still in use elsewhere.  This is a band-aid;
-	     * the upstream callers leaking double frees still need
-	     * fixing (#223).
+	     * #223 — double-free guard.  Originally added when cap_server
+	     * crashed in malloc+0x83 after ~15 cap_acquire calls and the
+	     * trace looked like the same block being pushed twice onto the
+	     * freelist.  Later investigation showed the pattern was actually
+	     * normal LIFO recycling (alloc/free on a hot loop returning the
+	     * same address) and that the real cause was the libmach printf
+	     * %llu bug fixed in 8846e1d.  Keep this here, dormant: if the
+	     * symptom reappears we re-enable it and add the
+	     * _malloc_dbl_free_hit() instrumentation back to capture the
+	     * caller PC.  Walk is O(N) on the per-bucket freelist; free()
+	     * is not hot.
 	     */
-	    for (p = fl->next; p != NULL; p = p->next) {
-		if (p == addr)
-		    return;
+	    {
+		union header *p;
+		for (p = fl->next; p != NULL; p = p->next) {
+		    if (p == addr)
+			return;	/* drop the duplicate push */
+		}
 	    }
+#endif
 	    addr->next = fl->next;
 	    fl->next = addr;
 	}
