@@ -78,6 +78,7 @@ struct vga_priv {
 	volatile uint16_t *fb;		/* mapped 0xB8000 */
 	unsigned int	cur_col;
 	unsigned int	cur_row;
+	uint64_t	scroll_count;	/* #203: total scrolls since attach */
 };
 
 /* gpu_display_t is opaque outside core; the module owns its concrete
@@ -151,6 +152,15 @@ vga_scroll_one(struct vga_priv *p)
 		for (i = 0; i < VGA_COLS; i++)
 			last_row[i] = VGA_CELL(' ', VGA_ATTR_DEFAULT);
 	}
+
+	p->scroll_count++;
+}
+
+static uint64_t
+vga_get_scroll_count(void *priv)
+{
+	const struct vga_priv *p = (const struct vga_priv *)priv;
+	return p->scroll_count;
 }
 
 static void
@@ -327,4 +337,5 @@ const gpu_module_ops_t vga_module_ops = {
 	.bo_map           = NULL,
 	.submit           = NULL,	/* no command submission in 0.1.0 */
 	.text_puts        = vga_text_puts,
+	.get_scroll_count = vga_get_scroll_count,
 };

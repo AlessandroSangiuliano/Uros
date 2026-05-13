@@ -31,7 +31,7 @@
 #include <stddef.h>
 #include <gpu/gpu_types.h>
 
-#define GPU_MODULE_ABI_VERSION		1u
+#define GPU_MODULE_ABI_VERSION		2u
 
 /* ============================================================
  * Forward-declared opaque types.
@@ -96,6 +96,11 @@ typedef struct gpu_module_ops {
 	 * rasterizer in core when text_render lands.  vga.c implements
 	 * it as a direct write to 0xB8000. */
 	int		(*text_puts)(void *priv, const char *buf, size_t len);
+
+	/* Diagnostic counters (ABI 2, #203).  Optional — return 0 / NULL
+	 * if the module doesn't have anything meaningful.  Summed across
+	 * all attached devices by gpu_query_stats. */
+	uint64_t	(*get_scroll_count)(void *priv);
 } gpu_module_ops_t;
 
 /* ============================================================
