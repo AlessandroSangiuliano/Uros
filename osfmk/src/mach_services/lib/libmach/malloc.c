@@ -239,6 +239,9 @@ malloc(size_t size)
 		return(0);
 	}
 
+	if (addr == NULL)
+		return NULL;
+
 	addr->size = allocsize;
 	return (void *) (addr + 1);
 }
@@ -248,11 +251,37 @@ free(void *data)
 {
 	vm_size_t freesize;
 	union header *fl;
-	union header *addr = ((union header *)data) - 1;
+	union header *addr;
 
+	if (data == NULL)
+		return;
+
+	addr = ((union header *)data) - 1;
 	freesize = get_allocsize(addr->size, &fl);
 
 	if (freesize < kalloc_max) {
+#if 0
+	    /*
+	     * #223 — double-free guard.  Originally added when cap_server
+	     * crashed in malloc+0x83 after ~15 cap_acquire calls and the
+	     * trace looked like the same block being pushed twice onto the
+	     * freelist.  Later investigation showed the pattern was actually
+	     * normal LIFO recycling (alloc/free on a hot loop returning the
+	     * same address) and that the real cause was the libmach printf
+	     * %llu bug fixed in 8846e1d.  Keep this here, dormant: if the
+	     * symptom reappears we re-enable it and add the
+	     * _malloc_dbl_free_hit() instrumentation back to capture the
+	     * caller PC.  Walk is O(N) on the per-bucket freelist; free()
+	     * is not hot.
+	     */
+	    {
+		union header *p;
+		for (p = fl->next; p != NULL; p = p->next) {
+		    if (p == addr)
+			return;	/* drop the duplicate push */
+		}
+	    }
+#endif
 	    addr->next = fl->next;
 	    fl->next = addr;
 	}
