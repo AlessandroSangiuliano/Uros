@@ -146,6 +146,7 @@ foreach(_dev_hdr ncr810 ncr825 adsl fta tu)
 endforeach()
 
 set(KERNEL_INCLUDES
+    ${CMAKE_SOURCE_DIR}/uapi			# #179 — UAPI split: single source of truth
     ${KERNEL_SRC_DIR}
     ${KERNEL_SRC_DIR}/include
     ${KERNEL_SRC_DIR}/i386
@@ -179,6 +180,7 @@ add_custom_command(
             -nostdinc
             -ffreestanding
             -isystem ${GCC_INCLUDE_DIR}
+            -I${CMAKE_SOURCE_DIR}/uapi
             -I${KERNEL_SRC_DIR}
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386

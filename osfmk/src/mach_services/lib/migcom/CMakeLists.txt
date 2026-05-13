@@ -53,12 +53,17 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ident.c
 
 add_executable(migcom ${MIGCOM_SOURCES})
 
-target_include_directories(migcom PRIVATE
+target_include_directories(migcom BEFORE PRIVATE
+  # migcom ships a local stub mach/boolean.h that has no
+  # <mach/machine/boolean.h> indirection (it's a host tool, the real
+  # Mach types are irrelevant).  Must come *before* uapi/ which the
+  # top-level CMakeLists adds globally, otherwise uapi/mach/boolean.h
+  # wins and pulls in headers we don't have on the host (#179).
   ${SRC_DIR}
+)
+target_include_directories(migcom PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR} # for parser.h
   ${CMAKE_SOURCE_DIR}/export/include
-  ${CMAKE_SOURCE_DIR}/../../mach_kernel
-  /home/slex/Scrivania/osfmk-mklinux/osfmk/export/include
 )
 
 # link libfl or libl if available

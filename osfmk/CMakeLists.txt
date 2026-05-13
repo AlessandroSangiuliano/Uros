@@ -51,6 +51,22 @@ if(NOT EXPORT_PLATFORM)
 endif()
 message(STATUS "EXPORT_PLATFORM = ${EXPORT_PLATFORM}")
 
+# #179 — UAPI split: shared kernel/userspace wire-format headers live in
+# osfmk/uapi/.  Expose the directory via an INTERFACE library so any target
+# can simply `target_link_libraries(<x> PRIVATE uros_uapi)` to get the
+# include path.  Today only kernel + libmach + a handful of low-level libs
+# need it; as more headers migrate, more targets will pick this up.
+add_library(uros_uapi INTERFACE)
+target_include_directories(uros_uapi INTERFACE
+  ${CMAKE_SOURCE_DIR}/uapi
+)
+
+# Quick-and-broad: also add it to the global include path so legacy
+# CMakeLists with hand-rolled include paths don't need per-file edits
+# during the migration.  Once every consumer goes through uros_uapi this
+# can be removed.
+include_directories(${CMAKE_SOURCE_DIR}/uapi)
+
 # Directory sorgenti principale
 include(CTest)
 enable_testing()
