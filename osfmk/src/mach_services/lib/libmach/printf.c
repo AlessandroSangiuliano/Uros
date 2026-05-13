@@ -138,8 +138,31 @@
 
 #define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
 
+/*
+ * 64-bit divmod by an arbitrary base, implemented bit-by-bit to avoid
+ * pulling libgcc's __udivmoddi4 into the freestanding -nostdlib build.
+ * Slow but called only by printf for at most ~20 iterations per number.
+ */
+static unsigned long long
+udivmod_ll(unsigned long long n, unsigned int base, unsigned int *rem)
+{
+	unsigned long long q = 0;
+	unsigned int r = 0;
+	int i;
+
+	for (i = 63; i >= 0; i--) {
+		r = (r << 1) | (unsigned int)((n >> i) & 1ULL);
+		if (r >= base) {
+			r -= base;
+			q |= (1ULL << i);
+		}
+	}
+	*rem = r;
+	return q;
+}
+
 static void
-printnum(unsigned long	u,	/* number to print */
+printnum(unsigned long long	u,	/* number to print */
 	 int		base,
 	 void			(*outc)(void *, int),
 	 void			*outc_arg)
@@ -147,10 +170,11 @@ printnum(unsigned long	u,	/* number to print */
 	char	buf[MAXBUF];	/* build number here */
 	char *	p = &buf[MAXBUF-1];
 	static char digs[] = "0123456789abcdef";
+	unsigned int rem;
 
 	do {
-	    *p-- = digs[u % base];
-	    u /= base;
+	    u = udivmod_ll(u, (unsigned int)base, &rem);
+	    *p-- = digs[rem];
 	} while (u != 0);
 
 	while (++p != &buf[MAXBUF])
@@ -168,11 +192,12 @@ _doprnt(const char *fmt,
 	int		prec;
 	boolean_t	ladjust;
 	char		padc;
-	long		n;
-	unsigned long	u;
+	long long	n;
+	unsigned long long u;
 	int		plus_sign;
 	int		sign_char;
 	boolean_t	altfmt;
+	boolean_t	is_long_long;
 	int		base;
 	char		c;
 
@@ -191,6 +216,7 @@ _doprnt(const char *fmt,
 	    plus_sign = 0;
 	    sign_char = 0;
 	    altfmt = FALSE;
+	    is_long_long = FALSE;
 
 	    while (TRUE) {
 		if (*fmt == '#') {
@@ -245,8 +271,13 @@ _doprnt(const char *fmt,
 		}
 	    }
 
-	    if (*fmt == 'l')
+	    if (*fmt == 'l') {
 		fmt++;	/* need it if sizeof(int) < sizeof(long) */
+		if (*fmt == 'l') {
+		    is_long_long = TRUE;
+		    fmt++;
+		}
+	    }
 
 	    switch(*fmt) {
 		case 'b':
@@ -393,19 +424,21 @@ _doprnt(const char *fmt,
 		    goto print_unsigned;
 
 		print_signed:
-		    n = va_arg(args, long);
+		    n = is_long_long ? va_arg(args, long long)
+				     : (long long)va_arg(args, long);
 		    if (n >= 0) {
-			u = n;
+			u = (unsigned long long)n;
 			sign_char = plus_sign;
 		    }
 		    else {
-			u = -n;
+			u = (unsigned long long)(-n);
 			sign_char = '-';
 		    }
 		    goto print_num;
 
 		print_unsigned:
-		    u = va_arg(args, unsigned long);
+		    u = is_long_long ? va_arg(args, unsigned long long)
+				     : (unsigned long long)va_arg(args, unsigned long);
 		    goto print_num;
 
 		print_num:
@@ -423,8 +456,9 @@ _doprnt(const char *fmt,
 		    }
 
 		    do {
-			*p-- = digits[u % base];
-			u /= base;
+			unsigned int rem;
+			u = udivmod_ll(u, (unsigned int)base, &rem);
+			*p-- = digits[rem];
 		    } while (u != 0);
 
 		    length -= (&buf[MAXBUF-1] - p);

@@ -1612,9 +1612,10 @@ main(int argc, char **argv)
     printf_init(device_port);
     panic_init(host_port);
 
-    /* Mirror printf onto gpu_server's text plane so the bench output
-     * lands on the QEMU/VGA window too, not only the serial console. */
-    (void)gpu_console_init("bench");
+    /* Mirror printf onto gpu_server's text plane (#222 follow-up).
+     * Async because servers launch in parallel and gpu_server may not
+     * be netname-registered yet when this main() runs. */
+    (void)gpu_console_init_async("bench", 100u, 50u);
 
     suites = parse_suites(argc, argv);
 
