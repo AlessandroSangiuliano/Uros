@@ -54,6 +54,7 @@
 
 #include <chips/busses.h>
 #include <i386/ipl.h>
+#include <i386/misc_protos.h>		/* pic_irq_mask / pic_irq_unmask (#222) */
 #include <i386/pio.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
@@ -105,6 +106,14 @@ irq_forward_handler(int irq)
 	if (!irq_forward_table[irq].active ||
 	    irq_forward_table[irq].notify_port == IP_NULL)
 		return;
+
+	/*
+	 * Mask the IRQ at the PIC before EOI so a still-asserted
+	 * level-triggered line (#222) cannot re-fire while the message
+	 * is in flight.  Userspace driver calls device_intr_enable
+	 * after clearing the device-side status register.
+	 */
+	pic_irq_mask(irq);
 
 	irq_pending[irq]++;
 	thread_wakeup((event_t)&irq_thread_wake_event);
@@ -361,6 +370,34 @@ ds_master_device_intr_unregister(
 	irq_forward_table[irq].notify_port = IP_NULL;
 	irq_forward_table[irq].active = 0;
 
+	splx(s);
+
+	return KERN_SUCCESS;
+}
+
+/*
+ * Re-enable the IRQ at the PIC after the userspace driver has processed
+ * a forwarded notification (#222).  Idempotent: safe for edge-triggered
+ * IRQs where the top-half mask is unnecessary — drivers call this
+ * uniformly regardless of trigger mode.
+ */
+kern_return_t
+ds_master_device_intr_enable(
+	ipc_port_t		master_port,
+	unsigned int		irq)
+{
+	kern_return_t kr;
+	spl_t s;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (irq >= IRQ_FORWARD_MAX)
+		return KERN_INVALID_ARGUMENT;
+
+	s = splhigh();
+	pic_irq_unmask(irq);
 	splx(s);
 
 	return KERN_SUCCESS;

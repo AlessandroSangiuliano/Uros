@@ -1745,6 +1745,7 @@ ahci_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 		ahci_write(AHCI_IS, ~0u);
 		for (pi = 0; pi < n_ports; pi++)
 			port_write(ahci_ports[pi].hba_port, PORT_IS, ~0u);
+		(void)device_intr_enable(master_device, ahci_irq);
 		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
 		((mig_reply_error_t *)out)->Head.msgh_size =
 			sizeof(mig_reply_error_t);

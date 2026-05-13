@@ -470,13 +470,12 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	}
 
 	/*
-	 * Note: GHC_IE (global interrupt enable) is NOT set here.
-	 * The original ahci_driver never enabled it — IRQ forwarding
-	 * works via the kernel's device_intr_register mechanism, not
-	 * via AHCI's global interrupt enable bit.  Enabling GHC_IE
-	 * causes an immediate IRQ delivery before the message loop
-	 * is ready, which deadlocks the task.
+	 * Enable AHCI global interrupt delivery (#222).  Safe now that the
+	 * kernel masks the line at the PIC on each forwarded notification
+	 * and the userspace handler re-unmasks via device_intr_enable after
+	 * clearing PORT_IS — no level-triggered storm.
 	 */
+	ahci_write(st, AHCI_GHC, ahci_read(st, AHCI_GHC) | GHC_IE);
 
 	*priv = st;
 	return 0;
@@ -587,6 +586,12 @@ ahci_mod_irq_handler(void *priv)
 	ahci_write(st, AHCI_IS, ~0u);
 	for (i = 0; i < st->n_ports; i++)
 		port_write(st, st->ports[i].hba_port, PORT_IS, ~0u);
+
+	/*
+	 * Device-side status cleared above; re-unmask the line at the PIC
+	 * so the next assertion (level-triggered PCI) can fire (#222).
+	 */
+	(void)device_intr_enable(st->master_device, st->ahci_irq);
 }
 
 static int

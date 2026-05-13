@@ -35,6 +35,7 @@
 #include <mach/thread_switch.h>
 #include <signal.h>
 #include <mach/port.h>
+#include "gpu_console.h"
 
 static int pass = 1;
 static int test_num;
@@ -947,6 +948,12 @@ test_thread_pool_bench(void)
 int
 main(int argc, char **argv)
 {
+	/* Mirror printf onto gpu_server's text plane so test output lands
+	 * on the QEMU/VGA window too, not only the serial console.  Async
+	 * because servers launch in parallel and gpu_server may not be
+	 * netname-registered yet. */
+	(void)gpu_console_init_async("pthread_test", 100u, 50u);
+
 	printf("pthread_test: starting\n");
 	test_num = 0;
 

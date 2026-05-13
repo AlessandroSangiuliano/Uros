@@ -437,6 +437,7 @@ virtio_mod_irq_handler(void *priv)
 {
 	struct virtio_state *st = (struct virtio_state *)priv;
 	vio_read8(st, VIRTIO_PCI_ISR);
+	(void)device_intr_enable(st->master_device, st->irq);
 }
 
 /* ================================================================

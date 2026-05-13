@@ -365,3 +365,59 @@ intnull(
 {
 	printf("intnull(%d)\n", unit_dev);
 }
+
+/*
+ * Per-IRQ PIC mask/unmask used by the IRQ forwarding path (#222).
+ *
+ * The kernel spl path (spl.S) reloads curr_pic_mask from pic_mask[ipl]
+ * on every spl transition, so a transient override of curr_pic_mask
+ * alone would be clobbered immediately.  We therefore mutate the
+ * pic_mask[] table itself, keeping a side overlay (pic_forced_mask)
+ * so unmask can recompute the table from intpri[] and re-apply any
+ * still-forced bits.
+ *
+ * Caller must hold splhigh() to serialise table mutation against
+ * spl transitions.
+ */
+/* curr_ipl[] is defined earlier in this file (one per CPU). */
+static u_short		pic_forced_mask;
+
+void
+pic_irq_mask(unsigned int irq)
+{
+	u_short bit;
+	int i;
+
+	if (irq >= NINTR)
+		return;
+	bit = (u_short)(1u << irq);
+	pic_forced_mask |= bit;
+	for (i = SPL0; i <= SPLHI; i++)
+		pic_mask[i] |= bit;
+	curr_pic_mask |= bit;
+	if (irq < 8)
+		outb(master_ocw, (unsigned char)(curr_pic_mask & 0xFF));
+	else
+		outb(slaves_ocw, (unsigned char)((curr_pic_mask >> 8) & 0xFF));
+}
+
+void
+pic_irq_unmask(unsigned int irq)
+{
+	u_short bit;
+	int i;
+
+	if (irq >= NINTR)
+		return;
+	bit = (u_short)(1u << irq);
+	pic_forced_mask &= (u_short)~bit;
+
+	form_pic_mask();
+	if (pic_forced_mask) {
+		for (i = SPL0; i <= SPLHI; i++)
+			pic_mask[i] |= pic_forced_mask;
+	}
+	curr_pic_mask = pic_mask[curr_ipl[0]];
+	outb(master_ocw, (unsigned char)(curr_pic_mask & 0xFF));
+	outb(slaves_ocw, (unsigned char)((curr_pic_mask >> 8) & 0xFF));
+}

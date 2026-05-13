@@ -51,6 +51,7 @@
 #include <pthread.h>
 #include <device/device.h>
 #include <device/device_types.h>
+#include "gpu_console.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -1610,6 +1611,11 @@ main(int argc, char **argv)
      */
     printf_init(device_port);
     panic_init(host_port);
+
+    /* Mirror printf onto gpu_server's text plane (#222 follow-up).
+     * Async because servers launch in parallel and gpu_server may not
+     * be netname-registered yet when this main() runs. */
+    (void)gpu_console_init_async("bench", 100u, 50u);
 
     suites = parse_suites(argc, argv);
 

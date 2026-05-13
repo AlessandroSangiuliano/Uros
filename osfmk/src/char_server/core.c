@@ -316,6 +316,13 @@ char_core_dispatch_irq(mach_msg_header_t *in)
 		if (irq_slots[i].port != in->msgh_local_port)
 			continue;
 		(*irq_slots[i].handler)(irq_slots[i].arg);
+		/*
+		 * Re-unmask the line at the PIC after the module-side
+		 * handler has cleared the device status (#222).  No-op for
+		 * edge-triggered lines (PS/2, COM) but uniform across
+		 * trigger modes.
+		 */
+		(void)device_intr_enable(irq_master_device, irq_slots[i].irq);
 		return TRUE;
 	}
 	/* Stray IRQ notification (slot torn down between the kernel

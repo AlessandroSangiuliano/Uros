@@ -88,6 +88,21 @@ routine device_intr_unregister(
 	);
 
 /*
+ * Re-enable (unmask) an IRQ at the PIC after the userspace driver has
+ * processed a forwarded notification.  The top-half handler masks the
+ * line on delivery to prevent level-triggered re-fire while the message
+ * is in flight; the driver must call this RPC after clearing the
+ * device-side status register (#222).
+ *
+ * Idempotent / no-op for IRQs that are already unmasked or never
+ * registered — drivers can call it uniformly regardless of trigger mode.
+ */
+routine device_intr_enable(
+		master_port	: mach_port_t;
+	in	irq		: natural_t
+	);
+
+/*
  * Allocate a physically contiguous DMA buffer.
  * Returns the kernel virtual address and the physical address.
  */
