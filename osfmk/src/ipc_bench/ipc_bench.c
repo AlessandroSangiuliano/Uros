@@ -51,6 +51,7 @@
 #include <pthread.h>
 #include <device/device.h>
 #include <device/device_types.h>
+#include "gpu_console.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -1610,6 +1611,10 @@ main(int argc, char **argv)
      */
     printf_init(device_port);
     panic_init(host_port);
+
+    /* Mirror printf onto gpu_server's text plane so the bench output
+     * lands on the QEMU/VGA window too, not only the serial console. */
+    (void)gpu_console_init("bench");
 
     suites = parse_suites(argc, argv);
 

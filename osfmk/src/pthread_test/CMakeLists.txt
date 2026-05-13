@@ -33,6 +33,8 @@ target_include_directories(pthread_test_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
+  # libgpu_console (mirror printf to gpu_server)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
 )
 
 # Link with libpthreads INSTEAD of libcthreads.
@@ -41,6 +43,9 @@ target_link_libraries(pthread_test_server PRIVATE
   -Wl,--start-group
   libpthreads
   libmach
+  libgpu_console
+  libcap
+  libnetname
   -Wl,--end-group
 )
 

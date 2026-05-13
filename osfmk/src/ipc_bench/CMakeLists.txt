@@ -91,6 +91,8 @@ target_include_directories(ipc_bench_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
+  # libgpu_console (mirror printf to gpu_server)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
 )
 
 # Link against Mach userspace libraries.
@@ -101,6 +103,8 @@ target_link_libraries(ipc_bench_server PRIVATE
   libmach
   libnetname
   libflipc2
+  libgpu_console
+  libcap
   -Wl,--end-group
 )
 
