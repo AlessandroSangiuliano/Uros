@@ -213,6 +213,7 @@ target_include_directories(libmach BEFORE PUBLIC
 target_include_directories(libmach PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
+  ${CMAKE_SOURCE_DIR}/uapi			# #179 — UAPI split
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
