@@ -91,6 +91,7 @@ EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
 PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 CAP_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_server"
 CAP_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_test"
+GPUSTAT="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/gpustat"
 
 if [ ! -f "$NAME_SERVER" ]; then
     echo "ERRORE: name_server non trovato: $NAME_SERVER"
@@ -177,6 +178,13 @@ CAP_TEST_CONF_LINE=""
 if [ -f "$CAP_TEST" ]; then
     CAP_TEST_CONF_LINE="cap_test cap_test"
 fi
+# gpustat (if built) runs after gpu_server / cap_server are up so it
+# can netname_look_up "gpu" and cap_request DEV_ADMIN.  It is a
+# single-shot probe (#203): one printf with the counters, then exits.
+GPUSTAT_CONF_LINE=""
+if [ -f "$GPUSTAT" ]; then
+    GPUSTAT_CONF_LINE="gpustat gpustat"
+fi
 #
 # Issue #184: default_pager ora apre la sua partizione di swap via BDS
 # (cap_request + device_open_cap) anziché via il driver IDE in-kernel.
@@ -202,6 +210,7 @@ ipc_bench ipc_bench${BENCH_ARGS}
 ext_server ext_server
 pthread_test pthread_test
 ${CAP_TEST_CONF_LINE}
+${GPUSTAT_CONF_LINE}
 CONF
 
 # --- Calcoli geometria ---
@@ -267,6 +276,10 @@ CAP_TEST_WRITE_LINE=""
 if [ -f "$CAP_TEST" ]; then
     CAP_TEST_WRITE_LINE="write $CAP_TEST cap_test"
 fi
+GPUSTAT_WRITE_LINE=""
+if [ -f "$GPUSTAT" ]; then
+    GPUSTAT_WRITE_LINE="write $GPUSTAT gpustat"
+fi
 echo "[4/6] Copia file nel filesystem ext2..."
 # ipc_bench's disk_bench tests open hello.txt / bench.dat at the root
 # of the default ext2 mount (ext_server → ahci0a / hd0a), so seed both
@@ -293,6 +306,7 @@ write $EXT2_SERVER ext_server
 write $PTHREAD_TEST pthread_test
 ${CAP_SERVER_WRITE_LINE}
 ${CAP_TEST_WRITE_LINE}
+${GPUSTAT_WRITE_LINE}
 mkdir modules
 cd modules
 mkdir block

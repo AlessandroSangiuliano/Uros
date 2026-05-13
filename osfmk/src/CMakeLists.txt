@@ -94,6 +94,11 @@ if(OSFMK_BUILD_CAP_TEST)
   add_subdirectory(cap_test)
 endif()
 
+# Build gpustat userspace probe for gpu_query_stats (#203)
+if(OSFMK_BUILD_GPUSTAT)
+  add_subdirectory(gpustat)
+endif()
+
 # Build gpu_server (#194 — userspace GPU/display server)
 if(OSFMK_BUILD_GPU_SERVER)
   add_subdirectory(gpu_server)
