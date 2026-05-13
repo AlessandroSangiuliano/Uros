@@ -95,6 +95,35 @@ static struct gpu_display  vga_display_singleton = {
  * Framebuffer helpers
  * ============================================================ */
 
+/*
+ * #201: hardware cursor sync.  The CRTC pair (0x3D4 index / 0x3D5 data)
+ * holds the 16-bit "cursor location" at registers 0x0E (high) / 0x0F
+ * (low).  Port-I/O privilege is granted via device_open("iopl") in
+ * gpu_server/main.c — without it the outb triggers #GP and the kernel
+ * SIGSEGVs us.  The MIG-less inline asm is the same trick char_server's
+ * ps2/uart modules use.
+ */
+#define VGA_CRTC_INDEX	0x3D4
+#define VGA_CRTC_DATA	0x3D5
+#define VGA_CRTC_CURSOR_HIGH	0x0E
+#define VGA_CRTC_CURSOR_LOW	0x0F
+
+static inline void
+vga_outb(uint16_t port, uint8_t v)
+{
+	__asm__ __volatile__ ("outb %0, %1" : : "a"(v), "Nd"(port));
+}
+
+static void
+vga_cursor_update(const struct vga_priv *p)
+{
+	uint16_t pos = (uint16_t)(p->cur_row * VGA_COLS + p->cur_col);
+	vga_outb(VGA_CRTC_INDEX, VGA_CRTC_CURSOR_HIGH);
+	vga_outb(VGA_CRTC_DATA,  (uint8_t)(pos >> 8));
+	vga_outb(VGA_CRTC_INDEX, VGA_CRTC_CURSOR_LOW);
+	vga_outb(VGA_CRTC_DATA,  (uint8_t)(pos & 0xFF));
+}
+
 static void
 vga_clear(struct vga_priv *p)
 {
@@ -103,6 +132,7 @@ vga_clear(struct vga_priv *p)
 		p->fb[i] = VGA_CELL(' ', VGA_ATTR_DEFAULT);
 	p->cur_col = 0;
 	p->cur_row = 0;
+	vga_cursor_update(p);
 }
 
 static void
@@ -202,10 +232,17 @@ static void
 vga_detach(void *priv)
 {
 	struct vga_priv *p = (struct vga_priv *)priv;
-	/* MIG device_mmio_unmap exists; releasing it on detach is
-	 * cosmetically correct but the module is also tearing the
-	 * gpu_server task down so leaving the page mapped is harmless.
-	 * A future hotplug path will wire the unmap. */
+
+	/* #201: release the 0xB8000 mapping.  Today detach only fires at
+	 * task exit so the address space tears down anyway, but a future
+	 * hot-unplug path can call this safely without leaking VA. */
+	if (p->fb != NULL) {
+		(void)device_mmio_unmap(gpu_device_port,
+					(natural_t)(uintptr_t)p->fb,
+					VGA_TEXT_SIZE,
+					mach_task_self());
+		p->fb = NULL;
+	}
 	p->attached = 0;
 }
 
@@ -259,6 +296,10 @@ vga_text_puts(void *priv, const char *buf, size_t len)
 		return -1;
 	for (i = 0; i < len; i++)
 		vga_putc(p, buf[i]);
+	/* #201: sync HW cursor once per batch — cheaper than per-char,
+	 * still gives a visible blinking underline that follows the
+	 * tail of the most recent text. */
+	vga_cursor_update(p);
 	return 0;
 }
 

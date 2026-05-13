@@ -26,6 +26,7 @@
 #include <mach/notify.h>
 #include <sa_mach.h>
 #include <servers/netname.h>
+#include <device/device.h>
 #include <stdio.h>
 #include <string.h>
 #include "gpu_server.h"
@@ -45,6 +46,7 @@ mach_port_t	gpu_root_ledger_paged;
 mach_port_t	gpu_service_port;
 static mach_port_t gpu_port_set;
 static mach_port_t gpu_cap_revoke_port;
+static mach_port_t gpu_iopl_port;	/* #201: port-I/O privilege for VGA CRTC */
 
 /* ================================================================
  * cap_revoke_notify — server-side handler invoked when cap_server
@@ -227,6 +229,23 @@ main(int argc, char **argv)
 	if (gpu_core_init() < 0) {
 		printf("gpu_server: core init failed\n");
 		return 1;
+	}
+
+	/* #201: grant port-I/O privilege so the VGA module can program the
+	 * CRTC cursor location registers (0x3D4/0x3D5) via outb.  Same
+	 * pattern as char_server: holding the send right returned by
+	 * device_open("iopl") is enough — the kernel's #GP emulator checks
+	 * this task as a privileged port-I/O caller. */
+	{
+		security_token_t tok = { { 0, 0 } };
+		kern_return_t kr2;
+
+		kr2 = device_open(gpu_device_port, MACH_PORT_NULL, 0, tok,
+				  "iopl", &gpu_iopl_port);
+		if (kr2 != KERN_SUCCESS)
+			printf("gpu_server: device_open(\"iopl\") failed "
+			       "(kr=%d) — VGA cursor sync disabled\n",
+			       (int)kr2);
 	}
 
 	/* Load back-end modules from /mach_servers/modules/gpu/ via
