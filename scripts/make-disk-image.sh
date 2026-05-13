@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # ==========================================================================
-# make-disk-image.sh — Crea un'immagine disco per OSFMK/Uros
+# make-disk-image.sh — Crea un'immagine disco per OSFMK/Uros (#224)
 #
-# Genera un disco MBR con due partizioni:
-#   hd0a (MBR entry 0) — ext2  — /mach_servers/ con config e binari server
-#   hd0b (MBR entry 1) — raw   — paging/swap per il default_pager
+# Genera un disco MBR con tre partizioni, layout compatibile con il
+# block_device_server modulare (ahci.so) — niente più disco IDE:
+#   disk0a (MBR entry 0) — ext2  — /mach_servers/ con config e binari
+#   disk0b (MBR entry 1) — ext2  — hello.txt + bench.dat (test data)
+#   disk0c (MBR entry 2) — raw   — paging/swap per il default_pager
 #
-# Il driver hd del kernel Mach mappa le entry MBR 1:1 su d_partitions[]:
-#   MBR entry 0 → d_partitions[0] → device name "hd0a"
-#   MBR entry 1 → d_partitions[1] → device name "hd0b"
-#
-# boot_device viene impostato su hd0a (partizione 0) dal kernel.
-# Il default_pager riceve "hd0b" come argomento via bootstrap.conf.
+# Il driver AHCI userspace (block_device_server/modules/ahci.so) mappa
+# le entry MBR 1:1 su 'ahci0[abc]' e BDS le ri-pubblica come 'disk0[abc]'.
+# Stage-2 bootstrap (Issue #185) e default_pager (argv="disk0c") aprono
+# queste partizioni via cap_request + device_open_cap.
 #
 # Uso:
-#   ./scripts/make-disk-image.sh                    # usa i default
+#   ./scripts/make-disk-image.sh                    # default 40 MB
 #   ./scripts/make-disk-image.sh -o disk.img        # path output custom
-#   ./scripts/make-disk-image.sh -s 32              # dimensione totale in MB
+#   ./scripts/make-disk-image.sh -s 64              # dimensione totale in MB
 #
 # Requisiti: sfdisk, mke2fs, debugfs (pacchetti: fdisk, e2fsprogs)
 # Non richiede root/sudo.
@@ -28,12 +28,14 @@ BUILD_DIR="$REPO_ROOT/osfmk/build"
 ARCH="$(uname -m)"
 
 # --- Parametri di default ---
-IMG_SIZE_MB=32
+IMG_SIZE_MB=40
 DISK_IMG="$BUILD_DIR/disk.img"
 SECT_SIZE=512
-PART1_START_SECT=2048       # ext2 filesystem — allineato a 1 MiB
-FS_SIZE_MB=4                # dimensione filesystem (piccola: solo server binari)
-# Il resto del disco diventa swap per il default_pager
+PART0_START_SECT=2048        # disk0a — /mach_servers/, 1 MiB aligned
+FS0_SIZE_MB=4
+PART1_START_SECT=10240       # disk0b — test data
+FS1_SIZE_MB=4
+PART2_START_SECT=18432       # disk0c — raw swap
 
 # ipc_bench suite selection (empty = all)
 BENCH_ARGS=""
@@ -204,16 +206,17 @@ CONF
 
 # --- Calcoli geometria ---
 TOTAL_SECTS=$((IMG_SIZE_MB * 1024 * 1024 / SECT_SIZE))
-FS_SIZE_SECTS=$((FS_SIZE_MB * 1024 * 1024 / SECT_SIZE))
-PART2_START_SECT=$((PART1_START_SECT + FS_SIZE_SECTS))
+FS0_SIZE_SECTS=$((FS0_SIZE_MB * 1024 * 1024 / SECT_SIZE))
+FS1_SIZE_SECTS=$((FS1_SIZE_MB * 1024 * 1024 / SECT_SIZE))
 SWAP_SIZE_SECTS=$((TOTAL_SECTS - PART2_START_SECT))
 SWAP_SIZE_MB=$((SWAP_SIZE_SECTS * SECT_SIZE / 1024 / 1024))
 
 echo "=== Creazione immagine disco OSFMK ==="
 echo "  Output:      $DISK_IMG"
 echo "  Dimensione:  ${IMG_SIZE_MB} MB"
-echo "  Partizione 1 (hd0a): ext2, ${FS_SIZE_MB} MB  — /mach_servers/"
-echo "  Partizione 2 (hd0b): swap, ${SWAP_SIZE_MB} MB — paging"
+echo "  disk0a: ext2, ${FS0_SIZE_MB} MB  — /mach_servers/"
+echo "  disk0b: ext2, ${FS1_SIZE_MB} MB  — hello.txt + bench.dat (test data)"
+echo "  disk0c: raw,  ${SWAP_SIZE_MB} MB — paging/swap"
 echo ""
 
 # --- 1. Immagine vuota ---
@@ -221,21 +224,21 @@ echo "[1/6] Creazione immagine vuota (${IMG_SIZE_MB} MB)..."
 dd if=/dev/zero of="$DISK_IMG" bs=1M count="$IMG_SIZE_MB" status=none
 
 # --- 2. Tabella partizioni MBR ---
-# Entry 0 → hd0a (ext2 filesystem con i server)
-# Entry 1 → hd0b (raw swap per il default_pager)
-echo "[2/6] Scrittura tabella partizioni MBR..."
+echo "[2/6] Scrittura tabella partizioni MBR (3 entries)..."
 sfdisk --quiet "$DISK_IMG" <<EOF
 label: dos
-start=$PART1_START_SECT, size=$FS_SIZE_SECTS, type=83
+start=$PART0_START_SECT, size=$FS0_SIZE_SECTS, type=83
+start=$PART1_START_SECT, size=$FS1_SIZE_SECTS, type=83
 start=$PART2_START_SECT, size=$SWAP_SIZE_SECTS, type=82
 EOF
 
-# --- 3. Formattare la partizione ext2 ---
-echo "[3/6] Formattazione ext2 (hd0a)..."
+# --- 3. Formattare le due partizioni ext2 ---
+echo "[3/6] Formattazione ext2 (disk0a + disk0b)..."
 PART_IMG=$(mktemp /tmp/osfmk-part.XXXXXX.img)
-trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF"' EXIT
+PART1_IMG=$(mktemp /tmp/osfmk-part1.XXXXXX.img)
+trap 'rm -f "$PART_IMG" "$PART1_IMG" "$BOOTSTRAP_CONF"' EXIT
 
-dd if=/dev/zero of="$PART_IMG" bs="$SECT_SIZE" count="$FS_SIZE_SECTS" status=none
+dd if=/dev/zero of="$PART_IMG" bs="$SECT_SIZE" count="$FS0_SIZE_SECTS" status=none
 mke2fs -t ext2 -q -F \
     -b 4096 \
     -I 256 \
@@ -243,6 +246,15 @@ mke2fs -t ext2 -q -F \
     -L "mach_servers" \
     -O filetype \
     "$PART_IMG"
+
+dd if=/dev/zero of="$PART1_IMG" bs="$SECT_SIZE" count="$FS1_SIZE_SECTS" status=none
+mke2fs -t ext2 -q -F \
+    -b 4096 \
+    -I 256 \
+    -r 1 \
+    -L "disk0b" \
+    -O filetype \
+    "$PART1_IMG"
 
 # --- 4. Copia file nel filesystem con debugfs ---
 # cap_server and cap_test are optional: write only when the binaries
@@ -295,7 +307,7 @@ DBGFS
 
 # gpu_server is optional in 0.1.0 (OSFMK_BUILD_GPU_SERVER off by default)
 if [ -f "$GPU_SERVER" ] && [ -f "$GPU_VGA_MODULE" ]; then
-    debugfs -w -f - "$PART_IMG" >>"$DBGFS_LOG" 2>&1 <<DBGFS
+    debugfs -w -f - "$PART_IMG" 2>/dev/null <<DBGFS
 cd /mach_servers
 write $GPU_SERVER gpu_server
 cd modules
@@ -311,7 +323,7 @@ fi
 # /mach_servers/modules/char/ is filled by #206 (ps2.so) + #207 (uart.so);
 # this skeleton ships only the executable.
 if [ -f "$CHAR_SERVER" ]; then
-    debugfs -w -f - "$PART_IMG" >>"$DBGFS_LOG" 2>&1 <<DBGFS
+    debugfs -w -f - "$PART_IMG" 2>/dev/null <<DBGFS
 cd /mach_servers
 write $CHAR_SERVER char_server
 cd modules
@@ -319,7 +331,7 @@ mkdir char
 DBGFS
     echo "  /mach_servers/char_server                 → $(stat -c%s "$CHAR_SERVER") bytes"
     if [ -f "$CHAR_PS2_MODULE" ]; then
-        debugfs -w -f - "$PART_IMG" >>"$DBGFS_LOG" 2>&1 <<DBGFS
+        debugfs -w -f - "$PART_IMG" 2>/dev/null <<DBGFS
 cd /mach_servers/modules/char
 write $CHAR_PS2_MODULE ps2.so
 DBGFS
@@ -346,53 +358,37 @@ echo "  /mach_servers/hal_server    → $(stat -c%s "$HAL_SERVER") bytes"
 echo "  /mach_servers/modules/hal/pci_scan.so     → $(stat -c%s "$HAL_PCI_SCAN_MODULE") bytes"
 echo "  /mach_servers/ext_server    → $(stat -c%s "$EXT2_SERVER") bytes"
 
-# --- 5. Inserimento partizione ext2 nell'immagine disco ---
-echo "[5/6] Assemblaggio partizione ext2..."
-dd if="$PART_IMG" of="$DISK_IMG" bs="$SECT_SIZE" seek="$PART1_START_SECT" conv=notrunc status=none
+# --- 4b. Popola disk0b con hello.txt (test data) ---
+DBHELLO=$(mktemp)
+printf 'Hello from disk0b partition\n' > "$DBHELLO"
+debugfs -w -f /dev/stdin "$PART1_IMG" <<DBGFS 2>/dev/null
+write $DBHELLO hello.txt
+DBGFS
+rm -f "$DBHELLO"
+
+# --- 5. Inserimento delle due partizioni ext2 nell'immagine disco ---
+echo "[5/6] Assemblaggio partizioni ext2 (disk0a + disk0b)..."
+dd if="$PART_IMG"  of="$DISK_IMG" bs="$SECT_SIZE" seek="$PART0_START_SECT" conv=notrunc status=none
+dd if="$PART1_IMG" of="$DISK_IMG" bs="$SECT_SIZE" seek="$PART1_START_SECT" conv=notrunc status=none
 
 # --- 6. La partizione swap è già zero-filled (nessun formato necessario) ---
-# Issue #184: il default_pager non passa più dal driver IDE in-kernel.
-# Apre la partizione tramite block_device_server: blk_open("disk0c") +
-# cap_request(RESOURCE_BLK_DEVICE) + device_open_cap → handle autenticato
-# per-(client, partizione) che usa come backing store.
-echo "[6/6] Partizione swap (hd0b/disk0c) pronta (zero-filled)."
+echo "[6/6] Partizione swap (disk0c) pronta (zero-filled)."
 
 echo ""
 echo "=== Immagine disco creata con successo ==="
 echo "  $DISK_IMG ($(stat -c%s "$DISK_IMG") bytes)"
 echo ""
-echo "Struttura disco (${IMG_SIZE_MB} MB):"
-echo "  MBR:    settore 0"
-echo "  hd0a:   settori ${PART1_START_SECT}-$((PART1_START_SECT + FS_SIZE_SECTS - 1))  (ext2, ${FS_SIZE_MB} MB)"
-echo "    └── /mach_servers/"
-echo "        ├── bootstrap.conf"
-echo "        ├── name_server"
-echo "        ├── default_pager"
-echo "        ├── hello_server"
-echo "        ├── ipc_bench"
-echo "        ├── block_device_server"
-echo "        ├── hal_server"
-echo "        ├── ext_server"
-echo "        └── modules/"
-echo "            ├── block/"
-echo "            │   ├── ahci.so"
-echo "            │   └── virtio_blk.so"
-echo "            └── hal/"
-echo "                └── pci_scan.so"
-echo "  hd0b:   settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (swap, ${SWAP_SIZE_MB} MB)"
+echo "Struttura disco (${IMG_SIZE_MB} MB, AHCI):"
+echo "  MBR:     settore 0"
+echo "  disk0a:  settori ${PART0_START_SECT}-$((PART0_START_SECT + FS0_SIZE_SECTS - 1))  (ext2, ${FS0_SIZE_MB} MB)"
+echo "    └── /mach_servers/ + hello.txt + bench.dat"
+echo "  disk0b:  settori ${PART1_START_SECT}-$((PART1_START_SECT + FS1_SIZE_SECTS - 1))  (ext2, ${FS1_SIZE_MB} MB) — test data"
+echo "  disk0c:  settori ${PART2_START_SECT}-$((PART2_START_SECT + SWAP_SIZE_SECTS - 1))  (raw,  ${SWAP_SIZE_MB} MB) — paging"
 echo ""
-echo "Flusso di boot:"
-echo "  1. Kernel boot_device → hd0a (d_partitions[0])"
-echo "  2. Bootstrap legge /dev/boot_device/mach_servers/bootstrap.conf"
-echo "  3. Bootstrap carica /dev/boot_device/mach_servers/name_server"
-echo "  4. Bootstrap carica /dev/boot_device/mach_servers/cap_server"
-echo "  5. Bootstrap carica /dev/boot_device/mach_servers/hal_server"
-echo "  6. Bootstrap carica /dev/boot_device/mach_servers/block_device_server"
-echo "  7. Bootstrap carica /dev/boot_device/mach_servers/default_pager"
-echo "  8. Bootstrap carica /dev/boot_device/mach_servers/hello_server"
-echo "  9. Bootstrap carica /dev/boot_device/mach_servers/ipc_bench"
-echo " 10. Bootstrap carica /dev/boot_device/mach_servers/ext_server"
-echo " 11. default_pager argv[1]='disk0c' → device_open_cap via BDS → ${SWAP_SIZE_MB} MB swap"
+echo "Flusso di boot (#224 — no IDE):"
+echo "  1. Stage-1: kernel mappa bootstrap.bundle → bootstrap legge i binari da RAM"
+echo "  2. Stage-2: bootstrap apre disk0a via BDS (cap_request + device_open_cap)"
+echo "  3. default_pager argv[1]='disk0c' → ${SWAP_SIZE_MB} MB swap via BDS"
 echo ""
 echo "Per avviare:"
 echo "  ./scripts/run-qemu.sh"
