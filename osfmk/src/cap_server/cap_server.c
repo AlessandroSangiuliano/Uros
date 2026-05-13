@@ -151,13 +151,19 @@ policy_allows_v1(mach_port_t sender,
     (void)sender;
     (void)ops;
 
-    /* Issue A: we only know how to sign RESOURCE_BLK_DEVICE tokens.
-     * Everything else is rejected to keep the surface honest —
-     * later issues add the other resource types as servers publish
-     * them. */
-    if (resource_type != RESOURCE_BLK_DEVICE)
-        return 0;
-
+    /*
+     * v1 is permissive by design: every resource type cap_server can
+     * be asked about is acked.  The real (manifest- / user- / quota-
+     * aware) policy arrives in a later issue.  Until then, blocking
+     * unknown types here breaks the libgpu_console mirror (#199), the
+     * char_server cap path (#205-#207), and any future userspace
+     * server that wants to gate access through cap_request — they all
+     * use their own resource_type tag ('GPU\0', 'CHR\0', ...).
+     *
+     * RESOURCE_BLK_DEVICE remains the only fully-modeled type in this
+     * enum, but tagging-only consumers (mirror caps, presence
+     * tokens) pass through.
+     */
     return 1;
 }
 
