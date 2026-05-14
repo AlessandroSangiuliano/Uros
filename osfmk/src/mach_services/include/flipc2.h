@@ -125,6 +125,7 @@ typedef int flipc2_return_t;
 #define FLIPC2_ERR_MAX_CLIENTS          -14  /* endpoint client limit reached    */
 #define FLIPC2_ERR_PEER_DEAD            -15  /* peer task has died               */
 #define FLIPC2_ERR_POOL_EMPTY           -16  /* buffer group pool exhausted      */
+#define FLIPC2_ERR_TIMEOUT              -17  /* wait deadline elapsed (#123)     */
 
 /*
  * Maximum consecutive spurious wakeups before declaring the channel dead.
@@ -193,7 +194,13 @@ struct flipc2_channel_header {
     uint32_t    layout_flags;       /* 0=flat, FLIPC2_LAYOUT_ISOLATED    */
     volatile uint32_t prod_tail;    /* next ring slot to write           */
     volatile uint32_t prod_sleeping;/* 1 = producer blocked on full ring */
-    uint32_t    _pad_prod[2];       /* pad to 64 bytes                   */
+    /* #124: doorbell coalescing — wake consumer only when ring has
+     * >= wakeup_thresh pending descriptors.  Default 1 (wake on every
+     * commit, current behaviour). Producer reads on every commit;
+     * consumer writes rarely (config time).  Stays on the producer
+     * cache line so the read is a local cache hit. */
+    volatile uint32_t wakeup_thresh;
+    uint32_t    _pad_prod;          /* pad to 64 bytes                   */
 
     /*
      * Cache line 1 (bytes 64–127): consumer-owned.
@@ -244,6 +251,7 @@ typedef struct flipc2_channel {
     volatile uint32_t   *cons_head;
     volatile uint32_t   *cons_sleeping;
     volatile uint64_t   *cons_total;
+    volatile uint32_t   *wakeup_thresh; /* #124 doorbell coalescing      */
 
     /* Cached constants from header (avoid ch->hdr-> on fast path) */
     uint32_t    ring_entries;
@@ -357,27 +365,65 @@ flipc2_produce_reserve(flipc2_channel_t ch)
 static inline void
 flipc2_produce_commit(flipc2_channel_t ch)
 {
+    uint32_t pending;
+    uint32_t thresh;
+
     FLIPC2_WRITE_FENCE();
     (*ch->prod_tail)++;
     (*ch->prod_total)++;
 
     FLIPC2_WRITE_FENCE();
+    /* #124: doorbell coalescing — skip the signal if the ring has
+     * fewer than wakeup_thresh pending and the consumer is awake
+     * (it will catch up on its own).  When consumer is sleeping we
+     * still respect the threshold; the consumer should pair this
+     * with flipc2_consume_wait_timed so it does not block forever
+     * waiting for a wakeup that the coalescer suppressed. */
     if (*ch->cons_sleeping) {
-        semaphore_signal(ch->sem_port);
-        (*ch->wakeups)++;
+        thresh  = *ch->wakeup_thresh;
+        pending = *ch->prod_tail - *ch->cons_head;
+        if (thresh <= 1 || pending >= thresh) {
+            semaphore_signal(ch->sem_port);
+            (*ch->wakeups)++;
+        }
     }
 }
 
 /*
- * Commit N descriptors in batch.
+ * Commit N descriptors in batch.  Same coalescing rule as
+ * flipc2_produce_commit.
  */
 static inline void
 flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
 {
+    uint32_t pending;
+    uint32_t thresh;
+
     FLIPC2_WRITE_FENCE();
     *ch->prod_tail += n;
     *ch->prod_total += n;
 
+    FLIPC2_WRITE_FENCE();
+    if (*ch->cons_sleeping) {
+        thresh  = *ch->wakeup_thresh;
+        pending = *ch->prod_tail - *ch->cons_head;
+        if (thresh <= 1 || pending >= thresh) {
+            semaphore_signal(ch->sem_port);
+            (*ch->wakeups)++;
+        }
+    }
+}
+
+/*
+ * #124 — force the consumer wakeup regardless of the coalescing
+ * threshold.  Use this when the producer knows it has just commit-
+ * ted the last descriptor of a logical batch and wants the consumer
+ * to start draining immediately (end-of-stream, flush before idle,
+ * RPC reply, etc.).  No-op when the consumer is not sleeping.
+ */
+static inline void
+flipc2_produce_flush(flipc2_channel_t ch)
+{
     FLIPC2_WRITE_FENCE();
     if (*ch->cons_sleeping) {
         semaphore_signal(ch->sem_port);
@@ -534,17 +580,25 @@ flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
 }
 
 /*
- * Wait for a descriptor with timeout (milliseconds).
- * Returns pointer to the descriptor, or NULL on timeout, corruption,
- * or DoS (spurious wakeup threshold exceeded).
+ * flipc2_consume_wait_timed (#123): adaptive consumer wait with an
+ * explicit deadline.  Distinguishes timeout from ring corruption
+ * and DoS so the caller can decide which periodic maintenance to run
+ * before retrying.
  *
- * Same adaptive protocol as flipc2_consume_wait, but uses
- * semaphore_timedwait to avoid blocking indefinitely when
- * the producer dies or is too slow.
+ *   FLIPC2_SUCCESS          — *out_desc is a ready descriptor
+ *   FLIPC2_ERR_TIMEOUT      — deadline elapsed, no data yet
+ *   FLIPC2_ERR_RING_CORRUPT — prod_tail jumped past ring capacity
+ *   FLIPC2_ERR_PEER_DEAD    — spurious-wakeup limit reached (DoS)
+ *   FLIPC2_ERR_KERNEL       — semaphore_timedwait failed unexpectedly
+ *
+ * timeout_ms == 0 selects non-blocking (spin only, then bail with
+ * FLIPC2_ERR_TIMEOUT).  Inlined like flipc2_consume_wait so the hot
+ * path stays tight in the caller's consumer loop.
  */
-static inline struct flipc2_desc *
-flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
-                         uint32_t timeout_ms)
+static inline flipc2_return_t
+flipc2_consume_wait_timed(flipc2_channel_t ch, uint32_t spin_count,
+                          uint32_t timeout_ms,
+                          struct flipc2_desc **out_desc)
 {
     uint32_t head = *ch->cons_head;
     uint32_t re = ch->ring_entries;
@@ -560,14 +614,20 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
         if (ch->cached_prod_tail != head) {
             avail = ch->cached_prod_tail - head;
             if (avail > re)
-                return (struct flipc2_desc *)0;
+                return FLIPC2_ERR_RING_CORRUPT;
             ch->spurious_wakeups = 0;
-            return &ch->ring[head & ch->ring_mask];
+            *out_desc = &ch->ring[head & ch->ring_mask];
+            return FLIPC2_SUCCESS;
         }
         FLIPC2_PAUSE();
     }
 
-    /* Phase 2: prepare to sleep */
+    /* Non-blocking: caller asked spin-only.  Surface TIMEOUT rather
+     * than entering the sleep path. */
+    if (timeout_ms == 0)
+        return FLIPC2_ERR_TIMEOUT;
+
+    /* Phase 2: prepare to sleep, re-check to avoid lost wakeup */
     *ch->cons_sleeping = 1;
     FLIPC2_WRITE_FENCE();
 
@@ -577,9 +637,10 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
         *ch->cons_sleeping = 0;
         avail = ch->cached_prod_tail - head;
         if (avail > re)
-            return (struct flipc2_desc *)0;
+            return FLIPC2_ERR_RING_CORRUPT;
         ch->spurious_wakeups = 0;
-        return &ch->ring[head & ch->ring_mask];
+        *out_desc = &ch->ring[head & ch->ring_mask];
+        return FLIPC2_SUCCESS;
     }
 
     /* Phase 3: block with timeout */
@@ -588,25 +649,46 @@ flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
     kr = semaphore_timedwait(ch->sem_port, ts);
     *ch->cons_sleeping = 0;
 
+    if (kr == KERN_OPERATION_TIMED_OUT)
+        return FLIPC2_ERR_TIMEOUT;
     if (kr != KERN_SUCCESS)
-        return (struct flipc2_desc *)0;
+        return FLIPC2_ERR_KERNEL;
 
     ch->cached_prod_tail = *ch->prod_tail;
     FLIPC2_READ_FENCE();
     avail = ch->cached_prod_tail - head;
 
     if (avail == 0) {
+        /* Spurious wakeup — peer signalled with no fresh data.
+         * Don't re-enter the wait inside our own deadline: surface
+         * TIMEOUT and let the caller decide whether to retry.  Keeps
+         * the per-call latency bound predictable. */
         ch->spurious_wakeups++;
         if (ch->spurious_wakeups >= FLIPC2_MAX_SPURIOUS_WAKEUPS)
-            return (struct flipc2_desc *)0;
-        return flipc2_consume_timedwait(ch, 0, timeout_ms);
+            return FLIPC2_ERR_PEER_DEAD;
+        return FLIPC2_ERR_TIMEOUT;
     }
 
     if (avail > re)
-        return (struct flipc2_desc *)0;
+        return FLIPC2_ERR_RING_CORRUPT;
 
     ch->spurious_wakeups = 0;
-    return &ch->ring[head & ch->ring_mask];
+    *out_desc = &ch->ring[head & ch->ring_mask];
+    return FLIPC2_SUCCESS;
+}
+
+/*
+ * Pointer-returning wrapper kept for parity with flipc2_consume_wait.
+ * Returns NULL on any non-success; new code should prefer
+ * flipc2_consume_wait_timed to distinguish timeout from corruption.
+ */
+static inline struct flipc2_desc *
+flipc2_consume_timedwait(flipc2_channel_t ch, uint32_t spin_count,
+                         uint32_t timeout_ms)
+{
+    struct flipc2_desc *d = (struct flipc2_desc *)0;
+    (void)flipc2_consume_wait_timed(ch, spin_count, timeout_ms, &d);
+    return d;
 }
 
 /*
@@ -1080,6 +1162,18 @@ flipc2_channel_set_semaphores(
     flipc2_channel_t    ch,
     mach_port_t         sem,
     mach_port_t         sem_prod);
+
+/*
+ * #124 — set the doorbell coalescing threshold for this channel.
+ * Producer signals the consumer only once at least `thresh` descriptors
+ * are pending in the ring (or via flipc2_produce_flush()).
+ *   thresh = 0 or 1 — default behaviour (wake on every commit)
+ *   thresh > 1     — bulk mode; pair with flipc2_consume_wait_timed
+ *                    on the consumer side
+ * Stored in the shared header; either peer may call it.
+ */
+void
+flipc2_channel_set_wakeup_threshold(flipc2_channel_t ch, uint32_t thresh);
 
 /* ------------------------------------------------------------------ */
 /*  Endpoint API (named channel discovery + connection handshake)       */
