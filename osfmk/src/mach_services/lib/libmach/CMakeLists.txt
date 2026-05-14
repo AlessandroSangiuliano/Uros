@@ -98,6 +98,7 @@ set(EXPORT_MIG_DEFS
   ${_EXPORT}/mach/ledger.defs
   ${_EXPORT}/mach/mach.defs
   ${_EXPORT}/mach/mach_host.defs
+  ${_EXPORT}/mach/mach_klog.defs
   ${_EXPORT}/mach/mach_norma.defs
   ${_EXPORT}/mach/mach_port.defs
   ${_EXPORT}/mach/memory_object.defs
@@ -139,6 +140,7 @@ set(_MIG_PUBLIC_MAP
   exc.h                          exc_user.h
   ledger.h                       ledger.h
   mach_host.h                    mach_host.h
+  mach_klog.h                    mach_klog.h
   mach.h                         mach_interface.h
   mach_norma.h                   mach_norma.h
   mach_port.h                    mach_port.h

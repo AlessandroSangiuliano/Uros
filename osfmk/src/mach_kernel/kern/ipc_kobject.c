@@ -185,6 +185,7 @@ mach_msg_size_t mig_reply_size;
 #include <mach/mach_server.h>
 #include <mach/mach_port_server.h>
 #include <mach/mach_host_server.h>
+#include <mach/mach_klog_server.h>
 #include <mach/clock_server.h>
 #include <mach/bootstrap_server.h>
 #include <mach/ledger_server.h>
@@ -214,6 +215,7 @@ rpc_subsystem_t mig_e[] = {
         (rpc_subsystem_t)&mach_subsystem,
         (rpc_subsystem_t)&mach_port_subsystem,
         (rpc_subsystem_t)&mach_host_subsystem,
+        (rpc_subsystem_t)&mach_klog_subsystem,
         (rpc_subsystem_t)&clock_subsystem,
         (rpc_subsystem_t)&do_bootstrap_subsystem,
         (rpc_subsystem_t)&ds_device_subsystem,

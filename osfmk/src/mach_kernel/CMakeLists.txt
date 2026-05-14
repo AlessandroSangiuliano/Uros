@@ -303,6 +303,10 @@ add_mig_server(${KERNEL_SRC_DIR}/mach/mach_port.defs
 add_mig_server(${KERNEL_SRC_DIR}/mach/mach_host.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
+# mach_klog_server.c - #200, kernel printf ring drain
+add_mig_server(${KERNEL_SRC_DIR}/mach/mach_klog.defs
+               ${KERNEL_BUILD_DIR}/mach MACH)
+
 # clock_server.c - kernel receives clock messages
 add_mig_server(${KERNEL_SRC_DIR}/mach/clock.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
@@ -421,6 +425,7 @@ set(KERN_SOURCES
     kern/ipc_sync.c
     kern/ipc_tt.c
     kern/kalloc.c
+    kern/klog.c
     kern/ledger.c
     kern/mach_clock.c
     kern/mach_factor.c
