@@ -243,6 +243,15 @@ hal_subscribe(void)
 
 	printf("blk: registered with HAL (mask=0x%08x match=0x%08x)\n",
 	       BLK_CLASS_MASK, BLK_CLASS_MATCH);
+
+	/* #173 smoke test: trigger one extra discovery pass.  The bus
+	 * is stable after boot so HAL should report "0 new" and we
+	 * must not receive a second hal_device_added burst. */
+	{
+		kern_return_t krr = hal_rescan(hal_service_port);
+		printf("blk: hal_rescan kr=%d (expect quiet — no fresh devs)\n",
+		       krr);
+	}
 	return 0;
 }
 

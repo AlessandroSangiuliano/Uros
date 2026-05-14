@@ -127,3 +127,11 @@ hal_register_driver(mach_port_t hal_port,
 	hal_driver_reg_replay(slot);
 	return KERN_SUCCESS;
 }
+
+kern_return_t
+hal_rescan(mach_port_t hal_port)
+{
+	(void)hal_port;
+	hal_run_discovery();
+	return KERN_SUCCESS;
+}
