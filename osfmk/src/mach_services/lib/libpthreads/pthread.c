@@ -917,6 +917,87 @@ pthread_join(pthread_t thread,
 }
 
 /*
+ * pthread_timedjoin_np — like pthread_join but with an absolute
+ * CLOCK_REALTIME deadline (#156).  GNU/Linux extension; non-POSIX.
+ *
+ * On timeout the joiner walks back the num_joiners increment so the
+ * thread doesn't think it still has a watcher.  Same race window as
+ * pthread_join itself: between semaphore_timedwait returning
+ * KERN_OPERATION_TIMED_OUT and us re-acquiring thread->lock, the
+ * thread may have just exited and signalled joiners — in that
+ * case we honour the join and harvest the exit value (we don't
+ * want to drop the corpse on the floor just because we were a few
+ * cycles slow).
+ */
+int
+pthread_timedjoin_np(pthread_t thread,
+		     void **value_ptr,
+		     const struct timespec *abstime)
+{
+	kern_return_t kern_res;
+
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	if (abstime == NULL)
+		return (EINVAL);
+
+	LOCK(thread->lock);
+	if (thread->detached != PTHREAD_CREATE_JOINABLE &&
+	    thread->detached != _PTHREAD_EXITED) {
+		UNLOCK(thread->lock);
+		return (EINVAL);
+	}
+
+	if (thread->detached == PTHREAD_CREATE_JOINABLE) {
+		struct timespec now;
+		tvalspec_t then;
+
+		thread->num_joiners++;
+		UNLOCK(thread->lock);
+
+		getclock(TIMEOFDAY, &now);
+		then.tv_nsec = abstime->tv_nsec - now.tv_nsec;
+		then.tv_sec  = abstime->tv_sec  - now.tv_sec;
+		if (then.tv_nsec < 0) {
+			then.tv_nsec += 1000000000;
+			then.tv_sec--;
+		}
+		if ((int)then.tv_sec < 0) {
+			then.tv_sec  = 0;
+			then.tv_nsec = 0;
+		}
+
+		kern_res = semaphore_timedwait(thread->joiners, then);
+		LOCK(thread->lock);
+		thread->num_joiners--;
+
+		if (kern_res == KERN_OPERATION_TIMED_OUT &&
+		    thread->detached != _PTHREAD_EXITED) {
+			UNLOCK(thread->lock);
+			return (ETIMEDOUT);
+		}
+		/* Either the wait succeeded, or it timed out *just* as
+		 * the thread exited — fall through to the exit harvest
+		 * below. */
+	}
+
+	if (thread->detached == _PTHREAD_EXITED) {
+		if (thread->num_joiners == 0) {
+			if (value_ptr)
+				*value_ptr = thread->exit_value;
+			UNLOCK(thread->lock);
+			MACH_CALL(semaphore_signal(thread->death), kern_res);
+			return (ESUCCESS);
+		}
+		UNLOCK(thread->lock);
+		return (ESRCH);
+	}
+
+	UNLOCK(thread->lock);
+	return (EINVAL);
+}
+
+/*
  * Get the scheduling policy and scheduling paramters for a thread.
  */
 int       

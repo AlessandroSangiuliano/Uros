@@ -297,8 +297,14 @@ void      pthread_exit(void *value_ptr);
 int       pthread_getschedparam(pthread_t thread, 
 				int *policy,
                                 struct sched_param *param);
-int       pthread_join(pthread_t thread, 
+int       pthread_join(pthread_t thread,
 		       void **value_ptr);
+/* GNU/Linux extension (#156): pthread_join with an absolute
+ * CLOCK_REALTIME deadline.  Returns ETIMEDOUT if the thread did
+ * not terminate before abstime. */
+int       pthread_timedjoin_np(pthread_t thread,
+			       void **value_ptr,
+			       const struct timespec *abstime);
 int       pthread_mutex_destroy(pthread_mutex_t *mutex);
 int       pthread_mutex_getprioceiling(const pthread_mutex_t *mutex, 
                                        int *prioceiling);
