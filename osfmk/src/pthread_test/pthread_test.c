@@ -942,6 +942,60 @@ test_thread_pool_bench(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test: pthread_timedjoin_np (#156)
+ *
+ * Two checks:
+ *   a) timeout fires when the joinee is still alive
+ *   b) success after the joinee terminates
+ * ---------------------------------------------------------------- */
+
+static void *
+slow_joinee(void *arg)
+{
+	(void)arg;
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 200);
+	return (void *)0x42424242;
+}
+
+static void
+test_timedjoin_np(void)
+{
+	pthread_t t;
+	struct timespec deadline;
+	void *retval = NULL;
+	int rc;
+
+	if (pthread_create(&t, NULL, slow_joinee, NULL) != 0) {
+		test_fail("timedjoin_np", "pthread_create failed");
+		return;
+	}
+
+	/* (a) Past deadline → must return ETIMEDOUT immediately. */
+	deadline.tv_sec = 0;
+	deadline.tv_nsec = 0;
+	rc = pthread_timedjoin_np(t, NULL, &deadline);
+	if (rc != ETIMEDOUT) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "(a) expected ETIMEDOUT(%d), got %d",
+			 ETIMEDOUT, rc);
+		test_fail("timedjoin_np", buf);
+		pthread_join(t, NULL);
+		return;
+	}
+
+	/* (b) Generous deadline → succeed once the joinee finishes. */
+	getclock(TIMEOFDAY, &deadline);
+	deadline.tv_sec += 5;
+	rc = pthread_timedjoin_np(t, &retval, &deadline);
+	if (rc != 0 || retval != (void *)0x42424242) {
+		test_fail("timedjoin_np", "(b) join did not return exit value");
+		return;
+	}
+
+	test_ok("pthread_timedjoin_np");
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -983,6 +1037,7 @@ main(int argc, char **argv)
 		else
 			test_fail("yield", "non-zero return");
 	}
+	test_timedjoin_np();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
