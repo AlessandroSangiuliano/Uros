@@ -53,22 +53,26 @@ hal_registry_add(const struct hal_device_info *dev)
 	int existing;
 
 	if (dev == NULL)
-		return -1;
+		return HAL_REGISTRY_ADD_ERROR;
 
 	existing = find_index(dev->bus, dev->slot, dev->func);
 	if (existing >= 0) {
+		/* Same BDF: refresh the entry but report as duplicate so
+		 * the caller does not fire a fresh hal_device_added.  #173
+		 * relies on this to keep hal_rescan idempotent when no
+		 * topology changed. */
 		registry[existing] = *dev;
-		return existing;
+		return HAL_REGISTRY_ADD_EXISTING;
 	}
 
 	if (n_registry >= HAL_MAX_DEVICES) {
 		printf("hal: registry full, dropping device %u:%u.%u\n",
 		       dev->bus, dev->slot, dev->func);
-		return -1;
+		return HAL_REGISTRY_ADD_ERROR;
 	}
 
-	registry[n_registry] = *dev;
-	return n_registry++;
+	registry[n_registry++] = *dev;
+	return HAL_REGISTRY_ADD_NEW;
 }
 
 int

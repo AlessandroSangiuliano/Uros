@@ -79,14 +79,15 @@ static struct hal_device_info scan_buf[HAL_MAX_DEVICES];
  * Discovery pass — run every loaded module, merge into the registry
  * ================================================================ */
 
-static void
-run_discovery(void)
+void
+hal_run_discovery(void)
 {
 	int m;
 
 	for (m = 0; m < n_discovery; m++) {
 		const struct hal_discovery_ops *ops = discovery[m];
 		int n, i;
+		int new_devs = 0;
 
 		if (ops->init != NULL && ops->init(master_device) < 0) {
 			printf("hal: module %s init failed\n", ops->name);
@@ -99,13 +100,19 @@ run_discovery(void)
 			continue;
 		}
 
-		printf("hal: module %s returned %d device(s)\n", ops->name, n);
-
 		for (i = 0; i < n; i++) {
-			if (hal_registry_add(&scan_buf[i]) < 0)
-				continue;
-			hal_driver_reg_notify_match(&scan_buf[i]);
+			int rc = hal_registry_add(&scan_buf[i]);
+			if (rc == HAL_REGISTRY_ADD_NEW) {
+				/* #173: only fresh devices trigger
+				 * hal_device_added — repeated rescans
+				 * over a stable bus stay quiet. */
+				hal_driver_reg_notify_match(&scan_buf[i]);
+				new_devs++;
+			}
 		}
+
+		printf("hal: module %s scanned %d device(s) (%d new)\n",
+		       ops->name, n, new_devs);
 	}
 }
 
@@ -215,7 +222,7 @@ main(int argc, char **argv)
 		       "be empty\n");
 	}
 
-	run_discovery();
+	hal_run_discovery();
 	dump_registry();
 
 	printf("hal: init complete, entering message loop\n");

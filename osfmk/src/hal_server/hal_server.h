@@ -116,7 +116,24 @@ struct hal_discovery_ops {
  * Registry API (hal_registry.c)
  * ================================================================ */
 
+/*
+ * hal_registry_add return codes.  Distinguishing NEW from EXISTING
+ * lets the discovery loop fire hal_device_added only for newly
+ * discovered devices, so #173 hal_rescan stays idempotent on a
+ * stable bus.
+ */
+#define HAL_REGISTRY_ADD_ERROR		(-1)
+#define HAL_REGISTRY_ADD_EXISTING	0
+#define HAL_REGISTRY_ADD_NEW		1
+
 int  hal_registry_add(const struct hal_device_info *dev);
+/*
+ * #173: trigger a fresh discovery pass on demand.  Reuses the same
+ * machinery as the initial boot scan; only devices whose BDF was not
+ * already in the registry generate hal_device_added notifications.
+ * Safe to call repeatedly — the registry de-duplicates by BDF.
+ */
+void hal_run_discovery(void);
 int  hal_registry_count(void);
 const struct hal_device_info *hal_registry_get(unsigned int bus,
 					       unsigned int slot,
