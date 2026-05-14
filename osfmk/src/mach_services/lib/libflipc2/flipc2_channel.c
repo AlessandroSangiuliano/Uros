@@ -93,11 +93,13 @@ flipc2_init_header(struct flipc2_channel_header *hdr,
         volatile uint32_t *cp = (volatile uint32_t *)(base + FLIPC2_ISO_CONS_OFFSET);
         pp[0] = 0;  /* prod_tail */
         pp[1] = 0;  /* prod_sleeping */
+        pp[6] = 1;  /* #124 wakeup_thresh — default = wake on every commit */
         cp[0] = 0;  /* cons_head */
         cp[1] = 0;  /* cons_sleeping */
     } else {
         hdr->prod_tail     = 0;
         hdr->prod_sleeping = 0;
+        hdr->wakeup_thresh = 1;  /* #124 default */
         hdr->cons_head     = 0;
         hdr->cons_sleeping = 0;
         hdr->prod_total    = 0;
@@ -129,6 +131,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
         ch->prod_sleeping = (volatile uint32_t *)(pp + 4);
         ch->prod_total    = (volatile uint64_t *)(pp + 8);
         ch->wakeups       = (volatile uint64_t *)(pp + 16);
+        ch->wakeup_thresh = (volatile uint32_t *)(pp + 24);  /* #124 */
         ch->cons_head     = (volatile uint32_t *)(cp + 0);
         ch->cons_sleeping = (volatile uint32_t *)(cp + 4);
         ch->cons_total    = (volatile uint64_t *)(cp + 8);
@@ -137,6 +140,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
         ch->prod_sleeping = &hdr->prod_sleeping;
         ch->prod_total    = &hdr->prod_total;
         ch->wakeups       = &hdr->wakeups;
+        ch->wakeup_thresh = &hdr->wakeup_thresh;             /* #124 */
         ch->cons_head     = &hdr->cons_head;
         ch->cons_sleeping = &hdr->cons_sleeping;
         ch->cons_total    = &hdr->cons_total;
@@ -638,4 +642,25 @@ flipc2_channel_set_semaphores(
 {
     ch->sem_port      = sem;
     ch->sem_port_prod = sem_prod;
+}
+
+/*
+ * flipc2_channel_set_wakeup_threshold (#124) — configure how many
+ * pending descriptors the producer must accumulate before signalling
+ * a sleeping consumer.  Default is 1 (current behaviour, wake on
+ * every commit).  Higher values trade wake latency for throughput:
+ * good for bulk I/O where the producer commits in bursts.  Callers
+ * that raise the threshold above 1 SHOULD pair the consumer with
+ * flipc2_consume_wait_timed so the consumer eventually drains a
+ * short tail-batch the threshold suppresses.
+ *
+ * thresh = 0 is treated as 1.  Stored in the shared header so both
+ * peers see the same value; safe to call from either side.
+ */
+void
+flipc2_channel_set_wakeup_threshold(flipc2_channel_t ch, uint32_t thresh)
+{
+    if (thresh == 0)
+        thresh = 1;
+    *ch->wakeup_thresh = thresh;
 }
