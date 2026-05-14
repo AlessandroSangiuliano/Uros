@@ -225,8 +225,19 @@ echo_thread_func(void *arg)
 		      port,
 		      MACH_MSG_TIMEOUT_NONE,
 		      MACH_PORT_NULL);
-	if (kr != MACH_MSG_SUCCESS)
+	if (kr != MACH_MSG_SUCCESS) {
+	    /*
+	     * Terminal errors mean the bench destroyed the receive port
+	     * — exit instead of spinning on mach_msg(RCV) forever and
+	     * polluting the next test's scheduling.
+	     */
+	    if (kr == MACH_RCV_PORT_DIED ||
+		kr == MACH_RCV_PORT_CHANGED ||
+		kr == MACH_RCV_INVALID_NAME ||
+		kr == MACH_RCV_TIMED_OUT)
+		break;
 	    continue;
+	}
 
 	/* Send a minimal reply */
 	reply.head.msgh_bits =
@@ -582,8 +593,19 @@ slow_echo_thread_func(void *arg)
 		      port,
 		      MACH_MSG_TIMEOUT_NONE,
 		      MACH_PORT_NULL);
-	if (kr != MACH_MSG_SUCCESS)
+	if (kr != MACH_MSG_SUCCESS) {
+	    /*
+	     * Terminal errors mean the bench destroyed the receive port
+	     * — exit instead of spinning on mach_msg(RCV) forever and
+	     * polluting the next test's scheduling.
+	     */
+	    if (kr == MACH_RCV_PORT_DIED ||
+		kr == MACH_RCV_PORT_CHANGED ||
+		kr == MACH_RCV_INVALID_NAME ||
+		kr == MACH_RCV_TIMED_OUT)
+		break;
 	    continue;
+	}
 
 	reply.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
@@ -1179,8 +1201,19 @@ ool_echo_thread_func(void *arg)
 		      port,
 		      MACH_MSG_TIMEOUT_NONE,
 		      MACH_PORT_NULL);
-	if (kr != MACH_MSG_SUCCESS)
+	if (kr != MACH_MSG_SUCCESS) {
+	    /*
+	     * Terminal errors mean the bench destroyed the receive port
+	     * — exit instead of spinning on mach_msg(RCV) forever and
+	     * polluting the next test's scheduling.
+	     */
+	    if (kr == MACH_RCV_PORT_DIED ||
+		kr == MACH_RCV_PORT_CHANGED ||
+		kr == MACH_RCV_INVALID_NAME ||
+		kr == MACH_RCV_TIMED_OUT)
+		break;
 	    continue;
+	}
 
 	/* Deallocate received OOL data to avoid leaking memory */
 	if ((msg.head.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
