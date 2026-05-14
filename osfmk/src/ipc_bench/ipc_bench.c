@@ -1001,8 +1001,6 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 
     get_time(&t0);
     for (i = 0; i < iters; i++) {
-	kern_return_t kr_s, kr_r;
-
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
 			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
@@ -1011,38 +1009,15 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 	send_buf.head.msgh_local_port  = reply_port;
 	send_buf.head.msgh_id	      = 1;
 
-	/*
-	 * #225 diagnostic: bench was hanging silently in this loop
-	 * with MACH_MSG_TIMEOUT_NONE.  Use a 5-second timeout so a
-	 * stuck mach_msg returns MACH_*_TIMED_OUT and we can pinpoint
-	 * which iteration / which leg (send vs recv) hung.  5 s is
-	 * far above normal latency (~1.5 us) so there are no false
-	 * positives.
-	 */
-	kr_s = mach_msg(&send_buf.head,
-			MACH_SEND_MSG | MACH_SEND_TIMEOUT,
-			send_size, 0,
-			MACH_PORT_NULL, 5000, MACH_PORT_NULL);
-	if (kr_s != MACH_MSG_SUCCESS) {
-	    printf("  %s: STUCK on SEND iter=%d kr=0x%x\n",
-		   label, i, (unsigned)kr_s);
-	    goto pp_intra_abort;
-	}
-	kr_r = mach_msg(&recv_buf.head,
-			MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-			0, sizeof(recv_buf),
-			reply_port, 5000, MACH_PORT_NULL);
-	if (kr_r != MACH_MSG_SUCCESS) {
-	    printf("  %s: STUCK on RCV iter=%d kr=0x%x\n",
-		   label, i, (unsigned)kr_r);
-	    goto pp_intra_abort;
-	}
+	mach_msg(&send_buf.head, MACH_SEND_MSG, send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
     }
     get_time(&t1);
 
     print_result(label, elapsed_ns(&t0, &t1), iters);
 
-pp_intra_abort:
     mach_port_destroy(mach_task_self(), echo_port);
     mach_port_destroy(mach_task_self(), reply_port);
 }
