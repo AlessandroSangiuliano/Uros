@@ -102,6 +102,25 @@ int                      gpu_core_dev_copy_all(struct gpu_device_info *out,
 int gpu_core_cap_check(const char *token, unsigned int token_count,
 		       uint64_t op, uint64_t resource_id);
 
+/* ============================================================
+ * Per-cap handle table (#202)
+ *
+ * device_open registers a (cap_id, dev_id) row; device_close
+ * removes it; cap_revoke_notify walks the whole table and frees
+ * every row matching the revoked cap_id.  In 0.1.0 the row only
+ * tracks the open itself — bo / context lifetimes get tacked onto
+ * the same row when those ops become real.
+ *
+ * Returns: open=0 ok / -1 table full or duplicate; close/revoke
+ * counts torn-down rows (0 = nothing matched).
+ * ============================================================ */
+
+#define GPU_MAX_HANDLES		32
+
+int      gpu_core_handle_open(uint64_t cap_id, gpu_dev_id_t dev_id);
+int      gpu_core_handle_close(uint64_t cap_id, gpu_dev_id_t dev_id);
+unsigned int gpu_core_handle_revoke(uint64_t cap_id);
+
 /*
  * Text plane.  Routes a chunk to the first attached module that
  * implements text_puts (today: vga); falls back to the bootstrap

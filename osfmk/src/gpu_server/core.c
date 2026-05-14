@@ -226,6 +226,98 @@ gpu_core_cap_check(const char *token, unsigned int token_count,
 }
 
 /* ================================================================
+ * Per-cap handle table (#202)
+ *
+ * One row per (cap_id, dev_id) opened by a client.  device_open
+ * inserts; device_close removes; cap_revoke_notify walks and frees
+ * every row carrying the revoked cap_id.  The table is intentionally
+ * small (GPU_MAX_HANDLES) — a single VGA in 0.1.0 has at most one
+ * "real" client (the bootstrap log_forwarder), so 32 rows leave room
+ * for the test harnesses that #197/#202 wires.
+ *
+ * Single-threaded server: lock-free reads/writes are correct here —
+ * the dispatch loop in main.c serialises every MIG handler and the
+ * cap_revoke_notify message lands on the same thread.  When the
+ * render thread starts touching this table (post-0.2 BO lifetimes)
+ * the access pattern grows a lock; today it does not.
+ * ================================================================ */
+
+struct gpu_handle {
+	int		in_use;
+	uint64_t	cap_id;
+	gpu_dev_id_t	dev_id;
+};
+
+static struct gpu_handle handles[GPU_MAX_HANDLES];
+
+static struct gpu_handle *
+handle_lookup(uint64_t cap_id, gpu_dev_id_t dev_id)
+{
+	unsigned int i;
+
+	for (i = 0; i < GPU_MAX_HANDLES; i++) {
+		if (handles[i].in_use &&
+		    handles[i].cap_id == cap_id &&
+		    handles[i].dev_id == dev_id)
+			return &handles[i];
+	}
+	return NULL;
+}
+
+int
+gpu_core_handle_open(uint64_t cap_id, gpu_dev_id_t dev_id)
+{
+	unsigned int i;
+
+	if (handle_lookup(cap_id, dev_id) != NULL) {
+		/* Duplicate open of (cap, dev): caller is confused.
+		 * Don't error — treat as no-op, the table still has the
+		 * row and revocation will tear it down once. */
+		return 0;
+	}
+	for (i = 0; i < GPU_MAX_HANDLES; i++) {
+		if (!handles[i].in_use) {
+			handles[i].in_use = 1;
+			handles[i].cap_id = cap_id;
+			handles[i].dev_id = dev_id;
+			return 0;
+		}
+	}
+	printf("gpu_server: handle table full, rejecting open "
+	       "cap=%llu dev=%u\n",
+	       (unsigned long long)cap_id, (unsigned)dev_id);
+	return -1;
+}
+
+int
+gpu_core_handle_close(uint64_t cap_id, gpu_dev_id_t dev_id)
+{
+	struct gpu_handle *h = handle_lookup(cap_id, dev_id);
+	if (h == NULL)
+		return -1;
+	h->in_use = 0;
+	h->cap_id = 0;
+	h->dev_id = 0;
+	return 0;
+}
+
+unsigned int
+gpu_core_handle_revoke(uint64_t cap_id)
+{
+	unsigned int i, freed = 0;
+
+	for (i = 0; i < GPU_MAX_HANDLES; i++) {
+		if (handles[i].in_use && handles[i].cap_id == cap_id) {
+			handles[i].in_use = 0;
+			handles[i].cap_id = 0;
+			handles[i].dev_id = 0;
+			freed++;
+		}
+	}
+	return freed;
+}
+
+/* ================================================================
  * Core init
  * ================================================================ */
 
@@ -233,6 +325,7 @@ int
 gpu_core_init(void)
 {
 	memset(devices, 0, sizeof(devices));
+	memset(handles, 0, sizeof(handles));
 	n_devices = 0;
 	return 0;
 }

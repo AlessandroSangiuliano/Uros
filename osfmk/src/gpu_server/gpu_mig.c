@@ -25,9 +25,28 @@
 #include <mach.h>
 #include <mach/kern_return.h>
 #include <mach/gpu_stats.h>
+#include <mach/cap_types.h>
 #include <stdio.h>
 #include <string.h>
 #include "gpu_server.h"
+
+/*
+ * Pull the cap_id out of the wire-format `struct uros_cap` token the
+ * client passed.  device_open / device_close need it to key the
+ * handle table; gpu_core_cap_check has already validated the token
+ * size by the time we read it.  Returns 0 on token-less callers
+ * (handle table won't track them).
+ */
+static uint64_t
+cap_id_from_token(const char *token, mach_msg_type_number_t cnt)
+{
+	struct uros_cap cap;
+
+	if (token == NULL || cnt != sizeof(cap))
+		return 0;
+	memcpy(&cap, token, sizeof(cap));
+	return cap.cap_id;
+}
 
 /* MIG generates a leading mach_port_t argument named gpu_port even
  * for simpleroutines; we just acknowledge and ignore it. */
@@ -113,9 +132,30 @@ gpu_device_open(mach_port_t gpu_port,
 	if (dev == NULL)
 		return KERN_INVALID_ARGUMENT;
 
-	/* In #194 the "open" is a no-op handshake.  Once cap_server is
-	 * wired in, this is where we'd register the open against the
-	 * caller's task port for revocation tear-down. */
+	/* #202: register the (cap_id, dev_id) pair so cap_revoke_notify
+	 * can tear it down when cap_server revokes the issuing cap.  A
+	 * full table is the only failure mode (caps without an cap_id —
+	 * token-less open — collapse onto cap_id=0 and share one row). */
+	if (gpu_core_handle_open(cap_id_from_token(cap, cap_count),
+				 (gpu_dev_id_t)dev_id) < 0)
+		return KERN_RESOURCE_SHORTAGE;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+gpu_device_close(mach_port_t gpu_port,
+		 char *cap, mach_msg_type_number_t cap_count,
+		 uint32_t dev_id)
+{
+	(void)gpu_port;
+
+	if (gpu_core_cap_check(cap, cap_count, GPU_CAP_DEV_OPEN,
+			       (uint64_t)dev_id) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	if (gpu_core_handle_close(cap_id_from_token(cap, cap_count),
+				  (gpu_dev_id_t)dev_id) < 0)
+		return KERN_INVALID_ARGUMENT;
 	return KERN_SUCCESS;
 }
 
