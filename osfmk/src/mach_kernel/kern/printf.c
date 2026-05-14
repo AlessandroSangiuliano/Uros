@@ -219,6 +219,7 @@
 #include <kern/lock.h>
 #include <kern/thread.h>
 #include <kern/misc_protos.h>
+#include <kern/klog.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -784,6 +785,19 @@ boolean_t	new_printf_cpu_number = FALSE;
 
 decl_simple_lock_data(,printf_lock)
 
+/*
+ * #200: every char that goes to the console also lands in the kernel
+ * ring buffer so userspace can drain it via host_get_log.  Used as
+ * the putc callback in _doprnt and as a direct cnputc wrapper for
+ * the MP cpu-number prefix.
+ */
+static void
+klog_cnputc(char c)
+{
+	cnputc(c);
+	klog_putc(c);
+}
+
 void
 printf_init(void)
 {
@@ -791,6 +805,7 @@ printf_init(void)
 	 * Lock is only really needed after the first thread is created.
 	 */
 	simple_lock_init(&printf_lock, ETAP_MISC_PRINTF);
+	klog_init();
 }
 
 /* derived from boot_gets */
@@ -862,24 +877,24 @@ printf(const char *fmt, ...)
 			int i;
 
 			i = cpu_number();
-			cnputc('{');
+			klog_cnputc('{');
 			if (i > 99) {
-				cnputc('?');
+				klog_cnputc('?');
 			} else {
 				if (i > 9) {
-					cnputc('0'+ (i / 10));
+					klog_cnputc('0'+ (i / 10));
 					i = i % 10;
 				}
-				cnputc('0' + i);
+				klog_cnputc('0' + i);
 			}
-			cnputc('}');
-			cnputc(' ');
+			klog_cnputc('}');
+			klog_cnputc(' ');
 		}
-		_doprnt(fmt, &listp, cnputc, 16);
+		_doprnt(fmt, &listp, klog_cnputc, 16);
 		simple_unlock(&printf_lock);
       } else
 #endif	/* MP_PRINTF */
-      _doprnt(fmt, &listp, cnputc, 16);
+      _doprnt(fmt, &listp, klog_cnputc, 16);
 	va_end(listp);
 	enable_preemption();
 }

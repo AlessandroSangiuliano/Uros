@@ -4,28 +4,75 @@
  */
 
 /*
- * bootstrap/log_forwarder.c — thin wrapper around libgpu_console.
+ * bootstrap/log_forwarder.c — kernel printf → gpu_server bridge.
  *
- * The original #198 implementation had its own cap_request +
- * netname_look_up + gpu_text_puts plumbing.  The real logic now
- * lives in libgpu_console (#199 prep) so every server task can
- * mirror its printf to the screen with a single function call;
- * this file remains as a stable bootstrap-internal API in case the
- * future kernel-log-ring drain (#200) wants a bootstrap-private
- * place to hang state that does not belong in libgpu_console.
+ * Two paths:
  *
- * After bootstrap finishes launching servers it invokes
- * log_forwarder_init() → gpu_console_init("bootstrap"), which
- * installs the libsa_mach printf mirror.  From that point bootstrap's
- * own printf reaches both the kernel serial console and the VGA
- * framebuffer via gpu_server.
+ *   1. log_forwarder_puts(buf, len) / log_forwarder_str(s) —
+ *      synchronous mirror of bootstrap's own printf (libsa_mach hook
+ *      installed by gpu_console_init).  This is what was here before
+ *      #200; nothing changed.
+ *
+ *   2. drain pthread (#200) — once gpu_console is up, spawn a
+ *      worker that pulls bytes out of the kernel ring buffer (see
+ *      kern/klog.c) via host_get_log and feeds them to gpu_console.
+ *      Without this, the only kernel printf that ever reached the
+ *      VGA console after #199 was anything bootstrap re-printed
+ *      itself; panic backtraces and pre-userspace boot output went
+ *      to serial only.
+ *
+ * Cadence: 50 ms poll (design doc §11.3 rule 3 — bounded latency
+ * from kernel printf to on-screen pixel without burning CPU on an
+ * idle ring).  If the drainer ever falls more than 64 KiB behind,
+ * the kernel snaps the cursor forward and we lose the gap silently
+ * (drop-on-loss — never block printf for a slow viewer).
  */
 
 #include <string.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <mach.h>
+#include <mach/mach_traps.h>
+#include <mach/mach_klog.h>
+#include <mach/host_info.h>
+#include <mach/thread_switch.h>
 
 #include "log_forwarder.h"
 #include "gpu_console.h"
+
+#define KLOG_DRAIN_INTERVAL_MS	50	/* 50 ms — design doc §11.3 rule 3 */
+
+extern kern_return_t thread_switch(mach_port_t thread,
+				   int option,
+				   mach_msg_timeout_t option_time);
+
+static pthread_t klog_drain_tid;
+static int       klog_drain_started;
+
+static void *
+klog_drain_thread(void *arg)
+{
+	natural_t cursor = 0;
+	mach_port_t host = mach_host_self();
+	klog_data_t buf;
+
+	(void)arg;
+
+	for (;;) {
+		mach_msg_type_number_t cnt = sizeof(buf);
+		natural_t next;
+		kern_return_t kr;
+
+		kr = host_get_log(host, cursor, buf, &cnt, &next);
+		if (kr == KERN_SUCCESS && cnt > 0) {
+			gpu_console_puts(buf, (size_t)cnt);
+			cursor = next;
+		}
+		thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+			      KLOG_DRAIN_INTERVAL_MS);
+	}
+	return NULL;
+}
 
 int
 log_forwarder_init(void)
@@ -40,6 +87,20 @@ log_forwarder_init(void)
 	 * to gpu_server, so this line should land on the VGA console
 	 * via vga.so → 0xB8000. */
 	printf("Uros 0.1.0 — userspace text path online.\n");
+
+	/* #200: spawn the kernel ring drain.  Failure is non-fatal —
+	 * bootstrap's own printf still mirrors via libsa_mach. */
+	if (!klog_drain_started) {
+		int err = pthread_create(&klog_drain_tid, NULL,
+					 klog_drain_thread, NULL);
+		if (err == 0) {
+			klog_drain_started = 1;
+			printf("log_forwarder: kernel klog drain started\n");
+		} else {
+			printf("log_forwarder: pthread_create failed (%d) — "
+			       "kernel printf will not reach VGA\n", err);
+		}
+	}
 	return 0;
 }
 

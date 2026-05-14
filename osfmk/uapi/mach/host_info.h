@@ -124,6 +124,11 @@ typedef char	kernel_version_t[KERNEL_VERSION_MAX];
 #define KERNEL_BOOT_INFO_MAX (4096)
 typedef char	kernel_boot_info_t[KERNEL_BOOT_INFO_MAX];
 
+/* #200: max bytes per host_get_log RPC.  Must match the array bound
+ * in mach/mach_klog.defs. */
+#define KLOG_DATA_MAX	(4096)
+typedef char	klog_data_t[KLOG_DATA_MAX];
+
 #define	KERNEL_BOOTMAGIC_MAX	(8192)
 
 /*
