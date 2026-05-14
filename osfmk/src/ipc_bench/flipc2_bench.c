@@ -91,5 +91,8 @@ bench_flipc2_run(mach_port_t clock_port)
     /* --- Pollset smoke test (#122) --- */
     bench_flipc2_pollset();
 
+    /* --- MPSC smoke test (#126) --- */
+    bench_flipc2_mpsc();
+
     printf("\n");
 }

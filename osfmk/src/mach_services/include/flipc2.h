@@ -82,6 +82,7 @@
 /* Creation flags (passed to flipc2_channel_create_ex) */
 #define FLIPC2_CREATE_ISOLATED      0x00000001
 #define FLIPC2_CREATE_FLAT          0x00000002  /* force flat layout */
+#define FLIPC2_CREATE_MPSC          0x00000004  /* #126 multi-producer */
 
 /* Sharing roles (passed to flipc2_channel_share_isolated) */
 #define FLIPC2_ROLE_PRODUCER        1
@@ -219,9 +220,14 @@ struct flipc2_channel_header {
     uint8_t             _pad_stats[64 - 24]; /* fill cache line          */
 
     /*
-     * Cache line 3 (bytes 192–255): reserved for future use.
+     * Cache line 3 (bytes 192–255):
+     *   prod_reserved is the MPSC slot allocator (#126).  Lives on its
+     *   own cache line so producer-side CAS contention does not
+     *   touch the prod_tail line that the consumer reads.  Unused in
+     *   SPSC mode (FLIPC2_CREATE_MPSC absent at create time).
      */
-    uint8_t             _reserved[64];
+    volatile uint32_t   prod_reserved;
+    uint8_t             _reserved[60];
 };
 
 /* Compile-time check: header must be exactly 256 bytes */
@@ -252,6 +258,7 @@ typedef struct flipc2_channel {
     volatile uint32_t   *cons_sleeping;
     volatile uint64_t   *cons_total;
     volatile uint32_t   *wakeup_thresh; /* #124 doorbell coalescing      */
+    volatile uint32_t   *prod_reserved; /* #126 MPSC slot allocator      */
 
     /* Cached constants from header (avoid ch->hdr-> on fast path) */
     uint32_t    ring_entries;
@@ -428,6 +435,106 @@ flipc2_produce_flush(flipc2_channel_t ch)
     if (*ch->cons_sleeping) {
         semaphore_signal(ch->sem_port);
         (*ch->wakeups)++;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/*  Fast-path: produce (MPSC, #126)                                    */
+/*                                                                    */
+/*  Two-counter discipline:                                            */
+/*    prod_reserved — bumped atomically per producer to claim a slot   */
+/*    prod_tail     — bumped in-order so the consumer sees a gap-free  */
+/*                    sequence (we wait for our predecessor to publish */
+/*                    before advancing prod_tail to our_idx + 1).      */
+/*  Channel must have been created with FLIPC2_CREATE_MPSC.            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Reserve a slot for the calling producer.  On success *out_idx is
+ * the absolute sequence number assigned to this producer and
+ * *out_desc points to the matching ring entry.
+ *
+ * Caller writes the descriptor fields, then calls
+ * flipc2_produce_commit_mpsc(ch, *out_idx).
+ *
+ * Blocks (semaphore_wait on prod) if the ring is full; spin_count
+ * iterations of poll happen first as in flipc2_produce_wait.
+ */
+static inline struct flipc2_desc *
+flipc2_produce_wait_mpsc(flipc2_channel_t ch, uint32_t spin_count,
+                         uint32_t *out_idx)
+{
+    uint32_t re = ch->ring_entries;
+    uint32_t my_idx;
+    uint32_t i;
+    uint32_t space;
+
+    /* Atomically claim the next slot. */
+    my_idx = __atomic_fetch_add(ch->prod_reserved, 1, __ATOMIC_ACQ_REL);
+    *out_idx = my_idx;
+
+    /* Spin-poll until the ring has room for our reserved index.
+     * Reservation index minus cons_head is the producer-side
+     * "in-flight" count; bound it by ring_entries. */
+    for (i = 0; i < spin_count; i++) {
+        FLIPC2_READ_FENCE();
+        space = re - (my_idx - *ch->cons_head);
+        if ((int32_t)(my_idx - *ch->cons_head) < (int32_t)re && space <= re)
+            return &ch->ring[my_idx & ch->ring_mask];
+        FLIPC2_PAUSE();
+    }
+
+    /* Slow path: producer-sleep on the producer semaphore until the
+     * consumer releases enough slots.  Re-checks every wake so a
+     * spurious signal does not silently advance.
+     *
+     * MPSC subtlety: prod_sleeping is a single bit shared by every
+     * blocked producer; clearing it on wake would silence the
+     * consumer for the remaining waiters.  We signal-chain at exit
+     * so any other blocked producer also wakes.  If none is blocked,
+     * the extra signal accumulates on the semaphore and gets
+     * harmlessly consumed by the next wait. */
+    while ((int32_t)(my_idx - *ch->cons_head) >= (int32_t)re) {
+        *ch->prod_sleeping = 1;
+        FLIPC2_WRITE_FENCE();
+        if ((int32_t)(my_idx - *ch->cons_head) < (int32_t)re)
+            break;
+        semaphore_wait(ch->sem_port_prod);
+    }
+    semaphore_signal(ch->sem_port_prod);
+    return &ch->ring[my_idx & ch->ring_mask];
+}
+
+/*
+ * Publish the slot claimed by flipc2_produce_wait_mpsc.  Waits for
+ * our predecessor to publish so prod_tail advances in order — without
+ * this, the consumer could read a slot before its descriptor was
+ * written.  Spinning is OK because the predecessor is also a
+ * producer doing exactly the same dance; latency stays bounded by
+ * the number of in-flight producers.
+ */
+static inline void
+flipc2_produce_commit_mpsc(flipc2_channel_t ch, uint32_t my_idx)
+{
+    uint32_t pending;
+    uint32_t thresh;
+
+    FLIPC2_WRITE_FENCE();
+    /* Spin until prod_tail == my_idx, then advance. */
+    while (__atomic_load_n(ch->prod_tail, __ATOMIC_ACQUIRE) != my_idx)
+        FLIPC2_PAUSE();
+
+    __atomic_store_n(ch->prod_tail, my_idx + 1, __ATOMIC_RELEASE);
+    (*ch->prod_total)++;
+
+    FLIPC2_WRITE_FENCE();
+    if (*ch->cons_sleeping) {
+        thresh  = *ch->wakeup_thresh;
+        pending = (my_idx + 1) - *ch->cons_head;
+        if (thresh <= 1 || pending >= thresh) {
+            semaphore_signal(ch->sem_port);
+            (*ch->wakeups)++;
+        }
     }
 }
 

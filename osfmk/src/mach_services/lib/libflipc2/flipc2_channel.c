@@ -94,6 +94,7 @@ flipc2_init_header(struct flipc2_channel_header *hdr,
         pp[0] = 0;  /* prod_tail */
         pp[1] = 0;  /* prod_sleeping */
         pp[6] = 1;  /* #124 wakeup_thresh — default = wake on every commit */
+        pp[7] = 0;  /* #126 prod_reserved (MPSC slot allocator)            */
         cp[0] = 0;  /* cons_head */
         cp[1] = 0;  /* cons_sleeping */
     } else {
@@ -105,6 +106,7 @@ flipc2_init_header(struct flipc2_channel_header *hdr,
         hdr->prod_total    = 0;
         hdr->cons_total    = 0;
         hdr->wakeups       = 0;
+        hdr->prod_reserved = 0;  /* #126 MPSC slot allocator */
     }
 }
 
@@ -132,6 +134,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
         ch->prod_total    = (volatile uint64_t *)(pp + 8);
         ch->wakeups       = (volatile uint64_t *)(pp + 16);
         ch->wakeup_thresh = (volatile uint32_t *)(pp + 24);  /* #124 */
+        ch->prod_reserved = (volatile uint32_t *)(pp + 28);  /* #126 */
         ch->cons_head     = (volatile uint32_t *)(cp + 0);
         ch->cons_sleeping = (volatile uint32_t *)(cp + 4);
         ch->cons_total    = (volatile uint64_t *)(cp + 8);
@@ -141,6 +144,7 @@ flipc2_init_handle(struct flipc2_channel *ch,
         ch->prod_total    = &hdr->prod_total;
         ch->wakeups       = &hdr->wakeups;
         ch->wakeup_thresh = &hdr->wakeup_thresh;             /* #124 */
+        ch->prod_reserved = &hdr->prod_reserved;             /* #126 */
         ch->cons_head     = &hdr->cons_head;
         ch->cons_sleeping = &hdr->cons_sleeping;
         ch->cons_total    = &hdr->cons_total;
