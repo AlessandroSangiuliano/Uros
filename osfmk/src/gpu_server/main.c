@@ -62,9 +62,18 @@ static mach_port_t gpu_iopl_port;	/* #201: port-I/O privilege for VGA CRTC */
 kern_return_t
 cap_revoke_notify(mach_port_t notify_port, uint64_t cap_id)
 {
+	unsigned int freed;
+
 	(void)notify_port;
-	printf("gpu_server: cap_revoke_notify cap=%llu (no live state to "
-	       "release in 0.1.0)\n", (unsigned long long)cap_id);
+
+	/* #202: walk the per-cap handle table and tear down every row
+	 * the revoked cap had open.  When bo_alloc / context_create
+	 * become real (post-0.2) the row carries those resources too
+	 * and they get released here. */
+	freed = gpu_core_handle_revoke(cap_id);
+	printf("gpu_server: cap_revoke_notify cap=%llu (%u handle%s "
+	       "released)\n",
+	       (unsigned long long)cap_id, freed, freed == 1 ? "" : "s");
 	return KERN_SUCCESS;
 }
 

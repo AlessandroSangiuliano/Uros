@@ -160,3 +160,20 @@ routine query_stats(
 		gpu_port	: mach_port_t;
 	in	cap		: gpu_token_t;
 	out	stats		: gpu_stats_blob_t);
+
+/* =================================================================
+ * Handle teardown (#202)
+ *
+ * device_close releases a handle previously created by device_open.
+ * Idempotent in the sense that an unknown (cap_id, dev_id) pair
+ * returns KERN_INVALID_ARGUMENT but never panics — the same
+ * (cap_id, dev_id) pair could have been torn down already by
+ * cap_revoke_notify, which fires when cap_server revokes the
+ * issuing cap.  Appended at the end so existing msg ids stay
+ * stable.
+ * ================================================================= */
+
+routine device_close(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	dev_id		: gpu_u32_t);
