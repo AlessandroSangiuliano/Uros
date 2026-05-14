@@ -167,6 +167,9 @@ void bench_flipc2_bufgroup_inter_rpc(const char *label, int data_size, int iters
 void bench_flipc2_isolated_rpc(const char *label, int data_size, int iters);
 void bench_flipc2_isolated_inter_rpc(const char *label, int data_size, int iters);
 
+/* Pollset smoke test (flipc2_bench_pollset.c, #122) */
+void bench_flipc2_pollset(void);
+
 /* Main entry point */
 void bench_flipc2_run(mach_port_t clock_port);
 

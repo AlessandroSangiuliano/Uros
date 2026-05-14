@@ -39,6 +39,7 @@ set(LIB_SOURCES
   flipc2_channel.c
   flipc2_bufgroup.c
   flipc2_endpoint.c
+  flipc2_pollset.c
   ${EP_USER_C}
   ${EP_SERVER_C}
 )
