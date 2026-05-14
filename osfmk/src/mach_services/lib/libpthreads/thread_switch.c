@@ -31,6 +31,7 @@
 
 #include <mach.h>
 #include <mach/mach_syscalls.h>
+#include <mach/thread_switch.h>
 
 kern_return_t
 thread_switch(
@@ -39,4 +40,27 @@ thread_switch(
 	mach_msg_timeout_t	option_time)
 {
 	return syscall_thread_switch(thread, option, option_time);
+}
+
+/*
+ * sched_yield() / pthread_yield() — POSIX yield (#155).
+ *
+ * Both are wrappers over thread_switch with no target thread and
+ * SWITCH_OPTION_NONE: relinquish the CPU and let the scheduler pick
+ * whoever is next.  POSIX says sched_yield returns 0 on success, -1
+ * on failure (with errno set); we never fail because the underlying
+ * trap can't either.
+ */
+int
+sched_yield(void)
+{
+	(void)syscall_thread_switch(MACH_PORT_NULL,
+				    SWITCH_OPTION_NONE, 0);
+	return 0;
+}
+
+int
+pthread_yield(void)
+{
+	return sched_yield();
 }

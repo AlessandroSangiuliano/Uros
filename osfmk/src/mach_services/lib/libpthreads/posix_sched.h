@@ -44,4 +44,10 @@ struct sched_param
 #define SCHED_FIFO       POLICY_FIFO
 #define SCHED_RR         POLICY_RR
 
+/*
+ * sched_yield() — POSIX cooperative yield (#155).  Always returns 0
+ * on Uros (the underlying thread_switch trap can't fail).
+ */
+extern int sched_yield(void);
+
 #endif /* _POSIX_SCHED_H */
