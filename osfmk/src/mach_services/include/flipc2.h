@@ -1163,6 +1163,44 @@ flipc2_channel_set_semaphores(
     mach_port_t         sem,
     mach_port_t         sem_prod);
 
+/* ------------------------------------------------------------------ */
+/*  Pollset API — multi-channel wait (#122)                            */
+/* ------------------------------------------------------------------ */
+
+typedef struct flipc2_pollset *flipc2_pollset_t;
+
+typedef struct flipc2_event {
+    flipc2_channel_t channel;
+} flipc2_event_t;
+
+/*
+ * Create a new pollset.  Owns a shared Mach semaphore; channels
+ * added with flipc2_pollset_add() will have their producer wakeup
+ * redirected here so flipc2_poll() waits on a single semaphore
+ * across N channels.
+ *
+ * Inter-task constraint: add channels BEFORE the remote peer
+ * attaches.  See flipc2_pollset.c header for details.
+ */
+flipc2_return_t flipc2_pollset_create(flipc2_pollset_t *out);
+void            flipc2_pollset_destroy(flipc2_pollset_t ps);
+
+flipc2_return_t flipc2_pollset_add(flipc2_pollset_t ps,
+                                   flipc2_channel_t ch);
+flipc2_return_t flipc2_pollset_remove(flipc2_pollset_t ps,
+                                      flipc2_channel_t ch);
+
+/*
+ * Wait for descriptors on any channel in the pollset.
+ *   events / max_events — caller-supplied output array
+ *   timeout_ms          — 0 non-blocking, (uint32_t)-1 infinite
+ * Returns the number of events filled (>= 0), or a negative
+ * flipc2_return_t code on error.
+ */
+int flipc2_poll(flipc2_pollset_t ps,
+                flipc2_event_t *events, int max_events,
+                uint32_t timeout_ms);
+
 /*
  * #124 — set the doorbell coalescing threshold for this channel.
  * Producer signals the consumer only once at least `thresh` descriptors

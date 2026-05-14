@@ -88,5 +88,8 @@ bench_flipc2_run(mach_port_t clock_port)
     bench_flipc2_bufgroup_inter_rpc("256B RPC (bufgroup inter)", 256,
                                      FLIPC2_BENCH_ITERS);
 
+    /* --- Pollset smoke test (#122) --- */
+    bench_flipc2_pollset();
+
     printf("\n");
 }
