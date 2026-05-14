@@ -409,5 +409,10 @@ int       pthread_spin_lock(pthread_spinlock_t *lock);
 int       pthread_spin_trylock(pthread_spinlock_t *lock);
 int       pthread_spin_unlock(pthread_spinlock_t *lock);
 
+/* Cooperative yield (#155).  Non-POSIX alias for sched_yield(),
+ * provided for portability with code written against GNU/Solaris
+ * pthreads.  Always returns 0. */
+int       pthread_yield(void);
+
 
 #endif /* _POSIX_PTHREAD_H */

@@ -975,6 +975,14 @@ main(int argc, char **argv)
 	test_thread_name_kernel();
 	test_signals();
 	test_thread_pool_bench();
+	{
+		extern int sched_yield(void);
+		extern int pthread_yield(void);
+		if (sched_yield() == 0 && pthread_yield() == 0)
+			test_ok("yield (sched_yield/pthread_yield)");
+		else
+			test_fail("yield", "non-zero return");
+	}
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
