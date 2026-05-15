@@ -92,6 +92,8 @@ PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
 CAP_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_server"
 CAP_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_test"
 GPUSTAT="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/gpustat"
+EXEC_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/exec_server"
+HELLO_EXEC="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_exec"
 
 if [ ! -f "$NAME_SERVER" ]; then
     echo "ERRORE: name_server non trovato: $NAME_SERVER"
@@ -178,6 +180,10 @@ CAP_TEST_CONF_LINE=""
 if [ -f "$CAP_TEST" ]; then
     CAP_TEST_CONF_LINE="cap_test cap_test"
 fi
+EXEC_SERVER_CONF_LINE=""
+if [ -f "$EXEC_SERVER" ]; then
+    EXEC_SERVER_CONF_LINE="exec_server exec_server"
+fi
 # gpustat (if built) runs after gpu_server / cap_server are up so it
 # can netname_look_up "gpu" and cap_request DEV_ADMIN.  It is a
 # single-shot probe (#203): one printf with the counters, then exits.
@@ -206,8 +212,9 @@ hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
 hello_server hello_server
-ipc_bench ipc_bench${BENCH_ARGS}
 ext_server ext_server
+${EXEC_SERVER_CONF_LINE}
+ipc_bench ipc_bench${BENCH_ARGS}
 pthread_test pthread_test
 ${CAP_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
@@ -280,6 +287,10 @@ GPUSTAT_WRITE_LINE=""
 if [ -f "$GPUSTAT" ]; then
     GPUSTAT_WRITE_LINE="write $GPUSTAT gpustat"
 fi
+EXEC_SERVER_WRITE_LINE=""
+if [ -f "$EXEC_SERVER" ]; then
+    EXEC_SERVER_WRITE_LINE="write $EXEC_SERVER exec_server"
+fi
 echo "[4/6] Copia file nel filesystem ext2..."
 # ipc_bench's disk_bench tests open hello.txt / bench.dat at the root
 # of the default ext2 mount (ext_server → ahci0a / hd0a), so seed both
@@ -290,9 +301,18 @@ BENCH_DAT=$(mktemp)
 printf 'Hello from /mach_servers/ root\n' > "$HELLO_TXT"
 dd if=/dev/urandom of="$BENCH_DAT" bs=1K count=1 status=none
 trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF" "$HELLO_TXT" "$BENCH_DAT"' EXIT
+
+# hello_exec is optional (#228 v0.1.0): copy to / so exec_server can
+# load "/hello_exec" via libvfs.
+HELLO_EXEC_WRITE_LINE=""
+if [ -f "$HELLO_EXEC" ]; then
+    HELLO_EXEC_WRITE_LINE="write $HELLO_EXEC hello_exec"
+fi
+
 debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 write $HELLO_TXT hello.txt
 write $BENCH_DAT bench.dat
+${HELLO_EXEC_WRITE_LINE}
 mkdir mach_servers
 cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf
@@ -307,6 +327,7 @@ write $PTHREAD_TEST pthread_test
 ${CAP_SERVER_WRITE_LINE}
 ${CAP_TEST_WRITE_LINE}
 ${GPUSTAT_WRITE_LINE}
+${EXEC_SERVER_WRITE_LINE}
 mkdir modules
 cd modules
 mkdir block
