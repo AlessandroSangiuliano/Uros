@@ -775,7 +775,8 @@ ext_server_demux(mach_msg_header_t *in, mach_msg_header_t *out)
  */
 static int
 mount_partition(struct mount_context *mnt, const char *driver_name,
-		const char *service_name, int blocking)
+		const char *service_name, const char *mount_path,
+		int blocking)
 {
 	kern_return_t kr;
 	struct blk_dev *bd;
@@ -1000,6 +1001,21 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 	else
 		printf("ext2: registered as \"%s\"\n", service_name);
 
+	/* #220: also register the mount path so libvfs can route
+	 * fs_open(path) to this partition without per-client knowledge
+	 * of which ext_server instance owns which subtree. */
+	if (mount_path) {
+		kr = netname_check_in_mount(name_server_port,
+					    (char *)mount_path,
+					    MACH_PORT_NULL, mnt->port);
+		if (kr != KERN_SUCCESS)
+			printf("ext2: netname_check_in_mount(%s) "
+			       "failed (kr=%d)\n", mount_path, kr);
+		else
+			printf("ext2: mount registered at \"%s\"\n",
+			       mount_path);
+	}
+
 	mnt->active = 1;
 	return 0;
 }
@@ -1045,11 +1061,12 @@ main(int argc, char **argv)
 		static const struct {
 			const char *driver;
 			const char *service;
+			const char *mount;	/* path prefix for libvfs (#220) */
 		} part_table[] = {
-			{ "ahci0a", "ext_server" },
-			{ "ahci0b", "ext_server:1" },
-			{ "ahci1a", "ext_server:2" },
-			{ "ahci1b", "ext_server:3" },
+			{ "ahci0a", "ext_server",   "/"           },
+			{ "ahci0b", "ext_server:1", "/mnt/disk1"  },
+			{ "ahci1a", "ext_server:2", "/mnt/disk2"  },
+			{ "ahci1b", "ext_server:3", "/mnt/disk3"  },
 		};
 		int i;
 
@@ -1057,6 +1074,7 @@ main(int argc, char **argv)
 			int rc = mount_partition(&mounts[i],
 				part_table[i].driver,
 				part_table[i].service,
+				part_table[i].mount,
 				/*blocking=*/ (i == 0));
 			if (rc < 0) {
 				if (i == 0)

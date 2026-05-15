@@ -11,23 +11,8 @@
 #include <mach/mach_types.h>
 #include <mach/message.h>
 #include <mach/mig_errors.h>
+#include <mach/rpc.h>
 #include <mach/port.h>
-
-#ifdef AUTOTEST
-#ifndef FUNCTION_PTR_T
-#define FUNCTION_PTR_T
-typedef void (*function_ptr_t)(mach_port_t, char *, mach_msg_type_number_t);
-typedef struct {
-        char            *name;
-        function_ptr_t  function;
-} function_table_entry;
-typedef function_table_entry 	*function_table_t;
-#endif /* FUNCTION_PTR_T */
-#endif /* AUTOTEST */
-
-#ifndef	netname_MSG_COUNT
-#define	netname_MSG_COUNT	8
-#endif	/* netname_MSG_COUNT */
 
 #include <mach/std_types.h>
 #include <servers/netname_defs.h>
@@ -196,16 +181,71 @@ kern_return_t netname_notify
 );
 #endif	/* defined(LINTLIBRARY) */
 
-#ifndef subsystem_to_name_map_netname
-#define subsystem_to_name_map_netname \
-    { "netname_check_in", 1040 },\
-    { "netname_look_up", 1041 },\
-    { "netname_check_out", 1042 },\
-    { "netname_version", 1043 },\
-    { "netname_register_send_right", 1044 },\
-    { "netname_debug_on", 1045 },\
-    { "netname_debug_off", 1046 },\
-    { "netname_notify", 1047 }
-#endif
+/* Routine netname_check_in_mount */
+#ifdef	mig_external
+mig_external
+#else
+extern
+#endif	/* mig_external */
+kern_return_t netname_check_in_mount
+#if	defined(LINTLIBRARY)
+    (server_port, prefix, signature, port_id)
+	mach_port_t server_port;
+	netname_name_t prefix;
+	mach_port_t signature;
+	mach_port_t port_id;
+{ return netname_check_in_mount(server_port, prefix, signature, port_id); }
+#else
+(
+	mach_port_t server_port,
+	netname_name_t prefix,
+	mach_port_t signature,
+	mach_port_t port_id
+);
+#endif	/* defined(LINTLIBRARY) */
+
+/* Routine netname_check_out_mount */
+#ifdef	mig_external
+mig_external
+#else
+extern
+#endif	/* mig_external */
+kern_return_t netname_check_out_mount
+#if	defined(LINTLIBRARY)
+    (server_port, prefix, signature)
+	mach_port_t server_port;
+	netname_name_t prefix;
+	mach_port_t signature;
+{ return netname_check_out_mount(server_port, prefix, signature); }
+#else
+(
+	mach_port_t server_port,
+	netname_name_t prefix,
+	mach_port_t signature
+);
+#endif	/* defined(LINTLIBRARY) */
+
+/* Routine netname_look_up_mount */
+#ifdef	mig_external
+mig_external
+#else
+extern
+#endif	/* mig_external */
+kern_return_t netname_look_up_mount
+#if	defined(LINTLIBRARY)
+    (server_port, path, port_id, matched)
+	mach_port_t server_port;
+	netname_path_t path;
+	mach_port_t *port_id;
+	netname_name_t matched;
+{ return netname_look_up_mount(server_port, path, port_id, matched); }
+#else
+(
+	mach_port_t server_port,
+	netname_path_t path,
+	mach_port_t *port_id,
+	netname_name_t matched
+);
+#endif	/* defined(LINTLIBRARY) */
 
 #endif	 /* _netname_user_ */
