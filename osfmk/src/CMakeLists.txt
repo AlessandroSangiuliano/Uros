@@ -44,6 +44,16 @@ if(OSFMK_BUILD_HELLO_SERVER)
   add_subdirectory(hello_server)
 endif()
 
+# Build exec_server (userspace ELF loader / process spawner, #228)
+if(OSFMK_BUILD_EXEC_SERVER)
+  add_subdirectory(exec_server)
+endif()
+
+# Build hello_exec test binary (#228 v0.1.0 acceptance)
+if(OSFMK_BUILD_HELLO_EXEC)
+  add_subdirectory(hello_exec)
+endif()
+
 # Build IPC performance benchmark
 if(OSFMK_BUILD_IPC_BENCH)
   add_subdirectory(ipc_bench)

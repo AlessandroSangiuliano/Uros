@@ -31,6 +31,33 @@ add_custom_command(
 )
 
 # ===========================================================================
+# MIG-generated exec_server user stubs (#228 v0.1.0 smoke test)
+# ===========================================================================
+
+set(EXEC_DEFS ${CMAKE_SOURCE_DIR}/src/exec_server/exec.defs)
+set(EXEC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/exec_user.c)
+set(EXEC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/exec.h)
+
+add_custom_command(
+  OUTPUT ${EXEC_USER_C} ${EXEC_USER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_BINARY_DIR}/generated/include
+    -I${CMAKE_SOURCE_DIR}/export/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/exec_server
+    -header ${EXEC_USER_H}
+    -sheader /dev/null
+    -user ${EXEC_USER_C}
+    -server /dev/null
+    ${EXEC_DEFS}
+  DEPENDS migcom ${EXEC_DEFS}
+  COMMENT "MIG: exec.defs (user stubs for ipc_bench smoke test)"
+  VERBATIM
+)
+
+# ===========================================================================
 # Source files
 # ===========================================================================
 
@@ -49,8 +76,10 @@ set(IPC_BENCH_SOURCES
   flipc2_bench_pollset.c
   flipc2_bench_mpsc.c
   libvfs_smoke.c
+  exec_smoke.c
   nostdlib_stubs.c
   ${EXT2_USER_C}
+  ${EXEC_USER_C}
 )
 
 # ===========================================================================
@@ -98,6 +127,8 @@ target_include_directories(ipc_bench_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
   # libvfs (libvfs.h, vfs_types.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
+  # exec_server (exec_types.h imported by MIG-generated exec.h)
+  ${CMAKE_SOURCE_DIR}/src/exec_server
 )
 
 # Link against Mach userspace libraries.

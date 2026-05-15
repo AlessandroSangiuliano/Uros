@@ -60,6 +60,8 @@ HELLO_SERVER="$SBIN/hello_server"
 IPC_BENCH="$SBIN/ipc_bench"
 EXT2_SERVER="$SBIN/ext_server"
 PTHREAD_TEST="$SBIN/pthread_test"
+EXEC_SERVER="$SBIN/exec_server"
+HELLO_EXEC="$SBIN/hello_exec"
 
 HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
 AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
@@ -95,6 +97,8 @@ CAP_SERVER_CONF_LINE=""
 [ -f "$CAP_SERVER" ] && CAP_SERVER_CONF_LINE="cap_server cap_server"
 CAP_TEST_CONF_LINE=""
 [ -f "$CAP_TEST" ] && CAP_TEST_CONF_LINE="cap_test cap_test"
+EXEC_SERVER_CONF_LINE=""
+[ -f "$EXEC_SERVER" ] && EXEC_SERVER_CONF_LINE="exec_server exec_server"
 GPUSTAT_CONF_LINE=""
 [ -f "$GPUSTAT" ] && GPUSTAT_CONF_LINE="gpustat gpustat"
 
@@ -112,8 +116,9 @@ hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
 hello_server hello_server
-ipc_bench ipc_bench${BENCH_ARGS}
 ext_server ext_server
+${EXEC_SERVER_CONF_LINE}
+ipc_bench ipc_bench${BENCH_ARGS}
 pthread_test pthread_test
 ${CAP_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
@@ -130,6 +135,7 @@ ARGS+=("hello_server:$HELLO_SERVER")
 ARGS+=("ipc_bench:$IPC_BENCH")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
+[ -f "$EXEC_SERVER" ] && ARGS+=("exec_server:$EXEC_SERVER")
 [ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
 [ -f "$GPUSTAT" ] && ARGS+=("gpustat:$GPUSTAT")
 ARGS+=("modules/hal/pci_scan.so:$HAL_PCI_SCAN_MODULE")

@@ -1838,6 +1838,12 @@ main(int argc, char **argv)
 	bench_libvfs_smoke();
     }
 
+    /* exec_server smoke test (#228 v0.1.0) — same FLIPC gate. */
+    if (suites & SUITE_FLIPC2) {
+	extern void bench_exec_smoke(void);
+	bench_exec_smoke();
+    }
+
     printf("=== Benchmark complete ===\n");
 
     /*

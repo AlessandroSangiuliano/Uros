@@ -25,6 +25,8 @@ option(OSFMK_BUILD_CAP_TEST "Build capability negative-test binary" OFF)
 option(OSFMK_BUILD_GPUSTAT "Build gpustat userspace probe for gpu_query_stats (#203)" OFF)
 option(OSFMK_BUILD_GPU_SERVER "Build gpu_server (userspace GPU/display server, #194)" OFF)
 option(OSFMK_BUILD_CHAR_SERVER "Build char_server (userspace character device server, #205)" OFF)
+option(OSFMK_BUILD_EXEC_SERVER "Build exec_server (userspace ELF loader / process spawner, #228)" OFF)
+option(OSFMK_BUILD_HELLO_EXEC "Build hello_exec test binary (#228 v0.1.0)" OFF)
 
 # Issue #211: kernel symbol table for DDB.  Default ON for Debug / unset
 # build types (developer build), OFF for Release where DDB lookup-by-name

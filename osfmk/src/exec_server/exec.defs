@@ -1,0 +1,73 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ */
+
+/*
+ * exec.defs — MIG interface for exec_server (#228 v0.1.0).
+ *
+ * Subsystem 3100.  Single routine in v0.1.0: synchronously load an
+ * ELF binary from a libvfs-resolvable path and create a new task +
+ * initial thread to run it.
+ *
+ * Naming convention (uses the migcom serverstripprefix extension
+ * introduced in #227):
+ *   - User stub (libposix / ipc_bench):  exec_load
+ *   - Server impl (exec_server):         exec_S_load
+ */
+
+subsystem
+#if	KERNEL_SERVER
+	  KernelServer
+#endif	/* KERNEL_SERVER */
+		       exec 3100;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+serverprefix		exec_S_;
+serverstripprefix	exec_;
+
+import "exec_types.h";
+
+type exec_path_t = c_string[*:1024];
+type exec_blob_t = pointer_t;
+
+/*
+ * exec_load — load a static ELF binary into a fresh child task.
+ *
+ *   client_task — parent task.  v0.1.0: the new task is created as a
+ *                 clone of this task's IPC space (caps inherited
+ *                 raw); v0.3.0 will derive caps via cap_server.
+ *   path        — absolute path to the binary, resolved through
+ *                 libvfs by exec_server.
+ *   argv_blob   — serialised argv (see exec_blob_t in exec_types.h).
+ *   envp_blob   — serialised envp.
+ *
+ *   new_task    — task port of the spawned task (with send right).
+ *   new_thread  — initial thread port (with send right).  Already
+ *                 resumed by the time this RPC returns.
+ *   result_code — EXEC_OK on success, EXEC_ERR_* otherwise.
+ */
+routine exec_load(
+		exec_port	: mach_port_t;
+	in	client_task	: task_t;
+	in	path		: exec_path_t;
+	in	argv_blob	: exec_blob_t;
+	in	envp_blob	: exec_blob_t;
+	out	new_task	: task_t;
+	out	new_thread	: thread_t;
+	out	result_code	: int);
