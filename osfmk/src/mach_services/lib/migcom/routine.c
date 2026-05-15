@@ -1920,7 +1920,21 @@ rtCheckRoutine(register routine_t *rt)
 
     rt->rtErrorName = ErrorProc;
     rt->rtOneWay = (rt->rtKind == rkSimpleRoutine);
-    rt->rtServerName = strconcat(ServerPrefix, rt->rtName);
+    {
+	string_t base = rt->rtName;
+	size_t slen;
+
+	/* If serverstripprefix is set and the routine name starts with
+	 * it, strip that leading substring before applying ServerPrefix.
+	 * This lets a .defs file declare e.g. routine fs_open and have
+	 * the server impl symbol come out as vfs_open instead of
+	 * vfs_S_fs_open.  User-side name is never affected. */
+	if (ServerStripPrefix != strNULL &&
+	    (slen = strlen(ServerStripPrefix)) > 0 &&
+	    strncmp(base, ServerStripPrefix, slen) == 0)
+	    base = (string_t)(base + slen);
+	rt->rtServerName = strconcat(ServerPrefix, base);
+    }
     rt->rtUserName = strconcat(UserPrefix, rt->rtName);
 
     /* Add implicit arguments. */

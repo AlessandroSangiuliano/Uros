@@ -1831,6 +1831,13 @@ main(int argc, char **argv)
     if (suites & SUITE_FLIPC2)
 	bench_flipc2_run(clock_port);
 
+    /* libvfs smoke test (#220 v0.1) — hangs off the FLIPC suite gate
+     * for now; pure correctness, not a perf bench. */
+    if (suites & SUITE_FLIPC2) {
+	extern void bench_libvfs_smoke(void);
+	bench_libvfs_smoke();
+    }
+
     printf("=== Benchmark complete ===\n");
 
     /*

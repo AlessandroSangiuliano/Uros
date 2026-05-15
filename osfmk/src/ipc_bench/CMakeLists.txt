@@ -48,6 +48,7 @@ set(IPC_BENCH_SOURCES
   flipc2_bench_bufgroup.c
   flipc2_bench_pollset.c
   flipc2_bench_mpsc.c
+  libvfs_smoke.c
   nostdlib_stubs.c
   ${EXT2_USER_C}
 )
@@ -95,6 +96,8 @@ target_include_directories(ipc_bench_server PRIVATE
   ${CMAKE_SOURCE_DIR}/include
   # libgpu_console (mirror printf to gpu_server)
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  # libvfs (libvfs.h, vfs_types.h)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
 )
 
 # Link against Mach userspace libraries.
@@ -105,6 +108,7 @@ target_link_libraries(ipc_bench_server PRIVATE
   libmach
   libnetname
   libflipc2
+  libvfs
   libgpu_console
   libcap
   -Wl,--end-group

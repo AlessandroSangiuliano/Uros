@@ -62,6 +62,13 @@ serverprefix do_;
 
 type netname_name_t	= c_string[*:128];
 
+/*
+ * netname_path_t — full filesystem path (mount lookup input).
+ * Sized for a typical PATH_MAX; the mount registry entries
+ * (prefixes) fit in netname_name_t.
+ */
+type netname_path_t	= c_string[*:1024];
+
 import <servers/netname_defs.h>;
 
 routine netname_check_in(
@@ -107,4 +114,36 @@ routine netname_notify(
 	server_port	: mach_port_t;
 	port_name	: netname_name_t;
 	notify_port	: mach_port_make_send_once_t);
+
+/*
+ * Mount registry (#220 sub-step C).  A separate keyspace from the
+ * service-name table above: mount keys are filesystem path prefixes
+ * (absolute, with leading '/') and lookup is longest-segment-match
+ * rather than exact.  Used by libvfs to route fs_open() to the right
+ * fs_server without per-client hardcoded knowledge of who owns what.
+ */
+
+routine netname_check_in_mount(
+	server_port	: mach_port_t;
+	prefix		: netname_name_t;
+	signature	: mach_port_copy_send_t;
+	port_id		: mach_port_make_send_t);
+
+routine netname_check_out_mount(
+	server_port	: mach_port_t;
+	prefix		: netname_name_t;
+	signature	: mach_port_copy_send_t);
+
+/*
+ * Longest-prefix mount lookup.
+ *   path    — absolute filesystem path (e.g. "/mnt/disk1/etc/passwd")
+ *   port_id — send right of the matching mount's owner
+ *   matched — the prefix that matched (caller strips it to get the
+ *             path relative to the mount, if needed)
+ */
+routine netname_look_up_mount(
+	server_port	: mach_port_t;
+	path		: netname_path_t;
+    out	port_id		: mach_port_move_send_t;
+    out	matched		: netname_name_t);
 

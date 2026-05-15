@@ -132,6 +132,12 @@ string_t WaitTime = strNULL;
 string_t ErrorProc = "MsgError";
 string_t ServerPrefix = "";
 string_t UserPrefix = "";
+string_t ServerStripPrefix = "";	/* stripped from routine name before
+					 * applying ServerPrefix on the server
+					 * side; user side is unaffected.
+					 * Lets vfs.defs name routines fs_open
+					 * (user) and impls vfs_open (server)
+					 * with no _S_ middle. */
 string_t ServerDemux = strNULL;
 string_t ServerImpl = strNULL;
 string_t ServerSubsys = strNULL;

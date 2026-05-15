@@ -104,6 +104,7 @@ extern void yyerror(char *);
 %token	syNoWaitTime
 %token	syErrorProc
 %token	syServerPrefix
+%token	syServerStripPrefix
 %token	syUserPrefix
 %token	syServerDemux
 %token	syRCSId
@@ -227,6 +228,7 @@ Statement		:	Subsystem sySemi
 			|	MsgOption sySemi
 			|	Error sySemi
 			|	ServerPrefix sySemi
+			|	ServerStripPrefix sySemi
 			|	UserPrefix sySemi
 			|	ServerDemux sySemi
 			|	TypeDecl sySemi
@@ -347,6 +349,14 @@ ServerPrefix		:	syServerPrefix syIdentifier
     ServerPrefix = $2;
     if (BeVerbose)
 	printf("ServerPrefix %s\n\n", ServerPrefix);
+}
+			;
+
+ServerStripPrefix	:	syServerStripPrefix syIdentifier
+{
+    ServerStripPrefix = $2;
+    if (BeVerbose)
+	printf("ServerStripPrefix %s\n\n", ServerStripPrefix);
 }
 			;
 

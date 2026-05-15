@@ -32,6 +32,37 @@ add_custom_command(
 )
 
 # ===========================================================================
+# MIG-generated vfs server stubs (subsystem 3000, #220 sub-step B)
+# ===========================================================================
+
+set(VFS_DEFS ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs/vfs.defs)
+set(VFS_TYPES_H ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs/vfs_types.h)
+
+set(VFS_USER_C ${CMAKE_CURRENT_BINARY_DIR}/vfs_user.c)
+set(VFS_USER_H ${CMAKE_CURRENT_BINARY_DIR}/vfs.h)
+set(VFS_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/vfs_server.c)
+set(VFS_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/vfs_server.h)
+
+add_custom_command(
+  OUTPUT ${VFS_USER_C} ${VFS_USER_H} ${VFS_SERVER_C} ${VFS_SERVER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_BINARY_DIR}/generated/include
+    -I${CMAKE_SOURCE_DIR}/export/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
+    -header ${VFS_USER_H}
+    -sheader ${VFS_SERVER_H}
+    -user ${VFS_USER_C}
+    -server ${VFS_SERVER_C}
+    ${VFS_DEFS}
+  DEPENDS migcom ${VFS_DEFS} ${VFS_TYPES_H}
+  COMMENT "MIG: vfs.defs (server stubs for ext_server, #220)"
+  VERBATIM
+)
+
+# ===========================================================================
 # MIG-generated ahci_batch user stubs (batch device writes)
 # ===========================================================================
 
@@ -93,6 +124,7 @@ set(EXT2_SERVER_SOURCES
   device_read_overwrite.c
   nostdlib_stubs.c
   ${EXT2_SERVER_C}
+  ${VFS_SERVER_C}
   ${AB_USER_C}
   ${DM_USER_C}
 )
@@ -128,6 +160,8 @@ target_include_directories(ext_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/ahci_driver
   # ext2fs_types.h (imported by MIG-generated code)
   ${CMAKE_CURRENT_SOURCE_DIR}
+  # vfs_types.h (imported by MIG-generated vfs_server.c)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h)
