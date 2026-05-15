@@ -29,6 +29,7 @@
  */
 
 #include <stdint.h>
+#include <stddef.h>     /* size_t */
 
 /*
  * MIG ctype mappings — vfs.defs declares vfs_u32_t/vfs_u64_t to keep the
@@ -53,6 +54,9 @@ typedef char            vfs_path_t[1024];
 #include <mach/vm_types.h>
 typedef pointer_t       vfs_buf_t;
 typedef pointer_t       vfs_dirent_array_t;
+
+/* The libvfs public C API lives at the bottom of this file, after the
+ * wire structures (vfs_stat_t / vfs_dirent_t) it references. */
 
 /* ------------------------------------------------------------------ */
 /*  Library version (BSD-style major.minor.patch)                      */
@@ -172,5 +176,14 @@ typedef struct vfs_dirent {
     uint8_t     _pad[6];
     char        d_name[VFS_NAME_MAX + 1];
 } vfs_dirent_t;
+
+/*
+ * The libvfs public client API (vfs_open / vfs_read / ...) lives in a
+ * separate libvfs.h header.  vfs_types.h is the wire / kernel-side
+ * contract — it's safe to include from both client tasks and from
+ * fs_servers, and intentionally does NOT pull in the client wrappers
+ * which would collide with the MIG-generated server impl symbols
+ * (vfs_open vs vfs_open client wrapper).
+ */
 
 #endif /* _VFS_TYPES_H_ */
