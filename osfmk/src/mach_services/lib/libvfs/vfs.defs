@@ -1,0 +1,201 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ */
+
+/*
+ * vfs.defs — common VFS interface for every Uros fs_server (#220 v0.1).
+ *
+ * Subsystem 3000.  Every filesystem server (ext_server, fat_server,
+ * ufs_server, ...) implements this same MIG interface so libvfs can
+ * dispatch without knowing the on-disk format.
+ *
+ * Naming convention:
+ *   - User stubs (libvfs side):   fs_open, fs_read, ...
+ *   - Server impl (fs_server):    vfs_S_open, vfs_S_read, ...
+ *
+ * Routine ordering is part of the wire ABI: new routines may only be
+ * appended at the end, never inserted in the middle, so msg_id stays
+ * stable across libvfs versions.
+ */
+
+subsystem
+#if	KERNEL_SERVER
+	  KernelServer
+#endif	/* KERNEL_SERVER */
+		       vfs 3000;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+serverprefix	vfs_S_;
+
+import "vfs_types.h";
+
+/*
+ * Wire types.
+ *   vfs_u32_t / vfs_u64_t — scalar widths (matching uint32_t/uint64_t in C)
+ *   vfs_path_t   — NUL-terminated absolute path, up to VFS_PATH_MAX bytes
+ *   vfs_buf_t    — out-of-line byte buffer (read/write payload)
+ *   vfs_stat_t   — fixed 80-byte struct from vfs_types.h, sent inline as
+ *                  20 × unsigned32 words
+ *   vfs_dirent_array_t — out-of-line byte buffer holding N × vfs_dirent_t
+ */
+type vfs_u32_t           = unsigned32   ctype: vfs_u32_t;
+type vfs_u64_t           = unsigned64   ctype: vfs_u64_t;
+type vfs_path_t          = c_string[*:1024];
+type vfs_buf_t           = pointer_t;
+type vfs_stat_t          = struct[20] of unsigned32;     /* 80 bytes; see vfs_types.h */
+type vfs_dirent_array_t  = pointer_t;
+
+/* ------------------------------------------------------------------ */
+/*  File operations                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Open a file by absolute path.
+ *   flags  — bitmask of VFS_O_* (vfs_types.h)
+ *   mode   — POSIX mode bits, used only when VFS_O_CREAT is set
+ *   handle — opaque cookie; pass to fs_read/write/close/fstat
+ *   type   — VFS_FT_* of the opened object
+ */
+routine fs_open(
+		fs_port		: mach_port_t;
+	in	path		: vfs_path_t;
+	in	flags		: int;
+	in	mode		: int;
+	out	handle		: vfs_u64_t;
+	out	type		: vfs_u32_t
+	);
+
+/*
+ * Close an open handle.  The fs_server frees its per-open state.
+ */
+routine fs_close(
+		fs_port		: mach_port_t;
+	in	handle		: vfs_u64_t
+	);
+
+/*
+ * Read up to count bytes starting at the given offset.  Data returned
+ * out-of-line.  data_count < count signals short read (EOF or partial).
+ */
+routine fs_read(
+		fs_port		: mach_port_t;
+	in	handle		: vfs_u64_t;
+	in	offset		: vfs_u64_t;
+	in	count		: vfs_u32_t;
+	out	data		: vfs_buf_t
+	);
+
+/*
+ * Write data at the given offset.  Returns the number of bytes the
+ * server actually accepted; partial writes are legal.
+ */
+routine fs_write(
+		fs_port		: mach_port_t;
+	in	handle		: vfs_u64_t;
+	in	offset		: vfs_u64_t;
+	in	data		: vfs_buf_t;
+	out	written		: vfs_u32_t
+	);
+
+/*
+ * Truncate an open file to the given length.  Extends with zeroes if
+ * length > current size.
+ */
+routine fs_truncate(
+		fs_port		: mach_port_t;
+	in	handle		: vfs_u64_t;
+	in	length		: vfs_u64_t
+	);
+
+/*
+ * Stat by path: traverse name lookup, fill vfs_stat_t.  Symlinks are
+ * followed unless VFS_O_NOFOLLOW is implied by the caller (handled in
+ * libvfs; this RPC always follows for v0.1).
+ */
+routine fs_stat(
+		fs_port		: mach_port_t;
+	in	path		: vfs_path_t;
+	out	st		: vfs_stat_t
+	);
+
+/*
+ * Stat by open handle.  Avoids re-traversing the path on hot fds.
+ */
+routine fs_fstat(
+		fs_port		: mach_port_t;
+	in	handle		: vfs_u64_t;
+	out	st		: vfs_stat_t
+	);
+
+/*
+ * Read a batch of directory entries starting at cookie (pass 0 to
+ * begin).  Returns up to VFS_DIRENT_MAX entries out-of-line and the
+ * cookie to resume from.  next_cookie == 0 signals end of stream.
+ */
+routine fs_readdir(
+		fs_port		: mach_port_t;
+	in	dir_handle	: vfs_u64_t;
+	in	cookie		: vfs_u64_t;
+	out	entries		: vfs_dirent_array_t;
+	out	next_cookie	: vfs_u64_t
+	);
+
+/* ------------------------------------------------------------------ */
+/*  Namespace operations                                                */
+/* ------------------------------------------------------------------ */
+
+routine fs_unlink(
+		fs_port		: mach_port_t;
+	in	path		: vfs_path_t
+	);
+
+routine fs_mkdir(
+		fs_port		: mach_port_t;
+	in	path		: vfs_path_t;
+	in	mode		: int
+	);
+
+routine fs_rmdir(
+		fs_port		: mach_port_t;
+	in	path		: vfs_path_t
+	);
+
+/*
+ * Rename within the same fs_server.  Cross-filesystem rename is
+ * synthesized by libvfs (copy + unlink) and never reaches this RPC.
+ * Server should return VFS_ERR_XDEV if old and new live on different
+ * mount points it owns, just in case.
+ */
+routine fs_rename(
+		fs_port		: mach_port_t;
+	in	old_path	: vfs_path_t;
+	in	new_path	: vfs_path_t
+	);
+
+/* ------------------------------------------------------------------ */
+/*  Maintenance                                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Flush all dirty cached state to the underlying device.  No-op if the
+ * fs_server is read-only.
+ */
+routine fs_sync(
+		fs_port		: mach_port_t
+	);
