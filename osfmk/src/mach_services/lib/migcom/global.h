@@ -118,6 +118,7 @@ extern string_t WaitTime;
 extern string_t ErrorProc;
 extern string_t ServerPrefix;
 extern string_t UserPrefix;
+extern string_t ServerStripPrefix;
 extern string_t ServerDemux;
 extern string_t ServerImpl;
 extern string_t ServerSubsys;

@@ -23,9 +23,13 @@
  * ufs_server, ...) implements this same MIG interface so libvfs can
  * dispatch without knowing the on-disk format.
  *
- * Naming convention:
+ * Naming convention (relies on the migcom serverstripprefix extension):
  *   - User stubs (libvfs side):   fs_open, fs_read, ...
- *   - Server impl (fs_server):    vfs_S_open, vfs_S_read, ...
+ *   - Server impl (fs_server):    vfs_open, vfs_read, ...
+ *
+ * The user side keeps the canonical fs_* name (so client code reads as
+ * file-system ops), while the server side gets the subsystem-name
+ * prefix vfs_ — useful when one process implements several subsystems.
  *
  * Routine ordering is part of the wire ABI: new routines may only be
  * appended at the end, never inserted in the middle, so msg_id stays
@@ -41,7 +45,8 @@ subsystem
 #include <mach/std_types.defs>
 #include <mach/mach_types.defs>
 
-serverprefix	vfs_S_;
+serverprefix		vfs_;
+serverstripprefix	fs_;
 
 import "vfs_types.h";
 

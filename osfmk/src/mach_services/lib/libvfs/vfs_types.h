@@ -38,6 +38,22 @@
 typedef uint32_t        vfs_u32_t;
 typedef uint64_t        vfs_u64_t;
 
+/*
+ * vfs_path_t — fixed-width C string buffer matching the vfs.defs
+ * declaration `c_string[*:1024]`.  Servers receive paths in a buffer
+ * of this exact size.
+ */
+typedef char            vfs_path_t[1024];
+
+/*
+ * vfs_buf_t / vfs_dirent_array_t — out-of-line byte buffers (Mach
+ * pointer_t on the wire).  Typedef so the MIG-generated stubs that
+ * mention vfs_buf_t / vfs_dirent_array_t in their prototypes compile.
+ */
+#include <mach/vm_types.h>
+typedef pointer_t       vfs_buf_t;
+typedef pointer_t       vfs_dirent_array_t;
+
 /* ------------------------------------------------------------------ */
 /*  Library version (BSD-style major.minor.patch)                      */
 /* ------------------------------------------------------------------ */

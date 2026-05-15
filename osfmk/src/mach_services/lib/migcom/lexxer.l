@@ -210,6 +210,7 @@ extern void yyerror(char *);
 <Normal>[Oo][Ff]				RETURN(syOf);
 <Normal>[Ee][Rr][Rr][Oo][Rr]			RETURN(syErrorProc);
 <Normal>[Ss][Ee][Rr][Vv][Ee][Rr][Pp][Rr][Ee][Ff][Ii][Xx] RETURN(syServerPrefix);
+<Normal>[Ss][Ee][Rr][Vv][Ee][Rr][Ss][Tt][Rr][Ii][Pp][Pp][Rr][Ee][Ff][Ii][Xx] RETURN(syServerStripPrefix);
 <Normal>[Uu][Ss][Ee][Rr][Pp][Rr][Ee][Ff][Ii][Xx]	RETURN(syUserPrefix);
 <Normal>[Ss][Ee][Rr][Vv][Ee][Rr][Dd][Ee][Mm][Uu][Xx]	RETURN(syServerDemux);
 <Normal>[Rr][Cc][Ss][Ii][Dd]			RETURN(syRCSId);

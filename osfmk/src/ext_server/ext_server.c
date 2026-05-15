@@ -62,6 +62,8 @@
 #include <gpu_console.h>
 
 #include "ext2fs_server_server.h"
+#include "vfs_server.h"
+#include "vfs_types.h"
 #include "ahci_batch.h"
 #include "device_master.h"
 
@@ -531,6 +533,235 @@ ds_ext2_read_close(
 }
 
 /* ================================================================
+ * VFS adapter (#220 sub-step B) — implement vfs.defs (subsystem 3000)
+ * on top of the existing ds_ext2_* handlers and the ext2fs_* library.
+ *
+ * This is the first fs_server to expose vfs.defs.  Routines we cannot
+ * back yet (truncate, readdir, namespace ops) return KERN_FAILURE; they
+ * become real once the ext2fs library grows the matching primitives
+ * (tracked under #168 / future ext_server work).  libvfs (#220 sub-step
+ * C) is the only intended consumer.
+ *
+ * Handle convention: vfs_handle_t is the existing 1-based ext2 fid
+ * widened to 64 bits.  Zero is reserved on the wire (never returned
+ * on success).
+ * ================================================================ */
+
+static fs_private_t
+vfs_priv_for_handle(struct mount_context *mnt, vfs_u64_t handle)
+{
+	int idx;
+
+	if (handle == 0 || handle > MAX_OPEN_FILES)
+		return (fs_private_t)0;
+	idx = (int)handle - 1;
+	if (!mnt->open_files[idx].in_use)
+		return (fs_private_t)0;
+	return mnt->open_files[idx].private;
+}
+
+static void
+vfs_fill_stat(fs_private_t priv, vfs_stat_t *st)
+{
+	struct ext2_vnode *vn = ext2fs_file_vnode(priv);
+	int is_dir = ext2fs_file_is_directory(priv);
+	int is_exec = ext2fs_file_is_executable(priv);
+
+	memset(st, 0, sizeof(*st));
+	st->st_size     = (vfs_u64_t)ext2fs_file_size(priv);
+	st->st_blksize  = 4096;
+	st->st_blocks   = (st->st_size + 511) / 512;
+	st->st_nlink    = 1;
+	st->st_type     = is_dir ? VFS_FT_DIR : VFS_FT_REG;
+	st->st_mode     = is_dir  ? 0755 :
+	                  is_exec ? 0755 : 0644;
+	if (vn) {
+		st->st_ino  = (vfs_u64_t)vn->v_ino;
+	}
+}
+
+kern_return_t
+vfs_open(
+	mach_port_t	fs_port,
+	vfs_path_t	path,
+	int		flags,
+	int		mode,
+	vfs_u64_t	*handle_out,
+	vfs_u32_t	*type_out)
+{
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	natural_t fid;
+	kern_return_t kr;
+	fs_private_t priv;
+
+	(void)flags;	/* v0.1: ignore O_CREAT/O_TRUNC; backend has no support */
+	(void)mode;
+
+	kr = ds_ext2_open(fs_port, path, &fid);
+	if (kr != KERN_SUCCESS) {
+		*handle_out = 0;
+		*type_out   = VFS_FT_UNKNOWN;
+		return kr;
+	}
+
+	priv = vfs_priv_for_handle(mnt, (vfs_u64_t)fid);
+	*handle_out = (vfs_u64_t)fid;
+	*type_out   = (priv && ext2fs_file_is_directory(priv))
+		      ? VFS_FT_DIR : VFS_FT_REG;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+vfs_close(mach_port_t fs_port, vfs_u64_t handle)
+{
+	return ds_ext2_close(fs_port, (natural_t)handle);
+}
+
+kern_return_t
+vfs_read(
+	mach_port_t		fs_port,
+	vfs_u64_t		handle,
+	vfs_u64_t		offset,
+	vfs_u32_t		count,
+	pointer_t		*data_out,
+	mach_msg_type_number_t	*data_count_out)
+{
+	/* Existing ds_ext2_read takes natural_t offset (32-bit).  Until
+	 * the backend grows 64-bit offsets, refuse calls past 4 GiB and
+	 * truncate large reads to 32-bit count. */
+	if (offset > 0xFFFFFFFFu)
+		return KERN_INVALID_ARGUMENT;
+	return ds_ext2_read(fs_port, (natural_t)handle,
+			    (natural_t)offset, (natural_t)count,
+			    data_out, data_count_out);
+}
+
+kern_return_t
+vfs_write(
+	mach_port_t		fs_port,
+	vfs_u64_t		handle,
+	vfs_u64_t		offset,
+	pointer_t		data,
+	mach_msg_type_number_t	data_count,
+	vfs_u32_t		*written_out)
+{
+	kern_return_t kr;
+
+	if (offset > 0xFFFFFFFFu)
+		return KERN_INVALID_ARGUMENT;
+	kr = ds_ext2_write(fs_port, (natural_t)handle,
+			   (natural_t)offset, data, data_count);
+	*written_out = (kr == KERN_SUCCESS) ? data_count : 0;
+	return kr;
+}
+
+kern_return_t
+vfs_truncate(mach_port_t fs_port, vfs_u64_t handle, vfs_u64_t length)
+{
+	(void)fs_port; (void)handle; (void)length;
+	return KERN_FAILURE;	/* ext2fs lib has no truncate primitive */
+}
+
+kern_return_t
+vfs_stat(mach_port_t fs_port, vfs_path_t path, vfs_stat_t *st)
+{
+	natural_t fid;
+	kern_return_t kr;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	fs_private_t priv;
+
+	/* Open + fstat + close.  v0.1 acceptable; future work: a
+	 * dedicated lookup that doesn't allocate an fid. */
+	kr = ds_ext2_open(fs_port, path, &fid);
+	if (kr != KERN_SUCCESS)
+		return kr;
+	priv = vfs_priv_for_handle(mnt, (vfs_u64_t)fid);
+	if (!priv) {
+		ds_ext2_close(fs_port, fid);
+		return KERN_FAILURE;
+	}
+	vfs_fill_stat(priv, st);
+	ds_ext2_close(fs_port, fid);
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+vfs_fstat(mach_port_t fs_port, vfs_u64_t handle, vfs_stat_t *st)
+{
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	fs_private_t priv = vfs_priv_for_handle(mnt, handle);
+
+	if (!priv)
+		return KERN_INVALID_ARGUMENT;
+	vfs_fill_stat(priv, st);
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+vfs_readdir(
+	mach_port_t		fs_port,
+	vfs_u64_t		dir_handle,
+	vfs_u64_t		cookie,
+	pointer_t		*entries_out,
+	mach_msg_type_number_t	*entries_count_out,
+	vfs_u64_t		*next_cookie_out)
+{
+	(void)fs_port; (void)dir_handle; (void)cookie;
+	*entries_out       = (pointer_t)0;
+	*entries_count_out = 0;
+	*next_cookie_out   = 0;
+	return KERN_FAILURE;	/* ext2fs lib has no dirent enumeration */
+}
+
+kern_return_t
+vfs_unlink(mach_port_t fs_port, vfs_path_t path)
+{
+	(void)fs_port; (void)path;
+	return KERN_FAILURE;
+}
+
+kern_return_t
+vfs_mkdir(mach_port_t fs_port, vfs_path_t path, int mode)
+{
+	(void)fs_port; (void)path; (void)mode;
+	return KERN_FAILURE;
+}
+
+kern_return_t
+vfs_rmdir(mach_port_t fs_port, vfs_path_t path)
+{
+	(void)fs_port; (void)path;
+	return KERN_FAILURE;
+}
+
+kern_return_t
+vfs_rename(mach_port_t fs_port, vfs_path_t old_path, vfs_path_t new_path)
+{
+	(void)fs_port; (void)old_path; (void)new_path;
+	return KERN_FAILURE;
+}
+
+kern_return_t
+vfs_sync(mach_port_t fs_port)
+{
+	return ds_ext2_sync(fs_port);
+}
+
+/* ================================================================
+ * Multi-subsystem MIG demux: native ext2fs_server (2920) + vfs (3000)
+ * ================================================================ */
+
+static boolean_t
+ext_server_demux(mach_msg_header_t *in, mach_msg_header_t *out)
+{
+	if (vfs_server(in, out))
+		return TRUE;
+	if (ext2fs_server_server(in, out))
+		return TRUE;
+	return FALSE;
+}
+
+/* ================================================================
  * Mount a single partition
  * ================================================================ */
 
@@ -850,8 +1081,10 @@ main(int argc, char **argv)
 
 	printf("ext2: ready, entering message loop\n");
 
-	/* MIG server loop — receives from port set covering all mounts */
-	mach_msg_server(ext2fs_server_server, 8192, port_set,
+	/* MIG server loop — receives from port set covering all mounts.
+	 * Demux dispatches to ext2fs_server (subsystem 2920, legacy) and
+	 * vfs (subsystem 3000, common interface for libvfs). */
+	mach_msg_server(ext_server_demux, 8192, port_set,
 			MACH_MSG_OPTION_NONE);
 
 	return 0;
