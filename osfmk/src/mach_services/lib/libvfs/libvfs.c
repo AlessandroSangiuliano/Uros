@@ -98,38 +98,36 @@ vfs_match_prefix(const char *path, const char *prefix)
     return 0;
 }
 
-/* Look up the mount that owns 'path'.  Tries the in-process cache
- * first; on miss, asks name_server and inserts the result.  Returns
- * MACH_PORT_NULL if no mount matches (caller surfaces VFS_FD_INVALID). */
+/* Look up the mount that owns 'path'.  v0.1.0 always queries
+ * name_server because the in-process cache cannot know whether a
+ * more-specific mount has appeared since the last lookup — e.g. the
+ * cached "/" entry would beat a later-registered "/proc" if we
+ * trusted the cache without re-checking.  Cache invalidation via a
+ * notify port is v0.2.0 (#230); until then the cost is one ~1.4 µs
+ * RPC per vfs_open / vfs_stat — acceptable, since vfs_open is rare.
+ * The cache is still maintained for diagnostics. */
 static mach_port_t
 vfs_resolve_mount(const char *path)
 {
     int i;
-    size_t best_len = 0;
-    mach_port_t best_port = MACH_PORT_NULL;
     netname_name_t matched;
     mach_port_t port = MACH_PORT_NULL;
     kern_return_t kr;
 
-    /* Cache lookup (longest prefix wins). */
-    for (i = 0; i < VFS_MAX_CACHED_MOUNTS; i++) {
-        if (!vfs_mounts[i].in_use)
-            continue;
-        size_t mlen = vfs_match_prefix(path, vfs_mounts[i].prefix);
-        if (mlen > best_len) {
-            best_len  = mlen;
-            best_port = vfs_mounts[i].fs_port;
-        }
-    }
-    if (best_port != MACH_PORT_NULL)
-        return best_port;
-
-    /* Cache miss: ask name_server. */
     matched[0] = '\0';
     kr = netname_look_up_mount(name_server_port, (char *)path,
                                &port, matched);
     if (kr != NETNAME_SUCCESS || port == MACH_PORT_NULL)
         return MACH_PORT_NULL;
+
+    /* Refresh-or-insert cache entry for matched prefix. */
+    for (i = 0; i < VFS_MAX_CACHED_MOUNTS; i++) {
+        if (vfs_mounts[i].in_use
+            && strcmp(vfs_mounts[i].prefix, matched) == 0) {
+            vfs_mounts[i].fs_port = port;
+            return port;
+        }
+    }
 
     /* Insert into the first free slot.  v0.1: no eviction; if we run
      * out of slots, future lookups bypass the cache and pay the

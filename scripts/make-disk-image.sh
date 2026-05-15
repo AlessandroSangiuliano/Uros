@@ -28,14 +28,14 @@ BUILD_DIR="$REPO_ROOT/osfmk/build"
 ARCH="$(uname -m)"
 
 # --- Parametri di default ---
-IMG_SIZE_MB=40
+IMG_SIZE_MB=48
 DISK_IMG="$BUILD_DIR/disk.img"
 SECT_SIZE=512
 PART0_START_SECT=2048        # disk0a — /mach_servers/, 1 MiB aligned
-FS0_SIZE_MB=4
-PART1_START_SECT=10240       # disk0b — test data
+FS0_SIZE_MB=8                # bumped from 4 MB to fit proc_server (#237)
+PART1_START_SECT=18432       # disk0b — test data
 FS1_SIZE_MB=4
-PART2_START_SECT=18432       # disk0c — raw swap
+PART2_START_SECT=26624       # disk0c — raw swap
 
 # ipc_bench suite selection (empty = all)
 BENCH_ARGS=""
@@ -94,6 +94,7 @@ CAP_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_test"
 GPUSTAT="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/gpustat"
 EXEC_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_exec"
+PROC_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/proc_server"
 
 if [ ! -f "$NAME_SERVER" ]; then
     echo "ERRORE: name_server non trovato: $NAME_SERVER"
@@ -184,6 +185,10 @@ EXEC_SERVER_CONF_LINE=""
 if [ -f "$EXEC_SERVER" ]; then
     EXEC_SERVER_CONF_LINE="exec_server exec_server"
 fi
+PROC_SERVER_CONF_LINE=""
+if [ -f "$PROC_SERVER" ]; then
+    PROC_SERVER_CONF_LINE="proc_server proc_server"
+fi
 # gpustat (if built) runs after gpu_server / cap_server are up so it
 # can netname_look_up "gpu" and cap_request DEV_ADMIN.  It is a
 # single-shot probe (#203): one printf with the counters, then exits.
@@ -214,6 +219,7 @@ default_pager default_pager disk0c
 hello_server hello_server
 ext_server ext_server
 ${EXEC_SERVER_CONF_LINE}
+${PROC_SERVER_CONF_LINE}
 ipc_bench ipc_bench${BENCH_ARGS}
 pthread_test pthread_test
 ${CAP_TEST_CONF_LINE}
@@ -291,6 +297,10 @@ EXEC_SERVER_WRITE_LINE=""
 if [ -f "$EXEC_SERVER" ]; then
     EXEC_SERVER_WRITE_LINE="write $EXEC_SERVER exec_server"
 fi
+PROC_SERVER_WRITE_LINE=""
+if [ -f "$PROC_SERVER" ]; then
+    PROC_SERVER_WRITE_LINE="write $PROC_SERVER proc_server"
+fi
 echo "[4/6] Copia file nel filesystem ext2..."
 # ipc_bench's disk_bench tests open hello.txt / bench.dat at the root
 # of the default ext2 mount (ext_server → ahci0a / hd0a), so seed both
@@ -328,6 +338,7 @@ ${CAP_SERVER_WRITE_LINE}
 ${CAP_TEST_WRITE_LINE}
 ${GPUSTAT_WRITE_LINE}
 ${EXEC_SERVER_WRITE_LINE}
+${PROC_SERVER_WRITE_LINE}
 mkdir modules
 cd modules
 mkdir block

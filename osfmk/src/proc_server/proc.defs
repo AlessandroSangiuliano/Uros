@@ -1,0 +1,91 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * proc.defs — MIG interface for proc_server (#237 v0.1.0).
+ *
+ * Subsystem 3200.  Three routines in v0.1.0:
+ *   proc_register         — register a freshly-spawned task, get pid
+ *   proc_subscribe_exit   — register a notify port; one-shot mach msg
+ *                           is sent there when the pid becomes zombie
+ *   proc_list             — debug enumerate, precursor to ps(1)
+ *
+ * waitpid POSIX semantics live in libposix-uros (future) and are
+ * implemented client-side as: subscribe + mach_msg_receive on the
+ * notify port.  proc_server stays single-threaded with no parked
+ * reply ports.
+ *
+ * Naming uses the migcom serverstripprefix extension (#227):
+ *   user stub  : proc_register / proc_wait / proc_list
+ *   server impl: proc_S_register / proc_S_wait / proc_S_list
+ *
+ * The /proc filesystem (vfs.defs) is exposed via a separate
+ * subsystem chain in the demux — see proc_main.c.
+ */
+
+subsystem
+#if	KERNEL_SERVER
+	  KernelServer
+#endif	/* KERNEL_SERVER */
+		       proc 3200;
+
+#include <mach/std_types.defs>
+#include <mach/mach_types.defs>
+
+serverprefix		proc_S_;
+serverstripprefix	proc_;
+
+import "proc_types.h";
+
+type proc_pid_t       = unsigned    ctype: proc_pid_t;
+type proc_cmdline_t   = c_string[*:128];
+type proc_entry_t     = struct[36] of unsigned32;     /* 144 bytes */
+type proc_entry_array = pointer_t   ctype: proc_entry_array;
+
+/*
+ * Register a task with proc_server.  The caller passes a send right
+ * to the new task's port; proc_server installs a DEAD_NAME notify on
+ * it so it can detect termination and mark the pid zombie.
+ *
+ *   parent_pid — 0 (PROC_PID_NONE) for no parent
+ *   task_port  — task to track
+ *   cmdline    — command name (truncated to PROC_CMDLINE_MAX)
+ *
+ *   new_pid    — server-assigned pid (>= PROC_PID_INIT + 1 today)
+ *   result     — PROC_OK or PROC_ERR_*
+ */
+routine proc_register(
+		proc_port	: mach_port_t;
+	in	parent_pid	: proc_pid_t;
+	in	task_port	: mach_port_t;
+	in	cmdline		: proc_cmdline_t;
+	out	new_pid		: proc_pid_t;
+	out	result		: int);
+
+/*
+ * Subscribe a notify port to the named pid's exit.  proc_server saves
+ * the send-once right and, when the pid becomes a zombie, sends a
+ * single proc_exit_msg_t (see proc_types.h) to it.  If the pid is
+ * already a zombie, the notification fires immediately.  v0.1.0
+ * keeps a single waiter slot per pid — concurrent subscribers race;
+ * v0.x.0 generalises to a list.
+ */
+routine proc_subscribe_exit(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	in	notify_port	: mach_port_make_send_once_t;
+	out	result		: int);
+
+/*
+ * Enumerate all known pids (running + zombies).  Caller passes an
+ * out array; server fills it.  v0.1.0 returns up to PROC_MAX_TASKS
+ * entries; truncation is signalled with PROC_ERR_TOO_MANY but the
+ * filled prefix is still valid.
+ */
+routine proc_list(
+		proc_port	: mach_port_t;
+	out	entries		: proc_entry_array;
+	out	count		: unsigned;
+	out	result		: int);
