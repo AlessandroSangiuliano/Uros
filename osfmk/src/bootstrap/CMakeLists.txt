@@ -169,6 +169,7 @@ target_link_libraries(bootstrap_server PRIVATE
   libcap
   libgpu_console
   libnetname
+  libelf
   libpthreads
   libmach
   -Wl,--end-group
