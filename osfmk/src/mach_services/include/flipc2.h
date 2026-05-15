@@ -51,9 +51,9 @@
 /* ------------------------------------------------------------------ */
 
 #define FLIPC2_LIB_VERSION_MAJOR    0
-#define FLIPC2_LIB_VERSION_MINOR    0
-#define FLIPC2_LIB_VERSION_PATCH    3
-#define FLIPC2_LIB_VERSION_STRING   "0.0.3"
+#define FLIPC2_LIB_VERSION_MINOR    1
+#define FLIPC2_LIB_VERSION_PATCH    0
+#define FLIPC2_LIB_VERSION_STRING   "0.1.0"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
