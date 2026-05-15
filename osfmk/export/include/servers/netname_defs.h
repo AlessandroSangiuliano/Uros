@@ -67,8 +67,11 @@
 #define NETNAME_NO_SUCH_HOST	(1002)
 #define NETNAME_HOST_NOT_FOUND	(1003)
 #define	NETNAME_INVALID_PORT	(1004)
+#define NETNAME_NO_MOUNT	(1005)	/* no mount prefix matched (#220) */
+#define NETNAME_MOUNT_EXISTS	(1006)	/* prefix already registered (#220) */
 
 typedef char netname_name_t[80];
+typedef char netname_path_t[1024];
 
 /*
  * Notification message sent by the name server to watchers when

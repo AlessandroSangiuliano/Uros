@@ -451,6 +451,141 @@ do_netname_version(mach_port_t server, netname_name_t version)
     return KERN_SUCCESS;
 }
 
+/* ================================================================
+ * Mount registry (#220 sub-step C).  Separate keyspace from the
+ * service-name table: keys are absolute path prefixes and lookup is
+ * longest-segment-match instead of exact.  Used by libvfs to route
+ * filesystem RPCs to the right fs_server.
+ * ================================================================ */
+
+typedef struct mount_record {
+    struct mount_record *next;
+    netname_name_t       prefix;
+    mach_port_t          port;
+    mach_port_t          sig;
+} *mount_record_t;
+
+static mount_record_t mounts;
+
+/*
+ * Segment-aware prefix match: prefix must end at a '/' boundary in
+ * path so that "/mnt/d" does not match "/mnt/disk1".  Returns the
+ * length of the matched prefix, or 0 if no match.
+ */
+static size_t
+mount_prefix_match(const char *path, const char *prefix)
+{
+    size_t pl = strlen(prefix);
+    size_t patl = strlen(path);
+
+    if (pl > patl)
+	return 0;
+    if (strncmp(path, prefix, pl) != 0)
+	return 0;
+    /* Root prefix "/" matches every absolute path. */
+    if (pl == 1 && prefix[0] == '/')
+	return 1;
+    /* Otherwise the next char in path must be either end-of-string
+     * or the path separator, so /mnt/d does not match /mnt/disk1. */
+    if (path[pl] == '\0' || path[pl] == '/')
+	return pl;
+    return 0;
+}
+
+kern_return_t
+do_netname_check_in_mount(mach_port_t server, netname_name_t prefix,
+			  mach_port_t sig, mach_port_t port)
+{
+    mount_record_t this;
+
+    if (Debug)
+	printf("%s: netname_check_in_mount('%.80s', port=%x, sig=%x)\n",
+	       program, prefix, port, sig);
+
+    /* Validate: must be absolute. */
+    if (prefix[0] != '/')
+	return NETNAME_NOT_YOURS;
+
+    /* Reject duplicates (caller should check_out_mount first). */
+    for (this = mounts; this != NULL; this = this->next)
+	if (strncmp(this->prefix, prefix, sizeof(this->prefix)) == 0)
+	    return NETNAME_MOUNT_EXISTS;
+
+    this = (mount_record_t) malloc(sizeof *this);
+    if (this == NULL)
+	return KERN_RESOURCE_SHORTAGE;
+    this->port = port;
+    this->sig  = sig;
+    (void) strncpy(this->prefix, prefix, sizeof(this->prefix) - 1);
+    this->prefix[sizeof(this->prefix) - 1] = '\0';
+    this->next = mounts;
+    mounts = this;
+
+    add_reference(sig);
+    add_reference(port);
+    return NETNAME_SUCCESS;
+}
+
+kern_return_t
+do_netname_check_out_mount(mach_port_t server, netname_name_t prefix,
+			   mach_port_t sig)
+{
+    mount_record_t *prev, this;
+
+    if (Debug)
+	printf("%s: netname_check_out_mount('%.80s', sig=%x)\n",
+	       program, prefix, sig);
+
+    for (prev = &mounts, this = mounts;
+	 this != NULL;
+	 prev = &this->next, this = *prev) {
+	if (strncmp(this->prefix, prefix, sizeof(this->prefix)) != 0)
+	    continue;
+	if (this->sig != sig)
+	    return NETNAME_NOT_YOURS;
+	*prev = this->next;
+	free((char *) this);
+	add_reference(sig);
+	return NETNAME_SUCCESS;
+    }
+    return NETNAME_NOT_CHECKED_IN;
+}
+
+kern_return_t
+do_netname_look_up_mount(mach_port_t server, netname_path_t path,
+			 mach_port_t *out_port, netname_name_t out_matched)
+{
+    mount_record_t this, best = NULL;
+    size_t best_len = 0;
+
+    /* Longest-prefix wins; first hit on equal length is fine since we
+     * reject duplicates at check_in time. */
+    for (this = mounts; this != NULL; this = this->next) {
+	size_t mlen = mount_prefix_match(path, this->prefix);
+	if (mlen > best_len) {
+	    best     = this;
+	    best_len = mlen;
+	}
+    }
+
+    if (best == NULL) {
+	if (Debug)
+	    printf("%s: netname_look_up_mount('%.80s'): no match\n",
+		   program, path);
+	out_matched[0] = '\0';
+	return NETNAME_NO_MOUNT;
+    }
+
+    if (Debug)
+	printf("%s: netname_look_up_mount('%.80s') => '%.80s' port=%x\n",
+	       program, path, best->prefix, best->port);
+
+    sub_reference(*out_port = best->port);
+    (void) strncpy(out_matched, best->prefix, sizeof(netname_name_t) - 1);
+    out_matched[sizeof(netname_name_t) - 1] = '\0';
+    return NETNAME_SUCCESS;
+}
+
 kern_return_t
 do_mach_notify_port_deleted(mach_port_t notify, mach_port_t name)
 {
