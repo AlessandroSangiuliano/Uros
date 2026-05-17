@@ -228,6 +228,15 @@ start_thread(mach_port_t new_task, uintptr_t entry, vm_address_t stack_top,
 /*  Top-level: orchestrate a full exec                                  */
 /* ------------------------------------------------------------------ */
 
+static int
+fail_after_task(mach_port_t new_task, elf_image_t *img, void *file_buf, int rc)
+{
+    (void)task_terminate(new_task);
+    elf_close(img);
+    free(file_buf);
+    return rc;
+}
+
 int
 exec_do_load(mach_port_t client_task, const char *path,
              const void *argv_blob, mach_msg_type_number_t argv_len,
@@ -282,18 +291,18 @@ exec_do_load(mach_port_t client_task, const char *path,
     /* 4. Map every PT_LOAD into the child. */
     rc = install_segments(new_task, &img);
     if (rc != EXEC_OK)
-        goto fail_after_task;
+        return fail_after_task(new_task, &img, file_buf, rc);
 
     /* 5. Set up the initial stack with argv/envp/auxv. */
     rc = exec_build_stack(new_task, argv_blob, argv_len,
                           envp_blob, envp_len, &stack_top);
     if (rc != EXEC_OK)
-        goto fail_after_task;
+        return fail_after_task(new_task, &img, file_buf, rc);
 
     /* 6. Bring up the entry thread. */
     rc = start_thread(new_task, elf_entry(&img), stack_top, &new_thread);
     if (rc != EXEC_OK)
-        goto fail_after_task;
+        return fail_after_task(new_task, &img, file_buf, rc);
 
     elf_close(&img);
     free(file_buf);
@@ -301,10 +310,4 @@ exec_do_load(mach_port_t client_task, const char *path,
     *out_task   = new_task;
     *out_thread = new_thread;
     return EXEC_OK;
-
-fail_after_task:
-    (void)task_terminate(new_task);
-    elf_close(&img);
-    free(file_buf);
-    return rc;
 }

@@ -559,39 +559,45 @@ default_pager_backing_store_delete(
 	return KERN_FAILURE;
 #endif
 
-    restart:
-	PSL_LOCK();
-	error = KERN_SUCCESS;
-	for (i = 0; i <= paging_segment_max; i++) {
-		ps = paging_segments[i];
-		if (ps != PAGING_SEGMENT_NULL &&
-		    ps->ps_bs == bs &&
-		    ! ps->ps_going_away) {
-			PS_LOCK(ps);
-			/* disable access to this segment */
-			ps->ps_going_away = TRUE;
-			PS_UNLOCK(ps);
-			PSL_UNLOCK();
-			BS_UNLOCK(bs);
-			/*
-			 * The "ps" segment is "off-line" now,
-			 * we can try and delete it...
-			 */
-			error = ps_delete(ps);
-			if (error != KERN_SUCCESS) {
+	for (;;) {
+		int restart = 0;
+
+		PSL_LOCK();
+		error = KERN_SUCCESS;
+		for (i = 0; i <= paging_segment_max; i++) {
+			ps = paging_segments[i];
+			if (ps != PAGING_SEGMENT_NULL &&
+			    ps->ps_bs == bs &&
+			    ! ps->ps_going_away) {
+				PS_LOCK(ps);
+				/* disable access to this segment */
+				ps->ps_going_away = TRUE;
+				PS_UNLOCK(ps);
+				PSL_UNLOCK();
+				BS_UNLOCK(bs);
 				/*
-				 * We couldn't delete the segment,
-				 * probably because there's not enough
-				 * virtual memory left.
-				 * Re-enable all the segments.
+				 * The "ps" segment is "off-line" now,
+				 * we can try and delete it...
 				 */
+				error = ps_delete(ps);
+				if (error != KERN_SUCCESS) {
+					/*
+					 * We couldn't delete the segment,
+					 * probably because there's not
+					 * enough virtual memory left.
+					 * Re-enable all the segments.
+					 */
+					BS_LOCK(bs);
+					PSL_LOCK();
+					break;
+				}
 				BS_LOCK(bs);
-				PSL_LOCK();
+				restart = 1;
 				break;
 			}
-			BS_LOCK(bs);
-			goto restart;
 		}
+		if (!restart)
+			break;
 	}
 
 	if (error != KERN_SUCCESS) {

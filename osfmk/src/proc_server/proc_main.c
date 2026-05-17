@@ -632,6 +632,13 @@ proc_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 /*  Bring-up                                                           */
 /* ------------------------------------------------------------------ */
 
+static int
+proc_bringup_fatal(kern_return_t kr)
+{
+    printf("proc: bring-up failed kr=%d\n", kr);
+    return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -653,16 +660,20 @@ main(int argc, char **argv)
     /* Three receive ports + one shared port set. */
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_RECEIVE, &proc_port);
-    if (kr) goto fatal;
+    if (kr)
+        return proc_bringup_fatal(kr);
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_RECEIVE, &mount_port);
-    if (kr) goto fatal;
+    if (kr)
+        return proc_bringup_fatal(kr);
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_RECEIVE, &notify_port);
-    if (kr) goto fatal;
+    if (kr)
+        return proc_bringup_fatal(kr);
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_PORT_SET, &port_set);
-    if (kr) goto fatal;
+    if (kr)
+        return proc_bringup_fatal(kr);
 
     (void)mach_port_move_member(mach_task_self(), proc_port,   port_set);
     (void)mach_port_move_member(mach_task_self(), mount_port,  port_set);
@@ -679,7 +690,7 @@ main(int argc, char **argv)
                           MACH_PORT_NULL, proc_port);
     if (kr != NETNAME_SUCCESS) {
         printf("proc: netname_check_in failed kr=%d\n", kr);
-        goto fatal;
+        return proc_bringup_fatal(kr);
     }
 
     /* Register /proc as a vfs mount point — libvfs in any task will
@@ -702,9 +713,5 @@ main(int argc, char **argv)
     mach_msg_server(proc_demux, 8192, port_set, MACH_MSG_OPTION_NONE);
 
     printf("proc: mach_msg_server exited unexpectedly\n");
-    return 1;
-
-fatal:
-    printf("proc: bring-up failed kr=%d\n", kr);
     return 1;
 }

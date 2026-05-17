@@ -1519,6 +1519,14 @@ ds_device_write_inband(mach_port_t device, mach_port_t reply,
  * Batch write: multiple non-contiguous blocks in one IPC message
  * ================================================================ */
 
+static kern_return_t
+ahci_write_fail(io_buf_ptr_t data, mach_msg_type_number_t data_count,
+		kern_return_t err)
+{
+	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
+	return err;
+}
+
 kern_return_t
 ds_device_write_batch(mach_port_t device, mach_port_t reply,
 		      mach_msg_type_name_t reply_poly,
@@ -1553,7 +1561,7 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 		if (sz == 0)
 			continue;
 		if (data_off + sz > data_count)
-			goto bad;
+			return ahci_write_fail(data, data_count, D_INVALID_SIZE);
 
 		/* Round up to sector boundary */
 		total = (sz + SECTOR_SIZE - 1) & ~(SECTOR_SIZE - 1);
@@ -1579,7 +1587,8 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 				       cpy);
 			if (ahci_submit_batch(port_idx, lba,
 					      sects, 1) < 0)
-				goto io_err;
+				return ahci_write_fail(data, data_count,
+						       D_IO_ERROR);
 			lba += sects;
 		}
 
@@ -1590,13 +1599,6 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
 	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
 	*bytes_written = (io_buf_len_t)total_written;
 	return KERN_SUCCESS;
-
-bad:
-	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
-	return D_INVALID_SIZE;
-io_err:
-	vm_deallocate(mach_task_self(), (vm_offset_t)data, data_count);
-	return D_IO_ERROR;
 }
 
 /* ================================================================

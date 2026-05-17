@@ -388,6 +388,31 @@ blk_write_phys(struct blk_dev *dev,
  * Batch write
  * ================================================================ */
 
+static kern_return_t
+blk_write_batch_fallback(struct blk_dev *dev,
+			 recnum_t *recnums,
+			 io_buf_ptr_t *data_bufs,
+			 mach_msg_type_number_t *data_sizes,
+			 unsigned int count,
+			 io_buf_len_t *total_written)
+{
+	unsigned int i;
+	io_buf_len_t written;
+	io_buf_len_t total = 0;
+	kern_return_t kr;
+
+	for (i = 0; i < count; i++) {
+		kr = device_write(dev->bd_port, 0, recnums[i],
+				  data_bufs[i], data_sizes[i],
+				  (int *)&written);
+		if (kr != KERN_SUCCESS)
+			return kr;
+		total += written;
+	}
+	*total_written = total;
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 blk_write_batch(struct blk_dev *dev,
 		recnum_t *recnums,
@@ -417,46 +442,29 @@ blk_write_batch(struct blk_dev *dev,
 
 		kr = vm_allocate(mach_task_self(), &concat,
 				 total_size, TRUE);
-		if (kr != KERN_SUCCESS)
-			goto fallback;
+		if (kr == KERN_SUCCESS) {
+			off = 0;
+			for (i = 0; i < count; i++) {
+				memcpy((void *)(concat + off),
+				       (void *)data_bufs[i], data_sizes[i]);
+				off += data_sizes[i];
+			}
 
-		off = 0;
-		for (i = 0; i < count; i++) {
-			memcpy((void *)(concat + off),
-			       (void *)data_bufs[i], data_sizes[i]);
-			off += data_sizes[i];
+			kr = device_write_batch(dev->bd_port, 0,
+						recnums, count,
+						sizes, count,
+						(io_buf_ptr_t)concat,
+						(mach_msg_type_number_t)total_size,
+						total_written);
+
+			vm_deallocate(mach_task_self(), concat, total_size);
+			return kr;
 		}
-
-		kr = device_write_batch(dev->bd_port, 0,
-					recnums, count,
-					sizes, count,
-					(io_buf_ptr_t)concat,
-					(mach_msg_type_number_t)total_size,
-					total_written);
-
-		vm_deallocate(mach_task_self(), concat, total_size);
-		return kr;
+		/* vm_allocate failed — fall through to per-block writes */
 	}
 
-fallback:
-	/* Fallback: individual writes */
-	{
-		unsigned int i;
-		io_buf_len_t written;
-		io_buf_len_t total = 0;
-		kern_return_t kr;
-
-		for (i = 0; i < count; i++) {
-			kr = device_write(dev->bd_port, 0, recnums[i],
-					  data_bufs[i], data_sizes[i],
-					  (int *)&written);
-			if (kr != KERN_SUCCESS)
-				return kr;
-			total += written;
-		}
-		*total_written = total;
-		return KERN_SUCCESS;
-	}
+	return blk_write_batch_fallback(dev, recnums, data_bufs, data_sizes,
+					count, total_written);
 }
 
 /* ================================================================

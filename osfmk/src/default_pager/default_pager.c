@@ -454,36 +454,47 @@ mach_msg_server(
 		return KERN_RESOURCE_SHORTAGE;
 
 	for (;;) {
-	    get_request:
 		mr = mach_msg(&bufRequest->Head, MACH_RCV_MSG | server_options,
 			      0, max_size, rcv_name, MACH_MSG_TIMEOUT_NONE,
 			      MACH_PORT_NULL);
 		while (mr == MACH_MSG_SUCCESS) {
-			/* we have a request message */
+			int need_send = 1;
 
+			/* we have a request message */
 			(void) (*demux)(&bufRequest->Head, &bufReply->Head);
 
 			if (!(bufReply->Head.msgh_bits & MACH_MSGH_BITS_COMPLEX)
 			    && bufReply->RetCode != KERN_SUCCESS) {
-				if (bufReply->RetCode == MIG_NO_REPLY)
-					goto get_request;
-
-				/*
-				 * Don't destroy the reply port right,
-				 * so we can send an error message
-				 */
-				bufRequest->Head.msgh_remote_port =
-					MACH_PORT_NULL;
-				mach_msg_destroy(&bufRequest->Head);
+				if (bufReply->RetCode == MIG_NO_REPLY) {
+					need_send = 0;
+				} else {
+					/*
+					 * Don't destroy the reply port right,
+					 * so we can send an error message
+					 */
+					bufRequest->Head.msgh_remote_port =
+						MACH_PORT_NULL;
+					mach_msg_destroy(&bufRequest->Head);
+				}
 			}
 
-			if (bufReply->Head.msgh_remote_port == MACH_PORT_NULL) {
+			if (need_send &&
+			    bufReply->Head.msgh_remote_port == MACH_PORT_NULL) {
 				/* no reply port, so destroy the reply */
 				if (bufReply->Head.msgh_bits &
 				    MACH_MSGH_BITS_COMPLEX)
 					mach_msg_destroy(&bufReply->Head);
+				need_send = 0;
+			}
 
-				goto get_request;
+			if (!need_send) {
+				/* skip the send, just do a fresh receive */
+				mr = mach_msg(&bufRequest->Head,
+					      MACH_RCV_MSG | server_options,
+					      0, max_size, rcv_name,
+					      MACH_MSG_TIMEOUT_NONE,
+					      MACH_PORT_NULL);
+				continue;
 			}
 
 			/* send reply and get next request */
