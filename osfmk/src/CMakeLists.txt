@@ -54,6 +54,11 @@ if(OSFMK_BUILD_HELLO_EXEC)
   add_subdirectory(hello_exec)
 endif()
 
+# Build proc_server (POSIX process model owner, #237)
+if(OSFMK_BUILD_PROC_SERVER)
+  add_subdirectory(proc_server)
+endif()
+
 # Build IPC performance benchmark
 if(OSFMK_BUILD_IPC_BENCH)
   add_subdirectory(ipc_bench)

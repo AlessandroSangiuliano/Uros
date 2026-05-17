@@ -27,6 +27,7 @@ option(OSFMK_BUILD_GPU_SERVER "Build gpu_server (userspace GPU/display server, #
 option(OSFMK_BUILD_CHAR_SERVER "Build char_server (userspace character device server, #205)" OFF)
 option(OSFMK_BUILD_EXEC_SERVER "Build exec_server (userspace ELF loader / process spawner, #228)" OFF)
 option(OSFMK_BUILD_HELLO_EXEC "Build hello_exec test binary (#228 v0.1.0)" OFF)
+option(OSFMK_BUILD_PROC_SERVER "Build proc_server (POSIX process model owner, #237)" OFF)
 
 # Issue #211: kernel symbol table for DDB.  Default ON for Debug / unset
 # build types (developer build), OFF for Release where DDB lookup-by-name

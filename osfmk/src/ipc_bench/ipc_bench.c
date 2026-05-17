@@ -1844,6 +1844,12 @@ main(int argc, char **argv)
 	bench_exec_smoke();
     }
 
+    /* proc_server smoke test (#237 v0.1.0) — same FLIPC gate. */
+    if (suites & SUITE_FLIPC2) {
+	extern void bench_proc_smoke(void);
+	bench_proc_smoke();
+    }
+
     printf("=== Benchmark complete ===\n");
 
     /*
