@@ -138,6 +138,17 @@ uintptr_t elf_entry(const elf_image_t *img);     /* e_entry virtual address */
 int       elf_is_32bit(const elf_image_t *img);
 int       elf_is_64bit(const elf_image_t *img);
 
+/*
+ * File-offset of the program-header table (e_phoff) and the on-wire
+ * size of a single entry (e_phentsize).  Exposed primarily so a
+ * userspace loader can derive the runtime VA of the phdr table for
+ * AUXV's AT_PHDR entry: walk PT_LOAD segments, find the one whose
+ * [offset, offset+filesz) covers e_phoff, then
+ *   phdr_va = pt_load.vaddr + (e_phoff - pt_load.offset).
+ */
+uint64_t  elf_phoff(const elf_image_t *img);
+uint32_t  elf_phentsize(const elf_image_t *img);
+
 /* ------------------------------------------------------------------ */
 /*  Program headers                                                    */
 /* ------------------------------------------------------------------ */
