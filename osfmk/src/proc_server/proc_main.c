@@ -65,6 +65,8 @@ struct pid_entry {
     int             in_use;
     proc_pid_t      pid;
     proc_pid_t      ppid;
+    proc_pid_t      pgrp_id;         /* POSIX process group (v0.3.0) */
+    proc_pid_t      sid;             /* POSIX session id    (v0.3.0) */
     mach_port_t     task_port;       /* receive-side perspective */
     char            cmdline[PROC_CMDLINE_MAX];
     uint8_t         state;           /* PROC_STATE_* */
@@ -176,6 +178,20 @@ proc_S_register(
     e->in_use     = 1;
     e->pid        = pid;
     e->ppid       = parent_pid;
+    /* POSIX fork inherits pgrp + session from parent (v0.3.0).  If
+     * the parent isn't tracked (parent_pid == 0 or unknown), the new
+     * pid is a self-leader: pgrp = sid = pid. */
+    {
+        struct pid_entry *parent_entry = (parent_pid != PROC_PID_NONE)
+            ? find_by_pid_locked(parent_pid) : NULL;
+        if (parent_entry) {
+            e->pgrp_id = parent_entry->pgrp_id;
+            e->sid     = parent_entry->sid;
+        } else {
+            e->pgrp_id = pid;
+            e->sid     = pid;
+        }
+    }
     e->task_port  = task_port;
     e->state      = PROC_STATE_RUNNING;
     e->exit_code  = 0;
@@ -466,6 +482,248 @@ proc_S_kill(
 }
 
 /* ------------------------------------------------------------------ */
+/*  POSIX session + process group (v0.3.0 / #239)                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * setsid: caller's pid becomes leader of a new session and a new
+ * process group, both numerically equal to the pid.  POSIX forbids
+ * this if the caller is already a pgrp leader (would create a
+ * collision with the existing pgrp_id == pid).
+ */
+kern_return_t
+proc_S_setsid(
+    mach_port_t                 server_port,
+    proc_pid_t                  pid,
+    proc_pid_t                  *new_sid,
+    int                         *result)
+{
+    struct pid_entry *e;
+    int i, is_leader = 0;
+
+    (void)server_port;
+    *new_sid = 0;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    /* POSIX: setsid() fails with EPERM if the calling pid is already
+     * a pgrp leader, i.e. some entry (including itself) already has
+     * pgrp_id == pid. */
+    for (i = 0; i < PROC_MAX_TASKS; i++) {
+        if (pid_table[i].in_use && pid_table[i].pgrp_id == pid) {
+            is_leader = 1;
+            break;
+        }
+    }
+    if (is_leader) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_PERM;
+        return KERN_SUCCESS;
+    }
+    e->sid     = pid;
+    e->pgrp_id = pid;
+    pthread_mutex_unlock(&pid_lock);
+
+    *new_sid = pid;
+    *result  = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+/*
+ * setpgid(pid, pgrp): move pid into pgrp.  pgrp == 0 means "use pid"
+ * (POSIX: create a new pgrp with id == pid).  The target pgrp, if it
+ * already exists, must be in the same session as pid.
+ */
+kern_return_t
+proc_S_setpgid(
+    mach_port_t                 server_port,
+    proc_pid_t                  pid,
+    proc_pid_t                  pgrp,
+    int                         *result)
+{
+    struct pid_entry *e;
+    int i;
+    proc_pid_t target_pgrp;
+    int pgrp_exists = 0;
+    proc_pid_t pgrp_sid = 0;
+
+    (void)server_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    target_pgrp = (pgrp == 0) ? pid : pgrp;
+
+    /* If target_pgrp already labels another running pid, snapshot
+     * that pid's session so we can enforce the same-session rule. */
+    for (i = 0; i < PROC_MAX_TASKS; i++) {
+        if (pid_table[i].in_use &&
+            pid_table[i].pgrp_id == target_pgrp) {
+            pgrp_exists = 1;
+            pgrp_sid    = pid_table[i].sid;
+            break;
+        }
+    }
+    if (pgrp_exists && pgrp_sid != e->sid) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_DIFF_SESS;
+        return KERN_SUCCESS;
+    }
+    e->pgrp_id = target_pgrp;
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+kern_return_t
+proc_S_getsid(
+    mach_port_t                 server_port,
+    proc_pid_t                  pid,
+    proc_pid_t                  *sid,
+    int                         *result)
+{
+    struct pid_entry *e;
+    (void)server_port;
+    *sid = 0;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (e)
+        *sid = e->sid;
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = e ? PROC_OK : PROC_ERR_NOT_FOUND;
+    return KERN_SUCCESS;
+}
+
+kern_return_t
+proc_S_getpgid(
+    mach_port_t                 server_port,
+    proc_pid_t                  pid,
+    proc_pid_t                  *pgrp,
+    int                         *result)
+{
+    struct pid_entry *e;
+    (void)server_port;
+    *pgrp = 0;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (e)
+        *pgrp = e->pgrp_id;
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = e ? PROC_OK : PROC_ERR_NOT_FOUND;
+    return KERN_SUCCESS;
+}
+
+/*
+ * killpg: deliver signo to every running pid in pgrp.  We can't hold
+ * pid_lock across task_terminate / mach_msg, so we snapshot the
+ * matching ports into a local array under the lock, then dispatch
+ * outside.  For catchable signals we use signal_port (COPY_SEND);
+ * pids without a signal_port are skipped silently (POSIX killpg
+ * doesn't require every recipient to be reachable).  n_sent counts
+ * how many dispatches actually fired.
+ */
+kern_return_t
+proc_S_killpg(
+    mach_port_t                 server_port,
+    proc_pid_t                  pgrp,
+    int                         signo,
+    unsigned                    *n_sent,
+    int                         *result)
+{
+    /* Snapshot: per-match port + classification of the dispatch.
+     * We size the array to PROC_MAX_TASKS so it always fits. */
+    struct killpg_target {
+        mach_port_t port;       /* task_port for uncatchable, signal_port otherwise */
+        proc_pid_t  pid;        /* for cleanup-on-error of signal_port */
+    };
+    struct killpg_target uncatch[PROC_MAX_TASKS];
+    struct killpg_target catchable[PROC_MAX_TASKS];
+    unsigned n_uncatch = 0, n_catch = 0;
+    unsigned i;
+    unsigned sent = 0;
+    int is_uncatch;
+
+    (void)server_port;
+    *n_sent = 0;
+
+    if (!signo_valid(signo)) {
+        *result = PROC_ERR_BAD_SIGNO;
+        return KERN_SUCCESS;
+    }
+    is_uncatch = (signo == PROC_SIGKILL || signo == PROC_SIGSTOP ||
+                  signo == PROC_SIGCONT);
+
+    pthread_mutex_lock(&pid_lock);
+    for (i = 0; i < PROC_MAX_TASKS; i++) {
+        if (!pid_table[i].in_use) continue;
+        if (pid_table[i].state == PROC_STATE_ZOMBIE) continue;
+        if (pid_table[i].pgrp_id != pgrp) continue;
+        if (is_uncatch) {
+            uncatch[n_uncatch].port = pid_table[i].task_port;
+            uncatch[n_uncatch].pid  = pid_table[i].pid;
+            n_uncatch++;
+        } else if (pid_table[i].signal_port != MACH_PORT_NULL) {
+            catchable[n_catch].port = pid_table[i].signal_port;
+            catchable[n_catch].pid  = pid_table[i].pid;
+            n_catch++;
+        }
+    }
+    pthread_mutex_unlock(&pid_lock);
+
+    if (is_uncatch) {
+        for (i = 0; i < n_uncatch; i++) {
+            kern_return_t kr;
+            switch (signo) {
+            case PROC_SIGKILL: kr = task_terminate(uncatch[i].port); break;
+            case PROC_SIGSTOP: kr = task_suspend  (uncatch[i].port); break;
+            case PROC_SIGCONT: kr = task_resume   (uncatch[i].port); break;
+            default:           kr = KERN_INVALID_ARGUMENT;           break;
+            }
+            if (kr == KERN_SUCCESS) sent++;
+        }
+    } else {
+        for (i = 0; i < n_catch; i++) {
+            kern_return_t kr = send_signal_msg(catchable[i].port, signo,
+                                               PROC_PID_NONE);
+            if (kr == KERN_SUCCESS) {
+                sent++;
+            } else {
+                /* Clear dead signal_port slot, same policy as proc_kill. */
+                struct pid_entry *e;
+                pthread_mutex_lock(&pid_lock);
+                e = find_by_pid_locked(catchable[i].pid);
+                if (e && e->signal_port == catchable[i].port) {
+                    e->signal_port = MACH_PORT_NULL;
+                    pthread_mutex_unlock(&pid_lock);
+                    (void)mach_port_deallocate(mach_task_self(),
+                                               catchable[i].port);
+                } else {
+                    pthread_mutex_unlock(&pid_lock);
+                }
+            }
+        }
+    }
+
+    *n_sent = sent;
+    *result = (sent > 0) ? PROC_OK : PROC_ERR_NOT_FOUND;
+    return KERN_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
 /*  vfs.defs adapter for /proc/N/stat                                   */
 /* ------------------------------------------------------------------ */
 
@@ -571,9 +829,12 @@ vfs_close(mach_port_t fs_port, vfs_u64_t handle)
 }
 
 /*
- * Format /proc/N/stat line — Linux-compatible-ish for v0.1.0.
- * Fields we fill (rest are placeholder zero):
- *   pid (cmdline) state ppid 0 0 0 -1 0 0 0 0 0 0 0 0 ...
+ * Format /proc/N/stat line — Linux-compatible field ordering.
+ * Fields filled (rest are placeholder zero):
+ *   1 pid  2 (cmdline)  3 state  4 ppid  5 pgrp  6 session  7 tty_nr
+ *   8 tpgid  ... (the trailing zeros are POSIX accounting we don't
+ *   track yet — added incrementally per #240).  tty_nr stays 0 until
+ *   controlling-tty wiring lands in #247.
  */
 static int
 format_stat(const struct pid_entry *e, char *buf, int max)
@@ -581,8 +842,11 @@ format_stat(const struct pid_entry *e, char *buf, int max)
     int n;
     char ch[2] = { (char)e->state, '\0' };
     n = snprintf(buf, max,
-                 "%u (%s) %s %u 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
-                 (unsigned)e->pid, e->cmdline, ch, (unsigned)e->ppid);
+                 "%u (%s) %s %u %u %u 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+                 (unsigned)e->pid, e->cmdline, ch,
+                 (unsigned)e->ppid,
+                 (unsigned)e->pgrp_id,
+                 (unsigned)e->sid);
     if (n < 0)
         n = 0;
     if (n >= max)

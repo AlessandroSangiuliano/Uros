@@ -8,7 +8,8 @@
 
 /*
  * proc_types.h — wire-stable types for the proc MIG subsystem
- * (#237 / proc_server v0.1.0; signals added in v0.2.0 / #238).
+ * (#237 / proc_server v0.1.0; signals added in v0.2.0 / #238;
+ *  process groups + sessions in v0.3.0 / #239).
  */
 
 #include <stdint.h>
@@ -20,9 +21,9 @@
 /* ------------------------------------------------------------------ */
 
 #define PROC_SERVER_VERSION_MAJOR    0
-#define PROC_SERVER_VERSION_MINOR    2
+#define PROC_SERVER_VERSION_MINOR    3
 #define PROC_SERVER_VERSION_PATCH    0
-#define PROC_SERVER_VERSION_STRING   "0.2.0"
+#define PROC_SERVER_VERSION_STRING   "0.3.0"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -95,6 +96,8 @@ typedef struct proc_exit_msg {
 #define PROC_ERR_TOO_MANY    -5   /* list bigger than caller buffer */
 #define PROC_ERR_NO_SIGPORT  -6   /* target has no signal_port registered */
 #define PROC_ERR_BAD_SIGNO   -7   /* signo out of range / unknown */
+#define PROC_ERR_PERM        -8   /* setsid on pgrp leader, etc. (POSIX EPERM) */
+#define PROC_ERR_DIFF_SESS   -9   /* setpgid target pgrp in different session */
 
 /* ------------------------------------------------------------------ */
 /*  Signals (v0.2.0 / #238)                                            */
