@@ -64,14 +64,21 @@ strspn(const char *s1, const char *s2)
 {
 	const char *p = s1, *spanp;
 	char c, sc;
+	int found;
 
 	/*
 	 * Skip any characters in s2, excluding the terminating \0.
 	 */
-cont:
-	c = *p++;
-	for (spanp = s2; (sc = *spanp++) != 0;)
-		if (sc == c)
-			goto cont;
+	for (;;) {
+		c = *p++;
+		found = 0;
+		for (spanp = s2; (sc = *spanp++) != 0;)
+			if (sc == c) {
+				found = 1;
+				break;
+			}
+		if (!found)
+			break;
+	}
 	return (p - 1 - s1);
 }

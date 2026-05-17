@@ -181,23 +181,27 @@ ipc_entry_lookup(
 			IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
 			entry = IE_NULL;
 	}
-	else
-	if (index < space->is_table_size) {
-		entry = &space->is_table[index];
-		if (IE_BITS_GEN(entry->ie_bits) != MACH_PORT_GEN(name))
-			if (entry->ie_bits & IE_BITS_COLLISION) {
-				assert(space->is_tree_total > 0);
-				goto tree_lookup;
-			} else
+	else {
+		int use_tree = 0;
+		if (index < space->is_table_size) {
+			entry = &space->is_table[index];
+			if (IE_BITS_GEN(entry->ie_bits) != MACH_PORT_GEN(name)) {
+				if (entry->ie_bits & IE_BITS_COLLISION) {
+					assert(space->is_tree_total > 0);
+					use_tree = 1;
+				} else
+					entry = IE_NULL;
+			} else if (IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
 				entry = IE_NULL;
-		else if (IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
+		} else if (space->is_tree_total == 0)
 			entry = IE_NULL;
-	} else if (space->is_tree_total == 0)
-		entry = IE_NULL;
-	else
-	    tree_lookup:
-		entry = (ipc_entry_t)
+		else
+			use_tree = 1;
+
+		if (use_tree)
+			entry = (ipc_entry_t)
 				ipc_splay_tree_lookup(&space->is_tree, name);
+	}
 
 	assert((entry == IE_NULL) || IE_BITS_TYPE(entry->ie_bits));
 	return entry;

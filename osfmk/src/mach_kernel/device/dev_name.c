@@ -318,40 +318,45 @@ dev_set_indirection(
 
 	n = (char *) kalloc(strlen(name) + 1);
 	simple_lock(&dev_name_lock);
-again:
-	for (di = dev_indirect_table;
-	     di < dev_indirect_table + dev_indirect_size;
-	     di++) {
-	    if (!strcmp(di->d_name, name)) {
-		di->d_ops = ops;
-		di->d_unit = unit;
-		simple_unlock(&dev_name_lock);
-		kfree((vm_offset_t) n, strlen(name) + 1);
-		return;
+	for (;;) {
+	    int retry = 0;
+	    for (di = dev_indirect_table;
+		 di < dev_indirect_table + dev_indirect_size;
+		 di++) {
+		if (!strcmp(di->d_name, name)) {
+		    di->d_ops = ops;
+		    di->d_unit = unit;
+		    simple_unlock(&dev_name_lock);
+		    kfree((vm_offset_t) n, strlen(name) + 1);
+		    return;
+		}
 	    }
-	}
-	if (dev_indirect_size == dev_indirect_max) {
-	    dev_indirect_t otable;
-	    int max = dev_indirect_max << 1;
-	    int i;
+	    if (dev_indirect_size == dev_indirect_max) {
+		dev_indirect_t otable;
+		int max = dev_indirect_max << 1;
+		int i;
 
-	    simple_unlock(&dev_name_lock);
-	    di = (dev_indirect_t) kalloc(max * sizeof(struct dev_indirect));
-	    simple_lock(&dev_name_lock);
-	    if (max != (dev_indirect_max << 1)) {
-		kfree((vm_offset_t) di, max * sizeof(struct dev_indirect));
-		goto again;
+		simple_unlock(&dev_name_lock);
+		di = (dev_indirect_t) kalloc(max * sizeof(struct dev_indirect));
+		simple_lock(&dev_name_lock);
+		if (max != (dev_indirect_max << 1)) {
+		    kfree((vm_offset_t) di, max * sizeof(struct dev_indirect));
+		    retry = 1;
+		} else {
+		    dev_indirect_max = max;
+		    for (i = 0; i < dev_indirect_size; i++)
+			di[i] = dev_indirect_table[i];
+		    otable = dev_indirect_table;
+		    dev_indirect_table = di;
+		    simple_unlock(&dev_name_lock);
+		    max >>= 1;
+		    kfree((vm_offset_t) otable, max * sizeof(struct dev_indirect));
+		    simple_lock(&dev_name_lock);
+		    retry = 1;
+		}
 	    }
-	    dev_indirect_max = max;
-	    for (i = 0; i < dev_indirect_size; i++)
-		di[i] = dev_indirect_table[i];
-	    otable = dev_indirect_table;
-	    dev_indirect_table = di;
-    	    simple_unlock(&dev_name_lock);
-	    max >>= 1;
-	    kfree((vm_offset_t) otable, max * sizeof(struct dev_indirect));
-	    simple_lock(&dev_name_lock);
-	    goto again;
+	    if (!retry)
+		break;
 	}
 	di->d_name = n;
 	strcpy(di->d_name, name);

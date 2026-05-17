@@ -717,36 +717,36 @@ aout_db_search_symbol(
 	    first_pass = TRUE;
 	}
 
-    try_again:
-	for (cp = ep-1; cp >= sp; cp--) {
-	    if (cp->n_un.n_name == 0)
-		continue;
-	    if ((cp->n_type & N_STAB) != 0)
-		continue;
-	    if (strategy == DB_STGY_XTRN && (cp->n_type & N_EXT) == 0)
-		continue;
-	    if (off >= cp->n_value) {
-		if (off - cp->n_value < diff) {
-		    diff = off - cp->n_value;
-		    symp = cp;
-		    if (diff == 0 && (cp->n_type & N_EXT))
-			    break;
-		}
-		else if (off - cp->n_value == diff) {
-		    if (symp == 0)
+	for (;;) {
+	    for (cp = ep-1; cp >= sp; cp--) {
+		if (cp->n_un.n_name == 0)
+		    continue;
+		if ((cp->n_type & N_STAB) != 0)
+		    continue;
+		if (strategy == DB_STGY_XTRN && (cp->n_type & N_EXT) == 0)
+		    continue;
+		if (off >= cp->n_value) {
+		    if (off - cp->n_value < diff) {
+			diff = off - cp->n_value;
 			symp = cp;
-		    else if ((symp->n_type & N_EXT) == 0 &&
-				(cp->n_type & N_EXT) != 0)
-			symp = cp;	/* pick the external symbol */
+			if (diff == 0 && (cp->n_type & N_EXT))
+				break;
+		    }
+		    else if (off - cp->n_value == diff) {
+			if (symp == 0)
+			    symp = cp;
+			else if ((symp->n_type & N_EXT) == 0 &&
+				    (cp->n_type & N_EXT) != 0)
+			    symp = cp;	/* pick the external symbol */
+		    }
 		}
 	    }
+	    if (symp != 0 || !first_pass)
+		break;
+	    first_pass = FALSE;
+	    sp = (struct nlist *) symtab->start;
 	}
 	if (symp == 0) {
-	    if (first_pass) {
-		first_pass = FALSE;
-		sp = (struct nlist *) symtab->start;
-		goto try_again;
-	    }
 	    *diffp = off;
 	}
 	else {

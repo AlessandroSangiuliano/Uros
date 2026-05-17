@@ -241,34 +241,36 @@ i386_set_ldt(
 
 	pcb = thr_act->mact.pcb;
 	new_ldt = 0;
-    Retry:
-	simple_lock(&pcb->lock);
-	old_ldt = pcb->ims.ldt;
+	for (;;) {
+	    simple_lock(&pcb->lock);
+	    old_ldt = pcb->ims.ldt;
+	    if (!(old_ldt == 0 ||
+		  old_ldt->desc.limit_low + 1 < ldt_size_needed))
+		break;
+	    if (new_ldt != 0)
+		break;
+	    /*
+	     * No old LDT, or not big enough — drop lock, allocate, retry.
+	     */
+	    simple_unlock(&pcb->lock);
+
+	    new_ldt = (user_ldt_t) kalloc(ldt_size_needed
+					  + sizeof(struct real_descriptor));
+	    new_ldt->desc.limit_low   = ldt_size_needed - 1;
+	    new_ldt->desc.limit_high  = 0;
+	    new_ldt->desc.base_low    =
+			    ((vm_offset_t)&new_ldt->ldt[0]) & 0xffff;
+	    new_ldt->desc.base_med    =
+			    (((vm_offset_t)&new_ldt->ldt[0]) >> 16)
+					     & 0xff;
+	    new_ldt->desc.base_high   =
+			    ((vm_offset_t)&new_ldt->ldt[0]) >> 24;
+	    new_ldt->desc.access      = ACC_P | ACC_LDT;
+	    new_ldt->desc.granularity = 0;
+	}
 	if (old_ldt == 0 ||
 	    old_ldt->desc.limit_low + 1 < ldt_size_needed)
 	{
-	    /*
-	     * No old LDT, or not big enough
-	     */
-	    if (new_ldt == 0) {
-		simple_unlock(&pcb->lock);
-
-		new_ldt = (user_ldt_t) kalloc(ldt_size_needed
-					      + sizeof(struct real_descriptor));
-		new_ldt->desc.limit_low   = ldt_size_needed - 1;
-		new_ldt->desc.limit_high  = 0;
-		new_ldt->desc.base_low    = 
-				((vm_offset_t)&new_ldt->ldt[0]) & 0xffff;
-		new_ldt->desc.base_med    = 
-				(((vm_offset_t)&new_ldt->ldt[0]) >> 16)
-						 & 0xff;
-		new_ldt->desc.base_high   = 
-				((vm_offset_t)&new_ldt->ldt[0]) >> 24;
-		new_ldt->desc.access      = ACC_P | ACC_LDT;
-		new_ldt->desc.granularity = 0;
-
-		goto Retry;
-	    }
 
 	    /*
 	     * Have new LDT.  If there was a an old ldt, copy descriptors

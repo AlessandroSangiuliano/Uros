@@ -266,7 +266,7 @@ panic(const char *str, ...)
 #endif /* NCONSFEED */
 #endif /* PPC */
 
- restart:
+	for (;;) {
 	PANIC_LOCK();
 	if (panicstr) {
 	    if (cpu_number() != paniccpu) {
@@ -279,7 +279,7 @@ panic(const char *str, ...)
 		while (panicwait)
 		    continue;
 		Debugger("panic");
-		goto restart;
+		continue;	/* restart loop */
 	    } else {
 		Debugger("Double panic");
 		PANIC_UNLOCK();
@@ -292,6 +292,8 @@ panic(const char *str, ...)
 		/* NOTREACHED */
 #endif	/* MACH_KDB || MACH_KGDB */
 	    }
+	}
+	break;	/* fall through to set panicstr */
 	}
 	panicstr = str;
 	paniccpu = cpu_number();

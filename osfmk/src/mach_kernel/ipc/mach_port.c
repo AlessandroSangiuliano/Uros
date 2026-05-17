@@ -1564,6 +1564,8 @@ mach_port_get_attributes(
                         return kr;
                 /* port is locked and active */
 
+                {
+                int have_pset = 0;
                 if (port->ip_pset != IPS_NULL) {
                         ipc_pset_t pset = port->ip_pset;
 
@@ -1571,7 +1573,7 @@ mach_port_get_attributes(
                         if (!ips_active(pset)) {
                                 ipc_pset_remove(pset, port);
                                 ips_check_unlock(pset);
-                                goto no_port_set;
+                                /* pset is dead — fall through to no_pset path */
                         } else {
                                 statusp->mps_pset = pset->ips_local_name;
                                 imq_lock(&pset->ips_messages);
@@ -1579,13 +1581,15 @@ mach_port_get_attributes(
                                 imq_unlock(&pset->ips_messages);
                                 ips_unlock(pset);
                                 assert(MACH_PORT_VALID(statusp->mps_pset));
+                                have_pset = 1;
                         }
-                } else {
-                no_port_set:
+                }
+                if (!have_pset) {
                         statusp->mps_pset = MACH_PORT_NULL;
                         imq_lock(&port->ip_messages);
                         statusp->mps_seqno = port->ip_seqno;
                         imq_unlock(&port->ip_messages);
+                }
                 }
                 statusp->mps_mscount = port->ip_mscount;
                 statusp->mps_qlimit = port->ip_qlimit;

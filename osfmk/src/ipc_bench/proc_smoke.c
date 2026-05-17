@@ -160,40 +160,40 @@ bench_proc_smoke(void)
     /* 5. Subscribe to exit, then terminate, then receive. */
     kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
                             &notify_recv);
-    if (kr) { printf("  proc: notify port_allocate kr=%d\n", kr); goto out; }
-    /* MIG generates the user stub with mach_port_make_send_once_t for
-     * notify_port — it does the receive→send-once disposition switch
-     * on the wire, no manual mach_port_insert_right needed. */
-    notify_send = notify_recv;
+    if (kr) {
+        printf("  proc: notify port_allocate kr=%d\n", kr);
+    } else {
+        /* MIG generates the user stub with mach_port_make_send_once_t for
+         * notify_port — it does the receive→send-once disposition switch
+         * on the wire, no manual mach_port_insert_right needed. */
+        notify_send = notify_recv;
 
-    rc = 0;
-    kr = proc_subscribe_exit(proc_port, pid, notify_send, &rc);
-    if (kr != KERN_SUCCESS || rc != 0) {
-        printf("  proc: subscribe_exit failed kr=%d rc=%d — FAIL\n",
-               kr, rc);
-        goto out;
-    }
-
-    (void)task_terminate(new_task);
-
-    {
-        proc_exit_msg_t reply;
-        memset(&reply, 0, sizeof(reply));
-        reply.head.msgh_local_port = notify_recv;
-        kr = mach_msg(&reply.head,
-                      MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-                      0, sizeof(reply), notify_recv,
-                      /* timeout ms */ 1000, MACH_PORT_NULL);
-        if (kr == KERN_SUCCESS) {
-            printf("  proc: exit notification: pid=%u code=%d\n",
-                   reply.pid, reply.exit_code);
-            printf("  proc: PASS\n");
+        rc = 0;
+        kr = proc_subscribe_exit(proc_port, pid, notify_send, &rc);
+        if (kr != KERN_SUCCESS || rc != 0) {
+            printf("  proc: subscribe_exit failed kr=%d rc=%d — FAIL\n",
+                   kr, rc);
         } else {
-            printf("  proc: notify timeout kr=%d — FAIL\n", kr);
+            proc_exit_msg_t reply;
+
+            (void)task_terminate(new_task);
+
+            memset(&reply, 0, sizeof(reply));
+            reply.head.msgh_local_port = notify_recv;
+            kr = mach_msg(&reply.head,
+                          MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                          0, sizeof(reply), notify_recv,
+                          /* timeout ms */ 1000, MACH_PORT_NULL);
+            if (kr == KERN_SUCCESS) {
+                printf("  proc: exit notification: pid=%u code=%d\n",
+                       reply.pid, reply.exit_code);
+                printf("  proc: PASS\n");
+            } else {
+                printf("  proc: notify timeout kr=%d — FAIL\n", kr);
+            }
         }
     }
 
-out:
     if (notify_recv != MACH_PORT_NULL)
         (void)mach_port_destroy(mach_task_self(), notify_recv);
     if (new_thread != MACH_PORT_NULL)

@@ -1964,25 +1964,24 @@ thread_doassign(
 
 	/*
 	 *	Lock both psets now, use ordering to avoid deadlocks.
+	 *	Retry if new_pset is inactive — reassigning to default_pset
+	 *	requires re-acquiring both pset locks in order.
 	 */
-Restart:
-	if (pset < new_pset) {
-	    pset_lock(pset);
-	    pset_lock(new_pset);
-	} else {
-	    pset_lock(new_pset);
-	    pset_lock(pset);
-	}
+	for (;;) {
+	    if (pset < new_pset) {
+		pset_lock(pset);
+		pset_lock(new_pset);
+	    } else {
+		pset_lock(new_pset);
+		pset_lock(pset);
+	    }
 
-	/*
-	 *	Check if new_pset is ok to assign to.  If not, reassign
-	 *	to default_pset.
-	 */
-	if (!new_pset->active) {
+	    if (new_pset->active)
+		break;
+
 	    pset_unlock(pset);
 	    pset_unlock(new_pset);
 	    new_pset = &default_pset;
-	    goto Restart;
 	}
 
 	/*

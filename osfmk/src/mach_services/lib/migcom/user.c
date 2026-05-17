@@ -2330,9 +2330,13 @@ WriteShortCircInArgAfter(FILE *file, register argument_t *arg)
 				((arg->argFlags & flDealloc) ||
 				 !(arg->argFlags & flConst))
 		)) {
-		/* Need to dealloc the temporary: */
+		/* Need to dealloc the temporary.  vm_deallocate's second
+		 * argument is a vm_address_t (integer), not a pointer —
+		 * historical migcom emitted "(vm_address_t *)" which
+		 * compiles fine on K&R / pre-strict-int compilers but
+		 * is rejected by modern gcc with -Wint-conversion. */
 		fprintf(file, "\t(void)vm_deallocate(mach_task_self(),");
-		fprintf(file, " (vm_address_t *) _%sTemp_, %s);\n",
+		fprintf(file, " (vm_address_t) _%sTemp_, %s);\n",
 					    arg->argVarName, size);
 	    }
 	    break;
@@ -2383,9 +2387,10 @@ WriteShortCircOutArgAfter(FILE *file, register argument_t *arg)
 				    arg->argVarName, size, arg->argVarName);
 		if (!argIsIn(arg) && (arg->argFlags & flDealloc) &&
 					(arg->argFlags & flOverwrite)) {
-		    /* Deallocate argument returned by server */
+		    /* Deallocate argument returned by server.  Same
+		     * vm_deallocate signature fix as above. */
 		    fprintf(file, "\t(void)vm_deallocate(mach_task_self(),");
-		    fprintf(file, " (vm_address_t *) %s%s, %s);\n",
+		    fprintf(file, " (vm_address_t) %s%s, %s);\n",
 				    (arg->argByReferenceUser ? "*" : ""),
 				    arg->argVarName, size);
 		}

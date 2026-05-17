@@ -2698,8 +2698,10 @@ idle_thread_continue(void)
 		/*
 		 *	This is not a switch statement to avoid the
 		 *	bounds checking code in the common case.
+		 *	The PROCESSOR_IDLE branch may re-loop here if state
+		 *	changes under us.
 		 */
-retry:
+	    for (;;) {
 		state = myprocessor->state;
 		if (state == PROCESSOR_DISPATCHING) {
 			/*
@@ -2779,7 +2781,7 @@ retry:
 				 *	Something happened, try again.
 				 */
 				simple_unlock(&pset->idle_lock);
-				goto retry;
+				continue;
 			}
 			/*
 			 *	Processor was not dispatched (Rare).
@@ -2843,6 +2845,8 @@ retry:
 				cpu_state(mycpu), mycpu);
 			panic("idle_thread");
 		}
+		break;	/* unreachable, all branches above return or panic */
+	    } /* end for(;;) retry */
 
 		splx(s);
 	}

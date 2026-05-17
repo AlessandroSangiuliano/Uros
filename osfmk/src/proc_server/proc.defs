@@ -89,3 +89,37 @@ routine proc_list(
 	out	entries		: proc_entry_array;
 	out	count		: unsigned;
 	out	result		: int);
+
+/*
+ * Register a signal_port for a pid (#238 / v0.2.0).  The caller passes
+ * a send right; proc_server stores it and uses it on every subsequent
+ * proc_kill for that pid (catchable signals) and on SIGCHLD delivery
+ * to the parent.  Re-calling replaces the previous port (old send right
+ * is deallocated server-side).  v0.2.0 keeps one signal_port per pid;
+ * a future pthread_sigmask might want per-thread, but that policy
+ * lives in libposix-uros.
+ */
+routine proc_set_signal_port(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	in	signal_port	: mach_port_t;
+	out	result		: int);
+
+/*
+ * Send a signal to a pid (#238 / v0.2.0).
+ *   SIGKILL  → task_terminate(target.task_port)         (uncatchable)
+ *   SIGSTOP  → task_suspend(target.task_port)           (uncatchable)
+ *   SIGCONT  → task_resume(target.task_port)
+ *   any other valid signo → mach_msg(proc_signal_msg_t) on
+ *                           target.signal_port (PROC_ERR_NO_SIGPORT
+ *                           if none registered).
+ *
+ * sender_pid is wire-filled server-side with PROC_PID_NONE — v0.2.0
+ * doesn't yet authenticate the caller; libposix-uros will pass
+ * getpid() once it learns its own pid.  (Reserved for v0.3.0.)
+ */
+routine proc_kill(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	in	signo		: int;
+	out	result		: int);

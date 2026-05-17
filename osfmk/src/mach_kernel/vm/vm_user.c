@@ -762,30 +762,35 @@ vm_msync(
 		new_msr->length = flush_size;
 		new_msr->object = object;
 		new_msr->flag = VM_MSYNC_SYNCHRONIZING;
-re_iterate:
-		queue_iterate(&object->msr_q, msr, msync_req_t, msr_q) {
-			/*
-			 * need to check for overlapping entry, if found, wait
-			 * on overlapping msr to be done, then reiterate
-			 */
-			msr_lock(msr);
-			if (msr->flag == VM_MSYNC_SYNCHRONIZING &&
-			    ((offset >= msr->offset && 
-			      offset < (msr->offset + msr->length)) ||
-			     (msr->offset >= offset &&
-			      msr->offset < (offset + flush_size))))
-			{
-				assert_wait((event_t) msr, TRUE);
+
+		/* Look for an overlapping in-progress request; if found,
+		 * wait for it to finish and re-iterate from scratch. */
+		{
+		int restart_iterate = 1;
+		while (restart_iterate) {
+			restart_iterate = 0;
+			queue_iterate(&object->msr_q, msr, msync_req_t, msr_q) {
+				msr_lock(msr);
+				if (msr->flag == VM_MSYNC_SYNCHRONIZING &&
+				    ((offset >= msr->offset &&
+				      offset < (msr->offset + msr->length)) ||
+				     (msr->offset >= offset &&
+				      msr->offset < (offset + flush_size))))
+				{
+					assert_wait((event_t) msr, TRUE);
+					msr_unlock(msr);
+					vm_object_unlock(object);
+					thread_block((void (*)(void))0);
+					if (current_act()->handlers)
+						act_execute_returnhandlers();
+					vm_object_lock(object);
+					restart_iterate = 1;
+					break;	/* exits queue_iterate */
+				}
 				msr_unlock(msr);
-				vm_object_unlock(object);
-				thread_block((void (*)(void))0);
-				if (current_act()->handlers)
-					act_execute_returnhandlers();
-				vm_object_lock(object);
-				goto re_iterate;
 			}
-			msr_unlock(msr);
-		}/* queue_iterate */
+		}
+		}
 
 		queue_enter(&object->msr_q, new_msr, msync_req_t, msr_q);
 		vm_object_unlock(object);

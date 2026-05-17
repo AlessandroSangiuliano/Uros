@@ -407,24 +407,26 @@ seqnos_memory_object_create(
 	if (vs == VSTRUCT_NULL)
 		return KERN_RESOURCE_SHORTAGE;
 
-    rename_it:
-	kr = mach_port_rename(default_pager_self,
-			      new_mem_obj, (mach_port_t)vs_to_port(vs));
-	if (kr != KERN_SUCCESS) {
-		vstruct_t	vs1;
-
+	for (;;) {
+		kr = mach_port_rename(default_pager_self,
+				      new_mem_obj,
+				      (mach_port_t)vs_to_port(vs));
+		if (kr == KERN_SUCCESS)
+			break;
 		if (kr != KERN_NAME_EXISTS)
 			Panic("rename");
-		vs1 = (vstruct_t) kalloc(sizeof (struct vstruct));
-		*vs1 = *vs;
+		{
+			vstruct_t vs1 = (vstruct_t)
+				kalloc(sizeof (struct vstruct));
+			*vs1 = *vs;
 
-		VSL_LOCK();
-		queue_enter(&vstruct_list.vsl_leak_queue, vs, vstruct_t,
-			    vs_links);
-		VSL_UNLOCK();
+			VSL_LOCK();
+			queue_enter(&vstruct_list.vsl_leak_queue, vs,
+				    vstruct_t, vs_links);
+			VSL_UNLOCK();
 
-		vs = vs1;
-		goto rename_it;
+			vs = vs1;
+		}
 	}
 
 	new_mem_obj = (mach_port_t) vs_to_port(vs);
@@ -931,14 +933,16 @@ default_pager_object_create(
 
 	vs = vs_object_create(size);
 
-    rename_it:
-	port = (mach_port_t) vs_to_port(vs);
-	result = mach_port_allocate_name(default_pager_self,
-					 MACH_PORT_RIGHT_RECEIVE, port);
-	if (result != KERN_SUCCESS) {
-		vstruct_t	vs1;
+	for (;;) {
+		vstruct_t vs1;
 
-		if (result != KERN_NAME_EXISTS) 
+		port = (mach_port_t) vs_to_port(vs);
+		result = mach_port_allocate_name(default_pager_self,
+						 MACH_PORT_RIGHT_RECEIVE,
+						 port);
+		if (result == KERN_SUCCESS)
+			break;
+		if (result != KERN_NAME_EXISTS)
 			return result;
 
 		vs1 = (vstruct_t) kalloc(sizeof (struct vstruct));
@@ -948,7 +952,6 @@ default_pager_object_create(
 			    vs_links);
 		VSL_UNLOCK();
 		vs = vs1;
-		goto rename_it;
 	}
 
 	/*
@@ -963,6 +966,26 @@ default_pager_object_create(
 	*mem_obj = port;
 
 	return KERN_SUCCESS;
+}
+
+static kern_return_t
+dpo_nomemory(default_pager_object_array_t	objects_inline,
+	     mach_port_array_t			ports_inline,
+	     default_pager_object_t		*objects,
+	     mach_port_t			*ports,
+	     unsigned int			num_objects,
+	     vm_offset_t			oaddr, vm_size_t osize,
+	     vm_offset_t			paddr, vm_size_t psize)
+{
+	unsigned int i;
+	for (i = 0; i < num_objects; i++)
+		(void) mach_port_deallocate(default_pager_self, ports[i]);
+
+	if (objects != objects_inline)
+		(void) vm_deallocate(default_pager_self, oaddr, osize);
+	if (ports != ports_inline)
+		(void) vm_deallocate(default_pager_self, paddr, psize);
+	return KERN_RESOURCE_SHORTAGE;
 }
 
 kern_return_t
@@ -1018,7 +1041,9 @@ default_pager_objects(
 
 		kr = vm_allocate_wired(default_pager_self, &newaddr, newsize, TRUE);
 		if (kr != KERN_SUCCESS)
-			goto nomemory;
+			return dpo_nomemory(*objectsp, *portsp,
+					    objects, ports, num_objects,
+					    oaddr, osize, paddr, psize);
 
 		oaddr = newaddr;
 		osize = newsize;
@@ -1034,7 +1059,9 @@ default_pager_objects(
 
 		kr = vm_allocate_wired(default_pager_self, &newaddr, newsize, TRUE);
 		if (kr != KERN_SUCCESS)
-			goto nomemory;
+			return dpo_nomemory(*objectsp, *portsp,
+					    objects, ports, num_objects,
+					    oaddr, osize, paddr, psize);
 
 		paddr = newaddr;
 		psize = newsize;
@@ -1068,8 +1095,13 @@ default_pager_objects(
 		/*
 		 * Avoid interfering with normal operations
 		 */
-		if (!VS_MAP_TRY_LOCK(entry))
-			goto not_this_one;
+		if (!VS_MAP_TRY_LOCK(entry)) {
+			/* skip — do not return garbage */
+			objects[num_objects].dpo_object = (vm_offset_t) 0;
+			objects[num_objects].dpo_size = 0;
+			ports  [num_objects++] = MACH_PORT_NULL;
+			continue;
+		}
 		size = ps_vstruct_allocated_size(entry);
 		VS_MAP_UNLOCK(entry);
 
@@ -1083,7 +1115,11 @@ default_pager_objects(
 			 * or memory_object_init.
 			 */
 			VS_UNLOCK(entry);
-			goto not_this_one;
+			/* skip — do not return garbage */
+			objects[num_objects].dpo_object = (vm_offset_t) 0;
+			objects[num_objects].dpo_size = 0;
+			ports  [num_objects++] = MACH_PORT_NULL;
+			continue;
 		}
 
 		/*
@@ -1117,16 +1153,6 @@ default_pager_objects(
 		objects[num_objects].dpo_object = (vm_offset_t) entry;
 		objects[num_objects].dpo_size = size;
 		ports  [num_objects++] = port;
-		continue;
-
-	    not_this_one:
-		/*
-		 * Do not return garbage
-		 */
-		objects[num_objects].dpo_object = (vm_offset_t) 0;
-		objects[num_objects].dpo_size = 0;
-		ports  [num_objects++] = MACH_PORT_NULL;
-
 	}
 
 	VSL_UNLOCK();
@@ -1188,22 +1214,6 @@ default_pager_objects(
 	}
 
 	return KERN_SUCCESS;
-
-    nomemory:
-	{
-		register int	i;
-		for (i = 0; i < num_objects; i++)
-			(void) mach_port_deallocate(default_pager_self,
-						    ports[i]);
-	}
-
-	if (objects != *objectsp)
-		(void) vm_deallocate(default_pager_self, oaddr, osize);
-
-	if (ports != *portsp)
-		(void) vm_deallocate(default_pager_self, paddr, psize);
-
-	return KERN_RESOURCE_SHORTAGE;
 }
 
 kern_return_t
@@ -1229,6 +1239,7 @@ default_pager_object_pages(
 
 	for (;;) {
 		vstruct_t	entry;
+		int		found = 0;
 
 		VSL_LOCK();
 		queue_iterate(&vstruct_list.vsl_queue, entry, vstruct_t,
@@ -1236,19 +1247,19 @@ default_pager_object_pages(
 			VS_LOCK(entry);
 			if (entry->vs_object_name == object) {
 				VSL_UNLOCK();
-				goto found_object;
+				found = 1;
+				break;
 			}
 			VS_UNLOCK(entry);
 		}
-		VSL_UNLOCK();
-
-		/* did not find the object */
-
-		if (pages != *pagesp)
-			(void) vm_deallocate(default_pager_self, addr, size);
-		return KERN_INVALID_ARGUMENT;
-
-	    found_object:
+		if (!found) {
+			VSL_UNLOCK();
+			/* did not find the object */
+			if (pages != *pagesp)
+				(void) vm_deallocate(default_pager_self,
+						     addr, size);
+			return KERN_INVALID_ARGUMENT;
+		}
 
 		if (!VS_MAP_TRY_LOCK(entry)) {
 			/* oh well bad luck */

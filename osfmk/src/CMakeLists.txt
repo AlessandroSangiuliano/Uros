@@ -109,6 +109,12 @@ if(OSFMK_BUILD_CAP_TEST)
   add_subdirectory(cap_test)
 endif()
 
+# Build kernel242_test (#242 no-goto kernel exerciser)
+add_subdirectory(kernel242_test)
+
+# Build sig_test (#238 proc_server signal exerciser)
+add_subdirectory(sig_test)
+
 # Build gpustat userspace probe for gpu_query_stats (#203)
 if(OSFMK_BUILD_GPUSTAT)
   add_subdirectory(gpustat)

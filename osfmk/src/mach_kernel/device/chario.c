@@ -708,7 +708,8 @@ char_read_quoted(
 		break;
 	    }
 	    if ((char)c == TTY_QUOTEC) {
-		switch (getc(&tp->t_inq)) {
+		int q = getc(&tp->t_inq);
+		switch (q) {
 		case -1:
 		    printf("char_read_quoted: quote without quoted\n");
 		    break;
@@ -717,11 +718,9 @@ char_read_quoted(
 		    nread++;
 		    break;
 		case TQ_BREAK:
-		    tp->t_outofband = TOOB_BREAK;
-		    goto getarg;
 		case TQ_BAD_PARITY:
-		    tp->t_outofband = TOOB_BAD_PARITY;
-getarg:
+		    tp->t_outofband = (q == TQ_BREAK) ?
+				      TOOB_BREAK : TOOB_BAD_PARITY;
 		    if ((c = getc(&tp->t_inq)) < 0) {
 			printf("char_read_quoted: missing event arg\n");
 			tp->t_outofbandarg = 0;

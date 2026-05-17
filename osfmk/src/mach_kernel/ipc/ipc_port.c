@@ -597,6 +597,7 @@ ipc_port_set_seqno(
 	ipc_port_t		port,
 	mach_port_seqno_t	seqno)
 {
+	int set_via_pset = 0;
 	if (port->ip_pset != IPS_NULL) {
 		ipc_pset_t pset = port->ip_pset;
 
@@ -604,14 +605,15 @@ ipc_port_set_seqno(
 		if (!ips_active(pset)) {
 			ipc_pset_remove(pset, port);
 			ips_check_unlock(pset);
-			goto no_port_set;
+			/* pset is dead — fall through to port path */
 		} else {
 			imq_lock(&pset->ips_messages);
 			port->ip_seqno = seqno;
 			imq_unlock(&pset->ips_messages);
+			set_via_pset = 1;
 		}
-	} else {
-	    no_port_set:
+	}
+	if (!set_via_pset) {
 		imq_lock(&port->ip_messages);
 		port->ip_seqno = seqno;
 		imq_unlock(&port->ip_messages);
@@ -1024,16 +1026,20 @@ ipc_port_check_circularity(
 	 */
 
 	ip_lock(port);
+	{
+	int fast_path = 0;
 	if (ip_lock_try(dest)) {
 		if (!ip_active(dest) ||
 		    (dest->ip_receiver_name != MACH_PORT_NULL) ||
-		    (dest->ip_destination == IP_NULL))
-			goto not_circular;
-
-		/* dest is in transit; further checking necessary */
-
-		ip_unlock(dest);
+		    (dest->ip_destination == IP_NULL)) {
+			fast_path = 1;
+		} else {
+			/* dest is in transit; further checking necessary */
+			ip_unlock(dest);
+		}
 	}
+
+	if (!fast_path) {
 	ip_unlock(port);
 
 	ipc_port_multiple_lock(); /* massive serialization */
@@ -1091,8 +1097,8 @@ ipc_port_check_circularity(
 
 	ip_lock(port);
 	ipc_port_multiple_unlock();
-
-    not_circular:
+	} /* close if (!fast_path) */
+	} /* close fast_path scope */
 
 	/* port is in limbo */
 

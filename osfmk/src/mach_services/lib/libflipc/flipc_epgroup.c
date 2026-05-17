@@ -255,17 +255,15 @@ static FLIPC_buffer_t flipc_epgroup_find_buffer(flipc_epgroup_t epgroup,
     }
     
     /* I have the endpoint group simple lock.  */
-    do {
-
-	/* For when we find a buffer, but lose the version update race.  */
-      try_again:		
+    for (;;) {
+	int retry = 0;
 
 	/* Save current version information.  */
 	version_count = epgroup->pail_version;
 
 	/* Search the epgroup's endpoints.  */
 	current_cbptr = epgroup->pail_first_endpoint;
-	
+
 	while (current_cbptr != FLIPC_CBPTR_NULL) {
 	    flipc_endpoint_t endpoint = FLIPC_ENDPOINT_PTR(current_cbptr);
 	    flipc_cb_ptr acquire_cbptr, tmp_cbptr;
@@ -288,7 +286,8 @@ static FLIPC_buffer_t flipc_epgroup_find_buffer(flipc_epgroup_t epgroup,
 		   from the epgroup and deallocated on us.  Let go
 		   of the endpoint lock, and start over.  */
 		flipc_simple_lock_release(&endpoint->pail_lock);
-		goto try_again;
+		retry = 1;
+		break;
 	    }
 
 	    /* Is there a buffer on this endpoint? */
@@ -307,7 +306,8 @@ static FLIPC_buffer_t flipc_epgroup_find_buffer(flipc_epgroup_t epgroup,
 		   time around the loop.  */
 		flipc_simple_lock_release(&endpoint->pail_lock);
 		/* Only endpoint group lock held here.  */
-		goto try_again;
+		retry = 1;
+		break;
 	    }
 	    
 	    /* There wasn't a buffer on that endpoint; move on.  */
@@ -317,7 +317,11 @@ static FLIPC_buffer_t flipc_epgroup_find_buffer(flipc_epgroup_t epgroup,
 	    /* Note that we leave the epgroup simple lock held.  */
 	}
 
-    } while (version_count != epgroup->pail_version);
+	if (retry)
+	    continue;
+	if (version_count == epgroup->pail_version)
+	    break;
+    }
 
     /* Now we release the epgroup simple lock.  */
     flipc_simple_lock_release(&epgroup->pail_lock);

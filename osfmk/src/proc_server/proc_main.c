@@ -73,6 +73,11 @@ struct pid_entry {
     /* Single subscriber for v0.1.0; v0.x.0 widens to a list. */
     mach_port_t     exit_notify;     /* send-once right, MACH_PORT_NULL if none */
 
+    /* Signal port (v0.2.0 / #238) — send right held by proc_server;
+     * catchable signals are delivered here, and SIGCHLD goes to the
+     * parent's slot when this pid dies. */
+    mach_port_t     signal_port;
+
     /* Open-handle table for /proc/N/stat — one slot per pid_entry. */
     int             stat_handle_in_use;
     vfs_u64_t       stat_handle_id;
@@ -175,6 +180,7 @@ proc_S_register(
     e->state      = PROC_STATE_RUNNING;
     e->exit_code  = 0;
     e->exit_notify = MACH_PORT_NULL;
+    e->signal_port = MACH_PORT_NULL;
     e->stat_handle_in_use = 0;
     (void)strncpy(e->cmdline, cmdline, sizeof(e->cmdline) - 1);
     e->cmdline[sizeof(e->cmdline) - 1] = '\0';
@@ -309,6 +315,153 @@ proc_S_list(
     *entriesCnt = (mach_msg_type_number_t)(sizeof(proc_entry_t) * n);
     *count      = n;
     *result     = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Signal delivery (v0.2.0 / #238)                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Send proc_signal_msg_t to a signal_port.  COPY_SEND so the server
+ * keeps the right for subsequent kills.  Returns the mach_msg kr —
+ * caller decides whether to clear the slot on dead-name errors.
+ */
+static kern_return_t
+send_signal_msg(mach_port_t sigport, int signo, proc_pid_t sender)
+{
+    proc_signal_msg_t msg;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.head.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    msg.head.msgh_size        = sizeof(msg) - sizeof(mach_msg_trailer_t);
+    msg.head.msgh_remote_port = sigport;
+    msg.head.msgh_local_port  = MACH_PORT_NULL;
+    msg.head.msgh_id          = PROC_SIGNAL_MSGID;
+    msg.signo                 = signo;
+    msg.sender_pid            = sender;
+
+    return mach_msg(&msg.head, MACH_SEND_MSG,
+                    sizeof(msg) - sizeof(mach_msg_trailer_t),
+                    0, MACH_PORT_NULL,
+                    MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+static int
+signo_valid(int signo)
+{
+    return signo > 0 && signo < PROC_NSIG;
+}
+
+kern_return_t
+proc_S_set_signal_port(
+    mach_port_t                 server_port,
+    proc_pid_t                  pid,
+    mach_port_t                 signal_port,
+    int                         *result)
+{
+    struct pid_entry *e;
+    mach_port_t old = MACH_PORT_NULL;
+
+    (void)server_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        if (signal_port != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), signal_port);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    old = e->signal_port;
+    e->signal_port = signal_port;
+    pthread_mutex_unlock(&pid_lock);
+
+    if (old != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), old);
+
+    *result = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+kern_return_t
+proc_S_kill(
+    mach_port_t                 server_port,
+    proc_pid_t                  pid,
+    int                         signo,
+    int                         *result)
+{
+    struct pid_entry *e;
+    mach_port_t task = MACH_PORT_NULL;
+    mach_port_t sigport = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    (void)server_port;
+
+    if (!signo_valid(signo)) {
+        *result = PROC_ERR_BAD_SIGNO;
+        return KERN_SUCCESS;
+    }
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (!e || e->state == PROC_STATE_ZOMBIE) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    /* Uncatchable signals act on the task port; catchable ones go to
+     * the signal_port via mach_msg.  Snapshot the rights under the
+     * lock, release the lock before issuing the kernel/mach call. */
+    if (signo == PROC_SIGKILL || signo == PROC_SIGSTOP ||
+        signo == PROC_SIGCONT) {
+        task = e->task_port;
+    } else {
+        sigport = e->signal_port;
+    }
+    pthread_mutex_unlock(&pid_lock);
+
+    switch (signo) {
+    case PROC_SIGKILL:
+        kr = task_terminate(task);
+        *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
+        return KERN_SUCCESS;
+    case PROC_SIGSTOP:
+        kr = task_suspend(task);
+        *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
+        return KERN_SUCCESS;
+    case PROC_SIGCONT:
+        kr = task_resume(task);
+        *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
+        return KERN_SUCCESS;
+    default:
+        break;
+    }
+
+    if (sigport == MACH_PORT_NULL) {
+        *result = PROC_ERR_NO_SIGPORT;
+        return KERN_SUCCESS;
+    }
+
+    kr = send_signal_msg(sigport, signo, PROC_PID_NONE);
+    if (kr != KERN_SUCCESS) {
+        /* Signal port is dead or gone — clear the slot so future kills
+         * skip it.  Re-lock and clear only if no one swapped it in. */
+        pthread_mutex_lock(&pid_lock);
+        e = find_by_pid_locked(pid);
+        if (e && e->signal_port == sigport) {
+            e->signal_port = MACH_PORT_NULL;
+            pthread_mutex_unlock(&pid_lock);
+            (void)mach_port_deallocate(mach_task_self(), sigport);
+        } else {
+            pthread_mutex_unlock(&pid_lock);
+        }
+        *result = PROC_ERR_KERNEL;
+        return KERN_SUCCESS;
+    }
+
+    *result = PROC_OK;
     return KERN_SUCCESS;
 }
 
@@ -573,9 +726,11 @@ kern_return_t vfs_sync(mach_port_t fp) { (void)fp; return KERN_SUCCESS; }
 kern_return_t
 do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
 {
-    struct pid_entry *e;
+    struct pid_entry *e, *parent;
     mach_port_t subscriber = MACH_PORT_NULL;
+    mach_port_t parent_sigport = MACH_PORT_NULL;
     proc_pid_t pid = 0;
+    proc_pid_t ppid = 0;
     int32_t code = 0;
 
     (void)notify;
@@ -588,9 +743,18 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
         subscriber    = e->exit_notify;
         e->exit_notify = MACH_PORT_NULL;
         pid           = e->pid;
+        ppid          = e->ppid;
         code          = e->exit_code;
         printf("proc: pid=%u zombied (task=0x%x)\n",
                pid, (unsigned)name);
+        /* SIGCHLD wiring (v0.2.0 / #238): if the parent has a signal
+         * port registered, snapshot it under the lock — the COPY_SEND
+         * happens later, after we drop the lock. */
+        if (ppid != PROC_PID_NONE) {
+            parent = find_by_pid_locked(ppid);
+            if (parent && parent->signal_port != MACH_PORT_NULL)
+                parent_sigport = parent->signal_port;
+        }
     }
     pthread_mutex_unlock(&pid_lock);
 
@@ -599,6 +763,12 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
 
     if (subscriber != MACH_PORT_NULL)
         fire_exit_notify(subscriber, pid, code);
+
+    /* Deliver SIGCHLD to parent.  sender_pid carries the dead child's
+     * pid so the parent can waitpid() it.  Best-effort — if the port
+     * is dead, proc_kill will clean it up the next time it's used. */
+    if (parent_sigport != MACH_PORT_NULL)
+        (void)send_signal_msg(parent_sigport, PROC_SIGCHLD, pid);
 
     return KERN_SUCCESS;
 }
@@ -632,6 +802,13 @@ proc_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 /*  Bring-up                                                           */
 /* ------------------------------------------------------------------ */
 
+static int
+proc_bringup_fatal(kern_return_t kr)
+{
+    printf("proc: bring-up failed kr=%d\n", kr);
+    return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -653,16 +830,20 @@ main(int argc, char **argv)
     /* Three receive ports + one shared port set. */
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_RECEIVE, &proc_port);
-    if (kr) goto fatal;
+    if (kr)
+        return proc_bringup_fatal(kr);
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_RECEIVE, &mount_port);
-    if (kr) goto fatal;
+    if (kr)
+        return proc_bringup_fatal(kr);
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_RECEIVE, &notify_port);
-    if (kr) goto fatal;
+    if (kr)
+        return proc_bringup_fatal(kr);
     kr = mach_port_allocate(mach_task_self(),
                             MACH_PORT_RIGHT_PORT_SET, &port_set);
-    if (kr) goto fatal;
+    if (kr)
+        return proc_bringup_fatal(kr);
 
     (void)mach_port_move_member(mach_task_self(), proc_port,   port_set);
     (void)mach_port_move_member(mach_task_self(), mount_port,  port_set);
@@ -679,7 +860,7 @@ main(int argc, char **argv)
                           MACH_PORT_NULL, proc_port);
     if (kr != NETNAME_SUCCESS) {
         printf("proc: netname_check_in failed kr=%d\n", kr);
-        goto fatal;
+        return proc_bringup_fatal(kr);
     }
 
     /* Register /proc as a vfs mount point — libvfs in any task will
@@ -702,9 +883,5 @@ main(int argc, char **argv)
     mach_msg_server(proc_demux, 8192, port_set, MACH_MSG_OPTION_NONE);
 
     printf("proc: mach_msg_server exited unexpectedly\n");
-    return 1;
-
-fatal:
-    printf("proc: bring-up failed kr=%d\n", kr);
     return 1;
 }
