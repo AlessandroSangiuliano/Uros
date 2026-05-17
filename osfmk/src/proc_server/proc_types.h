@@ -9,7 +9,8 @@
 /*
  * proc_types.h — wire-stable types for the proc MIG subsystem
  * (#237 / proc_server v0.1.0; signals added in v0.2.0 / #238;
- *  process groups + sessions in v0.3.0 / #239).
+ *  process groups + sessions in v0.3.0 / #239;
+ *  resource accounting in v0.4.0 / #240).
  */
 
 #include <stdint.h>
@@ -21,9 +22,9 @@
 /* ------------------------------------------------------------------ */
 
 #define PROC_SERVER_VERSION_MAJOR    0
-#define PROC_SERVER_VERSION_MINOR    3
+#define PROC_SERVER_VERSION_MINOR    4
 #define PROC_SERVER_VERSION_PATCH    0
-#define PROC_SERVER_VERSION_STRING   "0.3.0"
+#define PROC_SERVER_VERSION_STRING   "0.4.0"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -147,5 +148,44 @@ typedef struct proc_signal_msg {
     proc_pid_t          sender_pid;
     mach_msg_trailer_t  trailer;
 } proc_signal_msg_t;
+
+/* ------------------------------------------------------------------ */
+/*  Resource accounting (v0.4.0 / #240)                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * proc_rusage_t — POSIX-ish per-pid resource snapshot, sourced from
+ * the kernel via task_info(TASK_BASIC_INFO + TASK_EVENTS_INFO).
+ *
+ * All fields are 32-bit (`uint32_t`) to keep the wire format MIG-
+ * marshallable as a fixed `struct[N] of unsigned32`, matching the
+ * pattern already used by proc_entry_t.  Times are split into
+ * seconds + microseconds (kernel format) instead of a single 64-bit
+ * counter — easier to read in /proc/N/stat and matches
+ * `time_value_t` directly.
+ *
+ *   utime_*   — user-mode CPU time accumulated by the task
+ *   stime_*   — system-mode CPU time
+ *   maxrss_kb — peak resident set in KiB (snapshot of resident_size)
+ *   virtual_kb — current virtual size in KiB
+ *   minflt    — page faults serviced without I/O (zero-fill + COW)
+ *   majflt    — actual page-ins
+ *   msgsnd    — Mach messages sent (TASK_EVENTS_INFO)
+ *   msgrcv    — Mach messages received
+ *
+ * sizeof(proc_rusage_t) == 40 bytes (10 * uint32_t).
+ */
+typedef struct proc_rusage {
+    uint32_t  utime_sec;
+    uint32_t  utime_usec;
+    uint32_t  stime_sec;
+    uint32_t  stime_usec;
+    uint32_t  maxrss_kb;
+    uint32_t  virtual_kb;
+    uint32_t  minflt;
+    uint32_t  majflt;
+    uint32_t  msgsnd;
+    uint32_t  msgrcv;
+} proc_rusage_t;
 
 #endif /* _PROC_TYPES_H_ */
