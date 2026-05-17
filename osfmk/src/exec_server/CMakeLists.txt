@@ -41,6 +41,7 @@ set(EXEC_SERVER_SOURCES
   exec_main.c
   exec_load.c
   exec_stack.c
+  exec_vdso.c
   ${EXEC_SERVER_C}
 )
 

@@ -30,8 +30,18 @@
 #include <string.h>
 #include <stdlib.h>
 
-/* AT_* constants we care about today. */
-#define AT_NULL     0
+/* AT_* constants we care about today (v0.4.0 / #236). */
+#define AT_NULL          0
+#define AT_PHDR          3
+#define AT_PHENT         4
+#define AT_PHNUM         5
+#define AT_PAGESZ        6
+#define AT_ENTRY         9
+#define AT_RANDOM       25
+#define AT_SYSINFO_EHDR 33
+
+#define EXEC_PAGE_SIZE  4096U
+#define EXEC_RANDOM_LEN 16U
 
 /* ------------------------------------------------------------------ */
 /*  Helpers — count NUL-separated strings in a blob                    */
@@ -79,21 +89,43 @@ blob_count(const char *buf, mach_msg_type_number_t len,
 /*  Core: assemble + vm_write                                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Count the AUXV (tag, value) pairs we'll emit given the caller's
+ * hints.  AT_PAGESZ and AT_RANDOM are always present; AT_NULL is the
+ * terminator.  Optional entries (AT_ENTRY / AT_PHDR+AT_PHENT+AT_PHNUM
+ * / AT_SYSINFO_EHDR) are emitted only when the hint is non-zero so
+ * legacy consumers don't get bogus values.
+ */
+static unsigned
+count_auxv_pairs(const struct exec_auxv_hints *h)
+{
+    unsigned n = 1 /* AT_PAGESZ */ + 1 /* AT_RANDOM */ + 1 /* AT_NULL */;
+    if (h) {
+        if (h->vdso_base) n++;
+        if (h->entry_va)  n++;
+        if (h->phdr_va)   n += 3;   /* AT_PHDR + AT_PHENT + AT_PHNUM */
+    }
+    return n;
+}
+
 int
 exec_build_stack(mach_port_t new_task,
                  const void *argv_blob, mach_msg_type_number_t argv_len,
                  const void *envp_blob, mach_msg_type_number_t envp_len,
+                 const struct exec_auxv_hints *hints,
                  vm_address_t *out_top)
 {
     int argc, envc;
     uint32_t argv_strs = 0, envp_strs = 0;
     vm_size_t header_bytes;
     vm_size_t total_bytes;
+    unsigned auxv_pairs;
     char *buf;
     uint32_t *p;
     char *strings_dst;
     vm_address_t base_va;
     vm_address_t stack_va;
+    vm_address_t random_va;
     kern_return_t kr;
 
     /* 1. Allocate the stack page in the new task. */
@@ -111,21 +143,19 @@ exec_build_stack(mach_port_t new_task,
         return EXEC_ERR_BAD_BLOB;
     }
 
-    /* 3. Lay the stack out into a local buffer first.  The runtime
-     *    layout is top-down; we build it bottom-up in the buffer
-     *    and place it at the high end of the stack page.
-     *
-     *    Sizes (in bytes):
-     *      header = sizeof(int)            // argc
-     *             + (argc + 1) * 4         // argv[] + NULL
-     *             + (envc + 1) * 4         // envp[] + NULL
-     *             + 2 * 4                  // auxv: AT_NULL pair
-     *      strings = argv_strs + envp_strs */
+    /* 3. Compute layout sizes.  v0.4.0 carries:
+     *   - argc word
+     *   - argv vector (argc + 1 slots)
+     *   - envp vector (envc + 1 slots)
+     *   - AUXV (variable, see count_auxv_pairs)
+     *   - argv + envp string blobs
+     *   - AT_RANDOM payload (16 bytes the kernel/libc seed from) */
+    auxv_pairs = count_auxv_pairs(hints);
     header_bytes = sizeof(uint32_t)
                  + (argc + 1) * sizeof(uint32_t)
                  + (envc + 1) * sizeof(uint32_t)
-                 + 2 * sizeof(uint32_t);
-    total_bytes = header_bytes + argv_strs + envp_strs;
+                 + auxv_pairs * 2 * sizeof(uint32_t);
+    total_bytes = header_bytes + argv_strs + envp_strs + EXEC_RANDOM_LEN;
 
     /* Round up to 16-byte alignment so ESP at entry is 16-aligned
      * (System V ABI requires ESP%16 == 0 at the call to _start). */
@@ -143,6 +173,10 @@ exec_build_stack(mach_port_t new_task,
     /* 4. Compute the runtime VA where this buffer will land — top of
      *    the stack page minus the layout size. */
     stack_va = EXEC_STACK_TOP - total_bytes;
+    /* AT_RANDOM lives in the 16 bytes immediately after the string
+     * region; we point AUXV's AT_RANDOM at the runtime VA of those
+     * bytes. */
+    random_va = stack_va + header_bytes + argv_strs + envp_strs;
 
     /* Place strings at the end of the layout; pointers in the header
      * point at runtime VAs inside the strings region. */
@@ -153,6 +187,7 @@ exec_build_stack(mach_port_t new_task,
         char *dst = strings_dst;
         vm_address_t cur_va = strings_va;
         int idx = 0;
+        unsigned i;
 
         p = (uint32_t *)buf;
         *p++ = (uint32_t)argc;
@@ -181,9 +216,39 @@ exec_build_stack(mach_port_t new_task,
         }
         *p++ = 0;       /* envp NULL terminator */
 
-        /* AUXV: AT_NULL only in v0.1.0. */
-        *p++ = AT_NULL;
-        *p++ = 0;
+        /* AUXV (v0.4.0).  Always emit AT_PAGESZ + AT_RANDOM; emit the
+         * optional entries only when the caller provided real values.
+         * Order matters only for AT_NULL coming last. */
+        *p++ = AT_PAGESZ;        *p++ = EXEC_PAGE_SIZE;
+        *p++ = AT_RANDOM;        *p++ = (uint32_t)random_va;
+        if (hints) {
+            if (hints->vdso_base) {
+                *p++ = AT_SYSINFO_EHDR; *p++ = (uint32_t)hints->vdso_base;
+            }
+            if (hints->entry_va) {
+                *p++ = AT_ENTRY;        *p++ = (uint32_t)hints->entry_va;
+            }
+            if (hints->phdr_va) {
+                *p++ = AT_PHDR;         *p++ = (uint32_t)hints->phdr_va;
+                *p++ = AT_PHENT;        *p++ = hints->phent;
+                *p++ = AT_PHNUM;        *p++ = hints->phnum;
+            }
+        }
+        *p++ = AT_NULL;          *p++ = 0;
+
+        /* AT_RANDOM payload: 16 bytes of seed material.  We don't yet
+         * have a kernel RNG exposed to userland, so seed from cycle-
+         * counter + task port id — non-cryptographic but at least it
+         * differs across boots and across tasks. */
+        {
+            uint8_t *r = (uint8_t *)buf + header_bytes
+                                       + argv_strs + envp_strs;
+            uint32_t seed = (uint32_t)new_task * 2654435761u;
+            for (i = 0; i < EXEC_RANDOM_LEN; i++) {
+                seed = seed * 1103515245u + 12345u;
+                r[i] = (uint8_t)(seed >> 16);
+            }
+        }
     }
 
     /* 5. vm_write the assembled layout to the high end of the stack. */
