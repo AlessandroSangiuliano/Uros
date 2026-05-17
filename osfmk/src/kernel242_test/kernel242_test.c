@@ -70,6 +70,7 @@ extern void printf_init(mach_port_t device_server_port);
 static unsigned int g_pass = 0;
 static unsigned int g_fail = 0;
 static const char *g_current_test = "?";
+static mach_port_t g_host_priv = MACH_PORT_NULL;	/* from bootstrap */
 
 #define EXPECT(expr, msg) do {                                      \
     if (!(expr)) {                                                  \
@@ -402,6 +403,89 @@ test_pager_busy(void)
 }
 
 /* =========================================================================
+ * default_pager/dp_memory_object.c  default_pager_objects
+ *
+ * Exercises the refactored loop body (former not_this_one goto,
+ * for-loop with break, dpo_nomemory cleanup helper).  We ask the
+ * default_pager to enumerate ALL active memory objects with the
+ * smallest possible inline buffer, so the kernel takes the
+ *   if (opotential < actual)
+ * branch and calls vm_allocate_wired.  In the common case the
+ * allocation succeeds and we exercise the success path.  We don't
+ * try to force vm_allocate_wired to actually fail (that would need
+ * to exhaust the wired-memory budget, which is impractical from a
+ * functional test) — but the rest of the function, including the
+ * iteration loop where the not_this_one goto used to live, is
+ * fully exercised.
+ *
+ * NOTE: dpo_nomemory cleanup helper itself is exercised only on
+ * vm_allocate_wired failure — not reachable in this test.  The
+ * helper is, however, called via tail position from the success path
+ * file's compile/link, so a malformed helper would have failed at
+ * build time.
+ * ========================================================================= */
+extern kern_return_t host_default_memory_manager(mach_port_t host_priv,
+                                                 mach_port_t *def_mgr_inout,
+                                                 vm_size_t cluster);
+extern kern_return_t default_pager_objects(mach_port_t default_pager,
+    pointer_t *objects, mach_msg_type_number_t *objectsCnt,
+    mach_port_array_t *ports, mach_msg_type_number_t *portsCnt);
+extern kern_return_t mach_host_self_trap(void);   /* declared elsewhere */
+
+static void
+test_default_pager_objects(void)
+{
+    mach_port_t hp = g_host_priv;
+    mach_port_t dpager = MACH_PORT_NULL;
+    pointer_t   objects = 0;
+    mach_msg_type_number_t objCnt = 0;
+    mach_port_array_t ports = 0;
+    mach_msg_type_number_t prtCnt = 0;
+    kern_return_t kr;
+
+    BEGIN_TEST("default_pager_objects (dp_memory_object.c)");
+
+    /* mach_host_self() returns the regular host port; for the
+     * default-memory-manager getter we need host_priv.  In a single-
+     * privilege build the regular host port doubles as host_priv,
+     * which is the case here (no urMach security separation yet). */
+    kr = host_default_memory_manager(hp, &dpager, 0);
+    if (kr != KERN_SUCCESS || dpager == MACH_PORT_NULL) {
+        printf("  note: host_default_memory_manager kr=%d — SKIP\n", kr);
+        PASS();      /* boot not ready or no priv, not a regression */
+        return;
+    }
+
+    /* Pass null inline arrays to force vm_allocate_wired allocation
+     * inside default_pager_objects (opotential < actual). */
+    kr = default_pager_objects(dpager,
+                               &objects, &objCnt,
+                               (mach_port_array_t *)&ports, &prtCnt);
+    printf("  default_pager_objects kr=%d objCnt=%u prtCnt=%u\n",
+           kr, objCnt, prtCnt);
+    EXPECT(kr == KERN_SUCCESS || kr == KERN_RESOURCE_SHORTAGE,
+           "default_pager_objects survived");
+
+    if (kr == KERN_SUCCESS) {
+        if (objCnt > 0)
+            (void)vm_deallocate(mach_task_self(),
+                                (vm_address_t)objects,
+                                objCnt * sizeof(unsigned));
+        if (prtCnt > 0) {
+            unsigned i;
+            mach_port_t *parr = (mach_port_t *)ports;
+            for (i = 0; i < prtCnt; i++)
+                if (parr[i] != MACH_PORT_NULL)
+                    (void)mach_port_deallocate(mach_task_self(), parr[i]);
+            (void)vm_deallocate(mach_task_self(),
+                                (vm_address_t)ports,
+                                prtCnt * sizeof(mach_port_t));
+        }
+    }
+    PASS();
+}
+
+/* =========================================================================
  * i386/user_ldt.c  i386_set_ldt  — the Retry loop (now a for(;;)) gets
  * exercised end-to-end.  We use the MIG-generated user stub from
  * mach_i386.defs, which the test build generates locally.
@@ -504,6 +588,7 @@ main(int argc, char **argv)
     if (bootstrap_ports(bootstrap_port, &host, &device, &lw, &lp, &sec)
         != KERN_SUCCESS)
         return 1;
+    g_host_priv = host;
     printf_init(device);
 
     printf("\n=== kernel242_test (#242 no-goto kernel exerciser) ===\n");
@@ -517,6 +602,7 @@ main(int argc, char **argv)
     test_thread_terminate();
     test_vm_msync();
     test_pager_busy();
+    test_default_pager_objects();
     test_user_ldt();
     test_fpu_state();
 

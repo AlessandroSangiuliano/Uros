@@ -28,11 +28,6 @@ add_custom_command(
     -user ${MACH_I386_USER_C}
     -server /dev/null
     ${MACH_I386_DEFS}
-  # Workaround for a migcom code-gen bug in i386_get_ldt: it emits
-  # `(vm_address_t *) _desc_listTemp_` instead of just `_desc_listTemp_`.
-  # We only need i386_set_ldt here, but the file has to compile as a
-  # whole, so we drop the spurious pointer cast with sed.
-  COMMAND sed -i "s|(vm_address_t \\*) _desc_listTemp_|(vm_address_t)_desc_listTemp_|g" ${MACH_I386_USER_C}
   DEPENDS migcom ${MACH_I386_DEFS}
   COMMENT "MIG: mach_i386.defs (user stubs for kernel242_test)"
   VERBATIM
