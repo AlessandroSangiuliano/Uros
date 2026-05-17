@@ -33,9 +33,9 @@
 /* ------------------------------------------------------------------ */
 
 #define EXEC_SERVER_VERSION_MAJOR    0
-#define EXEC_SERVER_VERSION_MINOR    1
+#define EXEC_SERVER_VERSION_MINOR    4
 #define EXEC_SERVER_VERSION_PATCH    0
-#define EXEC_SERVER_VERSION_STRING   "0.1.0"
+#define EXEC_SERVER_VERSION_STRING   "0.4.0"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -52,6 +52,20 @@
 #define EXEC_STACK_VA            0xBF800000U
 #define EXEC_STACK_SIZE          (16 * 1024)
 #define EXEC_STACK_TOP           (EXEC_STACK_VA + EXEC_STACK_SIZE)
+
+/*
+ * vDSO page (v0.4.0 / #236): one read-only 4 KiB page mapped into
+ * every freshly-created task at a fixed VA below the stack.
+ *
+ * v0.4.0 ships a *placeholder* vDSO: a valid Elf32 ELF header so
+ * userspace can walk it via AT_SYSINFO_EHDR, with no exported
+ * symbols yet.  The fast paths (clock_gettime / getpid / signal
+ * trampoline) land incrementally — having the page + AUXV entry
+ * present lets libposix-uros (#218) probe for support without
+ * branching on its absence.
+ */
+#define EXEC_VDSO_VA             0xBF000000U
+#define EXEC_VDSO_SIZE           4096U
 
 /* ------------------------------------------------------------------ */
 /*  Wire types                                                         */

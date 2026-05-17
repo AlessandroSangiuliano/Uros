@@ -293,9 +293,29 @@ exec_do_load(mach_port_t client_task, const char *path,
     if (rc != EXEC_OK)
         return fail_after_task(new_task, &img, file_buf, rc);
 
-    /* 5. Set up the initial stack with argv/envp/auxv. */
-    rc = exec_build_stack(new_task, argv_blob, argv_len,
-                          envp_blob, envp_len, &stack_top);
+    /* 4.5. Install the vDSO placeholder (v0.4.0 / #236).  Failure
+     *      here is non-fatal — the binary can still run, libposix
+     *      will just take the slow path on every syscall. */
+    {
+        vm_address_t vdso_base = 0;
+        struct exec_auxv_hints hints;
+        int vrc = exec_install_vdso(new_task, &vdso_base);
+        if (vrc != EXEC_OK) {
+            printf("exec: vdso install failed rc=%d (non-fatal)\n", vrc);
+            vdso_base = 0;
+        }
+
+        memset(&hints, 0, sizeof(hints));
+        hints.entry_va  = (vm_address_t)elf_entry(&img);
+        hints.vdso_base = vdso_base;
+        /* AT_PHDR / AT_PHENT / AT_PHNUM are deferred until #234
+         * (PT_INTERP / dynamic linker) — static ET_EXEC binaries
+         * don't need them. */
+
+        /* 5. Set up the initial stack with argv/envp/auxv. */
+        rc = exec_build_stack(new_task, argv_blob, argv_len,
+                              envp_blob, envp_len, &hints, &stack_top);
+    }
     if (rc != EXEC_OK)
         return fail_after_task(new_task, &img, file_buf, rc);
 
