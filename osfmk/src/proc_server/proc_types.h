@@ -8,7 +8,7 @@
 
 /*
  * proc_types.h — wire-stable types for the proc MIG subsystem
- * (#237 / proc_server v0.1.0).
+ * (#237 / proc_server v0.1.0; signals added in v0.2.0 / #238).
  */
 
 #include <stdint.h>
@@ -20,9 +20,9 @@
 /* ------------------------------------------------------------------ */
 
 #define PROC_SERVER_VERSION_MAJOR    0
-#define PROC_SERVER_VERSION_MINOR    1
+#define PROC_SERVER_VERSION_MINOR    2
 #define PROC_SERVER_VERSION_PATCH    0
-#define PROC_SERVER_VERSION_STRING   "0.1.0"
+#define PROC_SERVER_VERSION_STRING   "0.2.0"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -93,5 +93,56 @@ typedef struct proc_exit_msg {
 #define PROC_ERR_NOT_FOUND   -3   /* pid does not exist */
 #define PROC_ERR_KERNEL      -4   /* underlying Mach call failed */
 #define PROC_ERR_TOO_MANY    -5   /* list bigger than caller buffer */
+#define PROC_ERR_NO_SIGPORT  -6   /* target has no signal_port registered */
+#define PROC_ERR_BAD_SIGNO   -7   /* signo out of range / unknown */
+
+/* ------------------------------------------------------------------ */
+/*  Signals (v0.2.0 / #238)                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Signal numbers — Linux/i386 layout for ease of porting libc later.
+ * proc_server itself only special-cases SIGKILL/SIGSTOP/SIGCONT; the
+ * other constants are just labels carried in the wire message and
+ * interpreted by libposix-uros (#218).
+ */
+#define PROC_SIGHUP           1
+#define PROC_SIGINT           2
+#define PROC_SIGQUIT          3
+#define PROC_SIGILL           4
+#define PROC_SIGTRAP          5
+#define PROC_SIGABRT          6
+#define PROC_SIGBUS           7
+#define PROC_SIGFPE           8
+#define PROC_SIGKILL          9   /* cannot be caught/blocked */
+#define PROC_SIGUSR1         10
+#define PROC_SIGSEGV         11
+#define PROC_SIGUSR2         12
+#define PROC_SIGPIPE         13
+#define PROC_SIGALRM         14
+#define PROC_SIGTERM         15
+#define PROC_SIGCHLD         17
+#define PROC_SIGCONT         18
+#define PROC_SIGSTOP         19   /* cannot be caught/blocked */
+#define PROC_SIGTSTP         20
+#define PROC_NSIG            32
+
+#define PROC_SIGNAL_MSGID    3298
+
+/*
+ * Wire message proc_server sends on a target's signal_port for
+ * catchable signals.  libposix-uros's handler thread receives this
+ * and dispatches to sa_handler with sa_mask applied.
+ *
+ *   signo       — PROC_SIG* number
+ *   sender_pid  — pid that issued proc_kill, or the dead child's pid
+ *                 for SIGCHLD (so the parent can waitpid that pid)
+ */
+typedef struct proc_signal_msg {
+    mach_msg_header_t   head;
+    int32_t             signo;
+    proc_pid_t          sender_pid;
+    mach_msg_trailer_t  trailer;
+} proc_signal_msg_t;
 
 #endif /* _PROC_TYPES_H_ */
