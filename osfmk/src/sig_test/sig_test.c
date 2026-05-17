@@ -4,7 +4,8 @@
  */
 
 /*
- * sig_test — userspace exerciser for proc_server v0.2.0 signals (#238).
+ * sig_test — userspace exerciser for proc_server signals (#238) +
+ * process groups / sessions (#239).
  *
  * Lives outside ipc_bench because it is a feature test, not a
  * benchmark — same pattern as kernel242_test (#242).  Exercises every
@@ -317,6 +318,250 @@ test_child_kill_sigchld(void)
     PASS();
 }
 
+/* ==================================================================
+ *  Process groups + sessions (v0.3.0 / #239)
+ * ================================================================== */
+
+/*
+ * After setup_self() with parent_pid=0, we are pgrp leader and
+ * session leader of pgrp=sid=my_pid.  Validate that proc_server
+ * agrees, and that a child registered under us inherits both.
+ */
+static void
+test_pgrp_inherit(void)
+{
+    mach_port_t child = MACH_PORT_NULL;
+    proc_pid_t child_pid = 0;
+    proc_pid_t got = 0;
+    int rc = 0;
+    kern_return_t kr;
+
+    BEGIN_TEST("pgrp/sid: self leader + child inherits");
+
+    /* Self should be its own pgrp + sid leader (set at register). */
+    rc = 0; got = 0;
+    kr = proc_getpgid(proc_port, my_pid, &got, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "getpgid self");
+    EXPECT_RC(rc, PROC_OK, "getpgid self rc");
+    EXPECT(got == my_pid, "self.pgrp should be my_pid");
+
+    rc = 0; got = 0;
+    kr = proc_getsid(proc_port, my_pid, &got, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "getsid self");
+    EXPECT_RC(rc, PROC_OK, "getsid self rc");
+    EXPECT(got == my_pid, "self.sid should be my_pid");
+
+    /* Child registered with parent_pid=my_pid must inherit both. */
+    kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0,
+                     FALSE, &child);
+    EXPECT_KR(kr, KERN_SUCCESS, "task_create");
+    kr = proc_register(proc_port, my_pid, child, (char *)"inh_child",
+                       &child_pid, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "proc_register child");
+    EXPECT_RC(rc, PROC_OK, "proc_register child rc");
+
+    rc = 0; got = 0;
+    kr = proc_getpgid(proc_port, child_pid, &got, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "getpgid child");
+    EXPECT(got == my_pid, "child.pgrp should inherit my_pid");
+
+    rc = 0; got = 0;
+    kr = proc_getsid(proc_port, child_pid, &got, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "getsid child");
+    EXPECT(got == my_pid, "child.sid should inherit my_pid");
+
+    /* Drain the SIGCHLD before next test. */
+    (void)task_terminate(child);
+    {
+        int signo = 0; proc_pid_t s = 0;
+        (void)recv_signal(2000, &signo, &s);
+    }
+    PASS();
+}
+
+/*
+ * setsid on a pgrp leader must fail with PROC_ERR_PERM (POSIX EPERM).
+ * We are leader from setup, so the call on self must error.  Also
+ * verify the same on a freshly-created child (we make it leader by
+ * setpgid then try setsid on it).
+ */
+static void
+test_setsid_perm(void)
+{
+    int rc = 0;
+    proc_pid_t new_sid = 0;
+    kern_return_t kr;
+
+    BEGIN_TEST("setsid on pgrp leader -> PERM");
+    kr = proc_setsid(proc_port, my_pid, &new_sid, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "setsid self");
+    EXPECT_RC(rc, PROC_ERR_PERM, "self is leader, expected PERM");
+    PASS();
+}
+
+/*
+ * setpgid(child, child) moves a child out of the parent's pgrp into
+ * its own — child becomes pgrp leader, still in the parent's session.
+ */
+static void
+test_setpgid_new_pgrp(void)
+{
+    mach_port_t child = MACH_PORT_NULL;
+    proc_pid_t child_pid = 0;
+    proc_pid_t got = 0;
+    int rc = 0;
+    kern_return_t kr;
+
+    BEGIN_TEST("setpgid(child, child) -> child is new pgrp leader");
+    kr = task_create(mach_task_self(), (ledger_port_array_t)0, 0,
+                     FALSE, &child);
+    EXPECT_KR(kr, KERN_SUCCESS, "task_create");
+    kr = proc_register(proc_port, my_pid, child, (char *)"pgleader",
+                       &child_pid, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "proc_register child");
+
+    rc = 0;
+    kr = proc_setpgid(proc_port, child_pid, child_pid, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "setpgid child");
+    EXPECT_RC(rc, PROC_OK, "setpgid rc");
+
+    rc = 0; got = 0;
+    kr = proc_getpgid(proc_port, child_pid, &got, &rc);
+    EXPECT(got == child_pid, "child.pgrp should be child_pid");
+
+    /* Same session — child still belongs to ours. */
+    rc = 0; got = 0;
+    kr = proc_getsid(proc_port, child_pid, &got, &rc);
+    EXPECT(got == my_pid, "child.sid should still be my_pid");
+
+    (void)task_terminate(child);
+    {
+        int signo = 0; proc_pid_t s = 0;
+        (void)recv_signal(2000, &signo, &s);
+    }
+    PASS();
+}
+
+/*
+ * killpg(pgrp, SIGUSR1) on a pgrp containing two of our children
+ * (which share our signal_port since they don't register their own
+ * — for the test we move them into a fresh pgrp first and rely on
+ * the parent's signal_port being checked only for OUR pid; killpg
+ * dispatches to each pid's own signal_port, which our children
+ * don't have, so n_sent should be 0).
+ *
+ * For a true catchable-killpg test we need children with their own
+ * signal_ports.  Bare task_create children can't run code (no thread
+ * trampoline), so simulate by registering FAKE child pids that point
+ * to throwaway recv ports as task_port, and give each a real
+ * signal_port we hold on the parent side.  proc_server doesn't
+ * inspect task_port for anything other than dead-name notify, which
+ * we don't care about firing here.
+ */
+static void
+test_killpg_catchable(void)
+{
+    mach_port_t fake_taskA, fake_taskB;
+    mach_port_t sigA_recv, sigB_recv;
+    mach_port_t pgrp_set;       /* port_set covering both sig ports */
+    proc_pid_t  pidA = 0, pidB = 0;
+    proc_pid_t  pgrp;
+    unsigned    n_sent = 0;
+    int         rc = 0;
+    int         got_A = 0, got_B = 0;
+    kern_return_t kr;
+    int i;
+
+    BEGIN_TEST("killpg(pgrp, SIGUSR1) -> 2 recipients");
+
+    /* Two fake task ports — only used as table keys / dead-name
+     * subjects.  proc_server will install dead-name notify on them
+     * but we won't trigger it during this test. */
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &fake_taskA);
+    EXPECT_KR(kr, KERN_SUCCESS, "alloc fake_taskA");
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &fake_taskB);
+    EXPECT_KR(kr, KERN_SUCCESS, "alloc fake_taskB");
+    (void)mach_port_insert_right(mach_task_self(), fake_taskA, fake_taskA,
+                                 MACH_MSG_TYPE_MAKE_SEND);
+    (void)mach_port_insert_right(mach_task_self(), fake_taskB, fake_taskB,
+                                 MACH_MSG_TYPE_MAKE_SEND);
+
+    kr = proc_register(proc_port, my_pid, fake_taskA, (char *)"kpgA",
+                       &pidA, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "register A");
+    kr = proc_register(proc_port, my_pid, fake_taskB, (char *)"kpgB",
+                       &pidB, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "register B");
+
+    /* Per-child signal ports + put them in a port_set so we can
+     * receive from either in any order. */
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &sigA_recv);
+    EXPECT_KR(kr, KERN_SUCCESS, "alloc sigA_recv");
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+                            &sigB_recv);
+    EXPECT_KR(kr, KERN_SUCCESS, "alloc sigB_recv");
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_PORT_SET,
+                            &pgrp_set);
+    EXPECT_KR(kr, KERN_SUCCESS, "alloc port_set");
+    (void)mach_port_move_member(mach_task_self(), sigA_recv, pgrp_set);
+    (void)mach_port_move_member(mach_task_self(), sigB_recv, pgrp_set);
+    (void)mach_port_insert_right(mach_task_self(), sigA_recv, sigA_recv,
+                                 MACH_MSG_TYPE_MAKE_SEND);
+    (void)mach_port_insert_right(mach_task_self(), sigB_recv, sigB_recv,
+                                 MACH_MSG_TYPE_MAKE_SEND);
+
+    rc = 0;
+    kr = proc_set_signal_port(proc_port, pidA, sigA_recv, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "set_signal_port A");
+    rc = 0;
+    kr = proc_set_signal_port(proc_port, pidB, sigB_recv, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "set_signal_port B");
+
+    /* Move both into a fresh pgrp.  Pick pidA as pgrp leader. */
+    pgrp = pidA;
+    rc = 0;
+    kr = proc_setpgid(proc_port, pidA, pgrp, &rc);
+    EXPECT_RC(rc, PROC_OK, "setpgid A");
+    rc = 0;
+    kr = proc_setpgid(proc_port, pidB, pgrp, &rc);
+    EXPECT_RC(rc, PROC_OK, "setpgid B");
+
+    rc = 0; n_sent = 0;
+    kr = proc_killpg(proc_port, pgrp, PROC_SIGUSR1, &n_sent, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "killpg kr");
+    EXPECT_RC(rc, PROC_OK, "killpg rc");
+    EXPECT(n_sent == 2, "killpg should reach both A and B");
+
+    /* Drain two messages from the port_set — order is unspecified, so
+     * track each receipt by msgh_local_port. */
+    for (i = 0; i < 2; i++) {
+        proc_signal_msg_t msg;
+        memset(&msg, 0, sizeof(msg));
+        msg.head.msgh_size       = sizeof(msg);
+        msg.head.msgh_local_port = pgrp_set;
+        kr = mach_msg(&msg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+                      0, sizeof(msg), pgrp_set, 2000, MACH_PORT_NULL);
+        EXPECT_KR(kr, KERN_SUCCESS, "recv killpg sig");
+        EXPECT(msg.head.msgh_id == PROC_SIGNAL_MSGID, "wrong msgid");
+        EXPECT(msg.signo == PROC_SIGUSR1, "wrong signo");
+        if (msg.head.msgh_local_port == sigA_recv) got_A = 1;
+        if (msg.head.msgh_local_port == sigB_recv) got_B = 1;
+    }
+    EXPECT(got_A && got_B, "both children should have received");
+
+    /* Cleanup: terminate fakes to drain dead-name + SIGCHLDs. */
+    (void)mach_port_destroy(mach_task_self(), fake_taskA);
+    (void)mach_port_destroy(mach_task_self(), fake_taskB);
+    for (i = 0; i < 2; i++) {
+        int s = 0; proc_pid_t sender = 0;
+        (void)recv_signal(2000, &s, &sender);
+    }
+    PASS();
+}
+
 /* ------------------------------------------------------------------ */
 
 static void
@@ -343,7 +588,7 @@ main(int argc, char **argv)
         return 1;
     printf_init(device);
 
-    printf("\n=== sig_test (proc_server v0.2.0 / #238) ===\n");
+    printf("\n=== sig_test (proc_server v0.2.0/v0.3.0 / #238 + #239) ===\n");
     wait_for_proc_server();
     if (proc_port == MACH_PORT_NULL) {
         printf("  sig_test: proc_server never appeared -- SKIP\n");
@@ -360,6 +605,12 @@ main(int argc, char **argv)
         test_bad_pid();
         test_child_stop_cont();
         test_child_kill_sigchld();
+
+        /* v0.3.0 / #239 — process groups + sessions */
+        test_pgrp_inherit();
+        test_setsid_perm();
+        test_setpgid_new_pgrp();
+        test_killpg_catchable();
     }
 
     printf("\n=== sig_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);

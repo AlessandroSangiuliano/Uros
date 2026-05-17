@@ -123,3 +123,54 @@ routine proc_kill(
 	in	pid		: proc_pid_t;
 	in	signo		: int;
 	out	result		: int);
+
+/*
+ * POSIX session / process group routines (#239 / v0.3.0).
+ *
+ *   setsid(pid)            — pid becomes leader of a new session and
+ *                            a new pgrp (both == pid).  EPERM if pid
+ *                            is already a pgrp leader (POSIX).
+ *   setpgid(pid, pgrp)     — move pid to pgrp.  pgrp must already
+ *                            exist in pid's session (or pgrp == pid,
+ *                            which creates a new pgrp).  pgrp == 0
+ *                            means "use pid".
+ *   getpgid(pid) / getsid  — read-only lookup; out_pgrp/out_sid 0
+ *                            on PROC_ERR_NOT_FOUND.
+ *   killpg(pgrp, signo)    — send signo to every pid whose pgrp_id
+ *                            == pgrp (excluding zombies).  Returns
+ *                            PROC_OK if at least one pid received
+ *                            it; n_sent is the count, useful for
+ *                            tests.  signo follows proc_kill rules
+ *                            (catchable → mach_msg, uncatchable →
+ *                            task op).
+ */
+routine proc_setsid(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	out	new_sid		: proc_pid_t;
+	out	result		: int);
+
+routine proc_setpgid(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	in	pgrp		: proc_pid_t;
+	out	result		: int);
+
+routine proc_getsid(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	out	sid		: proc_pid_t;
+	out	result		: int);
+
+routine proc_getpgid(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	out	pgrp		: proc_pid_t;
+	out	result		: int);
+
+routine proc_killpg(
+		proc_port	: mach_port_t;
+	in	pgrp		: proc_pid_t;
+	in	signo		: int;
+	out	n_sent		: unsigned;
+	out	result		: int);
