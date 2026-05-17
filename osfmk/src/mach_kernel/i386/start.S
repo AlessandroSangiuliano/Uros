@@ -400,7 +400,13 @@ LEXT(pstart)
  * %ebx holds first available physical address.
  */
 
-	movl	$0x500000,%ebx
+	/* #241: bump first-available phys for page tables to 16 MB.
+	 * Was 0x500000 (5 MB), but multiboot modules (kernel symbols,
+	 * bootstrap server, and especially the multi-MB bundle of stage-1
+	 * binaries) end past 5 MB, so the page-table allocation here would
+	 * silently overwrite them.  16 MB is plenty of headroom for modules
+	 * loaded by GRUB before page tables begin. */
+	movl	$0x1000000,%ebx
 	addl	$(NBPG-1),%ebx		/* round first avail physical addr */
 	andl	$(-NBPG),%ebx		/* to machine page size */
 	leal	-KVTOPHYS(%ebx),%eax	/* convert to virtual address */
