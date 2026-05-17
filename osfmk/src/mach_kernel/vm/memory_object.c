@@ -481,9 +481,14 @@ memory_object_data_supply(
 
 		/*
 		 *	Look up target page and check its state.
+		 *	Loop to retry if we end up waiting on a busy page.
 		 */
 
-retry_lookup:
+	    int got_error = 0;
+	    {
+		int retry_lookup_pending = 1;
+		while (retry_lookup_pending) {
+		retry_lookup_pending = 0;
 		m = vm_page_lookup(object,offset);
 		was_clustered = FALSE;
 		if (m == VM_PAGE_NULL) {
@@ -519,7 +524,8 @@ retry_lookup:
 				vm_object_unlock(object);
 				thread_block((void (*)(void))0);
 				vm_object_lock(object);
-				goto retry_lookup;
+				retry_lookup_pending = 1;
+				continue;	/* re-enter while loop */
 			}
 
 			/*
@@ -529,7 +535,8 @@ retry_lookup:
 			result = KERN_MEMORY_PRESENT;
 			error_offset = offset + object->paging_offset;
 
-			break;
+			got_error = 1;
+			break;		/* exits while */
 		    }
 		}
 
@@ -602,9 +609,14 @@ retry_lookup:
 			else {
 			    error_offset = offset + object->paging_offset +
 						PAGE_SIZE;
-			    break;
+			    got_error = 1;
+			    break;	/* exits while */
 			}
 		}
+		}	/* end while (retry_lookup_pending) */
+		}	/* end retry_lookup scope */
+		if (got_error)
+			break;	/* exits the outer per-page for-loop */
 	}
 
 	vm_object_paging_end(object);

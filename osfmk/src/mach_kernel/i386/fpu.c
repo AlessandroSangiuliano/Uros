@@ -463,15 +463,17 @@ ASSERT_IPL(SPL0);
 			&state->hw_state[sizeof(struct i386_fp_save)];
 
 	    new_ifps = 0;
-	Retry:
-	    simple_lock(&pcb->lock);
-	    ifps = pcb->ims.ifps;
-	    if (ifps == 0) {
-		if (new_ifps == 0) {
+	    for (;;) {
+		simple_lock(&pcb->lock);
+		ifps = pcb->ims.ifps;
+		if (ifps == 0 && new_ifps == 0) {
 		    simple_unlock(&pcb->lock);
 		    new_ifps = (struct i386_fpsave_state *) zalloc(ifps_zone);
-		    goto Retry;
+		    continue;
 		}
+		break;
+	    }
+	    if (ifps == 0) {
 		ifps = new_ifps;
 		new_ifps = 0;
 		pcb->ims.ifps = ifps;

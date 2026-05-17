@@ -259,26 +259,26 @@ funnel_enter(
 		return;
 	}
 
-    restart:
-	while (f->funnel_count &&
-	       f->funnel_cpu != cpu_number()) {
+	for (;;) {
+		while (f->funnel_count &&
+		       f->funnel_cpu != cpu_number()) {
 #if	MACH_LDEBUG
-		if (i++ == funnel_loop_max) {
-			i = 0;
-			printf("Looping trying to enter funnel 0x%x\n", f);
+			if (i++ == funnel_loop_max) {
+				i = 0;
+				printf("Looping trying to enter funnel 0x%x\n", f);
 #if	MACH_KDB || MACH_KGDB
-			Debugger("funnel_enter: deadlock ?");
+				Debugger("funnel_enter: deadlock ?");
 #endif	/* MACH_KDB || MACH_KGDB */
-		}
+			}
 #endif	/* MACH_LDEBUG */
-	}
-	s = splhigh();
-	simple_lock(&f->funnel_lock);
-	if (f->funnel_count && f->funnel_cpu != cpu_number()) {
-		/* we were beaten by another cpu */
+		}
+		s = splhigh();
+		simple_lock(&f->funnel_lock);
+		if (!(f->funnel_count && f->funnel_cpu != cpu_number()))
+			break;
+		/* we were beaten by another cpu — restart */
 		simple_unlock(&f->funnel_lock);
 		splx(s);
-		goto restart;
 	}
 	if (f->funnel_count == 0) {
 		mp_disable_preemption();/* unpreemptible while in funnel */

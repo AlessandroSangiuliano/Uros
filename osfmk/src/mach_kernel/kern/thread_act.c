@@ -268,8 +268,7 @@ thread_terminate(
 		act_unlock_thread(thr_act);
 		task_unlock(task);
 		ret = KERN_TERMINATED;
-		goto out;
-	}
+	} else {
 
 	/*
 	 *	Break IPC control over the thread.
@@ -299,7 +298,8 @@ thread_terminate(
 	}
 
 	task_unlock(task);
-out:
+	} /* if (!thr_act->active) else */
+
 #if	NCPUS > 1
 	if (held) {
 		thread_unstop(thread);

@@ -385,44 +385,46 @@ i386_io_port_add(
 	new_io_tss = 0;
 	iu = (io_use_t) kalloc(sizeof(struct io_use));
 
-    Retry:
-	simple_lock(&iopb_lock);
+	for (;;) {
+	    simple_lock(&iopb_lock);
 
-	/* find the io_port_t for the device */
-	io_port = device_to_io_port_lookup(device);
-	if (io_port == 0) {
-	    /*
-	     * Device does not have IO ports available.
-	     */
-	    simple_unlock(&iopb_lock);
-	    if (new_io_tss)
-		kfree((vm_offset_t)new_io_tss, sizeof(struct iopb_tss));
-	    kfree((vm_offset_t) iu, sizeof(struct io_use));
-	    return KERN_INVALID_ARGUMENT;
-	}
-
-	/* Have the IO port. */
-
-	/* Make sure the thread has a TSS. */
-
-	simple_lock(&pcb->lock);
-	io_tss = pcb->ims.io_tss;
-	if (io_tss == 0) {
-	    if (new_io_tss == 0) {
+	    /* find the io_port_t for the device */
+	    io_port = device_to_io_port_lookup(device);
+	    if (io_port == 0) {
 		/*
-		 * Allocate an IO-tss.
+		 * Device does not have IO ports available.
 		 */
-		simple_unlock(&pcb->lock);
 		simple_unlock(&iopb_lock);
-
-		new_io_tss = (iopb_tss_t) kalloc(sizeof(struct iopb_tss));
-		io_tss_init(new_io_tss);
-
-		goto Retry;
+		if (new_io_tss)
+		    kfree((vm_offset_t)new_io_tss, sizeof(struct iopb_tss));
+		kfree((vm_offset_t) iu, sizeof(struct io_use));
+		return KERN_INVALID_ARGUMENT;
 	    }
-	    io_tss = new_io_tss;
-	    pcb->ims.io_tss = io_tss;
-	    new_io_tss = 0;
+
+	    /* Have the IO port. */
+
+	    /* Make sure the thread has a TSS. */
+
+	    simple_lock(&pcb->lock);
+	    io_tss = pcb->ims.io_tss;
+	    if (io_tss != 0)
+		break;
+
+	    if (new_io_tss != 0) {
+		io_tss = new_io_tss;
+		pcb->ims.io_tss = io_tss;
+		new_io_tss = 0;
+		break;
+	    }
+
+	    /*
+	     * Allocate an IO-tss and retry under fresh locks.
+	     */
+	    simple_unlock(&pcb->lock);
+	    simple_unlock(&iopb_lock);
+
+	    new_io_tss = (iopb_tss_t) kalloc(sizeof(struct iopb_tss));
+	    io_tss_init(new_io_tss);
 	}
 
 	/*

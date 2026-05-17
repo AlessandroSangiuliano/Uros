@@ -197,8 +197,7 @@ evc_signal(
 	ev->count++;
 	thread = ev->waiting_thread;
 	ev->waiting_thread = 0;
-	if (thread == THREAD_NULL)
-		goto done;
+	if (thread != THREAD_NULL) {
 
 	/* make thread runnable on this processor */
 	/* taken from clear_wait */
@@ -243,7 +242,8 @@ evc_signal(
 		panic("evc_signal.2");
 		break;
 	}
-done:
+	} /* if (thread != THREAD_NULL) */
+
 	simple_unlock(&ev->lock);
 	splx(s);
 }

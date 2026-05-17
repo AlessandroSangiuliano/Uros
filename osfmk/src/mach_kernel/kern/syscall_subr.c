@@ -268,6 +268,7 @@ syscall_thread_switch(
     register thread_t		cur_thread = current_thread();
     register processor_t	myprocessor;
     ipc_port_t			port;
+    int				did_handoff = 0;
 
     /*
      *	Process option.
@@ -344,14 +345,17 @@ syscall_thread_switch(
 					counter(c_thread_switch_handoff++);
 					thread_run((void(*)(void))SAFE_THR_DEPRESS, thread);
 
-					goto out;
-				}
+					did_handoff = 1;
+				} else {
 				thread_unlock(thread);
 				splx(s);
+				}
 			}
-			act_unlock_thread(thr_act);
+			if (!did_handoff)
+				act_unlock_thread(thr_act);
 	    }
-	    ip_unlock(port);
+	    if (!did_handoff)
+		ip_unlock(port);
     }
 
     /*
@@ -362,6 +366,7 @@ syscall_thread_switch(
      *	highest priority thread (can easily happen with a collection
      *	of timesharing threads).
      */
+    if (!did_handoff) {
     mp_disable_preemption();
     myprocessor = current_processor();
 #if	NCPUS > 1
@@ -380,7 +385,7 @@ syscall_thread_switch(
     }
 #endif	/* NCPUS > 1 */
 
-out:
+    }
     if (option == SWITCH_OPTION_WAIT)
 	reset_timeout_check(&cur_thread->timer);
 

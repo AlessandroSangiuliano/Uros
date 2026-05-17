@@ -1660,9 +1660,9 @@ ds_read_done(
 	 * Send the data to the reply port - this
 	 * unwires and deallocates it.
 	 */
-	if (ior->io_op & IO_INBAND && ior->io_op & IO_QUEUE)
-		goto out;
-	else if (ior->io_op & IO_INBAND) {
+	if (!(ior->io_op & IO_INBAND && ior->io_op & IO_QUEUE))
+	{
+	if (ior->io_op & IO_INBAND) {
 		assert((ior->io_op & IO_SYNC) == 0);
 		(void)ds_device_read_reply_inband(ior->io_reply_port,
 					      ior->io_reply_port_type,
@@ -1766,8 +1766,8 @@ log_io_map ("ds_read_done", ior);
 		}
 
 	}
+	} /* close if !(IO_INBAND && IO_QUEUE) */
 
-out:
 	device_dec_ioip(ior->io_device, ior);
 
 	/*
@@ -2094,10 +2094,13 @@ io_completed(
 	     * get the (*io_done)() function executed and we were able to do
 	     * it here, nothing further need be done.
 	     */
-	    if (queue == &io_done_thread_queue) {
+	    if (queue == &io_done_thread_queue && ior->io_done == 0) {
 		assert(queue->handoffs == 0);
-		if (ior->io_done == 0)
-		    goto out;
+		/* nothing further to do — fall to out */
+		splx(s);
+		return;
+	    } else if (queue == &io_done_thread_queue) {
+		assert(queue->handoffs == 0);
 	    } else {
 		/*
 		 * If we're about to queue to a user io_done_queue_wait()
@@ -2129,7 +2132,6 @@ io_completed(
 	    ior->io_op &= ~IO_FREE;
 	    io_done_queue_add(queue, ior);
 	}
-out:
 	splx(s);
 }
 
