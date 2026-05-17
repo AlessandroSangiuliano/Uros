@@ -704,8 +704,8 @@ processor_doaction(
 	processor->processor_set_next = PROCESSOR_SET_NULL;
 
 	if (processor->state == PROCESSOR_ASSIGN) {
-
-Restart_pset:
+	    int do_shutdown = 0;
+	    for (;;) {
 	    /*
 	     *	Nasty problem: we want to lock the target pset, but
 	     *	we have to enable interrupts to do that which requires
@@ -738,7 +738,8 @@ Restart_pset:
 
 	    if (processor->state == PROCESSOR_SHUTDOWN) {
 		pset_unlock(new_pset);
-		goto shutdown; /* will release pset reference */
+		do_shutdown = 1;	/* will release pset reference */
+		break;
 	    }
 
 	    if (processor->processor_set_next != PROCESSOR_SET_NULL) {
@@ -755,7 +756,7 @@ Restart_pset:
 	        processor_lock(processor);
 		new_pset = processor->processor_set_next;
 		processor->processor_set_next = PROCESSOR_SET_NULL;
-		goto Restart_pset;
+		continue;
 	    }
 
 	    /*
@@ -807,9 +808,12 @@ Restart_pset:
 
 	    thread_block((void (*)(void)) 0);
 	    return;
+	    } /* end for(;;) Restart_pset */
+	    if (!do_shutdown)
+		panic("action_thread: Restart_pset exit without action");
+	    /* fall through to shutdown code */
 	}
 
-shutdown:
 #endif	/* MACH_HOST */
 	
 	/*

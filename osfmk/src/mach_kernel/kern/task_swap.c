@@ -976,6 +976,7 @@ pick_outtask(void)
 		
 
 		task_lock(task);
+	    do {
 #if	MACH_RT
 		/*
 		 * Don't swap real-time tasks.
@@ -984,16 +985,16 @@ pick_outtask(void)
 		 * n the eligible list ?
 		 */
 		if (task->policy & POLICYCLASS_FIXEDPRI) {
-			goto tryagain;
+			break;	/* tryagain */
 		}
 #endif	/* MACH_RT */
 		if (!task->active) {
 			TASK_STATS_INCR(inactive_task_count);
-			goto tryagain;
+			break;	/* tryagain */
 		}
 		if (task->res_act_count == 0) {
 			TASK_STATS_INCR(empty_task_count);
-			goto tryagain;
+			break;	/* tryagain */
 		}
 		assert(!queue_empty(&task->thr_acts));
 		thr_act = (thread_act_t)queue_first(&task->thr_acts);
@@ -1052,7 +1053,7 @@ pick_outtask(void)
 			}
 #endif
 		}
-tryagain:
+	    } while (0);	/* do { ... } while(0) used as labeled break target */
 		task_unlock(task);
 		task = (task_t)queue_next(&task->swapped_tasks);
 	}

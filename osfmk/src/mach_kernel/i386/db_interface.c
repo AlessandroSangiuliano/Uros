@@ -349,8 +349,7 @@ kdb_trap(
 	i386_last_kdb_sp = (unsigned) &type;
 
 #if	NCPUS > 1
-	if (!kdb_enter(regs->eip))
-		goto kdb_exit;
+    if (kdb_enter(regs->eip)) {
 #endif	/* NCPUS > 1 */
 
 	/*  Should switch to kdb's own stack here. */
@@ -409,7 +408,7 @@ kdb_trap(
 	    regs->eip += BKPT_SIZE;
 
 #if	NCPUS > 1
-kdb_exit:
+    }
 	kdb_leave();
 #endif	/* NCPUS > 1 */
 
@@ -480,8 +479,7 @@ kdb_kentry(
 	saved_state[cpu_number()] = &regs;
 
 #if	NCPUS > 1
-	if (!kdb_enter(regs.eip))
-		goto kdb_exit;
+    if (kdb_enter(regs.eip)) {
 #endif	/* NCPUS > 1 */
 
 	bcopy((char *)&regs, (char *)&ddb_regs, sizeof (ddb_regs));
@@ -511,7 +509,7 @@ kdb_kentry(
 	int_regs->gs = ddb_regs.gs & 0xffff;
 
 #if	NCPUS > 1
-kdb_exit:
+    }
 	kdb_leave();
 #endif	/* NCPUS > 1 */
 	saved_state[cpu_number()] = 0;
@@ -906,28 +904,26 @@ kdb_enter(int pc)
 
 	if (db_pass_thru[my_cpu]) {
 		retval = 0;
-		goto kdb_exit;
+	} else {
+		kdb_active[my_cpu]++;
+		lock_kdb();
+
+		if (kdb_debug)
+			db_printf("kdb_enter: cpu %d, is_slave %d, kdb_cpu %d, run mode %d pc %x (%x) holds %d\n",
+				  my_cpu, kdb_is_slave[my_cpu], kdb_cpu,
+				  db_run_mode, pc, *(int *)pc, cpus_holding_bkpts);
+		if (db_breakpoints_inserted)
+			cpus_holding_bkpts++;
+		if (kdb_cpu == -1 && !kdb_is_slave[my_cpu]) {
+			kdb_cpu = my_cpu;
+			remote_kdb();	/* stop other cpus */
+			retval = 1;
+		} else if (kdb_cpu == my_cpu)
+			retval = 1;
+		else
+			retval = 0;
 	}
 
-	kdb_active[my_cpu]++;
-	lock_kdb();
-
-	if (kdb_debug)
-		db_printf("kdb_enter: cpu %d, is_slave %d, kdb_cpu %d, run mode %d pc %x (%x) holds %d\n",
-			  my_cpu, kdb_is_slave[my_cpu], kdb_cpu,
-			  db_run_mode, pc, *(int *)pc, cpus_holding_bkpts);
-	if (db_breakpoints_inserted)
-		cpus_holding_bkpts++;
-	if (kdb_cpu == -1 && !kdb_is_slave[my_cpu]) {
-		kdb_cpu = my_cpu;
-		remote_kdb();	/* stop other cpus */
-		retval = 1;
-	} else if (kdb_cpu == my_cpu) 
-		retval = 1;
-	else
-		retval = 0;
-
-kdb_exit:
 #if	NCPUS > 1
 	enable_preemption();
 #endif	/* NCPUS > 1 */
