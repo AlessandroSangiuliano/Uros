@@ -5,7 +5,7 @@
 
 /*
  * sig_test — userspace exerciser for proc_server signals (#238) +
- * process groups / sessions (#239).
+ * process groups / sessions (#239) + resource accounting (#240).
  *
  * Lives outside ipc_bench because it is a feature test, not a
  * benchmark — same pattern as kernel242_test (#242).  Exercises every
@@ -319,6 +319,51 @@ test_child_kill_sigchld(void)
 }
 
 /* ==================================================================
+ *  Resource accounting (v0.4.0 / #240)
+ * ================================================================== */
+
+static void
+test_getrusage_self(void)
+{
+    proc_rusage_t r;
+    int rc = 0;
+    kern_return_t kr;
+
+    BEGIN_TEST("getrusage(self) returns non-zero virtual_kb");
+    memset(&r, 0, sizeof(r));
+    kr = proc_getrusage(proc_port, my_pid, &r, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "proc_getrusage");
+    EXPECT_RC(rc, PROC_OK, "proc_getrusage rc");
+    /* A live task always has some virtual address space. */
+    EXPECT(r.virtual_kb > 0, "virtual_kb should be > 0 for a live task");
+    /* maxrss should also be non-zero for a running task (it has at
+     * least its code + stack resident). */
+    EXPECT(r.maxrss_kb > 0, "maxrss_kb should be > 0 for a live task");
+    printf("  rusage(self): utime=%u.%06us stime=%u.%06us "
+           "vsize=%u KiB rss=%u KiB minflt=%u majflt=%u msgs=%u/%u\n",
+           r.utime_sec, r.utime_usec,
+           r.stime_sec, r.stime_usec,
+           r.virtual_kb, r.maxrss_kb,
+           r.minflt, r.majflt, r.msgsnd, r.msgrcv);
+    PASS();
+}
+
+static void
+test_getrusage_bad_pid(void)
+{
+    proc_rusage_t r;
+    int rc = 0;
+    kern_return_t kr;
+
+    BEGIN_TEST("getrusage(bad pid) -> NOT_FOUND");
+    memset(&r, 0, sizeof(r));
+    kr = proc_getrusage(proc_port, 0xDEADBEEF, &r, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "proc_getrusage kr");
+    EXPECT_RC(rc, PROC_ERR_NOT_FOUND, "expected NOT_FOUND");
+    PASS();
+}
+
+/* ==================================================================
  *  Process groups + sessions (v0.3.0 / #239)
  * ================================================================== */
 
@@ -588,7 +633,7 @@ main(int argc, char **argv)
         return 1;
     printf_init(device);
 
-    printf("\n=== sig_test (proc_server v0.2.0/v0.3.0 / #238 + #239) ===\n");
+    printf("\n=== sig_test (proc_server v0.2.0/v0.3.0/v0.4.0 / #238 + #239 + #240) ===\n");
     wait_for_proc_server();
     if (proc_port == MACH_PORT_NULL) {
         printf("  sig_test: proc_server never appeared -- SKIP\n");
@@ -611,6 +656,10 @@ main(int argc, char **argv)
         test_setsid_perm();
         test_setpgid_new_pgrp();
         test_killpg_catchable();
+
+        /* v0.4.0 / #240 — resource accounting */
+        test_getrusage_self();
+        test_getrusage_bad_pid();
     }
 
     printf("\n=== sig_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);

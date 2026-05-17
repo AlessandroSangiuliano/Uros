@@ -28,6 +28,7 @@
 #include <mach/message.h>
 #include <mach/notify.h>
 #include <mach/mach_interface.h>
+#include <mach/task_info.h>
 #include <sa_mach.h>
 #include <pthread.h>
 #include <servers/netname.h>
@@ -79,6 +80,11 @@ struct pid_entry {
      * catchable signals are delivered here, and SIGCHLD goes to the
      * parent's slot when this pid dies. */
     mach_port_t     signal_port;
+
+    /* Cached resource accounting (v0.4.0 / #240) — refreshed on
+     * proc_getrusage() and on /proc/N/stat reads.  Zombies keep the
+     * last snapshot taken before task termination. */
+    proc_rusage_t   last_rusage;
 
     /* Open-handle table for /proc/N/stat — one slot per pid_entry. */
     int             stat_handle_in_use;
@@ -197,6 +203,7 @@ proc_S_register(
     e->exit_code  = 0;
     e->exit_notify = MACH_PORT_NULL;
     e->signal_port = MACH_PORT_NULL;
+    memset(&e->last_rusage, 0, sizeof(e->last_rusage));
     e->stat_handle_in_use = 0;
     (void)strncpy(e->cmdline, cmdline, sizeof(e->cmdline) - 1);
     e->cmdline[sizeof(e->cmdline) - 1] = '\0';
@@ -724,6 +731,122 @@ proc_S_killpg(
 }
 
 /* ------------------------------------------------------------------ */
+/*  Resource accounting (v0.4.0 / #240)                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Query the kernel for the rusage of `task_port` and fill `out`.
+ * Combines TASK_BASIC_INFO (times + sizes + suspend count) with
+ * TASK_EVENTS_INFO (faults + Mach msg counters).  BASIC carries the
+ * load-bearing fields; EVENTS is best-effort (the kernel can return
+ * KERN_FAILURE for it without breaking the snapshot), so we only
+ * propagate failure when BASIC itself fails.
+ */
+static kern_return_t
+query_kernel_rusage(mach_port_t task_port, proc_rusage_t *out)
+{
+    task_basic_info_data_t  basic;
+    task_events_info_data_t events;
+    mach_msg_type_number_t  cnt;
+    kern_return_t           kr_basic, kr_events;
+
+    memset(out, 0, sizeof(*out));
+
+    cnt = TASK_BASIC_INFO_COUNT;
+    kr_basic = task_info(task_port, TASK_BASIC_INFO,
+                         (task_info_t)&basic, &cnt);
+    if (kr_basic != KERN_SUCCESS)
+        return kr_basic;
+
+    out->utime_sec   = (uint32_t)basic.user_time.seconds;
+    out->utime_usec  = (uint32_t)basic.user_time.microseconds;
+    out->stime_sec   = (uint32_t)basic.system_time.seconds;
+    out->stime_usec  = (uint32_t)basic.system_time.microseconds;
+    out->virtual_kb  = (uint32_t)(basic.virtual_size  / 1024);
+    out->maxrss_kb   = (uint32_t)(basic.resident_size / 1024);
+
+    cnt = TASK_EVENTS_INFO_COUNT;
+    kr_events = task_info(task_port, TASK_EVENTS_INFO,
+                          (task_info_t)&events, &cnt);
+    if (kr_events == KERN_SUCCESS) {
+        /* Linux ru_minflt = zero_fill + COW (no I/O); ru_majflt = pageins. */
+        out->minflt = (uint32_t)(events.zero_fills + events.cow_faults);
+        out->majflt = (uint32_t)events.pageins;
+        out->msgsnd = (uint32_t)events.messages_sent;
+        out->msgrcv = (uint32_t)events.messages_received;
+    }
+    /* EVENTS failure leaves those fields at zero — still a valid
+     * snapshot of times + memory sizes from BASIC. */
+    return KERN_SUCCESS;
+}
+
+/*
+ * Refresh the cached rusage for `pid` from the kernel.  Zombies
+ * skip the refresh (the kernel task is gone) but the cached
+ * snapshot remains valid.  Returns KERN_SUCCESS even when we
+ * couldn't refresh — callers fall back to whatever's in the cache.
+ */
+static void
+refresh_rusage_for_pid(proc_pid_t pid)
+{
+    struct pid_entry *e;
+    mach_port_t task = MACH_PORT_NULL;
+    int is_zombie = 0;
+    proc_rusage_t fresh;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (e) {
+        task = e->task_port;
+        is_zombie = (e->state == PROC_STATE_ZOMBIE);
+    }
+    pthread_mutex_unlock(&pid_lock);
+
+    if (!e || is_zombie || task == MACH_PORT_NULL)
+        return;
+
+    if (query_kernel_rusage(task, &fresh) != KERN_SUCCESS)
+        return;
+
+    pthread_mutex_lock(&pid_lock);
+    /* Re-find: the slot is never recycled in v0.x.0, so the pointer
+     * stays valid, but the state may have flipped to ZOMBIE while we
+     * were unlocked.  In that case the kernel rusage we just got is
+     * still the most recent snapshot, so commit it anyway. */
+    e = find_by_pid_locked(pid);
+    if (e)
+        e->last_rusage = fresh;
+    pthread_mutex_unlock(&pid_lock);
+}
+
+kern_return_t
+proc_S_getrusage(
+    mach_port_t                 server_port,
+    proc_pid_t                  pid,
+    proc_rusage_t               *usage,
+    int                         *result)
+{
+    struct pid_entry *e;
+
+    (void)server_port;
+    memset(usage, 0, sizeof(*usage));
+
+    /* Best-effort refresh from the kernel before snapshotting the
+     * cache — keeps the returned values as close to "now" as a
+     * single RPC can manage. */
+    refresh_rusage_for_pid(pid);
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (e)
+        *usage = e->last_rusage;
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = e ? PROC_OK : PROC_ERR_NOT_FOUND;
+    return KERN_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
 /*  vfs.defs adapter for /proc/N/stat                                   */
 /* ------------------------------------------------------------------ */
 
@@ -830,23 +953,46 @@ vfs_close(mach_port_t fs_port, vfs_u64_t handle)
 
 /*
  * Format /proc/N/stat line — Linux-compatible field ordering.
- * Fields filled (rest are placeholder zero):
- *   1 pid  2 (cmdline)  3 state  4 ppid  5 pgrp  6 session  7 tty_nr
- *   8 tpgid  ... (the trailing zeros are POSIX accounting we don't
- *   track yet — added incrementally per #240).  tty_nr stays 0 until
- *   controlling-tty wiring lands in #247.
+ * Fields filled:
+ *   1 pid       2 (cmdline)    3 state     4 ppid
+ *   5 pgrp      6 session      7 tty_nr    8 tpgid
+ *   9 flags    10 minflt      11 cminflt  12 majflt
+ *  13 cmajflt  14 utime       15 stime    16 cutime
+ *  17 cstime   ... (priority/nice/threads not tracked yet)
+ *  22 starttime  23 vsize     24 rss
+ *
+ * utime/stime are expressed in clock ticks; we report seconds * 100
+ * (i.e. assume HZ == 100) since the kernel hands us time_value_t and
+ * Linux convention for /proc is "USER_HZ ticks".  rss is reported in
+ * pages (PAGE_SIZE bytes), so we divide bytes by 4096.  tty_nr stays
+ * 0 until #247 wires controlling-tty.
  */
 static int
 format_stat(const struct pid_entry *e, char *buf, int max)
 {
     int n;
     char ch[2] = { (char)e->state, '\0' };
+    const proc_rusage_t *r = &e->last_rusage;
+    uint32_t utime_ticks = r->utime_sec * 100u + r->utime_usec / 10000u;
+    uint32_t stime_ticks = r->stime_sec * 100u + r->stime_usec / 10000u;
+    /* virtual_kb / maxrss_kb are KiB; Linux vsize is bytes, rss is pages. */
+    uint32_t vsize_bytes = r->virtual_kb * 1024u;
+    uint32_t rss_pages   = r->maxrss_kb / 4u;  /* KiB / 4 == pages (PAGE_SIZE=4096) */
+    uint32_t minflt = r->minflt;
+    uint32_t majflt = r->majflt;
+
     n = snprintf(buf, max,
-                 "%u (%s) %s %u %u %u 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
+                 "%u (%s) %s %u %u %u 0 -1 0 %u 0 %u 0 %u %u 0 0 0 0 0 0 0 %u %u 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n",
                  (unsigned)e->pid, e->cmdline, ch,
                  (unsigned)e->ppid,
                  (unsigned)e->pgrp_id,
-                 (unsigned)e->sid);
+                 (unsigned)e->sid,
+                 (unsigned)minflt,
+                 (unsigned)majflt,
+                 (unsigned)utime_ticks,
+                 (unsigned)stime_ticks,
+                 (unsigned)vsize_bytes,
+                 (unsigned)rss_pages);
     if (n < 0)
         n = 0;
     if (n >= max)
@@ -874,6 +1020,18 @@ vfs_read(
 
     *data_out       = (pointer_t)0;
     *data_count_out = 0;
+
+    /* Snapshot pid under lock, refresh rusage outside lock, then
+     * format from the (potentially-updated) cache. */
+    {
+        proc_pid_t target_pid = 0;
+        pthread_mutex_lock(&pid_lock);
+        e = find_by_handle_locked(handle);
+        if (e) target_pid = e->pid;
+        pthread_mutex_unlock(&pid_lock);
+        if (target_pid != 0)
+            refresh_rusage_for_pid(target_pid);
+    }
 
     pthread_mutex_lock(&pid_lock);
     e = find_by_handle_locked(handle);
@@ -906,7 +1064,15 @@ vfs_fstat(mach_port_t fs_port, vfs_u64_t handle, vfs_stat_t *st)
     struct pid_entry *e;
     char tmp[512];
     int len;
+    proc_pid_t target_pid = 0;
     (void)fs_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_handle_locked(handle);
+    if (e) target_pid = e->pid;
+    pthread_mutex_unlock(&pid_lock);
+    if (target_pid != 0)
+        refresh_rusage_for_pid(target_pid);
 
     pthread_mutex_lock(&pid_lock);
     e = find_by_handle_locked(handle);
@@ -939,6 +1105,7 @@ vfs_stat(mach_port_t fs_port, char *path, vfs_stat_t *st)
     tail = parse_proc_path(path, &pid);
     if (!tail || strcmp(tail, "stat") != 0)
         return KERN_FAILURE;
+    refresh_rusage_for_pid(pid);
     pthread_mutex_lock(&pid_lock);
     e = find_by_pid_locked(pid);
     if (!e) {

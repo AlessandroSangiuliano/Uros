@@ -43,6 +43,8 @@ type proc_pid_t       = unsigned    ctype: proc_pid_t;
 type proc_cmdline_t   = c_string[*:128];
 type proc_entry_t     = struct[36] of unsigned32;     /* 144 bytes */
 type proc_entry_array = pointer_t   ctype: proc_entry_array;
+type proc_rusage_t    = struct[10] of unsigned32      /* 40 bytes  */
+                          ctype: proc_rusage_t;
 
 /*
  * Register a task with proc_server.  The caller passes a send right
@@ -173,4 +175,21 @@ routine proc_killpg(
 	in	pgrp		: proc_pid_t;
 	in	signo		: int;
 	out	n_sent		: unsigned;
+	out	result		: int);
+
+/*
+ * proc_getrusage(pid) — POSIX-style resource snapshot for a pid
+ * (#240 / v0.4.0).  proc_server forwards the call into the kernel
+ * via task_info(task_port, TASK_BASIC_INFO + TASK_EVENTS_INFO),
+ * marshals the result into proc_rusage_t, and returns it inline.
+ *
+ * Returns PROC_ERR_NOT_FOUND if the pid is unknown, PROC_ERR_KERNEL
+ * if any of the underlying task_info calls fails.  Zombies are
+ * permitted: the last-snapshot values stick until the slot is
+ * reused (today the slot is never recycled — see v0.1.0 notes).
+ */
+routine proc_getrusage(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	out	usage		: proc_rusage_t;
 	out	result		: int);
