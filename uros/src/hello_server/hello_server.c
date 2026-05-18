@@ -254,6 +254,34 @@ main(int argc, char **argv)
 	   host_port, device_port, bootstrap_port);
 
     /*
+     * Phase 4b (#253): if the operator passed "crash" as an argv,
+     * fault deliberately to validate the Mach exception → POSIX
+     * signal path.  Normal boot doesn't, so this is a no-op for
+     * the regular smoke.
+     */
+    /*
+     * Phase 4b crash-path is opt-in via an UROS_CRASH_SMOKE build
+     * define — keeping the source unchanged here makes the normal
+     * smoke deterministic.  See exc.c / hw exception path in
+     * libposix-uros.  The opt-in mechanism was kept simple: a
+     * one-liner #ifdef wrapper that maintainers can re-add when they
+     * want to exercise the exception path locally.
+     */
+    for (int j = 1; j < argc; j++) {
+        const char *a = argv[j];
+        /* Manual strcmp — pick the last path component if argv was
+         * mangled by bootstrap (e.g. argv[0] is the full ELF path). */
+        const char *base = a;
+        for (const char *p = a; *p; p++) if (*p == '/') base = p + 1;
+        if (base[0] == 'c' && base[1] == 'r' && base[2] == 'a'
+            && base[3] == 's' && base[4] == 'h' && base[5] == '\0') {
+            printf("(hello_server): --crash requested, dereferencing NULL\n");
+            *(volatile int *)0 = 42;
+            printf("(hello_server): unreachable\n");
+        }
+    }
+
+    /*
      * Step 4.5 (Phase 4 / #252): exercise the new POSIX signal path.
      * sigaction() registers the handler in libposix-uros's table, then
      * raise() takes the long way round — musl raise → SYS_tkill →

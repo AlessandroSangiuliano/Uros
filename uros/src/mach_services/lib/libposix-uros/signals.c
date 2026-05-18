@@ -293,6 +293,14 @@ __uros_signals_init(void)
      * any earlier step leaves us with no thread spinning on a port
      * proc_server doesn't know about. */
     (void)spawn_handler_thread();
+
+    /* 6. Hardware exception path (#253 / Phase 4b): install a
+     * dedicated exception port so a SEGV/FPE/ILL in this task becomes
+     * a clean log+terminate instead of a kernel-level fault.  Failure
+     * is non-fatal — the task just keeps the kernel's default
+     * exception port and behaves as before. */
+    extern void __uros_exceptions_init(void);
+    __uros_exceptions_init();
 }
 
 /* ------------------------------------------------------------------ */

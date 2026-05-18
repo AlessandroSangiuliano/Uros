@@ -22,4 +22,17 @@ __uros_sig_thread_entry:
         call    __uros_sig_thread_die
 1:      jmp     1b
 
+/*
+ * Phase 4b (#253): same pattern for the exception-port thread.
+ * Kept separate so each entry is single-purpose and a stack trace in
+ * DDB is unambiguous about which thread is which.
+ */
+.globl __uros_exc_thread_entry
+.type  __uros_exc_thread_entry, @function
+__uros_exc_thread_entry:
+        xorl    %ebp, %ebp
+        call    __uros_exc_loop
+        call    __uros_sig_thread_die
+2:      jmp     2b
+
 .section .note.GNU-stack,"",@progbits
