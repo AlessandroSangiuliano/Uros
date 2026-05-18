@@ -12,12 +12,12 @@ if [ ! -x "$OUTDIR/noasan_migcom" ]; then
   # Detect SRC similarly to build_and_run.sh (project may live under subdirs)
   if [ -f "/workspace/CMakeLists.txt" ]; then
     SRC=/workspace
-  elif [ -f "/workspace/osfmk/CMakeLists.txt" ]; then
+  elif [ -f "/workspace/uros/CMakeLists.txt" ]; then
     SRC=/workspace/osfmk
   elif [ -f "/workspace/src/mach_services/lib/migcom/CMakeLists.txt" ]; then
     SRC=/workspace/src/mach_services/lib/migcom
-  elif [ -f "/workspace/osfmk/src/mach_services/lib/migcom/CMakeLists.txt" ]; then
-    SRC=/workspace/osfmk/src/mach_services/lib/migcom
+  elif [ -f "/workspace/uros/src/mach_services/lib/migcom/CMakeLists.txt" ]; then
+    SRC=/workspace/uros/src/mach_services/lib/migcom
   else
     SRC=/workspace
     echo "[attach] Warning: could not find CMakeLists.txt in expected locations; using /workspace" >> "$OUTDIR/gdb_pause_run.log"
@@ -27,7 +27,7 @@ if [ ! -x "$OUTDIR/noasan_migcom" ]; then
   cp "$BUILD_DIR/src/mach_services/lib/migcom/migcom" "$OUTDIR/noasan_migcom" || true
   chmod +x "$OUTDIR/noasan_migcom" || true
 fi
-TEST_MIG="/workspace/osfmk/src/mach_services/lib/migcom/tests/device_request-small.mig"
+TEST_MIG="/workspace/uros/src/mach_services/lib/migcom/tests/device_request-small.mig"
 # Run NOASAN under debug interceptor; when pause file appears attach gdb and dump diagnostics
 MIG_ABORT_ON_NONASCII=2 LD_PRELOAD=/workspace/tools/libnonascii_debug.so "$OUTDIR/noasan_migcom" -V -i test_ -user /dev/null -server /dev/null -sheader /dev/null -dheader /dev/null < "$TEST_MIG" & child=$!
 echo "[attach] child=$child" > "$OUTDIR/gdb_pause_run.log"

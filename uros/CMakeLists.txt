@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(osfmk
+project(uros
   VERSION 0.1
   LANGUAGES C ASM
 )
@@ -45,10 +45,10 @@ if(NOT DEFINED OSFMK_GEN_KSYMS)
 endif()
 
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
-option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'osfmk' when building kernel)" "")
+option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'uros' when building kernel)" "")
 if(NOT EXPORT_PLATFORM)
   if(OSFMK_BUILD_KERNEL)
-    set(EXPORT_PLATFORM "osfmk")
+    set(EXPORT_PLATFORM "uros")
   else()
     set(EXPORT_PLATFORM "${CMAKE_SYSTEM_NAME}")
   endif()
@@ -56,7 +56,7 @@ endif()
 message(STATUS "EXPORT_PLATFORM = ${EXPORT_PLATFORM}")
 
 # #179 — UAPI split: shared kernel/userspace wire-format headers live in
-# osfmk/uapi/.  Expose the directory via an INTERFACE library so any target
+# uros/uapi/.  Expose the directory via an INTERFACE library so any target
 # can simply `target_link_libraries(<x> PRIVATE uros_uapi)` to get the
 # include path.  Today only kernel + libmach + a handful of low-level libs
 # need it; as more headers migrate, more targets will pick this up.

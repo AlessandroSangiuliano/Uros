@@ -7,7 +7,7 @@
  * char_server.h — Internal types and globals for the char_server task.
  *
  * Mirror gpu_server.h.  Public client-visible types live in
- * osfmk/export/include/char/.
+ * uros/export/include/char/.
  */
 
 #ifndef _CHAR_SERVER_INTERNAL_H_

@@ -9,7 +9,7 @@
  * First concrete implementation of gpu_module_ops_t: single 80x25
  * text-mode display backed by the VGA framebuffer at physical
  * 0xB8000.  The kernel VGA driver
- * (osfmk/src/mach_kernel/i386/AT386/vga.c) is being retired in #199;
+ * (uros/src/mach_kernel/i386/AT386/vga.c) is being retired in #199;
  * this module owns the same hardware from userspace.
  *
  * What this module does today:

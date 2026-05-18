@@ -15,13 +15,13 @@
 # Uso:
 #   ./scripts/run-bochs.sh                  # X11 GUI + serial -> file
 #   ./scripts/run-bochs.sh --no-disk        # senza ata0-master IDE
-#   tail -F osfmk/build/bochs-serial.log    # in altro terminale
+#   tail -F uros/build/bochs-serial.log    # in altro terminale
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BUILD_DIR="$REPO_ROOT/osfmk/build"
-KERNEL="$BUILD_DIR/export/osfmk/boot/mach_kernel"
-BOOTSTRAP="$BUILD_DIR/export/osfmk/$(uname -m)/user/sbin/bootstrap"
+BUILD_DIR="$REPO_ROOT/uros/build"
+KERNEL="$BUILD_DIR/export/uros/boot/mach_kernel"
+BOOTSTRAP="$BUILD_DIR/export/uros/$(uname -m)/user/sbin/bootstrap"
 BUNDLE="$BUILD_DIR/bootstrap.bundle"
 DISK_IMG="$BUILD_DIR/disk.img"
 

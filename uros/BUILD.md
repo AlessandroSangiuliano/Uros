@@ -199,7 +199,7 @@ Any memory errors will be reported automatically.
 
 The CMake Tools extension automatically detects `CMakePresets.json`.
 
-1. Open VS Code in the `osfmk` directory
+1. Open VS Code in the `uros` directory
 2. Press `Ctrl+Shift+P` → "CMake: Select Configure Preset"
 3. Choose your desired preset
 4. Press `F7` to build or `Ctrl+Shift+P` → "CMake: Build"
@@ -278,7 +278,7 @@ The test preset for `debug` automatically sets `LSAN_OPTIONS=detect_leaks=0` to 
 ## Project Structure
 
 ```
-osfmk/
+uros/
 ├── CMakeLists.txt          # Main CMake configuration
 ├── CMakePresets.json       # Build presets (this file)
 ├── BUILD.md                # This document

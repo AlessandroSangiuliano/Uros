@@ -24,9 +24,9 @@
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BUILD_DIR="$REPO_ROOT/osfmk/build"
-KERNEL="$BUILD_DIR/export/osfmk/boot/mach_kernel"
-BOOTSTRAP="$BUILD_DIR/export/osfmk/$(uname -m)/user/sbin/bootstrap"
+BUILD_DIR="$REPO_ROOT/uros/build"
+KERNEL="$BUILD_DIR/export/uros/boot/mach_kernel"
+BOOTSTRAP="$BUILD_DIR/export/uros/$(uname -m)/user/sbin/bootstrap"
 DISK_IMG="$BUILD_DIR/disk.img"
 BUNDLE_IMG="$BUILD_DIR/bootstrap.bundle"
 
@@ -112,7 +112,7 @@ fi
 # Issue #211: ksyms.bin (kernel DDB symbol table) shipped as mod[2] when
 # present.  The kernel scans multiboot mods for the "KSYM" magic; the
 # module-position is not significant.
-KSYMS_IMG="$BUILD_DIR/export/osfmk/boot/ksyms.bin"
+KSYMS_IMG="$BUILD_DIR/export/uros/boot/ksyms.bin"
 if [ -f "$KSYMS_IMG" ]; then
     INITRD="$INITRD,$KSYMS_IMG"
     echo "DDB syms: $KSYMS_IMG"

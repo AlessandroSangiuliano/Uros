@@ -528,7 +528,7 @@ Preprocessa assembly `.s` per i386.
 ### 4.1 Struttura
 
 ```
-osfmk/
+uros/
 ├── CMakeLists.txt              ← Top-level: opzioni, CTest, add_subdirectory(src)
 ├── CMakePresets.json           ← 4 preset: debug, debug-nosan, release, relwithdebinfo
 └── src/
@@ -748,7 +748,7 @@ Questo impedisce al kernel di paginarla out (il pager stesso non può essere pag
 ```
 build-debug/
 ├── export/
-│   └── osfmk/
+│   └── uros/
 │       └── x86_64/            (o i386)
 │           ├── kernel/
 │           │   └── mach_kernel    ← Kernel ELF

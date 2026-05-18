@@ -11,7 +11,7 @@ Author: Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
 
 `gpu_server` is the userspace task that owns every display/graphics device
 on the system. It replaces the current in-kernel VGA driver
-(`osfmk/src/mach_kernel/i386/AT386/vga.c`) and is the only task allowed
+(`uros/src/mach_kernel/i386/AT386/vga.c`) and is the only task allowed
 to talk to GPU hardware.
 
 It follows the standard Uros driver pattern (see `uros_design.md` §4):
@@ -431,7 +431,7 @@ What 0.1.0 DOES guarantee:
 ### 8.2 Files added in 0.1.0
 
 ```
-osfmk/src/mach_services/gpu_server/
+uros/src/mach_services/gpu_server/
     main.c              — task entry, MIG dispatch loop, render thread
     core.c              — module loader, resource registry, cap_verify glue
     text_render.c       — puts → cell grid, scroll via memmove
@@ -441,11 +441,11 @@ osfmk/src/mach_services/gpu_server/
     modules/
         vga.c           — text mode backend (CRTC ports, font ROM, A0000)
 
-osfmk/src/bootstrap/
+uros/src/bootstrap/
     log_forwarder.c     — thread that drains kernel log buffer and
                           calls gpu_text_puts in chunks (~50 lines)
 
-osfmk/export/include/gpu/
+uros/export/include/gpu/
     gpu_types.h         — public types (gpu_mode_t, gpu_bo_flags_t,
                           gpu_cap_t, gpu_ctx_id_t, ...)
     gpu_module_abi.h    — module-side ABI (§4)
@@ -454,8 +454,8 @@ osfmk/export/include/gpu/
 Files **deleted** in 0.1.0:
 
 ```
-osfmk/src/mach_kernel/i386/AT386/vga.c        — moved to userspace module
-osfmk/src/mach_kernel/i386/AT386/vga.h        — gone
+uros/src/mach_kernel/i386/AT386/vga.c        — moved to userspace module
+uros/src/mach_kernel/i386/AT386/vga.h        — gone
    (kernel keeps console_serial.c only for early-boot panic)
 ```
 
