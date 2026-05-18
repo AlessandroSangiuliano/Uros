@@ -165,6 +165,7 @@ ipc_task_init(
 		task->exc_actions[EXC_MACH_SYSCALL].port = 
 			ipc_port_make_send(realhost.host_self);
 		task->itk_bootstrap = IP_NULL;
+		task->itk_cap = IP_NULL;	/* #216 v2.1 */
 		for (i = 0; i < TASK_PORT_REGISTER_MAX; i++)
 			task->itk_registered[i] = IP_NULL;
 	} else {
@@ -189,6 +190,9 @@ ipc_task_init(
 		}/* for */
 		task->itk_bootstrap =
 			ipc_port_copy_send(parent->itk_bootstrap);
+		/* #216 v2.1 — itk_cap is per-task identity, NOT inherited.
+		 * bootstrap re-provisions per child after task_create. */
+		task->itk_cap = IP_NULL;
 
 		itk_unlock(parent);
 	}
@@ -276,6 +280,8 @@ ipc_task_terminate(
 	}/* for */
 	if (IP_VALID(task->itk_bootstrap))
 		ipc_port_release_send(task->itk_bootstrap);
+	if (IP_VALID(task->itk_cap))		/* #216 v2.1 */
+		ipc_port_release_send(task->itk_cap);
 
 	for (i = 0; i < TASK_PORT_REGISTER_MAX; i++)
 		if (IP_VALID(task->itk_registered[i]))
@@ -605,7 +611,12 @@ task_get_special_port(
             case TASK_PAGED_LEDGER_PORT:
                 whichp = &task->paged_ledger_port;
                 break;
-                    
+
+	    case TASK_CAP_PORT:
+		/* #216 v2.1 — per-task cap_server port. */
+		whichp = &task->itk_cap;
+		break;
+
 	    default:
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -666,7 +677,12 @@ task_set_special_port(
             case TASK_PAGED_LEDGER_PORT:
                 whichp = &task->paged_ledger_port;
                 break;
-                    
+
+	    case TASK_CAP_PORT:
+		/* #216 v2.1 — per-task cap_server port. */
+		whichp = &task->itk_cap;
+		break;
+
 	    default:
 		return KERN_INVALID_ARGUMENT;
 	}/* switch */

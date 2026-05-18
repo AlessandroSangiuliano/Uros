@@ -38,10 +38,13 @@
 #include <mach/bootstrap.h>
 #include <mach/mach_port.h>
 #include <mach/message.h>
+#include <mach/cap_types.h>             /* #216 v2.1 enforcement probe */
 #include <sa_mach.h>
 #include <pthread.h>
 #include <device/device.h>
 #include <device/device_types.h>
+#include <libcap.h>                     /* #216 v2.1 enforcement probe */
+#include <mach_init.h>                  /* mach_cap_port (#216 v2.1) */
 #include <stdio.h>
 
 /*
@@ -252,6 +255,34 @@ main(int argc, char **argv)
      */
     enumerate_ports();
     check_port_status(hello_port);
+
+    /*
+     * Step 6.5: #216 v2.1 enforcement probe.  hello_server's manifest
+     * declares zero caps_required, so any cap_request must come back
+     * as CAP_ERR_NOT_IN_MANIFEST (2413) when the per-task cap_port is
+     * in use.  When TASK_CAP_PORT isn't set (bootstrap without a
+     * manifest, or pre-#216 bootstrap), we expect CAP_ERR_NONE
+     * because the legacy well-known path is permissive — that's a
+     * cleanly reportable state, not a failure.
+     */
+    {
+	struct uros_cap probe;
+	kern_return_t pk;
+
+	printf("(hello_server): manifest enforcement probe — "
+	       "mach_cap_port=0x%x\n", mach_cap_port);
+	pk = cap_request(RESOURCE_BLK_DEVICE, 0xdeadbeefULL,
+			 CAP_OP_BLK_READ, 0, &probe);
+	if (pk == CAP_ERR_NOT_IN_MANIFEST) {
+	    printf("(hello_server): probe -> CAP_ERR_NOT_IN_MANIFEST "
+		   "— enforcement WORKS\n");
+	} else if (pk == KERN_SUCCESS) {
+	    printf("(hello_server): probe -> KERN_SUCCESS "
+		   "(legacy permissive path)\n");
+	} else {
+	    printf("(hello_server): probe -> kr=%d (unexpected)\n", pk);
+	}
+    }
 
     /*
      * Step 7: Tell the bootstrap we're done initializing.

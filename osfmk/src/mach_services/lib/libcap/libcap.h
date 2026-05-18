@@ -115,6 +115,27 @@ kern_return_t cap_use_local(const struct uros_cap *token,
                             uint32_t op,
                             uint64_t resource_id);
 
+/*
+ * cap_provision() — bootstrap-side wrapper around the
+ * cap_provision_task RPC (#216 v2.1).  Hands cap_server a manifest
+ * blob and the receive of a per-task cap_port the child task will
+ * use for every future cap_request.  Bootstrap typically stamps the
+ * returned port into the child via task_set_special_port(TASK_CAP_PORT).
+ *
+ * Named differently from the server-side MIG handler
+ * (cap_provision_task) so libcap.a can be safely linked into the
+ * cap_server binary without symbol collision — same pattern as
+ * cap_request / cap_acquire.
+ *
+ * Returns KERN_SUCCESS on a successful install; otherwise one of
+ * CAP_ERR_* (manifest invalid / no slot / no memory) or the
+ * underlying mach_msg failure.
+ */
+kern_return_t cap_provision(mach_port_t task_port,
+                            const void *manifest_blob,
+                            unsigned int manifest_len,
+                            mach_port_t *out_task_cap_port);
+
 #ifdef __cplusplus
 }
 #endif

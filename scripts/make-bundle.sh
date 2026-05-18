@@ -48,6 +48,12 @@ if [ ! -x "$MKBUNDLE" ]; then
 fi
 
 SBIN="$BUILD_DIR/export/osfmk/$ARCH/user/sbin"
+MANIFESTS="$BUILD_DIR/export/osfmk/$ARCH/user/manifests"
+
+# #216 v2.1: compiled per-server manifests (.cmf TLV) that bootstrap
+# hands to cap_server at task_create time.  Optional — servers
+# without a .cmf fall back to the legacy permissive cap_server path.
+HELLO_SERVER_CMF="$MANIFESTS/hello_server.cmf"
 
 NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
@@ -144,6 +150,7 @@ ARGS+=("hal_server:$HAL_SERVER")
 ARGS+=("block_device_server:$BLOCK_DEVICE_SERVER")
 ARGS+=("default_pager:$DEFAULT_PAGER")
 ARGS+=("hello_server:$HELLO_SERVER")
+[ -f "$HELLO_SERVER_CMF" ] && ARGS+=("hello_server.cmf:$HELLO_SERVER_CMF")
 ARGS+=("ipc_bench:$IPC_BENCH")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
