@@ -45,6 +45,7 @@
 #define UROS_SYS_close            6
 #define UROS_SYS_getpid          20
 #define UROS_SYS_getuid          24
+#define UROS_SYS_kill            37
 #define UROS_SYS_brk             45
 #define UROS_SYS_getgid          47
 #define UROS_SYS_geteuid         49
@@ -57,9 +58,11 @@
 #define UROS_SYS_rt_sigprocmask 175
 #define UROS_SYS_mmap2          192
 #define UROS_SYS_fstat64        197
+#define UROS_SYS_tkill          238
 #define UROS_SYS_set_thread_area 243
 #define UROS_SYS_exit_group     252
 #define UROS_SYS_set_tid_address 258
+#define UROS_SYS_tgkill         270
 #define UROS_SYS_openat         295
 
 /* ------------------------------------------------------------------ */
@@ -213,8 +216,6 @@ static long h_munmap(long addr, long len, long a3,
 STUB(h_brk,             -ENOMEM)
 STUB(h_set_thread_area, 0)
 STUB(h_set_tid_address, 1)
-STUB(h_rt_sigprocmask,  0)
-STUB(h_rt_sigaction,    0)
 STUB(h_ioctl,           -ENOTTY)
 STUB(h_read,            -EBADF)
 STUB(h_readv,           -EBADF)
@@ -222,11 +223,71 @@ STUB(h_open,            -EACCES)
 STUB(h_openat,          -EACCES)
 STUB(h_close,           0)
 STUB(h_fstat64,         -EBADF)
-STUB(h_getpid,          1)
 STUB(h_getuid,          0)
 STUB(h_geteuid,         0)
 STUB(h_getgid,          0)
 STUB(h_getegid,         0)
+
+/* ------------------------------------------------------------------ */
+/* Phase 4 real handlers — bridge POSIX syscalls to libposix-uros's   */
+/* signal module (signals.c).                                         */
+/* ------------------------------------------------------------------ */
+
+/* From signals.c. */
+extern unsigned int __uros_my_pid;
+extern int  __uros_sigaction(int signo, const void *act, void *old);
+extern int  __uros_sigprocmask(int how, const void *set, void *old);
+extern int  __uros_kill(unsigned int pid, int signo);
+
+static long h_rt_sigaction(long sig, long act, long old,
+                           long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;     /* a4 = sigsetsize, ignored */
+    return __uros_sigaction((int)sig, (const void *)act, (void *)old);
+}
+
+static long h_rt_sigprocmask(long how, long set, long old,
+                             long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return __uros_sigprocmask((int)how, (const void *)set, (void *)old);
+}
+
+static long h_getpid(long a1, long a2, long a3,
+                     long a4, long a5, long a6)
+{
+    (void)a1; (void)a2; (void)a3;
+    (void)a4; (void)a5; (void)a6;
+    /* Fall back to 1 when proc_server registration didn't go through —
+     * tasks can still print "[pid=1]" without crashing. */
+    return __uros_my_pid ? __uros_my_pid : 1;
+}
+
+static long h_kill(long pid, long sig, long a3,
+                   long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_kill((unsigned int)pid, (int)sig);
+}
+
+/*
+ * tkill / tgkill arrive from raise() and pthread_kill().  Without per-
+ * thread targeting (Phase 6) we ignore the tid/tgid and dispatch to
+ * the whole task — fine for raise() in single-threaded musl tasks.
+ */
+static long h_tkill(long tid, long sig, long a3,
+                    long a4, long a5, long a6)
+{
+    (void)tid; (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_kill(__uros_my_pid ? __uros_my_pid : 1, (int)sig);
+}
+
+static long h_tgkill(long tgid, long tid, long sig,
+                     long a4, long a5, long a6)
+{
+    (void)tid; (void)a4; (void)a5; (void)a6;
+    return __uros_kill((unsigned int)tgid, (int)sig);
+}
 
 /* ------------------------------------------------------------------ */
 /* Dispatch table                                                     */
@@ -242,6 +303,7 @@ static const struct entry table[] = {
     { UROS_SYS_close,            h_close           },
     { UROS_SYS_getpid,           h_getpid          },
     { UROS_SYS_getuid,           h_getuid          },
+    { UROS_SYS_kill,             h_kill            },
     { UROS_SYS_brk,              h_brk             },
     { UROS_SYS_getgid,           h_getgid          },
     { UROS_SYS_geteuid,          h_geteuid         },
@@ -254,9 +316,11 @@ static const struct entry table[] = {
     { UROS_SYS_rt_sigprocmask,   h_rt_sigprocmask  },
     { UROS_SYS_mmap2,            h_mmap2           },
     { UROS_SYS_fstat64,          h_fstat64         },
+    { UROS_SYS_tkill,            h_tkill           },
     { UROS_SYS_set_thread_area,  h_set_thread_area },
     { UROS_SYS_exit_group,       h_exit            },
     { UROS_SYS_set_tid_address,  h_set_tid_address },
+    { UROS_SYS_tgkill,           h_tgkill          },
     { UROS_SYS_openat,           h_openat          },
 };
 

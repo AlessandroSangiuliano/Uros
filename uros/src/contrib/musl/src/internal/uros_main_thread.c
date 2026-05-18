@@ -27,9 +27,24 @@
 struct pthread __uros_main_thread;
 unsigned long  __uros_tp;
 
+/*
+ * Phase 4 (#252) — once the synthetic TP is wired, kick the signal
+ * personality startup.  The function is provided by libposix-uros and
+ * declared weak so musl can build standalone without a libposix-uros
+ * archive (Phase 1 host-only smoke).  See uros/src/mach_services/lib/
+ * libposix-uros/signals.c.
+ *
+ * The attribute uses __weak__ (not weak): musl's internal
+ * features.h #defines `weak` as `__attribute__((__weak__))`, so the
+ * shorter spelling collides with the macro inside this TU.
+ */
+extern void __uros_signals_init(void) __attribute__((__weak__));
+
 void __uros_libc_init(void)
 {
 	__uros_main_thread.self   = &__uros_main_thread;
 	__uros_tp = (unsigned long)((char *)&__uros_main_thread
 	                            + sizeof(struct pthread));
+	if (__uros_signals_init)
+		__uros_signals_init();
 }

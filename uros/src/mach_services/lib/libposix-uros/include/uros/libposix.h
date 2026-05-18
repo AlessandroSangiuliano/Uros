@@ -46,6 +46,17 @@ long __uros_syscall5(long n, long a1, long a2, long a3, long a4, long a5);
 long __uros_syscall6(long n, long a1, long a2, long a3,
                      long a4, long a5, long a6);
 
+/*
+ * Phase 4 (#252) — signal personality bootstrap.  Called from musl's
+ * patched __uros_libc_init() so a one-line init sequence in main()
+ * leaves the task ready to receive signals via proc_server.
+ *
+ * Safe to call before main(): the function is itself reentrant against
+ * a partial proc_server (it gives up gracefully if proc_server is not
+ * yet up — signals just stay SIG_DFL).
+ */
+void __uros_signals_init(void);
+
 #ifdef __cplusplus
 }
 #endif
