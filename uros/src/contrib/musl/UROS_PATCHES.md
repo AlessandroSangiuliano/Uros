@@ -16,10 +16,9 @@ each entry by hand.
 | Date       | File(s)                              | Issue | Why |
 |------------|--------------------------------------|-------|-----|
 | 2026-05-18 | (none yet)                           | #249  | Phase 1 ships vanilla musl 1.2.5 — no source edits, only out-of-tree build glue. |
+| 2026-05-18 | `arch/i386/syscall_arch.h`           | #250  | Replace inline `int $128` / `call *%gs:16` stubs with C-ABI calls to `__uros_syscallN(...)` (provided by libposix-uros).  Drops the vDSO macro block; Uros has its own fast-path mechanism (#236). |
 
-## Planned future patches (Phase 2+)
+## Planned future patches (Phase 3+)
 
-- `arch/i386/syscall_arch.h` — replace `__syscall_*` dispatch with calls
-  into `__uros_syscall(n, ...)` provided by libposix-uros.  (Phase 2.)
 - `src/internal/libc.h` and friends — adapt thread-pointer / TLS setup
   to Uros if needed.  (Phase 6, with pthread integration.)

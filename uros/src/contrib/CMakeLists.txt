@@ -71,6 +71,7 @@ if(UROS_BUILD_MUSL)
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
 
+  # Phase 1 host smoke (kept).  Links musl against host libgcc only.
   add_custom_target(musl_smoke
     COMMAND cc -m32 -nostdinc
               -I${MUSL_PREFIX}/include
@@ -84,6 +85,29 @@ if(UROS_BUILD_MUSL)
               -o ${CMAKE_CURRENT_BINARY_DIR}/musl_smoke
     DEPENDS musl_extproj ${CMAKE_CURRENT_SOURCE_DIR}/musl_smoke.c
     COMMENT "Linking musl smoke test (standalone hello against libc-musl.a)"
+    VERBATIM
+  )
+
+  # Phase 2 link smoke (#250): musl + libposix-uros + hello.c -> i386 ELF.
+  # Validates only that the patched syscall_arch.h links cleanly (every
+  # __syscallN reference must resolve to libposix-uros's __uros_syscallN).
+  # Runtime smoke is deferred to Phase 3, when a real Uros task exists.
+  add_custom_target(musl_uros_smoke
+    COMMAND cc -m32 -nostdinc
+              -I${MUSL_PREFIX}/include
+              -nostdlib -static
+              ${MUSL_PREFIX}/lib/crt1.o
+              ${MUSL_PREFIX}/lib/crti.o
+              ${CMAKE_CURRENT_SOURCE_DIR}/musl_smoke.c
+              $<TARGET_FILE:libposix-uros>
+              ${MUSL_OUT}
+              $<TARGET_FILE:libposix-uros>
+              ${MUSL_LIBGCC}
+              ${MUSL_PREFIX}/lib/crtn.o
+              -o ${CMAKE_CURRENT_BINARY_DIR}/musl_uros_smoke
+    DEPENDS musl_extproj libposix-uros
+            ${CMAKE_CURRENT_SOURCE_DIR}/musl_smoke.c
+    COMMENT "Linking musl+libposix-uros smoke (Phase 2 link-only validation)"
     VERBATIM
   )
 endif()
