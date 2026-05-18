@@ -21,6 +21,7 @@ project(libposix-uros C ASM)
 add_library(libposix-uros STATIC
   syscall.c
   handlers.c
+  stubs.c
   i386/traps.S
 )
 

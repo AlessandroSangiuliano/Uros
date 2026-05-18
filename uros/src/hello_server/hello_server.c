@@ -39,13 +39,15 @@
 #include <mach/mach_port.h>
 #include <mach/message.h>
 #include <mach/cap_types.h>             /* #216 v2.1 enforcement probe */
-#include <sa_mach.h>
-#include <pthread.h>
 #include <device/device.h>
 #include <device/device_types.h>
 #include <libcap.h>                     /* #216 v2.1 enforcement probe */
 #include <mach_init.h>                  /* mach_cap_port (#216 v2.1) */
-#include <stdio.h>
+#include <stdio.h>                      /* musl libc — Phase 3 pilot (#251) */
+#include <stdlib.h>                     /* exit family */
+#include <unistd.h>                     /* _exit() from musl */
+#include <uros/libposix.h>              /* __uros_libc_init() */
+extern void __uros_libc_init(void);     /* defined in patched musl */
 
 /*
  * Global ports — obtained at startup.
@@ -181,6 +183,23 @@ main(int argc, char **argv)
     int			i;
 
     /*
+     * Step 0 (Phase 3 / #251): wire up musl's synthetic main-thread struct
+     * before any libc function runs.  Without this, the very first printf
+     * dereferences a null TLS pointer and SEGVs.  Removed in Phase 6 once
+     * real pthread + set_thread_area lands.
+     *
+     * setvbuf disables stdout buffering: musl's isatty() returns -ENOTTY
+     * from our ioctl stub, which makes musl fall back to fully-buffered
+     * mode — every line then sits in a 1 KB FILE buffer waiting for an
+     * explicit fflush that hello_server never issues (it lives forever in
+     * the IPC loop).  Phase 4 will introduce a real char_server ioctl that
+     * reports TTY status; until then, unbuffered output is the honest
+     * choice for a debug server.
+     */
+    __uros_libc_init();
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    /*
      * Step 1: Get privileged ports from the bootstrap server.
      *
      * On Mach 4 this was:
@@ -201,17 +220,11 @@ main(int argc, char **argv)
     }
 
     /*
-     * Step 2: Initialize console I/O.
-     * This opens the "console" device via device_open() so that
-     * printf() can write characters through Mach device_write_inband().
+     * Step 2/3 (was printf_init + panic_init): no longer needed under the
+     * musl path — printf goes directly through SYS_write to mach_print,
+     * and panic() isn't linked from libmach_core (the file is excluded;
+     * abort()/_Exit() from musl take its place).  See #251.
      */
-    printf_init(device_port);
-
-    /*
-     * Step 3: Initialize panic handler.
-     * Stashes the host_priv port so panic() can call host_reboot().
-     */
-    panic_init(host_port);
 
     /*
      * Step 4: We have a console — say hello!
