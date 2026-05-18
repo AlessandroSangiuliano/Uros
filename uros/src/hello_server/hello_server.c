@@ -310,6 +310,50 @@ main(int argc, char **argv)
     }
 
     /*
+     * Step 4.6 (Phase 5 / #254): spawn /hello_exec via the new
+     * __uros_spawn primitive and waitpid for it.  __uros_spawn is the
+     * same path execve() uses, but called explicitly here so we don't
+     * have to suicide before we can observe the child finish.
+     */
+    {
+        extern int  __uros_spawn(const char *path,
+                                 char *const argv[], char *const envp[],
+                                 mach_port_t *out_task,
+                                 mach_port_t *out_thread,
+                                 unsigned int *out_pid);
+        extern int  __uros_waitpid(int pid, int *status, int options);
+
+        char *argv_v[] = { (char *)"hello_exec", NULL };
+        char *envp_v[] = { NULL };
+        mach_port_t  child_task = MACH_PORT_NULL;
+        mach_port_t  child_thread = MACH_PORT_NULL;
+        unsigned int child_pid = 0;
+        int sr = __uros_spawn("/hello_exec", argv_v, envp_v,
+                              &child_task, &child_thread, &child_pid);
+        if (sr != 0) {
+            printf("(hello_server): __uros_spawn(/hello_exec) failed: %d\n", sr);
+        } else {
+            printf("(hello_server): spawned /hello_exec pid=%u task=0x%x\n",
+                   child_pid, (unsigned)child_task);
+            /* hello_exec is a Mach-level test program that mach_print's
+             * its AUXV and then spins forever, expecting the parent to
+             * kill it.  Give it a beat to print, then task_terminate;
+             * proc_server's dead-name handler will mark pid zombie and
+             * unblock our waitpid via proc_subscribe_exit. */
+            for (int j = 0; j < 30; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+            (void)task_terminate(child_task);
+            int status = 0;
+            int wr = __uros_waitpid((int)child_pid, &status, 0);
+            if (wr < 0)
+                printf("(hello_server): waitpid failed: %d\n", wr);
+            else
+                printf("(hello_server): waitpid -> pid=%d status=0x%x\n",
+                       wr, status);
+        }
+    }
+
+    /*
      * Step 5: Allocate our service port.
      *
      * On Mach 4, the original used a hardcoded HELLO_SERVER_PORT

@@ -42,13 +42,43 @@ add_custom_command(
 )
 set_source_files_properties(${PROC_USER_C} ${PROC_USER_H} PROPERTIES GENERATED TRUE)
 
+# Phase 5 (#254): exec_server client stubs.  Same pattern as proc.defs
+# above — generated locally, linked into libposix-uros, so any musl-
+# linked server gets execve() routing through us.
+set(EXEC_DEFS   ${CMAKE_SOURCE_DIR}/src/exec_server/exec.defs)
+set(EXEC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/exec_user.c)
+set(EXEC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/exec.h)
+
+add_custom_command(
+  OUTPUT ${EXEC_USER_C} ${EXEC_USER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_BINARY_DIR}/generated/include
+    -I${CMAKE_SOURCE_DIR}/export/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/exec_server
+    -header ${EXEC_USER_H}
+    -sheader /dev/null
+    -user ${EXEC_USER_C}
+    -server /dev/null
+    ${EXEC_DEFS}
+  DEPENDS migcom ${EXEC_DEFS}
+  COMMENT "MIG: exec.defs (libposix-uros)"
+  VERBATIM
+)
+set_source_files_properties(${EXEC_USER_C} ${EXEC_USER_H} PROPERTIES GENERATED TRUE)
+
 add_library(libposix-uros STATIC
   syscall.c
   handlers.c
   stubs.c
   signals.c
   exceptions.c
+  posix_exec.c
+  posix_wait.c
   ${PROC_USER_C}
+  ${EXEC_USER_C}
   i386/traps.S
   i386/sig_thread_entry.S
 )
@@ -69,6 +99,9 @@ target_compile_options(libposix-uros PRIVATE
 set_source_files_properties(${PROC_USER_C} PROPERTIES
   COMPILE_OPTIONS "-w"
 )
+set_source_files_properties(${EXEC_USER_C} PROPERTIES
+  COMPILE_OPTIONS "-w"
+)
 
 # musl headers (errno.h, signal.h, ...) — published by Phase 1
 # ExternalProject under build/src/contrib/musl-install/.
@@ -80,12 +113,13 @@ target_include_directories(libposix-uros PUBLIC
 
 # Internal-only includes for MIG output, kernel/mach RPC headers, etc.
 target_include_directories(libposix-uros PRIVATE
-  ${CMAKE_CURRENT_BINARY_DIR}        # generated proc.h
+  ${CMAKE_CURRENT_BINARY_DIR}        # generated proc.h / exec.h
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/proc_server
+  ${CMAKE_SOURCE_DIR}/src/exec_server
 )
 
 # Ensure musl has been built before we try to compile against its
