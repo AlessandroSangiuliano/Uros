@@ -20,6 +20,7 @@ set_source_files_properties(${CAP_REVOKE_USER_MIG_C} ${CAP_REVOKE_USER_MIG_H}
 set(CAP_SERVER_SOURCES
   cap_server.c
   cap_table.c
+  cap_manifest_table.c
   ${CAP_SERVER_MIG_C}
   ${CAP_REVOKE_USER_MIG_C}
 )
