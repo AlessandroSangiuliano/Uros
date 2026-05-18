@@ -6,7 +6,7 @@
 /*
  * gpu_server.h — Internal types and globals for the gpu_server task.
  *
- * Public, client-visible types are in osfmk/export/include/gpu/.
+ * Public, client-visible types are in uros/export/include/gpu/.
  * Anything declared here is private to the gpu_server process: the
  * core, the dispatch loop, and the back-end modules linked into the
  * same address space.

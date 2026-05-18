@@ -749,7 +749,7 @@ set_target_properties(${KERNEL_TARGET} PROPERTIES
     LINK_DEPENDS ${KERNEL_LINKER_SCRIPT}
     OUTPUT_NAME "mach_kernel"
     SUFFIX ""
-    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/osfmk/boot"
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/uros/boot"
 )
 
 # =============================================================================
@@ -767,7 +767,7 @@ set_target_properties(${KERNEL_TARGET} PROPERTIES
 # pre-#211 behaviour.
 # =============================================================================
 if(OSFMK_GEN_KSYMS)
-    set(KERNEL_KSYMS "${CMAKE_BINARY_DIR}/export/osfmk/boot/ksyms.bin")
+    set(KERNEL_KSYMS "${CMAKE_BINARY_DIR}/export/uros/boot/ksyms.bin")
     add_custom_command(
         OUTPUT ${KERNEL_KSYMS}
         COMMAND ${CMAKE_SOURCE_DIR}/../scripts/gen-ksyms.py
@@ -781,7 +781,7 @@ if(OSFMK_GEN_KSYMS)
     # Stale ksyms.bin from a previous Debug build would silently mismatch
     # the current kernel — wipe it on Release reconfigures.
 else()
-    file(REMOVE "${CMAKE_BINARY_DIR}/export/osfmk/boot/ksyms.bin")
+    file(REMOVE "${CMAKE_BINARY_DIR}/export/uros/boot/ksyms.bin")
 endif()
 
 # =============================================================================

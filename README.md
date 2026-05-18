@@ -1,6 +1,6 @@
 # Uros
 
-Uros is a multiserver operating system based on the OSF variant of Mach (osfmk) from the MkLinux DR3 project. The goal is to build a modern, secure, multiserver OS on top of the osfmk microkernel, originally developed by the Open Software Foundation (OSF) and Carnegie Mellon University (CMU).
+Uros is a multiserver operating system originally based on the OSF variant of Mach (the `osfmk` codebase from the MkLinux DR3 project, by the Open Software Foundation and Carnegie Mellon University). The source tree under `uros/` was historically named `osfmk/` and the kernel inside it has since evolved into UrMach. The goal is to build a modern, secure, multiserver OS on top of the UrMach microkernel.
 
 **Target architecture:** i386 (32-bit x86)
 **Compiler:** GCC 15, `-std=gnu11`
@@ -106,7 +106,7 @@ libmach, libsa_mach, libpthreads, libdl, libmodload, libflipc, libflipc2, libnet
 The shortest path to a booting system on QEMU:
 
 ```sh
-mkdir -p osfmk/build && cd osfmk/build
+mkdir -p uros/build && cd uros/build
 cmake -G Ninja \
   -DOSFMK_BUILD_KERNEL=ON \
   -DOSFMK_BUILD_BOOTSTRAP=ON \
@@ -163,7 +163,7 @@ Every userspace component is opt-in via a CMake flag.  Defaults keep a kernel-on
 To start from a clean configuration, just wipe the build tree:
 
 ```sh
-rm -rf osfmk/build && mkdir osfmk/build && cd osfmk/build
+rm -rf uros/build && mkdir uros/build && cd uros/build
 cmake -G Ninja -D... ..
 ```
 
@@ -172,17 +172,17 @@ cmake -G Ninja -D... ..
 After configuration, build the full enabled tree:
 
 ```sh
-cd osfmk/build && ninja
+cd uros/build && ninja
 ```
 
 ### Building a single component
 
-Each component has a Ninja target.  Useful when iterating on one server / library.  Always run from `osfmk/build/`.
+Each component has a Ninja target.  Useful when iterating on one server / library.  Always run from `uros/build/`.
 
 **Kernel + boot:**
 
 ```sh
-ninja mach_kernel              # microkernel ELF (export/osfmk/boot/mach_kernel)
+ninja mach_kernel              # microkernel ELF (export/uros/boot/mach_kernel)
 ninja mach_kernel_ksyms        # ksyms.bin DDB symbol table (#211)
 ninja locore                   # boot asm objects
 ninja bootstrap                # bootstrap server (PIE)
@@ -217,7 +217,7 @@ ninja cap_test_server          # cap_server negative tests
 ninja gpustat_bin              # gpu_query_stats probe (#203)
 ```
 
-**Libraries** (all `static .a`, output under `build/export/osfmk/<arch>/user/lib/`):
+**Libraries** (all `static .a`, output under `build/export/uros/<arch>/user/lib/`):
 
 ```sh
 ninja libmach libsa_mach libpthreads libcthreads librthreads
@@ -235,7 +235,7 @@ ninja migcom                   # MIG compiler (Flex/Bison)
 
 ### Disk image and stage-1 bundle
 
-The disk and bundle are built by scripts in `scripts/`, not by CMake.  Both pick up whatever binaries are present in `osfmk/build/export/.../user/sbin/`, so optional components are silently included only when their flag was enabled.
+The disk and bundle are built by scripts in `scripts/`, not by CMake.  Both pick up whatever binaries are present in `uros/build/export/.../user/sbin/`, so optional components are silently included only when their flag was enabled.
 
 ```sh
 ./scripts/make-disk-image.sh             # MBR + 3 partitions (ext2/ext2/raw swap)
@@ -281,7 +281,7 @@ The disk and bundle are built by scripts in `scripts/`, not by CMake.  Both pick
 ## Project Structure
 
 ```
-osfmk/
+uros/
 ├── src/
 │   ├── mach_kernel/           # Microkernel source
 │   ├── bootstrap/             # Bootstrap server (PIE, libdl self-bootstrap)
@@ -307,7 +307,7 @@ osfmk/
 │           └── migcom/        # MIG compiler (Flex/Bison)
 ├── export/include/            # Public headers (multi-arch: i386, <arch>/...)
 ├── build/                     # Build output
-│   └── export/osfmk/boot/     # mach_kernel binary
+│   └── export/uros/boot/     # mach_kernel binary
 scripts/
 ├── run-qemu.sh                # QEMU launch (--ahci, --virtio, --bench)
 └── make-disk-image.sh         # Disk image builder

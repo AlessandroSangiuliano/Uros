@@ -24,7 +24,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$REPO_ROOT/osfmk/build"
+BUILD_DIR="$REPO_ROOT/uros/build"
 ARCH="$(uname -m)"
 
 # --- Parametri di default ---
@@ -74,27 +74,27 @@ for cmd in dd sfdisk mke2fs debugfs; do
 done
 
 # --- Percorsi dei binari ---
-NAME_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/name_server"
-DEFAULT_PAGER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/default_pager"
-HELLO_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_server"
-IPC_BENCH="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ipc_bench"
-BLOCK_DEVICE_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/block_device_server"
+NAME_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/name_server"
+DEFAULT_PAGER="$BUILD_DIR/export/uros/$ARCH/user/sbin/default_pager"
+HELLO_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_server"
+IPC_BENCH="$BUILD_DIR/export/uros/$ARCH/user/sbin/ipc_bench"
+BLOCK_DEVICE_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/block_device_server"
 AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
 VIRTIO_BLK_MODULE="$BUILD_DIR/src/block_device_server/modules/virtio_blk.so"
-HAL_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hal_server"
+HAL_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/hal_server"
 HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
-GPU_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/gpu_server"
+GPU_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpu_server"
 GPU_VGA_MODULE="$BUILD_DIR/src/gpu_server/modules/vga.so"
-CHAR_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/char_server"
+CHAR_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/char_server"
 CHAR_PS2_MODULE="$BUILD_DIR/src/char_server/modules/ps2.so"
-EXT2_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/ext_server"
-PTHREAD_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/pthread_test"
-CAP_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_server"
-CAP_TEST="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/cap_test"
-GPUSTAT="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/gpustat"
-EXEC_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/exec_server"
-HELLO_EXEC="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/hello_exec"
-PROC_SERVER="$BUILD_DIR/export/osfmk/$ARCH/user/sbin/proc_server"
+EXT2_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/ext_server"
+PTHREAD_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/pthread_test"
+CAP_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_server"
+CAP_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_test"
+GPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpustat"
+EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
+HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
+PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 
 if [ ! -f "$NAME_SERVER" ]; then
     echo "ERRORE: name_server non trovato: $NAME_SERVER"

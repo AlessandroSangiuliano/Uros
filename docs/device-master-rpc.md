@@ -7,9 +7,9 @@ tasks it delegates to may hold a send right).
 MIG subsystem `device_master`, base ID **2900**.
 
 Source files:
-- `osfmk/src/mach_kernel/device/device_master.defs` — MIG definitions
-- `osfmk/src/mach_kernel/device/device_master.c` — kernel implementation
-- `osfmk/src/mach_kernel/device/device_master.h` — kernel header
+- `uros/src/mach_kernel/device/device_master.defs` — MIG definitions
+- `uros/src/mach_kernel/device/device_master.c` — kernel implementation
+- `uros/src/mach_kernel/device/device_master.h` — kernel header
 
 ## PCI Configuration Space
 

@@ -3,7 +3,7 @@ project(libcap C)
 
 # Generate MIG stubs from cap_server.defs (user + server).  Both sides are
 # emitted: user stubs are linked into libcap for clients; server stubs are
-# compiled by the cap_server executable target (osfmk/src/cap_server/).
+# compiled by the cap_server executable target (uros/src/cap_server/).
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
 set(CAP_DEFS "${CMAKE_SOURCE_DIR}/export/include/mach/cap_server.defs")
 set(CAP_USER_C   "${CMAKE_BINARY_DIR}/generated/cap_server_user.c")

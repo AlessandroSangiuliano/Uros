@@ -16,7 +16,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$REPO_ROOT/osfmk/build"
+BUILD_DIR="$REPO_ROOT/uros/build"
 ARCH="$(uname -m)"
 
 BUNDLE_OUT="$BUILD_DIR/bootstrap.bundle"
@@ -47,8 +47,8 @@ if [ ! -x "$MKBUNDLE" ]; then
     exit 1
 fi
 
-SBIN="$BUILD_DIR/export/osfmk/$ARCH/user/sbin"
-MANIFESTS="$BUILD_DIR/export/osfmk/$ARCH/user/manifests"
+SBIN="$BUILD_DIR/export/uros/$ARCH/user/sbin"
+MANIFESTS="$BUILD_DIR/export/uros/$ARCH/user/manifests"
 
 # #216 v2.1: compiled per-server manifests (.cmf TLV) that bootstrap
 # hands to cap_server at task_create time.  Optional — servers
