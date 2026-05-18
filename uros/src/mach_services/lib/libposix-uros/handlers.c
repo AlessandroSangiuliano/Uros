@@ -43,10 +43,13 @@
 #define UROS_SYS_write            4
 #define UROS_SYS_open             5
 #define UROS_SYS_close            6
+#define UROS_SYS_waitpid          7
+#define UROS_SYS_execve          11
 #define UROS_SYS_getpid          20
 #define UROS_SYS_getuid          24
 #define UROS_SYS_kill            37
 #define UROS_SYS_brk             45
+#define UROS_SYS_wait4          114
 #define UROS_SYS_getgid          47
 #define UROS_SYS_geteuid         49
 #define UROS_SYS_getegid         50
@@ -290,6 +293,40 @@ static long h_tgkill(long tgid, long tid, long sig,
 }
 
 /* ------------------------------------------------------------------ */
+/* Phase 5 (#254): execve / waitpid / wait4                           */
+/* ------------------------------------------------------------------ */
+
+extern int __uros_execve(const char *path,
+                         char *const argv[], char *const envp[]);
+extern int __uros_waitpid(int pid, int *status, int options);
+
+static long h_execve(long path, long argv, long envp,
+                     long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return __uros_execve((const char *)path,
+                         (char *const *)argv,
+                         (char *const *)envp);
+}
+
+static long h_waitpid(long pid, long status, long options,
+                      long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return __uros_waitpid((int)pid, (int *)status, (int)options);
+}
+
+/* wait4(pid, status*, options, rusage*) — we ignore rusage entirely
+ * in Phase 5 and route to waitpid.  Resource accounting in proc_server
+ * (#240) can be exposed later if anyone cares. */
+static long h_wait4(long pid, long status, long options, long rusage,
+                    long a5, long a6)
+{
+    (void)rusage; (void)a5; (void)a6;
+    return __uros_waitpid((int)pid, (int *)status, (int)options);
+}
+
+/* ------------------------------------------------------------------ */
 /* Dispatch table                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -301,7 +338,10 @@ static const struct entry table[] = {
     { UROS_SYS_write,            h_write           },
     { UROS_SYS_open,             h_open            },
     { UROS_SYS_close,            h_close           },
+    { UROS_SYS_waitpid,          h_waitpid         },
+    { UROS_SYS_execve,           h_execve          },
     { UROS_SYS_getpid,           h_getpid          },
+    { UROS_SYS_wait4,            h_wait4           },
     { UROS_SYS_getuid,           h_getuid          },
     { UROS_SYS_kill,             h_kill            },
     { UROS_SYS_brk,              h_brk             },
