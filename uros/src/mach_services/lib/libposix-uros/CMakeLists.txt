@@ -47,6 +47,7 @@ add_library(libposix-uros STATIC
   handlers.c
   stubs.c
   signals.c
+  exceptions.c
   ${PROC_USER_C}
   i386/traps.S
   i386/sig_thread_entry.S
