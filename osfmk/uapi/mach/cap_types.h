@@ -179,5 +179,15 @@ cap_name_hash(const char *name)
 #define CAP_ERR_RESOURCE_MISMATCH 2410
 #define CAP_ERR_NO_MEMORY         2411
 #define CAP_ERR_INTERNAL          2412
+#define CAP_ERR_NOT_IN_MANIFEST   2413   /* v2.1 / #216: type+ops not declared */
+#define CAP_ERR_MANIFEST_INVALID  2414   /* malformed .cmf blob */
+#define CAP_ERR_NO_MANIFEST_SLOT  2415   /* cap_server manifest table full */
+
+/*
+ * Manifest binary format (v2.1 / #216) lives in its own header so
+ * it stays usable from the host-side mkmanifest tool, which can't
+ * pull in the arch-specific Mach chain.
+ */
+#include <mach/cap_manifest.h>
 
 #endif /* _MACH_CAP_TYPES_H_ */

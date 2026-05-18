@@ -82,6 +82,13 @@ extern	mach_port_t	bootstrap_port;
 extern	mach_port_t	name_server_port;
 extern	mach_port_t	environment_port;
 extern	mach_port_t	service_port;
+/*
+ *	#216 v2.1 — per-task cap_server port populated by mach_init_ports
+ *	via task_get_special_port(TASK_CAP_PORT).  MACH_PORT_NULL when
+ *	bootstrap didn't provision one (legacy / unmigrated server),
+ *	libcap then falls back to netname_look_up("cap_server").
+ */
+extern	mach_port_t	mach_cap_port;
 
 /*
  *	Where these ports occur in the "mach_ports_register"

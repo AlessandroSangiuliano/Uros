@@ -275,6 +275,8 @@ typedef struct task {
 	struct exception_action exc_actions[EXC_TYPES_COUNT];
 		 			/* a send right each valid element  */
 	struct ipc_port *itk_bootstrap;	/* a send right */
+	struct ipc_port *itk_cap;	/* a send right — #216 v2.1
+					   per-task cap_server port */
 	struct ipc_port *itk_registered[TASK_PORT_REGISTER_MAX];
 					/* all send rights */
 

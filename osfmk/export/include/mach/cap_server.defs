@@ -66,6 +66,14 @@ type cap_u32_t = unsigned    ctype: cap_u32_t;
  */
 type cap_token_t = array[*:256] of char;
 
+/*
+ *	Manifest blob (#216 v2.1).  Compiled .cmf bytes carried OOL on
+ *	cap_provision_task.  The 16 KiB cap matches CAP_MANIFEST_MAX_BYTES
+ *	in <mach/cap_manifest.h>; cap_server bounds-checks the contents
+ *	before installing.
+ */
+type cap_manifest_blob_t = array[*:16384] of char;
+
 import <mach/cap_types.h>;
 
 /*
@@ -137,3 +145,28 @@ routine cap_verify(
 routine cap_subscribe_revoke(
 		cap_server	: mach_port_t;
 	in	notify_port	: mach_port_send_t);
+
+/*
+ *	cap_provision_task — bootstrap-only RPC (#216 v2.1) that
+ *	installs a compiled manifest blob in cap_server's per-task
+ *	manifest table and returns a fresh per-task cap_port the
+ *	child task will use for all its cap_request / cap_acquire
+ *	calls.  Identity == port: only the holder of the returned
+ *	send right can issue requests that land on cap_server's
+ *	matching receive port, so the port name doubles as the
+ *	principal in the policy check.
+ *
+ *	task_port is informational for now (audit / future
+ *	cross-reference); the actual identity binding is via the
+ *	returned cap_port.  manifest is the .cmf binary, validated
+ *	against <mach/cap_manifest.h> before installation.
+ *
+ *	Trust model in v2.1: any caller can invoke this; the secure
+ *	gating to "bootstrap only" arrives in a follow-up issue
+ *	(setup-port pattern).
+ */
+routine cap_provision_task(
+		cap_server	: mach_port_t;
+	in	task_port	: mach_port_t;
+	in	manifest	: cap_manifest_blob_t;
+	out	task_cap_port	: mach_port_t);

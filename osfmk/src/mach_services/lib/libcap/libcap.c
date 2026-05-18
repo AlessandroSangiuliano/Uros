@@ -61,6 +61,20 @@ cap_server_port(void)
     if (cached_cap_port != MACH_PORT_NULL)
         return cached_cap_port;
 
+    /*
+     * #216 v2.1 — prefer the per-task cap_port stamped by bootstrap
+     * (TASK_CAP_PORT, exposed by libmach as mach_cap_port).  Manifest
+     * enforcement runs on this path.  Fall back to the well-known
+     * netname-looked-up cap_server (legacy / permissive) when no
+     * per-task port was provisioned: bootstrap itself, unmigrated
+     * servers, or tasks created outside the bootstrap-managed
+     * lineage.
+     */
+    if (mach_cap_port != MACH_PORT_NULL) {
+        cached_cap_port = mach_cap_port;
+        return cached_cap_port;
+    }
+
     kr = netname_look_up(name_server_port, "",
                          (char *)CAP_SERVER_NETNAME, &port);
     if (kr != KERN_SUCCESS)
@@ -191,4 +205,28 @@ cap_use_local(const struct uros_cap *token,
 {
     if (token == NULL) return CAP_ERR_INVALID_TOKEN;
     return urmach_cap_use(token, op, resource_id);
+}
+
+extern kern_return_t mig_cap_provision_task(mach_port_t cap_server,
+                                            mach_port_t task_port,
+                                            char *manifest,
+                                            mach_msg_type_number_t manifestCnt,
+                                            mach_port_t *task_cap_port);
+
+kern_return_t
+cap_provision(mach_port_t task_port,
+              const void *manifest_blob,
+              unsigned int manifest_len,
+              mach_port_t *out_task_cap_port)
+{
+    mach_port_t srv = cap_server_port();
+    if (srv == MACH_PORT_NULL) return CAP_ERR_INTERNAL;
+    if (!manifest_blob || manifest_len == 0 || !out_task_cap_port)
+        return CAP_ERR_INVALID_TOKEN;
+
+    *out_task_cap_port = MACH_PORT_NULL;
+    return mig_cap_provision_task(srv, task_port,
+                                  (char *)manifest_blob,
+                                  (mach_msg_type_number_t)manifest_len,
+                                  out_task_cap_port);
 }

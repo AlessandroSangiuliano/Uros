@@ -48,6 +48,7 @@
 #include <stdlib.h>
 
 #include "cap_table.h"
+#include "cap_manifest_table.h"  /* #216 v2.1: per-task manifests */
 #include "cap_server_server.h"   /* MIG-generated demux prototype */
 #include "cap_revoke.h"          /* MIG-generated cap_revoke_notify user stub */
 #include "gpu_console.h"         /* #209: async printf mirror */
@@ -70,21 +71,42 @@ static mach_port_t root_ledger_wired;
 static mach_port_t root_ledger_paged;
 
 /*
- * Our receive port — netname publishes a send right to this.
+ * Our well-known receive port — netname publishes a send right to this.
+ * Legacy callers (everyone before #216 v2.1) reach cap_server here and
+ * get the permissive v1 policy.
  */
 static mach_port_t cap_port;
 
 /*
- * Dispatcher: the MIG-generated cap_server_server() handles every
- * subsystem 3500 message.  Anything else is unknown and gets a
- * MIG_BAD_ID reply.
+ * Port set that covers cap_port + every per-task cap_port allocated
+ * by cap_provision_task.  mach_msg_server receives from the set;
+ * the demux uses in->msgh_local_port to identify the caller.
+ */
+static mach_port_t cap_port_set;
+
+/*
+ * Single-threaded snapshot of the receive port the current request
+ * arrived on.  Set by cap_demux before dispatching the MIG server,
+ * cleared after.  Used by the policy gate in cap_acquire to decide
+ * whether to enforce a manifest (per-task port: yes, well-known
+ * cap_port: no — legacy / permissive).
+ */
+static mach_port_t g_request_local_port;
+
+/*
+ * Dispatcher: snapshot the receive port for the policy gate, then
+ * hand off to the MIG-generated cap_server_server.  Anything that
+ * doesn't match subsystem 3500 gets a MIG_BAD_ID reply.
  */
 static boolean_t
 cap_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 {
-    if (cap_server_server(in, out))
-        return TRUE;
-    return FALSE;
+    boolean_t handled;
+
+    g_request_local_port = in->msgh_local_port;
+    handled = cap_server_server(in, out);
+    g_request_local_port = MACH_PORT_NULL;
+    return handled;
 }
 
 /* ============================================================
@@ -197,6 +219,27 @@ cap_acquire(mach_port_t             server,
 
     if (!policy_allows_v1(MACH_PORT_NULL, resource_type, ops))
         return CAP_ERR_POLICY_DENIED;
+
+    /*
+     * Manifest enforcement (#216 v2.1): if the request arrived on a
+     * per-task cap_port (i.e. not the well-known cap_port reachable
+     * via netname), look up the task's manifest and refuse the
+     * request when type+ops aren't declared.  Legacy well-known
+     * callers fall through to the permissive path.  In Phase 3 this
+     * branch is dead — no client has been migrated yet, every
+     * request still lands on the well-known port.
+     */
+    if (g_request_local_port != MACH_PORT_NULL &&
+        g_request_local_port != cap_port) {
+        const cap_manifest_header_t *m =
+            cap_manifest_table_get(g_request_local_port);
+        if (m && !cap_manifest_allows(m, resource_type, ops)) {
+            printf("cap: DENY (manifest) port=0x%x rtype=%u ops=0x%llx\n",
+                   (unsigned)g_request_local_port, resource_type,
+                   (unsigned long long)ops);
+            return CAP_ERR_NOT_IN_MANIFEST;
+        }
+    }
 
     struct cap_entry *e = (struct cap_entry *)malloc(sizeof(*e));
     if (!e) return CAP_ERR_NO_MEMORY;
@@ -403,6 +446,82 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
     return KERN_SUCCESS;
 }
 
+/*
+ * cap_provision_task (#216 v2.1).  Allocate a fresh receive port,
+ * add it to cap_port_set so subsequent requests on it land in our
+ * mach_msg loop, install the validated manifest blob in the
+ * per-task table keyed by the receive name, and hand a send right
+ * back to the caller.  The caller (bootstrap today) is expected to
+ * either keep the send right and forward it to the new child task,
+ * or have it inserted into the child's IPC space directly.
+ *
+ * Trust: any caller can invoke this in v2.1; gating to bootstrap-
+ * only via a setup-port pattern is a follow-up.
+ */
+kern_return_t
+cap_provision_task(mach_port_t            server,
+                   mach_port_t            task_port,
+                   char                  *manifest_buf,
+                   mach_msg_type_number_t manifest_len,
+                   mach_port_t           *out_task_cap_port)
+{
+    mach_port_t new_port = MACH_PORT_NULL;
+    mach_port_t send_right = MACH_PORT_NULL;
+    kern_return_t kr;
+    int vrc;
+
+    (void)server;
+    (void)task_port;        /* informational for now (audit) */
+    *out_task_cap_port = MACH_PORT_NULL;
+
+    vrc = cap_manifest_validate(manifest_buf, (uint32_t)manifest_len, NULL);
+    if (vrc != CAP_ERR_NONE) {
+        printf("cap: provision_task — manifest invalid (rc=%d, len=%u)\n",
+               vrc, (unsigned)manifest_len);
+        return vrc;
+    }
+
+    kr = mach_port_allocate(mach_task_self(),
+                            MACH_PORT_RIGHT_RECEIVE, &new_port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: provision_task — port_allocate kr=%d\n", kr);
+        return CAP_ERR_NO_MEMORY;
+    }
+
+    /* Hand the receive port to the port set so subsequent requests on
+     * it land in our mach_msg loop.  On failure rip the port back down
+     * so we don't leak. */
+    kr = mach_port_move_member(mach_task_self(), new_port, cap_port_set);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: provision_task — move_member kr=%d\n", kr);
+        (void)mach_port_destroy(mach_task_self(), new_port);
+        return CAP_ERR_INTERNAL;
+    }
+
+    vrc = cap_manifest_table_install(new_port, manifest_buf,
+                                     (uint32_t)manifest_len);
+    if (vrc != CAP_ERR_NONE) {
+        (void)mach_port_destroy(mach_task_self(), new_port);
+        return vrc;
+    }
+
+    /* Caller wants a send right; we keep the receive side. */
+    kr = mach_port_insert_right(mach_task_self(), new_port, new_port,
+                                MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: provision_task — insert_right kr=%d\n", kr);
+        (void)mach_port_destroy(mach_task_self(), new_port);
+        return CAP_ERR_INTERNAL;
+    }
+    send_right = new_port;
+
+    printf("cap: provisioned task — cap_port=0x%x manifest=%u bytes\n",
+           (unsigned)new_port, (unsigned)manifest_len);
+
+    *out_task_cap_port = send_right;
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 cap_verify(mach_port_t             server,
            char                   *token_buf,
@@ -455,6 +574,7 @@ main(int argc, char **argv)
 
     cap_key_init();
     cap_table_init();
+    cap_manifest_table_init();
     printf("cap: hmac key initialized, table ready\n");
 
     int ekr = cap_key_export_to_kernel();
@@ -479,6 +599,24 @@ main(int argc, char **argv)
         return 1;
     }
 
+    /*
+     * Port set covering the well-known cap_port plus every per-task
+     * cap_port allocated by cap_provision_task (#216 v2.1).  The
+     * receive loop services the set; the demux uses msgh_local_port
+     * to identify which task is calling.
+     */
+    kr = mach_port_allocate(mach_task_self(),
+                            MACH_PORT_RIGHT_PORT_SET, &cap_port_set);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: port_set allocate failed (%d)\n", kr);
+        return 1;
+    }
+    kr = mach_port_move_member(mach_task_self(), cap_port, cap_port_set);
+    if (kr != KERN_SUCCESS) {
+        printf("cap: move_member(cap_port) failed (%d)\n", kr);
+        return 1;
+    }
+
     kr = netname_check_in(name_server_port, "cap_server",
                           MACH_PORT_NULL, cap_port);
     if (kr != KERN_SUCCESS)
@@ -499,7 +637,7 @@ main(int argc, char **argv)
     bootstrap_completed(bootstrap_port, mach_task_self());
 
     printf("cap: entering message loop\n");
-    mach_msg_server(cap_demux, 8192, cap_port, MACH_MSG_OPTION_NONE);
+    mach_msg_server(cap_demux, 8192, cap_port_set, MACH_MSG_OPTION_NONE);
 
     printf("cap: mach_msg_server exited unexpectedly\n");
     return 1;

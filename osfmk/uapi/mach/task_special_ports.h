@@ -101,6 +101,16 @@ typedef	int	task_special_port_t;
 
 #define TASK_PAGED_LEDGER_PORT	6	/* Paged resource ledger for task. */
 
+#define TASK_CAP_PORT		7	/* Per-task cap_server port
+					   (#216 v2.1).  Send right to a
+					   receive port held by cap_server
+					   in its port set; identity == port
+					   for the manifest-aware policy
+					   check.  bootstrap stamps it via
+					   task_set_special_port; libmach
+					   queries it at init and exposes it
+					   as mach_cap_port. */
+
 /*
  *	Definitions for ease of use
  */
@@ -128,5 +138,11 @@ typedef	int	task_special_port_t;
 
 #define task_set_paged_ledger_port(task, port)	\
 		(task_set_special_port((task), TASK_PAGED_LEDGER_PORT, (port)))
+
+#define task_get_cap_port(task, port)		\
+		(task_get_special_port((task), TASK_CAP_PORT, (port)))
+
+#define task_set_cap_port(task, port)		\
+		(task_set_special_port((task), TASK_CAP_PORT, (port)))
 
 #endif	/* _MACH_TASK_SPECIAL_PORTS_H_ */

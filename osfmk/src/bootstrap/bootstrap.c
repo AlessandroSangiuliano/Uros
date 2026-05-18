@@ -74,6 +74,8 @@
 #include <blk.h>
 #include <libcap.h>
 #include <mach/cap_types.h>
+#include <mach/cap_manifest.h>          /* #216 v2.1 */
+#include <mach/task_special_ports.h>    /* TASK_CAP_PORT (#216 v2.1) */
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
 #include "file_system.h"
@@ -124,6 +126,20 @@ static char *parse_boot_args(char **data, struct server **sp);
 static void data_device_loop(void);
 static kern_return_t data_device_load_file(task_port_t, const char *,
 					   vm_address_t *, vm_size_t *);
+
+/*
+ * provision_cap_port_for_child (#216 v2.1) — look up an optional
+ * compiled-manifest blob `<symtab>.cmf` in the boot bundle, hand it
+ * to cap_server via cap_provision_task, and stamp the returned
+ * per-task cap_port into the freshly-created child task as
+ * TASK_CAP_PORT.  Best-effort: missing manifest, cap_server not yet
+ * up, or RPC failure all leave the child without a per-task port,
+ * which means it falls back to the legacy permissive well-known
+ * path.  Returns 1 on a successful install (info only), 0 otherwise.
+ */
+static int
+provision_cap_port_for_child(task_port_t child_task,
+			     const char *symtab_name);
 
 char	*boot_device = (char *)BOOT_DEVICE_NAME;
 
@@ -408,6 +424,96 @@ boot_open_file(const char *path, struct file *fp)
 			return open_file_on_port(bds_boot_handle, rel, fp);
 	}
 	return open_file(bootstrap_master_device_port, path, fp);
+}
+
+/*
+ * provision_cap_port_for_child — see forward declaration.
+ *
+ * Lookup the manifest in the boot bundle as "<symtab>.cmf"; if found
+ * and well-formed, ask cap_server for a per-task cap_port and stamp
+ * it as TASK_CAP_PORT on the child.  Missing manifest is the common
+ * case (no .cmf shipped for legacy / unmigrated servers) — silently
+ * skip.  Everything else is logged but non-fatal: a child without
+ * TASK_CAP_PORT falls through to the well-known cap_server path
+ * (permissive, same as before #216).
+ */
+static int
+provision_cap_port_for_child(task_port_t child_task,
+			     const char *symtab_name)
+{
+	char		path[BOOT_BUNDLE_NAME_MAX];
+	struct file	f;
+	void		*blob = NULL;
+	size_t		sz;
+	int		r;
+	mach_port_t	cap_port = MACH_PORT_NULL;
+	kern_return_t	kr;
+
+	if (!bundle_active() || symtab_name == NULL || *symtab_name == '\0')
+		return 0;
+
+	if (snprintf(path, sizeof(path), "%s.cmf", symtab_name)
+	    >= (int)sizeof(path))
+		return 0;	/* name too long for our path buffer */
+
+	r = bundle_open(path, &f);
+	if (r != 0)
+		return 0;	/* expected for unmigrated servers */
+
+	sz = file_size(&f);
+	if (sz == 0 || sz > CAP_MANIFEST_MAX_BYTES) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: %s: manifest blob size %u out of range\n",
+		       program_name, symtab_name, (unsigned)sz);
+		BOOTSTRAP_IO_UNLOCK();
+		close_file(&f);
+		return 0;
+	}
+
+	blob = malloc(sz);
+	if (!blob) {
+		close_file(&f);
+		return 0;
+	}
+	r = read_file(&f, 0, (vm_offset_t)blob, sz);
+	close_file(&f);
+	if (r != 0) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: %s: manifest read failed (%d)\n",
+		       program_name, symtab_name, r);
+		BOOTSTRAP_IO_UNLOCK();
+		free(blob);
+		return 0;
+	}
+
+	kr = cap_provision(child_task, blob, (unsigned int)sz,
+			   &cap_port);
+	free(blob);
+	if (kr != KERN_SUCCESS || cap_port == MACH_PORT_NULL) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: %s: cap_provision_task failed (%d) — "
+		       "falling back to legacy cap_server path\n",
+		       program_name, symtab_name, kr);
+		BOOTSTRAP_IO_UNLOCK();
+		return 0;
+	}
+
+	kr = task_set_special_port(child_task, TASK_CAP_PORT, cap_port);
+	if (kr != KERN_SUCCESS) {
+		BOOTSTRAP_IO_LOCK();
+		printf("%s: %s: task_set_special_port(TASK_CAP_PORT) failed (%d)\n",
+		       program_name, symtab_name, kr);
+		BOOTSTRAP_IO_UNLOCK();
+		(void)mach_port_deallocate(mach_task_self(), cap_port);
+		return 0;
+	}
+
+	BOOTSTRAP_IO_LOCK();
+	printf("%s: %s: TASK_CAP_PORT=0x%x (manifest %u bytes)\n",
+	       program_name, symtab_name, (unsigned)cap_port,
+	       (unsigned)sz);
+	BOOTSTRAP_IO_UNLOCK();
+	return 1;
 }
 
 /*
@@ -851,6 +957,17 @@ main(int argc, char **argv)
 
 	    if (kr != KERN_SUCCESS)
 		panic("task_set_bootstrap_port 0x%x", kr);
+
+	    /*
+	     * #216 v2.1 — best-effort per-task cap_port provisioning.
+	     * Servers with a "<symtab>.cmf" manifest in the boot bundle
+	     * get a TASK_CAP_PORT stamped on them now, before thread
+	     * creation so libmach init reads it on the first instruction.
+	     * The call is a silent no-op for unmigrated servers / when
+	     * cap_server hasn't come up yet — they boot exactly like
+	     * before.
+	     */
+	    (void)provision_cap_port_for_child(user_task, sp->symtab_name);
 
 	    kr = thread_create(user_task, &user_thread);
 	    if (kr != KERN_SUCCESS)

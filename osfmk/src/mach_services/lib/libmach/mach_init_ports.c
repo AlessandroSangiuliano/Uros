@@ -55,6 +55,7 @@ mach_port_t	bootstrap_port = MACH_PORT_NULL;
 mach_port_t	name_server_port = MACH_PORT_NULL;
 mach_port_t	environment_port = MACH_PORT_NULL;
 mach_port_t	service_port = MACH_PORT_NULL;
+mach_port_t	mach_cap_port = MACH_PORT_NULL;	/* #216 v2.1 */
 
 void
 mach_init_ports(void)
@@ -71,6 +72,17 @@ mach_init_ports(void)
 				   &bootstrap_port);
 	if (kr != KERN_SUCCESS)
 	    return;
+
+	/*
+	 *	#216 v2.1 — per-task cap_server port (TASK_CAP_PORT).
+	 *	Optional: bootstrap only installs one for servers that ship
+	 *	a manifest.  KERN_FAILURE / IP_NULL means "no manifest" and
+	 *	libcap will fall back to the netname-looked-up well-known
+	 *	cap_server (permissive).  Don't propagate this failure.
+	 */
+	(void)task_get_special_port(mach_task_self(),
+				    TASK_CAP_PORT,
+				    &mach_cap_port);
 
 	kr = mach_ports_lookup(mach_task_self(), &ports,
 			       &ports_count);
