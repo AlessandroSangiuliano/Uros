@@ -30,12 +30,15 @@
 #include "exec_types.h"
 #include "exec_internal.h"
 
+#include <libcap.h>             /* cap_provision (#235) */
 #include <libelf.h>
 #include <libvfs.h>
 #include <mach/elf.h>           /* PT_LOAD, PF_*, ET_EXEC */
 #include <mach.h>
+#include <mach/cap_manifest.h>  /* TLV format (#235) */
 #include <mach/mach_traps.h>
 #include <mach/mach_interface.h>
+#include <mach/task_special_ports.h>  /* TASK_CAP_PORT (#235) */
 #include <mach/i386/thread_status.h>
 #include <stdio.h>
 #include <string.h>
@@ -237,6 +240,110 @@ fail_after_task(mach_port_t new_task, elf_image_t *img, void *file_buf, int rc)
     return rc;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Manifest provisioning (#235)                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Empty-default manifest used as fallback when the binary has no
+ * embedded .uros_manifest section.  Hand-laid TLV blob — no need to
+ * call mkmanifest at runtime.  Layout:
+ *
+ *   - 48-byte cap_manifest_header_t
+ *   - 0 required entries
+ *   - 0 delegatable entries
+ *   - 12-byte name region "(noname)\0" padded to 4-byte align
+ *
+ * Total 64 bytes.  All offsets / counts validated by cap_server's
+ * cap_manifest_validate so this must round-trip.
+ */
+#define DEFAULT_NAME      "(noname)"
+#define DEFAULT_NAME_LEN  9            /* including the NUL */
+
+static const struct {
+    cap_manifest_header_t hdr;
+    char                  name[12];    /* padded to multiple of 4 */
+} default_manifest_blob = {
+    .hdr = {
+        .magic              = CAP_MANIFEST_MAGIC,
+        .version            = CAP_MANIFEST_VERSION,
+        .header_size        = (uint16_t)sizeof(cap_manifest_header_t),
+        .total_size         = sizeof(cap_manifest_header_t) + 12u,
+        .flags              = 0,
+        .name_offset        = sizeof(cap_manifest_header_t),
+        .name_length        = DEFAULT_NAME_LEN,
+        .required_offset    = sizeof(cap_manifest_header_t),
+        .required_count     = 0,
+        .delegatable_offset = sizeof(cap_manifest_header_t),
+        .delegatable_count  = 0,
+        ._reserved          = { 0, 0 },
+    },
+    .name = DEFAULT_NAME,
+};
+
+/*
+ * Look up the .uros_manifest ELF section.  When present, returns a
+ * pointer + length into the file buffer (no copy).  When absent,
+ * points to the static empty-default blob above.  Either way the
+ * returned bytes live for the duration of exec_do_load.
+ */
+static void
+extract_manifest(const elf_image_t *img,
+                 const void **out_blob, uint32_t *out_len)
+{
+    elf_shdr_view_t sh;
+    if (elf_shdr_find(img, ".uros_manifest", &sh) == ELF_OK &&
+        sh.data != NULL &&
+        sh.size >= sizeof(cap_manifest_header_t) &&
+        sh.size <= CAP_MANIFEST_MAX_BYTES) {
+        *out_blob = sh.data;
+        *out_len  = (uint32_t)sh.size;
+        return;
+    }
+    *out_blob = &default_manifest_blob;
+    *out_len  = (uint32_t)sizeof(default_manifest_blob);
+}
+
+/*
+ * Provision a per-task cap_port for `new_task` from the manifest
+ * embedded in `img` (or the empty default).  Best-effort: failure
+ * here is logged but non-fatal — the spawned task boots without a
+ * TASK_CAP_PORT and falls through to the legacy permissive
+ * well-known cap_server path, same behaviour as exec_server before
+ * #235.  Returns 1 on a successful install, 0 otherwise.
+ */
+static int
+provision_cap_port(mach_port_t new_task, const elf_image_t *img,
+                   const char *path)
+{
+    const void   *blob;
+    uint32_t      blen;
+    mach_port_t   cap_port = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    extract_manifest(img, &blob, &blen);
+
+    kr = cap_provision(new_task, blob, blen, &cap_port);
+    if (kr != KERN_SUCCESS || cap_port == MACH_PORT_NULL) {
+        printf("exec: cap_provision(%s) failed kr=%d — legacy path\n",
+               path ? path : "(?)", kr);
+        return 0;
+    }
+
+    kr = task_set_special_port(new_task, TASK_CAP_PORT, cap_port);
+    if (kr != KERN_SUCCESS) {
+        printf("exec: task_set_special_port(TASK_CAP_PORT) failed kr=%d\n",
+               kr);
+        (void)mach_port_deallocate(mach_task_self(), cap_port);
+        return 0;
+    }
+
+    printf("exec: %s -> TASK_CAP_PORT=0x%x (manifest %u bytes%s)\n",
+           path ? path : "(?)", (unsigned)cap_port, blen,
+           (blob == &default_manifest_blob) ? ", default" : "");
+    return 1;
+}
+
 int
 exec_do_load(mach_port_t client_task, const char *path,
              const void *argv_blob, mach_msg_type_number_t argv_len,
@@ -292,6 +399,12 @@ exec_do_load(mach_port_t client_task, const char *path,
     rc = install_segments(new_task, &img);
     if (rc != EXEC_OK)
         return fail_after_task(new_task, &img, file_buf, rc);
+
+    /* 4.25. Provision the child's per-task cap_port from the binary's
+     *       .uros_manifest section (#235).  Done before vDSO + stack
+     *       so libmach init reads TASK_CAP_PORT on the very first
+     *       instruction.  Best-effort — see provision_cap_port. */
+    (void)provision_cap_port(new_task, &img, path);
 
     /* 4.5. Install the vDSO placeholder (v0.4.0 / #236).  Failure
      *      here is non-fatal — the binary can still run, libposix
