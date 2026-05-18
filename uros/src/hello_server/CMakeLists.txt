@@ -2,30 +2,57 @@ cmake_minimum_required(VERSION 3.16)
 project(hello_server C)
 
 # ===========================================================================
-# Source files
+# Phase 3 (#251) — hello_server is the pilot for the musl libc path.
+# Links musl + libposix-uros + libmach_core instead of full libmach.
+# Until the migration is finished (Phase 8) this server only builds with
+# -DUROS_BUILD_MUSL=ON; the legacy libmach build path is gone.
 # ===========================================================================
+if(NOT UROS_BUILD_MUSL)
+  return()
+endif()
 
 set(HELLO_SERVER_SOURCES
   hello_server.c
 )
 
-# ===========================================================================
-# Build target: Mach standalone executable (same pattern as default_pager)
-# ===========================================================================
-
 add_executable(hello_server_server
   ${HELLO_SERVER_SOURCES}
 )
 
-add_dependencies(hello_server_server mig_mach_public_headers)
+add_dependencies(hello_server_server mig_mach_public_headers musl_extproj)
+
+set(MUSL_PREFIX ${CMAKE_BINARY_DIR}/src/contrib/musl-install)
+
+# gcc's internal include directory — needed alongside -nostdinc so the
+# compiler can still find stddef.h, stdarg.h, intrinsics, etc.
+execute_process(
+  COMMAND ${CMAKE_C_COMPILER} -m32 -print-file-name=include
+  OUTPUT_VARIABLE _GCC_INCLUDE
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# libgcc.a for compiler builtins (__udivdi3 etc.) once we drop gcc.s
+# from the libmach path.
+execute_process(
+  COMMAND ${CMAKE_C_COMPILER} -m32 -print-libgcc-file-name
+  OUTPUT_VARIABLE _LIBGCC_A
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+)
 
 target_compile_options(hello_server_server PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2
+  # SSP disabled for the pilot: musl's __init_ssp() isn't called (we
+  # bypass __libc_start_main), so the canary stays at 0 and overrun
+  # detection is effectively off.  Better to be honest about it than
+  # emit unchecked SSP prologues.  Re-enabled in Phase 6 with pthreads.
+  -fno-stack-protector
   -fno-builtin
-  -mstack-protector-guard=global
   -w
   -include stdint.h
+  # nostdinc: drop /usr/include entirely so <stdio.h> resolves to musl's
+  # copy, not gcc's host glibc wrapper.
+  -nostdinc
 )
 
 target_compile_definitions(hello_server_server PRIVATE
@@ -33,33 +60,36 @@ target_compile_definitions(hello_server_server PRIVATE
 )
 
 target_include_directories(hello_server_server PRIVATE
-  # pthread.h and machine/pthread_impl.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
-  # Generated includes (mach/machine -> i386 symlink)
-  ${CMAKE_BINARY_DIR}/generated/include
-  # Mach services include (sa_mach.h, stdio.h, string.h)
+  # ORDER MATTERS — musl headers first.
+  ${MUSL_PREFIX}/include
+  # gcc internal headers (stddef.h, stdarg.h) — required because of -nostdinc
+  ${_GCC_INCLUDE}
+  # libposix-uros public ABI (__uros_syscall*, version macros)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libposix-uros/include
+  # In-tree Mach userspace headers (mach_init.h with mach_cap_port,
+  # libcap.h ...) — placed before export/include so the developer copy
+  # wins over the public-export stub for symbols not yet promoted.
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
+  # Generated MIG headers (mach/bootstrap.h, mach/mach_port.h, ...)
+  ${CMAKE_BINARY_DIR}/generated/include
+  # Pre-built export headers (mach.h, libcap.h, device/, ...)
   ${CMAKE_SOURCE_DIR}/export/include
-  # Kernel headers (mach/, device/, i386/)
+  # Kernel headers needed by some MIG-generated stubs
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
-  # Top-level include
   ${CMAKE_SOURCE_DIR}/include
 )
 
-# Link against Mach userspace libraries.
-# Same circular dependency resolution as bootstrap: --start-group/--end-group.
 target_link_libraries(hello_server_server PRIVATE
   -Wl,--start-group
-  libpthreads
   libcap
   libnetname
-  libmach
+  libmach_core
+  libposix-uros
+  ${MUSL_PREFIX}/lib/libc-musl.a
+  ${_LIBGCC_A}
   -Wl,--end-group
 )
 
-# Linker flags: 32-bit static Mach binary, no host libc.
 target_link_options(hello_server_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
@@ -72,8 +102,7 @@ set_target_properties(hello_server_server PROPERTIES
 )
 
 # ===========================================================================
-# #216 v2.1 manifest — compiled by mkmanifest into a .cmf blob that
-# bootstrap reads from the bundle and hands to cap_server.
+# #216 v2.1 manifest — unchanged from pre-musl build.
 # ===========================================================================
 
 set(HELLO_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/hello_server.manifest)

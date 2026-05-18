@@ -227,3 +227,101 @@ set_target_properties(libmach PROPERTIES
   OUTPUT_NAME "mach"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )
+
+# ===========================================================================
+# libmach_core (#251) — slim libmach for servers that link musl libc.
+#
+# Same source set as libmach minus every file that defines a symbol musl
+# already provides.  Used by servers migrated to the musl libc path so
+# they can link without -Wl,--allow-multiple-definition.  When the last
+# server is migrated (Phase 8 of #219), the excluded files are deleted
+# from libmach itself and libmach_core gets renamed back to libmach.
+#
+# Gated by UROS_BUILD_MUSL: no point building a duplicate archive for
+# users not on the musl path.
+# ===========================================================================
+if(UROS_BUILD_MUSL)
+  set(LIBMACH_MUSL_CONFLICTS
+    # stdio (musl src/stdio/, src/string/__doprintf)
+    "/printf\\.c$"
+    "/sprintf\\.c$"
+    "/doprnt\\.c$"
+    "/fprintf_stderr\\.c$"
+    # malloc family (musl src/malloc/mallocng)
+    "/malloc\\.c$"
+    "/sbrk\\.c$"
+    # process termination (musl src/exit/)
+    "/exit\\.c$"
+    "/panic\\.c$"          # abort wrapper, calls printf+exit
+    "/Ovfork\\.c$"         # defines vfork(); musl has its own
+    # SSP (musl src/env/__stack_chk_fail.c); init_stack_guard stub
+    # is provided by libposix-uros so crt0.c still links cleanly.
+    "/stack_protector\\.c$"
+    # error reporting (musl src/errno/, src/string/strerror.c)
+    "/errno\\.c$"
+    "/error_codes\\.c$"
+    # POSIX libc bits (musl src/{ctype,env,unistd,stdlib}/)
+    "/ctype\\.c$"
+    "/getenv\\.c$"
+    "/sleep\\.c$"
+    # string family (musl src/string/) — both the consolidated
+    # sa_string.c and the per-function .c files
+    "/sa_string\\.c$"
+    "/strcat\\.c$"   "/strcmp\\.c$"   "/strcpy\\.c$"
+    "/strlen\\.c$"   "/strspn\\.c$"
+    "/strncat\\.c$"  "/strncmp\\.c$"  "/strncpy\\.c$"
+    "/strlcat\\.c$"  "/strlcpy\\.c$"
+    # numeric conversion (musl src/stdlib/strto*.c)
+    "/strtol\\.c$"   "/strtoul\\.c$"
+    "/strtoq\\.c$"   "/strtouq\\.c$"
+    # i386 assembly conflicts
+    "/i386/memset\\.s$"     # memset, bzero  — musl provides
+    "/i386/memcpy\\.s$"     # memcpy, memmove, bcopy
+    "/i386/ffs\\.s$"        # ffs
+    "/i386/gcc\\.s$"        # __divsi3 / __udivsi3 (libgcc provides)
+    "/i386/fork\\.s$"       # fork() syscall stub
+  )
+
+  set(LIBMACH_CORE_SOURCES ${LIB_SOURCES})
+  foreach(_pat IN LISTS LIBMACH_MUSL_CONFLICTS)
+    list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX ${_pat})
+  endforeach()
+
+  # The preprocessed i386 .s outputs were appended after running through
+  # cpp into ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/*.S.  Filter those
+  # too so the i386 stubs above don't sneak back in via the preprocessed
+  # path.
+  list(FILTER LIBMACH_CORE_SOURCES EXCLUDE REGEX "/generated/asm/(memset|memcpy|ffs|gcc|fork|bzero)\\.s\\.S$")
+
+  add_library(libmach_core STATIC ${LIBMACH_CORE_SOURCES})
+  add_dependencies(libmach_core mig_device_header mig_mach_public_headers)
+
+  # Mirror libmach's compile + include configuration so the two stay
+  # ABI-compatible (same gnu11, same SSE2, same SSP guard mode).
+  target_compile_options(libmach_core PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w
+                            -mstack-protector-guard=global -include stdint.h>
+  )
+  target_compile_options(libmach_core PRIVATE -m32 -march=i686 -msse -msse2)
+  target_compile_options(libmach_core PRIVATE
+    $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>
+  )
+
+  target_include_directories(libmach_core BEFORE PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
+  )
+  target_include_directories(libmach_core PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_BINARY_DIR}/generated/include
+    ${CMAKE_SOURCE_DIR}/uapi
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include
+    ${CMAKE_SOURCE_DIR}/export/include
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel
+    ${CMAKE_SOURCE_DIR}/include
+  )
+
+  set_target_properties(libmach_core PROPERTIES
+    OUTPUT_NAME "mach_core"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  )
+endif()
