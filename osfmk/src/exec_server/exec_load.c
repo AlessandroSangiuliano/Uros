@@ -308,9 +308,35 @@ exec_do_load(mach_port_t client_task, const char *path,
         memset(&hints, 0, sizeof(hints));
         hints.entry_va  = (vm_address_t)elf_entry(&img);
         hints.vdso_base = vdso_base;
-        /* AT_PHDR / AT_PHENT / AT_PHNUM are deferred until #234
-         * (PT_INTERP / dynamic linker) — static ET_EXEC binaries
-         * don't need them. */
+
+        /* AT_PHDR derivation (#248): the phdr table lives at file
+         * offset e_phoff; for ET_EXEC the program headers are mapped
+         * as part of whichever PT_LOAD whose file range covers that
+         * offset.  Compute the runtime VA the same way Linux's
+         * fs/binfmt_elf.c does, by scanning the PT_LOADs.  If no
+         * segment claims the phdr range we just skip the hint —
+         * static binaries without a self-referencing PT_LOAD don't
+         * need AT_PHDR. */
+        {
+            uint64_t phoff = elf_phoff(&img);
+            int n_ph = elf_phdr_count(&img);
+            int i;
+            for (i = 0; i < n_ph; i++) {
+                elf_phdr_view_t ph;
+                if (elf_phdr_get(&img, i, &ph) != ELF_OK)
+                    continue;
+                if (ph.type != PT_LOAD)
+                    continue;
+                if (phoff >= ph.offset &&
+                    phoff <  ph.offset + ph.filesz) {
+                    hints.phdr_va = (vm_address_t)
+                        (ph.vaddr + (phoff - ph.offset));
+                    hints.phent   = elf_phentsize(&img);
+                    hints.phnum   = (uint32_t)n_ph;
+                    break;
+                }
+            }
+        }
 
         /* 5. Set up the initial stack with argv/envp/auxv. */
         rc = exec_build_stack(new_task, argv_blob, argv_len,

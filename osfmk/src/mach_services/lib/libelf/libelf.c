@@ -215,6 +215,18 @@ elf_is_64bit(const elf_image_t *img)
     return img->_is_64 != 0;
 }
 
+uint64_t
+elf_phoff(const elf_image_t *img)
+{
+    return (uint64_t)ehdr_of(img)->e_phoff;
+}
+
+uint32_t
+elf_phentsize(const elf_image_t *img)
+{
+    return (uint32_t)ehdr_of(img)->e_phentsize;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Program headers                                                    */
 /* ------------------------------------------------------------------ */
