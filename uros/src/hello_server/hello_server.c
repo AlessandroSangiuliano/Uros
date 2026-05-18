@@ -39,6 +39,8 @@
 #include <mach/mach_port.h>
 #include <mach/message.h>
 #include <mach/cap_types.h>             /* #216 v2.1 enforcement probe */
+#include <mach/thread_switch.h>         /* SWITCH_OPTION_WAIT (Phase 4) */
+#include <mach/mach_syscalls.h>         /* syscall_thread_switch (Phase 4) */
 #include <device/device.h>
 #include <device/device_types.h>
 #include <libcap.h>                     /* #216 v2.1 enforcement probe */
@@ -46,8 +48,22 @@
 #include <stdio.h>                      /* musl libc — Phase 3 pilot (#251) */
 #include <stdlib.h>                     /* exit family */
 #include <unistd.h>                     /* _exit() from musl */
+#include <signal.h>                     /* sigaction/raise — Phase 4 (#252) */
 #include <uros/libposix.h>              /* __uros_libc_init() */
 extern void __uros_libc_init(void);     /* defined in patched musl */
+
+/*
+ * Phase 4 (#252) smoke: SIGUSR1 handler.  File scope so taking its
+ * address doesn't trigger a nested-function trampoline (we link with
+ * a non-executable stack).
+ */
+static volatile int hello_handler_fired;
+static void
+hello_sigusr1(int s)
+{
+    hello_handler_fired = s;
+    printf("(hello_server): handler fired for signo=%d\n", s);
+}
 
 /*
  * Global ports — obtained at startup.
@@ -236,6 +252,34 @@ main(int argc, char **argv)
     printf("(hello_server): host_port=0x%x device_port=0x%x "
 	   "bootstrap_port=0x%x\n",
 	   host_port, device_port, bootstrap_port);
+
+    /*
+     * Step 4.5 (Phase 4 / #252): exercise the new POSIX signal path.
+     * sigaction() registers the handler in libposix-uros's table, then
+     * raise() takes the long way round — musl raise → SYS_tkill →
+     * __uros_kill → proc_kill RPC → proc_server posts proc_signal_msg
+     * on our signal_port → libposix-uros's handler thread receives it
+     * and calls hello_sigusr1.  Anything visible on the console proves
+     * the full client+server signal loop works end-to-end.
+     */
+    extern unsigned int __uros_my_pid;
+    printf("(hello_server): signals: pid=%u\n", __uros_my_pid);
+    {
+        struct sigaction sa = { 0 };
+        sa.sa_handler = hello_sigusr1;
+        if (sigaction(SIGUSR1, &sa, NULL) != 0)
+            printf("(hello_server): sigaction(SIGUSR1) failed\n");
+        else
+            printf("(hello_server): sigaction(SIGUSR1) installed\n");
+
+        if (raise(SIGUSR1) != 0)
+            printf("(hello_server): raise(SIGUSR1) failed\n");
+        /* Yield long enough for the handler thread to pick up the msg
+         * and run the handler before we move on. */
+        for (int j = 0; j < 50 && !hello_handler_fired; j++)
+            (void)syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+        printf("(hello_server): handler_fired=%d\n", hello_handler_fired);
+    }
 
     /*
      * Step 5: Allocate our service port.
