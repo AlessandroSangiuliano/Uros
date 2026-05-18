@@ -103,6 +103,7 @@ target_link_libraries(exec_server_bin PRIVATE
   libpthreads
   libmach
   libnetname
+  libcap
   libvfs
   libelf
   -Wl,--end-group

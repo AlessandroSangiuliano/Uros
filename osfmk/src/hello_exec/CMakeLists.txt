@@ -31,3 +31,26 @@ set_target_properties(hello_exec_bin PROPERTIES
   OUTPUT_NAME "hello_exec"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
 )
+
+# ===========================================================================
+# #235 — embedded .uros_manifest section.
+#
+# mkmanifest compiles the plain-text manifest into a binary .cmf
+# blob, then objcopy --add-section appends it to the built binary as
+# a non-loadable ELF section named .uros_manifest.  exec_server
+# extracts the section at load time via libelf and hands it to
+# cap_server through cap_provision.
+# ===========================================================================
+
+set(HELLO_EXEC_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/hello_exec.manifest)
+set(HELLO_EXEC_CMF         ${CMAKE_CURRENT_BINARY_DIR}/hello_exec.cmf)
+
+add_custom_command(TARGET hello_exec_bin POST_BUILD
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${HELLO_EXEC_CMF} ${HELLO_EXEC_MANIFEST_SRC}
+  COMMAND ${CMAKE_OBJCOPY} --add-section .uros_manifest=${HELLO_EXEC_CMF}
+            --set-section-flags .uros_manifest=noload,readonly,contents
+            $<TARGET_FILE:hello_exec_bin>
+  DEPENDS mkmanifest ${HELLO_EXEC_MANIFEST_SRC}
+  COMMENT "embed .uros_manifest into hello_exec"
+  VERBATIM
+)

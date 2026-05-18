@@ -1,0 +1,12 @@
+# hello_exec manifest — Uros #235 pilot.
+#
+# hello_exec is the canonical exec_server smoke binary: bare _start
+# that walks the AUXV and loops on mach_null.  It never calls
+# cap_request, so the legitimate cap set is empty — same situation
+# as hello_server.  Any cap_request from this task should come back
+# as CAP_ERR_NOT_IN_MANIFEST under v2.1 enforcement.
+
+name hello_exec
+
+# No `required` lines.
+# No `delegatable` lines.
