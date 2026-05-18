@@ -29,6 +29,10 @@ option(OSFMK_BUILD_EXEC_SERVER "Build exec_server (userspace ELF loader / proces
 option(OSFMK_BUILD_HELLO_EXEC "Build hello_exec test binary (#228 v0.1.0)" OFF)
 option(OSFMK_BUILD_PROC_SERVER "Build proc_server (POSIX process model owner, #237)" OFF)
 
+# #249 — libc.so consolidation roadmap, Phase 1: vendor musl 1.2.5 and
+# build it standalone as libc-musl.a.  No Uros integration yet.
+option(UROS_BUILD_MUSL "Build vendored musl 1.2.5 as standalone libc-musl.a (#249)" OFF)
+
 # Issue #211: kernel symbol table for DDB.  Default ON for Debug / unset
 # build types (developer build), OFF for Release where DDB lookup-by-name
 # is not needed and the ~88 KB blob would just be dead weight.
@@ -75,6 +79,10 @@ include_directories(${CMAKE_SOURCE_DIR}/uapi)
 include(CTest)
 enable_testing()
 add_subdirectory(src)
+
+if(UROS_BUILD_MUSL)
+  add_subdirectory(src/contrib)
+endif()
 
 # Target clean-all: rimuove completamente la directory di build
 add_custom_target(clean-all
