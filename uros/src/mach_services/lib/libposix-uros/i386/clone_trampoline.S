@@ -16,16 +16,17 @@
  * License: MIT
  */
 
+/*
+ * The trampoline is a thin shim: clone laid out the new thread's stack
+ * as a cdecl frame for __uros_thread_bootstrap(fn, arg, tls_base), so
+ * all we have to do is jump into it.  Zero %ebp so debuggers stop
+ * unwinding at the thread root.
+ */
 .text
 .globl __uros_clone_trampoline
 .type  __uros_clone_trampoline, @function
 __uros_clone_trampoline:
-        movl    %ebp, %eax              /* fn = saved in ebp by clone */
-        xorl    %ebp, %ebp              /* zero frame ptr — debugger hint */
-        call    *%eax                   /* call fn(arg) — arg at 4(%esp) */
-        /* fn returned with the exit code in %eax. */
-        pushl   %eax
-        call    _exit
-1:      jmp     1b                      /* unreachable */
+        xorl    %ebp, %ebp
+        jmp     __uros_thread_bootstrap
 
 .section .note.GNU-stack,"",@progbits

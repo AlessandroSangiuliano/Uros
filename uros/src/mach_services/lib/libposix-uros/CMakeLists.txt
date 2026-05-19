@@ -124,6 +124,15 @@ target_compile_options(libposix-uros PRIVATE
   $<$<COMPILE_LANGUAGE:ASM>:-m32>
 )
 
+# Phase 6b smoke (#257): the same -DUROS_PTHREAD_SMOKE=1 the user passes
+# via CMAKE_C_FLAGS for the C side must also reach our trampoline asm.
+# CMake doesn't forward CMAKE_C_FLAGS to ASM compilation, so we mirror
+# the flag onto the ASM build line for this target only.
+if(CMAKE_C_FLAGS MATCHES "UROS_PTHREAD_SMOKE")
+  target_compile_options(libposix-uros PRIVATE
+    $<$<COMPILE_LANGUAGE:ASM>:-DUROS_PTHREAD_SMOKE=1>)
+endif()
+
 # Loosen warnings on the MIG-generated proc_user.c — migcom emits
 # constructs (uninitialised stack out-args, K&R-ish casts) that trip
 # -Wall/-Wextra unconditionally.  Same convention used by every other

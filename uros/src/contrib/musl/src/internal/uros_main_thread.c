@@ -57,12 +57,47 @@ void __uros_libc_init(void)
 	__uros_main_thread.thr.self = &__uros_main_thread.thr;
 
 	/*
+	 * Phase 6b (#257): pthread_create splices the new thread into a
+	 * circular linked list rooted at the main thread.  Musl's
+	 * __init_libc would normally seed it as a list of one; we bypass
+	 * that path, so set it up here.  Without these two stores the
+	 * parent's `new->next->prev = new` walks through a NULL `next`
+	 * pointer.
+	 */
+	__uros_main_thread.thr.next = &__uros_main_thread.thr;
+	__uros_main_thread.thr.prev = &__uros_main_thread.thr;
+
+	/*
 	 * Phase 6a (#256): musl's pthread_create gates on
 	 * libc.can_do_threads (set by __init_tls on Linux).  We bypass
 	 * __init_libc and friends, so set it here once the synthetic
 	 * main thread is wired up.
 	 */
 	libc.can_do_threads = 1;
+
+	/*
+	 * Phase 6b (#257): pthread_create needs libc.tls_size > 0 and
+	 * libc.tls_align > 0.  Without them, its math
+	 *
+	 *   tsd = map + size - __pthread_tsd_size;
+	 *   new = __copy_tls(tsd - libc.tls_size);
+	 *
+	 * collapses to `mem = map+size` — one past the allocation — and
+	 * the first write inside __copy_tls (dtv[0] = ...) page-faults.
+	 *
+	 * __init_tls would normally compute these from the ELF PT_TLS
+	 * phdr (or fall back to the no-PT_TLS default).  Until our auxv
+	 * carries AT_PHDR/AT_PHENT/AT_PHNUM (project_236_deferred),
+	 * mirror the no-TLS-segment branch by hand: reserve enough room
+	 * at the top of every new thread's mmap for a struct pthread
+	 * plus two pointers of dtv, aligned to MIN_TLS_ALIGN.
+	 */
+	{
+		size_t a   = sizeof(void *);
+		size_t raw = 2 * sizeof(void *) + sizeof(struct pthread);
+		libc.tls_align = a;
+		libc.tls_size  = (raw + a - 1) & -a;
+	}
 
 	/* Phase 6a (#256): install an LDT descriptor for the main thread
 	 * with base = &tp_word and load it into %gs.  After this call,

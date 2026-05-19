@@ -105,11 +105,22 @@ extern int syscall_thread_switch(unsigned long, int, int);
 void
 __uros_main_tls_init(void)
 {
-    uintptr_t *tp = __uros_main_tcb_tp_addr();
-    /* %gs:0 must return TP itself so __pthread_self() (= TP -
-     * sizeof(pthread)) lands on the start of the pthread struct. */
-    *tp = (uintptr_t)tp;
-    if (install_tls(mach_thread_self(), (unsigned int)tp) != KERN_SUCCESS)
+    /*
+     * i386 musl uses TLS-below-TP and defines __pthread_self() as
+     * __get_tp() with no adjustment.  That means the LDT base must
+     * point AT the pthread struct, and the struct's first field
+     * (.self) must hold its own address — %gs:0 then reads .self and
+     * returns the pthread pointer.  __uros_libc_init seeds .self =
+     * &thr already; we just install the LDT with thr as the base.
+     *
+     * `__uros_main_thread` is `{ struct pthread thr; uintptr_t tp_word; }`
+     * laid out by the linker; .thr lives at offset 0 so &thr ==
+     * &__uros_main_thread.  The tp_word field is leftover from the
+     * earlier TLS_ABOVE_TP-flavoured attempt — kept for ABI stability,
+     * the LDT base no longer points at it.
+     */
+    void *thr = &__uros_main_thread;
+    if (install_tls(mach_thread_self(), (unsigned int)thr) != KERN_SUCCESS)
         return;
 
     /* Force the CPU's LDTR to pick up the new LDT we just installed
@@ -143,6 +154,17 @@ __uros_install_thread_tls(mach_port_t target_thread,
     if (kr != KERN_SUCCESS)
         return 0;
     desc->entry_number = UROS_TLS_LDT_SLOT;
+    return UROS_TLS_LDT_SELECTOR;
+}
+
+/* Variant used by __uros_clone: musl's pthread_create passes a raw TP
+ * pointer (TP_ADJ(new) = new on i386) as the tls argument, not a
+ * struct user_desc.  Skip the user_desc indirection entirely. */
+int
+__uros_install_thread_tls_at(mach_port_t target_thread, unsigned int base_addr)
+{
+    if (install_tls(target_thread, base_addr) != KERN_SUCCESS)
+        return 0;
     return UROS_TLS_LDT_SELECTOR;
 }
 

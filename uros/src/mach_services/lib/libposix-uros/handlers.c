@@ -56,6 +56,8 @@ extern __uros_kern_return_t  syscall_vm_protect(__uros_port_t task,
                                                 int set_max,
                                                 int new_prot);
 extern __uros_kern_return_t  syscall_task_terminate(__uros_port_t task);
+extern __uros_kern_return_t  thread_terminate(__uros_port_t thread);
+extern __uros_port_t         mach_thread_self(void);
 
 /* ------------------------------------------------------------------ */
 /* Linux i386 syscall numbers we care about.  Subset of the table musl */
@@ -198,6 +200,23 @@ static long h_exit(long status, long a2, long a3,
     (void)syscall_task_terminate(task_self());
     for (;;) { /* unreachable */ }
     return 0; /* unreachable, satisfies -Wreturn-type */
+}
+
+/*
+ * Linux SYS_exit (1) terminates the calling thread only; SYS_exit_group
+ * (252) takes down the whole task.  pthread_exit (worker thread end)
+ * runs SYS_exit, and mapping it to task_terminate would kill the
+ * joiner before pthread_join could observe the result.  Route SYS_exit
+ * to thread_terminate(mach_thread_self()) and keep h_exit (task-wide)
+ * for SYS_exit_group / process exit.
+ */
+static long h_exit_thread(long status, long a2, long a3,
+                          long a4, long a5, long a6)
+{
+    (void)status; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)thread_terminate(mach_thread_self());
+    for (;;) { /* unreachable */ }
+    return 0;
 }
 
 /*
@@ -472,7 +491,7 @@ static long h_futex(long uaddr, long op, long val, long timeout,
 struct entry { long n; __uros_handler_t h; };
 
 static const struct entry table[] = {
-    { UROS_SYS_exit,             h_exit            },
+    { UROS_SYS_exit,             h_exit_thread     },
     { UROS_SYS_fork,             h_fork            },
     { UROS_SYS_read,             h_read            },
     { UROS_SYS_write,            h_write           },
