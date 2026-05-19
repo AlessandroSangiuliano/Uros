@@ -193,3 +193,17 @@ routine proc_getrusage(
 	in	pid		: proc_pid_t;
 	out	usage		: proc_rusage_t;
 	out	result		: int);
+
+/*
+ * proc_set_exit_code(pid, code) — record a POSIX exit status for the
+ * named pid (#255 / Phase 5b).  Called by libposix-uros's SYS_exit
+ * handler just before task_terminate so the value lands in
+ * proc_exit_msg_t and waitpid's status word.  No-op if the pid is
+ * unknown; safe to call repeatedly (last writer wins until the dead-
+ * name handler fires).
+ */
+routine proc_set_exit_code(
+		proc_port	: mach_port_t;
+	in	pid		: proc_pid_t;
+	in	code		: int;
+	out	result		: int);

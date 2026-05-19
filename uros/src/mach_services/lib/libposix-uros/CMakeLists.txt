@@ -77,10 +77,12 @@ add_library(libposix-uros STATIC
   exceptions.c
   posix_exec.c
   posix_wait.c
+  posix_fork.c
   ${PROC_USER_C}
   ${EXEC_USER_C}
   i386/traps.S
   i386/sig_thread_entry.S
+  i386/fork_capture.S
 )
 
 add_dependencies(libposix-uros mig_mach_public_headers)

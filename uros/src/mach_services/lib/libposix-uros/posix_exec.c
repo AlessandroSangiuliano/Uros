@@ -48,6 +48,12 @@ extern unsigned int __uros_my_pid;
  * means "not yet resolved" (lookup is lazy on first execve call). */
 static mach_port_t __uros_exec_port = MACH_PORT_NULL;
 
+/* Phase 5b (#255) hooks for posix_fork.c.  Keeps __uros_exec_port
+ * file-static here while letting fork inherit the cached send right
+ * into the child's IPC space. */
+mach_port_t __uros_get_exec_port(void) { return __uros_exec_port; }
+void        __uros_set_exec_port(mach_port_t p) { __uros_exec_port = p; }
+
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
 /* ------------------------------------------------------------------ */

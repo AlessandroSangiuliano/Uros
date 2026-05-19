@@ -114,3 +114,18 @@ mig_put_reply_port(
 	mach_port_t	reply_port)
 {
 }
+
+/*
+ * Phase 5b (#255): drop libmach's cached port-name globals after a
+ * fork().  The child's IPC space is empty when task_create returns,
+ * so the parent's cached values are noise that next MIG calls will
+ * accidentally reuse — MACH_SEND_INVALID_DEST on the first RPC.
+ * Forces a re-cache via the relevant Mach traps on next use.
+ */
+extern mach_port_t mach_task_self_;
+void
+mig_reset_after_fork(void)
+{
+	mig_reply_port = MACH_PORT_NULL;
+	mach_task_self_ = mach_task_self();
+}
