@@ -208,6 +208,12 @@ kernel_trap(syscall_mach_port_mod_refs,-118,4)
 kernel_trap(syscall_mach_port_request_notification,-119,7)
 
 /*
+ * UrMach extensions — Uros-specific traps, named urmach_* to
+ * distinguish them from inherited Mach traps.
+ */
+kernel_trap(urmach_thread_set_cleartid,-51,1)
+
+/*
  *	These "Mach" traps are not implemented by the kernel;
  *	the emulation library and Unix server implement them.
  *	But they are traditionally part of libmach, and use

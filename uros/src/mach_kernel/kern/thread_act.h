@@ -308,6 +308,15 @@ typedef struct thread_activation {
 	 */
 	queue_head_t	held_ulocks;
 
+	/*
+	 * User-space address to zero atomically when this activation
+	 * terminates — the kernel half of Linux CLONE_CHILD_CLEARTID, used
+	 * by libposix-uros pthread support to wake a joiner waiting on
+	 * __thread_list_lock without leaving a race window.  Set via
+	 * urmach_thread_set_cleartid (trap 50); 0 means "no cleartid".
+	 */
+	vm_offset_t	cleartid_addr;
+
 #if	XKMACHKERNEL
 	void		*xk_resources;
 #endif	/* XKMACHKERNEL */

@@ -1837,6 +1837,33 @@ syscall_thread_terminate(
 	return result;
 }
 
+/*
+ *	Routine:	urmach_thread_set_cleartid
+ *	Purpose:
+ *		Register a user-space address that the kernel will
+ *		atomically zero when the calling thread terminates —
+ *		the kernel half of Linux's CLONE_CHILD_CLEARTID, used by
+ *		libposix-uros pthread support to wake a joiner waiting
+ *		on __thread_list_lock without leaving a user-space race
+ *		window (see issue #257).
+ *	Conditions:
+ *		Always sets cleartid for the current activation; ignored
+ *		input addresses just disable the mechanism (pass 0).
+ *		No copyout happens here — only the address is recorded.
+ */
+kern_return_t
+urmach_thread_set_cleartid(
+	vm_offset_t	addr)
+{
+	thread_act_t	act = current_act();
+
+	if (act == THR_ACT_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	act->cleartid_addr = addr;
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 syscall_thread_abort_safely(
 	mach_port_t	thread)

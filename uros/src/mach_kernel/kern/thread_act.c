@@ -271,6 +271,28 @@ thread_terminate(
 	} else {
 
 	/*
+	 *	urmach: kernel half of Linux CLONE_CHILD_CLEARTID — if the
+	 *	thread registered a cleartid address (libposix-uros sets it
+	 *	per pthread, via urmach_thread_set_cleartid), zero it now
+	 *	while we still own the activation and its task's vm_map is
+	 *	live.  Restricted to self-termination: copyout uses
+	 *	current_thread()->task, so terminating a peer in the same
+	 *	task is fine but cross-task kill is not — matching Linux,
+	 *	which only clears the tid when the owning thread exits.
+	 *	Best-effort: a faulting copyout (e.g. stack already unmapped)
+	 *	just drops the wake, mirroring the kernel-side futex queue
+	 *	losing a wake on a vanished waiter address.
+	 */
+	if (thr_act->cleartid_addr != 0 &&
+	    current_task() == task) {
+		unsigned int zero = 0;
+		(void) copyout((char *)&zero,
+		               (char *)thr_act->cleartid_addr,
+		               sizeof(zero));
+		thr_act->cleartid_addr = 0;
+	}
+
+	/*
 	 *	Break IPC control over the thread.
 	 */
 	ipc_thr_act_disable_act_locked(thr_act);

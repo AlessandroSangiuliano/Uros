@@ -382,6 +382,15 @@ extern kern_return_t syscall_thread_create(
 
 extern kern_return_t syscall_thread_terminate(
 				mach_port_t	target_thread);
+
+/*
+ * Uros-specific trap (#257): register a user-space address the kernel
+ * zeroes when the calling thread terminates — the kernel half of
+ * Linux's CLONE_CHILD_CLEARTID, used by libposix-uros to wake a
+ * pthread joiner that's polling __thread_list_lock.  Pass 0 to clear.
+ */
+extern kern_return_t urmach_thread_set_cleartid(
+				vm_offset_t	cleartid_addr);
 				
 extern kern_return_t syscall_thread_abort_safely(
 				mach_port_t	target_thread);
