@@ -34,6 +34,29 @@
 
 #include "internal.h"
 
+/*
+ * Mach trap stubs we reach for from this freestanding TU.  Declared
+ * locally to keep handlers.c independent of `<mach.h>` (which would
+ * pull in a lot of musl-vs-Mach type juggling).  Names match
+ * libmach_core's public exports verbatim — the linker resolves them
+ * to the SYSENTER stubs <mach/syscall_sw.h> emits.
+ */
+extern void                  mach_print(const char *);
+extern __uros_port_t         mach_task_self(void);
+extern __uros_kern_return_t  syscall_vm_allocate(__uros_port_t task,
+                                                 unsigned long *addr,
+                                                 unsigned long size,
+                                                 int anywhere);
+extern __uros_kern_return_t  syscall_vm_deallocate(__uros_port_t task,
+                                                   unsigned long addr,
+                                                   unsigned long size);
+extern __uros_kern_return_t  syscall_vm_protect(__uros_port_t task,
+                                                unsigned long addr,
+                                                unsigned long size,
+                                                int set_max,
+                                                int new_prot);
+extern __uros_kern_return_t  syscall_task_terminate(__uros_port_t task);
+
 /* ------------------------------------------------------------------ */
 /* Linux i386 syscall numbers we care about.  Subset of the table musl */
 /* builds from arch/i386/bits/syscall.h.in.                            */
@@ -91,7 +114,7 @@ __uros_port_t __cached_task_self;
 static __uros_port_t task_self(void)
 {
     if (__cached_task_self == 0)
-        __cached_task_self = __uros_trap_mach_task_self();
+        __cached_task_self = mach_task_self();
     return __cached_task_self;
 }
 
@@ -108,7 +131,7 @@ static void debug_write(const char *p, size_t n)
         for (size_t i = 0; i < take; i++)
             chunk[i] = p[i];
         chunk[take] = '\0';
-        __uros_trap_mach_print(chunk);
+        mach_print(chunk);
         p += take;
         n -= take;
     }
@@ -172,7 +195,7 @@ static long h_exit(long status, long a2, long a3,
 {
     (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
     __uros_record_exit_code((int)status);
-    (void)__uros_trap_task_terminate(task_self());
+    (void)syscall_task_terminate(task_self());
     for (;;) { /* unreachable */ }
     return 0; /* unreachable, satisfies -Wreturn-type */
 }
@@ -199,7 +222,7 @@ static long h_mmap2(long addr, long len, long prot,
 
     unsigned long out = (unsigned long)addr;
     int anywhere = !(flags & UROS_MAP_FIXED);
-    __uros_kern_return_t kr = __uros_trap_vm_allocate(task_self(),
+    __uros_kern_return_t kr = syscall_vm_allocate(task_self(),
                                                      &out,
                                                      (unsigned long)len,
                                                      anywhere);
@@ -230,7 +253,7 @@ static long h_mprotect(long addr, long len, long prot,
     if (prot & UROS_PROT_READ)  new_prot |= UROS_VM_PROT_READ;
     if (prot & UROS_PROT_WRITE) new_prot |= UROS_VM_PROT_WRITE;
     if (prot & UROS_PROT_EXEC)  new_prot |= UROS_VM_PROT_EXECUTE;
-    __uros_kern_return_t kr = __uros_trap_vm_protect(task_self(),
+    __uros_kern_return_t kr = syscall_vm_protect(task_self(),
                                                     (unsigned long)addr,
                                                     (unsigned long)len,
                                                     0 /* not set_maximum */,
@@ -244,7 +267,7 @@ static long h_munmap(long addr, long len, long a3,
     (void)a3; (void)a4; (void)a5; (void)a6;
     if (len <= 0)
         return -EINVAL;
-    __uros_kern_return_t kr = __uros_trap_vm_deallocate(task_self(),
+    __uros_kern_return_t kr = syscall_vm_deallocate(task_self(),
                                                        (unsigned long)addr,
                                                        (unsigned long)len);
     return kr == 0 ? 0 : -EINVAL;

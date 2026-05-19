@@ -110,7 +110,6 @@ add_library(libposix-uros STATIC
   ${PROC_USER_C}
   ${EXEC_USER_C}
   ${MACH_I386_USER_C}
-  i386/traps.S
   i386/sig_thread_entry.S
   i386/fork_capture.S
   i386/clone_trampoline.S
