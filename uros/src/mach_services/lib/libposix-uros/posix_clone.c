@@ -79,15 +79,9 @@ __uros_thread_bootstrap(int (*fn)(void *), void *arg,
 {
     BOOT_TRACE("bootstrap enter");
 
-    if (tls_base) {
-        if (__uros_install_thread_tls_at(mach_thread_self(), tls_base)) {
-            /* Yield so the scheduler picks our pcb back up and
-             * reloads LDTR from the descriptor we just installed —
-             * same dance __uros_main_tls_init does. */
-            (void)syscall_thread_switch(0, UROS_SWITCH_OPTION_NONE, 0);
-            __asm__ __volatile__("movw %w0, %%gs" :: "r"(0x27));
-        }
-    }
+    (void)tls_base;     /* LDT is installed + selector preloaded by the
+                         * parent in __uros_clone (#258).  By the time
+                         * we run, %gs already references the TLS. */
 
     /* Register the ctid so the kernel zeroes it atomically on
      * thread_terminate — closes the join-side race that the Phase 6b
@@ -152,7 +146,7 @@ __uros_clone(int (*fn)(void *),
     ((uintptr_t *)sp)[0] = 0;                       /* fake return addr */
     ((uintptr_t *)sp)[1] = (uintptr_t)fn;
     ((uintptr_t *)sp)[2] = (uintptr_t)arg;
-    ((uintptr_t *)sp)[3] = tls_base;
+    ((uintptr_t *)sp)[3] = 0;     /* tls_base — installed below by parent */
     ((uintptr_t *)sp)[4] = (uintptr_t)ctid;
 
     /* 1. Create the kernel thread, suspended. */
@@ -164,28 +158,39 @@ __uros_clone(int (*fn)(void *),
     }
     TRACE("thread_create ok");
 
-    /* 2. Initial register state: trampoline at eip, args on the stack
-     * at uesp; segments use the safe USER_CS/USER_DS defaults — TLS
-     * (%gs) is installed on the new thread itself via
-     * __uros_thread_bootstrap before fn is called. */
+    /*
+     * 2. Install per-thread TLS BEFORE thread_resume.  This is the
+     * #258 attempt: the kernel's act_machine_switch_pcb loads LDTR
+     * from pcb->ims.ldt on every context switch, so by the time the
+     * scheduler dispatches the new thread its LDT should already be
+     * live and %gs = 0x27 should resolve.
+     */
+    int gs_sel = 0x1f;
+    if (tls_base) {
+        int sel = __uros_install_thread_tls_at(new_thread,
+                                               (unsigned int)tls_base);
+        if (sel)
+            gs_sel = sel;
+        TRACE("parent-side LDT install ok");
+    }
+
+    /* 3. Initial register state: trampoline at eip, args on the stack
+     * at uesp; gs preloaded with the LDT selector. */
     struct i386_thread_state state = {0};
     state.eip  = (int)__uros_clone_trampoline;
     state.uesp = (int)sp;
     state.cs   = 0x17;
     state.ds = state.es = state.ss = state.fs = 0x1f;
-    state.gs   = 0x1f;
+    state.gs   = gs_sel;
     state.efl  = 0x202;
 
     /*
-     * Use i386_REGS_SEGS_STATE rather than i386_THREAD_STATE: the
-     * THREAD_STATE flavor unconditionally forces ds/es/fs/gs to
-     * USER_DS in pcb.c, throwing away the LDT selector we just put
-     * in state.gs.  REGS_SEGS_STATE honours our segment values
-     * (after validating cs/ss have user privilege), which is what
-     * pthread_create needs to land in the child with %gs pointing
-     * at its TLS.
+     * Use i386_REGS_SEGS_STATE: i386_THREAD_STATE unconditionally
+     * forces gs = USER_DS in pcb.c:765, which would drop our LDT
+     * selector.  REGS_SEGS_STATE honours state.gs after validating
+     * cs/ss have user privilege.
      */
-    kr = thread_set_state(new_thread, i386_THREAD_STATE,
+    kr = thread_set_state(new_thread, i386_REGS_SEGS_STATE,
                           (thread_state_t)&state,
                           i386_THREAD_STATE_COUNT);
     if (kr != KERN_SUCCESS) {

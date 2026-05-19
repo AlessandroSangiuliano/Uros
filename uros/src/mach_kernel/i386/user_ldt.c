@@ -289,14 +289,22 @@ i386_set_ldt(
 
 	    /*
 	     * Have new LDT.  If there was a an old ldt, copy descriptors
-	     * from old to new.  Otherwise copy the default ldt.
+	     * from old to new.  Otherwise copy the default ldt — for any
+	     * target activation, not just current_act().  Skipping this
+	     * for non-current targets (pthread spawn calling i386_set_ldt
+	     * on a freshly-created suspended thread, #258) leaves entries
+	     * 0..first_desc-1 as kalloc'd garbage; when the kernel then
+	     * loads that LDT via lldt on the next context switch, the
+	     * CPU's micro-loaded LDTR can prefetch a garbage entry and
+	     * we GP fault on the first user-side instruction even though
+	     * %gs only references the (valid) entry at first_desc.
 	     */
 	    if (old_ldt) {
 		bcopy((char *)&old_ldt->ldt[0],
 		      (char *)&new_ldt->ldt[0],
 		      old_ldt->desc.limit_low + 1);
 	    }
-	    else if (thr_act == current_act()) {
+	    else {
 		struct real_descriptor template = {0, 0, 0, ACC_P, 0, 0 ,0};
 
 		for (dp = &new_ldt->ldt[0], i = 0; i < first_desc; i++, dp++) {
