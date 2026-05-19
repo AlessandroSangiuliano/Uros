@@ -16,7 +16,15 @@
 typedef int           __uros_kern_return_t;
 typedef unsigned int  __uros_port_t;
 
-/* Mach trap trampolines (i386/traps.S). */
+/*
+ * Mach trap trampolines (i386/traps.S).  These are 1-instruction
+ * tail-call thunks into libmach_core's identically-numbered stubs —
+ * libmach_core ships the SYSENTER fast path via the canonical
+ * <mach/syscall_sw.h> chain, and libposix-uros just borrows it
+ * under a namespaced name so handlers.c stays freestanding (no
+ * mach.h, no kern_return_t / mach_port_t type clashes).  See
+ * memory `mach-trap-sysenter-policy`.
+ */
 extern void                  __uros_trap_mach_print(const char *s);
 extern __uros_port_t         __uros_trap_mach_task_self(void);
 extern __uros_kern_return_t  __uros_trap_vm_allocate(__uros_port_t task,
