@@ -39,13 +39,56 @@
 #include <mach/mach_interface.h>
 #include <mach/thread_status.h>
 
-/* From posix_tls.c — install LDT for a target thread, returns the
- * selector to load into %gs (0 on failure). */
-struct __uros_user_desc;
-extern int __uros_install_thread_tls(mach_port_t target_thread,
-                                     struct __uros_user_desc *desc);
-
 extern void __uros_clone_trampoline(void);
+
+#ifdef UROS_PTHREAD_SMOKE
+extern void mach_print(const char *);
+#endif
+
+/* From posix_tls.c. */
+extern int __uros_install_thread_tls_at(mach_port_t target_thread,
+                                        unsigned int base_addr);
+
+/* Linux switch_thread_switch options.  Matches kern/syscall_subr.h. */
+#define UROS_SWITCH_OPTION_NONE 0
+extern int    syscall_thread_switch(unsigned long, int, int);
+extern void   _exit(int);
+
+#ifdef UROS_PTHREAD_SMOKE
+#define BOOT_TRACE(s) mach_print("posix-uros/clone: " s "\n")
+#else
+#define BOOT_TRACE(s) do { } while (0)
+#endif
+
+/*
+ * Entry point for newly-created pthread Mach threads.  Called by the
+ * trampoline with the cdecl frame __uros_clone laid out; runs on the
+ * new thread itself so the LDT install + LDTR-activation yield happen
+ * in the right context (same idiom __uros_main_tls_init uses for the
+ * main thread).
+ */
+void
+__uros_thread_bootstrap(int (*fn)(void *), void *arg, unsigned int tls_base)
+{
+    BOOT_TRACE("bootstrap enter");
+
+    if (tls_base) {
+        if (__uros_install_thread_tls_at(mach_thread_self(), tls_base)) {
+            /* Yield so the scheduler picks our pcb back up and
+             * reloads LDTR from the descriptor we just installed —
+             * same dance __uros_main_tls_init does. */
+            (void)syscall_thread_switch(0, UROS_SWITCH_OPTION_NONE, 0);
+            __asm__ __volatile__("movw %w0, %%gs" :: "r"(0x27));
+        }
+    }
+    BOOT_TRACE("bootstrap calling fn");
+
+    int rc = fn(arg);
+    _exit(rc);
+    for (;;) { /* unreachable */ }
+}
+
+#define TRACE(s) BOOT_TRACE(s)
 
 /* Linux clone(2) flag bits that musl pthread_create cares about. */
 #define UROS_CLONE_SETTLS         0x00080000
@@ -61,59 +104,89 @@ __uros_clone(int (*fn)(void *),
 {
     kern_return_t kr;
 
+    TRACE("enter");
+
     if (!fn || !stack)
         return -22; /* -EINVAL */
 
-    /* Lay out the new thread's initial stack: 16-byte align then push
-     * fn's argument so the trampoline's `call *fn` finds it at the
-     * standard cdecl-first-arg position (4(%esp) after the call). */
+    /*
+     * Lay out the new thread's initial stack as a cdecl call frame for
+     * __uros_thread_bootstrap(fn, arg, tls_base):
+     *
+     *   [high]
+     *     tls_base    ← +12 from uesp
+     *     arg         ← +8
+     *     fn          ← +4
+     *     <ret addr>  ← +0 (overwritten when bootstrap pushes a frame
+     *                  for further calls; we never return through it)
+     *   [low / uesp]
+     *
+     * The trampoline just `call __uros_thread_bootstrap` — no register
+     * juggling needed.  TLS install happens on the new thread itself
+     * (same mechanism as the main thread in __uros_main_tls_init),
+     * which sidesteps the kernel's "i386_set_ldt for a non-current
+     * thread" code path that doesn't activate LDTR until the next
+     * context switch.
+     */
+    uintptr_t tls_base = (flags & UROS_CLONE_SETTLS)
+                            ? (uintptr_t)newtls
+                            : 0;
+
     uintptr_t sp = ((uintptr_t)stack) & ~0xFu;
-    sp -= 4;
-    *(uintptr_t *)sp = (uintptr_t)arg;
+    sp -= 16;
+    ((uintptr_t *)sp)[0] = 0;                       /* fake return addr */
+    ((uintptr_t *)sp)[1] = (uintptr_t)fn;
+    ((uintptr_t *)sp)[2] = (uintptr_t)arg;
+    ((uintptr_t *)sp)[3] = tls_base;
 
     /* 1. Create the kernel thread, suspended. */
     mach_port_t new_thread = MACH_PORT_NULL;
     kr = thread_create(mach_task_self(), &new_thread);
-    if (kr != KERN_SUCCESS)
+    if (kr != KERN_SUCCESS) {
+        TRACE("thread_create failed");
         return -11; /* -EAGAIN */
-
-    /* 2. Install per-thread TLS if requested.  newtls points at the
-     * caller's `struct user_desc`; install_tls fills entry_number. */
-    int gs_sel = 0x1f;     /* USER_DS — sensible default */
-    if ((flags & UROS_CLONE_SETTLS) && newtls) {
-        int sel = __uros_install_thread_tls(new_thread,
-                                            (struct __uros_user_desc *)newtls);
-        if (sel)
-            gs_sel = sel;
     }
+    TRACE("thread_create ok");
 
-    /* 3. Initial register state: trampoline at eip, our stack at uesp,
-     * fn in ebp (trampoline reads it from there before zeroing ebp),
-     * TLS selector in gs.  Other segments are the standard user-mode
-     * values shared by every Uros user task. */
+    /* 2. Initial register state: trampoline at eip, args on the stack
+     * at uesp; segments use the safe USER_CS/USER_DS defaults — TLS
+     * (%gs) is installed on the new thread itself via
+     * __uros_thread_bootstrap before fn is called. */
     struct i386_thread_state state = {0};
     state.eip  = (int)__uros_clone_trampoline;
     state.uesp = (int)sp;
-    state.ebp  = (int)fn;
     state.cs   = 0x17;
     state.ds = state.es = state.ss = state.fs = 0x1f;
-    state.gs   = gs_sel;
+    state.gs   = 0x1f;
     state.efl  = 0x202;
 
+    /*
+     * Use i386_REGS_SEGS_STATE rather than i386_THREAD_STATE: the
+     * THREAD_STATE flavor unconditionally forces ds/es/fs/gs to
+     * USER_DS in pcb.c, throwing away the LDT selector we just put
+     * in state.gs.  REGS_SEGS_STATE honours our segment values
+     * (after validating cs/ss have user privilege), which is what
+     * pthread_create needs to land in the child with %gs pointing
+     * at its TLS.
+     */
     kr = thread_set_state(new_thread, i386_THREAD_STATE,
                           (thread_state_t)&state,
                           i386_THREAD_STATE_COUNT);
     if (kr != KERN_SUCCESS) {
+        TRACE("thread_set_state failed");
         (void)thread_terminate(new_thread);
         return -11;
     }
+    TRACE("thread_set_state ok");
 
     /* 4. Start it. */
     kr = thread_resume(new_thread);
     if (kr != KERN_SUCCESS) {
+        TRACE("thread_resume failed");
         (void)thread_terminate(new_thread);
         return -11;
     }
+    TRACE("thread_resume ok");
 
     /* 5. Use the Mach thread port name as the tid.  musl wants a
      * non-negative int; port names fit comfortably. */
