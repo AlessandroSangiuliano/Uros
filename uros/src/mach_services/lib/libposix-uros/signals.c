@@ -254,27 +254,46 @@ __uros_signals_init(void)
         return;
     __sig_initialised = 1;
 
+    /*
+     * Phase 5b (#255): re-entrant entry for fork().  The child task
+     * already has __uros_my_pid (set by parent via vm_write before
+     * thread_create_running) and __uros_proc_port (inherited send
+     * right) populated; in that case we skip the netname lookup +
+     * proc_register and pick up at the signal_port allocation.
+     * First-time callers come in with __uros_my_pid == 0 and run
+     * the full path.
+     */
+    int is_post_fork = (__uros_my_pid != 0
+                        && __uros_proc_port != MACH_PORT_NULL);
+
     /* Initialise table: every signal defaults to SIG_DFL, empty mask. */
     for (int i = 0; i < PROC_NSIG; i++)
         __sig_actions[i].sa_handler = SIG_DFL;
     sigemptyset(&__sig_mask);
 
-    /* 1. Resolve proc_server. */
-    kr = lookup_proc_server(&__uros_proc_port);
-    if (kr != KERN_SUCCESS)
-        return;     /* leave SIG_DFL everywhere; signals just won't fire */
+    if (!is_post_fork) {
+        /* 1. Resolve proc_server. */
+        kr = lookup_proc_server(&__uros_proc_port);
+        if (kr != KERN_SUCCESS)
+            return;     /* leave SIG_DFL everywhere; signals won't fire */
 
-    /* 2. Self-register to obtain a pid.  proc_register's cmd_t arg is
-     * MIG-declared as a fixed-size char[128]; size the local buffer
-     * accordingly so gcc's stringop-overflow analyser doesn't complain. */
-    char cmd_name[128] = "musl-task";
-    rc = PROC_ERR_INVAL;
-    (void)proc_register(__uros_proc_port, PROC_PID_NONE, mach_task_self(),
-                        cmd_name, &__uros_my_pid, &rc);
-    if (rc != PROC_OK)
-        return;
+        /* 2. Self-register to obtain a pid.  proc_register's cmd_t arg
+         * is MIG-declared as a fixed-size char[128]; size the local
+         * buffer accordingly so gcc's stringop-overflow analyser
+         * doesn't complain. */
+        char cmd_name[128] = "musl-task";
+        rc = PROC_ERR_INVAL;
+        (void)proc_register(__uros_proc_port, PROC_PID_NONE,
+                            mach_task_self(), cmd_name,
+                            &__uros_my_pid, &rc);
+        if (rc != PROC_OK)
+            return;
+    }
 
-    /* 3. Allocate the receive right our signals arrive on. */
+    /* 3. Allocate a fresh receive right our signals arrive on.  In a
+     * forked child, the parent's __sig_port name was CoW'd but refers
+     * to nothing in the child's IPC space — overwrite it. */
+    __sig_port = MACH_PORT_NULL;
     kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
                             &__sig_port);
     if (kr != KERN_SUCCESS)
@@ -294,13 +313,47 @@ __uros_signals_init(void)
      * proc_server doesn't know about. */
     (void)spawn_handler_thread();
 
-    /* 6. Hardware exception path (#253 / Phase 4b): install a
-     * dedicated exception port so a SEGV/FPE/ILL in this task becomes
-     * a clean log+terminate instead of a kernel-level fault.  Failure
-     * is non-fatal — the task just keeps the kernel's default
-     * exception port and behaves as before. */
+    /* 6. Hardware exception path (#253 / Phase 4b). */
     extern void __uros_exceptions_init(void);
     __uros_exceptions_init();
+}
+
+/*
+ * Phase 5b (#255): the child path of fork() calls this from
+ * posix_fork.c after task_create + state restore have landed it back
+ * in user code.  Clears __sig_initialised so the next __uros_signals_init
+ * actually re-runs (otherwise the early `if (__sig_initialised)` would
+ * short-circuit it), then runs the re-entrant init path above.
+ */
+extern void mig_reset_after_fork(void);
+
+void
+__uros_post_fork_init(void)
+{
+    /* libmach_core caches a few port-name globals (mig_reply_port,
+     * mach_task_self_) that are valid in the parent's IPC space but
+     * mean nothing in the child's freshly-created one.  Reset before
+     * we attempt any MIG RPC. */
+    mig_reset_after_fork();
+
+    __sig_initialised = 0;
+    __uros_signals_init();
+}
+
+/*
+ * Phase 5b (#255): record an exit code with proc_server.  Called by
+ * handlers.c's SYS_exit / SYS_exit_group path just before
+ * task_terminate; the dead-name handler then fires
+ * proc_exit_msg_t with the value waitpid's W_EXITCODE picks up.
+ */
+void
+__uros_record_exit_code(int status)
+{
+    if (__uros_proc_port == MACH_PORT_NULL || __uros_my_pid == 0)
+        return;
+    int rc = 0;
+    (void)proc_set_exit_code(__uros_proc_port,
+                             __uros_my_pid, status, &rc);
 }
 
 /* ------------------------------------------------------------------ */

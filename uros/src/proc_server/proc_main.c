@@ -846,6 +846,34 @@ proc_S_getrusage(
     return KERN_SUCCESS;
 }
 
+/*
+ * proc_set_exit_code(pid, code) — Phase 5b (#255) hook for the
+ * libposix-uros SYS_exit handler.  Stash the value so the impending
+ * dead-name notification's proc_exit_msg_t carries the real exit code
+ * instead of the default 0.  Last writer wins; safe if the pid is
+ * already gone (no-op + PROC_ERR_NOT_FOUND).
+ */
+kern_return_t
+proc_S_set_exit_code(
+    mach_port_t                 server_port,
+    proc_pid_t                  pid,
+    int                         code,
+    int                         *result)
+{
+    struct pid_entry *e;
+
+    (void)server_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(pid);
+    if (e)
+        e->exit_code = code;
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = e ? PROC_OK : PROC_ERR_NOT_FOUND;
+    return KERN_SUCCESS;
+}
+
 /* ------------------------------------------------------------------ */
 /*  vfs.defs adapter for /proc/N/stat                                   */
 /* ------------------------------------------------------------------ */
@@ -1170,7 +1198,10 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
     e = find_by_task_locked(name);
     if (e) {
         e->state      = PROC_STATE_ZOMBIE;
-        e->exit_code  = 0;     /* v0.1.0: no exit-code wire-up yet */
+        /* exit_code was set by proc_S_set_exit_code (#255 / Phase 5b)
+         * just before the dying task issued task_terminate; leave it
+         * alone here — overwriting with 0 throws away the value
+         * waitpid is about to read. */
         subscriber    = e->exit_notify;
         e->exit_notify = MACH_PORT_NULL;
         pid           = e->pid;

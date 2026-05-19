@@ -49,6 +49,7 @@
 #include <stdlib.h>                     /* exit family */
 #include <unistd.h>                     /* _exit() from musl */
 #include <signal.h>                     /* sigaction/raise — Phase 4 (#252) */
+#include <sys/wait.h>                   /* waitpid — Phase 5 (#254) */
 #include <uros/libposix.h>              /* __uros_libc_init() */
 extern void __uros_libc_init(void);     /* defined in patched musl */
 
@@ -330,6 +331,30 @@ main(int argc, char **argv)
         unsigned int child_pid = 0;
         int sr = __uros_spawn("/hello_exec", argv_v, envp_v,
                               &child_task, &child_thread, &child_pid);
+        /*
+         * Phase 5b (#255): fork() smoke.  Child prints once and
+         * _exit(7); parent waitpid's and checks the encoded status.
+         */
+        extern int __uros_fork(void);
+        int forked_pid = __uros_fork();
+        if (forked_pid < 0) {
+            printf("(hello_server): fork() failed: %d\n", forked_pid);
+        } else if (forked_pid == 0) {
+            printf("(hello_server)[child]: hello from forked child, pid=%u\n",
+                   __uros_my_pid);
+            printf("(hello_server)[child]: about to _exit(7)\n");
+            _exit(7);
+        } else {
+            printf("(hello_server): fork() -> child_pid=%d\n", forked_pid);
+            int fst = 0;
+            int fwr = __uros_waitpid(forked_pid, &fst, 0);
+            if (fwr < 0)
+                printf("(hello_server): waitpid(forked) failed: %d\n", fwr);
+            else
+                printf("(hello_server): waitpid(forked) -> pid=%d status=0x%x\n",
+                       fwr, fst);
+        }
+
         if (sr != 0) {
             printf("(hello_server): __uros_spawn(/hello_exec) failed: %d\n", sr);
         } else {

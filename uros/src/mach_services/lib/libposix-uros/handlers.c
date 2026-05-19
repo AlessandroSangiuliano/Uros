@@ -39,6 +39,7 @@
 /* builds from arch/i386/bits/syscall.h.in.                            */
 /* ------------------------------------------------------------------ */
 #define UROS_SYS_exit             1
+#define UROS_SYS_fork             2
 #define UROS_SYS_read             3
 #define UROS_SYS_write            4
 #define UROS_SYS_open             5
@@ -78,7 +79,12 @@
  * enough.  Initialised lazily to keep startup free of Uros-specific
  * hooks during Phase 2.
  */
-static __uros_port_t __cached_task_self;
+/*
+ * The cached task-self port name.  Non-static because posix_fork.c
+ * resets it in the child path before the first IPC call (the parent's
+ * task port name is invalid in the child's freshly-created IPC space).
+ */
+__uros_port_t __cached_task_self;
 
 static __uros_port_t task_self(void)
 {
@@ -151,10 +157,19 @@ static long h_writev(long fd, long iov_ptr, long iovcnt,
     return total;
 }
 
+/*
+ * Phase 5b (#255): record our exit code with proc_server before we
+ * vanish, so waitpid's WEXITSTATUS sees the real value instead of 0.
+ * Implemented in signals.c (where the mach headers already live).
+ * handlers.c stays freestanding-clean.
+ */
+extern void __uros_record_exit_code(int status);
+
 static long h_exit(long status, long a2, long a3,
                    long a4, long a5, long a6)
 {
-    (void)status; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    __uros_record_exit_code((int)status);
     (void)__uros_trap_task_terminate(task_self());
     for (;;) { /* unreachable */ }
     return 0; /* unreachable, satisfies -Wreturn-type */
@@ -299,6 +314,14 @@ static long h_tgkill(long tgid, long tid, long sig,
 extern int __uros_execve(const char *path,
                          char *const argv[], char *const envp[]);
 extern int __uros_waitpid(int pid, int *status, int options);
+extern int __uros_fork(void);
+
+static long h_fork(long a1, long a2, long a3,
+                   long a4, long a5, long a6)
+{
+    (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_fork();
+}
 
 static long h_execve(long path, long argv, long envp,
                      long a4, long a5, long a6)
@@ -334,6 +357,7 @@ struct entry { long n; __uros_handler_t h; };
 
 static const struct entry table[] = {
     { UROS_SYS_exit,             h_exit            },
+    { UROS_SYS_fork,             h_fork            },
     { UROS_SYS_read,             h_read            },
     { UROS_SYS_write,            h_write           },
     { UROS_SYS_open,             h_open            },
