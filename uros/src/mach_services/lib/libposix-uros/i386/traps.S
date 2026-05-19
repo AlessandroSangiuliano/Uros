@@ -49,6 +49,14 @@ __uros_trap_vm_deallocate:
         MACH_TRAP_GATE
         ret
 
+/* syscall_vm_protect(task, addr, size, set_max, new_prot) -> kr — trap -91 */
+.globl __uros_trap_vm_protect
+.type  __uros_trap_vm_protect, @function
+__uros_trap_vm_protect:
+        movl    $-91, %eax
+        MACH_TRAP_GATE
+        ret
+
 /* syscall_task_terminate(task) -> kern_return_t — trap -69 */
 .globl __uros_trap_task_terminate
 .type  __uros_trap_task_terminate, @function

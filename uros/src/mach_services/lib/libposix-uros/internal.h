@@ -26,6 +26,11 @@ extern __uros_kern_return_t  __uros_trap_vm_allocate(__uros_port_t task,
 extern __uros_kern_return_t  __uros_trap_vm_deallocate(__uros_port_t task,
                                                       unsigned long addr,
                                                       unsigned long size);
+extern __uros_kern_return_t  __uros_trap_vm_protect(__uros_port_t task,
+                                                   unsigned long addr,
+                                                   unsigned long size,
+                                                   int set_max,
+                                                   int new_prot);
 extern __uros_kern_return_t  __uros_trap_task_terminate(__uros_port_t task);
 
 /*

@@ -1,50 +1,76 @@
 /*
- * Uros patch (#251 / Phase 3): synthetic main-thread struct for
- * single-threaded musl-linked Uros tasks.
+ * Uros patch (#251 + #256): main-thread TCB used by musl-linked Uros
+ * tasks.  Phase 3 introduced a single shared pthread struct
+ * (__uros_main_thread) to bridge the gap before real TLS landed.
+ * Phase 6a (#256) keeps that struct but turns it into a proper
+ * TCB layout: pthread followed by a TLS "self" word, with the LDT
+ * descriptor installed by libposix-uros pointing at the self word.
  *
- * musl's __pthread_self() is the bottleneck for everything thread-
- * local (errno, stdio FLOCK, SSP canary, locale).  Until Phase 6
- * brings up real pthreads with set_thread_area, every musl-linked
- * task points its __get_tp() at this single static struct.  Each
- * task owns its own copy because musl-linked binaries are statically
- * linked today.
+ *   layout (low → high addr)
+ *     +-----------------+
+ *     |  pthread struct |   ← __uros_main_thread.thr
+ *     +-----------------+
+ *     |   tp_word       |   ← LDT base, holds &tp_word so %gs:0 = TP
+ *     +-----------------+
  *
- * Initialisation contract: __uros_libc_init() must be the very first
- * call inside main() (the libmach_core crt0 hands control to main
- * before any libc code runs, so we can't autoload via a constructor
- * — those need __libc_start_main, which we deliberately bypass).
+ *   __get_tp()        = %gs:0          = &tp_word
+ *   __pthread_self()  = TP - sizeof(struct pthread) = &thr  ✓
  *
- * SECURITY NOTE: __stack_chk_guard stays at its default 0 because we
- * do not call musl's __init_ssp().  Compiler-emitted SSP checks
- * therefore compare 0 to 0 and always pass — overrun detection is
- * effectively disabled.  hello_server compiles with
- * -fno-stack-protector to make this explicit.  Phase 6 wires up real
- * canary seeding alongside pthread support.
+ * Note: __uros_main_thread used to be `struct pthread`; we keep
+ * the symbol but it's now a longer composite.  External references
+ * to it stop at the `.thr` field via standard struct member access.
+ *
+ * SSP NOTE: __stack_chk_guard stays at 0 (we still don't call
+ * __init_ssp()).  hello_server compiles with -fno-stack-protector
+ * to make this explicit; Phase 6b/c wires up real canary seeding.
  */
 
 #include "pthread_impl.h"
+#include "libc.h"
 
-struct pthread __uros_main_thread;
-unsigned long  __uros_tp;
+struct __uros_main_tcb {
+	struct pthread thr;
+	uintptr_t      tp_word;
+};
+struct __uros_main_tcb __uros_main_thread;
 
 /*
- * Phase 4 (#252) — once the synthetic TP is wired, kick the signal
- * personality startup.  The function is provided by libposix-uros and
- * declared weak so musl can build standalone without a libposix-uros
- * archive (Phase 1 host-only smoke).  See uros/src/mach_services/lib/
- * libposix-uros/signals.c.
- *
- * The attribute uses __weak__ (not weak): musl's internal
- * features.h #defines `weak` as `__attribute__((__weak__))`, so the
- * shorter spelling collides with the macro inside this TU.
+ * Phase 4 / 6a entry points provided by libposix-uros.  Declared weak
+ * so musl still builds standalone for the Phase 1 host smoke (no
+ * libposix-uros archive linked).
  */
-extern void __uros_signals_init(void) __attribute__((__weak__));
+extern void __uros_signals_init(void)  __attribute__((__weak__));
+extern void __uros_main_tls_init(void) __attribute__((__weak__));
+
+/*
+ * Tiny accessor that hands libposix-uros (which doesn't have the
+ * `struct pthread` type) the address of the tp_word field — used to
+ * install the main thread's LDT-based TLS descriptor.
+ */
+void *__uros_main_tcb_tp_addr(void)
+{
+	return &__uros_main_thread.tp_word;
+}
 
 void __uros_libc_init(void)
 {
-	__uros_main_thread.self   = &__uros_main_thread;
-	__uros_tp = (unsigned long)((char *)&__uros_main_thread
-	                            + sizeof(struct pthread));
+	__uros_main_thread.thr.self = &__uros_main_thread.thr;
+
+	/*
+	 * Phase 6a (#256): musl's pthread_create gates on
+	 * libc.can_do_threads (set by __init_tls on Linux).  We bypass
+	 * __init_libc and friends, so set it here once the synthetic
+	 * main thread is wired up.
+	 */
+	libc.can_do_threads = 1;
+
+	/* Phase 6a (#256): install an LDT descriptor for the main thread
+	 * with base = &tp_word and load it into %gs.  After this call,
+	 * %gs:0 reads tp_word, which __uros_main_tls_init sets to its
+	 * own address — wires up the standard __pthread_self() arithmetic. */
+	if (__uros_main_tls_init)
+		__uros_main_tls_init();
+
 	if (__uros_signals_init)
 		__uros_signals_init();
 }

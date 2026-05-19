@@ -20,6 +20,10 @@ each entry by hand.
 | 2026-05-18 | `arch/i386/pthread_arch.h`           | #251  | Replace `movl %gs:0,%0` TLS read with a load from a global `__uros_tp` pointer.  Single-threaded shim until Phase 6 brings real pthreads + `set_thread_area`. |
 | 2026-05-18 | `src/internal/uros_main_thread.c`    | #251  | NEW file.  Defines `struct pthread __uros_main_thread` + `__uros_tp` + `__uros_libc_init()`.  Every musl-linked Uros task points its synthetic thread pointer at this single struct.  __uros_libc_init() is called first thing in main() (libmach_core's crt0 hands control before any libc code runs). |
 | 2026-05-18 | `src/internal/uros_main_thread.c`    | #252  | Extend `__uros_libc_init()` to call `__uros_signals_init()` (weak — falls through cleanly for the Phase 1 host-only smoke that doesn't link libposix-uros). |
+| 2026-05-19 | `arch/i386/pthread_arch.h`           | #256  | Revert the #251 patch — restore upstream `movl %gs:0, %0`.  Phase 6a installs a real per-thread TLS descriptor via `i386_set_ldt`, so `%gs:0` now resolves correctly. |
+| 2026-05-19 | `src/internal/uros_main_thread.c`    | #256  | Drop `__uros_tp`.  Keep `__uros_main_thread` (initialised + installed via set_thread_area). |
+| 2026-05-19 | `src/thread/i386/__set_thread_area.s`| #256  | Change the selector-from-entry constant from `3` (Linux GDT, TI=0, RPL=3) to `7` (Uros LDT, TI=1, RPL=3).  Our SYS_set_thread_area returns an LDT slot index, not a GDT slot. |
+| 2026-05-19 | `src/thread/i386/clone.s`            | #256  | Replace the int $0x80 path entirely.  __clone now thunks to libposix-uros's `__uros_clone` (C ABI), which does the Mach thread_create + thread_set_state + thread_resume dance directly — Linux clone(2) is a single syscall, on Mach it's several MIG RPCs. |
 
 ## Planned future patches (Phase 3+)
 

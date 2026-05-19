@@ -51,6 +51,7 @@
 #define UROS_SYS_kill            37
 #define UROS_SYS_brk             45
 #define UROS_SYS_wait4          114
+#define UROS_SYS_mprotect       125
 #define UROS_SYS_getgid          47
 #define UROS_SYS_geteuid         49
 #define UROS_SYS_getegid         50
@@ -63,6 +64,7 @@
 #define UROS_SYS_mmap2          192
 #define UROS_SYS_fstat64        197
 #define UROS_SYS_tkill          238
+#define UROS_SYS_futex          240
 #define UROS_SYS_set_thread_area 243
 #define UROS_SYS_exit_group     252
 #define UROS_SYS_set_tid_address 258
@@ -206,6 +208,36 @@ static long h_mmap2(long addr, long len, long prot,
     return (long)out;
 }
 
+/*
+ * mprotect(addr, len, prot).  We map Linux prot bits onto Mach
+ * VM_PROT_* and call syscall_vm_protect with set_maximum=FALSE
+ * (Mach's "current" protection, the one the CPU consults).
+ */
+#define UROS_PROT_READ  0x1
+#define UROS_PROT_WRITE 0x2
+#define UROS_PROT_EXEC  0x4
+#define UROS_VM_PROT_READ    0x1
+#define UROS_VM_PROT_WRITE   0x2
+#define UROS_VM_PROT_EXECUTE 0x4
+
+static long h_mprotect(long addr, long len, long prot,
+                       long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    if (len <= 0)
+        return -EINVAL;
+    int new_prot = 0;
+    if (prot & UROS_PROT_READ)  new_prot |= UROS_VM_PROT_READ;
+    if (prot & UROS_PROT_WRITE) new_prot |= UROS_VM_PROT_WRITE;
+    if (prot & UROS_PROT_EXEC)  new_prot |= UROS_VM_PROT_EXECUTE;
+    __uros_kern_return_t kr = __uros_trap_vm_protect(task_self(),
+                                                    (unsigned long)addr,
+                                                    (unsigned long)len,
+                                                    0 /* not set_maximum */,
+                                                    new_prot);
+    return kr == 0 ? 0 : -EACCES;
+}
+
 static long h_munmap(long addr, long len, long a3,
                      long a4, long a5, long a6)
 {
@@ -232,7 +264,6 @@ static long h_munmap(long addr, long len, long a3,
     }
 
 STUB(h_brk,             -ENOMEM)
-STUB(h_set_thread_area, 0)
 STUB(h_set_tid_address, 1)
 STUB(h_ioctl,           -ENOTTY)
 STUB(h_read,            -EBADF)
@@ -350,6 +381,68 @@ static long h_wait4(long pid, long status, long options, long rusage,
 }
 
 /* ------------------------------------------------------------------ */
+/* Phase 6a (#256): set_thread_area / futex                            */
+/* ------------------------------------------------------------------ */
+
+extern int __uros_set_thread_area(void *desc);
+
+static long h_set_thread_area(long desc, long a2, long a3,
+                              long a4, long a5, long a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_set_thread_area((void *)desc);
+}
+
+/*
+ * Phase 6a futex stub: busy-wait via syscall_thread_switch.  Works
+ * for uncontended mutexes and the simple cmpxchg-loop patterns musl's
+ * pthread_join uses; total throughput-killer under real contention.
+ * Phase 6b replaces this with a proper mach_msg-based sleep.
+ *
+ * Linux futex signature on i386:
+ *   futex(uint32_t *uaddr, int op, uint32_t val,
+ *         const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3)
+ *
+ * Operations we handle:
+ *   FUTEX_WAIT (0):    if *uaddr == val, yield and return 0; else -EAGAIN.
+ *   FUTEX_WAKE (1):    no-op, return val (claimed wake count).
+ *   FUTEX_WAIT_BITSET (9), FUTEX_WAKE_BITSET (10): same as WAIT/WAKE.
+ *   PRIVATE bit (128): ignored — all our futexes are intra-task.
+ */
+#define UROS_FUTEX_OP_MASK     0x7f
+#define UROS_FUTEX_WAIT        0
+#define UROS_FUTEX_WAKE        1
+#define UROS_FUTEX_WAIT_BITSET 9
+#define UROS_FUTEX_WAKE_BITSET 10
+
+extern long syscall_thread_switch(unsigned long, int, int);
+
+static long h_futex(long uaddr, long op, long val, long timeout,
+                    long uaddr2, long val3)
+{
+    (void)timeout; (void)uaddr2; (void)val3;
+    int bare_op = (int)(op & UROS_FUTEX_OP_MASK);
+    switch (bare_op) {
+    case UROS_FUTEX_WAIT:
+    case UROS_FUTEX_WAIT_BITSET: {
+        unsigned int cur = *(volatile unsigned int *)uaddr;
+        if (cur != (unsigned int)val)
+            return -11;       /* -EAGAIN — value changed under us */
+        (void)syscall_thread_switch(0 /* MACH_PORT_NULL */,
+                                    1 /* SWITCH_OPTION_DEPRESS */,
+                                    1 /* 1ms hint */);
+        return 0;
+    }
+    case UROS_FUTEX_WAKE:
+    case UROS_FUTEX_WAKE_BITSET:
+        return val;           /* claim all wakeups happened — busy-wait
+                                 path on the waiter side will retry */
+    default:
+        return -38;           /* -ENOSYS */
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Dispatch table                                                     */
 /* ------------------------------------------------------------------ */
 
@@ -374,6 +467,7 @@ static const struct entry table[] = {
     { UROS_SYS_getegid,          h_getegid         },
     { UROS_SYS_ioctl,            h_ioctl           },
     { UROS_SYS_munmap,           h_munmap          },
+    { UROS_SYS_mprotect,         h_mprotect        },
     { UROS_SYS_readv,            h_readv           },
     { UROS_SYS_writev,           h_writev          },
     { UROS_SYS_rt_sigaction,     h_rt_sigaction    },
@@ -381,6 +475,7 @@ static const struct entry table[] = {
     { UROS_SYS_mmap2,            h_mmap2           },
     { UROS_SYS_fstat64,          h_fstat64         },
     { UROS_SYS_tkill,            h_tkill           },
+    { UROS_SYS_futex,            h_futex           },
     { UROS_SYS_set_thread_area,  h_set_thread_area },
     { UROS_SYS_exit_group,       h_exit            },
     { UROS_SYS_set_tid_address,  h_set_tid_address },

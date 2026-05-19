@@ -34,7 +34,14 @@ extern void		remote_kdb(void);
 extern void		clear_kdb_intr(void);
 extern void		set_cpu_model(void);
 extern void		cpu_shutdown(void);
-extern void		fix_desc(
+/*
+ * desc_fake_to_real() — in-place conversion of `struct
+ * fake_descriptor` (the contiguous layout the rest of the kernel and
+ * the MIG `descriptor_list_t` use) into `struct real_descriptor` (the
+ * shuffled layout the CPU loads from the GDT/LDT).  Operates on
+ * `num_desc` consecutive entries.  Historical name: fix_desc.
+ */
+extern void		desc_fake_to_real(
 				void		* desc,
 				int		num_desc);
 extern void		cnpollc(
