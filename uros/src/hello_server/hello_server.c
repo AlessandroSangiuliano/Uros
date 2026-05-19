@@ -49,6 +49,7 @@
 #include <stdlib.h>                     /* exit family */
 #include <unistd.h>                     /* _exit() from musl */
 #include <signal.h>                     /* sigaction/raise — Phase 4 (#252) */
+#include <pthread.h>                    /* pthread — Phase 6a (#256) */
 #include <sys/wait.h>                   /* waitpid — Phase 5 (#254) */
 #include <uros/libposix.h>              /* __uros_libc_init() */
 extern void __uros_libc_init(void);     /* defined in patched musl */
@@ -64,6 +65,20 @@ hello_sigusr1(int s)
 {
     hello_handler_fired = s;
     printf("(hello_server): handler fired for signo=%d\n", s);
+}
+
+/*
+ * Phase 6a smoke (#256): the pthread worker writes its argument
+ * back via a shared "answer" slot, prints a line, and returns.
+ */
+static volatile int hello_pthread_answer;
+static void *
+hello_pthread_worker(void *arg)
+{
+    int v = (int)(uintptr_t)arg;
+    printf("(hello_server)[pthread]: hello from worker, arg=%d\n", v);
+    hello_pthread_answer = v + 100;
+    return (void *)(uintptr_t)(v + 100);
 }
 
 /*
@@ -354,6 +369,33 @@ main(int argc, char **argv)
                 printf("(hello_server): waitpid(forked) -> pid=%d status=0x%x\n",
                        fwr, fst);
         }
+
+        /*
+         * Phase 6a (#256): pthread infrastructure (set_thread_area +
+         * clone + futex) landed but pthread_create runtime hangs in
+         * the post-clone setup — Phase 6b will dig into the clone/
+         * futex race once we have a proper kernel-side "activate LDT"
+         * primitive (today we yield to force a context switch, which
+         * works for the main thread but not yet for newly-created
+         * Mach threads coming in from thread_create_running).
+         */
+#ifdef UROS_PTHREAD_SMOKE
+        {
+            pthread_t worker_tid;
+            int pr = pthread_create(&worker_tid, NULL,
+                                    hello_pthread_worker,
+                                    (void *)(uintptr_t)42);
+            if (pr != 0) {
+                printf("(hello_server): pthread_create failed: %d\n", pr);
+            } else {
+                printf("(hello_server): pthread_create OK\n");
+                void *ret = NULL;
+                int jr = pthread_join(worker_tid, &ret);
+                printf("(hello_server): pthread_join rc=%d ret=%d answer=%d\n",
+                       jr, (int)(uintptr_t)ret, hello_pthread_answer);
+            }
+        }
+#endif
 
         if (sr != 0) {
             printf("(hello_server): __uros_spawn(/hello_exec) failed: %d\n", sr);

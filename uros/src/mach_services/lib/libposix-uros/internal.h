@@ -16,17 +16,18 @@
 typedef int           __uros_kern_return_t;
 typedef unsigned int  __uros_port_t;
 
-/* Mach trap trampolines (i386/traps.S). */
-extern void                  __uros_trap_mach_print(const char *s);
-extern __uros_port_t         __uros_trap_mach_task_self(void);
-extern __uros_kern_return_t  __uros_trap_vm_allocate(__uros_port_t task,
-                                                    unsigned long *addr,
-                                                    unsigned long size,
-                                                    int anywhere);
-extern __uros_kern_return_t  __uros_trap_vm_deallocate(__uros_port_t task,
-                                                      unsigned long addr,
-                                                      unsigned long size);
-extern __uros_kern_return_t  __uros_trap_task_terminate(__uros_port_t task);
+/*
+ * libposix-uros doesn't ship its own Mach trap stubs — every
+ * musl-linked Uros server already links libmach_core, which emits
+ * the SYSENTER fast path via `#include <mach/syscall_sw.h>`.  Files
+ * that need Mach traps either include `<mach.h>` & friends (signals.c,
+ * exceptions.c, posix_fork.c, posix_clone.c — all already include
+ * the proper Mach headers) or declare the few they reach for locally
+ * (handlers.c, see top of file).
+ *
+ * No __uros_trap_* aliases — same names as libmach, fewer indirections.
+ * See memory `mach-trap-sysenter-policy`.
+ */
 
 /*
  * Handler signature.  All Linux syscalls go through a single 6-arg

@@ -20,7 +20,11 @@ __set_thread_area:
 	jnz 2f
 	movl (%esp),%edx
 	movl %edx,(%ecx)
-	leal 3(,%edx,8),%edx
+	# Uros patch (#256 / Phase 6a): the entry_number returned by
+	# our SYS_set_thread_area is an LDT slot, not a Linux GDT slot.
+	# Selector = (idx << 3) | TI(LDT,0x4) | RPL(3) — so the
+	# constant added below becomes 7, not 3.
+	leal 7(,%edx,8),%edx
 3:	movw %dx,%gs
 1:
 	addl $16,%esp

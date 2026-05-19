@@ -69,6 +69,33 @@ add_custom_command(
 )
 set_source_files_properties(${EXEC_USER_C} ${EXEC_USER_H} PROPERTIES GENERATED TRUE)
 
+# Phase 6a (#256): i386_set_ldt MIG stubs.  The user side isn't
+# generated anywhere else in the tree (mach_i386.defs only emits the
+# in-kernel server impl by default), so we MIG it locally.
+set(MACH_I386_DEFS   ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/i386/mach_i386.defs)
+set(MACH_I386_USER_C ${CMAKE_CURRENT_BINARY_DIR}/mach_i386_user.c)
+set(MACH_I386_USER_H ${CMAKE_CURRENT_BINARY_DIR}/mach_i386.h)
+
+add_custom_command(
+  OUTPUT ${MACH_I386_USER_C} ${MACH_I386_USER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_BINARY_DIR}/generated/include
+    -I${CMAKE_SOURCE_DIR}/export/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/i386
+    -header ${MACH_I386_USER_H}
+    -sheader /dev/null
+    -user ${MACH_I386_USER_C}
+    -server /dev/null
+    ${MACH_I386_DEFS}
+  DEPENDS migcom ${MACH_I386_DEFS}
+  COMMENT "MIG: mach_i386.defs (libposix-uros)"
+  VERBATIM
+)
+set_source_files_properties(${MACH_I386_USER_C} ${MACH_I386_USER_H} PROPERTIES GENERATED TRUE)
+
 add_library(libposix-uros STATIC
   syscall.c
   handlers.c
@@ -78,11 +105,14 @@ add_library(libposix-uros STATIC
   posix_exec.c
   posix_wait.c
   posix_fork.c
+  posix_tls.c
+  posix_clone.c
   ${PROC_USER_C}
   ${EXEC_USER_C}
-  i386/traps.S
+  ${MACH_I386_USER_C}
   i386/sig_thread_entry.S
   i386/fork_capture.S
+  i386/clone_trampoline.S
 )
 
 add_dependencies(libposix-uros mig_mach_public_headers)
@@ -102,6 +132,9 @@ set_source_files_properties(${PROC_USER_C} PROPERTIES
   COMPILE_OPTIONS "-w"
 )
 set_source_files_properties(${EXEC_USER_C} PROPERTIES
+  COMPILE_OPTIONS "-w"
+)
+set_source_files_properties(${MACH_I386_USER_C} PROPERTIES
   COMPILE_OPTIONS "-w"
 )
 

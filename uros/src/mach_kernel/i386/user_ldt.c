@@ -79,6 +79,7 @@
 #include <i386/seg.h>
 #include <i386/thread.h>
 #include <i386/user_ldt.h>
+#include <i386/misc_protos.h>          /* desc_fake_to_real */
 
 char	acc_type[8][3] = {
     /*	code	stack	data */
@@ -197,11 +198,25 @@ i386_set_ldt(
 
 	    (void) vm_map_wire(ipc_kernel_map,
 			trunc_page(dst_addr),
-			round_page(dst_addr + 
+			round_page(dst_addr +
 				count * sizeof(struct real_descriptor)),
 			VM_PROT_READ|VM_PROT_WRITE, FALSE);
 	    desc_list = (descriptor_list_t) dst_addr;
 	}
+
+	/*
+	 * The MIG contract (mach_i386.defs / descriptor_list_t) says
+	 * userspace sends `struct fake_descriptor`, but the validation
+	 * below and the bcopy at the bottom both read/store the entries
+	 * as `struct real_descriptor` — the hardware format the CPU
+	 * loads from the LDT.  Convert in-place via desc_fake_to_real() so the
+	 * two layouts agree.  Without this call, the access byte ends
+	 * up read from byte 5 (real's slot) of fake-laid-out memory,
+	 * which happens to coincide with bits 8..15 of the limit field
+	 * and produces spurious "valid code segment" matches in the
+	 * switch — fix #256.
+	 */
+	desc_fake_to_real(desc_list, count);
 
 	for (i = 0, dp = (struct real_descriptor *) desc_list;
 	     i < count;

@@ -234,23 +234,23 @@ mp_desc_init(
 	    mpt->gdt[sel_idx(KERNEL_LDT)] = ldt_desc_pattern;
 	    mpt->gdt[sel_idx(KERNEL_LDT)].offset =
 		(unsigned int) mpt->ldt;
-	    fix_desc(&mpt->gdt[sel_idx(KERNEL_LDT)], 1);
+	    desc_fake_to_real(&mpt->gdt[sel_idx(KERNEL_LDT)], 1);
 
 	    mpt->gdt[sel_idx(KERNEL_TSS)] = tss_desc_pattern;
 	    mpt->gdt[sel_idx(KERNEL_TSS)].offset =
 		(unsigned int) &mpt->ktss;
-	    fix_desc(&mpt->gdt[sel_idx(KERNEL_TSS)], 1);
+	    desc_fake_to_real(&mpt->gdt[sel_idx(KERNEL_TSS)], 1);
 
 	    mpt->gdt[sel_idx(CPU_DATA)] = cpudata_desc_pattern;
 	    mpt->gdt[sel_idx(CPU_DATA)].offset =
 	    	(unsigned int) &cpu_data[mycpu];
-	    fix_desc(&mpt->gdt[sel_idx(CPU_DATA)], 1);
+	    desc_fake_to_real(&mpt->gdt[sel_idx(CPU_DATA)], 1);
 
 #if	MACH_KDB
 	    mpt->gdt[sel_idx(DEBUG_TSS)] = tss_desc_pattern;
 	    mpt->gdt[sel_idx(DEBUG_TSS)].offset =
 		    (unsigned int) &mpt->dbtss;
-	    fix_desc(&mpt->gdt[sel_idx(DEBUG_TSS)], 1);
+	    desc_fake_to_real(&mpt->gdt[sel_idx(DEBUG_TSS)], 1);
 
 	    mpt->dbtss.esp0 = (int)(db_task_stack_store +
 		    (INTSTACK_SIZE * (mycpu + 1)) - sizeof (natural_t));

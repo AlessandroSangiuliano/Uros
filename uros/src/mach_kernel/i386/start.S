@@ -510,19 +510,19 @@ LEXT(pstart)
 	lea	PA(EXT(idt)),%esi	/* fix IDT */
 	movl	$(IDTSZ),%ecx
 	movl	$(PA(fix_idt_ret)),%ebx
-	jmp	fix_desc_common		/* (cannot use stack) */
+	jmp	desc_fake_to_real_common		/* (cannot use stack) */
 fix_idt_ret:
 
 	lea	PA(EXT(gdt)),%esi	/* fix GDT */
 	movl	$(GDTSZ),%ecx
 	movl	$(PA(fix_gdt_ret)),%ebx
-	jmp	fix_desc_common		/* (cannot use stack) */
+	jmp	desc_fake_to_real_common		/* (cannot use stack) */
 fix_gdt_ret:
 
 	lea	PA(EXT(ldt)),%esi	/* fix LDT */
 	movl	$(LDTSZ),%ecx
 	movl	$(PA(fix_ldt_ret)),%ebx
-	jmp	fix_desc_common		/* (cannot use stack) */
+	jmp	desc_fake_to_real_common		/* (cannot use stack) */
 fix_ldt_ret:
 
 /*
@@ -765,7 +765,9 @@ LEXT(svstart)
  *	byte  5			access byte 1
  *	bytes 6..7		offset 31..16
  */
-	.globl	EXT(fix_desc)
+	.globl	EXT(desc_fake_to_real)
+	.globl	EXT(fix_desc)		/* legacy alias — to be removed */
+LEXT(desc_fake_to_real)
 LEXT(fix_desc)
 	pushl	%ebp			/* set up */
 	movl	%esp,%ebp		/* stack frame */
@@ -774,13 +776,13 @@ LEXT(fix_desc)
 	movl	B_ARG0,%esi		/* point to first descriptor */
 	movl	B_ARG1,%ecx		/* get number of descriptors */
 	lea	0f,%ebx			/* get return address */
-	jmp	fix_desc_common		/* call internal routine */
+	jmp	desc_fake_to_real_common
 0:	popl	%ebx			/* restore registers */
 	popl	%esi
 	leave				/* pop stack frame */
 	ret				/* return */
 
-fix_desc_common:
+desc_fake_to_real_common:
 0:
 	movw	6(%esi),%dx		/* get access byte */
 	movb	%dh,%al

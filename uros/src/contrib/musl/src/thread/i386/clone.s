@@ -1,49 +1,37 @@
+/*
+ * Uros patch (#256 / Phase 6a): replace the Linux int $0x80 clone
+ * with a C-ABI thunk that delegates to libposix-uros's __uros_clone.
+ * That function does the Mach thread_create + i386_set_ldt +
+ * thread_set_state + thread_resume dance directly — clone(2) on
+ * Linux is a single syscall; on Mach it is several MIG RPCs that
+ * are easier to express in C than in fragile inline asm.
+ *
+ * Calling convention (cdecl, matching musl's pthread_create caller):
+ *   int __clone(int (*fn)(void*), void *stack, int flags,
+ *               void *arg, pid_t *ptid, void *newtls, pid_t *ctid);
+ *
+ * Returns the new thread's tid in the parent, never returns 0 to the
+ * caller (the child path lives entirely on the new Mach thread, set
+ * up by __uros_clone — there's no "child returns from clone here").
+ */
+
 .text
 .global __clone
 .hidden __clone
-.type   __clone,@function
+.type   __clone, @function
 __clone:
-	push %ebp
-	mov %esp,%ebp
-	push %ebx
-	push %esi
-	push %edi
-
-	xor %eax,%eax
-	push $0x51
-	mov %gs,%ax
-	push $0xfffff
-	shr $3,%eax
-	push 28(%ebp)
-	push %eax
-	mov $120,%al
-
-	mov 12(%ebp),%ecx
-	mov 16(%ebp),%ebx
-	and $-16,%ecx
-	sub $16,%ecx
-	mov 20(%ebp),%edi
-	mov %edi,(%ecx)
-	mov 24(%ebp),%edx
-	mov %esp,%esi
-	mov 32(%ebp),%edi
-	mov 8(%ebp),%ebp
-	int $128
-	test %eax,%eax
-	jnz 1f
-
-	mov %ebp,%eax
-	xor %ebp,%ebp
-	call *%eax
-	mov %eax,%ebx
-	xor %eax,%eax
-	inc %eax
-	int $128
-	hlt
-
-1:	add $16,%esp
-	pop %edi
-	pop %esi
-	pop %ebx
-	pop %ebp
+	pushl	%ebp
+	movl	%esp, %ebp
+	pushl	32(%ebp)       /* ctid    */
+	pushl	28(%ebp)       /* newtls  */
+	pushl	24(%ebp)       /* ptid    */
+	pushl	20(%ebp)       /* arg     */
+	pushl	16(%ebp)       /* flags   */
+	pushl	12(%ebp)       /* stack   */
+	pushl	 8(%ebp)       /* fn      */
+	call	__uros_clone
+	addl	$28, %esp
+	popl	%ebp
 	ret
+
+.section .note.GNU-stack,"",@progbits
