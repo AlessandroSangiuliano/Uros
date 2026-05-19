@@ -80,6 +80,10 @@
 #include <i386/thread.h>
 #include <i386/user_ldt.h>
 #include <i386/misc_protos.h>          /* desc_fake_to_real */
+#include <i386/proc_reg.h>             /* set_ldt */
+#if	NCPUS > 1
+#include <i386/mp_desc.h>              /* mp_gdt */
+#endif
 
 char	acc_type[8][3] = {
     /*	code	stack	data */
@@ -251,8 +255,23 @@ i386_set_ldt(
 		    return KERN_INVALID_ARGUMENT;
 	    }
 	}
-	ldt_size_needed = sizeof(struct real_descriptor)
-			* (first_desc + count);
+	/*
+	 * Always reserve room for the LDTSZ system slots (USER_SCALL,
+	 * USER_RPC, USER_CS, USER_DS).  Even when the caller writes a
+	 * smaller LDT, the running CPU still expects those selectors to
+	 * resolve — copyout/copyin reload %es with USER_DS, the SYSENTER
+	 * return path uses USER_CS, and any LDT_relative segment register
+	 * that survives a yield will trip the next time it's loaded.
+	 * Pre-#258 nobody noticed because i386_set_ldt didn't reload
+	 * LDTR; the small LDT lived in pcb->ims.ldt but the CPU kept
+	 * running on KERNEL_LDT until the next context switch.
+	 */
+	{
+	    int end = first_desc + count;
+	    if (end < LDTSZ)
+	        end = LDTSZ;
+	    ldt_size_needed = sizeof(struct real_descriptor) * end;
+	}
 
 	pcb = thr_act->mact.pcb;
 	new_ldt = 0;
@@ -299,19 +318,38 @@ i386_set_ldt(
 	     * we GP fault on the first user-side instruction even though
 	     * %gs only references the (valid) entry at first_desc.
 	     */
-	    if (old_ldt) {
-		bcopy((char *)&old_ldt->ldt[0],
-		      (char *)&new_ldt->ldt[0],
-		      old_ldt->desc.limit_low + 1);
-	    }
-	    else {
+	    {
 		struct real_descriptor template = {0, 0, 0, ACC_P, 0, 0 ,0};
+		int n_total = (ldt_size_needed
+		               / sizeof(struct real_descriptor));
 
-		for (dp = &new_ldt->ldt[0], i = 0; i < first_desc; i++, dp++) {
-		    if (i < LDTSZ)
-		    	*dp = *(struct real_descriptor *) &ldt[i];
-		    else
-			*dp = template;
+		/* Slots 0..LDTSZ-1 are the kernel's standard user gates +
+		 * USER_CS/USER_DS — always overlay them so the LDT is a
+		 * legal one for the CPU to run on. */
+		for (i = 0, dp = &new_ldt->ldt[0]; i < LDTSZ; i++, dp++)
+		    *dp = *(struct real_descriptor *) &ldt[i];
+
+		/* Carry over any existing per-thread descriptors above
+		 * LDTSZ; the caller's incoming descriptors will overlay
+		 * their slots via the bcopy further below. */
+		if (old_ldt && old_ldt->desc.limit_low + 1 >
+		    LDTSZ * sizeof(struct real_descriptor)) {
+		    int carry = old_ldt->desc.limit_low + 1
+		                - LDTSZ * sizeof(struct real_descriptor);
+		    bcopy((char *)&old_ldt->ldt[LDTSZ],
+		          (char *)&new_ldt->ldt[LDTSZ],
+		          carry);
+		}
+
+		/* Fill any gap between the carried region (or LDTSZ) and
+		 * first_desc with empty-but-present placeholders, matching
+		 * the original behaviour for non-overlapping caller writes. */
+		for (i = LDTSZ, dp = &new_ldt->ldt[LDTSZ];
+		     i < first_desc && i < n_total; i++, dp++) {
+		    if (!old_ldt ||
+		        i * sizeof(struct real_descriptor)
+		        >= old_ldt->desc.limit_low + 1)
+		        *dp = template;
 		}
 	    }
 
@@ -330,6 +368,38 @@ i386_set_ldt(
 	      count * sizeof(struct real_descriptor));
 
 	simple_unlock(&pcb->lock);
+
+	/*
+	 * If the target is the calling thread, reload LDTR right here so
+	 * the caller can use the new descriptors without having to yield
+	 * just to get act_machine_switch_pcb to run.  Done with
+	 * preemption disabled to keep the GDT-then-lldt window from
+	 * racing with a scheduler tick that would itself reload LDTR.
+	 *
+	 * Phase 6a tried this and saw a `mov %cx,%es` panic in
+	 * copyout_retry — but that was upstream of the kalloc-garbage
+	 * default-entries bug fixed earlier in this function: lldt'ing an
+	 * LDT whose low slots held invalid present/type bits could
+	 * destabilise segment-register loads done from kernel-side
+	 * recovery paths.  With the bcopy guard dropped above, every
+	 * slot of the new LDT is a valid copy of the kernel default or
+	 * the caller's supplied descriptor, and the reload is safe.
+	 */
+	if (thr_act == current_act()) {
+	    int mycpu;
+	    mp_disable_preemption();
+	    mycpu = cpu_number();
+#if	NCPUS > 1
+	    *(struct real_descriptor *)&mp_gdt[mycpu][sel_idx(USER_LDT)]
+	        = pcb->ims.ldt->desc;
+#else
+	    (void)mycpu;
+	    *(struct real_descriptor *)&gdt[sel_idx(USER_LDT)]
+	        = pcb->ims.ldt->desc;
+#endif
+	    set_ldt(USER_LDT);
+	    mp_enable_preemption();
+	}
 
 	if (new_ldt)
 	    kfree((vm_offset_t)new_ldt,

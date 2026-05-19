@@ -91,17 +91,6 @@ extern struct __uros_main_tcb __uros_main_thread;
  */
 extern void *__uros_main_tcb_tp_addr(void);
 
-/*
- * Forward decl — we yield right after i386_set_ldt so the next
- * scheduler pass reloads LDTR from our pcb->ims.ldt (pcb.c's
- * switch_act_context owns that update path).  Without the yield the
- * CPU's LDTR still points at KERNEL_LDT and loading our LDT-relative
- * selector into %gs would GP fault.  Phase 6b can revisit this when
- * we land a kernel-side "activate LDT now" primitive.
- */
-extern int syscall_thread_switch(unsigned long, int, int);
-#define UROS_SWITCH_OPTION_NONE 0
-
 void
 __uros_main_tls_init(void)
 {
@@ -118,17 +107,15 @@ __uros_main_tls_init(void)
      * &__uros_main_thread.  The tp_word field is leftover from the
      * earlier TLS_ABOVE_TP-flavoured attempt — kept for ABI stability,
      * the LDT base no longer points at it.
+     *
+     * Kernel-side, i386_set_ldt now reloads LDTR before returning when
+     * the target is the calling thread (#258), so we can load %gs
+     * immediately after the trap — no yield needed.
      */
     void *thr = &__uros_main_thread;
     if (install_tls(mach_thread_self(), (unsigned int)thr) != KERN_SUCCESS)
         return;
 
-    /* Force the CPU's LDTR to pick up the new LDT we just installed
-     * in pcb->ims.ldt — yielding triggers a context switch and the
-     * scheduler restores LDTR from our pcb on the way back. */
-    (void)syscall_thread_switch(0, UROS_SWITCH_OPTION_NONE, 0);
-
-    /* LDTR now references our LDT; loading the selector is safe. */
     __asm__ __volatile__("movw %w0, %%gs" :: "r"(UROS_TLS_LDT_SELECTOR));
 }
 
