@@ -169,18 +169,6 @@ _Noreturn void __pthread_exit(void *result)
 	a_store(&self->detach_state, DT_EXITED);
 	__wake(&self->detach_state, 1, 1);
 
-	/*
-	 * Uros patch (#257 / Phase 6b): the kernel doesn't honour
-	 * CLONE_CHILD_CLEARTID (musl passed &__thread_list_lock as ctid
-	 * via pthread_create), so the lock would otherwise stay set to
-	 * this thread's tid forever and any subsequent __tl_lock /
-	 * __tl_sync would deadlock.  Release it explicitly here — same
-	 * memory that the kernel would clear atomically with SYS_exit on
-	 * Linux.  Racy on heavy contention, fine for our pthread workloads.
-	 */
-	a_store(&__thread_list_lock, 0);
-	__wake(&__thread_list_lock, 1, 0);
-
 	for (;;) __syscall(SYS_exit, 0);
 }
 

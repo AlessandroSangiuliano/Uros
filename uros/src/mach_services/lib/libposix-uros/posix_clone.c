@@ -54,6 +54,12 @@ extern int __uros_install_thread_tls_at(mach_port_t target_thread,
 extern int    syscall_thread_switch(unsigned long, int, int);
 extern void   _exit(int);
 
+/* Kernel half of CLONE_CHILD_CLEARTID — see issue #257.  Registers a
+ * user address that the kernel zeroes when the calling thread
+ * terminates, so a joiner polling on it observes the exit even though
+ * our futex stub doesn't queue waiters. */
+extern int    urmach_thread_set_cleartid(unsigned long addr);
+
 #ifdef UROS_PTHREAD_SMOKE
 #define BOOT_TRACE(s) mach_print("posix-uros/clone: " s "\n")
 #else
@@ -68,7 +74,8 @@ extern void   _exit(int);
  * main thread).
  */
 void
-__uros_thread_bootstrap(int (*fn)(void *), void *arg, unsigned int tls_base)
+__uros_thread_bootstrap(int (*fn)(void *), void *arg,
+                        unsigned int tls_base, unsigned int ctid_addr)
 {
     BOOT_TRACE("bootstrap enter");
 
@@ -81,6 +88,13 @@ __uros_thread_bootstrap(int (*fn)(void *), void *arg, unsigned int tls_base)
             __asm__ __volatile__("movw %w0, %%gs" :: "r"(0x27));
         }
     }
+
+    /* Register the ctid so the kernel zeroes it atomically on
+     * thread_terminate — closes the join-side race that the Phase 6b
+     * userspace patch in __pthread_exit had to paper over. */
+    if (ctid_addr)
+        (void)urmach_thread_set_cleartid((unsigned long)ctid_addr);
+
     BOOT_TRACE("bootstrap calling fn");
 
     int rc = fn(arg);
@@ -111,10 +125,11 @@ __uros_clone(int (*fn)(void *),
 
     /*
      * Lay out the new thread's initial stack as a cdecl call frame for
-     * __uros_thread_bootstrap(fn, arg, tls_base):
+     * __uros_thread_bootstrap(fn, arg, tls_base, ctid_addr):
      *
      *   [high]
-     *     tls_base    ← +12 from uesp
+     *     ctid_addr   ← +16 from uesp
+     *     tls_base    ← +12
      *     arg         ← +8
      *     fn          ← +4
      *     <ret addr>  ← +0 (overwritten when bootstrap pushes a frame
@@ -133,11 +148,12 @@ __uros_clone(int (*fn)(void *),
                             : 0;
 
     uintptr_t sp = ((uintptr_t)stack) & ~0xFu;
-    sp -= 16;
+    sp -= 32;                                       /* 16-byte align */
     ((uintptr_t *)sp)[0] = 0;                       /* fake return addr */
     ((uintptr_t *)sp)[1] = (uintptr_t)fn;
     ((uintptr_t *)sp)[2] = (uintptr_t)arg;
     ((uintptr_t *)sp)[3] = tls_base;
+    ((uintptr_t *)sp)[4] = (uintptr_t)ctid;
 
     /* 1. Create the kernel thread, suspended. */
     mach_port_t new_thread = MACH_PORT_NULL;
@@ -192,7 +208,9 @@ __uros_clone(int (*fn)(void *),
      * non-negative int; port names fit comfortably. */
     int tid = (int)new_thread;
     if (ptid) *ptid = tid;
-    (void)ctid;     /* Phase 6b will honour CLONE_CHILD_CLEARTID */
+    /* ctid is passed through to the bootstrap on the new thread's
+     * stack — it registers it with urmach_thread_set_cleartid so the
+     * kernel clears *ctid on thread_terminate (#257). */
 
     return tid;
 }

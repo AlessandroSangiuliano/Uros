@@ -338,7 +338,7 @@ mach_trap_t	mach_trap_table[] = {
 #else  /* VCF */
 	MACH_TRAP(kern_invalid, 0),		/* 50 */
 #endif /* VCF */
-	MACH_TRAP(not_implemented, 0),		/* 51 */
+	MACH_TRAP(urmach_thread_set_cleartid, 1),	/* 51 */
 	MACH_TRAP(not_implemented, 0),		/* 52 */
 	MACH_TRAP(not_implemented, 0),		/* 53 */
 	MACH_TRAP(not_implemented, 0),		/* 54 */

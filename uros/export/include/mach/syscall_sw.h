@@ -138,6 +138,14 @@ kernel_trap(urmach_cap_use,-38,4)
 kernel_trap(urmach_cap_revoke,-39,2)
 kernel_trap(urmach_cap_register,-40,1)
 
+/*
+ *	urmach_thread_set_cleartid (#257) — register a user-space address
+ *	the kernel zeroes when the calling thread terminates.  Kernel half
+ *	of Linux CLONE_CHILD_CLEARTID; used by libposix-uros to wake a
+ *	pthread joiner polling __thread_list_lock.
+ */
+kernel_trap(urmach_thread_set_cleartid,-51,1)
+
 kernel_trap(mach_reply_port,-26,0)
 kernel_trap(mach_thread_self,-27,0)
 kernel_trap(mach_task_self,-28,0)
