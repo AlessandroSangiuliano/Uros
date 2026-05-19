@@ -31,8 +31,19 @@ struct i386_thread_state {
 #define RTHREAD_STACK_OFFSET 16
 #endif
 
+/*
+ * Thread-state flavor values — must match
+ * src/mach_kernel/mach/i386/thread_status.h.  Kernel-side accepts a
+ * superset; userspace mostly uses THREAD_STATE (kernel forces all
+ * segments to USER_CS/USER_DS) but pthread spawn (#258) needs
+ * REGS_SEGS_STATE so it can preload %gs with the new thread's LDT
+ * selector.
+ */
 #ifndef i386_THREAD_STATE
-#define i386_THREAD_STATE 1 /* Arbitrary nonzero value for userspace stub */
+#define i386_THREAD_STATE       1
+#endif
+#ifndef i386_REGS_SEGS_STATE
+#define i386_REGS_SEGS_STATE    5
 #endif
 
 #endif /* _MACH_I386_THREAD_STATUS_H_ */
