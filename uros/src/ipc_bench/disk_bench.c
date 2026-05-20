@@ -2220,7 +2220,9 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 		/* Dirty list test — multiple dirty files + sync */
 		test_dirty_list();
 
-		/* Page-cache cold vs warm on a 12 MB file (#267) */
+		/* Page-cache cold vs warm (#267): 4 MB matches the historical
+		 * baseline (no eviction), 12 MB exercises the 16 MB cache. */
+		bench_cache_cold_warm("bench_4m.dat");
 		bench_cache_cold_warm("bench_large.dat");
 	}
 

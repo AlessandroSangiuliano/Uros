@@ -311,13 +311,17 @@ echo "[4/6] Copia file nel filesystem ext2..."
 HELLO_TXT=$(mktemp)
 BENCH_DAT=$(mktemp)
 BENCH_LARGE=$(mktemp)
+BENCH_4M=$(mktemp)
 printf 'Hello from /mach_servers/ root\n' > "$HELLO_TXT"
 dd if=/dev/urandom of="$BENCH_DAT" bs=1K count=1 status=none
 # bench_large.dat (#267): 12 MB — bigger than the old 4 MB page cache but
 # within the 16 MB DMA cache, so disk_bench can show a cold-vs-warm
 # (miss-vs-hit) read speedup that the old cache could not cache whole.
 dd if=/dev/urandom of="$BENCH_LARGE" bs=1M count=12 status=none
-trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF" "$HELLO_TXT" "$BENCH_DAT" "$BENCH_LARGE"' EXIT
+# bench_4m.dat (#267): 4 MB — apples-to-apples with the historical
+# file-pool cached-read baseline (~930 MB/s at 64 KB, warm).
+dd if=/dev/urandom of="$BENCH_4M" bs=1M count=4 status=none
+trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF" "$HELLO_TXT" "$BENCH_DAT" "$BENCH_LARGE" "$BENCH_4M"' EXIT
 
 # hello_exec is optional (#228 v0.1.0): copy to / so exec_server can
 # load "/hello_exec" via libvfs.
@@ -330,6 +334,7 @@ debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 write $HELLO_TXT hello.txt
 write $BENCH_DAT bench.dat
 write $BENCH_LARGE bench_large.dat
+write $BENCH_4M bench_4m.dat
 ${HELLO_EXEC_WRITE_LINE}
 mkdir mach_servers
 cd mach_servers
