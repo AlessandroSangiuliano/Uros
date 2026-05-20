@@ -87,4 +87,17 @@ int             vfs_fstat(vfs_fd_t fd, vfs_stat_t *out);
 
 int             vfs_sync(vfs_fd_t fd);
 
+/*
+ * Namespace operations (v0.3.0, #231).  Paths are absolute.
+ *   vfs_unlink — remove a name.
+ *   vfs_rename — move a name; same-mount uses the server's atomic
+ *                rename, cross-mount is synthesized as copy + unlink
+ *                (POSIX EXDEV semantics).
+ *   vfs_copy   — byte copy src -> dst, creating/truncating dst; works
+ *                within or across mounts.  Returns 0 / -1.
+ */
+int             vfs_unlink(const char *path);
+int             vfs_rename(const char *oldpath, const char *newpath);
+int             vfs_copy(const char *src, const char *dst);
+
 #endif /* _LIBVFS_H_ */

@@ -561,3 +561,114 @@ vfs_sync(vfs_fd_t fd)
     }
     return (kr == KERN_SUCCESS) ? 0 : -1;
 }
+
+/* ------------------------------------------------------------------ */
+/*  Namespace operations (v0.3.0, #231)                                */
+/* ------------------------------------------------------------------ */
+
+#define VFS_COPY_CHUNK  8192
+
+int
+vfs_unlink(const char *path)
+{
+    mach_port_t fs_port;
+    kern_return_t kr = KERN_FAILURE;
+    int attempt;
+
+    if (!path || path[0] != '/')
+        return -1;
+
+    vfs_init();
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        pthread_mutex_lock(&vfs_lock);
+        fs_port = vfs_resolve_mount(path);
+        pthread_mutex_unlock(&vfs_lock);
+        if (fs_port == MACH_PORT_NULL)
+            return -1;
+
+        kr = fs_unlink(fs_port, (char *)path);
+        if (!vfs_send_died(kr))
+            break;
+        pthread_mutex_lock(&vfs_lock);
+        vfs_mark_port_dead_locked(fs_port);
+        pthread_mutex_unlock(&vfs_lock);
+    }
+    return (kr == KERN_SUCCESS) ? 0 : -1;
+}
+
+int
+vfs_copy(const char *src, const char *dst)
+{
+    vfs_fd_t s, d;
+    char buf[VFS_COPY_CHUNK];
+    ssize_t n;
+    int rc = 0;
+
+    if (!src || !dst || src[0] != '/' || dst[0] != '/')
+        return -1;
+
+    s = vfs_open(src, VFS_O_RDONLY, 0);
+    if (s == VFS_FD_INVALID)
+        return -1;
+    d = vfs_open(dst, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC, 0644);
+    if (d == VFS_FD_INVALID) {
+        vfs_close(s);
+        return -1;
+    }
+
+    for (;;) {
+        n = vfs_read(s, buf, sizeof buf);
+        if (n < 0) { rc = -1; break; }
+        if (n == 0) break;                  /* EOF */
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = vfs_write(d, buf + off, (size_t)(n - off));
+            if (w <= 0) { rc = -1; break; }
+            off += w;
+        }
+        if (rc != 0) break;
+    }
+
+    vfs_close(s);
+    vfs_close(d);
+    return rc;
+}
+
+int
+vfs_rename(const char *oldpath, const char *newpath)
+{
+    mach_port_t po, pn;
+    kern_return_t kr = KERN_FAILURE;
+    int attempt;
+
+    if (!oldpath || !newpath || oldpath[0] != '/' || newpath[0] != '/')
+        return -1;
+
+    vfs_init();
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        pthread_mutex_lock(&vfs_lock);
+        po = vfs_resolve_mount(oldpath);
+        pn = vfs_resolve_mount(newpath);
+        pthread_mutex_unlock(&vfs_lock);
+        if (po == MACH_PORT_NULL || pn == MACH_PORT_NULL)
+            return -1;
+
+        /* Different mounts can't share an atomic rename — POSIX returns
+         * EXDEV; we synthesize it as copy + unlink of the source. */
+        if (po != pn) {
+            if (vfs_copy(oldpath, newpath) != 0)
+                return -1;
+            return vfs_unlink(oldpath);
+        }
+
+        kr = fs_rename(po, (char *)oldpath, (char *)newpath);
+        if (!vfs_send_died(kr))
+            break;
+        pthread_mutex_lock(&vfs_lock);
+        vfs_mark_port_dead_locked(po);
+        pthread_mutex_unlock(&vfs_lock);
+    }
+    return (kr == KERN_SUCCESS) ? 0 : -1;
+}
