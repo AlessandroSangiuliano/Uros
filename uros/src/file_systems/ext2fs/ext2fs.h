@@ -163,6 +163,8 @@ extern int ext2fs_unlink(struct device *dev, const char *path);
 extern int ext2fs_rename(struct device *dev, const char *oldpath,
 			 const char *newpath);
 extern int ext2fs_truncate_file(fs_private_t private, vm_size_t length);
+extern int ext2fs_readdir(fs_private_t private, struct fs_dirent *out,
+			  unsigned int max, unsigned int *out_count);
 extern size_t ext2fs_file_size(fs_private_t);
 extern int ext2fs_is_dirty(fs_private_t);
 extern boolean_t ext2fs_file_is_directory(fs_private_t);

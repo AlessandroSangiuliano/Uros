@@ -737,11 +737,73 @@ vfs_readdir(
 	mach_msg_type_number_t	*entries_count_out,
 	vfs_u64_t		*next_cookie_out)
 {
-	(void)fs_port; (void)dir_handle; (void)cookie;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	fs_private_t priv = vfs_priv_for_handle(mnt, dir_handle);
+	struct fs_dirent *tmp;
+	vfs_dirent_t *outv;
+	unsigned int want, got = 0, emit = 0, i;
+	vm_offset_t buf;
+	kern_return_t kr;
+	int rc;
+
 	*entries_out       = (pointer_t)0;
 	*entries_count_out = 0;
 	*next_cookie_out   = 0;
-	return KERN_FAILURE;	/* ext2fs lib has no dirent enumeration */
+
+	if (!priv)
+		return KERN_INVALID_ARGUMENT;
+
+	/* ext2fs_readdir() always enumerates from the start, so read
+	 * cookie + VFS_DIRENT_MAX entries and slice off the ones already
+	 * delivered.  Adequate for the directory sizes this fs sees. */
+	want = (unsigned int)cookie + VFS_DIRENT_MAX;
+	tmp = (struct fs_dirent *)malloc(want * sizeof(*tmp));
+	if (!tmp)
+		return KERN_RESOURCE_SHORTAGE;
+
+	rc = ext2fs_readdir(priv, tmp, want, &got);
+	if (rc != 0) {
+		free(tmp);
+		return KERN_FAILURE;
+	}
+
+	kr = vm_allocate(mach_task_self(), &buf,
+			 VFS_DIRENT_MAX * sizeof(vfs_dirent_t), TRUE);
+	if (kr != KERN_SUCCESS) {
+		free(tmp);
+		return kr;
+	}
+	outv = (vfs_dirent_t *)buf;
+
+	for (i = (unsigned int)cookie; i < got && emit < VFS_DIRENT_MAX; i++) {
+		unsigned int nlen = (unsigned int)strlen(tmp[i].name);
+		uint8_t vt;
+		switch (tmp[i].type) {		/* ext2 FT -> VFS_FT */
+		case 1:  vt = VFS_FT_REG;     break;
+		case 2:  vt = VFS_FT_DIR;     break;
+		case 3:  vt = VFS_FT_CHAR;    break;
+		case 4:  vt = VFS_FT_BLOCK;   break;
+		case 5:  vt = VFS_FT_FIFO;    break;
+		case 6:  vt = VFS_FT_SOCK;    break;
+		case 7:  vt = VFS_FT_SYMLINK; break;
+		default: vt = VFS_FT_UNKNOWN; break;
+		}
+		if (nlen > VFS_NAME_MAX)
+			nlen = VFS_NAME_MAX;
+		outv[emit].d_ino     = (uint64_t)tmp[i].ino;
+		outv[emit].d_cookie  = (uint64_t)(i + 1);
+		outv[emit].d_type    = vt;
+		outv[emit].d_namelen = (uint8_t)nlen;
+		memcpy(outv[emit].d_name, tmp[i].name, nlen);
+		outv[emit].d_name[nlen] = '\0';
+		emit++;
+	}
+	free(tmp);
+
+	*entries_out       = (pointer_t)buf;
+	*entries_count_out = (mach_msg_type_number_t)(emit * sizeof(vfs_dirent_t));
+	*next_cookie_out   = (i < got) ? (vfs_u64_t)i : 0;
+	return KERN_SUCCESS;
 }
 
 kern_return_t

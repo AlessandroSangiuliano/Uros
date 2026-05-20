@@ -347,8 +347,8 @@ struct ext2_mount {
 	struct dcache_entry	 m_dcache[DCACHE_SIZE];
 };
 
-static int ext2fs_readdir(fs_private_t, struct fs_dirent *,
-			  unsigned int, unsigned int *);
+int ext2fs_readdir(fs_private_t, struct fs_dirent *,
+		   unsigned int, unsigned int *);
 
 struct fs_ops ext2fs_ops = {
 	ext2fs_open_file,
@@ -1898,7 +1898,7 @@ ext2fs_file_is_directory(fs_private_t private)
  * caller can detect truncation by comparing *out_count to what it
  * expected or by re-reading with a larger buffer.
  */
-static int
+int
 ext2fs_readdir(fs_private_t private,
 	       struct fs_dirent *out,
 	       unsigned int max,
