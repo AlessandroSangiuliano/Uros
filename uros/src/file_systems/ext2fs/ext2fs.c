@@ -2312,10 +2312,28 @@ static int
 dir_write_block(struct ext2fs_file *dir_fp, daddr_t lblk, vm_offset_t buf)
 {
 	daddr_t dblk;
+	int bs = EXT2_BLOCK_SIZE(dir_fp->f_fs);
+	char *tmp;
 	int rc = block_map(dir_fp, lblk, &dblk);
 	if (rc != 0)
 		return rc;
-	return write_disk_block(dir_fp, dblk, buf, EXT2_BLOCK_SIZE(dir_fp->f_fs));
+	/*
+	 * 'buf' is the page-cache page we borrowed and edited in place.  With
+	 * the DMA-backed page cache that buffer lives in device DMA memory,
+	 * and device_write() cannot copyin from that mapping — it silently
+	 * persists zeroes (the in-process VA reads fine, but the kernel-side
+	 * copyin of the non-phys write path does not).  Copy into a normal
+	 * heap buffer for the synchronous write.  Directory writes are a cold
+	 * path, so the extra 4 KiB copy is negligible; file data keeps using
+	 * the working phys writeback path untouched.
+	 */
+	tmp = malloc(bs);
+	if (!tmp)
+		return KERN_RESOURCE_SHORTAGE;
+	memcpy(tmp, (void *)buf, bs);
+	rc = write_disk_block(dir_fp, dblk, (vm_offset_t)tmp, bs);
+	free(tmp);
+	return rc;
 }
 
 /*
