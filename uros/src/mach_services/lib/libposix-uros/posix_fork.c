@@ -63,6 +63,7 @@ extern mach_port_t  __uros_exec_port;     /* defined as static — fwd here via 
 extern unsigned int __uros_my_pid;
 extern __uros_port_t __cached_task_self;  /* in handlers.c */
 extern void          __uros_post_fork_init(void);
+extern void          mig_reset_after_fork(void);  /* libmach_core */
 
 /* posix_exec.c keeps __uros_exec_port file-static for lookup caching.
  * Expose a thin getter+setter so fork can inherit + the child can
@@ -70,6 +71,22 @@ extern void          __uros_post_fork_init(void);
  * less weak symbol so we don't broaden the public ABI. */
 mach_port_t __uros_get_exec_port(void);
 void        __uros_set_exec_port(mach_port_t p);
+
+/* posix_tls.c: install the per-thread LDT TLS descriptor for the
+ * calling thread with base = tp, and load %gs.  Returns 0 on success. */
+extern int  __uros_set_thread_area_tp(void *tp);
+
+/*
+ * The calling thread's TLS pointer (%gs:0), captured by the parent just
+ * before task_create and therefore CoW-visible to the child.  The
+ * child's main thread comes up with %gs forced to USER_DS by
+ * thread_create_running (i386_THREAD_STATE), so it must reinstall its
+ * LDT TLS descriptor before any libc (stdio locks, errno, the SSP
+ * canary) runs — see #259.  CoW means the child's TCB lives at the same
+ * virtual address, so the parent's TP value is exactly what the child
+ * reinstalls.
+ */
+static unsigned int __uros_fork_saved_tp;
 
 /* ------------------------------------------------------------------ */
 /* Port inheritance                                                    */
@@ -133,11 +150,29 @@ __uros_fork(void)
          *    __uros_post_fork_init re-allocate + re-register.
          */
         __cached_task_self = 0;
+        /* Reset the MIG caches (reply port + task-self) BEFORE anything
+         * that issues an RPC: the parent's mig_reply_port is meaningless
+         * in our fresh IPC space.  __uros_set_thread_area_tp installs the
+         * LDT via the i386_set_ldt MIG RPC, so the reset must precede it.
+         * __uros_post_fork_init re-runs this (idempotent). */
+        mig_reset_after_fork();
+        /* Reinstall our TLS: thread_create_running forced %gs to USER_DS,
+         * so the canary, errno and stdio locks are unusable until the LDT
+         * descriptor is back.  The TP was captured by the parent below
+         * and CoW'd into our address space. */
+        (void)__uros_set_thread_area_tp((void *)__uros_fork_saved_tp);
         __uros_post_fork_init();
         return 0;
     }
 
     /* ===== Parent path =========================================== */
+
+    /*
+     * 0. Capture the calling thread's TLS pointer (%gs:0) before
+     *    task_create snapshots the VM, so the child can reinstall its
+     *    LDT descriptor (the child resumes with %gs = USER_DS).
+     */
+    __asm__ __volatile__("movl %%gs:0, %0" : "=r"(__uros_fork_saved_tp));
 
     /*
      * 1. task_create with inherit_memory=TRUE.  The kernel makes a

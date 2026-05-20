@@ -20,8 +20,8 @@
  *     4. Insert a MAKE_SEND right and hand it to proc_server via
  *        proc_set_signal_port — once registered, every proc_kill
  *        targeting us posts a proc_signal_msg_t to this port.
- *     5. vm_allocate a 16 KB stack and thread_create_running into
- *        __uros_sig_thread_entry (asm), which calls __uros_sig_loop.
+ *     5. pthread_create a detached handler thread running
+ *        __uros_sig_loop (so it gets a real musl TCB / valid %gs).
  *
  * Flow on every catchable signal:
  *
@@ -43,6 +43,7 @@
  */
 
 #include <errno.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -68,8 +69,6 @@
 /* State                                                              */
 /* ------------------------------------------------------------------ */
 
-#define UROS_SIG_STACK_SIZE  (16 * 1024)
-
 /*
  * Per-process sigaction table.  Indices are PROC_SIG* numbers (Linux
  * i386 layout — matches what musl-side sigaction passes in).
@@ -82,9 +81,6 @@ static int               __sig_initialised;
 mach_port_t              __uros_proc_port    = MACH_PORT_NULL;
 proc_pid_t               __uros_my_pid       = 0;
 static mach_port_t       __sig_port          = MACH_PORT_NULL;
-
-/* Forward decl of the asm entry that thread_create_running jumps to. */
-extern void __uros_sig_thread_entry(void);
 
 /* ------------------------------------------------------------------ */
 /* POSIX default actions                                              */
@@ -131,7 +127,7 @@ lookup_proc_server(mach_port_t *out)
 }
 
 /* ------------------------------------------------------------------ */
-/* Handler thread bottom — invoked by sig_thread_entry.S              */
+/* Handler thread bottom — invoked from sig_thread_main (pthread)     */
 /* ------------------------------------------------------------------ */
 
 void
@@ -180,64 +176,44 @@ __uros_sig_loop(void)
     }
 }
 
-/*
- * Called by the asm stub if __uros_sig_loop ever returns (it
- * shouldn't).  Politely terminate the handler thread without taking
- * the whole task down.
- */
-void
-__uros_sig_thread_die(void)
-{
-    (void)thread_terminate(mach_thread_self());
-    for (;;) { /* unreachable */ }
-}
-
 /* ------------------------------------------------------------------ */
 /* Thread bootstrap                                                   */
 /* ------------------------------------------------------------------ */
 
+/*
+ * pthread entry trampoline (#259): __uros_sig_loop() is `void(void)`
+ * and never returns.  Running the handler thread as a real pthread —
+ * instead of a raw thread_create_running with a hand-set i386 state —
+ * gives it a proper musl TCB: %gs resolves to its own thread pointer,
+ * so the stack canary (%gs:0x14) and any libc the dispatched user
+ * handler touches (errno, locale, stdio locks) work.  The old raw
+ * thread ran with %gs=USER_DS, which left those reads pointing at low
+ * linear addresses — fine only while page 0 happened to be mapped.
+ */
+static void *
+sig_thread_main(void *arg)
+{
+    (void)arg;
+    __uros_sig_loop();
+    return 0;       /* unreachable */
+}
+
 static kern_return_t
 spawn_handler_thread(void)
 {
-    vm_address_t  stack = 0;
-    kern_return_t kr;
+    pthread_attr_t attr;
+    pthread_t      th;
 
-    kr = vm_allocate(mach_task_self(), &stack, UROS_SIG_STACK_SIZE, TRUE);
-    if (kr != KERN_SUCCESS)
-        return kr;
+    if (pthread_attr_init(&attr) != 0)
+        return KERN_RESOURCE_SHORTAGE;
+    /* Detached: the signal thread runs for the life of the task and is
+     * never joined. */
+    (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
-    /*
-     * thread_create_running drops us at our entry with %esp pointing at
-     * the supplied stack top.  We bias by 16 bytes to leave room for an
-     * artificial frame and a guard slot, then push a "return address"
-     * which is in fact the entry of our die-stub — if __uros_sig_loop
-     * ever returns through the asm wrapper, ret lands there and the
-     * thread terminates cleanly.
-     */
-    uint32_t *sp = (uint32_t *)(stack + UROS_SIG_STACK_SIZE);
-    sp -= 4;                                            /* alignment slack */
-    *--sp = (uint32_t)__uros_sig_thread_die;            /* fake return */
+    int rc = pthread_create(&th, &attr, sig_thread_main, NULL);
+    (void)pthread_attr_destroy(&attr);
 
-    struct i386_thread_state state;
-    memset(&state, 0, sizeof state);
-    state.eip = (int)__uros_sig_thread_entry;
-    state.uesp = (int)sp;
-    state.ebp = 0;
-    state.cs = 0x17;   /* USER_CS — matches kernel's i386 user GDT */
-    state.ds = 0x1f;
-    state.es = 0x1f;
-    state.ss = 0x1f;
-    state.fs = 0x1f;
-    state.gs = 0x1f;
-    state.efl = 0x202; /* IF=1, reserved bit 1 */
-
-    thread_act_t handler;
-    kr = thread_create_running(mach_task_self(),
-                               i386_THREAD_STATE,
-                               (thread_state_t)&state,
-                               i386_THREAD_STATE_COUNT,
-                               &handler);
-    return kr;
+    return rc == 0 ? KERN_SUCCESS : KERN_RESOURCE_SHORTAGE;
 }
 
 /* ------------------------------------------------------------------ */

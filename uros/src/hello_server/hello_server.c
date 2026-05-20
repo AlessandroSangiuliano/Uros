@@ -51,8 +51,7 @@
 #include <signal.h>                     /* sigaction/raise — Phase 4 (#252) */
 #include <pthread.h>                    /* pthread — Phase 6a (#256) */
 #include <sys/wait.h>                   /* waitpid — Phase 5 (#254) */
-#include <uros/libposix.h>              /* __uros_libc_init() */
-extern void __uros_libc_init(void);     /* defined in patched musl */
+#include <uros/libposix.h>
 
 /*
  * Phase 4 (#252) smoke: SIGUSR1 handler.  File scope so taking its
@@ -215,10 +214,9 @@ main(int argc, char **argv)
     int			i;
 
     /*
-     * Step 0 (Phase 3 / #251): wire up musl's synthetic main-thread struct
-     * before any libc function runs.  Without this, the very first printf
-     * dereferences a null TLS pointer and SEGVs.  Removed in Phase 6 once
-     * real pthread + set_thread_area lands.
+     * musl TLS + stack canary are now brought up by __uros_libc_init()
+     * from crt0 (libmach_core) BEFORE main() runs (#259) — main()'s own
+     * %gs:0x14 canary prologue depends on it, so it can't live here.
      *
      * setvbuf disables stdout buffering: musl's isatty() returns -ENOTTY
      * from our ioctl stub, which makes musl fall back to fully-buffered
@@ -228,7 +226,6 @@ main(int argc, char **argv)
      * reports TTY status; until then, unbuffered output is the honest
      * choice for a debug server.
      */
-    __uros_libc_init();
     setvbuf(stdout, NULL, _IONBF, 0);
 
     /*

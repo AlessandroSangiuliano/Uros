@@ -24,6 +24,8 @@ each entry by hand.
 | 2026-05-19 | `src/internal/uros_main_thread.c`    | #256  | Drop `__uros_tp`.  Keep `__uros_main_thread` (initialised + installed via set_thread_area). |
 | 2026-05-19 | `src/thread/i386/__set_thread_area.s`| #256  | Change the selector-from-entry constant from `3` (Linux GDT, TI=0, RPL=3) to `7` (Uros LDT, TI=1, RPL=3).  Our SYS_set_thread_area returns an LDT slot index, not a GDT slot. |
 | 2026-05-19 | `src/thread/i386/clone.s`            | #256  | Replace the int $0x80 path entirely.  __clone now thunks to libposix-uros's `__uros_clone` (C ABI), which does the Mach thread_create + thread_set_state + thread_resume dance directly — Linux clone(2) is a single syscall, on Mach it's several MIG RPCs. |
+| 2026-05-20 | `src/internal/uros_main_thread.c`    | #259  | Rewrite `__uros_libc_init()` to drive musl's real `__init_tls` + `__init_ssp` from a synthesized minimal auxv (bootstrap-loaded servers have no Linux-style stack/auxv).  Drops the hand-rolled `__uros_main_thread` TCB, the manual `tls_size`/`tls_align`/circular-list seeding, and `__uros_main_tcb_tp_addr`.  Main TCB is now musl's `builtin_tls`; LDT installed via `__set_thread_area` → libposix-uros `__uros_set_thread_area_tp`.  Enables the stack canary.  No PT_TLS in these binaries, so `__init_tls` skips the phdr walk. |
+| 2026-05-20 | `src/thread/i386/__set_thread_area.s`| #259  | Replace the whole int $0x80 body with a tail-call to libposix-uros `__uros_set_thread_area_tp` (same idiom as clone.s).  int $0x80 on Uros is a Mach trap, not the Linux dispatcher, so the old trap never reached our SYS_set_thread_area handler — this stub was effectively dead until `__init_tp` started calling it. |
 
 ## Planned future patches (Phase 3+)
 

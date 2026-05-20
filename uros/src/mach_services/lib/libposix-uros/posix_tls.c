@@ -8,12 +8,10 @@
  * gets its own descriptor at the same selector value (0x27), no
  * allocation bookkeeping needed.
  *
- * The main thread's TCB is the static `__uros_main_thread` declared
- * in musl's src/internal/uros_main_thread.c (a `struct pthread`
- * followed by a `tp_word`).  __uros_main_tls_init writes the
- * self-reference into tp_word and installs the LDT descriptor so
- * `%gs:0` resolves to tp_word's content, which is tp_word's address —
- * making __pthread_self() (TP - sizeof(pthread)) land on &thr.
+ * The main thread's TCB is musl's own builtin_tls (set up by
+ * __init_tls); __init_tp calls __set_thread_area, whose i386 stub
+ * tail-calls __uros_set_thread_area_tp below to install the LDT.  New
+ * pthreads install via __uros_install_thread_tls_at from posix_clone.c.
  *
  * Author: Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
  * License: MIT
@@ -67,56 +65,36 @@ install_tls(mach_port_t target_thread, unsigned int base)
 }
 
 /* ------------------------------------------------------------------ */
-/* Main-thread TLS install — called from __uros_libc_init             */
+/* musl __set_thread_area thunk target (#259)                          */
 /* ------------------------------------------------------------------ */
 
-/* From musl src/internal/uros_main_thread.c */
-struct __uros_main_tcb {
-    struct __uros_pthread_opaque {
-        char raw[0];           /* opaque to the C side; size known via the
-                                * sizeof in the linker-provided extern */
-    } thr;
-    uintptr_t tp_word;
-};
-extern struct __uros_main_tcb __uros_main_thread;
-
 /*
- * sizeof(struct pthread) — provided by the patched syscall_arch.h
- * extern, via uros_main_thread.c's compile.  We need it to locate the
- * tp_word inside the linker-laid-out struct.  Easier than redeclaring
- * the full pthread layout here is to recompute it: the tp_word lives
- * immediately after the pthread struct, but the struct's size depends
- * on musl's internal layout.  Worst case we link a tiny helper from
- * the musl side to fetch &tp_word directly.
+ * musl's i386 __set_thread_area.s tail-calls here (replacing its old
+ * int $0x80 path, same idiom as clone.s → __uros_clone).  __init_tp
+ * invokes it as __set_thread_area(TP_ADJ(p)); on i386 TP_ADJ(p)==p, so
+ * `tp` is the pthread pointer itself.
+ *
+ * i386 musl uses TLS-below-TP with __pthread_self() == __get_tp() (no
+ * adjustment), so the LDT base must point AT the pthread struct whose
+ * first field (.self) holds its own address — %gs:0 then reads .self
+ * and returns the thread pointer.  __init_tp seeds .self = p before
+ * calling us, so we just install the LDT with base = tp and load %gs.
+ *
+ * Kernel-side, i386_set_ldt reloads LDTR before returning when the
+ * target is the calling thread (#258), so %gs is live immediately.
+ *
+ * Returns 0 on success (musl then sets libc.can_do_threads), -1 on
+ * failure (fatal in __init_tp).
  */
-extern void *__uros_main_tcb_tp_addr(void);
-
-void
-__uros_main_tls_init(void)
+int
+__uros_set_thread_area_tp(void *tp)
 {
-    /*
-     * i386 musl uses TLS-below-TP and defines __pthread_self() as
-     * __get_tp() with no adjustment.  That means the LDT base must
-     * point AT the pthread struct, and the struct's first field
-     * (.self) must hold its own address — %gs:0 then reads .self and
-     * returns the pthread pointer.  __uros_libc_init seeds .self =
-     * &thr already; we just install the LDT with thr as the base.
-     *
-     * `__uros_main_thread` is `{ struct pthread thr; uintptr_t tp_word; }`
-     * laid out by the linker; .thr lives at offset 0 so &thr ==
-     * &__uros_main_thread.  The tp_word field is leftover from the
-     * earlier TLS_ABOVE_TP-flavoured attempt — kept for ABI stability,
-     * the LDT base no longer points at it.
-     *
-     * Kernel-side, i386_set_ldt now reloads LDTR before returning when
-     * the target is the calling thread (#258), so we can load %gs
-     * immediately after the trap — no yield needed.
-     */
-    void *thr = &__uros_main_thread;
-    if (install_tls(mach_thread_self(), (unsigned int)thr) != KERN_SUCCESS)
-        return;
+    if (install_tls(mach_thread_self(),
+                    (unsigned int)(uintptr_t)tp) != KERN_SUCCESS)
+        return -1;
 
     __asm__ __volatile__("movw %w0, %%gs" :: "r"(UROS_TLS_LDT_SELECTOR));
+    return 0;
 }
 
 /* ------------------------------------------------------------------ */

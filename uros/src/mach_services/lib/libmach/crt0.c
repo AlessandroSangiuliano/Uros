@@ -58,6 +58,18 @@ __attribute__((weak)) int  (*_mach_init_routine)(void)      = 0;
 __attribute__((weak)) int  (*_threadlib_init_routine)(void) = 0;
 __attribute__((weak)) void (*_threadlib_exit_routine)(int)  = 0;
 
+/*
+ * musl libc init (#259).  Provided by the patched musl
+ * (src/internal/uros_main_thread.c) and pulled in only by musl-linked
+ * servers; weak so legacy libmach servers link without it.  Must run
+ * BEFORE main() because musl-linked code reads the stack canary from
+ * %gs:0x14 (the per-thread TLS slot) in its function prologues — that
+ * slot only becomes valid once __uros_libc_init drives __init_tls +
+ * __init_ssp.  Calling it from inside main() (as Phase 3-6 did) faults
+ * main()'s own prologue on the not-yet-installed TLS.
+ */
+extern void __uros_libc_init(void) __attribute__((weak));
+
 static char *__nullarg = 0;
 static char **__argv = &__nullarg;
 static int __argc = 0;
@@ -91,6 +103,14 @@ __start_mach(void)
 
 	__get_arguments();
 	__get_environment();
+
+	/*
+	 * musl-linked servers: bring up TLS + stack canary before main()
+	 * runs, so main()'s %gs:0x14 canary prologue sees a live TCB.
+	 * No-op for legacy libmach servers (weak symbol absent).
+	 */
+	if (__uros_libc_init)
+		__uros_libc_init();
 
 	if (*_threadlib_init_routine) {
 		int new_sp;
