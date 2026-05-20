@@ -594,10 +594,28 @@ vfs_open(
 	kern_return_t kr;
 	fs_private_t priv;
 
-	(void)flags;	/* v0.1: ignore O_CREAT/O_TRUNC; backend has no support */
-	(void)mode;
-
 	kr = ds_ext2_open(fs_port, path, &fid);
+
+	/* O_EXCL: a successful open of an existing file is an error. */
+	if (kr == KERN_SUCCESS &&
+	    (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
+		(void)ds_ext2_close(fs_port, fid);
+		*handle_out = 0;
+		*type_out   = VFS_FT_UNKNOWN;
+		return KERN_FAILURE;
+	}
+
+	/* O_CREAT: create the file then reopen if it didn't exist. */
+	if (kr != KERN_SUCCESS && (flags & VFS_O_CREAT)) {
+		int rc = ext2fs_create(&mnt->dev, path, mode ? mode : 0644);
+		if (rc != 0) {
+			*handle_out = 0;
+			*type_out   = VFS_FT_UNKNOWN;
+			return KERN_FAILURE;
+		}
+		kr = ds_ext2_open(fs_port, path, &fid);
+	}
+
 	if (kr != KERN_SUCCESS) {
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
@@ -605,6 +623,12 @@ vfs_open(
 	}
 
 	priv = vfs_priv_for_handle(mnt, (vfs_u64_t)fid);
+
+	/* O_TRUNC: drop a regular file's contents to zero length. */
+	if ((flags & VFS_O_TRUNC) && priv &&
+	    !ext2fs_file_is_directory(priv))
+		(void)ext2fs_truncate_file(priv, 0);
+
 	*handle_out = (vfs_u64_t)fid;
 	*type_out   = (priv && ext2fs_file_is_directory(priv))
 		      ? VFS_FT_DIR : VFS_FT_REG;
@@ -658,8 +682,15 @@ vfs_write(
 kern_return_t
 vfs_truncate(mach_port_t fs_port, vfs_u64_t handle, vfs_u64_t length)
 {
-	(void)fs_port; (void)handle; (void)length;
-	return KERN_FAILURE;	/* ext2fs lib has no truncate primitive */
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	fs_private_t priv = vfs_priv_for_handle(mnt, handle);
+
+	if (!priv)
+		return KERN_INVALID_ARGUMENT;
+	if (length > 0xFFFFFFFFu)
+		return KERN_INVALID_ARGUMENT;
+	return ext2fs_truncate_file(priv, (vm_size_t)length) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
@@ -716,8 +747,10 @@ vfs_readdir(
 kern_return_t
 vfs_unlink(mach_port_t fs_port, vfs_path_t path)
 {
-	(void)fs_port; (void)path;
-	return KERN_FAILURE;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	return ext2fs_unlink(&mnt->dev, path) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
@@ -737,8 +770,10 @@ vfs_rmdir(mach_port_t fs_port, vfs_path_t path)
 kern_return_t
 vfs_rename(mach_port_t fs_port, vfs_path_t old_path, vfs_path_t new_path)
 {
-	(void)fs_port; (void)old_path; (void)new_path;
-	return KERN_FAILURE;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	return ext2fs_rename(&mnt->dev, old_path, new_path) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t

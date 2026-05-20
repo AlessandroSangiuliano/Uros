@@ -1537,6 +1537,13 @@ ext2fs_open_file_into(
 		cp++;
 
 	    /*
+	     * Trailing separators (or the root path "/") leave nothing to
+	     * look up — the current inode is the answer.
+	     */
+	    if (*cp == '\0')
+		break;
+
+	    /*
 	     * Get next component of path name.
 	     */
 	    component = cp;
@@ -2490,7 +2497,7 @@ dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
 
 			if (le32_to_cpu(dp->inode) != 0 &&
 			    dp->name_len == name_len &&
-			    strncmp(dp->name, name, name_len) == 0) {
+			    memcmp(dp->name, name, name_len) == 0) {
 				if (ino_out)
 					*ino_out = (ino_t)le32_to_cpu(dp->inode);
 				if (prev)
@@ -3219,5 +3226,362 @@ ext2fs_sync(fs_private_t private)
 
 	if (fp->f_dev.cache)
 		return page_cache_sync(fp->f_dev.cache);
+	return 0;
+}
+
+/* ================================================================
+ * Writable namespace (#264): create / unlink / truncate / rename.
+ *
+ * These operate on the PARENT directory: the path is split into a
+ * parent directory and a leaf name, the parent is opened via
+ * ext2fs_open_file_into() (sharing its vnode like any other opener),
+ * the directory-entry and allocation helpers above do the work, and
+ * ext2fs_close_file() flushes the parent's dirty inode / group
+ * descriptors / superblock.  Freed blocks are accounted through an fp
+ * that owns a vnode (the parent) so the dirty flags are raised.
+ * ================================================================ */
+
+/*
+ * Split an absolute path into its parent directory and leaf name.
+ * parent_out must hold at least PATH_MAX+1 bytes.  "/a/b/c" -> "/a/b"
+ * + "c"; "/x" -> "/" + "x".  *leaf_out points inside parent_out.
+ */
+static void
+split_parent_leaf(const char *path, char *parent_out, const char **leaf_out)
+{
+	char *slash;
+
+	strncpy(parent_out, path, PATH_MAX);
+	parent_out[PATH_MAX] = '\0';
+
+	slash = strrchr(parent_out, '/');
+	if (slash == NULL) {
+		/* Relative leaf, no directory part — treat parent as root. */
+		*leaf_out = path;
+		strcpy(parent_out, "/");
+		return;
+	}
+	*leaf_out = path + (slash - parent_out) + 1;
+	if (slash == parent_out)
+		parent_out[1] = '\0';	/* parent is root "/" */
+	else
+		*slash = '\0';
+}
+
+/*
+ * Write a fresh on-disk inode at 'ino'.  Only this inode's slot inside
+ * the shared inode-table block is touched.  iblock (EXT2_N_BLOCKS long,
+ * may be NULL) seeds the block map; the inode cache is invalidated so a
+ * later read_inode() picks up the new contents.
+ */
+static int
+write_new_inode(struct ext2fs_file *ctx, ino_t ino, int mode,
+		const unsigned long *iblock, unsigned long size,
+		unsigned long blocks, int links)
+{
+	struct ext2_super_block *fs = ctx->f_fs;
+	daddr_t itblk = ext2_ino2blk(fs, ctx->f_gd, ino);
+	vm_offset_t buf;
+	vm_size_t bsz;
+	struct ext2_inode *raw;
+	int rc, k;
+
+	rc = read_disk_block(ctx, itblk, &buf, &bsz);
+	if (rc != 0)
+		return rc;
+
+	raw = (struct ext2_inode *)((char *)buf +
+		ext2_itoo(fs, ino) * EXT2_INODE_SIZE(fs));
+	memset(raw, 0, EXT2_INODE_SIZE(fs));
+	raw->i_mode = cpu_to_le16(mode);
+	raw->i_links_count = cpu_to_le16(links);
+	raw->i_size = cpu_to_le32(size);
+	raw->i_blocks = cpu_to_le32(blocks);
+	if (iblock)
+		for (k = 0; k < EXT2_N_BLOCKS; k++)
+			raw->i_block[k] = cpu_to_le32(iblock[k]);
+
+	rc = write_disk_block(ctx, itblk, buf, EXT2_BLOCK_SIZE(fs));
+	vm_deallocate(mach_task_self(), buf, bsz);
+
+	{
+		struct ext2_mount *m =
+			(struct ext2_mount *)ctx->f_dev.mount_data;
+		if (m)
+			icache_invalidate(m, ino);
+	}
+	return rc;
+}
+
+/*
+ * Recursively free an indirect block tree.  level 0 = single indirect
+ * (entries are data blocks), 1 = double, 2 = triple.  Frees every block
+ * it points at and then the indirect block itself.  Returns the number
+ * of freed blocks through *freed (for i_blocks accounting).
+ */
+static void
+free_indirect_tree(struct ext2fs_file *acct, daddr_t ind_block, int level,
+		   int *freed)
+{
+	struct ext2_super_block *fs = acct->f_fs;
+	int per = EXT2_ADDR_PER_BLOCK(fs);
+	vm_offset_t buf;
+	vm_size_t bsz;
+	unsigned long *ptr;
+	int i;
+
+	if (ind_block == 0)
+		return;
+	if (read_disk_block(acct, ind_block, &buf, &bsz) != 0)
+		return;
+
+	ptr = (unsigned long *)buf;
+	for (i = 0; i < per; i++) {
+		daddr_t blk = le32_to_cpu(ptr[i]);
+		if (blk == 0)
+			continue;
+		if (level > 0)
+			free_indirect_tree(acct, blk, level - 1, freed);
+		else {
+			block_free(acct, blk);
+			(*freed)++;
+		}
+	}
+	vm_deallocate(mach_task_self(), buf, bsz);
+
+	block_free(acct, ind_block);
+	(*freed)++;
+}
+
+/*
+ * Free the data blocks of an inode whose block map is 'iblock', from
+ * logical block 'from' to the end.  Partial truncation that would have
+ * to descend into an indirect tree (from > NDADDR) is not supported and
+ * returns an error rather than risk leaking blocks.  'acct' must own a
+ * vnode so block_free() can raise the gd/superblock dirty flags.  The
+ * number of freed disk blocks is returned through *freed_sectors as a
+ * count of fs blocks (caller scales to 512-byte units for i_blocks).
+ */
+static int
+free_file_blocks(struct ext2fs_file *acct, unsigned long *iblock,
+		 daddr_t from, int *freed_blocks)
+{
+	int i;
+
+	*freed_blocks = 0;
+
+	if (from > NDADDR)
+		return KERN_FAILURE;	/* partial indirect truncate unsupported */
+
+	/* Direct blocks at or beyond 'from'. */
+	for (i = (int)from; i < NDADDR; i++) {
+		if (iblock[i]) {
+			block_free(acct, (daddr_t)iblock[i]);
+			(*freed_blocks)++;
+			iblock[i] = 0;
+		}
+	}
+
+	/* Everything from 'from' onward includes the whole indirect set. */
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR],     0, freed_blocks);
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR + 1], 1, freed_blocks);
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR + 2], 2, freed_blocks);
+	iblock[NDADDR]     = 0;
+	iblock[NDADDR + 1] = 0;
+	iblock[NDADDR + 2] = 0;
+	return 0;
+}
+
+/*
+ * Open the parent directory of 'path' into the caller-provided fp.
+ * Returns 0 with *leaf pointing at the leaf name inside leafbuf
+ * (PATH_MAX+1), or an FS_* error.  The caller must ext2fs_close_file(fp)
+ * on success.
+ */
+static int
+open_parent_dir(struct device *dev, const char *path, char *leafbuf,
+		const char **leaf, struct ext2fs_file *fp)
+{
+	fs_private_t pp;
+	int rc;
+
+	split_parent_leaf(path, leafbuf, leaf);
+	if ((*leaf)[0] == '\0')
+		return FS_INVALID_PARAMETER;
+
+	rc = ext2fs_open_file_into(dev, leafbuf, &pp, fp);
+	if (rc != 0)
+		return rc;
+	if ((fp->f_ic->i_mode & IFMT) != IFDIR) {
+		ext2fs_close_file(pp);
+		return FS_NOT_DIRECTORY;
+	}
+	return 0;
+}
+
+int
+ext2fs_create(struct device *dev, const char *path, int mode)
+{
+	struct ext2fs_file parent;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino, existing;
+	int rc, goal;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &existing) == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_INVALID_PARAMETER;	/* already exists */
+	}
+
+	goal = (parent.f_ino - 1) / parent.f_fs->s_inodes_per_group;
+	ino = inode_alloc(&parent, goal, 0);
+	if (ino == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	rc = write_new_inode(&parent, ino, IFREG | (mode & 0777), NULL, 0, 0, 1);
+	if (rc == 0)
+		rc = dir_add_entry(&parent, leaf, ino, EXT2_FT_REG_FILE);
+	if (rc != 0)
+		inode_free(&parent, ino, 0);
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return rc;
+}
+
+int
+ext2fs_unlink(struct device *dev, const char *path)
+{
+	struct ext2fs_file parent, target;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino = 0;
+	int rc, links, freed = 0;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	rc = dir_remove_entry(&parent, leaf, &ino);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* Read the target inode through a scratch fp that borrows the
+	 * parent's fs/gd/dev, then drop a link.  At zero links free its
+	 * data blocks and the inode itself — accounted on the parent fp so
+	 * the gd/superblock dirty flags are flushed on close. */
+	memset(&target, 0, sizeof(target));
+	target.f_dev = parent.f_dev;
+	target.f_fs  = parent.f_fs;
+	target.f_gd  = parent.f_gd;
+	target.f_ic  = &target.f_ic_scratch;
+
+	if (read_inode(ino, &target) == 0) {
+		links = (int)target.f_ic->i_links_count - 1;
+		if (links <= 0) {
+			free_file_blocks(&parent, target.f_ic->i_block, 0,
+					 &freed);
+			(void)write_new_inode(&parent, ino, 0, NULL, 0, 0, 0);
+			inode_free(&parent, ino, 0);
+		} else {
+			(void)write_new_inode(&parent, ino,
+				target.f_ic->i_mode, target.f_ic->i_block,
+				target.f_ic->i_size, target.f_ic->i_blocks,
+				links);
+		}
+	}
+	free_file_buffers(&target);
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return 0;
+}
+
+/*
+ * Truncate an open file to 'length'.  Only truncation to zero, or to a
+ * length still within the direct blocks, is supported; anything that
+ * would require partial indirect-tree truncation returns an error.
+ */
+int
+ext2fs_truncate_file(fs_private_t private, vm_size_t length)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	struct ext2_super_block *fs = fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	daddr_t from = (length + block_size - 1) / block_size;
+	int freed = 0, rc;
+
+	if (fp->f_ic->i_size <= length)
+		return 0;	/* grow-on-truncate not handled here */
+
+	rc = free_file_blocks(fp, fp->f_ic->i_block, from, &freed);
+	if (rc != 0)
+		return rc;
+
+	fp->f_ic->i_size = length;
+	if ((unsigned long)(freed * (block_size / 512)) <= fp->f_ic->i_blocks)
+		fp->f_ic->i_blocks -= freed * (block_size / 512);
+	else
+		fp->f_ic->i_blocks = 0;
+	if (fp->f_vnode)
+		fp->f_vnode->v_inode_dirty = 1;
+	return ext2fs_flush_metadata(private);
+}
+
+int
+ext2fs_rename(struct device *dev, const char *oldpath, const char *newpath)
+{
+	struct ext2fs_file oldp, newp;
+	char oldleafbuf[PATH_MAX + 1], newleafbuf[PATH_MAX + 1];
+	const char *oldleaf, *newleaf;
+	ino_t ino = 0, dummy = 0, victim = 0;
+	int rc, file_type;
+	struct ext2fs_file tmp;
+
+	/* Resolve the source: parent dir + the inode being moved. */
+	rc = open_parent_dir(dev, oldpath, oldleafbuf, &oldleaf, &oldp);
+	if (rc != 0)
+		return rc;
+	if (search_directory((char *)oldleaf, &oldp, &ino) != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return FS_NO_ENTRY;
+	}
+
+	/* Determine the entry's file_type from the inode mode. */
+	memset(&tmp, 0, sizeof(tmp));
+	tmp.f_dev = oldp.f_dev; tmp.f_fs = oldp.f_fs; tmp.f_gd = oldp.f_gd;
+	tmp.f_ic = &tmp.f_ic_scratch;
+	file_type = EXT2_FT_REG_FILE;
+	if (read_inode(ino, &tmp) == 0 &&
+	    (tmp.f_ic->i_mode & IFMT) == IFDIR)
+		file_type = EXT2_FT_DIR;
+	free_file_buffers(&tmp);
+
+	/* Add the new name (overwriting any existing target). */
+	rc = open_parent_dir(dev, newpath, newleafbuf, &newleaf, &newp);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return rc;
+	}
+	if (search_directory((char *)newleaf, &newp, &victim) == 0) {
+		/* Destination exists — remove it first (POSIX overwrite). */
+		(void)dir_remove_entry(&newp, newleaf, &dummy);
+	}
+	rc = dir_add_entry(&newp, newleaf, ino, file_type);
+	ext2fs_close_file((fs_private_t)&newp);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return rc;
+	}
+
+	/* Drop the old name. */
+	(void)dir_remove_entry(&oldp, oldleaf, &dummy);
+	ext2fs_close_file((fs_private_t)&oldp);
 	return 0;
 }

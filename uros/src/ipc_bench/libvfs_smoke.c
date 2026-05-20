@@ -74,6 +74,31 @@ bench_libvfs_smoke(void)
 		       (unsigned long long)st.st_size);
 	}
 
+	/* Writable namespace (#264): create -> write -> read back. */
+	{
+		const char *p = "/uros_w.txt";
+		const char *msg = "writable ext2!";
+		vfs_fd_t wfd = vfs_open(p, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC,
+					0644);
+		if (wfd == VFS_FD_INVALID) {
+			printf("  libvfs: O_CREAT %s FAILED\n", p);
+			ok = 0;
+		} else {
+			ssize_t w = vfs_write(wfd, msg, strlen(msg));
+			char rb[32];
+			ssize_t r;
+			vfs_lseek(wfd, 0, VFS_SEEK_SET);
+			memset(rb, 0, sizeof(rb));
+			r = vfs_read(wfd, rb, sizeof(rb) - 1);
+			printf("  libvfs: create+write %ld, read %ld: \"%s\"\n",
+			       (long)w, (long)r, rb);
+			if (w != (ssize_t)strlen(msg) || r != w ||
+			    strcmp(rb, msg) != 0)
+				ok = 0;
+			vfs_close(wfd);
+		}
+	}
+
 	/* Try the second mount if present.  Failure is OK — depends on
 	 * which AHCI partitions QEMU exposes today. */
 	fd = vfs_open("/mnt/disk1/hello.txt", VFS_O_RDONLY, 0);
