@@ -2117,6 +2117,182 @@ block_alloc(struct ext2fs_file *fp, int goal_group)
 }
 
 /*
+ * Free a previously allocated data block: clear its bit in the block
+ * bitmap and bump the group + superblock free counts.  Inverse of
+ * block_alloc().  Dirty flags are raised on fp's vnode so the next
+ * ext2fs_flush_metadata() writes the descriptors and superblock back.
+ */
+static void
+block_free(struct ext2fs_file *fp, daddr_t block)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int bits_per_group = fs->s_blocks_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+	unsigned char *bm;
+	int group, bit, rc;
+
+	if (block < (daddr_t)fs->s_first_data_block ||
+	    block >= (daddr_t)fs->s_blocks_count)
+		return;
+
+	group = (block - fs->s_first_data_block) / bits_per_group;
+	bit   = (block - fs->s_first_data_block) % bits_per_group;
+
+	rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_block_bitmap),
+			     &bitmap, &bitmap_size);
+	if (rc != 0)
+		return;
+
+	bm = (unsigned char *)bitmap;
+	if (bm[bit >> 3] & (1 << (bit & 7))) {
+		bm[bit >> 3] &= ~(1 << (bit & 7));
+		rc = write_disk_block(fp, le32_to_cpu(gd[group].bg_block_bitmap),
+				      bitmap, block_size);
+		if (rc == 0) {
+			gd[group].bg_free_blocks_count = cpu_to_le16(
+				le16_to_cpu(gd[group].bg_free_blocks_count) + 1);
+			fs->s_free_blocks_count++;
+			if (fp->f_vnode) {
+				fp->f_vnode->v_gd_dirty = 1;
+				fp->f_vnode->v_super_dirty = 1;
+			}
+		}
+	}
+	vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+}
+
+/*
+ * Allocate a free inode, mirroring block_alloc() against the inode
+ * bitmap.  Reserved inodes (< EXT2_FIRST_INO) are skipped — they are
+ * already marked used in group 0's bitmap, but we guard anyway.  When
+ * is_dir is set the group's used-directory count is bumped (ext2 uses it
+ * for the Orlov-style allocator; we just keep it consistent).
+ *
+ * Returns the 1-based inode number, or 0 on failure.  Raises the gd +
+ * superblock dirty flags on fp's vnode.
+ */
+static ino_t
+inode_alloc(struct ext2fs_file *fp, int goal_group, int is_dir)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int ipg = fs->s_inodes_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int first_ino = EXT2_FIRST_INO(fs);
+	int ngroups, group, g, bit, rc;
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+
+	ngroups = (fs->s_inodes_count + ipg - 1) / ipg;
+
+	for (g = 0; g < ngroups; g++) {
+		group = (goal_group + g) % ngroups;
+
+		if (le16_to_cpu(gd[group].bg_free_inodes_count) == 0)
+			continue;
+
+		rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+				     &bitmap, &bitmap_size);
+		if (rc != 0)
+			continue;
+
+		{
+			unsigned char *bm = (unsigned char *)bitmap;
+
+			for (bit = 0; bit < ipg; bit++) {
+				ino_t ino = (ino_t)group * ipg + bit + 1;
+				if (ino < (ino_t)first_ino)
+					continue;
+				if (bm[bit >> 3] & (1 << (bit & 7)))
+					continue;
+
+				bm[bit >> 3] |= (1 << (bit & 7));
+				rc = write_disk_block(fp,
+					le32_to_cpu(gd[group].bg_inode_bitmap),
+					bitmap, block_size);
+				if (rc != 0) {
+					vm_deallocate(mach_task_self(),
+						      bitmap, bitmap_size);
+					return 0;
+				}
+
+				gd[group].bg_free_inodes_count = cpu_to_le16(
+					le16_to_cpu(gd[group].bg_free_inodes_count) - 1);
+				if (is_dir)
+					gd[group].bg_used_dirs_count = cpu_to_le16(
+						le16_to_cpu(gd[group].bg_used_dirs_count) + 1);
+				fs->s_free_inodes_count--;
+				if (fp->f_vnode) {
+					fp->f_vnode->v_gd_dirty = 1;
+					fp->f_vnode->v_super_dirty = 1;
+				}
+
+				vm_deallocate(mach_task_self(),
+					      bitmap, bitmap_size);
+				return ino;
+			}
+		}
+
+		vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+	}
+
+	return 0;	/* no free inode */
+}
+
+/*
+ * Release an inode: clear its bit in the inode bitmap, bump free counts
+ * (and drop the group's used-dirs count when freeing a directory).
+ * Inverse of inode_alloc().  The caller is responsible for having freed
+ * the inode's data blocks first.
+ */
+static void
+inode_free(struct ext2fs_file *fp, ino_t ino, int is_dir)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int ipg = fs->s_inodes_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+	unsigned char *bm;
+	int group, bit, rc;
+
+	if (ino < (ino_t)EXT2_FIRST_INO(fs) || ino > (ino_t)fs->s_inodes_count)
+		return;
+
+	group = (ino - 1) / ipg;
+	bit   = (ino - 1) % ipg;
+
+	rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+			     &bitmap, &bitmap_size);
+	if (rc != 0)
+		return;
+
+	bm = (unsigned char *)bitmap;
+	if (bm[bit >> 3] & (1 << (bit & 7))) {
+		bm[bit >> 3] &= ~(1 << (bit & 7));
+		rc = write_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+				      bitmap, block_size);
+		if (rc == 0) {
+			gd[group].bg_free_inodes_count = cpu_to_le16(
+				le16_to_cpu(gd[group].bg_free_inodes_count) + 1);
+			if (is_dir)
+				gd[group].bg_used_dirs_count = cpu_to_le16(
+					le16_to_cpu(gd[group].bg_used_dirs_count) - 1);
+			fs->s_free_inodes_count++;
+			if (fp->f_vnode) {
+				fp->f_vnode->v_gd_dirty = 1;
+				fp->f_vnode->v_super_dirty = 1;
+			}
+		}
+	}
+	vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+}
+
+/*
  * Serialize the in-core inode into the cached raw inode block.
  * The block must already be in fp->f_inode_blk (populated by read_inode).
  */
