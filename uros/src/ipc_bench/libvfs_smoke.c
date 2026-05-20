@@ -75,7 +75,7 @@ bench_libvfs_smoke(void)
 	}
 
 	/* Writable namespace (#264): create -> write -> read back. */
-	{
+	if (1) {
 		const char *p = "/uros_w.txt";
 		const char *msg = "writable ext2!";
 		vfs_fd_t wfd = vfs_open(p, VFS_O_RDWR | VFS_O_CREAT | VFS_O_TRUNC,
@@ -96,6 +96,29 @@ bench_libvfs_smoke(void)
 			    strcmp(rb, msg) != 0)
 				ok = 0;
 			vfs_close(wfd);
+		}
+	}
+
+	/* Namespace ops (#231): rename then unlink, same mount. */
+	if (1) {
+		vfs_stat_t st;
+		if (vfs_rename("/uros_w.txt", "/uros_r.txt") != 0) {
+			printf("  libvfs: rename FAILED\n");
+			ok = 0;
+		} else if (vfs_stat("/uros_r.txt", &st) != 0 ||
+			   vfs_stat("/uros_w.txt", &st) == 0) {
+			printf("  libvfs: rename visibility wrong\n");
+			ok = 0;
+		} else {
+			printf("  libvfs: rename /uros_w.txt -> /uros_r.txt OK "
+			       "(size=%llu)\n", (unsigned long long)st.st_size);
+			if (vfs_unlink("/uros_r.txt") != 0 ||
+			    vfs_stat("/uros_r.txt", &st) == 0) {
+				printf("  libvfs: unlink FAILED\n");
+				ok = 0;
+			} else {
+				printf("  libvfs: unlink /uros_r.txt OK\n");
+			}
 		}
 	}
 
