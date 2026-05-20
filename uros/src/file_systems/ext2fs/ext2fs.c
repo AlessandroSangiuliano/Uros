@@ -2624,8 +2624,12 @@ write_super(struct ext2fs_file *fp)
 	struct ext2_super_block raw;
 	io_buf_len_t bytes_written;
 
-	/* Convert to little-endian for on-disk format */
-	memset(&raw, 0, sizeof(raw));
+	/* Start from the full in-core superblock so fields we don't touch
+	 * (s_uuid, s_reserved_gdt_blocks, volume name, hash seed, ...) are
+	 * preserved verbatim; zeroing them corrupted the resize inode's
+	 * reserved-GDT blocks and dropped the UUID (#266).  The cpu_to_le
+	 * overrides below re-encode the mutable/structural fields for BE. */
+	raw = *fs;
 	raw.s_inodes_count = cpu_to_le32(fs->s_inodes_count);
 	raw.s_blocks_count = cpu_to_le32(fs->s_blocks_count);
 	raw.s_r_blocks_count = cpu_to_le32(fs->s_r_blocks_count);
@@ -3089,7 +3093,10 @@ ext2fs_flush_metadata(fs_private_t private)
 		/* --- Prepare superblock (little-endian raw copy) --- */
 		struct ext2_super_block raw_sb;
 		if (vn->v_super_dirty) {
-			memset(&raw_sb, 0, sizeof(raw_sb));
+			/* Full copy first so untouched fields (uuid,
+			 * reserved_gdt_blocks, ...) survive — see write_super
+			 * (#266). */
+			raw_sb = *fs;
 			raw_sb.s_inodes_count =
 				cpu_to_le32(fs->s_inodes_count);
 			raw_sb.s_blocks_count =
