@@ -2292,6 +2292,228 @@ inode_free(struct ext2fs_file *fp, ino_t ino, int is_dir)
 	vm_deallocate(mach_task_self(), bitmap, bitmap_size);
 }
 
+/* ext2 on-disk directory-entry file_type values (FILETYPE feature). */
+#define EXT2_FT_REG_FILE	1
+#define EXT2_FT_DIR		2
+
+/*
+ * Persist a single directory block that was modified in place.  buf is
+ * the borrowed page-cache pointer returned by buf_read_file (so the
+ * cache already reflects our edit); we only need to push it to disk.
+ */
+static int
+dir_write_block(struct ext2fs_file *dir_fp, daddr_t lblk, vm_offset_t buf)
+{
+	daddr_t dblk;
+	int rc = block_map(dir_fp, lblk, &dblk);
+	if (rc != 0)
+		return rc;
+	return write_disk_block(dir_fp, dblk, buf, EXT2_BLOCK_SIZE(dir_fp->f_fs));
+}
+
+/*
+ * Append a fresh data block to a directory holding a single empty entry
+ * that spans the whole block, then place (name -> ino) in it.  Only the
+ * direct-block range is handled: directories deep enough to need an
+ * indirect block (> 12 blocks ~= 48 KiB of entries) are far beyond what
+ * this bootstrap fs is expected to grow, and we fail cleanly instead.
+ */
+static int
+dir_grow_and_add(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
+		 int file_type, int name_len)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	daddr_t lblk = dir_fp->f_ic->i_size / block_size;
+	int goal_group;
+	daddr_t newblk;
+	char *blk;
+	struct ext2_dir_entry *dp;
+	int rc;
+
+	if (lblk >= NDADDR)
+		return KERN_RESOURCE_SHORTAGE;
+
+	goal_group = (dir_fp->f_ino - 1) / fs->s_inodes_per_group;
+	newblk = block_alloc(dir_fp, goal_group);
+	if (newblk == 0)
+		return KERN_RESOURCE_SHORTAGE;
+
+	blk = (char *)malloc(block_size);
+	if (!blk) {
+		block_free(dir_fp, newblk);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	memset(blk, 0, block_size);
+
+	dp = (struct ext2_dir_entry *)blk;
+	dp->inode = cpu_to_le32((unsigned long)ino);
+	dp->rec_len = cpu_to_le16(block_size);
+	dp->name_len = (unsigned char)name_len;
+	dp->file_type = (unsigned char)file_type;
+	memcpy(dp->name, name, name_len);
+
+	rc = write_disk_block(dir_fp, newblk, (vm_offset_t)blk, block_size);
+	free(blk);
+	if (rc != 0) {
+		block_free(dir_fp, newblk);
+		return rc;
+	}
+
+	/* Link the new block into the inode and extend its size. */
+	dir_fp->f_ic->i_block[lblk] = newblk;
+	dir_fp->f_ic->i_size += block_size;
+	dir_fp->f_ic->i_blocks += block_size / 512;
+	if (dir_fp->f_vnode)
+		dir_fp->f_vnode->v_inode_dirty = 1;
+
+	{
+		struct ext2_mount *m =
+			(struct ext2_mount *)dir_fp->f_dev.mount_data;
+		if (m)
+			dcache_insert(m, dir_fp->f_ino, name, ino);
+	}
+	return 0;
+}
+
+/*
+ * Insert (name -> ino) into directory dir_fp.  Walks each directory
+ * block for a usable slot: a deleted entry (inode==0) whose rec_len is
+ * large enough, or trailing slack in a live entry that can be split off.
+ * Grows the directory by a block if nothing fits.  Returns 0 / error.
+ *
+ * dir_fp must have its inode loaded and a vnode (for dirty flags).  We
+ * read through buf_read_file, so the buffer we mutate is the same memory
+ * the page cache hands future readers; dir_write_block then persists it.
+ */
+static int
+dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
+	      int file_type)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int name_len = (int)strlen(name);
+	int needed = EXT2_DIR_REC_LEN(name_len);
+	struct ext2_mount *m = (struct ext2_mount *)dir_fp->f_dev.mount_data;
+	vm_offset_t offset;
+
+	if (name_len == 0 || name_len > EXT2_NAME_LEN)
+		return FS_NAME_TOO_LONG;
+
+	for (offset = 0; offset < dir_fp->f_ic->i_size; offset += block_size) {
+		vm_offset_t buf = 0;
+		vm_size_t buf_size = 0;
+		daddr_t lblk = offset / block_size;
+		int off, rc;
+
+		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
+		if (rc != 0)
+			return rc;
+
+		off = 0;
+		while (off + 8 <= block_size) {
+			struct ext2_dir_entry *dp =
+				(struct ext2_dir_entry *)((char *)buf + off);
+			int rec_len = le16_to_cpu(dp->rec_len);
+			int used;
+
+			if (rec_len < 8 || (off + rec_len) > block_size)
+				break;	/* corrupt block — give up on it */
+
+			used = (le32_to_cpu(dp->inode) == 0)
+				? 0 : EXT2_DIR_REC_LEN(dp->name_len);
+
+			if (rec_len - used >= needed) {
+				struct ext2_dir_entry *ne;
+				if (used == 0) {
+					ne = dp;	/* reuse deleted slot whole */
+				} else {
+					ne = (struct ext2_dir_entry *)
+						((char *)dp + used);
+					ne->rec_len = cpu_to_le16(rec_len - used);
+					dp->rec_len = cpu_to_le16(used);
+				}
+				ne->inode = cpu_to_le32((unsigned long)ino);
+				ne->name_len = (unsigned char)name_len;
+				ne->file_type = (unsigned char)file_type;
+				memcpy(ne->name, name, name_len);
+
+				rc = dir_write_block(dir_fp, lblk, buf);
+				if (rc != 0)
+					return rc;
+				if (m)
+					dcache_insert(m, dir_fp->f_ino, name, ino);
+				return 0;
+			}
+			off += rec_len;
+		}
+	}
+
+	return dir_grow_and_add(dir_fp, name, ino, file_type, name_len);
+}
+
+/*
+ * Remove the entry 'name' from directory dir_fp.  On success the removed
+ * inode number is returned through ino_out so the caller can drop link
+ * counts / free the inode.  Removal is the classic ext2 tombstone: the
+ * entry's rec_len is folded into the previous record, or inode is zeroed
+ * when it is the first record in the block.  Returns 0 / FS_NO_ENTRY.
+ */
+static int
+dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int name_len = (int)strlen(name);
+	struct ext2_mount *m = (struct ext2_mount *)dir_fp->f_dev.mount_data;
+	vm_offset_t offset;
+
+	for (offset = 0; offset < dir_fp->f_ic->i_size; offset += block_size) {
+		vm_offset_t buf = 0;
+		vm_size_t buf_size = 0;
+		daddr_t lblk = offset / block_size;
+		struct ext2_dir_entry *prev = NULL;
+		int off, rc;
+
+		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
+		if (rc != 0)
+			return rc;
+
+		off = 0;
+		while (off + 8 <= block_size) {
+			struct ext2_dir_entry *dp =
+				(struct ext2_dir_entry *)((char *)buf + off);
+			int rec_len = le16_to_cpu(dp->rec_len);
+
+			if (rec_len < 8 || (off + rec_len) > block_size)
+				break;
+
+			if (le32_to_cpu(dp->inode) != 0 &&
+			    dp->name_len == name_len &&
+			    strncmp(dp->name, name, name_len) == 0) {
+				if (ino_out)
+					*ino_out = (ino_t)le32_to_cpu(dp->inode);
+				if (prev)
+					prev->rec_len = cpu_to_le16(
+						le16_to_cpu(prev->rec_len) + rec_len);
+				else
+					dp->inode = cpu_to_le32(0);
+
+				rc = dir_write_block(dir_fp, lblk, buf);
+				if (rc != 0)
+					return rc;
+				if (m)
+					dcache_insert(m, dir_fp->f_ino, name,
+						      DCACHE_NEGATIVE);
+				return 0;
+			}
+			prev = dp;
+			off += rec_len;
+		}
+	}
+	return FS_NO_ENTRY;
+}
+
 /*
  * Serialize the in-core inode into the cached raw inode block.
  * The block must already be in fp->f_inode_blk (populated by read_inode).
