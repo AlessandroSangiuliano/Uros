@@ -41,7 +41,14 @@
 #include <mach/vm_types.h>
 #include <pthread.h>
 
-#define PAGE_CACHE_HASH_BUCKETS	128
+/*
+ * Hash buckets.  Must scale with the entry count or lookups degrade into
+ * long linear chain walks.  The DMA page cache holds up to 4096 entries
+ * (#265); with the old 128 buckets that was a load factor of 32 and made
+ * cached reads measurably slower.  4096 buckets keeps the load factor at
+ * ~1 (array is 16 KB per cache — negligible).
+ */
+#define PAGE_CACHE_HASH_BUCKETS	4096
 
 /*
  * Writeback callback: called when a dirty block must be flushed to disk.
