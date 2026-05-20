@@ -991,15 +991,15 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 			/* Upgrade to DMA-backed page cache */
 			{
 				unsigned int kva, uva;
-				unsigned int pa_list[1024];
-				mach_msg_type_number_t pa_cnt = 1024;
+				unsigned int pa_list[4096];
+				mach_msg_type_number_t pa_cnt = 4096;
 				unsigned int n_entries = 4096;
 				unsigned int n_pages;
 				struct page_cache *dma_pc;
 
 				n_pages = (n_entries * blksz + 4095) / 4096;
-				if (n_pages > 1024)
-					n_pages = 1024;
+				if (n_pages > 4096)
+					n_pages = 4096;
 
 				kr = device_dma_alloc_sg(
 					device_port, n_pages,

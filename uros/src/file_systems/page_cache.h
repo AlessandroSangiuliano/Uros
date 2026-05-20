@@ -79,7 +79,7 @@ struct page_cache {
 	/* DMA pool: pre-allocated wired pages with known physical addrs */
 	vm_offset_t		pc_dma_pool;	  /* base VA (0 = no DMA) */
 	vm_size_t		pc_dma_pool_size; /* total pool bytes */
-	unsigned int		pc_dma_pa[1024];  /* per-page physical addrs */
+	unsigned int		pc_dma_pa[4096];  /* per-page physical addrs */
 	unsigned int		pc_dma_n_pages;	  /* number of DMA pages */
 	vm_size_t		pc_block_size;	  /* block size for slot calc */
 	struct page_cache_entry	*pc_hash[PAGE_CACHE_HASH_BUCKETS];

@@ -502,7 +502,7 @@ ds_master_device_dma_alloc_sg(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	if (n_pages == 0 || n_pages > 1024)
+	if (n_pages == 0 || n_pages > 4096)
 		return KERN_INVALID_ARGUMENT;
 
 	task = convert_port_to_task(task_port);
