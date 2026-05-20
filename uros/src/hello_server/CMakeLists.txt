@@ -42,11 +42,10 @@ execute_process(
 target_compile_options(hello_server_server PRIVATE
   -std=gnu11
   -m32 -march=i686 -msse -msse2
-  # SSP disabled for the pilot: musl's __init_ssp() isn't called (we
-  # bypass __libc_start_main), so the canary stays at 0 and overrun
-  # detection is effectively off.  Better to be honest about it than
-  # emit unchecked SSP prologues.  Re-enabled in Phase 6 with pthreads.
-  -fno-stack-protector
+  # SSP re-enabled (#259): __uros_libc_init() now drives musl's real
+  # __init_tls + __init_ssp, so __stack_chk_guard and the per-thread
+  # canary are seeded before any protected function runs.
+  -fstack-protector-strong
   -fno-builtin
   -w
   -include stdint.h
@@ -93,6 +92,12 @@ target_link_libraries(hello_server_server PRIVATE
 target_link_options(hello_server_server PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
+  # Force-link musl's __uros_libc_init (#259): crt0 references it only
+  # weakly (so legacy libmach servers link without it), and a weak ref
+  # does not pull an object out of a static archive.  -u makes the
+  # linker treat it as an undefined-strong symbol, pulling
+  # uros_main_thread.o from libc-musl.a so crt0's call resolves.
+  -Wl,-u,__uros_libc_init
   -Wl,--build-id=none
 )
 

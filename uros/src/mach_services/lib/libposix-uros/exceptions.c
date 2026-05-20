@@ -24,6 +24,7 @@
  * License: MIT
  */
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdint.h>
 
@@ -38,15 +39,11 @@
 
 #include "uros/libposix.h"
 
-/* sig_thread_entry.S */
-extern void __uros_exc_thread_entry(void);
 
 /* From signals.c — reused so the exception thread can stop printing in
  * the middle of a SIG_DFL terminate path.  Not currently used here but
  * kept handy. */
 extern unsigned int __uros_my_pid;
-
-#define UROS_EXC_STACK_SIZE  (16 * 1024)
 
 mach_port_t  __uros_exc_port = MACH_PORT_NULL;
 
@@ -195,6 +192,15 @@ __uros_exc_loop(void)
     }
 }
 
+/* pthread entry trampoline (#259) — see spawn note in __uros_exceptions_init. */
+static void *
+exc_thread_main(void *arg)
+{
+    (void)arg;
+    __uros_exc_loop();
+    return 0;       /* unreachable */
+}
+
 /* ------------------------------------------------------------------ */
 /* Init                                                                */
 /* ------------------------------------------------------------------ */
@@ -228,31 +234,17 @@ __uros_exceptions_init(void)
         return;
     }
 
-    /* 3. Spawn the exception thread.  Same recipe as the signal
-     * thread (signals.c spawn_handler_thread) but a different entry. */
-    vm_address_t stack = 0;
-    kr = vm_allocate(mach_task_self(), &stack, UROS_EXC_STACK_SIZE, TRUE);
-    if (kr != KERN_SUCCESS)
+    /* 3. Spawn the exception thread as a detached pthread (#259) so it
+     * gets a real musl TCB — %gs resolves to its own thread pointer,
+     * making the stack canary and the printf diagnostic in __uros_exc_loop
+     * safe.  The old raw thread ran with %gs=USER_DS, so those TLS reads
+     * landed at low linear addresses (fine only while page 0 was mapped). */
+    pthread_attr_t attr;
+    pthread_t      th;
+
+    if (pthread_attr_init(&attr) != 0)
         return;
-
-    extern void __uros_sig_thread_die(void);
-    uint32_t *sp = (uint32_t *)(stack + UROS_EXC_STACK_SIZE);
-    sp -= 4;                                            /* alignment slack */
-    *--sp = (uint32_t)__uros_sig_thread_die;            /* fake return */
-
-    struct i386_thread_state state;
-    for (size_t i = 0; i < sizeof state / sizeof(int); i++)
-        ((int *)&state)[i] = 0;
-    state.eip = (int)__uros_exc_thread_entry;
-    state.uesp = (int)sp;
-    state.cs   = 0x17;
-    state.ds = state.es = state.ss = state.fs = state.gs = 0x1f;
-    state.efl  = 0x202;
-
-    thread_act_t thread;
-    (void)thread_create_running(mach_task_self(),
-                                i386_THREAD_STATE,
-                                (thread_state_t)&state,
-                                i386_THREAD_STATE_COUNT,
-                                &thread);
+    (void)pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    (void)pthread_create(&th, &attr, exc_thread_main, NULL);
+    (void)pthread_attr_destroy(&attr);
 }
