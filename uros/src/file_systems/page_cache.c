@@ -604,8 +604,8 @@ page_cache_create_dma(unsigned int max_entries, vm_size_t block_size,
 	pc->pc_dma_pool_size = (vm_size_t)n_pages * 4096;
 	pc->pc_dma_n_pages = n_pages;
 	pc->pc_block_size = block_size;
-	if (n_pages > 1024)
-		n_pages = 1024;
+	if (n_pages > 4096)
+		n_pages = 4096;
 	memcpy(pc->pc_dma_pa, pa_list, n_pages * sizeof(unsigned int));
 
 	/* Pre-assign data buffers and physical addresses to each entry */
