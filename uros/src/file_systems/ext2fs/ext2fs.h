@@ -162,6 +162,8 @@ extern int ext2fs_create(struct device *dev, const char *path, int mode);
 extern int ext2fs_unlink(struct device *dev, const char *path);
 extern int ext2fs_rename(struct device *dev, const char *oldpath,
 			 const char *newpath);
+extern int ext2fs_mkdir(struct device *dev, const char *path, int mode);
+extern int ext2fs_rmdir(struct device *dev, const char *path);
 extern int ext2fs_truncate_file(fs_private_t private, vm_size_t length);
 extern int ext2fs_readdir(fs_private_t private, struct fs_dirent *out,
 			  unsigned int max, unsigned int *out_count);

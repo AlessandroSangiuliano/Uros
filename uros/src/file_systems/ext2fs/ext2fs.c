@@ -3585,3 +3585,160 @@ ext2fs_rename(struct device *dev, const char *oldpath, const char *newpath)
 	ext2fs_close_file((fs_private_t)&oldp);
 	return 0;
 }
+
+int
+ext2fs_mkdir(struct device *dev, const char *path, int mode)
+{
+	struct ext2fs_file parent;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino, existing;
+	daddr_t dblk;
+	char *blk;
+	struct ext2_dir_entry *dot, *dotdot;
+	unsigned long iblock[EXT2_N_BLOCKS];
+	int rc, goal, block_size;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &existing) == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_INVALID_PARAMETER;	/* already exists */
+	}
+
+	block_size = EXT2_BLOCK_SIZE(parent.f_fs);
+	goal = (parent.f_ino - 1) / parent.f_fs->s_inodes_per_group;
+
+	ino = inode_alloc(&parent, goal, 1 /* is_dir */);
+	if (ino == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	dblk = block_alloc(&parent, goal);
+	if (dblk == 0) {
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	/* Build the initial directory block: "." then ".." spanning the
+	 * rest of the block. */
+	blk = (char *)malloc(block_size);
+	if (!blk) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	memset(blk, 0, block_size);
+	dot = (struct ext2_dir_entry *)blk;
+	dot->inode = cpu_to_le32((unsigned long)ino);
+	dot->rec_len = cpu_to_le16(EXT2_DIR_REC_LEN(1));
+	dot->name_len = 1;
+	dot->file_type = EXT2_FT_DIR;
+	dot->name[0] = '.';
+	dotdot = (struct ext2_dir_entry *)(blk + EXT2_DIR_REC_LEN(1));
+	dotdot->inode = cpu_to_le32((unsigned long)parent.f_ino);
+	dotdot->rec_len = cpu_to_le16(block_size - EXT2_DIR_REC_LEN(1));
+	dotdot->name_len = 2;
+	dotdot->file_type = EXT2_FT_DIR;
+	dotdot->name[0] = '.';
+	dotdot->name[1] = '.';
+	rc = write_disk_block(&parent, dblk, (vm_offset_t)blk, block_size);
+	free(blk);
+	if (rc != 0) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* The new directory inode: links_count 2 (itself via "." and the
+	 * name in the parent), one data block. */
+	memset(iblock, 0, sizeof(iblock));
+	iblock[0] = (unsigned long)dblk;
+	rc = write_new_inode(&parent, ino, IFDIR | (mode & 0777), iblock,
+			     block_size, block_size / 512, 2);
+	if (rc == 0)
+		rc = dir_add_entry(&parent, leaf, ino, EXT2_FT_DIR);
+	if (rc != 0) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* The parent gains a link from the child's "..". */
+	parent.f_ic->i_links_count++;
+	if (parent.f_vnode)
+		parent.f_vnode->v_inode_dirty = 1;
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return 0;
+}
+
+/*
+ * Remove an empty directory.  Refuses non-empty directories (anything
+ * beyond "." and "..").  Frees the directory's data block and inode and
+ * drops the link the child contributed to the parent.
+ */
+int
+ext2fs_rmdir(struct device *dev, const char *path)
+{
+	struct ext2fs_file parent, target;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino = 0;
+	int rc, freed = 0;
+	struct fs_dirent ents[4];
+	unsigned int got = 0;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &ino) != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NO_ENTRY;
+	}
+
+	/* Open the target and verify it is an empty directory. */
+	memset(&target, 0, sizeof(target));
+	target.f_dev = parent.f_dev;
+	target.f_fs  = parent.f_fs;
+	target.f_gd  = parent.f_gd;
+	target.f_ic  = &target.f_ic_scratch;
+	if (read_inode(ino, &target) != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NO_ENTRY;
+	}
+	if ((target.f_ic->i_mode & IFMT) != IFDIR) {
+		free_file_buffers(&target);
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NOT_DIRECTORY;
+	}
+	rc = ext2fs_readdir((fs_private_t)&target, ents, 4, &got);
+	if (rc != 0 || got > 2) {
+		free_file_buffers(&target);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc != 0 ? rc : FS_INVALID_PARAMETER; /* not empty */
+	}
+
+	/* Remove the name, free the directory's blocks and inode. */
+	(void)dir_remove_entry(&parent, leaf, &ino);
+	free_file_blocks(&parent, target.f_ic->i_block, 0, &freed);
+	(void)write_new_inode(&parent, ino, 0, NULL, 0, 0, 0);
+	inode_free(&parent, ino, 1);
+	free_file_buffers(&target);
+
+	/* The parent loses the link the child's ".." held. */
+	if (parent.f_ic->i_links_count > 0)
+		parent.f_ic->i_links_count--;
+	if (parent.f_vnode)
+		parent.f_vnode->v_inode_dirty = 1;
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return 0;
+}

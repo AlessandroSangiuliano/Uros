@@ -818,15 +818,19 @@ vfs_unlink(mach_port_t fs_port, vfs_path_t path)
 kern_return_t
 vfs_mkdir(mach_port_t fs_port, vfs_path_t path, int mode)
 {
-	(void)fs_port; (void)path; (void)mode;
-	return KERN_FAILURE;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	return ext2fs_mkdir(&mnt->dev, path, mode ? mode : 0755) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
 vfs_rmdir(mach_port_t fs_port, vfs_path_t path)
 {
-	(void)fs_port; (void)path;
-	return KERN_FAILURE;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	return ext2fs_rmdir(&mnt->dev, path) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
