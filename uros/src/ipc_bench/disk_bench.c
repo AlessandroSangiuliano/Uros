@@ -47,6 +47,10 @@
 #include <servers/netname.h>
 #include <sa_mach.h>
 #include <stdio.h>
+#include <string.h>
+
+#include <libcap.h>
+#include <mach/cap_types.h>
 
 #include "ext2fs_server.h"
 
@@ -195,7 +199,10 @@ bench_raw_write(const char *label, unsigned int chunk_size,
 			printf("  %s: get_status failed kr=%d\n", label, kr);
 			return;
 		}
-		disk_size_sects = (unsigned int)st[0];
+		/* DEV_GET_SIZE_DEVICE_SIZE (st[0]) is the device size in BYTES,
+		 * not sectors — convert so write_start lands inside the device
+		 * (else recnum overshoots and AHCI returns D_INVALID_SIZE). */
+		disk_size_sects = (unsigned int)st[0] / SECTOR_SIZE;
 	}
 
 	sectors_per_chunk = chunk_size / SECTOR_SIZE;
@@ -1992,6 +1999,93 @@ test_batch_rpc(void)
 }
 
 /* ===================================================================
+ * Page-cache cold vs warm benchmark (#267)
+ *
+ * Reads a large file (> the old 4 MB cache, within the 16 MB DMA cache)
+ * twice: the first pass is cold (cache empty -> misses go to AHCI), the
+ * second is warm (every block served from the page cache).  The warm/cold
+ * speedup quantifies the 16 MB cache benefit.  Reads go ipc_bench ->
+ * ext_server -> page cache -> AHCI, so this exercises the real cache.
+ * =================================================================== */
+static unsigned long
+read_whole_file(natural_t fid, unsigned int file_size, unsigned int chunk,
+		int *reads_out)
+{
+	tvalspec_t t0, t1;
+	unsigned int offset = 0;
+	int reads = 0;
+	kern_return_t kr;
+	pointer_t data;
+	mach_msg_type_number_t data_count;
+
+	dget_time(&t0);
+	while (offset < file_size) {
+		unsigned int want = file_size - offset;
+		if (want > chunk)
+			want = chunk;
+		kr = ext2_read(ext2_port, fid, offset, want, &data, &data_count);
+		if (kr != KERN_SUCCESS || data_count == 0)
+			break;
+		vm_deallocate(mach_task_self(), data, data_count);
+		offset += data_count;
+		reads++;
+	}
+	dget_time(&t1);
+	if (reads_out)
+		*reads_out = reads;
+	return delapsed_ns(&t0, &t1);
+}
+
+static void
+bench_cache_cold_warm(const char *filename)
+{
+	kern_return_t kr;
+	natural_t fid, file_size;
+	unsigned long cold_ns, warm_ns;
+	int rc, rw;
+	unsigned int chunk = 64 * 1024;
+
+	kr = ext2_open(ext2_port, filename, &fid);
+	if (kr != KERN_SUCCESS) {
+		printf("  cache cold/warm: open(\"%s\") failed kr=%d "
+		       "(is it on the rootfs?)\n", filename, kr);
+		return;
+	}
+	kr = ext2_stat(ext2_port, fid, &file_size);
+	if (kr != KERN_SUCCESS || file_size == 0) {
+		printf("  cache cold/warm: stat failed/empty\n");
+		ext2_close(ext2_port, fid);
+		return;
+	}
+
+	/* Cold: first read of this file since boot -> cache misses -> AHCI. */
+	cold_ns = read_whole_file(fid, file_size, chunk, &rc);
+	/* Warm: immediate re-read -> page-cache hits. */
+	warm_ns = read_whole_file(fid, file_size, chunk, &rw);
+	ext2_close(ext2_port, fid);
+
+	{
+		unsigned long cold_us = cold_ns / 1000;
+		unsigned long warm_us = warm_ns / 1000;
+		/* bytes/us == MB/s */
+		unsigned long cold_mbps = cold_us ? file_size / cold_us : 0;
+		unsigned long warm_mbps = warm_us ? file_size / warm_us : 0;
+		/* Use us (not ns) to avoid 32-bit overflow in the *100. */
+		unsigned long speedup_x100 =
+			warm_us ? (cold_us * 100UL) / warm_us : 0;
+
+		printf("  cache cold/warm (%s, %u KB, chunk 64 KB):\n",
+		       filename, file_size / 1024);
+		printf("    cold (miss->AHCI)   %6lu us  %4lu MB/s  (%d reads)\n",
+		       cold_us, cold_mbps, rc);
+		printf("    warm (cache hit)    %6lu us  %4lu MB/s  (%d reads)\n",
+		       warm_us, warm_mbps, rw);
+		printf("    warm speedup        %lu.%02lux\n",
+		       speedup_x100 / 100, speedup_x100 % 100);
+	}
+}
+
+/* ===================================================================
  * Public entry point
  * =================================================================== */
 
@@ -2005,12 +2099,47 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 	/* Discover servers via netname.
 	 * Try per-partition name (ahci0a) first, fall back to legacy name. */
+	const char *ahci_name = "ahci0a";
 	kr = netname_look_up(name_server_port, "", "ahci0a", &ahci_port);
-	if (kr != KERN_SUCCESS)
+	if (kr != KERN_SUCCESS) {
+		ahci_name = "ahci_driver";
 		kr = netname_look_up(name_server_port, "", "ahci_driver",
 				     &ahci_port);
+	}
 	if (kr == KERN_SUCCESS) {
-		have_ahci = 1;
+		/*
+		 * Authenticate the partition port through the capability
+		 * system, exactly like ext_server / default_pager.  Without
+		 * this, raw device_read/device_write are rejected with
+		 * KERN_NO_ACCESS and the whole raw path is skipped (#267).
+		 */
+		struct uros_cap tok;
+		char tok_blob[CAP_TOKEN_MAX];
+		security_token_t null_sec = { { 0, 0 } };
+		mach_port_t authed = MACH_PORT_NULL;
+
+		kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(ahci_name),
+				 CAP_OP_BLK_READ | CAP_OP_BLK_WRITE,
+				 0 /* no expiry */, &tok);
+		if (kr == KERN_SUCCESS) {
+			memcpy(tok_blob, &tok, sizeof(tok));
+			kr = device_open_cap(ahci_port, MACH_PORT_NULL,
+					     D_READ | D_WRITE, null_sec,
+					     (char *)ahci_name, tok_blob,
+					     (mach_msg_type_number_t)sizeof(tok),
+					     &authed);
+			if (kr == KERN_SUCCESS) {
+				ahci_port = authed;
+				have_ahci = 1;
+			} else {
+				printf("  raw bench: device_open_cap(%s) "
+				       "failed kr=%d (raw skipped)\n",
+				       ahci_name, kr);
+			}
+		} else {
+			printf("  raw bench: cap_request(%s) failed kr=%d "
+			       "(raw skipped)\n", ahci_name, kr);
+		}
 	}
 
 	kr = netname_look_up(name_server_port, "", "ext_server", &ext2_port);
@@ -2090,6 +2219,9 @@ bench_disk_run(mach_port_t host_port, mach_port_t clock)
 
 		/* Dirty list test — multiple dirty files + sync */
 		test_dirty_list();
+
+		/* Page-cache cold vs warm on a 12 MB file (#267) */
+		bench_cache_cold_warm("bench_large.dat");
 	}
 
 	if (have_ahci && have_ext2) {
