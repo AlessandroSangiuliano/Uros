@@ -436,20 +436,20 @@ static long h_set_thread_area(long desc, long a2, long a3,
 }
 
 /*
- * Phase 6a futex stub: busy-wait via syscall_thread_switch.  Works
- * for uncontended mutexes and the simple cmpxchg-loop patterns musl's
- * pthread_join uses; total throughput-killer under real contention.
- * Phase 6b replaces this with a proper mach_msg-based sleep.
+ * Real futex via mach_msg (#260).  Logic lives in posix_futex.c; this
+ * is just the dispatcher slot.
  *
  * Linux futex signature on i386:
  *   futex(uint32_t *uaddr, int op, uint32_t val,
  *         const struct timespec *timeout, uint32_t *uaddr2, uint32_t val3)
  *
  * Operations we handle:
- *   FUTEX_WAIT (0):    if *uaddr == val, yield and return 0; else -EAGAIN.
- *   FUTEX_WAKE (1):    no-op, return val (claimed wake count).
- *   FUTEX_WAIT_BITSET (9), FUTEX_WAKE_BITSET (10): same as WAIT/WAKE.
- *   PRIVATE bit (128): ignored — all our futexes are intra-task.
+ *   FUTEX_WAIT (0) / FUTEX_WAIT_BITSET (9):
+ *       block on a per-`uaddr` Mach port until FUTEX_WAKE arrives.
+ *   FUTEX_WAKE (1) / FUTEX_WAKE_BITSET (10):
+ *       send up to `val` empty messages to the per-`uaddr` port.
+ *   PRIVATE bit (128) and CLOCK_REALTIME bit (256): ignored — every
+ *       futex is intra-task and we treat timeouts as relative.
  */
 #define UROS_FUTEX_OP_MASK     0x7f
 #define UROS_FUTEX_WAIT        0
@@ -457,28 +457,24 @@ static long h_set_thread_area(long desc, long a2, long a3,
 #define UROS_FUTEX_WAIT_BITSET 9
 #define UROS_FUTEX_WAKE_BITSET 10
 
-extern long syscall_thread_switch(unsigned long, int, int);
+extern int __uros_futex_wait(unsigned int *uaddr, unsigned int val,
+                             const void *timeout);
+extern int __uros_futex_wake(unsigned int *uaddr, int n);
 
 static long h_futex(long uaddr, long op, long val, long timeout,
                     long uaddr2, long val3)
 {
-    (void)timeout; (void)uaddr2; (void)val3;
+    (void)uaddr2; (void)val3;
     int bare_op = (int)(op & UROS_FUTEX_OP_MASK);
     switch (bare_op) {
     case UROS_FUTEX_WAIT:
-    case UROS_FUTEX_WAIT_BITSET: {
-        unsigned int cur = *(volatile unsigned int *)uaddr;
-        if (cur != (unsigned int)val)
-            return -11;       /* -EAGAIN — value changed under us */
-        (void)syscall_thread_switch(0 /* MACH_PORT_NULL */,
-                                    1 /* SWITCH_OPTION_DEPRESS */,
-                                    1 /* 1ms hint */);
-        return 0;
-    }
+    case UROS_FUTEX_WAIT_BITSET:
+        return __uros_futex_wait((unsigned int *)uaddr,
+                                 (unsigned int)val,
+                                 (const void *)timeout);
     case UROS_FUTEX_WAKE:
     case UROS_FUTEX_WAKE_BITSET:
-        return val;           /* claim all wakeups happened — busy-wait
-                                 path on the waiter side will retry */
+        return __uros_futex_wake((unsigned int *)uaddr, (int)val);
     default:
         return -38;           /* -ENOSYS */
     }

@@ -107,6 +107,7 @@ add_library(libposix-uros STATIC
   posix_fork.c
   posix_tls.c
   posix_clone.c
+  posix_futex.c
   ${PROC_USER_C}
   ${EXEC_USER_C}
   ${MACH_I386_USER_C}
