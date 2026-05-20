@@ -28,14 +28,16 @@ BUILD_DIR="$REPO_ROOT/uros/build"
 ARCH="$(uname -m)"
 
 # --- Parametri di default ---
-IMG_SIZE_MB=48
+IMG_SIZE_MB=512
 DISK_IMG="$BUILD_DIR/disk.img"
 SECT_SIZE=512
 PART0_START_SECT=2048        # disk0a — /mach_servers/, 1 MiB aligned
-FS0_SIZE_MB=8                # bumped from 4 MB to fit proc_server (#237)
-PART1_START_SECT=18432       # disk0b — test data
-FS1_SIZE_MB=4
-PART2_START_SECT=26624       # disk0c — raw swap
+FS0_SIZE_MB=128              # 8 -> 128 MB (#266): 8x the 16 MB DMA page cache,
+                             # generous headroom for content growth
+PART1_START_SECT=264192      # disk0b — test data (2048 + 128 MiB)
+FS1_SIZE_MB=8
+PART2_START_SECT=280576      # disk0c — raw swap (264192 + 8 MiB) -> ~375 MB
+
 
 # ipc_bench suite selection (empty = all)
 BENCH_ARGS=""
