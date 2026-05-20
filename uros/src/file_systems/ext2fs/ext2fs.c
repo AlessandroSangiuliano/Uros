@@ -347,8 +347,8 @@ struct ext2_mount {
 	struct dcache_entry	 m_dcache[DCACHE_SIZE];
 };
 
-static int ext2fs_readdir(fs_private_t, struct fs_dirent *,
-			  unsigned int, unsigned int *);
+int ext2fs_readdir(fs_private_t, struct fs_dirent *,
+		   unsigned int, unsigned int *);
 
 struct fs_ops ext2fs_ops = {
 	ext2fs_open_file,
@@ -1537,6 +1537,13 @@ ext2fs_open_file_into(
 		cp++;
 
 	    /*
+	     * Trailing separators (or the root path "/") leave nothing to
+	     * look up — the current inode is the answer.
+	     */
+	    if (*cp == '\0')
+		break;
+
+	    /*
 	     * Get next component of path name.
 	     */
 	    component = cp;
@@ -1891,7 +1898,7 @@ ext2fs_file_is_directory(fs_private_t private)
  * caller can detect truncation by comparing *out_count to what it
  * expected or by re-reading with a larger buffer.
  */
-static int
+int
 ext2fs_readdir(fs_private_t private,
 	       struct fs_dirent *out,
 	       unsigned int max,
@@ -2114,6 +2121,422 @@ block_alloc(struct ext2fs_file *fp, int goal_group)
 	}
 
 	return 0;	/* no space */
+}
+
+/*
+ * Free a previously allocated data block: clear its bit in the block
+ * bitmap and bump the group + superblock free counts.  Inverse of
+ * block_alloc().  Dirty flags are raised on fp's vnode so the next
+ * ext2fs_flush_metadata() writes the descriptors and superblock back.
+ */
+static void
+block_free(struct ext2fs_file *fp, daddr_t block)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int bits_per_group = fs->s_blocks_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+	unsigned char *bm;
+	int group, bit, rc;
+
+	if (block < (daddr_t)fs->s_first_data_block ||
+	    block >= (daddr_t)fs->s_blocks_count)
+		return;
+
+	group = (block - fs->s_first_data_block) / bits_per_group;
+	bit   = (block - fs->s_first_data_block) % bits_per_group;
+
+	rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_block_bitmap),
+			     &bitmap, &bitmap_size);
+	if (rc != 0)
+		return;
+
+	bm = (unsigned char *)bitmap;
+	if (bm[bit >> 3] & (1 << (bit & 7))) {
+		bm[bit >> 3] &= ~(1 << (bit & 7));
+		rc = write_disk_block(fp, le32_to_cpu(gd[group].bg_block_bitmap),
+				      bitmap, block_size);
+		if (rc == 0) {
+			gd[group].bg_free_blocks_count = cpu_to_le16(
+				le16_to_cpu(gd[group].bg_free_blocks_count) + 1);
+			fs->s_free_blocks_count++;
+			if (fp->f_vnode) {
+				fp->f_vnode->v_gd_dirty = 1;
+				fp->f_vnode->v_super_dirty = 1;
+			}
+		}
+	}
+	vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+}
+
+/*
+ * Allocate a free inode, mirroring block_alloc() against the inode
+ * bitmap.  Reserved inodes (< EXT2_FIRST_INO) are skipped — they are
+ * already marked used in group 0's bitmap, but we guard anyway.  When
+ * is_dir is set the group's used-directory count is bumped (ext2 uses it
+ * for the Orlov-style allocator; we just keep it consistent).
+ *
+ * Returns the 1-based inode number, or 0 on failure.  Raises the gd +
+ * superblock dirty flags on fp's vnode.
+ */
+static ino_t
+inode_alloc(struct ext2fs_file *fp, int goal_group, int is_dir)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int ipg = fs->s_inodes_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int first_ino = EXT2_FIRST_INO(fs);
+	int ngroups, group, g, bit, rc;
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+
+	ngroups = (fs->s_inodes_count + ipg - 1) / ipg;
+
+	for (g = 0; g < ngroups; g++) {
+		group = (goal_group + g) % ngroups;
+
+		if (le16_to_cpu(gd[group].bg_free_inodes_count) == 0)
+			continue;
+
+		rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+				     &bitmap, &bitmap_size);
+		if (rc != 0)
+			continue;
+
+		{
+			unsigned char *bm = (unsigned char *)bitmap;
+
+			for (bit = 0; bit < ipg; bit++) {
+				ino_t ino = (ino_t)group * ipg + bit + 1;
+				if (ino < (ino_t)first_ino)
+					continue;
+				if (bm[bit >> 3] & (1 << (bit & 7)))
+					continue;
+
+				bm[bit >> 3] |= (1 << (bit & 7));
+				rc = write_disk_block(fp,
+					le32_to_cpu(gd[group].bg_inode_bitmap),
+					bitmap, block_size);
+				if (rc != 0) {
+					vm_deallocate(mach_task_self(),
+						      bitmap, bitmap_size);
+					return 0;
+				}
+
+				gd[group].bg_free_inodes_count = cpu_to_le16(
+					le16_to_cpu(gd[group].bg_free_inodes_count) - 1);
+				if (is_dir)
+					gd[group].bg_used_dirs_count = cpu_to_le16(
+						le16_to_cpu(gd[group].bg_used_dirs_count) + 1);
+				fs->s_free_inodes_count--;
+				if (fp->f_vnode) {
+					fp->f_vnode->v_gd_dirty = 1;
+					fp->f_vnode->v_super_dirty = 1;
+				}
+
+				vm_deallocate(mach_task_self(),
+					      bitmap, bitmap_size);
+				return ino;
+			}
+		}
+
+		vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+	}
+
+	return 0;	/* no free inode */
+}
+
+/*
+ * Release an inode: clear its bit in the inode bitmap, bump free counts
+ * (and drop the group's used-dirs count when freeing a directory).
+ * Inverse of inode_alloc().  The caller is responsible for having freed
+ * the inode's data blocks first.
+ */
+static void
+inode_free(struct ext2fs_file *fp, ino_t ino, int is_dir)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int ipg = fs->s_inodes_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+	unsigned char *bm;
+	int group, bit, rc;
+
+	if (ino < (ino_t)EXT2_FIRST_INO(fs) || ino > (ino_t)fs->s_inodes_count)
+		return;
+
+	group = (ino - 1) / ipg;
+	bit   = (ino - 1) % ipg;
+
+	rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+			     &bitmap, &bitmap_size);
+	if (rc != 0)
+		return;
+
+	bm = (unsigned char *)bitmap;
+	if (bm[bit >> 3] & (1 << (bit & 7))) {
+		bm[bit >> 3] &= ~(1 << (bit & 7));
+		rc = write_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+				      bitmap, block_size);
+		if (rc == 0) {
+			gd[group].bg_free_inodes_count = cpu_to_le16(
+				le16_to_cpu(gd[group].bg_free_inodes_count) + 1);
+			if (is_dir)
+				gd[group].bg_used_dirs_count = cpu_to_le16(
+					le16_to_cpu(gd[group].bg_used_dirs_count) - 1);
+			fs->s_free_inodes_count++;
+			if (fp->f_vnode) {
+				fp->f_vnode->v_gd_dirty = 1;
+				fp->f_vnode->v_super_dirty = 1;
+			}
+		}
+	}
+	vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+}
+
+/* ext2 on-disk directory-entry file_type values (FILETYPE feature). */
+#define EXT2_FT_REG_FILE	1
+#define EXT2_FT_DIR		2
+
+/*
+ * Persist a single directory block that was modified in place.  buf is
+ * the borrowed page-cache pointer returned by buf_read_file (so the
+ * cache already reflects our edit); we only need to push it to disk.
+ */
+static int
+dir_write_block(struct ext2fs_file *dir_fp, daddr_t lblk, vm_offset_t buf)
+{
+	daddr_t dblk;
+	int bs = EXT2_BLOCK_SIZE(dir_fp->f_fs);
+	char *tmp;
+	int rc = block_map(dir_fp, lblk, &dblk);
+	if (rc != 0)
+		return rc;
+	/*
+	 * 'buf' is the page-cache page we borrowed and edited in place.  With
+	 * the DMA-backed page cache that buffer lives in device DMA memory,
+	 * and device_write() cannot copyin from that mapping — it silently
+	 * persists zeroes (the in-process VA reads fine, but the kernel-side
+	 * copyin of the non-phys write path does not).  Copy into a normal
+	 * heap buffer for the synchronous write.  Directory writes are a cold
+	 * path, so the extra 4 KiB copy is negligible; file data keeps using
+	 * the working phys writeback path untouched.
+	 */
+	tmp = malloc(bs);
+	if (!tmp)
+		return KERN_RESOURCE_SHORTAGE;
+	memcpy(tmp, (void *)buf, bs);
+	rc = write_disk_block(dir_fp, dblk, (vm_offset_t)tmp, bs);
+	free(tmp);
+	return rc;
+}
+
+/*
+ * Append a fresh data block to a directory holding a single empty entry
+ * that spans the whole block, then place (name -> ino) in it.  Only the
+ * direct-block range is handled: directories deep enough to need an
+ * indirect block (> 12 blocks ~= 48 KiB of entries) are far beyond what
+ * this bootstrap fs is expected to grow, and we fail cleanly instead.
+ */
+static int
+dir_grow_and_add(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
+		 int file_type, int name_len)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	daddr_t lblk = dir_fp->f_ic->i_size / block_size;
+	int goal_group;
+	daddr_t newblk;
+	char *blk;
+	struct ext2_dir_entry *dp;
+	int rc;
+
+	if (lblk >= NDADDR)
+		return KERN_RESOURCE_SHORTAGE;
+
+	goal_group = (dir_fp->f_ino - 1) / fs->s_inodes_per_group;
+	newblk = block_alloc(dir_fp, goal_group);
+	if (newblk == 0)
+		return KERN_RESOURCE_SHORTAGE;
+
+	blk = (char *)malloc(block_size);
+	if (!blk) {
+		block_free(dir_fp, newblk);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	memset(blk, 0, block_size);
+
+	dp = (struct ext2_dir_entry *)blk;
+	dp->inode = cpu_to_le32((unsigned long)ino);
+	dp->rec_len = cpu_to_le16(block_size);
+	dp->name_len = (unsigned char)name_len;
+	dp->file_type = (unsigned char)file_type;
+	memcpy(dp->name, name, name_len);
+
+	rc = write_disk_block(dir_fp, newblk, (vm_offset_t)blk, block_size);
+	free(blk);
+	if (rc != 0) {
+		block_free(dir_fp, newblk);
+		return rc;
+	}
+
+	/* Link the new block into the inode and extend its size. */
+	dir_fp->f_ic->i_block[lblk] = newblk;
+	dir_fp->f_ic->i_size += block_size;
+	dir_fp->f_ic->i_blocks += block_size / 512;
+	if (dir_fp->f_vnode)
+		dir_fp->f_vnode->v_inode_dirty = 1;
+
+	{
+		struct ext2_mount *m =
+			(struct ext2_mount *)dir_fp->f_dev.mount_data;
+		if (m)
+			dcache_insert(m, dir_fp->f_ino, name, ino);
+	}
+	return 0;
+}
+
+/*
+ * Insert (name -> ino) into directory dir_fp.  Walks each directory
+ * block for a usable slot: a deleted entry (inode==0) whose rec_len is
+ * large enough, or trailing slack in a live entry that can be split off.
+ * Grows the directory by a block if nothing fits.  Returns 0 / error.
+ *
+ * dir_fp must have its inode loaded and a vnode (for dirty flags).  We
+ * read through buf_read_file, so the buffer we mutate is the same memory
+ * the page cache hands future readers; dir_write_block then persists it.
+ */
+static int
+dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
+	      int file_type)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int name_len = (int)strlen(name);
+	int needed = EXT2_DIR_REC_LEN(name_len);
+	struct ext2_mount *m = (struct ext2_mount *)dir_fp->f_dev.mount_data;
+	vm_offset_t offset;
+
+	if (name_len == 0 || name_len > EXT2_NAME_LEN)
+		return FS_NAME_TOO_LONG;
+
+	for (offset = 0; offset < dir_fp->f_ic->i_size; offset += block_size) {
+		vm_offset_t buf = 0;
+		vm_size_t buf_size = 0;
+		daddr_t lblk = offset / block_size;
+		int off, rc;
+
+		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
+		if (rc != 0)
+			return rc;
+
+		off = 0;
+		while (off + 8 <= block_size) {
+			struct ext2_dir_entry *dp =
+				(struct ext2_dir_entry *)((char *)buf + off);
+			int rec_len = le16_to_cpu(dp->rec_len);
+			int used;
+
+			if (rec_len < 8 || (off + rec_len) > block_size)
+				break;	/* corrupt block — give up on it */
+
+			used = (le32_to_cpu(dp->inode) == 0)
+				? 0 : EXT2_DIR_REC_LEN(dp->name_len);
+
+			if (rec_len - used >= needed) {
+				struct ext2_dir_entry *ne;
+				if (used == 0) {
+					ne = dp;	/* reuse deleted slot whole */
+				} else {
+					ne = (struct ext2_dir_entry *)
+						((char *)dp + used);
+					ne->rec_len = cpu_to_le16(rec_len - used);
+					dp->rec_len = cpu_to_le16(used);
+				}
+				ne->inode = cpu_to_le32((unsigned long)ino);
+				ne->name_len = (unsigned char)name_len;
+				ne->file_type = (unsigned char)file_type;
+				memcpy(ne->name, name, name_len);
+
+				rc = dir_write_block(dir_fp, lblk, buf);
+				if (rc != 0)
+					return rc;
+				if (m)
+					dcache_insert(m, dir_fp->f_ino, name, ino);
+				return 0;
+			}
+			off += rec_len;
+		}
+	}
+
+	return dir_grow_and_add(dir_fp, name, ino, file_type, name_len);
+}
+
+/*
+ * Remove the entry 'name' from directory dir_fp.  On success the removed
+ * inode number is returned through ino_out so the caller can drop link
+ * counts / free the inode.  Removal is the classic ext2 tombstone: the
+ * entry's rec_len is folded into the previous record, or inode is zeroed
+ * when it is the first record in the block.  Returns 0 / FS_NO_ENTRY.
+ */
+static int
+dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int name_len = (int)strlen(name);
+	struct ext2_mount *m = (struct ext2_mount *)dir_fp->f_dev.mount_data;
+	vm_offset_t offset;
+
+	for (offset = 0; offset < dir_fp->f_ic->i_size; offset += block_size) {
+		vm_offset_t buf = 0;
+		vm_size_t buf_size = 0;
+		daddr_t lblk = offset / block_size;
+		struct ext2_dir_entry *prev = NULL;
+		int off, rc;
+
+		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
+		if (rc != 0)
+			return rc;
+
+		off = 0;
+		while (off + 8 <= block_size) {
+			struct ext2_dir_entry *dp =
+				(struct ext2_dir_entry *)((char *)buf + off);
+			int rec_len = le16_to_cpu(dp->rec_len);
+
+			if (rec_len < 8 || (off + rec_len) > block_size)
+				break;
+
+			if (le32_to_cpu(dp->inode) != 0 &&
+			    dp->name_len == name_len &&
+			    memcmp(dp->name, name, name_len) == 0) {
+				if (ino_out)
+					*ino_out = (ino_t)le32_to_cpu(dp->inode);
+				if (prev)
+					prev->rec_len = cpu_to_le16(
+						le16_to_cpu(prev->rec_len) + rec_len);
+				else
+					dp->inode = cpu_to_le32(0);
+
+				rc = dir_write_block(dir_fp, lblk, buf);
+				if (rc != 0)
+					return rc;
+				if (m)
+					dcache_insert(m, dir_fp->f_ino, name,
+						      DCACHE_NEGATIVE);
+				return 0;
+			}
+			prev = dp;
+			off += rec_len;
+		}
+	}
+	return FS_NO_ENTRY;
 }
 
 /*
@@ -2821,5 +3244,519 @@ ext2fs_sync(fs_private_t private)
 
 	if (fp->f_dev.cache)
 		return page_cache_sync(fp->f_dev.cache);
+	return 0;
+}
+
+/* ================================================================
+ * Writable namespace (#264): create / unlink / truncate / rename.
+ *
+ * These operate on the PARENT directory: the path is split into a
+ * parent directory and a leaf name, the parent is opened via
+ * ext2fs_open_file_into() (sharing its vnode like any other opener),
+ * the directory-entry and allocation helpers above do the work, and
+ * ext2fs_close_file() flushes the parent's dirty inode / group
+ * descriptors / superblock.  Freed blocks are accounted through an fp
+ * that owns a vnode (the parent) so the dirty flags are raised.
+ * ================================================================ */
+
+/*
+ * Split an absolute path into its parent directory and leaf name.
+ * parent_out must hold at least PATH_MAX+1 bytes.  "/a/b/c" -> "/a/b"
+ * + "c"; "/x" -> "/" + "x".  *leaf_out points inside parent_out.
+ */
+static void
+split_parent_leaf(const char *path, char *parent_out, const char **leaf_out)
+{
+	char *slash;
+
+	strncpy(parent_out, path, PATH_MAX);
+	parent_out[PATH_MAX] = '\0';
+
+	slash = strrchr(parent_out, '/');
+	if (slash == NULL) {
+		/* Relative leaf, no directory part — treat parent as root. */
+		*leaf_out = path;
+		strcpy(parent_out, "/");
+		return;
+	}
+	*leaf_out = path + (slash - parent_out) + 1;
+	if (slash == parent_out)
+		parent_out[1] = '\0';	/* parent is root "/" */
+	else
+		*slash = '\0';
+}
+
+/*
+ * Write a fresh on-disk inode at 'ino'.  Only this inode's slot inside
+ * the shared inode-table block is touched.  iblock (EXT2_N_BLOCKS long,
+ * may be NULL) seeds the block map; the inode cache is invalidated so a
+ * later read_inode() picks up the new contents.
+ */
+static int
+write_new_inode(struct ext2fs_file *ctx, ino_t ino, int mode,
+		const unsigned long *iblock, unsigned long size,
+		unsigned long blocks, int links)
+{
+	struct ext2_super_block *fs = ctx->f_fs;
+	daddr_t itblk = ext2_ino2blk(fs, ctx->f_gd, ino);
+	vm_offset_t buf;
+	vm_size_t bsz;
+	struct ext2_inode *raw;
+	int rc, k;
+
+	rc = read_disk_block(ctx, itblk, &buf, &bsz);
+	if (rc != 0)
+		return rc;
+
+	raw = (struct ext2_inode *)((char *)buf +
+		ext2_itoo(fs, ino) * EXT2_INODE_SIZE(fs));
+	memset(raw, 0, EXT2_INODE_SIZE(fs));
+	raw->i_mode = cpu_to_le16(mode);
+	raw->i_links_count = cpu_to_le16(links);
+	raw->i_size = cpu_to_le32(size);
+	raw->i_blocks = cpu_to_le32(blocks);
+	if (iblock)
+		for (k = 0; k < EXT2_N_BLOCKS; k++)
+			raw->i_block[k] = cpu_to_le32(iblock[k]);
+
+	rc = write_disk_block(ctx, itblk, buf, EXT2_BLOCK_SIZE(fs));
+	vm_deallocate(mach_task_self(), buf, bsz);
+
+	{
+		struct ext2_mount *m =
+			(struct ext2_mount *)ctx->f_dev.mount_data;
+		if (m)
+			icache_invalidate(m, ino);
+	}
+	return rc;
+}
+
+/*
+ * Recursively free an indirect block tree.  level 0 = single indirect
+ * (entries are data blocks), 1 = double, 2 = triple.  Frees every block
+ * it points at and then the indirect block itself.  Returns the number
+ * of freed blocks through *freed (for i_blocks accounting).
+ */
+static void
+free_indirect_tree(struct ext2fs_file *acct, daddr_t ind_block, int level,
+		   int *freed)
+{
+	struct ext2_super_block *fs = acct->f_fs;
+	int per = EXT2_ADDR_PER_BLOCK(fs);
+	vm_offset_t buf;
+	vm_size_t bsz;
+	unsigned long *ptr;
+	int i;
+
+	if (ind_block == 0)
+		return;
+	if (read_disk_block(acct, ind_block, &buf, &bsz) != 0)
+		return;
+
+	ptr = (unsigned long *)buf;
+	for (i = 0; i < per; i++) {
+		daddr_t blk = le32_to_cpu(ptr[i]);
+		if (blk == 0)
+			continue;
+		if (level > 0)
+			free_indirect_tree(acct, blk, level - 1, freed);
+		else {
+			block_free(acct, blk);
+			(*freed)++;
+		}
+	}
+	vm_deallocate(mach_task_self(), buf, bsz);
+
+	block_free(acct, ind_block);
+	(*freed)++;
+}
+
+/*
+ * Free the data blocks of an inode whose block map is 'iblock', from
+ * logical block 'from' to the end.  Partial truncation that would have
+ * to descend into an indirect tree (from > NDADDR) is not supported and
+ * returns an error rather than risk leaking blocks.  'acct' must own a
+ * vnode so block_free() can raise the gd/superblock dirty flags.  The
+ * number of freed disk blocks is returned through *freed_sectors as a
+ * count of fs blocks (caller scales to 512-byte units for i_blocks).
+ */
+static int
+free_file_blocks(struct ext2fs_file *acct, unsigned long *iblock,
+		 daddr_t from, int *freed_blocks)
+{
+	int i;
+
+	*freed_blocks = 0;
+
+	if (from > NDADDR)
+		return KERN_FAILURE;	/* partial indirect truncate unsupported */
+
+	/* Direct blocks at or beyond 'from'. */
+	for (i = (int)from; i < NDADDR; i++) {
+		if (iblock[i]) {
+			block_free(acct, (daddr_t)iblock[i]);
+			(*freed_blocks)++;
+			iblock[i] = 0;
+		}
+	}
+
+	/* Everything from 'from' onward includes the whole indirect set. */
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR],     0, freed_blocks);
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR + 1], 1, freed_blocks);
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR + 2], 2, freed_blocks);
+	iblock[NDADDR]     = 0;
+	iblock[NDADDR + 1] = 0;
+	iblock[NDADDR + 2] = 0;
+	return 0;
+}
+
+/*
+ * Open the parent directory of 'path' into the caller-provided fp.
+ * Returns 0 with *leaf pointing at the leaf name inside leafbuf
+ * (PATH_MAX+1), or an FS_* error.  The caller must ext2fs_close_file(fp)
+ * on success.
+ */
+static int
+open_parent_dir(struct device *dev, const char *path, char *leafbuf,
+		const char **leaf, struct ext2fs_file *fp)
+{
+	fs_private_t pp;
+	int rc;
+
+	split_parent_leaf(path, leafbuf, leaf);
+	if ((*leaf)[0] == '\0')
+		return FS_INVALID_PARAMETER;
+
+	rc = ext2fs_open_file_into(dev, leafbuf, &pp, fp);
+	if (rc != 0)
+		return rc;
+	if ((fp->f_ic->i_mode & IFMT) != IFDIR) {
+		ext2fs_close_file(pp);
+		return FS_NOT_DIRECTORY;
+	}
+	return 0;
+}
+
+int
+ext2fs_create(struct device *dev, const char *path, int mode)
+{
+	struct ext2fs_file parent;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino, existing;
+	int rc, goal;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &existing) == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_INVALID_PARAMETER;	/* already exists */
+	}
+
+	goal = (parent.f_ino - 1) / parent.f_fs->s_inodes_per_group;
+	ino = inode_alloc(&parent, goal, 0);
+	if (ino == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	rc = write_new_inode(&parent, ino, IFREG | (mode & 0777), NULL, 0, 0, 1);
+	if (rc == 0)
+		rc = dir_add_entry(&parent, leaf, ino, EXT2_FT_REG_FILE);
+	if (rc != 0)
+		inode_free(&parent, ino, 0);
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return rc;
+}
+
+int
+ext2fs_unlink(struct device *dev, const char *path)
+{
+	struct ext2fs_file parent, target;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino = 0;
+	int rc, links, freed = 0;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	rc = dir_remove_entry(&parent, leaf, &ino);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* Read the target inode through a scratch fp that borrows the
+	 * parent's fs/gd/dev, then drop a link.  At zero links free its
+	 * data blocks and the inode itself — accounted on the parent fp so
+	 * the gd/superblock dirty flags are flushed on close. */
+	memset(&target, 0, sizeof(target));
+	target.f_dev = parent.f_dev;
+	target.f_fs  = parent.f_fs;
+	target.f_gd  = parent.f_gd;
+	target.f_ic  = &target.f_ic_scratch;
+
+	if (read_inode(ino, &target) == 0) {
+		links = (int)target.f_ic->i_links_count - 1;
+		if (links <= 0) {
+			free_file_blocks(&parent, target.f_ic->i_block, 0,
+					 &freed);
+			(void)write_new_inode(&parent, ino, 0, NULL, 0, 0, 0);
+			inode_free(&parent, ino, 0);
+		} else {
+			(void)write_new_inode(&parent, ino,
+				target.f_ic->i_mode, target.f_ic->i_block,
+				target.f_ic->i_size, target.f_ic->i_blocks,
+				links);
+		}
+	}
+	free_file_buffers(&target);
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return 0;
+}
+
+/*
+ * Truncate an open file to 'length'.  Only truncation to zero, or to a
+ * length still within the direct blocks, is supported; anything that
+ * would require partial indirect-tree truncation returns an error.
+ */
+int
+ext2fs_truncate_file(fs_private_t private, vm_size_t length)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	struct ext2_super_block *fs = fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	daddr_t from = (length + block_size - 1) / block_size;
+	int freed = 0, rc;
+
+	if (fp->f_ic->i_size <= length)
+		return 0;	/* grow-on-truncate not handled here */
+
+	rc = free_file_blocks(fp, fp->f_ic->i_block, from, &freed);
+	if (rc != 0)
+		return rc;
+
+	fp->f_ic->i_size = length;
+	if ((unsigned long)(freed * (block_size / 512)) <= fp->f_ic->i_blocks)
+		fp->f_ic->i_blocks -= freed * (block_size / 512);
+	else
+		fp->f_ic->i_blocks = 0;
+	if (fp->f_vnode)
+		fp->f_vnode->v_inode_dirty = 1;
+	return ext2fs_flush_metadata(private);
+}
+
+int
+ext2fs_rename(struct device *dev, const char *oldpath, const char *newpath)
+{
+	struct ext2fs_file oldp, newp;
+	char oldleafbuf[PATH_MAX + 1], newleafbuf[PATH_MAX + 1];
+	const char *oldleaf, *newleaf;
+	ino_t ino = 0, dummy = 0, victim = 0;
+	int rc, file_type;
+	struct ext2fs_file tmp;
+
+	/* Resolve the source: parent dir + the inode being moved. */
+	rc = open_parent_dir(dev, oldpath, oldleafbuf, &oldleaf, &oldp);
+	if (rc != 0)
+		return rc;
+	if (search_directory((char *)oldleaf, &oldp, &ino) != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return FS_NO_ENTRY;
+	}
+
+	/* Determine the entry's file_type from the inode mode. */
+	memset(&tmp, 0, sizeof(tmp));
+	tmp.f_dev = oldp.f_dev; tmp.f_fs = oldp.f_fs; tmp.f_gd = oldp.f_gd;
+	tmp.f_ic = &tmp.f_ic_scratch;
+	file_type = EXT2_FT_REG_FILE;
+	if (read_inode(ino, &tmp) == 0 &&
+	    (tmp.f_ic->i_mode & IFMT) == IFDIR)
+		file_type = EXT2_FT_DIR;
+	free_file_buffers(&tmp);
+
+	/* Add the new name (overwriting any existing target). */
+	rc = open_parent_dir(dev, newpath, newleafbuf, &newleaf, &newp);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return rc;
+	}
+	if (search_directory((char *)newleaf, &newp, &victim) == 0) {
+		/* Destination exists — remove it first (POSIX overwrite). */
+		(void)dir_remove_entry(&newp, newleaf, &dummy);
+	}
+	rc = dir_add_entry(&newp, newleaf, ino, file_type);
+	ext2fs_close_file((fs_private_t)&newp);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return rc;
+	}
+
+	/* Drop the old name. */
+	(void)dir_remove_entry(&oldp, oldleaf, &dummy);
+	ext2fs_close_file((fs_private_t)&oldp);
+	return 0;
+}
+
+int
+ext2fs_mkdir(struct device *dev, const char *path, int mode)
+{
+	struct ext2fs_file parent;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino, existing;
+	daddr_t dblk;
+	char *blk;
+	struct ext2_dir_entry *dot, *dotdot;
+	unsigned long iblock[EXT2_N_BLOCKS];
+	int rc, goal, block_size;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &existing) == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_INVALID_PARAMETER;	/* already exists */
+	}
+
+	block_size = EXT2_BLOCK_SIZE(parent.f_fs);
+	goal = (parent.f_ino - 1) / parent.f_fs->s_inodes_per_group;
+
+	ino = inode_alloc(&parent, goal, 1 /* is_dir */);
+	if (ino == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	dblk = block_alloc(&parent, goal);
+	if (dblk == 0) {
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	/* Build the initial directory block: "." then ".." spanning the
+	 * rest of the block. */
+	blk = (char *)malloc(block_size);
+	if (!blk) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	memset(blk, 0, block_size);
+	dot = (struct ext2_dir_entry *)blk;
+	dot->inode = cpu_to_le32((unsigned long)ino);
+	dot->rec_len = cpu_to_le16(EXT2_DIR_REC_LEN(1));
+	dot->name_len = 1;
+	dot->file_type = EXT2_FT_DIR;
+	dot->name[0] = '.';
+	dotdot = (struct ext2_dir_entry *)(blk + EXT2_DIR_REC_LEN(1));
+	dotdot->inode = cpu_to_le32((unsigned long)parent.f_ino);
+	dotdot->rec_len = cpu_to_le16(block_size - EXT2_DIR_REC_LEN(1));
+	dotdot->name_len = 2;
+	dotdot->file_type = EXT2_FT_DIR;
+	dotdot->name[0] = '.';
+	dotdot->name[1] = '.';
+	rc = write_disk_block(&parent, dblk, (vm_offset_t)blk, block_size);
+	free(blk);
+	if (rc != 0) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* The new directory inode: links_count 2 (itself via "." and the
+	 * name in the parent), one data block. */
+	memset(iblock, 0, sizeof(iblock));
+	iblock[0] = (unsigned long)dblk;
+	rc = write_new_inode(&parent, ino, IFDIR | (mode & 0777), iblock,
+			     block_size, block_size / 512, 2);
+	if (rc == 0)
+		rc = dir_add_entry(&parent, leaf, ino, EXT2_FT_DIR);
+	if (rc != 0) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* The parent gains a link from the child's "..". */
+	parent.f_ic->i_links_count++;
+	if (parent.f_vnode)
+		parent.f_vnode->v_inode_dirty = 1;
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return 0;
+}
+
+/*
+ * Remove an empty directory.  Refuses non-empty directories (anything
+ * beyond "." and "..").  Frees the directory's data block and inode and
+ * drops the link the child contributed to the parent.
+ */
+int
+ext2fs_rmdir(struct device *dev, const char *path)
+{
+	struct ext2fs_file parent, target;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino = 0;
+	int rc, freed = 0;
+	struct fs_dirent ents[4];
+	unsigned int got = 0;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &ino) != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NO_ENTRY;
+	}
+
+	/* Open the target and verify it is an empty directory. */
+	memset(&target, 0, sizeof(target));
+	target.f_dev = parent.f_dev;
+	target.f_fs  = parent.f_fs;
+	target.f_gd  = parent.f_gd;
+	target.f_ic  = &target.f_ic_scratch;
+	if (read_inode(ino, &target) != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NO_ENTRY;
+	}
+	if ((target.f_ic->i_mode & IFMT) != IFDIR) {
+		free_file_buffers(&target);
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NOT_DIRECTORY;
+	}
+	rc = ext2fs_readdir((fs_private_t)&target, ents, 4, &got);
+	if (rc != 0 || got > 2) {
+		free_file_buffers(&target);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc != 0 ? rc : FS_INVALID_PARAMETER; /* not empty */
+	}
+
+	/* Remove the name, free the directory's blocks and inode. */
+	(void)dir_remove_entry(&parent, leaf, &ino);
+	free_file_blocks(&parent, target.f_ic->i_block, 0, &freed);
+	(void)write_new_inode(&parent, ino, 0, NULL, 0, 0, 0);
+	inode_free(&parent, ino, 1);
+	free_file_buffers(&target);
+
+	/* The parent loses the link the child's ".." held. */
+	if (parent.f_ic->i_links_count > 0)
+		parent.f_ic->i_links_count--;
+	if (parent.f_vnode)
+		parent.f_vnode->v_inode_dirty = 1;
+
+	ext2fs_close_file((fs_private_t)&parent);
 	return 0;
 }

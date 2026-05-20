@@ -594,10 +594,28 @@ vfs_open(
 	kern_return_t kr;
 	fs_private_t priv;
 
-	(void)flags;	/* v0.1: ignore O_CREAT/O_TRUNC; backend has no support */
-	(void)mode;
-
 	kr = ds_ext2_open(fs_port, path, &fid);
+
+	/* O_EXCL: a successful open of an existing file is an error. */
+	if (kr == KERN_SUCCESS &&
+	    (flags & VFS_O_CREAT) && (flags & VFS_O_EXCL)) {
+		(void)ds_ext2_close(fs_port, fid);
+		*handle_out = 0;
+		*type_out   = VFS_FT_UNKNOWN;
+		return KERN_FAILURE;
+	}
+
+	/* O_CREAT: create the file then reopen if it didn't exist. */
+	if (kr != KERN_SUCCESS && (flags & VFS_O_CREAT)) {
+		int rc = ext2fs_create(&mnt->dev, path, mode ? mode : 0644);
+		if (rc != 0) {
+			*handle_out = 0;
+			*type_out   = VFS_FT_UNKNOWN;
+			return KERN_FAILURE;
+		}
+		kr = ds_ext2_open(fs_port, path, &fid);
+	}
+
 	if (kr != KERN_SUCCESS) {
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
@@ -605,6 +623,12 @@ vfs_open(
 	}
 
 	priv = vfs_priv_for_handle(mnt, (vfs_u64_t)fid);
+
+	/* O_TRUNC: drop a regular file's contents to zero length. */
+	if ((flags & VFS_O_TRUNC) && priv &&
+	    !ext2fs_file_is_directory(priv))
+		(void)ext2fs_truncate_file(priv, 0);
+
 	*handle_out = (vfs_u64_t)fid;
 	*type_out   = (priv && ext2fs_file_is_directory(priv))
 		      ? VFS_FT_DIR : VFS_FT_REG;
@@ -658,8 +682,15 @@ vfs_write(
 kern_return_t
 vfs_truncate(mach_port_t fs_port, vfs_u64_t handle, vfs_u64_t length)
 {
-	(void)fs_port; (void)handle; (void)length;
-	return KERN_FAILURE;	/* ext2fs lib has no truncate primitive */
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	fs_private_t priv = vfs_priv_for_handle(mnt, handle);
+
+	if (!priv)
+		return KERN_INVALID_ARGUMENT;
+	if (length > 0xFFFFFFFFu)
+		return KERN_INVALID_ARGUMENT;
+	return ext2fs_truncate_file(priv, (vm_size_t)length) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
@@ -706,39 +737,109 @@ vfs_readdir(
 	mach_msg_type_number_t	*entries_count_out,
 	vfs_u64_t		*next_cookie_out)
 {
-	(void)fs_port; (void)dir_handle; (void)cookie;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	fs_private_t priv = vfs_priv_for_handle(mnt, dir_handle);
+	struct fs_dirent *tmp;
+	vfs_dirent_t *outv;
+	unsigned int want, got = 0, emit = 0, i;
+	vm_offset_t buf;
+	kern_return_t kr;
+	int rc;
+
 	*entries_out       = (pointer_t)0;
 	*entries_count_out = 0;
 	*next_cookie_out   = 0;
-	return KERN_FAILURE;	/* ext2fs lib has no dirent enumeration */
+
+	if (!priv)
+		return KERN_INVALID_ARGUMENT;
+
+	/* ext2fs_readdir() always enumerates from the start, so read
+	 * cookie + VFS_DIRENT_MAX entries and slice off the ones already
+	 * delivered.  Adequate for the directory sizes this fs sees. */
+	want = (unsigned int)cookie + VFS_DIRENT_MAX;
+	tmp = (struct fs_dirent *)malloc(want * sizeof(*tmp));
+	if (!tmp)
+		return KERN_RESOURCE_SHORTAGE;
+
+	rc = ext2fs_readdir(priv, tmp, want, &got);
+	if (rc != 0) {
+		free(tmp);
+		return KERN_FAILURE;
+	}
+
+	kr = vm_allocate(mach_task_self(), &buf,
+			 VFS_DIRENT_MAX * sizeof(vfs_dirent_t), TRUE);
+	if (kr != KERN_SUCCESS) {
+		free(tmp);
+		return kr;
+	}
+	outv = (vfs_dirent_t *)buf;
+
+	for (i = (unsigned int)cookie; i < got && emit < VFS_DIRENT_MAX; i++) {
+		unsigned int nlen = (unsigned int)strlen(tmp[i].name);
+		uint8_t vt;
+		switch (tmp[i].type) {		/* ext2 FT -> VFS_FT */
+		case 1:  vt = VFS_FT_REG;     break;
+		case 2:  vt = VFS_FT_DIR;     break;
+		case 3:  vt = VFS_FT_CHAR;    break;
+		case 4:  vt = VFS_FT_BLOCK;   break;
+		case 5:  vt = VFS_FT_FIFO;    break;
+		case 6:  vt = VFS_FT_SOCK;    break;
+		case 7:  vt = VFS_FT_SYMLINK; break;
+		default: vt = VFS_FT_UNKNOWN; break;
+		}
+		if (nlen > VFS_NAME_MAX)
+			nlen = VFS_NAME_MAX;
+		outv[emit].d_ino     = (uint64_t)tmp[i].ino;
+		outv[emit].d_cookie  = (uint64_t)(i + 1);
+		outv[emit].d_type    = vt;
+		outv[emit].d_namelen = (uint8_t)nlen;
+		memcpy(outv[emit].d_name, tmp[i].name, nlen);
+		outv[emit].d_name[nlen] = '\0';
+		emit++;
+	}
+	free(tmp);
+
+	*entries_out       = (pointer_t)buf;
+	*entries_count_out = (mach_msg_type_number_t)(emit * sizeof(vfs_dirent_t));
+	*next_cookie_out   = (i < got) ? (vfs_u64_t)i : 0;
+	return KERN_SUCCESS;
 }
 
 kern_return_t
 vfs_unlink(mach_port_t fs_port, vfs_path_t path)
 {
-	(void)fs_port; (void)path;
-	return KERN_FAILURE;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	return ext2fs_unlink(&mnt->dev, path) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
 vfs_mkdir(mach_port_t fs_port, vfs_path_t path, int mode)
 {
-	(void)fs_port; (void)path; (void)mode;
-	return KERN_FAILURE;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	return ext2fs_mkdir(&mnt->dev, path, mode ? mode : 0755) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
 vfs_rmdir(mach_port_t fs_port, vfs_path_t path)
 {
-	(void)fs_port; (void)path;
-	return KERN_FAILURE;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	return ext2fs_rmdir(&mnt->dev, path) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t
 vfs_rename(mach_port_t fs_port, vfs_path_t old_path, vfs_path_t new_path)
 {
-	(void)fs_port; (void)old_path; (void)new_path;
-	return KERN_FAILURE;
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	return ext2fs_rename(&mnt->dev, old_path, new_path) == 0
+		? KERN_SUCCESS : KERN_FAILURE;
 }
 
 kern_return_t

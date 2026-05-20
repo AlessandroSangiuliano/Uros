@@ -58,6 +58,14 @@ char *strcat(char *dst, const char *src) {
     return ret;
 }
 
+char *strrchr(const char *s, int c) {
+    const char *last = (char)c == '\0' ? s : 0;
+    for (; *s; s++)
+        if (*s == (char)c)
+            last = s;
+    return (char *)last;
+}
+
 size_t strlen(const char *s) {
     size_t len = 0;
     while (*s++) len++;
