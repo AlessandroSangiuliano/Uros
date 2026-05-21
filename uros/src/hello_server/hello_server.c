@@ -88,13 +88,15 @@ hello_pthread_worker(void *arg)
  * libposix-uros fd layer (open/read/lseek/fstat/close) over libvfs.
  * Runs AFTER bootstrap_completed, so ext_server has a chance to mount
  * "/"; we retry open() while it comes up, yielding to let the fs task
- * run.  /hello.txt is seeded by make-disk-image.sh.
+ * run.  /posix_smoke.txt is a read-only fixture seeded by
+ * make-disk-image.sh — kept separate from /hello.txt (which disk_bench
+ * uses as a write scratch file) so the check passes on a non-fresh disk.
  */
 static void
 hello_posix_fs_smoke(void)
 {
-    static const char expect[] = "Hello from /mach_servers/ root\n";
-    const char *path = "/hello.txt";
+    static const char expect[] = "libposix-uros POSIX fd layer smoke\n";
+    const char *path = "/posix_smoke.txt";
     int fd = -1;
 
     for (int t = 0; t < 400 && fd < 0; t++) {
