@@ -108,4 +108,12 @@ int             vfs_copy(const char *src, const char *dst);
  */
 void            vfs_flipc_set_enabled(int on);
 
+/*
+ * Flush every fd's pending write-behind buffer to its fs_server (#232).
+ * libposix-uros calls this before execve hands the fd table to a new
+ * image, since the buffers live in this task's heap and would otherwise
+ * be lost across exec.
+ */
+void            vfs_flush_all(void);
+
 #endif /* _LIBVFS_H_ */

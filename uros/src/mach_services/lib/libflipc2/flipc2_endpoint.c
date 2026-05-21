@@ -84,6 +84,11 @@ struct flipc2_endpoint {
     uint32_t            ring_entries;
     uint32_t            flags;          /* FLIPC2_CREATE_ISOLATED etc. */
     int                 pending_conn_idx; /* set by MIG stub, read by accept */
+    /* Reactor pump (#232): a dead client's channels, recorded instead of
+     * destroyed so the caller can drop them from its pollset first. */
+    int                 reactor_mode;
+    flipc2_channel_t    pending_dead_fwd;
+    flipc2_channel_t    pending_dead_rev;
     struct flipc2_ep_conn conns[FLIPC2_EP_MAX_CLIENTS_MAX];
 };
 
@@ -130,6 +135,57 @@ flipc2_ep_cleanup_dead(struct flipc2_endpoint *ep,
 
     /* Unknown dead name — just deallocate */
     mach_port_deallocate(mach_task_self(), dead_port);
+}
+
+/*
+ * Reactor variant (#232): on client death, record the channels for the
+ * caller to tear down (after removing them from its pollset) instead of
+ * destroying them here.  Eliminates the use-after-free between the
+ * dead-name handler and a separate consumer.
+ */
+static void
+flipc2_ep_cleanup_dead_reactor(struct flipc2_endpoint *ep,
+                               mach_msg_header_t *msg)
+{
+    mach_dead_name_notification_t *notif =
+        (mach_dead_name_notification_t *)msg;
+    mach_port_t dead_port = notif->not_port;
+    uint32_t i;
+
+    for (i = 0; i < ep->max_clients; i++) {
+        if (!ep->conns[i].active)
+            continue;
+        if (ep->conns[i].client_task != dead_port)
+            continue;
+
+        ep->pending_dead_fwd = ep->conns[i].fwd_ch;
+        ep->pending_dead_rev = ep->conns[i].rev_ch;
+        mach_port_deallocate(mach_task_self(), dead_port);
+        ep->conns[i].active = 0;
+        ep->conns[i].client_task = MACH_PORT_NULL;
+        ep->n_clients--;
+        return;
+    }
+    mach_port_deallocate(mach_task_self(), dead_port);
+}
+
+/* Reactor demux: like flipc2_ep_demux but records dead clients rather
+ * than destroying their channels (see flipc2_endpoint_pump). */
+static boolean_t
+flipc2_ep_demux_reactor(mach_msg_header_t *in, mach_msg_header_t *out)
+{
+    if (flipc2_endpoint_server(in, out))
+        return TRUE;
+
+    if (in->msgh_id == MACH_NOTIFY_DEAD_NAME) {
+        struct flipc2_endpoint *ep =
+            (struct flipc2_endpoint *)(unsigned long)in->msgh_local_port;
+        flipc2_ep_cleanup_dead_reactor(ep, in);
+        ((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+        out->msgh_size = sizeof(mig_reply_error_t);
+        return TRUE;
+    }
+    return FALSE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -458,6 +514,61 @@ flipc2_endpoint_create(
     }
 
     *ep_out = ep;
+    return FLIPC2_SUCCESS;
+}
+
+flipc2_return_t
+flipc2_endpoint_pump(
+    flipc2_endpoint_t   ep,
+    uint32_t            timeout_ms,
+    flipc2_ep_event_t  *ev)
+{
+    union { mach_msg_header_t hdr; char buf[8192]; } in;
+    union { mach_msg_header_t hdr; char buf[8192]; } out;
+    kern_return_t kr;
+
+    if (!ep || !ev)
+        return FLIPC2_ERR_INVALID_ARGUMENT;
+
+    ev->type   = FLIPC2_EP_EVENT_NONE;
+    ev->fwd_ch = (flipc2_channel_t)0;
+    ev->rev_ch = (flipc2_channel_t)0;
+
+    ep->pending_conn_idx  = -1;
+    ep->pending_dead_fwd  = (flipc2_channel_t)0;
+    ep->pending_dead_rev  = (flipc2_channel_t)0;
+
+    /* Receive at most one control message, bounded by timeout_ms. */
+    kr = mach_msg(&in.hdr, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+                  sizeof(in), ep->port_set, timeout_ms, MACH_PORT_NULL);
+    if (kr == MACH_RCV_TIMED_OUT)
+        return FLIPC2_SUCCESS;          /* nothing pending */
+    if (kr != MACH_MSG_SUCCESS)
+        return FLIPC2_ERR_KERNEL;
+
+    /* Dispatch (connect handshake sets pending_conn_idx; dead-name
+     * records pending_dead_* without destroying). */
+    (void)flipc2_ep_demux_reactor(&in.hdr, &out.hdr);
+
+    /* Send the MIG reply when the routine produced one. */
+    if (out.hdr.msgh_remote_port != MACH_PORT_NULL &&
+        ((mig_reply_error_t *)&out)->RetCode != MIG_NO_REPLY) {
+        (void)mach_msg(&out.hdr, MACH_SEND_MSG, out.hdr.msgh_size, 0,
+                       MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE,
+                       MACH_PORT_NULL);
+    }
+
+    if (ep->pending_conn_idx >= 0) {
+        int idx = ep->pending_conn_idx;
+        ev->type   = FLIPC2_EP_EVENT_NEW;
+        ev->fwd_ch = ep->conns[idx].fwd_ch;
+        ev->rev_ch = ep->conns[idx].rev_ch;
+        ep->pending_conn_idx = -1;
+    } else if (ep->pending_dead_rev != (flipc2_channel_t)0) {
+        ev->type   = FLIPC2_EP_EVENT_DEAD;
+        ev->fwd_ch = ep->pending_dead_fwd;
+        ev->rev_ch = ep->pending_dead_rev;
+    }
     return FLIPC2_SUCCESS;
 }
 

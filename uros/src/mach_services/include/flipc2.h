@@ -1367,6 +1367,41 @@ flipc2_endpoint_accept(
     flipc2_channel_t   *rev_ch);
 
 /*
+ * Reactor-mode event pump (single-thread server model).
+ *
+ * flipc2_endpoint_accept() blocks until a connect and auto-destroys a
+ * client's channels on death — which races a separate per-client
+ * consumer thread.  The pump lets one thread own the whole lifecycle:
+ * it processes at most one control message (connect / dead-name) with a
+ * bounded wait and reports it as an event, WITHOUT destroying anything.
+ * The caller adds new channels to its pollset and, on FLIPC2_EP_DEAD,
+ * removes them from the pollset and calls flipc2_channel_destroy itself
+ * — so no channel is ever freed while another thread touches it.
+ */
+#define FLIPC2_EP_EVENT_NONE    0       /* timed out, nothing to do      */
+#define FLIPC2_EP_EVENT_NEW     1       /* a client connected            */
+#define FLIPC2_EP_EVENT_DEAD    2       /* a client died (caller frees)  */
+
+typedef struct flipc2_ep_event {
+    int                 type;           /* FLIPC2_EP_EVENT_*              */
+    flipc2_channel_t    fwd_ch;         /* server→client                 */
+    flipc2_channel_t    rev_ch;         /* client→server                 */
+} flipc2_ep_event_t;
+
+/*
+ * Process one control message on the endpoint, waiting at most
+ * timeout_ms (0 = non-blocking poll).  On return *ev describes what
+ * happened.  For FLIPC2_EP_EVENT_DEAD the channels are no longer
+ * registered in the endpoint but are NOT destroyed — the caller must
+ * remove them from any pollset and call flipc2_channel_destroy.
+ */
+flipc2_return_t
+flipc2_endpoint_pump(
+    flipc2_endpoint_t   ep,
+    uint32_t            timeout_ms,
+    flipc2_ep_event_t  *ev);
+
+/*
  * Server-side: tear down endpoint, disconnect all clients.
  *
  * Unregisters from the name server, destroys all active connections'
