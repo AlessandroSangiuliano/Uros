@@ -56,6 +56,14 @@
  * vfs_types.h, so the include path stays an internal detail. */
 #include "vfs.h"
 
+/* FLIPC v2 fast-path (#232): bulk reads above a size threshold travel a
+ * shared-memory channel instead of the fs_read Mach RPC. */
+#include <flipc2.h>
+#include "vfs_flipc.h"
+
+/* Read-ahead window size: one big FLIPC fetch feeds many small reads. */
+#define VFS_PREFETCH_SIZE  VFS_FLIPC_MAX_READ
+
 /* ------------------------------------------------------------------ */
 /*  Internal state                                                     */
 /* ------------------------------------------------------------------ */
@@ -71,6 +79,12 @@ struct vfs_fd_entry {
     vfs_u64_t       offset;
     int             flags;
     uint8_t         type;       /* VFS_FT_* */
+    /* FLIPC v2 read-ahead prefetch window (#232).  A large FLIPC fetch
+     * fills pf_buf; subsequent sequential reads are served by memcpy
+     * with no IPC.  pf_buf == 0 means no window allocated yet. */
+    vm_offset_t     pf_buf;
+    vfs_u64_t       pf_start;   /* file offset of pf_buf[0]            */
+    vfs_u32_t       pf_len;     /* valid bytes in pf_buf (0 = empty)   */
 };
 
 struct vfs_mount_cache_entry {
@@ -316,6 +330,9 @@ vfs_open(const char *path, int flags, int mode)
     vfs_fds[fd].offset  = 0;
     vfs_fds[fd].flags   = flags;
     vfs_fds[fd].type    = (uint8_t)type;
+    vfs_fds[fd].pf_buf  = 0;
+    vfs_fds[fd].pf_start = 0;
+    vfs_fds[fd].pf_len  = 0;
     pthread_mutex_unlock(&vfs_lock);
     return fd;
 }
@@ -339,6 +356,14 @@ vfs_close(vfs_fd_t fd)
     dead    = e->dead;
     e->in_use = 0;
     e->dead   = 0;
+    {
+        /* Release the prefetch window (#232) back to the VM. */
+        vm_offset_t pf = e->pf_buf;
+        e->pf_buf = 0;
+        e->pf_len = 0;
+        if (pf)
+            (void)vm_deallocate(mach_task_self(), pf, VFS_PREFETCH_SIZE);
+    }
     pthread_mutex_unlock(&vfs_lock);
 
     /* A dead fd has no live server to tell; freeing the slot is the whole
@@ -346,6 +371,223 @@ vfs_close(vfs_fd_t fd)
     if (!dead)
         (void)fs_close(fs_port, handle);
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  FLIPC v2 fast-path (#232)                                           */
+/* ------------------------------------------------------------------ */
+
+struct vfs_flipc_conn {
+    int                 in_use;
+    int                 state;      /* 0 untried, 1 connected, 2 unavailable */
+    mach_port_t         fs_port;
+    flipc2_channel_t    fwd;        /* server -> client (we consume) */
+    flipc2_channel_t    rev;        /* client -> server (we produce) */
+    pthread_mutex_t     io_lock;    /* serialises one in-flight request */
+    uint64_t            seq;
+};
+
+#define VFS_FLIPC_MAX_CONN  8
+static struct vfs_flipc_conn vfs_flipc_conns[VFS_FLIPC_MAX_CONN];
+
+/* Master switch — lets the benchmark A/B the FLIPC path against Mach on
+ * the same vfs_read calls.  On by default. */
+static int vfs_flipc_enabled = 1;
+
+void
+vfs_flipc_set_enabled(int on)
+{
+    vfs_flipc_enabled = on ? 1 : 0;
+}
+
+/*
+ * Find (or lazily connect) the FLIPC channel for 'fs_port'.  Returns a
+ * connected conn, or NULL when the server has no fast-path / connect
+ * failed (caller stays on the Mach path).  Slot bookkeeping is under
+ * vfs_lock; the connect handshake runs under the per-conn io_lock.
+ */
+static struct vfs_flipc_conn *
+vfs_flipc_get(mach_port_t fs_port)
+{
+    int i, freeslot = -1;
+    struct vfs_flipc_conn *c = NULL;
+
+    pthread_mutex_lock(&vfs_lock);
+    for (i = 0; i < VFS_FLIPC_MAX_CONN; i++) {
+        if (vfs_flipc_conns[i].in_use &&
+            vfs_flipc_conns[i].fs_port == fs_port) {
+            c = &vfs_flipc_conns[i];
+            break;
+        }
+        if (!vfs_flipc_conns[i].in_use && freeslot < 0)
+            freeslot = i;
+    }
+    if (!c) {
+        if (freeslot < 0) {
+            pthread_mutex_unlock(&vfs_lock);
+            return NULL;            /* table full — just use Mach */
+        }
+        c = &vfs_flipc_conns[freeslot];
+        c->in_use  = 1;
+        c->state   = 0;
+        c->fs_port = fs_port;
+        c->seq     = 0;
+        pthread_mutex_init(&c->io_lock, NULL);
+    }
+    pthread_mutex_unlock(&vfs_lock);
+
+    if (c->state == 1)
+        return c;
+    if (c->state == 2)
+        return NULL;
+
+    /* Untried: resolve the endpoint name and connect, once. */
+    pthread_mutex_lock(&c->io_lock);
+    if (c->state == 0) {
+        vfs_path_t name;
+        int res = -1;
+        kern_return_t kr = fs_flipc_endpoint(fs_port, name, &res);
+        if (kr == KERN_SUCCESS && res == 0 && name[0]) {
+            flipc2_channel_t fwd = 0, rev = 0;
+            if (flipc2_endpoint_connect(name, 0, 0, &fwd, &rev)
+                == FLIPC2_SUCCESS) {
+                c->fwd = fwd;
+                c->rev = rev;
+                c->state = 1;
+            } else {
+                c->state = 2;
+            }
+        } else {
+            c->state = 2;
+        }
+    }
+    pthread_mutex_unlock(&c->io_lock);
+    return (c->state == 1) ? c : NULL;
+}
+
+/*
+ * One FLIPC read round-trip.  Returns bytes read (>= 0, 0 = EOF) on
+ * success, or -1 to tell the caller to fall back to the Mach path
+ * (channel broke or the server reported an error).
+ */
+static ssize_t
+vfs_flipc_read(struct vfs_flipc_conn *c, vfs_u64_t handle,
+               vfs_u64_t offset, void *buf, size_t count)
+{
+    ssize_t ret = -1;
+    struct flipc2_desc *req, *rep;
+    uint64_t want = count;
+
+    if (want > VFS_FLIPC_MAX_READ)
+        want = VFS_FLIPC_MAX_READ;
+
+    pthread_mutex_lock(&c->io_lock);
+
+    req = flipc2_produce_wait(c->rev, FLIPC2_SPIN_DEFAULT);
+    if (!req) { c->state = 2; goto out; }
+    req->opcode      = VFS_FLIPC_OP_READ;
+    req->flags       = 0;
+    req->cookie      = ++c->seq;
+    req->data_offset = 0;
+    req->data_length = want;
+    req->param[0]    = 0;
+    req->param[1]    = handle;
+    req->param[2]    = offset;
+    flipc2_produce_commit(c->rev);
+
+    rep = flipc2_consume_wait(c->fwd, FLIPC2_SPIN_DEFAULT);
+    if (!rep) { c->state = 2; goto out; }
+    if (rep->status == VFS_FLIPC_OK) {
+        uint64_t n   = rep->data_length;
+        uint64_t off = rep->data_offset;
+        if (n > 0)
+            memcpy(buf, flipc2_data_ptr(c->fwd, off), (size_t)n);
+        ret = (ssize_t)n;
+    }
+    flipc2_consume_release(c->fwd);
+
+out:
+    pthread_mutex_unlock(&c->io_lock);
+    return ret;
+}
+
+/*
+ * Pipelined read via the per-fd prefetch window (#232).  A single large
+ * FLIPC fetch fills pf_buf; the requested bytes — and every subsequent
+ * sequential read that lands in the window — are served by a local
+ * memcpy with no further IPC.  This is what turns FLIPC's throughput
+ * edge into a real win for small/medium reads, where a synchronous
+ * per-read channel round-trip would otherwise lose to Mach's RPC.
+ *
+ * Returns bytes read (>= 0, 0 = EOF) on success, or -1 to fall back to
+ * the Mach data path (channel error with nothing yet delivered).
+ */
+static ssize_t
+vfs_prefetch_read(vfs_fd_t fd, struct vfs_flipc_conn *c,
+                  vfs_u64_t handle, void *ubuf, size_t count)
+{
+    struct vfs_fd_entry *e;
+    vfs_u64_t offset, pf_start;
+    vfs_u32_t pf_len;
+    vm_offset_t pf_buf;
+    size_t done = 0;
+    int err = 0;
+    char *out = (char *)ubuf;
+
+    pthread_mutex_lock(&vfs_lock);
+    e = vfs_fd_get(fd);
+    if (!e || e->dead) { pthread_mutex_unlock(&vfs_lock); return -1; }
+    offset   = e->offset;
+    pf_buf   = e->pf_buf;
+    pf_start = e->pf_start;
+    pf_len   = e->pf_len;
+    pthread_mutex_unlock(&vfs_lock);
+
+    if (pf_buf == 0) {
+        if (vm_allocate(mach_task_self(), &pf_buf,
+                        VFS_PREFETCH_SIZE, TRUE) != KERN_SUCCESS)
+            return -1;          /* fall back to Mach */
+        pf_len = 0;
+    }
+
+    while (done < count) {
+        int covered = (pf_len > 0 && offset >= pf_start &&
+                       offset < pf_start + pf_len);
+        if (!covered) {
+            ssize_t n = vfs_flipc_read(c, handle, offset,
+                                       (void *)pf_buf, VFS_PREFETCH_SIZE);
+            if (n < 0) { err = 1; break; }
+            pf_start = offset;
+            pf_len   = (vfs_u32_t)n;
+            if (n == 0)
+                break;          /* EOF */
+        }
+        {
+            vfs_u64_t in_win = (pf_start + pf_len) - offset;
+            size_t give = count - done;
+            if (give > in_win)
+                give = (size_t)in_win;
+            memcpy(out + done,
+                   (void *)(pf_buf + (size_t)(offset - pf_start)), give);
+            done   += give;
+            offset += give;
+        }
+    }
+
+    pthread_mutex_lock(&vfs_lock);
+    e = vfs_fd_get(fd);
+    if (e) {
+        e->pf_buf   = pf_buf;
+        e->pf_start = pf_start;
+        e->pf_len   = pf_len;
+        if (done > 0)
+            e->offset = offset;
+    }
+    pthread_mutex_unlock(&vfs_lock);
+
+    if (done == 0 && err)
+        return -1;              /* nothing delivered — try Mach */
+    return (ssize_t)done;
 }
 
 ssize_t
@@ -369,6 +611,20 @@ vfs_read(vfs_fd_t fd, void *buf, size_t count)
     handle  = e->handle;
     offset  = e->offset;
     pthread_mutex_unlock(&vfs_lock);
+
+    /* #232: when the server offers a FLIPC fast-path, serve reads from
+     * the pipelined read-ahead window (one big channel fetch feeds many
+     * small reads with no IPC).  Any failure falls through to the Mach
+     * fs_read path below (unchanged). */
+    if (vfs_flipc_enabled) {
+        struct vfs_flipc_conn *fc = vfs_flipc_get(fs_port);
+        if (fc) {
+            ssize_t fr = vfs_prefetch_read(fd, fc, handle, buf, count);
+            if (fr >= 0)
+                return fr;      /* prefetch path owns the offset update */
+            /* fr < 0: fall back to Mach for this request */
+        }
+    }
 
     kr = fs_read(fs_port, handle, offset, (vfs_u32_t)count,
                  &data, &data_count);
@@ -431,8 +687,10 @@ vfs_write(vfs_fd_t fd, const void *buf, size_t count)
 
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);
-    if (e)
+    if (e) {
         e->offset += written;
+        e->pf_len  = 0;        /* #232: content changed — drop prefetch */
+    }
     pthread_mutex_unlock(&vfs_lock);
     return (ssize_t)written;
 }

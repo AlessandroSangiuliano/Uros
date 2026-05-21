@@ -1178,6 +1178,17 @@ kern_return_t vfs_rename(mach_port_t fp, char *o, char *n)
 { (void)fp;(void)o;(void)n; return KERN_FAILURE; }
 kern_return_t vfs_sync(mach_port_t fp) { (void)fp; return KERN_SUCCESS; }
 
+/* /proc is a synthetic fs with no bulk data path — no FLIPC fast-path
+ * (#232).  Report unavailable so libvfs stays on the Mach data path. */
+kern_return_t
+vfs_flipc_endpoint(mach_port_t fp, vfs_path_t endpoint, int *result)
+{
+	(void)fp;
+	endpoint[0] = '\0';
+	*result = -1;
+	return KERN_SUCCESS;
+}
+
 /* ------------------------------------------------------------------ */
 /*  notify.defs handler — DEAD_NAME on a registered task               */
 /* ------------------------------------------------------------------ */

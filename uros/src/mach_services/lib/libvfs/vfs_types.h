@@ -63,9 +63,9 @@ typedef pointer_t       vfs_dirent_array_t;
 /* ------------------------------------------------------------------ */
 
 #define LIBVFS_VERSION_MAJOR    0
-#define LIBVFS_VERSION_MINOR    4
+#define LIBVFS_VERSION_MINOR    5
 #define LIBVFS_VERSION_PATCH    0
-#define LIBVFS_VERSION_STRING   "0.4.0"
+#define LIBVFS_VERSION_STRING   "0.5.0"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */

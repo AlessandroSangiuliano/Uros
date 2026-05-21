@@ -100,4 +100,12 @@ int             vfs_unlink(const char *path);
 int             vfs_rename(const char *oldpath, const char *newpath);
 int             vfs_copy(const char *src, const char *dst);
 
+/*
+ * FLIPC v2 fast-path control (#232).  Bulk vfs_read above an internal
+ * size threshold routes its data through a shared-memory channel when
+ * the fs_server offers one; disabling forces the Mach data path (used
+ * by benchmarks to A/B the two).  Enabled by default.
+ */
+void            vfs_flipc_set_enabled(int on);
+
 #endif /* _LIBVFS_H_ */

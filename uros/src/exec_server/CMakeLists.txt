@@ -105,6 +105,7 @@ target_link_libraries(exec_server_bin PRIVATE
   libnetname
   libcap
   libvfs
+  libflipc2
   libelf
   -Wl,--end-group
 )
