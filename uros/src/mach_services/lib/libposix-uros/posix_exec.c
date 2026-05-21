@@ -40,6 +40,10 @@
 #include "exec_types.h"
 #include "proc.h"
 #include "proc_types.h"
+#include "uros_fd_handoff.h"
+
+/* posix_exec_fds.c: serialise the surviving fd set into 'blob'. */
+extern int __uros_serialize_fds(struct uros_fd_handoff *blob);
 
 extern mach_port_t  __uros_proc_port;
 extern unsigned int __uros_my_pid;
@@ -183,6 +187,49 @@ __uros_spawn(const char *path,
     case EXEC_ERR_PERMISSION:                  return -EACCES;
     default:                                   return -EIO;
     }
+
+    /*
+     * #262 step 3: hand the surviving (non-O_CLOEXEC) fds to the new
+     * image, which exec_server returned SUSPENDED.  We plant a handoff
+     * page at the fixed VA, insert each fs_server send right into the
+     * new task's IPC space (under the same name the blob records), then
+     * vm_write the blob.  The new task's __uros_absorb_inherited_fds
+     * reads it before main.  Skip entirely when nothing is inheritable.
+     */
+    {
+        static struct uros_fd_handoff blob;   /* ~2 KiB — keep off the stack */
+        int nfd = __uros_serialize_fds(&blob);
+        if (nfd > 0) {
+            vm_address_t hv = (vm_address_t)EXEC_FD_HANDOFF_VA;
+            if (vm_allocate(new_task, &hv, EXEC_FD_HANDOFF_SIZE, FALSE)
+                == KERN_SUCCESS) {
+                int i, j;
+                for (i = 0; i < nfd; i++) {
+                    mach_port_t name = (mach_port_t)blob.recs[i].fs_port;
+                    mach_port_t right = MACH_PORT_NULL;
+                    mach_msg_type_name_t acq = 0;
+                    int dup = 0;
+                    for (j = 0; j < i; j++)
+                        if (blob.recs[j].fs_port == blob.recs[i].fs_port) {
+                            dup = 1; break;
+                        }
+                    if (dup)
+                        continue;
+                    if (mach_port_extract_right(mach_task_self(), name,
+                            MACH_MSG_TYPE_COPY_SEND, &right, &acq)
+                        == KERN_SUCCESS)
+                        (void)mach_port_insert_right(new_task, name,
+                                                     right, acq);
+                }
+                (void)vm_write(new_task, (vm_address_t)EXEC_FD_HANDOFF_VA,
+                               (vm_offset_t)&blob, sizeof blob);
+            }
+        }
+    }
+
+    /* The initial thread came back suspended (#262 step 3) — start it
+     * now that the fd handoff is in place. */
+    (void)thread_resume(new_thread);
 
     /* Register the new task with proc_server so SIGCHLD / waitpid
      * work.  Failure here is non-fatal — the task is already running. */

@@ -96,6 +96,7 @@ CAP_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_test"
 GPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpustat"
 EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
+FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 
 if [ ! -f "$NAME_SERVER" ]; then
@@ -309,10 +310,15 @@ echo "[4/6] Copia file nel filesystem ext2..."
 # files here.  bench.dat only needs the first 64 bytes — a 1 KB blob
 # is plenty and keeps the partition small.
 HELLO_TXT=$(mktemp)
+POSIX_SMOKE=$(mktemp)
 BENCH_DAT=$(mktemp)
 BENCH_LARGE=$(mktemp)
 BENCH_4M=$(mktemp)
 printf 'Hello from /mach_servers/ root\n' > "$HELLO_TXT"
+# Read-only fixture for hello_server's POSIX fd-layer smoke (#262).
+# Kept separate from hello.txt, which disk_bench uses as a write
+# scratch file — so the smoke passes on a non-fresh disk too.
+printf 'libposix-uros POSIX fd layer smoke\n' > "$POSIX_SMOKE"
 dd if=/dev/urandom of="$BENCH_DAT" bs=1K count=1 status=none
 # bench_large.dat (#267): 12 MB — bigger than the old 4 MB page cache but
 # within the 16 MB DMA cache, so disk_bench can show a cold-vs-warm
@@ -321,7 +327,7 @@ dd if=/dev/urandom of="$BENCH_LARGE" bs=1M count=12 status=none
 # bench_4m.dat (#267): 4 MB — apples-to-apples with the historical
 # file-pool cached-read baseline (~930 MB/s at 64 KB, warm).
 dd if=/dev/urandom of="$BENCH_4M" bs=1M count=4 status=none
-trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF" "$HELLO_TXT" "$BENCH_DAT" "$BENCH_LARGE" "$BENCH_4M"' EXIT
+trap 'rm -f "$PART_IMG" "$BOOTSTRAP_CONF" "$HELLO_TXT" "$POSIX_SMOKE" "$BENCH_DAT" "$BENCH_LARGE" "$BENCH_4M"' EXIT
 
 # hello_exec is optional (#228 v0.1.0): copy to / so exec_server can
 # load "/hello_exec" via libvfs.
@@ -330,12 +336,21 @@ if [ -f "$HELLO_EXEC" ]; then
     HELLO_EXEC_WRITE_LINE="write $HELLO_EXEC hello_exec"
 fi
 
+# fd_exec_test is optional (#262 step 3): copy to / so hello_server can
+# fork+execve "/fd_exec_test" and prove fds survive across exec.
+FD_EXEC_TEST_WRITE_LINE=""
+if [ -f "$FD_EXEC_TEST" ]; then
+    FD_EXEC_TEST_WRITE_LINE="write $FD_EXEC_TEST fd_exec_test"
+fi
+
 debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 write $HELLO_TXT hello.txt
+write $POSIX_SMOKE posix_smoke.txt
 write $BENCH_DAT bench.dat
 write $BENCH_LARGE bench_large.dat
 write $BENCH_4M bench_4m.dat
 ${HELLO_EXEC_WRITE_LINE}
+${FD_EXEC_TEST_WRITE_LINE}
 mkdir mach_servers
 cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf

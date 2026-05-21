@@ -217,12 +217,13 @@ start_thread(mach_port_t new_task, uintptr_t entry, vm_address_t stack_top,
         return EXEC_ERR_THREAD_CREATE;
     }
 
-    kr = thread_resume(th);
-    if (kr != KERN_SUCCESS) {
-        printf("exec: thread_resume kr=%d\n", kr);
-        return EXEC_ERR_THREAD_CREATE;
-    }
-
+    /*
+     * Leave the thread SUSPENDED (#262 step 3).  thread_create starts
+     * it suspended; we no longer resume here.  The caller (libposix-uros
+     * execve/spawn) hands over any inherited fds into the new task and
+     * then issues thread_resume itself, so the new image's first user
+     * instruction sees a fully populated fd table.
+     */
     *out_thread = th;
     return EXEC_OK;
 }

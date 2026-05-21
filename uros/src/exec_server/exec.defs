@@ -58,8 +58,10 @@ type exec_blob_t = pointer_t;
  *   envp_blob   — serialised envp.
  *
  *   new_task    — task port of the spawned task (with send right).
- *   new_thread  — initial thread port (with send right).  Already
- *                 resumed by the time this RPC returns.
+ *   new_thread  — initial thread port (with send right).  Returned
+ *                 SUSPENDED (#262 step 3): the caller hands over any
+ *                 inherited fds into the new task, then thread_resume's
+ *                 it so the new image starts with a populated fd table.
  *   result_code — EXEC_OK on success, EXEC_ERR_* otherwise.
  */
 routine exec_load(

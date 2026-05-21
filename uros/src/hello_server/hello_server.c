@@ -51,6 +51,9 @@
 #include <signal.h>                     /* sigaction/raise — Phase 4 (#252) */
 #include <pthread.h>                    /* pthread — Phase 6a (#256) */
 #include <sys/wait.h>                   /* waitpid — Phase 5 (#254) */
+#include <fcntl.h>                      /* open/O_* — Phase 3 fd layer (#262) */
+#include <sys/stat.h>                   /* fstat/struct stat — (#262) */
+#include <string.h>                     /* memcmp/strlen — (#262) */
 #include <uros/libposix.h>
 
 /*
@@ -78,6 +81,162 @@ hello_pthread_worker(void *arg)
     printf("(hello_server)[pthread]: hello from worker, arg=%d\n", v);
     hello_pthread_answer = v + 100;
     return (void *)(uintptr_t)(v + 100);
+}
+
+/*
+ * Phase 3 (#262): end-to-end POSIX file I/O smoke.  Exercises the new
+ * libposix-uros fd layer (open/read/lseek/fstat/close) over libvfs.
+ * Runs AFTER bootstrap_completed, so ext_server has a chance to mount
+ * "/"; we retry open() while it comes up, yielding to let the fs task
+ * run.  /posix_smoke.txt is a read-only fixture seeded by
+ * make-disk-image.sh — kept separate from /hello.txt (which disk_bench
+ * uses as a write scratch file) so the check passes on a non-fresh disk.
+ */
+static void
+hello_posix_fs_smoke(void)
+{
+    static const char expect[] = "libposix-uros POSIX fd layer smoke\n";
+    const char *path = "/posix_smoke.txt";
+    int fd = -1;
+
+    for (int t = 0; t < 400 && fd < 0; t++) {
+        fd = open(path, O_RDONLY);
+        if (fd < 0)
+            (void)syscall_thread_switch(MACH_PORT_NULL,
+                                        SWITCH_OPTION_WAIT, 25);
+    }
+    if (fd < 0) {
+        printf("(hello_server): POSIX fs smoke SKIP — %s not mountable\n",
+               path);
+        return;
+    }
+    printf("(hello_server): POSIX open(%s) -> fd=%d\n", path, fd);
+
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    if (n < 0) {
+        printf("(hello_server): POSIX read failed\n");
+        close(fd);
+        return;
+    }
+    buf[n] = '\0';
+    int match = ((size_t)n == sizeof(expect) - 1)
+                && memcmp(buf, expect, n) == 0;
+    printf("(hello_server): POSIX read %d bytes: \"%s\" -> %s\n",
+           (int)n, buf, match ? "MATCH" : "MISMATCH");
+
+    struct stat st;
+    if (fstat(fd, &st) == 0)
+        printf("(hello_server): POSIX fstat size=%u mode=0%o\n",
+               (unsigned)st.st_size, (unsigned)st.st_mode);
+    else
+        printf("(hello_server): POSIX fstat failed\n");
+
+    off_t back = lseek(fd, 0, SEEK_SET);
+    char c = 0;
+    ssize_t r2 = read(fd, &c, 1);
+    printf("(hello_server): POSIX lseek->%d, reread byte='%c' (r2=%d)\n",
+           (int)back, (r2 == 1 ? c : '?'), (int)r2);
+
+    close(fd);
+    printf("(hello_server): POSIX fs smoke %s\n",
+           match ? "PASS" : "FAIL");
+}
+
+/*
+ * Phase 3 (#262 step 2): fork() must hand the child working copies of
+ * the parent's open fds.  Open a file, advance the parent's offset, then
+ * fork: the child reads the same fd (proving the fs_server send right was
+ * inherited) from its own CoW'd offset.  Child reports via exit status so
+ * the result is unambiguous regardless of console interleaving.
+ */
+static void
+hello_posix_fork_fd_smoke(void)
+{
+    const char *path = "/posix_smoke.txt";
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("(hello_server): fork-fd smoke SKIP — open(%s) failed\n",
+               path);
+        return;
+    }
+    /* Parent advances to offset 4 so the child's independent (CoW'd)
+     * offset is observable rather than shared. */
+    char hdr[4];
+    (void)read(fd, hdr, sizeof hdr);
+
+    int pid = fork();
+    if (pid < 0) {
+        printf("(hello_server): fork-fd smoke fork() failed\n");
+        close(fd);
+        return;
+    }
+    if (pid == 0) {
+        /* Child: the inherited fd must be readable. */
+        char cb[64];
+        ssize_t cn = read(fd, cb, sizeof cb - 1);
+        _exit(cn > 0 ? 0 : 1);
+    }
+
+    int status = 0;
+    int wr = waitpid(pid, &status, 0);
+    int child_ok = (wr == pid) && WIFEXITED(status)
+                   && WEXITSTATUS(status) == 0;
+    close(fd);
+    printf("(hello_server): fork-fd smoke %s (child status=0x%x)\n",
+           child_ok ? "PASS" : "FAIL", status);
+}
+
+/*
+ * Phase 3 (#262 step 3): fds must survive exec.  Open a file, then
+ * spawn /fd_exec_test — a musl binary that reads the inherited fd 3 and
+ * exits 0 on the expected content.  __uros_spawn is exactly the exec
+ * path (load + suspended thread + fd handoff + resume) minus the
+ * caller's suicide, so it isolates the fd-handoff mechanism: serialise
+ * the surviving fds -> insert their fs_server send rights into the
+ * suspended new task -> vm_write the table -> resume -> the new image's
+ * __uros_absorb_inherited_fds rebuilds the fd table before main.
+ *
+ * Note: the fork()+execve() combination additionally needs task_create
+ * to accept a forked task as the exec parent, which currently fails with
+ * KERN_INVALID_ARGUMENT — a separate fork/exec limitation tracked apart
+ * from this fd-handoff work.
+ */
+static void
+hello_posix_exec_fd_smoke(void)
+{
+    extern int __uros_spawn(const char *path,
+                            char *const argv[], char *const envp[],
+                            mach_port_t *out_task,
+                            mach_port_t *out_thread,
+                            unsigned int *out_pid);
+    extern int __uros_waitpid(int pid, int *status, int options);
+
+    const char *path = "/posix_smoke.txt";
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("(hello_server): exec-fd smoke SKIP — open(%s) failed\n",
+               path);
+        return;
+    }
+    /* fd is 3 (lowest free); fd_exec_test reads fd 3 explicitly. */
+    char *av[] = { (char *)"fd_exec_test", NULL };
+    char *ev[] = { NULL };
+    unsigned int child_pid = 0;
+    int sr = __uros_spawn("/fd_exec_test", av, ev, NULL, NULL, &child_pid);
+    if (sr != 0) {
+        printf("(hello_server): exec-fd smoke spawn failed: %d\n", sr);
+        close(fd);
+        return;
+    }
+
+    int status = 0;
+    int wr = __uros_waitpid((int)child_pid, &status, 0);
+    int child_ok = (wr == (int)child_pid) && WIFEXITED(status)
+                   && WEXITSTATUS(status) == 0;
+    close(fd);
+    printf("(hello_server): exec-fd smoke %s (child status=0x%x)\n",
+           child_ok ? "PASS" : "FAIL", status);
 }
 
 /*
@@ -484,6 +643,14 @@ main(int argc, char **argv)
     bootstrap_completed(bootstrap_port, mach_task_self());
 
     printf("(hello_server): bootstrap_completed, entering message loop\n");
+
+    /*
+     * Step 7.5 (Phase 3 / #262): POSIX file I/O smoke over libvfs.
+     * Done after bootstrap_completed so ext_server can mount "/".
+     */
+    hello_posix_fs_smoke();
+    hello_posix_fork_fd_smoke();
+    hello_posix_exec_fd_smoke();
 
     /*
      * Step 8: Message receive loop.

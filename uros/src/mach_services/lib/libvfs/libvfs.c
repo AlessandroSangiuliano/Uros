@@ -563,6 +563,101 @@ vfs_sync(vfs_fd_t fd)
 }
 
 /* ------------------------------------------------------------------ */
+/*  fork inheritance support (#262 step 2)                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Collect the distinct fs_server send-right names behind every live
+ * (in-use, non-dead) open fd into 'ports'.  Returns the count written,
+ * capped at 'max'.  posix_fork.c uses this to re-insert each right into
+ * the forked child's IPC space: the child's CoW'd vfs fd table holds
+ * these port NAMES but they resolve to nothing until the rights are
+ * inserted under the same names.  Distinct because several fds can share
+ * one mount's fs_port and inserting a name twice is wasted work.
+ */
+int
+vfs_enum_open_ports(mach_port_t *ports, int max)
+{
+    int n = 0;
+    int i, j;
+
+    if (!ports || max <= 0)
+        return 0;
+
+    pthread_mutex_lock(&vfs_lock);
+    for (i = 0; i < VFS_MAX_FDS && n < max; i++) {
+        mach_port_t p;
+        int dup = 0;
+        if (!vfs_fds[i].in_use || vfs_fds[i].dead)
+            continue;
+        p = vfs_fds[i].fs_port;
+        if (p == MACH_PORT_NULL)
+            continue;
+        for (j = 0; j < n; j++)
+            if (ports[j] == p) { dup = 1; break; }
+        if (!dup)
+            ports[n++] = p;
+    }
+    pthread_mutex_unlock(&vfs_lock);
+    return n;
+}
+
+/*
+ * Read out the persistent state of one open fd (#262 step 3, execve
+ * handoff).  Returns 0 on success, -1 if the fd is invalid/dead.
+ */
+int
+vfs_export_fd(vfs_fd_t fd, mach_port_t *port, vfs_u64_t *handle,
+              vfs_u64_t *offset, int *flags, uint8_t *type)
+{
+    struct vfs_fd_entry *e;
+
+    pthread_mutex_lock(&vfs_lock);
+    e = vfs_fd_get(fd);
+    if (!e || e->dead) {
+        pthread_mutex_unlock(&vfs_lock);
+        return -1;
+    }
+    if (port)   *port   = e->fs_port;
+    if (handle) *handle = e->handle;
+    if (offset) *offset = e->offset;
+    if (flags)  *flags  = e->flags;
+    if (type)   *type   = e->type;
+    pthread_mutex_unlock(&vfs_lock);
+    return 0;
+}
+
+/*
+ * Recreate an fd entry from previously-exported state (#262 step 3).
+ * 'port' must already be a valid send right in this task's IPC space
+ * (the execve handoff inserts it before calling this).  Returns the new
+ * vfs_fd_t, or VFS_FD_INVALID if the table is full.
+ */
+vfs_fd_t
+vfs_import_fd(mach_port_t port, vfs_u64_t handle, vfs_u64_t offset,
+              int flags, uint8_t type)
+{
+    vfs_fd_t fd;
+
+    vfs_init();
+    pthread_mutex_lock(&vfs_lock);
+    fd = vfs_fd_alloc();
+    if (fd == VFS_FD_INVALID) {
+        pthread_mutex_unlock(&vfs_lock);
+        return VFS_FD_INVALID;
+    }
+    vfs_fds[fd].in_use  = 1;
+    vfs_fds[fd].dead    = 0;
+    vfs_fds[fd].fs_port = port;
+    vfs_fds[fd].handle  = handle;
+    vfs_fds[fd].offset  = offset;
+    vfs_fds[fd].flags   = flags;
+    vfs_fds[fd].type    = type;
+    pthread_mutex_unlock(&vfs_lock);
+    return fd;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Namespace operations (v0.3.0, #231)                                */
 /* ------------------------------------------------------------------ */
 

@@ -202,6 +202,23 @@ __uros_fork(void)
     inherit_send_right(mach_task_self(), child_task, __uros_get_exec_port());
 
     /*
+     * 2b. Inherit the fs_server send rights behind every open libvfs fd
+     *     (#262 step 2).  The child's CoW'd vfs fd table holds these
+     *     port NAMES but they resolve to nothing until we re-insert the
+     *     rights under the same names.  After this the child can read/
+     *     write its inherited fds.  Note: parent and child share the
+     *     fs_server-side open handle (only the client offset is CoW'd
+     *     and independent); a per-task dup notion is a later refinement.
+     */
+    {
+        extern int vfs_enum_open_ports(mach_port_t *ports, int max);
+        mach_port_t fd_ports[64];
+        int np = vfs_enum_open_ports(fd_ports, 64);
+        for (int i = 0; i < np; i++)
+            inherit_send_right(mach_task_self(), child_task, fd_ports[i]);
+    }
+
+    /*
      * 3. Register the child with proc_server.  The new pid is the
      *    return value the parent hands back; we also write it into
      *    the child's BSS at &__uros_my_pid so the child's signal

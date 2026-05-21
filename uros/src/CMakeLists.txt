@@ -55,6 +55,11 @@ if(OSFMK_BUILD_HELLO_EXEC)
   add_subdirectory(hello_exec)
 endif()
 
+# Build fd_exec_test (#262 step 3: execve fd-inheritance smoke target)
+if(UROS_BUILD_MUSL)
+  add_subdirectory(fd_exec_test)
+endif()
+
 # Build proc_server (POSIX process model owner, #237)
 if(OSFMK_BUILD_PROC_SERVER)
   add_subdirectory(proc_server)

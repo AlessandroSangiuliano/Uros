@@ -67,6 +67,19 @@
 #define EXEC_VDSO_VA             0xBF000000U
 #define EXEC_VDSO_SIZE           4096U
 
+/*
+ * fd-inheritance handoff page (#262 step 3): one 4 KiB page at a fixed
+ * VA, well below the vDSO/stack and above the typical ELF text/heap.
+ * exec_server does NOT map it — the execing parent vm_allocate's it in
+ * the (suspended) new task, fills it with the serialised fd table, then
+ * resumes.  The new task's libposix-uros startup probes this VA with
+ * vm_region: present-and-valid means absorb the inherited fds, absent
+ * (every bootstrap-launched task) means skip.  Independent of the new
+ * ELF's symbol addresses, so it works across arbitrary execve targets.
+ */
+#define EXEC_FD_HANDOFF_VA       0xBE000000U
+#define EXEC_FD_HANDOFF_SIZE     4096U
+
 /* ------------------------------------------------------------------ */
 /*  Wire types                                                         */
 /* ------------------------------------------------------------------ */
