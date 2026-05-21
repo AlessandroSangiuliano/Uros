@@ -51,6 +51,9 @@
 #include <signal.h>                     /* sigaction/raise — Phase 4 (#252) */
 #include <pthread.h>                    /* pthread — Phase 6a (#256) */
 #include <sys/wait.h>                   /* waitpid — Phase 5 (#254) */
+#include <fcntl.h>                      /* open/O_* — Phase 3 fd layer (#262) */
+#include <sys/stat.h>                   /* fstat/struct stat — (#262) */
+#include <string.h>                     /* memcmp/strlen — (#262) */
 #include <uros/libposix.h>
 
 /*
@@ -78,6 +81,64 @@ hello_pthread_worker(void *arg)
     printf("(hello_server)[pthread]: hello from worker, arg=%d\n", v);
     hello_pthread_answer = v + 100;
     return (void *)(uintptr_t)(v + 100);
+}
+
+/*
+ * Phase 3 (#262): end-to-end POSIX file I/O smoke.  Exercises the new
+ * libposix-uros fd layer (open/read/lseek/fstat/close) over libvfs.
+ * Runs AFTER bootstrap_completed, so ext_server has a chance to mount
+ * "/"; we retry open() while it comes up, yielding to let the fs task
+ * run.  /hello.txt is seeded by make-disk-image.sh.
+ */
+static void
+hello_posix_fs_smoke(void)
+{
+    static const char expect[] = "Hello from /mach_servers/ root\n";
+    const char *path = "/hello.txt";
+    int fd = -1;
+
+    for (int t = 0; t < 400 && fd < 0; t++) {
+        fd = open(path, O_RDONLY);
+        if (fd < 0)
+            (void)syscall_thread_switch(MACH_PORT_NULL,
+                                        SWITCH_OPTION_WAIT, 25);
+    }
+    if (fd < 0) {
+        printf("(hello_server): POSIX fs smoke SKIP — %s not mountable\n",
+               path);
+        return;
+    }
+    printf("(hello_server): POSIX open(%s) -> fd=%d\n", path, fd);
+
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    if (n < 0) {
+        printf("(hello_server): POSIX read failed\n");
+        close(fd);
+        return;
+    }
+    buf[n] = '\0';
+    int match = ((size_t)n == sizeof(expect) - 1)
+                && memcmp(buf, expect, n) == 0;
+    printf("(hello_server): POSIX read %d bytes: \"%s\" -> %s\n",
+           (int)n, buf, match ? "MATCH" : "MISMATCH");
+
+    struct stat st;
+    if (fstat(fd, &st) == 0)
+        printf("(hello_server): POSIX fstat size=%u mode=0%o\n",
+               (unsigned)st.st_size, (unsigned)st.st_mode);
+    else
+        printf("(hello_server): POSIX fstat failed\n");
+
+    off_t back = lseek(fd, 0, SEEK_SET);
+    char c = 0;
+    ssize_t r2 = read(fd, &c, 1);
+    printf("(hello_server): POSIX lseek->%d, reread byte='%c' (r2=%d)\n",
+           (int)back, (r2 == 1 ? c : '?'), (int)r2);
+
+    close(fd);
+    printf("(hello_server): POSIX fs smoke %s\n",
+           match ? "PASS" : "FAIL");
 }
 
 /*
@@ -484,6 +545,12 @@ main(int argc, char **argv)
     bootstrap_completed(bootstrap_port, mach_task_self());
 
     printf("(hello_server): bootstrap_completed, entering message loop\n");
+
+    /*
+     * Step 7.5 (Phase 3 / #262): POSIX file I/O smoke over libvfs.
+     * Done after bootstrap_completed so ext_server can mount "/".
+     */
+    hello_posix_fs_smoke();
 
     /*
      * Step 8: Message receive loop.

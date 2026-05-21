@@ -82,6 +82,7 @@ target_link_libraries(hello_server_server PRIVATE
   -Wl,--start-group
   libcap
   libnetname
+  libvfs
   libmach_core
   libposix-uros
   ${MUSL_PREFIX}/lib/libc-musl.a

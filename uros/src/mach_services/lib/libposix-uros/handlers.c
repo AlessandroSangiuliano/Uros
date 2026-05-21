@@ -59,6 +59,23 @@ extern __uros_kern_return_t  syscall_task_terminate(__uros_port_t task);
 extern __uros_kern_return_t  thread_terminate(__uros_port_t thread);
 extern __uros_port_t         mach_thread_self(void);
 
+/*
+ * POSIX fd layer (#262) — implemented in posix_fd.c, which owns the
+ * libvfs include and the fd<->vfs_fd mapping.  handlers.c stays
+ * freestanding-clean and just forwards the dispatch slots.
+ */
+extern long __uros_open(const char *path, int flags, int mode);
+extern long __uros_openat(int dirfd, const char *path, int flags, int mode);
+extern long __uros_read(int fd, void *buf, size_t count);
+extern long __uros_write(int fd, const void *buf, size_t count);
+extern long __uros_readv(int fd, const void *iov, int iovcnt);
+extern long __uros_writev(int fd, const void *iov, int iovcnt);
+extern long __uros_close(int fd);
+extern long __uros_llseek(int fd, unsigned long off_hi, unsigned long off_lo,
+                          void *result, unsigned int whence);
+extern long __uros_statx(int dirfd, const char *path, int flags,
+                         unsigned int mask, void *statxbuf);
+
 /* ------------------------------------------------------------------ */
 /* Linux i386 syscall numbers we care about.  Subset of the table musl */
 /* builds from arch/i386/bits/syscall.h.in.                            */
@@ -75,6 +92,7 @@ extern __uros_port_t         mach_thread_self(void);
 #define UROS_SYS_getuid          24
 #define UROS_SYS_kill            37
 #define UROS_SYS_brk             45
+#define UROS_SYS__llseek        140
 #define UROS_SYS_wait4          114
 #define UROS_SYS_mprotect       125
 #define UROS_SYS_getgid          47
@@ -95,6 +113,7 @@ extern __uros_port_t         mach_thread_self(void);
 #define UROS_SYS_set_tid_address 258
 #define UROS_SYS_tgkill         270
 #define UROS_SYS_openat         295
+#define UROS_SYS_statx          383
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -120,68 +139,88 @@ static __uros_port_t task_self(void)
     return __cached_task_self;
 }
 
-/*
- * mach_print expects a NUL-terminated string.  POSIX write() gives us a
- * length-prefixed buffer with no terminator, so we copy through a small
- * stack chunk.  Phase 3 throws this away in favour of a real I/O path.
- */
-static void debug_write(const char *p, size_t n)
-{
-    char chunk[128];
-    while (n > 0) {
-        size_t take = n < sizeof(chunk) - 1 ? n : sizeof(chunk) - 1;
-        for (size_t i = 0; i < take; i++)
-            chunk[i] = p[i];
-        chunk[take] = '\0';
-        mach_print(chunk);
-        p += take;
-        n -= take;
-    }
-}
-
 /* ------------------------------------------------------------------ */
 /* Real handlers                                                      */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Phase 3 (#262): file I/O is owned by the POSIX fd layer in
+ * posix_fd.c.  These dispatch slots forward to it; the fd layer routes
+ * 0/1/2 to the console (mach_print) and everything else through libvfs.
+ */
 static long h_write(long fd, long buf, long count,
                     long a4, long a5, long a6)
 {
     (void)a4; (void)a5; (void)a6;
-    if (fd != 1 && fd != 2)
-        return -EBADF;
     if (count < 0)
         return -EINVAL;
     if (count == 0)
         return 0;
-    debug_write((const char *)buf, (size_t)count);
-    return count;
+    return __uros_write((int)fd, (const void *)buf, (size_t)count);
 }
-
-/*
- * struct iovec layout on Linux i386: { void *iov_base; size_t iov_len; }
- * — two 32-bit words.  We decode by hand to avoid pulling in sys/uio.h
- * from a libc we don't yet own.
- */
-struct uros_iovec { unsigned long base; unsigned long len; };
 
 static long h_writev(long fd, long iov_ptr, long iovcnt,
                      long a4, long a5, long a6)
 {
     (void)a4; (void)a5; (void)a6;
-    if (fd != 1 && fd != 2)
-        return -EBADF;
-    if (iovcnt < 0)
-        return -EINVAL;
+    return __uros_writev((int)fd, (const void *)iov_ptr, (int)iovcnt);
+}
 
-    const struct uros_iovec *iov = (const struct uros_iovec *)iov_ptr;
-    long total = 0;
-    for (long i = 0; i < iovcnt; i++) {
-        if (iov[i].len == 0)
-            continue;
-        debug_write((const char *)iov[i].base, iov[i].len);
-        total += (long)iov[i].len;
-    }
-    return total;
+static long h_read(long fd, long buf, long count,
+                   long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    if (count < 0)
+        return -EINVAL;
+    if (count == 0)
+        return 0;
+    return __uros_read((int)fd, (void *)buf, (size_t)count);
+}
+
+static long h_readv(long fd, long iov_ptr, long iovcnt,
+                    long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return __uros_readv((int)fd, (const void *)iov_ptr, (int)iovcnt);
+}
+
+static long h_open(long path, long flags, long mode,
+                   long a4, long a5, long a6)
+{
+    (void)a4; (void)a5; (void)a6;
+    return __uros_open((const char *)path, (int)flags, (int)mode);
+}
+
+static long h_openat(long dirfd, long path, long flags,
+                     long mode, long a5, long a6)
+{
+    (void)a5; (void)a6;
+    return __uros_openat((int)dirfd, (const char *)path,
+                         (int)flags, (int)mode);
+}
+
+static long h_close(long fd, long a2, long a3,
+                    long a4, long a5, long a6)
+{
+    (void)a2; (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_close((int)fd);
+}
+
+static long h_llseek(long fd, long off_hi, long off_lo,
+                     long result, long whence, long a6)
+{
+    (void)a6;
+    return __uros_llseek((int)fd, (unsigned long)off_hi,
+                         (unsigned long)off_lo, (void *)result,
+                         (unsigned int)whence);
+}
+
+static long h_statx(long dirfd, long path, long flags,
+                    long mask, long statxbuf, long a6)
+{
+    (void)a6;
+    return __uros_statx((int)dirfd, (const char *)path, (int)flags,
+                        (unsigned int)mask, (void *)statxbuf);
 }
 
 /*
@@ -308,12 +347,6 @@ static long h_munmap(long addr, long len, long a3,
 STUB(h_brk,             -ENOMEM)
 STUB(h_set_tid_address, 1)
 STUB(h_ioctl,           -ENOTTY)
-STUB(h_read,            -EBADF)
-STUB(h_readv,           -EBADF)
-STUB(h_open,            -EACCES)
-STUB(h_openat,          -EACCES)
-STUB(h_close,           0)
-STUB(h_fstat64,         -EBADF)
 STUB(h_getuid,          0)
 STUB(h_geteuid,         0)
 STUB(h_getgid,          0)
@@ -511,7 +544,8 @@ static const struct entry table[] = {
     { UROS_SYS_rt_sigaction,     h_rt_sigaction    },
     { UROS_SYS_rt_sigprocmask,   h_rt_sigprocmask  },
     { UROS_SYS_mmap2,            h_mmap2           },
-    { UROS_SYS_fstat64,          h_fstat64         },
+    { UROS_SYS__llseek,          h_llseek          },
+    { UROS_SYS_statx,            h_statx           },
     { UROS_SYS_tkill,            h_tkill           },
     { UROS_SYS_futex,            h_futex           },
     { UROS_SYS_set_thread_area,  h_set_thread_area },

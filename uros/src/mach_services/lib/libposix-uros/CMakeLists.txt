@@ -99,6 +99,7 @@ set_source_files_properties(${MACH_I386_USER_C} ${MACH_I386_USER_H} PROPERTIES G
 add_library(libposix-uros STATIC
   syscall.c
   handlers.c
+  posix_fd.c
   stubs.c
   signals.c
   exceptions.c
@@ -164,6 +165,7 @@ target_include_directories(libposix-uros PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/proc_server
   ${CMAKE_SOURCE_DIR}/src/exec_server
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs   # libvfs.h, vfs_types.h (#262)
 )
 
 # Ensure musl has been built before we try to compile against its
