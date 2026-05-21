@@ -144,6 +144,50 @@ hello_posix_fs_smoke(void)
 }
 
 /*
+ * Phase 3 (#262 step 2): fork() must hand the child working copies of
+ * the parent's open fds.  Open a file, advance the parent's offset, then
+ * fork: the child reads the same fd (proving the fs_server send right was
+ * inherited) from its own CoW'd offset.  Child reports via exit status so
+ * the result is unambiguous regardless of console interleaving.
+ */
+static void
+hello_posix_fork_fd_smoke(void)
+{
+    const char *path = "/posix_smoke.txt";
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("(hello_server): fork-fd smoke SKIP — open(%s) failed\n",
+               path);
+        return;
+    }
+    /* Parent advances to offset 4 so the child's independent (CoW'd)
+     * offset is observable rather than shared. */
+    char hdr[4];
+    (void)read(fd, hdr, sizeof hdr);
+
+    int pid = fork();
+    if (pid < 0) {
+        printf("(hello_server): fork-fd smoke fork() failed\n");
+        close(fd);
+        return;
+    }
+    if (pid == 0) {
+        /* Child: the inherited fd must be readable. */
+        char cb[64];
+        ssize_t cn = read(fd, cb, sizeof cb - 1);
+        _exit(cn > 0 ? 0 : 1);
+    }
+
+    int status = 0;
+    int wr = waitpid(pid, &status, 0);
+    int child_ok = (wr == pid) && WIFEXITED(status)
+                   && WEXITSTATUS(status) == 0;
+    close(fd);
+    printf("(hello_server): fork-fd smoke %s (child status=0x%x)\n",
+           child_ok ? "PASS" : "FAIL", status);
+}
+
+/*
  * Global ports — obtained at startup.
  */
 static mach_port_t	host_port;
@@ -553,6 +597,7 @@ main(int argc, char **argv)
      * Done after bootstrap_completed so ext_server can mount "/".
      */
     hello_posix_fs_smoke();
+    hello_posix_fork_fd_smoke();
 
     /*
      * Step 8: Message receive loop.
