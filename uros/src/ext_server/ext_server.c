@@ -61,9 +61,11 @@
 #include <libcap.h>
 #include <gpu_console.h>
 
+#include <flipc2.h>                      /* FLIPC v2 fast-path (#232) */
 #include "ext2fs_server_server.h"
 #include "vfs_server.h"
 #include "vfs_types.h"
+#include "vfs_flipc.h"                   /* fast-path protocol (#232) */
 #include "ahci_batch.h"
 #include "device_master.h"
 
@@ -120,6 +122,7 @@ struct mount_context {
 	mach_port_t	port;			/* receive port for this mount */
 	char		driver_name[64];	/* block driver name */
 	char		service_name[64];	/* netname registration */
+	char		flipc_ep[80];		/* FLIPC v2 endpoint name (#232) */
 };
 
 static struct mount_context	mounts[MAX_MOUNTS];
@@ -1122,6 +1125,201 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 }
 
 /* ================================================================
+ * FLIPC v2 fast-path (#232) — bulk read over a shared-memory channel
+ * ================================================================ */
+
+/*
+ * Control RPC (vfs.defs): hand libvfs the name of the FLIPC endpoint
+ * that serves this mount.  Empty name + non-zero result means no
+ * fast-path (libvfs stays on the Mach data path).
+ */
+kern_return_t
+vfs_flipc_endpoint(mach_port_t fs_port, vfs_path_t endpoint, int *result)
+{
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+
+	if (mnt && mnt->flipc_ep[0]) {
+		strncpy(endpoint, mnt->flipc_ep, VFS_PATH_MAX - 1);
+		endpoint[VFS_PATH_MAX - 1] = '\0';
+		*result = 0;
+	} else {
+		endpoint[0] = '\0';
+		*result = -1;
+	}
+	return KERN_SUCCESS;
+}
+
+struct flipc_client {
+	struct mount_context	*mnt;
+	flipc2_channel_t	 fwd;	/* server -> client (we produce) */
+	flipc2_channel_t	 rev;	/* client -> server (we consume) */
+};
+
+/*
+ * Per-connection consumer: drain READ requests off the reverse channel,
+ * read file data into the forward channel's data region, and reply.  One
+ * request is in flight at a time (libvfs serialises), so data offset 0
+ * is reused safely.
+ */
+static void *
+flipc_consumer(void *arg)
+{
+	struct flipc_client *c = (struct flipc_client *)arg;
+	struct mount_context *mnt = c->mnt;
+
+	for (;;) {
+		struct flipc2_desc *req = flipc2_consume_wait(c->rev,
+							      FLIPC2_SPIN_DEFAULT);
+		if (!req)
+			break;			/* channel dead */
+		uint32_t op     = req->opcode;
+		uint64_t cookie = req->cookie;
+		uint64_t handle = req->param[1];
+		uint64_t offset = req->param[2];
+		uint64_t count  = req->data_length;
+		flipc2_consume_release(c->rev);
+
+		struct flipc2_desc *rep = flipc2_produce_wait(c->fwd,
+							      FLIPC2_SPIN_DEFAULT);
+		if (!rep)
+			break;
+		rep->opcode      = op;
+		rep->cookie      = cookie;
+		rep->flags       = 0;
+		rep->data_offset = 0;
+		rep->data_length = 0;
+		rep->status      = VFS_FLIPC_ERR_INVAL;
+
+		if (op == VFS_FLIPC_OP_READ) {
+			int idx = (int)handle - 1;
+			if (idx < 0 || idx >= MAX_OPEN_FILES ||
+			    !mnt->open_files[idx].in_use) {
+				rep->status = VFS_FLIPC_ERR_BADHANDLE;
+			} else {
+				fs_private_t priv = mnt->open_files[idx].private;
+				size_t fsize = ext2fs_file_size(priv);
+				uint64_t cap = c->fwd->hdr->data_size;
+				if (cap > VFS_FLIPC_MAX_READ)
+					cap = VFS_FLIPC_MAX_READ;
+				if (offset >= fsize || count == 0) {
+					rep->status = VFS_FLIPC_OK;
+				} else {
+					if (offset + count > fsize)
+						count = fsize - offset;
+					if (count > cap)
+						count = cap;
+					void *dst = flipc2_data_ptr(c->fwd, 0);
+					int rc = ext2fs_read_file(priv,
+						(vm_offset_t)offset,
+						(vm_offset_t)dst,
+						(vm_size_t)count);
+					if (rc != 0) {
+						rep->status = VFS_FLIPC_ERR_IO;
+					} else {
+						rep->status      = VFS_FLIPC_OK;
+						rep->data_length = count;
+					}
+				}
+			}
+		}
+		flipc2_produce_commit(c->fwd);
+	}
+	free(c);
+	return NULL;
+}
+
+/* endpoint -> mount map, filled at create time. */
+static struct { flipc2_endpoint_t ep; struct mount_context *mnt; }
+	flipc_ep_map[MAX_MOUNTS];
+static int flipc_ep_map_n;
+
+static struct mount_context *
+flipc_ep_owner(flipc2_endpoint_t ep)
+{
+	int i;
+	for (i = 0; i < flipc_ep_map_n; i++)
+		if (flipc_ep_map[i].ep == ep)
+			return flipc_ep_map[i].mnt;
+	return NULL;
+}
+
+/*
+ * Per-mount accept loop: wait for libvfs clients to connect and spawn a
+ * consumer thread for each.  The endpoint itself is created up front in
+ * main() (before the Mach loop) so fs_flipc_endpoint can hand out the
+ * name only once the endpoint is actually registered.
+ */
+static void *
+flipc_accept(void *arg)
+{
+	flipc2_endpoint_t ep = (flipc2_endpoint_t)arg;
+
+	for (;;) {
+		flipc2_channel_t fwd = 0, rev = 0;
+		if (flipc2_endpoint_accept(ep, &fwd, &rev) != FLIPC2_SUCCESS)
+			continue;
+		struct flipc_client *c =
+			(struct flipc_client *)malloc(sizeof(*c));
+		if (!c) {
+			flipc2_channel_detach(fwd);
+			flipc2_channel_detach(rev);
+			continue;
+		}
+		c->mnt = flipc_ep_owner(ep);
+		c->fwd = fwd;
+		c->rev = rev;
+		pthread_t t;
+		if (pthread_create(&t, NULL, flipc_consumer, c) != 0) {
+			flipc2_channel_detach(fwd);
+			flipc2_channel_detach(rev);
+			free(c);
+			continue;
+		}
+		pthread_detach(t);
+	}
+	return NULL;
+}
+
+/*
+ * Create the FLIPC endpoint for one mount and start its accept thread.
+ * On any failure the mount simply has no fast-path (flipc_ep stays "").
+ */
+static void
+flipc_start_mount(struct mount_context *mnt)
+{
+	flipc2_endpoint_t ep;
+	flipc2_return_t ret;
+
+	(void)snprintf(mnt->flipc_ep, sizeof(mnt->flipc_ep),
+		       "%s%s", VFS_FLIPC_ENDPOINT_PREFIX, mnt->service_name);
+
+	ret = flipc2_endpoint_create(mnt->flipc_ep, 4,
+				     VFS_FLIPC_CHANNEL_SIZE,
+				     VFS_FLIPC_RING_ENTRIES, 0, &ep);
+	if (ret != FLIPC2_SUCCESS) {
+		printf("ext2: FLIPC endpoint_create(%s) failed %d\n",
+		       mnt->flipc_ep, ret);
+		mnt->flipc_ep[0] = '\0';
+		return;
+	}
+	if (flipc_ep_map_n < MAX_MOUNTS) {
+		flipc_ep_map[flipc_ep_map_n].ep  = ep;
+		flipc_ep_map[flipc_ep_map_n].mnt = mnt;
+		flipc_ep_map_n++;
+	}
+
+	pthread_t t;
+	if (pthread_create(&t, NULL, flipc_accept, ep) != 0) {
+		printf("ext2: FLIPC accept thread failed for %s\n",
+		       mnt->flipc_ep);
+		mnt->flipc_ep[0] = '\0';
+		return;
+	}
+	pthread_detach(t);
+	printf("ext2: FLIPC fast-path endpoint \"%s\" ready\n", mnt->flipc_ep);
+}
+
+/* ================================================================
  * Main entry point
  * ================================================================ */
 
@@ -1196,6 +1394,15 @@ main(int argc, char **argv)
 		pthread_detach(wb_thread);
 		printf("ext2: writeback thread started (%d ms interval)\n",
 		       WRITEBACK_INTERVAL_MS);
+	}
+
+	/* #232: bring up a FLIPC v2 fast-path endpoint per active mount,
+	 * before the Mach loop so fs_flipc_endpoint reports a ready name. */
+	{
+		int mi;
+		for (mi = 0; mi < n_mounts; mi++)
+			if (mounts[mi].active)
+				flipc_start_mount(&mounts[mi]);
 	}
 
 	printf("ext2: ready, entering message loop\n");

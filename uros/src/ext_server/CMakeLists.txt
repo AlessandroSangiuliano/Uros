@@ -193,6 +193,7 @@ target_link_libraries(ext_server_bin PRIVATE
   libblk
   libcap
   libnetname
+  libflipc2
   libgpu_console
   -Wl,--end-group
 )

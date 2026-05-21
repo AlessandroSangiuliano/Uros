@@ -1816,8 +1816,12 @@ main(int argc, char **argv)
     /* ---------------------------------------------------------
      * Disk I/O benchmarks
      * --------------------------------------------------------- */
-    if (suites & SUITE_DISK)
+    if (suites & SUITE_DISK) {
 	bench_disk_run(host_port, clock_port);
+	/* #232: FLIPC v2 read fast-path A/B over libvfs. */
+	extern void bench_libvfs_flipc(mach_port_t clock);
+	bench_libvfs_flipc(clock_port);
+    }
 
     /* ---------------------------------------------------------
      * Memory bandwidth benchmarks

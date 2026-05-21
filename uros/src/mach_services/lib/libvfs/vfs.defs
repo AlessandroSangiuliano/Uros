@@ -204,3 +204,21 @@ routine fs_rename(
 routine fs_sync(
 		fs_port		: mach_port_t
 	);
+
+/* ------------------------------------------------------------------ */
+/*  FLIPC v2 fast-path discovery (#232)                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Ask the server for the name of the FLIPC v2 endpoint that serves the
+ * mount behind fs_port.  libvfs connects to it (flipc2_endpoint_connect)
+ * and routes bulk read/write data through the shared-memory channel
+ * instead of fs_read/fs_write Mach RPCs.  result == 0 and a non-empty
+ * name mean the fast-path is available; result != 0 means the server has
+ * no fast-path and the caller must stay on the Mach data path.
+ */
+routine fs_flipc_endpoint(
+		fs_port		: mach_port_t;
+	out	endpoint	: vfs_path_t;
+	out	result		: int
+	);

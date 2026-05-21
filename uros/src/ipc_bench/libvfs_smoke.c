@@ -12,6 +12,9 @@
  */
 
 #include <libvfs.h>
+#include <mach.h>
+#include <mach/clock.h>
+#include <mach/clock_types.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -135,4 +138,88 @@ bench_libvfs_smoke(void)
 	}
 
 	printf("  libvfs: %s\n", ok ? "PASS" : "FAIL");
+}
+
+/*
+ * #232 — A/B throughput: read a large file through vfs_read with the
+ * FLIPC v2 fast-path disabled (Mach fs_read) vs enabled (shared-memory
+ * channel).  Same call path, same chunking — only the data plane
+ * differs.  Run under the disk suite (needs /bench_large.dat + the
+ * realtime clock for timing).
+ */
+static unsigned long
+lvf_read_whole(vfs_fd_t fd, char *buf, unsigned int chunk, mach_port_t clock)
+{
+	tvalspec_t t0, t1;
+	ssize_t n;
+
+	vfs_lseek(fd, 0, VFS_SEEK_SET);
+	clock_get_time(clock, &t0);
+	while ((n = vfs_read(fd, buf, chunk)) > 0)
+		;
+	clock_get_time(clock, &t1);
+	return (unsigned long)(t1.tv_sec - t0.tv_sec) * 1000000000UL
+	       + (unsigned long)(t1.tv_nsec - t0.tv_nsec);
+}
+
+void
+bench_libvfs_flipc(mach_port_t clock)
+{
+	static char buf[65536];
+	const char *path = "/bench_large.dat";
+	static const unsigned int chunks[] = { 4096, 16384, 65536 };
+	vfs_fd_t fd;
+	vfs_stat_t st;
+	unsigned long fsize;
+	unsigned int ci;
+
+	printf("\n--- libvfs FLIPC v2 fast-path read A/B (#232) ---\n");
+
+	if (vfs_init() != 0)
+		return;
+	fd = vfs_open(path, VFS_O_RDONLY, 0);
+	if (fd == VFS_FD_INVALID) {
+		printf("  open %s failed — skipping (seed bench_large.dat)\n",
+		       path);
+		return;
+	}
+	if (vfs_fstat(fd, &st) != 0) {
+		printf("  fstat failed\n");
+		vfs_close(fd);
+		return;
+	}
+	fsize = (unsigned long)st.st_size;
+
+	/* Warm the page cache AND establish the FLIPC channel (first large
+	 * read connects lazily) so neither cost lands inside the timed run. */
+	vfs_flipc_set_enabled(1);
+	(void)lvf_read_whole(fd, buf, sizeof(buf), clock);
+
+	printf("  file=%lu KB, warm cache; Mach fs_read vs FLIPC fast-path:\n",
+	       fsize / 1024);
+	printf("  chunk    Mach MB/s   FLIPC MB/s   speedup\n");
+
+	for (ci = 0; ci < sizeof(chunks) / sizeof(chunks[0]); ci++) {
+		unsigned int chunk = chunks[ci];
+		unsigned long mach_ns, flipc_ns;
+		unsigned long mach_us, flipc_us, mach_mbps, flipc_mbps, ratio;
+
+		vfs_flipc_set_enabled(0);
+		mach_ns = lvf_read_whole(fd, buf, chunk, clock);
+		vfs_flipc_set_enabled(1);
+		flipc_ns = lvf_read_whole(fd, buf, chunk, clock);
+
+		mach_us  = mach_ns / 1000;
+		flipc_us = flipc_ns / 1000;
+		mach_mbps  = mach_us  ? fsize / mach_us  : 0;
+		flipc_mbps = flipc_us ? fsize / flipc_us : 0;
+		ratio = flipc_us ? (mach_us * 100) / flipc_us : 0;
+
+		printf("  %4uK    %8lu    %8lu     %lu.%02lux\n",
+		       chunk / 1024, mach_mbps, flipc_mbps,
+		       ratio / 100, ratio % 100);
+	}
+
+	vfs_close(fd);
+	vfs_flipc_set_enabled(1);
 }

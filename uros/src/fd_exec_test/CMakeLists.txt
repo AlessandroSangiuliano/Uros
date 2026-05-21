@@ -54,6 +54,7 @@ target_link_libraries(fd_exec_test_bin PRIVATE
   libcap
   libnetname
   libvfs
+  libflipc2
   libmach_core
   libposix-uros
   ${MUSL_PREFIX}/lib/libc-musl.a
