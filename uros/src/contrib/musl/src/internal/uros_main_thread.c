@@ -34,6 +34,11 @@
  * Phase 1 host-only smoke that doesn't pull in the archive. */
 extern void __uros_signals_init(void) __attribute__((__weak__));
 
+/* Provided by libposix-uros (#262 step 3): absorb the fd table handed
+ * over by execve, if this task was spawned with one.  Weak so musl still
+ * links for smokes that don't pull in the archive. */
+extern void __uros_absorb_inherited_fds(void) __attribute__((__weak__));
+
 void __uros_libc_init(void)
 {
 	/* Minimal synthetic auxv.  Indexed up to AT_RANDOM; everything
@@ -60,4 +65,9 @@ void __uros_libc_init(void)
 
 	if (__uros_signals_init)
 		__uros_signals_init();
+
+	/* If we were execve'd with an inherited fd table, rebuild it now —
+	 * before main() so the new image's first open/read sees the fds. */
+	if (__uros_absorb_inherited_fds)
+		__uros_absorb_inherited_fds();
 }

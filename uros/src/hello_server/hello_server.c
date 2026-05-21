@@ -188,6 +188,58 @@ hello_posix_fork_fd_smoke(void)
 }
 
 /*
+ * Phase 3 (#262 step 3): fds must survive exec.  Open a file, then
+ * spawn /fd_exec_test — a musl binary that reads the inherited fd 3 and
+ * exits 0 on the expected content.  __uros_spawn is exactly the exec
+ * path (load + suspended thread + fd handoff + resume) minus the
+ * caller's suicide, so it isolates the fd-handoff mechanism: serialise
+ * the surviving fds -> insert their fs_server send rights into the
+ * suspended new task -> vm_write the table -> resume -> the new image's
+ * __uros_absorb_inherited_fds rebuilds the fd table before main.
+ *
+ * Note: the fork()+execve() combination additionally needs task_create
+ * to accept a forked task as the exec parent, which currently fails with
+ * KERN_INVALID_ARGUMENT — a separate fork/exec limitation tracked apart
+ * from this fd-handoff work.
+ */
+static void
+hello_posix_exec_fd_smoke(void)
+{
+    extern int __uros_spawn(const char *path,
+                            char *const argv[], char *const envp[],
+                            mach_port_t *out_task,
+                            mach_port_t *out_thread,
+                            unsigned int *out_pid);
+    extern int __uros_waitpid(int pid, int *status, int options);
+
+    const char *path = "/posix_smoke.txt";
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("(hello_server): exec-fd smoke SKIP — open(%s) failed\n",
+               path);
+        return;
+    }
+    /* fd is 3 (lowest free); fd_exec_test reads fd 3 explicitly. */
+    char *av[] = { (char *)"fd_exec_test", NULL };
+    char *ev[] = { NULL };
+    unsigned int child_pid = 0;
+    int sr = __uros_spawn("/fd_exec_test", av, ev, NULL, NULL, &child_pid);
+    if (sr != 0) {
+        printf("(hello_server): exec-fd smoke spawn failed: %d\n", sr);
+        close(fd);
+        return;
+    }
+
+    int status = 0;
+    int wr = __uros_waitpid((int)child_pid, &status, 0);
+    int child_ok = (wr == (int)child_pid) && WIFEXITED(status)
+                   && WEXITSTATUS(status) == 0;
+    close(fd);
+    printf("(hello_server): exec-fd smoke %s (child status=0x%x)\n",
+           child_ok ? "PASS" : "FAIL", status);
+}
+
+/*
  * Global ports — obtained at startup.
  */
 static mach_port_t	host_port;
@@ -598,6 +650,7 @@ main(int argc, char **argv)
      */
     hello_posix_fs_smoke();
     hello_posix_fork_fd_smoke();
+    hello_posix_exec_fd_smoke();
 
     /*
      * Step 8: Message receive loop.

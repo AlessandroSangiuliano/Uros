@@ -392,5 +392,45 @@ long __uros_statx(int dirfd, const char *path, int flags,
 }
 
 /* ------------------------------------------------------------------ */
-/*  fork / exec hooks (#262 steps 2 & 3) — defined later               */
+/*  execve fd handoff hooks (#262 step 3)                              */
 /* ------------------------------------------------------------------ */
+
+/*
+ * Enumerate the POSIX fds that survive execve: in use, not a console
+ * stream, and not O_CLOEXEC.  Writes parallel (posix_fd, vfs_fd) arrays
+ * and returns the count (<= max).  posix_exec_fds.c turns each pair into
+ * a handoff record by exporting the libvfs state behind vfd.
+ */
+int __uros_pfd_enum_inheritable(int *posix_fds, vfs_fd_t *vfds, int max)
+{
+    int n = 0;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    for (int i = 3; i < POSIX_OPEN_MAX && n < max; i++) {
+        if (!pfds[i].in_use || pfds[i].is_console || pfds[i].cloexec)
+            continue;
+        posix_fds[n] = i;
+        vfds[n]      = pfds[i].vfd;
+        n++;
+    }
+    pthread_mutex_unlock(&pfd_lock);
+    return n;
+}
+
+/*
+ * Bind POSIX fd 'posix_fd' to an already-imported libvfs fd 'vfd' in
+ * the freshly-execed task (#262 step 3).  Cleared O_CLOEXEC: an fd that
+ * crossed exec is by definition not close-on-exec.
+ */
+void __uros_pfd_install(int posix_fd, vfs_fd_t vfd)
+{
+    if (posix_fd < 3 || posix_fd >= POSIX_OPEN_MAX)
+        return;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    pfds[posix_fd].in_use     = 1;
+    pfds[posix_fd].is_console = 0;
+    pfds[posix_fd].cloexec    = 0;
+    pfds[posix_fd].vfd        = vfd;
+    pthread_mutex_unlock(&pfd_lock);
+}

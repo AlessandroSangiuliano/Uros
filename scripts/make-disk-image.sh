@@ -96,6 +96,7 @@ CAP_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_test"
 GPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpustat"
 EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
+FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 
 if [ ! -f "$NAME_SERVER" ]; then
@@ -335,6 +336,13 @@ if [ -f "$HELLO_EXEC" ]; then
     HELLO_EXEC_WRITE_LINE="write $HELLO_EXEC hello_exec"
 fi
 
+# fd_exec_test is optional (#262 step 3): copy to / so hello_server can
+# fork+execve "/fd_exec_test" and prove fds survive across exec.
+FD_EXEC_TEST_WRITE_LINE=""
+if [ -f "$FD_EXEC_TEST" ]; then
+    FD_EXEC_TEST_WRITE_LINE="write $FD_EXEC_TEST fd_exec_test"
+fi
+
 debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 write $HELLO_TXT hello.txt
 write $POSIX_SMOKE posix_smoke.txt
@@ -342,6 +350,7 @@ write $BENCH_DAT bench.dat
 write $BENCH_LARGE bench_large.dat
 write $BENCH_4M bench_4m.dat
 ${HELLO_EXEC_WRITE_LINE}
+${FD_EXEC_TEST_WRITE_LINE}
 mkdir mach_servers
 cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf

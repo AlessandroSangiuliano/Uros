@@ -100,6 +100,7 @@ add_library(libposix-uros STATIC
   syscall.c
   handlers.c
   posix_fd.c
+  posix_exec_fds.c
   stubs.c
   signals.c
   exceptions.c
