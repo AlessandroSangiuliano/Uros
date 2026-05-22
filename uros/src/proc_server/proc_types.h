@@ -99,6 +99,7 @@ typedef struct proc_exit_msg {
 #define PROC_ERR_BAD_SIGNO   -7   /* signo out of range / unknown */
 #define PROC_ERR_PERM        -8   /* setsid on pgrp leader, etc. (POSIX EPERM) */
 #define PROC_ERR_DIFF_SESS   -9   /* setpgid target pgrp in different session */
+#define PROC_ERR_NO_CTTY    -10   /* session has no controlling tty (POSIX ENOTTY) */
 
 /* ------------------------------------------------------------------ */
 /*  Signals (v0.2.0 / #238)                                            */
