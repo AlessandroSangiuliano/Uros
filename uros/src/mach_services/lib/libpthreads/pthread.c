@@ -394,6 +394,7 @@ pthread_attr_init(pthread_attr_t *attr)
 {
 	attr->sig = _PTHREAD_ATTR_SIG;
 	attr->policy = _PTHREAD_DEFAULT_POLICY;
+	attr->param.sched_priority = 0;	/* #273: kernel keeps the real base */
 	attr->inherit = _PTHREAD_DEFAULT_INHERITSCHED;
 	attr->detached = PTHREAD_CREATE_JOINABLE;
 	attr->stacksize = 0;	/* 0 = use default */
@@ -999,102 +1000,21 @@ pthread_timedjoin_np(pthread_t thread,
 }
 
 /*
- * Get the scheduling policy and scheduling paramters for a thread.
- */
-int       
-pthread_getschedparam(pthread_t thread, 
-		      int *policy,
-		      struct sched_param *param)
-{
-	if (thread->sig == _PTHREAD_SIG)
-	{
-		if (policy != (int *)NULL)
-			*policy = thread->policy;
-		if (param != (struct sched_param *)NULL)
-			*param = thread->param;
-		switch (thread->policy)
-		{
-		case SCHED_OTHER:
-			break;
-		case SCHED_FIFO:
-			break;
-		case SCHED_RR:
-			break;
-		default:
-			return (EINVAL);
-		}
-		return (ESUCCESS);
-	} else
-	{
-		return (ESRCH);  /* Not a valid thread structure */
-	}
-}
-
-/*
- * Set the scheduling policy and scheudling paramters for a thread.
- */
-int       
-pthread_setschedparam(pthread_t thread, 
-		      int policy,
-		      const struct sched_param *param)
-{
-	if (thread->sig == _PTHREAD_SIG)
-	{
-		switch (policy)
-		{
-		case SCHED_OTHER:
-			break;
-		case SCHED_FIFO:
-			break;
-		case SCHED_RR:
-			break;
-		default:
-			return (EINVAL);
-		}
-		return (ESUCCESS);
-	} else
-	{
-		return (ESRCH);  /* Not a valid thread structure */
-	}
-}
-
-/*
- * Change a thread's scheduling priority without changing its policy
- * (POSIX.1-2001).  Lighter than pthread_setschedparam: it keeps the
- * thread's current policy and only pushes the new base priority down to
- * the Mach scheduler via thread_policy().
+ * Push a (policy, base priority) pair down to the Mach scheduler for a
+ * thread and keep the pthread bookkeeping in sync.  Shared by
+ * pthread_setschedparam (explicit policy) and pthread_setschedprio
+ * (current policy).  Returns a POSIX errno.
  *
- * The valid priority range is policy-defined and the kernel is the
- * authority (invalid_pri in kern/sched.h rejects pri < 0 or pri above
- * the lowest schedulable priority).  We reject an obviously bad prio
- * early and let thread_policy() have the final say, mapping its failure
- * to EINVAL.
+ * Priority range is policy- and kernel-defined (invalid_pri in
+ * kern/sched.h: 0..lowest-schedulable, and a thread may only lower its
+ * own priority below its max); the kernel is the authority and we map
+ * its failures to errno.  A policy the processor set does not enable
+ * comes back as KERN_INVALID_POLICY -> ENOTSUP.
  */
-int
-pthread_setschedprio(pthread_t thread, int prio)
+static int
+_pthread_push_sched(pthread_t thread, int policy, int prio)
 {
-	kern_return_t		kr;
-	thread_basic_info_data_t binfo;
-	mach_msg_type_number_t	cnt = THREAD_BASIC_INFO_COUNT;
-	int			policy;
-
-	if (thread->sig != _PTHREAD_SIG)
-		return (ESRCH);
-	if (prio < 0)
-		return (EINVAL);
-
-	/*
-	 * Use the thread's *actual* scheduling policy as the kernel reports
-	 * it, not the policy stored in the pthread struct: the two can
-	 * diverge (the default pthread policy is SCHED_FIFO but a thread
-	 * runs under the timeshare policy the processor set enables).
-	 * Pushing the stored policy would try to switch policy and the
-	 * pset would reject it; the kernel's view is authoritative.
-	 */
-	if (thread_info(thread->kernel_thread, THREAD_BASIC_INFO,
-			(thread_info_t)&binfo, &cnt) != KERN_SUCCESS)
-		return (ESRCH);
-	policy = binfo.policy;
+	kern_return_t	kr;
 
 	switch (policy)
 	{
@@ -1115,9 +1035,8 @@ pthread_setschedprio(pthread_t thread, int prio)
 		mach_msg_type_number_t	cnt = POLICY_RR_INFO_COUNT;
 
 		/*
-		 * Preserve the thread's current round-robin quantum: this
-		 * call changes priority only.  Fall back to 0 (kernel
-		 * default) if the thread can't report its quantum.
+		 * Preserve the current round-robin quantum if the thread
+		 * already runs RR; otherwise let the kernel pick a default.
 		 */
 		rr_base.quantum = 0;
 		if (thread_info(thread->kernel_thread, THREAD_SCHED_RR_INFO,
@@ -1143,6 +1062,8 @@ pthread_setschedprio(pthread_t thread, int prio)
 		return (EINVAL);
 	}
 
+	if (kr == KERN_INVALID_POLICY)
+		return (ENOTSUP);
 	if (kr != KERN_SUCCESS)
 		return (EINVAL);
 
@@ -1152,6 +1073,143 @@ pthread_setschedprio(pthread_t thread, int prio)
 	thread->param.sched_priority = prio;
 	UNLOCK(thread->lock);
 	return (ESUCCESS);
+}
+
+/*
+ * Refresh the pthread struct's cached policy/priority from the kernel
+ * for the policy currently in effect.  Best-effort: leaves the cache
+ * untouched if the thread cannot be queried.
+ */
+static void
+_pthread_refresh_sched(pthread_t thread, int policy)
+{
+	int			base = -1;
+	mach_msg_type_number_t	c;
+
+	switch (policy)
+	{
+	case POLICY_TIMESHARE:
+	{
+		policy_timeshare_info_data_t ti;
+
+		c = POLICY_TIMESHARE_INFO_COUNT;
+		if (thread_info(thread->kernel_thread,
+				THREAD_SCHED_TIMESHARE_INFO,
+				(thread_info_t)&ti, &c) == KERN_SUCCESS)
+			base = ti.base_priority;
+		break;
+	}
+	case POLICY_RR:
+	{
+		policy_rr_info_data_t ri;
+
+		c = POLICY_RR_INFO_COUNT;
+		if (thread_info(thread->kernel_thread, THREAD_SCHED_RR_INFO,
+				(thread_info_t)&ri, &c) == KERN_SUCCESS)
+			base = ri.base_priority;
+		break;
+	}
+	case POLICY_FIFO:
+	{
+		policy_fifo_info_data_t fi;
+
+		c = POLICY_FIFO_INFO_COUNT;
+		if (thread_info(thread->kernel_thread, THREAD_SCHED_FIFO_INFO,
+				(thread_info_t)&fi, &c) == KERN_SUCCESS)
+			base = fi.base_priority;
+		break;
+	}
+	default:
+		return;
+	}
+
+	LOCK(thread->lock);
+	thread->policy = policy;
+	if (base >= 0)
+		thread->param.sched_priority = base;
+	UNLOCK(thread->lock);
+}
+
+/*
+ * Get the scheduling policy and parameters for a thread, reading the
+ * real state in effect from the kernel — the pthread struct cache can
+ * lag the kernel (e.g. the default policy differs from what the
+ * processor set actually runs).  Falls back to the cache if the thread
+ * cannot be queried.
+ */
+int
+pthread_getschedparam(pthread_t thread,
+		      int *policy,
+		      struct sched_param *param)
+{
+	thread_basic_info_data_t	binfo;
+	mach_msg_type_number_t		cnt = THREAD_BASIC_INFO_COUNT;
+
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);  /* Not a valid thread structure */
+
+	if (thread_info(thread->kernel_thread, THREAD_BASIC_INFO,
+			(thread_info_t)&binfo, &cnt) == KERN_SUCCESS)
+		_pthread_refresh_sched(thread, binfo.policy);
+
+	LOCK(thread->lock);
+	if (policy != (int *)NULL)
+		*policy = thread->policy;
+	if (param != (struct sched_param *)NULL)
+		*param = thread->param;
+	UNLOCK(thread->lock);
+	return (ESUCCESS);
+}
+
+/*
+ * Set the scheduling policy and parameters for a thread.  Unlike the
+ * historical stub, this actually pushes the requested policy + base
+ * priority to the Mach scheduler (a policy the processor set does not
+ * enable returns ENOTSUP).
+ */
+int
+pthread_setschedparam(pthread_t thread,
+		      int policy,
+		      const struct sched_param *param)
+{
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);  /* Not a valid thread structure */
+	if (param == (const struct sched_param *)NULL)
+		return (EINVAL);
+	if (policy != SCHED_OTHER && policy != SCHED_FIFO && policy != SCHED_RR)
+		return (EINVAL);
+	if (param->sched_priority < 0)
+		return (EINVAL);
+
+	return (_pthread_push_sched(thread, policy, param->sched_priority));
+}
+
+/*
+ * Change a thread's scheduling priority without changing its policy
+ * (POSIX.1-2001).  Lighter than pthread_setschedparam: it keeps the
+ * thread's current policy and only pushes the new base priority down to
+ * the Mach scheduler.
+ *
+ * Uses the thread's *actual* scheduling policy as the kernel reports it,
+ * not the policy cached in the pthread struct: the two can diverge
+ * (#273), and the kernel's view is authoritative.
+ */
+int
+pthread_setschedprio(pthread_t thread, int prio)
+{
+	thread_basic_info_data_t binfo;
+	mach_msg_type_number_t	cnt = THREAD_BASIC_INFO_COUNT;
+
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	if (prio < 0)
+		return (EINVAL);
+
+	if (thread_info(thread->kernel_thread, THREAD_BASIC_INFO,
+			(thread_info_t)&binfo, &cnt) != KERN_SUCCESS)
+		return (ESRCH);
+
+	return (_pthread_push_sched(thread, binfo.policy, prio));
 }
 
 /*
