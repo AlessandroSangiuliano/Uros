@@ -42,6 +42,11 @@ __uros_serialize_fds(struct uros_fd_handoff *blob)
     vfs_fd_t vfds[UROS_FD_HANDOFF_MAX];
     int n, i, out = 0;
 
+    /* #232: push any buffered writes to the fs_servers before execve —
+     * the write-behind buffers live in this (about-to-be-replaced) task's
+     * heap and would otherwise be lost. */
+    vfs_flush_all();
+
     memset(blob, 0, sizeof(*blob));
     blob->magic = UROS_FD_HANDOFF_MAGIC;
 

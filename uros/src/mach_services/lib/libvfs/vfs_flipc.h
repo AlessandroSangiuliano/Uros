@@ -64,6 +64,7 @@
 
 /* Opcodes. */
 #define VFS_FLIPC_OP_READ          1
+#define VFS_FLIPC_OP_WRITE         2
 
 /* Reply status codes. */
 #define VFS_FLIPC_OK               0

@@ -61,8 +61,13 @@
 #include <flipc2.h>
 #include "vfs_flipc.h"
 
-/* Read-ahead window size: one big FLIPC fetch feeds many small reads. */
+/* Read-ahead window size: one big FLIPC fetch feeds many small reads.
+ * The write-behind buffer uses the same size. */
 #define VFS_PREFETCH_SIZE  VFS_FLIPC_MAX_READ
+
+/* Flush a fd's pending write-behind buffer (defined with the FLIPC
+ * helpers below; forward-declared for the close/read/seek call sites). */
+static int vfs_wb_flush(vfs_fd_t fd);
 
 /* ------------------------------------------------------------------ */
 /*  Internal state                                                     */
@@ -85,6 +90,13 @@ struct vfs_fd_entry {
     vm_offset_t     pf_buf;
     vfs_u64_t       pf_start;   /* file offset of pf_buf[0]            */
     vfs_u32_t       pf_len;     /* valid bytes in pf_buf (0 = empty)   */
+    /* FLIPC v2 write-behind buffer (#232).  Contiguous sequential
+     * writes coalesce here and flush as one large FLIPC write; flushed
+     * before any read/stat/seek/sync/close so the file stays coherent.
+     * All buffered bytes are contiguous starting at wb_start. */
+    vm_offset_t     wb_buf;
+    vfs_u64_t       wb_start;   /* file offset of wb_buf[0]            */
+    vfs_u32_t       wb_len;     /* buffered bytes (0 = empty)          */
 };
 
 struct vfs_mount_cache_entry {
@@ -333,6 +345,9 @@ vfs_open(const char *path, int flags, int mode)
     vfs_fds[fd].pf_buf  = 0;
     vfs_fds[fd].pf_start = 0;
     vfs_fds[fd].pf_len  = 0;
+    vfs_fds[fd].wb_buf  = 0;
+    vfs_fds[fd].wb_start = 0;
+    vfs_fds[fd].wb_len  = 0;
     pthread_mutex_unlock(&vfs_lock);
     return fd;
 }
@@ -344,6 +359,9 @@ vfs_close(vfs_fd_t fd)
     mach_port_t fs_port;
     vfs_u64_t handle;
     int dead;
+
+    /* Flush any buffered writes before tearing the fd down (#232). */
+    (void)vfs_wb_flush(fd);
 
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);
@@ -357,12 +375,17 @@ vfs_close(vfs_fd_t fd)
     e->in_use = 0;
     e->dead   = 0;
     {
-        /* Release the prefetch window (#232) back to the VM. */
+        /* Release the prefetch + write-behind windows (#232). */
         vm_offset_t pf = e->pf_buf;
+        vm_offset_t wb = e->wb_buf;
         e->pf_buf = 0;
         e->pf_len = 0;
+        e->wb_buf = 0;
+        e->wb_len = 0;
         if (pf)
             (void)vm_deallocate(mach_task_self(), pf, VFS_PREFETCH_SIZE);
+        if (wb)
+            (void)vm_deallocate(mach_task_self(), wb, VFS_PREFETCH_SIZE);
     }
     pthread_mutex_unlock(&vfs_lock);
 
@@ -512,6 +535,195 @@ out:
 }
 
 /*
+ * One FLIPC write round-trip: copy the payload into the reverse
+ * channel's data region, post a WRITE request, await the reply.
+ * 'count' must be <= VFS_FLIPC_MAX_READ (the channel data region).
+ * Returns bytes written (>= 0) or -1 to fall back to the Mach path.
+ */
+static ssize_t
+vfs_flipc_write(struct vfs_flipc_conn *c, vfs_u64_t handle,
+                vfs_u64_t offset, const void *buf, size_t count)
+{
+    ssize_t ret = -1;
+    struct flipc2_desc *req, *rep;
+
+    if (count > VFS_FLIPC_MAX_READ)
+        count = VFS_FLIPC_MAX_READ;
+
+    pthread_mutex_lock(&c->io_lock);
+
+    req = flipc2_produce_wait(c->rev, FLIPC2_SPIN_DEFAULT);
+    if (!req) { c->state = 2; goto out; }
+    memcpy(flipc2_data_ptr(c->rev, 0), buf, count);
+    req->opcode      = VFS_FLIPC_OP_WRITE;
+    req->flags       = 0;
+    req->cookie      = ++c->seq;
+    req->data_offset = 0;
+    req->data_length = count;
+    req->param[0]    = 0;
+    req->param[1]    = handle;
+    req->param[2]    = offset;
+    flipc2_produce_commit(c->rev);
+
+    rep = flipc2_consume_wait(c->fwd, FLIPC2_SPIN_DEFAULT);
+    if (!rep) { c->state = 2; goto out; }
+    if (rep->status == VFS_FLIPC_OK)
+        ret = (ssize_t)rep->data_length;
+    flipc2_consume_release(c->fwd);
+
+out:
+    pthread_mutex_unlock(&c->io_lock);
+    return ret;
+}
+
+/*
+ * Emit one buffered run to the server: FLIPC write when a channel is
+ * up, else (or on FLIPC failure) a single Mach fs_write of the whole
+ * run.  Re-writing a FLIPC-written prefix via Mach is idempotent (same
+ * bytes, same offset), so the fallback stays simple.
+ */
+static void
+vfs_wb_emit(struct vfs_flipc_conn *c, mach_port_t fs_port, vfs_u64_t handle,
+            vm_offset_t wb_buf, vfs_u64_t wb_start, vfs_u32_t wb_len)
+{
+    ssize_t w = -1;
+    if (wb_len == 0)
+        return;
+    if (c)
+        w = vfs_flipc_write(c, handle, wb_start, (void *)wb_buf, wb_len);
+    if (w != (ssize_t)wb_len) {
+        vfs_u32_t written = 0;
+        (void)fs_write(fs_port, handle, wb_start, (pointer_t)wb_buf,
+                       (mach_msg_type_number_t)wb_len, &written);
+    }
+}
+
+/*
+ * Flush a fd's pending write-behind buffer to the server.  Claims the
+ * buffer under the lock (clears wb_len) so it can't double-flush, then
+ * emits outside the lock.  Called before any op that must see a
+ * coherent file: read, lseek, fstat, sync, close.
+ */
+static int
+vfs_wb_flush(vfs_fd_t fd)
+{
+    struct vfs_fd_entry *e;
+    mach_port_t fs_port;
+    vfs_u64_t handle, wb_start;
+    vfs_u32_t wb_len;
+    vm_offset_t wb_buf;
+    struct vfs_flipc_conn *c;
+
+    pthread_mutex_lock(&vfs_lock);
+    e = vfs_fd_get(fd);
+    if (!e || e->wb_len == 0) {
+        pthread_mutex_unlock(&vfs_lock);
+        return 0;
+    }
+    fs_port  = e->fs_port;
+    handle   = e->handle;
+    wb_buf   = e->wb_buf;
+    wb_start = e->wb_start;
+    wb_len   = e->wb_len;
+    e->wb_len = 0;                  /* claim */
+    pthread_mutex_unlock(&vfs_lock);
+
+    c = vfs_flipc_get(fs_port);
+    vfs_wb_emit(c, fs_port, handle, wb_buf, wb_start, wb_len);
+    return 0;
+}
+
+/*
+ * Flush every fd's write-behind buffer.  libposix-uros calls this before
+ * execve hands the fd table to a new image (the buffer lives in this
+ * task's heap and would otherwise be lost across exec).
+ */
+void
+vfs_flush_all(void)
+{
+    int i;
+    for (i = 0; i < VFS_MAX_FDS; i++) {
+        int pending;
+        pthread_mutex_lock(&vfs_lock);
+        pending = vfs_fds[i].in_use && vfs_fds[i].wb_len > 0;
+        pthread_mutex_unlock(&vfs_lock);
+        if (pending)
+            (void)vfs_wb_flush((vfs_fd_t)i);
+    }
+}
+
+/*
+ * Write-behind path (#232): coalesce contiguous sequential writes into
+ * a per-fd buffer and emit them as few large FLIPC writes.  A single
+ * synchronous channel write loses to Mach's RPC (the round-trip wakeup),
+ * so the win — like read prefetch — comes from batching.  Returns bytes
+ * accepted (== count) or -1 to fall back to the Mach path.
+ */
+static ssize_t
+vfs_writebehind(vfs_fd_t fd, struct vfs_flipc_conn *c, mach_port_t fs_port,
+                vfs_u64_t handle, const void *ubuf, size_t count)
+{
+    struct vfs_fd_entry *e;
+    vfs_u64_t offset, wb_start;
+    vfs_u32_t wb_len;
+    vm_offset_t wb_buf;
+    size_t done = 0;
+    const char *in = (const char *)ubuf;
+
+    pthread_mutex_lock(&vfs_lock);
+    e = vfs_fd_get(fd);
+    if (!e || e->dead) { pthread_mutex_unlock(&vfs_lock); return -1; }
+    offset   = e->offset;
+    wb_buf   = e->wb_buf;
+    wb_start = e->wb_start;
+    wb_len   = e->wb_len;
+    pthread_mutex_unlock(&vfs_lock);
+
+    if (wb_buf == 0) {
+        if (vm_allocate(mach_task_self(), &wb_buf,
+                        VFS_PREFETCH_SIZE, TRUE) != KERN_SUCCESS)
+            return -1;          /* fall back to Mach */
+        wb_len = 0;
+    }
+
+    /* A non-contiguous write can't extend the current run — emit it. */
+    if (wb_len > 0 && offset != wb_start + wb_len) {
+        vfs_wb_emit(c, fs_port, handle, wb_buf, wb_start, wb_len);
+        wb_len = 0;
+    }
+    if (wb_len == 0)
+        wb_start = offset;
+
+    while (done < count) {
+        size_t space = VFS_PREFETCH_SIZE - wb_len;
+        size_t take  = count - done;
+        if (take > space)
+            take = space;
+        memcpy((void *)(wb_buf + wb_len), in + done, take);
+        wb_len += (vfs_u32_t)take;
+        done   += take;
+        offset += take;
+        if (wb_len == VFS_PREFETCH_SIZE) {
+            vfs_wb_emit(c, fs_port, handle, wb_buf, wb_start, wb_len);
+            wb_len   = 0;
+            wb_start = offset;
+        }
+    }
+
+    pthread_mutex_lock(&vfs_lock);
+    e = vfs_fd_get(fd);
+    if (e) {
+        e->wb_buf   = wb_buf;
+        e->wb_start = wb_start;
+        e->wb_len   = wb_len;
+        e->offset   = offset;
+        e->pf_len   = 0;        /* content changed — drop read prefetch */
+    }
+    pthread_mutex_unlock(&vfs_lock);
+    return (ssize_t)done;
+}
+
+/*
  * Pipelined read via the per-fd prefetch window (#232).  A single large
  * FLIPC fetch fills pf_buf; the requested bytes — and every subsequent
  * sequential read that lands in the window — are served by a local
@@ -612,6 +824,9 @@ vfs_read(vfs_fd_t fd, void *buf, size_t count)
     offset  = e->offset;
     pthread_mutex_unlock(&vfs_lock);
 
+    /* #232: a read must see prior buffered writes — flush write-behind. */
+    (void)vfs_wb_flush(fd);
+
     /* #232: when the server offers a FLIPC fast-path, serve reads from
      * the pipelined read-ahead window (one big channel fetch feeds many
      * small reads with no IPC).  Any failure falls through to the Mach
@@ -671,6 +886,17 @@ vfs_write(vfs_fd_t fd, const void *buf, size_t count)
     offset  = e->offset;
     pthread_mutex_unlock(&vfs_lock);
 
+    /* #232: coalesce into the write-behind buffer and emit as few large
+     * FLIPC writes.  Falls through to Mach on any fast-path failure. */
+    if (vfs_flipc_enabled && count > 0) {
+        struct vfs_flipc_conn *fc = vfs_flipc_get(fs_port);
+        if (fc) {
+            ssize_t wr = vfs_writebehind(fd, fc, fs_port, handle, buf, count);
+            if (wr >= 0)
+                return wr;      /* write-behind owns the offset update */
+        }
+    }
+
     /* MIG OOL transfers expect to own the buffer, but our caller's
      * 'buf' may live on the stack or be reused.  Pass a copy by value
      * via the inline pointer_t form: MIG copies it for us. */
@@ -701,6 +927,10 @@ vfs_lseek(vfs_fd_t fd, off_t offset, int whence)
     struct vfs_fd_entry *e;
     off_t new_off = -1;
     vfs_stat_t st;
+
+    /* #232: flush buffered writes so the seek base / future ops are
+     * coherent (a jump also ends the contiguous write-behind run). */
+    (void)vfs_wb_flush(fd);
 
     /* SEEK_END requires a stat for the file size; do it before grabbing
      * the lock to avoid an RPC under the mutex. */
@@ -774,6 +1004,9 @@ vfs_fstat(vfs_fd_t fd, vfs_stat_t *out)
     if (!out)
         return -1;
 
+    /* #232: flush buffered writes so st_size reflects them. */
+    (void)vfs_wb_flush(fd);
+
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);
     if (!e || e->dead) {
@@ -800,6 +1033,9 @@ vfs_sync(vfs_fd_t fd)
     struct vfs_fd_entry *e;
     mach_port_t fs_port;
     kern_return_t kr;
+
+    /* #232: push buffered writes to the server before syncing. */
+    (void)vfs_wb_flush(fd);
 
     pthread_mutex_lock(&vfs_lock);
     e = vfs_fd_get(fd);

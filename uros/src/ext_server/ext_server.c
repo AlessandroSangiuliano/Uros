@@ -1149,139 +1149,192 @@ vfs_flipc_endpoint(mach_port_t fs_port, vfs_path_t endpoint, int *result)
 	return KERN_SUCCESS;
 }
 
-struct flipc_client {
-	struct mount_context	*mnt;
-	flipc2_channel_t	 fwd;	/* server -> client (we produce) */
-	flipc2_channel_t	 rev;	/* client -> server (we consume) */
-};
-
 /*
- * Per-connection consumer: drain READ requests off the reverse channel,
- * read file data into the forward channel's data region, and reply.  One
- * request is in flight at a time (libvfs serialises), so data offset 0
- * is reused safely.
+ * Serve one pending request on 'rev', replying on 'fwd'.  Non-blocking:
+ * returns 1 if a request was processed, 0 if none was pending.  The
+ * reactor calls this in a drain loop.  One request is in flight per
+ * client (libvfs serialises), so data offset 0 is reused safely.
  */
-static void *
-flipc_consumer(void *arg)
+static int
+flipc_serve_one(struct mount_context *mnt, flipc2_channel_t fwd,
+		flipc2_channel_t rev)
 {
-	struct flipc_client *c = (struct flipc_client *)arg;
-	struct mount_context *mnt = c->mnt;
+	struct flipc2_desc *req = flipc2_consume_peek(rev);
+	if (!req)
+		return 0;
 
-	for (;;) {
-		struct flipc2_desc *req = flipc2_consume_wait(c->rev,
-							      FLIPC2_SPIN_DEFAULT);
-		if (!req)
-			break;			/* channel dead */
-		uint32_t op     = req->opcode;
-		uint64_t cookie = req->cookie;
-		uint64_t handle = req->param[1];
-		uint64_t offset = req->param[2];
-		uint64_t count  = req->data_length;
-		flipc2_consume_release(c->rev);
+	uint32_t op       = req->opcode;
+	uint64_t cookie   = req->cookie;
+	uint64_t handle   = req->param[1];
+	uint64_t offset   = req->param[2];
+	uint64_t count    = req->data_length;
+	uint64_t data_off = req->data_offset;
+	void *wsrc = (op == VFS_FLIPC_OP_WRITE)
+		     ? flipc2_data_ptr(rev, data_off) : (void *)0;
+	flipc2_consume_release(rev);
 
-		struct flipc2_desc *rep = flipc2_produce_wait(c->fwd,
-							      FLIPC2_SPIN_DEFAULT);
-		if (!rep)
-			break;
-		rep->opcode      = op;
-		rep->cookie      = cookie;
-		rep->flags       = 0;
-		rep->data_offset = 0;
-		rep->data_length = 0;
-		rep->status      = VFS_FLIPC_ERR_INVAL;
+	struct flipc2_desc *rep = flipc2_produce_wait(fwd, FLIPC2_SPIN_DEFAULT);
+	if (!rep)
+		return 1;		/* ring wedged — drop the reply */
+	rep->opcode      = op;
+	rep->cookie      = cookie;
+	rep->flags       = 0;
+	rep->data_offset = 0;
+	rep->data_length = 0;
+	rep->status      = VFS_FLIPC_ERR_INVAL;
 
-		if (op == VFS_FLIPC_OP_READ) {
-			int idx = (int)handle - 1;
-			if (idx < 0 || idx >= MAX_OPEN_FILES ||
-			    !mnt->open_files[idx].in_use) {
-				rep->status = VFS_FLIPC_ERR_BADHANDLE;
+	if (op == VFS_FLIPC_OP_READ) {
+		int idx = (int)handle - 1;
+		if (idx < 0 || idx >= MAX_OPEN_FILES ||
+		    !mnt->open_files[idx].in_use) {
+			rep->status = VFS_FLIPC_ERR_BADHANDLE;
+		} else {
+			fs_private_t priv = mnt->open_files[idx].private;
+			size_t fsize = ext2fs_file_size(priv);
+			uint64_t cap = fwd->hdr->data_size;
+			if (cap > VFS_FLIPC_MAX_READ)
+				cap = VFS_FLIPC_MAX_READ;
+			if (offset >= fsize || count == 0) {
+				rep->status = VFS_FLIPC_OK;
 			} else {
-				fs_private_t priv = mnt->open_files[idx].private;
-				size_t fsize = ext2fs_file_size(priv);
-				uint64_t cap = c->fwd->hdr->data_size;
-				if (cap > VFS_FLIPC_MAX_READ)
-					cap = VFS_FLIPC_MAX_READ;
-				if (offset >= fsize || count == 0) {
-					rep->status = VFS_FLIPC_OK;
+				if (offset + count > fsize)
+					count = fsize - offset;
+				if (count > cap)
+					count = cap;
+				void *dst = flipc2_data_ptr(fwd, 0);
+				int rc = ext2fs_read_file(priv,
+					(vm_offset_t)offset,
+					(vm_offset_t)dst,
+					(vm_size_t)count);
+				if (rc != 0) {
+					rep->status = VFS_FLIPC_ERR_IO;
 				} else {
-					if (offset + count > fsize)
-						count = fsize - offset;
-					if (count > cap)
-						count = cap;
-					void *dst = flipc2_data_ptr(c->fwd, 0);
-					int rc = ext2fs_read_file(priv,
-						(vm_offset_t)offset,
-						(vm_offset_t)dst,
-						(vm_size_t)count);
-					if (rc != 0) {
-						rep->status = VFS_FLIPC_ERR_IO;
-					} else {
-						rep->status      = VFS_FLIPC_OK;
-						rep->data_length = count;
-					}
+					rep->status      = VFS_FLIPC_OK;
+					rep->data_length = count;
 				}
 			}
 		}
-		flipc2_produce_commit(c->fwd);
+	} else if (op == VFS_FLIPC_OP_WRITE) {
+		int idx = (int)handle - 1;
+		if (idx < 0 || idx >= MAX_OPEN_FILES ||
+		    !mnt->open_files[idx].in_use || !wsrc) {
+			rep->status = VFS_FLIPC_ERR_BADHANDLE;
+		} else if (count == 0) {
+			rep->status = VFS_FLIPC_OK;
+		} else {
+			fs_private_t priv = mnt->open_files[idx].private;
+			int rc = ext2fs_write_file(priv,
+				(vm_offset_t)offset,
+				(vm_offset_t)wsrc,
+				(vm_size_t)count);
+			if (rc != 0) {
+				rep->status = VFS_FLIPC_ERR_IO;
+			} else {
+				dirty_list_add(mnt, idx);
+				rep->status      = VFS_FLIPC_OK;
+				rep->data_length = count;
+			}
+		}
 	}
-	free(c);
-	return NULL;
+	flipc2_produce_commit(fwd);
+	return 1;
 }
 
-/* endpoint -> mount map, filled at create time. */
-static struct { flipc2_endpoint_t ep; struct mount_context *mnt; }
-	flipc_ep_map[MAX_MOUNTS];
-static int flipc_ep_map_n;
-
-static struct mount_context *
-flipc_ep_owner(flipc2_endpoint_t ep)
-{
-	int i;
-	for (i = 0; i < flipc_ep_map_n; i++)
-		if (flipc_ep_map[i].ep == ep)
-			return flipc_ep_map[i].mnt;
-	return NULL;
-}
+struct flipc_reactor_arg {
+	flipc2_endpoint_t	ep;
+	struct mount_context	*mnt;
+};
+static struct flipc_reactor_arg flipc_reactor_args[MAX_MOUNTS];
 
 /*
- * Per-mount accept loop: wait for libvfs clients to connect and spawn a
- * consumer thread for each.  The endpoint itself is created up front in
- * main() (before the Mach loop) so fs_flipc_endpoint can hand out the
- * name only once the endpoint is actually registered.
+ * Single-thread reactor per endpoint (#232).  One thread owns the whole
+ * lifecycle: it polls every connected client's reverse channel for data
+ * AND pumps the endpoint control port for connect / dead-name events.
+ * Because the same thread that learns a client died is the one consuming
+ * its channels, it can drop the channel from the pollset and destroy it
+ * with no other thread touching it — eliminating the use-after-free that
+ * a separate per-client consumer thread suffered.
  */
+#define FLIPC_REACTOR_MAX_CONNS	16
+#define FLIPC_POLL_TIMEOUT_MS	10
+
 static void *
-flipc_accept(void *arg)
+flipc_reactor(void *arg)
 {
-	flipc2_endpoint_t ep = (flipc2_endpoint_t)arg;
+	struct flipc_reactor_arg *ra = (struct flipc_reactor_arg *)arg;
+	flipc2_endpoint_t ep = ra->ep;
+	struct mount_context *mnt = ra->mnt;
+	flipc2_pollset_t ps;
+	struct { flipc2_channel_t fwd, rev; } conns[FLIPC_REACTOR_MAX_CONNS];
+	int nconns = 0;
+
+	if (flipc2_pollset_create(&ps) != FLIPC2_SUCCESS)
+		return NULL;
 
 	for (;;) {
-		flipc2_channel_t fwd = 0, rev = 0;
-		if (flipc2_endpoint_accept(ep, &fwd, &rev) != FLIPC2_SUCCESS)
-			continue;
-		struct flipc_client *c =
-			(struct flipc_client *)malloc(sizeof(*c));
-		if (!c) {
-			flipc2_channel_detach(fwd);
-			flipc2_channel_detach(rev);
-			continue;
+		flipc2_event_t events[FLIPC_REACTOR_MAX_CONNS];
+		flipc2_ep_event_t ev;
+		int n = 0;
+		int i, j;
+
+		/* Data plane.  flipc2_poll arms cons_sleeping and blocks on
+		 * the shared semaphore, so a client's request wakes it within
+		 * microseconds; the timeout only bounds how long an idle
+		 * reactor waits before it re-checks the control port.  When no
+		 * clients are connected, block on the control port instead so
+		 * we don't busy-spin an empty pollset. */
+		if (nconns > 0) {
+			n = flipc2_poll(ps, events, FLIPC_REACTOR_MAX_CONNS,
+					FLIPC_POLL_TIMEOUT_MS);
+			for (i = 0; i < n; i++) {
+				flipc2_channel_t rev = events[i].channel;
+				flipc2_channel_t fwd = 0;
+				for (j = 0; j < nconns; j++)
+					if (conns[j].rev == rev) {
+						fwd = conns[j].fwd;
+						break;
+					}
+				if (fwd)
+					while (flipc_serve_one(mnt, fwd, rev))
+						;
+			}
 		}
-		c->mnt = flipc_ep_owner(ep);
-		c->fwd = fwd;
-		c->rev = rev;
-		pthread_t t;
-		if (pthread_create(&t, NULL, flipc_consumer, c) != 0) {
-			flipc2_channel_detach(fwd);
-			flipc2_channel_detach(rev);
-			free(c);
+
+		/* Control plane: connect / dead-name.  Non-blocking while
+		 * clients exist (poll above did the waiting); blocking only
+		 * when idle with no clients. */
+		if (flipc2_endpoint_pump(ep,
+					 nconns > 0 ? 0 : FLIPC_POLL_TIMEOUT_MS,
+					 &ev) != FLIPC2_SUCCESS)
 			continue;
+
+		if (ev.type == FLIPC2_EP_EVENT_NEW) {
+			if (nconns < FLIPC_REACTOR_MAX_CONNS) {
+				conns[nconns].fwd = ev.fwd_ch;
+				conns[nconns].rev = ev.rev_ch;
+				nconns++;
+				flipc2_pollset_add(ps, ev.rev_ch);
+			}
+			/* The client may have posted its first request before
+			 * we joined it to the pollset — drain it now. */
+			while (flipc_serve_one(mnt, ev.fwd_ch, ev.rev_ch))
+				;
+		} else if (ev.type == FLIPC2_EP_EVENT_DEAD) {
+			flipc2_pollset_remove(ps, ev.rev_ch);
+			for (j = 0; j < nconns; j++)
+				if (conns[j].rev == ev.rev_ch) {
+					conns[j] = conns[--nconns];
+					break;
+				}
+			flipc2_channel_destroy(ev.fwd_ch);
+			flipc2_channel_destroy(ev.rev_ch);
 		}
-		pthread_detach(t);
 	}
 	return NULL;
 }
 
 /*
- * Create the FLIPC endpoint for one mount and start its accept thread.
+ * Create the FLIPC endpoint for one mount and start its reactor thread.
  * On any failure the mount simply has no fast-path (flipc_ep stays "").
  */
 static void
@@ -1289,6 +1342,7 @@ flipc_start_mount(struct mount_context *mnt)
 {
 	flipc2_endpoint_t ep;
 	flipc2_return_t ret;
+	static int slot;
 
 	(void)snprintf(mnt->flipc_ep, sizeof(mnt->flipc_ep),
 		       "%s%s", VFS_FLIPC_ENDPOINT_PREFIX, mnt->service_name);
@@ -1302,19 +1356,23 @@ flipc_start_mount(struct mount_context *mnt)
 		mnt->flipc_ep[0] = '\0';
 		return;
 	}
-	if (flipc_ep_map_n < MAX_MOUNTS) {
-		flipc_ep_map[flipc_ep_map_n].ep  = ep;
-		flipc_ep_map[flipc_ep_map_n].mnt = mnt;
-		flipc_ep_map_n++;
+
+	if (slot >= MAX_MOUNTS) {
+		mnt->flipc_ep[0] = '\0';
+		return;
 	}
+	flipc_reactor_args[slot].ep  = ep;
+	flipc_reactor_args[slot].mnt = mnt;
 
 	pthread_t t;
-	if (pthread_create(&t, NULL, flipc_accept, ep) != 0) {
-		printf("ext2: FLIPC accept thread failed for %s\n",
+	if (pthread_create(&t, NULL, flipc_reactor,
+			   &flipc_reactor_args[slot]) != 0) {
+		printf("ext2: FLIPC reactor thread failed for %s\n",
 		       mnt->flipc_ep);
 		mnt->flipc_ep[0] = '\0';
 		return;
 	}
+	slot++;
 	pthread_detach(t);
 	printf("ext2: FLIPC fast-path endpoint \"%s\" ready\n", mnt->flipc_ep);
 }
