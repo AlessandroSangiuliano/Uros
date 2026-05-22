@@ -112,13 +112,25 @@ slurp_binary(const char *path, void **out, vm_size_t *out_size)
 /* ------------------------------------------------------------------ */
 
 /*
- * For each PT_LOAD: vm_allocate at the requested vaddr, vm_write the
- * file content, vm_protect to the segment's RWX flags.  v0.1.0 only
- * supports static ET_EXEC (no load bias) — ET_DYN/PIE arrives with
- * exec_server v0.2.0 alongside PT_INTERP.
+ * Load bias bases (#234).  ET_EXEC loads at bias 0 (its p_vaddr are
+ * absolute).  A PT_INTERP dynamic linker is ET_DYN and gets relocated
+ * to EXEC_INTERP_BASE; an ET_DYN/PIE main image (no fixed link address)
+ * gets EXEC_DYN_BASE.  Both regions sit below the stack/vDSO window and
+ * above the typical 0x08048000 ET_EXEC text, so they don't collide.
+ */
+#define EXEC_INTERP_BASE  0x40000000U
+#define EXEC_DYN_BASE     0x56555000U
+
+/*
+ * For each PT_LOAD: vm_allocate at (vaddr + bias), vm_write the file
+ * content, vm_protect to the segment's RWX flags.  `bias` is 0 for a
+ * fixed-address ET_EXEC and the chosen load base for an ET_DYN image
+ * (the interpreter, or a PIE main image).  exec_server does not apply
+ * relocations — for dynamic images that is the interpreter's job.
  */
 static int
-install_segments(mach_port_t new_task, const elf_image_t *img)
+install_segments(mach_port_t new_task, const elf_image_t *img,
+                 vm_address_t bias)
 {
     int n = elf_phdr_count(img);
     int i;
@@ -127,6 +139,7 @@ install_segments(mach_port_t new_task, const elf_image_t *img)
     for (i = 0; i < n; i++) {
         elf_phdr_view_t ph;
         vm_address_t addr;
+        vm_address_t seg_va;
         vm_prot_t prot;
 
         if (elf_phdr_get(img, i, &ph) != ELF_OK)
@@ -134,10 +147,12 @@ install_segments(mach_port_t new_task, const elf_image_t *img)
         if (ph.type != PT_LOAD || ph.memsz == 0)
             continue;
 
+        seg_va = (vm_address_t)ph.vaddr + bias;
+
         /* Round to page boundaries for the kernel allocator. */
-        addr = (vm_address_t)(ph.vaddr & ~(vm_address_t)0xFFFu);
+        addr = seg_va & ~(vm_address_t)0xFFFu;
         {
-            vm_size_t size = (vm_size_t)((ph.vaddr + ph.memsz + 0xFFFu)
+            vm_size_t size = (vm_size_t)((seg_va + ph.memsz + 0xFFFu)
                                          & ~(vm_address_t)0xFFFu) - addr;
             kr = vm_allocate(new_task, &addr, size, FALSE);
             if (kr != KERN_SUCCESS) {
@@ -150,12 +165,12 @@ install_segments(mach_port_t new_task, const elf_image_t *img)
         /* Copy the file portion of the segment.  The tail
          * memsz - filesz is already zero from vm_allocate. */
         if (ph.filesz > 0 && ph.data) {
-            kr = vm_write(new_task, (vm_address_t)ph.vaddr,
+            kr = vm_write(new_task, seg_va,
                           (vm_offset_t)ph.data,
                           (mach_msg_type_number_t)ph.filesz);
             if (kr != KERN_SUCCESS) {
                 printf("exec: vm_write(0x%x, %u) failed kr=%d\n",
-                       (unsigned)ph.vaddr, (unsigned)ph.filesz, kr);
+                       (unsigned)seg_va, (unsigned)ph.filesz, kr);
                 return EXEC_ERR_VM_SETUP;
             }
         }
@@ -166,7 +181,7 @@ install_segments(mach_port_t new_task, const elf_image_t *img)
         if (ph.flags & PF_X) prot |= VM_PROT_EXECUTE;
 
         kr = vm_protect(new_task, addr,
-                        (vm_size_t)((ph.vaddr + ph.memsz + 0xFFFu)
+                        (vm_size_t)((seg_va + ph.memsz + 0xFFFu)
                                     & ~(vm_address_t)0xFFFu) - addr,
                         FALSE, prot);
         if (kr != KERN_SUCCESS) {
@@ -176,6 +191,53 @@ install_segments(mach_port_t new_task, const elf_image_t *img)
         }
     }
     return EXEC_OK;
+}
+
+/*
+ * Load a PT_INTERP dynamic linker (#234).  Reads the interpreter image
+ * named by `interp_path`, parses it, and maps its PT_LOADs at
+ * EXEC_INTERP_BASE.  On success *out_entry is the interpreter's runtime
+ * entry point (base + e_entry), where control is handed off instead of
+ * the application's e_entry.
+ */
+static int
+load_interp(mach_port_t new_task, const char *interp_path,
+            vm_address_t *out_base, uintptr_t *out_entry)
+{
+    void *ibuf = NULL;
+    vm_size_t isz = 0;
+    elf_image_t iimg;
+    int rc;
+
+    rc = slurp_binary(interp_path, &ibuf, &isz);
+    if (rc != EXEC_OK) {
+        printf("exec: cannot read interpreter \"%s\" rc=%d\n",
+               interp_path, rc);
+        return rc;
+    }
+    if (elf_open(ibuf, (size_t)isz, &iimg) != ELF_OK) {
+        free(ibuf);
+        return EXEC_ERR_PARSE;
+    }
+    /* The interpreter must itself be statically self-contained
+     * (ET_DYN with no further PT_INTERP). */
+    if (elf_type(&iimg) != ET_DYN || elf_interp(&iimg) != NULL) {
+        elf_close(&iimg);
+        free(ibuf);
+        printf("exec: interpreter \"%s\" is not a bare ET_DYN\n",
+               interp_path);
+        return EXEC_ERR_PARSE;
+    }
+
+    rc = install_segments(new_task, &iimg, EXEC_INTERP_BASE);
+    if (rc == EXEC_OK) {
+        *out_base  = EXEC_INTERP_BASE;
+        *out_entry = (uintptr_t)(EXEC_INTERP_BASE + elf_entry(&iimg));
+    }
+
+    elf_close(&iimg);
+    free(ibuf);
+    return rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -357,6 +419,10 @@ exec_do_load(mach_port_t client_task, const char *path,
     mach_port_t new_task = MACH_PORT_NULL;
     mach_port_t new_thread = MACH_PORT_NULL;
     vm_address_t stack_top;
+    vm_address_t main_bias = 0;     /* ET_DYN load bias, 0 for ET_EXEC */
+    vm_address_t interp_base = 0;   /* AT_BASE, 0 if no PT_INTERP */
+    uintptr_t    start_entry;       /* where the first thread begins */
+    const char  *interp;
     int rc;
     kern_return_t kr;
 
@@ -373,17 +439,16 @@ exec_do_load(mach_port_t client_task, const char *path,
         free(file_buf);
         return EXEC_ERR_PARSE;
     }
-    if (elf_type(&img) != ET_EXEC) {
-        /* v0.1.0: only static fully-linked executables (ET_EXEC).
-         * ET_DYN + PT_INTERP is exec_server v0.2.0 (#234). */
-        elf_close(&img);
-        free(file_buf);
-        return EXEC_ERR_NOT_STATIC;
-    }
-    if (elf_interp(&img) != NULL) {
-        elf_close(&img);
-        free(file_buf);
-        return EXEC_ERR_NOT_STATIC;
+    /* v0.2.0 (#234): accept ET_EXEC (bias 0) and ET_DYN/PIE (loaded at
+     * EXEC_DYN_BASE).  A PT_INTERP, if present, names a dynamic linker
+     * we load below and hand control to instead of the app entry. */
+    {
+        uint32_t et = elf_type(&img);
+        if (et != ET_EXEC && et != ET_DYN) {
+            elf_close(&img);
+            free(file_buf);
+            return EXEC_ERR_NOT_STATIC;
+        }
     }
 
     /* 3. Create the child task — IPC space inherited from the
@@ -396,10 +461,25 @@ exec_do_load(mach_port_t client_task, const char *path,
         return EXEC_ERR_TASK_CREATE;
     }
 
+    /* ET_DYN/PIE images load at a bias; fixed ET_EXEC at 0. */
+    main_bias = (elf_type(&img) == ET_DYN) ? EXEC_DYN_BASE : 0;
+
     /* 4. Map every PT_LOAD into the child. */
-    rc = install_segments(new_task, &img);
+    rc = install_segments(new_task, &img, main_bias);
     if (rc != EXEC_OK)
         return fail_after_task(new_task, &img, file_buf, rc);
+
+    /* 4.1. If the image names a dynamic linker (PT_INTERP), load it and
+     *      hand control to its entry instead of the app's e_entry; the
+     *      interpreter relocates the app and chains to AT_ENTRY (#234). */
+    interp = elf_interp(&img);
+    if (interp != NULL) {
+        rc = load_interp(new_task, interp, &interp_base, &start_entry);
+        if (rc != EXEC_OK)
+            return fail_after_task(new_task, &img, file_buf, rc);
+    } else {
+        start_entry = (uintptr_t)(elf_entry(&img) + main_bias);
+    }
 
     /* 4.25. Provision the child's per-task cap_port from the binary's
      *       .uros_manifest section (#235).  Done before vDSO + stack
@@ -420,8 +500,12 @@ exec_do_load(mach_port_t client_task, const char *path,
         }
 
         memset(&hints, 0, sizeof(hints));
-        hints.entry_va  = (vm_address_t)elf_entry(&img);
-        hints.vdso_base = vdso_base;
+        /* AT_ENTRY is always the application's entry (with bias), even
+         * when control first goes to the interpreter — the interpreter
+         * reads AT_ENTRY to chain into the app after relocations. */
+        hints.entry_va    = (vm_address_t)(elf_entry(&img) + main_bias);
+        hints.vdso_base   = vdso_base;
+        hints.interp_base = interp_base;   /* AT_BASE, 0 if static */
 
         /* AT_PHDR derivation (#248): the phdr table lives at file
          * offset e_phoff; for ET_EXEC the program headers are mapped
@@ -444,7 +528,7 @@ exec_do_load(mach_port_t client_task, const char *path,
                 if (phoff >= ph.offset &&
                     phoff <  ph.offset + ph.filesz) {
                     hints.phdr_va = (vm_address_t)
-                        (ph.vaddr + (phoff - ph.offset));
+                        (ph.vaddr + (phoff - ph.offset) + main_bias);
                     hints.phent   = elf_phentsize(&img);
                     hints.phnum   = (uint32_t)n_ph;
                     break;
@@ -459,8 +543,9 @@ exec_do_load(mach_port_t client_task, const char *path,
     if (rc != EXEC_OK)
         return fail_after_task(new_task, &img, file_buf, rc);
 
-    /* 6. Bring up the entry thread. */
-    rc = start_thread(new_task, elf_entry(&img), stack_top, &new_thread);
+    /* 6. Bring up the entry thread — at the interpreter's entry when a
+     *    PT_INTERP was present, otherwise at the app's (biased) entry. */
+    rc = start_thread(new_task, start_entry, stack_top, &new_thread);
     if (rc != EXEC_OK)
         return fail_after_task(new_task, &img, file_buf, rc);
 

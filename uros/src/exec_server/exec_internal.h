@@ -43,6 +43,7 @@ struct exec_auxv_hints {
     uint32_t     phent;          /* AT_PHENT (size of one phdr)   */
     uint32_t     phnum;          /* AT_PHNUM (count)              */
     vm_address_t vdso_base;      /* AT_SYSINFO_EHDR,  0 = skip   */
+    vm_address_t interp_base;    /* AT_BASE (dyn-linker load bias), 0 = skip */
 };
 
 int exec_build_stack(mach_port_t new_task,
