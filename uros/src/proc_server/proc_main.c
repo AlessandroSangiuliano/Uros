@@ -68,6 +68,18 @@ struct pid_entry {
     proc_pid_t      ppid;
     proc_pid_t      pgrp_id;         /* POSIX process group (v0.3.0) */
     proc_pid_t      sid;             /* POSIX session id    (v0.3.0) */
+
+    /* Controlling-tty / job control (v0.4.0 / #247).  Meaningful only on
+     * a session-leader entry (pid == sid); other members reach them by
+     * looking up their sid's leader.  ctty_port == MACH_PORT_NULL means
+     * the session has no controlling terminal. */
+    mach_port_t     ctty_port;       /* leader-only: send right to tty */
+    proc_pid_t      fg_pgrp_id;      /* leader-only: foreground pgrp */
+
+    /* Job-control stop state: set when proc_server suspends the task for
+     * SIGSTOP, cleared on SIGCONT, so a continue can durably resume the
+     * whole stopped process group (#247). */
+    uint8_t         stopped;
     mach_port_t     task_port;       /* receive-side perspective */
     char            cmdline[PROC_CMDLINE_MAX];
     uint8_t         state;           /* PROC_STATE_* */
@@ -114,6 +126,25 @@ find_by_task_locked(mach_port_t task)
     for (i = 0; i < PROC_MAX_TASKS; i++)
         if (pid_table[i].in_use && pid_table[i].task_port == task)
             return &pid_table[i];
+    return NULL;
+}
+
+/*
+ * Find a session's leader entry — the in-use pid whose pid == sid (a
+ * session id is the leader's pid by construction, see proc_setsid).
+ * The controlling-tty state (#247) lives there.  Returns NULL if the
+ * leader is gone (e.g. the session leader already exited).
+ */
+static struct pid_entry *
+find_session_leader_locked(proc_pid_t sid)
+{
+    struct pid_entry *e;
+
+    if (sid == 0)
+        return NULL;
+    e = find_by_pid_locked(sid);
+    if (e && e->sid == sid)
+        return e;
     return NULL;
 }
 
@@ -434,11 +465,40 @@ proc_S_kill(
         *result = PROC_ERR_NOT_FOUND;
         return KERN_SUCCESS;
     }
+    /*
+     * SIGCONT is special: durably continue the whole stopped process
+     * group (#247), not just wake the one target.  Snapshot the tasks
+     * proc_server itself suspended (stopped flag) under the lock, clear
+     * the flag, then task_resume outside the lock.  SIGCONT to a group
+     * with nothing stopped is a successful no-op (POSIX).
+     */
+    if (signo == PROC_SIGCONT) {
+        mach_port_t cont_tasks[PROC_MAX_TASKS];
+        unsigned n_cont = 0, j;
+        proc_pid_t grp = e->pgrp_id;
+        int k;
+
+        for (k = 0; k < PROC_MAX_TASKS; k++) {
+            if (pid_table[k].in_use &&
+                pid_table[k].state != PROC_STATE_ZOMBIE &&
+                pid_table[k].pgrp_id == grp &&
+                pid_table[k].stopped) {
+                cont_tasks[n_cont++] = pid_table[k].task_port;
+                pid_table[k].stopped = 0;
+            }
+        }
+        pthread_mutex_unlock(&pid_lock);
+
+        for (j = 0; j < n_cont; j++)
+            (void)task_resume(cont_tasks[j]);
+        *result = PROC_OK;
+        return KERN_SUCCESS;
+    }
+
     /* Uncatchable signals act on the task port; catchable ones go to
      * the signal_port via mach_msg.  Snapshot the rights under the
      * lock, release the lock before issuing the kernel/mach call. */
-    if (signo == PROC_SIGKILL || signo == PROC_SIGSTOP ||
-        signo == PROC_SIGCONT) {
+    if (signo == PROC_SIGKILL || signo == PROC_SIGSTOP) {
         task = e->task_port;
     } else {
         sigport = e->signal_port;
@@ -452,10 +512,14 @@ proc_S_kill(
         return KERN_SUCCESS;
     case PROC_SIGSTOP:
         kr = task_suspend(task);
-        *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
-        return KERN_SUCCESS;
-    case PROC_SIGCONT:
-        kr = task_resume(task);
+        if (kr == KERN_SUCCESS) {
+            /* Mark the pid stopped so a later SIGCONT resumes it. */
+            pthread_mutex_lock(&pid_lock);
+            e = find_by_pid_locked(pid);
+            if (e)
+                e->stopped = 1;
+            pthread_mutex_unlock(&pid_lock);
+        }
         *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
         return KERN_SUCCESS;
     default:
@@ -534,6 +598,11 @@ proc_S_setsid(
     }
     e->sid     = pid;
     e->pgrp_id = pid;
+    /* A new session starts with no controlling terminal (#247): this is
+     * what makes the fork()+setsid() daemonize idiom detach from the
+     * tty.  The leader claims one explicitly via proc_set_ctty. */
+    e->ctty_port  = MACH_PORT_NULL;
+    e->fg_pgrp_id = 0;
     pthread_mutex_unlock(&pid_lock);
 
     *new_sid = pid;
@@ -727,6 +796,154 @@ proc_S_killpg(
 
     *n_sent = sent;
     *result = (sent > 0) ? PROC_OK : PROC_ERR_NOT_FOUND;
+    return KERN_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Controlling terminal / job control (v0.4.0 / #247)                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * proc_set_ctty(sid, tty_port): the session leader claims tty_port as
+ * the session's controlling terminal.  POSIX allows this only when the
+ * session has no controlling tty yet; the foreground process group is
+ * initialised to the leader's own pgrp.  Consumes the passed send right.
+ */
+kern_return_t
+proc_S_set_ctty(
+    mach_port_t                 server_port,
+    proc_pid_t                  sid,
+    mach_port_t                 tty_port,
+    int                         *result)
+{
+    struct pid_entry *e;
+
+    (void)server_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_session_leader_locked(sid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        if (tty_port != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), tty_port);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    if (e->ctty_port != MACH_PORT_NULL) {
+        pthread_mutex_unlock(&pid_lock);
+        if (tty_port != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), tty_port);
+        *result = PROC_ERR_PERM;        /* session already has a ctty */
+        return KERN_SUCCESS;
+    }
+    e->ctty_port  = tty_port;
+    e->fg_pgrp_id = e->pgrp_id;         /* leader's pgrp is foreground */
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+/*
+ * proc_clear_ctty(sid): release the session's controlling terminal.
+ * Idempotent — clearing a session that has none simply succeeds.
+ */
+kern_return_t
+proc_S_clear_ctty(
+    mach_port_t                 server_port,
+    proc_pid_t                  sid,
+    int                         *result)
+{
+    struct pid_entry *e;
+    mach_port_t old = MACH_PORT_NULL;
+
+    (void)server_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_session_leader_locked(sid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    old           = e->ctty_port;
+    e->ctty_port  = MACH_PORT_NULL;
+    e->fg_pgrp_id = 0;
+    pthread_mutex_unlock(&pid_lock);
+
+    if (old != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), old);
+
+    *result = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+/*
+ * proc_tcsetpgrp(sid, pgrp): set the foreground process group of the
+ * session's controlling tty.  PROC_ERR_NO_CTTY if the session has none.
+ */
+kern_return_t
+proc_S_tcsetpgrp(
+    mach_port_t                 server_port,
+    proc_pid_t                  sid,
+    proc_pid_t                  pgrp,
+    int                         *result)
+{
+    struct pid_entry *e;
+
+    (void)server_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_session_leader_locked(sid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    if (e->ctty_port == MACH_PORT_NULL) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_NO_CTTY;
+        return KERN_SUCCESS;
+    }
+    e->fg_pgrp_id = pgrp;
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+/*
+ * proc_tcgetpgrp(sid): read the foreground process group.
+ * PROC_ERR_NO_CTTY if the session has no controlling tty.
+ */
+kern_return_t
+proc_S_tcgetpgrp(
+    mach_port_t                 server_port,
+    proc_pid_t                  sid,
+    proc_pid_t                  *pgrp,
+    int                         *result)
+{
+    struct pid_entry *e;
+
+    (void)server_port;
+    *pgrp = 0;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_session_leader_locked(sid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    if (e->ctty_port == MACH_PORT_NULL) {
+        pthread_mutex_unlock(&pid_lock);
+        *result = PROC_ERR_NO_CTTY;
+        return KERN_SUCCESS;
+    }
+    *pgrp = e->fg_pgrp_id;
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = PROC_OK;
     return KERN_SUCCESS;
 }
 
@@ -1199,6 +1416,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
     struct pid_entry *e, *parent;
     mach_port_t subscriber = MACH_PORT_NULL;
     mach_port_t parent_sigport = MACH_PORT_NULL;
+    mach_port_t ctty = MACH_PORT_NULL;
     proc_pid_t pid = 0;
     proc_pid_t ppid = 0;
     int32_t code = 0;
@@ -1218,6 +1436,13 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
         pid           = e->pid;
         ppid          = e->ppid;
         code          = e->exit_code;
+        /* If a session leader dies, release its controlling tty so the
+         * send right isn't leaked (#247). */
+        if (e->ctty_port != MACH_PORT_NULL) {
+            ctty          = e->ctty_port;
+            e->ctty_port  = MACH_PORT_NULL;
+            e->fg_pgrp_id = 0;
+        }
         printf("proc: pid=%u zombied (task=0x%x)\n",
                pid, (unsigned)name);
         /* SIGCHLD wiring (v0.2.0 / #238): if the parent has a signal
@@ -1233,6 +1458,10 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
 
     /* Drop the dead-name reference the kernel handed us. */
     (void)mach_port_deallocate(mach_task_self(), name);
+
+    /* Release a dead session leader's controlling-tty send right. */
+    if (ctty != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), ctty);
 
     if (subscriber != MACH_PORT_NULL)
         fire_exit_notify(subscriber, pid, code);

@@ -607,6 +607,84 @@ test_killpg_catchable(void)
     PASS();
 }
 
+/* ==================================================================
+ *  Controlling terminal + job control (v0.4.0 / #247)
+ * ================================================================== */
+
+/*
+ * Exercise the controlling-tty RPCs on our own session (we are the
+ * session leader, sid == my_pid).  A dummy port stands in for the tty
+ * device — proc_server only keeps a send right to it.
+ */
+static void
+test_ctty(void)
+{
+    proc_pid_t got = 0;
+    int rc = 0;
+    kern_return_t kr;
+    mach_port_t tty = MACH_PORT_NULL;
+
+    BEGIN_TEST("controlling tty + tcsetpgrp/tcgetpgrp (#247)");
+
+    /* No controlling tty yet → tcgetpgrp reports PROC_ERR_NO_CTTY. */
+    rc = 0;
+    kr = proc_tcgetpgrp(proc_port, my_pid, &got, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "tcgetpgrp(no ctty) kr");
+    EXPECT_RC(rc, PROC_ERR_NO_CTTY, "tcgetpgrp before claim");
+
+    /* A send right is all proc_server keeps; fabricate a dummy tty. */
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &tty);
+    EXPECT_KR(kr, KERN_SUCCESS, "alloc dummy tty");
+    kr = mach_port_insert_right(mach_task_self(), tty, tty,
+                                MACH_MSG_TYPE_MAKE_SEND);
+    EXPECT_KR(kr, KERN_SUCCESS, "make tty send right");
+
+    /* Claim it; foreground pgrp defaults to the leader's pgrp. */
+    rc = 0;
+    kr = proc_set_ctty(proc_port, my_pid, tty, &rc);
+    EXPECT_KR(kr, KERN_SUCCESS, "set_ctty kr");
+    EXPECT_RC(rc, PROC_OK, "set_ctty rc");
+
+    rc = 0; got = 0;
+    kr = proc_tcgetpgrp(proc_port, my_pid, &got, &rc);
+    EXPECT_RC(rc, PROC_OK, "tcgetpgrp after claim rc");
+    EXPECT(got == my_pid, "fg pgrp defaults to leader pgrp");
+
+    /* A second claim must fail — the session already has a ctty. */
+    {
+        mach_port_t tty2 = MACH_PORT_NULL;
+        mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &tty2);
+        mach_port_insert_right(mach_task_self(), tty2, tty2,
+                               MACH_MSG_TYPE_MAKE_SEND);
+        rc = 0;
+        kr = proc_set_ctty(proc_port, my_pid, tty2, &rc);
+        EXPECT_RC(rc, PROC_ERR_PERM, "second set_ctty -> PERM");
+        (void)mach_port_destroy(mach_task_self(), tty2);
+    }
+
+    /* Switch the foreground pgrp and read it back. */
+    rc = 0;
+    kr = proc_tcsetpgrp(proc_port, my_pid, my_pid + 1, &rc);
+    EXPECT_RC(rc, PROC_OK, "tcsetpgrp rc");
+    rc = 0; got = 0;
+    kr = proc_tcgetpgrp(proc_port, my_pid, &got, &rc);
+    EXPECT(got == my_pid + 1, "tcgetpgrp reflects tcsetpgrp");
+
+    /* Release it; both queries report no controlling tty again. */
+    rc = 0;
+    kr = proc_clear_ctty(proc_port, my_pid, &rc);
+    EXPECT_RC(rc, PROC_OK, "clear_ctty rc");
+    rc = 0; got = 0;
+    kr = proc_tcgetpgrp(proc_port, my_pid, &got, &rc);
+    EXPECT_RC(rc, PROC_ERR_NO_CTTY, "tcgetpgrp after clear");
+    rc = 0;
+    kr = proc_tcsetpgrp(proc_port, my_pid, my_pid, &rc);
+    EXPECT_RC(rc, PROC_ERR_NO_CTTY, "tcsetpgrp without ctty");
+
+    (void)mach_port_destroy(mach_task_self(), tty);
+    PASS();
+}
+
 /* ------------------------------------------------------------------ */
 
 static void
@@ -660,6 +738,9 @@ main(int argc, char **argv)
         /* v0.4.0 / #240 — resource accounting */
         test_getrusage_self();
         test_getrusage_bad_pid();
+
+        /* v0.4.0 / #247 — controlling tty + job control */
+        test_ctty();
     }
 
     printf("\n=== sig_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);

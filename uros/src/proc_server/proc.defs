@@ -207,3 +207,47 @@ routine proc_set_exit_code(
 	in	pid		: proc_pid_t;
 	in	code		: int;
 	out	result		: int);
+
+/*
+ * Controlling-terminal / job control (v0.4.0 / #247).
+ *
+ * A session has at most one controlling tty; the state lives on the
+ * session-leader entry (pid == sid).  These RPCs are keyed by session
+ * id so the tty driver and libposix-uros can manage the foreground
+ * process group without knowing which member issued the call.
+ *
+ *   proc_set_ctty(sid, tty_port)  — the session leader claims tty_port
+ *                            as the controlling terminal.  PROC_ERR_PERM
+ *                            if the session already has one.  The
+ *                            foreground pgrp is initialised to the
+ *                            leader's pgrp.  Consumes the passed send
+ *                            right (kept by proc_server, freed on clear).
+ *   proc_clear_ctty(sid)   — release the controlling tty (close / session
+ *                            exit).  Idempotent.
+ *   proc_tcsetpgrp(sid, pgrp) — set the foreground process group.
+ *                            PROC_ERR_NOT_FOUND if the session has no
+ *                            controlling tty.
+ *   proc_tcgetpgrp(sid)    — read the foreground process group.
+ */
+routine proc_set_ctty(
+		proc_port	: mach_port_t;
+	in	sid		: proc_pid_t;
+	in	tty_port	: mach_port_t;
+	out	result		: int);
+
+routine proc_clear_ctty(
+		proc_port	: mach_port_t;
+	in	sid		: proc_pid_t;
+	out	result		: int);
+
+routine proc_tcsetpgrp(
+		proc_port	: mach_port_t;
+	in	sid		: proc_pid_t;
+	in	pgrp		: proc_pid_t;
+	out	result		: int);
+
+routine proc_tcgetpgrp(
+		proc_port	: mach_port_t;
+	in	sid		: proc_pid_t;
+	out	pgrp		: proc_pid_t;
+	out	result		: int);
