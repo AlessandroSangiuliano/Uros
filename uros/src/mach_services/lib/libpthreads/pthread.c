@@ -30,6 +30,7 @@
 #include "pthread_internals.h"
 #include <stdio.h>	/* For printf(). */
 #include <errno.h>	/* For __mach_errno_addr() prototype. */
+#include <mach/thread_info.h>	/* For THREAD_SCHED_RR_INFO (#153). */
 
 extern void mig_init(void *initial);
 
@@ -1055,6 +1056,102 @@ pthread_setschedparam(pthread_t thread,
 	{
 		return (ESRCH);  /* Not a valid thread structure */
 	}
+}
+
+/*
+ * Change a thread's scheduling priority without changing its policy
+ * (POSIX.1-2001).  Lighter than pthread_setschedparam: it keeps the
+ * thread's current policy and only pushes the new base priority down to
+ * the Mach scheduler via thread_policy().
+ *
+ * The valid priority range is policy-defined and the kernel is the
+ * authority (invalid_pri in kern/sched.h rejects pri < 0 or pri above
+ * the lowest schedulable priority).  We reject an obviously bad prio
+ * early and let thread_policy() have the final say, mapping its failure
+ * to EINVAL.
+ */
+int
+pthread_setschedprio(pthread_t thread, int prio)
+{
+	kern_return_t		kr;
+	thread_basic_info_data_t binfo;
+	mach_msg_type_number_t	cnt = THREAD_BASIC_INFO_COUNT;
+	int			policy;
+
+	if (thread->sig != _PTHREAD_SIG)
+		return (ESRCH);
+	if (prio < 0)
+		return (EINVAL);
+
+	/*
+	 * Use the thread's *actual* scheduling policy as the kernel reports
+	 * it, not the policy stored in the pthread struct: the two can
+	 * diverge (the default pthread policy is SCHED_FIFO but a thread
+	 * runs under the timeshare policy the processor set enables).
+	 * Pushing the stored policy would try to switch policy and the
+	 * pset would reject it; the kernel's view is authoritative.
+	 */
+	if (thread_info(thread->kernel_thread, THREAD_BASIC_INFO,
+			(thread_info_t)&binfo, &cnt) != KERN_SUCCESS)
+		return (ESRCH);
+	policy = binfo.policy;
+
+	switch (policy)
+	{
+	case POLICY_FIFO:
+	{
+		struct policy_fifo_base	fifo_base;
+
+		fifo_base.base_priority = prio;
+		kr = thread_policy(thread->kernel_thread, POLICY_FIFO,
+				   (policy_base_t)&fifo_base,
+				   POLICY_FIFO_BASE_COUNT, FALSE);
+		break;
+	}
+	case POLICY_RR:
+	{
+		struct policy_rr_base	rr_base;
+		policy_rr_info_data_t	rr_info;
+		mach_msg_type_number_t	cnt = POLICY_RR_INFO_COUNT;
+
+		/*
+		 * Preserve the thread's current round-robin quantum: this
+		 * call changes priority only.  Fall back to 0 (kernel
+		 * default) if the thread can't report its quantum.
+		 */
+		rr_base.quantum = 0;
+		if (thread_info(thread->kernel_thread, THREAD_SCHED_RR_INFO,
+				(thread_info_t)&rr_info, &cnt) == KERN_SUCCESS)
+			rr_base.quantum = rr_info.quantum;
+		rr_base.base_priority = prio;
+		kr = thread_policy(thread->kernel_thread, POLICY_RR,
+				   (policy_base_t)&rr_base,
+				   POLICY_RR_BASE_COUNT, FALSE);
+		break;
+	}
+	case POLICY_TIMESHARE:
+	{
+		struct policy_timeshare_base	ts_base;
+
+		ts_base.base_priority = prio;
+		kr = thread_policy(thread->kernel_thread, POLICY_TIMESHARE,
+				   (policy_base_t)&ts_base,
+				   POLICY_TIMESHARE_BASE_COUNT, FALSE);
+		break;
+	}
+	default:
+		return (EINVAL);
+	}
+
+	if (kr != KERN_SUCCESS)
+		return (EINVAL);
+
+	/* Keep the pthread bookkeeping consistent with the kernel. */
+	LOCK(thread->lock);
+	thread->policy = policy;
+	thread->param.sched_priority = prio;
+	UNLOCK(thread->lock);
+	return (ESUCCESS);
 }
 
 /*
