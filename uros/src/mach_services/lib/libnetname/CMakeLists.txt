@@ -62,4 +62,5 @@ if(UROS_BUILD_MUSL)
     $<TARGET_PROPERTY:libnetname,COMPILE_OPTIONS>)
   target_include_directories(libnetname-pic PRIVATE
     $<TARGET_PROPERTY:libnetname,INCLUDE_DIRECTORIES>)
+  set_target_properties(libnetname-pic PROPERTIES OUTPUT_NAME "netname-pic")
 endif()

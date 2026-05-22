@@ -130,4 +130,5 @@ if(UROS_BUILD_MUSL)
     $<TARGET_PROPERTY:libcap,COMPILE_OPTIONS>)
   target_include_directories(libcap-pic PRIVATE
     $<TARGET_PROPERTY:libcap,INCLUDE_DIRECTORIES>)
+  set_target_properties(libcap-pic PROPERTIES OUTPUT_NAME "cap-pic")
 endif()

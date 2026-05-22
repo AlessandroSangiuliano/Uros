@@ -202,3 +202,4 @@ target_compile_options(libposix-uros-pic PRIVATE
   $<TARGET_PROPERTY:libposix-uros,COMPILE_OPTIONS>)
 target_include_directories(libposix-uros-pic PRIVATE
   $<TARGET_PROPERTY:libposix-uros,INCLUDE_DIRECTORIES>)
+set_target_properties(libposix-uros-pic PROPERTIES OUTPUT_NAME "posix-uros-pic")

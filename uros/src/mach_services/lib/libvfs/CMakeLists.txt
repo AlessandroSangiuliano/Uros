@@ -106,4 +106,5 @@ if(UROS_BUILD_MUSL)
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include
   )
+  set_target_properties(libvfs-pic PROPERTIES OUTPUT_NAME "vfs-pic")
 endif()

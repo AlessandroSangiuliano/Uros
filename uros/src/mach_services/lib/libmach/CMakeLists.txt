@@ -338,4 +338,5 @@ if(UROS_BUILD_MUSL)
     $<TARGET_PROPERTY:libmach_core,COMPILE_OPTIONS>)
   target_include_directories(libmach_core-pic PRIVATE
     $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
+  set_target_properties(libmach_core-pic PROPERTIES OUTPUT_NAME "mach_core-pic")
 endif()
