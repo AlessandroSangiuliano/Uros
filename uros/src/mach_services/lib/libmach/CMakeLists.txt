@@ -324,4 +324,18 @@ if(UROS_BUILD_MUSL)
     OUTPUT_NAME "mach_core"
     ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
   )
+
+  # PIC variant for the umbrella libc.so (#234 incr 2b).  Same slim source
+  # set as libmach_core (musl provides the excluded libc symbols), compiled
+  # position-independent so the Mach traps + RPC stubs can be folded into
+  # libc.so via EXTRA_OBJS.  Flags/includes copied from libmach_core so the
+  # two never drift.  The Mach trap is lcall/sysenter (immediate-only) and
+  # the SSE2 mem*.s use no absolute relocs → PIC-clean.
+  add_library(libmach_core-pic STATIC ${LIBMACH_CORE_SOURCES})
+  add_dependencies(libmach_core-pic mig_device_header mig_mach_public_headers)
+  set_target_properties(libmach_core-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(libmach_core-pic PRIVATE
+    $<TARGET_PROPERTY:libmach_core,COMPILE_OPTIONS>)
+  target_include_directories(libmach_core-pic PRIVATE
+    $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
 endif()
