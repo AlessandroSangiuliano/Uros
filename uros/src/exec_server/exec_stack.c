@@ -36,6 +36,7 @@
 #define AT_PHENT         4
 #define AT_PHNUM         5
 #define AT_PAGESZ        6
+#define AT_BASE          7
 #define AT_ENTRY         9
 #define AT_RANDOM       25
 #define AT_SYSINFO_EHDR 33
@@ -101,9 +102,10 @@ count_auxv_pairs(const struct exec_auxv_hints *h)
 {
     unsigned n = 1 /* AT_PAGESZ */ + 1 /* AT_RANDOM */ + 1 /* AT_NULL */;
     if (h) {
-        if (h->vdso_base) n++;
-        if (h->entry_va)  n++;
-        if (h->phdr_va)   n += 3;   /* AT_PHDR + AT_PHENT + AT_PHNUM */
+        if (h->vdso_base)   n++;
+        if (h->entry_va)    n++;
+        if (h->interp_base) n++;    /* AT_BASE */
+        if (h->phdr_va)     n += 3; /* AT_PHDR + AT_PHENT + AT_PHNUM */
     }
     return n;
 }
@@ -227,6 +229,9 @@ exec_build_stack(mach_port_t new_task,
             }
             if (hints->entry_va) {
                 *p++ = AT_ENTRY;        *p++ = (uint32_t)hints->entry_va;
+            }
+            if (hints->interp_base) {
+                *p++ = AT_BASE;         *p++ = (uint32_t)hints->interp_base;
             }
             if (hints->phdr_va) {
                 *p++ = AT_PHDR;         *p++ = (uint32_t)hints->phdr_va;
