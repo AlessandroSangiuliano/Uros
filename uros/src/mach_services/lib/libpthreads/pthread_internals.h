@@ -224,7 +224,14 @@ typedef struct
 #define _PTHREAD_DEFAULT_INHERITSCHED	PTHREAD_INHERIT_SCHED
 #define _PTHREAD_DEFAULT_PROTOCOL	PTHREAD_PRIO_NONE
 #define _PTHREAD_DEFAULT_PRIOCEILING	0
-#define _PTHREAD_DEFAULT_POLICY		SCHED_FIFO
+/*
+ * #273: the default policy must match the policy threads actually run
+ * under.  The kernel thread template uses POLICY_TIMESHARE and the
+ * default processor set only enables timesharing, so SCHED_OTHER is the
+ * truthful default; the old SCHED_FIFO never took effect (FIFO is not
+ * enabled in the pset) and left the cached policy diverging from reality.
+ */
+#define _PTHREAD_DEFAULT_POLICY		SCHED_OTHER
 #define _PTHREAD_DEFAULT_STACKSIZE	0x10000	  /* 64K */
 
 #define _PTHREAD_NO_SIG			0x00000000

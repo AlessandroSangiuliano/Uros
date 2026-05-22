@@ -1056,6 +1056,59 @@ test_setschedprio(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test: pthread_setschedparam / getschedparam round-trip (#273)
+ * ---------------------------------------------------------------- */
+
+static void
+test_setschedparam(void)
+{
+	pthread_t		self = pthread_self();
+	struct sched_param	p;
+	int			policy, rc;
+
+	/* The default policy must now be SCHED_OTHER (timeshare), matching
+	 * the policy the kernel actually runs threads under (#273). */
+	if (pthread_getschedparam(self, &policy, &p) != 0) {
+		test_fail("setschedparam", "getschedparam failed");
+		return;
+	}
+	if (policy != SCHED_OTHER) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "default policy %d != SCHED_OTHER",
+			 policy);
+		test_fail("setschedparam", buf);
+		return;
+	}
+
+	/* NULL param and a bogus policy must both be rejected. */
+	if (pthread_setschedparam(self, SCHED_OTHER, NULL) != EINVAL) {
+		test_fail("setschedparam", "NULL param not rejected");
+		return;
+	}
+	if (pthread_setschedparam(self, 999, &p) != EINVAL) {
+		test_fail("setschedparam", "bogus policy not rejected");
+		return;
+	}
+
+	/* Re-applying the current policy + base priority must take effect
+	 * (write-through, not the old no-op stub) and be observable. */
+	rc = pthread_setschedparam(self, SCHED_OTHER, &p);
+	if (rc != 0) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "SCHED_OTHER apply rc=%d", rc);
+		test_fail("setschedparam", buf);
+		return;
+	}
+	if (pthread_getschedparam(self, &policy, &p) != 0 ||
+	    policy != SCHED_OTHER) {
+		test_fail("setschedparam", "policy not SCHED_OTHER after set");
+		return;
+	}
+
+	test_ok("pthread_setschedparam");
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -1099,6 +1152,7 @@ main(int argc, char **argv)
 	}
 	test_timedjoin_np();
 	test_setschedprio();
+	test_setschedparam();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
