@@ -265,8 +265,8 @@ typedef struct mach_port_status {
 	unsigned int		mps_flags;	/* port flags */
 } mach_port_status_t;
 
-#define MACH_PORT_QLIMIT_DEFAULT	((mach_port_msgcount_t) 5)
-#define MACH_PORT_QLIMIT_MAX		((mach_port_msgcount_t) 16)
+#define MACH_PORT_QLIMIT_DEFAULT	((mach_port_msgcount_t) 10)
+#define MACH_PORT_QLIMIT_MAX		((mach_port_msgcount_t) 32)
 
 typedef struct mach_port_limits {
 	mach_port_msgcount_t	mpl_qlimit;	/* number of msgs */

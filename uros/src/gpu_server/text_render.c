@@ -175,9 +175,23 @@ gpu_text_render_enqueue(const char *buf, size_t len)
 
 	pthread_mutex_lock(&q_mutex);
 	if (q_head - q_tail >= TEXT_QUEUE_DEPTH) {
+		/* Full.  This is a cosmetic log mirror that follows the
+		 * tail of output, so evict the OLDEST queued chunk rather
+		 * than dropping the new one (#268).
+		 *
+		 * The previous policy dropped the newest chunk: under a
+		 * sustained burst — e.g. the --bench disk run flooding the
+		 * queue faster than the single render thread can paint
+		 * (~320 us/scroll on KVM, more with a real GTK window doing
+		 * host re-render) — the final lines ("=== Benchmark
+		 * complete ===") were permanently dropped while the 16
+		 * oldest chunks sat painted on screen.  The VGA window
+		 * appeared frozen mid-run even though the guest ran to
+		 * completion (COM1 proved it).  Keep-newest guarantees the
+		 * screen converges to the most recent output once the burst
+		 * subsides. */
+		q_tail++;
 		q_drops++;
-		pthread_mutex_unlock(&q_mutex);
-		return;
 	}
 
 	slot = &text_queue[q_head % TEXT_QUEUE_DEPTH];
