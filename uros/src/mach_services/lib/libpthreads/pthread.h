@@ -362,9 +362,10 @@ int       pthread_once(pthread_once_t *once_control,
 pthread_t pthread_self(void);
 int       pthread_setname_np(pthread_t thread, const char *name);
 int       pthread_getname_np(pthread_t thread, char *buf, int len);
-int       pthread_setschedparam(pthread_t thread, 
+int       pthread_setschedparam(pthread_t thread,
 				int policy,
                                 const struct sched_param *param);
+int       pthread_setschedprio(pthread_t thread, int prio);
 int       pthread_key_create(pthread_key_t *key,
 			     void (*destructor)(void *));
 int       pthread_key_delete(pthread_key_t key);

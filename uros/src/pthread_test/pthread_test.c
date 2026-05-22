@@ -33,6 +33,9 @@
 #include <sys/timers.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
+#include <mach/policy.h>		/* POLICY_TIMESHARE_INFO (#153) */
+#include <mach/thread_info.h>		/* THREAD_SCHED_TIMESHARE_INFO (#153) */
+#include <mach.h>			/* thread_info() user stub (#153) */
 #include <signal.h>
 #include <mach/port.h>
 #include "gpu_console.h"
@@ -996,6 +999,63 @@ test_timedjoin_np(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test: pthread_setschedprio (#153)
+ * ---------------------------------------------------------------- */
+
+static void
+test_setschedprio(void)
+{
+	pthread_t			self = pthread_self();
+	struct sched_param		p;
+	policy_timeshare_info_data_t	ti;
+	mach_msg_type_number_t		cnt = POLICY_TIMESHARE_INFO_COUNT;
+	int				policy, rc, target;
+
+	/* Negative priority must be rejected up front. */
+	if (pthread_setschedprio(self, -1) != EINVAL) {
+		test_fail("setschedprio", "negative prio not rejected");
+		return;
+	}
+
+	/* A wildly out-of-range priority must be rejected by the kernel. */
+	if (pthread_setschedprio(self, 1000000) != EINVAL) {
+		test_fail("setschedprio", "huge prio not rejected");
+		return;
+	}
+
+	/*
+	 * Pick a kernel-valid priority by reading the thread's current
+	 * base priority: in Mach a thread may only lower its priority
+	 * (numerically >= its max_priority), and the absolute range is
+	 * NRQS-dependent, so re-applying the current value is the only
+	 * portable "always valid" choice.
+	 */
+	target = -1;
+	if (thread_info(mach_thread_self(), THREAD_SCHED_TIMESHARE_INFO,
+			(thread_info_t)&ti, &cnt) == KERN_SUCCESS)
+		target = ti.base_priority;
+	if (target < 0) {
+		test_fail("setschedprio", "could not read current priority");
+		return;
+	}
+
+	rc = pthread_setschedprio(self, target);
+	if (rc != 0) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "valid prio %d rc=%d", target, rc);
+		test_fail("setschedprio", buf);
+		return;
+	}
+	if (pthread_getschedparam(self, &policy, &p) != 0 ||
+	    p.sched_priority != target) {
+		test_fail("setschedprio", "getschedparam mismatch");
+		return;
+	}
+
+	test_ok("pthread_setschedprio");
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -1038,6 +1098,7 @@ main(int argc, char **argv)
 			test_fail("yield", "non-zero return");
 	}
 	test_timedjoin_np();
+	test_setschedprio();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
