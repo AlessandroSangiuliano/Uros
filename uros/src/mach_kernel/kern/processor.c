@@ -346,7 +346,15 @@ void pset_init(
 	pset->pset_self = IP_NULL;
 	pset->pset_name_self = IP_NULL;
 	pset->max_priority = BASEPRI_USER;
-	pset->policies = POLICY_TIMESHARE;
+	/*
+	 * #274: enable the fixed-priority policies alongside timesharing.
+	 * The run queues are already per-priority and thread_policy_common
+	 * implements RR quantum / FIFO, so POSIX SCHED_FIFO / SCHED_RR
+	 * threads become schedulable instead of being rejected with
+	 * KERN_INVALID_POLICY.  The per-policy limits/bases below are
+	 * already set up for rr/fifo.
+	 */
+	pset->policies = POLICY_TIMESHARE | POLICY_RR | POLICY_FIFO;
 	pset->set_quantum = min_quantum;
 #if	NCPUS > 1
 	pset->quantum_adj_index = 0;

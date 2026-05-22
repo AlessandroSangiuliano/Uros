@@ -653,6 +653,9 @@ _pthread_body(pthread_t self)
 	pthread_exit((self->fun)(self->arg));
 }
 
+/* Defined further down; applies (policy, base priority) to the kernel. */
+static int _pthread_push_sched(pthread_t thread, int policy, int prio);
+
 static int
 _pthread_create(pthread_t t,
 		const pthread_attr_t *attrs,
@@ -705,6 +708,18 @@ _pthread_create(pthread_t t,
 		{
 			t->death = MACH_PORT_NULL;
 		}
+
+		/*
+		 * #274: with PTHREAD_EXPLICIT_SCHED the thread must start
+		 * under the policy/priority from its attributes rather than
+		 * inheriting the kernel default.  Push it now that the
+		 * kernel thread exists; ignore the result so a policy the
+		 * pset rejects doesn't fail thread creation (the thread
+		 * still runs under the inherited policy).
+		 */
+		if (t->inherit == PTHREAD_EXPLICIT_SCHED)
+			(void)_pthread_push_sched(t, t->policy,
+						  t->param.sched_priority);
 	} while (0);
 	return (res);
 }

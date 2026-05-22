@@ -1109,6 +1109,75 @@ test_setschedparam(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test: PTHREAD_EXPLICIT_SCHED at thread creation + FIFO/RR enabled (#274)
+ * ---------------------------------------------------------------- */
+
+static void *
+thread_report_policy(void *arg)
+{
+	int			*out = (int *)arg;	/* [0]=rc [1]=policy */
+	struct sched_param	p;
+	int			pol = -1;
+
+	out[0] = pthread_getschedparam(pthread_self(), &pol, &p);
+	out[1] = pol;
+	return NULL;
+}
+
+static void
+test_explicit_sched(void)
+{
+	pthread_attr_t		attr;
+	pthread_t		th;
+	struct sched_param	p;
+	int			policy, rc, report[2] = { -1, -1 };
+
+	/* FIFO/RR are now enabled in the default pset (#274): setting RR on
+	 * the current thread must succeed (was ENOTSUP before). */
+	pthread_getschedparam(pthread_self(), &policy, &p);
+	rc = pthread_setschedparam(pthread_self(), SCHED_RR, &p);
+	if (rc != 0) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "SCHED_RR rc=%d (FIFO/RR enabled?)",
+			 rc);
+		test_fail("explicit_sched", buf);
+		return;
+	}
+	/* Put ourselves back to timesharing so the rest of the run behaves. */
+	(void)pthread_setschedparam(pthread_self(), SCHED_OTHER, &p);
+
+	/*
+	 * A thread created with PTHREAD_EXPLICIT_SCHED + SCHED_RR must come
+	 * up under RR.  Reuse a kernel-valid base priority (the current
+	 * thread's) so the priority is in range.
+	 */
+	pthread_attr_init(&attr);
+	pthread_attr_setinheritsched(&attr, PTHREAD_EXPLICIT_SCHED);
+	pthread_attr_setschedpolicy(&attr, SCHED_RR);
+	pthread_attr_setschedparam(&attr, &p);
+
+	if (pthread_create(&th, &attr, thread_report_policy, report) != 0) {
+		test_fail("explicit_sched", "pthread_create failed");
+		return;
+	}
+	pthread_join(th, NULL);
+
+	if (report[0] != 0) {
+		test_fail("explicit_sched", "child getschedparam failed");
+		return;
+	}
+	if (report[1] != SCHED_RR) {
+		char buf[80];
+		snprintf(buf, sizeof(buf), "child policy %d != SCHED_RR",
+			 report[1]);
+		test_fail("explicit_sched", buf);
+		return;
+	}
+
+	test_ok("explicit_sched (PTHREAD_EXPLICIT_SCHED + FIFO/RR)");
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -1153,6 +1222,7 @@ main(int argc, char **argv)
 	test_timedjoin_np();
 	test_setschedprio();
 	test_setschedparam();
+	test_explicit_sched();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
