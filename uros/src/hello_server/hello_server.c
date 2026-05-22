@@ -482,6 +482,38 @@ main(int argc, char **argv)
     }
 
     /*
+     * #234 Phase 7: spawn the first DYNAMIC binary (/hello_dyn, ET_DYN
+     * with PT_INTERP=/lib/ld-musl-i386.so.1).  exec_server maps it + the
+     * interpreter (the umbrella libc.so); ld-musl self-relocates, relocates
+     * the program, runs musl startup and reaches main(), which mach_print's.
+     * Same spawn+observe+terminate dance as hello_exec below.
+     */
+    {
+        extern int __uros_spawn(const char *path, char *const argv[],
+                                char *const envp[], mach_port_t *out_task,
+                                mach_port_t *out_thread, unsigned int *out_pid);
+        extern int __uros_waitpid(int pid, int *status, int options);
+        char *dyn_argv[] = { (char *)"hello_dyn", NULL };
+        char *dyn_envp[] = { NULL };
+        mach_port_t  dt = MACH_PORT_NULL, dth = MACH_PORT_NULL;
+        unsigned int dpid = 0;
+        int dr = __uros_spawn("/hello_dyn", dyn_argv, dyn_envp,
+                              &dt, &dth, &dpid);
+        if (dr != 0) {
+            printf("(hello_server): __uros_spawn(/hello_dyn) failed: %d\n", dr);
+        } else {
+            printf("(hello_server): spawned /hello_dyn pid=%u task=0x%x\n",
+                   dpid, (unsigned)dt);
+            for (int j = 0; j < 60; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL,
+                                            SWITCH_OPTION_WAIT, 20);
+            (void)task_terminate(dt);
+            int dst = 0;
+            (void)__uros_waitpid((int)dpid, &dst, 0);
+        }
+    }
+
+    /*
      * Step 4.6 (Phase 5 / #254): spawn /hello_exec via the new
      * __uros_spawn primitive and waitpid for it.  __uros_spawn is the
      * same path execve() uses, but called explicitly here so we don't
