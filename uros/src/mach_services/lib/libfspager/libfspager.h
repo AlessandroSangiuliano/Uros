@@ -7,18 +7,6 @@
  * libfspager.h — server-side library that turns any Uros file-system
  * server into a Mach memory-object pager (#276).
  *
- * Why a library?
- * --------------
- * File-backed mmap requires the fs server to act as the Mach pager for
- * each mapped file: hand out memory_object send rights, answer
- * memory_object_data_request faults with page content, accept dirty
- * pages via memory_object_data_return.  All of that is identical
- * boilerplate across filesystems; the only fs-specific part is the
- * underlying block I/O.  We split it into a library so every fs server
- * (today: ext_server; later: fs_uros_server, fat_server, ufs_server)
- * picks up mmap by linking us and providing four block-oriented
- * callbacks — no Mach VM code in the fs server itself.
- *
  * Two-pager model
  * ---------------
  * libfspager is the file pager and is per-fs (one server task, many
@@ -28,10 +16,18 @@
  * anonymous → default_pager; file-backed → the fs server that owns
  * the file's memory_object.
  *
+ * Threading model
+ * ---------------
+ * The fs server runs a single mach_msg_receive loop on a port set.
+ * libfspager owns the memory_object ports it allocates and inserts
+ * them into the caller-supplied port set so the fs server's existing
+ * loop dispatches them.  No worker threads of our own; concurrency
+ * matches the fs server's.
+ *
  * Scope phases (#276)
  * -------------------
- *   A — this file: API + MIG handler stubs that compile and dispatch
- *       but don't yet allocate ports or move data.  No client.
+ *   A — API + MIG handler stubs that compile and dispatch but don't
+ *       yet allocate ports or move data (commit 27d7cc83, on dev).
  *   B — port allocation, lifecycle (init/terminate), in-memory table;
  *       ext_server links + adds fs_mmap RPC; first end-to-end vm_map
  *       with stub read_page returning zeros.
@@ -43,7 +39,9 @@
  *
  * Versioning ([[feedback_versioning_bsd]]): bumped per BSD rules — major
  * on callback signature change, minor on new optional ops, patch on
- * fixes.  Phase A is the first cut, so 0.1.0.
+ * fixes.  Phase B kept at 0.1.0 because the public surface is still
+ * shaking; will bump to 0.2.0 at the end of Phase B if any callback
+ * gains a parameter.
  */
 
 #ifndef _LIBFSPAGER_LIBFSPAGER_H_
@@ -97,12 +95,19 @@ struct fs_pager_ops {
 
 /*
  * fs_pager_init — one-shot library init for the fs server.  Must be
- * called before any fs_pager_create.  `tag` is used in log messages
- * (not copied — keep alive).
+ * called before any fs_pager_create.
  *
- * Phase A: records the tag; no port-set or table yet.
+ *   tag      — used in log messages; not copied, keep alive.
+ *   port_set — port-set port the fs server's mach_msg_receive loop
+ *              already listens on.  libfspager moves every new
+ *              memory_object port into this set so the fs server's
+ *              existing dispatch handles them without a parallel
+ *              loop.  Must be a valid PORT_SET receive right owned
+ *              by the calling task.
+ *
+ * Returns 0 on success, -1 on failure (bad port_set, etc.).
  */
-void fs_pager_init(const char *tag);
+int fs_pager_init(const char *tag, mach_port_t port_set);
 
 /*
  * fs_pager_create — register a file with libfspager and get back the
@@ -113,13 +118,30 @@ void fs_pager_init(const char *tag);
  *   ops     — the four callbacks above; not copied (keep alive).
  *   state   — opaque cookie passed to each callback.
  *
- * Returns MACH_PORT_NULL on failure.  Phase A: always MACH_PORT_NULL
- * (logs "not yet implemented" so the fs server's mmap path fails
- * loudly until Phase B).
+ * Returns MACH_PORT_NULL on failure (table full, out of memory, port
+ * allocation failed).  The send right belongs to the caller and is
+ * what fs_mmap RPCs hand back to the client.
+ *
+ * Phase B: real port allocation, table insertion, port joins the
+ * port_set passed to fs_pager_init.  read_page / write_page calls are
+ * still routed to the ops vtable but the data path is only filled in
+ * by Phase C.
  */
 mach_port_t fs_pager_create(uint64_t file_id,
                             const struct fs_pager_ops *ops,
                             void *state);
+
+/*
+ * fs_pager_destroy — explicit teardown (rare path).  Normally a pager
+ * record is reclaimed when the kernel sends memory_object_terminate
+ * after the last mapping of the file goes away.  This entry point is
+ * for the fs server to force teardown (file deleted, mount torn
+ * down).  No-op if file_id has no registered pager.
+ *
+ * Phase B: removes from the table, releases the port; the next
+ * data_request on that port will hit the not-found path.
+ */
+void fs_pager_destroy(uint64_t file_id);
 
 /*
  * fs_pager_demux — message demultiplexer to OR into the fs server's
@@ -134,9 +156,6 @@ mach_port_t fs_pager_create(uint64_t file_id,
  *       return my_fs_orig_demux(in, out)
  *           || fs_pager_demux(in, out);
  *   }
- *
- * Phase A: forwards to the MIG dispatch; the dispatch lands in our
- * stub handlers (below in libfspager.c).
  */
 boolean_t fs_pager_demux(mach_msg_header_t *in, mach_msg_header_t *out);
 
