@@ -65,6 +65,12 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(fd_exec_test)
 endif()
 
+# Build libfoo.so + dlopen_test — musl dlopen end-to-end (#234 incr 4)
+if(UROS_BUILD_MUSL)
+  add_subdirectory(libfoo)
+  add_subdirectory(dlopen_test)
+endif()
+
 # Build proc_server (POSIX process model owner, #237)
 if(OSFMK_BUILD_PROC_SERVER)
   add_subdirectory(proc_server)

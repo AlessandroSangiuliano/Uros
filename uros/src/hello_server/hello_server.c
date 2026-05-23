@@ -514,6 +514,38 @@ main(int argc, char **argv)
     }
 
     /*
+     * #234 Phase 7 incr 4: spawn /dlopen_test, the dlopen end-to-end
+     * smoke test.  Same spawn+observe+terminate pattern as hello_dyn
+     * above; runs after it so the umbrella libc.so is proven to bring
+     * a fresh task up before we ask it to dlopen a second .so.
+     */
+    {
+        extern int __uros_spawn(const char *path, char *const argv[],
+                                char *const envp[], mach_port_t *out_task,
+                                mach_port_t *out_thread, unsigned int *out_pid);
+        extern int __uros_waitpid(int pid, int *status, int options);
+        char *dl_argv[] = { (char *)"dlopen_test", NULL };
+        char *dl_envp[] = { NULL };
+        mach_port_t  dlt = MACH_PORT_NULL, dlth = MACH_PORT_NULL;
+        unsigned int dlpid = 0;
+        int dlr = __uros_spawn("/dlopen_test", dl_argv, dl_envp,
+                               &dlt, &dlth, &dlpid);
+        if (dlr != 0) {
+            printf("(hello_server): __uros_spawn(/dlopen_test) failed: %d\n",
+                   dlr);
+        } else {
+            printf("(hello_server): spawned /dlopen_test pid=%u task=0x%x\n",
+                   dlpid, (unsigned)dlt);
+            for (int j = 0; j < 60; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL,
+                                            SWITCH_OPTION_WAIT, 20);
+            (void)task_terminate(dlt);
+            int dlst = 0;
+            (void)__uros_waitpid((int)dlpid, &dlst, 0);
+        }
+    }
+
+    /*
      * Step 4.6 (Phase 5 / #254): spawn /hello_exec via the new
      * __uros_spawn primitive and waitpid for it.  __uros_spawn is the
      * same path execve() uses, but called explicitly here so we don't

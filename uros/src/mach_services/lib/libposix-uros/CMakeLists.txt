@@ -192,7 +192,12 @@ set_target_properties(libposix-uros PROPERTIES
 # their proven path is untouched.  Build/include flags are copied from the
 # base target so the two never drift.
 # ---------------------------------------------------------------------------
-add_library(libposix-uros-pic STATIC ${LIBPOSIX_UROS_SRCS})
+# The -pic archive carries an extra TU (dyn_bootstrap.c) that registers
+# mach_init() as a constructor — picked up by ld-musl's __init_array
+# walker so name_server_port et al. are valid before main() in dynamic
+# tasks (#234 incr 4).  Static binaries call mach_init() explicitly and
+# do not need it.
+add_library(libposix-uros-pic STATIC ${LIBPOSIX_UROS_SRCS} dyn_bootstrap.c)
 add_dependencies(libposix-uros-pic mig_mach_public_headers)
 if(TARGET musl_extproj)
   add_dependencies(libposix-uros-pic musl_extproj)
