@@ -142,6 +142,7 @@ maybe_add(libelf)
 maybe_add(libdl)
 maybe_add(libmodload)
 maybe_add(libcap)
+maybe_add(libfspager)
 maybe_add(libgpu_console)
 maybe_add(libposix-uros)
 
