@@ -112,3 +112,23 @@ set_target_properties(libcap PROPERTIES
   OUTPUT_NAME "cap"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )
+
+# PIC variant for the umbrella libc.so (#234 incr 2b).  cap_verify on every
+# RPC means libc.so needs this; uses only ABI-stable libc decls (string/
+# stdlib, no pthread) so a plain PIC clone is safe.
+if(UROS_BUILD_MUSL)
+  add_library(libcap-pic STATIC
+    libcap.c
+    sha256.c
+    sha256_shani.c
+    hmac_sha256.c
+    ${CAP_USER_C}
+  )
+  add_dependencies(libcap-pic mig_mach_public_headers)
+  set_target_properties(libcap-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(libcap-pic PRIVATE
+    $<TARGET_PROPERTY:libcap,COMPILE_OPTIONS>)
+  target_include_directories(libcap-pic PRIVATE
+    $<TARGET_PROPERTY:libcap,INCLUDE_DIRECTORIES>)
+  set_target_properties(libcap-pic PROPERTIES OUTPUT_NAME "cap-pic")
+endif()

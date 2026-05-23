@@ -55,9 +55,20 @@ if(OSFMK_BUILD_HELLO_EXEC)
   add_subdirectory(hello_exec)
 endif()
 
+# Build hello_dyn — first dynamically-linked binary (#234 Phase 7).
+if(UROS_BUILD_MUSL)
+  add_subdirectory(hello_dyn)
+endif()
+
 # Build fd_exec_test (#262 step 3: execve fd-inheritance smoke target)
 if(UROS_BUILD_MUSL)
   add_subdirectory(fd_exec_test)
+endif()
+
+# Build libfoo.so + dlopen_test — musl dlopen end-to-end (#234 incr 4)
+if(UROS_BUILD_MUSL)
+  add_subdirectory(libfoo)
+  add_subdirectory(dlopen_test)
 endif()
 
 # Build proc_server (POSIX process model owner, #237)

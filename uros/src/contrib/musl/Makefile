@@ -41,6 +41,12 @@ IMPH = $(addprefix $(srcdir)/, src/internal/stdio_impl.h src/internal/pthread_im
 LDFLAGS =
 LDFLAGS_AUTO =
 LIBCC = -lgcc
+# Uros #234 incr 2b: extra PIC archives folded into libc.so so the dynamic
+# linker (== libc.so) carries the real __uros_syscall dispatcher + Mach/VFS
+# stack (libposix-uros, libmach, libvfs, ...).  Empty by default → vanilla
+# build; the Uros CMake passes EXTRA_OBJS=... on the make line.  Normal
+# archive semantics: only the symbols libc.so references get pulled in.
+EXTRA_OBJS =
 CPPFLAGS =
 CFLAGS =
 CFLAGS_AUTO = -Os -pipe
@@ -160,7 +166,7 @@ obj/%.lo: $(srcdir)/%.c $(GENH) $(IMPH)
 
 lib/libc.so: $(LOBJS) $(LDSO_OBJS)
 	$(CC) $(CFLAGS_ALL) $(LDFLAGS_ALL) -nostdlib -shared \
-	-Wl,-e,_dlstart -o $@ $(LOBJS) $(LDSO_OBJS) $(LIBCC)
+	-Wl,-e,_dlstart -o $@ $(LOBJS) $(LDSO_OBJS) $(EXTRA_OBJS) $(LIBCC)
 
 lib/libc.a: $(AOBJS)
 	rm -f $@

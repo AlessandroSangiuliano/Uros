@@ -98,6 +98,14 @@ EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
 FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
+# #234 Phase 7: dynamic linker + first dynamic binary.  ld-musl-i386.so.1 is
+# the umbrella libc.so; it goes to /lib/ where hello_dyn's PT_INTERP points.
+HELLO_DYN="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_dyn"
+MUSL_LDSO="$BUILD_DIR/src/contrib/musl-install/lib/libc.so"
+# #234 Phase 7 incr 4: dlopen end-to-end test.  dlopen_test goes to / next
+# to hello_dyn; libfoo.so goes to /lib/ where dlopen("/lib/libfoo.so") finds it.
+DLOPEN_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/dlopen_test"
+LIBFOO_SO="$BUILD_DIR/export/uros/$ARCH/user/lib/libfoo.so"
 
 if [ ! -f "$NAME_SERVER" ]; then
     echo "ERRORE: name_server non trovato: $NAME_SERVER"
@@ -343,6 +351,22 @@ if [ -f "$FD_EXEC_TEST" ]; then
     FD_EXEC_TEST_WRITE_LINE="write $FD_EXEC_TEST fd_exec_test"
 fi
 
+# hello_dyn (#234 Phase 7): first dynamic binary.  Copy to / and install the
+# interpreter (umbrella libc.so) at /lib/ld-musl-i386.so.1 where its
+# PT_INTERP points.  Both optional (need UROS_BUILD_MUSL).
+HELLO_DYN_WRITE_LINE=""
+LDSO_MKDIR_LINE=""
+if [ -f "$HELLO_DYN" ] && [ -f "$MUSL_LDSO" ]; then
+    HELLO_DYN_WRITE_LINE="write $HELLO_DYN hello_dyn"
+    LDSO_MKDIR_LINE="mkdir lib"   # ld-musl + libfoo written into it below
+fi
+
+# dlopen_test (#234 Phase 7 incr 4): dynamic binary that dlopens libfoo.so.
+DLOPEN_TEST_WRITE_LINE=""
+if [ -f "$DLOPEN_TEST" ] && [ -f "$MUSL_LDSO" ]; then
+    DLOPEN_TEST_WRITE_LINE="write $DLOPEN_TEST dlopen_test"
+fi
+
 debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 write $HELLO_TXT hello.txt
 write $POSIX_SMOKE posix_smoke.txt
@@ -351,6 +375,9 @@ write $BENCH_LARGE bench_large.dat
 write $BENCH_4M bench_4m.dat
 ${HELLO_EXEC_WRITE_LINE}
 ${FD_EXEC_TEST_WRITE_LINE}
+${HELLO_DYN_WRITE_LINE}
+${DLOPEN_TEST_WRITE_LINE}
+${LDSO_MKDIR_LINE}
 mkdir mach_servers
 cd mach_servers
 write $BOOTSTRAP_CONF bootstrap.conf
@@ -378,6 +405,28 @@ mkdir hal
 cd hal
 write $HAL_PCI_SCAN_MODULE pci_scan.so
 DBGFS
+
+# #234 Phase 7: install the dynamic linker (umbrella libc.so) at
+# /lib/ld-musl-i386.so.1 — where hello_dyn's PT_INTERP points.  Separate
+# debugfs pass so the /lib cd/write doesn't tangle with the main heredoc.
+if [ -f "$HELLO_DYN" ] && [ -f "$MUSL_LDSO" ]; then
+    # libfoo.so is optional; only write it if the build produced it
+    # (incr 4 may be temporarily out-of-tree on side branches).
+    LIBFOO_WRITE_LINE=""
+    if [ -f "$LIBFOO_SO" ]; then
+        LIBFOO_WRITE_LINE="write $LIBFOO_SO libfoo.so"
+    fi
+    debugfs -w -f /dev/stdin "$PART_IMG" 2>/dev/null <<DBGFS
+cd /lib
+write $MUSL_LDSO ld-musl-i386.so.1
+${LIBFOO_WRITE_LINE}
+DBGFS
+    if [ -f "$LIBFOO_SO" ]; then
+        echo "  / : hello_dyn + dlopen_test + /lib/{ld-musl-i386.so.1, libfoo.so} (#234)"
+    else
+        echo "  / : hello_dyn + /lib/ld-musl-i386.so.1 (dynamic linker, #234)"
+    fi
+fi
 
 # gpu_server is optional in 0.1.0 (OSFMK_BUILD_GPU_SERVER off by default)
 if [ -f "$GPU_SERVER" ] && [ -f "$GPU_VGA_MODULE" ]; then

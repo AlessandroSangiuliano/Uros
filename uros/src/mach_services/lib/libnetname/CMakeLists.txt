@@ -50,3 +50,17 @@ set_target_properties(libnetname PROPERTIES
   OUTPUT_NAME "netname"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )
+
+# PIC variant for the umbrella libc.so (#234 incr 2b).  Only Mach RPC stubs
+# (no libc-level types) → a plain PIC clone is ABI-safe; flags/includes
+# copied from the base target.
+if(UROS_BUILD_MUSL)
+  add_library(libnetname-pic STATIC ${NETNAME_USER_C})
+  add_dependencies(libnetname-pic mig_mach_public_headers)
+  set_target_properties(libnetname-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(libnetname-pic PRIVATE
+    $<TARGET_PROPERTY:libnetname,COMPILE_OPTIONS>)
+  target_include_directories(libnetname-pic PRIVATE
+    $<TARGET_PROPERTY:libnetname,INCLUDE_DIRECTORIES>)
+  set_target_properties(libnetname-pic PROPERTIES OUTPUT_NAME "netname-pic")
+endif()

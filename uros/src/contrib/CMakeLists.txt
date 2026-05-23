@@ -15,10 +15,20 @@ if(UROS_BUILD_MUSL)
   set(MUSL_PREFIX   ${CMAKE_CURRENT_BINARY_DIR}/musl-install)
   set(MUSL_LIB      ${MUSL_PREFIX}/lib/libc.a)
   set(MUSL_OUT      ${MUSL_PREFIX}/lib/libc-musl.a)
+  # Phase 7 (#234 incr 2a): shared build also emits libc.so (which IS the
+  # musl dynamic linker, entry _dlstart) and the ld-musl-i386.so.1 symlink.
+  # --syslibdir below keeps the symlink inside our install tree instead of
+  # the host's absolute /lib.
+  set(MUSL_SO       ${MUSL_PREFIX}/lib/libc.so)
+  set(MUSL_LDSO     ${MUSL_PREFIX}/lib/ld-musl-i386.so.1)
 
   # i386 freestanding-ish build.  We still rely on the host gcc with -m32
-  # for now; cross-toolchain comes in a later phase.  We disable shared so
-  # only libc.a is produced.
+  # for now; cross-toolchain comes in a later phase.  Shared is enabled
+  # (#234 incr 2a) so the build also emits libc.so / ld-musl-i386.so.1
+  # (the dynamic linker); libc.a is still produced for the static path.
+  # The patched syscall_arch.h routes __syscallN to __uros_syscallN, which
+  # libc.so resolves via the WEAK stubs in src/internal/uros_syscall_stub.c
+  # (links standalone now; the real dispatcher gets bundled in 2b).
   ExternalProject_Add(musl_extproj
     SOURCE_DIR        ${MUSL_SRC}
     BINARY_DIR        ${MUSL_BUILD}
@@ -35,8 +45,9 @@ if(UROS_BUILD_MUSL)
     CONFIGURE_COMMAND ${MUSL_SRC}/configure
                         --srcdir=${MUSL_SRC}
                         --prefix=${MUSL_PREFIX}
+                        --syslibdir=${MUSL_PREFIX}/lib
                         --target=i386-linux-gnu
-                        --disable-shared
+                        --enable-shared
                         CC=cc
                         "CFLAGS=-m32 -Os -pipe -fno-stack-protector"
                         AR=ar
@@ -44,7 +55,7 @@ if(UROS_BUILD_MUSL)
     BUILD_COMMAND     ${CMAKE_COMMAND} -E env make -j
     INSTALL_COMMAND   make install
                 COMMAND ${CMAKE_COMMAND} -E copy ${MUSL_LIB} ${MUSL_OUT}
-    BUILD_BYPRODUCTS  ${MUSL_LIB} ${MUSL_OUT}
+    BUILD_BYPRODUCTS  ${MUSL_LIB} ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
     LOG_CONFIGURE     ON
     LOG_BUILD         ON
     LOG_INSTALL       ON
@@ -58,7 +69,55 @@ if(UROS_BUILD_MUSL)
   )
   add_dependencies(musl::c musl_extproj)
 
+  # Shared variant (#234 incr 2a): libc.so == ld-musl-i386.so.1, the musl
+  # dynamic linker (entry _dlstart).  Exposed as an imported SHARED target
+  # so the exec_server / disk-image plumbing can locate the artifact.
+  add_library(musl::ldso SHARED IMPORTED GLOBAL)
+  set_target_properties(musl::ldso PROPERTIES
+    IMPORTED_LOCATION             ${MUSL_SO}
+    INTERFACE_INCLUDE_DIRECTORIES ${MUSL_PREFIX}/include
+  )
+  add_dependencies(musl::ldso musl_extproj)
+
   message(STATUS "musl 1.2.5 vendored: build=${MUSL_BUILD} install=${MUSL_PREFIX}")
+  message(STATUS "musl dynamic linker: ${MUSL_LDSO}")
+
+  # -------------------------------------------------------------------------
+  # Umbrella libc.so (#234 incr 2b).
+  #
+  # musl_extproj (above) builds a libc.so with EXTRA_OBJS empty — the WEAK
+  # __uros_syscall stubs satisfy --no-undefined but it is a hollow no-op.
+  # Here we relink libc.so folding in the Uros PIC backend so the dynamic
+  # linker (== libc.so) carries the real __uros_syscall dispatcher + the
+  # Mach/VFS stack.  src/ is processed before src/contrib, so the *-pic
+  # targets already exist.
+  #
+  #   --whole-archive on libposix-uros-pic  -> its STRONG __uros_syscall*
+  #     override the weak stubs already in libc.so (a plain reference would
+  #     not pull the archive, since the weak defs already satisfy it);
+  #   the remaining archives in --start-group/--end-group are pulled by
+  #     reference (they have circular inter-dependencies).
+  #
+  # libc.so is rm'd first because EXTRA_OBJS is not one of its make
+  # prerequisites — without that, make would see it up-to-date and skip the
+  # relink.  The result is copied over the installed ${MUSL_SO} that the
+  # ld-musl-i386.so.1 symlink points at.
+  # -------------------------------------------------------------------------
+  set(MUSL_UMBRELLA_STAMP ${CMAKE_CURRENT_BINARY_DIR}/musl-umbrella.stamp)
+  add_custom_command(
+    OUTPUT ${MUSL_UMBRELLA_STAMP}
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${MUSL_BUILD}/lib/libc.so
+    COMMAND ${CMAKE_COMMAND} -E env make -C ${MUSL_BUILD} lib/libc.so
+            "EXTRA_OBJS=-Wl,--whole-archive $<TARGET_FILE:libposix-uros-pic> -Wl,--no-whole-archive -Wl,--start-group $<TARGET_FILE:libvfs-pic> $<TARGET_FILE:libmach_core-pic> $<TARGET_FILE:libnetname-pic> $<TARGET_FILE:libcap-pic> -Wl,--end-group"
+    COMMAND ${CMAKE_COMMAND} -E copy ${MUSL_BUILD}/lib/libc.so ${MUSL_SO}
+    COMMAND ${CMAKE_COMMAND} -E touch ${MUSL_UMBRELLA_STAMP}
+    DEPENDS musl_extproj
+            libposix-uros-pic libvfs-pic libmach_core-pic
+            libnetname-pic libcap-pic
+    COMMENT "Linking umbrella libc.so (musl + Uros PIC backend: posix-uros/vfs/mach/netname/cap)"
+    VERBATIM
+  )
+  add_custom_target(musl_umbrella ALL DEPENDS ${MUSL_UMBRELLA_STAMP})
 
   # Smoke test target: build a standalone hello.c against libc-musl.a.
   # Invoked manually via `ninja musl_smoke`.  Not added to ALL.

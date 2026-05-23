@@ -1,0 +1,10 @@
+# hello_dyn manifest — Uros #234 Phase 7 (first dynamic binary).
+#
+# Like hello_exec, hello_dyn never calls cap_request, so its legitimate
+# cap set is empty.  Present so exec_server's cap-provisioning path is
+# exercised for a dynamic image too.
+
+name hello_dyn
+
+# No `required` lines.
+# No `delegatable` lines.

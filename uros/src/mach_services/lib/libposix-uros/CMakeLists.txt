@@ -96,7 +96,7 @@ add_custom_command(
 )
 set_source_files_properties(${MACH_I386_USER_C} ${MACH_I386_USER_H} PROPERTIES GENERATED TRUE)
 
-add_library(libposix-uros STATIC
+set(LIBPOSIX_UROS_SRCS
   syscall.c
   handlers.c
   posix_fd.c
@@ -116,6 +116,8 @@ add_library(libposix-uros STATIC
   i386/fork_capture.S
   i386/clone_trampoline.S
 )
+
+add_library(libposix-uros STATIC ${LIBPOSIX_UROS_SRCS})
 
 add_dependencies(libposix-uros mig_mach_public_headers)
 
@@ -179,3 +181,30 @@ set_target_properties(libposix-uros PROPERTIES
   OUTPUT_NAME "posix-uros"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
 )
+
+# ---------------------------------------------------------------------------
+# PIC variant for the umbrella libc.so (#234 incr 2b).
+#
+# Same sources and flags as libposix-uros, compiled position-independent so
+# it can be folded into musl's libc.so via EXTRA_OBJS — the dynamic linker
+# (== libc.so) thus carries the real __uros_syscall dispatcher + Mach/VFS
+# stack.  The static system servers keep using the non-PIC libposix-uros, so
+# their proven path is untouched.  Build/include flags are copied from the
+# base target so the two never drift.
+# ---------------------------------------------------------------------------
+# The -pic archive carries an extra TU (dyn_bootstrap.c) that registers
+# mach_init() as a constructor — picked up by ld-musl's __init_array
+# walker so name_server_port et al. are valid before main() in dynamic
+# tasks (#234 incr 4).  Static binaries call mach_init() explicitly and
+# do not need it.
+add_library(libposix-uros-pic STATIC ${LIBPOSIX_UROS_SRCS} dyn_bootstrap.c)
+add_dependencies(libposix-uros-pic mig_mach_public_headers)
+if(TARGET musl_extproj)
+  add_dependencies(libposix-uros-pic musl_extproj)
+endif()
+set_target_properties(libposix-uros-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_compile_options(libposix-uros-pic PRIVATE
+  $<TARGET_PROPERTY:libposix-uros,COMPILE_OPTIONS>)
+target_include_directories(libposix-uros-pic PRIVATE
+  $<TARGET_PROPERTY:libposix-uros,INCLUDE_DIRECTORIES>)
+set_target_properties(libposix-uros-pic PROPERTIES OUTPUT_NAME "posix-uros-pic")
