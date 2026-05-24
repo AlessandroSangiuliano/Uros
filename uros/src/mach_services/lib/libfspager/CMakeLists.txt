@@ -56,8 +56,19 @@ target_compile_options(libfspager PRIVATE
                           -include stdint.h -m32 -march=i686>
 )
 
+# Disable MIG's hardcoded msgh_size / disposition TypeCheck on the
+# generated server stubs.  The kernel's memory_object_init message
+# shape may differ slightly from what the host-compiled .defs predict
+# (different Mach branches send slightly different trailers / port
+# dispositions); without this every well-formed call silently fails
+# MIG_BAD_ARGUMENTS in the wrapper before our seqnos_* handler runs.
+set_source_files_properties(${MO_SERVER_C} PROPERTIES
+  COMPILE_DEFINITIONS "TypeCheck=0")
+
 target_include_directories(libfspager PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
+  # generated/ exposes mach.h, mach_port.h (user stubs vm_allocate,
+  # memory_object_data_supply, mach_port_*).
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include

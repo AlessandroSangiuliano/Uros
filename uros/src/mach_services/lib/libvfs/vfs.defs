@@ -222,3 +222,29 @@ routine fs_flipc_endpoint(
 	out	endpoint	: vfs_path_t;
 	out	result		: int
 	);
+
+/* ------------------------------------------------------------------ */
+/*  File-backed mmap (#276 Phase B)                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Hand the caller a Mach memory_object that maps `handle`'s file
+ * content.  libvfs in the client task vm_maps the returned port at the
+ * desired address; subsequent page faults route to the fs server via
+ * libfspager and resolve through its read_page / write_page callbacks.
+ *
+ *   handle  — fid returned by a previous fs_open
+ *   prot    — POSIX PROT_* bits (informative; the kernel still
+ *             enforces the per-mapping protection passed to vm_map)
+ *   flags   — POSIX MAP_* bits (informative; lets the server know
+ *             whether to issue a fresh memory_object per call or
+ *             share an existing one — Phase B always issues fresh)
+ *   mem_obj — send right to the memory_object; pass to vm_map
+ */
+routine fs_mmap(
+		fs_port		: mach_port_t;
+	in	handle		: vfs_u64_t;
+	in	prot		: vfs_u32_t;
+	in	flags		: vfs_u32_t;
+	out	mem_obj		: mach_port_t
+	);

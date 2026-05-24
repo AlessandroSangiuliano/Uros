@@ -34,9 +34,11 @@
 #include "libfspager.h"
 
 #include <mach.h>
-#include "mach_port.h"               /* MIG-generated stubs:
-                                        mach_port_allocate, _insert_right,
-                                        _move_member, _destroy */
+#include "mach.h"                    /* MIG: vm_allocate, vm_deallocate,
+                                        memory_object_data_supply */
+#include "mach_port.h"               /* MIG: mach_port_allocate,
+                                        _insert_right, _move_member,
+                                        _destroy */
 #include <mach/memory_object.h>
 #include <mach/vm_sync.h>
 #include <mach/mach_traps.h>
@@ -255,10 +257,11 @@ fs_pager_demux(mach_msg_header_t *in, mach_msg_header_t *out)
  * supplies the control port (back-channel into the kernel's VM, used
  * later for memory_object_data_supply, lock_request, etc.).
  *
- * Marks the table entry initialised and stores control_port.  Refusing
- * (returning != KERN_SUCCESS) would leave the object in limbo; we
- * always accept and log if the port isn't ours (shouldn't happen, but
- * helps debug stray messages).
+ * Marks the table entry initialised, stores control_port, and tells
+ * the kernel we are ready via memory_object_change_attributes — the
+ * latter is REQUIRED: without it the kernel never sends
+ * memory_object_data_request and the first page fault on the mapping
+ * blocks forever (default_pager does the same call at init time).
  */
 kern_return_t
 seqnos_memory_object_init(
@@ -268,6 +271,8 @@ seqnos_memory_object_init(
     vm_size_t          pager_page_size)
 {
     struct fspager_entry *e;
+    memory_object_attr_info_data_t attrs;
+    kern_return_t kr;
 
     (void)seqno; (void)pager_page_size;
 
@@ -277,21 +282,37 @@ seqnos_memory_object_init(
         fspager_unlock(&g_pager_lock);
         printf("%s: memory_object_init on unknown port 0x%x\n",
                g_pager_tag, (unsigned)mem_obj);
-        /* Release the control port the kernel handed us — we won't
-         * be using it. */
         (void)mach_port_destroy(mach_task_self(), control_port);
         return KERN_SUCCESS;
     }
     if (e->initialised) {
         fspager_unlock(&g_pager_lock);
-        printf("%s: memory_object_init: port 0x%x re-init (was %d)\n",
-               g_pager_tag, (unsigned)mem_obj, e->initialised);
+        printf("%s: memory_object_init: port 0x%x re-init\n",
+               g_pager_tag, (unsigned)mem_obj);
         (void)mach_port_destroy(mach_task_self(), control_port);
         return KERN_SUCCESS;
     }
     e->control_port = control_port;
     e->initialised  = 1;
     fspager_unlock(&g_pager_lock);
+
+    /* Signal "pager is ready, will service data_requests".  Same
+     * attribute set default_pager uses: caller-driven copy, default
+     * cluster size, may_cache=FALSE (file pagers don't cache pages
+     * in the kernel for us), temporary=FALSE (it's a file, not
+     * scratch). */
+    attrs.copy_strategy     = MEMORY_OBJECT_COPY_DELAY;
+    attrs.cluster_size      = (vm_size_t)pager_page_size;
+    attrs.may_cache_object  = FALSE;
+    attrs.temporary         = FALSE;
+    kr = memory_object_change_attributes(control_port,
+                                         MEMORY_OBJECT_ATTRIBUTE_INFO,
+                                         (memory_object_info_t)&attrs,
+                                         MEMORY_OBJECT_ATTR_INFO_COUNT,
+                                         MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS)
+        printf("%s: change_attributes kr=%d (page faults will block)\n",
+               g_pager_tag, kr);
     return KERN_SUCCESS;
 }
 
@@ -339,10 +360,17 @@ seqnos_memory_object_terminate(
 }
 
 /*
- * memory_object_data_request — page fault.  Phase B leaves this a
- * stub returning KERN_SUCCESS so the kernel doesn't error, but the
- * mapping will read zeros (no memory_object_data_supply ever sent).
- * Phase C calls ops->read_page and replies with data_supply.
+ * memory_object_data_request — page fault.  Look the port up in the
+ * table, vm_allocate a transient buffer the size of the request, ask
+ * the fs to fill it via ops->read_page, then hand the buffer to the
+ * kernel as out-of-line data with dataDealloc=TRUE (the underlying
+ * msg layer frees it after the send).  No reply expected — this is a
+ * simpleroutine; we issue the matching memory_object_data_supply on
+ * the control port the kernel gave us at init time.
+ *
+ * Phase B: read_page is allowed to be a stub that zero-fills; the
+ * mapping then reads as all zeros.  Phase C swaps in the real fs
+ * read path and dlopen / file mmap start returning actual bytes.
  */
 kern_return_t
 seqnos_memory_object_data_request(
@@ -353,8 +381,66 @@ seqnos_memory_object_data_request(
     vm_size_t          length,
     vm_prot_t          desired_access)
 {
-    (void)mem_obj; (void)seqno; (void)control_port;
-    (void)offset;  (void)length; (void)desired_access;
+    struct fspager_entry *e;
+    uint64_t  file_id;
+    const struct fs_pager_ops *ops;
+    void     *state;
+    vm_offset_t buf = 0;
+    kern_return_t kr;
+
+    (void)seqno; (void)desired_access;
+
+    fspager_lock(&g_pager_lock);
+    e = fspager_lookup_locked(mem_obj);
+    if (e == NULL) {
+        fspager_unlock(&g_pager_lock);
+        printf("%s: data_request on unknown port 0x%x\n",
+               g_pager_tag, (unsigned)mem_obj);
+        return KERN_SUCCESS;
+    }
+    file_id = e->file_id;
+    ops     = e->ops;
+    state   = e->state;
+    fspager_unlock(&g_pager_lock);
+
+    if (ops == NULL || ops->read_page == NULL) {
+        printf("%s: data_request: no read_page op for fid=%llu\n",
+               g_pager_tag, (unsigned long long)file_id);
+        return KERN_SUCCESS;
+    }
+
+    /* OOL transfer buffer.  vm_allocate's anywhere=TRUE: the kernel
+     * picks the address; we hand the range to the message system and
+     * it goes back to the page-fault initiator unchanged. */
+    kr = vm_allocate(mach_task_self(), &buf, (vm_size_t)length, TRUE);
+    if (kr != KERN_SUCCESS) {
+        printf("%s: data_request: vm_allocate(%u) kr=%d\n",
+               g_pager_tag, (unsigned)length, kr);
+        return KERN_SUCCESS;
+    }
+
+    if (ops->read_page(state, file_id,
+                       (uint64_t)offset, (void *)buf,
+                       (unsigned int)length) != 0) {
+        /* read_page failed — zero-fill to keep the kernel from
+         * looping on the same fault, and supply anyway. */
+        memset((void *)buf, 0, length);
+    }
+
+    kr = memory_object_data_supply(control_port,
+                                   offset,
+                                   buf,
+                                   (mach_msg_type_number_t)length,
+                                   /*dataDealloc=*/ TRUE,
+                                   /*lock_value=*/  VM_PROT_NONE,
+                                   /*precious=*/    FALSE,
+                                   MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS) {
+        printf("%s: memory_object_data_supply kr=%d\n",
+               g_pager_tag, kr);
+        /* dataDealloc=TRUE only releases on success; clean up here. */
+        (void)vm_deallocate(mach_task_self(), buf, length);
+    }
     return KERN_SUCCESS;
 }
 

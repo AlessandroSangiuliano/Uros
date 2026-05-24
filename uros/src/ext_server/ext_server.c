@@ -59,6 +59,7 @@
 #include <page_cache.h>
 #include <blk.h>
 #include <libcap.h>
+#include <libfspager.h>                  /* file-backed mmap pager (#276) */
 #include <gpu_console.h>
 
 #include <flipc2.h>                      /* FLIPC v2 fast-path (#232) */
@@ -852,6 +853,81 @@ vfs_sync(mach_port_t fs_port)
 }
 
 /* ================================================================
+ * File-backed mmap (#276 Phase B.3): hand out a libfspager-backed
+ * memory_object for the file.  Phase B's read_page returns zeros so
+ * we can validate the end-to-end vm_map chain (libposix-uros h_mmap2
+ * -> libvfs vfs_mmap -> us -> libfspager -> kernel vm_object).  Phase
+ * C plugs ext2fs_pread into read_page and the mapping starts reading
+ * real file content.
+ * ================================================================ */
+
+static int
+ext_pager_read_page(void *state, uint64_t file_id,
+                    uint64_t off, void *buf, unsigned int len)
+{
+	(void)state; (void)file_id; (void)off;
+	/* Phase B stub: zero-fill so the kernel's data_supply path has
+	 * something defined to map; the mapping reads as all-zeroes
+	 * until Phase C wires the real ext2 read path. */
+	memset(buf, 0, len);
+	return 0;
+}
+
+static uint64_t
+ext_pager_file_size(void *state, uint64_t file_id)
+{
+	fs_private_t priv = (fs_private_t)(uintptr_t)file_id;
+	(void)state;
+	if (priv == NULL)
+		return 0;
+	return (uint64_t)ext2fs_file_size(priv);
+}
+
+static void
+ext_pager_close_file(void *state, uint64_t file_id)
+{
+	(void)state; (void)file_id;
+	/* Phase D may release a per-file pager cache here; nothing to
+	 * do in Phase B since fs_pager_create owns the only state. */
+}
+
+static const struct fs_pager_ops ext_pager_ops = {
+	.read_page  = ext_pager_read_page,
+	.write_page = NULL,     /* Phase D */
+	.close_file = ext_pager_close_file,
+	.file_size  = ext_pager_file_size,
+};
+
+kern_return_t
+vfs_mmap(mach_port_t fs_port, vfs_u64_t handle,
+         vfs_u32_t prot, vfs_u32_t flags, mach_port_t *out_mem_obj)
+{
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	fs_private_t priv;
+	mach_port_t mem_obj;
+
+	(void)prot; (void)flags;        /* Phase B: hints only */
+
+	priv = vfs_priv_for_handle(mnt, handle);
+	if (priv == NULL) {
+		*out_mem_obj = MACH_PORT_NULL;
+		return KERN_FAILURE;
+	}
+	/* Encode the per-file state pointer as file_id so the callbacks
+	 * (which receive only file_id, no per-call mount context) can
+	 * recover it via cast.  Stable for the lifetime of the open
+	 * handle; libfspager calls close_file before any further use. */
+	mem_obj = fs_pager_create((uint64_t)(uintptr_t)priv,
+	                          &ext_pager_ops, NULL);
+	if (mem_obj == MACH_PORT_NULL) {
+		*out_mem_obj = MACH_PORT_NULL;
+		return KERN_FAILURE;
+	}
+	*out_mem_obj = mem_obj;
+	return KERN_SUCCESS;
+}
+
+/* ================================================================
  * Multi-subsystem MIG demux: native ext2fs_server (2920) + vfs (3000)
  * ================================================================ */
 
@@ -861,6 +937,11 @@ ext_server_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	if (vfs_server(in, out))
 		return TRUE;
 	if (ext2fs_server_server(in, out))
+		return TRUE;
+	/* #276: dispatch memory_object_* messages to libfspager so
+	 * file-backed mmap traffic (data_request, terminate, etc.)
+	 * gets handled alongside the regular fs RPCs in the same loop. */
+	if (fs_pager_demux(in, out))
 		return TRUE;
 	return FALSE;
 }
@@ -1408,6 +1489,14 @@ main(int argc, char **argv)
 		MACH_PORT_RIGHT_PORT_SET, &port_set);
 	if (kr != KERN_SUCCESS) {
 		printf("ext2: port set alloc failed\n");
+		return 1;
+	}
+
+	/* #276: hand the same port set to libfspager so the memory_object
+	 * ports it allocates for fs_mmap clients land in the same receive
+	 * loop as fs_open/read/write below. */
+	if (fs_pager_init("ext2", port_set) != 0) {
+		printf("ext2: fs_pager_init failed\n");
 		return 1;
 	}
 
