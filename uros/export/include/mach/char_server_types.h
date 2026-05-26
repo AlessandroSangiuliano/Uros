@@ -22,4 +22,24 @@ typedef uint64_t	chr_u64_t;
 typedef char		chr_token_t[CHR_TOKEN_MAX];
 typedef char		chr_buf_t[CHR_BUF_MAX];
 
+/*
+ * RPC result codes (#275.2).  Carried as `out result : int` on routines
+ * that need to signal POSIX semantics beyond Mach's kern_return_t.
+ *
+ *   CHR_OK              — success
+ *   CHR_TTY_BACKGROUND  — caller is in a background pgrp of this tty's
+ *                         controlling session; SIGTTIN/SIGTTOU has been
+ *                         sent to the calling pgrp.  libposix-uros's
+ *                         wrapper maps this to errno = EINTR after the
+ *                         handler runs (or EIO if the signal is blocked).
+ *   CHR_ERR_INVAL       — bad device / class mismatch
+ *   CHR_ERR_NO_MODULE   — module hook not wired
+ *   CHR_ERR_KERNEL      — underlying Mach call failed
+ */
+#define CHR_OK                 0
+#define CHR_TTY_BACKGROUND    -1
+#define CHR_ERR_INVAL         -2
+#define CHR_ERR_NO_MODULE     -3
+#define CHR_ERR_KERNEL        -4
+
 #endif /* _MACH_CHAR_SERVER_TYPES_H_ */

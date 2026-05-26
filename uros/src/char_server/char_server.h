@@ -29,6 +29,14 @@ struct char_device_entry {
 	const char_module_ops_t		*module;
 	void				*priv;
 	struct char_device_info		info;
+	/*
+	 * Controlling-terminal owner (#275.1+).  sid of the session that
+	 * called tty_acquire_ctty on this device; 0 if unbound.  Only
+	 * meaningful for CHAR_CLASS_TTY entries.  Background-read/write
+	 * checks (#275.2/.3) compare the caller's sid against this field
+	 * and the caller's pgrp against proc_tcgetpgrp(sid).
+	 */
+	int				ctty_sid;
 };
 
 /* ============================================================
@@ -97,5 +105,6 @@ extern mach_port_t	char_service_port;
  * tty_acquire_ctty fails with KERN_FAILURE in that case.
  */
 extern mach_port_t	char_proc_port;
+void			char_proc_port_resolve(void);
 
 #endif /* _CHAR_SERVER_INTERNAL_H_ */

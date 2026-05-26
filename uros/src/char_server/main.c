@@ -179,25 +179,36 @@ lookup_hal_optional(void)
 }
 
 /*
- * Resolve the proc_server service port via netname.  Not fatal — the
- * tty class only needs it when a session leader actually calls
- * tty_acquire_ctty (#275.1); a missing proc_server just makes that one
- * RPC fail.  Logged once for diagnostics.
+ * Resolve the proc_server service port via netname.  proc_server boots
+ * from disk in stage-2 (after char_server), so the lookup is almost
+ * always a miss at our startup — keep it lazy: try at init for the
+ * fast path when boot order ever flips, then retry on every job-control
+ * RPC that needs it (char_proc_port_resolve below).  Non-fatal either
+ * way; missing proc_server only disables the tty_acquire_ctty path.
  */
-static void
-lookup_proc_optional(void)
+void
+char_proc_port_resolve(void)
 {
 	kern_return_t kr;
 
+	if (char_proc_port != MACH_PORT_NULL)
+		return;
 	kr = netname_look_up(name_server_port, "", "proc", &char_proc_port);
 	if (kr != KERN_SUCCESS) {
 		char_proc_port = MACH_PORT_NULL;
-		printf("char_server: proc_server not available "
-		       "(kr=%d) — tty_acquire_ctty disabled\n", (int)kr);
 		return;
 	}
 	printf("char_server: resolved proc_server port=0x%x\n",
 	       (unsigned)char_proc_port);
+}
+
+static void
+lookup_proc_optional(void)
+{
+	char_proc_port_resolve();
+	if (char_proc_port == MACH_PORT_NULL)
+		printf("char_server: proc_server not yet registered "
+		       "— tty_acquire_ctty will retry lazily\n");
 }
 
 /* ============================================================

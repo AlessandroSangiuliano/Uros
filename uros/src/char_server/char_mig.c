@@ -131,16 +131,71 @@ char_kbd_subscribe(mach_port_t char_port,
  * TTY plane
  * ============================================================ */
 
+/*
+ * tty_jobctl_check — implements POSIX background-read/write semantics
+ * (#275.2 / #275.3).  Returns CHR_OK if the caller is allowed to
+ * proceed; CHR_TTY_BACKGROUND after dispatching SIGTTIN/SIGTTOU to the
+ * caller's pgrp; CHR_OK with no check if the device has no ctty owner
+ * or caller_pid == 0 (privileged/debug path).
+ *
+ * Three proc_server round-trips today (getsid, getpgid, tcgetpgrp).
+ * A future compound RPC can collapse them; for v0.1 keep it composed
+ * out of the existing primitives so proc_server stays untouched.
+ */
+static int
+tty_jobctl_check(struct char_device_entry *dev, int caller_pid, int signo)
+{
+	int sid = 0, pgrp = 0, fg_pgrp = 0, rc = 0;
+	kern_return_t kr;
+	unsigned n_sent = 0;
+
+	if (caller_pid == 0 || dev->ctty_sid == 0)
+		return CHR_OK;
+	char_proc_port_resolve();
+	if (char_proc_port == MACH_PORT_NULL)
+		return CHR_OK;
+
+	kr = proc_getsid(char_proc_port, (proc_pid_t)caller_pid,
+			 (proc_pid_t *)&sid, &rc);
+	if (kr != KERN_SUCCESS || rc != PROC_OK || sid != dev->ctty_sid)
+		return CHR_OK;
+
+	kr = proc_tcgetpgrp(char_proc_port, (proc_pid_t)sid,
+			    (proc_pid_t *)&fg_pgrp, &rc);
+	if (kr != KERN_SUCCESS || rc != PROC_OK)
+		return CHR_OK;
+
+	kr = proc_getpgid(char_proc_port, (proc_pid_t)caller_pid,
+			  (proc_pid_t *)&pgrp, &rc);
+	if (kr != KERN_SUCCESS || rc != PROC_OK)
+		return CHR_OK;
+
+	if (pgrp == fg_pgrp)
+		return CHR_OK;
+
+	/* Background pgrp — deliver the signal and tell the caller to bail.
+	 * Per POSIX the signal goes to the whole pgrp, not just the caller;
+	 * proc_killpg returns the number of pids reached (irrelevant here). */
+	(void)proc_killpg(char_proc_port, (proc_pid_t)pgrp, signo,
+			  &n_sent, &rc);
+	return CHR_TTY_BACKGROUND;
+}
+
 kern_return_t
 char_tty_read(mach_port_t char_port,
 	      char *cap, mach_msg_type_number_t cap_count,
-	      uint32_t dev_id, uint32_t max,
-	      char *buf, mach_msg_type_number_t *buf_count)
+	      uint32_t dev_id, int caller_pid, uint32_t max,
+	      char *buf, mach_msg_type_number_t *buf_count,
+	      int *result)
 {
 	struct char_device_entry *dev;
 	size_t got = 0;
+	int jc;
 
 	(void)char_port;
+
+	*buf_count = 0;
+	*result = CHR_ERR_INVAL;
 
 	dev = char_core_dev_lookup((char_dev_id_t)dev_id);
 	if (dev == NULL)
@@ -151,8 +206,14 @@ char_tty_read(mach_port_t char_port,
 				(uint64_t)dev_id) != 0)
 		return KERN_PROTECTION_FAILURE;
 
+	jc = tty_jobctl_check(dev, caller_pid, PROC_SIGTTIN);
+	if (jc == CHR_TTY_BACKGROUND) {
+		*result = CHR_TTY_BACKGROUND;
+		return KERN_SUCCESS;
+	}
+
 	if (dev->module->tty_read == NULL) {
-		*buf_count = 0;
+		*result = CHR_ERR_NO_MODULE;
 		return KERN_FAILURE;
 	}
 
@@ -160,10 +221,11 @@ char_tty_read(mach_port_t char_port,
 		max = CHR_BUF_MAX;
 
 	if (dev->module->tty_read(dev->priv, buf, (size_t)max, &got) != 0) {
-		*buf_count = 0;
+		*result = CHR_ERR_KERNEL;
 		return KERN_FAILURE;
 	}
 	*buf_count = (mach_msg_type_number_t)got;
+	*result = CHR_OK;
 	return KERN_SUCCESS;
 }
 
@@ -269,6 +331,7 @@ char_tty_acquire_ctty(mach_port_t char_port,
 				(uint64_t)dev_id) != 0)
 		return KERN_PROTECTION_FAILURE;
 
+	char_proc_port_resolve();
 	if (char_proc_port == MACH_PORT_NULL) {
 		printf("char_server: tty_acquire_ctty dev=%u sid=%d: "
 		       "proc_server unavailable\n", dev_id, sid);
@@ -296,6 +359,9 @@ char_tty_acquire_ctty(mach_port_t char_port,
 		printf("char_server: proc_set_ctty MIG kr=%d\n", (int)kr);
 		return kr;
 	}
+
+	if (proc_rc == PROC_OK)
+		dev->ctty_sid = sid;
 
 	*result = proc_rc;
 	return KERN_SUCCESS;
