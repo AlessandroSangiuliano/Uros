@@ -59,6 +59,7 @@
 #include <page_cache.h>
 #include <blk.h>
 #include <libcap.h>
+#include <libfspager.h>                  /* file-backed mmap pager (#276) */
 #include <gpu_console.h>
 
 #include <flipc2.h>                      /* FLIPC v2 fast-path (#232) */
@@ -852,6 +853,184 @@ vfs_sync(mach_port_t fs_port)
 }
 
 /* ================================================================
+ * File-backed mmap (#276 Phase B.3): hand out a libfspager-backed
+ * memory_object for the file.  Phase B's read_page returns zeros so
+ * we can validate the end-to-end vm_map chain (libposix-uros h_mmap2
+ * -> libvfs vfs_mmap -> us -> libfspager -> kernel vm_object).  Phase
+ * C plugs ext2fs_pread into read_page and the mapping starts reading
+ * real file content.
+ * ================================================================ */
+
+static int
+ext_pager_read_page(void *state, uint64_t file_id,
+                    uint64_t off, void *buf, unsigned int len)
+{
+	fs_private_t priv = (fs_private_t)(uintptr_t)file_id;
+	size_t fsize;
+	unsigned int to_read;
+	int rc;
+
+	(void)state;
+
+	if (priv == NULL || buf == NULL || len == 0)
+		return -EINVAL;
+
+	fsize = ext2fs_file_size(priv);
+
+	/* Wholly past EOF — return a zero page; the kernel will see a
+	 * legitimate, all-zero page above the file size (Linux & POSIX
+	 * mmap semantics: faulting in the page past the rounded-up file
+	 * length yields zeros, not SIGBUS, when the page is partially
+	 * within the file). */
+	if ((uint64_t)off >= fsize) {
+		memset(buf, 0, len);
+		return 0;
+	}
+
+	to_read = len;
+	if ((uint64_t)off + to_read > fsize)
+		to_read = (unsigned int)(fsize - off);
+
+	rc = ext2fs_read_file(priv,
+	                      (vm_offset_t)off,
+	                      (vm_offset_t)buf,
+	                      (vm_size_t)to_read);
+	if (rc != 0)
+		return -EIO;
+
+	/* Final page that straddles EOF: zero the tail so the user task
+	 * never sees stale memory beyond the file's logical end. */
+	if (to_read < len)
+		memset((char *)buf + to_read, 0, len - to_read);
+
+	return 0;
+}
+
+static uint64_t
+ext_pager_file_size(void *state, uint64_t file_id)
+{
+	fs_private_t priv = (fs_private_t)(uintptr_t)file_id;
+	(void)state;
+	if (priv == NULL)
+		return 0;
+	return (uint64_t)ext2fs_file_size(priv);
+}
+
+static void
+ext_pager_close_file(void *state, uint64_t file_id)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)(uintptr_t)file_id;
+
+	(void)state;
+
+	/* The pager owns this clone (vfs_mmap copies the open-file slot's
+	 * ext2fs_file into a heap allocation when it creates the pager;
+	 * see the comment there).  No one else holds a reference to it
+	 * once memory_object_terminate has fired, so freeing here is
+	 * safe.  Belt-and-braces NULL check in case a future caller
+	 * passes 0. */
+	if (fp != NULL)
+		free(fp);
+}
+
+static int
+ext_pager_write_page(void *state, uint64_t file_id,
+                     uint64_t off, const void *buf, unsigned int len)
+{
+	fs_private_t priv = (fs_private_t)(uintptr_t)file_id;
+	size_t fsize;
+	unsigned int to_write;
+	int rc;
+
+	(void)state;
+
+	if (priv == NULL || buf == NULL || len == 0)
+		return -EINVAL;
+
+	/* Mach write-back: the kernel hands us a page worth of dirty
+	 * bytes (or a clustered run) at `off`.  We let ext2fs_write_file
+	 * handle block allocation / extent walk.  Clip at the current
+	 * file size — pager-driven writes never extend the file (the
+	 * file's grown by explicit POSIX writes or truncate, never by
+	 * the page fault path: pages past EOF are zero-filled on read,
+	 * dirty pages over the rounded-up final page are clipped here).
+	 */
+	fsize = ext2fs_file_size(priv);
+	if ((uint64_t)off >= fsize)
+		return 0;                    /* nothing to persist */
+
+	to_write = len;
+	if ((uint64_t)off + to_write > fsize)
+		to_write = (unsigned int)(fsize - off);
+
+	rc = ext2fs_write_file(priv,
+	                       (vm_offset_t)off,
+	                       (vm_offset_t)buf,
+	                       (vm_size_t)to_write);
+	if (rc != 0)
+		return -EIO;
+
+	return 0;
+}
+
+static const struct fs_pager_ops ext_pager_ops = {
+	.read_page  = ext_pager_read_page,
+	.write_page = ext_pager_write_page,
+	.close_file = ext_pager_close_file,
+	.file_size  = ext_pager_file_size,
+};
+
+kern_return_t
+vfs_mmap(mach_port_t fs_port, vfs_u64_t handle,
+         vfs_u32_t prot, vfs_u32_t flags, mach_port_t *out_mem_obj)
+{
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	fs_private_t priv;
+	mach_port_t mem_obj;
+
+	(void)prot; (void)flags;        /* Phase B: hints only */
+
+	priv = vfs_priv_for_handle(mnt, handle);
+	if (priv == NULL) {
+		*out_mem_obj = MACH_PORT_NULL;
+		return KERN_FAILURE;
+	}
+
+	/* The pager's lifetime is decoupled from the open fd's: POSIX
+	 * allows close(fd) right after mmap, the mapping (and therefore
+	 * the pager) lives on until the last task unmaps it.  We can't
+	 * point the pager at vfs_priv_for_handle's slot — that gets
+	 * reused as soon as the client closes the fd, and the next
+	 * data_request would walk freed metadata (cr2=0x18 inside
+	 * ext2_blkoff, seen during Phase C bringup).  Clone the
+	 * ext2fs_file into a heap allocation the pager owns end-to-end
+	 * and free in ext_pager_close_file when the kernel sends the
+	 * final memory_object_terminate. */
+	{
+		struct ext2fs_file *clone = malloc(sizeof(*clone));
+		if (clone == NULL) {
+			*out_mem_obj = MACH_PORT_NULL;
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		ext2fs_clone_file(clone, (const struct ext2fs_file *)priv);
+		priv = (fs_private_t)clone;
+	}
+
+	/* Encode the per-file state pointer as file_id so the callbacks
+	 * (which receive only file_id, no per-call mount context) can
+	 * recover it via cast.  Stable for the lifetime of the pager. */
+	mem_obj = fs_pager_create((uint64_t)(uintptr_t)priv,
+	                          &ext_pager_ops, NULL);
+	if (mem_obj == MACH_PORT_NULL) {
+		free((void *)priv);   /* drop the clone we just allocated */
+		*out_mem_obj = MACH_PORT_NULL;
+		return KERN_FAILURE;
+	}
+	*out_mem_obj = mem_obj;
+	return KERN_SUCCESS;
+}
+
+/* ================================================================
  * Multi-subsystem MIG demux: native ext2fs_server (2920) + vfs (3000)
  * ================================================================ */
 
@@ -861,6 +1040,11 @@ ext_server_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	if (vfs_server(in, out))
 		return TRUE;
 	if (ext2fs_server_server(in, out))
+		return TRUE;
+	/* #276: dispatch memory_object_* messages to libfspager so
+	 * file-backed mmap traffic (data_request, terminate, etc.)
+	 * gets handled alongside the regular fs RPCs in the same loop. */
+	if (fs_pager_demux(in, out))
 		return TRUE;
 	return FALSE;
 }
@@ -1408,6 +1592,14 @@ main(int argc, char **argv)
 		MACH_PORT_RIGHT_PORT_SET, &port_set);
 	if (kr != KERN_SUCCESS) {
 		printf("ext2: port set alloc failed\n");
+		return 1;
+	}
+
+	/* #276: hand the same port set to libfspager so the memory_object
+	 * ports it allocates for fs_mmap clients land in the same receive
+	 * loop as fs_open/read/write below. */
+	if (fs_pager_init("ext2", port_set) != 0) {
+		printf("ext2: fs_pager_init failed\n");
 		return 1;
 	}
 

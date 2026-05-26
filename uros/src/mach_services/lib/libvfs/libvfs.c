@@ -636,6 +636,56 @@ vfs_sync(vfs_fd_t fd)
     return (kr == KERN_SUCCESS) ? 0 : -1;
 }
 
+/*
+ * vfs_mmap — request a Mach memory_object backing this fd's file
+ * from the fs_server.  Caller hands the returned send right to
+ * vm_map; the kernel will then route faults to the fs server via
+ * libfspager (#276 Phase B).
+ *
+ * The fs_port + handle are read under vfs_lock just like every other
+ * op.  Flush the write-behind window first so the memory object
+ * starts from a coherent on-server state (matters once we wire
+ * MAP_SHARED in Phase D; harmless before).
+ */
+int
+vfs_mmap(vfs_fd_t fd, int prot, int flags, mach_port_t *out_port)
+{
+    struct vfs_fd_entry *e;
+    mach_port_t fs_port;
+    vfs_u64_t handle;
+    mach_port_t mem_obj = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    if (!out_port)
+        return -1;
+
+    (void)vfs_flipc_wb_flush(fd);
+
+    pthread_mutex_lock(&vfs_lock);
+    e = vfs_fd_get(fd);
+    if (!e || e->dead) {
+        pthread_mutex_unlock(&vfs_lock);
+        return -1;
+    }
+    fs_port = e->fs_port;
+    handle  = e->handle;
+    pthread_mutex_unlock(&vfs_lock);
+
+    kr = fs_mmap(fs_port, handle,
+                 (vfs_u32_t)prot, (vfs_u32_t)flags, &mem_obj);
+    if (vfs_send_died(kr)) {
+        pthread_mutex_lock(&vfs_lock);
+        vfs_mark_port_dead_locked(fs_port);
+        pthread_mutex_unlock(&vfs_lock);
+        return -1;
+    }
+    if (kr != KERN_SUCCESS || mem_obj == MACH_PORT_NULL)
+        return -1;
+
+    *out_port = mem_obj;
+    return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /*  fork inheritance support (#262 step 2)                              */
 /* ------------------------------------------------------------------ */

@@ -29,6 +29,7 @@
  */
 
 #include "vfs_types.h"          /* wire types: vfs_stat_t, VFS_O_*, ... */
+#include <mach.h>               /* mach_port_t for vfs_mmap (#276) */
 
 /*
  * vfs_fd_t — libvfs file descriptor.  An int index into the per-task
@@ -86,6 +87,20 @@ int             vfs_stat(const char *path, vfs_stat_t *out);
 int             vfs_fstat(vfs_fd_t fd, vfs_stat_t *out);
 
 int             vfs_sync(vfs_fd_t fd);
+
+/*
+ * vfs_mmap - ask the fs_server for a Mach memory_object backing the
+ * file open under `fd`.  The returned send right is what libposix-uros
+ * passes to vm_map (h_mmap2 for the POSIX mmap path, #276 Phase B).
+ *
+ *   prot/flags - POSIX PROT_xxx and MAP_xxx bits, forwarded as hints;
+ *                actual protection is enforced per-mapping by the
+ *                kernel at vm_map time.
+ *   out_port   - set to the memory_object port on success.
+ * Returns 0 on success, -1 on failure (out_port left untouched).
+ */
+int             vfs_mmap(vfs_fd_t fd, int prot, int flags,
+                         mach_port_t *out_port);
 
 /*
  * Namespace operations (v0.3.0, #231).  Paths are absolute.

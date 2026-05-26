@@ -269,15 +269,28 @@ static long h_exit_thread(long status, long a2, long a3,
 #define UROS_MAP_ANONYMOUS  0x20
 #define UROS_MAP_FIXED      0x10
 
+/* File-backed branch lives in posix_fd.c (#276 Phase B.3) so handlers.c
+ * stays freestanding-clean (no <mach.h>, no libvfs).  Returns mapped
+ * address or -errno; we forward the value verbatim from h_mmap2. */
+extern long __uros_mmap_fd(long addr, unsigned long len, long prot,
+                           long flags, int fd, long pgoff);
+
 static long h_mmap2(long addr, long len, long prot,
                     long flags, long fd, long pgoff)
 {
-    (void)prot; (void)pgoff;
-    if (!(flags & UROS_MAP_ANONYMOUS) || fd != -1)
-        return -ENOSYS;
     if (len <= 0)
         return -EINVAL;
 
+    /* File-backed: route through libvfs -> fs_server -> libfspager. */
+    if (fd != -1)
+        return __uros_mmap_fd(addr, (unsigned long)len, prot,
+                              flags, (int)fd, pgoff);
+
+    /* Anonymous: kernel vm_allocate as before. */
+    if (!(flags & UROS_MAP_ANONYMOUS))
+        return -ENOSYS;
+
+    (void)prot; (void)pgoff;
     unsigned long out = (unsigned long)addr;
     int anywhere = !(flags & UROS_MAP_FIXED);
     __uros_kern_return_t kr = syscall_vm_allocate(task_self(),

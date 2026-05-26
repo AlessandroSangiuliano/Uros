@@ -162,6 +162,7 @@ target_include_directories(libposix-uros PUBLIC
 # Internal-only includes for MIG output, kernel/mach RPC headers, etc.
 target_include_directories(libposix-uros PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR}        # generated proc.h / exec.h
+  ${CMAKE_BINARY_DIR}/generated      # generated mach.h / mach_port.h (#276)
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel

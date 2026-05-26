@@ -23,6 +23,10 @@
 #include <pthread.h>
 
 #include "libvfs.h"
+#include <mach_init.h>          /* mach_task_self */
+#include <mach/vm_inherit.h>
+#include "mach_port.h"          /* MIG: mach_port_deallocate */
+#include "mach.h"               /* MIG: vm_map */
 
 /* Console write sink — same SYSENTER trap handlers.c reaches for. */
 extern void mach_print(const char *);
@@ -189,6 +193,23 @@ long __uros_openat(int dirfd, const char *path, int flags, int mode)
     if (dirfd == LX_AT_FDCWD)
         return __uros_open(path, flags, mode);   /* relative -> ENOENT */
     return -ENOTSUP;
+}
+
+/* Public helper: resolve a POSIX fd to its libvfs fd.  Mirrors the
+ * internal resolve_fd but exported for h_mmap2 (#276) and any other
+ * handler that needs the libvfs side of an fd it received as POSIX.
+ * Returns -1 for invalid / closed fds and -2 for the console pseudo-
+ * fds (0/1/2 before they are redirected to real files). */
+vfs_fd_t __uros_pfd_to_vfs(int fd)
+{
+    if (fd < 0 || fd >= POSIX_OPEN_MAX) return -1;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    if (!pfds[fd].in_use) { pthread_mutex_unlock(&pfd_lock); return -1; }
+    int console = pfds[fd].is_console;
+    vfs_fd_t vfd = pfds[fd].vfd;
+    pthread_mutex_unlock(&pfd_lock);
+    return console ? -2 : vfd;
 }
 
 /* Resolve a POSIX fd to its libvfs fd.  Returns -1 and sets *err for an
@@ -433,4 +454,80 @@ void __uros_pfd_install(int posix_fd, vfs_fd_t vfd)
     pfds[posix_fd].cloexec    = 0;
     pfds[posix_fd].vfd        = vfd;
     pthread_mutex_unlock(&pfd_lock);
+}
+
+/* ------------------------------------------------------------------ */
+/*  File-backed mmap (#276 Phase B.3)                                   */
+/* ------------------------------------------------------------------ */
+
+/* Linux i386 mmap2 protection / flag bits the dispatcher in
+ * handlers.c maps onto Mach VM_PROT_*; mirrored here so we
+ * stay independent of that header. */
+#define LX_PROT_READ   0x1
+#define LX_PROT_WRITE  0x2
+#define LX_PROT_EXEC   0x4
+#define LX_MAP_FIXED   0x10
+
+/*
+ * __uros_mmap_fd — file-backed branch of h_mmap2.  Translate POSIX fd
+ * into a libvfs fd, fetch the memory_object via vfs_mmap (a fresh port
+ * per call in Phase B; Phase D may dedup MAP_SHARED), and vm_map it
+ * into the caller's task at byte offset pgoff * 4096.
+ *
+ * Returns the mapped address on success, -errno on failure.  h_mmap2
+ * funnels the fd!=-1 case here and returns this value verbatim.
+ */
+long
+__uros_mmap_fd(long addr, unsigned long len, long prot,
+               long flags, int fd, long pgoff)
+{
+    vfs_fd_t   vfd;
+    mach_port_t mem_obj = MACH_PORT_NULL;
+    int        rc;
+    kern_return_t kr;
+
+    if (len == 0)
+        return -EINVAL;
+
+    vfd = __uros_pfd_to_vfs(fd);
+    if (vfd < 0)
+        return -EBADF;
+
+    rc = vfs_mmap(vfd, (int)prot, (int)flags, &mem_obj);
+    if (rc != 0 || mem_obj == MACH_PORT_NULL)
+        return -ENODEV;
+
+    /* Build vm_map args.  Mach vm_prot bits happen to match Linux
+     * PROT_ values 1/2/4 — straight cast is correct on i386. */
+    vm_address_t a = (vm_address_t)addr;
+    int anywhere = !(flags & LX_MAP_FIXED);
+    vm_prot_t cur_prot = (vm_prot_t)(prot & 7);
+    if (cur_prot == 0)
+        cur_prot = VM_PROT_READ;
+    vm_prot_t max_prot = VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE;
+
+    /* MAP_FIXED semantics on Linux implicitly unmap any pre-existing
+     * mapping covering [addr, addr+len).  Mach vm_map refuses to
+     * overlap (KERN_INVALID_ADDRESS).  Replicate the Linux behaviour
+     * by vm_deallocate'ing the range first — musl's ld-musl relies on
+     * this when it MAP_FIXEDs each PT_LOAD over a previously-reserved
+     * VA hole. */
+    if (flags & LX_MAP_FIXED)
+        (void)vm_deallocate(mach_task_self(), a, (vm_size_t)len);
+
+    kr = vm_map(mach_task_self(),
+                &a, (vm_size_t)len,
+                /*mask=*/ 0, anywhere,
+                mem_obj,
+                /*offset=*/ (vm_offset_t)pgoff * 4096u,
+                /*copy=*/   FALSE,
+                cur_prot, max_prot,
+                VM_INHERIT_DEFAULT);
+
+    /* Drop the local send right — vm_map took its own. */
+    (void)mach_port_deallocate(mach_task_self(), mem_obj);
+
+    if (kr != KERN_SUCCESS)
+        return -ENOMEM;
+    return (long)a;
 }

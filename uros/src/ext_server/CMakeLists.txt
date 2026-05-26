@@ -180,6 +180,8 @@ target_include_directories(ext_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/file_systems/ext2fs
   # libcap.h for capability-gated device_open_cap
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  # libfspager.h for file-backed mmap (#276)
+  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libfspager
   # libgpu_console (#199 prep)
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
 )
@@ -192,6 +194,7 @@ target_link_libraries(ext_server_bin PRIVATE
   libsa_fs
   libblk
   libcap
+  libfspager
   libnetname
   libflipc2
   libgpu_console
