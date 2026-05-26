@@ -91,4 +91,11 @@ extern mach_port_t	char_root_ledger_wired;
 extern mach_port_t	char_root_ledger_paged;
 extern mach_port_t	char_service_port;
 
+/*
+ * proc_server send right.  Looked up once at startup from netname ("proc")
+ * by main.c (#275.1).  MACH_PORT_NULL until proc_server is available;
+ * tty_acquire_ctty fails with KERN_FAILURE in that case.
+ */
+extern mach_port_t	char_proc_port;
+
 #endif /* _CHAR_SERVER_INTERNAL_H_ */

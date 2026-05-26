@@ -19,6 +19,7 @@ set(CHAR_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libmodload
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/proc_server
   ${CMAKE_BINARY_DIR}/generated/include
   # mach_services/include MUST come before build/generated so <mach.h>
   # resolves to the libmach userspace version, not the MIG-emitted shim.
@@ -58,6 +59,36 @@ add_custom_command(
     ${DEVICE_MASTER_DEFS}
   DEPENDS migcom ${DEVICE_MASTER_DEFS}
   COMMENT "MIG: device_master.defs (user stubs for char_server modules)"
+  VERBATIM
+)
+
+# ===========================================================================
+# MIG: proc.defs — user stubs for proc_server RPCs (proc_set_ctty +
+# proc_tcsetpgrp / proc_tcgetpgrp).  Wired in #275.1 so the tty class
+# can claim the controlling terminal of the calling session.  Same
+# pattern as device_master.defs above.
+# ===========================================================================
+
+set(PROC_DEFS   ${CMAKE_SOURCE_DIR}/src/proc_server/proc.defs)
+set(PROC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/proc_user.c)
+set(PROC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/proc.h)
+
+add_custom_command(
+  OUTPUT ${PROC_USER_C} ${PROC_USER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_BINARY_DIR}/generated/include
+    -I${CMAKE_SOURCE_DIR}/export/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/proc_server
+    -header ${PROC_USER_H}
+    -sheader /dev/null
+    -user ${PROC_USER_C}
+    -server /dev/null
+    ${PROC_DEFS}
+  DEPENDS migcom ${PROC_DEFS}
+  COMMENT "MIG: proc.defs (user stubs for char_server tty class)"
   VERBATIM
 )
 
@@ -167,6 +198,8 @@ set(CHAR_SOURCES
   # core.c calls device_intr_register / device_intr_unregister
   # directly to wire module IRQs into the port set (#206).
   ${DM_USER_C}
+  # #275.1: char_mig.c's tty_acquire_ctty handler RPCs proc_server.
+  ${PROC_USER_C}
   ${CMAKE_BINARY_DIR}/generated/cap_revoke_server.c
 )
 
@@ -181,6 +214,7 @@ add_executable(char_server
   ${CHAR_USER_H}
   ${CHAR_SERVER_H}
   ${DM_USER_H}
+  ${PROC_USER_H}
 )
 
 add_dependencies(char_server mig_mach_public_headers libcap mig_cap_revoke

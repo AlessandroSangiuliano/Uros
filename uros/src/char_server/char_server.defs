@@ -120,6 +120,27 @@ routine tty_subscribe(
 	in	dev_id		: chr_u32_t;
 	in	notify_port	: mach_port_t);
 
+/*
+ * tty_acquire_ctty — the session leader claims this tty as the
+ * controlling terminal for its session (#247 driver side, #275.1).
+ * char_server forwards to proc_set_ctty(sid, tty_port) on the
+ * proc_server, where tty_port is a fresh send right to char_server's
+ * service port (proc_server keeps it for the lifetime of the ctty —
+ * future signal delivery / TIOCNOTTY routes through it).
+ *
+ * Cap-gated on CHAR_CAP_TTY_RW (no separate CTTY op for v0.1 — the
+ * read/write cap already implies the right to bind the session).
+ * `result` carries the proc_server PROC_OK / PROC_ERR_* code so the
+ * libposix-uros wrapper can map it to POSIX errno (EPERM if the
+ * session already owns a controlling tty, etc.).
+ */
+routine tty_acquire_ctty(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	sid		: int;
+	out	result		: int);
+
 /* =================================================================
  * Mouse plane (#215 — ps2_mouse.so)
  * ================================================================= */

@@ -43,6 +43,7 @@ mach_port_t	char_security_port;
 mach_port_t	char_root_ledger_wired;
 mach_port_t	char_root_ledger_paged;
 mach_port_t	char_service_port;
+mach_port_t	char_proc_port = MACH_PORT_NULL;
 static mach_port_t char_port_set;
 static mach_port_t char_cap_revoke_port;
 
@@ -177,6 +178,28 @@ lookup_hal_optional(void)
 	return hal_port;
 }
 
+/*
+ * Resolve the proc_server service port via netname.  Not fatal — the
+ * tty class only needs it when a session leader actually calls
+ * tty_acquire_ctty (#275.1); a missing proc_server just makes that one
+ * RPC fail.  Logged once for diagnostics.
+ */
+static void
+lookup_proc_optional(void)
+{
+	kern_return_t kr;
+
+	kr = netname_look_up(name_server_port, "", "proc", &char_proc_port);
+	if (kr != KERN_SUCCESS) {
+		char_proc_port = MACH_PORT_NULL;
+		printf("char_server: proc_server not available "
+		       "(kr=%d) — tty_acquire_ctty disabled\n", (int)kr);
+		return;
+	}
+	printf("char_server: resolved proc_server port=0x%x\n",
+	       (unsigned)char_proc_port);
+}
+
 /* ============================================================
  * Main
  * ============================================================ */
@@ -259,6 +282,11 @@ main(int argc, char **argv)
 	}
 
 	subscribe_to_cap_revoke();
+
+	/* #275.1: optional proc_server handle for tty_acquire_ctty.  Done
+	 * after discovery so any module that needs to publish a /dev entry
+	 * has already happened; proc_server boots before us in bootstrap. */
+	lookup_proc_optional();
 
 	bootstrap_completed(bootstrap_port, mach_task_self());
 	printf("char_server: init complete, entering message loop\n");

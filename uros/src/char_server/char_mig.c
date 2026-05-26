@@ -18,10 +18,13 @@
 
 #include <mach.h>
 #include <mach/kern_return.h>
+#include <mach/mach_port.h>
 #include <stdio.h>
 #include <string.h>
 #include <mach/char_server_types.h>	/* CHR_BUF_MAX */
 #include "char_server.h"
+#include "proc.h"			/* MIG user stubs for proc_server */
+#include "proc_types.h"			/* PROC_OK, proc_pid_t */
 
 /* Pick the right cap op for a given device class. */
 static uint64_t
@@ -237,6 +240,65 @@ char_tty_subscribe(mach_port_t char_port,
 		return KERN_FAILURE;
 	return (dev->module->tty_subscribe(dev->priv, notify_port) == 0)
 		? KERN_SUCCESS : KERN_FAILURE;
+}
+
+/*
+ * tty_acquire_ctty — bind this tty as the controlling terminal of the
+ * caller's session (#275.1).  We hand proc_server a fresh send right
+ * to char_service_port; once #275.2 wires per-tty signal delivery, the
+ * passed port will become a per-device handle instead.
+ */
+kern_return_t
+char_tty_acquire_ctty(mach_port_t char_port,
+		      char *cap, mach_msg_type_number_t cap_count,
+		      uint32_t dev_id, int sid, int *result)
+{
+	struct char_device_entry *dev;
+	mach_port_t              tty_port;
+	kern_return_t            kr;
+	int                      proc_rc = 0;
+
+	(void)char_port;
+
+	dev = char_core_dev_lookup((char_dev_id_t)dev_id);
+	if (dev == NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (dev->info.class != CHAR_CLASS_TTY)
+		return KERN_INVALID_ARGUMENT;
+	if (char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_RW,
+				(uint64_t)dev_id) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	if (char_proc_port == MACH_PORT_NULL) {
+		printf("char_server: tty_acquire_ctty dev=%u sid=%d: "
+		       "proc_server unavailable\n", dev_id, sid);
+		return KERN_FAILURE;
+	}
+
+	/* Fresh send right — proc_server keeps it and deallocates on
+	 * proc_clear_ctty / session-leader exit (see proc.defs). */
+	kr = mach_port_insert_right(mach_task_self(),
+				    char_service_port, char_service_port,
+				    MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("char_server: tty_acquire_ctty insert_right "
+		       "failed (kr=%d)\n", (int)kr);
+		return KERN_FAILURE;
+	}
+	tty_port = char_service_port;
+
+	kr = proc_set_ctty(char_proc_port, (proc_pid_t)sid,
+			   tty_port, &proc_rc);
+	if (kr != KERN_SUCCESS) {
+		/* MIG transport failure — proc_server did not consume the
+		 * send right, so we drop the userref we just created. */
+		(void)mach_port_deallocate(mach_task_self(), tty_port);
+		printf("char_server: proc_set_ctty MIG kr=%d\n", (int)kr);
+		return kr;
+	}
+
+	*result = proc_rc;
+	return KERN_SUCCESS;
 }
 
 /* ============================================================
