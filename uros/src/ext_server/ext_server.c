@@ -933,9 +933,49 @@ ext_pager_close_file(void *state, uint64_t file_id)
 		free(fp);
 }
 
+static int
+ext_pager_write_page(void *state, uint64_t file_id,
+                     uint64_t off, const void *buf, unsigned int len)
+{
+	fs_private_t priv = (fs_private_t)(uintptr_t)file_id;
+	size_t fsize;
+	unsigned int to_write;
+	int rc;
+
+	(void)state;
+
+	if (priv == NULL || buf == NULL || len == 0)
+		return -EINVAL;
+
+	/* Mach write-back: the kernel hands us a page worth of dirty
+	 * bytes (or a clustered run) at `off`.  We let ext2fs_write_file
+	 * handle block allocation / extent walk.  Clip at the current
+	 * file size — pager-driven writes never extend the file (the
+	 * file's grown by explicit POSIX writes or truncate, never by
+	 * the page fault path: pages past EOF are zero-filled on read,
+	 * dirty pages over the rounded-up final page are clipped here).
+	 */
+	fsize = ext2fs_file_size(priv);
+	if ((uint64_t)off >= fsize)
+		return 0;                    /* nothing to persist */
+
+	to_write = len;
+	if ((uint64_t)off + to_write > fsize)
+		to_write = (unsigned int)(fsize - off);
+
+	rc = ext2fs_write_file(priv,
+	                       (vm_offset_t)off,
+	                       (vm_offset_t)buf,
+	                       (vm_size_t)to_write);
+	if (rc != 0)
+		return -EIO;
+
+	return 0;
+}
+
 static const struct fs_pager_ops ext_pager_ops = {
 	.read_page  = ext_pager_read_page,
-	.write_page = NULL,     /* Phase D */
+	.write_page = ext_pager_write_page,
 	.close_file = ext_pager_close_file,
 	.file_size  = ext_pager_file_size,
 };

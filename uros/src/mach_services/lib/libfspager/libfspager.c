@@ -480,15 +480,78 @@ seqnos_memory_object_supply_completed(
     return KERN_SUCCESS;
 }
 
+/*
+ * memory_object_data_return — kernel hands us a dirty page (or a
+ * clustered run) to persist.  Phase D wires this to ops->write_page;
+ * the OOL buffer is then vm_deallocate'd (the kernel keeps no
+ * reference once we return).
+ *
+ * `dirty` says the kernel believes the bytes differ from what we last
+ * supplied via data_supply.  `kernel_copy` is a hint about whether the
+ * kernel retained a clean copy — we don't act on it in Phase D.
+ *
+ * If write_page is NULL (fs server didn't provide writeback support)
+ * or returns an error, the kernel still loses its copy of the page
+ * (semantically POSIX-correct: msync can fail, the user just sees
+ * silent data loss for that range).  Logging the error is enough for
+ * now; a later phase may introduce a write-back failure flag the fs
+ * can surface to clients via stat / mmap-time hints.
+ */
 kern_return_t
 seqnos_memory_object_data_return(
     mach_port_t mem_obj, mach_port_seqno_t seqno, mach_port_t control_port,
     vm_offset_t offset, pointer_t data, mach_msg_type_number_t data_count,
     boolean_t dirty, boolean_t kernel_copy)
 {
-    (void)mem_obj; (void)seqno; (void)control_port;
-    (void)offset;  (void)data;  (void)data_count;
-    (void)dirty;   (void)kernel_copy;
+    struct fspager_entry *e;
+    uint64_t file_id = 0;
+    const struct fs_pager_ops *ops = NULL;
+    void *state = NULL;
+
+    (void)seqno; (void)control_port; (void)kernel_copy;
+
+    if (!dirty || data_count == 0)
+        goto release;            /* nothing to persist */
+
+    fspager_lock(&g_pager_lock);
+    e = fspager_lookup_locked(mem_obj);
+    if (e != NULL) {
+        file_id = e->file_id;
+        ops     = e->ops;
+        state   = e->state;
+    }
+    fspager_unlock(&g_pager_lock);
+
+    if (ops != NULL && ops->write_page != NULL) {
+        int rc = ops->write_page(state, file_id,
+                                 (uint64_t)offset,
+                                 (const void *)data,
+                                 (unsigned int)data_count);
+        if (rc != 0)
+            printf("%s: write_page(fid=%llu off=0x%lx len=%u) -> %d\n",
+                   g_pager_tag, (unsigned long long)file_id,
+                   (unsigned long)offset, (unsigned int)data_count,
+                   rc);
+    } else if (ops != NULL) {
+        /* Fs server has no write_page — only log once per pager so we
+         * don't spam during read-only mappings that the kernel
+         * occasionally cleans. */
+        static int warned = 0;
+        if (!warned) {
+            warned = 1;
+            printf("%s: data_return on read-only pager (fid=%llu); "
+                   "kernel-side dirty page will be dropped\n",
+                   g_pager_tag, (unsigned long long)file_id);
+        }
+    }
+
+release:
+    /* Always release the OOL buffer — the kernel is done with it
+     * regardless of whether we persisted the bytes. */
+    if (data != 0 && data_count != 0)
+        (void)vm_deallocate(mach_task_self(),
+                            (vm_address_t)data,
+                            (vm_size_t)data_count);
     return KERN_SUCCESS;
 }
 
