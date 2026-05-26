@@ -193,7 +193,8 @@ char_proc_port_resolve(void)
 
 	if (char_proc_port != MACH_PORT_NULL)
 		return;
-	kr = netname_look_up(name_server_port, "", "proc", &char_proc_port);
+	kr = netname_look_up(name_server_port, "", "proc_server",
+			     &char_proc_port);
 	if (kr != KERN_SUCCESS) {
 		char_proc_port = MACH_PORT_NULL;
 		return;
@@ -210,6 +211,7 @@ lookup_proc_optional(void)
 		printf("char_server: proc_server not yet registered "
 		       "— tty_acquire_ctty will retry lazily\n");
 }
+
 
 /* ============================================================
  * Main
