@@ -1395,6 +1395,14 @@ kern_return_t vfs_rename(mach_port_t fp, char *o, char *n)
 { (void)fp;(void)o;(void)n; return KERN_FAILURE; }
 kern_return_t vfs_sync(mach_port_t fp) { (void)fp; return KERN_SUCCESS; }
 
+/* /proc files are synthetic — no mmap path.  Stub introduced when
+ * fs_mmap landed in vfs.defs via #276; proc_server otherwise fails to
+ * link.  Returns KERN_FAILURE → libposix-uros maps to EINVAL. */
+kern_return_t vfs_mmap(mach_port_t fp, vfs_u64_t h, vfs_u32_t prot,
+                       vfs_u32_t flags, mach_port_t *mem_obj)
+{ (void)fp;(void)h;(void)prot;(void)flags;
+  *mem_obj = MACH_PORT_NULL; return KERN_FAILURE; }
+
 /* /proc is a synthetic fs with no bulk data path — no FLIPC fast-path
  * (#232).  Report unavailable so libvfs stays on the Mach data path. */
 kern_return_t
