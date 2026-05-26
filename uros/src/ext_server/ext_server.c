@@ -865,11 +865,44 @@ static int
 ext_pager_read_page(void *state, uint64_t file_id,
                     uint64_t off, void *buf, unsigned int len)
 {
-	(void)state; (void)file_id; (void)off;
-	/* Phase B stub: zero-fill so the kernel's data_supply path has
-	 * something defined to map; the mapping reads as all-zeroes
-	 * until Phase C wires the real ext2 read path. */
-	memset(buf, 0, len);
+	fs_private_t priv = (fs_private_t)(uintptr_t)file_id;
+	size_t fsize;
+	unsigned int to_read;
+	int rc;
+
+	(void)state;
+
+	if (priv == NULL || buf == NULL || len == 0)
+		return -EINVAL;
+
+	fsize = ext2fs_file_size(priv);
+
+	/* Wholly past EOF — return a zero page; the kernel will see a
+	 * legitimate, all-zero page above the file size (Linux & POSIX
+	 * mmap semantics: faulting in the page past the rounded-up file
+	 * length yields zeros, not SIGBUS, when the page is partially
+	 * within the file). */
+	if ((uint64_t)off >= fsize) {
+		memset(buf, 0, len);
+		return 0;
+	}
+
+	to_read = len;
+	if ((uint64_t)off + to_read > fsize)
+		to_read = (unsigned int)(fsize - off);
+
+	rc = ext2fs_read_file(priv,
+	                      (vm_offset_t)off,
+	                      (vm_offset_t)buf,
+	                      (vm_size_t)to_read);
+	if (rc != 0)
+		return -EIO;
+
+	/* Final page that straddles EOF: zero the tail so the user task
+	 * never sees stale memory beyond the file's logical end. */
+	if (to_read < len)
+		memset((char *)buf + to_read, 0, len - to_read);
+
 	return 0;
 }
 
@@ -886,9 +919,18 @@ ext_pager_file_size(void *state, uint64_t file_id)
 static void
 ext_pager_close_file(void *state, uint64_t file_id)
 {
-	(void)state; (void)file_id;
-	/* Phase D may release a per-file pager cache here; nothing to
-	 * do in Phase B since fs_pager_create owns the only state. */
+	struct ext2fs_file *fp = (struct ext2fs_file *)(uintptr_t)file_id;
+
+	(void)state;
+
+	/* The pager owns this clone (vfs_mmap copies the open-file slot's
+	 * ext2fs_file into a heap allocation when it creates the pager;
+	 * see the comment there).  No one else holds a reference to it
+	 * once memory_object_terminate has fired, so freeing here is
+	 * safe.  Belt-and-braces NULL check in case a future caller
+	 * passes 0. */
+	if (fp != NULL)
+		free(fp);
 }
 
 static const struct fs_pager_ops ext_pager_ops = {
@@ -913,13 +955,34 @@ vfs_mmap(mach_port_t fs_port, vfs_u64_t handle,
 		*out_mem_obj = MACH_PORT_NULL;
 		return KERN_FAILURE;
 	}
+
+	/* The pager's lifetime is decoupled from the open fd's: POSIX
+	 * allows close(fd) right after mmap, the mapping (and therefore
+	 * the pager) lives on until the last task unmaps it.  We can't
+	 * point the pager at vfs_priv_for_handle's slot — that gets
+	 * reused as soon as the client closes the fd, and the next
+	 * data_request would walk freed metadata (cr2=0x18 inside
+	 * ext2_blkoff, seen during Phase C bringup).  Clone the
+	 * ext2fs_file into a heap allocation the pager owns end-to-end
+	 * and free in ext_pager_close_file when the kernel sends the
+	 * final memory_object_terminate. */
+	{
+		struct ext2fs_file *clone = malloc(sizeof(*clone));
+		if (clone == NULL) {
+			*out_mem_obj = MACH_PORT_NULL;
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		ext2fs_clone_file(clone, (const struct ext2fs_file *)priv);
+		priv = (fs_private_t)clone;
+	}
+
 	/* Encode the per-file state pointer as file_id so the callbacks
 	 * (which receive only file_id, no per-call mount context) can
-	 * recover it via cast.  Stable for the lifetime of the open
-	 * handle; libfspager calls close_file before any further use. */
+	 * recover it via cast.  Stable for the lifetime of the pager. */
 	mem_obj = fs_pager_create((uint64_t)(uintptr_t)priv,
 	                          &ext_pager_ops, NULL);
 	if (mem_obj == MACH_PORT_NULL) {
+		free((void *)priv);   /* drop the clone we just allocated */
 		*out_mem_obj = MACH_PORT_NULL;
 		return KERN_FAILURE;
 	}
