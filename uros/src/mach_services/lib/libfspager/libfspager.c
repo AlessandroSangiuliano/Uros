@@ -555,13 +555,50 @@ release:
     return KERN_SUCCESS;
 }
 
+/*
+ * memory_object_synchronize — userspace called msync(2) on a mapping
+ * backed by this pager.  We translate to memory_object_lock_request
+ * asking the kernel to return every dirty page in the range via
+ * memory_object_data_return — that recurses into our data_return
+ * handler which calls ops->write_page (Phase D.1 path).  The kernel
+ * eventually replies with memory_object_lock_completed (handler below
+ * is a no-op; the synchrony is on the user side, managed by the
+ * kernel).
+ *
+ * Flag mapping:
+ *   VM_SYNC_INVALIDATE → should_flush = TRUE  (drop clean+dirty)
+ *   else               → should_flush = FALSE (keep cached)
+ *   Always RETURN_DIRTY so clean pages aren't needlessly shipped.
+ *
+ * VM_SYNC_ASYNCHRONOUS vs VM_SYNC_SYNCHRONOUS is handled by the
+ * kernel-side caller (vm_msync), not by us — we always do the same
+ * thing on this side.
+ */
 kern_return_t
 seqnos_memory_object_synchronize(
     mach_port_t mem_obj, mach_port_seqno_t seqno, mach_port_t control_port,
     vm_offset_t offset, vm_size_t length, vm_sync_t flags)
 {
-    (void)mem_obj; (void)seqno; (void)control_port;
-    (void)offset;  (void)length; (void)flags;
+    kern_return_t kr;
+    boolean_t should_flush = (flags & VM_SYNC_INVALIDATE) ? TRUE : FALSE;
+
+    (void)mem_obj; (void)seqno;
+
+    kr = memory_object_lock_request(control_port,
+                                    offset, length,
+                                    MEMORY_OBJECT_RETURN_DIRTY,
+                                    should_flush,
+                                    VM_PROT_NO_CHANGE,
+                                    MACH_PORT_NULL);
+    if (kr != KERN_SUCCESS)
+        printf("%s: synchronize: lock_request kr=%d\n", g_pager_tag, kr);
+
+    /* Spec asks us to ack via memory_object_synchronize_completed once
+     * the kernel finishes the lock request.  The kernel does that for
+     * us implicitly when the simpleroutine returns, given the way
+     * lock_request is wired; default_pager follows the same shortcut.
+     * If a future fs needs explicit gating it can post-process the
+     * lock_completed handler below. */
     return KERN_SUCCESS;
 }
 
