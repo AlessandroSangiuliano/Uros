@@ -232,12 +232,16 @@ char_tty_read(mach_port_t char_port,
 kern_return_t
 char_tty_write(mach_port_t char_port,
 	       char *cap, mach_msg_type_number_t cap_count,
-	       uint32_t dev_id,
-	       char *buf, mach_msg_type_number_t buf_count)
+	       uint32_t dev_id, int caller_pid,
+	       char *buf, mach_msg_type_number_t buf_count,
+	       int *result)
 {
 	struct char_device_entry *dev;
+	int jc;
 
 	(void)char_port;
+
+	*result = CHR_ERR_INVAL;
 
 	dev = char_core_dev_lookup((char_dev_id_t)dev_id);
 	if (dev == NULL)
@@ -248,9 +252,47 @@ char_tty_write(mach_port_t char_port,
 				(uint64_t)dev_id) != 0)
 		return KERN_PROTECTION_FAILURE;
 
-	if (dev->module->tty_write == NULL)
+	/* TOSTOP gates the bg-write policy.  When it's off, writes from
+	 * bg pgrps pass through unmodified (Linux/BSD default). */
+	if (dev->tty_tostop) {
+		jc = tty_jobctl_check(dev, caller_pid, PROC_SIGTTOU);
+		if (jc == CHR_TTY_BACKGROUND) {
+			*result = CHR_TTY_BACKGROUND;
+			return KERN_SUCCESS;
+		}
+	}
+
+	if (dev->module->tty_write == NULL) {
+		*result = CHR_ERR_NO_MODULE;
 		return KERN_FAILURE;
+	}
 	(void)dev->module->tty_write(dev->priv, buf, (size_t)buf_count);
+	*result = CHR_OK;
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+char_tty_set_tostop(mach_port_t char_port,
+		    char *cap, mach_msg_type_number_t cap_count,
+		    uint32_t dev_id, int enable, int *result)
+{
+	struct char_device_entry *dev;
+
+	(void)char_port;
+
+	*result = CHR_ERR_INVAL;
+
+	dev = char_core_dev_lookup((char_dev_id_t)dev_id);
+	if (dev == NULL)
+		return KERN_INVALID_ARGUMENT;
+	if (dev->info.class != CHAR_CLASS_TTY)
+		return KERN_INVALID_ARGUMENT;
+	if (char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_CONFIG,
+				(uint64_t)dev_id) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	dev->tty_tostop = (enable != 0);
+	*result = CHR_OK;
 	return KERN_SUCCESS;
 }
 

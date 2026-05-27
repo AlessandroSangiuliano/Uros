@@ -37,6 +37,14 @@ struct char_device_entry {
 	 * and the caller's pgrp against proc_tcgetpgrp(sid).
 	 */
 	int				ctty_sid;
+	/*
+	 * POSIX TOSTOP flag (#275.3).  When non-zero, a background-pgrp
+	 * caller that tries to tty_write gets SIGTTOU instead of bytes;
+	 * the foreground pgrp writes unmodified.  Default 0 (BSD/Linux
+	 * default) — the shell flips it on per-session when it cares.
+	 * Only meaningful for CHAR_CLASS_TTY entries.
+	 */
+	int				tty_tostop;
 };
 
 /* ============================================================
