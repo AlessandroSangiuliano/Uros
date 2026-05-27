@@ -47,7 +47,7 @@ FRESH_DISK=false    # --fresh-disk: regen disk.img before launch (avoids stale
 BENCH_ARGS=""
 EXTRA_ARGS=""
 MINIMAL_ARG=""
-NO_REBOOT="$NO_REBOOT"
+NO_REBOOT="-no-reboot"
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; USE_AHCI=false; shift ;;
