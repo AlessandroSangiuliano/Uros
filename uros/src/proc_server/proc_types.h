@@ -22,9 +22,9 @@
 /* ------------------------------------------------------------------ */
 
 #define PROC_SERVER_VERSION_MAJOR    0
-#define PROC_SERVER_VERSION_MINOR    4
+#define PROC_SERVER_VERSION_MINOR    5
 #define PROC_SERVER_VERSION_PATCH    0
-#define PROC_SERVER_VERSION_STRING   "0.4.0"
+#define PROC_SERVER_VERSION_STRING   "0.5.0"
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -100,6 +100,13 @@ typedef struct proc_exit_msg {
 #define PROC_ERR_PERM        -8   /* setsid on pgrp leader, etc. (POSIX EPERM) */
 #define PROC_ERR_DIFF_SESS   -9   /* setpgid target pgrp in different session */
 #define PROC_ERR_NO_CTTY    -10   /* session has no controlling tty (POSIX ENOTTY) */
+
+/* ------------------------------------------------------------------ */
+/*  System shutdown / reboot (v0.5.0 / #281)                           */
+/* ------------------------------------------------------------------ */
+
+#define PROC_SHUTDOWN_HALT       0   /* power off (host_reboot HOST_REBOOT_HALT) */
+#define PROC_SHUTDOWN_REBOOT     1   /* restart  (host_reboot options=0)        */
 
 /* ------------------------------------------------------------------ */
 /*  Signals (v0.2.0 / #238)                                            */

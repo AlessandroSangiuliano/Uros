@@ -47,6 +47,7 @@ FRESH_DISK=false    # --fresh-disk: regen disk.img before launch (avoids stale
 BENCH_ARGS=""
 EXTRA_ARGS=""
 MINIMAL_ARG=""
+NO_REBOOT="-no-reboot"
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; USE_AHCI=false; shift ;;
@@ -57,6 +58,7 @@ while [ $# -gt 0 ]; do
         --sha-ni) USE_SHA_NI=true; shift ;;
         --fresh-disk) FRESH_DISK=true; shift ;;
         --minimal) MINIMAL_ARG="--minimal"; FRESH_DISK=true; shift ;;
+        --allow-reboot) NO_REBOOT=""; shift ;;
         --bench)
             shift
             while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
@@ -124,10 +126,10 @@ fi
 # the host CPU (or KVM-restricted CPUID) doesn't expose it.  TCG is
 # slower than KVM but produces correct architectural behaviour.
 if [ "$USE_SHA_NI" = true ]; then
-    QEMU_ARGS="-m 512M -accel tcg -cpu Icelake-Server,+sha-ni -kernel $KERNEL -initrd $INITRD -no-reboot"
+    QEMU_ARGS="-m 512M -accel tcg -cpu Icelake-Server,+sha-ni -kernel $KERNEL -initrd $INITRD $NO_REBOOT"
     echo "Acceleration: TCG (--sha-ni: Icelake-Server,+sha-ni)"
 else
-    QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $INITRD -no-reboot"
+    QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $INITRD $NO_REBOOT"
 fi
 
 # Issue #224: stage-2 e default_pager girano interamente su AHCI; il

@@ -46,6 +46,9 @@ extern void mach_print(const char *);
 
 #include "char_server.h"        /* MIG: char_* user stubs */
 #include <char/char_types.h>    /* struct char_device_info + CHAR_CLASS_* */
+#include "proc.h"               /* MIG: proc_shutdown */
+#include "proc_types.h"         /* PROC_SHUTDOWN_HALT / _REBOOT */
+extern mach_port_t __uros_proc_port;
 
 /* From libposix-uros — we want the canonical pid. */
 extern unsigned int __uros_my_pid;
@@ -313,6 +316,32 @@ main(int argc, char **argv)
 
         if (strcmp(parts[0], "exit") == 0 || strcmp(parts[0], "quit") == 0)
             break;
+
+        if (strcmp(parts[0], "shutdown") == 0 ||
+            strcmp(parts[0], "halt")     == 0 ||
+            strcmp(parts[0], "poweroff") == 0 ||
+            strcmp(parts[0], "reboot")   == 0 ||
+            strcmp(parts[0], "restart")  == 0) {
+            int reboot = (strcmp(parts[0], "reboot") == 0 ||
+                          strcmp(parts[0], "restart") == 0);
+            int rc = 0;
+            kern_return_t kr;
+
+            printf("ush: requesting %s...\n", reboot ? "reboot" : "shutdown");
+            if (__uros_proc_port == MACH_PORT_NULL) {
+                printf("ush: proc_server unavailable\n");
+                continue;
+            }
+            kr = proc_shutdown(__uros_proc_port,
+                               reboot ? PROC_SHUTDOWN_REBOOT
+                                      : PROC_SHUTDOWN_HALT,
+                               &rc);
+            /* On success host_reboot does not return; reaching here is
+             * itself the error path. */
+            printf("ush: proc_shutdown returned kr=%d rc=%d\n",
+                   (int)kr, rc);
+            continue;
+        }
 
         if (parts[0][0] != '/') {
             printf("ush: only absolute paths supported (got \"%s\")\n",
