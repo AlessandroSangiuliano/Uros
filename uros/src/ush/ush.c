@@ -196,7 +196,13 @@ read_line(char *buf, size_t cap_)
             (void)write(tty_fd, "\r\n", 2);
             break;
         }
-        /* No backspace handling — kept minimal for v0.1. */
+        if (ch == 0x7f || ch == 0x08) {     /* DEL / BS — quick win */
+            if (i > 0) {
+                i--;
+                (void)write(tty_fd, "\b \b", 3);
+            }
+            continue;
+        }
         buf[i++] = ch;
         (void)write(tty_fd, &ch, 1);   /* local echo */
     }

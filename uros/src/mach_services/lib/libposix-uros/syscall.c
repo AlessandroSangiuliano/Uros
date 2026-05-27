@@ -36,6 +36,24 @@ static void trace_syscall(long n)
 }
 #endif
 
+/*
+ * #279 workaround — Uros' all_intrs path in the kernel saves only ds/es
+ * and overwrites %gs with CPU_DATA without ever restoring user's TLS
+ * selector.  Any IRQ that fires while we're running with %gs=0x27 thus
+ * leaks 0x48 (or worse, leaves %gs at the kernel value visible to user
+ * code as soon as the kernel pops the trap frame).  Until the kernel
+ * push/pop layout is widened to include %gs/%fs without disturbing the
+ * I_EFL/I_CS offsets, force a TLS reload on every syscall return.
+ *
+ * All pthreads in libposix-uros land on the same LDT slot (4 -> 0x27),
+ * so unconditionally restoring 0x27 is safe regardless of which thread
+ * came in.
+ */
+static inline void __uros_restore_gs(void)
+{
+    __asm__ __volatile__("movw %w0, %%gs" :: "r"(0x27));
+}
+
 static long __dispatch(long n,
                        long a1, long a2, long a3,
                        long a4, long a5, long a6)
@@ -44,9 +62,13 @@ static long __dispatch(long n,
     trace_syscall(n);
 #endif
     __uros_handler_t h = __uros_lookup(n);
-    if (!h)
+    if (!h) {
+        __uros_restore_gs();
         return -ENOSYS;
-    return h(a1, a2, a3, a4, a5, a6);
+    }
+    long r = h(a1, a2, a3, a4, a5, a6);
+    __uros_restore_gs();
+    return r;
 }
 
 long __uros_syscall0(long n)
