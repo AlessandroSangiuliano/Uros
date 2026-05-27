@@ -29,6 +29,8 @@
 #include <mach/notify.h>
 #include <mach/mach_interface.h>
 #include <mach/task_info.h>
+#include <mach/host_reboot.h>
+#include <mach/mach_host.h>    /* host_reboot user stub */
 #include <sa_mach.h>
 #include <pthread.h>
 #include <servers/netname.h>
@@ -944,6 +946,58 @@ proc_S_tcgetpgrp(
     pthread_mutex_unlock(&pid_lock);
 
     *result = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* proc_S_shutdown — bring the system down via host_reboot (#281).    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * v0.5.0 minimum: relay host_reboot to the kernel using our master
+ * host port (received from bootstrap_ports at startup).  Full drain
+ * (SIGTERM sweep + vfs sync) is a follow-up tracked in #281 — for
+ * now the kernel's halt_all_cpus path already shuts processors
+ * cleanly, which is good enough to stop hammering QEMU.
+ *
+ * On success this call does not return: host_reboot halts/resets the
+ * machine before the reply marshalls.  Callers should treat any reply
+ * as a failure.
+ */
+kern_return_t
+proc_S_shutdown(
+    mach_port_t                 server_port,
+    int                         mode,
+    int                         *result)
+{
+    int options;
+    kern_return_t kr;
+
+    (void)server_port;
+
+    switch (mode) {
+    case PROC_SHUTDOWN_HALT:
+        options = HOST_REBOOT_HALT;
+        printf("proc: shutdown — host_reboot(HALT)\n");
+        break;
+    case PROC_SHUTDOWN_REBOOT:
+        options = 0;
+        printf("proc: shutdown — host_reboot(REBOOT)\n");
+        break;
+    default:
+        *result = PROC_ERR_INVAL;
+        return KERN_SUCCESS;
+    }
+
+    /* TODO(#281): SIGTERM sweep with a short grace window, then
+     * SIGKILL, then walk the mount registry asking each fs server
+     * to flush and unmount.  v0.5.0 ships the unconditional reboot
+     * so the operator at least has a non-destructive way out of QEMU. */
+
+    kr = host_reboot(host_port, options);
+    /* host_reboot does not return on success.  Report failure if it
+     * somehow does. */
+    *result = (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
     return KERN_SUCCESS;
 }
 

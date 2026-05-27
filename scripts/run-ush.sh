@@ -40,4 +40,4 @@ EXTRA="-display none -serial mon:stdio"
 if [ -n "$LOGFILE" ]; then
     EXTRA="$EXTRA -D $LOGFILE"
 fi
-exec "$SCRIPT_DIR/run-qemu.sh" --minimal $EXTRA
+exec "$SCRIPT_DIR/run-qemu.sh" --minimal --allow-reboot $EXTRA
