@@ -127,5 +127,15 @@ void
 mig_reset_after_fork(void)
 {
 	mig_reply_port = MACH_PORT_NULL;
+	/*
+	 * mach_task_self() in <mach_init.h> is a macro that expands to the
+	 * cached global, so `mach_task_self_ = mach_task_self()` would be a
+	 * no-op.  Undef before invoking so the real trap stub runs and
+	 * returns a port name valid in the child's IPC space — without
+	 * this the child kept the parent's stale name, which exec_load
+	 * passed to task_create and the kernel rejected as IKOT_ACT (#269).
+	 */
+#undef mach_task_self
+	extern mach_port_t mach_task_self(void);
 	mach_task_self_ = mach_task_self();
 }
