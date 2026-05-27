@@ -189,6 +189,8 @@ uart_notify_subscribers(struct uart_priv *p)
  * — see device_master.c #206 fix).
  * ============================================================ */
 
+extern void mach_print(const char *);
+
 static void
 uart_irq_handler(void *arg)
 {
@@ -196,6 +198,7 @@ uart_irq_handler(void *arg)
 	unsigned int budget;
 	int got_any = 0;
 
+	mach_print("uart: IRQ fired\n");
 	for (budget = 0; budget < 64u; budget++) {
 		uint8_t lsr = uart_in(UART_LSR);
 		if ((lsr & LSR_DR) == 0)
@@ -344,6 +347,14 @@ uart_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
 		buf[n++] = (char)p->ring[p->ring_tail];
 		p->ring_tail = (p->ring_tail + 1u) & UART_RING_MASK;
 	}
+
+	/* Polled fallback: if the IRQ path is not delivering for some
+	 * reason (PIC, QEMU model, etc.), still drain RHR directly so
+	 * input keeps moving.  Cheap because called only on syscall. */
+	while (n < max && (uart_in(UART_LSR) & LSR_DR)) {
+		buf[n++] = (char)uart_in(UART_RHR);
+	}
+
 	*out_len = n;
 	return 0;
 }

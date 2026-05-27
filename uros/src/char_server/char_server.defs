@@ -73,25 +73,57 @@ routine kbd_subscribe(
 
 /*
  * tty_read — block until at least one byte is available, return up
- * to `max` bytes.  `len` is the actual number returned.
+ * to `max` bytes.  `buf` length is the actual number returned.
+ *
+ * Job-control (#275.2): `caller_pid` is the POSIX pid of the calling
+ * process.  If the caller's session owns this tty as ctty AND the
+ * caller's pgrp is not the foreground pgrp, char_server sends SIGTTIN
+ * to the calling pgrp via proc_killpg and returns CHR_TTY_BACKGROUND
+ * with buf empty.  caller_pid == 0 means "skip job-control check"
+ * (debug / privileged readers).
  */
 routine tty_read(
 		char_port	: mach_port_t;
 	in	cap		: chr_token_t;
 	in	dev_id		: chr_u32_t;
+	in	caller_pid	: int;
 	in	max		: chr_u32_t;
-	out	buf		: chr_buf_t);
+	out	buf		: chr_buf_t;
+	out	result		: int);
 
 /*
- * tty_write — fire-and-forget byte stream out to the UART.
- * simpleroutine: producer never blocks on serial speed (the module
- * absorbs the wait or drops on flow-control timeout).
+ * tty_write — byte stream out to the UART.  Job-control: with TOSTOP
+ * on (see tty_set_tostop), a background-pgrp caller gets SIGTTOU and
+ * CHR_TTY_BACKGROUND instead of bytes on the wire (#275.3).  Without
+ * TOSTOP — the BSD/Linux default — background writes pass through.
+ *
+ * Demoted from simpleroutine in #275.3 because the caller needs to
+ * see the result code (otherwise it cannot tell a TOSTOP-suppressed
+ * write from a successful one and would not know when to call
+ * pthread_kill / signal-wait for SIGTTOU delivery).  Today the only
+ * caller path is uart.so which never blocks, so the synchronous
+ * reply is essentially free.
  */
-simpleroutine tty_write(
+routine tty_write(
 		char_port	: mach_port_t;
 	in	cap		: chr_token_t;
 	in	dev_id		: chr_u32_t;
-	in	buf		: chr_buf_t);
+	in	caller_pid	: int;
+	in	buf		: chr_buf_t;
+	out	result		: int);
+
+/*
+ * tty_set_tostop — toggle the per-device TOSTOP flag (#275.3).  The
+ * shell flips it on for its session's ctty when it cares about
+ * background writes interleaving with foreground prompt output.
+ * Cap-gated on CHAR_CAP_TTY_CONFIG (same level as tty_set_attr).
+ */
+routine tty_set_tostop(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	enable		: int;
+	out	result		: int);
 
 /*
  * tty_set_attr — line discipline params.  Cap-gated on
@@ -119,6 +151,49 @@ routine tty_subscribe(
 	in	cap		: chr_token_t;
 	in	dev_id		: chr_u32_t;
 	in	notify_port	: mach_port_t);
+
+/*
+ * tty_get_ctty — given a session id, return the dev_id of the tty
+ * the session bound as its controlling terminal via tty_acquire_ctty.
+ * Pure introspection — no cap_check, the result is just the integer
+ * dev_id; the actual read/write of the device still goes through the
+ * normal cap path (or the session-member exception, see char_mig.c).
+ *
+ * Used by libposix-uros's open("/dev/tty") implementation (#275.4-bis):
+ * 1. caller asks proc_server proc_getsid(pid) -> sid
+ * 2. caller asks char_server tty_get_ctty(sid) -> dev_id
+ * 3. caller installs a tty fd that routes read/write to char_server
+ *    with this dev_id.
+ *
+ * Returns CHR_OK with `dev_id` filled when the session owns a ctty,
+ * CHR_ERR_INVAL with dev_id=0 when it does not.
+ */
+routine tty_get_ctty(
+		char_port	: mach_port_t;
+	in	sid		: int;
+	out	dev_id		: chr_u32_t;
+	out	result		: int);
+
+/*
+ * tty_acquire_ctty — the session leader claims this tty as the
+ * controlling terminal for its session (#247 driver side, #275.1).
+ * char_server forwards to proc_set_ctty(sid, tty_port) on the
+ * proc_server, where tty_port is a fresh send right to char_server's
+ * service port (proc_server keeps it for the lifetime of the ctty —
+ * future signal delivery / TIOCNOTTY routes through it).
+ *
+ * Cap-gated on CHAR_CAP_TTY_RW (no separate CTTY op for v0.1 — the
+ * read/write cap already implies the right to bind the session).
+ * `result` carries the proc_server PROC_OK / PROC_ERR_* code so the
+ * libposix-uros wrapper can map it to POSIX errno (EPERM if the
+ * session already owns a controlling tty, etc.).
+ */
+routine tty_acquire_ctty(
+		char_port	: mach_port_t;
+	in	cap		: chr_token_t;
+	in	dev_id		: chr_u32_t;
+	in	sid		: int;
+	out	result		: int);
 
 /* =================================================================
  * Mouse plane (#215 — ps2_mouse.so)

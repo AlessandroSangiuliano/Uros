@@ -27,9 +27,37 @@
 #include <mach/vm_inherit.h>
 #include "mach_port.h"          /* MIG: mach_port_deallocate */
 #include "mach.h"               /* MIG: vm_map */
+#include <servers/netname.h>    /* netname_look_up */
+#include "proc.h"               /* proc_getsid */
+#include "char_server.h"        /* char_tty_get_ctty/read/write/set_tostop */
+extern boolean_t swtch_pri(int pri); /* mach kernel trap — voluntary yield */
 
 /* Console write sink — same SYSENTER trap handlers.c reaches for. */
 extern void mach_print(const char *);
+
+/* From signals.c: proc_server send right + caller's pid. */
+extern mach_port_t  __uros_proc_port;
+extern unsigned int __uros_my_pid;
+
+/* char_server send right — resolved lazily via netname on first /dev/tty
+ * open.  Shared with the tty fd I/O path below. */
+static mach_port_t      uros_char_port = MACH_PORT_NULL;
+static pthread_mutex_t  char_port_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static mach_port_t char_port_resolve(void)
+{
+    mach_port_t got;
+
+    pthread_mutex_lock(&char_port_lock);
+    if (uros_char_port == MACH_PORT_NULL && name_server_port != MACH_PORT_NULL) {
+        char host[80] = "";
+        char serv[80] = "char";
+        (void)netname_look_up(name_server_port, host, serv, &uros_char_port);
+    }
+    got = uros_char_port;
+    pthread_mutex_unlock(&char_port_lock);
+    return got;
+}
 
 /* ------------------------------------------------------------------ */
 /*  Linux i386 O_* flags (musl passes these straight through)          */
@@ -70,8 +98,10 @@ extern void mach_print(const char *);
 struct posix_fd {
     int       in_use;
     int       is_console;   /* 0/1/2 — routed to mach_print, never vfs */
+    int       is_tty;       /* /dev/tty — routed to char_server (#275.4-bis) */
     int       cloexec;      /* close on execve */
-    vfs_fd_t  vfd;          /* underlying libvfs fd (-1 for console) */
+    vfs_fd_t  vfd;          /* underlying libvfs fd (-1 for console/tty) */
+    unsigned  tty_dev_id;   /* char_server dev_id for is_tty fds */
 };
 
 static struct posix_fd  pfds[POSIX_OPEN_MAX];
@@ -156,6 +186,58 @@ static void console_write(const char *p, size_t n)
 /*  Public handlers (called from handlers.c dispatch table)            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * /dev/tty open path (#275.4-bis): resolve the caller's session, ask
+ * char_server which dev_id is bound as ctty, allocate a tty-kind fd.
+ * Returns -ENOTTY when the session has no controlling tty (matches
+ * Linux open("/dev/tty") for a session leader without one).
+ */
+static long open_dev_tty(int flags)
+{
+    if (__uros_proc_port == 0 || __uros_my_pid == 0)
+        return -ENOTTY;
+
+    mach_port_t cport = char_port_resolve();
+    if (cport == MACH_PORT_NULL)
+        return -ENOTTY;
+
+    /* Caller's sid via proc_server. */
+    unsigned int sid = 0;
+    int rc = 0;
+    if (proc_getsid(__uros_proc_port, __uros_my_pid, &sid, &rc) != 0
+        || rc != 0)
+        return -ENOTTY;
+
+    /* Session's ctty dev_id via char_server. */
+    unsigned int dev_id = 0;
+    int cres = 0;
+    if (char_tty_get_ctty(cport, (int)sid, &dev_id, &cres) != 0
+        || cres != 0 || dev_id == 0)
+        return -ENOTTY;
+
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    int fd = pfd_alloc_locked();
+    if (fd < 0) {
+        pthread_mutex_unlock(&pfd_lock);
+        return -EMFILE;
+    }
+    pfds[fd].in_use     = 1;
+    pfds[fd].is_console = 0;
+    pfds[fd].is_tty     = 1;
+    pfds[fd].cloexec    = (flags & LX_O_CLOEXEC) ? 1 : 0;
+    pfds[fd].vfd        = VFS_FD_INVALID;
+    pfds[fd].tty_dev_id = dev_id;
+    pthread_mutex_unlock(&pfd_lock);
+    return fd;
+}
+
+static int path_eq(const char *p, const char *s)
+{
+    while (*p && *s && *p == *s) { p++; s++; }
+    return *p == 0 && *s == 0;
+}
+
 long __uros_open(const char *path, int flags, int mode)
 {
     if (!path)
@@ -163,6 +245,10 @@ long __uros_open(const char *path, int flags, int mode)
     /* No cwd yet: only absolute paths resolve through libvfs. */
     if (path[0] != '/')
         return -ENOENT;
+
+    /* /dev/tty — magic per-session ctty device (#275.4-bis). */
+    if (path_eq(path, "/dev/tty"))
+        return open_dev_tty(flags);
 
     vfs_fd_t vfd = vfs_open(path, xlate_open_flags(flags), mode);
     if (vfd == VFS_FD_INVALID)
@@ -178,8 +264,10 @@ long __uros_open(const char *path, int flags, int mode)
     }
     pfds[fd].in_use     = 1;
     pfds[fd].is_console = 0;
+    pfds[fd].is_tty     = 0;
     pfds[fd].cloexec    = (flags & LX_O_CLOEXEC) ? 1 : 0;
     pfds[fd].vfd        = vfd;
+    pfds[fd].tty_dev_id = 0;
     pthread_mutex_unlock(&pfd_lock);
     return fd;
 }
@@ -221,12 +309,29 @@ static vfs_fd_t resolve_fd(int fd, int *err)
     pthread_mutex_lock(&pfd_lock);
     pfd_init_locked();
     if (!pfds[fd].in_use) { pthread_mutex_unlock(&pfd_lock); *err = -EBADF; return -1; }
-    int console = pfds[fd].is_console;
+    int special = pfds[fd].is_console || pfds[fd].is_tty;
     vfs_fd_t vfd = pfds[fd].vfd;
     pthread_mutex_unlock(&pfd_lock);
-    if (console)
-        return -2;
+    if (special)
+        return -2;     /* caller distinguishes console vs tty via tty_fd_snapshot */
     return vfd;
+}
+
+/* Snapshot a tty-kind fd's (char_port, dev_id) under the lock.
+ * Returns 0 on success, -EBADF if fd is invalid, -ENOTTY if not a tty. */
+static int tty_fd_snapshot(int fd, mach_port_t *port, unsigned *dev_id)
+{
+    if (fd < 0 || fd >= POSIX_OPEN_MAX) return -EBADF;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    if (!pfds[fd].in_use) { pthread_mutex_unlock(&pfd_lock); return -EBADF; }
+    int tty = pfds[fd].is_tty;
+    unsigned id = pfds[fd].tty_dev_id;
+    pthread_mutex_unlock(&pfd_lock);
+    if (!tty) return -ENOTTY;
+    *port   = char_port_resolve();
+    *dev_id = id;
+    return (*port == MACH_PORT_NULL) ? -EIO : 0;
 }
 
 long __uros_read(int fd, void *buf, size_t count)
@@ -234,8 +339,41 @@ long __uros_read(int fd, void *buf, size_t count)
     int err;
     vfs_fd_t vfd = resolve_fd(fd, &err);
     if (err) return err;
-    if (vfd == -2)                    /* console: nothing to read yet */
-        return 0;
+    if (vfd == -2) {
+        /* fds 0/1/2 or /dev/tty: distinguish via is_tty. */
+        mach_port_t cport;
+        unsigned    dev_id;
+        if (tty_fd_snapshot(fd, &cport, &dev_id) == 0) {
+            char     cap[256] = { 0 };    /* MIG chr_token_t; session-owner bypass uses count=0 */
+            char     rbuf[4096];
+            unsigned int rlen = sizeof(rbuf);
+            int      cres = 0;
+            unsigned int want = count > sizeof(rbuf)
+                                ? sizeof(rbuf) : (unsigned)count;
+            /* Block until data is available — uart.so drains its IRQ
+             * ring into the RPC buf; if the ring is empty we yield and
+             * retry instead of busy-spinning the demux thread.  No
+             * O_NONBLOCK support yet (v0.1 ush doesn't need it). */
+            for (;;) {
+                rlen = sizeof(rbuf);
+                if (char_tty_read(cport, cap, 0, dev_id,
+                                  (int)__uros_my_pid,
+                                  want, rbuf, &rlen, &cres) != 0)
+                    return -EIO;
+                if (cres == -1)           /* CHR_TTY_BACKGROUND */
+                    return -EINTR;
+                if (cres != 0)
+                    return -EIO;
+                if (rlen > 0)
+                    break;
+                (void)swtch_pri(0);
+            }
+            if (rlen > count) rlen = count;
+            if (rlen) memcpy(buf, rbuf, rlen);
+            return (long)rlen;
+        }
+        return 0;                          /* plain console: no input */
+    }
     ssize_t n = vfs_read(vfd, buf, count);
     return n < 0 ? -EIO : (long)n;
 }
@@ -245,7 +383,25 @@ long __uros_write(int fd, const void *buf, size_t count)
     int err;
     vfs_fd_t vfd = resolve_fd(fd, &err);
     if (err) return err;
-    if (vfd == -2) {                  /* console */
+    if (vfd == -2) {
+        mach_port_t cport;
+        unsigned    dev_id;
+        if (tty_fd_snapshot(fd, &cport, &dev_id) == 0) {
+            char     cap[256] = { 0 };
+            char     wbuf[4096];
+            int      cres = 0;
+            unsigned int want = count > sizeof(wbuf)
+                                ? sizeof(wbuf) : (unsigned)count;
+            if (want) memcpy(wbuf, buf, want);
+            if (char_tty_write(cport, cap, 0, dev_id, (int)__uros_my_pid,
+                               wbuf, want, &cres) != 0)
+                return -EIO;
+            if (cres == -1)               /* CHR_TTY_BACKGROUND (TOSTOP) */
+                return -EINTR;
+            if (cres != 0)
+                return -EIO;
+            return (long)want;
+        }
         if (count) console_write((const char *)buf, count);
         return (long)count;
     }
@@ -294,14 +450,19 @@ long __uros_close(int fd)
     pfd_init_locked();
     if (!pfds[fd].in_use) { pthread_mutex_unlock(&pfd_lock); return -EBADF; }
     int console = pfds[fd].is_console;
+    int tty     = pfds[fd].is_tty;
     vfs_fd_t vfd = pfds[fd].vfd;
     if (!console) {
-        pfds[fd].in_use = 0;
-        pfds[fd].vfd    = VFS_FD_INVALID;
+        pfds[fd].in_use     = 0;
+        pfds[fd].is_tty     = 0;
+        pfds[fd].vfd        = VFS_FD_INVALID;
+        pfds[fd].tty_dev_id = 0;
     }
     pthread_mutex_unlock(&pfd_lock);
-    /* Closing a std stream is a no-op here (console stays open). */
-    if (!console)
+    /* Closing a std stream is a no-op (console stays open).  /dev/tty
+     * has no per-open server-side state to release — char_server tracks
+     * subscriptions, not fds — so just dropping the slot is enough. */
+    if (!console && !tty)
         vfs_close(vfd);
     return 0;
 }

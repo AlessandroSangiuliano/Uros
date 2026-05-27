@@ -500,6 +500,19 @@ _doprnt(
 		    capitals=16;	/* Print in upper case */
 		    goto print_unsigned;
 
+		case 'p':
+		    /* Pointer: emit "0x" then the unsigned hex value, zero-
+		     * padded to the host pointer width so columns align. */
+		    truncate = _doprnt_truncates;
+		    base = 16;
+		    if (length == 0) {
+			length = (int)(2 * sizeof(void *));
+			padc   = '0';
+		    }
+		    (*putc)('0');
+		    (*putc)('x');
+		    goto print_unsigned;
+
 		case 'z':
 		    truncate = _doprnt_truncates;
 		    base = 16;

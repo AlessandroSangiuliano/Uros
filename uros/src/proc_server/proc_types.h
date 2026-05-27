@@ -130,6 +130,8 @@ typedef struct proc_exit_msg {
 #define PROC_SIGCONT         18
 #define PROC_SIGSTOP         19   /* cannot be caught/blocked */
 #define PROC_SIGTSTP         20
+#define PROC_SIGTTIN         21   /* bg pgrp read from ctty (#275.2) */
+#define PROC_SIGTTOU         22   /* bg pgrp write to ctty w/ TOSTOP (#275.3) */
 #define PROC_NSIG            32
 
 #define PROC_SIGNAL_MSGID    3298

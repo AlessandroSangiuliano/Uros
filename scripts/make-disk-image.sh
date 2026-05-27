@@ -41,6 +41,7 @@ PART2_START_SECT=280576      # disk0c — raw swap (264192 + 8 MiB) -> ~375 MB
 
 # ipc_bench suite selection (empty = all)
 BENCH_ARGS=""
+MINIMAL=0
 
 # --- Parse argomenti ---
 while [ $# -gt 0 ]; do
@@ -54,11 +55,14 @@ while [ $# -gt 0 ]; do
                 shift
             done
             ;;
+        --minimal) MINIMAL=1; shift ;;
         -h|--help)
-            echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...]"
+            echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...] [--minimal]"
             echo ""
             echo "  --bench suite ...   Passa suite names a ipc_bench"
             echo "                      (syscall intra slow inter port pp ool flipc2 all)"
+            echo "  --minimal           Omit hello_server/ipc_bench/pthread_test/cap_test/"
+            echo "                      gpustat from disk bootstrap.conf (stage-2)"
             exit 0
             ;;
         *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
@@ -97,6 +101,7 @@ GPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpustat"
 EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
 FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
+USH="$BUILD_DIR/export/uros/$ARCH/user/sbin/ush"
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 # #234 Phase 7: dynamic linker + first dynamic binary.  ld-musl-i386.so.1 is
 # the umbrella libc.so; it goes to /lib/ where hello_dyn's PT_INTERP points.
@@ -207,6 +212,13 @@ GPUSTAT_CONF_LINE=""
 if [ -f "$GPUSTAT" ]; then
     GPUSTAT_CONF_LINE="gpustat gpustat"
 fi
+# ush (#275.5): Uros shell.  Needs proc_server + char_server + ext_server
+# up so it can setsid, acquire ctty, and open /dev/tty.  Launched as the
+# last stage-2 task; it will read from the UART for interactive use.
+USH_CONF_LINE=""
+if [ -f "$USH" ]; then
+    USH_CONF_LINE="ush ush"
+fi
 #
 # Issue #184: default_pager ora apre la sua partizione di swap via BDS
 # (cap_request + device_open_cap) anziché via il driver IDE in-kernel.
@@ -219,6 +231,18 @@ GPU_SERVER_CONF_LINE=""
 CHAR_SERVER_CONF_LINE=""
 [ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
 
+if [ "$MINIMAL" = "1" ]; then
+    HELLO_SERVER_LINE=""
+    IPC_BENCH_LINE=""
+    PTHREAD_TEST_LINE=""
+    CAP_TEST_CONF_LINE=""
+    GPUSTAT_CONF_LINE=""
+else
+    HELLO_SERVER_LINE="hello_server hello_server"
+    IPC_BENCH_LINE="ipc_bench ipc_bench${BENCH_ARGS}"
+    PTHREAD_TEST_LINE="pthread_test pthread_test"
+fi
+
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
@@ -227,14 +251,15 @@ ${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
-hello_server hello_server
+${HELLO_SERVER_LINE}
 ext_server ext_server
 ${EXEC_SERVER_CONF_LINE}
 ${PROC_SERVER_CONF_LINE}
-ipc_bench ipc_bench${BENCH_ARGS}
-pthread_test pthread_test
+${IPC_BENCH_LINE}
+${PTHREAD_TEST_LINE}
 ${CAP_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
+${USH_CONF_LINE}
 CONF
 
 # --- Calcoli geometria ---
@@ -351,6 +376,13 @@ if [ -f "$FD_EXEC_TEST" ]; then
     FD_EXEC_TEST_WRITE_LINE="write $FD_EXEC_TEST fd_exec_test"
 fi
 
+# ush is optional (#275.5): copy to /mach_servers/ so bootstrap stage-2
+# can load it as a session-leader after proc_server / char_server.
+USH_WRITE_LINE=""
+if [ -f "$USH" ]; then
+    USH_WRITE_LINE="write $USH ush"
+fi
+
 # hello_dyn (#234 Phase 7): first dynamic binary.  Copy to / and install the
 # interpreter (umbrella libc.so) at /lib/ld-musl-i386.so.1 where its
 # PT_INTERP points.  Both optional (need UROS_BUILD_MUSL).
@@ -394,6 +426,7 @@ ${CAP_TEST_WRITE_LINE}
 ${GPUSTAT_WRITE_LINE}
 ${EXEC_SERVER_WRITE_LINE}
 ${PROC_SERVER_WRITE_LINE}
+${USH_WRITE_LINE}
 mkdir modules
 cd modules
 mkdir block

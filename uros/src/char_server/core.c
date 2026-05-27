@@ -307,7 +307,12 @@ char_core_dispatch_irq(mach_msg_header_t *in)
 {
 	unsigned int i;
 
-	if (in->msgh_id < IRQ_NOTIFY_MSGH_BASE)
+	/* IRQ notifications carry msgh_id == IRQ_NOTIFY_MSGH_BASE + irq.
+	 * Kernel uses irq in 0..15, so anything outside this narrow range
+	 * is a MIG RPC (char_server.defs starts at 4100) and must fall
+	 * through to the regular demux. */
+	if (in->msgh_id < IRQ_NOTIFY_MSGH_BASE ||
+	    in->msgh_id >= IRQ_NOTIFY_MSGH_BASE + 16)
 		return FALSE;
 
 	for (i = 0; i < CHAR_MAX_IRQ; i++) {

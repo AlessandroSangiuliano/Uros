@@ -46,6 +46,7 @@ FRESH_DISK=false    # --fresh-disk: regen disk.img before launch (avoids stale
                     # from previous ungraceful QEMU exit)
 BENCH_ARGS=""
 EXTRA_ARGS=""
+MINIMAL_ARG=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; USE_AHCI=false; shift ;;
@@ -55,6 +56,7 @@ while [ $# -gt 0 ]; do
         --virtio) USE_VIRTIO=true; shift ;;
         --sha-ni) USE_SHA_NI=true; shift ;;
         --fresh-disk) FRESH_DISK=true; shift ;;
+        --minimal) MINIMAL_ARG="--minimal"; FRESH_DISK=true; shift ;;
         --bench)
             shift
             while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
@@ -70,19 +72,19 @@ done
 # or if --fresh-disk was explicitly requested.  --bench implies fresh.
 if [ -n "$BENCH_ARGS" ]; then
     echo "Bench suites:$BENCH_ARGS"
-    "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS
+    "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
 elif [ "$FRESH_DISK" = true ]; then
-    echo "Regenerating disk image (--fresh-disk)…"
-    "$REPO_ROOT/scripts/make-disk-image.sh"
+    echo "Regenerating disk image (--fresh-disk$([ -n "$MINIMAL_ARG" ] && echo " --minimal"))…"
+    "$REPO_ROOT/scripts/make-disk-image.sh" $MINIMAL_ARG
 fi
 
 # Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
 # binaries stay in sync with the on-disk copy (especially with --bench).
 if [ "$USE_BUNDLE" = true ]; then
     if [ -n "$BENCH_ARGS" ]; then
-        "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS
+        "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG
     else
-        "$REPO_ROOT/scripts/make-bundle.sh"
+        "$REPO_ROOT/scripts/make-bundle.sh" $MINIMAL_ARG
     fi
 fi
 

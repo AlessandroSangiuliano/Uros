@@ -22,6 +22,7 @@ ARCH="$(uname -m)"
 BUNDLE_OUT="$BUILD_DIR/bootstrap.bundle"
 MKBUNDLE="$BUILD_DIR/tools/mkbundle"
 BENCH_ARGS=""
+MINIMAL=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -33,8 +34,12 @@ while [ $# -gt 0 ]; do
                 shift
             done
             ;;
+        --minimal)
+            MINIMAL=1; shift ;;
         -h|--help)
-            echo "Uso: $0 [-o output.bundle] [--bench suite ...]"
+            echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal]"
+            echo "  --minimal: skip test/bench tasks (ipc_bench, pthread_test, cap_test,"
+            echo "             kernel242_test, sig_test, gpustat) from bootstrap.conf"
             exit 0
             ;;
         *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
@@ -116,11 +121,32 @@ PROC_SERVER_CONF_LINE=""
 [ -f "$PROC_SERVER" ] && PROC_SERVER_CONF_LINE="proc_server proc_server"
 GPUSTAT_CONF_LINE=""
 [ -f "$GPUSTAT" ] && GPUSTAT_CONF_LINE="gpustat gpustat"
+# ush (#275.5): kept off the bundle (no `ARGS+=` entry below) so it
+# always loads from /dev/boot_device/mach_servers/ush on disk.  The
+# bootstrap.conf line still names it as a stage-2 task; bootstrap's
+# fallback path picks it up from the disk fs.
+USH="$SBIN/ush"
+USH_CONF_LINE=""
+[ -f "$USH" ] && USH_CONF_LINE="ush ush"
 
 GPU_SERVER_CONF_LINE=""
 [ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
 CHAR_SERVER_CONF_LINE=""
 [ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
+
+if [ "$MINIMAL" = "1" ]; then
+    HELLO_SERVER_LINE=""
+    IPC_BENCH_LINE=""
+    PTHREAD_TEST_LINE=""
+    CAP_TEST_CONF_LINE=""
+    KERNEL242_TEST_CONF_LINE=""
+    SIG_TEST_CONF_LINE=""
+    GPUSTAT_CONF_LINE=""
+else
+    HELLO_SERVER_LINE="hello_server hello_server"
+    IPC_BENCH_LINE="ipc_bench ipc_bench${BENCH_ARGS}"
+    PTHREAD_TEST_LINE="pthread_test pthread_test"
+fi
 
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
@@ -130,16 +156,17 @@ ${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
-hello_server hello_server
+${HELLO_SERVER_LINE}
 ext_server ext_server
 ${EXEC_SERVER_CONF_LINE}
 ${PROC_SERVER_CONF_LINE}
-ipc_bench ipc_bench${BENCH_ARGS}
-pthread_test pthread_test
+${IPC_BENCH_LINE}
+${PTHREAD_TEST_LINE}
 ${CAP_TEST_CONF_LINE}
 ${KERNEL242_TEST_CONF_LINE}
 ${SIG_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
+${USH_CONF_LINE}
 CONF
 
 ARGS=(-o "$BUNDLE_OUT")

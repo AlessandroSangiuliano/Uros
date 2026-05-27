@@ -114,6 +114,12 @@ extern long __uros_statx(int dirfd, const char *path, int flags,
 #define UROS_SYS_tgkill         270
 #define UROS_SYS_openat         295
 #define UROS_SYS_statx          383
+/* Session / process-group syscalls (#275.4). */
+#define UROS_SYS_setpgid         57
+#define UROS_SYS_getpgrp         65
+#define UROS_SYS_setsid          66
+#define UROS_SYS_getpgid        132
+#define UROS_SYS_getsid         147
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -359,7 +365,198 @@ static long h_munmap(long addr, long len, long a3,
 
 STUB(h_brk,             -ENOMEM)
 STUB(h_set_tid_address, 1)
-STUB(h_ioctl,           -ENOTTY)
+
+/* ------------------------------------------------------------------ */
+/* h_ioctl — tc{set,get}pgrp / tcgetsid via proc_server (#275.4).      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Linux i386 termios ioctl numbers.  musl's tcsetpgrp / tcgetpgrp /
+ * tcgetsid expand to ioctl(fd, TIOC{S,G}PGRP / TIOCGSID, &arg) — the
+ * fd is informally validated (must be open) but we ignore it for v0.1:
+ * a process can only address its own session's ctty, and proc_server
+ * holds the canonical session→ctty binding.
+ */
+#define LX_TIOCGPGRP  0x540F
+#define LX_TIOCSPGRP  0x5410
+#define LX_TIOCGSID   0x5429
+
+extern __uros_port_t       __uros_proc_port;
+extern unsigned int        __uros_my_pid;
+
+/* MIG-generated proc_server stubs.  Signatures lifted from proc.defs
+ * (serverstripprefix proc_) — keeping them as local externs so this TU
+ * stays freestanding (no <mach/proc.h> pulled in). */
+extern __uros_kern_return_t proc_getsid(__uros_port_t proc_port,
+                                        unsigned int pid,
+                                        unsigned int *sid, int *result);
+extern __uros_kern_return_t proc_tcgetpgrp(__uros_port_t proc_port,
+                                           unsigned int sid,
+                                           unsigned int *pgrp, int *result);
+extern __uros_kern_return_t proc_tcsetpgrp(__uros_port_t proc_port,
+                                           unsigned int sid,
+                                           unsigned int pgrp, int *result);
+extern __uros_kern_return_t proc_setsid(__uros_port_t proc_port,
+                                        unsigned int pid,
+                                        unsigned int *new_sid, int *result);
+extern __uros_kern_return_t proc_setpgid(__uros_port_t proc_port,
+                                         unsigned int pid,
+                                         unsigned int pgrp, int *result);
+extern __uros_kern_return_t proc_getpgid(__uros_port_t proc_port,
+                                         unsigned int pid,
+                                         unsigned int *pgrp, int *result);
+
+/* proc.h PROC_OK / PROC_ERR_NO_CTTY mapped here to keep handlers.c
+ * independent of proc_types.h. */
+#define UROS_PROC_OK            0
+#define UROS_PROC_ERR_NO_CTTY (-10)
+
+static long h_ioctl(long fd, long request, long arg,
+                    long a4, long a5, long a6)
+{
+    (void)fd; (void)a4; (void)a5; (void)a6;
+
+    if (__uros_proc_port == 0 || __uros_my_pid == 0)
+        return -ENOTTY;
+
+    switch ((unsigned long)request) {
+
+    case LX_TIOCGSID: {
+        unsigned int sid = 0;
+        int rc = 0;
+        if (!arg) return -EFAULT;
+        if (proc_getsid(__uros_proc_port, __uros_my_pid, &sid, &rc) != 0)
+            return -EIO;
+        if (rc != UROS_PROC_OK)
+            return -ENOTTY;
+        *(int *)arg = (int)sid;
+        return 0;
+    }
+
+    case LX_TIOCGPGRP: {
+        unsigned int sid = 0, pgrp = 0;
+        int rc = 0;
+        if (!arg) return -EFAULT;
+        if (proc_getsid(__uros_proc_port, __uros_my_pid, &sid, &rc) != 0
+            || rc != UROS_PROC_OK)
+            return -ENOTTY;
+        if (proc_tcgetpgrp(__uros_proc_port, sid, &pgrp, &rc) != 0)
+            return -EIO;
+        if (rc == UROS_PROC_ERR_NO_CTTY)
+            return -ENOTTY;
+        if (rc != UROS_PROC_OK)
+            return -EIO;
+        *(int *)arg = (int)pgrp;
+        return 0;
+    }
+
+    case LX_TIOCSPGRP: {
+        unsigned int sid = 0;
+        int rc = 0, pgrp;
+        if (!arg) return -EFAULT;
+        pgrp = *(const int *)arg;
+        if (pgrp <= 0) return -EINVAL;
+        if (proc_getsid(__uros_proc_port, __uros_my_pid, &sid, &rc) != 0
+            || rc != UROS_PROC_OK)
+            return -ENOTTY;
+        if (proc_tcsetpgrp(__uros_proc_port, sid,
+                           (unsigned int)pgrp, &rc) != 0)
+            return -EIO;
+        if (rc == UROS_PROC_ERR_NO_CTTY)
+            return -ENOTTY;
+        if (rc != UROS_PROC_OK)
+            return -EPERM;
+        return 0;
+    }
+
+    default:
+        return -ENOTTY;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Session / process-group syscalls (#275.4).                          */
+/* ------------------------------------------------------------------ */
+
+/* Map proc_server result code → Linux errno. */
+#define UROS_PROC_ERR_INVAL      (-1)
+#define UROS_PROC_ERR_NOT_FOUND  (-3)
+#define UROS_PROC_ERR_PERM       (-8)
+#define UROS_PROC_ERR_DIFF_SESS  (-9)
+
+static long proc_rc_to_errno(int rc)
+{
+    switch (rc) {
+    case UROS_PROC_OK:           return 0;
+    case UROS_PROC_ERR_INVAL:    return -EINVAL;
+    case UROS_PROC_ERR_NOT_FOUND:return -ESRCH;
+    case UROS_PROC_ERR_PERM:     return -EPERM;
+    case UROS_PROC_ERR_DIFF_SESS:return -EPERM;
+    default:                     return -EINVAL;
+    }
+}
+
+static long h_setsid(long a1, long a2, long a3,
+                     long a4, long a5, long a6)
+{
+    unsigned int new_sid = 0;
+    int rc = 0;
+    (void)a1;(void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
+    if (__uros_proc_port == 0 || __uros_my_pid == 0) return -EPERM;
+    if (proc_setsid(__uros_proc_port, __uros_my_pid, &new_sid, &rc) != 0)
+        return -EIO;
+    if (rc != UROS_PROC_OK) return proc_rc_to_errno(rc);
+    return (long)new_sid;
+}
+
+static long h_getsid(long pid, long a2, long a3,
+                     long a4, long a5, long a6)
+{
+    unsigned int target = (unsigned int)pid, sid = 0;
+    int rc = 0;
+    (void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
+    if (target == 0) target = __uros_my_pid;
+    if (__uros_proc_port == 0) return -EPERM;
+    if (proc_getsid(__uros_proc_port, target, &sid, &rc) != 0) return -EIO;
+    if (rc != UROS_PROC_OK) return proc_rc_to_errno(rc);
+    return (long)sid;
+}
+
+static long h_setpgid(long pid, long pgrp, long a3,
+                      long a4, long a5, long a6)
+{
+    unsigned int target = (unsigned int)pid;
+    int rc = 0;
+    (void)a3;(void)a4;(void)a5;(void)a6;
+    if (target == 0) target = __uros_my_pid;
+    if (__uros_proc_port == 0) return -EPERM;
+    if (proc_setpgid(__uros_proc_port, target,
+                     (unsigned int)pgrp, &rc) != 0) return -EIO;
+    return proc_rc_to_errno(rc);
+}
+
+static long h_getpgid(long pid, long a2, long a3,
+                      long a4, long a5, long a6)
+{
+    unsigned int target = (unsigned int)pid, pgrp = 0;
+    int rc = 0;
+    (void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
+    if (target == 0) target = __uros_my_pid;
+    if (__uros_proc_port == 0) return -EPERM;
+    if (proc_getpgid(__uros_proc_port, target, &pgrp, &rc) != 0) return -EIO;
+    if (rc != UROS_PROC_OK) return proc_rc_to_errno(rc);
+    return (long)pgrp;
+}
+
+static long h_getpgrp(long a1, long a2, long a3,
+                      long a4, long a5, long a6)
+{
+    /* Linux getpgrp() takes no args and returns the caller's pgrp.
+     * Equivalent to getpgid(0). */
+    (void)a1;(void)a2;(void)a3;(void)a4;(void)a5;(void)a6;
+    return h_getpgid(0, 0, 0, 0, 0, 0);
+}
+
 STUB(h_getuid,          0)
 STUB(h_geteuid,         0)
 STUB(h_getgid,          0)
@@ -566,6 +763,11 @@ static const struct entry table[] = {
     { UROS_SYS_set_tid_address,  h_set_tid_address },
     { UROS_SYS_tgkill,           h_tgkill          },
     { UROS_SYS_openat,           h_openat          },
+    { UROS_SYS_setsid,           h_setsid          },
+    { UROS_SYS_getsid,           h_getsid          },
+    { UROS_SYS_setpgid,          h_setpgid         },
+    { UROS_SYS_getpgid,          h_getpgid         },
+    { UROS_SYS_getpgrp,          h_getpgrp         },
 };
 
 __uros_handler_t __uros_lookup(long n)

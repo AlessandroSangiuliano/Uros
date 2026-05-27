@@ -69,6 +69,32 @@ add_custom_command(
 )
 set_source_files_properties(${EXEC_USER_C} ${EXEC_USER_H} PROPERTIES GENERATED TRUE)
 
+# #275.4-bis: char_server.defs user stubs for /dev/tty open + tty fd
+# routing.  Same pattern as proc.defs / exec.defs above.
+set(CHAR_DEFS   ${CMAKE_SOURCE_DIR}/src/char_server/char_server.defs)
+set(CHAR_USER_C ${CMAKE_CURRENT_BINARY_DIR}/char_server_user.c)
+set(CHAR_USER_H ${CMAKE_CURRENT_BINARY_DIR}/char_server.h)
+
+add_custom_command(
+  OUTPUT ${CHAR_USER_C} ${CHAR_USER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    -I${CMAKE_BINARY_DIR}/generated/include
+    -I${CMAKE_SOURCE_DIR}/export/include
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/char_server
+    -header ${CHAR_USER_H}
+    -sheader /dev/null
+    -user ${CHAR_USER_C}
+    -server /dev/null
+    ${CHAR_DEFS}
+  DEPENDS migcom ${CHAR_DEFS}
+  COMMENT "MIG: char_server.defs (libposix-uros)"
+  VERBATIM
+)
+set_source_files_properties(${CHAR_USER_C} ${CHAR_USER_H} PROPERTIES GENERATED TRUE)
+
 # Phase 6a (#256): i386_set_ldt MIG stubs.  The user side isn't
 # generated anywhere else in the tree (mach_i386.defs only emits the
 # in-kernel server impl by default), so we MIG it locally.
@@ -112,6 +138,7 @@ set(LIBPOSIX_UROS_SRCS
   posix_futex.c
   ${PROC_USER_C}
   ${EXEC_USER_C}
+  ${CHAR_USER_C}
   ${MACH_I386_USER_C}
   i386/fork_capture.S
   i386/clone_trampoline.S
@@ -147,6 +174,9 @@ set_source_files_properties(${PROC_USER_C} PROPERTIES
 set_source_files_properties(${EXEC_USER_C} PROPERTIES
   COMPILE_OPTIONS "-w"
 )
+set_source_files_properties(${CHAR_USER_C} PROPERTIES
+  COMPILE_OPTIONS "-w"
+)
 set_source_files_properties(${MACH_I386_USER_C} PROPERTIES
   COMPILE_OPTIONS "-w"
 )
@@ -169,6 +199,7 @@ target_include_directories(libposix-uros PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/proc_server
   ${CMAKE_SOURCE_DIR}/src/exec_server
+  ${CMAKE_SOURCE_DIR}/src/char_server
   ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs   # libvfs.h, vfs_types.h (#262)
 )
 

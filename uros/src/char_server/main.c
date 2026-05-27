@@ -43,6 +43,7 @@ mach_port_t	char_security_port;
 mach_port_t	char_root_ledger_wired;
 mach_port_t	char_root_ledger_paged;
 mach_port_t	char_service_port;
+mach_port_t	char_proc_port = MACH_PORT_NULL;
 static mach_port_t char_port_set;
 static mach_port_t char_cap_revoke_port;
 
@@ -177,6 +178,41 @@ lookup_hal_optional(void)
 	return hal_port;
 }
 
+/*
+ * Resolve the proc_server service port via netname.  proc_server boots
+ * from disk in stage-2 (after char_server), so the lookup is almost
+ * always a miss at our startup — keep it lazy: try at init for the
+ * fast path when boot order ever flips, then retry on every job-control
+ * RPC that needs it (char_proc_port_resolve below).  Non-fatal either
+ * way; missing proc_server only disables the tty_acquire_ctty path.
+ */
+void
+char_proc_port_resolve(void)
+{
+	kern_return_t kr;
+
+	if (char_proc_port != MACH_PORT_NULL)
+		return;
+	kr = netname_look_up(name_server_port, "", "proc_server",
+			     &char_proc_port);
+	if (kr != KERN_SUCCESS) {
+		char_proc_port = MACH_PORT_NULL;
+		return;
+	}
+	printf("char_server: resolved proc_server port=0x%x\n",
+	       (unsigned)char_proc_port);
+}
+
+static void
+lookup_proc_optional(void)
+{
+	char_proc_port_resolve();
+	if (char_proc_port == MACH_PORT_NULL)
+		printf("char_server: proc_server not yet registered "
+		       "— tty_acquire_ctty will retry lazily\n");
+}
+
+
 /* ============================================================
  * Main
  * ============================================================ */
@@ -259,6 +295,11 @@ main(int argc, char **argv)
 	}
 
 	subscribe_to_cap_revoke();
+
+	/* #275.1: optional proc_server handle for tty_acquire_ctty.  Done
+	 * after discovery so any module that needs to publish a /dev entry
+	 * has already happened; proc_server boots before us in bootstrap. */
+	lookup_proc_optional();
 
 	bootstrap_completed(bootstrap_port, mach_task_self());
 	printf("char_server: init complete, entering message loop\n");
