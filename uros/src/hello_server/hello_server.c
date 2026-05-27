@@ -591,6 +591,31 @@ main(int argc, char **argv)
         }
 
         /*
+         * #269 reproducer: fork() + execve() in child.  Drives the
+         * kernel diagnostic prints in task_create / ref_task_port_locked.
+         */
+        printf("(hello_server): #269 repro — fork+execve\n");
+        int xpid = __uros_fork();
+        if (xpid < 0) {
+            printf("(hello_server): #269 fork() failed: %d\n", xpid);
+        } else if (xpid == 0) {
+            printf("(hello_server)[fxchild]: pid=%u, calling execve\n",
+                   __uros_my_pid);
+            char *xav[] = { (char *)"hello_exec", NULL };
+            char *xev[] = { NULL };
+            extern int __uros_execve(const char *p, char *const a[],
+                                     char *const e[]);
+            int er = __uros_execve("/hello_exec", xav, xev);
+            printf("(hello_server)[fxchild]: execve returned %d\n", er);
+            _exit(11);
+        } else {
+            int xst = 0;
+            int xwr = __uros_waitpid(xpid, &xst, 0);
+            printf("(hello_server): #269 waitpid -> wr=%d status=0x%x\n",
+                   xwr, xst);
+        }
+
+        /*
          * Phase 6a (#256): pthread infrastructure (set_thread_area +
          * clone + futex) landed but pthread_create runtime hangs in
          * the post-clone setup — Phase 6b will dig into the clone/
