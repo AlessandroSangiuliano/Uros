@@ -132,6 +132,68 @@ char_kbd_subscribe(mach_port_t char_port,
  * ============================================================ */
 
 /*
+ * tty_get_ctty handler — walk the device table for an entry whose
+ * ctty_sid matches.  Linear scan over CHAR_MAX_DEVICES (8 today) is
+ * cheap.  No cap_check; see the defs comment.
+ */
+kern_return_t
+char_tty_get_ctty(mach_port_t char_port, int sid,
+		  uint32_t *dev_id, int *result)
+{
+	struct char_device_entry *dev;
+	unsigned int n, i, found = 0;
+
+	(void)char_port;
+
+	*dev_id = 0;
+	*result = CHR_ERR_INVAL;
+
+	if (sid <= 0)
+		return KERN_SUCCESS;
+
+	n = char_core_dev_count();
+	for (i = 0; i < n; i++) {
+		dev = char_core_dev_lookup((char_dev_id_t)(i + 1));
+		if (dev == NULL || dev->info.class != CHAR_CLASS_TTY)
+			continue;
+		if (dev->ctty_sid == sid) {
+			*dev_id = (uint32_t)dev->id;
+			*result = CHR_OK;
+			found = 1;
+			break;
+		}
+	}
+	if (!found)
+		*result = CHR_ERR_INVAL;
+	return KERN_SUCCESS;
+}
+
+/*
+ * tty_session_owner_check — cap-check bypass for processes that are
+ * members of the session that owns this tty as ctty.  Returns 1 if
+ * the bypass applies (no cap needed), 0 otherwise.  Cheap proc_getsid
+ * round-trip — only invoked on tty_read / tty_write entry, and only
+ * after dev->ctty_sid is known to be set.
+ */
+static int
+tty_session_owner_check(struct char_device_entry *dev, int caller_pid)
+{
+	int sid = 0, rc = 0;
+
+	if (caller_pid <= 0 || dev->ctty_sid == 0)
+		return 0;
+	char_proc_port_resolve();
+	if (char_proc_port == MACH_PORT_NULL)
+		return 0;
+	if (proc_getsid(char_proc_port, (proc_pid_t)caller_pid,
+			(proc_pid_t *)&sid, &rc) != KERN_SUCCESS)
+		return 0;
+	if (rc != PROC_OK)
+		return 0;
+	return sid == dev->ctty_sid;
+}
+
+/*
  * tty_jobctl_check — implements POSIX background-read/write semantics
  * (#275.2 / #275.3).  Returns CHR_OK if the caller is allowed to
  * proceed; CHR_TTY_BACKGROUND after dispatching SIGTTIN/SIGTTOU to the
@@ -202,8 +264,9 @@ char_tty_read(mach_port_t char_port,
 		return KERN_INVALID_ARGUMENT;
 	if (dev->info.class != CHAR_CLASS_TTY)
 		return KERN_INVALID_ARGUMENT;
-	if (char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_RW,
-				(uint64_t)dev_id) != 0)
+	if (!tty_session_owner_check(dev, caller_pid)
+	    && char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_RW,
+				   (uint64_t)dev_id) != 0)
 		return KERN_PROTECTION_FAILURE;
 
 	jc = tty_jobctl_check(dev, caller_pid, PROC_SIGTTIN);
@@ -248,8 +311,9 @@ char_tty_write(mach_port_t char_port,
 		return KERN_INVALID_ARGUMENT;
 	if (dev->info.class != CHAR_CLASS_TTY)
 		return KERN_INVALID_ARGUMENT;
-	if (char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_RW,
-				(uint64_t)dev_id) != 0)
+	if (!tty_session_owner_check(dev, caller_pid)
+	    && char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_RW,
+				   (uint64_t)dev_id) != 0)
 		return KERN_PROTECTION_FAILURE;
 
 	/* TOSTOP gates the bg-write policy.  When it's off, writes from

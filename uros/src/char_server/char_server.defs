@@ -153,6 +153,28 @@ routine tty_subscribe(
 	in	notify_port	: mach_port_t);
 
 /*
+ * tty_get_ctty — given a session id, return the dev_id of the tty
+ * the session bound as its controlling terminal via tty_acquire_ctty.
+ * Pure introspection — no cap_check, the result is just the integer
+ * dev_id; the actual read/write of the device still goes through the
+ * normal cap path (or the session-member exception, see char_mig.c).
+ *
+ * Used by libposix-uros's open("/dev/tty") implementation (#275.4-bis):
+ * 1. caller asks proc_server proc_getsid(pid) -> sid
+ * 2. caller asks char_server tty_get_ctty(sid) -> dev_id
+ * 3. caller installs a tty fd that routes read/write to char_server
+ *    with this dev_id.
+ *
+ * Returns CHR_OK with `dev_id` filled when the session owns a ctty,
+ * CHR_ERR_INVAL with dev_id=0 when it does not.
+ */
+routine tty_get_ctty(
+		char_port	: mach_port_t;
+	in	sid		: int;
+	out	dev_id		: chr_u32_t;
+	out	result		: int);
+
+/*
  * tty_acquire_ctty — the session leader claims this tty as the
  * controlling terminal for its session (#247 driver side, #275.1).
  * char_server forwards to proc_set_ctty(sid, tty_port) on the
