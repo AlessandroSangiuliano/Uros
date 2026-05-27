@@ -97,6 +97,7 @@ GPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpustat"
 EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
 FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
+USH="$BUILD_DIR/export/uros/$ARCH/user/sbin/ush"
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 # #234 Phase 7: dynamic linker + first dynamic binary.  ld-musl-i386.so.1 is
 # the umbrella libc.so; it goes to /lib/ where hello_dyn's PT_INTERP points.
@@ -207,6 +208,13 @@ GPUSTAT_CONF_LINE=""
 if [ -f "$GPUSTAT" ]; then
     GPUSTAT_CONF_LINE="gpustat gpustat"
 fi
+# ush (#275.5): Uros shell.  Needs proc_server + char_server + ext_server
+# up so it can setsid, acquire ctty, and open /dev/tty.  Launched as the
+# last stage-2 task; it will read from the UART for interactive use.
+USH_CONF_LINE=""
+if [ -f "$USH" ]; then
+    USH_CONF_LINE="ush ush"
+fi
 #
 # Issue #184: default_pager ora apre la sua partizione di swap via BDS
 # (cap_request + device_open_cap) anziché via il driver IDE in-kernel.
@@ -235,6 +243,7 @@ ipc_bench ipc_bench${BENCH_ARGS}
 pthread_test pthread_test
 ${CAP_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
+${USH_CONF_LINE}
 CONF
 
 # --- Calcoli geometria ---
@@ -351,6 +360,13 @@ if [ -f "$FD_EXEC_TEST" ]; then
     FD_EXEC_TEST_WRITE_LINE="write $FD_EXEC_TEST fd_exec_test"
 fi
 
+# ush is optional (#275.5): copy to /mach_servers/ so bootstrap stage-2
+# can load it as a session-leader after proc_server / char_server.
+USH_WRITE_LINE=""
+if [ -f "$USH" ]; then
+    USH_WRITE_LINE="write $USH ush"
+fi
+
 # hello_dyn (#234 Phase 7): first dynamic binary.  Copy to / and install the
 # interpreter (umbrella libc.so) at /lib/ld-musl-i386.so.1 where its
 # PT_INTERP points.  Both optional (need UROS_BUILD_MUSL).
@@ -394,6 +410,7 @@ ${CAP_TEST_WRITE_LINE}
 ${GPUSTAT_WRITE_LINE}
 ${EXEC_SERVER_WRITE_LINE}
 ${PROC_SERVER_WRITE_LINE}
+${USH_WRITE_LINE}
 mkdir modules
 cd modules
 mkdir block

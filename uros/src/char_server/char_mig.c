@@ -433,8 +433,18 @@ char_tty_acquire_ctty(mach_port_t char_port,
 		return KERN_INVALID_ARGUMENT;
 	if (dev->info.class != CHAR_CLASS_TTY)
 		return KERN_INVALID_ARGUMENT;
-	if (char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_RW,
-				(uint64_t)dev_id) != 0)
+	/*
+	 * Cap-check policy on bind (#275.5): unbound ttys can be claimed
+	 * without a cap so the first session leader (ush, getty) doesn't
+	 * need cap_acquire bootstrapping just to grab its ctty.  Once
+	 * dev->ctty_sid is set, proc_server's PROC_ERR_PERM blocks any
+	 * second claim from another session anyway.  Bound ttys keep the
+	 * cap_check so an unrelated caller can't trample the binding via
+	 * a re-bind race after the owner releases.
+	 */
+	if (dev->ctty_sid != 0
+	    && char_core_cap_check(cap, cap_count, CHAR_CAP_TTY_RW,
+				   (uint64_t)dev_id) != 0)
 		return KERN_PROTECTION_FAILURE;
 
 	char_proc_port_resolve();

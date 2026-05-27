@@ -1,0 +1,11 @@
+# ush manifest — Uros shell #275.5.
+#
+# ush bootstraps its controlling tty via the "unbound-tty" exception
+# in char_server (any caller can claim an unbound tty as ctty without
+# a cap; once bound the session-owner check covers reads/writes via
+# /dev/tty).  No caps required at v0.1.0.
+
+name ush
+
+# No `required` lines — empty caps_required.
+# No `delegatable` lines — empty caps_delegatable.

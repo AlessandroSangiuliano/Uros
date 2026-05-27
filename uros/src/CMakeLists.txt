@@ -65,6 +65,11 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(fd_exec_test)
 endif()
 
+# Build ush — Uros shell (#275.5).
+if(UROS_BUILD_MUSL)
+  add_subdirectory(ush)
+endif()
+
 # Build libfoo.so + dlopen_test — musl dlopen end-to-end (#234 incr 4)
 if(UROS_BUILD_MUSL)
   add_subdirectory(libfoo)

@@ -116,6 +116,13 @@ PROC_SERVER_CONF_LINE=""
 [ -f "$PROC_SERVER" ] && PROC_SERVER_CONF_LINE="proc_server proc_server"
 GPUSTAT_CONF_LINE=""
 [ -f "$GPUSTAT" ] && GPUSTAT_CONF_LINE="gpustat gpustat"
+# ush (#275.5): kept off the bundle (no `ARGS+=` entry below) so it
+# always loads from /dev/boot_device/mach_servers/ush on disk.  The
+# bootstrap.conf line still names it as a stage-2 task; bootstrap's
+# fallback path picks it up from the disk fs.
+USH="$SBIN/ush"
+USH_CONF_LINE=""
+[ -f "$USH" ] && USH_CONF_LINE="ush ush"
 
 GPU_SERVER_CONF_LINE=""
 [ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
@@ -140,6 +147,7 @@ ${CAP_TEST_CONF_LINE}
 ${KERNEL242_TEST_CONF_LINE}
 ${SIG_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
+${USH_CONF_LINE}
 CONF
 
 ARGS=(-o "$BUNDLE_OUT")
