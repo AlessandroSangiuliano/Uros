@@ -22,6 +22,7 @@ ARCH="$(uname -m)"
 BUNDLE_OUT="$BUILD_DIR/bootstrap.bundle"
 MKBUNDLE="$BUILD_DIR/tools/mkbundle"
 BENCH_ARGS=""
+MINIMAL=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -33,8 +34,12 @@ while [ $# -gt 0 ]; do
                 shift
             done
             ;;
+        --minimal)
+            MINIMAL=1; shift ;;
         -h|--help)
-            echo "Uso: $0 [-o output.bundle] [--bench suite ...]"
+            echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal]"
+            echo "  --minimal: skip test/bench tasks (ipc_bench, pthread_test, cap_test,"
+            echo "             kernel242_test, sig_test, gpustat) from bootstrap.conf"
             exit 0
             ;;
         *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
@@ -129,6 +134,20 @@ GPU_SERVER_CONF_LINE=""
 CHAR_SERVER_CONF_LINE=""
 [ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
 
+if [ "$MINIMAL" = "1" ]; then
+    HELLO_SERVER_LINE=""
+    IPC_BENCH_LINE=""
+    PTHREAD_TEST_LINE=""
+    CAP_TEST_CONF_LINE=""
+    KERNEL242_TEST_CONF_LINE=""
+    SIG_TEST_CONF_LINE=""
+    GPUSTAT_CONF_LINE=""
+else
+    HELLO_SERVER_LINE="hello_server hello_server"
+    IPC_BENCH_LINE="ipc_bench ipc_bench${BENCH_ARGS}"
+    PTHREAD_TEST_LINE="pthread_test pthread_test"
+fi
+
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
@@ -137,12 +156,12 @@ ${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
-hello_server hello_server
+${HELLO_SERVER_LINE}
 ext_server ext_server
 ${EXEC_SERVER_CONF_LINE}
 ${PROC_SERVER_CONF_LINE}
-ipc_bench ipc_bench${BENCH_ARGS}
-pthread_test pthread_test
+${IPC_BENCH_LINE}
+${PTHREAD_TEST_LINE}
 ${CAP_TEST_CONF_LINE}
 ${KERNEL242_TEST_CONF_LINE}
 ${SIG_TEST_CONF_LINE}

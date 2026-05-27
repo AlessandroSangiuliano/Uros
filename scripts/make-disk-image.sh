@@ -41,6 +41,7 @@ PART2_START_SECT=280576      # disk0c — raw swap (264192 + 8 MiB) -> ~375 MB
 
 # ipc_bench suite selection (empty = all)
 BENCH_ARGS=""
+MINIMAL=0
 
 # --- Parse argomenti ---
 while [ $# -gt 0 ]; do
@@ -54,11 +55,14 @@ while [ $# -gt 0 ]; do
                 shift
             done
             ;;
+        --minimal) MINIMAL=1; shift ;;
         -h|--help)
-            echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...]"
+            echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...] [--minimal]"
             echo ""
             echo "  --bench suite ...   Passa suite names a ipc_bench"
             echo "                      (syscall intra slow inter port pp ool flipc2 all)"
+            echo "  --minimal           Omit hello_server/ipc_bench/pthread_test/cap_test/"
+            echo "                      gpustat from disk bootstrap.conf (stage-2)"
             exit 0
             ;;
         *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
@@ -227,6 +231,18 @@ GPU_SERVER_CONF_LINE=""
 CHAR_SERVER_CONF_LINE=""
 [ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
 
+if [ "$MINIMAL" = "1" ]; then
+    HELLO_SERVER_LINE=""
+    IPC_BENCH_LINE=""
+    PTHREAD_TEST_LINE=""
+    CAP_TEST_CONF_LINE=""
+    GPUSTAT_CONF_LINE=""
+else
+    HELLO_SERVER_LINE="hello_server hello_server"
+    IPC_BENCH_LINE="ipc_bench ipc_bench${BENCH_ARGS}"
+    PTHREAD_TEST_LINE="pthread_test pthread_test"
+fi
+
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
@@ -235,12 +251,12 @@ ${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
 block_device_server block_device_server
 default_pager default_pager disk0c
-hello_server hello_server
+${HELLO_SERVER_LINE}
 ext_server ext_server
 ${EXEC_SERVER_CONF_LINE}
 ${PROC_SERVER_CONF_LINE}
-ipc_bench ipc_bench${BENCH_ARGS}
-pthread_test pthread_test
+${IPC_BENCH_LINE}
+${PTHREAD_TEST_LINE}
 ${CAP_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
 ${USH_CONF_LINE}
