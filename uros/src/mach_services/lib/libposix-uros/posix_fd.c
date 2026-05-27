@@ -30,6 +30,7 @@
 #include <servers/netname.h>    /* netname_look_up */
 #include "proc.h"               /* proc_getsid */
 #include "char_server.h"        /* char_tty_get_ctty/read/write/set_tostop */
+extern boolean_t swtch_pri(int pri); /* mach kernel trap — voluntary yield */
 
 /* Console write sink — same SYSENTER trap handlers.c reaches for. */
 extern void mach_print(const char *);
@@ -349,13 +350,24 @@ long __uros_read(int fd, void *buf, size_t count)
             int      cres = 0;
             unsigned int want = count > sizeof(rbuf)
                                 ? sizeof(rbuf) : (unsigned)count;
-            if (char_tty_read(cport, cap, 0, dev_id, (int)__uros_my_pid,
-                              want, rbuf, &rlen, &cres) != 0)
-                return -EIO;
-            if (cres == -1)               /* CHR_TTY_BACKGROUND */
-                return -EINTR;
-            if (cres != 0)
-                return -EIO;
+            /* Block until data is available — uart.so drains its IRQ
+             * ring into the RPC buf; if the ring is empty we yield and
+             * retry instead of busy-spinning the demux thread.  No
+             * O_NONBLOCK support yet (v0.1 ush doesn't need it). */
+            for (;;) {
+                rlen = sizeof(rbuf);
+                if (char_tty_read(cport, cap, 0, dev_id,
+                                  (int)__uros_my_pid,
+                                  want, rbuf, &rlen, &cres) != 0)
+                    return -EIO;
+                if (cres == -1)           /* CHR_TTY_BACKGROUND */
+                    return -EINTR;
+                if (cres != 0)
+                    return -EIO;
+                if (rlen > 0)
+                    break;
+                (void)swtch_pri(0);
+            }
             if (rlen > count) rlen = count;
             if (rlen) memcpy(buf, rbuf, rlen);
             return (long)rlen;

@@ -45,6 +45,7 @@ extern void mach_print(const char *);
 #define USHLOG(s) mach_print("ush: " s "\n")
 
 #include "char_server.h"        /* MIG: char_* user stubs */
+#include <char/char_types.h>    /* struct char_device_info + CHAR_CLASS_* */
 
 /* From libposix-uros — we want the canonical pid. */
 extern unsigned int __uros_my_pid;
@@ -87,37 +88,25 @@ lookup_char_server(void)
 static int
 find_tty_device(uint32_t *out_dev_id)
 {
-    struct char_device_info {
-        uint32_t id;
-        uint32_t class_;
-        char     name[32];
-        char     module[16];
-        uint32_t flags;
-    } *devs;
+    struct char_device_info *devs;
     vm_offset_t buf      = 0;
     mach_msg_type_number_t bcnt = 0;
     uint32_t n           = 0;
     kern_return_t kr;
     unsigned int i;
 
-    USHLOG("find_tty_device: calling query_devices");
     kr = char_query_devices(char_port, &buf, &bcnt, &n);
-    USHLOG("find_tty_device: query_devices returned");
-    if (kr != KERN_SUCCESS || n == 0) {
-        USHLOG("query_devices failed or n=0");
+    if (kr != KERN_SUCCESS || n == 0)
         return -1;
-    }
     devs = (void *)buf;
     for (i = 0; i < n; i++) {
-        if (devs[i].class_ == 2 /* CHAR_CLASS_TTY */) {
+        if (devs[i].class == CHAR_CLASS_TTY) {
             *out_dev_id = devs[i].id;
-            USHLOG("found tty device");
             (void)vm_deallocate(mach_task_self(), buf, bcnt);
             return 0;
         }
     }
     (void)vm_deallocate(mach_task_self(), buf, bcnt);
-    USHLOG("find_tty_device: no TTY class in table");
     return -1;
 }
 
@@ -161,11 +150,13 @@ ush_setup(void)
         return -1;
     USHLOG("char_server resolved");
 
-    /* v0.1: hardcode dev_id=2 (UART tty in char_server's boot order).
-     * Switching to char_query_devices is a TODO — the call currently
-     * hangs the caller for reasons under investigation. */
-    dev_id = 2;
-    USHLOG("using hardcoded dev_id=2 (UART)");
+    /* v0.1: prefer the first CHAR_CLASS_TTY device reported by
+     * char_query_devices.  Fall back to UART (dev_id=2 in current
+     * boot order) if discovery fails. */
+    if (find_tty_device(&dev_id) < 0) {
+        printf("ush: no TTY device found, falling back to dev_id=2\n");
+        dev_id = 2;
+    }
 
     kr = char_tty_acquire_ctty(char_port, cap, 0, dev_id, (int)s, &rc);
     if (kr != KERN_SUCCESS || rc != 0) {
