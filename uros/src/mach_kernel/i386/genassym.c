@@ -272,6 +272,7 @@ main(
 	DECLARE("R_CR2",	offsetof(struct i386_saved_state *, cr2));
 	DECLARE("ISS_SIZE",	sizeof (struct i386_saved_state));
 
+	DECLARE("I_GS",		offsetof(struct i386_interrupt_state *, gs));
         DECLARE("I_ECX",	offsetof(struct i386_interrupt_state *, ecx));
 	DECLARE("I_EIP",	offsetof(struct i386_interrupt_state *, eip));
 	DECLARE("I_CS",		offsetof(struct i386_interrupt_state *, cs));

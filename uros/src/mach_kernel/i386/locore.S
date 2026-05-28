@@ -1230,6 +1230,9 @@ Entry(all_intrs)
 
 	pushl	%ds			/* save segment registers */
 	pushl	%es
+	pushl	%gs			/* #280: save user %gs (I_GS) before */
+					/* we clobber it with CPU_DATA below; */
+					/* restored on every iret path */
 	mov	%ss,%dx			/* switch to kernel segments */
 	mov	%dx,%ds
 	mov	%dx,%es
@@ -1331,6 +1334,12 @@ LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
 #endif	/* MACH_RT */
 
 1:
+	pop	%gs			/* #280: restore user %gs (I_GS).  Cannot */
+					/* fault here: nothing touched the LDT */
+					/* between interrupt entry and this iret */
+					/* (no-AST path runs only the C handler; */
+					/* kernel-preempt path returns to a kernel */
+					/* %gs, always valid). */
 	pop	%es			/* restore segment regs */
 	pop	%ds
 	pop	%edx
@@ -1378,6 +1387,12 @@ LEXT(return_to_iret_i)			/* ( label for kdb_kintr) */
  *	ss
  */
 ast_from_interrupt:
+	pop	%gs			/* #280: restore user %gs (I_GS) into the */
+					/* live register so the push %gs below */
+					/* captures the user value, not CPU_DATA. */
+					/* Safe: still cli, LDT unchanged since the */
+					/* interrupt; the final restore goes through */
+					/* the fault-recoverable kret_popl_gs. */
 	pop	%es			/* restore all registers ... */
 	pop	%ds
 	popl	%edx
@@ -1461,7 +1476,8 @@ ast_from_interrupt:
  *		pointer to save area on old stack
  *	      [ saved %ebx, if accurate timing ]
  *
- * old stack:	saved %es
+ * old stack:	saved %gs		(#280)
+ *		saved %es
  *		saved %ds
  *		saved %edx
  *		saved %ecx

@@ -119,6 +119,7 @@ struct v86_assist_state {
  */
 
 struct i386_interrupt_state {
+	int	gs;	/* #280: saved user %gs, restored on iret (all_intrs) */
 	int	es;
 	int	ds;
 	int	edx;
