@@ -65,6 +65,11 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(fd_exec_test)
 endif()
 
+# Build hello_world (#286: standard printf-to-ctty hello world)
+if(UROS_BUILD_MUSL)
+  add_subdirectory(hello_world)
+endif()
+
 # Build ush — Uros shell (#275.5).
 if(UROS_BUILD_MUSL)
   add_subdirectory(ush)

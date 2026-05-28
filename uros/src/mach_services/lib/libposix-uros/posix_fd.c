@@ -100,6 +100,7 @@ struct posix_fd {
     int       is_console;   /* 0/1/2 — routed to mach_print, never vfs */
     int       is_tty;       /* /dev/tty — routed to char_server (#275.4-bis) */
     int       cloexec;      /* close on execve */
+    int       std_probed;   /* 0/1/2 — tried to bind to the session ctty (#286) */
     vfs_fd_t  vfd;          /* underlying libvfs fd (-1 for console/tty) */
     unsigned  tty_dev_id;   /* char_server dev_id for is_tty fds */
 };
@@ -192,27 +193,76 @@ static void console_write(const char *p, size_t n)
  * Returns -ENOTTY when the session has no controlling tty (matches
  * Linux open("/dev/tty") for a session leader without one).
  */
-static long open_dev_tty(int flags)
+/*
+ * Resolve the caller's controlling-tty dev_id (or 0 if none): ask
+ * proc_server for our sid, then char_server which dev is bound as the
+ * session ctty.  Shared by open("/dev/tty") and the std-fd binding
+ * below.  Does RPCs — never call while holding pfd_lock.
+ */
+static unsigned int ctty_dev_id(void)
 {
     if (__uros_proc_port == 0 || __uros_my_pid == 0)
-        return -ENOTTY;
+        return 0;
 
     mach_port_t cport = char_port_resolve();
     if (cport == MACH_PORT_NULL)
-        return -ENOTTY;
+        return 0;
 
-    /* Caller's sid via proc_server. */
     unsigned int sid = 0;
     int rc = 0;
     if (proc_getsid(__uros_proc_port, __uros_my_pid, &sid, &rc) != 0
         || rc != 0)
-        return -ENOTTY;
+        return 0;
 
-    /* Session's ctty dev_id via char_server. */
     unsigned int dev_id = 0;
     int cres = 0;
     if (char_tty_get_ctty(cport, (int)sid, &dev_id, &cres) != 0
-        || cres != 0 || dev_id == 0)
+        || cres != 0)
+        return 0;
+    return dev_id;
+}
+
+/*
+ * #286: lazily back the standard streams (fds 0/1/2) with the session's
+ * controlling tty so a plain printf/read reaches the terminal, exactly
+ * like every Unix.  A musl child execs into ush's session and inherits
+ * its ctty, so its first stdout write upgrades fd 1 from the mach_print
+ * console fallback to the real char_server TTY path.  Tasks with no ctty
+ * (servers, early boot) keep the console fallback.  Probed once per fd:
+ * a task that has no ctty when it first writes stays on the console
+ * rather than re-issuing RPCs on every write.
+ */
+static void maybe_upgrade_std_fd(int fd)
+{
+    if (fd < 0 || fd > 2)
+        return;
+
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    if (!pfds[fd].is_console || pfds[fd].std_probed) {
+        pthread_mutex_unlock(&pfd_lock);
+        return;
+    }
+    pfds[fd].std_probed = 1;
+    pthread_mutex_unlock(&pfd_lock);
+
+    unsigned int dev_id = ctty_dev_id();   /* RPCs — lock dropped */
+    if (dev_id == 0)
+        return;                            /* no ctty: stay on console */
+
+    pthread_mutex_lock(&pfd_lock);
+    if (pfds[fd].is_console) {              /* re-check under lock */
+        pfds[fd].is_console = 0;
+        pfds[fd].is_tty     = 1;
+        pfds[fd].tty_dev_id = dev_id;
+    }
+    pthread_mutex_unlock(&pfd_lock);
+}
+
+static long open_dev_tty(int flags)
+{
+    unsigned int dev_id = ctty_dev_id();
+    if (dev_id == 0)
         return -ENOTTY;
 
     pthread_mutex_lock(&pfd_lock);
@@ -337,6 +387,7 @@ static int tty_fd_snapshot(int fd, mach_port_t *port, unsigned *dev_id)
 long __uros_read(int fd, void *buf, size_t count)
 {
     int err;
+    maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
     vfs_fd_t vfd = resolve_fd(fd, &err);
     if (err) return err;
     if (vfd == -2) {
@@ -381,6 +432,7 @@ long __uros_read(int fd, void *buf, size_t count)
 long __uros_write(int fd, const void *buf, size_t count)
 {
     int err;
+    maybe_upgrade_std_fd(fd);          /* #286: bind 0/1/2 to ctty if any */
     vfs_fd_t vfd = resolve_fd(fd, &err);
     if (err) return err;
     if (vfd == -2) {
