@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -178,6 +179,31 @@ ush_setup(void)
 }
 
 /* ------------------------------------------------------------------ */
+/*  Terminal output                                                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * tty_msg — user-facing status straight to the controlling tty.
+ * The banner and prompt go through write(tty_fd); job-control
+ * notifications must too, otherwise they sit in musl's full-buffered
+ * stdout (fd 1 is not the tty) and never reach the user.
+ */
+static void
+tty_msg(const char *fmt, ...)
+{
+    char    buf[128];
+    va_list ap;
+    int     n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(buf, sizeof buf, fmt, ap);
+    va_end(ap);
+    if (n > 0)
+        (void)write(tty_fd, buf, (size_t)n < sizeof buf ? (size_t)n
+                                                        : sizeof buf - 1);
+}
+
+/* ------------------------------------------------------------------ */
 /*  Tiny line reader                                                   */
 /* ------------------------------------------------------------------ */
 
@@ -277,13 +303,13 @@ run_command(char *argv[], int bg)
     /* Parent: race-safe duplicate of setpgid; tcsetpgrp before wait. */
     (void)setpgid(pid, pid);
     if (bg) {
-        printf("[bg] pid=%d\n", (int)pid);
+        tty_msg("[bg] pid=%d\r\n", (int)pid);
         return;
     }
     (void)tcsetpgrp(tty_fd, pid);
     (void)waitpid(pid, &status, 0);
     (void)tcsetpgrp(tty_fd, pgid_self);
-    printf("ush: pid=%d exit=0x%x\n", (int)pid, status);
+    tty_msg("ush: pid=%d exit=0x%x\r\n", (int)pid, status);
 }
 
 /* ------------------------------------------------------------------ */
