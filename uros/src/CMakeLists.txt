@@ -16,6 +16,27 @@ if(NOT EXISTS "${GEN_MACH_MACHINE}")
     SYMBOLIC)
 endif()
 
+# #288: shared force-pull for minimal static musl binaries.  musl's
+# libc-musl.a carries WEAK -ENOSYS stubs (__uros_syscall0..6,
+# __uros_set_thread_area_tp; uros_syscall_stub.c, #234) that exist only so
+# the standalone libc.so / ld-musl links under --no-undefined.  A static
+# binary referencing too few libposix-uros symbols (a printf-only program)
+# fails to drag the strong defs in, so the weak stubs win and every syscall
+# + the TLS setup return -ENOSYS (hlt in __init_tls before main).  Linking
+# this INTERFACE target force-pulls the real syscall dispatcher (syscall.o)
+# and TLS installer (posix_tls.o) — no per-binary -Wl,-u boilerplate.
+#
+# Deliberately does NOT force __uros_clone: pulling its object
+# (posix_clone.o) drags in the pthread-clone machinery, which has a side
+# effect that breaks ush's fork+execve (#269-adjacent).  Binaries that
+# really use pthreads pull posix_clone.o by referencing pthread_create.
+if(UROS_BUILD_MUSL)
+  add_library(uros_musl_dispatcher INTERFACE)
+  target_link_options(uros_musl_dispatcher INTERFACE
+    -Wl,-u,__uros_syscall0
+    -Wl,-u,__uros_set_thread_area_tp)
+endif()
+
 # Per ora costruiamo solo i tool host necessari (mig/migcom, librerie base).
 
 if(OSFMK_BUILD_TOOLS)

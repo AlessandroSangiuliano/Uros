@@ -60,6 +60,9 @@ target_link_libraries(fd_exec_test_bin PRIVATE
   ${MUSL_PREFIX}/lib/libc-musl.a
   ${_LIBGCC_A}
   -Wl,--end-group
+  # #288: force-pull the real syscall dispatcher + TLS installer, otherwise
+  # musl's WEAK -ENOSYS stubs win the link for this minimal static binary.
+  uros_musl_dispatcher
 )
 
 target_link_options(fd_exec_test_bin PRIVATE
