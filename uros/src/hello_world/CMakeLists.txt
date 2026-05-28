@@ -61,25 +61,15 @@ target_link_libraries(hello_world_bin PRIVATE
   ${MUSL_PREFIX}/lib/libc-musl.a
   ${_LIBGCC_A}
   -Wl,--end-group
+  # #288: force-pull the real syscall dispatcher + TLS installer (shadowed
+  # otherwise by musl's WEAK -ENOSYS stubs in a printf-only static binary).
+  uros_musl_dispatcher
 )
 
 target_link_options(hello_world_bin PRIVATE
   -m32 -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,-u,__uros_libc_init
-  # Force-pull the real libposix-uros syscall dispatcher (syscall.o) and TLS
-  # installer (posix_tls.o).  musl's libc-musl.a carries WEAK -ENOSYS stubs
-  # for __uros_syscall0..6 and __uros_set_thread_area_tp (uros_syscall_stub.c,
-  # #234 — needed so the standalone libc.so / ld-musl links under
-  # --no-undefined).  A printf-only static binary references too few
-  # libposix-uros symbols to drag the strong defs in otherwise, so the weak
-  # stubs win and every syscall + the TLS setup return -ENOSYS (hlt in
-  # __init_tls).  These two -u pull exactly the syscall + TLS objects; we do
-  # NOT force __uros_clone — its real object (posix_clone.o) drags in the
-  # pthread-clone machinery, which has a side effect that breaks fork+execve
-  # (#269-adjacent), and a hello world never forks anyway.
-  -Wl,-u,__uros_syscall0
-  -Wl,-u,__uros_set_thread_area_tp
   -Wl,--build-id=none
 )
 
