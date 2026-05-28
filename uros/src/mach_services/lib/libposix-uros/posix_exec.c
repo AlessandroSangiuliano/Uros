@@ -227,28 +227,32 @@ __uros_spawn(const char *path,
         }
     }
 
-    /* The initial thread came back suspended (#262 step 3) — start it
-     * now that the fd handoff is in place. */
-    (void)thread_resume(new_thread);
-
-    /* Register the new task with proc_server so SIGCHLD / waitpid
-     * work.  Failure here is non-fatal — the task is already running. */
+    /* Register the new task with proc_server BEFORE resuming it (#287).
+     * The fresh image's libposix init self-registers with its own task
+     * port; proc_register is idempotent by task port, so this exec-side
+     * registration must win the race to seed the inherited pgrp + session
+     * (otherwise the child self-registers as a new self-leader and loses
+     * the controlling tty).  Failure here is non-fatal for SIGCHLD/waitpid
+     * but would cost the session inheritance, so do it while the thread is
+     * still suspended. */
     proc_pid_t new_pid = 0;
     int prc = PROC_ERR_INVAL;
     if (__uros_proc_port != MACH_PORT_NULL) {
         char cmd[128];
-        size_t cl = 0;
+        size_t cl = path_len;
         for (size_t i = path_len; i > 0; i--) {
-            if (path[i - 1] == '/') { cl = path_len - i; goto have_base; }
+            if (path[i - 1] == '/') { cl = path_len - i; break; }
         }
-        cl = path_len;
-have_base:
         if (cl >= sizeof cmd) cl = sizeof cmd - 1;
         memcpy(cmd, path + path_len - cl, cl);
         cmd[cl] = '\0';
         (void)proc_register(__uros_proc_port, __uros_my_pid,
                             new_task, cmd, &new_pid, &prc);
     }
+
+    /* The initial thread came back suspended (#262 step 3) — start it now
+     * that the fd handoff is in place and proc knows its identity. */
+    (void)thread_resume(new_thread);
 
     if (out_task)   *out_task = new_task;
     else            (void)mach_port_deallocate(mach_task_self(), new_task);

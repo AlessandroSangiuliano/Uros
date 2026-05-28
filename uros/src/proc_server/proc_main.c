@@ -200,6 +200,32 @@ proc_S_register(
     (void)server_port;
 
     pthread_mutex_lock(&pid_lock);
+
+    /* #287: idempotent registration by task port.  execve on Uros is
+     * "spawn + suicide": the exec path already registered the new task
+     * (inheriting the parent's pgrp + session) before the fresh image
+     * runs.  When that image's libposix init then self-registers with
+     * its own task port, return the identity the exec path already
+     * minted instead of allocating a new self-leader pid — otherwise the
+     * exec'd child lands in a brand-new session (sid = its own pid) and
+     * loses the controlling tty / job-control context (its /dev/tty
+     * lookup fails and stdout silently falls back to the mach_print
+     * console, racing the shell's own output).  Mach coalesces send
+     * rights to the same port, so the self-register's task_port name
+     * matches the stored one. */
+    for (i = 0; i < PROC_MAX_TASKS; i++) {
+        if (pid_table[i].in_use && pid_table[i].task_port == task_port) {
+            proc_pid_t existing = pid_table[i].pid;
+            pthread_mutex_unlock(&pid_lock);
+            /* Drop the extra uref MIG just handed us; the existing entry
+             * already holds its own reference to the same port. */
+            (void)mach_port_deallocate(mach_task_self(), task_port);
+            *new_pid = existing;
+            *result  = PROC_OK;
+            return KERN_SUCCESS;
+        }
+    }
+
     for (i = 0; i < PROC_MAX_TASKS; i++) {
         if (!pid_table[i].in_use) {
             e = &pid_table[i];
