@@ -60,6 +60,39 @@ expect {
     timeout           { send_user "\n\[smoke\] FAIL: no AUXV output\n"; exit 1 }
 }
 
+# Wait for the prompt to come back before the next command.
+expect { "ush\$ " {} timeout {} }
+
+# Step 3b (#286) — a standard printf hello world in the foreground.
+# Unlike hello_exec (infinite loop), /hello_world returns, exercising the
+# full foreground tcsetpgrp + waitpid round trip; "hello" must arrive on
+# the controlling tty (libposix-uros binds fds 0/1/2 to the session ctty).
+send "/hello_world\r"
+# ush's "ush: pid=N exit=0x0" (direct tty_msg) and hello_world's buffered
+# "hello" (via char_server) can arrive in either order, so don't chain two
+# ordered expects.  Match "hello" (the acceptance: printf reached the tty);
+# the return of the prompt proves ush reaped the foreground child.
+# The reap line ("ush: pid=N exit=0x0", direct), the next prompt, and the
+# child's buffered "hello" (flushed late via char_server) race each other in
+# the serial stream.  Require the reap (proves foreground waitpid completed)
+# and the "hello" (proves printf reached the tty), in whichever order they
+# land; don't anchor on the prompt afterwards (it may already have scrolled
+# past).  ush is back at a prompt and reading either way, so the shutdown
+# step below still drives cleanly.
+set _saw_hello 0
+set _saw_reap  0
+for {set i 0} {$i < 2} {incr i} {
+    expect {
+        -re "hello\[\r\n]" { set _saw_hello 1 }
+        -re "exit=0x0"     { set _saw_reap 1 }
+        timeout            { break }
+    }
+}
+if {$_saw_hello} { send_user "\n\[smoke\] hello_world stdout->ctty OK\n" } \
+                 else { send_user "\n\[smoke\] FAIL: no hello_world output\n"; exit 1 }
+if {$_saw_reap}  { send_user "\[smoke\] ush reaped hello_world (exit 0)\n" } \
+                 else { send_user "\n\[smoke\] FAIL: hello_world not reaped\n"; exit 1 }
+
 # Step 4 — graceful poweroff.  ush sends proc_shutdown(HALT) RPC,
 # proc_server calls host_reboot(HOST_REBOOT_HALT), the kernel writes
 # ACPI PM1a_CNT 0x2000 and QEMU cuts power immediately — so the
