@@ -268,3 +268,27 @@ routine proc_shutdown(
 		proc_port	: mach_port_t;
 	in	mode		: int;
 	out	result		: int);
+
+/*
+ * Hand off an existing pid to a freshly-spawned task (#287).
+ *
+ * Uros implements execve as "spawn a new task + the caller suicides".
+ * To keep POSIX semantics — the pid the parent got from fork() must be
+ * the pid of the program after exec, so waitpid()/kill()/job-control all
+ * refer to the running program — execve reassigns the caller's own pid
+ * entry to the new task instead of minting a fresh pid for it.  proc
+ * swaps the entry's task_port to new_task (re-arming the dead-name
+ * watch), updates the cmdline, and keeps pid/ppid/pgrp/sid intact.  The
+ * caller then task_terminate()s its old task; that task's dead-name no
+ * longer matches any entry and is ignored.
+ *
+ *   old_pid   — the caller's current pid (the one to preserve)
+ *   new_task  — the freshly-spawned task that should become old_pid
+ *   cmdline   — new command name for /proc
+ */
+routine proc_exec_handoff(
+		proc_port	: mach_port_t;
+	in	old_pid		: proc_pid_t;
+	in	new_task	: mach_port_t;
+	in	cmdline		: proc_cmdline_t;
+	out	result		: int);

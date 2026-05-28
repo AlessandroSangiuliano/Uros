@@ -200,6 +200,32 @@ proc_S_register(
     (void)server_port;
 
     pthread_mutex_lock(&pid_lock);
+
+    /* #287: idempotent registration by task port.  execve on Uros is
+     * "spawn + suicide": the exec path already registered the new task
+     * (inheriting the parent's pgrp + session) before the fresh image
+     * runs.  When that image's libposix init then self-registers with
+     * its own task port, return the identity the exec path already
+     * minted instead of allocating a new self-leader pid — otherwise the
+     * exec'd child lands in a brand-new session (sid = its own pid) and
+     * loses the controlling tty / job-control context (its /dev/tty
+     * lookup fails and stdout silently falls back to the mach_print
+     * console, racing the shell's own output).  Mach coalesces send
+     * rights to the same port, so the self-register's task_port name
+     * matches the stored one. */
+    for (i = 0; i < PROC_MAX_TASKS; i++) {
+        if (pid_table[i].in_use && pid_table[i].task_port == task_port) {
+            proc_pid_t existing = pid_table[i].pid;
+            pthread_mutex_unlock(&pid_lock);
+            /* Drop the extra uref MIG just handed us; the existing entry
+             * already holds its own reference to the same port. */
+            (void)mach_port_deallocate(mach_task_self(), task_port);
+            *new_pid = existing;
+            *result  = PROC_OK;
+            return KERN_SUCCESS;
+        }
+    }
+
     for (i = 0; i < PROC_MAX_TASKS; i++) {
         if (!pid_table[i].in_use) {
             e = &pid_table[i];
@@ -265,6 +291,69 @@ proc_S_register(
 
     *new_pid = pid;
     *result  = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+/*
+ * #287: reassign an existing pid to a freshly-spawned task so execve
+ * preserves the caller's pid (POSIX in-place-exec semantics emulated on
+ * the "spawn + suicide" model).  Swap the entry's task_port to new_task,
+ * re-arm the dead-name watch on it, refresh the cmdline, and keep
+ * pid/ppid/pgrp/sid.  The caller's old task then suicides; its dead-name
+ * no longer matches any entry (we dropped our ref) and is ignored.
+ */
+kern_return_t
+proc_S_exec_handoff(
+    mach_port_t                 server_port,
+    proc_pid_t                  old_pid,
+    mach_port_t                 new_task,
+    proc_cmdline_t              cmdline,
+    int                         *result)
+{
+    struct pid_entry *e;
+    mach_port_t old_port = MACH_PORT_NULL;
+    mach_port_t prev = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    (void)server_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(old_pid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        if (new_task != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), new_task);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    old_port      = e->task_port;
+    e->task_port  = new_task;
+    e->state      = PROC_STATE_RUNNING;
+    (void)strncpy(e->cmdline, cmdline, sizeof(e->cmdline) - 1);
+    e->cmdline[sizeof(e->cmdline) - 1] = '\0';
+    pthread_mutex_unlock(&pid_lock);
+
+    /* Watch the new task for death so waitpid still reaps old_pid. */
+    kr = mach_port_request_notification(mach_task_self(), new_task,
+                                        MACH_NOTIFY_DEAD_NAME, 0,
+                                        notify_port,
+                                        MACH_MSG_TYPE_MAKE_SEND_ONCE,
+                                        &prev);
+    if (prev != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), prev);
+    if (kr != KERN_SUCCESS)
+        printf("proc: exec_handoff dead-name request kr=%d (pid=%u)\n",
+               kr, old_pid);
+
+    /* Drop our ref to the old (about-to-suicide) task port.  Its pending
+     * dead-name notification, when it fires, won't match any entry. */
+    if (old_port != MACH_PORT_NULL && old_port != new_task)
+        (void)mach_port_deallocate(mach_task_self(), old_port);
+
+    printf("proc: exec_handoff pid=%u -> task=0x%x cmd=\"%s\"\n",
+           old_pid, (unsigned)new_task, e->cmdline);
+
+    *result = PROC_OK;
     return KERN_SUCCESS;
 }
 
