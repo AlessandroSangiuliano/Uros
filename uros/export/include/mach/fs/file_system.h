@@ -85,6 +85,7 @@ struct fs_ops {
 #define	FS_INVALID_FS		5004	/* bad file system */
 #define	FS_NOT_IN_FILE		5005	/* offset not in file */
 #define	FS_INVALID_PARAMETER	5006	/* bad parameter to a routine */
+#define	FS_NO_RESOURCES		5007	/* server resource exhausted (e.g. vnode table) */
 
 extern int open_file(mach_port_t, const char *, struct file *);
 extern void close_file(struct file *);

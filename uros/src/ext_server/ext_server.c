@@ -928,9 +928,17 @@ ext_pager_close_file(void *state, uint64_t file_id)
 	 * see the comment there).  No one else holds a reference to it
 	 * once memory_object_terminate has fired, so freeing here is
 	 * safe.  Belt-and-braces NULL check in case a future caller
-	 * passes 0. */
-	if (fp != NULL)
+	 * passes 0.
+	 *
+	 * #283: the clone took a vnode reference in ext2fs_clone_file
+	 * (v_refcount++).  We must release it via ext2fs_close_file
+	 * before free(), otherwise every file-backed mmap teardown leaks
+	 * a vnode-table slot; after VNODE_TABLE_SIZE distinct mappings
+	 * the table fills and the next open returns FS_NO_RESOURCES. */
+	if (fp != NULL) {
+		ext2fs_close_file((fs_private_t)fp);
 		free(fp);
+	}
 }
 
 static int
