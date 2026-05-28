@@ -1699,9 +1699,13 @@ ext2fs_open_file_into(
 			(struct ext2_mount *)fp->f_dev.mount_data;
 		struct ext2_vnode *vn = m ? vnode_get(m, fp->f_ino) : NULL;
 		if (!vn) {
+			/* #283: vnode table exhausted — a resource limit, not a
+			 * missing name.  Returning FS_NO_ENTRY here used to make
+			 * a perfectly-present file look absent (the original 5001
+			 * symptom). */
 			free(namebuf);
 			ext2fs_close_file((fs_private_t)fp);
-			return FS_NO_ENTRY;
+			return FS_NO_RESOURCES;
 		}
 		if (vn->v_refcount == 1) {
 			/* New vnode — populate from scratch */
