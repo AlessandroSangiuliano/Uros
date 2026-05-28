@@ -294,6 +294,69 @@ proc_S_register(
     return KERN_SUCCESS;
 }
 
+/*
+ * #287: reassign an existing pid to a freshly-spawned task so execve
+ * preserves the caller's pid (POSIX in-place-exec semantics emulated on
+ * the "spawn + suicide" model).  Swap the entry's task_port to new_task,
+ * re-arm the dead-name watch on it, refresh the cmdline, and keep
+ * pid/ppid/pgrp/sid.  The caller's old task then suicides; its dead-name
+ * no longer matches any entry (we dropped our ref) and is ignored.
+ */
+kern_return_t
+proc_S_exec_handoff(
+    mach_port_t                 server_port,
+    proc_pid_t                  old_pid,
+    mach_port_t                 new_task,
+    proc_cmdline_t              cmdline,
+    int                         *result)
+{
+    struct pid_entry *e;
+    mach_port_t old_port = MACH_PORT_NULL;
+    mach_port_t prev = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    (void)server_port;
+
+    pthread_mutex_lock(&pid_lock);
+    e = find_by_pid_locked(old_pid);
+    if (!e) {
+        pthread_mutex_unlock(&pid_lock);
+        if (new_task != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), new_task);
+        *result = PROC_ERR_NOT_FOUND;
+        return KERN_SUCCESS;
+    }
+    old_port      = e->task_port;
+    e->task_port  = new_task;
+    e->state      = PROC_STATE_RUNNING;
+    (void)strncpy(e->cmdline, cmdline, sizeof(e->cmdline) - 1);
+    e->cmdline[sizeof(e->cmdline) - 1] = '\0';
+    pthread_mutex_unlock(&pid_lock);
+
+    /* Watch the new task for death so waitpid still reaps old_pid. */
+    kr = mach_port_request_notification(mach_task_self(), new_task,
+                                        MACH_NOTIFY_DEAD_NAME, 0,
+                                        notify_port,
+                                        MACH_MSG_TYPE_MAKE_SEND_ONCE,
+                                        &prev);
+    if (prev != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), prev);
+    if (kr != KERN_SUCCESS)
+        printf("proc: exec_handoff dead-name request kr=%d (pid=%u)\n",
+               kr, old_pid);
+
+    /* Drop our ref to the old (about-to-suicide) task port.  Its pending
+     * dead-name notification, when it fires, won't match any entry. */
+    if (old_port != MACH_PORT_NULL && old_port != new_task)
+        (void)mach_port_deallocate(mach_task_self(), old_port);
+
+    printf("proc: exec_handoff pid=%u -> task=0x%x cmd=\"%s\"\n",
+           old_pid, (unsigned)new_task, e->cmdline);
+
+    *result = PROC_OK;
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 proc_S_subscribe_exit(
     mach_port_t                 server_port,

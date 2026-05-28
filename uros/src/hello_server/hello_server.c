@@ -209,7 +209,8 @@ hello_posix_exec_fd_smoke(void)
                             char *const argv[], char *const envp[],
                             mach_port_t *out_task,
                             mach_port_t *out_thread,
-                            unsigned int *out_pid);
+                            unsigned int *out_pid,
+                            int replace_self);
     extern int __uros_waitpid(int pid, int *status, int options);
 
     const char *path = "/posix_smoke.txt";
@@ -223,7 +224,8 @@ hello_posix_exec_fd_smoke(void)
     char *av[] = { (char *)"fd_exec_test", NULL };
     char *ev[] = { NULL };
     unsigned int child_pid = 0;
-    int sr = __uros_spawn("/fd_exec_test", av, ev, NULL, NULL, &child_pid);
+    int sr = __uros_spawn("/fd_exec_test", av, ev, NULL, NULL, &child_pid,
+                          0 /* spawn a child, keep our own pid */);
     if (sr != 0) {
         printf("(hello_server): exec-fd smoke spawn failed: %d\n", sr);
         close(fd);
@@ -491,14 +493,15 @@ main(int argc, char **argv)
     {
         extern int __uros_spawn(const char *path, char *const argv[],
                                 char *const envp[], mach_port_t *out_task,
-                                mach_port_t *out_thread, unsigned int *out_pid);
+                                mach_port_t *out_thread, unsigned int *out_pid,
+                                int replace_self);
         extern int __uros_waitpid(int pid, int *status, int options);
         char *dyn_argv[] = { (char *)"hello_dyn", NULL };
         char *dyn_envp[] = { NULL };
         mach_port_t  dt = MACH_PORT_NULL, dth = MACH_PORT_NULL;
         unsigned int dpid = 0;
         int dr = __uros_spawn("/hello_dyn", dyn_argv, dyn_envp,
-                              &dt, &dth, &dpid);
+                              &dt, &dth, &dpid, 0 /* spawn child */);
         if (dr != 0) {
             printf("(hello_server): __uros_spawn(/hello_dyn) failed: %d\n", dr);
         } else {
@@ -522,14 +525,15 @@ main(int argc, char **argv)
     {
         extern int __uros_spawn(const char *path, char *const argv[],
                                 char *const envp[], mach_port_t *out_task,
-                                mach_port_t *out_thread, unsigned int *out_pid);
+                                mach_port_t *out_thread, unsigned int *out_pid,
+                                int replace_self);
         extern int __uros_waitpid(int pid, int *status, int options);
         char *dl_argv[] = { (char *)"dlopen_test", NULL };
         char *dl_envp[] = { NULL };
         mach_port_t  dlt = MACH_PORT_NULL, dlth = MACH_PORT_NULL;
         unsigned int dlpid = 0;
         int dlr = __uros_spawn("/dlopen_test", dl_argv, dl_envp,
-                               &dlt, &dlth, &dlpid);
+                               &dlt, &dlth, &dlpid, 0 /* spawn child */);
         if (dlr != 0) {
             printf("(hello_server): __uros_spawn(/dlopen_test) failed: %d\n",
                    dlr);
@@ -556,7 +560,8 @@ main(int argc, char **argv)
                                  char *const argv[], char *const envp[],
                                  mach_port_t *out_task,
                                  mach_port_t *out_thread,
-                                 unsigned int *out_pid);
+                                 unsigned int *out_pid,
+                                 int replace_self);
         extern int  __uros_waitpid(int pid, int *status, int options);
 
         char *argv_v[] = { (char *)"hello_exec", NULL };
@@ -565,7 +570,8 @@ main(int argc, char **argv)
         mach_port_t  child_thread = MACH_PORT_NULL;
         unsigned int child_pid = 0;
         int sr = __uros_spawn("/hello_exec", argv_v, envp_v,
-                              &child_task, &child_thread, &child_pid);
+                              &child_task, &child_thread, &child_pid,
+                              0 /* spawn child */);
         /*
          * Phase 5b (#255): fork() smoke.  Child prints once and
          * _exit(7); parent waitpid's and checks the encoded status.

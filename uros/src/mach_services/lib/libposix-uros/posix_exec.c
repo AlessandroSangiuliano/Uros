@@ -129,7 +129,8 @@ __uros_spawn(const char *path,
              char *const envp[],
              mach_port_t *out_task,
              mach_port_t *out_thread,
-             proc_pid_t *out_pid)
+             proc_pid_t *out_pid,
+             int replace_self)
 {
     kern_return_t kr;
     int rc;
@@ -246,8 +247,19 @@ __uros_spawn(const char *path,
         if (cl >= sizeof cmd) cl = sizeof cmd - 1;
         memcpy(cmd, path + path_len - cl, cl);
         cmd[cl] = '\0';
-        (void)proc_register(__uros_proc_port, __uros_my_pid,
-                            new_task, cmd, &new_pid, &prc);
+        if (replace_self) {
+            /* execve (#287): the caller is about to suicide, so the new
+             * task must inherit the caller's *exact* pid — the shell's
+             * waitpid()/kill()/job-control all use the pid it got from
+             * fork(), which must stay attached to the running program.
+             * Hand off our pid to new_task instead of minting a new one. */
+            (void)proc_exec_handoff(__uros_proc_port, __uros_my_pid,
+                                    new_task, cmd, &prc);
+            new_pid = __uros_my_pid;
+        } else {
+            (void)proc_register(__uros_proc_port, __uros_my_pid,
+                                new_task, cmd, &new_pid, &prc);
+        }
     }
 
     /* The initial thread came back suspended (#262 step 3) — start it now
@@ -275,7 +287,8 @@ __uros_spawn(const char *path,
 int
 __uros_execve(const char *path, char *const argv[], char *const envp[])
 {
-    int r = __uros_spawn(path, argv, envp, NULL, NULL, NULL);
+    int r = __uros_spawn(path, argv, envp, NULL, NULL, NULL,
+                         1 /* replace_self: hand our pid to the new task */);
     if (r != 0)
         return r;
     /* New task is alive — politely vanish.  task_terminate doesn't
