@@ -251,3 +251,20 @@ routine proc_tcgetpgrp(
 	in	sid		: proc_pid_t;
 	out	pgrp		: proc_pid_t;
 	out	result		: int);
+
+/*
+ * System-wide graceful shutdown / reboot (v0.5.0 / #281).
+ *
+ *   mode == PROC_SHUTDOWN_HALT   → host_reboot(host, HOST_REBOOT_HALT)
+ *   mode == PROC_SHUTDOWN_REBOOT → host_reboot(host, 0)
+ *
+ * v0.5.0 minimum: relay the host_reboot trap from a task that owns
+ * the master host port.  Future passes will add SIGTERM-then-SIGKILL
+ * sweeps and vfs sync before the kernel reset (see #281).  This RPC
+ * does not return on success — the kernel halts/resets before the
+ * reply lands; callers should treat any reply as failure.
+ */
+routine proc_shutdown(
+		proc_port	: mach_port_t;
+	in	mode		: int;
+	out	result		: int);

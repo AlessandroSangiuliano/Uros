@@ -706,11 +706,26 @@ halt_all_cpus(
 	}
 	else {
 	    rebootflag = 1;
-	    printf("In tight loop: hit ctl-alt-del to reboot\n");
+
+	    /*
+	     * Modern halt = power off.  Try the ACPI shutdown registers
+	     * used by QEMU/PIIX4 (0x604), Bochs / newer QEMU (0xB004) and
+	     * VirtualBox (0x4004).  The value 0x2000 is SLP_TYP=0 |
+	     * SLP_EN, which transitions the chipset to S5 (soft-off).
+	     * On real hardware without ACPI poweroff support this is a
+	     * no-op and we fall through to the legacy cli/hlt loop, the
+	     * operator can then trigger ctl-alt-del.
+	     */
+	    outw(0x604,  0x2000);   /* QEMU PIIX4 PM1a_CNT */
+	    outw(0xB004, 0x2000);   /* Bochs / newer QEMU  */
+	    outw(0x4004, 0x3400);   /* VirtualBox          */
+
+	    printf("System halted.\n");
 	    (void) spllo();
 	}
+	__asm__ __volatile__("cli");
 	for (;;)
-	    continue;
+	    __asm__ __volatile__("hlt");
 }
 
 /*
