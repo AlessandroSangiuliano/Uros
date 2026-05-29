@@ -118,6 +118,22 @@ if {$_saw_dhello} { send_user "\n\[smoke\] hello_dyn_world stdout->ctty OK (dyna
 if {$_saw_dreap}  { send_user "\[smoke\] ush reaped hello_dyn_world (exit 0, dynamic clean-exit)\n" } \
                   else { send_user "\n\[smoke\] FAIL: hello_dyn_world not reaped\n"; exit 1 }
 
+expect { "ush\$ " {} timeout {} }
+
+# Step 3d (#291) — minimal musl pthread regression.  /pthread_min creates +
+# joins worker threads with mutex contention.  Before #291 (weak
+# uros_syscall_stub.lo in the static libc-musl.a) pthread_create failed with
+# EAGAIN because the weak -ENOSYS __uros_clone shadowed the strong one;
+# stripping the stub lets the strong libposix-uros __uros_clone link in.
+# Require the program's own "PASS" line.
+send "/pthread_min\r"
+set timeout 60
+expect {
+    -re "pthread_min: PASS"  { send_user "\n\[smoke\] pthread_min PASS (musl pthread_create works, #291)\n" }
+    -re "pthread_min: FAIL"  { send_user "\n\[smoke\] FAIL: pthread_min reported FAIL\n"; exit 1 }
+    timeout                  { send_user "\n\[smoke\] FAIL: no pthread_min result\n"; exit 1 }
+}
+
 # Step 4 — graceful poweroff with drain (#284).  ush sends
 # proc_shutdown(HALT); proc_server SIGTERMs userland apps, fs_syncs every
 # mount, then calls host_reboot(HOST_REBOOT_HALT).  The kernel writes ACPI
