@@ -55,6 +55,18 @@ if(UROS_BUILD_MUSL)
     BUILD_COMMAND     ${CMAKE_COMMAND} -E env make -j
     INSTALL_COMMAND   make install
                 COMMAND ${CMAKE_COMMAND} -E copy ${MUSL_LIB} ${MUSL_OUT}
+                # #291: strip the WEAK -ENOSYS syscall/clone/TLS stubs
+                # (uros_syscall_stub.lo) from the STATIC libc-musl.a.  They
+                # exist only so the shared libc.so / ld-musl links standalone
+                # under --no-undefined; in the static archive they are a trap
+                # — a static app that links libposix-uros (every Uros binary)
+                # would otherwise pick up the weak -ENOSYS __uros_clone /
+                # __uros_syscallN instead of the strong dispatcher, breaking
+                # pthread_create (EAGAIN), TLS, and every syscall unless each
+                # binary force-pulls them with -Wl,-u (the #286/#288 hack).
+                # The shared libc.so keeps the stubs (built from libc.a, not
+                # this copy), so the standalone ldso link is unaffected.
+                COMMAND ar d ${MUSL_OUT} uros_syscall_stub.lo
     BUILD_BYPRODUCTS  ${MUSL_LIB} ${MUSL_OUT} ${MUSL_SO} ${MUSL_LDSO}
     LOG_CONFIGURE     ON
     LOG_BUILD         ON

@@ -16,25 +16,23 @@ if(NOT EXISTS "${GEN_MACH_MACHINE}")
     SYMBOLIC)
 endif()
 
-# #288: shared force-pull for minimal static musl binaries.  musl's
-# libc-musl.a carries WEAK -ENOSYS stubs (__uros_syscall0..6,
-# __uros_set_thread_area_tp; uros_syscall_stub.c, #234) that exist only so
-# the standalone libc.so / ld-musl links under --no-undefined.  A static
-# binary referencing too few libposix-uros symbols (a printf-only program)
-# fails to drag the strong defs in, so the weak stubs win and every syscall
-# + the TLS setup return -ENOSYS (hlt in __init_tls before main).  Linking
-# this INTERFACE target force-pulls the real syscall dispatcher (syscall.o)
-# and TLS installer (posix_tls.o) — no per-binary -Wl,-u boilerplate.
+# uros_musl_dispatcher — kept as a no-op INTERFACE for backward
+# compatibility (a few targets still link it).
 #
-# Deliberately does NOT force __uros_clone: pulling its object
-# (posix_clone.o) drags in the pthread-clone machinery, which has a side
-# effect that breaks ush's fork+execve (#269-adjacent).  Binaries that
-# really use pthreads pull posix_clone.o by referencing pthread_create.
+# History: musl's libc-musl.a used to carry WEAK -ENOSYS stubs
+# (__uros_syscall0..6, __uros_set_thread_area_tp, __uros_clone;
+# uros_syscall_stub.c, #234) that exist only so the standalone libc.so /
+# ld-musl links under --no-undefined.  Those weak defs leaked into the
+# STATIC archive too, where they shadowed the strong libposix-uros
+# dispatcher unless every binary force-pulled them with -Wl,-u (#286, #288).
+#
+# #291 strips uros_syscall_stub.lo from the static libc-musl.a entirely (see
+# contrib/CMakeLists.txt), so the strong __uros_syscallN / TLS / clone defs
+# are now the only ones in the static link and get pulled automatically —
+# no -Wl,-u anywhere.  __uros_clone is safe to pull into forking binaries
+# since #292 (fork's post-fork reinit moved to a pthread_atfork handler).
 if(UROS_BUILD_MUSL)
   add_library(uros_musl_dispatcher INTERFACE)
-  target_link_options(uros_musl_dispatcher INTERFACE
-    -Wl,-u,__uros_syscall0
-    -Wl,-u,__uros_set_thread_area_tp)
 endif()
 
 # Per ora costruiamo solo i tool host necessari (mig/migcom, librerie base).
@@ -95,6 +93,12 @@ endif()
 # dynamic clean-exit/reap path through ld-musl + the umbrella libc.so)
 if(UROS_BUILD_MUSL)
   add_subdirectory(hello_dyn_world)
+endif()
+
+# Build pthread_min (#291: minimal musl pthread regression — proves
+# pthread_create works without any -Wl,-u clone workaround)
+if(UROS_BUILD_MUSL)
+  add_subdirectory(pthread_min)
 endif()
 
 # Build ush — Uros shell (#275.5).

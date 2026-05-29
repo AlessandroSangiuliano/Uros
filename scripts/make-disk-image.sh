@@ -102,6 +102,7 @@ EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
 FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
 HELLO_WORLD="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_world"
+PTHREAD_MIN="$BUILD_DIR/export/uros/$ARCH/user/sbin/pthread_min"  # #291 musl pthread regression
 USH="$BUILD_DIR/export/uros/$ARCH/user/sbin/ush"
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 # #234 Phase 7: dynamic linker + first dynamic binary.  ld-musl-i386.so.1 is
@@ -387,6 +388,13 @@ if [ -f "$HELLO_WORLD" ]; then
     HELLO_WORLD_WRITE_LINE="write $HELLO_WORLD hello_world"
 fi
 
+# pthread_min (#291): minimal musl pthread regression; copy to / so ush can
+# launch "/pthread_min".
+PTHREAD_MIN_WRITE_LINE=""
+if [ -f "$PTHREAD_MIN" ]; then
+    PTHREAD_MIN_WRITE_LINE="write $PTHREAD_MIN pthread_min"
+fi
+
 # ush is optional (#275.5): copy to /mach_servers/ so bootstrap stage-2
 # can load it as a session-leader after proc_server / char_server.
 USH_WRITE_LINE=""
@@ -427,6 +435,7 @@ write $BENCH_4M bench_4m.dat
 ${HELLO_EXEC_WRITE_LINE}
 ${FD_EXEC_TEST_WRITE_LINE}
 ${HELLO_WORLD_WRITE_LINE}
+${PTHREAD_MIN_WRITE_LINE}
 ${HELLO_DYN_WRITE_LINE}
 ${HELLO_DYN_WORLD_WRITE_LINE}
 ${DLOPEN_TEST_WRITE_LINE}
