@@ -264,6 +264,21 @@ __uros_signals_init(void)
                             &__uros_my_pid, &rc);
         if (rc != PROC_OK)
             return;
+
+        /*
+         * #292: register the post-fork reinit as a pthread_atfork CHILD
+         * handler.  musl's fork() runs child handlers from __fork_handler()
+         * AFTER _Fork()/__post_Fork() has reset the thread list to single-
+         * threaded.  Running __uros_post_fork_init (which spawns the signal
+         * handler pthread) inline in __uros_fork's child path instead ran it
+         * BEFORE that reset — fine while __uros_clone was a weak -ENOSYS
+         * no-op, but as soon as the real __uros_clone is linked the spawn
+         * walked musl's still-CoW'd (parent) thread list and corrupted it,
+         * breaking fork()+execve().  Registering here (main task only, once)
+         * defers the reinit to the correct point.
+         */
+        extern void __uros_post_fork_init(void);
+        (void)pthread_atfork(NULL, NULL, __uros_post_fork_init);
     }
 
     /* 3. Allocate a fresh receive right our signals arrive on.  In a

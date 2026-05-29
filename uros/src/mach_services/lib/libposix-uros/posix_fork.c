@@ -161,7 +161,13 @@ __uros_fork(void)
          * descriptor is back.  The TP was captured by the parent below
          * and CoW'd into our address space. */
         (void)__uros_set_thread_area_tp((void *)__uros_fork_saved_tp);
-        __uros_post_fork_init();
+        /*
+         * #292: do NOT run __uros_post_fork_init() here.  It spawns the
+         * signal handler pthread, which must happen AFTER musl's __post_Fork
+         * resets the thread list — so it is registered as a pthread_atfork
+         * child handler (see __uros_signals_init) and fires from fork()'s
+         * __fork_handler() once we return.
+         */
         return 0;
     }
 
