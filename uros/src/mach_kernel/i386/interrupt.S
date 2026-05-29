@@ -250,8 +250,26 @@ int_check:
 	movw	$(OCW_TEMPLATE | READ_NEXT_RD | READ_IS_ONRD), %ax
 	outb	%al,%dx
 	inb	%dx,%al			# read ISR
-	testb	$0x80, %al		# return if IS7 is off
-	jz	interrupt_return
+	testb	$0x80, %al		# IS7 set -> real interrupt
+	jnz	int_real_irq7_15	# real: fall through to the EOI path
+	/*
+	 * #278: spurious interrupt.  A spurious IRQ7 (master) needs no EOI,
+	 * but a spurious IRQ15 (slave) still made the master latch its cascade
+	 * input (IRQ2) in-service — the master has no idea the slave's vector
+	 * was spurious.  If we return without EOIing the master, IRQ2 stays
+	 * in-service forever and starves every lower-priority master line
+	 * (COM1 IRQ4 etc.).  These spurious slave INTAs happen routinely with
+	 * the level-triggered AHCI IRQ (11): the forward path masks the slave
+	 * while its line is still asserted, so the re-armed cascade resolves
+	 * to a spurious slave vector.  EOI the master cascade here.
+	 */
+	cmpl	$15, %ecx		# slave (IRQ15) spurious?
+	jne	interrupt_return	# IRQ7 master spurious: no EOI needed
+	movl	EXT(master_icw), %edx
+	movb	$0x62, %al		# specific EOI for cascade (IRQ2)
+	outb	%al, %dx
+	jmp	interrupt_return
+int_real_irq7_15:
 
 
 /*
