@@ -107,6 +107,9 @@ PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 # #234 Phase 7: dynamic linker + first dynamic binary.  ld-musl-i386.so.1 is
 # the umbrella libc.so; it goes to /lib/ where hello_dyn's PT_INTERP points.
 HELLO_DYN="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_dyn"
+# #289: dynamic twin of hello_world (printf + return) — verifies the
+# dynamic clean-exit/reap path.  Same PT_INTERP as hello_dyn.
+HELLO_DYN_WORLD="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_dyn_world"
 MUSL_LDSO="$BUILD_DIR/src/contrib/musl-install/lib/libc.so"
 # #234 Phase 7 incr 4: dlopen end-to-end test.  dlopen_test goes to / next
 # to hello_dyn; libfoo.so goes to /lib/ where dlopen("/lib/libfoo.so") finds it.
@@ -401,6 +404,14 @@ if [ -f "$HELLO_DYN" ] && [ -f "$MUSL_LDSO" ]; then
     LDSO_MKDIR_LINE="mkdir lib"   # ld-musl + libfoo written into it below
 fi
 
+# hello_dyn_world (#289): dynamic clean-exit verification binary.  Needs the
+# same interpreter as hello_dyn, so gate it on the ld-musl presence too.
+HELLO_DYN_WORLD_WRITE_LINE=""
+if [ -f "$HELLO_DYN_WORLD" ] && [ -f "$MUSL_LDSO" ]; then
+    HELLO_DYN_WORLD_WRITE_LINE="write $HELLO_DYN_WORLD hello_dyn_world"
+    LDSO_MKDIR_LINE="mkdir lib"   # ensure /lib exists even if hello_dyn absent
+fi
+
 # dlopen_test (#234 Phase 7 incr 4): dynamic binary that dlopens libfoo.so.
 DLOPEN_TEST_WRITE_LINE=""
 if [ -f "$DLOPEN_TEST" ] && [ -f "$MUSL_LDSO" ]; then
@@ -417,6 +428,7 @@ ${HELLO_EXEC_WRITE_LINE}
 ${FD_EXEC_TEST_WRITE_LINE}
 ${HELLO_WORLD_WRITE_LINE}
 ${HELLO_DYN_WRITE_LINE}
+${HELLO_DYN_WORLD_WRITE_LINE}
 ${DLOPEN_TEST_WRITE_LINE}
 ${LDSO_MKDIR_LINE}
 mkdir mach_servers
@@ -449,9 +461,11 @@ write $HAL_PCI_SCAN_MODULE pci_scan.so
 DBGFS
 
 # #234 Phase 7: install the dynamic linker (umbrella libc.so) at
-# /lib/ld-musl-i386.so.1 — where hello_dyn's PT_INTERP points.  Separate
-# debugfs pass so the /lib cd/write doesn't tangle with the main heredoc.
-if [ -f "$HELLO_DYN" ] && [ -f "$MUSL_LDSO" ]; then
+# /lib/ld-musl-i386.so.1 — where the dynamic binaries' PT_INTERP points.
+# Separate debugfs pass so the /lib cd/write doesn't tangle with the main
+# heredoc.  Installed if any dynamic binary (hello_dyn / hello_dyn_world)
+# is present.
+if { [ -f "$HELLO_DYN" ] || [ -f "$HELLO_DYN_WORLD" ]; } && [ -f "$MUSL_LDSO" ]; then
     # libfoo.so is optional; only write it if the build produced it
     # (incr 4 may be temporarily out-of-tree on side branches).
     LIBFOO_WRITE_LINE=""
