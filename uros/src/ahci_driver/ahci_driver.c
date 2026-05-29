@@ -1744,9 +1744,15 @@ ahci_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 	/* IRQ notification — acknowledge on all active ports, no reply */
 	if (in->msgh_id >= IRQ_NOTIFY_MSGH_BASE) {
 		int pi;
-		ahci_write(AHCI_IS, ~0u);
+		/* #278: clear per-port PxIS BEFORE the global HBA IS.  The AHCI
+		 * spec requires this order: writing the global IS bit while the
+		 * port still has pending PxIS bits makes the HBA immediately
+		 * re-assert the (level-triggered) interrupt line, leaving IRQ11
+		 * high.  That kept the master PIC cascade in-service and starved
+		 * COM1's IRQ4 (#278). */
 		for (pi = 0; pi < n_ports; pi++)
 			port_write(ahci_ports[pi].hba_port, PORT_IS, ~0u);
+		ahci_write(AHCI_IS, ~0u);
 		(void)device_intr_enable(master_device, ahci_irq);
 		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
 		((mig_reply_error_t *)out)->Head.msgh_size =

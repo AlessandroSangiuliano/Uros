@@ -348,13 +348,6 @@ uart_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
 		p->ring_tail = (p->ring_tail + 1u) & UART_RING_MASK;
 	}
 
-	/* Polled fallback: if the IRQ path is not delivering for some
-	 * reason (PIC, QEMU model, etc.), still drain RHR directly so
-	 * input keeps moving.  Cheap because called only on syscall. */
-	while (n < max && (uart_in(UART_LSR) & LSR_DR)) {
-		buf[n++] = (char)uart_in(UART_RHR);
-	}
-
 	*out_len = n;
 	return 0;
 }
