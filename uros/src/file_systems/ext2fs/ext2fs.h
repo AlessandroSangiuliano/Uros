@@ -157,6 +157,9 @@ extern int ext2fs_write_file(fs_private_t, vm_offset_t, vm_offset_t, vm_size_t);
 extern int ext2fs_sync(fs_private_t);
 extern int ext2fs_flush_metadata(fs_private_t);
 
+/* #284: mark the volume cleanly unmounted (set EXT2_VALID_FS + flush sb). */
+extern int ext2fs_mark_clean_dev(struct device *dev);
+
 /* Writable namespace (#264). */
 extern int ext2fs_create(struct device *dev, const char *path, int mode);
 extern int ext2fs_unlink(struct device *dev, const char *path);

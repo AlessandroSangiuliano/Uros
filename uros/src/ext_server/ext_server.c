@@ -852,6 +852,27 @@ vfs_sync(mach_port_t fs_port)
 	return ds_ext2_sync(fs_port);
 }
 
+/*
+ * #284: clean unmount.  Flush everything to disk, then mark the on-disk
+ * superblock cleanly unmounted (EXT2_VALID_FS) so the host's fsck.ext2
+ * sees a clean volume after a graceful shutdown.  ext2_dev_write bypasses
+ * the page cache, so the sync must run first; the mark-clean is the last,
+ * authoritative write before host_reboot.
+ */
+kern_return_t
+vfs_unmount(mach_port_t fs_port)
+{
+	struct mount_context *mnt = (struct mount_context *)fs_port;
+	int rc;
+
+	(void) ds_ext2_sync(fs_port);
+
+	rc = ext2fs_mark_clean_dev(&mnt->dev);
+	printf("ext2: unmount — '%s' %s\n", mnt->service_name,
+	       (rc == 0) ? "marked clean" : "mark-clean FAILED");
+	return KERN_SUCCESS;
+}
+
 /* ================================================================
  * File-backed mmap (#276 Phase B.3): hand out a libfspager-backed
  * memory_object for the file.  Phase B's read_page returns zeros so

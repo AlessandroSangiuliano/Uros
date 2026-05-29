@@ -248,3 +248,18 @@ routine fs_mmap(
 	in	flags		: vfs_u32_t;
 	out	mem_obj		: mach_port_t
 	);
+
+/* ------------------------------------------------------------------ */
+/*  Clean unmount (#284)                                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Final flush + clean unmount.  The server syncs all dirty state to the
+ * device and marks the on-disk volume cleanly unmounted (e.g. ext2 sets
+ * EXT2_VALID_FS) so the next boot's fsck sees a clean filesystem.  Used
+ * by proc_server's shutdown drain after the SIGTERM sweep.  Read-only or
+ * virtual mounts treat this as a no-op.
+ */
+routine fs_unmount(
+		fs_port		: mach_port_t
+	);

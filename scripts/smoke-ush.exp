@@ -101,8 +101,8 @@ if {$_saw_reap}  { send_user "\[smoke\] ush reaped hello_world (exit 0)\n" } \
 # signal is the root fs sync confirmation followed by QEMU dropping the VM.
 send "shutdown\r"
 expect {
-    "shutdown — sync / ok" { send_user "\n\[smoke\] proc_shutdown drain + fs sync OK\n" }
-    timeout                { send_user "\n\[smoke\] FAIL: shutdown drain not acked\n"; exit 1 }
+    "shutdown — unmount / ok" { send_user "\n\[smoke\] proc_shutdown drain + clean unmount OK\n" }
+    timeout                   { send_user "\n\[smoke\] FAIL: shutdown drain not acked\n"; exit 1 }
 }
 
 # Wait for QEMU itself to exit (ACPI poweroff drops the VM).  QEMU

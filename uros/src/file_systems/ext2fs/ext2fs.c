@@ -301,6 +301,9 @@ static int mount_fs(
 static void unmount_fs(
 		struct ext2fs_file *);
 
+static int write_super(
+		struct ext2fs_file *);
+
 /*
  * Per-mount filesystem state.
  * One instance per mounted partition, hung off struct device.mount_data.
@@ -1424,6 +1427,19 @@ mount_fs(register struct ext2fs_file	*fp)
 	error = read_fs(&fp->f_dev, &fp->f_fs, &fp->f_gd, &fp->f_gd_size);
 	if (error)
 	    return (error);
+
+	/*
+	 * #284 phase 1 (Linux-compliant): mark the volume "in use" so an
+	 * unclean shutdown forces e2fsck on the next boot.  Linux clears
+	 * EXT2_VALID_FS and bumps the mount count on every RW mount; the
+	 * symmetric "mark clean" is ext2fs_mark_clean_dev() at unmount.
+	 * Only the first (uncached) mount reaches here.
+	 */
+	if (fp->f_fs->s_state & EXT2_VALID_FS) {
+		fp->f_fs->s_state &= ~EXT2_VALID_FS;
+		fp->f_fs->s_mnt_count++;
+		(void) write_super(fp);
+	}
 
 	/* Cache for subsequent opens in per-mount state */
 	if (m) {
@@ -2673,6 +2689,33 @@ write_super(struct ext2fs_file *fp)
 			    (io_buf_ptr_t) &raw,
 			    (mach_msg_type_number_t) SBSIZE,
 			    &bytes_written);
+}
+
+/*
+ * #284 phase 2 (Linux-compliant): mark the volume cleanly unmounted —
+ * set EXT2_VALID_FS in the cached superblock and flush it straight to
+ * disk (ext2_dev_write bypasses the page cache).  Inverse of the
+ * mount-time mark-dirty in mount_fs().  Called from the fs_unmount RPC
+ * at shutdown, after the final data sync.  Operates on the per-device
+ * cached superblock so no open file handle is required.
+ */
+int
+ext2fs_mark_clean_dev(struct device *dev)
+{
+	struct ext2_mount *m = ext2_get_mount(dev);
+	struct ext2fs_file tmp;
+
+	if (!m || !m->m_fs)
+		return FS_INVALID_FS;
+
+	m->m_fs->s_state |= EXT2_VALID_FS;
+
+	/* write_super() only touches f_dev + f_fs, so a stack file with
+	 * just those two fields populated is enough to flush the sb. */
+	memset(&tmp, 0, sizeof(tmp));
+	tmp.f_dev = *dev;
+	tmp.f_fs  = m->m_fs;
+	return write_super(&tmp);
 }
 
 /*

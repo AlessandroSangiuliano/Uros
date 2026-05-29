@@ -1138,8 +1138,8 @@ proc_drain_fs_sync(void)
             kr = netname_look_up_mount(name_server_port, line,
                                        &fs_port, matched);
             if (kr == NETNAME_SUCCESS && fs_port != MACH_PORT_NULL) {
-                kern_return_t sk = fs_sync(fs_port);
-                printf("proc: shutdown — sync %s %s\n", line,
+                kern_return_t sk = fs_unmount(fs_port);
+                printf("proc: shutdown — unmount %s %s\n", line,
                        (sk == KERN_SUCCESS) ? "ok" : "FAILED");
                 (void)mach_port_deallocate(mach_task_self(), fs_port);
             }
@@ -1639,6 +1639,7 @@ kern_return_t vfs_rmdir(mach_port_t fp, char *p) { (void)fp;(void)p;
 kern_return_t vfs_rename(mach_port_t fp, char *o, char *n)
 { (void)fp;(void)o;(void)n; return KERN_FAILURE; }
 kern_return_t vfs_sync(mach_port_t fp) { (void)fp; return KERN_SUCCESS; }
+kern_return_t vfs_unmount(mach_port_t fp) { (void)fp; return KERN_SUCCESS; }
 
 /* /proc files are synthetic — no mmap path.  Stub introduced when
  * fs_mmap landed in vfs.defs via #276; proc_server otherwise fails to
