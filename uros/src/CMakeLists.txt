@@ -91,6 +91,12 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(hello_world)
 endif()
 
+# Build hello_dyn_world (#289: dynamic twin of hello_world — verifies the
+# dynamic clean-exit/reap path through ld-musl + the umbrella libc.so)
+if(UROS_BUILD_MUSL)
+  add_subdirectory(hello_dyn_world)
+endif()
+
 # Build ush — Uros shell (#275.5).
 if(UROS_BUILD_MUSL)
   add_subdirectory(ush)

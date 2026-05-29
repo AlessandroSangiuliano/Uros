@@ -93,6 +93,31 @@ if {$_saw_hello} { send_user "\n\[smoke\] hello_world stdout->ctty OK\n" } \
 if {$_saw_reap}  { send_user "\[smoke\] ush reaped hello_world (exit 0)\n" } \
                  else { send_user "\n\[smoke\] FAIL: hello_world not reaped\n"; exit 1 }
 
+# Wait for the prompt before launching the dynamic case so the two runs
+# don't overlap on the tty.
+expect { "ush\$ " {} timeout {} }
+
+# Step 3c (#289) — the DYNAMIC twin of hello_world.  /hello_dyn_world is an
+# ET_DYN/PIE that runs through ld-musl + the umbrella libc.so, then returns
+# from main.  This exercises the dynamic clean-exit path (musl exit() ->
+# exit_group -> libposix-uros h_exit -> task_terminate) and ush's foreground
+# waitpid reap — the gap #234 left (it only proved reaching main).  Same
+# race handling as 3b: require "hello" and the exit=0x0 reap in either order.
+send "/hello_dyn_world\r"
+set _saw_dhello 0
+set _saw_dreap  0
+for {set i 0} {$i < 2} {incr i} {
+    expect {
+        -re "hello\[\r\n]" { set _saw_dhello 1 }
+        -re "exit=0x0"     { set _saw_dreap 1 }
+        timeout            { break }
+    }
+}
+if {$_saw_dhello} { send_user "\n\[smoke\] hello_dyn_world stdout->ctty OK (dynamic)\n" } \
+                  else { send_user "\n\[smoke\] FAIL: no hello_dyn_world output\n"; exit 1 }
+if {$_saw_dreap}  { send_user "\[smoke\] ush reaped hello_dyn_world (exit 0, dynamic clean-exit)\n" } \
+                  else { send_user "\n\[smoke\] FAIL: hello_dyn_world not reaped\n"; exit 1 }
+
 # Step 4 — graceful poweroff with drain (#284).  ush sends
 # proc_shutdown(HALT); proc_server SIGTERMs userland apps, fs_syncs every
 # mount, then calls host_reboot(HOST_REBOOT_HALT).  The kernel writes ACPI
