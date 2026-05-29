@@ -198,7 +198,9 @@ uart_irq_handler(void *arg)
 	unsigned int budget;
 	int got_any = 0;
 
+#ifdef UART_DEBUG_TRACE	/* set via -DUART_DEBUG_TRACE for bring-up */
 	mach_print("uart: IRQ fired\n");
+#endif
 	for (budget = 0; budget < 64u; budget++) {
 		uint8_t lsr = uart_in(UART_LSR);
 		if ((lsr & LSR_DR) == 0)

@@ -133,10 +133,10 @@ add_library(char_ps2_module SHARED
 )
 add_dependencies(char_ps2_module mig_mach_public_headers)
 target_compile_options(char_ps2_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
-target_compile_definitions(char_ps2_module PRIVATE MACH_IPC_COMPAT=0
-  # Bring-up trace: log every byte read from PS2_DATA in ps2_irq_handler.
-  # Remove when a real subscriber (tty / shell) consumes the events.
-  PS2_DEBUG_TRACE)
+target_compile_definitions(char_ps2_module PRIVATE MACH_IPC_COMPAT=0)
+# PS2_DEBUG_TRACE (per-scancode console trace) was bring-up scaffolding;
+# now that the shell consumes the events it just spams the console on
+# every keypress.  Re-add -DPS2_DEBUG_TRACE here for low-level debugging.
 target_include_directories(char_ps2_module PRIVATE ${CHAR_INCLUDE_DIRS})
 set_target_properties(char_ps2_module PROPERTIES
   OUTPUT_NAME "ps2"
@@ -173,10 +173,11 @@ add_library(char_uart_module SHARED
 )
 add_dependencies(char_uart_module mig_mach_public_headers)
 target_compile_options(char_uart_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
-target_compile_definitions(char_uart_module PRIVATE MACH_IPC_COMPAT=0
-  # Bring-up trace: log every RX byte in uart_irq_handler.  Remove
-  # when a real subscriber (shell / getty) consumes the stream.
-  UART_DEBUG_TRACE)
+target_compile_definitions(char_uart_module PRIVATE MACH_IPC_COMPAT=0)
+# UART_DEBUG_TRACE (per-RX-byte + per-IRQ console trace) was bring-up
+# scaffolding; now that the shell consumes the stream it just spams the
+# console on every keypress.  Re-add -DUART_DEBUG_TRACE here to bring it
+# back for low-level debugging.
 target_include_directories(char_uart_module PRIVATE ${CHAR_INCLUDE_DIRS})
 set_target_properties(char_uart_module PROPERTIES
   OUTPUT_NAME "uart"
