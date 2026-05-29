@@ -248,4 +248,25 @@ kern_return_t netname_look_up_mount
 );
 #endif	/* defined(LINTLIBRARY) */
 
+/* Routine netname_list_mounts */
+#ifdef	mig_external
+mig_external
+#else
+extern
+#endif	/* mig_external */
+kern_return_t netname_list_mounts
+#if	defined(LINTLIBRARY)
+    (server_port, prefixes, count)
+	mach_port_t server_port;
+	netname_path_t prefixes;
+	int *count;
+{ return netname_list_mounts(server_port, prefixes, count); }
+#else
+(
+	mach_port_t server_port,
+	netname_path_t prefixes,
+	int *count
+);
+#endif	/* defined(LINTLIBRARY) */
+
 #endif	 /* _netname_user_ */

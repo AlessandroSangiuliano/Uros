@@ -93,16 +93,16 @@ if {$_saw_hello} { send_user "\n\[smoke\] hello_world stdout->ctty OK\n" } \
 if {$_saw_reap}  { send_user "\[smoke\] ush reaped hello_world (exit 0)\n" } \
                  else { send_user "\n\[smoke\] FAIL: hello_world not reaped\n"; exit 1 }
 
-# Step 4 — graceful poweroff.  ush sends proc_shutdown(HALT) RPC,
-# proc_server calls host_reboot(HOST_REBOOT_HALT), the kernel writes
-# ACPI PM1a_CNT 0x2000 and QEMU cuts power immediately — so the
-# kernel's "System halted." printf never makes it out the serial line.
-# The deterministic success signal is proc_server's confirmation
-# followed by QEMU dropping the VM (EOF on the spawn).
+# Step 4 — graceful poweroff with drain (#284).  ush sends
+# proc_shutdown(HALT); proc_server SIGTERMs userland apps, fs_syncs every
+# mount, then calls host_reboot(HOST_REBOOT_HALT).  The kernel writes ACPI
+# PM1a_CNT 0x2000 and QEMU cuts power immediately, so the kernel's
+# "System halted." printf never makes it out.  The deterministic success
+# signal is the root fs sync confirmation followed by QEMU dropping the VM.
 send "shutdown\r"
 expect {
-    "host_reboot(HALT)" { send_user "\n\[smoke\] proc_shutdown(HALT) OK\n" }
-    timeout             { send_user "\n\[smoke\] FAIL: shutdown not acked\n"; exit 1 }
+    "shutdown — sync / ok" { send_user "\n\[smoke\] proc_shutdown drain + fs sync OK\n" }
+    timeout                { send_user "\n\[smoke\] FAIL: shutdown drain not acked\n"; exit 1 }
 }
 
 # Wait for QEMU itself to exit (ACPI poweroff drops the VM).  QEMU

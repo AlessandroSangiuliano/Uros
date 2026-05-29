@@ -100,6 +100,7 @@ set(PROC_SERVER_SOURCES
   proc_main.c
   ${PROC_SERVER_C}
   ${VFS_SERVER_C}
+  ${VFS_USER_C}
   ${NOTIFY_SERVER_C}
 )
 
@@ -108,6 +109,7 @@ set(PROC_SERVER_SOURCES
 # so this is just defensive).
 set_source_files_properties(${PROC_SERVER_C} PROPERTIES GENERATED TRUE)
 set_source_files_properties(${VFS_SERVER_C} PROPERTIES GENERATED TRUE)
+set_source_files_properties(${VFS_USER_C} PROPERTIES GENERATED TRUE)
 set_source_files_properties(${NOTIFY_SERVER_C} PROPERTIES GENERATED TRUE)
 
 # ===========================================================================

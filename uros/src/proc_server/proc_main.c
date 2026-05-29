@@ -43,6 +43,7 @@
 /* MIG-generated headers — proc + vfs + notify. */
 #include "proc_server.h"
 #include "vfs_server.h"
+#include "vfs.h"             /* fs_sync() client stub (#284 shutdown drain) */
 #include "notify_server.h"
 
 /* ------------------------------------------------------------------ */
@@ -1042,16 +1043,118 @@ proc_S_tcgetpgrp(
 /* proc_S_shutdown — bring the system down via host_reboot (#281).    */
 /* ------------------------------------------------------------------ */
 
+/* SIGTERM grace window before we escalate to task_terminate (#284). */
+#define PROC_DRAIN_GRACE_US     800000      /* 0.8 s */
+
 /*
- * v0.5.0 minimum: relay host_reboot to the kernel using our master
- * host port (received from bootstrap_ports at startup).  Full drain
- * (SIGTERM sweep + vfs sync) is a follow-up tracked in #281 — for
- * now the kernel's halt_all_cpus path already shuts processors
- * cleanly, which is good enough to stop hammering QEMU.
- *
- * On success this call does not return: host_reboot halts/resets the
- * machine before the reply marshalls.  Callers should treat any reply
- * as a failure.
+ * #284 phase 1 — SIGTERM sweep.  Send PROC_SIGTERM to every userland
+ * app, give them a short grace window to flush and exit, then SIGKILL
+ * (task_terminate) anything still alive.  We target only pids that own
+ * a signal_port: those are the userland apps (ush and its children).
+ * The core servers — ext_server, name_server, block_device, char — set
+ * no signal_port, so the sweep never touches them, which is exactly what
+ * we want: ext_server must stay alive for the fs sync in phase 2.
+ */
+static void
+proc_drain_sigterm_sweep(void)
+{
+    struct { mach_port_t sigport; proc_pid_t pid; } term[PROC_MAX_TASKS];
+    mach_port_t kill_tasks[PROC_MAX_TASKS];
+    unsigned n_term = 0, n_kill = 0, i;
+    int k;
+
+    pthread_mutex_lock(&pid_lock);
+    for (k = 0; k < PROC_MAX_TASKS; k++) {
+        struct pid_entry *e = &pid_table[k];
+        if (e->in_use && e->state != PROC_STATE_ZOMBIE &&
+            e->signal_port != MACH_PORT_NULL) {
+            term[n_term].sigport = e->signal_port;
+            term[n_term].pid     = e->pid;
+            n_term++;
+        }
+    }
+    pthread_mutex_unlock(&pid_lock);
+
+    if (n_term == 0)
+        return;
+
+    printf("proc: shutdown — SIGTERM to %u task(s)\n", n_term);
+    for (i = 0; i < n_term; i++)
+        (void)send_signal_msg(term[i].sigport, PROC_SIGTERM, PROC_PID_NONE);
+
+    usleep(PROC_DRAIN_GRACE_US);
+
+    /* Whatever we SIGTERM'd that is still alive gets task_terminate, so
+     * shutdown always completes in a bounded time even if an app hangs. */
+    pthread_mutex_lock(&pid_lock);
+    for (i = 0; i < n_term; i++) {
+        struct pid_entry *e = find_by_pid_locked(term[i].pid);
+        if (e && e->state != PROC_STATE_ZOMBIE)
+            kill_tasks[n_kill++] = e->task_port;
+    }
+    pthread_mutex_unlock(&pid_lock);
+
+    if (n_kill) {
+        printf("proc: shutdown — SIGKILL %u unresponsive task(s)\n", n_kill);
+        for (i = 0; i < n_kill; i++)
+            (void)task_terminate(kill_tasks[i]);
+    }
+}
+
+/*
+ * #284 phase 2 — flush every mounted filesystem.  Walk the mount
+ * registry (netname_list_mounts), then fs_sync each mount's fs_port.
+ * fs_sync is fs-wide ("flush all dirty cached state to the device") and
+ * a no-op on read-only servers, so this is safe for every mount.  We
+ * skip our own /proc mount — it is virtual and an RPC to ourselves from
+ * this server thread would deadlock.  Failures are logged, never fatal.
+ */
+static void
+proc_drain_fs_sync(void)
+{
+    netname_path_t prefixes;
+    int count = 0;
+    kern_return_t kr;
+    char *line;
+
+    kr = netname_list_mounts(name_server_port, prefixes, &count);
+    if (kr != NETNAME_SUCCESS) {
+        printf("proc: shutdown — list_mounts failed kr=%d (skip sync)\n", kr);
+        return;
+    }
+    printf("proc: shutdown — syncing %d mount(s)\n", count);
+
+    /* prefixes is a newline-separated list; walk it in place. */
+    line = prefixes;
+    while (line && *line) {
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = '\0';
+
+        if (*line && strcmp(line, PROC_MOUNT_PATH) != 0) {
+            mach_port_t fs_port = MACH_PORT_NULL;
+            netname_name_t matched;
+
+            kr = netname_look_up_mount(name_server_port, line,
+                                       &fs_port, matched);
+            if (kr == NETNAME_SUCCESS && fs_port != MACH_PORT_NULL) {
+                kern_return_t sk = fs_sync(fs_port);
+                printf("proc: shutdown — sync %s %s\n", line,
+                       (sk == KERN_SUCCESS) ? "ok" : "FAILED");
+                (void)mach_port_deallocate(mach_task_self(), fs_port);
+            }
+        }
+
+        line = nl ? nl + 1 : NULL;
+    }
+}
+
+/*
+ * Graceful drain (#284) then host_reboot.  The drain SIGTERMs userland
+ * apps (grace + SIGKILL fallback) and fs_syncs every mount so no dirty
+ * page is lost across the reset.  On success host_reboot does not return:
+ * it halts/resets the machine before the reply marshalls, so any reply
+ * the caller sees is a failure.
  */
 kern_return_t
 proc_S_shutdown(
@@ -1067,22 +1170,21 @@ proc_S_shutdown(
     switch (mode) {
     case PROC_SHUTDOWN_HALT:
         options = HOST_REBOOT_HALT;
-        printf("proc: shutdown — host_reboot(HALT)\n");
+        printf("proc: shutdown — HALT (draining first)\n");
         break;
     case PROC_SHUTDOWN_REBOOT:
         options = 0;
-        printf("proc: shutdown — host_reboot(REBOOT)\n");
+        printf("proc: shutdown — REBOOT (draining first)\n");
         break;
     default:
         *result = PROC_ERR_INVAL;
         return KERN_SUCCESS;
     }
 
-    /* TODO(#281): SIGTERM sweep with a short grace window, then
-     * SIGKILL, then walk the mount registry asking each fs server
-     * to flush and unmount.  v0.5.0 ships the unconditional reboot
-     * so the operator at least has a non-destructive way out of QEMU. */
+    proc_drain_sigterm_sweep();
+    proc_drain_fs_sync();
 
+    printf("proc: shutdown — host_reboot(0x%x)\n", options);
     kr = host_reboot(host_port, options);
     /* host_reboot does not return on success.  Report failure if it
      * somehow does. */

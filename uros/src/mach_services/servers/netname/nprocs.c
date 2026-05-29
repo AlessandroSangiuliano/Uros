@@ -586,6 +586,41 @@ do_netname_look_up_mount(mach_port_t server, netname_path_t path,
     return NETNAME_SUCCESS;
 }
 
+/*
+ * #284: enumerate every mount prefix into a single newline-separated
+ * buffer.  proc_server's shutdown drain splits the result and re-resolves
+ * each prefix via netname_look_up_mount to fs_sync it.  If the registry
+ * outgrows the buffer we stop early and report the count we managed to
+ * emit — a partial sync is still better than none on the way down.
+ */
+kern_return_t
+do_netname_list_mounts(mach_port_t server, netname_path_t out_prefixes,
+		       int *out_count)
+{
+    mount_record_t this;
+    size_t off = 0;
+    int n = 0;
+    const size_t cap = sizeof(netname_path_t);
+
+    out_prefixes[0] = '\0';
+    for (this = mounts; this != NULL; this = this->next) {
+	size_t pl = strlen(this->prefix);
+	/* prefix + '\n' + terminating NUL must fit. */
+	if (off + pl + 2 > cap)
+	    break;
+	memcpy(out_prefixes + off, this->prefix, pl);
+	off += pl;
+	out_prefixes[off++] = '\n';
+	n++;
+    }
+    out_prefixes[off] = '\0';
+    *out_count = n;
+
+    if (Debug)
+	printf("%s: netname_list_mounts => %d mount(s)\n", program, n);
+    return NETNAME_SUCCESS;
+}
+
 kern_return_t
 do_mach_notify_port_deleted(mach_port_t notify, mach_port_t name)
 {

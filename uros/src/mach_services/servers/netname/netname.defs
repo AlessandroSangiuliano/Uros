@@ -147,3 +147,15 @@ routine netname_look_up_mount(
     out	port_id		: mach_port_move_send_t;
     out	matched		: netname_name_t);
 
+/*
+ * Enumerate every registered mount prefix (#284).  Returns the prefixes
+ * newline-separated in a single buffer (caller splits on '\n') plus the
+ * count.  Used by proc_server's shutdown drain to walk the registry and
+ * fs_sync each mount before host_reboot.  No port rights are handed out
+ * here — the caller re-resolves each prefix via netname_look_up_mount.
+ */
+routine netname_list_mounts(
+	server_port	: mach_port_t;
+    out	prefixes	: netname_path_t;
+    out	count		: int);
+
