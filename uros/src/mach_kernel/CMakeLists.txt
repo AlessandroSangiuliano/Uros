@@ -44,6 +44,19 @@ endif()
 set(KERNEL_TARGET "mach_kernel")
 set(KERNEL_TEXTORG "0x100000")  # 1MB - physical load address
 
+# #300 — SMP bring-up.  Default 1 keeps the v0.1.0 single-CPU build unchanged.
+# Override with -DUROS_NCPUS=2 (or 4, 8) to enable the SMP code paths.
+set(UROS_NCPUS "1" CACHE STRING "Number of CPUs the kernel supports (1 = UP, >1 = SMP)")
+if(UROS_NCPUS GREATER 1)
+    message(STATUS "SMP build: UROS_NCPUS=${UROS_NCPUS} (experimental, #300 in progress)")
+    # MPS 1.x AP-boot path (mp.c, mp_v1_1.c, slave_boot.S).
+    # ACPI MADT path will land via #305.
+    set(KERNEL_SMP_DEFINES -DMP_V1_1=1)
+else()
+    message(STATUS "UP build: UROS_NCPUS=${UROS_NCPUS}")
+    set(KERNEL_SMP_DEFINES "")
+endif()
+
 # Get GCC's internal include path (for stdarg.h, etc.) EARLY so we can use it in C_FLAGS
 # Must use -m32 to get 32-bit compatible include path
 execute_process(
@@ -96,7 +109,7 @@ set(KERNEL_DEFINES
     -DKERNEL
     -DMACH_KERNEL
     -DAT386=1
-    -DNCPUS=1
+    -DNCPUS=${UROS_NCPUS}
     -DMACH_ASSERT=1
     -DMACH_DEBUG=1
     -DMACH_KDB=1
@@ -113,6 +126,7 @@ set(KERNEL_DEFINES
     -DNPCI=1
     # GCC/ELF does not use underscore prefix for C symbols
     -D__NO_UNDERSCORES__
+    ${KERNEL_SMP_DEFINES}
 )
 
 # MIG-specific flags - disable type checking for kernel stubs
@@ -602,6 +616,21 @@ set(AT386_SOURCES
     # vga_entries.h gone; userspace gpu_server owns the display).
 )
 
+# #300 — SMP bring-up sources, only when UROS_NCPUS > 1.
+# mp.c is the high-level shim (slave_clock, cause_ast_check, cpu_int_word[]).
+# mp_stub.c provides the link-time symbols (cpu_start, mp_probe_cpus, ...)
+# that mp_v1_1.c would have hosted.  The historical mp_v1_1.c is kept out
+# of the build until Increment 3 replaces it with a modern MPS 1.4 parser.
+# slave_boot.S (added below to AT386_ASM_SOURCES) is the AP trampoline.
+if(UROS_NCPUS GREATER 1)
+    list(APPEND AT386_SOURCES
+        i386/mp_desc.c
+        i386/AT386/mp/mp.c
+        i386/AT386/mp/mp_stub.c
+        i386/AT386/mp/mp_table.c
+    )
+endif()
+
 # Chips/busses
 set(CHIPS_SOURCES
     chips/busses.c
@@ -659,6 +688,13 @@ set(I386_ASM_SOURCES
 set(AT386_ASM_SOURCES
     i386/AT386/kdasm.S
 )
+
+# #300 — AP trampoline (real-mode -> 32-bit PM) when UROS_NCPUS > 1.
+if(UROS_NCPUS GREATER 1)
+    list(APPEND AT386_ASM_SOURCES
+        i386/AT386/mp/slave_boot.S
+    )
+endif()
 
 # locore.S is special - concatenated from multiple files
 set(LOCORE_DEPS

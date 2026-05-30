@@ -48,6 +48,7 @@ BENCH_ARGS=""
 EXTRA_ARGS=""
 MINIMAL_ARG=""
 NO_REBOOT="-no-reboot"
+SMP_COUNT=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; USE_AHCI=false; shift ;;
@@ -59,6 +60,7 @@ while [ $# -gt 0 ]; do
         --fresh-disk) FRESH_DISK=true; shift ;;
         --minimal) MINIMAL_ARG="--minimal"; FRESH_DISK=true; shift ;;
         --allow-reboot) NO_REBOOT=""; shift ;;
+        --smp) shift; SMP_COUNT="$1"; shift ;;
         --bench)
             shift
             while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
@@ -130,6 +132,12 @@ if [ "$USE_SHA_NI" = true ]; then
     echo "Acceleration: TCG (--sha-ni: Icelake-Server,+sha-ni)"
 else
     QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $INITRD $NO_REBOOT"
+fi
+# #300: --smp N exposes N CPUs to the guest.  Requires the kernel to be
+# built with -DUROS_NCPUS=N (or >=N).
+if [ -n "$SMP_COUNT" ]; then
+    QEMU_ARGS="$QEMU_ARGS -smp $SMP_COUNT"
+    echo "SMP: $SMP_COUNT CPUs"
 fi
 
 # Issue #224: stage-2 e default_pager girano interamente su AHCI; il

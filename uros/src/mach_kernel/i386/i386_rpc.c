@@ -334,13 +334,15 @@ vm_map_t port_name_to_map(mach_port_t);
 
 #define klkernel_call(entry, ksp, rv) 					\
 MACRO_BEGIN                                                             \
-	/* On MP, preemption is disabled at this point */		\
+	/* On MP, preemption is disabled at this point.                 \
+	 * #300: rv is an output (=m), not an input — fixes operand     \
+	 * type mismatch that the UP variant above already gets right. */ \
         __asm__ volatile(                                               \
-                "movl %0,%%ebx;                                         \
+                "movl %1,%%ebx;                                         \
                  xchgl %%ebx,%%esp;                                     \
 		 " CALL_MP_ENABLE_PREEMPTION "				\
                  call " CC_SYM_PREFIX entry ";                          \
-                 movl %%eax,%1;                                         \
+                 movl %%eax,%0;                                         \
               8: " CALL_MP_DISABLE_PREEMPTION "				\
 		 call " CC_SYM_PREFIX "_cpu_number;			\
 		 cmpl $0," CC_SYM_PREFIX "need_ast(,%%eax,4);           \
@@ -351,8 +353,8 @@ MACRO_BEGIN                                                             \
                  addl $4,%%esp;                                         \
                  jmp 8b;                                                \
               9: movl %%ebx,%%esp"                                      \
-                : /* no outputs */                                      \
-                : "g" (ksp), "g" (rv)		                        \
+                : "=m" (rv)                                             \
+                : "g" (ksp)		                                \
                 : "%ebx", "%eax", "%ecx", "%edx", "cc", "memory");      \
 	/* On MP, preemption is still disabled */			\
 MACRO_END

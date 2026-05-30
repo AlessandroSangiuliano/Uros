@@ -113,9 +113,11 @@ vm_offset_t	int_stack_high;
 
 /*
  * First cpu`s interrupt stack.
+ * #300: declared extern so the real labels in i386/start.S do not
+ * collide at link time when mp_desc.c is brought into the SMP build.
  */
-char		intstack[];	/* bottom */
-char		eintstack[];	/* top */
+extern char	intstack[];	/* bottom */
+extern char	eintstack[];	/* top */
 
 /*
  * We allocate interrupt stacks from physical memory.
