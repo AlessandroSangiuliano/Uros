@@ -103,6 +103,7 @@ HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
 FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
 HELLO_WORLD="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_world"
 PTHREAD_MIN="$BUILD_DIR/export/uros/$ARCH/user/sbin/pthread_min"  # #291 musl pthread regression
+FLIPC_BENCH="$BUILD_DIR/export/uros/$ARCH/user/sbin/flipc_bench"  # #272 standalone FLIPC A/B
 USH="$BUILD_DIR/export/uros/$ARCH/user/sbin/ush"
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 # #234 Phase 7: dynamic linker + first dynamic binary.  ld-musl-i386.so.1 is
@@ -395,6 +396,13 @@ if [ -f "$PTHREAD_MIN" ]; then
     PTHREAD_MIN_WRITE_LINE="write $PTHREAD_MIN pthread_min"
 fi
 
+# flipc_bench (#272): standalone libvfs FLIPC A/B benchmark; copy to / so
+# ush can launch "/flipc_bench" on a quiescent system after boot.
+FLIPC_BENCH_WRITE_LINE=""
+if [ -f "$FLIPC_BENCH" ]; then
+    FLIPC_BENCH_WRITE_LINE="write $FLIPC_BENCH flipc_bench"
+fi
+
 # ush is optional (#275.5): copy to /mach_servers/ so bootstrap stage-2
 # can load it as a session-leader after proc_server / char_server.
 USH_WRITE_LINE=""
@@ -436,6 +444,7 @@ ${HELLO_EXEC_WRITE_LINE}
 ${FD_EXEC_TEST_WRITE_LINE}
 ${HELLO_WORLD_WRITE_LINE}
 ${PTHREAD_MIN_WRITE_LINE}
+${FLIPC_BENCH_WRITE_LINE}
 ${HELLO_DYN_WRITE_LINE}
 ${HELLO_DYN_WORLD_WRITE_LINE}
 ${DLOPEN_TEST_WRITE_LINE}

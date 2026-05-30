@@ -82,8 +82,30 @@ extern void init_stack_guard(void);
 static void __setup_ptrs(vm_offset_t, vm_size_t, char ***, int *);
 static void __get_arguments(void);
 static void __get_environment(void);
+static void __setup_args_from_stack(unsigned long entry_sp);
 
-void __start_mach(void);
+void __start_mach(void);                       /* asm trampoline, below */
+void __start_mach_c(unsigned long entry_sp);
+
+/*
+ * ELF entry trampoline.  The kernel / exec_server start us with %esp
+ * pointing at the System V argument frame ([argc][argv..][0][envp..][0]
+ * [auxv..]).  Capture that pointer before the C prologue perturbs %esp,
+ * then call the C startup with it.  Static, non-PIE binaries only — the
+ * direct call needs no PLT.
+ */
+__asm__(
+    ".text\n"
+    ".globl __start_mach\n"
+    ".type __start_mach,@function\n"
+    "__start_mach:\n"
+    "    xorl %ebp, %ebp\n"        /* outermost frame */
+    "    movl %esp, %eax\n"        /* %eax = &argc (entry %esp) */
+    "    andl $-16, %esp\n"        /* 16-byte align */
+    "    subl $12, %esp\n"
+    "    pushl %eax\n"             /* arg: entry_sp */
+    "    call __start_mach_c\n"
+    "    hlt\n");
 
 /*
  * __attribute__((optimize("no-stack-protector"))) ensures this function
@@ -91,7 +113,7 @@ void __start_mach(void);
  * initialized when we enter here.
  */
 void __attribute__((no_stack_protector))
-__start_mach(void)
+__start_mach_c(unsigned long entry_sp)
 {
 	int retval;
 
@@ -103,6 +125,18 @@ __start_mach(void)
 
 	__get_arguments();
 	__get_environment();
+
+	/*
+	 * bootstrap_arguments only answers for tasks the bootstrap server
+	 * loaded (it keys on task_port in servers[]); for execve'd images
+	 * it returns KERN_INVALID_ARGUMENT, so __argc is still 0 here.
+	 * Those images carry their argv/envp on the System V entry stack
+	 * that exec_server built — read it from there.  Bootstrap-loaded
+	 * servers already have their args (or a zeroed argc=0 stack), so
+	 * this is a pure fallback that never overrides the RPC path.
+	 */
+	if (__argc == 0)
+		__setup_args_from_stack(entry_sp);
 
 	/*
 	 * musl-linked servers: bring up TLS + stack canary before main()
@@ -198,4 +232,43 @@ __get_environment(void)
 	if (kr != KERN_SUCCESS || environment_size == 0)
 		return;
 	__setup_ptrs(environment, environment_size, &__environment, &nptrs);
+}
+
+/*
+ * Parse argc/argv/envp from the System V i386 entry stack that
+ * exec_server builds for execve'd images:
+ *
+ *   entry_sp -> [ argc ][ argv[0..argc-1] ][ NULL ][ envp[0..] ][ NULL ]...
+ *
+ * Only called as a fallback when bootstrap_arguments yielded nothing
+ * (i.e. for an execve'd task).  The pointers live in the task's own
+ * stack page, so we hand them to main() directly — no copy needed.
+ */
+static void
+__setup_args_from_stack(unsigned long entry_sp)
+{
+	int *frame;
+	int argc;
+	char **argv;
+
+	if (entry_sp == 0)
+		return;
+
+	frame = (int *)entry_sp;
+	argc  = frame[0];
+	/* A zeroed (bootstrap set_regs) or implausible frame -> leave the
+	 * defaults so we don't dereference garbage. */
+	if (argc <= 0 || argc > 4096)
+		return;
+
+	argv = (char **)&frame[1];
+	if (argv[argc] != 0)            /* argv must be NULL-terminated */
+		return;
+
+	__argv = argv;
+	__argc = argc;
+
+	/* envp immediately follows the argv NULL terminator. */
+	if (__environment == &__nullarg)
+		__environment = &argv[argc + 1];
 }

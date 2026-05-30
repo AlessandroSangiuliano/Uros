@@ -155,6 +155,10 @@ set(KERNEL_INCLUDES
     ${KERNEL_BUILD_DIR}/mach
     ${KERNEL_BUILD_DIR}/mach_debug
     ${KERNEL_BUILD_DIR}/device
+    # Public Uros export headers (LAST so kernel-internal mach/ wins on
+    # duplicates).  Lets the kernel pull header-only public headers like
+    # <mach/urmach_version.h> from a single source of truth.
+    ${CMAKE_SOURCE_DIR}/export/include
 )
 
 # =============================================================================

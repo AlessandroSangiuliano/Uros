@@ -31,10 +31,22 @@ set timeout $BOOT_TIMEOUT
 
 spawn $RUN_QEMU --minimal --allow-reboot -display none -serial mon:stdio
 
+# Step 0 — UrMach kernel banner (versioning, #295).  The kernel prints
+# URMACH_VERSION_STRING from <mach/urmach_version.h> at machine_startup.
+# We don't fail on miss (early-boot output ordering can race the screen
+# clear); just record if we caught it.
+set _saw_urmach 0
+expect {
+    -re "UrMach \[0-9\]+\\.\[0-9\]+\\.\[0-9\]+"  { set _saw_urmach 1 }
+    "ush v0.1.0"                                  { ;# fell through — banner missed }
+    timeout                                       { send_user "\n\[smoke\] FAIL: no ush banner within ${BOOT_TIMEOUT}s\n"; exit 1 }
+}
+if {$_saw_urmach} { send_user "\n\[smoke\] UrMach kernel banner OK\n" }
+
 # Step 1 — wait for shell prompt.  Boot prints a lot; we anchor on the
 # banner that ush writes only after ctty acquisition succeeds.
 expect {
-    "ush v0.1.0"      { send_user "\n\[smoke\] ush banner OK\n" }
+    "ush v0.1.0"      { send_user "\[smoke\] ush banner OK\n" }
     timeout           { send_user "\n\[smoke\] FAIL: no ush banner within ${BOOT_TIMEOUT}s\n"; exit 1 }
 }
 expect {
@@ -133,6 +145,54 @@ expect {
     -re "pthread_min: FAIL"  { send_user "\n\[smoke\] FAIL: pthread_min reported FAIL\n"; exit 1 }
     timeout                  { send_user "\n\[smoke\] FAIL: no pthread_min result\n"; exit 1 }
 }
+
+expect { "ush\$ " {} timeout {} }
+
+# Step 3e (#272) — standalone FLIPC v2 A/B benchmark, launched from the
+# shell on a now-quiescent system (the whole point of #272: no boot-time
+# CPU contention).  Pass "-n 1 -c 64,1024": one run over a 64K and a 1 MiB
+# chunk, read+write.  The "runs=1 chunks=2" echo also proves the argv fix
+# (static musl binaries now receive their command line via the exec_server
+# SysV stack).  Full N-run medians are an interactive invocation
+# (/flipc_bench -n 9 -c 4,16,64,1024).
+send "/flipc_bench -n 1 -c 64,1024\r"
+set timeout 120
+set _fb_argv 0
+set _fb_readback 0
+set _fb_done 0
+expect {
+    -re "flipc_bench: runs=1 chunks=2" { set _fb_argv 1; exp_continue }
+    -re "write A/B readback: OK"   { set _fb_readback 1; exp_continue }
+    -re "write A/B readback: MISMATCH" { send_user "\n\[smoke\] FAIL: flipc_bench write readback mismatch\n"; exit 1 }
+    -re "flipc_bench: done"        { set _fb_done 1 }
+    timeout                        { send_user "\n\[smoke\] FAIL: flipc_bench did not finish\n"; exit 1 }
+}
+if {$_fb_argv} { send_user "\n\[smoke\] argv reached static musl binary (exec SysV stack, #272 argv fix)\n" } \
+               else { send_user "\n\[smoke\] FAIL: flipc_bench ran with default args (argv not passed)\n"; exit 1 }
+if {$_fb_done && $_fb_readback} { send_user "\[smoke\] flipc_bench standalone OK (read+write A/B incl 1MiB, coherent, #272)\n" } \
+                                else { send_user "\n\[smoke\] FAIL: flipc_bench incomplete\n"; exit 1 }
+
+expect { "ush\$ " {} timeout {} }
+
+# Step 3f — fd-lifecycle + read stress on the FLIPC fast-path.  "-R 60"
+# drives 60 back-to-back { open; read-to-EOF; close } cycles through the
+# libvfs FLIPC prefetch path (the default/production data path).  Permanent
+# guard that repeated file I/O stays stable under churn.
+#
+# NB: the Mach OOL fallback path (FLIPC disabled, "/flipc_bench -M 60")
+# corrupts the client after ~2500 OOL receives — tracked as a separate
+# kernel issue.  The guard here exercises the FLIPC path, which is immune.
+send "/flipc_bench -R 60\r"
+set timeout 120
+set _fb_stress 0
+expect {
+    -re "flipc_bench: done"  { set _fb_stress 1 }
+    timeout                  { send_user "\n\[smoke\] FAIL: FLIPC read stress did not finish (churn instability?)\n"; exit 1 }
+}
+if {$_fb_stress} { send_user "\n\[smoke\] FLIPC fd+read stress OK (60 open/read/close, no fault)\n" } \
+                 else { send_user "\n\[smoke\] FAIL: FLIPC read stress incomplete\n"; exit 1 }
+
+expect { "ush\$ " {} timeout {} }
 
 # Step 4 — graceful poweroff with drain (#284).  ush sends
 # proc_shutdown(HALT); proc_server SIGTERMs userland apps, fs_syncs every

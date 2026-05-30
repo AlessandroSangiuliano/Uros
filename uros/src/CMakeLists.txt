@@ -101,6 +101,12 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(pthread_min)
 endif()
 
+# Build flipc_bench (#272: standalone libvfs FLIPC v2 A/B benchmark,
+# launched from the shell post-boot for quiescent, median-of-N numbers)
+if(UROS_BUILD_MUSL)
+  add_subdirectory(flipc_bench)
+endif()
+
 # Build ush — Uros shell (#275.5).
 if(UROS_BUILD_MUSL)
   add_subdirectory(ush)
