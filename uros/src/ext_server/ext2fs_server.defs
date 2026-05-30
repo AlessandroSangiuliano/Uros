@@ -73,7 +73,7 @@ routine ext2_read(
 	in	fid		: natural_t;
 	in	offset		: natural_t;
 	in	count		: natural_t;
-	out	data		: pointer_t
+	out	data		: pointer_t, Dealloc
 	);
 
 /*
@@ -112,7 +112,7 @@ routine ext2_open_read(
 	in	offset		: natural_t;
 	in	count		: natural_t;
 	out	fid		: natural_t;
-	out	data		: pointer_t
+	out	data		: pointer_t, Dealloc
 	);
 
 /*
@@ -123,5 +123,5 @@ routine ext2_read_close(
 	in	fid		: natural_t;
 	in	offset		: natural_t;
 	in	count		: natural_t;
-	out	data		: pointer_t
+	out	data		: pointer_t, Dealloc
 	);
