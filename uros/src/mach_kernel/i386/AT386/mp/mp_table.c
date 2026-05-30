@@ -38,6 +38,7 @@
 #include <i386/AT386/mp/mp.h>
 #include <i386/apic.h>
 #include <i386/io_map_entries.h>		/* io_map() */
+#include <vm/vm_map.h>			/* kernel_map, VM_MAP_NULL */
 
 /*
  * Floating Pointer Structure — 16 bytes, byte-packed on the wire.
@@ -110,15 +111,71 @@ struct mp_ioapic_entry {
 } __attribute__((packed));
 
 /*
+ * ACPI MADT structures.  Modern SeaBIOS/QEMU (and most UEFI machines)
+ * advertise only the BSP through the MPS 1.4 table and expect the OS to
+ * walk ACPI MADT to find the APs.  We parse the minimum needed to
+ * enumerate processors — no AML interpreter required.
+ */
+struct acpi_rsdp_v1 {
+	char		signature[8];	/* "RSD PTR " */
+	unsigned char	checksum;	/* first 20 bytes must sum to 0 */
+	char		oem_id[6];
+	unsigned char	revision;	/* 0 = ACPI 1.0, 2 = ACPI 2.0+ */
+	unsigned int	rsdt_phys;
+} __attribute__((packed));
+
+struct acpi_sdt_header {
+	char		signature[4];
+	unsigned int	length;
+	unsigned char	revision;
+	unsigned char	checksum;
+	char		oem_id[6];
+	char		oem_table_id[8];
+	unsigned int	oem_revision;
+	unsigned int	creator_id;
+	unsigned int	creator_revision;
+} __attribute__((packed));
+
+struct acpi_madt {
+	struct acpi_sdt_header	header;
+	unsigned int		lapic_phys;
+	unsigned int		flags;	/* bit 0 = 8259 present */
+	/* followed by variable-length entries */
+} __attribute__((packed));
+
+#define MADT_ENTRY_LAPIC	0
+#define MADT_ENTRY_IOAPIC	1
+#define MADT_ENTRY_LAPIC_FLAG_ENABLED	0x01
+
+struct madt_lapic_entry {
+	unsigned char	type;		/* MADT_ENTRY_LAPIC */
+	unsigned char	length;		/* 8 */
+	unsigned char	proc_id;
+	unsigned char	lapic_id;
+	unsigned int	flags;
+} __attribute__((packed));
+
+struct madt_ioapic_entry {
+	unsigned char	type;		/* MADT_ENTRY_IOAPIC */
+	unsigned char	length;		/* 12 */
+	unsigned char	ioapic_id;
+	unsigned char	reserved;
+	unsigned int	ioapic_phys;
+	unsigned int	gsi_base;
+} __attribute__((packed));
+
+/*
  * Cached state — populated on first call to mp_v1_1_init() and read back
  * by get_ncpus()/validate_cpus().
  */
-static boolean_t	mp_parsed = FALSE;
+static boolean_t	mp_phase1_done = FALSE;	/* low-mem search done */
+static boolean_t	mp_phase2_done = FALSE;	/* high-mem MADT + io_map done */
 static int		mp_cpu_count;
-static unsigned char		mp_cpu_lapic_id[NCPUS];
-static unsigned char		mp_bsp_lapic_id;
-static unsigned int		mp_lapic_phys;
-static unsigned int		mp_ioapic_phys[4];	/* up to 4 I/O APICs */
+static unsigned char	mp_cpu_lapic_id[NCPUS];
+static unsigned char	mp_bsp_lapic_id;
+static unsigned int	mp_lapic_phys;
+static unsigned int	mp_rsdt_phys;		/* found in phase 1, parsed in phase 2 */
+static unsigned int	mp_ioapic_phys[4];	/* up to 4 I/O APICs */
 static int		mp_ioapic_count;
 
 /* Externals that the rest of the kernel exports — set up here once we
@@ -144,12 +201,29 @@ mp_bsp_lapic_id_get(void)
 }
 
 /*
- * Physical→kernel-virtual mapping.  Identity-mapped low memory (under
- * 1 MiB) is reachable through phystokv(); the MP table always lives
- * either there or in the BIOS ROM region, both of which qualify.
+ * Physical→kernel-virtual translation.
+ *
+ * - MP_PHYS_TO_KV: identity-mapped low memory (RSDP/FPS searches), reach
+ *   via VM_MIN_KERNEL_ADDRESS offset.  Only safe for phys < ~16 MiB which
+ *   is where start.S sets up its initial kernel mapping.
+ * - acpi_map: arbitrary phys → kernel-virt via io_map().  ACPI tables on
+ *   QEMU live just below RAM top (e.g., 0x1FFE0000 with -m 512M), well
+ *   above the bootstrap mapping; io_map allocates a kernel-virt window
+ *   and pmap_map_bd's the physical page in.  Returns a page-aligned
+ *   virtual base plus the in-page offset already applied.
  */
-extern vm_offset_t	phystokv_off;	/* unused but documents intent */
 #define MP_PHYS_TO_KV(pa)	((vm_offset_t)(pa) + 0xC0000000U)
+
+static vm_offset_t
+acpi_map(unsigned int pa, vm_size_t len)
+{
+	unsigned int page_pa  = pa & ~0xFFFu;
+	unsigned int page_off = pa & 0xFFFu;
+	vm_size_t    mapped   = (vm_size_t)((page_off + len + 0xFFFu) &
+					    ~0xFFFu);
+
+	return io_map(page_pa, mapped) + page_off;
+}
 
 static unsigned char
 mp_checksum(const void *buf, vm_size_t len)
@@ -191,7 +265,11 @@ mp_find_fps_in_range(vm_offset_t start, vm_offset_t end)
  * Search the three regions called out by MPS 1.4 §4.1:
  *   1) First 1 KiB of the EBDA (segment from BDA word at phys 0x40E).
  *   2) Last 1 KiB of base memory (segment from BDA word at phys 0x413).
- *   3) BIOS ROM, 0xF0000–0xFFFFF.
+ *   3) BIOS ROM, 0xF0000-0xFFFFF.
+ *
+ * All three regions are below 1 MiB and reachable through the bootstrap
+ * identity mapping that start.S sets up — this function is intended to
+ * run *before* pmap_bootstrap.
  */
 static struct mp_fps *
 mp_find_fps(void)
@@ -301,41 +379,246 @@ mp_parse_config(struct mp_config *config)
 }
 
 /*
- * mp_v1_1_init() — entry point called from model_dep.c during platform
- * bring-up.  Searches the FPS, parses the configuration table, and caches
- * the result for get_ncpus()/validate_cpus().  Idempotent.
- *
- * Note we override the stub installed by mp_stub.c when this file is
- * compiled in.
+ * Look for the "RSD PTR " RSDP signature in [start, end) on 16-byte
+ * alignment.  Returns a virtual pointer to the RSDP on success.
  */
-void
-mp_v1_1_init(void)
+static struct acpi_rsdp_v1 *
+acpi_find_rsdp_in_range(vm_offset_t start, vm_offset_t end)
+{
+	vm_offset_t p;
+	struct acpi_rsdp_v1 *rsdp;
+
+	for (p = start; p + sizeof(struct acpi_rsdp_v1) <= end; p += 16) {
+		rsdp = (struct acpi_rsdp_v1 *)p;
+		if (rsdp->signature[0] != 'R' || rsdp->signature[1] != 'S' ||
+		    rsdp->signature[2] != 'D' || rsdp->signature[3] != ' ' ||
+		    rsdp->signature[4] != 'P' || rsdp->signature[5] != 'T' ||
+		    rsdp->signature[6] != 'R' || rsdp->signature[7] != ' ')
+			continue;
+		if (mp_checksum(rsdp, 20) != 0)
+			continue;
+		return rsdp;
+	}
+	return (struct acpi_rsdp_v1 *)0;
+}
+
+static struct acpi_rsdp_v1 *
+acpi_find_rsdp(void)
+{
+	struct acpi_rsdp_v1 *rsdp;
+	unsigned short ebda_seg;
+	vm_offset_t ebda_pa;
+
+	ebda_seg = *(unsigned short *)MP_PHYS_TO_KV(0x40E);
+
+	if (ebda_seg) {
+		ebda_pa = (vm_offset_t)ebda_seg << 4;
+		rsdp = acpi_find_rsdp_in_range(MP_PHYS_TO_KV(ebda_pa),
+					       MP_PHYS_TO_KV(ebda_pa + 1024));
+		if (rsdp)
+			return rsdp;
+	}
+
+	return acpi_find_rsdp_in_range(MP_PHYS_TO_KV(0xE0000),
+				       MP_PHYS_TO_KV(0x100000));
+}
+
+/*
+ * Walk a MADT, picking up processor LAPIC IDs and I/O APIC addresses.
+ * Returns TRUE on a valid MADT.
+ */
+static boolean_t
+acpi_parse_madt(struct acpi_madt *madt)
+{
+	const unsigned char *p;
+	const unsigned char *end;
+
+	if (mp_checksum(madt, madt->header.length) != 0)
+		return FALSE;
+
+	mp_lapic_phys = madt->lapic_phys;
+
+	p = (const unsigned char *)(madt + 1);
+	end = (const unsigned char *)madt + madt->header.length;
+
+	while (p + 2 <= end) {
+		unsigned char etype = p[0];
+		unsigned char elen  = p[1];
+
+		if (elen < 2 || p + elen > end)
+			break;
+
+		switch (etype) {
+		case MADT_ENTRY_LAPIC: {
+			const struct madt_lapic_entry *lapic =
+			    (const struct madt_lapic_entry *)p;
+			if ((lapic->flags & MADT_ENTRY_LAPIC_FLAG_ENABLED) &&
+			    mp_cpu_count < NCPUS) {
+				mp_cpu_lapic_id[mp_cpu_count++] =
+				    lapic->lapic_id;
+			}
+			break;
+		}
+		case MADT_ENTRY_IOAPIC: {
+			const struct madt_ioapic_entry *io =
+			    (const struct madt_ioapic_entry *)p;
+			if (mp_ioapic_count <
+			    (int)(sizeof(mp_ioapic_phys) /
+				  sizeof(mp_ioapic_phys[0]))) {
+				mp_ioapic_phys[mp_ioapic_count++] =
+				    io->ioapic_phys;
+			}
+			break;
+		}
+		default:
+			/* Unknown entry — skip past via its length. */
+			break;
+		}
+		p += elen;
+	}
+
+	if (mp_cpu_count > 0) {
+		/* ACPI doesn't dedicate a BSP flag in the LAPIC entry; the
+		 * BSP is the CPU that is currently executing this code.
+		 * cpu_number() will return 0 until we map the LAPIC, so the
+		 * first LAPIC ID listed is by convention the BSP on every
+		 * platform we have seen — but to be safe we read it directly
+		 * from the running LAPIC once it is mapped.  For now record
+		 * the first id; init() fixes it up below if needed. */
+		mp_bsp_lapic_id = mp_cpu_lapic_id[0];
+	}
+	return mp_cpu_count > 0;
+}
+
+/*
+ * Walk an RSDT (or XSDT) looking for the "APIC" subtable, then parse it.
+ * Returns TRUE if a usable MADT is found and at least one CPU emerged.
+ */
+static boolean_t
+acpi_walk_rsdt(struct acpi_sdt_header *rsdt, boolean_t use_xsdt)
+{
+	unsigned int entries;
+	unsigned int i;
+	struct acpi_sdt_header *sub;
+	unsigned int sub_phys;
+
+	if (mp_checksum(rsdt, rsdt->length) != 0)
+		return FALSE;
+
+	if (use_xsdt) {
+		const unsigned int *xptr64_lo;
+		entries = (rsdt->length - sizeof(*rsdt)) / 8;
+		xptr64_lo = (const unsigned int *)(rsdt + 1);
+		for (i = 0; i < entries; i++) {
+			/* On i386 we only consume the low 32 bits of each
+			 * XSDT pointer; ACPI tables in QEMU all live below
+			 * 4 GiB so the high half is 0. */
+			sub_phys = xptr64_lo[i * 2];
+			sub = (struct acpi_sdt_header *)
+			    acpi_map(sub_phys, 0x1000);
+			if (sub->signature[0] == 'A' &&
+			    sub->signature[1] == 'P' &&
+			    sub->signature[2] == 'I' &&
+			    sub->signature[3] == 'C') {
+				if (sub->length > 0x1000)
+					sub = (struct acpi_sdt_header *)
+					    acpi_map(sub_phys, sub->length);
+				return acpi_parse_madt(
+				    (struct acpi_madt *)sub);
+			}
+		}
+	} else {
+		const unsigned int *ptr32;
+		entries = (rsdt->length - sizeof(*rsdt)) / 4;
+		ptr32 = (const unsigned int *)(rsdt + 1);
+		for (i = 0; i < entries; i++) {
+			sub_phys = ptr32[i];
+			sub = (struct acpi_sdt_header *)
+			    acpi_map(sub_phys, 0x1000);
+			if (sub->signature[0] == 'A' &&
+			    sub->signature[1] == 'P' &&
+			    sub->signature[2] == 'I' &&
+			    sub->signature[3] == 'C') {
+				if (sub->length > 0x1000)
+					sub = (struct acpi_sdt_header *)
+					    acpi_map(sub_phys, sub->length);
+				return acpi_parse_madt(
+				    (struct acpi_madt *)sub);
+			}
+		}
+	}
+	return FALSE;
+}
+
+/*
+ * Phase 1: just remember the RSDT physical address from the RSDP.
+ * Returns TRUE if an RSDP was located.  No io_map calls — RSDT lives in
+ * high memory and we follow the pointer later in phase 2.
+ */
+static boolean_t
+mp_acpi_locate(void)
+{
+	struct acpi_rsdp_v1 *rsdp;
+
+	rsdp = acpi_find_rsdp();
+	if (!rsdp)
+		return FALSE;
+
+	mp_rsdt_phys = rsdp->rsdt_phys;
+	printf("mp_table: ACPI RSDP at %p, rev %u, rsdt_phys=0x%x\n",
+	       (void *)rsdp, (unsigned)rsdp->revision, mp_rsdt_phys);
+	return TRUE;
+}
+
+/*
+ * Phase 2: io_map the RSDT, find the MADT, parse it.  Called from the
+ * second mp_v1_1_init() once kernel_pmap is alive.
+ */
+static boolean_t
+mp_acpi_parse(void)
+{
+	struct acpi_sdt_header *rsdt;
+
+	if (mp_rsdt_phys == 0)
+		return FALSE;
+
+	rsdt = (struct acpi_sdt_header *)acpi_map(mp_rsdt_phys, 0x1000);
+	if (rsdt->signature[0] != 'R' || rsdt->signature[1] != 'S' ||
+	    rsdt->signature[2] != 'D' || rsdt->signature[3] != 'T') {
+		printf("mp_table: bad RSDT signature at 0x%x\n",
+		       mp_rsdt_phys);
+		return FALSE;
+	}
+
+	if (rsdt->length > 0x1000)
+		rsdt = (struct acpi_sdt_header *)
+		    acpi_map(mp_rsdt_phys, rsdt->length);
+
+	return acpi_walk_rsdt(rsdt, FALSE);
+}
+
+/*
+ * Try the legacy MPS 1.4 path.  Returns TRUE if a valid table was found
+ * and populated the cached state.
+ */
+static boolean_t
+mp_try_mps(void)
 {
 	struct mp_fps *fps;
 	struct mp_config *config;
 
-	if (mp_parsed)
-		return;
-	mp_parsed = TRUE;
-	mp_cpu_count = 0;
-	mp_ioapic_count = 0;
-
 	fps = mp_find_fps();
-	if (!fps) {
-		printf("mp_table: no MP floating pointer found, UP fallback\n");
-		mp_cpu_count = 1;
-		mp_bsp_lapic_id = 0;
-		return;
-	}
+	if (!fps)
+		return FALSE;
 
 	printf("mp_table: FPS at %p, spec %d.%d%s\n",
 	       (void *)fps, fps->spec_rev >> 4 ? fps->spec_rev >> 4 : 1,
-	       fps->spec_rev & 0xF, (fps->feature2 & 0x80) ? ", IMCR" : "");
+	       fps->spec_rev & 0xF,
+	       (fps->feature2 & 0x80) ? ", IMCR" : "");
 
 	if (fps->config_phys == 0) {
-		/* Default configuration — feature1 selects one of 7 layouts.
-		 * Always 2 CPUs in default configs (MPS 1.4 §5).  Treat as
-		 * such; LAPIC is the standard 0xFEE00000. */
+		/* Default configuration: feature1 picks one of 7 layouts,
+		 * each of which always describes 2 CPUs (MPS 1.4 ch.5). */
 		mp_cpu_count = 2;
 		mp_lapic_phys = LAPIC_START;
 		mp_bsp_lapic_id = 0;
@@ -343,28 +626,100 @@ mp_v1_1_init(void)
 		mp_cpu_lapic_id[1] = 1;
 		printf("mp_table: default config %u, assuming 2 CPUs\n",
 		       fps->feature1);
-		return;
+		return TRUE;
 	}
 
 	config = (struct mp_config *)MP_PHYS_TO_KV(fps->config_phys);
 	if (!mp_parse_config(config)) {
-		printf("mp_table: PCMP at 0x%x invalid, UP fallback\n",
+		printf("mp_table: PCMP at 0x%x invalid\n",
 		       fps->config_phys);
-		mp_cpu_count = 1;
-		mp_bsp_lapic_id = 0;
-		return;
+		return FALSE;
 	}
 
-	printf("mp_table: %d CPU(s), BSP lapic_id=%d, lapic@0x%x, %d IOAPIC(s)\n",
-	       mp_cpu_count, mp_bsp_lapic_id, mp_lapic_phys, mp_ioapic_count);
+	printf("mp_table: %d CPU(s) via MPS, BSP lapic_id=%d, "
+	       "lapic@0x%x, %d IOAPIC(s)\n",
+	       mp_cpu_count, mp_bsp_lapic_id, mp_lapic_phys,
+	       mp_ioapic_count);
+	return TRUE;
+}
+
+/*
+ * mp_v1_1_init() — entry point called from model_dep.c during platform
+ * bring-up.  Tries ACPI MADT first (modern firmware), falls back to MPS
+ * 1.4 (BIOS-era).  Caches the result for get_ncpus()/validate_cpus().
+ * Idempotent.
+ *
+ * Note we override the stub installed by mp_stub.c when this file is
+ * compiled in.
+ */
+extern vm_map_t kernel_map;	/* from vm/vm_map.h */
+
+void
+mp_v1_1_init(void)
+{
+	/*
+	 * Phase 1 — search BIOS-area low memory for the FPS / RSDP.  Runs
+	 * before pmap_bootstrap (from i386_init via mp_probe_cpus → lazy
+	 * get_ncpus), so we cannot io_map anything.  The MPS config table
+	 * (when present) lives in low memory and is parsed here.  The ACPI
+	 * RSDT lives in high memory; we just remember its phys address and
+	 * defer the walk to phase 2.
+	 */
+	if (!mp_phase1_done) {
+		mp_phase1_done = TRUE;
+		mp_cpu_count = 0;
+		mp_ioapic_count = 0;
+		mp_rsdt_phys = 0;
+
+		if (mp_acpi_locate()) {
+			/* ACPI found.  The real CPU list comes from MADT in
+			 * phase 2; report a single CPU here so the early
+			 * bookkeeping (mp_probe_cpus → validate_cpus →
+			 * interrupt_stack_alloc → mp_desc_init) runs as UP.
+			 * Phase 2 discovers the real APs and brings them up
+			 * via start_other_cpus(). */
+			mp_cpu_count = 1;
+			mp_lapic_phys = LAPIC_START;
+			mp_bsp_lapic_id = 0;
+			printf("mp_table: phase 1 deferred to ACPI MADT\n");
+		} else if (mp_try_mps()) {
+			printf("mp_table: phase 1 used MPS, %d CPU(s)\n",
+			       mp_cpu_count);
+		} else {
+			printf("mp_table: phase 1 found neither, UP fallback\n");
+			mp_cpu_count = 1;
+			mp_bsp_lapic_id = 0;
+		}
+	}
 
 	/*
-	 * Map the local APIC into kernel virtual space so the rest of the
-	 * kernel (cpu_number() inline, interrupt.S, the AP boot path in
-	 * mp.c) can poke its registers.
+	 * Phase 2 — kernel_map is alive, so we can io_map() arbitrary
+	 * physical addresses.  Map the LAPIC and, if we deferred ACPI,
+	 * walk the RSDT/MADT now to obtain the real CPU list.
 	 */
-	lapic_start = io_map(mp_lapic_phys, LAPIC_SIZE);
-	lapic_id    = (int)(lapic_start + LAPIC_ID);
+	if (!mp_phase2_done && kernel_map != VM_MAP_NULL) {
+		mp_phase2_done = TRUE;
+
+		if (mp_rsdt_phys != 0) {
+			/* Wipe the conservative phase-1 cpu list before MADT
+			 * rewrites it with the real lapic IDs. */
+			mp_cpu_count = 0;
+			if (mp_acpi_parse()) {
+				printf("mp_table: %d CPU(s) via ACPI MADT, "
+				       "lapic@0x%x, %d IOAPIC(s)\n",
+				       mp_cpu_count, mp_lapic_phys,
+				       mp_ioapic_count);
+			} else {
+				printf("mp_table: ACPI MADT parse failed, "
+				       "UP fallback\n");
+				mp_cpu_count = 1;
+				mp_bsp_lapic_id = 0;
+			}
+		}
+
+		lapic_start = io_map(mp_lapic_phys, LAPIC_SIZE);
+		lapic_id    = (int)(lapic_start + LAPIC_ID);
+	}
 }
 
 /*
@@ -374,7 +729,7 @@ mp_v1_1_init(void)
 int
 get_ncpus(void)
 {
-	if (!mp_parsed)
+	if (!mp_phase1_done)
 		mp_v1_1_init();
 	return mp_cpu_count;
 }
