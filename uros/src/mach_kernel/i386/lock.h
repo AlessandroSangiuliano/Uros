@@ -322,19 +322,24 @@ extern void bit_unlock(
 
 
 #if	MACH_RT || (NCPUS > 1) || MACH_LDEBUG
+/*
+ * mutex_lock_assert_safe() lives in <kern/lock.c>; declared here as extern
+ * because <i386/lock.h> cannot pull in <kern/thread.h> (cycle through
+ * <kern/lock.h>).  #300.
+ */
+extern void mutex_lock_assert_safe(void);
 #if	MACH_LDEBUG || !MACH_RT
 #define	mutex_try(m)	(!(m)->interlock && _mutex_try(m))
 #define	mutex_lock(m)							\
 MACRO_BEGIN								\
-	assert(current_thread() == THREAD_NULL ||			\
-	       current_thread()->wait_event == NO_EVENT);		\
+	mutex_lock_assert_safe();					\
 	_mutex_lock((m));						\
 MACRO_END
 #else	/* MACH_LDEBUG || !MACH_RT */
 #define	mutex_try(m)	(!(m)->interlock && \
 		!xchgb ((volatile char *)&((m)->locked), 1))
 #define	mutex_lock(m)							\
-	(assert(current_thread()->wait_event == NO_EVENT),		\
+	(mutex_lock_assert_safe(),					\
 	 (mutex_try (m) ? (void) 1 : _mutex_lock (m)))
 #endif	/* MACH_LDEBUG || !MACH_RT */
 #else	/* MACH_RT || (NCPUS > 1) || MACH_LDEBUG */

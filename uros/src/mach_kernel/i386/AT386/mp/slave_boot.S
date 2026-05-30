@@ -68,7 +68,7 @@
  */
 
 #include "machine/asm.h"
-#include "machine/mp/boot.h"
+#include "machine/AT386/mp/boot.h"
 
 #define CR0_PE_ON	0x1
 #define CR0_PE_OFF	0xfffffffe
@@ -105,7 +105,7 @@ ENTRY(slave_pstart)
 	data16
 	mov	$MP_BOOTSTACK, %esp
 
-	/set up %es
+	/* set up %es */
 	mov	%ax, %es
 
 	/* change to protected mode */

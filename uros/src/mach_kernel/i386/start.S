@@ -359,7 +359,7 @@ LEXT(pstart)
 	jmp	1f
 0:	cmpl	$0,PA(EXT(start_lock))
 	jne	0b
-1:	movb	$1,%eax
+1:	movl	$1,%eax			/* movb $1,%eax was a 25-year-old gas bug — #300 */
 	xchgl	%eax,PA(EXT(start_lock)) /* locked */
 	testl	%eax,%eax
 	jnz	0b

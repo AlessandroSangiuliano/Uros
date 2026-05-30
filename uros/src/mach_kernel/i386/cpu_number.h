@@ -82,7 +82,12 @@
 
 #if	NCPUS > 1
 
-extern int	cpu_number(void);
+/*
+ * #300: removed the leading `extern int cpu_number(void);` declaration —
+ * the AT386/MP_V1_1 branch below redefines cpu_number() as `static inline`,
+ * which collides with the extern prototype.  The static inline form is the
+ * single source of truth on i386.
+ */
 
 #if	AT386
 #if	MP_V1_1
@@ -91,7 +96,14 @@ extern int	cpu_number(void);
 
 extern int lapic_id;
 
-extern __inline__ int cpu_number(void)
+/*
+ * #300: static instead of extern so the inline definition does not emit an
+ * external symbol in every translation unit (gcc since C99 treats plain
+ * `extern inline` as a request for an out-of-line definition).  The header
+ * is the only place this function is defined; static inline keeps the body
+ * visible for inlining without producing duplicate strong symbols.
+ */
+static __inline__ int cpu_number(void)
 {
 	register int cpu;
 
@@ -120,7 +132,7 @@ extern __inline__ int cpu_number(void)
 #error	cpu_number() definition only works for #cpus <= 8
 #else
 
-extern __inline__ int cpu_number(void)
+static __inline__ int cpu_number(void)
 {
 	register int cpu;
 

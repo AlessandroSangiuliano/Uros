@@ -816,7 +816,7 @@ mp_intr(
 	char				*ret_addr, /* ret addr in  handler */
 	struct i386_interrupt_state	*regs)
 {
-	register mycpu;
+	register int mycpu;
 	volatile int	*my_word;
 #if	MACH_KDB && MACH_ASSERT
 	int i=100;
@@ -843,7 +843,7 @@ mp_intr(
 			ast_check();
 #if	MACH_KDB
 		} else if (i_bit(MP_KDB, my_word)) {
-			extern kdb_is_slave[];
+			extern int kdb_is_slave[];
 
 			i_bit_clear(MP_KDB, my_word);
 			kdb_is_slave[mycpu]++;
@@ -916,7 +916,7 @@ start_other_cpus(void)
 	int i;
 
 	extern char slave_boot_base[], slave_boot_end[];
-	extern pstart(void);
+	extern int pstart(void);
 
 	master_up();
 
@@ -983,7 +983,7 @@ get_ncpus(void)
 void
 slave_machine_init(void)
 {
-	register	my_cpu;
+	register int	my_cpu;
 	extern	int	curr_ipl[];
 
 	mp_disable_preemption();

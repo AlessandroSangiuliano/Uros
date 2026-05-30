@@ -105,9 +105,9 @@
 
 #ifndef	ASSEMBLER
 #include <kern/lock.h>
-extern	cpu_int_word[];
-extern	real_ncpus;		/* real number of cpus */
-extern	wncpu;			/* wanted number of cpus */
+extern	int	cpu_int_word[];
+extern	int	real_ncpus;	/* real number of cpus */
+extern	int	wncpu;		/* wanted number of cpus */
 decl_simple_lock_data(extern,kdb_lock)	/* kdb lock		*/
 
 extern	int	kdb_cpu;		/* current cpu running kdb	*/

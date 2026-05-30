@@ -79,7 +79,7 @@
 #include <kern/machine.h>
 #include <i386/db_machdep.h>
 #include <ddb/db_run.h>
-#include <machine/mp/mp.h>
+#include <machine/AT386/mp/mp.h>
 #include <i386/setjmp.h>
 #include <i386/misc_protos.h>
 
@@ -100,7 +100,7 @@ extern int get_ncpus(void);
 void
 slave_clock(void)
 {
-	register cpu;
+	register int cpu;
 
 	mp_disable_preemption();
 	for (cpu=cpu_number()+1; cpu<NCPUS; cpu++)
@@ -211,7 +211,7 @@ void
 remote_kdb(void)
 {
 	int	my_cpu;
-	register	i;
+	register int	i;
 
 	mp_disable_preemption();
 	my_cpu = cpu_number();
