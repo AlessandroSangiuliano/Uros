@@ -44,6 +44,19 @@ endif()
 set(KERNEL_TARGET "mach_kernel")
 set(KERNEL_TEXTORG "0x100000")  # 1MB - physical load address
 
+# #300 — SMP bring-up.  Default 1 keeps the v0.1.0 single-CPU build unchanged.
+# Override with -DUROS_NCPUS=2 (or 4, 8) to enable the SMP code paths.
+set(UROS_NCPUS "1" CACHE STRING "Number of CPUs the kernel supports (1 = UP, >1 = SMP)")
+if(UROS_NCPUS GREATER 1)
+    message(STATUS "SMP build: UROS_NCPUS=${UROS_NCPUS} (experimental, #300 in progress)")
+    # MPS 1.x AP-boot path (mp.c, mp_v1_1.c, slave_boot.S).
+    # ACPI MADT path will land via #305.
+    set(KERNEL_SMP_DEFINES -DMP_V1_1=1)
+else()
+    message(STATUS "UP build: UROS_NCPUS=${UROS_NCPUS}")
+    set(KERNEL_SMP_DEFINES "")
+endif()
+
 # Get GCC's internal include path (for stdarg.h, etc.) EARLY so we can use it in C_FLAGS
 # Must use -m32 to get 32-bit compatible include path
 execute_process(
@@ -96,7 +109,7 @@ set(KERNEL_DEFINES
     -DKERNEL
     -DMACH_KERNEL
     -DAT386=1
-    -DNCPUS=1
+    -DNCPUS=${UROS_NCPUS}
     -DMACH_ASSERT=1
     -DMACH_DEBUG=1
     -DMACH_KDB=1
@@ -113,6 +126,7 @@ set(KERNEL_DEFINES
     -DNPCI=1
     # GCC/ELF does not use underscore prefix for C symbols
     -D__NO_UNDERSCORES__
+    ${KERNEL_SMP_DEFINES}
 )
 
 # MIG-specific flags - disable type checking for kernel stubs
