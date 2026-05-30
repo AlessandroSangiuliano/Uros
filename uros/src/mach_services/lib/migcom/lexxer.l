@@ -236,6 +236,7 @@ extern void yyerror(char *);
 <Normal>[Oo][Vv][Ee][Rr][Ww][Rr][Ii][Tt][Ee]	FRETURN(flOverwrite);
 <Normal>[Dd][Ee][Aa][Ll][Ll][Oo][Cc]		FRETURN(flDealloc);
 <Normal>[Nn][Oo][Tt][Dd][Ee][Aa][Ll][Ll][Oo][Cc] FRETURN(flNotDealloc);
+<Normal>[Uu][Ss][Ee][Rr][Dd][Ee][Aa][Ll][Ll][Oo][Cc] FRETURN(flUserDealloc);
 <Normal>[Cc][Oo][Uu][Nn][Tt][Ii][Nn][Oo][Uu][Tt] FRETURN(flCountInOut);
 <Normal>[Pp][Oo][Ll][Yy][Mm][Oo][Rr][Pp][Hh][Ii][Cc]	TPRETURN(MACH_MSG_TYPE_POLYMORPHIC, MACH_MSG_TYPE_POLYMORPHIC, 32);
 <Normal>[Aa][Uu][Tt][Oo]			FRETURN(flAuto);
