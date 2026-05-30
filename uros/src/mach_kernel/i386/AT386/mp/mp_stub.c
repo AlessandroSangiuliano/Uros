@@ -51,29 +51,11 @@ int		lapic_id = (int)&lapic_id_initdata;
 vm_offset_t	lapic_start;
 
 /* cpu_int_word[NCPUS], real_ncpus and wncpu are already defined by mp.c;
- * cpu_start(), cpu_control() and mp_probe_cpus() likewise live there. */
-
-/*
- * get_ncpus() — called by mp.c::mp_probe_cpus() to ask the platform how
- * many CPUs it found.  Stub answers 1.
- */
-int
-get_ncpus(void)
-{
-	return 1;
-}
-
-/*
- * validate_cpus() — marks the first `n` machine_slot[] entries as CPUs.
- * mp.c calls this from the MP_V1_1 branch of mp_probe_cpus(); we keep it
- * truthful for n==1 and ignore higher counts (no AP support yet).
- */
-void
-validate_cpus(int ncpus)
-{
-	(void)ncpus;
-	machine_slot[0].is_cpu = TRUE;
-}
+ * cpu_start(), cpu_control() and mp_probe_cpus() likewise live there.
+ *
+ * get_ncpus() and validate_cpus() live in mp_table.c (Increment 3): they
+ * walk the MPS 1.4 FPS/PCMP to enumerate real processors instead of always
+ * answering 1. */
 
 /*
  * cpu_interrupt() — send an IPI to `cpu` (typically using cpu_int_word
@@ -127,16 +109,10 @@ mp_v1_1_io_unlock(struct processor *p)
 	(void)p;
 }
 
-/*
- * mp_v1_1_init() — bring the historical MPS 1.x machinery up.  Stub does
- * nothing; replaced by the modern MP table parser in Increment 3.
- */
+/* mp_v1_1_init() lives in mp_table.c (Increment 3); the global
+ * mp_v1_1_initialized flag is still owned by this file because mp.c and
+ * a couple of legacy callers check it directly. */
 boolean_t	mp_v1_1_initialized = FALSE;
-
-void
-mp_v1_1_init(void)
-{
-}
 
 /*
  * mp_v1_1_take_irq() / mp_v1_1_reset_irq() — install/remove a per-CPU IRQ

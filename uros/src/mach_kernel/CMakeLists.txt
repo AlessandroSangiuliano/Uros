@@ -627,6 +627,7 @@ if(UROS_NCPUS GREATER 1)
         i386/mp_desc.c
         i386/AT386/mp/mp.c
         i386/AT386/mp/mp_stub.c
+        i386/AT386/mp/mp_table.c
     )
 endif()
 
