@@ -1818,11 +1818,8 @@ main(int argc, char **argv)
      * --------------------------------------------------------- */
     if (suites & SUITE_DISK) {
 	bench_disk_run(host_port, clock_port);
-	/* #232: FLIPC v2 read + write fast-path A/B over libvfs. */
-	extern void bench_libvfs_flipc(mach_port_t clock);
-	extern void bench_libvfs_flipc_write(mach_port_t clock);
-	bench_libvfs_flipc(clock_port);
-	bench_libvfs_flipc_write(clock_port);
+	/* #232 FLIPC v2 read/write A/B moved to the standalone flipc_bench
+	 * binary (#272), launched from the shell on a quiescent system. */
     }
 
     /* ---------------------------------------------------------

@@ -130,10 +130,23 @@ vfs_resolve_mount(const char *path)
     if (kr != NETNAME_SUCCESS || port == MACH_PORT_NULL)
         return MACH_PORT_NULL;
 
-    /* Refresh-or-insert cache entry for matched prefix. */
+    /* Refresh-or-insert cache entry for matched prefix.
+     *
+     * netname_look_up_mount() hands us a fresh send-right reference on
+     * every call.  When we already cache this mount, that new reference
+     * is a duplicate of the one the cache holds (same port name, bumped
+     * uref) — drop it, or every vfs_open() of an already-mounted path
+     * leaks a send right and the IPC space grows without bound until the
+     * task faults.  Found via the fd-lifecycle stress (#272): ~13 back-
+     * to-back opens of one file were enough to corrupt the task. */
     for (i = 0; i < VFS_MAX_CACHED_MOUNTS; i++) {
         if (vfs_mounts[i].in_use
             && strcmp(vfs_mounts[i].prefix, matched) == 0) {
+            if (port != vfs_mounts[i].fs_port)
+                (void)mach_port_deallocate(mach_task_self(),
+                                           vfs_mounts[i].fs_port);
+            else
+                (void)mach_port_deallocate(mach_task_self(), port);
             vfs_mounts[i].fs_port = port;
             return port;
         }
