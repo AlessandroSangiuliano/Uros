@@ -103,7 +103,7 @@ routine fs_read(
 	in	handle		: vfs_u64_t;
 	in	offset		: vfs_u64_t;
 	in	count		: vfs_u32_t;
-	out	data		: vfs_buf_t
+	out	data		: vfs_buf_t, Dealloc
 	);
 
 /*
@@ -157,7 +157,7 @@ routine fs_readdir(
 		fs_port		: mach_port_t;
 	in	dir_handle	: vfs_u64_t;
 	in	cookie		: vfs_u64_t;
-	out	entries		: vfs_dirent_array_t;
+	out	entries		: vfs_dirent_array_t, Dealloc;
 	out	next_cookie	: vfs_u64_t
 	);
 
