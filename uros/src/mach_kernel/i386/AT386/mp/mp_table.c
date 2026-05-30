@@ -37,6 +37,7 @@
 #include <kern/misc_protos.h>
 #include <i386/AT386/mp/mp.h>
 #include <i386/apic.h>
+#include <i386/io_map_entries.h>		/* io_map() */
 
 /*
  * Floating Pointer Structure — 16 bytes, byte-packed on the wire.
@@ -119,6 +120,28 @@ static unsigned char		mp_bsp_lapic_id;
 static unsigned int		mp_lapic_phys;
 static unsigned int		mp_ioapic_phys[4];	/* up to 4 I/O APICs */
 static int		mp_ioapic_count;
+
+/* Externals that the rest of the kernel exports — set up here once we
+ * know where the local APIC actually sits in memory. */
+extern vm_offset_t	lapic_start;
+extern int		lapic_id;
+
+/*
+ * Public accessors used by the AP boot path in mp.c.
+ */
+unsigned char
+mp_cpu_lapic_id_get(int slot)
+{
+	if (slot < 0 || slot >= mp_cpu_count)
+		return 0xFF;
+	return mp_cpu_lapic_id[slot];
+}
+
+unsigned char
+mp_bsp_lapic_id_get(void)
+{
+	return mp_bsp_lapic_id;
+}
 
 /*
  * Physical→kernel-virtual mapping.  Identity-mapped low memory (under
@@ -334,6 +357,14 @@ mp_v1_1_init(void)
 
 	printf("mp_table: %d CPU(s), BSP lapic_id=%d, lapic@0x%x, %d IOAPIC(s)\n",
 	       mp_cpu_count, mp_bsp_lapic_id, mp_lapic_phys, mp_ioapic_count);
+
+	/*
+	 * Map the local APIC into kernel virtual space so the rest of the
+	 * kernel (cpu_number() inline, interrupt.S, the AP boot path in
+	 * mp.c) can poke its registers.
+	 */
+	lapic_start = io_map(mp_lapic_phys, LAPIC_SIZE);
+	lapic_id    = (int)(lapic_start + LAPIC_ID);
 }
 
 /*

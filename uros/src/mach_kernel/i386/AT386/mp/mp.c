@@ -80,6 +80,8 @@
 #include <i386/db_machdep.h>
 #include <ddb/db_run.h>
 #include <machine/AT386/mp/mp.h>
+#include <machine/AT386/mp/boot.h>		/* #300: MP_BOOT, MP_MACH_START */
+#include <i386/apic.h>				/* #300: LAPIC_ICR / LAPIC_ICRD */
 #include <i386/setjmp.h>
 #include <i386/misc_protos.h>
 
@@ -138,13 +140,154 @@ cause_ast_check(
 	cpu_interrupt(cpu);
 }
 
-/*ARGSUSED*/
-kern_return_t
-cpu_start(
-	int	slot_num)
+/*
+ * cpu_start() — bring application processor `slot_num` out of reset and
+ * into the kernel via the INIT/SIPI/SIPI sequence on the local APIC.
+ *
+ * Sequence per Intel SDM Vol. 3 §8.4:
+ *   1. Drop the slave_boot.S trampoline at phys MP_BOOT (0x1000) and
+ *      stash the entry point — &pstart converted to physical — at the
+ *      well-known slot MP_MACH_START (0x800) that slave_pstart reads.
+ *   2. Send INIT IPI (level-assert) targeted at the AP's LAPIC ID.
+ *   3. Wait ~10 ms.
+ *   4. Send STARTUP IPI with vector = MP_BOOT >> 12.
+ *   5. Wait ~200 µs.
+ *   6. Send STARTUP IPI a second time (spec recommendation; modern CPUs
+ *      ignore the second one but it makes us robust on older steppings).
+ *   7. Poll machine_slot[slot_num].running for up to ~1 s — the AP marks
+ *      itself running once it reaches cpu_up() via slave_main().
+ *
+ * #300 Increment 4.  No I/O APIC / PIC interaction here yet (Phase C).
+ */
+
+extern char	slave_boot_base[];	/* AP real-mode trampoline */
+extern char	slave_boot_end[];
+extern void	pstart(void);		/* shared BSP/AP entry in start.S */
+extern vm_offset_t	lapic_start;	/* LAPIC virtual base, set by mp_table.c */
+extern unsigned char	mp_cpu_lapic_id_get(int slot);	/* mp_table.c */
+extern unsigned char	mp_bsp_lapic_id_get(void);	/* mp_table.c */
+
+#define MP_BOOT_VA	((vm_offset_t)MP_BOOT     + 0xC0000000U)
+#define MP_MACH_START_VA ((vm_offset_t)MP_MACH_START + 0xC0000000U)
+#define KV_TO_PA(x)	((unsigned int)(x) - 0xC0000000U)
+
+#define LAPIC_REG32(off)	(*(volatile unsigned int *)(lapic_start + (off)))
+
+/*
+ * Busy-wait roughly `us` microseconds.  KVM is fast enough that we just
+ * need *some* delay between IPIs; replaced by a proper TSC-calibrated
+ * delay when #302 wires up real timing.  Empirically ~100 iterations/μs
+ * on a 2 GHz host with the optimiser disabled, which we generously
+ * overestimate so the wait is always long enough.
+ */
+static void
+mp_busy_delay_us(unsigned int us)
 {
-	printf("cpu_start not implemented\n");
-	return (KERN_FAILURE);
+	volatile unsigned int spin;
+	unsigned int total = us * 200u;
+
+	for (spin = 0; spin < total; spin++)
+		;
+}
+
+static void
+mp_busy_delay_ms(unsigned int ms)
+{
+	while (ms-- > 0)
+		mp_busy_delay_us(1000);
+}
+
+static void
+mp_lapic_ipi_wait(void)
+{
+	while (LAPIC_REG32(LAPIC_ICR) & LAPIC_ICR_DS_PENDING)
+		;
+}
+
+static void
+mp_lapic_send_init(unsigned int dest_lapic_id)
+{
+	LAPIC_REG32(LAPIC_ICRD) =
+	    (dest_lapic_id & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG32(LAPIC_ICR)  =
+	    LAPIC_ICR_DM_INIT | LAPIC_ICR_LEVEL_ASSERT;
+	mp_lapic_ipi_wait();
+}
+
+static void
+mp_lapic_send_sipi(unsigned int dest_lapic_id, unsigned int vector)
+{
+	LAPIC_REG32(LAPIC_ICRD) =
+	    (dest_lapic_id & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG32(LAPIC_ICR)  =
+	    LAPIC_ICR_DM_STARTUP | (vector & LAPIC_ICR_VECTOR_MASK);
+	mp_lapic_ipi_wait();
+}
+
+kern_return_t
+cpu_start(int slot_num)
+{
+	unsigned char	dest_lapic;
+	unsigned int	pstart_pa;
+	vm_size_t	trampoline_size;
+	int		wait_ms;
+
+	if (lapic_start == 0) {
+		printf("cpu_start(%d): LAPIC not mapped, refusing\n", slot_num);
+		return KERN_FAILURE;
+	}
+
+	dest_lapic = mp_cpu_lapic_id_get(slot_num);
+	if (dest_lapic == 0xFF) {
+		printf("cpu_start(%d): no LAPIC ID known\n", slot_num);
+		return KERN_FAILURE;
+	}
+	if (dest_lapic == mp_bsp_lapic_id_get())
+		return KERN_SUCCESS;	/* the BSP is already running */
+
+	/*
+	 * Copy the trampoline to its rendezvous address and seed the
+	 * entry-point slot.  Both addresses are in identity-mapped low
+	 * memory reachable through phystokv().
+	 */
+	trampoline_size = (vm_size_t)(slave_boot_end - slave_boot_base);
+	memcpy((void *)MP_BOOT_VA, slave_boot_base, trampoline_size);
+
+	pstart_pa = KV_TO_PA(pstart);
+	*(volatile unsigned int *)MP_MACH_START_VA = pstart_pa;
+
+	printf("cpu_start: slot=%d lapic=%d trampoline=%lu B entry=0x%x\n",
+	       slot_num, dest_lapic, (unsigned long)trampoline_size,
+	       pstart_pa);
+
+	/*
+	 * INIT/SIPI/SIPI dance.
+	 */
+	mp_lapic_send_init(dest_lapic);
+	mp_busy_delay_ms(10);
+
+	mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+	mp_busy_delay_us(200);
+
+	mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+	mp_busy_delay_us(200);
+
+	/*
+	 * Wait up to ~1 s for the AP to reach cpu_up() and flip its
+	 * machine_slot[].running flag.
+	 */
+	for (wait_ms = 0; wait_ms < 1000; wait_ms++) {
+		if (machine_slot[slot_num].running == TRUE) {
+			printf("cpu_start: AP %d online (lapic=%d)\n",
+			       slot_num, dest_lapic);
+			return KERN_SUCCESS;
+		}
+		mp_busy_delay_ms(1);
+	}
+
+	printf("cpu_start: AP %d (lapic=%d) failed to come online\n",
+	       slot_num, dest_lapic);
+	return KERN_FAILURE;
 }
 
 /*ARGSUSED*/

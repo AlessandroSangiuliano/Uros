@@ -69,13 +69,31 @@ cpu_interrupt(int cpu)
 }
 
 /*
- * start_other_cpus() — called from kern/startup.c on the BSP to bring all
- * APs into the scheduler.  Stub does nothing; #300 Incrementi 3-4 wire
- * this up to the real INIT/SIPI sequence.
+ * start_other_cpus() — called from kern/startup.c on the BSP after the
+ * scheduler is up.  Walks every slot the MP table identified as a CPU,
+ * skips the BSP itself, and asks cpu_start() (in mp.c) to bring each AP
+ * online via the INIT/SIPI/SIPI sequence.
+ *
+ * #300 Increment 4.  Errors are logged but not fatal: a failed AP just
+ * stays offline; the rest of the system keeps running on the CPUs that
+ * did make it.
  */
+extern int master_cpu;
+extern int real_ncpus;
+extern kern_return_t cpu_start(int slot);
+
 void
 start_other_cpus(void)
 {
+	int slot;
+
+	for (slot = 0; slot < real_ncpus; slot++) {
+		if (slot == master_cpu)
+			continue;
+		if (cpu_start(slot) != KERN_SUCCESS)
+			printf("start_other_cpus: AP slot %d did not come up\n",
+			       slot);
+	}
 }
 
 /*
