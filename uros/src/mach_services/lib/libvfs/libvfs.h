@@ -1,0 +1,134 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ */
+
+#ifndef _LIBVFS_H_
+#define _LIBVFS_H_
+
+/*
+ * libvfs.h — public client API for the libvfs dispatcher (#220 v0.1).
+ *
+ * Include from any task that needs filesystem I/O routed through the
+ * VFS mount table.  fs_servers MUST NOT include this header: their
+ * impl symbols (vfs_open, vfs_read, ...) collide with the client
+ * wrappers declared here.
+ */
+
+#include "vfs_types.h"          /* wire types: vfs_stat_t, VFS_O_*, ... */
+#include <mach.h>               /* mach_port_t for vfs_mmap (#276) */
+
+/*
+ * vfs_fd_t — libvfs file descriptor.  An int index into the per-task
+ * fd table; NOT a POSIX fd (libposix-uros owns the POSIX numbering and
+ * its own translation, in a future layer).  -1 on error.
+ */
+typedef int             vfs_fd_t;
+
+#define VFS_FD_INVALID  ((vfs_fd_t)-1)
+
+/* lseek whence */
+#define VFS_SEEK_SET    0
+#define VFS_SEEK_CUR    1
+#define VFS_SEEK_END    2
+
+/*
+ * size_t comes via <stddef.h> already pulled in by vfs_types.h.
+ * ssize_t and off_t are not consistently defined across sa_mach
+ * (off_t is u32 in sa_mach/types.h, ssize_t is absent), so we provide
+ * local typedefs guarded against the most common system definitions.
+ * Wire-side offsets always use vfs_u64_t regardless of off_t width.
+ */
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+typedef long            ssize_t;
+#endif
+#ifndef _OFF_T_DEFINED
+#define _OFF_T_DEFINED
+typedef unsigned int    off_t;          /* matches sa_mach/types.h */
+#endif
+
+/*
+ * Initialise libvfs once per task.  Idempotent and cheap; safe to
+ * call from library constructors.  Today: zeroes the fd table; the
+ * mount cache is populated lazily on the first vfs_open().
+ */
+int             vfs_init(void);
+
+/*
+ * vfs_open — resolve path to fs_server, ask it to open, allocate an fd.
+ *   flags — VFS_O_* (vfs_types.h)
+ *   mode  — POSIX mode bits, used only when VFS_O_CREAT is set
+ * Returns a valid vfs_fd_t on success, VFS_FD_INVALID on failure.
+ */
+vfs_fd_t        vfs_open(const char *path, int flags, int mode);
+
+int             vfs_close(vfs_fd_t fd);
+
+ssize_t         vfs_read(vfs_fd_t fd, void *buf, size_t count);
+ssize_t         vfs_write(vfs_fd_t fd, const void *buf, size_t count);
+
+off_t           vfs_lseek(vfs_fd_t fd, off_t offset, int whence);
+
+int             vfs_stat(const char *path, vfs_stat_t *out);
+int             vfs_fstat(vfs_fd_t fd, vfs_stat_t *out);
+
+int             vfs_sync(vfs_fd_t fd);
+
+/*
+ * vfs_mmap - ask the fs_server for a Mach memory_object backing the
+ * file open under `fd`.  The returned send right is what libposix-uros
+ * passes to vm_map (h_mmap2 for the POSIX mmap path, #276 Phase B).
+ *
+ *   prot/flags - POSIX PROT_xxx and MAP_xxx bits, forwarded as hints;
+ *                actual protection is enforced per-mapping by the
+ *                kernel at vm_map time.
+ *   out_port   - set to the memory_object port on success.
+ * Returns 0 on success, -1 on failure (out_port left untouched).
+ */
+int             vfs_mmap(vfs_fd_t fd, int prot, int flags,
+                         mach_port_t *out_port);
+
+/*
+ * Namespace operations (v0.3.0, #231).  Paths are absolute.
+ *   vfs_unlink — remove a name.
+ *   vfs_rename — move a name; same-mount uses the server's atomic
+ *                rename, cross-mount is synthesized as copy + unlink
+ *                (POSIX EXDEV semantics).
+ *   vfs_copy   — byte copy src -> dst, creating/truncating dst; works
+ *                within or across mounts.  Returns 0 / -1.
+ */
+int             vfs_unlink(const char *path);
+int             vfs_rename(const char *oldpath, const char *newpath);
+int             vfs_copy(const char *src, const char *dst);
+
+/*
+ * FLIPC v2 fast-path control (#232).  Bulk vfs_read above an internal
+ * size threshold routes its data through a shared-memory channel when
+ * the fs_server offers one; disabling forces the Mach data path (used
+ * by benchmarks to A/B the two).  Enabled by default.
+ */
+void            vfs_flipc_set_enabled(int on);
+
+/*
+ * Flush every fd's pending write-behind buffer to its fs_server (#232).
+ * libposix-uros calls this before execve hands the fd table to a new
+ * image, since the buffers live in this task's heap and would otherwise
+ * be lost across exec.
+ */
+void            vfs_flush_all(void);
+
+#endif /* _LIBVFS_H_ */

@@ -1,0 +1,118 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * char_server.h — Internal types and globals for the char_server task.
+ *
+ * Mirror gpu_server.h.  Public client-visible types live in
+ * uros/export/include/char/.
+ */
+
+#ifndef _CHAR_SERVER_INTERNAL_H_
+#define _CHAR_SERVER_INTERNAL_H_
+
+#include <mach.h>
+#include <mach/mach_types.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <char/char_types.h>
+#include <char/char_module_abi.h>
+
+#define CHAR_MAX_DEVICES	8
+#define CHAR_MAX_MODULES	8
+
+struct char_device_entry {
+	int				in_use;
+	char_dev_id_t			id;
+	const char_module_ops_t		*module;
+	void				*priv;
+	struct char_device_info		info;
+	/*
+	 * Controlling-terminal owner (#275.1+).  sid of the session that
+	 * called tty_acquire_ctty on this device; 0 if unbound.  Only
+	 * meaningful for CHAR_CLASS_TTY entries.  Background-read/write
+	 * checks (#275.2/.3) compare the caller's sid against this field
+	 * and the caller's pgrp against proc_tcgetpgrp(sid).
+	 */
+	int				ctty_sid;
+	/*
+	 * POSIX TOSTOP flag (#275.3).  When non-zero, a background-pgrp
+	 * caller that tries to tty_write gets SIGTTOU instead of bytes;
+	 * the foreground pgrp writes unmodified.  Default 0 (BSD/Linux
+	 * default) — the shell flips it on per-session when it cares.
+	 * Only meaningful for CHAR_CLASS_TTY entries.
+	 */
+	int				tty_tostop;
+};
+
+/* ============================================================
+ * Core API
+ * ============================================================ */
+
+int  char_core_init(void);
+void char_core_run_discovery(const char_module_ops_t * const *modules,
+			     unsigned int n_modules,
+			     mach_port_t hal_port);
+
+struct char_device_entry *char_core_dev_lookup(char_dev_id_t id);
+unsigned int              char_core_dev_count(void);
+int                       char_core_dev_copy_all(struct char_device_info *out,
+						 unsigned int max);
+
+/*
+ * cap_check — same shape as gpu_core_cap_check.  resource_id is the
+ * dev_id (or 0 for class-wide ops); the required `op` is selected
+ * by the MIG handler from CHAR_CAP_*.  Empty tokens (count == 0)
+ * are rejected — char_server has no early-boot exception path
+ * comparable to gpu_text_puts.
+ */
+int char_core_cap_check(const char *token, unsigned int token_count,
+			uint64_t op, uint64_t resource_id);
+
+/*
+ * IRQ wiring for back-end modules.  Implemented in core.c, exposed
+ * via the public ABI in <char/char_module_abi.h>.
+ *
+ * Demux entry point invoked by main.c when an IRQ notification
+ * arrives on the port set; returns TRUE if the message was an IRQ
+ * notification we recognised.
+ */
+boolean_t char_core_dispatch_irq(mach_msg_header_t *in);
+
+/*
+ * One-time init for the IRQ table.  Must be called before
+ * char_core_irq_register can succeed.  Needs the master_device port
+ * (for device_intr_register) and the port_set (to attach the IRQ
+ * receive port to it).
+ */
+int  char_core_irq_init(mach_port_t master_device, mach_port_t port_set);
+
+/* ============================================================
+ * MIG-side glue
+ * ============================================================ */
+
+extern boolean_t char_server_server(mach_msg_header_t *in,
+				    mach_msg_header_t *out);
+
+/* ============================================================
+ * Global state (defined in main.c)
+ * ============================================================ */
+
+extern mach_port_t	char_host_port;
+extern mach_port_t	char_device_port;
+extern mach_port_t	char_security_port;
+extern mach_port_t	char_root_ledger_wired;
+extern mach_port_t	char_root_ledger_paged;
+extern mach_port_t	char_service_port;
+
+/*
+ * proc_server send right.  Looked up once at startup from netname ("proc")
+ * by main.c (#275.1).  MACH_PORT_NULL until proc_server is available;
+ * tty_acquire_ctty fails with KERN_FAILURE in that case.
+ */
+extern mach_port_t	char_proc_port;
+void			char_proc_port_resolve(void);
+
+#endif /* _CHAR_SERVER_INTERNAL_H_ */

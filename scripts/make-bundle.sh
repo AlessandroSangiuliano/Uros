@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# ==========================================================================
+# make-bundle.sh — Crea il bundle stage-1 multiboot per Uros (Issue #186).
+#
+# Il bundle è un archivio flat name->bytes che il kernel passa al
+# bootstrap server come secondo modulo multiboot (mod[1]).  Contiene la
+# bootstrap.conf e i binari/moduli necessari prima che il
+# block_device_server sia in piedi (stage-0), così bootstrap.c non deve
+# più affidarsi al driver IDE in-kernel per leggere /mach_servers/.
+#
+# Uso:
+#   ./scripts/make-bundle.sh                  # output di default
+#   ./scripts/make-bundle.sh -o bundle.bin    # path output custom
+#   ./scripts/make-bundle.sh --bench all ...  # passa suite a ipc_bench
+# ==========================================================================
+set -euo pipefail
+
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD_DIR="$REPO_ROOT/uros/build"
+ARCH="$(uname -m)"
+
+BUNDLE_OUT="$BUILD_DIR/bootstrap.bundle"
+MKBUNDLE="$BUILD_DIR/tools/mkbundle"
+BENCH_ARGS=""
+MINIMAL=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) BUNDLE_OUT="$2"; shift 2 ;;
+        --bench)
+            shift
+            while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
+                BENCH_ARGS="$BENCH_ARGS $1"
+                shift
+            done
+            ;;
+        --minimal)
+            MINIMAL=1; shift ;;
+        -h|--help)
+            echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal]"
+            echo "  --minimal: skip test/bench tasks (ipc_bench, pthread_test, cap_test,"
+            echo "             kernel242_test, sig_test, gpustat) from bootstrap.conf"
+            exit 0
+            ;;
+        *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [ ! -x "$MKBUNDLE" ]; then
+    echo "ERRORE: mkbundle non trovato: $MKBUNDLE"
+    echo "  Build con: cd $BUILD_DIR && ninja mkbundle"
+    exit 1
+fi
+
+SBIN="$BUILD_DIR/export/uros/$ARCH/user/sbin"
+MANIFESTS="$BUILD_DIR/export/uros/$ARCH/user/manifests"
+
+# #216 v2.1: compiled per-server manifests (.cmf TLV) that bootstrap
+# hands to cap_server at task_create time.  Optional — servers
+# without a .cmf fall back to the legacy permissive cap_server path.
+HELLO_SERVER_CMF="$MANIFESTS/hello_server.cmf"
+
+NAME_SERVER="$SBIN/name_server"
+CAP_SERVER="$SBIN/cap_server"
+CAP_TEST="$SBIN/cap_test"
+GPUSTAT="$SBIN/gpustat"
+HAL_SERVER="$SBIN/hal_server"
+BLOCK_DEVICE_SERVER="$SBIN/block_device_server"
+DEFAULT_PAGER="$SBIN/default_pager"
+HELLO_SERVER="$SBIN/hello_server"
+IPC_BENCH="$SBIN/ipc_bench"
+EXT2_SERVER="$SBIN/ext_server"
+PTHREAD_TEST="$SBIN/pthread_test"
+EXEC_SERVER="$SBIN/exec_server"
+HELLO_EXEC="$SBIN/hello_exec"
+PROC_SERVER="$SBIN/proc_server"
+KERNEL242_TEST="$SBIN/kernel242_test"
+SIG_TEST="$SBIN/sig_test"
+
+HAL_PCI_SCAN_MODULE="$BUILD_DIR/src/hal_server/modules/pci_scan.so"
+AHCI_MODULE="$BUILD_DIR/src/block_device_server/modules/ahci.so"
+VIRTIO_BLK_MODULE="$BUILD_DIR/src/block_device_server/modules/virtio_blk.so"
+GPU_SERVER="$SBIN/gpu_server"
+GPU_VGA_MODULE="$BUILD_DIR/src/gpu_server/modules/vga.so"
+CHAR_SERVER="$SBIN/char_server"
+CHAR_PS2_MODULE="$BUILD_DIR/src/char_server/modules/ps2.so"
+CHAR_UART_MODULE="$BUILD_DIR/src/char_server/modules/uart.so"
+CHAR_PS2_MOUSE_MODULE="$BUILD_DIR/src/char_server/modules/ps2_mouse.so"
+
+REQUIRED_FILES=(
+    "$NAME_SERVER" "$HAL_SERVER" "$BLOCK_DEVICE_SERVER"
+    "$DEFAULT_PAGER" "$HELLO_SERVER" "$IPC_BENCH"
+    "$EXT2_SERVER" "$PTHREAD_TEST"
+    "$HAL_PCI_SCAN_MODULE" "$AHCI_MODULE" "$VIRTIO_BLK_MODULE"
+)
+# gpu_server is optional in 0.1.0 (OSFMK_BUILD_GPU_SERVER off by default)
+[ -f "$GPU_SERVER" ] && REQUIRED_FILES+=("$GPU_SERVER" "$GPU_VGA_MODULE")
+for f in "${REQUIRED_FILES[@]}"; do
+    if [ ! -f "$f" ]; then
+        echo "ERRORE: file mancante: $f"
+        exit 1
+    fi
+done
+
+# bootstrap.conf — stesso contenuto di make-disk-image.sh, perché la
+# personalità di stage-0 deve essere indistinguibile da quella stage-2.
+BOOTSTRAP_CONF=$(mktemp)
+trap 'rm -f "$BOOTSTRAP_CONF"' EXIT
+
+CAP_SERVER_CONF_LINE=""
+[ -f "$CAP_SERVER" ] && CAP_SERVER_CONF_LINE="cap_server cap_server"
+CAP_TEST_CONF_LINE=""
+[ -f "$CAP_TEST" ] && CAP_TEST_CONF_LINE="cap_test cap_test"
+KERNEL242_TEST_CONF_LINE=""
+[ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="kernel242_test kernel242_test"
+SIG_TEST_CONF_LINE=""
+[ -f "$SIG_TEST" ] && SIG_TEST_CONF_LINE="sig_test sig_test"
+EXEC_SERVER_CONF_LINE=""
+[ -f "$EXEC_SERVER" ] && EXEC_SERVER_CONF_LINE="exec_server exec_server"
+PROC_SERVER_CONF_LINE=""
+[ -f "$PROC_SERVER" ] && PROC_SERVER_CONF_LINE="proc_server proc_server"
+GPUSTAT_CONF_LINE=""
+[ -f "$GPUSTAT" ] && GPUSTAT_CONF_LINE="gpustat gpustat"
+# ush (#275.5): kept off the bundle (no `ARGS+=` entry below) so it
+# always loads from /dev/boot_device/mach_servers/ush on disk.  The
+# bootstrap.conf line still names it as a stage-2 task; bootstrap's
+# fallback path picks it up from the disk fs.
+USH="$SBIN/ush"
+USH_CONF_LINE=""
+[ -f "$USH" ] && USH_CONF_LINE="ush ush"
+
+GPU_SERVER_CONF_LINE=""
+[ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
+CHAR_SERVER_CONF_LINE=""
+[ -f "$CHAR_SERVER" ] && CHAR_SERVER_CONF_LINE="char_server char_server"
+
+if [ "$MINIMAL" = "1" ]; then
+    HELLO_SERVER_LINE=""
+    IPC_BENCH_LINE=""
+    PTHREAD_TEST_LINE=""
+    CAP_TEST_CONF_LINE=""
+    KERNEL242_TEST_CONF_LINE=""
+    SIG_TEST_CONF_LINE=""
+    GPUSTAT_CONF_LINE=""
+else
+    HELLO_SERVER_LINE="hello_server hello_server"
+    IPC_BENCH_LINE="ipc_bench ipc_bench${BENCH_ARGS}"
+    PTHREAD_TEST_LINE="pthread_test pthread_test"
+fi
+
+cat > "$BOOTSTRAP_CONF" <<CONF
+name_server name_server
+${CAP_SERVER_CONF_LINE}
+${GPU_SERVER_CONF_LINE}
+${CHAR_SERVER_CONF_LINE}
+hal_server hal_server
+block_device_server block_device_server
+default_pager default_pager disk0c
+${HELLO_SERVER_LINE}
+ext_server ext_server
+${EXEC_SERVER_CONF_LINE}
+${PROC_SERVER_CONF_LINE}
+${IPC_BENCH_LINE}
+${PTHREAD_TEST_LINE}
+${CAP_TEST_CONF_LINE}
+${KERNEL242_TEST_CONF_LINE}
+${SIG_TEST_CONF_LINE}
+${GPUSTAT_CONF_LINE}
+${USH_CONF_LINE}
+CONF
+
+ARGS=(-o "$BUNDLE_OUT")
+ARGS+=("bootstrap.conf:$BOOTSTRAP_CONF")
+ARGS+=("name_server:$NAME_SERVER")
+[ -f "$CAP_SERVER" ] && ARGS+=("cap_server:$CAP_SERVER")
+ARGS+=("hal_server:$HAL_SERVER")
+ARGS+=("block_device_server:$BLOCK_DEVICE_SERVER")
+ARGS+=("default_pager:$DEFAULT_PAGER")
+ARGS+=("hello_server:$HELLO_SERVER")
+[ -f "$HELLO_SERVER_CMF" ] && ARGS+=("hello_server.cmf:$HELLO_SERVER_CMF")
+ARGS+=("ipc_bench:$IPC_BENCH")
+ARGS+=("ext_server:$EXT2_SERVER")
+ARGS+=("pthread_test:$PTHREAD_TEST")
+[ -f "$EXEC_SERVER" ] && ARGS+=("exec_server:$EXEC_SERVER")
+[ -f "$PROC_SERVER" ] && ARGS+=("proc_server:$PROC_SERVER")
+[ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
+[ -f "$KERNEL242_TEST" ] && ARGS+=("kernel242_test:$KERNEL242_TEST")
+[ -f "$SIG_TEST" ] && ARGS+=("sig_test:$SIG_TEST")
+[ -f "$GPUSTAT" ] && ARGS+=("gpustat:$GPUSTAT")
+ARGS+=("modules/hal/pci_scan.so:$HAL_PCI_SCAN_MODULE")
+ARGS+=("modules/block/ahci.so:$AHCI_MODULE")
+ARGS+=("modules/block/virtio_blk.so:$VIRTIO_BLK_MODULE")
+if [ -f "$GPU_SERVER" ]; then
+    ARGS+=("gpu_server:$GPU_SERVER")
+    ARGS+=("modules/gpu/vga.so:$GPU_VGA_MODULE")
+fi
+if [ -f "$CHAR_SERVER" ]; then
+    ARGS+=("char_server:$CHAR_SERVER")
+    [ -f "$CHAR_PS2_MODULE" ]       && ARGS+=("modules/char/ps2.so:$CHAR_PS2_MODULE")
+    [ -f "$CHAR_UART_MODULE" ]      && ARGS+=("modules/char/uart.so:$CHAR_UART_MODULE")
+    [ -f "$CHAR_PS2_MOUSE_MODULE" ] && ARGS+=("modules/char/ps2_mouse.so:$CHAR_PS2_MOUSE_MODULE")
+fi
+
+"$MKBUNDLE" "${ARGS[@]}"
+
+echo "Bundle: $BUNDLE_OUT ($(stat -c%s "$BUNDLE_OUT") bytes)"

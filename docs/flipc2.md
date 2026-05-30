@@ -1,6 +1,10 @@
 # FLIPC v2 — High-Performance IPC for Uros
 
-**Library version: 0.0.3**
+**Library version: 0.1.0**
+
+> **0.1.0 highlights** — multi-producer (MPSC) channels (#126), multi-channel
+> wait via pollset (#122), bounded `consume_wait_timed` (#123), producer-side
+> doorbell coalescing with explicit `produce_flush` (#124).
 
 ## Table of Contents
 
@@ -26,8 +30,11 @@ speed for trusted server-to-server and driver-to-server communication.
 ### Key Properties
 
 - **Zero kernel traps** on the fast path (produce/consume)
-- **Lock-free** SPSC (Single Producer, Single Consumer) ring buffer protocol
-- **Adaptive wakeup**: spin-poll first, fall back to Mach semaphore
+- **Lock-free** SPSC ring buffer protocol; opt-in MPSC mode for fan-in workloads
+- **Adaptive wakeup**: spin-poll first, fall back to Mach semaphore (with optional
+  bounded `consume_wait_timed` and producer-side doorbell coalescing)
+- **Multi-channel wait**: a single `flipc2_poll()` call drains N channels via a
+  shared semaphore (pollset)
 - **Cache-line aligned** structures to eliminate false sharing
 - **Corruption detection** and DoS defense (spurious wakeup limit)
 - **Named endpoint discovery** via the Mach name server
@@ -349,6 +356,7 @@ All API functions return `flipc2_return_t` (typedef for `int`):
 | `FLIPC2_ERR_MAX_CLIENTS` | -14 | Endpoint client limit reached |
 | `FLIPC2_ERR_PEER_DEAD` | -15 | Peer task has died |
 | `FLIPC2_ERR_POOL_EMPTY` | -16 | Buffer group pool exhausted |
+| `FLIPC2_ERR_TIMEOUT` | -17 | `consume_wait_timed` deadline elapsed (#123) |
 
 ### 4.3 Constants
 
@@ -382,6 +390,7 @@ All API functions return `flipc2_return_t` (typedef for `int`):
 #define FLIPC2_LAYOUT_ISOLATED          0x00000001
 #define FLIPC2_CREATE_ISOLATED          0x00000001
 #define FLIPC2_CREATE_FLAT              0x00000002  /* force flat layout */
+#define FLIPC2_CREATE_MPSC              0x00000004  /* multi-producer (#126) */
 #define FLIPC2_ROLE_PRODUCER            1
 #define FLIPC2_ROLE_CONSUMER            2
 #define FLIPC2_CHANNEL_SIZE_MIN_ISOLATED 16384  /* 16 KB minimum */
@@ -508,6 +517,49 @@ void flipc2_channel_set_bufgroup(flipc2_channel_t ch,
 Associates a buffer group with this channel. After this, `flipc2_resolve_data()`
 dispatches to the buffer group for descriptors with `FLIPC2_FLAG_DATA_BUFGROUP`.
 
+```c
+void
+flipc2_channel_set_wakeup_threshold(flipc2_channel_t ch, uint32_t thresh);
+```
+
+**(#124)** Set the doorbell-coalescing threshold for this channel. The producer
+signals the consumer only once at least `thresh` descriptors are pending in the
+ring (or via `flipc2_produce_flush()`).
+- `thresh = 0` or `1` — default (wake on every commit)
+- `thresh > 1` — bulk mode; **pair with `flipc2_consume_wait_timed`** on the
+  consumer side so a delayed flush cannot stall it indefinitely
+
+Stored in the shared header; either peer may call it.
+
+#### Pollset (multi-channel wait, #122)
+
+```c
+typedef struct flipc2_pollset *flipc2_pollset_t;
+typedef struct flipc2_event { flipc2_channel_t channel; } flipc2_event_t;
+
+flipc2_return_t flipc2_pollset_create(flipc2_pollset_t *out);
+void            flipc2_pollset_destroy(flipc2_pollset_t ps);
+
+flipc2_return_t flipc2_pollset_add(flipc2_pollset_t ps,
+                                   flipc2_channel_t ch);
+flipc2_return_t flipc2_pollset_remove(flipc2_pollset_t ps,
+                                      flipc2_channel_t ch);
+
+int flipc2_poll(flipc2_pollset_t ps,
+                flipc2_event_t *events, int max_events,
+                uint32_t timeout_ms);
+```
+
+A pollset owns a shared Mach semaphore; added channels have their consumer
+wakeup redirected to it, so a single `flipc2_poll()` drains N channels at once.
+`timeout_ms = 0` is non-blocking; `(uint32_t)-1` is infinite. Returns the number
+of events filled, or a negative `flipc2_return_t` on error.
+
+> **Inter-task constraint**: add the channel to the pollset *before* the remote
+> peer attaches. The peer reads the wakeup-semaphore name from the shared
+> header at attach time; redirecting it after the fact would leave the producer
+> still signalling the original semaphore.
+
 ### 4.5 Producer Fast Path (inline)
 
 ```c
@@ -535,6 +587,30 @@ flipc2_produce_wait(flipc2_channel_t ch, uint32_t spin_count);
 ```
 Blocking reserve: spin-poll, then block on producer backpressure semaphore.
 Returns `NULL` only on ring corruption.
+
+```c
+static inline void
+flipc2_produce_flush(flipc2_channel_t ch);
+```
+**(#124)** Force a consumer wakeup regardless of the doorbell-coalescing
+threshold. Use at end-of-batch (RPC reply, frame flush, idle) when you have
+just committed the final descriptor of a logical group.
+
+#### Producer Fast Path — MPSC (#126)
+
+For channels created with `FLIPC2_CREATE_MPSC`. Concurrent producers use a
+two-counter discipline (`prod_reserved` for atomic claim, `prod_tail` for
+in-order publish) so the consumer always sees a gap-free sequence.
+
+```c
+static inline struct flipc2_desc *
+flipc2_produce_wait_mpsc(flipc2_channel_t ch, uint32_t spin_count,
+                         uint32_t *out_idx);
+
+static inline void
+flipc2_produce_commit_mpsc(flipc2_channel_t ch, uint32_t my_idx);
+```
+The reserved index (`*out_idx`) must be passed verbatim to commit.
 
 ### 4.6 Consumer Fast Path (inline)
 
@@ -565,12 +641,30 @@ Blocking wait with adaptive wakeup (spin → semaphore). Returns `NULL` on
 corruption or DoS (64 consecutive spurious wakeups).
 
 ```c
+static inline flipc2_return_t
+flipc2_consume_wait_timed(flipc2_channel_t ch,
+                          uint32_t spin_count,
+                          uint32_t timeout_ms,
+                          struct flipc2_desc **out_desc);
+```
+**(#123)** Bounded variant of `consume_wait` that distinguishes timeout from
+ring corruption and DoS:
+- `FLIPC2_SUCCESS` — `*out_desc` is a ready descriptor
+- `FLIPC2_ERR_TIMEOUT` — deadline elapsed (or non-blocking with `timeout_ms == 0`)
+- `FLIPC2_ERR_RING_CORRUPT`, `FLIPC2_ERR_PEER_DEAD`, `FLIPC2_ERR_KERNEL`
+
+Required when the producer side enables doorbell coalescing
+(`flipc2_channel_set_wakeup_threshold` > 1) so the consumer doesn't block
+forever waiting for a wake the coalescer suppressed.
+
+```c
 static inline struct flipc2_desc *
 flipc2_consume_timedwait(flipc2_channel_t ch,
                          uint32_t spin_count,
                          uint32_t timeout_ms);
 ```
-Same as `consume_wait` but with a timeout. Returns `NULL` on timeout.
+Pointer-returning wrapper kept for parity with `consume_wait`. Returns `NULL`
+on any non-success — new code should prefer `consume_wait_timed`.
 
 ```c
 static inline uint32_t
@@ -1077,6 +1171,72 @@ void manual_client_attach(vm_address_t fwd_addr, uint32_t size,
 }
 ```
 
+### 5.6 Multi-Producer Channel (MPSC, #126)
+
+When several producer threads share a single channel — fan-in workloads such as
+multiple worker threads logging to one collector — opt into MPSC mode at create
+time. The consumer side is unchanged.
+
+```c
+void mpsc_example(void) {
+    flipc2_channel_t ch;
+    mach_port_t sem;
+
+    /* Opt into MPSC at create time. */
+    flipc2_channel_create_ex(64 * 1024, 64,
+                             FLIPC2_CREATE_MPSC, &ch, &sem);
+
+    /* In each producer thread: */
+    uint32_t idx;
+    struct flipc2_desc *d = flipc2_produce_wait_mpsc(ch, 1024, &idx);
+    d->cookie = my_payload;
+    flipc2_produce_commit_mpsc(ch, idx);   /* must pass the reserved idx */
+
+    /* Consumer side is the same as SPSC: */
+    struct flipc2_desc *r = flipc2_consume_wait(ch, 4096);
+    consume(r);
+    flipc2_consume_release(ch);
+}
+```
+
+The consumer always sees a gap-free in-order sequence: `commit_mpsc` waits for
+the predecessor's slot to publish before advancing `prod_tail`, so partial
+writes are never observed.
+
+### 5.7 Multi-Channel Wait (Pollset, #122)
+
+A pollset lets one consumer thread wait on many channels via a single
+semaphore — equivalent to `epoll`/`kqueue` for FLIPC v2.
+
+```c
+void pollset_example(flipc2_channel_t *channels, int n) {
+    flipc2_pollset_t ps;
+    flipc2_event_t events[16];
+
+    flipc2_pollset_create(&ps);
+    for (int i = 0; i < n; i++)
+        flipc2_pollset_add(ps, channels[i]);  /* before peer attaches */
+
+    for (;;) {
+        int got = flipc2_poll(ps, events, 16, /*timeout_ms=*/100);
+        for (int i = 0; i < got; i++) {
+            flipc2_channel_t ch = events[i].channel;
+            struct flipc2_desc *d;
+            while ((d = flipc2_consume_peek(ch)) != NULL) {
+                handle(ch, d);
+                flipc2_consume_release(ch);
+            }
+        }
+    }
+}
+```
+
+> **Inter-task constraint**: call `flipc2_pollset_add()` **before** the remote
+> peer attaches to the channel. The pollset rewrites the channel's wakeup
+> semaphore in the shared header, and the peer reads that name once at attach
+> time — adding it after the fact would leave the producer signalling the
+> original semaphore.
+
 ---
 
 ## 6. Performance
@@ -1142,7 +1302,19 @@ fields on separate pages eliminate false sharing on cache lines.
 | Mixed frame (60 draw + tex + audio, intra) | 0.73 µs/frame |
 | Mixed frame (62 desc, inter-task) | 4.10 µs/frame |
 
-### 6.7 Comparison with Mach IPC
+### 6.7 MPSC and Pollset (smoke tests)
+
+These features ship with correctness smoke tests in `ipc_bench` rather than
+microbenchmarks — the cost on the steady-state hot path is one extra atomic
+fetch-add per produce (MPSC) or zero (pollset, which only redirects the wakeup
+semaphore at setup).
+
+| Test | Result |
+|------|--------|
+| MPSC: 3 producers × 256 iters → 768 msgs, no dup, no miss | PASS |
+| Pollset: 3 channels, fast/empty/slow paths | PASS |
+
+### 6.8 Comparison with Mach IPC
 
 | Pattern | Mach IPC | FLIPC v2 | Ratio |
 |---------|----------|----------|-------|

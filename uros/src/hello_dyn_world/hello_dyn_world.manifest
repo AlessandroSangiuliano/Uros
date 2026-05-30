@@ -1,0 +1,10 @@
+# hello_dyn_world manifest — Uros #289 (dynamic clean-exit verification).
+#
+# Like hello_dyn, it never calls cap_request, so its legitimate cap set is
+# empty.  Present so exec_server's cap-provisioning path is exercised for
+# this dynamic image too.
+
+name hello_dyn_world
+
+# No `required` lines.
+# No `delegatable` lines.

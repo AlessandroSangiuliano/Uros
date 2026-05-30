@@ -1,0 +1,186 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * gpu_server.h — Internal types and globals for the gpu_server task.
+ *
+ * Public, client-visible types are in uros/export/include/gpu/.
+ * Anything declared here is private to the gpu_server process: the
+ * core, the dispatch loop, and the back-end modules linked into the
+ * same address space.
+ */
+
+#ifndef _GPU_SERVER_INTERNAL_H_
+#define _GPU_SERVER_INTERNAL_H_
+
+#include <mach.h>
+#include <mach/mach_types.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <gpu/gpu_types.h>
+#include <gpu/gpu_module_abi.h>
+
+/* ============================================================
+ * Limits
+ *
+ * 0.1.0 ships with a single VGA device; the table sizes leave room
+ * for hot-plug experiments without touching the layout.
+ * ============================================================ */
+
+#define GPU_MAX_DEVICES		8
+#define GPU_MAX_DISPLAYS	16	/* per gpu_server, not per device */
+#define GPU_MAX_BOS		64
+#define GPU_MAX_CONTEXTS	16
+#define GPU_MAX_MODULES		8
+
+/* ============================================================
+ * Resource registry entries
+ *
+ * Lookups go gpu_dev_id_t/gpu_disp_id_t/gpu_bo_id_t/gpu_ctx_id_t →
+ * pointer into one of these tables.  Slot 0 is reserved as
+ * "invalid handle"; live entries start at index 1.
+ * ============================================================ */
+
+struct gpu_device_entry {
+	int			in_use;
+	gpu_dev_id_t		id;
+	const gpu_module_ops_t	*module;	/* back-end driving this device */
+	void			*priv;		/* opaque module state */
+	struct gpu_device_info	info;		/* cached for query_devices */
+};
+
+/* gpu_display, gpu_bo, gpu_context structs are intentionally opaque
+ * to clients (they are forward-declared in gpu/gpu_module_abi.h);
+ * concrete layouts live in core.c. */
+
+/* ============================================================
+ * Module registry
+ *
+ * In 0.1.0 modules are statically linked into gpu_server (#194 is
+ * skeleton-only, the vga module lands in #195).  Once #162 ships
+ * libdl auto-bootstrap, run-time loading from
+ * /mach_servers/modules/gpu/ replaces the static list.
+ * ============================================================ */
+
+/* No on-server module slot: gpu_server keeps a flat array of
+ * `gpu_module_ops_t *` returned by libmodload and walks it during
+ * discovery.  libmodload owns the dlopen handles. */
+
+/* ============================================================
+ * Core API — exposed to modules and to the MIG handlers
+ * ============================================================ */
+
+/*
+ * core_init / core_run_discovery are called from main.c during
+ * startup.  Modules never call these.  `modules` is the array
+ * libmodload populated; entries are full gpu_module_ops_t pointers
+ * looked up via dlsym.
+ */
+int  gpu_core_init(void);
+void gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
+			    unsigned int n_modules,
+			    mach_port_t hal_port);
+
+/*
+ * Resource lookup helpers used by the MIG handlers (gpu_mig.c).
+ * Return NULL on invalid id.
+ */
+struct gpu_device_entry *gpu_core_dev_lookup(gpu_dev_id_t id);
+unsigned int             gpu_core_dev_count(void);
+uint64_t                 gpu_core_sum_scrolls(void);	/* #203 */
+int                      gpu_core_dev_copy_all(struct gpu_device_info *out,
+					       unsigned int max);
+
+/*
+ * Capability check hook.  In 0.1.0 returns KERN_SUCCESS for every
+ * non-empty token (no real verification yet).  Wired up to
+ * cap_verify in #197.  Empty tokens (token_count == 0) are allowed
+ * for the tokenless text_puts/query_devices entry points.
+ */
+int gpu_core_cap_check(const char *token, unsigned int token_count,
+		       uint64_t op, uint64_t resource_id);
+
+/* ============================================================
+ * Per-cap handle table (#202)
+ *
+ * device_open registers a (cap_id, dev_id) row; device_close
+ * removes it; cap_revoke_notify walks the whole table and frees
+ * every row matching the revoked cap_id.  In 0.1.0 the row only
+ * tracks the open itself — bo / context lifetimes get tacked onto
+ * the same row when those ops become real.
+ *
+ * Returns: open=0 ok / -1 table full or duplicate; close/revoke
+ * counts torn-down rows (0 = nothing matched).
+ * ============================================================ */
+
+#define GPU_MAX_HANDLES		32
+
+int      gpu_core_handle_open(uint64_t cap_id, gpu_dev_id_t dev_id);
+int      gpu_core_handle_close(uint64_t cap_id, gpu_dev_id_t dev_id);
+unsigned int gpu_core_handle_revoke(uint64_t cap_id);
+
+/*
+ * Text plane.  Routes a chunk to the first attached module that
+ * implements text_puts (today: vga); falls back to the bootstrap
+ * console if no module is loaded.  Called from the text_render
+ * worker thread, NEVER directly from the MIG dispatch loop — the
+ * MIG handler enqueues into text_render and returns immediately.
+ */
+void gpu_core_text_puts(const char *buf, size_t len);
+
+/* ============================================================
+ * Text render pipeline (text_render.c)
+ *
+ * Single worker thread + bounded SPSC queue per design doc §11.3
+ * rule 4.  Producers (gpu_text_puts MIG handler in 0.1.0; future
+ * panic / log_forwarder paths) enqueue and never block — the
+ * rendering thread serialises every cell write into vga so the
+ * cursor and scroll state cannot race.
+ *
+ * Returns 0 on success.  After init the worker is detached; gpu_server
+ * never joins it (the only termination path is task exit).
+ * ============================================================ */
+
+int  gpu_text_render_init(void);
+
+/*
+ * Enqueue a chunk of text into the render queue.  Drops silently if
+ * the queue is full (best-effort log semantics, design §11.3 rule
+ * 2): producers like simpleroutine MIG handlers must not block on
+ * VGA paint speed.  Up to GPU_BUF_MAX bytes are accepted per call;
+ * longer chunks get truncated.
+ */
+void gpu_text_render_enqueue(const char *buf, size_t len);
+
+/*
+ * Diagnostics — surfaced through gpu_query_stats (#203).  Drops counts
+ * chunks lost when the queue was full; chunks_processed counts those
+ * the worker actually handed to vga_text_puts.
+ */
+unsigned int gpu_text_render_drops(void);
+uint64_t     gpu_text_render_chunks_processed(void);
+
+/* ============================================================
+ * MIG-side glue — implemented in gpu_mig.c
+ * ============================================================ */
+
+/* Generated by MIG from gpu_server.defs (server-side dispatcher).
+ * MIG names it `<subsystem>_server`, so for our `subsystem gpu_server`
+ * declaration the dispatcher comes out as `gpu_server_server`. */
+extern boolean_t gpu_server_server(mach_msg_header_t *in,
+				   mach_msg_header_t *out);
+
+/* ============================================================
+ * Global state (defined in main.c)
+ * ============================================================ */
+
+extern mach_port_t	gpu_host_port;
+extern mach_port_t	gpu_device_port;
+extern mach_port_t	gpu_security_port;
+extern mach_port_t	gpu_root_ledger_wired;
+extern mach_port_t	gpu_root_ledger_paged;
+extern mach_port_t	gpu_service_port;
+
+#endif /* _GPU_SERVER_INTERNAL_H_ */

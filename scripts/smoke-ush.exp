@@ -1,0 +1,223 @@
+#!/usr/bin/expect -f
+#
+# smoke-ush.exp — #275.6 acceptance smoke test for ush v0.1.0.
+#
+# Boots Uros in minimal mode under QEMU and drives ush from the serial
+# console.  Validates the full #275 pipeline end-to-end:
+#
+#   1. boot reaches "ush$" prompt           (ctty acquisition + setsid)
+#   2. "/hello_exec &" backgrounds a child   (fork+execve+setpgid, no
+#      tcsetpgrp on bg path)
+#   3. hello_exec runs (AUXV dump appears)   (exec_server + initial stack)
+#   4. "shutdown" powers QEMU off cleanly    (proc_shutdown RPC + ACPI)
+#
+# Exit code 0 on success; non-zero if any step times out or output
+# does not match.  Default boot timeout is 180s — Uros boot is noisy
+# (ext2 mount, default_pager, etc.) and the bundle is rebuilt fresh
+# when --minimal is passed.
+#
+# Author: Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# License: MIT
+
+set BOOT_TIMEOUT  180
+set CMD_TIMEOUT   30
+set REPO_ROOT     [file dirname [file dirname [file normalize $argv0]]]
+set RUN_QEMU      "$REPO_ROOT/scripts/run-qemu.sh"
+
+# Force a single line of output; -display none keeps QEMU from popping
+# a window, -serial mon:stdio multiplexes COM1 onto expect's pty.
+log_user 1
+set timeout $BOOT_TIMEOUT
+
+spawn $RUN_QEMU --minimal --allow-reboot -display none -serial mon:stdio
+
+# Step 0 — UrMach kernel banner (versioning, #295).  The kernel prints
+# URMACH_VERSION_STRING from <mach/urmach_version.h> at machine_startup.
+# We don't fail on miss (early-boot output ordering can race the screen
+# clear); just record if we caught it.
+set _saw_urmach 0
+expect {
+    -re "UrMach \[0-9\]+\\.\[0-9\]+\\.\[0-9\]+"  { set _saw_urmach 1 }
+    "ush v0.1.0"                                  { ;# fell through — banner missed }
+    timeout                                       { send_user "\n\[smoke\] FAIL: no ush banner within ${BOOT_TIMEOUT}s\n"; exit 1 }
+}
+if {$_saw_urmach} { send_user "\n\[smoke\] UrMach kernel banner OK\n" }
+
+# Step 1 — wait for shell prompt.  Boot prints a lot; we anchor on the
+# banner that ush writes only after ctty acquisition succeeds.
+expect {
+    "ush v0.1.0"      { send_user "\[smoke\] ush banner OK\n" }
+    timeout           { send_user "\n\[smoke\] FAIL: no ush banner within ${BOOT_TIMEOUT}s\n"; exit 1 }
+}
+expect {
+    "ush\$ "          { send_user "\[smoke\] ush prompt OK\n" }
+    timeout           { send_user "\n\[smoke\] FAIL: no ush prompt\n"; exit 1 }
+}
+
+# Step 2 — background a hello_exec job.  hello_exec is an infinite
+# loop (mach_null spin), so foreground would hang waitpid; bg keeps
+# ush at the prompt while the child prints its AUXV dump.
+set timeout $CMD_TIMEOUT
+send "/hello_exec &\r"
+expect {
+    -re "\\\[bg\\\] pid=\[0-9\]+"  { send_user "\n\[smoke\] bg fork OK\n" }
+    timeout                         { send_user "\n\[smoke\] FAIL: no \[bg\] line\n"; exit 1 }
+}
+
+# Step 3 — confirm hello_exec actually ran (exec_server hand-off,
+# AUXV stack walk).  Matches the AT_PAGESZ line which exec_server
+# always emits.
+expect {
+    "AT_PAGESZ"       { send_user "\[smoke\] hello_exec AUXV OK\n" }
+    timeout           { send_user "\n\[smoke\] FAIL: no AUXV output\n"; exit 1 }
+}
+
+# Wait for the prompt to come back before the next command.
+expect { "ush\$ " {} timeout {} }
+
+# Step 3b (#286) — a standard printf hello world in the foreground.
+# Unlike hello_exec (infinite loop), /hello_world returns, exercising the
+# full foreground tcsetpgrp + waitpid round trip; "hello" must arrive on
+# the controlling tty (libposix-uros binds fds 0/1/2 to the session ctty).
+send "/hello_world\r"
+# ush's "ush: pid=N exit=0x0" (direct tty_msg) and hello_world's buffered
+# "hello" (via char_server) can arrive in either order, so don't chain two
+# ordered expects.  Match "hello" (the acceptance: printf reached the tty);
+# the return of the prompt proves ush reaped the foreground child.
+# The reap line ("ush: pid=N exit=0x0", direct), the next prompt, and the
+# child's buffered "hello" (flushed late via char_server) race each other in
+# the serial stream.  Require the reap (proves foreground waitpid completed)
+# and the "hello" (proves printf reached the tty), in whichever order they
+# land; don't anchor on the prompt afterwards (it may already have scrolled
+# past).  ush is back at a prompt and reading either way, so the shutdown
+# step below still drives cleanly.
+set _saw_hello 0
+set _saw_reap  0
+for {set i 0} {$i < 2} {incr i} {
+    expect {
+        -re "hello\[\r\n]" { set _saw_hello 1 }
+        -re "exit=0x0"     { set _saw_reap 1 }
+        timeout            { break }
+    }
+}
+if {$_saw_hello} { send_user "\n\[smoke\] hello_world stdout->ctty OK\n" } \
+                 else { send_user "\n\[smoke\] FAIL: no hello_world output\n"; exit 1 }
+if {$_saw_reap}  { send_user "\[smoke\] ush reaped hello_world (exit 0)\n" } \
+                 else { send_user "\n\[smoke\] FAIL: hello_world not reaped\n"; exit 1 }
+
+# Wait for the prompt before launching the dynamic case so the two runs
+# don't overlap on the tty.
+expect { "ush\$ " {} timeout {} }
+
+# Step 3c (#289) — the DYNAMIC twin of hello_world.  /hello_dyn_world is an
+# ET_DYN/PIE that runs through ld-musl + the umbrella libc.so, then returns
+# from main.  This exercises the dynamic clean-exit path (musl exit() ->
+# exit_group -> libposix-uros h_exit -> task_terminate) and ush's foreground
+# waitpid reap — the gap #234 left (it only proved reaching main).  Same
+# race handling as 3b: require "hello" and the exit=0x0 reap in either order.
+send "/hello_dyn_world\r"
+set _saw_dhello 0
+set _saw_dreap  0
+for {set i 0} {$i < 2} {incr i} {
+    expect {
+        -re "hello\[\r\n]" { set _saw_dhello 1 }
+        -re "exit=0x0"     { set _saw_dreap 1 }
+        timeout            { break }
+    }
+}
+if {$_saw_dhello} { send_user "\n\[smoke\] hello_dyn_world stdout->ctty OK (dynamic)\n" } \
+                  else { send_user "\n\[smoke\] FAIL: no hello_dyn_world output\n"; exit 1 }
+if {$_saw_dreap}  { send_user "\[smoke\] ush reaped hello_dyn_world (exit 0, dynamic clean-exit)\n" } \
+                  else { send_user "\n\[smoke\] FAIL: hello_dyn_world not reaped\n"; exit 1 }
+
+expect { "ush\$ " {} timeout {} }
+
+# Step 3d (#291) — minimal musl pthread regression.  /pthread_min creates +
+# joins worker threads with mutex contention.  Before #291 (weak
+# uros_syscall_stub.lo in the static libc-musl.a) pthread_create failed with
+# EAGAIN because the weak -ENOSYS __uros_clone shadowed the strong one;
+# stripping the stub lets the strong libposix-uros __uros_clone link in.
+# Require the program's own "PASS" line.
+send "/pthread_min\r"
+set timeout 60
+expect {
+    -re "pthread_min: PASS"  { send_user "\n\[smoke\] pthread_min PASS (musl pthread_create works, #291)\n" }
+    -re "pthread_min: FAIL"  { send_user "\n\[smoke\] FAIL: pthread_min reported FAIL\n"; exit 1 }
+    timeout                  { send_user "\n\[smoke\] FAIL: no pthread_min result\n"; exit 1 }
+}
+
+expect { "ush\$ " {} timeout {} }
+
+# Step 3e (#272) — standalone FLIPC v2 A/B benchmark, launched from the
+# shell on a now-quiescent system (the whole point of #272: no boot-time
+# CPU contention).  Pass "-n 1 -c 64,1024": one run over a 64K and a 1 MiB
+# chunk, read+write.  The "runs=1 chunks=2" echo also proves the argv fix
+# (static musl binaries now receive their command line via the exec_server
+# SysV stack).  Full N-run medians are an interactive invocation
+# (/flipc_bench -n 9 -c 4,16,64,1024).
+send "/flipc_bench -n 1 -c 64,1024\r"
+set timeout 120
+set _fb_argv 0
+set _fb_readback 0
+set _fb_done 0
+expect {
+    -re "flipc_bench: runs=1 chunks=2" { set _fb_argv 1; exp_continue }
+    -re "write A/B readback: OK"   { set _fb_readback 1; exp_continue }
+    -re "write A/B readback: MISMATCH" { send_user "\n\[smoke\] FAIL: flipc_bench write readback mismatch\n"; exit 1 }
+    -re "flipc_bench: done"        { set _fb_done 1 }
+    timeout                        { send_user "\n\[smoke\] FAIL: flipc_bench did not finish\n"; exit 1 }
+}
+if {$_fb_argv} { send_user "\n\[smoke\] argv reached static musl binary (exec SysV stack, #272 argv fix)\n" } \
+               else { send_user "\n\[smoke\] FAIL: flipc_bench ran with default args (argv not passed)\n"; exit 1 }
+if {$_fb_done && $_fb_readback} { send_user "\[smoke\] flipc_bench standalone OK (read+write A/B incl 1MiB, coherent, #272)\n" } \
+                                else { send_user "\n\[smoke\] FAIL: flipc_bench incomplete\n"; exit 1 }
+
+expect { "ush\$ " {} timeout {} }
+
+# Step 3f — fd-lifecycle + read stress on the FLIPC fast-path.  "-R 60"
+# drives 60 back-to-back { open; read-to-EOF; close } cycles through the
+# libvfs FLIPC prefetch path (the default/production data path).  Permanent
+# guard that repeated file I/O stays stable under churn.
+#
+# NB: the Mach OOL fallback path (FLIPC disabled, "/flipc_bench -M 60")
+# corrupts the client after ~2500 OOL receives — tracked as a separate
+# kernel issue.  The guard here exercises the FLIPC path, which is immune.
+send "/flipc_bench -R 60\r"
+set timeout 120
+set _fb_stress 0
+expect {
+    -re "flipc_bench: done"  { set _fb_stress 1 }
+    timeout                  { send_user "\n\[smoke\] FAIL: FLIPC read stress did not finish (churn instability?)\n"; exit 1 }
+}
+if {$_fb_stress} { send_user "\n\[smoke\] FLIPC fd+read stress OK (60 open/read/close, no fault)\n" } \
+                 else { send_user "\n\[smoke\] FAIL: FLIPC read stress incomplete\n"; exit 1 }
+
+expect { "ush\$ " {} timeout {} }
+
+# Step 4 — graceful poweroff with drain (#284).  ush sends
+# proc_shutdown(HALT); proc_server SIGTERMs userland apps, fs_syncs every
+# mount, then calls host_reboot(HOST_REBOOT_HALT).  The kernel writes ACPI
+# PM1a_CNT 0x2000 and QEMU cuts power immediately, so the kernel's
+# "System halted." printf never makes it out.  The deterministic success
+# signal is the root fs sync confirmation followed by QEMU dropping the VM.
+send "shutdown\r"
+expect {
+    "shutdown — unmount / ok" { send_user "\n\[smoke\] proc_shutdown drain + clean unmount OK\n" }
+    timeout                   { send_user "\n\[smoke\] FAIL: shutdown drain not acked\n"; exit 1 }
+}
+
+# Wait for QEMU itself to exit (ACPI poweroff drops the VM).  QEMU
+# exits 0 on ACPI S5 with --allow-reboot (no -no-reboot).
+expect {
+    eof     { send_user "\[smoke\] QEMU powered off\n" }
+    timeout { send_user "\n\[smoke\] FAIL: QEMU did not power off\n"; exit 1 }
+}
+catch wait result
+set exit_status [lindex $result 3]
+if {$exit_status == 0} {
+    send_user "\n\[smoke\] PASS — all steps green, QEMU exited cleanly\n"
+    exit 0
+} else {
+    send_user "\n\[smoke\] FAIL — QEMU exit status $exit_status\n"
+    exit 1
+}

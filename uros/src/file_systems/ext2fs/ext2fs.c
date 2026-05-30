@@ -1,0 +1,3816 @@
+/*
+ * Copyright 1991-1998 by Open Software Foundation, Inc. 
+ *              All Rights Reserved 
+ *  
+ * Permission to use, copy, modify, and distribute this software and 
+ * its documentation for any purpose and without fee is hereby granted, 
+ * provided that the above copyright notice appears in all copies and 
+ * that both the copyright notice and this permission notice appear in 
+ * supporting documentation. 
+ *  
+ * OSF DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE 
+ * INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS 
+ * FOR A PARTICULAR PURPOSE. 
+ *  
+ * IN NO EVENT SHALL OSF BE LIABLE FOR ANY SPECIAL, INDIRECT, OR 
+ * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM 
+ * LOSS OF USE, DATA OR PROFITS, WHETHER IN ACTION OF CONTRACT, 
+ * NEGLIGENCE, OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION 
+ * WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. 
+ */
+/*
+ * MkLinux
+ */
+/* 
+ * Mach Operating System
+ * Copyright (c) 1991,1990 Carnegie Mellon University
+ * All Rights Reserved.
+ * 
+ * Permission to use, copy, modify and distribute this software and its
+ * documentation is hereby granted, provided that both the copyright
+ * notice and this permission notice appear in all copies of the
+ * software, derivative works or modified versions, and any portions
+ * thereof, and that both notices appear in supporting documentation.
+ * 
+ * CARNEGIE MELLON ALLOWS FREE USE OF THIS SOFTWARE IN ITS "AS IS"
+ * CONDITION.  CARNEGIE MELLON DISCLAIMS ANY LIABILITY OF ANY KIND FOR
+ * ANY DAMAGES WHATSOEVER RESULTING FROM THE USE OF THIS SOFTWARE.
+ * 
+ * Carnegie Mellon requests users of this software to return to
+ * 
+ *  Software Distribution Coordinator  or  Software.Distribution@CS.CMU.EDU
+ *  School of Computer Science
+ *  Carnegie Mellon University
+ *  Pittsburgh PA 15213-3890
+ * 
+ * any improvements or extensions that they make and grant Carnegie Mellon
+ * the rights to redistribute these changes.
+ */
+/*
+ * OLD HISTORY
+ * Revision 2.8  93/05/10  19:40:24  rvb
+ * 	Changed "" includes to <>
+ * 	[93/04/30            mrt]
+ * 
+ * Revision 2.7  93/05/10  17:44:48  rvb
+ * 	Include files specified with quotes dont work properly
+ * 	when the C file in in the master directory but the
+ * 	include file is in the shadow directory. Change to
+ * 	using angle brackets.
+ * 	Ian Dall <DALL@hfrd.dsto.gov.au>	4/28/93
+ * 	[93/05/10  13:15:31  rvb]
+ * 
+ * Revision 2.6  93/01/14  17:09:10  danner
+ * 	64bit clean.  Just type-bug fixes, actually.
+ * 	[92/11/30            af]
+ * 
+ * Revision 2.5  92/03/01  00:39:32  rpd
+ * 	Fixed device_get_status argument types.
+ * 	[92/02/29            rpd]
+ * 
+ * Revision 2.4  92/02/23  22:25:43  elf
+ * 	Removed debugging printf.
+ * 	[92/02/23  13:16:45  af]
+ * 
+ * 	Added variation of file_direct to page on raw devices.
+ * 	[92/02/22  18:53:04  af]
+ * 
+ * 	Added remove_file_direct().  Commented out some unused code.
+ * 	[92/02/19  17:31:01  af]
+ * 
+ * Revision 2.3  92/01/24  18:14:31  rpd
+ * 	Added casts to device_read dataCnt argument to mollify
+ * 	buggy versions of gcc.
+ * 	[92/01/24            rpd]
+ * 
+ * Revision 2.2  92/01/03  19:57:13  dbg
+ * 	Make file_direct self-contained: add the few fields needed from
+ * 	the superblock.
+ * 	[91/10/17            dbg]
+ * 
+ * 	Deallocate unused superblocks when switching file systems.  Add
+ * 	file_close routine to free space taken by file metadata.
+ * 	[91/09/25            dbg]
+ * 
+ * 	Move outside of kernel.
+ * 	Unmodify open_file to put arrays back on stack.
+ * 	[91/09/04            dbg]
+ * 
+ * Revision 2.8  91/08/28  11:09:42  jsb
+ * 	Added struct file_direct and associated functions.
+ * 	[91/08/19            rpd]
+ * 
+ * Revision 2.7  91/07/31  17:24:07  dbg
+ * 	Call vm_wire instead of vm_pageable.
+ * 	[91/07/30  16:38:01  dbg]
+ * 
+ * Revision 2.6  91/05/18  14:28:45  rpd
+ * 	Changed block_map to avoid blocking operations
+ * 	while holding an exclusive lock.
+ * 	[91/04/06            rpd]
+ * 	Added locking in block_map.
+ * 	[91/04/03            rpd]
+ * 
+ * Revision 2.5  91/05/14  15:22:53  mrt
+ * 	Correcting copyright
+ * 
+ * Revision 2.4  91/02/05  17:01:23  mrt
+ * 	Changed to new copyright
+ * 	[91/01/28  14:54:52  mrt]
+ * 
+ * Revision 2.3  90/10/25  14:41:42  rwd
+ * 	Modified open_file to allocate arrays from heap, not stack.
+ * 	[90/10/23            rpd]
+ * 
+ * Revision 2.2  90/08/27  21:45:27  dbg
+ * 	Reduce lint.
+ * 	[90/08/13            dbg]
+ * 
+ * 	Created from include files, bsd4.3-Reno (public domain) source,
+ * 	and old code written at CMU.
+ * 	[90/07/17            dbg]
+ * 
+ */
+/*
+ * Stand-alone EXT2FS file reading package.
+ */
+
+#include <ext2fs/ext2fs.h>
+#include "externs.h"
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <device/device_types.h>
+#include <device/device.h>
+#include <page_cache.h>
+#include <blk.h>
+
+/*
+ * MIG user stubs from ahci_batch.defs (subsystem 2950).
+ * Weak: resolve to NULL for binaries that don't link the stubs (e.g.
+ * bootstrap), causing a transparent fallback to individual I/O.
+ */
+extern kern_return_t device_write_batch(
+	mach_port_t device,
+	dev_mode_t mode,
+	recnum_t *recnums, mach_msg_type_number_t recnumsCnt,
+	unsigned int *sizes, mach_msg_type_number_t sizesCnt,
+	io_buf_ptr_t data, mach_msg_type_number_t dataCnt,
+	io_buf_len_t *bytes_written) __attribute__((weak));
+
+extern kern_return_t device_read_phys(
+	mach_port_t device,
+	dev_mode_t mode, recnum_t recnum,
+	io_buf_len_t bytes_wanted,
+	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	io_buf_len_t *bytes_read) __attribute__((weak));
+
+extern kern_return_t device_write_phys(
+	mach_port_t device,
+	dev_mode_t mode, recnum_t recnum,
+	io_buf_len_t bytes_to_write,
+	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	io_buf_len_t *bytes_written) __attribute__((weak));
+
+/* ================================================================
+ * Block I/O dispatch helpers
+ *
+ * If the device has a blk_dev handle, dispatch through libblk.
+ * Otherwise fall back to direct device_read/write (bootstrap path).
+ * ================================================================ */
+
+static inline kern_return_t
+ext2_dev_read(struct device *dev, recnum_t recnum,
+	      io_buf_len_t bytes_wanted,
+	      io_buf_ptr_t *data, mach_msg_type_number_t *bytes_read)
+{
+	if (dev->blk)
+		return blk_read(dev->blk, recnum, bytes_wanted,
+				data, bytes_read);
+	return device_read(dev->dev_port, 0, recnum,
+			   (int)bytes_wanted, data, bytes_read);
+}
+
+static inline kern_return_t
+ext2_dev_write(struct device *dev, recnum_t recnum,
+	       io_buf_ptr_t data, mach_msg_type_number_t data_count,
+	       io_buf_len_t *bytes_written)
+{
+	if (dev->blk)
+		return blk_write(dev->blk, recnum, data, data_count,
+				 bytes_written);
+	return device_write(dev->dev_port, 0, recnum,
+			    data, data_count, (int *)bytes_written);
+}
+
+static inline kern_return_t
+ext2_dev_read_overwrite(struct device *dev, recnum_t recnum,
+			io_buf_len_t bytes_wanted,
+			vm_offset_t buffer,
+			mach_msg_type_number_t *bytes_read)
+{
+	if (dev->blk)
+		return blk_read_overwrite(dev->blk, recnum, bytes_wanted,
+					  buffer, bytes_read);
+	return device_read_overwrite(dev->dev_port, 0, recnum,
+				     bytes_wanted, buffer, bytes_read);
+}
+
+static inline int
+ext2_dev_has_phys(struct device *dev)
+{
+	if (dev->blk)
+		return blk_has_phys(dev->blk);
+	return (device_read_phys != NULL);
+}
+
+static inline kern_return_t
+ext2_dev_read_phys(struct device *dev, recnum_t recnum,
+		   io_buf_len_t bytes_wanted,
+		   unsigned int *phys_addrs, unsigned int n_phys,
+		   io_buf_len_t *bytes_read)
+{
+	if (dev->blk)
+		return blk_read_phys(dev->blk, recnum, bytes_wanted,
+				     phys_addrs, n_phys, bytes_read);
+	return device_read_phys(dev->dev_port, 0, recnum, bytes_wanted,
+				phys_addrs, n_phys, bytes_read);
+}
+
+static inline kern_return_t
+ext2_dev_write_phys(struct device *dev, recnum_t recnum,
+		    io_buf_len_t bytes_to_write,
+		    unsigned int *phys_addrs, unsigned int n_phys,
+		    io_buf_len_t *bytes_written)
+{
+	if (dev->blk)
+		return blk_write_phys(dev->blk, recnum, bytes_to_write,
+				      phys_addrs, n_phys, bytes_written);
+	return device_write_phys(dev->dev_port, 0, recnum, bytes_to_write,
+				 phys_addrs, n_phys, bytes_written);
+}
+
+static inline int
+ext2_dev_has_batch(struct device *dev)
+{
+	if (dev->blk)
+		return blk_has_batch(dev->blk);
+	return (device_write_batch != NULL);
+}
+
+#define mutex_lock(a)
+#define mutex_unlock(a)
+#define mutex_init(a)
+
+static security_token_t null_security_token;
+
+static void free_file_buffers(
+		struct ext2fs_file *);
+
+static int read_inode(
+		ino_t,
+		struct ext2fs_file *);
+
+static int block_map(
+		struct ext2fs_file *,
+		daddr_t,
+		daddr_t *);
+
+static int buf_read_file(
+		struct ext2fs_file *,
+		vm_offset_t,
+		vm_offset_t *,
+		vm_size_t *);
+
+static int search_directory(
+		char *,
+	        struct ext2fs_file *,
+		ino_t *);
+
+static int read_fs(
+		struct device *,
+		struct ext2_super_block **,
+		struct ext2_group_desc  **,
+		vm_size_t *);
+
+static int mount_fs(
+		struct ext2fs_file *);
+
+static void unmount_fs(
+		struct ext2fs_file *);
+
+static int write_super(
+		struct ext2fs_file *);
+
+/*
+ * Per-mount filesystem state.
+ * One instance per mounted partition, hung off struct device.mount_data.
+ * Contains cached superblock, group descriptors, inode/vnode/dcache tables.
+ *
+ * Allocated dynamically by the filesystem dispatch layer (file_system.c)
+ * via vm_allocate using fs_ops.mount_size.  Callers that bypass the
+ * dispatch layer (e.g. ext_server) get an on-demand vm_allocate in
+ * ext2_get_mount().
+ */
+
+#define ICACHE_SIZE	16		/* must be power of 2 */
+#define ICACHE_HASH(ino) ((ino) & (ICACHE_SIZE - 1))
+
+struct icache_entry {
+	ino_t			ic_ino;		/* 0 = empty */
+	struct ext2_inode	ic_inode;	/* cached inode data */
+};
+
+#define VNODE_TABLE_SIZE	32
+
+#define DCACHE_SIZE	32		/* must be power of 2 */
+#define DCACHE_NAME_MAX	60
+#define DCACHE_NEGATIVE	((ino_t)-1)	/* sentinel for "known absent" */
+
+/* dcache_lookup return codes */
+#define DCACHE_MISS	0	/* not in cache */
+#define DCACHE_HIT	1	/* positive hit, *ino_out set */
+#define DCACHE_NEG	2	/* negative hit, name does not exist */
+
+struct dcache_entry {
+	ino_t		dc_parent;	/* 0 = empty */
+	ino_t		dc_child;	/* DCACHE_NEGATIVE = negative entry */
+	char		dc_name[DCACHE_NAME_MAX];
+};
+
+struct ext2_mount {
+	struct ext2_super_block	*m_fs;
+	struct ext2_group_desc	*m_gd;
+	vm_size_t		 m_gd_size;
+	int			 m_nindir[NIADDR];
+	struct icache_entry	 m_icache[ICACHE_SIZE];
+	struct ext2_vnode	 m_vnode_table[VNODE_TABLE_SIZE];
+	struct dcache_entry	 m_dcache[DCACHE_SIZE];
+};
+
+int ext2fs_readdir(fs_private_t, struct fs_dirent *,
+		   unsigned int, unsigned int *);
+
+struct fs_ops ext2fs_ops = {
+	ext2fs_open_file,
+	ext2fs_close_file,
+	ext2fs_read_file,
+	ext2fs_file_size,
+	ext2fs_file_is_directory,
+	ext2fs_file_is_executable,
+	ext2fs_readdir,
+	sizeof(struct ext2_mount)
+};
+
+/*
+ * Return the per-mount state for this device.
+ * The dispatch layer pre-allocates mount_data via fs_ops.mount_size;
+ * if called directly (ext_server), fall back to vm_allocate.
+ */
+static struct ext2_mount *
+ext2_get_mount(struct device *dev)
+{
+	if (dev->mount_data)
+		return (struct ext2_mount *)dev->mount_data;
+
+	if (vm_allocate(mach_task_self(),
+			(vm_address_t *)&dev->mount_data,
+			sizeof(struct ext2_mount), TRUE) != KERN_SUCCESS)
+		return NULL;
+
+	return (struct ext2_mount *)dev->mount_data;
+}
+
+/*
+ * Inode cache — per-mount, accessed via ext2_mount.
+ */
+
+static struct ext2_inode *
+icache_lookup(struct ext2_mount *m, ino_t ino)
+{
+	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+	if (e->ic_ino == ino)
+		return &e->ic_inode;
+	return NULL;
+}
+
+static void
+icache_insert(struct ext2_mount *m, ino_t ino, const struct ext2_inode *inode)
+{
+	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+	e->ic_ino = ino;
+	e->ic_inode = *inode;
+}
+
+static void
+icache_invalidate(struct ext2_mount *m, ino_t ino)
+{
+	struct icache_entry *e = &m->m_icache[ICACHE_HASH(ino)];
+	if (e->ic_ino == ino)
+		e->ic_ino = 0;
+}
+
+/*
+ * Vnode table — per-mount, accessed via ext2_mount.
+ */
+
+static struct ext2_vnode *
+vnode_find(struct ext2_mount *m, ino_t ino)
+{
+	int i;
+	for (i = 0; i < VNODE_TABLE_SIZE; i++) {
+		if (m->m_vnode_table[i].v_ino == ino &&
+		    m->m_vnode_table[i].v_refcount > 0)
+			return &m->m_vnode_table[i];
+	}
+	return NULL;
+}
+
+static struct ext2_vnode *
+vnode_get(struct ext2_mount *m, ino_t ino)
+{
+	int i, free_slot = -1;
+
+	for (i = 0; i < VNODE_TABLE_SIZE; i++) {
+		if (m->m_vnode_table[i].v_ino == ino &&
+		    m->m_vnode_table[i].v_refcount > 0) {
+			m->m_vnode_table[i].v_refcount++;
+			return &m->m_vnode_table[i];
+		}
+		if (free_slot < 0 && m->m_vnode_table[i].v_refcount == 0)
+			free_slot = i;
+	}
+
+	if (free_slot < 0)
+		return NULL;
+
+	/* Free old resources if slot was cached */
+	if (m->m_vnode_table[free_slot].v_inode_blk) {
+		vm_deallocate(mach_task_self(),
+			      m->m_vnode_table[free_slot].v_inode_blk,
+			      m->m_vnode_table[free_slot].v_inode_blk_size);
+	}
+	memset(&m->m_vnode_table[free_slot], 0, sizeof(struct ext2_vnode));
+	m->m_vnode_table[free_slot].v_ino = ino;
+	m->m_vnode_table[free_slot].v_refcount = 1;
+	return &m->m_vnode_table[free_slot];
+}
+
+static void
+vnode_put(struct ext2_vnode *vn)
+{
+	if (!vn)
+		return;
+	if (--vn->v_refcount <= 0) {
+		if (vn->v_inode_blk) {
+			vm_deallocate(mach_task_self(),
+				      vn->v_inode_blk,
+				      vn->v_inode_blk_size);
+			vn->v_inode_blk = 0;
+		}
+		vn->v_ino = 0;
+		vn->v_refcount = 0;
+	}
+}
+
+/*
+ * Directory entry cache — per-mount, accessed via ext2_mount.
+ */
+
+static unsigned int
+dcache_hash(ino_t parent, const char *name)
+{
+	unsigned int h = parent;
+	while (*name)
+		h = h * 31 + (unsigned char)*name++;
+	return h & (DCACHE_SIZE - 1);
+}
+
+static int
+dcache_lookup(struct ext2_mount *m, ino_t parent, const char *name,
+	      ino_t *ino_out)
+{
+	struct dcache_entry *e = &m->m_dcache[dcache_hash(parent, name)];
+	if (e->dc_parent == parent && strcmp(e->dc_name, name) == 0) {
+		if (e->dc_child == DCACHE_NEGATIVE)
+			return DCACHE_NEG;
+		*ino_out = e->dc_child;
+		return DCACHE_HIT;
+	}
+	return DCACHE_MISS;
+}
+
+static void
+dcache_insert(struct ext2_mount *m, ino_t parent, const char *name,
+	      ino_t child)
+{
+	unsigned int idx = dcache_hash(parent, name);
+	struct dcache_entry *e = &m->m_dcache[idx];
+	e->dc_parent = parent;
+	e->dc_child = child;
+	strncpy(e->dc_name, name, DCACHE_NAME_MAX - 1);
+	e->dc_name[DCACHE_NAME_MAX - 1] = '\0';
+}
+
+/*
+ * Free file buffers, but don't close file.
+ */
+static void
+free_file_buffers(register struct ext2fs_file *fp)
+{
+	register int level;
+
+	/*
+	 * Free the indirect blocks
+	 */
+	for (level = 0; level < NIADDR; level++) {
+	    if (fp->f_blk[level] != 0) {
+		(void) vm_deallocate(mach_task_self(),
+				     fp->f_blk[level],
+				     fp->f_blksize[level]);
+		fp->f_blksize[level] = 0;
+		fp->f_blk[level] = 0;
+	    }
+	    fp->f_blkno[level] = -1;
+	}
+
+	/*
+	 * Free the data block (skip if borrowed from page cache)
+	 */
+	if (fp->f_buf != 0) {
+	    if (!fp->f_buf_borrowed)
+		(void) vm_deallocate(mach_task_self(),
+				     fp->f_buf,
+				     fp->f_buf_size);
+	    fp->f_buf = 0;
+	    fp->f_buf_borrowed = 0;
+	}
+	fp->f_buf_blkno = -1;
+	fp->f_ra_last_block = -1;
+
+	/*
+	 * Free the cached inode block
+	 */
+	if (fp->f_inode_blk != 0) {
+	    (void) vm_deallocate(mach_task_self(),
+				 fp->f_inode_blk,
+				 fp->f_inode_blk_size);
+	    fp->f_inode_blk = 0;
+	    fp->f_inode_blk_size = 0;
+	}
+}
+
+/*
+ * Read a new inode into a file structure.
+ *
+ * Checks the inode cache first; on hit, copies the cached inode
+ * directly without any device I/O.  On miss, reads from disk and
+ * populates the cache.
+ */
+static int
+read_inode(ino_t inumber, register struct ext2fs_file *fp)
+{
+	vm_offset_t		buf;
+	mach_msg_type_number_t	buf_size;
+	register
+	struct ext2_super_block	*fs;
+	daddr_t			disk_block;
+	kern_return_t		rc;
+	struct ext2_inode	*cached = NULL;
+
+#ifdef	DEBUG
+	int	i = inumber;
+	if(debug)
+		printf("read_inode(%d)\n", i);
+#endif
+	fs = fp->f_fs;
+	fp->f_ino = inumber;
+
+	/* Check the inode cache first */
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		cached = icache_lookup(m, inumber);
+	}
+	if (cached) {
+		free_file_buffers(fp);
+		*fp->f_ic = *cached;
+		return (0);
+	}
+
+	/* Cache miss — read from disk */
+	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
+
+	rc = ext2_dev_read(&fp->f_dev,
+			 (recnum_t) dbtorec(&fp->f_dev,
+					    ext2_fsbtodb(fp->f_fs, disk_block)),
+			 (int) EXT2_BLOCK_SIZE(fs),
+			 (char **)&buf,
+			 &buf_size);
+	if (rc != KERN_SUCCESS)
+	    return (rc);
+
+	{
+	    struct ext2_inode *raw_inode;
+	    struct ext2_inode *inode;
+	    unsigned long block;
+
+	    /*
+	     * Locate the inode within the block.  We cannot simply
+	     * use pointer arithmetic on (struct ext2_inode *) because
+	     * sizeof(struct ext2_inode) is 128, while modern ext2
+	     * filesystems may use 256-byte (or larger) inodes.
+	     * Instead we compute the byte offset using the actual
+	     * on-disk inode size from the superblock.
+	     */
+	    raw_inode = (struct ext2_inode *)
+		((char *)buf + ext2_itoo(fs, inumber) * EXT2_INODE_SIZE(fs));
+	    inode = fp->f_ic;
+
+	    inode->i_mode = le16_to_cpu(raw_inode->i_mode);
+	    inode->i_uid = le16_to_cpu(raw_inode->i_uid);
+	    inode->i_size = le32_to_cpu(raw_inode->i_size);
+	    inode->i_atime = le32_to_cpu(raw_inode->i_atime);
+	    inode->i_ctime = le32_to_cpu(raw_inode->i_ctime);
+	    inode->i_mtime = le32_to_cpu(raw_inode->i_mtime);
+	    inode->i_dtime = le32_to_cpu(raw_inode->i_dtime);
+	    inode->i_gid = le16_to_cpu(raw_inode->i_gid);
+	    inode->i_links_count = le16_to_cpu(raw_inode->i_links_count);
+	    inode->i_blocks = le32_to_cpu(raw_inode->i_blocks);
+	    inode->i_flags = le32_to_cpu(raw_inode->i_flags);
+	    if ((((inode->i_mode) & IFMT) == IFLNK) && !inode->i_blocks)
+		    for (block = 0; block < EXT2_N_BLOCKS; block++)
+			    inode->i_block[block] = raw_inode->i_block[block];
+	    else for (block = 0; block < EXT2_N_BLOCKS; block++)
+		    inode->i_block[block] = le32_to_cpu(raw_inode->i_block[block]);
+	    /* inode->i_version = ++event;	*/
+	    inode->i_file_acl = le32_to_cpu(raw_inode->i_file_acl);
+	    inode->i_dir_acl = le32_to_cpu(raw_inode->i_dir_acl);
+	    inode->i_faddr = le32_to_cpu(raw_inode->i_faddr);
+	    inode->i_frag = raw_inode->i_frag;
+	    inode->i_fsize = raw_inode->i_fsize;
+	}
+
+	/* Populate the inode cache */
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		icache_insert(m, inumber, fp->f_ic);
+	}
+
+	/*
+	 * Clear out the old buffers (this also frees the previous
+	 * f_inode_blk, so we must cache the new block afterwards).
+	 */
+	free_file_buffers(fp);
+
+	/*
+	 * Cache the raw inode block for write-back without re-reading.
+	 */
+	fp->f_inode_blk = buf;
+	fp->f_inode_blk_size = buf_size;
+
+	return (0);
+}
+
+/*
+ * Given an offset in a file, find the disk block number that
+ * contains that block.
+ */
+static int
+block_map(
+	struct ext2fs_file	*fp,
+	daddr_t			file_block,
+	daddr_t			*disk_block_p)	/* out */
+{
+	int		level;
+	int		idx;
+	daddr_t		ind_block_num;
+	kern_return_t	rc;
+
+	vm_offset_t	olddata[NIADDR+1];
+	vm_size_t	oldsize[NIADDR+1];
+
+#ifdef	DEBUG
+	int i = file_block;
+	if(debug)
+		printf("block_map(%d)\n", i);
+#endif 
+	/*
+	 * Index structure of an inode:
+	 *
+	 * i_db[0..NDADDR-1]	hold block numbers for blocks
+	 *			0..NDADDR-1
+	 *
+	 * i_ib[0]		index block 0 is the single indirect
+	 *			block
+	 *			holds block numbers for blocks
+	 *			NDADDR .. NDADDR + NINDIR(fs)-1
+	 *
+	 * i_ib[1]		index block 1 is the double indirect
+	 *			block
+	 *			holds block numbers for INDEX blocks
+	 *			for blocks
+	 *			NDADDR + NINDIR(fs) ..
+	 *			NDADDR + NINDIR(fs) + NINDIR(fs)**2 - 1
+	 *
+	 * i_ib[2]		index block 2 is the triple indirect
+	 *			block
+	 *			holds block numbers for double-indirect
+	 *			blocks for blocks
+	 *			NDADDR + NINDIR(fs) + NINDIR(fs)**2 ..
+	 *			NDADDR + NINDIR(fs) + NINDIR(fs)**2
+	 *				+ NINDIR(fs)**3 - 1
+	 */
+
+	mutex_lock(&fp->f_lock);
+
+	if (file_block < NDADDR) {
+	    /* Direct block. */
+	    *disk_block_p = fp->f_ic->i_block[file_block];
+	    mutex_unlock(&fp->f_lock);
+	    return (0);
+	}
+
+	file_block -= NDADDR;
+
+	/*
+	 * nindir[0] = NINDIR
+	 * nindir[1] = NINDIR**2
+	 * nindir[2] = NINDIR**3
+	 *	etc
+	 */
+	for (level = 0; level < NIADDR; level++) {
+	    if (file_block < fp->f_nindir[level])
+		break;
+	    file_block -= fp->f_nindir[level];
+	}
+	if (level == NIADDR) {
+	    /* Block number too high */
+	    mutex_unlock(&fp->f_lock);
+	    return (FS_NOT_IN_FILE);
+	}
+
+	ind_block_num = fp->f_ic->i_block[level + NDADDR];
+
+	/*
+	 * Initialize array of blocks to free.
+	 */
+	for (idx = 0; idx < NIADDR; idx++)
+	    oldsize[idx] = 0;
+
+	for (; level >= 0; level--) {
+
+	    vm_offset_t	data;
+	    mach_msg_type_number_t	size;
+
+	    if (ind_block_num == 0)
+		break;
+
+	    if (fp->f_blkno[level] == ind_block_num) {
+		/*
+		 *	Cache hit.  Just pick up the data.
+		 */
+
+		data = fp->f_blk[level];
+	    }
+	    else {
+		/*
+		 *	Drop our lock while doing the read.
+		 *	(The f_dev and f_fs fields don`t change.)
+		 */
+		mutex_unlock(&fp->f_lock);
+
+		rc = ext2_dev_read(&fp->f_dev,
+				 (recnum_t) dbtorec(&fp->f_dev,
+					    ext2_fsbtodb(fp->f_fs, ind_block_num)),
+				 EXT2_BLOCK_SIZE(fp->f_fs),
+				 (char **)&data,
+				 &size);
+		if (rc != KERN_SUCCESS)
+		    return (rc);
+
+		/*
+		 *	See if we can cache the data.  Need a write lock to
+		 *	do this.  While we hold the write lock, we can`t do
+		 *	*anything* which might block for memory.  Otherwise
+		 *	a non-privileged thread might deadlock with the
+		 *	privileged threads.  We can`t block while taking the
+		 *	write lock.  Otherwise a non-privileged thread
+		 *	blocked in the vm_deallocate (while holding a read
+		 *	lock) will block a privileged thread.  For the same
+		 *	reason, we can`t take a read lock and then use
+		 *	lock_read_to_write.
+		 */
+
+		mutex_lock(&fp->f_lock);
+
+		olddata[level] = fp->f_blk[level];
+		oldsize[level] = fp->f_blksize[level];
+
+		fp->f_blkno[level] = ind_block_num;
+		fp->f_blk[level] = data;
+		fp->f_blksize[level] = size;
+
+		/*
+		 *	Return to holding a read lock, and
+		 *	dispose of old data.
+		 */
+
+	    }
+
+	    if (level > 0) {
+		idx = file_block / fp->f_nindir[level-1];
+		file_block %= fp->f_nindir[level-1];
+	    }
+	    else
+		idx = file_block;
+
+	    ind_block_num = le32_to_cpu(((daddr_t *)data)[idx]);
+	}
+
+	mutex_unlock(&fp->f_lock);
+
+	/*
+	 * After unlocking the file, free any blocks that
+	 * we need to free.
+	 */
+	for (idx = 0; idx < NIADDR; idx++)
+	    if (oldsize[idx] != 0)
+		(void) vm_deallocate(mach_task_self(),
+				     olddata[idx],
+				     oldsize[idx]);
+
+	*disk_block_p = ind_block_num;
+	return (0);
+}
+
+/*
+ * Readahead: on sequential cache miss, prefetch up to RA_BLOCKS
+ * contiguous disk blocks in a single device_read IPC and insert
+ * them all into the page cache.
+ */
+#define EXT2_RA_BLOCKS	32
+
+static void
+ext2_readahead(struct ext2fs_file *fp, daddr_t file_block,
+	       daddr_t disk_block)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	daddr_t max_file_block;
+	int n_contig;
+	int i, rc;
+	vm_offset_t ra_buf;
+	vm_size_t ra_buf_size;
+	vm_offset_t cached;
+	vm_size_t cached_size;
+
+	if (!fp->f_dev.cache)
+		return;
+
+	max_file_block = (fp->f_ic->i_size + block_size - 1) / block_size;
+
+	/*
+	 * Find the longest run of physically contiguous blocks
+	 * starting from disk_block+1 that are not yet cached.
+	 */
+	n_contig = 1;  /* include current block */
+	for (i = 1; i < EXT2_RA_BLOCKS; i++) {
+		daddr_t fb = file_block + i;
+		daddr_t db;
+
+		if (fb >= max_file_block)
+			break;
+
+		rc = block_map(fp, fb, &db);
+		if (rc != 0 || db == 0)
+			break;
+
+		/* Must be physically contiguous */
+		if (db != disk_block + i)
+			break;
+
+		/* Stop if already cached */
+		if (page_cache_lookup(fp->f_dev.cache, db,
+				      &cached, &cached_size) == 0)
+			break;
+
+		n_contig++;
+	}
+
+	if (n_contig <= 1)
+		return;
+
+	/* Single large device_read for the whole run */
+	rc = ext2_dev_read(&fp->f_dev,
+			 (recnum_t) dbtorec(&fp->f_dev,
+					    ext2_fsbtodb(fs, disk_block)),
+			 n_contig * block_size,
+			 (char **)&ra_buf, (unsigned int *)&ra_buf_size);
+	if (rc != 0)
+		return;
+
+	/* Insert each block into page cache */
+	for (i = 0; i < n_contig; i++) {
+		page_cache_insert(fp->f_dev.cache, disk_block + i,
+				  ra_buf + i * block_size,
+				  (vm_size_t)block_size);
+	}
+
+	(void)vm_deallocate(mach_task_self(), ra_buf, ra_buf_size);
+}
+
+/*
+ * Read a portion of a file into an internal buffer.  Return
+ * the location in the buffer and the amount in the buffer.
+ */
+static int
+buf_read_file(
+	register struct ext2fs_file	*fp,
+	vm_offset_t			offset,
+	vm_offset_t			*buf_p,		/* out */
+	vm_size_t			*size_p)	/* out */
+{
+	register
+	struct ext2_super_block	*fs;
+	vm_offset_t		off;
+	register daddr_t	file_block;
+	daddr_t			disk_block;
+	int			rc;
+	vm_offset_t		block_size;
+
+#ifdef	DEBUG
+	if(debug)
+		printf("buf_read_file(%d, %d)\n", offset, *size_p);
+#endif 
+	if (offset >= fp->f_ic->i_size)
+	    return (FS_NOT_IN_FILE);
+
+	fs = fp->f_fs;
+
+	off = ext2_blkoff(fs, offset);
+	file_block = ext2_lblkno(fs, offset);
+	block_size = ext2_blksize(fs, fp, file_block);
+
+	if (off || (!*buf_p) || *size_p < block_size ||
+	    ((*buf_p) & (fp->f_dev.rec_size-1))) {
+	    if (file_block != fp->f_buf_blkno) {
+	        rc = block_map(fp, file_block, &disk_block);
+		if (rc != 0)
+		    return (rc);
+
+		if (fp->f_buf) {
+		    if (!fp->f_buf_borrowed)
+			(void)vm_deallocate(mach_task_self(),
+					    fp->f_buf,
+					    fp->f_buf_size);
+		    fp->f_buf = 0;
+		    fp->f_buf_borrowed = 0;
+		}
+
+		if (disk_block == 0) {
+		    (void)vm_allocate(mach_task_self(),
+				      &fp->f_buf,
+				      block_size,
+				      TRUE);
+		    memset((void *)fp->f_buf, 0, block_size);
+		    fp->f_buf_size = block_size;
+		} else if (fp->f_dev.cache) {
+		    vm_offset_t cached;
+		    vm_size_t   cached_size;
+
+		    if (page_cache_lookup(fp->f_dev.cache, disk_block,
+					  &cached, &cached_size) == 0) {
+			/* Page cache hit — borrow pointer (zero-copy) */
+			fp->f_buf = cached;
+			fp->f_buf_size = block_size;
+			fp->f_buf_borrowed = 1;
+		    } else {
+			/* Page cache miss — readahead if sequential */
+			if (file_block == fp->f_ra_last_block + 1)
+				ext2_readahead(fp, file_block, disk_block);
+
+			/* Re-check cache (readahead may have populated it) */
+			if (page_cache_lookup(fp->f_dev.cache, disk_block,
+					      &cached, &cached_size) == 0) {
+				fp->f_buf = cached;
+				fp->f_buf_size = block_size;
+				fp->f_buf_borrowed = 1;
+			} else if (fp->f_dev.cache->pc_dma_pool &&
+				   ext2_dev_has_phys(&fp->f_dev)) {
+				/* Zero-copy DMA path */
+				struct page_cache_entry *e;
+				e = page_cache_alloc_entry(fp->f_dev.cache,
+							   disk_block);
+				if (e) {
+					unsigned int pa =
+						(unsigned int)e->pc_phys;
+					io_buf_len_t br;
+					rc = ext2_dev_read_phys(
+						&fp->f_dev,
+						(recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+						(io_buf_len_t) block_size,
+						&pa, 1, &br);
+					if (rc)
+						return (rc);
+					fp->f_buf = e->pc_data;
+					fp->f_buf_size = block_size;
+					fp->f_buf_borrowed = 1;
+				} else {
+					goto fallback_read;
+				}
+			} else {
+fallback_read:
+				/* Single block read (fallback) */
+				rc = ext2_dev_read(&fp->f_dev,
+					     (recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+					     (int) block_size,
+					     (char **) &fp->f_buf,
+					     (unsigned int *)&fp->f_buf_size);
+				if (rc)
+				    return (rc);
+				page_cache_insert(fp->f_dev.cache, disk_block,
+						  fp->f_buf, fp->f_buf_size);
+			}
+		    }
+		} else {
+		    rc = ext2_dev_read(&fp->f_dev,
+				     (recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+				     (int) block_size,
+				     (char **) &fp->f_buf,
+				     (unsigned int *)&fp->f_buf_size);
+	        }
+		if (rc)
+		    return (rc);
+
+	        fp->f_buf_blkno = file_block;
+	    }
+
+	    /*
+	     * Return address of byte in buffer corresponding to
+	     * offset, and size of remainder of buffer after that
+	     * byte.
+	     */
+	    *buf_p = fp->f_buf + off;
+	    *size_p = block_size - off;
+
+	} else {
+		/*
+		 * Directly read into caller buffer
+		 */
+	        rc = block_map(fp, file_block, &disk_block);
+		if (rc != 0)
+		    return (rc);
+
+		if (disk_block == 0) {
+			memset((void *)*buf_p, 0, block_size);
+			*size_p = block_size;
+			return 0;
+		}
+
+		if (fp->f_dev.cache) {
+			vm_offset_t cached;
+			vm_size_t   cached_size;
+
+			if (page_cache_lookup(fp->f_dev.cache, disk_block,
+					      &cached, &cached_size) == 0) {
+				/* Page cache hit — copy to caller */
+				memcpy((void *)*buf_p, (void *)cached,
+				       block_size);
+				*size_p = block_size;
+			} else {
+				/* Page cache miss — readahead if sequential */
+				if (file_block == fp->f_ra_last_block + 1)
+					ext2_readahead(fp, file_block,
+						       disk_block);
+
+				/* Re-check cache after readahead */
+				if (page_cache_lookup(fp->f_dev.cache,
+						disk_block,
+						&cached, &cached_size) == 0) {
+					memcpy((void *)*buf_p,
+					       (void *)cached, block_size);
+					*size_p = block_size;
+				} else if (fp->f_dev.cache->pc_dma_pool &&
+					   ext2_dev_has_phys(&fp->f_dev)) {
+					/* Zero-copy DMA into cache */
+					struct page_cache_entry *e;
+					e = page_cache_alloc_entry(
+						fp->f_dev.cache, disk_block);
+					if (e) {
+						unsigned int pa =
+							(unsigned int)e->pc_phys;
+						io_buf_len_t br;
+						rc = ext2_dev_read_phys(
+							&fp->f_dev,
+							(recnum_t) dbtorec(
+								&fp->f_dev,
+								ext2_fsbtodb(fs,
+									disk_block)),
+							(io_buf_len_t) block_size,
+							&pa, 1, &br);
+						if (rc)
+							return (rc);
+						memcpy((void *)*buf_p,
+						       (void *)e->pc_data,
+						       block_size);
+						*size_p = block_size;
+					} else {
+						goto fallback_read_direct;
+					}
+				} else {
+fallback_read_direct:
+					/* Single block read (fallback) */
+					rc = ext2_dev_read_overwrite(
+						&fp->f_dev,
+						(recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+						(int) block_size,
+						*buf_p,
+						(unsigned int *)size_p);
+					if (rc)
+						return (rc);
+					page_cache_insert(fp->f_dev.cache,
+							  disk_block,
+							  *buf_p, *size_p);
+				}
+			}
+		} else {
+			rc = ext2_dev_read_overwrite(&fp->f_dev,
+				     (recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+				     (int) block_size,
+				     *buf_p,
+				     (unsigned int *)size_p);
+			if (rc)
+				return (rc);
+		}
+	}
+
+	/*
+	 * Truncate buffer at end of file.
+	 */
+	if (*size_p > fp->f_ic->i_size - offset)
+	    *size_p = fp->f_ic->i_size - offset;
+
+	fp->f_ra_last_block = file_block;
+	return (0);
+}
+
+/*
+ * Search a directory for a name and return its
+ * i_number.
+ */
+static int
+search_directory(
+	char *name,
+	register struct ext2fs_file *fp,
+	ino_t *inumber_p)
+{
+	vm_offset_t	buf;
+	vm_size_t	buf_size;
+	vm_offset_t	offset;
+	register struct ext2_dir_entry *dp;
+	int		length;
+	kern_return_t	rc;
+	char		tmp_name[256];
+	ino_t		cached_ino;
+	int		cache_rc = DCACHE_MISS;
+
+#ifdef	DEBUG
+	if(debug)
+		printf("search_directory(%s)\n", name);
+#endif
+
+	/* Check the directory entry cache first */
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		cache_rc = dcache_lookup(m, fp->f_ino, name, &cached_ino);
+	}
+	if (cache_rc == DCACHE_HIT) {
+		*inumber_p = cached_ino;
+		return (0);
+	}
+	if (cache_rc == DCACHE_NEG)
+		return (FS_NO_ENTRY);
+
+	length = strlen(name);
+
+	offset = 0;
+	while (offset < fp->f_ic->i_size) {
+	    buf = 0;
+	    buf_size = 0;
+	    rc = buf_read_file(fp, offset, &buf, &buf_size);
+	    if (rc != KERN_SUCCESS)
+		return (rc);
+
+	    dp = (struct ext2_dir_entry *)buf;
+	    if (le32_to_cpu(dp->inode) != 0) {
+		strncpy (tmp_name, dp->name, le16_to_cpu(dp->name_len));
+		tmp_name[le16_to_cpu(dp->name_len)] = '\0';
+		if (le16_to_cpu(dp->name_len) == length &&
+		    !strcmp(name, tmp_name))
+	    	{
+		    /* found entry — cache it */
+		    *inumber_p = le32_to_cpu(dp->inode);
+		    {
+		    struct ext2_mount *m =
+			(struct ext2_mount *)fp->f_dev.mount_data;
+		    if (m)
+			dcache_insert(m, fp->f_ino, name, *inumber_p);
+		    }
+		    return (0);
+		}
+	    }
+	    offset += le16_to_cpu(dp->rec_len);
+	}
+
+	/* Cache the negative result */
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		dcache_insert(m, fp->f_ino, name, DCACHE_NEGATIVE);
+	}
+	return (FS_NO_ENTRY);
+}
+
+static int
+read_fs(
+	struct device *dev,
+	struct ext2_super_block **fsp,
+	struct ext2_group_desc  **gdp,
+	vm_size_t		*gd_size_p)
+{
+	register
+	struct ext2_super_block *fs, raw_fs;
+	vm_offset_t		buf;
+	vm_offset_t		buf2;
+	mach_msg_type_number_t	buf_size;
+	mach_msg_type_number_t	buf2_size;
+	int			error;
+	int			gd_count;
+	int			gd_blocks;
+	int			gd_size;
+	int			gd_location;
+	int			gd_sector;
+
+#ifdef	DEBUG
+	if(debug)
+		printf("read_fs()\n");
+#endif 
+	/*
+	 * Read the super block
+	 */
+	error = ext2_dev_read(dev,
+			    (recnum_t) dbtorec(dev, SBLOCK), SBSIZE,
+			    (char **) &buf, &buf_size);
+	if (error)
+	    return (error);
+
+	/*
+	 * Check the superblock
+	 */
+	raw_fs = *(struct ext2_super_block *)buf;
+	if (le16_to_cpu(raw_fs.s_magic) != EXT2_SUPER_MAGIC) {
+		(void) vm_deallocate(mach_task_self(), buf, buf_size);
+		return (FS_INVALID_FS);
+	}
+
+	fs = (struct ext2_super_block *) buf;
+	*fsp = fs;
+
+	fs->s_inodes_count = le32_to_cpu(raw_fs.s_inodes_count);
+	fs->s_blocks_count = le32_to_cpu(raw_fs.s_blocks_count);
+	fs->s_r_blocks_count = le32_to_cpu(raw_fs.s_r_blocks_count);
+	fs->s_free_blocks_count = le32_to_cpu(raw_fs.s_free_blocks_count);
+	fs->s_free_inodes_count = le32_to_cpu(raw_fs.s_free_inodes_count);
+	fs->s_first_data_block = le32_to_cpu(raw_fs.s_first_data_block);
+	fs->s_log_block_size = le32_to_cpu(raw_fs.s_log_block_size);
+	fs->s_log_frag_size = le32_to_cpu(raw_fs.s_log_frag_size);
+	fs->s_blocks_per_group = le32_to_cpu(raw_fs.s_blocks_per_group);
+	fs->s_frags_per_group = le32_to_cpu(raw_fs.s_frags_per_group);
+	fs->s_inodes_per_group = le32_to_cpu(raw_fs.s_inodes_per_group);
+	fs->s_mtime = le32_to_cpu(raw_fs.s_mtime);
+	fs->s_wtime = le32_to_cpu(raw_fs.s_wtime);
+	fs->s_mnt_count = le16_to_cpu(raw_fs.s_mnt_count);
+	fs->s_max_mnt_count = le16_to_cpu(raw_fs.s_max_mnt_count);
+	fs->s_magic = le16_to_cpu(raw_fs.s_magic);
+	fs->s_state = le16_to_cpu(raw_fs.s_state);
+	fs->s_errors = le16_to_cpu(raw_fs.s_errors);
+	fs->s_minor_rev_level = le16_to_cpu(raw_fs.s_minor_rev_level);
+	fs->s_lastcheck = le32_to_cpu(raw_fs.s_lastcheck);
+	fs->s_checkinterval = le32_to_cpu(raw_fs.s_checkinterval);
+	fs->s_creator_os = le32_to_cpu(raw_fs.s_creator_os);
+	fs->s_rev_level = le32_to_cpu(raw_fs.s_rev_level);
+	fs->s_def_resuid = le16_to_cpu(raw_fs.s_def_resuid);
+	fs->s_def_resgid = le16_to_cpu(raw_fs.s_def_resgid);
+
+	/*
+	 * Byte-swap dynamic revision fields.
+	 * For GOOD_OLD_REV these fields don't exist on disk but
+	 * EXT2_INODE_SIZE() / EXT2_FIRST_INO() will return the
+	 * old defaults (128 / 11) regardless.
+	 */
+	if (fs->s_rev_level >= EXT2_DYNAMIC_REV) {
+		fs->s_first_ino = le32_to_cpu(raw_fs.s_first_ino);
+		fs->s_inode_size = le16_to_cpu(raw_fs.s_inode_size);
+		fs->s_block_group_nr = le16_to_cpu(raw_fs.s_block_group_nr);
+		fs->s_feature_compat = le32_to_cpu(raw_fs.s_feature_compat);
+		fs->s_feature_incompat = le32_to_cpu(raw_fs.s_feature_incompat);
+		fs->s_feature_ro_compat = le32_to_cpu(raw_fs.s_feature_ro_compat);
+	} else {
+		fs->s_first_ino = EXT2_GOOD_OLD_FIRST_INO;
+		fs->s_inode_size = EXT2_GOOD_OLD_INODE_SIZE;
+		fs->s_feature_compat = 0;
+		fs->s_feature_incompat = 0;
+		fs->s_feature_ro_compat = 0;
+	}
+
+	/*
+	 * Validate inode size: must be a power of 2, at least 128 bytes,
+	 * and no larger than the block size.
+	 */
+	{
+		unsigned short isz = EXT2_INODE_SIZE(fs);
+		if (isz < EXT2_GOOD_OLD_INODE_SIZE ||
+		    isz > EXT2_BLOCK_SIZE(fs) ||
+		    (isz & (isz - 1)) != 0) {
+			printf("ext2: invalid inode size %d\n", isz);
+			(void) vm_deallocate(mach_task_self(), buf, buf_size);
+			return (FS_INVALID_FS);
+		}
+	}
+
+	/*
+	 * Reject incompatible features we do not understand.
+	 * Since this is a read-only filesystem, compatible and
+	 * read-only compatible features can be safely ignored.
+	 */
+	if (fs->s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_SUPP) {
+		printf("ext2: unsupported incompat features 0x%lx\n",
+		       fs->s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_SUPP);
+		(void) vm_deallocate(mach_task_self(), buf, buf_size);
+		return (FS_INVALID_FS);
+	}
+
+#ifdef	DEBUG
+	printf("ext2: rev %ld, inode size %d, block size %ld\n",
+	       fs->s_rev_level,
+	       (int)EXT2_INODE_SIZE(fs),
+	       (long)EXT2_BLOCK_SIZE(fs));
+#endif
+
+	/*
+	 * Compute the groups informations
+	 */
+	gd_count = (fs->s_blocks_count - fs->s_first_data_block +
+		    fs->s_blocks_per_group - 1) / fs->s_blocks_per_group;
+	gd_blocks = (gd_count + EXT2_DESC_PER_BLOCK(fs) - 1) /
+		    EXT2_DESC_PER_BLOCK(fs);
+	gd_size = gd_blocks * EXT2_BLOCK_SIZE(fs);
+	gd_location = fs->s_first_data_block + 1;
+	gd_sector = (gd_location * EXT2_BLOCK_SIZE(fs)) / DEV_BSIZE;
+
+	/*
+	 * Read the groups descriptors
+	 */
+	error = ext2_dev_read(dev,
+			    (recnum_t) dbtorec(dev, gd_sector), gd_size,
+			    (char **) &buf2, &buf2_size);
+	if (error) {
+		(void) vm_deallocate(mach_task_self(), buf, buf_size);
+#ifdef	DEBUG
+		if (debug)
+			printf("ext2 read_fs: device_read(group_descs)"
+			       " returned 0x%x\n", error);
+#endif
+		return error;
+	}
+
+	*gdp = (struct ext2_group_desc *) buf2;
+	*gd_size_p = gd_size;
+
+	return 0;
+}
+
+static int
+mount_fs(register struct ext2fs_file	*fp)
+{
+	int error;
+	struct ext2_mount *m = ext2_get_mount(&fp->f_dev);
+
+	if (m && m->m_fs) {
+		/* Reuse cached superblock and group descriptors */
+		fp->f_fs = m->m_fs;
+		fp->f_gd = m->m_gd;
+		fp->f_gd_size = m->m_gd_size;
+		{
+		    register int level;
+		    for (level = 0; level < NIADDR; level++)
+			fp->f_nindir[level] = m->m_nindir[level];
+		}
+		return (0);
+	}
+
+	error = read_fs(&fp->f_dev, &fp->f_fs, &fp->f_gd, &fp->f_gd_size);
+	if (error)
+	    return (error);
+
+	/*
+	 * #284 phase 1 (Linux-compliant): mark the volume "in use" so an
+	 * unclean shutdown forces e2fsck on the next boot.  Linux clears
+	 * EXT2_VALID_FS and bumps the mount count on every RW mount; the
+	 * symmetric "mark clean" is ext2fs_mark_clean_dev() at unmount.
+	 * Only the first (uncached) mount reaches here.
+	 */
+	if (fp->f_fs->s_state & EXT2_VALID_FS) {
+		fp->f_fs->s_state &= ~EXT2_VALID_FS;
+		fp->f_fs->s_mnt_count++;
+		(void) write_super(fp);
+	}
+
+	/* Cache for subsequent opens in per-mount state */
+	if (m) {
+		m->m_fs = fp->f_fs;
+		m->m_gd = fp->f_gd;
+		m->m_gd_size = fp->f_gd_size;
+	}
+
+	{
+	    register struct ext2_super_block *fs = fp->f_fs;
+	    register int	mult;
+	    register int	level;
+
+	    mult = 1;
+	    for (level = 0; level < NIADDR; level++) {
+		mult *= NINDIR(fs);
+		fp->f_nindir[level] = mult;
+		if (m)
+			m->m_nindir[level] = mult;
+	    }
+	}
+
+	return (0);
+}
+
+static void
+unmount_fs(register struct ext2fs_file *fp)
+{
+	if (file_is_structured(fp)) {
+	    /* Don't free cached superblock/GD — they're shared */
+	    struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	    if (!m || fp->f_fs != m->m_fs) {
+		(void) vm_deallocate(mach_task_self(),
+				     (vm_offset_t) fp->f_fs,
+				     SBSIZE);
+		(void) vm_deallocate(mach_task_self(),
+				     (vm_offset_t) fp->f_gd,
+				     fp->f_gd_size);
+	    }
+	    fp->f_fs = 0;
+	}
+}
+
+/*
+ * Open a file into a caller-supplied ext2fs_file struct.
+ * The caller is responsible for allocation and deallocation of fp.
+ */
+int
+ext2fs_open_file_into(
+	struct device *dev,
+	const char *path,
+	fs_private_t *private,
+	struct ext2fs_file *fp)
+{
+#define	RETURN(code)	{ rc = (code); goto exit; }
+
+	register char	*cp, *component;
+	register int	c;	/* char */
+	register int	rc;
+	ino_t		inumber, parent_inumber;
+	int		nlinks = 0;
+	char	        *namebuf;
+
+#ifdef	DEBUG
+	if(debug)
+		printf("ext2fs_open_file(%s, %s)\n", dev, path);
+#endif
+	if (path == 0 || *path == '\0') {
+	    return FS_NO_ENTRY;
+	}
+
+	namebuf = (char*)malloc((size_t)(PATH_MAX+1));
+	memset((void *)fp, '\0', sizeof(struct ext2fs_file));
+	fp->f_dev = *dev;
+	fp->f_ic = &fp->f_ic_scratch;	/* path walk uses scratch */
+	/*
+	 * Copy name into buffer to allow modifying it.
+	 */
+	strcpy(namebuf, path);
+
+	cp = namebuf;
+
+	rc = mount_fs(fp);
+	if (rc)
+	    return rc;
+
+	/*
+	 * Propagate mount_data back to the original device struct.
+	 * ext2_get_mount() stores the new ext2_mount on fp->f_dev
+	 * (a copy), so the caller's device never gets updated.
+	 */
+	if (fp->f_dev.mount_data && !dev->mount_data)
+		dev->mount_data = fp->f_dev.mount_data;
+
+	inumber = (ino_t) ROOTINO;
+	if ((rc = read_inode(inumber, fp)) != 0)
+	    goto exit;
+
+	while (*cp) {
+
+	    /*
+	     * Check that current node is a directory.
+	     */
+	    if ((fp->f_ic->i_mode & IFMT) != IFDIR)
+		RETURN (FS_NOT_DIRECTORY);
+
+	    /*
+	     * Remove extra separators
+	     */
+	    while (*cp == '/')
+		cp++;
+
+	    /*
+	     * Trailing separators (or the root path "/") leave nothing to
+	     * look up — the current inode is the answer.
+	     */
+	    if (*cp == '\0')
+		break;
+
+	    /*
+	     * Get next component of path name.
+	     */
+	    component = cp;
+	    {
+		register int	len = 0;
+
+		while ((c = *cp) != '\0' && c != '/') {
+		    if (len++ > MAXNAMLEN)
+			RETURN (FS_NAME_TOO_LONG);
+		    if (c & 0200)
+			RETURN (FS_INVALID_PARAMETER);
+		    cp++;
+		}
+		*cp = 0;
+	    }
+
+	    /*
+	     * Look up component in current directory.
+	     * Save directory inumber in case we find a
+	     * symbolic link.
+	     */
+	    parent_inumber = inumber;
+	    rc = search_directory(component, fp, &inumber);
+	    if (rc)
+	        goto exit;
+
+	    *cp = c;
+
+	    /*
+	     * Open next component.
+	     */
+	    if ((rc = read_inode(inumber, fp)) != 0)
+		goto exit;
+
+	    /*
+	     * Check for symbolic link.
+	     */
+	    if ((fp->f_ic->i_mode & IFMT) == IFLNK) {
+
+		int	link_len = fp->f_ic->i_size;
+		int	len;
+
+		len = strlen(cp) + 1;
+
+		if (link_len + len >= MAXPATHLEN - 1)
+		    RETURN (FS_NAME_TOO_LONG);
+
+		if (++nlinks > MAXSYMLINKS)
+		    RETURN (FS_SYMLINK_LOOP);
+
+		ovbcopy(cp, &namebuf[link_len], len);
+
+#ifdef	IC_FASTLINK
+		if (fp->f_ic->i_blocks == 0) {
+		    memcpy(namebuf,
+			   (char *)fp->f_ic->i_block, (unsigned)link_len);
+		}
+		else
+#endif	/* IC_FASTLINK */
+		{
+		    /*
+		     * Read file for symbolic link
+		     */
+		    vm_offset_t	buf;
+		    mach_msg_type_number_t	buf_size;
+		    daddr_t	disk_block;
+		    register struct ext2_super_block *fs = fp->f_fs;
+
+		    (void) block_map(fp, (daddr_t)0, &disk_block);
+		    rc = ext2_dev_read(&fp->f_dev,
+				     (recnum_t) dbtorec(&fp->f_dev,
+							ext2_fsbtodb(fs,
+								disk_block)),
+				     (int) ext2_blksize(fs, fp, 0),
+				     (char **) &buf,
+				     &buf_size);
+		    if (rc)
+			goto exit;
+
+		    memcpy(namebuf, (char *)buf, (unsigned)link_len);
+		    (void) vm_deallocate(mach_task_self(), buf, buf_size);
+		}
+
+		/*
+		 * If relative pathname, restart at parent directory.
+		 * If absolute pathname, restart at root.
+		 * If pathname begins '/dev/<device>/',
+		 *	restart at root of that device.
+		 */
+		cp = namebuf;
+		if (*cp != '/') {
+		    inumber = parent_inumber;
+		}
+#ifndef	MACH_DEV_LINK
+		else
+		    inumber = (ino_t)ROOTINO;
+#else	/* MACH_DEV_LINK */
+		else if (!strprefix(cp, "/dev/")) {
+		    inumber = (ino_t)ROOTINO;
+		}
+		else {
+		    cp += 5;
+		    component = cp;
+		    while ((c = *cp) != '\0' && c != '/') {
+			cp++;
+		    }
+		    *cp = '\0';
+
+		    /*
+		     * Unmount current file system and free buffers.
+		     */
+		    close_file(fp);
+
+		    /*
+		     * Open new root device.
+		     */
+		    rc = device_open(master_device_port,
+				D_READ,
+				component,
+				&fp->f_dev.dev_port);
+		    if (rc)
+			return (rc);
+
+		    fp->f_dev.rec_size = dev_rec_size(fp->f_dev.dev_port);
+
+		    if (c == 0) {
+			fp->f_fs = 0;
+			goto out_ok;
+		    }
+
+		    *cp = c;
+
+		    rc = mount_fs(fp);
+		    if (rc)
+			return (rc);
+
+		    inumber = (ino_t)ROOTINO;
+		}
+#endif	/* MACH_DEV_LINK */
+		if ((rc = read_inode(inumber, fp)) != 0)
+		    goto exit;
+	    }
+	}
+
+	/*
+	 * Found terminal component — attach shared vnode.
+	 */
+#if MACH_DEV_LINK
+    out_ok:
+#endif	/* MACH_DEV_LINK */
+	{
+		struct ext2_mount *m =
+			(struct ext2_mount *)fp->f_dev.mount_data;
+		struct ext2_vnode *vn = m ? vnode_get(m, fp->f_ino) : NULL;
+		if (!vn) {
+			/* #283: vnode table exhausted — a resource limit, not a
+			 * missing name.  Returning FS_NO_ENTRY here used to make
+			 * a perfectly-present file look absent (the original 5001
+			 * symptom). */
+			free(namebuf);
+			ext2fs_close_file((fs_private_t)fp);
+			return FS_NO_RESOURCES;
+		}
+		if (vn->v_refcount == 1) {
+			/* New vnode — populate from scratch */
+			vn->v_ic = fp->f_ic_scratch;
+			vn->v_inode_blk = fp->f_inode_blk;
+			vn->v_inode_blk_size = fp->f_inode_blk_size;
+			fp->f_inode_blk = 0;
+			fp->f_inode_blk_size = 0;
+		} else {
+			/* Existing vnode — discard scratch data */
+			if (fp->f_inode_blk) {
+				vm_deallocate(mach_task_self(),
+					      fp->f_inode_blk,
+					      fp->f_inode_blk_size);
+				fp->f_inode_blk = 0;
+				fp->f_inode_blk_size = 0;
+			}
+		}
+		fp->f_vnode = vn;
+		fp->f_ic = &vn->v_ic;
+	}
+	mutex_init(&fp->f_lock);
+	free(namebuf);
+	*private = (fs_private_t) fp;
+	return 0;
+
+	/*
+	 * At error exit, close file to free storage.
+	 */
+    exit:
+	free(namebuf);
+	ext2fs_close_file((fs_private_t)fp);
+	return rc;
+}
+
+/*
+ * Open a file.  Allocates ext2fs_file via malloc.
+ * Caller must free() the returned private after ext2fs_close_file().
+ */
+int
+ext2fs_open_file(
+	struct device *dev,
+	const char *path,
+	fs_private_t *private)
+{
+	struct ext2fs_file *fp;
+
+	fp = (struct ext2fs_file *)malloc(sizeof(struct ext2fs_file));
+	if (!fp)
+		return FS_NO_ENTRY;
+
+	return ext2fs_open_file_into(dev, path, private, fp);
+}
+
+/*
+ * Clone an already-open file into a new ext2fs_file struct.
+ * Shares the source's vnode (refcount bump) — changes by either
+ * opener are immediately visible to the other.  No disk I/O.
+ */
+void
+ext2fs_clone_file(struct ext2fs_file *dst, const struct ext2fs_file *src)
+{
+	int level;
+
+	memset(dst, 0, sizeof(*dst));
+	dst->f_dev = src->f_dev;
+
+	/* Shared filesystem metadata (cached — no allocation needed) */
+	dst->f_fs = src->f_fs;
+	dst->f_gd = src->f_gd;
+	dst->f_gd_size = src->f_gd_size;
+	for (level = 0; level < NIADDR; level++)
+		dst->f_nindir[level] = src->f_nindir[level];
+
+	dst->f_ino = src->f_ino;
+
+	/* Share the vnode — inode data is shared, not copied */
+	dst->f_vnode = src->f_vnode;
+	if (dst->f_vnode) {
+		dst->f_vnode->v_refcount++;
+		dst->f_ic = &dst->f_vnode->v_ic;
+	} else {
+		dst->f_ic = &dst->f_ic_scratch;
+	}
+
+	/* Per-opener state: fresh */
+	dst->f_buf_blkno = -1;
+	dst->f_ra_last_block = -1;
+}
+
+/*
+ * Close file - free all storage used.
+ */
+void
+ext2fs_close_file(
+	fs_private_t private)
+{
+	register struct ext2fs_file *fp = (struct ext2fs_file *)private;
+
+	/*
+	 * Flush dirty metadata before closing.
+	 */
+	if (fp->f_vnode)
+		ext2fs_flush_metadata(private);
+
+	/*
+	 * Free the disk super-block.
+	 */
+	unmount_fs(fp);
+
+	/*
+	 * Free the inode and data buffers.
+	 */
+	free_file_buffers(fp);
+
+	/*
+	 * Release vnode reference.
+	 */
+	if (fp->f_vnode) {
+		vnode_put(fp->f_vnode);
+		fp->f_vnode = NULL;
+		fp->f_ic = &fp->f_ic_scratch;
+	}
+}
+
+struct ext2_vnode *
+ext2fs_file_vnode(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	return fp->f_vnode;
+}
+
+/*
+ * Copy a portion of a file into kernel memory.
+ * Cross block boundaries when necessary.
+ */
+int
+ext2fs_read_file(
+	fs_private_t private,
+	vm_offset_t		offset,
+	vm_offset_t		start,
+	vm_size_t		size)
+{
+  	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	int			rc;
+	register vm_size_t	csize;
+	vm_offset_t		buf;
+	vm_size_t		buf_size;
+
+#ifdef	DEBUG
+	if(debug)
+		printf("ext2fs_read_file(%d, %d)\n", offset, size);
+#endif 
+	while (size != 0) {
+	    buf = start;
+	    buf_size = size;
+	    rc = buf_read_file(fp, offset, &buf, &buf_size);
+	    if (rc)
+		return (rc);
+
+	    csize = size;
+	    if (csize > buf_size)
+		csize = buf_size;
+	    if (csize == 0)
+		break;
+
+	    if (buf != start)
+		memcpy((char *)start, (const char *)buf, csize);
+
+	    offset += csize;
+	    start  += csize;
+	    size   -= csize;
+	}
+#if 0
+	if (resid)
+	    *resid = size;
+#endif
+	return (0);
+}
+
+boolean_t
+ext2fs_file_is_directory(fs_private_t private)
+{
+  	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	return((fp->f_ic->i_mode & IFMT) == IFDIR);
+}
+
+/*
+ * ext2fs_readdir — iterate every directory entry and fill an array of
+ * fs_dirent.  Used by the bootstrap to enumerate module directories.
+ *
+ * Mirrors the block-walking loop in search_directory() but emits names
+ * instead of matching one.  Stops when max entries are written; the
+ * caller can detect truncation by comparing *out_count to what it
+ * expected or by re-reading with a larger buffer.
+ */
+int
+ext2fs_readdir(fs_private_t private,
+	       struct fs_dirent *out,
+	       unsigned int max,
+	       unsigned int *out_count)
+{
+	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	vm_offset_t		buf;
+	vm_size_t		buf_size;
+	vm_offset_t		offset;
+	struct ext2_dir_entry	*dp;
+	unsigned int		n = 0;
+	int			rc;
+	unsigned int		nlen;
+
+	if ((fp->f_ic->i_mode & IFMT) != IFDIR)
+		return FS_NOT_DIRECTORY;
+
+	offset = 0;
+	while (offset < fp->f_ic->i_size && n < max) {
+		buf = 0;
+		buf_size = 0;
+		rc = buf_read_file(fp, offset, &buf, &buf_size);
+		if (rc != KERN_SUCCESS)
+			return rc;
+		if (buf_size == 0)
+			break;
+
+		dp = (struct ext2_dir_entry *)buf;
+		if (le16_to_cpu(dp->rec_len) == 0)
+			break;	/* corrupt — avoid infinite loop */
+
+		if (le32_to_cpu(dp->inode) != 0) {
+			nlen = dp->name_len;
+			if (nlen > FS_DIRENT_NAME_MAX)
+				nlen = FS_DIRENT_NAME_MAX;
+
+			out[n].ino  = le32_to_cpu(dp->inode);
+			out[n].type = dp->file_type;
+			memcpy(out[n].name, dp->name, nlen);
+			out[n].name[nlen] = '\0';
+			n++;
+		}
+
+		offset += le16_to_cpu(dp->rec_len);
+	}
+
+	*out_count = n;
+	return KERN_SUCCESS;
+}
+
+size_t
+ext2fs_file_size(fs_private_t private)
+{
+  	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	return(fp->f_ic->i_size);
+}
+
+int
+ext2fs_is_dirty(fs_private_t private)
+{
+	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	if (!fp->f_vnode)
+		return 0;
+	return(fp->f_vnode->v_inode_dirty || fp->f_vnode->v_gd_dirty || fp->f_vnode->v_super_dirty);
+}
+
+boolean_t
+ext2fs_file_is_executable(fs_private_t private)
+{
+  	register struct ext2fs_file	*fp = (struct ext2fs_file *)private;
+	if ((fp->f_ic->i_mode & IFMT) != IFREG
+#if 0
+	    || (fp->f_ic->i_mode & (IEXEC|IEXEC>>3|IEXEC>>6)) == 0
+#endif
+	    ) {
+		return (FALSE);
+	}
+	return(TRUE);
+}
+
+/* ================================================================
+ * Write support
+ * ================================================================ */
+
+/*
+ * Write a raw disk block (in fs block units) to the device.
+ */
+static int
+write_disk_block(
+	struct ext2fs_file	*fp,
+	daddr_t			disk_block,
+	vm_offset_t		data,
+	vm_size_t		size)
+{
+	io_buf_len_t bytes_written;
+	kern_return_t rc;
+
+	rc = ext2_dev_write(&fp->f_dev,
+			  (recnum_t) dbtorec(&fp->f_dev,
+					     ext2_fsbtodb(fp->f_fs,
+							 disk_block)),
+			  (io_buf_ptr_t) data,
+			  (mach_msg_type_number_t) size,
+			  &bytes_written);
+	if (rc != KERN_SUCCESS)
+		return rc;
+	if ((vm_size_t)bytes_written != size)
+		return KERN_FAILURE;
+	return 0;
+}
+
+/*
+ * Read a raw disk block (in fs block units) from the device.
+ */
+static int
+read_disk_block(
+	struct ext2fs_file	*fp,
+	daddr_t			disk_block,
+	vm_offset_t		*data_out,
+	vm_size_t		*size_out)
+{
+	return ext2_dev_read(&fp->f_dev,
+			   (recnum_t) dbtorec(&fp->f_dev,
+					      ext2_fsbtodb(fp->f_fs,
+							  disk_block)),
+			   (int) EXT2_BLOCK_SIZE(fp->f_fs),
+			   (char **) data_out,
+			   (unsigned int *) size_out);
+}
+
+/*
+ * Allocate a free block from the filesystem.
+ * Prefers the block group 'goal_group' (or 0 for any).
+ * Returns the allocated disk block number, or 0 on failure.
+ *
+ * Updates: block bitmap on disk, group descriptor free count,
+ * superblock free count.
+ */
+static daddr_t
+block_alloc(struct ext2fs_file *fp, int goal_group)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int ngroups;
+	int group, g;
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int bits_per_group = fs->s_blocks_per_group;
+	int rc;
+	daddr_t alloc_block;
+
+	ngroups = (fs->s_blocks_count - fs->s_first_data_block +
+		   fs->s_blocks_per_group - 1) / fs->s_blocks_per_group;
+
+	/* Search from goal_group, wrapping around */
+	for (g = 0; g < ngroups; g++) {
+		group = (goal_group + g) % ngroups;
+
+		if (le16_to_cpu(gd[group].bg_free_blocks_count) == 0)
+			continue;
+
+		/* Read block bitmap for this group */
+		rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_block_bitmap),
+				     &bitmap, &bitmap_size);
+		if (rc != 0)
+			continue;
+
+		/* Scan bitmap for a free bit */
+		{
+			unsigned char *bm = (unsigned char *)bitmap;
+			int bit;
+			int max_bit = bits_per_group;
+
+			/* Last group may have fewer blocks */
+			if (group == ngroups - 1) {
+				int remaining = fs->s_blocks_count -
+					fs->s_first_data_block -
+					(unsigned long)group * bits_per_group;
+				if (remaining < max_bit)
+					max_bit = remaining;
+			}
+
+			for (bit = 0; bit < max_bit; bit++) {
+				if (!(bm[bit >> 3] & (1 << (bit & 7)))) {
+					/* Found free block — mark as used */
+					bm[bit >> 3] |= (1 << (bit & 7));
+
+					/* Write bitmap back */
+					rc = write_disk_block(fp,
+						le32_to_cpu(gd[group].bg_block_bitmap),
+						bitmap, block_size);
+					if (rc != 0) {
+						vm_deallocate(mach_task_self(),
+							      bitmap, bitmap_size);
+						return 0;
+					}
+
+					/* Update group descriptor */
+					gd[group].bg_free_blocks_count =
+						cpu_to_le16(
+						le16_to_cpu(gd[group].bg_free_blocks_count) - 1);
+					fp->f_vnode->v_gd_dirty = 1;
+
+					/* Update superblock */
+					fs->s_free_blocks_count--;
+					fp->f_vnode->v_super_dirty = 1;
+
+					alloc_block = fs->s_first_data_block +
+						(unsigned long)group * bits_per_group + bit;
+
+					vm_deallocate(mach_task_self(),
+						      bitmap, bitmap_size);
+					return alloc_block;
+				}
+			}
+		}
+
+		vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+	}
+
+	return 0;	/* no space */
+}
+
+/*
+ * Free a previously allocated data block: clear its bit in the block
+ * bitmap and bump the group + superblock free counts.  Inverse of
+ * block_alloc().  Dirty flags are raised on fp's vnode so the next
+ * ext2fs_flush_metadata() writes the descriptors and superblock back.
+ */
+static void
+block_free(struct ext2fs_file *fp, daddr_t block)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int bits_per_group = fs->s_blocks_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+	unsigned char *bm;
+	int group, bit, rc;
+
+	if (block < (daddr_t)fs->s_first_data_block ||
+	    block >= (daddr_t)fs->s_blocks_count)
+		return;
+
+	group = (block - fs->s_first_data_block) / bits_per_group;
+	bit   = (block - fs->s_first_data_block) % bits_per_group;
+
+	rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_block_bitmap),
+			     &bitmap, &bitmap_size);
+	if (rc != 0)
+		return;
+
+	bm = (unsigned char *)bitmap;
+	if (bm[bit >> 3] & (1 << (bit & 7))) {
+		bm[bit >> 3] &= ~(1 << (bit & 7));
+		rc = write_disk_block(fp, le32_to_cpu(gd[group].bg_block_bitmap),
+				      bitmap, block_size);
+		if (rc == 0) {
+			gd[group].bg_free_blocks_count = cpu_to_le16(
+				le16_to_cpu(gd[group].bg_free_blocks_count) + 1);
+			fs->s_free_blocks_count++;
+			if (fp->f_vnode) {
+				fp->f_vnode->v_gd_dirty = 1;
+				fp->f_vnode->v_super_dirty = 1;
+			}
+		}
+	}
+	vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+}
+
+/*
+ * Allocate a free inode, mirroring block_alloc() against the inode
+ * bitmap.  Reserved inodes (< EXT2_FIRST_INO) are skipped — they are
+ * already marked used in group 0's bitmap, but we guard anyway.  When
+ * is_dir is set the group's used-directory count is bumped (ext2 uses it
+ * for the Orlov-style allocator; we just keep it consistent).
+ *
+ * Returns the 1-based inode number, or 0 on failure.  Raises the gd +
+ * superblock dirty flags on fp's vnode.
+ */
+static ino_t
+inode_alloc(struct ext2fs_file *fp, int goal_group, int is_dir)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int ipg = fs->s_inodes_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int first_ino = EXT2_FIRST_INO(fs);
+	int ngroups, group, g, bit, rc;
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+
+	ngroups = (fs->s_inodes_count + ipg - 1) / ipg;
+
+	for (g = 0; g < ngroups; g++) {
+		group = (goal_group + g) % ngroups;
+
+		if (le16_to_cpu(gd[group].bg_free_inodes_count) == 0)
+			continue;
+
+		rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+				     &bitmap, &bitmap_size);
+		if (rc != 0)
+			continue;
+
+		{
+			unsigned char *bm = (unsigned char *)bitmap;
+
+			for (bit = 0; bit < ipg; bit++) {
+				ino_t ino = (ino_t)group * ipg + bit + 1;
+				if (ino < (ino_t)first_ino)
+					continue;
+				if (bm[bit >> 3] & (1 << (bit & 7)))
+					continue;
+
+				bm[bit >> 3] |= (1 << (bit & 7));
+				rc = write_disk_block(fp,
+					le32_to_cpu(gd[group].bg_inode_bitmap),
+					bitmap, block_size);
+				if (rc != 0) {
+					vm_deallocate(mach_task_self(),
+						      bitmap, bitmap_size);
+					return 0;
+				}
+
+				gd[group].bg_free_inodes_count = cpu_to_le16(
+					le16_to_cpu(gd[group].bg_free_inodes_count) - 1);
+				if (is_dir)
+					gd[group].bg_used_dirs_count = cpu_to_le16(
+						le16_to_cpu(gd[group].bg_used_dirs_count) + 1);
+				fs->s_free_inodes_count--;
+				if (fp->f_vnode) {
+					fp->f_vnode->v_gd_dirty = 1;
+					fp->f_vnode->v_super_dirty = 1;
+				}
+
+				vm_deallocate(mach_task_self(),
+					      bitmap, bitmap_size);
+				return ino;
+			}
+		}
+
+		vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+	}
+
+	return 0;	/* no free inode */
+}
+
+/*
+ * Release an inode: clear its bit in the inode bitmap, bump free counts
+ * (and drop the group's used-dirs count when freeing a directory).
+ * Inverse of inode_alloc().  The caller is responsible for having freed
+ * the inode's data blocks first.
+ */
+static void
+inode_free(struct ext2fs_file *fp, ino_t ino, int is_dir)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_group_desc *gd = fp->f_gd;
+	int ipg = fs->s_inodes_per_group;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	vm_offset_t bitmap;
+	vm_size_t bitmap_size;
+	unsigned char *bm;
+	int group, bit, rc;
+
+	if (ino < (ino_t)EXT2_FIRST_INO(fs) || ino > (ino_t)fs->s_inodes_count)
+		return;
+
+	group = (ino - 1) / ipg;
+	bit   = (ino - 1) % ipg;
+
+	rc = read_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+			     &bitmap, &bitmap_size);
+	if (rc != 0)
+		return;
+
+	bm = (unsigned char *)bitmap;
+	if (bm[bit >> 3] & (1 << (bit & 7))) {
+		bm[bit >> 3] &= ~(1 << (bit & 7));
+		rc = write_disk_block(fp, le32_to_cpu(gd[group].bg_inode_bitmap),
+				      bitmap, block_size);
+		if (rc == 0) {
+			gd[group].bg_free_inodes_count = cpu_to_le16(
+				le16_to_cpu(gd[group].bg_free_inodes_count) + 1);
+			if (is_dir)
+				gd[group].bg_used_dirs_count = cpu_to_le16(
+					le16_to_cpu(gd[group].bg_used_dirs_count) - 1);
+			fs->s_free_inodes_count++;
+			if (fp->f_vnode) {
+				fp->f_vnode->v_gd_dirty = 1;
+				fp->f_vnode->v_super_dirty = 1;
+			}
+		}
+	}
+	vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+}
+
+/* ext2 on-disk directory-entry file_type values (FILETYPE feature). */
+#define EXT2_FT_REG_FILE	1
+#define EXT2_FT_DIR		2
+
+/*
+ * Persist a single directory block that was modified in place.  buf is
+ * the borrowed page-cache pointer returned by buf_read_file (so the
+ * cache already reflects our edit); we only need to push it to disk.
+ */
+static int
+dir_write_block(struct ext2fs_file *dir_fp, daddr_t lblk, vm_offset_t buf)
+{
+	daddr_t dblk;
+	int bs = EXT2_BLOCK_SIZE(dir_fp->f_fs);
+	char *tmp;
+	int rc = block_map(dir_fp, lblk, &dblk);
+	if (rc != 0)
+		return rc;
+	/*
+	 * 'buf' is the page-cache page we borrowed and edited in place.  With
+	 * the DMA-backed page cache that buffer lives in device DMA memory,
+	 * and device_write() cannot copyin from that mapping — it silently
+	 * persists zeroes (the in-process VA reads fine, but the kernel-side
+	 * copyin of the non-phys write path does not).  Copy into a normal
+	 * heap buffer for the synchronous write.  Directory writes are a cold
+	 * path, so the extra 4 KiB copy is negligible; file data keeps using
+	 * the working phys writeback path untouched.
+	 */
+	tmp = malloc(bs);
+	if (!tmp)
+		return KERN_RESOURCE_SHORTAGE;
+	memcpy(tmp, (void *)buf, bs);
+	rc = write_disk_block(dir_fp, dblk, (vm_offset_t)tmp, bs);
+	free(tmp);
+	return rc;
+}
+
+/*
+ * Append a fresh data block to a directory holding a single empty entry
+ * that spans the whole block, then place (name -> ino) in it.  Only the
+ * direct-block range is handled: directories deep enough to need an
+ * indirect block (> 12 blocks ~= 48 KiB of entries) are far beyond what
+ * this bootstrap fs is expected to grow, and we fail cleanly instead.
+ */
+static int
+dir_grow_and_add(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
+		 int file_type, int name_len)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	daddr_t lblk = dir_fp->f_ic->i_size / block_size;
+	int goal_group;
+	daddr_t newblk;
+	char *blk;
+	struct ext2_dir_entry *dp;
+	int rc;
+
+	if (lblk >= NDADDR)
+		return KERN_RESOURCE_SHORTAGE;
+
+	goal_group = (dir_fp->f_ino - 1) / fs->s_inodes_per_group;
+	newblk = block_alloc(dir_fp, goal_group);
+	if (newblk == 0)
+		return KERN_RESOURCE_SHORTAGE;
+
+	blk = (char *)malloc(block_size);
+	if (!blk) {
+		block_free(dir_fp, newblk);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	memset(blk, 0, block_size);
+
+	dp = (struct ext2_dir_entry *)blk;
+	dp->inode = cpu_to_le32((unsigned long)ino);
+	dp->rec_len = cpu_to_le16(block_size);
+	dp->name_len = (unsigned char)name_len;
+	dp->file_type = (unsigned char)file_type;
+	memcpy(dp->name, name, name_len);
+
+	rc = write_disk_block(dir_fp, newblk, (vm_offset_t)blk, block_size);
+	free(blk);
+	if (rc != 0) {
+		block_free(dir_fp, newblk);
+		return rc;
+	}
+
+	/* Link the new block into the inode and extend its size. */
+	dir_fp->f_ic->i_block[lblk] = newblk;
+	dir_fp->f_ic->i_size += block_size;
+	dir_fp->f_ic->i_blocks += block_size / 512;
+	if (dir_fp->f_vnode)
+		dir_fp->f_vnode->v_inode_dirty = 1;
+
+	{
+		struct ext2_mount *m =
+			(struct ext2_mount *)dir_fp->f_dev.mount_data;
+		if (m)
+			dcache_insert(m, dir_fp->f_ino, name, ino);
+	}
+	return 0;
+}
+
+/*
+ * Insert (name -> ino) into directory dir_fp.  Walks each directory
+ * block for a usable slot: a deleted entry (inode==0) whose rec_len is
+ * large enough, or trailing slack in a live entry that can be split off.
+ * Grows the directory by a block if nothing fits.  Returns 0 / error.
+ *
+ * dir_fp must have its inode loaded and a vnode (for dirty flags).  We
+ * read through buf_read_file, so the buffer we mutate is the same memory
+ * the page cache hands future readers; dir_write_block then persists it.
+ */
+static int
+dir_add_entry(struct ext2fs_file *dir_fp, const char *name, ino_t ino,
+	      int file_type)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int name_len = (int)strlen(name);
+	int needed = EXT2_DIR_REC_LEN(name_len);
+	struct ext2_mount *m = (struct ext2_mount *)dir_fp->f_dev.mount_data;
+	vm_offset_t offset;
+
+	if (name_len == 0 || name_len > EXT2_NAME_LEN)
+		return FS_NAME_TOO_LONG;
+
+	for (offset = 0; offset < dir_fp->f_ic->i_size; offset += block_size) {
+		vm_offset_t buf = 0;
+		vm_size_t buf_size = 0;
+		daddr_t lblk = offset / block_size;
+		int off, rc;
+
+		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
+		if (rc != 0)
+			return rc;
+
+		off = 0;
+		while (off + 8 <= block_size) {
+			struct ext2_dir_entry *dp =
+				(struct ext2_dir_entry *)((char *)buf + off);
+			int rec_len = le16_to_cpu(dp->rec_len);
+			int used;
+
+			if (rec_len < 8 || (off + rec_len) > block_size)
+				break;	/* corrupt block — give up on it */
+
+			used = (le32_to_cpu(dp->inode) == 0)
+				? 0 : EXT2_DIR_REC_LEN(dp->name_len);
+
+			if (rec_len - used >= needed) {
+				struct ext2_dir_entry *ne;
+				if (used == 0) {
+					ne = dp;	/* reuse deleted slot whole */
+				} else {
+					ne = (struct ext2_dir_entry *)
+						((char *)dp + used);
+					ne->rec_len = cpu_to_le16(rec_len - used);
+					dp->rec_len = cpu_to_le16(used);
+				}
+				ne->inode = cpu_to_le32((unsigned long)ino);
+				ne->name_len = (unsigned char)name_len;
+				ne->file_type = (unsigned char)file_type;
+				memcpy(ne->name, name, name_len);
+
+				rc = dir_write_block(dir_fp, lblk, buf);
+				if (rc != 0)
+					return rc;
+				if (m)
+					dcache_insert(m, dir_fp->f_ino, name, ino);
+				return 0;
+			}
+			off += rec_len;
+		}
+	}
+
+	return dir_grow_and_add(dir_fp, name, ino, file_type, name_len);
+}
+
+/*
+ * Remove the entry 'name' from directory dir_fp.  On success the removed
+ * inode number is returned through ino_out so the caller can drop link
+ * counts / free the inode.  Removal is the classic ext2 tombstone: the
+ * entry's rec_len is folded into the previous record, or inode is zeroed
+ * when it is the first record in the block.  Returns 0 / FS_NO_ENTRY.
+ */
+static int
+dir_remove_entry(struct ext2fs_file *dir_fp, const char *name, ino_t *ino_out)
+{
+	struct ext2_super_block *fs = dir_fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int name_len = (int)strlen(name);
+	struct ext2_mount *m = (struct ext2_mount *)dir_fp->f_dev.mount_data;
+	vm_offset_t offset;
+
+	for (offset = 0; offset < dir_fp->f_ic->i_size; offset += block_size) {
+		vm_offset_t buf = 0;
+		vm_size_t buf_size = 0;
+		daddr_t lblk = offset / block_size;
+		struct ext2_dir_entry *prev = NULL;
+		int off, rc;
+
+		rc = buf_read_file(dir_fp, offset, &buf, &buf_size);
+		if (rc != 0)
+			return rc;
+
+		off = 0;
+		while (off + 8 <= block_size) {
+			struct ext2_dir_entry *dp =
+				(struct ext2_dir_entry *)((char *)buf + off);
+			int rec_len = le16_to_cpu(dp->rec_len);
+
+			if (rec_len < 8 || (off + rec_len) > block_size)
+				break;
+
+			if (le32_to_cpu(dp->inode) != 0 &&
+			    dp->name_len == name_len &&
+			    memcmp(dp->name, name, name_len) == 0) {
+				if (ino_out)
+					*ino_out = (ino_t)le32_to_cpu(dp->inode);
+				if (prev)
+					prev->rec_len = cpu_to_le16(
+						le16_to_cpu(prev->rec_len) + rec_len);
+				else
+					dp->inode = cpu_to_le32(0);
+
+				rc = dir_write_block(dir_fp, lblk, buf);
+				if (rc != 0)
+					return rc;
+				if (m)
+					dcache_insert(m, dir_fp->f_ino, name,
+						      DCACHE_NEGATIVE);
+				return 0;
+			}
+			prev = dp;
+			off += rec_len;
+		}
+	}
+	return FS_NO_ENTRY;
+}
+
+/*
+ * Serialize the in-core inode into the cached raw inode block.
+ * The block must already be in fp->f_inode_blk (populated by read_inode).
+ */
+static void
+serialize_inode(struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_inode *raw_inode;
+	struct ext2_inode *inode = fp->f_ic;
+	unsigned long block;
+
+	raw_inode = (struct ext2_inode *)
+		((char *)fp->f_vnode->v_inode_blk +
+		 ext2_itoo(fs, fp->f_vnode->v_ino) * EXT2_INODE_SIZE(fs));
+
+	raw_inode->i_mode = cpu_to_le16(inode->i_mode);
+	raw_inode->i_uid = cpu_to_le16(inode->i_uid);
+	raw_inode->i_size = cpu_to_le32(inode->i_size);
+	raw_inode->i_atime = cpu_to_le32(inode->i_atime);
+	raw_inode->i_ctime = cpu_to_le32(inode->i_ctime);
+	raw_inode->i_mtime = cpu_to_le32(inode->i_mtime);
+	raw_inode->i_dtime = cpu_to_le32(inode->i_dtime);
+	raw_inode->i_gid = cpu_to_le16(inode->i_gid);
+	raw_inode->i_links_count = cpu_to_le16(inode->i_links_count);
+	raw_inode->i_blocks = cpu_to_le32(inode->i_blocks);
+	raw_inode->i_flags = cpu_to_le32(inode->i_flags);
+	for (block = 0; block < EXT2_N_BLOCKS; block++)
+		raw_inode->i_block[block] = cpu_to_le32(inode->i_block[block]);
+	raw_inode->i_file_acl = cpu_to_le32(inode->i_file_acl);
+	raw_inode->i_dir_acl = cpu_to_le32(inode->i_dir_acl);
+	raw_inode->i_faddr = cpu_to_le32(inode->i_faddr);
+	raw_inode->i_frag = inode->i_frag;
+	raw_inode->i_fsize = inode->i_fsize;
+}
+
+/*
+ * Write the inode back to disk using the cached inode block.
+ * No device_read needed — the block was cached by read_inode().
+ */
+static int
+write_inode(ino_t inumber, struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_vnode *vn = fp->f_vnode;
+	daddr_t disk_block;
+
+	if (!vn || vn->v_inode_blk == 0)
+		return KERN_FAILURE;
+
+	serialize_inode(fp);
+
+	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
+	return write_disk_block(fp, disk_block,
+				vn->v_inode_blk, EXT2_BLOCK_SIZE(fs));
+}
+
+/*
+ * Write the group descriptors back to disk.
+ */
+static int
+write_gd(struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	int gd_location = fs->s_first_data_block + 1;
+	int gd_sector = (gd_location * EXT2_BLOCK_SIZE(fs)) / DEV_BSIZE;
+	io_buf_len_t bytes_written;
+
+	return ext2_dev_write(&fp->f_dev,
+			    (recnum_t) dbtorec(&fp->f_dev, gd_sector),
+			    (io_buf_ptr_t) fp->f_gd,
+			    (mach_msg_type_number_t) fp->f_gd_size,
+			    &bytes_written);
+}
+
+/*
+ * Write the superblock back to disk.
+ */
+static int
+write_super(struct ext2fs_file *fp)
+{
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_super_block raw;
+	io_buf_len_t bytes_written;
+
+	/* Start from the full in-core superblock so fields we don't touch
+	 * (s_uuid, s_reserved_gdt_blocks, volume name, hash seed, ...) are
+	 * preserved verbatim; zeroing them corrupted the resize inode's
+	 * reserved-GDT blocks and dropped the UUID (#266).  The cpu_to_le
+	 * overrides below re-encode the mutable/structural fields for BE. */
+	raw = *fs;
+	raw.s_inodes_count = cpu_to_le32(fs->s_inodes_count);
+	raw.s_blocks_count = cpu_to_le32(fs->s_blocks_count);
+	raw.s_r_blocks_count = cpu_to_le32(fs->s_r_blocks_count);
+	raw.s_free_blocks_count = cpu_to_le32(fs->s_free_blocks_count);
+	raw.s_free_inodes_count = cpu_to_le32(fs->s_free_inodes_count);
+	raw.s_first_data_block = cpu_to_le32(fs->s_first_data_block);
+	raw.s_log_block_size = cpu_to_le32(fs->s_log_block_size);
+	raw.s_log_frag_size = cpu_to_le32(fs->s_log_frag_size);
+	raw.s_blocks_per_group = cpu_to_le32(fs->s_blocks_per_group);
+	raw.s_frags_per_group = cpu_to_le32(fs->s_frags_per_group);
+	raw.s_inodes_per_group = cpu_to_le32(fs->s_inodes_per_group);
+	raw.s_mtime = cpu_to_le32(fs->s_mtime);
+	raw.s_wtime = cpu_to_le32(fs->s_wtime);
+	raw.s_mnt_count = cpu_to_le16(fs->s_mnt_count);
+	raw.s_max_mnt_count = cpu_to_le16(fs->s_max_mnt_count);
+	raw.s_magic = cpu_to_le16(fs->s_magic);
+	raw.s_state = cpu_to_le16(fs->s_state);
+	raw.s_errors = cpu_to_le16(fs->s_errors);
+	raw.s_minor_rev_level = cpu_to_le16(fs->s_minor_rev_level);
+	raw.s_lastcheck = cpu_to_le32(fs->s_lastcheck);
+	raw.s_checkinterval = cpu_to_le32(fs->s_checkinterval);
+	raw.s_creator_os = cpu_to_le32(fs->s_creator_os);
+	raw.s_rev_level = cpu_to_le32(fs->s_rev_level);
+	raw.s_def_resuid = cpu_to_le16(fs->s_def_resuid);
+	raw.s_def_resgid = cpu_to_le16(fs->s_def_resgid);
+	if (fs->s_rev_level >= EXT2_DYNAMIC_REV) {
+		raw.s_first_ino = cpu_to_le32(fs->s_first_ino);
+		raw.s_inode_size = cpu_to_le16(fs->s_inode_size);
+		raw.s_block_group_nr = cpu_to_le16(fs->s_block_group_nr);
+		raw.s_feature_compat = cpu_to_le32(fs->s_feature_compat);
+		raw.s_feature_incompat = cpu_to_le32(fs->s_feature_incompat);
+		raw.s_feature_ro_compat = cpu_to_le32(fs->s_feature_ro_compat);
+	}
+
+	return ext2_dev_write(&fp->f_dev,
+			    (recnum_t) dbtorec(&fp->f_dev, SBLOCK),
+			    (io_buf_ptr_t) &raw,
+			    (mach_msg_type_number_t) SBSIZE,
+			    &bytes_written);
+}
+
+/*
+ * #284 phase 2 (Linux-compliant): mark the volume cleanly unmounted —
+ * set EXT2_VALID_FS in the cached superblock and flush it straight to
+ * disk (ext2_dev_write bypasses the page cache).  Inverse of the
+ * mount-time mark-dirty in mount_fs().  Called from the fs_unmount RPC
+ * at shutdown, after the final data sync.  Operates on the per-device
+ * cached superblock so no open file handle is required.
+ */
+int
+ext2fs_mark_clean_dev(struct device *dev)
+{
+	struct ext2_mount *m = ext2_get_mount(dev);
+	struct ext2fs_file tmp;
+
+	if (!m || !m->m_fs)
+		return FS_INVALID_FS;
+
+	m->m_fs->s_state |= EXT2_VALID_FS;
+
+	/* write_super() only touches f_dev + f_fs, so a stack file with
+	 * just those two fields populated is enough to flush the sb. */
+	memset(&tmp, 0, sizeof(tmp));
+	tmp.f_dev = *dev;
+	tmp.f_fs  = m->m_fs;
+	return write_super(&tmp);
+}
+
+/*
+ * Get or allocate an indirect block, then store 'value' at 'idx'.
+ * *ind_blk_p is the indirect block number (0 = must allocate).
+ * On success, *ind_blk_p is updated (if allocated), and the indirect
+ * block is written back to disk.  fp->f_ic->i_blocks is updated for
+ * newly allocated indirect blocks.
+ */
+static int
+indirect_set(struct ext2fs_file *fp, daddr_t *ind_blk_p,
+	     int idx, daddr_t value, int block_size)
+{
+	vm_offset_t ind_buf;
+	vm_size_t ind_size;
+	int rc;
+
+	if (*ind_blk_p == 0) {
+		/* Allocate the indirect block */
+		*ind_blk_p = block_alloc(fp, 0);
+		if (*ind_blk_p == 0)
+			return KERN_RESOURCE_SHORTAGE;
+		fp->f_ic->i_blocks += block_size / DEV_BSIZE;
+
+		if (vm_allocate(mach_task_self(), &ind_buf,
+				block_size, TRUE) != KERN_SUCCESS)
+			return KERN_RESOURCE_SHORTAGE;
+		memset((void *)ind_buf, 0, block_size);
+		ind_size = block_size;
+	} else {
+		rc = read_disk_block(fp, *ind_blk_p, &ind_buf, &ind_size);
+		if (rc != 0)
+			return rc;
+	}
+
+	((daddr_t *)ind_buf)[idx] = cpu_to_le32(value);
+	rc = write_disk_block(fp, *ind_blk_p, ind_buf, block_size);
+	vm_deallocate(mach_task_self(), ind_buf, ind_size);
+	return rc;
+}
+
+/*
+ * Invalidate cached indirect block at the given level if it matches blk.
+ */
+static void
+invalidate_ind_cache(struct ext2fs_file *fp, int level, daddr_t blk)
+{
+	if (level < NIADDR && fp->f_blkno[level] == blk) {
+		fp->f_blkno[level] = -1;
+		if (fp->f_blk[level]) {
+			vm_deallocate(mach_task_self(),
+				      fp->f_blk[level],
+				      fp->f_blksize[level]);
+			fp->f_blk[level] = 0;
+			fp->f_blksize[level] = 0;
+		}
+	}
+}
+
+/*
+ * Write data to a file at the given offset.
+ * Allocates new blocks as needed, extends file size.
+ */
+int
+ext2fs_write_file(
+	fs_private_t		private,
+	vm_offset_t		offset,
+	vm_offset_t		data,
+	vm_size_t		size)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	struct ext2_super_block *fs = fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	int rc;
+
+	while (size > 0) {
+		daddr_t file_block = ext2_lblkno(fs, offset);
+		int off = ext2_blkoff(fs, offset);
+		vm_size_t chunk = block_size - off;
+		daddr_t disk_block;
+
+		if (chunk > size)
+			chunk = size;
+
+		/* Resolve file block → disk block */
+		rc = block_map(fp, file_block, &disk_block);
+		if (rc != 0)
+			return rc;
+
+		if (disk_block == 0) {
+			int nindir = NINDIR(fs);
+
+			disk_block = block_alloc(fp, 0);
+			if (disk_block == 0)
+				return KERN_RESOURCE_SHORTAGE;
+
+			if (file_block < NDADDR) {
+				/* Direct block */
+				fp->f_ic->i_block[file_block] = disk_block;
+
+			} else if (file_block < NDADDR + nindir) {
+				/* Single indirect */
+				int idx = file_block - NDADDR;
+				daddr_t ind = fp->f_ic->i_block[EXT2_IND_BLOCK];
+
+				rc = indirect_set(fp, &ind, idx,
+						  disk_block, block_size);
+				if (rc != 0) return rc;
+				fp->f_ic->i_block[EXT2_IND_BLOCK] = ind;
+				invalidate_ind_cache(fp, 0, ind);
+
+			} else if (file_block < NDADDR + nindir +
+				   nindir * nindir) {
+				/* Double indirect */
+				int rem = file_block - NDADDR - nindir;
+				int idx1 = rem / nindir;
+				int idx2 = rem % nindir;
+				daddr_t dind =
+					fp->f_ic->i_block[EXT2_DIND_BLOCK];
+				daddr_t sind;
+				vm_offset_t dind_buf;
+				vm_size_t dind_size;
+
+				/* Get/alloc double-indirect block */
+				if (dind == 0) {
+					dind = block_alloc(fp, 0);
+					if (dind == 0)
+						return KERN_RESOURCE_SHORTAGE;
+					fp->f_ic->i_block[EXT2_DIND_BLOCK] =
+						dind;
+					fp->f_ic->i_blocks +=
+						block_size / DEV_BSIZE;
+				}
+
+				/* Read it to find single-indirect pointer */
+				rc = read_disk_block(fp, dind,
+						     &dind_buf, &dind_size);
+				if (rc != 0) return rc;
+				sind = le32_to_cpu(
+					((daddr_t *)dind_buf)[idx1]);
+				vm_deallocate(mach_task_self(),
+					      dind_buf, dind_size);
+
+				/* Set data block in single-indirect */
+				rc = indirect_set(fp, &sind, idx2,
+						  disk_block, block_size);
+				if (rc != 0) return rc;
+
+				/* Update double-indirect entry if sind
+				 * was just allocated */
+				rc = indirect_set(fp, &dind, idx1,
+						  sind, block_size);
+				if (rc != 0) return rc;
+				fp->f_ic->i_block[EXT2_DIND_BLOCK] = dind;
+				invalidate_ind_cache(fp, 0, sind);
+				invalidate_ind_cache(fp, 1, dind);
+
+			} else {
+				/* Triple indirect */
+				long rem = file_block - NDADDR - nindir -
+					   (long)nindir * nindir;
+				int idx1 = rem / ((long)nindir * nindir);
+				int idx2 = (rem / nindir) % nindir;
+				int idx3 = rem % nindir;
+				daddr_t tind =
+					fp->f_ic->i_block[EXT2_TIND_BLOCK];
+				daddr_t dind, sind;
+				vm_offset_t tbuf, dbuf;
+				vm_size_t tsize, dsize;
+
+				/* Get/alloc triple-indirect block */
+				if (tind == 0) {
+					tind = block_alloc(fp, 0);
+					if (tind == 0)
+						return KERN_RESOURCE_SHORTAGE;
+					fp->f_ic->i_block[EXT2_TIND_BLOCK] =
+						tind;
+					fp->f_ic->i_blocks +=
+						block_size / DEV_BSIZE;
+				}
+
+				/* Read triple to find double pointer */
+				rc = read_disk_block(fp, tind,
+						     &tbuf, &tsize);
+				if (rc != 0) return rc;
+				dind = le32_to_cpu(
+					((daddr_t *)tbuf)[idx1]);
+				vm_deallocate(mach_task_self(),
+					      tbuf, tsize);
+
+				/* Get/alloc double-indirect */
+				if (dind == 0) {
+					dind = block_alloc(fp, 0);
+					if (dind == 0)
+						return KERN_RESOURCE_SHORTAGE;
+					fp->f_ic->i_blocks +=
+						block_size / DEV_BSIZE;
+				}
+
+				/* Read double to find single pointer */
+				rc = read_disk_block(fp, dind,
+						     &dbuf, &dsize);
+				if (rc != 0) return rc;
+				sind = le32_to_cpu(
+					((daddr_t *)dbuf)[idx2]);
+				vm_deallocate(mach_task_self(),
+					      dbuf, dsize);
+
+				/* Set data block in single-indirect */
+				rc = indirect_set(fp, &sind, idx3,
+						  disk_block, block_size);
+				if (rc != 0) return rc;
+
+				/* Update double → single */
+				rc = indirect_set(fp, &dind, idx2,
+						  sind, block_size);
+				if (rc != 0) return rc;
+
+				/* Update triple → double */
+				rc = indirect_set(fp, &tind, idx1,
+						  dind, block_size);
+				if (rc != 0) return rc;
+				fp->f_ic->i_block[EXT2_TIND_BLOCK] = tind;
+				invalidate_ind_cache(fp, 0, sind);
+				invalidate_ind_cache(fp, 1, dind);
+				invalidate_ind_cache(fp, 2, tind);
+			}
+			fp->f_ic->i_blocks += block_size / DEV_BSIZE;
+		}
+
+		/* Invalidate f_buf so read path re-fetches from cache */
+		if (fp->f_buf_blkno == file_block) {
+			if (fp->f_buf) {
+				if (!fp->f_buf_borrowed)
+					vm_deallocate(mach_task_self(),
+						      fp->f_buf,
+						      fp->f_buf_size);
+				fp->f_buf = 0;
+				fp->f_buf_borrowed = 0;
+			}
+			fp->f_buf_blkno = -1;
+		}
+
+		if (off == 0 && chunk == (vm_size_t)block_size) {
+			/* Full block write — use page cache */
+			if (fp->f_dev.cache)
+				page_cache_update(fp->f_dev.cache,
+						  disk_block, data, chunk);
+			else {
+				rc = write_disk_block(fp, disk_block,
+						      data, chunk);
+				if (rc != 0)
+					return rc;
+			}
+		} else {
+			/* Partial block — read-modify-write */
+			vm_offset_t blkbuf;
+			vm_size_t blkbuf_size;
+
+			if (fp->f_dev.cache) {
+				vm_offset_t cached;
+				vm_size_t cached_size;
+
+				if (page_cache_lookup(fp->f_dev.cache,
+						      disk_block,
+						      &cached,
+						      &cached_size) == 0) {
+					/* Modify in-place via update */
+					vm_offset_t tmp;
+					if (vm_allocate(mach_task_self(),
+							&tmp, block_size,
+							TRUE) != KERN_SUCCESS)
+						return KERN_RESOURCE_SHORTAGE;
+					memcpy((void *)tmp, (void *)cached,
+					       block_size);
+					memcpy((void *)(tmp + off),
+					       (void *)data, chunk);
+					page_cache_update(fp->f_dev.cache,
+							  disk_block,
+							  tmp, block_size);
+					vm_deallocate(mach_task_self(),
+						      tmp, block_size);
+					goto next;
+				}
+			}
+
+			/* Read existing block from disk */
+			rc = read_disk_block(fp, disk_block,
+					     &blkbuf, &blkbuf_size);
+			if (rc != 0) {
+				/* New block: zero-fill */
+				if (vm_allocate(mach_task_self(), &blkbuf,
+						block_size, TRUE) != KERN_SUCCESS)
+					return KERN_RESOURCE_SHORTAGE;
+				memset((void *)blkbuf, 0, block_size);
+				blkbuf_size = block_size;
+			}
+
+			memcpy((void *)(blkbuf + off), (void *)data, chunk);
+
+			if (fp->f_dev.cache)
+				page_cache_update(fp->f_dev.cache,
+						  disk_block,
+						  blkbuf, block_size);
+			else {
+				rc = write_disk_block(fp, disk_block,
+						      blkbuf, block_size);
+			}
+			vm_deallocate(mach_task_self(), blkbuf, blkbuf_size);
+			if (rc != 0)
+				return rc;
+		}
+
+	next:
+		offset += chunk;
+		data += chunk;
+		size -= chunk;
+	}
+
+	/* Update file size if extended */
+	if (offset > fp->f_ic->i_size)
+		fp->f_ic->i_size = offset;
+
+	/* Mark inode dirty — flushed on sync or close.
+	 * gd and superblock are marked dirty in block_alloc() only
+	 * when new blocks are actually allocated.
+	 * Invalidate inode cache so future opens re-read from disk. */
+	fp->f_vnode->v_inode_dirty = 1;
+	{
+	struct ext2_mount *m = (struct ext2_mount *)fp->f_dev.mount_data;
+	if (m)
+		icache_invalidate(m, fp->f_ino);
+	}
+
+	return 0;
+}
+
+/*
+ * Flush dirty metadata to disk.  When 2+ items are dirty, batch
+ * them into a single device_write_batch IPC to save round-trips.
+ */
+int
+ext2fs_flush_metadata(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	struct ext2_super_block *fs = fp->f_fs;
+	struct ext2_vnode *vn = fp->f_vnode;
+	int n_dirty = 0;
+	int rc;
+
+	if (!vn)
+		return 0;
+
+	if (vn->v_inode_dirty) n_dirty++;
+	if (vn->v_gd_dirty) n_dirty++;
+	if (vn->v_super_dirty) n_dirty++;
+
+	if (n_dirty == 0)
+		return 0;
+
+	/* Single dirty item or no batch stub: unbatched path */
+	if (n_dirty == 1 || !ext2_dev_has_batch(&fp->f_dev)) {
+		if (vn->v_inode_dirty) {
+			rc = write_inode(vn->v_ino, fp);
+			if (rc != 0) return rc;
+			vn->v_inode_dirty = 0;
+		}
+		if (vn->v_gd_dirty) {
+			rc = write_gd(fp);
+			if (rc != 0) return rc;
+			vn->v_gd_dirty = 0;
+		}
+		if (vn->v_super_dirty) {
+			rc = write_super(fp);
+			if (rc != 0) return rc;
+			vn->v_super_dirty = 0;
+		}
+		return 0;
+	}
+
+	/*
+	 * Multiple dirty items — batch the writes into one IPC.
+	 * The inode block is cached in fp->f_inode_blk from read_inode(),
+	 * so no device_read is needed here.
+	 */
+	{
+		recnum_t recnums[3];
+		unsigned int sizes[3];
+		unsigned int n = 0;
+		unsigned int total_size = 0;
+		vm_offset_t concat;
+		unsigned int off;
+		io_buf_len_t bytes_written;
+		unsigned int inode_blk_size = EXT2_BLOCK_SIZE(fs);
+
+		/* --- Prepare inode block (serialize in-place) --- */
+		if (vn->v_inode_dirty) {
+			if (vn->v_inode_blk == 0)
+				return KERN_FAILURE;
+			serialize_inode(fp);
+
+			daddr_t inode_disk_block = ext2_ino2blk(fs,
+						fp->f_gd, vn->v_ino);
+			recnums[n] = (recnum_t)dbtorec(&fp->f_dev,
+				ext2_fsbtodb(fs, inode_disk_block));
+			sizes[n] = inode_blk_size;
+			total_size += inode_blk_size;
+			n++;
+		}
+
+		/* --- Prepare group descriptors --- */
+		if (vn->v_gd_dirty) {
+			int gd_loc = fs->s_first_data_block + 1;
+			int gd_sec = (gd_loc * EXT2_BLOCK_SIZE(fs))
+				     / DEV_BSIZE;
+			recnums[n] = (recnum_t)dbtorec(&fp->f_dev, gd_sec);
+			sizes[n] = fp->f_gd_size;
+			total_size += fp->f_gd_size;
+			n++;
+		}
+
+		/* --- Prepare superblock (little-endian raw copy) --- */
+		struct ext2_super_block raw_sb;
+		if (vn->v_super_dirty) {
+			/* Full copy first so untouched fields (uuid,
+			 * reserved_gdt_blocks, ...) survive — see write_super
+			 * (#266). */
+			raw_sb = *fs;
+			raw_sb.s_inodes_count =
+				cpu_to_le32(fs->s_inodes_count);
+			raw_sb.s_blocks_count =
+				cpu_to_le32(fs->s_blocks_count);
+			raw_sb.s_r_blocks_count =
+				cpu_to_le32(fs->s_r_blocks_count);
+			raw_sb.s_free_blocks_count =
+				cpu_to_le32(fs->s_free_blocks_count);
+			raw_sb.s_free_inodes_count =
+				cpu_to_le32(fs->s_free_inodes_count);
+			raw_sb.s_first_data_block =
+				cpu_to_le32(fs->s_first_data_block);
+			raw_sb.s_log_block_size =
+				cpu_to_le32(fs->s_log_block_size);
+			raw_sb.s_log_frag_size =
+				cpu_to_le32(fs->s_log_frag_size);
+			raw_sb.s_blocks_per_group =
+				cpu_to_le32(fs->s_blocks_per_group);
+			raw_sb.s_frags_per_group =
+				cpu_to_le32(fs->s_frags_per_group);
+			raw_sb.s_inodes_per_group =
+				cpu_to_le32(fs->s_inodes_per_group);
+			raw_sb.s_mtime =
+				cpu_to_le32(fs->s_mtime);
+			raw_sb.s_wtime =
+				cpu_to_le32(fs->s_wtime);
+			raw_sb.s_mnt_count =
+				cpu_to_le16(fs->s_mnt_count);
+			raw_sb.s_max_mnt_count =
+				cpu_to_le16(fs->s_max_mnt_count);
+			raw_sb.s_magic =
+				cpu_to_le16(fs->s_magic);
+			raw_sb.s_state =
+				cpu_to_le16(fs->s_state);
+			raw_sb.s_errors =
+				cpu_to_le16(fs->s_errors);
+			raw_sb.s_minor_rev_level =
+				cpu_to_le16(fs->s_minor_rev_level);
+			raw_sb.s_lastcheck =
+				cpu_to_le32(fs->s_lastcheck);
+			raw_sb.s_checkinterval =
+				cpu_to_le32(fs->s_checkinterval);
+			raw_sb.s_creator_os =
+				cpu_to_le32(fs->s_creator_os);
+			raw_sb.s_rev_level =
+				cpu_to_le32(fs->s_rev_level);
+			raw_sb.s_def_resuid =
+				cpu_to_le16(fs->s_def_resuid);
+			raw_sb.s_def_resgid =
+				cpu_to_le16(fs->s_def_resgid);
+			if (fs->s_rev_level >= EXT2_DYNAMIC_REV) {
+				raw_sb.s_first_ino =
+					cpu_to_le32(fs->s_first_ino);
+				raw_sb.s_inode_size =
+					cpu_to_le16(fs->s_inode_size);
+				raw_sb.s_block_group_nr =
+					cpu_to_le16(fs->s_block_group_nr);
+				raw_sb.s_feature_compat =
+					cpu_to_le32(fs->s_feature_compat);
+				raw_sb.s_feature_incompat =
+					cpu_to_le32(fs->s_feature_incompat);
+				raw_sb.s_feature_ro_compat =
+					cpu_to_le32(fs->s_feature_ro_compat);
+			}
+
+			recnums[n] = (recnum_t)dbtorec(&fp->f_dev, SBLOCK);
+			sizes[n] = SBSIZE;
+			total_size += SBSIZE;
+			n++;
+		}
+
+		/* --- Send batched write --- */
+		if (fp->f_dev.blk) {
+			/* libblk path: pass separate buffers */
+			io_buf_ptr_t data_bufs[3];
+			mach_msg_type_number_t data_sizes[3];
+			unsigned int bi = 0;
+
+			if (vn->v_inode_dirty) {
+				data_bufs[bi] = (io_buf_ptr_t)vn->v_inode_blk;
+				data_sizes[bi] = inode_blk_size;
+				bi++;
+			}
+			if (vn->v_gd_dirty) {
+				data_bufs[bi] = (io_buf_ptr_t)fp->f_gd;
+				data_sizes[bi] = fp->f_gd_size;
+				bi++;
+			}
+			if (vn->v_super_dirty) {
+				data_bufs[bi] = (io_buf_ptr_t)&raw_sb;
+				data_sizes[bi] = SBSIZE;
+				bi++;
+			}
+
+			rc = blk_write_batch(fp->f_dev.blk,
+					     recnums, data_bufs,
+					     data_sizes, n,
+					     &bytes_written);
+		} else {
+			/* Direct device_write_batch path:
+			 * concatenate into a single OOL buffer */
+			rc = vm_allocate(mach_task_self(), &concat,
+					 total_size, TRUE);
+			if (rc != KERN_SUCCESS)
+				return rc;
+
+			off = 0;
+			if (vn->v_inode_dirty) {
+				memcpy((void *)(concat + off),
+				       (void *)vn->v_inode_blk,
+				       inode_blk_size);
+				off += inode_blk_size;
+			}
+			if (vn->v_gd_dirty) {
+				memcpy((void *)(concat + off),
+				       (void *)fp->f_gd, fp->f_gd_size);
+				off += fp->f_gd_size;
+			}
+			if (vn->v_super_dirty) {
+				memcpy((void *)(concat + off),
+				       (void *)&raw_sb, SBSIZE);
+				off += SBSIZE;
+			}
+
+			rc = device_write_batch(fp->f_dev.dev_port, 0,
+						recnums, n, sizes, n,
+						(io_buf_ptr_t)concat,
+						total_size,
+						&bytes_written);
+
+			vm_deallocate(mach_task_self(), concat, total_size);
+		}
+
+		if (rc == KERN_SUCCESS) {
+			vn->v_inode_dirty = 0;
+			vn->v_gd_dirty = 0;
+			vn->v_super_dirty = 0;
+		}
+		return rc;
+	}
+}
+
+int
+ext2fs_sync(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	int rc;
+
+	rc = ext2fs_flush_metadata(private);
+	if (rc != 0)
+		return rc;
+
+	if (fp->f_dev.cache)
+		return page_cache_sync(fp->f_dev.cache);
+	return 0;
+}
+
+/* ================================================================
+ * Writable namespace (#264): create / unlink / truncate / rename.
+ *
+ * These operate on the PARENT directory: the path is split into a
+ * parent directory and a leaf name, the parent is opened via
+ * ext2fs_open_file_into() (sharing its vnode like any other opener),
+ * the directory-entry and allocation helpers above do the work, and
+ * ext2fs_close_file() flushes the parent's dirty inode / group
+ * descriptors / superblock.  Freed blocks are accounted through an fp
+ * that owns a vnode (the parent) so the dirty flags are raised.
+ * ================================================================ */
+
+/*
+ * Split an absolute path into its parent directory and leaf name.
+ * parent_out must hold at least PATH_MAX+1 bytes.  "/a/b/c" -> "/a/b"
+ * + "c"; "/x" -> "/" + "x".  *leaf_out points inside parent_out.
+ */
+static void
+split_parent_leaf(const char *path, char *parent_out, const char **leaf_out)
+{
+	char *slash;
+
+	strncpy(parent_out, path, PATH_MAX);
+	parent_out[PATH_MAX] = '\0';
+
+	slash = strrchr(parent_out, '/');
+	if (slash == NULL) {
+		/* Relative leaf, no directory part — treat parent as root. */
+		*leaf_out = path;
+		strcpy(parent_out, "/");
+		return;
+	}
+	*leaf_out = path + (slash - parent_out) + 1;
+	if (slash == parent_out)
+		parent_out[1] = '\0';	/* parent is root "/" */
+	else
+		*slash = '\0';
+}
+
+/*
+ * Write a fresh on-disk inode at 'ino'.  Only this inode's slot inside
+ * the shared inode-table block is touched.  iblock (EXT2_N_BLOCKS long,
+ * may be NULL) seeds the block map; the inode cache is invalidated so a
+ * later read_inode() picks up the new contents.
+ */
+static int
+write_new_inode(struct ext2fs_file *ctx, ino_t ino, int mode,
+		const unsigned long *iblock, unsigned long size,
+		unsigned long blocks, int links)
+{
+	struct ext2_super_block *fs = ctx->f_fs;
+	daddr_t itblk = ext2_ino2blk(fs, ctx->f_gd, ino);
+	vm_offset_t buf;
+	vm_size_t bsz;
+	struct ext2_inode *raw;
+	int rc, k;
+
+	rc = read_disk_block(ctx, itblk, &buf, &bsz);
+	if (rc != 0)
+		return rc;
+
+	raw = (struct ext2_inode *)((char *)buf +
+		ext2_itoo(fs, ino) * EXT2_INODE_SIZE(fs));
+	memset(raw, 0, EXT2_INODE_SIZE(fs));
+	raw->i_mode = cpu_to_le16(mode);
+	raw->i_links_count = cpu_to_le16(links);
+	raw->i_size = cpu_to_le32(size);
+	raw->i_blocks = cpu_to_le32(blocks);
+	if (iblock)
+		for (k = 0; k < EXT2_N_BLOCKS; k++)
+			raw->i_block[k] = cpu_to_le32(iblock[k]);
+
+	rc = write_disk_block(ctx, itblk, buf, EXT2_BLOCK_SIZE(fs));
+	vm_deallocate(mach_task_self(), buf, bsz);
+
+	{
+		struct ext2_mount *m =
+			(struct ext2_mount *)ctx->f_dev.mount_data;
+		if (m)
+			icache_invalidate(m, ino);
+	}
+	return rc;
+}
+
+/*
+ * Recursively free an indirect block tree.  level 0 = single indirect
+ * (entries are data blocks), 1 = double, 2 = triple.  Frees every block
+ * it points at and then the indirect block itself.  Returns the number
+ * of freed blocks through *freed (for i_blocks accounting).
+ */
+static void
+free_indirect_tree(struct ext2fs_file *acct, daddr_t ind_block, int level,
+		   int *freed)
+{
+	struct ext2_super_block *fs = acct->f_fs;
+	int per = EXT2_ADDR_PER_BLOCK(fs);
+	vm_offset_t buf;
+	vm_size_t bsz;
+	unsigned long *ptr;
+	int i;
+
+	if (ind_block == 0)
+		return;
+	if (read_disk_block(acct, ind_block, &buf, &bsz) != 0)
+		return;
+
+	ptr = (unsigned long *)buf;
+	for (i = 0; i < per; i++) {
+		daddr_t blk = le32_to_cpu(ptr[i]);
+		if (blk == 0)
+			continue;
+		if (level > 0)
+			free_indirect_tree(acct, blk, level - 1, freed);
+		else {
+			block_free(acct, blk);
+			(*freed)++;
+		}
+	}
+	vm_deallocate(mach_task_self(), buf, bsz);
+
+	block_free(acct, ind_block);
+	(*freed)++;
+}
+
+/*
+ * Free the data blocks of an inode whose block map is 'iblock', from
+ * logical block 'from' to the end.  Partial truncation that would have
+ * to descend into an indirect tree (from > NDADDR) is not supported and
+ * returns an error rather than risk leaking blocks.  'acct' must own a
+ * vnode so block_free() can raise the gd/superblock dirty flags.  The
+ * number of freed disk blocks is returned through *freed_sectors as a
+ * count of fs blocks (caller scales to 512-byte units for i_blocks).
+ */
+static int
+free_file_blocks(struct ext2fs_file *acct, unsigned long *iblock,
+		 daddr_t from, int *freed_blocks)
+{
+	int i;
+
+	*freed_blocks = 0;
+
+	if (from > NDADDR)
+		return KERN_FAILURE;	/* partial indirect truncate unsupported */
+
+	/* Direct blocks at or beyond 'from'. */
+	for (i = (int)from; i < NDADDR; i++) {
+		if (iblock[i]) {
+			block_free(acct, (daddr_t)iblock[i]);
+			(*freed_blocks)++;
+			iblock[i] = 0;
+		}
+	}
+
+	/* Everything from 'from' onward includes the whole indirect set. */
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR],     0, freed_blocks);
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR + 1], 1, freed_blocks);
+	free_indirect_tree(acct, (daddr_t)iblock[NDADDR + 2], 2, freed_blocks);
+	iblock[NDADDR]     = 0;
+	iblock[NDADDR + 1] = 0;
+	iblock[NDADDR + 2] = 0;
+	return 0;
+}
+
+/*
+ * Open the parent directory of 'path' into the caller-provided fp.
+ * Returns 0 with *leaf pointing at the leaf name inside leafbuf
+ * (PATH_MAX+1), or an FS_* error.  The caller must ext2fs_close_file(fp)
+ * on success.
+ */
+static int
+open_parent_dir(struct device *dev, const char *path, char *leafbuf,
+		const char **leaf, struct ext2fs_file *fp)
+{
+	fs_private_t pp;
+	int rc;
+
+	split_parent_leaf(path, leafbuf, leaf);
+	if ((*leaf)[0] == '\0')
+		return FS_INVALID_PARAMETER;
+
+	rc = ext2fs_open_file_into(dev, leafbuf, &pp, fp);
+	if (rc != 0)
+		return rc;
+	if ((fp->f_ic->i_mode & IFMT) != IFDIR) {
+		ext2fs_close_file(pp);
+		return FS_NOT_DIRECTORY;
+	}
+	return 0;
+}
+
+int
+ext2fs_create(struct device *dev, const char *path, int mode)
+{
+	struct ext2fs_file parent;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino, existing;
+	int rc, goal;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &existing) == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_INVALID_PARAMETER;	/* already exists */
+	}
+
+	goal = (parent.f_ino - 1) / parent.f_fs->s_inodes_per_group;
+	ino = inode_alloc(&parent, goal, 0);
+	if (ino == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	rc = write_new_inode(&parent, ino, IFREG | (mode & 0777), NULL, 0, 0, 1);
+	if (rc == 0)
+		rc = dir_add_entry(&parent, leaf, ino, EXT2_FT_REG_FILE);
+	if (rc != 0)
+		inode_free(&parent, ino, 0);
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return rc;
+}
+
+int
+ext2fs_unlink(struct device *dev, const char *path)
+{
+	struct ext2fs_file parent, target;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino = 0;
+	int rc, links, freed = 0;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	rc = dir_remove_entry(&parent, leaf, &ino);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* Read the target inode through a scratch fp that borrows the
+	 * parent's fs/gd/dev, then drop a link.  At zero links free its
+	 * data blocks and the inode itself — accounted on the parent fp so
+	 * the gd/superblock dirty flags are flushed on close. */
+	memset(&target, 0, sizeof(target));
+	target.f_dev = parent.f_dev;
+	target.f_fs  = parent.f_fs;
+	target.f_gd  = parent.f_gd;
+	target.f_ic  = &target.f_ic_scratch;
+
+	if (read_inode(ino, &target) == 0) {
+		links = (int)target.f_ic->i_links_count - 1;
+		if (links <= 0) {
+			free_file_blocks(&parent, target.f_ic->i_block, 0,
+					 &freed);
+			(void)write_new_inode(&parent, ino, 0, NULL, 0, 0, 0);
+			inode_free(&parent, ino, 0);
+		} else {
+			(void)write_new_inode(&parent, ino,
+				target.f_ic->i_mode, target.f_ic->i_block,
+				target.f_ic->i_size, target.f_ic->i_blocks,
+				links);
+		}
+	}
+	free_file_buffers(&target);
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return 0;
+}
+
+/*
+ * Truncate an open file to 'length'.  Only truncation to zero, or to a
+ * length still within the direct blocks, is supported; anything that
+ * would require partial indirect-tree truncation returns an error.
+ */
+int
+ext2fs_truncate_file(fs_private_t private, vm_size_t length)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	struct ext2_super_block *fs = fp->f_fs;
+	int block_size = EXT2_BLOCK_SIZE(fs);
+	daddr_t from = (length + block_size - 1) / block_size;
+	int freed = 0, rc;
+
+	if (fp->f_ic->i_size <= length)
+		return 0;	/* grow-on-truncate not handled here */
+
+	rc = free_file_blocks(fp, fp->f_ic->i_block, from, &freed);
+	if (rc != 0)
+		return rc;
+
+	fp->f_ic->i_size = length;
+	if ((unsigned long)(freed * (block_size / 512)) <= fp->f_ic->i_blocks)
+		fp->f_ic->i_blocks -= freed * (block_size / 512);
+	else
+		fp->f_ic->i_blocks = 0;
+	if (fp->f_vnode)
+		fp->f_vnode->v_inode_dirty = 1;
+	return ext2fs_flush_metadata(private);
+}
+
+int
+ext2fs_rename(struct device *dev, const char *oldpath, const char *newpath)
+{
+	struct ext2fs_file oldp, newp;
+	char oldleafbuf[PATH_MAX + 1], newleafbuf[PATH_MAX + 1];
+	const char *oldleaf, *newleaf;
+	ino_t ino = 0, dummy = 0, victim = 0;
+	int rc, file_type;
+	struct ext2fs_file tmp;
+
+	/* Resolve the source: parent dir + the inode being moved. */
+	rc = open_parent_dir(dev, oldpath, oldleafbuf, &oldleaf, &oldp);
+	if (rc != 0)
+		return rc;
+	if (search_directory((char *)oldleaf, &oldp, &ino) != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return FS_NO_ENTRY;
+	}
+
+	/* Determine the entry's file_type from the inode mode. */
+	memset(&tmp, 0, sizeof(tmp));
+	tmp.f_dev = oldp.f_dev; tmp.f_fs = oldp.f_fs; tmp.f_gd = oldp.f_gd;
+	tmp.f_ic = &tmp.f_ic_scratch;
+	file_type = EXT2_FT_REG_FILE;
+	if (read_inode(ino, &tmp) == 0 &&
+	    (tmp.f_ic->i_mode & IFMT) == IFDIR)
+		file_type = EXT2_FT_DIR;
+	free_file_buffers(&tmp);
+
+	/* Add the new name (overwriting any existing target). */
+	rc = open_parent_dir(dev, newpath, newleafbuf, &newleaf, &newp);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return rc;
+	}
+	if (search_directory((char *)newleaf, &newp, &victim) == 0) {
+		/* Destination exists — remove it first (POSIX overwrite). */
+		(void)dir_remove_entry(&newp, newleaf, &dummy);
+	}
+	rc = dir_add_entry(&newp, newleaf, ino, file_type);
+	ext2fs_close_file((fs_private_t)&newp);
+	if (rc != 0) {
+		ext2fs_close_file((fs_private_t)&oldp);
+		return rc;
+	}
+
+	/* Drop the old name. */
+	(void)dir_remove_entry(&oldp, oldleaf, &dummy);
+	ext2fs_close_file((fs_private_t)&oldp);
+	return 0;
+}
+
+int
+ext2fs_mkdir(struct device *dev, const char *path, int mode)
+{
+	struct ext2fs_file parent;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino, existing;
+	daddr_t dblk;
+	char *blk;
+	struct ext2_dir_entry *dot, *dotdot;
+	unsigned long iblock[EXT2_N_BLOCKS];
+	int rc, goal, block_size;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &existing) == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_INVALID_PARAMETER;	/* already exists */
+	}
+
+	block_size = EXT2_BLOCK_SIZE(parent.f_fs);
+	goal = (parent.f_ino - 1) / parent.f_fs->s_inodes_per_group;
+
+	ino = inode_alloc(&parent, goal, 1 /* is_dir */);
+	if (ino == 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	dblk = block_alloc(&parent, goal);
+	if (dblk == 0) {
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	/* Build the initial directory block: "." then ".." spanning the
+	 * rest of the block. */
+	blk = (char *)malloc(block_size);
+	if (!blk) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+	memset(blk, 0, block_size);
+	dot = (struct ext2_dir_entry *)blk;
+	dot->inode = cpu_to_le32((unsigned long)ino);
+	dot->rec_len = cpu_to_le16(EXT2_DIR_REC_LEN(1));
+	dot->name_len = 1;
+	dot->file_type = EXT2_FT_DIR;
+	dot->name[0] = '.';
+	dotdot = (struct ext2_dir_entry *)(blk + EXT2_DIR_REC_LEN(1));
+	dotdot->inode = cpu_to_le32((unsigned long)parent.f_ino);
+	dotdot->rec_len = cpu_to_le16(block_size - EXT2_DIR_REC_LEN(1));
+	dotdot->name_len = 2;
+	dotdot->file_type = EXT2_FT_DIR;
+	dotdot->name[0] = '.';
+	dotdot->name[1] = '.';
+	rc = write_disk_block(&parent, dblk, (vm_offset_t)blk, block_size);
+	free(blk);
+	if (rc != 0) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* The new directory inode: links_count 2 (itself via "." and the
+	 * name in the parent), one data block. */
+	memset(iblock, 0, sizeof(iblock));
+	iblock[0] = (unsigned long)dblk;
+	rc = write_new_inode(&parent, ino, IFDIR | (mode & 0777), iblock,
+			     block_size, block_size / 512, 2);
+	if (rc == 0)
+		rc = dir_add_entry(&parent, leaf, ino, EXT2_FT_DIR);
+	if (rc != 0) {
+		block_free(&parent, dblk);
+		inode_free(&parent, ino, 1);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc;
+	}
+
+	/* The parent gains a link from the child's "..". */
+	parent.f_ic->i_links_count++;
+	if (parent.f_vnode)
+		parent.f_vnode->v_inode_dirty = 1;
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return 0;
+}
+
+/*
+ * Remove an empty directory.  Refuses non-empty directories (anything
+ * beyond "." and "..").  Frees the directory's data block and inode and
+ * drops the link the child contributed to the parent.
+ */
+int
+ext2fs_rmdir(struct device *dev, const char *path)
+{
+	struct ext2fs_file parent, target;
+	char leafbuf[PATH_MAX + 1];
+	const char *leaf;
+	ino_t ino = 0;
+	int rc, freed = 0;
+	struct fs_dirent ents[4];
+	unsigned int got = 0;
+
+	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
+	if (rc != 0)
+		return rc;
+
+	if (search_directory((char *)leaf, &parent, &ino) != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NO_ENTRY;
+	}
+
+	/* Open the target and verify it is an empty directory. */
+	memset(&target, 0, sizeof(target));
+	target.f_dev = parent.f_dev;
+	target.f_fs  = parent.f_fs;
+	target.f_gd  = parent.f_gd;
+	target.f_ic  = &target.f_ic_scratch;
+	if (read_inode(ino, &target) != 0) {
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NO_ENTRY;
+	}
+	if ((target.f_ic->i_mode & IFMT) != IFDIR) {
+		free_file_buffers(&target);
+		ext2fs_close_file((fs_private_t)&parent);
+		return FS_NOT_DIRECTORY;
+	}
+	rc = ext2fs_readdir((fs_private_t)&target, ents, 4, &got);
+	if (rc != 0 || got > 2) {
+		free_file_buffers(&target);
+		ext2fs_close_file((fs_private_t)&parent);
+		return rc != 0 ? rc : FS_INVALID_PARAMETER; /* not empty */
+	}
+
+	/* Remove the name, free the directory's blocks and inode. */
+	(void)dir_remove_entry(&parent, leaf, &ino);
+	free_file_blocks(&parent, target.f_ic->i_block, 0, &freed);
+	(void)write_new_inode(&parent, ino, 0, NULL, 0, 0, 0);
+	inode_free(&parent, ino, 1);
+	free_file_buffers(&target);
+
+	/* The parent loses the link the child's ".." held. */
+	if (parent.f_ic->i_links_count > 0)
+		parent.f_ic->i_links_count--;
+	if (parent.f_vnode)
+		parent.f_vnode->v_inode_dirty = 1;
+
+	ext2fs_close_file((fs_private_t)&parent);
+	return 0;
+}

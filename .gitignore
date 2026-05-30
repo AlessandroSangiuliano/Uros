@@ -1,7 +1,7 @@
-osfmk/build/
-osfmk/build*/
+uros/build/
+uros/build*/
 MODERNIZATION_TRACKER.md
 
 .claude/
 
-osfmk/src/sysenter_test/sysenter_test.S
+uros/src/sysenter_test/sysenter_test.S

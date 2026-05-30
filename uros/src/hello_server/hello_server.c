@@ -1,0 +1,757 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+/*
+ * hello_server.c — Minimal Mach standalone server for OSFMK
+ *
+ * A port of the original Uros hello_server from Mach 4 to OSF Mach.
+ * This server demonstrates:
+ *   - Standalone Mach server startup (bootstrap_ports, printf_init)
+ *   - Port allocation and send right management
+ *   - Message receive loop
+ *   - Console I/O via the Mach device layer
+ *
+ * It can be used for testing, studying the Mach IPC system, and
+ * performance measurement.
+ */
+
+#include <mach.h>
+#include <mach/bootstrap.h>
+#include <mach/mach_port.h>
+#include <mach/message.h>
+#include <mach/cap_types.h>             /* #216 v2.1 enforcement probe */
+#include <mach/thread_switch.h>         /* SWITCH_OPTION_WAIT (Phase 4) */
+#include <mach/mach_syscalls.h>         /* syscall_thread_switch (Phase 4) */
+#include <device/device.h>
+#include <device/device_types.h>
+#include <libcap.h>                     /* #216 v2.1 enforcement probe */
+#include <mach_init.h>                  /* mach_cap_port (#216 v2.1) */
+#include <stdio.h>                      /* musl libc — Phase 3 pilot (#251) */
+#include <stdlib.h>                     /* exit family */
+#include <unistd.h>                     /* _exit() from musl */
+#include <signal.h>                     /* sigaction/raise — Phase 4 (#252) */
+#include <pthread.h>                    /* pthread — Phase 6a (#256) */
+#include <sys/wait.h>                   /* waitpid — Phase 5 (#254) */
+#include <fcntl.h>                      /* open/O_* — Phase 3 fd layer (#262) */
+#include <sys/stat.h>                   /* fstat/struct stat — (#262) */
+#include <string.h>                     /* memcmp/strlen — (#262) */
+#include <uros/libposix.h>
+
+/*
+ * Phase 4 (#252) smoke: SIGUSR1 handler.  File scope so taking its
+ * address doesn't trigger a nested-function trampoline (we link with
+ * a non-executable stack).
+ */
+static volatile int hello_handler_fired;
+static void
+hello_sigusr1(int s)
+{
+    hello_handler_fired = s;
+    printf("(hello_server): handler fired for signo=%d\n", s);
+}
+
+/*
+ * Phase 6a smoke (#256): the pthread worker writes its argument
+ * back via a shared "answer" slot, prints a line, and returns.
+ */
+static volatile int hello_pthread_answer;
+static void *
+hello_pthread_worker(void *arg)
+{
+    int v = (int)(uintptr_t)arg;
+    printf("(hello_server)[pthread]: hello from worker, arg=%d\n", v);
+    hello_pthread_answer = v + 100;
+    return (void *)(uintptr_t)(v + 100);
+}
+
+/*
+ * Phase 3 (#262): end-to-end POSIX file I/O smoke.  Exercises the new
+ * libposix-uros fd layer (open/read/lseek/fstat/close) over libvfs.
+ * Runs AFTER bootstrap_completed, so ext_server has a chance to mount
+ * "/"; we retry open() while it comes up, yielding to let the fs task
+ * run.  /posix_smoke.txt is a read-only fixture seeded by
+ * make-disk-image.sh — kept separate from /hello.txt (which disk_bench
+ * uses as a write scratch file) so the check passes on a non-fresh disk.
+ */
+static void
+hello_posix_fs_smoke(void)
+{
+    static const char expect[] = "libposix-uros POSIX fd layer smoke\n";
+    const char *path = "/posix_smoke.txt";
+    int fd = -1;
+
+    for (int t = 0; t < 400 && fd < 0; t++) {
+        fd = open(path, O_RDONLY);
+        if (fd < 0)
+            (void)syscall_thread_switch(MACH_PORT_NULL,
+                                        SWITCH_OPTION_WAIT, 25);
+    }
+    if (fd < 0) {
+        printf("(hello_server): POSIX fs smoke SKIP — %s not mountable\n",
+               path);
+        return;
+    }
+    printf("(hello_server): POSIX open(%s) -> fd=%d\n", path, fd);
+
+    char buf[64];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    if (n < 0) {
+        printf("(hello_server): POSIX read failed\n");
+        close(fd);
+        return;
+    }
+    buf[n] = '\0';
+    int match = ((size_t)n == sizeof(expect) - 1)
+                && memcmp(buf, expect, n) == 0;
+    printf("(hello_server): POSIX read %d bytes: \"%s\" -> %s\n",
+           (int)n, buf, match ? "MATCH" : "MISMATCH");
+
+    struct stat st;
+    if (fstat(fd, &st) == 0)
+        printf("(hello_server): POSIX fstat size=%u mode=0%o\n",
+               (unsigned)st.st_size, (unsigned)st.st_mode);
+    else
+        printf("(hello_server): POSIX fstat failed\n");
+
+    off_t back = lseek(fd, 0, SEEK_SET);
+    char c = 0;
+    ssize_t r2 = read(fd, &c, 1);
+    printf("(hello_server): POSIX lseek->%d, reread byte='%c' (r2=%d)\n",
+           (int)back, (r2 == 1 ? c : '?'), (int)r2);
+
+    close(fd);
+    printf("(hello_server): POSIX fs smoke %s\n",
+           match ? "PASS" : "FAIL");
+}
+
+/*
+ * Phase 3 (#262 step 2): fork() must hand the child working copies of
+ * the parent's open fds.  Open a file, advance the parent's offset, then
+ * fork: the child reads the same fd (proving the fs_server send right was
+ * inherited) from its own CoW'd offset.  Child reports via exit status so
+ * the result is unambiguous regardless of console interleaving.
+ */
+static void
+hello_posix_fork_fd_smoke(void)
+{
+    const char *path = "/posix_smoke.txt";
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("(hello_server): fork-fd smoke SKIP — open(%s) failed\n",
+               path);
+        return;
+    }
+    /* Parent advances to offset 4 so the child's independent (CoW'd)
+     * offset is observable rather than shared. */
+    char hdr[4];
+    (void)read(fd, hdr, sizeof hdr);
+
+    int pid = fork();
+    if (pid < 0) {
+        printf("(hello_server): fork-fd smoke fork() failed\n");
+        close(fd);
+        return;
+    }
+    if (pid == 0) {
+        /* Child: the inherited fd must be readable. */
+        char cb[64];
+        ssize_t cn = read(fd, cb, sizeof cb - 1);
+        _exit(cn > 0 ? 0 : 1);
+    }
+
+    int status = 0;
+    int wr = waitpid(pid, &status, 0);
+    int child_ok = (wr == pid) && WIFEXITED(status)
+                   && WEXITSTATUS(status) == 0;
+    close(fd);
+    printf("(hello_server): fork-fd smoke %s (child status=0x%x)\n",
+           child_ok ? "PASS" : "FAIL", status);
+}
+
+/*
+ * Phase 3 (#262 step 3): fds must survive exec.  Open a file, then
+ * spawn /fd_exec_test — a musl binary that reads the inherited fd 3 and
+ * exits 0 on the expected content.  __uros_spawn is exactly the exec
+ * path (load + suspended thread + fd handoff + resume) minus the
+ * caller's suicide, so it isolates the fd-handoff mechanism: serialise
+ * the surviving fds -> insert their fs_server send rights into the
+ * suspended new task -> vm_write the table -> resume -> the new image's
+ * __uros_absorb_inherited_fds rebuilds the fd table before main.
+ *
+ * Note: the fork()+execve() combination additionally needs task_create
+ * to accept a forked task as the exec parent, which currently fails with
+ * KERN_INVALID_ARGUMENT — a separate fork/exec limitation tracked apart
+ * from this fd-handoff work.
+ */
+static void
+hello_posix_exec_fd_smoke(void)
+{
+    extern int __uros_spawn(const char *path,
+                            char *const argv[], char *const envp[],
+                            mach_port_t *out_task,
+                            mach_port_t *out_thread,
+                            unsigned int *out_pid,
+                            int replace_self);
+    extern int __uros_waitpid(int pid, int *status, int options);
+
+    const char *path = "/posix_smoke.txt";
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("(hello_server): exec-fd smoke SKIP — open(%s) failed\n",
+               path);
+        return;
+    }
+    /* fd is 3 (lowest free); fd_exec_test reads fd 3 explicitly. */
+    char *av[] = { (char *)"fd_exec_test", NULL };
+    char *ev[] = { NULL };
+    unsigned int child_pid = 0;
+    int sr = __uros_spawn("/fd_exec_test", av, ev, NULL, NULL, &child_pid,
+                          0 /* spawn a child, keep our own pid */);
+    if (sr != 0) {
+        printf("(hello_server): exec-fd smoke spawn failed: %d\n", sr);
+        close(fd);
+        return;
+    }
+
+    int status = 0;
+    int wr = __uros_waitpid((int)child_pid, &status, 0);
+    int child_ok = (wr == (int)child_pid) && WIFEXITED(status)
+                   && WEXITSTATUS(status) == 0;
+    close(fd);
+    printf("(hello_server): exec-fd smoke %s (child status=0x%x)\n",
+           child_ok ? "PASS" : "FAIL", status);
+}
+
+/*
+ * Global ports — obtained at startup.
+ */
+static mach_port_t	host_port;
+static mach_port_t	device_port;
+static mach_port_t	security_port;
+static mach_port_t	root_ledger_wired;
+static mach_port_t	root_ledger_paged;
+
+/*
+ * Our service port — clients can send messages here.
+ */
+static mach_port_t	hello_port;
+
+/*
+ * Message IDs for our simple protocol.
+ */
+#define HELLO_MSG_PING		1000
+#define HELLO_MSG_PONG		1001
+#define HELLO_MSG_SHUTDOWN	1002
+
+/*
+ * Generic message buffer for receive.
+ */
+typedef struct {
+    mach_msg_header_t	head;
+    char		body[256];
+} hello_msg_t;
+
+/*
+ * enumerate_ports — list all ports in the current task.
+ * Reproduces the mach_port_names() enumeration from the Mach4 version.
+ */
+static void
+enumerate_ports(void)
+{
+    kern_return_t		kr;
+    mach_port_array_t		names;
+    mach_msg_type_number_t	names_count;
+    mach_port_type_array_t	types;
+    mach_msg_type_number_t	types_count;
+    unsigned int		i;
+
+    kr = mach_port_names(mach_task_self(),
+			 &names, &names_count,
+			 &types, &types_count);
+    if (kr != KERN_SUCCESS) {
+	printf("(hello_server): mach_port_names failed: %d\n", kr);
+	return;
+    }
+
+    printf("(hello_server): task has %d ports:\n", names_count);
+    for (i = 0; i < names_count; i++) {
+	printf("  port %d: name=0x%x type=0x%x\n",
+	       i, names[i], types[i]);
+    }
+}
+
+/*
+ * check_port_status — verify our hello_port has the expected rights.
+ */
+static void
+check_port_status(mach_port_t port)
+{
+    kern_return_t		kr;
+    mach_port_type_t		ptype;
+
+    kr = mach_port_type(mach_task_self(), port, &ptype);
+    if (kr != KERN_SUCCESS) {
+	printf("(hello_server): port 0x%x not valid: %d\n", port, kr);
+    } else {
+	printf("(hello_server): port 0x%x type=0x%x%s%s%s\n",
+	       port, ptype,
+	       (ptype & MACH_PORT_TYPE_RECEIVE) ? " RECV" : "",
+	       (ptype & MACH_PORT_TYPE_SEND)    ? " SEND" : "",
+	       (ptype & MACH_PORT_TYPE_SEND_ONCE) ? " SONCE" : "");
+    }
+}
+
+/*
+ * message_loop — sit in a receive loop and handle incoming messages.
+ */
+static void
+message_loop(void)
+{
+    kern_return_t	kr;
+    hello_msg_t		msg;
+    int			running = 1;
+
+    printf("(hello_server): entering message loop on port 0x%x\n",
+	   hello_port);
+
+    while (running) {
+	kr = mach_msg(&msg.head,
+		      MACH_RCV_MSG,
+		      0,			/* send size */
+		      sizeof(msg),		/* receive limit */
+		      hello_port,		/* receive port */
+		      MACH_MSG_TIMEOUT_NONE,
+		      MACH_PORT_NULL);
+
+	if (kr != MACH_MSG_SUCCESS) {
+	    printf("(hello_server): mach_msg receive failed: %d\n", kr);
+	    continue;
+	}
+
+	printf("(hello_server): received msg id=%d from port=0x%x\n",
+	       msg.head.msgh_id, msg.head.msgh_remote_port);
+
+	switch (msg.head.msgh_id) {
+	case HELLO_MSG_PING:
+	    printf("(hello_server): PING received\n");
+	    break;
+
+	case HELLO_MSG_SHUTDOWN:
+	    printf("(hello_server): SHUTDOWN received, exiting\n");
+	    running = 0;
+	    break;
+
+	default:
+	    printf("(hello_server): unknown msg id %d\n",
+		   msg.head.msgh_id);
+	    break;
+	}
+    }
+}
+
+int
+main(int argc, char **argv)
+{
+    kern_return_t	kr;
+    int			i;
+
+    /*
+     * musl TLS + stack canary are now brought up by __uros_libc_init()
+     * from crt0 (libmach_core) BEFORE main() runs (#259) — main()'s own
+     * %gs:0x14 canary prologue depends on it, so it can't live here.
+     *
+     * setvbuf disables stdout buffering: musl's isatty() returns -ENOTTY
+     * from our ioctl stub, which makes musl fall back to fully-buffered
+     * mode — every line then sits in a 1 KB FILE buffer waiting for an
+     * explicit fflush that hello_server never issues (it lives forever in
+     * the IPC loop).  Phase 4 will introduce a real char_server ioctl that
+     * reports TTY status; until then, unbuffered output is the honest
+     * choice for a debug server.
+     */
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    /*
+     * Step 1: Get privileged ports from the bootstrap server.
+     *
+     * On Mach 4 this was:
+     *   get_privileged_ports(&host_port, &device_port);
+     *
+     * On OSF Mach, bootstrap_ports() is a MIG routine that also
+     * returns ledger and security ports.
+     */
+    kr = bootstrap_ports(bootstrap_port,
+			 &host_port,
+			 &device_port,
+			 &root_ledger_wired,
+			 &root_ledger_paged,
+			 &security_port);
+    if (kr != KERN_SUCCESS) {
+	/* Can't printf yet — no console.  Just exit. */
+	_exit(1);
+    }
+
+    /*
+     * Step 2/3 (was printf_init + panic_init): no longer needed under the
+     * musl path — printf goes directly through SYS_write to mach_print,
+     * and panic() isn't linked from libmach_core (the file is excluded;
+     * abort()/_Exit() from musl take its place).  See #251.
+     */
+
+    /*
+     * Step 4: We have a console — say hello!
+     */
+    printf("(hello_server): started, argc=%d\n", argc);
+    for (i = 0; i < argc; i++)
+	printf("(hello_server): argv[%d]='%s'\n", i, argv[i]);
+
+    printf("(hello_server): host_port=0x%x device_port=0x%x "
+	   "bootstrap_port=0x%x\n",
+	   host_port, device_port, bootstrap_port);
+
+    /*
+     * Phase 4b (#253): if the operator passed "crash" as an argv,
+     * fault deliberately to validate the Mach exception → POSIX
+     * signal path.  Normal boot doesn't, so this is a no-op for
+     * the regular smoke.
+     */
+    /*
+     * Phase 4b crash-path is opt-in via an UROS_CRASH_SMOKE build
+     * define — keeping the source unchanged here makes the normal
+     * smoke deterministic.  See exc.c / hw exception path in
+     * libposix-uros.  The opt-in mechanism was kept simple: a
+     * one-liner #ifdef wrapper that maintainers can re-add when they
+     * want to exercise the exception path locally.
+     */
+    for (int j = 1; j < argc; j++) {
+        const char *a = argv[j];
+        /* Manual strcmp — pick the last path component if argv was
+         * mangled by bootstrap (e.g. argv[0] is the full ELF path). */
+        const char *base = a;
+        for (const char *p = a; *p; p++) if (*p == '/') base = p + 1;
+        if (base[0] == 'c' && base[1] == 'r' && base[2] == 'a'
+            && base[3] == 's' && base[4] == 'h' && base[5] == '\0') {
+            printf("(hello_server): --crash requested, dereferencing NULL\n");
+            *(volatile int *)0 = 42;
+            printf("(hello_server): unreachable\n");
+        }
+    }
+
+    /*
+     * Step 4.5 (Phase 4 / #252): exercise the new POSIX signal path.
+     * sigaction() registers the handler in libposix-uros's table, then
+     * raise() takes the long way round — musl raise → SYS_tkill →
+     * __uros_kill → proc_kill RPC → proc_server posts proc_signal_msg
+     * on our signal_port → libposix-uros's handler thread receives it
+     * and calls hello_sigusr1.  Anything visible on the console proves
+     * the full client+server signal loop works end-to-end.
+     */
+    extern unsigned int __uros_my_pid;
+    printf("(hello_server): signals: pid=%u\n", __uros_my_pid);
+    {
+        struct sigaction sa = { 0 };
+        sa.sa_handler = hello_sigusr1;
+        if (sigaction(SIGUSR1, &sa, NULL) != 0)
+            printf("(hello_server): sigaction(SIGUSR1) failed\n");
+        else
+            printf("(hello_server): sigaction(SIGUSR1) installed\n");
+
+        if (raise(SIGUSR1) != 0)
+            printf("(hello_server): raise(SIGUSR1) failed\n");
+        /* Yield long enough for the handler thread to pick up the msg
+         * and run the handler before we move on. */
+        for (int j = 0; j < 50 && !hello_handler_fired; j++)
+            (void)syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+        printf("(hello_server): handler_fired=%d\n", hello_handler_fired);
+    }
+
+    /*
+     * #234 Phase 7: spawn the first DYNAMIC binary (/hello_dyn, ET_DYN
+     * with PT_INTERP=/lib/ld-musl-i386.so.1).  exec_server maps it + the
+     * interpreter (the umbrella libc.so); ld-musl self-relocates, relocates
+     * the program, runs musl startup and reaches main(), which mach_print's.
+     * Same spawn+observe+terminate dance as hello_exec below.
+     */
+    {
+        extern int __uros_spawn(const char *path, char *const argv[],
+                                char *const envp[], mach_port_t *out_task,
+                                mach_port_t *out_thread, unsigned int *out_pid,
+                                int replace_self);
+        extern int __uros_waitpid(int pid, int *status, int options);
+        char *dyn_argv[] = { (char *)"hello_dyn", NULL };
+        char *dyn_envp[] = { NULL };
+        mach_port_t  dt = MACH_PORT_NULL, dth = MACH_PORT_NULL;
+        unsigned int dpid = 0;
+        int dr = __uros_spawn("/hello_dyn", dyn_argv, dyn_envp,
+                              &dt, &dth, &dpid, 0 /* spawn child */);
+        if (dr != 0) {
+            printf("(hello_server): __uros_spawn(/hello_dyn) failed: %d\n", dr);
+        } else {
+            printf("(hello_server): spawned /hello_dyn pid=%u task=0x%x\n",
+                   dpid, (unsigned)dt);
+            for (int j = 0; j < 60; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL,
+                                            SWITCH_OPTION_WAIT, 20);
+            (void)task_terminate(dt);
+            int dst = 0;
+            (void)__uros_waitpid((int)dpid, &dst, 0);
+        }
+    }
+
+    /*
+     * #234 Phase 7 incr 4: spawn /dlopen_test, the dlopen end-to-end
+     * smoke test.  Same spawn+observe+terminate pattern as hello_dyn
+     * above; runs after it so the umbrella libc.so is proven to bring
+     * a fresh task up before we ask it to dlopen a second .so.
+     */
+    {
+        extern int __uros_spawn(const char *path, char *const argv[],
+                                char *const envp[], mach_port_t *out_task,
+                                mach_port_t *out_thread, unsigned int *out_pid,
+                                int replace_self);
+        extern int __uros_waitpid(int pid, int *status, int options);
+        char *dl_argv[] = { (char *)"dlopen_test", NULL };
+        char *dl_envp[] = { NULL };
+        mach_port_t  dlt = MACH_PORT_NULL, dlth = MACH_PORT_NULL;
+        unsigned int dlpid = 0;
+        int dlr = __uros_spawn("/dlopen_test", dl_argv, dl_envp,
+                               &dlt, &dlth, &dlpid, 0 /* spawn child */);
+        if (dlr != 0) {
+            printf("(hello_server): __uros_spawn(/dlopen_test) failed: %d\n",
+                   dlr);
+        } else {
+            printf("(hello_server): spawned /dlopen_test pid=%u task=0x%x\n",
+                   dlpid, (unsigned)dlt);
+            for (int j = 0; j < 60; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL,
+                                            SWITCH_OPTION_WAIT, 20);
+            (void)task_terminate(dlt);
+            int dlst = 0;
+            (void)__uros_waitpid((int)dlpid, &dlst, 0);
+        }
+    }
+
+    /*
+     * Step 4.6 (Phase 5 / #254): spawn /hello_exec via the new
+     * __uros_spawn primitive and waitpid for it.  __uros_spawn is the
+     * same path execve() uses, but called explicitly here so we don't
+     * have to suicide before we can observe the child finish.
+     */
+    {
+        extern int  __uros_spawn(const char *path,
+                                 char *const argv[], char *const envp[],
+                                 mach_port_t *out_task,
+                                 mach_port_t *out_thread,
+                                 unsigned int *out_pid,
+                                 int replace_self);
+        extern int  __uros_waitpid(int pid, int *status, int options);
+
+        char *argv_v[] = { (char *)"hello_exec", NULL };
+        char *envp_v[] = { NULL };
+        mach_port_t  child_task = MACH_PORT_NULL;
+        mach_port_t  child_thread = MACH_PORT_NULL;
+        unsigned int child_pid = 0;
+        int sr = __uros_spawn("/hello_exec", argv_v, envp_v,
+                              &child_task, &child_thread, &child_pid,
+                              0 /* spawn child */);
+        /*
+         * Phase 5b (#255): fork() smoke.  Child prints once and
+         * _exit(7); parent waitpid's and checks the encoded status.
+         */
+        extern int __uros_fork(void);
+        int forked_pid = __uros_fork();
+        if (forked_pid < 0) {
+            printf("(hello_server): fork() failed: %d\n", forked_pid);
+        } else if (forked_pid == 0) {
+            printf("(hello_server)[child]: hello from forked child, pid=%u\n",
+                   __uros_my_pid);
+            printf("(hello_server)[child]: about to _exit(7)\n");
+            _exit(7);
+        } else {
+            printf("(hello_server): fork() -> child_pid=%d\n", forked_pid);
+            int fst = 0;
+            int fwr = __uros_waitpid(forked_pid, &fst, 0);
+            if (fwr < 0)
+                printf("(hello_server): waitpid(forked) failed: %d\n", fwr);
+            else
+                printf("(hello_server): waitpid(forked) -> pid=%d status=0x%x\n",
+                       fwr, fst);
+        }
+
+        /*
+         * #269 reproducer: fork() + execve() in child.  Drives the
+         * kernel diagnostic prints in task_create / ref_task_port_locked.
+         */
+        printf("(hello_server): #269 repro — fork+execve\n");
+        int xpid = __uros_fork();
+        if (xpid < 0) {
+            printf("(hello_server): #269 fork() failed: %d\n", xpid);
+        } else if (xpid == 0) {
+            printf("(hello_server)[fxchild]: pid=%u, calling execve\n",
+                   __uros_my_pid);
+            char *xav[] = { (char *)"hello_exec", NULL };
+            char *xev[] = { NULL };
+            extern int __uros_execve(const char *p, char *const a[],
+                                     char *const e[]);
+            int er = __uros_execve("/hello_exec", xav, xev);
+            printf("(hello_server)[fxchild]: execve returned %d\n", er);
+            _exit(11);
+        } else {
+            int xst = 0;
+            int xwr = __uros_waitpid(xpid, &xst, 0);
+            printf("(hello_server): #269 waitpid -> wr=%d status=0x%x\n",
+                   xwr, xst);
+        }
+
+        /*
+         * Phase 6a (#256): pthread infrastructure (set_thread_area +
+         * clone + futex) landed but pthread_create runtime hangs in
+         * the post-clone setup — Phase 6b will dig into the clone/
+         * futex race once we have a proper kernel-side "activate LDT"
+         * primitive (today we yield to force a context switch, which
+         * works for the main thread but not yet for newly-created
+         * Mach threads coming in from thread_create_running).
+         */
+#ifdef UROS_PTHREAD_SMOKE
+        {
+            pthread_t worker_tid;
+            int pr = pthread_create(&worker_tid, NULL,
+                                    hello_pthread_worker,
+                                    (void *)(uintptr_t)42);
+            if (pr != 0) {
+                printf("(hello_server): pthread_create failed: %d\n", pr);
+            } else {
+                printf("(hello_server): pthread_create OK\n");
+                void *ret = NULL;
+                int jr = pthread_join(worker_tid, &ret);
+                printf("(hello_server): pthread_join rc=%d ret=%d answer=%d\n",
+                       jr, (int)(uintptr_t)ret, hello_pthread_answer);
+            }
+        }
+#endif
+
+        if (sr != 0) {
+            printf("(hello_server): __uros_spawn(/hello_exec) failed: %d\n", sr);
+        } else {
+            printf("(hello_server): spawned /hello_exec pid=%u task=0x%x\n",
+                   child_pid, (unsigned)child_task);
+            /* hello_exec is a Mach-level test program that mach_print's
+             * its AUXV and then spins forever, expecting the parent to
+             * kill it.  Give it a beat to print, then task_terminate;
+             * proc_server's dead-name handler will mark pid zombie and
+             * unblock our waitpid via proc_subscribe_exit. */
+            for (int j = 0; j < 30; j++)
+                (void)syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 20);
+            (void)task_terminate(child_task);
+            int status = 0;
+            int wr = __uros_waitpid((int)child_pid, &status, 0);
+            if (wr < 0)
+                printf("(hello_server): waitpid failed: %d\n", wr);
+            else
+                printf("(hello_server): waitpid -> pid=%d status=0x%x\n",
+                       wr, status);
+        }
+    }
+
+    /*
+     * Step 5: Allocate our service port.
+     *
+     * On Mach 4, the original used a hardcoded HELLO_SERVER_PORT
+     * with mach_port_allocate_name().  On OSF Mach we allocate
+     * dynamically — the port name is assigned by the kernel.
+     */
+    kr = mach_port_allocate(mach_task_self(),
+			    MACH_PORT_RIGHT_RECEIVE,
+			    &hello_port);
+    if (kr != KERN_SUCCESS) {
+	printf("(hello_server): port allocate failed: %d\n", kr);
+	_exit(1);
+    }
+
+    /* Make a send right so others could send to us */
+    kr = mach_port_insert_right(mach_task_self(),
+				hello_port, hello_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+	printf("(hello_server): insert send right failed: %d\n", kr);
+	_exit(1);
+    }
+
+    printf("(hello_server): allocated service port 0x%x\n", hello_port);
+
+    /*
+     * Step 6: Enumerate all ports in our task (diagnostic).
+     */
+    enumerate_ports();
+    check_port_status(hello_port);
+
+    /*
+     * Step 6.5: #216 v2.1 enforcement probe.  hello_server's manifest
+     * declares zero caps_required, so any cap_request must come back
+     * as CAP_ERR_NOT_IN_MANIFEST (2413) when the per-task cap_port is
+     * in use.  When TASK_CAP_PORT isn't set (bootstrap without a
+     * manifest, or pre-#216 bootstrap), we expect CAP_ERR_NONE
+     * because the legacy well-known path is permissive — that's a
+     * cleanly reportable state, not a failure.
+     */
+    {
+	struct uros_cap probe;
+	kern_return_t pk;
+
+	printf("(hello_server): manifest enforcement probe — "
+	       "mach_cap_port=0x%x\n", mach_cap_port);
+	pk = cap_request(RESOURCE_BLK_DEVICE, 0xdeadbeefULL,
+			 CAP_OP_BLK_READ, 0, &probe);
+	if (pk == CAP_ERR_NOT_IN_MANIFEST) {
+	    printf("(hello_server): probe -> CAP_ERR_NOT_IN_MANIFEST "
+		   "— enforcement WORKS\n");
+	} else if (pk == KERN_SUCCESS) {
+	    printf("(hello_server): probe -> KERN_SUCCESS "
+		   "(legacy permissive path)\n");
+	} else {
+	    printf("(hello_server): probe -> kr=%d (unexpected)\n", pk);
+	}
+    }
+
+    /*
+     * Step 7: Tell the bootstrap we're done initializing.
+     * This unblocks loading of subsequent servers (if serialized).
+     */
+    bootstrap_completed(bootstrap_port, mach_task_self());
+
+    printf("(hello_server): bootstrap_completed, entering message loop\n");
+
+    /*
+     * Step 7.5 (Phase 3 / #262): POSIX file I/O smoke over libvfs.
+     * Done after bootstrap_completed so ext_server can mount "/".
+     */
+    hello_posix_fs_smoke();
+    hello_posix_fork_fd_smoke();
+    hello_posix_exec_fd_smoke();
+
+    /*
+     * Step 8: Message receive loop.
+     */
+    message_loop();
+
+    printf("(hello_server): exiting\n");
+    return 0;
+}

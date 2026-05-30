@@ -1,0 +1,12 @@
+# dlopen_test manifest — Uros #234 Phase 7 increment 4.
+#
+# Like hello_dyn, dlopen_test never calls cap_request directly; the
+# resources it touches (vfs.open on /lib/libfoo.so, vm_map of the
+# segments) are mediated through the cap fs path that already gates
+# library loading.  Present so exec_server's cap_provision is
+# exercised for this dynamic image too.
+
+name dlopen_test
+
+# No `required` lines.
+# No `delegatable` lines.

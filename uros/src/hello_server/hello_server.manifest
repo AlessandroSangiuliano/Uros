@@ -1,0 +1,13 @@
+# hello_server manifest — Uros #216 v2.1 pilot.
+#
+# hello_server is the canonical test/demo server: it allocates a
+# receive port, registers via netname, runs a Mach message loop.
+# It never calls cap_request / cap_acquire, so the legitimate cap
+# set is empty.  A non-empty cap_acquire from this task means
+# something broke or a test is trying to probe denial — both should
+# come back as CAP_ERR_NOT_IN_MANIFEST under v2.1 enforcement.
+
+name hello_server
+
+# No `required` lines — empty caps_required.
+# No `delegatable` lines — empty caps_delegatable.

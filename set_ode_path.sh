@@ -1,7 +1,7 @@
 :
 
 # path to mig, makeboot, etc.
-PATH=/usr/src/DR3/osfmk/tools/ppc/ppc_linux/hostbin:$PATH
+PATH=/usr/src/DR3/uros/tools/ppc/ppc_linux/hostbin:$PATH
 
 # The concept here is that if you are in the ODE environment, then
 # you have the ODE tools earlier in your path.  You will then get the
