@@ -1,0 +1,46 @@
+#!/usr/bin/expect -f
+#
+# diag293-mach.exp — #293 investigation harness.
+#
+# Boots Uros minimal, launches /flipc_bench -M 60 (Mach OOL fast-path
+# disabled) and captures the kernel's [#293] instrumentation lines from
+# vm_map_copyout, then the crash signature, until the guest goes silent
+# (panic/reboot) or 4 minutes elapse.
+#
+# Author: Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+# License: MIT
+
+set BOOT_TIMEOUT  180
+set BENCH_TIMEOUT 240
+set REPO_ROOT     [file dirname [file dirname [file normalize $argv0]]]
+set RUN_QEMU      "$REPO_ROOT/scripts/run-qemu.sh"
+
+log_user 1
+set timeout $BOOT_TIMEOUT
+
+spawn $RUN_QEMU --minimal --allow-reboot -display none -serial mon:stdio
+
+expect {
+    "ush\$ "  { send_user "\n\[diag293\] ush prompt OK\n" }
+    timeout   { send_user "\n\[diag293\] FAIL: no ush prompt\n"; exit 1 }
+}
+
+set timeout $BENCH_TIMEOUT
+send "/flipc_bench -M 60\r"
+
+expect {
+    -re "flipc_bench: mach-path read diag done" {
+        send_user "\n\[diag293\] flipc_bench completed (no crash!)\n"
+    }
+    -re "ush\$ " {
+        send_user "\n\[diag293\] back at prompt (bench finished or crashed)\n"
+    }
+    timeout {
+        send_user "\n\[diag293\] timeout — bench likely hung or panicked silently\n"
+    }
+}
+
+# Give the kernel a moment to flush any tail output, then quit.
+sleep 2
+send "\x01x"
+expect eof
