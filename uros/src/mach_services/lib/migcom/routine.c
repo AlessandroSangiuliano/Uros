@@ -824,6 +824,17 @@ static ipc_flags_t
 rtProcessDeallocFlag(register ipc_type_t *it, register ipc_flags_t flags, register arg_kind_t kind, dealloc_t *what, string_t name)
 {
 
+    /* UserDealloc (#298): same semantics as Dealloc for userspace server
+     * stubs, but a no-op for in-kernel server stubs.  We resolve it here
+     * so the rest of the function never has to know about it: in user
+     * mode we promote it to flDealloc, in kernel mode we just strip it. */
+
+    if (flags & flUserDealloc) {
+	flags &= ~flUserDealloc;
+	if (!IsKernelServer)
+	    flags |= flDealloc;
+    }
+
     /* only one of flDealloc, flNotDealloc, flMaybeDealloc */
 
     if (flags & flMaybeDealloc) {

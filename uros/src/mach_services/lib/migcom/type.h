@@ -136,6 +136,17 @@ typedef u_int ipc_flags_t;
 #define	flRetCode	 (0x80)	/* RetCode specified */
 #define	flAuto		(0x100)	/* Will not be referenced by server after RPC */
 #define	flConst		(0x200)	/* Will not be modified by server during RPC */
+#define	flUserDealloc	(0x400)	/* UserDealloc: Dealloc when generating a
+				 * userspace server stub, ignored when
+				 * generating an in-kernel server stub (#298).
+				 * Use for OOL outs on .defs files that are
+				 * shared between a userspace server (which
+				 * vm_allocate's a fresh reply buffer each
+				 * call) and an in-kernel server (which
+				 * manages its own buffer lifecycle through
+				 * kmem_io_map / continuations and would be
+				 * harmed by a vm_map_copyin src_destroy=TRUE
+				 * on an address outside kernel_map). */
 
 typedef enum dealloc {
 	d_NO,			/* do not deallocate */
