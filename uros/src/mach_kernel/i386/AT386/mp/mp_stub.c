@@ -35,6 +35,7 @@
 #include <kern/misc_protos.h>
 #include <kern/cpu_data.h>	/* current_cpu_id() (#301) */
 #include <vm/vm_kern.h>		/* kmem_alloc (#308) */
+#include <i386/cpu_number.h>	/* cpu_number() (#304) */
 #include <i386/lapic.h>		/* lapic_enable / lapic_send_ipi (#302) */
 #include <i386/mp_desc.h>	/* mp_desc_table / interrupt_stack (#308) */
 #include <i386/pic.h>		/* NINTR */
@@ -64,14 +65,22 @@ vm_offset_t	lapic_start;
  * answering 1. */
 
 /*
- * cpu_interrupt() — send an IPI to `cpu` (typically using cpu_int_word
- * to encode the reason).  With no APs awake this is a no-op.  Replaced
- * by the real LAPIC ICR-driven implementation in #302.
+ * cpu_interrupt() — send an IPI to `cpu`.  Used by interrupt_processor()
+ * (mp.c) after setting MP_TLB_FLUSH in cpu_int_word[cpu]; the receiving
+ * AP's IPI handler reads the bit and dispatches to pmap_update_interrupt.
+ *
+ * #304: route through LAPIC IPI_VECTOR_TLB_SHOOT.  Sending to ourselves
+ * is a no-op — process_pmap_updates is called inline by the initiator
+ * once it owns the pmap lock, so a self-IPI would deadlock on splvm.
+ * Sending to a CPU that the MP table never reported is silently
+ * dropped by lapic_send_ipi (mp_cpu_lapic_id_get returns 0xFF).
  */
 void
 cpu_interrupt(int cpu)
 {
-	(void)cpu;
+	if (cpu == cpu_number())
+		return;
+	lapic_send_ipi(cpu, IPI_VECTOR_TLB_SHOOT);
 }
 
 /*
