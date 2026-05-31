@@ -222,6 +222,7 @@ mp_desc_init(
 		  sizeof(struct i386_tss));
 	    bzero((char *)&cpu_data[mycpu],
 		  sizeof(cpu_data_t));
+	    cpu_data[mycpu].cpu_id = mycpu;	/* #301 */
 #if	MACH_KDB
 	    mp_dbtss[mycpu] = &mpt->dbtss;
 	    bcopy((char *)&dbtss,

@@ -40,6 +40,7 @@
 #endif
 
 extern struct thread_shuttle __inline__ *current_thread(void);
+extern int 	__inline__	current_cpu_id(void);
 extern int 	__inline__	get_preemption_level(void);
 extern void 	__inline__	disable_preemption(void);
 extern void 	__inline__      enable_preemption(void);
@@ -58,6 +59,29 @@ extern struct thread_shuttle __inline__	*current_thread(void)
 	__asm__ volatile ("	movl %%gs:(%1),%0" : "=r" (ct) : "r" (idx));
 
 	return (ct);
+}
+
+/*
+ * #301: return the per-CPU identity from %gs:cpu_id.  Compiles down to
+ * a single segment-relative load — no lock, no global indexing.  The
+ * %gs base is the GDT CPU_DATA descriptor, which boot/start.S loads on
+ * the BSP cold path and mp_desc_init() rewrites per-AP so that each
+ * CPU sees its own &cpu_data[id].
+ *
+ * Template for adding new per-CPU fields: copy this accessor and swap
+ * the field name.  See [[project-301-per-cpu-design]] for the planned
+ * generic __per_cpu(field) macro (deferred — needs a typeof or per-field
+ * accessor pattern that survives the kern/cpu_data.h ↔ i386/cpu_data.h
+ * include cycle).
+ */
+extern int __inline__		current_cpu_id(void)
+{
+	register int	idx = (int)&((cpu_data_t *)0)->cpu_id;
+	register int	id;
+
+	__asm__ volatile ("	movl %%gs:(%1),%0" : "=r" (id) : "r" (idx));
+
+	return (id);
 }
 
 extern int __inline__		get_preemption_level(void)

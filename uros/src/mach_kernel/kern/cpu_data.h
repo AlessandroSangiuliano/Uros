@@ -36,6 +36,14 @@ typedef struct
 #endif	/* MACH_RT */
 	int		simple_lock_count;
 	int		interrupt_level;
+	/*
+	 * #301: per-CPU data via %gs.  cpu_id is appended to keep
+	 * pre-existing offsets (active_thread, preemption_level, …)
+	 * stable for callers that read them through %gs-relative inline
+	 * asm.  Zero for the BSP (matches BSS), set to the AP's slot
+	 * by mp_desc_init() right after it bzero's the slot.
+	 */
+	int		cpu_id;
 } cpu_data_t;
 
 extern cpu_data_t	cpu_data[NCPUS];
