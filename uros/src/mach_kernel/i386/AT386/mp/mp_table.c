@@ -717,6 +717,18 @@ mp_v1_1_init(void)
 			}
 		}
 
+		/* #302: resync the kernel-wide CPU bookkeeping now that we
+		 * have the real LAPIC count.  Phase 1 only marked slot 0
+		 * (ACPI MADT defers to phase 2), so start_kernel_threads
+		 * would otherwise create just one idle thread and the AP
+		 * would crash in cpu_launch_first_thread(THREAD_NULL). */
+		{
+			extern int real_ncpus;
+			extern void validate_cpus(int);
+			real_ncpus = mp_cpu_count;
+			validate_cpus(mp_cpu_count);
+		}
+
 		lapic_start = io_map(mp_lapic_phys, LAPIC_SIZE);
 		lapic_id    = (int)(lapic_start + LAPIC_ID);
 	}
