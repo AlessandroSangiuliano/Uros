@@ -34,10 +34,21 @@
    lock until the thread that holds it is scheduled.  But on a
    multiprocessor there's a fair chance that if we spin a little we'll
    get the lock without incurring the overhead of a kernel call.  So
-   pthread_init() will set _spin_tries to >1 in that case.  */
+   pthread_init() will set _spin_tries to >1 in that case.
+
+   #310: the DATA() macro from <i386/asm.h> only emits .globl/.align/label
+   — it does NOT switch to .data.  Without the explicit .data/.text bracket
+   below, _spin_tries lands in .text (the assembler's default section) and
+   gets mapped read-only.  On a uniprocessor that's harmless (pthread_init
+   leaves it at 1, so no write ever happens), but on SMP pthread_init does
+   `_spin_tries = SPIN_TRIES` and the store faults — and OSF's vm_fault
+   reports it as KERN_INVALID_ADDRESS (kr=2) rather than a protection
+   violation, which is what made #310 so confusing to track down.  */
+.data
 DATA(_spin_tries)
 	.long	1
 ENDDATA(_spin_tries)
+.text
 
 /*
  * void _spin_lock(void *m)
