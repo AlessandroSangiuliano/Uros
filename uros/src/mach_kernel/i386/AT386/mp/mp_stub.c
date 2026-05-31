@@ -88,19 +88,16 @@ start_other_cpus(void)
 	/* #301: BSP self-reports its per-CPU identity via %gs. */
 	printf("smp: BSP cpu_id=%d via %%gs\n", current_cpu_id());
 
-	/* #302 acceptance (reduced): self-IPI round-trip on the BSP.
-	 * Validates that lapic_enable() worked, the ICR write is honoured,
-	 * the IDT vector dispatches through ipi_call_func_entry, and the
-	 * handler EOI's.  The full BSP→AP path is deferred to #303
-	 * (spinlock audit): cpu_start()'s INIT/SIPI/SIPI fires correctly,
-	 * the AP reaches slave_machine_init, but the busy-wait on
-	 * machine_slot[slot].running observed from the BSP never sees the
-	 * AP's update — strong indication of a memory-barrier / lock
-	 * ordering issue that #303 will untangle.  All the per-CPU plumbing
-	 * (LAPIC enable on AP, cpu_id %gs accessor, IPI vectors with EOI)
-	 * stays in place so #303 can flip on cpu_start() with no further
-	 * changes here. */
+	/* #302: self-IPI round-trip on the BSP. */
 	lapic_send_ipi(master_cpu, IPI_VECTOR_CALL_FUNC);
+
+	/* #303 audit identified the BSP→AP completion path as broken
+	 * BEFORE the lock layer is reached: COM1 byte probes confirmed
+	 * the AP never makes it to svstart (start.S) after the SIPI, so
+	 * the failure sits in the real-mode trampoline / slave_start
+	 * paging setup / pstart fork, not in any simple_lock or mutex.
+	 * Bringing the AP up end-to-end is now a dedicated sub-issue;
+	 * cpu_start() stays disabled here until it lands. */
 }
 
 /*
@@ -119,12 +116,6 @@ slave_machine_init(void)
 	/* Tell the BSP this AP is alive.  cpu_start() polls
 	 * machine_slot[slot].running and gives up after ~1 s otherwise. */
 	machine_slot[my_cpu].running = TRUE;
-
-	/* The AP printf intentionally lives on the BSP side (see
-	 * start_other_cpus) instead of here: the console driver isn't
-	 * thread-safe across two CPUs yet — that gets fixed by #303
-	 * (spinlock audit).  Until then, the BSP reads machine_slot
-	 * after cpu_start() returns and prints on the AP's behalf. */
 }
 
 /*

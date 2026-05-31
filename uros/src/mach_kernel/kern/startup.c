@@ -328,6 +328,10 @@ setup_main(void)
 	act_init();
 	thread_init();
 	subsystem_init();
+	{
+		extern void lock_smoke_test(void);
+		lock_smoke_test();	/* #303 acceptance */
+	}
 	cap_init();
 #if	TASK_SWAPPER
 	task_swappable(&realhost, kernel_task, FALSE);
