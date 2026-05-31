@@ -336,6 +336,15 @@ kdb_trap(
 		    /*NOTREACHED*/
 		}
 		kdbprinttrap(type, code, (int *)&regs->eip, regs->uesp);
+		/* #307: for kernel-mode page faults, uesp is garbage.  Dump
+		 * cr2 (faulting address — saved by t_page_fault into the
+		 * pusha esp slot, i.e. regs->esp), the trap frame address,
+		 * and ebp so we can locate the real kernel stack. */
+		if (type == T_PAGE_FAULT) {
+			db_printf("  cr2=%x  regs=%x  ebp=%x  ebx=%x  edi=%x  esi=%x\n",
+				  regs->esp, (unsigned)regs,
+				  regs->ebp, regs->ebx, regs->edi, regs->esi);
+		}
 	}
 
 #if	NCPUS > 1

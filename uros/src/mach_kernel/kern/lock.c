@@ -2086,14 +2086,14 @@ etap_mutex_unlock(
 
 #if	MACH_RT || (NCPUS > 1) || MACH_LDEBUG
 /*
- * Sanity assert called from the mutex_lock() macro in <i386/lock.h>.
+ * Sanity hook for the mutex_lock() macro in <i386/lock.h>.
  *
  * The macro itself cannot dereference current_thread()->wait_event because
- * <i386/lock.h> is included by <kern/lock.h>, which is in turn included by
+ * <i386/lock.h> is included by <kern/lock.h>, which in turn is included by
  * <kern/thread.h> — making it impossible for <i386/lock.h> to see the full
- * struct thread_shuttle definition without an include cycle.  Hosting the
- * check here keeps the assert without forcing every caller of <kern/lock.h>
- * to also include <kern/thread.h>.  #300.
+ * struct thread_shuttle definition without an include cycle.  The hook lives
+ * here so the assert is reachable without forcing every caller of
+ * <kern/lock.h> to also pull in <kern/thread.h>.
  */
 void
 mutex_lock_assert_safe(void)
