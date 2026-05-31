@@ -330,7 +330,9 @@ setup_main(void)
 	subsystem_init();
 	{
 		extern void lock_smoke_test(void);
+		extern void fpu_sanity_check(void);
 		lock_smoke_test();	/* #303 acceptance */
+		fpu_sanity_check();	/* #309 acceptance (BSP arm) */
 	}
 	cap_init();
 #if	TASK_SWAPPER

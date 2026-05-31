@@ -210,6 +210,14 @@ slave_machine_init(void)
 	/* #302: enable this AP's local APIC.  Without this, IPIs and
 	 * eventually LAPIC timer interrupts are silently dropped. */
 	lapic_enable();
+
+	/* #309 acceptance (AP arm): same SSE2 + x87 sanity check the
+	 * BSP runs from setup_main.  Will #UD here if ap_machine_init
+	 * didn't program CR4 / FPU correctly. */
+	{
+		extern void fpu_sanity_check(void);
+		fpu_sanity_check();
+	}
 }
 
 /*
