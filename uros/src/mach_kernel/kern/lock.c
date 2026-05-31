@@ -2094,22 +2094,11 @@ etap_mutex_unlock(
  * struct thread_shuttle definition without an include cycle.  The hook lives
  * here so the assert is reachable without forcing every caller of
  * <kern/lock.h> to also pull in <kern/thread.h>.
- *
- * #307 / TEMPORARY: the real assert was
- *
- *     assert(current_thread() == THREAD_NULL ||
- *            current_thread()->wait_event == NO_EVENT);
- *
- * but current_thread() reads from %gs (see i386/cpu_data.h), and the BSP
- * does not load %gs = CPU_DATA before calling machine_startup() — only
- * the AP path in start.S::svstart does.  Dereferencing the garbage thread
- * pointer triple-faults the early SMP boot.  The proper fix is to set up
- * %gs on the BSP cold path in start.S; that lands together with the
- * spinlock audit in #303.  Until then the hook is a no-op.
  */
 void
 mutex_lock_assert_safe(void)
 {
-	/* no-op until #303 — see comment above. */
+	assert(current_thread() == THREAD_NULL ||
+	       current_thread()->wait_event == NO_EVENT);
 }
 #endif	/* MACH_RT || (NCPUS > 1) || MACH_LDEBUG */

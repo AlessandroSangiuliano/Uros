@@ -1003,6 +1003,27 @@ extern	vm_offset_t	avail_start, avail_end;
  *	&etext		end of kernel text
  */
 
+/*
+ * #307: skip the kernel image / boot page-table hole when picking a new
+ * VA for a bootstrap page-table page.  Without this, in NCPUS > 1 builds
+ * `virtual_avail` walks straight into kernel .text (the +0x2000 offset for
+ * the AP boot pages is enough to make the trick collide) and the second
+ * loop in pmap_bootstrap fills the kernel image with zeros.  See
+ * project_307_pt_pool_real_fix.md for the eventual rework.
+ *
+ * hole_start/hole_end are physical addresses (set in model_dep.c::i386_init).
+ * va is a kernel virtual address: convert before comparing.
+ */
+extern vm_offset_t hole_start, hole_end;
+static __inline__ vm_offset_t
+pmap_bootstrap_skip_hole(vm_offset_t va)
+{
+	vm_offset_t pa = va - VM_MIN_KERNEL_ADDRESS;
+	if (pa >= hole_start && pa < hole_end)
+		return hole_end + VM_MIN_KERNEL_ADDRESS;
+	return va;
+}
+
 void
 pmap_bootstrap(
 	vm_offset_t	load_start)
@@ -1155,6 +1176,7 @@ pmap_bootstrap(
 
 	for (va = virtual_avail; va < virtual_end; va += INTEL_PGBYTES) {
 	    if (pte >= ptend) {
+		virtual_avail = pmap_bootstrap_skip_hole(virtual_avail);
 		pte = (pt_entry_t *)virtual_avail;
 		ptend = pte + NPTES;
 		virtual_avail = (vm_offset_t)ptend;
@@ -1213,6 +1235,7 @@ pmap_bootstrap(
 	virtual_end += morevm;
 	for (tva = va; tva < virtual_end; tva += INTEL_PGBYTES) {
 	    if (pte >= ptend) {
+		virtual_avail = pmap_bootstrap_skip_hole(virtual_avail);
 		pte = (pt_entry_t *)virtual_avail;
 		ptend = pte + NPTES;
 		virtual_avail = (vm_offset_t)ptend;
