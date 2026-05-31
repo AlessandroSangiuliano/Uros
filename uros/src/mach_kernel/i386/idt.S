@@ -421,9 +421,28 @@ INTERRUPT(0xed)
 INTERRUPT(0xee)
 INTERRUPT(0xef)
 
+/*
+ * #302: IPI vectors get dedicated entry stubs (i386/ipi.S) instead of
+ * the generic all_intrs path, because the LAPIC delivers IPIs and
+ * all_intrs would spuriously OCW2-EOI the 8259 PIC.
+ *
+ * Keep these in sync with IPI_VECTOR_* in <i386/lapic.h>:
+ *   0xF0 → ipi_resched_entry
+ *   0xF1 → ipi_tlb_shoot_entry
+ *   0xF2 → ipi_call_func_entry
+ *
+ * UP builds don't compile ipi.S, so this section falls back to plain
+ * INTERRUPT(...) stubs identical to the rest of the high-vector range.
+ */
+#if	NCPUS > 1
+	IDT_ENTRY(EXT(ipi_resched_entry),   K_INTR_GATE)
+	IDT_ENTRY(EXT(ipi_tlb_shoot_entry), K_INTR_GATE)
+	IDT_ENTRY(EXT(ipi_call_func_entry), K_INTR_GATE)
+#else
 INTERRUPT(0xf0)
 INTERRUPT(0xf1)
 INTERRUPT(0xf2)
+#endif	/* NCPUS > 1 */
 INTERRUPT(0xf3)
 INTERRUPT(0xf4)
 INTERRUPT(0xf5)

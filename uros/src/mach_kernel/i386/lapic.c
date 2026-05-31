@@ -34,6 +34,7 @@
 
 #include <types.h>
 #include <i386/lapic.h>
+#include <kern/cpu_data.h>	/* current_cpu_id() */
 #include <kern/misc_protos.h>	/* printf */
 
 extern unsigned char	mp_bsp_lapic_id_get(void);
@@ -120,6 +121,37 @@ lapic_send_ipi_all_excluding_self(unsigned int vector)
 	    | LAPIC_ICR_DSS_OTHERS
 	    | (vector & LAPIC_ICR_VECTOR_MASK);
 	lapic_ipi_wait();
+}
+
+/*
+ * IPI handlers — stubs for #302 increment 2.  Real reschedule / TLB
+ * shootdown / cross-CPU call semantics land in their own sub-issues
+ * (TLB shootdown is #304).  Until then, prove the path end-to-end by
+ * just printing on receipt and acking via lapic_eoi().
+ *
+ * These run with interrupts disabled (K_INTR_GATE in the IDT) and on
+ * the stack the LAPIC interrupted — no kmsg pool / no preemption / no
+ * sleeping, exactly like any other hardware interrupt handler.
+ */
+void
+ipi_resched_handler(void)
+{
+	printf("IPI: resched on cpu %d\n", current_cpu_id());
+	lapic_eoi();
+}
+
+void
+ipi_tlb_shoot_handler(void)
+{
+	printf("IPI: tlb-shoot on cpu %d\n", current_cpu_id());
+	lapic_eoi();
+}
+
+void
+ipi_call_func_handler(void)
+{
+	printf("IPI: call-func on cpu %d\n", current_cpu_id());
+	lapic_eoi();
 }
 
 #endif	/* NCPUS > 1 */
