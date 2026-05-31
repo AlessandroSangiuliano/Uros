@@ -70,6 +70,7 @@ extern cpu_data_t	cpu_data[NCPUS];
 #endif
 
 static struct thread_shuttle __inline__ *current_thread(void);
+static int __inline__		current_cpu_id(void);
 static int __inline__		get_preemption_level(void);
 static int __inline__		get_simple_lock_count(void);
 static int __inline__		get_interrupt_level(void);
@@ -85,6 +86,16 @@ static void __inline__		mp_enable_preemption_no_check(void);
 static struct thread_shuttle __inline__ *current_thread(void)
 {
 	return (cpu_data[cpu_number()].active_thread);
+}
+
+/*
+ * #301: cpu_id accessor for builds without MACH_RT.  Falls back to
+ * indexing through cpu_number().  Real per-%gs version lives in
+ * machine/cpu_data.h and gets used when MACH_RT is on.
+ */
+static int __inline__	current_cpu_id(void)
+{
+	return (cpu_data[cpu_number()].cpu_id);
 }
 
 static int __inline__	get_preemption_level(void)
@@ -133,6 +144,7 @@ static void __inline__	mp_enable_preemption_no_check(void)
 #else	/* !defined(__GNUC__) */
 
 #define current_thread()	(cpu_data[cpu_number()].active_thread)
+#define current_cpu_id()	(cpu_data[cpu_number()].cpu_id)
 #define get_preemption_level()	(0)
 #define get_simple_lock_count()	(cpu_data[cpu_number()].simple_lock_count)
 #define get_interrupt_level()	(cpu_data[cpu_number()].interrupt_level)
