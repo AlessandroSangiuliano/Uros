@@ -87,19 +87,15 @@ inherit it.
 The audit surfaced one concrete usage-level issue that does *not*
 belong to a primitive but is exposed by the SMP build:
 
-- **AP boot completion via `cpu_start()`**.  The BSP-side busy-poll on
-  `machine_slot[slot].running` in `i386/AT386/mp/mp.c::cpu_start()`
-  never observes the AP's update, even though the AP runs to
-  `slave_machine_init` and writes the flag.  `struct machine_slot`'s
-  `running` field is not `volatile`, but the BSP loop calls
-  `mp_busy_delay_ms()` between checks so the compiler does re-read
-  it.  The real cause is one of: (a) the AP doesn't reach the write
-  at all (some earlier step on the slave entry path faults silently);
-  (b) the AP writes, but the BSP poll lives in a different cache-line
-  that needs a memory barrier; (c) an interrupt vector storm on the
-  AP keeps it spinning in handlers.  Fix lands in increment 2 of this
-  same issue (or splits into a sub-issue if the root cause turns out
-  to be larger than expected).
+- **AP boot completion via `cpu_start()`** — split into its own
+  sub-issue **#308** because the failure mode turned out to be
+  outside the lock layer entirely.  Polled-COM1 byte probes (write
+  `'Y'` at the very entry of `svstart` in `i386/start.S`, write `'M'`
+  in `kern/startup.c::slave_main`) produced no output, meaning the
+  AP stalls *before* reaching `svstart` — somewhere in the
+  `slave_boot.S` trampoline, the shared `pstart` fork, or
+  `slave_start`'s paging setup.  None of that is locking; the audit's
+  contribution here was ruling that layer out as the culprit.
 
 - Console driver `printf` is not cross-CPU safe.  The AP-side
   diagnostic printf from #301 incr 2 was visibly racing with the BSP
