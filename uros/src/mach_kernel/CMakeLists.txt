@@ -423,8 +423,8 @@ set(DEVICE_PAGER_HEADER ${KERNEL_BUILD_DIR}/device/device_pager_server.h)
 
 # Core kernel subsystem
 set(KERN_SOURCES
-    kern/ast.c
     kern/bootstrap.c
+    kern/ast.c
     kern/boot_script.c
     kern/clock.c
     kern/counters.c
