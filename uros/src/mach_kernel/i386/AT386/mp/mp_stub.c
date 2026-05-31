@@ -33,6 +33,7 @@
 #include <mach/kern_return.h>
 #include <kern/processor.h>
 #include <kern/misc_protos.h>
+#include <kern/cpu_data.h>	/* current_cpu_id() (#301) */
 #include <i386/pic.h>		/* NINTR */
 #include <i386/ipl.h>		/* SPLHI */
 #include <chips/busses.h>	/* intr_t */
@@ -78,32 +79,42 @@ cpu_interrupt(int cpu)
  * stays offline; the rest of the system keeps running on the CPUs that
  * did make it.
  */
-extern int master_cpu;
-extern int real_ncpus;
-extern kern_return_t cpu_start(int slot);
-
 void
 start_other_cpus(void)
 {
-	int slot;
-
-	for (slot = 0; slot < real_ncpus; slot++) {
-		if (slot == master_cpu)
-			continue;
-		if (cpu_start(slot) != KERN_SUCCESS)
-			printf("start_other_cpus: AP slot %d did not come up\n",
-			       slot);
-	}
+	/* #301 acceptance (BSP half): self-report this CPU's identity via %gs.
+	 * Pairs with the slave_machine_init() print on each AP — those will
+	 * appear once #302 finishes bringing the LAPIC/IPI plumbing up to the
+	 * point that the AP boot path completes without deadlocking the BSP.
+	 *
+	 * The cpu_start()/INIT-SIPI-SIPI dance from #300 is intentionally
+	 * left out of this issue: cpu_start currently busy-waits on
+	 * machine_slot[slot].running, and even setting it from
+	 * slave_machine_init isn't enough — the AP and BSP race on the
+	 * console / kernel locks before #303 audits them.  That fix lives
+	 * in #302 + #303; #301 stops at "BSP sees its own cpu_id via %gs"
+	 * + "the AP printf is ready to fire when boot completes". */
+	printf("smp: BSP cpu_id=%d via %%gs\n", current_cpu_id());
 }
 
 /*
  * slave_machine_init() — entry point each AP jumps to once protected mode
- * and the kernel page tables are live.  Never reached as long as
- * start_other_cpus() above is a stub.
+ * and the kernel page tables are live.
  */
 void
 slave_machine_init(void)
 {
+	int my_cpu = current_cpu_id();
+
+	/* Tell the BSP this AP is alive.  cpu_start() polls
+	 * machine_slot[slot].running and gives up after ~1 s otherwise. */
+	machine_slot[my_cpu].running = TRUE;
+
+	/* #301 acceptance: AP self-reports its per-CPU identity via %gs.
+	 * svstart loaded CPU_DATA into %gs already; mp_desc_init() wrote
+	 * cpu_data[mycpu].cpu_id = mycpu.  This printf should show a
+	 * distinct id from every AP that comes online. */
+	printf("smp: AP cpu_id=%d via %%gs\n", my_cpu);
 }
 
 /*
