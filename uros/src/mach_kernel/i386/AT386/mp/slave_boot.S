@@ -75,11 +75,37 @@
 
 	.file	"slave_boot.s"
 
-	.text	
+	.text
+
+/*
+ * #308: the trampoline below executes in real mode (16-bit) up to the
+ * ljmp at the end of real_to_prot, then in 32-bit protected mode from
+ * `xprot:` onwards.  The original source used `data16`/`addr16` prefixes
+ * to flip operand size on a per-instruction basis, but it never told
+ * GAS which base mode to use — GAS defaulted to .code32 for the whole
+ * file and the prefixes ended up *reversing* the semantics: every
+ * `data16 mov $imm, %eax` was emitted as a 16-bit-immediate move with
+ * the high two bytes of the intended 32-bit immediate left in the
+ * stream as spurious `00 00` (= `add %al,(%eax)`) bytes that the real
+ * CPU happily executed.  The fix is one-line obvious:
+ *
+ *   .code16        for the part that runs in real mode
+ *   .code32        for the part that runs in protected mode
+ *
+ * With explicit base modes the `data16`/`addr16` prefixes are no
+ * longer needed — they are removed below.
+ */
+
+	.code16
 
 #define	LJMP(segment,address)	\
 	.byte	0xea		;\
 	.long	address-EXT(slave_boot_base)		;\
+	.word	segment
+
+#define	LJMP16(segment,address)	\
+	.byte	0xea		;\
+	.word	address-EXT(slave_boot_base)		;\
 	.word	segment
 
 #define	LGDT(address)	\
@@ -90,8 +116,7 @@
 ENTRY(slave_boot_base)
 	/* code is loaded at 0x0:0x1000 */
 	/* ljmp to the next instruction to set up %cs */
-	data16
-	LJMP(MP_BOOTSEG, EXT(slave_pstart))
+	LJMP16(MP_BOOTSEG, EXT(slave_pstart))
 
 ENTRY(slave_pstart)
 	/* set up %ds */
@@ -99,21 +124,20 @@ ENTRY(slave_pstart)
 	mov	%ax, %ds
 
 	/* set up %ss and %esp */
-	data16
 	mov	$MP_BOOTSEG, %eax
 	mov	%ax, %ss
-	data16
 	mov	$MP_BOOTSTACK, %esp
 
 	/* set up %es */
 	mov	%ax, %es
 
 	/* change to protected mode */
-	data16
 	call	EXT(real_to_prot)
 
-	push	MP_MACH_START
+	.code32
+	pushl	MP_MACH_START
 	call	EXT(startprog)
+	.code16
 
 /
 /* real_to_prot() */
@@ -124,42 +148,63 @@ ENTRY(real_to_prot)
 	/* guarantee that interrupt is disabled when in prot mode */
 	cli
 
-	/* load the gdtr */
-	addr16
-	data16
+	/*
+	 * Load the GDTR.  The LGDT() macro emits a 32-bit displacement
+	 * (gdtr - slave_boot_base) immediately after the opcode, which
+	 * the CPU only decodes correctly if we tell it to use 32-bit
+	 * addressing.  In real mode (.code16) the default is 16-bit
+	 * addressing, so add an addr32 (0x67) prefix.  Real-mode segment
+	 * base (DS = MP_BOOTSEG, base = 0x1000) is still added on top
+	 * of the disp32, so effective phys = 0x1000 + (gdtr - base) =
+	 * MP_GDT, which is what we want.
+	 */
+	.byte	0x67			/* addr32 */
 	LGDT(EXT(gdtr))
 
 	/* set the PE bit of CR0 */
 	mov	%cr0, %eax
-
-	data16
 	or	$CR0_PE_ON, %eax
-	mov	%eax, %cr0 
+	mov	%eax, %cr0
 
-	/* make intrasegment jump to flush the processor pipeline and */
-	/* reload CS register */
+	/* make intrasegment jump to flush the processor pipeline and
+	 * reload CS register.  data16 prefix forces 32-bit operand so
+	 * the immediate after `ea` is a 32-bit offset (matching what
+	 * LJMP() emits), and we land in xprot (D=1 code segment 0x08). */
 	data16
 	LJMP(0x08, xprot)
 
+	.code32
 xprot:
-	/* we are in USE32 mode now */
-	/* set up the protective mode segment registers : DS, SS, ES */
+	/*
+	 * We are in USE32 mode now.  Keep SS pointing at the boot data
+	 * segment (selector 0x10, base = MP_BOOT) so the existing 16-bit
+	 * stack address remains valid, but flip DS / ES to the flat
+	 * "init data" segment (selector 0x20, base = 0, limit = 4 GB).
+	 * The caller is about to `pushl MP_MACH_START` (= immediate
+	 * 0x800) and that must read phys 0x800 absolute, which only works
+	 * if DS has base zero.  Previously DS had base = 0x1000 and the
+	 * pushed value came from phys 0x1800 — garbage from the bootstack.
+	 */
 	mov	$0x10, %eax
-	movw	%ax, %ds
 	movw	%ax, %ss
+
+	mov	$0x20, %eax
+	movw	%ax, %ds
 	movw	%ax, %es
 
 	ret
+	.code16
 
 /
 /* startprog(phyaddr) */
 /	start the program on protected mode where phyaddr is the entry point
 /
 
+	.code32
 ENTRY(startprog)
 	push	%ebp
 	mov	%esp, %ebp
-	
+
 	mov	0x8(%ebp), %ecx		/* entry offset  */
 	mov	$0x28, %ebx		/* segment */
 	push	%ebx

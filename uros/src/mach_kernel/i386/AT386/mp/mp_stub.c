@@ -34,10 +34,14 @@
 #include <kern/processor.h>
 #include <kern/misc_protos.h>
 #include <kern/cpu_data.h>	/* current_cpu_id() (#301) */
+#include <vm/vm_kern.h>		/* kmem_alloc (#308) */
 #include <i386/lapic.h>		/* lapic_enable / lapic_send_ipi (#302) */
+#include <i386/mp_desc.h>	/* mp_desc_table / interrupt_stack (#308) */
 #include <i386/pic.h>		/* NINTR */
 #include <i386/ipl.h>		/* SPLHI */
 #include <chips/busses.h>	/* intr_t */
+
+#define	AP_INTSTACK_BYTES	4096	/* INTSTACK_SIZE; locore.S sets this in assym */
 
 #define NSPL	(SPLHI + 1)
 
@@ -81,23 +85,78 @@ cpu_interrupt(int cpu)
  * did make it.
  */
 extern int master_cpu;
+extern int real_ncpus;
+extern kern_return_t cpu_start(int slot);
+extern void master_up(void);
+extern vm_offset_t interrupt_stack[NCPUS];
+extern vm_offset_t int_stack_top[NCPUS];
+
+/*
+ * #308: allocate the per-AP kernel resources that interrupt_stack_alloc()
+ * would have set up if mp_probe_cpus() had known the real CPU count.
+ * With ACPI MADT detection deferred to phase 2 (#300), phase 1 sees a
+ * conservative count of 1, so interrupt_stack_alloc() only sets up
+ * slot 0 (the BSP) — leaving interrupt_stack[i>0] and mp_desc_table[i>0]
+ * as zero.  svstart in start.S then uses interrupt_stack[lapic_id] as
+ * the AP's kernel stack and mp_desc_init() dereferences mp_desc_table[i]
+ * to copy in the per-CPU IDT/GDT/LDT; both crash hard if those slots
+ * are NULL.  Lazily kmem_alloc() them here, on the BSP, right before
+ * each cpu_start().
+ */
+static kern_return_t
+ap_alloc_resources(int slot)
+{
+	vm_offset_t stack;
+	vm_offset_t mpt;
+
+	if (interrupt_stack[slot] == 0) {
+		if (kmem_alloc(kernel_map, &stack, AP_INTSTACK_BYTES)
+		    != KERN_SUCCESS)
+			return KERN_RESOURCE_SHORTAGE;
+		interrupt_stack[slot] = stack;
+		int_stack_top[slot]   = stack + AP_INTSTACK_BYTES;
+	}
+	if (mp_desc_table[slot] == 0) {
+		if (kmem_alloc(kernel_map, &mpt,
+			       sizeof(struct mp_desc_table)) != KERN_SUCCESS)
+			return KERN_RESOURCE_SHORTAGE;
+		mp_desc_table[slot] = (struct mp_desc_table *)mpt;
+	}
+	return KERN_SUCCESS;
+}
 
 void
 start_other_cpus(void)
 {
+	int slot;
+
 	/* #301: BSP self-reports its per-CPU identity via %gs. */
 	printf("smp: BSP cpu_id=%d via %%gs\n", current_cpu_id());
 
 	/* #302: self-IPI round-trip on the BSP. */
 	lapic_send_ipi(master_cpu, IPI_VECTOR_CALL_FUNC);
 
-	/* #303 audit identified the BSP→AP completion path as broken
-	 * BEFORE the lock layer is reached: COM1 byte probes confirmed
-	 * the AP never makes it to svstart (start.S) after the SIPI, so
-	 * the failure sits in the real-mode trampoline / slave_start
-	 * paging setup / pstart fork, not in any simple_lock or mutex.
-	 * Bringing the AP up end-to-end is now a dedicated sub-issue;
-	 * cpu_start() stays disabled here until it lands. */
+	/* #308: release start_lock so the APs, which are currently
+	 * spinning on it in pstart, can make forward progress.  The
+	 * historical mp_v1_1.c::start_other_cpus did this as its first
+	 * step; this mp_stub.c variant forgot to. */
+	master_up();
+
+	for (slot = 0; slot < real_ncpus; slot++) {
+		if (slot == master_cpu)
+			continue;
+		if (ap_alloc_resources(slot) != KERN_SUCCESS) {
+			printf("start_other_cpus: AP slot %d kmem_alloc failed\n",
+			       slot);
+			continue;
+		}
+		if (cpu_start(slot) != KERN_SUCCESS) {
+			printf("start_other_cpus: AP slot %d did not come up\n",
+			       slot);
+			continue;
+		}
+		printf("smp: AP cpu_id=%d online (reported by BSP)\n", slot);
+	}
 }
 
 /*
