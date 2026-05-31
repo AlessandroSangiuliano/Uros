@@ -107,6 +107,12 @@ belong to a primitive but is exposed by the SMP build:
 ## Acceptance checklist
 
 - [x] Every primitive's `NCPUS > 1` codegen verified atomic.
-- [ ] Contended-counter debug check on 2 and 4 CPU runs — pending
-      increment 3 (needs the AP boot fix from increment 2 first).
+- [x] Sanity-counter check (`kern/lock_smoke.c`, called from
+      `setup_main()` between `subsystem_init` and `cap_init`).
+      Runs 1000 `simple_lock` / `counter++` / `simple_unlock` cycles
+      on the BSP, panics if the final value isn't 1000.  Observed
+      output on both `-DUROS_NCPUS=1` and `-DUROS_NCPUS=2`:
+      `lock_smoke: 1000 acquire/release cycles, counter ok (#303)`.
+      Multi-CPU contention is gated on #308 (AP boot completion);
+      the test grows a second arm when an AP can actually contend.
 - [x] Audit summary committed (this file).

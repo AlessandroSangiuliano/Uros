@@ -426,6 +426,7 @@ set(KERN_SOURCES
     kern/ast.c
     kern/bootstrap.c
     kern/boot_script.c
+    kern/lock_smoke.c
     kern/clock.c
     kern/counters.c
     kern/cpu_data.c
