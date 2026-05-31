@@ -625,6 +625,7 @@ set(AT386_SOURCES
 if(UROS_NCPUS GREATER 1)
     list(APPEND AT386_SOURCES
         i386/mp_desc.c
+        i386/lapic.c
         i386/AT386/mp/mp.c
         i386/AT386/mp/mp_stub.c
         i386/AT386/mp/mp_table.c
@@ -690,9 +691,11 @@ set(AT386_ASM_SOURCES
 )
 
 # #300 — AP trampoline (real-mode -> 32-bit PM) when UROS_NCPUS > 1.
+# #302 — IPI entry stubs (3 vectors).
 if(UROS_NCPUS GREATER 1)
     list(APPEND AT386_ASM_SOURCES
         i386/AT386/mp/slave_boot.S
+        i386/ipi.S
     )
 endif()
 

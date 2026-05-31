@@ -613,6 +613,16 @@ machine_init(void)
 
 #if	MP_V1_1
 	mp_v1_1_init();
+	/*
+	 * #302: enable the BSP local APIC now that mp_v1_1_init's phase 2
+	 * has io_map()'d the LAPIC MMIO window into lapic_start.  This is
+	 * what arms lapic_send_ipi() / lapic_eoi() for the rest of the boot.
+	 * AP enable lands in slave_machine_init in a later increment.
+	 */
+	{
+		extern void lapic_enable(void);
+		lapic_enable();
+	}
 #endif	/* MP_V1_1 */
 
 	/*

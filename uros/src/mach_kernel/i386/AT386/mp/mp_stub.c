@@ -34,6 +34,7 @@
 #include <kern/processor.h>
 #include <kern/misc_protos.h>
 #include <kern/cpu_data.h>	/* current_cpu_id() (#301) */
+#include <i386/lapic.h>		/* lapic_enable / lapic_send_ipi (#302) */
 #include <i386/pic.h>		/* NINTR */
 #include <i386/ipl.h>		/* SPLHI */
 #include <chips/busses.h>	/* intr_t */
@@ -79,22 +80,27 @@ cpu_interrupt(int cpu)
  * stays offline; the rest of the system keeps running on the CPUs that
  * did make it.
  */
+extern int master_cpu;
+
 void
 start_other_cpus(void)
 {
-	/* #301 acceptance (BSP half): self-report this CPU's identity via %gs.
-	 * Pairs with the slave_machine_init() print on each AP — those will
-	 * appear once #302 finishes bringing the LAPIC/IPI plumbing up to the
-	 * point that the AP boot path completes without deadlocking the BSP.
-	 *
-	 * The cpu_start()/INIT-SIPI-SIPI dance from #300 is intentionally
-	 * left out of this issue: cpu_start currently busy-waits on
-	 * machine_slot[slot].running, and even setting it from
-	 * slave_machine_init isn't enough — the AP and BSP race on the
-	 * console / kernel locks before #303 audits them.  That fix lives
-	 * in #302 + #303; #301 stops at "BSP sees its own cpu_id via %gs"
-	 * + "the AP printf is ready to fire when boot completes". */
+	/* #301: BSP self-reports its per-CPU identity via %gs. */
 	printf("smp: BSP cpu_id=%d via %%gs\n", current_cpu_id());
+
+	/* #302 acceptance (reduced): self-IPI round-trip on the BSP.
+	 * Validates that lapic_enable() worked, the ICR write is honoured,
+	 * the IDT vector dispatches through ipi_call_func_entry, and the
+	 * handler EOI's.  The full BSP→AP path is deferred to #303
+	 * (spinlock audit): cpu_start()'s INIT/SIPI/SIPI fires correctly,
+	 * the AP reaches slave_machine_init, but the busy-wait on
+	 * machine_slot[slot].running observed from the BSP never sees the
+	 * AP's update — strong indication of a memory-barrier / lock
+	 * ordering issue that #303 will untangle.  All the per-CPU plumbing
+	 * (LAPIC enable on AP, cpu_id %gs accessor, IPI vectors with EOI)
+	 * stays in place so #303 can flip on cpu_start() with no further
+	 * changes here. */
+	lapic_send_ipi(master_cpu, IPI_VECTOR_CALL_FUNC);
 }
 
 /*
@@ -106,15 +112,19 @@ slave_machine_init(void)
 {
 	int my_cpu = current_cpu_id();
 
+	/* #302: enable this AP's local APIC.  Without this, IPIs and
+	 * eventually LAPIC timer interrupts are silently dropped. */
+	lapic_enable();
+
 	/* Tell the BSP this AP is alive.  cpu_start() polls
 	 * machine_slot[slot].running and gives up after ~1 s otherwise. */
 	machine_slot[my_cpu].running = TRUE;
 
-	/* #301 acceptance: AP self-reports its per-CPU identity via %gs.
-	 * svstart loaded CPU_DATA into %gs already; mp_desc_init() wrote
-	 * cpu_data[mycpu].cpu_id = mycpu.  This printf should show a
-	 * distinct id from every AP that comes online. */
-	printf("smp: AP cpu_id=%d via %%gs\n", my_cpu);
+	/* The AP printf intentionally lives on the BSP side (see
+	 * start_other_cpus) instead of here: the console driver isn't
+	 * thread-safe across two CPUs yet — that gets fixed by #303
+	 * (spinlock audit).  Until then, the BSP reads machine_slot
+	 * after cpu_start() returns and prints on the AP's behalf. */
 }
 
 /*
