@@ -140,10 +140,21 @@ ipi_resched_handler(void)
 	lapic_eoi();
 }
 
+/*
+ * #304: dispatch to the legacy OSF pmap_update_interrupt() machinery.
+ * It expects to be entered at splip (the LAPIC IDT_ENTRY uses
+ * K_INTR_GATE which already cleared IF for us), walks
+ * cpu_update_list[cpu_number()], runs each requested INVALIDATE_TLB,
+ * and clears cpu_update_needed[].  Acknowledging via EOI is our job —
+ * pmap_update_interrupt was written before the LAPIC era and has no
+ * idea EOI even exists.
+ */
+extern void pmap_update_interrupt(void);
+
 void
 ipi_tlb_shoot_handler(void)
 {
-	printf("IPI: tlb-shoot on cpu %d\n", current_cpu_id());
+	pmap_update_interrupt();
 	lapic_eoi();
 }
 
