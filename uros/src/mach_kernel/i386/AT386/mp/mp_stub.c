@@ -160,6 +160,35 @@ start_other_cpus(void)
 }
 
 /*
+ * #309: bring the AP's CR0/CR4/FPU state up to par with what
+ * machine_startup()/i386_init() did on the BSP.  Without this the
+ * first SSE/AVX instruction in a userspace thread that the scheduler
+ * lands on the AP takes #UD because CR4.OSFXSR is clear.
+ *
+ * Mirrors the BSP order from i386/AT386/model_dep.c:
+ *   - i386_init() sets CR4.PGE after pmap_bootstrap.
+ *   - machine_init() calls init_fpu() which sets CR0/CR4 FPU bits,
+ *     CR4.OSXSAVE if XSAVE is available, and writes XCR0.
+ *
+ * sysenter_ap_init() is already called from mp_desc_init().  The
+ * sha256-NI dispatch table is global (set once on the BSP) and the
+ * IDT/GDT/LDT/TSS were already loaded in svstart, so this is the
+ * full per-CPU CPU-state init the AP needs before being handed to
+ * the scheduler.
+ */
+extern void init_fpu(void);
+extern unsigned int get_cr4(void);
+extern void set_cr4(unsigned int);
+#define	CR4_PGE	0x80	/* enable global PTEs */
+
+static void
+ap_machine_init(void)
+{
+	set_cr4(get_cr4() | CR4_PGE);
+	init_fpu();
+}
+
+/*
  * slave_machine_init() — entry point each AP jumps to once protected mode
  * and the kernel page tables are live.
  */
@@ -168,13 +197,27 @@ slave_machine_init(void)
 {
 	int my_cpu = current_cpu_id();
 
+	/* Tell the BSP this AP is alive FIRST — cpu_start()'s 1 s busy-
+	 * poll can otherwise time out before ap_machine_init's printfs
+	 * (FPU detect / XSAVE enable) finish draining through the polled
+	 * COM1 driver.  Setting the flag is just one store; nothing else
+	 * on this CPU depends on the AP being further along yet. */
+	machine_slot[my_cpu].running = TRUE;
+
+	/* #309: get this AP's CR0/CR4/FPU state in sync with the BSP. */
+	ap_machine_init();
+
 	/* #302: enable this AP's local APIC.  Without this, IPIs and
 	 * eventually LAPIC timer interrupts are silently dropped. */
 	lapic_enable();
 
-	/* Tell the BSP this AP is alive.  cpu_start() polls
-	 * machine_slot[slot].running and gives up after ~1 s otherwise. */
-	machine_slot[my_cpu].running = TRUE;
+	/* #309 acceptance (AP arm): same SSE2 + x87 sanity check the
+	 * BSP runs from setup_main.  Will #UD here if ap_machine_init
+	 * didn't program CR4 / FPU correctly. */
+	{
+		extern void fpu_sanity_check(void);
+		fpu_sanity_check();
+	}
 }
 
 /*

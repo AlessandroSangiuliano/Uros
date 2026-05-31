@@ -574,6 +574,7 @@ set(I386_C_SOURCES
     i386/db_interface.c
     i386/db_trace.c
     i386/fpu.c
+    i386/fpu_sanity.c
     i386/gdt.c
     i386/hardclock.c
     i386/io_emulate.c
@@ -632,6 +633,10 @@ if(UROS_NCPUS GREATER 1)
         i386/AT386/mp/mp_table.c
     )
 endif()
+
+# #309: per-CPU SSE/FPU sanity check is useful both on UP (cheap
+# baseline) and SMP (proves AP CR4/FPU init worked).  Goes into the
+# common i386 source list.
 
 # Chips/busses
 set(CHIPS_SOURCES
