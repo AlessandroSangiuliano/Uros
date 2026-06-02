@@ -532,6 +532,7 @@ boolean_t	cpu_update_needed[NCPUS];
 
 extern void		process_pmap_updates(pmap_t pmap);
 extern void		pmap_update_interrupt(void);
+extern void		pmap_tlb_shootdown_handler(void);	/* #304/#310 */
 extern pmap_t		kernel_pmap;
 
 #endif	/* NCPUS > 1 */
@@ -766,8 +767,13 @@ extern void		flush_tlb(void);
 	 */								\
 	i_bit_clear((my_cpu), &cpus_idle);				\
 									\
+	/* #304/#310: flush via the lock-free shootdown handler, not	\
+	 * pmap_update_interrupt() — the latter's process_pmap_updates()	\
+	 * reloads CR3 for dead pmaps, which corrupts the context we are	\
+	 * about to resume.  This catches a shootdown that was queued	\
+	 * while we were parked (idle / at splvm) and could not ack.  */	\
 	if (cpu_update_needed[(my_cpu)])				\
-	    pmap_update_interrupt();					\
+	    pmap_tlb_shootdown_handler();				\
 									\
 	/*								\
 	 *	Mark that this cpu is now active.			\
