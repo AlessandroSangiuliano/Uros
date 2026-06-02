@@ -25,15 +25,26 @@
  * EIP/CS/EFLAGS (and possibly SS/ESP for cross-privilege).
  *
  * Each stub saves the caller-clobbered set + segment registers, switches
- * %ds/%es to KERNEL_DS, calls the C handler (which is responsible for
- * lapic_eoi()), then unwinds and iret's.  We deliberately do NOT route
- * through alltraps/all_intrs: IPIs originate from the LAPIC, the PIC
- * EOI sequence in all_intrs would send a spurious OCW2 to the 8259 and
- * stale interrupts could leak through.
+ * %ds/%es to KERNEL_DS and %gs to CPU_DATA, calls the C handler (which is
+ * responsible for lapic_eoi()), then unwinds and iret's.  We deliberately
+ * do NOT route through alltraps/all_intrs: IPIs originate from the LAPIC,
+ * the PIC EOI sequence in all_intrs would send a spurious OCW2 to the
+ * 8259 and stale interrupts could leak through.
+ *
+ * #310: %gs MUST be reloaded to CPU_DATA.  When the IPI is taken while
+ * the CPU is running a user thread (CPL 3), %gs holds the user's TLS
+ * selector, not the kernel per-CPU descriptor.  The C handler reaches
+ * pmap_update_interrupt() -> process_pmap_updates(), which calls
+ * current_thread()/cpu_number() — both read %gs:(off).  With the user
+ * %gs still loaded those reads return garbage and the handler faults on
+ * a near-NULL pointer (cr2=0x4 / 0x24).  This mirrors what all_intrs
+ * does for the #280 gs-leak fix: save the caller's %gs, load CPU_DATA,
+ * restore on exit.  Reloading CPU_DATA when the IPI came from kernel
+ * mode is a harmless no-op (%gs was already CPU_DATA).
  */
 
 #include <i386/asm.h>
-#include <assym.S>		/* KERNEL_DS */
+#include <assym.S>		/* KERNEL_DS, CPU_DATA */
 
 #define IPI_ENTER	\
 	pushl	%eax	;\
@@ -41,11 +52,15 @@
 	pushl	%edx	;\
 	pushl	%ds	;\
 	pushl	%es	;\
+	pushl	%gs	;\
 	mov	$KERNEL_DS,%ax	;\
 	mov	%ax,%ds	;\
-	mov	%ax,%es
+	mov	%ax,%es	;\
+	mov	$CPU_DATA,%ax	;\
+	mov	%ax,%gs
 
 #define IPI_LEAVE	\
+	popl	%gs	;\
 	popl	%es	;\
 	popl	%ds	;\
 	popl	%edx	;\
