@@ -3109,9 +3109,25 @@ phys_attribute_clear(
 #endif
 
 		    /*
-		     * Invalidate TLBs for all CPUs using this mapping.
+		     * Invalidate TLBs for the mapping we are about to alter.
+		     *
+		     * #304: clearing the REFERENCE (accessed) bit is advisory —
+		     * it only feeds the pageout clock, and a stale accessed bit
+		     * in another CPU's TLB just makes a page look more recently
+		     * used (it gets re-faulted, never corrupted).  vm_pageout
+		     * calls pmap_clear_reference() on every page it scans, so a
+		     * cross-CPU shootdown per mapping here turned into a storm of
+		     * hundreds of thousands of IPIs that stalled SMP boot.  Do a
+		     * local flush only for reference-only clears (UP-equivalent),
+		     * and reserve the full cross-CPU shootdown for the MODIFY
+		     * (dirty) bit, where another CPU's stale dirty TLB entry
+		     * could write back over a page we have already cleaned.
 		     */
-		    PMAP_UPDATE_TLBS(pmap, va, va + PAGE_SIZE);
+		    if (bits & PHYS_MODIFIED) {
+			PMAP_UPDATE_TLBS(pmap, va, va + PAGE_SIZE);
+		    } else {
+			INVALIDATE_TLB(va, va + PAGE_SIZE);
+		    }
 		}
 
 		/*
