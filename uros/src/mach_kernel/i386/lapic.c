@@ -141,20 +141,26 @@ ipi_resched_handler(void)
 }
 
 /*
- * #304: dispatch to the legacy OSF pmap_update_interrupt() machinery.
- * It expects to be entered at splip (the LAPIC IDT_ENTRY uses
- * K_INTR_GATE which already cleared IF for us), walks
- * cpu_update_list[cpu_number()], runs each requested INVALIDATE_TLB,
- * and clears cpu_update_needed[].  Acknowledging via EOI is our job —
- * pmap_update_interrupt was written before the LAPIC era and has no
- * idea EOI even exists.
+ * #304/#310: dispatch to pmap_tlb_shootdown_handler() (pmap.c).  That
+ * routine does an unconditional local TLB flush and clears this CPU's
+ * cpu_update_needed[] ack — lock-free, so it is safe no matter what the
+ * interrupted code was holding.  The initiator's PMAP_UPDATE_TLBS spins
+ * on that monotone ack.
+ *
+ * We deliberately do NOT call the older pmap_update_interrupt(): its
+ * process_pmap_updates() path reloads CR3 for dead pmaps mid-interrupt,
+ * which corrupts an AP that took the IPI while running a user thread
+ * (see the comment on pmap_tlb_shootdown_handler).
+ *
+ * Entered with IF=0 (K_INTR_GATE).  EOI is our responsibility — the
+ * pmap layer predates the LAPIC and has no notion of it.
  */
-extern void pmap_update_interrupt(void);
+extern void pmap_tlb_shootdown_handler(void);
 
 void
 ipi_tlb_shoot_handler(void)
 {
-	pmap_update_interrupt();
+	pmap_tlb_shootdown_handler();
 	lapic_eoi();
 }
 

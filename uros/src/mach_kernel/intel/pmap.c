@@ -688,10 +688,13 @@ extern	int	max_lock_loops;
 	users = (pmap)->cpus_using & ~cpu_mask;        			\
 	if (users) { 							\
             LOOP_VAR;							\
-	    /* signal them, and wait for them to finish */ 		\
-	    /* using the pmap */ 					\
+	    /* signal them, and wait for them to acknowledge the	\
+	     * flush.  We spin on the monotone cpu_update_needed ack	\
+	     * (pmap_tlb_ack_outstanding), NOT on the transient		\
+	     * cpus_active bit — the latter is reset by the handler so	\
+	     * fast that this spin could miss it and hang (#310).  */	\
 	    signal_cpus(users, (pmap), (s), (e));      			\
-	    while (((pmap)->cpus_using & cpus_active & ~cpu_mask)) {	\
+	    while (pmap_tlb_ack_outstanding(users)) {			\
 		LOOP_CHECK("PMAP_UPDATE_TLBS", pmap);			\
 		continue; 						\
 	    }								\
@@ -788,6 +791,31 @@ extern void signal_cpus(
 			pmap_t		pmap,
 			vm_offset_t	start,
 			vm_offset_t	end);
+
+/*
+ *	#304/#310: ack predicate for the PMAP_UPDATE_TLBS initiator spin.
+ *
+ *	`wait_set` is the set of other CPUs that might be using the pmap.
+ *	We only wait for those that are BOTH still in cpus_active (i.e. not
+ *	parked at splvm with IPIs masked — re-read every call so a CPU that
+ *	drops to splvm falls out of the wait) AND still have their
+ *	cpu_update_needed flag set (the monotone ACK: signal_cpus set it
+ *	before the IPI, pmap_tlb_shootdown_handler clears it after flushing).
+ *	A CPU that parked at splvm before acking will flush on resume via
+ *	MARK_CPU_ACTIVE, so dropping it here is safe.
+ */
+static __inline__ boolean_t
+pmap_tlb_ack_outstanding(cpu_set wait_set)
+{
+	register int	cpu;
+
+	wait_set &= cpus_active;
+	for (cpu = 0; wait_set != 0; cpu++, wait_set >>= 1) {
+		if ((wait_set & 1) && cpu_update_needed[cpu])
+			return (TRUE);
+	}
+	return (FALSE);
+}
 
 #endif	/* NCPUS > 1 */
 
@@ -3533,8 +3561,76 @@ pmap_update_interrupt(void)
 	    i_bit_set(my_cpu, &cpus_active);
 
 	} while (cpu_update_needed[my_cpu]);
-	
+
 	splx(s);
+	mp_enable_preemption();
+}
+
+/*
+ *	pmap_tlb_shootdown_handler() — #310/#304 robust TLB-shootdown IPI body.
+ *
+ *	The historical pmap_update_interrupt()/process_pmap_updates() pair
+ *	consults real_pmap[my_cpu] and, for a pmap whose ref_count has hit
+ *	zero, reloads CR3 with set_cr3(kernel_pmap->pdirbase) in the middle
+ *	of interrupt handling.  On an AP that took the IPI from user mode
+ *	this corrupts the interrupted context: real_pmap[]/the update list
+ *	can be stale relative to what the AP is actually running, and the
+ *	mid-flight CR3 reload leaves the user thread executing on the kernel
+ *	page directory, producing near-NULL dereferences in the scheduler
+ *	(act_lock_thread) a few instructions after the iret.
+ *
+ *	For the first correct SMP pass we need neither range precision nor
+ *	the dead-pmap CR3 dance.  An unconditional local TLB flush is always
+ *	safe, and the only part of the old protocol the initiator actually
+ *	waits on is the cpus_active bit (see PMAP_UPDATE_TLBS).  So: drop out
+ *	of cpus_active, flush, drain our queue, rejoin; re-check
+ *	cpu_update_needed so a request that races in after the flush is still
+ *	honoured before we return.  No locks, no CR3 reload, no dependency on
+ *	current_thread()/real_pmap[].
+ *
+ *	Like the INVALIDATE_TLB this replaces, the flush is a CR3 reload and
+ *	therefore does not evict INTEL_PTE_GLOBAL kernel entries; that
+ *	matches the previous behaviour and is acceptable for the common case
+ *	(user-space unmaps).  Global-kernel-page shootdown is a documented
+ *	follow-up.
+ */
+void
+pmap_tlb_shootdown_handler(void)
+{
+	register int	my_cpu;
+
+	mp_disable_preemption();
+	my_cpu = cpu_number();
+
+	/*
+	 *	Lock-free TLB-shootdown handler.  Two properties matter:
+	 *
+	 *	1. No locks.  The IPI is delivered at IF=1 (a CPU holding a
+	 *	   pmap lock is at splvm/IF=0, so the IPI is masked there), but
+	 *	   the interrupted code may hold an unrelated simple_lock (a
+	 *	   PV-list lock, a zone lock, …).  If we spun on any lock the
+	 *	   initiator might hold, while the initiator waited on the lock
+	 *	   we interrupted, the two CPUs would deadlock.  An
+	 *	   unconditional flush_tlb() needs no lock and is always safe.
+	 *
+	 *	2. cpu_update_needed[] is the ACK, and it is monotone: signal_
+	 *	   cpus() sets it TRUE before sending the IPI, and we clear it
+	 *	   only AFTER the flush.  The initiator waits on it (see
+	 *	   pmap_tlb_ack_outstanding()).  We must NOT touch cpus_active
+	 *	   here: the old code cleared+reset it as the ack, but that bit
+	 *	   is reset so fast that an initiator which started spinning
+	 *	   after we finished would wait on it forever (the boot hang).
+	 *	   cpus_active is owned by SPLVM/SPLX and MARK_CPU_IDLE/ACTIVE.
+	 *
+	 *	Clear-before-flush + re-check picks up any shootdown that races
+	 *	in while we are flushing, before we return.
+	 */
+	do {
+		cpu_update_needed[my_cpu] = FALSE;
+		INVALIDATE_TLB(VM_MIN_ADDRESS, VM_MAX_KERNEL_ADDRESS);
+		cpu_update_list[my_cpu].count = 0;
+	} while (cpu_update_needed[my_cpu]);
+
 	mp_enable_preemption();
 }
 #endif	/* NCPUS > 1 */
