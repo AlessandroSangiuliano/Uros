@@ -141,6 +141,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <i386/asm.h>
 #include <i386/ipl.h>
 #include <i386/pic.h>
+#include <i386/apic.h>		/* LAPIC_TPR — #311 I/O APIC spl path */
 
 #if	MP_V1_1
 #define	TRAP_DEBUG 0 /* Must match interrupt.s and mp_v1_1.c */
@@ -360,6 +361,31 @@ LEXT(set_spl)
 	cmpl	$(IPLHI), %eax
 	ja	set_spl_bad_new_ipl
 	movl	%eax,CX(EXT(curr_ipl),%edx)/* set NEW ipl level */
+
+	/*
+	 * #311: with the I/O APIC armed, masking is per-CPU via the LAPIC
+	 * task-priority register, not the global 8259.  TPR class 4 (0x40)
+	 * blocks the device vectors 0x40-0x4f at any spl above spllo; IPIs
+	 * (class F) always get through.  spllo -> TPR 0.  Each CPU writes its
+	 * own LAPIC at the shared lapic_start window, so this is inherently
+	 * per-CPU and needs no slave special-case.  Then exit via the common
+	 * pop/sti tail (label 2 below).
+	 */
+	cmpl	$0, EXT(ioapic_enabled)
+	je	9f
+	xorl	%ecx, %ecx		/* newTPR = (new ipl == 0) ? 0 : 0x40 */
+	testl	%eax, %eax
+	jz	7f
+	movl	$0x40, %ecx
+7:	cmpl	%ecx, CX(EXT(lapic_tpr_cache), %edx)
+	je	2f			/* TPR class unchanged: skip the MMIO */
+	movl	EXT(lapic_start), %eax	/* eax (new ipl) is dead past label 2 */
+	testl	%eax, %eax
+	jz	2f			/* LAPIC not mapped yet: leave cache stale */
+	movl	%ecx, CX(EXT(lapic_tpr_cache), %edx)
+	movl	%ecx, LAPIC_TPR(%eax)
+	jmp	2f
+9:
 #if	!MP_V1_1
 	cmpl	$(SPLHI), %eax		/* if SPLHI */
 	jne	1f
@@ -520,6 +546,26 @@ LEXT(set_spl_noi)
 	cmpl	$(IPLHI), %eax
 	ja	set_spl_noi_bad_ipl
 	movl	%eax,CX(EXT(curr_ipl),%edx)	/* set new SPL level */
+
+	/*
+	 * #311: I/O APIC path — program this CPU's LAPIC TPR instead of the
+	 * 8259, leaving IF untouched (interrupt-return uses this with IF=0).
+	 */
+	cmpl	$0, EXT(ioapic_enabled)
+	je	7f
+	xorl	%ecx, %ecx		/* newTPR = (new ipl == 0) ? 0 : 0x40 */
+	testl	%eax, %eax
+	jz	5f
+	movl	$0x40, %ecx
+5:	cmpl	%ecx, CX(EXT(lapic_tpr_cache), %edx)
+	je	1f			/* TPR class unchanged: skip the MMIO */
+	movl	EXT(lapic_start), %eax
+	testl	%eax, %eax
+	jz	1f			/* LAPIC not mapped yet: leave cache stale */
+	movl	%ecx, CX(EXT(lapic_tpr_cache), %edx)
+	movl	%ecx, LAPIC_TPR(%eax)
+	jmp	1f
+7:
 	movw	EXT(pic_mask)(,%eax,2), %ax	/* get new pic mask */
 	cmpw	EXT(curr_pic_mask),%ax	/* if different, */
 	je	1f

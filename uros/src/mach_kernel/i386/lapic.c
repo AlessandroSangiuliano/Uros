@@ -40,6 +40,15 @@
 extern unsigned char	mp_bsp_lapic_id_get(void);
 extern unsigned char	mp_cpu_lapic_id_get(int slot);
 
+/*
+ * #311: last TPR value written per CPU, so set_spl/set_spl_noi (spl.S) can
+ * skip the LAPIC MMIO write — a KVM VM-exit — when the spl transition does
+ * not change the device-mask class.  This mirrors the curr_pic_mask compare
+ * the 8259 path used.  Seeded to -1 by ioapic_init() so the first write on
+ * each CPU always lands.
+ */
+int	lapic_tpr_cache[NCPUS];
+
 /* Spin until the previous IPI has been accepted by its target(s).
  * Polling LAPIC_ICR_DS_PENDING in the ICR low word is the only way the
  * SDM blesses for tracking IPI delivery from the source side. */

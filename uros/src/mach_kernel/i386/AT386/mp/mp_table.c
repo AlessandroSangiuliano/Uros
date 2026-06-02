@@ -201,6 +201,24 @@ mp_bsp_lapic_id_get(void)
 }
 
 /*
+ * I/O APIC accessors used by ioapic.c (#311) to find I/O APIC #0's MMIO
+ * base.  Populated by the MPS / ACPI MADT walk above.
+ */
+unsigned int
+mp_ioapic_phys_get(int idx)
+{
+	if (idx < 0 || idx >= mp_ioapic_count)
+		return 0;
+	return mp_ioapic_phys[idx];
+}
+
+int
+mp_ioapic_count_get(void)
+{
+	return mp_ioapic_count;
+}
+
+/*
  * Physical→kernel-virtual translation.
  *
  * - MP_PHYS_TO_KV: identity-mapped low memory (RSDP/FPS searches), reach
