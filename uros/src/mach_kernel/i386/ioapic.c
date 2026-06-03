@@ -107,14 +107,36 @@ ioapic_write_rte(unsigned int irq, unsigned int low)
 	ioapic_write(reg, low);
 }
 
+/*
+ * ISA IRQ -> I/O APIC GSI (input pin).
+ *
+ * On every PC platform the ACPI MADT remaps the 8254 PIT (ISA IRQ 0) onto
+ * GSI 2 via an Interrupt Source Override; the other ISA lines are identity.
+ * Getting this right matters: hardclock() is wired to IRQ 0 (rtclock.c) and
+ * drives the timeout wheel, so if the PIT is left on GSI 0 it never fires
+ * and every MACH_RCV_TIMEOUT hangs forever (e.g. block_device_server's HAL
+ * replay drain) -- the SMP boot then wedges right after reading the MBR.
+ *
+ * TODO: parse the MADT Interrupt Source Override entries instead of
+ * hardcoding the (universal) IRQ0->GSI2 timer override.
+ */
+static unsigned int
+gsi_for_irq(unsigned int irq)
+{
+	return (irq == 0) ? 2u : irq;
+}
+
 void
 ioapic_mask_irq(unsigned int irq)
 {
-	unsigned int reg, low;
+	unsigned int reg, low, gsi;
 
-	if (!ioapic_enabled || irq >= ioapic_redirs)
+	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
 		return;
-	reg = IOA_R_REDIRECTION + 2 * irq;
+	gsi = gsi_for_irq(irq);
+	if (gsi >= ioapic_redirs)
+		return;
+	reg = IOA_R_REDIRECTION + 2 * gsi;
 	low = ioapic_read(reg);
 	ioapic_write(reg, low | IOA_R_R_MASKED);
 }
@@ -122,11 +144,14 @@ ioapic_mask_irq(unsigned int irq)
 void
 ioapic_unmask_irq(unsigned int irq)
 {
-	unsigned int reg, low;
+	unsigned int reg, low, gsi;
 
-	if (!ioapic_enabled || irq >= ioapic_redirs)
+	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
 		return;
-	reg = IOA_R_REDIRECTION + 2 * irq;
+	gsi = gsi_for_irq(irq);
+	if (gsi >= ioapic_redirs)
+		return;
+	reg = IOA_R_REDIRECTION + 2 * gsi;
 	low = ioapic_read(reg);
 	ioapic_write(reg, low & ~IOA_R_R_MASKED);
 }
@@ -171,16 +196,33 @@ ioapic_init(void)
 	 * Program every entry masked.  take_irq()/device_intr_register unmask
 	 * the lines that get a real handler; until then a still-asserted line
 	 * cannot storm us.
+	 *
+	 * Step 1: a benign masked placeholder on every pin.
+	 * Step 2: for each ISA IRQ, drive its mapped GSI (gsi_for_irq) with
+	 * that IRQ's vector (0x40+irq), so e.g. the PIT (IRQ0->GSI2) delivers
+	 * vector 0x40 and the existing ivect[0]=hardclock dispatch runs.  The
+	 * 8259 cascade (IRQ2) is not a device line under the I/O APIC, so it
+	 * gets no entry.
 	 */
-	for (irq = 0; irq < ioapic_redirs; irq++) {
-		unsigned int low;
+	for (irq = 0; irq < ioapic_redirs; irq++)
+		ioapic_write_rte(irq, (IOAPIC_VECTOR_BASE + irq)
+				 | IOA_R_R_DM_FIXED | IOA_R_R_MASKED);
+
+	for (irq = 0; irq < IOAPIC_ISA_IRQS; irq++) {
+		unsigned int gsi, low;
+
+		if (irq == 2)
+			continue;		/* 8259 cascade */
+		gsi = gsi_for_irq(irq);
+		if (gsi >= ioapic_redirs)
+			continue;
 
 		low  = (IOAPIC_VECTOR_BASE + irq) & IOA_R_R_VECTOR_MASK;
 		low |= IOA_R_R_DM_FIXED;	/* physical destination */
 		if (elcr & (1u << irq))
 			low |= IOA_R_R_TM_LEVEL | IOA_R_R_IP_PLRITY_LOW;
 		low |= IOA_R_R_MASKED;
-		ioapic_write_rte(irq, low);
+		ioapic_write_rte(gsi, low);
 	}
 
 	/*

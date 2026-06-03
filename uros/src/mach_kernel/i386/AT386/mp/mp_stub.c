@@ -256,11 +256,18 @@ mp_v1_1_io_unlock(struct processor *p)
 boolean_t	mp_v1_1_initialized = FALSE;
 
 /*
- * mp_v1_1_take_irq() / mp_v1_1_reset_irq() — install/remove a per-CPU IRQ
- * handler in the SMP interrupt vector tables.  Stubs always succeed; the
- * single-CPU build behaves as if there was no per-CPU IRQ routing — i.e.
- * the legacy PIC remains the single source of IRQs, which is exactly what
- * we want until #302 wires up the IOAPIC.
+ * mp_v1_1_take_irq() / mp_v1_1_reset_irq() — would install/remove a per-CPU
+ * IRQ handler in the historical mp_v1_1 vector tables.  Since mp_v1_1.c is
+ * not built, these stubs decline so take_irq()/reset_irq() fall through to
+ * the shared ivect[]/intpri[] path (and, under the I/O APIC, the RTE
+ * unmask in autoconf.c).
+ *
+ * #311: they MUST return FALSE.  take_irq() runs its real body only when
+ * `!mp_v1_1_take_irq()` is true; returning TRUE here turned take_irq() into
+ * a no-op, so ivect[]/intpri[] were never populated and no RTE was ever
+ * unmasked — device IRQs limped along on driver polling while the clock
+ * (hardclock on IRQ0, which cannot poll) never ticked, hanging every
+ * MACH_RCV_TIMEOUT on SMP.
  */
 boolean_t
 mp_v1_1_take_irq(int pic, int unit, int spl, void *intr)
@@ -269,7 +276,7 @@ mp_v1_1_take_irq(int pic, int unit, int spl, void *intr)
 	(void)unit;
 	(void)spl;
 	(void)intr;
-	return TRUE;
+	return FALSE;
 }
 
 boolean_t
@@ -279,7 +286,7 @@ mp_v1_1_reset_irq(int pic, int *unit, int *spl, void *intr)
 	(void)unit;
 	(void)spl;
 	(void)intr;
-	return TRUE;
+	return FALSE;
 }
 
 /*

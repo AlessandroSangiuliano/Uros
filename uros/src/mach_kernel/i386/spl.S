@@ -373,17 +373,23 @@ LEXT(set_spl)
 	 */
 	cmpl	$0, EXT(ioapic_enabled)
 	je	9f
-	xorl	%ecx, %ecx		/* newTPR = (new ipl == 0) ? 0 : 0x40 */
-	testl	%eax, %eax
+	/*
+	 * Program this CPU's LAPIC TPR.  IMPORTANT: the interrupt dispatch
+	 * (interrupt.S) relies on set_spl preserving %ecx (the IRQ index used
+	 * for ivect[]/iunit[] right after this call), so compute the new TPR
+	 * in %eax (dead past label 2, which pops the old level back) and reuse
+	 * %edx — never touch %ecx.
+	 */
+	testl	%eax, %eax		/* new ipl == 0 (spllo)? -> TPR 0 else 0x40 */
 	jz	7f
-	movl	$0x40, %ecx
-7:	cmpl	%ecx, CX(EXT(lapic_tpr_cache), %edx)
+	movl	$0x40, %eax
+7:	cmpl	%eax, CX(EXT(lapic_tpr_cache), %edx)
 	je	2f			/* TPR class unchanged: skip the MMIO */
-	movl	EXT(lapic_start), %eax	/* eax (new ipl) is dead past label 2 */
-	testl	%eax, %eax
-	jz	2f			/* LAPIC not mapped yet: leave cache stale */
-	movl	%ecx, CX(EXT(lapic_tpr_cache), %edx)
-	movl	%ecx, LAPIC_TPR(%eax)
+	movl	%eax, CX(EXT(lapic_tpr_cache), %edx)	/* cache[cpu] = newTPR */
+	movl	EXT(lapic_start), %edx	/* cpu no longer needed -> lapic_start */
+	testl	%edx, %edx
+	jz	2f			/* LAPIC not mapped yet */
+	movl	%eax, LAPIC_TPR(%edx)
 	jmp	2f
 9:
 #if	!MP_V1_1
@@ -553,17 +559,17 @@ LEXT(set_spl_noi)
 	 */
 	cmpl	$0, EXT(ioapic_enabled)
 	je	7f
-	xorl	%ecx, %ecx		/* newTPR = (new ipl == 0) ? 0 : 0x40 */
-	testl	%eax, %eax
+	/* TPR path — preserve %ecx (see set_spl); compute newTPR in %eax. */
+	testl	%eax, %eax		/* new ipl == 0 (spllo)? -> TPR 0 else 0x40 */
 	jz	5f
-	movl	$0x40, %ecx
-5:	cmpl	%ecx, CX(EXT(lapic_tpr_cache), %edx)
+	movl	$0x40, %eax
+5:	cmpl	%eax, CX(EXT(lapic_tpr_cache), %edx)
 	je	1f			/* TPR class unchanged: skip the MMIO */
-	movl	EXT(lapic_start), %eax
-	testl	%eax, %eax
-	jz	1f			/* LAPIC not mapped yet: leave cache stale */
-	movl	%ecx, CX(EXT(lapic_tpr_cache), %edx)
-	movl	%ecx, LAPIC_TPR(%eax)
+	movl	%eax, CX(EXT(lapic_tpr_cache), %edx)	/* cache[cpu] = newTPR */
+	movl	EXT(lapic_start), %edx	/* cpu no longer needed -> lapic_start */
+	testl	%edx, %edx
+	jz	1f			/* LAPIC not mapped yet */
+	movl	%eax, LAPIC_TPR(%edx)
 	jmp	1f
 7:
 	movw	EXT(pic_mask)(,%eax,2), %ax	/* get new pic mask */
