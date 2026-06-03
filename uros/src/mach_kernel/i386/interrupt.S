@@ -158,6 +158,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <i386/asm.h>
 #include <i386/ipl.h>
 #include <i386/pic.h>
+#include <i386/apic.h>		/* LAPIC_EOI — #311 I/O APIC dispatch */
 #include <assym.S>
 
 #if	AT386
@@ -206,6 +207,17 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 Entry(interrupt)
 
 	movl	%eax,%ecx		# stash interrupt vector number
+
+#if	NCPUS > 1
+	/*
+	 * #311: once the I/O APIC is armed, device IRQs arrive as LAPIC
+	 * vectors 0x40+irq and are EOI'd at the LAPIC, not the 8259.  Take
+	 * the clean dispatch before any 8259 / mp_v1_1 handling.
+	 */
+	cmpl	$0, EXT(ioapic_enabled)
+	jne	ioapic_dispatch
+#endif	/* NCPUS > 1 */
+
 #if	MP_V1_1
 	movl	EXT(mp_v1_1_initialized), %eax
 	cmpl	$0, %eax
@@ -327,7 +339,11 @@ return_from_interrupt:
  * corrupted before this interrupt fired.  Capture the interrupted EIP
  * (STAT_TIME=1 layout: [%esp+4] = old_kernel_esp, [old_kernel_esp+24] = EIP)
  * and panic to locate the corruption site.
+ *
+ * #311: the I/O APIC dispatch joins here with old_ipl already in %eax,
+ * after doing its own LAPIC EOI.
  */
+intr_restore_spl:
 	cmpl	$(IPLHI), %eax
 	ja	ret_intr_corrupt
 
@@ -489,3 +505,44 @@ Entry(slave_interrupt)
 	jmp	return_from_interrupt
 
 #endif	/* NCPUS > 1 && AT386 && !MP_V1_1*/
+
+#if	NCPUS > 1
+/*
+ * #311: I/O APIC interrupt dispatch.
+ *
+ * Entered with %ecx = LAPIC vector (0x40+irq).  The I/O APIC delivered this
+ * straight to a local APIC, so we reuse the existing ivect[]/intpri[]/
+ * iunit[] tables (indexed by irq) but acknowledge at the LAPIC, never the
+ * 8259.  Per-CPU masking is the LAPIC TPR programmed by set_spl (spl.S),
+ * so there is no PIC OCW2 / spurious-IRQ7 handling here at all.
+ *
+ * The EOI is issued *after* the handler returns: a level-triggered RTE
+ * (PCI, e.g. AHCI) keeps re-asserting until its driver clears the device
+ * and masks the line (irq_forward_handler -> ioapic_mask_irq), so EOI'ing
+ * before the handler ran would storm.  While the handler runs the LAPIC's
+ * in-service bit for this vector (class 4) gates every other device IRQ;
+ * IPIs (class F) still get through.
+ */
+ioapic_dispatch:
+	subl	$0x40, %ecx		# vector -> irq 0..15
+	jl	int_range_err
+	cmpl	$15, %ecx
+	jg	int_range_err
+
+	movzbl	EXT(intpri)(%ecx), %eax	# new IPL = intpri[irq]
+	call	EXT(set_spl)		# raise spl (programs TPR), enables IF
+
+	pushl	%eax			# save old IPL
+	pushl	EXT(iunit)(,%ecx,4)	# unit# -> handler arg
+	call	*EXT(ivect)(,%ecx,4)	# *ivect[irq](unit)
+	addl	$4,%esp			# pop handler arg
+	cli				# IF=0 before EOI + spl restore
+
+	movl	EXT(lapic_start), %edx	# LAPIC EOI (after the handler)
+	testl	%edx, %edx
+	jz	1f
+	movl	$0, LAPIC_EOI(%edx)
+1:
+	popl	%eax			# old IPL
+	jmp	intr_restore_spl	# shared tail: IPLHI check + set_spl_noi
+#endif	/* NCPUS > 1 */

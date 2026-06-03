@@ -623,6 +623,18 @@ machine_init(void)
 		extern void lapic_enable(void);
 		lapic_enable();
 	}
+
+	/*
+	 * #311: bring up the I/O APIC and switch device-IRQ delivery off the
+	 * global 8259 onto LAPIC vectors with per-CPU TPR masking.  Must run
+	 * after lapic_enable() (BSP LAPIC live) and with kernel_map alive
+	 * (mp_v1_1_init's phase 2 io_map'd the LAPIC just above).  Falls back
+	 * silently to the 8259 if no usable I/O APIC is present.
+	 */
+	{
+		extern void ioapic_init(void);
+		ioapic_init();
+	}
 #endif	/* MP_V1_1 */
 
 	/*
