@@ -3480,12 +3480,37 @@ signal_cpus(
 	    cpu_update_needed[which_cpu] = TRUE;
 	    simple_unlock(&update_list_p->lock);
 
-	    /* if its the kernel pmap, ignore cpus_idle */
+	    /*
+	     * #313: defer the flush for any CPU that is idle.  The update is
+	     * already queued (cpu_update_needed, above) and MARK_CPU_ACTIVE
+	     * replays it before the CPU resumes real work; pmap_tlb_ack_-
+	     * outstanding already excludes idle CPUs (they leave cpus_active)
+	     * so we never spin waiting for them.
+	     *
+	     * Previously kernel_pmap forced an immediate IPI even to idle CPUs
+	     * -- and since an idle CPU runs the idle thread on the kernel pmap
+	     * (real_pmap == kernel_pmap), that path fired on essentially every
+	     * kernel-map teardown.  It was ~100% of the SMP shootdown tax and
+	     * the bulk of the slow boot (idle AP, IPI + ack-spin per IPC).
+	     *
+	     * Deferring kernel_pmap to an idle CPU is safe: the kernel page
+	     * directory is never freed, so the idle CPU's CR3 stays valid and
+	     * only some leaf TLB entries go stale -- harmless until it touches
+	     * that VA, which the idle loop never does, and it flushes on wakeup.
+	     * We must STILL interrupt an idle CPU whose CR3 points at THIS
+	     * *user* pmap (real_pmap == pmap && pmap != kernel_pmap): a user
+	     * page directory can be torn down under it, so it has to reload CR3
+	     * now.  (Safe under #311: device IRQs go to the BSP only, so an idle
+	     * AP runs no driver ISR that could touch the freed kernel VA before
+	     * its wakeup flush -- revisit when #312 adds IRQ affinity.)
+	     */
 	    if (((cpus_idle & (1 << which_cpu)) == 0) ||
-		(pmap == kernel_pmap) || real_pmap[which_cpu] == pmap)
-	      {
+		(pmap != kernel_pmap && real_pmap[which_cpu] == pmap)) {
 		interrupt_processor(which_cpu);
-	      }
+	    }
+	    /* else: idle + deferrable -- the update is already queued in
+	     * cpu_update_list/cpu_update_needed and MARK_CPU_ACTIVE replays it
+	     * before the CPU runs real work. */
 	    use_list &= ~(1 << which_cpu);
 	}
 }
