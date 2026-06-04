@@ -428,7 +428,7 @@ INTERRUPT(0xef)
  *
  * Keep these in sync with IPI_VECTOR_* in <i386/lapic.h>:
  *   0xF0 → ipi_resched_entry
- *   0xF1 → ipi_tlb_shoot_entry
+ *   0xF1 → ipi_mp_entry		(#316: unified cpu_int_word dispatch)
  *   0xF2 → ipi_call_func_entry
  *
  * UP builds don't compile ipi.S, so this section falls back to plain
@@ -436,7 +436,7 @@ INTERRUPT(0xef)
  */
 #if	NCPUS > 1
 	IDT_ENTRY(EXT(ipi_resched_entry),   K_INTR_GATE)
-	IDT_ENTRY(EXT(ipi_tlb_shoot_entry), K_INTR_GATE)
+	IDT_ENTRY(EXT(ipi_mp_entry),        K_INTR_GATE)
 	IDT_ENTRY(EXT(ipi_call_func_entry), K_INTR_GATE)
 #else
 INTERRUPT(0xf0)
