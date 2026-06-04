@@ -62,6 +62,12 @@ extern void	lapic_eoi(void);
 extern void	lapic_send_ipi(int slot, unsigned int vector);
 extern void	lapic_send_ipi_all_excluding_self(unsigned int vector);
 
+/* #312: per-CPU LAPIC timer.  lapic_timer_calibrate() measures the local
+ * timer against the 8254 RTC and stores the per-HZ-tick INITIAL_COUNT (at
+ * divide-by-16) in lapic_timer_count. */
+extern void		lapic_timer_calibrate(void);
+extern unsigned int	lapic_timer_count;
+
 #endif	/* NCPUS > 1 */
 
 #endif	/* _I386_LAPIC_H_ */

@@ -146,6 +146,11 @@ start_other_cpus(void)
 	/* #301: BSP self-reports its per-CPU identity via %gs. */
 	printf("smp: BSP cpu_id=%d via %%gs\n", current_cpu_id());
 
+	/* #312: calibrate the LAPIC timer once, here on the BSP while it is the
+	 * sole reader of the shared 8254 (no AP is running yet).  APs reuse the
+	 * result when they arm their per-CPU periodic timer. */
+	lapic_timer_calibrate();
+
 	/* #302: self-IPI round-trip on the BSP. */
 	lapic_send_ipi(master_cpu, IPI_VECTOR_CALL_FUNC);
 

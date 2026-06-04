@@ -44,6 +44,10 @@
 #include <kern/ast.h>			/* ast_check */
 #include <kern/time_out.h>		/* hertz_tick */
 #include <i386/misc_protos.h>		/* slave_clock */
+#include <machine/mach_param.h>		/* HZ */
+#include <i386/spl.h>			/* splhi/splx */
+#include <i386/pit.h>			/* PIT ports for 8254 calibration ref */
+#include <i386/pio.h>			/* inb/outb */
 
 extern unsigned char	mp_bsp_lapic_id_get(void);
 extern unsigned char	mp_cpu_lapic_id_get(int slot);
@@ -100,6 +104,100 @@ lapic_eoi(void)
 	if (lapic_start == 0)
 		return;
 	LAPIC_REG32(LAPIC_EOI) = 0;
+}
+
+/*
+ * #312: per-CPU LAPIC timer.
+ *
+ * `lapic_timer_count` is the INITIAL_COUNT (at divide-by-16) that makes the
+ * timer expire once per HZ tick.  We derive it by timing a free-running
+ * one-shot LAPIC countdown against the 8254 PIT, which keeps counting in
+ * hardware regardless of the interrupt mask -- so the measurement needs no
+ * clock tick to advance and works with interrupts off.
+ *
+ * Calibrated ONCE on the BSP (start_other_cpus), before any AP runs, so the
+ * BSP is the sole reader of the shared 8254 (no latch race) and there is no
+ * dependency on a concurrent clock interrupt.  The LAPIC bus clock is shared
+ * by every core on a socket, so APs reuse the value.
+ *
+ * Increment 1 only calibrates and prints; the periodic timer LVT, its IDT
+ * vector and the switch off the cross-CPU MP_CLOCK IPI come next.
+ */
+unsigned int	lapic_timer_count;
+
+extern unsigned int	clknum;		/* rtclock.c: 8254 counts per second */
+extern unsigned int	clks_per_int;	/* rtclock.c: 8254 counts per HZ tick */
+
+#define	LAPIC_TIMER_DIV_16	0x03	/* SDM divide-configuration: bus/16 */
+
+/* 64-bit / 32-bit -> 32-bit via a single i386 divl (no libgcc __udivdi3). */
+static __inline__ unsigned int
+lapic_div64_32(unsigned long long num, unsigned int den)
+{
+	unsigned int q, r;
+
+	__asm__("divl %4"
+		: "=a" (q), "=d" (r)
+		: "a" ((unsigned int)num), "d" ((unsigned int)(num >> 32)),
+		  "rm" (den));
+	return q;
+}
+
+/* Latch + read 8254 counter 0 (the system tick).  Only valid with the clock
+ * interrupt masked, so no one else latches the counter concurrently. */
+#define	LAPIC_READ_8254(v)	{				\
+	outb(PITCTL_PORT, PIT_C0);				\
+	(v)  = inb(PITCTR0_PORT);				\
+	(v) |= inb(PITCTR0_PORT) << 8; }
+
+void
+lapic_timer_calibrate(void)
+{
+	unsigned int	c0, c1, end_count, lapic_ticks, pit_counts, window;
+	unsigned int	guard;
+	spl_t		s;
+
+	if (lapic_start == 0 || lapic_timer_count != 0)
+		return;			/* once per boot; APs reuse the value */
+
+	/* /16 divisor; one-shot (no PERIODIC bit), masked during measurement. */
+	LAPIC_REG32(LAPIC_TIMER_DIVIDE_CONFIG) = LAPIC_TIMER_DIV_16;
+	LAPIC_REG32(LAPIC_LVT_TIMER) = LAPIC_LVT_MASKED;
+
+	window = clknum / 125;		/* ~8 ms of 8254 counts, < one tick */
+
+	s = splhi();			/* mask the clock IRQ: sole 8254 reader */
+
+	/* Start near the top of an 8254 period so the window cannot wrap. */
+	guard = 100000000u;
+	do { LAPIC_READ_8254(c0); }
+	while (c0 < clks_per_int - clks_per_int / 32 && --guard);
+
+	LAPIC_REG32(LAPIC_INITIAL_COUNT_TIMER) = 0xFFFFFFFFu;	/* start LAPIC */
+	guard = 100000000u;
+	do { LAPIC_READ_8254(c1); }
+	while (c1 <= c0 && (c0 - c1) < window && --guard);
+
+	end_count = LAPIC_REG32(LAPIC_CURRENT_COUNT_TIMER);
+	LAPIC_REG32(LAPIC_INITIAL_COUNT_TIMER) = 0;		/* stop LAPIC */
+	splx(s);
+
+	pit_counts  = (c1 <= c0) ? (c0 - c1) : 1;	/* 8254 counts elapsed */
+	lapic_ticks = 0xFFFFFFFFu - end_count;		/* LAPIC counts elapsed */
+	if (pit_counts == 0)
+		pit_counts = 1;
+
+	/*
+	 * counts/tick = lapic_freq16 / HZ
+	 *             = (lapic_ticks * clknum / pit_counts) / HZ
+	 *             =  lapic_ticks * clks_per_int / pit_counts   (clks_per_int = clknum/HZ)
+	 */
+	lapic_timer_count =
+		lapic_div64_32((unsigned long long)lapic_ticks * clks_per_int,
+			       pit_counts);
+
+	printf("lapic timer: %u lapic / %u pit (~8ms, /16) -> %u counts/tick @ %dHz\n",
+	       lapic_ticks, pit_counts, lapic_timer_count, HZ);
 }
 
 void
