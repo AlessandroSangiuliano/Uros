@@ -236,6 +236,13 @@ slave_machine_init(void)
 		extern void fpu_sanity_check(void);
 		fpu_sanity_check();
 	}
+
+	/* #312: arm this AP's local periodic LAPIC timer (calibrated on the
+	 * BSP in start_other_cpus).  From now this CPU clocks hertz_tick()
+	 * itself instead of waiting on the cross-CPU MP_CLOCK IPI; the tick is
+	 * TPR-gated (vector 0x3f, class 3) so the first one only lands once the
+	 * AP drops to spllo in the scheduler, with a valid current thread. */
+	lapic_timer_start();
 }
 
 /*

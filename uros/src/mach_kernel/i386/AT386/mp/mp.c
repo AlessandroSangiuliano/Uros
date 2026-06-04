@@ -89,6 +89,7 @@ int	cpu_int_word[NCPUS];
 
 extern void cpu_interrupt(int cpu);
 extern int get_ncpus(void);
+extern int lapic_timer_enabled;		/* #312: per-CPU LAPIC timer active (lapic.c) */
 
 /*
  * Generate a clock interrupt on next running cpu
@@ -103,6 +104,16 @@ void
 slave_clock(void)
 {
 	register int cpu;
+
+	/*
+	 * #312: once the per-CPU LAPIC timers are calibrated and armed, every
+	 * AP clocks hertz_tick() from its own local timer (lapic_timer_handler),
+	 * so there is nothing to forward.  Skipping the MP_CLOCK IPI here is what
+	 * removes the cross-CPU clock interrupt that fired above splsched and
+	 * deadlocked a lock holder during a TLB shootdown (#317).
+	 */
+	if (lapic_timer_enabled)
+		return;
 
 	mp_disable_preemption();
 	for (cpu=cpu_number()+1; cpu<NCPUS; cpu++)

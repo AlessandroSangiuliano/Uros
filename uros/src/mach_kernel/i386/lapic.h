@@ -55,7 +55,21 @@ extern vm_offset_t lapic_start;	/* set by mp_table.c via io_map() */
 #define IPI_VECTOR_MP		0xF1
 #define IPI_VECTOR_CALL_FUNC	0xF2
 
+/*
+ * #312: per-CPU LAPIC timer vector.  Deliberately picked in priority class 3
+ * (0x30-0x3f), NOT in the IPI class 0xF0-0xF2: the binary TPR scheme in spl.S
+ * raises the LAPIC task-priority register to 0x40 (class 4) at every spl above
+ * spllo, which masks classes <= 4 -- so this timer is gated by spl exactly like
+ * the device clock (vector 0x40), while the IPIs (class F) are never masked.
+ * That gating is what makes hertz_tick()->thread_quantum_update()->thread_lock
+ * safe from the timer handler: it cannot fire while a scheduler lock is held
+ * (those run at splsched), unlike the MP_CLOCK IPI that caused #317.
+ */
+#define LAPIC_TIMER_VECTOR	0x3F
+
 #define LAPIC_SPURIOUS_VECTOR	0xFF
+
+struct i386_interrupt_state;		/* <i386/thread.h>; only a pointer is used */
 
 extern void	lapic_enable(void);
 extern void	lapic_eoi(void);
@@ -64,9 +78,15 @@ extern void	lapic_send_ipi_all_excluding_self(unsigned int vector);
 
 /* #312: per-CPU LAPIC timer.  lapic_timer_calibrate() measures the local
  * timer against the 8254 RTC and stores the per-HZ-tick INITIAL_COUNT (at
- * divide-by-16) in lapic_timer_count. */
+ * divide-by-16) in lapic_timer_count; lapic_timer_start() arms the periodic
+ * timer on the calling CPU; lapic_timer_handler() is the C handler the ipi.S
+ * stub calls; lapic_timer_enabled gates slave_clock() off once the per-CPU
+ * timers take over from the cross-CPU MP_CLOCK IPI. */
 extern void		lapic_timer_calibrate(void);
+extern void		lapic_timer_start(void);
+extern void		lapic_timer_handler(struct i386_interrupt_state *regs);
 extern unsigned int	lapic_timer_count;
+extern int		lapic_timer_enabled;
 
 #endif	/* NCPUS > 1 */
 

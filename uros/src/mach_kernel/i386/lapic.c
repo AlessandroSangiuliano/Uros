@@ -125,6 +125,13 @@ lapic_eoi(void)
  */
 unsigned int	lapic_timer_count;
 
+/*
+ * Set once on the BSP at the end of calibration.  From that point the APs own
+ * their clock through the local LAPIC timer, so slave_clock() (mp.c) stops
+ * forwarding the cross-CPU MP_CLOCK IPI -- the source of #317.  Read by mp.c.
+ */
+int		lapic_timer_enabled;
+
 extern unsigned int	clknum;		/* rtclock.c: 8254 counts per second */
 extern unsigned int	clks_per_int;	/* rtclock.c: 8254 counts per HZ tick */
 
@@ -198,6 +205,73 @@ lapic_timer_calibrate(void)
 
 	printf("lapic timer: %u lapic / %u pit (~8ms, /16) -> %u counts/tick @ %dHz\n",
 	       lapic_ticks, pit_counts, lapic_timer_count, HZ);
+
+	/*
+	 * From here on the APs drive their own clock locally (lapic_timer_start
+	 * in slave_machine_init): tell slave_clock() to stop forwarding the
+	 * cross-CPU MP_CLOCK IPI.  Set last, after lapic_timer_count is valid,
+	 * and on the BSP before any AP arms -- the AP isn't scheduling yet, so
+	 * the brief gap with neither source is harmless.
+	 */
+	if (lapic_timer_count != 0)
+		lapic_timer_enabled = 1;
+}
+
+/*
+ * lapic_timer_start() — arm this CPU's LAPIC timer to fire LAPIC_TIMER_VECTOR
+ * periodically at the HZ rate, using the count calibrated above.  Called by
+ * each AP from slave_machine_init() once its local APIC is enabled.  The
+ * timer keeps counting in hardware even while masked by the TPR; the LAPIC
+ * holds at most one tick pending in the IRR and delivers it when this CPU
+ * drops back to spllo, so a CPU that spends a stretch at high spl coalesces
+ * the missed ticks into one -- the same behaviour the masked device clock has.
+ */
+void
+lapic_timer_start(void)
+{
+	if (lapic_start == 0 || lapic_timer_count == 0)
+		return;
+
+	LAPIC_REG32(LAPIC_TIMER_DIVIDE_CONFIG) = LAPIC_TIMER_DIV_16;
+	LAPIC_REG32(LAPIC_LVT_TIMER) = LAPIC_TIMER_VECTOR | LAPIC_LVT_PERIODIC;
+	LAPIC_REG32(LAPIC_INITIAL_COUNT_TIMER) = lapic_timer_count;
+}
+
+/*
+ * lapic_timer_handler() — per-CPU clock tick (#312), reached from the ipi.S
+ * stub on LAPIC_TIMER_VECTOR.  Replaces the MP_CLOCK IPI for application
+ * processors: each AP does its own scheduler accounting via hertz_tick().
+ *
+ * rtclock_intr() (time-of-day keeping) is deliberately NOT called here -- that
+ * stays master-only on the BSP's device clock; an AP only needs the per-CPU
+ * quantum/usage accounting hertz_tick() does.
+ *
+ * Because LAPIC_TIMER_VECTOR sits in TPR class 3, the LAPIC delivered this
+ * only because the CPU is at spllo; we therefore CANNOT be nested inside a
+ * scheduler lock holder (those raise spl to splsched -> TPR 0x40, which masks
+ * class 3).  So thread_quantum_update() may take thread_lock the ordinary way
+ * -- none of the #317 cross-CPU trylock hazard applies.
+ *
+ * Preemption is held off across hertz_tick for the same reason as
+ * ipi_mp_handler (#316): hertz_tick's internal balanced enable_preemption
+ * would otherwise reach kernel_preempt_check() and context-switch from inside
+ * this interrupt (IF=0, frame on the interrupt stack).  We close with
+ * mp_enable_preemption_no_check(); the asm stub returns through ipi_ast_return
+ * (locore.S), which takes any AST_QUANTUM raised here through a proper trap
+ * frame.  `regs` is the saved i386_interrupt_state, read only for usermode/pc.
+ */
+void
+lapic_timer_handler(struct i386_interrupt_state *regs)
+{
+	boolean_t	usermode;
+
+	mp_disable_preemption();
+
+	usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
+	hertz_tick(usermode, (natural_t)regs->eip);
+
+	lapic_eoi();
+	mp_enable_preemption_no_check();
 }
 
 void
