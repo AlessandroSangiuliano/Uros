@@ -180,11 +180,19 @@ thread_quantum_update(
 			/* FIFO always has an infinite quantum */
 			myprocessor->first_quantum = TRUE;
 			s = splsched();
-			thread_lock(thread);
-			if (thread->sched_stamp != sched_tick) {
-				update_priority(thread);
+			/*
+			 * #317: try-lock, never spin on thread_lock here.
+			 * hertz_tick() runs on an AP from the cross-CPU clock
+			 * IPI with IF=0; spinning on a thread_lock another CPU
+			 * holds would stall the TLB-shootdown ack this CPU owes
+			 * and deadlock.  The priority recompute is advisory --
+			 * if the lock is busy, skip it; the next tick redoes it.
+			 */
+			if (simple_lock_try(&thread->lock)) {
+				if (thread->sched_stamp != sched_tick)
+					update_priority(thread);
+				thread_unlock(thread);
 			}
-			thread_unlock(thread);
 			splx(s);
 			ast_check();
 			return;
@@ -210,22 +218,23 @@ thread_quantum_update(
 #endif	/* NCPUS > 1 */
 		if (myprocessor->quantum <= 0) {
 			s = splsched();
-			thread_lock(thread);
-			if (thread->sched_stamp != sched_tick) {
+			if (simple_lock_try(&thread->lock)) {	/* #317: no spin */
+			    if (thread->sched_stamp != sched_tick) {
 				update_priority(thread);
-			}
-			else {
-			    if (
-				(thread->policy == POLICY_TIMESHARE) &&
-				(thread->depress_priority < 0)) {
-				    thread_timer_delta(thread);
-				    thread->sched_usage +=
-					thread->sched_delta;
-				    thread->sched_delta = 0;
-				    compute_my_priority(thread);
 			    }
+			    else {
+				if (
+				    (thread->policy == POLICY_TIMESHARE) &&
+				    (thread->depress_priority < 0)) {
+					thread_timer_delta(thread);
+					thread->sched_usage +=
+					    thread->sched_delta;
+					thread->sched_delta = 0;
+					compute_my_priority(thread);
+				}
+			    }
+			    thread_unlock(thread);
 			}
-			thread_unlock(thread);
 			splx(s);
 
 			/*
@@ -248,24 +257,25 @@ thread_quantum_update(
 		 */
 		else {
 		    s = splsched();
-		    thread_lock(thread);
-		    if (thread->sched_stamp != sched_tick) {
-			update_priority(thread);
-		    }
-		    else {
-			if (
-			    (thread->policy == POLICY_TIMESHARE) &&
-			    (thread->depress_priority < 0)) {
-				thread_timer_delta(thread);
-				if (thread->sched_delta >= USAGE_THRESHOLD) {
-				    thread->sched_usage +=
-					thread->sched_delta;
-				    thread->sched_delta = 0;
-				    compute_my_priority(thread);
-				}
+		    if (simple_lock_try(&thread->lock)) {	/* #317: no spin */
+			if (thread->sched_stamp != sched_tick) {
+			    update_priority(thread);
 			}
+			else {
+			    if (
+				(thread->policy == POLICY_TIMESHARE) &&
+				(thread->depress_priority < 0)) {
+				    thread_timer_delta(thread);
+				    if (thread->sched_delta >= USAGE_THRESHOLD) {
+					thread->sched_usage +=
+					    thread->sched_delta;
+					thread->sched_delta = 0;
+					compute_my_priority(thread);
+				    }
+			    }
+			}
+			thread_unlock(thread);
 		    }
-		    thread_unlock(thread);
 		    splx(s);
 		}
 		/*
