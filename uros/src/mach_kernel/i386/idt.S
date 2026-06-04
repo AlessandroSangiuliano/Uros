@@ -232,7 +232,18 @@ INTERRUPT(0x3b)
 INTERRUPT(0x3c)
 INTERRUPT(0x3d)
 INTERRUPT(0x3e)
+/*
+ * #312: 0x3f is the per-CPU LAPIC timer (LAPIC_TIMER_VECTOR) on SMP — a
+ * dedicated entry stub (i386/ipi.S) that runs the handler on the interrupt
+ * stack and returns through the AST epilogue, like the IPI stubs.  Class-3
+ * vector so the TPR (spl) masks it like the device clock.  UP builds keep the
+ * generic all_intrs stub.
+ */
+#if	NCPUS > 1
+	IDT_ENTRY(EXT(lapic_timer_entry), K_INTR_GATE)
+#else
 INTERRUPT(0x3f)
+#endif	/* NCPUS > 1 */
 
 INTERRUPT(0x40)
 INTERRUPT(0x41)

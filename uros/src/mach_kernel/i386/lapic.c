@@ -44,6 +44,10 @@
 #include <kern/ast.h>			/* ast_check */
 #include <kern/time_out.h>		/* hertz_tick */
 #include <i386/misc_protos.h>		/* slave_clock */
+#include <machine/mach_param.h>		/* HZ */
+#include <i386/spl.h>			/* splhi/splx */
+#include <i386/pit.h>			/* PIT ports for 8254 calibration ref */
+#include <i386/pio.h>			/* inb/outb */
 
 extern unsigned char	mp_bsp_lapic_id_get(void);
 extern unsigned char	mp_cpu_lapic_id_get(int slot);
@@ -100,6 +104,174 @@ lapic_eoi(void)
 	if (lapic_start == 0)
 		return;
 	LAPIC_REG32(LAPIC_EOI) = 0;
+}
+
+/*
+ * #312: per-CPU LAPIC timer.
+ *
+ * `lapic_timer_count` is the INITIAL_COUNT (at divide-by-16) that makes the
+ * timer expire once per HZ tick.  We derive it by timing a free-running
+ * one-shot LAPIC countdown against the 8254 PIT, which keeps counting in
+ * hardware regardless of the interrupt mask -- so the measurement needs no
+ * clock tick to advance and works with interrupts off.
+ *
+ * Calibrated ONCE on the BSP (start_other_cpus), before any AP runs, so the
+ * BSP is the sole reader of the shared 8254 (no latch race) and there is no
+ * dependency on a concurrent clock interrupt.  The LAPIC bus clock is shared
+ * by every core on a socket, so APs reuse the value.
+ *
+ * Increment 1 only calibrates and prints; the periodic timer LVT, its IDT
+ * vector and the switch off the cross-CPU MP_CLOCK IPI come next.
+ */
+unsigned int	lapic_timer_count;
+
+/*
+ * Set once on the BSP at the end of calibration.  From that point the APs own
+ * their clock through the local LAPIC timer, so slave_clock() (mp.c) stops
+ * forwarding the cross-CPU MP_CLOCK IPI -- the source of #317.  Read by mp.c.
+ */
+int		lapic_timer_enabled;
+
+extern unsigned int	clknum;		/* rtclock.c: 8254 counts per second */
+extern unsigned int	clks_per_int;	/* rtclock.c: 8254 counts per HZ tick */
+
+#define	LAPIC_TIMER_DIV_16	0x03	/* SDM divide-configuration: bus/16 */
+
+/* 64-bit / 32-bit -> 32-bit via a single i386 divl (no libgcc __udivdi3). */
+static __inline__ unsigned int
+lapic_div64_32(unsigned long long num, unsigned int den)
+{
+	unsigned int q, r;
+
+	__asm__("divl %4"
+		: "=a" (q), "=d" (r)
+		: "a" ((unsigned int)num), "d" ((unsigned int)(num >> 32)),
+		  "rm" (den));
+	return q;
+}
+
+/* Latch + read 8254 counter 0 (the system tick).  Only valid with the clock
+ * interrupt masked, so no one else latches the counter concurrently. */
+#define	LAPIC_READ_8254(v)	{				\
+	outb(PITCTL_PORT, PIT_C0);				\
+	(v)  = inb(PITCTR0_PORT);				\
+	(v) |= inb(PITCTR0_PORT) << 8; }
+
+void
+lapic_timer_calibrate(void)
+{
+	unsigned int	c0, c1, end_count, lapic_ticks, pit_counts, window;
+	unsigned int	guard;
+	spl_t		s;
+
+	if (lapic_start == 0 || lapic_timer_count != 0)
+		return;			/* once per boot; APs reuse the value */
+
+	/* /16 divisor; one-shot (no PERIODIC bit), masked during measurement. */
+	LAPIC_REG32(LAPIC_TIMER_DIVIDE_CONFIG) = LAPIC_TIMER_DIV_16;
+	LAPIC_REG32(LAPIC_LVT_TIMER) = LAPIC_LVT_MASKED;
+
+	window = clknum / 125;		/* ~8 ms of 8254 counts, < one tick */
+
+	s = splhi();			/* mask the clock IRQ: sole 8254 reader */
+
+	/* Start near the top of an 8254 period so the window cannot wrap. */
+	guard = 100000000u;
+	do { LAPIC_READ_8254(c0); }
+	while (c0 < clks_per_int - clks_per_int / 32 && --guard);
+
+	LAPIC_REG32(LAPIC_INITIAL_COUNT_TIMER) = 0xFFFFFFFFu;	/* start LAPIC */
+	guard = 100000000u;
+	do { LAPIC_READ_8254(c1); }
+	while (c1 <= c0 && (c0 - c1) < window && --guard);
+
+	end_count = LAPIC_REG32(LAPIC_CURRENT_COUNT_TIMER);
+	LAPIC_REG32(LAPIC_INITIAL_COUNT_TIMER) = 0;		/* stop LAPIC */
+	splx(s);
+
+	pit_counts  = (c1 <= c0) ? (c0 - c1) : 1;	/* 8254 counts elapsed */
+	lapic_ticks = 0xFFFFFFFFu - end_count;		/* LAPIC counts elapsed */
+	if (pit_counts == 0)
+		pit_counts = 1;
+
+	/*
+	 * counts/tick = lapic_freq16 / HZ
+	 *             = (lapic_ticks * clknum / pit_counts) / HZ
+	 *             =  lapic_ticks * clks_per_int / pit_counts   (clks_per_int = clknum/HZ)
+	 */
+	lapic_timer_count =
+		lapic_div64_32((unsigned long long)lapic_ticks * clks_per_int,
+			       pit_counts);
+
+	printf("lapic timer: %u lapic / %u pit (~8ms, /16) -> %u counts/tick @ %dHz\n",
+	       lapic_ticks, pit_counts, lapic_timer_count, HZ);
+
+	/*
+	 * From here on the APs drive their own clock locally (lapic_timer_start
+	 * in slave_machine_init): tell slave_clock() to stop forwarding the
+	 * cross-CPU MP_CLOCK IPI.  Set last, after lapic_timer_count is valid,
+	 * and on the BSP before any AP arms -- the AP isn't scheduling yet, so
+	 * the brief gap with neither source is harmless.
+	 */
+	if (lapic_timer_count != 0)
+		lapic_timer_enabled = 1;
+}
+
+/*
+ * lapic_timer_start() — arm this CPU's LAPIC timer to fire LAPIC_TIMER_VECTOR
+ * periodically at the HZ rate, using the count calibrated above.  Called by
+ * each AP from slave_machine_init() once its local APIC is enabled.  The
+ * timer keeps counting in hardware even while masked by the TPR; the LAPIC
+ * holds at most one tick pending in the IRR and delivers it when this CPU
+ * drops back to spllo, so a CPU that spends a stretch at high spl coalesces
+ * the missed ticks into one -- the same behaviour the masked device clock has.
+ */
+void
+lapic_timer_start(void)
+{
+	if (lapic_start == 0 || lapic_timer_count == 0)
+		return;
+
+	LAPIC_REG32(LAPIC_TIMER_DIVIDE_CONFIG) = LAPIC_TIMER_DIV_16;
+	LAPIC_REG32(LAPIC_LVT_TIMER) = LAPIC_TIMER_VECTOR | LAPIC_LVT_PERIODIC;
+	LAPIC_REG32(LAPIC_INITIAL_COUNT_TIMER) = lapic_timer_count;
+}
+
+/*
+ * lapic_timer_handler() — per-CPU clock tick (#312), reached from the ipi.S
+ * stub on LAPIC_TIMER_VECTOR.  Replaces the MP_CLOCK IPI for application
+ * processors: each AP does its own scheduler accounting via hertz_tick().
+ *
+ * rtclock_intr() (time-of-day keeping) is deliberately NOT called here -- that
+ * stays master-only on the BSP's device clock; an AP only needs the per-CPU
+ * quantum/usage accounting hertz_tick() does.
+ *
+ * Because LAPIC_TIMER_VECTOR sits in TPR class 3, the LAPIC delivered this
+ * only because the CPU is at spllo; we therefore CANNOT be nested inside a
+ * scheduler lock holder (those raise spl to splsched -> TPR 0x40, which masks
+ * class 3).  So thread_quantum_update() may take thread_lock the ordinary way
+ * -- none of the #317 cross-CPU trylock hazard applies.
+ *
+ * Preemption is held off across hertz_tick for the same reason as
+ * ipi_mp_handler (#316): hertz_tick's internal balanced enable_preemption
+ * would otherwise reach kernel_preempt_check() and context-switch from inside
+ * this interrupt (IF=0, frame on the interrupt stack).  We close with
+ * mp_enable_preemption_no_check(); the asm stub returns through ipi_ast_return
+ * (locore.S), which takes any AST_QUANTUM raised here through a proper trap
+ * frame.  `regs` is the saved i386_interrupt_state, read only for usermode/pc.
+ */
+void
+lapic_timer_handler(struct i386_interrupt_state *regs)
+{
+	boolean_t	usermode;
+
+	mp_disable_preemption();
+
+	usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
+	hertz_tick(usermode, (natural_t)regs->eip);
+
+	lapic_eoi();
+	mp_enable_preemption_no_check();
 }
 
 void

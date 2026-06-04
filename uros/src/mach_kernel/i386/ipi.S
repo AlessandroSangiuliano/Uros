@@ -144,6 +144,43 @@ Entry(ipi_mp_entry)
 	popl	%esp				/* restore %esp -> saved frame */
 	jmp	EXT(ipi_ast_return)		/* shared AST/preempt + iret epilogue */
 
+/*
+ * #312: per-CPU LAPIC timer (LAPIC_TIMER_VECTOR, class 3).  Like ipi_mp_entry
+ * this can raise an AST (hertz_tick -> AST_QUANTUM) and can interrupt user
+ * mode, so it shares the exact same shape: switch to this CPU's interrupt
+ * stack (esp0 points at &pcb->iss in user mode -- running the handler there
+ * would corrupt the preempted thread's saved state, BUG2) and, when not
+ * nested, return through the shared all_intrs AST/preempt epilogue so a
+ * quantum-expiry reschedule is actually taken.  Being TPR-gated it should
+ * never nest on the interrupt stack, but we keep the same defensive check.
+ */
+Entry(lapic_timer_entry)
+	IPI_ENTER
+	CPU_NUMBER(%edx)
+	movl	CX(EXT(int_stack_top),%edx),%ecx	/* this CPU's int stack top */
+	cmpl	%ecx,%esp
+	ja	2f				/* %esp above top: not on int stack */
+	movl	CX(EXT(interrupt_stack),%edx),%eax /* ... and its base */
+	cmpl	%eax,%esp
+	jbe	2f				/* %esp at/below base: not on it */
+
+	/* nested on the interrupt stack: run in place, just return */
+	pushl	%esp				/* &i386_interrupt_state */
+	call	EXT(lapic_timer_handler)
+	addl	$4,%esp
+	IPI_LEAVE
+
+2:	/* not on the interrupt stack: switch to it for the handler, then
+	 * return to the saved frame (thread kernel stack, or pcb->iss when
+	 * the timer hit user mode). */
+	xchgl	%ecx,%esp			/* %esp = int stack top; %ecx = &frame */
+	pushl	%ecx				/* save frame pointer */
+	pushl	%ecx				/* arg: &i386_interrupt_state */
+	call	EXT(lapic_timer_handler)
+	addl	$4,%esp				/* pop handler arg */
+	popl	%esp				/* restore %esp -> saved frame */
+	jmp	EXT(ipi_ast_return)		/* shared AST/preempt + iret epilogue */
+
 Entry(ipi_call_func_entry)
 	IPI_ENTER
 	call	EXT(ipi_call_func_handler)
