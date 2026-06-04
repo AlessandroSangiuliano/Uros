@@ -39,13 +39,20 @@ extern vm_offset_t lapic_start;	/* set by mp_table.c via io_map() */
 #define LAPIC_REG32(off)	(*(volatile unsigned int *)(lapic_start + (off)))
 
 /*
- * IPI vectors reserved for the kernel.  Handlers + IDT wiring land in
- * #302 increment 2.  Numbers picked above the legacy PIC range and well
- * below the LAPIC error / spurious slots so they coexist with the rest
- * of the interrupt map.
+ * IPI vectors reserved for the kernel.  Numbers picked above the legacy
+ * PIC range and well below the LAPIC error / spurious slots so they
+ * coexist with the rest of the interrupt map.
+ *
+ * #316: cpu_interrupt() (mp_stub.c) sends a single coalescing IPI on
+ * IPI_VECTOR_MP whenever a producer sets a bit in cpu_int_word[cpu]
+ * (MP_TLB_FLUSH / MP_AST / MP_CLOCK / MP_KDB).  ipi_mp_handler() drains
+ * every pending bit and dispatches it; the asm stub (ipi.S) then re-enters
+ * the shared all_intrs AST/preempt epilogue so a cross-CPU reschedule
+ * actually happens on return.  RESCHED / CALL_FUNC remain distinct vectors
+ * for the bring-up self-test and possible directed sends.
  */
 #define IPI_VECTOR_RESCHED	0xF0
-#define IPI_VECTOR_TLB_SHOOT	0xF1
+#define IPI_VECTOR_MP		0xF1
 #define IPI_VECTOR_CALL_FUNC	0xF2
 
 #define LAPIC_SPURIOUS_VECTOR	0xFF

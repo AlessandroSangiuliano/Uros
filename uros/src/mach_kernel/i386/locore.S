@@ -1282,6 +1282,17 @@ LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
 
 	popl	%esp			/* switch back to old stack */
 
+	/*
+	 * #316: IPIs that can raise an AST (ipi_mp_entry in ipi.S) jump here
+	 * after their C handler instead of a bare iret, sharing this AST /
+	 * preempt epilogue so a cross-CPU reschedule is actually taken.  %esp
+	 * points at the saved i386_interrupt_state either way: all_intrs just
+	 * restored it from the interrupt stack above; ipi_mp_entry likewise
+	 * restores it (popl %esp) after running its C handler on the interrupt
+	 * stack, and IPI_ENTER pushed an identical register frame.
+	 */
+	.globl	EXT(ipi_ast_return)
+LEXT(ipi_ast_return)
 	CPU_NUMBER(%edx)
 	movl	CX(EXT(need_ast),%edx),%eax
 	testl	%eax,%eax		/* any pending asts? */

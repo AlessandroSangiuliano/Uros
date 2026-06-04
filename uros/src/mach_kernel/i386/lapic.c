@@ -34,8 +34,16 @@
 
 #include <types.h>
 #include <i386/lapic.h>
-#include <kern/cpu_data.h>	/* current_cpu_id() */
-#include <kern/misc_protos.h>	/* printf */
+#include <kern/cpu_data.h>		/* current_cpu_id() */
+#include <kern/misc_protos.h>		/* printf */
+#include <i386/cpu_number.h>		/* cpu_number() */
+#include <machine/AT386/mp/mp.h>	/* MP_AST/MP_CLOCK/MP_KDB/MP_TLB_FLUSH, cpu_int_word */
+#include <i386/lock.h>			/* i_bit_clear */
+#include <i386/eflags.h>		/* EFL_VM */
+#include <i386/thread.h>		/* struct i386_interrupt_state */
+#include <kern/ast.h>			/* ast_check */
+#include <kern/time_out.h>		/* hertz_tick */
+#include <i386/misc_protos.h>		/* slave_clock */
 
 extern unsigned char	mp_bsp_lapic_id_get(void);
 extern unsigned char	mp_cpu_lapic_id_get(int slot);
@@ -133,13 +141,14 @@ lapic_send_ipi_all_excluding_self(unsigned int vector)
 }
 
 /*
- * IPI handlers — stubs for #302 increment 2.  Real reschedule / TLB
- * shootdown / cross-CPU call semantics land in their own sub-issues
- * (TLB shootdown is #304).  Until then, prove the path end-to-end by
- * just printing on receipt and acking via lapic_eoi().
+ * The active cross-CPU path is ipi_mp_handler() below (IPI_VECTOR_MP,
+ * sent by cpu_interrupt()).  The RESCHED and CALL_FUNC vectors are not on
+ * any current send path — they survive only for the #302 bring-up
+ * self-test (start_other_cpus sends a CALL_FUNC to the BSP) and as room
+ * for future directed sends; their handlers stay minimal.
  *
- * These run with interrupts disabled (K_INTR_GATE in the IDT) and on
- * the stack the LAPIC interrupted — no kmsg pool / no preemption / no
+ * All IPI handlers run with interrupts disabled (K_INTR_GATE in the IDT),
+ * %gs = CPU_DATA, on the stack the LAPIC interrupted — no kmsg pool / no
  * sleeping, exactly like any other hardware interrupt handler.
  */
 void
@@ -150,27 +159,133 @@ ipi_resched_handler(void)
 }
 
 /*
- * #304/#310: dispatch to pmap_tlb_shootdown_handler() (pmap.c).  That
- * routine does an unconditional local TLB flush and clears this CPU's
- * cpu_update_needed[] ack — lock-free, so it is safe no matter what the
- * interrupted code was holding.  The initiator's PMAP_UPDATE_TLBS spins
- * on that monotone ack.
+ * ipi_mp_handler() — #316: the unified cross-CPU IPI handler.
  *
- * We deliberately do NOT call the older pmap_update_interrupt(): its
- * process_pmap_updates() path reloads CR3 for dead pmaps mid-interrupt,
- * which corrupts an AP that took the IPI while running a user thread
- * (see the comment on pmap_tlb_shootdown_handler).
+ * cpu_interrupt() (mp_stub.c) sends a single coalescing IPI on
+ * IPI_VECTOR_MP after a producer in mp.c sets its reason bit in
+ * cpu_int_word[this_cpu].  Here we drain every pending bit and dispatch
+ * it.  Previously this routine (then ipi_tlb_shoot_handler) only ran the
+ * TLB shootdown, so MP_AST / MP_CLOCK / MP_KDB were silently dropped and
+ * cross-CPU reschedule / clock distribution never happened.
  *
- * Entered with IF=0 (K_INTR_GATE).  EOI is our responsibility — the
- * pmap layer predates the LAPIC and has no notion of it.
+ * Entered with IF=0 (K_INTR_GATE), %gs = CPU_DATA.  The ipi.S stub runs us
+ * on this CPU's interrupt stack (NOT the interrupted thread's %esp, which
+ * is &pcb->iss when the IPI hit user mode — running here would corrupt the
+ * saved state).  EOI is our responsibility.  On return the stub re-enters
+ * the shared all_intrs AST/preempt epilogue (ipi_ast_return, locore.S) so
+ * the AST raised below is actually taken.
+ *
+ * The whole dispatch runs with preemption DISABLED, exactly like the
+ * historical mp_intr().  ast_check() / hertz_tick() internally do balanced
+ * mp_disable/enable_preemption(); were our outer level 0, the closing
+ * enable would drop to 0 with need_ast already set and fire
+ * kernel_preempt_check() — a context switch from INSIDE this interrupt
+ * handler (IF=0, no rebuilt trap frame), corrupting the preempted user
+ * thread (its EIP comes back garbage -> #GP).  So we hold preemption off,
+ * close with mp_enable_preemption_no_check(), and let ipi_ast_return take
+ * the deferred AST through the proper trap-frame path.
+ *
+ * `regs` points at the saved i386_interrupt_state (layout-identical to an
+ * all_intrs frame) and is read only for the MP_CLOCK usermode/pc.
+ *
+ * #304/#310: the TLB shootdown is serviced UNCONDITIONALLY, exactly as the
+ * old handler did.  Its ack is tracked by cpu_update_needed[] independently
+ * of cpu_int_word, so gating on MP_TLB_FLUSH could skip a shootdown whose
+ * bit a prior invocation already cleared, hanging the initiator's spin.  An
+ * unconditional local flush is cheap and cannot regress the proven path.
+ * We never call the older pmap_update_interrupt(): its process_pmap_updates()
+ * reloads CR3 for dead pmaps mid-interrupt, corrupting an AP that took the
+ * IPI while running a user thread.
  */
 extern void pmap_tlb_shootdown_handler(void);
 
 void
-ipi_tlb_shoot_handler(void)
+ipi_mp_handler(struct i386_interrupt_state *regs)
 {
+	int		mycpu;
+	int		word;
+	boolean_t	sched_safe;
+
+	/*
+	 * Capture the INTERRUPTED preemption level before we disable it below.
+	 * thread_lock() and every other scheduler simple_lock disable
+	 * preemption while held, so a nonzero level here means the code we cut
+	 * into already holds one.  ast_check() and
+	 * hertz_tick()->thread_quantum_update() re-take exactly those locks;
+	 * running them now would self-deadlock — the IPI vector (0xF1) sits
+	 * above splsched's TPR class, so unlike the spl-gated mp_intr() of old
+	 * it is NOT masked while a CPU holds a scheduler lock.  When it is
+	 * unsafe we leave the MP_AST / MP_CLOCK bits pending and let the next
+	 * clock IPI retry them: the per-CPU accounting is approximate and the
+	 * cross-CPU reschedule ends up at most one tick late.  The TLB
+	 * shootdown is lock-free and always safe.
+	 */
+	sched_safe = (get_preemption_level() == 0);
+
+	mp_disable_preemption();
+	mycpu = cpu_number();
+
+	/* MP_TLB_FLUSH: lock-free, safe at any spl — always service. */
 	pmap_tlb_shootdown_handler();
+	i_bit_clear(MP_TLB_FLUSH, &cpu_int_word[mycpu]);
+
+	/*
+	 * Drain the coalesced event bits.  Loop only while we actually make
+	 * progress, so bits deferred for safety (left set above) do not spin
+	 * us here — they wait for a later IPI.
+	 */
+	for (;;) {
+		boolean_t did = FALSE;
+
+		word = cpu_int_word[mycpu];
+
+		/*
+		 * MP_AST: cross-CPU reschedule request (cause_ast_check).
+		 * Evaluate this CPU's run state and raise need_ast[] if a switch
+		 * is due; ipi_ast_return consumes it on the way out.
+		 */
+		if (sched_safe && (word & (1 << MP_AST))) {
+			i_bit_clear(MP_AST, &cpu_int_word[mycpu]);
+			ast_check();
+			did = TRUE;
+		}
+
+		/*
+		 * MP_CLOCK: round-robin clock distribution (slave_clock chain off
+		 * the BSP's hardclock).  Do this CPU's per-CPU scheduler
+		 * accounting — hertz_tick() decrements the quantum and raises
+		 * AST_QUANTUM when it expires — then pass the tick to the next
+		 * running CPU.
+		 */
+		if (sched_safe && (word & (1 << MP_CLOCK))) {
+			boolean_t usermode;
+
+			i_bit_clear(MP_CLOCK, &cpu_int_word[mycpu]);
+			usermode = (regs->efl & EFL_VM) ||
+				   ((regs->cs & 0x03) != 0);
+			hertz_tick(usermode, (natural_t)regs->eip);
+			slave_clock();
+			did = TRUE;
+		}
+
+		/*
+		 * MP_KDB: remote_kdb() asks this CPU to enter the debugger as a
+		 * slave.  Interactive DDB across CPUs needs console arbitration
+		 * (kdb_console is still a stub) and is deferred to the post-SMP
+		 * DDB rework; just clear the bit.  No regression: it was dropped
+		 * before.
+		 */
+		if (word & (1 << MP_KDB)) {
+			i_bit_clear(MP_KDB, &cpu_int_word[mycpu]);
+			did = TRUE;
+		}
+
+		if (!did)
+			break;
+	}
+
 	lapic_eoi();
+	mp_enable_preemption_no_check();
 }
 
 void

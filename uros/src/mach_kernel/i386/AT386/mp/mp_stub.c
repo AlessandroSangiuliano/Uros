@@ -65,14 +65,18 @@ vm_offset_t	lapic_start;
  * answering 1. */
 
 /*
- * cpu_interrupt() — send an IPI to `cpu`.  Used by interrupt_processor()
- * (mp.c) after setting MP_TLB_FLUSH in cpu_int_word[cpu]; the receiving
- * AP's IPI handler reads the bit and dispatches to pmap_update_interrupt.
+ * cpu_interrupt() — send the unified MP IPI to `cpu`.  Producers in mp.c
+ * (interrupt_processor / cause_ast_check / slave_clock / remote_kdb) first
+ * set their reason bit in cpu_int_word[cpu] (MP_TLB_FLUSH / MP_AST /
+ * MP_CLOCK / MP_KDB), then call here; ipi_mp_handler() on the target drains
+ * every pending bit and dispatches it.
  *
- * #304: route through LAPIC IPI_VECTOR_TLB_SHOOT.  Sending to ourselves
- * is a no-op — process_pmap_updates is called inline by the initiator
- * once it owns the pmap lock, so a self-IPI would deadlock on splvm.
- * Sending to a CPU that the MP table never reported is silently
+ * #316: route through LAPIC IPI_VECTOR_MP (was IPI_VECTOR_TLB_SHOOT, which
+ * only ever ran the TLB-shootdown handler — so MP_AST / MP_CLOCK / MP_KDB
+ * were silently dropped and cross-CPU reschedule never happened).  Sending
+ * to ourselves is a no-op — process_pmap_updates is called inline by the
+ * initiator once it owns the pmap lock, so a self-IPI would deadlock on
+ * splvm.  Sending to a CPU that the MP table never reported is silently
  * dropped by lapic_send_ipi (mp_cpu_lapic_id_get returns 0xFF).
  */
 void
@@ -80,7 +84,7 @@ cpu_interrupt(int cpu)
 {
 	if (cpu == cpu_number())
 		return;
-	lapic_send_ipi(cpu, IPI_VECTOR_TLB_SHOOT);
+	lapic_send_ipi(cpu, IPI_VECTOR_MP);
 }
 
 /*
