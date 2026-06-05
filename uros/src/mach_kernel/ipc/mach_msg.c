@@ -651,11 +651,23 @@ out:
  * If compiled in, the run-time toggle "enable_hotpath" below
  * eases testing & debugging
  */
-#if	NCPUS == 1 && !MACH_RT
+/*
+ * #319 axis B: the mach_msg hotpath is the L4-style synchronous-RPC hand-off
+ * (sender goes on the reply port's wait queue, direct switch to the receiver,
+ * NO run-queue round-trip) -- the ~100x SMP RPC win (#315/#319).
+ *
+ * It is now enabled on SMP too.  The previous SMP race (a receiver woken by a
+ * concurrent timeout/abort between the mqueue dequeue and the post-commit
+ * thread_lock) is closed by the pre-commit TH_WAIT check + claim under
+ * thread_lock right before the commit point (see "SMP-safe hand-off" below).
+ * MACH_RT is still excluded: the hotpath inlines scheduler internals that the
+ * real-time build reworks.
+ */
+#if	!MACH_RT
 #define ENABLE_HOTPATH 1
-#else	/* NCPUS == 1 && !MACH_RT */
+#else	/* !MACH_RT */
 #define ENABLE_HOTPATH 0
-#endif	/* NCPUS == 1 && !MACH_RT */
+#endif	/* !MACH_RT */
 
 #if	ENABLE_HOTPATH
 /*
@@ -1580,6 +1592,43 @@ mach_msg_overwrite_trap(
 		 */
 #endif	/* THREAD_SWAPPER */
 
+		/*
+		 * #319 SMP-safe hand-off.  On SMP a concurrent timeout or abort
+		 * can pull the receiver out of TH_WAIT using thread_lock alone
+		 * (clear_wait never takes imq_lock), even while it is still queued
+		 * on dest_mqueue.  Holding imq_lock(dest_mqueue) therefore does NOT
+		 * freeze the receiver's scheduler state.  Verify it is still purely
+		 * waiting and CLAIM it (set TH_RUN) atomically under thread_lock
+		 * now, before we commit anything: a racing clear_wait then sees
+		 * TH_RUN already set and no-ops its thread_setrun.  If the receiver
+		 * already left TH_WAIT (timed out / aborted / running), fall off to
+		 * the slow path -- exactly what the slow path does at ipc_mqueue.c.
+		 *
+		 * Lock order imq(dest_mqueue) -> thread(receiver) matches the
+		 * THREAD_SWAPPER block above; thread_lock is dropped again right
+		 * here, before any io_lock, so the simple-lock nesting is unchanged.
+		 * The post-commit block below relies on this claim and no longer
+		 * re-locks the receiver.
+		 */
+		s = splsched();
+		thread_lock(receiver);
+		if ((receiver->state & TH_SCHED_STATE) != TH_WAIT) {
+			thread_unlock(receiver);
+			splx(s);
+			HOT(c_mmot_bad_rcvr++);
+			goto fall_off;
+		}
+		receiver->state &= ~(TH_WAIT|TH_UNINT);
+		receiver->state |= TH_RUN;
+		receiver->at_safe_point = NOT_AT_SAFE_POINT;
+#if	NCPUS > 1
+		mp_disable_preemption();
+		receiver->last_processor = current_processor();
+		mp_enable_preemption();
+#endif	/* NCPUS > 1 */
+		thread_unlock(receiver);
+		splx(s);
+
 		/* At this point we are committed to do the "handoff". */
 		c_mach_msg_trap_switch_fast++;
 
@@ -1643,24 +1692,13 @@ mach_msg_overwrite_trap(
 			mp_enable_preemption();
 
 			/*
-			 * This receiver is no longer eligible to be
-			 * awakened and handed a message.
+			 * The receiver was already claimed (TH_RUN set,
+			 * removed from TH_WAIT) under thread_lock before the
+			 * commit point, so it is no longer eligible to be
+			 * awakened and handed a message by anyone else.  No
+			 * receiver re-lock is needed here -- doing it again
+			 * would reopen the SMP race the pre-commit claim closes.
 			 */
-			thread_lock(receiver);
-
-			assert((receiver->state & (TH_RUN|TH_WAIT)) == TH_WAIT);
-			assert(receiver != self);
-
-			receiver->state &= ~(TH_WAIT|TH_UNINT);
-
-			receiver->state |= TH_RUN;
-			receiver->at_safe_point = NOT_AT_SAFE_POINT;
-#if	NCPUS > 1	/* from thread_invoke inline */
-			mp_disable_preemption();
-			receiver->last_processor = current_processor();
-			mp_enable_preemption();
-#endif	/* NCPUS > 1 */
-			thread_unlock(receiver);
 			assert( receiver != self );
 #if	THREAD_SWAPPER
 			act_unlock(rcv_act);

@@ -263,8 +263,13 @@ ENTRY(hw_lock_lock)
 
 	movb	$1,%cl
 2:	testb	%cl,0(%edx)		/* spin checking lock value in cache */
-	jne	2b			/* non-zero means locked, keep spinning */
-	jmp	1b			/* zero means unlocked, try to grab it */
+	jz	1b			/* zero means unlocked, try to grab it */
+	pause				/* #319 Phase 1: spin-wait hint (rep;nop) --
+					 * cuts the memory-order-violation pipeline
+					 * flush on lock release + coherence/power
+					 * pressure on every contended lock (port/
+					 * imq/runq/thread) on the cross-CPU RPC path */
+	jmp	2b			/* still locked, keep spinning */
 
 /*
  *	void hw_lock_unlock(hw_lock_t)
