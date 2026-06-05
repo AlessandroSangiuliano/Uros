@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
             echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...] [--minimal]"
             echo ""
             echo "  --bench suite ...   Passa suite names a ipc_bench"
-            echo "                      (syscall intra slow inter port pp ool flipc2 all)"
+            echo "                      (syscall intra slow inter comb port pp ool flipc2 all)"
             echo "  --minimal           Omit hello_server/ipc_bench/pthread_test/cap_test/"
             echo "                      gpustat from disk bootstrap.conf (stage-2)"
             exit 0

@@ -14,6 +14,12 @@
 #                                                   # rebuild o se la run
 #                                                   # precedente è stata
 #                                                   # chiusa a metà writeback)
+#   ./scripts/run-qemu.sh --diskregen               # come sopra: rigenera il
+#                                                   # disco SOLO quando lo chiedi.
+#                                                   # Di default il disco NON è
+#                                                   # rigenerato (anche con
+#                                                   # --bench: la suite passa
+#                                                   # dal bundle stage-1)
 #
 # L'immagine disco contiene /mach_servers/ con:
 #   bootstrap.conf   — configurazione del bootstrap
@@ -49,6 +55,9 @@ EXTRA_ARGS=""
 MINIMAL_ARG=""
 NO_REBOOT="-no-reboot"
 SMP_COUNT=""
+DISK_REGEN=false    # --diskregen: opt in to regenerating disk.img this launch
+                    # (otherwise the existing disk is reused, even with --bench;
+                    # the bench suite is carried by the stage-1 bundle)
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; USE_AHCI=false; shift ;;
@@ -58,6 +67,7 @@ while [ $# -gt 0 ]; do
         --virtio) USE_VIRTIO=true; shift ;;
         --sha-ni) USE_SHA_NI=true; shift ;;
         --fresh-disk) FRESH_DISK=true; shift ;;
+        --diskregen) DISK_REGEN=true; shift ;;
         --minimal) MINIMAL_ARG="--minimal"; FRESH_DISK=true; shift ;;
         --allow-reboot) NO_REBOOT=""; shift ;;
         --smp) shift; SMP_COUNT="$1"; shift ;;
@@ -72,14 +82,23 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Regenerate disk image if --bench was specified (pass suite selection)
-# or if --fresh-disk was explicitly requested.  --bench implies fresh.
-if [ -n "$BENCH_ARGS" ]; then
-    echo "Bench suites:$BENCH_ARGS"
-    "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
-elif [ "$FRESH_DISK" = true ]; then
-    echo "Regenerating disk image (--fresh-disk$([ -n "$MINIMAL_ARG" ] && echo " --minimal"))…"
-    "$REPO_ROOT/scripts/make-disk-image.sh" $MINIMAL_ARG
+# Disk-image regeneration is opt-in: it happens only with --diskregen (or
+# --fresh-disk/--minimal, or when disk.img is missing).  Otherwise the existing
+# disk is reused -- even with --bench -- so iterating on the kernel doesn't pay
+# the disk-format cost every launch.  The bench suite reaches ipc_bench through
+# the stage-1 bundle (rebuilt below), so changing --bench suites does NOT need
+# a disk regen.
+if [ "$DISK_REGEN" = true ] || [ "$FRESH_DISK" = true ] || [ ! -f "$DISK_IMG" ]; then
+    [ -f "$DISK_IMG" ] || echo "disk.img missing — regenerating."
+    if [ -n "$BENCH_ARGS" ]; then
+        echo "Regenerating disk image (--bench):$BENCH_ARGS"
+        "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
+    else
+        echo "Regenerating disk image$([ -n "$MINIMAL_ARG" ] && echo " (--minimal)")…"
+        "$REPO_ROOT/scripts/make-disk-image.sh" $MINIMAL_ARG
+    fi
+elif [ -n "$BENCH_ARGS" ]; then
+    echo "Bench suites:$BENCH_ARGS (via bundle; disk reused — pass --diskregen to rebuild it)"
 fi
 
 # Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
