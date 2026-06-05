@@ -7,3 +7,4 @@ MODERNIZATION_TRACKER.md
 uros/src/sysenter_test/sysenter_test.S
 
 *.log
+*.console
