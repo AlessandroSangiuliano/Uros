@@ -345,6 +345,119 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 }
 
 /* ===================================================================
+ * Combined-trap (SEND|RCV) echo thread  [#320]
+ *
+ * MIG-server-style loop: the first iteration only receives; thereafter
+ * each iteration SENDS the previous reply AND RECEIVES the next request
+ * in a single mach_msg() trap.  The server therefore parks on TH_WAIT
+ * between requests, so both peers take the mach_msg combined-message
+ * hotpath (the L4-style hand-off) rather than the separate-call DTS path.
+ * =================================================================== */
+
+static void *
+combined_echo_thread_func(void *arg)
+{
+    mach_port_t		port = (mach_port_t)(unsigned long)arg;
+    bench_recv_buf_t	buf;
+    kern_return_t	kr;
+    mach_msg_option_t	opt	= MACH_RCV_MSG;	/* first time: receive only */
+    mach_msg_size_t	send_sz = 0;
+
+    for (;;) {
+	kr = mach_msg(&buf.head, opt, send_sz, sizeof(buf), port,
+		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	if (kr != MACH_MSG_SUCCESS) {
+	    if (kr == MACH_RCV_PORT_DIED  || kr == MACH_RCV_PORT_CHANGED ||
+		kr == MACH_RCV_INVALID_NAME || kr == MACH_RCV_TIMED_OUT  ||
+		kr == MACH_SEND_INVALID_DEST)
+		break;
+	    opt = MACH_RCV_MSG; send_sz = 0;	/* resync to a clean receive */
+	    continue;
+	}
+
+	/*
+	 * buf holds a request; buf.head.msgh_remote_port is the client's
+	 * send-once reply right.  Turn the buffer into a null reply to it,
+	 * then SEND it and RCV the next request in one trap.
+	 */
+	buf.head.msgh_bits	 = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	buf.head.msgh_local_port = MACH_PORT_NULL;
+	buf.head.msgh_size	 = sizeof(bench_null_msg_t);
+	buf.head.msgh_id	+= 100;
+	opt	= MACH_SEND_MSG | MACH_RCV_MSG;
+	send_sz = sizeof(bench_null_msg_t);
+    }
+    return (void *)0;
+}
+
+/* ===================================================================
+ * Combined-trap intra-task RPC benchmark  [#320]
+ *
+ * The client issues one mach_msg(MACH_SEND_MSG|MACH_RCV_MSG) per round
+ * trip (send the request to the echo port, receive the reply on its own
+ * reply port) -- exactly what a MIG simpleroutine does.  This is the path
+ * that exercises the SMP-safe hotpath (#315); bench_intra_rpc, by using
+ * separate send/recv calls, does not.
+ * =================================================================== */
+
+static void
+bench_combined_rpc(const char *label, int send_size, int iters)
+{
+    mach_port_t		echo_port, reply_port;
+    kern_return_t	kr;
+    tvalspec_t		t0, t1;
+    int			i;
+    bench_recv_buf_t	buf;	/* one buffer: send from it, receive into it */
+
+    kr = mach_port_allocate(mach_task_self(),
+			    MACH_PORT_RIGHT_RECEIVE, &echo_port);
+    if (kr) { printf("  %s: port alloc failed %d\n", label, kr); return; }
+    kr = mach_port_insert_right(mach_task_self(), echo_port, echo_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+    if (kr) { printf("  %s: insert right failed %d\n", label, kr); return; }
+    reply_port = mach_reply_port();
+
+    {
+	pthread_t echo_th;
+	pthread_create(&echo_th, NULL, combined_echo_thread_func,
+		       (void *)(unsigned long)echo_port);
+	pthread_detach(echo_th);
+    }
+    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+    for (i = 0; i < WARMUP_ITERS; i++) {
+	buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	buf.head.msgh_size	  = send_size;
+	buf.head.msgh_remote_port = echo_port;
+	buf.head.msgh_local_port  = reply_port;
+	buf.head.msgh_id	  = 1;
+	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
+		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+
+    get_time(&t0);
+    for (i = 0; i < iters; i++) {
+	buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	buf.head.msgh_size	  = send_size;
+	buf.head.msgh_remote_port = echo_port;
+	buf.head.msgh_local_port  = reply_port;
+	buf.head.msgh_id	  = 1;
+	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
+		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    get_time(&t1);
+
+    print_result(label, elapsed_ns(&t0, &t1), iters);
+
+    mach_port_destroy(mach_task_self(), echo_port);
+    mach_port_destroy(mach_task_self(), reply_port);
+}
+
+/* ===================================================================
  * Inter-task: child echo entry point
  *
  * This function runs in the CHILD task.  It must not call any
@@ -1586,6 +1699,7 @@ bench_mach_print(int iters)
 #define SUITE_DISK	(1u <<  7)
 #define SUITE_MEM	(1u <<  8)
 #define SUITE_FLIPC2	(1u <<  9)
+#define SUITE_COMB	(1u << 10)
 #define SUITE_ALL	0xFFFFFFFFu
 
 static int
@@ -1613,6 +1727,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "disk"))    mask |= SUITE_DISK;
 	else if (streq(argv[i], "mem"))	    mask |= SUITE_MEM;
 	else if (streq(argv[i], "flipc2"))  mask |= SUITE_FLIPC2;
+	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
     }
     return mask ? mask : SUITE_ALL;
 }
@@ -1738,6 +1853,24 @@ main(int argc, char **argv)
 			(int)sizeof(bench_1024_msg_t), BENCH_ITERS);
 	bench_inter_rpc("4096B inline RPC",
 			(int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Combined-trap (SEND|RCV) RPC -- exercises the mach_msg hotpath [#320]
+     * --------------------------------------------------------- */
+    if (suites & SUITE_COMB) {
+	printf("--- Combined SEND|RCV intra-task (hotpath) ---\n");
+
+	bench_combined_rpc("null RPC",
+			   (int)sizeof(bench_null_msg_t), BENCH_ITERS);
+	bench_combined_rpc("128B inline RPC",
+			   (int)sizeof(bench_128_msg_t), BENCH_ITERS);
+	bench_combined_rpc("1024B inline RPC",
+			   (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
+	bench_combined_rpc("4096B inline RPC",
+			   (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
 
 	printf("\n");
     }
