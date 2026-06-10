@@ -107,12 +107,17 @@ static __inline__ int cpu_number(void)
 {
 	register int cpu;
 
-	__asm__ volatile ("movl " CC_SYM_PREFIX "lapic_id, %0\n"
-			  "	movl 0(%0), %0\n"
-			  "	shrl %1, %0\n"
-			  "	andl %2, %0"
-		    : "=r" (cpu)
-		    : "i" (LAPIC_ID_SHIFT), "i" (LAPIC_ID_MASK));
+	/*
+	 * #313: read the logical cpu number from cr3 bits 0-2 instead of the
+	 * LAPIC ID register.  The LAPIC is MMIO — reading it traps+emulates
+	 * under KVM (no APICv) and is uncached/serializing on bare metal.  The
+	 * cpu number is kept in cr3 (set_cr3 stamps it, get_cr3 masks it,
+	 * slave_start seeds it from the LAPIC); reading cr3 does not VM-exit
+	 * under EPT and costs a few cycles.
+	 */
+	__asm__ volatile ("movl %%cr3, %0\n"
+			  "	andl $0x7, %0"
+		    : "=r" (cpu));
 
 	return(cpu);
 }
