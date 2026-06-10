@@ -93,6 +93,15 @@
 #include <kern/misc_protos.h>
 
 #include <mach_kdb.h>
+#include <kern/cpu_data.h>		/* #321: cpu_data_t for the offset check */
+
+/*
+ * #321: the C cpu_number() in <i386/cpu_number.h> reads %gs:CPU_DATA_CPU_ID_GS,
+ * a hand-mirrored offset (the real header can't be included there -- include
+ * cycle).  Fail the build loudly if cpu_data_t's layout drifts from it.
+ */
+_Static_assert(__builtin_offsetof(cpu_data_t, cpu_id) == CPU_DATA_CPU_ID_GS,
+	       "CPU_DATA_CPU_ID_GS in <i386/cpu_number.h> is out of sync with cpu_data_t");
 
 /*
  * The i386 needs an interrupt stack to keep the PCB stack from being

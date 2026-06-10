@@ -318,6 +318,8 @@ main(
 		offsetof(cpu_data_t *, interrupt_level));
         DECLARE("CPD_SIMPLE_LOCK_COUNT",
 		offsetof(cpu_data_t *,simple_lock_count));
+        DECLARE("CPU_DATA_CPU_ID",		/* #321: asm CPU_NUMBER() reads %gs:CPU_DATA_CPU_ID */
+		offsetof(cpu_data_t *, cpu_id));
 
 	DECLARE("PTES_PER_PAGE",	NPTES);
 	DECLARE("INTEL_PTE_KERNEL",	INTEL_PTE_VALID|INTEL_PTE_WRITE);
