@@ -682,6 +682,21 @@ LEXT(svstart)
 	movl	%eax, %cr3
 #endif	/* MBUS */
 
+#if	(NCPUS > 1) && !MBUS && !CBUS
+	/*
+	 * #313: seed this AP's logical cpu number into cr3 bits 0-2 from the
+	 * LAPIC ID (the only reliable source this early) so cpu_number(), which
+	 * now reads cr3 instead of the LAPIC MMIO register, returns the right
+	 * value from here on.  Mirrors the CBUS/MBUS stamps above.
+	 */
+	CPU_NUMBER_FROM_LAPIC(%eax)
+	andl	$0x7, %eax		/* cr3 only carries 3 cpu bits */
+	movl	%cr3, %edx
+	andl	$(~0x7), %edx		/* clear any stale low bits */
+	orl	%eax, %edx
+	movl	%edx, %cr3		/* cr3 now encodes the cpu number */
+#endif	/* (NCPUS > 1) && !MBUS && !CBUS */
+
 	CPU_NUMBER(%eax)
 	movl	CX(EXT(interrupt_stack),%eax),%esp /* get stack */
 	addl	$(INTSTACK_SIZE),%esp	/* point to top */

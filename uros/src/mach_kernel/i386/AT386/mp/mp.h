@@ -91,7 +91,21 @@
 
 #else	/* MBUS || CBUS */
 #include <i386/apic.h>
+/*
+ * #313: cpu_number() formerly read the LAPIC ID register (MMIO) on every
+ * syscall / trap return / context switch.  Under KVM without APICv each read
+ * is trapped and emulated (~16 vm_exits per RPC); even on bare metal it is an
+ * uncached, serializing MMIO access.  The logical cpu number already lives in
+ * cr3 bits 0-2 — set_cr3 stamps it, get_cr3 (and the copyout fault path) mask
+ * it out, flush_tlb preserves it, and slave_start seeds it once from the
+ * LAPIC.  So read it straight from cr3: that does not VM-exit under EPT and
+ * costs a few cycles.  CPU_NUMBER_FROM_LAPIC stays for the one-time boot seed.
+ */
 #define CPU_NUMBER(r) \
+	movl	%cr3, r ; \
+	andl	$0x7, r
+
+#define CPU_NUMBER_FROM_LAPIC(r) \
     	movl	EXT(lapic_id), r  ; \
     	movl	0(r),r		  ; \
     	shrl	$LAPIC_ID_SHIFT, r; \
