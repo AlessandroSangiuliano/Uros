@@ -1627,7 +1627,15 @@ mach_msg_overwrite_trap(
 		mp_enable_preemption();
 #endif	/* NCPUS > 1 */
 		thread_unlock(receiver);
-		splx(s);
+		/*
+		 * #317 lost-wakeup fix (window B): do NOT splx() here.  Keep
+		 * splsched() held continuously from the receiver claim above
+		 * all the way through switch_context() below, so the sender
+		 * cannot be involuntarily preempted mid-hand-off after it is
+		 * marked TH_WAIT but before it switches to the already-claimed
+		 * receiver (which would orphan that receiver).  The single
+		 * matching splx(s) happens once, after the switch.
+		 */
 
 		/* At this point we are committed to do the "handoff". */
 		c_mach_msg_trap_switch_fast++;
@@ -1655,6 +1663,29 @@ mach_msg_overwrite_trap(
 		self->ith_option = option;
 		self->ith_scatter_list = MACH_MSG_BODY_NULL;
 		self->ith_scatter_list_size = scatter_list_size;
+
+		/*
+		 * #317 lost-wakeup fix (window A): mark the sender TH_WAIT NOW,
+		 * while we still hold imq_lock(rcv_mqueue).  A concurrent reply
+		 * deliverer must take imq_lock(rcv_mqueue) to dequeue us from
+		 * imq_threads, so it is guaranteed to observe TH_WAIT and route
+		 * the wakeup through thread_go()/thread_dispatch() instead of
+		 * no-opping on a still-TH_RUN sender and losing it.  This mirrors
+		 * the slow path (ipc_mqueue_receive sets TH_WAIT under imq_lock
+		 * before unlocking).  Whichever of thread_go() (deliverer) and
+		 * thread_dispatch() (receiver, post-switch) runs first, the
+		 * sender ends up on a run queue: see thread_go() / thread_dispatch
+		 * in kern/sched_prim.c.
+		 */
+		thread_lock(self);
+		assert(!(self->state & TH_ABORT));
+		assert(self->state & TH_RUN);
+		self->state |= TH_WAIT;
+		self->at_safe_point = SAFE_EXTERNAL_RECEIVE;
+		self->reason = 0;		/* inline thread_invoke */
+		self->wait_result = -1;		/* for later assertions */
+		thread_unlock(self);
+
 		imq_unlock(rcv_mqueue);
 
 		/*
@@ -1683,8 +1714,12 @@ mach_msg_overwrite_trap(
 	
 			check_simple_locks();
 
-			s = splsched();
-
+			/*
+			 * #317 fix: spl is STILL held from the receiver claim
+			 * above -- do NOT splsched() again here, and do not
+			 * lower it until after switch_context().  's' already
+			 * holds the caller's spl from that earlier splsched().
+			 */
 			mp_disable_preemption();
 			/* from thread_block_reason() */
 			ast_off(cpu_number(),
@@ -1703,20 +1738,12 @@ mach_msg_overwrite_trap(
 #if	THREAD_SWAPPER
 			act_unlock(rcv_act);
 #endif	/* THREAD_SWAPPER */
-	
-			/*
-			 * Prepare self (the sender) to block.
-			 */
-			thread_lock(self);
-			assert(!(self->state & TH_ABORT));
-			assert(self->wait_result = -1); /* for assertions */
-			assert(self->state & TH_RUN);
-			self->state |= TH_WAIT;
-			self->at_safe_point = SAFE_EXTERNAL_RECEIVE;
-			self->reason = 0;	/* inline thread_invoke */
-			thread_unlock(self);
 
 			/*
+			 * self (the sender) was already marked TH_WAIT under
+			 * imq_lock(rcv_mqueue) above (window-A fix), so there is
+			 * nothing left to prepare here -- just switch.
+			 *
 			 * Switch to the receiver now.
 			 * Inlined: thread_invoke(self, receiver, 0);
 			 */
