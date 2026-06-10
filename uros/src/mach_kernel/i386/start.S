@@ -682,22 +682,12 @@ LEXT(svstart)
 	movl	%eax, %cr3
 #endif	/* MBUS */
 
-#if	(NCPUS > 1) && !MBUS && !CBUS
 	/*
-	 * #313: seed this AP's logical cpu number into cr3 bits 0-2 from the
-	 * LAPIC ID (the only reliable source this early) so cpu_number(), which
-	 * now reads cr3 instead of the LAPIC MMIO register, returns the right
-	 * value from here on.  Mirrors the CBUS/MBUS stamps above.
+	 * #321: %gs is not CPU_DATA yet (it is loaded near the end of svstart,
+	 * after the per-CPU GDT), so read the cpu number from the LAPIC here at
+	 * boot.  Once %gs is loaded, every other CPU_NUMBER reads %gs:cpu_id.
 	 */
 	CPU_NUMBER_FROM_LAPIC(%eax)
-	andl	$0x7, %eax		/* cr3 only carries 3 cpu bits */
-	movl	%cr3, %edx
-	andl	$(~0x7), %edx		/* clear any stale low bits */
-	orl	%eax, %edx
-	movl	%edx, %cr3		/* cr3 now encodes the cpu number */
-#endif	/* (NCPUS > 1) && !MBUS && !CBUS */
-
-	CPU_NUMBER(%eax)
 	movl	CX(EXT(interrupt_stack),%eax),%esp /* get stack */
 	addl	$(INTSTACK_SIZE),%esp	/* point to top */
 	xorl	%ebp,%ebp		/* for completeness */
@@ -715,7 +705,7 @@ LEXT(svstart)
 					/* pointer returned in %eax */
 	subl	$4,%esp			/* get space to build pseudo-descriptors */
 	
-	CPU_NUMBER(%eax)
+	CPU_NUMBER_FROM_LAPIC(%eax)	/* #321: %gs not CPU_DATA yet (GDT not loaded) */
 	movw	$(GDTSZ*8-1),0(%esp)	/* set GDT size in GDT descriptor */
 	movl	CX(EXT(mp_gdt),%eax),%edx
 	movl	%edx,2(%esp)		/* point to local GDT */

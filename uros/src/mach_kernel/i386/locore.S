@@ -2449,9 +2449,8 @@ copyout_retry:
 #endif	/* defined(AT386) && defined(i386) */
 
 	movl	%cr3,%ecx		/* point to page directory */
-#if	NCPUS > 1 && AT386
-	andl	$(~0x7), %ecx		/* remove cpu number */
-#endif	/* NCPUS > 1 && AT386 */
+					/* #321: cr3 no longer carries the cpu */
+					/* number (now in %gs:cpu_id), so no mask */
 	movl	%edi,%eax		/* get page directory bits */
 	shrl	$(PDESHIFT),%eax	/* from user address */
 	movl	KERNELBASE(%ecx,%eax,4),%ecx
@@ -2610,12 +2609,10 @@ ENTRY(_fprestore)
  * Set cr3
  */
 ENTRY(set_cr3)
-#if	NCPUS > 1 && AT386
-	CPU_NUMBER(%eax)
-	orl	4(%esp), %eax
-#else	/* NCPUS > 1 && AT386 */
 	movl	4(%esp),%eax		/* get new cr3 value */
-#endif	/* NCPUS > 1 && AT386 */
+					/* #321: cr3 no longer encodes the cpu */
+					/* number (now %gs:cpu_id) -- leave its */
+					/* low bits clear so PCID can use them */
 	/*
 	 * Don't set PDBR to a new value (hence invalidating the
 	 * "paging cache") if the new value matches the current one.
@@ -2631,10 +2628,8 @@ ENTRY(set_cr3)
  * Read cr3
  */
 ENTRY(get_cr3)
-	movl	%cr3,%eax
-#if	NCPUS > 1 && AT386
-	andl	$(~0x7), %eax		/* remove cpu number */
-#endif	/* NCPUS > 1 && AT386 */
+	movl	%cr3,%eax		/* #321: cr3 is pure PDBR now (cpu */
+					/* number lives in %gs:cpu_id), no mask */
 	ret
 
 /*

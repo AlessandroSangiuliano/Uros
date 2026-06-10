@@ -79,6 +79,7 @@
 #include <platforms.h>
 #include <mp_v1_1.h>
 #include <cpus.h>
+#include <mach_rt.h>		/* #321: MACH_RT selects the cpu_data_t layout */
 
 #if	NCPUS > 1
 
@@ -103,21 +104,36 @@ extern int lapic_id;
  * is the only place this function is defined; static inline keeps the body
  * visible for inlining without producing duplicate strong symbols.
  */
+/*
+ * #321: offset of cpu_id within cpu_data_t (the %gs per-CPU area).  cpu_id is
+ * the last field of cpu_data_t <kern/cpu_data.h>; the layout depends on
+ * MACH_RT (preemption_level present).  That header can't be included here (it
+ * includes <kern/cpu_number.h> back, a cycle), so the value is mirrored and
+ * checked against offsetof(cpu_data_t, cpu_id) by a _Static_assert in
+ * i386/mp_desc.c.  The asm CPU_NUMBER() in <mp.h> uses the genassym-computed
+ * CPU_DATA_CPU_ID instead.
+ */
+#if	MACH_RT
+#define	CPU_DATA_CPU_ID_GS	16	/* active_thread,preempt,slk,intr,cpu_id */
+#else	/* MACH_RT */
+#define	CPU_DATA_CPU_ID_GS	12	/* active_thread,slk,intr,cpu_id */
+#endif	/* MACH_RT */
+
 static __inline__ int cpu_number(void)
 {
 	register int cpu;
 
 	/*
-	 * #313: read the logical cpu number from cr3 bits 0-2 instead of the
-	 * LAPIC ID register.  The LAPIC is MMIO — reading it traps+emulates
-	 * under KVM (no APICv) and is uncached/serializing on bare metal.  The
-	 * cpu number is kept in cr3 (set_cr3 stamps it, get_cr3 masks it,
-	 * slave_start seeds it from the LAPIC); reading cr3 does not VM-exit
-	 * under EPT and costs a few cycles.
+	 * #321: read the logical cpu number from the per-CPU data area via
+	 * %gs:cpu_id (the GDT CPU_DATA descriptor points %gs at this CPU's
+	 * &cpu_data[id]).  A single cached segment-relative load: no LAPIC MMIO
+	 * (traps+emulates under KVM, uncached on bare metal) and no cr3 trick
+	 * (8-CPU cap, clashes with PCID).  %gs is established before any C code
+	 * runs (start.S vstart on the BSP, svstart on each AP).
 	 */
-	__asm__ volatile ("movl %%cr3, %0\n"
-			  "	andl $0x7, %0"
-		    : "=r" (cpu));
+	__asm__ volatile ("movl %%gs:%c1, %0"
+		    : "=r" (cpu)
+		    : "i" (CPU_DATA_CPU_ID_GS));
 
 	return(cpu);
 }
