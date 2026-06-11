@@ -151,7 +151,7 @@ kernel_trap(urmach_thread_set_cleartid,-51,1)
  *	in (possibly shared) user memory.  Replaces the heavy Mach-semaphore
  *	block path for FLIPC / POSIX sync.  See <mach/urmach_futex.h>.
  */
-kernel_trap(urmach_futex,-42,4)
+kernel_trap(urmach_futex,-42,5)
 
 kernel_trap(mach_reply_port,-26,0)
 kernel_trap(mach_thread_self,-27,0)

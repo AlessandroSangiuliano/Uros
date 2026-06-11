@@ -516,6 +516,7 @@ semaphore_dereference(semaphore_t semaphore)
  */
 #define URMACH_FUTEX_WAIT	0
 #define URMACH_FUTEX_WAKE	1
+#define URMACH_FUTEX_WAKE_WAIT	2
 
 static event_t
 futex_key(unsigned int *uaddr)
@@ -597,22 +598,93 @@ futex_wake(unsigned int *uaddr, int nwake)
 }
 
 /*
+ *	futex_wake_wait — combined wake + wait with a DIRECT hand-off.
+ *
+ *	Wake one waiter on wake_uaddr and block on wait_uaddr (if its value
+ *	still == wait_val), switching *straight* to the woken thread instead
+ *	of going through the run queue + reschedule.  This is the futex
+ *	primitive for a synchronous hand-off (ping-pong / RPC reply, FLIPC's
+ *	reply-then-wait pattern) — it removes the block->resume scheduler
+ *	round-trip (~tens of us) the same way the mach_msg L4 hotpath does.
+ */
+static kern_return_t
+futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
+		unsigned int wait_val, unsigned int timeout_ms)
+{
+	thread_t	self = current_thread();
+	event_t		wait_key, wake_key;
+	unsigned int	cur;
+	spl_t		s;
+	int		ticks = 0;
+
+	wait_key = futex_key(wait_uaddr);
+	wake_key = futex_key(wake_uaddr);
+	if (wait_key == (event_t) 0 || wake_key == (event_t) 0)
+		return KERN_INVALID_ADDRESS;
+
+	if (timeout_ms != 0) {
+		unsigned int uhz = (unsigned int) hz;
+		ticks = (int) ((timeout_ms / 1000) * uhz +
+			       ((timeout_ms % 1000) * uhz) / 1000);
+		if (ticks == 0)
+			ticks = 1;
+	}
+
+	s = splsched();
+	assert_wait(wait_key, TRUE);
+
+	if (copyin((const char *) wait_uaddr, (char *) &cur, sizeof(cur)) != 0) {
+		clear_wait(self, THREAD_AWAKENED, TRUE);
+		splx(s);
+		(void) futex_wake(wake_uaddr, 1);
+		return KERN_INVALID_ADDRESS;
+	}
+	if (cur != wait_val) {
+		/* wait condition already gone: don't block, but still wake. */
+		clear_wait(self, THREAD_AWAKENED, TRUE);
+		splx(s);
+		(void) futex_wake(wake_uaddr, 1);
+		return KERN_NOT_WAITING;
+	}
+	if (ticks != 0)
+		thread_set_timeout(ticks);
+	splx(s);
+
+	/*
+	 * Try to hand the CPU straight to a parked waiter on wake_uaddr
+	 * (self is already asserted-wait, so it parks and resumes here when
+	 * woken).  If none is parked, the helper either woke a racing waiter
+	 * the normal way or found nobody — either way we block normally.
+	 */
+	if (!thread_handoff_to_parked_waiter(wake_key))
+		thread_block((void (*)(void)) 0);
+
+	if (self->wait_result == THREAD_TIMED_OUT)
+		return KERN_OPERATION_TIMED_OUT;
+	return KERN_SUCCESS;
+}
+
+/*
  *	Routine:	urmach_futex	(trap)
  *
  *	WAIT(uaddr,val,timeout_ms): if *uaddr == val, block until woken or
  *	    the timeout (ms; 0 = forever) elapses.  Returns KERN_NOT_WAITING
  *	    if the value already differs (caller re-checks and retries).
  *	WAKE(uaddr,n):  wake up to n waiters on uaddr (n==1 -> exactly one).
+ *	WAKE_WAIT(uaddr=wait,val=wait_val,timeout,wake_uaddr): wake one waiter
+ *	    on wake_uaddr and block on `uaddr` (==val), with a direct hand-off.
  */
 kern_return_t
 urmach_futex(unsigned int *uaddr, int op, unsigned int val,
-	     unsigned int timeout_ms)
+	     unsigned int timeout_ms, unsigned int *wake_uaddr)
 {
 	switch (op) {
 	case URMACH_FUTEX_WAIT:
 		return futex_wait(uaddr, val, timeout_ms);
 	case URMACH_FUTEX_WAKE:
 		return futex_wake(uaddr, (int) val);
+	case URMACH_FUTEX_WAKE_WAIT:
+		return futex_wake_wait(wake_uaddr, uaddr, val, timeout_ms);
 	default:
 		return KERN_INVALID_ARGUMENT;
 	}

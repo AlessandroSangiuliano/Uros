@@ -1104,6 +1104,94 @@ thread_wakeup_prim(
 	splx(s);
 }
 
+/*
+ *	thread_handoff_to_parked_waiter:
+ *
+ *	Futex (#324) direct hand-off.  Find one thread waiting on `event`
+ *	and, if it is *fully parked* (its context is saved -- detectable
+ *	because thread_dispatch() clears TH_RUN once the blocked thread has
+ *	been switched away), switch directly to it via thread_invoke(),
+ *	bypassing the run-queue + reschedule round-trip.  The caller must
+ *	have already done assert_wait() on its own wait event, so the
+ *	current thread parks here (keeping its stack) and resumes when later
+ *	woken.
+ *
+ *	SMP-safe: a thread still in the assert_wait()->thread_block() window
+ *	is TH_WAIT|TH_RUN (not yet parked); we must NOT switch to it (its
+ *	saved context is stale), so we wake it the normal way instead.
+ *
+ *	Returns TRUE if the hand-off happened (current thread blocked and was
+ *	later resumed).  Returns FALSE if no parked waiter was found (the
+ *	caller should fall back to a normal block); a found-but-not-parked
+ *	waiter is woken normally and FALSE is returned.
+ */
+boolean_t
+thread_handoff_to_parked_waiter(
+	event_t		event)
+{
+	register queue_t	q;
+	register int		index;
+	register thread_t	thread, next_th;
+	register thread_t	self = current_thread();
+	register simple_lock_t	lock;
+	thread_t		victim = THREAD_NULL;
+	boolean_t		parked;
+	spl_t			s;
+
+	index = wait_hash(event);
+	q = &wait_queue[index];
+	s = splsched();
+	lock = simple_lock_addr(wait_lock[index]);
+
+	simple_lock(lock);
+	thread = (thread_t) queue_first(q);
+	while (!queue_end(q, (queue_entry_t)thread)) {
+		next_th = (thread_t) queue_next((queue_t) thread);
+		/* Skip self: with a same-word wake+wait the caller has just
+		 * asserted_wait on this very key, so it is in this queue too. */
+		if (thread->wait_event == event && thread != self) {
+			remqueue(q, (queue_entry_t) thread);
+			thread->wait_event = (event_t) WAKING_EVENT;
+			victim = thread;
+			break;
+		}
+		thread = next_th;
+	}
+	simple_unlock(lock);
+
+	if (victim == THREAD_NULL) {
+		splx(s);
+		return FALSE;
+	}
+
+	thread_lock(victim);
+	reset_timeout_check(&victim->timer);
+	victim->wait_event = NO_EVENT;
+	victim->wait_result = THREAD_AWAKENED;
+	victim->at_safe_point = NOT_AT_SAFE_POINT;
+
+	/* Parked == TH_WAIT and nothing else (not running, suspended, etc.). */
+	parked = ((victim->state & (TH_WAIT|TH_SUSP|TH_RUN|TH_UNINT)) == TH_WAIT);
+	victim->state = (victim->state &~ TH_WAIT) | TH_RUN;
+
+	if (!parked) {
+		/* Still in its block window -- wake the normal way. */
+		thread_setrun(victim, TRUE, TAIL_Q);
+		thread_unlock(victim);
+		splx(s);
+		return FALSE;
+	}
+	thread_unlock(victim);
+
+	/* Direct switch.  self (already TH_WAIT via the caller's assert_wait)
+	 * is disposed -- and so parked -- by the victim's own post-switch
+	 * thread_dispatch(); self resumes here when it is later woken. */
+	thread_invoke(self, victim, 0);
+
+	splx(s);
+	return TRUE;
+}
+
 #if	NCPUS > 1
 /*
  *	thread_bind:

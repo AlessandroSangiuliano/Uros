@@ -39,15 +39,20 @@
 /* op codes — MUST match the kernel (kern/sync_sema.c) */
 #define URMACH_FUTEX_WAIT	0	/* if *uaddr==val, block (timeout_ms; 0=forever) */
 #define URMACH_FUTEX_WAKE	1	/* wake up to `val` waiters (val==1 -> exactly one) */
+#define URMACH_FUTEX_WAKE_WAIT	2	/* wake one on wake_uaddr + block on uaddr==val,
+					 * with a direct hand-off (RPC/ping-pong) */
 
 /*
- * urmach_futex(uaddr, op, val, timeout_ms)
- *   WAIT: KERN_SUCCESS woken, KERN_OPERATION_TIMED_OUT timed out,
- *         KERN_NOT_WAITING *uaddr already != val (retry),
- *         KERN_INVALID_ADDRESS bad/non-resident address.
- *   WAKE: KERN_SUCCESS.
+ * urmach_futex(uaddr, op, val, timeout_ms, wake_uaddr)
+ *   WAIT:      block if *uaddr==val.  wake_uaddr unused.
+ *   WAKE:      wake `val` waiters on uaddr.  wake_uaddr unused.
+ *   WAKE_WAIT: wake one waiter on wake_uaddr, then block on *uaddr==val,
+ *              switching straight to the woken thread (no run-queue trip).
+ * Returns: KERN_SUCCESS woken, KERN_OPERATION_TIMED_OUT, KERN_NOT_WAITING
+ * (value already changed — retry), KERN_INVALID_ADDRESS.
  */
 extern kern_return_t urmach_futex(unsigned int *uaddr, int op,
-				  unsigned int val, unsigned int timeout_ms);
+				  unsigned int val, unsigned int timeout_ms,
+				  unsigned int *wake_uaddr);
 
 #endif	/* _MACH_URMACH_FUTEX_H_ */

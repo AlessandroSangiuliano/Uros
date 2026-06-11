@@ -192,20 +192,21 @@ flipc2_stop_echo(struct flipc2_echo_args *args, flipc2_channel_t fwd_ch,
  * =================================================================== */
 
 static volatile unsigned int fx_turn;	/* 0 = main's turn, 1 = peer's turn */
+static volatile int fx_running;		/* cleared by main to stop the peer  */
 static int          fx_iters;
 static mach_port_t  fx_sem_a, fx_sem_b;
 
 static void *
 fx_futex_peer(void *arg)
 {
-    int i;
     (void)arg;
-    for (i = 0; i < fx_iters; i++) {
-        while (fx_turn == 0)
-            urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAIT, 0, 0);
-        fx_turn = 0;
+    while (fx_running) {
+        fx_turn = 0;			/* hand the turn to main */
         FLIPC2_WRITE_FENCE();
-        urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE, 1, 0);
+        /* wake main + block (with direct hand-off) while it stays main's turn */
+        while (fx_turn == 0 && fx_running)
+            urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE_WAIT,
+                         0, 0, (unsigned int *)&fx_turn);
     }
     return (void *)0;
 }
@@ -236,21 +237,29 @@ bench_futex_pingpong(void)
 
     /* ---- urmach_futex ping-pong ---- */
     fx_turn = 0;
+    fx_running = 1;
     if (pthread_create(&ct, NULL, fx_futex_peer, NULL) != 0) {
         printf("  futex: pthread_create failed\n");
         return;
     }
     flipc2_get_time(&t0);
     for (i = 0; i < fx_iters; i++) {
-        while (fx_turn == 1)
-            urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAIT, 1, 0);
-        fx_turn = 1;
+        fx_turn = 1;			/* hand the turn to the peer */
         FLIPC2_WRITE_FENCE();
-        urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE, 1, 0);
+        /* wake peer + block (with direct hand-off) while it stays peer's turn */
+        while (fx_turn == 1)
+            urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE_WAIT,
+                         1, 0, (unsigned int *)&fx_turn);
     }
     flipc2_get_time(&t1);
+    /* stop the peer: clear the flag, then unstick it from any park */
+    fx_running = 0;
+    fx_turn = 1;			/* peer's while(turn==0) condition goes false */
+    FLIPC2_WRITE_FENCE();
+    urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE, 8, 0,
+                 (unsigned int *)0);
     pthread_join(ct, NULL);
-    flipc2_print_result("futex ping-pong", flipc2_elapsed_ns(&t0, &t1), fx_iters);
+    flipc2_print_result("futex WAKE_WAIT ping-pong", flipc2_elapsed_ns(&t0, &t1), fx_iters);
 
     /* ---- Mach semaphore ping-pong (A/B baseline) ---- */
     kr = semaphore_create(mach_task_self(), &fx_sem_a, SYNC_POLICY_FIFO, 0);
