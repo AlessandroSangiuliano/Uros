@@ -529,8 +529,36 @@ ioapic_dispatch:
 	cmpl	$15, %ecx
 	jg	int_range_err
 
+	/*
+	 * #322 soft-spl: with the LAPIC TPR left at 0 this device IRQ reaches us
+	 * even at spl above spllo.  If this CPU is masked (curr_ipl>0) the spl
+	 * level forbids running the handler now: defer it.  Record irq in
+	 * softspl_pending[cpu], mask its IOAPIC RTE so a level-triggered line
+	 * stops re-asserting (no TPR to gate it anymore), LAPIC-EOI, and return
+	 * with spl untouched and IF still off.  set_spl/set_spl_noi replay it
+	 * (unmask RTE + self-IPI) once curr_ipl drops back to spllo.
+	 */
+	cmpl	$0, EXT(softspl_enabled)
+	je	idsp_run
+	CPU_NUMBER(%eax)		# %eax = cpu
+	cmpl	$0, CX(EXT(curr_ipl),%eax)
+	je	idsp_run		# at spllo: deliver now
+	movl	$1, %edx
+	shll	%cl, %edx		# %edx = 1<<irq  (cl = irq, 0..15)
+	orl	%edx, CX(EXT(softspl_pending),%eax)
+	pushl	%ecx			# arg: irq -> mask its RTE
+	call	EXT(ioapic_mask_irq)
+	addl	$4, %esp
+	movl	EXT(lapic_start), %edx	# LAPIC EOI (no handler ran)
+	testl	%edx, %edx
+	jz	idsp_deferred_done
+	movl	$0, LAPIC_EOI(%edx)
+idsp_deferred_done:
+	ret				# back to all_intrs: IF off, spl unchanged
+
+idsp_run:
 	movzbl	EXT(intpri)(%ecx), %eax	# new IPL = intpri[irq]
-	call	EXT(set_spl)		# raise spl (programs TPR), enables IF
+	call	EXT(set_spl)		# raise spl, enables IF
 
 	pushl	%eax			# save old IPL
 	pushl	EXT(iunit)(,%ecx,4)	# unit# -> handler arg

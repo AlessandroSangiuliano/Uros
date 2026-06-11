@@ -88,6 +88,22 @@ extern void		lapic_timer_handler(struct i386_interrupt_state *regs);
 extern unsigned int	lapic_timer_count;
 extern int		lapic_timer_enabled;
 
+/*
+ * #322: soft-spl (deferred interrupt masking).  Instead of programming the
+ * LAPIC TPR on every spl transition (a KVM VM-exit each time, ~18us under
+ * qemu's vapic), the TPR stays 0 and the spl level is enforced in software.
+ * A maskable vector delivered while curr_ipl>0 is recorded in
+ * softspl_pending[cpu] by the dispatch stub and re-injected via self-IPI by
+ * softspl_replay() when spl drops to spllo.  Bits 0..NINTR-1 are device IRQs;
+ * SOFTSPL_CLOCK_BIT is the per-CPU LAPIC timer.  softspl_enabled gates the
+ * whole scheme (0 == the #311 hardware-TPR path, for A/B and as a fallback).
+ */
+#define SOFTSPL_CLOCK_BIT	(1u << 16)
+extern int		softspl_enabled;
+extern unsigned int	softspl_pending[];
+extern void		lapic_send_self_ipi(unsigned int vector);
+extern void		softspl_replay(int cpu);
+
 #endif	/* NCPUS > 1 */
 
 #endif	/* _I386_LAPIC_H_ */

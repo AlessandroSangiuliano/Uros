@@ -156,7 +156,28 @@ Entry(ipi_mp_entry)
  */
 Entry(lapic_timer_entry)
 	IPI_ENTER
-	CPU_NUMBER(%edx)
+	CPU_NUMBER(%edx)			/* %edx = cpu */
+	/*
+	 * #322 soft-spl: with the LAPIC TPR left at 0 the timer (vector 0x3f)
+	 * fires even above spllo.  If this CPU is masked (curr_ipl>0) defer the
+	 * tick rather than run hertz_tick() here -- it takes thread_lock, the
+	 * #317 hazard the old TPR gating prevented.  Set the clock bit in
+	 * softspl_pending[cpu], EOI, and iret; set_spl replays it (self-IPI
+	 * 0x3f) at spllo so no tick is lost.
+	 */
+	cmpl	$0, EXT(softspl_enabled)
+	je	lt_run
+	cmpl	$0, CX(EXT(curr_ipl),%edx)
+	je	lt_run				/* at spllo: run the tick now */
+	orl	$0x10000, CX(EXT(softspl_pending),%edx)	/* SOFTSPL_CLOCK_BIT */
+	movl	EXT(lapic_start), %eax
+	testl	%eax, %eax
+	jz	lt_deferred_done
+	movl	$0, LAPIC_EOI(%eax)
+lt_deferred_done:
+	IPI_LEAVE
+
+lt_run:
 	movl	CX(EXT(int_stack_top),%edx),%ecx	/* this CPU's int stack top */
 	cmpl	%ecx,%esp
 	ja	2f				/* %esp above top: not on int stack */

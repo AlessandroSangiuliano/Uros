@@ -374,13 +374,33 @@ LEXT(set_spl)
 	cmpl	$0, EXT(ioapic_enabled)
 	je	9f
 	/*
-	 * Program this CPU's LAPIC TPR.  IMPORTANT: the interrupt dispatch
-	 * (interrupt.S) relies on set_spl preserving %ecx (the IRQ index used
-	 * for ivect[]/iunit[] right after this call), so compute the new TPR
-	 * in %eax (dead past label 2, which pops the old level back) and reuse
-	 * %edx — never touch %ecx.
+	 * #322 soft-spl: do NOT touch the LAPIC TPR.  curr_ipl is already
+	 * updated above; the dispatch stubs (interrupt.S / ipi.S) enforce the
+	 * level by deferring any maskable vector that arrives while curr_ipl>0.
+	 * Here we only have to release that backlog: when we drop to spllo and
+	 * something was deferred, replay it.  %eax = new ipl, %edx = cpu.  This
+	 * skips the per-transition MMIO write that costs a KVM VM-exit (#311).
 	 */
-	testl	%eax, %eax		/* new ipl == 0 (spllo)? -> TPR 0 else 0x40 */
+	cmpl	$0, EXT(softspl_enabled)
+	je	8f			/* soft-spl off: keep the #311 TPR path */
+	testl	%eax, %eax		/* raising / still masked (ipl>0)? */
+	jnz	2f			/*   nothing to replay */
+	cmpl	$0, CX(EXT(softspl_pending), %edx)
+	je	2f			/* spllo but nothing deferred */
+	pushl	%ecx			/* set_spl preserves %ecx for interrupt.S */
+	pushl	%edx			/* arg: cpu */
+	call	EXT(softspl_replay)
+	addl	$4, %esp
+	popl	%ecx
+	jmp	2f
+	/*
+	 * #311 hardware-TPR path (softspl_enabled == 0).  Program this CPU's
+	 * LAPIC TPR.  IMPORTANT: the interrupt dispatch (interrupt.S) relies on
+	 * set_spl preserving %ecx (the IRQ index used for ivect[]/iunit[] right
+	 * after this call), so compute the new TPR in %eax (dead past label 2,
+	 * which pops the old level back) and reuse %edx — never touch %ecx.
+	 */
+8:	testl	%eax, %eax		/* new ipl == 0 (spllo)? -> TPR 0 else 0x40 */
 	jz	7f
 	movl	$0x40, %eax
 7:	cmpl	%eax, CX(EXT(lapic_tpr_cache), %edx)
@@ -559,7 +579,25 @@ LEXT(set_spl_noi)
 	 */
 	cmpl	$0, EXT(ioapic_enabled)
 	je	7f
-	/* TPR path — preserve %ecx (see set_spl); compute newTPR in %eax. */
+	/*
+	 * #322 soft-spl: no LAPIC TPR write (IF stays off on this return path).
+	 * curr_ipl is set; on the drop to spllo, replay anything deferred while
+	 * masked.  %eax = new ipl, %edx = cpu.  Self-IPIs queued by the replay
+	 * are delivered once the interrupt return restores IF.
+	 */
+	cmpl	$0, EXT(softspl_enabled)
+	je	6f			/* soft-spl off: keep the #311 TPR path */
+	testl	%eax, %eax		/* raising / still masked (ipl>0)? */
+	jnz	1f			/*   nothing to replay */
+	cmpl	$0, CX(EXT(softspl_pending), %edx)
+	je	1f			/* spllo but nothing deferred */
+	pushl	%ecx			/* keep %ecx (mirrors set_spl contract) */
+	pushl	%edx			/* arg: cpu */
+	call	EXT(softspl_replay)
+	addl	$4, %esp
+	popl	%ecx
+	jmp	1f
+6:	/* #311 TPR path — preserve %ecx (see set_spl); compute newTPR in %eax. */
 	testl	%eax, %eax		/* new ipl == 0 (spllo)? -> TPR 0 else 0x40 */
 	jz	5f
 	movl	$0x40, %eax
