@@ -45,6 +45,11 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 #include <kern/host.h>
+#include <kern/sched_prim.h>		/* assert_wait/thread_block/thread_wakeup (#324) */
+#include <kern/thread.h>		/* current_map() (#324) */
+#include <kern/time_out.h>		/* hz (#324) */
+#include <vm/vm_map.h>			/* vm_map_pmap() (#324) */
+#include <vm/pmap.h>			/* pmap_extract() (#324) */
 
 /*
  *	Routine:	semaphore_create
@@ -485,4 +490,130 @@ semaphore_dereference(semaphore_t semaphore)
 
 	if (ref_count == 0)
 		kfree((vm_offset_t) semaphore, sizeof(struct semaphore));
+}
+
+/*
+ * ==================================================================
+ *  urmach_futex — modern futex-style fast synchronization (#324)
+ * ==================================================================
+ *
+ *  A lightweight wait/wake on a 32-bit word in user memory, meant to
+ *  replace the heavy Mach-semaphore kernel-trap path on the FLIPC /
+ *  POSIX block fallback.  The userspace fast path (atomic compare on
+ *  the word) stays entirely in userspace; we only trap here when a
+ *  thread must actually block (WAIT) or wake a blocked peer (WAKE) —
+ *  the futex philosophy (Linux futex / FreeBSD _umtx_op).
+ *
+ *  The wait key is the *physical* address of the word: pmap_extract()
+ *  already folds in the page offset, so two tasks that map the same
+ *  shared page (e.g. a FLIPC channel header at different virtual
+ *  addresses) hash to the same wait bucket.  This requires the page
+ *  to be resident — FLIPC channel memory is wired shared memory, so
+ *  the re-read below never faults.  A fault-safe path for pageable
+ *  memory (POSIX/pthread on anonymous memory) is future work.
+ *
+ *  op codes MUST stay in sync with <mach/urmach_futex.h> (userspace).
+ */
+#define URMACH_FUTEX_WAIT	0
+#define URMACH_FUTEX_WAKE	1
+
+static event_t
+futex_key(unsigned int *uaddr)
+{
+	/* Physical address (offset included) as the wait-hash key, so the
+	 * same shared page mapped at different vaddrs in two tasks resolves
+	 * to the same futex. */
+	return (event_t) pmap_extract(vm_map_pmap(current_map()),
+				      (vm_offset_t) uaddr);
+}
+
+static kern_return_t
+futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms)
+{
+	thread_t	self = current_thread();
+	event_t		key;
+	unsigned int	cur;
+	spl_t		s;
+	int		ticks = 0;
+
+	key = futex_key(uaddr);
+	if (key == (event_t) 0)
+		return KERN_INVALID_ADDRESS;
+
+	if (timeout_ms != 0) {
+		/* ticks = timeout_ms * hz / 1000, in 32-bit only — the kernel
+		 * has no libgcc 64-bit divide (__udivdi3). */
+		unsigned int uhz = (unsigned int) hz;
+		ticks = (int) ((timeout_ms / 1000) * uhz +
+			       ((timeout_ms % 1000) * uhz) / 1000);
+		if (ticks == 0)
+			ticks = 1;	/* round a sub-tick timeout up to 1 tick */
+	}
+
+	s = splsched();
+	assert_wait(key, TRUE);
+
+	/*
+	 * Re-read the word now that we are queued on the wait hash: this
+	 * closes the lost-wakeup window (a waker that stored *uaddr and
+	 * called WAKE before our assert_wait would otherwise be missed).
+	 * The page is resident, so copyin does not fault under splsched.
+	 */
+	if (copyin((const char *) uaddr, (char *) &cur, sizeof(cur)) != 0) {
+		clear_wait(self, THREAD_AWAKENED, TRUE);
+		splx(s);
+		return KERN_INVALID_ADDRESS;
+	}
+	if (cur != val) {
+		clear_wait(self, THREAD_AWAKENED, TRUE);
+		splx(s);
+		return KERN_NOT_WAITING;	/* value already changed: caller retries */
+	}
+	splx(s);
+
+	if (ticks != 0)
+		thread_set_timeout(ticks);
+	thread_block((void (*)(void)) 0);
+
+	if (self->wait_result == THREAD_TIMED_OUT)
+		return KERN_OPERATION_TIMED_OUT;
+	return KERN_SUCCESS;
+}
+
+static kern_return_t
+futex_wake(unsigned int *uaddr, int nwake)
+{
+	event_t key;
+
+	key = futex_key(uaddr);
+	if (key == (event_t) 0)
+		return KERN_INVALID_ADDRESS;
+
+	if (nwake == 1)
+		thread_wakeup_one(key);
+	else
+		thread_wakeup(key);		/* wake all (nwake>1 approximated) */
+	return KERN_SUCCESS;
+}
+
+/*
+ *	Routine:	urmach_futex	(trap)
+ *
+ *	WAIT(uaddr,val,timeout_ms): if *uaddr == val, block until woken or
+ *	    the timeout (ms; 0 = forever) elapses.  Returns KERN_NOT_WAITING
+ *	    if the value already differs (caller re-checks and retries).
+ *	WAKE(uaddr,n):  wake up to n waiters on uaddr (n==1 -> exactly one).
+ */
+kern_return_t
+urmach_futex(unsigned int *uaddr, int op, unsigned int val,
+	     unsigned int timeout_ms)
+{
+	switch (op) {
+	case URMACH_FUTEX_WAIT:
+		return futex_wait(uaddr, val, timeout_ms);
+	case URMACH_FUTEX_WAKE:
+		return futex_wake(uaddr, (int) val);
+	default:
+		return KERN_INVALID_ARGUMENT;
+	}
 }

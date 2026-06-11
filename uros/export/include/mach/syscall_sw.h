@@ -146,6 +146,13 @@ kernel_trap(urmach_cap_register,-40,1)
  */
 kernel_trap(urmach_thread_set_cleartid,-51,1)
 
+/*
+ *	urmach_futex (#324) — modern futex-style wait/wake on a 32-bit word
+ *	in (possibly shared) user memory.  Replaces the heavy Mach-semaphore
+ *	block path for FLIPC / POSIX sync.  See <mach/urmach_futex.h>.
+ */
+kernel_trap(urmach_futex,-42,4)
+
 kernel_trap(mach_reply_port,-26,0)
 kernel_trap(mach_thread_self,-27,0)
 kernel_trap(mach_task_self,-28,0)

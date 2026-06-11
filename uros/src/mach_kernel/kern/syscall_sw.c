@@ -243,6 +243,8 @@
 extern kern_return_t	kern_invalid(void);
 extern mach_port_t	null_port(void);
 extern kern_return_t	not_implemented(void);
+extern kern_return_t	urmach_futex(unsigned int *uaddr, int op,
+				     unsigned int val, unsigned int timeout_ms);
 
 /*
  *	To add a new entry:
@@ -324,7 +326,7 @@ mach_trap_t	mach_trap_table[] = {
 
 	MACH_TRAP(urmach_cap_register, 1),	/* 40 */
 	MACH_TRAP(kern_invalid, 0),		/* 41 rsvd for init_process */
-	MACH_TRAP(not_implemented, 0),		/* 42 */
+	MACH_TRAP(urmach_futex, 4),		/* 42 (#324 futex) */
 	MACH_TRAP(not_implemented, 0),		/* 43 */
 	MACH_TRAP(not_implemented, 0),		/* 44 */
 	MACH_TRAP(not_implemented, 0),		/* 45 */

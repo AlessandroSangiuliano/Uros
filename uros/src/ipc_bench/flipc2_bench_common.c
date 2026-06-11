@@ -12,6 +12,7 @@
 #include <mach/mach_host.h>
 #include <mach/clock.h>
 #include <mach/thread_switch.h>
+#include <mach/urmach_futex.h>		/* #324 futex microbench */
 #include <stdio.h>
 #include <string.h>
 
@@ -181,4 +182,94 @@ flipc2_stop_echo(struct flipc2_echo_args *args, flipc2_channel_t fwd_ch,
     semaphore_signal(fwd_ch->sem_port);
 
     pthread_join(ct, NULL);
+}
+
+/* ===================================================================
+ * #324 futex microbench: ping-pong round-trip, urmach_futex vs Mach
+ * semaphore.  Two threads in the same task hand a token back and forth
+ * over a shared word (futex) or a pair of Mach semaphores.  Measures
+ * the pure block+wake round-trip latency that FLIPC's sleep path pays.
+ * =================================================================== */
+
+static volatile unsigned int fx_turn;	/* 0 = main's turn, 1 = peer's turn */
+static int          fx_iters;
+static mach_port_t  fx_sem_a, fx_sem_b;
+
+static void *
+fx_futex_peer(void *arg)
+{
+    int i;
+    (void)arg;
+    for (i = 0; i < fx_iters; i++) {
+        while (fx_turn == 0)
+            urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAIT, 0, 0);
+        fx_turn = 0;
+        FLIPC2_WRITE_FENCE();
+        urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE, 1, 0);
+    }
+    return (void *)0;
+}
+
+static void *
+fx_sem_peer(void *arg)
+{
+    int i;
+    (void)arg;
+    for (i = 0; i < fx_iters; i++) {
+        semaphore_wait(fx_sem_b);
+        semaphore_signal(fx_sem_a);
+    }
+    return (void *)0;
+}
+
+void
+bench_futex_pingpong(void)
+{
+    pthread_t       ct;
+    tvalspec_t      t0, t1;
+    int             i;
+    kern_return_t   kr;
+
+    fx_iters = FLIPC2_BENCH_ITERS;
+
+    printf("\n--- #324 futex vs Mach semaphore ping-pong (block+wake round-trip) ---\n");
+
+    /* ---- urmach_futex ping-pong ---- */
+    fx_turn = 0;
+    if (pthread_create(&ct, NULL, fx_futex_peer, NULL) != 0) {
+        printf("  futex: pthread_create failed\n");
+        return;
+    }
+    flipc2_get_time(&t0);
+    for (i = 0; i < fx_iters; i++) {
+        while (fx_turn == 1)
+            urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAIT, 1, 0);
+        fx_turn = 1;
+        FLIPC2_WRITE_FENCE();
+        urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE, 1, 0);
+    }
+    flipc2_get_time(&t1);
+    pthread_join(ct, NULL);
+    flipc2_print_result("futex ping-pong", flipc2_elapsed_ns(&t0, &t1), fx_iters);
+
+    /* ---- Mach semaphore ping-pong (A/B baseline) ---- */
+    kr = semaphore_create(mach_task_self(), &fx_sem_a, SYNC_POLICY_FIFO, 0);
+    if (kr == KERN_SUCCESS)
+        kr = semaphore_create(mach_task_self(), &fx_sem_b, SYNC_POLICY_FIFO, 0);
+    if (kr != KERN_SUCCESS) {
+        printf("  semaphore: create failed %d\n", kr);
+        return;
+    }
+    if (pthread_create(&ct, NULL, fx_sem_peer, NULL) != 0) {
+        printf("  semaphore: pthread_create failed\n");
+        return;
+    }
+    flipc2_get_time(&t0);
+    for (i = 0; i < fx_iters; i++) {
+        semaphore_signal(fx_sem_b);
+        semaphore_wait(fx_sem_a);
+    }
+    flipc2_get_time(&t1);
+    pthread_join(ct, NULL);
+    flipc2_print_result("semaphore ping-pong", flipc2_elapsed_ns(&t0, &t1), fx_iters);
 }

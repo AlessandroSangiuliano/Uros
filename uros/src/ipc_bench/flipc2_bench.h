@@ -191,6 +191,9 @@ void bench_flipc2_pollset(void);
 /* MPSC smoke test (flipc2_bench_mpsc.c, #126) */
 void bench_flipc2_mpsc(void);
 
+/* #324 futex vs Mach semaphore ping-pong microbench */
+void bench_futex_pingpong(void);
+
 /* Main entry point */
 void bench_flipc2_run(mach_port_t clock_port);
 

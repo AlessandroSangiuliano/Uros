@@ -23,6 +23,9 @@ bench_flipc2_run(mach_port_t clock_port)
 
     printf("\n=== FLIPC v2 Benchmarks ===\n");
 
+    /* --- #324 futex vs Mach semaphore ping-pong (block+wake floor) --- */
+    bench_futex_pingpong();
+
     /* --- Throughput (single-thread, zero kernel) --- */
     printf("\n--- FLIPC2 throughput (single-thread, no kernel) ---\n");
     bench_flipc2_throughput("null desc (batch=1)",   1, FLIPC2_BENCH_ITERS);
