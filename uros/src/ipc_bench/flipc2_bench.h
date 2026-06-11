@@ -34,7 +34,25 @@
 
 #define FLIPC2_WARMUP_ITERS     100
 #define FLIPC2_BENCH_ITERS      10000
-#define FLIPC2_BENCH_SPIN       0   /* cthreads are cooperative: spin is useless */
+/*
+ * Spin count before the adaptive wait falls back to the Mach semaphore.
+ *
+ * Kept at 0 so the RPC benchmarks deterministically exercise the kernel's
+ * semaphore sleep/wakeup + context-switch path (~8 us/wakeup on the SMP
+ * build) — the worst case.  (The old "cthreads are cooperative: spin is
+ * useless" rationale is stale: userland has run preemptive 1:1 pthreads
+ * since #82, so spinning is no longer inherently pointless.)
+ *
+ * Real drivers use FLIPC2_SPIN_DEFAULT: when both peers spin AND the
+ * scheduler places them on separate CPUs, the reply is caught in userspace
+ * with no trap (measured ~216 ns for 128B intra RPC — FLIPC's hand-rolled
+ * futex fast-path).  But a blanket spin here is net-negative: on a single
+ * CPU, and against the non-spinning inter-task child echo, it only burns
+ * cycles before the inevitable sleep (UP intra-null jumps to ~100 us).  So
+ * the spin-vs-sleep recovery is a scheduler/placement matter (#319), not a
+ * benchmark knob — the floor itself lives in the kernel semaphore path.
+ */
+#define FLIPC2_BENCH_SPIN       0
 #define FLIPC2_BENCH_CHAN_SIZE  (64 * 1024)
 #define FLIPC2_BENCH_RING_ENTRIES 256
 #define FLIPC2_CHILD_STACK_SIZE (64 * 1024)
