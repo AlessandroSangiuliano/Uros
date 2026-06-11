@@ -610,6 +610,11 @@ ipc_port_set_seqno(
 			imq_lock(&pset->ips_messages);
 			port->ip_seqno = seqno;
 			imq_unlock(&pset->ips_messages);
+			ips_unlock(pset);	/* SMP: io_lock is a blocking mutex --
+						 * the missing unlock leaked the pset
+						 * lock, wedging the next ips_lock
+						 * (e.g. mach_port_destroy of the set).
+						 * Matches mach_port_get_attributes. */
 			set_via_pset = 1;
 		}
 	}
