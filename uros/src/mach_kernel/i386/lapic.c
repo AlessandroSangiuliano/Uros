@@ -34,6 +34,7 @@
 
 #include <types.h>
 #include <i386/lapic.h>
+#include <i386/ioapic.h>		/* ioapic_unmask_irq (#322 replay) */
 #include <kern/cpu_data.h>		/* current_cpu_id() */
 #include <kern/misc_protos.h>		/* printf */
 #include <i386/cpu_number.h>		/* cpu_number() */
@@ -310,6 +311,81 @@ lapic_send_ipi_all_excluding_self(unsigned int vector)
 	    | LAPIC_ICR_DSS_OTHERS
 	    | (vector & LAPIC_ICR_VECTOR_MASK);
 	lapic_ipi_wait();
+}
+
+/*
+ * #322 soft-spl (deferred interrupt masking).
+ *
+ * #311 raised the LAPIC task-priority register to class 4 on every spl above
+ * spllo so device IRQs (0x40-0x4f) and the LAPIC timer (0x3f) were masked in
+ * hardware while IPIs (class F) stayed deliverable.  Under KVM without APICv
+ * each of those TPR MMIO writes is a VM-exit that qemu's vapic TPR-access path
+ * turns into a full vCPU register+MSR sync (~18us); an inter-task RPC crosses
+ * spl ~5 times and pays ~90us of pure virtualization tax (#322).
+ *
+ * But the TPR is a pure function of curr_ipl, which the kernel already tracks
+ * in software.  So leave the TPR at 0 (the LAPIC masks nothing) and enforce
+ * the spl level in software: a maskable vector delivered while curr_ipl>0 is
+ * recorded in softspl_pending[cpu] by the dispatch stub (interrupt.S / ipi.S),
+ * which returns without running the handler; set_spl/set_spl_noi (spl.S) call
+ * softspl_replay() when curr_ipl drops back to spllo, re-injecting each pending
+ * source via a self-IPI so its normal IDT entry runs the handler at the safe
+ * level.  spl transitions become plain memory writes -- no MMIO, no VM-exit --
+ * and the only cost is paid when an interrupt genuinely fires while soft-masked
+ * (never on the us-scale RPC hot path).  IPIs are class F: never soft-masked.
+ *
+ * softspl_enabled gates the scheme: 0 restores the exact #311 hardware-TPR
+ * path, for A/B measurement and as a safety fallback.
+ */
+int		softspl_enabled = 1;
+unsigned int	softspl_pending[NCPUS];
+
+/*
+ * Re-inject a vector on the current CPU.  DSS_SELF is the SDM self-IPI
+ * shorthand; with TPR=0 the vector is latched in the IRR and delivered the
+ * instant IF is restored, re-entering its normal IDT stub.
+ */
+void
+lapic_send_self_ipi(unsigned int vector)
+{
+	if (lapic_start == 0)
+		return;
+
+	lapic_ipi_wait();
+	LAPIC_REG32(LAPIC_ICR) =
+	    LAPIC_ICR_DM_FIXED
+	    | LAPIC_ICR_LEVEL_ASSERT
+	    | LAPIC_ICR_DSS_SELF
+	    | (vector & LAPIC_ICR_VECTOR_MASK);
+	lapic_ipi_wait();
+}
+
+/*
+ * Replay every interrupt deferred on this CPU while it was soft-masked.
+ * Called from set_spl/set_spl_noi (IF off) right after curr_ipl drops to
+ * spllo.  A deferred device IRQ had its RTE masked at defer time to stop a
+ * level-triggered line from storming; unmask it and self-IPI so the line is
+ * re-armed and the (possibly edge) interrupt is re-delivered.  The clock is
+ * re-injected the same way so timekeeping does not lose the tick.  Bits
+ * 0..15 are device IRQs (vector 0x40+irq); SOFTSPL_CLOCK_BIT is the timer.
+ */
+void
+softspl_replay(int cpu)
+{
+	unsigned int p = softspl_pending[cpu];
+	int irq;
+
+	softspl_pending[cpu] = 0;
+
+	for (irq = 0; irq < 16; irq++) {
+		if (p & (1u << irq)) {
+			ioapic_unmask_irq(irq);
+			lapic_send_self_ipi(0x40 + irq);
+		}
+	}
+
+	if (p & SOFTSPL_CLOCK_BIT)
+		lapic_send_self_ipi(LAPIC_TIMER_VECTOR);
 }
 
 /*
