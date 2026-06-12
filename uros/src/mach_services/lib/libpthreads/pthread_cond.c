@@ -30,8 +30,19 @@
 #include <sys/timers.h>              /* For struct timespec and getclock(). */
 
 /*
+ * #324: the condvar's kernel wakeup is now urmach_futex on a generation
+ * (sequence) counter instead of a Mach semaphore.  We repurpose the
+ * 32-bit cond->sem slot (no longer a port) as that counter — COND_SEQ().
+ * A waiter snapshots the seq under cond->lock before blocking; signal /
+ * broadcast bump the seq (under cond->lock) then wake, so a signal racing
+ * a not-yet-blocked waiter is never lost (FUTEX_WAIT on a changed seq
+ * returns at once).  Spurious wakeups are allowed by the condvar contract.
+ */
+#define COND_SEQ(c)	((volatile int *)&(c)->sem)
+
+/*
  * Thread-safe lazy initialization for PTHREAD_COND_INITIALIZER.
- * Uses CAS to ensure exactly one thread creates the semaphore;
+ * Uses CAS to ensure exactly one thread initializes the seq counter;
  * losers spin until the winner publishes _PTHREAD_COND_SIG.
  */
 static int
@@ -42,23 +53,13 @@ _pthread_cond_lazy_init(pthread_cond_t *cond)
 					_PTHREAD_NO_SIG, 0,
 					__ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
 	{
-		kern_return_t kern_res;
 		LOCK_INIT(cond->lock);
 		cond->next = (pthread_cond_t *)NULL;
 		cond->prev = (pthread_cond_t *)NULL;
 		cond->busy = (pthread_mutex_t *)NULL;
 		cond->waiters = 0;
 		cond->clock = CLOCK_REALTIME;
-		MACH_CALL(semaphore_create(mach_task_self(),
-					   &cond->sem,
-					   SYNC_POLICY_FIFO,
-					   0), kern_res);
-		if (kern_res != KERN_SUCCESS)
-		{
-			__atomic_store_n(&cond->sig, _PTHREAD_COND_SIG_init,
-					 __ATOMIC_RELEASE);
-			return (ENOMEM);
-		}
+		*COND_SEQ(cond) = 0;		/* #324: futex seq, not a port */
 		__atomic_store_n(&cond->sig, _PTHREAD_COND_SIG,
 				 __ATOMIC_RELEASE);
 	} else
@@ -73,10 +74,9 @@ _pthread_cond_lazy_init(pthread_cond_t *cond)
 /*
  * Destroy a condition variable.
  */
-int       
+int
 pthread_cond_destroy(pthread_cond_t *cond)
 {
-	kern_return_t kern_res;
 	if (cond->sig == _PTHREAD_COND_SIG)
 	{
 		LOCK(cond->lock);
@@ -87,8 +87,7 @@ pthread_cond_destroy(pthread_cond_t *cond)
 		} else
 		{
 			cond->sig = _PTHREAD_NO_SIG;
-			MACH_CALL(semaphore_destroy(mach_task_self(),
-						    cond->sem), kern_res);
+			/* #324: no kernel object — the seq lives in user mem. */
 			UNLOCK(cond->lock);
 			return (ESUCCESS);
 		}
@@ -99,12 +98,10 @@ pthread_cond_destroy(pthread_cond_t *cond)
 /*
  * Initialize a condition variable.  Note: 'attr' is ignored.
  */
-int       
+int
 pthread_cond_init(pthread_cond_t *cond,
 		  const pthread_condattr_t *attr)
 {
-	kern_return_t kern_res;
-
 	LOCK_INIT(cond->lock);
 	cond->sig = _PTHREAD_COND_SIG;
 	cond->next = (pthread_cond_t *)NULL;
@@ -113,25 +110,16 @@ pthread_cond_init(pthread_cond_t *cond,
 	cond->waiters = 0;
 	cond->clock = (attr && attr->sig == _PTHREAD_COND_ATTR_SIG)
 		      ? attr->clock : CLOCK_REALTIME;
-	MACH_CALL(semaphore_create(mach_task_self(),
-				   &cond->sem,
-				   SYNC_POLICY_FIFO,
-				   0), kern_res);
-	if (kern_res != KERN_SUCCESS)
-	{
-		cond->sig = _PTHREAD_NO_SIG;  /* Not a valid condition variable */
-		return (ENOMEM);
-	} else
-		return (ESUCCESS);
+	*COND_SEQ(cond) = 0;		/* #324: futex seq counter, not a port */
+	return (ESUCCESS);
 }
 
 /*
  * Signal a condition variable, waking up all threads waiting for it.
  */
-int       
+int
 pthread_cond_broadcast(pthread_cond_t *cond)
 {
-	kern_return_t kern_res;
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
 		int res;
@@ -146,16 +134,10 @@ pthread_cond_broadcast(pthread_cond_t *cond)
 			UNLOCK(cond->lock);
 			return (ESUCCESS);
 		}
+		(*COND_SEQ(cond))++;	/* new generation; wakes every waiter */
 		UNLOCK(cond->lock);
-		MACH_CALL(semaphore_signal(cond->sem), kern_res);
-		MACH_CALL(semaphore_signal_all(cond->sem), kern_res);
-		if (kern_res == KERN_SUCCESS)
-		{
-			return (ESUCCESS);
-		} else
-		{
-			return (EINVAL);
-		}
+		_pthread_futex_wake_all(COND_SEQ(cond));
+		return (ESUCCESS);
 	} else
 		return (EINVAL); /* Not a condition variable */
 }
@@ -166,7 +148,6 @@ pthread_cond_broadcast(pthread_cond_t *cond)
 int
 pthread_cond_signal(pthread_cond_t *cond)
 {
-	kern_return_t kern_res;
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
 		int res;
@@ -174,22 +155,17 @@ pthread_cond_signal(pthread_cond_t *cond)
 			return (res);
 	}
 	if (cond->sig == _PTHREAD_COND_SIG)
-	{ 
+	{
 		LOCK(cond->lock);
 		if (cond->waiters == 0)
 		{ /* Avoid kernel call since there are no waiters... */
-			UNLOCK(cond->lock);	
+			UNLOCK(cond->lock);
 			return (ESUCCESS);
 		}
+		(*COND_SEQ(cond))++;	/* new generation; wakes one waiter */
 		UNLOCK(cond->lock);
-		MACH_CALL(semaphore_signal(cond->sem), kern_res);
-		if (kern_res == KERN_SUCCESS)
-		{
-			return (ESUCCESS);
-		} else
-		{
-			return (EINVAL);
-		}
+		_pthread_futex_wake_one(COND_SEQ(cond));
+		return (ESUCCESS);
 	} else
 		return (EINVAL); /* Not a condition variable */
 }
@@ -245,6 +221,7 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	kern_return_t kern_res;
 	pthread_mutex_t *busy;
 	tvalspec_t then;
+	int seq;
 	if (cond->sig == _PTHREAD_COND_SIG_init)
 	{
 		if (res = _pthread_cond_lazy_init(cond))
@@ -260,6 +237,10 @@ _pthread_cond_wait(pthread_cond_t *cond,
 		return (EINVAL);
 	}
 	cond->waiters++;
+	/* Snapshot the generation under cond->lock: a signal/broadcast that
+	 * runs after this (also under cond->lock) bumps it, so our futex wait
+	 * below will not block on a stale value -> no lost wakeup. */
+	seq = *COND_SEQ(cond);
 	if (cond->waiters == 1)
 	{
 		_pthread_cond_add(cond, mutex);
@@ -295,12 +276,17 @@ _pthread_cond_wait(pthread_cond_t *cond,
 			kern_res = KERN_OPERATION_TIMED_OUT;
 		} else
 		{
-			MACH_CALL(semaphore_timedwait(cond->sem, then),
-				  kern_res);
+			/* Relative ms; 0 means "forever" to urmach_futex, so
+			 * round a sub-ms remainder up to 1. */
+			unsigned int tmo_ms = (unsigned int)then.tv_sec * 1000u
+					    + (unsigned int)(then.tv_nsec / 1000000);
+			if (tmo_ms == 0)
+				tmo_ms = 1;
+			kern_res = _pthread_futex_wait(COND_SEQ(cond), seq, tmo_ms);
 		}
 	} else
 	{
-		MACH_CALL(semaphore_wait(cond->sem), kern_res);
+		kern_res = _pthread_futex_wait(COND_SEQ(cond), seq, 0);
 	}
 	LOCK(cond->lock);
 	cond->waiters--;
@@ -314,17 +300,12 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	{
 		return (res);
 	}
-	if (kern_res == KERN_SUCCESS)
-	{
-		return (ESUCCESS);
-	} else
+	/* Only a real timeout is an error; a normal wake, a generation that
+	 * already advanced (KERN_NOT_WAITING), or any spurious return all map
+	 * to ESUCCESS — pthread_cond_wait callers re-test the predicate. */
 	if (kern_res == KERN_OPERATION_TIMED_OUT)
-	{
 		return (ETIMEDOUT);
-	} else
-	{
-		return (EINVAL);
-	}
+	return (ESUCCESS);
 }
 
 int       

@@ -33,6 +33,18 @@
 #include "pthread_internals.h"
 #include <sys/timers.h>		/* For struct timespec and getclock(). */
 
+/*
+ * #324: block/wake via urmach_futex on two generation counters instead of
+ * the reader/writer Mach semaphores.  We repurpose the 32-bit reader_sem /
+ * writer_sem slots (no longer ports) as those counters.  All lock state
+ * (readers/writer/blocked_writers) stays under rwlock->lock; a blocker
+ * snapshots the relevant seq under the lock and FUTEX_WAITs on it, an
+ * unlocker bumps the seq under the lock then wakes — so a wake racing a
+ * not-yet-blocked waiter is never lost.
+ */
+#define RWL_RSEQ(r)	((volatile int *)&(r)->reader_sem)
+#define RWL_WSEQ(r)	((volatile int *)&(r)->writer_sem)
+
 int
 pthread_rwlockattr_init(pthread_rwlockattr_t *attr)
 {
@@ -77,36 +89,19 @@ int
 pthread_rwlock_init(pthread_rwlock_t *rwlock,
 		    const pthread_rwlockattr_t *attr)
 {
-	kern_return_t kr;
-
 	LOCK_INIT(rwlock->lock);
 	rwlock->sig = _PTHREAD_RWLOCK_SIG;
 	rwlock->readers = 0;
 	rwlock->writer = 0;
 	rwlock->blocked_writers = 0;
-
-	MACH_CALL(semaphore_create(mach_task_self(),
-				   &rwlock->reader_sem,
-				   SYNC_POLICY_FIFO, 0), kr);
-	if (kr != KERN_SUCCESS)
-		return (ENOMEM);
-
-	MACH_CALL(semaphore_create(mach_task_self(),
-				   &rwlock->writer_sem,
-				   SYNC_POLICY_FIFO, 0), kr);
-	if (kr != KERN_SUCCESS) {
-		semaphore_destroy(mach_task_self(), rwlock->reader_sem);
-		return (ENOMEM);
-	}
-
+	*RWL_RSEQ(rwlock) = 0;		/* #324: futex seq counters, not ports */
+	*RWL_WSEQ(rwlock) = 0;
 	return (ESUCCESS);
 }
 
 int
 pthread_rwlock_destroy(pthread_rwlock_t *rwlock)
 {
-	kern_return_t kr;
-
 	if (rwlock->sig != _PTHREAD_RWLOCK_SIG)
 		return (EINVAL);
 
@@ -117,19 +112,13 @@ pthread_rwlock_destroy(pthread_rwlock_t *rwlock)
 	}
 	rwlock->sig = _PTHREAD_NO_SIG;
 	UNLOCK(rwlock->lock);
-
-	MACH_CALL(semaphore_destroy(mach_task_self(),
-				    rwlock->reader_sem), kr);
-	MACH_CALL(semaphore_destroy(mach_task_self(),
-				    rwlock->writer_sem), kr);
+	/* #324: no kernel objects to free. */
 	return (ESUCCESS);
 }
 
 int
 pthread_rwlock_rdlock(pthread_rwlock_t *rwlock)
 {
-	kern_return_t kr;
-
 	if (rwlock->sig != _PTHREAD_RWLOCK_SIG)
 		return (EINVAL);
 
@@ -139,8 +128,9 @@ pthread_rwlock_rdlock(pthread_rwlock_t *rwlock)
 	 * (writer-preference to prevent starvation).
 	 */
 	while (rwlock->writer || rwlock->blocked_writers > 0) {
+		int s = *RWL_RSEQ(rwlock);
 		UNLOCK(rwlock->lock);
-		MACH_CALL(semaphore_wait(rwlock->reader_sem), kr);
+		(void) _pthread_futex_wait(RWL_RSEQ(rwlock), s, 0);
 		LOCK(rwlock->lock);
 	}
 	rwlock->readers++;
@@ -186,6 +176,15 @@ _pthread_rwlock_deadline(const struct timespec *abstime, tvalspec_t *then)
 	return (1);
 }
 
+/* Relative tvalspec -> ms for urmach_futex; never 0 (which means forever). */
+static unsigned int
+_pthread_rwlock_ms(const tvalspec_t *then)
+{
+	unsigned int ms = (unsigned int)then->tv_sec * 1000u
+			+ (unsigned int)(then->tv_nsec / 1000000);
+	return ms == 0 ? 1u : ms;
+}
+
 int
 pthread_rwlock_timedrdlock(pthread_rwlock_t *rwlock,
 			   const struct timespec *abstime)
@@ -198,10 +197,12 @@ pthread_rwlock_timedrdlock(pthread_rwlock_t *rwlock,
 
 	LOCK(rwlock->lock);
 	while (rwlock->writer || rwlock->blocked_writers > 0) {
+		int s = *RWL_RSEQ(rwlock);
 		UNLOCK(rwlock->lock);
 		if (!_pthread_rwlock_deadline(abstime, &then))
 			return (ETIMEDOUT);
-		MACH_CALL(semaphore_timedwait(rwlock->reader_sem, then), kr);
+		kr = _pthread_futex_wait(RWL_RSEQ(rwlock), s,
+					 _pthread_rwlock_ms(&then));
 		if (kr == KERN_OPERATION_TIMED_OUT)
 			return (ETIMEDOUT);
 		LOCK(rwlock->lock);
@@ -224,6 +225,7 @@ pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock,
 	LOCK(rwlock->lock);
 	rwlock->blocked_writers++;
 	while (rwlock->writer || rwlock->readers > 0) {
+		int s = *RWL_WSEQ(rwlock);
 		UNLOCK(rwlock->lock);
 		if (!_pthread_rwlock_deadline(abstime, &then))
 		{
@@ -232,7 +234,8 @@ pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock,
 			UNLOCK(rwlock->lock);
 			return (ETIMEDOUT);
 		}
-		MACH_CALL(semaphore_timedwait(rwlock->writer_sem, then), kr);
+		kr = _pthread_futex_wait(RWL_WSEQ(rwlock), s,
+					 _pthread_rwlock_ms(&then));
 		if (kr == KERN_OPERATION_TIMED_OUT)
 		{
 			LOCK(rwlock->lock);
@@ -251,16 +254,15 @@ pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock,
 int
 pthread_rwlock_wrlock(pthread_rwlock_t *rwlock)
 {
-	kern_return_t kr;
-
 	if (rwlock->sig != _PTHREAD_RWLOCK_SIG)
 		return (EINVAL);
 
 	LOCK(rwlock->lock);
 	rwlock->blocked_writers++;
 	while (rwlock->writer || rwlock->readers > 0) {
+		int s = *RWL_WSEQ(rwlock);
 		UNLOCK(rwlock->lock);
-		MACH_CALL(semaphore_wait(rwlock->writer_sem), kr);
+		(void) _pthread_futex_wait(RWL_WSEQ(rwlock), s, 0);
 		LOCK(rwlock->lock);
 	}
 	rwlock->blocked_writers--;
@@ -288,8 +290,6 @@ pthread_rwlock_trywrlock(pthread_rwlock_t *rwlock)
 int
 pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
 {
-	kern_return_t kr;
-
 	if (rwlock->sig != _PTHREAD_RWLOCK_SIG)
 		return (EINVAL);
 
@@ -298,18 +298,21 @@ pthread_rwlock_unlock(pthread_rwlock_t *rwlock)
 		/* Writer releasing — prefer waiting writers */
 		rwlock->writer = 0;
 		if (rwlock->blocked_writers > 0) {
+			(*RWL_WSEQ(rwlock))++;
 			UNLOCK(rwlock->lock);
-			MACH_CALL(semaphore_signal(rwlock->writer_sem), kr);
+			_pthread_futex_wake_one(RWL_WSEQ(rwlock));
 		} else {
+			(*RWL_RSEQ(rwlock))++;
 			UNLOCK(rwlock->lock);
 			/* Wake all blocked readers */
-			MACH_CALL(semaphore_signal_all(rwlock->reader_sem), kr);
+			_pthread_futex_wake_all(RWL_RSEQ(rwlock));
 		}
 	} else if (rwlock->readers > 0) {
 		rwlock->readers--;
 		if (rwlock->readers == 0 && rwlock->blocked_writers > 0) {
+			(*RWL_WSEQ(rwlock))++;
 			UNLOCK(rwlock->lock);
-			MACH_CALL(semaphore_signal(rwlock->writer_sem), kr);
+			_pthread_futex_wake_one(RWL_WSEQ(rwlock));
 		} else {
 			UNLOCK(rwlock->lock);
 		}

@@ -41,9 +41,39 @@
 #include <mach/thread_switch.h>
 #include <mach/mach_host.h>
 #include <mach.h>			/* For generic MACH support */
+#include <mach/urmach_futex.h>		/* #324 futex block/wake primitive */
 #include "posix_sched.h"		/* For POSIX scheduling policy & parameter */
 #include "pthread_machdep.h"		/* Machine-dependent definitions. */
 #include <signal.h>			/* For sigset_t, signal constants */
+
+/*
+ * #324 — block/wake on a 32-bit word via the kernel futex instead of a
+ * per-object Mach semaphore.  All libpthreads sync objects are intra-task,
+ * so we pass URMACH_FUTEX_PRIVATE (key on (address space, virtual addr),
+ * no VM-object lookup).  These back the mutex / cond / rwlock / barrier
+ * slow paths; the uncontended fast paths stay pure userspace atomics.
+ */
+static __inline__ kern_return_t
+_pthread_futex_wait(volatile int *w, int val, unsigned int timeout_ms)
+{
+	return urmach_futex((unsigned int *)w,
+			    URMACH_FUTEX_WAIT | URMACH_FUTEX_PRIVATE,
+			    (unsigned int)val, timeout_ms, (unsigned int *)0);
+}
+static __inline__ void
+_pthread_futex_wake_one(volatile int *w)
+{
+	(void) urmach_futex((unsigned int *)w,
+			    URMACH_FUTEX_WAKE | URMACH_FUTEX_PRIVATE,
+			    1, 0, (unsigned int *)0);
+}
+static __inline__ void
+_pthread_futex_wake_all(volatile int *w)
+{
+	(void) urmach_futex((unsigned int *)w,
+			    URMACH_FUTEX_WAKE | URMACH_FUTEX_PRIVATE,
+			    0x7fffffff, 0, (unsigned int *)0);
+}
 
 /*
  * Compiled-in limits
