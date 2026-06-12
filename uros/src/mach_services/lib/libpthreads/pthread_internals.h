@@ -76,6 +76,14 @@ _pthread_futex_wake_all(volatile int *w)
 }
 
 /*
+ * The thread-lifecycle (joiners/death/pool wake) and sigwait sync used
+ * per-thread Mach semaphores.  Post-#324 those mach_port_t fields hold no
+ * port — reuse them in place as 32-bit futex words.  PTH_FW() casts a
+ * field to the (volatile int *) the helpers above expect.
+ */
+#define PTH_FW(field)	((volatile int *)&(field))
+
+/*
  * Compiled-in limits
  */
 

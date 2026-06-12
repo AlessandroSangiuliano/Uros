@@ -97,10 +97,13 @@ pthread_kill(pthread_t thread, int sig)
 	 * If the thread is blocked in sigwait() and this signal is in its
 	 * wait set (sig_sem != MACH_PORT_NULL), wake it up.
 	 */
-	if (thread->sig_sem != MACH_PORT_NULL)
+	if (thread->sig_sem != 0)
 	{
-		kern_return_t kern_res;
-		MACH_CALL(semaphore_signal(thread->sig_sem), kern_res);
+		/* #324: thread is armed for sigwait — bump its futex seq and
+		 * wake it (sig_sem stays non-zero, so it doubles as the
+		 * "armed" marker). */
+		(*PTH_FW(thread->sig_sem))++;
+		_pthread_futex_wake_one(PTH_FW(thread->sig_sem));
 	}
 	UNLOCK(thread->lock);
 	return (ESUCCESS);
@@ -117,25 +120,15 @@ int
 sigwait(const sigset_t *set, int *sig)
 {
 	pthread_t self = pthread_self();
-	kern_return_t kern_res;
-	mach_port_t sem;
 	unsigned long deliverable;
+	int seq;
 	int i;
 
-	/* Create the sigwait semaphore on first use */
+	/* Arm for sigwait on first use: sig_sem becomes a non-zero futex
+	 * seq counter (#324); pthread_kill bumps + wakes it. */
 	LOCK(self->lock);
-	if (self->sig_sem == MACH_PORT_NULL)
-	{
-		MACH_CALL(semaphore_create(mach_task_self(),
-					   &self->sig_sem,
-					   SYNC_POLICY_FIFO, 0), kern_res);
-		if (kern_res != KERN_SUCCESS)
-		{
-			UNLOCK(self->lock);
-			return (ENOMEM);
-		}
-	}
-	sem = self->sig_sem;
+	if (self->sig_sem == 0)
+		self->sig_sem = 1;
 	UNLOCK(self->lock);
 
 	for (;;)
@@ -156,10 +149,12 @@ sigwait(const sigset_t *set, int *sig)
 				}
 			}
 		}
+		seq = *PTH_FW(self->sig_sem);	/* snapshot under lock */
 		UNLOCK(self->lock);
 
-		/* Block until pthread_kill() posts our semaphore */
-		MACH_CALL(semaphore_wait(sem), kern_res);
+		/* Block until pthread_kill() bumps the seq (a delivery that
+		 * raced the snapshot returns us at once — no lost wakeup). */
+		(void) _pthread_futex_wait(PTH_FW(self->sig_sem), seq, 0);
 		/* Loop back to check pending signals again */
 	}
 }
