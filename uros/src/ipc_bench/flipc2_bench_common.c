@@ -179,7 +179,9 @@ flipc2_stop_echo(struct flipc2_echo_args *args, flipc2_channel_t fwd_ch,
         d->status = 0;
         flipc2_produce_commit(fwd_ch);
     }
-    semaphore_signal(fwd_ch->sem_port);
+    /* #324: belt-and-suspenders wake on the prod_tail futex (the commit
+     * above already wakes a sleeping consumer). */
+    FLIPC2_FUTEX_WAKE(fwd_ch->prod_tail, 1);
 
     pthread_join(ct, NULL);
 }

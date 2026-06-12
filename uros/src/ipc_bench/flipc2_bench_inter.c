@@ -69,8 +69,8 @@ flipc2_child_echo_entry(void)
     uint8_t *fwd_data = fwd_base + args->data_offset;
     uint8_t *rev_data = rev_base + args->data_offset;
     uint32_t mask = args->ring_mask;
-    mach_port_t fwd_sem = args->fwd_sem;
-    mach_port_t rev_sem = args->rev_sem;
+    /* #324: fwd_sem/rev_sem unused — block/wake go through the prod_tail
+     * futex (FLIPC2_FUTEX_WAIT/WAKE), matching the migrated library. */
     int echo_data_size = args->data_size;
 
     for (;;) {
@@ -84,7 +84,7 @@ flipc2_child_echo_entry(void)
                 *fwd_cons_sleeping = 0;
                 break;
             }
-            semaphore_wait(fwd_sem);
+            FLIPC2_FUTEX_WAIT(fwd_prod_tail, head, 0);
             *fwd_cons_sleeping = 0;
         }
 
@@ -117,7 +117,7 @@ flipc2_child_echo_entry(void)
 
         FLIPC2_WRITE_FENCE();
         if (*rev_cons_sleeping)
-            semaphore_signal(rev_sem);
+            FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
     }
 }
 
@@ -218,8 +218,8 @@ flipc2_child_batch_echo_entry(void)
     struct flipc2_desc *rev_ring =
         (struct flipc2_desc *)(rev_base + args->ring_offset);
     uint32_t mask = args->ring_mask;
-    mach_port_t fwd_sem = args->fwd_sem;
-    mach_port_t rev_sem = args->rev_sem;
+    /* #324: fwd_sem/rev_sem unused — block/wake go through the prod_tail
+     * futex (FLIPC2_FUTEX_WAIT/WAKE), matching the migrated library. */
 
     for (;;) {
         uint32_t head = *fwd_cons_head;
@@ -232,7 +232,7 @@ flipc2_child_batch_echo_entry(void)
                 *fwd_cons_sleeping = 0;
                 break;
             }
-            semaphore_wait(fwd_sem);
+            FLIPC2_FUTEX_WAIT(fwd_prod_tail, head, 0);
             *fwd_cons_sleeping = 0;
         }
 
@@ -264,7 +264,7 @@ flipc2_child_batch_echo_entry(void)
         /* Signal parent once for entire batch */
         FLIPC2_WRITE_FENCE();
         if (*rev_cons_sleeping)
-            semaphore_signal(rev_sem);
+            FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
     }
 }
 
@@ -299,8 +299,8 @@ flipc2_child_bg_echo_entry(void)
     struct flipc2_desc *rev_ring =
         (struct flipc2_desc *)(rev_base + args->ring_offset);
     uint32_t mask = args->ring_mask;
-    mach_port_t fwd_sem = args->fwd_sem;
-    mach_port_t rev_sem = args->rev_sem;
+    /* #324: fwd_sem/rev_sem unused — block/wake go through the prod_tail
+     * futex (FLIPC2_FUTEX_WAIT/WAKE), matching the migrated library. */
 
     /* Buffer group pointers */
     struct flipc2_bufgroup_header *bg_hdr =
@@ -320,7 +320,7 @@ flipc2_child_bg_echo_entry(void)
                 *fwd_cons_sleeping = 0;
                 break;
             }
-            semaphore_wait(fwd_sem);
+            FLIPC2_FUTEX_WAIT(fwd_prod_tail, head, 0);
             *fwd_cons_sleeping = 0;
         }
         struct flipc2_desc *d = &fwd_ring[head & mask];
@@ -374,7 +374,7 @@ flipc2_child_bg_echo_entry(void)
 
         FLIPC2_WRITE_FENCE();
         if (*rev_cons_sleeping)
-            semaphore_signal(rev_sem);
+            FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
     }
 }
 
