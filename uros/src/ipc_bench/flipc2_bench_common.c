@@ -205,7 +205,8 @@ fx_futex_peer(void *arg)
         FLIPC2_WRITE_FENCE();
         /* wake main + block (with direct hand-off) while it stays main's turn */
         while (fx_turn == 0 && fx_running)
-            urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE_WAIT,
+            urmach_futex((unsigned int *)&fx_turn,
+                         URMACH_FUTEX_WAKE_WAIT | URMACH_FUTEX_PRIVATE,
                          0, 0, (unsigned int *)&fx_turn);
     }
     return (void *)0;
@@ -248,7 +249,8 @@ bench_futex_pingpong(void)
         FLIPC2_WRITE_FENCE();
         /* wake peer + block (with direct hand-off) while it stays peer's turn */
         while (fx_turn == 1)
-            urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE_WAIT,
+            urmach_futex((unsigned int *)&fx_turn,
+                         URMACH_FUTEX_WAKE_WAIT | URMACH_FUTEX_PRIVATE,
                          1, 0, (unsigned int *)&fx_turn);
     }
     flipc2_get_time(&t1);
@@ -256,7 +258,8 @@ bench_futex_pingpong(void)
     fx_running = 0;
     fx_turn = 1;			/* peer's while(turn==0) condition goes false */
     FLIPC2_WRITE_FENCE();
-    urmach_futex((unsigned int *)&fx_turn, URMACH_FUTEX_WAKE, 8, 0,
+    urmach_futex((unsigned int *)&fx_turn,
+                 URMACH_FUTEX_WAKE | URMACH_FUTEX_PRIVATE, 8, 0,
                  (unsigned int *)0);
     pthread_join(ct, NULL);
     flipc2_print_result("futex WAKE_WAIT ping-pong", flipc2_elapsed_ns(&t0, &t1), fx_iters);

@@ -25,10 +25,12 @@
  * or wake a blocked peer — the futex model (Linux futex / FreeBSD
  * _umtx_op), replacing the heavy Mach-semaphore kernel-trap block path.
  *
- * The wait key is the physical address of the word, so the same shared
- * page mapped at different virtual addresses in two tasks (e.g. a FLIPC
- * channel header) refers to the same futex.  The word must be in
- * resident memory (FLIPC channels are wired shared memory).
+ * The wait key is the underlying VM object + offset of the word, so the
+ * same memory shared at different virtual addresses in two tasks (e.g. a
+ * FLIPC channel shared via vm_remap) refers to the same futex — like
+ * Linux's shared get_futex_key().  A purely intra-task futex (POSIX sem,
+ * pthread mutex/cond) can OR in URMACH_FUTEX_PRIVATE to key on the cheaper
+ * (address space, virtual address) pair and skip the VM-object lookup.
  */
 
 #ifndef _MACH_URMACH_FUTEX_H_
@@ -41,6 +43,8 @@
 #define URMACH_FUTEX_WAKE	1	/* wake up to `val` waiters (val==1 -> exactly one) */
 #define URMACH_FUTEX_WAKE_WAIT	2	/* wake one on wake_uaddr + block on uaddr==val,
 					 * with a direct hand-off (RPC/ping-pong) */
+
+#define URMACH_FUTEX_PRIVATE	0x80	/* OR into op: intra-task only, fast keying */
 
 /*
  * urmach_futex(uaddr, op, val, timeout_ms, wake_uaddr)

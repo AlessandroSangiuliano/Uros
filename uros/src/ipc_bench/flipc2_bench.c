@@ -54,6 +54,13 @@ bench_flipc2_run(mach_port_t clock_port)
     bench_flipc2_inter_rpc("1024B RPC (inter)", 1024, FLIPC2_BENCH_ITERS);
     bench_flipc2_inter_rpc("4096B RPC (inter)", 4096, FLIPC2_BENCH_ITERS);
 
+    /* --- Inter-task RPC over urmach_futex (#324, SHARED keying) --- */
+    printf("\n--- FLIPC2 inter-task RPC (urmach_futex hand-off) ---\n");
+    bench_flipc2_inter_rpc_futex("null RPC (inter futex)",    0, FLIPC2_BENCH_ITERS);
+    bench_flipc2_inter_rpc_futex("128B RPC (inter futex)",  128, FLIPC2_BENCH_ITERS);
+    bench_flipc2_inter_rpc_futex("1024B RPC (inter futex)", 1024, FLIPC2_BENCH_ITERS);
+    bench_flipc2_inter_rpc_futex("4096B RPC (inter futex)", 4096, FLIPC2_BENCH_ITERS);
+
     /* --- Inter-task BATCH throughput (amortized) --- */
     printf("\n--- FLIPC2 inter-task BATCH (vm_remap, amortized) ---\n");
     bench_flipc2_inter_batch("batch=1 (inter)",   1, FLIPC2_BENCH_ITERS);

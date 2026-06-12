@@ -504,32 +504,78 @@ semaphore_dereference(semaphore_t semaphore)
  *  thread must actually block (WAIT) or wake a blocked peer (WAKE) —
  *  the futex philosophy (Linux futex / FreeBSD _umtx_op).
  *
- *  The wait key is the *physical* address of the word: pmap_extract()
- *  already folds in the page offset, so two tasks that map the same
- *  shared page (e.g. a FLIPC channel header at different virtual
- *  addresses) hash to the same wait bucket.  This requires the page
- *  to be resident — FLIPC channel memory is wired shared memory, so
- *  the re-read below never faults.  A fault-safe path for pageable
- *  memory (POSIX/pthread on anonymous memory) is future work.
+ *  Wait key (futex_key): two tasks that map the same memory at *different*
+ *  virtual addresses (e.g. a FLIPC channel shared via vm_remap) must hash
+ *  to the same wait bucket.  The physical address does NOT work for this:
+ *  a vm_remap(copy=FALSE) mapping can resolve to different physical frames
+ *  per task (lazy faulting / shadow objects).  Instead we key on the
+ *  underlying VM object + offset — exactly like Linux's shared
+ *  get_futex_key(): vm_remap(copy=FALSE) shares the *same* vm_object at the
+ *  same offset in both tasks, so (object,offset) is the shared identity.
+ *  Intra-task (POSIX/pthread) futexes pass URMACH_FUTEX_PRIVATE and key on
+ *  the cheaper (address space, virtual address) pair, skipping the map
+ *  lookup.
  *
  *  op codes MUST stay in sync with <mach/urmach_futex.h> (userspace).
  */
 #define URMACH_FUTEX_WAIT	0
 #define URMACH_FUTEX_WAKE	1
 #define URMACH_FUTEX_WAKE_WAIT	2
+#define URMACH_FUTEX_OP_MASK	0x7f
+#define URMACH_FUTEX_PRIVATE	0x80	/* intra-task: key by (map,vaddr) */
+
+/*
+ * Combine two machine words into a 32-bit wait-hash event with a good
+ * spread, so distinct (object,offset) / (map,vaddr) pairs almost never
+ * collide.  A rare collision is harmless: the woken thread re-checks the
+ * futex word and, finding it unchanged, blocks again — futexes already
+ * tolerate spurious wakeups.  Never returns the reserved NO_EVENT (0).
+ */
+static event_t
+futex_combine(unsigned long a, unsigned long b)
+{
+	unsigned long h = a * 2654435761UL;		/* Knuth multiplicative */
+	h ^= b + 0x9e3779b9UL + (h << 6) + (h >> 2);	/* hash_combine mix */
+	if (h == 0)
+		h = 0x9e3779b9UL;
+	return (event_t) h;
+}
 
 static event_t
-futex_key(unsigned int *uaddr)
+futex_key(unsigned int *uaddr, boolean_t is_private)
 {
-	/* Physical address (offset included) as the wait-hash key, so the
-	 * same shared page mapped at different vaddrs in two tasks resolves
-	 * to the same futex. */
-	return (event_t) pmap_extract(vm_map_pmap(current_map()),
-				      (vm_offset_t) uaddr);
+	vm_map_t	map = current_map();
+	vm_offset_t	vaddr = (vm_offset_t) uaddr;
+	vm_map_entry_t	entry;
+	vm_object_t	object;
+	vm_offset_t	offset;
+
+	if (is_private)
+		return futex_combine((unsigned long) map, (unsigned long) vaddr);
+
+	/*
+	 * Shared key: resolve uaddr -> (vm_object, offset).  A sub-map or an
+	 * object-less entry falls back to the task-local identity (correct
+	 * intra-task, just won't unify across tasks for that exotic case).
+	 */
+	vm_map_lock_read(map);
+	if (!vm_map_lookup_entry(map, vaddr, &entry) || entry->is_sub_map) {
+		vm_map_unlock_read(map);
+		return futex_combine((unsigned long) map, (unsigned long) vaddr);
+	}
+	object = entry->object.vm_object;
+	offset = entry->offset + (vaddr - entry->vme_start);
+	vm_map_unlock_read(map);
+
+	if (object == VM_OBJECT_NULL)
+		return futex_combine((unsigned long) map, (unsigned long) vaddr);
+
+	return futex_combine((unsigned long) object, (unsigned long) offset);
 }
 
 static kern_return_t
-futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms)
+futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
+	   boolean_t is_private)
 {
 	thread_t	self = current_thread();
 	event_t		key;
@@ -537,7 +583,7 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms)
 	spl_t		s;
 	int		ticks = 0;
 
-	key = futex_key(uaddr);
+	key = futex_key(uaddr, is_private);
 	if (key == (event_t) 0)
 		return KERN_INVALID_ADDRESS;
 
@@ -582,11 +628,11 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms)
 }
 
 static kern_return_t
-futex_wake(unsigned int *uaddr, int nwake)
+futex_wake(unsigned int *uaddr, int nwake, boolean_t is_private)
 {
 	event_t key;
 
-	key = futex_key(uaddr);
+	key = futex_key(uaddr, is_private);
 	if (key == (event_t) 0)
 		return KERN_INVALID_ADDRESS;
 
@@ -609,7 +655,8 @@ futex_wake(unsigned int *uaddr, int nwake)
  */
 static kern_return_t
 futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
-		unsigned int wait_val, unsigned int timeout_ms)
+		unsigned int wait_val, unsigned int timeout_ms,
+		boolean_t is_private)
 {
 	thread_t	self = current_thread();
 	event_t		wait_key, wake_key;
@@ -617,8 +664,8 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 	spl_t		s;
 	int		ticks = 0;
 
-	wait_key = futex_key(wait_uaddr);
-	wake_key = futex_key(wake_uaddr);
+	wait_key = futex_key(wait_uaddr, is_private);
+	wake_key = futex_key(wake_uaddr, is_private);
 	if (wait_key == (event_t) 0 || wake_key == (event_t) 0)
 		return KERN_INVALID_ADDRESS;
 
@@ -636,14 +683,14 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 	if (copyin((const char *) wait_uaddr, (char *) &cur, sizeof(cur)) != 0) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
-		(void) futex_wake(wake_uaddr, 1);
+		(void) futex_wake(wake_uaddr, 1, is_private);
 		return KERN_INVALID_ADDRESS;
 	}
 	if (cur != wait_val) {
 		/* wait condition already gone: don't block, but still wake. */
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
-		(void) futex_wake(wake_uaddr, 1);
+		(void) futex_wake(wake_uaddr, 1, is_private);
 		return KERN_NOT_WAITING;
 	}
 	if (ticks != 0)
@@ -678,13 +725,16 @@ kern_return_t
 urmach_futex(unsigned int *uaddr, int op, unsigned int val,
 	     unsigned int timeout_ms, unsigned int *wake_uaddr)
 {
-	switch (op) {
+	boolean_t is_private = (op & URMACH_FUTEX_PRIVATE) != 0;
+
+	switch (op & URMACH_FUTEX_OP_MASK) {
 	case URMACH_FUTEX_WAIT:
-		return futex_wait(uaddr, val, timeout_ms);
+		return futex_wait(uaddr, val, timeout_ms, is_private);
 	case URMACH_FUTEX_WAKE:
-		return futex_wake(uaddr, (int) val);
+		return futex_wake(uaddr, (int) val, is_private);
 	case URMACH_FUTEX_WAKE_WAIT:
-		return futex_wake_wait(wake_uaddr, uaddr, val, timeout_ms);
+		return futex_wake_wait(wake_uaddr, uaddr, val, timeout_ms,
+				       is_private);
 	default:
 		return KERN_INVALID_ARGUMENT;
 	}

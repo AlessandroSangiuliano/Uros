@@ -139,6 +139,7 @@ extern volatile struct flipc2_child_args flipc2_child_args_storage;
 
 /* Child entry points (noreturn, used from inter-task setup) */
 void flipc2_child_echo_entry(void);
+void flipc2_child_echo_futex_entry(void);	/* #324 futex variant */
 void flipc2_child_batch_echo_entry(void);
 void flipc2_child_bg_echo_entry(void);
 
@@ -163,6 +164,7 @@ void bench_flipc2_rpc(const char *label, int data_size, int iters);
 
 /* Inter-task RPC + batch (flipc2_bench_inter.c) */
 void bench_flipc2_inter_rpc(const char *label, int data_size, int iters);
+void bench_flipc2_inter_rpc_futex(const char *label, int data_size, int iters);
 void bench_flipc2_inter_batch(const char *label, int batch_size, int iters);
 
 /* Game simulation (flipc2_bench_game.c) */
