@@ -3148,10 +3148,31 @@ ipc_kmsg_check_scatter(
  *	require locking.
  */
 #define IKM_STASH 16	/* # of cache entries per cpu */
-ipc_kmsg_t	ipc_kmsg_cache[ NCPUS ][ IKM_STASH ];
-unsigned int	ipc_kmsg_cache_avail[NCPUS];
-unsigned int	c_ipc_kmsg_cache_tries = 0;
-unsigned int	c_ipc_kmsg_cache_misses = 0;
+
+/*
+ *	#323: consolidate the per-CPU pool state into one cache-line-aligned
+ *	struct per CPU so two CPUs never share a line.  The old layout packed
+ *	ipc_kmsg_cache_avail[NCPUS] (4-byte counters) adjacently — [0] and [1]
+ *	bounced on the same line every alloc/free — and bumped two *global*
+ *	tries/misses counters from every core on every message (worst-case
+ *	line bouncing).  Now each CPU owns a whole cache line: a 64-byte stash
+ *	(16 ptrs) on one line, then avail + per-CPU tries/misses on the next.
+ *	The tries/misses are folded only when read (ikm_cache_stats).
+ */
+#define KMSG_CACHE_LINE	64
+
+struct kmsg_pcpu {
+	ipc_kmsg_t	stash[IKM_STASH];	/* 16 * 4B = 64B = one line */
+	unsigned int	avail;			/* LIFO depth (stack top)    */
+	unsigned int	tries;			/* per-CPU stats, folded on read */
+	unsigned int	misses;
+	unsigned char	_pad[KMSG_CACHE_LINE - 3 * sizeof(unsigned int)];
+} __attribute__((aligned(KMSG_CACHE_LINE)));
+
+_Static_assert(sizeof(struct kmsg_pcpu) % KMSG_CACHE_LINE == 0,
+	       "kmsg_pcpu must be a whole number of cache lines");
+
+static struct kmsg_pcpu	kmsg_pool[NCPUS];
 
 /*
  *	Routine:	ikm_cache_get
@@ -3167,20 +3188,20 @@ boolean_t
 ikm_cache_get(
 	ipc_kmsg_t	* kmsg)
 {
-	register unsigned int	cpu;
+	register struct kmsg_pcpu	*pc;
 
-	c_ipc_kmsg_cache_tries++;
 	disable_preemption();
-	cpu = cpu_number();
+	pc = &kmsg_pool[cpu_number()];
+	pc->tries++;
 
-	if (ipc_kmsg_cache_avail[cpu]) {
-		*kmsg = ipc_kmsg_cache[cpu][--ipc_kmsg_cache_avail[cpu]];
+	if (pc->avail) {
+		*kmsg = pc->stash[--pc->avail];
 		enable_preemption();
 		return(TRUE);
 	}
 
+	pc->misses++;
 	enable_preemption();
-	c_ipc_kmsg_cache_misses++;
 	return(FALSE);
 }
 
@@ -3197,13 +3218,13 @@ boolean_t
 ikm_cache_put(
 	ipc_kmsg_t	kmsg)
 {
-	unsigned int	cpu;
+	register struct kmsg_pcpu	*pc;
 
 	disable_preemption();
-	cpu = cpu_number();
+	pc = &kmsg_pool[cpu_number()];
 
-	if (ipc_kmsg_cache_avail[cpu] < IKM_STASH) {
-		ipc_kmsg_cache[cpu][ipc_kmsg_cache_avail[cpu]++] = kmsg;
+	if (pc->avail < IKM_STASH) {
+		pc->stash[pc->avail++] = kmsg;
 		enable_preemption();
 		return(TRUE);
 	}
@@ -3219,7 +3240,28 @@ ikm_cache_init()
 	unsigned int	cpu;
 
 	for (cpu = 0; cpu < NCPUS; ++cpu)
-		ipc_kmsg_cache_avail[cpu] = 0;
+		kmsg_pool[cpu].avail = 0;
+}
+
+/*
+ *	Routine:	ikm_cache_stats
+ *	Purpose:	Fold the per-CPU tries/misses counters into totals for
+ *			HOST_IPC_CACHE_INFO.  Read-side only — the hot path
+ *			never touches another CPU's line.
+ */
+void
+ikm_cache_stats(
+	unsigned int	*tries,
+	unsigned int	*misses)
+{
+	unsigned int	cpu, t = 0, m = 0;
+
+	for (cpu = 0; cpu < NCPUS; ++cpu) {
+		t += kmsg_pool[cpu].tries;
+		m += kmsg_pool[cpu].misses;
+	}
+	*tries  = t;
+	*misses = m;
 }
 
 
