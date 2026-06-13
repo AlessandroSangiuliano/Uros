@@ -192,6 +192,19 @@ xprot:
 	movw	%ax, %ds
 	movw	%ax, %es
 
+	/*
+	 * #328: the `call EXT(real_to_prot)` in slave_pstart runs in real mode
+	 * (.code16) and therefore pushes a *16-bit* return IP, but this `ret`
+	 * sits in .code32 and defaults to a *32-bit* pop — it consumes the
+	 * 2-byte return plus 2 extra bytes off the top of the boot stack and
+	 * folds them into the high half of EIP.  Those stale bytes are zero by
+	 * luck when only one AP boots, but garbage once a second AP has run,
+	 * so the over-wide ret jumped to a bad address and the 3rd CPU looped
+	 * in the trampoline (system triple-fault on --smp 4 / NCPUS>2).  Force
+	 * a 16-bit ret (operand-size prefix 0x66 -> retw) so it pops exactly
+	 * the 2 bytes the real-mode call pushed.
+	 */
+	.byte	0x66			/* operand-size prefix: 16-bit ret (retw) */
 	ret
 	.code16
 
