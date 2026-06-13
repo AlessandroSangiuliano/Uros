@@ -34,28 +34,26 @@
 /*
  * Destroy a mutex variable.
  */
-int       
+int
 pthread_mutex_destroy(pthread_mutex_t *mutex)
 {
-	kern_return_t kern_res;
 	if (mutex->sig != _PTHREAD_MUTEX_SIG)
 		return (EINVAL);
-	if ((mutex->owner != (pthread_t)NULL) || 
+	if ((mutex->owner != (pthread_t)NULL) ||
 	    (mutex->busy != (pthread_cond_t *)NULL))
 		return (EBUSY);
 	mutex->sig = _PTHREAD_NO_SIG;
-	MACH_CALL(semaphore_destroy(mach_task_self(),
-				    mutex->sem), kern_res);
+	/* #324: no per-mutex kernel object to free — the futex is the word
+	 * mutex->state in user memory. */
 	return (ESUCCESS);
 }
 
 /*
  * Initialize a mutex variable, possibly with additional attributes.
  */
-int       
+int
 pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
 {
-	kern_return_t kern_res;
 	LOCK_INIT(mutex->lock);
 	mutex->sig = _PTHREAD_MUTEX_SIG;
 	if (attr)
@@ -82,18 +80,9 @@ pthread_mutex_init(pthread_mutex_t *mutex, const pthread_mutexattr_t *attr)
 	mutex->busy = (pthread_cond_t *)NULL;
 	mutex->waiters = 0;
 	mutex->state = 0;
-	MACH_CALL(semaphore_create(mach_task_self(),
-				   &mutex->sem,
-				   SYNC_POLICY_FIFO,
-				   0), kern_res);
-	if (kern_res != KERN_SUCCESS)
-	{
-		mutex->sig = _PTHREAD_NO_SIG;  /* Not a valid mutex variable */
-		return (ENOMEM);
-	} else
-	{
-		return (ESUCCESS);
-	}
+	/* #324: the blocking primitive is now urmach_futex on mutex->state;
+	 * there is no per-mutex Mach semaphore to allocate. */
+	return (ESUCCESS);
 }
 
 /*
@@ -140,9 +129,9 @@ _pthread_mutex_remove(pthread_mutex_t *mutex)
  *   2 = locked, one or more waiters (contended)
  *
  * Uncontended lock:  CAS(0→1), no syscall
- * Contended lock:    CAS(→2), then semaphore_wait
+ * Contended lock:    CAS(→2), then urmach_futex WAIT on state==2 (#324)
  * Uncontended unlock: XCHG(→0), if old was 1 → no syscall
- * Contended unlock:   XCHG(→0), if old was 2 → semaphore_signal
+ * Contended unlock:   XCHG(→0), if old was 2 → urmach_futex WAKE one (#324)
  */
 
 /*
@@ -174,7 +163,6 @@ _pthread_mutex_robust_check(pthread_mutex_t *mutex)
 int
 pthread_mutex_lock(pthread_mutex_t *mutex)
 {
-	kern_return_t kern_res;
 	int old;
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
@@ -239,12 +227,14 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 		UNLOCK(mutex->lock);
 	}
 
-	/* Slow path: contended — mark state=2 and block */
+	/* Slow path: contended — mark state=2 and block (Drepper futex).
+	 * _pthread_futex_wait blocks only while state still reads 2, so a
+	 * concurrent unlock (state→0) is never missed. */
 	if (old != 2)
 		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
 	while (old != 0)
 	{
-		MACH_CALL(semaphore_wait(mutex->sem), kern_res);
+		(void) _pthread_futex_wait(&mutex->state, 2, 0);
 		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
 	}
 	LOCK(mutex->lock);
@@ -386,7 +376,13 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 		{
 			return (ETIMEDOUT);
 		}
-		MACH_CALL(semaphore_timedwait(mutex->sem, then), kern_res);
+		/* Relative remaining time in ms; urmach_futex treats 0 as
+		 * "block forever", so round a sub-ms remainder up to 1. */
+		unsigned int tmo_ms = (unsigned int)then.tv_sec * 1000u
+				    + (unsigned int)(then.tv_nsec / 1000000);
+		if (tmo_ms == 0)
+			tmo_ms = 1;
+		kern_res = _pthread_futex_wait(&mutex->state, 2, tmo_ms);
 		if (kern_res == KERN_OPERATION_TIMED_OUT)
 			return (ETIMEDOUT);
 		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
@@ -403,7 +399,6 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 int
 pthread_mutex_unlock(pthread_mutex_t *mutex)
 {
-	kern_return_t kern_res;
 	int old;
 	if (mutex->sig == _PTHREAD_MUTEX_SIG_init)
 	{
@@ -443,7 +438,7 @@ pthread_mutex_unlock(pthread_mutex_t *mutex)
 	if (old == 2)
 	{
 		/* There were waiters — wake one */
-		MACH_CALL(semaphore_signal(mutex->sem), kern_res);
+		_pthread_futex_wake_one(&mutex->state);
 	}
 	return (ESUCCESS);
 }

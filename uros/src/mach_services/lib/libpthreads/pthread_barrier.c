@@ -77,8 +77,6 @@ pthread_barrier_init(pthread_barrier_t *barrier,
 		     const pthread_barrierattr_t *attr,
 		     unsigned count)
 {
-	kern_return_t kr;
-
 	if (count == 0)
 		return (EINVAL);
 
@@ -87,21 +85,14 @@ pthread_barrier_init(pthread_barrier_t *barrier,
 	barrier->count = (int)count;
 	barrier->waiting = 0;
 	barrier->phase = 0;
-
-	MACH_CALL(semaphore_create(mach_task_self(),
-				   &barrier->sem,
-				   SYNC_POLICY_FIFO, 0), kr);
-	if (kr != KERN_SUCCESS)
-		return (ENOMEM);
-
+	/* #324: the phase toggle below is itself the futex word — no Mach
+	 * semaphore is needed. */
 	return (ESUCCESS);
 }
 
 int
 pthread_barrier_destroy(pthread_barrier_t *barrier)
 {
-	kern_return_t kr;
-
 	if (barrier->sig != _PTHREAD_BARRIER_SIG)
 		return (EINVAL);
 
@@ -112,16 +103,13 @@ pthread_barrier_destroy(pthread_barrier_t *barrier)
 	}
 	barrier->sig = _PTHREAD_NO_SIG;
 	UNLOCK(barrier->lock);
-
-	MACH_CALL(semaphore_destroy(mach_task_self(),
-				    barrier->sem), kr);
+	/* #324: no kernel object to free. */
 	return (ESUCCESS);
 }
 
 int
 pthread_barrier_wait(pthread_barrier_t *barrier)
 {
-	kern_return_t kr;
 	int my_phase;
 
 	if (barrier->sig != _PTHREAD_BARRIER_SIG)
@@ -132,21 +120,21 @@ pthread_barrier_wait(pthread_barrier_t *barrier)
 	barrier->waiting++;
 
 	if (barrier->waiting == barrier->count) {
-		/* Last thread: release everyone */
+		/* Last thread: flip the phase and release everyone */
 		barrier->waiting = 0;
 		__atomic_store_n(&barrier->phase, !my_phase,
 				 __ATOMIC_RELEASE);
 		UNLOCK(barrier->lock);
-		/* Wake all (count - 1) blocked threads */
-		MACH_CALL(semaphore_signal_all(barrier->sem), kr);
+		/* Wake all (count - 1) blocked threads on the phase word */
+		_pthread_futex_wake_all(&barrier->phase);
 		return (PTHREAD_BARRIER_SERIAL_THREAD);
 	}
 
-	/* Not last: block until phase changes (spurious-wakeup safe) */
+	/* Not last: block while the phase still reads my_phase.  A flip done
+	 * after this snapshot makes urmach_futex return at once (no lost
+	 * wakeup); the loop also absorbs any spurious wakeup. */
 	UNLOCK(barrier->lock);
-	do {
-		MACH_CALL(semaphore_wait(barrier->sem), kr);
-	} while (__atomic_load_n(&barrier->phase, __ATOMIC_ACQUIRE)
-		 == my_phase);
+	while (__atomic_load_n(&barrier->phase, __ATOMIC_ACQUIRE) == my_phase)
+		(void) _pthread_futex_wait(&barrier->phase, my_phase, 0);
 	return (ESUCCESS);
 }

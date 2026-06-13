@@ -218,35 +218,24 @@ flipc2_channel_create_ex(
     (void)vm_wire(mach_host_self(), mach_task_self(), addr, channel_size,
                   VM_PROT_READ | VM_PROT_WRITE);
 
-    /* Create semaphore for adaptive wakeup (consumer) */
-    kr = semaphore_create(mach_task_self(), &sem, SYNC_POLICY_FIFO, 0);
-    if (kr != KERN_SUCCESS) {
-        vm_deallocate(mach_task_self(), addr, channel_size);
-        return FLIPC2_ERR_KERNEL;
-    }
+    /* #324: the per-channel adaptive-wakeup block/wake is now a futex on
+     * the shared ring counters (see flipc2.h), so no Mach semaphore is
+     * allocated here.  The sem_port out-param and the header's wakeup_sem*
+     * fields are kept for ABI stability and read MACH_PORT_NULL.  (The
+     * pollset keeps its own separate doorbell semaphore — that is a
+     * cross-task multi-channel wait a single-word futex cannot serve.) */
+    sem = MACH_PORT_NULL;
 
-    /* Create semaphore for producer backpressure (ring full) */
-    {
-        mach_port_t sem_prod;
-        kr = semaphore_create(mach_task_self(), &sem_prod, SYNC_POLICY_FIFO, 0);
-        if (kr != KERN_SUCCESS) {
-            semaphore_destroy(mach_task_self(), sem);
-            vm_deallocate(mach_task_self(), addr, channel_size);
-            return FLIPC2_ERR_KERNEL;
-        }
-
-        /* Initialize header */
-        hdr = (struct flipc2_channel_header *)addr;
-        flipc2_init_header(hdr, channel_size, ring_entries, flags);
-        hdr->wakeup_sem = sem;
-        hdr->wakeup_sem_prod = sem_prod;
-    }
+    /* Initialize header */
+    hdr = (struct flipc2_channel_header *)addr;
+    flipc2_init_header(hdr, channel_size, ring_entries, flags);
+    hdr->wakeup_sem = MACH_PORT_NULL;
+    hdr->wakeup_sem_prod = MACH_PORT_NULL;
 
     /* Allocate the handle */
     kr = vm_allocate(mach_task_self(), (vm_address_t *)&ch,
                      sizeof(struct flipc2_channel), TRUE);
     if (kr != KERN_SUCCESS) {
-        semaphore_destroy(mach_task_self(), sem);
         vm_deallocate(mach_task_self(), addr, channel_size);
         return FLIPC2_ERR_RESOURCE_SHORTAGE;
     }
@@ -371,11 +360,8 @@ flipc2_channel_destroy(
     hdr->magic = 0;
     FLIPC2_WRITE_FENCE();
 
-    /* Destroy the semaphores */
-    if (hdr->wakeup_sem != MACH_PORT_NULL)
-        semaphore_destroy(mach_task_self(), hdr->wakeup_sem);
-    if (hdr->wakeup_sem_prod != MACH_PORT_NULL)
-        semaphore_destroy(mach_task_self(), hdr->wakeup_sem_prod);
+    /* #324: no per-channel semaphores to destroy (block/wake is a futex
+     * on the shared ring counters). */
 
     /* Unmap shared memory */
     vm_deallocate(mach_task_self(), (vm_address_t)hdr, size);
@@ -618,7 +604,12 @@ flipc2_semaphore_share(
 {
     kern_return_t   kr;
 
-    if (sem == MACH_PORT_NULL || target_task == MACH_PORT_NULL)
+    /* #324: a NULL wakeup port is the normal case now — block/wake is a
+     * futex on the shared ring memory, so there is no port to hand to the
+     * peer.  Nothing to share, succeed. */
+    if (sem == MACH_PORT_NULL)
+        return FLIPC2_SUCCESS;
+    if (target_task == MACH_PORT_NULL)
         return FLIPC2_ERR_INVALID_ARGUMENT;
 
     kr = mach_port_insert_right(target_task,
