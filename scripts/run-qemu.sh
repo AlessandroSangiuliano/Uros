@@ -58,6 +58,9 @@ SMP_COUNT=""
 DISK_REGEN=false    # --diskregen: opt in to regenerating disk.img this launch
                     # (otherwise the existing disk is reused, even with --bench;
                     # the bench suite is carried by the stage-1 bundle)
+REUSE_BUNDLE=false  # --reuse-bundle: skip the make-bundle.sh step and reuse the
+                    # existing bootstrap.bundle (fast iteration / repeated launches
+                    # of the same kernel+servers, e.g. SMP reliability loops)
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; USE_AHCI=false; shift ;;
@@ -68,6 +71,7 @@ while [ $# -gt 0 ]; do
         --sha-ni) USE_SHA_NI=true; shift ;;
         --fresh-disk) FRESH_DISK=true; shift ;;
         --diskregen) DISK_REGEN=true; shift ;;
+        --reuse-bundle) REUSE_BUNDLE=true; shift ;;
         --minimal) MINIMAL_ARG="--minimal"; FRESH_DISK=true; shift ;;
         --allow-reboot) NO_REBOOT=""; shift ;;
         --smp) shift; SMP_COUNT="$1"; shift ;;
@@ -104,7 +108,9 @@ fi
 # Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
 # binaries stay in sync with the on-disk copy (especially with --bench).
 if [ "$USE_BUNDLE" = true ]; then
-    if [ -n "$BENCH_ARGS" ]; then
+    if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
+        echo "Bundle:  reusing $BUNDLE_IMG (--reuse-bundle, skipped rebuild)"
+    elif [ -n "$BENCH_ARGS" ]; then
         "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG
     else
         "$REPO_ROOT/scripts/make-bundle.sh" $MINIMAL_ARG

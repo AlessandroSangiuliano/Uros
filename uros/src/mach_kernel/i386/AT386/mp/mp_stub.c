@@ -105,6 +105,18 @@ extern vm_offset_t interrupt_stack[NCPUS];
 extern vm_offset_t int_stack_top[NCPUS];
 
 /*
+ * #299 (4-CPU stability): two-phase bring-up barrier.  Each AP completes
+ * its CPU-state init (CR4/FPU, LAPIC enable, FPU sanity) and reports
+ * machine_slot[].running = TRUE so cpu_start()'s 1 s poll succeeds, then
+ * parks here with interrupts still disabled until the BSP has finished
+ * the whole start_other_cpus() loop and flips ap_can_run.  This closes
+ * the "start a new AP while a previous AP is already running the
+ * scheduler + arming its periodic LAPIC timer" window: APs only arm
+ * their timer / enter the scheduler once *every* CPU is past bring-up.
+ */
+volatile boolean_t ap_can_run = FALSE;
+
+/*
  * #308: allocate the per-AP kernel resources that interrupt_stack_alloc()
  * would have set up if mp_probe_cpus() had known the real CPU count.
  * With ACPI MADT detection deferred to phase 2 (#300), phase 1 sees a
@@ -175,6 +187,12 @@ start_other_cpus(void)
 		}
 		printf("smp: AP cpu_id=%d online (reported by BSP)\n", slot);
 	}
+
+	/* #299: every AP is past CPU-state init and parked at the barrier in
+	 * slave_machine_init().  Release them together so none arms its LAPIC
+	 * timer / enters the scheduler while another AP is still being
+	 * brought up. */
+	ap_can_run = TRUE;
 }
 
 /*
@@ -236,6 +254,14 @@ slave_machine_init(void)
 		extern void fpu_sanity_check(void);
 		fpu_sanity_check();
 	}
+
+	/* #299: park here until the BSP has brought up *all* APs.  CPU-state
+	 * init is done and machine_slot[].running is already TRUE, so the
+	 * BSP's cpu_start() poll has succeeded for this slot; we just must
+	 * not arm the periodic timer / enter the scheduler until every other
+	 * AP is also past bring-up (see start_other_cpus). */
+	while (!ap_can_run)
+		__asm__ __volatile__("pause" ::: "memory");
 
 	/* #312: arm this AP's local periodic LAPIC timer (calibrated on the
 	 * BSP in start_other_cpus).  From now this CPU clocks hertz_tick()
