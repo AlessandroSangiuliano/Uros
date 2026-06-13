@@ -655,6 +655,28 @@ _pthread_create(pthread_t t,
 {
 	int res;
 	kern_return_t kern_res;
+	extern int _mig_multithreaded;
+
+	/*
+	 * #299 (SMP reply-port aliasing): libmach also ships a single-threaded
+	 * mig_support (one shared static reply port); its symbols are weak, so
+	 * the only thing that guarantees the per-thread libpthreads version is
+	 * linked in is a *strong* reference to a libpthreads-only mig symbol.
+	 * _mig_multithreaded is exactly that — touching it here forces the
+	 * per-thread mig_support to win the link for every program that creates
+	 * threads.  Functionally: the moment a second thread is created, switch
+	 * to per-thread reply ports (migrating the creator's current shared port
+	 * into its own TSD) BEFORE the new thread can run.  Otherwise, on SMP the
+	 * new thread races on another CPU and calls mig_get_reply_port() while
+	 * _mig_multithreaded is still 0, grabbing the SAME reply port as its
+	 * creator: two threads then receive on one reply port, ipc_mqueue_deliver
+	 * hands the RPC reply to whichever is first in line, and the caller hangs
+	 * forever (gpu_server's render worker was the first victim).  mig_init()
+	 * is idempotent once _mig_multithreaded is already 1.
+	 */
+	if (!_mig_multithreaded)
+		mig_init((void *)pthread_self());
+
 	res = ESUCCESS;
 	do
 	{
