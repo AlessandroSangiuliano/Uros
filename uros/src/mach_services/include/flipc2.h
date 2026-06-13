@@ -1306,7 +1306,7 @@ flipc2_channel_set_semaphores(
     mach_port_t         sem_prod);
 
 /* ------------------------------------------------------------------ */
-/*  Pollset API — multi-channel wait (#122)                            */
+/*  Pollset API — multi-channel wait (#122, #325)                      */
 /* ------------------------------------------------------------------ */
 
 typedef struct flipc2_pollset *flipc2_pollset_t;
@@ -1316,10 +1316,10 @@ typedef struct flipc2_event {
 } flipc2_event_t;
 
 /*
- * Create a new pollset.  Owns a shared Mach semaphore; channels
- * added with flipc2_pollset_add() will have their producer wakeup
- * redirected here so flipc2_poll() waits on a single semaphore
- * across N channels.
+ * Create a new pollset.  Since #325 flipc2_poll() blocks with
+ * urmach_futex_waitv on every member channel's prod_tail, so a
+ * producer's ordinary futex wake reaches it in microseconds — no
+ * shared semaphore, no producer-wakeup redirection.
  *
  * Inter-task constraint: add channels BEFORE the remote peer
  * attaches.  See flipc2_pollset.c header for details.

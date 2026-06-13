@@ -222,8 +222,9 @@ flipc2_channel_create_ex(
      * the shared ring counters (see flipc2.h), so no Mach semaphore is
      * allocated here.  The sem_port out-param and the header's wakeup_sem*
      * fields are kept for ABI stability and read MACH_PORT_NULL.  (The
-     * pollset keeps its own separate doorbell semaphore — that is a
-     * cross-task multi-channel wait a single-word futex cannot serve.) */
+     * pollset's cross-task multi-channel wait is also a futex since #325 —
+     * urmach_futex_waitv on every channel's prod_tail — so no doorbell
+     * semaphore is needed there either.) */
     sem = MACH_PORT_NULL;
 
     /* Initialize header */

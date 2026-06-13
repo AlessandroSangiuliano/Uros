@@ -1490,12 +1490,13 @@ flipc_reactor(void *arg)
 		int n = 0;
 		int i, j;
 
-		/* Data plane.  flipc2_poll arms cons_sleeping and blocks on
-		 * the shared semaphore, so a client's request wakes it within
-		 * microseconds; the timeout only bounds how long an idle
-		 * reactor waits before it re-checks the control port.  When no
-		 * clients are connected, block on the control port instead so
-		 * we don't busy-spin an empty pollset. */
+		/* Data plane.  flipc2_poll arms cons_sleeping and blocks with
+		 * urmach_futex_waitv on every channel's prod_tail (#325), so a
+		 * client's request wakes it within microseconds; the timeout
+		 * only bounds how long an idle reactor waits before it
+		 * re-checks the control port.  When no clients are connected,
+		 * block on the control port instead so we don't busy-spin an
+		 * empty pollset. */
 		if (nconns > 0) {
 			n = flipc2_poll(ps, events, FLIPC_REACTOR_MAX_CONNS,
 					FLIPC_POLL_TIMEOUT_MS);

@@ -84,7 +84,10 @@ extern	kern_return_t	semaphore_signal_all 	(semaphore_t semaphore);
 extern	kern_return_t	semaphore_signal_thread	(semaphore_t semaphore,
 						 thread_act_t thread_act);
 extern	kern_return_t	semaphore_wait       	(semaphore_t semaphore);
-extern	kern_return_t	semaphore_timedwait    	(semaphore_t semaphore, 
+extern	kern_return_t	semaphore_timedwait    	(semaphore_t semaphore,
 						 tvalspec_t wait_time);
+
+/* #325: initialise the urmach_futex multi-wait (WAITV) registry lock. */
+extern	void		futexv_init		(void);
 
 #endif /* _KERN_SYNC_SEMA_H_ */
