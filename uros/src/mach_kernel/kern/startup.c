@@ -335,6 +335,10 @@ setup_main(void)
 		fpu_sanity_check();	/* #309 acceptance (BSP arm) */
 	}
 	cap_init();
+	{
+		extern void futexv_init(void);
+		futexv_init();		/* #325: urmach_futex WAITV registry */
+	}
 #if	TASK_SWAPPER
 	task_swappable(&realhost, kernel_task, FALSE);
 #endif	/* TASK_SWAPPER */

@@ -43,6 +43,7 @@
 #define URMACH_FUTEX_WAKE	1	/* wake up to `val` waiters (val==1 -> exactly one) */
 #define URMACH_FUTEX_WAKE_WAIT	2	/* wake one on wake_uaddr + block on uaddr==val,
 					 * with a direct hand-off (RPC/ping-pong) */
+#define URMACH_FUTEX_WAITV	3	/* block until ANY of `val` words differs (#325) */
 
 #define URMACH_FUTEX_PRIVATE	0x80	/* OR into op: intra-task only, fast keying */
 
@@ -58,5 +59,29 @@
 extern kern_return_t urmach_futex(unsigned int *uaddr, int op,
 				  unsigned int val, unsigned int timeout_ms,
 				  unsigned int *wake_uaddr);
+
+/*
+ * URMACH_FUTEX_WAITV (#325) — wait on many futex words at once, wake on any.
+ *
+ * Like Linux futex_waitv (5.16+): block until ANY of `nr` words differs from
+ * its paired `val` (or `timeout_ms` elapses; 0 = forever).  `*woken_index`
+ * (if non-NULL) receives the index of the word that fired — advisory, since
+ * several may be ready, so the caller still rescans.  SHARED-keyed, so the
+ * same memory shared across tasks (e.g. FLIPC channels' prod_tail) refers to
+ * the same futex; a producer's ordinary URMACH_FUTEX_WAKE wakes the waiter —
+ * no shared doorbell.  This is the pure-futex pollset/epoll primitive.
+ */
+struct urmach_futexv {
+	unsigned int	*uaddr;
+	unsigned int	 val;
+};
+
+static __inline kern_return_t
+urmach_futex_waitv(struct urmach_futexv *waiters, unsigned int nr,
+		   unsigned int timeout_ms, unsigned int *woken_index)
+{
+	return urmach_futex((unsigned int *) waiters, URMACH_FUTEX_WAITV,
+			    nr, timeout_ms, woken_index);
+}
 
 #endif	/* _MACH_URMACH_FUTEX_H_ */

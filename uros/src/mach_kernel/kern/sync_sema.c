@@ -521,6 +521,7 @@ semaphore_dereference(semaphore_t semaphore)
 #define URMACH_FUTEX_WAIT	0
 #define URMACH_FUTEX_WAKE	1
 #define URMACH_FUTEX_WAKE_WAIT	2
+#define URMACH_FUTEX_WAITV	3	/* #325: wait on many words, wake on any */
 #define URMACH_FUTEX_OP_MASK	0x7f
 #define URMACH_FUTEX_PRIVATE	0x80	/* intra-task: key by (map,vaddr) */
 
@@ -571,6 +572,118 @@ futex_key(unsigned int *uaddr, boolean_t is_private)
 		return futex_combine((unsigned long) map, (unsigned long) vaddr);
 
 	return futex_combine((unsigned long) object, (unsigned long) offset);
+}
+
+/*
+ * ==================================================================
+ *  URMACH_FUTEX_WAITV (#325) — wait on many futexes, wake on any.
+ * ==================================================================
+ *
+ *  A Mach thread can be queued on only ONE wait hash bucket (it *is*
+ *  the queue element), so we cannot enqueue it on the N buckets of N
+ *  futex keys.  Instead a multi-waiter registers its N keys in this
+ *  small table and parks on a private event (its slot address).  A
+ *  normal single-key FUTEX_WAKE (e.g. a FLIPC producer waking its own
+ *  channel's prod_tail) scans the table — only when futexv_active != 0,
+ *  a lock-free gate so the common no-WAITV path never takes this lock —
+ *  and, on a key match, records which index fired and wakes the parked
+ *  thread.  This keeps the "producer does an ordinary FUTEX_WAKE on its
+ *  own word" property: no shared doorbell page, no cross-task contended
+ *  line.  Correctness backstops (independent of the registry fast path):
+ *  the per-key recheck before blocking closes the registration window,
+ *  and the caller's timeout is the ultimate floor (never worse than the
+ *  pre-#325 idle-poll).
+ *
+ *  Layout MUST match struct urmach_futexv in <mach/urmach_futex.h>.
+ */
+#define URMACH_FUTEX_WAITV	3
+
+#define FUTEXV_MAX_KEYS		16	/* >= FLIPC2_POLLSET_MAX_CHANNELS */
+#define FUTEXV_MAX_WAITERS	16	/* concurrent multi-waiters (poll loops) */
+
+struct urmach_futexv {
+	unsigned int	*uaddr;
+	unsigned int	 val;
+};
+
+struct futexv_waiter {
+	thread_t	thread;			/* owner; THREAD_NULL == free */
+	event_t		keys[FUTEXV_MAX_KEYS];
+	unsigned int	nr;
+	int		woken_index;		/* set by a waker; -1 until fired */
+};
+
+static struct futexv_waiter	futexv_table[FUTEXV_MAX_WAITERS];
+decl_simple_lock_data(static, futexv_lock)
+static volatile unsigned int	futexv_active;	/* in-use slots; lock-free gate */
+
+void
+futexv_init(void)
+{
+	simple_lock_init(&futexv_lock, ETAP_NO_TRACE);
+}
+
+/*
+ * A single-key wake may belong to one or more registered multi-waiters.
+ * Under futexv_lock, mark each matching waiter (record which key fired)
+ * and remember its park event; wake them AFTER dropping futexv_lock, so
+ * futexv_lock always sits above the scheduler wait-queue locks.  The
+ * caller gates this on a lock-free futexv_active test.
+ */
+static void
+futexv_wake_key(event_t key)
+{
+	event_t		to_wake[FUTEXV_MAX_WAITERS];
+	int		nwake = 0;
+	int		i;
+	unsigned int	k;
+	spl_t		s;
+
+	s = splsched();
+	simple_lock(&futexv_lock);
+	for (i = 0; i < FUTEXV_MAX_WAITERS; i++) {
+		struct futexv_waiter *w = &futexv_table[i];
+
+		if (w->thread == THREAD_NULL)
+			continue;
+		for (k = 0; k < w->nr; k++) {
+			if (w->keys[k] == key) {
+				if (w->woken_index < 0)
+					w->woken_index = (int) k;
+				to_wake[nwake++] = (event_t) w;
+				break;
+			}
+		}
+	}
+	simple_unlock(&futexv_lock);
+	splx(s);
+
+	for (i = 0; i < nwake; i++)
+		thread_wakeup_one(to_wake[i]);
+}
+
+/*
+ * Release a waiter's slot and return the index a waker recorded (or -1).
+ * All slot fields are read/written only under futexv_lock.
+ */
+static int
+futexv_unregister(struct futexv_waiter *slot)
+{
+	int	woken;
+	spl_t	s;
+
+	s = splsched();
+	simple_lock(&futexv_lock);
+	woken = slot->woken_index;
+	if (slot->thread != THREAD_NULL) {
+		slot->thread = THREAD_NULL;
+		slot->nr = 0;
+		if (futexv_active != 0)
+			futexv_active--;
+	}
+	simple_unlock(&futexv_lock);
+	splx(s);
+	return woken;
 }
 
 static kern_return_t
@@ -635,6 +748,15 @@ futex_wake(unsigned int *uaddr, int nwake, boolean_t is_private)
 	key = futex_key(uaddr, is_private);
 	if (key == (event_t) 0)
 		return KERN_INVALID_ADDRESS;
+
+	/*
+	 * #325: this key may also belong to a registered multi-waiter
+	 * (URMACH_FUTEX_WAITV).  Lock-free gate: futexv_active is virtually
+	 * always 0, so the common single-futex wake never touches the
+	 * registry lock.
+	 */
+	if (futexv_active != 0)
+		futexv_wake_key(key);
 
 	if (nwake == 1)
 		thread_wakeup_one(key);
@@ -712,6 +834,141 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 }
 
 /*
+ *	futex_waitv — block until ANY of nr words differs from its expected
+ *	value (or the timeout elapses), like Linux futex_waitv (5.16+).  Used
+ *	by a multi-channel consumer (e.g. a FLIPC pollset / server reactor)
+ *	to wait on N channels at once and be woken in microseconds by an
+ *	ordinary producer FUTEX_WAKE, instead of an idle-poll timeout.
+ *
+ *	`uwaiters` is a user array of nr {uaddr,val}.  On a wake, *woken_out
+ *	(if non-NULL) receives the index of the word that fired (advisory:
+ *	the caller still rescans, since several may be ready).
+ */
+static kern_return_t
+futex_waitv(struct urmach_futexv *uwaiters, unsigned int nr,
+	    unsigned int timeout_ms, unsigned int *woken_out,
+	    boolean_t is_private)
+{
+	thread_t		self = current_thread();
+	struct urmach_futexv	local[FUTEXV_MAX_KEYS];
+	event_t			keys[FUTEXV_MAX_KEYS];
+	struct futexv_waiter	*slot = (struct futexv_waiter *) 0;
+	unsigned int		i;
+	unsigned int		cur;
+	int			ticks = 0;
+	int			changed = -1;	/* >=0 word index, -2 fault */
+	int			woken;
+	spl_t			s;
+
+	if (nr == 0 || nr > FUTEXV_MAX_KEYS)
+		return KERN_INVALID_ARGUMENT;
+
+	/* Pull the (uaddr,val) array in while faulting is still allowed. */
+	if (copyin((const char *) uwaiters, (char *) local,
+		   nr * sizeof(struct urmach_futexv)) != 0)
+		return KERN_INVALID_ADDRESS;
+
+	/*
+	 * Resolve the keys BEFORE raising spl: SHARED keying takes
+	 * vm_map_lock_read, which must never be held under splsched or under
+	 * the futexv simple_lock (a blocking lock below a spin lock wedges
+	 * SMP).  This mirrors futex_wait/futex_wake, which key before splsched.
+	 */
+	for (i = 0; i < nr; i++) {
+		keys[i] = futex_key(local[i].uaddr, is_private);
+		if (keys[i] == (event_t) 0)
+			return KERN_INVALID_ADDRESS;
+	}
+
+	if (timeout_ms != 0) {
+		unsigned int uhz = (unsigned int) hz;
+		ticks = (int) ((timeout_ms / 1000) * uhz +
+			       ((timeout_ms % 1000) * uhz) / 1000);
+		if (ticks == 0)
+			ticks = 1;	/* round a sub-tick timeout up to 1 tick */
+	}
+
+	s = splsched();
+	simple_lock(&futexv_lock);
+
+	for (i = 0; i < FUTEXV_MAX_WAITERS; i++) {
+		if (futexv_table[i].thread == THREAD_NULL) {
+			slot = &futexv_table[i];
+			break;
+		}
+	}
+	if (slot == (struct futexv_waiter *) 0) {
+		simple_unlock(&futexv_lock);
+		splx(s);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	/*
+	 * Stash the (pre-resolved) keys, mark the slot in use, and park on
+	 * it — all before releasing futexv_lock, so any waker that later
+	 * finds this slot is guaranteed to see us already wait-queued
+	 * (futexv_lock sits above the wait-queue lock).
+	 */
+	slot->thread = self;
+	slot->nr = nr;
+	slot->woken_index = -1;
+	for (i = 0; i < nr; i++)
+		slot->keys[i] = keys[i];
+	futexv_active++;
+	assert_wait((event_t) slot, TRUE);
+	simple_unlock(&futexv_lock);
+
+	/*
+	 * Lost-wakeup recheck: a producer that advanced one of the words
+	 * before we registered did its FUTEX_WAKE against an unqueued
+	 * waiter.  Re-read every word; if any moved off its expected value,
+	 * don't block — the caller rescans and finds the data.  Pages are
+	 * resident (active ring), so copyin won't fault under splsched.
+	 */
+	for (i = 0; i < nr; i++) {
+		if (copyin((const char *) local[i].uaddr,
+			   (char *) &cur, sizeof(cur)) != 0) {
+			changed = -2;
+			break;
+		}
+		if (cur != local[i].val) {
+			changed = (int) i;
+			break;
+		}
+	}
+
+	if (changed != -1) {
+		clear_wait(self, THREAD_AWAKENED, TRUE);
+		splx(s);
+		(void) futexv_unregister(slot);
+		if (changed == -2)
+			return KERN_INVALID_ADDRESS;
+		if (woken_out != (unsigned int *) 0) {
+			unsigned int wi = (unsigned int) changed;
+			(void) copyout((const char *) &wi,
+				       (char *) woken_out, sizeof(wi));
+		}
+		return KERN_NOT_WAITING;
+	}
+	splx(s);
+
+	if (ticks != 0)
+		thread_set_timeout(ticks);
+	thread_block((void (*)(void)) 0);
+
+	woken = futexv_unregister(slot);
+	if (woken_out != (unsigned int *) 0 && woken >= 0) {
+		unsigned int wi = (unsigned int) woken;
+		(void) copyout((const char *) &wi,
+			       (char *) woken_out, sizeof(wi));
+	}
+
+	if (self->wait_result == THREAD_TIMED_OUT)
+		return KERN_OPERATION_TIMED_OUT;
+	return KERN_SUCCESS;
+}
+
+/*
  *	Routine:	urmach_futex	(trap)
  *
  *	WAIT(uaddr,val,timeout_ms): if *uaddr == val, block until woken or
@@ -720,6 +977,8 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
  *	WAKE(uaddr,n):  wake up to n waiters on uaddr (n==1 -> exactly one).
  *	WAKE_WAIT(uaddr=wait,val=wait_val,timeout,wake_uaddr): wake one waiter
  *	    on wake_uaddr and block on `uaddr` (==val), with a direct hand-off.
+ *	WAITV(uaddr=waiters,val=nr,timeout,wake_uaddr=woken_out): block until
+ *	    any of the nr {uaddr,val} words differs; *woken_out gets the index.
  */
 kern_return_t
 urmach_futex(unsigned int *uaddr, int op, unsigned int val,
@@ -735,6 +994,9 @@ urmach_futex(unsigned int *uaddr, int op, unsigned int val,
 	case URMACH_FUTEX_WAKE_WAIT:
 		return futex_wake_wait(wake_uaddr, uaddr, val, timeout_ms,
 				       is_private);
+	case URMACH_FUTEX_WAITV:
+		return futex_waitv((struct urmach_futexv *) uaddr, val,
+				   timeout_ms, wake_uaddr, is_private);
 	default:
 		return KERN_INVALID_ARGUMENT;
 	}
