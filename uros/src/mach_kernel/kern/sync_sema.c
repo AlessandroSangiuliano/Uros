@@ -710,6 +710,18 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 			ticks = 1;	/* round a sub-tick timeout up to 1 tick */
 	}
 
+	/*
+	 * #299: touch the futex word now, while we can still fault safely
+	 * (no wait asserted yet, IPL low).  The re-read below runs under
+	 * splsched with wait_event already set; if the page were not resident
+	 * its copyin would enter vm_fault -> vm_map_lock (mutex) -> assert
+	 * (mutex_lock with wait_event != NO_EVENT) and try to block under
+	 * splsched.  On SMP the page is NOT always resident here (COW / first
+	 * touch / a concurrent unmap on another CPU), so page it in now.
+	 */
+	if (copyin((const char *) uaddr, (char *) &cur, sizeof(cur)) != 0)
+		return KERN_INVALID_ADDRESS;
+
 	s = splsched();
 	assert_wait(key, TRUE);
 
@@ -717,7 +729,7 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 	 * Re-read the word now that we are queued on the wait hash: this
 	 * closes the lost-wakeup window (a waker that stored *uaddr and
 	 * called WAKE before our assert_wait would otherwise be missed).
-	 * The page is resident, so copyin does not fault under splsched.
+	 * Page made resident just above, so copyin does not fault under splsched.
 	 */
 	if (copyin((const char *) uaddr, (char *) &cur, sizeof(cur)) != 0) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
@@ -799,6 +811,11 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 			ticks = 1;
 	}
 
+	/* #299: page the wait word in now (see futex_wait) so the re-read
+	 * under splsched can't enter vm_fault with wait_event set. */
+	if (copyin((const char *) wait_uaddr, (char *) &cur, sizeof(cur)) != 0)
+		return KERN_INVALID_ADDRESS;
+
 	s = splsched();
 	assert_wait(wait_key, TRUE);
 
@@ -875,8 +892,14 @@ futex_waitv(struct urmach_futexv *uwaiters, unsigned int nr,
 	 * SMP).  This mirrors futex_wait/futex_wake, which key before splsched.
 	 */
 	for (i = 0; i < nr; i++) {
+		unsigned int tmp;
 		keys[i] = futex_key(local[i].uaddr, is_private);
 		if (keys[i] == (event_t) 0)
+			return KERN_INVALID_ADDRESS;
+		/* #299: page each word in now (see futex_wait) so the
+		 * post-assert_wait re-read below can't fault under splsched. */
+		if (copyin((const char *) local[i].uaddr,
+			   (char *) &tmp, sizeof(tmp)) != 0)
 			return KERN_INVALID_ADDRESS;
 	}
 
