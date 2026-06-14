@@ -79,7 +79,9 @@ flipc2_child_echo_entry(void)
         /* Adaptive wait: set sleeping flag, re-check, block */
         while (*fwd_prod_tail == head) {
             *fwd_cons_sleeping = 1;
-            FLIPC2_WRITE_FENCE();
+            FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(ring) is the
+					 * one reorder x86 allows; needs mfence,
+					 * not the store-store WRITE_FENCE */
             if (*fwd_prod_tail != head) {
                 *fwd_cons_sleeping = 0;
                 break;
@@ -115,7 +117,8 @@ flipc2_child_echo_entry(void)
         FLIPC2_WRITE_FENCE();
         *rev_prod_tail = tail + 1;
 
-        FLIPC2_WRITE_FENCE();
+        FLIPC2_FULL_FENCE();	/* #299: store(rev_prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
         if (*rev_cons_sleeping)
             FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
     }
@@ -227,7 +230,9 @@ flipc2_child_batch_echo_entry(void)
         /* Wait until at least one descriptor is available */
         while (*fwd_prod_tail == head) {
             *fwd_cons_sleeping = 1;
-            FLIPC2_WRITE_FENCE();
+            FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(ring) is the
+					 * one reorder x86 allows; needs mfence,
+					 * not the store-store WRITE_FENCE */
             if (*fwd_prod_tail != head) {
                 *fwd_cons_sleeping = 0;
                 break;
@@ -262,7 +267,8 @@ flipc2_child_batch_echo_entry(void)
         *rev_prod_tail = tail + avail;
 
         /* Signal parent once for entire batch */
-        FLIPC2_WRITE_FENCE();
+        FLIPC2_FULL_FENCE();	/* #299: store(rev_prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
         if (*rev_cons_sleeping)
             FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
     }
@@ -315,7 +321,9 @@ flipc2_child_bg_echo_entry(void)
         /* Adaptive wait: set sleeping flag, re-check, block */
         while (*fwd_prod_tail == head) {
             *fwd_cons_sleeping = 1;
-            FLIPC2_WRITE_FENCE();
+            FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(ring) is the
+					 * one reorder x86 allows; needs mfence,
+					 * not the store-store WRITE_FENCE */
             if (*fwd_prod_tail != head) {
                 *fwd_cons_sleeping = 0;
                 break;
@@ -372,7 +380,8 @@ flipc2_child_bg_echo_entry(void)
         FLIPC2_WRITE_FENCE();
         *rev_prod_tail = tail + 1;
 
-        FLIPC2_WRITE_FENCE();
+        FLIPC2_FULL_FENCE();	/* #299: store(rev_prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
         if (*rev_cons_sleeping)
             FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
     }

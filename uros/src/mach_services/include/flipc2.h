@@ -401,7 +401,8 @@ flipc2_produce_commit(flipc2_channel_t ch)
     (*ch->prod_tail)++;
     (*ch->prod_total)++;
 
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
     /* #124: doorbell coalescing — skip the signal if the ring has
      * fewer than wakeup_thresh pending and the consumer is awake
      * (it will catch up on its own).  When consumer is sleeping we
@@ -432,7 +433,8 @@ flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
     *ch->prod_tail += n;
     *ch->prod_total += n;
 
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
     if (*ch->cons_sleeping) {
         thresh  = *ch->wakeup_thresh;
         pending = *ch->prod_tail - *ch->cons_head;
@@ -453,7 +455,8 @@ flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
 static inline void
 flipc2_produce_flush(flipc2_channel_t ch)
 {
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
     if (*ch->cons_sleeping) {
         FLIPC2_FUTEX_WAKE(ch->prod_tail, 1);
         (*ch->wakeups)++;
@@ -554,7 +557,8 @@ flipc2_produce_commit_mpsc(flipc2_channel_t ch, uint32_t my_idx)
     __atomic_store_n(ch->prod_tail, my_idx + 1, __ATOMIC_RELEASE);
     (*ch->prod_total)++;
 
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
     if (*ch->cons_sleeping) {
         thresh  = *ch->wakeup_thresh;
         pending = (my_idx + 1) - *ch->cons_head;
@@ -682,7 +686,9 @@ flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
 
     /* Phase 2: prepare to sleep */
     *ch->cons_sleeping = 1;
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(prod_tail) is the one
+				 * reorder x86 allows; the store-store WRITE_FENCE
+				 * does not order it -> lost wakeup under SMP */
 
     /* Re-check to avoid lost wakeup */
     ch->cached_prod_tail = *ch->prod_tail;
@@ -769,7 +775,9 @@ flipc2_consume_wait_timed(flipc2_channel_t ch, uint32_t spin_count,
 
     /* Phase 2: prepare to sleep, re-check to avoid lost wakeup */
     *ch->cons_sleeping = 1;
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(prod_tail) is the one
+				 * reorder x86 allows; the store-store WRITE_FENCE
+				 * does not order it -> lost wakeup under SMP */
 
     ch->cached_prod_tail = *ch->prod_tail;
     FLIPC2_READ_FENCE();
