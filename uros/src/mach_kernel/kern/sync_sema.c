@@ -686,6 +686,25 @@ futexv_unregister(struct futexv_waiter *slot)
 	return woken;
 }
 
+/*
+ * #299: a futex blocker asserts_wait() then re-reads the word; if it decides
+ * NOT to block (value changed, or copyin error) it clear_wait()s and returns.
+ * But on SMP a waker can pull it off the wait-hash in that window, in which
+ * case clear_wait() sees the transitional WAKING_EVENT and bails WITHOUT
+ * clearing TH_WAIT -- the thread would then return to userspace still marked
+ * "waiting" with a stale wait_event, and its next syscall's futex_key()/
+ * mutex_lock() would take vm_map_lock with wait_event != NO_EVENT (lock.c
+ * assert) and corrupt the wait-hash.  Drain that pending wake here: if our
+ * wait_event is still set, a waker is mid-thread_wakeup_prim() on us, so
+ * block to let it complete (it clears TH_WAIT + wait_event).
+ */
+static void
+futex_recheck_drain(void)
+{
+	if (current_thread()->wait_event != NO_EVENT)
+		thread_block((void (*)(void)) 0);
+}
+
 static kern_return_t
 futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 	   boolean_t is_private)
@@ -734,11 +753,13 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 	if (copyin((const char *) uaddr, (char *) &cur, sizeof(cur)) != 0) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
+		futex_recheck_drain();
 		return KERN_INVALID_ADDRESS;
 	}
 	if (cur != val) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
+		futex_recheck_drain();
 		return KERN_NOT_WAITING;	/* value already changed: caller retries */
 	}
 	splx(s);
@@ -822,6 +843,7 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 	if (copyin((const char *) wait_uaddr, (char *) &cur, sizeof(cur)) != 0) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
+		futex_recheck_drain();
 		(void) futex_wake(wake_uaddr, 1, is_private);
 		return KERN_INVALID_ADDRESS;
 	}
@@ -829,6 +851,7 @@ futex_wake_wait(unsigned int *wake_uaddr, unsigned int *wait_uaddr,
 		/* wait condition already gone: don't block, but still wake. */
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
+		futex_recheck_drain();
 		(void) futex_wake(wake_uaddr, 1, is_private);
 		return KERN_NOT_WAITING;
 	}
@@ -963,6 +986,7 @@ futex_waitv(struct urmach_futexv *uwaiters, unsigned int nr,
 	if (changed != -1) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
+		futex_recheck_drain();
 		(void) futexv_unregister(slot);
 		if (changed == -2)
 			return KERN_INVALID_ADDRESS;
