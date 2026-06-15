@@ -28,6 +28,15 @@
 
 #include <mach_rt.h>
 
+/*
+ * #329 phase 5: pad each CPU's slot to a full cache line (aligned(64) rounds
+ * sizeof up to 64) so adjacent CPUs never share one.  Without this, the hot
+ * per-CPU fields below -- written on every context switch (active_thread),
+ * interrupt (interrupt_level) and simple_lock -- packed 4 CPUs into a single
+ * 64-byte line on a 4-way box, bouncing it across all cores.  The padding is
+ * tail-only, so the field offsets stay stable for the %gs-relative asm
+ * (genassym CPU_DATA_*) and the offsetof(cpu_data_t, cpu_id) _Static_assert.
+ */
 typedef struct
 {
 	struct thread_shuttle	*active_thread;
@@ -44,7 +53,10 @@ typedef struct
 	 * by mp_desc_init() right after it bzero's the slot.
 	 */
 	int		cpu_id;
-} cpu_data_t;
+} __attribute__((aligned(64))) cpu_data_t;
+
+_Static_assert(sizeof(cpu_data_t) == 64,
+	       "cpu_data_t must own a whole cache line (#329 phase 5)");
 
 extern cpu_data_t	cpu_data[NCPUS];
 
