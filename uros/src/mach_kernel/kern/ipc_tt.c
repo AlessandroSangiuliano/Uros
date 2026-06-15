@@ -939,17 +939,13 @@ ref_space_port_locked( ipc_port_t port, ipc_space_t *pspace )
 		space = ((task_t) port->ip_kobject)->itk_space;
 
 		/*
-		 * Normal lock ordering puts ipc_space lock before
-		 * ip_lock(). Allow out-of-order locking here, inlining
-		 * is_reference() to accomodate it.
+		 * #329 phase 1: the refcount is now a lock-free atomic, so
+		 * there is no lock-ordering problem to dodge here -- just bump
+		 * it while holding ip_lock().  (The old code mutex_try'd the
+		 * per-space ref lock out of order and bailed with FALSE on
+		 * contention, forcing the caller to retry.)
 		 */
-		if (!mutex_try(&space->is_ref_lock_data)) {
-			ip_unlock(port);
-			mutex_pause();
-			return (FALSE);
-		}
-		space->is_references++;
-		mutex_unlock(&space->is_ref_lock_data);
+		atomic_incl((long *) &space->is_references, 1);
 	}
 	*pspace = space;
 	ip_unlock(port);

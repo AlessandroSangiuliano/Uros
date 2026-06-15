@@ -116,8 +116,7 @@
 typedef natural_t ipc_space_refs_t;
 
 struct ipc_space {
-	decl_mutex_data(,is_ref_lock_data)
-	ipc_space_refs_t is_references;
+	ipc_space_refs_t is_references;	/* #329: lock-free atomic refcount */
 
 	lock_t is_lock_data;		/* #327: reader/writer lock (was a mutex) */
 	boolean_t is_active;		/* is the space alive? */
@@ -151,26 +150,23 @@ extern ipc_space_t default_pager_space;
 
 #define is_fast_space(is)	((is)->is_fast)
 
-#define	is_ref_lock_init(is)	mutex_init(&(is)->is_ref_lock_data, \
-					   ETAP_IPC_IS_REF)
+/*
+ * #329 phase 1: the space reference count is kept with lock-free atomics
+ * instead of a dedicated per-space mutex (the old is_ref_lock_data).  A
+ * reference is an atomic increment; a release is an atomic decrement that
+ * frees the space when it drops the last reference.  There is no lock left
+ * to initialise, so is_ref_lock_init() is now a no-op.
+ */
+#define	is_ref_lock_init(is)	/* no lock: refcount is atomic */
 
 #define	ipc_space_reference_macro(is)					\
-MACRO_BEGIN								\
-	mutex_lock(&(is)->is_ref_lock_data);				\
-	assert((is)->is_references > 0);				\
-	(is)->is_references++;						\
-	mutex_unlock(&(is)->is_ref_lock_data);				\
-MACRO_END
+	atomic_incl((long *) &(is)->is_references, 1)
 
 #define	ipc_space_release_macro(is)					\
 MACRO_BEGIN								\
-	ipc_space_refs_t _refs;						\
+	long _refs = atomic_add_fetchl((long *) &(is)->is_references, -1);\
 									\
-	mutex_lock(&(is)->is_ref_lock_data);				\
-	assert((is)->is_references > 0);				\
-	_refs = --(is)->is_references;					\
-	mutex_unlock(&(is)->is_ref_lock_data);				\
-									\
+	assert(_refs >= 0);						\
 	if (_refs == 0)							\
 		is_free(is);						\
 MACRO_END
