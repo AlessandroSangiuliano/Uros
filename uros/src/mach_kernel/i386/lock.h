@@ -153,6 +153,8 @@ static __inline__ void	atomic_setl(long * p, long value);
 static __inline__ void	atomic_sets(short * p, short value);
 static __inline__ void	atomic_setb(char * p, char value);
 
+static __inline__ long	atomic_add_fetchl(long * p, long delta);
+
 static __inline__ char	xchgb(volatile char * cp, char new)
 {
 	register char	old = new;
@@ -263,6 +265,27 @@ static __inline__ void	atomic_sets(short * p, short value)
 static __inline__ void	atomic_setb(char * p, char value)
 {
 	*p = value;
+}
+
+/*
+ * Atomic add returning the NEW value.  xaddl writes the old value back into
+ * its register operand, so add the delta to recover the new one.  Used for
+ * lock-free refcounts where the releaser must learn whether it dropped the
+ * last reference (#329 phase 1).
+ */
+static __inline__ long	atomic_add_fetchl(long * p, long delta)
+{
+#if NEED_ATOMIC
+	register long	old = delta;
+
+	__asm__ volatile ("	lock		\n		\
+				xaddl	%0,%1"			:	\
+			"+r" (old), "+m" (*(volatile long *)p)		:	\
+								: "memory");
+	return (old + delta);
+#else /* NEED_ATOMIC */
+	return (*p += delta);
+#endif /* NEED_ATOMIC */
 }
 
 
