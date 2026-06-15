@@ -1753,6 +1753,7 @@ bench_mach_print(int iters)
 #define SUITE_MEM	(1u <<  8)
 #define SUITE_FLIPC2	(1u <<  9)
 #define SUITE_COMB	(1u << 10)
+#define SUITE_CC	(1u << 11)	/* concurrent same-space (#327) */
 #define SUITE_ALL	0xFFFFFFFFu
 
 static int
@@ -1781,8 +1782,121 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "mem"))	    mask |= SUITE_MEM;
 	else if (streq(argv[i], "flipc2"))  mask |= SUITE_FLIPC2;
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
+	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
     }
     return mask ? mask : SUITE_ALL;
+}
+
+/* ===================================================================
+ * Concurrent same-space RPC benchmark (#327)
+ *
+ * Spawns `nthreads` worker threads in THIS task, each driving its own
+ * echo thread over a private port pair.  All of them share one ipc_space,
+ * so every mach_msg they issue contends on the space lock.  With the old
+ * mutex (is_read_lock == is_write_lock) the workers serialize on it; with
+ * the #327 reader/writer lock the receive-side lookups run concurrently
+ * while the send-side copyin still takes the write side.  We report the
+ * aggregate ns/RPC so the scaling from x1 -> xN exposes the contention:
+ * a flat number means full serialization, a dropping one means the read
+ * side now overlaps.  Compare the same numbers against a mutex kernel
+ * (A/B) to isolate the lock from raw CPU parallelism.
+ * =================================================================== */
+
+#define MAX_CC_THREADS	8
+
+typedef struct {
+    mach_port_t	echo_port;
+    mach_port_t	reply_port;
+    int		iters;
+    int		send_size;
+    pthread_t	th;
+} cc_worker_t;
+
+static volatile int g_cc_go;	/* start barrier for the timed region */
+
+static void *
+cc_worker_func(void *arg)
+{
+    cc_worker_t		*w = (cc_worker_t *)arg;
+    bench_recv_buf_t	send_buf;
+    bench_null_msg_t	recv_buf;
+    int			i;
+
+    while (!g_cc_go)		/* all workers begin together */
+	;
+
+    for (i = 0; i < w->iters; i++) {
+	send_buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	send_buf.head.msgh_size	       = w->send_size;
+	send_buf.head.msgh_remote_port = w->echo_port;
+	send_buf.head.msgh_local_port  = w->reply_port;
+	send_buf.head.msgh_id	       = 1;
+
+	mach_msg(&send_buf.head, MACH_SEND_MSG, w->send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 w->reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    return (void *)0;
+}
+
+static void
+bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
+{
+    cc_worker_t		w[MAX_CC_THREADS];
+    tvalspec_t		t0, t1;
+    kern_return_t	kr;
+    int			i;
+
+    if (nthreads > MAX_CC_THREADS)
+	nthreads = MAX_CC_THREADS;
+
+    g_cc_go = 0;
+
+    /*
+     * Per worker: a private echo receive port (+ a MAKE_SEND right) and a
+     * reply port, plus a dedicated echo thread.  spawn_echo() uses a single
+     * global ready port, so the echo threads must be created one at a time,
+     * before the workers are released.
+     */
+    for (i = 0; i < nthreads; i++) {
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &w[i].echo_port);
+	if (kr) { printf("  cc[%d]: echo alloc failed %d\n", i, kr); return; }
+	mach_port_insert_right(mach_task_self(), w[i].echo_port,
+			       w[i].echo_port, MACH_MSG_TYPE_MAKE_SEND);
+	w[i].reply_port = mach_reply_port();
+	w[i].iters	= iters_per_thread;
+	w[i].send_size	= send_size;
+
+	spawn_echo("cc-echo", echo_thread_func, w[i].echo_port);
+    }
+
+    for (i = 0; i < nthreads; i++)
+	pthread_create(&w[i].th, NULL, cc_worker_func, &w[i]);
+
+    get_time(&t0);
+    g_cc_go = 1;
+    for (i = 0; i < nthreads; i++)
+	pthread_join(w[i].th, NULL);
+    get_time(&t1);
+
+    {
+	unsigned long	total_ns  = elapsed_ns(&t0, &t1);
+	long		total_rpc = (long)nthreads * iters_per_thread;
+	unsigned long	per_rpc	  = total_ns / (total_rpc ? total_rpc : 1);
+
+	printf("  concurrent same-space x%d   %ld RPCs in %lu ns  "
+	       "(%lu ns/RPC aggregate)\n",
+	       nthreads, total_rpc, total_ns, per_rpc);
+    }
+
+    for (i = 0; i < nthreads; i++) {
+	mach_port_destroy(mach_task_self(), w[i].echo_port);
+	mach_port_destroy(mach_task_self(), w[i].reply_port);
+    }
 }
 
 /* ===================================================================
@@ -1924,6 +2038,24 @@ main(int argc, char **argv)
 			   (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
 	bench_combined_rpc("4096B inline RPC",
 			   (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Concurrent same-space RPC -- N threads, one ipc_space [#327]
+     * Exposes the ipc_space read/write lock contention; watch the
+     * aggregate ns/RPC as the thread count scales x1 -> x4.
+     * --------------------------------------------------------- */
+    if (suites & SUITE_CC) {
+	printf("--- Concurrent same-space RPC (ipc_space lock, #327) ---\n");
+
+	bench_concurrent_samespace(1, (int)sizeof(bench_null_msg_t),
+				   BENCH_ITERS);
+	bench_concurrent_samespace(2, (int)sizeof(bench_null_msg_t),
+				   BENCH_ITERS);
+	bench_concurrent_samespace(4, (int)sizeof(bench_null_msg_t),
+				   BENCH_ITERS);
 
 	printf("\n");
     }

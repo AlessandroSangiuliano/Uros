@@ -85,6 +85,7 @@
 
 #include <mach/port.h>
 #include <kern/assert.h>
+#include <kern/lock.h>
 #include <kern/macro_help.h>
 #include <ipc/ipc_entry.h>
 
@@ -95,8 +96,16 @@ typedef struct ipc_splay_tree {
 	ipc_tree_entry_t *ist_ltreep;	/* pointer into left tree */
 	ipc_tree_entry_t ist_rtree;	/* root of right tree */
 	ipc_tree_entry_t *ist_rtreep;	/* pointer into right tree */
+	decl_simple_lock_data(,ist_lock_data)	/* serializes ipc_splay_tree_lookup (#327) */
 } *ipc_splay_tree_t;
 
+/*
+ * #327: ipc_space now uses a real reader/writer lock, so several readers
+ * may sit in ipc_entry_lookup() -> ipc_splay_tree_lookup() concurrently.
+ * The splay lookup restructures the tree (it is *not* read-only), so it must
+ * be serialized by a private spinlock.  All other splay operations run under
+ * the exclusive (write) space lock, hence ist_lock stays a no-op for them.
+ */
 #define	ist_lock(splay)		/* no locking */
 #define ist_unlock(splay)	/* no locking */
 

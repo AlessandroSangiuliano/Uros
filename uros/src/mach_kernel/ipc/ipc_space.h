@@ -119,7 +119,7 @@ struct ipc_space {
 	decl_mutex_data(,is_ref_lock_data)
 	ipc_space_refs_t is_references;
 
-	decl_mutex_data(,is_lock_data)
+	lock_t is_lock_data;		/* #327: reader/writer lock (was a mutex) */
 	boolean_t is_active;		/* is the space alive? */
 	boolean_t is_growing;		/* is the space growing? */
 	ipc_entry_t is_table;		/* an array of entries */
@@ -175,16 +175,24 @@ MACRO_BEGIN								\
 		is_free(is);						\
 MACRO_END
 
-#define	is_lock_init(is)	mutex_init(&(is)->is_lock_data, ETAP_IPC_IS)
+/*
+ * #327: ipc_space uses a real reader/writer lock so that several threads of
+ * the same task can look up / receive concurrently (read side) while right
+ * mutation (send copyin, entry alloc/dealloc) still takes the write side.
+ * lock_read_done()/lock_write_done() both resolve to lock_done(), which
+ * releases whichever mode is held.
+ */
+#define	is_lock_init(is)	lock_init(&(is)->is_lock_data, TRUE, \
+					  ETAP_IPC_IS, ETAP_IPC_IS)
 
-#define	is_read_lock(is)	mutex_lock(&(is)->is_lock_data)
-#define is_read_unlock(is)	mutex_unlock(&(is)->is_lock_data)
+#define	is_read_lock(is)	lock_read(&(is)->is_lock_data)
+#define is_read_unlock(is)	lock_read_done(&(is)->is_lock_data)
 
-#define	is_write_lock(is)	mutex_lock(&(is)->is_lock_data)
-#define	is_write_lock_try(is)	mutex_try(&(is)->is_lock_data)
-#define is_write_unlock(is)	mutex_unlock(&(is)->is_lock_data)
+#define	is_write_lock(is)	lock_write(&(is)->is_lock_data)
+#define	is_write_lock_try(is)	lock_try_write(&(is)->is_lock_data)
+#define is_write_unlock(is)	lock_write_done(&(is)->is_lock_data)
 
-#define	is_write_to_read_lock(is)
+#define	is_write_to_read_lock(is) lock_write_to_read(&(is)->is_lock_data)
 
 /* Take a reference on a space */
 extern void ipc_space_reference(

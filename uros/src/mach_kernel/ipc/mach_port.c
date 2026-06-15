@@ -264,7 +264,12 @@ mach_port_names(
 		ipc_entry_num_t bound;
 		vm_size_t size_needed;
 
-		is_read_lock(space);
+		/*
+		 * #327: this enumerates the splay tree (ipc_splay_traverse_*),
+		 * which mutates it, so it must hold the space exclusively.
+		 * (is_*_unlock below both map to lock_done().)
+		 */
+		is_write_lock(space);
 		if (!space->is_active) {
 			is_read_unlock(space);
 			if (size != 0) {

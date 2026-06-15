@@ -309,6 +309,7 @@ ipc_splay_tree_init(
 	ipc_splay_tree_t	splay)
 {
 	splay->ist_root = ITE_NULL;
+	simple_lock_init(&splay->ist_lock_data, ETAP_IPC_IS);	/* #327 */
 }
 
 /*
@@ -353,7 +354,12 @@ ipc_splay_tree_lookup(
 {
 	ipc_tree_entry_t root;
 
-	ist_lock(splay);
+	/*
+	 * #327: a splay lookup restructures the tree, so it is not read-only.
+	 * Under the ipc_space reader/writer lock several readers may call this
+	 * concurrently; serialize them with the tree's private spinlock.
+	 */
+	simple_lock(&splay->ist_lock_data);
 
 	root = splay->ist_root;
 	if (root != ITE_NULL) {
@@ -372,7 +378,7 @@ ipc_splay_tree_lookup(
 			root = ITE_NULL;
 	}
 
-	ist_unlock(splay);
+	simple_unlock(&splay->ist_lock_data);	/* #327 */
 
 	return root;
 }
