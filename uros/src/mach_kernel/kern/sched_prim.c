@@ -577,7 +577,22 @@ thread_go(thread)
 
 	reset_timeout_check(&thread->timer);
 
-	if (thread->state & TH_WAIT) {
+	/*
+	 * #299 (SMP): thread_go() wakes a thread parked via thread_will_wait()
+	 * (an IPC receiver on imq_threads), which never sets wait_event.  A
+	 * thread instead queued on the event/mutex wait-hash has wait_event !=
+	 * NO_EVENT; we must NOT clear its TH_WAIT, or we wake it out of a lock
+	 * it has not acquired and leave a stale entry on the hash (which then
+	 * makes thread_wakeup_prim panic finding it without TH_WAIT).  This
+	 * happens when an IPC receiver is aborted (act_abort) but, before it
+	 * removes itself from imq_threads, re-blocks on imq_lock; a concurrent
+	 * ipc_mqueue_changed() then dequeues it from imq_threads and thread_go's
+	 * it.  Skipping it here is safe: it is still TH_WAIT on the mutex hash
+	 * and will be woken normally by the lock release, then sees ith_state
+	 * and handles the change on its own re-run.  assert_wait sets wait_event
+	 * under thread_lock too, so the check is race-free.
+	 */
+	if ((thread->state & TH_WAIT) && thread->wait_event == NO_EVENT) {
 		thread->state &= ~TH_WAIT;
 		if (!(thread->state & TH_RUN)) {
 			thread->state |= TH_RUN;

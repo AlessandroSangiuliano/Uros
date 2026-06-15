@@ -155,7 +155,9 @@ flipc2_poll(flipc2_pollset_t ps,
 	 * cons_sleeping store. */
 	for (i = 0; i < ps->n_channels; i++)
 		*ps->channels[i]->cons_sleeping = 1;
-	FLIPC2_WRITE_FENCE();
+	FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(prod_tail in scan)
+				 * store-load handshake needs mfence, not the
+				 * store-store WRITE_FENCE */
 
 	n = flipc2_pollset_scan(ps, events, max_events);
 	if (n > 0) {
