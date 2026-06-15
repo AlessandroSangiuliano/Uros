@@ -273,7 +273,12 @@ mach_port_space_info(
 	tree_potential = *treeCntp;
 
 	for (;;) {
-		is_read_lock(space);
+		/*
+		 * #327: this dumps the splay tree (ipc_splay_traverse_*), which
+		 * mutates it, so hold the space exclusively.  (is_read_unlock
+		 * below maps to lock_done(), which releases the write lock.)
+		 */
+		is_write_lock(space);
 		if (!space->is_active) {
 			is_read_unlock(space);
 			if (table_info != *tablep)

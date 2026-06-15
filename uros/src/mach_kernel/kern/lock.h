@@ -754,5 +754,6 @@ extern void	lock_write_to_read	(lock_t*);
 #define	lock_write_done(l)		lock_done(l)
 
 extern boolean_t lock_read_to_write	(lock_t*);  /* vm_map is only user */
+extern boolean_t lock_try_write		(lock_t*);  /* non-blocking write acquire (#327) */
 
 #endif	/* _KERN_LOCK_H_ */

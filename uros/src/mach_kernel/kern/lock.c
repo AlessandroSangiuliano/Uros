@@ -1511,13 +1511,15 @@ lock_write_to_read(
 }
 
 
-#if	0	/* Unused */
 /*
  *	Routine:	lock_try_write
  *	Function:
  *		Tries to get a write lock.
  *
  *		Returns FALSE if the lock is not held on return.
+ *
+ *	Re-enabled for #327: backs is_write_lock_try() now that
+ *	ipc_space uses a real reader/writer lock.
  */
 
 boolean_t
@@ -1558,6 +1560,7 @@ lock_try_write(
 	return(TRUE);
 }
 
+#if	0	/* Unused: no callers */
 /*
  *	Routine:	lock_try_read
  *	Function:
