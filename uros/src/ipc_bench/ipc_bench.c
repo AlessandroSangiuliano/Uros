@@ -203,6 +203,86 @@ print_result(const char *label, unsigned long total_ns, int iters)
 }
 
 /* ===================================================================
+ * SMP-correct echo-thread readiness handshake.
+ *
+ * The old code "synchronised" by calling thread_switch(YIELD/DEPRESS)
+ * after pthread_create and assuming the echo thread had, by the time the
+ * yield returned, started and blocked in mach_msg_receive.  That is a
+ * uniprocessor assumption: on SMP the echo thread runs on another CPU
+ * and the yield guarantees nothing.  Instead, the echo thread sends a
+ * one-shot ping on a ready port as its very first action; spawn_echo()
+ * blocks receiving it, so the benchmark loop only starts once the echo
+ * thread is provably running.  Benches run sequentially, so a single
+ * global ready port (live only across the handshake) suffices and lets
+ * the four echo funcs keep their (void*)port argument unchanged.
+ * =================================================================== */
+
+static volatile mach_port_t g_echo_ready_port = MACH_PORT_NULL;
+
+/* echo side: announce "I'm running" (call once at thread entry). */
+static void
+echo_signal_ready(void)
+{
+    mach_port_t		rp = g_echo_ready_port;
+    mach_msg_header_t	m;
+
+    if (rp == MACH_PORT_NULL)
+	return;
+    m.msgh_bits	       = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    m.msgh_size	       = sizeof(m);
+    m.msgh_remote_port = rp;
+    m.msgh_local_port  = MACH_PORT_NULL;
+    m.msgh_id	       = 0;
+    (void) mach_msg(&m, MACH_SEND_MSG, sizeof(m), 0,
+		    MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+/* spawner side: create the echo thread and block until it is running.
+ * Replaces "pthread_create + pthread_detach + thread_switch(yield)".
+ * The 5 s timeout turns a libpthreads lost-wakeup (echo never scheduled)
+ * into an explicit log line instead of a silent wedge — a clean signal
+ * to distinguish a benchmark sync bug from a real threading bug. */
+static void
+spawn_echo(const char *label, void *(*fn)(void *), mach_port_t echo_port)
+{
+    pthread_t		th;
+    mach_port_t		ready_port;
+    /* Receive buffer must hold the header AND the trailer the kernel
+     * appends, plus slack — receiving into a bare header overflows the
+     * stack (the stack protector trips: "stack smashing detected"). */
+    struct {
+	mach_msg_header_t  head;
+	mach_msg_trailer_t trailer;
+	char		   pad[32];
+    } m;
+    kern_return_t	kr;
+
+    if (mach_port_allocate(mach_task_self(),
+			   MACH_PORT_RIGHT_RECEIVE, &ready_port)) {
+	/* Fall back to the old best-effort yield if we can't make a port. */
+	pthread_create(&th, NULL, fn, (void *)(unsigned long)echo_port);
+	pthread_detach(th);
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+	return;
+    }
+    mach_port_insert_right(mach_task_self(), ready_port, ready_port,
+			   MACH_MSG_TYPE_MAKE_SEND);
+    g_echo_ready_port = ready_port;
+
+    pthread_create(&th, NULL, fn, (void *)(unsigned long)echo_port);
+    pthread_detach(th);
+
+    kr = mach_msg(&m.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(m),
+		  ready_port, 5000, MACH_PORT_NULL);
+    if (kr == MACH_RCV_TIMED_OUT)
+	printf("  %s: echo thread failed to start in 5s "
+	       "(libpthreads lost wakeup?)\n", label);
+
+    g_echo_ready_port = MACH_PORT_NULL;
+    mach_port_destroy(mach_task_self(), ready_port);
+}
+
+/* ===================================================================
  * Intra-task echo thread (cthread)
  *
  * Receives a message on `port`, sends a reply back on the
@@ -216,6 +296,8 @@ echo_thread_func(void *arg)
     bench_recv_buf_t	msg;
     bench_null_msg_t	reply;
     kern_return_t	kr;
+
+    echo_signal_ready();
 
     for (;;) {
 	kr = mach_msg(&msg.head,
@@ -289,16 +371,8 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 
     reply_port = mach_reply_port();
 
-    /* Spawn echo thread */
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
-
-    /* Let echo thread start up */
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, echo_thread_func, echo_port);
 
     /* Warmup */
     for (i = 0; i < WARMUP_ITERS; i++) {
@@ -363,6 +437,8 @@ combined_echo_thread_func(void *arg)
     mach_msg_option_t	opt	= MACH_RCV_MSG;	/* first time: receive only */
     mach_msg_size_t	send_sz = 0;
 
+    echo_signal_ready();
+
     for (;;) {
 	kr = mach_msg(&buf.head, opt, send_sz, sizeof(buf), port,
 		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
@@ -417,13 +493,8 @@ bench_combined_rpc(const char *label, int send_size, int iters)
     if (kr) { printf("  %s: insert right failed %d\n", label, kr); return; }
     reply_port = mach_reply_port();
 
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, combined_echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, combined_echo_thread_func, echo_port);
 
     for (i = 0; i < WARMUP_ITERS; i++) {
 	buf.head.msgh_bits =
@@ -698,6 +769,8 @@ slow_echo_thread_func(void *arg)
     bench_null_msg_t	reply;
     kern_return_t	kr;
 
+    echo_signal_ready();
+
     for (;;) {
 	kr = mach_msg(&msg.head,
 		      MACH_RCV_MSG,
@@ -772,20 +845,14 @@ bench_slow_receive(const char *label, int send_size, int iters)
 
     reply_port = mach_reply_port();
 
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, slow_echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, slow_echo_thread_func, echo_port);
 
-    /* Let echo thread start and block for the first time */
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
-
-    /* Warmup — same yield-send-recv pattern */
+    /* Warmup.  (The old per-iteration thread_switch(YIELD) here assumed UP
+     * "echo is now blocked" semantics; on SMP it is unachievable and only
+     * added a busy-yield spin, so it is gone — Mach queues the message and
+     * the echo thread services it regardless of where it is.) */
     for (i = 0; i < WARMUP_ITERS; i++) {
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
-
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
 			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
@@ -803,12 +870,6 @@ bench_slow_receive(const char *label, int send_size, int iters)
     /* Timed run */
     get_time(&t0);
     for (i = 0; i < iters; i++) {
-	/*
-	 * Yield CPU: echo thread runs, calls mach_msg_receive, blocks.
-	 * On return here the echo thread is guaranteed to be sleeping.
-	 */
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
-
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
 			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
@@ -1089,13 +1150,8 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 
     reply_port = mach_reply_port();
 
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, echo_thread_func, echo_port);
 
     for (i = 0; i < WARMUP_ITERS; i++) {
 	send_buf.head.msgh_bits =
@@ -1306,6 +1362,8 @@ ool_echo_thread_func(void *arg)
     bench_null_msg_t	reply;
     kern_return_t	kr;
 
+    echo_signal_ready();
+
     for (;;) {
 	kr = mach_msg(&msg.head,
 		      MACH_RCV_MSG,
@@ -1381,13 +1439,8 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
     if (kr) { printf("  %s: insert right failed %d\n", label, kr); return; }
     reply_port = mach_reply_port();
 
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, ool_echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, ool_echo_thread_func, echo_port);
 
     /* Warmup */
     for (i = 0; i < WARMUP_ITERS; i++) {
