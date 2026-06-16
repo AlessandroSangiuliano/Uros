@@ -127,6 +127,7 @@ kernel_trap(mach_print,-14,1)
 kernel_trap(mach_null,-15,0)
 kernel_trap(mach_thread_set_name,-16,1)
 kernel_trap(evc_wait,-17,1)
+kernel_trap(urmach_rcu_sync,-18,0)	/* #331 step 2 (TEMPORARY) */
 
 /*
  *	UrMach capability fast-path traps (slots 37-40).  These replace

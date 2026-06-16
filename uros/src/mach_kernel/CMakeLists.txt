@@ -454,6 +454,7 @@ set(KERN_SOURCES
     kern/priority.c
     kern/processor.c
     kern/queue.c
+    kern/rcu.c
     kern/rpc.c
     kern/sched_prim.c
     kern/sscanf.c

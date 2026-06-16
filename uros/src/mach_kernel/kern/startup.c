@@ -212,6 +212,7 @@
 #include <kern/machine.h>
 #include <kern/posixtime.h>
 #include <kern/processor.h>
+#include <kern/rcu.h>
 #include <kern/sched_prim.h>
 #include <kern/startup.h>
 #include <kern/task.h>
@@ -284,6 +285,7 @@ setup_main(void)
 	ipc_bootstrap();
 	vm_mem_init();
 	ipc_init();
+	urmach_rcu_init();		/* #331 step 2: QSBR (no-op stub today) */
 
 	/*
 	 * As soon as the virtual memory system is up, we record
