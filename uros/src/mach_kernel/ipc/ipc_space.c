@@ -107,7 +107,6 @@
 #include <kern/zalloc.h>
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
-#include <ipc/ipc_splay.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_table.h>
