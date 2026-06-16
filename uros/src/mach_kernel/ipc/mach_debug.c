@@ -227,6 +227,43 @@ host_ipc_hash_info(
 }
 
 /*
+ *	#331: ipc_radix_iterate() callback that dumps each sparse overflow
+ *	entry into the tree_info array (replaces the splay traversal).  The
+ *	radix has no per-entry BST links, so lchild/rchild are reported null.
+ */
+struct space_info_radix_ctx {
+	ipc_info_tree_name_t	*tree_info;
+	unsigned int		 index;
+};
+
+static void
+mach_port_space_info_radix(
+	mach_port_index_t	index_unused,
+	ipc_tree_entry_t	tentry,
+	void			*arg)
+{
+	struct space_info_radix_ctx *c = (struct space_info_radix_ctx *) arg;
+	ipc_info_tree_name_t *iitn = &c->tree_info[c->index++];
+	ipc_info_name_t *iin = &iitn->iitn_name;
+	ipc_entry_t entry = &tentry->ite_entry;
+	ipc_entry_bits_t bits = entry->ie_bits;
+
+	(void) index_unused;
+	assert(IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE);
+
+	iin->iin_name = tentry->ite_name;
+	iin->iin_collision = FALSE;		/* #331: no collisions */
+	iin->iin_type = IE_BITS_TYPE(bits);
+	iin->iin_urefs = IE_BITS_UREFS(bits);
+	iin->iin_object = (vm_offset_t) entry->ie_object;
+	iin->iin_next = entry->ie_next;
+	iin->iin_hash = entry->ie_index;
+
+	iitn->iitn_lchild = MACH_PORT_NULL;	/* #331: radix has no BST links */
+	iitn->iitn_rchild = MACH_PORT_NULL;
+}
+
+/*
  *	Routine:	mach_port_space_info
  *	Purpose:
  *		Returns information about an IPC space.
@@ -256,7 +293,6 @@ mach_port_space_info(
 	unsigned int tree_potential, tree_actual;
 	vm_offset_t tree_addr;
 	vm_size_t tree_size;
-	ipc_tree_entry_t tentry;
 	ipc_entry_t table;
 	ipc_entry_num_t tsize;
 	mach_port_index_t index;
@@ -367,36 +403,14 @@ mach_port_space_info(
 		iin->iin_hash = entry->ie_index;
 	}
 
-	for (tentry = ipc_splay_traverse_start(&space->is_tree), index = 0;
-	     tentry != ITE_NULL;
-	     tentry = ipc_splay_traverse_next(&space->is_tree, FALSE)) {
-		ipc_info_tree_name_t *iitn = &tree_info[index++];
-		ipc_info_name_t *iin = &iitn->iitn_name;
-		ipc_entry_t entry = &tentry->ite_entry;
-		ipc_entry_bits_t bits = entry->ie_bits;
+	{
+		struct space_info_radix_ctx ctx;
 
-		assert(IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE);
-
-		iin->iin_name = tentry->ite_name;
-		iin->iin_collision = (bits & IE_BITS_COLLISION) ? TRUE : FALSE;
-		iin->iin_type = IE_BITS_TYPE(bits);
-		iin->iin_urefs = IE_BITS_UREFS(bits);
-		iin->iin_object = (vm_offset_t) entry->ie_object;
-		iin->iin_next = entry->ie_next;
-		iin->iin_hash = entry->ie_index;
-
-		if (tentry->ite_lchild == ITE_NULL)
-			iitn->iitn_lchild = MACH_PORT_NULL;
-		else
-			iitn->iitn_lchild = tentry->ite_lchild->ite_name;
-
-		if (tentry->ite_rchild == ITE_NULL)
-			iitn->iitn_rchild = MACH_PORT_NULL;
-		else
-			iitn->iitn_rchild = tentry->ite_rchild->ite_name;
-
+		ctx.tree_info = tree_info;
+		ctx.index = 0;
+		ipc_radix_iterate(&space->is_tree, mach_port_space_info_radix,
+				  &ctx);
 	}
-	ipc_splay_traverse_finish(&space->is_tree);
 	is_read_unlock(space);
 
 	if (table_info == *tablep) {

@@ -1900,6 +1900,68 @@ bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
 }
 
 /* ===================================================================
+ * Radix overflow capability-table test (#331)
+ *
+ * Exercises the sparse-name code paths that the normal benchmark does
+ * not: allocate_name at a high (sparse) index goes through the radix
+ * overflow, a colliding index must be rejected with KERN_NAME_EXISTS,
+ * and destroy must free the radix entry so the name can be re-used.
+ * =================================================================== */
+
+static void
+test_radix_overflow(void)
+{
+    kern_return_t	kr;
+    mach_port_t		self = mach_task_self();
+    unsigned int	sparse = 0x100000;	/* 1M: well above the table */
+    mach_port_t		name_a = (mach_port_t)((sparse << 8) | 0x11);
+    mach_port_t		name_b = (mach_port_t)((sparse << 8) | 0x22); /* same idx, diff gen */
+    mach_port_type_t	type;
+    int			ok = 1;
+    int			i;
+    mach_port_t		names[8];
+
+    /* 1) sparse allocate -> radix insert */
+    kr = mach_port_allocate_name(self, MACH_PORT_RIGHT_RECEIVE, name_a);
+    if (kr != KERN_SUCCESS) { printf("  radix: alloc sparse failed %d\n", kr); ok = 0; }
+
+    /* 2) it must be found -> radix lookup */
+    kr = mach_port_type(self, name_a, &type);
+    if (kr != KERN_SUCCESS) { printf("  radix: type(sparse) failed %d\n", kr); ok = 0; }
+
+    /* 3) colliding name (same index, different gen) -> KERN_NAME_EXISTS */
+    kr = mach_port_allocate_name(self, MACH_PORT_RIGHT_RECEIVE, name_b);
+    if (kr != KERN_NAME_EXISTS) {
+	printf("  radix: collision expected KERN_NAME_EXISTS, got %d\n", kr);
+	ok = 0;
+    }
+
+    /* 4) destroy -> radix delete */
+    kr = mach_port_destroy(self, name_a);
+    if (kr != KERN_SUCCESS) { printf("  radix: destroy(sparse) failed %d\n", kr); ok = 0; }
+
+    /* 5) re-allocate the same name -> radix re-insert after delete */
+    kr = mach_port_allocate_name(self, MACH_PORT_RIGHT_RECEIVE, name_a);
+    if (kr != KERN_SUCCESS) { printf("  radix: re-alloc failed %d\n", kr); ok = 0; }
+    (void) mach_port_destroy(self, name_a);
+
+    /* 6) several sparse indices in different radix subtrees, then verify */
+    for (i = 0; i < 8; i++) {
+	names[i] = (mach_port_t)(((sparse + (i * 0x40000)) << 8) | 0x33);
+	kr = mach_port_allocate_name(self, MACH_PORT_RIGHT_RECEIVE, names[i]);
+	if (kr != KERN_SUCCESS) { printf("  radix: multi alloc[%d] failed %d\n", i, kr); ok = 0; }
+    }
+    for (i = 0; i < 8; i++) {
+	kr = mach_port_type(self, names[i], &type);
+	if (kr != KERN_SUCCESS) { printf("  radix: multi type[%d] failed %d\n", i, kr); ok = 0; }
+    }
+    for (i = 0; i < 8; i++)
+	(void) mach_port_destroy(self, names[i]);
+
+    printf("  radix overflow test: %s\n", ok ? "PASS" : "FAIL");
+}
+
+/* ===================================================================
  * Main
  * =================================================================== */
 
@@ -2068,6 +2130,7 @@ main(int argc, char **argv)
 
 	bench_port_alloc_destroy(BENCH_ITERS);
 	bench_port_names(BENCH_ITERS);
+	test_radix_overflow();		/* #331 sparse/collision paths */
     }
 
     /* ---------------------------------------------------------

@@ -94,7 +94,7 @@
 #include <kern/lock.h>
 #include <kern/zalloc.h>
 #include <ipc/ipc_entry.h>
-#include <ipc/ipc_splay.h>
+#include <ipc/ipc_radix.h>
 #include <ipc/ipc_types.h>
 
 /*
@@ -124,9 +124,9 @@ struct ipc_space {
 	ipc_entry_t is_table;		/* an array of entries */
 	ipc_entry_num_t is_table_size;	/* current size of table */
 	struct ipc_table_size *is_table_next; /* info for larger table */
-	struct ipc_splay_tree is_tree;	/* a splay tree of entries */
+	struct ipc_radix_tree is_tree;	/* #331: sparse-index overflow (radix) */
 	ipc_entry_num_t is_tree_total;	/* number of entries in the tree */
-	ipc_entry_num_t is_tree_small;	/* # of small entries in the tree */
+	ipc_entry_num_t is_tree_small;	/* #331: unused (kept for mach_debug ABI) */
 	ipc_entry_num_t is_tree_hash;	/* # of hashed entries in the tree */
 	boolean_t is_fast;              /* for is_fast_space() */
 	natural_t is_generation;	/* bumped on right removal/modification */
