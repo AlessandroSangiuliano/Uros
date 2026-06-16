@@ -494,7 +494,7 @@ set(IPC_SOURCES
     ipc/ipc_pset.c
     ipc/ipc_right.c
     ipc/ipc_space.c
-    ipc/ipc_splay.c
+    ipc/ipc_radix.c
     ipc/ipc_table.c
     ipc/ipc_thread.c
     ipc/mach_msg.c
