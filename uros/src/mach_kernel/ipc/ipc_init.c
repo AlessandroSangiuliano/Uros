@@ -227,6 +227,20 @@ ipc_bootstrap(void)
 	 * XXX	panics when port allocation for an internal object fails.
 	 *zone_change(ipc_object_zones[IOT_PORT], Z_EXHAUST, TRUE);
 	 */
+	/*
+	 * #331 step 2 (part 3b): make the port zone type-stable.  A lock-free
+	 * capability lookup reads entry->ie_object and then ip_lock()s the port
+	 * without the space lock; the port must therefore be safe to lock even
+	 * if another CPU concurrently freed it.  Non-collectable storage keeps
+	 * the page valid (the caller re-validates ip_active + identity after
+	 * locking), so the lock never faults.  This also closes the pre-existing
+	 * race in the per-thread port cache (#55, mach_msg.c), which already
+	 * ip_lock()s an unlocked cached port and only then checks ip_active.
+	 * Trade-off: freed ports are reused from the zone free list but their
+	 * pages are never returned to the system (bounded by peak port count);
+	 * reclaiming them would need call_rcu-style deferral (a #330 follow-up).
+	 */
+	zone_change(ipc_object_zones[IOT_PORT], Z_COLLECT, FALSE);
 
 	ipc_object_zones[IOT_PORT_SET] =
 		zinit(sizeof(struct ipc_pset),
@@ -235,6 +249,8 @@ ipc_bootstrap(void)
 		      "ipc port sets");
 	/* make it exhaustible */
 	zone_change(ipc_object_zones[IOT_PORT_SET], Z_EXHAUST, TRUE);
+	/* #331 step 2 (part 3b): type-stable for the same reason as ports */
+	zone_change(ipc_object_zones[IOT_PORT_SET], Z_COLLECT, FALSE);
 
 	/* create special spaces */
 
