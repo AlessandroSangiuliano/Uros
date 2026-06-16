@@ -2019,6 +2019,84 @@ test_cap_probe_lockfree(void)
 }
 
 /* ===================================================================
+ * #331 step 2 (TEMPORARY): lock-free probe under CONCURRENCY.
+ * A prober thread hammers urmach_cap_probe() on a set of STABLE names
+ * (allocated once, never freed) while the main thread churns the table
+ * (allocate + destroy batches, forcing grows).  Invariant: a grow copies
+ * each live entry to the same index in the new table, so a stable name
+ * must ALWAYS probe as RECEIVE -- if the lock-free reader ever returns
+ * something else it lost a live entry across a concurrent grow (a bug).
+ * KVM/TSO will not surface memory-ordering bugs, but this catches faults,
+ * use-after-free in the type-stable storage, and grow/seqlock logic bugs.
+ * =================================================================== */
+#define	CC_PROBE_STABLE	16
+#define	CC_PROBE_CHURN	48
+#define	CC_PROBE_ROUNDS	300
+
+static volatile int	g_probe_stop;
+static mach_port_t	g_probe_stable[CC_PROBE_STABLE];
+static volatile long	g_probe_count;
+static volatile long	g_probe_bad;
+
+static void *
+cap_probe_worker(void *arg)
+{
+    (void) arg;
+    while (!g_probe_stop) {
+	int i;
+	for (i = 0; i < CC_PROBE_STABLE; i++) {
+	    if (urmach_cap_probe(g_probe_stable[i]) != MACH_PORT_TYPE_RECEIVE)
+		g_probe_bad++;
+	    g_probe_count++;
+	}
+    }
+    return NULL;
+}
+
+static void
+test_cap_probe_concurrent(void)
+{
+    pthread_t		th;
+    mach_port_t		self = mach_task_self();
+    kern_return_t	kr;
+    int			i, round;
+
+    for (i = 0; i < CC_PROBE_STABLE; i++) {
+	kr = mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE, &g_probe_stable[i]);
+	if (kr != KERN_SUCCESS) {
+	    printf("  cc-probe: stable alloc failed %d\n", kr);
+	    return;
+	}
+    }
+
+    g_probe_stop = 0;
+    g_probe_count = 0;
+    g_probe_bad = 0;
+    pthread_create(&th, NULL, cap_probe_worker, NULL);
+
+    for (round = 0; round < CC_PROBE_ROUNDS; round++) {
+	mach_port_t churn[CC_PROBE_CHURN];
+
+	for (i = 0; i < CC_PROBE_CHURN; i++)
+	    if (mach_port_allocate(self, MACH_PORT_RIGHT_RECEIVE,
+				   &churn[i]) != KERN_SUCCESS)
+		churn[i] = MACH_PORT_NULL;
+	for (i = 0; i < CC_PROBE_CHURN; i++)
+	    if (churn[i] != MACH_PORT_NULL)
+		(void) mach_port_destroy(self, churn[i]);
+    }
+
+    g_probe_stop = 1;
+    pthread_join(th, NULL);
+
+    for (i = 0; i < CC_PROBE_STABLE; i++)
+	(void) mach_port_destroy(self, g_probe_stable[i]);
+
+    printf("  lock-free concurrent stress: %s (%ld probes, %ld lost)\n",
+	   g_probe_bad == 0 ? "PASS" : "FAIL", g_probe_count, g_probe_bad);
+}
+
+/* ===================================================================
  * Main
  * =================================================================== */
 
@@ -2189,6 +2267,7 @@ main(int argc, char **argv)
 	bench_port_names(BENCH_ITERS);
 	test_radix_overflow();		/* #331 sparse/collision paths */
 	test_cap_probe_lockfree();	/* #331 step 2 lock-free reader (TEMP) */
+	test_cap_probe_concurrent();	/* #331 step 2 lock-free under load (TEMP) */
     }
 
     /* ---------------------------------------------------------
