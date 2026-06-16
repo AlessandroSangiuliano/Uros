@@ -188,6 +188,18 @@ ipc_bootstrap(void)
 	/* make it exhaustible */
 	zone_change(ipc_tree_entry_zone, Z_EXHAUST, TRUE);
 #endif
+	/*
+	 * #331 step 2: make the ite zone type-stable.  Zones are collectable by
+	 * default, so the GC can reclaim an emptied page back to the system; a
+	 * lock-free reader could then dereference a freed ite into unmapped or
+	 * repurposed memory.  Marking the zone non-collectable keeps its pages
+	 * forever, so a freed ite stays valid ipc_tree_entry-typed storage --
+	 * the lookup's `ite_name == name' re-check then rejects a reused entry,
+	 * and freeing an ite needs no RCU grace period.  (zfree still returns
+	 * the element to the free list for reuse as another ite; only the
+	 * page-reclaiming GC is disabled.)
+	 */
+	zone_change(ipc_tree_entry_zone, Z_COLLECT, FALSE);
 
 	/*
 	 * populate all port(set) zones
