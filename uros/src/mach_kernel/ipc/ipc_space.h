@@ -130,6 +130,14 @@ struct ipc_space {
 	ipc_entry_num_t is_tree_hash;	/* # of hashed entries in the tree */
 	boolean_t is_fast;              /* for is_fast_space() */
 	natural_t is_generation;	/* bumped on right removal/modification */
+	/*
+	 * #331 step 2: seqlock guarding the (is_table, is_table_size) pair and
+	 * the table contents while ipc_entry_grow_table rebuilds them.  Odd =
+	 * update in progress; a lock-free reader (ipc_entry_lookup_rcu) snapshots
+	 * it, walks, then re-reads and retries on any change.  Mutated only under
+	 * the write lock, so the odd/even discipline needs no atomics.
+	 */
+	volatile natural_t is_seq;
 };
 
 #define	IS_NULL			((ipc_space_t) 0)

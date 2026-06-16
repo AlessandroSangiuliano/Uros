@@ -125,6 +125,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <ipc/ipc_entry.h>
+#include <ipc/ipc_radix.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_port.h>
@@ -200,6 +201,18 @@ ipc_bootstrap(void)
 	 * page-reclaiming GC is disabled.)
 	 */
 	zone_change(ipc_tree_entry_zone, Z_COLLECT, FALSE);
+
+	/*
+	 * #331 step 2: radix overflow nodes, also type-stable (see ipc_radix.c).
+	 * Expandable (zinit default), so the size is just a hint; sparse names
+	 * use only a handful of nodes in practice.
+	 */
+	ipc_radix_node_zone =
+		zinit(sizeof(struct ipc_radix_node),
+			ipc_tree_entry_max * sizeof(struct ipc_radix_node),
+			sizeof(struct ipc_radix_node),
+			"ipc radix nodes");
+	zone_change(ipc_radix_node_zone, Z_COLLECT, FALSE);
 
 	/*
 	 * populate all port(set) zones

@@ -215,6 +215,7 @@ ipc_space_create(
 	space->is_tree_small = 0;
 	space->is_tree_hash = 0;
 	space->is_generation = 0;
+	space->is_seq = 0;		/* #331 step 2: table seqlock */
 
 	*spacep = space;
 	return KERN_SUCCESS;
@@ -251,6 +252,7 @@ ipc_space_create_special(
 	is_lock_init(space);
 	space->is_active = FALSE;
 	space->is_generation = 0;
+	space->is_seq = 0;		/* #331 step 2: table seqlock */
 
 	*spacep = space;
 	return KERN_SUCCESS;

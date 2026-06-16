@@ -107,6 +107,17 @@ urmach_synchronize_rcu(void)
 		while (machine_slot[c].running &&
 		       !cpu_data[c].rcu_cpu_idle &&
 		       cpu_data[c].rcu_qs_seq == snap[c]) {
+			/*
+			 *	A CPU spinning here is itself a writer holding no
+			 *	read reference, i.e. quiescent -- so report our own
+			 *	quiescent state while we wait.  Without this, two
+			 *	CPUs that both enter synchronize_rcu (e.g. two
+			 *	concurrent table grows) deadlock waiting on each
+			 *	other: a spinning CPU is not idle, does not
+			 *	context-switch, and may have interrupts masked so no
+			 *	clock tick advances its counter.
+			 */
+			urmach_rcu_quiescent_state();
 			urmach_rcu_cpu_pause();
 			if (++spins >= URMACH_RCU_STALL_SPINS) {
 				printf("urmach_rcu: WARNING cpu %d not quiescent "
@@ -116,29 +127,4 @@ urmach_synchronize_rcu(void)
 			}
 		}
 	}
-}
-
-/*
- *	#331 step 2 liveness probe (TEMPORARY mach trap, slot 18).  Driven from
- *	user space by ipc_bench at the ush$ prompt -- i.e. with the system fully
- *	up and every CPU genuinely busy -- so it validates that the three
- *	quiescent-state checkpoints fire on all online CPUs and that a grace
- *	period actually completes, without perturbing the delicate AP bring-up.
- *	If the grace period ever stalled this trap would never return and the
- *	user-space caller would visibly hang.
- *
- *	It does NOT exercise the memory-ordering paths -- that is step 4's
- *	concurrent stress, and KVM/TSO would not reproduce those bugs anyway.
- *	Remove this trap (and its syscall_sw.c / syscall_sw.h / ipc_bench.c
- *	wiring) once the lock-free lookup conversion is validated.
- */
-kern_return_t
-urmach_rcu_sync(void)
-{
-	int i;
-
-	for (i = 0; i < 8; i++)
-		urmach_synchronize_rcu();
-
-	return KERN_SUCCESS;
 }

@@ -97,10 +97,12 @@
 #include <kern/sched_prim.h>
 #include <kern/zalloc.h>
 #include <kern/misc_protos.h>
+#include <kern/thread.h>		/* current_space() for urmach_cap_probe (TEMP) */
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_radix.h>
+#include <kern/rcu.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_table.h>
@@ -175,6 +177,102 @@ ipc_entry_lookup(
 
 	assert((entry == IE_NULL) || IE_BITS_TYPE(entry->ie_bits));
 	return entry;
+}
+
+/*
+ *	Routine:	ipc_entry_lookup_type_lockfree
+ *	Purpose:
+ *		Return the port type of `name' in `space' WITHOUT taking the
+ *		space lock.  This is the #331 step 2 lock-free read path.
+ *	Conditions:
+ *		No lock held.  `space' must stay allocated for the call (e.g.
+ *		the caller's own current space).  Reads only ie_bits/ite_bits
+ *		(an atomic int) -- never the object -- so it never needs an
+ *		object lock.
+ *	Why it is safe without a lock:
+ *		- is_table, the radix nodes, and the ites are all type-stable
+ *		  (their zones/pool never return memory to the system, see
+ *		  ipc_table.c / ipc_radix.c / ipc_init.c), so every deref lands
+ *		  on valid, correctly-typed memory even if another CPU freed and
+ *		  reused it concurrently.
+ *		- The per-space seqlock (is_seq) gives a consistent
+ *		  (is_table_size, is_table) snapshot and forces a retry across a
+ *		  concurrent ipc_entry_grow_table.  Reading size before table
+ *		  means we never pair an old (small) table with a new (large)
+ *		  size, so the index is always in bounds -- no fault.
+ *		- ie_bits is a single int (atomic load), so a concurrent
+ *		  alloc/dealloc is seen whole; the generation check rejects a
+ *		  reused slot.  The radix path re-checks ite_name.
+ *		The result is racy by nature (it reflects some instant during a
+ *		concurrent modification) but never faults, tears, or loops.
+ */
+mach_port_type_t
+ipc_entry_lookup_type_lockfree(
+	ipc_space_t	space,
+	mach_port_t	name)
+{
+	mach_port_index_t	index = MACH_PORT_INDEX(name);
+	mach_port_gen_t		gen   = MACH_PORT_GEN(name);
+	unsigned int		tries = 0;
+
+	for (;;) {
+		natural_t		s;
+		ipc_entry_t		table;
+		ipc_entry_num_t		size;
+		ipc_entry_bits_t	bits = 0;
+		boolean_t		found = FALSE;
+
+		if (++tries > 1000000)		/* paranoia: never spin forever */
+			return MACH_PORT_TYPE_NONE;
+
+		s = space->is_seq;
+		if (s & 1) {			/* grow in progress -- retry */
+			urmach_rcu_barrier();
+			continue;
+		}
+		urmach_rcu_barrier();
+
+		/* size BEFORE table: grow publishes table then size, so this
+		 * order never yields (old table, new size) -> always in bounds */
+		size = space->is_table_size;
+		urmach_rcu_barrier();
+		table = space->is_table;
+		urmach_rcu_barrier();
+
+		if (index < size) {
+			bits = table[index].ie_bits;
+			if (IE_BITS_GEN(bits) == gen &&
+			    IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE)
+				found = TRUE;
+		} else {
+			ipc_tree_entry_t tentry =
+				ipc_radix_lookup(&space->is_tree, index);
+
+			if (tentry != ITE_NULL && tentry->ite_name == name) {
+				bits = tentry->ite_bits;
+				found = TRUE;
+			}
+		}
+
+		urmach_rcu_barrier();
+		if (space->is_seq != s)		/* table changed under us -- retry */
+			continue;
+
+		return found ? IE_BITS_TYPE(bits) : MACH_PORT_TYPE_NONE;
+	}
+}
+
+/*
+ *	#331 step 2 (TEMPORARY mach trap, slot 18): probe the type of `name' in
+ *	the caller's own space via the lock-free path, for ipc_bench to validate
+ *	the lock-free reader from user space (including under concurrency).
+ *	Remove with the rest of the step-2 scaffolding once validated.
+ */
+mach_port_type_t
+urmach_cap_probe(
+	mach_port_t	name)
+{
+	return ipc_entry_lookup_type_lockfree(current_space(), name);
 }
 
 /*
@@ -697,6 +795,15 @@ ipc_entry_grow_table(
 		       (target_size != ITS_SIZE_NONE));
 		assert(space->is_table_size == osize);
 
+		/*
+		 *	#331 step 2: open the table seqlock (odd) before swapping in
+		 *	the new table and rebuilding its contents below, so a
+		 *	lock-free reader that catches us mid-rebuild retries instead
+		 *	of reading a half-populated table.
+		 */
+		space->is_seq++;
+		urmach_rcu_barrier();
+
 		space->is_table = table;
 		space->is_table_size = size;
 		space->is_table_next = nits;
@@ -800,6 +907,12 @@ ipc_entry_grow_table(
 		table[0].ie_next = free_index;
 
 		/*
+		 *	#331 step 2: table fully rebuilt -- close the seqlock (even).
+		 */
+		urmach_rcu_barrier();
+		space->is_seq++;
+
+		/*
 		 *	Now we need to free the old table.
 		 *	If the space dies or grows while unlocked,
 		 *	then we can quit here.
@@ -807,6 +920,12 @@ ipc_entry_grow_table(
 
 		is_write_unlock(space);
 		thread_wakeup((event_t) space);
+		/*
+		 *	#331 step 2: it_entries_free does NOT return the old table to
+		 *	the system -- it pools it (type-stable), so a lock-free reader
+		 *	still looking at it sees valid memory and retries via the
+		 *	seqlock.  No grace period needed here.
+		 */
 		it_entries_free(oits, otable);
 		is_write_lock(space);
 		if (!space->is_active || (space->is_table_next != nits))
