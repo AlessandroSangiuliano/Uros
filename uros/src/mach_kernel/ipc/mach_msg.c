@@ -842,7 +842,7 @@ boolean_t enable_hotpath = TRUE;	/* Patchable, just in case ...	*/
 #endif	/* HOTPATH_ENABLE */
 
 /*
- *	Routine:	mach_msg_lockfree_resolve
+ *	Routine:	urmach_msg_lockfree_resolve
  *	Purpose:
  *		#331 step 2 part 3b: resolve the RPC copyin's reply_name (a
  *		receive right) and dest_name (a send right) to their ports
@@ -851,59 +851,45 @@ boolean_t enable_hotpath = TRUE;	/* Patchable, just in case ...	*/
  *		and validated; on failure returns FALSE with no locks held and
  *		the caller falls back to the locked lookup.
  *	Conditions:
- *		Nothing locked.  Dense-only: a sparse/missing/wrong-typed name
- *		returns FALSE so the locked path handles it (and the radix).
+ *		Nothing locked.  Handles both dense and sparse (radix) names via
+ *		ipc_entry_lookup_lockfree; a missing/wrong-typed name returns
+ *		FALSE so the locked path handles it.
  *	Why it is safe without the lock:
- *		is_table and the ports are type-stable (#331), so every deref
- *		hits valid memory and ip_lock never faults.  We snapshot
- *		(is_generation, is_seq), read size-before-table for a consistent
- *		in-bounds snapshot, resolve and lock the ports, then re-check the
- *		snapshot: a concurrent table grow (is_seq) or any right
- *		removal/modification (is_generation, bumped at the head of
- *		ipc_right_destroy before the entry is cleared, under ip_lock of
- *		the very port we hold) makes us return FALSE rather than act on a
- *		stale mapping.  So it never misdelivers: it either confirms
- *		name->port at a valid linearization point or gives up.
+ *		ipc_entry_lookup_lockfree reads the entry from type-stable storage
+ *		under the per-space seqlock (no fault, table-consistent); the ports
+ *		are type-stable too, so ip_lock never faults.  We snapshot
+ *		(is_generation, is_seq) around both lookups, lock the ports, then
+ *		re-check the snapshot: a concurrent table grow (is_seq) or any
+ *		right removal/modification (is_generation, bumped at the head of
+ *		ipc_right_destroy before the entry is cleared, under ip_lock of the
+ *		very port we hold) makes us return FALSE rather than act on a stale
+ *		mapping.  So it never misdelivers: it confirms name->port at a
+ *		valid linearization point or gives up.
  */
 static boolean_t
-mach_msg_lockfree_resolve(
+urmach_msg_lockfree_resolve(
 	ipc_space_t	space,
 	mach_port_t	reply_name,
 	mach_port_t	dest_name,
 	ipc_port_t	*reply_portp,
 	ipc_port_t	*dest_portp)
 {
-	natural_t	  gen0 = space->is_generation;
-	natural_t	  seq0 = space->is_seq;
-	ipc_entry_num_t	  size;
-	ipc_entry_t	  table;
-	mach_port_index_t ri = MACH_PORT_INDEX(reply_name);
-	mach_port_index_t di = MACH_PORT_INDEX(dest_name);
-	ipc_entry_bits_t  rb, db;
-	ipc_port_t	  rp, dp;
+	natural_t	gen0 = space->is_generation;
+	natural_t	seq0 = space->is_seq;
+	ipc_entry_t	re, de;
+	ipc_port_t	rp, dp;
 
-	if (seq0 & 1)				/* table mid-grow */
-		return FALSE;
-	urmach_rcu_barrier();
-	size = space->is_table_size;		/* size before table: never */
-	urmach_rcu_barrier();			/* (old table, new size) */
-	table = space->is_table;
 	urmach_rcu_barrier();
 
-	if (ri >= size || di >= size)		/* dense-only; else locked path */
+	re = ipc_entry_lookup_lockfree(space, reply_name);
+	if (re == IE_NULL || !(re->ie_bits & MACH_PORT_TYPE_RECEIVE))
 		return FALSE;
+	rp = (ipc_port_t) re->ie_object;
 
-	rb = table[ri].ie_bits;
-	if (IE_BITS_GEN(rb) != MACH_PORT_GEN(reply_name) ||
-	    !(rb & MACH_PORT_TYPE_RECEIVE))
+	de = ipc_entry_lookup_lockfree(space, dest_name);
+	if (de == IE_NULL || !(de->ie_bits & MACH_PORT_TYPE_SEND))
 		return FALSE;
-	rp = (ipc_port_t) table[ri].ie_object;
-
-	db = table[di].ie_bits;
-	if (IE_BITS_GEN(db) != MACH_PORT_GEN(dest_name) ||
-	    !(db & MACH_PORT_TYPE_SEND))
-		return FALSE;
-	dp = (ipc_port_t) table[di].ie_object;
+	dp = (ipc_port_t) de->ie_object;
 
 	if (rp == IP_NULL || dp == IP_NULL)
 		return FALSE;
@@ -1143,9 +1129,9 @@ mach_msg_overwrite_trap(
 		    {
 			ipc_port_t lf_reply, lf_dest;
 
-			if (mach_msg_lockfree_resolve(space, reply_name,
-						      hdr->msgh_remote_port,
-						      &lf_reply, &lf_dest)) {
+			if (urmach_msg_lockfree_resolve(space, reply_name,
+							hdr->msgh_remote_port,
+							&lf_reply, &lf_dest)) {
 				natural_t _sgen = space->is_generation;
 
 				reply_port = lf_reply;

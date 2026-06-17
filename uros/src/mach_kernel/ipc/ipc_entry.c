@@ -179,36 +179,36 @@ ipc_entry_lookup(
 }
 
 /*
- *	Routine:	ipc_entry_lookup_type_lockfree
+ *	Routine:	ipc_entry_lookup_lockfree
  *	Purpose:
- *		Return the port type of `name' in `space' WITHOUT taking the
- *		space lock.  This is the #331 step 2 lock-free read path.
- *		(Validated mechanism; currently has no in-kernel caller -- the
- *		hot-path wiring in mach_msg is the #331 step 2 part 3b follow-up.)
+ *		Like ipc_entry_lookup, but WITHOUT taking the space lock.
+ *		Returns the entry for `name' (dense table or radix overflow), or
+ *		IE_NULL.  The #331 step 2 lock-free read primitive, shared by the
+ *		mach_msg hot path (urmach_msg_lockfree_resolve) and available for
+ *		read-only callers (e.g. a future lock-free mach_port_type).
  *	Conditions:
- *		No lock held.  `space' must stay allocated for the call (e.g.
- *		the caller's own current space).  Reads only ie_bits/ite_bits
- *		(an atomic int) -- never the object -- so it never needs an
- *		object lock.
+ *		No lock held.  `space' must stay allocated for the call (a live
+ *		space -- the caller's own, or a destination kept alive by a ref).
+ *	Returned-pointer contract:
+ *		The pointer is into type-stable storage (is_table or an ite), so
+ *		it is ALWAYS safe to dereference, but its CONTENTS may be stale.
+ *		A caller that acts on entry->ie_object (e.g. locks the port) MUST
+ *		revalidate: snapshot space->is_generation and space->is_seq before
+ *		calling, lock the resolved object, then re-check both unchanged.
+ *		A read-only caller that only wants ie_bits gets a racy-but-whole
+ *		value (the generation / ite_name check rejects a reused slot).
  *	Why it is safe without a lock:
  *		- is_table, the radix nodes, and the ites are all type-stable
- *		  (their zones/pool never return memory to the system, see
- *		  ipc_table.c / ipc_radix.c / ipc_init.c), so every deref lands
- *		  on valid, correctly-typed memory even if another CPU freed and
- *		  reused it concurrently.
- *		- The per-space seqlock (is_seq) gives a consistent
- *		  (is_table_size, is_table) snapshot and forces a retry across a
- *		  concurrent ipc_entry_grow_table.  Reading size before table
- *		  means we never pair an old (small) table with a new (large)
- *		  size, so the index is always in bounds -- no fault.
- *		- ie_bits is a single int (atomic load), so a concurrent
- *		  alloc/dealloc is seen whole; the generation check rejects a
- *		  reused slot.  The radix path re-checks ite_name.
- *		The result is racy by nature (it reflects some instant during a
- *		concurrent modification) but never faults, tears, or loops.
+ *		  (ipc_table.c / ipc_radix.c / ipc_init.c), so every deref lands
+ *		  on valid, correctly-typed memory even after a concurrent free.
+ *		- The per-space seqlock (is_seq) gives a consistent (size, table)
+ *		  snapshot and retries across a concurrent ipc_entry_grow_table;
+ *		  reading size before table means the index is always in bounds.
+ *		- ie_bits is a single int (atomic load); the generation check (or
+ *		  ite_name re-check on the radix path) rejects a reused slot.
  */
-mach_port_type_t
-ipc_entry_lookup_type_lockfree(
+ipc_entry_t
+ipc_entry_lookup_lockfree(
 	ipc_space_t	space,
 	mach_port_t	name)
 {
@@ -217,14 +217,13 @@ ipc_entry_lookup_type_lockfree(
 	unsigned int		tries = 0;
 
 	for (;;) {
-		natural_t		s;
-		ipc_entry_t		table;
-		ipc_entry_num_t		size;
-		ipc_entry_bits_t	bits = 0;
-		boolean_t		found = FALSE;
+		natural_t	s;
+		ipc_entry_t	table;
+		ipc_entry_num_t	size;
+		ipc_entry_t	entry = IE_NULL;
 
 		if (++tries > 1000000)		/* paranoia: never spin forever */
-			return MACH_PORT_TYPE_NONE;
+			return IE_NULL;
 
 		s = space->is_seq;
 		if (s & 1) {			/* grow in progress -- retry */
@@ -241,25 +240,25 @@ ipc_entry_lookup_type_lockfree(
 		urmach_rcu_barrier();
 
 		if (index < size) {
-			bits = table[index].ie_bits;
+			ipc_entry_t		e = &table[index];
+			ipc_entry_bits_t	bits = e->ie_bits;
+
 			if (IE_BITS_GEN(bits) == gen &&
 			    IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE)
-				found = TRUE;
+				entry = e;
 		} else {
 			ipc_tree_entry_t tentry =
 				ipc_radix_lookup(&space->is_tree, index);
 
-			if (tentry != ITE_NULL && tentry->ite_name == name) {
-				bits = tentry->ite_bits;
-				found = TRUE;
-			}
+			if (tentry != ITE_NULL && tentry->ite_name == name)
+				entry = (ipc_entry_t) tentry;
 		}
 
 		urmach_rcu_barrier();
 		if (space->is_seq != s)		/* table changed under us -- retry */
 			continue;
 
-		return found ? IE_BITS_TYPE(bits) : MACH_PORT_TYPE_NONE;
+		return entry;
 	}
 }
 
