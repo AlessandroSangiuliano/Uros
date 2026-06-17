@@ -122,6 +122,13 @@ extern void		ipc_radix_destroy(
 						              void *),
 				void			*arg);
 
+/*
+ *	Type-stable zone backing the nodes (#331 step 2): non-collectable, so a
+ *	freed node stays valid radix-node storage for a lock-free reader.
+ *	Created in ipc_init().
+ */
+extern zone_t		ipc_radix_node_zone;
+
 /* Node supply helpers (call the alloc one *outside* the space lock). */
 extern struct ipc_radix_node *ipc_radix_node_alloc(void);
 extern void		ipc_radix_node_free(struct ipc_radix_node *node);

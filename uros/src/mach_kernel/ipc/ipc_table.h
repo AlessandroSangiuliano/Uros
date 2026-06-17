@@ -155,8 +155,14 @@ extern void ipc_table_free(
 	((ipc_entry_t)							\
 	 ipc_table_alloc((its)->its_size * sizeof(struct ipc_entry)))
 
-#define it_entries_reallocable(its)					\
-	(((its)->its_size * sizeof(struct ipc_entry)) >= PAGE_SIZE)
+/*
+ *	#331 step 2: always grow via alloc-new + copy, never realloc-in-place.
+ *	The new table is drawn from the type-stable pool (ipc_table_alloc) and may
+ *	carry stale contents from a previous life, so ipc_entry_grow_table must
+ *	memcpy/memset it fresh (the !reallocable path).  In-place realloc would
+ *	also risk pooling a still-live table.  See ipc_table.c.
+ */
+#define it_entries_reallocable(its)	(0)
 
 #define	it_entries_realloc(its, table, nits)				\
 	((ipc_entry_t)							\

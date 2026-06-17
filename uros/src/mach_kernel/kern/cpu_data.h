@@ -53,6 +53,28 @@ typedef struct
 	 * by mp_desc_init() right after it bzero's the slot.
 	 */
 	int		cpu_id;
+	/*
+	 * #331 step 2 (QSBR RCU): per-CPU quiescent-state bookkeeping for the
+	 * lock-free capability-table reads.  Appended AFTER cpu_id so the
+	 * %gs-relative field offsets (active_thread/.../cpu_id) stay fixed;
+	 * these two are read in C via cpu_data[cpu_number()], never through
+	 * %gs, so they need no genassym entry.  rcu_read_depth is CPU-local
+	 * (nesting of active read sections) -- valid because MACH_RT==0 makes
+	 * the kernel non-preemptive, so a reader never migrates CPU
+	 * mid-section.  rcu_qs_seq is bumped at each quiescent state and is the
+	 * only field read cross-CPU (by urmach_synchronize_rcu).  See
+	 * <kern/rcu.h>.
+	 */
+	int			rcu_read_depth;
+	volatile unsigned int	rcu_qs_seq;
+	/*
+	 * #331 step 2: set while this CPU is in the idle wait loop.  An idle
+	 * CPU holds no RCU read reference, so it is quiescent by definition;
+	 * urmach_synchronize_rcu counts it immediately rather than waiting for
+	 * it to tick (a HLTed idle CPU may not report a quiescent state for a
+	 * long time).  Read cross-CPU; written only by the owning CPU.
+	 */
+	volatile int		rcu_cpu_idle;
 } __attribute__((aligned(64))) cpu_data_t;
 
 _Static_assert(sizeof(cpu_data_t) == 64,

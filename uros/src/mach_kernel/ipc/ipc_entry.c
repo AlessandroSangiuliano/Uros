@@ -101,6 +101,7 @@
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_radix.h>
+#include <kern/rcu.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_table.h>
@@ -175,6 +176,90 @@ ipc_entry_lookup(
 
 	assert((entry == IE_NULL) || IE_BITS_TYPE(entry->ie_bits));
 	return entry;
+}
+
+/*
+ *	Routine:	ipc_entry_lookup_lockfree
+ *	Purpose:
+ *		Like ipc_entry_lookup, but WITHOUT taking the space lock.
+ *		Returns the entry for `name' (dense table or radix overflow), or
+ *		IE_NULL.  The #331 step 2 lock-free read primitive, shared by the
+ *		mach_msg hot path (urmach_msg_lockfree_resolve) and available for
+ *		read-only callers (e.g. a future lock-free mach_port_type).
+ *	Conditions:
+ *		No lock held.  `space' must stay allocated for the call (a live
+ *		space -- the caller's own, or a destination kept alive by a ref).
+ *	Returned-pointer contract:
+ *		The pointer is into type-stable storage (is_table or an ite), so
+ *		it is ALWAYS safe to dereference, but its CONTENTS may be stale.
+ *		A caller that acts on entry->ie_object (e.g. locks the port) MUST
+ *		revalidate: snapshot space->is_generation and space->is_seq before
+ *		calling, lock the resolved object, then re-check both unchanged.
+ *		A read-only caller that only wants ie_bits gets a racy-but-whole
+ *		value (the generation / ite_name check rejects a reused slot).
+ *	Why it is safe without a lock:
+ *		- is_table, the radix nodes, and the ites are all type-stable
+ *		  (ipc_table.c / ipc_radix.c / ipc_init.c), so every deref lands
+ *		  on valid, correctly-typed memory even after a concurrent free.
+ *		- The per-space seqlock (is_seq) gives a consistent (size, table)
+ *		  snapshot and retries across a concurrent ipc_entry_grow_table;
+ *		  reading size before table means the index is always in bounds.
+ *		- ie_bits is a single int (atomic load); the generation check (or
+ *		  ite_name re-check on the radix path) rejects a reused slot.
+ */
+ipc_entry_t
+ipc_entry_lookup_lockfree(
+	ipc_space_t	space,
+	mach_port_t	name)
+{
+	mach_port_index_t	index = MACH_PORT_INDEX(name);
+	mach_port_gen_t		gen   = MACH_PORT_GEN(name);
+	unsigned int		tries = 0;
+
+	for (;;) {
+		natural_t	s;
+		ipc_entry_t	table;
+		ipc_entry_num_t	size;
+		ipc_entry_t	entry = IE_NULL;
+
+		if (++tries > 1000000)		/* paranoia: never spin forever */
+			return IE_NULL;
+
+		s = space->is_seq;
+		if (s & 1) {			/* grow in progress -- retry */
+			urmach_rcu_barrier();
+			continue;
+		}
+		urmach_rcu_barrier();
+
+		/* size BEFORE table: grow publishes table then size, so this
+		 * order never yields (old table, new size) -> always in bounds */
+		size = space->is_table_size;
+		urmach_rcu_barrier();
+		table = space->is_table;
+		urmach_rcu_barrier();
+
+		if (index < size) {
+			ipc_entry_t		e = &table[index];
+			ipc_entry_bits_t	bits = e->ie_bits;
+
+			if (IE_BITS_GEN(bits) == gen &&
+			    IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE)
+				entry = e;
+		} else {
+			ipc_tree_entry_t tentry =
+				ipc_radix_lookup(&space->is_tree, index);
+
+			if (tentry != ITE_NULL && tentry->ite_name == name)
+				entry = (ipc_entry_t) tentry;
+		}
+
+		urmach_rcu_barrier();
+		if (space->is_seq != s)		/* table changed under us -- retry */
+			continue;
+
+		return entry;
+	}
 }
 
 /*
@@ -697,6 +782,15 @@ ipc_entry_grow_table(
 		       (target_size != ITS_SIZE_NONE));
 		assert(space->is_table_size == osize);
 
+		/*
+		 *	#331 step 2: open the table seqlock (odd) before swapping in
+		 *	the new table and rebuilding its contents below, so a
+		 *	lock-free reader that catches us mid-rebuild retries instead
+		 *	of reading a half-populated table.
+		 */
+		space->is_seq++;
+		urmach_rcu_barrier();
+
 		space->is_table = table;
 		space->is_table_size = size;
 		space->is_table_next = nits;
@@ -800,6 +894,12 @@ ipc_entry_grow_table(
 		table[0].ie_next = free_index;
 
 		/*
+		 *	#331 step 2: table fully rebuilt -- close the seqlock (even).
+		 */
+		urmach_rcu_barrier();
+		space->is_seq++;
+
+		/*
 		 *	Now we need to free the old table.
 		 *	If the space dies or grows while unlocked,
 		 *	then we can quit here.
@@ -807,6 +907,12 @@ ipc_entry_grow_table(
 
 		is_write_unlock(space);
 		thread_wakeup((event_t) space);
+		/*
+		 *	#331 step 2: it_entries_free does NOT return the old table to
+		 *	the system -- it pools it (type-stable), so a lock-free reader
+		 *	still looking at it sees valid memory and retries via the
+		 *	seqlock.  No grace period needed here.
+		 */
 		it_entries_free(oits, otable);
 		is_write_lock(space);
 		if (!space->is_active || (space->is_table_next != nits))

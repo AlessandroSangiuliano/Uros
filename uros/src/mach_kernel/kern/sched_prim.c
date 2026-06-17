@@ -322,6 +322,7 @@
 #include <kern/misc_protos.h>
 #include <kern/processor.h>
 #include <kern/queue.h>
+#include <kern/rcu.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
 #include <kern/ipc_sched.h>
@@ -1834,6 +1835,13 @@ thread_dispatch(
 		printf("\tthread_dispatch(thr=%x)\n", thread);
 #endif	/* MACH_ASSERT */
 
+	/*
+	 * #331 step 2: primary QSBR quiescent point.  We run here as the new
+	 * thread just after a context switch, so this CPU has passed through a
+	 * point with no active RCU reader (a reader never blocks/switches).
+	 */
+	urmach_rcu_quiescent_state();
+
 	wake_lock(thread);
 	thread_lock(thread);
 
@@ -2726,6 +2734,14 @@ idle_thread_continue(void)
 		if (curr_ipl[cpu_number()])
 			panic ("Idle thread at spl > 0?");
 #endif
+		/*
+		 * #331 step 2: an idle CPU holds no RCU read reference, so
+		 * report a quiescent state each pass -- lets grace periods
+		 * finish promptly on idle CPUs without relying solely on the
+		 * clock tick.
+		 */
+		urmach_rcu_quiescent_state();
+
 #ifdef	MARK_CPU_IDLE
 		MARK_CPU_IDLE(mycpu);
 #endif	/* MARK_CPU_IDLE */
@@ -2750,6 +2766,13 @@ idle_thread_continue(void)
  *	This cpu will be dispatched (by thread_setrun) by setting next_thread
  *	to the value of the thread to run next.  Also check runq counts.
  */
+		/*
+		 * #331 step 2: this CPU is about to wait for work -- mark it
+		 * quiescent for QSBR for the whole idle span (cleared once it
+		 * gets a thread to run below).
+		 */
+		urmach_rcu_idle_enter();
+
 		s = splsched();
 		while ((*threadp == (volatile thread_t)THREAD_NULL) &&
 #if	FAST_IDLE
@@ -2760,7 +2783,7 @@ idle_thread_continue(void)
 		       && (*lcount <= *depress2_countp)
 #endif	/* NCPUS > 1 */
 #else	/* FAST_IDLE */
-		       (*gcount == 0) 
+		       (*gcount == 0)
 #if	NCPUS > 1
 		       && (*lcount == 0)
 #endif	/*NCPUS > 1*/
@@ -2791,6 +2814,9 @@ idle_thread_continue(void)
 #endif /* POWER_SAVE */
 			s = splsched();
 		}
+
+		/* #331 step 2: leaving idle -- about to run a real thread. */
+		urmach_rcu_idle_exit();
 
 #ifdef	MARK_CPU_ACTIVE
 		splx(s);

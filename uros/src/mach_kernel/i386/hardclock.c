@@ -108,6 +108,7 @@
 #include <mach_kdb.h>
 #include <kern/cpu_number.h>
 #include <kern/kern_types.h>
+#include <kern/rcu.h>
 #include <platforms.h>
 #include <mp_v1_1.h>
 #include <mach_kprof.h>
@@ -333,6 +334,14 @@ hardclock(
 	 */
 	slave_clock();
 #endif	/* NCPUS >1 && AT386 */
+
+	/*
+	 * #331 step 2: per-CPU QSBR backstop.  Fires at HZ on every CPU; reports
+	 * a quiescent state when this CPU is not mid-lookup (depth==0).  This is
+	 * what keeps a grace period from stalling on a CPU that busy-spins on a
+	 * lock and never context-switches.
+	 */
+	urmach_rcu_quiescent_state();
 
 	mp_enable_preemption();
 }

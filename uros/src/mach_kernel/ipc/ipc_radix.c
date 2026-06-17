@@ -26,9 +26,20 @@
 
 #include <mach/port.h>
 #include <kern/assert.h>
-#include <kern/kalloc.h>
+#include <kern/zalloc.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_radix.h>
+
+/*
+ *	#331 step 2: radix nodes come from a dedicated type-stable zone (made
+ *	non-collectable in ipc_init).  A lock-free reader may keep walking a
+ *	node another CPU just pruned and freed; with type-stable storage that
+ *	deref always lands on valid ipc_radix_node memory, the walk is bounded
+ *	(IPC_RADIX_LEVELS deep, no cycles), and it ends at a type-stable ite
+ *	whose ite_name re-check rejects a stale/reused entry -- so a node free
+ *	needs no RCU grace period.
+ */
+zone_t	ipc_radix_node_zone;
 
 /* slot index for `index' at level `lvl' (lvl 0 = leaf). */
 #define	IRT_SLOT(index, lvl)	\
@@ -40,7 +51,7 @@ ipc_radix_node_alloc(void)
 	struct ipc_radix_node *n;
 	int i;
 
-	n = (struct ipc_radix_node *) kalloc(sizeof(struct ipc_radix_node));
+	n = (struct ipc_radix_node *) zalloc(ipc_radix_node_zone);
 	if (n == (struct ipc_radix_node *) 0)
 		return n;
 
@@ -53,7 +64,7 @@ ipc_radix_node_alloc(void)
 void
 ipc_radix_node_free(struct ipc_radix_node *node)
 {
-	kfree((vm_offset_t) node, sizeof(struct ipc_radix_node));
+	zfree(ipc_radix_node_zone, (vm_offset_t) node);
 }
 
 /* Pop a pre-allocated node off the caller's supply stack (linked via slots[0]). */

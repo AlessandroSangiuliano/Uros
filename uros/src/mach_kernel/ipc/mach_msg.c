@@ -166,6 +166,7 @@
 #include <kern/counters.h>
 #include <kern/cpu_number.h>
 #include <kern/lock.h>
+#include <kern/rcu.h>
 #include <kern/sched_prim.h>
 #include <kern/ipc_sched.h>
 #include <kern/exception.h>
@@ -841,6 +842,78 @@ boolean_t enable_hotpath = TRUE;	/* Patchable, just in case ...	*/
 #endif	/* HOTPATH_ENABLE */
 
 /*
+ *	Routine:	urmach_msg_lockfree_resolve
+ *	Purpose:
+ *		#331 step 2 part 3b: resolve the RPC copyin's reply_name (a
+ *		receive right) and dest_name (a send right) to their ports
+ *		WITHOUT taking the space lock.  On success returns TRUE with
+ *		*reply_portp / *dest_portp set and BOTH ports ip_lock'd, active,
+ *		and validated; on failure returns FALSE with no locks held and
+ *		the caller falls back to the locked lookup.
+ *	Conditions:
+ *		Nothing locked.  Handles both dense and sparse (radix) names via
+ *		ipc_entry_lookup_lockfree; a missing/wrong-typed name returns
+ *		FALSE so the locked path handles it.
+ *	Why it is safe without the lock:
+ *		ipc_entry_lookup_lockfree reads the entry from type-stable storage
+ *		under the per-space seqlock (no fault, table-consistent); the ports
+ *		are type-stable too, so ip_lock never faults.  We snapshot
+ *		(is_generation, is_seq) around both lookups, lock the ports, then
+ *		re-check the snapshot: a concurrent table grow (is_seq) or any
+ *		right removal/modification (is_generation, bumped at the head of
+ *		ipc_right_destroy before the entry is cleared, under ip_lock of the
+ *		very port we hold) makes us return FALSE rather than act on a stale
+ *		mapping.  So it never misdelivers: it confirms name->port at a
+ *		valid linearization point or gives up.
+ */
+static boolean_t
+urmach_msg_lockfree_resolve(
+	ipc_space_t	space,
+	mach_port_t	reply_name,
+	mach_port_t	dest_name,
+	ipc_port_t	*reply_portp,
+	ipc_port_t	*dest_portp)
+{
+	natural_t	gen0 = space->is_generation;
+	natural_t	seq0 = space->is_seq;
+	ipc_entry_t	re, de;
+	ipc_port_t	rp, dp;
+
+	urmach_rcu_barrier();
+
+	re = ipc_entry_lookup_lockfree(space, reply_name);
+	if (re == IE_NULL || !(re->ie_bits & MACH_PORT_TYPE_RECEIVE))
+		return FALSE;
+	rp = (ipc_port_t) re->ie_object;
+
+	de = ipc_entry_lookup_lockfree(space, dest_name);
+	if (de == IE_NULL || !(de->ie_bits & MACH_PORT_TYPE_SEND))
+		return FALSE;
+	dp = (ipc_port_t) de->ie_object;
+
+	if (rp == IP_NULL || dp == IP_NULL)
+		return FALSE;
+
+	ip_lock(dp);
+	if (!ip_active(dp) || !ip_lock_try(rp)) {
+		ip_unlock(dp);
+		return FALSE;
+	}
+
+	/* Re-check the snapshot now that both ports are locked. */
+	urmach_rcu_barrier();
+	if (space->is_generation != gen0 || space->is_seq != seq0) {
+		ip_unlock(rp);
+		ip_unlock(dp);
+		return FALSE;
+	}
+
+	*reply_portp = rp;
+	*dest_portp = dp;
+	return TRUE;
+}
+
+/*
  *	Routine:	mach_msg_overwrite_trap [mach trap]
  *	Purpose:
  *		Possibly send a message; possibly receive a message.
@@ -1045,6 +1118,35 @@ mach_msg_overwrite_trap(
 					goto fast_copyin_cached;
 				}
 			}
+
+			/*
+			 * #331 step 2 part 3b: on a cache miss, try resolving both
+			 * names WITHOUT the space lock.  On success both ports are
+			 * locked and validated -- populate the per-thread cache and
+			 * take the existing fast path.  On failure fall through to the
+			 * locked lookup below (it also covers sparse/radix names).
+			 */
+		    {
+			ipc_port_t lf_reply, lf_dest;
+
+			if (urmach_msg_lockfree_resolve(space, reply_name,
+							hdr->msgh_remote_port,
+							&lf_reply, &lf_dest)) {
+				natural_t _sgen = space->is_generation;
+
+				reply_port = lf_reply;
+				dest_port  = lf_dest;
+				self->ith_port_cache[0].ipc_name  = reply_name;
+				self->ith_port_cache[0].ipc_port  = reply_port;
+				self->ith_port_cache[0].ipc_space = space;
+				self->ith_port_cache[0].ipc_gen   = _sgen;
+				self->ith_port_cache[1].ipc_name  = hdr->msgh_remote_port;
+				self->ith_port_cache[1].ipc_port  = dest_port;
+				self->ith_port_cache[1].ipc_space = space;
+				self->ith_port_cache[1].ipc_gen   = _sgen;
+				goto fast_copyin_cached;
+			}
+		    }
 
 			is_read_lock(space);
 			assert(space->is_active);
