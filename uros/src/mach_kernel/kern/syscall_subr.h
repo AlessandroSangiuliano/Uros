@@ -122,9 +122,6 @@ extern void		mach_print(const char *s);
 /* Set current thread's name (visible in DDB) */
 extern kern_return_t	mach_thread_set_name(const char *name);
 
-/* #331 step 2 (TEMPORARY): lock-free type probe of a name in the caller's space */
-extern mach_port_type_t	urmach_cap_probe(mach_port_t name);
-
 #include <machine/syscall_subr.h>
 
 #endif	/* _KERN_SYSCALL_SUBR_H_ */

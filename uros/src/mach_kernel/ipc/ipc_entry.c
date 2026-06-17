@@ -97,7 +97,6 @@
 #include <kern/sched_prim.h>
 #include <kern/zalloc.h>
 #include <kern/misc_protos.h>
-#include <kern/thread.h>		/* current_space() for urmach_cap_probe (TEMP) */
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
@@ -184,6 +183,8 @@ ipc_entry_lookup(
  *	Purpose:
  *		Return the port type of `name' in `space' WITHOUT taking the
  *		space lock.  This is the #331 step 2 lock-free read path.
+ *		(Validated mechanism; currently has no in-kernel caller -- the
+ *		hot-path wiring in mach_msg is the #331 step 2 part 3b follow-up.)
  *	Conditions:
  *		No lock held.  `space' must stay allocated for the call (e.g.
  *		the caller's own current space).  Reads only ie_bits/ite_bits
@@ -260,19 +261,6 @@ ipc_entry_lookup_type_lockfree(
 
 		return found ? IE_BITS_TYPE(bits) : MACH_PORT_TYPE_NONE;
 	}
-}
-
-/*
- *	#331 step 2 (TEMPORARY mach trap, slot 18): probe the type of `name' in
- *	the caller's own space via the lock-free path, for ipc_bench to validate
- *	the lock-free reader from user space (including under concurrency).
- *	Remove with the rest of the step-2 scaffolding once validated.
- */
-mach_port_type_t
-urmach_cap_probe(
-	mach_port_t	name)
-{
-	return ipc_entry_lookup_type_lockfree(current_space(), name);
 }
 
 /*
