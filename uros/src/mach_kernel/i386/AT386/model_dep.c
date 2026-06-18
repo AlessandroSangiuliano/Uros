@@ -912,19 +912,28 @@ i386_init(void)
 #endif	/* NCPUS > 1 && AT386 */
 
 	set_cr4(get_cr4() | CR4_PGE);
-	pmap_bootstrap(loadpt);
 
 	/*
-	 * pmap_bootstrap steals page-table pages from physical addresses
-	 * starting at avail_start, advancing it to a value inside the memory
-	 * hole (hole_start..hole_end covers BIOS/VGA area plus kernel text,
-	 * data and page tables).  pmap_next_page only skips the hole when
-	 * avail_next hits hole_start exactly; since avail_start lands above
-	 * hole_start the skip never fires, and kernel/page-table pages get
-	 * handed out as free physical memory.  Advance past the hole here.
+	 * #334: advance avail_start past the memory hole BEFORE pmap_bootstrap,
+	 * not after.  pmap_bootstrap "steals" the kernel page-table pages it
+	 * builds the direct map with starting at avail_start.  Left at its boot
+	 * value (a few KB), it stole them from *low conventional memory*
+	 * (phys 0x3000..0x9f000) — the same sub-1MB region the SMP AP trampoline
+	 * and other low-memory consumers scribble on.  At >=8 CPUs that wild
+	 * write lands on a live kernel direct-map PT page, so pmap_enter writes
+	 * a user PTE through phystokv() into a page the hardware no longer walks,
+	 * and the faulting copyout re-faults forever (#334).  start.S already
+	 * maps phys [0, hole_end) 1:1, so skipping it here loses no mapping; it
+	 * just forces the stolen PT pages to come from RAM above the hole.
+	 *
+	 * It also keeps the kernel/page-table pages out of the free list: with
+	 * avail_start >= hole_end the whole hole is below the available range
+	 * (pmap_next_page never hands it out).
 	 */
 	if (avail_start < hole_end)
 		avail_start = hole_end;
+
+	pmap_bootstrap(loadpt);
 
 	/* Steal the contiguous memory that's been requested by various
 	   kernel subsystems.  */
