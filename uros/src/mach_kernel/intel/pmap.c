@@ -651,6 +651,25 @@ lock_t	pmap_system_lock;
 	lock_write_to_read(&pmap_system_lock);	\
 }
 
+/*
+ * #329 step 1 (lockless reads): shared read lock on the pmap system WITHOUT
+ * locking any single pmap -- for pure pv-list readers that span several pmaps
+ * (phys_attribute_test).  Taking the system lock in READ (not WRITE) lets these
+ * run concurrently with the protocol-2 pmap operations (pmap_enter/remove),
+ * while still excluding the protocol-3 exclusive writers (pmap_page_protect,
+ * phys_attribute_set/clear) that restructure pv lists.  The caller adds the
+ * per-page PVH lock for the page it walks and reads PTEs locklessly.
+ */
+#define PMAP_SYS_READ_LOCK(spl) {	\
+	SPLVM(spl);			\
+	lock_read(&pmap_system_lock);	\
+}
+
+#define PMAP_SYS_READ_UNLOCK(spl) {		\
+	lock_read_done(&pmap_system_lock);	\
+	SPLX(spl);				\
+}
+
 #define LOCK_PVH(index)		lock_pvh_pai(index)
 
 #define UNLOCK_PVH(index)	unlock_pvh_pai(index)
@@ -723,6 +742,8 @@ extern	int	max_lock_loops;
 #define PMAP_READ_UNLOCK(pmap, spl)	SPLX(spl)
 #define PMAP_WRITE_UNLOCK(spl)		SPLX(spl)
 #define PMAP_WRITE_TO_READ_LOCK(pmap)
+#define PMAP_SYS_READ_LOCK(spl)		SPLVM(spl)
+#define PMAP_SYS_READ_UNLOCK(spl)	SPLX(spl)
 
 #if	MACH_RT
 #define LOCK_PVH(index)			disable_preemption()
@@ -3247,24 +3268,38 @@ phys_attribute_test(
 	}
 
 	/*
-	 *	Lock the pmap system first, since we will be checking
-	 *	several pmaps.
+	 * #329 (lockless reads, step 1): this is a pure read.  It used to take
+	 * the global pmap_system_lock in WRITE mode (protocol 3), serializing
+	 * every pmap_is_modified/referenced against the entire pmap system.
+	 * Take it in READ (shared) mode instead, plus this page's PVH lock:
+	 *
+	 *  - the shared read lock still excludes the protocol-3 exclusive
+	 *    writers (pmap_page_protect, phys_attribute_set/clear) that
+	 *    restructure pv lists, but now runs CONCURRENTLY with the
+	 *    protocol-2 pmap operations (pmap_enter/pmap_remove), which is the
+	 *    scaling win -- faults no longer serialize against ref/mod probes;
+	 *  - the PVH lock keeps this page's pv list stable against those
+	 *    concurrent protocol-2 inserts/removes (they hold LOCK_PVH too);
+	 *  - a held pv entry implies the mapping (hence its page-table page) is
+	 *    live, so each PTE is read locklessly (atomic on x86) with no
+	 *    per-pmap lock -- which also avoids any pmap<->PVH order inversion.
 	 */
-
-	PMAP_WRITE_LOCK(spl);
-
 	pai = pa_index(phys);
 	pv_h = pai_to_pvh(pai);
 
+	PMAP_SYS_READ_LOCK(spl);
+	LOCK_PVH(pai);
+
 	if (pmap_phys_attributes[pai] & bits) {
-	    PMAP_WRITE_UNLOCK(spl);
+	    UNLOCK_PVH(pai);
+	    PMAP_SYS_READ_UNLOCK(spl);
 	    return (TRUE);
 	}
 
 	/*
-	 * Walk down PV list, checking all mappings.
-	 * We do not have to lock the pv_list because we have
-	 * the entire pmap system locked.
+	 * Walk down PV list, checking all mappings.  The PVH lock keeps the
+	 * list stable; PTEs are read without the per-pmap lock (atomic read,
+	 * page-table page kept live by the held mapping).
 	 */
 	if (pv_h->pmap != PMAP_NULL) {
 	    /*
@@ -3273,10 +3308,6 @@ phys_attribute_test(
 	    for (pv_e = pv_h; pv_e != PV_ENTRY_NULL; pv_e = pv_e->next) {
 
 		pmap = pv_e->pmap;
-		/*
-		 * Lock the pmap to block pmap_extract and similar routines.
-		 */
-		simple_lock(&pmap->lock);
 
 		{
 		    register vm_offset_t va;
@@ -3301,16 +3332,16 @@ phys_attribute_test(
 
 		    do {
 			if (*pte++ & bits) {
-			    simple_unlock(&pmap->lock);
-			    PMAP_WRITE_UNLOCK(spl);
+			    UNLOCK_PVH(pai);
+			    PMAP_SYS_READ_UNLOCK(spl);
 			    return (TRUE);
 			}
 		    } while (--i > 0);
 		}
-		simple_unlock(&pmap->lock);
 	    }
 	}
-	PMAP_WRITE_UNLOCK(spl);
+	UNLOCK_PVH(pai);
+	PMAP_SYS_READ_UNLOCK(spl);
 	return (FALSE);
 }
 
