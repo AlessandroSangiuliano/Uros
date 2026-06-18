@@ -676,6 +676,15 @@ int	tr_ipc_mqueue_deliver = 0;
 dstat_decl(unsigned int	c_imd_waiting_receiver = 0;)
 dstat_decl(unsigned int	c_imd_enqueued = 0;)
 
+/*
+ * #329: re-enable the Direct Thread Switch (#54) at SMP, with the off-core
+ * check that the original lacked.  Default OFF (the safe thread_go path); set
+ * to 1 to take the direct switch when the receiver is fully parked.  Kept as a
+ * runtime flag so DTS-on vs DTS-off inter-task RPC latency can be A/B'd on SMP
+ * without recompiling.
+ */
+int	ipc_dts_smp = 0;
+
 mach_msg_return_t
 ipc_mqueue_deliver(
 	register ipc_port_t	port,
@@ -821,27 +830,47 @@ ipc_mqueue_deliver(
 		reset_timeout_check(&receiver->timer);
 #if	NCPUS > 1
 		/*
-		 * #329: the Direct Thread Switch (thread_run on this CPU) is a
-		 * UNIPROCESSOR-only latency optimisation and is unsafe at SMP.
-		 * A receiver in state TH_WAIT may still be physically executing
-		 * on another CPU -- in the window between assert_wait() (done
-		 * under imq_lock in ipc_mqueue_receive) and the context switch
-		 * inside thread_block().  thread_run() would start running it on
-		 * THIS cpu while it is still live on the other one, so the thread
-		 * runs on two CPUs and/or the wakeup is dropped; the receiver is
-		 * left blocked with the message already dequeued -> the inter-task
-		 * RPC wedges with an empty run queue (the smp8 "PP inter-task"
-		 * hang).  Use the normal thread_go()/thread_setrun path instead:
-		 * it only marks the receiver runnable and the scheduler will not
-		 * dispatch it onto a CPU until it is fully off its previous one.
-		 * (The old DTS bug was masked by the global pmap_system_lock
-		 * serialising pmap ops; #329's lockless ref/mod probe removes that
-		 * accidental serialisation and exposes it.)
+		 * #329: Direct Thread Switch at SMP.
+		 *
+		 * The original DTS was UP-only-correct and raced at SMP: a receiver
+		 * in state TH_WAIT may still be physically executing on another CPU
+		 * (window between assert_wait() under imq_lock in ipc_mqueue_receive
+		 * and the context switch inside thread_block()), so switching to it
+		 * here ran it on two CPUs / dropped the wakeup -> the smp8 "PP
+		 * inter-task" wedge.  (It was long masked by the global
+		 * pmap_system_lock serialising pmap ops; the #329 lockless ref/mod
+		 * probe removed that accidental serialisation and exposed it.)
+		 *
+		 * Correct version, mirroring thread_handoff_to_parked_waiter (#324):
+		 *   - take the direct switch ONLY if the receiver is *fully parked*
+		 *     ((state & TH_SCHED_STATE) == TH_WAIT, i.e. TH_RUN clear, which
+		 *     thread_dispatch() sets only after the receiver has switched
+		 *     away) -- so it is genuinely off-core;
+		 *   - keep splsched ACROSS thread_run (do NOT splx before the switch
+		 *     -- that low-spl window was the actual lost-wakeup hole);
+		 *   - otherwise fall back to the safe thread_go()/thread_setrun path.
+		 * Gated by ipc_dts_smp (default 0) so it can be A/B-measured.
 		 */
-		thread_unlock(receiver);
-		splx(_s);
-		enable_preemption();
-		thread_go(receiver);
+		if (ipc_dts_smp &&
+		    (receiver->state & TH_SCHED_STATE) == TH_WAIT) {
+			receiver->state =
+				(receiver->state & ~TH_WAIT) | TH_RUN;
+			receiver->wait_result = THREAD_AWAKENED;
+			thread_unlock(receiver);
+			counter(c_ipc_mqueue_deliver_direct++);
+			/* balance the disable_preemption() above so the receiver
+			 * runs at the right per-CPU preemption level; stay at
+			 * splsched (preemption is still gated by spl) until the
+			 * sender is resumed after the switch. */
+			enable_preemption();
+			thread_run((void (*)(void)) 0, receiver);
+			splx(_s);
+		} else {
+			thread_unlock(receiver);
+			splx(_s);
+			enable_preemption();
+			thread_go(receiver);
+		}
 #else	/* NCPUS > 1 */
 		if ((receiver->state & TH_SCHED_STATE) == TH_WAIT) {
 			receiver->state =
