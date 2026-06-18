@@ -819,6 +819,30 @@ ipc_mqueue_deliver(
 		spl_t _s = splsched();
 		thread_lock(receiver);
 		reset_timeout_check(&receiver->timer);
+#if	NCPUS > 1
+		/*
+		 * #329: the Direct Thread Switch (thread_run on this CPU) is a
+		 * UNIPROCESSOR-only latency optimisation and is unsafe at SMP.
+		 * A receiver in state TH_WAIT may still be physically executing
+		 * on another CPU -- in the window between assert_wait() (done
+		 * under imq_lock in ipc_mqueue_receive) and the context switch
+		 * inside thread_block().  thread_run() would start running it on
+		 * THIS cpu while it is still live on the other one, so the thread
+		 * runs on two CPUs and/or the wakeup is dropped; the receiver is
+		 * left blocked with the message already dequeued -> the inter-task
+		 * RPC wedges with an empty run queue (the smp8 "PP inter-task"
+		 * hang).  Use the normal thread_go()/thread_setrun path instead:
+		 * it only marks the receiver runnable and the scheduler will not
+		 * dispatch it onto a CPU until it is fully off its previous one.
+		 * (The old DTS bug was masked by the global pmap_system_lock
+		 * serialising pmap ops; #329's lockless ref/mod probe removes that
+		 * accidental serialisation and exposes it.)
+		 */
+		thread_unlock(receiver);
+		splx(_s);
+		enable_preemption();
+		thread_go(receiver);
+#else	/* NCPUS > 1 */
 		if ((receiver->state & TH_SCHED_STATE) == TH_WAIT) {
 			receiver->state =
 				(receiver->state & ~TH_WAIT) | TH_RUN;
@@ -836,6 +860,7 @@ ipc_mqueue_deliver(
 			enable_preemption();
 			thread_go(receiver);
 		}
+#endif	/* NCPUS > 1 */
 	} else {
 		thread_go(receiver);
 		enable_preemption();
