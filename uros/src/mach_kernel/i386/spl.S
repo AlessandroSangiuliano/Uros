@@ -371,6 +371,7 @@ LEXT(set_spl)
 	 * per-CPU and needs no slave special-case.  Then exit via the common
 	 * pop/sti tail (label 2 below).
 	 */
+#if	NCPUS > 1
 	cmpl	$0, EXT(ioapic_enabled)
 	je	9f
 	/*
@@ -412,6 +413,7 @@ LEXT(set_spl)
 	movl	%eax, LAPIC_TPR(%edx)
 	jmp	2f
 9:
+#endif	/* NCPUS > 1 */
 #if	!MP_V1_1
 	cmpl	$(SPLHI), %eax		/* if SPLHI */
 	jne	1f
@@ -577,6 +579,7 @@ LEXT(set_spl_noi)
 	 * #311: I/O APIC path — program this CPU's LAPIC TPR instead of the
 	 * 8259, leaving IF untouched (interrupt-return uses this with IF=0).
 	 */
+#if	NCPUS > 1
 	cmpl	$0, EXT(ioapic_enabled)
 	je	7f
 	/*
@@ -610,6 +613,7 @@ LEXT(set_spl_noi)
 	movl	%eax, LAPIC_TPR(%edx)
 	jmp	1f
 7:
+#endif	/* NCPUS > 1 */
 	movw	EXT(pic_mask)(,%eax,2), %ax	/* get new pic mask */
 	cmpw	EXT(curr_pic_mask),%ax	/* if different, */
 	je	1f

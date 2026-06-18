@@ -884,6 +884,30 @@ extern vm_offset_t get_rpc();
 #endif  /* DEBUG_ALIAS */
 
 /*
+ * #333: recursive page-table self-map.
+ *
+ * PDE PTDPTDI points at the page directory itself, so the page tables appear
+ * at a fixed virtual window (PTmap) and the page directory appears as an array
+ * of PTEs (PTD).  These windows resolve through whatever PD is currently in
+ * CR3 -- which always carries a valid recursive slot (set in pmap_bootstrap
+ * for the kernel PD and in pmap_create for every task PD) -- so a kernel-VA
+ * page-table read through them never faults, even when the kernel PD's
+ * direct-map alias lands in the boot hole (#241) at high CPU counts.  Kernel
+ * mappings are global (identical in every PD), so reading the current window
+ * is always correct for a kernel VA on any pmap.
+ *
+ * The recursive PDE must NOT be INTEL_PTE_GLOBAL: each pmap's slot points at
+ * its own PD, so a stale global TLB entry would shadow the next pmap's tables.
+ */
+#define PTDPTDI		0x3FF			/* self-map PDE slot (top 4 MB) */
+#define PTMAP_BASE	((vm_offset_t)PTDPTDI << PDESHIFT)		   /* 0xFFC00000 */
+#define PTD_BASE	(PTMAP_BASE + ((vm_offset_t)PTDPTDI << PTESHIFT))  /* 0xFFFFF000 */
+#define PTmap		((pt_entry_t *)PTMAP_BASE)
+#define PTD		((pt_entry_t *)PTD_BASE)
+#define vtopte(va)	(&PTmap[(vm_offset_t)(va) >> PTESHIFT])
+#define vtopde(va)	(&PTD[pdenum(kernel_pmap, (vm_offset_t)(va))])
+
+/*
  *	Given an offset and a map, compute the address of the
  *	pte.  If the address is invalid with respect to the map
  *	then PT_ENTRY_NULL is returned (and the map may need to grow).
@@ -898,6 +922,20 @@ pmap_pte(
 {
 	register pt_entry_t	*ptp;
 	register pt_entry_t	pte;
+
+	/*
+	 * #333: a kernel virtual address is global -- its PDE/PTE are identical
+	 * in every pmap -- so resolve it through the always-mapped recursive
+	 * window of the current CR3.  This never faults, even when the kernel
+	 * PD's direct-map alias is in the boot hole (#241).  A user VA keeps the
+	 * direct-map walk (its PD/PT are never in the hole, and it may belong to
+	 * a pmap that is not the one currently loaded).
+	 */
+	if (addr >= VM_MIN_KERNEL_ADDRESS) {
+		if ((*vtopde(addr) & INTEL_PTE_VALID) == 0)
+			return(PT_ENTRY_NULL);
+		return(vtopte(addr));
+	}
 
 	pte = pmap->dirbase[pdenum(pmap, addr)];
 	if ((pte & INTEL_PTE_VALID) == 0)
@@ -1235,8 +1273,14 @@ pmap_bootstrap(
 	 * the page table allocation loop from wrapping around 32-bit.
 	 */
 	{
+		/*
+		 * #333: reserve the top page-directory slot (PTDPTDI, the 4 MB
+		 * at PTMAP_BASE) for the recursive self-map by capping the
+		 * kernel VM range below it.  The kmap window, when active, is
+		 * carved further down, so it never collides with PTmap/PTD.
+		 */
 		vm_size_t max_morevm =
-		    trunc_page(VM_MAX_KERNEL_ADDRESS) - virtual_end;
+		    trunc_page(PTMAP_BASE) - virtual_end;
 
 		morevm = 3*avail_end;
 		if (morevm > max_morevm)
@@ -1343,6 +1387,17 @@ pmap_bootstrap(
 	printf("Address translation enabled.\n");
 
 #endif	/* i860 */
+	/*
+	 * #333: install the recursive self-map slot BEFORE the first
+	 * kvtophys()/pmap_pte() on a kernel VA -- kvtophys() resolves kernel VAs
+	 * through this very window, so it must be live first (chicken-and-egg).
+	 * The kernel PD's physical base is its direct-map alias minus the kernel
+	 * base (kpde == phystokv(pd_phys)); we cannot call kvtophys() to obtain
+	 * it here for the same reason.  Not GLOBAL (see PTDPTDI).
+	 */
+	kpde[PTDPTDI] = pa_to_pte((vm_offset_t)kpde - VM_MIN_KERNEL_ADDRESS)
+		      | INTEL_PTE_VALID | INTEL_PTE_WRITE;
+
 	kernel_pmap->pdirbase = kvtophys((vm_offset_t)kernel_pmap->dirbase);
 
 }
@@ -1575,8 +1630,26 @@ pmap_create(
 			 */
 			p->dirbase = (pt_entry_t *) dirbases;
 			dirbases += INTEL_PGBYTES;
-			memcpy(p->dirbase, kpde, INTEL_PGBYTES);
 			p->pdirbase = kvtophys((vm_offset_t)p->dirbase);
+			/*
+			 * #333: the kernel PD's KV alias (kpde) can be unmapped
+			 * when it lands in the boot hole (>=8 CPUs), so seed the
+			 * shared kernel PDEs from the always-mapped recursive
+			 * window (PTD) instead of memcpy(kpde).  User PDEs start
+			 * empty; the recursive slot points at this pmap's own PD.
+			 */
+			{
+				int kbase = pdenum(kernel_pmap,
+						   VM_MIN_KERNEL_ADDRESS);
+
+				memset(p->dirbase, 0,
+				       kbase * sizeof(pt_entry_t));
+				memcpy(&p->dirbase[kbase], &PTD[kbase],
+				       (NPDES - kbase) * sizeof(pt_entry_t));
+				p->dirbase[PTDPTDI] = pa_to_pte(p->pdirbase)
+						    | INTEL_PTE_VALID
+						    | INTEL_PTE_WRITE;
+			}
 
 			simple_lock_init(&p->lock, ETAP_VM_PMAP);
 			p->cpus_using = 0;
@@ -1909,14 +1982,15 @@ pmap_remove(
 	 */
 	PMAP_UPDATE_TLBS(map, s, e);
 
-	pde = pmap_pde(map, s);
+	/* #333: kernel VAs resolve through the fault-free recursive window */
+	pde = (map == kernel_pmap) ? vtopde(s) : pmap_pde(map, s);
 	while (s < e) {
 	    l = (s + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE-1);
 	    if (l == 0 || l > e)
 		l = e;
 	    if (*pde & INTEL_PTE_VALID) {
-		spte = (pt_entry_t *)ptetokv(*pde);
-		spte = &spte[ptenum(s)];
+		spte = (map == kernel_pmap) ? vtopte(s)
+		     : &((pt_entry_t *)ptetokv(*pde))[ptenum(s)];
 		epte = &spte[intel_btop(l-s)];
 		pmap_remove_range(map, s, spte, epte);
 	    }
@@ -2149,14 +2223,15 @@ pmap_protect(
 	 */
 	PMAP_UPDATE_TLBS(map, s, e);
 
-	pde = pmap_pde(map, s);
+	/* #333: kernel VAs resolve through the fault-free recursive window */
+	pde = (map == kernel_pmap) ? vtopde(s) : pmap_pde(map, s);
 	while (s < e) {
 	    l = (s + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE-1);
 	    if (l == 0 || l > e)
 		l = e;
 	    if (*pde & INTEL_PTE_VALID) {
-		spte = (pt_entry_t *)ptetokv(*pde);
-		spte = &spte[ptenum(s)];
+		spte = (map == kernel_pmap) ? vtopte(s)
+		     : &((pt_entry_t *)ptetokv(*pde))[ptenum(s)];
 		epte = &spte[intel_btop(l-s)];
 
 		while (spte < epte) {
@@ -3358,14 +3433,15 @@ pmap_modify_pages(
 	 */
 	PMAP_UPDATE_TLBS(map, s, e);
 
-	pde = pmap_pde(map, s);
+	/* #333: kernel VAs resolve through the fault-free recursive window */
+	pde = (map == kernel_pmap) ? vtopde(s) : pmap_pde(map, s);
 	while (s < e) {
 	    l = (s + PDE_MAPPED_SIZE) & ~(PDE_MAPPED_SIZE-1);
 	    if (l == 0 || l > e)
 		l = e;
 	    if (*pde & INTEL_PTE_VALID) {
-		spte = (pt_entry_t *)ptetokv(*pde);
-		spte = &spte[ptenum(s)];
+		spte = (map == kernel_pmap) ? vtopte(s)
+		     : &((pt_entry_t *)ptetokv(*pde))[ptenum(s)];
 		epte = &spte[intel_btop(l-s)];
 		while (spte < epte) {
 		    if (*spte & INTEL_PTE_VALID) {
