@@ -1630,6 +1630,34 @@ ds_read_done(
 	    size_read = ior->io_count - ior->io_residual;
 
 	start_data  = (vm_offset_t)ior->io_data;
+
+	/*
+	 * Invariant: a read with no data buffer cannot have transferred any
+	 * bytes.  If a driver completes a read leaving io_data == NULL while
+	 * io_residual == 0 (so size_read == io_count > 0) -- e.g. a rarely
+	 * taken synchronous-completion path under SMP load -- the marshalling
+	 * below (ds_device_read_reply_inband / vm_map_copyin) would copy
+	 * size_read bytes starting at address 0, faulting in bcopy with a NULL
+	 * source.  Clamp the transfer to zero and report a short read rather
+	 * than dereferencing NULL in the kernel.  (Diagnosed via a near-NULL
+	 * bcopy crash: ds_read_done -> ds_device_read_reply_inband -> memcpy.)
+	 */
+	if (start_data == 0 && size_read != 0) {
+	    static int warned = 0;
+	    if (!warned) {
+		warned = 1;
+		printf("ds_read_done: NULL io_data, size_read=%d "
+		       "(op=0x%x count=%d residual=%d err=%d dev=0x%x name=%s) -- "
+		       "clamping (warn-once)\n",
+		       size_read, ior->io_op, ior->io_count, ior->io_residual,
+		       ior->io_error, (unsigned int)ior->io_device,
+		       (ior->io_device && ior->io_device->dev_ops &&
+			ior->io_device->dev_ops->d_name)
+			   ? ior->io_device->dev_ops->d_name : "?");
+	    }
+	    size_read = 0;
+	}
+
 	end_data    = start_data + size_read;
 
 	start_sent  = (ior->io_op & IO_INBAND) ? start_data :
@@ -1643,18 +1671,20 @@ ds_read_done(
 	 * target buffer.  Amount of data read is returned to client,
 	 * so short read is handled there, not here.
 	 */
-	if ((ior->io_op & IO_OVERWRITE) == 0) {
+	if (start_data != 0) {
+	    if ((ior->io_op & IO_OVERWRITE) == 0) {
 		if (start_sent < start_data)
 		    bzero((char *)start_sent, start_data - start_sent);
 		if (end_sent > end_data)
 		    bzero((char *)end_data, end_sent - end_data);
-	}
+	    }
 
-	/*
-	 * Mark the data dirty (if the pages were filled by DMA, the
-	 * pmap module may think that they are clean).
-	 */
-	pmap_modify_pages(kernel_pmap, start_sent, end_sent);
+	    /*
+	     * Mark the data dirty (if the pages were filled by DMA, the
+	     * pmap module may think that they are clean).
+	     */
+	    pmap_modify_pages(kernel_pmap, start_sent, end_sent);
+	}
 
 	/*
 	 * Send the data to the reply port - this

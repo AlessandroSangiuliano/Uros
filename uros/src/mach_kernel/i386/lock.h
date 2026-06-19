@@ -111,6 +111,28 @@ typedef	hw_lock_data_t	*hw_lock_t;
 			"r" (bit), "m" (*(volatile int *)(l))	:	\
 			"memory");
 
+/*
+ *	Non-blocking variant of bit_lock: attempt to set the bit once.
+ *	Returns TRUE if the bit was free and is now held by the caller,
+ *	FALSE if it was already locked.  Used to acquire locks out of the
+ *	natural order without spinning (deadlock-free back-off + retry),
+ *	e.g. the canonical PVH->pmap ordering in intel/pmap.c (#329).
+ *
+ *	`lock btsl` sets CF to the previous value of the bit; `sbbl %0,%0`
+ *	then yields 0 when CF==0 (bit was free, we took it) or -1 otherwise.
+ */
+#define	bit_lock_try(bit,l)						\
+({									\
+	int	__blt_taken;						\
+	__asm__ volatile("	lock		\n			\
+				btsl	%2,%1	\n			\
+				sbbl	%0,%0"				\
+			: "=r" (__blt_taken), "+m" (*(volatile int *)(l)) \
+			: "r" (bit)					\
+			: "memory", "cc");				\
+	(__blt_taken == 0);						\
+})
+
 #define	bit_unlock(bit,l)						\
 	__asm__ volatile("	lock		\n			\
 				btrl	%0,%1"			:	\

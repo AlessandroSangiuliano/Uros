@@ -291,7 +291,7 @@
  *	Author:	Avadis Tevanian, Jr., Michael Wayne Young
  *	(These guys wrote the Vax version)
  *
- *	Physical Map management code for Intel i386, i486, and i860.
+ *	Physical Map management code for Intel i386/i486 and later.
  *
  *	Manages physical address maps.
  *
@@ -394,16 +394,6 @@ void phys_attribute_set(
 #ifndef	set_dirbase
 void	set_dirbase(vm_offset_t	dirbase);
 #endif	/* set_dirbase */
-
-#if	i860
-#include <mach_kdb.h>
-#if	iPSC860
-#include <i860ipsc/nodehw.h>
-#endif	/* iPSC860 */
-
-#define	PA_TO_PTE(pa)	(pa_to_pte((pa)))
-#define	iswired(pte)	((pte) & INTEL_PTE_wired)
-#endif	/* i860 */
 
 #if	i386
 #define	PA_TO_PTE(pa)	(pa_to_pte((pa) - VM_MIN_KERNEL_ADDRESS))
@@ -536,6 +526,7 @@ boolean_t	pmap_initialized = FALSE;/* Has pmap_init completed? */
 
 #define pai_to_pvh(pai)		(&pv_head_table[pai])
 #define lock_pvh_pai(pai)	bit_lock(pai, (void *)pv_lock_table)
+#define try_lock_pvh_pai(pai)	bit_lock_try(pai, (void *)pv_lock_table)
 #define unlock_pvh_pai(pai)	bit_unlock(pai, (void *)pv_lock_table)
 
 /*
@@ -620,38 +611,54 @@ vm_object_t	pmap_object = VM_OBJECT_NULL;
 }
 
 /*
- *	Lock on pmap system
+ *	#329 stage C: the global pmap_system_lock ("Giant") has been removed.
+ *	Cross-pmap pv-list consistency is now provided by the per-page PVH bit
+ *	lock alone -- always taken in the canonical PVH->pmap order: protocol-3
+ *	writers (pmap_page_protect, phys_attribute_set/clear) take the PVH first
+ *	and the per-pmap lock per entry; protocol-2 paths (pmap_enter,
+ *	pmap_remove_range) reach the same order via LOCK_PVH_TRY + back-off.
+ *	SPLVM/SPLX still bracket every operation: they carry the cpus_active
+ *	bookkeeping the TLB-shootdown protocol (PMAP_UPDATE_TLBS) relies on, and
+ *	block the IPI while a pmap lock is held.
  */
-lock_t	pmap_system_lock;
-
 #define PMAP_READ_LOCK(pmap, spl) {	\
 	SPLVM(spl);			\
-	lock_read(&pmap_system_lock);	\
 	simple_lock(&(pmap)->lock);	\
 }
 
 #define PMAP_WRITE_LOCK(spl) {		\
 	SPLVM(spl);			\
-	lock_write(&pmap_system_lock);	\
 }
 
 #define PMAP_READ_UNLOCK(pmap, spl) {		\
 	simple_unlock(&(pmap)->lock);		\
-	lock_read_done(&pmap_system_lock);	\
 	SPLX(spl);				\
 }
 
 #define PMAP_WRITE_UNLOCK(spl) {		\
-	lock_write_done(&pmap_system_lock);	\
 	SPLX(spl);				\
 }
 
 #define PMAP_WRITE_TO_READ_LOCK(pmap) {		\
 	simple_lock(&(pmap)->lock);		\
-	lock_write_to_read(&pmap_system_lock);	\
+}
+
+/*
+ * Pure pv-list reader spanning several pmaps (phys_attribute_test,
+ * pmap_verify_free): no per-pmap lock, just SPLVM + the per-page PVH lock
+ * (taken by the caller) + lockless PTE reads.
+ */
+#define PMAP_SYS_READ_LOCK(spl) {	\
+	SPLVM(spl);			\
+}
+
+#define PMAP_SYS_READ_UNLOCK(spl) {		\
+	SPLX(spl);				\
 }
 
 #define LOCK_PVH(index)		lock_pvh_pai(index)
+
+#define LOCK_PVH_TRY(index)	try_lock_pvh_pai(index)
 
 #define UNLOCK_PVH(index)	unlock_pvh_pai(index)
 
@@ -723,12 +730,16 @@ extern	int	max_lock_loops;
 #define PMAP_READ_UNLOCK(pmap, spl)	SPLX(spl)
 #define PMAP_WRITE_UNLOCK(spl)		SPLX(spl)
 #define PMAP_WRITE_TO_READ_LOCK(pmap)
+#define PMAP_SYS_READ_LOCK(spl)		SPLVM(spl)
+#define PMAP_SYS_READ_UNLOCK(spl)	SPLX(spl)
 
 #if	MACH_RT
 #define LOCK_PVH(index)			disable_preemption()
+#define LOCK_PVH_TRY(index)		(disable_preemption(), TRUE)
 #define UNLOCK_PVH(index)		enable_preemption()
 #else	/* MACH_RT */
 #define LOCK_PVH(index)
+#define LOCK_PVH_TRY(index)		(TRUE)
 #define UNLOCK_PVH(index)
 #endif	/* MACH_RT */
 
@@ -743,16 +754,9 @@ extern	int	max_lock_loops;
 
 #define MAX_TBIS_SIZE	32		/* > this -> TBIA */ /* XXX */
 
-#if	i860
-#define INVALIDATE_TLB(s, e) { \
-	flush(); \
-	flush_tlb(); \
-}
-#else	/* i860 */
 #define INVALIDATE_TLB(s, e) { \
 	flush_tlb(); \
 }
-#endif	/* i860 */
 
 
 #if	NCPUS > 1
@@ -851,23 +855,6 @@ extern char end;
  * Page directory for kernel.
  */
 pt_entry_t	*kpde = (pt_entry_t *)1; /* set by start.s - keep out of bss */
-
-#if	i860
-int	paging_enabled = 0;			/* MMU turned on */
-void	pmap_bootstrap_i860_physmem();		/* map physical memory */
-void	pmap_bootstrap_i860_virtmem();		/* make tables for vm */
-void	pmap_bootstrap_i860_dirty();		/* pre-mark pages as dirty */
-void	pmap_bootstrap_i860_uncache_tables();	/* mark page tables uncached */
-void	pmap_bootstrap_i860_trap_page();	/* get a page for ttrap.s */
-#if	iPSC860
-void	pmap_bootstrap_i860_io();		/* map some i/o devices */
-#endif	/* iPSC860 */
-
-#endif	/* i860 */
-
-#if     i860
-#define SHARING_FAULTS 1
-#endif
 
 #if  DEBUG_ALIAS
 #define PMAP_ALIAS_MAX 32
@@ -1112,86 +1099,14 @@ pmap_bootstrap(
 
 	kernel_pmap = &kernel_pmap_store;
 
-#if	NCPUS > 1
-	lock_init(&pmap_system_lock,
-		  FALSE,		/* NOT a sleep lock */
-		  ETAP_VM_PMAP_SYS,
-		  ETAP_VM_PMAP_SYS_I);
-#endif	/* NCPUS > 1 */
+	/* #329 stage C: pmap_system_lock removed -- per-page PVH + per-pmap
+	 * locks now provide all pmap/pv-list serialization. */
 
 	simple_lock_init(&kernel_pmap->lock, ETAP_VM_PMAP_KERNEL);
 	simple_lock_init(&pv_free_list_lock, ETAP_VM_PMAP_FREE);
 
 	kernel_pmap->ref_count = 1;
 
-#if	i860
-
-	/*
-	 *	Kernel virtual address space comes from the top.
-	 */
-	virtual_end = trunc_page(VM_MAX_KERNEL_ADDRESS);
-	virtual_avail = round_page(virtual_end - morevm + INTEL_PGBYTES);
-
-	/*
-	 *	Allocate a kernel page directory; put it's virtual
-	 *	address in kpde.  Allocate enough kernel page tables
-	 *	to span avail_start to avail_end.
-	 *	Map all of physical ram.
-	 */
-	pmap_bootstrap_i860_physmem(&kpde);
-
-	/*
-	 *	Map in a page for use by the trap handler which
-	 *	saves state at a negative offset from r0.
-	 *
-	 *	The i860 also starts executing code for all
-	 *	exceptions at virtual address 0xffffff00;
-	 *	plop some instructions at that address to
-	 *	branch to alltraps().
-	 */
-	pmap_bootstrap_i860_trap_page(kpde);
-
-
-#if	someday
-	/*
-	 *	Map in a page for use by the dcache flush routine.
-	 */
-	pmap_bootstrap_i860_flush_area(kpde);
-#endif	/* someday */
-
-#if	iPSC860
-	/*
-	 *	Map in some essential device registers.
-	 */
-	pmap_bootstrap_i860_io(kpde,
-		FIFO_ADDR_PH, FIFO_ADDR, FALSE);
-
-	pmap_bootstrap_i860_io(kpde,
-		FIFO_ADDR_PH + XEOD_OFF_PH, FIFO_ADDR + XEOD_OFF, FALSE);
-
-	pmap_bootstrap_i860_io(kpde,
-		CSR_ADDR_PH, CSR_ADDR, FALSE);
-
-	pmap_bootstrap_i860_io(kpde,
-		PERFCNT_ADDR_PH, PERFCNT_ADDR, TRUE);
-
-	pmap_bootstrap_i860_io(kpde,
-		UART_ADDR_PH, UART_ADDR, FALSE);
-#endif	/* iPSC860 */
-
-	/*
-	 *	Allocate enough kernel page tables to
-	 *	span from virtual_avail to virtual_end.
-	 */
-	pmap_bootstrap_i860_virtmem(kpde);
-
-	virtual_end = trunc_page(virtual_end);
-
-	kernel_pmap->dirbase = kpde;
-	printf("Kernel virtual space from 0x%x to 0x%x.\n",
-			virtual_avail, virtual_end);
-
-#else	/* i860 */
 	/*
 	 *	The kernel page directory has been allocated;
 	 *	its virtual address is in kpde.
@@ -1350,7 +1265,6 @@ pmap_bootstrap(
 	kernel_pmap->dirbase = kpde;
 	printf("Kernel virtual space from 0x%x to 0x%x.\n",
 			VM_MIN_KERNEL_ADDRESS, virtual_end);
-#endif	/* i860 */
 
 	printf("Available physical space from 0x%x to 0x%x\n",
 			avail_start, avail_end);
@@ -1359,34 +1273,6 @@ pmap_bootstrap(
 			(avail_end - LOWMEM_LIMIT) / (1024*1024),
 			LOWMEM_LIMIT / (1024*1024));
 
-#if	i860
-	/*
-	 *	Ensure that all pages that are used for page
-	 *	tables are marked non-cacheable.
-	 *
-	 *	XXX This post-pass will go away, eventually.
-	 */
-	pmap_bootstrap_i860_uncache_tables(kernel_pmap->dirbase);
-
-	/*
-	 *	Mark all the pages that have just been entered
-	 *	as accessed and dirty.
-	 *
-	 *	XXX This post-pass will go away, eventually.
-	 */
-	pmap_bootstrap_i860_dirty(kernel_pmap->dirbase);
-
-	/*
-	 *	Throw the Big Switch.
-	 */
-	mp_disable_preemption();
-	set_dirbase(kernel_pmap, cpu_number());
-	mp_enable_preemption();
-	paging_enabled = 1;
-
-	printf("Address translation enabled.\n");
-
-#endif	/* i860 */
 	/*
 	 * #333: install the recursive self-map slot BEFORE the first
 	 * kvtophys()/pmap_pte() on a kernel VA -- kvtophys() resolves kernel VAs
@@ -1548,13 +1434,18 @@ pmap_verify_free(
 	if (!pmap_valid_page(phys))
 		return(FALSE);
 
-	PMAP_WRITE_LOCK(spl);
+	/* #329 stage C: read the pv-list head under the per-page PVH lock
+	 * (was the global write lock). */
+	PMAP_SYS_READ_LOCK(spl);
 
 	pai = pa_index(phys);
+	LOCK_PVH(pai);
 	pv_h = pai_to_pvh(pai);
 
 	result = (pv_h->pmap == PMAP_NULL);
-	PMAP_WRITE_UNLOCK(spl);
+
+	UNLOCK_PVH(pai);
+	PMAP_SYS_READ_UNLOCK(spl);
 
 	return(result);
 }
@@ -1851,10 +1742,6 @@ pmap_remove_range(
 	    if (pa == 0)
 		continue;
 
-	    num_removed++;
-	    if (iswired(*cpte))
-		num_unwired++;
-
 	    if (!valid_page(pa)) {
 
 		/*
@@ -1863,6 +1750,10 @@ pmap_remove_range(
 		 */
 		register int	i = ptes_per_vm_page;
 		register pt_entry_t	*lpte = cpte;
+
+		num_removed++;
+		if (iswired(*cpte))
+		    num_unwired++;
 		do {
 		    *lpte = 0;
 		    lpte++;
@@ -1871,7 +1762,29 @@ pmap_remove_range(
 	    }
 
 	    pai = pa_index(pa);
-	    LOCK_PVH(pai);
+	    /*
+	     * #329: take the PVH in canonical PVH->pmap order.  We hold
+	     * pmap->lock; if the PVH is busy, drop ONLY pmap->lock (the caller
+	     * keeps spl and the system lock), wait for the PVH, re-acquire
+	     * pmap->lock and re-do this slot.  This lets a protocol-3 writer
+	     * that holds the PVH and wants pmap->lock make progress, breaking
+	     * the lock-order inversion the giant lock used to hide.  *cpte is
+	     * re-read on the retry, so a slot that changed while unlocked is
+	     * handled correctly.
+	     */
+	    if (!LOCK_PVH_TRY(pai)) {
+		simple_unlock(&pmap->lock);
+		LOCK_PVH(pai);
+		UNLOCK_PVH(pai);
+		simple_lock(&pmap->lock);
+		cpte -= ptes_per_vm_page;
+		va  -= PAGE_SIZE;
+		continue;
+	    }
+
+	    num_removed++;
+	    if (iswired(*cpte))
+		num_unwired++;
 
 	    /*
 	     *	Get the modify and reference bits.
@@ -2055,6 +1968,14 @@ pmap_page_protect(
 	pv_h = pai_to_pvh(pai);
 
 	/*
+	 * #329: protocol-3 writer -- take this page's PVH lock FIRST (canonical
+	 * PVH->pmap order), then the per-pmap lock per entry below.  With
+	 * pmap_system_lock gone (stage C) the PVH lock is what serializes this
+	 * pv-list walk against concurrent pmap_enter/pmap_remove on this page.
+	 */
+	LOCK_PVH(pai);
+
+	/*
 	 * Walk down PV list, changing or removing all mappings.
 	 * We do not have to lock the pv_list because we have
 	 * the entire pmap system locked.
@@ -2160,6 +2081,8 @@ pmap_page_protect(
 		}
 	    }
 	}
+
+	UNLOCK_PVH(pai);
 
 	PMAP_WRITE_UNLOCK(spl);
 }
@@ -2325,7 +2248,15 @@ pmap_enter(
 	 *	the allocated entry later (if we no longer need it).
 	 */
 	pv_e = PV_ENTRY_NULL;
-Retry:
+
+	/*
+	 * #329: structured retry loop (replaces the old "Retry:"/goto).
+	 * "continue" restarts the operation after we drop the pmap lock to
+	 * acquire a PVH in the canonical PVH->pmap order (or to refill the
+	 * pv_entry zone); "break" finishes.  Each pass re-reads the pte, so
+	 * any work already committed to the page table is re-derived safely.
+	 */
+	for (;;) {
 	PMAP_READ_LOCK(pmap, spl);
 
 	/*
@@ -2381,7 +2312,7 @@ Retry:
 		pte_increment_pa(template);
 	    } while (--i > 0);
 
-	    goto Done;
+	    break;
 	}
 
 	/*
@@ -2390,11 +2321,6 @@ Retry:
 	 *	      and remove old pvlist entry.
 	 *	   2) Add pvlist entry for new mapping
 	 *	   3) Enter new mapping.
-	 *
-	 *	SHARING_FAULTS complicates this slightly in that it cannot
-	 *	replace the mapping, but must remove it (because adding the
-	 *	pvlist entry for the new mapping may remove others), and
-	 *	hence always enters the new mapping at step 3)
 	 *
 	 *	If the old physical page is not managed step 1) is skipped
 	 *	(except for updating the TLBs), and the mapping is
@@ -2420,7 +2346,19 @@ Retry:
 	    if (valid_page(old_pa)) {
 
 		pai = pa_index(old_pa);
-		LOCK_PVH(pai);
+		/*
+		 * #329: take the PVH in canonical PVH->pmap order.  We hold
+		 * pmap->lock, so if the PVH is busy we must not spin (that is
+		 * the order inversion the giant lock used to hide): drop the
+		 * pmap lock, wait for the PVH, then retry.  Nothing has been
+		 * committed to the page table yet, so the retry is clean.
+		 */
+		if (!LOCK_PVH_TRY(pai)) {
+		    PMAP_READ_UNLOCK(pmap, spl);
+		    LOCK_PVH(pai);
+		    UNLOCK_PVH(pai);
+		    continue;
+		}
 
 		assert(pmap->stats.resident_count >= 1);
 		pmap->stats.resident_count--;
@@ -2520,16 +2458,13 @@ Retry:
 
 	    pai = pa_index(pa);
 
-
-#if SHARING_FAULTS
-RetryPvList:
-	    /*
-	     * We can return here from the sharing fault code below
-	     * in case we removed the only entry on the pv list and thus
-	     * must enter the new one in the list header.
-	     */
-#endif /* SHARING_FAULTS */
-	    LOCK_PVH(pai);
+	    /* #329: canonical PVH->pmap order (see old-mapping case above). */
+	    if (!LOCK_PVH_TRY(pai)) {
+		PMAP_READ_UNLOCK(pmap, spl);
+		LOCK_PVH(pai);
+		UNLOCK_PVH(pai);
+		continue;
+	    }
 	    pv_h = pai_to_pvh(pai);
 
 	    if (pv_h->pmap == PMAP_NULL) {
@@ -2555,56 +2490,6 @@ RetryPvList:
 		    }
 		}
 #endif	/* DEBUG */
-#if SHARING_FAULTS
-                {
-                    /*
-                     * do sharing faults.
-                     * if we find an entry on this pv list in the same address
-		     * space, remove it.  we know there will not be more
-		     * than one. 
-		     */
-		    pv_entry_t	e = pv_h;
-                    pt_entry_t      *opte;
-
-		    while (e != PV_ENTRY_NULL) {
-			if (e->pmap == pmap) {
-                            /*
-			     *	Remove it, drop pv list lock first.
-			     */
-                            UNLOCK_PVH(pai);
-
-                            opte = pmap_pte(pmap, e->va);
-                            assert(opte != PT_ENTRY_NULL);
-                            /*
-			     *	Invalidate the translation buffer,
-			     *	then remove the mapping.
-			     */
-                             PMAP_UPDATE_TLBS(pmap, e->va, e->va + PAGE_SIZE);
-                             pmap_remove_range(pmap, e->va, opte,
-                                                      opte + ptes_per_vm_page);
-			     /*
-			      * We could have remove the head entry,
-			      * so there could be no more entries
-			      * and so we have to use the pv head entry.
-			      * so, go back to the top and try the entry
-			      * again.
-			      */
-			     goto RetryPvList;
-			}
-                        e = e->next;
-		    }
-
-		    /*
-                     * check that this mapping is not already there
-                     */
-		    e = pv_h;
-		    while (e != PV_ENTRY_NULL) {
-			if (e->pmap == pmap)
-                            panic("pmap_enter: alias in pv_list");
-			e = e->next;
-		    }
-		}
-#endif /* SHARING_FAULTS */
 #if DEBUG_ALIAS
                 {
                     /*
@@ -2657,7 +2542,7 @@ RetryPvList:
 			 * Refill from zone.
 			 */
 			pv_e = (pv_entry_t) zalloc(pv_list_zone);
-			goto Retry;
+			continue;
 		    }
 		}
 		pv_e->va = v;
@@ -2697,7 +2582,10 @@ RetryPvList:
 		pte++;
 		pte_increment_pa(template);
 	} while (--i > 0);
-Done:
+
+	break;
+	}	/* for (;;) retry loop */
+
 	if (pv_e != PV_ENTRY_NULL) {
 	    PV_FREE(pv_e);
 	}
@@ -2870,17 +2758,6 @@ pmap_expand(
 	 *	set several page directory entries.
 	 */
 
-#if	i860
-        /*
-         * First mark the page table page(s) non-cacheable.
-         */
-	i = ptes_per_vm_page;
-	pdp = pmap_pte(kernel_map->pmap, pa);
-	do {
-	    *pdp |= INTEL_PTE_NCACHE;
-	    pdp++;
-	} while (--i > 0);
-#endif	/* i860 */
 	i = ptes_per_vm_page;
 	pdp = &map->dirbase[pdenum(map, v) & ~(i-1)];
 	do {
@@ -2891,13 +2768,6 @@ pmap_expand(
 	    pdp++;
 	    pa += INTEL_PGBYTES;
 	} while (--i > 0);
-#if	i860
-	/*
-	 * Flush the data cache.
-	 */
-
-        flush();
-#endif	/* i860 */
 	PMAP_READ_UNLOCK(map, spl);
 	return;
 }
@@ -3152,6 +3022,9 @@ phys_attribute_clear(
 	pai = pa_index(phys);
 	pv_h = pai_to_pvh(pai);
 
+	/* #329 stage A: canonical PVH->pmap order (redundant under global write). */
+	LOCK_PVH(pai);
+
 	/*
 	 * Walk down PV list, clearing all modify or reference bits.
 	 * We do not have to lock the pv_list because we have
@@ -3220,6 +3093,8 @@ phys_attribute_clear(
 
 	pmap_phys_attributes[pai] &= ~bits;
 
+	UNLOCK_PVH(pai);
+
 	PMAP_WRITE_UNLOCK(spl);
 }
 
@@ -3247,24 +3122,32 @@ phys_attribute_test(
 	}
 
 	/*
-	 *	Lock the pmap system first, since we will be checking
-	 *	several pmaps.
+	 * #329: pure read of one page's ref/mod state, serialized by that
+	 * page's PVH lock alone (originally protocol-3 under the global write
+	 * lock; since stage C there is no global lock):
+	 *
+	 *  - the PVH lock keeps this page's pv list stable against concurrent
+	 *    protocol-2 inserts/removes and protocol-3 writers (all take it);
+	 *  - a held pv entry implies the mapping (hence its page-table page) is
+	 *    live, so each PTE is read locklessly (atomic on x86) with no
+	 *    per-pmap lock -- which also avoids any pmap<->PVH order inversion.
 	 */
-
-	PMAP_WRITE_LOCK(spl);
-
 	pai = pa_index(phys);
 	pv_h = pai_to_pvh(pai);
 
+	PMAP_SYS_READ_LOCK(spl);
+	LOCK_PVH(pai);
+
 	if (pmap_phys_attributes[pai] & bits) {
-	    PMAP_WRITE_UNLOCK(spl);
+	    UNLOCK_PVH(pai);
+	    PMAP_SYS_READ_UNLOCK(spl);
 	    return (TRUE);
 	}
 
 	/*
-	 * Walk down PV list, checking all mappings.
-	 * We do not have to lock the pv_list because we have
-	 * the entire pmap system locked.
+	 * Walk down PV list, checking all mappings.  The PVH lock keeps the
+	 * list stable; PTEs are read without the per-pmap lock (atomic read,
+	 * page-table page kept live by the held mapping).
 	 */
 	if (pv_h->pmap != PMAP_NULL) {
 	    /*
@@ -3273,10 +3156,6 @@ phys_attribute_test(
 	    for (pv_e = pv_h; pv_e != PV_ENTRY_NULL; pv_e = pv_e->next) {
 
 		pmap = pv_e->pmap;
-		/*
-		 * Lock the pmap to block pmap_extract and similar routines.
-		 */
-		simple_lock(&pmap->lock);
 
 		{
 		    register vm_offset_t va;
@@ -3301,16 +3180,16 @@ phys_attribute_test(
 
 		    do {
 			if (*pte++ & bits) {
-			    simple_unlock(&pmap->lock);
-			    PMAP_WRITE_UNLOCK(spl);
+			    UNLOCK_PVH(pai);
+			    PMAP_SYS_READ_UNLOCK(spl);
 			    return (TRUE);
 			}
 		    } while (--i > 0);
 		}
-		simple_unlock(&pmap->lock);
 	    }
 	}
-	PMAP_WRITE_UNLOCK(spl);
+	UNLOCK_PVH(pai);
+	PMAP_SYS_READ_UNLOCK(spl);
 	return (FALSE);
 }
 
@@ -3323,6 +3202,7 @@ phys_attribute_set(
 	int		bits)
 {
 	int			spl;
+	int			pai;
 
 	assert(phys != vm_page_fictitious_addr);
 	if (!valid_page(phys)) {
@@ -3339,7 +3219,11 @@ phys_attribute_set(
 	 */
 
 	PMAP_WRITE_LOCK(spl);
-	pmap_phys_attributes[pa_index(phys)] |= bits;
+	pai = pa_index(phys);
+	/* #329 stage A: canonical PVH->pmap order (redundant under global write). */
+	LOCK_PVH(pai);
+	pmap_phys_attributes[pai] |= bits;
+	UNLOCK_PVH(pai);
 	PMAP_WRITE_UNLOCK(spl);
 }
 
@@ -3785,412 +3669,6 @@ db_show_page(vm_offset_t pa)
 
 #endif /* MACH_KDB */
 
-#if	i860	/* akp */
-
-/*
- *	Allocate a page for use during pmap_bootstrap().
- *
- *	Pages are stolen from the "hole_end" side.
- */
-static vm_offset_t *
-pmap_bootstrap_i860_steal_page(void)
-{
-	pt_entry_t	*page;
-	extern vm_offset_t hole_end;
-
-	page = (pt_entry_t *) hole_end;
-	hole_end += INTEL_PGBYTES;
-	memset((char *) page, 0, INTEL_PGBYTES);
-
-	return page;
-}
-
-
-/*
- *	Return TRUE if addr should be marked as write-thru.
- *
- *	In general, kernel text+data+bss+symbols+misc
- *	should *not* be marked as write-thru; physical
- *	free pages not-yet-in-use should be marked as
- *	write-thru.
- */
-static boolean_t
-pmap_bootstrap_i860_mark_write_thru(
-	vm_offset_t	addr)
-{
-	extern	vm_offset_t	hole_start, hole_end;
-
-	/*
-	 *	Kernel text, data, bss, page dir, page tabs, etc.
-	 */
-	if ((addr >= hole_start) && (addr < hole_end))
-		return FALSE;
-
-	return TRUE;
-}
-
-
-/*
- *	Map a range of memory, physical:virtual as 1:1
- *
- *	Enough page tables to map phys_lo to phys_hi are
- *	allocated.
- */
-static void
-pmap_bootstrap_i860_memrange(
-	pt_entry_t	*dir,
-	vm_offset_t	phys_lo,
-	vm_offset_t	phys_hi)
-{
-	pt_entry_t	*tab, *pdep, *ptep, tmp;
-	vm_offset_t	cur, max;
-	int		ntables, tabcnt, pagcnt;
-
-	tabcnt = 0;
-	pagcnt = 0;
-	phys_lo = round_page(phys_lo);
-	phys_hi = trunc_page(phys_hi);
-	ntables = atop(phys_hi - phys_lo) / NPTES;
-
-	/*
-	 *	Allocate and initialize the page tables
-	 */
-	cur = phys_lo;
-	while (ntables--) {
-		tab = pmap_bootstrap_i860_steal_page();
-		dir[pdenum(cur)] = pa_to_pte((vm_offset_t) tab)
-				| INTEL_PTE_REF
-				| INTEL_PTE_VALID
-				| INTEL_PTE_WRITE;
-		cur += (INTEL_PGBYTES * NPTES);
-		tabcnt++;
-	}
-
-	cur = phys_lo;
-	max = phys_hi;
-	while (cur < max) {
-		pdep = &dir[pdenum(cur)];
-		if (*pdep == 0) {
-			panic("pmap_bootstrap_i860_memrange: no page table");
-		}
-		tab = (pt_entry_t *) ((*pdep) & ~INTEL_OFFMASK);
-		ptep = &tab[ptenum(cur)];
-		if (*ptep != 0) {
-			panic("pmap_bootstrap_i860_memrange: address in use");
-		}
-		tmp = pa_to_pte((vm_offset_t) cur)
-			| INTEL_PTE_REF
-			| INTEL_PTE_MOD
-			| INTEL_PTE_VALID
-			| INTEL_PTE_WRITE;
-		if (pmap_bootstrap_i860_mark_write_thru(cur))
-			tmp |= INTEL_PTE_WTHRU;
-		*ptep = tmp;
-		cur += INTEL_PGBYTES;
-		pagcnt++;
-	}
-
-	printf("[ %d phys pages (%d tables) mapping 0x%x to 0x%x ]\n",
-		pagcnt, tabcnt, phys_lo, phys_hi);
-}
-
-
-/*
- *	Map all of physical memory 1-1.
- */
-void
-pmap_bootstrap_i860_physmem(
-	pt_entry_t	**dirbase)	/* out */
-{
-	pt_entry_t	*dir;
-
-	/*
-	 *	Allocate the kernel page directory.
-	 */
-	dir = (pt_entry_t *) pmap_bootstrap_i860_steal_page();
-	*dirbase = dir;
-
-	/*
-	 *	map avail_start to avail_end
-	 */
-	pmap_bootstrap_i860_memrange(dir, avail_start, avail_end);
-}
-
-
-/*
- *	Allocate (and initialize) enough kernel page tables to cover
- *	virtual_avail to virtual_end.
- */
-void
-pmap_bootstrap_i860_virtmem(
-	pt_entry_t	*dir)
-{
-	vm_offset_t	cur, max;
-	pt_entry_t	*tab, *pdep;
-
-	cur = virtual_avail;
-	max = virtual_end;
-	while (cur < max) {
-		pdep = &dir[pdenum(cur)];
-		cur += INTEL_PGBYTES;
-		if (*pdep != 0)
-			continue;
-		tab = (pt_entry_t *) pmap_bootstrap_i860_steal_page();
-		*pdep = pa_to_pte((vm_offset_t) tab)
-			| INTEL_PTE_REF
-			| INTEL_PTE_VALID
-			| INTEL_PTE_WRITE;
-	}
-}
-
-
-#if	iPSC860
-/*
- *	Map in some crucial device registers.
- */
-void
-pmap_bootstrap_i860_io(
-	pt_entry_t	*dir,
-	vm_offset_t	pdev,
-	vm_offset_t	vdev,
-	boolean_t	user)
-{
-	pt_entry_t	*tab, *pdep, *ptep, bits;
-
-	pdep = &dir[pdenum(vdev)];
-	if (*pdep == 0) {
-		/*
-		 *	no page table...make one
-		 */
-		tab = (pt_entry_t *) pmap_bootstrap_i860_steal_page();
-		bits = pa_to_pte((vm_offset_t) tab)
-			| INTEL_PTE_REF
-			| INTEL_PTE_VALID
-			| INTEL_PTE_WRITE;
-		if (user) {
-			bits |= INTEL_PTE_USER;
-		}
-		*pdep = bits;
-	} else {
-		/*
-		 *	use the existing page table
-		 */
-		if (user && ((*pdep & INTEL_PTE_USER) == 0)) {
-			*pdep |= INTEL_PTE_USER;
-		}
-		tab = (pt_entry_t *) ((*pdep) & ~INTEL_OFFMASK);
-	}
-	ptep = &tab[ptenum(vdev)];
-
-	/*
-	 *	Address collision?
-	 */
-	if (*ptep != 0) {
-		panic("pmap_bootstrap_i860_io");
-	}
-
-	bits = pa_to_pte((vm_offset_t) pdev)
-			| INTEL_PTE_REF
-			| INTEL_PTE_MOD
-			| INTEL_PTE_VALID
-			| INTEL_PTE_NCACHE
-			| INTEL_PTE_WRITE;
-	if (user) {
-		bits |= INTEL_PTE_USER;
-	}
-	*ptep = bits;
-
-	if (vdev < virtual_end)
-		virtual_end = trunc_page(vdev - INTEL_PGBYTES);
-
-	printf("[ device register phys %x mapped to virt %x. ]\n", pdev, vdev);
-}
-
-#endif	/* iPSC860 */
-
-/*
- *	Map in a page for use by the trap handler;
- *	it saves state at a negative offset from r0.
- *
- *	The i860 also starts all executing code for all
- *	exceptions at virtual address 0xffffff00; this
- *	routine installs instructions to branch to alltraps().
- */
-void
-pmap_bootstrap_i860_trap_page(
-	pt_entry_t	*dir)
-{
-	pt_entry_t	*pdep, *ptep, *tab;
-	unsigned long	*vtrapvec, *ptrapvec;
-	unsigned long	*vtrappage, *ptrappage;
-	unsigned long	nop, br;
-	long		broff;
-	extern void	alltraps();
-
-	vtrappage = (unsigned long *) 0xfffff000;
-	if (vtrappage < (unsigned long *) virtual_end)
-		virtual_end = trunc_page((vm_offset_t)vtrappage-INTEL_PGBYTES);
-
-	pdep = &dir[pdenum((vm_offset_t) vtrappage)];
-
-	if (pte_to_pa(*pdep) == 0) {
-		/*
-		 *	Need to make a page table...
-		 */
-		tab = (pt_entry_t *) pmap_bootstrap_i860_steal_page();
-		*pdep = pa_to_pte((vm_offset_t) tab)
-			| INTEL_PTE_REF
-			| INTEL_PTE_VALID
-			| INTEL_PTE_WRITE;
-	} else {
-		/*
-		 *	Use the existing page table
-		 */
-		tab = (pt_entry_t *) ((*pdep) & ~INTEL_OFFMASK);
-	}
-
-	ptep = &tab[ptenum((vm_offset_t) vtrappage)];
-#if	iPSC860
-	/*
-	 *	Most i860 designs have *some* physical memory at
-	 *	0xffffff00; these two platforms have address decoding
-	 *	circuitry that decodes the same memory (modulo memory
-	 *	size) from some base address up to 0xffffffff.
-	 *	One convenient alias is at 0xfffff000 and is the
-	 *	last physical page of memory.  So, just subtract one
-	 *	page from avail_end as a way to prevent us from using
-	 *	the top-most page and map it one-to-one with 0xfffff000.
-	 */
-	ptrappage = vtrappage;
-	avail_end -= INTEL_PGBYTES;
-#else	/* iPSC860 */
-	/*
-	 *	Other i860 platforms may have to do something like this...
-	 */
-	ptrappage = (unsigned long *) pmap_bootstrap_i860_steal_page();
-#endif	/* iPSC860 */
-
-	*ptep = pa_to_pte((vm_offset_t) ptrappage)
-		| INTEL_PTE_REF
-		| INTEL_PTE_MOD
-		| INTEL_PTE_VALID
-		| INTEL_PTE_WRITE;
-
-	nop = 0xa000; nop <<= 16;
-	br  = 0x6800; br  <<= 16;
-	vtrapvec = &vtrappage[960];
-	ptrapvec = &ptrappage[960];
-	broff = ((vm_offset_t) alltraps) - ((vm_offset_t) &vtrapvec[9]);
-
-	ptrapvec[0] = nop;
-	ptrapvec[1] = nop;
-	ptrapvec[2] = nop;
-	ptrapvec[3] = nop;
-	ptrapvec[4] = nop;
-	ptrapvec[5] = nop;
-	ptrapvec[6] = nop;
-	ptrapvec[7] = nop;
-	ptrapvec[8] = br | ((broff >> 2) & 0x03ffffff);
-	ptrapvec[9] = nop;
-
-	printf("[ trap-handler page at phys addr 0x%x. ]\n", ptrappage);
-}
-
-
-/*
- *	This is the sloppy way to mark *all* of the initial
- *	kernel pages as accessed and dirty.
- *	No exceptions! (pun intended).
- */
-void
-pmap_bootstrap_i860_dirty(
-	pt_entry_t	*dirbase)
-{
-	pt_entry_t	*ptep, *pdep, tmp;
-	int		x, y, pdecnt, ptecnt;
-
-	pdecnt = ptecnt = 0;
-	pdep = &dirbase[0];
-	for (y = 0; y < NPDES; y++, pdep++) {
-		if (((tmp = *pdep) & INTEL_PTE_VALID) == 0) {
-			continue;
-		}
-		*pdep = tmp
-			| INTEL_PTE_REF
-			;
-		pdecnt++;
-
-		ptep = (pt_entry_t *) ((*pdep) & ~INTEL_OFFMASK);
-
-		for (x = 0; x < NPTES; x++, ptep++) {
-			if ((tmp = *ptep) & INTEL_PTE_VALID) {
-				if ((tmp & (INTEL_PTE_REF|INTEL_PTE_MOD)) == 0)
-					*ptep = tmp
-						| INTEL_PTE_REF
-						| INTEL_PTE_MOD
-						;
-				ptecnt++;
-			}
-		}
-	}
-	printf("[ pre-marked %d pages (%d pde's) as referenced and modified. ]\n",
-		ptecnt, pdecnt);
-}
-
-
-/*
- *	Mark all pages that are actualy page tables as uncached.
- */
-void
-pmap_bootstrap_i860_uncache_tables(
-	pt_entry_t	*dirbase)
-{
-	pt_entry_t	*ptep, *pdep, tmp, *tab_pdep, *tab_tab, *tab_ptep;
-	pt_entry_t	*tab;
-	int		i, cnt;
-
-	cnt = 0;
-	pdep = &dirbase[0];
-	for (i = 0; i < NPDES; i++, pdep++) {
-		if (((tmp = *pdep) & INTEL_PTE_VALID) == 0) {
-			continue;
-		}
-		cnt++;
-		tab = (pt_entry_t *) ((*pdep) & ~INTEL_OFFMASK);
-
-		/*
-		 * tab now points to a page table.
-		 * get the pte for it.
-		 */
-		tab_pdep = &dirbase[pdenum((vm_offset_t) tab)];
-		tab_tab = (pt_entry_t *) ((*tab_pdep) & ~INTEL_OFFMASK);
-		tab_ptep = &tab_tab[ptenum((vm_offset_t) tab)];
-		*tab_ptep |= INTEL_PTE_NCACHE;
-	}
-
-	printf("[ %d kernel page tables marked non-cacheable. ]\n", cnt);
-}
-
-
-#if	i860XP
-static int	use_i860xp_flush = 1;
-#endif	/* i860XP */
-
-void
-set_dirbase(
-	register vm_offset_t	dirbase)
-{
-#if	i860XP
-	if (use_i860xp_flush) {
-		i860xp_flush_and_ctxsw(dirbase);
-	} else {
-		flush_and_ctxsw(dirbase);
-	}
-#else	/* i860XP */
-	flush_and_ctxsw(dirbase);
-#endif	/* i860XP */
-}
-#endif	/* i860 */
 
 #if	MACH_KDB
 void db_kvtophys(vm_offset_t);
