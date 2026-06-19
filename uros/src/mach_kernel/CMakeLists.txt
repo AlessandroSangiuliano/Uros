@@ -46,7 +46,14 @@ set(KERNEL_TEXTORG "0x100000")  # 1MB - physical load address
 
 # #300 — SMP bring-up.  Default 1 keeps the v0.1.0 single-CPU build unchanged.
 # Override with -DUROS_NCPUS=2 (or 4, 8) to enable the SMP code paths.
-set(UROS_NCPUS "1" CACHE STRING "Number of CPUs the kernel supports (1 = UP, >1 = SMP)")
+#
+# #330 (dynamic per-CPU, option B): for SMP builds this is now the fixed
+# *maximum* CPU count (the size of the per-CPU arrays), NOT the number you
+# boot.  Set it once to a generous cap (e.g. 64); the real count comes from
+# the MADT/MP table at runtime (real_ncpus, clamped to <= NCPUS).  The same
+# binary then boots any N <= UROS_NCPUS with no rebuild and a fixed image
+# layout.  See i386/AT386/cpus.h.
+set(UROS_NCPUS "1" CACHE STRING "Max CPUs supported (per-CPU array size; 1 = UP). Runtime count from MADT.")
 if(UROS_NCPUS GREATER 1)
     message(STATUS "SMP build: UROS_NCPUS=${UROS_NCPUS} (experimental, #300 in progress)")
     # MPS 1.x AP-boot path (mp.c, mp_v1_1.c, slave_boot.S).
