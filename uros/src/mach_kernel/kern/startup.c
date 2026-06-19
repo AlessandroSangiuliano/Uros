@@ -427,6 +427,8 @@ start_kernel_threads(void)
 	    }
 	}
 
+	zone_enable_hot_magazines();	/* #330: per-CPU magazines on hot zones */
+
 	(void) kernel_thread(kernel_task, reaper_thread, (char *) 0);
 #if	THREAD_SWAPPER
 	(void) kernel_thread(kernel_task, swapin_thread, (char *) 0);
