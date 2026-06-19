@@ -526,6 +526,7 @@ boolean_t	pmap_initialized = FALSE;/* Has pmap_init completed? */
 
 #define pai_to_pvh(pai)		(&pv_head_table[pai])
 #define lock_pvh_pai(pai)	bit_lock(pai, (void *)pv_lock_table)
+#define try_lock_pvh_pai(pai)	bit_lock_try(pai, (void *)pv_lock_table)
 #define unlock_pvh_pai(pai)	bit_unlock(pai, (void *)pv_lock_table)
 
 /*
@@ -662,6 +663,8 @@ lock_t	pmap_system_lock;
 
 #define LOCK_PVH(index)		lock_pvh_pai(index)
 
+#define LOCK_PVH_TRY(index)	try_lock_pvh_pai(index)
+
 #define UNLOCK_PVH(index)	unlock_pvh_pai(index)
 
 #if	USLOCK_DEBUG && MACH_KDB
@@ -737,9 +740,11 @@ extern	int	max_lock_loops;
 
 #if	MACH_RT
 #define LOCK_PVH(index)			disable_preemption()
+#define LOCK_PVH_TRY(index)		(disable_preemption(), TRUE)
 #define UNLOCK_PVH(index)		enable_preemption()
 #else	/* MACH_RT */
 #define LOCK_PVH(index)
+#define LOCK_PVH_TRY(index)		(TRUE)
 #define UNLOCK_PVH(index)
 #endif	/* MACH_RT */
 
@@ -1741,10 +1746,6 @@ pmap_remove_range(
 	    if (pa == 0)
 		continue;
 
-	    num_removed++;
-	    if (iswired(*cpte))
-		num_unwired++;
-
 	    if (!valid_page(pa)) {
 
 		/*
@@ -1753,6 +1754,10 @@ pmap_remove_range(
 		 */
 		register int	i = ptes_per_vm_page;
 		register pt_entry_t	*lpte = cpte;
+
+		num_removed++;
+		if (iswired(*cpte))
+		    num_unwired++;
 		do {
 		    *lpte = 0;
 		    lpte++;
@@ -1761,7 +1766,29 @@ pmap_remove_range(
 	    }
 
 	    pai = pa_index(pa);
-	    LOCK_PVH(pai);
+	    /*
+	     * #329: take the PVH in canonical PVH->pmap order.  We hold
+	     * pmap->lock; if the PVH is busy, drop ONLY pmap->lock (the caller
+	     * keeps spl and the system lock), wait for the PVH, re-acquire
+	     * pmap->lock and re-do this slot.  This lets a protocol-3 writer
+	     * that holds the PVH and wants pmap->lock make progress, breaking
+	     * the lock-order inversion the giant lock used to hide.  *cpte is
+	     * re-read on the retry, so a slot that changed while unlocked is
+	     * handled correctly.
+	     */
+	    if (!LOCK_PVH_TRY(pai)) {
+		simple_unlock(&pmap->lock);
+		LOCK_PVH(pai);
+		UNLOCK_PVH(pai);
+		simple_lock(&pmap->lock);
+		cpte -= ptes_per_vm_page;
+		va  -= PAGE_SIZE;
+		continue;
+	    }
+
+	    num_removed++;
+	    if (iswired(*cpte))
+		num_unwired++;
 
 	    /*
 	     *	Get the modify and reference bits.
@@ -2226,7 +2253,15 @@ pmap_enter(
 	 *	the allocated entry later (if we no longer need it).
 	 */
 	pv_e = PV_ENTRY_NULL;
-Retry:
+
+	/*
+	 * #329: structured retry loop (replaces the old "Retry:"/goto).
+	 * "continue" restarts the operation after we drop the pmap lock to
+	 * acquire a PVH in the canonical PVH->pmap order (or to refill the
+	 * pv_entry zone); "break" finishes.  Each pass re-reads the pte, so
+	 * any work already committed to the page table is re-derived safely.
+	 */
+	for (;;) {
 	PMAP_READ_LOCK(pmap, spl);
 
 	/*
@@ -2282,7 +2317,7 @@ Retry:
 		pte_increment_pa(template);
 	    } while (--i > 0);
 
-	    goto Done;
+	    break;
 	}
 
 	/*
@@ -2316,7 +2351,19 @@ Retry:
 	    if (valid_page(old_pa)) {
 
 		pai = pa_index(old_pa);
-		LOCK_PVH(pai);
+		/*
+		 * #329: take the PVH in canonical PVH->pmap order.  We hold
+		 * pmap->lock, so if the PVH is busy we must not spin (that is
+		 * the order inversion the giant lock used to hide): drop the
+		 * pmap lock, wait for the PVH, then retry.  Nothing has been
+		 * committed to the page table yet, so the retry is clean.
+		 */
+		if (!LOCK_PVH_TRY(pai)) {
+		    PMAP_READ_UNLOCK(pmap, spl);
+		    LOCK_PVH(pai);
+		    UNLOCK_PVH(pai);
+		    continue;
+		}
 
 		assert(pmap->stats.resident_count >= 1);
 		pmap->stats.resident_count--;
@@ -2416,7 +2463,13 @@ Retry:
 
 	    pai = pa_index(pa);
 
-	    LOCK_PVH(pai);
+	    /* #329: canonical PVH->pmap order (see old-mapping case above). */
+	    if (!LOCK_PVH_TRY(pai)) {
+		PMAP_READ_UNLOCK(pmap, spl);
+		LOCK_PVH(pai);
+		UNLOCK_PVH(pai);
+		continue;
+	    }
 	    pv_h = pai_to_pvh(pai);
 
 	    if (pv_h->pmap == PMAP_NULL) {
@@ -2494,7 +2547,7 @@ Retry:
 			 * Refill from zone.
 			 */
 			pv_e = (pv_entry_t) zalloc(pv_list_zone);
-			goto Retry;
+			continue;
 		    }
 		}
 		pv_e->va = v;
@@ -2534,7 +2587,10 @@ Retry:
 		pte++;
 		pte_increment_pa(template);
 	} while (--i > 0);
-Done:
+
+	break;
+	}	/* for (;;) retry loop */
+
 	if (pv_e != PV_ENTRY_NULL) {
 	    PV_FREE(pv_e);
 	}
