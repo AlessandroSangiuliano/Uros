@@ -500,6 +500,26 @@ decl_simple_lock_data(,pv_free_list_lock)
 zone_t		pv_list_zone;		/* zone of pv_entry structures */
 
 /*
+ *	#330: type-stable page-table page pool.
+ *
+ *	pmap_extract() now walks page tables lock-free.  A concurrent
+ *	pmap_collect() can unlink (clear the PDE of) an empty PT page while a
+ *	reader still holds a pointer into it.  To make that safe WITHOUT a
+ *	grace period (which a non-preemptive kernel cannot provide cheaply --
+ *	see #336), reclaimed PT pages are never returned to the VM allocator:
+ *	pmap_collect() pushes them here and pmap_expand() pops them back.  The
+ *	pages stay wired and registered in pmap_object, so a stale reader only
+ *	ever dereferences PT-shaped memory (an empty PT page reads as invalid
+ *	PTEs; a recycled one reads as some other pmap's PTEs -- never freed or
+ *	repurposed memory).  Pages are linked through the unused pageq.next of
+ *	a wired page.  pmap_destroy() still frees its PT pages to the allocator
+ *	directly: it runs at ref_count==0, so no reader can be walking them.
+ */
+decl_simple_lock_data(, pmap_pt_pool_lock)
+vm_page_t	pmap_pt_pool_list = VM_PAGE_NULL;	/* LIFO of recycled PT pages */
+int		pmap_pt_pool_count = 0;
+
+/*
  *	Each entry in the pv_head_table is locked by a bit in the
  *	pv_lock_table.  The lock bits are accessed by the physical
  *	address of the page they lock.
@@ -1345,6 +1365,8 @@ pmap_init(void)
 	pmap_zone = zinit(s, 400*s, 4096, "pmap"); /* XXX */
 	s = (vm_size_t) sizeof(struct pv_entry);
 	pv_list_zone = zinit(s, 10000*s, 4096, "pv_list"); /* XXX */
+
+	simple_lock_init(&pmap_pt_pool_lock, ETAP_VM_PMAP);	/* #330 */
 
 #if	NCPUS > 1
 	/*
@@ -2658,18 +2680,24 @@ pmap_extract(
 {
 	register pt_entry_t	*pte;
 	register vm_offset_t	pa;
-	spl_t			spl;
 
-	SPLVM(spl);
-	simple_lock(&pmap->lock);
+	/*
+	 * #330: lock-free read.  pmap->lock no longer guards readers and no spl
+	 * is needed: page-table pages are type-stable (pmap_collect recycles
+	 * empty ones onto pmap_pt_pool_list and never returns them to the VM
+	 * allocator), so this walk can never dereference a page repurposed for
+	 * unrelated data -- no use-after-free.  The PDE/PTE words are 4-byte
+	 * aligned, so each load is atomic: we observe old-or-new, never torn.
+	 * The result is inherently racy (the mapping may change right after we
+	 * return); callers needing a stable answer hold the relevant vm_map
+	 * lock, which also keeps a live mapping's PT page out of pmap_collect.
+	 */
 	if ((pte = pmap_pte(pmap, va)) == PT_ENTRY_NULL)
 	    pa = (vm_offset_t) 0;
 	else if (!(*pte & INTEL_PTE_VALID))
 	    pa = (vm_offset_t) 0;
 	else
 	    pa = pte_to_pa(*pte) + (va & INTEL_OFFMASK);
-	simple_unlock(&pmap->lock);
-	SPLX(spl);
 	return(pa);
 }
 
@@ -2711,23 +2739,41 @@ pmap_expand(
 	    pmap_object = vm_object_allocate(avail_end);
 
 	/*
-	 *	Allocate a VM page for the level 2 page table entries.
+	 *	#330: reuse a recycled PT page from the type-stable pool if one
+	 *	is available -- it is already wired and registered in pmap_object.
+	 *	Otherwise grab a fresh page and install it the usual way.
 	 */
-	while ((m = vm_page_grab()) == VM_PAGE_NULL)
-		VM_PAGE_WAIT();
+	m = VM_PAGE_NULL;
+	simple_lock(&pmap_pt_pool_lock);
+	if (pmap_pt_pool_list != VM_PAGE_NULL) {
+		m = pmap_pt_pool_list;
+		pmap_pt_pool_list = (vm_page_t) m->pageq.next;
+		pmap_pt_pool_count--;
+	}
+	simple_unlock(&pmap_pt_pool_lock);
 
-	/*
-	 *	Map the page to its physical address so that it
-	 *	can be found later.
-	 */
-	pa = m->phys_addr;
-	vm_object_lock(pmap_object);
-	vm_page_insert(m, pmap_object, pa);
-	vm_page_lock_queues();
-	vm_page_wire(m);
-	inuse_ptepages_count++;
-	vm_object_unlock(pmap_object);
-	vm_page_unlock_queues();
+	if (m != VM_PAGE_NULL) {
+		pa = m->phys_addr;
+	} else {
+		/*
+		 *	Allocate a VM page for the level 2 page table entries.
+		 */
+		while ((m = vm_page_grab()) == VM_PAGE_NULL)
+			VM_PAGE_WAIT();
+
+		/*
+		 *	Map the page to its physical address so that it
+		 *	can be found later.
+		 */
+		pa = m->phys_addr;
+		vm_object_lock(pmap_object);
+		vm_page_insert(m, pmap_object, pa);
+		vm_page_lock_queues();
+		vm_page_wire(m);
+		inuse_ptepages_count++;
+		vm_object_unlock(pmap_object);
+		vm_page_unlock_queues();
+	}
 
 	/*
 	 *	Zero the page.
@@ -2743,12 +2789,16 @@ pmap_expand(
 	 */
 	if (pmap_pte(map, v) != PT_ENTRY_NULL) {
 		PMAP_READ_UNLOCK(map, spl);
-		vm_object_lock(pmap_object);
-		vm_page_lock_queues();
-		vm_page_free(m);
-		inuse_ptepages_count--;
-		vm_page_unlock_queues();
-		vm_object_unlock(pmap_object);
+		/*
+		 *	#330: return the unused page to the type-stable pool
+		 *	(it is wired, zeroed and in pmap_object) rather than to
+		 *	the VM allocator -- keeps every PT page type-stable.
+		 */
+		simple_lock(&pmap_pt_pool_lock);
+		m->pageq.next = (queue_entry_t) pmap_pt_pool_list;
+		pmap_pt_pool_list = m;
+		pmap_pt_pool_count++;
+		simple_unlock(&pmap_pt_pool_lock);
 		return;
 	}
 
@@ -2881,7 +2931,13 @@ pmap_collect(
 		    PMAP_READ_UNLOCK(p, spl);
 
 		    /*
-		     * And free the pte page itself.
+		     * #330: the PDE is now cleared, so the PT page is unlinked.
+		     * A lock-free pmap_extract on another CPU may still be
+		     * walking it, so we cannot return it to the VM allocator.
+		     * Recycle it onto the type-stable pool instead: it stays
+		     * wired and in pmap_object, its PTEs are all zero (cleared
+		     * by pmap_remove_range above), and pmap_expand will reuse
+		     * it.  A stale reader thus only ever reads PT-shaped memory.
 		     */
 		    {
 			register vm_page_t m;
@@ -2890,11 +2946,13 @@ pmap_collect(
 			m = vm_page_lookup(pmap_object, pa);
 			if (m == VM_PAGE_NULL)
 			    panic("pmap_collect: pte page not in object");
-			vm_page_lock_queues();
-			vm_page_free(m);
-			inuse_ptepages_count--;
-			vm_page_unlock_queues();
 			vm_object_unlock(pmap_object);
+
+			simple_lock(&pmap_pt_pool_lock);
+			m->pageq.next = (queue_entry_t) pmap_pt_pool_list;
+			pmap_pt_pool_list = m;
+			pmap_pt_pool_count++;
+			simple_unlock(&pmap_pt_pool_lock);
 		    }
 
 		    PMAP_READ_LOCK(p, spl);
