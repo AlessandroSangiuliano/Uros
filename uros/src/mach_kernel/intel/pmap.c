@@ -611,53 +611,48 @@ vm_object_t	pmap_object = VM_OBJECT_NULL;
 }
 
 /*
- *	Lock on pmap system
+ *	#329 stage C: the global pmap_system_lock ("Giant") has been removed.
+ *	Cross-pmap pv-list consistency is now provided by the per-page PVH bit
+ *	lock alone -- always taken in the canonical PVH->pmap order: protocol-3
+ *	writers (pmap_page_protect, phys_attribute_set/clear) take the PVH first
+ *	and the per-pmap lock per entry; protocol-2 paths (pmap_enter,
+ *	pmap_remove_range) reach the same order via LOCK_PVH_TRY + back-off.
+ *	SPLVM/SPLX still bracket every operation: they carry the cpus_active
+ *	bookkeeping the TLB-shootdown protocol (PMAP_UPDATE_TLBS) relies on, and
+ *	block the IPI while a pmap lock is held.
  */
-lock_t	pmap_system_lock;
-
 #define PMAP_READ_LOCK(pmap, spl) {	\
 	SPLVM(spl);			\
-	lock_read(&pmap_system_lock);	\
 	simple_lock(&(pmap)->lock);	\
 }
 
 #define PMAP_WRITE_LOCK(spl) {		\
 	SPLVM(spl);			\
-	lock_write(&pmap_system_lock);	\
 }
 
 #define PMAP_READ_UNLOCK(pmap, spl) {		\
 	simple_unlock(&(pmap)->lock);		\
-	lock_read_done(&pmap_system_lock);	\
 	SPLX(spl);				\
 }
 
 #define PMAP_WRITE_UNLOCK(spl) {		\
-	lock_write_done(&pmap_system_lock);	\
 	SPLX(spl);				\
 }
 
 #define PMAP_WRITE_TO_READ_LOCK(pmap) {		\
 	simple_lock(&(pmap)->lock);		\
-	lock_write_to_read(&pmap_system_lock);	\
 }
 
 /*
- * #329 step 1 (lockless reads): shared read lock on the pmap system WITHOUT
- * locking any single pmap -- for pure pv-list readers that span several pmaps
- * (phys_attribute_test).  Taking the system lock in READ (not WRITE) lets these
- * run concurrently with the protocol-2 pmap operations (pmap_enter/remove),
- * while still excluding the protocol-3 exclusive writers (pmap_page_protect,
- * phys_attribute_set/clear) that restructure pv lists.  The caller adds the
- * per-page PVH lock for the page it walks and reads PTEs locklessly.
+ * Pure pv-list reader spanning several pmaps (phys_attribute_test,
+ * pmap_verify_free): no per-pmap lock, just SPLVM + the per-page PVH lock
+ * (taken by the caller) + lockless PTE reads.
  */
 #define PMAP_SYS_READ_LOCK(spl) {	\
 	SPLVM(spl);			\
-	lock_read(&pmap_system_lock);	\
 }
 
 #define PMAP_SYS_READ_UNLOCK(spl) {		\
-	lock_read_done(&pmap_system_lock);	\
 	SPLX(spl);				\
 }
 
@@ -1104,12 +1099,8 @@ pmap_bootstrap(
 
 	kernel_pmap = &kernel_pmap_store;
 
-#if	NCPUS > 1
-	lock_init(&pmap_system_lock,
-		  FALSE,		/* NOT a sleep lock */
-		  ETAP_VM_PMAP_SYS,
-		  ETAP_VM_PMAP_SYS_I);
-#endif	/* NCPUS > 1 */
+	/* #329 stage C: pmap_system_lock removed -- per-page PVH + per-pmap
+	 * locks now provide all pmap/pv-list serialization. */
 
 	simple_lock_init(&kernel_pmap->lock, ETAP_VM_PMAP_KERNEL);
 	simple_lock_init(&pv_free_list_lock, ETAP_VM_PMAP_FREE);
@@ -1443,13 +1434,18 @@ pmap_verify_free(
 	if (!pmap_valid_page(phys))
 		return(FALSE);
 
-	PMAP_WRITE_LOCK(spl);
+	/* #329 stage C: read the pv-list head under the per-page PVH lock
+	 * (was the global write lock). */
+	PMAP_SYS_READ_LOCK(spl);
 
 	pai = pa_index(phys);
+	LOCK_PVH(pai);
 	pv_h = pai_to_pvh(pai);
 
 	result = (pv_h->pmap == PMAP_NULL);
-	PMAP_WRITE_UNLOCK(spl);
+
+	UNLOCK_PVH(pai);
+	PMAP_SYS_READ_UNLOCK(spl);
 
 	return(result);
 }
@@ -1972,11 +1968,10 @@ pmap_page_protect(
 	pv_h = pai_to_pvh(pai);
 
 	/*
-	 * #329 stage A: take the PVH lock for this page even though the
-	 * global write lock already excludes everyone.  It is redundant
-	 * today, but it makes this protocol-3 writer acquire locks in the
-	 * canonical PVH->pmap order, which is the invariant we need before
-	 * pmap_system_lock can be removed (stage C).
+	 * #329: protocol-3 writer -- take this page's PVH lock FIRST (canonical
+	 * PVH->pmap order), then the per-pmap lock per entry below.  With
+	 * pmap_system_lock gone (stage C) the PVH lock is what serializes this
+	 * pv-list walk against concurrent pmap_enter/pmap_remove on this page.
 	 */
 	LOCK_PVH(pai);
 
@@ -3127,18 +3122,12 @@ phys_attribute_test(
 	}
 
 	/*
-	 * #329 (lockless reads, step 1): this is a pure read.  It used to take
-	 * the global pmap_system_lock in WRITE mode (protocol 3), serializing
-	 * every pmap_is_modified/referenced against the entire pmap system.
-	 * Take it in READ (shared) mode instead, plus this page's PVH lock:
+	 * #329: pure read of one page's ref/mod state, serialized by that
+	 * page's PVH lock alone (originally protocol-3 under the global write
+	 * lock; since stage C there is no global lock):
 	 *
-	 *  - the shared read lock still excludes the protocol-3 exclusive
-	 *    writers (pmap_page_protect, phys_attribute_set/clear) that
-	 *    restructure pv lists, but now runs CONCURRENTLY with the
-	 *    protocol-2 pmap operations (pmap_enter/pmap_remove), which is the
-	 *    scaling win -- faults no longer serialize against ref/mod probes;
-	 *  - the PVH lock keeps this page's pv list stable against those
-	 *    concurrent protocol-2 inserts/removes (they hold LOCK_PVH too);
+	 *  - the PVH lock keeps this page's pv list stable against concurrent
+	 *    protocol-2 inserts/removes and protocol-3 writers (all take it);
 	 *  - a held pv entry implies the mapping (hence its page-table page) is
 	 *    live, so each PTE is read locklessly (atomic on x86) with no
 	 *    per-pmap lock -- which also avoids any pmap<->PVH order inversion.
