@@ -238,6 +238,7 @@
 #include <i386/mp_desc.h>
 #endif	/* NCPUS */
 #include <i386/sysenter.h>
+#include <i386/AT386/fbcons.h>		/* struct mb2_framebuffer, fbcons_init */
 
 #if	HIMEM
 #include <i386/AT386/himem.h>
@@ -474,16 +475,9 @@ static struct multiboot_module mb2_mods[MB2_MAX_MODS]
 	__attribute__((section(".data")));
 
 /* Framebuffer descriptor from the mb2 framebuffer tag (type 8); consumed by
- * the emergency framebuffer console (#342). */
-struct mb2_framebuffer {
-	unsigned long long	addr;
-	unsigned int		pitch;
-	unsigned int		width;
-	unsigned int		height;
-	unsigned char		bpp;
-	unsigned char		fb_type;	/* 1 = direct RGB, 2 = EGA text */
-	unsigned char		present;
-} mb2_fb __attribute__((section(".data"))) = { 0 };
+ * the emergency framebuffer console (fbcons.c, #342).  The struct layout lives
+ * in fbcons.h so the console and this parser agree on it. */
+struct mb2_framebuffer mb2_fb __attribute__((section(".data"))) = { 0 };
 
 static void
 mb2_parse(void)
