@@ -84,6 +84,9 @@
 #include <i386/apic.h>				/* #300: LAPIC_ICR / LAPIC_ICRD */
 #include <i386/setjmp.h>
 #include <i386/misc_protos.h>
+#include <i386/spl.h>				/* #302: splhi/splx for TSC calib */
+#include <i386/pit.h>				/* #302: 8254 ports for TSC calib */
+#include <i386/pio.h>				/* #302: inb/outb */
 
 int	cpu_int_word[NCPUS];
 
@@ -185,20 +188,124 @@ extern unsigned char	mp_bsp_lapic_id_get(void);	/* mp_table.c */
 #define LAPIC_REG32(off)	(*(volatile unsigned int *)(lapic_start + (off)))
 
 /*
- * Busy-wait roughly `us` microseconds.  KVM is fast enough that we just
- * need *some* delay between IPIs; replaced by a proper TSC-calibrated
- * delay when #302 wires up real timing.  Empirically ~100 iterations/μs
- * on a 2 GHz host with the optimiser disabled, which we generously
- * overestimate so the wait is always long enough.
+ * #302: TSC-calibrated micro-delay for the INIT/SIPI/SIPI dance and the
+ * AP come-online poll.  The historical placeholder was a fixed-count
+ * `volatile` busy loop calibrated by hand ("~200 iterations/µs"); that
+ * estimate is host-dependent — on a fast core (e.g. Ryzen) the loop runs
+ * far quicker than assumed, so the real wall-clock delays collapse below
+ * the spec minima and APs miss their bring-up window (only one AP comes
+ * online, nondeterministically).  We instead time the TSC against the
+ * 8254 PIT once on the BSP, exactly like lapic_timer_calibrate(), and
+ * spin on rdtsc for a genuine wall-clock interval.  Only the BSP's local
+ * TSC is read for elapsed time, so none of #318's cross-core skew /
+ * invariance concerns apply here.
+ */
+extern unsigned int	clknum;		/* rtclock.c: 8254 counts per second */
+extern unsigned int	clks_per_int;	/* rtclock.c: 8254 counts per HZ tick */
+
+unsigned int	mp_tsc_per_us;		/* 0 = not yet calibrated (fallback) */
+
+/* Latch + read 8254 counter 0; valid only with the clock IRQ masked. */
+#define	MP_READ_8254(v)	{					\
+	outb(PITCTL_PORT, PIT_C0);				\
+	(v)  = inb(PITCTR0_PORT);				\
+	(v) |= inb(PITCTR0_PORT) << 8; }
+
+static __inline__ unsigned long long
+mp_rdtsc(void)
+{
+	unsigned int lo, hi;
+	__asm__ __volatile__("rdtsc" : "=a" (lo), "=d" (hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+/* 64-bit / 32-bit -> 32-bit via a single divl (no libgcc __udivdi3). */
+static __inline__ unsigned int
+mp_div64_32(unsigned long long num, unsigned int den)
+{
+	unsigned int q, r;
+
+	__asm__("divl %4"
+		: "=a" (q), "=d" (r)
+		: "a" ((unsigned int)num), "d" ((unsigned int)(num >> 32)),
+		  "rm" (den));
+	return q;
+}
+
+/*
+ * Calibrate mp_tsc_per_us by counting TSC ticks across a ~8 ms 8254 window.
+ * Called once on the BSP from start_other_cpus(), before any AP runs and
+ * while the BSP is the sole reader of the shared 8254 (no latch race).
+ */
+void
+mp_tsc_calibrate(void)
+{
+	unsigned int		c0, c1, pit_counts, window, guard, elapsed_us;
+	unsigned long long	t0, t1;
+	spl_t			s;
+
+	if (mp_tsc_per_us != 0)
+		return;			/* once per boot */
+
+	window = clknum / 125;		/* ~8 ms of 8254 counts, < one tick */
+
+	s = splhi();			/* mask the clock IRQ: sole 8254 reader */
+
+	/* Start near the top of an 8254 period so the window cannot wrap. */
+	guard = 100000000u;
+	do { MP_READ_8254(c0); }
+	while (c0 < clks_per_int - clks_per_int / 32 && --guard);
+
+	t0 = mp_rdtsc();
+	guard = 100000000u;
+	do { MP_READ_8254(c1); }
+	while (c1 <= c0 && (c0 - c1) < window && --guard);
+	t1 = mp_rdtsc();
+
+	splx(s);
+
+	pit_counts = (c1 <= c0) ? (c0 - c1) : 1;	/* 8254 counts elapsed */
+	if (pit_counts == 0)
+		pit_counts = 1;
+
+	/* elapsed_us = pit_counts / (clknum / 1e6); done as 64/32 to keep
+	 * precision and avoid overflow at any plausible TSC frequency. */
+	elapsed_us = mp_div64_32((unsigned long long)pit_counts * 1000000u, clknum);
+	if (elapsed_us == 0)
+		elapsed_us = 1;
+
+	mp_tsc_per_us = mp_div64_32(t1 - t0, elapsed_us);
+	if (mp_tsc_per_us == 0)
+		mp_tsc_per_us = 1;
+
+	/* NB: the kernel printf has no %llu, so report only 32-bit values. */
+	printf("mp: TSC calibrated -> %u TSC/us (~%u MHz) over %u us 8254 window\n",
+	       mp_tsc_per_us, mp_tsc_per_us, elapsed_us);
+}
+
+/*
+ * Busy-wait `us` microseconds.  Uses the calibrated TSC for a true
+ * wall-clock delay; before calibration (or if it failed) falls back to
+ * the historical fixed-count loop so the early/UP paths still work.
  */
 static void
 mp_busy_delay_us(unsigned int us)
 {
-	volatile unsigned int spin;
-	unsigned int total = us * 200u;
+	if (mp_tsc_per_us != 0) {
+		unsigned long long deadline =
+			mp_rdtsc() + (unsigned long long)us * mp_tsc_per_us;
+		while (mp_rdtsc() < deadline)
+			__asm__ __volatile__("pause");
+		return;
+	}
 
-	for (spin = 0; spin < total; spin++)
-		;
+	{
+		volatile unsigned int spin;
+		unsigned int total = us * 200u;
+
+		for (spin = 0; spin < total; spin++)
+			;
+	}
 }
 
 static void
@@ -284,10 +391,12 @@ cpu_start(int slot_num)
 	mp_busy_delay_us(200);
 
 	/*
-	 * Wait up to ~1 s for the AP to reach cpu_up() and flip its
-	 * machine_slot[].running flag.
+	 * Wait up to ~2 s for the AP to reach cpu_up() and flip its
+	 * machine_slot[].running flag.  With the TSC-calibrated delay this is
+	 * a true 2 s of wall-clock margin, which covers a slow-to-schedule AP
+	 * under host oversubscription (e.g. -smp == host thread count).
 	 */
-	for (wait_ms = 0; wait_ms < 1000; wait_ms++) {
+	for (wait_ms = 0; wait_ms < 2000; wait_ms++) {
 		if (machine_slot[slot_num].running == TRUE) {
 			printf("cpu_start: AP %d online (lapic=%d)\n",
 			       slot_num, dest_lapic);

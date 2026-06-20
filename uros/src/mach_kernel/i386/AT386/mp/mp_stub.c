@@ -100,6 +100,7 @@ cpu_interrupt(int cpu)
 extern int master_cpu;
 extern int real_ncpus;
 extern kern_return_t cpu_start(int slot);
+extern void mp_tsc_calibrate(void);	/* #302: TSC delay calibration (mp.c) */
 extern void master_up(void);
 extern vm_offset_t interrupt_stack[NCPUS];
 extern vm_offset_t int_stack_top[NCPUS];
@@ -162,6 +163,11 @@ start_other_cpus(void)
 	 * sole reader of the shared 8254 (no AP is running yet).  APs reuse the
 	 * result when they arm their per-CPU periodic timer. */
 	lapic_timer_calibrate();
+
+	/* #302: calibrate the TSC against the 8254 (same window technique) so
+	 * cpu_start()'s INIT/SIPI delays and come-online poll use a true
+	 * wall-clock interval instead of a host-dependent fixed-count loop. */
+	mp_tsc_calibrate();
 
 	/* #302: self-IPI round-trip on the BSP. */
 	lapic_send_ipi(master_cpu, IPI_VECTOR_CALL_FUNC);
