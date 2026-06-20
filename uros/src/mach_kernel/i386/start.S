@@ -205,6 +205,36 @@ multiboot_header:
 	.long	0x00000002		/* flags: MEMORY_INFO (ELF hdrs used) */
 	.long	-(0x1BADB002 + 0x00000002)	/* checksum */
 
+	/*
+	 * #342: second, multiboot2 header.  Kept alongside the mb1 header
+	 * (dual): `qemu -kernel` uses the mb1 loader (no framebuffer), while
+	 * GRUB on UEFI uses mb2 and hands us a GOP linear framebuffer.  The
+	 * entry below branches on the bootloader magic in %eax.  mb2 requires
+	 * the header 8-byte aligned within the first 32 KiB of the image.
+	 */
+	.align	8
+multiboot2_header:
+	.long	0xE85250D6		/* mb2 magic */
+	.long	0			/* architecture: 0 = i386 (32-bit) */
+	.long	multiboot2_header_end - multiboot2_header	/* header length */
+	.long	-(0xE85250D6 + 0 + (multiboot2_header_end - multiboot2_header)) /* checksum */
+	/* framebuffer request tag (type 5): ask GRUB for a GOP framebuffer.
+	 * flags bit0 = 1 -> optional, so the kernel still boots if the
+	 * bootloader can't provide one (we confirm boot via serial first). */
+	.align	8
+	.short	5			/* MULTIBOOT_HEADER_TAG_FRAMEBUFFER */
+	.short	1			/* flags: optional */
+	.long	20			/* size */
+	.long	0			/* width  (0 = no preference) */
+	.long	0			/* height (0 = no preference) */
+	.long	0			/* depth  (0 = no preference) */
+	/* end tag (type 0) */
+	.align	8
+	.short	0
+	.short	0
+	.long	8
+multiboot2_header_end:
+
 	.text				/* switch back to text section */
 
 #if	NCPUS > 1
@@ -351,6 +381,18 @@ EXT(mp_boot_pde):
 	.align	ALIGN
 	.globl	EXT(pstart)
 LEXT(pstart)
+	/*
+	 * #342: capture the multiboot magic (%eax) and boot-info pointer
+	 * (%ebx) at the very first instruction — the `mov $0,%ax` below
+	 * already clobbers %eax, and the SMP start_lock xchg destroys it
+	 * entirely.  Only the BSP's first entry carries valid values; APs
+	 * re-enter pstart much later (in start_other_cpus), well after
+	 * parse_multiboot() has consumed these globals, so an AP overwrite
+	 * is harmless.
+	 */
+	movl	%eax, PA(EXT(boot_magic))
+	movl	%ebx, PA(EXT(boot_info_phys))
+
 	mov	$0,%ax			/* fs must be zeroed; */
 	mov	%ax,%fs			/* some bootstrappers don`t do this */
 	mov	%ax,%gs
@@ -371,14 +413,32 @@ LEXT(pstart)
 
 /*
  * Get startup parameters.
+ *
+ * #342: stash the bootloader magic (%eax) and the raw boot-info pointer
+ * (%ebx) so C can tell mb1 from mb2 and parse the right format.  Only do
+ * the historical mb1 struct copy into mb_info when the magic is mb1
+ * (0x2BADB002); for mb2 (0x36D76289) the C-side mb2 parser populates
+ * mb_info from the tag list instead.
  */
-
-        movl    %ebx, %esi
+        cmpl    $0x2BADB002, PA(EXT(boot_magic))  /* mb1 magic? (%eax gone */
+        jne     2f			/* -> read the saved copy; no -> mb2) */
+        movl    PA(EXT(boot_info_phys)), %esi	/* mb1 info ptr (physical) */
         lea     PA(EXT(mb_info)), %edi
         movl    PA(EXT(mb_info_size)), %ecx
         cld
         rep
 	movsb
+        jmp     1f
+2:
+        cmpl    $0x36D76289, PA(EXT(boot_magic))  /* mb2 magic? */
+        jne     1f			/* neither -> leave mb_info default */
+        movl    PA(EXT(boot_info_phys)), %esi	/* mb2 tag list (physical) */
+        lea     PA(EXT(mb2_info_buf)), %edi
+        movl    $16384, %ecx		/* copy a fixed chunk; paging is off */
+        cld
+        rep
+	movsb
+1:
 
 #if 0
 #ifdef	SYMMETRY

@@ -277,6 +277,16 @@ unsigned int	avail_remaining;
  */
 int mb_info_size = sizeof(struct multiboot_info);
 struct multiboot_info mb_info __attribute__((section(".data"))) = { .flags = 0xDEADBEEF };
+
+/*
+ * #342: bootloader magic (%eax) and raw boot-info pointer (%ebx), stashed
+ * by start.S before the BSS clear (hence .data with initializers).
+ * parse_multiboot() reads boot_magic to choose mb1 vs mb2 parsing.
+ *   mb1 bootloader magic = 0x2BADB002, mb2 = 0x36D76289.
+ */
+unsigned int boot_magic     __attribute__((section(".data"))) = 0;
+unsigned int boot_info_phys __attribute__((section(".data"))) = 0;
+
 extern vm_offset_t boot_start;
 extern vm_size_t boot_size;
 extern vm_offset_t exec_start;
@@ -435,9 +445,121 @@ extern vm_offset_t boot_args_start;
 extern vm_size_t boot_args_size;
 struct multiboot_module *mb_module = 0;
 
+/*
+ * #342: multiboot2 boot path.  GRUB on UEFI hands an mb2 tag list (in %ebx)
+ * instead of the mb1 info struct.  start.S copies a fixed chunk of that tag
+ * list into mb2_info_buf (physical copy while paging is off, so C can parse
+ * it without phystokv/identity-map concerns), and mb2_parse() below walks
+ * the tags and fills the same mb_info fields the rest of model_dep.c already
+ * consumes (mem_lower/upper, mods, cmdline).  parse_multiboot()/
+ * parse_arguments() and the #211 ksyms scan keep working unchanged.  The
+ * framebuffer tag is stashed in mb2_fb for the emergency console (fbcons).
+ */
+#define MB2_BOOTLOADER_MAGIC	0x36d76289u
+#define MB2_TAG_END		0u
+#define MB2_TAG_CMDLINE		1u
+#define MB2_TAG_MODULE		3u
+#define MB2_TAG_BASIC_MEMINFO	4u
+#define MB2_TAG_FRAMEBUFFER	8u
+
+struct mb2_tag { unsigned int type; unsigned int size; };
+
+/* start.S copies GRUB's mb2 tag list here (.data, survives the BSS clear). */
+char mb2_info_buf[16384] __attribute__((section(".data")));
+
+/* mb1-format module array we point mb_info.mods_addr at (physical, so the
+ * ksyms scan's phystokv() round-trips). */
+#define MB2_MAX_MODS	8
+static struct multiboot_module mb2_mods[MB2_MAX_MODS]
+	__attribute__((section(".data")));
+
+/* Framebuffer descriptor from the mb2 framebuffer tag (type 8); consumed by
+ * the emergency framebuffer console (#342). */
+struct mb2_framebuffer {
+	unsigned long long	addr;
+	unsigned int		pitch;
+	unsigned int		width;
+	unsigned int		height;
+	unsigned char		bpp;
+	unsigned char		fb_type;	/* 1 = direct RGB, 2 = EGA text */
+	unsigned char		present;
+} mb2_fb __attribute__((section(".data"))) = { 0 };
+
+static void
+mb2_parse(void)
+{
+	vm_offset_t	base = (vm_offset_t)mb2_info_buf;
+	unsigned int	total = *(unsigned int *)base;	/* total_size */
+	vm_offset_t	p, end;
+	unsigned int	nmods = 0;
+
+	if (total < 8 || total > sizeof(mb2_info_buf))
+		total = sizeof(mb2_info_buf);
+	p   = base + 8;			/* skip total_size + reserved */
+	end = base + total;
+
+	while (p + 8 <= end) {
+		struct mb2_tag *t = (struct mb2_tag *)p;
+		if (t->type == MB2_TAG_END)
+			break;
+		if (t->size < 8)	/* malformed/garbage -> avoid inf loop */
+			break;
+		switch (t->type) {
+		case MB2_TAG_BASIC_MEMINFO: {
+			unsigned int *m = (unsigned int *)p; /* type,size,lower,upper */
+			mb_info.mem_lower = m[2];
+			mb_info.mem_upper = m[3];
+			break;
+		}
+		case MB2_TAG_MODULE: {
+			unsigned int *m = (unsigned int *)p; /* +start,+end,string */
+			if (nmods < MB2_MAX_MODS) {
+				mb2_mods[nmods].mod_start = m[2];
+				mb2_mods[nmods].mod_end   = m[3];
+				nmods++;
+			}
+			break;
+		}
+		case MB2_TAG_CMDLINE:
+			/* the string lives inside mb2_info_buf (kernel virtual) */
+			mb_info.cmdline = p + 8;
+			break;
+		case MB2_TAG_FRAMEBUFFER: {
+			unsigned int *w = (unsigned int *)p;
+			mb2_fb.addr    = ((unsigned long long)w[3] << 32) | w[2];
+			mb2_fb.pitch   = w[4];
+			mb2_fb.width   = w[5];
+			mb2_fb.height  = w[6];
+			mb2_fb.bpp     = (unsigned char)(w[7] & 0xff);
+			mb2_fb.fb_type = (unsigned char)((w[7] >> 8) & 0xff);
+			mb2_fb.present = 1;
+			break;
+		}
+		default:
+			break;
+		}
+		p += (t->size + 7u) & ~7u;	/* tags are 8-byte aligned */
+	}
+
+	/*
+	 * mods_addr must be PHYSICAL — the #211 ksyms scan does phystokv() on
+	 * it.  phystokv(a) == a + VM_MIN_KERNEL_ADDRESS (a macro), so the
+	 * inverse is a plain subtraction.  We must NOT use kvtophys() here: it
+	 * is a real function that walks the pmap, which is not up yet this
+	 * early (parse_multiboot runs before i386_init), and hangs.
+	 */
+	mb_info.mods_addr  = (vm_offset_t)mb2_mods - VM_MIN_KERNEL_ADDRESS;
+	mb_info.mods_count = nmods;
+	mb_info.flags = MULTIBOOT_MEMORY | MULTIBOOT_CMDLINE | MULTIBOOT_MODS;
+}
+
 void
 parse_multiboot(void)
 {
+	/* #342: mb2 (GRUB/UEFI) populates mb_info from its tag list first. */
+	if (boot_magic == MB2_BOOTLOADER_MAGIC)
+		mb2_parse();
+
 	/* Get memory info */
 	cnvmem = mb_info.mem_lower;
 	extmem = mb_info.mem_upper;
