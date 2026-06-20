@@ -253,7 +253,14 @@
 
 int		loadpt;
 
-vm_size_t	mem_size = 0; 
+/*
+ * #337: forced into .data so the "-m"/"-k" physical-memory limit, parsed by
+ * parse_arguments() BEFORE the BSS is zeroed, survives the BSS clear.  As a
+ * zero-initialised global it lived in .bss and was wiped back to 0 before the
+ * clamp at the "compute mem_size" site read it, so -m/-k were silently
+ * ignored.  Same fix and reason as cons_is_com1 / halt_in_debugger.
+ */
+vm_size_t	mem_size __attribute__((section(".data"))) = 0;
 vm_offset_t	first_addr = 0;	/* set by start.s - keep out of bss */
 vm_offset_t	first_avail = 1;/* set by start.s - keep out of bss */
 vm_offset_t	last_addr;
