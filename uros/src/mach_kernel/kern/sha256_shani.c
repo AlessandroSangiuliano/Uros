@@ -47,7 +47,19 @@
 #define _MM_MALLOC_H_INCLUDED
 #include <immintrin.h>
 
-#define SHA_NI_TARGET __attribute__((target("sha,ssse3,sse4.1")))
+/*
+ * force_align_arg_pointer: the SHA intrinsics make the compiler spill
+ * __m128i locals to the stack with aligned movdqa, which assumes a
+ * 16-byte-aligned frame.  The 32-bit Mach kernel does not maintain the
+ * SysV i386 16-byte stack alignment along every call path (e.g.
+ * urmach_cap_verify -> cap_check_locked -> hmac_sha256), so the incoming
+ * stack can be misaligned and those movdqa spills #GP.  Only triggers on
+ * CPUs that actually have SHA-NI (Ryzen/Ice Lake+); Kaby Lake and older
+ * Intel fall back to the C path and never hit it.  Realign the stack on
+ * entry so the aligned spills are valid regardless of the caller.
+ */
+#define SHA_NI_TARGET \
+	__attribute__((target("sha,ssse3,sse4.1"), force_align_arg_pointer))
 
 SHA_NI_TARGET
 void sha256_compress_shani(struct sha256_ctx *ctx, const uint8_t block[64])
