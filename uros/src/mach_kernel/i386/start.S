@@ -460,13 +460,48 @@ LEXT(pstart)
  * %ebx holds first available physical address.
  */
 
-	/* #241: bump first-available phys for page tables to 16 MB.
-	 * Was 0x500000 (5 MB), but multiboot modules (kernel symbols,
-	 * bootstrap server, and especially the multi-MB bundle of stage-1
-	 * binaries) end past 5 MB, so the page-table allocation here would
-	 * silently overwrite them.  16 MB is plenty of headroom for modules
-	 * loaded by GRUB before page tables begin. */
-	movl	$0x1000000,%ebx
+	/* #241 / #342: place the initial page tables ABOVE every multiboot
+	 * module.  #241 hardcoded 16 MB, but GRUB (multiboot2) scatters the
+	 * bootstrap + multi-MB stage-1 bundle + ksyms well PAST 16 MB, so a
+	 * fixed base silently overwrote the bundle's tail (and the VM allocator
+	 * later reused the part above first_avail), corrupting stage-1 .so
+	 * modules ("not an ELF file").  Start from a 16 MB floor — which covers
+	 * the kernel and the tighter qemu/multiboot1 layout, where modules stay
+	 * below 16 MB — and, for an mb2 boot, walk the tag list and raise the
+	 * base past the highest module end. */
+	movl	$0x1000000,%ebx			/* floor: 16 MB */
+
+	cmpl	$0x36D76289,PA(EXT(boot_magic))	/* multiboot2 bootloader? */
+	jne	31f
+	leal	PA(EXT(mb2_info_buf)),%esi
+	movl	(%esi),%ecx			/* total_size */
+	cmpl	$16384,%ecx			/* clamp to the copied buffer */
+	jbe	30f
+	movl	$16384,%ecx
+30:
+	leal	(%esi,%ecx),%edx		/* %edx = end of tag list */
+	addl	$8,%esi				/* skip total_size + reserved */
+32:
+	cmpl	%edx,%esi			/* past end of tags? */
+	jae	31f
+	movl	(%esi),%eax			/* tag type (0 = END) */
+	testl	%eax,%eax
+	jz	31f
+	movl	4(%esi),%ecx			/* tag size */
+	cmpl	$8,%ecx				/* malformed/zero -> stop */
+	jb	31f
+	cmpl	$3,%eax				/* MULTIBOOT_TAG_TYPE_MODULE? */
+	jne	33f
+	movl	12(%esi),%eax			/* mod_end */
+	cmpl	%ebx,%eax
+	jbe	33f
+	movl	%eax,%ebx			/* raise base past this module */
+33:
+	addl	$7,%ecx				/* advance to next 8-aligned tag */
+	andl	$-8,%ecx
+	addl	%ecx,%esi
+	jmp	32b
+31:
 	addl	$(NBPG-1),%ebx		/* round first avail physical addr */
 	andl	$(-NBPG),%ebx		/* to machine page size */
 	leal	-KVTOPHYS(%ebx),%eax	/* convert to virtual address */
