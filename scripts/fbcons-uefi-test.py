@@ -18,8 +18,11 @@
 # log, screendump the framebuffer, quit.  Outputs land in uros/build/ (PNG if
 # Pillow is installed, otherwise the raw PPM).
 #
-# Usage:  scripts/fbcons-uefi-test.py
+# Usage:  scripts/fbcons-uefi-test.py            # diskless: early boot only
+#         scripts/fbcons-uefi-test.py --disk     # attach disk.img, run the
+#                                                # bundle's benchmark to the end
 # Needs:  qemu-system-i386 (+KVM), grub-mkrescue, mtools, python3 (Pillow opt).
+#         --disk expects uros/build/disk.img (build it with a run-qemu --bench).
 
 import json, os, socket, subprocess, sys, time
 
@@ -36,28 +39,38 @@ KERNEL = os.path.join(BUILD, "export", "uros", "boot", "mach_kernel")
 BOOTSTRAP = os.path.join(BUILD, "export", "uros", os.uname().machine, "user", "sbin", "bootstrap")
 BUNDLE = os.path.join(BUILD, "bootstrap.bundle")
 KSYMS = os.path.join(BUILD, "export", "uros", "boot", "ksyms.bin")
+DISK = os.path.join(BUILD, "disk.img")
 
-GRUB_CFG = """\
-serial --unit=0 --speed=115200
-terminal_input  serial console
-terminal_output serial console
-insmod all_video
-insmod vbe
-set gfxpayload=1024x768x32
-set timeout=1
-menuentry "Uros (multiboot2 + framebuffer)" {
-    multiboot2 /boot/mach_kernel -r
-    module2    /boot/bootstrap        bootstrap
-    module2    /boot/bootstrap.bundle bundle
-    module2    /boot/ksyms.bin        ksyms
-    boot
-}
-"""
+def grub_cfg(want_fb):
+    # want_fb: request a linear framebuffer (gfxpayload) so the kernel gets an
+    # mb2 framebuffer tag and fbcons activates.  --no-fb keeps GRUB in text mode
+    # (no framebuffer tag -> fbcons stays inactive) to A/B the fbcons cost.
+    video = ("insmod all_video\ninsmod vbe\nset gfxpayload=1024x768x32\n"
+             if want_fb else "")
+    # '-f' turns on the in-kernel framebuffer console (off by default); only
+    # meaningful when we also requested a framebuffer.
+    kargs = "-r -f" if want_fb else "-r"
+    return ("serial --unit=0 --speed=115200\n"
+            "terminal_input  serial console\n"
+            "terminal_output serial console\n"
+            + video +
+            "set timeout=1\n"
+            'menuentry "Uros (multiboot2)" {\n'
+            "    multiboot2 /boot/mach_kernel %s\n" % kargs +
+            "    module2    /boot/bootstrap        bootstrap\n"
+            "    module2    /boot/bootstrap.bundle bundle\n"
+            "    module2    /boot/ksyms.bin        ksyms\n"
+            "    boot\n"
+            "}\n")
 
-MARKERS = ("init complete", "Benchmark complete", "no partitions", "blk:")
+# Diskless: stop once the early servers are up (boot halts at "no partitions").
+# With --disk: attach disk.img (AHCI) so stage-2 mounts the root fs and the
+# bundle's benchmark suite runs to completion.
+MARKERS_DISKLESS = ("init complete", "no partitions", "blk:")
+MARKER_DISK = "Benchmark complete"
 
 
-def build_iso():
+def build_iso(want_fb):
     import shutil
     boot = os.path.join(ISO_TREE, "boot")
     os.makedirs(os.path.join(boot, "grub"), exist_ok=True)
@@ -67,7 +80,7 @@ def build_iso():
     if os.path.exists(KSYMS):
         shutil.copy(KSYMS, os.path.join(boot, "ksyms.bin"))
     with open(os.path.join(boot, "grub", "grub.cfg"), "w") as fh:
-        fh.write(GRUB_CFG)
+        fh.write(grub_cfg(want_fb))
     subprocess.run(["grub-mkrescue", "-o", ISO, ISO_TREE],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -111,17 +124,32 @@ def main():
         except FileNotFoundError:
             pass
 
-    print("building GRUB multiboot2 ISO ...")
-    build_iso()
+    want_fb = "--no-fb" not in sys.argv
+    print("building GRUB multiboot2 ISO (%s) ..."
+          % ("framebuffer" if want_fb else "text mode, fbcons off"))
+    build_iso(want_fb)
 
-    print("booting QEMU (SeaBIOS + std-vga, headless) ...")
-    qemu = subprocess.Popen([
-        "qemu-system-i386", "-m", "512M", "-enable-kvm",
+    want_disk = "--disk" in sys.argv or "--bench" in sys.argv
+    cmd = [
+        "qemu-system-i386", "-m", "512M", "-enable-kvm", "-cpu", "host",
         "-cdrom", ISO, "-boot", "d",
         "-vga", "std", "-display", "none",
         "-serial", "file:%s" % SER,
         "-qmp", "unix:%s,server,nowait" % QMP,
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    ]
+    if want_disk:
+        cmd += [
+            "-device", "ich9-ahci,id=ahci0",
+            "-drive", "id=ahcidisk0,file=%s,format=raw,if=none" % DISK,
+            "-device", "ide-hd,drive=ahcidisk0,bus=ahci0.0",
+        ]
+        markers, wait_s = (MARKER_DISK,), 300
+    else:
+        markers, wait_s = MARKERS_DISKLESS, 45
+
+    print("booting QEMU (SeaBIOS + std-vga, headless%s) ..."
+          % (", AHCI disk" if want_disk else ""))
+    qemu = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
     rc = 1
     try:
@@ -130,12 +158,12 @@ def main():
         qmp(s, "qmp_capabilities")
 
         t0 = time.time()
-        while time.time() - t0 < 45:
+        while time.time() - t0 < wait_s:
             try:
                 seen = open(SER, "rb").read().decode("latin1")
             except FileNotFoundError:
                 seen = ""
-            if any(m in seen for m in MARKERS):
+            if any(m in seen for m in markers):
                 break
             time.sleep(0.3)
         time.sleep(1.5)                # let the last lines flush to the fb

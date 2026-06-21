@@ -33,4 +33,8 @@ extern struct mb2_framebuffer	mb2_fb;
 extern void	fbcons_init(void);
 extern void	fbcons_putc(char c);
 
+/* Opt-in flag set by the '-f' boot argument; fbcons_init() is a no-op unless
+ * it is set.  Off by default so the userspace gpu_server owns the display. */
+extern int	fbcons_enabled;
+
 #endif	/* _I386_AT386_FBCONS_H_ */

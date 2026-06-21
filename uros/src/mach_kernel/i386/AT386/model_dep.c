@@ -630,6 +630,11 @@ parse_arguments(void)
 		case 'r':
 		    cons_is_com1 = 1;
 		    break;
+		case 'f':	/* -f: enable the emergency framebuffer console
+				 * (fbcons); off by default so gpu_server owns
+				 * the display.  #342. */
+		    fbcons_enabled = 1;
+		    break;
 		case 'm':	/* -m??:  memory size Mbytes*/
 		    mem_size = atoi_term(p, &p)*1024*1024;
 		    break;
