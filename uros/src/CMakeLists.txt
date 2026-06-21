@@ -128,10 +128,10 @@ if(OSFMK_BUILD_IPC_BENCH)
   add_subdirectory(ipc_bench)
 endif()
 
-# Build AHCI userspace driver
-if(OSFMK_BUILD_AHCI_DRIVER)
-  add_subdirectory(ahci_driver)
-endif()
+# The standalone AHCI userspace driver (src/ahci_driver) was removed: it was
+# superseded by the modular block_device_server/ahci (ahci.so loaded by blk)
+# and was no longer deployed in the bundle or on disk.  ext_server's MIG
+# ahci_batch stubs now come from block_device_server/ahci/ (identical defs).
 
 # Build virtio-blk userspace driver
 if(OSFMK_BUILD_VIRTIO_BLK)

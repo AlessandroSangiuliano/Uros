@@ -619,6 +619,10 @@ set(AT386_SOURCES
     # keyboard, a future ps2_mouse.so will own the mouse).
     i386/AT386/console_cdev.c
     i386/AT386/ddb_kbd.c
+    # Emergency in-kernel framebuffer console (#342): the ONLY way to see
+    # boot/panic output on pure-UEFI machines (no serial, no legacy 0xB8000).
+    # Not a display driver — the userspace gpu_server still owns the screen.
+    i386/AT386/fbcons.c
     i386/AT386/model_dep.c
     i386/AT386/physmem.c
     i386/AT386/pic_isa.c

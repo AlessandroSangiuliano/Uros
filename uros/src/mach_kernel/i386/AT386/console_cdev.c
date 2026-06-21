@@ -24,6 +24,7 @@
 #include <device/io_req.h>
 #include <device/device_types.h>
 #include <i386/pio.h>
+#include <i386/AT386/fbcons.h>
 
 extern void com_putc(char c);
 extern void cpu_shutdown(void);
@@ -60,15 +61,26 @@ cnputc(char c)
 	} else {
 		com_putc(c);
 	}
+
+	/* Mirror to the emergency framebuffer console.  No-op until
+	 * fbcons_init() has mapped a multiboot2 framebuffer (#342); on a
+	 * pure-UEFI box this is the only path that actually shows output,
+	 * since com_putc above writes to a COM1 that isn't there. */
+	fbcons_putc(c);
 }
 
 void
 cninit(void)
 {
 	/* In-kernel VGA initialization removed in #199; in-kernel
-	 * keyboard removed in #208.  Nothing for cninit to do — the
-	 * COM1 path is brought up by com_cons_init() at boot, and
-	 * userspace owns everything else. */
+	 * keyboard removed in #208.  The COM1 path is brought up by
+	 * com_cons_init() at boot, and userspace owns everything else.
+	 *
+	 * #342: bring up the emergency framebuffer console if GRUB handed
+	 * us a multiboot2 framebuffer.  This runs right after i386_init(),
+	 * so the pmap is up and io_map() can map the LFB.  It stays a no-op
+	 * on legacy/QEMU boots that have a real serial console. */
+	fbcons_init();
 }
 
 void
