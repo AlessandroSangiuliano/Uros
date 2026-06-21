@@ -66,7 +66,7 @@ add_custom_command(
 # MIG-generated ahci_batch user stubs (batch device writes)
 # ===========================================================================
 
-set(AHCI_BATCH_DEFS ${CMAKE_SOURCE_DIR}/src/ahci_driver/ahci_batch.defs)
+set(AHCI_BATCH_DEFS ${CMAKE_SOURCE_DIR}/src/block_device_server/ahci/ahci_batch.defs)
 
 set(AB_USER_C ${CMAKE_CURRENT_BINARY_DIR}/ahci_batch_user.c)
 set(AB_USER_H ${CMAKE_CURRENT_BINARY_DIR}/ahci_batch.h)
@@ -78,13 +78,13 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/ahci_driver
+    -I${CMAKE_SOURCE_DIR}/src/block_device_server/ahci
     -header ${AB_USER_H}
     -sheader /dev/null
     -user ${AB_USER_C}
     -server /dev/null
     ${AHCI_BATCH_DEFS}
-  DEPENDS migcom ${AHCI_BATCH_DEFS} ${CMAKE_SOURCE_DIR}/src/ahci_driver/ahci_batch_types.h
+  DEPENDS migcom ${AHCI_BATCH_DEFS} ${CMAKE_SOURCE_DIR}/src/block_device_server/ahci/ahci_batch_types.h
   COMMENT "MIG: ahci_batch.defs (user stubs for ext2_server)"
   VERBATIM
 )
@@ -157,7 +157,7 @@ target_include_directories(ext_server_bin PRIVATE
   # MIG-generated headers (ext2fs_server_server.h, ahci_batch.h)
   ${CMAKE_CURRENT_BINARY_DIR}
   # ahci_batch_types.h
-  ${CMAKE_SOURCE_DIR}/src/ahci_driver
+  ${CMAKE_SOURCE_DIR}/src/block_device_server/ahci
   # ext2fs_types.h (imported by MIG-generated code)
   ${CMAKE_CURRENT_SOURCE_DIR}
   # vfs_types.h (imported by MIG-generated vfs_server.c)
