@@ -124,6 +124,20 @@ struct acpi_rsdp_v1 {
 	unsigned int	rsdt_phys;
 } __attribute__((packed));
 
+/*
+ * ACPI 2.0+ RSDP: the v1 fields above, followed by a 64-bit XSDT pointer.
+ * Used when the RSDP advertises revision >= 2 (typical on UEFI), where the
+ * 32-bit RsdtAddress may be zero and only the XSDT is valid.
+ */
+struct acpi_rsdp_v2 {
+	struct acpi_rsdp_v1	v1;
+	unsigned int		length;
+	unsigned int		xsdt_phys_lo;
+	unsigned int		xsdt_phys_hi;
+	unsigned char		ext_checksum;
+	unsigned char		reserved[3];
+} __attribute__((packed));
+
 struct acpi_sdt_header {
 	char		signature[4];
 	unsigned int	length;
@@ -175,6 +189,8 @@ static unsigned char	mp_cpu_lapic_id[NCPUS];
 static unsigned char	mp_bsp_lapic_id;
 static unsigned int	mp_lapic_phys;
 static unsigned int	mp_rsdt_phys;		/* found in phase 1, parsed in phase 2 */
+static unsigned int	mp_xsdt_phys;		/* ACPI 2.0+ XSDT, preferred when set */
+static boolean_t	mp_use_xsdt;		/* walk the XSDT instead of the RSDT */
 static unsigned int	mp_ioapic_phys[4];	/* up to 4 I/O APICs */
 static int		mp_ioapic_count;
 
@@ -420,12 +436,33 @@ acpi_find_rsdp_in_range(vm_offset_t start, vm_offset_t end)
 	return (struct acpi_rsdp_v1 *)0;
 }
 
+/* Set by mb2_parse() (model_dep.c) when GRUB hands us the RSDP via a
+ * multiboot2 ACPI tag — the only ACPI source on a pure-UEFI boot. */
+extern void *mb2_acpi_rsdp;
+
 static struct acpi_rsdp_v1 *
 acpi_find_rsdp(void)
 {
 	struct acpi_rsdp_v1 *rsdp;
 	unsigned short ebda_seg;
 	vm_offset_t ebda_pa;
+
+	/*
+	 * Preferred source: GRUB's multiboot2 ACPI tag.  On a pure-UEFI box the
+	 * EBDA and 0xE0000-0x100000 BIOS area scanned below are empty, so this
+	 * is the only way to locate the RSDP.  Validate the "RSD PTR " signature
+	 * and the 20-byte v1 checksum before trusting it; otherwise fall through
+	 * to the scan, so a malformed tag never wedges a legacy boot.
+	 */
+	if (mb2_acpi_rsdp) {
+		rsdp = (struct acpi_rsdp_v1 *)mb2_acpi_rsdp;
+		if (rsdp->signature[0] == 'R' && rsdp->signature[1] == 'S' &&
+		    rsdp->signature[2] == 'D' && rsdp->signature[3] == ' ' &&
+		    rsdp->signature[4] == 'P' && rsdp->signature[5] == 'T' &&
+		    rsdp->signature[6] == 'R' && rsdp->signature[7] == ' ' &&
+		    mp_checksum(rsdp, 20) == 0)
+			return rsdp;
+	}
 
 	ebda_seg = *(unsigned short *)MP_PHYS_TO_KV(0x40E);
 
@@ -583,8 +620,31 @@ mp_acpi_locate(void)
 		return FALSE;
 
 	mp_rsdt_phys = rsdp->rsdt_phys;
-	printf("mp_table: ACPI RSDP at %p, rev %u, rsdt_phys=0x%x\n",
-	       (void *)rsdp, (unsigned)rsdp->revision, mp_rsdt_phys);
+	mp_xsdt_phys = 0;
+	mp_use_xsdt  = FALSE;
+
+	/*
+	 * ACPI 2.0+ (revision >= 2) RSDPs carry a 64-bit XSDT pointer and may
+	 * leave the 32-bit RsdtAddress zero (seen on UEFI).  Prefer the XSDT
+	 * when its extended checksum is valid; on i386 we consume only the low
+	 * 32 bits, as ACPI tables live below 4 GiB.
+	 */
+	if (rsdp->revision >= 2) {
+		struct acpi_rsdp_v2 *r2 = (struct acpi_rsdp_v2 *)rsdp;
+		if (r2->length >= sizeof(*r2) && r2->length <= 256 &&
+		    mp_checksum(r2, r2->length) == 0 &&
+		    r2->xsdt_phys_lo != 0) {
+			mp_xsdt_phys = r2->xsdt_phys_lo;
+			mp_use_xsdt  = TRUE;
+		}
+	}
+
+	printf("mp_table: ACPI RSDP at %p (%s), rev %u, %s=0x%x\n",
+	       (void *)rsdp,
+	       (mb2_acpi_rsdp == (void *)rsdp) ? "mb2 tag" : "bios scan",
+	       (unsigned)rsdp->revision,
+	       mp_use_xsdt ? "xsdt" : "rsdt",
+	       mp_use_xsdt ? mp_xsdt_phys : mp_rsdt_phys);
 	return TRUE;
 }
 
@@ -595,24 +655,42 @@ mp_acpi_locate(void)
 static boolean_t
 mp_acpi_parse(void)
 {
-	struct acpi_sdt_header *rsdt;
+	struct acpi_sdt_header *sdt;
+
+	/*
+	 * Prefer the XSDT when the RSDP advertised one (ACPI 2.0+).  If it is
+	 * missing or unusable, fall back to the 32-bit RSDT below.
+	 */
+	if (mp_use_xsdt && mp_xsdt_phys != 0) {
+		sdt = (struct acpi_sdt_header *)acpi_map(mp_xsdt_phys, 0x1000);
+		if (sdt->signature[0] == 'X' && sdt->signature[1] == 'S' &&
+		    sdt->signature[2] == 'D' && sdt->signature[3] == 'T') {
+			if (sdt->length > 0x1000)
+				sdt = (struct acpi_sdt_header *)
+				    acpi_map(mp_xsdt_phys, sdt->length);
+			if (acpi_walk_rsdt(sdt, TRUE))
+				return TRUE;
+		}
+		printf("mp_table: XSDT at 0x%x unusable, trying RSDT\n",
+		       mp_xsdt_phys);
+	}
 
 	if (mp_rsdt_phys == 0)
 		return FALSE;
 
-	rsdt = (struct acpi_sdt_header *)acpi_map(mp_rsdt_phys, 0x1000);
-	if (rsdt->signature[0] != 'R' || rsdt->signature[1] != 'S' ||
-	    rsdt->signature[2] != 'D' || rsdt->signature[3] != 'T') {
+	sdt = (struct acpi_sdt_header *)acpi_map(mp_rsdt_phys, 0x1000);
+	if (sdt->signature[0] != 'R' || sdt->signature[1] != 'S' ||
+	    sdt->signature[2] != 'D' || sdt->signature[3] != 'T') {
 		printf("mp_table: bad RSDT signature at 0x%x\n",
 		       mp_rsdt_phys);
 		return FALSE;
 	}
 
-	if (rsdt->length > 0x1000)
-		rsdt = (struct acpi_sdt_header *)
-		    acpi_map(mp_rsdt_phys, rsdt->length);
+	if (sdt->length > 0x1000)
+		sdt = (struct acpi_sdt_header *)
+		    acpi_map(mp_rsdt_phys, sdt->length);
 
-	return acpi_walk_rsdt(rsdt, FALSE);
+	return acpi_walk_rsdt(sdt, FALSE);
 }
 
 /*
@@ -688,6 +766,8 @@ mp_v1_1_init(void)
 		mp_cpu_count = 0;
 		mp_ioapic_count = 0;
 		mp_rsdt_phys = 0;
+		mp_xsdt_phys = 0;
+		mp_use_xsdt = FALSE;
 
 		if (mp_acpi_locate()) {
 			/* ACPI found.  The real CPU list comes from MADT in
@@ -718,7 +798,7 @@ mp_v1_1_init(void)
 	if (!mp_phase2_done && kernel_map != VM_MAP_NULL) {
 		mp_phase2_done = TRUE;
 
-		if (mp_rsdt_phys != 0) {
+		if (mp_rsdt_phys != 0 || mp_xsdt_phys != 0) {
 			/* Wipe the conservative phase-1 cpu list before MADT
 			 * rewrites it with the real lapic IDs. */
 			mp_cpu_count = 0;

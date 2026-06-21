@@ -462,6 +462,8 @@ struct multiboot_module *mb_module = 0;
 #define MB2_TAG_MODULE		3u
 #define MB2_TAG_BASIC_MEMINFO	4u
 #define MB2_TAG_FRAMEBUFFER	8u
+#define MB2_TAG_ACPI_OLD	14u	/* RSDP copy, ACPI 1.0  */
+#define MB2_TAG_ACPI_NEW	15u	/* RSDP copy, ACPI 2.0+ */
 
 struct mb2_tag { unsigned int type; unsigned int size; };
 
@@ -478,6 +480,15 @@ static struct multiboot_module mb2_mods[MB2_MAX_MODS]
  * the emergency framebuffer console (fbcons.c, #342).  The struct layout lives
  * in fbcons.h so the console and this parser agree on it. */
 struct mb2_framebuffer mb2_fb __attribute__((section(".data"))) = { 0 };
+
+/*
+ * Copy of the ACPI RSDP handed to us by GRUB via the multiboot2 ACPI tag
+ * (type 14 = ACPI 1.0, type 15 = ACPI 2.0+).  On a pure-UEFI machine the RSDP
+ * is NOT in the legacy BIOS/EBDA area, so the kernel's low-memory scan
+ * (i386/AT386/mp/mp_table.c) finds nothing and SMP silently degrades to UP;
+ * this is the only pointer to ACPI there.  It points into mb2_info_buf (.data),
+ * so it stays valid for the kernel's lifetime.  NULL on a legacy/mb1 boot. */
+void *mb2_acpi_rsdp __attribute__((section(".data"))) = 0;
 
 static void
 mb2_parse(void)
@@ -529,6 +540,13 @@ mb2_parse(void)
 			mb2_fb.present = 1;
 			break;
 		}
+		case MB2_TAG_ACPI_OLD:
+		case MB2_TAG_ACPI_NEW:
+			/* The RSDP copy follows the 8-byte tag header.  Prefer
+			 * the 2.0+ tag (XSDT-capable) when GRUB gives both. */
+			if (mb2_acpi_rsdp == 0 || t->type == MB2_TAG_ACPI_NEW)
+				mb2_acpi_rsdp = (void *)(p + 8);
+			break;
 		default:
 			break;
 		}
