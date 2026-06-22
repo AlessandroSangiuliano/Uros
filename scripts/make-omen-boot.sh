@@ -152,7 +152,10 @@ if [ "$WANT_ISO" = true ]; then
             # stays with the kernel.  A full --bench bundle has char_server,
             # which claims IRQ 1 once it attaches and would shadow the break-key,
             # so leave it off there rather than ship a Ctrl+D that quietly dies.
-            K=""; [ "$BENCH_ONLY" = 1 ] && K=" -K"
+            # #344: `-W` arms the perf-counter NMI hard-lockup watchdog so an
+            # IF=0 wedge (where Ctrl+D can't break in) dumps EIP+backtrace to
+            # fbcons by itself.  Armed alongside -K on --bench-only.
+            K=""; [ "$BENCH_ONLY" = 1 ] && K=" -K -W"
             emit_iso_entry "(bench, all CPUs)" "$K"
             emit_iso_entry "(bench, 7 CPUs)"   " -c7$K"
             emit_iso_entry "(bench, 6 CPUs)"   " -c6$K"
