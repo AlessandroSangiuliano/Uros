@@ -187,6 +187,17 @@ static boolean_t	mp_phase2_done = FALSE;	/* high-mem MADT + io_map done */
 static int		mp_cpu_count;
 static unsigned char	mp_cpu_lapic_id[NCPUS];
 static unsigned char	mp_bsp_lapic_id;
+
+/*
+ * #344: reverse map, raw local-APIC ID -> dense CPU slot.  Real hardware has
+ * non-contiguous APIC IDs (omen: BSP=0, first AP=2), but the BSP indexes every
+ * per-CPU resource (interrupt_stack[], mp_desc_table[], mp_gdt/mp_idt[]) by
+ * dense slot.  The AP early path (CPU_NUMBER_FROM_LAPIC in start.S svstart)
+ * reads its raw APIC ID and must translate it through this table to the slot,
+ * or it grabs the wrong (often NULL) interrupt stack and triple-faults the box.
+ * On QEMU (IDs 0,1,2,3) it is the identity.  Non-static: referenced by start.S.
+ */
+unsigned char		lapic_to_slot[256];
 static unsigned int	mp_lapic_phys;
 static unsigned int	mp_rsdt_phys;		/* found in phase 1, parsed in phase 2 */
 static unsigned int	mp_xsdt_phys;		/* ACPI 2.0+ XSDT, preferred when set */
@@ -823,8 +834,25 @@ mp_v1_1_init(void)
 		{
 			extern int real_ncpus;
 			extern void validate_cpus(int);
+			extern int boot_cpu_cap;	/* -c<n> (model_dep.c) */
+			if (boot_cpu_cap > 0 && mp_cpu_count > boot_cpu_cap) {
+				printf("mp_table: -c%d caps CPUs %d -> %d "
+				       "(SMP debug)\n", boot_cpu_cap,
+				       mp_cpu_count, boot_cpu_cap);
+				mp_cpu_count = boot_cpu_cap;
+			}
 			real_ncpus = mp_cpu_count;
 			validate_cpus(mp_cpu_count);
+		}
+
+		/* #344: (re)build the APIC-ID -> dense-slot reverse map now that
+		 * the real CPU list is known, before any AP runs svstart. */
+		{
+			int i;
+			for (i = 0; i < 256; i++)
+				lapic_to_slot[i] = 0;
+			for (i = 0; i < mp_cpu_count && i < NCPUS; i++)
+				lapic_to_slot[mp_cpu_lapic_id[i]] = (unsigned char)i;
 		}
 
 		lapic_start = io_map(mp_lapic_phys, LAPIC_SIZE);

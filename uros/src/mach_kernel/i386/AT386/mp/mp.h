@@ -109,7 +109,8 @@
     	movl	EXT(lapic_id), r  ; \
     	movl	0(r),r		  ; \
     	shrl	$LAPIC_ID_SHIFT, r; \
-    	andl	$LAPIC_ID_MASK, r
+    	andl	$LAPIC_ID_MASK, r ; \
+    	movzbl	EXT(lapic_to_slot)(,r,1), r	/* #344: APIC ID -> dense slot */
 
 #endif	/* MBUS || CBUS */
 

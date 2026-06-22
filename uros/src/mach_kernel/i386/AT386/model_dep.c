@@ -313,6 +313,12 @@ int		halt_in_debugger __attribute__((section(".data"))) = 0;
  * clear.  See setup_main() + #213. */
 int		halt_in_debugger_late __attribute__((section(".data"))) = 0;
 
+/* `-c<n>` boot arg: cap how many CPUs are brought up (SMP debug, #344) — e.g.
+ * `-c4` boots only the first 4 of an 8-CPU box, to bisect a per-CPU bring-up
+ * crash on real hardware.  0 = bring up every CPU the MADT reports.  .data so
+ * it survives i386_init()'s BSS clear, like halt_in_debugger above. */
+int		boot_cpu_cap __attribute__((section(".data"))) = 0;
+
 extern int	cons_is_com1;
 
 void		parse_arguments(void);
@@ -658,6 +664,9 @@ parse_arguments(void)
 		    break;
 		case 'k':	/* -k??:  memory size Kbytes */
 		    mem_size = atoi_term(p, &p)*1024;
+		    break;
+		case 'c':	/* -c??:  cap CPUs brought up (SMP debug, #344) */
+		    boot_cpu_cap = atoi_term(p, &p);
 		    break;
 		default:
 #if	NCPUS > 1 && AT386
