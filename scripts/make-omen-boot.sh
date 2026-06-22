@@ -147,12 +147,18 @@ if [ "$WANT_ISO" = true ]; then
             # default (entry 0) = all CPUs.  The `-c<n>` capped entries remain
             # for fallback / bisecting a per-CPU bring-up crash from the GRUB
             # menu with a single dd (1 = UP, guaranteed-stable baseline).
-            emit_iso_entry "(bench, all CPUs)" ""
-            emit_iso_entry "(bench, 7 CPUs)"   " -c7"
-            emit_iso_entry "(bench, 6 CPUs)"   " -c6"
-            emit_iso_entry "(bench, 4 CPUs)"   " -c4"
-            emit_iso_entry "(bench, 2 CPUs)"   " -c2"
-            emit_iso_entry "(bench, 1 CPU UP)" " -c1"
+            # #335: `-K` arms Ctrl+D on the PS/2 keyboard to break into DDB on a
+            # wedge.  Only on --bench-only: there is no char_server, so IRQ 1
+            # stays with the kernel.  A full --bench bundle has char_server,
+            # which claims IRQ 1 once it attaches and would shadow the break-key,
+            # so leave it off there rather than ship a Ctrl+D that quietly dies.
+            K=""; [ "$BENCH_ONLY" = 1 ] && K=" -K"
+            emit_iso_entry "(bench, all CPUs)" "$K"
+            emit_iso_entry "(bench, 7 CPUs)"   " -c7$K"
+            emit_iso_entry "(bench, 6 CPUs)"   " -c6$K"
+            emit_iso_entry "(bench, 4 CPUs)"   " -c4$K"
+            emit_iso_entry "(bench, 2 CPUs)"   " -c2$K"
+            emit_iso_entry "(bench, 1 CPU UP)" " -c1$K"
         else
             emit_iso_entry "(UrMach, fbcons)" ""
         fi

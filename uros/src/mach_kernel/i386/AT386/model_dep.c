@@ -320,6 +320,7 @@ int		halt_in_debugger_late __attribute__((section(".data"))) = 0;
 int		boot_cpu_cap __attribute__((section(".data"))) = 0;
 
 extern int	cons_is_com1;
+extern int	ddb_kbd_break_enabled;	/* #335: -K arms Ctrl+D -> DDB */
 
 void		parse_arguments(void);
 void		parse_multiboot(void);
@@ -582,22 +583,42 @@ parse_multiboot(void)
 	cnvmem = mb_info.mem_lower;
 	extmem = mb_info.mem_upper;
 
-	/* 
-         * Get information about the bootstrap. Currently we only
+	/*
+	 * Get information about the bootstrap. Currently we only
 	 * support loading one module.
+	 *
+	 * mods_addr is PHYSICAL by convention (mb2_parse() stores it as
+	 * mb2_mods - VM_MIN_KERNEL_ADDRESS; for mb1 start.S copies qemu's
+	 * physical mbi).  Reach the module array through the kernel phys map
+	 * with phystokv() — exactly like the #211 ksyms scan below.  The raw
+	 * dereference that used to be here only worked while mods_addr landed
+	 * in the boot-time low identity map, which is just 0-4 MB (start.S):
+	 * fine for mb2 (mb2_mods is low-BSS) and for the old, smaller kernel,
+	 * but #342 grew the kernel so qemu's mb1 modules now sit above 4 MB
+	 * and the bare deref #PF'd before the first console output.
 	 */
-	mb_module = (struct multiboot_module *) mb_info.mods_addr;
+	mb_module = (struct multiboot_module *) phystokv(mb_info.mods_addr);
  	boot_start = mb_module[0].mod_start;
  	boot_size = mb_module[0].mod_end - mb_module[0].mod_start;
- 
+
  	if (mb_info.mods_count >= 2) {
  		exec_start = mb_module[1].mod_start;
  		exec_size  = mb_module[1].mod_end - mb_module[1].mod_start;
  	}
 
 
-	kern_args_start = mb_info.cmdline;
-	kern_args_size = strlen((char *) kern_args_start);
+	/*
+	 * cmdline: mb2_parse() points it into the (kernel-virtual) copied tag
+	 * buffer; mb1 leaves it as qemu's physical pointer, so translate that
+	 * one too (same 4 MB low-map reason as mods_addr above).
+	 */
+	if (boot_magic == MB2_BOOTLOADER_MAGIC)
+		kern_args_start = mb_info.cmdline;
+	else
+		kern_args_start = mb_info.cmdline ?
+		    phystokv(mb_info.cmdline) : 0;
+	kern_args_size = kern_args_start ?
+	    strlen((char *) kern_args_start) : 0;
 
  	//boot_args_start = mb_module->cmdline;
  	//boot_args_size = strlen(boot_args_start);
@@ -667,6 +688,11 @@ parse_arguments(void)
 		    break;
 		case 'c':	/* -c??:  cap CPUs brought up (SMP debug, #344) */
 		    boot_cpu_cap = atoi_term(p, &p);
+		    break;
+		case 'K':	/* -K: arm Ctrl+D on the PS/2 keyboard to break
+				 * into DDB when there is no serial port (bare-
+				 * metal debug, #335). */
+		    ddb_kbd_break_enabled = 1;
 		    break;
 		default:
 #if	NCPUS > 1 && AT386
@@ -823,6 +849,16 @@ machine_init(void)
 	 * Find the devices
 	 */
 	probeio();
+
+	/*
+	 * #335: arm the PS/2 break-key (Ctrl+D -> DDB) when -K was given and
+	 * the console is not serial.  After probeio() so the PIC / I-O APIC
+	 * and all device IRQs are configured; IRQ 1 is still free here.
+	 */
+	{
+		extern void ddb_kbd_break_init(void);
+		ddb_kbd_break_init();
+	}
 
 	/*
 	 * Set the boot device to disk0 or whatever

@@ -29,7 +29,10 @@
 
 #include <mach/boolean.h>
 #include <kern/misc_protos.h>
+#include <kern/spl.h>		/* spl_t, splhigh, splx */
 #include <i386/pio.h>
+#include <i386/ipl.h>		/* SPL6 */
+#include <chips/busses.h>	/* take_irq / reset_irq / intr_t */
 
 extern int com_getc(boolean_t wait);
 extern int cons_is_com1;
@@ -258,4 +261,181 @@ cnpollc(boolean_t on)
 	 * IRQs masked), so there is nothing to preserve.
 	 */
 	(void)on;
+}
+
+/* ============================================================
+ * #335 — PS/2 break-key: enter the kernel debugger from the keyboard.
+ *
+ * On a serial console (cons_is_com1) com.c already turns com_halt_char
+ * into a kdb_kintr() (check_debugger() in comintr()).  A machine with no
+ * serial port (omen, UEFI) has no such path, so a wedge is undebuggable.
+ *
+ * This installs a minimal IRQ-1 top half that watches for Ctrl+D and
+ * calls kdb_kintr() — the exact entry comintr() uses — landing DDB on the
+ * interrupted frame.  Opt-in via the -K boot flag, and only when the
+ * console is not COM1.  It claims IRQ 1 with take_irq(); if the userspace
+ * char_server/ps2.so later registers IRQ 1, device_intr_register() does a
+ * reset_irq() before its take_irq(), so it transparently takes the line
+ * over (and restores this handler on unregister) — no clobber, no hang.
+ * ============================================================ */
+
+#if	MACH_KDB || MACH_KGDB
+extern void kdb_kintr(void);	/* locore.S — break into the debugger */
+#endif
+
+/* Set by the -K boot flag in parse_arguments(); .data so it survives the
+ * BSS clear, like boot_cpu_cap / cons_is_com1 (#337). */
+int ddb_kbd_break_enabled __attribute__((section(".data"))) = 0;
+
+#define KBD_SC_CTRL	0x1D	/* Ctrl make; release = | 0x80 */
+#define KBD_SC_D	0x20	/* 'd' make */
+
+static int ddb_brk_ctrl;	/* Ctrl currently held */
+
+/*
+ * IRQ-1 top half.  Reached through the ivect[] dispatch (interrupt.S)
+ * with interrupts enabled at SPL6 — the same context comintr() runs in,
+ * so kdb_kintr() from here is safe.  We drain port 0x60 to ack the 8042;
+ * the PIC / I-O APIC EOI is done by the dispatch wrapper.
+ */
+void
+ddb_kbd_intr(int unit)
+{
+	unsigned char status, sc;
+	(void)unit;
+
+	status = inb(KBD_STATUS);
+	if ((status & KBD_STAT_OBF) == 0)
+		return;			/* nothing pending (shared / spurious) */
+	if (status & KBD_STAT_AUX) {
+		(void)inb(KBD_DATA);	/* mouse byte — drain and ignore */
+		return;
+	}
+	sc = inb(KBD_DATA);
+
+	if (sc == 0xE0)			/* extended prefix; next byte stands alone */
+		return;
+	if (sc == KBD_SC_CTRL)        { ddb_brk_ctrl = 1; return; }
+	if (sc == (KBD_SC_CTRL|0x80)) { ddb_brk_ctrl = 0; return; }
+
+	if (ddb_brk_ctrl && sc == KBD_SC_D) {
+		ddb_brk_ctrl = 0;	/* one-shot: don't re-fire on key repeat */
+#if	MACH_KDB || MACH_KGDB
+		kdb_kintr();
+#endif
+	}
+}
+
+/* ------------------------------------------------------------------
+ * Minimal 8042 controller bring-up.
+ *
+ * Without char_server, nothing programs the 8042: on bare metal the
+ * firmware may hand us the keyboard port with its IRQ and/or clock
+ * disabled, so IRQ 1 never fires and ddb_kbd_intr() never runs (this is
+ * why Ctrl+D worked under QEMU — SeaBIOS pre-enables the controller —
+ * but not on real hardware).  Mirror char_server/modules/ps2.c's
+ * ps2_attach(): drain, set the config byte (port-1 IRQ + set-1
+ * translation + keyboard clock on), re-enable port 1, enable scanning.
+ * All waits are bounded so a wedged controller can't hang the boot.
+ * ------------------------------------------------------------------ */
+#define KBD_STAT_IBF	0x02	/* input buffer full (cmd still in flight) */
+#define I8042_DISABLE_P1 0xAD
+#define I8042_DISABLE_P2 0xA7
+#define I8042_ENABLE_P1	0xAE
+#define I8042_READ_CFG	0x20
+#define I8042_WRITE_CFG	0x60
+#define KBD_ENABLE_SCAN	0xF4
+#define I8042_SPINS	100000
+
+static int
+ddb_8042_in_empty(void)
+{
+	int i;
+	for (i = 0; i < I8042_SPINS; i++)
+		if ((inb(KBD_STATUS) & KBD_STAT_IBF) == 0)
+			return 0;
+	return -1;
+}
+
+static int
+ddb_8042_out_full(void)
+{
+	int i;
+	for (i = 0; i < I8042_SPINS; i++)
+		if (inb(KBD_STATUS) & KBD_STAT_OBF)
+			return 0;
+	return -1;
+}
+
+static void
+ddb_8042_cmd(unsigned char c)
+{
+	if (ddb_8042_in_empty() == 0)
+		outb(KBD_STATUS, c);
+}
+
+static void
+ddb_8042_data(unsigned char v)
+{
+	if (ddb_8042_in_empty() == 0)
+		outb(KBD_DATA, v);
+}
+
+static void
+ddb_8042_kbd_enable(void)
+{
+	unsigned char cfg;
+	int i;
+
+	ddb_8042_cmd(I8042_DISABLE_P1);
+	ddb_8042_cmd(I8042_DISABLE_P2);
+	for (i = 0; i < 16; i++) {		/* drain stale OBF bytes */
+		if ((inb(KBD_STATUS) & KBD_STAT_OBF) == 0)
+			break;
+		(void)inb(KBD_DATA);
+	}
+
+	ddb_8042_cmd(I8042_READ_CFG);
+	if (ddb_8042_out_full() < 0)
+		return;
+	cfg = inb(KBD_DATA);
+	cfg |= 0x01;	/* enable port-1 (keyboard) interrupt -> IRQ 1 */
+	cfg |= 0x40;	/* translate to scancode set 1 (our tables) */
+	cfg &= ~0x10;	/* clear "disable port-1 clock" -> keyboard on */
+	ddb_8042_cmd(I8042_WRITE_CFG);
+	ddb_8042_data(cfg);
+
+	ddb_8042_cmd(I8042_ENABLE_P1);
+
+	ddb_8042_data(KBD_ENABLE_SCAN);		/* 0xF4 */
+	if (ddb_8042_out_full() == 0)
+		(void)inb(KBD_DATA);		/* eat the 0xFA ACK */
+}
+
+/*
+ * Arm the break-key.  Called once from machine_init() after probeio(), so
+ * the PIC / I-O APIC and every device IRQ are configured and IRQ 1 is
+ * still free.  IRQ 1 is seeded intnull@SPL6 in pic_isa.c, so reset_irq()
+ * first clears intpri[1] — otherwise take_irq() sees SPL6 != 0 and spins
+ * thinking two devices share the line.
+ */
+void
+ddb_kbd_break_init(void)
+{
+	spl_t	s;
+	int	o_unit, o_spl;
+	intr_t	o_handler;
+
+	if (!ddb_kbd_break_enabled)
+		return;
+	if (cons_is_com1)		/* serial already has com_halt_char */
+		return;
+
+	s = splhigh();
+	ddb_8042_kbd_enable();		/* make the 8042 deliver IRQ 1 */
+	reset_irq(1, &o_unit, &o_spl, &o_handler);
+	take_irq(1, 1, SPL6, (intr_t)ddb_kbd_intr);
+	splx(s);
+
+	printf("DDB: press Ctrl+D on the PS/2 keyboard to enter the debugger\n");
 }
