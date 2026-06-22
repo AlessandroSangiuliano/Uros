@@ -1277,11 +1277,31 @@ pmap_bootstrap(
 	    *pte++ = 0;
 
 	/*
-	 *	invalidate user virtual addresses 
+	 *	Invalidate every user-range PDE (VA 0 .. VM_MIN_KERNEL_ADDRESS),
+	 *	which includes PDE[0] = the boot-time low 0-4 MB identity map that
+	 *	start.S installed only so the paging-transition code kept running
+	 *	at its low/physical address right after CR0_PG (start.S "set it also
+	 *	as pte for location 0..3fffff").  Past this point the kernel runs
+	 *	entirely on high virtual addresses, so that map is dead weight --
+	 *	and, worse, it *masks* physical-as-virtual dereference bugs: while
+	 *	it lives, a stray deref of a sub-4 MB physical address silently
+	 *	succeeds (only blowing up on hardware whose physical layout pushes
+	 *	the same structure past 4 MB, e.g. #342/#344 omen-only).  Tearing it
+	 *	down makes any such deref fault deterministically, here and on KVM.
 	 */
 	memset((char *)kpde,
 	       0,
 	       pdenum(kernel_pmap,VM_MIN_KERNEL_ADDRESS)*sizeof(pt_entry_t));
+	/*
+	 *	#345: the PDEs are cleared in the page directory, but the low
+	 *	identity map is still cached in the TLB until the next CR3 reload
+	 *	(lazily, at the first context switch).  Flush now so the teardown is
+	 *	effective immediately -- fail-fast starts at the end of bootstrap,
+	 *	not whenever the first set_cr3 happens.  INTEL_PTE_KERNEL carries no
+	 *	GLOBAL bit (genassym: VALID|WRITE), so a plain CR3 reload evicts
+	 *	these entries even with CR4.PGE enabled.
+	 */
+	flush_tlb();
 	kernel_pmap->dirbase = kpde;
 	printf("Kernel virtual space from 0x%x to 0x%x.\n",
 			VM_MIN_KERNEL_ADDRESS, virtual_end);
