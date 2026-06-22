@@ -582,22 +582,42 @@ parse_multiboot(void)
 	cnvmem = mb_info.mem_lower;
 	extmem = mb_info.mem_upper;
 
-	/* 
-         * Get information about the bootstrap. Currently we only
+	/*
+	 * Get information about the bootstrap. Currently we only
 	 * support loading one module.
+	 *
+	 * mods_addr is PHYSICAL by convention (mb2_parse() stores it as
+	 * mb2_mods - VM_MIN_KERNEL_ADDRESS; for mb1 start.S copies qemu's
+	 * physical mbi).  Reach the module array through the kernel phys map
+	 * with phystokv() — exactly like the #211 ksyms scan below.  The raw
+	 * dereference that used to be here only worked while mods_addr landed
+	 * in the boot-time low identity map, which is just 0-4 MB (start.S):
+	 * fine for mb2 (mb2_mods is low-BSS) and for the old, smaller kernel,
+	 * but #342 grew the kernel so qemu's mb1 modules now sit above 4 MB
+	 * and the bare deref #PF'd before the first console output.
 	 */
-	mb_module = (struct multiboot_module *) mb_info.mods_addr;
+	mb_module = (struct multiboot_module *) phystokv(mb_info.mods_addr);
  	boot_start = mb_module[0].mod_start;
  	boot_size = mb_module[0].mod_end - mb_module[0].mod_start;
- 
+
  	if (mb_info.mods_count >= 2) {
  		exec_start = mb_module[1].mod_start;
  		exec_size  = mb_module[1].mod_end - mb_module[1].mod_start;
  	}
 
 
-	kern_args_start = mb_info.cmdline;
-	kern_args_size = strlen((char *) kern_args_start);
+	/*
+	 * cmdline: mb2_parse() points it into the (kernel-virtual) copied tag
+	 * buffer; mb1 leaves it as qemu's physical pointer, so translate that
+	 * one too (same 4 MB low-map reason as mods_addr above).
+	 */
+	if (boot_magic == MB2_BOOTLOADER_MAGIC)
+		kern_args_start = mb_info.cmdline;
+	else
+		kern_args_start = mb_info.cmdline ?
+		    phystokv(mb_info.cmdline) : 0;
+	kern_args_size = kern_args_start ?
+	    strlen((char *) kern_args_start) : 0;
 
  	//boot_args_start = mb_module->cmdline;
  	//boot_args_size = strlen(boot_args_start);
