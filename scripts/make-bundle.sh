@@ -23,6 +23,7 @@ BUNDLE_OUT="$BUILD_DIR/bootstrap.bundle"
 MKBUNDLE="$BUILD_DIR/tools/mkbundle"
 BENCH_ARGS=""
 MINIMAL=0
+DISKLESS=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -36,10 +37,14 @@ while [ $# -gt 0 ]; do
             ;;
         --minimal)
             MINIMAL=1; shift ;;
+        --diskless)
+            DISKLESS=1; shift ;;
         -h|--help)
-            echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal]"
+            echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal] [--diskless]"
             echo "  --minimal: skip test/bench tasks (ipc_bench, pthread_test, cap_test,"
             echo "             kernel242_test, sig_test, gpustat) from bootstrap.conf"
+            echo "  --diskless: run ipc_bench in stage-1 (before block_device_server) so the"
+            echo "              IPC suite completes without a boot disk (#344, omen USB boot)"
             exit 0
             ;;
         *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
@@ -148,12 +153,25 @@ else
     PTHREAD_TEST_LINE="pthread_test pthread_test"
 fi
 
+# #344: diskless bench.  bootstrap.c blocks at stage-2 waiting for the boot
+# disk immediately after launching block_device_server, so any task listed
+# after it (ipc_bench included) never runs without a disk.  In --diskless mode
+# run ipc_bench in stage-1, ahead of block_device_server, so the IPC suite
+# completes from RAM on a USB boot (omen, #332); its disk-I/O sub-bench
+# self-skips when no ext_server/disk is present.
+IPC_BENCH_STAGE1_LINE=""
+if [ "$DISKLESS" = "1" ]; then
+    IPC_BENCH_STAGE1_LINE="$IPC_BENCH_LINE"
+    IPC_BENCH_LINE=""
+fi
+
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
 ${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
+${IPC_BENCH_STAGE1_LINE}
 block_device_server block_device_server
 default_pager default_pager disk0c
 ${HELLO_SERVER_LINE}

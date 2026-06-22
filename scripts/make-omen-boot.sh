@@ -46,12 +46,55 @@ SNIPPET="$BUILD/omen-grub-snippet.cfg"
 
 WANT_ISO=true
 WANT_GRUB=true
-case "${1:-}" in
-    --iso)  WANT_GRUB=false ;;
-    --grub) WANT_ISO=false ;;
-    "")     ;;
-    *) echo "Unknown flag: $1" >&2; exit 2 ;;
-esac
+BENCH=0
+BENCH_ONLY=0
+BENCH_ARGS=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --iso)  WANT_GRUB=false; shift ;;
+        --grub) WANT_ISO=false; shift ;;
+        --bench)
+            # --bench [suite ...]: build a diskless-bench bundle (ipc_bench in
+            # stage-1) instead of the prebuilt boot-only bundle, so the IPC
+            # suite runs from RAM on omen — bootstrap otherwise blocks at
+            # stage-2 waiting for a boot disk before ipc_bench (#344/#332).
+            # Extra non-flag args pass through to ipc_bench.
+            BENCH=1; shift
+            while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
+                BENCH_ARGS="$BENCH_ARGS $1"; shift
+            done
+            ;;
+        --bench-only)
+            # #344: like --bench but a MINIMAL bundle — name_server + ipc_bench
+            # only.  Skips gpu/cap/char/hal so the IPC suite still runs when an
+            # early server wedges on real hardware (omen); ipc_bench self-skips
+            # its cap/disk sub-benches when those servers are absent.
+            BENCH=1; BENCH_ONLY=1; shift
+            while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
+                BENCH_ARGS="$BENCH_ARGS $1"; shift
+            done
+            ;;
+        *) echo "Unknown flag: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [ "$BENCH_ONLY" = 1 ]; then
+    BUNDLE="$BUILD/bootstrap-omen-benchonly.bundle"
+    SBIN_DIR="$BUILD/export/uros/$(uname -m)/user/sbin"
+    MKBUNDLE="$BUILD/tools/mkbundle"
+    echo "building minimal bench bundle (name_server + ipc_bench only):${BENCH_ARGS:- default suite}"
+    CONF=$(mktemp)
+    printf 'name_server name_server\nipc_bench ipc_bench%s\n' "$BENCH_ARGS" > "$CONF"
+    "$MKBUNDLE" -o "$BUNDLE" \
+        "bootstrap.conf:$CONF" \
+        "name_server:$SBIN_DIR/name_server" \
+        "ipc_bench:$SBIN_DIR/ipc_bench"
+    rm -f "$CONF"
+elif [ "$BENCH" = 1 ]; then
+    BUNDLE="$BUILD/bootstrap-omen-bench.bundle"
+    echo "building diskless-bench bundle (ipc_bench in stage-1):${BENCH_ARGS:- default suite}"
+    "$REPO_ROOT/scripts/make-bundle.sh" --diskless --bench $BENCH_ARGS -o "$BUNDLE"
+fi
 
 for f in "$KERNEL" "$BOOTSTRAP" "$BUNDLE"; do
     [ -f "$f" ] || { echo "ERROR: missing $f (build the kernel first)"; exit 1; }
@@ -81,20 +124,38 @@ if [ "$WANT_ISO" = true ]; then
     # (efi_gop on UEFI, vbe on legacy/CSM); gfxpayload makes GRUB hand the
     # kernel a linear framebuffer via the mb2 framebuffer tag -> fbcons.  `-f`
     # turns fbcons on (off by default so the userspace gpu_server owns the FB).
-    {
-        printf 'set timeout=5\n'
-        printf 'set default=0\n'
-        printf 'terminal_input  console\n'
-        printf 'terminal_output console\n'
-        printf 'insmod all_video\n'
-        printf 'set gfxpayload=1024x768x32\n\n'
-        printf 'menuentry "Uros (UrMach, fbcons)" {\n'
-        printf '    multiboot2 /boot/mach_kernel -f\n'
+    # Emit one GRUB menuentry: $1 = label suffix, $2 = extra kernel args.
+    emit_iso_entry() {
+        printf 'menuentry "Uros %s" {\n' "$1"
+        printf '    multiboot2 /boot/mach_kernel -f%s\n' "$2"
         printf '    module2    /boot/bootstrap        bootstrap\n'
         printf '    module2    /boot/bootstrap.bundle bundle\n'
         [ -n "$ksyms_iso_line" ] && printf '%s\n' "$ksyms_iso_line"
         printf '    boot\n'
         printf '}\n'
+    }
+
+    {
+        printf 'set timeout=10\n'
+        printf 'set default=0\n'
+        printf 'terminal_input  console\n'
+        printf 'terminal_output console\n'
+        printf 'insmod all_video\n'
+        printf 'set gfxpayload=1024x768x32\n\n'
+        if [ "$BENCH" = 1 ]; then
+            # #344: the AP bring-up barrier fix should let every CPU come up, so
+            # default (entry 0) = all CPUs.  The `-c<n>` capped entries remain
+            # for fallback / bisecting a per-CPU bring-up crash from the GRUB
+            # menu with a single dd (1 = UP, guaranteed-stable baseline).
+            emit_iso_entry "(bench, all CPUs)" ""
+            emit_iso_entry "(bench, 7 CPUs)"   " -c7"
+            emit_iso_entry "(bench, 6 CPUs)"   " -c6"
+            emit_iso_entry "(bench, 4 CPUs)"   " -c4"
+            emit_iso_entry "(bench, 2 CPUs)"   " -c2"
+            emit_iso_entry "(bench, 1 CPU UP)" " -c1"
+        else
+            emit_iso_entry "(UrMach, fbcons)" ""
+        fi
     } >"$ISO_TREE/boot/grub/grub.cfg"
 
     echo "building hybrid ISO (BIOS + UEFI): $ISO"
