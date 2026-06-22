@@ -320,6 +320,7 @@ int		halt_in_debugger_late __attribute__((section(".data"))) = 0;
 int		boot_cpu_cap __attribute__((section(".data"))) = 0;
 
 extern int	cons_is_com1;
+extern int	ddb_kbd_break_enabled;	/* #335: -K arms Ctrl+D -> DDB */
 
 void		parse_arguments(void);
 void		parse_multiboot(void);
@@ -688,6 +689,11 @@ parse_arguments(void)
 		case 'c':	/* -c??:  cap CPUs brought up (SMP debug, #344) */
 		    boot_cpu_cap = atoi_term(p, &p);
 		    break;
+		case 'K':	/* -K: arm Ctrl+D on the PS/2 keyboard to break
+				 * into DDB when there is no serial port (bare-
+				 * metal debug, #335). */
+		    ddb_kbd_break_enabled = 1;
+		    break;
 		default:
 #if	NCPUS > 1 && AT386
 		    if (ch > '0' && ch <= '9')
@@ -843,6 +849,16 @@ machine_init(void)
 	 * Find the devices
 	 */
 	probeio();
+
+	/*
+	 * #335: arm the PS/2 break-key (Ctrl+D -> DDB) when -K was given and
+	 * the console is not serial.  After probeio() so the PIC / I-O APIC
+	 * and all device IRQs are configured; IRQ 1 is still free here.
+	 */
+	{
+		extern void ddb_kbd_break_init(void);
+		ddb_kbd_break_init();
+	}
 
 	/*
 	 * Set the boot device to disk0 or whatever
