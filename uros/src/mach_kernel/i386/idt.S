@@ -146,6 +146,20 @@ Entry(name)				;\
 	jmp	EXT(alltraps)
 
 /*
+ * NMI.  Like EXCEPTION but installed through an interrupt gate (clears IF) and
+ * routed through alltraps so the #344 NMI watchdog (kernel_trap case T_NMI)
+ * gets a full saved_state — the interrupted EIP/registers are exactly what we
+ * need to localise an IF=0 wedge.  No error code: push a zero, then the trap
+ * number.
+ */
+#define	NMI_INTR(n,name) \
+	IDT_ENTRY(EXT(name),K_INTR_GATE);\
+Entry(name)				;\
+	pushl	$0			;\
+	pushl	$(n)			;\
+	jmp	EXT(alltraps)
+
+/*
  * Interrupt.
  */
 #define	INTERRUPT(n) \
@@ -161,7 +175,7 @@ Entry(idt)
 
 EXCEPTION(0x00,t_zero_div)
 EXCEP_SPC(0x01,t_debug)
-INTERRUPT(0x02)			/* NMI */
+NMI_INTR(0x02,t_nmi)		/* NMI -> alltraps -> kernel_trap T_NMI (#344) */
 EXCEP_USR(0x03,t_int3)
 EXCEP_USR(0x04,t_into)
 EXCEP_USR(0x05,t_bounds)

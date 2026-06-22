@@ -378,6 +378,9 @@ extern struct recovery	retry_table_end[];
 char *	trap_type[] = {TRAP_NAMES};
 int	TRAP_TYPES = sizeof(trap_type)/sizeof(trap_type[0]);
 
+/* #344: perf-counter NMI hard-lockup watchdog (i386/nmi_watchdog.c). */
+extern void nmi_watchdog(struct i386_saved_state *regs);
+
 /*
  * Trap from kernel mode.  Only page-fault errors are recoverable,
  * and then only in special circumstances.  All other errors are
@@ -415,6 +418,11 @@ kernel_trap(
 
 	switch (type) {
 	    case T_PREEMPT:
+		return (TRUE);
+
+	    case T_NMI:
+		/* #344: perf-counter NMI hard-lockup watchdog. */
+		nmi_watchdog(regs);
 		return (TRUE);
 
 	    case T_NO_FPU:
@@ -658,6 +666,12 @@ user_trap(
 	type = regs->trapno;
 	code = 0;
 	subcode = 0;
+
+	if (type == T_NMI) {
+		/* #344: NMI hit user mode; run the watchdog, deliver nothing. */
+		nmi_watchdog(regs);
+		return;
+	}
 
 	switch (type) {
 

@@ -321,6 +321,8 @@ int		boot_cpu_cap __attribute__((section(".data"))) = 0;
 
 extern int	cons_is_com1;
 extern int	ddb_kbd_break_enabled;	/* #335: -K arms Ctrl+D -> DDB */
+extern int	nmi_watchdog_enabled;	/* #344: -W arms the NMI watchdog */
+extern void	nmi_watchdog_init(void);
 
 void		parse_arguments(void);
 void		parse_multiboot(void);
@@ -694,6 +696,10 @@ parse_arguments(void)
 				 * metal debug, #335). */
 		    ddb_kbd_break_enabled = 1;
 		    break;
+		case 'W':	/* -W: arm the perf-counter NMI hard-lockup
+				 * watchdog to catch IF=0 wedges (#344). */
+		    nmi_watchdog_enabled = 1;
+		    break;
 		default:
 #if	NCPUS > 1 && AT386
 		    if (ch > '0' && ch <= '9')
@@ -804,6 +810,13 @@ machine_init(void)
 		extern void lapic_enable(void);
 		lapic_enable();
 	}
+
+	/*
+	 * #344: arm the perf-counter NMI hard-lockup watchdog on the BSP (no-op
+	 * unless -W was passed).  Safe this early: it only starts accusing once
+	 * it has seen the clock tick at least once (wd_seen gating).
+	 */
+	nmi_watchdog_init();
 
 	/*
 	 * #311: bring up the I/O APIC and switch device-IRQ delivery off the
