@@ -38,6 +38,7 @@
 #include <i386/cpu_number.h>	/* cpu_number() (#304) */
 #include <i386/lapic.h>		/* lapic_enable / lapic_send_ipi (#302) */
 #include <i386/mp_desc.h>	/* mp_desc_table / interrupt_stack (#308) */
+#include <i386/lock.h>		/* atomic_incl (#344 bring-up barrier) */
 #include <i386/pic.h>		/* NINTR */
 #include <i386/ipl.h>		/* SPLHI */
 #include <chips/busses.h>	/* intr_t */
@@ -118,6 +119,17 @@ extern vm_offset_t int_stack_top[NCPUS];
 volatile boolean_t ap_can_run = FALSE;
 
 /*
+ * #344: count of APs that have finished their OWN bring-up (past lapic_enable
+ * + fpu_sanity) and parked at the ap_can_run barrier.  The BSP waits for this
+ * to reach real_ncpus-1 before flipping ap_can_run, so no AP is released into
+ * the scheduler (and starts cross-CPU IPIs) while another AP — the last one,
+ * which reports running=TRUE early, before init_fpu — is still mid-FPU-init
+ * with its LAPIC not yet enabled.  That window wedges/resets the last AP on
+ * real hardware (deterministic on omen); KVM's looser timing hides it.
+ */
+volatile long ap_barrier_count = 0;
+
+/*
  * #308: allocate the per-AP kernel resources that interrupt_stack_alloc()
  * would have set up if mp_probe_cpus() had known the real CPU count.
  * With ACPI MADT detection deferred to phase 2 (#300), phase 1 sees a
@@ -194,6 +206,18 @@ start_other_cpus(void)
 		printf("smp: AP cpu_id=%d online (reported by BSP)\n", slot);
 	}
 
+	/* #344: wait until every AP has finished its own bring-up (past
+	 * lapic_enable + fpu_sanity) and is parked at the barrier.  cpu_start()
+	 * returns as soon as an AP reports running=TRUE — which it does early,
+	 * before init_fpu — so without this the last AP is still mid-FPU-init
+	 * when the loop ends and we release everyone; the resulting cross-CPU
+	 * traffic wedges/resets it on real hardware. */
+	{
+		long aps = (long)real_ncpus - 1;
+		while (ap_barrier_count < aps)
+			__asm__ __volatile__("pause" ::: "memory");
+	}
+
 	/* #299: every AP is past CPU-state init and parked at the barrier in
 	 * slave_machine_init().  Release them together so none arms its LAPIC
 	 * timer / enters the scheduler while another AP is still being
@@ -260,6 +284,12 @@ slave_machine_init(void)
 		extern void fpu_sanity_check(void);
 		fpu_sanity_check();
 	}
+
+	/* #344: announce this AP is fully past CPU-state init (LAPIC enabled,
+	 * FPU sane).  The BSP gates ap_can_run on every AP reaching here, so the
+	 * scheduler/IPIs don't start on other cores while this one is still in
+	 * its (printf-heavy) init_fpu with the LAPIC not yet enabled. */
+	atomic_incl((long *)&ap_barrier_count, 1);
 
 	/* #299: park here until the BSP has brought up *all* APs.  CPU-state
 	 * init is done and machine_slot[].running is already TRUE, so the
