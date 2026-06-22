@@ -279,6 +279,36 @@ act_machine_switch_pcb( thread_act_t new_act )
 
         assert(new_act->thread != NULL);
         assert(new_act->thread->kernel_stack != 0);
+
+	/*
+	 * #344 diagnostic: on omen (real HW) switch_context page-faults with a
+	 * WRITE to ~16 MB.  The first thread-controlled write here is into
+	 * STACK_IEL(kernel_stack); a low (< VM_MIN_KERNEL_ADDRESS) kernel_stack
+	 * or pcb means someone stored a physical/boot-region address instead of
+	 * the high kernel VA.  Catch it BEFORE the faulting write so we get the
+	 * culprit thread with full context, instead of vm_fault tripping
+	 * mutex_lock_assert_safe and hiding the cause.  One-shot.
+	 */
+	{
+		static int reported_344 = 0;
+		vm_offset_t kstk = new_act->thread->kernel_stack;
+		vm_offset_t pcbp = (vm_offset_t) new_act->mact.pcb;
+		if (!reported_344 &&
+		    (kstk < VM_MIN_KERNEL_ADDRESS || pcbp < VM_MIN_KERNEL_ADDRESS)) {
+			reported_344 = 1;
+			printf("#344 BAD new_act=0x%x thread=0x%x kstack=0x%x "
+			       "STACK_IEL=0x%x pcb=0x%x task=0x%x map=0x%x\n",
+			       (unsigned) new_act,
+			       (unsigned) new_act->thread,
+			       (unsigned) kstk,
+			       (unsigned) STACK_IEL(kstk),
+			       (unsigned) pcbp,
+			       (unsigned) new_act->task,
+			       (unsigned) new_act->map);
+			Debugger("#344 low kernel_stack/pcb in act_machine_switch_pcb");
+		}
+	}
+
         STACK_IEL(new_act->thread->kernel_stack)->saved_state =
                 &new_act->mact.pcb->iss;
 
