@@ -462,6 +462,35 @@ kernel_trap(
 		    map = thr_act->map;
 		}
 
+		/*
+		 * #344 diagnostic: a kernel-mode fault at a low VA is normal
+		 * ONLY for copyin/copyout, whose faulting instruction is listed
+		 * in retry_table/recover_table (resolved below via vm_fault) or
+		 * which set thread->recover.  Anything else is a stray pointer
+		 * (#344: switch_context writes ~16 MB on omen).  vm_fault would
+		 * take the map lock and trip mutex_lock_assert_safe while we hold
+		 * a wait_event, hanging Debugger() silently (the observed wedge).
+		 * Panic here instead, BEFORE vm_fault, so the exact faulting EIP
+		 * and address freeze readable on fbcons.  Diagnostic only.
+		 */
+		if (subcode < VM_MIN_KERNEL_ADDRESS) {
+		    register struct recovery *rp344;
+		    int recoverable344 = (thread != THREAD_NULL && thread->recover);
+		    for (rp344 = recover_table;
+			 !recoverable344 && rp344 < recover_table_end; rp344++)
+			if (regs->eip == rp344->fault_addr) recoverable344 = 1;
+		    for (rp344 = retry_table;
+			 !recoverable344 && rp344 < retry_table_end; rp344++)
+			if (regs->eip == rp344->fault_addr) recoverable344 = 1;
+		    if (!recoverable344)
+			panic("#344 KLOWFAULT eip=0x%x cr2=0x%x err=0x%x "
+			      "thr=0x%x map=0x%x | eax=%x ebx=%x ecx=%x edx=%x "
+			      "esi=%x edi=%x ebp=%x",
+			      regs->eip, subcode, code, thread, map,
+			      regs->eax, regs->ebx, regs->ecx, regs->edx,
+			      regs->esi, regs->edi, regs->ebp);
+		}
+
 #if	MACH_KDB
 		/*
 		 * Check for watchpoint on kernel static data.
