@@ -155,7 +155,9 @@ if [ "$WANT_ISO" = true ]; then
             # #344: `-W` arms the perf-counter NMI hard-lockup watchdog so an
             # IF=0 wedge (where Ctrl+D can't break in) dumps EIP+backtrace to
             # fbcons by itself.  Armed alongside -K on --bench-only.
-            K=""; [ "$BENCH_ONLY" = 1 ] && K=" -K -W"
+            # #344: `-Z` poisons freed zone elements + verifies on realloc to
+            # catch the use-after-free that scribbles the terminating task.
+            K=""; [ "$BENCH_ONLY" = 1 ] && K=" -K -W -Z"
             emit_iso_entry "(bench, all CPUs)" "$K"
             emit_iso_entry "(bench, 7 CPUs)"   " -c7$K"
             emit_iso_entry "(bench, 6 CPUs)"   " -c6$K"

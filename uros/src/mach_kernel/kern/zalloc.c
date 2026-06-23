@@ -294,7 +294,13 @@
  * when it is freed, to help catch usage after freeing?  The down-side
  * is that this obscures the identity of the freed element.
  */
-boolean_t zfree_clear = FALSE;
+/*
+ * #344: forced into .data so the "-Z" boot arg (parse_arguments runs BEFORE
+ * the BSS is zeroed) survives the BSS clear.  When set, freed zone elements
+ * are poisoned with 0xdeadbeef and REMOVE_FROM_ZONE verifies the poison on
+ * realloc -- catches a use-after-free / wild write to a freed element.
+ */
+boolean_t zfree_clear __attribute__((section(".data"))) = FALSE;
 
 #define ADD_TO_ZONE(zone, element)					\
 MACRO_BEGIN								\
@@ -316,6 +322,27 @@ MACRO_BEGIN								\
 	if ((ret) != (type) 0) {					\
 	    if (!is_kernel_data_addr(((vm_offset_t *)(ret))[0])) {	\
 		panic("A freed zone element has been modified.\n");	\
+	    }								\
+	    if (zfree_clear) {						\
+		/* #344: verify the 0xdeadbeef poison written at free time	\
+		 * is intact.  A clobbered word means something wrote to	\
+		 * this element while it was free (use-after-free / wild	\
+		 * write) -- e.g. a freed task/act whose thr_acts linkage	\
+		 * was overwritten with a user value.  Report element, zone,	\
+		 * word offset and the bad value, then drop to the debugger. */	\
+		register int _zi;					\
+		for (_zi = 1;						\
+		     _zi < (int)((zone)->elem_size/sizeof(vm_offset_t)) - 1; \
+		     _zi++)						\
+		    if (((vm_offset_t *)(ret))[_zi] != 0xdeadbeef) {	\
+			printf("#344 zone UAF: elem=0x%x zone='%s' "	\
+			       "word[%d] (off 0x%x) = 0x%x (poison clobbered)\n", \
+			       (unsigned)(ret), (zone)->zone_name, _zi,	\
+			       (unsigned)(_zi * sizeof(vm_offset_t)),	\
+			       (unsigned)((vm_offset_t *)(ret))[_zi]);	\
+			Debugger("#344 zone poison clobbered");		\
+			break;						\
+		    }							\
 	    }								\
 	    (zone)->count++;						\
 	    (zone)->free_elements = *((vm_offset_t *)(ret));		\

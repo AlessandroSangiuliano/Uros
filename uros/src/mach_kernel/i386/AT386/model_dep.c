@@ -700,6 +700,10 @@ parse_arguments(void)
 				 * watchdog to catch IF=0 wedges (#344). */
 		    nmi_watchdog_enabled = 1;
 		    break;
+		case 'Z':	/* -Z: poison freed zone elements + verify on
+				 * realloc to catch use-after-free (#344). */
+		    { extern boolean_t zfree_clear; zfree_clear = TRUE; }
+		    break;
 		default:
 #if	NCPUS > 1 && AT386
 		    if (ch > '0' && ch <= '9')
