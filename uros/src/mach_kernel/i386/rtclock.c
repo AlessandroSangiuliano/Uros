@@ -379,10 +379,30 @@ rtc_gettime(
 	 * the (global) 8254 access across CPUs.
 	 */
 	LOCK_RTC(s);
-	do {
-	    READ_8254(val);                 /* read clock */
-	    READ_8254(val2);                /* read clock */
-	} while ( val2 > val || val2 < val - 10 );
+	{
+	    /*
+	     * #344: this loop must never spin forever.  Two real bugs hid here:
+	     *  (1) `val2 < val - 10` is UNSIGNED, so when val < 10 the `val - 10`
+	     *      underflows to ~4e9 and the test is almost always true -> the
+	     *      loop never exits whenever the counter is read near 0;
+	     *  (2) on omen (real HW) the 8254 lives behind a slow LPC bus and its
+	     *      latched reads can be slow/torn enough never to yield a
+	     *      consistent decreasing pair at all.
+	     * Either way rtc_gettime spun in inb at IF=0 (caught by the NMI
+	     * watchdog: inb <- rtc_gettime <- clock_sleep -> hard wedge on omen).
+	     * Use a non-underflowing test (`val2 + 10 < val`) and bound the retry;
+	     * if the PIT stays unreadable, skip sub-tick interpolation (val ==
+	     * clks_per_int -> 0 contribution) -- mtime alone still advances per
+	     * tick, so time stays monotonic, just coarser.
+	     */
+	    int spins = 0;
+	    do {
+		READ_8254(val);             /* read clock */
+		READ_8254(val2);            /* read clock */
+	    } while ( (val2 > val || val2 + 10 < val) && ++spins < 20 );
+	    if (spins >= 20)
+		val = clks_per_int;         /* PIT unreadable: mtime only */
+	}
 	if ( val > clks_per_int_99 && rtc_tick_pending() )
 	    itime.tv_nsec = rtclock.intr_nsec; /* counter wrapped: add a tick */
 	itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
