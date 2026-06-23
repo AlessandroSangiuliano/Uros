@@ -347,6 +347,62 @@ rtc_tick_pending(void)
 }
 
 /*
+ * #344: TSC-based sub-tick interpolation.
+ *
+ * The 8254 sub-tick read (READ_8254) is unreliable on real hardware -- on omen
+ * its latched LPC reads never yield a consistent pair and rtc_gettime spun
+ * forever at IF=0 (root-caused via the NMI watchdog).  The bounded-8254 path is
+ * kept as a fallback, but when the TSC has been calibrated (mp_tsc_per_us != 0,
+ * which it always is post-bring-up) we instead measure nanoseconds since the
+ * last clock tick directly from the TSC: rtclock_intr() stamps rtclock_tsc_at_tick
+ * when it advances mtime, and here we read the TSC and convert the delta.
+ */
+extern unsigned int	mp_tsc_per_us;		/* TSC counts per microsecond (mp.c) */
+unsigned long long	rtclock_tsc_at_tick;	/* TSC at the last mtime advance */
+
+static __inline__ unsigned long long
+rtc_rdtsc(void)
+{
+	unsigned int lo, hi;
+	__asm__ __volatile__("rdtsc" : "=a" (lo), "=d" (hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+/* 64/32 -> 32 via a single divl (no libgcc __udivdi3). */
+static __inline__ unsigned int
+rtc_div64_32(unsigned long long num, unsigned int den)
+{
+	unsigned int q, r;
+	__asm__("divl %4"
+		: "=a" (q), "=d" (r)
+		: "a" ((unsigned int)num), "d" ((unsigned int)(num >> 32)),
+		  "rm" (den));
+	return q;
+}
+
+/*
+ * Nanoseconds since the last clock tick, from the TSC, clamped to one tick.
+ * Caller holds rtclock.lock.  Returns 0 if the TSC isn't calibrated.
+ */
+static unsigned int
+rtc_subtick_nsec(void)
+{
+	unsigned int	delta, maxd, sub;
+
+	if (mp_tsc_per_us == 0)
+		return 0;			/* not calibrated: mtime only */
+	delta = (unsigned int)(rtc_rdtsc() - rtclock_tsc_at_tick);
+	/* Cap the delta (~20 ms) so the divl quotient can't exceed 32 bits. */
+	maxd = mp_tsc_per_us * 20000u;
+	if (maxd && delta > maxd)
+		delta = maxd;
+	sub = rtc_div64_32((unsigned long long)delta * 1000ULL, mp_tsc_per_us);
+	if ((int)sub > rtclock.intr_nsec)
+		sub = rtclock.intr_nsec;	/* never exceed one tick */
+	return sub;
+}
+
+/*
  * Get the clock device time. This routine is responsible
  * for converting the device's machine dependent time value
  * into a canonical tvalspec_t value.
@@ -379,21 +435,22 @@ rtc_gettime(
 	 * the (global) 8254 access across CPUs.
 	 */
 	LOCK_RTC(s);
-	{
+	if (mp_tsc_per_us != 0) {
 	    /*
-	     * #344: this loop must never spin forever.  Two real bugs hid here:
-	     *  (1) `val2 < val - 10` is UNSIGNED, so when val < 10 the `val - 10`
-	     *      underflows to ~4e9 and the test is almost always true -> the
-	     *      loop never exits whenever the counter is read near 0;
-	     *  (2) on omen (real HW) the 8254 lives behind a slow LPC bus and its
-	     *      latched reads can be slow/torn enough never to yield a
-	     *      consistent decreasing pair at all.
-	     * Either way rtc_gettime spun in inb at IF=0 (caught by the NMI
-	     * watchdog: inb <- rtc_gettime <- clock_sleep -> hard wedge on omen).
-	     * Use a non-underflowing test (`val2 + 10 < val`) and bound the retry;
-	     * if the PIT stays unreadable, skip sub-tick interpolation (val ==
-	     * clks_per_int -> 0 contribution) -- mtime alone still advances per
-	     * tick, so time stays monotonic, just coarser.
+	     * #344: preferred path -- sub-tick from the TSC (see rtc_subtick_nsec).
+	     * The 8254 read below is unreliable on real HW (omen LPC: latched reads
+	     * never form a consistent decreasing pair -> rtc_gettime spun forever at
+	     * IF=0).  The TSC is monotonic and cheap and is always calibrated post
+	     * bring-up.
+	     */
+	    itime.tv_nsec = rtc_subtick_nsec();
+	} else {
+	    /*
+	     * Fallback when the TSC isn't calibrated: bounded 8254 read.  The old
+	     * `val2 < val - 10` test was UNSIGNED (underflowed for val < 10 -> the
+	     * loop never exited); use `val2 + 10 < val` and cap the retry, and if
+	     * the PIT stays unreadable skip interpolation (val == clks_per_int ->
+	     * 0 contribution) so mtime alone advances, monotonic but coarser.
 	     */
 	    int spins = 0;
 	    do {
@@ -402,10 +459,10 @@ rtc_gettime(
 	    } while ( (val2 > val || val2 + 10 < val) && ++spins < 20 );
 	    if (spins >= 20)
 		val = clks_per_int;         /* PIT unreadable: mtime only */
+	    if ( val > clks_per_int_99 && rtc_tick_pending() )
+		itime.tv_nsec = rtclock.intr_nsec; /* counter wrapped: add a tick */
+	    itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
 	}
-	if ( val > clks_per_int_99 && rtc_tick_pending() )
-	    itime.tv_nsec = rtclock.intr_nsec; /* counter wrapped: add a tick */
-	itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
 	if ( itime.tv_nsec < last_ival ) {
 	    if (rtc_print_lost_tick)
 		printf( "rtclock: missed clock interrupt.\n" );
@@ -449,10 +506,14 @@ rtc_gettime_interrupts_disabled(
 	 * between the two longwords and so dont need to use MTS_TO_TS.
 	 * Sub-tick interpolation runs on SMP too (#314); see rtc_gettime().
 	 */
-	READ_8254(val);                     /* read clock */
-	if ( val > clks_per_int_99 && rtc_tick_pending() )
-	    itime.tv_nsec = rtclock.intr_nsec; /* counter wrapped: add a tick */
-	itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
+	if (mp_tsc_per_us != 0) {
+	    itime.tv_nsec = rtc_subtick_nsec();	/* #344: TSC sub-tick */
+	} else {
+	    READ_8254(val);                 /* read clock (8254 fallback) */
+	    if ( val > clks_per_int_99 && rtc_tick_pending() )
+		itime.tv_nsec = rtclock.intr_nsec; /* counter wrapped: add a tick */
+	    itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
+	}
 	if ( itime.tv_nsec < last_ival ) {
 	    if (rtc_print_lost_tick)
 		printf( "rtclock: missed clock interrupt.\n" );
@@ -721,8 +782,13 @@ rtclock_intr(void)
 	 * Update clock time. Do the update so that the macro
 	 * MTS_TO_TS() for reading the mapped time works (e.g.
 	 * update in order: mtv_csec, mtv_nsec, mtv_sec).
-	 */	 
+	 */
 	LOCK_RTC(s);
+	/*
+	 * #344: anchor the TSC to this tick so rtc_subtick_nsec() can measure
+	 * nanoseconds since mtime last advanced (replaces the unreliable 8254).
+	 */
+	rtclock_tsc_at_tick = rtc_rdtsc();
 	i = rtclock.mtime->mtv_nsec + rtclock.intr_nsec;
 	if (i < NSEC_PER_SEC)
 	    rtclock.mtime->mtv_nsec = i;
