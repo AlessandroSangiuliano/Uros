@@ -993,6 +993,17 @@ lock_kdb(void)
 
 	for(;;) {
 		kdb_console();
+		/*
+		 * #344: recursive kdb entry on the SAME cpu (a fault taken while
+		 * already inside the debugger -- e.g. DDB dereferences a corrupt
+		 * activation/task while reporting a panic).  We already hold
+		 * kdb_lock, so db_simple_lock_try() below would fail forever and
+		 * spin here at IF=0 -- a silent hard wedge (caught by the NMI
+		 * watchdog: lock_kdb <- kdb_enter <- kdb_trap <- kdb_trap).  Break
+		 * out: we own the lock, just re-enter.
+		 */
+		if (kdb_cpu == my_cpu)
+			break;
 		if (kdb_cpu != -1 && kdb_cpu != my_cpu) {
 			continue;
 		}
@@ -1001,7 +1012,7 @@ lock_kdb(void)
 				break;
 			db_simple_unlock(&kdb_lock);
 		}
-	} 
+	}
 
 #if	NCPUS > 1
 	enable_preemption();
