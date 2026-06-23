@@ -146,18 +146,16 @@ Entry(name)				;\
 	jmp	EXT(alltraps)
 
 /*
- * NMI.  Like EXCEPTION but installed through an interrupt gate (clears IF) and
- * routed through alltraps so the #344 NMI watchdog (kernel_trap case T_NMI)
- * gets a full saved_state — the interrupted EIP/registers are exactly what we
- * need to localise an IF=0 wedge.  No error code: push a zero, then the trap
- * number.
+ * NMI.  Installed through an interrupt gate (clears IF); the handler body is a
+ * dedicated minimal stub (t_nmi in locore.S), NOT alltraps.  An NMI must NOT
+ * take the normal kernel trap-return path: trap_from_kernel switches stacks and
+ * checks need_ast for AST_URGENT preemption (locore.S), i.e. it can context-
+ * switch — fatal from NMI context (the NMI-blocked latch only clears on iret).
+ * So this macro only installs the IDT entry; the stub saves state, calls
+ * nmi_watchdog() and irets.
  */
 #define	NMI_INTR(n,name) \
-	IDT_ENTRY(EXT(name),K_INTR_GATE);\
-Entry(name)				;\
-	pushl	$0			;\
-	pushl	$(n)			;\
-	jmp	EXT(alltraps)
+	IDT_ENTRY(EXT(name),K_INTR_GATE)
 
 /*
  * Interrupt.

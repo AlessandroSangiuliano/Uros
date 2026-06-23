@@ -804,6 +804,43 @@ Entry(t_page_fault)
  * NB: below use of CPU_NUMBER assumes that macro will use correct
  * segment register for any kernel data accesses.
  */
+/*
+ * t_nmi — dedicated NMI handler for the #344 perf-counter watchdog.
+ *
+ * Entered through an interrupt gate (vector 2).  Deliberately does NOT use
+ * alltraps: an NMI must return through a plain iret (which clears the NMI-
+ * blocked latch) WITHOUT the trap-return path's stack switch and AST_URGENT
+ * preemption check — those can context-switch, which corrupts the NMI state.
+ * Builds the same i386_saved_state layout alltraps does, calls nmi_watchdog(),
+ * then restores and irets.  Short and non-recursive (HW blocks NMI until iret);
+ * runs on the current kernel stack (the CPU loaded ktss.esp0 on a user-mode
+ * NMI).
+ */
+Entry(t_nmi)
+	pushl	$0			/* no error code: push a fake one */
+	pushl	$2			/* T_NMI trap-number slot */
+	pusha				/* eax,ecx,edx,ebx,esp,ebp,esi,edi */
+	pushl	%ds			/* segment registers (struct order) */
+	pushl	%es
+	pushl	%fs
+	pushl	%gs
+	mov	%ss,%ax
+	mov	%ax,%ds			/* kernel data segs for the C handler */
+	mov	%ax,%es
+	mov	$CPU_DATA,%ax
+	mov	%ax,%gs			/* per-CPU base so cpu_number() works */
+	cld
+	pushl	%esp			/* pass &saved_state */
+	call	EXT(nmi_watchdog)
+	addl	$4,%esp
+	popl	%gs			/* restore the interrupted segments */
+	popl	%fs
+	popl	%es
+	popl	%ds
+	popa
+	addl	$8,%esp			/* pop trapno + fake err */
+	iret
+
 Entry(alltraps)
 	pusha				/* save the general registers */
 trap_push_segs:
