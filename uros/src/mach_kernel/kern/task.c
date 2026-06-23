@@ -1144,6 +1144,22 @@ task_hold_locked(
 	list = &task->thr_acts;
 	thr_act = (thread_act_t) queue_first(list);
 	while (!queue_end(list, (queue_entry_t) thr_act)) {
+		/*
+		 * #344: guard against a corrupted thr_acts list.  Terminating a
+		 * task whose kernel structures were scribbled (e.g. a task that
+		 * crashed with a wild user jump left task->thr_acts.next at a
+		 * near-NULL garbage value) made act_lock_thread() fault on the
+		 * bogus thr_act at IF=0 and panic the kernel -- one bad task must
+		 * not take the whole system down.  A thr_act must be a pointer-
+		 * aligned kernel VA; if it isn't, bail loudly instead of faulting.
+		 */
+		if ((vm_offset_t) thr_act < VM_MIN_KERNEL_ADDRESS ||
+		    ((vm_offset_t) thr_act & (sizeof(vm_offset_t) - 1))) {
+			printf("task_hold_locked: corrupt thr_acts in task %p "
+			       "(thr_act=%p) -- aborting hold\n",
+			       (void *)task, (void *)thr_act);
+			break;
+		}
 		(void)act_lock_thread(thr_act);
 		thread_hold(thr_act);
 		act_unlock_thread(thr_act);
