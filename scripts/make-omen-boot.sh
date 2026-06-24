@@ -99,6 +99,19 @@ fi
 for f in "$KERNEL" "$BOOTSTRAP" "$BUNDLE"; do
     [ -f "$f" ] || { echo "ERROR: missing $f (build the kernel first)"; exit 1; }
 done
+
+# Always regenerate ksyms.bin from the EXACT kernel we are about to ship.  A
+# stale ksyms (kernel rebuilt, symbol table not) makes every DDB `trace` resolve
+# to the wrong function — hours wasted chasing phantom call chains (#344).  Bind
+# the symbol table to this kernel binary here so the two can never drift.
+GEN_KSYMS="$REPO_ROOT/scripts/gen-ksyms.py"
+if command -v python3 >/dev/null 2>&1 && [ -f "$GEN_KSYMS" ]; then
+    echo "Regenerating ksyms.bin from $KERNEL ..."
+    python3 "$GEN_KSYMS" "$KERNEL" "$KSYMS" || {
+        echo "ERROR: gen-ksyms.py failed — refusing to ship a stale symbol table"; exit 1; }
+else
+    echo "WARNING: python3 or gen-ksyms.py missing — shipping existing $KSYMS as-is"
+fi
 HAVE_KSYMS=false
 [ -f "$KSYMS" ] && HAVE_KSYMS=true
 
