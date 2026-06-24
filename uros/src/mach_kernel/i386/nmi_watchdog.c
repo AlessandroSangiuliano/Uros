@@ -54,6 +54,7 @@
 #endif	/* NCPUS > 1 */
 
 extern void cnputc(char);
+extern int  db_active;		/* nonzero while a CPU is stopped in DDB */
 
 /*
  * heartbeat — bumped by the clock tick (hardclock / lapic_timer_handler),
@@ -61,6 +62,27 @@ extern void cnputc(char);
  * Defined unconditionally so the tick paths can bump it without #if soup.
  */
 volatile unsigned int nmi_heartbeat = 0;
+
+/*
+ * Per-CPU dedicated stacks for the NMI handler (#344).  A user-mode NMI makes
+ * the CPU load ktss.esp0, which on this kernel points into the interrupted
+ * thread's INLINE-pcb saved-state area (act+0x58, see act_machine_switch_pcb in
+ * pcb.c) -- NOT a real kernel stack.  alltraps switches to thread->kernel_stack
+ * after saving registers; the t_nmi stub (deliberately) does not, so running the
+ * C watchdog there underflows the tiny saved-state slot down through act+0
+ * (thr_acts.next) and the pcb segment/LDT state, corrupting the current thread's
+ * activation -- the deterministic omen task-corruption.  t_nmi switches to this
+ * CPU's slot (indexed by CPU_NUMBER) before calling nmi_watchdog(): one stack per
+ * CPU so concurrent NMIs on an SMP box never share a stack.  HW blocks NMI
+ * re-entry on a CPU until iret, so a single slot per CPU suffices.
+ *
+ * NB: the t_nmi stub computes the slot top as nmi_stacks + (cpu+1)<<12, so
+ * NMI_STACK_SIZE is locked to 4096 -- the _Static_assert guards against drift.
+ */
+#define NMI_STACK_SIZE	4096
+_Static_assert(NMI_STACK_SIZE == 4096,
+	       "t_nmi in locore.S hardcodes shll $12 for the per-CPU slot index");
+unsigned char nmi_stacks[NCPUS][NMI_STACK_SIZE] __attribute__((aligned(16)));
 
 /*
  * Set by the "-W" boot argument.  parse_arguments() runs BEFORE the BSS is
@@ -177,6 +199,17 @@ nmi_watchdog(struct i386_saved_state *regs)
 	 */
 	wd_arm_pmc();
 	LAPIC_REG32(LAPIC_LVT_PERFCNT) = LAPIC_LVT_DM_NMI;
+
+	/*
+	 * In DDB the clock is legitimately stopped (IF=0, interactive).  That is
+	 * not a wedge -- don't print the misleading "halted; power-cycle" banner
+	 * over a live debugger session.  Treat it as a heartbeat so the stale
+	 * counter resets the moment we resume.
+	 */
+	if (db_active) {
+		wd_stale[cpu] = 0;
+		return;
+	}
 
 	hb = nmi_heartbeat;
 	if (hb != wd_last_hb[cpu]) {		/* clock still ticking: healthy */
