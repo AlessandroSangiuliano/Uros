@@ -1514,6 +1514,20 @@ vm_page_release(
 	if (mem->free)
 		panic("vm_page_release");
 	mem->free = TRUE;
+	/*
+	 * #344: route by the physical address, not the cached highmem flag.
+	 * On large-RAM machines (omen 16 GB, reproduced under QEMU -m 6G) some
+	 * pages above LOWMEM_LIMIT reached the free lists with highmem=FALSE
+	 * (the pmap_startup labeling does not cover every page that ends up
+	 * freed here).  Such a page on the lowmem list gets handed to
+	 * vm_page_grab() as a page table -- which pmap_pte()/ptetokv() can only
+	 * reach through the <512 MB direct-map window (phys+VM_MIN_KERNEL_ADDRESS
+	 * overflows past 4 GB otherwise) -> #344 KLOWFAULT.  phys_addr is always
+	 * correct, so derive the flag from it here: this is the single gate
+	 * through which every page enters a free list, so it can never be wrong
+	 * downstream.
+	 */
+	mem->highmem = !pa_is_lowmem(mem->phys_addr);
 	if (mem->highmem) {
 		mem->pageq.next = (queue_entry_t) vm_page_queue_free_highmem;
 		vm_page_queue_free_highmem = mem;
