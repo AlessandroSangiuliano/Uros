@@ -274,9 +274,10 @@ mp_desc_init(
 	    mpt->ktss.io_bit_map_offset = 0x0FFF;	/* no IO bitmap */
 
 	    /*
-	     * Program SYSENTER MSRs for this AP.
+	     * Program SYSENTER MSRs for this AP (#348: ESP -> this AP's
+	     * per-CPU trampoline slot, indexed by its dense CPU number).
 	     */
-	    sysenter_ap_init(0);
+	    sysenter_ap_init(mycpu);
 
 	    return mpt;
 	}
