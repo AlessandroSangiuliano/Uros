@@ -704,6 +704,13 @@ parse_arguments(void)
 				 * realloc to catch use-after-free (#344). */
 		    { extern boolean_t zfree_clear; zfree_clear = TRUE; }
 		    break;
+		case 'D':	/* -D: enable the SMP Direct-Thread-Switch on the
+				 * IPC slow path (ipc_dts_smp).  Off by default;
+				 * this flag turns it on for a same-binary A/B of
+				 * the separate send/recv bench (intra/inter --
+				 * comb rides the hotpath, not this path). */
+		    { extern int ipc_dts_smp; ipc_dts_smp = 1; }
+		    break;
 		default:
 #if	NCPUS > 1 && AT386
 		    if (ch > '0' && ch <= '9')
