@@ -1857,10 +1857,21 @@ Entry(syscall_int80)
 LEXT(sysenter_entry)
 	/*
 	 * SYSENTER does NOT clear IF, so disable interrupts first.
-	 * SS.base=0 from SYSENTER matches our flat KERNEL_DS, and
-	 * ESP is already a valid kernel virtual address from the MSR.
+	 * SS.base=0 from SYSENTER matches our flat KERNEL_DS.
 	 */
 	cli
+
+	/*
+	 * #348: IA32_SYSENTER_ESP points at this CPU's trampoline slot
+	 * (sysenter_stub[cpu].kstack), not the thread kernel stack.  Switch
+	 * to the real kernel stack with a single load -- replacing the
+	 * ~144 cyc per-switch WRMSR with a ~3 cyc store + this ~4 cyc load.
+	 * %esp now == &slot.kstack; the slot holds the thread's kernel stack
+	 * top (kept current by sysenter_update_esp).  An NMI/#MC taken right
+	 * here pushes into the slot's scratch area below .kstack, so .kstack
+	 * stays intact across this one-instruction window (see sysenter.c).
+	 */
+	movl	(%esp),%esp
 
 	pushl	%eax			/* save syscall number */
 
