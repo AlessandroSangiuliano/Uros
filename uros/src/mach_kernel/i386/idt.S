@@ -146,6 +146,18 @@ Entry(name)				;\
 	jmp	EXT(alltraps)
 
 /*
+ * NMI.  Installed through an interrupt gate (clears IF); the handler body is a
+ * dedicated minimal stub (t_nmi in locore.S), NOT alltraps.  An NMI must NOT
+ * take the normal kernel trap-return path: trap_from_kernel switches stacks and
+ * checks need_ast for AST_URGENT preemption (locore.S), i.e. it can context-
+ * switch — fatal from NMI context (the NMI-blocked latch only clears on iret).
+ * So this macro only installs the IDT entry; the stub saves state, calls
+ * nmi_watchdog() and irets.
+ */
+#define	NMI_INTR(n,name) \
+	IDT_ENTRY(EXT(name),K_INTR_GATE)
+
+/*
  * Interrupt.
  */
 #define	INTERRUPT(n) \
@@ -161,7 +173,7 @@ Entry(idt)
 
 EXCEPTION(0x00,t_zero_div)
 EXCEP_SPC(0x01,t_debug)
-INTERRUPT(0x02)			/* NMI */
+NMI_INTR(0x02,t_nmi)		/* NMI -> alltraps -> kernel_trap T_NMI (#344) */
 EXCEP_USR(0x03,t_int3)
 EXCEP_USR(0x04,t_into)
 EXCEP_USR(0x05,t_bounds)

@@ -804,6 +804,56 @@ Entry(t_page_fault)
  * NB: below use of CPU_NUMBER assumes that macro will use correct
  * segment register for any kernel data accesses.
  */
+/*
+ * t_nmi — dedicated NMI handler for the #344 perf-counter watchdog.
+ *
+ * Entered through an interrupt gate (vector 2).  Deliberately does NOT use
+ * alltraps: an NMI must return through a plain iret (which clears the NMI-
+ * blocked latch) WITHOUT the trap-return path's stack switch and AST_URGENT
+ * preemption check — those can context-switch, which corrupts the NMI state.
+ * Builds the same i386_saved_state layout alltraps does, calls nmi_watchdog(),
+ * then restores and irets.  Short and non-recursive (HW blocks NMI until iret).
+ *
+ * #344: a user-mode NMI makes the CPU load ktss.esp0, which points into the
+ * interrupted thread's INLINE-pcb saved-state area (act+0x58), NOT a real kernel
+ * stack -- alltraps switches to thread->kernel_stack but we must not (the AST/
+ * preemption path corrupts the NMI latch).  So we build the saved-state on the
+ * esp0 area, then switch to this CPU's dedicated NMI stack for the C handler,
+ * which would otherwise underflow the saved-state and scribble over the
+ * activation.  Per-CPU slot (CPU_NUMBER index) so concurrent NMIs never share.
+ */
+Entry(t_nmi)
+	pushl	$0			/* no error code: push a fake one */
+	pushl	$2			/* T_NMI trap-number slot */
+	pusha				/* eax,ecx,edx,ebx,esp,ebp,esi,edi */
+	pushl	%ds			/* segment registers (struct order) */
+	pushl	%es
+	pushl	%fs
+	pushl	%gs
+	mov	%ss,%ax
+	mov	%ax,%ds			/* kernel data segs for the C handler */
+	mov	%ax,%es
+	mov	$CPU_DATA,%ax
+	mov	%ax,%gs			/* per-CPU base so cpu_number() works */
+	cld
+	movl	%esp,%edx		/* edx = &saved_state (on the esp0 area) */
+	xorl	%eax,%eax		/* cpu 0 default (UP: CPU_NUMBER is a no-op) */
+	CPU_NUMBER(%eax)		/* SMP: eax = this CPU's number (via %gs) */
+	incl	%eax			/* select the TOP of this CPU's slot */
+	shll	$12,%eax		/* * NMI_STACK_SIZE == 4096 (see _Static_assert) */
+	addl	$EXT(nmi_stacks),%eax
+	movl	%eax,%esp		/* per-CPU dedicated NMI stack */
+	pushl	%edx			/* pass &saved_state (and stash it) */
+	call	EXT(nmi_watchdog)
+	popl	%esp			/* esp <- &saved_state (back on esp0 area) */
+	popl	%gs			/* restore the interrupted segments */
+	popl	%fs
+	popl	%es
+	popl	%ds
+	popa
+	addl	$8,%esp			/* pop trapno + fake err */
+	iret
+
 Entry(alltraps)
 	pusha				/* save the general registers */
 trap_push_segs:

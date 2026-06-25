@@ -277,6 +277,12 @@ slave_machine_init(void)
 	 * eventually LAPIC timer interrupts are silently dropped. */
 	lapic_enable();
 
+	/* #344: arm this AP's perf-counter NMI watchdog (no-op unless -W). */
+	{
+		extern void nmi_watchdog_init(void);
+		nmi_watchdog_init();
+	}
+
 	/* #309 acceptance (AP arm): same SSE2 + x87 sanity check the
 	 * BSP runs from setup_main.  Will #UD here if ap_machine_init
 	 * didn't program CR4 / FPU correctly. */

@@ -1,0 +1,280 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to
+ * deal in the Software without restriction, including without limitation the
+ * rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+ * sell copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ */
+
+/*
+ * nmi_watchdog.c — perf-counter NMI hard-lockup detector (#344).
+ *
+ * The omen bare-metal wedge is a silent freeze with interrupts disabled
+ * (IF=0): the LAPIC-timer / device-clock IRQ is masked, so nothing advances
+ * and an IRQ-based debugger entry (Ctrl+D) can never break in.  An NMI is the
+ * only thing that still fires at IF=0.
+ *
+ * We program a general-purpose performance counter (IA32_PMC0, unhalted core
+ * cycles) to overflow roughly every ~100 ms and route the LAPIC performance-
+ * counter LVT to NMI delivery.  Each NMI checks a heartbeat that the clock
+ * tick bumps at IF=1: if it has not advanced for several NMIs the CPU is
+ * wedged, and we dump the interrupted EIP + registers + a kernel-stack
+ * backtrace LOCK-FREE (cnputc, which never takes printf_lock) so the output
+ * reaches fbcons even if the wedged CPU holds the console lock.
+ *
+ * Caveat: unhalted-cycles counts only while the CPU is executing, so this
+ * catches a spin/deadlock at IF=0.  A CPU genuinely HLT'd at IF=0 stops the
+ * counter and would not be caught — but that case prints nothing either way,
+ * and the absence of a watchdog report is itself the distinguishing signal.
+ *
+ * Opt-in via the "-W" boot argument; off by default so normal runs and KVM
+ * are unperturbed.  Diagnostic infrastructure for #344; keep.
+ */
+
+#include <cpus.h>
+#include <kern/misc_protos.h>
+#include <kern/cpu_number.h>
+#include <mach/vm_param.h>
+#include <i386/proc_reg.h>
+#include <mach/i386/thread_status.h>	/* struct i386_saved_state */
+
+#if	NCPUS > 1
+#include <i386/lapic.h>
+#include <i386/apic.h>
+#endif	/* NCPUS > 1 */
+
+extern void cnputc(char);
+extern int  db_active;		/* nonzero while a CPU is stopped in DDB */
+
+/*
+ * heartbeat — bumped by the clock tick (hardclock / lapic_timer_handler),
+ * which only runs at IF=1.  Stalls the instant the system wedges at IF=0.
+ * Defined unconditionally so the tick paths can bump it without #if soup.
+ */
+volatile unsigned int nmi_heartbeat = 0;
+
+/*
+ * Per-CPU dedicated stacks for the NMI handler (#344).  A user-mode NMI makes
+ * the CPU load ktss.esp0, which on this kernel points into the interrupted
+ * thread's INLINE-pcb saved-state area (act+0x58, see act_machine_switch_pcb in
+ * pcb.c) -- NOT a real kernel stack.  alltraps switches to thread->kernel_stack
+ * after saving registers; the t_nmi stub (deliberately) does not, so running the
+ * C watchdog there underflows the tiny saved-state slot down through act+0
+ * (thr_acts.next) and the pcb segment/LDT state, corrupting the current thread's
+ * activation -- the deterministic omen task-corruption.  t_nmi switches to this
+ * CPU's slot (indexed by CPU_NUMBER) before calling nmi_watchdog(): one stack per
+ * CPU so concurrent NMIs on an SMP box never share a stack.  HW blocks NMI
+ * re-entry on a CPU until iret, so a single slot per CPU suffices.
+ *
+ * NB: the t_nmi stub computes the slot top as nmi_stacks + (cpu+1)<<12, so
+ * NMI_STACK_SIZE is locked to 4096 -- the _Static_assert guards against drift.
+ */
+#define NMI_STACK_SIZE	4096
+_Static_assert(NMI_STACK_SIZE == 4096,
+	       "t_nmi in locore.S hardcodes shll $12 for the per-CPU slot index");
+unsigned char nmi_stacks[NCPUS][NMI_STACK_SIZE] __attribute__((aligned(16)));
+
+/*
+ * Set by the "-W" boot argument.  parse_arguments() runs BEFORE the BSS is
+ * zeroed (see model_dep.c mem_size / cons_is_com1), so a .bss flag set there
+ * gets wiped back to 0 before machine_init reads it — force it into .data.
+ */
+int nmi_watchdog_enabled __attribute__((section(".data"))) = 0;
+
+#if	NCPUS > 1
+
+/* Intel architectural performance-monitoring MSRs. */
+#define MSR_IA32_PERFEVTSEL0	0x186
+#define MSR_IA32_PMC0		0x0C1
+
+/* IA32_PERFEVTSELx fields. */
+#define PES_EVENT_UNHALTED_CYC	0x3C	/* event 0x3C, umask 0x00 */
+#define PES_USR			(1u << 16)
+#define PES_OS			(1u << 17)
+#define PES_INT			(1u << 20)	/* PMI (interrupt) on overflow */
+#define PES_EN			(1u << 22)
+
+/* LAPIC performance-counter LVT register (absent from apic.h). */
+#define LAPIC_LVT_PERFCNT	0x00000340
+
+/* Cycles between NMIs.  omen is ~2.8 GHz, so ~2.8e8 cycles ~= 100 ms. */
+#define WD_RELOAD_CYCLES	280000000ULL
+
+/* No clock tick across this many NMIs (~1 s at ~100 ms/NMI) ==> wedged. */
+#define WD_STALE_LIMIT		10
+
+static unsigned int	wd_last_hb[NCPUS];
+static unsigned int	wd_stale[NCPUS];
+static int		wd_fired[NCPUS];
+static int		wd_seen[NCPUS];	/* clock has ticked at least once */
+
+static void
+wd_puts(const char *s)
+{
+	while (*s)
+		cnputc(*s++);
+}
+
+static void
+wd_hex(unsigned int v)
+{
+	int i;
+
+	cnputc('0');
+	cnputc('x');
+	for (i = 28; i >= 0; i -= 4)
+		cnputc("0123456789abcdef"[(v >> i) & 0xF]);
+}
+
+/*
+ * Reload PMC0 so it counts WD_RELOAD_CYCLES more unhalted cycles, then
+ * overflows (delivering the next PMI/NMI).  The PMC is 48 bits wide; load
+ * (2^48 - N) so the overflow lands after N cycles.  Both terms are compile
+ * time constants, so no 64-bit division is emitted.
+ */
+static void
+wd_arm_pmc(void)
+{
+	unsigned long long v = (1ULL << 48) - WD_RELOAD_CYCLES;
+
+	wrmsr(MSR_IA32_PMC0,
+	      (unsigned int)(v & 0xFFFFFFFFULL),
+	      (unsigned int)((v >> 32) & 0xFFFFULL));
+}
+
+void
+nmi_watchdog_init(void)
+{
+	int cpu;
+
+	if (!nmi_watchdog_enabled)
+		return;
+	if (lapic_start == 0)
+		return;
+
+	cpu = cpu_number();
+	wd_last_hb[cpu] = nmi_heartbeat;
+	wd_stale[cpu] = 0;
+	wd_fired[cpu] = 0;
+	wd_seen[cpu] = 0;
+
+	/* Route the LAPIC perf-counter LVT to NMI delivery, unmasked. */
+	LAPIC_REG32(LAPIC_LVT_PERFCNT) = LAPIC_LVT_DM_NMI;
+
+	/* Arm the counter, then enable it with PMI-on-overflow. */
+	wd_arm_pmc();
+	wrmsr(MSR_IA32_PERFEVTSEL0,
+	      PES_EVENT_UNHALTED_CYC | PES_USR | PES_OS | PES_INT | PES_EN, 0);
+
+	printf("nmi_watchdog: armed on cpu %d (perfcnt LVT -> NMI, ~%u Mcyc/NMI)\n",
+	       cpu, (unsigned int)(WD_RELOAD_CYCLES / 1000000ULL));
+}
+
+void
+nmi_watchdog(struct i386_saved_state *regs)
+{
+	int cpu;
+	unsigned int hb;
+	unsigned int ebp;
+	int i;
+
+	if (!nmi_watchdog_enabled || lapic_start == 0)
+		return;
+
+	cpu = cpu_number();
+
+	/*
+	 * Re-arm first so we keep getting NMIs.  On overflow the LVT sets its
+	 * mask bit; rewriting it (NMI delivery, mask clear) unmasks it.
+	 */
+	wd_arm_pmc();
+	LAPIC_REG32(LAPIC_LVT_PERFCNT) = LAPIC_LVT_DM_NMI;
+
+	/*
+	 * In DDB the clock is legitimately stopped (IF=0, interactive).  That is
+	 * not a wedge -- don't print the misleading "halted; power-cycle" banner
+	 * over a live debugger session.  Treat it as a heartbeat so the stale
+	 * counter resets the moment we resume.
+	 */
+	if (db_active) {
+		wd_stale[cpu] = 0;
+		return;
+	}
+
+	hb = nmi_heartbeat;
+	if (hb != wd_last_hb[cpu]) {		/* clock still ticking: healthy */
+		wd_last_hb[cpu] = hb;
+		wd_stale[cpu] = 0;
+		wd_seen[cpu] = 1;
+		return;
+	}
+	if (!wd_seen[cpu])			/* clock not started yet: wait */
+		return;
+	if (++wd_stale[cpu] < WD_STALE_LIMIT)
+		return;
+	if (wd_fired[cpu])			/* report once per CPU */
+		return;
+	wd_fired[cpu] = 1;
+
+	wd_puts("\n*** NMI WATCHDOG: cpu ");
+	wd_hex((unsigned int)cpu);
+	wd_puts(" wedged (no clock tick ~0.5s) ***\n eip=");
+	wd_hex(regs->eip);
+	wd_puts(" cs=");
+	wd_hex(regs->cs);
+	wd_puts(" efl=");
+	wd_hex(regs->efl);
+	wd_puts("\n eax=");
+	wd_hex(regs->eax);
+	wd_puts(" ebx=");
+	wd_hex(regs->ebx);
+	wd_puts(" ecx=");
+	wd_hex(regs->ecx);
+	wd_puts(" edx=");
+	wd_hex(regs->edx);
+	wd_puts("\n esi=");
+	wd_hex(regs->esi);
+	wd_puts(" edi=");
+	wd_hex(regs->edi);
+	wd_puts(" ebp=");
+	wd_hex(regs->ebp);
+	wd_puts(" esp=");
+	wd_hex(regs->uesp);
+	wd_puts("\n backtrace:");
+
+	/*
+	 * Walk the kernel %ebp frame chain directly (NMI hit kernel code at
+	 * IF=0).  Frames live in kernel VAs and ascend; stop otherwise.
+	 */
+	ebp = regs->ebp;
+	for (i = 0; i < 24 && ebp >= VM_MIN_KERNEL_ADDRESS; i++) {
+		unsigned int *fr = (unsigned int *)ebp;
+		unsigned int ret = fr[1];
+		unsigned int next = fr[0];
+
+		cnputc(' ');
+		wd_hex(ret);
+		if (next <= ebp)		/* not ascending: bail */
+			break;
+		ebp = next;
+	}
+	wd_puts("\n*** halted; power-cycle to retry ***\n");
+}
+
+#else	/* NCPUS > 1 */
+
+/* UP build: no LAPIC perf-counter path.  Provide the symbols as no-ops. */
+void nmi_watchdog_init(void) { }
+void nmi_watchdog(struct i386_saved_state *regs) { (void)regs; }
+
+#endif	/* NCPUS > 1 */

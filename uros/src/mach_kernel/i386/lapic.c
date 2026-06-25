@@ -265,8 +265,12 @@ void
 lapic_timer_handler(struct i386_interrupt_state *regs)
 {
 	boolean_t	usermode;
+	extern volatile unsigned int nmi_heartbeat;	/* #344 watchdog */
 
 	mp_disable_preemption();
+
+	/* #344: bump the NMI-watchdog heartbeat from the per-CPU tick too. */
+	nmi_heartbeat++;
 
 	usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
 	hertz_tick(usermode, (natural_t)regs->eip);

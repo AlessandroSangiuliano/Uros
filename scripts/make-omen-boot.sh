@@ -99,6 +99,19 @@ fi
 for f in "$KERNEL" "$BOOTSTRAP" "$BUNDLE"; do
     [ -f "$f" ] || { echo "ERROR: missing $f (build the kernel first)"; exit 1; }
 done
+
+# Always regenerate ksyms.bin from the EXACT kernel we are about to ship.  A
+# stale ksyms (kernel rebuilt, symbol table not) makes every DDB `trace` resolve
+# to the wrong function — hours wasted chasing phantom call chains (#344).  Bind
+# the symbol table to this kernel binary here so the two can never drift.
+GEN_KSYMS="$REPO_ROOT/scripts/gen-ksyms.py"
+if command -v python3 >/dev/null 2>&1 && [ -f "$GEN_KSYMS" ]; then
+    echo "Regenerating ksyms.bin from $KERNEL ..."
+    python3 "$GEN_KSYMS" "$KERNEL" "$KSYMS" || {
+        echo "ERROR: gen-ksyms.py failed — refusing to ship a stale symbol table"; exit 1; }
+else
+    echo "WARNING: python3 or gen-ksyms.py missing — shipping existing $KSYMS as-is"
+fi
 HAVE_KSYMS=false
 [ -f "$KSYMS" ] && HAVE_KSYMS=true
 
@@ -152,6 +165,13 @@ if [ "$WANT_ISO" = true ]; then
             # stays with the kernel.  A full --bench bundle has char_server,
             # which claims IRQ 1 once it attaches and would shadow the break-key,
             # so leave it off there rather than ship a Ctrl+D that quietly dies.
+            # `-K` is kept by default: ~zero cost (no keypresses during a bench)
+            # and it lets us break into DDB if something wedges.  The debug-only
+            # `-W` (perf-counter NMI watchdog: an NMI every ~100 ms perturbs the
+            # IPC hotpath) and `-Z` (zone poison + verify on every alloc/free,
+            # which the IPC kmsg path hits constantly) measurably slow the
+            # benchmark, so they are NOT armed by default now that #344/#346 are
+            # fixed -- add them by hand to a bundle when chasing a regression.
             K=""; [ "$BENCH_ONLY" = 1 ] && K=" -K"
             emit_iso_entry "(bench, all CPUs)" "$K"
             emit_iso_entry "(bench, 7 CPUs)"   " -c7$K"
@@ -159,6 +179,17 @@ if [ "$WANT_ISO" = true ]; then
             emit_iso_entry "(bench, 4 CPUs)"   " -c4$K"
             emit_iso_entry "(bench, 2 CPUs)"   " -c2$K"
             emit_iso_entry "(bench, 1 CPU UP)" " -c1$K"
+            # `-D` variants: SAME kernel binary, ipc_dts_smp ON.  For a
+            # same-binary A/B of the SMP Direct-Thread-Switch on the separate
+            # send/recv bench (intra/inter -- comb rides the mach_msg hotpath and
+            # is unaffected).  default=0 stays the DTS-off baseline (A); pick a
+            # "DTS" entry for B.  (scheduler perf / #319 follow-up)
+            emit_iso_entry "(bench, all CPUs, DTS)" "$K -D"
+            emit_iso_entry "(bench, 7 CPUs, DTS)"   " -c7$K -D"
+            emit_iso_entry "(bench, 6 CPUs, DTS)"   " -c6$K -D"
+            emit_iso_entry "(bench, 4 CPUs, DTS)"   " -c4$K -D"
+            emit_iso_entry "(bench, 2 CPUs, DTS)"   " -c2$K -D"
+            emit_iso_entry "(bench, 1 CPU UP, DTS)" " -c1$K -D"
         else
             emit_iso_entry "(UrMach, fbcons)" ""
         fi

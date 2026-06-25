@@ -1144,6 +1144,22 @@ task_hold_locked(
 	list = &task->thr_acts;
 	thr_act = (thread_act_t) queue_first(list);
 	while (!queue_end(list, (queue_entry_t) thr_act)) {
+		/*
+		 * #344: guard against a corrupted thr_acts list.  Terminating a
+		 * task whose kernel structures were scribbled (e.g. a task that
+		 * crashed with a wild user jump left task->thr_acts.next at a
+		 * near-NULL garbage value) made act_lock_thread() fault on the
+		 * bogus thr_act at IF=0 and panic the kernel -- one bad task must
+		 * not take the whole system down.  A thr_act must be a pointer-
+		 * aligned kernel VA; if it isn't, bail loudly instead of faulting.
+		 */
+		if ((vm_offset_t) thr_act < VM_MIN_KERNEL_ADDRESS ||
+		    ((vm_offset_t) thr_act & (sizeof(vm_offset_t) - 1))) {
+			printf("task_hold_locked: corrupt thr_acts in task %p "
+			       "(thr_act=%p) -- aborting hold\n",
+			       (void *)task, (void *)thr_act);
+			break;
+		}
 		(void)act_lock_thread(thr_act);
 		thread_hold(thr_act);
 		act_unlock_thread(thr_act);
@@ -1353,6 +1369,27 @@ task_wait_locked(
 	while (1) {
 		thr_act = (thread_act_t) queue_first(list);
 		while (!queue_end(list, (queue_entry_t) thr_act)) {
+			/*
+			 * #344: same guard as task_hold_locked.  Terminating a task
+			 * whose thr_acts list was scribbled with user-register garbage
+			 * (head = a user VA like 0x080985b4) made act_lock_thread()
+			 * mutex_lock a near-NULL address (cr2=0x1f3) and panic at IF=0.
+			 * A thr_act must be a pointer-aligned kernel VA; bail loudly.
+			 */
+			if ((vm_offset_t) thr_act < VM_MIN_KERNEL_ADDRESS ||
+			    ((vm_offset_t) thr_act & (sizeof(vm_offset_t) - 1))) {
+				printf("task_wait_locked: corrupt thr_acts in task %p "
+				       "(thr_act=%p) -- aborting wait\n",
+				       (void *)task, (void *)thr_act);
+				/*
+				 * Point thr_act at the list sentinel so BOTH this inner
+				 * loop and the outer while(1) see queue_end() and stop;
+				 * a bare break would re-enter the outer loop on the same
+				 * corrupt head and spin forever.
+				 */
+				thr_act = (thread_act_t) list;
+				break;
+			}
 			thread = act_lock_thread(thr_act);
 			if (refd_thr_act != THR_ACT_NULL) {
 				act_deallocate(refd_thr_act);

@@ -300,6 +300,14 @@ kdb_trap(
 	boolean_t		trap_from_user;
 	spl_t			s = db_splhigh();
 
+	/*
+	 * #346: mark the debugger active NOW, before kdbprinttrap's printf,
+	 * so printf() drops printf_lock (which the faulting context or a
+	 * stopped peer CPU may hold) instead of deadlocking the console.
+	 * Balanced by db_active-- just before the single return below.
+	 */
+	db_active++;
+
 	switch (type) {
 	    case T_DEBUG:	/* single_step */
 	    {
@@ -431,6 +439,7 @@ kdb_trap(
 	enable_preemption();
 #endif	/* NCPUS > 1 */
 
+	db_active--;			/* #346: balances the entry bump */
 	db_splx(s);
 
 	return (1);
@@ -845,6 +854,8 @@ db_machdep_init(void)
 		INTSTACK_SIZE - sizeof (natural_t));
 	dbtss.esp = dbtss.esp0;
 	dbtss.eip = (int)&db_task_start;
+	dbtss.cr3 = get_cr3();		/* #346: task switch loads CR3 from the
+					 * TSS; 0 left the #DF handler unmapped. */
 }
 
 #else /* NCPUS > 1 */
@@ -883,6 +894,11 @@ db_machdep_init(void)
 				(INTSTACK_SIZE * (c + 1)) - sizeof (natural_t));
 			dbtss.esp = dbtss.esp0;
 			dbtss.eip = (int)&db_task_start;
+			dbtss.cr3 = get_cr3();	/* #346: a task switch loads CR3
+						 * from the TSS; 0 left the #DF
+						 * handler running unmapped.  APs
+						 * inherit this via mp_desc_init's
+						 * bcopy of dbtss. */
 			/*
 			 * The TSS for the debugging task on each slave CPU
 			 * is set up in mp_desc_init().
@@ -993,6 +1009,17 @@ lock_kdb(void)
 
 	for(;;) {
 		kdb_console();
+		/*
+		 * #344: recursive kdb entry on the SAME cpu (a fault taken while
+		 * already inside the debugger -- e.g. DDB dereferences a corrupt
+		 * activation/task while reporting a panic).  We already hold
+		 * kdb_lock, so db_simple_lock_try() below would fail forever and
+		 * spin here at IF=0 -- a silent hard wedge (caught by the NMI
+		 * watchdog: lock_kdb <- kdb_enter <- kdb_trap <- kdb_trap).  Break
+		 * out: we own the lock, just re-enter.
+		 */
+		if (kdb_cpu == my_cpu)
+			break;
 		if (kdb_cpu != -1 && kdb_cpu != my_cpu) {
 			continue;
 		}
@@ -1001,7 +1028,7 @@ lock_kdb(void)
 				break;
 			db_simple_unlock(&kdb_lock);
 		}
-	} 
+	}
 
 #if	NCPUS > 1
 	enable_preemption();

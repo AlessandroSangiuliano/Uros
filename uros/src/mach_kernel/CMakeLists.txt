@@ -588,6 +588,7 @@ set(I386_C_SOURCES
     i386/io_emulate.c
     i386/io_map.c
     i386/iopb.c
+    i386/nmi_watchdog.c
     i386/ktss.c
     i386/ldt.c
     i386/loose_ends.c

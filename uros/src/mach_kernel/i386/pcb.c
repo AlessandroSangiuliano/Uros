@@ -279,6 +279,7 @@ act_machine_switch_pcb( thread_act_t new_act )
 
         assert(new_act->thread != NULL);
         assert(new_act->thread->kernel_stack != 0);
+
         STACK_IEL(new_act->thread->kernel_stack)->saved_state =
                 &new_act->mact.pcb->iss;
 
