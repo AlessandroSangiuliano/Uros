@@ -889,11 +889,15 @@ void
 printf(const char *fmt, ...)
 {
 	va_list	listp;
+	extern int db_active;		/* #346: while a CPU is in DDB, skip
+					 * printf_lock -- it may be held by the
+					 * faulting context or a stopped peer CPU,
+					 * which deadlocks the debugger's console. */
 
 	disable_preemption();
 	va_start(listp, fmt);
 #if	MP_PRINTF
-	if (cpu_data[master_cpu].active_thread) {
+	if (cpu_data[master_cpu].active_thread && !db_active) {
 		simple_lock(&printf_lock);
 		if (cpu_number() != master_cpu)
 			new_printf_cpu_number = TRUE;

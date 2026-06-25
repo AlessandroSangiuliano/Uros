@@ -138,7 +138,9 @@ struct i386_tss	dbtss = {
 	KERNEL_DS,			/* ss */
 	KERNEL_DS,			/* ds */
 	KERNEL_DS,			/* fs */
-	KERNEL_DS,			/* gs */
+	CPU_DATA,			/* gs -- #346: db_task_start does CPU_NUMBER
+					 * (%gs:cpu_id) on SMP; KERNEL_DS (base 0)
+					 * made it read garbage and triple-fault. */
 	KERNEL_LDT,			/* ldt */
 	0,				/* trace_trap */
 	0x0FFF				/* IO bitmap offset -
