@@ -50,15 +50,21 @@
 /*
  * Per-CPU helpers, matching the asm macros locore.S / interrupt.S define
  * locally (there is no shared asm header for them).  ipi.S only ever
- * compiles for NCPUS > 1, so the MP forms are unconditional.  CPU_NUMBER
- * reads the LAPIC ID register exactly like <i386/AT386/mp/mp.h>; CX indexes
- * a per-CPU array by the cpu number held in a register.
+ * compiles for NCPUS > 1, so the MP forms are unconditional.  CX indexes a
+ * per-CPU array by the cpu number held in a register.
+ *
+ * #346: CPU_NUMBER must return the DENSE SLOT, not the raw LAPIC id.  It used
+ * to read the LAPIC id register (>>24 & 0x0f) WITHOUT the lapic_to_slot[] remap
+ * that <i386/AT386/mp/mp.h>'s CPU_NUMBER_FROM_LAPIC applies -- so on a box whose
+ * APIC ids are not slot numbers (omen: slot 1 = APIC id 2) the timer/IPI handler
+ * indexed int_stack_top[]/curr_ipl[] by 2 instead of 1, out of bounds at 2 CPUs
+ * -> garbage %esp -> #DF -> reset.  IPI_ENTER has already loaded %gs = CPU_DATA,
+ * so read the slot straight from %gs:cpu_id like the rest of the kernel (#321) --
+ * correct, and it drops the per-tick LAPIC MMIO read too.
  */
 #define	CPU_NUMBER(r)			\
-	movl	EXT(lapic_id), r	;\
-	movl	0(r),r			;\
-	shrl	$LAPIC_ID_SHIFT, r	;\
-	andl	$LAPIC_ID_MASK, r
+	movl	$CPU_DATA_CPU_ID, r	;\
+	movl	%gs:(r), r
 #define	CX(addr,reg)	addr(,reg,4)
 
 #define IPI_ENTER	\
