@@ -1755,6 +1755,7 @@ bench_mach_print(int iters)
 #define SUITE_COMB	(1u << 10)
 #define SUITE_CC	(1u << 11)	/* concurrent same-space (#327) */
 #define SUITE_FAULT	(1u << 12)	/* concurrent same-space faults (#338) */
+#define SUITE_SCALE	(1u << 13)	/* concurrency sweep, clean numbers (#319) */
 #define SUITE_ALL	0xFFFFFFFFu
 
 static int
@@ -1785,6 +1786,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
+	else if (streq(argv[i], "scale"))   mask |= SUITE_SCALE;
     }
     return mask ? mask : SUITE_ALL;
 }
@@ -1804,7 +1806,9 @@ parse_suites(int argc, char **argv)
  * (A/B) to isolate the lock from raw CPU parallelism.
  * =================================================================== */
 
-#define MAX_CC_THREADS	8
+#define MAX_CC_THREADS	32	/* #319: oversubscription sweep up to 32 */
+#define SCALE_ITERS	2000	/* per thread per run in the scale sweep */
+#define SCALE_RUNS	5	/* runs per thread-count -> median (kill noise) */
 
 typedef struct {
     mach_port_t	echo_port;
@@ -1844,12 +1848,19 @@ cc_worker_func(void *arg)
     return (void *)0;
 }
 
-static void
-bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
+/*
+ * Run the concurrent same-space RPC workload ONCE and return the aggregate
+ * wall-clock ns (no print).  Shared by the cc suite (#327) and the scale sweep
+ * (#319).  nthreads workers each do iters RPCs through a private echo thread,
+ * all released together by the g_cc_go barrier.
+ */
+static unsigned long
+cc_run_once(int nthreads, int send_size, int iters_per_thread)
 {
     cc_worker_t		w[MAX_CC_THREADS];
     tvalspec_t		t0, t1;
     kern_return_t	kr;
+    unsigned long	total_ns;
     int			i;
 
     if (nthreads > MAX_CC_THREADS)
@@ -1857,22 +1868,15 @@ bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
 
     g_cc_go = 0;
 
-    /*
-     * Per worker: a private echo receive port (+ a MAKE_SEND right) and a
-     * reply port, plus a dedicated echo thread.  spawn_echo() uses a single
-     * global ready port, so the echo threads must be created one at a time,
-     * before the workers are released.
-     */
     for (i = 0; i < nthreads; i++) {
 	kr = mach_port_allocate(mach_task_self(),
 				MACH_PORT_RIGHT_RECEIVE, &w[i].echo_port);
-	if (kr) { printf("  cc[%d]: echo alloc failed %d\n", i, kr); return; }
+	if (kr) { printf("  cc[%d]: echo alloc failed %d\n", i, kr); return 0; }
 	mach_port_insert_right(mach_task_self(), w[i].echo_port,
 			       w[i].echo_port, MACH_MSG_TYPE_MAKE_SEND);
 	w[i].reply_port = mach_reply_port();
 	w[i].iters	= iters_per_thread;
 	w[i].send_size	= send_size;
-
 	spawn_echo("cc-echo", echo_thread_func, w[i].echo_port);
     }
 
@@ -1884,20 +1888,77 @@ bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
     for (i = 0; i < nthreads; i++)
 	pthread_join(w[i].th, NULL);
     get_time(&t1);
-
-    {
-	unsigned long	total_ns  = elapsed_ns(&t0, &t1);
-	long		total_rpc = (long)nthreads * iters_per_thread;
-	unsigned long	per_rpc	  = total_ns / (total_rpc ? total_rpc : 1);
-
-	printf("  concurrent same-space x%d   %ld RPCs in %lu ns  "
-	       "(%lu ns/RPC aggregate)\n",
-	       nthreads, total_rpc, total_ns, per_rpc);
-    }
+    total_ns = elapsed_ns(&t0, &t1);
 
     for (i = 0; i < nthreads; i++) {
 	mach_port_destroy(mach_task_self(), w[i].echo_port);
 	mach_port_destroy(mach_task_self(), w[i].reply_port);
+    }
+    return total_ns;
+}
+
+static void
+bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
+{
+    unsigned long	total_ns;
+    long		total_rpc;
+
+    if (nthreads > MAX_CC_THREADS)
+	nthreads = MAX_CC_THREADS;
+    total_ns  = cc_run_once(nthreads, send_size, iters_per_thread);
+    total_rpc = (long)nthreads * iters_per_thread;
+    printf("  concurrent same-space x%d   %ld RPCs in %lu ns  "
+	   "(%lu ns/RPC aggregate)\n",
+	   nthreads, total_rpc, total_ns,
+	   total_ns / (total_rpc ? total_rpc : 1));
+}
+
+/*
+ * #319: concurrency sweep with median-of-N for CLEAN scaling numbers.  At the
+ * current CPU count (set at boot, -cN), run the concurrent same-space RPC
+ * workload at increasing thread counts; for each, take the median over
+ * SCALE_RUNS runs (a warmup run is discarded) to kill the single-run variance.
+ * Report aggregate ns/RPC and speedup vs 1 thread.  This stresses the
+ * scheduler/runq + IPC wakeup (the #319 target): perfect scaling keeps ns/RPC
+ * flat (speedup = T); a global-runq bottleneck makes ns/RPC rise (speedup < T).
+ * One boot = one clean curve for that CPU count; reboot with -cN for the rest.
+ */
+static void
+bench_scale(void)
+{
+    static const int	tc[] = { 1, 2, 4, 6, 8, 12, 16, 24, 32 };
+    int			ntc = (int)(sizeof(tc) / sizeof(tc[0]));
+    int			send = (int)sizeof(bench_null_msg_t);
+    unsigned long	base_nspr = 0;
+    int			i, r, a, b;
+
+    printf("    thr   med ns/RPC(aggr)   speedup vs 1\n");
+    for (i = 0; i < ntc; i++) {
+	int		T = tc[i];
+	unsigned long	s[SCALE_RUNS], med, nspr, sx100;
+
+	if (T > MAX_CC_THREADS)
+	    break;
+
+	(void) cc_run_once(T, send, SCALE_ITERS / 4);	/* warmup, discarded */
+	for (r = 0; r < SCALE_RUNS; r++)
+	    s[r] = cc_run_once(T, send, SCALE_ITERS);
+	/* insertion sort of SCALE_RUNS samples -> median (no qsort/stdlib) */
+	for (a = 1; a < SCALE_RUNS; a++) {
+	    unsigned long key = s[a];
+	    for (b = a - 1; b >= 0 && s[b] > key; b--)
+		s[b + 1] = s[b];
+	    s[b + 1] = key;
+	}
+	med  = s[SCALE_RUNS / 2];
+	nspr = med / ((unsigned long)T * SCALE_ITERS);
+	if (nspr == 0)
+	    nspr = 1;
+	if (i == 0)
+	    base_nspr = nspr;
+	sx100 = (unsigned long)T * base_nspr * 100 / nspr;	/* speedup x100 */
+	printf("    %-4d  %-15lu   %lu.%02lux\n",
+	       T, nspr, sx100 / 100, sx100 % 100);
     }
 }
 
@@ -2233,6 +2294,15 @@ main(int argc, char **argv)
 	printf("    completion = no deadlock;  'ok' = no corruption\n");
 	bench_fault_stress(16, 2048, 256);	/* 16 thr, 2 MB chunks */
 	bench_fault_stress(32, 1024, 256);	/* 32 thr (4x oversub), 1 MB */
+	printf("\n");
+    }
+
+    if (suites & SUITE_SCALE) {
+	printf("--- scaling sweep (#319: concurrent same-space RPC, "
+	       "median of %d) ---\n", SCALE_RUNS);
+	printf("    curve for the CURRENT cpu count (boot -cN); "
+	       "speedup<T => runq/scheduler contention\n");
+	bench_scale();
 	printf("\n");
     }
 
