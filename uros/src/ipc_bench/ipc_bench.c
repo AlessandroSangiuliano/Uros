@@ -1754,6 +1754,7 @@ bench_mach_print(int iters)
 #define SUITE_FLIPC2	(1u <<  9)
 #define SUITE_COMB	(1u << 10)
 #define SUITE_CC	(1u << 11)	/* concurrent same-space (#327) */
+#define SUITE_FAULT	(1u << 12)	/* concurrent same-space faults (#338) */
 #define SUITE_ALL	0xFFFFFFFFu
 
 static int
@@ -1783,6 +1784,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "flipc2"))  mask |= SUITE_FLIPC2;
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
+	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
     }
     return mask ? mask : SUITE_ALL;
 }
@@ -1896,6 +1898,109 @@ bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
     for (i = 0; i < nthreads; i++) {
 	mach_port_destroy(mach_task_self(), w[i].echo_port);
 	mach_port_destroy(mach_task_self(), w[i].reply_port);
+    }
+}
+
+/* ===================================================================
+ * pmap concurrent-fault stress (#338: split page-table locks)
+ *
+ * N worker threads (oversubscribed vs CPUs) each loop: mmap a private
+ * anonymous chunk, write every page (faults it in -> pmap_enter on this
+ * address space), read every page back checking the value (a racing
+ * pmap_remove/enter or a missed TLB shootdown would corrupt it), then
+ * munmap (-> pmap_remove).  All in ONE address space across all CPUs,
+ * so it hammers the per-PT-page pt-locks, the pmd_same recheck, the
+ * enter<->activate TLB barrier and the protocol-2/3 ordering -- the
+ * paths KVM (TSO) cannot exercise.  Completion = no deadlock; the value
+ * check = no corruption.
+ * =================================================================== */
+
+#define MAX_FAULT_THREADS	32
+
+static volatile int	g_fault_go;
+static volatile int	g_fault_err;
+
+typedef struct {
+    int			id;
+    int			iters;
+    int			chunk_kb;
+    pthread_t		th;
+    unsigned long	checksum;
+} fault_worker_t;
+
+static void *
+fault_worker_func(void *arg)
+{
+    fault_worker_t	*w = (fault_worker_t *)arg;
+    vm_size_t		sz = (vm_size_t)w->chunk_kb * 1024;
+    unsigned long	sum = 0;
+    int			it;
+    vm_size_t		off;
+
+    while (!g_fault_go)		/* all workers start together */
+	;
+
+    for (it = 0; it < w->iters; it++) {
+	vm_address_t	addr = 0;
+	volatile char	*p;
+
+	/* Mach-native anonymous map (== mmap MAP_ANON under the hood); the
+	 * sa_mach header shadow makes <sys/mman.h> clash on off_t. */
+	if (vm_allocate(mach_task_self(), &addr, sz, TRUE) != KERN_SUCCESS) {
+	    g_fault_err = 1;
+	    continue;
+	}
+	p = (volatile char *)addr;
+	/* fault every page in (pmap_enter) */
+	for (off = 0; off < sz; off += 4096)
+	    p[off] = (char)((off >> 12) + it + w->id);
+	/* read back: a racing remove/enter or stale TLB shows up here */
+	for (off = 0; off < sz; off += 4096) {
+	    if (p[off] != (char)((off >> 12) + it + w->id))
+		g_fault_err = 1;
+	    sum += (unsigned char)p[off];
+	}
+	vm_deallocate(mach_task_self(), addr, sz);	/* pmap_remove */
+    }
+    w->checksum = sum;
+    return (void *)0;
+}
+
+static void
+bench_fault_stress(int nthreads, int chunk_kb, int iters_per_thread)
+{
+    fault_worker_t	w[MAX_FAULT_THREADS];
+    tvalspec_t		t0, t1;
+    int			i;
+
+    if (nthreads > MAX_FAULT_THREADS)
+	nthreads = MAX_FAULT_THREADS;
+
+    g_fault_go = 0;
+    g_fault_err = 0;
+
+    for (i = 0; i < nthreads; i++) {
+	w[i].id		= i;
+	w[i].iters	= iters_per_thread;
+	w[i].chunk_kb	= chunk_kb;
+	w[i].checksum	= 0;
+	pthread_create(&w[i].th, NULL, fault_worker_func, &w[i]);
+    }
+
+    get_time(&t0);
+    g_fault_go = 1;
+    for (i = 0; i < nthreads; i++)
+	pthread_join(w[i].th, NULL);
+    get_time(&t1);
+
+    {
+	unsigned long	total_ns = elapsed_ns(&t0, &t1);
+	long		pages	 = (long)nthreads * iters_per_thread *
+				   ((long)chunk_kb / 4);
+	printf("  fault-stress x%-2d  %dKB x %d iters  "
+	       "%ld page-faults in %lu ns  ->  %s\n",
+	       nthreads, chunk_kb, iters_per_thread, pages, total_ns,
+	       g_fault_err ? "**CORRUPTION/ERROR**" : "ok");
     }
 }
 
@@ -2119,6 +2224,15 @@ main(int argc, char **argv)
 	bench_concurrent_samespace(4, (int)sizeof(bench_null_msg_t),
 				   BENCH_ITERS);
 
+	printf("\n");
+    }
+
+    if (suites & SUITE_FAULT) {
+	printf("--- pmap fault stress "
+	       "(#338: concurrent same-space page faults) ---\n");
+	printf("    completion = no deadlock;  'ok' = no corruption\n");
+	bench_fault_stress(16, 2048, 256);	/* 16 thr, 2 MB chunks */
+	bench_fault_stress(32, 1024, 256);	/* 32 thr (4x oversub), 1 MB */
 	printf("\n");
     }
 
