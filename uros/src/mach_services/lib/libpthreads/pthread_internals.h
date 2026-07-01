@@ -116,6 +116,12 @@ typedef struct _pthread
 	unsigned long  sigmask;	      /* Blocked signal set */
 	unsigned long  sigpending;    /* Pending signal set */
 	mach_port_t    sig_sem;	      /* Semaphore for sigwait() wakeup */
+	int	       pool_wake;      /* #352: per-thread futex seq for pool park/wake.
+					 * MUST be per-thread, not per-pool-slot: a slot
+					 * address is reused by the next parker before the
+					 * previous (already pool_get'd) thread is woken, so a
+					 * slot-keyed futex piles two threads on one key and
+					 * thread_wakeup_one() strands one of them. */
 	void	       *tsd[_POSIX_THREAD_KEYS_MAX];  /* Thread specific data */
 } *pthread_t;
 
