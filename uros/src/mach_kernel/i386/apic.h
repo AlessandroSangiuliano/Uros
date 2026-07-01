@@ -28,7 +28,16 @@
 
 #define LAPIC_ID			0x00000020
 #define		LAPIC_ID_SHIFT		24
-#define		LAPIC_ID_MASK		0x0F
+/*
+ * #354: the xAPIC Local APIC ID field (bits 24-31) is 8 bits wide, so the
+ * mask MUST be 0xFF.  It used to be 0x0F, which truncated every APIC id to
+ * 4 bits (0-15): fine on omen (8 logical CPUs, ids 0-7), but on a 32-CPU
+ * hybrid part (OMEGA i9-13900: P-core HT siblings + E-cores use ids >= 16)
+ * CPU_NUMBER_FROM_LAPIC (start.S svstart) mapped a booting AP to the WRONG
+ * dense slot -> it grabbed another CPU's interrupt_stack/GDT -> #DF -> reset.
+ * lapic_to_slot[] is [256] and is built from the full ids, so 0xFF is safe.
+ */
+#define		LAPIC_ID_MASK		0xFF
 #define LAPIC_VERSION			0x00000030
 #define		LAPIC_VERSION_MASK	0xFF
 #define LAPIC_TPR			0x00000080
