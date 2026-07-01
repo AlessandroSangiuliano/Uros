@@ -409,7 +409,15 @@ typedef unsigned int	pt_entry_t;
 #define ptetokv(a)	(phystokv(pte_to_pa(a)))
 
 #ifndef	ASSEMBLER
-typedef	volatile long	cpu_set;	/* set of CPUs - must be <= 32 */
+/*
+ * #355: MUST be UNSIGNED.  The TLB-shootdown ack loops shift a cpu_set right
+ * (`for (cpu=0; wait_set!=0; cpu++, wait_set>>=1)`).  As a *signed* long, once
+ * bit 31 is set (cpu 31 active on a 32-CPU box) the right shift sign-extends,
+ * so wait_set never reaches 0: the loop runs past cpu 31 into a non-existent
+ * "cpu 32" whose ack word never changes, and the initiator spins forever.
+ * Harmless on <=31 CPUs (bit 31 never set), fatal at 32 -- the #355 hang.
+ */
+typedef	volatile unsigned long	cpu_set;	/* set of CPUs - must be <= 32 */
 					/* changed by other processors */
 
 struct pmap {

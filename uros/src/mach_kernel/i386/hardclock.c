@@ -215,6 +215,7 @@ hardclock(
 	register unsigned pc;
 	register boolean_t usermode;
 	extern volatile unsigned int nmi_heartbeat;	/* #344 watchdog */
+	extern volatile unsigned int nmi_cpu_tick[];	/* #355 per-cpu watchdog */
 
 	mp_disable_preemption();
 	mycpu = cpu_number();
@@ -222,6 +223,8 @@ hardclock(
 	/* #344: heartbeat for the NMI hard-lockup watchdog.  Only advances at
 	 * IF=1; stalls the instant the system wedges with interrupts off. */
 	nmi_heartbeat++;
+	/* #355: per-cpu tick so the NMI can pinpoint a single wedged core. */
+	nmi_cpu_tick[mycpu]++;
 
 #ifdef	PARANOID_KDB
 	if (paranoid_cpu == mycpu &&
