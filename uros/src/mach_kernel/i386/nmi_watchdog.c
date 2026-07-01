@@ -64,6 +64,15 @@ extern int  db_active;		/* nonzero while a CPU is stopped in DDB */
 volatile unsigned int nmi_heartbeat = 0;
 
 /*
+ * #355: PER-CPU tick counter, bumped by each CPU's OWN timer tick (which only
+ * runs at IF=1).  The global nmi_heartbeat above stays alive as long as ANY
+ * cpu ticks, so it only catches a total clock-stop; a PARTIAL wedge (one cpu
+ * spinning at IF=0 while the rest idle-tick) never trips it.  Indexing this
+ * per-cpu lets the NMI detect exactly the wedged core.
+ */
+volatile unsigned int nmi_cpu_tick[NCPUS] = { 0 };
+
+/*
  * Per-CPU dedicated stacks for the NMI handler (#344).  A user-mode NMI makes
  * the CPU load ktss.esp0, which on this kernel points into the interrupted
  * thread's INLINE-pcb saved-state area (act+0x58, see act_machine_switch_pcb in
@@ -113,7 +122,7 @@ int nmi_watchdog_enabled __attribute__((section(".data"))) = 0;
 /* No clock tick across this many NMIs (~1 s at ~100 ms/NMI) ==> wedged. */
 #define WD_STALE_LIMIT		10
 
-static unsigned int	wd_last_hb[NCPUS];
+static unsigned int	wd_last_tick[NCPUS];	/* #355: last per-cpu tick seen */
 static unsigned int	wd_stale[NCPUS];
 static int		wd_fired[NCPUS];
 static int		wd_seen[NCPUS];	/* clock has ticked at least once */
@@ -163,7 +172,7 @@ nmi_watchdog_init(void)
 		return;
 
 	cpu = cpu_number();
-	wd_last_hb[cpu] = nmi_heartbeat;
+	wd_last_tick[cpu] = nmi_cpu_tick[cpu];
 	wd_stale[cpu] = 0;
 	wd_fired[cpu] = 0;
 	wd_seen[cpu] = 0;
@@ -211,9 +220,9 @@ nmi_watchdog(struct i386_saved_state *regs)
 		return;
 	}
 
-	hb = nmi_heartbeat;
-	if (hb != wd_last_hb[cpu]) {		/* clock still ticking: healthy */
-		wd_last_hb[cpu] = hb;
+	hb = nmi_cpu_tick[cpu];			/* #355: THIS cpu's own tick */
+	if (hb != wd_last_tick[cpu]) {		/* this cpu still ticking: healthy */
+		wd_last_tick[cpu] = hb;
 		wd_stale[cpu] = 0;
 		wd_seen[cpu] = 1;
 		return;
@@ -228,7 +237,7 @@ nmi_watchdog(struct i386_saved_state *regs)
 
 	wd_puts("\n*** NMI WATCHDOG: cpu ");
 	wd_hex((unsigned int)cpu);
-	wd_puts(" wedged (no clock tick ~0.5s) ***\n eip=");
+	wd_puts(" wedged (no timer tick ~1s: IF=0 spin/deadlock) ***\n eip=");
 	wd_hex(regs->eip);
 	wd_puts(" cs=");
 	wd_hex(regs->cs);

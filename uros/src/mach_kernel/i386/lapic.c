@@ -266,11 +266,15 @@ lapic_timer_handler(struct i386_interrupt_state *regs)
 {
 	boolean_t	usermode;
 	extern volatile unsigned int nmi_heartbeat;	/* #344 watchdog */
+	extern volatile unsigned int nmi_cpu_tick[];	/* #355 per-cpu watchdog */
 
 	mp_disable_preemption();
 
 	/* #344: bump the NMI-watchdog heartbeat from the per-CPU tick too. */
 	nmi_heartbeat++;
+	/* #355: also bump THIS cpu's own tick, so the NMI can detect a partial
+	 * (single-cpu) wedge instead of only a total clock-stop. */
+	nmi_cpu_tick[cpu_number()]++;
 
 	usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
 	hertz_tick(usermode, (natural_t)regs->eip);
