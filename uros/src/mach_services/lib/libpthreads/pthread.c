@@ -187,18 +187,21 @@ _pthread_free_stack(pthread_t self)
 /*
  * [Internal] thread pool — recycle kernel threads instead of destroying them.
  *
- * When a pthread exits, its kernel thread parks on a semaphore instead of
- * calling thread_terminate().  pthread_create() can then reuse a parked
- * thread, avoiding the cost of thread_create() + thread_set_state() RPCs.
+ * When a pthread exits, its kernel thread parks on a futex (self->pool_wake)
+ * instead of calling thread_terminate().  pthread_create() can then reuse a
+ * parked thread, avoiding the cost of thread_create() + thread_set_state()
+ * RPCs.  The wake word lives in the pthread (per-thread), NOT here in the
+ * slot: a slot is reused by the next parker before the previous (already
+ * pool_get'd) thread is woken, so a slot-keyed futex would pile two threads
+ * on one key and strand one of them (#352).
  */
 
 #define _THREAD_POOL_MAX	8	/* Maximum cached kernel threads */
 
 struct _pool_entry {
 	thread_port_t	kernel_thread;	/* Mach thread port */
-	mach_port_t	wake_sem;	/* Semaphore to wake this thread */
 	vm_address_t	stack;		/* Stack assigned to this thread */
-	pthread_t	self;		/* pthread_t at base of stack */
+	pthread_t	self;		/* pthread_t at base of stack (has pool_wake) */
 };
 
 static struct _pool_entry _thread_pool[_THREAD_POOL_MAX];
@@ -241,17 +244,27 @@ _pthread_pool_park(pthread_t self)
 	}
 	idx = _thread_pool_count++;
 
-	/* #324: wake_sem is a futex seq word now — the pool slot is
-	 * zero-initialized, so there is nothing to create. */
+	/* #352: park on a PER-THREAD futex word (self->pool_wake), not a
+	 * per-slot one.  A slot address is reused by the next parker before
+	 * this thread (once pool_get'd) is actually woken, so a slot-keyed
+	 * futex would pile two threads on one key and thread_wakeup_one()
+	 * would strand one of them (the lost wakeup #352). */
 	_thread_pool[idx].kernel_thread = self->kernel_thread;
 	_thread_pool[idx].stack = (vm_address_t)STACK_LOWEST((vm_address_t)self);
 	_thread_pool[idx].self = self;
-	wake_seq = *PTH_FW(_thread_pool[idx].wake_sem);	/* snapshot under lock */
+	/* #352: reset to the deterministic "parked" value (0) under the lock.
+	 * pthread_create() reuses us by memset()ing the whole pthread (which
+	 * includes pool_wake) and only THEN publishing fun/arg and bumping the
+	 * word non-zero.  Anchoring the wait value at 0 means the memset (also
+	 * 0) never makes our re-read mismatch — so we can only wake on the
+	 * post-fun/arg bump, never escape early into a NULL fun.  No waker can
+	 * race this store: pulling us needs the pool lock we still hold. */
+	self->pool_wake = 0;
+	wake_seq = 0;
 	UNLOCK(_thread_pool_lock);
 
-	/* Park: block until pthread_create bumps our wake seq */
-	(void) _pthread_futex_wait(PTH_FW(_thread_pool[idx].wake_sem),
-				   wake_seq, 0);
+	/* Park: block until pthread_create publishes fun/arg and bumps our word */
+	(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
 
 	/* Woken up — self->fun and self->arg have been set by pthread_create */
 	_pthread_pool_trampoline(self);
@@ -280,9 +293,9 @@ _pthread_pool_get(pthread_t *thread, vm_address_t *stack,
 	*thread = _thread_pool[idx].self;
 	*stack = _thread_pool[idx].stack;
 	*kernel_thread = _thread_pool[idx].kernel_thread;
-	/* #324: return the address of the slot's wake futex word so the
-	 * caller can bump+wake the parked thread. */
-	*wake_word = PTH_FW(_thread_pool[idx].wake_sem);
+	/* #352: return the address of the PARKED THREAD's own wake futex word
+	 * (not the slot's) so the caller bumps+wakes exactly that thread. */
+	*wake_word = PTH_FW((*thread)->pool_wake);
 	UNLOCK(_thread_pool_lock);
 	return 1;
 }
