@@ -179,6 +179,20 @@ if [ "$WANT_ISO" = true ]; then
             emit_iso_entry "(bench, 4 CPUs)"   " -c4$K"
             emit_iso_entry "(bench, 2 CPUs)"   " -c2$K"
             emit_iso_entry "(bench, 1 CPU UP)" " -c1$K"
+            # `-P` variant: SAME kernel binary, #356 hand-off-on-block ON (the
+            # wakee of a combined-op send runs on the waker's CPU instead of a
+            # remote idle one, same-task only).  A/B: entry 0 (baseline
+            # idle-dispatch) vs this entry -- compare absolute ns/RPC at
+            # thr=8..24 plus the s319 lq counter (instrumented builds).
+            emit_iso_entry "(bench, all CPUs, handoff)" "$K -P"
+            # `-c16` on OMEGA (i9-13900) = slots 0-15 = the 16 P-core HT
+            # threads only (E-cores sit at slots >= 16, lapic ids >= 64, #354).
+            # A HOMOGENEOUS run: if the mid-curve collapse (thr=8..24) is
+            # driven by pairs landing on slow E-cores rather than by the
+            # scheduler, this curve comes out flat.  Handoff variant included
+            # for the same A/B on homogeneous silicon.
+            emit_iso_entry "(bench, 16 CPUs P-only)"          " -c16$K"
+            emit_iso_entry "(bench, 16 CPUs P-only, handoff)" " -c16$K -P"
             # `-D` variants: SAME kernel binary, ipc_dts_smp ON.  For a
             # same-binary A/B of the SMP Direct-Thread-Switch on the separate
             # send/recv bench (intra/inter -- comb rides the mach_msg hotpath and

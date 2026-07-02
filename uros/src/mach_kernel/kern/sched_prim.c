@@ -1263,6 +1263,7 @@ struct s319_stat {
 	unsigned long		psetlock_max;	/* worst single acquire (cycles) */
 	unsigned long		setrun;		/* unbound thread_setrun calls */
 	unsigned long		psetenq;	/* enqueues onto the GLOBAL runq */
+	unsigned long		localhoff;	/* #356 hand-off-on-block enqueues */
 	char			pad[64];	/* isolate each entry to its own line */
 } s319[NCPUS] __attribute__((aligned(64)));
 
@@ -1278,7 +1279,7 @@ void
 s319_dump(void)
 {
 	unsigned long	sum_avg = 0, navg = 0, mx = 0;
-	unsigned long	tot_cnt = 0, tot_setrun = 0, tot_enq = 0;
+	unsigned long	tot_cnt = 0, tot_setrun = 0, tot_enq = 0, tot_lq = 0;
 	int		cpu;
 
 	/*
@@ -1297,11 +1298,13 @@ s319_dump(void)
 		tot_cnt += cnt;
 		tot_setrun += s319[cpu].setrun;
 		tot_enq += s319[cpu].psetenq;
+		tot_lq += s319[cpu].localhoff;
 		s319[cpu].psetlock_cyc = 0;
 		s319[cpu].psetlock_cnt = 0;
 		s319[cpu].psetlock_max = 0;
 		s319[cpu].setrun = 0;
 		s319[cpu].psetenq = 0;
+		s319[cpu].localhoff = 0;
 	}
 
 	/*
@@ -1310,8 +1313,8 @@ s319_dump(void)
 	 */
 	if (tot_setrun < 1000)
 		return;
-	printf("s319: setrun=%lu gq=%lu acq=%lu avg=%lu max=%lu cyc/acq\n",
-	       tot_setrun, tot_enq, tot_cnt,
+	printf("s319: setrun=%lu lq=%lu gq=%lu acq=%lu avg=%lu max=%lu cyc/acq\n",
+	       tot_setrun, tot_lq, tot_enq, tot_cnt,
 	       navg ? sum_avg / navg : 0, mx);
 }
 #endif	/* S319_INSTRUMENT */
@@ -2257,6 +2260,28 @@ run_queue_enqueue(
 	return( oldrqcount );
 }
 
+#if	NCPUS > 1
+/*
+ * #356: run-time gate for the synchronous-RPC hand-off-on-block placement
+ * (see the hint consumption in thread_setrun).  Off by default; enabled by
+ * the -P boot argument for same-binary A/B on hardware.
+ *
+ * The hand-off also stays dormant until EVERY CPU has passed cpu_up()
+ * (machine_info.avail_cpus reaches real_ncpus -- guaranteed on any boot
+ * that completes, since start_other_cpus barriers on all APs): shifting
+ * bench wakeup placement DURING bring-up widened a latent window where a
+ * slave-init AP (no current_thread yet) kernel-faults into a contended map
+ * mutex and panics in assert_wait ("sleep before scheduler is up", seen on
+ * OMEGA cpu 20).  Placement only matters under load, so keep it off until
+ * bring-up is done.
+ */
+/* .data, NOT bss: parse_arguments() runs BEFORE i386_init()'s BSS clear, so a
+ * zero-initialised flag would be silently wiped back to 0 after -P set it --
+ * the exact #337 trap (see halt_in_debugger in model_dep.c). */
+int	sched_rpc_handoff __attribute__((section(".data"))) = 0;
+extern int	real_ncpus;
+#endif	/* NCPUS > 1 */
+
 /*
  *	thread_setrun:
  *
@@ -2318,6 +2343,44 @@ thread_setrun(
 #if	S319_INSTRUMENT
 	    s319[cpu_number()].setrun++;
 #endif
+
+	    /*
+	     * #356 hand-off on block: the waker flagged that it is about to
+	     * block (combined mach_msg send phase -- the same syscall proceeds
+	     * to the receive and sleeps).  A synchronous RPC pair is
+	     * inherently serial, so instead of shipping the wakee to a remote
+	     * idle CPU (cold caches, wake-from-idle latency -- the measured
+	     * 32-core pre-saturation collapse) queue it on THIS cpu's local
+	     * runq: thread_select picks it up the moment the waker blocks, on
+	     * the one CPU where its data is warm.  Same-task only (an
+	     * inter-task switch on one CPU costs a cr3 reload = full TLB flush
+	     * on i386, measured worse than the split).  One-shot: consumed by
+	     * the first wakeup of the send.  Runtime-gated by -P boot arg.
+	     */
+	    if (sched_rpc_handoff &&
+		machine_info.avail_cpus >= real_ncpus) {
+		register thread_t	self = current_thread();
+
+		if (self->handoff_hint) {
+			self->handoff_hint = FALSE;
+			if (
+#if	MACH_HOST
+			    pset == current_processor()->processor_set &&
+#endif	/* MACH_HOST */
+			    self->top_act != THR_ACT_NULL &&
+			    th->top_act != THR_ACT_NULL &&
+			    self->top_act->task == th->top_act->task) {
+#if	S319_INSTRUMENT
+				s319[cpu_number()].localhoff++;
+#endif
+				(void) run_queue_enqueue(
+					&current_processor()->runq, th, tail);
+				mp_enable_preemption();
+				return;
+			}
+		}
+	    }
+
 #if	HW_FOOTPRINT
 	    /*
 	     *	But first check the last processor it ran on.
