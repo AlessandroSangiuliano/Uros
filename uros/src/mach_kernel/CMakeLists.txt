@@ -136,6 +136,16 @@ set(KERNEL_DEFINES
     ${KERNEL_SMP_DEFINES}
 )
 
+# #319 scheduler instrumentation: per-CPU counters + rdtsc around the global
+# pset->runq.lock acquire in thread_select, dumped from sched_thread.
+# Diagnostic tool: flip ON (cmake -DUROS_S319_INSTRUMENT=ON) when measuring
+# scheduler/runq behavior, keep OFF for normal and perf builds.
+option(UROS_S319_INSTRUMENT "Build the #319 runq instrumentation (s319 counters + dump)" OFF)
+if(UROS_S319_INSTRUMENT)
+    list(APPEND KERNEL_DEFINES -DS319_INSTRUMENT=1)
+    message(STATUS "#319 s319 scheduler instrumentation: ON")
+endif()
+
 # MIG-specific flags - disable type checking for kernel stubs
 set(MIG_CFLAGS
     -Dmig_internal=
