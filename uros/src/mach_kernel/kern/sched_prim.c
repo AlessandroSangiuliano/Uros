@@ -1235,6 +1235,88 @@ thread_bind(
 #endif	/*NCPUS > 1*/
 
 /*
+ * #319 instrumentation: is the global pset->runq.lock actually contended /
+ * interfered with?  Per-CPU (cache-line isolated) counters; rdtsc around the
+ * lock acquire in thread_select.  Dumped every few seconds from sched_thread
+ * (PROCESS context -- printing from hertz_tick at interrupt level nested
+ * inside the BSP's own console writes and wedged the OMEGA 32-CPU bring-up),
+ * and only for intervals with real scheduling activity so boot output stays
+ * untouched.  setrun vs gq (global-runq enqueues) shows the saturation ratio
+ * -- how many wakeups fall onto the GLOBAL runq vs land on an idle CPU.  The
+ * dump zeroes the counters, so each printed line is one interval -> the
+ * cycles/acquire form a time series across a concurrency sweep.
+ *
+ * Diagnostic tool, compiled out by default: build with
+ * cmake -DUROS_S319_INSTRUMENT=ON when measuring scheduler behavior.
+ * 32-core results (2026-07): lock uncontended (~0.2% of CPU time), but idle
+ * CPUs full-speed-polling runq.count inflated every acquire (842 vs 445 cyc)
+ * -> the idle-loop gcount sampling fix below.
+ */
+#ifndef	S319_INSTRUMENT
+#define	S319_INSTRUMENT	0
+#endif
+
+#if	S319_INSTRUMENT
+struct s319_stat {
+	unsigned long long	psetlock_cyc;	/* cycles acquiring pset->runq.lock */
+	unsigned long		psetlock_cnt;	/* # acquisitions (thread_select) */
+	unsigned long		psetlock_max;	/* worst single acquire (cycles) */
+	unsigned long		setrun;		/* unbound thread_setrun calls */
+	unsigned long		psetenq;	/* enqueues onto the GLOBAL runq */
+	char			pad[64];	/* isolate each entry to its own line */
+} s319[NCPUS] __attribute__((aligned(64)));
+
+static inline unsigned long long
+s319_rdtsc(void)
+{
+	unsigned int	lo, hi;
+	__asm__ volatile("rdtsc" : "=a" (lo), "=d" (hi));
+	return ((unsigned long long) hi << 32) | lo;
+}
+
+void
+s319_dump(void)
+{
+	unsigned long	sum_avg = 0, navg = 0, mx = 0;
+	unsigned long	tot_cnt = 0, tot_setrun = 0, tot_enq = 0;
+	int		cpu;
+
+	/*
+	 * No 64-bit divide (no libgcc __udivdi3 in the kernel): average each
+	 * CPU's cycles in 32 bits (a few seconds per-CPU fits) then mean them.
+	 */
+	for (cpu = 0; cpu < NCPUS; cpu++) {
+		unsigned long	cnt = s319[cpu].psetlock_cnt;
+
+		if (cnt != 0) {
+			sum_avg += (unsigned long) s319[cpu].psetlock_cyc / cnt;
+			navg++;
+		}
+		if (s319[cpu].psetlock_max > mx)
+			mx = s319[cpu].psetlock_max;
+		tot_cnt += cnt;
+		tot_setrun += s319[cpu].setrun;
+		tot_enq += s319[cpu].psetenq;
+		s319[cpu].psetlock_cyc = 0;
+		s319[cpu].psetlock_cnt = 0;
+		s319[cpu].psetlock_max = 0;
+		s319[cpu].setrun = 0;
+		s319[cpu].psetenq = 0;
+	}
+
+	/*
+	 * Only report intervals with real load: keeps bring-up and idle
+	 * screens clean (and the bench's own output mostly unmolested).
+	 */
+	if (tot_setrun < 1000)
+		return;
+	printf("s319: setrun=%lu gq=%lu acq=%lu avg=%lu max=%lu cyc/acq\n",
+	       tot_setrun, tot_enq, tot_cnt,
+	       navg ? sum_avg / navg : 0, mx);
+}
+#endif	/* S319_INSTRUMENT */
+
+/*
  *	Select a thread for this processor (the current processor) to run.
  *	May select the current thread.
  *	Assumes splsched.
@@ -1262,9 +1344,27 @@ thread_select(
 #if     NCPUS > 1
 	simple_lock(&runq->lock);
 #endif  /* NCPUS > 1 */
-	simple_lock(&pset->runq.lock);
+#if	S319_INSTRUMENT
+	{
+		unsigned long long	_s0, _s1;
+		unsigned long		_sd;
+		register int		_sc;
 
-	other_runnable = 
+		_s0 = s319_rdtsc();
+		simple_lock(&pset->runq.lock);
+		_s1 = s319_rdtsc();
+		_sd = (unsigned long) (_s1 - _s0);
+		_sc = cpu_number();
+		s319[_sc].psetlock_cyc += _sd;
+		s319[_sc].psetlock_cnt++;
+		if (_sd > s319[_sc].psetlock_max)
+			s319[_sc].psetlock_max = _sd;
+	}
+#else
+	simple_lock(&pset->runq.lock);
+#endif
+
+	other_runnable =
 #if	NCPUS > 1
 	    runq->count > 0 ||
 #endif	/* NCPUS > 1 */
@@ -2215,6 +2315,9 @@ thread_setrun(
 	     *	Not bound, any processor in the processor set is ok.
 	     */
 	    pset = th->processor_set;
+#if	S319_INSTRUMENT
+	    s319[cpu_number()].setrun++;
+#endif
 #if	HW_FOOTPRINT
 	    /*
 	     *	But first check the last processor it ran on.
@@ -2286,6 +2389,9 @@ thread_setrun(
 		    ast_on(cpu_number(), ast_flags);
 		}
 	    }
+#if	S319_INSTRUMENT
+	    s319[cpu_number()].psetenq++;
+#endif
 	    (void)run_queue_enqueue(rq, th, tail);
 	}
 	else {
@@ -3047,6 +3153,18 @@ sched_thread(void)
 	if (task_swap_on)
 		compute_vm_averages();
 #endif	/* TASKS_SWAPPER */
+
+#if	S319_INSTRUMENT
+	/* #319 TEMP: report runq-lock contention every ~5s, process context. */
+	{
+		static unsigned int	s319_beats;
+
+		if (++s319_beats >= 5) {
+			s319_beats = 0;
+			s319_dump();
+		}
+	}
+#endif
 
 	/*
 	 *	Check for stuck threads.  This can't be done off of
