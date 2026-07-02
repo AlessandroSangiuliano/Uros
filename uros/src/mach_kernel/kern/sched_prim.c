@@ -2810,6 +2810,7 @@ idle_thread_continue(void)
 	register int state;
 	int	mycpu;
 	spl_t	s;
+	register unsigned int idle_passes = 0;	/* #319 gcount sampling */
 #if	FAST_IDLE
 	register volatile int *thread_statep;
 	register volatile int *depress_countp;
@@ -2889,7 +2890,18 @@ idle_thread_continue(void)
 		       && (*lcount <= *depress2_countp)
 #endif	/* NCPUS > 1 */
 #else	/* FAST_IDLE */
-		       (*gcount == 0)
+		       /*
+		        * #319: sample the SHARED pset->runq.count only every
+		        * 64th pass.  N idle CPUs spinning full speed on that
+		        * one global line invalidation-storm every runq write
+		        * by the busy CPUs (measured on 32-core bare metal:
+		        * pset lock acquire avg 842 cyc with ~24 idle pollers
+		        * vs 445 with none).  next_thread/local runq stay
+		        * full-rate, so idle-dispatch latency is untouched;
+		        * only the rare enqueue-to-global-while-idle race
+		        * waits up to ~64 passes (a few microseconds).
+		        */
+		       ((idle_passes++ & 63) != 0 || *gcount == 0)
 #if	NCPUS > 1
 		       && (*lcount == 0)
 #endif	/*NCPUS > 1*/
@@ -2910,6 +2922,10 @@ idle_thread_continue(void)
 			}
 			else
 				splx(s);
+
+			/* #319: spin-wait hint (rep;nop) -- eases the memory
+			 * pipeline and the SMT sibling while idle-polling. */
+			__asm__ volatile("pause");
 
 			/*
 			 * machine_idle is a machine dependent function,
