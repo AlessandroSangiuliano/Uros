@@ -670,6 +670,10 @@ out:
 #define ENABLE_HOTPATH 0
 #endif	/* !MACH_RT */
 
+#if	NCPUS > 1
+extern int	sched_rpc_handoff;	/* #356 hand-off on block (sched_prim.c) */
+#endif
+
 #if	ENABLE_HOTPATH
 /*
  * These counters allow tracing of hotpath behavior under test loads.
@@ -2453,8 +2457,23 @@ mach_msg_overwrite_trap(
 		 *	we still need to send it and receive a reply.
 		 */
 
+#if	NCPUS > 1
+		/*
+		 * #356 hand-off on block: this is the combined-op slow send
+		 * (the hotpath fell off) -- right after it this same thread
+		 * copies in the reply port and blocks in ipc_mqueue_receive.
+		 * Flag it so thread_setrun runs whoever this send wakes on
+		 * THIS cpu instead of a remote idle one (one-shot; cleared
+		 * below if the send woke nobody).
+		 */
+		if (sched_rpc_handoff)
+			self->handoff_hint = TRUE;
+#endif	/* NCPUS > 1 */
 		mr = ipc_mqueue_send(kmsg, MACH_MSG_OPTION_NONE,
 				     MACH_MSG_TIMEOUT_NONE);
+#if	NCPUS > 1
+		self->handoff_hint = FALSE;
+#endif	/* NCPUS > 1 */
 		if (mr != MACH_MSG_SUCCESS) {
 			mr |= ipc_kmsg_copyout_pseudo(kmsg, space,
 						      current_map(),
@@ -2583,8 +2602,30 @@ mach_msg_overwrite_trap(
 #endif	/* ENABLE_HOTPATH */
 
 	if (option & MACH_SEND_MSG) {
+#if	NCPUS > 1
+		/*
+		 * #356 hand-off on block (EXPERIMENT, -P boot arg): flag the
+		 * sender so thread_setrun runs whoever this send wakes on
+		 * THIS cpu instead of shipping it to a remote idle one
+		 * (one-shot, consumed by the first wakeup; cleared right
+		 * after the send in any case).  RPC-style callers (client
+		 * send->recv, server recv->reply->recv) block right after
+		 * their send, so the wakee picks this CPU up warm the moment
+		 * they do.  A fire-and-forget sender that keeps running
+		 * instead delays its wakee by up to a quantum -- the kernel
+		 * cannot tell the two apart from here, which is why this is
+		 * an -P experiment: if the placement thesis holds on 32-core
+		 * hardware, the durable mechanism is an explicit option bit
+		 * set by callers that know they block (MIG stubs / libmach).
+		 */
+		if (sched_rpc_handoff)
+			current_thread()->handoff_hint = TRUE;
+#endif	/* NCPUS > 1 */
 		mr = mach_msg_send(msg, option, send_size,
 				   timeout, notify);
+#if	NCPUS > 1
+		current_thread()->handoff_hint = FALSE;
+#endif	/* NCPUS > 1 */
 		if (mr != MACH_MSG_SUCCESS) {
 			return mr;
 		}

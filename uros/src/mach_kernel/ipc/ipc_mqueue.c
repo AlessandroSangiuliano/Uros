@@ -683,7 +683,11 @@ dstat_decl(unsigned int	c_imd_enqueued = 0;)
  * runtime flag so DTS-on vs DTS-off inter-task RPC latency can be A/B'd on SMP
  * without recompiling.
  */
-int	ipc_dts_smp = 0;
+/* .data, NOT bss (#356): parse_arguments() runs BEFORE the BSS clear, so as a
+ * zero-initialised global the -D boot flag was set and then silently wiped
+ * back to 0 -- every ipc_dts_smp A/B run before this fix compared baseline
+ * against baseline.  Same #337 trap as halt_in_debugger. */
+int	ipc_dts_smp __attribute__((section(".data"))) = 0;
 
 mach_msg_return_t
 ipc_mqueue_deliver(

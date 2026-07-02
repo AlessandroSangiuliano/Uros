@@ -711,6 +711,15 @@ parse_arguments(void)
 				 * comb rides the hotpath, not this path). */
 		    { extern int ipc_dts_smp; ipc_dts_smp = 1; }
 		    break;
+#if	NCPUS > 1
+		case 'P':	/* -P: enable the #356 synchronous-RPC hand-off
+				 * on block (wakee of a combined-op send runs on
+				 * the waker's CPU instead of a remote idle one,
+				 * same-task only).  Off by default; same-binary
+				 * A/B against the idle-dispatch baseline. */
+		    { extern int sched_rpc_handoff; sched_rpc_handoff = 1; }
+		    break;
+#endif	/* NCPUS > 1 */
 		default:
 #if	NCPUS > 1 && AT386
 		    if (ch > '0' && ch <= '9')
