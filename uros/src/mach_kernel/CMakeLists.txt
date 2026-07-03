@@ -637,6 +637,9 @@ set(AT386_SOURCES
     i386/AT386/model_dep.c
     i386/AT386/physmem.c
     i386/AT386/pic_isa.c
+    # #357: idle HLT (machine_idle + wake doorbell; POWER_SAVE=1 in
+    # power_save.h, -S boot flag reverts to the legacy poll idle).
+    i386/AT386/power_save.c
     # In-kernel VGA driver removed in #199 (vga.c, vga.h, vgareg.h,
     # vga_entries.h gone; userspace gpu_server owns the display).
 )

@@ -2401,6 +2401,9 @@ thread_setrun(
 			    processor->state = PROCESSOR_DISPATCHING;
 			    simple_unlock(&pset->idle_lock);
 			    simple_unlock(&processor->lock);
+#if	POWER_SAVE
+			    machine_idle_wake(processor->slot_num);
+#endif	/* POWER_SAVE */
 			    mp_enable_preemption();
 		            return;
 		    }
@@ -2419,6 +2422,9 @@ thread_setrun(
 		    processor->next_thread = th;
 		    processor->state = PROCESSOR_DISPATCHING;
 		    simple_unlock(&pset->idle_lock);
+#if	POWER_SAVE
+		    machine_idle_wake(processor->slot_num);
+#endif	/* POWER_SAVE */
 		    mp_enable_preemption();
 		    return;
 		}
@@ -2474,6 +2480,9 @@ thread_setrun(
 		    processor->state = PROCESSOR_DISPATCHING;
 		    simple_unlock(&pset->idle_lock);
 		    simple_unlock(&processor->lock);
+#if	POWER_SAVE
+		    machine_idle_wake(processor->slot_num);
+#endif	/* POWER_SAVE */
 		    mp_enable_preemption();
 		    return;
 		}
@@ -3002,6 +3011,11 @@ idle_thread_continue(void)
 
 		/* #331 step 2: leaving idle -- about to run a real thread. */
 		urmach_rcu_idle_exit();
+
+#if	POWER_SAVE
+		/* #357: idle stint over -- reset the HLT grace window. */
+		machine_idle_exit(mycpu);
+#endif	/* POWER_SAVE */
 
 #ifdef	MARK_CPU_ACTIVE
 		splx(s);
