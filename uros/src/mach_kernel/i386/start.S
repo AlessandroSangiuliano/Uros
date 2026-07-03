@@ -460,17 +460,39 @@ LEXT(pstart)
  * %ebx holds first available physical address.
  */
 
-	/* #241 / #342: place the initial page tables ABOVE every multiboot
-	 * module.  #241 hardcoded 16 MB, but GRUB (multiboot2) scatters the
-	 * bootstrap + multi-MB stage-1 bundle + ksyms well PAST 16 MB, so a
-	 * fixed base silently overwrote the bundle's tail (and the VM allocator
-	 * later reused the part above first_avail), corrupting stage-1 .so
-	 * modules ("not an ELF file").  Start from a 16 MB floor — which covers
-	 * the kernel and the tighter qemu/multiboot1 layout, where modules stay
-	 * below 16 MB — and, for an mb2 boot, walk the tag list and raise the
-	 * base past the highest module end. */
+	/* #241 / #342 / #359: place the initial page tables ABOVE every
+	 * multiboot module.  #241 hardcoded 16 MB; #342 added a walk of the
+	 * mb2 tag list raising the base past the highest module end, on the
+	 * assumption that the tighter qemu/multiboot1 layout keeps modules
+	 * below 16 MB.  #359: that assumption died — the NCPUS=64 kernel
+	 * image plus a ~11 MB stage-1 bundle pushed mod[1]'s tail to ~18 MB
+	 * on mb1 too, and the fixed base silently zeroed the bundle's tail
+	 * (gpu_server onward: "unloadable file format").  So walk the module
+	 * list on BOTH boot paths; the 16 MB floor only covers the kernel
+	 * image itself.  i386_init() re-checks the final layout and panics
+	 * loudly if a module still overlaps the page-table area. */
 	movl	$0x1000000,%ebx			/* floor: 16 MB */
 
+	cmpl	$0x2BADB002,PA(EXT(boot_magic))	/* multiboot1 bootloader? */
+	jne	36f
+	leal	PA(EXT(mb_info)),%esi
+	movl	(%esi),%eax			/* mb1 flags */
+	testl	$0x8,%eax			/* MULTIBOOT_INFO_MODS set? */
+	jz	31f
+	movl	20(%esi),%ecx			/* mods_count */
+	movl	24(%esi),%esi			/* mods_addr (physical) */
+34:
+	testl	%ecx,%ecx			/* modules exhausted? */
+	jz	31f
+	movl	4(%esi),%eax			/* mod_end */
+	cmpl	%ebx,%eax
+	jbe	35f
+	movl	%eax,%ebx			/* raise base past this module */
+35:
+	addl	$16,%esi			/* next 16-byte module record */
+	decl	%ecx
+	jmp	34b
+36:
 	cmpl	$0x36D76289,PA(EXT(boot_magic))	/* multiboot2 bootloader? */
 	jne	31f
 	leal	PA(EXT(mb2_info_buf)),%esi

@@ -1280,7 +1280,29 @@ bootstrap_create(void)
 
     if (/*(mb_info.flags & MULTIBOOT_MODS)
           ||*/ (mb_info.mods_count == 0))
-        panic ("No bootstrap code loaded with the kernel!");  
+        panic ("No bootstrap code loaded with the kernel!");
+
+    /*
+     * #359 belt: start.S places the boot page directory/tables above the
+     * highest multiboot module end (module walk on both the mb1 and mb2
+     * paths).  If any module still reaches past the page-table base, the
+     * early boot has ALREADY silently corrupted its tail (#241/#359
+     * class: zeroed ELFs, "unloadable file format") -- refuse to limp
+     * on and say exactly what happened instead.
+     */
+    if (mb_info.mods_addr != 0) {
+        extern vm_offset_t (kvtophys)(vm_offset_t addr);
+        extern char *kpde;	/* VA of the boot page directory (start.S) */
+        vm_offset_t ptbase = kvtophys((vm_offset_t) kpde);
+        struct multiboot_module *mods =
+            (struct multiboot_module *) phystokv(mb_info.mods_addr);
+
+        for (i = 0; i < mb_info.mods_count; i++)
+            if (mods[i].mod_end > ptbase)
+                panic("multiboot mod[%d] ends at phys 0x%x, past the boot "
+                      "page tables at 0x%x -- module tail clobbered (#359)",
+                      i, mods[i].mod_end, (unsigned int) ptbase);
+    }
 
     /* Initialize boot script variables.  We leak these send rights.  */
     losers = boot_script_set_variable
