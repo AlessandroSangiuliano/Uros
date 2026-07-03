@@ -193,6 +193,15 @@ if [ "$WANT_ISO" = true ]; then
             # for the same A/B on homogeneous silicon.
             emit_iso_entry "(bench, 16 CPUs P-only)"          " -c16$K"
             emit_iso_entry "(bench, 16 CPUs P-only, handoff)" " -c16$K -P"
+            # `-S` variants: SAME kernel binary, #357 idle HLT OFF (legacy
+            # always-poll idle loop).  The kernel now HLTs idle CPUs by
+            # default, returning the package power/thermal budget to the
+            # working cores; these entries are the old spinning-idle regime
+            # for a same-binary A/B (every pre-#357 bare-metal number was
+            # taken under it).
+            emit_iso_entry "(bench, all CPUs, idle-spin)"       "$K -S"
+            emit_iso_entry "(bench, 16 CPUs P-only, idle-spin)" " -c16$K -S"
+            emit_iso_entry "(bench, 4 CPUs, idle-spin)"         " -c4$K -S"
             # `-D` variants: SAME kernel binary, ipc_dts_smp ON.  For a
             # same-binary A/B of the SMP Direct-Thread-Switch on the separate
             # send/recv bench (intra/inter -- comb rides the mach_msg hotpath and

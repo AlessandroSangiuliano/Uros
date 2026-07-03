@@ -704,6 +704,11 @@ parse_arguments(void)
 				 * realloc to catch use-after-free (#344). */
 		    { extern boolean_t zfree_clear; zfree_clear = TRUE; }
 		    break;
+		case 'S':	/* -S: spin -- disable the #357 idle HLT and
+				 * revert to the legacy always-poll idle loop
+				 * (same-binary A/B / debug). */
+		    { extern int sched_idle_hlt; sched_idle_hlt = 0; }
+		    break;
 		case 'D':	/* -D: enable the SMP Direct-Thread-Switch on the
 				 * IPC slow path (ipc_dts_smp).  Off by default;
 				 * this flag turns it on for a same-binary A/B of
