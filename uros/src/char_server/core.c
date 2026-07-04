@@ -334,3 +334,97 @@ char_core_dispatch_irq(mach_msg_header_t *in)
 	 * sending it and us draining it).  Swallow silently. */
 	return TRUE;
 }
+
+/* ============================================================
+ * Keyboard → console loopback (#363).
+ *
+ * The on-screen console is a CHAR_CLASS_TTY module that lives in this
+ * very process, so it cannot be an ordinary external keyboard
+ * subscriber.  Instead core allocates one receive port, drops it on
+ * the shared port set, and hands a send right to every keyboard
+ * module through its kbd_subscribe op.  ps2.so then fans each key
+ * event to that port exactly as it would to a remote client; the
+ * events arrive on our own port set, char_demux spots msgh_id
+ * CHAR_KBD_EVENT_MSGH_ID and calls the sink the console registered.
+ *
+ * Human typing is low-frequency, so the kernel round-trip per
+ * keystroke is free; the win is that ps2.so stays entirely unaware it
+ * is talking to an in-process consumer.
+ * ============================================================ */
+
+static void		(*kbd_sink)(void *arg, const char_kbd_event_t *ev);
+static void		*kbd_sink_arg;
+static mach_port_t	kbd_loopback_port;
+
+void
+char_core_register_kbd_sink(void (*fn)(void *, const char_kbd_event_t *),
+			    void *arg)
+{
+	kbd_sink     = fn;
+	kbd_sink_arg = arg;
+}
+
+boolean_t
+char_core_dispatch_kbd_event(mach_msg_header_t *in)
+{
+	const char_kbd_event_msg_t *msg;
+
+	if (in->msgh_id != CHAR_KBD_EVENT_MSGH_ID)
+		return FALSE;
+
+	/* Route to the console sink if one registered; drop otherwise
+	 * (no console module loaded → nobody to hand the event to). */
+	if (kbd_sink != NULL) {
+		msg = (const char_kbd_event_msg_t *)in;
+		kbd_sink(kbd_sink_arg, &msg->event);
+	}
+	return TRUE;
+}
+
+int
+char_core_kbd_loopback_wire(void)
+{
+	kern_return_t kr;
+	mach_port_t   send;
+	unsigned int  i, wired = 0;
+
+	if (!irq_initialised)		/* port set lives in the IRQ block */
+		return -1;
+	if (kbd_sink == NULL)		/* no console attached → nothing to do */
+		return 0;
+
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &kbd_loopback_port);
+	if (kr != KERN_SUCCESS) {
+		printf("char_server: kbd loopback port alloc failed (kr=%d)\n",
+		       (int)kr);
+		return -1;
+	}
+	kr = mach_port_insert_right(mach_task_self(), kbd_loopback_port,
+				    kbd_loopback_port, MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		(void)mach_port_destroy(mach_task_self(), kbd_loopback_port);
+		kbd_loopback_port = MACH_PORT_NULL;
+		return -1;
+	}
+	(void)mach_port_move_member(mach_task_self(), kbd_loopback_port,
+				    irq_port_set);
+	send = kbd_loopback_port;
+
+	for (i = 1; i < CHAR_MAX_DEVICES; i++) {
+		struct char_device_entry *dev = &devices[i];
+
+		if (!dev->in_use || dev->module == NULL)
+			continue;
+		if (dev->info.class != CHAR_CLASS_KEYBOARD)
+			continue;
+		if (dev->module->kbd_subscribe == NULL)
+			continue;
+		if (dev->module->kbd_subscribe(dev->priv, send) == 0)
+			wired++;
+	}
+
+	printf("char_server: keyboard->console loopback wired "
+	       "(%u keyboard%s)\n", wired, wired == 1 ? "" : "s");
+	return (wired > 0) ? 0 : -1;
+}

@@ -24,6 +24,7 @@ MKBUNDLE="$BUILD_DIR/tools/mkbundle"
 BENCH_ARGS=""
 MINIMAL=0
 DISKLESS=0
+WITH_CONSOLE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -39,6 +40,8 @@ while [ $# -gt 0 ]; do
             MINIMAL=1; shift ;;
         --diskless)
             DISKLESS=1; shift ;;
+        --with-console)
+            WITH_CONSOLE=1; shift ;;
         -h|--help)
             echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal] [--diskless]"
             echo "  --minimal: skip test/bench tasks (ipc_bench, pthread_test, cap_test,"
@@ -91,6 +94,7 @@ CHAR_SERVER="$SBIN/char_server"
 CHAR_PS2_MODULE="$BUILD_DIR/src/char_server/modules/ps2.so"
 CHAR_UART_MODULE="$BUILD_DIR/src/char_server/modules/uart.so"
 CHAR_PS2_MOUSE_MODULE="$BUILD_DIR/src/char_server/modules/ps2_mouse.so"
+CHAR_CONSOLE_MODULE="$BUILD_DIR/src/char_server/modules/console.so"
 
 REQUIRED_FILES=(
     "$NAME_SERVER" "$HAL_SERVER" "$BLOCK_DEVICE_SERVER"
@@ -217,6 +221,12 @@ if [ -f "$CHAR_SERVER" ]; then
     [ -f "$CHAR_PS2_MODULE" ]       && ARGS+=("modules/char/ps2.so:$CHAR_PS2_MODULE")
     [ -f "$CHAR_UART_MODULE" ]      && ARGS+=("modules/char/uart.so:$CHAR_UART_MODULE")
     [ -f "$CHAR_PS2_MOUSE_MODULE" ] && ARGS+=("modules/char/ps2_mouse.so:$CHAR_PS2_MOUSE_MODULE")
+    # #363: the on-screen console TTY ships only when explicitly asked
+    # (--with-console).  Without it ush binds the UART TTY and the serial
+    # console behaves exactly as before — headless/bench boots untouched.
+    if [ "$WITH_CONSOLE" = "1" ] && [ -f "$CHAR_CONSOLE_MODULE" ]; then
+        ARGS+=("modules/char/console.so:$CHAR_CONSOLE_MODULE")
+    fi
 fi
 
 "$MKBUNDLE" "${ARGS[@]}"

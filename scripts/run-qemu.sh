@@ -61,9 +61,14 @@ DISK_REGEN=false    # --diskregen: opt in to regenerating disk.img this launch
 REUSE_BUNDLE=false  # --reuse-bundle: skip the make-bundle.sh step and reuse the
                     # existing bootstrap.bundle (fast iteration / repeated launches
                     # of the same kernel+servers, e.g. SMP reliability loops)
+CONSOLE_ARG=""      # --with-console: ship the on-screen console TTY (#363) in the
+                    # bundle so ush binds the graphical window instead of the UART.
+                    # Off by default → serial/headless/bench paths unchanged.
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; USE_AHCI=false; shift ;;
+        --with-console) CONSOLE_ARG="--with-console"; shift ;;
+        --window) EXTRA_ARGS="$EXTRA_ARGS -display gtk"; shift ;;
         --no-bundle) USE_BUNDLE=false; shift ;;
         --ahci2) USE_AHCI=true; USE_AHCI2=true; shift ;;
         --ahci) USE_AHCI=true; shift ;;
@@ -111,9 +116,9 @@ if [ "$USE_BUNDLE" = true ]; then
     if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
         echo "Bundle:  reusing $BUNDLE_IMG (--reuse-bundle, skipped rebuild)"
     elif [ -n "$BENCH_ARGS" ]; then
-        "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG
+        "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG $CONSOLE_ARG
     else
-        "$REPO_ROOT/scripts/make-bundle.sh" $MINIMAL_ARG
+        "$REPO_ROOT/scripts/make-bundle.sh" $MINIMAL_ARG $CONSOLE_ARG
     fi
 fi
 
