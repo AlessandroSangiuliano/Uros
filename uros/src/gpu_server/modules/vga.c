@@ -89,6 +89,13 @@ struct vga_surface {
 	unsigned int	cur_col;
 	unsigned int	cur_row;
 	uint64_t	scroll_count;		/* #203: scrolls on this surface */
+	/* UTF-8 fold state (#364 polish): the VGA font is 8-bit CP437, so a
+	 * multibyte UTF-8 char would paint as several garbage glyphs.  We
+	 * decode across bytes and emit one ASCII glyph — utf8_left counts
+	 * continuation bytes still expected, utf8_cp accumulates the code
+	 * point. */
+	unsigned int	utf8_left;
+	uint32_t	utf8_cp;
 };
 
 struct vga_priv {
@@ -150,6 +157,7 @@ vga_clear_surface(struct vga_surface *s)
 		s->cells[i] = VGA_CELL(' ', VGA_ATTR_DEFAULT);
 	s->cur_col = 0;
 	s->cur_row = 0;
+	s->utf8_left = 0;
 }
 
 static void
@@ -199,8 +207,31 @@ vga_blit(struct vga_priv *p, unsigned int sid)
 	vga_cursor_update(&p->surf[sid]);
 }
 
+/*
+ * Fold a decoded UTF-8 code point to a single CP437/ASCII glyph so the
+ * 8-bit VGA font renders it legibly instead of as garbage bytes.
+ * Unmapped non-ASCII becomes '?' (#364 polish).
+ */
+static char
+utf8_fold(uint32_t cp)
+{
+	switch (cp) {
+	case 0x2013: case 0x2014:	return '-';	/* en / em dash */
+	case 0x2018: case 0x2019:	return '\'';	/* curly single quotes */
+	case 0x201C: case 0x201D:	return '"';	/* curly double quotes */
+	case 0x2022:			return '*';	/* bullet */
+	case 0x2026:			return '.';	/* horizontal ellipsis */
+	case 0x2190:			return '<';	/* left arrow */
+	case 0x2192:			return '>';	/* right arrow */
+	case 0x00A0:			return ' ';	/* no-break space */
+	default:			return (cp < 0x80) ? (char)cp : '?';
+	}
+}
+
+/* Low-level cell write: control chars + one printable glyph, with wrap
+ * and scroll.  Called by vga_surf_putc after UTF-8 folding. */
 static void
-vga_surf_putc(struct vga_surface *s, char c)
+vga_emit(struct vga_surface *s, char c)
 {
 	switch (c) {
 	case '\n':
@@ -234,6 +265,39 @@ vga_surf_putc(struct vga_surface *s, char c)
 		vga_scroll_surface(s);
 		s->cur_row = VGA_ROWS - 1;
 	}
+}
+
+/*
+ * UTF-8 -> CP437 folding front end (#364 polish).  Bytes < 0x80 pass
+ * straight to vga_emit (control chars + ASCII).  Multibyte UTF-8 is
+ * decoded across calls and emitted as a single folded glyph, so a stray
+ * em-dash / arrow in a log line no longer paints garbage.
+ */
+static void
+vga_surf_putc(struct vga_surface *s, char ch)
+{
+	uint8_t b = (uint8_t)ch;
+
+	if (s->utf8_left > 0) {
+		if ((b & 0xC0) == 0x80) {		/* continuation byte */
+			s->utf8_cp = (s->utf8_cp << 6) | (b & 0x3Fu);
+			if (--s->utf8_left == 0)
+				vga_emit(s, utf8_fold(s->utf8_cp));
+			return;
+		}
+		s->utf8_left = 0;	/* malformed — drop partial, reprocess b */
+	}
+
+	if (b < 0x80) {
+		vga_emit(s, (char)b);
+		return;
+	}
+
+	/* UTF-8 lead byte: set up the expected continuation length. */
+	if ((b & 0xE0) == 0xC0) { s->utf8_left = 1; s->utf8_cp = b & 0x1Fu; }
+	else if ((b & 0xF0) == 0xE0) { s->utf8_left = 2; s->utf8_cp = b & 0x0Fu; }
+	else if ((b & 0xF8) == 0xF0) { s->utf8_left = 3; s->utf8_cp = b & 0x07u; }
+	else vga_emit(s, '?');		/* stray continuation / invalid lead */
 }
 
 /* ============================================================

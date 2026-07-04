@@ -55,11 +55,11 @@ extern mach_port_t __uros_proc_port;
 extern unsigned int __uros_my_pid;
 
 /*
- * ASCII-only: the on-screen console (#363) renders through the gpu
- * 8-bit (CP437) font, so a UTF-8 em-dash shows up as garbage bytes.  It
- * looked fine on serial only because the host terminal decoded UTF-8.
+ * The em-dash is fine again: #364 gave the gpu text renderer a
+ * UTF-8 -> CP437 fold, so multibyte characters land as one legible glyph
+ * instead of the garbage bytes that forced the ASCII workaround in #363.
  */
-#define USH_BANNER     "\r\nush v0.1.0 - Uros shell (#275.5)\r\n"
+#define USH_BANNER     "\r\nush v0.1.0 — Uros shell (#275.5)\r\n"
 #define USH_PROMPT     "ush$ "
 #define USH_LINE_MAX   256
 
