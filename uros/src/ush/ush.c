@@ -94,52 +94,40 @@ lookup_char_server(void)
     return -1;
 }
 
+/*
+ * Collect candidate TTY dev_ids to try, best first: the on-screen
+ * consoles (#363/#365 — one per VT) ahead of the UART fallback (serial /
+ * headless / bench, when console.so is absent).  ush then claims the
+ * first candidate it can acquire; since #365 gives every VT its own
+ * console, a second ush skips the one already taken and lands on the
+ * next VT.  Returns how many ids were written.
+ */
 static int
-find_tty_device(uint32_t *out_dev_id)
+find_tty_devices(uint32_t *ids, unsigned int max)
 {
     struct char_device_info *devs;
     vm_offset_t buf      = 0;
     mach_msg_type_number_t bcnt = 0;
     uint32_t n           = 0;
     kern_return_t kr;
-    unsigned int i;
+    unsigned int i, cnt = 0;
 
     kr = char_query_devices(char_port, &buf, &bcnt, &n);
     if (kr != KERN_SUCCESS || n == 0)
-        return -1;
+        return 0;
     devs = (void *)buf;
 
-    /*
-     * Prefer the on-screen console (#363) when char_server loaded it, so
-     * the graphical window is the interactive terminal.  Otherwise take
-     * the first CHAR_CLASS_TTY — the UART, on serial / headless / bench
-     * boots whose bundle omits console.so, keeping the serial path
-     * exactly as before.
-     */
-    {
-        uint32_t first_tty = 0;
-        int      have_tty  = 0;
+    for (i = 0; i < n && cnt < max; i++)		/* consoles first */
+        if (devs[i].class == CHAR_CLASS_TTY &&
+            strcmp(devs[i].module_name, "console") == 0)
+            ids[cnt++] = devs[i].id;
+    for (i = 0; i < n && cnt < max; i++)		/* then UART etc. */
+        if (devs[i].class == CHAR_CLASS_TTY &&
+            strcmp(devs[i].module_name, "console") != 0)
+            ids[cnt++] = devs[i].id;
 
-        for (i = 0; i < n; i++) {
-            if (devs[i].class != CHAR_CLASS_TTY)
-                continue;
-            if (!have_tty) {
-                first_tty = devs[i].id;
-                have_tty  = 1;
-            }
-            if (strcmp(devs[i].module_name, "console") == 0) {
-                *out_dev_id = devs[i].id;
-                (void)vm_deallocate(mach_task_self(), buf, bcnt);
-                return 0;
-            }
-        }
-        (void)vm_deallocate(mach_task_self(), buf, bcnt);
-        if (have_tty) {
-            *out_dev_id = first_tty;
-            return 0;
-        }
-    }
-    return -1;
+    (void)vm_deallocate(mach_task_self(), buf, bcnt);
+    return (int)cnt;
 }
 
 static int
@@ -182,18 +170,38 @@ ush_setup(void)
         return -1;
     USHLOG("char_server resolved");
 
-    /* v0.1: prefer the first CHAR_CLASS_TTY device reported by
-     * char_query_devices.  Fall back to UART (dev_id=2 in current
-     * boot order) if discovery fails. */
-    if (find_tty_device(&dev_id) < 0) {
-        printf("ush: no TTY device found, falling back to dev_id=2\n");
-        dev_id = 2;
-    }
+    /*
+     * Claim the first candidate TTY we can acquire.  A free console
+     * (or the UART) binds without a cap (#275.5); a console already
+     * owned by another session fails the acquire cap-check, so a second
+     * ush walks past it to the next free VT (#365).
+     */
+    {
+        uint32_t cand[8];
+        int      ncand = find_tty_devices(cand, 8);
+        int      c, bound = 0;
 
-    kr = char_tty_acquire_ctty(char_port, cap, 0, dev_id, (int)s, &rc);
-    if (kr != KERN_SUCCESS || rc != 0) {
-        printf("ush: tty_acquire_ctty kr=%d rc=%d\n", (int)kr, rc);
-        return -1;
+        if (ncand <= 0) {
+            printf("ush: no TTY device found, falling back to dev_id=2\n");
+            cand[0] = 2;
+            ncand   = 1;
+        }
+
+        for (c = 0; c < ncand; c++) {
+            rc = 0;
+            kr = char_tty_acquire_ctty(char_port, cap, 0,
+                                       cand[c], (int)s, &rc);
+            if (kr == KERN_SUCCESS && rc == 0) {
+                dev_id = cand[c];
+                bound  = 1;
+                break;
+            }
+        }
+        if (!bound) {
+            printf("ush: could not acquire any tty (last kr=%d rc=%d)\n",
+                   (int)kr, rc);
+            return -1;
+        }
     }
     printf("ush: bound ctty dev_id=%u to sid=%d\n", dev_id, (int)s);
 
