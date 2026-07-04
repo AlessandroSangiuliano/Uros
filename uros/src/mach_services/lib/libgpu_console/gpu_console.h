@@ -27,6 +27,7 @@
 #define _LIBGPU_CONSOLE_H_
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -69,6 +70,18 @@ int  gpu_console_init_async(const char *tag,
  * failed or wasn't called.
  */
 void gpu_console_puts(const char *buf, size_t len);
+
+/*
+ * Virtual text surfaces (#204/#364).  gpu_console_puts_surface writes a
+ * chunk to a specific on-screen surface: surface 0 is the system
+ * console (identical to gpu_console_puts), higher ids are VTs (the
+ * console TTY writes the shell's output to surface 1, keeping it off
+ * the system log).  gpu_console_set_active_surface makes `surface` the
+ * one shown on the physical display — the VT switch.  No-ops if the
+ * gpu mirror was never brought up.
+ */
+void gpu_console_puts_surface(uint32_t surface, const char *buf, size_t len);
+void gpu_console_set_active_surface(uint32_t surface);
 
 #ifdef __cplusplus
 }

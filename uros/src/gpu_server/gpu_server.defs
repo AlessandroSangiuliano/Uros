@@ -177,3 +177,30 @@ routine device_close(
 		gpu_port	: mach_port_t;
 	in	cap		: gpu_token_t;
 	in	dev_id		: gpu_u32_t);
+
+/* =================================================================
+ * Virtual text surfaces (#204/#364) — appended at the end so the
+ * existing routine ids (text_puts=4000 .. device_close=4011) do not
+ * shift.  text_puts_on=4012, text_set_active=4013.
+ * ================================================================= */
+
+/*
+ * text_puts_on — like text_puts but targeting a specific virtual text
+ * surface.  surface 0 is the system console (== text_puts); higher ids
+ * address on-screen VTs (the console TTY writes ush's output to its own
+ * surface, keeping it off the system log).  Cap-checked identically.
+ */
+simpleroutine text_puts_on(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	surface		: gpu_u32_t;
+	in	buf		: gpu_buf_t);
+
+/*
+ * text_set_active — make `surface` the one scanned out to the physical
+ * display: the VT switch.  Fire-and-forget like text_puts.
+ */
+simpleroutine text_set_active(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	surface		: gpu_u32_t);

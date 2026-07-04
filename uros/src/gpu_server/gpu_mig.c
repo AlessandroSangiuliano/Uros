@@ -78,6 +78,44 @@ gpu_text_puts(mach_port_t gpu_port,
 	return KERN_SUCCESS;
 }
 
+/*
+ * text_puts_on / text_set_active (#204/#364) — surface-addressed text
+ * plane.  The cap gates text output in general (checked against
+ * resource_id 0, like text_puts); the per-surface resource_id encoding
+ * is #204's deferred work, so any holder of the text-write cap may
+ * address any VT surface for now.
+ */
+kern_return_t
+gpu_text_puts_on(mach_port_t gpu_port,
+		 char *cap, mach_msg_type_number_t cap_count,
+		 uint32_t surface,
+		 char *buf, mach_msg_type_number_t buf_count)
+{
+	(void)gpu_port;
+
+	if (gpu_core_cap_check(cap, cap_count,
+			       GPU_CAP_DISPLAY_SCANOUT, 0) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	gpu_text_render_enqueue_surface(surface, buf, (size_t)buf_count);
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+gpu_text_set_active(mach_port_t gpu_port,
+		    char *cap, mach_msg_type_number_t cap_count,
+		    uint32_t surface)
+{
+	(void)gpu_port;
+
+	if (gpu_core_cap_check(cap, cap_count,
+			       GPU_CAP_DISPLAY_SCANOUT, 0) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	(void)gpu_core_text_set_active(surface);
+	return KERN_SUCCESS;
+}
+
 /* ============================================================
  * Device queries
  * ============================================================ */
