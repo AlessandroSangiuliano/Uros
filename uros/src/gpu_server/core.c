@@ -339,7 +339,7 @@ gpu_core_init(void)
  * ================================================================ */
 
 void
-gpu_core_text_puts(const char *buf, size_t len)
+gpu_core_text_puts(uint32_t surface, const char *buf, size_t len)
 {
 	unsigned int i;
 
@@ -350,14 +350,15 @@ gpu_core_text_puts(const char *buf, size_t len)
 	 * text_puts.  In 0.1.0 that's the vga module on dev_id 1; in
 	 * 0.2+ a module may decline (text_puts == NULL) in which case
 	 * core falls back to the kernel console so we never lose
-	 * panic / log output. */
+	 * panic / log output.  `surface` selects the virtual text surface
+	 * (#204/#364): 0 = system console, others = on-screen VTs. */
 	for (i = 1; i < GPU_MAX_DEVICES; i++) {
 		struct gpu_device_entry *dev = gpu_core_dev_lookup(i);
 		if (dev == NULL)
 			continue;
 		if (dev->module == NULL || dev->module->text_puts == NULL)
 			continue;
-		(void)dev->module->text_puts(dev->priv, buf, len);
+		(void)dev->module->text_puts(dev->priv, surface, buf, len);
 		return;
 	}
 
@@ -371,4 +372,42 @@ gpu_core_text_puts(const char *buf, size_t len)
 		line[n] = '\0';
 		printf("gpu_server: text_puts(%u): %s\n", (unsigned)len, line);
 	}
+}
+
+/* ================================================================
+ * VT switch (#204/#364): make `surface` the one scanned out to the
+ * physical display.  Routes to the first module that supports it;
+ * single-surface modules (no text_set_active) return -1 harmlessly.
+ * ================================================================ */
+
+int
+gpu_core_text_set_active(uint32_t surface)
+{
+	unsigned int i;
+
+	for (i = 1; i < GPU_MAX_DEVICES; i++) {
+		struct gpu_device_entry *dev = gpu_core_dev_lookup(i);
+		if (dev == NULL || dev->module == NULL)
+			continue;
+		if (dev->module->text_set_active == NULL)
+			continue;
+		return dev->module->text_set_active(dev->priv, surface);
+	}
+	return -1;
+}
+
+uint32_t
+gpu_core_text_surface_count(void)
+{
+	unsigned int i;
+
+	for (i = 1; i < GPU_MAX_DEVICES; i++) {
+		struct gpu_device_entry *dev = gpu_core_dev_lookup(i);
+		if (dev == NULL || dev->module == NULL)
+			continue;
+		if (dev->module->text_surface_count == NULL)
+			continue;
+		return dev->module->text_surface_count(dev->priv);
+	}
+	return 1;
 }

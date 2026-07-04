@@ -73,12 +73,29 @@
  * today.
  * ============================================================ */
 
-struct vga_priv {
-	int		attached;
-	volatile uint16_t *fb;		/* mapped 0xB8000 */
+#define VGA_NSURFACES	4u			/* VT1..VT4 (#364) */
+#define VGA_CELLS	(VGA_COLS * VGA_ROWS)
+
+/*
+ * A virtual text surface (#204/#364): an off-screen 80x25 cell grid in
+ * RAM plus its own cursor.  Writes always land in `cells`; the surface
+ * that is `active` is additionally blitted to the VGA VRAM at 0xB8000,
+ * so exactly one surface is on screen at a time.  A VT switch is a blit
+ * of the target grid to VRAM — nothing is lost on the surfaces that
+ * scroll off screen.
+ */
+struct vga_surface {
+	uint16_t	cells[VGA_CELLS];	/* RAM shadow of the cell grid */
 	unsigned int	cur_col;
 	unsigned int	cur_row;
-	uint64_t	scroll_count;	/* #203: total scrolls since attach */
+	uint64_t	scroll_count;		/* #203: scrolls on this surface */
+};
+
+struct vga_priv {
+	int			attached;
+	volatile uint16_t	*fb;		/* mapped VGA VRAM (0xB8000) */
+	struct vga_surface	surf[VGA_NSURFACES];
+	unsigned int		active;		/* surface currently on screen */
 };
 
 /* gpu_display_t is opaque outside core; the module owns its concrete
@@ -116,9 +133,9 @@ vga_outb(uint16_t port, uint8_t v)
 }
 
 static void
-vga_cursor_update(const struct vga_priv *p)
+vga_cursor_update(const struct vga_surface *s)
 {
-	uint16_t pos = (uint16_t)(p->cur_row * VGA_COLS + p->cur_col);
+	uint16_t pos = (uint16_t)(s->cur_row * VGA_COLS + s->cur_col);
 	vga_outb(VGA_CRTC_INDEX, VGA_CRTC_CURSOR_HIGH);
 	vga_outb(VGA_CRTC_DATA,  (uint8_t)(pos >> 8));
 	vga_outb(VGA_CRTC_INDEX, VGA_CRTC_CURSOR_LOW);
@@ -126,77 +143,96 @@ vga_cursor_update(const struct vga_priv *p)
 }
 
 static void
-vga_clear(struct vga_priv *p)
+vga_clear_surface(struct vga_surface *s)
 {
 	unsigned int i;
-	for (i = 0; i < VGA_COLS * VGA_ROWS; i++)
-		p->fb[i] = VGA_CELL(' ', VGA_ATTR_DEFAULT);
-	p->cur_col = 0;
-	p->cur_row = 0;
-	vga_cursor_update(p);
+	for (i = 0; i < VGA_CELLS; i++)
+		s->cells[i] = VGA_CELL(' ', VGA_ATTR_DEFAULT);
+	s->cur_col = 0;
+	s->cur_row = 0;
 }
 
 static void
-vga_scroll_one(struct vga_priv *p)
+vga_scroll_surface(struct vga_surface *s)
 {
-	/* Move rows [1..ROWS) one row up, blank the last row.
-	 * memmove on the MMIO mapping is the fastest legal way: design
-	 * doc §11.3 rule 3 (~320 µs / scroll on KVM, ~600 µs on HW). */
-	memmove((void *)p->fb,
-		(const void *)(p->fb + VGA_COLS),
+	/* Move rows [1..ROWS) one row up in the RAM grid, blank the last
+	 * row.  The blit to VRAM (for the active surface) happens once per
+	 * write batch in vga_text_puts, not here. */
+	memmove(s->cells, s->cells + VGA_COLS,
 		(size_t)(VGA_ROWS - 1) * VGA_COLS * sizeof(uint16_t));
 
 	{
 		unsigned int i;
-		volatile uint16_t *last_row = p->fb + (VGA_ROWS - 1) * VGA_COLS;
+		uint16_t *last_row = s->cells + (VGA_ROWS - 1) * VGA_COLS;
 		for (i = 0; i < VGA_COLS; i++)
 			last_row[i] = VGA_CELL(' ', VGA_ATTR_DEFAULT);
 	}
 
-	p->scroll_count++;
+	s->scroll_count++;
 }
 
 static uint64_t
 vga_get_scroll_count(void *priv)
 {
 	const struct vga_priv *p = (const struct vga_priv *)priv;
-	return p->scroll_count;
+	uint64_t total = 0;
+	unsigned int i;
+
+	for (i = 0; i < VGA_NSURFACES; i++)
+		total += p->surf[i].scroll_count;
+	return total;
+}
+
+/*
+ * Blit a surface's RAM cell grid to the VGA VRAM and move the hardware
+ * cursor to match.  Meaningful only for the active surface — called
+ * once per write batch and on every VT switch.  memmove/memcpy on the
+ * MMIO mapping is the fastest legal paint (design §11.3 rule 3).
+ */
+static void
+vga_blit(struct vga_priv *p, unsigned int sid)
+{
+	if (p->fb == NULL || sid >= VGA_NSURFACES)
+		return;
+	memcpy((void *)p->fb, p->surf[sid].cells,
+	       VGA_CELLS * sizeof(uint16_t));
+	vga_cursor_update(&p->surf[sid]);
 }
 
 static void
-vga_putc(struct vga_priv *p, char c)
+vga_surf_putc(struct vga_surface *s, char c)
 {
 	switch (c) {
 	case '\n':
-		p->cur_col = 0;
-		p->cur_row++;
+		s->cur_col = 0;
+		s->cur_row++;
 		break;
 	case '\r':
-		p->cur_col = 0;
+		s->cur_col = 0;
 		break;
 	case '\t':
-		p->cur_col = (p->cur_col + 8u) & ~7u;
+		s->cur_col = (s->cur_col + 8u) & ~7u;
 		break;
 	case '\b':
-		if (p->cur_col > 0)
-			p->cur_col--;
+		if (s->cur_col > 0)
+			s->cur_col--;
 		break;
 	default: {
-		unsigned int off = p->cur_row * VGA_COLS + p->cur_col;
-		if (off < VGA_COLS * VGA_ROWS)
-			p->fb[off] = VGA_CELL(c, VGA_ATTR_DEFAULT);
-		p->cur_col++;
+		unsigned int off = s->cur_row * VGA_COLS + s->cur_col;
+		if (off < VGA_CELLS)
+			s->cells[off] = VGA_CELL(c, VGA_ATTR_DEFAULT);
+		s->cur_col++;
 		break;
 	}
 	}
 
-	if (p->cur_col >= VGA_COLS) {
-		p->cur_col = 0;
-		p->cur_row++;
+	if (s->cur_col >= VGA_COLS) {
+		s->cur_col = 0;
+		s->cur_row++;
 	}
-	if (p->cur_row >= VGA_ROWS) {
-		vga_scroll_one(p);
-		p->cur_row = VGA_ROWS - 1;
+	if (s->cur_row >= VGA_ROWS) {
+		vga_scroll_surface(s);
+		s->cur_row = VGA_ROWS - 1;
 	}
 }
 
@@ -231,10 +267,16 @@ vga_attach(void *priv)
 
 	p->fb = (volatile uint16_t *)(uintptr_t)uva;
 	p->attached = 1;
-	vga_clear(p);
+	{
+		unsigned int i;
+		for (i = 0; i < VGA_NSURFACES; i++)
+			vga_clear_surface(&p->surf[i]);
+	}
+	p->active = 0;
+	vga_blit(p, 0);		/* paint the (blank) system console to VRAM */
 
-	printf("vga: text mode %ux%u mapped at uva=0x%08x\n",
-	       VGA_COLS, VGA_ROWS, (unsigned int)uva);
+	printf("vga: text mode %ux%u mapped at uva=0x%08x (%u surfaces)\n",
+	       VGA_COLS, VGA_ROWS, (unsigned int)uva, VGA_NSURFACES);
 	return 0;
 }
 
@@ -297,19 +339,47 @@ vga_display_scanout(gpu_display_t *d, gpu_bo_t *bo)
 }
 
 static int
-vga_text_puts(void *priv, const char *buf, size_t len)
+vga_text_puts(void *priv, uint32_t surface, const char *buf, size_t len)
 {
 	struct vga_priv *p = (struct vga_priv *)priv;
+	struct vga_surface *s;
 	size_t i;
 
 	if (!p->attached || p->fb == NULL)
 		return -1;
+	if (surface >= VGA_NSURFACES)
+		surface = 0;		/* clamp unknown surfaces to the console */
+	s = &p->surf[surface];
+
 	for (i = 0; i < len; i++)
-		vga_putc(p, buf[i]);
-	/* #201: sync HW cursor once per batch — cheaper than per-char,
-	 * still gives a visible blinking underline that follows the
-	 * tail of the most recent text. */
-	vga_cursor_update(p);
+		vga_surf_putc(s, buf[i]);
+
+	/* Only the on-screen surface touches VRAM; background VTs just
+	 * accumulate in their RAM grid until switched to.  Blitting once
+	 * per batch (not per char) also syncs the HW cursor (#201). */
+	if (surface == p->active)
+		vga_blit(p, surface);
+	return 0;
+}
+
+static uint32_t
+vga_text_surface_count(void *priv)
+{
+	(void)priv;
+	return VGA_NSURFACES;
+}
+
+static int
+vga_text_set_active(void *priv, uint32_t surface)
+{
+	struct vga_priv *p = (struct vga_priv *)priv;
+
+	if (!p->attached || p->fb == NULL)
+		return -1;
+	if (surface >= VGA_NSURFACES)
+		return -1;
+	p->active = surface;
+	vga_blit(p, surface);		/* repaint VRAM from the target grid */
 	return 0;
 }
 
@@ -338,4 +408,6 @@ const gpu_module_ops_t vga_module_ops = {
 	.submit           = NULL,	/* no command submission in 0.1.0 */
 	.text_puts        = vga_text_puts,
 	.get_scroll_count = vga_get_scroll_count,
+	.text_surface_count = vga_text_surface_count,
+	.text_set_active  = vga_text_set_active,
 };

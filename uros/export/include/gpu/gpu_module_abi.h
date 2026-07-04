@@ -31,7 +31,7 @@
 #include <stddef.h>
 #include <gpu/gpu_types.h>
 
-#define GPU_MODULE_ABI_VERSION		2u
+#define GPU_MODULE_ABI_VERSION		3u	/* +virtual text surfaces (#204/#364) */
 
 /* ============================================================
  * Forward-declared opaque types.
@@ -91,16 +91,29 @@ typedef struct gpu_module_ops {
 				  const void *cmdbuf, size_t len,
 				  gpu_fence_id_t *out_fence);
 
-	/* Text fast-path (0.1.0 only).  A real GPU module returns
-	 * KERN_NOT_SUPPORTED here and goes through the generic glyph
-	 * rasterizer in core when text_render lands.  vga.c implements
-	 * it as a direct write to 0xB8000. */
-	int		(*text_puts)(void *priv, const char *buf, size_t len);
+	/* Text fast-path (0.1.0+).  `surface` selects one of the module's
+	 * virtual text surfaces (#204/#364): surface 0 = the system
+	 * console; higher ids = additional on-screen terminals (VTs).  Each
+	 * surface has its own off-screen cell grid + cursor; only the
+	 * active one is scanned out.  A single-surface module ignores a
+	 * non-zero `surface` (output still lands, on surface 0). */
+	int		(*text_puts)(void *priv, uint32_t surface,
+				     const char *buf, size_t len);
 
 	/* Diagnostic counters (ABI 2, #203).  Optional — return 0 / NULL
 	 * if the module doesn't have anything meaningful.  Summed across
 	 * all attached devices by gpu_query_stats. */
 	uint64_t	(*get_scroll_count)(void *priv);
+
+	/* Virtual text surfaces (ABI 3, #204/#364). ---------------------- */
+
+	/* Number of text surfaces the module keeps (>= 1).  NULL ⇒ 1. */
+	uint32_t	(*text_surface_count)(void *priv);
+
+	/* Make `surface` the one scanned out to the physical display — the
+	 * VT switch.  Repaints hardware from that surface's cell grid.
+	 * NULL ⇒ single-surface module, switching is a no-op. */
+	int		(*text_set_active)(void *priv, uint32_t surface);
 } gpu_module_ops_t;
 
 /* ============================================================
