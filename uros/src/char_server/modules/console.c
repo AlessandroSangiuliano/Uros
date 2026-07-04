@@ -96,6 +96,14 @@ struct console_priv {
 
 static struct console_priv console_singleton;
 
+/*
+ * One-shot: flipped the on-screen surface to the shell's VT the first
+ * time ush produces output, so the shell is the default view once it is
+ * up (#364).  After that the user's Ctrl+Alt+Fn choice is respected — a
+ * background write from the shell must not yank the screen off the log.
+ */
+static int console_shown_ush;
+
 /* ============================================================
  * RX ring helpers.
  * ============================================================ */
@@ -273,6 +281,15 @@ static int
 console_tty_write(void *priv, const char *buf, size_t len)
 {
 	(void)priv;
+
+	/* The shell is starting to talk: make its VT the one on screen, so
+	 * the graphical window shows ush by default once it is up (the boot
+	 * log was on tty1 until now).  One-shot — see console_shown_ush. */
+	if (!console_shown_ush) {
+		console_shown_ush = 1;
+		gpu_console_set_active_surface(CONSOLE_VT_SURFACE);
+	}
+
 	gpu_console_puts_surface(CONSOLE_VT_SURFACE, buf, len);
 	return 0;
 }
