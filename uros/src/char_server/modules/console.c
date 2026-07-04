@@ -69,11 +69,14 @@
  * Shift+PageUp/Down scrolls the on-screen surface through its scrollback.
  */
 #define CONSOLE_VT_SURFACE	1u
-#define CONSOLE_VT_MAX		4u
+#define CONSOLE_VT_MAX		4u	/* F1..F4 → surfaces 0..3 */
+#define CONSOLE_VT_COUNT	(CONSOLE_VT_MAX - 1u)	/* consoles on surf 1..3 */
 #define CONSOLE_SCROLL_STEP	12	/* rows per Shift+PageUp/Down */
 
 /* ============================================================
- * Per-instance state.  Single virtual console per board.
+ * Per-instance state.  One console per on-screen virtual terminal
+ * (#365): surface 0 is the system log (no console); surfaces 1..N each
+ * get their own console TTY so they can host their own shell.
  * ============================================================ */
 
 #define CON_RING_SIZE		1024u	/* must be power of two */
@@ -82,6 +85,7 @@
 
 struct console_priv {
 	int		attached;
+	uint32_t	surface;	/* the VT surface this console drives */
 
 	/* RX ring: producer = console_kbd_sink (demux thread), consumer =
 	 * console_tty_read (same demux thread).  Single-threaded server →
@@ -98,15 +102,35 @@ struct console_priv {
 	unsigned int	n_subscribers;
 };
 
-static struct console_priv console_singleton;
+static struct console_priv console_insts[CONSOLE_VT_COUNT];
+static unsigned int	    console_next;	/* next instance probe hands out */
 
 /*
- * One-shot: flipped the on-screen surface to the shell's VT the first
- * time ush produces output, so the shell is the default view once it is
- * up (#364).  After that the user's Ctrl+Alt+Fn choice is respected — a
- * background write from the shell must not yank the screen off the log.
+ * Which VT surface is currently on screen — the keyboard sink routes
+ * bytes to the console bound to it, so typing always reaches the shell
+ * you are looking at (#365).  Kept in step with the gpu active surface
+ * by every switch (manual Ctrl+Alt+Fn and the boot auto-switch).
+ */
+static uint32_t console_active_surface = CONSOLE_VT_SURFACE;
+
+/*
+ * One-shot: flip the on-screen surface to the shell's VT the first time
+ * a shell produces output, so it is the default view once up (#364).
+ * After that the user's Ctrl+Alt+Fn choice is respected.
  */
 static int console_shown_ush;
+
+static struct console_priv *
+console_for_surface(uint32_t surface)
+{
+	unsigned int i;
+
+	for (i = 0; i < CONSOLE_VT_COUNT; i++)
+		if (console_insts[i].attached &&
+		    console_insts[i].surface == surface)
+			return &console_insts[i];
+	return NULL;
+}
 
 /* ============================================================
  * RX ring helpers.
@@ -166,11 +190,13 @@ console_notify_subscribers(struct console_priv *p)
  * ============================================================ */
 
 static void
-console_kbd_sink(void *priv, const char_kbd_event_t *ev)
+console_kbd_sink(void *arg, const char_kbd_event_t *ev)
 {
-	struct console_priv *p = priv;
+	struct console_priv *p;
 	uint32_t keysym = ev->keysym;
 	uint8_t  byte;
+
+	(void)arg;			/* shared sink — routes by active surface */
 
 	if (!ev->pressed)		/* act on make only, ignore break */
 		return;
@@ -180,13 +206,14 @@ console_kbd_sink(void *priv, const char_kbd_event_t *ev)
 	/*
 	 * VT switch (#364): Ctrl+Alt+F1..Fn selects the on-screen surface
 	 * instead of feeding a byte to the shell.  F1 = surface 0 (system
-	 * console / tty1), F2 = surface 1 (this shell / tty2), ...  The
-	 * keystroke is consumed here — it never reaches the RX ring.
+	 * console / tty1), F2 = surface 1 (shell / tty2), ...  The keystroke
+	 * is consumed here — it never reaches any RX ring.
 	 */
 	if ((ev->modifiers & CHAR_KBD_MOD_CTRL) &&
 	    (ev->modifiers & CHAR_KBD_MOD_ALT) &&
 	    keysym >= KSYM_F1 && keysym < KSYM_F1 + CONSOLE_VT_MAX) {
-		gpu_console_set_active_surface(keysym - KSYM_F1);
+		console_active_surface = keysym - KSYM_F1;
+		gpu_console_set_active_surface(console_active_surface);
 		return;
 	}
 
@@ -228,6 +255,11 @@ console_kbd_sink(void *priv, const char_kbd_event_t *ev)
 		}
 	}
 
+	/* Deliver to the shell on the VT currently on screen.  The log VT
+	 * (surface 0) has no console, so typing there is simply dropped. */
+	p = console_for_surface(console_active_surface);
+	if (p == NULL)
+		return;
 	console_ring_push(p, byte);
 	console_notify_subscribers(p);
 }
@@ -239,10 +271,16 @@ console_kbd_sink(void *priv, const char_kbd_event_t *ev)
 static void *
 console_probe(const struct hal_device_info *dev)
 {
+	struct console_priv *p;
+
 	(void)dev;
-	if (console_singleton.attached)
-		return NULL;
-	return &console_singleton;
+	if (console_next >= CONSOLE_VT_COUNT)
+		return NULL;		/* one console per VT surface, then stop */
+
+	p = &console_insts[console_next];
+	p->surface = 1u + console_next;	/* VT consoles live on surfaces 1.. */
+	console_next++;
+	return p;
 }
 
 static int
@@ -255,13 +293,16 @@ console_attach(void *priv)
 	p->overrun_drops = 0;
 	p->n_subscribers = 0;
 
-	/* Register the in-process keyboard sink.  The loopback port itself
-	 * is opened + subscribed by char_core_kbd_loopback_wire() after
-	 * discovery (once ps2.so is attached too). */
-	char_core_register_kbd_sink(console_kbd_sink, p);
+	/* Register the in-process keyboard sink.  It is shared across all
+	 * console instances (it routes each byte to the on-screen VT), so
+	 * registering it on every attach is idempotent — same function, no
+	 * per-instance arg.  The loopback port is opened + subscribed by
+	 * char_core_kbd_loopback_wire() after discovery. */
+	char_core_register_kbd_sink(console_kbd_sink, NULL);
 
 	p->attached = 1;
-	printf("console: on-screen TTY attached (gpu out, ps2 in)\n");
+	printf("console: on-screen TTY attached for VT surface %u\n",
+	       p->surface);
 	return 0;
 }
 
@@ -271,7 +312,8 @@ console_detach(void *priv)
 	struct console_priv *p = priv;
 	unsigned int i;
 
-	char_core_register_kbd_sink(NULL, NULL);
+	/* Leave the shared keyboard sink registered — other console
+	 * instances still use it, and detach only fires at task exit. */
 	for (i = 0; i < p->n_subscribers; i++) {
 		if (p->subscribers[i] != MACH_PORT_NULL)
 			(void)mach_port_deallocate(mach_task_self(),
@@ -296,22 +338,23 @@ console_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
 	return 0;
 }
 
-/* tty_write — render to this console's own on-screen surface (tty2)
- * via libgpu_console, so the shell stays off the system log (tty1). */
+/* tty_write — render to this console's own on-screen surface via
+ * libgpu_console, so each shell stays on its own VT and off the log. */
 static int
 console_tty_write(void *priv, const char *buf, size_t len)
 {
-	(void)priv;
+	struct console_priv *p = priv;
 
-	/* The shell is starting to talk: make its VT the one on screen, so
-	 * the graphical window shows ush by default once it is up (the boot
-	 * log was on tty1 until now).  One-shot — see console_shown_ush. */
+	/* The first shell to talk becomes the default view, so the graphical
+	 * window shows a shell once it is up (the boot log was on tty1 until
+	 * now).  One-shot — see console_shown_ush. */
 	if (!console_shown_ush) {
 		console_shown_ush = 1;
-		gpu_console_set_active_surface(CONSOLE_VT_SURFACE);
+		console_active_surface = p->surface;
+		gpu_console_set_active_surface(p->surface);
 	}
 
-	gpu_console_puts_surface(CONSOLE_VT_SURFACE, buf, len);
+	gpu_console_puts_surface(p->surface, buf, len);
 	return 0;
 }
 
