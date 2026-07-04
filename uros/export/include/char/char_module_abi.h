@@ -24,6 +24,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <mach.h>
+#include <mach/message.h>
 #include <char/char_types.h>
 
 #define CHAR_MODULE_ABI_VERSION		3u	/* +mouse_subscribe (#215) */
@@ -98,6 +99,28 @@ typedef struct char_module_ops {
  * can disambiguate. */
 #define CHAR_TTY_NOTIFY_ID		3201u
 
+/*
+ * msgh_id a CHAR_CLASS_KEYBOARD module stamps on every fan-out message
+ * carrying one char_kbd_event_t inline (see kbd_subscribe).  Chosen
+ * outside the gpu_server (4000) / char_server (4100) MIG subsystems and
+ * clear of the IRQ-notification range (>= 3000, < 3016), so a subscriber
+ * demux can route it with a single id compare.  In-process subscribers
+ * (the console TTY, #363) match on the same id as external ones.
+ */
+#define CHAR_KBD_EVENT_MSGH_ID		4200
+
+/*
+ * Wire format of a keyboard fan-out message.  Producer (ps2.so) and
+ * every subscriber — including the in-process console (#363), which
+ * receives these via a loopback send right on char_server's own port
+ * set — share this one layout so the two ends never drift.
+ */
+typedef struct char_kbd_event_msg {
+	mach_msg_header_t	head;
+	NDR_record_t		ndr;
+	char_kbd_event_t	event;
+} char_kbd_event_msg_t;
+
 #define CHAR_MODULE_ENTRY_SUFFIX	"_module_ops"
 
 /* ============================================================
@@ -131,5 +154,17 @@ extern int char_core_irq_register(uint32_t irq,
  * Safe to call from detach().
  */
 extern int char_core_irq_unregister(uint32_t irq);
+
+/*
+ * Register a keyboard-event sink (#363).  The console TTY module calls
+ * this from attach() so that in-process keyboard fan-out — ps2.so
+ * sending CHAR_KBD_EVENT_MSGH_ID messages to the loopback port core
+ * opens in char_core_kbd_loopback_wire() — is delivered straight to
+ * `fn(arg, event)` from char_server's demux.  Only one sink; the last
+ * registration wins.  A module that is not the console never calls
+ * this.
+ */
+extern void char_core_register_kbd_sink(
+	void (*fn)(void *arg, const char_kbd_event_t *ev), void *arg);
 
 #endif /* _CHAR_CHAR_MODULE_ABI_H_ */

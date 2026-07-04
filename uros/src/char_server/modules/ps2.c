@@ -245,23 +245,16 @@ static struct ps2_priv ps2_singleton;
 /* ============================================================
  * Event fan-out.  One inline Mach msg per subscriber per event.
  *
- * msgh_id 4200 chosen outside the gpu_server (4000) and
- * char_server (4100) subsystems, well away from the IRQ
- * notification range (>= 3000).  Subscribers match on this id.
+ * The msgh_id (CHAR_KBD_EVENT_MSGH_ID) and the wire struct
+ * (char_kbd_event_msg_t) are the shared contract in
+ * <char/char_module_abi.h> — every subscriber, in-process (the
+ * console TTY, #363) or external, decodes with the same layout.
  * ============================================================ */
-
-#define CHAR_KBD_EVENT_MSGH_ID	4200
-
-typedef struct {
-	mach_msg_header_t	head;
-	NDR_record_t		ndr;
-	char_kbd_event_t	event;
-} ps2_event_msg_t;
 
 static void
 ps2_fanout(struct ps2_priv *p, const char_kbd_event_t *event)
 {
-	ps2_event_msg_t msg;
+	char_kbd_event_msg_t msg;
 	unsigned int i;
 	mach_msg_return_t mr;
 

@@ -54,7 +54,12 @@ extern mach_port_t __uros_proc_port;
 /* From libposix-uros — we want the canonical pid. */
 extern unsigned int __uros_my_pid;
 
-#define USH_BANNER     "\r\nush v0.1.0 — Uros shell (#275.5)\r\n"
+/*
+ * ASCII-only: the on-screen console (#363) renders through the gpu
+ * 8-bit (CP437) font, so a UTF-8 em-dash shows up as garbage bytes.  It
+ * looked fine on serial only because the host terminal decoded UTF-8.
+ */
+#define USH_BANNER     "\r\nush v0.1.0 - Uros shell (#275.5)\r\n"
 #define USH_PROMPT     "ush$ "
 #define USH_LINE_MAX   256
 
@@ -103,14 +108,37 @@ find_tty_device(uint32_t *out_dev_id)
     if (kr != KERN_SUCCESS || n == 0)
         return -1;
     devs = (void *)buf;
-    for (i = 0; i < n; i++) {
-        if (devs[i].class == CHAR_CLASS_TTY) {
-            *out_dev_id = devs[i].id;
-            (void)vm_deallocate(mach_task_self(), buf, bcnt);
+
+    /*
+     * Prefer the on-screen console (#363) when char_server loaded it, so
+     * the graphical window is the interactive terminal.  Otherwise take
+     * the first CHAR_CLASS_TTY — the UART, on serial / headless / bench
+     * boots whose bundle omits console.so, keeping the serial path
+     * exactly as before.
+     */
+    {
+        uint32_t first_tty = 0;
+        int      have_tty  = 0;
+
+        for (i = 0; i < n; i++) {
+            if (devs[i].class != CHAR_CLASS_TTY)
+                continue;
+            if (!have_tty) {
+                first_tty = devs[i].id;
+                have_tty  = 1;
+            }
+            if (strcmp(devs[i].module_name, "console") == 0) {
+                *out_dev_id = devs[i].id;
+                (void)vm_deallocate(mach_task_self(), buf, bcnt);
+                return 0;
+            }
+        }
+        (void)vm_deallocate(mach_task_self(), buf, bcnt);
+        if (have_tty) {
+            *out_dev_id = first_tty;
             return 0;
         }
     }
-    (void)vm_deallocate(mach_task_self(), buf, bcnt);
     return -1;
 }
 
