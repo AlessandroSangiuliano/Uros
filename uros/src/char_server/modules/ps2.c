@@ -146,6 +146,9 @@ ctrl_write_data(uint8_t v)
 #define KSYM_RETURN	0xFF0D
 #define KSYM_ESC	0xFF1B
 #define KSYM_F1		0xFFBE
+#define KSYM_F2		0xFFBF		/* F2..F4 for VT switch (#364) */
+#define KSYM_F3		0xFFC0
+#define KSYM_F4		0xFFC1
 #define KSYM_UP		0xFF52
 #define KSYM_DOWN	0xFF54
 #define KSYM_LEFT	0xFF51
@@ -177,7 +180,8 @@ static const uint16_t scset1_plain[128] = {
 	[0x34] = '.',	[0x35] = '/',	[0x36] = KSYM_RSHIFT,
 	[0x37] = '*',	[0x38] = KSYM_LALT, [0x39] = ' ',
 	[0x3A] = KSYM_CAPSLOCK,
-	[0x3B] = KSYM_F1, /* F1; F2..F12 omitted */
+	[0x3B] = KSYM_F1, [0x3C] = KSYM_F2, [0x3D] = KSYM_F3, [0x3E] = KSYM_F4,
+	/* F5..F12 still omitted — VT switch (#364) only needs F1..F4. */
 	[0x45] = KSYM_NUMLOCK, [0x46] = KSYM_SCROLLLOCK,
 };
 
@@ -200,7 +204,7 @@ static const uint16_t scset1_shift[128] = {
 	[0x34] = '>',	[0x35] = '?',	[0x36] = KSYM_RSHIFT,
 	[0x37] = '*',	[0x38] = KSYM_LALT, [0x39] = ' ',
 	[0x3A] = KSYM_CAPSLOCK,
-	[0x3B] = KSYM_F1,
+	[0x3B] = KSYM_F1, [0x3C] = KSYM_F2, [0x3D] = KSYM_F3, [0x3E] = KSYM_F4,
 	[0x45] = KSYM_NUMLOCK, [0x46] = KSYM_SCROLLLOCK,
 };
 

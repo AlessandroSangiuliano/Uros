@@ -138,6 +138,124 @@ gc_send(const char *buf, size_t len)
 }
 
 /* ============================================================
+ * Surface-addressed variants (#204/#364).  Same hand-rolled,
+ * drop-on-full marshalling as gc_send, for the two routines appended
+ * to gpu_server.defs:
+ *
+ *   text_puts_on   (id 4012): [Head][NDR][capCnt][cap…][surface][bufCnt][buf…]
+ *   text_set_active(id 4013): [Head][NDR][capCnt][cap…][surface]
+ *
+ * The scalar `surface` sits between the cap array and the buf array, in
+ * MIG declaration order.
+ * ============================================================ */
+
+#define GC_MSGH_ID_ON		4012	/* gpu_server.defs text_puts_on */
+#define GC_MSGH_ID_SETACTIVE	4013	/* gpu_server.defs text_set_active */
+
+struct gc_msg_on {
+	mach_msg_header_t	Head;
+	NDR_record_t		NDR;
+	mach_msg_type_number_t	capCnt;
+	char			cap[sizeof(struct uros_cap)];
+	uint32_t		surface;
+	mach_msg_type_number_t	bufCnt;
+	char			buf[GPU_BUF_MAX];
+};
+
+static void
+gc_send_on(uint32_t surface, const char *buf, size_t len)
+{
+	struct gc_msg_on msg;
+	mach_msg_size_t capCnt, bufCnt, capPad, bufPad, msgh_size;
+	char *p;
+
+	if (!gc_ready || buf == NULL || len == 0)
+		return;
+	if (len > GPU_BUF_MAX)
+		len = GPU_BUF_MAX;
+
+	capCnt = (mach_msg_size_t)sizeof(gc_cap);
+	bufCnt = (mach_msg_size_t)len;
+	capPad = (capCnt + 3u) & ~3u;
+	bufPad = (bufCnt + 3u) & ~3u;
+
+	msg.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	msg.Head.msgh_remote_port = gc_gpu_port;
+	msg.Head.msgh_local_port  = MACH_PORT_NULL;
+	msg.Head.msgh_id          = GC_MSGH_ID_ON;
+	msg.NDR = NDR_record;
+
+	p = (char *)&msg + sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+	*(mach_msg_type_number_t *)p = capCnt;
+	p += sizeof(mach_msg_type_number_t);
+	memcpy(p, &gc_cap, capCnt);
+	p += capPad;
+	*(uint32_t *)p = surface;
+	p += sizeof(uint32_t);
+	*(mach_msg_type_number_t *)p = bufCnt;
+	p += sizeof(mach_msg_type_number_t);
+	memcpy(p, buf, bufCnt);
+	p += bufPad;
+
+	msgh_size = (mach_msg_size_t)(p - (char *)&msg);
+	msg.Head.msgh_size = msgh_size;
+
+	(void)mach_msg(&msg.Head,
+		       MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+		       msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+static void
+gc_set_active(uint32_t surface)
+{
+	struct gc_msg_on msg;		/* reuse the layout; buf unused */
+	mach_msg_size_t capCnt, capPad, msgh_size;
+	char *p;
+
+	if (!gc_ready)
+		return;
+
+	capCnt = (mach_msg_size_t)sizeof(gc_cap);
+	capPad = (capCnt + 3u) & ~3u;
+
+	msg.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	msg.Head.msgh_remote_port = gc_gpu_port;
+	msg.Head.msgh_local_port  = MACH_PORT_NULL;
+	msg.Head.msgh_id          = GC_MSGH_ID_SETACTIVE;
+	msg.NDR = NDR_record;
+
+	p = (char *)&msg + sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+	*(mach_msg_type_number_t *)p = capCnt;
+	p += sizeof(mach_msg_type_number_t);
+	memcpy(p, &gc_cap, capCnt);
+	p += capPad;
+	*(uint32_t *)p = surface;
+	p += sizeof(uint32_t);
+
+	msgh_size = (mach_msg_size_t)(p - (char *)&msg);
+	msg.Head.msgh_size = msgh_size;
+
+	(void)mach_msg(&msg.Head,
+		       MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+		       msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+void
+gpu_console_puts_surface(uint32_t surface, const char *buf, size_t len)
+{
+	if (surface == 0)
+		gc_send(buf, len);	/* surface 0 == the plain text_puts path */
+	else
+		gc_send_on(surface, buf, len);
+}
+
+void
+gpu_console_set_active_surface(uint32_t surface)
+{
+	gc_set_active(surface);
+}
+
+/* ============================================================
  * libsa_mach printf hook.  Adds the optional tag prefix at every
  * line break — without it, the screen would mix output from N
  * servers into an unreadable stream.
