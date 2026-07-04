@@ -139,6 +139,10 @@ void gpu_core_text_puts(uint32_t surface, const char *buf, size_t len);
 int      gpu_core_text_set_active(uint32_t surface);
 uint32_t gpu_core_text_surface_count(void);
 
+/* Scroll the on-screen surface through its scrollback by `delta` rows
+ * (> 0 up into history, < 0 down toward live); #364. */
+int      gpu_core_text_scroll(int delta);
+
 /* ============================================================
  * Text render pipeline (text_render.c)
  *

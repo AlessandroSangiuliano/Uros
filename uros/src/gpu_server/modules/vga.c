@@ -75,6 +75,7 @@
 
 #define VGA_NSURFACES	4u			/* VT1..VT4 (#364) */
 #define VGA_CELLS	(VGA_COLS * VGA_ROWS)
+#define VGA_HIST_ROWS	128u			/* scrollback depth per surface */
 
 /*
  * A virtual text surface (#204/#364): an off-screen 80x25 cell grid in
@@ -96,6 +97,14 @@ struct vga_surface {
 	 * point. */
 	unsigned int	utf8_left;
 	uint32_t	utf8_cp;
+	/* Scrollback (#364): rows that scroll off the top are pushed into a
+	 * ring of VGA_HIST_ROWS lines.  view_off = how many rows the user
+	 * has scrolled up from the live bottom (0 = showing live output);
+	 * any new output snaps view_off back to 0. */
+	uint16_t	hist[VGA_HIST_ROWS][VGA_COLS];
+	unsigned int	hist_head;	/* ring write index (next slot) */
+	unsigned int	hist_count;	/* valid rows in the ring (<= max) */
+	unsigned int	view_off;	/* rows scrolled up from live */
 };
 
 struct vga_priv {
@@ -158,11 +167,22 @@ vga_clear_surface(struct vga_surface *s)
 	s->cur_col = 0;
 	s->cur_row = 0;
 	s->utf8_left = 0;
+	s->hist_head = 0;
+	s->hist_count = 0;
+	s->view_off = 0;
 }
 
 static void
 vga_scroll_surface(struct vga_surface *s)
 {
+	/* The row about to fall off the top is preserved in the scrollback
+	 * ring before we overwrite it. */
+	memcpy(s->hist[s->hist_head], s->cells,
+	       VGA_COLS * sizeof(uint16_t));
+	s->hist_head = (s->hist_head + 1u) % VGA_HIST_ROWS;
+	if (s->hist_count < VGA_HIST_ROWS)
+		s->hist_count++;
+
 	/* Move rows [1..ROWS) one row up in the RAM grid, blank the last
 	 * row.  The blit to VRAM (for the active surface) happens once per
 	 * write batch in vga_text_puts, not here. */
@@ -200,11 +220,54 @@ vga_get_scroll_count(void *priv)
 static void
 vga_blit(struct vga_priv *p, unsigned int sid)
 {
+	struct vga_surface *s;
+
 	if (p->fb == NULL || sid >= VGA_NSURFACES)
 		return;
-	memcpy((void *)p->fb, p->surf[sid].cells,
-	       VGA_CELLS * sizeof(uint16_t));
-	vga_cursor_update(&p->surf[sid]);
+	s = &p->surf[sid];
+
+	if (s->view_off == 0) {
+		/* Live view: the cell grid is exactly what's on screen. */
+		memcpy((void *)p->fb, s->cells, VGA_CELLS * sizeof(uint16_t));
+		vga_cursor_update(s);
+		return;
+	}
+
+	/*
+	 * Scrolled back `view_off` rows: compose the visible 25-row window
+	 * from the scrollback ring (older rows) and the live cell grid.
+	 * Logical rows are [history 0..hist_count-1][live 0..24]; the window
+	 * shows combined indices [hist_count-view_off .. +24].
+	 */
+	{
+		uint16_t win[VGA_ROWS][VGA_COLS];
+		unsigned int r;
+		int base = (int)s->hist_count - (int)s->view_off;
+
+		for (r = 0; r < VGA_ROWS; r++) {
+			int ci = base + (int)r;
+
+			if (ci >= (int)s->hist_count) {
+				memcpy(win[r],
+				       s->cells + (size_t)(ci - (int)s->hist_count)
+						  * VGA_COLS,
+				       VGA_COLS * sizeof(uint16_t));
+			} else if (ci >= 0) {
+				unsigned int hi = (s->hist_head + VGA_HIST_ROWS
+						   - s->hist_count
+						   + (unsigned int)ci)
+						  % VGA_HIST_ROWS;
+				memcpy(win[r], s->hist[hi],
+				       VGA_COLS * sizeof(uint16_t));
+			} else {
+				unsigned int c;
+				for (c = 0; c < VGA_COLS; c++)
+					win[r][c] = VGA_CELL(' ', VGA_ATTR_DEFAULT);
+			}
+		}
+		memcpy((void *)p->fb, win, VGA_CELLS * sizeof(uint16_t));
+		/* Cursor is meaningless while scrolled back — leave it. */
+	}
 }
 
 /*
@@ -415,6 +478,8 @@ vga_text_puts(void *priv, uint32_t surface, const char *buf, size_t len)
 		surface = 0;		/* clamp unknown surfaces to the console */
 	s = &p->surf[surface];
 
+	s->view_off = 0;		/* new output snaps the view to the bottom */
+
 	for (i = 0; i < len; i++)
 		vga_surf_putc(s, buf[i]);
 
@@ -447,6 +512,33 @@ vga_text_set_active(void *priv, uint32_t surface)
 	return 0;
 }
 
+/*
+ * Scroll the on-screen surface's view by `delta` rows through its
+ * scrollback (delta > 0 = up into history, < 0 = back down toward live).
+ * Clamped to [0, hist_count]; repaints VRAM from the composed window.
+ */
+static int
+vga_text_scroll(void *priv, int delta)
+{
+	struct vga_priv *p = (struct vga_priv *)priv;
+	struct vga_surface *s;
+	int off;
+
+	if (!p->attached || p->fb == NULL)
+		return -1;
+	s = &p->surf[p->active];
+
+	off = (int)s->view_off + delta;
+	if (off < 0)
+		off = 0;
+	if (off > (int)s->hist_count)
+		off = (int)s->hist_count;
+	s->view_off = (unsigned int)off;
+
+	vga_blit(p, p->active);
+	return 0;
+}
+
 /* ============================================================
  * Exported entry point.
  *
@@ -474,4 +566,5 @@ const gpu_module_ops_t vga_module_ops = {
 	.get_scroll_count = vga_get_scroll_count,
 	.text_surface_count = vga_text_surface_count,
 	.text_set_active  = vga_text_set_active,
+	.text_scroll      = vga_text_scroll,
 };
