@@ -204,3 +204,14 @@ simpleroutine text_set_active(
 		gpu_port	: mach_port_t;
 	in	cap		: gpu_token_t;
 	in	surface		: gpu_u32_t);
+
+/*
+ * text_scroll — scroll the on-screen surface through its scrollback by
+ * `delta` rows (> 0 up into history, < 0 down toward live output).  The
+ * VT switch key path (char_server) drives this on Shift+PageUp/Down.
+ * Fire-and-forget like the rest of the text plane.  id 4014.
+ */
+simpleroutine text_scroll(
+		gpu_port	: mach_port_t;
+	in	cap		: gpu_token_t;
+	in	delta		: int);

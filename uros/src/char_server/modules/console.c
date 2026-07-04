@@ -58,15 +58,19 @@
 #define KSYM_RETURN	0xFF0D
 #define KSYM_ESC	0xFF1B
 #define KSYM_F1		0xFFBE		/* F1..F4 = 0xFFBE..0xFFC1 (X11) */
+#define KSYM_PGUP	0xFF55
+#define KSYM_PGDN	0xFF56
 
 /*
  * Virtual terminals (#364).  The shell's output goes to surface
  * CONSOLE_VT_SURFACE (tty2) so it stays off the system log on surface 0
  * (tty1).  Ctrl+Alt+F1..Fn switches which surface is on screen; keep
  * CONSOLE_VT_MAX in step with the gpu module's VGA_NSURFACES.
+ * Shift+PageUp/Down scrolls the on-screen surface through its scrollback.
  */
 #define CONSOLE_VT_SURFACE	1u
 #define CONSOLE_VT_MAX		4u
+#define CONSOLE_SCROLL_STEP	12	/* rows per Shift+PageUp/Down */
 
 /* ============================================================
  * Per-instance state.  Single virtual console per board.
@@ -184,6 +188,23 @@ console_kbd_sink(void *priv, const char_kbd_event_t *ev)
 	    keysym >= KSYM_F1 && keysym < KSYM_F1 + CONSOLE_VT_MAX) {
 		gpu_console_set_active_surface(keysym - KSYM_F1);
 		return;
+	}
+
+	/*
+	 * Scrollback (#364): Shift+PageUp / Shift+PageDown scrolls the
+	 * on-screen surface through its history.  Consumed here — not fed to
+	 * the shell.  gpu_console_scroll targets whatever VT is currently on
+	 * screen, so it works on the log VT too, not just this shell's.
+	 */
+	if (ev->modifiers & CHAR_KBD_MOD_SHIFT) {
+		if (keysym == KSYM_PGUP) {
+			gpu_console_scroll(CONSOLE_SCROLL_STEP);
+			return;
+		}
+		if (keysym == KSYM_PGDN) {
+			gpu_console_scroll(-CONSOLE_SCROLL_STEP);
+			return;
+		}
 	}
 
 	if (keysym < 0x80) {

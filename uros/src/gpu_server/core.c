@@ -411,3 +411,19 @@ gpu_core_text_surface_count(void)
 	}
 	return 1;
 }
+
+int
+gpu_core_text_scroll(int delta)
+{
+	unsigned int i;
+
+	for (i = 1; i < GPU_MAX_DEVICES; i++) {
+		struct gpu_device_entry *dev = gpu_core_dev_lookup(i);
+		if (dev == NULL || dev->module == NULL)
+			continue;
+		if (dev->module->text_scroll == NULL)
+			continue;
+		return dev->module->text_scroll(dev->priv, delta);
+	}
+	return -1;
+}

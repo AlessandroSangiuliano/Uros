@@ -255,6 +255,48 @@ gpu_console_set_active_surface(uint32_t surface)
 	gc_set_active(surface);
 }
 
+#define GC_MSGH_ID_SCROLL	4014	/* gpu_server.defs text_scroll */
+
+static void
+gc_scroll(int32_t delta)
+{
+	struct gc_msg_on msg;		/* reuse layout: cap + one 4-byte scalar */
+	mach_msg_size_t capCnt, capPad, msgh_size;
+	char *p;
+
+	if (!gc_ready)
+		return;
+
+	capCnt = (mach_msg_size_t)sizeof(gc_cap);
+	capPad = (capCnt + 3u) & ~3u;
+
+	msg.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	msg.Head.msgh_remote_port = gc_gpu_port;
+	msg.Head.msgh_local_port  = MACH_PORT_NULL;
+	msg.Head.msgh_id          = GC_MSGH_ID_SCROLL;
+	msg.NDR = NDR_record;
+
+	p = (char *)&msg + sizeof(mach_msg_header_t) + sizeof(NDR_record_t);
+	*(mach_msg_type_number_t *)p = capCnt;
+	p += sizeof(mach_msg_type_number_t);
+	memcpy(p, &gc_cap, capCnt);
+	p += capPad;
+	*(int32_t *)p = delta;
+	p += sizeof(int32_t);
+
+	msgh_size = (mach_msg_size_t)(p - (char *)&msg);
+	msg.Head.msgh_size = msgh_size;
+
+	(void)mach_msg(&msg.Head, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+		       msgh_size, 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+void
+gpu_console_scroll(int delta)
+{
+	gc_scroll((int32_t)delta);
+}
+
 /* ============================================================
  * libsa_mach printf hook.  Adds the optional tag prefix at every
  * line break — without it, the screen would mix output from N

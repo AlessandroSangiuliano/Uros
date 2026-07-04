@@ -31,7 +31,7 @@
 #include <stddef.h>
 #include <gpu/gpu_types.h>
 
-#define GPU_MODULE_ABI_VERSION		3u	/* +virtual text surfaces (#204/#364) */
+#define GPU_MODULE_ABI_VERSION		4u	/* +text_scroll scrollback (#364) */
 
 /* ============================================================
  * Forward-declared opaque types.
@@ -114,6 +114,12 @@ typedef struct gpu_module_ops {
 	 * VT switch.  Repaints hardware from that surface's cell grid.
 	 * NULL ⇒ single-surface module, switching is a no-op. */
 	int		(*text_set_active)(void *priv, uint32_t surface);
+
+	/* Scroll the on-screen surface through its scrollback by `delta`
+	 * rows (> 0 = up into history, < 0 = down toward live output).  New
+	 * output snaps the view back to the bottom.  NULL ⇒ no scrollback
+	 * (ABI 4, #364). */
+	int		(*text_scroll)(void *priv, int delta);
 } gpu_module_ops_t;
 
 /* ============================================================

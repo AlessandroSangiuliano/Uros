@@ -83,6 +83,13 @@ void gpu_console_puts(const char *buf, size_t len);
 void gpu_console_puts_surface(uint32_t surface, const char *buf, size_t len);
 void gpu_console_set_active_surface(uint32_t surface);
 
+/*
+ * Scroll the on-screen surface through its scrollback by `delta` rows
+ * (> 0 = up into history, < 0 = down toward live).  Any fresh output
+ * snaps the view back to the bottom.  No-op if the mirror is down.
+ */
+void gpu_console_scroll(int delta);
+
 #ifdef __cplusplus
 }
 #endif

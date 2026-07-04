@@ -116,6 +116,21 @@ gpu_text_set_active(mach_port_t gpu_port,
 	return KERN_SUCCESS;
 }
 
+kern_return_t
+gpu_text_scroll(mach_port_t gpu_port,
+		char *cap, mach_msg_type_number_t cap_count,
+		int delta)
+{
+	(void)gpu_port;
+
+	if (gpu_core_cap_check(cap, cap_count,
+			       GPU_CAP_DISPLAY_SCANOUT, 0) != 0)
+		return KERN_PROTECTION_FAILURE;
+
+	(void)gpu_core_text_scroll(delta);
+	return KERN_SUCCESS;
+}
+
 /* ============================================================
  * Device queries
  * ============================================================ */
