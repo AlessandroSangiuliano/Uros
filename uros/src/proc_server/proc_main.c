@@ -36,6 +36,7 @@
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
 #include <vfs_types.h>
+#include <char/char_module_abi.h>  /* CHAR_CTTY_RELEASE_MSGH_ID (#365) */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -937,6 +938,32 @@ proc_S_set_ctty(
 }
 
 /*
+ * Tell the tty owner (char_server) that a session's controlling terminal
+ * has been released, so it can drop the stale binding and free the VT for
+ * a fresh shell (#365).  proc_server holds the send right to the tty port
+ * (handed over at tty_acquire_ctty), so it is the one that knows the exact
+ * moment the ctty goes away — on explicit clear or on leader death.
+ * One-way, best-effort: a dead port just means char_server is gone too.
+ */
+static void
+notify_ctty_release(mach_port_t ctty, proc_pid_t sid)
+{
+    char_ctty_release_msg_t m;
+
+    if (ctty == MACH_PORT_NULL)
+        return;
+    memset(&m, 0, sizeof m);
+    m.head.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    m.head.msgh_size        = sizeof m;
+    m.head.msgh_remote_port = ctty;
+    m.head.msgh_local_port  = MACH_PORT_NULL;
+    m.head.msgh_id          = CHAR_CTTY_RELEASE_MSGH_ID;
+    m.sid                   = (int32_t)sid;
+    (void)mach_msg(&m.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m,
+                   0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/*
  * proc_clear_ctty(sid): release the session's controlling terminal.
  * Idempotent — clearing a session that has none simply succeeds.
  */
@@ -963,8 +990,10 @@ proc_S_clear_ctty(
     e->fg_pgrp_id = 0;
     pthread_mutex_unlock(&pid_lock);
 
-    if (old != MACH_PORT_NULL)
+    if (old != MACH_PORT_NULL) {
+        notify_ctty_release(old, sid);
         (void)mach_port_deallocate(mach_task_self(), old);
+    }
 
     *result = PROC_OK;
     return KERN_SUCCESS;
@@ -1713,9 +1742,12 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
     /* Drop the dead-name reference the kernel handed us. */
     (void)mach_port_deallocate(mach_task_self(), name);
 
-    /* Release a dead session leader's controlling-tty send right. */
-    if (ctty != MACH_PORT_NULL)
+    /* Release a dead session leader's controlling-tty send right, and tell
+     * the tty owner first so it frees the VT (leader → sid == pid). */
+    if (ctty != MACH_PORT_NULL) {
+        notify_ctty_release(ctty, pid);
         (void)mach_port_deallocate(mach_task_self(), ctty);
+    }
 
     if (subscriber != MACH_PORT_NULL)
         fire_exit_notify(subscriber, pid, code);

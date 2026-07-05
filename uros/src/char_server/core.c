@@ -15,6 +15,8 @@
 #include <mach/cap_types.h>
 #include <stdio.h>
 #include <string.h>
+#include <servers/netname.h>	/* netname_look_up, name_server_port (#365) */
+#include <vt/vt_ipc.h>		/* vt_switch_msg_t, VT_SWITCH_MSGH_ID (#365) */
 #include "char_server.h"
 #include "device_master.h"	/* MIG: device_intr_{register,unregister} */
 
@@ -390,6 +392,86 @@ char_core_dispatch_kbd_event(mach_msg_header_t *in)
 		kbd_sink(kbd_sink_arg, &msg->event);
 	}
 	return TRUE;
+}
+
+/*
+ * Drop the controlling-tty binding for a session that has exited (#365).
+ * A ctty is bound at tty_acquire_ctty and, until now, never cleared: a
+ * respawned shell trying to re-claim the same VT hit the bound-tty cap
+ * gate (KERN_PROTECTION_FAILURE).  proc_server tells us the session is
+ * gone (see char_core_dispatch_ctty_release), and we free every device it
+ * owned so the VT is claimable again.
+ */
+void
+char_core_release_ctty(int sid)
+{
+	unsigned int i;
+
+	if (sid == 0)
+		return;
+	for (i = 1; i < CHAR_MAX_DEVICES; i++) {
+		if (devices[i].in_use && devices[i].ctty_sid == sid) {
+			devices[i].ctty_sid = 0;
+			printf("char_server: ctty released for sid=%d "
+			       "(dev %u free)\n", sid, i);
+		}
+	}
+}
+
+boolean_t
+char_core_dispatch_ctty_release(mach_msg_header_t *in)
+{
+	const char_ctty_release_msg_t *msg;
+
+	if (in->msgh_id != CHAR_CTTY_RELEASE_MSGH_ID)
+		return FALSE;
+
+	msg = (const char_ctty_release_msg_t *)in;
+	char_core_release_ctty(msg->sid);
+	return TRUE;
+}
+
+/*
+ * Tell the virtual_terminal_server the on-screen VT changed, so it can
+ * start a shell there lazily if none runs yet (#365 phase 3).  The console
+ * module calls this from its key sink on Ctrl+Alt+Fn.  The server port is
+ * looked up once and cached; a send failure (server restarted) drops the
+ * cache so the next switch re-resolves.  One-way, best-effort — on a
+ * headless / no-console build the lookup just fails and switches are moot.
+ */
+static mach_port_t vt_server_port = MACH_PORT_NULL;
+
+void
+char_core_notify_vt_switch(uint32_t surface)
+{
+	vt_switch_msg_t   m;
+	kern_return_t     kr;
+
+	if (vt_server_port == MACH_PORT_NULL) {
+		char host[80] = "";
+		char serv[80] = VT_SERVICE_NAME;
+
+		kr = netname_look_up(name_server_port, host, serv,
+				     &vt_server_port);
+		if (kr != NETNAME_SUCCESS) {
+			vt_server_port = MACH_PORT_NULL;
+			return;
+		}
+	}
+
+	memset(&m, 0, sizeof m);
+	m.head.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.head.msgh_size        = sizeof m;
+	m.head.msgh_remote_port = vt_server_port;
+	m.head.msgh_id          = VT_SWITCH_MSGH_ID;
+	m.surface               = (int32_t)surface;
+
+	kr = mach_msg(&m.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m,
+		      0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+	if (kr != MACH_MSG_SUCCESS && kr != MACH_SEND_TIMED_OUT) {
+		(void)mach_port_deallocate(mach_task_self(), vt_server_port);
+		vt_server_port = MACH_PORT_NULL;
+	}
 }
 
 int
