@@ -92,8 +92,6 @@ char_core_run_discovery(const char_module_ops_t * const *modules,
 
 	for (m = 0; m < n_modules; m++) {
 		const char_module_ops_t *ops = modules[m];
-		void *priv;
-		struct char_device_entry *dev;
 
 		if (ops == NULL)
 			continue;
@@ -107,40 +105,53 @@ char_core_run_discovery(const char_module_ops_t * const *modules,
 		}
 		if (ops->probe == NULL)
 			continue;
-		priv = ops->probe(NULL);
-		if (priv == NULL)
-			continue;
 
-		dev = alloc_dev_slot();
-		if (dev == NULL) {
-			printf("char_server: device table full, dropping "
-			       "\"%s\"\n", ops->name);
-			if (ops->detach)
-				ops->detach(priv);
-			continue;
+		/*
+		 * Probe repeatedly: a module may expose more than one device.
+		 * The console TTY hands out one instance per virtual terminal
+		 * (#365).  Single-instance modules (ps2, uart, ...) return NULL
+		 * on the second probe — their attach flips an "attached" guard —
+		 * so the loop ends after one device for them.
+		 */
+		for (;;) {
+			void *priv;
+			struct char_device_entry *dev;
+
+			priv = ops->probe(NULL);
+			if (priv == NULL)
+				break;		/* no (more) instances */
+
+			dev = alloc_dev_slot();
+			if (dev == NULL) {
+				printf("char_server: device table full, dropping "
+				       "\"%s\"\n", ops->name);
+				if (ops->detach)
+					ops->detach(priv);
+				break;
+			}
+
+			dev->module = ops;
+			dev->priv   = priv;
+			dev->info.id    = dev->id;
+			dev->info.class = ops->device_class;
+			dev->info.flags = 0;
+			strncpy(dev->info.module_name, ops->name,
+				CHAR_DEV_NAME_LEN - 1);
+			dev->info.module_name[CHAR_DEV_NAME_LEN - 1] = '\0';
+
+			if (ops->attach != NULL && ops->attach(priv) < 0) {
+				printf("char_server: module \"%s\" attach "
+				       "failed\n", ops->name);
+				dev->in_use = 0;
+				break;
+			}
+
+			n_devices++;
+			printf("char_server: device %u attached "
+			       "(module=\"%s\", class=%u)\n",
+			       (unsigned)dev->id, ops->name,
+			       (unsigned)dev->info.class);
 		}
-
-		dev->module = ops;
-		dev->priv   = priv;
-		dev->info.id    = dev->id;
-		dev->info.class = ops->device_class;
-		dev->info.flags = 0;
-		strncpy(dev->info.module_name, ops->name,
-			CHAR_DEV_NAME_LEN - 1);
-		dev->info.module_name[CHAR_DEV_NAME_LEN - 1] = '\0';
-
-		if (ops->attach != NULL && ops->attach(priv) < 0) {
-			printf("char_server: module \"%s\" attach failed\n",
-			       ops->name);
-			dev->in_use = 0;
-			continue;
-		}
-
-		n_devices++;
-		printf("char_server: device %u attached "
-		       "(module=\"%s\", class=%u)\n",
-		       (unsigned)dev->id, ops->name,
-		       (unsigned)dev->info.class);
 	}
 }
 

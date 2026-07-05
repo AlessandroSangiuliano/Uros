@@ -1,0 +1,10 @@
+# virtual_terminal_server manifest — Uros VT shell supervisor (#365).
+#
+# The supervisor drives no tty of its own: it only forks ush children,
+# each of which claims a free VT console as its ctty via char_server's
+# unbound-tty exception (#275.5).  No caps required.
+
+name virtual_terminal_server
+
+# No `required` lines — empty caps_required.
+# No `delegatable` lines — empty caps_delegatable.

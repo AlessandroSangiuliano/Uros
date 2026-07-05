@@ -134,9 +134,18 @@ GPUSTAT_CONF_LINE=""
 # always loads from /dev/boot_device/mach_servers/ush on disk.  The
 # bootstrap.conf line still names it as a stage-2 task; bootstrap's
 # fallback path picks it up from the disk fs.
+#
+# #365: the virtual_terminal_server, when built, takes ush's stage-2 launch
+# slot and forks ush onto each VT.  Like ush it is kept off the bundle and
+# loaded from disk; only the launch line changes.
 USH="$SBIN/ush"
+VTS="$SBIN/virtual_terminal_server"
 USH_CONF_LINE=""
-[ -f "$USH" ] && USH_CONF_LINE="ush ush"
+if [ -f "$VTS" ]; then
+    USH_CONF_LINE="virtual_terminal_server virtual_terminal_server"
+elif [ -f "$USH" ]; then
+    USH_CONF_LINE="ush ush"
+fi
 
 GPU_SERVER_CONF_LINE=""
 [ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
