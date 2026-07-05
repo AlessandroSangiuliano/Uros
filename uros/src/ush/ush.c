@@ -130,8 +130,19 @@ find_tty_devices(uint32_t *ids, unsigned int max)
     return (int)cnt;
 }
 
+/*
+ * ush_setup — become a session leader and bind a controlling tty.
+ *
+ * target_vt selects which VT console to claim (#365 phase 3): a positive
+ * value N asks for the N-th on-screen console (surface N), so the
+ * virtual_terminal_server can place a shell on a *specific* virtual
+ * terminal — e.g. the one the user just switched to — instead of letting
+ * every shell drift onto the next free VT.  target_vt == 0 keeps the
+ * first-free walk used when ush is launched standalone (or headless, where
+ * only the UART tty exists).
+ */
 static int
-ush_setup(void)
+ush_setup(int target_vt)
 {
     pid_t s;
     uint32_t dev_id = 0;
@@ -171,10 +182,15 @@ ush_setup(void)
     USHLOG("char_server resolved");
 
     /*
-     * Claim the first candidate TTY we can acquire.  A free console
-     * (or the UART) binds without a cap (#275.5); a console already
-     * owned by another session fails the acquire cap-check, so a second
-     * ush walks past it to the next free VT (#365).
+     * Bind a controlling tty.  A free console (or the UART) binds without
+     * a cap (#275.5); a console already owned by another session fails the
+     * acquire cap-check.
+     *
+     * find_tty_devices lists the consoles first, in surface order (the
+     * console module hands out surfaces 1..N in that order, #365 phase 1),
+     * so candidate index N-1 is the console for surface N.  A targeted
+     * request therefore claims exactly cand[target_vt-1]; a standalone ush
+     * (target_vt == 0) walks the list and takes the first it can get.
      */
     {
         uint32_t cand[8];
@@ -187,14 +203,31 @@ ush_setup(void)
             ncand   = 1;
         }
 
-        for (c = 0; c < ncand; c++) {
+        if (target_vt > 0 && target_vt <= ncand) {
+            /* Targeted: claim exactly this VT, do not drift on failure. */
+            c  = target_vt - 1;
             rc = 0;
             kr = char_tty_acquire_ctty(char_port, cap, 0,
                                        cand[c], (int)s, &rc);
             if (kr == KERN_SUCCESS && rc == 0) {
                 dev_id = cand[c];
                 bound  = 1;
-                break;
+            } else {
+                printf("ush: VT %d (dev_id=%u) busy (kr=%d rc=%d)\n",
+                       target_vt, cand[c], (int)kr, rc);
+                return -1;
+            }
+        } else {
+            /* First-free walk (standalone / headless UART). */
+            for (c = 0; c < ncand; c++) {
+                rc = 0;
+                kr = char_tty_acquire_ctty(char_port, cap, 0,
+                                           cand[c], (int)s, &rc);
+                if (kr == KERN_SUCCESS && rc == 0) {
+                    dev_id = cand[c];
+                    bound  = 1;
+                    break;
+                }
             }
         }
         if (!bound) {
@@ -358,10 +391,15 @@ main(int argc, char **argv)
     char  line[USH_LINE_MAX];
     char *parts[USH_MAX_ARGS + 1];
     int   n, bg;
+    int   target_vt = 0;
 
-    (void)argc; (void)argv;
+    /* argv[1], when present, is the VT surface to bind (#365 phase 3):
+     * the virtual_terminal_server passes it so this shell lands on a
+     * specific virtual terminal. */
+    if (argc > 1 && argv[1] != NULL)
+        target_vt = atoi(argv[1]);
 
-    if (ush_setup() < 0) {
+    if (ush_setup(target_vt) < 0) {
         printf("ush: setup failed, exiting\n");
         return 1;
     }

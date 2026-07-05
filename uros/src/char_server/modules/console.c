@@ -214,6 +214,10 @@ console_kbd_sink(void *arg, const char_kbd_event_t *ev)
 	    keysym >= KSYM_F1 && keysym < KSYM_F1 + CONSOLE_VT_MAX) {
 		console_active_surface = keysym - KSYM_F1;
 		gpu_console_set_active_surface(console_active_surface);
+		/* Let the virtual_terminal_server start a shell here if this VT
+		 * is still empty (#365 phase 3).  Surface 0 (log) is filtered
+		 * out on the server side. */
+		char_core_notify_vt_switch(console_active_surface);
 		return;
 	}
 

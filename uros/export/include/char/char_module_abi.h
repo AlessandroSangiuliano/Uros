@@ -121,6 +121,23 @@ typedef struct char_kbd_event_msg {
 	char_kbd_event_t	event;
 } char_kbd_event_msg_t;
 
+/*
+ * msgh_id proc_server stamps on the one-way message it sends to a
+ * controlling-tty port when the owning session leader exits (#365).  A
+ * ctty outlives the shell in char_server's device table until it learns
+ * the session is gone; proc_server holds the send right to that tty port
+ * (handed over at tty_acquire_ctty) so it is the natural notifier.  On
+ * receipt char_server drops the now-stale ctty binding, freeing the VT for
+ * a fresh shell.  Same numbering rationale as CHAR_KBD_EVENT_MSGH_ID.
+ */
+#define CHAR_CTTY_RELEASE_MSGH_ID	4201
+
+typedef struct char_ctty_release_msg {
+	mach_msg_header_t	head;
+	NDR_record_t		ndr;
+	int32_t			sid;	/* session whose ctty was released */
+} char_ctty_release_msg_t;
+
 #define CHAR_MODULE_ENTRY_SUFFIX	"_module_ops"
 
 /* ============================================================
@@ -166,5 +183,14 @@ extern int char_core_irq_unregister(uint32_t irq);
  */
 extern void char_core_register_kbd_sink(
 	void (*fn)(void *arg, const char_kbd_event_t *ev), void *arg);
+
+/*
+ * Notify the virtual_terminal_server that the on-screen VT changed to
+ * `surface` (#365 phase 3).  The console TTY module calls this from its key
+ * sink on Ctrl+Alt+Fn so the server can start a shell there lazily if none
+ * runs yet.  Best-effort and cheap: the server port is resolved once and
+ * cached inside core.
+ */
+extern void char_core_notify_vt_switch(uint32_t surface);
 
 #endif /* _CHAR_CHAR_MODULE_ABI_H_ */

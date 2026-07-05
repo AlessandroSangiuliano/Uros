@@ -93,6 +93,15 @@ char_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 		return TRUE;
 	}
 
+	/* Controlling-tty release (#365): proc_server tells us a session
+	 * leader exited so we can free its VT.  One-way, no reply. */
+	if (char_core_dispatch_ctty_release(in)) {
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
 	if (char_server_server(in, out))
 		return TRUE;
 	if (cap_revoke_server(in, out))
