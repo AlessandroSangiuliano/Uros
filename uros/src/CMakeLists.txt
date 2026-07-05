@@ -112,6 +112,11 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(ush)
 endif()
 
+# Build virtual_terminal_server — VT shell supervisor (#365 phase 2b).
+if(UROS_BUILD_MUSL)
+  add_subdirectory(virtual_terminal_server)
+endif()
+
 # Build libfoo.so + dlopen_test — musl dlopen end-to-end (#234 incr 4)
 if(UROS_BUILD_MUSL)
   add_subdirectory(libfoo)

@@ -105,6 +105,7 @@ HELLO_WORLD="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_world"
 PTHREAD_MIN="$BUILD_DIR/export/uros/$ARCH/user/sbin/pthread_min"  # #291 musl pthread regression
 FLIPC_BENCH="$BUILD_DIR/export/uros/$ARCH/user/sbin/flipc_bench"  # #272 standalone FLIPC A/B
 USH="$BUILD_DIR/export/uros/$ARCH/user/sbin/ush"
+VTS="$BUILD_DIR/export/uros/$ARCH/user/sbin/virtual_terminal_server"  # #365 VT shell supervisor
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 # #234 Phase 7: dynamic linker + first dynamic binary.  ld-musl-i386.so.1 is
 # the umbrella libc.so; it goes to /lib/ where hello_dyn's PT_INTERP points.
@@ -219,10 +220,16 @@ if [ -f "$GPUSTAT" ]; then
     GPUSTAT_CONF_LINE="gpustat gpustat"
 fi
 # ush (#275.5): Uros shell.  Needs proc_server + char_server + ext_server
-# up so it can setsid, acquire ctty, and open /dev/tty.  Launched as the
-# last stage-2 task; it will read from the UART for interactive use.
+# up so it can setsid, acquire ctty, and open /dev/tty.
+#
+# #365: when the virtual_terminal_server is present it becomes the last
+# stage-2 task instead of ush; it forks ush onto each virtual terminal.
+# ush stays on disk either way (the supervisor execs /mach_servers/ush);
+# only the launch line moves from "ush ush" to the supervisor.
 USH_CONF_LINE=""
-if [ -f "$USH" ]; then
+if [ -f "$VTS" ]; then
+    USH_CONF_LINE="virtual_terminal_server virtual_terminal_server"
+elif [ -f "$USH" ]; then
     USH_CONF_LINE="ush ush"
 fi
 #
@@ -404,10 +411,17 @@ if [ -f "$FLIPC_BENCH" ]; then
 fi
 
 # ush is optional (#275.5): copy to /mach_servers/ so bootstrap stage-2
-# can load it as a session-leader after proc_server / char_server.
+# can load it as a session-leader after proc_server / char_server.  #365:
+# the supervisor execs it from here, so it is written even when the direct
+# "ush ush" launch line has been replaced by virtual_terminal_server.
 USH_WRITE_LINE=""
 if [ -f "$USH" ]; then
     USH_WRITE_LINE="write $USH ush"
+fi
+# virtual_terminal_server (#365): VT shell supervisor, written alongside ush.
+VTS_WRITE_LINE=""
+if [ -f "$VTS" ]; then
+    VTS_WRITE_LINE="write $VTS virtual_terminal_server"
 fi
 
 # hello_dyn (#234 Phase 7): first dynamic binary.  Copy to / and install the
@@ -466,6 +480,7 @@ ${GPUSTAT_WRITE_LINE}
 ${EXEC_SERVER_WRITE_LINE}
 ${PROC_SERVER_WRITE_LINE}
 ${USH_WRITE_LINE}
+${VTS_WRITE_LINE}
 mkdir modules
 cd modules
 mkdir block
