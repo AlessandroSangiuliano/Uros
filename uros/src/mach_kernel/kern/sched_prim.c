@@ -1152,6 +1152,7 @@ thread_handoff_to_parked_waiter(
 	register simple_lock_t	lock;
 	thread_t		victim = THREAD_NULL;
 	boolean_t		parked;
+	register int		ostate;
 	spl_t			s;
 
 	index = wait_hash(event);
@@ -1186,13 +1187,30 @@ thread_handoff_to_parked_waiter(
 	victim->wait_result = THREAD_AWAKENED;
 	victim->at_safe_point = NOT_AT_SAFE_POINT;
 
+	/* Snapshot the scheduling state BEFORE we stamp TH_RUN below: the
+	 * not-parked path must know whether the victim was already running. */
+	ostate = victim->state;
+
 	/* Parked == TH_WAIT and nothing else (not running, suspended, etc.). */
-	parked = ((victim->state & (TH_WAIT|TH_SUSP|TH_RUN|TH_UNINT)) == TH_WAIT);
-	victim->state = (victim->state &~ TH_WAIT) | TH_RUN;
+	parked = ((ostate & (TH_WAIT|TH_SUSP|TH_RUN|TH_UNINT)) == TH_WAIT);
+	victim->state = (ostate &~ TH_WAIT) | TH_RUN;
 
 	if (!parked) {
-		/* Still in its block window -- wake the normal way. */
-		thread_setrun(victim, TRUE, TAIL_Q);
+		/*
+		 * Victim is not cleanly parked.  Mirror clear_wait_internal():
+		 * only a thread that is genuinely blocked (neither TH_RUN nor
+		 * TH_SUSP set) may be handed to thread_setrun().  If the victim
+		 * still has TH_RUN -- i.e. it is executing its own
+		 * assert_wait()->thread_block() window on another CPU -- calling
+		 * thread_setrun() here would dispatch a thread that is still
+		 * running, executing it on two CPUs at once (#360: the futex
+		 * ping-pong avalanched a single waiter onto up to 6 CPUs).
+		 * Clearing TH_WAIT above is sufficient: when the still-running
+		 * victim reaches thread_block() it sees itself runnable (TH_RUN,
+		 * no TH_WAIT) and simply does not block.
+		 */
+		if ((ostate & (TH_RUN | TH_SUSP)) == 0)
+			thread_setrun(victim, TRUE, TAIL_Q);
 		thread_unlock(victim);
 		splx(s);
 		return FALSE;
