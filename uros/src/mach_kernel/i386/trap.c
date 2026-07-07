@@ -454,6 +454,34 @@ kernel_trap(
 #endif	/* MACH_KDB */
 		subcode = regs->cr2;	/* get faulting address */
 
+		/*
+		 * #370: an AP still inside its bring-up window (before
+		 * cpu_launch_first_thread() installs current_thread at
+		 * kern/startup.c:627) has no current_thread.  If it faults here,
+		 * the vm_fault() below can block on a contended vm_map mutex and
+		 * panic in assert_wait ("no current_thread") -- seen twice on
+		 * OMEGA when user load overlaps late bring-up.  The real fault
+		 * site (cr2/eip) was never recorded, so any fix was a guess.
+		 * Capture it ONCE, right before the panic-prone vm_fault, so a
+		 * hardware run reveals exactly what the early AP touches.
+		 * Non-destructive: this only adds a log line; the fault still
+		 * takes its normal path afterwards.
+		 */
+		if (thread == THREAD_NULL) {
+			static int diag_done_370;
+
+			if (!diag_done_370) {
+				unsigned int cr3;
+
+				diag_done_370 = 1;
+				__asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+				printf("#370 EARLY-AP PAGE FAULT (no current_thread): "
+				       "cpu=%d cr2=0x%x eip=0x%x err=0x%x cr3=0x%x\n",
+				       cpu_number(), (unsigned)subcode,
+				       (unsigned)regs->eip, (unsigned)code, cr3);
+			}
+		}
+
 		if (subcode >= VM_MIN_KERNEL_ADDRESS) {
 		    map = kernel_map;
 		} else if (thr_act == THR_ACT_NULL || thread == THREAD_NULL)
