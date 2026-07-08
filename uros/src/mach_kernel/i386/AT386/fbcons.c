@@ -98,7 +98,13 @@ put_pixel(unsigned int x, unsigned int y, unsigned int color)
 }
 
 /* Blit one glyph to the framebuffer, magnified by fb_scale (#371): each font
- * pixel becomes an fb_scale x fb_scale block, so 4K text is drawn 2x. */
+ * pixel becomes an fb_scale x fb_scale block, so 4K text is drawn 2x.
+ *
+ * The 32bpp path (the common UEFI/GOP case) writes each glyph scanline as a run
+ * of consecutive 32-bit stores straight into the mapped framebuffer — no
+ * per-pixel function call or bytespp switch, and contiguous runs so the CPU's
+ * write-combining buffers coalesce them.  At 4K/2x that is the difference
+ * between a snappy console and a crawling one.  16/24bpp fall back to put_pixel. */
 static void
 render_glyph(unsigned char c, unsigned int col, unsigned int row)
 {
@@ -106,6 +112,27 @@ render_glyph(unsigned char c, unsigned int col, unsigned int row)
 	unsigned int		x0 = col * FONT_W * fb_scale;
 	unsigned int		y0 = row * FONT_H * fb_scale;
 	unsigned int		gy, gx, sy, sx;
+
+	if (fb_bytespp == 4) {
+		for (gy = 0; gy < FONT_H; gy++) {
+			unsigned char bits = g[gy];
+
+			for (sy = 0; sy < fb_scale; sy++) {
+				unsigned int *p = (unsigned int *)
+					(fb_base + (y0 + gy * fb_scale + sy) *
+					 fb_pitch + x0 * 4);
+
+				for (gx = 0; gx < FONT_W; gx++) {
+					unsigned int color =
+						(bits & (0x80 >> gx)) ? FB_FG : FB_BG;
+
+					for (sx = 0; sx < fb_scale; sx++)
+						*p++ = color;
+				}
+			}
+		}
+		return;
+	}
 
 	for (gy = 0; gy < FONT_H; gy++) {
 		unsigned char bits = g[gy];
