@@ -37,6 +37,7 @@
 #include <vm/vm_kern.h>		/* kmem_alloc (#308) */
 #include <i386/cpu_number.h>	/* cpu_number() (#304) */
 #include <i386/lapic.h>		/* lapic_enable / lapic_send_ipi (#302) */
+#include <kern/spl.h>		/* splhigh (#370) */
 #include <i386/mp_desc.h>	/* mp_desc_table / interrupt_stack (#308) */
 #include <i386/lock.h>		/* atomic_incl (#344 bring-up barrier) */
 #include <i386/pic.h>		/* NINTR */
@@ -304,6 +305,21 @@ slave_machine_init(void)
 	 * AP is also past bring-up (see start_other_cpus). */
 	while (!ap_can_run)
 		__asm__ __volatile__("pause" ::: "memory");
+
+	/* #370: raise spl BEFORE arming the timer, and stay there.  The tick is
+	 * TPR-gated so the design intends it to land only once the AP has a valid
+	 * current thread -- but that assumed the AP is already at splhigh here.
+	 * It is not: the AP reaches cpu_launch_first_thread() at low spl and only
+	 * raises splhigh() AFTER cpu_up(), leaving a window (cpu_up -> a periodic
+	 * tick firing -> the scheduler running with active_threads[cpu]==NULL ->
+	 * thread_setrun()'s preempt check dereferencing current_thread(), cr2=0x58)
+	 * seen on OMEGA (cpu 17/20/31).  Force splhigh() now so the just-armed
+	 * timer (and any resched IPI once cpu_up() exposes this CPU) stays masked
+	 * until the idle thread runs and drops spl -- by which point
+	 * thread_machine_set_current() has installed current_thread.  The spl is
+	 * inherited through slave_main() -> cpu_launch_first_thread(); its own
+	 * splhigh() then becomes a harmless nested no-op. */
+	(void) splhigh();
 
 	/* #312: arm this AP's local periodic LAPIC timer (calibrated on the
 	 * BSP in start_other_cpus).  From now this CPU clocks hertz_tick()
