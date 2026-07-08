@@ -456,15 +456,23 @@ fbcons_late_init(void)
 	vm_offset_t	addr;
 	unsigned int	r, c;
 
-	if (!fb_active || fb_shadow != (unsigned char *)0)
+	if (!fb_active || fb_shadow != (unsigned char *)0) {
+		printf("#372 fbcons_late_init: skip (active=%d shadow=%p)\n",
+		       fb_active, fb_shadow);
 		return;
+	}
 
 	/* Only the visible console area (top fb_rows text rows) is scrolled. */
 	fb_shadow_bytes = (vm_size_t)fb_pitch * fb_rows * FONT_H * fb_scale;
 
-	if (kmem_alloc(kernel_map, &addr, fb_shadow_bytes) != KERN_SUCCESS)
+	if (kmem_alloc(kernel_map, &addr, fb_shadow_bytes) != KERN_SUCCESS) {
+		printf("#372 fbcons: shadow kmem_alloc(%u B) FAILED -> slow redraw "
+		       "scroll\n", (unsigned)fb_shadow_bytes);
 		return;				/* stay on the redraw path */
+	}
 
+	printf("#372 fbcons: shadow %u B allocated -> fast bulk-copy scroll\n",
+	       (unsigned)fb_shadow_bytes);
 	fb_shadow = (unsigned char *)addr;
 	bzero((char *)fb_shadow, fb_shadow_bytes);	/* black padding areas */
 
