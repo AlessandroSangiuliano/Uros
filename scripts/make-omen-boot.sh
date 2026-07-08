@@ -154,7 +154,12 @@ if [ "$WANT_ISO" = true ]; then
         printf 'terminal_input  console\n'
         printf 'terminal_output console\n'
         printf 'insmod all_video\n'
-        printf 'set gfxpayload=1024x768x32\n\n'
+        # #371: request the panel's native 4K so fbcons fills the whole screen
+        # (char-cell scroll buffer + adaptive 2x font).  If the GOP/VBE has no
+        # 4K mode GRUB falls back to a smaller one and fbcons adapts (2x >=2560
+        # wide, else 1x).  OMEGA drives 4K monitors; drop this to the panel size
+        # on a smaller display.
+        printf 'set gfxpayload=3840x2160x32\n\n'
         if [ "$BENCH" = 1 ]; then
             # #344: the AP bring-up barrier fix should let every CPU come up, so
             # default (entry 0) = all CPUs.  The `-c<n>` capped entries remain
