@@ -263,6 +263,48 @@ draw_glyph(unsigned char c, unsigned int col, unsigned int row)
 }
 
 /*
+ * #372: bulk-copy a RAM buffer into the framebuffer with non-temporal
+ * (streaming) stores.  A scroll pushes the whole console area (~9 MB at 1920,
+ * ~33 MB at 4K) to the aperture on every scrolled line; a cached bcopy fills
+ * the CPU cache and then evicts to the (slow) display memory, which is what
+ * makes scrolling crawl on OMEGA even with a WB aperture.  movnti writes
+ * straight through the write-combining buffers to memory at full bandwidth,
+ * bypassing the cache — the right pattern for a write-once framebuffer.  Both
+ * ends are page-aligned and the length is a multiple of 4 (fb_pitch is), so a
+ * 32-bit stride is safe.  movnti is a GP-register store: no SSE/FPU state.
+ */
+static void
+fb_stream_copy(unsigned char *dst, const unsigned char *src, unsigned int bytes)
+{
+	unsigned int		*d = (unsigned int *)dst;
+	const unsigned int	*s = (const unsigned int *)src;
+	unsigned int		n = bytes >> 2;	/* 32-bit words */
+
+	/* 8x unrolled, one scratch reg reused (i386 has few GP regs): load a word
+	 * cached-fast from the shadow, stream it non-temporally to the aperture. */
+	for (; n >= 8; n -= 8, d += 8, s += 8) {
+		__asm__ volatile(
+			"movl  0(%1), %%eax\n\t movnti %%eax,  0(%0)\n\t"
+			"movl  4(%1), %%eax\n\t movnti %%eax,  4(%0)\n\t"
+			"movl  8(%1), %%eax\n\t movnti %%eax,  8(%0)\n\t"
+			"movl 12(%1), %%eax\n\t movnti %%eax, 12(%0)\n\t"
+			"movl 16(%1), %%eax\n\t movnti %%eax, 16(%0)\n\t"
+			"movl 20(%1), %%eax\n\t movnti %%eax, 20(%0)\n\t"
+			"movl 24(%1), %%eax\n\t movnti %%eax, 24(%0)\n\t"
+			"movl 28(%1), %%eax\n\t movnti %%eax, 28(%0)\n\t"
+			:
+			: "r" (d), "r" (s)
+			: "eax", "memory");
+	}
+	while (n--) {
+		__asm__ volatile("movnti %1, %0" : "=m" (*d) : "r" (*s));
+		d++;
+		s++;
+	}
+	__asm__ volatile("sfence" ::: "memory");
+}
+
+/*
  * Scroll up one character row.  Slide the cell grid up one row in RAM, blank the
  * freed bottom row, then redraw the whole screen from the grid.  No framebuffer
  * reads (those are the slow part); the framebuffer is only written.
@@ -289,7 +331,7 @@ fb_scroll(void)
 		bcopy((const char *)(fb_shadow + rowbytes),
 		      (char *)fb_shadow, movebytes);
 		bzero((char *)(fb_shadow + movebytes), rowbytes);
-		bcopy((const char *)fb_shadow, (char *)fb_base, totalbytes);
+		fb_stream_copy(fb_base, fb_shadow, totalbytes);
 		return;
 	}
 
