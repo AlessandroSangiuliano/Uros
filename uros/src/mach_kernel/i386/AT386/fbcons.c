@@ -37,6 +37,7 @@
 #include <string.h>			/* bcopy, bzero */
 #include <i386/io_map_entries.h>		/* io_map */
 #include <i386/pmap.h>			/* pmap_pte, INTEL_PTE_NCACHE, flush_tlb */
+#include <i386/proc_reg.h>		/* rdmsr (#372 fb memtype probe) */
 #include "fbcons.h"
 #include "fbcons_font.h"
 
@@ -74,6 +75,42 @@ static int		fb_active;
  * the BSS, so a BSS-resident flag would be wiped before fbcons_init() reads it
  * (same hazard as cons_is_com1 / mem_size, #337). */
 int			fbcons_enabled __attribute__((section(".data"))) = 0;
+
+/* #372: report the MTRR memory type covering the framebuffer aperture, to
+ * settle whether it is uncached (UC) -- which makes every pixel store a
+ * separate slow bus transaction and is the prime suspect for the crawling 4K
+ * console -- or write-combining (WC).  One line at init; removed once the WC
+ * fix lands.  Reads only the low 32 bits of each MSR (the aperture is < 4 GB). */
+static void
+fbcons_report_memtype(unsigned int phys)
+{
+	static const char *const nm[8] =
+		{ "UC", "WC", "?2", "?3", "WT", "WP", "WB", "?7" };
+	unsigned int cap_lo, hi, def_lo, i, vcnt, deftype, mtype = 8;
+
+	rdmsr(0x0fe, &cap_lo, &hi);		/* IA32_MTRRCAP     */
+	rdmsr(0x2ff, &def_lo, &hi);		/* IA32_MTRR_DEF_TYPE */
+	vcnt    = cap_lo & 0xff;
+	deftype = def_lo & 0x07;
+
+	for (i = 0; i < vcnt; i++) {
+		unsigned int base_lo, mask_lo;
+
+		rdmsr(0x200 + 2 * i, &base_lo, &hi);	/* PHYSBASEi */
+		rdmsr(0x201 + 2 * i, &mask_lo, &hi);	/* PHYSMASKi */
+		if (!(mask_lo & 0x800))			/* V (valid) bit */
+			continue;
+		if ((phys & (mask_lo & 0xfffff000)) ==
+		    (base_lo & (mask_lo & 0xfffff000))) {
+			mtype = base_lo & 0x07;
+			break;
+		}
+	}
+
+	printf("#372 fbcons: fb phys=0x%x  MTRR=%s (default %s)  PTE=WB  => a UC "
+	       "MTRR means every store is uncached (slow); WC would coalesce.\n",
+	       phys, (mtype < 8) ? nm[mtype] : "none", nm[deftype]);
+}
 
 static void
 put_pixel(unsigned int x, unsigned int y, unsigned int color)
@@ -290,4 +327,8 @@ fbcons_init(void)
 	memset((char *)fb_char, ' ', sizeof(fb_char));
 	bzero((char *)fb_base, size);		/* clear to black */
 	fb_active = 1;
+
+	/* #372: now that fb_active is set this prints on-screen (OMEGA has no
+	 * serial) -- tells us if the aperture is UC (slow) or WC. */
+	fbcons_report_memtype((unsigned int) mb2_fb.addr);
 }
