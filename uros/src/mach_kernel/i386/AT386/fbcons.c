@@ -47,6 +47,8 @@
 #define FB_FG		0x00ffffffu	/* white */
 #define FB_BG		0x00000000u	/* black */
 
+#define FB_PTE_PAT	0x00000080u	/* PAT bit in a 4K PTE (bit 7), #372 */
+
 /* #371: character-cell scroll buffer — only the on-screen glyph codes, not the
  * pixels.  Static (so fbcons works at cninit, before the kernel allocator
  * exists) and resolution-independent: sized for a 4K panel at the base 8x16
@@ -107,9 +109,49 @@ fbcons_report_memtype(unsigned int phys)
 		}
 	}
 
-	printf("#372 fbcons: fb phys=0x%x  MTRR=%s (default %s)  PTE=WB  => a UC "
-	       "MTRR means every store is uncached (slow); WC would coalesce.\n",
-	       phys, (mtype < 8) ? nm[mtype] : "none", nm[deftype]);
+	printf("#372 fbcons: fb phys=0x%x  MTRR=%s (default %s)  -> forcing WC via "
+	       "PAT7\n", phys, (mtype < 8) ? nm[mtype] : "none", nm[deftype]);
+}
+
+/*
+ * #372: make the framebuffer aperture write-combining (WC).
+ *
+ * The GOP aperture is covered by an MTRR of type UC (confirmed on hardware),
+ * so a plain write-back PTE still resolves to UC and every 4-byte pixel store
+ * is a separate uncached bus transaction -- the reason the 4K console crawls.
+ * A UC MTRR cannot be overridden to WC by another MTRR (UC wins on overlap),
+ * but it CAN by PAT: with PAT enabled the effective type is combine(MTRR,PAT),
+ * and MTRR-UC + PAT-WC = WC (Intel SDM Table 11-7).  So repurpose IA32_PAT
+ * entry 7 -- selected by a PTE with PAT+PCD+PWT set, default UC, and otherwise
+ * unused -- as WC, and map the framebuffer through it.
+ *
+ * IA32_PAT is per-CPU; this runs on the BSP, which does essentially all console
+ * drawing.  An AP that prints keeps UC for now (a rare path; extending this to
+ * ap_machine_init is tracked in #372).  Follow the SDM cache-control change
+ * sequence (CR0.CD=1, WBINVD, flush TLB, write MSR, WBINVD, flush TLB, restore).
+ */
+static void
+fbcons_pat_enable_wc(void)
+{
+	unsigned int	lo, hi, cr0;
+	unsigned long	eflags;
+
+	__asm__ volatile("pushf ; pop %0 ; cli" : "=r" (eflags));
+
+	cr0 = get_cr0();
+	set_cr0((cr0 & ~CR0_NW) | CR0_CD);	/* no-fill cache mode */
+	__asm__ volatile("wbinvd");
+	flush_tlb();
+
+	rdmsr(0x277, &lo, &hi);			/* IA32_PAT */
+	hi = (hi & 0x00ffffffu) | 0x01000000u;	/* PA7 = 0x01 (WC) */
+	wrmsr(0x277, lo, hi);
+
+	__asm__ volatile("wbinvd");
+	flush_tlb();
+	set_cr0(cr0);				/* restore cache mode */
+
+	__asm__ volatile("push %0 ; popf" : : "r" (eflags));
 }
 
 static void
@@ -241,6 +283,14 @@ fbcons_putc(char ch)
 	if (!fb_active)
 		return;
 
+	/* #372: the font is 8-bit, but boot strings carry UTF-8 (e.g. the em-dash
+	 * "—" = E2 80 94), which would render as three garbage glyphs ("OCo").
+	 * Drop continuation bytes and collapse a multi-byte lead to a single '-'. */
+	if (c >= 0x80 && c <= 0xbf)		/* UTF-8 continuation byte */
+		return;
+	if (c >= 0xc0)				/* UTF-8 lead byte */
+		c = '-';
+
 	switch (c) {
 	case '\n':
 		fb_newline();
@@ -283,22 +333,24 @@ fbcons_init(void)
 	fb_base    = (unsigned char *)io_map((vm_offset_t)mb2_fb.addr, size);
 
 	/*
-	 * Re-map the framebuffer write-back instead of uncached.  io_map()
-	 * forces INTEL_PTE_NCACHE, which turns every pixel store into a
-	 * separate uncached bus transaction — the dominant cost once the slow
-	 * scroll-reads are gone.  Clearing NCACHE gives a write-back PTE: on
-	 * real UEFI the firmware already marks the GOP aperture write-combining
-	 * via MTRR, so WB-PTE-over-WC-MTRR resolves to WC (fast, and the GPU
-	 * sees the writes); under QEMU it is plain cached, which is fast and
-	 * stays coherent with the emulated scanout.  Only the BSP runs at
-	 * cninit(), so a local TLB flush is enough (APs load the PTE fresh).
+	 * #372: make the framebuffer write-combining (WC).  io_map() maps it
+	 * INTEL_PTE_NCACHE (PCD), and the covering MTRR is UC, so every pixel
+	 * store is a separate uncached bus transaction — the reason the 4K
+	 * console crawls on real hardware (a plain write-back PTE does NOT help:
+	 * MTRR-UC wins over a WB PTE).  Program PAT entry 7 as WC (above) and
+	 * point the aperture's PTEs at it — PAT+PCD+PWT select PA7, and
+	 * MTRR-UC + PAT-WC resolves to WC, so stores coalesce in the
+	 * write-combining buffers.  Only the BSP runs at cninit(), so a local
+	 * TLB flush is enough (APs load the PTE fresh).
 	 */
+	fbcons_pat_enable_wc();
 	{
 		vm_offset_t va, end = (vm_offset_t)fb_base + round_page(size);
 		for (va = (vm_offset_t)fb_base; va < end; va += PAGE_SIZE) {
 			pt_entry_t *pte = pmap_pte(kernel_pmap, va);
 			if (pte != PT_ENTRY_NULL)
-				*pte &= ~INTEL_PTE_NCACHE;
+				*pte |= FB_PTE_PAT | INTEL_PTE_NCACHE |
+					INTEL_PTE_WTHRU;
 		}
 		flush_tlb();
 	}
