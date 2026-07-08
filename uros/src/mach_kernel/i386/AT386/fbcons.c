@@ -66,6 +66,8 @@ static unsigned int	fb_cols, fb_rows;	/* size in characters         */
 static unsigned int	fb_scale;	/* glyph magnification (1 or 2, #371) */
 static unsigned int	cur_col, cur_row;
 static int		fb_active;
+static int		utf8_left;	/* UTF-8 continuation bytes still due (#372) */
+static unsigned int	utf8_cp;	/* accumulated UTF-8 codepoint (#372)      */
 
 /* Opt-in: set by the '-f' boot argument (parse_arguments).  fbcons stays off
  * by default so the userspace gpu_server owns the display in normal operation;
@@ -283,13 +285,26 @@ fbcons_putc(char ch)
 	if (!fb_active)
 		return;
 
-	/* #372: the font is 8-bit, but boot strings carry UTF-8 (e.g. the em-dash
+	/* #372: the font is 8-bit but boot strings carry UTF-8 (e.g. the em-dash
 	 * "—" = E2 80 94), which would render as three garbage glyphs ("OCo").
-	 * Drop continuation bytes and collapse a multi-byte lead to a single '-'. */
-	if (c >= 0x80 && c <= 0xbf)		/* UTF-8 continuation byte */
+	 * Decode the sequence: map the en/em/horizontal-bar dashes to the CP437
+	 * full-width line glyph 0xC4 (a real long dash), anything else to '-'. */
+	if (c >= 0xc0) {			/* UTF-8 lead byte -- start a sequence */
+		if (c >= 0xf0)		{ utf8_left = 3; utf8_cp = c & 0x07; }
+		else if (c >= 0xe0)	{ utf8_left = 2; utf8_cp = c & 0x0f; }
+		else			{ utf8_left = 1; utf8_cp = c & 0x1f; }
 		return;
-	if (c >= 0xc0)				/* UTF-8 lead byte */
-		c = '-';
+	}
+	if (c >= 0x80) {			/* UTF-8 continuation byte */
+		if (utf8_left == 0)
+			return;			/* stray continuation, ignore */
+		utf8_cp = (utf8_cp << 6) | (c & 0x3f);
+		if (--utf8_left != 0)
+			return;			/* more bytes still due */
+		c = (utf8_cp == 0x2013 || utf8_cp == 0x2014 ||
+		     utf8_cp == 0x2015) ? 0xc4 : '-';
+		/* sequence complete -- fall through and render c */
+	}
 
 	switch (c) {
 	case '\n':
