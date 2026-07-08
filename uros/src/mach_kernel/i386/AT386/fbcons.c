@@ -23,10 +23,11 @@
  * Performance: the framebuffer is device memory mapped uncached, and *reads*
  * from it are punishingly slow.  The naive scroll (bcopy framebuffer->framebuffer)
  * reads back the whole screen every line and dominated boot time.  Instead we
- * keep a RAM shadow of the framebuffer pixels: glyphs are written to both the
- * framebuffer and the shadow, and scrolling is done by sliding the shadow in
- * RAM and then a single bulk bcopy(shadow -> framebuffer).  The framebuffer is
- * therefore only ever *written*, in bulk, never read.
+ * keep a RAM *character-cell* grid of the on-screen glyphs (#371): scrolling
+ * slides that tiny grid up and redraws from it, so the framebuffer is only ever
+ * *written*, never read.  (An earlier version shadowed every pixel, which had
+ * to be sized for the largest panel and could not reach 4K within the ~16 MB
+ * early boot map; the cell grid is resolution-independent and ~64 KB.)
  *
  * Colours are monochrome white-on-black, so the pixel channel order (RGB vs
  * BGR) does not matter — white and black are identical under any permutation.
@@ -45,17 +46,21 @@
 #define FB_FG		0x00ffffffu	/* white */
 #define FB_BG		0x00000000u	/* black */
 
-/* RAM shadow of the on-screen pixels — the scroll source, so we never read the
- * uncached framebuffer back.  Static (so fbcons works at cninit, before the
- * kernel allocator exists); sized for a 1024x768x32 console.  On a larger
- * display the console is capped to the rows that fit here (top of the screen). */
-#define FB_SHADOW_BYTES	(1024u * 768u * 4u)
-static unsigned char	fb_shadow[FB_SHADOW_BYTES];
+/* #371: character-cell scroll buffer — only the on-screen glyph codes, not the
+ * pixels.  Static (so fbcons works at cninit, before the kernel allocator
+ * exists) and resolution-independent: sized for a 4K panel at the base 8x16
+ * font (3840/8 x 2160/16).  A panel larger than that is clamped to the top-left
+ * that fits.  ~64 KB, vs the old 3 MB pixel shadow that a 4K console could not
+ * grow past the early boot map. */
+#define FB_MAX_COLS	480u
+#define FB_MAX_ROWS	135u
+static unsigned char	fb_char[FB_MAX_ROWS * FB_MAX_COLS];
 
 static unsigned char	*fb_base;	/* io_map'd framebuffer (kernel virt) */
 static unsigned int	fb_pitch;	/* bytes per scanline                 */
 static unsigned int	fb_bytespp;	/* bytes per pixel                    */
 static unsigned int	fb_cols, fb_rows;	/* size in characters         */
+static unsigned int	fb_scale;	/* glyph magnification (1 or 2, #371) */
 static unsigned int	cur_col, cur_row;
 static int		fb_active;
 
@@ -73,61 +78,77 @@ int			fbcons_enabled __attribute__((section(".data"))) = 0;
 static void
 put_pixel(unsigned int x, unsigned int y, unsigned int color)
 {
-	unsigned int	off = y * fb_pitch + x * fb_bytespp;
-	unsigned char	*p = fb_base + off;
-	unsigned char	*s = fb_shadow + off;	/* shadow mirrors the framebuffer */
+	unsigned char	*p = fb_base + y * fb_pitch + x * fb_bytespp;
 
 	switch (fb_bytespp) {
 	case 4:
 		*(unsigned int *)p = color;
-		*(unsigned int *)s = color;
 		break;
 	case 3:
-		p[0] = s[0] = (unsigned char)(color);
-		p[1] = s[1] = (unsigned char)(color >> 8);
-		p[2] = s[2] = (unsigned char)(color >> 16);
+		p[0] = (unsigned char)(color);
+		p[1] = (unsigned char)(color >> 8);
+		p[2] = (unsigned char)(color >> 16);
 		break;
 	case 2:
 		*(unsigned short *)p = (unsigned short)color;
-		*(unsigned short *)s = (unsigned short)color;
 		break;
 	default:
 		break;
 	}
 }
 
+/* Blit one glyph to the framebuffer, magnified by fb_scale (#371): each font
+ * pixel becomes an fb_scale x fb_scale block, so 4K text is drawn 2x. */
 static void
-draw_glyph(unsigned char c, unsigned int col, unsigned int row)
+render_glyph(unsigned char c, unsigned int col, unsigned int row)
 {
 	const unsigned char	*g = fbcons_font8x16[c];
-	unsigned int		x0 = col * FONT_W;
-	unsigned int		y0 = row * FONT_H;
-	unsigned int		gy, gx;
+	unsigned int		x0 = col * FONT_W * fb_scale;
+	unsigned int		y0 = row * FONT_H * fb_scale;
+	unsigned int		gy, gx, sy, sx;
 
 	for (gy = 0; gy < FONT_H; gy++) {
 		unsigned char bits = g[gy];
-		for (gx = 0; gx < FONT_W; gx++)
-			put_pixel(x0 + gx, y0 + gy,
-				  (bits & (0x80 >> gx)) ? FB_FG : FB_BG);
+		for (gx = 0; gx < FONT_W; gx++) {
+			unsigned int color = (bits & (0x80 >> gx)) ? FB_FG : FB_BG;
+
+			for (sy = 0; sy < fb_scale; sy++)
+				for (sx = 0; sx < fb_scale; sx++)
+					put_pixel(x0 + gx * fb_scale + sx,
+						  y0 + gy * fb_scale + sy,
+						  color);
+		}
 	}
 }
 
+/* Render a glyph AND record it in the cell grid, so fb_scroll() can redraw the
+ * screen without reading the framebuffer back. */
+static void
+draw_glyph(unsigned char c, unsigned int col, unsigned int row)
+{
+	fb_char[row * FB_MAX_COLS + col] = c;
+	render_glyph(c, col, row);
+}
+
 /*
- * Scroll up one character row.  Slide the RAM shadow up one text row, clear the
- * freed row, then push the whole shadow to the framebuffer in one bulk write.
- * No framebuffer reads (those are the slow part); the bcopy's are forward
- * (dst < src) so the overlap is safe.
+ * Scroll up one character row.  Slide the cell grid up one row in RAM, blank the
+ * freed bottom row, then redraw the whole screen from the grid.  No framebuffer
+ * reads (those are the slow part); the framebuffer is only written.
  */
 static void
 fb_scroll(void)
 {
-	unsigned int rowbytes   = FONT_H * fb_pitch;
-	unsigned int movebytes  = (fb_rows - 1) * rowbytes;
-	unsigned int totalbytes = fb_rows * rowbytes;
+	unsigned int r, c;
 
-	bcopy((const char *)(fb_shadow + rowbytes), (char *)fb_shadow, movebytes);
-	bzero((char *)(fb_shadow + movebytes), rowbytes);
-	bcopy((const char *)fb_shadow, (char *)fb_base, totalbytes);
+	/* Forward copy (dst < src) so the row overlap is safe, like the old
+	 * pixel-shadow slide; the kernel has bcopy but not memmove. */
+	bcopy((const char *)&fb_char[FB_MAX_COLS], (char *)&fb_char[0],
+	      (fb_rows - 1) * FB_MAX_COLS);
+	memset(&fb_char[(fb_rows - 1) * FB_MAX_COLS], ' ', fb_cols);
+
+	for (r = 0; r < fb_rows; r++)
+		for (c = 0; c < fb_cols; c++)
+			render_glyph(fb_char[r * FB_MAX_COLS + c], c, r);
 }
 
 static void
@@ -183,7 +204,6 @@ void
 fbcons_init(void)
 {
 	vm_size_t	size;
-	unsigned int	max_rows;
 
 	if (!fbcons_enabled)
 		return;				/* opt-in via '-f'; gpu_server
@@ -221,20 +241,26 @@ fbcons_init(void)
 
 	fb_pitch   = mb2_fb.pitch;
 	fb_bytespp = mb2_fb.bpp / 8;
-	fb_cols    = mb2_fb.width  / FONT_W;
-	fb_rows    = mb2_fb.height / FONT_H;
 
-	/* Cap the console to the rows whose pixels fit in the static shadow. */
-	max_rows = (unsigned int)(FB_SHADOW_BYTES / (FONT_H * fb_pitch));
-	if (fb_rows > max_rows)
-		fb_rows = max_rows;
-	if (fb_rows == 0)
-		return;				/* scanline wider than the shadow */
+	/* #371: magnify glyphs on a wide panel so 4K text stays readable — the
+	 * base 8x16 font at 3840 wide is 480 tiny columns.  Small panels keep 1x. */
+	fb_scale   = (mb2_fb.width >= 2560) ? 2 : 1;
+
+	fb_cols    = mb2_fb.width  / (FONT_W * fb_scale);
+	fb_rows    = mb2_fb.height / (FONT_H * fb_scale);
+
+	/* Clamp to the cell grid; a panel larger than 4K uses the top-left. */
+	if (fb_cols > FB_MAX_COLS)
+		fb_cols = FB_MAX_COLS;
+	if (fb_rows > FB_MAX_ROWS)
+		fb_rows = FB_MAX_ROWS;
+	if (fb_cols == 0 || fb_rows == 0)
+		return;
 
 	cur_col = 0;
 	cur_row = 0;
 
-	bzero((char *)fb_shadow, sizeof(fb_shadow));
+	memset((char *)fb_char, ' ', sizeof(fb_char));
 	bzero((char *)fb_base, size);		/* clear to black */
 	fb_active = 1;
 }
