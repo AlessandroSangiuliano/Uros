@@ -812,6 +812,14 @@ machine_init(void)
 	char bootdev_name[10] = "hd0s1";
 
 	/*
+	 * #372: the kernel allocator is up by now (machine_init runs after
+	 * vm_mem_init), so give fbcons its RAM pixel shadow — from here scrolling
+	 * is a bulk bcopy instead of re-rendering every glyph.  No-op unless
+	 * fbcons is active ('-f' on a framebuffer boot).
+	 */
+	fbcons_late_init();
+
+	/*
 	 * Adjust delay count before entering drivers
 	 */
 

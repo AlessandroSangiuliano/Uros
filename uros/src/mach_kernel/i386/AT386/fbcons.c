@@ -38,6 +38,7 @@
 #include <i386/io_map_entries.h>		/* io_map */
 #include <i386/pmap.h>			/* pmap_pte, INTEL_PTE_NCACHE, flush_tlb */
 #include <i386/proc_reg.h>		/* rdmsr (#372 fb memtype probe) */
+#include <vm/vm_kern.h>			/* kmem_alloc, kernel_map (#372 shadow) */
 #include "fbcons.h"
 #include "fbcons_font.h"
 
@@ -68,6 +69,14 @@ static unsigned int	cur_col, cur_row;
 static int		fb_active;
 static int		utf8_left;	/* UTF-8 continuation bytes still due (#372) */
 static unsigned int	utf8_cp;	/* accumulated UTF-8 codepoint (#372)      */
+
+/* #372: optional RAM pixel shadow, kmem_alloc'd once the allocator is up
+ * (fbcons_late_init).  When present, scrolling is one bulk bcopy(shadow->fb)
+ * instead of re-rendering every glyph — the old fast path, but sized to the
+ * real panel (a static 4K shadow would not fit the early boot map).  NULL
+ * until then: early scrolls fall back to the char-cell redraw. */
+static unsigned char	*fb_shadow;
+static vm_size_t	fb_shadow_bytes;
 
 /* Opt-in: set by the '-f' boot argument (parse_arguments).  fbcons stays off
  * by default so the userspace gpu_server owns the display in normal operation;
@@ -159,19 +168,28 @@ fbcons_pat_enable_wc(void)
 static void
 put_pixel(unsigned int x, unsigned int y, unsigned int color)
 {
-	unsigned char	*p = fb_base + y * fb_pitch + x * fb_bytespp;
+	unsigned int	off = y * fb_pitch + x * fb_bytespp;
+	unsigned char	*p = fb_base + off;
+	unsigned char	*s = fb_shadow ? fb_shadow + off : (unsigned char *)0;
 
 	switch (fb_bytespp) {
 	case 4:
 		*(unsigned int *)p = color;
+		if (s)
+			*(unsigned int *)s = color;
 		break;
 	case 3:
 		p[0] = (unsigned char)(color);
 		p[1] = (unsigned char)(color >> 8);
 		p[2] = (unsigned char)(color >> 16);
+		if (s) {
+			s[0] = p[0]; s[1] = p[1]; s[2] = p[2];
+		}
 		break;
 	case 2:
 		*(unsigned short *)p = (unsigned short)color;
+		if (s)
+			*(unsigned short *)s = (unsigned short)color;
 		break;
 	default:
 		break;
@@ -199,16 +217,22 @@ render_glyph(unsigned char c, unsigned int col, unsigned int row)
 			unsigned char bits = g[gy];
 
 			for (sy = 0; sy < fb_scale; sy++) {
-				unsigned int *p = (unsigned int *)
-					(fb_base + (y0 + gy * fb_scale + sy) *
-					 fb_pitch + x0 * 4);
+				unsigned int off = (y0 + gy * fb_scale + sy) *
+						   fb_pitch + x0 * 4;
+				unsigned int *p = (unsigned int *)(fb_base + off);
+				unsigned int *s = fb_shadow ?
+					(unsigned int *)(fb_shadow + off) :
+					(unsigned int *)0;
 
 				for (gx = 0; gx < FONT_W; gx++) {
 					unsigned int color =
 						(bits & (0x80 >> gx)) ? FB_FG : FB_BG;
 
-					for (sx = 0; sx < fb_scale; sx++)
+					for (sx = 0; sx < fb_scale; sx++) {
 						*p++ = color;
+						if (s)
+							*s++ = color;
+					}
 				}
 			}
 		}
@@ -248,12 +272,28 @@ fb_scroll(void)
 {
 	unsigned int r, c;
 
-	/* Forward copy (dst < src) so the row overlap is safe, like the old
-	 * pixel-shadow slide; the kernel has bcopy but not memmove. */
+	/* Slide the cell grid up one row and blank the freed bottom row.  This
+	 * is kept current in both scroll modes so a fallback stays correct. */
 	bcopy((const char *)&fb_char[FB_MAX_COLS], (char *)&fb_char[0],
 	      (fb_rows - 1) * FB_MAX_COLS);
 	memset(&fb_char[(fb_rows - 1) * FB_MAX_COLS], ' ', fb_cols);
 
+	if (fb_shadow) {
+		/* Fast path: slide the RAM pixel shadow up one text row, clear the
+		 * freed row, and push the whole console area to the framebuffer in
+		 * one bulk write — no per-glyph re-render, no framebuffer reads. */
+		unsigned int rowbytes = FONT_H * fb_scale * fb_pitch;
+		unsigned int movebytes = (fb_rows - 1) * rowbytes;
+		unsigned int totalbytes = fb_rows * rowbytes;
+
+		bcopy((const char *)(fb_shadow + rowbytes),
+		      (char *)fb_shadow, movebytes);
+		bzero((char *)(fb_shadow + movebytes), rowbytes);
+		bcopy((const char *)fb_shadow, (char *)fb_base, totalbytes);
+		return;
+	}
+
+	/* Fallback (before the shadow is allocated): redraw from the cell grid. */
 	for (r = 0; r < fb_rows; r++)
 		for (c = 0; c < fb_cols; c++)
 			render_glyph(fb_char[r * FB_MAX_COLS + c], c, r);
@@ -398,4 +438,39 @@ fbcons_init(void)
 	/* #372: now that fb_active is set this prints on-screen (OMEGA has no
 	 * serial) -- tells us if the aperture is UC (slow) or WC. */
 	fbcons_report_memtype((unsigned int) mb2_fb.addr);
+}
+
+/*
+ * #372: allocate the RAM pixel shadow, once the kernel allocator is up (called
+ * from machine_init(), after vm_mem_init()).  fbcons_init() runs at cninit()
+ * before any allocator exists, so the shadow can't be grabbed there; until this
+ * runs, scrolling redraws from the cell grid (fine for the sparse early boot).
+ * With the shadow, a scroll becomes one bulk bcopy instead of re-rendering
+ * every glyph -- the difference between a snappy 4K console and a crawling one.
+ * A static shadow would have to be sized for 4K (~33 MB) and would not fit the
+ * early boot map (#241/#359); a dynamic one lives in the normal kernel map.
+ */
+void
+fbcons_late_init(void)
+{
+	vm_offset_t	addr;
+	unsigned int	r, c;
+
+	if (!fb_active || fb_shadow != (unsigned char *)0)
+		return;
+
+	/* Only the visible console area (top fb_rows text rows) is scrolled. */
+	fb_shadow_bytes = (vm_size_t)fb_pitch * fb_rows * FONT_H * fb_scale;
+
+	if (kmem_alloc(kernel_map, &addr, fb_shadow_bytes) != KERN_SUCCESS)
+		return;				/* stay on the redraw path */
+
+	fb_shadow = (unsigned char *)addr;
+	bzero((char *)fb_shadow, fb_shadow_bytes);	/* black padding areas */
+
+	/* Populate it to match the current screen: render_glyph() mirrors into
+	 * the shadow now that fb_shadow is set, so afterwards shadow == fb. */
+	for (r = 0; r < fb_rows; r++)
+		for (c = 0; c < fb_cols; c++)
+			render_glyph(fb_char[r * FB_MAX_COLS + c], c, r);
 }
