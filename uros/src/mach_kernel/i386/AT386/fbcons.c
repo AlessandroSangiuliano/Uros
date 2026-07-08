@@ -89,16 +89,17 @@ static vm_size_t	fb_shadow_bytes;
  * (same hazard as cons_is_com1 / mem_size, #337). */
 int			fbcons_enabled __attribute__((section(".data"))) = 0;
 
-/* #372: report the MTRR memory type covering the framebuffer aperture, to
- * settle whether it is uncached (UC) -- which makes every pixel store a
- * separate slow bus transaction and is the prime suspect for the crawling 4K
- * console -- or write-combining (WC).  One line at init; removed once the WC
- * fix lands.  Reads only the low 32 bits of each MSR (the aperture is < 4 GB). */
-static void
-fbcons_report_memtype(unsigned int phys)
+/* #372: effective MTRR memory type covering the framebuffer aperture (0=UC,
+ * 1=WC, 4=WT, 5=WP, 6=WB).  Decides whether to force WC: a UC aperture (QEMU
+ * std-vga, some UC firmware) makes every store a separate slow bus transaction
+ * and must be overridden to WC via PAT; a WB/WC aperture (OMEGA GOP is WB, omen
+ * legacy VBE) is already cached/coalescing and fast, and forcing it to WC would
+ * SLOW the scattered per-glyph stores (partial write-combining flushes).  Reads
+ * only the low 32 bits of each MSR (the aperture is < 4 GB).  Silent -- printed
+ * later from fbcons_init once fb_active makes it visible on-screen. */
+static unsigned int
+fbcons_fb_mtrr_type(unsigned int phys)
 {
-	static const char *const nm[8] =
-		{ "UC", "WC", "?2", "?3", "WT", "WP", "WB", "?7" };
 	unsigned int cap_lo, hi, def_lo, i, vcnt, deftype, mtype = 8;
 
 	rdmsr(0x0fe, &cap_lo, &hi);		/* IA32_MTRRCAP     */
@@ -120,8 +121,7 @@ fbcons_report_memtype(unsigned int phys)
 		}
 	}
 
-	printf("#372 fbcons: fb phys=0x%x  MTRR=%s (default %s)  -> forcing WC via "
-	       "PAT7\n", phys, (mtype < 8) ? nm[mtype] : "none", nm[deftype]);
+	return (mtype < 8) ? mtype : deftype;
 }
 
 /*
@@ -373,6 +373,7 @@ void
 fbcons_init(void)
 {
 	vm_size_t	size;
+	unsigned int	fbtype;
 
 	if (!fbcons_enabled)
 		return;				/* opt-in via '-f'; gpu_server
@@ -388,24 +389,35 @@ fbcons_init(void)
 	fb_base    = (unsigned char *)io_map((vm_offset_t)mb2_fb.addr, size);
 
 	/*
-	 * #372: make the framebuffer write-combining (WC).  io_map() maps it
-	 * INTEL_PTE_NCACHE (PCD), and the covering MTRR is UC, so every pixel
-	 * store is a separate uncached bus transaction — the reason the 4K
-	 * console crawls on real hardware (a plain write-back PTE does NOT help:
-	 * MTRR-UC wins over a WB PTE).  Program PAT entry 7 as WC (above) and
-	 * point the aperture's PTEs at it — PAT+PCD+PWT select PA7, and
-	 * MTRR-UC + PAT-WC resolves to WC, so stores coalesce in the
-	 * write-combining buffers.  Only the BSP runs at cninit(), so a local
-	 * TLB flush is enough (APs load the PTE fresh).
+	 * #372: pick the framebuffer cache mode from the covering MTRR.
+	 *
+	 *  - UC aperture (QEMU std-vga; some UC firmware): every pixel store is a
+	 *    separate uncached bus transaction and the console crawls.  A UC MTRR
+	 *    can't be beaten by a WB PTE, but PAT can: program PA7 = WC and point
+	 *    the PTEs at it (PAT+PCD+PWT), so MTRR-UC + PAT-WC resolves to WC and
+	 *    stores coalesce.
+	 *  - WB/WC aperture (OMEGA GOP is WB, omen legacy VBE): already cached /
+	 *    write-combining and fast for the scattered per-glyph stores.  Just
+	 *    clear NCACHE for a write-back PTE and leave it to the MTRR.  Forcing
+	 *    WC here would make it UNcached and SLOWER (partial WC-buffer flushes)
+	 *    -- the mistake that made OMEGA crawl.
+	 *
+	 * Only the BSP runs at cninit(), so a local TLB flush is enough.
 	 */
-	fbcons_pat_enable_wc();
+	fbtype = fbcons_fb_mtrr_type((unsigned int)mb2_fb.addr);
+	if (fbtype == 0)			/* UC */
+		fbcons_pat_enable_wc();		/* set PA7 = WC */
 	{
 		vm_offset_t va, end = (vm_offset_t)fb_base + round_page(size);
 		for (va = (vm_offset_t)fb_base; va < end; va += PAGE_SIZE) {
 			pt_entry_t *pte = pmap_pte(kernel_pmap, va);
-			if (pte != PT_ENTRY_NULL)
+			if (pte == PT_ENTRY_NULL)
+				continue;
+			if (fbtype == 0)		/* UC -> WC via PA7 */
 				*pte |= FB_PTE_PAT | INTEL_PTE_NCACHE |
 					INTEL_PTE_WTHRU;
+			else				/* WB/WC -> cached WB PTE */
+				*pte &= ~INTEL_PTE_NCACHE;
 		}
 		flush_tlb();
 	}
@@ -436,8 +448,16 @@ fbcons_init(void)
 	fb_active = 1;
 
 	/* #372: now that fb_active is set this prints on-screen (OMEGA has no
-	 * serial) -- tells us if the aperture is UC (slow) or WC. */
-	fbcons_report_memtype((unsigned int) mb2_fb.addr);
+	 * serial) -- shows the aperture type and the cache mode we chose. */
+	{
+		static const char *const nm[8] =
+			{ "UC", "WC", "?2", "?3", "WT", "WP", "WB", "?7" };
+
+		printf("#372 fbcons: fb phys=0x%x MTRR=%s -> %s\n",
+		       (unsigned)mb2_fb.addr, nm[fbtype & 7],
+		       (fbtype == 0) ? "forced WC via PAT7"
+				     : "kept cached (WB PTE, fast)");
+	}
 }
 
 /*
