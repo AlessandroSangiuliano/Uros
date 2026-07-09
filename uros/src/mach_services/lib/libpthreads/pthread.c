@@ -53,6 +53,11 @@ int _pthread_stack_size __attribute__((weak));
 static int __pthread_stack_size, __pthread_stack_mask;
 static vm_address_t lowest_stack;
 static vm_address_t *free_stacks;
+/* #377: serialize the stack free-list.  The thread pool has _thread_pool_lock;
+ * this list had none, so a concurrent pop (_pthread_allocate_stack) and push
+ * (_pthread_free_stack) raced under SMP thread churn -- corrupting the list and
+ * handing the same stack to two threads (stack-smash crash, scale sweep >8). */
+static pthread_lock_t _free_stacks_lock = 0;
 
 #define STACK_LOWEST(sp)	((sp) & ~__pthread_stack_mask)
 #define STACK_RESERVED		(sizeof (struct _pthread))
@@ -87,6 +92,8 @@ _pthread_allocate_stack(void)
 {
 	vm_address_t cur_stack;
 	kern_return_t kr;
+
+	LOCK(_free_stacks_lock);			/* #377 */
 	if (free_stacks == 0)
 	{
 	    /* Allocating guard pages is done by doubling
@@ -172,6 +179,7 @@ _pthread_allocate_stack(void)
 	}
 	cur_stack = STACK_START((vm_address_t) free_stacks);
 	free_stacks = (vm_address_t *)*free_stacks;
+	UNLOCK(_free_stacks_lock);			/* #377 */
 	cur_stack = _adjust_sp(cur_stack); /* Machine dependent stack fudging */
 	return (cur_stack);
 }
@@ -180,8 +188,10 @@ static void
 _pthread_free_stack(pthread_t self)
 {
 	vm_address_t *base = (vm_address_t *) STACK_LOWEST((vm_address_t)self);
+	LOCK(_free_stacks_lock);			/* #377 */
 	*base = (vm_address_t) free_stacks;
 	free_stacks = base;
+	UNLOCK(_free_stacks_lock);			/* #377 */
 }
 
 /*
