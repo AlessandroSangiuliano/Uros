@@ -219,7 +219,8 @@ mach_msg_return_t msg_receive_error(
 	mach_msg_header_t	*msg,
 	mach_msg_option_t	option,
 	mach_port_seqno_t	seqno,
-	ipc_space_t		space);
+	ipc_space_t		space,
+	mach_msg_size_t		rcv_size);
 
 /* the size of each trailer has to be listed here for copyout purposes */
 mach_msg_trailer_size_t trailer_size[] = {
@@ -417,7 +418,7 @@ mach_msg_receive(
 		    || mr == MACH_RCV_TRANSPORT_ERROR
 #endif	/* DIPC */
 		    ) {
-			if (msg_receive_error(kmsg, msg, option, seqno, space)
+			if (msg_receive_error(kmsg, msg, option, seqno, space, rcv_size)
 			    == MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
@@ -451,7 +452,7 @@ mach_msg_receive(
 				mr = MACH_RCV_INVALID_DATA;
 		} 
 		else {
-			if (msg_receive_error(kmsg, msg, option, seqno, space) 
+			if (msg_receive_error(kmsg, msg, option, seqno, space, rcv_size)
 						== MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
@@ -581,7 +582,7 @@ finish_receive:
 #endif	/* DIPC */
 		    ) {
 			space = current_space();
-			if (msg_receive_error(kmsg, msg, option, seqno, space)
+			if (msg_receive_error(kmsg, msg, option, seqno, space, max_size)
 			    == MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
@@ -622,7 +623,7 @@ finish_receive:
 					== MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		} else {
-			if (msg_receive_error(kmsg, msg, option, seqno, space)
+			if (msg_receive_error(kmsg, msg, option, seqno, space, max_size)
 						== MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
@@ -1927,7 +1928,7 @@ mach_msg_overwrite_trap(
 			if (mr == MACH_RCV_TRANSPORT_ERROR) {
 				if (msg_receive_error(kmsg,
 				    (rcv_msg != MACH_MSG_NULL) ? rcv_msg : msg,
-					option, self->ith_seqno, space)
+					option, self->ith_seqno, space, rcv_size)
 				    == MACH_RCV_INVALID_DATA) {
 					mr = MACH_RCV_INVALID_DATA;
 				}
@@ -2521,7 +2522,7 @@ mach_msg_overwrite_trap(
 		if (mr == MACH_RCV_TRANSPORT_ERROR) {
 			if (msg_receive_error(temp_kmsg,
 				(rcv_msg != MACH_MSG_NULL) ? rcv_msg : msg,
-				option, temp_seqno, space)
+				option, temp_seqno, space, rcv_size)
 			    == MACH_RCV_INVALID_DATA) {
 				mr = MACH_RCV_INVALID_DATA;
 			}
@@ -2556,7 +2557,7 @@ mach_msg_overwrite_trap(
 		reply_size = send_size + trailer->msgh_trailer_size;
 		if (rcv_size < reply_size) {
 			if (msg_receive_error(kmsg, msg, option, temp_seqno,
-				        space) == MACH_RCV_INVALID_DATA) {
+				        space, rcv_size) == MACH_RCV_INVALID_DATA) {
 				mr = MACH_RCV_INVALID_DATA;
 				return(mr);
 			}
@@ -2580,7 +2581,7 @@ mach_msg_overwrite_trap(
 			} 
 			else {
 				if (msg_receive_error(kmsg, msg, option,
-				    temp_seqno, space) == MACH_RCV_INVALID_DATA)
+				    temp_seqno, space, rcv_size) == MACH_RCV_INVALID_DATA)
 					mr = MACH_RCV_INVALID_DATA;
 			}
 
@@ -2675,9 +2676,11 @@ msg_receive_error(
 	mach_msg_header_t	*msg,
 	mach_msg_option_t	option,
 	mach_port_seqno_t	seqno,
-	ipc_space_t		space)
+	ipc_space_t		space,
+	mach_msg_size_t		rcv_size)
 {
 	mach_msg_format_0_trailer_t *trailer;
+	mach_msg_size_t		osize;
 
 	/*
 	 * Copy out the destination port in the message.
@@ -2701,11 +2704,17 @@ msg_receive_error(
 	}
 
 	/*
-	 * Copy the message to user space
+	 * Copy the message to user space.  #374: never write past rcv_size.  This
+	 * path runs precisely because the receive buffer was too small
+	 * (MACH_RCV_TOO_LARGE), yet it rebuilds a minimal header+trailer (>= 32
+	 * bytes) and used to copy all of it out -- overflowing a smaller buffer
+	 * (e.g. a header-only 24-byte one) and smashing the caller's stack.
 	 */
-	if (ipc_kmsg_put(msg, kmsg, kmsg->ikm_header.msgh_size +
-			trailer->msgh_trailer_size) == MACH_RCV_INVALID_DATA)
+	osize = kmsg->ikm_header.msgh_size + trailer->msgh_trailer_size;
+	if (osize > rcv_size)
+		osize = rcv_size;
+	if (ipc_kmsg_put(msg, kmsg, osize) == MACH_RCV_INVALID_DATA)
 		return(MACH_RCV_INVALID_DATA);
-	else 
+	else
 		return(MACH_MSG_SUCCESS);
 }
