@@ -31,6 +31,7 @@ extern struct mb2_framebuffer	mb2_fb;
  * fbcons_init() succeeds, so cnputc() may call it unconditionally.
  */
 extern void	fbcons_init(void);
+extern void	fbcons_late_init(void);	/* #372: alloc the pixel shadow (post-VM) */
 extern void	fbcons_putc(char c);
 
 /* Opt-in flag set by the '-f' boot argument; fbcons_init() is a no-op unless
