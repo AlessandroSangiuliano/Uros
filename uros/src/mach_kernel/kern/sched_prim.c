@@ -2379,7 +2379,9 @@ thread_setrun(
 		machine_info.avail_cpus >= real_ncpus) {
 		register thread_t	self = current_thread();
 
-		if (self->handoff_hint) {
+		/* #370: self is THREAD_NULL on an early-AP that has not yet
+		 * installed its current thread; nothing to hand off then. */
+		if (self != THREAD_NULL && self->handoff_hint) {
 			self->handoff_hint = FALSE;
 			if (
 #if	MACH_HOST
@@ -2458,6 +2460,13 @@ thread_setrun(
 #if	MACH_HOST
 		(pset == processor->processor_set) &&
 #endif	/* MACH_HOST */
+		/* #370: an early-AP can enter thread_setrun before its current
+		 * thread is installed -- a periodic tick or resched IPI slipping
+		 * past the bring-up splhigh() in slave_machine_init.  Nothing is
+		 * running to preempt and current_thread() is THREAD_NULL, so the
+		 * old unconditional deref read NULL+0x58 (sched_pri): the cr2=0x58
+		 * early-AP page fault caught on OMEGA E-cores (cpu 25).  Skip it. */
+		current_thread() != THREAD_NULL &&
 		(current_thread()->sched_pri > th->sched_pri)) {
 
 		    /*
@@ -2518,8 +2527,11 @@ thread_setrun(
 	     */
 	    rq = &(processor->runq);
 	    if (processor == current_processor()) {
-		if (current_thread()->bound_processor == PROCESSOR_NULL ||
-		    current_thread()->sched_pri > th->sched_pri) {
+		/* #370: same early-AP guard as the unbound path -- no current
+		 * thread means nothing to preempt (bound-thread case). */
+		if (current_thread() != THREAD_NULL &&
+		    (current_thread()->bound_processor == PROCESSOR_NULL ||
+		     current_thread()->sched_pri > th->sched_pri)) {
 		    if (processor->state == PROCESSOR_DISPATCHING) {
 			cur_th = processor->next_thread;
 			processor->next_thread = th;
