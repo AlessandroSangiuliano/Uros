@@ -224,6 +224,18 @@ start_other_cpus(void)
 	 * timer / enters the scheduler while another AP is still being
 	 * brought up. */
 	ap_can_run = TRUE;
+
+	/* #358: one-line clock verdict now that every CPU ran hwp_init_cpu
+	 * (the APs run it before the barrier this loop just waited on). */
+	{
+		extern int hwp_cpus_on, hwp_epp_performance;
+
+		if (hwp_cpus_on)
+			printf("hwp: hardware P-states active on %d/%d CPUs%s "
+			       "(#358)\n", hwp_cpus_on, real_ncpus,
+			       hwp_epp_performance ? ", EPP=performance (-E)"
+						   : "");
+	}
 }
 
 /*
@@ -290,6 +302,14 @@ slave_machine_init(void)
 	{
 		extern void fpu_sanity_check(void);
 		fpu_sanity_check();
+	}
+
+	/* #358: hardware P-states on this AP -- enable HWP if the firmware
+	 * did not, apply the -E EPP bias.  Silent: the BSP printed the
+	 * verdict line, start_other_cpus prints the per-CPU summary. */
+	{
+		extern void hwp_init_cpu(boolean_t bsp);
+		hwp_init_cpu(FALSE);
 	}
 
 	/* #344: announce this AP is fully past CPU-state init (LAPIC enabled,

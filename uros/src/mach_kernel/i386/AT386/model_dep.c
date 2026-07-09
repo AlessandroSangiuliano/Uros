@@ -716,6 +716,17 @@ parse_arguments(void)
 				 * comb rides the hotpath, not this path). */
 		    { extern int ipc_dts_smp; ipc_dts_smp = 1; }
 		    break;
+		case 'E':	/* -E: #358 bias the HWP Energy/Performance
+				 * Preference to performance (0x00) on every
+				 * CPU, for bench runs.  Default leaves the
+				 * firmware's EPP untouched. */
+		    { extern int hwp_epp_performance; hwp_epp_performance = 1; }
+		    break;
+		case 'Q':	/* -Q: #358 skip enabling HWP (leave it as the
+				 * firmware left it) for a same-binary A/B of the
+				 * HWP win vs the default entry (which enables). */
+		    { extern int hwp_skip_enable; hwp_skip_enable = 1; }
+		    break;
 #if	NCPUS > 1
 		case 'P':	/* -P: enable the #356 synchronous-RPC hand-off
 				 * on block (wakee of a combined-op send runs on

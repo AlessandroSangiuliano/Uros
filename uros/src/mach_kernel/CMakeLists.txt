@@ -595,6 +595,9 @@ set(I386_C_SOURCES
     i386/fpu_sanity.c
     i386/gdt.c
     i386/hardclock.c
+    # #358: HWP (hardware P-states) bring-up -- verdict line + enable-if-off,
+    # '-E' EPP performance bias.  CPUID-gated, no-op on KVM.
+    i386/hwp.c
     i386/io_emulate.c
     i386/io_map.c
     i386/iopb.c
