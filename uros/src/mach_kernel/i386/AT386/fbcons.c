@@ -305,32 +305,46 @@ fb_stream_copy(unsigned char *dst, const unsigned char *src, unsigned int bytes)
 }
 
 /*
- * Scroll up one character row.  Slide the cell grid up one row in RAM, blank the
- * freed bottom row, then redraw the whole screen from the grid.  No framebuffer
- * reads (those are the slow part); the framebuffer is only written.
+ * #372: jump-scroll — advance N character rows in one shot instead of one.
+ *
+ * A scroll rewrites the ENTIRE console area no matter how far it moves: sliding
+ * the image up by one text row or by sixteen both change every on-screen pixel,
+ * so each scroll is one whole-screen blit (~8 MB at 1920, ~33 MB at 4K).  On a
+ * real GOP aperture that blit is bandwidth-bound — movnti, WC, cache mode, none
+ * of them moved the needle, because the wall is the write path to the display,
+ * not the CPU.  The one lever left is to do FEWER whole-screen blits: scrolling
+ * N rows at once turns the N blits that smooth 1-line scrolling would do into a
+ * single one, an N-fold cut in framebuffer traffic during the output bursts that
+ * dominate boot/benchmark time.  Everything else is unchanged — the cell grid
+ * and pixel shadow just slide by N rows instead of 1.  No framebuffer reads.
  */
 static void
-fb_scroll(void)
+fb_scroll(unsigned int n)
 {
 	unsigned int r, c;
 
-	/* Slide the cell grid up one row and blank the freed bottom row.  This
-	 * is kept current in both scroll modes so a fallback stays correct. */
-	bcopy((const char *)&fb_char[FB_MAX_COLS], (char *)&fb_char[0],
-	      (fb_rows - 1) * FB_MAX_COLS);
-	memset(&fb_char[(fb_rows - 1) * FB_MAX_COLS], ' ', fb_cols);
+	if (n == 0)
+		return;
+	if (n > fb_rows)
+		n = fb_rows;
+
+	/* Slide the cell grid up N rows and blank the freed bottom rows.  Kept
+	 * current in both scroll modes so the fallback redraw stays correct. */
+	bcopy((const char *)&fb_char[n * FB_MAX_COLS], (char *)&fb_char[0],
+	      (fb_rows - n) * FB_MAX_COLS);
+	memset(&fb_char[(fb_rows - n) * FB_MAX_COLS], ' ', n * FB_MAX_COLS);
 
 	if (fb_shadow) {
-		/* Fast path: slide the RAM pixel shadow up one text row, clear the
-		 * freed row, and push the whole console area to the framebuffer in
+		/* Fast path: slide the RAM pixel shadow up N text rows, clear the
+		 * freed rows, and push the whole console area to the framebuffer in
 		 * one bulk write — no per-glyph re-render, no framebuffer reads. */
 		unsigned int rowbytes = FONT_H * fb_scale * fb_pitch;
-		unsigned int movebytes = (fb_rows - 1) * rowbytes;
+		unsigned int movebytes = (fb_rows - n) * rowbytes;
 		unsigned int totalbytes = fb_rows * rowbytes;
 
-		bcopy((const char *)(fb_shadow + rowbytes),
+		bcopy((const char *)(fb_shadow + n * rowbytes),
 		      (char *)fb_shadow, movebytes);
-		bzero((char *)(fb_shadow + movebytes), rowbytes);
+		bzero((char *)(fb_shadow + movebytes), n * rowbytes);
 		fb_stream_copy(fb_base, fb_shadow, totalbytes);
 		return;
 	}
@@ -346,8 +360,13 @@ fb_newline(void)
 {
 	cur_col = 0;
 	if (++cur_row >= fb_rows) {
-		fb_scroll();
-		cur_row = fb_rows - 1;
+		/* Jump-scroll a quarter panel at a time (see fb_scroll): one bulk
+		 * blit makes room for many lines instead of one slow blit per line.
+		 * The freed rows below the cursor fill in before the next scroll. */
+		unsigned int step = (fb_rows >= 4) ? fb_rows / 4 : 1;
+
+		fb_scroll(step);
+		cur_row -= step;
 	}
 }
 
