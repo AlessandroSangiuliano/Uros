@@ -1825,7 +1825,15 @@ cc_worker_func(void *arg)
 {
     cc_worker_t		*w = (cc_worker_t *)arg;
     bench_recv_buf_t	send_buf;
-    bench_null_msg_t	recv_buf;
+    /*
+     * #374: receive into a full-size buffer, not a header-only bench_null_msg_t.
+     * A Mach receive writes the reply plus the kernel trailer, so a 24-byte
+     * (header-only) stack buffer has zero slack -- any byte past it lands on this
+     * frame's saved ebp / return address, the flaky scaling-sweep stack smash
+     * (eip=0x0/0x18; 0x18 = sizeof(mach_msg_header_t)).  Every other receiver in
+     * this file already uses bench_recv_buf_t; match them.
+     */
+    bench_recv_buf_t	recv_buf;
     int			i;
 
     while (!g_cc_go)		/* all workers begin together */
