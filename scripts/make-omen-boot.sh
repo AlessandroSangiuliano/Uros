@@ -190,6 +190,16 @@ if [ "$WANT_ISO" = true ]; then
             # idle-dispatch) vs this entry -- compare absolute ns/RPC at
             # thr=8..24 plus the s319 lq counter (instrumented builds).
             emit_iso_entry "(bench, all CPUs, handoff)" "$K -P"
+            # `-E` variant: SAME kernel binary, #358 HWP Energy/Performance
+            # Preference biased to performance (0x00) on every CPU, vs the
+            # firmware default (typically balanced 0x80).  A/B for clock ramp
+            # latency / boost stickiness; the hwp boot lines show the state.
+            emit_iso_entry "(bench, all CPUs, EPP-perf)" "$K -E"
+            # `-Q` variant: SAME kernel binary, #358 HWP left disabled (we do
+            # not touch PM_ENABLE).  On OMEGA the firmware ships HWP off, so
+            # this boots at base clock -- the A/B baseline for the HWP win vs
+            # entry 0 (which enables HWP).
+            emit_iso_entry "(bench, all CPUs, HWP-off)" "$K -Q"
             # `-c16` on OMEGA (i9-13900) = slots 0-15 = the 16 P-core HT
             # threads only (E-cores sit at slots >= 16, lapic ids >= 64, #354).
             # A HOMOGENEOUS run: if the mid-curve collapse (thr=8..24) is
