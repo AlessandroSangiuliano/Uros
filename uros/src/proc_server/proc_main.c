@@ -1088,7 +1088,6 @@ static void
 proc_drain_sigterm_sweep(void)
 {
     struct { mach_port_t sigport; proc_pid_t pid; } term[PROC_MAX_TASKS];
-    mach_port_t kill_tasks[PROC_MAX_TASKS];
     unsigned n_term = 0, n_kill = 0, i;
     int k;
 
@@ -1113,21 +1112,30 @@ proc_drain_sigterm_sweep(void)
 
     usleep(PROC_DRAIN_GRACE_US);
 
-    /* Whatever we SIGTERM'd that is still alive gets task_terminate, so
-     * shutdown always completes in a bounded time even if an app hangs. */
+    /*
+     * #379: count whoever ignored SIGTERM, but do NOT task_terminate()
+     * them here.  On SMP, terminating a task whose thread is still active
+     * on another CPU can hang task_terminate() intermittently, wedging the
+     * whole shutdown before the fs sync + host_reboot below (the log then
+     * stops dead at this line).  We don't need to force-kill them: the
+     * host_reboot in phase 3 resets the machine and wipes them, and the fs
+     * sync (phase 2) needs only the fs servers — which own no signal_port
+     * and are never in this sweep.  A survivor that ignored SIGTERM loses
+     * its unflushed buffers whether we kill it or reset it, so integrity is
+     * unchanged.  Leaving them alone keeps shutdown bounded — the original
+     * intent of the force-kill, minus the hang.
+     */
     pthread_mutex_lock(&pid_lock);
     for (i = 0; i < n_term; i++) {
         struct pid_entry *e = find_by_pid_locked(term[i].pid);
         if (e && e->state != PROC_STATE_ZOMBIE)
-            kill_tasks[n_kill++] = e->task_port;
+            n_kill++;
     }
     pthread_mutex_unlock(&pid_lock);
 
-    if (n_kill) {
-        printf("proc: shutdown — SIGKILL %u unresponsive task(s)\n", n_kill);
-        for (i = 0; i < n_kill; i++)
-            (void)task_terminate(kill_tasks[i]);
-    }
+    if (n_kill)
+        printf("proc: shutdown — %u task(s) unresponsive to SIGTERM; "
+               "leaving them for host_reboot (#379)\n", n_kill);
 }
 
 /*
