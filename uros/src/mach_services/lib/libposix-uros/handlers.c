@@ -76,6 +76,13 @@ extern long __uros_llseek(int fd, unsigned long off_hi, unsigned long off_lo,
 extern long __uros_statx(int dirfd, const char *path, int flags,
                          unsigned int mask, void *statxbuf);
 
+/*
+ * Timed sleep (#375) — implemented in posix_time.c, which owns the
+ * <mach.h> timed-receive.  Kept out of this freestanding TU like the
+ * fd handlers above.
+ */
+extern long __uros_nanosleep(const void *req, void *rem);
+
 /* ------------------------------------------------------------------ */
 /* Linux i386 syscall numbers we care about.  Subset of the table musl */
 /* builds from arch/i386/bits/syscall.h.in.                            */
@@ -95,6 +102,7 @@ extern long __uros_statx(int dirfd, const char *path, int flags,
 #define UROS_SYS__llseek        140
 #define UROS_SYS_wait4          114
 #define UROS_SYS_mprotect       125
+#define UROS_SYS_nanosleep      162
 #define UROS_SYS_getgid          47
 #define UROS_SYS_geteuid         49
 #define UROS_SYS_getegid         50
@@ -188,6 +196,13 @@ static long h_readv(long fd, long iov_ptr, long iovcnt,
 {
     (void)a4; (void)a5; (void)a6;
     return __uros_readv((int)fd, (const void *)iov_ptr, (int)iovcnt);
+}
+
+static long h_nanosleep(long req, long rem, long a3,
+                        long a4, long a5, long a6)
+{
+    (void)a3; (void)a4; (void)a5; (void)a6;
+    return __uros_nanosleep((const void *)req, (void *)rem);
 }
 
 static long h_open(long path, long flags, long mode,
@@ -749,6 +764,7 @@ static const struct entry table[] = {
     { UROS_SYS_ioctl,            h_ioctl           },
     { UROS_SYS_munmap,           h_munmap          },
     { UROS_SYS_mprotect,         h_mprotect        },
+    { UROS_SYS_nanosleep,        h_nanosleep       },
     { UROS_SYS_readv,            h_readv           },
     { UROS_SYS_writev,           h_writev          },
     { UROS_SYS_rt_sigaction,     h_rt_sigaction    },

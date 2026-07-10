@@ -126,6 +126,7 @@ set(LIBPOSIX_UROS_SRCS
   syscall.c
   handlers.c
   posix_fd.c
+  posix_time.c
   posix_exec_fds.c
   stubs.c
   signals.c

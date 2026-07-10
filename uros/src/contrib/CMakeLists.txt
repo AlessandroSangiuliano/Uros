@@ -115,17 +115,30 @@ if(UROS_BUILD_MUSL)
   # relink.  The result is copied over the installed ${MUSL_SO} that the
   # ld-musl-i386.so.1 symlink points at.
   # -------------------------------------------------------------------------
+  # #375: --exclude-libs=ALL (from musl's configure) forces every symbol of
+  # the folded-in *-pic ARCHIVES to local, so a dynamic tool cannot import the
+  # Mach API from the umbrella.  Only LOOSE objects escape --exclude-libs, so
+  # we hand the two objects that carry the Mach surface a tool needs — the MIG
+  # host stubs (host_processors/processor_info) and the trap thunks
+  # (mach_host_self) — to the link as loose objects.  Their globals stay
+  # exported, letting cpustat run the umbrella's single, initialised Mach
+  # runtime instead of a static duplicate.  (Built by libmach_core-pic, on
+  # which this command already DEPENDS.)
+  set(_MC_PICDIR ${CMAKE_BINARY_DIR}/src/mach_services/lib/libmach/CMakeFiles/libmach_core-pic.dir)
+  set(MACH_EXPORT_OBJS "${_MC_PICDIR}/__/__/__/__/generated/mach_host_user.c.o ${_MC_PICDIR}/generated/asm/mach_traps.s.S.o")
+
   set(MUSL_UMBRELLA_STAMP ${CMAKE_CURRENT_BINARY_DIR}/musl-umbrella.stamp)
   add_custom_command(
     OUTPUT ${MUSL_UMBRELLA_STAMP}
     COMMAND ${CMAKE_COMMAND} -E rm -f ${MUSL_BUILD}/lib/libc.so
     COMMAND ${CMAKE_COMMAND} -E env make -C ${MUSL_BUILD} lib/libc.so
-            "EXTRA_OBJS=-Wl,--whole-archive $<TARGET_FILE:libposix-uros-pic> -Wl,--no-whole-archive -Wl,--start-group $<TARGET_FILE:libvfs-pic> $<TARGET_FILE:libmach_core-pic> $<TARGET_FILE:libnetname-pic> $<TARGET_FILE:libcap-pic> -Wl,--end-group"
+            "EXTRA_OBJS=${MACH_EXPORT_OBJS} -Wl,--dynamic-list=${CMAKE_CURRENT_SOURCE_DIR}/uros_umbrella_mach.list -Wl,--whole-archive $<TARGET_FILE:libposix-uros-pic> -Wl,--no-whole-archive -Wl,--start-group $<TARGET_FILE:libvfs-pic> $<TARGET_FILE:libmach_core-pic> $<TARGET_FILE:libnetname-pic> $<TARGET_FILE:libcap-pic> -Wl,--end-group"
     COMMAND ${CMAKE_COMMAND} -E copy ${MUSL_BUILD}/lib/libc.so ${MUSL_SO}
     COMMAND ${CMAKE_COMMAND} -E touch ${MUSL_UMBRELLA_STAMP}
     DEPENDS musl_extproj
             libposix-uros-pic libvfs-pic libmach_core-pic
             libnetname-pic libcap-pic
+            ${CMAKE_CURRENT_SOURCE_DIR}/uros_umbrella_mach.list
     COMMENT "Linking umbrella libc.so (musl + Uros PIC backend: posix-uros/vfs/mach/netname/cap)"
     VERBATIM
   )

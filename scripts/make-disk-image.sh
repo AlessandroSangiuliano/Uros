@@ -104,6 +104,7 @@ FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
 HELLO_WORLD="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_world"
 PTHREAD_MIN="$BUILD_DIR/export/uros/$ARCH/user/sbin/pthread_min"  # #291 musl pthread regression
 FLIPC_BENCH="$BUILD_DIR/export/uros/$ARCH/user/sbin/flipc_bench"  # #272 standalone FLIPC A/B
+CPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/cpustat"          # #375 per-CPU load monitor (dynamic)
 USH="$BUILD_DIR/export/uros/$ARCH/user/sbin/ush"
 VTS="$BUILD_DIR/export/uros/$ARCH/user/sbin/virtual_terminal_server"  # #365 VT shell supervisor
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
@@ -448,6 +449,14 @@ if [ -f "$DLOPEN_TEST" ] && [ -f "$MUSL_LDSO" ]; then
     DLOPEN_TEST_WRITE_LINE="write $DLOPEN_TEST dlopen_test"
 fi
 
+# cpustat (#375): per-CPU load monitor, the first real dynamic tool.  Copy to
+# / so ush can launch "/cpustat"; needs the same interpreter as hello_dyn.
+CPUSTAT_WRITE_LINE=""
+if [ -f "$CPUSTAT" ] && [ -f "$MUSL_LDSO" ]; then
+    CPUSTAT_WRITE_LINE="write $CPUSTAT cpustat"
+    LDSO_MKDIR_LINE="mkdir lib"   # ensure /lib exists for the interpreter
+fi
+
 debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 write $HELLO_TXT hello.txt
 write $POSIX_SMOKE posix_smoke.txt
@@ -462,6 +471,7 @@ ${FLIPC_BENCH_WRITE_LINE}
 ${HELLO_DYN_WRITE_LINE}
 ${HELLO_DYN_WORLD_WRITE_LINE}
 ${DLOPEN_TEST_WRITE_LINE}
+${CPUSTAT_WRITE_LINE}
 ${LDSO_MKDIR_LINE}
 mkdir mach_servers
 cd mach_servers

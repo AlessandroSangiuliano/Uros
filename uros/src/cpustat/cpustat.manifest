@@ -1,0 +1,10 @@
+# cpustat manifest — #375.
+#
+# cpustat never calls cap_request, so its legitimate cap set is empty.
+# Present so exec_server's cap-provisioning path is exercised for this
+# dynamic image too (same convention as hello_dyn).
+
+name cpustat
+
+# No `required` lines.
+# No `delegatable` lines.

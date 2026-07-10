@@ -112,6 +112,12 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(ush)
 endif()
 
+# Build cpustat (#375) — per-CPU load monitor, the first dynamically-linked
+# real tool (umbrella libc.so + libmach_core-pic), launched from the shell.
+if(UROS_BUILD_MUSL)
+  add_subdirectory(cpustat)
+endif()
+
 # Build virtual_terminal_server — VT shell supervisor (#365 phase 2b).
 if(UROS_BUILD_MUSL)
   add_subdirectory(virtual_terminal_server)

@@ -1,0 +1,19 @@
+/*
+ * Extra dynamic-list for the umbrella libc.so (#375).
+ *
+ * The umbrella folds in the Uros PIC backend (posix-uros/vfs/mach/netname/
+ * cap) but links it with -Wl,--exclude-libs=ALL, so those symbols are LOCAL
+ * and unreachable by dynamic tools.  musl re-exports its own public API the
+ * same way, via --dynamic-list.  Here we re-export the small Mach surface a
+ * dynamically-linked tool needs so it can use the umbrella's single, already
+ * initialised Mach runtime instead of statically duplicating libmach (which
+ * leaves the copy's mach_init un-run and crashes on the first trap).
+ *
+ * Keep this minimal: entry points only.  Their internals (mach_msg, reply
+ * port, task-self cache) stay local in the umbrella and resolve there.
+ */
+{
+	mach_host_self;
+	host_processors;
+	processor_info;
+};
