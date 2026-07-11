@@ -208,6 +208,18 @@ uart_irq_handler(void *arg)
 		{
 			uint8_t b = uart_in(UART_RHR);
 			uint32_t next = (p->ring_head + 1u) & UART_RING_MASK;
+
+			/*
+			 * #382: Ctrl+D is the kernel-debugger break key.
+			 * The kernel can't see our RX bytes (we own COM1),
+			 * so report it; the RPC returns 0 only when the -K
+			 * boot flag armed the break — the byte is then
+			 * consumed by the debugger session.  Otherwise fall
+			 * through and deliver it as ordinary input (EOF).
+			 */
+			if (b == 0x04 && char_core_ddb_break() == 0)
+				continue;
+
 			if (next == p->ring_tail) {
 				p->overrun_drops++;
 			} else {

@@ -763,3 +763,37 @@ ds_master_device_io_port_write(
 	}
 	return KERN_SUCCESS;
 }
+
+/*
+ * #382: console-break entry into DDB from a userspace console driver.
+ *
+ * The serial (uart.so) and keyboard (ps2.so) drivers own their devices'
+ * RX paths, so the kernel-side break checks (com.c check_debugger,
+ * ddb_kbd) never see the break key once char_server is up.  The driver
+ * calls this when it spots Ctrl+D; we enter DDB right here, in the
+ * driver's RPC context, and return when the operator continues — the
+ * calling server thread simply blocks for the debug session.
+ *
+ * Gated by the -K boot flag: when not armed we return KERN_FAILURE and
+ * the driver delivers the byte as ordinary input instead.
+ */
+extern int	ddb_kbd_break_enabled;		/* -K (model_dep.c) */
+extern void	Debugger(const char *message);
+
+kern_return_t
+ds_master_device_ddb_break(
+	ipc_port_t		master_port)
+{
+	kern_return_t kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (!ddb_kbd_break_enabled)
+		return KERN_FAILURE;
+
+	printf("ddb: console break (Ctrl+D) from userspace driver\n");
+	Debugger("console break");
+	return KERN_SUCCESS;
+}

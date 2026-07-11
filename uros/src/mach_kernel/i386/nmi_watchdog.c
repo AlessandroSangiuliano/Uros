@@ -197,7 +197,30 @@ nmi_watchdog(struct i386_saved_state *regs)
 	unsigned int ebp;
 	int i;
 
-	if (!nmi_watchdog_enabled || lapic_start == 0)
+	/*
+	 * #382: emergency DDB door.  With -K armed but the perf-counter
+	 * watchdog OFF (-W absent), the only NMI source is an external
+	 * injection — QEMU's monitor "nmi" command (or a bare-metal NMI
+	 * button).  Turn it into a debugger break: this works even when
+	 * char_server is dead and every userspace break path with it,
+	 * which is exactly when the debugger is needed most.  The monitor
+	 * NMIs every CPU at once; only the first one through enters DDB,
+	 * the rest return to what they were doing.
+	 */
+	if (!nmi_watchdog_enabled) {
+		extern int ddb_kbd_break_enabled;	/* -K (model_dep.c) */
+		extern void Debugger(const char *message);
+		static volatile int ddb_nmi_in;
+
+		if (ddb_kbd_break_enabled &&
+		    !__sync_lock_test_and_set(&ddb_nmi_in, 1)) {
+			Debugger("NMI break");
+			__sync_lock_release(&ddb_nmi_in);
+		}
+		return;
+	}
+
+	if (lapic_start == 0)
 		return;
 
 	cpu = cpu_number();
