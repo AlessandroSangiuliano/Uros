@@ -369,6 +369,7 @@ proc_S_subscribe_exit(
     struct pid_entry *e;
     int fire_now = 0;
     int32_t code = 0;
+    mach_port_t reaped_sigport = MACH_PORT_NULL;
 
     (void)server_port;
 
@@ -384,6 +385,16 @@ proc_S_subscribe_exit(
     if (e->state == PROC_STATE_ZOMBIE) {
         fire_now = 1;
         code = e->exit_code;
+        /*
+         * #378: the caller is reaping this zombie now, so release its
+         * pid-table slot — otherwise the fixed-size table (PROC_MAX_TASKS)
+         * leaks one entry per process ever run.  task_port was already
+         * dropped when the dead-name notification deallocated it; only
+         * signal_port may still hold a (now dead-name) send right, freed
+         * below the lock.  memset clears in_use so the allocator reuses it.
+         */
+        reaped_sigport = e->signal_port;
+        memset(e, 0, sizeof(*e));
     } else {
         /* Replace any previous waiter (v0.1.0 single-slot). */
         if (e->exit_notify != MACH_PORT_NULL) {
@@ -405,6 +416,9 @@ proc_S_subscribe_exit(
         e->exit_notify = notify;
     }
     pthread_mutex_unlock(&pid_lock);
+
+    if (reaped_sigport != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), reaped_sigport);
 
     if (fire_now)
         fire_exit_notify(notify, pid, code);
@@ -1708,6 +1722,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
     mach_port_t subscriber = MACH_PORT_NULL;
     mach_port_t parent_sigport = MACH_PORT_NULL;
     mach_port_t ctty = MACH_PORT_NULL;
+    mach_port_t dead_sigport = MACH_PORT_NULL;
     proc_pid_t pid = 0;
     proc_pid_t ppid = 0;
     int32_t code = 0;
@@ -1744,11 +1759,27 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
             if (parent && parent->signal_port != MACH_PORT_NULL)
                 parent_sigport = parent->signal_port;
         }
+        /*
+         * #378: a waiter already blocked on this pid reaps it the moment
+         * we fire_exit_notify below, so release its pid-table slot now —
+         * otherwise the fixed-size table leaks one entry per process.  With
+         * no waiter we keep the zombie for a later waitpid, which reaps and
+         * frees it through proc_S_subscribe_exit's already-zombie path.
+         * (Unwaited zombies — background jobs, orphans — still linger until
+         * a reaper exists; tracked separately.)  signal_port is freed below
+         * the lock; everything else is already snapshotted or cleared.
+         */
+        if (subscriber != MACH_PORT_NULL) {
+            dead_sigport = e->signal_port;
+            memset(e, 0, sizeof(*e));
+        }
     }
     pthread_mutex_unlock(&pid_lock);
 
     /* Drop the dead-name reference the kernel handed us. */
     (void)mach_port_deallocate(mach_task_self(), name);
+    if (dead_sigport != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), dead_sigport);
 
     /* Release a dead session leader's controlling-tty send right, and tell
      * the tty owner first so it frees the VT (leader → sid == pid). */
