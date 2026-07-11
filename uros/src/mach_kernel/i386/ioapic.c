@@ -156,6 +156,29 @@ ioapic_unmask_irq(unsigned int irq)
 	ioapic_write(reg, low & ~IOA_R_R_MASKED);
 }
 
+/*
+ * #381: ELCR snapshot taken at ioapic_init(), so the IRQ-forward path can
+ * tell level-triggered lines (bit set: mask/unmask flow-control is safe —
+ * a still-asserted line re-fires on unmask) from edge-triggered ones (bit
+ * clear: an edge arriving while the RTE is masked is LOST forever; the
+ * 8259 latched those in its IRR, the I/O APIC does not).
+ */
+static unsigned int	ioapic_elcr;
+
+boolean_t
+ioapic_irq_is_level(unsigned int irq)
+{
+	if (!ioapic_enabled || irq >= IOAPIC_ISA_IRQS)
+		return FALSE;
+	return (ioapic_elcr & (1u << irq)) != 0;
+}
+
+boolean_t
+ioapic_active(void)
+{
+	return ioapic_enabled;
+}
+
 void
 ioapic_init(void)
 {
@@ -191,6 +214,7 @@ ioapic_init(void)
 
 	/* Trigger/polarity straight from the 8259 ELCR (see header). */
 	elcr = inb(ELCR_PORT_LO) | (inb(ELCR_PORT_HI) << 8);
+	ioapic_elcr = elcr;		/* #381: kept for ioapic_irq_is_level() */
 
 	/*
 	 * Program every entry masked.  take_irq()/device_intr_register unmask
