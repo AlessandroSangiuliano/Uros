@@ -100,6 +100,19 @@ unsigned char nmi_stacks[NCPUS][NMI_STACK_SIZE] __attribute__((aligned(16)));
  */
 int nmi_watchdog_enabled __attribute__((section(".data"))) = 0;
 
+/*
+ * #382: DDB CPU-park flag.  kdb_trap sets it and broadcasts an NMI to the
+ * other CPUs; each one spins here (inside its NMI handler, ISR/EOI state
+ * untouched) until the DDB session continues.  Without this, a DDB
+ * session on live SMP deadlocks the box: the running CPUs eventually
+ * issue a TLB-shootdown IPI, wait forever for the DDB'd CPU's ack while
+ * sitting in their own IPI handler pre-EOI (in-service 0xF1), and with
+ * PPR stuck at 0xF0 nothing below it — device IRQs included — is ever
+ * delivered again.  Defined unconditionally so kdb_trap links on any
+ * config.
+ */
+volatile int ddb_nmi_park = 0;
+
 #if	NCPUS > 1
 
 /* Intel architectural performance-monitoring MSRs. */
@@ -197,7 +210,63 @@ nmi_watchdog(struct i386_saved_state *regs)
 	unsigned int ebp;
 	int i;
 
-	if (!nmi_watchdog_enabled || lapic_start == 0)
+	/*
+	 * #382: DDB CPU-park.  Checked before anything else (including the
+	 * -W watchdog logic) so a DDB session freezes the whole box no
+	 * matter how this NMI was produced.  Spinning here keeps the CPU's
+	 * interrupted context — mid-IPI-handler included — perfectly
+	 * intact; on release it resumes where it was.
+	 *
+	 * While parked, step out of the TLB-shootdown protocol the same
+	 * way an idle CPU does (MARK_CPU_IDLE): drop out of cpus_active so
+	 * a PMAP_UPDATE_TLBS initiator does not spin forever on our ack
+	 * (pmap_tlb_ack_outstanding re-reads cpus_active every pass and
+	 * lets us fall out of its wait set).  On release, mirror
+	 * MARK_CPU_ACTIVE lock-free: leave cpus_idle, flush + ack via
+	 * pmap_tlb_shootdown_handler ("lock-free, safe at any spl"), then
+	 * rejoin cpus_active — any update we missed while parked is
+	 * covered by that unconditional full flush.
+	 */
+	if (ddb_nmi_park) {
+		/* cpu_set == volatile unsigned long (intel/pmap.h) */
+		extern volatile unsigned long cpus_active, cpus_idle;
+		extern void pmap_tlb_shootdown_handler(void);
+		unsigned long me = 1ul << cpu_number();
+
+		__sync_fetch_and_or(&cpus_idle, me);
+		__sync_fetch_and_and(&cpus_active, ~me);
+		while (ddb_nmi_park)
+			__asm__ __volatile__("pause" : : : "memory");
+		__sync_fetch_and_and(&cpus_idle, ~me);
+		pmap_tlb_shootdown_handler();
+		__sync_fetch_and_or(&cpus_active, me);
+		return;
+	}
+
+	/*
+	 * #382: emergency DDB door.  With -K armed but the perf-counter
+	 * watchdog OFF (-W absent), the only NMI source is an external
+	 * injection — QEMU's monitor "nmi" command (or a bare-metal NMI
+	 * button).  Turn it into a debugger break: this works even when
+	 * char_server is dead and every userspace break path with it,
+	 * which is exactly when the debugger is needed most.  The monitor
+	 * NMIs every CPU at once; only the first one through enters DDB,
+	 * the rest return to what they were doing.
+	 */
+	if (!nmi_watchdog_enabled) {
+		extern int ddb_kbd_break_enabled;	/* -K (model_dep.c) */
+		extern void Debugger(const char *message);
+		static volatile int ddb_nmi_in;
+
+		if (ddb_kbd_break_enabled &&
+		    !__sync_lock_test_and_set(&ddb_nmi_in, 1)) {
+			Debugger("NMI break");
+			__sync_lock_release(&ddb_nmi_in);
+		}
+		return;
+	}
+
+	if (lapic_start == 0)
 		return;
 
 	cpu = cpu_number();

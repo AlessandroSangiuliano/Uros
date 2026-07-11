@@ -240,6 +240,24 @@ char_core_irq_init(mach_port_t master_device, mach_port_t port_set)
 	return 0;
 }
 
+/*
+ * #382: forward a console break (Ctrl+D spotted by uart.so / ps2.so) to
+ * the kernel debugger.  The RPC blocks this dispatch thread for the whole
+ * DDB session — intended: nothing char_server-side should move while the
+ * operator pokes around.  Returns 0 when the kernel took the break
+ * (byte consumed), -1 when the -K flag isn't armed (deliver the byte as
+ * ordinary input).
+ */
+int
+char_core_ddb_break(void)
+{
+	if (!irq_initialised || irq_master_device == MACH_PORT_NULL)
+		return -1;
+	if (device_ddb_break(irq_master_device) != KERN_SUCCESS)
+		return -1;
+	return 0;
+}
+
 int
 char_core_irq_register(uint32_t irq, void (*handler)(void *), void *arg)
 {

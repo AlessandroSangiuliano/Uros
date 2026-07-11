@@ -347,6 +347,18 @@ ps2_handle_scancode(struct ps2_priv *p, uint8_t sc)
 		}
 	}
 
+	/*
+	 * #382: Ctrl+D is the kernel-debugger break key (#335 kept it in
+	 * the kernel's own PS/2 snooper, but ps2.so takes IRQ 1 over once
+	 * it attaches, so the snooper goes deaf).  Report it to the
+	 * kernel; the RPC succeeds only when the -K boot flag armed the
+	 * break, and the keystroke is then consumed by the DDB session.
+	 */
+	if (pressed && keysym == 'd' &&
+	    (p->modifiers & CHAR_KBD_MOD_CTRL) &&
+	    char_core_ddb_break() == 0)
+		return;
+
 	{
 		char_kbd_event_t ev;
 		ev.scancode  = (e0 ? ((uint32_t)0xE000 | code) : code);

@@ -428,8 +428,16 @@ ddb_kbd_break_init(void)
 
 	if (!ddb_kbd_break_enabled)
 		return;
-	if (cons_is_com1)		/* serial already has com_halt_char */
-		return;
+	/*
+	 * #382: do NOT skip when the console is serial.  This used to bail
+	 * out with "serial already has com_halt_char", but the serial
+	 * Ctrl-_ break is broken (kdb_kintr's frame walk no longer matches
+	 * the reworked interrupt path), so a -r boot ended up with no
+	 * working DDB door at all.  Arm the PS/2 Ctrl+D break whenever -K
+	 * asks for it; with cons_is_com1 the DDB session I/O still goes to
+	 * the serial console, which is exactly the headless-QEMU debug
+	 * flow (sendkey ctrl-d from the monitor).
+	 */
 
 	s = splhigh();
 	ddb_8042_kbd_enable();		/* make the 8042 deliver IRQ 1 */

@@ -173,6 +173,14 @@ extern int char_core_irq_register(uint32_t irq,
 extern int char_core_irq_unregister(uint32_t irq);
 
 /*
+ * #382: report a console break (Ctrl+D) to the kernel debugger.  The
+ * kernel accepts only when the -K boot flag armed the break; returns 0
+ * when DDB was entered (byte consumed — do NOT deliver it as input),
+ * -1 when not armed (deliver the byte normally).
+ */
+extern int char_core_ddb_break(void);
+
+/*
  * Register a keyboard-event sink (#363).  The console TTY module calls
  * this from attach() so that in-process keyboard fan-out — ps2.so
  * sending CHAR_KBD_EVENT_MSGH_ID messages to the loopback port core

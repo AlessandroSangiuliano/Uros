@@ -195,3 +195,16 @@ routine device_io_port_write(
 	in	size		: natural_t;
 	in	data		: natural_t
 	);
+
+/*
+ * #382: userspace console-break entry into the kernel debugger.
+ * The serial/keyboard drivers live in char_server, so the kernel never
+ * sees their RX bytes; when a driver spots the break key (Ctrl+D) it
+ * calls this instead.  Gated kernel-side by the -K boot flag
+ * (ddb_kbd_break_enabled): returns KERN_FAILURE when not armed, and the
+ * driver then delivers the byte as normal input.  When armed, the call
+ * enters DDB and returns only when the operator continues.
+ */
+routine device_ddb_break(
+		master_port	: mach_port_t
+	);

@@ -322,6 +322,27 @@ lapic_send_ipi_all_excluding_self(unsigned int vector)
 }
 
 /*
+ * #382: broadcast an NMI to every CPU but this one.  Used by kdb_trap to
+ * park the other CPUs for the DDB session: NMI delivery ignores IF and
+ * the TPR, so it reaches a CPU wherever it is — including the middle of
+ * an IPI handler — without touching its ISR/EOI state (the parked CPU
+ * just resumes where it was on release).
+ */
+void
+lapic_send_nmi_all_excluding_self(void)
+{
+	if (lapic_start == 0)
+		return;
+
+	lapic_ipi_wait();
+	LAPIC_REG32(LAPIC_ICR) =
+	    LAPIC_ICR_DM_NMI
+	    | LAPIC_ICR_LEVEL_ASSERT
+	    | LAPIC_ICR_DSS_OTHERS;
+	lapic_ipi_wait();
+}
+
+/*
  * #322 soft-spl (deferred interrupt masking).
  *
  * #311 raised the LAPIC task-priority register to class 4 on every spl above
@@ -486,59 +507,58 @@ ipi_mp_handler(struct i386_interrupt_state *regs)
 	i_bit_clear(MP_TLB_FLUSH, &cpu_int_word[mycpu]);
 
 	/*
-	 * Drain the coalesced event bits.  Loop only while we actually make
-	 * progress, so bits deferred for safety (left set above) do not spin
-	 * us here — they wait for a later IPI.
+	 * Service the coalesced event bits — SINGLE pass (#382).  This used
+	 * to be a drain loop ("repeat while we made progress"), but every
+	 * producer pairs its i_bit_set with a cpu_interrupt(): a bit that
+	 * lands while we are in-service leaves its IPI pending in the LAPIC
+	 * IRR and we re-enter right after the EOI, so nothing is ever lost
+	 * by leaving it for the next invocation.  The loop, on the other
+	 * hand, was a livelock: with several CPUs inside this handler the
+	 * MP_CLOCK round-robin (slave_clock passes the tick to the next
+	 * running CPU) circulates among them in microseconds, each pass
+	 * re-arming `did` — every CPU stays trapped here pre-EOI forever
+	 * (in-service 0xF1 pins PPR at 0xF0: no device vector delivers
+	 * again), while a TLB-shootdown initiator spins on their acks.
+	 * Observed live wedging the whole box out of a DDB session.
 	 */
-	for (;;) {
-		boolean_t did = FALSE;
+	word = cpu_int_word[mycpu];
 
-		word = cpu_int_word[mycpu];
-
-		/*
-		 * MP_AST: cross-CPU reschedule request (cause_ast_check).
-		 * Evaluate this CPU's run state and raise need_ast[] if a switch
-		 * is due; ipi_ast_return consumes it on the way out.
-		 */
-		if (sched_safe && (word & (1 << MP_AST))) {
-			i_bit_clear(MP_AST, &cpu_int_word[mycpu]);
-			ast_check();
-			did = TRUE;
-		}
-
-		/*
-		 * MP_CLOCK: round-robin clock distribution (slave_clock chain off
-		 * the BSP's hardclock).  Do this CPU's per-CPU scheduler
-		 * accounting — hertz_tick() decrements the quantum and raises
-		 * AST_QUANTUM when it expires — then pass the tick to the next
-		 * running CPU.
-		 */
-		if (sched_safe && (word & (1 << MP_CLOCK))) {
-			boolean_t usermode;
-
-			i_bit_clear(MP_CLOCK, &cpu_int_word[mycpu]);
-			usermode = (regs->efl & EFL_VM) ||
-				   ((regs->cs & 0x03) != 0);
-			hertz_tick(usermode, (natural_t)regs->eip);
-			slave_clock();
-			did = TRUE;
-		}
-
-		/*
-		 * MP_KDB: remote_kdb() asks this CPU to enter the debugger as a
-		 * slave.  Interactive DDB across CPUs needs console arbitration
-		 * (kdb_console is still a stub) and is deferred to the post-SMP
-		 * DDB rework; just clear the bit.  No regression: it was dropped
-		 * before.
-		 */
-		if (word & (1 << MP_KDB)) {
-			i_bit_clear(MP_KDB, &cpu_int_word[mycpu]);
-			did = TRUE;
-		}
-
-		if (!did)
-			break;
+	/*
+	 * MP_AST: cross-CPU reschedule request (cause_ast_check).
+	 * Evaluate this CPU's run state and raise need_ast[] if a switch
+	 * is due; ipi_ast_return consumes it on the way out.
+	 */
+	if (sched_safe && (word & (1 << MP_AST))) {
+		i_bit_clear(MP_AST, &cpu_int_word[mycpu]);
+		ast_check();
 	}
+
+	/*
+	 * MP_CLOCK: round-robin clock distribution (slave_clock chain off
+	 * the BSP's hardclock).  Do this CPU's per-CPU scheduler
+	 * accounting — hertz_tick() decrements the quantum and raises
+	 * AST_QUANTUM when it expires — then pass the tick to the next
+	 * running CPU.
+	 */
+	if (sched_safe && (word & (1 << MP_CLOCK))) {
+		boolean_t usermode;
+
+		i_bit_clear(MP_CLOCK, &cpu_int_word[mycpu]);
+		usermode = (regs->efl & EFL_VM) ||
+			   ((regs->cs & 0x03) != 0);
+		hertz_tick(usermode, (natural_t)regs->eip);
+		slave_clock();
+	}
+
+	/*
+	 * MP_KDB: remote_kdb() asks this CPU to enter the debugger as a
+	 * slave.  Interactive DDB across CPUs needs console arbitration
+	 * (kdb_console is still a stub) and is deferred to the post-SMP
+	 * DDB rework; just clear the bit.  No regression: it was dropped
+	 * before.
+	 */
+	if (word & (1 << MP_KDB))
+		i_bit_clear(MP_KDB, &cpu_int_word[mycpu]);
 
 	lapic_eoi();
 	mp_enable_preemption_no_check();

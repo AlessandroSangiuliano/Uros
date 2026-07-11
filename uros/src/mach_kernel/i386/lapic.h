@@ -75,6 +75,7 @@ extern void	lapic_enable(void);
 extern void	lapic_eoi(void);
 extern void	lapic_send_ipi(int slot, unsigned int vector);
 extern void	lapic_send_ipi_all_excluding_self(unsigned int vector);
+extern void	lapic_send_nmi_all_excluding_self(void);	/* #382 DDB park */
 
 /* #312: per-CPU LAPIC timer.  lapic_timer_calibrate() measures the local
  * timer against the 8254 RTC and stores the per-HZ-tick INITIAL_COUNT (at

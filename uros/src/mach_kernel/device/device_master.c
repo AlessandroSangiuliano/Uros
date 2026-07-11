@@ -805,3 +805,62 @@ ds_master_device_io_port_write(
 	}
 	return KERN_SUCCESS;
 }
+
+/*
+ * #382: console-break entry into DDB from a userspace console driver.
+ *
+ * The serial (uart.so) and keyboard (ps2.so) drivers own their devices'
+ * RX paths, so the kernel-side break checks (com.c check_debugger,
+ * ddb_kbd) never see the break key once char_server is up.  The driver
+ * calls this when it spots Ctrl+D; we enter DDB right here, in the
+ * driver's RPC context, and return when the operator continues — the
+ * calling server thread simply blocks for the debug session.
+ *
+ * Gated by the -K boot flag: when not armed we return KERN_FAILURE and
+ * the driver delivers the byte as ordinary input instead.
+ */
+extern int	ddb_kbd_break_enabled;		/* -K (model_dep.c) */
+extern void	Debugger(const char *message);
+
+kern_return_t
+ds_master_device_ddb_break(
+	ipc_port_t		master_port)
+{
+	kern_return_t kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (!ddb_kbd_break_enabled)
+		return KERN_FAILURE;
+
+#if	NCPUS > 1
+	/*
+	 * #382: park the other CPUs BEFORE anything slow happens on this
+	 * one.  A pre-park serial printf alone takes milliseconds; in
+	 * that window another CPU can start a TLB shootdown and wait
+	 * forever for this (about-to-stop) CPU's ack, wedging the other
+	 * CPUs inside the 0xF1 handler pre-EOI — the DDB session then
+	 * "works" but the box is already dead underneath (in-service
+	 * 0xF1 pins PPR at 0xF0: no device vector ever delivers again).
+	 * Also no printf before the park: with db_active still 0, a
+	 * parked CPU holding printf_lock would deadlock us right here.
+	 * kdb_trap skips its own park when the flag is already up and
+	 * clears it on the way out.
+	 */
+	{
+		extern volatile int ddb_nmi_park;
+		extern void lapic_send_nmi_all_excluding_self(void);
+
+		if (!ddb_nmi_park) {
+			ddb_nmi_park = 1;
+			lapic_send_nmi_all_excluding_self();
+		}
+	}
+#endif	/* NCPUS > 1 */
+
+	Debugger("console break");
+	printf("ddb: console break (Ctrl+D) session ended, resuming\n");
+	return KERN_SUCCESS;
+}
