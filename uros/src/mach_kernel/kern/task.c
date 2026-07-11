@@ -1033,18 +1033,28 @@ task_terminate(
 		}
 		/*
 		 *	Check if current thread_act or task is being terminated.
+		 *
+		 *	#380: do NOT act_lock_thread(cur_thr_act) here.  Taking the
+		 *	current RPC thread's activation/rpc lock while already holding
+		 *	BOTH task locks nests the act-lock chain under the victim's
+		 *	task lock; against the concurrent teardown of the victim's own
+		 *	threads this deadlocks intermittently -- act_lock_thread()
+		 *	spins forever in mutex_pause() (the SMP task_terminate hang hit
+		 *	by proc's SIGKILL and by the reboot sweep, #379).  We only need
+		 *	to bail if our own task/thread is itself being torn down:
+		 *	cur_task->active is stable under the task_lock(cur_task) we
+		 *	already hold, and the current thread is by definition running,
+		 *	so a plain read of cur_thr_act->active suffices for this
+		 *	best-effort guard -- no lock nesting required.
 		 */
-		cur_thread = act_lock_thread(cur_thr_act);
 		if ((!cur_task->active) || (!cur_thr_act->active)) {
 			/*
 			 * Current task or thread is being terminated.
 			 */
-			act_unlock_thread(cur_thr_act);
 			task_unlock(task);
 			task_unlock(cur_task);
 			return(KERN_FAILURE);
 		}
-		act_unlock_thread(cur_thr_act);
 		task_unlock(cur_task);
 
 		if (!task->active) {
