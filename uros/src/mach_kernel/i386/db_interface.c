@@ -308,6 +308,30 @@ kdb_trap(
 	 */
 	db_active++;
 
+#if	NCPUS > 1
+	/*
+	 * #382: park the other CPUs for the session.  Left running, they
+	 * eventually issue a TLB-shootdown IPI and wait forever for this
+	 * (stopped) CPU's ack while sitting pre-EOI in their own IPI
+	 * handler — the in-service 0xF1 pins their PPR at 0xF0 and every
+	 * lower vector (all device IRQs) is never delivered again: the
+	 * whole box wedges out of a mere debug session.  An NMI reaches
+	 * them wherever they are without touching their ISR/EOI state;
+	 * they spin in the NMI handler (nmi_watchdog.c) until we clear
+	 * the flag on the way out, then resume exactly where they were.
+	 * Outermost entry only (db_active can nest).
+	 */
+	{
+		extern volatile int ddb_nmi_park;
+		extern void lapic_send_nmi_all_excluding_self(void);
+
+		if (db_active == 1 && !ddb_nmi_park) {
+			ddb_nmi_park = 1;
+			lapic_send_nmi_all_excluding_self();
+		}
+	}
+#endif	/* NCPUS > 1 */
+
 	switch (type) {
 	    case T_DEBUG:	/* single_step */
 	    {
@@ -437,6 +461,20 @@ kdb_trap(
 
 #if	NCPUS > 1
 	enable_preemption();
+#endif	/* NCPUS > 1 */
+
+#if	NCPUS > 1
+	/*
+	 * #382: outermost exit — release the CPUs parked at entry.  They
+	 * leave their NMI-handler spin and resume exactly where the park
+	 * NMI caught them.
+	 */
+	{
+		extern volatile int ddb_nmi_park;
+
+		if (db_active == 1)
+			ddb_nmi_park = 0;
+	}
 #endif	/* NCPUS > 1 */
 
 	db_active--;			/* #346: balances the entry bump */
