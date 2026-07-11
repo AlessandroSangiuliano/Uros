@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -440,6 +441,33 @@ main(int argc, char **argv)
              * itself the error path. */
             printf("ush: proc_shutdown returned kr=%d rc=%d\n",
                    (int)kr, rc);
+            continue;
+        }
+
+        /* "kill [-SIG] pid..." — send a signal by pid.  Default SIGTERM;
+         * "kill -9 <pid>" is the direct trigger for proc's SIGKILL ->
+         * task_terminate() path (used to exercise the #380 cross-CPU
+         * stop of a task busy-spinning on another CPU). */
+        if (strcmp(parts[0], "kill") == 0) {
+            int sig = SIGTERM;
+            int ai  = 1;
+
+            if (n >= 2 && parts[1][0] == '-') {
+                sig = atoi(parts[1] + 1);
+                ai  = 2;
+            }
+            if (ai >= n) {
+                printf("usage: kill [-SIG] pid...\n");
+                continue;
+            }
+            for (; ai < n; ai++) {
+                int pid = atoi(parts[ai]);
+                if (kill(pid, sig) != 0)
+                    printf("ush: kill %d (sig %d) failed errno=%d\n",
+                           pid, sig, errno);
+                else
+                    printf("ush: sent sig %d to pid %d\n", sig, pid);
+            }
             continue;
         }
 
