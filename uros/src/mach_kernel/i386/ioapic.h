@@ -73,6 +73,18 @@ extern void	ioapic_init(void);
 extern void	ioapic_mask_irq(unsigned int irq);
 extern void	ioapic_unmask_irq(unsigned int irq);
 
+/*
+ * #381: trigger-mode query for the IRQ-forward flow control.  TRUE when the
+ * I/O APIC owns delivery AND the ELCR marks the line level-triggered (safe
+ * to mask/unmask per event: a still-asserted line re-fires on unmask).
+ * FALSE for edge lines — the I/O APIC does not latch fronts that arrive
+ * while the RTE is masked (the 8259 did, in its IRR), so masking an edge
+ * line can lose the front for good; a device that keeps INT asserted
+ * afterwards (16550 with a full RX FIFO) never fires again.
+ */
+extern boolean_t	ioapic_irq_is_level(unsigned int irq);
+extern boolean_t	ioapic_active(void);
+
 #endif	/* NCPUS > 1 */
 
 #endif	/* _I386_IOAPIC_H_ */
