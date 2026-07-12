@@ -134,6 +134,7 @@
 
 #include <string.h>
 #include <types.h>
+#include <pthread.h>	/* #384: ext2_vnode v_lock */
 #include <ext2fs/defs.h>
 #include <ext2fs/ext2_fs.h>
 #include <mach.h>
@@ -180,10 +181,22 @@ extern boolean_t ext2fs_file_is_executable(fs_private_t);
  * Shared vnode — one per unique inode, refcounted.
  * All openers of the same file share the same vnode, so changes
  * (size, blocks, dirty flags) are immediately visible to all.
+ *
+ * #384: v_lock serializes every reader/mutator of the shared inode's
+ * block map (block_map walk, write-extend, truncate, metadata flush).
+ * The library was inherited from the single-threaded boot loader with
+ * its mutexes stubbed to no-ops, but ext_server drives it from many
+ * threads: concurrent O_TRUNC writers on one file freed and re-allocated
+ * the shared block map under running walkers, which then read re-used
+ * DATA blocks as indirect tables (the 0x04040404-stride writeback storm).
+ * v_gen is bumped on every block-map mutation so each handle can
+ * invalidate its private indirect-block cache (f_blk[]) before reuse.
  */
 struct ext2_vnode {
 	int			v_refcount;	/* active openers */
 	ino_t			v_ino;		/* inode number */
+	pthread_mutex_t		v_lock;		/* #384: block map / inode */
+	unsigned int		v_gen;		/* #384: block-map generation */
 	struct ext2_inode	v_ic;		/* shared in-core inode */
 	vm_offset_t		v_inode_blk;	/* cached raw inode block */
 	vm_size_t		v_inode_blk_size;
@@ -223,6 +236,8 @@ struct ext2fs_file {
 	vm_size_t		f_inode_blk_size;
 	daddr_t			f_ra_last_block;/* last logical block read (readahead) */
 	int			f_buf_borrowed;	/* f_buf points into page cache */
+	unsigned int		f_gen;		/* #384: v_gen this handle's
+						   f_blk[]/f_buf caches match */
 };
 
 #define file_is_structured(_fp_)	((_fp_)->f_fs != 0)
