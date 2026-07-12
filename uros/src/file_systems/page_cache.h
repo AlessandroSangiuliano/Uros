@@ -66,6 +66,10 @@ struct page_cache_entry {
 	vm_size_t		pc_size;	/* size of cached data */
 	vm_offset_t		pc_phys;	/* physical addr (0 = vm_allocate'd) */
 	int			pc_dirty;	/* block has been modified */
+	int			pc_busy;	/* #384: writeback in flight —
+						   its data is being written
+						   outside pc_lock, so eviction
+						   must skip this entry */
 	struct page_cache_entry	*pc_hash_next;	/* hash chain */
 	struct page_cache_entry	*pc_lru_next;	/* toward MRU */
 	struct page_cache_entry	*pc_lru_prev;	/* toward LRU */
