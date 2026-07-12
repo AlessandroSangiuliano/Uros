@@ -1722,6 +1722,25 @@ mach_msg_overwrite_trap(
 		if ((receiver->state & TH_SCHED_STATE) != TH_WAIT) {
 			thread_unlock(receiver);
 			splx(s);
+#if	THREAD_SWAPPER
+			/*
+			 * #383: this bail-out runs AFTER the act_lock_try()
+			 * above took the receiver's act lock, so it must
+			 * release it like the swap-state recheck bail does.
+			 * Losing it here leaks the receiver's act lock with
+			 * the sender alive and gone: the next task_terminate
+			 * of the receiver's task then sleeps forever on the
+			 * orphaned mutex inside task_hold_locked() while
+			 * holding the task lock, wedging proc's SIGKILL and
+			 * anything else that touches the task (the kill ×
+			 * exec_handoff hang).  This path is exactly the one
+			 * a concurrent abort/terminate of the receiver takes
+			 * (clear_wait pulls it out of TH_WAIT while it is
+			 * still queued on dest_mqueue), so every kill that
+			 * raced a pending hand-off left one orphan behind.
+			 */
+			act_unlock(rcv_act);
+#endif	/* THREAD_SWAPPER */
 			HOT(c_mmot_bad_rcvr++);
 			goto fall_off;
 		}

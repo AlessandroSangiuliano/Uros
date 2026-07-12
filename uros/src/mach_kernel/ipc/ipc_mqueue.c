@@ -613,6 +613,25 @@ ipc_mqueue_send(
 		assert(self->ith_state == MACH_SEND_IN_PROGRESS);
 
 		/*
+		 * #383: we are still enqueued on ip_blocked.  The wakeup
+		 * side (ipc_mqueue_receive / ipc_port_set_qlimit) dequeues
+		 * BEFORE setting MACH_MSG_SUCCESS, and does both under
+		 * ip_lock, so ith_state != SUCCESS here proves our node is
+		 * still on the queue.  Remove it NOW, for every non-SUCCESS
+		 * wakeup: an interrupted sender (SIGKILL's act_abort pulls
+		 * us out of this interruptible wait) that returns while
+		 * still queued becomes a time bomb — when the port later
+		 * drains, the flow-control wakeup thread_go()s this thread
+		 * long after it has moved on (typically re-blocked in
+		 * mach_msg receive, possibly as a recycled shuttle), firing
+		 * the receive continuation with ith_state == MACH_MSG_SUCCESS
+		 * (== 0) and no kmsg: NULL deref at mach_msg_receive_continue.
+		 * The timed-out path had the same latent leak (and could
+		 * even re-enqueue itself while already queued).
+		 */
+		ipc_thread_rmqueue(&port->ip_blocked, self);
+
+		/*
 		 *	Thread wakeup-reason field tells us why
 		 *	the wait was interrupted.
 		 */
