@@ -1639,6 +1639,14 @@ mutex_lock_wait (
 {
 	m->waiters++;
 	ETAP_SET_REASON(current_thread(), BLOCKED_ON_MUTEX_LOCK);
+#if	MUTEX_OWNER_TRACK
+	/*
+	 * #383: the interlock is released inside
+	 * thread_sleep_interlock(), so drop the ilk owner note here —
+	 * a stale ilk_thr with waiters>0 would point at this window.
+	 */
+	m->ilk_thr = 0;
+#endif	/* MUTEX_OWNER_TRACK */
 	thread_sleep_interlock ((event_t) m, &m->interlock, FALSE);
 }
 

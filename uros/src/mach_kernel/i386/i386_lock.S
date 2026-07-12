@@ -84,9 +84,22 @@
 #endif   /* BUILD_STACK_FRAMES */
 
 
+#include <kern/mutex_track.h>
+
 #define	M_ILK		(%edx)
 #define	M_LOCKED	1(%edx)
 #define	M_WAITERS	2(%edx)
+#if	MUTEX_OWNER_TRACK
+/*
+ * #383: owner-tracking fields (kern/lock.h mutex_t).  NOTE: these
+ * occupy offsets 4/8/12, displacing the MACH_LDEBUG fields; the M_TYPE/
+ * M_PC/M_THREAD offsets below are stale while the tracking is on
+ * (MACH_LDEBUG is 0 in this tree, so that code never assembles).
+ */
+#define	M_OWN_THR	4(%edx)
+#define	M_OWN_PC	8(%edx)
+#define	M_ILK_THR	12(%edx)
+#endif	/* MUTEX_OWNER_TRACK */
 #if	MACH_LDEBUG
 #define	M_TYPE		4(%edx)
 #define	M_PC		8(%edx)
@@ -479,6 +492,11 @@ ENTRY(mutex_init)
 	movb	%al,M_ILK		/* clear interlock */
 	movb	%al,M_LOCKED		/* clear locked flag */
 	movw	%ax,M_WAITERS		/* init waiter count */
+#if	MUTEX_OWNER_TRACK
+	movl	%eax,M_OWN_THR		/* #383: clear owner tracking */
+	movl	%eax,M_OWN_PC
+	movl	%eax,M_ILK_THR
+#endif	/* MUTEX_OWNER_TRACK */
 
 #if	MACH_LDEBUG
 	movl	$MUTEX_TAG,M_TYPE	/* set lock type */
@@ -521,6 +539,12 @@ ml_get_hw:
 	testb	%cl,%cl			/* did we succeed? */
 	jne	ml_get_hw		/* no, try again */
 
+#if	MUTEX_OWNER_TRACK
+	movl	$CPD_ACTIVE_THREAD,%eax	/* #383: note who holds the ilk */
+	movl	%gs:(%eax),%ecx
+	movl	%ecx,M_ILK_THR
+#endif	/* MUTEX_OWNER_TRACK */
+
 /
 /* Beware of a race between this code path and the inline ASM fast-path locking */
 /* sequence which attempts to lock a mutex by directly setting the locked flag */
@@ -530,6 +554,14 @@ ml_get_hw:
 	xchgb	%cl,M_LOCKED		/* try to set locked flag */
 	testb	%cl,%cl			/* is the mutex locked? */
 	jne	ml_fail			/* yes, we lose */
+
+#if	MUTEX_OWNER_TRACK
+	movl	L_PC,%ecx		/* #383: record owner + pc */
+	movl	%ecx,M_OWN_PC
+	movl	$CPD_ACTIVE_THREAD,%eax
+	movl	%gs:(%eax),%ecx
+	movl	%ecx,M_OWN_THR
+#endif	/* MUTEX_OWNER_TRACK */
 
 #if	MACH_LDEBUG
 	movl	L_PC,%ecx
@@ -543,6 +575,9 @@ ml_get_hw:
 3:
 #endif
 
+#if	MUTEX_OWNER_TRACK
+	movl	$0,M_ILK_THR		/* #383: leaving the interlock */
+#endif	/* MUTEX_OWNER_TRACK */
 	xorb	%cl,%cl
 	xchgb	%cl,M_ILK
 
@@ -599,6 +634,17 @@ ENTRY(_mutex_try)
 	movb	$1,%al			/* locked value for mutex */
 	xchgb	%al,M_LOCKED		/* swap locked values */
 	xorb	$1,%al			/* generate return value */
+
+#if	MUTEX_OWNER_TRACK
+	testl	%eax,%eax		/* #383: on success record owner */
+	je	4f
+	movl	L_PC,%ecx
+	movl	%ecx,M_OWN_PC
+	movl	$CPD_ACTIVE_THREAD,%ecx
+	movl	%gs:(%ecx),%ecx
+	movl	%ecx,M_OWN_THR
+4:
+#endif	/* MUTEX_OWNER_TRACK */
 
 #if	MACH_LDEBUG || ETAP_LOCK_TRACE
 	testl	%eax,%eax		/* did we succeed? */
@@ -659,6 +705,12 @@ mu_get_hw:
 	testb	%cl,%cl			/* did we succeed? */
 	jne	mu_get_hw		/* no, try again */
 
+#if	MUTEX_OWNER_TRACK
+	movl	$CPD_ACTIVE_THREAD,%eax	/* #383: note who holds the ilk */
+	movl	%gs:(%eax),%ecx
+	movl	%ecx,M_ILK_THR
+#endif	/* MUTEX_OWNER_TRACK */
+
 	cmpw	$0,M_WAITERS		/* are there any waiters? */
 	jne	mu_wakeup		/* yes, more work to do */
 
@@ -674,9 +726,17 @@ mu_doit:
 0:
 #endif
 
+#if	MUTEX_OWNER_TRACK
+	movl	$0,M_OWN_THR		/* #383: disown */
+	movl	$0,M_OWN_PC
+#endif	/* MUTEX_OWNER_TRACK */
+
 	xorb	%cl,%cl
 	xchgb	%cl,M_LOCKED		/* unlock the mutex */
 
+#if	MUTEX_OWNER_TRACK
+	movl	$0,M_ILK_THR		/* #383: leaving the interlock */
+#endif	/* MUTEX_OWNER_TRACK */
 	xorb	%cl,%cl
 	xchgb	%cl,M_ILK
 
