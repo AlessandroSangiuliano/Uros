@@ -213,6 +213,7 @@ struct vm_page {
 			pageout:1,	/* page wired & busy for pageout (P) */
 			gobbled:1,      /* page used internally (P) */
 			highmem:1,	/* page is above LOWMEM_LIMIT (P) */
+			poisoned:1,	/* #385 hunt: free-list poison valid (P) */
 			:0;		/* (force to 'long' boundary) */
 #ifdef	ns32000
 	int		pad;		/* extra space for ns32000 bit ops */

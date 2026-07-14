@@ -1535,6 +1535,22 @@ pmap_verify_free(
 }
 
 /*
+ * #385 canary: TRUE iff 'phys' is a managed page that some pmap still
+ * maps.  Used by vm_page_release() to catch a page being freed while
+ * still in use — every legitimate free path runs pmap_remove /
+ * pmap_page_protect first, so a live pv list at free time is proof of
+ * a double free or a refcount race, at the exact moment it happens.
+ */
+boolean_t
+pmap_page_still_mapped(
+	vm_offset_t phys)
+{
+	if (!pmap_initialized || !pmap_valid_page(phys))
+		return FALSE;
+	return !pmap_verify_free(phys);
+}
+
+/*
  *	Create and return a physical map.
  *
  *	If the size specified for the map

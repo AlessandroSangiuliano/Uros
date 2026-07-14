@@ -337,6 +337,11 @@ user_page_fault_continue(
 	       regs->eax, regs->ebx, regs->ecx, regs->edx);
 	printf("  esi=0x%x edi=0x%x ebp=0x%x esp=0x%x\n",
 	       regs->esi, regs->edi, regs->ebp, regs->uesp);
+	/* #385 hunt: TLS forensics — is %gs still the LDT selector, and
+	 * does the thread still own a user LDT? */
+	printf("  segs: cs=0x%x ds=0x%x fs=0x%x gs=0x%x ldt=%p\n",
+	       regs->cs, regs->ds, regs->fs, regs->gs,
+	       (void *)thr_act->mact.pcb->ims.ldt);
 	/* Walk user EBP frame chain to print backtrace */
 	{
 	    unsigned int frame[2]; /* [0]=saved_ebp [1]=return_addr */
