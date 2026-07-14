@@ -2343,10 +2343,24 @@ FastPmapEnter:
 			VM_STAT(cow_faults++);
 
 			/*
-			 *	Now cope with the source page and object
-			 *	If the top object has a ref count of 1
-			 *	then no other map can access it, and hence
-			 *	it's not necessary to do the pmap_page_protect.
+			 *	Now cope with the source page and object.
+			 *
+			 *	#385: the old code skipped pmap_page_protect()
+			 *	when the TOP object's ref_count was 1 — but
+			 *	cur_m lives in cur_object (the BACKING), whose
+			 *	pages are mapped read-only through the shadow
+			 *	chain by this very task (prior read fault) and
+			 *	by anyone else shadowing it, regardless of the
+			 *	top's ref_count.  With the protect skipped, the
+			 *	faulter's old PTE and every cached TLB entry
+			 *	stayed live while vm_object_collapse() below
+			 *	freed cur_m as "covered" — a mapped page on the
+			 *	free list, re-grabbed by another CPU: stale
+			 *	reads of somebody else's fresh page, the
+			 *	kill-in-fork-window stack/bss corruption.
+			 *	Sever the physical mappings unconditionally,
+			 *	exactly like the slow path (vm_fault_page)
+			 *	always did.
 			 */
 
 			vm_object_lock(object);
@@ -2355,9 +2369,8 @@ FastPmapEnter:
 			vm_page_lock_queues();
 			vm_page_deactivate(cur_m);
 			m->dirty = TRUE;
-			if (object->ref_count != 1) 
-				pmap_page_protect(cur_m->phys_addr,
-						  VM_PROT_NONE);
+			pmap_page_protect(cur_m->phys_addr,
+					  VM_PROT_NONE);
 			vm_page_unlock_queues();
 
 			PAGE_WAKEUP_DONE(cur_m);
