@@ -299,7 +299,11 @@ vfs_open(const char *path, int flags, int mode)
          * with its own refcount, safe to use without the lock. */
         pthread_mutex_unlock(&vfs_lock);
 
-        kr = fs_open(fs_port, (char *)path, flags, mode, &handle, &type);
+        /* #385: hand the fs_server a send right to our task so it can
+         * reclaim this open's server-side fid if we die without close()
+         * (e.g. SIGKILL) — the right turns into a dead name on our death. */
+        kr = fs_open(fs_port, mach_task_self(), (char *)path, flags, mode,
+                     &handle, &type);
         if (!vfs_send_died(kr))
             break;
         /* Server died — evict the stale route and try a fresh resolve. */
