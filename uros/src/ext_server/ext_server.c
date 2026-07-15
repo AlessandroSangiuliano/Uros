@@ -93,6 +93,13 @@ static mach_port_t	root_ledger_paged;
 
 struct open_file {
 	int		in_use;
+	mach_port_t	owner;		/* #385: send right to the client task
+					 * that opened this fid via fs_open (0 for
+					 * the raw ext2_open path).  A SIGKILL'd
+					 * client never sends ext2_close; the send
+					 * right turns into a dead name on its death,
+					 * and ds_ext2_open reclaims the slot when the
+					 * pool is full.  Deallocated on close/reclaim. */
 	fs_private_t	private;	/* opaque ext2fs state */
 	struct ext2fs_file file_data;	/* pre-allocated (object pool) */
 	char		path[256];	/* path for clone matching */
@@ -119,6 +126,20 @@ struct mount_context {
 	struct device	dev;			/* block device */
 	struct writeback_ctx wb;		/* writeback context */
 	struct open_file open_files[MAX_OPEN_FILES];
+	/*
+	 * #385: serializes the fid table — the open_files[] pool slot
+	 * scan/claim (open), slot free (close) and the dirty list
+	 * (head + per-slot links).  This server is multithreaded (MIG
+	 * pool + FLIPC fast path + writeback thread); without it two
+	 * concurrent opens race the free-slot scan, both claim the same
+	 * fid, and the second's ext2fs_open_file_into overwrites the
+	 * first's file_data (block map).  The first opener's fid then
+	 * reads the second file's blocks at its own offsets — an
+	 * offset-preserving cross-file read that corrupted exec'd
+	 * images (a fresh ush reading vt_server's .text block).  Order:
+	 * of_lock -> ext2fs internal locks (v_lock/alloc); never reversed.
+	 */
+	pthread_mutex_t	of_lock;
 	int		dirty_head;		/* dirty list head (-1 = empty) */
 	mach_port_t	port;			/* receive port for this mount */
 	char		driver_name[64];	/* block driver name */
@@ -236,7 +257,9 @@ writeback_thread(void *arg)
 			if (!mnt->active)
 				continue;
 
-			/* Flush dirty metadata */
+			/* Flush dirty metadata (#385: dirty list + slots are
+			 * shared with open/close/write — walk under of_lock). */
+			pthread_mutex_lock(&mnt->of_lock);
 			{
 				int i = mnt->dirty_head;
 				while (i >= 0) {
@@ -250,6 +273,7 @@ writeback_thread(void *arg)
 					i = next;
 				}
 			}
+			pthread_mutex_unlock(&mnt->of_lock);
 
 			/* Flush dirty page cache blocks */
 			if (mnt->dev.cache)
@@ -275,19 +299,70 @@ ds_ext2_open(
 	fs_private_t priv;
 	int fid, rc, i, donor;
 
+	/*
+	 * #385: the whole slot allocation is one critical section.  Claim
+	 * the free slot (set in_use) BEFORE dropping the lock for the slow
+	 * path walk, so a concurrent open cannot pick the same slot or
+	 * clone from a half-initialized one.
+	 */
+	pthread_mutex_lock(&mnt->of_lock);
+
 	/* Find a free slot (pool allocation) */
 	for (fid = 0; fid < MAX_OPEN_FILES; fid++)
 		if (!mnt->open_files[fid].in_use)
 			break;
-	if (fid == MAX_OPEN_FILES)
-		return KERN_RESOURCE_SHORTAGE;
+	if (fid == MAX_OPEN_FILES) {
+		/*
+		 * #385: pool full — reclaim any fid whose owning client task
+		 * has died.  A SIGKILL'd client never sends ext2_close, so its
+		 * slot would leak forever; but its owner send right (handed to
+		 * us at fs_open) turns into a dead name on task death, which we
+		 * detect here with mach_port_type.  Claim the slot under of_lock,
+		 * then flush + drop the right outside it (same order as close).
+		 */
+		int kk;
+		for (kk = 0; kk < MAX_OPEN_FILES; kk++) {
+			mach_port_type_t t;
+			fs_private_t rpriv;
+			mach_port_t   rowner;
+			if (!mnt->open_files[kk].in_use || !mnt->open_files[kk].owner)
+				continue;
+			if (mach_port_type(mach_task_self(),
+					   mnt->open_files[kk].owner, &t)
+			    != KERN_SUCCESS || !(t & MACH_PORT_TYPE_DEAD_NAME))
+				continue;
+			dirty_list_remove(mnt, kk);
+			rpriv  = mnt->open_files[kk].private;
+			rowner = mnt->open_files[kk].owner;
+			mnt->open_files[kk].private = NULL;
+			mnt->open_files[kk].in_use  = 0;
+			mnt->open_files[kk].owner   = 0;
+			mnt->open_files[kk].path[0] = '\0';
+			pthread_mutex_unlock(&mnt->of_lock);
+			if (rpriv)
+				ext2fs_close_file(rpriv);
+			(void)mach_port_deallocate(mach_task_self(), rowner);
+			pthread_mutex_lock(&mnt->of_lock);
+		}
+		for (fid = 0; fid < MAX_OPEN_FILES; fid++)
+			if (!mnt->open_files[fid].in_use)
+				break;
+		if (fid == MAX_OPEN_FILES) {
+			pthread_mutex_unlock(&mnt->of_lock);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+	}
 
 	/* Check for existing open with same path — clone inode data
 	 * instead of full path walk + disk I/O.  Each opener gets its
 	 * own fid with independent read state. */
 	donor = -1;
 	for (i = 0; i < MAX_OPEN_FILES; i++) {
+		/* Skip slots still being populated (private == NULL): a
+		 * reservation whose path walk hasn't finished has no valid
+		 * file_data to clone yet (#385). */
 		if (mnt->open_files[i].in_use &&
+		    mnt->open_files[i].private != NULL &&
 		    strcmp(mnt->open_files[i].path, path) == 0) {
 			donor = i;
 			break;
@@ -299,26 +374,48 @@ ds_ext2_open(
 		ext2fs_clone_file(&mnt->open_files[fid].file_data,
 				  &mnt->open_files[donor].file_data);
 		priv = (fs_private_t)&mnt->open_files[fid].file_data;
+		mnt->open_files[fid].in_use  = 1;
+		mnt->open_files[fid].owner   = 0;
+		mnt->open_files[fid].private = priv;
+		strncpy(mnt->open_files[fid].path, path,
+			sizeof(mnt->open_files[fid].path) - 1);
+		mnt->open_files[fid].path[
+			sizeof(mnt->open_files[fid].path) - 1] = '\0';
+		pthread_mutex_unlock(&mnt->of_lock);
 		printf("ext2: cloned \"%s\" -> fid=%u (from fid=%u)\n",
 		       path, fid + 1, donor + 1);
 	} else {
-		/* Full open with path walk */
+		/*
+		 * Full open with path walk (disk I/O).  Reserve the slot now
+		 * and record the path, so a racing clone of the same path
+		 * still finds us as donor once we finish; drop the lock across
+		 * the slow walk, then re-check the outcome under the lock.
+		 */
+		mnt->open_files[fid].in_use = 1;
+		mnt->open_files[fid].owner  = 0;
+		strncpy(mnt->open_files[fid].path, path,
+			sizeof(mnt->open_files[fid].path) - 1);
+		mnt->open_files[fid].path[
+			sizeof(mnt->open_files[fid].path) - 1] = '\0';
+		mnt->open_files[fid].private = NULL;
+		pthread_mutex_unlock(&mnt->of_lock);
+
 		rc = ext2fs_open_file_into(&mnt->dev, path, &priv,
 					   &mnt->open_files[fid].file_data);
 		if (rc != 0) {
+			pthread_mutex_lock(&mnt->of_lock);
+			mnt->open_files[fid].in_use = 0;
+			mnt->open_files[fid].path[0] = '\0';
+			pthread_mutex_unlock(&mnt->of_lock);
 			printf("ext2: open \"%s\" failed (rc=%d)\n",
 			       path, rc);
 			return KERN_FAILURE;
 		}
+		pthread_mutex_lock(&mnt->of_lock);
+		mnt->open_files[fid].private = priv;
+		pthread_mutex_unlock(&mnt->of_lock);
 		printf("ext2: opened \"%s\" -> fid=%u\n", path, fid + 1);
 	}
-
-	mnt->open_files[fid].in_use  = 1;
-	mnt->open_files[fid].private = priv;
-	strncpy(mnt->open_files[fid].path, path,
-		sizeof(mnt->open_files[fid].path) - 1);
-	mnt->open_files[fid].path[sizeof(mnt->open_files[fid].path) - 1] =
-		'\0';
 
 	*fid_out = (natural_t)(fid + 1);
 	return KERN_SUCCESS;
@@ -396,16 +493,32 @@ ds_ext2_close(
 {
 	struct mount_context *mnt = (struct mount_context *)fs_port_arg;
 	int idx = (int)fid - 1;
+	fs_private_t priv;
+	mach_port_t  owner;
 
-	if (idx < 0 || idx >= MAX_OPEN_FILES || !mnt->open_files[idx].in_use)
+	if (idx < 0 || idx >= MAX_OPEN_FILES)
 		return KERN_INVALID_ARGUMENT;
 
+	/* #385: unlink the slot under the fid lock, then close outside it
+	 * (ext2fs_close_file does disk I/O + takes its own locks). */
+	pthread_mutex_lock(&mnt->of_lock);
+	if (!mnt->open_files[idx].in_use) {
+		pthread_mutex_unlock(&mnt->of_lock);
+		return KERN_INVALID_ARGUMENT;
+	}
 	dirty_list_remove(mnt, idx);
-	ext2fs_close_file(mnt->open_files[idx].private);
-
+	priv  = mnt->open_files[idx].private;
+	owner = mnt->open_files[idx].owner;	/* #385 */
 	mnt->open_files[idx].private = NULL;
+	mnt->open_files[idx].owner   = 0;
 	mnt->open_files[idx].in_use  = 0;
 	mnt->open_files[idx].path[0] = '\0';
+	pthread_mutex_unlock(&mnt->of_lock);
+
+	if (priv)
+		ext2fs_close_file(priv);
+	if (owner)				/* #385: drop the client-task ref */
+		(void)mach_port_deallocate(mach_task_self(), owner);
 
 	return KERN_SUCCESS;
 }
@@ -441,8 +554,12 @@ ds_ext2_write(
 		return KERN_FAILURE;
 	}
 
-	/* Write sets dirty flags — track for efficient sync */
-	dirty_list_add(mnt, idx);
+	/* Write sets dirty flags — track for efficient sync (#385: the
+	 * dirty list is shared with close and the writeback thread). */
+	pthread_mutex_lock(&mnt->of_lock);
+	if (mnt->open_files[idx].in_use)
+		dirty_list_add(mnt, idx);
+	pthread_mutex_unlock(&mnt->of_lock);
 
 	return KERN_SUCCESS;
 }
@@ -454,20 +571,25 @@ ds_ext2_sync(
 	struct mount_context *mnt = (struct mount_context *)fs_port_arg;
 	int rc;
 
-	/* Flush dirty metadata — iterate only dirty files */
+	/* Flush dirty metadata — iterate only dirty files (#385: under
+	 * of_lock, shared with open/close/write/writeback). */
+	pthread_mutex_lock(&mnt->of_lock);
 	{
 		int i = mnt->dirty_head;
 		while (i >= 0) {
 			int next = mnt->open_files[i].dirty_next;
 			rc = ext2fs_flush_metadata(
 				mnt->open_files[i].private);
-			if (rc != 0)
+			if (rc != 0) {
+				pthread_mutex_unlock(&mnt->of_lock);
 				return KERN_FAILURE;
+			}
 			if (!ext2fs_is_dirty(mnt->open_files[i].private))
 				dirty_list_remove(mnt, i);
 			i = next;
 		}
 	}
+	pthread_mutex_unlock(&mnt->of_lock);
 
 	/* Sync page cache to disk */
 	if (mnt->dev.cache) {
@@ -587,6 +709,7 @@ vfs_fill_stat(fs_private_t priv, vfs_stat_t *st)
 kern_return_t
 vfs_open(
 	mach_port_t	fs_port,
+	mach_port_t	client_task,
 	vfs_path_t	path,
 	int		flags,
 	int		mode,
@@ -606,6 +729,7 @@ vfs_open(
 		(void)ds_ext2_close(fs_port, fid);
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
+		(void)mach_port_deallocate(mach_task_self(), client_task);
 		return KERN_FAILURE;
 	}
 
@@ -615,6 +739,7 @@ vfs_open(
 		if (rc != 0) {
 			*handle_out = 0;
 			*type_out   = VFS_FT_UNKNOWN;
+			(void)mach_port_deallocate(mach_task_self(), client_task);
 			return KERN_FAILURE;
 		}
 		kr = ds_ext2_open(fs_port, path, &fid);
@@ -623,7 +748,24 @@ vfs_open(
 	if (kr != KERN_SUCCESS) {
 		*handle_out = 0;
 		*type_out   = VFS_FT_UNKNOWN;
+		(void)mach_port_deallocate(mach_task_self(), client_task);
 		return kr;
+	}
+
+	/* #385: record the client task so a dead-name reclaim can free this
+	 * fid if the client is killed before it calls close().  We keep the
+	 * send right (dropped in ds_ext2_close / the reclaim scan). */
+	{
+		int stored = 0;
+		pthread_mutex_lock(&mnt->of_lock);
+		if (fid >= 1 && fid <= MAX_OPEN_FILES &&
+		    mnt->open_files[fid - 1].in_use) {
+			mnt->open_files[fid - 1].owner = client_task;
+			stored = 1;
+		}
+		pthread_mutex_unlock(&mnt->of_lock);
+		if (!stored)
+			(void)mach_port_deallocate(mach_task_self(), client_task);
 	}
 
 	priv = vfs_priv_for_handle(mnt, (vfs_u64_t)fid);
@@ -1333,6 +1475,7 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 			       mount_path);
 	}
 
+	pthread_mutex_init(&mnt->of_lock, NULL);	/* #385 */
 	mnt->active = 1;
 	return 0;
 }
