@@ -248,9 +248,13 @@ i386_set_ldt(
 		case ACC_P | ACC_PL_U | ACC_CALL_GATE:
 		    break;
 		default:
-		    (void) vm_map_remove(ipc_kernel_map, 
-					 (vm_offset_t) desc_list,
-					 count * sizeof(struct real_descriptor),
+		    /* #385: end is an absolute address, not a length — free
+		     * the whole page the copyout/wire reserved, else every
+		     * i386_set_ldt leaks a wired page in ipc_kernel_map. */
+		    (void) vm_map_remove(ipc_kernel_map,
+					 trunc_page((vm_offset_t) desc_list),
+					 round_page((vm_offset_t) desc_list
+					     + count * sizeof(struct real_descriptor)),
 					 VM_MAP_REMOVE_KUNWIRE);
 		    return KERN_INVALID_ARGUMENT;
 	    }
@@ -407,9 +411,21 @@ i386_set_ldt(
 
 	/*
 	 * Free the descriptor list.
+	 *
+	 * #385: vm_map_remove's third argument is the END address, not a
+	 * length.  Passing count*sizeof(descriptor) made end < start (a
+	 * few bytes vs the high kernel dst_addr), so vm_map_delete removed
+	 * nothing and the wired page copyout/wire reserved leaked.  musl
+	 * calls i386_set_ldt on every TLS install (each exec and fork), so
+	 * ipc_kernel_map (1 MB) filled after ~256 installs; the next
+	 * vm_map_copyout then returned KERN_NO_SPACE and TLS setup failed —
+	 * the fork child faulted on %gs:0 and exec'd tasks hlt in __init_tp.
+	 * Free the whole reserved page, mirroring the wire range above.
 	 */
-	(void) vm_map_remove(ipc_kernel_map, (vm_offset_t) desc_list,
-			count * sizeof(struct real_descriptor),
+	(void) vm_map_remove(ipc_kernel_map,
+			trunc_page((vm_offset_t) desc_list),
+			round_page((vm_offset_t) desc_list
+			    + count * sizeof(struct real_descriptor)),
 			VM_MAP_REMOVE_KUNWIRE);
 	return KERN_SUCCESS;
 }
