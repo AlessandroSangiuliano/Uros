@@ -469,8 +469,18 @@ ipc_object_copyin(
 	kr = ipc_right_copyin(space, name, entry,
 			      msgt_name, TRUE,
 			      objectp, &soright);
-	if (IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
+	if (IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE) {
+		/*
+		 * #390: moving out the last right frees the name while the
+		 * port lives on (its ref went into the message).  A hot-path
+		 * cache holding this name->port would still resolve it, so
+		 * invalidate the per-thread caches — but only here, in the
+		 * dealloc branch: copyin is the message hot path and a bump
+		 * on every port-carrying message would defeat the cache.
+		 */
+		space->is_generation++;
 		ipc_entry_dealloc(space, name, entry);
+	}
 	is_write_unlock(space);
 
 	if ((kr == KERN_SUCCESS) && (soright != IP_NULL))
