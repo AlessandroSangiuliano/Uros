@@ -162,9 +162,16 @@ void sha256_compress_shani(struct sha256_ctx *ctx, const uint8_t block[64])
         0x106AA070F40E3585ULL, 0xD6990624D192E819ULL);
 
     /*
-     * Rounds 48-59: drop the SHA256MSG1 step in the last three quartets
-     * (no further schedule needed) but keep SHA256MSG2 to finish
-     * producing W[60..63].
+     * Rounds 52-59: drop the SHA256MSG1 step in the last TWO quartets (no
+     * further schedule needed) but keep SHA256MSG2 to finish producing
+     * W[60..63].
+     *
+     * #394: rounds 48-51 must KEEP their SHA256MSG1.  It is what builds the
+     * MSG3 that rounds 56-59 then turn into W[60..63] via SHA256MSG2 --
+     * dropping it leaves W[60..63] wrong while W[0..59] stay correct, so
+     * rounds 0-59 agree with the reference to the bit and only the final
+     * quartet diverges.  Every digest came out wrong; the KAT caught it and
+     * nothing else did.
      */
 #define ROUND_4_NO_MSG1(Ma, Mb, Md, K_HI, K_LO) do { \
     MSG    = _mm_add_epi32((Ma), _mm_set_epi64x((long long)(K_HI), \
@@ -177,7 +184,7 @@ void sha256_compress_shani(struct sha256_ctx *ctx, const uint8_t block[64])
     STATE0 = _mm_sha256rnds2_epu32(STATE0, STATE1, MSG); \
 } while (0)
 
-    /* Rounds 48-51 */ ROUND_4_NO_MSG1(MSG0, MSG1, MSG3,
+    /* Rounds 48-51 */ ROUND_4(MSG0, MSG1, MSG2, MSG3,
         0x34B0BCB52748774CULL, 0x1E376C0819A4C116ULL);
     /* Rounds 52-55 */ ROUND_4_NO_MSG1(MSG1, MSG2, MSG0,
         0x682E6FF35B9CCA4FULL, 0x4ED8AA4A391C0CB3ULL);
