@@ -108,6 +108,15 @@ main(int argc, char **argv)
      * after this would fail in confusing ways, so catch it up front.
      */
     sha256_dispatch_init();
+    /*
+     * #394: the KAT verdict must reach `pass` below.  It used to only print:
+     * the KAT runs here, ahead of `pass`, so a mismatch could not fail the
+     * suite and cap_test announced ALL TESTS PASSED on top of a provably
+     * broken SHA-256 (the SHA-NI path shipped wrong digests -- invisible to
+     * every test here, because both sides of each HMAC use the same function).
+     * A known-answer test that cannot fail the run is not a test.
+     */
+    int kat_ok = 1;
     {
         static const uint8_t kat_in[] = { 'a', 'b', 'c' };
         static const uint8_t kat_expected[32] = {
@@ -128,6 +137,7 @@ main(int argc, char **argv)
             printf("cap_test: SHA-256 KAT(\"abc\") OK\n");
         } else {
             printf("cap_test: SHA-256 KAT(\"abc\") FAIL — digest mismatch\n");
+            kat_ok = 0;
         }
     }
 
@@ -151,7 +161,7 @@ main(int argc, char **argv)
 
     kr = urmach_cap_register(&setup);
 
-    int pass = 1;
+    int pass = kat_ok;		/* #394: a failed KAT fails the suite */
     if (kr == CAP_ERR_UNAUTHORIZED) {
         printf("cap_test: [1] unauthorized register rejected: OK\n");
     } else {

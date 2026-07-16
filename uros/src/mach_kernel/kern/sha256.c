@@ -103,6 +103,52 @@ static int sha256_sha_ni_active = 0;
 
 int sha256_using_sha_ni(void) { return sha256_sha_ni_active; }
 
+/*
+ * #394: prove the fast path before trusting it.  A wrong SHA-NI compress is
+ * invisible to every layer above: both sides of an HMAC comparison use the same
+ * function, so capabilities still validate against each other and only a
+ * known-answer test can see the digests are not SHA-256.  CPUID says the
+ * instructions exist, not that our use of them is right -- so check the answer,
+ * and fall back to the C reference rather than ship wrong digests.
+ *
+ * Drives the compress directly rather than going through sha256(), so it has no
+ * dependency on the rest of the API.
+ *
+ * The CALLER must make XMM usable first: this executes SSE/SHA instructions, and
+ * init_fpu() leaves CR0.TS set for the lazy-FPU dance, so a bare call here would
+ * #NM into a handler that dereferences current_thread -- NULL during early boot.
+ * That knowledge is machine-dependent, so it lives at the call site in
+ * i386/AT386/model_dep.c rather than in this MI file.
+ */
+int sha256_shani_selftest(void) {
+    /* the padded single block for "abc": 'a','b','c', 0x80, zeros, bitlen 24 */
+    uint8_t block[SHA256_BLOCK_SIZE] = { 'a', 'b', 'c', 0x80 };
+    static const uint32_t want[8] = {
+        0xba7816bf, 0x8f01cfea, 0x414140de, 0x5dae2223,
+        0xb00361a3, 0x96177a9c, 0xb410ff61, 0xf20015ad,
+    };
+    struct sha256_ctx ctx;
+
+    block[SHA256_BLOCK_SIZE - 1] = 24;          /* 3 bytes * 8 bits */
+    ctx.state[0] = 0x6a09e667; ctx.state[1] = 0xbb67ae85;
+    ctx.state[2] = 0x3c6ef372; ctx.state[3] = 0xa54ff53a;
+    ctx.state[4] = 0x510e527f; ctx.state[5] = 0x9b05688c;
+    ctx.state[6] = 0x1f83d9ab; ctx.state[7] = 0x5be0cd19;
+
+    sha256_compress_shani(&ctx, block);
+
+    for (unsigned i = 0; i < 8; i++)
+        if (ctx.state[i] != want[i])
+            return 0;
+    return 1;
+}
+
+/* #394: revert to the C reference when the fast path fails its self-test. */
+void sha256_shani_disable(void) {
+    sha256_compress = sha256_compress_c;
+    sha256_sha_ni_active = 0;
+}
+
 void sha256_dispatch_init(void) {
     unsigned int eax, ebx, ecx, edx;
 
