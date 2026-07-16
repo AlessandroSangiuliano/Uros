@@ -100,6 +100,7 @@ typedef struct proc_exit_msg {
 #define PROC_ERR_PERM        -8   /* setsid on pgrp leader, etc. (POSIX EPERM) */
 #define PROC_ERR_DIFF_SESS   -9   /* setpgid target pgrp in different session */
 #define PROC_ERR_NO_CTTY    -10   /* session has no controlling tty (POSIX ENOTTY) */
+#define PROC_ERR_NO_CHILD   -11   /* caller has no children at all (POSIX ECHILD) */
 
 /* ------------------------------------------------------------------ */
 /*  System shutdown / reboot (v0.5.0 / #281)                           */

@@ -1898,6 +1898,28 @@ mach_msg_overwrite_trap(
 			imq_lock(rcv_mqueue);
 
 			switch (self->ith_state) {
+			    case MACH_MSG_SUCCESS:
+				/*
+				 * #387: the reply landed in the window
+				 * between the unlocked ith_state check above
+				 * and imq_lock.  A concurrent abort (e.g.
+				 * task_terminate of this task under the kill
+				 * x fork storm) pulled us out of TH_WAIT with
+				 * clear_wait -- thread_lock only, never
+				 * imq_lock, as the #319 claim comment
+				 * documents -- and we started running with
+				 * ith_state still IN_PROGRESS; the reply
+				 * deliverer, serialized only by imq_lock,
+				 * then dequeued us from imq_threads and
+				 * handed us ith_kmsg before we got the lock.
+				 * The message is ours: consume it exactly as
+				 * the slow path does (ipc_mqueue_receive
+				 * re-checks SUCCESS under imq_lock).  The
+				 * pending abort is delivered at the next AST.
+				 */
+				imq_unlock(rcv_mqueue);
+				break;
+
 			    case MACH_RCV_PORT_DIED:
 			    case MACH_RCV_PORT_CHANGED:
 				/* something bad happened to the port/set */
@@ -1923,12 +1945,14 @@ mach_msg_overwrite_trap(
 					return MACH_RCV_INTERRUPTED;
 
 				    default:
-					panic("mmot_hotpath: bad wait result");
+					panic("mmot_hotpath: bad wait result %x (ith_state %x)",
+					      save_wait_result, self->ith_state);
 				}
 				break;
 
 			    default:
-				panic("mmot_hotpath: bad ith_state");
+				panic("mmot_hotpath: bad ith_state %x (wait_result %x)",
+				      self->ith_state, save_wait_result);
 			}
 		}
 

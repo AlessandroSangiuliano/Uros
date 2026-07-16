@@ -392,6 +392,7 @@ main(int argc, char **argv)
     char  line[USH_LINE_MAX];
     char *parts[USH_MAX_ARGS + 1];
     int   n, bg;
+    int   rstatus;
     int   target_vt = 0;
 
     /* argv[1], when present, is the VT surface to bind (#365 phase 3):
@@ -407,6 +408,14 @@ main(int argc, char **argv)
     (void)write(tty_fd, USH_BANNER, strlen(USH_BANNER));
 
     for (;;) {
+        /* Reap finished background jobs before prompting: without this
+         * every "&" child that exited or was killed stays a zombie
+         * holding its proc pid slot, and a long session walls the whole
+         * system at PROC_MAX_TASKS spawns (the kill x fork storm hit
+         * the 256 wall at iteration ~254 every run). */
+        while (waitpid(-1, &rstatus, WNOHANG) > 0)
+            ;
+
         (void)write(tty_fd, USH_PROMPT, strlen(USH_PROMPT));
         ssize_t r = read_line(line, sizeof line);
         if (r < 0)  { printf("ush: read error\n"); break; }
