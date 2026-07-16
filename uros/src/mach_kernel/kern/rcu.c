@@ -73,6 +73,21 @@ urmach_synchronize_rcu(void)
 	int		me = cpu_number();
 
 	/*
+	 *	#336 LANDMINE: `me` is read without disabling preemption.  This is
+	 *	safe ONLY because the kernel is non-preemptive (MACH_RT == 0): this
+	 *	function never voluntarily blocks (it spins on a bare PAUSE), so the
+	 *	thread cannot migrate and `me` stays the CPU we actually run on --
+	 *	which is quiescent by definition (the caller holds no read ref), so
+	 *	skipping it below (c == me) is correct.  If MACH_RT is ever enabled,
+	 *	an involuntary preempt+migrate between here and the wait loop makes
+	 *	`me` name a CPU we left; its last quiescent state may predate the
+	 *	publish barrier below, so skipping it would end the grace period
+	 *	while a reader there still holds the old pointer -- a use-after-free.
+	 *	Before enabling kernel preemption, pin this: mp_disable_preemption()
+	 *	around the read (and the skip), or re-read `me` after any yield.
+	 */
+
+	/*
 	 *	Publish the unlink before sampling: after this fence no CPU can
 	 *	still load the old pointer out of the structure, so any CPU that
 	 *	advances its counter past the snapshot has truly finished every
