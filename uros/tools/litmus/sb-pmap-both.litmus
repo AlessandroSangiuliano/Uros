@@ -1,0 +1,43 @@
+X86 SB+pmap-both
+(*
+ * #350 - formal check of the #338 pmap_enter <-> set_dirbase TLB-shootdown barrier.
+ *
+ * #338 (split page-table locks) removed the giant per-pmap lock that used to
+ * implicitly order pmap_enter's PTE store before its cpus_using load.  In its
+ * place PMAP_TLB_WRITE_BARRIER() (a lock;addl fence) was added.  The correctness
+ * crux is a Dekker-style mutual exclusion between two CPUs:
+ *
+ *   P0 = pmap_enter        (thread A)      P1 = pmap_activate/set_dirbase (thread B)
+ *   ------------------------------         -----------------------------------------
+ *   store PTE = new                        set cpus_using bit = 1   (i_bit_set)
+ *   PMAP_TLB_WRITE_BARRIER  <-- fence      set_cr3 (serializing)    <-- fence
+ *   load  cpus_using                       TLB fill: load PTE
+ *
+ * Shared locations:
+ *   pte    the page-table entry A publishes.   0 = old/stale, 1 = new.
+ *   cpus   B's bit inside pmap->cpus_using.     0 = B not marked, 1 = B marked.
+ *
+ * The catastrophe (must be FORBIDDEN):
+ *   A loads cpus=0  -> A does not see B, so A does NOT shoot down B's TLB, AND
+ *   B loads pte=0   -> B's TLB fill takes the OLD mapping.
+ *   => B runs on a stale translation that nobody ever invalidates.
+ *
+ * This is exactly the SB (store-buffer) litmus shape.  Under x86-TSO the only
+ * architectural reordering is store->load, and SB's (0,0) outcome is forbidden
+ * IFF BOTH threads fence between their store and their load.
+ *
+ * Barriers modeled as MFENCE (full StoreLoad fence):
+ *   P0: lock;addl $0,0(%esp)  ==  MFENCE  (the #338 PMAP_TLB_WRITE_BARRIER)
+ *   P1: set_cr3               ==  MFENCE  (serializing CR3 load)
+ * The real cpus_using write is itself a lock;bts, an extra implicit fence on P1;
+ * modeling it as a plain store + set_cr3 fence is the weaker, conservative model.
+ *
+ * This file = the SHIPPED state: both barriers present.
+ * Expected verdict: Never  ->  the barrier pair is SUFFICIENT.
+ *)
+{ pte=0; cpus=0; }
+ P0             | P1             ;
+ MOV [pte],$1   | MOV [cpus],$1  ;
+ MFENCE         | MFENCE         ;
+ MOV EAX,[cpus] | MOV EAX,[pte]  ;
+exists (0:EAX=0 /\ 1:EAX=0)

@@ -1,0 +1,14 @@
+X86 SB+pmap-none
+(*
+ * #350 - baseline / liveness of the harness: neither thread fences.  Plain SB.
+ * Expected verdict: Sometimes  ->  confirms the catastrophe state is expressible
+ * and reachable, so a "Never" in sb-pmap-both is a real proof and not a typo that
+ * made the bad state unreachable by construction (a vacuous pass).
+ *
+ * See sb-pmap-both.litmus for the full mapping and modeling notes.
+ *)
+{ pte=0; cpus=0; }
+ P0             | P1             ;
+ MOV [pte],$1   | MOV [cpus],$1  ;
+ MOV EAX,[cpus] | MOV EAX,[pte]  ;
+exists (0:EAX=0 /\ 1:EAX=0)
