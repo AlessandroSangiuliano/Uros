@@ -427,6 +427,66 @@ proc_S_subscribe_exit(
     return KERN_SUCCESS;
 }
 
+/*
+ * proc_reap_zombie(parent_pid) — non-blocking any-child reap (#389).
+ *
+ * Backs POSIX waitpid(-1, st, WNOHANG): find one zombie child of
+ * parent_pid, release its slot (the same #378 reap subscribe_exit does
+ * on an already-zombie pid) and hand back its pid + exit code.  Without
+ * this a shell can never sweep its background jobs, and every "cmd &"
+ * ever spawned holds a pid-table slot forever (the 256 wall the kill x
+ * fork storm hit at iteration ~254).
+ */
+kern_return_t
+proc_S_reap_zombie(
+    mach_port_t   server_port,
+    proc_pid_t    parent_pid,
+    proc_pid_t   *pid_out,
+    int          *exit_code_out,
+    int          *result)
+{
+    int i, children = 0;
+
+    (void)server_port;
+
+    *pid_out       = 0;
+    *exit_code_out = 0;
+
+    pthread_mutex_lock(&pid_lock);
+    for (i = 0; i < PROC_MAX_TASKS; i++) {
+        struct pid_entry *e = &pid_table[i];
+        mach_port_t reaped_sigport, reaped_notify;
+
+        if (!e->in_use || e->ppid != parent_pid)
+            continue;
+        children++;
+        if (e->state != PROC_STATE_ZOMBIE)
+            continue;
+
+        *pid_out       = e->pid;
+        *exit_code_out = e->exit_code;
+        /* #378-style reap: task_port was already dropped by the
+         * dead-name notification; only signal_port (and a stale
+         * exit_notify, defensively) may still hold rights — freed
+         * below the lock. */
+        reaped_sigport = e->signal_port;
+        reaped_notify  = e->exit_notify;
+        memset(e, 0, sizeof(*e));
+        pthread_mutex_unlock(&pid_lock);
+
+        if (reaped_sigport != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), reaped_sigport);
+        if (reaped_notify != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), reaped_notify);
+        *result = PROC_OK;
+        return KERN_SUCCESS;
+    }
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = children ? PROC_ERR_NOT_FOUND : PROC_ERR_NO_CHILD;
+    return KERN_SUCCESS;
+}
+
 kern_return_t
 proc_S_list(
     mach_port_t                 server_port,

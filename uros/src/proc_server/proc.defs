@@ -292,3 +292,22 @@ routine proc_exec_handoff(
 	in	new_task	: mach_port_t;
 	in	cmdline		: proc_cmdline_t;
 	out	result		: int);
+
+/*
+ * Non-blocking any-child reap (#389).
+ *
+ * Backs POSIX waitpid(-1, st, WNOHANG): find one ZOMBIE entry whose
+ * ppid == parent_pid, release its pid-table slot (the same #378 reap
+ * proc_subscribe_exit performs on an already-zombie pid) and return
+ * its pid and exit code.  Never blocks.
+ *
+ *   result == PROC_OK            — zombie reaped; pid / exit_code valid
+ *   result == PROC_ERR_NOT_FOUND — children exist, none is a zombie yet
+ *   result == PROC_ERR_NO_CHILD  — parent_pid has no children (ECHILD)
+ */
+routine proc_reap_zombie(
+		proc_port	: mach_port_t;
+	in	parent_pid	: proc_pid_t;
+	out	pid		: proc_pid_t;
+	out	exit_code	: int;
+	out	result		: int);

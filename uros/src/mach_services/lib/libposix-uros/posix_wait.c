@@ -12,10 +12,14 @@
  * status is encoded the Linux way (low byte = signal, second-low =
  * exit value) so musl's WIFEXITED / WEXITSTATUS macros DTRT.
  *
- * Out of scope for Phase 5:
- *   - WNOHANG fast-path (we'd need proc_list + filter on caller pid)
+ * waitpid(-1, st, WNOHANG) is backed by proc_reap_zombie (#389): a
+ * non-blocking any-child sweep that reaps one zombie per call — what a
+ * shell needs to collect background jobs.
+ *
+ * Still out of scope:
+ *   - WNOHANG on specific pids (subscribe_exit only blocks)
  *   - WIFSTOPPED (SIGSTOP/SIGCONT tracking not surfaced by proc_server)
- *   - pid == -1 / pid == 0 / pid == -pgrp ranges; only pid > 0 works.
+ *   - blocking pid == -1 / pid == 0 / pid == -pgrp ranges.
  *
  * Author: Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
  * License: MIT
@@ -34,7 +38,11 @@
 #include "proc.h"
 #include "proc_types.h"
 
-extern mach_port_t __uros_proc_port;
+extern mach_port_t  __uros_proc_port;
+extern unsigned int __uros_my_pid;
+
+/* musl <sys/wait.h> ABI value; libposix doesn't pull musl headers here */
+#define UROS_WNOHANG 1
 
 /* ------------------------------------------------------------------ */
 /* Linux wait-status encoding                                          */
@@ -66,10 +74,35 @@ encode_status(int exit_code)
 int
 __uros_waitpid(int pid, int *status_out, int options)
 {
-    (void)options;     /* WNOHANG/WUNTRACED not yet honoured */
-
     if (__uros_proc_port == MACH_PORT_NULL)
         return -ESRCH;
+
+    /*
+     * #389: waitpid(-1, st, WNOHANG) — non-blocking any-child reap
+     * backed by proc_reap_zombie.  This is what a shell's background
+     * job sweep needs; blocking any-child waits stay out of scope.
+     */
+    if (pid == -1 && (options & UROS_WNOHANG)) {
+        proc_pid_t rpid = 0;
+        int        code = 0;
+        int        rc   = PROC_ERR_INVAL;
+
+        kern_return_t kr = proc_reap_zombie(__uros_proc_port,
+                                            (proc_pid_t)__uros_my_pid,
+                                            &rpid, &code, &rc);
+        if (kr != KERN_SUCCESS)
+            return -ECHILD;
+        if (rc == PROC_OK) {
+            if (status_out)
+                *status_out = encode_status(code);
+            return (int)rpid;
+        }
+        if (rc == PROC_ERR_NOT_FOUND)
+            return 0;      /* children alive, none exited yet */
+        return -ECHILD;    /* PROC_ERR_NO_CHILD or anything else */
+    }
+
+    (void)options;     /* WNOHANG on specific pids not yet honoured */
     if (pid <= 0)
         return -EINVAL;    /* Phase 5 supports specific-pid waits only */
 
