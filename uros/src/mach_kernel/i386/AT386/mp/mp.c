@@ -205,6 +205,18 @@ extern unsigned int	clks_per_int;	/* rtclock.c: 8254 counts per HZ tick */
 
 unsigned int	mp_tsc_per_us;		/* 0 = not yet calibrated (fallback) */
 
+/*
+ * #367: come-online poll budgets.  The fast budget is what a healthy AP
+ * must beat after one SIPI — generous (a throttled cold core transits
+ * the trampoline in far less) yet it only ever costs wall-clock time
+ * for a dead/absent slot, since the poll returns on the running flag.
+ * The spec budget preserves the historical 2 s worst-case margin for
+ * the conservative retry (slow-to-schedule APs under host
+ * oversubscription).
+ */
+#define	MP_AP_FAST_BUDGET_US	10000u		/* 10 ms  */
+#define	MP_AP_SPEC_BUDGET_US	2000000u	/* 2 s    */
+
 /* Latch + read 8254 counter 0; valid only with the clock IRQ masked. */
 #define	MP_READ_8254(v)	{					\
 	outb(PITCTL_PORT, PIT_C0);				\
@@ -315,6 +327,37 @@ mp_busy_delay_ms(unsigned int ms)
 		mp_busy_delay_us(1000);
 }
 
+/*
+ * #367: event-driven come-online wait.  Spin (PAUSE) on the AP's
+ * machine_slot[].running flag against a TSC deadline, returning the
+ * instant the AP reports in — no worst-case padding.  The "memory"
+ * clobber on the PAUSE forces running to be re-read each turn.
+ * Before TSC calibration falls back to the historical 1 ms-step poll.
+ */
+static boolean_t
+mp_poll_online(int slot, unsigned int budget_us)
+{
+	if (mp_tsc_per_us != 0) {
+		unsigned long long deadline = mp_rdtsc() +
+		    (unsigned long long)budget_us * mp_tsc_per_us;
+
+		while (mp_rdtsc() < deadline) {
+			if (machine_slot[slot].running == TRUE)
+				return TRUE;
+			__asm__ __volatile__("pause" ::: "memory");
+		}
+	} else {
+		unsigned int ms;
+
+		for (ms = 0; ms < (budget_us + 999u) / 1000u; ms++) {
+			if (machine_slot[slot].running == TRUE)
+				return TRUE;
+			mp_busy_delay_ms(1);
+		}
+	}
+	return machine_slot[slot].running == TRUE;
+}
+
 static void
 mp_lapic_ipi_wait(void)
 {
@@ -348,7 +391,6 @@ cpu_start(int slot_num)
 	unsigned char	dest_lapic;
 	unsigned int	pstart_pa;
 	vm_size_t	trampoline_size;
-	int		wait_ms;
 
 	if (lapic_start == 0) {
 		printf("cpu_start(%d): LAPIC not mapped, refusing\n", slot_num);
@@ -379,30 +421,68 @@ cpu_start(int slot_num)
 	       pstart_pa);
 
 	/*
-	 * INIT/SIPI/SIPI dance.
+	 * #367: two-attempt INIT/SIPI dance, events instead of fixed waits.
+	 *
+	 * The historical sequence — INIT + 10 ms, SIPI + 200 us, SIPI +
+	 * 200 us — is the 1994 MP-spec ceremony for discrete 82489DX APICs.
+	 * Integrated LAPICs latch the first SIPI and need none of the
+	 * padding, so every fixed delay here was pure per-AP boot tax
+	 * (~10.4 ms x N cores).
+	 *
+	 * Attempt 1 (modern): INIT, 10 us settle, ONE SIPI, then poll the
+	 * running flag.  A healthy AP flips it in well under a millisecond,
+	 * and the poll returns the moment it does.
+	 *
+	 * Attempt 2 (spec): only if the AP stayed silent — re-INIT (which
+	 * puts a half-started AP back into a known state) and run the full
+	 * conservative ceremony with the 2 s margin.  The second SIPI is
+	 * sent only if the AP is still down, making it what it really is on
+	 * modern silicon: a retry, not a rite.  Ancient machines lose one
+	 * 10 ms attempt and still boot; no CPU-model quirk tables to keep.
+	 *
+	 * Attempt 1 needs the calibrated TSC for its fine-grained poll; on
+	 * an uncalibrated (early/fallback) path we go straight to the spec
+	 * dance, whose margins never relied on it.
 	 */
-	mp_lapic_send_init(dest_lapic);
-	mp_busy_delay_ms(10);
+	{
+		unsigned long long	t0 = mp_rdtsc();
+		int			attempt = 0;
+		boolean_t		up = FALSE;
 
-	mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
-	mp_busy_delay_us(200);
+		if (mp_tsc_per_us != 0) {
+			attempt = 1;
+			mp_lapic_send_init(dest_lapic);
+			mp_busy_delay_us(10);
+			mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+			up = mp_poll_online(slot_num, MP_AP_FAST_BUDGET_US);
+		}
 
-	mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
-	mp_busy_delay_us(200);
+		if (!up) {
+			attempt++;
+			mp_lapic_send_init(dest_lapic);
+			mp_busy_delay_ms(10);
+			mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+			mp_busy_delay_us(200);
+			if (machine_slot[slot_num].running != TRUE) {
+				mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+				mp_busy_delay_us(200);
+			}
+			up = mp_poll_online(slot_num, MP_AP_SPEC_BUDGET_US);
+		}
 
-	/*
-	 * Wait up to ~2 s for the AP to reach cpu_up() and flip its
-	 * machine_slot[].running flag.  With the TSC-calibrated delay this is
-	 * a true 2 s of wall-clock margin, which covers a slow-to-schedule AP
-	 * under host oversubscription (e.g. -smp == host thread count).
-	 */
-	for (wait_ms = 0; wait_ms < 2000; wait_ms++) {
-		if (machine_slot[slot_num].running == TRUE) {
-			printf("cpu_start: AP %d online (lapic=%d)\n",
-			       slot_num, dest_lapic);
+		if (up) {
+			if (mp_tsc_per_us != 0)
+				printf("cpu_start: AP %d online (lapic=%d, "
+				       "attempt %d, %u us)\n",
+				       slot_num, dest_lapic, attempt,
+				       mp_div64_32(mp_rdtsc() - t0,
+						   mp_tsc_per_us));
+			else
+				printf("cpu_start: AP %d online (lapic=%d, "
+				       "attempt %d)\n",
+				       slot_num, dest_lapic, attempt);
 			return KERN_SUCCESS;
 		}
-		mp_busy_delay_ms(1);
 	}
 
 	printf("cpu_start: AP %d (lapic=%d) failed to come online\n",
