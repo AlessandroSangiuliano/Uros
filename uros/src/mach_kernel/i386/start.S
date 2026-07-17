@@ -399,12 +399,33 @@ LEXT(pstart)
 
 #if	NCPUS > 1
 	jmp	1f
-0:	cmpl	$0,PA(EXT(start_lock))
+	/*
+	 * #367: with the pipelined bring-up every AP is kicked at once and
+	 * they all queue here for the boot-stack lock.  PAUSE keeps N-1
+	 * spinning cores from hammering the lock cacheline while the one
+	 * inside the funnel is trying to get off the boot stack.
+	 */
+0:	pause
+	cmpl	$0,PA(EXT(start_lock))
 	jne	0b
 1:	movl	$1,%eax			/* movb $1,%eax was a 25-year-old gas bug — #300 */
 	xchgl	%eax,PA(EXT(start_lock)) /* locked */
 	testl	%eax,%eax
 	jnz	0b
+	/*
+	 * #367: announce that this CPU is past the trampoline and holds
+	 * start_lock.  From here to the svstart %esp switch nothing pushes,
+	 * so the shared boot stack's trampoline frames are dead the moment
+	 * this increment lands — which is exactly what the BSP's paced
+	 * kick waits for before SIPI-ing the next AP.  (The trampoline
+	 * window itself is NOT idempotent across APs: its call frames hold
+	 * phase-dependent values — a startprog frame holding the kernel
+	 * entry address gets overwritten by a slower AP's real_to_prot
+	 * return push, and the first AP far-returns into garbage; seen as
+	 * a #GP at 0x28:0x1f -> triple fault under parallel kicks.)
+	 */
+	lock
+	incl	PA(EXT(ap_funnel_entered))
 
 	cmpl	$0,PA(EXT(master_is_up))	/* are we first? */
 	jne	EXT(slave_start)		/* no -- system already up. */
