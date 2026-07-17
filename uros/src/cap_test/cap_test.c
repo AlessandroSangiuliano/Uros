@@ -49,6 +49,54 @@
  * Trap stub emitted by libmach (mach_traps.s): slot 40.
  */
 extern kern_return_t urmach_cap_register(struct uros_cap *token);
+extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
+                                       uint32_t op, uint64_t resource_id);
+
+/*
+ * #395 probe — XMM survival across the kernel cap-verify path.
+ *
+ * The kernel computes the capability HMAC with SHA-NI, which executes XMM
+ * instructions, in a kernel built -mno-sse under a lazy-FPU (CR0.TS)
+ * discipline with no save/restore around that use.  Suspicion: a cap-verify
+ * syscall silently clobbers the calling thread's XMM registers.
+ *
+ * These helpers move a 128-byte pattern into/out of xmm0..xmm7 around a
+ * single trap.  They are the only userland XMM between fill and read: the
+ * trap stubs are libmach assembly (no compiler codegen), so any change to
+ * the registers across the call happened in the kernel.  noinline keeps the
+ * compiler from scheduling its own code inside the window.
+ */
+static void __attribute__((noinline))
+xmm_fill(const uint8_t p[128])
+{
+    __asm__ volatile(
+        "movdqu   0(%0), %%xmm0\n\t"
+        "movdqu  16(%0), %%xmm1\n\t"
+        "movdqu  32(%0), %%xmm2\n\t"
+        "movdqu  48(%0), %%xmm3\n\t"
+        "movdqu  64(%0), %%xmm4\n\t"
+        "movdqu  80(%0), %%xmm5\n\t"
+        "movdqu  96(%0), %%xmm6\n\t"
+        "movdqu 112(%0), %%xmm7\n\t"
+        : : "r"(p)
+        : "xmm0", "xmm1", "xmm2", "xmm3",
+          "xmm4", "xmm5", "xmm6", "xmm7");
+}
+
+static void __attribute__((noinline))
+xmm_read(uint8_t p[128])
+{
+    __asm__ volatile(
+        "movdqu %%xmm0,   0(%0)\n\t"
+        "movdqu %%xmm1,  16(%0)\n\t"
+        "movdqu %%xmm2,  32(%0)\n\t"
+        "movdqu %%xmm3,  48(%0)\n\t"
+        "movdqu %%xmm4,  64(%0)\n\t"
+        "movdqu %%xmm5,  80(%0)\n\t"
+        "movdqu %%xmm6,  96(%0)\n\t"
+        "movdqu %%xmm7, 112(%0)\n\t"
+        : : "r"(p) : "memory");
+}
 
 extern kern_return_t bootstrap_ports(mach_port_t bootstrap,
                                      mach_port_t *host_port,
@@ -169,6 +217,82 @@ main(int argc, char **argv)
                "expected CAP_ERR_UNAUTHORIZED (%d), got %d\n",
                CAP_ERR_UNAUTHORIZED, (int)kr);
         pass = 0;
+    }
+
+    /*
+     * #395 probe.  Fill xmm0..7 with a known pattern, cross the kernel once,
+     * read them back.  Interleaved:
+     *
+     *   control  = mach_thread_self()      no FPU in the kernel; proves the
+     *                                      bare trap round-trip and this
+     *                                      harness preserve XMM
+     *   probe    = urmach_cap_verify()     the kernel HMACs the token
+     *                                      (SHA-NI on this CPU) before
+     *                                      rejecting it
+     *
+     * The token is garbage on purpose: cap_hmac_check runs unconditionally
+     * (constant-time reject), so CAP_ERR_INVALID_TOKEN back means the HMAC
+     * DID run.  CAP_ERR_INTERNAL means the cap key was never set, the HMAC
+     * never executed, and the probe proved nothing — reported as such, not
+     * as a pass.  A clobber that repeats with identical bytes is the SHA
+     * signature (same input -> same intermediates), distinguishing it from
+     * stray preemption noise.
+     */
+    {
+        static uint8_t pat[128], got[128], snap[128];
+        struct uros_cap bogus;
+        int ctl_bad = 0, hmac_bad = 0, hmac_ran = 0, stable = 0;
+        unsigned reg_mask = 0;
+        int it;
+
+        for (it = 0; it < 128; it++)
+            pat[it] = (uint8_t)(0xA0 ^ (it * 7));
+        for (size_t bi = 0; bi < sizeof(bogus); bi++)
+            ((uint8_t *)&bogus)[bi] = 0x5A;
+
+        for (it = 0; it < 50; it++) {
+            xmm_fill(pat);
+            (void)mach_thread_self();
+            xmm_read(got);
+            if (memcmp(pat, got, 128) != 0)
+                ctl_bad++;
+
+            xmm_fill(pat);
+            kr = urmach_cap_verify(&bogus, 1, 0);
+            xmm_read(got);
+            if (kr != CAP_ERR_INTERNAL)
+                hmac_ran = 1;
+            if (memcmp(pat, got, 128) != 0) {
+                if (hmac_bad == 0)
+                    memcpy(snap, got, 128);
+                else if (memcmp(snap, got, 128) == 0)
+                    stable++;
+                hmac_bad++;
+                for (unsigned r = 0; r < 8; r++)
+                    if (memcmp(pat + 16*r, got + 16*r, 16) != 0)
+                        reg_mask |= 1u << r;
+            }
+        }
+
+        if (ctl_bad != 0) {
+            printf("cap_test: [#395] probe INVALID — control trap clobbered "
+                   "xmm %d/50 (trap round-trip does not preserve FPU)\n",
+                   ctl_bad);
+            pass = 0;
+        } else if (!hmac_ran) {
+            printf("cap_test: [#395] probe SKIPPED — cap key not set, "
+                   "HMAC never ran (proves nothing)\n");
+        } else if (hmac_bad == 0) {
+            printf("cap_test: [#395] xmm preserved across cap_verify "
+                   "(50/50): OK\n");
+        } else {
+            printf("cap_test: [#395] CONFIRMED — cap_verify clobbered xmm "
+                   "%d/50, regs 0x%02x, stable %d/%d\n",
+                   hmac_bad, reg_mask, stable, hmac_bad > 1 ? hmac_bad - 1 : 0);
+            printf("cap_test: [#395]   xmm0 after: %02x%02x%02x%02x...\n",
+                   snap[0], snap[1], snap[2], snap[3]);
+            pass = 0;
+        }
     }
 
     /*

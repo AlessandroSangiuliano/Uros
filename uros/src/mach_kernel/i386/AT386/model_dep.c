@@ -881,51 +881,15 @@ machine_init(void)
 	init_fpu();
 
 	/*
-	 * Issue #180: install the SHA-NI fast path for sha256_compress
-	 * if the CPU advertises Intel SHA Extensions in CPUID leaf 7.
-	 * Must run after init_fpu() (which enables CR4.OSFXSR / OSXMMEXCPT
-	 * — required before any XMM-using code can execute).
+	 * #395: the kernel's SHA-256 (capability HMAC) is the portable C
+	 * implementation only.  The SHA-NI fast path that used to be
+	 * installed here executed XMM in a -mno-sse kernel under lazy FPU
+	 * (CR0.TS) with no save/restore: every cap-verify clobbered all
+	 * eight XMM registers of the calling thread (cap_test [#395],
+	 * 50/50 deterministic).  SHA-NI now lives in userland (libcap)
+	 * where SSE is legal; kernel and userland digests are identical,
+	 * so HMACs still match.
 	 */
-	{
-		extern void sha256_dispatch_init(void);
-		extern int  sha256_using_sha_ni(void);
-		extern int  sha256_shani_selftest(void);
-		extern void sha256_shani_disable(void);
-
-		sha256_dispatch_init();
-		if (sha256_using_sha_ni()) {
-			int ok;
-			unsigned int cr0;
-
-			/*
-			 * #394: CPUID says the instructions exist, not that we
-			 * drive them correctly -- and a wrong SHA-NI compress is
-			 * invisible above this layer, since both sides of every
-			 * HMAC use it and only a known-answer test can tell the
-			 * digests are not SHA-256.  Prove it before trusting it.
-			 *
-			 * The probe executes XMM, and init_fpu() above left
-			 * CR0.TS set for the lazy-FPU dance, so calling it bare
-			 * would #NM into a handler that dereferences
-			 * current_thread -- NULL this early in boot.  Clear TS
-			 * across the probe and put it back: no thread owns the
-			 * FPU yet, so there is no state to save.
-			 */
-			cr0 = get_cr0();
-			set_cr0(cr0 & ~CR0_TS);
-			ok = sha256_shani_selftest();
-			set_cr0(cr0);
-
-			if (ok) {
-				printf("SHA: Intel SHA Extensions enabled "
-				       "(HMAC fast path)\n");
-			} else {
-				sha256_shani_disable();
-				printf("SHA: SHA-NI self-test FAILED — "
-				       "falling back to C reference\n");
-			}
-		}
-	}
 
 #if	NPCI > 0
 	dma_zones_init();
