@@ -102,6 +102,8 @@ cpu_interrupt(int cpu)
 extern int master_cpu;
 extern int real_ncpus;
 extern kern_return_t cpu_start(int slot);
+extern void cpu_kick(int slot);		/* #367: fire INIT+SIPI, no wait */
+extern int  cpu_await_all(void);	/* #367: reap kicked APs, retry stragglers */
 extern void mp_tsc_calibrate(void);	/* #302: TSC delay calibration (mp.c) */
 extern void master_up(void);
 extern vm_offset_t interrupt_stack[NCPUS];
@@ -191,31 +193,48 @@ start_other_cpus(void)
 	 * step; this mp_stub.c variant forgot to. */
 	master_up();
 
-	for (slot = 0; slot < real_ncpus; slot++) {
-		if (slot == master_cpu)
-			continue;
-		if (ap_alloc_resources(slot) != KERN_SUCCESS) {
-			printf("start_other_cpus: AP slot %d kmem_alloc failed\n",
-			       slot);
-			continue;
-		}
-		if (cpu_start(slot) != KERN_SUCCESS) {
-			printf("start_other_cpus: AP slot %d did not come up\n",
-			       slot);
-			continue;
-		}
-		printf("smp: AP cpu_id=%d online (reported by BSP)\n", slot);
-	}
-
-	/* #344: wait until every AP has finished its own bring-up (past
-	 * lapic_enable + fpu_sanity) and is parked at the barrier.  cpu_start()
-	 * returns as soon as an AP reports running=TRUE — which it does early,
-	 * before init_fpu — so without this the last AP is still mid-FPU-init
-	 * when the loop ends and we release everyone; the resulting cross-CPU
-	 * traffic wedges/resets it on real hardware. */
+	/* #367 INCR-2: pipelined bring-up.  Phase 1 — allocate every AP's
+	 * per-CPU resources up front, then fire the modern INIT+SIPI at all
+	 * of them back to back.  The kicked APs serialize themselves through
+	 * the historical start_lock funnel (the microseconds each spends on
+	 * the shared boot stack) and run the rest of their init — mp_desc,
+	 * LAPIC, FPU, HWP — concurrently, instead of one AP at a time. */
 	{
-		long aps = (long)real_ncpus - 1;
-		while (ap_barrier_count < aps)
+		int n_online;
+		char ap_ok[NCPUS];
+
+		/* Allocate first, kick after: kmem_alloc costs milliseconds
+		 * apiece, and interleaved with the kicks it would sit right
+		 * in the measured bring-up window (and contend the VM locks
+		 * with nothing to show for it). */
+		for (slot = 0; slot < real_ncpus; slot++) {
+			ap_ok[slot] = 0;
+			if (slot == master_cpu)
+				continue;
+			if (ap_alloc_resources(slot) != KERN_SUCCESS) {
+				printf("start_other_cpus: AP slot %d "
+				       "kmem_alloc failed\n", slot);
+				continue;
+			}
+			ap_ok[slot] = 1;
+		}
+
+		for (slot = 0; slot < real_ncpus; slot++)
+			if (ap_ok[slot])
+				cpu_kick(slot);
+
+		/* Phase 2 — reap the running flags event-driven; any
+		 * straggler gets the full serial cpu_start() ceremony. */
+		n_online = cpu_await_all();
+
+		/* #344: wait until every ONLINE AP has finished its own
+		 * bring-up (past lapic_enable + fpu_sanity) and is parked at
+		 * the barrier — the APs' init now runs concurrently, and none
+		 * may be released while another is still mid-FPU-init.
+		 * Counting n_online rather than real_ncpus-1 also unwedges a
+		 * historical hang: a slot that failed to come up used to
+		 * leave this wait spinning forever. */
+		while (ap_barrier_count < (long)n_online)
 			__asm__ __volatile__("pause" ::: "memory");
 	}
 
