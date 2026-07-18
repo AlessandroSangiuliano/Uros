@@ -22,19 +22,20 @@ long __syscall_cp_c(syscall_arg_t nr,
                     syscall_arg_t u, syscall_arg_t v, syscall_arg_t w,
                     syscall_arg_t x, syscall_arg_t y, syscall_arg_t z)
 {
-	pthread_t self;
-	long r;
-	int st;
-
-	if ((st=(self=__pthread_self())->canceldisable)
-	    && (st==PTHREAD_CANCEL_DISABLE || nr==SYS_close))
-		return __syscall(nr, u, v, w, x, y, z);
-
-	r = __syscall_cp_asm(&self->cancel, nr, u, v, w, x, y, z);
-	if (r==-EINTR && nr!=SYS_close && self->cancel &&
-	    self->canceldisable != PTHREAD_CANCEL_DISABLE)
-		r = __cancel();
-	return r;
+	/*
+	 * Uros patch (#375): route cancellation points through the plain
+	 * __syscall (→ the patched __uros_syscallN dispatcher) instead of
+	 * __syscall_cp_asm.  That asm issues a raw `int $0x80`, for which
+	 * the Uros kernel has no Linux syscall gate — it traps as
+	 * EXC_SYSCALL and the task takes SIGSYS.  The umbrella libc.so, being
+	 * the whole shared library, always carries this strong gate, so every
+	 * dynamic tool doing a cancellable syscall (nanosleep, read, the raw
+	 * write(), wait, …) would crash the first time it made one.  Uros has
+	 * no signal-driven pthread cancellation, so collapsing to the
+	 * uncancellable path costs nothing today; revisit if real
+	 * cancellation ever lands.
+	 */
+	return __syscall(nr, u, v, w, x, y, z);
 }
 
 static void _sigaddset(sigset_t *set, int sig)

@@ -94,7 +94,7 @@
 #include <kern/lock.h>
 #include <kern/zalloc.h>
 #include <ipc/ipc_entry.h>
-#include <ipc/ipc_splay.h>
+#include <ipc/ipc_radix.h>
 #include <ipc/ipc_types.h>
 
 /*
@@ -116,21 +116,28 @@
 typedef natural_t ipc_space_refs_t;
 
 struct ipc_space {
-	decl_mutex_data(,is_ref_lock_data)
-	ipc_space_refs_t is_references;
+	ipc_space_refs_t is_references;	/* #329: lock-free atomic refcount */
 
-	decl_mutex_data(,is_lock_data)
+	lock_t is_lock_data;		/* #327: reader/writer lock (was a mutex) */
 	boolean_t is_active;		/* is the space alive? */
 	boolean_t is_growing;		/* is the space growing? */
 	ipc_entry_t is_table;		/* an array of entries */
 	ipc_entry_num_t is_table_size;	/* current size of table */
 	struct ipc_table_size *is_table_next; /* info for larger table */
-	struct ipc_splay_tree is_tree;	/* a splay tree of entries */
+	struct ipc_radix_tree is_tree;	/* #331: sparse-index overflow (radix) */
 	ipc_entry_num_t is_tree_total;	/* number of entries in the tree */
-	ipc_entry_num_t is_tree_small;	/* # of small entries in the tree */
+	ipc_entry_num_t is_tree_small;	/* #331: unused (kept for mach_debug ABI) */
 	ipc_entry_num_t is_tree_hash;	/* # of hashed entries in the tree */
 	boolean_t is_fast;              /* for is_fast_space() */
 	natural_t is_generation;	/* bumped on right removal/modification */
+	/*
+	 * #331 step 2: seqlock guarding the (is_table, is_table_size) pair and
+	 * the table contents while ipc_entry_grow_table rebuilds them.  Odd =
+	 * update in progress; a lock-free reader (ipc_entry_lookup_rcu) snapshots
+	 * it, walks, then re-reads and retries on any change.  Mutated only under
+	 * the write lock, so the odd/even discipline needs no atomics.
+	 */
+	volatile natural_t is_seq;
 };
 
 #define	IS_NULL			((ipc_space_t) 0)
@@ -151,40 +158,45 @@ extern ipc_space_t default_pager_space;
 
 #define is_fast_space(is)	((is)->is_fast)
 
-#define	is_ref_lock_init(is)	mutex_init(&(is)->is_ref_lock_data, \
-					   ETAP_IPC_IS_REF)
+/*
+ * #329 phase 1: the space reference count is kept with lock-free atomics
+ * instead of a dedicated per-space mutex (the old is_ref_lock_data).  A
+ * reference is an atomic increment; a release is an atomic decrement that
+ * frees the space when it drops the last reference.  There is no lock left
+ * to initialise, so is_ref_lock_init() is now a no-op.
+ */
+#define	is_ref_lock_init(is)	/* no lock: refcount is atomic */
 
 #define	ipc_space_reference_macro(is)					\
-MACRO_BEGIN								\
-	mutex_lock(&(is)->is_ref_lock_data);				\
-	assert((is)->is_references > 0);				\
-	(is)->is_references++;						\
-	mutex_unlock(&(is)->is_ref_lock_data);				\
-MACRO_END
+	atomic_incl((long *) &(is)->is_references, 1)
 
 #define	ipc_space_release_macro(is)					\
 MACRO_BEGIN								\
-	ipc_space_refs_t _refs;						\
+	long _refs = atomic_add_fetchl((long *) &(is)->is_references, -1);\
 									\
-	mutex_lock(&(is)->is_ref_lock_data);				\
-	assert((is)->is_references > 0);				\
-	_refs = --(is)->is_references;					\
-	mutex_unlock(&(is)->is_ref_lock_data);				\
-									\
+	assert(_refs >= 0);						\
 	if (_refs == 0)							\
 		is_free(is);						\
 MACRO_END
 
-#define	is_lock_init(is)	mutex_init(&(is)->is_lock_data, ETAP_IPC_IS)
+/*
+ * #327: ipc_space uses a real reader/writer lock so that several threads of
+ * the same task can look up / receive concurrently (read side) while right
+ * mutation (send copyin, entry alloc/dealloc) still takes the write side.
+ * lock_read_done()/lock_write_done() both resolve to lock_done(), which
+ * releases whichever mode is held.
+ */
+#define	is_lock_init(is)	lock_init(&(is)->is_lock_data, TRUE, \
+					  ETAP_IPC_IS, ETAP_IPC_IS)
 
-#define	is_read_lock(is)	mutex_lock(&(is)->is_lock_data)
-#define is_read_unlock(is)	mutex_unlock(&(is)->is_lock_data)
+#define	is_read_lock(is)	lock_read(&(is)->is_lock_data)
+#define is_read_unlock(is)	lock_read_done(&(is)->is_lock_data)
 
-#define	is_write_lock(is)	mutex_lock(&(is)->is_lock_data)
-#define	is_write_lock_try(is)	mutex_try(&(is)->is_lock_data)
-#define is_write_unlock(is)	mutex_unlock(&(is)->is_lock_data)
+#define	is_write_lock(is)	lock_write(&(is)->is_lock_data)
+#define	is_write_lock_try(is)	lock_try_write(&(is)->is_lock_data)
+#define is_write_unlock(is)	lock_write_done(&(is)->is_lock_data)
 
-#define	is_write_to_read_lock(is)
+#define	is_write_to_read_lock(is) lock_write_to_read(&(is)->is_lock_data)
 
 /* Take a reference on a space */
 extern void ipc_space_reference(

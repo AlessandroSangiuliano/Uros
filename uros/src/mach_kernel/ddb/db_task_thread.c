@@ -138,6 +138,18 @@ db_lookup_task_act(
 	if (queue_first(&task->thr_acts) == 0)
 	    return(-1);
 	queue_iterate(&task->thr_acts, thr_act, thread_act_t, thr_acts) {
+	    /*
+	     * #344: a corrupt thr_acts list (e.g. a task scribbled with user
+	     * values that's being terminated) must not fault the implicit
+	     * queue_next() deref below.  DDB calls this from db_init_default_act
+	     * while reporting a panic; a fault here re-enters kdb_trap and
+	     * recurses the debugger to death, eating the interrupt stack (the
+	     * NMI watchdog caught it: db_lookup_act <- db_task_trap <- kdb_trap
+	     * looping).  Bail if thr_act isn't a pointer-aligned kernel VA.
+	     */
+	    if ((vm_offset_t)thr_act < VM_MIN_KERNEL_ADDRESS ||
+		((vm_offset_t)thr_act & (sizeof(vm_offset_t) - 1)))
+		return(-1);
 	    if (target_act == thr_act)
 		return(act_id);
 	    if (act_id++ >= DB_MAX_THREADID)

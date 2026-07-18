@@ -141,6 +141,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <i386/asm.h>
 #include <i386/ipl.h>
 #include <i386/pic.h>
+#include <i386/apic.h>		/* LAPIC_TPR — #311 I/O APIC spl path */
 
 #if	MP_V1_1
 #define	TRAP_DEBUG 0 /* Must match interrupt.s and mp_v1_1.c */
@@ -360,6 +361,59 @@ LEXT(set_spl)
 	cmpl	$(IPLHI), %eax
 	ja	set_spl_bad_new_ipl
 	movl	%eax,CX(EXT(curr_ipl),%edx)/* set NEW ipl level */
+
+	/*
+	 * #311: with the I/O APIC armed, masking is per-CPU via the LAPIC
+	 * task-priority register, not the global 8259.  TPR class 4 (0x40)
+	 * blocks the device vectors 0x40-0x4f at any spl above spllo; IPIs
+	 * (class F) always get through.  spllo -> TPR 0.  Each CPU writes its
+	 * own LAPIC at the shared lapic_start window, so this is inherently
+	 * per-CPU and needs no slave special-case.  Then exit via the common
+	 * pop/sti tail (label 2 below).
+	 */
+#if	NCPUS > 1
+	cmpl	$0, EXT(ioapic_enabled)
+	je	9f
+	/*
+	 * #322 soft-spl: do NOT touch the LAPIC TPR.  curr_ipl is already
+	 * updated above; the dispatch stubs (interrupt.S / ipi.S) enforce the
+	 * level by deferring any maskable vector that arrives while curr_ipl>0.
+	 * Here we only have to release that backlog: when we drop to spllo and
+	 * something was deferred, replay it.  %eax = new ipl, %edx = cpu.  This
+	 * skips the per-transition MMIO write that costs a KVM VM-exit (#311).
+	 */
+	cmpl	$0, EXT(softspl_enabled)
+	je	8f			/* soft-spl off: keep the #311 TPR path */
+	testl	%eax, %eax		/* raising / still masked (ipl>0)? */
+	jnz	2f			/*   nothing to replay */
+	cmpl	$0, CX(EXT(softspl_pending), %edx)
+	je	2f			/* spllo but nothing deferred */
+	pushl	%ecx			/* set_spl preserves %ecx for interrupt.S */
+	pushl	%edx			/* arg: cpu */
+	call	EXT(softspl_replay)
+	addl	$4, %esp
+	popl	%ecx
+	jmp	2f
+	/*
+	 * #311 hardware-TPR path (softspl_enabled == 0).  Program this CPU's
+	 * LAPIC TPR.  IMPORTANT: the interrupt dispatch (interrupt.S) relies on
+	 * set_spl preserving %ecx (the IRQ index used for ivect[]/iunit[] right
+	 * after this call), so compute the new TPR in %eax (dead past label 2,
+	 * which pops the old level back) and reuse %edx — never touch %ecx.
+	 */
+8:	testl	%eax, %eax		/* new ipl == 0 (spllo)? -> TPR 0 else 0x40 */
+	jz	7f
+	movl	$0x40, %eax
+7:	cmpl	%eax, CX(EXT(lapic_tpr_cache), %edx)
+	je	2f			/* TPR class unchanged: skip the MMIO */
+	movl	%eax, CX(EXT(lapic_tpr_cache), %edx)	/* cache[cpu] = newTPR */
+	movl	EXT(lapic_start), %edx	/* cpu no longer needed -> lapic_start */
+	testl	%edx, %edx
+	jz	2f			/* LAPIC not mapped yet */
+	movl	%eax, LAPIC_TPR(%edx)
+	jmp	2f
+9:
+#endif	/* NCPUS > 1 */
 #if	!MP_V1_1
 	cmpl	$(SPLHI), %eax		/* if SPLHI */
 	jne	1f
@@ -520,6 +574,46 @@ LEXT(set_spl_noi)
 	cmpl	$(IPLHI), %eax
 	ja	set_spl_noi_bad_ipl
 	movl	%eax,CX(EXT(curr_ipl),%edx)	/* set new SPL level */
+
+	/*
+	 * #311: I/O APIC path — program this CPU's LAPIC TPR instead of the
+	 * 8259, leaving IF untouched (interrupt-return uses this with IF=0).
+	 */
+#if	NCPUS > 1
+	cmpl	$0, EXT(ioapic_enabled)
+	je	7f
+	/*
+	 * #322 soft-spl: no LAPIC TPR write (IF stays off on this return path).
+	 * curr_ipl is set; on the drop to spllo, replay anything deferred while
+	 * masked.  %eax = new ipl, %edx = cpu.  Self-IPIs queued by the replay
+	 * are delivered once the interrupt return restores IF.
+	 */
+	cmpl	$0, EXT(softspl_enabled)
+	je	6f			/* soft-spl off: keep the #311 TPR path */
+	testl	%eax, %eax		/* raising / still masked (ipl>0)? */
+	jnz	1f			/*   nothing to replay */
+	cmpl	$0, CX(EXT(softspl_pending), %edx)
+	je	1f			/* spllo but nothing deferred */
+	pushl	%ecx			/* keep %ecx (mirrors set_spl contract) */
+	pushl	%edx			/* arg: cpu */
+	call	EXT(softspl_replay)
+	addl	$4, %esp
+	popl	%ecx
+	jmp	1f
+6:	/* #311 TPR path — preserve %ecx (see set_spl); compute newTPR in %eax. */
+	testl	%eax, %eax		/* new ipl == 0 (spllo)? -> TPR 0 else 0x40 */
+	jz	5f
+	movl	$0x40, %eax
+5:	cmpl	%eax, CX(EXT(lapic_tpr_cache), %edx)
+	je	1f			/* TPR class unchanged: skip the MMIO */
+	movl	%eax, CX(EXT(lapic_tpr_cache), %edx)	/* cache[cpu] = newTPR */
+	movl	EXT(lapic_start), %edx	/* cpu no longer needed -> lapic_start */
+	testl	%edx, %edx
+	jz	1f			/* LAPIC not mapped yet */
+	movl	%eax, LAPIC_TPR(%edx)
+	jmp	1f
+7:
+#endif	/* NCPUS > 1 */
 	movw	EXT(pic_mask)(,%eax,2), %ax	/* get new pic mask */
 	cmpw	EXT(curr_pic_mask),%ax	/* if different, */
 	je	1f

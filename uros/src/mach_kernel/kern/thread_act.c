@@ -2015,10 +2015,28 @@ nudge(thread_act_t	thr_act)
 	 */
 	if (thr_act->thread && thr_act->thread->top_act == thr_act) {
 		/*
-		 * If it's suspended, wake it up. 
+		 * If it's suspended, wake it up.
 		 * This should nudge it even on another CPU.
 		 */
 		thread_wakeup((event_t)&thr_act->suspend_count);
+
+		/*
+		 * #361: the wakeup above only reaches a shuttle that is
+		 * already parked in TH_WAIT on &suspend_count.  An embryo
+		 * that gets resumed BEFORE it ever ran its park (shuttle in
+		 * pure TH_SUSP, never executed a user instruction) is deaf
+		 * to it, and nothing ever retries: bootstrap's main thread,
+		 * ush and a dozen kernel threads were lost this way on every
+		 * boot (12/1002 resumes measured).  On the release side
+		 * (count just hit zero) run the thread_unstop() path too:
+		 * for a stopped-but-never-parked shuttle it clears TH_SUSP
+		 * and setruns it -- the missing start; it is a no-op when
+		 * TH_SUSP is clear and does the normal release/wake_active
+		 * dance when the thread is parked.  Hold-side nudges keep
+		 * count > 0 and are unaffected.
+		 */
+		if (thr_act->suspend_count == 0)
+			thread_unstop(thr_act->thread);
 	}
 }
 

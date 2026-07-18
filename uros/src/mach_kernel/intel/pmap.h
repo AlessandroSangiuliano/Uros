@@ -409,7 +409,15 @@ typedef unsigned int	pt_entry_t;
 #define ptetokv(a)	(phystokv(pte_to_pa(a)))
 
 #ifndef	ASSEMBLER
-typedef	volatile long	cpu_set;	/* set of CPUs - must be <= 32 */
+/*
+ * #355: MUST be UNSIGNED.  The TLB-shootdown ack loops shift a cpu_set right
+ * (`for (cpu=0; wait_set!=0; cpu++, wait_set>>=1)`).  As a *signed* long, once
+ * bit 31 is set (cpu 31 active on a 32-CPU box) the right shift sign-extends,
+ * so wait_set never reaches 0: the loop runs past cpu 31 into a non-existent
+ * "cpu 32" whose ack word never changes, and the initiator spins forever.
+ * Harmless on <=31 CPUs (bit 31 never set), fatal at 32 -- the #355 hang.
+ */
+typedef	volatile unsigned long	cpu_set;	/* set of CPUs - must be <= 32 */
 					/* changed by other processors */
 
 struct pmap {
@@ -532,6 +540,7 @@ boolean_t	cpu_update_needed[NCPUS];
 
 extern void		process_pmap_updates(pmap_t pmap);
 extern void		pmap_update_interrupt(void);
+extern void		pmap_tlb_shootdown_handler(void);	/* #304/#310 */
 extern pmap_t		kernel_pmap;
 
 #endif	/* NCPUS > 1 */
@@ -766,8 +775,13 @@ extern void		flush_tlb(void);
 	 */								\
 	i_bit_clear((my_cpu), &cpus_idle);				\
 									\
+	/* #304/#310: flush via the lock-free shootdown handler, not	\
+	 * pmap_update_interrupt() — the latter's process_pmap_updates()	\
+	 * reloads CR3 for dead pmaps, which corrupts the context we are	\
+	 * about to resume.  This catches a shootdown that was queued	\
+	 * while we were parked (idle / at splvm) and could not ack.  */	\
 	if (cpu_update_needed[(my_cpu)])				\
-	    pmap_update_interrupt();					\
+	    pmap_tlb_shootdown_handler();				\
 									\
 	/*								\
 	 *	Mark that this cpu is now active.			\

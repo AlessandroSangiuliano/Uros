@@ -36,6 +36,7 @@
 #include <servers/netname.h>
 #include <servers/netname_defs.h>
 #include <vfs_types.h>
+#include <char/char_module_abi.h>  /* CHAR_CTTY_RELEASE_MSGH_ID (#365) */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -368,6 +369,7 @@ proc_S_subscribe_exit(
     struct pid_entry *e;
     int fire_now = 0;
     int32_t code = 0;
+    mach_port_t reaped_sigport = MACH_PORT_NULL;
 
     (void)server_port;
 
@@ -383,6 +385,16 @@ proc_S_subscribe_exit(
     if (e->state == PROC_STATE_ZOMBIE) {
         fire_now = 1;
         code = e->exit_code;
+        /*
+         * #378: the caller is reaping this zombie now, so release its
+         * pid-table slot — otherwise the fixed-size table (PROC_MAX_TASKS)
+         * leaks one entry per process ever run.  task_port was already
+         * dropped when the dead-name notification deallocated it; only
+         * signal_port may still hold a (now dead-name) send right, freed
+         * below the lock.  memset clears in_use so the allocator reuses it.
+         */
+        reaped_sigport = e->signal_port;
+        memset(e, 0, sizeof(*e));
     } else {
         /* Replace any previous waiter (v0.1.0 single-slot). */
         if (e->exit_notify != MACH_PORT_NULL) {
@@ -405,10 +417,73 @@ proc_S_subscribe_exit(
     }
     pthread_mutex_unlock(&pid_lock);
 
+    if (reaped_sigport != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), reaped_sigport);
+
     if (fire_now)
         fire_exit_notify(notify, pid, code);
 
     *result = PROC_OK;
+    return KERN_SUCCESS;
+}
+
+/*
+ * proc_reap_zombie(parent_pid) — non-blocking any-child reap (#389).
+ *
+ * Backs POSIX waitpid(-1, st, WNOHANG): find one zombie child of
+ * parent_pid, release its slot (the same #378 reap subscribe_exit does
+ * on an already-zombie pid) and hand back its pid + exit code.  Without
+ * this a shell can never sweep its background jobs, and every "cmd &"
+ * ever spawned holds a pid-table slot forever (the 256 wall the kill x
+ * fork storm hit at iteration ~254).
+ */
+kern_return_t
+proc_S_reap_zombie(
+    mach_port_t   server_port,
+    proc_pid_t    parent_pid,
+    proc_pid_t   *pid_out,
+    int          *exit_code_out,
+    int          *result)
+{
+    int i, children = 0;
+
+    (void)server_port;
+
+    *pid_out       = 0;
+    *exit_code_out = 0;
+
+    pthread_mutex_lock(&pid_lock);
+    for (i = 0; i < PROC_MAX_TASKS; i++) {
+        struct pid_entry *e = &pid_table[i];
+        mach_port_t reaped_sigport, reaped_notify;
+
+        if (!e->in_use || e->ppid != parent_pid)
+            continue;
+        children++;
+        if (e->state != PROC_STATE_ZOMBIE)
+            continue;
+
+        *pid_out       = e->pid;
+        *exit_code_out = e->exit_code;
+        /* #378-style reap: task_port was already dropped by the
+         * dead-name notification; only signal_port (and a stale
+         * exit_notify, defensively) may still hold rights — freed
+         * below the lock. */
+        reaped_sigport = e->signal_port;
+        reaped_notify  = e->exit_notify;
+        memset(e, 0, sizeof(*e));
+        pthread_mutex_unlock(&pid_lock);
+
+        if (reaped_sigport != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), reaped_sigport);
+        if (reaped_notify != MACH_PORT_NULL)
+            (void)mach_port_deallocate(mach_task_self(), reaped_notify);
+        *result = PROC_OK;
+        return KERN_SUCCESS;
+    }
+    pthread_mutex_unlock(&pid_lock);
+
+    *result = children ? PROC_ERR_NOT_FOUND : PROC_ERR_NO_CHILD;
     return KERN_SUCCESS;
 }
 
@@ -937,6 +1012,32 @@ proc_S_set_ctty(
 }
 
 /*
+ * Tell the tty owner (char_server) that a session's controlling terminal
+ * has been released, so it can drop the stale binding and free the VT for
+ * a fresh shell (#365).  proc_server holds the send right to the tty port
+ * (handed over at tty_acquire_ctty), so it is the one that knows the exact
+ * moment the ctty goes away — on explicit clear or on leader death.
+ * One-way, best-effort: a dead port just means char_server is gone too.
+ */
+static void
+notify_ctty_release(mach_port_t ctty, proc_pid_t sid)
+{
+    char_ctty_release_msg_t m;
+
+    if (ctty == MACH_PORT_NULL)
+        return;
+    memset(&m, 0, sizeof m);
+    m.head.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    m.head.msgh_size        = sizeof m;
+    m.head.msgh_remote_port = ctty;
+    m.head.msgh_local_port  = MACH_PORT_NULL;
+    m.head.msgh_id          = CHAR_CTTY_RELEASE_MSGH_ID;
+    m.sid                   = (int32_t)sid;
+    (void)mach_msg(&m.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof m,
+                   0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+}
+
+/*
  * proc_clear_ctty(sid): release the session's controlling terminal.
  * Idempotent — clearing a session that has none simply succeeds.
  */
@@ -963,8 +1064,10 @@ proc_S_clear_ctty(
     e->fg_pgrp_id = 0;
     pthread_mutex_unlock(&pid_lock);
 
-    if (old != MACH_PORT_NULL)
+    if (old != MACH_PORT_NULL) {
+        notify_ctty_release(old, sid);
         (void)mach_port_deallocate(mach_task_self(), old);
+    }
 
     *result = PROC_OK;
     return KERN_SUCCESS;
@@ -1059,7 +1162,6 @@ static void
 proc_drain_sigterm_sweep(void)
 {
     struct { mach_port_t sigport; proc_pid_t pid; } term[PROC_MAX_TASKS];
-    mach_port_t kill_tasks[PROC_MAX_TASKS];
     unsigned n_term = 0, n_kill = 0, i;
     int k;
 
@@ -1084,21 +1186,30 @@ proc_drain_sigterm_sweep(void)
 
     usleep(PROC_DRAIN_GRACE_US);
 
-    /* Whatever we SIGTERM'd that is still alive gets task_terminate, so
-     * shutdown always completes in a bounded time even if an app hangs. */
+    /*
+     * #379: count whoever ignored SIGTERM, but do NOT task_terminate()
+     * them here.  On SMP, terminating a task whose thread is still active
+     * on another CPU can hang task_terminate() intermittently, wedging the
+     * whole shutdown before the fs sync + host_reboot below (the log then
+     * stops dead at this line).  We don't need to force-kill them: the
+     * host_reboot in phase 3 resets the machine and wipes them, and the fs
+     * sync (phase 2) needs only the fs servers — which own no signal_port
+     * and are never in this sweep.  A survivor that ignored SIGTERM loses
+     * its unflushed buffers whether we kill it or reset it, so integrity is
+     * unchanged.  Leaving them alone keeps shutdown bounded — the original
+     * intent of the force-kill, minus the hang.
+     */
     pthread_mutex_lock(&pid_lock);
     for (i = 0; i < n_term; i++) {
         struct pid_entry *e = find_by_pid_locked(term[i].pid);
         if (e && e->state != PROC_STATE_ZOMBIE)
-            kill_tasks[n_kill++] = e->task_port;
+            n_kill++;
     }
     pthread_mutex_unlock(&pid_lock);
 
-    if (n_kill) {
-        printf("proc: shutdown — SIGKILL %u unresponsive task(s)\n", n_kill);
-        for (i = 0; i < n_kill; i++)
-            (void)task_terminate(kill_tasks[i]);
-    }
+    if (n_kill)
+        printf("proc: shutdown — %u task(s) unresponsive to SIGTERM; "
+               "leaving them for host_reboot (#379)\n", n_kill);
 }
 
 /*
@@ -1380,6 +1491,7 @@ parse_proc_path(const char *path, proc_pid_t *out_pid)
 kern_return_t
 vfs_open(
     mach_port_t fs_port,
+    mach_port_t client_task,
     char *path,
     int flags,
     int mode,
@@ -1391,6 +1503,9 @@ vfs_open(
     struct pid_entry *e;
 
     (void)fs_port; (void)flags; (void)mode;
+    /* #385: /proc handles are virtual (no fs_server fid pool), so we don't
+     * need the client-task reclaim hook — just drop the send right. */
+    (void)mach_port_deallocate(mach_task_self(), client_task);
 
     *handle_out = 0;
     *type_out   = VFS_FT_UNKNOWN;
@@ -1671,6 +1786,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
     mach_port_t subscriber = MACH_PORT_NULL;
     mach_port_t parent_sigport = MACH_PORT_NULL;
     mach_port_t ctty = MACH_PORT_NULL;
+    mach_port_t dead_sigport = MACH_PORT_NULL;
     proc_pid_t pid = 0;
     proc_pid_t ppid = 0;
     int32_t code = 0;
@@ -1707,15 +1823,34 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
             if (parent && parent->signal_port != MACH_PORT_NULL)
                 parent_sigport = parent->signal_port;
         }
+        /*
+         * #378: a waiter already blocked on this pid reaps it the moment
+         * we fire_exit_notify below, so release its pid-table slot now —
+         * otherwise the fixed-size table leaks one entry per process.  With
+         * no waiter we keep the zombie for a later waitpid, which reaps and
+         * frees it through proc_S_subscribe_exit's already-zombie path.
+         * (Unwaited zombies — background jobs, orphans — still linger until
+         * a reaper exists; tracked separately.)  signal_port is freed below
+         * the lock; everything else is already snapshotted or cleared.
+         */
+        if (subscriber != MACH_PORT_NULL) {
+            dead_sigport = e->signal_port;
+            memset(e, 0, sizeof(*e));
+        }
     }
     pthread_mutex_unlock(&pid_lock);
 
     /* Drop the dead-name reference the kernel handed us. */
     (void)mach_port_deallocate(mach_task_self(), name);
+    if (dead_sigport != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), dead_sigport);
 
-    /* Release a dead session leader's controlling-tty send right. */
-    if (ctty != MACH_PORT_NULL)
+    /* Release a dead session leader's controlling-tty send right, and tell
+     * the tty owner first so it frees the VT (leader → sid == pid). */
+    if (ctty != MACH_PORT_NULL) {
+        notify_ctty_release(ctty, pid);
         (void)mach_port_deallocate(mach_task_self(), ctty);
+    }
 
     if (subscriber != MACH_PORT_NULL)
         fire_exit_notify(subscriber, pid, code);

@@ -183,6 +183,11 @@ extern ipc_entry_t ipc_entry_lookup(
 	ipc_space_t	space,
 	mach_port_t	name);
 
+/* #331 step 2: lock-free entry lookup (no space lock); see ipc_entry.c */
+extern ipc_entry_t ipc_entry_lookup_lockfree(
+	ipc_space_t	space,
+	mach_port_t	name);
+
 /* Allocate an entry in a space */
 extern kern_return_t ipc_entry_get(
 	ipc_space_t	space,

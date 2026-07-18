@@ -53,6 +53,11 @@ int _pthread_stack_size __attribute__((weak));
 static int __pthread_stack_size, __pthread_stack_mask;
 static vm_address_t lowest_stack;
 static vm_address_t *free_stacks;
+/* #377: serialize the stack free-list.  The thread pool has _thread_pool_lock;
+ * this list had none, so a concurrent pop (_pthread_allocate_stack) and push
+ * (_pthread_free_stack) raced under SMP thread churn -- corrupting the list and
+ * handing the same stack to two threads (stack-smash crash, scale sweep >8). */
+static pthread_lock_t _free_stacks_lock = 0;
 
 #define STACK_LOWEST(sp)	((sp) & ~__pthread_stack_mask)
 #define STACK_RESERVED		(sizeof (struct _pthread))
@@ -87,6 +92,8 @@ _pthread_allocate_stack(void)
 {
 	vm_address_t cur_stack;
 	kern_return_t kr;
+
+	LOCK(_free_stacks_lock);			/* #377 */
 	if (free_stacks == 0)
 	{
 	    /* Allocating guard pages is done by doubling
@@ -172,6 +179,7 @@ _pthread_allocate_stack(void)
 	}
 	cur_stack = STACK_START((vm_address_t) free_stacks);
 	free_stacks = (vm_address_t *)*free_stacks;
+	UNLOCK(_free_stacks_lock);			/* #377 */
 	cur_stack = _adjust_sp(cur_stack); /* Machine dependent stack fudging */
 	return (cur_stack);
 }
@@ -180,25 +188,30 @@ static void
 _pthread_free_stack(pthread_t self)
 {
 	vm_address_t *base = (vm_address_t *) STACK_LOWEST((vm_address_t)self);
+	LOCK(_free_stacks_lock);			/* #377 */
 	*base = (vm_address_t) free_stacks;
 	free_stacks = base;
+	UNLOCK(_free_stacks_lock);			/* #377 */
 }
 
 /*
  * [Internal] thread pool — recycle kernel threads instead of destroying them.
  *
- * When a pthread exits, its kernel thread parks on a semaphore instead of
- * calling thread_terminate().  pthread_create() can then reuse a parked
- * thread, avoiding the cost of thread_create() + thread_set_state() RPCs.
+ * When a pthread exits, its kernel thread parks on a futex (self->pool_wake)
+ * instead of calling thread_terminate().  pthread_create() can then reuse a
+ * parked thread, avoiding the cost of thread_create() + thread_set_state()
+ * RPCs.  The wake word lives in the pthread (per-thread), NOT here in the
+ * slot: a slot is reused by the next parker before the previous (already
+ * pool_get'd) thread is woken, so a slot-keyed futex would pile two threads
+ * on one key and strand one of them (#352).
  */
 
 #define _THREAD_POOL_MAX	8	/* Maximum cached kernel threads */
 
 struct _pool_entry {
 	thread_port_t	kernel_thread;	/* Mach thread port */
-	mach_port_t	wake_sem;	/* Semaphore to wake this thread */
 	vm_address_t	stack;		/* Stack assigned to this thread */
-	pthread_t	self;		/* pthread_t at base of stack */
+	pthread_t	self;		/* pthread_t at base of stack (has pool_wake) */
 };
 
 static struct _pool_entry _thread_pool[_THREAD_POOL_MAX];
@@ -231,9 +244,8 @@ _pthread_pool_trampoline(pthread_t self)
 static int
 _pthread_pool_park(pthread_t self)
 {
-	kern_return_t kern_res;
-	mach_port_t sem;
 	int idx;
+	int wake_seq;
 
 	LOCK(_thread_pool_lock);
 	if (_thread_pool_count >= _THREAD_POOL_MAX) {
@@ -242,26 +254,27 @@ _pthread_pool_park(pthread_t self)
 	}
 	idx = _thread_pool_count++;
 
-	/* Create wake semaphore if needed */
-	if (_thread_pool[idx].wake_sem == MACH_PORT_NULL) {
-		MACH_CALL(semaphore_create(mach_task_self(),
-					   &_thread_pool[idx].wake_sem,
-					   SYNC_POLICY_FIFO, 0), kern_res);
-		if (kern_res != KERN_SUCCESS) {
-			_thread_pool_count--;
-			UNLOCK(_thread_pool_lock);
-			return 0;
-		}
-	}
-
+	/* #352: park on a PER-THREAD futex word (self->pool_wake), not a
+	 * per-slot one.  A slot address is reused by the next parker before
+	 * this thread (once pool_get'd) is actually woken, so a slot-keyed
+	 * futex would pile two threads on one key and thread_wakeup_one()
+	 * would strand one of them (the lost wakeup #352). */
 	_thread_pool[idx].kernel_thread = self->kernel_thread;
 	_thread_pool[idx].stack = (vm_address_t)STACK_LOWEST((vm_address_t)self);
 	_thread_pool[idx].self = self;
-	sem = _thread_pool[idx].wake_sem;
+	/* #352: reset to the deterministic "parked" value (0) under the lock.
+	 * pthread_create() reuses us by memset()ing the whole pthread (which
+	 * includes pool_wake) and only THEN publishing fun/arg and bumping the
+	 * word non-zero.  Anchoring the wait value at 0 means the memset (also
+	 * 0) never makes our re-read mismatch — so we can only wake on the
+	 * post-fun/arg bump, never escape early into a NULL fun.  No waker can
+	 * race this store: pulling us needs the pool lock we still hold. */
+	self->pool_wake = 0;
+	wake_seq = 0;
 	UNLOCK(_thread_pool_lock);
 
-	/* Park: block until pthread_create wakes us */
-	MACH_CALL(semaphore_wait(sem), kern_res);
+	/* Park: block until pthread_create publishes fun/arg and bumps our word */
+	(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
 
 	/* Woken up — self->fun and self->arg have been set by pthread_create */
 	_pthread_pool_trampoline(self);
@@ -277,7 +290,7 @@ _pthread_pool_park(pthread_t self)
  */
 static int
 _pthread_pool_get(pthread_t *thread, vm_address_t *stack,
-		  thread_port_t *kernel_thread, mach_port_t *wake_sem)
+		  thread_port_t *kernel_thread, volatile int **wake_word)
 {
 	int idx;
 
@@ -290,7 +303,9 @@ _pthread_pool_get(pthread_t *thread, vm_address_t *stack,
 	*thread = _thread_pool[idx].self;
 	*stack = _thread_pool[idx].stack;
 	*kernel_thread = _thread_pool[idx].kernel_thread;
-	*wake_sem = _thread_pool[idx].wake_sem;
+	/* #352: return the address of the PARKED THREAD's own wake futex word
+	 * (not the slot's) so the caller bumps+wakes exactly that thread. */
+	*wake_word = PTH_FW((*thread)->pool_wake);
 	UNLOCK(_thread_pool_lock);
 	return 1;
 }
@@ -663,6 +678,28 @@ _pthread_create(pthread_t t,
 {
 	int res;
 	kern_return_t kern_res;
+	extern int _mig_multithreaded;
+
+	/*
+	 * #299 (SMP reply-port aliasing): libmach also ships a single-threaded
+	 * mig_support (one shared static reply port); its symbols are weak, so
+	 * the only thing that guarantees the per-thread libpthreads version is
+	 * linked in is a *strong* reference to a libpthreads-only mig symbol.
+	 * _mig_multithreaded is exactly that — touching it here forces the
+	 * per-thread mig_support to win the link for every program that creates
+	 * threads.  Functionally: the moment a second thread is created, switch
+	 * to per-thread reply ports (migrating the creator's current shared port
+	 * into its own TSD) BEFORE the new thread can run.  Otherwise, on SMP the
+	 * new thread races on another CPU and calls mig_get_reply_port() while
+	 * _mig_multithreaded is still 0, grabbing the SAME reply port as its
+	 * creator: two threads then receive on one reply port, ipc_mqueue_deliver
+	 * hands the RPC reply to whichever is first in line, and the caller hangs
+	 * forever (gpu_server's render worker was the first victim).  mig_init()
+	 * is idempotent once _mig_multithreaded is already 1.
+	 */
+	if (!_mig_multithreaded)
+		mig_init((void *)pthread_self());
+
 	res = ESUCCESS;
 	do
 	{
@@ -679,35 +716,13 @@ _pthread_create(pthread_t t,
 		t->cleanup_stack = (struct _pthread_handler_rec *)NULL;
 		t->sigmask = 0;
 		t->sigpending = 0;
-		t->sig_sem = MACH_PORT_NULL;
-		/* Create control semaphores */
-		if (t->detached == PTHREAD_CREATE_JOINABLE)
-		{
-			MACH_CALL(semaphore_create(mach_task_self(), 
-						   &t->death, 
-						   SYNC_POLICY_FIFO, 
-						   0), kern_res);
-			if (kern_res != KERN_SUCCESS)
-			{
-				printf("Can't create 'death' semaphore: %d\n", kern_res);
-				res = EINVAL; /* Need better error here? */
-				break;
-			}
-			MACH_CALL(semaphore_create(mach_task_self(), 
-						   &t->joiners, 
-						   SYNC_POLICY_FIFO, 
-						   0), kern_res);
-			if (kern_res != KERN_SUCCESS)
-			{
-				printf("Can't create 'joiners' semaphore: %d\n", kern_res);
-				res = EINVAL; /* Need better error here? */
-				break;
-			}
-			t->num_joiners = 0;
-		} else
-		{
-			t->death = MACH_PORT_NULL;
-		}
+		t->sig_sem = 0;
+		/* #324: joiners/death are futex words now (the join handshake
+		 * blocks/wakes on them via urmach_futex), not Mach semaphores
+		 * — just zero them; `detached` carries the joinable state. */
+		t->death = 0;
+		t->joiners = 0;
+		t->num_joiners = 0;
 
 		/*
 		 * #274: with PTHREAD_EXPLICIT_SCHED the thread must start
@@ -745,16 +760,18 @@ pthread_create(pthread_t *thread,
 
 	/* Try to reuse a pooled kernel thread first */
 	{
-		mach_port_t wake_sem;
-		if (_pthread_pool_get(&t, &stack, &kernel_thread, &wake_sem))
+		volatile int *wake_word;
+		if (_pthread_pool_get(&t, &stack, &kernel_thread, &wake_word))
 		{
 			*thread = t;
 			if ((res = _pthread_create(t, attrs, kernel_thread)) != 0)
 				return (res);
 			t->arg = arg;
 			t->fun = start_routine;
-			/* Wake the parked thread — it will run _pthread_pool_trampoline */
-			MACH_CALL(semaphore_signal(wake_sem), kern_res);
+			/* Wake the parked thread (bump its seq) — it will run
+			 * _pthread_pool_trampoline and read fun/arg. */
+			(*wake_word)++;
+			_pthread_futex_wake_one(wake_word);
 			return (ESUCCESS);
 		}
 	}
@@ -798,12 +815,10 @@ pthread_create(pthread_t *thread,
 /*
  * Make a thread 'undetached' - no longer 'joinable' with other threads.
  */
-int       
+int
 pthread_detach(pthread_t thread)
 {
-	kern_return_t kern_res;
 	int num_joiners;
-	mach_port_t death;
 	if (thread->sig == _PTHREAD_SIG)
 	{
 		LOCK(thread->lock);
@@ -811,18 +826,14 @@ pthread_detach(pthread_t thread)
 		{
 			thread->detached = PTHREAD_CREATE_DETACHED;
 			num_joiners = thread->num_joiners;
-			death = thread->death;
-			thread->death = MACH_PORT_NULL;
+			/* #324: bump the joiners futex under the lock so a
+			 * racing joiner's snapshot is invalidated; wake them
+			 * (they re-check, see DETACHED, return EINVAL). */
+			(*PTH_FW(thread->joiners))++;
 			UNLOCK(thread->lock);
 			if (num_joiners > 0)
-			{ /* Have to tell these guys this thread can't be joined with */
-				MACH_CALL(semaphore_signal_all(thread->joiners), kern_res);
-			}
-			/* Destroy 'control' semaphores */
-			MACH_CALL(semaphore_destroy(mach_task_self(),
-						    thread->joiners), kern_res);
-			MACH_CALL(semaphore_destroy(mach_task_self(),
-						    death), kern_res);
+				_pthread_futex_wake_all(PTH_FW(thread->joiners));
+			/* #324: no control semaphores to destroy. */
 			return (ESUCCESS);
 		} else
 		{
@@ -857,28 +868,20 @@ pthread_exit(void *value_ptr)
 		self->detached = _PTHREAD_EXITED;
 		self->exit_value = value_ptr;
 		num_joiners = self->num_joiners;
+		/* #324: publish EXITED + bump the joiners futex under the lock
+		 * (invalidates a joiner's earlier snapshot — no lost wakeup). */
+		(*PTH_FW(self->joiners))++;
 		UNLOCK(self->lock);
 		if (num_joiners > 0)
-		{
-			MACH_CALL(semaphore_signal_all(self->joiners), kern_res);
-		}
-		MACH_CALL(semaphore_wait(self->death), kern_res);
+			_pthread_futex_wake_all(PTH_FW(self->joiners));
+		/* Wait on the death futex until the joiner that harvests our
+		 * exit value releases us by setting it non-zero. */
+		while (*PTH_FW(self->death) == 0)
+			(void) _pthread_futex_wait(PTH_FW(self->death), 0, 0);
 	} else
 		UNLOCK(self->lock);
-	/* Destroy join/death semaphores */
-	if (self->death)
-	{
-		MACH_CALL(semaphore_destroy(mach_task_self(), self->joiners), kern_res);
-		MACH_CALL(semaphore_destroy(mach_task_self(), self->death), kern_res);
-		self->death = MACH_PORT_NULL;
-		self->joiners = MACH_PORT_NULL;
-	}
-	/* Destroy signal semaphore if allocated */
-	if (self->sig_sem != MACH_PORT_NULL)
-	{
-		MACH_CALL(semaphore_destroy(mach_task_self(), self->sig_sem), kern_res);
-		self->sig_sem = MACH_PORT_NULL;
-	}
+	/* #324: nothing to destroy — joiners/death/sig_sem are futex words
+	 * in user memory, not Mach semaphores. */
 	/* Try to park this kernel thread in the pool for reuse */
 	if (_pthread_pool_park(self))
 		return;		/* NOT REACHED — park loops into trampoline */
@@ -900,9 +903,13 @@ pthread_join(pthread_t thread,
 		LOCK(thread->lock);
 		if (thread->detached == PTHREAD_CREATE_JOINABLE)
 		{
+			int j_snap;
 			thread->num_joiners++;
+			j_snap = *PTH_FW(thread->joiners);  /* snapshot under lock */
 			UNLOCK(thread->lock);
-			MACH_CALL(semaphore_wait(thread->joiners), kern_res);
+			/* Block until exit/detach bumps the joiners futex. */
+			(void) _pthread_futex_wait(PTH_FW(thread->joiners),
+						   j_snap, 0);
 			LOCK(thread->lock);
 			thread->num_joiners--;
 		}
@@ -915,7 +922,10 @@ pthread_join(pthread_t thread,
 					*value_ptr = thread->exit_value;
 				}
 				UNLOCK(thread->lock);
-				MACH_CALL(semaphore_signal(thread->death), kern_res);
+				/* #324: release the exiting thread (the hearse)
+				 * via the death futex. */
+				*PTH_FW(thread->death) = 1;
+				_pthread_futex_wake_one(PTH_FW(thread->death));
 				return (ESUCCESS);
 			} else
 			{	/* This 'joiner' missed the catch! */
@@ -968,8 +978,10 @@ pthread_timedjoin_np(pthread_t thread,
 	if (thread->detached == PTHREAD_CREATE_JOINABLE) {
 		struct timespec now;
 		tvalspec_t then;
+		int j_snap;
 
 		thread->num_joiners++;
+		j_snap = *PTH_FW(thread->joiners);  /* snapshot under lock */
 		UNLOCK(thread->lock);
 
 		getclock(TIMEOFDAY, &now);
@@ -984,7 +996,19 @@ pthread_timedjoin_np(pthread_t thread,
 			then.tv_nsec = 0;
 		}
 
-		kern_res = semaphore_timedwait(thread->joiners, then);
+		/* #324: deadline already passed -> immediate timeout (don't
+		 * pass 0 ms to the futex, which would mean "wait forever"). */
+		if (then.tv_sec == 0 && then.tv_nsec == 0) {
+			kern_res = KERN_OPERATION_TIMED_OUT;
+		} else {
+			unsigned int tmo_ms =
+				(unsigned int)then.tv_sec * 1000u +
+				(unsigned int)(then.tv_nsec / 1000000);
+			if (tmo_ms == 0)
+				tmo_ms = 1;
+			kern_res = _pthread_futex_wait(PTH_FW(thread->joiners),
+						       j_snap, tmo_ms);
+		}
 		LOCK(thread->lock);
 		thread->num_joiners--;
 
@@ -1003,7 +1027,9 @@ pthread_timedjoin_np(pthread_t thread,
 			if (value_ptr)
 				*value_ptr = thread->exit_value;
 			UNLOCK(thread->lock);
-			MACH_CALL(semaphore_signal(thread->death), kern_res);
+			/* #324: release the exiting thread via the death futex. */
+			*PTH_FW(thread->death) = 1;
+			_pthread_futex_wake_one(PTH_FW(thread->death));
 			return (ESUCCESS);
 		}
 		UNLOCK(thread->lock);

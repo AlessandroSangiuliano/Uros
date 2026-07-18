@@ -14,6 +14,12 @@
 #                                                   # rebuild o se la run
 #                                                   # precedente è stata
 #                                                   # chiusa a metà writeback)
+#   ./scripts/run-qemu.sh --diskregen               # come sopra: rigenera il
+#                                                   # disco SOLO quando lo chiedi.
+#                                                   # Di default il disco NON è
+#                                                   # rigenerato (anche con
+#                                                   # --bench: la suite passa
+#                                                   # dal bundle stage-1)
 #
 # L'immagine disco contiene /mach_servers/ con:
 #   bootstrap.conf   — configurazione del bootstrap
@@ -48,17 +54,32 @@ BENCH_ARGS=""
 EXTRA_ARGS=""
 MINIMAL_ARG=""
 NO_REBOOT="-no-reboot"
+SMP_COUNT=""
+DISK_REGEN=false    # --diskregen: opt in to regenerating disk.img this launch
+                    # (otherwise the existing disk is reused, even with --bench;
+                    # the bench suite is carried by the stage-1 bundle)
+REUSE_BUNDLE=false  # --reuse-bundle: skip the make-bundle.sh step and reuse the
+                    # existing bootstrap.bundle (fast iteration / repeated launches
+                    # of the same kernel+servers, e.g. SMP reliability loops)
+CONSOLE_ARG=""      # --with-console: ship the on-screen console TTY (#363) in the
+                    # bundle so ush binds the graphical window instead of the UART.
+                    # Off by default → serial/headless/bench paths unchanged.
 while [ $# -gt 0 ]; do
     case "$1" in
         --no-disk) USE_DISK=false; USE_AHCI=false; shift ;;
+        --with-console) CONSOLE_ARG="--with-console"; shift ;;
+        --window) EXTRA_ARGS="$EXTRA_ARGS -display gtk"; shift ;;
         --no-bundle) USE_BUNDLE=false; shift ;;
         --ahci2) USE_AHCI=true; USE_AHCI2=true; shift ;;
         --ahci) USE_AHCI=true; shift ;;
         --virtio) USE_VIRTIO=true; shift ;;
         --sha-ni) USE_SHA_NI=true; shift ;;
         --fresh-disk) FRESH_DISK=true; shift ;;
+        --diskregen) DISK_REGEN=true; shift ;;
+        --reuse-bundle) REUSE_BUNDLE=true; shift ;;
         --minimal) MINIMAL_ARG="--minimal"; FRESH_DISK=true; shift ;;
         --allow-reboot) NO_REBOOT=""; shift ;;
+        --smp) shift; SMP_COUNT="$1"; shift ;;
         --bench)
             shift
             while [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; do
@@ -70,23 +91,34 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Regenerate disk image if --bench was specified (pass suite selection)
-# or if --fresh-disk was explicitly requested.  --bench implies fresh.
-if [ -n "$BENCH_ARGS" ]; then
-    echo "Bench suites:$BENCH_ARGS"
-    "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
-elif [ "$FRESH_DISK" = true ]; then
-    echo "Regenerating disk image (--fresh-disk$([ -n "$MINIMAL_ARG" ] && echo " --minimal"))…"
-    "$REPO_ROOT/scripts/make-disk-image.sh" $MINIMAL_ARG
+# Disk-image regeneration is opt-in: it happens only with --diskregen (or
+# --fresh-disk/--minimal, or when disk.img is missing).  Otherwise the existing
+# disk is reused -- even with --bench -- so iterating on the kernel doesn't pay
+# the disk-format cost every launch.  The bench suite reaches ipc_bench through
+# the stage-1 bundle (rebuilt below), so changing --bench suites does NOT need
+# a disk regen.
+if [ "$DISK_REGEN" = true ] || [ "$FRESH_DISK" = true ] || [ ! -f "$DISK_IMG" ]; then
+    [ -f "$DISK_IMG" ] || echo "disk.img missing — regenerating."
+    if [ -n "$BENCH_ARGS" ]; then
+        echo "Regenerating disk image (--bench):$BENCH_ARGS"
+        "$REPO_ROOT/scripts/make-disk-image.sh" --bench $BENCH_ARGS $MINIMAL_ARG
+    else
+        echo "Regenerating disk image$([ -n "$MINIMAL_ARG" ] && echo " (--minimal)")…"
+        "$REPO_ROOT/scripts/make-disk-image.sh" $MINIMAL_ARG
+    fi
+elif [ -n "$BENCH_ARGS" ]; then
+    echo "Bench suites:$BENCH_ARGS (via bundle; disk reused — pass --diskregen to rebuild it)"
 fi
 
 # Issue #186: (re)build the stage-1 bundle so its bootstrap.conf and
 # binaries stay in sync with the on-disk copy (especially with --bench).
 if [ "$USE_BUNDLE" = true ]; then
-    if [ -n "$BENCH_ARGS" ]; then
-        "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG
+    if [ "$REUSE_BUNDLE" = true ] && [ -f "$BUNDLE_IMG" ]; then
+        echo "Bundle:  reusing $BUNDLE_IMG (--reuse-bundle, skipped rebuild)"
+    elif [ -n "$BENCH_ARGS" ]; then
+        "$REPO_ROOT/scripts/make-bundle.sh" --bench $BENCH_ARGS $MINIMAL_ARG $CONSOLE_ARG
     else
-        "$REPO_ROOT/scripts/make-bundle.sh" $MINIMAL_ARG
+        "$REPO_ROOT/scripts/make-bundle.sh" $MINIMAL_ARG $CONSOLE_ARG
     fi
 fi
 
@@ -130,6 +162,12 @@ if [ "$USE_SHA_NI" = true ]; then
     echo "Acceleration: TCG (--sha-ni: Icelake-Server,+sha-ni)"
 else
     QEMU_ARGS="-m 512M -enable-kvm -cpu host -kernel $KERNEL -initrd $INITRD $NO_REBOOT"
+fi
+# #300: --smp N exposes N CPUs to the guest.  Requires the kernel to be
+# built with -DUROS_NCPUS=N (or >=N).
+if [ -n "$SMP_COUNT" ]; then
+    QEMU_ARGS="$QEMU_ARGS -smp $SMP_COUNT"
+    echo "SMP: $SMP_COUNT CPUs"
 fi
 
 # Issue #224: stage-2 e default_pager girano interamente su AHCI; il

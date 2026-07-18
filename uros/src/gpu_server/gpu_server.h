@@ -128,7 +128,20 @@ unsigned int gpu_core_handle_revoke(uint64_t cap_id);
  * worker thread, NEVER directly from the MIG dispatch loop — the
  * MIG handler enqueues into text_render and returns immediately.
  */
-void gpu_core_text_puts(const char *buf, size_t len);
+void gpu_core_text_puts(uint32_t surface, const char *buf, size_t len);
+
+/*
+ * Virtual text surfaces (#204/#364).  gpu_core_text_set_active makes
+ * `surface` the one scanned out to the physical display (the VT
+ * switch); gpu_core_text_surface_count reports how many the active
+ * module keeps (1 for a single-surface module).
+ */
+int      gpu_core_text_set_active(uint32_t surface);
+uint32_t gpu_core_text_surface_count(void);
+
+/* Scroll the on-screen surface through its scrollback by `delta` rows
+ * (> 0 up into history, < 0 down toward live); #364. */
+int      gpu_core_text_scroll(int delta);
 
 /* ============================================================
  * Text render pipeline (text_render.c)
@@ -153,6 +166,15 @@ int  gpu_text_render_init(void);
  * longer chunks get truncated.
  */
 void gpu_text_render_enqueue(const char *buf, size_t len);
+
+/*
+ * Same, but targeting a specific virtual text surface (#204/#364).
+ * gpu_text_render_enqueue() is the surface-0 shorthand.  The surface id
+ * rides through the queue so the single render thread still serialises
+ * every cell write (no cross-surface race).
+ */
+void gpu_text_render_enqueue_surface(uint32_t surface,
+				     const char *buf, size_t len);
 
 /*
  * Diagnostics — surfaced through gpu_query_stats (#203).  Drops counts

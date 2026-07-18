@@ -112,6 +112,17 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(ush)
 endif()
 
+# Build cpustat (#375) — per-CPU load monitor, the first dynamically-linked
+# real tool (umbrella libc.so + libmach_core-pic), launched from the shell.
+if(UROS_BUILD_MUSL)
+  add_subdirectory(cpustat)
+endif()
+
+# Build virtual_terminal_server — VT shell supervisor (#365 phase 2b).
+if(UROS_BUILD_MUSL)
+  add_subdirectory(virtual_terminal_server)
+endif()
+
 # Build libfoo.so + dlopen_test — musl dlopen end-to-end (#234 incr 4)
 if(UROS_BUILD_MUSL)
   add_subdirectory(libfoo)
@@ -128,10 +139,10 @@ if(OSFMK_BUILD_IPC_BENCH)
   add_subdirectory(ipc_bench)
 endif()
 
-# Build AHCI userspace driver
-if(OSFMK_BUILD_AHCI_DRIVER)
-  add_subdirectory(ahci_driver)
-endif()
+# The standalone AHCI userspace driver (src/ahci_driver) was removed: it was
+# superseded by the modular block_device_server/ahci (ahci.so loaded by blk)
+# and was no longer deployed in the bundle or on disk.  ext_server's MIG
+# ahci_batch stubs now come from block_device_server/ahci/ (identical defs).
 
 # Build virtio-blk userspace driver
 if(OSFMK_BUILD_VIRTIO_BLK)

@@ -142,6 +142,9 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include <i386/pic.h>
 #include <i386/pio.h>
 #include <i386/misc_protos.h>
+#if	NCPUS > 1
+#include <i386/ioapic.h>	/* #311: device-IRQ mask/unmask moves to the I/O APIC */
+#endif
 
 #if	NCPUS > 1 && defined(CBUS)
 #include <busses/cbus/cbus.h>
@@ -390,6 +393,13 @@ pic_irq_mask(unsigned int irq)
 
 	if (irq >= NINTR)
 		return;
+#if	NCPUS > 1
+	/* #311: when the I/O APIC owns delivery, flow-control is the RTE. */
+	if (ioapic_enabled) {
+		ioapic_mask_irq(irq);
+		return;
+	}
+#endif
 	bit = (u_short)(1u << irq);
 	pic_forced_mask |= bit;
 	for (i = SPL0; i <= SPLHI; i++)
@@ -409,6 +419,12 @@ pic_irq_unmask(unsigned int irq)
 
 	if (irq >= NINTR)
 		return;
+#if	NCPUS > 1
+	if (ioapic_enabled) {
+		ioapic_unmask_irq(irq);
+		return;
+	}
+#endif
 	bit = (u_short)(1u << irq);
 	pic_forced_mask &= (u_short)~bit;
 

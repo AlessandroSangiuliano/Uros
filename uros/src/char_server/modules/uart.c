@@ -208,6 +208,18 @@ uart_irq_handler(void *arg)
 		{
 			uint8_t b = uart_in(UART_RHR);
 			uint32_t next = (p->ring_head + 1u) & UART_RING_MASK;
+
+			/*
+			 * #382: Ctrl+D is the kernel-debugger break key.
+			 * The kernel can't see our RX bytes (we own COM1),
+			 * so report it; the RPC returns 0 only when the -K
+			 * boot flag armed the break — the byte is then
+			 * consumed by the debugger session.  Otherwise fall
+			 * through and deliver it as ordinary input (EOF).
+			 */
+			if (b == 0x04 && char_core_ddb_break() == 0)
+				continue;
+
 			if (next == p->ring_tail) {
 				p->overrun_drops++;
 			} else {
@@ -344,6 +356,20 @@ uart_tty_read(void *priv, char *buf, size_t max, size_t *out_len)
 {
 	struct uart_priv *p = priv;
 	size_t n = 0;
+
+	/*
+	 * #382: opportunistic FIFO drain when the ring is empty.  An
+	 * edge-triggered IRQ 4 front can be lost for good whenever
+	 * delivery was impossible at the instant the RX line rose (CPUs
+	 * parked at IF=0 during a DDB session being the proven case) —
+	 * the 16550 then holds INT asserted with a full FIFO and never
+	 * fires again.  Readers poll this entry point continuously
+	 * anyway (the tty read poll), so one LSR peek per empty-ring
+	 * read resurrects the line within a poll period no matter what
+	 * ate the front.  Defense in depth on top of the #381 kernel fix.
+	 */
+	if (p->ring_tail == p->ring_head && (uart_in(UART_LSR) & LSR_DR))
+		uart_irq_handler(p);
 
 	while (n < max && p->ring_tail != p->ring_head) {
 		buf[n++] = (char)p->ring[p->ring_tail];

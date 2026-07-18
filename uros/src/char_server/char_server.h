@@ -90,6 +90,31 @@ boolean_t char_core_dispatch_irq(mach_msg_header_t *in);
 int  char_core_irq_init(mach_port_t master_device, mach_port_t port_set);
 
 /* ============================================================
+ * Keyboard → console loopback (#363).
+ *
+ * The console TTY module registers its key-event sink via
+ * char_core_register_kbd_sink() (declared in <char/char_module_abi.h>,
+ * the module-facing callback surface) at attach; after discovery
+ * main.c calls char_core_kbd_loopback_wire() to open a loopback port on
+ * the shared set and subscribe it to every keyboard module.
+ * char_demux routes CHAR_KBD_EVENT_MSGH_ID messages to the sink via
+ * char_core_dispatch_kbd_event().
+ * ============================================================ */
+
+boolean_t char_core_dispatch_kbd_event(mach_msg_header_t *in);
+int	  char_core_kbd_loopback_wire(void);
+
+/*
+ * Controlling-tty release (#365).  proc_server sends a
+ * CHAR_CTTY_RELEASE_MSGH_ID message to the tty port when a session leader
+ * exits; char_demux routes it to char_core_dispatch_ctty_release(), which
+ * clears the stale ctty binding via char_core_release_ctty() so the VT can
+ * be re-claimed by a respawned shell.
+ */
+boolean_t char_core_dispatch_ctty_release(mach_msg_header_t *in);
+void	  char_core_release_ctty(int sid);
+
+/* ============================================================
  * MIG-side glue
  * ============================================================ */
 

@@ -60,7 +60,7 @@ while [ $# -gt 0 ]; do
             echo "Uso: $0 [-o output.img] [-s size_mb] [--bench suite ...] [--minimal]"
             echo ""
             echo "  --bench suite ...   Passa suite names a ipc_bench"
-            echo "                      (syscall intra slow inter port pp ool flipc2 all)"
+            echo "                      (syscall intra slow inter comb port pp ool flipc2 all)"
             echo "  --minimal           Omit hello_server/ipc_bench/pthread_test/cap_test/"
             echo "                      gpustat from disk bootstrap.conf (stage-2)"
             exit 0
@@ -104,7 +104,9 @@ FD_EXEC_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/fd_exec_test"
 HELLO_WORLD="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_world"
 PTHREAD_MIN="$BUILD_DIR/export/uros/$ARCH/user/sbin/pthread_min"  # #291 musl pthread regression
 FLIPC_BENCH="$BUILD_DIR/export/uros/$ARCH/user/sbin/flipc_bench"  # #272 standalone FLIPC A/B
+CPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/cpustat"          # #375 per-CPU load monitor (dynamic)
 USH="$BUILD_DIR/export/uros/$ARCH/user/sbin/ush"
+VTS="$BUILD_DIR/export/uros/$ARCH/user/sbin/virtual_terminal_server"  # #365 VT shell supervisor
 PROC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/proc_server"
 # #234 Phase 7: dynamic linker + first dynamic binary.  ld-musl-i386.so.1 is
 # the umbrella libc.so; it goes to /lib/ where hello_dyn's PT_INTERP points.
@@ -219,10 +221,16 @@ if [ -f "$GPUSTAT" ]; then
     GPUSTAT_CONF_LINE="gpustat gpustat"
 fi
 # ush (#275.5): Uros shell.  Needs proc_server + char_server + ext_server
-# up so it can setsid, acquire ctty, and open /dev/tty.  Launched as the
-# last stage-2 task; it will read from the UART for interactive use.
+# up so it can setsid, acquire ctty, and open /dev/tty.
+#
+# #365: when the virtual_terminal_server is present it becomes the last
+# stage-2 task instead of ush; it forks ush onto each virtual terminal.
+# ush stays on disk either way (the supervisor execs /mach_servers/ush);
+# only the launch line moves from "ush ush" to the supervisor.
 USH_CONF_LINE=""
-if [ -f "$USH" ]; then
+if [ -f "$VTS" ]; then
+    USH_CONF_LINE="virtual_terminal_server virtual_terminal_server"
+elif [ -f "$USH" ]; then
     USH_CONF_LINE="ush ush"
 fi
 #
@@ -404,10 +412,17 @@ if [ -f "$FLIPC_BENCH" ]; then
 fi
 
 # ush is optional (#275.5): copy to /mach_servers/ so bootstrap stage-2
-# can load it as a session-leader after proc_server / char_server.
+# can load it as a session-leader after proc_server / char_server.  #365:
+# the supervisor execs it from here, so it is written even when the direct
+# "ush ush" launch line has been replaced by virtual_terminal_server.
 USH_WRITE_LINE=""
 if [ -f "$USH" ]; then
     USH_WRITE_LINE="write $USH ush"
+fi
+# virtual_terminal_server (#365): VT shell supervisor, written alongside ush.
+VTS_WRITE_LINE=""
+if [ -f "$VTS" ]; then
+    VTS_WRITE_LINE="write $VTS virtual_terminal_server"
 fi
 
 # hello_dyn (#234 Phase 7): first dynamic binary.  Copy to / and install the
@@ -434,6 +449,14 @@ if [ -f "$DLOPEN_TEST" ] && [ -f "$MUSL_LDSO" ]; then
     DLOPEN_TEST_WRITE_LINE="write $DLOPEN_TEST dlopen_test"
 fi
 
+# cpustat (#375): per-CPU load monitor, the first real dynamic tool.  Copy to
+# / so ush can launch "/cpustat"; needs the same interpreter as hello_dyn.
+CPUSTAT_WRITE_LINE=""
+if [ -f "$CPUSTAT" ] && [ -f "$MUSL_LDSO" ]; then
+    CPUSTAT_WRITE_LINE="write $CPUSTAT cpustat"
+    LDSO_MKDIR_LINE="mkdir lib"   # ensure /lib exists for the interpreter
+fi
+
 debugfs -w -f /dev/stdin "$PART_IMG" <<DBGFS 2>/dev/null
 write $HELLO_TXT hello.txt
 write $POSIX_SMOKE posix_smoke.txt
@@ -448,6 +471,7 @@ ${FLIPC_BENCH_WRITE_LINE}
 ${HELLO_DYN_WRITE_LINE}
 ${HELLO_DYN_WORLD_WRITE_LINE}
 ${DLOPEN_TEST_WRITE_LINE}
+${CPUSTAT_WRITE_LINE}
 ${LDSO_MKDIR_LINE}
 mkdir mach_servers
 cd mach_servers
@@ -466,6 +490,7 @@ ${GPUSTAT_WRITE_LINE}
 ${EXEC_SERVER_WRITE_LINE}
 ${PROC_SERVER_WRITE_LINE}
 ${USH_WRITE_LINE}
+${VTS_WRITE_LINE}
 mkdir modules
 cd modules
 mkdir block

@@ -322,6 +322,7 @@
 #include <kern/misc_protos.h>
 #include <kern/processor.h>
 #include <kern/queue.h>
+#include <kern/rcu.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
 #include <kern/ipc_sched.h>
@@ -577,7 +578,22 @@ thread_go(thread)
 
 	reset_timeout_check(&thread->timer);
 
-	if (thread->state & TH_WAIT) {
+	/*
+	 * #299 (SMP): thread_go() wakes a thread parked via thread_will_wait()
+	 * (an IPC receiver on imq_threads), which never sets wait_event.  A
+	 * thread instead queued on the event/mutex wait-hash has wait_event !=
+	 * NO_EVENT; we must NOT clear its TH_WAIT, or we wake it out of a lock
+	 * it has not acquired and leave a stale entry on the hash (which then
+	 * makes thread_wakeup_prim panic finding it without TH_WAIT).  This
+	 * happens when an IPC receiver is aborted (act_abort) but, before it
+	 * removes itself from imq_threads, re-blocks on imq_lock; a concurrent
+	 * ipc_mqueue_changed() then dequeues it from imq_threads and thread_go's
+	 * it.  Skipping it here is safe: it is still TH_WAIT on the mutex hash
+	 * and will be woken normally by the lock release, then sees ith_state
+	 * and handles the change on its own re-run.  assert_wait sets wait_event
+	 * under thread_lock too, so the check is race-free.
+	 */
+	if ((thread->state & TH_WAIT) && thread->wait_event == NO_EVENT) {
 		thread->state &= ~TH_WAIT;
 		if (!(thread->state & TH_RUN)) {
 			thread->state |= TH_RUN;
@@ -1104,6 +1120,112 @@ thread_wakeup_prim(
 	splx(s);
 }
 
+/*
+ *	thread_handoff_to_parked_waiter:
+ *
+ *	Futex (#324) direct hand-off.  Find one thread waiting on `event`
+ *	and, if it is *fully parked* (its context is saved -- detectable
+ *	because thread_dispatch() clears TH_RUN once the blocked thread has
+ *	been switched away), switch directly to it via thread_invoke(),
+ *	bypassing the run-queue + reschedule round-trip.  The caller must
+ *	have already done assert_wait() on its own wait event, so the
+ *	current thread parks here (keeping its stack) and resumes when later
+ *	woken.
+ *
+ *	SMP-safe: a thread still in the assert_wait()->thread_block() window
+ *	is TH_WAIT|TH_RUN (not yet parked); we must NOT switch to it (its
+ *	saved context is stale), so we wake it the normal way instead.
+ *
+ *	Returns TRUE if the hand-off happened (current thread blocked and was
+ *	later resumed).  Returns FALSE if no parked waiter was found (the
+ *	caller should fall back to a normal block); a found-but-not-parked
+ *	waiter is woken normally and FALSE is returned.
+ */
+boolean_t
+thread_handoff_to_parked_waiter(
+	event_t		event)
+{
+	register queue_t	q;
+	register int		index;
+	register thread_t	thread, next_th;
+	register thread_t	self = current_thread();
+	register simple_lock_t	lock;
+	thread_t		victim = THREAD_NULL;
+	boolean_t		parked;
+	register int		ostate;
+	spl_t			s;
+
+	index = wait_hash(event);
+	q = &wait_queue[index];
+	s = splsched();
+	lock = simple_lock_addr(wait_lock[index]);
+
+	simple_lock(lock);
+	thread = (thread_t) queue_first(q);
+	while (!queue_end(q, (queue_entry_t)thread)) {
+		next_th = (thread_t) queue_next((queue_t) thread);
+		/* Skip self: with a same-word wake+wait the caller has just
+		 * asserted_wait on this very key, so it is in this queue too. */
+		if (thread->wait_event == event && thread != self) {
+			remqueue(q, (queue_entry_t) thread);
+			thread->wait_event = (event_t) WAKING_EVENT;
+			victim = thread;
+			break;
+		}
+		thread = next_th;
+	}
+	simple_unlock(lock);
+
+	if (victim == THREAD_NULL) {
+		splx(s);
+		return FALSE;
+	}
+
+	thread_lock(victim);
+	reset_timeout_check(&victim->timer);
+	victim->wait_event = NO_EVENT;
+	victim->wait_result = THREAD_AWAKENED;
+	victim->at_safe_point = NOT_AT_SAFE_POINT;
+
+	/* Snapshot the scheduling state BEFORE we stamp TH_RUN below: the
+	 * not-parked path must know whether the victim was already running. */
+	ostate = victim->state;
+
+	/* Parked == TH_WAIT and nothing else (not running, suspended, etc.). */
+	parked = ((ostate & (TH_WAIT|TH_SUSP|TH_RUN|TH_UNINT)) == TH_WAIT);
+	victim->state = (ostate &~ TH_WAIT) | TH_RUN;
+
+	if (!parked) {
+		/*
+		 * Victim is not cleanly parked.  Mirror clear_wait_internal():
+		 * only a thread that is genuinely blocked (neither TH_RUN nor
+		 * TH_SUSP set) may be handed to thread_setrun().  If the victim
+		 * still has TH_RUN -- i.e. it is executing its own
+		 * assert_wait()->thread_block() window on another CPU -- calling
+		 * thread_setrun() here would dispatch a thread that is still
+		 * running, executing it on two CPUs at once (#360: the futex
+		 * ping-pong avalanched a single waiter onto up to 6 CPUs).
+		 * Clearing TH_WAIT above is sufficient: when the still-running
+		 * victim reaches thread_block() it sees itself runnable (TH_RUN,
+		 * no TH_WAIT) and simply does not block.
+		 */
+		if ((ostate & (TH_RUN | TH_SUSP)) == 0)
+			thread_setrun(victim, TRUE, TAIL_Q);
+		thread_unlock(victim);
+		splx(s);
+		return FALSE;
+	}
+	thread_unlock(victim);
+
+	/* Direct switch.  self (already TH_WAIT via the caller's assert_wait)
+	 * is disposed -- and so parked -- by the victim's own post-switch
+	 * thread_dispatch(); self resumes here when it is later woken. */
+	thread_invoke(self, victim, 0);
+
+	splx(s);
+	return TRUE;
+}
+
 #if	NCPUS > 1
 /*
  *	thread_bind:
@@ -1129,6 +1251,91 @@ thread_bind(
 	splx(s);
 }
 #endif	/*NCPUS > 1*/
+
+/*
+ * #319 instrumentation: is the global pset->runq.lock actually contended /
+ * interfered with?  Per-CPU (cache-line isolated) counters; rdtsc around the
+ * lock acquire in thread_select.  Dumped every few seconds from sched_thread
+ * (PROCESS context -- printing from hertz_tick at interrupt level nested
+ * inside the BSP's own console writes and wedged the OMEGA 32-CPU bring-up),
+ * and only for intervals with real scheduling activity so boot output stays
+ * untouched.  setrun vs gq (global-runq enqueues) shows the saturation ratio
+ * -- how many wakeups fall onto the GLOBAL runq vs land on an idle CPU.  The
+ * dump zeroes the counters, so each printed line is one interval -> the
+ * cycles/acquire form a time series across a concurrency sweep.
+ *
+ * Diagnostic tool, compiled out by default: build with
+ * cmake -DUROS_S319_INSTRUMENT=ON when measuring scheduler behavior.
+ * 32-core results (2026-07): lock uncontended (~0.2% of CPU time), but idle
+ * CPUs full-speed-polling runq.count inflated every acquire (842 vs 445 cyc)
+ * -> the idle-loop gcount sampling fix below.
+ */
+#ifndef	S319_INSTRUMENT
+#define	S319_INSTRUMENT	0
+#endif
+
+#if	S319_INSTRUMENT
+struct s319_stat {
+	unsigned long long	psetlock_cyc;	/* cycles acquiring pset->runq.lock */
+	unsigned long		psetlock_cnt;	/* # acquisitions (thread_select) */
+	unsigned long		psetlock_max;	/* worst single acquire (cycles) */
+	unsigned long		setrun;		/* unbound thread_setrun calls */
+	unsigned long		psetenq;	/* enqueues onto the GLOBAL runq */
+	unsigned long		localhoff;	/* #356 hand-off-on-block enqueues */
+	char			pad[64];	/* isolate each entry to its own line */
+} s319[NCPUS] __attribute__((aligned(64)));
+
+static inline unsigned long long
+s319_rdtsc(void)
+{
+	unsigned int	lo, hi;
+	__asm__ volatile("rdtsc" : "=a" (lo), "=d" (hi));
+	return ((unsigned long long) hi << 32) | lo;
+}
+
+void
+s319_dump(void)
+{
+	unsigned long	sum_avg = 0, navg = 0, mx = 0;
+	unsigned long	tot_cnt = 0, tot_setrun = 0, tot_enq = 0, tot_lq = 0;
+	int		cpu;
+
+	/*
+	 * No 64-bit divide (no libgcc __udivdi3 in the kernel): average each
+	 * CPU's cycles in 32 bits (a few seconds per-CPU fits) then mean them.
+	 */
+	for (cpu = 0; cpu < NCPUS; cpu++) {
+		unsigned long	cnt = s319[cpu].psetlock_cnt;
+
+		if (cnt != 0) {
+			sum_avg += (unsigned long) s319[cpu].psetlock_cyc / cnt;
+			navg++;
+		}
+		if (s319[cpu].psetlock_max > mx)
+			mx = s319[cpu].psetlock_max;
+		tot_cnt += cnt;
+		tot_setrun += s319[cpu].setrun;
+		tot_enq += s319[cpu].psetenq;
+		tot_lq += s319[cpu].localhoff;
+		s319[cpu].psetlock_cyc = 0;
+		s319[cpu].psetlock_cnt = 0;
+		s319[cpu].psetlock_max = 0;
+		s319[cpu].setrun = 0;
+		s319[cpu].psetenq = 0;
+		s319[cpu].localhoff = 0;
+	}
+
+	/*
+	 * Only report intervals with real load: keeps bring-up and idle
+	 * screens clean (and the bench's own output mostly unmolested).
+	 */
+	if (tot_setrun < 1000)
+		return;
+	printf("s319: setrun=%lu lq=%lu gq=%lu acq=%lu avg=%lu max=%lu cyc/acq\n",
+	       tot_setrun, tot_lq, tot_enq, tot_cnt,
+	       navg ? sum_avg / navg : 0, mx);
+}
+#endif	/* S319_INSTRUMENT */
 
 /*
  *	Select a thread for this processor (the current processor) to run.
@@ -1158,9 +1365,27 @@ thread_select(
 #if     NCPUS > 1
 	simple_lock(&runq->lock);
 #endif  /* NCPUS > 1 */
-	simple_lock(&pset->runq.lock);
+#if	S319_INSTRUMENT
+	{
+		unsigned long long	_s0, _s1;
+		unsigned long		_sd;
+		register int		_sc;
 
-	other_runnable = 
+		_s0 = s319_rdtsc();
+		simple_lock(&pset->runq.lock);
+		_s1 = s319_rdtsc();
+		_sd = (unsigned long) (_s1 - _s0);
+		_sc = cpu_number();
+		s319[_sc].psetlock_cyc += _sd;
+		s319[_sc].psetlock_cnt++;
+		if (_sd > s319[_sc].psetlock_max)
+			s319[_sc].psetlock_max = _sd;
+	}
+#else
+	simple_lock(&pset->runq.lock);
+#endif
+
+	other_runnable =
 #if	NCPUS > 1
 	    runq->count > 0 ||
 #endif	/* NCPUS > 1 */
@@ -1731,6 +1956,13 @@ thread_dispatch(
 		printf("\tthread_dispatch(thr=%x)\n", thread);
 #endif	/* MACH_ASSERT */
 
+	/*
+	 * #331 step 2: primary QSBR quiescent point.  We run here as the new
+	 * thread just after a context switch, so this CPU has passed through a
+	 * point with no active RCU reader (a reader never blocks/switches).
+	 */
+	urmach_rcu_quiescent_state();
+
 	wake_lock(thread);
 	thread_lock(thread);
 
@@ -2046,6 +2278,28 @@ run_queue_enqueue(
 	return( oldrqcount );
 }
 
+#if	NCPUS > 1
+/*
+ * #356: run-time gate for the synchronous-RPC hand-off-on-block placement
+ * (see the hint consumption in thread_setrun).  Off by default; enabled by
+ * the -P boot argument for same-binary A/B on hardware.
+ *
+ * The hand-off also stays dormant until EVERY CPU has passed cpu_up()
+ * (machine_info.avail_cpus reaches real_ncpus -- guaranteed on any boot
+ * that completes, since start_other_cpus barriers on all APs): shifting
+ * bench wakeup placement DURING bring-up widened a latent window where a
+ * slave-init AP (no current_thread yet) kernel-faults into a contended map
+ * mutex and panics in assert_wait ("sleep before scheduler is up", seen on
+ * OMEGA cpu 20).  Placement only matters under load, so keep it off until
+ * bring-up is done.
+ */
+/* .data, NOT bss: parse_arguments() runs BEFORE i386_init()'s BSS clear, so a
+ * zero-initialised flag would be silently wiped back to 0 after -P set it --
+ * the exact #337 trap (see halt_in_debugger in model_dep.c). */
+int	sched_rpc_handoff __attribute__((section(".data"))) = 0;
+extern int	real_ncpus;
+#endif	/* NCPUS > 1 */
+
 /*
  *	thread_setrun:
  *
@@ -2104,6 +2358,49 @@ thread_setrun(
 	     *	Not bound, any processor in the processor set is ok.
 	     */
 	    pset = th->processor_set;
+#if	S319_INSTRUMENT
+	    s319[cpu_number()].setrun++;
+#endif
+
+	    /*
+	     * #356 hand-off on block: the waker flagged that it is about to
+	     * block (combined mach_msg send phase -- the same syscall proceeds
+	     * to the receive and sleeps).  A synchronous RPC pair is
+	     * inherently serial, so instead of shipping the wakee to a remote
+	     * idle CPU (cold caches, wake-from-idle latency -- the measured
+	     * 32-core pre-saturation collapse) queue it on THIS cpu's local
+	     * runq: thread_select picks it up the moment the waker blocks, on
+	     * the one CPU where its data is warm.  Same-task only (an
+	     * inter-task switch on one CPU costs a cr3 reload = full TLB flush
+	     * on i386, measured worse than the split).  One-shot: consumed by
+	     * the first wakeup of the send.  Runtime-gated by -P boot arg.
+	     */
+	    if (sched_rpc_handoff &&
+		machine_info.avail_cpus >= real_ncpus) {
+		register thread_t	self = current_thread();
+
+		/* #370: self is THREAD_NULL on an early-AP that has not yet
+		 * installed its current thread; nothing to hand off then. */
+		if (self != THREAD_NULL && self->handoff_hint) {
+			self->handoff_hint = FALSE;
+			if (
+#if	MACH_HOST
+			    pset == current_processor()->processor_set &&
+#endif	/* MACH_HOST */
+			    self->top_act != THR_ACT_NULL &&
+			    th->top_act != THR_ACT_NULL &&
+			    self->top_act->task == th->top_act->task) {
+#if	S319_INSTRUMENT
+				s319[cpu_number()].localhoff++;
+#endif
+				(void) run_queue_enqueue(
+					&current_processor()->runq, th, tail);
+				mp_enable_preemption();
+				return;
+			}
+		}
+	    }
+
 #if	HW_FOOTPRINT
 	    /*
 	     *	But first check the last processor it ran on.
@@ -2124,6 +2421,9 @@ thread_setrun(
 			    processor->state = PROCESSOR_DISPATCHING;
 			    simple_unlock(&pset->idle_lock);
 			    simple_unlock(&processor->lock);
+#if	POWER_SAVE
+			    machine_idle_wake(processor->slot_num);
+#endif	/* POWER_SAVE */
 			    mp_enable_preemption();
 		            return;
 		    }
@@ -2142,6 +2442,9 @@ thread_setrun(
 		    processor->next_thread = th;
 		    processor->state = PROCESSOR_DISPATCHING;
 		    simple_unlock(&pset->idle_lock);
+#if	POWER_SAVE
+		    machine_idle_wake(processor->slot_num);
+#endif	/* POWER_SAVE */
 		    mp_enable_preemption();
 		    return;
 		}
@@ -2157,6 +2460,13 @@ thread_setrun(
 #if	MACH_HOST
 		(pset == processor->processor_set) &&
 #endif	/* MACH_HOST */
+		/* #370: an early-AP can enter thread_setrun before its current
+		 * thread is installed -- a periodic tick or resched IPI slipping
+		 * past the bring-up splhigh() in slave_machine_init.  Nothing is
+		 * running to preempt and current_thread() is THREAD_NULL, so the
+		 * old unconditional deref read NULL+0x58 (sched_pri): the cr2=0x58
+		 * early-AP page fault caught on OMEGA E-cores (cpu 25).  Skip it. */
+		current_thread() != THREAD_NULL &&
 		(current_thread()->sched_pri > th->sched_pri)) {
 
 		    /*
@@ -2175,6 +2485,9 @@ thread_setrun(
 		    ast_on(cpu_number(), ast_flags);
 		}
 	    }
+#if	S319_INSTRUMENT
+	    s319[cpu_number()].psetenq++;
+#endif
 	    (void)run_queue_enqueue(rq, th, tail);
 	}
 	else {
@@ -2194,6 +2507,9 @@ thread_setrun(
 		    processor->state = PROCESSOR_DISPATCHING;
 		    simple_unlock(&pset->idle_lock);
 		    simple_unlock(&processor->lock);
+#if	POWER_SAVE
+		    machine_idle_wake(processor->slot_num);
+#endif	/* POWER_SAVE */
 		    mp_enable_preemption();
 		    return;
 		}
@@ -2211,8 +2527,11 @@ thread_setrun(
 	     */
 	    rq = &(processor->runq);
 	    if (processor == current_processor()) {
-		if (current_thread()->bound_processor == PROCESSOR_NULL ||
-		    current_thread()->sched_pri > th->sched_pri) {
+		/* #370: same early-AP guard as the unbound path -- no current
+		 * thread means nothing to preempt (bound-thread case). */
+		if (current_thread() != THREAD_NULL &&
+		    (current_thread()->bound_processor == PROCESSOR_NULL ||
+		     current_thread()->sched_pri > th->sched_pri)) {
 		    if (processor->state == PROCESSOR_DISPATCHING) {
 			cur_th = processor->next_thread;
 			processor->next_thread = th;
@@ -2593,6 +2912,7 @@ idle_thread_continue(void)
 	register int state;
 	int	mycpu;
 	spl_t	s;
+	register unsigned int idle_passes = 0;	/* #319 gcount sampling */
 #if	FAST_IDLE
 	register volatile int *thread_statep;
 	register volatile int *depress_countp;
@@ -2623,6 +2943,14 @@ idle_thread_continue(void)
 		if (curr_ipl[cpu_number()])
 			panic ("Idle thread at spl > 0?");
 #endif
+		/*
+		 * #331 step 2: an idle CPU holds no RCU read reference, so
+		 * report a quiescent state each pass -- lets grace periods
+		 * finish promptly on idle CPUs without relying solely on the
+		 * clock tick.
+		 */
+		urmach_rcu_quiescent_state();
+
 #ifdef	MARK_CPU_IDLE
 		MARK_CPU_IDLE(mycpu);
 #endif	/* MARK_CPU_IDLE */
@@ -2647,6 +2975,13 @@ idle_thread_continue(void)
  *	This cpu will be dispatched (by thread_setrun) by setting next_thread
  *	to the value of the thread to run next.  Also check runq counts.
  */
+		/*
+		 * #331 step 2: this CPU is about to wait for work -- mark it
+		 * quiescent for QSBR for the whole idle span (cleared once it
+		 * gets a thread to run below).
+		 */
+		urmach_rcu_idle_enter();
+
 		s = splsched();
 		while ((*threadp == (volatile thread_t)THREAD_NULL) &&
 #if	FAST_IDLE
@@ -2657,7 +2992,18 @@ idle_thread_continue(void)
 		       && (*lcount <= *depress2_countp)
 #endif	/* NCPUS > 1 */
 #else	/* FAST_IDLE */
-		       (*gcount == 0) 
+		       /*
+		        * #319: sample the SHARED pset->runq.count only every
+		        * 64th pass.  N idle CPUs spinning full speed on that
+		        * one global line invalidation-storm every runq write
+		        * by the busy CPUs (measured on 32-core bare metal:
+		        * pset lock acquire avg 842 cyc with ~24 idle pollers
+		        * vs 445 with none).  next_thread/local runq stay
+		        * full-rate, so idle-dispatch latency is untouched;
+		        * only the rare enqueue-to-global-while-idle race
+		        * waits up to ~64 passes (a few microseconds).
+		        */
+		       ((idle_passes++ & 63) != 0 || *gcount == 0)
 #if	NCPUS > 1
 		       && (*lcount == 0)
 #endif	/*NCPUS > 1*/
@@ -2679,6 +3025,10 @@ idle_thread_continue(void)
 			else
 				splx(s);
 
+			/* #319: spin-wait hint (rep;nop) -- eases the memory
+			 * pipeline and the SMT sibling while idle-polling. */
+			__asm__ volatile("pause");
+
 			/*
 			 * machine_idle is a machine dependent function,
 			 * to conserve power.
@@ -2688,6 +3038,14 @@ idle_thread_continue(void)
 #endif /* POWER_SAVE */
 			s = splsched();
 		}
+
+		/* #331 step 2: leaving idle -- about to run a real thread. */
+		urmach_rcu_idle_exit();
+
+#if	POWER_SAVE
+		/* #357: idle stint over -- reset the HLT grace window. */
+		machine_idle_exit(mycpu);
+#endif	/* POWER_SAVE */
 
 #ifdef	MARK_CPU_ACTIVE
 		splx(s);
@@ -2918,6 +3276,18 @@ sched_thread(void)
 	if (task_swap_on)
 		compute_vm_averages();
 #endif	/* TASKS_SWAPPER */
+
+#if	S319_INSTRUMENT
+	/* #319 TEMP: report runq-lock contention every ~5s, process context. */
+	{
+		static unsigned int	s319_beats;
+
+		if (++s319_beats >= 5) {
+			s319_beats = 0;
+			s319_dump();
+		}
+	}
+#endif
 
 	/*
 	 *	Check for stuck threads.  This can't be done off of

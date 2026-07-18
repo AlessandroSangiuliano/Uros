@@ -1,0 +1,33 @@
+# clang-format config for the Uros / UrMach kernel (OSF Mach lineage, KNF-ish).
+#
+# Goal: normalise INDENTATION to consistent 8-wide tabs with Linux/K&R braces,
+# WITHOUT reflowing lines (ColumnLimit: 0) so the diff stays about indentation
+# rather than rewrapping the whole file.  Tweak after reviewing the first run.
+---
+Language:        Cpp
+BasedOnStyle:    LLVM
+IndentWidth:     8
+TabWidth:        8
+ContinuationIndentWidth: 8
+UseTab:          Always
+ColumnLimit:     0
+BreakBeforeBraces: Linux
+IndentCaseLabels: false
+IndentGotoLabels: false
+IndentPPDirectives: None
+PointerAlignment: Right
+DerivePointerAlignment: false
+AlignAfterOpenBracket: DontAlign
+AlignConsecutiveDeclarations: false
+AlignConsecutiveAssignments: false
+AlignConsecutiveMacros: false
+AlignTrailingComments: false
+AllowShortBlocksOnASingleLine: false
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortCaseLabelsOnASingleLine: false
+KeepEmptyLinesAtTheStartOfBlocks: true
+SortIncludes:    false
+ReflowComments:  true
+SpaceBeforeParens: ControlStatements

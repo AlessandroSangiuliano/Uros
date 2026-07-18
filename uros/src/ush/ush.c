@@ -26,6 +26,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -54,6 +55,11 @@ extern mach_port_t __uros_proc_port;
 /* From libposix-uros — we want the canonical pid. */
 extern unsigned int __uros_my_pid;
 
+/*
+ * The em-dash is fine again: #364 gave the gpu text renderer a
+ * UTF-8 -> CP437 fold, so multibyte characters land as one legible glyph
+ * instead of the garbage bytes that forced the ASCII workaround in #363.
+ */
 #define USH_BANNER     "\r\nush v0.1.0 — Uros shell (#275.5)\r\n"
 #define USH_PROMPT     "ush$ "
 #define USH_LINE_MAX   256
@@ -89,33 +95,55 @@ lookup_char_server(void)
     return -1;
 }
 
+/*
+ * Collect candidate TTY dev_ids to try, best first: the on-screen
+ * consoles (#363/#365 — one per VT) ahead of the UART fallback (serial /
+ * headless / bench, when console.so is absent).  ush then claims the
+ * first candidate it can acquire; since #365 gives every VT its own
+ * console, a second ush skips the one already taken and lands on the
+ * next VT.  Returns how many ids were written.
+ */
 static int
-find_tty_device(uint32_t *out_dev_id)
+find_tty_devices(uint32_t *ids, unsigned int max)
 {
     struct char_device_info *devs;
     vm_offset_t buf      = 0;
     mach_msg_type_number_t bcnt = 0;
     uint32_t n           = 0;
     kern_return_t kr;
-    unsigned int i;
+    unsigned int i, cnt = 0;
 
     kr = char_query_devices(char_port, &buf, &bcnt, &n);
     if (kr != KERN_SUCCESS || n == 0)
-        return -1;
+        return 0;
     devs = (void *)buf;
-    for (i = 0; i < n; i++) {
-        if (devs[i].class == CHAR_CLASS_TTY) {
-            *out_dev_id = devs[i].id;
-            (void)vm_deallocate(mach_task_self(), buf, bcnt);
-            return 0;
-        }
-    }
+
+    for (i = 0; i < n && cnt < max; i++)		/* consoles first */
+        if (devs[i].class == CHAR_CLASS_TTY &&
+            strcmp(devs[i].module_name, "console") == 0)
+            ids[cnt++] = devs[i].id;
+    for (i = 0; i < n && cnt < max; i++)		/* then UART etc. */
+        if (devs[i].class == CHAR_CLASS_TTY &&
+            strcmp(devs[i].module_name, "console") != 0)
+            ids[cnt++] = devs[i].id;
+
     (void)vm_deallocate(mach_task_self(), buf, bcnt);
-    return -1;
+    return (int)cnt;
 }
 
+/*
+ * ush_setup — become a session leader and bind a controlling tty.
+ *
+ * target_vt selects which VT console to claim (#365 phase 3): a positive
+ * value N asks for the N-th on-screen console (surface N), so the
+ * virtual_terminal_server can place a shell on a *specific* virtual
+ * terminal — e.g. the one the user just switched to — instead of letting
+ * every shell drift onto the next free VT.  target_vt == 0 keeps the
+ * first-free walk used when ush is launched standalone (or headless, where
+ * only the UART tty exists).
+ */
 static int
-ush_setup(void)
+ush_setup(int target_vt)
 {
     pid_t s;
     uint32_t dev_id = 0;
@@ -154,18 +182,60 @@ ush_setup(void)
         return -1;
     USHLOG("char_server resolved");
 
-    /* v0.1: prefer the first CHAR_CLASS_TTY device reported by
-     * char_query_devices.  Fall back to UART (dev_id=2 in current
-     * boot order) if discovery fails. */
-    if (find_tty_device(&dev_id) < 0) {
-        printf("ush: no TTY device found, falling back to dev_id=2\n");
-        dev_id = 2;
-    }
+    /*
+     * Bind a controlling tty.  A free console (or the UART) binds without
+     * a cap (#275.5); a console already owned by another session fails the
+     * acquire cap-check.
+     *
+     * find_tty_devices lists the consoles first, in surface order (the
+     * console module hands out surfaces 1..N in that order, #365 phase 1),
+     * so candidate index N-1 is the console for surface N.  A targeted
+     * request therefore claims exactly cand[target_vt-1]; a standalone ush
+     * (target_vt == 0) walks the list and takes the first it can get.
+     */
+    {
+        uint32_t cand[8];
+        int      ncand = find_tty_devices(cand, 8);
+        int      c, bound = 0;
 
-    kr = char_tty_acquire_ctty(char_port, cap, 0, dev_id, (int)s, &rc);
-    if (kr != KERN_SUCCESS || rc != 0) {
-        printf("ush: tty_acquire_ctty kr=%d rc=%d\n", (int)kr, rc);
-        return -1;
+        if (ncand <= 0) {
+            printf("ush: no TTY device found, falling back to dev_id=2\n");
+            cand[0] = 2;
+            ncand   = 1;
+        }
+
+        if (target_vt > 0 && target_vt <= ncand) {
+            /* Targeted: claim exactly this VT, do not drift on failure. */
+            c  = target_vt - 1;
+            rc = 0;
+            kr = char_tty_acquire_ctty(char_port, cap, 0,
+                                       cand[c], (int)s, &rc);
+            if (kr == KERN_SUCCESS && rc == 0) {
+                dev_id = cand[c];
+                bound  = 1;
+            } else {
+                printf("ush: VT %d (dev_id=%u) busy (kr=%d rc=%d)\n",
+                       target_vt, cand[c], (int)kr, rc);
+                return -1;
+            }
+        } else {
+            /* First-free walk (standalone / headless UART). */
+            for (c = 0; c < ncand; c++) {
+                rc = 0;
+                kr = char_tty_acquire_ctty(char_port, cap, 0,
+                                           cand[c], (int)s, &rc);
+                if (kr == KERN_SUCCESS && rc == 0) {
+                    dev_id = cand[c];
+                    bound  = 1;
+                    break;
+                }
+            }
+        }
+        if (!bound) {
+            printf("ush: could not acquire any tty (last kr=%d rc=%d)\n",
+                   (int)kr, rc);
+            return -1;
+        }
     }
     printf("ush: bound ctty dev_id=%u to sid=%d\n", dev_id, (int)s);
 
@@ -322,16 +392,30 @@ main(int argc, char **argv)
     char  line[USH_LINE_MAX];
     char *parts[USH_MAX_ARGS + 1];
     int   n, bg;
+    int   rstatus;
+    int   target_vt = 0;
 
-    (void)argc; (void)argv;
+    /* argv[1], when present, is the VT surface to bind (#365 phase 3):
+     * the virtual_terminal_server passes it so this shell lands on a
+     * specific virtual terminal. */
+    if (argc > 1 && argv[1] != NULL)
+        target_vt = atoi(argv[1]);
 
-    if (ush_setup() < 0) {
+    if (ush_setup(target_vt) < 0) {
         printf("ush: setup failed, exiting\n");
         return 1;
     }
     (void)write(tty_fd, USH_BANNER, strlen(USH_BANNER));
 
     for (;;) {
+        /* Reap finished background jobs before prompting: without this
+         * every "&" child that exited or was killed stays a zombie
+         * holding its proc pid slot, and a long session walls the whole
+         * system at PROC_MAX_TASKS spawns (the kill x fork storm hit
+         * the 256 wall at iteration ~254 every run). */
+        while (waitpid(-1, &rstatus, WNOHANG) > 0)
+            ;
+
         (void)write(tty_fd, USH_PROMPT, strlen(USH_PROMPT));
         ssize_t r = read_line(line, sizeof line);
         if (r < 0)  { printf("ush: read error\n"); break; }
@@ -366,6 +450,33 @@ main(int argc, char **argv)
              * itself the error path. */
             printf("ush: proc_shutdown returned kr=%d rc=%d\n",
                    (int)kr, rc);
+            continue;
+        }
+
+        /* "kill [-SIG] pid..." — send a signal by pid.  Default SIGTERM;
+         * "kill -9 <pid>" is the direct trigger for proc's SIGKILL ->
+         * task_terminate() path (used to exercise the #380 cross-CPU
+         * stop of a task busy-spinning on another CPU). */
+        if (strcmp(parts[0], "kill") == 0) {
+            int sig = SIGTERM;
+            int ai  = 1;
+
+            if (n >= 2 && parts[1][0] == '-') {
+                sig = atoi(parts[1] + 1);
+                ai  = 2;
+            }
+            if (ai >= n) {
+                printf("usage: kill [-SIG] pid...\n");
+                continue;
+            }
+            for (; ai < n; ai++) {
+                int pid = atoi(parts[ai]);
+                if (kill(pid, sig) != 0)
+                    printf("ush: kill %d (sig %d) failed errno=%d\n",
+                           pid, sig, errno);
+                else
+                    printf("ush: sent sig %d to pid %d\n", sig, pid);
+            }
             continue;
         }
 

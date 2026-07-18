@@ -55,6 +55,7 @@
 #include <chips/busses.h>
 #include <i386/ipl.h>
 #include <i386/misc_protos.h>		/* pic_irq_mask / pic_irq_unmask (#222) */
+#include <i386/ioapic.h>		/* ioapic_active / ioapic_irq_is_level (#381) */
 #include <i386/pio.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
@@ -98,6 +99,26 @@ static volatile unsigned int	irq_pending[IRQ_FORWARD_MAX];
 static int			irq_thread_started;
 static int			irq_thread_wake_event;	/* address used as wait channel */
 
+/*
+ * #381: mask/unmask flow-control is only safe on lines where a masked
+ * event is not lost.  The 8259 latches fronts in its IRR even while
+ * masked, so with the legacy PIC masking is always safe.  The I/O APIC
+ * does NOT latch a masked edge: a front arriving between the driver's
+ * final drain and device_intr_enable's unmask is gone, and a device that
+ * keeps INT asserted afterwards (16550 with a full RX FIFO) never fires
+ * again — the intermittent, permanent serial-input freeze.  Level lines
+ * re-fire on unmask, so for them the #222 storm protection stays.
+ */
+static boolean_t
+irq_forward_mask_safe(int irq)
+{
+#if	NCPUS > 1
+	if (ioapic_active())
+		return ioapic_irq_is_level((unsigned int)irq);
+#endif	/* NCPUS > 1 */
+	return TRUE;
+}
+
 static void
 irq_forward_handler(int irq)
 {
@@ -112,8 +133,12 @@ irq_forward_handler(int irq)
 	 * level-triggered line (#222) cannot re-fire while the message
 	 * is in flight.  Userspace driver calls device_intr_enable
 	 * after clearing the device-side status register.
+	 * #381: skip the mask on I/O APIC edge lines — see
+	 * irq_forward_mask_safe().  Edge lines cannot storm: one front
+	 * per event, and bursts coalesce in irq_pending[].
 	 */
-	pic_irq_mask(irq);
+	if (irq_forward_mask_safe(irq))
+		pic_irq_mask(irq);
 
 	irq_pending[irq]++;
 	thread_wakeup((event_t)&irq_thread_wake_event);
@@ -167,8 +192,22 @@ irq_forward_thread(void)
 
 		if (!any) {
 			spl_t s = splhigh();
-			/* Re-check under spl to avoid losing a wakeup. */
 			boolean_t empty = TRUE;
+
+			/*
+			 * #381: register the wait BEFORE the re-check.
+			 * splhigh() only quiesces THIS cpu — a top-half on
+			 * another CPU can bump irq_pending[] and fire its
+			 * thread_wakeup() between a bare re-check and
+			 * assert_wait(); that wakeup finds no waiter and is
+			 * lost, and we'd block forever with work pending.
+			 * With the wait registered first, a concurrent
+			 * wakeup marks it satisfied and thread_block()
+			 * returns immediately; if we spot the work
+			 * ourselves, cancel the wait and rescan.
+			 */
+			assert_wait((event_t)&irq_thread_wake_event,
+				    FALSE);	/* uninterruptible */
 			for (irq = 0; irq < IRQ_FORWARD_MAX; irq++) {
 				if (irq_pending[irq] != 0) {
 					empty = FALSE;
@@ -176,11 +215,11 @@ irq_forward_thread(void)
 				}
 			}
 			if (empty) {
-				assert_wait((event_t)&irq_thread_wake_event,
-					    FALSE);	/* uninterruptible */
 				splx(s);
 				thread_block((void(*)(void))0);
 			} else {
+				clear_wait(current_thread(),
+					   THREAD_AWAKENED, FALSE);
 				splx(s);
 			}
 		}
@@ -377,9 +416,11 @@ ds_master_device_intr_unregister(
 
 /*
  * Re-enable the IRQ at the PIC after the userspace driver has processed
- * a forwarded notification (#222).  Idempotent: safe for edge-triggered
- * IRQs where the top-half mask is unnecessary — drivers call this
- * uniformly regardless of trigger mode.
+ * a forwarded notification (#222).  Drivers call this uniformly
+ * regardless of trigger mode; #381 makes it the exact mirror of the
+ * top-half — only lines the top-half actually masked (level, or legacy
+ * 8259) are unmasked, so it cannot spuriously re-enable a line someone
+ * else masked on purpose.
  */
 kern_return_t
 ds_master_device_intr_enable(
@@ -397,7 +438,8 @@ ds_master_device_intr_enable(
 		return KERN_INVALID_ARGUMENT;
 
 	s = splhigh();
-	pic_irq_unmask(irq);
+	if (irq_forward_mask_safe((int)irq))
+		pic_irq_unmask(irq);
 	splx(s);
 
 	return KERN_SUCCESS;
@@ -761,5 +803,64 @@ ds_master_device_io_port_write(
 	default:
 		return KERN_INVALID_ARGUMENT;
 	}
+	return KERN_SUCCESS;
+}
+
+/*
+ * #382: console-break entry into DDB from a userspace console driver.
+ *
+ * The serial (uart.so) and keyboard (ps2.so) drivers own their devices'
+ * RX paths, so the kernel-side break checks (com.c check_debugger,
+ * ddb_kbd) never see the break key once char_server is up.  The driver
+ * calls this when it spots Ctrl+D; we enter DDB right here, in the
+ * driver's RPC context, and return when the operator continues — the
+ * calling server thread simply blocks for the debug session.
+ *
+ * Gated by the -K boot flag: when not armed we return KERN_FAILURE and
+ * the driver delivers the byte as ordinary input instead.
+ */
+extern int	ddb_kbd_break_enabled;		/* -K (model_dep.c) */
+extern void	Debugger(const char *message);
+
+kern_return_t
+ds_master_device_ddb_break(
+	ipc_port_t		master_port)
+{
+	kern_return_t kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (!ddb_kbd_break_enabled)
+		return KERN_FAILURE;
+
+#if	NCPUS > 1
+	/*
+	 * #382: park the other CPUs BEFORE anything slow happens on this
+	 * one.  A pre-park serial printf alone takes milliseconds; in
+	 * that window another CPU can start a TLB shootdown and wait
+	 * forever for this (about-to-stop) CPU's ack, wedging the other
+	 * CPUs inside the 0xF1 handler pre-EOI — the DDB session then
+	 * "works" but the box is already dead underneath (in-service
+	 * 0xF1 pins PPR at 0xF0: no device vector ever delivers again).
+	 * Also no printf before the park: with db_active still 0, a
+	 * parked CPU holding printf_lock would deadlock us right here.
+	 * kdb_trap skips its own park when the flag is already up and
+	 * clears it on the way out.
+	 */
+	{
+		extern volatile int ddb_nmi_park;
+		extern void lapic_send_nmi_all_excluding_self(void);
+
+		if (!ddb_nmi_park) {
+			ddb_nmi_park = 1;
+			lapic_send_nmi_all_excluding_self();
+		}
+	}
+#endif	/* NCPUS > 1 */
+
+	Debugger("console break");
+	printf("ddb: console break (Ctrl+D) session ended, resuming\n");
 	return KERN_SUCCESS;
 }

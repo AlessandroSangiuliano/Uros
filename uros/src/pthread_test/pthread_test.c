@@ -692,12 +692,43 @@ test_mutex_recursive(void)
 
 static pthread_mutex_t timedlock_mtx;
 
+/*
+ * #393: this test needs the holder to provably own the mutex while the prober
+ * runs, so the prober exercises the CONTENDED path -- the only one that ever
+ * consults the deadline (POSIX: an uncontended timedlock succeeds without
+ * looking at abstime, so a free mutex legitimately returns 0).
+ *
+ * It used to arrange that with thread_switch(DEPRESS, ms) on both sides, which
+ * is a scheduler hint, not synchronisation: DEPRESS lowers the caller's
+ * priority and yields, it does not block for the given time.  On UP that
+ * happened to hand the CPU to the holder and the test passed.  On SMP the
+ * prober has its own CPU and yields to nobody, so it raced ahead and probed a
+ * mutex the holder had not taken yet -- and timedlock correctly returned 0.
+ *
+ * These two flags make the ordering explicit and total, so the test asserts the
+ * timeout and nothing about the scheduler or the CPU count.  One condvar serves
+ * two predicates, hence broadcast rather than signal.
+ */
+static pthread_mutex_t hs_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  hs_cv  = PTHREAD_COND_INITIALIZER;
+static int	       holder_locked;	/* holder -> prober: mutex is taken */
+static int	       probe_done;	/* prober -> holder: you may release */
+
 static void *
 thread_timedlock_holder(void *arg)
 {
-	/* Hold the mutex for a while, then release */
 	pthread_mutex_lock(&timedlock_mtx);
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 50);
+
+	/* Publish that the mutex is taken, then keep holding it until the
+	 * prober says it is done -- so the probe cannot miss the contention in
+	 * either direction. */
+	pthread_mutex_lock(&hs_mtx);
+	holder_locked = 1;
+	pthread_cond_broadcast(&hs_cv);
+	while (!probe_done)
+		pthread_cond_wait(&hs_cv, &hs_mtx);
+	pthread_mutex_unlock(&hs_mtx);
+
 	pthread_mutex_unlock(&timedlock_mtx);
 	return NULL;
 }
@@ -723,14 +754,29 @@ test_mutex_timedlock(void)
 
 	/* Test 2: timedlock with expired deadline — should return ETIMEDOUT */
 	pthread_t holder;
+	holder_locked = 0;
+	probe_done = 0;
 	pthread_create(&holder, NULL, thread_timedlock_holder, NULL);
-	/* Let holder grab the lock */
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+
+	/* Wait until the holder provably owns the mutex (#393) — never assume a
+	 * yield handed it the CPU. */
+	pthread_mutex_lock(&hs_mtx);
+	while (!holder_locked)
+		pthread_cond_wait(&hs_cv, &hs_mtx);
+	pthread_mutex_unlock(&hs_mtx);
 
 	/* Set deadline in the past */
 	deadline.tv_sec = 0;
 	deadline.tv_nsec = 0;
 	rc = pthread_mutex_timedlock(&timedlock_mtx, &deadline);
+
+	/* Release the holder before judging rc: on the failure path we still
+	 * join it below, and a holder parked on probe_done would wedge there. */
+	pthread_mutex_lock(&hs_mtx);
+	probe_done = 1;
+	pthread_cond_broadcast(&hs_cv);
+	pthread_mutex_unlock(&hs_mtx);
+
 	if (rc != ETIMEDOUT) {
 		char buf[80];
 		snprintf(buf, sizeof(buf), "expected ETIMEDOUT(%d), got %d",

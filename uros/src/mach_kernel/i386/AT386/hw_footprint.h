@@ -4,5 +4,5 @@
  */
 #ifndef _HW_FOOTPRINT_H_
 #define _HW_FOOTPRINT_H_
-#define HW_FOOTPRINT 0
+#define HW_FOOTPRINT 1
 #endif

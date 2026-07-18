@@ -83,6 +83,25 @@ char_demux(mach_msg_header_t *in, mach_msg_header_t *out)
 		return TRUE;
 	}
 
+	/* In-process keyboard fan-out (#363): ps2.so sends key events to the
+	 * console's loopback port on this same set.  Single id compare, no
+	 * reply expected. */
+	if (char_core_dispatch_kbd_event(in)) {
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
+	/* Controlling-tty release (#365): proc_server tells us a session
+	 * leader exited so we can free its VT.  One-way, no reply. */
+	if (char_core_dispatch_ctty_release(in)) {
+		((mig_reply_error_t *)out)->RetCode = MIG_NO_REPLY;
+		((mig_reply_error_t *)out)->Head.msgh_size =
+			sizeof(mig_reply_error_t);
+		return TRUE;
+	}
+
 	if (char_server_server(in, out))
 		return TRUE;
 	if (cap_revoke_server(in, out))
@@ -295,6 +314,12 @@ main(int argc, char **argv)
 	}
 
 	subscribe_to_cap_revoke();
+
+	/* #363: wire the in-process keyboard->console loopback.  Runs after
+	 * discovery so both the keyboard module (ps2.so) and the console TTY
+	 * are attached; no-op when no console module is loaded (bench /
+	 * headless bundles omit console.so, keeping the serial path intact). */
+	(void)char_core_kbd_loopback_wire();
 
 	/* #275.1: optional proc_server handle for tty_acquire_ctty.  Done
 	 * after discovery so any module that needs to publish a /dev entry

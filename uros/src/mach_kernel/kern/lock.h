@@ -638,10 +638,33 @@ extern	void	simple_unlock_no_trace(simple_lock_t l);
  *	on them.
  */
 
+/*
+ * MUTEX_OWNER_TRACK (#383): mutex owner tracking, maintained by the
+ * assembler fast paths (i386_lock.S).  own_thr/own_pc identify who took
+ * `locked` and from where; ilk_thr identifies the thread currently
+ * inside the interlock-held slow-path window (mutex_lock_wait /
+ * mutex_unlock_wakeup).  A deadlocked mutex whose own_thr points at a
+ * thread that is alive elsewhere (or recycled) names the leaking call
+ * site directly — this is what found the #383 act-lock leak.
+ *
+ * Cost when enabled: 3-4 extra stores per mutex operation on the
+ * hottest paths (IPC act/port locks) and 12 bytes per mutex.  The
+ * switch lives in <kern/mutex_track.h>, shared with i386_lock.S; set
+ * it to 0 there for release/benchmark builds.
+ */
+#include <kern/mutex_track.h>
+
 typedef struct {
 	hw_lock_data_t	interlock;
 	hw_lock_data_t	locked;
 	short		waiters;
+#if	MUTEX_OWNER_TRACK
+	/* keep these three first and in this order: i386_lock.S uses
+	 * fixed offsets 4/8/12 (M_OWN_THR/M_OWN_PC/M_ILK_THR) */
+	vm_offset_t	own_thr;
+	vm_offset_t	own_pc;
+	vm_offset_t	ilk_thr;
+#endif	/* MUTEX_OWNER_TRACK */
 #if	MACH_LDEBUG
 	int		type;
 #define	MUTEX_TAG	0x4d4d
@@ -754,5 +777,6 @@ extern void	lock_write_to_read	(lock_t*);
 #define	lock_write_done(l)		lock_done(l)
 
 extern boolean_t lock_read_to_write	(lock_t*);  /* vm_map is only user */
+extern boolean_t lock_try_write		(lock_t*);  /* non-blocking write acquire (#327) */
 
 #endif	/* _KERN_LOCK_H_ */

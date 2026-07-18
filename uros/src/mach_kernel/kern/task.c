@@ -1033,18 +1033,28 @@ task_terminate(
 		}
 		/*
 		 *	Check if current thread_act or task is being terminated.
+		 *
+		 *	#380: do NOT act_lock_thread(cur_thr_act) here.  Taking the
+		 *	current RPC thread's activation/rpc lock while already holding
+		 *	BOTH task locks nests the act-lock chain under the victim's
+		 *	task lock; against the concurrent teardown of the victim's own
+		 *	threads this deadlocks intermittently -- act_lock_thread()
+		 *	spins forever in mutex_pause() (the SMP task_terminate hang hit
+		 *	by proc's SIGKILL and by the reboot sweep, #379).  We only need
+		 *	to bail if our own task/thread is itself being torn down:
+		 *	cur_task->active is stable under the task_lock(cur_task) we
+		 *	already hold, and the current thread is by definition running,
+		 *	so a plain read of cur_thr_act->active suffices for this
+		 *	best-effort guard -- no lock nesting required.
 		 */
-		cur_thread = act_lock_thread(cur_thr_act);
 		if ((!cur_task->active) || (!cur_thr_act->active)) {
 			/*
 			 * Current task or thread is being terminated.
 			 */
-			act_unlock_thread(cur_thr_act);
 			task_unlock(task);
 			task_unlock(cur_task);
 			return(KERN_FAILURE);
 		}
-		act_unlock_thread(cur_thr_act);
 		task_unlock(cur_task);
 
 		if (!task->active) {
@@ -1144,6 +1154,22 @@ task_hold_locked(
 	list = &task->thr_acts;
 	thr_act = (thread_act_t) queue_first(list);
 	while (!queue_end(list, (queue_entry_t) thr_act)) {
+		/*
+		 * #344: guard against a corrupted thr_acts list.  Terminating a
+		 * task whose kernel structures were scribbled (e.g. a task that
+		 * crashed with a wild user jump left task->thr_acts.next at a
+		 * near-NULL garbage value) made act_lock_thread() fault on the
+		 * bogus thr_act at IF=0 and panic the kernel -- one bad task must
+		 * not take the whole system down.  A thr_act must be a pointer-
+		 * aligned kernel VA; if it isn't, bail loudly instead of faulting.
+		 */
+		if ((vm_offset_t) thr_act < VM_MIN_KERNEL_ADDRESS ||
+		    ((vm_offset_t) thr_act & (sizeof(vm_offset_t) - 1))) {
+			printf("task_hold_locked: corrupt thr_acts in task %p "
+			       "(thr_act=%p) -- aborting hold\n",
+			       (void *)task, (void *)thr_act);
+			break;
+		}
 		(void)act_lock_thread(thr_act);
 		thread_hold(thr_act);
 		act_unlock_thread(thr_act);
@@ -1353,6 +1379,27 @@ task_wait_locked(
 	while (1) {
 		thr_act = (thread_act_t) queue_first(list);
 		while (!queue_end(list, (queue_entry_t) thr_act)) {
+			/*
+			 * #344: same guard as task_hold_locked.  Terminating a task
+			 * whose thr_acts list was scribbled with user-register garbage
+			 * (head = a user VA like 0x080985b4) made act_lock_thread()
+			 * mutex_lock a near-NULL address (cr2=0x1f3) and panic at IF=0.
+			 * A thr_act must be a pointer-aligned kernel VA; bail loudly.
+			 */
+			if ((vm_offset_t) thr_act < VM_MIN_KERNEL_ADDRESS ||
+			    ((vm_offset_t) thr_act & (sizeof(vm_offset_t) - 1))) {
+				printf("task_wait_locked: corrupt thr_acts in task %p "
+				       "(thr_act=%p) -- aborting wait\n",
+				       (void *)task, (void *)thr_act);
+				/*
+				 * Point thr_act at the list sentinel so BOTH this inner
+				 * loop and the outer while(1) see queue_end() and stop;
+				 * a bare break would re-enter the outer loop on the same
+				 * corrupt head and spin forever.
+				 */
+				thr_act = (thread_act_t) list;
+				break;
+			}
 			thread = act_lock_thread(thr_act);
 			if (refd_thr_act != THR_ACT_NULL) {
 				act_deallocate(refd_thr_act);

@@ -91,11 +91,26 @@
 
 #else	/* MBUS || CBUS */
 #include <i386/apic.h>
+/*
+ * #321: read the logical cpu number from the per-CPU data area via %gs:cpu_id.
+ * The %gs base is the GDT CPU_DATA descriptor, which each CPU's GDT points at
+ * its own &cpu_data[id] (mp_desc_init); the entry stubs load $CPU_DATA into %gs
+ * before any per-CPU access (the #280 gs discipline), so the segment is always
+ * valid here.  This is a single cached segment-relative load -- no LAPIC MMIO
+ * (which traps+emulates under KVM and is uncached on bare metal), no cr3 trick
+ * (which capped us at 8 CPUs and clashed with PCID).  CPU_NUMBER_FROM_LAPIC is
+ * kept for the boot path (start.S) where %gs is not yet loaded.
+ */
 #define CPU_NUMBER(r) \
+	movl	$CPU_DATA_CPU_ID, r ; \
+	movl	%gs:(r), r
+
+#define CPU_NUMBER_FROM_LAPIC(r) \
     	movl	EXT(lapic_id), r  ; \
     	movl	0(r),r		  ; \
     	shrl	$LAPIC_ID_SHIFT, r; \
-    	andl	$LAPIC_ID_MASK, r
+    	andl	$LAPIC_ID_MASK, r ; \
+    	movzbl	EXT(lapic_to_slot)(,r,1), r	/* #344: APIC ID -> dense slot */
 
 #endif	/* MBUS || CBUS */
 
@@ -105,9 +120,9 @@
 
 #ifndef	ASSEMBLER
 #include <kern/lock.h>
-extern	cpu_int_word[];
-extern	real_ncpus;		/* real number of cpus */
-extern	wncpu;			/* wanted number of cpus */
+extern	int	cpu_int_word[];
+extern	int	real_ncpus;	/* real number of cpus */
+extern	int	wncpu;		/* wanted number of cpus */
 decl_simple_lock_data(extern,kdb_lock)	/* kdb lock		*/
 
 extern	int	kdb_cpu;		/* current cpu running kdb	*/

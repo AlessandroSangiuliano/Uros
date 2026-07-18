@@ -914,6 +914,7 @@ thread_init(
 	/* thr_sh_template.processor_set (later) */
 #if	NCPUS > 1
 	thr_sh_template.bound_processor = PROCESSOR_NULL;
+	thr_sh_template.handoff_hint = FALSE;	/* #356 */
 #endif	/*NCPUS > 1*/
 #if	MACH_HOST
 	thr_sh_template.may_assign = TRUE;

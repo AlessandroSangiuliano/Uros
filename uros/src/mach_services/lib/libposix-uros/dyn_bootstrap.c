@@ -42,10 +42,33 @@
  * seeding mach_task_self_ via the real SYSENTER trap (the
  * <mach_init.h> macro shadows the function name everywhere it's
  * included, so we re-export the trap under its own asm name).
+ *
+ * The Uros personality tail (#375)
+ * --------------------------------
+ * Seeding the ports is only half of what a static task gets before
+ * main().  Static binaries run crt0's __uros_libc_init(), whose first
+ * half brings up musl TLS + the stack canary and whose second half
+ * wires the Uros POSIX personality: __uros_signals_init() (which
+ * proc_register()s us — so __uros_my_pid / __uros_proc_port become
+ * valid and printf can find the session's controlling tty instead of
+ * falling back to the raw mach_print console) and
+ * __uros_absorb_inherited_fds() (which reclaims any fd table execve
+ * handed over).
+ *
+ * A dynamic task does NOT need the first half — musl's real
+ * __libc_start_main already ran __init_tls + __init_ssp from the true
+ * SysV auxv before .init_array, so this constructor executes with TLS
+ * and the canary already live.  Calling __uros_libc_init() wholesale
+ * would redo (and disturb) that.  So we run only its personality tail
+ * here, giving dynamic tools the same proc identity + ctty routing as
+ * static ones.  Both symbols are weak: a smoke build that folds this
+ * TU without the rest of libposix-uros still links.
  */
 
 extern void mig_init(int);
 extern void mach_init_ports(void);
+extern void __uros_signals_init(void) __attribute__((weak));
+extern void __uros_absorb_inherited_fds(void) __attribute__((weak));
 
 /* mach_task_self lives in libmach as a SYSENTER stub (trap 28) but the
  * <mach_init.h> macro `#define mach_task_self() mach_task_self_`
@@ -66,4 +89,10 @@ __uros_dyn_bootstrap(void)
     mach_task_self_ = mach_task_self();
     mig_init(0);
     mach_init_ports();
+
+    /* Personality tail — needs the well-known ports seeded just above. */
+    if (__uros_signals_init)
+        __uros_signals_init();
+    if (__uros_absorb_inherited_fds)
+        __uros_absorb_inherited_fds();
 }

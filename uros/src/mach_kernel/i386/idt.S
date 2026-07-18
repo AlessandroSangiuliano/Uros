@@ -146,6 +146,18 @@ Entry(name)				;\
 	jmp	EXT(alltraps)
 
 /*
+ * NMI.  Installed through an interrupt gate (clears IF); the handler body is a
+ * dedicated minimal stub (t_nmi in locore.S), NOT alltraps.  An NMI must NOT
+ * take the normal kernel trap-return path: trap_from_kernel switches stacks and
+ * checks need_ast for AST_URGENT preemption (locore.S), i.e. it can context-
+ * switch — fatal from NMI context (the NMI-blocked latch only clears on iret).
+ * So this macro only installs the IDT entry; the stub saves state, calls
+ * nmi_watchdog() and irets.
+ */
+#define	NMI_INTR(n,name) \
+	IDT_ENTRY(EXT(name),K_INTR_GATE)
+
+/*
  * Interrupt.
  */
 #define	INTERRUPT(n) \
@@ -161,7 +173,7 @@ Entry(idt)
 
 EXCEPTION(0x00,t_zero_div)
 EXCEP_SPC(0x01,t_debug)
-INTERRUPT(0x02)			/* NMI */
+NMI_INTR(0x02,t_nmi)		/* NMI -> alltraps -> kernel_trap T_NMI (#344) */
 EXCEP_USR(0x03,t_int3)
 EXCEP_USR(0x04,t_into)
 EXCEP_USR(0x05,t_bounds)
@@ -232,7 +244,18 @@ INTERRUPT(0x3b)
 INTERRUPT(0x3c)
 INTERRUPT(0x3d)
 INTERRUPT(0x3e)
+/*
+ * #312: 0x3f is the per-CPU LAPIC timer (LAPIC_TIMER_VECTOR) on SMP — a
+ * dedicated entry stub (i386/ipi.S) that runs the handler on the interrupt
+ * stack and returns through the AST epilogue, like the IPI stubs.  Class-3
+ * vector so the TPR (spl) masks it like the device clock.  UP builds keep the
+ * generic all_intrs stub.
+ */
+#if	NCPUS > 1
+	IDT_ENTRY(EXT(lapic_timer_entry), K_INTR_GATE)
+#else
 INTERRUPT(0x3f)
+#endif	/* NCPUS > 1 */
 
 INTERRUPT(0x40)
 INTERRUPT(0x41)
@@ -421,9 +444,28 @@ INTERRUPT(0xed)
 INTERRUPT(0xee)
 INTERRUPT(0xef)
 
+/*
+ * #302: IPI vectors get dedicated entry stubs (i386/ipi.S) instead of
+ * the generic all_intrs path, because the LAPIC delivers IPIs and
+ * all_intrs would spuriously OCW2-EOI the 8259 PIC.
+ *
+ * Keep these in sync with IPI_VECTOR_* in <i386/lapic.h>:
+ *   0xF0 → ipi_resched_entry
+ *   0xF1 → ipi_mp_entry		(#316: unified cpu_int_word dispatch)
+ *   0xF2 → ipi_call_func_entry
+ *
+ * UP builds don't compile ipi.S, so this section falls back to plain
+ * INTERRUPT(...) stubs identical to the rest of the high-vector range.
+ */
+#if	NCPUS > 1
+	IDT_ENTRY(EXT(ipi_resched_entry),   K_INTR_GATE)
+	IDT_ENTRY(EXT(ipi_mp_entry),        K_INTR_GATE)
+	IDT_ENTRY(EXT(ipi_call_func_entry), K_INTR_GATE)
+#else
 INTERRUPT(0xf0)
 INTERRUPT(0xf1)
 INTERRUPT(0xf2)
+#endif	/* NCPUS > 1 */
 INTERRUPT(0xf3)
 INTERRUPT(0xf4)
 INTERRUPT(0xf5)

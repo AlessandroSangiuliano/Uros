@@ -238,7 +238,22 @@ __uros_fork(void)
                             child_task, cmd, &new_pid, &prc);
     }
 
-    if (new_pid != 0) {
+    /*
+     * #389: a failed registration (PROC_ERR_NO_SLOT on a full pid
+     * table) MUST fail the fork.  Before this check the child was
+     * started anyway — unregistered, and with the parent's CoW'd
+     * __uros_my_pid as its identity — and the parent got new_pid = 0
+     * back: it took the child branch of its own fork and exec'd or
+     * _exit()ed itself (the shell suicide at kill x fork storm
+     * iteration ~254, where the 256-slot table fills).
+     */
+    if (prc != PROC_OK || new_pid == 0) {
+        (void)task_terminate(child_task);
+        (void)mach_port_deallocate(mach_task_self(), child_task);
+        return -EAGAIN;
+    }
+
+    {
         proc_pid_t pid_copy = new_pid;
         (void)vm_write(child_task, (vm_address_t)&__uros_my_pid,
                        (vm_offset_t)&pid_copy, sizeof pid_copy);

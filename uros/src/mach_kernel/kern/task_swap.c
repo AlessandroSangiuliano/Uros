@@ -57,8 +57,21 @@
 
 int task_swap_debug = 0;
 int task_swap_stats = 0;
-int task_swap_enable = 1;
-int task_swap_on = 1;
+/* #317: keep the swap-out decision off too (redundant while task_swap_on==0,
+ * which keeps the swapper thread that reads this from ever starting, but makes
+ * the "permanently disabled" intent explicit). */
+int task_swap_enable = 0;
+/*
+ * #317: the 1990s whole-task swapper is "known to be unsafe MP" (OSF's own
+ * conf/AT386/FAST+APIC etc.).  On SMP a thread deadlocks / loses its wakeup on
+ * task_swapout_list_lock, wedging early boot ~11% of the time.  task_swap_on
+ * gates the swapper threads (startup.c), compute_vm_averages (sched_prim.c) and
+ * the swap-in path (below), so 0 disables all swapper activity at runtime
+ * without disturbing the TASK_SWAPPER-gated residence-count bookkeeping.
+ * Disabled permanently; the dead code is slated for removal in the post-SMP
+ * kernel rework.  (Designed for machines with 16 MB of RAM -- obsolete.)
+ */
+int task_swap_on = 0;
 
 queue_head_t	swapped_tasks;		/* completely swapped out tasks */
 queue_head_t	swapout_thread_q;	/* threads to be swapped out */

@@ -16,11 +16,21 @@
  */
 
 /*
- * SHA-256 per FIPS PUB 180-4 — kernel copy of libcap/sha256.c.  Kept
- * source-identical to the userspace version so cap_server and the
- * urmach_cap_verify fast path produce matching HMACs byte-for-byte.
+ * SHA-256 per FIPS PUB 180-4 — kernel copy of libcap/sha256.c core.
  * No libc dependencies (only stdint.h / stddef.h) so it links cleanly
  * inside the kernel.
+ *
+ * #395: the kernel uses the portable C compress ONLY, by design.  The
+ * kernel is built -mno-sse because under the lazy-FPU discipline
+ * (CR0.TS) any kernel XMM use runs on top of the calling thread's live
+ * FPU state: the SHA-NI fast path here clobbered all eight XMM
+ * registers of whoever issued a cap-verify syscall (probe: 50/50
+ * deterministic, cap_test [#395]).  Borrowing the FPU (save/restore
+ * around the HMAC) would cost more than the fast path saves -- the
+ * XSAVE area is 832 bytes against a ~1 us C-reference HMAC on a
+ * per-device-open path.  So SHA-NI lives in userland (libcap), where
+ * SSE is legal; the digests are identical by definition, so HMACs
+ * still match cap_server's byte-for-byte.
  */
 
 #include <kern/sha256.h>
@@ -48,7 +58,7 @@ static inline uint32_t rotr(uint32_t x, unsigned n) {
     return (x >> n) | (x << (32 - n));
 }
 
-static void sha256_compress_c(struct sha256_ctx *ctx, const uint8_t block[64]) {
+static void sha256_compress(struct sha256_ctx *ctx, const uint8_t block[64]) {
     uint32_t W[64];
     for (unsigned i = 0; i < 16; i++) {
         W[i] = ((uint32_t)block[4*i]   << 24)
@@ -82,40 +92,6 @@ static void sha256_compress_c(struct sha256_ctx *ctx, const uint8_t block[64]) {
     ctx->state[2] += c; ctx->state[3] += d;
     ctx->state[4] += e; ctx->state[5] += f;
     ctx->state[6] += g; ctx->state[7] += h;
-}
-
-/*
- * Issue #180: per-block compress is dispatched through a function
- * pointer.  Default is the portable C implementation; sha256_dispatch_init()
- * (called once at boot, after FPU/SSE setup) may swap it for the SHA-NI
- * variant if CPUID leaf 7 reports the extensions.
- */
-typedef void (*sha256_compress_fn)(struct sha256_ctx *, const uint8_t [64]);
-static sha256_compress_fn sha256_compress = sha256_compress_c;
-
-/* Defined in kern/sha256_shani.c, compiled with target("sha,ssse3,sse4.1"). */
-extern void sha256_compress_shani(struct sha256_ctx *ctx,
-                                  const uint8_t block[64]);
-
-#include <i386/proc_reg.h>      /* do_cpuid */
-
-static int sha256_sha_ni_active = 0;
-
-int sha256_using_sha_ni(void) { return sha256_sha_ni_active; }
-
-void sha256_dispatch_init(void) {
-    unsigned int eax, ebx, ecx, edx;
-
-    /* CPUID leaf 7, sub-leaf 0: EBX bit 29 = SHA Extensions. */
-    do_cpuid(0, 0, &eax, &ebx, &ecx, &edx);
-    if (eax < 7) {
-        return;     /* CPU too old to even report leaf 7 */
-    }
-    do_cpuid(7, 0, &eax, &ebx, &ecx, &edx);
-    if (ebx & (1u << 29)) {
-        sha256_compress = sha256_compress_shani;
-        sha256_sha_ni_active = 1;
-    }
 }
 
 void sha256_init(struct sha256_ctx *ctx) {

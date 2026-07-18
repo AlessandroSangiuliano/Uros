@@ -24,7 +24,29 @@
 #include <mach/mach_types.h>
 #include <mach/sync.h>
 #include <mach/sync_policy.h>
+#include <mach/urmach_futex.h>
 #include <stdint.h>
+
+/*
+ * #324 — block/wake on the shared ring counters via the kernel futex.
+ * The consumer sleeps until prod_tail advances; a producer (full ring)
+ * sleeps until cons_head advances.  Both counters live in the vm_remap'd
+ * channel memory, so this is a SHARED futex (no URMACH_FUTEX_PRIVATE):
+ * the kernel keys on (vm_object,offset), unifying the two tasks that map
+ * the channel at different virtual addresses.  Replaces the per-channel
+ * Mach semaphore (sem_port / sem_port_prod) on the slow path; the
+ * cons_sleeping / prod_sleeping flags still gate the wake so an awake
+ * peer costs no trap.  Lost-wakeup safety comes from the futex value
+ * check: FUTEX_WAIT(counter, snapshot) does not block once the counter
+ * has moved, exactly the guarantee the counting semaphore used to give.
+ */
+#define FLIPC2_FUTEX_WAIT(word, val, tmo_ms)				\
+	urmach_futex((unsigned int *)(word), URMACH_FUTEX_WAIT,		\
+		     (unsigned int)(val), (unsigned int)(tmo_ms),	\
+		     (unsigned int *)0)
+#define FLIPC2_FUTEX_WAKE(word, n)					\
+	urmach_futex((unsigned int *)(word), URMACH_FUTEX_WAKE,		\
+		     (unsigned int)(n), 0, (unsigned int *)0)
 
 /*
  * FLIPC v2: point-to-point shared-memory IPC channel for trusted servers.
@@ -379,7 +401,8 @@ flipc2_produce_commit(flipc2_channel_t ch)
     (*ch->prod_tail)++;
     (*ch->prod_total)++;
 
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
     /* #124: doorbell coalescing — skip the signal if the ring has
      * fewer than wakeup_thresh pending and the consumer is awake
      * (it will catch up on its own).  When consumer is sleeping we
@@ -390,7 +413,7 @@ flipc2_produce_commit(flipc2_channel_t ch)
         thresh  = *ch->wakeup_thresh;
         pending = *ch->prod_tail - *ch->cons_head;
         if (thresh <= 1 || pending >= thresh) {
-            semaphore_signal(ch->sem_port);
+            FLIPC2_FUTEX_WAKE(ch->prod_tail, 1);
             (*ch->wakeups)++;
         }
     }
@@ -410,12 +433,13 @@ flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
     *ch->prod_tail += n;
     *ch->prod_total += n;
 
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
     if (*ch->cons_sleeping) {
         thresh  = *ch->wakeup_thresh;
         pending = *ch->prod_tail - *ch->cons_head;
         if (thresh <= 1 || pending >= thresh) {
-            semaphore_signal(ch->sem_port);
+            FLIPC2_FUTEX_WAKE(ch->prod_tail, 1);
             (*ch->wakeups)++;
         }
     }
@@ -431,9 +455,10 @@ flipc2_produce_commit_n(flipc2_channel_t ch, uint32_t n)
 static inline void
 flipc2_produce_flush(flipc2_channel_t ch)
 {
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
     if (*ch->cons_sleeping) {
-        semaphore_signal(ch->sem_port);
+        FLIPC2_FUTEX_WAKE(ch->prod_tail, 1);
         (*ch->wakeups)++;
     }
 }
@@ -495,13 +520,18 @@ flipc2_produce_wait_mpsc(flipc2_channel_t ch, uint32_t spin_count,
      * the extra signal accumulates on the semaphore and gets
      * harmlessly consumed by the next wait. */
     while ((int32_t)(my_idx - *ch->cons_head) >= (int32_t)re) {
+        uint32_t ch_seen = *ch->cons_head;
         *ch->prod_sleeping = 1;
         FLIPC2_WRITE_FENCE();
         if ((int32_t)(my_idx - *ch->cons_head) < (int32_t)re)
             break;
-        semaphore_wait(ch->sem_port_prod);
+        /* Block until the consumer advances cons_head past ch_seen;
+         * FUTEX_WAIT returns immediately if it already has (no lost
+         * wakeup), and the loop re-tests our own slot window. */
+        FLIPC2_FUTEX_WAIT(ch->cons_head, ch_seen, 0);
     }
-    semaphore_signal(ch->sem_port_prod);
+    /* No signal-chain: the consumer now wakes every blocked producer on
+     * each slot release (#324), so progress no longer needs a cascade. */
     return &ch->ring[my_idx & ch->ring_mask];
 }
 
@@ -527,12 +557,13 @@ flipc2_produce_commit_mpsc(flipc2_channel_t ch, uint32_t my_idx)
     __atomic_store_n(ch->prod_tail, my_idx + 1, __ATOMIC_RELEASE);
     (*ch->prod_total)++;
 
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
     if (*ch->cons_sleeping) {
         thresh  = *ch->wakeup_thresh;
         pending = (my_idx + 1) - *ch->cons_head;
         if (thresh <= 1 || pending >= thresh) {
-            semaphore_signal(ch->sem_port);
+            FLIPC2_FUTEX_WAKE(ch->prod_tail, 1);
             (*ch->wakeups)++;
         }
     }
@@ -581,7 +612,10 @@ flipc2_consume_release(flipc2_channel_t ch)
 
     FLIPC2_WRITE_FENCE();
     if (*ch->prod_sleeping) {
-        semaphore_signal(ch->sem_port_prod);
+        /* Wake every blocked producer: with multiple MPSC producers the
+         * one whose reserved index just became free may not be the one a
+         * wake-one would pick, so they must all re-check cons_head. */
+        FLIPC2_FUTEX_WAKE(ch->cons_head, 0x7fffffff);
     }
 }
 
@@ -597,32 +631,36 @@ flipc2_consume_release_n(flipc2_channel_t ch, uint32_t n)
 
     FLIPC2_WRITE_FENCE();
     if (*ch->prod_sleeping) {
-        semaphore_signal(ch->sem_port_prod);
+        /* Wake every blocked producer: with multiple MPSC producers the
+         * one whose reserved index just became free may not be the one a
+         * wake-one would pick, so they must all re-check cons_head. */
+        FLIPC2_FUTEX_WAKE(ch->cons_head, 0x7fffffff);
     }
 }
 
 /*
  * Wait for a descriptor: spin for spin_count iterations, then block
- * on the Mach semaphore.  Returns pointer to the descriptor, or NULL
+ * on the prod_tail futex.  Returns pointer to the descriptor, or NULL
  * if the ring is corrupt or the peer is spamming spurious wakeups.
  *
  * This implements the adaptive wakeup protocol:
  *   1. Spin-poll prod_tail for spin_count iterations
  *   2. Set cons_sleeping = 1
  *   3. Write fence + re-check (avoid lost wakeup)
- *   4. semaphore_wait()
+ *   4. FUTEX_WAIT(prod_tail, head)
  *   5. Verify data actually arrived (spurious wakeup defense)
  *   6. Clear cons_sleeping
  *
- * Lost wakeup safety: Mach semaphores are counting semaphores.
- * If the producer calls semaphore_signal() between step 2 and step 4,
- * the signal is not lost — it increments the semaphore count, so the
- * subsequent semaphore_wait() returns immediately.
+ * Lost wakeup safety (#324): FUTEX_WAIT blocks only while prod_tail still
+ * reads `head`.  If the producer advances prod_tail between step 2 and
+ * step 4, the kernel's value re-check sees the change and returns at once
+ * (KERN_NOT_WAITING) instead of blocking — the same guarantee the old
+ * counting semaphore gave by incrementing its count.
  *
- * DoS defense: if semaphore_wait returns but no data is available,
- * this is a spurious wakeup (malicious semaphore_signal spam).
- * After FLIPC2_MAX_SPURIOUS_WAKEUPS consecutive spurious wakeups,
- * the channel is declared dead and NULL is returned.
+ * DoS defense: if the wait returns but no data is available, this is a
+ * spurious wakeup (a malicious peer FUTEX_WAKE spam).  After
+ * FLIPC2_MAX_SPURIOUS_WAKEUPS consecutive spurious wakeups, the channel
+ * is declared dead and NULL is returned.
  */
 static inline struct flipc2_desc *
 flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
@@ -648,7 +686,9 @@ flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
 
     /* Phase 2: prepare to sleep */
     *ch->cons_sleeping = 1;
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(prod_tail) is the one
+				 * reorder x86 allows; the store-store WRITE_FENCE
+				 * does not order it -> lost wakeup under SMP */
 
     /* Re-check to avoid lost wakeup */
     ch->cached_prod_tail = *ch->prod_tail;
@@ -662,8 +702,8 @@ flipc2_consume_wait(flipc2_channel_t ch, uint32_t spin_count)
         return &ch->ring[head & ch->ring_mask];
     }
 
-    /* Phase 3: block, then verify data actually arrived */
-    semaphore_wait(ch->sem_port);
+    /* Phase 3: block until prod_tail moves past head, then verify */
+    FLIPC2_FUTEX_WAIT(ch->prod_tail, head, 0);
     *ch->cons_sleeping = 0;
 
     ch->cached_prod_tail = *ch->prod_tail;
@@ -712,7 +752,6 @@ flipc2_consume_wait_timed(flipc2_channel_t ch, uint32_t spin_count,
     uint32_t avail;
     uint32_t i;
     kern_return_t kr;
-    tvalspec_t ts;
 
     /* Phase 1: spin-poll */
     for (i = 0; i < spin_count; i++) {
@@ -736,7 +775,9 @@ flipc2_consume_wait_timed(flipc2_channel_t ch, uint32_t spin_count,
 
     /* Phase 2: prepare to sleep, re-check to avoid lost wakeup */
     *ch->cons_sleeping = 1;
-    FLIPC2_WRITE_FENCE();
+    FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(prod_tail) is the one
+				 * reorder x86 allows; the store-store WRITE_FENCE
+				 * does not order it -> lost wakeup under SMP */
 
     ch->cached_prod_tail = *ch->prod_tail;
     FLIPC2_READ_FENCE();
@@ -750,15 +791,15 @@ flipc2_consume_wait_timed(flipc2_channel_t ch, uint32_t spin_count,
         return FLIPC2_SUCCESS;
     }
 
-    /* Phase 3: block with timeout */
-    ts.tv_sec  = timeout_ms / 1000;
-    ts.tv_nsec = (timeout_ms % 1000) * 1000000;
-    kr = semaphore_timedwait(ch->sem_port, ts);
+    /* Phase 3: block on prod_tail (==head) with the caller's deadline */
+    kr = FLIPC2_FUTEX_WAIT(ch->prod_tail, head, timeout_ms);
     *ch->cons_sleeping = 0;
 
     if (kr == KERN_OPERATION_TIMED_OUT)
         return FLIPC2_ERR_TIMEOUT;
-    if (kr != KERN_SUCCESS)
+    /* KERN_SUCCESS (woken) and KERN_NOT_WAITING (prod_tail already moved)
+     * both mean "re-check the ring"; only an unexpected error is fatal. */
+    if (kr != KERN_SUCCESS && kr != KERN_NOT_WAITING)
         return FLIPC2_ERR_KERNEL;
 
     ch->cached_prod_tail = *ch->prod_tail;
@@ -854,8 +895,10 @@ flipc2_produce_wait(flipc2_channel_t ch, uint32_t spin_count)
         return (struct flipc2_desc *)0;
     }
 
-    /* Phase 3: block on producer semaphore */
-    semaphore_wait(ch->sem_port_prod);
+    /* Phase 3: block until the consumer advances cons_head past the
+     * snapshot we just took (cached_cons_head); FUTEX_WAIT returns at
+     * once if it already has -> no lost wakeup. */
+    FLIPC2_FUTEX_WAIT(ch->cons_head, ch->cached_cons_head, 0);
     *ch->prod_sleeping = 0;
 
     ch->cached_cons_head = *ch->cons_head;
@@ -1271,7 +1314,7 @@ flipc2_channel_set_semaphores(
     mach_port_t         sem_prod);
 
 /* ------------------------------------------------------------------ */
-/*  Pollset API — multi-channel wait (#122)                            */
+/*  Pollset API — multi-channel wait (#122, #325)                      */
 /* ------------------------------------------------------------------ */
 
 typedef struct flipc2_pollset *flipc2_pollset_t;
@@ -1281,10 +1324,10 @@ typedef struct flipc2_event {
 } flipc2_event_t;
 
 /*
- * Create a new pollset.  Owns a shared Mach semaphore; channels
- * added with flipc2_pollset_add() will have their producer wakeup
- * redirected here so flipc2_poll() waits on a single semaphore
- * across N channels.
+ * Create a new pollset.  Since #325 flipc2_poll() blocks with
+ * urmach_futex_waitv on every member channel's prod_tail, so a
+ * producer's ordinary futex wake reaches it in microseconds — no
+ * shared semaphore, no producer-wakeup redirection.
  *
  * Inter-task constraint: add channels BEFORE the remote peer
  * attaches.  See flipc2_pollset.c header for details.

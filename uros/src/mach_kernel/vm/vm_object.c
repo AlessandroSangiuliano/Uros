@@ -1516,7 +1516,28 @@ vm_object_pager_wakeup(
 	 *	to be queued, wake them up now.
 	 */
 	vm_object_cache_lock();
-	assert(ip_kotype(pager) == IKOT_PAGER_TERMINATING);
+	/*
+	 *	#299 SMP race: vm_object_pager_wakeup() can be reached twice for
+	 *	the same pager -- once from memory_object_release() after the
+	 *	explicit terminate, and once from ipc_kobject_destroy() when the
+	 *	pager port dies (see kern/ipc_kobject.c, IKOT_PAGER_TERMINATING
+	 *	case).  Whichever runs first, if the port is still active, resets
+	 *	the kotype to IKOT_NONE; the second caller would then trip the old
+	 *	assert(ip_kotype(pager) == IKOT_PAGER_TERMINATING).  Tolerate it:
+	 *	if the terminating state is already cleared the kobject work is
+	 *	done, but a vm_object_enter() waiter (kern/vm_object.c, the
+	 *	assert_wait((event_t)pager) at the IKOT_PAGER_TERMINATING case)
+	 *	may still be blocked, so issue the wakeup and return.  Any waiter
+	 *	that bumped ip_kobject before the first caller ran was already
+	 *	woken by it; thread_wakeup() with no waiter is a harmless no-op.
+	 */
+	if (ip_kotype(pager) != IKOT_PAGER_TERMINATING) {
+		someone_waiting = (pager->ip_kobject == (ipc_kobject_t)pager);
+		vm_object_cache_unlock();
+		if (someone_waiting)
+			thread_wakeup((event_t) pager);
+		return;
+	}
 	someone_waiting = (pager->ip_kobject == (ipc_kobject_t)pager);
 	if (ip_active(pager))
 		ipc_kobject_set(pager, IKO_NULL, IKOT_NONE);

@@ -23,6 +23,7 @@
 #include <mach/mach_interface.h>
 #include <mach/thread_switch.h>
 #include <mach/i386/thread_status.h>
+#include <mach/urmach_futex.h>		/* #324 futex inter-task variant */
 #include <stdio.h>
 #include <string.h>
 
@@ -68,8 +69,8 @@ flipc2_child_echo_entry(void)
     uint8_t *fwd_data = fwd_base + args->data_offset;
     uint8_t *rev_data = rev_base + args->data_offset;
     uint32_t mask = args->ring_mask;
-    mach_port_t fwd_sem = args->fwd_sem;
-    mach_port_t rev_sem = args->rev_sem;
+    /* #324: fwd_sem/rev_sem unused — block/wake go through the prod_tail
+     * futex (FLIPC2_FUTEX_WAIT/WAKE), matching the migrated library. */
     int echo_data_size = args->data_size;
 
     for (;;) {
@@ -78,12 +79,14 @@ flipc2_child_echo_entry(void)
         /* Adaptive wait: set sleeping flag, re-check, block */
         while (*fwd_prod_tail == head) {
             *fwd_cons_sleeping = 1;
-            FLIPC2_WRITE_FENCE();
+            FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(ring) is the
+					 * one reorder x86 allows; needs mfence,
+					 * not the store-store WRITE_FENCE */
             if (*fwd_prod_tail != head) {
                 *fwd_cons_sleeping = 0;
                 break;
             }
-            semaphore_wait(fwd_sem);
+            FLIPC2_FUTEX_WAIT(fwd_prod_tail, head, 0);
             *fwd_cons_sleeping = 0;
         }
 
@@ -114,9 +117,81 @@ flipc2_child_echo_entry(void)
         FLIPC2_WRITE_FENCE();
         *rev_prod_tail = tail + 1;
 
-        FLIPC2_WRITE_FENCE();
+        FLIPC2_FULL_FENCE();	/* #299: store(rev_prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
         if (*rev_cons_sleeping)
-            semaphore_signal(rev_sem);
+            FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
+    }
+}
+
+/* ===================================================================
+ * Child echo (#324 futex): same loop as flipc2_child_echo_entry but the
+ * block/wake uses urmach_futex on the ring's prod_tail word instead of a
+ * Mach semaphore.  SHARED keying (no URMACH_FUTEX_PRIVATE): the channel is
+ * vm_remap'd, so the kernel keys on (vm_object,offset) — parent and child
+ * resolve their different vaddrs to the same futex.
+ * =================================================================== */
+
+void __attribute__((noreturn, used))
+flipc2_child_echo_futex_entry(void)
+{
+    volatile struct flipc2_child_args *args = &flipc2_child_args_storage;
+    uint8_t *fwd_base = (uint8_t *)args->fwd_base;
+    uint8_t *rev_base = (uint8_t *)args->rev_base;
+    volatile uint32_t *fwd_prod_tail =
+        (volatile uint32_t *)(fwd_base + args->prod_tail_off);
+    volatile uint32_t *fwd_cons_head =
+        (volatile uint32_t *)(fwd_base + args->cons_head_off);
+    volatile uint32_t *rev_prod_tail =
+        (volatile uint32_t *)(rev_base + args->prod_tail_off);
+    struct flipc2_desc *fwd_ring =
+        (struct flipc2_desc *)(fwd_base + args->ring_offset);
+    struct flipc2_desc *rev_ring =
+        (struct flipc2_desc *)(rev_base + args->ring_offset);
+    uint8_t *fwd_data = fwd_base + args->data_offset;
+    uint8_t *rev_data = rev_base + args->data_offset;
+    uint32_t mask = args->ring_mask;
+    int echo_data_size = args->data_size;
+    uint32_t head = *fwd_cons_head;     /* next request to consume */
+    uint32_t tail = *rev_prod_tail;     /* next reply slot to publish */
+
+    /* Wait for the very first request (nothing to wake yet). */
+    while (*fwd_prod_tail == head)
+        urmach_futex((unsigned int *)fwd_prod_tail, URMACH_FUTEX_WAIT,
+                     head, 0, (unsigned int *)0);
+
+    for (;;) {
+        struct flipc2_desc *d = &fwd_ring[head & mask];
+        struct flipc2_desc *reply = &rev_ring[tail & mask];
+
+        reply->opcode = d->opcode + 100;
+        reply->cookie = d->cookie;
+        reply->flags = 0;
+        reply->status = 0;
+        if (echo_data_size > 0 && d->data_length > 0) {
+            reply->data_offset = d->data_offset;
+            reply->data_length = d->data_length;
+            memcpy(rev_data + d->data_offset,
+                   fwd_data + d->data_offset,
+                   d->data_length);
+        } else {
+            reply->data_offset = 0;
+            reply->data_length = 0;
+        }
+
+        head++;
+        tail++;
+        FLIPC2_WRITE_FENCE();
+        *fwd_cons_head = head;          /* request consumed */
+        *rev_prod_tail = tail;          /* reply published  */
+        FLIPC2_WRITE_FENCE();
+
+        /* Wake the parent (parked on rev_prod_tail) and block until the
+         * next request lands (fwd_prod_tail advances) — direct hand-off. */
+        while (*fwd_prod_tail == head)
+            urmach_futex((unsigned int *)fwd_prod_tail,
+                         URMACH_FUTEX_WAKE_WAIT, head, 0,
+                         (unsigned int *)rev_prod_tail);
     }
 }
 
@@ -146,8 +221,8 @@ flipc2_child_batch_echo_entry(void)
     struct flipc2_desc *rev_ring =
         (struct flipc2_desc *)(rev_base + args->ring_offset);
     uint32_t mask = args->ring_mask;
-    mach_port_t fwd_sem = args->fwd_sem;
-    mach_port_t rev_sem = args->rev_sem;
+    /* #324: fwd_sem/rev_sem unused — block/wake go through the prod_tail
+     * futex (FLIPC2_FUTEX_WAIT/WAKE), matching the migrated library. */
 
     for (;;) {
         uint32_t head = *fwd_cons_head;
@@ -155,12 +230,14 @@ flipc2_child_batch_echo_entry(void)
         /* Wait until at least one descriptor is available */
         while (*fwd_prod_tail == head) {
             *fwd_cons_sleeping = 1;
-            FLIPC2_WRITE_FENCE();
+            FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(ring) is the
+					 * one reorder x86 allows; needs mfence,
+					 * not the store-store WRITE_FENCE */
             if (*fwd_prod_tail != head) {
                 *fwd_cons_sleeping = 0;
                 break;
             }
-            semaphore_wait(fwd_sem);
+            FLIPC2_FUTEX_WAIT(fwd_prod_tail, head, 0);
             *fwd_cons_sleeping = 0;
         }
 
@@ -190,9 +267,10 @@ flipc2_child_batch_echo_entry(void)
         *rev_prod_tail = tail + avail;
 
         /* Signal parent once for entire batch */
-        FLIPC2_WRITE_FENCE();
+        FLIPC2_FULL_FENCE();	/* #299: store(rev_prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
         if (*rev_cons_sleeping)
-            semaphore_signal(rev_sem);
+            FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
     }
 }
 
@@ -227,8 +305,8 @@ flipc2_child_bg_echo_entry(void)
     struct flipc2_desc *rev_ring =
         (struct flipc2_desc *)(rev_base + args->ring_offset);
     uint32_t mask = args->ring_mask;
-    mach_port_t fwd_sem = args->fwd_sem;
-    mach_port_t rev_sem = args->rev_sem;
+    /* #324: fwd_sem/rev_sem unused — block/wake go through the prod_tail
+     * futex (FLIPC2_FUTEX_WAIT/WAKE), matching the migrated library. */
 
     /* Buffer group pointers */
     struct flipc2_bufgroup_header *bg_hdr =
@@ -243,12 +321,14 @@ flipc2_child_bg_echo_entry(void)
         /* Adaptive wait: set sleeping flag, re-check, block */
         while (*fwd_prod_tail == head) {
             *fwd_cons_sleeping = 1;
-            FLIPC2_WRITE_FENCE();
+            FLIPC2_FULL_FENCE();	/* #299: store(sleeping)->load(ring) is the
+					 * one reorder x86 allows; needs mfence,
+					 * not the store-store WRITE_FENCE */
             if (*fwd_prod_tail != head) {
                 *fwd_cons_sleeping = 0;
                 break;
             }
-            semaphore_wait(fwd_sem);
+            FLIPC2_FUTEX_WAIT(fwd_prod_tail, head, 0);
             *fwd_cons_sleeping = 0;
         }
         struct flipc2_desc *d = &fwd_ring[head & mask];
@@ -300,9 +380,10 @@ flipc2_child_bg_echo_entry(void)
         FLIPC2_WRITE_FENCE();
         *rev_prod_tail = tail + 1;
 
-        FLIPC2_WRITE_FENCE();
+        FLIPC2_FULL_FENCE();	/* #299: store(rev_prod_tail)->load(cons_sleeping)
+				 * store-load handshake needs mfence */
         if (*rev_cons_sleeping)
-            semaphore_signal(rev_sem);
+            FLIPC2_FUTEX_WAKE(rev_prod_tail, 1);
     }
 }
 
@@ -547,6 +628,98 @@ bench_flipc2_inter_rpc(const char *label, int data_size, int iters)
         flipc2_produce_commit(fwd_ch);
         flipc2_consume_wait(rev_ch, FLIPC2_BENCH_SPIN);
         flipc2_consume_release(rev_ch);
+    }
+    flipc2_get_time(&t1);
+
+    flipc2_print_result(label, flipc2_elapsed_ns(&t0, &t1), iters);
+
+    flipc2_inter_cleanup(child_task, child_thread, fwd_ch, rev_ch);
+}
+
+/* ===================================================================
+ * Inter-task RPC (#324 futex): same round-trip as bench_flipc2_inter_rpc
+ * but the block/wake is urmach_futex (SHARED keying) instead of the Mach
+ * semaphore — exercising the cross-task futex hand-off (driver<->server).
+ * =================================================================== */
+
+void
+bench_flipc2_inter_rpc_futex(const char *label, int data_size, int iters)
+{
+    flipc2_channel_t    fwd_ch, rev_ch;
+    mach_port_t         fwd_sem, rev_sem;
+    mach_port_t         child_task, child_thread;
+    flipc2_return_t     ret;
+    tvalspec_t          t0, t1;
+    int                 i;
+
+    ret = flipc2_channel_create(FLIPC2_BENCH_CHAN_SIZE,
+                                FLIPC2_BENCH_RING_ENTRIES,
+                                &fwd_ch, &fwd_sem);
+    if (ret != FLIPC2_SUCCESS) {
+        printf("  %s: fwd create failed %d\n", label, ret);
+        return;
+    }
+    ret = flipc2_channel_create(FLIPC2_BENCH_CHAN_SIZE,
+                                FLIPC2_BENCH_RING_ENTRIES,
+                                &rev_ch, &rev_sem);
+    if (ret != FLIPC2_SUCCESS) {
+        printf("  %s: rev create failed %d\n", label, ret);
+        flipc2_channel_destroy(fwd_ch);
+        return;
+    }
+
+    if (flipc2_inter_setup(fwd_ch, rev_ch, fwd_sem, rev_sem,
+                           data_size, flipc2_child_echo_futex_entry,
+                           label, &child_task, &child_thread) != 0) {
+        flipc2_channel_destroy(rev_ch);
+        flipc2_channel_destroy(fwd_ch);
+        return;
+    }
+
+    /* Parent-side raw pointers (handle already has ring/data resolved). */
+    volatile uint32_t *fwd_prod_tail = fwd_ch->prod_tail;
+    volatile uint32_t *rev_prod_tail = rev_ch->prod_tail;
+    volatile uint32_t *rev_cons_head = rev_ch->cons_head;
+    struct flipc2_desc *fwd_ring = fwd_ch->ring;
+    uint8_t *fwd_data = fwd_ch->data;
+    uint32_t mask = fwd_ch->hdr->ring_mask;
+    uint32_t ftail = *fwd_prod_tail;    /* request seq          */
+    uint32_t rhead = *rev_cons_head;    /* reply-consumed seq   */
+
+    /* Warmup + timed share one body via a count that switches the clock. */
+    for (i = 0; i < FLIPC2_WARMUP_ITERS + iters; i++) {
+        struct flipc2_desc *d;
+
+        if (i == FLIPC2_WARMUP_ITERS)
+            flipc2_get_time(&t0);
+
+        d = &fwd_ring[ftail & mask];
+        d->opcode = 1;
+        d->cookie = i;
+        d->flags = 0;
+        d->status = 0;
+        if (data_size > 0) {
+            d->data_offset = 0;
+            d->data_length = data_size;
+            memset(fwd_data, 0xCC, data_size);
+        } else {
+            d->data_offset = 0;
+            d->data_length = 0;
+        }
+
+        ftail++;
+        FLIPC2_WRITE_FENCE();
+        *fwd_prod_tail = ftail;         /* publish request */
+
+        /* Wake the child (parked on fwd_prod_tail) and block until the
+         * reply lands (rev_prod_tail advances past rhead) — hand-off. */
+        while (*rev_prod_tail == rhead)
+            urmach_futex((unsigned int *)rev_prod_tail,
+                         URMACH_FUTEX_WAKE_WAIT, rhead, 0,
+                         (unsigned int *)fwd_prod_tail);
+
+        rhead++;
+        *rev_cons_head = rhead;         /* reply consumed */
     }
     flipc2_get_time(&t1);
 

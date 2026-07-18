@@ -131,6 +131,17 @@ typedef struct processor_basic_info	*processor_basic_info_t;
 #define PROCESSOR_BASIC_INFO_COUNT \
 		(sizeof(processor_basic_info_data_t)/sizeof(natural_t))
 
+#define	PROCESSOR_CPU_LOAD_INFO	2		/* cpu load information */
+
+struct processor_cpu_load_info {		/* number of ticks while running... */
+	unsigned long	cpu_ticks[CPU_STATE_MAX]; /* ... in the given mode */
+};
+
+typedef struct processor_cpu_load_info	processor_cpu_load_info_data_t;
+typedef struct processor_cpu_load_info	*processor_cpu_load_info_t;
+#define PROCESSOR_CPU_LOAD_INFO_COUNT \
+		(sizeof(processor_cpu_load_info_data_t)/sizeof(natural_t))
+
 /*
  *	Scaling factor for load_average, mach_factor.
  */

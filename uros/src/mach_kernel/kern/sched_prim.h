@@ -204,6 +204,10 @@ extern void		clear_wait_locked(
 		}
 
 
+/* #324 futex direct hand-off: switch straight to a fully-parked waiter */
+extern boolean_t	thread_handoff_to_parked_waiter(
+				event_t		event);
+
 /* Wake up thread (or threads) waiting on a particular event */
 extern void		thread_wakeup_prim(
 				event_t		event,

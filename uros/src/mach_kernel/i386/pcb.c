@@ -279,6 +279,7 @@ act_machine_switch_pcb( thread_act_t new_act )
 
         assert(new_act->thread != NULL);
         assert(new_act->thread->kernel_stack != 0);
+
         STACK_IEL(new_act->thread->kernel_stack)->saved_state =
                 &new_act->mact.pcb->iss;
 
@@ -328,13 +329,19 @@ act_machine_switch_pcb( thread_act_t new_act )
 	 */
 	if (ldt == 0) {
 	    /*
-	     * Use system LDT.
+	     * Use system LDT.  #341/#347: skip the LLDT when the kernel LDT is
+	     * already loaded -- the unconditional reload cost ~150 cyc on every
+	     * context switch, while SLDT (get_ldt) is a few cycles.  The KERNEL_LDT
+	     * descriptor is fixed, so the selector alone tells us it is current.
 	     */
-	    set_ldt(KERNEL_LDT);
+	    if (get_ldt() != KERNEL_LDT)
+		set_ldt(KERNEL_LDT);
 	}
 	else {
 	    /*
-	     * Thread has its own LDT.
+	     * Thread has its own LDT.  Reload unconditionally: the per-CPU GDT
+	     * USER_LDT descriptor may hold a different task's LDT, and the
+	     * selector alone cannot tell them apart.
 	     */
 	    *gdt_desc_p(mycpu,USER_LDT) = ldt->desc;
 	    set_ldt(USER_LDT);

@@ -1,0 +1,87 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ */
+
+/*
+ * urmach_futex (#324) — modern futex-style fast synchronization.
+ *
+ * A lightweight wait/wake on a 32-bit word in user memory.  The
+ * uncontended fast path stays entirely in userspace (atomic compare on
+ * the word); this trap is taken only when a thread must actually block
+ * or wake a blocked peer — the futex model (Linux futex / FreeBSD
+ * _umtx_op), replacing the heavy Mach-semaphore kernel-trap block path.
+ *
+ * The wait key is the underlying VM object + offset of the word, so the
+ * same memory shared at different virtual addresses in two tasks (e.g. a
+ * FLIPC channel shared via vm_remap) refers to the same futex — like
+ * Linux's shared get_futex_key().  A purely intra-task futex (POSIX sem,
+ * pthread mutex/cond) can OR in URMACH_FUTEX_PRIVATE to key on the cheaper
+ * (address space, virtual address) pair and skip the VM-object lookup.
+ */
+
+#ifndef _MACH_URMACH_FUTEX_H_
+#define _MACH_URMACH_FUTEX_H_
+
+#include <mach/kern_return.h>
+
+/* op codes — MUST match the kernel (kern/sync_sema.c) */
+#define URMACH_FUTEX_WAIT	0	/* if *uaddr==val, block (timeout_ms; 0=forever) */
+#define URMACH_FUTEX_WAKE	1	/* wake up to `val` waiters (val==1 -> exactly one) */
+#define URMACH_FUTEX_WAKE_WAIT	2	/* wake one on wake_uaddr + block on uaddr==val,
+					 * with a direct hand-off (RPC/ping-pong) */
+#define URMACH_FUTEX_WAITV	3	/* block until ANY of `val` words differs (#325) */
+
+#define URMACH_FUTEX_PRIVATE	0x80	/* OR into op: intra-task only, fast keying */
+
+/*
+ * urmach_futex(uaddr, op, val, timeout_ms, wake_uaddr)
+ *   WAIT:      block if *uaddr==val.  wake_uaddr unused.
+ *   WAKE:      wake `val` waiters on uaddr.  wake_uaddr unused.
+ *   WAKE_WAIT: wake one waiter on wake_uaddr, then block on *uaddr==val,
+ *              switching straight to the woken thread (no run-queue trip).
+ * Returns: KERN_SUCCESS woken, KERN_OPERATION_TIMED_OUT, KERN_NOT_WAITING
+ * (value already changed — retry), KERN_INVALID_ADDRESS.
+ */
+extern kern_return_t urmach_futex(unsigned int *uaddr, int op,
+				  unsigned int val, unsigned int timeout_ms,
+				  unsigned int *wake_uaddr);
+
+/*
+ * URMACH_FUTEX_WAITV (#325) — wait on many futex words at once, wake on any.
+ *
+ * Like Linux futex_waitv (5.16+): block until ANY of `nr` words differs from
+ * its paired `val` (or `timeout_ms` elapses; 0 = forever).  `*woken_index`
+ * (if non-NULL) receives the index of the word that fired — advisory, since
+ * several may be ready, so the caller still rescans.  SHARED-keyed, so the
+ * same memory shared across tasks (e.g. FLIPC channels' prod_tail) refers to
+ * the same futex; a producer's ordinary URMACH_FUTEX_WAKE wakes the waiter —
+ * no shared doorbell.  This is the pure-futex pollset/epoll primitive.
+ */
+struct urmach_futexv {
+	unsigned int	*uaddr;
+	unsigned int	 val;
+};
+
+static __inline kern_return_t
+urmach_futex_waitv(struct urmach_futexv *waiters, unsigned int nr,
+		   unsigned int timeout_ms, unsigned int *woken_index)
+{
+	return urmach_futex((unsigned int *) waiters, URMACH_FUTEX_WAITV,
+			    nr, timeout_ms, woken_index);
+}
+
+#endif	/* _MACH_URMACH_FUTEX_H_ */

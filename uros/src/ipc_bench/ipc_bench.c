@@ -203,6 +203,86 @@ print_result(const char *label, unsigned long total_ns, int iters)
 }
 
 /* ===================================================================
+ * SMP-correct echo-thread readiness handshake.
+ *
+ * The old code "synchronised" by calling thread_switch(YIELD/DEPRESS)
+ * after pthread_create and assuming the echo thread had, by the time the
+ * yield returned, started and blocked in mach_msg_receive.  That is a
+ * uniprocessor assumption: on SMP the echo thread runs on another CPU
+ * and the yield guarantees nothing.  Instead, the echo thread sends a
+ * one-shot ping on a ready port as its very first action; spawn_echo()
+ * blocks receiving it, so the benchmark loop only starts once the echo
+ * thread is provably running.  Benches run sequentially, so a single
+ * global ready port (live only across the handshake) suffices and lets
+ * the four echo funcs keep their (void*)port argument unchanged.
+ * =================================================================== */
+
+static volatile mach_port_t g_echo_ready_port = MACH_PORT_NULL;
+
+/* echo side: announce "I'm running" (call once at thread entry). */
+static void
+echo_signal_ready(void)
+{
+    mach_port_t		rp = g_echo_ready_port;
+    mach_msg_header_t	m;
+
+    if (rp == MACH_PORT_NULL)
+	return;
+    m.msgh_bits	       = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    m.msgh_size	       = sizeof(m);
+    m.msgh_remote_port = rp;
+    m.msgh_local_port  = MACH_PORT_NULL;
+    m.msgh_id	       = 0;
+    (void) mach_msg(&m, MACH_SEND_MSG, sizeof(m), 0,
+		    MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+}
+
+/* spawner side: create the echo thread and block until it is running.
+ * Replaces "pthread_create + pthread_detach + thread_switch(yield)".
+ * The 5 s timeout turns a libpthreads lost-wakeup (echo never scheduled)
+ * into an explicit log line instead of a silent wedge — a clean signal
+ * to distinguish a benchmark sync bug from a real threading bug. */
+static void
+spawn_echo(const char *label, void *(*fn)(void *), mach_port_t echo_port)
+{
+    pthread_t		th;
+    mach_port_t		ready_port;
+    /* Receive buffer must hold the header AND the trailer the kernel
+     * appends, plus slack — receiving into a bare header overflows the
+     * stack (the stack protector trips: "stack smashing detected"). */
+    struct {
+	mach_msg_header_t  head;
+	mach_msg_trailer_t trailer;
+	char		   pad[32];
+    } m;
+    kern_return_t	kr;
+
+    if (mach_port_allocate(mach_task_self(),
+			   MACH_PORT_RIGHT_RECEIVE, &ready_port)) {
+	/* Fall back to the old best-effort yield if we can't make a port. */
+	pthread_create(&th, NULL, fn, (void *)(unsigned long)echo_port);
+	pthread_detach(th);
+	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+	return;
+    }
+    mach_port_insert_right(mach_task_self(), ready_port, ready_port,
+			   MACH_MSG_TYPE_MAKE_SEND);
+    g_echo_ready_port = ready_port;
+
+    pthread_create(&th, NULL, fn, (void *)(unsigned long)echo_port);
+    pthread_detach(th);
+
+    kr = mach_msg(&m.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof(m),
+		  ready_port, 5000, MACH_PORT_NULL);
+    if (kr == MACH_RCV_TIMED_OUT)
+	printf("  %s: echo thread failed to start in 5s "
+	       "(libpthreads lost wakeup?)\n", label);
+
+    g_echo_ready_port = MACH_PORT_NULL;
+    mach_port_destroy(mach_task_self(), ready_port);
+}
+
+/* ===================================================================
  * Intra-task echo thread (cthread)
  *
  * Receives a message on `port`, sends a reply back on the
@@ -216,6 +296,8 @@ echo_thread_func(void *arg)
     bench_recv_buf_t	msg;
     bench_null_msg_t	reply;
     kern_return_t	kr;
+
+    echo_signal_ready();
 
     for (;;) {
 	kr = mach_msg(&msg.head,
@@ -289,16 +371,8 @@ bench_intra_rpc(const char *label, int send_size, int iters)
 
     reply_port = mach_reply_port();
 
-    /* Spawn echo thread */
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
-
-    /* Let echo thread start up */
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, echo_thread_func, echo_port);
 
     /* Warmup */
     for (i = 0; i < WARMUP_ITERS; i++) {
@@ -340,6 +414,116 @@ bench_intra_rpc(const char *label, int send_size, int iters)
     //print_cache_stats(label, &cs_before, &cs_after);
 
     /* Cleanup: destroy ports (kills echo thread's receive) */
+    mach_port_destroy(mach_task_self(), echo_port);
+    mach_port_destroy(mach_task_self(), reply_port);
+}
+
+/* ===================================================================
+ * Combined-trap (SEND|RCV) echo thread  [#320]
+ *
+ * MIG-server-style loop: the first iteration only receives; thereafter
+ * each iteration SENDS the previous reply AND RECEIVES the next request
+ * in a single mach_msg() trap.  The server therefore parks on TH_WAIT
+ * between requests, so both peers take the mach_msg combined-message
+ * hotpath (the L4-style hand-off) rather than the separate-call DTS path.
+ * =================================================================== */
+
+static void *
+combined_echo_thread_func(void *arg)
+{
+    mach_port_t		port = (mach_port_t)(unsigned long)arg;
+    bench_recv_buf_t	buf;
+    kern_return_t	kr;
+    mach_msg_option_t	opt	= MACH_RCV_MSG;	/* first time: receive only */
+    mach_msg_size_t	send_sz = 0;
+
+    echo_signal_ready();
+
+    for (;;) {
+	kr = mach_msg(&buf.head, opt, send_sz, sizeof(buf), port,
+		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	if (kr != MACH_MSG_SUCCESS) {
+	    if (kr == MACH_RCV_PORT_DIED  || kr == MACH_RCV_PORT_CHANGED ||
+		kr == MACH_RCV_INVALID_NAME || kr == MACH_RCV_TIMED_OUT  ||
+		kr == MACH_SEND_INVALID_DEST)
+		break;
+	    opt = MACH_RCV_MSG; send_sz = 0;	/* resync to a clean receive */
+	    continue;
+	}
+
+	/*
+	 * buf holds a request; buf.head.msgh_remote_port is the client's
+	 * send-once reply right.  Turn the buffer into a null reply to it,
+	 * then SEND it and RCV the next request in one trap.
+	 */
+	buf.head.msgh_bits	 = MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	buf.head.msgh_local_port = MACH_PORT_NULL;
+	buf.head.msgh_size	 = sizeof(bench_null_msg_t);
+	buf.head.msgh_id	+= 100;
+	opt	= MACH_SEND_MSG | MACH_RCV_MSG;
+	send_sz = sizeof(bench_null_msg_t);
+    }
+    return (void *)0;
+}
+
+/* ===================================================================
+ * Combined-trap intra-task RPC benchmark  [#320]
+ *
+ * The client issues one mach_msg(MACH_SEND_MSG|MACH_RCV_MSG) per round
+ * trip (send the request to the echo port, receive the reply on its own
+ * reply port) -- exactly what a MIG simpleroutine does.  This is the path
+ * that exercises the SMP-safe hotpath (#315); bench_intra_rpc, by using
+ * separate send/recv calls, does not.
+ * =================================================================== */
+
+static void
+bench_combined_rpc(const char *label, int send_size, int iters)
+{
+    mach_port_t		echo_port, reply_port;
+    kern_return_t	kr;
+    tvalspec_t		t0, t1;
+    int			i;
+    bench_recv_buf_t	buf;	/* one buffer: send from it, receive into it */
+
+    kr = mach_port_allocate(mach_task_self(),
+			    MACH_PORT_RIGHT_RECEIVE, &echo_port);
+    if (kr) { printf("  %s: port alloc failed %d\n", label, kr); return; }
+    kr = mach_port_insert_right(mach_task_self(), echo_port, echo_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+    if (kr) { printf("  %s: insert right failed %d\n", label, kr); return; }
+    reply_port = mach_reply_port();
+
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, combined_echo_thread_func, echo_port);
+
+    for (i = 0; i < WARMUP_ITERS; i++) {
+	buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	buf.head.msgh_size	  = send_size;
+	buf.head.msgh_remote_port = echo_port;
+	buf.head.msgh_local_port  = reply_port;
+	buf.head.msgh_id	  = 1;
+	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
+		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+
+    get_time(&t0);
+    for (i = 0; i < iters; i++) {
+	buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	buf.head.msgh_size	  = send_size;
+	buf.head.msgh_remote_port = echo_port;
+	buf.head.msgh_local_port  = reply_port;
+	buf.head.msgh_id	  = 1;
+	mach_msg(&buf.head, MACH_SEND_MSG | MACH_RCV_MSG, send_size,
+		 sizeof(buf), reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    get_time(&t1);
+
+    print_result(label, elapsed_ns(&t0, &t1), iters);
+
     mach_port_destroy(mach_task_self(), echo_port);
     mach_port_destroy(mach_task_self(), reply_port);
 }
@@ -585,6 +769,8 @@ slow_echo_thread_func(void *arg)
     bench_null_msg_t	reply;
     kern_return_t	kr;
 
+    echo_signal_ready();
+
     for (;;) {
 	kr = mach_msg(&msg.head,
 		      MACH_RCV_MSG,
@@ -659,20 +845,14 @@ bench_slow_receive(const char *label, int send_size, int iters)
 
     reply_port = mach_reply_port();
 
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, slow_echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, slow_echo_thread_func, echo_port);
 
-    /* Let echo thread start and block for the first time */
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
-
-    /* Warmup — same yield-send-recv pattern */
+    /* Warmup.  (The old per-iteration thread_switch(YIELD) here assumed UP
+     * "echo is now blocked" semantics; on SMP it is unachievable and only
+     * added a busy-yield spin, so it is gone — Mach queues the message and
+     * the echo thread services it regardless of where it is.) */
     for (i = 0; i < WARMUP_ITERS; i++) {
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
-
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
 			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
@@ -690,12 +870,6 @@ bench_slow_receive(const char *label, int send_size, int iters)
     /* Timed run */
     get_time(&t0);
     for (i = 0; i < iters; i++) {
-	/*
-	 * Yield CPU: echo thread runs, calls mach_msg_receive, blocks.
-	 * On return here the echo thread is guaranteed to be sleeping.
-	 */
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
-
 	send_buf.head.msgh_bits =
 	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
 			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
@@ -976,13 +1150,8 @@ bench_pp_intra(const char *label, int send_size, int use_pp, int iters)
 
     reply_port = mach_reply_port();
 
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, echo_thread_func, echo_port);
 
     for (i = 0; i < WARMUP_ITERS; i++) {
 	send_buf.head.msgh_bits =
@@ -1193,6 +1362,8 @@ ool_echo_thread_func(void *arg)
     bench_null_msg_t	reply;
     kern_return_t	kr;
 
+    echo_signal_ready();
+
     for (;;) {
 	kr = mach_msg(&msg.head,
 		      MACH_RCV_MSG,
@@ -1268,13 +1439,8 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
     if (kr) { printf("  %s: insert right failed %d\n", label, kr); return; }
     reply_port = mach_reply_port();
 
-    {
-	pthread_t echo_th;
-	pthread_create(&echo_th, NULL, ool_echo_thread_func,
-		       (void *)(unsigned long)echo_port);
-	pthread_detach(echo_th);
-    }
-    thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
+    /* Spawn echo thread and wait until it is provably running (SMP-safe). */
+    spawn_echo(label, ool_echo_thread_func, echo_port);
 
     /* Warmup */
     for (i = 0; i < WARMUP_ITERS; i++) {
@@ -1586,6 +1752,10 @@ bench_mach_print(int iters)
 #define SUITE_DISK	(1u <<  7)
 #define SUITE_MEM	(1u <<  8)
 #define SUITE_FLIPC2	(1u <<  9)
+#define SUITE_COMB	(1u << 10)
+#define SUITE_CC	(1u << 11)	/* concurrent same-space (#327) */
+#define SUITE_FAULT	(1u << 12)	/* concurrent same-space faults (#338) */
+#define SUITE_SCALE	(1u << 13)	/* concurrency sweep, clean numbers (#319) */
 #define SUITE_ALL	0xFFFFFFFFu
 
 static int
@@ -1613,8 +1783,356 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "disk"))    mask |= SUITE_DISK;
 	else if (streq(argv[i], "mem"))	    mask |= SUITE_MEM;
 	else if (streq(argv[i], "flipc2"))  mask |= SUITE_FLIPC2;
+	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
+	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
+	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
+	else if (streq(argv[i], "scale"))   mask |= SUITE_SCALE;
     }
     return mask ? mask : SUITE_ALL;
+}
+
+/* ===================================================================
+ * Concurrent same-space RPC benchmark (#327)
+ *
+ * Spawns `nthreads` worker threads in THIS task, each driving its own
+ * echo thread over a private port pair.  All of them share one ipc_space,
+ * so every mach_msg they issue contends on the space lock.  With the old
+ * mutex (is_read_lock == is_write_lock) the workers serialize on it; with
+ * the #327 reader/writer lock the receive-side lookups run concurrently
+ * while the send-side copyin still takes the write side.  We report the
+ * aggregate ns/RPC so the scaling from x1 -> xN exposes the contention:
+ * a flat number means full serialization, a dropping one means the read
+ * side now overlaps.  Compare the same numbers against a mutex kernel
+ * (A/B) to isolate the lock from raw CPU parallelism.
+ * =================================================================== */
+
+#define MAX_CC_THREADS	32	/* #319: oversubscription sweep up to 32 */
+#define SCALE_ITERS	2000	/* per thread per run in the scale sweep */
+#define SCALE_RUNS	5	/* runs per thread-count -> median (kill noise) */
+
+typedef struct {
+    mach_port_t	echo_port;
+    mach_port_t	reply_port;
+    int		iters;
+    int		send_size;
+    pthread_t	th;
+} cc_worker_t;
+
+static volatile int g_cc_go;	/* start barrier for the timed region */
+
+static void *
+cc_worker_func(void *arg)
+{
+    cc_worker_t		*w = (cc_worker_t *)arg;
+    bench_recv_buf_t	send_buf;
+    /*
+     * #374: receive into a full-size buffer, not a header-only bench_null_msg_t.
+     * A Mach receive writes the reply plus the kernel trailer, so a 24-byte
+     * (header-only) stack buffer has zero slack -- any byte past it lands on this
+     * frame's saved ebp / return address, the flaky scaling-sweep stack smash
+     * (eip=0x0/0x18; 0x18 = sizeof(mach_msg_header_t)).  Every other receiver in
+     * this file already uses bench_recv_buf_t; match them.
+     */
+    bench_recv_buf_t	recv_buf;
+    int			i;
+
+    while (!g_cc_go)		/* all workers begin together */
+	;
+
+    for (i = 0; i < w->iters; i++) {
+	send_buf.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE);
+	send_buf.head.msgh_size	       = w->send_size;
+	send_buf.head.msgh_remote_port = w->echo_port;
+	send_buf.head.msgh_local_port  = w->reply_port;
+	send_buf.head.msgh_id	       = 1;
+
+	mach_msg(&send_buf.head, MACH_SEND_MSG, w->send_size, 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 w->reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    return (void *)0;
+}
+
+/*
+ * Run the concurrent same-space RPC workload ONCE and return the aggregate
+ * wall-clock ns (no print).  Shared by the cc suite (#327) and the scale sweep
+ * (#319).  nthreads workers each do iters RPCs through a private echo thread,
+ * all released together by the g_cc_go barrier.
+ */
+static unsigned long
+cc_run_once(int nthreads, int send_size, int iters_per_thread)
+{
+    cc_worker_t		w[MAX_CC_THREADS];
+    tvalspec_t		t0, t1;
+    kern_return_t	kr;
+    unsigned long	total_ns;
+    int			i;
+
+    if (nthreads > MAX_CC_THREADS)
+	nthreads = MAX_CC_THREADS;
+
+    g_cc_go = 0;
+
+    for (i = 0; i < nthreads; i++) {
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &w[i].echo_port);
+	if (kr) { printf("  cc[%d]: echo alloc failed %d\n", i, kr); return 0; }
+	mach_port_insert_right(mach_task_self(), w[i].echo_port,
+			       w[i].echo_port, MACH_MSG_TYPE_MAKE_SEND);
+	w[i].reply_port = mach_reply_port();
+	w[i].iters	= iters_per_thread;
+	w[i].send_size	= send_size;
+	spawn_echo("cc-echo", echo_thread_func, w[i].echo_port);
+    }
+
+    for (i = 0; i < nthreads; i++)
+	pthread_create(&w[i].th, NULL, cc_worker_func, &w[i]);
+
+    get_time(&t0);
+    g_cc_go = 1;
+    for (i = 0; i < nthreads; i++)
+	pthread_join(w[i].th, NULL);
+    get_time(&t1);
+    total_ns = elapsed_ns(&t0, &t1);
+
+    for (i = 0; i < nthreads; i++) {
+	mach_port_destroy(mach_task_self(), w[i].echo_port);
+	mach_port_destroy(mach_task_self(), w[i].reply_port);
+    }
+    return total_ns;
+}
+
+static void
+bench_concurrent_samespace(int nthreads, int send_size, int iters_per_thread)
+{
+    unsigned long	total_ns;
+    long		total_rpc;
+
+    if (nthreads > MAX_CC_THREADS)
+	nthreads = MAX_CC_THREADS;
+    total_ns  = cc_run_once(nthreads, send_size, iters_per_thread);
+    total_rpc = (long)nthreads * iters_per_thread;
+    printf("  concurrent same-space x%d   %ld RPCs in %lu ns  "
+	   "(%lu ns/RPC aggregate)\n",
+	   nthreads, total_rpc, total_ns,
+	   total_ns / (total_rpc ? total_rpc : 1));
+}
+
+/*
+ * #319: concurrency sweep with median-of-N for CLEAN scaling numbers.  At the
+ * current CPU count (set at boot, -cN), run the concurrent same-space RPC
+ * workload at increasing thread counts; for each, take the median over
+ * SCALE_RUNS runs (a warmup run is discarded) to kill the single-run variance.
+ * Report aggregate ns/RPC and speedup vs 1 thread.  This stresses the
+ * scheduler/runq + IPC wakeup (the #319 target): perfect scaling keeps ns/RPC
+ * flat (speedup = T); a global-runq bottleneck makes ns/RPC rise (speedup < T).
+ * One boot = one clean curve for that CPU count; reboot with -cN for the rest.
+ */
+static void
+bench_scale(void)
+{
+    static const int	tc[] = { 1, 2, 4, 6, 8, 12, 16, 24, 32 };
+    int			ntc = (int)(sizeof(tc) / sizeof(tc[0]));
+    int			send = (int)sizeof(bench_null_msg_t);
+    unsigned long	base_nspr = 0;
+    int			i, r, a, b;
+
+    printf("    thr   med ns/RPC(aggr)   speedup vs 1\n");
+    for (i = 0; i < ntc; i++) {
+	int		T = tc[i];
+	unsigned long	s[SCALE_RUNS], med, nspr, sx100;
+
+	if (T > MAX_CC_THREADS)
+	    break;
+
+	(void) cc_run_once(T, send, SCALE_ITERS / 4);	/* warmup, discarded */
+	for (r = 0; r < SCALE_RUNS; r++)
+	    s[r] = cc_run_once(T, send, SCALE_ITERS);
+	/* insertion sort of SCALE_RUNS samples -> median (no qsort/stdlib) */
+	for (a = 1; a < SCALE_RUNS; a++) {
+	    unsigned long key = s[a];
+	    for (b = a - 1; b >= 0 && s[b] > key; b--)
+		s[b + 1] = s[b];
+	    s[b + 1] = key;
+	}
+	med  = s[SCALE_RUNS / 2];
+	nspr = med / ((unsigned long)T * SCALE_ITERS);
+	if (nspr == 0)
+	    nspr = 1;
+	if (i == 0)
+	    base_nspr = nspr;
+	sx100 = (unsigned long)T * base_nspr * 100 / nspr;	/* speedup x100 */
+	printf("    %-4d  %-15lu   %lu.%02lux\n",
+	       T, nspr, sx100 / 100, sx100 % 100);
+    }
+}
+
+/* ===================================================================
+ * pmap concurrent-fault stress (#338: split page-table locks)
+ *
+ * N worker threads (oversubscribed vs CPUs) each loop: mmap a private
+ * anonymous chunk, write every page (faults it in -> pmap_enter on this
+ * address space), read every page back checking the value (a racing
+ * pmap_remove/enter or a missed TLB shootdown would corrupt it), then
+ * munmap (-> pmap_remove).  All in ONE address space across all CPUs,
+ * so it hammers the per-PT-page pt-locks, the pmd_same recheck, the
+ * enter<->activate TLB barrier and the protocol-2/3 ordering -- the
+ * paths KVM (TSO) cannot exercise.  Completion = no deadlock; the value
+ * check = no corruption.
+ * =================================================================== */
+
+#define MAX_FAULT_THREADS	32
+
+static volatile int	g_fault_go;
+static volatile int	g_fault_err;
+
+typedef struct {
+    int			id;
+    int			iters;
+    int			chunk_kb;
+    pthread_t		th;
+    unsigned long	checksum;
+} fault_worker_t;
+
+static void *
+fault_worker_func(void *arg)
+{
+    fault_worker_t	*w = (fault_worker_t *)arg;
+    vm_size_t		sz = (vm_size_t)w->chunk_kb * 1024;
+    unsigned long	sum = 0;
+    int			it;
+    vm_size_t		off;
+
+    while (!g_fault_go)		/* all workers start together */
+	;
+
+    for (it = 0; it < w->iters; it++) {
+	vm_address_t	addr = 0;
+	volatile char	*p;
+
+	/* Mach-native anonymous map (== mmap MAP_ANON under the hood); the
+	 * sa_mach header shadow makes <sys/mman.h> clash on off_t. */
+	if (vm_allocate(mach_task_self(), &addr, sz, TRUE) != KERN_SUCCESS) {
+	    g_fault_err = 1;
+	    continue;
+	}
+	p = (volatile char *)addr;
+	/* fault every page in (pmap_enter) */
+	for (off = 0; off < sz; off += 4096)
+	    p[off] = (char)((off >> 12) + it + w->id);
+	/* read back: a racing remove/enter or stale TLB shows up here */
+	for (off = 0; off < sz; off += 4096) {
+	    if (p[off] != (char)((off >> 12) + it + w->id))
+		g_fault_err = 1;
+	    sum += (unsigned char)p[off];
+	}
+	vm_deallocate(mach_task_self(), addr, sz);	/* pmap_remove */
+    }
+    w->checksum = sum;
+    return (void *)0;
+}
+
+static void
+bench_fault_stress(int nthreads, int chunk_kb, int iters_per_thread)
+{
+    fault_worker_t	w[MAX_FAULT_THREADS];
+    tvalspec_t		t0, t1;
+    int			i;
+
+    if (nthreads > MAX_FAULT_THREADS)
+	nthreads = MAX_FAULT_THREADS;
+
+    g_fault_go = 0;
+    g_fault_err = 0;
+
+    for (i = 0; i < nthreads; i++) {
+	w[i].id		= i;
+	w[i].iters	= iters_per_thread;
+	w[i].chunk_kb	= chunk_kb;
+	w[i].checksum	= 0;
+	pthread_create(&w[i].th, NULL, fault_worker_func, &w[i]);
+    }
+
+    get_time(&t0);
+    g_fault_go = 1;
+    for (i = 0; i < nthreads; i++)
+	pthread_join(w[i].th, NULL);
+    get_time(&t1);
+
+    {
+	unsigned long	total_ns = elapsed_ns(&t0, &t1);
+	long		pages	 = (long)nthreads * iters_per_thread *
+				   ((long)chunk_kb / 4);
+	printf("  fault-stress x%-2d  %dKB x %d iters  "
+	       "%ld page-faults in %lu ns  ->  %s\n",
+	       nthreads, chunk_kb, iters_per_thread, pages, total_ns,
+	       g_fault_err ? "**CORRUPTION/ERROR**" : "ok");
+    }
+}
+
+/* ===================================================================
+ * Radix overflow capability-table test (#331)
+ *
+ * Exercises the sparse-name code paths that the normal benchmark does
+ * not: allocate_name at a high (sparse) index goes through the radix
+ * overflow, a colliding index must be rejected with KERN_NAME_EXISTS,
+ * and destroy must free the radix entry so the name can be re-used.
+ * =================================================================== */
+
+static void
+test_radix_overflow(void)
+{
+    kern_return_t	kr;
+    mach_port_t		self = mach_task_self();
+    unsigned int	sparse = 0x100000;	/* 1M: well above the table */
+    mach_port_t		name_a = (mach_port_t)((sparse << 8) | 0x11);
+    mach_port_t		name_b = (mach_port_t)((sparse << 8) | 0x22); /* same idx, diff gen */
+    mach_port_type_t	type;
+    int			ok = 1;
+    int			i;
+    mach_port_t		names[8];
+
+    /* 1) sparse allocate -> radix insert */
+    kr = mach_port_allocate_name(self, MACH_PORT_RIGHT_RECEIVE, name_a);
+    if (kr != KERN_SUCCESS) { printf("  radix: alloc sparse failed %d\n", kr); ok = 0; }
+
+    /* 2) it must be found -> radix lookup */
+    kr = mach_port_type(self, name_a, &type);
+    if (kr != KERN_SUCCESS) { printf("  radix: type(sparse) failed %d\n", kr); ok = 0; }
+
+    /* 3) colliding name (same index, different gen) -> KERN_NAME_EXISTS */
+    kr = mach_port_allocate_name(self, MACH_PORT_RIGHT_RECEIVE, name_b);
+    if (kr != KERN_NAME_EXISTS) {
+	printf("  radix: collision expected KERN_NAME_EXISTS, got %d\n", kr);
+	ok = 0;
+    }
+
+    /* 4) destroy -> radix delete */
+    kr = mach_port_destroy(self, name_a);
+    if (kr != KERN_SUCCESS) { printf("  radix: destroy(sparse) failed %d\n", kr); ok = 0; }
+
+    /* 5) re-allocate the same name -> radix re-insert after delete */
+    kr = mach_port_allocate_name(self, MACH_PORT_RIGHT_RECEIVE, name_a);
+    if (kr != KERN_SUCCESS) { printf("  radix: re-alloc failed %d\n", kr); ok = 0; }
+    (void) mach_port_destroy(self, name_a);
+
+    /* 6) several sparse indices in different radix subtrees, then verify */
+    for (i = 0; i < 8; i++) {
+	names[i] = (mach_port_t)(((sparse + (i * 0x40000)) << 8) | 0x33);
+	kr = mach_port_allocate_name(self, MACH_PORT_RIGHT_RECEIVE, names[i]);
+	if (kr != KERN_SUCCESS) { printf("  radix: multi alloc[%d] failed %d\n", i, kr); ok = 0; }
+    }
+    for (i = 0; i < 8; i++) {
+	kr = mach_port_type(self, names[i], &type);
+	if (kr != KERN_SUCCESS) { printf("  radix: multi type[%d] failed %d\n", i, kr); ok = 0; }
+    }
+    for (i = 0; i < 8; i++)
+	(void) mach_port_destroy(self, names[i]);
+
+    printf("  radix overflow test: %s\n", ok ? "PASS" : "FAIL");
 }
 
 /* ===================================================================
@@ -1743,6 +2261,60 @@ main(int argc, char **argv)
     }
 
     /* ---------------------------------------------------------
+     * Combined-trap (SEND|RCV) RPC -- exercises the mach_msg hotpath [#320]
+     * --------------------------------------------------------- */
+    if (suites & SUITE_COMB) {
+	printf("--- Combined SEND|RCV intra-task (hotpath) ---\n");
+
+	bench_combined_rpc("null RPC",
+			   (int)sizeof(bench_null_msg_t), BENCH_ITERS);
+	bench_combined_rpc("128B inline RPC",
+			   (int)sizeof(bench_128_msg_t), BENCH_ITERS);
+	bench_combined_rpc("1024B inline RPC",
+			   (int)sizeof(bench_1024_msg_t), BENCH_ITERS);
+	bench_combined_rpc("4096B inline RPC",
+			   (int)sizeof(bench_4096_msg_t), BENCH_ITERS);
+
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
+     * Concurrent same-space RPC -- N threads, one ipc_space [#327]
+     * Exposes the ipc_space read/write lock contention; watch the
+     * aggregate ns/RPC as the thread count scales x1 -> x4.
+     * --------------------------------------------------------- */
+    if (suites & SUITE_CC) {
+	printf("--- Concurrent same-space RPC (ipc_space lock, #327) ---\n");
+
+	bench_concurrent_samespace(1, (int)sizeof(bench_null_msg_t),
+				   BENCH_ITERS);
+	bench_concurrent_samespace(2, (int)sizeof(bench_null_msg_t),
+				   BENCH_ITERS);
+	bench_concurrent_samespace(4, (int)sizeof(bench_null_msg_t),
+				   BENCH_ITERS);
+
+	printf("\n");
+    }
+
+    if (suites & SUITE_FAULT) {
+	printf("--- pmap fault stress "
+	       "(#338: concurrent same-space page faults) ---\n");
+	printf("    completion = no deadlock;  'ok' = no corruption\n");
+	bench_fault_stress(16, 2048, 256);	/* 16 thr, 2 MB chunks */
+	bench_fault_stress(32, 1024, 256);	/* 32 thr (4x oversub), 1 MB */
+	printf("\n");
+    }
+
+    if (suites & SUITE_SCALE) {
+	printf("--- scaling sweep (#319: concurrent same-space RPC, "
+	       "median of %d) ---\n", SCALE_RUNS);
+	printf("    curve for the CURRENT cpu count (boot -cN); "
+	       "speedup<T => runq/scheduler contention\n");
+	bench_scale();
+	printf("\n");
+    }
+
+    /* ---------------------------------------------------------
      * Port operation benchmarks
      * --------------------------------------------------------- */
     if (suites & SUITE_PORT) {
@@ -1750,6 +2322,7 @@ main(int argc, char **argv)
 
 	bench_port_alloc_destroy(BENCH_ITERS);
 	bench_port_names(BENCH_ITERS);
+	test_radix_overflow();		/* #331 sparse/collision paths */
     }
 
     /* ---------------------------------------------------------

@@ -117,7 +117,11 @@ struct fake_descriptor gdt[GDTSZ] = {
 /* 0x038 */	{ 0, 0, 0, 0 },
 /* 0x040 */	{ 0, 0, 0, 0 },
 /* 0x048 */	{ (unsigned int)&cpu_data[0],
-		  sizeof(cpu_data)-1,
+		  sizeof(cpu_data[0])-1,	/* #346: one cpu_data_t, not the whole
+					 * array -- sizeof(cpu_data) let the BSP's
+					 * %gs over-reach into other CPUs' slots
+					 * instead of faulting (mp_desc_init's AP
+					 * descriptor already uses the element size) */
 		  SZ_32,
 		  ACC_P|ACC_PL_K|ACC_DATA_W
 		},			/* per-CPU current thread address */

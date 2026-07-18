@@ -5,3 +5,8 @@ MODERNIZATION_TRACKER.md
 .claude/
 
 uros/src/sysenter_test/sysenter_test.S
+
+*.log
+*.console
+
+.vscode/settings.json

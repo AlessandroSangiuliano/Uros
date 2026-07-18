@@ -48,6 +48,10 @@
 #include <i386/pio.h>
 #include <i386/misc_protos.h>
 #include <i386/rtclock_entries.h>
+#if	NCPUS > 1
+#include <i386/apic.h>		/* LAPIC_IRR_BASE — timer pending under #311 */
+#include <i386/lapic.h>		/* lapic_start, LAPIC_REG32 */
+#endif
 
 /*
  * List of real-time clock dependent routines.
@@ -308,6 +312,97 @@ rtc_init(void)
 static volatile unsigned int     last_ival = 0;
 
 /*
+ * rtc_tick_pending()
+ *
+ * True if a periodic clock interrupt has fired but has not yet been folded
+ * into rtclock.mtime.  rtc_gettime() consults this only when the 8254 down-
+ * counter sits in its top 1% (val > clks_per_int_99): in that narrow window
+ * the counter may have just wrapped while we hold the RTC lock with the clock
+ * masked, so mtime is momentarily one tick behind and we add it back.
+ *
+ * Legacy 8259 path: read the master IRR and test bit 0 (ISA IRQ0).
+ * #311 IOAPIC path: the 8259 is masked and the PIT is delivered as local-APIC
+ * vector PICM_VECTBASE (0x40), so test that vector in the LAPIC IRR instead.
+ * The PIT targets only the boot CPU's LAPIC, so on an AP this reads 0 and we
+ * simply forgo the (rare, sub-tick) correction there — never a regression
+ * versus the coarse path this replaces.
+ */
+static int
+rtc_tick_pending(void)
+{
+#if	NCPUS > 1
+	extern int	ioapic_enabled;
+
+	if (ioapic_enabled) {
+		unsigned int	vec = 0x40;	/* PICM_VECTBASE + IRQ0 */
+
+		if (lapic_start == 0)
+			return (0);
+		return ((LAPIC_REG32(LAPIC_IRR_BASE + 0x10 * (vec >> 5))
+			 & (1u << (vec & 0x1f))) != 0);
+	}
+#endif	/* NCPUS > 1 */
+	outb(0x0a, 0x20);		/* OCW3: select master IRR for reading */
+	return ((inb(0x20) & 1) != 0);	/* IRQ0 request pending? */
+}
+
+/*
+ * #344: TSC-based sub-tick interpolation.
+ *
+ * The 8254 sub-tick read (READ_8254) is unreliable on real hardware -- on omen
+ * its latched LPC reads never yield a consistent pair and rtc_gettime spun
+ * forever at IF=0 (root-caused via the NMI watchdog).  The bounded-8254 path is
+ * kept as a fallback, but when the TSC has been calibrated (mp_tsc_per_us != 0,
+ * which it always is post-bring-up) we instead measure nanoseconds since the
+ * last clock tick directly from the TSC: rtclock_intr() stamps rtclock_tsc_at_tick
+ * when it advances mtime, and here we read the TSC and convert the delta.
+ */
+extern unsigned int	mp_tsc_per_us;		/* TSC counts per microsecond (mp.c) */
+unsigned long long	rtclock_tsc_at_tick;	/* TSC at the last mtime advance */
+
+static __inline__ unsigned long long
+rtc_rdtsc(void)
+{
+	unsigned int lo, hi;
+	__asm__ __volatile__("rdtsc" : "=a" (lo), "=d" (hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+/* 64/32 -> 32 via a single divl (no libgcc __udivdi3). */
+static __inline__ unsigned int
+rtc_div64_32(unsigned long long num, unsigned int den)
+{
+	unsigned int q, r;
+	__asm__("divl %4"
+		: "=a" (q), "=d" (r)
+		: "a" ((unsigned int)num), "d" ((unsigned int)(num >> 32)),
+		  "rm" (den));
+	return q;
+}
+
+/*
+ * Nanoseconds since the last clock tick, from the TSC, clamped to one tick.
+ * Caller holds rtclock.lock.  Returns 0 if the TSC isn't calibrated.
+ */
+static unsigned int
+rtc_subtick_nsec(void)
+{
+	unsigned int	delta, maxd, sub;
+
+	if (mp_tsc_per_us == 0)
+		return 0;			/* not calibrated: mtime only */
+	delta = (unsigned int)(rtc_rdtsc() - rtclock_tsc_at_tick);
+	/* Cap the delta (~20 ms) so the divl quotient can't exceed 32 bits. */
+	maxd = mp_tsc_per_us * 20000u;
+	if (maxd && delta > maxd)
+		delta = maxd;
+	sub = rtc_div64_32((unsigned long long)delta * 1000ULL, mp_tsc_per_us);
+	if ((int)sub > rtclock.intr_nsec)
+		sub = rtclock.intr_nsec;	/* never exceed one tick */
+	return sub;
+}
+
+/*
  * Get the clock device time. This routine is responsible
  * for converting the device's machine dependent time value
  * into a canonical tvalspec_t value.
@@ -326,24 +421,48 @@ rtc_gettime(
 		cur_time->tv_sec = 0;
 		return (KERN_SUCCESS);
 	}
-#if	(NCPUS == 1 || (MP_V1_1 && 0)) && AT386
+#if	AT386
 
 	/*
 	 * Inhibit interrupts. Determine the incremental
 	 * time since the last interrupt. (This could be
 	 * done in assembler for a bit more speed).
+	 *
+	 * NB: the 8254 sub-tick interpolation below runs on SMP too (#314).
+	 * Without it rtc_gettime() returns only mtime, advanced once per tick,
+	 * so time resolution on SMP collapses to 1/HZ (10 ms) and every fine
+	 * benchmark reads as 0 / impossible bandwidth.  The RTC lock serialises
+	 * the (global) 8254 access across CPUs.
 	 */
 	LOCK_RTC(s);
-	do {
-	    READ_8254(val);                 /* read clock */
-	    READ_8254(val2);                /* read clock */
-	} while ( val2 > val || val2 < val - 10 );
-	if ( val > clks_per_int_99 ) {
-	    outb( 0x0a, 0x20 );             /* see if interrupt pending */
-	    if ( inb( 0x20 ) & 1 )
-		itime.tv_nsec = rtclock.intr_nsec; /* yes, add a tick */
+	if (mp_tsc_per_us != 0) {
+	    /*
+	     * #344: preferred path -- sub-tick from the TSC (see rtc_subtick_nsec).
+	     * The 8254 read below is unreliable on real HW (omen LPC: latched reads
+	     * never form a consistent decreasing pair -> rtc_gettime spun forever at
+	     * IF=0).  The TSC is monotonic and cheap and is always calibrated post
+	     * bring-up.
+	     */
+	    itime.tv_nsec = rtc_subtick_nsec();
+	} else {
+	    /*
+	     * Fallback when the TSC isn't calibrated: bounded 8254 read.  The old
+	     * `val2 < val - 10` test was UNSIGNED (underflowed for val < 10 -> the
+	     * loop never exited); use `val2 + 10 < val` and cap the retry, and if
+	     * the PIT stays unreadable skip interpolation (val == clks_per_int ->
+	     * 0 contribution) so mtime alone advances, monotonic but coarser.
+	     */
+	    int spins = 0;
+	    do {
+		READ_8254(val);             /* read clock */
+		READ_8254(val2);            /* read clock */
+	    } while ( (val2 > val || val2 + 10 < val) && ++spins < 20 );
+	    if (spins >= 20)
+		val = clks_per_int;         /* PIT unreadable: mtime only */
+	    if ( val > clks_per_int_99 && rtc_tick_pending() )
+		itime.tv_nsec = rtclock.intr_nsec; /* counter wrapped: add a tick */
+	    itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
 	}
-	itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
 	if ( itime.tv_nsec < last_ival ) {
 	    if (rtc_print_lost_tick)
 		printf( "rtclock: missed clock interrupt.\n" );
@@ -355,7 +474,7 @@ rtc_gettime(
 	ADD_TVALSPEC(cur_time, ((tvalspec_t *)&itime));
 #else
 	MTS_TO_TS(rtclock.mtime, cur_time);
-#endif	/* (NCPUS == 1 || (MP_V1_1 && 0)) && AT386 */
+#endif	/* AT386 */
 	return (KERN_SUCCESS);
 }
 
@@ -378,21 +497,23 @@ rtc_gettime_interrupts_disabled(
 		cur_time->tv_sec = 0;
 		return;
 	}
-#if	(NCPUS == 1 || (MP_V1_1 && 0)) && AT386
+#if	AT386
 
 	simple_lock(&rtclock.lock);
 
 	/*
 	 * Copy the current time knowing that we cant be interrupted
-	 * between the two longwords and so dont need to use MTS_TO_TS
+	 * between the two longwords and so dont need to use MTS_TO_TS.
+	 * Sub-tick interpolation runs on SMP too (#314); see rtc_gettime().
 	 */
-	READ_8254(val);                     /* read clock */
-	if ( val > clks_per_int_99 ) {
-	    outb( 0x0a, 0x20 );             /* see if interrupt pending */
-	    if ( inb( 0x20 ) & 1 )
-		itime.tv_nsec = rtclock.intr_nsec; /* yes, add a tick */
+	if (mp_tsc_per_us != 0) {
+	    itime.tv_nsec = rtc_subtick_nsec();	/* #344: TSC sub-tick */
+	} else {
+	    READ_8254(val);                 /* read clock (8254 fallback) */
+	    if ( val > clks_per_int_99 && rtc_tick_pending() )
+		itime.tv_nsec = rtclock.intr_nsec; /* counter wrapped: add a tick */
+	    itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
 	}
-	itime.tv_nsec += ((clks_per_int - val) * time_per_clk) / ZHZ;
 	if ( itime.tv_nsec < last_ival ) {
 	    if (rtc_print_lost_tick)
 		printf( "rtclock: missed clock interrupt.\n" );
@@ -406,7 +527,7 @@ rtc_gettime_interrupts_disabled(
 
 #else
 	MTS_TO_TS(rtclock.mtime, cur_time);
-#endif	/* (NCPUS == 1 || (MP_V1_1 && 0)) && AT386 */
+#endif	/* AT386 */
 }
 
 /*
@@ -443,10 +564,11 @@ rtc_getattr(
 	switch (flavor) {
 
 	case CLOCK_GET_TIME_RES:	/* >0 res */
-#if	(NCPUS == 1 || (MP_V1_1 && 0)) && AT386
+#if	AT386
+		/* 8254 sub-tick interpolation gives ~1 us on UP and SMP (#314). */
 		*(clock_res_t *) attr = 1000;
 		break;
-#endif	/* (NCPUS == 1 || (MP_V1_1 && 0)) && AT386 */
+#endif	/* AT386 */
 	case CLOCK_MAP_TIME_RES:	/* >0 canonical */
 	case CLOCK_ALARM_CURRES:	/* =0 no alarm */
 		*(clock_res_t *) attr = rtclock.intr_nsec;
@@ -660,8 +782,13 @@ rtclock_intr(void)
 	 * Update clock time. Do the update so that the macro
 	 * MTS_TO_TS() for reading the mapped time works (e.g.
 	 * update in order: mtv_csec, mtv_nsec, mtv_sec).
-	 */	 
+	 */
 	LOCK_RTC(s);
+	/*
+	 * #344: anchor the TSC to this tick so rtc_subtick_nsec() can measure
+	 * nanoseconds since mtime last advanced (replaces the unreliable 8254).
+	 */
+	rtclock_tsc_at_tick = rtc_rdtsc();
 	i = rtclock.mtime->mtv_nsec + rtclock.intr_nsec;
 	if (i < NSEC_PER_SEC)
 	    rtclock.mtime->mtv_nsec = i;

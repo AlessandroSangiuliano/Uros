@@ -146,6 +146,58 @@ void mach_port_gst_helper(
 	mach_port_t		*names,
 	ipc_entry_num_t		*actualp);
 
+/*
+ * #331: ipc_radix_iterate() callbacks for enumerating the sparse overflow,
+ * replacing the splay-tree traversals.  Each bundles the loop state that
+ * the helper above needs into the iterate `arg'.
+ */
+struct mpn_radix_ctx {
+	ipc_port_timestamp_t	timestamp;
+	mach_port_t		*names;
+	mach_port_type_t	*types;
+	ipc_entry_num_t		*actual;
+};
+
+static void
+mach_port_names_radix(
+	mach_port_index_t	index,
+	ipc_tree_entry_t	tentry,
+	void			*arg)
+{
+	struct mpn_radix_ctx *c = (struct mpn_radix_ctx *) arg;
+
+	(void) index;
+	assert(IE_BITS_TYPE(tentry->ite_bits) != MACH_PORT_TYPE_NONE);
+	mach_port_names_helper(c->timestamp, &tentry->ite_entry,
+			       tentry->ite_name, c->names, c->types, c->actual);
+}
+
+struct mpgst_radix_ctx {
+	ipc_pset_t		pset;
+	ipc_entry_num_t		maxnames;
+	mach_port_t		*names;
+	ipc_entry_num_t		*actual;
+};
+
+static void
+mach_port_gst_radix(
+	mach_port_index_t	index,
+	ipc_tree_entry_t	tentry,
+	void			*arg)
+{
+	struct mpgst_radix_ctx *c = (struct mpgst_radix_ctx *) arg;
+	ipc_entry_bits_t bits = tentry->ite_bits;
+
+	(void) index;
+	assert(IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE);
+	if (bits & MACH_PORT_TYPE_RECEIVE) {
+		ipc_port_t port = (ipc_port_t) tentry->ite_object;
+
+		mach_port_gst_helper(c->pset, port, c->maxnames,
+				     c->names, c->actual);
+	}
+}
+
 
 /* Zeroed template of qos flags */
 
@@ -236,7 +288,6 @@ mach_port_names(
 	mach_port_type_t	**typesp,
 	mach_msg_type_number_t	*typesCnt)
 {
-	ipc_tree_entry_t tentry;
 	ipc_entry_t table;
 	ipc_entry_num_t tsize;
 	mach_port_index_t index;
@@ -264,7 +315,12 @@ mach_port_names(
 		ipc_entry_num_t bound;
 		vm_size_t size_needed;
 
-		is_read_lock(space);
+		/*
+		 * #327: this enumerates the splay tree (ipc_splay_traverse_*),
+		 * which mutates it, so it must hold the space exclusively.
+		 * (is_*_unlock below both map to lock_done().)
+		 */
+		is_write_lock(space);
 		if (!space->is_active) {
 			is_read_unlock(space);
 			if (size != 0) {
@@ -333,18 +389,15 @@ mach_port_names(
 		}
 	}
 
-	for (tentry = ipc_splay_traverse_start(&space->is_tree);
-	    tentry != ITE_NULL;
-	    tentry = ipc_splay_traverse_next(&space->is_tree, FALSE)) {
-		ipc_entry_t entry = &tentry->ite_entry;
-		mach_port_t name = tentry->ite_name;
+	{
+		struct mpn_radix_ctx ctx;
 
-		assert(IE_BITS_TYPE(tentry->ite_bits) !=
-				    MACH_PORT_TYPE_NONE);
-		mach_port_names_helper(timestamp, entry, name,
-				    names, types, &actual);
+		ctx.timestamp = timestamp;
+		ctx.names = names;
+		ctx.types = types;
+		ctx.actual = &actual;
+		ipc_radix_iterate(&space->is_tree, mach_port_names_radix, &ctx);
 	}
-	ipc_splay_traverse_finish(&space->is_tree);
 	is_read_unlock(space);
 
 	if (actual == 0) {
@@ -1141,7 +1194,6 @@ mach_port_get_set_status(
 	size = PAGE_SIZE;	/* initial guess */
 
 	for (;;) {
-		ipc_tree_entry_t tentry;
 		ipc_entry_t entry, table;
 		ipc_entry_num_t tsize;
 		mach_port_index_t index;
@@ -1195,22 +1247,16 @@ mach_port_get_set_status(
 			}
 		}
 
-		for (tentry = ipc_splay_traverse_start(&space->is_tree);
-		    tentry != ITE_NULL;
-		    tentry =
-		    ipc_splay_traverse_next(&space->is_tree,FALSE)) {
-			ipc_entry_bits_t bits = tentry->ite_bits;
+		{
+			struct mpgst_radix_ctx ctx;
 
-			assert(IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE);
-
-			if (bits & MACH_PORT_TYPE_RECEIVE) {
-			    ipc_port_t port = (ipc_port_t) tentry->ite_object;
-
-			    mach_port_gst_helper(pset, port, maxnames,
-						       names, &actual);
-			}
+			ctx.pset = pset;
+			ctx.maxnames = maxnames;
+			ctx.names = names;
+			ctx.actual = &actual;
+			ipc_radix_iterate(&space->is_tree, mach_port_gst_radix,
+					  &ctx);
 		}
-		ipc_splay_traverse_finish(&space->is_tree);
 		is_read_unlock(space);
 
 		if (actual <= maxnames)

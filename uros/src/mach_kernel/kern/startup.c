@@ -212,6 +212,7 @@
 #include <kern/machine.h>
 #include <kern/posixtime.h>
 #include <kern/processor.h>
+#include <kern/rcu.h>
 #include <kern/sched_prim.h>
 #include <kern/startup.h>
 #include <kern/task.h>
@@ -284,6 +285,7 @@ setup_main(void)
 	ipc_bootstrap();
 	vm_mem_init();
 	ipc_init();
+	urmach_rcu_init();		/* #331 step 2: QSBR (no-op stub today) */
 
 	/*
 	 * As soon as the virtual memory system is up, we record
@@ -328,7 +330,19 @@ setup_main(void)
 	act_init();
 	thread_init();
 	subsystem_init();
+	{
+		extern void lock_smoke_test(void);
+		extern void fpu_sanity_check(void);
+		extern void hwp_init_cpu(boolean_t bsp);
+		lock_smoke_test();	/* #303 acceptance */
+		fpu_sanity_check();	/* #309 acceptance (BSP arm) */
+		hwp_init_cpu(TRUE);	/* #358 hardware P-states (BSP arm) */
+	}
 	cap_init();
+	{
+		extern void futexv_init(void);
+		futexv_init();		/* #325: urmach_futex WAITV registry */
+	}
 #if	TASK_SWAPPER
 	task_swappable(&realhost, kernel_task, FALSE);
 #endif	/* TASK_SWAPPER */
@@ -414,6 +428,8 @@ start_kernel_threads(void)
 		splx(s);
 	    }
 	}
+
+	zone_enable_hot_magazines();	/* #330: per-CPU magazines on hot zones */
 
 	(void) kernel_thread(kernel_task, reaper_thread, (char *) 0);
 #if	THREAD_SWAPPER

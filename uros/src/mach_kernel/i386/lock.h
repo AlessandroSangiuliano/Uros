@@ -111,6 +111,28 @@ typedef	hw_lock_data_t	*hw_lock_t;
 			"r" (bit), "m" (*(volatile int *)(l))	:	\
 			"memory");
 
+/*
+ *	Non-blocking variant of bit_lock: attempt to set the bit once.
+ *	Returns TRUE if the bit was free and is now held by the caller,
+ *	FALSE if it was already locked.  Used to acquire locks out of the
+ *	natural order without spinning (deadlock-free back-off + retry),
+ *	e.g. the canonical PVH->pmap ordering in intel/pmap.c (#329).
+ *
+ *	`lock btsl` sets CF to the previous value of the bit; `sbbl %0,%0`
+ *	then yields 0 when CF==0 (bit was free, we took it) or -1 otherwise.
+ */
+#define	bit_lock_try(bit,l)						\
+({									\
+	int	__blt_taken;						\
+	__asm__ volatile("	lock		\n			\
+				btsl	%2,%1	\n			\
+				sbbl	%0,%0"				\
+			: "=r" (__blt_taken), "+m" (*(volatile int *)(l)) \
+			: "r" (bit)					\
+			: "memory", "cc");				\
+	(__blt_taken == 0);						\
+})
+
 #define	bit_unlock(bit,l)						\
 	__asm__ volatile("	lock		\n			\
 				btrl	%0,%1"			:	\
@@ -152,6 +174,8 @@ static __inline__ char	atomic_getb(char * p);
 static __inline__ void	atomic_setl(long * p, long value);
 static __inline__ void	atomic_sets(short * p, short value);
 static __inline__ void	atomic_setb(char * p, char value);
+
+static __inline__ long	atomic_add_fetchl(long * p, long delta);
 
 static __inline__ char	xchgb(volatile char * cp, char new)
 {
@@ -265,6 +289,27 @@ static __inline__ void	atomic_setb(char * p, char value)
 	*p = value;
 }
 
+/*
+ * Atomic add returning the NEW value.  xaddl writes the old value back into
+ * its register operand, so add the delta to recover the new one.  Used for
+ * lock-free refcounts where the releaser must learn whether it dropped the
+ * last reference (#329 phase 1).
+ */
+static __inline__ long	atomic_add_fetchl(long * p, long delta)
+{
+#if NEED_ATOMIC
+	register long	old = delta;
+
+	__asm__ volatile ("	lock		\n		\
+				xaddl	%0,%1"			:	\
+			"+r" (old), "+m" (*(volatile long *)p)		:	\
+								: "memory");
+	return (old + delta);
+#else /* NEED_ATOMIC */
+	return (*p += delta);
+#endif /* NEED_ATOMIC */
+}
+
 
 #if	0
 /*
@@ -322,19 +367,24 @@ extern void bit_unlock(
 
 
 #if	MACH_RT || (NCPUS > 1) || MACH_LDEBUG
+/*
+ * mutex_lock_assert_safe() lives in <kern/lock.c>; declared here as extern
+ * because <i386/lock.h> cannot pull in <kern/thread.h> (cycle through
+ * <kern/lock.h>).  #300.
+ */
+extern void mutex_lock_assert_safe(void);
 #if	MACH_LDEBUG || !MACH_RT
 #define	mutex_try(m)	(!(m)->interlock && _mutex_try(m))
 #define	mutex_lock(m)							\
 MACRO_BEGIN								\
-	assert(current_thread() == THREAD_NULL ||			\
-	       current_thread()->wait_event == NO_EVENT);		\
+	mutex_lock_assert_safe();					\
 	_mutex_lock((m));						\
 MACRO_END
 #else	/* MACH_LDEBUG || !MACH_RT */
 #define	mutex_try(m)	(!(m)->interlock && \
 		!xchgb ((volatile char *)&((m)->locked), 1))
 #define	mutex_lock(m)							\
-	(assert(current_thread()->wait_event == NO_EVENT),		\
+	(mutex_lock_assert_safe(),					\
 	 (mutex_try (m) ? (void) 1 : _mutex_lock (m)))
 #endif	/* MACH_LDEBUG || !MACH_RT */
 #else	/* MACH_RT || (NCPUS > 1) || MACH_LDEBUG */

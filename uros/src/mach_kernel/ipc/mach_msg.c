@@ -166,6 +166,7 @@
 #include <kern/counters.h>
 #include <kern/cpu_number.h>
 #include <kern/lock.h>
+#include <kern/rcu.h>
 #include <kern/sched_prim.h>
 #include <kern/ipc_sched.h>
 #include <kern/exception.h>
@@ -218,7 +219,8 @@ mach_msg_return_t msg_receive_error(
 	mach_msg_header_t	*msg,
 	mach_msg_option_t	option,
 	mach_port_seqno_t	seqno,
-	ipc_space_t		space);
+	ipc_space_t		space,
+	mach_msg_size_t		rcv_size);
 
 /* the size of each trailer has to be listed here for copyout purposes */
 mach_msg_trailer_size_t trailer_size[] = {
@@ -416,7 +418,7 @@ mach_msg_receive(
 		    || mr == MACH_RCV_TRANSPORT_ERROR
 #endif	/* DIPC */
 		    ) {
-			if (msg_receive_error(kmsg, msg, option, seqno, space)
+			if (msg_receive_error(kmsg, msg, option, seqno, space, rcv_size)
 			    == MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
@@ -450,7 +452,7 @@ mach_msg_receive(
 				mr = MACH_RCV_INVALID_DATA;
 		} 
 		else {
-			if (msg_receive_error(kmsg, msg, option, seqno, space) 
+			if (msg_receive_error(kmsg, msg, option, seqno, space, rcv_size)
 						== MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
@@ -580,7 +582,7 @@ finish_receive:
 #endif	/* DIPC */
 		    ) {
 			space = current_space();
-			if (msg_receive_error(kmsg, msg, option, seqno, space)
+			if (msg_receive_error(kmsg, msg, option, seqno, space, max_size)
 			    == MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
@@ -621,7 +623,7 @@ finish_receive:
 					== MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		} else {
-			if (msg_receive_error(kmsg, msg, option, seqno, space)
+			if (msg_receive_error(kmsg, msg, option, seqno, space, max_size)
 						== MACH_RCV_INVALID_DATA)
 				mr = MACH_RCV_INVALID_DATA;
 		}
@@ -651,11 +653,27 @@ out:
  * If compiled in, the run-time toggle "enable_hotpath" below
  * eases testing & debugging
  */
-#if	NCPUS == 1 && !MACH_RT
+/*
+ * #319 axis B: the mach_msg hotpath is the L4-style synchronous-RPC hand-off
+ * (sender goes on the reply port's wait queue, direct switch to the receiver,
+ * NO run-queue round-trip) -- the ~100x SMP RPC win (#315/#319).
+ *
+ * It is now enabled on SMP too.  The previous SMP race (a receiver woken by a
+ * concurrent timeout/abort between the mqueue dequeue and the post-commit
+ * thread_lock) is closed by the pre-commit TH_WAIT check + claim under
+ * thread_lock right before the commit point (see "SMP-safe hand-off" below).
+ * MACH_RT is still excluded: the hotpath inlines scheduler internals that the
+ * real-time build reworks.
+ */
+#if	!MACH_RT
 #define ENABLE_HOTPATH 1
-#else	/* NCPUS == 1 && !MACH_RT */
+#else	/* !MACH_RT */
 #define ENABLE_HOTPATH 0
-#endif	/* NCPUS == 1 && !MACH_RT */
+#endif	/* !MACH_RT */
+
+#if	NCPUS > 1
+extern int	sched_rpc_handoff;	/* #356 hand-off on block (sched_prim.c) */
+#endif
 
 #if	ENABLE_HOTPATH
 /*
@@ -827,6 +845,78 @@ unsigned int c_mmot_kernel_send = 0;		/* kernel server calls	*/
 
 boolean_t enable_hotpath = TRUE;	/* Patchable, just in case ...	*/
 #endif	/* HOTPATH_ENABLE */
+
+/*
+ *	Routine:	urmach_msg_lockfree_resolve
+ *	Purpose:
+ *		#331 step 2 part 3b: resolve the RPC copyin's reply_name (a
+ *		receive right) and dest_name (a send right) to their ports
+ *		WITHOUT taking the space lock.  On success returns TRUE with
+ *		*reply_portp / *dest_portp set and BOTH ports ip_lock'd, active,
+ *		and validated; on failure returns FALSE with no locks held and
+ *		the caller falls back to the locked lookup.
+ *	Conditions:
+ *		Nothing locked.  Handles both dense and sparse (radix) names via
+ *		ipc_entry_lookup_lockfree; a missing/wrong-typed name returns
+ *		FALSE so the locked path handles it.
+ *	Why it is safe without the lock:
+ *		ipc_entry_lookup_lockfree reads the entry from type-stable storage
+ *		under the per-space seqlock (no fault, table-consistent); the ports
+ *		are type-stable too, so ip_lock never faults.  We snapshot
+ *		(is_generation, is_seq) around both lookups, lock the ports, then
+ *		re-check the snapshot: a concurrent table grow (is_seq) or any
+ *		right removal/modification (is_generation, bumped at the head of
+ *		ipc_right_destroy before the entry is cleared, under ip_lock of the
+ *		very port we hold) makes us return FALSE rather than act on a stale
+ *		mapping.  So it never misdelivers: it confirms name->port at a
+ *		valid linearization point or gives up.
+ */
+static boolean_t
+urmach_msg_lockfree_resolve(
+	ipc_space_t	space,
+	mach_port_t	reply_name,
+	mach_port_t	dest_name,
+	ipc_port_t	*reply_portp,
+	ipc_port_t	*dest_portp)
+{
+	natural_t	gen0 = space->is_generation;
+	natural_t	seq0 = space->is_seq;
+	ipc_entry_t	re, de;
+	ipc_port_t	rp, dp;
+
+	urmach_rcu_barrier();
+
+	re = ipc_entry_lookup_lockfree(space, reply_name);
+	if (re == IE_NULL || !(re->ie_bits & MACH_PORT_TYPE_RECEIVE))
+		return FALSE;
+	rp = (ipc_port_t) re->ie_object;
+
+	de = ipc_entry_lookup_lockfree(space, dest_name);
+	if (de == IE_NULL || !(de->ie_bits & MACH_PORT_TYPE_SEND))
+		return FALSE;
+	dp = (ipc_port_t) de->ie_object;
+
+	if (rp == IP_NULL || dp == IP_NULL)
+		return FALSE;
+
+	ip_lock(dp);
+	if (!ip_active(dp) || !ip_lock_try(rp)) {
+		ip_unlock(dp);
+		return FALSE;
+	}
+
+	/* Re-check the snapshot now that both ports are locked. */
+	urmach_rcu_barrier();
+	if (space->is_generation != gen0 || space->is_seq != seq0) {
+		ip_unlock(rp);
+		ip_unlock(dp);
+		return FALSE;
+	}
+
+	*reply_portp = rp;
+	*dest_portp = dp;
+	return TRUE;
+}
 
 /*
  *	Routine:	mach_msg_overwrite_trap [mach trap]
@@ -1033,6 +1123,35 @@ mach_msg_overwrite_trap(
 					goto fast_copyin_cached;
 				}
 			}
+
+			/*
+			 * #331 step 2 part 3b: on a cache miss, try resolving both
+			 * names WITHOUT the space lock.  On success both ports are
+			 * locked and validated -- populate the per-thread cache and
+			 * take the existing fast path.  On failure fall through to the
+			 * locked lookup below (it also covers sparse/radix names).
+			 */
+		    {
+			ipc_port_t lf_reply, lf_dest;
+
+			if (urmach_msg_lockfree_resolve(space, reply_name,
+							hdr->msgh_remote_port,
+							&lf_reply, &lf_dest)) {
+				natural_t _sgen = space->is_generation;
+
+				reply_port = lf_reply;
+				dest_port  = lf_dest;
+				self->ith_port_cache[0].ipc_name  = reply_name;
+				self->ith_port_cache[0].ipc_port  = reply_port;
+				self->ith_port_cache[0].ipc_space = space;
+				self->ith_port_cache[0].ipc_gen   = _sgen;
+				self->ith_port_cache[1].ipc_name  = hdr->msgh_remote_port;
+				self->ith_port_cache[1].ipc_port  = dest_port;
+				self->ith_port_cache[1].ipc_space = space;
+				self->ith_port_cache[1].ipc_gen   = _sgen;
+				goto fast_copyin_cached;
+			}
+		    }
 
 			is_read_lock(space);
 			assert(space->is_active);
@@ -1580,6 +1699,70 @@ mach_msg_overwrite_trap(
 		 */
 #endif	/* THREAD_SWAPPER */
 
+		/*
+		 * #319 SMP-safe hand-off.  On SMP a concurrent timeout or abort
+		 * can pull the receiver out of TH_WAIT using thread_lock alone
+		 * (clear_wait never takes imq_lock), even while it is still queued
+		 * on dest_mqueue.  Holding imq_lock(dest_mqueue) therefore does NOT
+		 * freeze the receiver's scheduler state.  Verify it is still purely
+		 * waiting and CLAIM it (set TH_RUN) atomically under thread_lock
+		 * now, before we commit anything: a racing clear_wait then sees
+		 * TH_RUN already set and no-ops its thread_setrun.  If the receiver
+		 * already left TH_WAIT (timed out / aborted / running), fall off to
+		 * the slow path -- exactly what the slow path does at ipc_mqueue.c.
+		 *
+		 * Lock order imq(dest_mqueue) -> thread(receiver) matches the
+		 * THREAD_SWAPPER block above; thread_lock is dropped again right
+		 * here, before any io_lock, so the simple-lock nesting is unchanged.
+		 * The post-commit block below relies on this claim and no longer
+		 * re-locks the receiver.
+		 */
+		s = splsched();
+		thread_lock(receiver);
+		if ((receiver->state & TH_SCHED_STATE) != TH_WAIT) {
+			thread_unlock(receiver);
+			splx(s);
+#if	THREAD_SWAPPER
+			/*
+			 * #383: this bail-out runs AFTER the act_lock_try()
+			 * above took the receiver's act lock, so it must
+			 * release it like the swap-state recheck bail does.
+			 * Losing it here leaks the receiver's act lock with
+			 * the sender alive and gone: the next task_terminate
+			 * of the receiver's task then sleeps forever on the
+			 * orphaned mutex inside task_hold_locked() while
+			 * holding the task lock, wedging proc's SIGKILL and
+			 * anything else that touches the task (the kill ×
+			 * exec_handoff hang).  This path is exactly the one
+			 * a concurrent abort/terminate of the receiver takes
+			 * (clear_wait pulls it out of TH_WAIT while it is
+			 * still queued on dest_mqueue), so every kill that
+			 * raced a pending hand-off left one orphan behind.
+			 */
+			act_unlock(rcv_act);
+#endif	/* THREAD_SWAPPER */
+			HOT(c_mmot_bad_rcvr++);
+			goto fall_off;
+		}
+		receiver->state &= ~(TH_WAIT|TH_UNINT);
+		receiver->state |= TH_RUN;
+		receiver->at_safe_point = NOT_AT_SAFE_POINT;
+#if	NCPUS > 1
+		mp_disable_preemption();
+		receiver->last_processor = current_processor();
+		mp_enable_preemption();
+#endif	/* NCPUS > 1 */
+		thread_unlock(receiver);
+		/*
+		 * #317 lost-wakeup fix (window B): do NOT splx() here.  Keep
+		 * splsched() held continuously from the receiver claim above
+		 * all the way through switch_context() below, so the sender
+		 * cannot be involuntarily preempted mid-hand-off after it is
+		 * marked TH_WAIT but before it switches to the already-claimed
+		 * receiver (which would orphan that receiver).  The single
+		 * matching splx(s) happens once, after the switch.
+		 */
+
 		/* At this point we are committed to do the "handoff". */
 		c_mach_msg_trap_switch_fast++;
 
@@ -1606,6 +1789,29 @@ mach_msg_overwrite_trap(
 		self->ith_option = option;
 		self->ith_scatter_list = MACH_MSG_BODY_NULL;
 		self->ith_scatter_list_size = scatter_list_size;
+
+		/*
+		 * #317 lost-wakeup fix (window A): mark the sender TH_WAIT NOW,
+		 * while we still hold imq_lock(rcv_mqueue).  A concurrent reply
+		 * deliverer must take imq_lock(rcv_mqueue) to dequeue us from
+		 * imq_threads, so it is guaranteed to observe TH_WAIT and route
+		 * the wakeup through thread_go()/thread_dispatch() instead of
+		 * no-opping on a still-TH_RUN sender and losing it.  This mirrors
+		 * the slow path (ipc_mqueue_receive sets TH_WAIT under imq_lock
+		 * before unlocking).  Whichever of thread_go() (deliverer) and
+		 * thread_dispatch() (receiver, post-switch) runs first, the
+		 * sender ends up on a run queue: see thread_go() / thread_dispatch
+		 * in kern/sched_prim.c.
+		 */
+		thread_lock(self);
+		assert(!(self->state & TH_ABORT));
+		assert(self->state & TH_RUN);
+		self->state |= TH_WAIT;
+		self->at_safe_point = SAFE_EXTERNAL_RECEIVE;
+		self->reason = 0;		/* inline thread_invoke */
+		self->wait_result = -1;		/* for later assertions */
+		thread_unlock(self);
+
 		imq_unlock(rcv_mqueue);
 
 		/*
@@ -1634,8 +1840,12 @@ mach_msg_overwrite_trap(
 	
 			check_simple_locks();
 
-			s = splsched();
-
+			/*
+			 * #317 fix: spl is STILL held from the receiver claim
+			 * above -- do NOT splsched() again here, and do not
+			 * lower it until after switch_context().  's' already
+			 * holds the caller's spl from that earlier splsched().
+			 */
 			mp_disable_preemption();
 			/* from thread_block_reason() */
 			ast_off(cpu_number(),
@@ -1643,42 +1853,23 @@ mach_msg_overwrite_trap(
 			mp_enable_preemption();
 
 			/*
-			 * This receiver is no longer eligible to be
-			 * awakened and handed a message.
+			 * The receiver was already claimed (TH_RUN set,
+			 * removed from TH_WAIT) under thread_lock before the
+			 * commit point, so it is no longer eligible to be
+			 * awakened and handed a message by anyone else.  No
+			 * receiver re-lock is needed here -- doing it again
+			 * would reopen the SMP race the pre-commit claim closes.
 			 */
-			thread_lock(receiver);
-
-			assert((receiver->state & (TH_RUN|TH_WAIT)) == TH_WAIT);
-			assert(receiver != self);
-
-			receiver->state &= ~(TH_WAIT|TH_UNINT);
-
-			receiver->state |= TH_RUN;
-			receiver->at_safe_point = NOT_AT_SAFE_POINT;
-#if	NCPUS > 1	/* from thread_invoke inline */
-			mp_disable_preemption();
-			receiver->last_processor = current_processor();
-			mp_enable_preemption();
-#endif	/* NCPUS > 1 */
-			thread_unlock(receiver);
 			assert( receiver != self );
 #if	THREAD_SWAPPER
 			act_unlock(rcv_act);
 #endif	/* THREAD_SWAPPER */
-	
-			/*
-			 * Prepare self (the sender) to block.
-			 */
-			thread_lock(self);
-			assert(!(self->state & TH_ABORT));
-			assert(self->wait_result = -1); /* for assertions */
-			assert(self->state & TH_RUN);
-			self->state |= TH_WAIT;
-			self->at_safe_point = SAFE_EXTERNAL_RECEIVE;
-			self->reason = 0;	/* inline thread_invoke */
-			thread_unlock(self);
 
 			/*
+			 * self (the sender) was already marked TH_WAIT under
+			 * imq_lock(rcv_mqueue) above (window-A fix), so there is
+			 * nothing left to prepare here -- just switch.
+			 *
 			 * Switch to the receiver now.
 			 * Inlined: thread_invoke(self, receiver, 0);
 			 */
@@ -1707,6 +1898,28 @@ mach_msg_overwrite_trap(
 			imq_lock(rcv_mqueue);
 
 			switch (self->ith_state) {
+			    case MACH_MSG_SUCCESS:
+				/*
+				 * #387: the reply landed in the window
+				 * between the unlocked ith_state check above
+				 * and imq_lock.  A concurrent abort (e.g.
+				 * task_terminate of this task under the kill
+				 * x fork storm) pulled us out of TH_WAIT with
+				 * clear_wait -- thread_lock only, never
+				 * imq_lock, as the #319 claim comment
+				 * documents -- and we started running with
+				 * ith_state still IN_PROGRESS; the reply
+				 * deliverer, serialized only by imq_lock,
+				 * then dequeued us from imq_threads and
+				 * handed us ith_kmsg before we got the lock.
+				 * The message is ours: consume it exactly as
+				 * the slow path does (ipc_mqueue_receive
+				 * re-checks SUCCESS under imq_lock).  The
+				 * pending abort is delivered at the next AST.
+				 */
+				imq_unlock(rcv_mqueue);
+				break;
+
 			    case MACH_RCV_PORT_DIED:
 			    case MACH_RCV_PORT_CHANGED:
 				/* something bad happened to the port/set */
@@ -1732,12 +1945,14 @@ mach_msg_overwrite_trap(
 					return MACH_RCV_INTERRUPTED;
 
 				    default:
-					panic("mmot_hotpath: bad wait result");
+					panic("mmot_hotpath: bad wait result %x (ith_state %x)",
+					      save_wait_result, self->ith_state);
 				}
 				break;
 
 			    default:
-				panic("mmot_hotpath: bad ith_state");
+				panic("mmot_hotpath: bad ith_state %x (wait_result %x)",
+				      self->ith_state, save_wait_result);
 			}
 		}
 
@@ -1756,7 +1971,7 @@ mach_msg_overwrite_trap(
 			if (mr == MACH_RCV_TRANSPORT_ERROR) {
 				if (msg_receive_error(kmsg,
 				    (rcv_msg != MACH_MSG_NULL) ? rcv_msg : msg,
-					option, self->ith_seqno, space)
+					option, self->ith_seqno, space, rcv_size)
 				    == MACH_RCV_INVALID_DATA) {
 					mr = MACH_RCV_INVALID_DATA;
 				}
@@ -2286,8 +2501,23 @@ mach_msg_overwrite_trap(
 		 *	we still need to send it and receive a reply.
 		 */
 
+#if	NCPUS > 1
+		/*
+		 * #356 hand-off on block: this is the combined-op slow send
+		 * (the hotpath fell off) -- right after it this same thread
+		 * copies in the reply port and blocks in ipc_mqueue_receive.
+		 * Flag it so thread_setrun runs whoever this send wakes on
+		 * THIS cpu instead of a remote idle one (one-shot; cleared
+		 * below if the send woke nobody).
+		 */
+		if (sched_rpc_handoff)
+			self->handoff_hint = TRUE;
+#endif	/* NCPUS > 1 */
 		mr = ipc_mqueue_send(kmsg, MACH_MSG_OPTION_NONE,
 				     MACH_MSG_TIMEOUT_NONE);
+#if	NCPUS > 1
+		self->handoff_hint = FALSE;
+#endif	/* NCPUS > 1 */
 		if (mr != MACH_MSG_SUCCESS) {
 			mr |= ipc_kmsg_copyout_pseudo(kmsg, space,
 						      current_map(),
@@ -2335,7 +2565,7 @@ mach_msg_overwrite_trap(
 		if (mr == MACH_RCV_TRANSPORT_ERROR) {
 			if (msg_receive_error(temp_kmsg,
 				(rcv_msg != MACH_MSG_NULL) ? rcv_msg : msg,
-				option, temp_seqno, space)
+				option, temp_seqno, space, rcv_size)
 			    == MACH_RCV_INVALID_DATA) {
 				mr = MACH_RCV_INVALID_DATA;
 			}
@@ -2370,7 +2600,7 @@ mach_msg_overwrite_trap(
 		reply_size = send_size + trailer->msgh_trailer_size;
 		if (rcv_size < reply_size) {
 			if (msg_receive_error(kmsg, msg, option, temp_seqno,
-				        space) == MACH_RCV_INVALID_DATA) {
+				        space, rcv_size) == MACH_RCV_INVALID_DATA) {
 				mr = MACH_RCV_INVALID_DATA;
 				return(mr);
 			}
@@ -2394,7 +2624,7 @@ mach_msg_overwrite_trap(
 			} 
 			else {
 				if (msg_receive_error(kmsg, msg, option,
-				    temp_seqno, space) == MACH_RCV_INVALID_DATA)
+				    temp_seqno, space, rcv_size) == MACH_RCV_INVALID_DATA)
 					mr = MACH_RCV_INVALID_DATA;
 			}
 
@@ -2416,8 +2646,30 @@ mach_msg_overwrite_trap(
 #endif	/* ENABLE_HOTPATH */
 
 	if (option & MACH_SEND_MSG) {
+#if	NCPUS > 1
+		/*
+		 * #356 hand-off on block (EXPERIMENT, -P boot arg): flag the
+		 * sender so thread_setrun runs whoever this send wakes on
+		 * THIS cpu instead of shipping it to a remote idle one
+		 * (one-shot, consumed by the first wakeup; cleared right
+		 * after the send in any case).  RPC-style callers (client
+		 * send->recv, server recv->reply->recv) block right after
+		 * their send, so the wakee picks this CPU up warm the moment
+		 * they do.  A fire-and-forget sender that keeps running
+		 * instead delays its wakee by up to a quantum -- the kernel
+		 * cannot tell the two apart from here, which is why this is
+		 * an -P experiment: if the placement thesis holds on 32-core
+		 * hardware, the durable mechanism is an explicit option bit
+		 * set by callers that know they block (MIG stubs / libmach).
+		 */
+		if (sched_rpc_handoff)
+			current_thread()->handoff_hint = TRUE;
+#endif	/* NCPUS > 1 */
 		mr = mach_msg_send(msg, option, send_size,
 				   timeout, notify);
+#if	NCPUS > 1
+		current_thread()->handoff_hint = FALSE;
+#endif	/* NCPUS > 1 */
 		if (mr != MACH_MSG_SUCCESS) {
 			return mr;
 		}
@@ -2467,9 +2719,11 @@ msg_receive_error(
 	mach_msg_header_t	*msg,
 	mach_msg_option_t	option,
 	mach_port_seqno_t	seqno,
-	ipc_space_t		space)
+	ipc_space_t		space,
+	mach_msg_size_t		rcv_size)
 {
 	mach_msg_format_0_trailer_t *trailer;
+	mach_msg_size_t		osize;
 
 	/*
 	 * Copy out the destination port in the message.
@@ -2493,11 +2747,17 @@ msg_receive_error(
 	}
 
 	/*
-	 * Copy the message to user space
+	 * Copy the message to user space.  #374: never write past rcv_size.  This
+	 * path runs precisely because the receive buffer was too small
+	 * (MACH_RCV_TOO_LARGE), yet it rebuilds a minimal header+trailer (>= 32
+	 * bytes) and used to copy all of it out -- overflowing a smaller buffer
+	 * (e.g. a header-only 24-byte one) and smashing the caller's stack.
 	 */
-	if (ipc_kmsg_put(msg, kmsg, kmsg->ikm_header.msgh_size +
-			trailer->msgh_trailer_size) == MACH_RCV_INVALID_DATA)
+	osize = kmsg->ikm_header.msgh_size + trailer->msgh_trailer_size;
+	if (osize > rcv_size)
+		osize = rcv_size;
+	if (ipc_kmsg_put(msg, kmsg, osize) == MACH_RCV_INVALID_DATA)
 		return(MACH_RCV_INVALID_DATA);
-	else 
+	else
 		return(MACH_MSG_SUCCESS);
 }
