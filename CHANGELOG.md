@@ -6,6 +6,74 @@ The numbering tracks Uros as a whole (multiserver OS + userland). The UrMach ker
 
 ---
 
+## 0.2.0 — 2026-07-XX
+
+**Theme**: SMP. Uros goes from a single-core system to a symmetric multiprocessor: UrMach boots, schedules and benchmarks on 32 logical CPUs on real hardware (Intel i9-13900K hybrid P/E), with modern per-CPU foundations, a phased kernel-locking modernization, idle power management, and a long tail of concurrency bugs found and fixed by running real workloads on real silicon. Kernel banner: `UrMach 0.2.0`.
+
+See [docs/release_notes_0.2.0.md](docs/release_notes_0.2.0.md) for the full narrative.
+
+### Added
+
+- **SMP bring-up** — ACPI MADT CPU discovery, INIT/SIPI AP startup, per-AP CPU state init (CR4/FPU/SYSENTER/LAPIC LVT), IOAPIC interrupt routing with per-CPU LAPIC TPR, per-CPU LAPIC timer (clock off the PIT), cross-CPU reschedule IPIs, TLB shootdown via IPI (#300, #302, #304, #305, #309, #311, #312, #316).
+- **Modern AP bring-up** (#367) — retired the 1994 MP-spec fixed delays for an attempt+retry fast path (INIT + one SIPI + TSC-deadline poll; full spec sequence with margin as the retry), then pipelined the whole bring-up: the BSP kicks every AP back-to-back and paces only the shared-trampoline transit through a post-lock-acquire funnel counter, so AP init (mp_desc/LAPIC/FPU/HWP) runs concurrently. ~120× faster per-AP kick under KVM; 31 APs online with visible overlap on OMEGA. A failed AP no longer hangs boot (the rendezvous barrier counts APs actually online).
+- **Per-CPU data via `%gs`** (#301, #321) — modern per-CPU area replacing the cr3/array[cpu] CPU-number model; per-CPU SYSENTER trampoline drops the per-switch `IA32_SYSENTER_ESP` WRMSR (#348, ~144 cycles measured on bare metal).
+- **Soft-spl** (#322) — interrupt-priority management without the per-transition hardware cost on the IPC fast path.
+- **futex primitives** (#324, #325) — `urmach_futex` wait/wake/requeue and `urmach_futex_waitv` multi-wait; libpthreads mutexes/condvars rebuilt on the futex fast path (uncontended lock/unlock never enters the kernel).
+- **Kernel locking modernization** (phased):
+  - lock-primitive audit for `NCPUS > 1` — every primitive verified to compile to real atomics (#303, [docs/lock_audit_smp.md](docs/lock_audit_smp.md));
+  - reader-writer lock for `ipc_space` on read-mostly paths (#327);
+  - pmap giant-lock removal (#329) and per-pmap locking with lockless read paths, zone magazines, dynamic per-CPU allocation (#330);
+  - modern capability table — radix tree + seqlock, lock-free name→entry lookups (#331);
+  - split page-table locks for concurrent `pmap_enter`/`pmap_remove` (#338), with the enter↔activate TLB-shootdown barrier **formally validated** under x86-TSO with herd7 litmus tests (#350, [uros/tools/litmus/](uros/tools/litmus/));
+  - cache-line padding for the per-CPU kmsg pool (#323).
+- **Idle → HLT** (#357) — idle CPUs halt (two-phase Dekker handshake against the wakeup path) instead of PAUSE-spinning, freeing the shared package power budget; `-S` boot flag restores spin. 4–6.4× on all-32 bare-metal IPC latency.
+- **HWP** (#358) — hardware P-states enabled at CPU bring-up with per-CPU MSR reporting; `-E` biases the energy/performance preference, `-Q` skips enabling (HWP enable is one-way until cold boot). −20/−40% verified in a controlled P-core A/B on top of the #357 win.
+- **Synchronous-RPC hand-off, increment 1** (#356) — `-P` boot flag: hand-off-on-block wakeup placement; −11/−12% on same-task suites on bare metal.
+- **Framebuffer console for UEFI bare metal** (#342, #371, #372) — multiboot2 boot path with ACPI RSDP handoff (#343), in-kernel GOP fbcons with write-combining mapping, full-panel char-cell renderer at native resolution with adaptive 2× font and jump-scroll.
+- **On-screen console + virtual terminals** (#363, #364, #365) — keyboard+GPU console TTY through char_server↔gpu_server, Ctrl-Alt-Fn VT switching, lazy per-VT shells with a per-VT supervisor.
+- **cpustat** (#375) — per-CPU `processor_info`/cpu_ticks plumbing verified under SMP, consumed by `cpustat` — the first dynamically-linked userland tool shipped in the disk image.
+- **Debug doors for SMP crash hunts** — serial-break and PS/2 Ctrl+D DDB entry re-armed via RPC single-pass IPI (#335, #337, #382); per-CPU perf-counter NMI hard-lockup watchdog (`-W`); zone poisoning (`-Z`); owner-tracked mutexes (`MUTEX_OWNER_TRACK`).
+- **Bench + harness** — ipc_bench concurrency suites `scale` (thread sweep) and `cc` (concurrent client pairs) (#351); smoke test at a chosen CPU count (`scripts/smoke-ush.sh --smp N`, #376); bare-metal bench ISOs via `scripts/make-omen-boot.sh --iso --bench-only <suite>` with a GRUB menu exposing `-c`/`-P`/`-E`/`-Q`/`-S` variants.
+
+### Fixed
+
+- **Bring-up races and UB** — early AP without `current_thread` page-faulting into `vm_fault`/`assert_wait` (#370); 3rd-CPU concurrent bring-up triple fault (#328); AP `%gs`/`cpu_number` window (#346); `lapic_to_slot[]` vs high APIC IDs on hybrid P/E parts (#354); `cpu_set` signed-shift UB hanging the scale sweep on 32 real cores (#355); `thread_resume` losing the race against embryo parking, leaving resumed-but-never-parked threads in limbo (#361).
+- **Multiboot1 modules above 16 MB silently overwritten by the boot page tables** (#359, the #241 class on the mb1 path).
+- **TLB shootdown vs `simple_lock` deadlock** when a CPU spins with IPIs masked (#317); cross-CPU shootdown/OOL-churn performance tax (#313); sub-tick time-of-day interpolation was `NCPUS == 1` only (#314).
+- **SMP kernel races flushed out by kill×fork/exec storms**:
+  - futex handoff dispatched a victim thread still `TH_RUN` on another CPU — double dispatch, double kernel page fault (#360);
+  - SIGKILL racing exec's self-terminate: an error-bail path leaked `act_lock(rcv_act)`, deadlocking both terminators; an interrupted sender in `ip_blocked` took a phantom wakeup (#383);
+  - SIGKILL racing fork's COW window: COW protection applied to the top object instead of the backing one corrupted both sides of the fork; the same hunt found `i386_set_ldt` passing a length where `vm_map_remove` expects an end address (wired `ipc_kernel_map` page leaked per exec) and ext_server fid exhaustion cured via dead-name notifications (#385);
+  - `mmot_hotpath: bad ith_state` panic — the reply could complete between an unlocked state check and `imq_lock`; `MACH_MSG_SUCCESS` is now accepted as a slow-path outcome, not a panic (#387);
+  - port-name cache: `is_generation` not bumped on `mod_refs`/`rename`/`copyin` let a dropped send right stay usable through the per-thread cache (#390, found by the #386 audit — the rest of the fast-path sweep verified clean);
+  - `task_terminate` on a task with a thread live on another CPU deadlocked in `act_lock_thread`; fixed with a flat liveness wait, plus a `kill` builtin in ush to exercise it (#380);
+  - `thread_wait` single-shot cross-CPU stop could block forever; serial input freeze traced to an edge-triggered IRQ4 lost while masked at the IOAPIC (#381).
+- **Kernel receive-path overflow** — `msg_receive_error` copied a fixed 32 bytes without clamping to `rcv_size`, smashing the return linkage of a zero-slack concurrent receiver (#374; found by the scale sweep, unblocked the first-ever valid `cc` numbers).
+- **Storage**: AHCI batch of exactly 32 slots issued no command (`ci_mask = (1u << 32) - 1` UB → silent zero-filled reads) (#362); ext2 writeback corruption under concurrent FLIPC writers — the ext2 server's historical no-op mutexes made real (`v_lock` + generation counter + `pc_busy` interlock) (#384); ext_server fid slot freed while `ext2fs_close_file` still walked it (#388).
+- **proc_server**: pid-table slot never freed on reap — the 254-process wall (#378); `fork` returned 0 to the parent when `proc_register` failed on a full pid table (shell suicide), background zombies now reaped (#389); `reboot` no longer force-kills processes still handling SIGTERM (#379).
+- **libpthreads**: `free_stacks` pop/push had no lock — two threads could win the same stack under concurrent create/destroy (#377); the thread-pool futex word was per-slot, so a recycled slot stranded one of two waiters (#352).
+- **Test defects that could not fail** (#393, #394, #395) — the pattern from the `-smp 8` acceptance pass: the timedlock test treated `thread_switch(DEPRESS)` as synchronization (a UP assumption; libpthreads itself was correct) and its failure path deadlocked the suite, hiding three later tests (#393); the SHA-NI SHA-256 compress computed wrong digests (a missing `SHA256MSG1` in the last two message-schedule quartets) and its known-answer test did not gate the suite (#394); the kernel's SHA-NI HMAC ran on the caller's live FPU state under lazy FPU (the kernel is `-mno-sse` for exactly this reason) — hardware SHA-NI removed from the kernel entirely; userland libcap keeps it behind a self-test gate, and cap_test carries an XMM-preservation regression probe (#395).
+
+### Changed
+
+- **`NCPUS=64` is the release build** — one kernel binary runs 1..64 CPUs; the `-c N` boot flag caps how many are brought up.
+- **Kernel SHA-256 is portable C only** (#395) — the kernel is SSE-free by construction again; SHA-NI acceleration lives in userland libcap only.
+- **Default idle is HLT** (#357) and **HWP is enabled at bring-up** (#358) — `-S` and `-Q` opt out.
+- **Direct thread switch is opt-in on SMP** (`-D`) — cross-CPU DTS pays an i386 cr3 TLB flush; the UP win returns with x86-64 + PCID.
+- **#341 closed by design decision** — scaling a hot Mach port beyond its fixed floor is FLIPC v2's job (the data plane owns throughput); the Mach control plane is not micro-optimized further.
+- **#319 closed by measurement** — the global run queue does **not** contend at this scale (0.2% of samples at saturation); the measured cause of the pre-saturation collapse is RPC-pair placement across idle CPUs, and the lever is #356's hand-off (`-P`). Per-CPU run queues are not the next move.
+- **#347 closed by measurement** — eager XSAVE fires on ~0.01% of context switches on the IPC path (FPU hypothesis refuted); the concrete win extracted was skipping redundant LLDT reloads.
+
+### Known limitations
+
+- **Pure-UEFI machines with no PS/2 (OMEGA class) are headless/bench-only** in 0.2.0: no input until the USB stack (#353) and no on-screen userspace console until the fbcons→gpu_server handoff (#369). Interactive use = BIOS/CSM machines (omen) or QEMU. This is a declared perimeter, not a bug.
+- **Pre-saturation scaling hump on many-core** — at 12–24 threads on 32 CPUs, RPC pairs scattered across idle CPUs pay cold caches and the wake path (up to ~55k ns/RPC, recovering to ~12.6k at exact saturation). Diagnosed (#319 verdict), lever identified (#356 `-P`); full placement work is next-cycle.
+- **fork() rough edges from v0.1.0 remain** (#269 class); POSIX `uname()` backed by the version macros (#296) slipped to the next cycle.
+- **THREAD_SWAPPER is still compiled into hot paths** — kernel rework planned post-SMP.
+- **i386 only** — x86-64 (PCID, SYSCALL, 15 GP registers, higher-half + direct map) is the v0.3.0 theme.
+
+---
+
 ## 0.1.0 — 2026-05-30
 
 **Theme**: from "boots and runs servers" to "interactive POSIX environment". Uros now reaches an interactive shell (`ush`) over the controlling tty with a working musl-based runtime: `fork`+`execve`+`waitpid`, job control, signals, `/proc`, file I/O through libvfs, and runtime ELF loading through ld-musl + libc.so.
