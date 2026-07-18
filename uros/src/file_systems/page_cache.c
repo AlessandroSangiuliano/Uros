@@ -112,6 +112,15 @@ evict_lru(struct page_cache *pc)
 {
 	struct page_cache_entry *victim = pc->pc_lru_tail.pc_lru_prev;
 
+	/*
+	 * #384: skip entries whose data a page_cache_sync writeback is
+	 * using outside pc_lock — re-using (DMA) or freeing (non-DMA)
+	 * their buffer mid-write would flush another block's bytes, or
+	 * worse.  Busy entries are rare (one sync batch at a time).
+	 */
+	while (victim != &pc->pc_lru_head && victim->pc_busy)
+		victim = victim->pc_lru_prev;
+
 	/* Don't evict the head sentinel */
 	if (victim == &pc->pc_lru_head)
 		return NULL;
@@ -279,6 +288,7 @@ page_cache_insert(struct page_cache *pc, daddr_t block,
 	/* Fill entry */
 	e->pc_block = block;
 	e->pc_dirty = 0;
+	e->pc_busy = 0;
 
 	/* Insert into hash chain */
 	e->pc_hash_next = pc->pc_hash[h];
@@ -364,6 +374,13 @@ page_cache_update(struct page_cache *pc, daddr_t block,
 	struct page_cache_entry *e;
 	vm_offset_t buf;
 
+	/* #384: refuse garbage keys (see page_cache_alloc_entry). */
+	if (block < 0) {
+		printf("page_cache: rejecting negative block %ld update\n",
+		       (long)block);
+		return;
+	}
+
 	pthread_mutex_lock(&pc->pc_lock);
 
 	/* If block is already cached, update in place */
@@ -434,9 +451,14 @@ batch_sort(struct sync_entry *b, int n)
 	}
 }
 
-/* Mark a range of blocks clean under lock */
+/*
+ * Post-writeback bookkeeping for a range of blocks, under lock:
+ * always drop the busy pin; mark clean only if the write landed.
+ * (#384: an entry that vanished meanwhile — invalidated — is fine;
+ * its busy flag is reset when the entry is reused.)
+ */
 static void
-mark_range_clean(struct page_cache *pc, daddr_t first, int count)
+mark_range_done(struct page_cache *pc, daddr_t first, int count, int success)
 {
 	int i;
 
@@ -446,8 +468,11 @@ mark_range_clean(struct page_cache *pc, daddr_t first, int count)
 		struct page_cache_entry *ce;
 		for (ce = pc->pc_hash[h]; ce; ce = ce->pc_hash_next) {
 			if (ce->pc_block == first + i) {
-				ce->pc_dirty = 0;
-				pc->pc_writebacks++;
+				ce->pc_busy = 0;
+				if (success) {
+					ce->pc_dirty = 0;
+					pc->pc_writebacks++;
+				}
 				break;
 			}
 		}
@@ -460,35 +485,53 @@ page_cache_sync(struct page_cache *pc)
 {
 	struct sync_entry batch[SYNC_BATCH];
 	int n, i, failures = 0;
-	struct page_cache_entry *e, *start;
+	int skip_failed;
+	struct page_cache_entry *e;
 
-	start = NULL;
-	do {
-		/* Phase 1: collect dirty entries under lock */
+	/*
+	 * #384: the old version kept a resume CURSOR (an entry pointer)
+	 * and the batch's DATA pointers across the pc_lock release while
+	 * it wrote the batch out.  Concurrent producers could evict,
+	 * re-key or free those entries meanwhile: the resumed LRU walk
+	 * then wandered through re-used memory, and the writeback pushed
+	 * other blocks' bytes.  Now every batch restarts from the LRU
+	 * tail (written entries turn clean, so the scan makes progress
+	 * by itself; permanently-failing entries are skipped by count),
+	 * and batch entries are pinned busy so eviction leaves their
+	 * buffers alone until the write lands.
+	 */
+	skip_failed = 0;
+	for (;;) {
+		int seen_failed = 0;
+
+		/* Phase 1: collect dirty entries under lock, pin them */
 		n = 0;
 		pthread_mutex_lock(&pc->pc_lock);
-
-		e = start ? start : pc->pc_lru_tail.pc_lru_prev;
+		e = pc->pc_lru_tail.pc_lru_prev;
 		while (e != &pc->pc_lru_head && n < SYNC_BATCH) {
-			if (e->pc_dirty) {
-				batch[n].block = e->pc_block;
-				batch[n].data  = e->pc_data;
-				batch[n].size  = e->pc_size;
-				batch[n].phys  = e->pc_phys;
-				n++;
+			if (e->pc_dirty && !e->pc_busy) {
+				if (seen_failed < skip_failed) {
+					seen_failed++;
+				} else {
+					e->pc_busy = 1;
+					batch[n].block = e->pc_block;
+					batch[n].data  = e->pc_data;
+					batch[n].size  = e->pc_size;
+					batch[n].phys  = e->pc_phys;
+					n++;
+				}
 			}
 			e = e->pc_lru_prev;
 		}
-		/* Remember where to resume (NULL = done) */
-		start = (e != &pc->pc_lru_head) ? e : NULL;
-
 		pthread_mutex_unlock(&pc->pc_lock);
 
 		if (n == 0)
 			break;
 
 		if (!pc->pc_writeback) {
-			mark_range_clean(pc, batch[0].block, 1);
+			/* No writeback callback: dirty data is discardable */
+			for (i = 0; i < n; i++)
+				mark_range_done(pc, batch[i].block, 1, 1);
 			continue;
 		}
 
@@ -519,8 +562,7 @@ page_cache_sync(struct page_cache *pc)
 					batch[i].phys);
 				if (ret != 0)
 					failures++;
-				else
-					mark_range_clean(pc, run_start, 1);
+				mark_range_done(pc, run_start, 1, ret == 0);
 				i++;
 			} else {
 				/* Merged write: copy into contiguous
@@ -543,11 +585,9 @@ page_cache_sync(struct page_cache *pc)
 						    batch[i + j].phys);
 						if (ret != 0)
 							failures++;
-						else
-							mark_range_clean(
-							    pc,
-							    batch[i+j].block,
-							    1);
+						mark_range_done(pc,
+						    batch[i + j].block, 1,
+						    ret == 0);
 					}
 					i += run_len;
 					continue;
@@ -567,13 +607,20 @@ page_cache_sync(struct page_cache *pc)
 
 				if (ret != 0)
 					failures += run_len;
-				else
-					mark_range_clean(pc, run_start,
-							 run_len);
+				mark_range_done(pc, run_start, run_len,
+						ret == 0);
 				i += run_len;
 			}
 		}
-	} while (start != NULL);
+
+		/*
+		 * Entries that failed stay dirty: skip that many on the
+		 * next pass so the scan keeps making forward progress
+		 * instead of re-collecting the same failing blocks
+		 * forever within one sync call.
+		 */
+		skip_failed = failures;
+	}
 
 	return failures;
 }
@@ -631,6 +678,15 @@ page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
 	if (!pc->pc_dma_pool)
 		return NULL;
 
+	/* #384: refuse garbage keys — a negative block is always a bug
+	 * in the caller (stale/corrupt block map) and would become an
+	 * unflushable dirty entry hammering the device forever. */
+	if (block < 0) {
+		printf("page_cache: rejecting negative block %ld\n",
+		       (long)block);
+		return NULL;
+	}
+
 	pthread_mutex_lock(&pc->pc_lock);
 
 	/* Check if already cached */
@@ -663,6 +719,7 @@ page_cache_alloc_entry(struct page_cache *pc, daddr_t block)
 	/* Set up the entry (data/phys already assigned from pool) */
 	e->pc_block = block;
 	e->pc_dirty = 0;
+	e->pc_busy = 0;
 
 	/* Insert into hash and LRU */
 	e->pc_hash_next = pc->pc_hash[h];

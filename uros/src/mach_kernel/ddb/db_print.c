@@ -1008,6 +1008,31 @@ db_print_one_entry(
 	}
 }
 
+/* #331: ipc_radix_iterate() callback for the sparse overflow in DDB. */
+struct db_port_iter_ctx {
+	int		count;
+	boolean_t	is_pset;
+	boolean_t	do_output;
+};
+
+static void
+db_port_iterate_radix(
+	mach_port_index_t	index,
+	ipc_tree_entry_t	tentry,
+	void			*arg)
+{
+	struct db_port_iter_ctx *c = (struct db_port_iter_ctx *) arg;
+	ipc_entry_t entry = &tentry->ite_entry;
+
+	(void) index;
+	if (entry->ie_bits & MACH_PORT_TYPE_PORT_RIGHTS) {
+		if (c->do_output)
+			db_print_one_entry(entry, 0, tentry->ite_name,
+					   c->is_pset);
+		c->count++;
+	}
+}
+
 int
 db_port_iterate(
 	thread_act_t	thr_act,
@@ -1015,7 +1040,6 @@ db_port_iterate(
 	boolean_t	do_output)
 {
 	ipc_entry_t entry;
-	ipc_tree_entry_t tentry;
 	int index;
 	int size;
 	int count;
@@ -1034,16 +1058,14 @@ db_port_iterate(
 			++count;
 		}
 	}
-	for (tentry = ipc_splay_traverse_start(&space->is_tree);
-		tentry != ITE_NULL;
-		tentry = ipc_splay_traverse_next(&space->is_tree, FALSE)) {
-		entry = &tentry->ite_entry;
-		if (entry->ie_bits & MACH_PORT_TYPE_PORT_RIGHTS) {
-			if (do_output)
-				db_print_one_entry(entry,
-					0, tentry->ite_name, is_pset);
-			++count;
-		}
+	{
+		struct db_port_iter_ctx ctx;
+
+		ctx.count = count;
+		ctx.is_pset = is_pset;
+		ctx.do_output = do_output;
+		ipc_radix_iterate(&space->is_tree, db_port_iterate_radix, &ctx);
+		count = ctx.count;
 	}
 	return (count);
 }

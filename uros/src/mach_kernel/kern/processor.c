@@ -738,35 +738,70 @@ processor_info(
 	processor_info_t	info,
 	mach_msg_type_number_t	*count)
 {
-	register int	slot_num, state;
-	register processor_basic_info_t		basic_info;
+	register int	slot_num;
 
 	if (processor == PROCESSOR_NULL)
 		return(KERN_INVALID_ARGUMENT);
 
-	if (flavor != PROCESSOR_BASIC_INFO ||
-		*count < PROCESSOR_BASIC_INFO_COUNT)
+	slot_num = processor->slot_num;
+
+	switch (flavor) {
+
+	case PROCESSOR_BASIC_INFO:
+	{
+		register processor_basic_info_t	basic_info;
+		int				state;
+
+		if (*count < PROCESSOR_BASIC_INFO_COUNT)
 			return(KERN_FAILURE);
 
-	basic_info = (processor_basic_info_t) info;
+		basic_info = (processor_basic_info_t) info;
+		basic_info->cpu_type = machine_slot[slot_num].cpu_type;
+		basic_info->cpu_subtype = machine_slot[slot_num].cpu_subtype;
+		state = processor->state;
+		if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE)
+			basic_info->running = FALSE;
+		else
+			basic_info->running = TRUE;
+		basic_info->slot_num = slot_num;
+		if (processor == master_processor)
+			basic_info->is_master = TRUE;
+		else
+			basic_info->is_master = FALSE;
 
-	slot_num = processor->slot_num;
-	basic_info->cpu_type = machine_slot[slot_num].cpu_type;
-	basic_info->cpu_subtype = machine_slot[slot_num].cpu_subtype;
-	state = processor->state;
-	if (state == PROCESSOR_SHUTDOWN || state == PROCESSOR_OFF_LINE)
-		basic_info->running = FALSE;
-	else
-		basic_info->running = TRUE;
-	basic_info->slot_num = slot_num;
-	if (processor == master_processor) 
-		basic_info->is_master = TRUE;
-	else
-		basic_info->is_master = FALSE;
+		*count = PROCESSOR_BASIC_INFO_COUNT;
+		*host = &realhost;
+		return(KERN_SUCCESS);
+	}
 
-	*count = PROCESSOR_BASIC_INFO_COUNT;
-	*host = &realhost;
-	return(KERN_SUCCESS);
+	case PROCESSOR_CPU_LOAD_INFO:
+	{
+		register processor_cpu_load_info_t	cpu_load_info;
+		unsigned long				ticks1, ticks2;
+		int					i;
+
+		if (*count < PROCESSOR_CPU_LOAD_INFO_COUNT)
+			return(KERN_FAILURE);
+
+		cpu_load_info = (processor_cpu_load_info_t) info;
+		for (i = 0; i < CPU_STATE_MAX; i++) {
+			do {
+				ticks1 = *(volatile integer_t *)
+					&machine_slot[slot_num].cpu_ticks[i];
+				ticks2 = *(volatile integer_t *)
+					&machine_slot[slot_num].cpu_ticks[i];
+			} while (ticks1 != ticks2);
+			cpu_load_info->cpu_ticks[i] = ticks1;
+		}
+
+		*count = PROCESSOR_CPU_LOAD_INFO_COUNT;
+		*host = &realhost;
+		return(KERN_SUCCESS);
+	}
+
+	default:
+		return(KERN_FAILURE);
+	}
 }
 
 kern_return_t

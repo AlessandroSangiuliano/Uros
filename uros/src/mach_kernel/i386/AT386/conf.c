@@ -335,8 +335,18 @@ struct dev_ops	dev_name_list[] =
 	  async_in,	reset,		port_death,	subdev,
 	  dev_info */
 
-	/* slot 0 = "console" indirect target; see header comment above. */
-	{ "console",	consoleopen,	consoleclose,	NULL_READ,
+	/* slot 0 = "console" indirect target; see header comment above.
+	 *
+	 * The console cdev is WRITE-ONLY (kernel/early-userspace printf sink);
+	 * input is owned by char_server (ps2/uart).  Its read handler must be
+	 * NO_READ (nodev -> D_INVALID_OPERATION), NOT NULL_READ (nulldev ->
+	 * D_SUCCESS): a bogus read "success" leaves io_data == NULL and
+	 * io_residual == 0, so ds_read_done() computes size_read == io_count
+	 * and marshals that many bytes from a NULL buffer -- a near-NULL bcopy
+	 * crash hit when a client (e.g. ush before its tty is wired) reads the
+	 * console.  Returning the error keeps reads from ever reaching that
+	 * NULL-buffer path. */
+	{ "console",	consoleopen,	consoleclose,	NO_READ,
 	  consolewrite,	NULL_GETS,	NULL_SETS,	NO_MMAP,
 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
 	  NO_DINFO },

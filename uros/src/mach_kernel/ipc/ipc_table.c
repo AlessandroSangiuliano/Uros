@@ -90,7 +90,32 @@
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_entry.h>
 #include <kern/kalloc.h>
+#include <kern/lock.h>
 #include <vm/vm_kern.h>
+
+/*
+ *	#331 step 2: entry tables are type-stable.  A capability lookup that
+ *	runs lock-free (no space lock) may keep reading is_table after another
+ *	CPU has grown the space and dropped the old table; if that memory were
+ *	returned to the system the deref would fault.  So freed tables are never
+ *	handed back -- they go onto a per-size free list and are reused only as
+ *	tables (same size).  A stale reader then sees valid table memory (its own
+ *	old table, or another space's table of the same size); the space seqlock
+ *	(is_seq) makes it retry, and the in-bounds, gen-checked read never faults
+ *	or tears.  The pool is bounded by the peak number of live tables per size
+ *	(steady state is small: freed tables are quickly reused by the next grow).
+ *
+ *	Each pooled table stores its link + size in its first bytes (it is free
+ *	memory); a reuse fully reinitialises it, and index 0 is never a valid
+ *	port name, so a lock-free reader never interprets the header as an entry.
+ */
+struct ipc_table_pool {
+	vm_offset_t	itp_next;
+	vm_size_t	itp_size;
+};
+
+decl_simple_lock_data(static, ipc_table_pool_lock)
+static vm_offset_t	ipc_table_pool_head = 0;
 
 /*
  * Forward declarations
@@ -158,6 +183,8 @@ ipc_table_fill(
 void
 ipc_table_init(void)
 {
+	simple_lock_init(&ipc_table_pool_lock, ETAP_IPC_IS);
+
 	ipc_table_entries = (ipc_table_size_t)
 		kalloc(sizeof(struct ipc_table_size) *
 		       ipc_table_entries_size);
@@ -198,6 +225,26 @@ ipc_table_alloc(
 	vm_size_t	size)
 {
 	vm_offset_t table;
+	vm_offset_t *prevp;
+
+	/*
+	 *	#331 step 2: reuse a pooled table of the same size if one is
+	 *	available (keeps tables type-stable -- see the file header).
+	 */
+	simple_lock(&ipc_table_pool_lock);
+	prevp = &ipc_table_pool_head;
+	for (table = ipc_table_pool_head; table != 0; ) {
+		struct ipc_table_pool *h = (struct ipc_table_pool *) table;
+
+		if (h->itp_size == size) {
+			*prevp = h->itp_next;
+			simple_unlock(&ipc_table_pool_lock);
+			return table;
+		}
+		prevp = &h->itp_next;
+		table = h->itp_next;
+	}
+	simple_unlock(&ipc_table_pool_lock);
 
 	if (size < PAGE_SIZE)
 		table = kalloc(size);
@@ -249,8 +296,16 @@ ipc_table_free(
 	vm_size_t	size,
 	vm_offset_t	table)
 {
-	if (size < PAGE_SIZE)
-		kfree(table, size);
-	else
-		kmem_free(kalloc_map, table, size);
+	struct ipc_table_pool *h = (struct ipc_table_pool *) table;
+
+	/*
+	 *	#331 step 2: do NOT return the table to the system -- a lock-free
+	 *	reader may still be looking at it.  Pool it by size for reuse; the
+	 *	memory stays valid table storage forever (type-stable).
+	 */
+	simple_lock(&ipc_table_pool_lock);
+	h->itp_size = size;
+	h->itp_next = ipc_table_pool_head;
+	ipc_table_pool_head = table;
+	simple_unlock(&ipc_table_pool_lock);
 }

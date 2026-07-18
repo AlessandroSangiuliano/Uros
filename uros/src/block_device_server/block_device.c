@@ -436,8 +436,15 @@ ds_device_read(mach_port_t device, mach_port_t reply,
 		uint32_t part_end = part->start_lba + part->num_sectors;
 		unsigned int offset, chunk;
 
-		/* Sequential detection: prefetch up to ra_max_sectors */
-		if (ra_cache.buf != 0 &&
+		/* Sequential detection: prefetch up to ra_max_sectors.
+		 * Gate on a recorded prior position (lba_count != 0), NOT on a
+		 * prior readahead buffer.  buf is set only *after* a readahead
+		 * runs, so requiring buf != 0 here was chicken-and-egg: the
+		 * readahead never bootstrapped and every sequential read fell
+		 * through to disk.  The position (lba_start/lba_count/part) is
+		 * recorded on every read, with or without a buffer, so this now
+		 * fires on the 2nd sequential read. */
+		if (ra_cache.lba_count != 0 &&
 		    ra_cache.part == part &&
 		    lba == ra_cache.lba_start + ra_cache.lba_count &&
 		    nsectors <= ra_max_sectors / 2 &&

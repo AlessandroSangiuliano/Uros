@@ -23,6 +23,8 @@ BUNDLE_OUT="$BUILD_DIR/bootstrap.bundle"
 MKBUNDLE="$BUILD_DIR/tools/mkbundle"
 BENCH_ARGS=""
 MINIMAL=0
+DISKLESS=0
+WITH_CONSOLE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -36,10 +38,16 @@ while [ $# -gt 0 ]; do
             ;;
         --minimal)
             MINIMAL=1; shift ;;
+        --diskless)
+            DISKLESS=1; shift ;;
+        --with-console)
+            WITH_CONSOLE=1; shift ;;
         -h|--help)
-            echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal]"
+            echo "Uso: $0 [-o output.bundle] [--bench suite ...] [--minimal] [--diskless]"
             echo "  --minimal: skip test/bench tasks (ipc_bench, pthread_test, cap_test,"
             echo "             kernel242_test, sig_test, gpustat) from bootstrap.conf"
+            echo "  --diskless: run ipc_bench in stage-1 (before block_device_server) so the"
+            echo "              IPC suite completes without a boot disk (#344, omen USB boot)"
             exit 0
             ;;
         *) echo "Opzione sconosciuta: $1" >&2; exit 1 ;;
@@ -86,6 +94,7 @@ CHAR_SERVER="$SBIN/char_server"
 CHAR_PS2_MODULE="$BUILD_DIR/src/char_server/modules/ps2.so"
 CHAR_UART_MODULE="$BUILD_DIR/src/char_server/modules/uart.so"
 CHAR_PS2_MOUSE_MODULE="$BUILD_DIR/src/char_server/modules/ps2_mouse.so"
+CHAR_CONSOLE_MODULE="$BUILD_DIR/src/char_server/modules/console.so"
 
 REQUIRED_FILES=(
     "$NAME_SERVER" "$HAL_SERVER" "$BLOCK_DEVICE_SERVER"
@@ -125,9 +134,18 @@ GPUSTAT_CONF_LINE=""
 # always loads from /dev/boot_device/mach_servers/ush on disk.  The
 # bootstrap.conf line still names it as a stage-2 task; bootstrap's
 # fallback path picks it up from the disk fs.
+#
+# #365: the virtual_terminal_server, when built, takes ush's stage-2 launch
+# slot and forks ush onto each VT.  Like ush it is kept off the bundle and
+# loaded from disk; only the launch line changes.
 USH="$SBIN/ush"
+VTS="$SBIN/virtual_terminal_server"
 USH_CONF_LINE=""
-[ -f "$USH" ] && USH_CONF_LINE="ush ush"
+if [ -f "$VTS" ]; then
+    USH_CONF_LINE="virtual_terminal_server virtual_terminal_server"
+elif [ -f "$USH" ]; then
+    USH_CONF_LINE="ush ush"
+fi
 
 GPU_SERVER_CONF_LINE=""
 [ -f "$GPU_SERVER" ] && GPU_SERVER_CONF_LINE="gpu_server gpu_server"
@@ -148,12 +166,25 @@ else
     PTHREAD_TEST_LINE="pthread_test pthread_test"
 fi
 
+# #344: diskless bench.  bootstrap.c blocks at stage-2 waiting for the boot
+# disk immediately after launching block_device_server, so any task listed
+# after it (ipc_bench included) never runs without a disk.  In --diskless mode
+# run ipc_bench in stage-1, ahead of block_device_server, so the IPC suite
+# completes from RAM on a USB boot (omen, #332); its disk-I/O sub-bench
+# self-skips when no ext_server/disk is present.
+IPC_BENCH_STAGE1_LINE=""
+if [ "$DISKLESS" = "1" ]; then
+    IPC_BENCH_STAGE1_LINE="$IPC_BENCH_LINE"
+    IPC_BENCH_LINE=""
+fi
+
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
 ${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
+${IPC_BENCH_STAGE1_LINE}
 block_device_server block_device_server
 default_pager default_pager disk0c
 ${HELLO_SERVER_LINE}
@@ -199,6 +230,12 @@ if [ -f "$CHAR_SERVER" ]; then
     [ -f "$CHAR_PS2_MODULE" ]       && ARGS+=("modules/char/ps2.so:$CHAR_PS2_MODULE")
     [ -f "$CHAR_UART_MODULE" ]      && ARGS+=("modules/char/uart.so:$CHAR_UART_MODULE")
     [ -f "$CHAR_PS2_MOUSE_MODULE" ] && ARGS+=("modules/char/ps2_mouse.so:$CHAR_PS2_MOUSE_MODULE")
+    # #363: the on-screen console TTY ships only when explicitly asked
+    # (--with-console).  Without it ush binds the UART TTY and the serial
+    # console behaves exactly as before — headless/bench boots untouched.
+    if [ "$WITH_CONSOLE" = "1" ] && [ -f "$CHAR_CONSOLE_MODULE" ]; then
+        ARGS+=("modules/char/console.so:$CHAR_CONSOLE_MODULE")
+    fi
 fi
 
 "$MKBUNDLE" "${ARGS[@]}"

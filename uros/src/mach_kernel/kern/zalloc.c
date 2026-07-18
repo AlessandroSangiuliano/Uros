@@ -265,6 +265,8 @@
 #include <mach/vm_param.h>
 #include <vm/vm_kern.h>
 #include <machine/machparam.h>
+#include <cpus.h>				/* #330: NCPUS */
+#include <kern/cpu_number.h>			/* #330: cpu_number() */
 
 
 #if	MACH_ASSERT
@@ -292,7 +294,13 @@
  * when it is freed, to help catch usage after freeing?  The down-side
  * is that this obscures the identity of the freed element.
  */
-boolean_t zfree_clear = FALSE;
+/*
+ * #344: forced into .data so the "-Z" boot arg (parse_arguments runs BEFORE
+ * the BSS is zeroed) survives the BSS clear.  When set, freed zone elements
+ * are poisoned with 0xdeadbeef and REMOVE_FROM_ZONE verifies the poison on
+ * realloc -- catches a use-after-free / wild write to a freed element.
+ */
+boolean_t zfree_clear __attribute__((section(".data"))) = FALSE;
 
 #define ADD_TO_ZONE(zone, element)					\
 MACRO_BEGIN								\
@@ -314,6 +322,27 @@ MACRO_BEGIN								\
 	if ((ret) != (type) 0) {					\
 	    if (!is_kernel_data_addr(((vm_offset_t *)(ret))[0])) {	\
 		panic("A freed zone element has been modified.\n");	\
+	    }								\
+	    if (zfree_clear) {						\
+		/* #344: verify the 0xdeadbeef poison written at free time	\
+		 * is intact.  A clobbered word means something wrote to	\
+		 * this element while it was free (use-after-free / wild	\
+		 * write) -- e.g. a freed task/act whose thr_acts linkage	\
+		 * was overwritten with a user value.  Report element, zone,	\
+		 * word offset and the bad value, then drop to the debugger. */	\
+		register int _zi;					\
+		for (_zi = 1;						\
+		     _zi < (int)((zone)->elem_size/sizeof(vm_offset_t)) - 1; \
+		     _zi++)						\
+		    if (((vm_offset_t *)(ret))[_zi] != 0xdeadbeef) {	\
+			printf("#344 zone UAF: elem=0x%x zone='%s' "	\
+			       "word[%d] (off 0x%x) = 0x%x (poison clobbered)\n", \
+			       (unsigned)(ret), (zone)->zone_name, _zi,	\
+			       (unsigned)(_zi * sizeof(vm_offset_t)),	\
+			       (unsigned)((vm_offset_t *)(ret))[_zi]);	\
+			Debugger("#344 zone poison clobbered");		\
+			break;						\
+		    }							\
 	    }								\
 	    (zone)->count++;						\
 	    (zone)->free_elements = *((vm_offset_t *)(ret));		\
@@ -430,6 +459,48 @@ MACRO_END
 
 #define lock_try_zone(zone)	simple_lock_try(&zone->lock)
 
+/*
+ *	#330: per-CPU zone magazines.
+ *
+ *	Hot zones (kalloc, IPC, vm_map_entry, ...) are hit by every CPU at once,
+ *	and the per-zone simple_lock taken on every zalloc/zfree becomes an SMP
+ *	bottleneck (lock-word cache-line bouncing + serialization).  A magazine
+ *	is a small per-CPU LIFO cache of free elements -- the same pattern as the
+ *	#52 per-CPU kmsg pool.  zalloc pops from the local magazine without the
+ *	zone lock; only on a miss does it take the lock once and refill a whole
+ *	batch.  zfree pushes to the local magazine; only when it is full does it
+ *	take the lock and drain a batch back.  The lock is thus amortized over
+ *	~ZMAG_DEPTH operations.
+ *
+ *	Magazines are opt-in per zone (mag_index >= 0, assigned by
+ *	zone_enable_magazines) so only the few hot zones pay the small static
+ *	footprint.  Elements parked in a magazine were REMOVE_FROM_ZONE'd, so
+ *	they count as in-use and are off zone->free_elements: zone_gc therefore
+ *	sees their pages as busy and will not reclaim them -- no GC change and no
+ *	cross-CPU draining (bounded waste: <= ZMAG_DEPTH * NCPUS per zone).
+ *
+ *	Interrupt / preemption safety mirrors the plain path: raise the zone's
+ *	spl (if any) so an interrupt handler on this CPU cannot re-enter the
+ *	magazine, and disable_preemption so the per-CPU index stays stable.
+ */
+#define	ZMAG_DEPTH	15		/* elements per magazine (one cache line) */
+#define	ZMAG_MAX_ZONES	32		/* how many zones may have magazines */
+#define	ZMAG_LINE	64
+#define	ZMAG_REFILL	ZMAG_DEPTH	/* grab this many on a miss */
+#define	ZMAG_DRAIN	(ZMAG_DEPTH/2)	/* push this many back when full */
+
+struct zone_magazine {
+	vm_offset_t	stash[ZMAG_DEPTH];
+	unsigned int	avail;			/* LIFO depth (stack top) */
+} __attribute__((aligned(ZMAG_LINE)));
+
+_Static_assert(sizeof(struct zone_magazine) % ZMAG_LINE == 0,
+	       "zone_magazine must be a whole number of cache lines");
+
+static struct zone_magazine	zone_mag[ZMAG_MAX_ZONES][NCPUS];
+decl_simple_lock_data(static, zone_mag_alloc_lock)	/* guards zone_mag_next */
+static int	zone_mag_next = 0;		/* next free index in zone_mag[] */
+
 kern_return_t		zget_space(
 				vm_offset_t size,
 				vm_offset_t *result);
@@ -538,6 +609,7 @@ zinit(
 	z->expandable  = TRUE;
 	z->waiting = FALSE;
 	z->spl_routine = ZONE_NO_SPL;
+	z->mag_index = -1;		/* #330: no per-CPU magazines unless enabled */
 
 #if	ZONE_DEBUG
 	z->active_zones.next = z->active_zones.prev = 0;	
@@ -557,6 +629,77 @@ zinit(
 	simple_unlock(&all_zones_lock);
 
 	return(z);
+}
+
+/*
+ *	#330: turn on per-CPU magazines for a hot zone.  Opt-in: only the few
+ *	zones that are hammered from every CPU should call this.  Must run after
+ *	the zone exists.  No-op under ZONE_DEBUG (magazines bypass the
+ *	active_zones bookkeeping the debug checks rely on).
+ */
+void
+zone_enable_magazines(
+	zone_t	zone)
+{
+#if	ZONE_DEBUG
+	(void)zone;
+#else	/* ZONE_DEBUG */
+	int	idx, cpu;
+
+	assert(zone != ZONE_NULL);
+
+	simple_lock(&zone_mag_alloc_lock);
+	if (zone->mag_index >= 0) {		/* already enabled */
+		simple_unlock(&zone_mag_alloc_lock);
+		return;
+	}
+	if (zone_mag_next >= ZMAG_MAX_ZONES) {
+		simple_unlock(&zone_mag_alloc_lock);
+		printf("zone_enable_magazines: no magazine slot left for \"%s\"\n",
+		       zone->zone_name ? zone->zone_name : "?");
+		return;
+	}
+	idx = zone_mag_next++;
+	simple_unlock(&zone_mag_alloc_lock);
+
+	for (cpu = 0; cpu < NCPUS; cpu++)
+		zone_mag[idx][cpu].avail = 0;
+
+	zone->mag_index = idx;		/* publish last: this arms the fast path */
+#endif	/* ZONE_DEBUG */
+}
+
+/*
+ *	#330: turn on magazines for the kernel's hottest zones.  Called once,
+ *	late in startup (scheduler + per-CPU %gs are up), after these zones have
+ *	been created.  These are the zones every CPU hammers: kalloc size
+ *	classes, IPC ports/spaces/tree-entries, and VM map entries.
+ */
+void
+zone_enable_hot_magazines(void)
+{
+	/* Local externs avoid pulling ipc/vm headers into this low-level file. */
+	extern struct zone	*k_zone[16];		/* kern/kalloc.c */
+	extern zone_t		vm_map_entry_zone;	/* vm/vm_map.c   */
+	extern zone_t		ipc_object_zones[];	/* [0]=IOT_PORT, [1]=IOT_PORT_SET */
+	extern zone_t		ipc_space_zone;
+	extern zone_t		ipc_tree_entry_zone;
+	int	i;
+
+	for (i = 0; i < 16; i++)
+		if (k_zone[i] != ZONE_NULL)
+			zone_enable_magazines(k_zone[i]);
+
+	if (vm_map_entry_zone != ZONE_NULL)
+		zone_enable_magazines(vm_map_entry_zone);
+	if (ipc_object_zones[0] != ZONE_NULL)		/* IOT_PORT */
+		zone_enable_magazines(ipc_object_zones[0]);
+	if (ipc_object_zones[1] != ZONE_NULL)		/* IOT_PORT_SET */
+		zone_enable_magazines(ipc_object_zones[1]);
+	if (ipc_space_zone != ZONE_NULL)
+		zone_enable_magazines(ipc_space_zone);
+	if (ipc_tree_entry_zone != ZONE_NULL)
+		zone_enable_magazines(ipc_tree_entry_zone);
 }
 
 /*
@@ -735,6 +878,7 @@ zone_bootstrap(void)
 	vm_offset_t zone_zone_space;
 
 	simple_lock_init(&all_zones_lock, ETAP_MISC_ZONE_ALL);
+	simple_lock_init(&zone_mag_alloc_lock, ETAP_MISC_ZONE_ALL);	/* #330 */
 
 	first_zone = ZONE_NULL;
 	last_zone = &first_zone;
@@ -800,6 +944,31 @@ zalloc(
 
 	assert(zone != ZONE_NULL);
 	check_simple_locks();
+
+	/*
+	 *	#330: per-CPU magazine fast path -- pop from the local cache with
+	 *	no zone lock.  On a miss fall through to the locked path, which
+	 *	refills the magazine with a batch before returning.
+	 */
+	if (zone->mag_index >= 0) {
+		register struct zone_magazine *mag;
+		spl_t ms = 0;
+
+		if (zone->spl_routine)
+			ms = (*zone->spl_routine)();
+		disable_preemption();
+		mag = &zone_mag[zone->mag_index][cpu_number()];
+		if (mag->avail) {
+			addr = mag->stash[--mag->avail];
+			enable_preemption();
+			if (zone->spl_routine)
+				splx(ms);
+			return(addr);
+		}
+		enable_preemption();
+		if (zone->spl_routine)
+			splx(ms);
+	}
 
 	if (zone->spl_routine)
 		s = (*zone->spl_routine)();
@@ -952,6 +1121,29 @@ zalloc(
 			REMOVE_FROM_ZONE(zone, addr, vm_offset_t);
 	}
 
+	/*
+	 *	#330: we are about to return one element on the slow (locked) path;
+	 *	while we hold the lock, pull a batch more onto this CPU's magazine
+	 *	so the next ZMAG_DEPTH allocations skip the lock.  The elements are
+	 *	REMOVE_FROM_ZONE'd (counted as in-use, off the free list), so
+	 *	zone_gc treats their pages as busy.  Under ZONE_DEBUG mag_index is
+	 *	always -1, so this is skipped and active_zones stays consistent.
+	 */
+	if (addr != 0 && zone->mag_index >= 0) {
+		register struct zone_magazine *mag;
+		vm_offset_t e;
+
+		disable_preemption();
+		mag = &zone_mag[zone->mag_index][cpu_number()];
+		while (mag->avail < ZMAG_REFILL) {
+			REMOVE_FROM_ZONE(zone, e, vm_offset_t);
+			if (e == 0)
+				break;
+			mag->stash[mag->avail++] = e;
+		}
+		enable_preemption();
+	}
+
 #if	ZONE_DEBUG
 	if (addr && zone_debug_enabled(zone)) {
 		enqueue_tail(&zone->active_zones, (queue_entry_t)addr);
@@ -1027,6 +1219,44 @@ zfree(
 	    (!from_zone_map(elem) || !from_zone_map(elem+zone->elem_size-1)))
 		panic("zfree: non-allocated memory in collectable zone!");
 #endif
+
+	/*
+	 *	#330: per-CPU magazine fast path -- push to the local cache with no
+	 *	zone lock.  If the magazine is full, take the lock once, drain a
+	 *	batch back to the global free list (ADD_TO_ZONE decrements count, so
+	 *	those pages become collectable again), then free this element too.
+	 */
+	if (zone->mag_index >= 0) {
+		register struct zone_magazine *mag;
+		spl_t ms = 0;
+
+		if (zone->spl_routine)
+			ms = (*zone->spl_routine)();
+		disable_preemption();
+		mag = &zone_mag[zone->mag_index][cpu_number()];
+		if (mag->avail < ZMAG_DEPTH) {
+			mag->stash[mag->avail++] = elem;
+			enable_preemption();
+			if (zone->spl_routine)
+				splx(ms);
+			return;
+		}
+		/* Magazine full: drain a batch under the lock, then free elem. */
+		lock_zone(zone);
+		{
+			int n = ZMAG_DRAIN;
+			while (n-- > 0 && mag->avail > 0) {
+				vm_offset_t e = mag->stash[--mag->avail];
+				ADD_TO_ZONE(zone, e);
+			}
+		}
+		ADD_TO_ZONE(zone, elem);
+		unlock_zone(zone);
+		enable_preemption();
+		if (zone->spl_routine)
+			splx(ms);
+		return;
+	}
 
 	if (zone->spl_routine)
 		s = (*zone->spl_routine)();

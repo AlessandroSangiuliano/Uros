@@ -34,7 +34,25 @@
 
 #define FLIPC2_WARMUP_ITERS     100
 #define FLIPC2_BENCH_ITERS      10000
-#define FLIPC2_BENCH_SPIN       0   /* cthreads are cooperative: spin is useless */
+/*
+ * Spin count before the adaptive wait falls back to the Mach semaphore.
+ *
+ * Kept at 0 so the RPC benchmarks deterministically exercise the kernel's
+ * semaphore sleep/wakeup + context-switch path (~8 us/wakeup on the SMP
+ * build) — the worst case.  (The old "cthreads are cooperative: spin is
+ * useless" rationale is stale: userland has run preemptive 1:1 pthreads
+ * since #82, so spinning is no longer inherently pointless.)
+ *
+ * Real drivers use FLIPC2_SPIN_DEFAULT: when both peers spin AND the
+ * scheduler places them on separate CPUs, the reply is caught in userspace
+ * with no trap (measured ~216 ns for 128B intra RPC — FLIPC's hand-rolled
+ * futex fast-path).  But a blanket spin here is net-negative: on a single
+ * CPU, and against the non-spinning inter-task child echo, it only burns
+ * cycles before the inevitable sleep (UP intra-null jumps to ~100 us).  So
+ * the spin-vs-sleep recovery is a scheduler/placement matter (#319), not a
+ * benchmark knob — the floor itself lives in the kernel semaphore path.
+ */
+#define FLIPC2_BENCH_SPIN       0
 #define FLIPC2_BENCH_CHAN_SIZE  (64 * 1024)
 #define FLIPC2_BENCH_RING_ENTRIES 256
 #define FLIPC2_CHILD_STACK_SIZE (64 * 1024)
@@ -121,6 +139,7 @@ extern volatile struct flipc2_child_args flipc2_child_args_storage;
 
 /* Child entry points (noreturn, used from inter-task setup) */
 void flipc2_child_echo_entry(void);
+void flipc2_child_echo_futex_entry(void);	/* #324 futex variant */
 void flipc2_child_batch_echo_entry(void);
 void flipc2_child_bg_echo_entry(void);
 
@@ -145,6 +164,7 @@ void bench_flipc2_rpc(const char *label, int data_size, int iters);
 
 /* Inter-task RPC + batch (flipc2_bench_inter.c) */
 void bench_flipc2_inter_rpc(const char *label, int data_size, int iters);
+void bench_flipc2_inter_rpc_futex(const char *label, int data_size, int iters);
 void bench_flipc2_inter_batch(const char *label, int batch_size, int iters);
 
 /* Game simulation (flipc2_bench_game.c) */
@@ -172,6 +192,9 @@ void bench_flipc2_pollset(void);
 
 /* MPSC smoke test (flipc2_bench_mpsc.c, #126) */
 void bench_flipc2_mpsc(void);
+
+/* #324 futex vs Mach semaphore ping-pong microbench */
+void bench_futex_pingpong(void);
 
 /* Main entry point */
 void bench_flipc2_run(mach_port_t clock_port);

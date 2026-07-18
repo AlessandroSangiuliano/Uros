@@ -125,6 +125,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>
 #include <ipc/ipc_entry.h>
+#include <ipc/ipc_radix.h>
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_port.h>
@@ -188,6 +189,30 @@ ipc_bootstrap(void)
 	/* make it exhaustible */
 	zone_change(ipc_tree_entry_zone, Z_EXHAUST, TRUE);
 #endif
+	/*
+	 * #331 step 2: make the ite zone type-stable.  Zones are collectable by
+	 * default, so the GC can reclaim an emptied page back to the system; a
+	 * lock-free reader could then dereference a freed ite into unmapped or
+	 * repurposed memory.  Marking the zone non-collectable keeps its pages
+	 * forever, so a freed ite stays valid ipc_tree_entry-typed storage --
+	 * the lookup's `ite_name == name' re-check then rejects a reused entry,
+	 * and freeing an ite needs no RCU grace period.  (zfree still returns
+	 * the element to the free list for reuse as another ite; only the
+	 * page-reclaiming GC is disabled.)
+	 */
+	zone_change(ipc_tree_entry_zone, Z_COLLECT, FALSE);
+
+	/*
+	 * #331 step 2: radix overflow nodes, also type-stable (see ipc_radix.c).
+	 * Expandable (zinit default), so the size is just a hint; sparse names
+	 * use only a handful of nodes in practice.
+	 */
+	ipc_radix_node_zone =
+		zinit(sizeof(struct ipc_radix_node),
+			ipc_tree_entry_max * sizeof(struct ipc_radix_node),
+			sizeof(struct ipc_radix_node),
+			"ipc radix nodes");
+	zone_change(ipc_radix_node_zone, Z_COLLECT, FALSE);
 
 	/*
 	 * populate all port(set) zones
@@ -202,6 +227,20 @@ ipc_bootstrap(void)
 	 * XXX	panics when port allocation for an internal object fails.
 	 *zone_change(ipc_object_zones[IOT_PORT], Z_EXHAUST, TRUE);
 	 */
+	/*
+	 * #331 step 2 (part 3b): make the port zone type-stable.  A lock-free
+	 * capability lookup reads entry->ie_object and then ip_lock()s the port
+	 * without the space lock; the port must therefore be safe to lock even
+	 * if another CPU concurrently freed it.  Non-collectable storage keeps
+	 * the page valid (the caller re-validates ip_active + identity after
+	 * locking), so the lock never faults.  This also closes the pre-existing
+	 * race in the per-thread port cache (#55, mach_msg.c), which already
+	 * ip_lock()s an unlocked cached port and only then checks ip_active.
+	 * Trade-off: freed ports are reused from the zone free list but their
+	 * pages are never returned to the system (bounded by peak port count);
+	 * reclaiming them would need call_rcu-style deferral (a #330 follow-up).
+	 */
+	zone_change(ipc_object_zones[IOT_PORT], Z_COLLECT, FALSE);
 
 	ipc_object_zones[IOT_PORT_SET] =
 		zinit(sizeof(struct ipc_pset),
@@ -210,6 +249,8 @@ ipc_bootstrap(void)
 		      "ipc port sets");
 	/* make it exhaustible */
 	zone_change(ipc_object_zones[IOT_PORT_SET], Z_EXHAUST, TRUE);
+	/* #331 step 2 (part 3b): type-stable for the same reason as ports */
+	zone_change(ipc_object_zones[IOT_PORT_SET], Z_COLLECT, FALSE);
 
 	/* create special spaces */
 

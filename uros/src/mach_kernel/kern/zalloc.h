@@ -205,6 +205,7 @@ typedef struct zone {
 	/* boolean_t */	doing_alloc :1,	/* is zone expanding now? */
 	/* boolean_t */	waiting :1;	/* is thread waiting for expansion? */
 	spl_t           (*spl_routine)(void);
+	int		mag_index;	/* #330: per-CPU magazine slot, -1 = none */
 	struct zone *	next_zone;	/* Link for all-zones list */
 #if	ZONE_DEBUG
 	queue_head_t	active_zones;	/* active elements */
@@ -225,6 +226,15 @@ extern vm_offset_t	zalloc(
 /* Get from zone free list */
 extern vm_offset_t	zget(
 				zone_t		zone);
+
+/* #330: enable per-CPU magazines on a hot zone (opt-in, must be called after
+ * the zone is created; no-op under ZONE_DEBUG). */
+extern void		zone_enable_magazines(
+				zone_t		zone);
+
+/* #330: enable magazines on the kernel's hottest zones (kalloc/IPC/VM).  Call
+ * once, late in startup, after those zones exist and per-CPU %gs is up. */
+extern void		zone_enable_hot_magazines(void);
 
 /* Create zone */
 extern zone_t		zinit(

@@ -260,9 +260,114 @@ ext2_dev_has_batch(struct device *dev)
 	return (device_write_batch != NULL);
 }
 
+/*
+ * Historical no-op mutexes from the single-threaded boot-loader origin
+ * of this file.  They guard nothing (the f_lock field they nominally
+ * took does not even exist) and are kept only so stray call sites keep
+ * compiling.  Real serialization (#384) is the vnode lock below.
+ */
 #define mutex_lock(a)
 #define mutex_unlock(a)
 #define mutex_init(a)
+
+/*
+ * #384: real locks.  ext_server drives this library from many threads
+ * (MIG pool, FLIPC fast-path, writeback thread), so the shared state
+ * needs actual mutual exclusion:
+ *
+ *  - vnode v_lock (per-inode): block-map walks (block_map), block-map
+ *    mutation (write-extend, truncate), and metadata flush.  Taken via
+ *    vnode_mutex_lock()/unlock(); no-op for path-walk handles that have
+ *    no vnode yet (their f_ic_scratch is private).
+ *  - ext2_alloc_lock (global): the block/inode allocator's read-modify-
+ *    write of the shared bitmaps + group descriptors + superblock
+ *    counters.  Concurrent allocators used to lose each other's bitmap
+ *    updates (double-allocated blocks).  Leaf lock: nothing else is
+ *    taken while holding it.
+ *  - ext2_vnode_table_lock (global): vnode_get/put refcounts.
+ *
+ * Lock order: v_lock -> ext2_alloc_lock (write-extend allocates while
+ * holding the vnode); v_lock -> pc_lock (page cache) via the data path.
+ * Never the reverse.
+ */
+static pthread_mutex_t ext2_alloc_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t ext2_vnode_table_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void
+vnode_mutex_lock(struct ext2fs_file *fp)
+{
+	if (fp->f_vnode)
+		pthread_mutex_lock(&fp->f_vnode->v_lock);
+}
+
+static void
+vnode_mutex_unlock(struct ext2fs_file *fp)
+{
+	if (fp->f_vnode)
+		pthread_mutex_unlock(&fp->f_vnode->v_lock);
+}
+
+/*
+ * #384: drop this handle's private caches of the shared block map —
+ * the indirect-block buffers (f_blk[]) and the data-block buffer
+ * (f_buf).  Used when the shared map changed underneath them: the
+ * cached blocks may have been freed and re-allocated, and walking a
+ * stale indirect buffer reads file DATA as an indirect table.
+ */
+static void
+handle_caches_drop(struct ext2fs_file *fp)
+{
+	int level;
+
+	for (level = 0; level < NIADDR; level++) {
+		if (fp->f_blk[level] != 0) {
+			(void) vm_deallocate(mach_task_self(),
+					     fp->f_blk[level],
+					     fp->f_blksize[level]);
+			fp->f_blk[level] = 0;
+			fp->f_blksize[level] = 0;
+		}
+		fp->f_blkno[level] = -1;
+	}
+	if (fp->f_buf != 0) {
+		if (!fp->f_buf_borrowed)
+			(void) vm_deallocate(mach_task_self(),
+					     fp->f_buf, fp->f_buf_size);
+		fp->f_buf = 0;
+		fp->f_buf_borrowed = 0;
+	}
+	fp->f_buf_blkno = -1;
+	fp->f_ra_last_block = -1;
+}
+
+/*
+ * #384: called with v_lock held.  If another opener mutated the shared
+ * block map since this handle last looked (truncate freed it, or a
+ * write extended it), drop the private caches and adopt the current
+ * generation.
+ */
+static void
+vnode_gen_check(struct ext2fs_file *fp)
+{
+	if (!fp->f_vnode || fp->f_gen == fp->f_vnode->v_gen)
+		return;
+	handle_caches_drop(fp);
+	fp->f_gen = fp->f_vnode->v_gen;
+}
+
+/*
+ * #384: called with v_lock held, after mutating the shared block map.
+ * Invalidates every OTHER handle's private caches (they re-sync in
+ * vnode_gen_check) while keeping this handle current.
+ */
+static void
+vnode_gen_bump(struct ext2fs_file *fp)
+{
+	if (fp->f_vnode) {
+		fp->f_vnode->v_gen++;
+		fp->f_gen = fp->f_vnode->v_gen;
+	}
+}
 
 static security_token_t null_security_token;
 
@@ -433,18 +538,22 @@ vnode_get(struct ext2_mount *m, ino_t ino)
 {
 	int i, free_slot = -1;
 
+	pthread_mutex_lock(&ext2_vnode_table_lock);
 	for (i = 0; i < VNODE_TABLE_SIZE; i++) {
 		if (m->m_vnode_table[i].v_ino == ino &&
 		    m->m_vnode_table[i].v_refcount > 0) {
 			m->m_vnode_table[i].v_refcount++;
+			pthread_mutex_unlock(&ext2_vnode_table_lock);
 			return &m->m_vnode_table[i];
 		}
 		if (free_slot < 0 && m->m_vnode_table[i].v_refcount == 0)
 			free_slot = i;
 	}
 
-	if (free_slot < 0)
+	if (free_slot < 0) {
+		pthread_mutex_unlock(&ext2_vnode_table_lock);
 		return NULL;
+	}
 
 	/* Free old resources if slot was cached */
 	if (m->m_vnode_table[free_slot].v_inode_blk) {
@@ -455,6 +564,9 @@ vnode_get(struct ext2_mount *m, ino_t ino)
 	memset(&m->m_vnode_table[free_slot], 0, sizeof(struct ext2_vnode));
 	m->m_vnode_table[free_slot].v_ino = ino;
 	m->m_vnode_table[free_slot].v_refcount = 1;
+	pthread_mutex_init(&m->m_vnode_table[free_slot].v_lock, NULL);
+	m->m_vnode_table[free_slot].v_gen = 1;
+	pthread_mutex_unlock(&ext2_vnode_table_lock);
 	return &m->m_vnode_table[free_slot];
 }
 
@@ -463,6 +575,7 @@ vnode_put(struct ext2_vnode *vn)
 {
 	if (!vn)
 		return;
+	pthread_mutex_lock(&ext2_vnode_table_lock);
 	if (--vn->v_refcount <= 0) {
 		if (vn->v_inode_blk) {
 			vm_deallocate(mach_task_self(),
@@ -473,6 +586,7 @@ vnode_put(struct ext2_vnode *vn)
 		vn->v_ino = 0;
 		vn->v_refcount = 0;
 	}
+	pthread_mutex_unlock(&ext2_vnode_table_lock);
 }
 
 /*
@@ -680,7 +794,7 @@ read_inode(ino_t inumber, register struct ext2fs_file *fp)
  * contains that block.
  */
 static int
-block_map(
+block_map_locked(
 	struct ext2fs_file	*fp,
 	daddr_t			file_block,
 	daddr_t			*disk_block_p)	/* out */
@@ -690,14 +804,11 @@ block_map(
 	daddr_t		ind_block_num;
 	kern_return_t	rc;
 
-	vm_offset_t	olddata[NIADDR+1];
-	vm_size_t	oldsize[NIADDR+1];
-
 #ifdef	DEBUG
 	int i = file_block;
 	if(debug)
 		printf("block_map(%d)\n", i);
-#endif 
+#endif
 	/*
 	 * Index structure of an inode:
 	 *
@@ -723,14 +834,19 @@ block_map(
 	 *			NDADDR + NINDIR(fs) + NINDIR(fs)**2 ..
 	 *			NDADDR + NINDIR(fs) + NINDIR(fs)**2
 	 *				+ NINDIR(fs)**3 - 1
+	 *
+	 * #384: runs entirely under the vnode lock (see block_map()
+	 * below); the shared block map cannot be freed or re-pointed
+	 * underneath the walk, and f_blk[] is only touched by this
+	 * handle, so replaced buffers are deallocated inline.  The
+	 * indirect-block device reads happen under the lock too: they
+	 * only contend with openers of the same file, and are rare
+	 * (per-handle indirect cache).
 	 */
-
-	mutex_lock(&fp->f_lock);
 
 	if (file_block < NDADDR) {
 	    /* Direct block. */
 	    *disk_block_p = fp->f_ic->i_block[file_block];
-	    mutex_unlock(&fp->f_lock);
 	    return (0);
 	}
 
@@ -749,17 +865,10 @@ block_map(
 	}
 	if (level == NIADDR) {
 	    /* Block number too high */
-	    mutex_unlock(&fp->f_lock);
 	    return (FS_NOT_IN_FILE);
 	}
 
 	ind_block_num = fp->f_ic->i_block[level + NDADDR];
-
-	/*
-	 * Initialize array of blocks to free.
-	 */
-	for (idx = 0; idx < NIADDR; idx++)
-	    oldsize[idx] = 0;
 
 	for (; level >= 0; level--) {
 
@@ -777,12 +886,6 @@ block_map(
 		data = fp->f_blk[level];
 	    }
 	    else {
-		/*
-		 *	Drop our lock while doing the read.
-		 *	(The f_dev and f_fs fields don`t change.)
-		 */
-		mutex_unlock(&fp->f_lock);
-
 		rc = ext2_dev_read(&fp->f_dev,
 				 (recnum_t) dbtorec(&fp->f_dev,
 					    ext2_fsbtodb(fp->f_fs, ind_block_num)),
@@ -792,33 +895,14 @@ block_map(
 		if (rc != KERN_SUCCESS)
 		    return (rc);
 
-		/*
-		 *	See if we can cache the data.  Need a write lock to
-		 *	do this.  While we hold the write lock, we can`t do
-		 *	*anything* which might block for memory.  Otherwise
-		 *	a non-privileged thread might deadlock with the
-		 *	privileged threads.  We can`t block while taking the
-		 *	write lock.  Otherwise a non-privileged thread
-		 *	blocked in the vm_deallocate (while holding a read
-		 *	lock) will block a privileged thread.  For the same
-		 *	reason, we can`t take a read lock and then use
-		 *	lock_read_to_write.
-		 */
-
-		mutex_lock(&fp->f_lock);
-
-		olddata[level] = fp->f_blk[level];
-		oldsize[level] = fp->f_blksize[level];
+		if (fp->f_blk[level] != 0)
+		    (void) vm_deallocate(mach_task_self(),
+					 fp->f_blk[level],
+					 fp->f_blksize[level]);
 
 		fp->f_blkno[level] = ind_block_num;
 		fp->f_blk[level] = data;
 		fp->f_blksize[level] = size;
-
-		/*
-		 *	Return to holding a read lock, and
-		 *	dispose of old data.
-		 */
-
 	    }
 
 	    if (level > 0) {
@@ -831,20 +915,28 @@ block_map(
 	    ind_block_num = le32_to_cpu(((daddr_t *)data)[idx]);
 	}
 
-	mutex_unlock(&fp->f_lock);
-
-	/*
-	 * After unlocking the file, free any blocks that
-	 * we need to free.
-	 */
-	for (idx = 0; idx < NIADDR; idx++)
-	    if (oldsize[idx] != 0)
-		(void) vm_deallocate(mach_task_self(),
-				     olddata[idx],
-				     oldsize[idx]);
-
 	*disk_block_p = ind_block_num;
 	return (0);
+}
+
+/*
+ * #384: public block_map — vnode-locked wrapper.  Re-syncs this
+ * handle's private caches if the shared block map changed (truncate /
+ * extension by another opener) before walking it.
+ */
+static int
+block_map(
+	struct ext2fs_file	*fp,
+	daddr_t			file_block,
+	daddr_t			*disk_block_p)	/* out */
+{
+	int rc;
+
+	vnode_mutex_lock(fp);
+	vnode_gen_check(fp);
+	rc = block_map_locked(fp, file_block, disk_block_p);
+	vnode_mutex_unlock(fp);
+	return rc;
 }
 
 /*
@@ -1742,6 +1834,7 @@ ext2fs_open_file_into(
 		}
 		fp->f_vnode = vn;
 		fp->f_ic = &vn->v_ic;
+		fp->f_gen = vn->v_gen;
 	}
 	mutex_init(&fp->f_lock);
 	free(namebuf);
@@ -1801,8 +1894,11 @@ ext2fs_clone_file(struct ext2fs_file *dst, const struct ext2fs_file *src)
 	/* Share the vnode — inode data is shared, not copied */
 	dst->f_vnode = src->f_vnode;
 	if (dst->f_vnode) {
+		pthread_mutex_lock(&ext2_vnode_table_lock);
 		dst->f_vnode->v_refcount++;
+		pthread_mutex_unlock(&ext2_vnode_table_lock);
 		dst->f_ic = &dst->f_vnode->v_ic;
+		dst->f_gen = dst->f_vnode->v_gen;
 	} else {
 		dst->f_ic = &dst->f_ic_scratch;
 	}
@@ -2058,7 +2154,7 @@ read_disk_block(
  * superblock free count.
  */
 static daddr_t
-block_alloc(struct ext2fs_file *fp, int goal_group)
+block_alloc_impl(struct ext2fs_file *fp, int goal_group)
 {
 	struct ext2_super_block *fs = fp->f_fs;
 	struct ext2_group_desc *gd = fp->f_gd;
@@ -2150,7 +2246,7 @@ block_alloc(struct ext2fs_file *fp, int goal_group)
  * ext2fs_flush_metadata() writes the descriptors and superblock back.
  */
 static void
-block_free(struct ext2fs_file *fp, daddr_t block)
+block_free_impl(struct ext2fs_file *fp, daddr_t block)
 {
 	struct ext2_super_block *fs = fp->f_fs;
 	struct ext2_group_desc *gd = fp->f_gd;
@@ -2192,6 +2288,32 @@ block_free(struct ext2fs_file *fp, daddr_t block)
 }
 
 /*
+ * #384: allocator entry points — the bitmap read-modify-write, group
+ * descriptor counts and superblock counts are shared by every file on
+ * the mount; concurrent allocators used to lose each other's bitmap
+ * updates and hand the same block to two writers.  ext2_alloc_lock is
+ * a leaf lock (nothing else is acquired while holding it).
+ */
+static daddr_t
+block_alloc(struct ext2fs_file *fp, int goal_group)
+{
+	daddr_t b;
+
+	pthread_mutex_lock(&ext2_alloc_lock);
+	b = block_alloc_impl(fp, goal_group);
+	pthread_mutex_unlock(&ext2_alloc_lock);
+	return b;
+}
+
+static void
+block_free(struct ext2fs_file *fp, daddr_t block)
+{
+	pthread_mutex_lock(&ext2_alloc_lock);
+	block_free_impl(fp, block);
+	pthread_mutex_unlock(&ext2_alloc_lock);
+}
+
+/*
  * Allocate a free inode, mirroring block_alloc() against the inode
  * bitmap.  Reserved inodes (< EXT2_FIRST_INO) are skipped — they are
  * already marked used in group 0's bitmap, but we guard anyway.  When
@@ -2202,7 +2324,7 @@ block_free(struct ext2fs_file *fp, daddr_t block)
  * superblock dirty flags on fp's vnode.
  */
 static ino_t
-inode_alloc(struct ext2fs_file *fp, int goal_group, int is_dir)
+inode_alloc_impl(struct ext2fs_file *fp, int goal_group, int is_dir)
 {
 	struct ext2_super_block *fs = fp->f_fs;
 	struct ext2_group_desc *gd = fp->f_gd;
@@ -2276,7 +2398,7 @@ inode_alloc(struct ext2fs_file *fp, int goal_group, int is_dir)
  * the inode's data blocks first.
  */
 static void
-inode_free(struct ext2fs_file *fp, ino_t ino, int is_dir)
+inode_free_impl(struct ext2fs_file *fp, ino_t ino, int is_dir)
 {
 	struct ext2_super_block *fs = fp->f_fs;
 	struct ext2_group_desc *gd = fp->f_gd;
@@ -2317,6 +2439,26 @@ inode_free(struct ext2fs_file *fp, ino_t ino, int is_dir)
 		}
 	}
 	vm_deallocate(mach_task_self(), bitmap, bitmap_size);
+}
+
+/* #384: locked wrappers — same rationale as block_alloc/block_free. */
+static ino_t
+inode_alloc(struct ext2fs_file *fp, int goal_group, int is_dir)
+{
+	ino_t ino;
+
+	pthread_mutex_lock(&ext2_alloc_lock);
+	ino = inode_alloc_impl(fp, goal_group, is_dir);
+	pthread_mutex_unlock(&ext2_alloc_lock);
+	return ino;
+}
+
+static void
+inode_free(struct ext2fs_file *fp, ino_t ino, int is_dir)
+{
+	pthread_mutex_lock(&ext2_alloc_lock);
+	inode_free_impl(fp, ino, is_dir);
+	pthread_mutex_unlock(&ext2_alloc_lock);
 }
 
 /* ext2 on-disk directory-entry file_type values (FILETYPE feature). */
@@ -2779,14 +2921,13 @@ invalidate_ind_cache(struct ext2fs_file *fp, int level, daddr_t blk)
  * Write data to a file at the given offset.
  * Allocates new blocks as needed, extends file size.
  */
-int
-ext2fs_write_file(
-	fs_private_t		private,
+static int
+write_file_locked(
+	struct ext2fs_file	*fp,
 	vm_offset_t		offset,
 	vm_offset_t		data,
 	vm_size_t		size)
 {
-	struct ext2fs_file *fp = (struct ext2fs_file *)private;
 	struct ext2_super_block *fs = fp->f_fs;
 	int block_size = EXT2_BLOCK_SIZE(fs);
 	int rc;
@@ -2801,7 +2942,7 @@ ext2fs_write_file(
 			chunk = size;
 
 		/* Resolve file block → disk block */
-		rc = block_map(fp, file_block, &disk_block);
+		rc = block_map_locked(fp, file_block, &disk_block);
 		if (rc != 0)
 			return rc;
 
@@ -2944,6 +3085,10 @@ ext2fs_write_file(
 				invalidate_ind_cache(fp, 2, tind);
 			}
 			fp->f_ic->i_blocks += block_size / DEV_BSIZE;
+
+			/* #384: the shared block map changed — invalidate
+			 * every other opener's private indirect caches. */
+			vnode_gen_bump(fp);
 		}
 
 		/* Invalidate f_buf so read path re-fetches from cache */
@@ -3054,13 +3199,37 @@ ext2fs_write_file(
 }
 
 /*
- * Flush dirty metadata to disk.  When 2+ items are dirty, batch
- * them into a single device_write_batch IPC to save round-trips.
+ * #384: public write — the whole call runs under the vnode lock, so
+ * concurrent writers to the same file (each mutating the shared block
+ * map through allocation) are fully serialized, and no reader walks a
+ * half-updated map.
  */
 int
-ext2fs_flush_metadata(fs_private_t private)
+ext2fs_write_file(
+	fs_private_t		private,
+	vm_offset_t		offset,
+	vm_offset_t		data,
+	vm_size_t		size)
 {
 	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	int rc;
+
+	vnode_mutex_lock(fp);
+	vnode_gen_check(fp);
+	rc = write_file_locked(fp, offset, data, size);
+	vnode_mutex_unlock(fp);
+	return rc;
+}
+
+/*
+ * Flush dirty metadata to disk.  When 2+ items are dirty, batch
+ * them into a single device_write_batch IPC to save round-trips.
+ * #384: body; runs under the vnode lock (see wrapper below) so the
+ * inode snapshot it serializes is consistent with concurrent writers.
+ */
+static int
+flush_metadata_locked(struct ext2fs_file *fp)
+{
 	struct ext2_super_block *fs = fp->f_fs;
 	struct ext2_vnode *vn = fp->f_vnode;
 	int n_dirty = 0;
@@ -3284,6 +3453,18 @@ ext2fs_flush_metadata(fs_private_t private)
 		}
 		return rc;
 	}
+}
+
+int
+ext2fs_flush_metadata(fs_private_t private)
+{
+	struct ext2fs_file *fp = (struct ext2fs_file *)private;
+	int rc;
+
+	vnode_mutex_lock(fp);
+	rc = flush_metadata_locked(fp);
+	vnode_mutex_unlock(fp);
+	return rc;
 }
 
 int
@@ -3589,12 +3770,26 @@ ext2fs_truncate_file(fs_private_t private, vm_size_t length)
 	daddr_t from = (length + block_size - 1) / block_size;
 	int freed = 0, rc;
 
-	if (fp->f_ic->i_size <= length)
+	/*
+	 * #384: truncation frees the shared block map — the single most
+	 * destructive mutation.  Serialize it against every walker and
+	 * writer of this inode, and bump the generation so their private
+	 * indirect caches (now pointing at freed, soon re-allocated
+	 * blocks) are dropped before reuse.
+	 */
+	vnode_mutex_lock(fp);
+	vnode_gen_check(fp);
+
+	if (fp->f_ic->i_size <= length) {
+		vnode_mutex_unlock(fp);
 		return 0;	/* grow-on-truncate not handled here */
+	}
 
 	rc = free_file_blocks(fp, fp->f_ic->i_block, from, &freed);
-	if (rc != 0)
+	if (rc != 0) {
+		vnode_mutex_unlock(fp);
 		return rc;
+	}
 
 	fp->f_ic->i_size = length;
 	if ((unsigned long)(freed * (block_size / 512)) <= fp->f_ic->i_blocks)
@@ -3603,6 +3798,10 @@ ext2fs_truncate_file(fs_private_t private, vm_size_t length)
 		fp->f_ic->i_blocks = 0;
 	if (fp->f_vnode)
 		fp->f_vnode->v_inode_dirty = 1;
+	/* Our own f_blk[] caches point into the freed tree too. */
+	handle_caches_drop(fp);
+	vnode_gen_bump(fp);
+	vnode_mutex_unlock(fp);
 	return ext2fs_flush_metadata(private);
 }
 

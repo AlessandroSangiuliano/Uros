@@ -6,6 +6,7 @@
 # Usage:
 #   ./scripts/run-ush.sh                  # boot to ush prompt (Ctrl-A x to quit)
 #   ./scripts/run-ush.sh --log out.log    # also tee serial output to a file
+#   ./scripts/run-ush.sh --smp 2          # expose N CPUs (needs -DUROS_NCPUS>=N)
 #
 # Notes:
 #   - QEMU runs with `-nographic` so the terminal becomes the COM1 of
@@ -34,6 +35,7 @@ LOGFILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --log) LOGFILE="$2"; shift 2 ;;
+        --smp) shift; SMP_COUNT="$1"; shift ;;
         -h|--help)
             sed -n '3,18p' "$0"
             exit 0
@@ -47,4 +49,8 @@ EXTRA="-display none -serial mon:stdio"
 if [ -n "$LOGFILE" ]; then
     EXTRA="$EXTRA -D $LOGFILE"
 fi
-exec "$SCRIPT_DIR/run-qemu.sh" --minimal --allow-reboot $EXTRA
+SMP_ARG=""
+if [ -n "$SMP_COUNT" ]; then
+    SMP_ARG="--smp $SMP_COUNT"
+fi
+exec "$SCRIPT_DIR/run-qemu.sh" --minimal --allow-reboot $SMP_ARG $EXTRA

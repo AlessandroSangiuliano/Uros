@@ -59,11 +59,21 @@
 
 static mach_port_t	mig_reply_port = MACH_PORT_NULL;
 
-/*****************************************************
- *  Called by mach_init. This is necessary after
- *  a fork to get rid of bogus port number.
- ****************************************************/
+/*
+ * #299: these four entry points are also defined, with a per-thread
+ * (pthread-TSD) implementation, in libpthreads/mig_support.c.  A program
+ * that links BOTH libmach and libpthreads (i.e. any multithreaded server)
+ * must use the per-thread version: otherwise every thread shares this one
+ * static mig_reply_port, two threads receive on the same reply port, and
+ * ipc_mqueue_deliver hands an RPC reply to the wrong thread — the caller
+ * hangs forever (only visible under real concurrency, i.e. SMP 4+ CPUs;
+ * gpu_server's render worker was the first victim).  Mark libmach's copies
+ * WEAK so the strong libpthreads definitions win whenever both are linked;
+ * pure single-threaded programs (libmach only) still get these as the sole,
+ * weak-but-present definitions.
+ */
 
+__attribute__((weak))
 void
 mig_init(
 	void		*first)
@@ -77,6 +87,7 @@ mig_init(
  *  Used to provide the same interface as multi-threaded tasks need.
  ********************************************************/
 
+__attribute__((weak))
 mach_port_t
 mig_get_reply_port()
 {
@@ -91,6 +102,7 @@ mig_get_reply_port()
  *  Could be called by user.
  ***********************************************************/
 
+__attribute__((weak))
 void
 mig_dealloc_reply_port(
 	mach_port_t	reply_port)
@@ -109,6 +121,7 @@ mig_dealloc_reply_port(
  *  Could be called by user.
  ***********************************************************/
 
+__attribute__((weak))
 void
 mig_put_reply_port(
 	mach_port_t	reply_port)

@@ -28,6 +28,15 @@
 
 #include <mach_rt.h>
 
+/*
+ * #329 phase 5: pad each CPU's slot to a full cache line (aligned(64) rounds
+ * sizeof up to 64) so adjacent CPUs never share one.  Without this, the hot
+ * per-CPU fields below -- written on every context switch (active_thread),
+ * interrupt (interrupt_level) and simple_lock -- packed 4 CPUs into a single
+ * 64-byte line on a 4-way box, bouncing it across all cores.  The padding is
+ * tail-only, so the field offsets stay stable for the %gs-relative asm
+ * (genassym CPU_DATA_*) and the offsetof(cpu_data_t, cpu_id) _Static_assert.
+ */
 typedef struct
 {
 	struct thread_shuttle	*active_thread;
@@ -36,7 +45,40 @@ typedef struct
 #endif	/* MACH_RT */
 	int		simple_lock_count;
 	int		interrupt_level;
-} cpu_data_t;
+	/*
+	 * #301: per-CPU data via %gs.  cpu_id is appended to keep
+	 * pre-existing offsets (active_thread, preemption_level, …)
+	 * stable for callers that read them through %gs-relative inline
+	 * asm.  Zero for the BSP (matches BSS), set to the AP's slot
+	 * by mp_desc_init() right after it bzero's the slot.
+	 */
+	int		cpu_id;
+	/*
+	 * #331 step 2 (QSBR RCU): per-CPU quiescent-state bookkeeping for the
+	 * lock-free capability-table reads.  Appended AFTER cpu_id so the
+	 * %gs-relative field offsets (active_thread/.../cpu_id) stay fixed;
+	 * these two are read in C via cpu_data[cpu_number()], never through
+	 * %gs, so they need no genassym entry.  rcu_read_depth is CPU-local
+	 * (nesting of active read sections) -- valid because MACH_RT==0 makes
+	 * the kernel non-preemptive, so a reader never migrates CPU
+	 * mid-section.  rcu_qs_seq is bumped at each quiescent state and is the
+	 * only field read cross-CPU (by urmach_synchronize_rcu).  See
+	 * <kern/rcu.h>.
+	 */
+	int			rcu_read_depth;
+	volatile unsigned int	rcu_qs_seq;
+	/*
+	 * #331 step 2: set while this CPU is in the idle wait loop.  An idle
+	 * CPU holds no RCU read reference, so it is quiescent by definition;
+	 * urmach_synchronize_rcu counts it immediately rather than waiting for
+	 * it to tick (a HLTed idle CPU may not report a quiescent state for a
+	 * long time).  Read cross-CPU; written only by the owning CPU.
+	 */
+	volatile int		rcu_cpu_idle;
+} __attribute__((aligned(64))) cpu_data_t;
+
+_Static_assert(sizeof(cpu_data_t) == 64,
+	       "cpu_data_t must own a whole cache line (#329 phase 5)");
 
 extern cpu_data_t	cpu_data[NCPUS];
 
@@ -62,6 +104,7 @@ extern cpu_data_t	cpu_data[NCPUS];
 #endif
 
 static struct thread_shuttle __inline__ *current_thread(void);
+static int __inline__		current_cpu_id(void);
 static int __inline__		get_preemption_level(void);
 static int __inline__		get_simple_lock_count(void);
 static int __inline__		get_interrupt_level(void);
@@ -77,6 +120,16 @@ static void __inline__		mp_enable_preemption_no_check(void);
 static struct thread_shuttle __inline__ *current_thread(void)
 {
 	return (cpu_data[cpu_number()].active_thread);
+}
+
+/*
+ * #301: cpu_id accessor for builds without MACH_RT.  Falls back to
+ * indexing through cpu_number().  Real per-%gs version lives in
+ * machine/cpu_data.h and gets used when MACH_RT is on.
+ */
+static int __inline__	current_cpu_id(void)
+{
+	return (cpu_data[cpu_number()].cpu_id);
 }
 
 static int __inline__	get_preemption_level(void)
@@ -125,6 +178,7 @@ static void __inline__	mp_enable_preemption_no_check(void)
 #else	/* !defined(__GNUC__) */
 
 #define current_thread()	(cpu_data[cpu_number()].active_thread)
+#define current_cpu_id()	(cpu_data[cpu_number()].cpu_id)
 #define get_preemption_level()	(0)
 #define get_simple_lock_count()	(cpu_data[cpu_number()].simple_lock_count)
 #define get_interrupt_level()	(cpu_data[cpu_number()].interrupt_level)

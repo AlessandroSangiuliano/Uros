@@ -19,13 +19,26 @@
 
 #include <mach/kern_return.h>
 #include <kern/misc_protos.h>
+#include <kern/lock.h>
 #include <device/conf.h>
 #include <device/io_req.h>
 #include <device/device_types.h>
 #include <i386/pio.h>
+#include <i386/AT386/fbcons.h>
 
 extern void com_putc(char c);
 extern void cpu_shutdown(void);
+
+/*
+ * Shared with kern/printf.c: the single console serialization lock.  Kernel
+ * printf() already holds it for the duration of one message; taking the same
+ * lock here makes each userspace console write() atomic too, so concurrent
+ * writers (servers, the shell, benchmarks) on different CPUs cannot interleave
+ * their bytes character-by-character on the COM1 line.  On a uniprocessor
+ * simple_lock is a no-op and an in-kernel write runs to completion without a
+ * voluntary switch, so no interleaving is possible there anyway.
+ */
+decl_simple_lock_data(extern, printf_lock)
 
 /* ============================================================
  * Console primitives that used to live in kd.c.  Moved here so
@@ -48,15 +61,26 @@ cnputc(char c)
 	} else {
 		com_putc(c);
 	}
+
+	/* Mirror to the emergency framebuffer console.  No-op until
+	 * fbcons_init() has mapped a multiboot2 framebuffer (#342); on a
+	 * pure-UEFI box this is the only path that actually shows output,
+	 * since com_putc above writes to a COM1 that isn't there. */
+	fbcons_putc(c);
 }
 
 void
 cninit(void)
 {
 	/* In-kernel VGA initialization removed in #199; in-kernel
-	 * keyboard removed in #208.  Nothing for cninit to do — the
-	 * COM1 path is brought up by com_cons_init() at boot, and
-	 * userspace owns everything else. */
+	 * keyboard removed in #208.  The COM1 path is brought up by
+	 * com_cons_init() at boot, and userspace owns everything else.
+	 *
+	 * #342: bring up the emergency framebuffer console if GRUB handed
+	 * us a multiboot2 framebuffer.  This runs right after i386_init(),
+	 * so the pmap is up and io_map() can map the LFB.  It stays a no-op
+	 * on legacy/QEMU boots that have a real serial console. */
+	fbcons_init();
 }
 
 void
@@ -99,8 +123,17 @@ consolewrite(dev_t dev, io_req_t ior)
 
 	p = (char *)ior->io_data;
 	n = ior->io_count;
+
+	/*
+	 * Serialize the whole buffer against kernel printf and any other
+	 * console writer (shared printf_lock) so SMP writers don't interleave
+	 * byte-by-byte on the UART.  cnputc -> com_putc is polled and never
+	 * blocks, so the section completes without a voluntary context switch.
+	 */
+	simple_lock(&printf_lock);
 	while (n--)
 		cnputc(*p++);
+	simple_unlock(&printf_lock);
 
 	ior->io_residual = 0;
 	return D_SUCCESS;

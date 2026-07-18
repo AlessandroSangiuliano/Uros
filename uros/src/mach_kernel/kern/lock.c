@@ -1511,13 +1511,15 @@ lock_write_to_read(
 }
 
 
-#if	0	/* Unused */
 /*
  *	Routine:	lock_try_write
  *	Function:
  *		Tries to get a write lock.
  *
  *		Returns FALSE if the lock is not held on return.
+ *
+ *	Re-enabled for #327: backs is_write_lock_try() now that
+ *	ipc_space uses a real reader/writer lock.
  */
 
 boolean_t
@@ -1558,6 +1560,7 @@ lock_try_write(
 	return(TRUE);
 }
 
+#if	0	/* Unused: no callers */
 /*
  *	Routine:	lock_try_read
  *	Function:
@@ -1636,6 +1639,14 @@ mutex_lock_wait (
 {
 	m->waiters++;
 	ETAP_SET_REASON(current_thread(), BLOCKED_ON_MUTEX_LOCK);
+#if	MUTEX_OWNER_TRACK
+	/*
+	 * #383: the interlock is released inside
+	 * thread_sleep_interlock(), so drop the ilk owner note here —
+	 * a stale ilk_thr with waiters>0 would point at this window.
+	 */
+	m->ilk_thr = 0;
+#endif	/* MUTEX_OWNER_TRACK */
 	thread_sleep_interlock ((event_t) m, &m->interlock, FALSE);
 }
 
@@ -2083,3 +2094,22 @@ etap_mutex_unlock(
 }
 
 #endif  /* ETAP_LOCK_TRACE */
+
+#if	MACH_RT || (NCPUS > 1) || MACH_LDEBUG
+/*
+ * Sanity hook for the mutex_lock() macro in <i386/lock.h>.
+ *
+ * The macro itself cannot dereference current_thread()->wait_event because
+ * <i386/lock.h> is included by <kern/lock.h>, which in turn is included by
+ * <kern/thread.h> — making it impossible for <i386/lock.h> to see the full
+ * struct thread_shuttle definition without an include cycle.  The hook lives
+ * here so the assert is reachable without forcing every caller of
+ * <kern/lock.h> to also pull in <kern/thread.h>.
+ */
+void
+mutex_lock_assert_safe(void)
+{
+	assert(current_thread() == THREAD_NULL ||
+	       current_thread()->wait_event == NO_EVENT);
+}
+#endif	/* MACH_RT || (NCPUS > 1) || MACH_LDEBUG */

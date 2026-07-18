@@ -804,6 +804,56 @@ Entry(t_page_fault)
  * NB: below use of CPU_NUMBER assumes that macro will use correct
  * segment register for any kernel data accesses.
  */
+/*
+ * t_nmi — dedicated NMI handler for the #344 perf-counter watchdog.
+ *
+ * Entered through an interrupt gate (vector 2).  Deliberately does NOT use
+ * alltraps: an NMI must return through a plain iret (which clears the NMI-
+ * blocked latch) WITHOUT the trap-return path's stack switch and AST_URGENT
+ * preemption check — those can context-switch, which corrupts the NMI state.
+ * Builds the same i386_saved_state layout alltraps does, calls nmi_watchdog(),
+ * then restores and irets.  Short and non-recursive (HW blocks NMI until iret).
+ *
+ * #344: a user-mode NMI makes the CPU load ktss.esp0, which points into the
+ * interrupted thread's INLINE-pcb saved-state area (act+0x58), NOT a real kernel
+ * stack -- alltraps switches to thread->kernel_stack but we must not (the AST/
+ * preemption path corrupts the NMI latch).  So we build the saved-state on the
+ * esp0 area, then switch to this CPU's dedicated NMI stack for the C handler,
+ * which would otherwise underflow the saved-state and scribble over the
+ * activation.  Per-CPU slot (CPU_NUMBER index) so concurrent NMIs never share.
+ */
+Entry(t_nmi)
+	pushl	$0			/* no error code: push a fake one */
+	pushl	$2			/* T_NMI trap-number slot */
+	pusha				/* eax,ecx,edx,ebx,esp,ebp,esi,edi */
+	pushl	%ds			/* segment registers (struct order) */
+	pushl	%es
+	pushl	%fs
+	pushl	%gs
+	mov	%ss,%ax
+	mov	%ax,%ds			/* kernel data segs for the C handler */
+	mov	%ax,%es
+	mov	$CPU_DATA,%ax
+	mov	%ax,%gs			/* per-CPU base so cpu_number() works */
+	cld
+	movl	%esp,%edx		/* edx = &saved_state (on the esp0 area) */
+	xorl	%eax,%eax		/* cpu 0 default (UP: CPU_NUMBER is a no-op) */
+	CPU_NUMBER(%eax)		/* SMP: eax = this CPU's number (via %gs) */
+	incl	%eax			/* select the TOP of this CPU's slot */
+	shll	$12,%eax		/* * NMI_STACK_SIZE == 4096 (see _Static_assert) */
+	addl	$EXT(nmi_stacks),%eax
+	movl	%eax,%esp		/* per-CPU dedicated NMI stack */
+	pushl	%edx			/* pass &saved_state (and stash it) */
+	call	EXT(nmi_watchdog)
+	popl	%esp			/* esp <- &saved_state (back on esp0 area) */
+	popl	%gs			/* restore the interrupted segments */
+	popl	%fs
+	popl	%es
+	popl	%ds
+	popa
+	addl	$8,%esp			/* pop trapno + fake err */
+	iret
+
 Entry(alltraps)
 	pusha				/* save the general registers */
 trap_push_segs:
@@ -1282,6 +1332,17 @@ LEXT(return_to_iret)			/* (label for kdb_kintr and hardclock) */
 
 	popl	%esp			/* switch back to old stack */
 
+	/*
+	 * #316: IPIs that can raise an AST (ipi_mp_entry in ipi.S) jump here
+	 * after their C handler instead of a bare iret, sharing this AST /
+	 * preempt epilogue so a cross-CPU reschedule is actually taken.  %esp
+	 * points at the saved i386_interrupt_state either way: all_intrs just
+	 * restored it from the interrupt stack above; ipi_mp_entry likewise
+	 * restores it (popl %esp) after running its C handler on the interrupt
+	 * stack, and IPI_ENTER pushed an identical register frame.
+	 */
+	.globl	EXT(ipi_ast_return)
+LEXT(ipi_ast_return)
 	CPU_NUMBER(%edx)
 	movl	CX(EXT(need_ast),%edx),%eax
 	testl	%eax,%eax		/* any pending asts? */
@@ -1796,10 +1857,21 @@ Entry(syscall_int80)
 LEXT(sysenter_entry)
 	/*
 	 * SYSENTER does NOT clear IF, so disable interrupts first.
-	 * SS.base=0 from SYSENTER matches our flat KERNEL_DS, and
-	 * ESP is already a valid kernel virtual address from the MSR.
+	 * SS.base=0 from SYSENTER matches our flat KERNEL_DS.
 	 */
 	cli
+
+	/*
+	 * #348: IA32_SYSENTER_ESP points at this CPU's trampoline slot
+	 * (sysenter_stub[cpu].kstack), not the thread kernel stack.  Switch
+	 * to the real kernel stack with a single load -- replacing the
+	 * ~144 cyc per-switch WRMSR with a ~3 cyc store + this ~4 cyc load.
+	 * %esp now == &slot.kstack; the slot holds the thread's kernel stack
+	 * top (kept current by sysenter_update_esp).  An NMI/#MC taken right
+	 * here pushes into the slot's scratch area below .kstack, so .kstack
+	 * stays intact across this one-instruction window (see sysenter.c).
+	 */
+	movl	(%esp),%esp
 
 	pushl	%eax			/* save syscall number */
 
@@ -2438,9 +2510,8 @@ copyout_retry:
 #endif	/* defined(AT386) && defined(i386) */
 
 	movl	%cr3,%ecx		/* point to page directory */
-#if	NCPUS > 1 && AT386
-	andl	$(~0x7), %ecx		/* remove cpu number */
-#endif	/* NCPUS > 1 && AT386 */
+					/* #321: cr3 no longer carries the cpu */
+					/* number (now in %gs:cpu_id), so no mask */
 	movl	%edi,%eax		/* get page directory bits */
 	shrl	$(PDESHIFT),%eax	/* from user address */
 	movl	KERNELBASE(%ecx,%eax,4),%ecx
@@ -2599,12 +2670,10 @@ ENTRY(_fprestore)
  * Set cr3
  */
 ENTRY(set_cr3)
-#if	NCPUS > 1 && AT386
-	CPU_NUMBER(%eax)
-	orl	4(%esp), %eax
-#else	/* NCPUS > 1 && AT386 */
 	movl	4(%esp),%eax		/* get new cr3 value */
-#endif	/* NCPUS > 1 && AT386 */
+					/* #321: cr3 no longer encodes the cpu */
+					/* number (now %gs:cpu_id) -- leave its */
+					/* low bits clear so PCID can use them */
 	/*
 	 * Don't set PDBR to a new value (hence invalidating the
 	 * "paging cache") if the new value matches the current one.
@@ -2620,10 +2689,8 @@ ENTRY(set_cr3)
  * Read cr3
  */
 ENTRY(get_cr3)
-	movl	%cr3,%eax
-#if	NCPUS > 1 && AT386
-	andl	$(~0x7), %eax		/* remove cpu number */
-#endif	/* NCPUS > 1 && AT386 */
+	movl	%cr3,%eax		/* #321: cr3 is pure PDBR now (cpu */
+					/* number lives in %gs:cpu_id), no mask */
 	ret
 
 /*

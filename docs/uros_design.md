@@ -580,36 +580,171 @@ notifications when servers die or mounts change.
 
 ---
 
-## 10. Future roadmap
+## 10. SMP architecture
 
-### 10.1 x86-64 migration
+Landed in v0.2.0. The release build is `NCPUS=64` with `MP_V1_1=1`; one binary
+runs 1..64 CPUs (`-c N` boot flag caps bring-up). Validated on 32 logical CPUs
+(Intel i9-13900K hybrid P/E) on bare metal. The issue-level narrative lives in
+[release_notes_0.2.0.md](release_notes_0.2.0.md); this chapter records the
+architecture.
 
-- **PCID**: Process Context IDs to avoid TLB flush on context switch
+### 10.1 CPU discovery and AP bring-up
+
+- **Discovery**: ACPI MADT is the primary CPU enumeration; the 1994 MP table
+  remains as fallback. Hybrid parts report sparse/high APIC IDs — the
+  `lapic_to_slot[]` mapping is masked and bounds-checked, never assumed dense.
+- **Startup protocol**: modern attempt+retry instead of the MP-spec fixed
+  delays. Fast path: INIT + 10 µs + a *single* SIPI + TSC-deadline poll
+  (10 ms budget). Only if the AP stays silent does the full spec ceremony run
+  (INIT + 10 ms, SIPI ×2 + 200 µs, 2 s margin). The retry is the compatibility
+  mechanism — no per-CPU-family quirk tables.
+- **Pipelined bring-up**: the BSP kicks all APs back-to-back and overlaps
+  their init (mp_desc, LAPIC, FPU/XSAVE, SYSENTER MSRs, HWP). The only paced
+  resource is the shared real-mode trampoline: its stack frames are
+  *phase-dependent* (a slower AP's `call` return push lands where a faster
+  AP keeps its far-return target), so transit must be exclusive. The pacing
+  signal is a funnel counter the AP increments immediately after acquiring
+  the historical boot-stack lock (`start_lock`) — verified on the assembly
+  that no further pushes occur between that acquire and the switch to the
+  AP's own stack.
+- **Failure containment**: the rendezvous barrier counts APs *actually
+  online*, so a dead AP degrades the boot instead of hanging it. Stragglers
+  are retried serially; a visibly stuck trampoline lock is reported but never
+  INIT-reset (an INIT there would freeze the funnel for everyone behind it).
+- **Early-AP discipline**: until an AP has a `current_thread`, fault paths
+  that would dereference it are guarded and fail loudly.
+- **Scaling endgame** (documented, not built): per-AP trampoline stacks
+  selected by LAPIC ID, if serial trampoline transit ever shows up at
+  100+ cores.
+
+### 10.2 Per-CPU data model
+
+- **`%gs`-based per-CPU area**: `cpu_number()` and per-CPU state are a
+  segment-relative load, not a cr3-derived array walk.
+- Per CPU: SYSENTER trampoline (retires the per-switch `IA32_SYSENTER_ESP`
+  WRMSR), LAPIC timer (clock is not PIT-funneled), kmsg pool with
+  cache-line-padded counters, run state.
+- **Dynamic per-CPU allocator** for new subsystems (no static `[NCPUS]`
+  arrays for hot data).
+
+### 10.3 Locking architecture
+
+Layered, converted incrementally with measurement at each step (audit in
+[lock_audit_smp.md](lock_audit_smp.md)):
+
+```
+hw_lock_*        raw xchg/cmpxchg spinlocks          (i386_lock.S)
+usimple_lock_*   portable simple lock                (kern/lock.c)
+mutex_*          blocking mutex over an interlock    (owner-tracked builds: MUTEX_OWNER_TRACK)
+is_lock          reader-writer lock for ipc_space    (read-mostly port-name resolution)
+seqlock + radix  capability table                    (lock-free name→entry lookups)
+```
+
+- **pmap**: per-pmap locking (the giant lock is gone) plus **split
+  page-table locks** — `pmap_enter`/`pmap_remove` on different page tables
+  of one pmap run concurrently. Read paths are lockless where profitable.
+- **TLB shootdown**: IPI-based, with two hard rules: a CPU never spins on a
+  simple_lock with IPIs masked, and the PTE-publish ↔ CPUs-active-read
+  ordering on the enter/activate edge carries an explicit fence — proved
+  necessary and sufficient under x86-TSO with herd7 (§10.5).
+- **Error-path symmetry**: every fast-path bail must release exactly the
+  locks/references the success path releases. This class (a bail leaking an
+  `act_lock`, a cache honoring a revoked right) produced real bugs and a
+  standing audit rule.
+- **Userland**: futex wait/wake/requeue + `futex_waitv` multi-wait;
+  libpthreads mutexes/condvars ride the futex fast path and stay out of the
+  kernel when uncontended.
+
+### 10.4 Scheduler, idle, and power
+
+- **Global run queue, kept by measurement**: at 32-CPU saturation the run
+  queue lock accounts for ~0.2% of samples — per-CPU run queues are
+  deliberately *not* built. The measured scaling limiter is RPC-pair
+  *placement* (pairs scattered across idle CPUs pay cold caches and the wake
+  path), which is scheduler-policy work, not lock work.
+- **Wakeup order is FIFO** and load-bearing for fairness under RPC storms.
+- **Hand-off-on-block** (`-P`): wake the synchronous-RPC partner on the
+  blocking CPU — first increment of the placement work.
+- **Idle = HLT** with a two-phase Dekker handshake against the wakeup path
+  (closes the lost-wakeup window without an IPI per wakeup). PAUSE-spin
+  idle is `-S`, kept for A/B only: on modern packages 31 spinners eat the
+  shared power budget (worth 4–6.4× on IPC latency on a 13900K).
+- **HWP** enabled at bring-up on capable CPUs (one-way until cold power-off);
+  `-E` biases EPP, `-Q` skips enabling.
+- **Direct thread switch** is `-D` opt-in on i386 SMP: cross-CPU DTS pays a
+  cr3 TLB flush. The win returns with x86-64 + PCID.
+
+### 10.5 Memory-model discipline (x86-TSO)
+
+- The only reordering x86 performs is **store→load** (the store buffer), so
+  cross-CPU protocols are written against x86-TSO and each protocol
+  documents the one fence it needs.
+- The canonical shape in the pmap shootdown protocol is the store-buffer
+  (SB) litmus pattern: CPU A publishes a PTE then reads the active-CPU set;
+  CPU B publishes its activation then reads the PTE. Both sides fence, or
+  both can read stale.
+- **Formal regression**: `uros/tools/litmus/` holds four herd7 tests (fence
+  on both sides / only A / only B / neither) proving the barrier is both
+  necessary and sufficient — herd7 enumerates *all* executions, so this is a
+  proof, not sampling. `run.sh` fails on any verdict drift. The "neither"
+  control exists so the suite is always *able* to fail.
+
+### 10.6 Debug facilities for SMP
+
+- **NMI hard-lockup watchdog** (`-W`): per-CPU perf-counter NMI that dumps a
+  wedged CPU's context even with interrupts off.
+- **DDB doors**: serial break and PS/2 Ctrl+D (`-K`) enter DDB via an RPC
+  re-arm + single-pass IPI that parks the other CPUs (NMI park).
+- **Post-mortem practice**: QEMU gdbstub for frozen-state autopsies; TCG
+  with `-d int` for full exception cascades (KVM wipes context on reset
+  paths); owner-tracked mutexes for deadlock attribution; zone poisoning
+  (`-Z`) for use-after-free.
+- **Boot-flag rule**: flag globals live in `.data` — argument parsing runs
+  before the BSS clear, and a BSS-resident flag silently resets.
+
+---
+
+## 11. Future roadmap
+
+### 11.1 x86-64 migration (v0.3.0 theme)
+
+- **PCID**: context switches without TLB flush — re-enables direct thread
+  switch (the measured i386 loss behind `-D`)
+- **SYSCALL** entry path and the 15-GP-register file
+- **Higher-half kernel + direct map**
 - **ECAM**: memory-mapped PCI Express configuration (no port I/O)
 - **IOMMU (VT-d)**: DMA isolation per driver task
 - **MSI/MSI-X**: direct interrupt routing to driver tasks
 - **Long mode pmap**: 4-level page tables, larger address space
 
-### 10.2 Networking
+### 11.2 Networking
 
 - `net_server` with modular drivers (e1000.so, virtio_net.so, ...)
 - TCP/IP stack as userspace server or library
 - Same architecture as block_device_server: HAL notifies, server loads modules
 
-### 10.3 GPU and display
+### 11.3 GPU and display
 
 - `gpu_server` for framebuffer, 2D acceleration
 - Command buffer submission via FLIPC v2 channels
 - Separate from HAL — GPU server is a driver server, not discovery
+- fbcons→gpu_server console handoff (#369): userspace console on pure-UEFI
+  machines
 
-### 10.4 USB
+### 11.4 USB
 
-- `usb_server` managing host controllers (UHCI, OHCI, EHCI, xHCI)
+- `usb_server` managing host controllers (UHCI, OHCI, EHCI, xHCI) (#353)
 - Class drivers as modules: storage, HID, audio, ...
 - Full hotplug via HAL notifications
+- Unlocks input on pure-UEFI machines (with 11.3, ends their
+  headless/bench-only perimeter)
 
-### 10.5 SMP
+### 11.5 SMP follow-ups
 
-- Per-CPU scheduling, per-CPU kmsg pools (already implemented)
-- Slab allocator with per-CPU magazines (#80)
-- Fine-grained kernel locking (IPC, VM subsystems)
+Core SMP shipped in v0.2.0 (chapter 10). Remaining threads:
+
+- Wakeup placement beyond the first hand-off increment (#356) — the measured
+  lever for the many-core pre-saturation hump
+- `ipc_space` write-side scaling (#340), deferred pmap follow-ups (#318, #349)
+- IPC profiling (#392) before any IPC redesign (#391)
+- Per-AP trampoline stacks if bring-up transit shows at 100+ cores

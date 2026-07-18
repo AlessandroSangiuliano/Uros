@@ -198,6 +198,10 @@
 #include <i386/AT386/mp/mp_v1_1.h>
 #endif	/* MP_V1_1 */
 
+#if	NCPUS > 1
+#include <i386/ioapic.h>	/* #311: take_irq/reset_irq drive the I/O APIC RTE */
+#endif
+
 
 /* initialization typecasts */
 #define	SPL_FIVE	(caddr_t)SPL5
@@ -661,6 +665,13 @@ take_irq(int pic, int unit, int spl, intr_t intr)
 		ivect[pic] = intr;
 		intpri[pic] = spl;
 		form_pic_mask();
+#if	NCPUS > 1
+		/* #311: a handler now exists for this line — let the I/O APIC
+		 * deliver it.  The 8259 path relies on form_pic_mask()+spl to
+		 * unmask; the I/O APIC RTE needs an explicit unmask. */
+		if (ioapic_enabled)
+			ioapic_unmask_irq(pic);
+#endif
 	} else {
 		printf("This device will clobber IRQ %d.\n", pic);
 		printf("You have two devices at the same IRQ.\n");
@@ -697,7 +708,13 @@ reset_irq(
 		ivect[pic] = (intr_t) intnull;
 		intpri[pic] = 0;
 		form_pic_mask();
-	} 
+#if	NCPUS > 1
+		/* #311: no handler left — mask the I/O APIC RTE so a stray
+		 * assertion cannot reach an intnull storm. */
+		if (ioapic_enabled)
+			ioapic_mask_irq(pic);
+#endif
+	}
 }
 
 void

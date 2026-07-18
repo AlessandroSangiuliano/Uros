@@ -79,14 +79,20 @@
 #include <kern/machine.h>
 #include <i386/db_machdep.h>
 #include <ddb/db_run.h>
-#include <machine/mp/mp.h>
+#include <machine/AT386/mp/mp.h>
+#include <machine/AT386/mp/boot.h>		/* #300: MP_BOOT, MP_MACH_START */
+#include <i386/apic.h>				/* #300: LAPIC_ICR / LAPIC_ICRD */
 #include <i386/setjmp.h>
 #include <i386/misc_protos.h>
+#include <i386/spl.h>				/* #302: splhi/splx for TSC calib */
+#include <i386/pit.h>				/* #302: 8254 ports for TSC calib */
+#include <i386/pio.h>				/* #302: inb/outb */
 
 int	cpu_int_word[NCPUS];
 
 extern void cpu_interrupt(int cpu);
 extern int get_ncpus(void);
+extern int lapic_timer_enabled;		/* #312: per-CPU LAPIC timer active (lapic.c) */
 
 /*
  * Generate a clock interrupt on next running cpu
@@ -100,7 +106,17 @@ extern int get_ncpus(void);
 void
 slave_clock(void)
 {
-	register cpu;
+	register int cpu;
+
+	/*
+	 * #312: once the per-CPU LAPIC timers are calibrated and armed, every
+	 * AP clocks hertz_tick() from its own local timer (lapic_timer_handler),
+	 * so there is nothing to forward.  Skipping the MP_CLOCK IPI here is what
+	 * removes the cross-CPU clock interrupt that fired above splsched and
+	 * deadlocked a lock holder during a TLB shootdown (#317).
+	 */
+	if (lapic_timer_enabled)
+		return;
 
 	mp_disable_preemption();
 	for (cpu=cpu_number()+1; cpu<NCPUS; cpu++)
@@ -138,13 +154,541 @@ cause_ast_check(
 	cpu_interrupt(cpu);
 }
 
-/*ARGSUSED*/
-kern_return_t
-cpu_start(
-	int	slot_num)
+/*
+ * cpu_start() — bring application processor `slot_num` out of reset and
+ * into the kernel via the INIT/SIPI/SIPI sequence on the local APIC.
+ *
+ * Sequence per Intel SDM Vol. 3 §8.4:
+ *   1. Drop the slave_boot.S trampoline at phys MP_BOOT (0x1000) and
+ *      stash the entry point — &pstart converted to physical — at the
+ *      well-known slot MP_MACH_START (0x800) that slave_pstart reads.
+ *   2. Send INIT IPI (level-assert) targeted at the AP's LAPIC ID.
+ *   3. Wait ~10 ms.
+ *   4. Send STARTUP IPI with vector = MP_BOOT >> 12.
+ *   5. Wait ~200 µs.
+ *   6. Send STARTUP IPI a second time (spec recommendation; modern CPUs
+ *      ignore the second one but it makes us robust on older steppings).
+ *   7. Poll machine_slot[slot_num].running for up to ~1 s — the AP marks
+ *      itself running once it reaches cpu_up() via slave_main().
+ *
+ * #300 Increment 4.  No I/O APIC / PIC interaction here yet (Phase C).
+ */
+
+extern char	slave_boot_base[];	/* AP real-mode trampoline */
+extern char	slave_boot_end[];
+extern void	pstart(void);		/* shared BSP/AP entry in start.S */
+extern vm_offset_t	lapic_start;	/* LAPIC virtual base, set by mp_table.c */
+extern unsigned char	mp_cpu_lapic_id_get(int slot);	/* mp_table.c */
+extern unsigned char	mp_bsp_lapic_id_get(void);	/* mp_table.c */
+
+#define MP_BOOT_VA	((vm_offset_t)MP_BOOT     + 0xC0000000U)
+#define MP_MACH_START_VA ((vm_offset_t)MP_MACH_START + 0xC0000000U)
+#define KV_TO_PA(x)	((unsigned int)(x) - 0xC0000000U)
+
+#define LAPIC_REG32(off)	(*(volatile unsigned int *)(lapic_start + (off)))
+
+/*
+ * #302: TSC-calibrated micro-delay for the INIT/SIPI/SIPI dance and the
+ * AP come-online poll.  The historical placeholder was a fixed-count
+ * `volatile` busy loop calibrated by hand ("~200 iterations/µs"); that
+ * estimate is host-dependent — on a fast core (e.g. Ryzen) the loop runs
+ * far quicker than assumed, so the real wall-clock delays collapse below
+ * the spec minima and APs miss their bring-up window (only one AP comes
+ * online, nondeterministically).  We instead time the TSC against the
+ * 8254 PIT once on the BSP, exactly like lapic_timer_calibrate(), and
+ * spin on rdtsc for a genuine wall-clock interval.  Only the BSP's local
+ * TSC is read for elapsed time, so none of #318's cross-core skew /
+ * invariance concerns apply here.
+ */
+extern unsigned int	clknum;		/* rtclock.c: 8254 counts per second */
+extern unsigned int	clks_per_int;	/* rtclock.c: 8254 counts per HZ tick */
+
+unsigned int	mp_tsc_per_us;		/* 0 = not yet calibrated (fallback) */
+
+/*
+ * #367: come-online poll budgets.  The fast budget is what a healthy AP
+ * must beat after one SIPI — generous (a throttled cold core transits
+ * the trampoline in far less) yet it only ever costs wall-clock time
+ * for a dead/absent slot, since the poll returns on the running flag.
+ * The spec budget preserves the historical 2 s worst-case margin for
+ * the conservative retry (slow-to-schedule APs under host
+ * oversubscription).
+ */
+#define	MP_AP_FAST_BUDGET_US	10000u		/* 10 ms  */
+#define	MP_AP_SPEC_BUDGET_US	2000000u	/* 2 s    */
+#define	MP_AP_PIPE_BUDGET_US	100000u		/* 100 ms: all kicked APs */
+
+/* Latch + read 8254 counter 0; valid only with the clock IRQ masked. */
+#define	MP_READ_8254(v)	{					\
+	outb(PITCTL_PORT, PIT_C0);				\
+	(v)  = inb(PITCTR0_PORT);				\
+	(v) |= inb(PITCTR0_PORT) << 8; }
+
+static __inline__ unsigned long long
+mp_rdtsc(void)
 {
-	printf("cpu_start not implemented\n");
-	return (KERN_FAILURE);
+	unsigned int lo, hi;
+	__asm__ __volatile__("rdtsc" : "=a" (lo), "=d" (hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+/* 64-bit / 32-bit -> 32-bit via a single divl (no libgcc __udivdi3). */
+static __inline__ unsigned int
+mp_div64_32(unsigned long long num, unsigned int den)
+{
+	unsigned int q, r;
+
+	__asm__("divl %4"
+		: "=a" (q), "=d" (r)
+		: "a" ((unsigned int)num), "d" ((unsigned int)(num >> 32)),
+		  "rm" (den));
+	return q;
+}
+
+/*
+ * Calibrate mp_tsc_per_us by counting TSC ticks across a ~8 ms 8254 window.
+ * Called once on the BSP from start_other_cpus(), before any AP runs and
+ * while the BSP is the sole reader of the shared 8254 (no latch race).
+ */
+void
+mp_tsc_calibrate(void)
+{
+	unsigned int		c0, c1, pit_counts, window, guard, elapsed_us;
+	unsigned long long	t0, t1;
+	spl_t			s;
+
+	if (mp_tsc_per_us != 0)
+		return;			/* once per boot */
+
+	window = clknum / 125;		/* ~8 ms of 8254 counts, < one tick */
+
+	s = splhi();			/* mask the clock IRQ: sole 8254 reader */
+
+	/* Start near the top of an 8254 period so the window cannot wrap. */
+	guard = 100000000u;
+	do { MP_READ_8254(c0); }
+	while (c0 < clks_per_int - clks_per_int / 32 && --guard);
+
+	t0 = mp_rdtsc();
+	guard = 100000000u;
+	do { MP_READ_8254(c1); }
+	while (c1 <= c0 && (c0 - c1) < window && --guard);
+	t1 = mp_rdtsc();
+
+	splx(s);
+
+	pit_counts = (c1 <= c0) ? (c0 - c1) : 1;	/* 8254 counts elapsed */
+	if (pit_counts == 0)
+		pit_counts = 1;
+
+	/* elapsed_us = pit_counts / (clknum / 1e6); done as 64/32 to keep
+	 * precision and avoid overflow at any plausible TSC frequency. */
+	elapsed_us = mp_div64_32((unsigned long long)pit_counts * 1000000u, clknum);
+	if (elapsed_us == 0)
+		elapsed_us = 1;
+
+	mp_tsc_per_us = mp_div64_32(t1 - t0, elapsed_us);
+	if (mp_tsc_per_us == 0)
+		mp_tsc_per_us = 1;
+
+	/* NB: the kernel printf has no %llu, so report only 32-bit values. */
+	printf("mp: TSC calibrated -> %u TSC/us (~%u MHz) over %u us 8254 window\n",
+	       mp_tsc_per_us, mp_tsc_per_us, elapsed_us);
+}
+
+/*
+ * Busy-wait `us` microseconds.  Uses the calibrated TSC for a true
+ * wall-clock delay; before calibration (or if it failed) falls back to
+ * the historical fixed-count loop so the early/UP paths still work.
+ */
+static void
+mp_busy_delay_us(unsigned int us)
+{
+	if (mp_tsc_per_us != 0) {
+		unsigned long long deadline =
+			mp_rdtsc() + (unsigned long long)us * mp_tsc_per_us;
+		while (mp_rdtsc() < deadline)
+			__asm__ __volatile__("pause");
+		return;
+	}
+
+	{
+		volatile unsigned int spin;
+		unsigned int total = us * 200u;
+
+		for (spin = 0; spin < total; spin++)
+			;
+	}
+}
+
+static void
+mp_busy_delay_ms(unsigned int ms)
+{
+	while (ms-- > 0)
+		mp_busy_delay_us(1000);
+}
+
+/*
+ * #367: event-driven come-online wait.  Spin (PAUSE) on the AP's
+ * machine_slot[].running flag against a TSC deadline, returning the
+ * instant the AP reports in — no worst-case padding.  The "memory"
+ * clobber on the PAUSE forces running to be re-read each turn.
+ * Before TSC calibration falls back to the historical 1 ms-step poll.
+ */
+static boolean_t
+mp_poll_online(int slot, unsigned int budget_us)
+{
+	if (mp_tsc_per_us != 0) {
+		unsigned long long deadline = mp_rdtsc() +
+		    (unsigned long long)budget_us * mp_tsc_per_us;
+
+		while (mp_rdtsc() < deadline) {
+			if (machine_slot[slot].running == TRUE)
+				return TRUE;
+			__asm__ __volatile__("pause" ::: "memory");
+		}
+	} else {
+		unsigned int ms;
+
+		for (ms = 0; ms < (budget_us + 999u) / 1000u; ms++) {
+			if (machine_slot[slot].running == TRUE)
+				return TRUE;
+			mp_busy_delay_ms(1);
+		}
+	}
+	return machine_slot[slot].running == TRUE;
+}
+
+static void
+mp_lapic_ipi_wait(void)
+{
+	while (LAPIC_REG32(LAPIC_ICR) & LAPIC_ICR_DS_PENDING)
+		;
+}
+
+static void
+mp_lapic_send_init(unsigned int dest_lapic_id)
+{
+	LAPIC_REG32(LAPIC_ICRD) =
+	    (dest_lapic_id & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG32(LAPIC_ICR)  =
+	    LAPIC_ICR_DM_INIT | LAPIC_ICR_LEVEL_ASSERT;
+	mp_lapic_ipi_wait();
+}
+
+static void
+mp_lapic_send_sipi(unsigned int dest_lapic_id, unsigned int vector)
+{
+	LAPIC_REG32(LAPIC_ICRD) =
+	    (dest_lapic_id & 0xFFu) << LAPIC_ICRD_DEST_SHIFT;
+	LAPIC_REG32(LAPIC_ICR)  =
+	    LAPIC_ICR_DM_STARTUP | (vector & LAPIC_ICR_VECTOR_MASK);
+	mp_lapic_ipi_wait();
+}
+
+/*
+ * #367 INCR-2: pipelined bring-up.
+ *
+ * The historical start_lock protocol already serializes the only shared
+ * resource: an AP entering pstart takes start_lock with an xchg before
+ * doing anything that matters, and releases it in svstart the moment it
+ * has switched onto its own per-CPU interrupt stack ("since we are no
+ * longer using bootstrap stack").  The trampoline's pre-lock stack use
+ * is benign under concurrency: every AP runs the identical instruction
+ * stream, so the few words pushed on the shared boot stack before the
+ * lock are byte-identical regardless of interleaving.
+ *
+ * So the BSP does not need to pace anybody: cpu_kick() fires the
+ * modern INIT+SIPI at a slot and returns immediately, the kicked APs
+ * funnel themselves through the microsecond-wide locked window, and
+ * their real initialization (mp_desc, LAPIC, FPU, HWP) runs
+ * concurrently.  cpu_await_all() then reaps the running flags as they
+ * flip, event-driven, and falls back to the full serial cpu_start()
+ * ceremony for any straggler.
+ */
+static unsigned long long	mp_ap_t0[NCPUS];
+static unsigned long long	mp_ap_online_ts[NCPUS];
+static unsigned char		mp_ap_kicked[NCPUS];
+
+extern int	start_lock;	/* start.S: nonzero = an AP owns the boot stack */
+
+/*
+ * #367: incremented (lock incl) by each CPU in pstart right after it
+ * acquires start_lock — i.e. the moment its trampoline transit is over
+ * and the shared boot stack's call frames are dead.  The paced kick
+ * below waits for this before waking the next AP: the trampoline window
+ * is NOT idempotent across concurrent APs (its stack frames hold
+ * phase-dependent values), so exactly one AP may transit at a time.
+ * BSS is fine: the BSP's own power-on increment lands before the BSS
+ * clear and is wiped, but the pipeline only measures deltas from APs,
+ * which all run long after.
+ */
+volatile int	ap_funnel_entered;
+
+/*
+ * Install the real-mode trampoline and seed the kernel entry point at
+ * MP_MACH_START.  Idempotent; the content is identical for every AP.
+ */
+static void
+mp_install_trampoline(void)
+{
+	static int	installed;
+	vm_size_t	trampoline_size;
+
+	if (installed)
+		return;
+	installed = 1;
+	trampoline_size = (vm_size_t)(slave_boot_end - slave_boot_base);
+	memcpy((void *)MP_BOOT_VA, slave_boot_base, trampoline_size);
+	*(volatile unsigned int *)MP_MACH_START_VA = KV_TO_PA(pstart);
+}
+
+/*
+ * Fire the modern wakeup at one AP, then wait only for its trampoline
+ * TRANSIT (the funnel-counter bump when it acquires start_lock) — not
+ * for it to come online.  That transit is the one mutually-exclusive
+ * stretch, a few microseconds; everything after it (mp_desc, LAPIC,
+ * FPU, HWP) runs concurrently with the other APs, and the caller reaps
+ * the running flags later via cpu_await_all().
+ *
+ * If the AP never reaches the funnel within the budget, park it with a
+ * bare INIT (it could be wedged anywhere in the trampoline, and the
+ * next kick would otherwise corrupt the shared boot stack under it);
+ * the straggler pass in cpu_await_all() then gives it the full serial
+ * ceremony.
+ */
+void
+cpu_kick(int slot_num)
+{
+	unsigned char	dest_lapic;
+	int		entered;
+
+	if (lapic_start == 0)
+		return;
+	dest_lapic = mp_cpu_lapic_id_get(slot_num);
+	if (dest_lapic == 0xFF || dest_lapic == mp_bsp_lapic_id_get())
+		return;
+
+	mp_install_trampoline();
+
+	entered = ap_funnel_entered;
+	mp_ap_t0[slot_num] = mp_rdtsc();
+	mp_ap_kicked[slot_num] = 1;
+
+	mp_lapic_send_init(dest_lapic);
+	mp_busy_delay_us(10);
+	mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+
+	if (mp_tsc_per_us != 0) {
+		unsigned long long deadline = mp_rdtsc() +
+		    (unsigned long long)MP_AP_FAST_BUDGET_US * mp_tsc_per_us;
+
+		while (ap_funnel_entered == entered) {
+			if (mp_rdtsc() >= deadline) {
+				mp_lapic_send_init(dest_lapic);
+				printf("cpu_kick: AP %d never cleared the "
+				       "trampoline, parked with INIT\n",
+				       slot_num);
+				return;
+			}
+			__asm__ __volatile__("pause" ::: "memory");
+		}
+	} else {
+		unsigned int ms;
+
+		for (ms = 0; ms < MP_AP_FAST_BUDGET_US / 1000u &&
+		    ap_funnel_entered == entered; ms++)
+			mp_busy_delay_ms(1);
+		if (ap_funnel_entered == entered) {
+			mp_lapic_send_init(dest_lapic);
+			printf("cpu_kick: AP %d never cleared the "
+			       "trampoline, parked with INIT\n", slot_num);
+		}
+	}
+}
+
+/*
+ * Reap every kicked AP: scan the running flags event-driven under a
+ * global fast deadline, printing each AP's kick-to-online time as it
+ * reports in; then give any straggler the full serial cpu_start()
+ * ceremony (spec timings, 2 s margin) — unless the boot-stack lock is
+ * visibly stuck, in which case an INIT could freeze the funnel for
+ * everyone and we only report.  Returns the number of APs online.
+ */
+int
+cpu_await_all(void)
+{
+	unsigned long long	t_first = 0, deadline;
+	int			slot, online = 0, pending = 0;
+
+	for (slot = 0; slot < NCPUS; slot++)
+		if (mp_ap_kicked[slot]) {
+			pending++;
+			if (t_first == 0 || mp_ap_t0[slot] < t_first)
+				t_first = mp_ap_t0[slot];
+		}
+	if (pending == 0)
+		return 0;
+
+	deadline = mp_rdtsc() +
+	    (unsigned long long)MP_AP_PIPE_BUDGET_US * mp_tsc_per_us;
+
+	/*
+	 * Reap silently, printing nothing inside the scan: the APs' own
+	 * init printfs are draining through printf_lock right now, and a
+	 * print here would queue behind them — inflating the very
+	 * timestamps we are about to take (the first pipelined runs
+	 * "measured" 2-3 ms per AP that was really console drain).
+	 */
+	while (pending > 0 && mp_rdtsc() < deadline) {
+		for (slot = 0; slot < NCPUS; slot++) {
+			if (!mp_ap_kicked[slot] ||
+			    machine_slot[slot].running != TRUE)
+				continue;
+			mp_ap_online_ts[slot] = mp_rdtsc();
+			mp_ap_kicked[slot] = 0;
+			pending--;
+			online++;
+		}
+		__asm__ __volatile__("pause" ::: "memory");
+	}
+
+	for (slot = 0; slot < NCPUS; slot++)
+		if (mp_ap_online_ts[slot] != 0)
+			printf("cpu_start: AP %d online (lapic=%d, "
+			       "pipelined, %u us)\n",
+			       slot, mp_cpu_lapic_id_get(slot),
+			       mp_div64_32(mp_ap_online_ts[slot] -
+					   mp_ap_t0[slot], mp_tsc_per_us));
+
+	/* Stragglers: the serial ceremony, one at a time. */
+	for (slot = 0; slot < NCPUS && pending > 0; slot++) {
+		if (!mp_ap_kicked[slot])
+			continue;
+		mp_ap_kicked[slot] = 0;
+		pending--;
+		if (start_lock != 0) {
+			printf("cpu_start: AP %d not up and the boot-stack "
+			       "lock is held — an AP is wedged in the "
+			       "trampoline; not retrying\n", slot);
+			continue;
+		}
+		printf("cpu_start: AP %d missed the pipeline window, "
+		       "retrying serially\n", slot);
+		if (cpu_start(slot) == KERN_SUCCESS)
+			online++;
+	}
+
+	if (online > 0 && mp_tsc_per_us != 0)
+		printf("smp: %d AP(s) online in %u us total "
+		       "(pipelined bring-up)\n", online,
+		       mp_div64_32(mp_rdtsc() - t_first, mp_tsc_per_us));
+	return online;
+}
+
+kern_return_t
+cpu_start(int slot_num)
+{
+	unsigned char	dest_lapic;
+	unsigned int	pstart_pa;
+	vm_size_t	trampoline_size;
+
+	if (lapic_start == 0) {
+		printf("cpu_start(%d): LAPIC not mapped, refusing\n", slot_num);
+		return KERN_FAILURE;
+	}
+
+	dest_lapic = mp_cpu_lapic_id_get(slot_num);
+	if (dest_lapic == 0xFF) {
+		printf("cpu_start(%d): no LAPIC ID known\n", slot_num);
+		return KERN_FAILURE;
+	}
+	if (dest_lapic == mp_bsp_lapic_id_get())
+		return KERN_SUCCESS;	/* the BSP is already running */
+
+	/*
+	 * Copy the trampoline to its rendezvous address and seed the
+	 * entry-point slot.  Both addresses are in identity-mapped low
+	 * memory reachable through phystokv().
+	 */
+	trampoline_size = (vm_size_t)(slave_boot_end - slave_boot_base);
+	memcpy((void *)MP_BOOT_VA, slave_boot_base, trampoline_size);
+
+	pstart_pa = KV_TO_PA(pstart);
+	*(volatile unsigned int *)MP_MACH_START_VA = pstart_pa;
+
+	printf("cpu_start: slot=%d lapic=%d trampoline=%lu B entry=0x%x\n",
+	       slot_num, dest_lapic, (unsigned long)trampoline_size,
+	       pstart_pa);
+
+	/*
+	 * #367: two-attempt INIT/SIPI dance, events instead of fixed waits.
+	 *
+	 * The historical sequence — INIT + 10 ms, SIPI + 200 us, SIPI +
+	 * 200 us — is the 1994 MP-spec ceremony for discrete 82489DX APICs.
+	 * Integrated LAPICs latch the first SIPI and need none of the
+	 * padding, so every fixed delay here was pure per-AP boot tax
+	 * (~10.4 ms x N cores).
+	 *
+	 * Attempt 1 (modern): INIT, 10 us settle, ONE SIPI, then poll the
+	 * running flag.  A healthy AP flips it in well under a millisecond,
+	 * and the poll returns the moment it does.
+	 *
+	 * Attempt 2 (spec): only if the AP stayed silent — re-INIT (which
+	 * puts a half-started AP back into a known state) and run the full
+	 * conservative ceremony with the 2 s margin.  The second SIPI is
+	 * sent only if the AP is still down, making it what it really is on
+	 * modern silicon: a retry, not a rite.  Ancient machines lose one
+	 * 10 ms attempt and still boot; no CPU-model quirk tables to keep.
+	 *
+	 * Attempt 1 needs the calibrated TSC for its fine-grained poll; on
+	 * an uncalibrated (early/fallback) path we go straight to the spec
+	 * dance, whose margins never relied on it.
+	 */
+	{
+		unsigned long long	t0 = mp_rdtsc();
+		int			attempt = 0;
+		boolean_t		up = FALSE;
+
+		if (mp_tsc_per_us != 0) {
+			attempt = 1;
+			mp_lapic_send_init(dest_lapic);
+			mp_busy_delay_us(10);
+			mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+			up = mp_poll_online(slot_num, MP_AP_FAST_BUDGET_US);
+		}
+
+		if (!up) {
+			attempt++;
+			mp_lapic_send_init(dest_lapic);
+			mp_busy_delay_ms(10);
+			mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+			mp_busy_delay_us(200);
+			if (machine_slot[slot_num].running != TRUE) {
+				mp_lapic_send_sipi(dest_lapic, MP_BOOT >> 12);
+				mp_busy_delay_us(200);
+			}
+			up = mp_poll_online(slot_num, MP_AP_SPEC_BUDGET_US);
+		}
+
+		if (up) {
+			if (mp_tsc_per_us != 0)
+				printf("cpu_start: AP %d online (lapic=%d, "
+				       "attempt %d, %u us)\n",
+				       slot_num, dest_lapic, attempt,
+				       mp_div64_32(mp_rdtsc() - t0,
+						   mp_tsc_per_us));
+			else
+				printf("cpu_start: AP %d online (lapic=%d, "
+				       "attempt %d)\n",
+				       slot_num, dest_lapic, attempt);
+			return KERN_SUCCESS;
+		}
+	}
+
+	printf("cpu_start: AP %d (lapic=%d) failed to come online\n",
+	       slot_num, dest_lapic);
+	return KERN_FAILURE;
 }
 
 /*ARGSUSED*/
@@ -211,7 +755,7 @@ void
 remote_kdb(void)
 {
 	int	my_cpu;
-	register	i;
+	register int	i;
 
 	mp_disable_preemption();
 	my_cpu = cpu_number();

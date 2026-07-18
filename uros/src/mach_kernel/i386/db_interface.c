@@ -300,6 +300,38 @@ kdb_trap(
 	boolean_t		trap_from_user;
 	spl_t			s = db_splhigh();
 
+	/*
+	 * #346: mark the debugger active NOW, before kdbprinttrap's printf,
+	 * so printf() drops printf_lock (which the faulting context or a
+	 * stopped peer CPU may hold) instead of deadlocking the console.
+	 * Balanced by db_active-- just before the single return below.
+	 */
+	db_active++;
+
+#if	NCPUS > 1
+	/*
+	 * #382: park the other CPUs for the session.  Left running, they
+	 * eventually issue a TLB-shootdown IPI and wait forever for this
+	 * (stopped) CPU's ack while sitting pre-EOI in their own IPI
+	 * handler — the in-service 0xF1 pins their PPR at 0xF0 and every
+	 * lower vector (all device IRQs) is never delivered again: the
+	 * whole box wedges out of a mere debug session.  An NMI reaches
+	 * them wherever they are without touching their ISR/EOI state;
+	 * they spin in the NMI handler (nmi_watchdog.c) until we clear
+	 * the flag on the way out, then resume exactly where they were.
+	 * Outermost entry only (db_active can nest).
+	 */
+	{
+		extern volatile int ddb_nmi_park;
+		extern void lapic_send_nmi_all_excluding_self(void);
+
+		if (db_active == 1 && !ddb_nmi_park) {
+			ddb_nmi_park = 1;
+			lapic_send_nmi_all_excluding_self();
+		}
+	}
+#endif	/* NCPUS > 1 */
+
 	switch (type) {
 	    case T_DEBUG:	/* single_step */
 	    {
@@ -336,6 +368,15 @@ kdb_trap(
 		    /*NOTREACHED*/
 		}
 		kdbprinttrap(type, code, (int *)&regs->eip, regs->uesp);
+		/* #307: for kernel-mode page faults, uesp is garbage.  Dump
+		 * cr2 (faulting address — saved by t_page_fault into the
+		 * pusha esp slot, i.e. regs->esp), the trap frame address,
+		 * and ebp so we can locate the real kernel stack. */
+		if (type == T_PAGE_FAULT) {
+			db_printf("  cr2=%x  regs=%x  ebp=%x  ebx=%x  edi=%x  esi=%x\n",
+				  regs->esp, (unsigned)regs,
+				  regs->ebp, regs->ebx, regs->edi, regs->esi);
+		}
 	}
 
 #if	NCPUS > 1
@@ -422,6 +463,21 @@ kdb_trap(
 	enable_preemption();
 #endif	/* NCPUS > 1 */
 
+#if	NCPUS > 1
+	/*
+	 * #382: outermost exit — release the CPUs parked at entry.  They
+	 * leave their NMI-handler spin and resume exactly where the park
+	 * NMI caught them.
+	 */
+	{
+		extern volatile int ddb_nmi_park;
+
+		if (db_active == 1)
+			ddb_nmi_park = 0;
+	}
+#endif	/* NCPUS > 1 */
+
+	db_active--;			/* #346: balances the entry bump */
 	db_splx(s);
 
 	return (1);
@@ -836,6 +892,8 @@ db_machdep_init(void)
 		INTSTACK_SIZE - sizeof (natural_t));
 	dbtss.esp = dbtss.esp0;
 	dbtss.eip = (int)&db_task_start;
+	dbtss.cr3 = get_cr3();		/* #346: task switch loads CR3 from the
+					 * TSS; 0 left the #DF handler unmapped. */
 }
 
 #else /* NCPUS > 1 */
@@ -874,6 +932,11 @@ db_machdep_init(void)
 				(INTSTACK_SIZE * (c + 1)) - sizeof (natural_t));
 			dbtss.esp = dbtss.esp0;
 			dbtss.eip = (int)&db_task_start;
+			dbtss.cr3 = get_cr3();	/* #346: a task switch loads CR3
+						 * from the TSS; 0 left the #DF
+						 * handler running unmapped.  APs
+						 * inherit this via mp_desc_init's
+						 * bcopy of dbtss. */
 			/*
 			 * The TSS for the debugging task on each slave CPU
 			 * is set up in mp_desc_init().
@@ -984,6 +1047,17 @@ lock_kdb(void)
 
 	for(;;) {
 		kdb_console();
+		/*
+		 * #344: recursive kdb entry on the SAME cpu (a fault taken while
+		 * already inside the debugger -- e.g. DDB dereferences a corrupt
+		 * activation/task while reporting a panic).  We already hold
+		 * kdb_lock, so db_simple_lock_try() below would fail forever and
+		 * spin here at IF=0 -- a silent hard wedge (caught by the NMI
+		 * watchdog: lock_kdb <- kdb_enter <- kdb_trap <- kdb_trap).  Break
+		 * out: we own the lock, just re-enter.
+		 */
+		if (kdb_cpu == my_cpu)
+			break;
 		if (kdb_cpu != -1 && kdb_cpu != my_cpu) {
 			continue;
 		}
@@ -992,7 +1066,7 @@ lock_kdb(void)
 				break;
 			db_simple_unlock(&kdb_lock);
 		}
-	} 
+	}
 
 #if	NCPUS > 1
 	enable_preemption();

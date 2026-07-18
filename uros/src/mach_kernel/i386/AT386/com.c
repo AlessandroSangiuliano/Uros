@@ -275,9 +275,17 @@ boolean_t 	comfifo[NCOM];
 boolean_t 	comtimer_active;
 int 		comtimer_state[NCOM];
 
-int 		cons_is_com1 = 0;		/* set to 1 if no PC keyboard
-						   in this case com1 is the
-						   console */
+/*
+ * #337: forced into .data so parse_arguments() (which runs BEFORE the BSS is
+ * zeroed) can set this from the "-r" boot flag and have it survive.  Defined
+ * as a zero-initialised global it would land in .bss, and the later BSS clear
+ * would wipe the "-r" assignment back to 0 -- which left DDB reading the (dead,
+ * headless) PS/2 port instead of COM1, so serial DDB never took input.  Mirror
+ * the same trick already used for halt_in_debugger in i386/AT386/model_dep.c.
+ */
+int 		cons_is_com1 __attribute__((section(".data"))) = 0;
+						/* set to 1 if no PC keyboard;
+						   then com1 is the console */
 char 		com_halt_char = '_' & 0x1f; 	/* CTRL(_) to enter ddb */
 
 #ifndef	PORTSELECTOR

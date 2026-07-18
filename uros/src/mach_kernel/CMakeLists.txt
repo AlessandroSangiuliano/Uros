@@ -44,6 +44,26 @@ endif()
 set(KERNEL_TARGET "mach_kernel")
 set(KERNEL_TEXTORG "0x100000")  # 1MB - physical load address
 
+# #300 — SMP bring-up.  Default 1 keeps the v0.1.0 single-CPU build unchanged.
+# Override with -DUROS_NCPUS=2 (or 4, 8) to enable the SMP code paths.
+#
+# #330 (dynamic per-CPU, option B): for SMP builds this is now the fixed
+# *maximum* CPU count (the size of the per-CPU arrays), NOT the number you
+# boot.  Set it once to a generous cap (e.g. 64); the real count comes from
+# the MADT/MP table at runtime (real_ncpus, clamped to <= NCPUS).  The same
+# binary then boots any N <= UROS_NCPUS with no rebuild and a fixed image
+# layout.  See i386/AT386/cpus.h.
+set(UROS_NCPUS "1" CACHE STRING "Max CPUs supported (per-CPU array size; 1 = UP). Runtime count from MADT.")
+if(UROS_NCPUS GREATER 1)
+    message(STATUS "SMP build: UROS_NCPUS=${UROS_NCPUS} (experimental, #300 in progress)")
+    # MPS 1.x AP-boot path (mp.c, mp_v1_1.c, slave_boot.S).
+    # ACPI MADT path will land via #305.
+    set(KERNEL_SMP_DEFINES -DMP_V1_1=1)
+else()
+    message(STATUS "UP build: UROS_NCPUS=${UROS_NCPUS}")
+    set(KERNEL_SMP_DEFINES "")
+endif()
+
 # Get GCC's internal include path (for stdarg.h, etc.) EARLY so we can use it in C_FLAGS
 # Must use -m32 to get 32-bit compatible include path
 execute_process(
@@ -96,7 +116,7 @@ set(KERNEL_DEFINES
     -DKERNEL
     -DMACH_KERNEL
     -DAT386=1
-    -DNCPUS=1
+    -DNCPUS=${UROS_NCPUS}
     -DMACH_ASSERT=1
     -DMACH_DEBUG=1
     -DMACH_KDB=1
@@ -113,7 +133,18 @@ set(KERNEL_DEFINES
     -DNPCI=1
     # GCC/ELF does not use underscore prefix for C symbols
     -D__NO_UNDERSCORES__
+    ${KERNEL_SMP_DEFINES}
 )
+
+# #319 scheduler instrumentation: per-CPU counters + rdtsc around the global
+# pset->runq.lock acquire in thread_select, dumped from sched_thread.
+# Diagnostic tool: flip ON (cmake -DUROS_S319_INSTRUMENT=ON) when measuring
+# scheduler/runq behavior, keep OFF for normal and perf builds.
+option(UROS_S319_INSTRUMENT "Build the #319 runq instrumentation (s319 counters + dump)" OFF)
+if(UROS_S319_INSTRUMENT)
+    list(APPEND KERNEL_DEFINES -DS319_INSTRUMENT=1)
+    message(STATUS "#319 s319 scheduler instrumentation: ON")
+endif()
 
 # MIG-specific flags - disable type checking for kernel stubs
 set(MIG_CFLAGS
@@ -412,6 +443,7 @@ set(KERN_SOURCES
     kern/ast.c
     kern/bootstrap.c
     kern/boot_script.c
+    kern/lock_smoke.c
     kern/clock.c
     kern/counters.c
     kern/cpu_data.c
@@ -439,6 +471,7 @@ set(KERN_SOURCES
     kern/priority.c
     kern/processor.c
     kern/queue.c
+    kern/rcu.c
     kern/rpc.c
     kern/sched_prim.c
     kern/sscanf.c
@@ -452,7 +485,6 @@ set(KERN_SOURCES
     kern/syscall_sw.c
     kern/cap.c
     kern/sha256.c
-    kern/sha256_shani.c
     kern/hmac_sha256.c
     kern/task.c
     kern/task_swap.c
@@ -479,7 +511,7 @@ set(IPC_SOURCES
     ipc/ipc_pset.c
     ipc/ipc_right.c
     ipc/ipc_space.c
-    ipc/ipc_splay.c
+    ipc/ipc_radix.c
     ipc/ipc_table.c
     ipc/ipc_thread.c
     ipc/mach_msg.c
@@ -559,11 +591,16 @@ set(I386_C_SOURCES
     i386/db_interface.c
     i386/db_trace.c
     i386/fpu.c
+    i386/fpu_sanity.c
     i386/gdt.c
     i386/hardclock.c
+    # #358: HWP (hardware P-states) bring-up -- verdict line + enable-if-off,
+    # '-E' EPP performance bias.  CPUID-gated, no-op on KVM.
+    i386/hwp.c
     i386/io_emulate.c
     i386/io_map.c
     i386/iopb.c
+    i386/nmi_watchdog.c
     i386/ktss.c
     i386/ldt.c
     i386/loose_ends.c
@@ -595,12 +632,40 @@ set(AT386_SOURCES
     # keyboard, a future ps2_mouse.so will own the mouse).
     i386/AT386/console_cdev.c
     i386/AT386/ddb_kbd.c
+    # Emergency in-kernel framebuffer console (#342): the ONLY way to see
+    # boot/panic output on pure-UEFI machines (no serial, no legacy 0xB8000).
+    # Not a display driver — the userspace gpu_server still owns the screen.
+    i386/AT386/fbcons.c
     i386/AT386/model_dep.c
     i386/AT386/physmem.c
     i386/AT386/pic_isa.c
+    # #357: idle HLT (machine_idle + wake doorbell; POWER_SAVE=1 in
+    # power_save.h, -S boot flag reverts to the legacy poll idle).
+    i386/AT386/power_save.c
     # In-kernel VGA driver removed in #199 (vga.c, vga.h, vgareg.h,
     # vga_entries.h gone; userspace gpu_server owns the display).
 )
+
+# #300 — SMP bring-up sources, only when UROS_NCPUS > 1.
+# mp.c is the high-level shim (slave_clock, cause_ast_check, cpu_int_word[]).
+# mp_stub.c provides the link-time symbols (cpu_start, mp_probe_cpus, ...)
+# that mp_v1_1.c would have hosted.  The historical mp_v1_1.c is kept out
+# of the build until Increment 3 replaces it with a modern MPS 1.4 parser.
+# slave_boot.S (added below to AT386_ASM_SOURCES) is the AP trampoline.
+if(UROS_NCPUS GREATER 1)
+    list(APPEND AT386_SOURCES
+        i386/mp_desc.c
+        i386/lapic.c
+        i386/ioapic.c
+        i386/AT386/mp/mp.c
+        i386/AT386/mp/mp_stub.c
+        i386/AT386/mp/mp_table.c
+    )
+endif()
+
+# #309: per-CPU SSE/FPU sanity check is useful both on UP (cheap
+# baseline) and SMP (proves AP CR4/FPU init worked).  Goes into the
+# common i386 source list.
 
 # Chips/busses
 set(CHIPS_SOURCES
@@ -659,6 +724,15 @@ set(I386_ASM_SOURCES
 set(AT386_ASM_SOURCES
     i386/AT386/kdasm.S
 )
+
+# #300 — AP trampoline (real-mode -> 32-bit PM) when UROS_NCPUS > 1.
+# #302 — IPI entry stubs (3 vectors).
+if(UROS_NCPUS GREATER 1)
+    list(APPEND AT386_ASM_SOURCES
+        i386/AT386/mp/slave_boot.S
+        i386/ipi.S
+    )
+endif()
 
 # locore.S is special - concatenated from multiple files
 set(LOCORE_DEPS

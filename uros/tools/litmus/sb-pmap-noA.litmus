@@ -1,0 +1,17 @@
+X86 SB+pmap-noA
+(*
+ * #350 - control: the PRE-#338 state.  A (pmap_enter) has NO barrier between its
+ * PTE store and its cpus_using load; B (set_dirbase) still fences via set_cr3.
+ *
+ * SB with a fence on only one thread does NOT forbid (0,0) under x86-TSO.
+ * Expected verdict: Sometimes  ->  the catastrophe is REACHABLE without A's fence.
+ * => the #338 PMAP_TLB_WRITE_BARRIER (P0 side) is NECESSARY.
+ *
+ * See sb-pmap-both.litmus for the full mapping and modeling notes.
+ *)
+{ pte=0; cpus=0; }
+ P0             | P1             ;
+ MOV [pte],$1   | MOV [cpus],$1  ;
+                | MFENCE         ;
+ MOV EAX,[cpus] | MOV EAX,[pte]  ;
+exists (0:EAX=0 /\ 1:EAX=0)

@@ -1,0 +1,19 @@
+X86 SB+pmap-noB
+(*
+ * #350 - control: A (pmap_enter) fences via PMAP_TLB_WRITE_BARRIER, but B's
+ * serializing step (set_cr3) is removed.  One-sided fencing again does not
+ * forbid (0,0) under x86-TSO.
+ * Expected verdict: Sometimes  ->  B's serializing barrier is NECESSARY too.
+ *
+ * (In the real kernel B's cpus_using write is a lock;bts, which is itself a
+ *  fence, so B is never truly unfenced -- this control isolates the ROLE of the
+ *  B-side ordering, completing the necessary-and-sufficient argument.)
+ *
+ * See sb-pmap-both.litmus for the full mapping and modeling notes.
+ *)
+{ pte=0; cpus=0; }
+ P0             | P1             ;
+ MOV [pte],$1   | MOV [cpus],$1  ;
+ MFENCE         |                ;
+ MOV EAX,[cpus] | MOV EAX,[pte]  ;
+exists (0:EAX=0 /\ 1:EAX=0)

@@ -235,6 +235,17 @@ void printnum(
 #define	MP_PRINTF	((NCPUS > 1) || MACH_ASSERT)
 #endif /* !hp_pa */
 
+/*
+ * Per-CPU "{N} " prefix on every printf line.  Handy for attributing
+ * concurrent SMP output to a CPU, but very noisy in normal runs (the flag
+ * latches on after the first AP print, so every line gets tagged).  Off by
+ * default; flip to 1 (or build with -DMP_PRINTF_CPU_PREFIX=1) to re-enable.
+ * The printf_lock serialization below stays on regardless.
+ */
+#ifndef MP_PRINTF_CPU_PREFIX
+#define	MP_PRINTF_CPU_PREFIX	0
+#endif
+
 #define isdigit(d) ((d) >= '0' && (d) <= '9')
 #define Ctod(c) ((c) - '0')
 
@@ -878,15 +889,19 @@ void
 printf(const char *fmt, ...)
 {
 	va_list	listp;
+	extern int db_active;		/* #346: while a CPU is in DDB, skip
+					 * printf_lock -- it may be held by the
+					 * faulting context or a stopped peer CPU,
+					 * which deadlocks the debugger's console. */
 
 	disable_preemption();
 	va_start(listp, fmt);
 #if	MP_PRINTF
-	if (cpu_data[master_cpu].active_thread) {
+	if (cpu_data[master_cpu].active_thread && !db_active) {
 		simple_lock(&printf_lock);
 		if (cpu_number() != master_cpu)
 			new_printf_cpu_number = TRUE;
-		if (new_printf_cpu_number) {
+		if (MP_PRINTF_CPU_PREFIX && new_printf_cpu_number) {
 			int i;
 
 			i = cpu_number();

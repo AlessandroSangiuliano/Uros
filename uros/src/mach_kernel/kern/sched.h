@@ -214,7 +214,7 @@ extern void		thread_quantum_update(
 
 extern queue_head_t	action_queue;	/* assign/shutdown queue */
 
-decl_simple_lock_data(,action_lock)
+decl_simple_lock_data(extern,action_lock)	/* #300: real definition lives in kern/machine.c */
 
 extern int		min_quantum;	/* defines max context switch rate */
 

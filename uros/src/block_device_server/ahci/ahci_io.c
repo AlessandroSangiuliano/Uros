@@ -250,7 +250,20 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 		nsectors -= sects_per_slot;
 	}
 
-	ci_mask = (1u << nslots) - 1;
+	/*
+	 * nslots can reach 32 (a full batch: batch_slots == 32).  `1u << 32`
+	 * is undefined behaviour and on x86 the shift count is masked to 5
+	 * bits, so `1u << 32` evaluates to `1u << 0` == 1 and ci_mask would
+	 * be 0 — no command bits set, so PORT_CI is written 0, no slot is
+	 * issued, and the completion wait returns "done" immediately while
+	 * the DMA buffer keeps whatever stale/zero data it held.  The
+	 * readahead path issues exactly 8192 sectors == 32 slots, so every
+	 * large sequential read silently returned zeros past the first
+	 * cached chunk (ext2 read_inode on any inode-table block beyond the
+	 * first saw a zeroed inode -> "not a directory" -> stage-2 opens of
+	 * disk-only servers like ush failed).  Build the mask width-safely.
+	 */
+	ci_mask = (nslots >= 32) ? ~0u : ((1u << nslots) - 1);
 	if (port_ncq)
 		port_write(st, port, PORT_SACT, ci_mask);
 	port_write(st, port, PORT_CI, ci_mask);

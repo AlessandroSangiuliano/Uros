@@ -537,6 +537,7 @@ vm_page_bootstrap(
 	m->free = FALSE;
 	m->reference = FALSE;
 	m->pageout = FALSE;
+	m->poisoned = FALSE;	/* #385 hunt */
 
 	m->busy = TRUE;
 	m->wanted = FALSE;
@@ -1426,6 +1427,35 @@ vm_page_grab(void)
 		      mem->phys_addr);
 	mutex_unlock(&vm_page_queue_free_lock);
 
+#if	MACH_ASSERT
+	/*
+	 * #385 hunt, layer 4: verify the free-list poison (see
+	 * vm_page_release).  A changed word means somebody wrote the
+	 * page while it was free — dump what they wrote: it
+	 * fingerprints the writer.  Only pages that went through the
+	 * poisoning release (boot-time pages never did).
+	 */
+	if (mem->poisoned) {
+		extern vm_offset_t kmap(vm_offset_t);
+		extern void kunmap(vm_offset_t);
+		unsigned int *w = (unsigned int *)kmap(mem->phys_addr);
+		int i;
+		mem->poisoned = FALSE;
+		for (i = 0; i < PAGE_SIZE / 4; i++) {
+			if (w[i] != 0xF5EEF5EE) {
+				printf("#385: free page 0x%x dirtied at +0x%x:"
+				       " %08x %08x %08x %08x %08x %08x %08x %08x\n",
+				       mem->phys_addr, i * 4,
+				       w[i], w[i+1], w[i+2], w[i+3],
+				       w[i+4], w[i+5], w[i+6], w[i+7]);
+				panic("vm_page_grab: page 0x%x written while "
+				      "free (#385 layer 4)", mem->phys_addr);
+			}
+		}
+		kunmap(mem->phys_addr);
+	}
+#endif	/* MACH_ASSERT */
+
 	/*
 	 *	Decide if we should poke the pageout daemon.
 	 *	We do this if the free count is less than the low
@@ -1490,6 +1520,31 @@ vm_page_grab_any(void)
 	mem->free = FALSE;
 	mutex_unlock(&vm_page_queue_free_lock);
 
+#if	MACH_ASSERT
+	/* #385 hunt, layer 4: same poison check as vm_page_grab() —
+	 * this is the grab user-space faults come through. */
+	if (mem->poisoned) {
+		extern vm_offset_t kmap(vm_offset_t);
+		extern void kunmap(vm_offset_t);
+		unsigned int *w = (unsigned int *)kmap(mem->phys_addr);
+		int i;
+		mem->poisoned = FALSE;
+		for (i = 0; i < PAGE_SIZE / 4; i++) {
+			if (w[i] != 0xF5EEF5EE) {
+				printf("#385: free page 0x%x dirtied at +0x%x:"
+				       " %08x %08x %08x %08x %08x %08x %08x %08x\n",
+				       mem->phys_addr, i * 4,
+				       w[i], w[i+1], w[i+2], w[i+3],
+				       w[i+4], w[i+5], w[i+6], w[i+7]);
+				panic("vm_page_grab_any: page 0x%x written "
+				      "while free (#385 layer 4)",
+				      mem->phys_addr);
+			}
+		}
+		kunmap(mem->phys_addr);
+	}
+#endif	/* MACH_ASSERT */
+
 	if ((vm_page_free_count < vm_page_free_min) ||
 	    ((vm_page_free_count < vm_page_free_target) &&
 	     (vm_page_inactive_count < vm_page_inactive_target)))
@@ -1508,12 +1563,67 @@ void
 vm_page_release(
 	register vm_page_t	mem)
 {
+#if	MACH_ASSERT
+	extern boolean_t pmap_page_still_mapped(vm_offset_t phys);
+#endif	/* MACH_ASSERT */
+
 	assert(!mem->private && !mem->fictitious);
+
+#if	MACH_ASSERT
+	/*
+	 * #385 canary: this is the single gate through which every page
+	 * enters a free list (see the #344 note below).  A page arriving
+	 * here while some pmap still maps it means somebody is freeing
+	 * memory that is still in use (double deallocate / refcount race
+	 * / skipped pmap_page_protect) — the poisoned-page corruption.
+	 * Trap the culprit red-handed: this is what caught the #385
+	 * COW-fast-path bug, with the freeing call chain on the stack.
+	 * Cost: one pvh-locked list-head read per page free; tied to
+	 * MACH_ASSERT so release/bench builds shed it.
+	 */
+	if (pmap_page_still_mapped(mem->phys_addr))
+		panic("vm_page_release: page 0x%x still mapped (#385)",
+		      mem->phys_addr);
+
+	/*
+	 * #385 hunt, layer 4: poison the page on its way into the free
+	 * list.  vm_page_grab()/grab_any() verify the poison on the way
+	 * out: any word that changed while the page sat in the free list
+	 * was written through a stale translation or by in-flight DMA —
+	 * and the overwritten content fingerprints the writer.  kmap
+	 * reaches highmem too (user pages come from there first:
+	 * grab_any prefers highmem).
+	 */
+	{
+		extern vm_offset_t kmap(vm_offset_t);
+		extern void kunmap(vm_offset_t);
+		unsigned int *w = (unsigned int *)kmap(mem->phys_addr);
+		int i;
+		for (i = 0; i < PAGE_SIZE / 4; i++)
+			w[i] = 0xF5EEF5EE;
+		kunmap(mem->phys_addr);
+		mem->poisoned = TRUE;
+	}
+#endif	/* MACH_ASSERT */
 
 	mutex_lock(&vm_page_queue_free_lock);
 	if (mem->free)
 		panic("vm_page_release");
 	mem->free = TRUE;
+	/*
+	 * #344: route by the physical address, not the cached highmem flag.
+	 * On large-RAM machines (omen 16 GB, reproduced under QEMU -m 6G) some
+	 * pages above LOWMEM_LIMIT reached the free lists with highmem=FALSE
+	 * (the pmap_startup labeling does not cover every page that ends up
+	 * freed here).  Such a page on the lowmem list gets handed to
+	 * vm_page_grab() as a page table -- which pmap_pte()/ptetokv() can only
+	 * reach through the <512 MB direct-map window (phys+VM_MIN_KERNEL_ADDRESS
+	 * overflows past 4 GB otherwise) -> #344 KLOWFAULT.  phys_addr is always
+	 * correct, so derive the flag from it here: this is the single gate
+	 * through which every page enters a free list, so it can never be wrong
+	 * downstream.
+	 */
+	mem->highmem = !pa_is_lowmem(mem->phys_addr);
 	if (mem->highmem) {
 		mem->pageq.next = (queue_entry_t) vm_page_queue_free_highmem;
 		vm_page_queue_free_highmem = mem;
@@ -2418,6 +2528,7 @@ vm_page_find_contiguous(
 				assert(m->free);
 				assert(!m->wanted);
 				m->free = FALSE;
+				m->poisoned = FALSE;	/* #385 hunt: skip check */
 				m->gobbled = TRUE;
 			}
 			vm_page_free_count -= npages;

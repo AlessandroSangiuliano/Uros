@@ -613,6 +613,25 @@ ipc_mqueue_send(
 		assert(self->ith_state == MACH_SEND_IN_PROGRESS);
 
 		/*
+		 * #383: we are still enqueued on ip_blocked.  The wakeup
+		 * side (ipc_mqueue_receive / ipc_port_set_qlimit) dequeues
+		 * BEFORE setting MACH_MSG_SUCCESS, and does both under
+		 * ip_lock, so ith_state != SUCCESS here proves our node is
+		 * still on the queue.  Remove it NOW, for every non-SUCCESS
+		 * wakeup: an interrupted sender (SIGKILL's act_abort pulls
+		 * us out of this interruptible wait) that returns while
+		 * still queued becomes a time bomb — when the port later
+		 * drains, the flow-control wakeup thread_go()s this thread
+		 * long after it has moved on (typically re-blocked in
+		 * mach_msg receive, possibly as a recycled shuttle), firing
+		 * the receive continuation with ith_state == MACH_MSG_SUCCESS
+		 * (== 0) and no kmsg: NULL deref at mach_msg_receive_continue.
+		 * The timed-out path had the same latent leak (and could
+		 * even re-enqueue itself while already queued).
+		 */
+		ipc_thread_rmqueue(&port->ip_blocked, self);
+
+		/*
 		 *	Thread wakeup-reason field tells us why
 		 *	the wait was interrupted.
 		 */
@@ -675,6 +694,19 @@ int	tr_ipc_mqueue_deliver = 0;
 
 dstat_decl(unsigned int	c_imd_waiting_receiver = 0;)
 dstat_decl(unsigned int	c_imd_enqueued = 0;)
+
+/*
+ * #329: re-enable the Direct Thread Switch (#54) at SMP, with the off-core
+ * check that the original lacked.  Default OFF (the safe thread_go path); set
+ * to 1 to take the direct switch when the receiver is fully parked.  Kept as a
+ * runtime flag so DTS-on vs DTS-off inter-task RPC latency can be A/B'd on SMP
+ * without recompiling.
+ */
+/* .data, NOT bss (#356): parse_arguments() runs BEFORE the BSS clear, so as a
+ * zero-initialised global the -D boot flag was set and then silently wiped
+ * back to 0 -- every ipc_dts_smp A/B run before this fix compared baseline
+ * against baseline.  Same #337 trap as halt_in_debugger. */
+int	ipc_dts_smp __attribute__((section(".data"))) = 0;
 
 mach_msg_return_t
 ipc_mqueue_deliver(
@@ -819,6 +851,50 @@ ipc_mqueue_deliver(
 		spl_t _s = splsched();
 		thread_lock(receiver);
 		reset_timeout_check(&receiver->timer);
+#if	NCPUS > 1
+		/*
+		 * #329: Direct Thread Switch at SMP.
+		 *
+		 * The original DTS was UP-only-correct and raced at SMP: a receiver
+		 * in state TH_WAIT may still be physically executing on another CPU
+		 * (window between assert_wait() under imq_lock in ipc_mqueue_receive
+		 * and the context switch inside thread_block()), so switching to it
+		 * here ran it on two CPUs / dropped the wakeup -> the smp8 "PP
+		 * inter-task" wedge.  (It was long masked by the global
+		 * pmap_system_lock serialising pmap ops; the #329 lockless ref/mod
+		 * probe removed that accidental serialisation and exposed it.)
+		 *
+		 * Correct version, mirroring thread_handoff_to_parked_waiter (#324):
+		 *   - take the direct switch ONLY if the receiver is *fully parked*
+		 *     ((state & TH_SCHED_STATE) == TH_WAIT, i.e. TH_RUN clear, which
+		 *     thread_dispatch() sets only after the receiver has switched
+		 *     away) -- so it is genuinely off-core;
+		 *   - keep splsched ACROSS thread_run (do NOT splx before the switch
+		 *     -- that low-spl window was the actual lost-wakeup hole);
+		 *   - otherwise fall back to the safe thread_go()/thread_setrun path.
+		 * Gated by ipc_dts_smp (default 0) so it can be A/B-measured.
+		 */
+		if (ipc_dts_smp &&
+		    (receiver->state & TH_SCHED_STATE) == TH_WAIT) {
+			receiver->state =
+				(receiver->state & ~TH_WAIT) | TH_RUN;
+			receiver->wait_result = THREAD_AWAKENED;
+			thread_unlock(receiver);
+			counter(c_ipc_mqueue_deliver_direct++);
+			/* balance the disable_preemption() above so the receiver
+			 * runs at the right per-CPU preemption level; stay at
+			 * splsched (preemption is still gated by spl) until the
+			 * sender is resumed after the switch. */
+			enable_preemption();
+			thread_run((void (*)(void)) 0, receiver);
+			splx(_s);
+		} else {
+			thread_unlock(receiver);
+			splx(_s);
+			enable_preemption();
+			thread_go(receiver);
+		}
+#else	/* NCPUS > 1 */
 		if ((receiver->state & TH_SCHED_STATE) == TH_WAIT) {
 			receiver->state =
 				(receiver->state & ~TH_WAIT) | TH_RUN;
@@ -836,6 +912,7 @@ ipc_mqueue_deliver(
 			enable_preemption();
 			thread_go(receiver);
 		}
+#endif	/* NCPUS > 1 */
 	} else {
 		thread_go(receiver);
 		enable_preemption();

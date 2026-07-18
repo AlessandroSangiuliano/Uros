@@ -153,10 +153,12 @@ add_library(char_ps2_mouse_module SHARED
 )
 add_dependencies(char_ps2_mouse_module mig_mach_public_headers)
 target_compile_options(char_ps2_mouse_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
-target_compile_definitions(char_ps2_mouse_module PRIVATE MACH_IPC_COMPAT=0
-  # Bring-up trace: log every raw AUX byte from 8042.  Remove once a
-  # real consumer (compositor / pointer cursor) reads the events.
-  PS2_MOUSE_DEBUG_TRACE)
+target_compile_definitions(char_ps2_mouse_module PRIVATE MACH_IPC_COMPAT=0)
+# PS2_MOUSE_DEBUG_TRACE (per-packet dx/dy + per-AUX-byte trace) was bring-up
+# scaffolding; issued from the IRQ handler it floods the console — and the gpu
+# console mirror (#363) — on every mouse move ("the mouse explodes").  printf
+# from interrupt context is a rule we don't break.  Re-add -DPS2_MOUSE_DEBUG_TRACE
+# here for low-level debugging.
 target_include_directories(char_ps2_mouse_module PRIVATE ${CHAR_INCLUDE_DIRS})
 set_target_properties(char_ps2_mouse_module PROPERTIES
   OUTPUT_NAME "ps2_mouse"
@@ -181,6 +183,25 @@ target_compile_definitions(char_uart_module PRIVATE MACH_IPC_COMPAT=0)
 target_include_directories(char_uart_module PRIVATE ${CHAR_INCLUDE_DIRS})
 set_target_properties(char_uart_module PROPERTIES
   OUTPUT_NAME "uart"
+  PREFIX ""
+  SUFFIX ".so"
+  LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+)
+
+# --- On-screen console TTY module (#363) ---
+# Virtual TTY: gpu_console_puts() out (resolved from the char_server
+# executable at load), ps2 key events in via the in-process loopback.
+add_library(char_console_module SHARED
+  modules/console.c
+  modules/ssp_module_stub.c
+)
+add_dependencies(char_console_module mig_mach_public_headers)
+target_compile_options(char_console_module PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
+target_compile_definitions(char_console_module PRIVATE MACH_IPC_COMPAT=0)
+target_include_directories(char_console_module PRIVATE ${CHAR_INCLUDE_DIRS})
+set_target_properties(char_console_module PROPERTIES
+  OUTPUT_NAME "console"
   PREFIX ""
   SUFFIX ".so"
   LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
@@ -219,7 +240,8 @@ add_executable(char_server
 )
 
 add_dependencies(char_server mig_mach_public_headers libcap mig_cap_revoke
-		 char_ps2_module char_uart_module char_ps2_mouse_module)
+		 char_ps2_module char_uart_module char_ps2_mouse_module
+		 char_console_module)
 
 target_compile_options(char_server PRIVATE ${CHAR_COMPILE_OPTIONS} -fPIC)
 target_compile_definitions(char_server PRIVATE MACH_IPC_COMPAT=0)

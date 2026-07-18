@@ -54,15 +54,16 @@ extern int	sysenter_available;
 extern void	sysenter_init(void);
 
 /*
- * Program IA32_SYSENTER_ESP to the given PCB stack top address.
- * Called from act_machine_switch_pcb() on every context switch.
+ * Record the current thread's kernel stack top for the SYSENTER entry stub.
+ * Called from act_machine_switch_pcb() on every context switch.  #348: a plain
+ * per-CPU memory store, not a WRMSR (IA32_SYSENTER_ESP is programmed once).
  */
 extern void	sysenter_update_esp(unsigned int new_esp);
 
 /*
- * Program all three SYSENTER MSRs for a secondary (AP) CPU.
- * Called from mp_desc_init() or the AP startup path.
+ * Program the SYSENTER MSRs for a secondary (AP) CPU (mycpu = dense CPU number).
+ * Called from mp_desc_init() on the AP itself.
  */
-extern void	sysenter_ap_init(unsigned int pcb_stack_top);
+extern void	sysenter_ap_init(int mycpu);
 
 #endif /* _I386_SYSENTER_H_ */

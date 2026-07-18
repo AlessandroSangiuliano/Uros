@@ -93,6 +93,15 @@
 #include <kern/misc_protos.h>
 
 #include <mach_kdb.h>
+#include <kern/cpu_data.h>		/* #321: cpu_data_t for the offset check */
+
+/*
+ * #321: the C cpu_number() in <i386/cpu_number.h> reads %gs:CPU_DATA_CPU_ID_GS,
+ * a hand-mirrored offset (the real header can't be included there -- include
+ * cycle).  Fail the build loudly if cpu_data_t's layout drifts from it.
+ */
+_Static_assert(__builtin_offsetof(cpu_data_t, cpu_id) == CPU_DATA_CPU_ID_GS,
+	       "CPU_DATA_CPU_ID_GS in <i386/cpu_number.h> is out of sync with cpu_data_t");
 
 /*
  * The i386 needs an interrupt stack to keep the PCB stack from being
@@ -113,9 +122,11 @@ vm_offset_t	int_stack_high;
 
 /*
  * First cpu`s interrupt stack.
+ * #300: declared extern so the real labels in i386/start.S do not
+ * collide at link time when mp_desc.c is brought into the SMP build.
  */
-char		intstack[];	/* bottom */
-char		eintstack[];	/* top */
+extern char	intstack[];	/* bottom */
+extern char	eintstack[];	/* top */
 
 /*
  * We allocate interrupt stacks from physical memory.
@@ -220,6 +231,7 @@ mp_desc_init(
 		  sizeof(struct i386_tss));
 	    bzero((char *)&cpu_data[mycpu],
 		  sizeof(cpu_data_t));
+	    cpu_data[mycpu].cpu_id = mycpu;	/* #301 */
 #if	MACH_KDB
 	    mp_dbtss[mycpu] = &mpt->dbtss;
 	    bcopy((char *)&dbtss,
@@ -262,9 +274,10 @@ mp_desc_init(
 	    mpt->ktss.io_bit_map_offset = 0x0FFF;	/* no IO bitmap */
 
 	    /*
-	     * Program SYSENTER MSRs for this AP.
+	     * Program SYSENTER MSRs for this AP (#348: ESP -> this AP's
+	     * per-CPU trampoline slot, indexed by its dense CPU number).
 	     */
-	    sysenter_ap_init(0);
+	    sysenter_ap_init(mycpu);
 
 	    return mpt;
 	}

@@ -100,7 +100,8 @@
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_space.h>
-#include <ipc/ipc_splay.h>
+#include <ipc/ipc_radix.h>
+#include <kern/rcu.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_table.h>
@@ -110,44 +111,11 @@
 zone_t ipc_tree_entry_zone;
 
 /*
- * Forward declarations
+ *	#331: collisions (two live names sharing one index) are now rejected
+ *	at allocation with KERN_NAME_EXISTS, so the overflow store holds only
+ *	sparse entries (index >= is_table_size) and never needs a "does name
+ *	collide with a tree entry?" test -- ipc_entry_tree_collision is gone.
  */
-boolean_t ipc_entry_tree_collision(
-	ipc_space_t	space,
-	mach_port_t	name);
-
-/*
- *	Routine:	ipc_entry_tree_collision
- *	Purpose:
- *		Checks if "name" collides with an allocated name
- *		in the space's tree.  That is, returns TRUE
- *		if the splay tree contains a name with the same
- *		index as "name".
- *	Conditions:
- *		The space is locked (read or write) and active.
- */
-
-boolean_t
-ipc_entry_tree_collision(
-	ipc_space_t	space,
-	mach_port_t	name)
-{
-	mach_port_index_t index;
-	mach_port_t lower, upper;
-
-	assert(space->is_active);
-
-	/*
-	 *	Check if we collide with the next smaller name
-	 *	or the next larger name.
-	 */
-
-	ipc_splay_tree_bounds(&space->is_tree, name, &lower, &upper);
-
-	index = MACH_PORT_INDEX(name);
-	return (((lower != ~0) && (MACH_PORT_INDEX(lower) == index)) ||
-		((upper != 0) && (MACH_PORT_INDEX(upper) == index)));
-}
 
 /*
  *	Routine:	ipc_entry_lookup
@@ -182,29 +150,116 @@ ipc_entry_lookup(
 			entry = IE_NULL;
 	}
 	else {
-		int use_tree = 0;
 		if (index < space->is_table_size) {
 			entry = &space->is_table[index];
-			if (IE_BITS_GEN(entry->ie_bits) != MACH_PORT_GEN(name)) {
-				if (entry->ie_bits & IE_BITS_COLLISION) {
-					assert(space->is_tree_total > 0);
-					use_tree = 1;
-				} else
-					entry = IE_NULL;
-			} else if (IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
+			if (IE_BITS_GEN(entry->ie_bits) != MACH_PORT_GEN(name) ||
+			    IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
 				entry = IE_NULL;
 		} else if (space->is_tree_total == 0)
 			entry = IE_NULL;
-		else
-			use_tree = 1;
+		else {
+			/*
+			 * #331: a sparse name lives in the radix overflow.  The
+			 * radix is keyed by index alone (one live entry per
+			 * index), so confirm the full name -- a stale
+			 * generation is not this entry.
+			 */
+			ipc_tree_entry_t tentry =
+				ipc_radix_lookup(&space->is_tree, index);
 
-		if (use_tree)
-			entry = (ipc_entry_t)
-				ipc_splay_tree_lookup(&space->is_tree, name);
+			if (tentry != ITE_NULL && tentry->ite_name == name)
+				entry = (ipc_entry_t) tentry;
+			else
+				entry = IE_NULL;
+		}
 	}
 
 	assert((entry == IE_NULL) || IE_BITS_TYPE(entry->ie_bits));
 	return entry;
+}
+
+/*
+ *	Routine:	ipc_entry_lookup_lockfree
+ *	Purpose:
+ *		Like ipc_entry_lookup, but WITHOUT taking the space lock.
+ *		Returns the entry for `name' (dense table or radix overflow), or
+ *		IE_NULL.  The #331 step 2 lock-free read primitive, shared by the
+ *		mach_msg hot path (urmach_msg_lockfree_resolve) and available for
+ *		read-only callers (e.g. a future lock-free mach_port_type).
+ *	Conditions:
+ *		No lock held.  `space' must stay allocated for the call (a live
+ *		space -- the caller's own, or a destination kept alive by a ref).
+ *	Returned-pointer contract:
+ *		The pointer is into type-stable storage (is_table or an ite), so
+ *		it is ALWAYS safe to dereference, but its CONTENTS may be stale.
+ *		A caller that acts on entry->ie_object (e.g. locks the port) MUST
+ *		revalidate: snapshot space->is_generation and space->is_seq before
+ *		calling, lock the resolved object, then re-check both unchanged.
+ *		A read-only caller that only wants ie_bits gets a racy-but-whole
+ *		value (the generation / ite_name check rejects a reused slot).
+ *	Why it is safe without a lock:
+ *		- is_table, the radix nodes, and the ites are all type-stable
+ *		  (ipc_table.c / ipc_radix.c / ipc_init.c), so every deref lands
+ *		  on valid, correctly-typed memory even after a concurrent free.
+ *		- The per-space seqlock (is_seq) gives a consistent (size, table)
+ *		  snapshot and retries across a concurrent ipc_entry_grow_table;
+ *		  reading size before table means the index is always in bounds.
+ *		- ie_bits is a single int (atomic load); the generation check (or
+ *		  ite_name re-check on the radix path) rejects a reused slot.
+ */
+ipc_entry_t
+ipc_entry_lookup_lockfree(
+	ipc_space_t	space,
+	mach_port_t	name)
+{
+	mach_port_index_t	index = MACH_PORT_INDEX(name);
+	mach_port_gen_t		gen   = MACH_PORT_GEN(name);
+	unsigned int		tries = 0;
+
+	for (;;) {
+		natural_t	s;
+		ipc_entry_t	table;
+		ipc_entry_num_t	size;
+		ipc_entry_t	entry = IE_NULL;
+
+		if (++tries > 1000000)		/* paranoia: never spin forever */
+			return IE_NULL;
+
+		s = space->is_seq;
+		if (s & 1) {			/* grow in progress -- retry */
+			urmach_rcu_barrier();
+			continue;
+		}
+		urmach_rcu_barrier();
+
+		/* size BEFORE table: grow publishes table then size, so this
+		 * order never yields (old table, new size) -> always in bounds */
+		size = space->is_table_size;
+		urmach_rcu_barrier();
+		table = space->is_table;
+		urmach_rcu_barrier();
+
+		if (index < size) {
+			ipc_entry_t		e = &table[index];
+			ipc_entry_bits_t	bits = e->ie_bits;
+
+			if (IE_BITS_GEN(bits) == gen &&
+			    IE_BITS_TYPE(bits) != MACH_PORT_TYPE_NONE)
+				entry = e;
+		} else {
+			ipc_tree_entry_t tentry =
+				ipc_radix_lookup(&space->is_tree, index);
+
+			if (tentry != ITE_NULL && tentry->ite_name == name)
+				entry = (ipc_entry_t) tentry;
+		}
+
+		urmach_rcu_barrier();
+		if (space->is_seq != s)		/* table changed under us -- retry */
+			continue;
+
+		return entry;
+	}
 }
 
 /*
@@ -315,6 +370,30 @@ ipc_entry_alloc(
 }
 
 /*
+ *	Routine:	ipc_entry_name_prealloc_free
+ *	Purpose:
+ *		Free a tree entry and/or radix node supply that
+ *		ipc_entry_alloc_name() pre-allocated outside the space lock
+ *		but did not end up consuming.
+ */
+
+static void
+ipc_entry_name_prealloc_free(
+	ipc_tree_entry_t	tree_entry,
+	struct ipc_radix_node	*supply)
+{
+	if (tree_entry != ITE_NULL)
+		ite_free(tree_entry);
+
+	while (supply != (struct ipc_radix_node *) 0) {
+		struct ipc_radix_node *n = supply;
+
+		supply = (struct ipc_radix_node *) n->slots[0];
+		ipc_radix_node_free(n);
+	}
+}
+
+/*
  *	Routine:	ipc_entry_alloc_name
  *	Purpose:
  *		Allocates/finds an entry with a specific name.
@@ -325,6 +404,8 @@ ipc_entry_alloc(
  *	Returns:
  *		KERN_SUCCESS		Found existing entry with same name.
  *		KERN_SUCCESS		Allocated a new entry.
+ *		KERN_NAME_EXISTS	#331: the index is already in use by a
+ *					different generation (no overflow displace).
  *		KERN_INVALID_TASK	The space is dead.
  *		KERN_RESOURCE_SHORTAGE	Couldn't allocate memory.
  */
@@ -338,6 +419,7 @@ ipc_entry_alloc_name(
 	mach_port_index_t index = MACH_PORT_INDEX(name);
 	mach_port_gen_t gen = MACH_PORT_GEN(name);
 	ipc_tree_entry_t tree_entry = ITE_NULL;
+	struct ipc_radix_node *supply = (struct ipc_radix_node *) 0;
 
 	assert(MACH_PORT_VALID(name));
 
@@ -347,22 +429,19 @@ ipc_entry_alloc_name(
 	for (;;) {
 		ipc_entry_t entry;
 		ipc_tree_entry_t tentry;
-		ipc_table_size_t its;
 
 		if (!space->is_active) {
 			is_write_unlock(space);
-			if (tree_entry) ite_free(tree_entry);
+			ipc_entry_name_prealloc_free(tree_entry, supply);
 			return KERN_INVALID_TASK;
 		}
 
 		/*
-		 *	If we are under the table cutoff,
-		 *	there are usually three cases:
-		 *		1) The entry is inuse, for the same name
-		 *		2) The entry is inuse, for a different name
-		 *		3) The entry is free
-		 *	For a task with a "fast" IPC space, we disallow
-		 *	case 3), because ports cannot be renamed.
+		 *	Under the table cutoff there are three cases:
+		 *		1) inuse, same name        -> return it
+		 *		2) inuse, different gen    -> KERN_NAME_EXISTS (#331)
+		 *		3) free                    -> take the slot
+		 *	A "fast" space disallows case 3 (ports can't be renamed).
 		 */
 
 		if ((0 < index) && (index < space->is_table_size)) {
@@ -372,15 +451,26 @@ ipc_entry_alloc_name(
 
 			if (IE_BITS_TYPE(entry->ie_bits)) {
 				if (IE_BITS_GEN(entry->ie_bits) == gen) {
+					/* case 1: same name already present */
 					*entryp = entry;
-					assert(!tree_entry);
+					ipc_entry_name_prealloc_free(tree_entry,
+								     supply);
 					return KERN_SUCCESS;
 				}
+
+				/*
+				 * case 2 (#331): the index is live under a
+				 * different generation.  We no longer displace
+				 * it into an overflow tree -- the name is taken.
+				 */
+				is_write_unlock(space);
+				ipc_entry_name_prealloc_free(tree_entry, supply);
+				return KERN_NAME_EXISTS;
 			} else {
 				mach_port_index_t free_index, next_index;
 
 				/*
-				 *	Rip the entry out of the free list.
+				 *	case 3: rip the entry out of the free list.
 				 */
 
 				for (free_index = 0;
@@ -397,10 +487,7 @@ ipc_entry_alloc_name(
 				entry->ie_request = 0;
 
 				*entryp = entry;
-				if (is_fast_space(space))
-					assert(!tree_entry);
-				else if (tree_entry)
-					ite_free(tree_entry);
+				ipc_entry_name_prealloc_free(tree_entry, supply);
 				return KERN_SUCCESS;
 			}
 		}
@@ -412,103 +499,85 @@ ipc_entry_alloc_name(
 		 */
 		if (is_fast_space(space)) {
 			is_write_unlock(space);
-			assert(!tree_entry);
+			ipc_entry_name_prealloc_free(tree_entry, supply);
 			return KERN_FAILURE;
 		}
 
 		/*
-		 *	Before trying to allocate any memory,
-		 *	check if the entry already exists in the tree.
-		 *	This avoids spurious resource errors.
-		 *	The splay tree makes a subsequent lookup/insert
-		 *	of the same name cheap, so this costs little.
+		 *	#331: index >= is_table_size -- a sparse name living in
+		 *	the radix overflow.  If something already occupies the
+		 *	index it is either the same name (return it) or a
+		 *	different generation (rejected, same as the table case).
 		 */
 
-		if ((space->is_tree_total > 0) &&
-		    ((tentry = ipc_splay_tree_lookup(&space->is_tree, name))
-							!= ITE_NULL)) {
-			assert(tentry->ite_space == space);
-			assert(IE_BITS_TYPE(tentry->ite_bits));
+		if (space->is_tree_total > 0) {
+			tentry = ipc_radix_lookup(&space->is_tree, index);
+			if (tentry != ITE_NULL) {
+				if (tentry->ite_name == name) {
+					assert(tentry->ite_space == space);
+					assert(IE_BITS_TYPE(tentry->ite_bits));
+					*entryp = &tentry->ite_entry;
+					ipc_entry_name_prealloc_free(tree_entry,
+								     supply);
+					return KERN_SUCCESS;
+				}
 
-			*entryp = &tentry->ite_entry;
-			if (tree_entry) ite_free(tree_entry);
-			return KERN_SUCCESS;
-		}
-
-		its = space->is_table_next;
-
-		/*
-		 *	Check if the table should be grown.
-		 *
-		 *	Note that if space->is_table_size == its->its_size,
-		 *	then we won't ever try to grow the table.
-		 *
-		 *	Note that we are optimistically assuming that name
-		 *	doesn't collide with any existing names.  (So if
-		 *	it were entered into the tree, is_tree_small would
-		 *	be incremented.)  This is OK, because even in that
-		 *	case, we don't lose memory by growing the table.
-		 */
-
-		if ((space->is_table_size <= index) &&
-		    (index < its->its_size) &&
-		    (((its->its_size - space->is_table_size) *
-		      sizeof(struct ipc_entry)) <
-		     ((space->is_tree_small + 1) *
-		      sizeof(struct ipc_tree_entry)))) {
-			kern_return_t kr;
-
-			/*
-			 *	Can save space by growing the table.
-			 *	Because the space will be unlocked,
-			 *	we must restart.
-			 */
-
-			kr = ipc_entry_grow_table(space, ITS_SIZE_NONE);
-			assert(kr != KERN_NO_SPACE);
-			if (kr != KERN_SUCCESS) {
-				/* space is unlocked */
-				if (tree_entry) ite_free(tree_entry);
-				return kr;
+				is_write_unlock(space);
+				ipc_entry_name_prealloc_free(tree_entry, supply);
+				return KERN_NAME_EXISTS;
 			}
-
-			continue;
 		}
 
 		/*
-		 *	If a splay-tree entry was allocated previously,
-		 *	go ahead and insert it into the tree.
+		 *	Not present.  If we have pre-allocated the tree entry and
+		 *	a worst-case radix node supply, insert now; otherwise drop
+		 *	the lock, pre-allocate, and retry (mirrors the old splay
+		 *	ite_alloc-outside-the-lock dance).
 		 */
 
 		if (tree_entry != ITE_NULL) {
-			space->is_tree_total++;
-
-			if (index < space->is_table_size)
-				space->is_table[index].ie_bits |=
-					IE_BITS_COLLISION;
-			else if ((index < its->its_size) &&
-				 !ipc_entry_tree_collision(space, name))
-				space->is_tree_small++;
-
-			ipc_splay_tree_insert(&space->is_tree,
-					      name, tree_entry);
-
 			tree_entry->ite_bits = 0;
 			tree_entry->ite_object = IO_NULL;
 			tree_entry->ite_request = 0;
+			tree_entry->ite_name = name;
 			tree_entry->ite_space = space;
+
+			ipc_radix_insert(&space->is_tree, index, tree_entry,
+					 &supply);
+			space->is_tree_total++;
+
 			*entryp = &tree_entry->ite_entry;
+
+			/* the radix kept what it needed; free any spare nodes. */
+			ipc_entry_name_prealloc_free(ITE_NULL, supply);
 			return KERN_SUCCESS;
 		}
 
 		/*
-		 *	Allocate a tree entry and try again.
+		 *	Allocate the tree entry plus a worst-case radix node
+		 *	supply (one fresh node per level) outside the lock, then
+		 *	retry.
 		 */
 
 		is_write_unlock(space);
 		tree_entry = ite_alloc();
 		if (tree_entry == ITE_NULL)
 			return KERN_RESOURCE_SHORTAGE;
+		{
+			int i;
+
+			for (i = 0; i < IPC_RADIX_LEVELS; i++) {
+				struct ipc_radix_node *n = ipc_radix_node_alloc();
+
+				if (n == (struct ipc_radix_node *) 0) {
+					ipc_entry_name_prealloc_free(tree_entry,
+								     supply);
+					return KERN_RESOURCE_SHORTAGE;
+				}
+				n->slots[0] = (void *) supply;
+				supply = n;
+			}
+		}
 		is_write_lock(space);
 	}
 }
@@ -557,84 +626,27 @@ ipc_entry_dealloc(
 	if ((index < size) && (entry == &table[index])) {
 		assert(IE_BITS_GEN(entry->ie_bits) == MACH_PORT_GEN(name));
 
-		if (entry->ie_bits & IE_BITS_COLLISION) {
-			struct ipc_splay_tree small, collisions;
-			ipc_tree_entry_t tentry;
-			mach_port_t tname;
-			boolean_t pick;
-			ipc_entry_bits_t bits;
-			ipc_object_t obj;
-
-			/* must move an entry from tree to table */
-
-			ipc_splay_tree_split(&space->is_tree,
-					     MACH_PORT_MAKE(index+1, 0),
-					     &collisions);
-			ipc_splay_tree_split(&collisions,
-					     MACH_PORT_MAKE(index, 0),
-					     &small);
-
-			pick = ipc_splay_tree_pick(&collisions,
-						   &tname, &tentry);
-			assert(pick);
-			assert(MACH_PORT_INDEX(tname) == index);
-
-			bits = tentry->ite_bits;
-			entry->ie_bits = bits | MACH_PORT_GEN(tname);
-			entry->ie_object = obj = tentry->ite_object;
-			entry->ie_request = tentry->ite_request;
-			assert(tentry->ite_space == space);
-
-			if (IE_BITS_TYPE(bits) == MACH_PORT_TYPE_SEND) {
-				ipc_hash_global_delete(space, obj,
-						       tname, tentry);
-				ipc_hash_local_insert(space, obj,
-						      index, entry);
-			}
-
-			ipc_splay_tree_delete(&collisions, tname, tentry);
-
-			assert(space->is_tree_total > 0);
-			space->is_tree_total--;
-
-			/* check if collision bit should still be on */
-
-			pick = ipc_splay_tree_pick(&collisions,
-						   &tname, &tentry);
-			if (pick) {
-				entry->ie_bits |= IE_BITS_COLLISION;
-				ipc_splay_tree_join(&space->is_tree,
-						    &collisions);
-			}
-
-			ipc_splay_tree_join(&space->is_tree, &small);
-		} else {
-			entry->ie_bits &= IE_BITS_GEN_MASK;
-			entry->ie_next = table->ie_next;
-			table->ie_next = index;
-		}
+		/*
+		 * #331: one live entry per index, so freeing a table slot no
+		 * longer promotes a colliding entry up from an overflow tree.
+		 */
+		entry->ie_bits &= IE_BITS_GEN_MASK;
+		entry->ie_next = table->ie_next;
+		table->ie_next = index;
 	} else {
+		/* A sparse name: the entry lives in the radix overflow. */
 		ipc_tree_entry_t tentry = (ipc_tree_entry_t) entry;
+		ipc_tree_entry_t deleted;
 
 		assert(tentry->ite_space == space);
 
-		ipc_splay_tree_delete(&space->is_tree, name, tentry);
+		deleted = ipc_radix_delete(&space->is_tree, index);
+		assert(deleted == tentry);
 
 		assert(space->is_tree_total > 0);
 		space->is_tree_total--;
 
-		if (index < size) {
-			ipc_entry_t ientry = &table[index];
-
-			assert(ientry->ie_bits & IE_BITS_COLLISION);
-
-			if (!ipc_entry_tree_collision(space, name))
-				ientry->ie_bits &= ~IE_BITS_COLLISION;
-		} else if ((index < space->is_table_next->its_size) &&
-			   !ipc_entry_tree_collision(space, name)) {
-			assert(space->is_tree_small > 0);
-			space->is_tree_small--;
-		}
+		ite_free(tentry);
 	}
 }
 
@@ -770,6 +782,15 @@ ipc_entry_grow_table(
 		       (target_size != ITS_SIZE_NONE));
 		assert(space->is_table_size == osize);
 
+		/*
+		 *	#331 step 2: open the table seqlock (odd) before swapping in
+		 *	the new table and rebuilding its contents below, so a
+		 *	lock-free reader that catches us mid-rebuild retries instead
+		 *	of reading a half-populated table.
+		 */
+		space->is_seq++;
+		urmach_rcu_barrier();
+
 		space->is_table = table;
 		space->is_table_size = size;
 		space->is_table_next = nits;
@@ -805,128 +826,52 @@ ipc_entry_grow_table(
 		}
 
 		/*
-		 *	If there are entries in the splay tree,
-		 *	then we have work to do:
-		 *		1) transfer entries to the table
-		 *		2) update is_tree_small
+		 *	#331: entries whose index now fits in the grown table,
+		 *	i.e. osize <= index < size, move from the radix overflow
+		 *	into the table; sparser entries stay put.  With one live
+		 *	entry per index there are no collisions to juggle.
 		 */
 
 		assert(!is_fast_space(space) || space->is_tree_total == 0);
 		if (space->is_tree_total > 0) {
 			mach_port_index_t index;
-			boolean_t delete;
-			struct ipc_splay_tree ignore;
-			struct ipc_splay_tree move;
-			struct ipc_splay_tree small;
-			ipc_entry_num_t nosmall;
-			ipc_tree_entry_t tentry;
 
-			/*
-			 *	The splay tree divides into four regions,
-			 *	based on the index of the entries:
-			 *		1) 0 <= index < osize
-			 *		2) osize <= index < size
-			 *		3) size <= index < nsize
-			 *		4) nsize <= index
-			 *
-			 *	Entries in the first part are ignored.
-			 *	Entries in the second part, that don't
-			 *	collide, are moved into the table.
-			 *	Entries in the third part, that don't
-			 *	collide, are counted for is_tree_small.
-			 *	Entries in the fourth part are ignored.
-			 */
-
-			ipc_splay_tree_split(&space->is_tree,
-					     MACH_PORT_MAKE(nsize, 0),
-					     &small);
-			ipc_splay_tree_split(&small,
-					     MACH_PORT_MAKE(size, 0),
-					     &move);
-			ipc_splay_tree_split(&move,
-					     MACH_PORT_MAKE(osize, 0),
-					     &ignore);
-
-			/* move entries into the table */
-
-			for (tentry = ipc_splay_traverse_start(&move);
-			     tentry != ITE_NULL;
-			     tentry = ipc_splay_traverse_next(&move, delete)) {
-				mach_port_t name;
-				mach_port_gen_t gen;
-				mach_port_type_t type;
-				ipc_entry_bits_t bits;
-				ipc_object_t obj;
+			for (index = osize; index < size; index++) {
+				ipc_tree_entry_t tentry;
 				ipc_entry_t entry;
+				ipc_entry_bits_t bits;
+				mach_port_type_t type;
+				ipc_object_t obj;
 
-				name = tentry->ite_name;
-				gen = MACH_PORT_GEN(name);
-				index = MACH_PORT_INDEX(name);
+				tentry = ipc_radix_lookup(&space->is_tree, index);
+				if (tentry == ITE_NULL)
+					continue;
 
 				assert(tentry->ite_space == space);
-				assert((osize <= index) && (index < size));
+				assert(MACH_PORT_INDEX(tentry->ite_name) == index);
 
 				entry = &table[index];
-
-				/* collision with previously moved entry? */
-
-				bits = entry->ie_bits;
-				if (bits != 0) {
-					assert(IE_BITS_TYPE(bits));
-					assert(IE_BITS_GEN(bits) != gen);
-
-					entry->ie_bits =
-						bits | IE_BITS_COLLISION;
-					delete = FALSE;
-					continue;
-				}
+				assert(entry->ie_bits == 0);	/* a fresh slot */
 
 				bits = tentry->ite_bits;
 				type = IE_BITS_TYPE(bits);
 				assert(type != MACH_PORT_TYPE_NONE);
 
-				entry->ie_bits = bits | gen;
+				entry->ie_bits = bits | MACH_PORT_GEN(tentry->ite_name);
 				entry->ie_object = obj = tentry->ite_object;
 				entry->ie_request = tentry->ite_request;
 
 				if (type == MACH_PORT_TYPE_SEND) {
 					ipc_hash_global_delete(space, obj,
-							       name, tentry);
+						       tentry->ite_name, tentry);
 					ipc_hash_local_insert(space, obj,
-							      index, entry);
+						      index, entry);
 				}
 
+				(void) ipc_radix_delete(&space->is_tree, index);
+				ite_free(tentry);
 				space->is_tree_total--;
-				delete = TRUE;
 			}
-			ipc_splay_traverse_finish(&move);
-
-			/* count entries for is_tree_small */
-
-			nosmall = 0; index = 0;
-			for (tentry = ipc_splay_traverse_start(&small);
-			     tentry != ITE_NULL;
-			     tentry = ipc_splay_traverse_next(&small, FALSE)) {
-				mach_port_index_t nindex;
-
-				nindex = MACH_PORT_INDEX(tentry->ite_name);
-
-				if (nindex != index) {
-					nosmall++;
-					index = nindex;
-				}
-			}
-			ipc_splay_traverse_finish(&small);
-
-			assert(nosmall <= (nsize - size));
-			assert(nosmall <= space->is_tree_total);
-			space->is_tree_small = nosmall;
-
-			/* put the splay tree back together */
-
-			ipc_splay_tree_join(&space->is_tree, &small);
-			ipc_splay_tree_join(&space->is_tree, &move);
-			ipc_splay_tree_join(&space->is_tree, &ignore);
 		}
 
 		/*
@@ -949,6 +894,12 @@ ipc_entry_grow_table(
 		table[0].ie_next = free_index;
 
 		/*
+		 *	#331 step 2: table fully rebuilt -- close the seqlock (even).
+		 */
+		urmach_rcu_barrier();
+		space->is_seq++;
+
+		/*
 		 *	Now we need to free the old table.
 		 *	If the space dies or grows while unlocked,
 		 *	then we can quit here.
@@ -956,22 +907,23 @@ ipc_entry_grow_table(
 
 		is_write_unlock(space);
 		thread_wakeup((event_t) space);
+		/*
+		 *	#331 step 2: it_entries_free does NOT return the old table to
+		 *	the system -- it pools it (type-stable), so a lock-free reader
+		 *	still looking at it sees valid memory and retries via the
+		 *	seqlock.  No grace period needed here.
+		 */
 		it_entries_free(oits, otable);
 		is_write_lock(space);
 		if (!space->is_active || (space->is_table_next != nits))
 			return KERN_SUCCESS;
 
 		/*
-		 *	We might have moved enough entries from
-		 *	the splay tree into the table that
-		 *	the table can be profitably grown again.
-		 *
-		 *	Note that if size == nsize, then
-		 *	space->is_tree_small == 0.
+		 *	#331: sparse names live in the radix without forcing the
+		 *	table to grow, so there is no "grow again to absorb the
+		 *	tree" pass -- a single growth is enough.
 		 */
-	} while ((space->is_tree_small > 0) &&
-		 (((nsize - size) * sizeof(struct ipc_entry)) <
-		  (space->is_tree_small * sizeof(struct ipc_tree_entry))));
+	} while (0);
 
 	return KERN_SUCCESS;
 }

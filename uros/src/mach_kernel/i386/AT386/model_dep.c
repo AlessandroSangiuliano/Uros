@@ -238,6 +238,7 @@
 #include <i386/mp_desc.h>
 #endif	/* NCPUS */
 #include <i386/sysenter.h>
+#include <i386/AT386/fbcons.h>		/* struct mb2_framebuffer, fbcons_init */
 
 #if	HIMEM
 #include <i386/AT386/himem.h>
@@ -253,7 +254,14 @@
 
 int		loadpt;
 
-vm_size_t	mem_size = 0; 
+/*
+ * #337: forced into .data so the "-m"/"-k" physical-memory limit, parsed by
+ * parse_arguments() BEFORE the BSS is zeroed, survives the BSS clear.  As a
+ * zero-initialised global it lived in .bss and was wiped back to 0 before the
+ * clamp at the "compute mem_size" site read it, so -m/-k were silently
+ * ignored.  Same fix and reason as cons_is_com1 / halt_in_debugger.
+ */
+vm_size_t	mem_size __attribute__((section(".data"))) = 0;
 vm_offset_t	first_addr = 0;	/* set by start.s - keep out of bss */
 vm_offset_t	first_avail = 1;/* set by start.s - keep out of bss */
 vm_offset_t	last_addr;
@@ -270,6 +278,16 @@ unsigned int	avail_remaining;
  */
 int mb_info_size = sizeof(struct multiboot_info);
 struct multiboot_info mb_info __attribute__((section(".data"))) = { .flags = 0xDEADBEEF };
+
+/*
+ * #342: bootloader magic (%eax) and raw boot-info pointer (%ebx), stashed
+ * by start.S before the BSS clear (hence .data with initializers).
+ * parse_multiboot() reads boot_magic to choose mb1 vs mb2 parsing.
+ *   mb1 bootloader magic = 0x2BADB002, mb2 = 0x36D76289.
+ */
+unsigned int boot_magic     __attribute__((section(".data"))) = 0;
+unsigned int boot_info_phys __attribute__((section(".data"))) = 0;
+
 extern vm_offset_t boot_start;
 extern vm_size_t boot_size;
 extern vm_offset_t exec_start;
@@ -295,7 +313,16 @@ int		halt_in_debugger __attribute__((section(".data"))) = 0;
  * clear.  See setup_main() + #213. */
 int		halt_in_debugger_late __attribute__((section(".data"))) = 0;
 
+/* `-c<n>` boot arg: cap how many CPUs are brought up (SMP debug, #344) — e.g.
+ * `-c4` boots only the first 4 of an 8-CPU box, to bisect a per-CPU bring-up
+ * crash on real hardware.  0 = bring up every CPU the MADT reports.  .data so
+ * it survives i386_init()'s BSS clear, like halt_in_debugger above. */
+int		boot_cpu_cap __attribute__((section(".data"))) = 0;
+
 extern int	cons_is_com1;
+extern int	ddb_kbd_break_enabled;	/* #335: -K arms Ctrl+D -> DDB */
+extern int	nmi_watchdog_enabled;	/* #344: -W arms the NMI watchdog */
+extern void	nmi_watchdog_init(void);
 
 void		parse_arguments(void);
 void		parse_multiboot(void);
@@ -428,29 +455,172 @@ extern vm_offset_t boot_args_start;
 extern vm_size_t boot_args_size;
 struct multiboot_module *mb_module = 0;
 
+/*
+ * #342: multiboot2 boot path.  GRUB on UEFI hands an mb2 tag list (in %ebx)
+ * instead of the mb1 info struct.  start.S copies a fixed chunk of that tag
+ * list into mb2_info_buf (physical copy while paging is off, so C can parse
+ * it without phystokv/identity-map concerns), and mb2_parse() below walks
+ * the tags and fills the same mb_info fields the rest of model_dep.c already
+ * consumes (mem_lower/upper, mods, cmdline).  parse_multiboot()/
+ * parse_arguments() and the #211 ksyms scan keep working unchanged.  The
+ * framebuffer tag is stashed in mb2_fb for the emergency console (fbcons).
+ */
+#define MB2_BOOTLOADER_MAGIC	0x36d76289u
+#define MB2_TAG_END		0u
+#define MB2_TAG_CMDLINE		1u
+#define MB2_TAG_MODULE		3u
+#define MB2_TAG_BASIC_MEMINFO	4u
+#define MB2_TAG_FRAMEBUFFER	8u
+#define MB2_TAG_ACPI_OLD	14u	/* RSDP copy, ACPI 1.0  */
+#define MB2_TAG_ACPI_NEW	15u	/* RSDP copy, ACPI 2.0+ */
+
+struct mb2_tag { unsigned int type; unsigned int size; };
+
+/* start.S copies GRUB's mb2 tag list here (.data, survives the BSS clear). */
+char mb2_info_buf[16384] __attribute__((section(".data")));
+
+/* mb1-format module array we point mb_info.mods_addr at (physical, so the
+ * ksyms scan's phystokv() round-trips). */
+#define MB2_MAX_MODS	8
+static struct multiboot_module mb2_mods[MB2_MAX_MODS]
+	__attribute__((section(".data")));
+
+/* Framebuffer descriptor from the mb2 framebuffer tag (type 8); consumed by
+ * the emergency framebuffer console (fbcons.c, #342).  The struct layout lives
+ * in fbcons.h so the console and this parser agree on it. */
+struct mb2_framebuffer mb2_fb __attribute__((section(".data"))) = { 0 };
+
+/*
+ * Copy of the ACPI RSDP handed to us by GRUB via the multiboot2 ACPI tag
+ * (type 14 = ACPI 1.0, type 15 = ACPI 2.0+).  On a pure-UEFI machine the RSDP
+ * is NOT in the legacy BIOS/EBDA area, so the kernel's low-memory scan
+ * (i386/AT386/mp/mp_table.c) finds nothing and SMP silently degrades to UP;
+ * this is the only pointer to ACPI there.  It points into mb2_info_buf (.data),
+ * so it stays valid for the kernel's lifetime.  NULL on a legacy/mb1 boot. */
+void *mb2_acpi_rsdp __attribute__((section(".data"))) = 0;
+
+static void
+mb2_parse(void)
+{
+	vm_offset_t	base = (vm_offset_t)mb2_info_buf;
+	unsigned int	total = *(unsigned int *)base;	/* total_size */
+	vm_offset_t	p, end;
+	unsigned int	nmods = 0;
+
+	if (total < 8 || total > sizeof(mb2_info_buf))
+		total = sizeof(mb2_info_buf);
+	p   = base + 8;			/* skip total_size + reserved */
+	end = base + total;
+
+	while (p + 8 <= end) {
+		struct mb2_tag *t = (struct mb2_tag *)p;
+		if (t->type == MB2_TAG_END)
+			break;
+		if (t->size < 8)	/* malformed/garbage -> avoid inf loop */
+			break;
+		switch (t->type) {
+		case MB2_TAG_BASIC_MEMINFO: {
+			unsigned int *m = (unsigned int *)p; /* type,size,lower,upper */
+			mb_info.mem_lower = m[2];
+			mb_info.mem_upper = m[3];
+			break;
+		}
+		case MB2_TAG_MODULE: {
+			unsigned int *m = (unsigned int *)p; /* +start,+end,string */
+			if (nmods < MB2_MAX_MODS) {
+				mb2_mods[nmods].mod_start = m[2];
+				mb2_mods[nmods].mod_end   = m[3];
+				nmods++;
+			}
+			break;
+		}
+		case MB2_TAG_CMDLINE:
+			/* the string lives inside mb2_info_buf (kernel virtual) */
+			mb_info.cmdline = p + 8;
+			break;
+		case MB2_TAG_FRAMEBUFFER: {
+			unsigned int *w = (unsigned int *)p;
+			mb2_fb.addr    = ((unsigned long long)w[3] << 32) | w[2];
+			mb2_fb.pitch   = w[4];
+			mb2_fb.width   = w[5];
+			mb2_fb.height  = w[6];
+			mb2_fb.bpp     = (unsigned char)(w[7] & 0xff);
+			mb2_fb.fb_type = (unsigned char)((w[7] >> 8) & 0xff);
+			mb2_fb.present = 1;
+			break;
+		}
+		case MB2_TAG_ACPI_OLD:
+		case MB2_TAG_ACPI_NEW:
+			/* The RSDP copy follows the 8-byte tag header.  Prefer
+			 * the 2.0+ tag (XSDT-capable) when GRUB gives both. */
+			if (mb2_acpi_rsdp == 0 || t->type == MB2_TAG_ACPI_NEW)
+				mb2_acpi_rsdp = (void *)(p + 8);
+			break;
+		default:
+			break;
+		}
+		p += (t->size + 7u) & ~7u;	/* tags are 8-byte aligned */
+	}
+
+	/*
+	 * mods_addr must be PHYSICAL — the #211 ksyms scan does phystokv() on
+	 * it.  phystokv(a) == a + VM_MIN_KERNEL_ADDRESS (a macro), so the
+	 * inverse is a plain subtraction.  We must NOT use kvtophys() here: it
+	 * is a real function that walks the pmap, which is not up yet this
+	 * early (parse_multiboot runs before i386_init), and hangs.
+	 */
+	mb_info.mods_addr  = (vm_offset_t)mb2_mods - VM_MIN_KERNEL_ADDRESS;
+	mb_info.mods_count = nmods;
+	mb_info.flags = MULTIBOOT_MEMORY | MULTIBOOT_CMDLINE | MULTIBOOT_MODS;
+}
+
 void
 parse_multiboot(void)
 {
+	/* #342: mb2 (GRUB/UEFI) populates mb_info from its tag list first. */
+	if (boot_magic == MB2_BOOTLOADER_MAGIC)
+		mb2_parse();
+
 	/* Get memory info */
 	cnvmem = mb_info.mem_lower;
 	extmem = mb_info.mem_upper;
 
-	/* 
-         * Get information about the bootstrap. Currently we only
+	/*
+	 * Get information about the bootstrap. Currently we only
 	 * support loading one module.
+	 *
+	 * mods_addr is PHYSICAL by convention (mb2_parse() stores it as
+	 * mb2_mods - VM_MIN_KERNEL_ADDRESS; for mb1 start.S copies qemu's
+	 * physical mbi).  Reach the module array through the kernel phys map
+	 * with phystokv() — exactly like the #211 ksyms scan below.  The raw
+	 * dereference that used to be here only worked while mods_addr landed
+	 * in the boot-time low identity map, which is just 0-4 MB (start.S):
+	 * fine for mb2 (mb2_mods is low-BSS) and for the old, smaller kernel,
+	 * but #342 grew the kernel so qemu's mb1 modules now sit above 4 MB
+	 * and the bare deref #PF'd before the first console output.
 	 */
-	mb_module = (struct multiboot_module *) mb_info.mods_addr;
+	mb_module = (struct multiboot_module *) phystokv(mb_info.mods_addr);
  	boot_start = mb_module[0].mod_start;
  	boot_size = mb_module[0].mod_end - mb_module[0].mod_start;
- 
+
  	if (mb_info.mods_count >= 2) {
  		exec_start = mb_module[1].mod_start;
  		exec_size  = mb_module[1].mod_end - mb_module[1].mod_start;
  	}
 
 
-	kern_args_start = mb_info.cmdline;
-	kern_args_size = strlen((char *) kern_args_start);
+	/*
+	 * cmdline: mb2_parse() points it into the (kernel-virtual) copied tag
+	 * buffer; mb1 leaves it as qemu's physical pointer, so translate that
+	 * one too (same 4 MB low-map reason as mods_addr above).
+	 */
+	if (boot_magic == MB2_BOOTLOADER_MAGIC)
+		kern_args_start = mb_info.cmdline;
+	else
+		kern_args_start = mb_info.cmdline ?
+		    phystokv(mb_info.cmdline) : 0;
+	kern_args_size = kern_args_start ?
+	    strlen((char *) kern_args_start) : 0;
 
  	//boot_args_start = mb_module->cmdline;
  	//boot_args_size = strlen(boot_args_start);
@@ -507,12 +677,65 @@ parse_arguments(void)
 		case 'r':
 		    cons_is_com1 = 1;
 		    break;
+		case 'f':	/* -f: enable the emergency framebuffer console
+				 * (fbcons); off by default so gpu_server owns
+				 * the display.  #342. */
+		    fbcons_enabled = 1;
+		    break;
 		case 'm':	/* -m??:  memory size Mbytes*/
 		    mem_size = atoi_term(p, &p)*1024*1024;
 		    break;
 		case 'k':	/* -k??:  memory size Kbytes */
 		    mem_size = atoi_term(p, &p)*1024;
 		    break;
+		case 'c':	/* -c??:  cap CPUs brought up (SMP debug, #344) */
+		    boot_cpu_cap = atoi_term(p, &p);
+		    break;
+		case 'K':	/* -K: arm Ctrl+D on the PS/2 keyboard to break
+				 * into DDB when there is no serial port (bare-
+				 * metal debug, #335). */
+		    ddb_kbd_break_enabled = 1;
+		    break;
+		case 'W':	/* -W: arm the perf-counter NMI hard-lockup
+				 * watchdog to catch IF=0 wedges (#344). */
+		    nmi_watchdog_enabled = 1;
+		    break;
+		case 'Z':	/* -Z: poison freed zone elements + verify on
+				 * realloc to catch use-after-free (#344). */
+		    { extern boolean_t zfree_clear; zfree_clear = TRUE; }
+		    break;
+		case 'S':	/* -S: spin -- disable the #357 idle HLT and
+				 * revert to the legacy always-poll idle loop
+				 * (same-binary A/B / debug). */
+		    { extern int sched_idle_hlt; sched_idle_hlt = 0; }
+		    break;
+		case 'D':	/* -D: enable the SMP Direct-Thread-Switch on the
+				 * IPC slow path (ipc_dts_smp).  Off by default;
+				 * this flag turns it on for a same-binary A/B of
+				 * the separate send/recv bench (intra/inter --
+				 * comb rides the hotpath, not this path). */
+		    { extern int ipc_dts_smp; ipc_dts_smp = 1; }
+		    break;
+		case 'E':	/* -E: #358 bias the HWP Energy/Performance
+				 * Preference to performance (0x00) on every
+				 * CPU, for bench runs.  Default leaves the
+				 * firmware's EPP untouched. */
+		    { extern int hwp_epp_performance; hwp_epp_performance = 1; }
+		    break;
+		case 'Q':	/* -Q: #358 skip enabling HWP (leave it as the
+				 * firmware left it) for a same-binary A/B of the
+				 * HWP win vs the default entry (which enables). */
+		    { extern int hwp_skip_enable; hwp_skip_enable = 1; }
+		    break;
+#if	NCPUS > 1
+		case 'P':	/* -P: enable the #356 synchronous-RPC hand-off
+				 * on block (wakee of a combined-op send runs on
+				 * the waker's CPU instead of a remote idle one,
+				 * same-task only).  Off by default; same-binary
+				 * A/B against the idle-dispatch baseline. */
+		    { extern int sched_rpc_handoff; sched_rpc_handoff = 1; }
+		    break;
+#endif	/* NCPUS > 1 */
 		default:
 #if	NCPUS > 1 && AT386
 		    if (ch > '0' && ch <= '9')
@@ -600,6 +823,14 @@ machine_init(void)
 	char bootdev_name[10] = "hd0s1";
 
 	/*
+	 * #372: the kernel allocator is up by now (machine_init runs after
+	 * vm_mem_init), so give fbcons its RAM pixel shadow — from here scrolling
+	 * is a bulk bcopy instead of re-rendering every glyph.  No-op unless
+	 * fbcons is active ('-f' on a framebuffer boot).
+	 */
+	fbcons_late_init();
+
+	/*
 	 * Adjust delay count before entering drivers
 	 */
 
@@ -613,6 +844,35 @@ machine_init(void)
 
 #if	MP_V1_1
 	mp_v1_1_init();
+	/*
+	 * #302: enable the BSP local APIC now that mp_v1_1_init's phase 2
+	 * has io_map()'d the LAPIC MMIO window into lapic_start.  This is
+	 * what arms lapic_send_ipi() / lapic_eoi() for the rest of the boot.
+	 * AP enable lands in slave_machine_init in a later increment.
+	 */
+	{
+		extern void lapic_enable(void);
+		lapic_enable();
+	}
+
+	/*
+	 * #344: arm the perf-counter NMI hard-lockup watchdog on the BSP (no-op
+	 * unless -W was passed).  Safe this early: it only starts accusing once
+	 * it has seen the clock tick at least once (wd_seen gating).
+	 */
+	nmi_watchdog_init();
+
+	/*
+	 * #311: bring up the I/O APIC and switch device-IRQ delivery off the
+	 * global 8259 onto LAPIC vectors with per-CPU TPR masking.  Must run
+	 * after lapic_enable() (BSP LAPIC live) and with kernel_map alive
+	 * (mp_v1_1_init's phase 2 io_map'd the LAPIC just above).  Falls back
+	 * silently to the 8259 if no usable I/O APIC is present.
+	 */
+	{
+		extern void ioapic_init(void);
+		ioapic_init();
+	}
 #endif	/* MP_V1_1 */
 
 	/*
@@ -621,18 +881,15 @@ machine_init(void)
 	init_fpu();
 
 	/*
-	 * Issue #180: install the SHA-NI fast path for sha256_compress
-	 * if the CPU advertises Intel SHA Extensions in CPUID leaf 7.
-	 * Must run after init_fpu() (which enables CR4.OSFXSR / OSXMMEXCPT
-	 * — required before any XMM-using code can execute).
+	 * #395: the kernel's SHA-256 (capability HMAC) is the portable C
+	 * implementation only.  The SHA-NI fast path that used to be
+	 * installed here executed XMM in a -mno-sse kernel under lazy FPU
+	 * (CR0.TS) with no save/restore: every cap-verify clobbered all
+	 * eight XMM registers of the calling thread (cap_test [#395],
+	 * 50/50 deterministic).  SHA-NI now lives in userland (libcap)
+	 * where SSE is legal; kernel and userland digests are identical,
+	 * so HMACs still match.
 	 */
-	{
-		extern void sha256_dispatch_init(void);
-		extern int  sha256_using_sha_ni(void);
-		sha256_dispatch_init();
-		if (sha256_using_sha_ni())
-			printf("SHA: Intel SHA Extensions enabled (HMAC fast path)\n");
-	}
 
 #if	NPCI > 0
 	dma_zones_init();
@@ -646,6 +903,16 @@ machine_init(void)
 	 * Find the devices
 	 */
 	probeio();
+
+	/*
+	 * #335: arm the PS/2 break-key (Ctrl+D -> DDB) when -K was given and
+	 * the console is not serial.  After probeio() so the PIC / I-O APIC
+	 * and all device IRQs are configured; IRQ 1 is still free here.
+	 */
+	{
+		extern void ddb_kbd_break_init(void);
+		ddb_kbd_break_init();
+	}
 
 	/*
 	 * Set the boot device to disk0 or whatever
@@ -890,19 +1157,28 @@ i386_init(void)
 #endif	/* NCPUS > 1 && AT386 */
 
 	set_cr4(get_cr4() | CR4_PGE);
-	pmap_bootstrap(loadpt);
 
 	/*
-	 * pmap_bootstrap steals page-table pages from physical addresses
-	 * starting at avail_start, advancing it to a value inside the memory
-	 * hole (hole_start..hole_end covers BIOS/VGA area plus kernel text,
-	 * data and page tables).  pmap_next_page only skips the hole when
-	 * avail_next hits hole_start exactly; since avail_start lands above
-	 * hole_start the skip never fires, and kernel/page-table pages get
-	 * handed out as free physical memory.  Advance past the hole here.
+	 * #334: advance avail_start past the memory hole BEFORE pmap_bootstrap,
+	 * not after.  pmap_bootstrap "steals" the kernel page-table pages it
+	 * builds the direct map with starting at avail_start.  Left at its boot
+	 * value (a few KB), it stole them from *low conventional memory*
+	 * (phys 0x3000..0x9f000) — the same sub-1MB region the SMP AP trampoline
+	 * and other low-memory consumers scribble on.  At >=8 CPUs that wild
+	 * write lands on a live kernel direct-map PT page, so pmap_enter writes
+	 * a user PTE through phystokv() into a page the hardware no longer walks,
+	 * and the faulting copyout re-faults forever (#334).  start.S already
+	 * maps phys [0, hole_end) 1:1, so skipping it here loses no mapping; it
+	 * just forces the stolen PT pages to come from RAM above the hole.
+	 *
+	 * It also keeps the kernel/page-table pages out of the free list: with
+	 * avail_start >= hole_end the whole hole is below the available range
+	 * (pmap_next_page never hands it out).
 	 */
 	if (avail_start < hole_end)
 		avail_start = hole_end;
+
+	pmap_bootstrap(loadpt);
 
 	/* Steal the contiguous memory that's been requested by various
 	   kernel subsystems.  */

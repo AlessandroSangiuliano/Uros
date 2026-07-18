@@ -205,6 +205,36 @@ multiboot_header:
 	.long	0x00000002		/* flags: MEMORY_INFO (ELF hdrs used) */
 	.long	-(0x1BADB002 + 0x00000002)	/* checksum */
 
+	/*
+	 * #342: second, multiboot2 header.  Kept alongside the mb1 header
+	 * (dual): `qemu -kernel` uses the mb1 loader (no framebuffer), while
+	 * GRUB on UEFI uses mb2 and hands us a GOP linear framebuffer.  The
+	 * entry below branches on the bootloader magic in %eax.  mb2 requires
+	 * the header 8-byte aligned within the first 32 KiB of the image.
+	 */
+	.align	8
+multiboot2_header:
+	.long	0xE85250D6		/* mb2 magic */
+	.long	0			/* architecture: 0 = i386 (32-bit) */
+	.long	multiboot2_header_end - multiboot2_header	/* header length */
+	.long	-(0xE85250D6 + 0 + (multiboot2_header_end - multiboot2_header)) /* checksum */
+	/* framebuffer request tag (type 5): ask GRUB for a GOP framebuffer.
+	 * flags bit0 = 1 -> optional, so the kernel still boots if the
+	 * bootloader can't provide one (we confirm boot via serial first). */
+	.align	8
+	.short	5			/* MULTIBOOT_HEADER_TAG_FRAMEBUFFER */
+	.short	1			/* flags: optional */
+	.long	20			/* size */
+	.long	0			/* width  (0 = no preference) */
+	.long	0			/* height (0 = no preference) */
+	.long	0			/* depth  (0 = no preference) */
+	/* end tag (type 0) */
+	.align	8
+	.short	0
+	.short	0
+	.long	8
+multiboot2_header_end:
+
 	.text				/* switch back to text section */
 
 #if	NCPUS > 1
@@ -351,18 +381,51 @@ EXT(mp_boot_pde):
 	.align	ALIGN
 	.globl	EXT(pstart)
 LEXT(pstart)
+	/*
+	 * #342: capture the multiboot magic (%eax) and boot-info pointer
+	 * (%ebx) at the very first instruction — the `mov $0,%ax` below
+	 * already clobbers %eax, and the SMP start_lock xchg destroys it
+	 * entirely.  Only the BSP's first entry carries valid values; APs
+	 * re-enter pstart much later (in start_other_cpus), well after
+	 * parse_multiboot() has consumed these globals, so an AP overwrite
+	 * is harmless.
+	 */
+	movl	%eax, PA(EXT(boot_magic))
+	movl	%ebx, PA(EXT(boot_info_phys))
+
 	mov	$0,%ax			/* fs must be zeroed; */
 	mov	%ax,%fs			/* some bootstrappers don`t do this */
 	mov	%ax,%gs
 
 #if	NCPUS > 1
 	jmp	1f
-0:	cmpl	$0,PA(EXT(start_lock))
+	/*
+	 * #367: with the pipelined bring-up every AP is kicked at once and
+	 * they all queue here for the boot-stack lock.  PAUSE keeps N-1
+	 * spinning cores from hammering the lock cacheline while the one
+	 * inside the funnel is trying to get off the boot stack.
+	 */
+0:	pause
+	cmpl	$0,PA(EXT(start_lock))
 	jne	0b
-1:	movb	$1,%eax
+1:	movl	$1,%eax			/* movb $1,%eax was a 25-year-old gas bug — #300 */
 	xchgl	%eax,PA(EXT(start_lock)) /* locked */
 	testl	%eax,%eax
 	jnz	0b
+	/*
+	 * #367: announce that this CPU is past the trampoline and holds
+	 * start_lock.  From here to the svstart %esp switch nothing pushes,
+	 * so the shared boot stack's trampoline frames are dead the moment
+	 * this increment lands — which is exactly what the BSP's paced
+	 * kick waits for before SIPI-ing the next AP.  (The trampoline
+	 * window itself is NOT idempotent across APs: its call frames hold
+	 * phase-dependent values — a startprog frame holding the kernel
+	 * entry address gets overwritten by a slower AP's real_to_prot
+	 * return push, and the first AP far-returns into garbage; seen as
+	 * a #GP at 0x28:0x1f -> triple fault under parallel kicks.)
+	 */
+	lock
+	incl	PA(EXT(ap_funnel_entered))
 
 	cmpl	$0,PA(EXT(master_is_up))	/* are we first? */
 	jne	EXT(slave_start)		/* no -- system already up. */
@@ -371,14 +434,32 @@ LEXT(pstart)
 
 /*
  * Get startup parameters.
+ *
+ * #342: stash the bootloader magic (%eax) and the raw boot-info pointer
+ * (%ebx) so C can tell mb1 from mb2 and parse the right format.  Only do
+ * the historical mb1 struct copy into mb_info when the magic is mb1
+ * (0x2BADB002); for mb2 (0x36D76289) the C-side mb2 parser populates
+ * mb_info from the tag list instead.
  */
-
-        movl    %ebx, %esi
+        cmpl    $0x2BADB002, PA(EXT(boot_magic))  /* mb1 magic? (%eax gone */
+        jne     2f			/* -> read the saved copy; no -> mb2) */
+        movl    PA(EXT(boot_info_phys)), %esi	/* mb1 info ptr (physical) */
         lea     PA(EXT(mb_info)), %edi
         movl    PA(EXT(mb_info_size)), %ecx
         cld
         rep
 	movsb
+        jmp     1f
+2:
+        cmpl    $0x36D76289, PA(EXT(boot_magic))  /* mb2 magic? */
+        jne     1f			/* neither -> leave mb_info default */
+        movl    PA(EXT(boot_info_phys)), %esi	/* mb2 tag list (physical) */
+        lea     PA(EXT(mb2_info_buf)), %edi
+        movl    $16384, %ecx		/* copy a fixed chunk; paging is off */
+        cld
+        rep
+	movsb
+1:
 
 #if 0
 #ifdef	SYMMETRY
@@ -400,13 +481,70 @@ LEXT(pstart)
  * %ebx holds first available physical address.
  */
 
-	/* #241: bump first-available phys for page tables to 16 MB.
-	 * Was 0x500000 (5 MB), but multiboot modules (kernel symbols,
-	 * bootstrap server, and especially the multi-MB bundle of stage-1
-	 * binaries) end past 5 MB, so the page-table allocation here would
-	 * silently overwrite them.  16 MB is plenty of headroom for modules
-	 * loaded by GRUB before page tables begin. */
-	movl	$0x1000000,%ebx
+	/* #241 / #342 / #359: place the initial page tables ABOVE every
+	 * multiboot module.  #241 hardcoded 16 MB; #342 added a walk of the
+	 * mb2 tag list raising the base past the highest module end, on the
+	 * assumption that the tighter qemu/multiboot1 layout keeps modules
+	 * below 16 MB.  #359: that assumption died — the NCPUS=64 kernel
+	 * image plus a ~11 MB stage-1 bundle pushed mod[1]'s tail to ~18 MB
+	 * on mb1 too, and the fixed base silently zeroed the bundle's tail
+	 * (gpu_server onward: "unloadable file format").  So walk the module
+	 * list on BOTH boot paths; the 16 MB floor only covers the kernel
+	 * image itself.  i386_init() re-checks the final layout and panics
+	 * loudly if a module still overlaps the page-table area. */
+	movl	$0x1000000,%ebx			/* floor: 16 MB */
+
+	cmpl	$0x2BADB002,PA(EXT(boot_magic))	/* multiboot1 bootloader? */
+	jne	36f
+	leal	PA(EXT(mb_info)),%esi
+	movl	(%esi),%eax			/* mb1 flags */
+	testl	$0x8,%eax			/* MULTIBOOT_INFO_MODS set? */
+	jz	31f
+	movl	20(%esi),%ecx			/* mods_count */
+	movl	24(%esi),%esi			/* mods_addr (physical) */
+34:
+	testl	%ecx,%ecx			/* modules exhausted? */
+	jz	31f
+	movl	4(%esi),%eax			/* mod_end */
+	cmpl	%ebx,%eax
+	jbe	35f
+	movl	%eax,%ebx			/* raise base past this module */
+35:
+	addl	$16,%esi			/* next 16-byte module record */
+	decl	%ecx
+	jmp	34b
+36:
+	cmpl	$0x36D76289,PA(EXT(boot_magic))	/* multiboot2 bootloader? */
+	jne	31f
+	leal	PA(EXT(mb2_info_buf)),%esi
+	movl	(%esi),%ecx			/* total_size */
+	cmpl	$16384,%ecx			/* clamp to the copied buffer */
+	jbe	30f
+	movl	$16384,%ecx
+30:
+	leal	(%esi,%ecx),%edx		/* %edx = end of tag list */
+	addl	$8,%esi				/* skip total_size + reserved */
+32:
+	cmpl	%edx,%esi			/* past end of tags? */
+	jae	31f
+	movl	(%esi),%eax			/* tag type (0 = END) */
+	testl	%eax,%eax
+	jz	31f
+	movl	4(%esi),%ecx			/* tag size */
+	cmpl	$8,%ecx				/* malformed/zero -> stop */
+	jb	31f
+	cmpl	$3,%eax				/* MULTIBOOT_TAG_TYPE_MODULE? */
+	jne	33f
+	movl	12(%esi),%eax			/* mod_end */
+	cmpl	%ebx,%eax
+	jbe	33f
+	movl	%eax,%ebx			/* raise base past this module */
+33:
+	addl	$7,%ecx				/* advance to next 8-aligned tag */
+	andl	$-8,%ecx
+	addl	%ecx,%esi
+	jmp	32b
+31:
 	addl	$(NBPG-1),%ebx		/* round first avail physical addr */
 	andl	$(-NBPG),%ebx		/* to machine page size */
 	leal	-KVTOPHYS(%ebx),%eax	/* convert to virtual address */
@@ -682,7 +820,12 @@ LEXT(svstart)
 	movl	%eax, %cr3
 #endif	/* MBUS */
 
-	CPU_NUMBER(%eax)
+	/*
+	 * #321: %gs is not CPU_DATA yet (it is loaded near the end of svstart,
+	 * after the per-CPU GDT), so read the cpu number from the LAPIC here at
+	 * boot.  Once %gs is loaded, every other CPU_NUMBER reads %gs:cpu_id.
+	 */
+	CPU_NUMBER_FROM_LAPIC(%eax)
 	movl	CX(EXT(interrupt_stack),%eax),%esp /* get stack */
 	addl	$(INTSTACK_SIZE),%esp	/* point to top */
 	xorl	%ebp,%ebp		/* for completeness */
@@ -700,7 +843,7 @@ LEXT(svstart)
 					/* pointer returned in %eax */
 	subl	$4,%esp			/* get space to build pseudo-descriptors */
 	
-	CPU_NUMBER(%eax)
+	CPU_NUMBER_FROM_LAPIC(%eax)	/* #321: %gs not CPU_DATA yet (GDT not loaded) */
 	movw	$(GDTSZ*8-1),0(%esp)	/* set GDT size in GDT descriptor */
 	movl	CX(EXT(mp_gdt),%eax),%edx
 	movl	%edx,2(%esp)		/* point to local GDT */

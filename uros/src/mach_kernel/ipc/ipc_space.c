@@ -107,7 +107,6 @@
 #include <kern/zalloc.h>
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
-#include <ipc/ipc_splay.h>
 #include <ipc/ipc_object.h>
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_table.h>
@@ -211,11 +210,12 @@ ipc_space_create(
 	space->is_table_size = new_size;
 	space->is_table_next = initial+1;
 
-	ipc_splay_tree_init(&space->is_tree);
+	ipc_radix_init(&space->is_tree);
 	space->is_tree_total = 0;
 	space->is_tree_small = 0;
 	space->is_tree_hash = 0;
 	space->is_generation = 0;
+	space->is_seq = 0;		/* #331 step 2: table seqlock */
 
 	*spacep = space;
 	return KERN_SUCCESS;
@@ -252,9 +252,38 @@ ipc_space_create_special(
 	is_lock_init(space);
 	space->is_active = FALSE;
 	space->is_generation = 0;
+	space->is_seq = 0;		/* #331 step 2: table seqlock */
 
 	*spacep = space;
 	return KERN_SUCCESS;
+}
+
+/*
+ *	Routine:	ipc_space_destroy_entry
+ *	Purpose:
+ *		ipc_radix_destroy() callback (#331): clean one sparse overflow
+ *		right while the space is torn down, then free its tree entry.
+ */
+
+static void
+ipc_space_destroy_entry(
+	mach_port_index_t	index,
+	ipc_tree_entry_t	tentry,
+	void			*arg)
+{
+	ipc_space_t space = (ipc_space_t) arg;
+	mach_port_type_t type = IE_BITS_TYPE(tentry->ite_bits);
+	mach_port_t name = tentry->ite_name;
+
+	(void) index;
+	assert(type != MACH_PORT_TYPE_NONE);
+
+	/* use the object before ipc_right_clean releases the ref */
+	if (type == MACH_PORT_TYPE_SEND)
+		ipc_hash_global_delete(space, tentry->ite_object, name, tentry);
+
+	ipc_right_clean(space, name, &tentry->ite_entry);
+	ite_free(tentry);
 }
 
 /*
@@ -270,7 +299,6 @@ void
 ipc_space_destroy(
 	ipc_space_t	space)
 {
-	ipc_tree_entry_t tentry;
 	ipc_entry_t table;
 	ipc_entry_num_t size;
 	mach_port_index_t index;
@@ -327,23 +355,8 @@ ipc_space_destroy(
 
 	it_entries_free(space->is_table_next-1, table);
 
-	for (tentry = ipc_splay_traverse_start(&space->is_tree);
-	     tentry != ITE_NULL;
-	     tentry = ipc_splay_traverse_next(&space->is_tree, TRUE)) {
-		mach_port_type_t type = IE_BITS_TYPE(tentry->ite_bits);
-		mach_port_t name = tentry->ite_name;
-
-		assert(type != MACH_PORT_TYPE_NONE);
-
-		/* use object before ipc_right_clean releases ref */
-
-		if (type == MACH_PORT_TYPE_SEND)
-			ipc_hash_global_delete(space, tentry->ite_object,
-					       name, tentry);
-
-		ipc_right_clean(space, name, &tentry->ite_entry);
-	}
-	ipc_splay_traverse_finish(&space->is_tree);
+	/* #331: clean every sparse overflow right and free the radix. */
+	ipc_radix_destroy(&space->is_tree, ipc_space_destroy_entry, space);
 
 	/*
 	 *	Because the space is now dead,

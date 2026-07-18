@@ -146,6 +146,9 @@ ctrl_write_data(uint8_t v)
 #define KSYM_RETURN	0xFF0D
 #define KSYM_ESC	0xFF1B
 #define KSYM_F1		0xFFBE
+#define KSYM_F2		0xFFBF		/* F2..F4 for VT switch (#364) */
+#define KSYM_F3		0xFFC0
+#define KSYM_F4		0xFFC1
 #define KSYM_UP		0xFF52
 #define KSYM_DOWN	0xFF54
 #define KSYM_LEFT	0xFF51
@@ -177,7 +180,8 @@ static const uint16_t scset1_plain[128] = {
 	[0x34] = '.',	[0x35] = '/',	[0x36] = KSYM_RSHIFT,
 	[0x37] = '*',	[0x38] = KSYM_LALT, [0x39] = ' ',
 	[0x3A] = KSYM_CAPSLOCK,
-	[0x3B] = KSYM_F1, /* F1; F2..F12 omitted */
+	[0x3B] = KSYM_F1, [0x3C] = KSYM_F2, [0x3D] = KSYM_F3, [0x3E] = KSYM_F4,
+	/* F5..F12 still omitted — VT switch (#364) only needs F1..F4. */
 	[0x45] = KSYM_NUMLOCK, [0x46] = KSYM_SCROLLLOCK,
 };
 
@@ -200,7 +204,7 @@ static const uint16_t scset1_shift[128] = {
 	[0x34] = '>',	[0x35] = '?',	[0x36] = KSYM_RSHIFT,
 	[0x37] = '*',	[0x38] = KSYM_LALT, [0x39] = ' ',
 	[0x3A] = KSYM_CAPSLOCK,
-	[0x3B] = KSYM_F1,
+	[0x3B] = KSYM_F1, [0x3C] = KSYM_F2, [0x3D] = KSYM_F3, [0x3E] = KSYM_F4,
 	[0x45] = KSYM_NUMLOCK, [0x46] = KSYM_SCROLLLOCK,
 };
 
@@ -245,23 +249,16 @@ static struct ps2_priv ps2_singleton;
 /* ============================================================
  * Event fan-out.  One inline Mach msg per subscriber per event.
  *
- * msgh_id 4200 chosen outside the gpu_server (4000) and
- * char_server (4100) subsystems, well away from the IRQ
- * notification range (>= 3000).  Subscribers match on this id.
+ * The msgh_id (CHAR_KBD_EVENT_MSGH_ID) and the wire struct
+ * (char_kbd_event_msg_t) are the shared contract in
+ * <char/char_module_abi.h> — every subscriber, in-process (the
+ * console TTY, #363) or external, decodes with the same layout.
  * ============================================================ */
-
-#define CHAR_KBD_EVENT_MSGH_ID	4200
-
-typedef struct {
-	mach_msg_header_t	head;
-	NDR_record_t		ndr;
-	char_kbd_event_t	event;
-} ps2_event_msg_t;
 
 static void
 ps2_fanout(struct ps2_priv *p, const char_kbd_event_t *event)
 {
-	ps2_event_msg_t msg;
+	char_kbd_event_msg_t msg;
 	unsigned int i;
 	mach_msg_return_t mr;
 
@@ -349,6 +346,18 @@ ps2_handle_scancode(struct ps2_priv *p, uint8_t sc)
 		default: break;
 		}
 	}
+
+	/*
+	 * #382: Ctrl+D is the kernel-debugger break key (#335 kept it in
+	 * the kernel's own PS/2 snooper, but ps2.so takes IRQ 1 over once
+	 * it attaches, so the snooper goes deaf).  Report it to the
+	 * kernel; the RPC succeeds only when the -K boot flag armed the
+	 * break, and the keystroke is then consumed by the DDB session.
+	 */
+	if (pressed && keysym == 'd' &&
+	    (p->modifiers & CHAR_KBD_MOD_CTRL) &&
+	    char_core_ddb_break() == 0)
+		return;
 
 	{
 		char_kbd_event_t ev;

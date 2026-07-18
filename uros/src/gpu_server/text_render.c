@@ -50,6 +50,7 @@
 #define TEXT_QUEUE_DEPTH	16u
 
 struct text_chunk {
+	uint32_t surface;		/* target virtual surface (#204/#364) */
 	size_t	len;
 	char	data[GPU_BUF_MAX];
 };
@@ -93,7 +94,7 @@ text_render_worker(void *arg)
 		 * and 150 ns/byte on real hardware.  Holding the queue
 		 * mutex across those would needlessly serialise
 		 * enqueue with VRAM I/O. */
-		gpu_core_text_puts(local.data, local.len);
+		gpu_core_text_puts(local.surface, local.data, local.len);
 	}
 
 	/* unreachable */
@@ -156,6 +157,12 @@ gpu_text_render_init(void)
 void
 gpu_text_render_enqueue(const char *buf, size_t len)
 {
+	gpu_text_render_enqueue_surface(0u, buf, len);
+}
+
+void
+gpu_text_render_enqueue_surface(uint32_t surface, const char *buf, size_t len)
+{
 	struct text_chunk *slot;
 	size_t copy;
 
@@ -167,7 +174,7 @@ gpu_text_render_enqueue(const char *buf, size_t len)
 		 * paint so early-boot output (gpu_server's own
 		 * startup printf) still reaches the screen.  This path
 		 * runs single-threaded (we are pre-init), no race. */
-		gpu_core_text_puts(buf, len);
+		gpu_core_text_puts(surface, buf, len);
 		return;
 	}
 
@@ -195,6 +202,7 @@ gpu_text_render_enqueue(const char *buf, size_t len)
 	}
 
 	slot = &text_queue[q_head % TEXT_QUEUE_DEPTH];
+	slot->surface = surface;
 	slot->len = copy;
 	memcpy(slot->data, buf, copy);
 	q_head++;

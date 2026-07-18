@@ -24,12 +24,36 @@ set CMD_TIMEOUT   30
 set REPO_ROOT     [file dirname [file dirname [file normalize $argv0]]]
 set RUN_QEMU      "$REPO_ROOT/scripts/run-qemu.sh"
 
+# #376: optional "--smp N", forwarded to run-qemu.sh.  The spawn below used to
+# hardcode its whole argument list, so the smoke could only run at the default
+# CPU count -- while the v0.2.0 acceptance checklist asks for it at -smp 8.
+# Nothing was wrong with run-qemu.sh (it has --smp); the harness simply could
+# not ask for it.  Default (no --smp) keeps the previous behaviour exactly.
+set SMP_ARGS {}
+for {set i 0} {$i < [llength $argv]} {incr i} {
+    set a [lindex $argv $i]
+    if {$a eq "--smp"} {
+        incr i
+        if {$i >= [llength $argv]} {
+            send_user "\[smoke\] FAIL: --smp needs a CPU count\n"
+            exit 2
+        }
+        set SMP_ARGS [list --smp [lindex $argv $i]]
+    } else {
+        send_user "\[smoke\] FAIL: unknown option: $a\n"
+        exit 2
+    }
+}
+
 # Force a single line of output; -display none keeps QEMU from popping
 # a window, -serial mon:stdio multiplexes COM1 onto expect's pty.
 log_user 1
 set timeout $BOOT_TIMEOUT
 
-spawn $RUN_QEMU --minimal --allow-reboot -display none -serial mon:stdio
+spawn $RUN_QEMU --minimal --allow-reboot {*}$SMP_ARGS -display none -serial mon:stdio
+if {[llength $SMP_ARGS]} {
+    send_user "\n\[smoke\] running at [lindex $SMP_ARGS 1] CPUs\n"
+}
 
 # Step 0 — UrMach kernel banner (versioning, #295).  The kernel prints
 # URMACH_VERSION_STRING from <mach/urmach_version.h> at machine_startup.
