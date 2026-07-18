@@ -1,6 +1,6 @@
 # Uros v0.2.0 — release notes
 
-**Released:** 2026-07-XX
+**Released:** 2026-07-18
 **Kernel:** UrMach 0.2.0 (`URMACH_VERSION_STRING`)
 **Target arch:** i386 (SMP, up to `NCPUS=64`)
 **Companion docs:** [README.md](../README.md), [CHANGELOG.md](../CHANGELOG.md), [docs/uros_design.md](uros_design.md), [docs/lock_audit_smp.md](lock_audit_smp.md)
