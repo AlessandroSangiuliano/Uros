@@ -66,7 +66,7 @@ See [docs/release_notes_0.2.0.md](docs/release_notes_0.2.0.md) for the full narr
 
 ### Known limitations
 
-- **Pure-UEFI machines with no PS/2 (OMEGA class) are headless/bench-only** in 0.2.0: no input until the USB stack (#353) and no on-screen userspace console until the fbcons→gpu_server handoff (#369). Interactive use = BIOS/CSM machines (omen) or QEMU. This is a declared perimeter, not a bug.
+- **Pure-UEFI machines with no PS/2 (OMEGA class) are headless/bench-only** in 0.2.0: no input until the USB stack (#353) and no on-screen userspace console until the fbcons→gpu_server handoff (#369). Interactive use = QEMU (console + VT stack validated end-to-end there); bare-metal interactive additionally requires a dedicated SATA disk with the Uros MBR layout. Declared perimeter, not a bug. `^C`/`^Z` signal generation is wired on the serial ctty, not yet on the on-screen VT keyboard (#397). Backlog from the first bare-metal interactive attempt: #398 (cross-session kill), #399 (AHCI 48-bit LBA), #400 (GPT recognition).
 - **Pre-saturation scaling hump on many-core** — at 12–24 threads on 32 CPUs, RPC pairs scattered across idle CPUs pay cold caches and the wake path (up to ~55k ns/RPC, recovering to ~12.6k at exact saturation). Diagnosed (#319 verdict), lever identified (#356 `-P`); full placement work is next-cycle.
 - **fork() rough edges from v0.1.0 remain** (#269 class); POSIX `uname()` backed by the version macros (#296) slipped to the next cycle.
 - **THREAD_SWAPPER is still compiled into hot paths** — kernel rework planned post-SMP.

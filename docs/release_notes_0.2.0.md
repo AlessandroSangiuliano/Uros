@@ -131,7 +131,7 @@ The arsenal that ships with the release: a per-CPU **perf-counter NMI hard-locku
 - **UEFI boot path** (#342, #343): multiboot2 with ACPI RSDP handoff, hybrid GRUB images (`scripts/make-omen-boot.sh`), and an in-kernel **GOP framebuffer console** for early output on machines with no serial port and no VGA text mode.
 - **fbcons at full panel** (#371, #372): native-resolution char-cell renderer with an adaptive 2× font, jump-scroll, and a write-combining framebuffer mapping (an uncached GOP framebuffer is unusable; WC is the difference between a console and a slideshow).
 - **On-screen terminal stack** (#363, #364, #365): a real keyboard+GPU console TTY through char_server↔gpu_server, **virtual terminals** on Ctrl-Alt-Fn, and lazy per-VT shells under a per-VT supervisor. The serial console remains the headless path.
-- **Bare-metal validation**: omen (i7-gen7, BIOS/CSM, interactive) and OMEGA (i9-13900K, pure UEFI, 32 logical CPUs — bench workhorse). The early triple-fault class on real firmware (#344, #346) is fixed; multiboot1 modules crossing 16 MB no longer get clobbered by the boot page tables (#359).
+- **Bare-metal validation**: omen (i7-gen7, BIOS/CSM) and OMEGA (i9-13900K, pure UEFI, 32 logical CPUs — bench workhorse), both for boot/output/bench. The early triple-fault class on real firmware (#344, #346) is fixed; multiboot1 modules crossing 16 MB no longer get clobbered by the boot page tables (#359). The interactive console + VT stack is validated end-to-end under QEMU (see Known limitations for the bare-metal precondition).
 
 ### 7. Storage, proc, and userland under SMP
 
@@ -201,7 +201,9 @@ KVM numbers are deliberately absent from this section: KVM lies about time on pr
 
 ## Known limitations
 
-- **Pure-UEFI machines with no PS/2 input (the OMEGA class) are headless/bench-only.** No USB stack yet (#353) and no fbcons→gpu_server console handoff yet (#369), so such machines have output but no input. Interactive use lives on BIOS/CSM machines (omen) and QEMU. This is a declared perimeter of 0.2.0, not a bug.
+- **Pure-UEFI machines with no PS/2 input (the OMEGA class) are headless/bench-only.** No USB stack yet (#353) and no fbcons→gpu_server console handoff yet (#369), so such machines have output but no input. This is a declared perimeter of 0.2.0, not a bug.
+- **Interactive use lives on QEMU in 0.2.0.** The on-screen console + VT stack (boot to `ush$` on the display, foreground/background jobs, Ctrl-Alt-Fn switching with lazy per-VT shells, clean `shutdown` drain) is validated end-to-end under QEMU with PS/2 + VGA text. Bare-metal interactive additionally requires dedicating a SATA disk with the Uros MBR layout for the root filesystem — there is no USB storage yet, and no current test machine can spare its disk. A precondition, not a bug. (Trying it on a GPT-partitioned disk also surfaced two driver gaps for the backlog: the AHCI IDENTIFY parser reads the 28-bit LBA field — a 1 TB disk reports as 128 GiB — #399, and the partition scanner does not recognize GPT — #400.)
+- **Line-discipline signals on the on-screen console**: `^C`/`^Z` generate signals on the serial ctty path; the on-screen VT keyboard does not wire them yet (#397, found by the release validation drive). A cross-session `kill` defect found in the same drive is tracked as #398. Serial job control is unaffected.
 - **The 12–24-thread placement hump on 32 CPUs** is understood but not yet engineered away; #356's remaining increments are the plan. Same-space RPC at full saturation sits at the ~10–12k ns/RPC ceiling on both test machines.
 - **fork() rough edges from v0.1.0 remain** (#269 class). `uname()` wiring (#296) slipped again.
 - **THREAD_SWAPPER still compiles into hot paths** — a post-SMP kernel rework will retire it.
