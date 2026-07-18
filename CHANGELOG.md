@@ -6,7 +6,7 @@ The numbering tracks Uros as a whole (multiserver OS + userland). The UrMach ker
 
 ---
 
-## 0.2.0 — 2026-07-XX
+## 0.2.0 — 2026-07-18
 
 **Theme**: SMP. Uros goes from a single-core system to a symmetric multiprocessor: UrMach boots, schedules and benchmarks on 32 logical CPUs on real hardware (Intel i9-13900K hybrid P/E), with modern per-CPU foundations, a phased kernel-locking modernization, idle power management, and a long tail of concurrency bugs found and fixed by running real workloads on real silicon. Kernel banner: `UrMach 0.2.0`.
 

@@ -2,15 +2,17 @@
 
 Uros is a multiserver operating system originally based on the OSF variant of Mach (the `osfmk` codebase from the MkLinux DR3 project, by the Open Software Foundation and Carnegie Mellon University). The source tree under `uros/` was historically named `osfmk/` and the kernel inside it has since evolved into **UrMach**. The goal is to build a modern, secure, multiserver OS on top of UrMach.
 
-**Target architecture:** i386 (32-bit x86)
-**Kernel:** UrMach 0.1.0
-**Compiler:** GCC 15, `-std=gnu11`
+**Target architecture:** i386 (32-bit x86), SMP up to `NCPUS=64`
+**Kernel:** UrMach 0.2.0
+**Compiler:** GCC, `-std=gnu11` (tested with GCC 15/16)
 **Build system:** CMake / Ninja
 **libc:** musl (static + shared, with an Uros syscall dispatcher)
 
-## Current status (v0.1.0)
+## Current status (v0.2.0)
 
 Uros boots through the full multiserver stack and lands in an interactive shell (`ush`) over the controlling tty, with a working musl-based POSIX runtime: `fork`+`execve`+`waitpid`, job control (`tcsetpgrp`/`tcgetpgrp`, `SIGCONT`/`SIGTSTP`/`SIGINT`), signals via per-thread exception ports, `/proc`, file I/O through libvfs (with a FLIPC v2 read-ahead fast path), and runtime ELF loading through ld-musl + a libc.so umbrella.
+
+As of v0.2.0 the whole stack is **SMP**: one kernel binary boots up to **32 logical CPUs on real hardware** (Intel i9-13900K) with pipelined AP bring-up, a modernized kernel-locking stack, idle-HLT + HWP power management, and an **on-screen console with Ctrl-Alt-Fn virtual terminals**. A combined null RPC on a P-core runs at ~1.1 µs with the full SMP locking stack underneath.
 
 You can type into the QEMU window or the serial console and run static or dynamically-linked musl binaries:
 
@@ -30,19 +32,45 @@ ush$ shutdown
 ### What boots
 
 ```
-QEMU multiboot -> UrMach 0.1.0 -> bootstrap server
+QEMU / bare metal (BIOS mb1, UEFI mb2 + GOP fbcons) -> UrMach 0.2.0 (SMP) -> bootstrap
   -> default_pager       (swap on disk0c)
   -> name_server         (netname_check_in/look_up + mount registry)
   -> cap_server          (capability authority + libcap)
   -> hal_server          (PCI enumeration, device registry, IRQ routing)
   -> block_device_server (AHCI + virtio-blk as dynamic modules)
   -> gpu_server          (VGA text console, libgpu_console mirror)
-  -> char_server         (UART tty, keyboard, job control)
+  -> char_server         (UART tty, PS/2 keyboard, on-screen console TTY, job control)
+  -> virtual_terminal_server (Ctrl-Alt-Fn VTs, lazy per-VT shells)
   -> ext_server          (ext2 multi-mount: '/', '/mnt/disk1')
   -> proc_server         (POSIX process model: fork/exec/wait/signals, /proc)
   -> exec_server         (userspace ELF loader, PT_INTERP + AT_BASE + auxv)
   -> ush                 (Uros shell — interactive prompt over ctty)
 ```
+
+### v0.2.0 release highlights
+
+v0.2.0 is the SMP release. Full narrative in [docs/release_notes_0.2.0.md](docs/release_notes_0.2.0.md); issue-by-issue list in the [CHANGELOG](CHANGELOG.md).
+
+#### SMP kernel
+
+- **Pipelined AP bring-up** (#367) — ACPI MADT discovery, attempt+retry INIT/SIPI (the 1994 fixed delays are gone), the BSP kicks every AP back-to-back and paces only the shared real-mode trampoline. ~120× faster per-AP kick; a dead AP degrades the boot instead of hanging it.
+- **Per-CPU foundations** — `%gs` per-CPU data (#321), per-CPU SYSENTER trampoline (#348), per-CPU LAPIC timer (#312), soft-spl (#322), IOAPIC routing (#311), TLB shootdown via IPI (#304).
+- **Locking modernization** — audited primitives (#303), `ipc_space` reader-writer lock (#327), per-pmap + split page-table locks (#329, #330, #338) with the shootdown barrier **formally proved** under x86-TSO via herd7 (#350, `uros/tools/litmus/`), lock-free capability lookups on a radix + seqlock table (#331), zone magazines + dynamic per-CPU allocation (#330).
+- **futex primitives** (#324, #325) — wait/wake/requeue + `futex_waitv`; libpthreads mutexes/condvars ride the futex fast path.
+- **Idle → HLT** (#357) and **HWP** (#358) — idle CPUs halt (worth 4–6.4× on all-32 bare-metal IPC latency) and hardware P-states are enabled at bring-up (a further −20/−40% on P-cores). `-S`/`-Q` boot flags opt out.
+- **A season of SMP crash hunts** — kill×fork/exec storms, concurrent writers and 32-core sweeps flushed out the classic classes: error-path lock leaks (#383, #386→#390), TOCTOU wakeups (#387), COW-window fork corruption (#385), close/reclaim UAF (#388), UB shifts (#355, #362), a kernel receive-path overflow (#374), and historical no-op locks made real (#377, #384). The debug arsenal ships in-tree: per-CPU NMI hard-lockup watchdog (`-W`), DDB entry doors, owner-tracked mutexes, zone poisoning.
+
+#### Console + bare metal
+
+- **UEFI framebuffer console** (#342, #371, #372) — multiboot2 + GOP fbcons with write-combining mapping and a full-panel adaptive renderer.
+- **On-screen console + virtual terminals** (#363, #364, #365) — keyboard+GPU console TTY, Ctrl-Alt-Fn switching, lazy per-VT shells.
+- **Bare metal** — BIOS/CSM (omen, i7-gen7) and pure-UEFI (OMEGA, i9-13900K / 32 logical CPUs) validated for boot, output and benchmarks; bootable bench ISOs via `scripts/make-omen-boot.sh --iso --bench-only <suite>`.
+
+#### Userland
+
+- **cpustat** (#375) — per-CPU load monitor, the first dynamically-linked real tool in the image.
+- **proc_server hardening** — pid-table slots reaped (#378, #389), honest `EAGAIN` from fork on a full table (#389), graceful reboot for SIGTERM handlers (#379), cross-CPU `task_terminate` (#380) with a `kill` builtin in ush.
+- **Release gate at 8 CPUs** — `scripts/smoke-ush.sh --smp 8` (#376).
 
 ### v0.1.0 release highlights
 
@@ -85,7 +113,21 @@ Where v0.0.2 was "boots, runs servers, hits the IPC numbers", v0.1.0 is "boots t
 - **CLI argv via SysV stack** (#294) — `crt0`'s asm trampoline captures the entry stack pointer and falls back to parsing `[argc][argv[]][NULL][envp[]]` for `execve`'d images; bootstrap-loaded servers still use `bootstrap_arguments`.
 - All v0.0.2 kernel work still in: flat memory model, SYSENTER, SSE/SSE2 + XSAVE, stack protector, HIGHMEM to 4 GB, DDB continuations, protected payloads, ELF multi-segment + ET_DYN, kmsg pool LIFO, port-cache, direct thread switch, zero-copy OOL.
 
-### IPC + performance (KVM, single core)
+### IPC + performance
+
+**Bare metal, v0.2.0** (2026-07-18, release kernel; medians / saturated points — hybrid P/E parts make single runs a lottery):
+
+| Metric | OMEGA (i9-13900K, 32 CPUs) | omen (i7-gen7, 8 CPUs) |
+|---|---|---|
+| Combined null RPC, same-CPU | ~1.1 µs (P-core) / ~1.45 µs all-32 | 1.68 µs |
+| Inter-task null RPC | 2.0–2.1 µs | 2.9 µs |
+| Same-space concurrent RPC at saturation | ~12.6k ns/RPC @ 32 thr | ~10.1k ns/RPC @ 32 thr |
+| Idle→HLT win (#357) | 4–6.4× across all suites | — |
+| Page-fault scaling (#338) | — | ~2000 → 140–400 ns/fault (2 → 7-8 CPUs) |
+
+Full tables, method rules and the placement analysis: [docs/release_notes_0.2.0.md](docs/release_notes_0.2.0.md) §Benchmarks.
+
+#### Historical baseline (KVM, single core, v0.1.0)
 
 Numbers from v0.0.2 still stand; v0.1.0 doesn't regress them. Mach IPC at ~1.2 µs intra-task null RPC, ~1.7 µs inter-task, zero-copy OOL constant ~2 µs from 4 KB to 64 KB. FLIPC v2 dominates throughput: 5 ns/op null batched, 17 ns/op 128 B produce+consume, 151 ns/op 4 KiB, 60-draw game frame in 0.34 µs batched.
 
@@ -124,7 +166,9 @@ Disk benchmarks (`disk_bench` via flipc_bench): raw AHCI 64 KB reads ~240–307 
 - `scripts/smoke-ush.sh` (driven by `smoke-ush.exp`) is the end-to-end acceptance run — boots Uros, anchors on the UrMach banner + ush prompt, exercises `hello_exec`, `hello_world`, `flipc_bench` standalone + `-R 60` FLIPC stress, FLIPC fd+read churn, and `shutdown` + clean unmount. Green on every release tag.
 - `scripts/diag293-mach.exp` — focused stress for the Mach OOL `fs_read` path (`/flipc_bench -M 60`), used to bisect #293.
 - `sig_test` — proc_server signal+job-control regression (14/14 across signal delivery, ctty, pgrp).
-- `pthread_test` — 22/22 pthread regression after #257+#273+#274.
+- `pthread_test` — 23/23 pthread regression (mutex types, condvars, rwlocks, barriers, futex paths).
+- `cap_test` — capability suite with the #394 SHA-NI known-answer gate and the #395 raw-trap XMM-preservation probe (kernel FPU-discipline regression).
+- The release gate runs the smoke at `--smp 8` plus all three suites on the release tip.
 
 ### User-space libraries
 
@@ -348,7 +392,20 @@ Exits 0 if every checkpoint passes (UrMach banner, ush prompt, hello_exec AUXV, 
 
 ## Roadmap
 
-### v0.1.0 (this release)
+### v0.2.0 (this release)
+
+- [x] SMP: pipelined AP bring-up to 32 logical CPUs on bare metal (#300-#316, #367)
+- [x] Kernel locking modernization — pmap split locks, `ipc_space` rwlock, radix+seqlock capability table, zone magazines (#327-#331, #338)
+- [x] herd7 formal validation of the pmap shootdown barrier under x86-TSO (#350)
+- [x] futex + `futex_waitv` kernel primitives; libpthreads on the futex fast path (#324, #325)
+- [x] Idle→HLT + HWP power management (#357, #358)
+- [x] Interactive graphical console — on-screen TTY + Ctrl-Alt-Fn virtual terminals (#363-#365)
+- [x] UEFI bare-metal boot with GOP framebuffer console (#342, #371, #372)
+- [x] cpustat — first dynamically-linked tool (#375)
+- [x] SMP crash-hunt hardening season (#317, #352-#362, #370-#395)
+- [x] UrMach 0.2.0, `NCPUS=64` release build; smoke gate at `-smp 8` (#376)
+
+### v0.1.0
 
 - [x] Userspace AHCI (SATA) driver
 - [x] Userspace virtio-blk driver
@@ -364,21 +421,22 @@ Exits 0 if every checkpoint passes (UrMach banner, ush prompt, hello_exec AUXV, 
 - [x] UrMach kernel versioning (0.1.0)
 - [x] MIG OOL leak class fixed (`Dealloc` / `UserDealloc`)
 
-### v0.2.0 — next release (planning)
+### v0.3.0 — next release (planning)
 
-Themes under discussion:
-
-- [ ] Interactive QEMU window — `ush` reachable from the graphical console (keyboard + VGA tty), not just serial
-- [ ] FreeBSD userland port — `ls`, `cat`, `cp`, `sh`, basic utilities running on the POSIX runtime
-- [ ] Capability system v1 — modern, performant cap layer (the design lives in `docs/uros_design.md` §4-5 and `cap_types.h` / `cap_manifest.h`)
-- [ ] libdl auto-bootstrap (#162) and per-class module pool maturity (#163)
-- [ ] device.defs / BDS audit pass (#297 follow-ups beyond the immediate fix)
-- [ ] terminal stack — pipe/PTY with flow control replacing the libgpu_console debug mirror for app stdout
+- [ ] **x86-64 port** — PCID (context switch without TLB flush), SYSCALL entry, higher-half kernel + direct map: the next performance floor
+- [ ] Wakeup placement, remaining increments (#356) — the measured lever for the many-core pre-saturation hump
+- [ ] `ipc_space` write-side scaling (#340); deferred pmap follow-ups (#318, #349)
+- [ ] IPC profiling (#392) before any IPC redesign (#391)
+- [ ] USB stack (#353) + fbcons→gpu_server handoff (#369) — turns pure-UEFI machines interactive
+- [ ] Source-tree reorganization (#396)
+- [ ] Backlog from the 0.2.0 validation drive: on-screen `^C`/`^Z` (#397), cross-session kill (#398), AHCI 48-bit LBA (#399), GPT recognition (#400)
 
 ### Later / future
 
-- [ ] SMP (slab allocator with per-CPU magazines as prerequisite, #80)
-- [ ] x86_64 port (PCID, MMCONFIG, IOMMU/VT-d)
+- [ ] FreeBSD userland port — `ls`, `cat`, `cp`, `sh`, basic utilities running on the POSIX runtime
+- [ ] Capability system v1 — modern, performant cap layer (the design lives in `docs/uros_design.md` §4-5 and `cap_types.h` / `cap_manifest.h`)
+- [ ] terminal stack — pipe/PTY with flow control; termios raw mode (the zsh-port prerequisites)
+- [ ] libdl auto-bootstrap (#162) and per-class module pool maturity (#163); device.defs / BDS audit pass (#297 follow-ups)
 - [ ] Unified Mach + FLIPC capability fabric (the "POST-Unix" goal: Unix-like personality on a modern microkernel + caps + high-performance IPC)
 - [ ] Additional architectures: aarch64, riscv64, optionally aarch32
 - [ ] Self-hosting
@@ -399,7 +457,9 @@ uros/
 │   ├── exec_server/           # Userspace ELF loader (PT_INTERP, auxv, pid-preserving exec)
 │   ├── cap_server/            # Capability authority + revoke notifications
 │   ├── gpu_server/            # GPU/display server (VGA text, libgpu_console mirror)
-│   ├── char_server/           # Character devices (UART tty, job control)
+│   ├── char_server/           # Character devices (UART tty, PS/2 kbd, console TTY, job control)
+│   ├── virtual_terminal_server/ # Ctrl-Alt-Fn VTs, lazy per-VT shells (#365)
+│   ├── cpustat/               # per-CPU load monitor — first dynamic tool (#375)
 │   ├── ush/                   # Uros shell
 │   ├── hello_world/           # static musl printf hello
 │   ├── hello_dyn_world/       # dynamic-linked twin (libc.so)
@@ -431,15 +491,17 @@ uros/
 │           ├── musl/          # Patched musl libc (static + shared)
 │           └── migcom/        # MIG compiler (Flex/Bison) — supports UserDealloc
 ├── export/include/            # Public headers (multi-arch: i386, <arch>/...)
+├── tools/litmus/              # herd7 litmus proofs of the pmap barrier (#350)
 ├── build/                     # Build output
 │   └── export/uros/boot/      # mach_kernel binary
 scripts/
-├── run-qemu.sh                # QEMU launch (--ahci, --virtio, --bench, --minimal)
+├── run-qemu.sh                # QEMU launch (--ahci, --virtio, --bench, --minimal, --smp N)
 ├── run-ush.sh                 # serial-only ush convenience launcher
-├── smoke-ush.sh / .exp        # release smoke gate
+├── smoke-ush.sh / .exp        # release smoke gate (--smp N)
 ├── diag293-mach.exp           # focused Mach OOL stress harness
 ├── make-disk-image.sh         # Disk image builder
-└── make-bundle.sh             # Multiboot stage-1 bundle builder
+├── make-bundle.sh             # Multiboot stage-1 bundle builder
+└── make-omen-boot.sh          # Bare-metal hybrid GRUB image / bench ISOs (--iso --bench-only)
 docs/
 ├── uros_design.md             # Full system design (HAL, drivers, caps, IPC, boot)
 ├── flipc2.md / flipc_v2_design.md
