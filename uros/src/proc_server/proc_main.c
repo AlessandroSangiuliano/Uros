@@ -574,6 +574,68 @@ signo_valid(int signo)
     return signo > 0 && signo < PROC_NSIG;
 }
 
+/*
+ * Default disposition of a signal for a target that has registered no
+ * signal_port (no libposix signal handler thread).  POSIX still requires
+ * the signal's default action to take effect: an unhandled SIGTERM/SIGINT
+ * terminates the process, an unhandled job-control stop signal stops it,
+ * SIGCHLD is discarded.  proc_server applies these itself on the task port,
+ * exactly as it already does for the uncatchable SIGKILL/SIGSTOP (#398).
+ *
+ * SIGKILL/SIGSTOP/SIGCONT never reach this helper — they are handled
+ * before the signal_port lookup.
+ */
+enum sig_dfl { SIG_DFL_TERM, SIG_DFL_STOP, SIG_DFL_IGN };
+
+static enum sig_dfl
+sig_default_action(int signo)
+{
+    switch (signo) {
+    case PROC_SIGCHLD:
+        return SIG_DFL_IGN;                     /* discarded by default */
+    case PROC_SIGTSTP:
+    case PROC_SIGTTIN:
+    case PROC_SIGTTOU:
+        return SIG_DFL_STOP;                    /* stop the process */
+    default:
+        return SIG_DFL_TERM;                    /* HUP/INT/QUIT/TERM/USR/PIPE/ALRM/... */
+    }
+}
+
+/*
+ * Carry out a signal's default disposition on the target's task port, for
+ * a pid that has no usable signal_port.  Returns the PROC_* result code.
+ */
+static int
+apply_default_disposition(proc_pid_t pid, int signo, mach_port_t task)
+{
+    struct pid_entry *e;
+    kern_return_t kr;
+
+    if (task == MACH_PORT_NULL)
+        return PROC_ERR_KERNEL;
+
+    switch (sig_default_action(signo)) {
+    case SIG_DFL_TERM:
+        kr = task_terminate(task);
+        return (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
+    case SIG_DFL_STOP:
+        kr = task_suspend(task);
+        if (kr == KERN_SUCCESS) {
+            /* Mark the pid stopped so a later SIGCONT resumes it. */
+            pthread_mutex_lock(&pid_lock);
+            e = find_by_pid_locked(pid);
+            if (e)
+                e->stopped = 1;
+            pthread_mutex_unlock(&pid_lock);
+        }
+        return (kr == KERN_SUCCESS) ? PROC_OK : PROC_ERR_KERNEL;
+    case SIG_DFL_IGN:
+    default:
+        return PROC_OK;                 /* delivered to a process that ignores it */
+    }
+}
+
 kern_return_t
 proc_S_set_signal_port(
     mach_port_t                 server_port,
@@ -664,13 +726,15 @@ proc_S_kill(
 
     /* Uncatchable signals act on the task port; catchable ones go to
      * the signal_port via mach_msg.  Snapshot the rights under the
-     * lock, release the lock before issuing the kernel/mach call. */
-    if (signo == PROC_SIGKILL || signo == PROC_SIGSTOP) {
-        task = e->task_port;
-    } else {
+     * lock, release the lock before issuing the kernel/mach call.  The
+     * task port is snapshotted unconditionally: a catchable signal to a
+     * target with no signal_port falls back to its default disposition,
+     * which also acts on the task (#398). */
+    task = e->task_port;
+    if (!(signo == PROC_SIGKILL || signo == PROC_SIGSTOP))
         sigport = e->signal_port;
-    }
     pthread_mutex_unlock(&pid_lock);
+
 
     switch (signo) {
     case PROC_SIGKILL:
@@ -694,7 +758,9 @@ proc_S_kill(
     }
 
     if (sigport == MACH_PORT_NULL) {
-        *result = PROC_ERR_NO_SIGPORT;
+        /* No handler thread registered: honour the signal's default
+         * disposition on the task port instead of dropping it (#398). */
+        *result = apply_default_disposition(pid, signo, task);
         return KERN_SUCCESS;
     }
 
@@ -711,7 +777,16 @@ proc_S_kill(
         } else {
             pthread_mutex_unlock(&pid_lock);
         }
-        *result = PROC_ERR_KERNEL;
+        /*
+         * The registered port is stale — typically a pid that forked (the
+         * child's libposix registered a handler port) and then execve'd, so
+         * the receive right died with the replaced image.  Clearing the slot
+         * alone made the signal vanish and wasted this kill: the caller saw
+         * success and the target kept running, and only a *second* kill —
+         * which then found the slot empty — took effect (#398).  Fall through
+         * to the default disposition now, so one kill is enough.
+         */
+        *result = apply_default_disposition(pid, signo, task);
         return KERN_SUCCESS;
     }
 
@@ -874,10 +949,11 @@ proc_S_getpgid(
  * killpg: deliver signo to every running pid in pgrp.  We can't hold
  * pid_lock across task_terminate / mach_msg, so we snapshot the
  * matching ports into a local array under the lock, then dispatch
- * outside.  For catchable signals we use signal_port (COPY_SEND);
- * pids without a signal_port are skipped silently (POSIX killpg
- * doesn't require every recipient to be reachable).  n_sent counts
- * how many dispatches actually fired.
+ * outside.  For catchable signals we use signal_port (COPY_SEND); pids
+ * with no usable signal_port — never registered, or stale after the
+ * registering image was replaced by execve — take the signal's default
+ * disposition instead of being dropped (#398).  n_sent counts how many
+ * dispatches actually fired.
  */
 kern_return_t
 proc_S_killpg(
@@ -891,11 +967,13 @@ proc_S_killpg(
      * We size the array to PROC_MAX_TASKS so it always fits. */
     struct killpg_target {
         mach_port_t port;       /* task_port for uncatchable, signal_port otherwise */
+        mach_port_t task;       /* task port — default-disposition fallback (#398) */
         proc_pid_t  pid;        /* for cleanup-on-error of signal_port */
     };
     struct killpg_target uncatch[PROC_MAX_TASKS];
     struct killpg_target catchable[PROC_MAX_TASKS];
-    unsigned n_uncatch = 0, n_catch = 0;
+    struct killpg_target dfl[PROC_MAX_TASKS];       /* catchable, no signal_port -> default action (#398) */
+    unsigned n_uncatch = 0, n_catch = 0, n_dfl = 0;
     unsigned i;
     unsigned sent = 0;
     int is_uncatch;
@@ -921,8 +999,15 @@ proc_S_killpg(
             n_uncatch++;
         } else if (pid_table[i].signal_port != MACH_PORT_NULL) {
             catchable[n_catch].port = pid_table[i].signal_port;
+            catchable[n_catch].task = pid_table[i].task_port;
             catchable[n_catch].pid  = pid_table[i].pid;
             n_catch++;
+        } else {
+            /* Catchable signal, but this member registered no handler:
+             * its default disposition acts on the task port (#398). */
+            dfl[n_dfl].port = pid_table[i].task_port;
+            dfl[n_dfl].pid  = pid_table[i].pid;
+            n_dfl++;
         }
     }
     pthread_mutex_unlock(&pid_lock);
@@ -957,7 +1042,23 @@ proc_S_killpg(
                 } else {
                     pthread_mutex_unlock(&pid_lock);
                 }
+                /* Stale port (the registering image was execve'd away):
+                 * fall back to the default disposition so this delivery
+                 * isn't wasted — same rule as proc_kill (#398). */
+                if (apply_default_disposition(catchable[i].pid, signo,
+                                              catchable[i].task) == PROC_OK)
+                    sent++;
             }
+        }
+
+        /* Members that registered no handler: apply the signal's default
+         * disposition on the task port, same as proc_kill (#398).  Without
+         * this a ^C/^Z to a pgrp containing a handler-less job (e.g. a bare
+         * spinner) would silently skip it. */
+        for (i = 0; i < n_dfl; i++) {
+            if (apply_default_disposition(dfl[i].pid, signo,
+                                          dfl[i].port) == PROC_OK)
+                sent++;
         }
     }
 
