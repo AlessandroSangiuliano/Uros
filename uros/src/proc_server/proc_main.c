@@ -314,6 +314,7 @@ proc_S_exec_handoff(
 {
     struct pid_entry *e;
     mach_port_t old_port = MACH_PORT_NULL;
+    mach_port_t old_sigport = MACH_PORT_NULL;
     mach_port_t prev = MACH_PORT_NULL;
     kern_return_t kr;
 
@@ -331,9 +332,25 @@ proc_S_exec_handoff(
     old_port      = e->task_port;
     e->task_port  = new_task;
     e->state      = PROC_STATE_RUNNING;
+    /*
+     * POSIX: execve resets every caught signal to its default disposition,
+     * because the handlers live in the image being replaced.  Concretely the
+     * port registered here belongs to the pre-exec image (typically the
+     * forked child, still running the parent's image when libposix
+     * registered it), and its receive right dies with that image.  Leaving
+     * it named here means the next kill(2) posts into a dead end and has to
+     * discover the breakage the hard way; dropping it now makes the very
+     * next signal take the default disposition directly (#398).
+     */
+    old_sigport    = e->signal_port;
+    e->signal_port = MACH_PORT_NULL;
     (void)strncpy(e->cmdline, cmdline, sizeof(e->cmdline) - 1);
     e->cmdline[sizeof(e->cmdline) - 1] = '\0';
     pthread_mutex_unlock(&pid_lock);
+
+    /* Same policy as proc_set_signal_port when a port is replaced. */
+    if (old_sigport != MACH_PORT_NULL)
+        (void)mach_port_deallocate(mach_task_self(), old_sigport);
 
     /* Watch the new task for death so waitpid still reaps old_pid. */
     kr = mach_port_request_notification(mach_task_self(), new_task,
