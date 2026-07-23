@@ -402,24 +402,51 @@ __uros_sigaction(int signo, const void *act_, void *old_)
     return 0;
 }
 
+/*
+ * rt_sigprocmask carries the *kernel* sigset, which on i386 is two words
+ * — musl passes exactly _NSIG/8 bytes and hands us that size in the
+ * fourth argument.  The POSIX sigset_t stored above is 128 bytes, so
+ * declaring the parameters as sigset_t read and wrote 128 bytes through
+ * pointers to 8-byte objects: the .rodata masks behind musl's
+ * __block_all_sigs / __block_app_sigs, and a struct field on the new
+ * thread's stack in pthread_create.  Nothing consulted the resulting
+ * garbage (it lands above bit 31 and PROC_NSIG is 32), but it is the
+ * same aliasing that made rt_sigaction smash musl's frame in #397 — and
+ * the two declarations of this function disagreed across translation
+ * units, so the compiler could never say so.  Convert explicitly.
+ */
+#define UROS_K_SIGSET_WORDS 2
+
 int
-__uros_sigprocmask(int how, const sigset_t *set, sigset_t *old)
+__uros_sigprocmask(int how, const void *set_, void *old_, unsigned setsize)
 {
+    const unsigned long *set = set_;
+    unsigned long       *old = old_;
+    unsigned long       *cur = (unsigned long *)&__sig_mask;
+
+    if (setsize != UROS_K_SIGSET_WORDS * sizeof(unsigned long))
+        return -EINVAL;
+
     if (old)
-        *old = __sig_mask;
+        for (unsigned i = 0; i < UROS_K_SIGSET_WORDS; i++)
+            old[i] = cur[i];
     if (!set)
         return 0;
     switch (how) {
     case SIG_BLOCK:
-        for (size_t i = 0; i < sizeof __sig_mask / sizeof(unsigned long); i++)
-            ((unsigned long *)&__sig_mask)[i] |= ((const unsigned long *)set)[i];
+        for (unsigned i = 0; i < UROS_K_SIGSET_WORDS; i++)
+            cur[i] |= set[i];
         break;
     case SIG_UNBLOCK:
-        for (size_t i = 0; i < sizeof __sig_mask / sizeof(unsigned long); i++)
-            ((unsigned long *)&__sig_mask)[i] &= ~((const unsigned long *)set)[i];
+        for (unsigned i = 0; i < UROS_K_SIGSET_WORDS; i++)
+            cur[i] &= ~set[i];
         break;
     case SIG_SETMASK:
-        __sig_mask = *set;
+        /* Wipe the whole POSIX mask first: assigning only the two
+         * kernel words would leave stale bits in the tail. */
+        sigemptyset(&__sig_mask);
+        for (unsigned i = 0; i < UROS_K_SIGSET_WORDS; i++)
+            cur[i] = set[i];
         break;
     default:
         return -EINVAL;

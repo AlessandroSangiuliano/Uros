@@ -585,7 +585,8 @@ STUB(h_getegid,         0)
 /* From signals.c. */
 extern unsigned int __uros_my_pid;
 extern int  __uros_sigaction(int signo, const void *act, void *old);
-extern int  __uros_sigprocmask(int how, const void *set, void *old);
+extern int  __uros_sigprocmask(int how, const void *set, void *old,
+                               unsigned setsize);
 extern int  __uros_kill(unsigned int pid, int signo);
 
 /*
@@ -599,11 +600,18 @@ static long h_rt_sigaction(long sig, long act, long old,
     return __uros_sigaction((int)sig, (const void *)act, (void *)old);
 }
 
+/*
+ * a4 is the sigsetsize, and here it is load-bearing rather than noise:
+ * the masks are in the kernel sigset ABI (two words on i386), not the
+ * 128-byte POSIX sigset_t, and __uros_sigprocmask needs the size to
+ * refuse anything it would otherwise read past.
+ */
 static long h_rt_sigprocmask(long how, long set, long old,
                              long a4, long a5, long a6)
 {
-    (void)a4; (void)a5; (void)a6;
-    return __uros_sigprocmask((int)how, (const void *)set, (void *)old);
+    (void)a5; (void)a6;
+    return __uros_sigprocmask((int)how, (const void *)set, (void *)old,
+                              (unsigned)a4);
 }
 
 static long h_getpid(long a1, long a2, long a3,
