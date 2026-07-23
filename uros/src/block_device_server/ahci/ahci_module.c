@@ -237,6 +237,7 @@ ahci_identify(struct ahci_state *st, int port_idx)
 	uint16_t *buf = (uint16_t *)st->data_uva;
 	char model[41];
 	uint32_t lba28;
+	uint64_t sectors;
 	unsigned int i;
 
 	memset(&fis, 0, sizeof(fis));
@@ -259,12 +260,43 @@ ahci_identify(struct ahci_state *st, int port_idx)
 	for (i = 39; i > 0 && model[i] == ' '; i--)
 		model[i] = '\0';
 
-	lba28 = ((uint32_t)buf[61] << 16) | buf[60];
-	pi->disk_sectors = lba28;
+	/*
+	 * Capacity.  Words 60-61 hold a 28-bit sector count, which the ATA
+	 * spec saturates at 0x0FFFFFFF for anything past 128 GiB — a 1 TB
+	 * disk reported exactly that and came out as ~131071 MB (#399).  When
+	 * the device announces LBA48 the real count lives in words 100-103,
+	 * so prefer that.  The I/O path already issues READ/WRITE DMA EXT and
+	 * NCQ commands, so nothing else has to change to address it.
+	 */
+	lba28 = ((uint32_t)buf[ATA_ID_LBA28_CAP + 1] << 16) |
+		 buf[ATA_ID_LBA28_CAP];
+	sectors = lba28;
+
+	if (buf[ATA_ID_CMD_SET_2] & ATA_ID_CMD_SET_2_LBA48) {
+		uint64_t lba48 = 0;
+		for (i = 0; i < 4; i++)
+			lba48 |= (uint64_t)buf[ATA_ID_LBA48_CAP + i] << (16 * i);
+		if (lba48 > sectors)
+			sectors = lba48;
+	}
+
+	/*
+	 * The block stack carries sector counts as uint32_t, so it can
+	 * address just under 2 TiB.  Report the truth and clamp rather than
+	 * truncating silently; a bigger disk stays usable up to the limit.
+	 */
+	if (sectors > 0xFFFFFFFFull) {
+		printf("ahci: port %d has %llu sectors; clamping to the "
+		       "32-bit sector limit (~2 TiB addressable)\n",
+		       pi->hba_port, (unsigned long long)sectors);
+		sectors = 0xFFFFFFFFull;
+	}
+	pi->disk_sectors = (uint32_t)sectors;
 
 	printf("ahci: port %d model: %s\n", pi->hba_port, model);
-	printf("ahci: port %d sectors: %u  capacity: ~%u MB\n",
-	       pi->hba_port, lba28, lba28 / 2048);
+	printf("ahci: port %d sectors: %u  capacity: ~%u MB%s\n",
+	       pi->hba_port, pi->disk_sectors, pi->disk_sectors / 2048,
+	       (sectors > lba28) ? " (LBA48)" : "");
 
 	{
 		uint32_t cap = ahci_read(st, AHCI_CAP);
