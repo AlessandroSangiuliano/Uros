@@ -57,6 +57,7 @@ void char_core_run_discovery(const char_module_ops_t * const *modules,
 			     mach_port_t hal_port);
 
 struct char_device_entry *char_core_dev_lookup(char_dev_id_t id);
+struct char_device_entry *char_core_dev_by_priv(void *priv);
 unsigned int              char_core_dev_count(void);
 int                       char_core_dev_copy_all(struct char_device_info *out,
 						 unsigned int max);

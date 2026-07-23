@@ -245,6 +245,18 @@ ush_setup(int target_vt)
         return -1;
     }
     printf("ush: opened /dev/tty -> fd=%d\n", tty_fd);
+
+    /*
+     * The tty line discipline sends the terminal signals to the whole
+     * foreground process group (#397), and while no job is running that
+     * group is the shell's own.  A shell must therefore not take the
+     * default action for them: ^C at the prompt has to abandon the input
+     * line, not kill the session.  Ignore them here and restore SIG_DFL
+     * in the child before execve, so foreground jobs stay interruptible.
+     */
+    (void)signal(SIGINT,  SIG_IGN);
+    (void)signal(SIGQUIT, SIG_IGN);
+    (void)signal(SIGTSTP, SIG_IGN);
     return 0;
 }
 
@@ -365,6 +377,11 @@ run_command(char *argv[], int bg)
         (void)setpgid(0, 0);
         if (!bg)
             (void)tcsetpgrp(tty_fd, getpid());
+        /* Undo the shell's own guard (#397): a job must be interruptible
+         * even though the shell that spawned it ignores these. */
+        (void)signal(SIGINT,  SIG_DFL);
+        (void)signal(SIGQUIT, SIG_DFL);
+        (void)signal(SIGTSTP, SIG_DFL);
         execve(argv[0], argv, (char *const[]){ NULL });
         printf("ush: execve(%s) failed errno=%d\n", argv[0], errno);
         _exit(127);
