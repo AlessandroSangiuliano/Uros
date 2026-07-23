@@ -72,40 +72,40 @@ endif()
 
 # Build hello_exec test binary (#228 v0.1.0 acceptance)
 if(OSFMK_BUILD_HELLO_EXEC)
-  add_subdirectory(hello_exec)
+  add_subdirectory(tests/hello_exec)
 endif()
 
 # Build hello_dyn — first dynamically-linked binary (#234 Phase 7).
 if(UROS_BUILD_MUSL)
-  add_subdirectory(hello_dyn)
+  add_subdirectory(tests/hello_dyn)
 endif()
 
 # Build fd_exec_test (#262 step 3: execve fd-inheritance smoke target)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(fd_exec_test)
+  add_subdirectory(tests/fd_exec_test)
 endif()
 
 # Build hello_world (#286: standard printf-to-ctty hello world)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(hello_world)
+  add_subdirectory(tests/hello_world)
 endif()
 
 # Build hello_dyn_world (#289: dynamic twin of hello_world — verifies the
 # dynamic clean-exit/reap path through ld-musl + the umbrella libc.so)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(hello_dyn_world)
+  add_subdirectory(tests/hello_dyn_world)
 endif()
 
 # Build pthread_min (#291: minimal musl pthread regression — proves
 # pthread_create works without any -Wl,-u clone workaround)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(pthread_min)
+  add_subdirectory(tests/pthread_min)
 endif()
 
 # Build flipc_bench (#272: standalone libvfs FLIPC v2 A/B benchmark,
 # launched from the shell post-boot for quiescent, median-of-N numbers)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(flipc_bench)
+  add_subdirectory(bench/flipc_bench)
 endif()
 
 # Build ush — Uros shell (#275.5).
@@ -126,8 +126,8 @@ endif()
 
 # Build libfoo.so + dlopen_test — musl dlopen end-to-end (#234 incr 4)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(libfoo)
-  add_subdirectory(dlopen_test)
+  add_subdirectory(tests/libfoo)
+  add_subdirectory(tests/dlopen_test)
 endif()
 
 # Build proc_server (POSIX process model owner, #237)
@@ -137,7 +137,7 @@ endif()
 
 # Build IPC performance benchmark
 if(OSFMK_BUILD_IPC_BENCH)
-  add_subdirectory(ipc_bench)
+  add_subdirectory(bench/ipc_bench)
 endif()
 
 # The standalone AHCI userspace driver (src/ahci_driver) was removed: it was
@@ -172,7 +172,7 @@ endif()
 
 # Build pthread test server
 if(OSFMK_BUILD_PTHREAD_TEST)
-  add_subdirectory(pthread_test)
+  add_subdirectory(tests/pthread_test)
 endif()
 
 # Build capability server (Uros cap_server)
@@ -182,14 +182,14 @@ endif()
 
 # Build capability negative-test binary
 if(OSFMK_BUILD_CAP_TEST)
-  add_subdirectory(cap_test)
+  add_subdirectory(tests/cap_test)
 endif()
 
 # Build kernel242_test (#242 no-goto kernel exerciser)
-add_subdirectory(kernel242_test)
+add_subdirectory(tests/kernel242_test)
 
 # Build sig_test (#238 proc_server signal exerciser)
-add_subdirectory(sig_test)
+add_subdirectory(tests/sig_test)
 
 # Build gpustat userspace probe for gpu_query_stats (#203)
 if(OSFMK_BUILD_GPUSTAT)
