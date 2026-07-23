@@ -110,13 +110,13 @@ endif()
 
 # Build ush — Uros shell (#275.5).
 if(UROS_BUILD_MUSL)
-  add_subdirectory(ush)
+  add_subdirectory(cmds/ush)
 endif()
 
 # Build cpustat (#375) — per-CPU load monitor, the first dynamically-linked
 # real tool (umbrella libc.so + libmach_core-pic), launched from the shell.
 if(UROS_BUILD_MUSL)
-  add_subdirectory(cpustat)
+  add_subdirectory(cmds/cpustat)
 endif()
 
 # Build virtual_terminal_server — VT shell supervisor (#365 phase 2b).
@@ -193,7 +193,7 @@ add_subdirectory(tests/sig_test)
 
 # Build gpustat userspace probe for gpu_query_stats (#203)
 if(OSFMK_BUILD_GPUSTAT)
-  add_subdirectory(gpustat)
+  add_subdirectory(cmds/gpustat)
 endif()
 
 # Build gpu_server (#194 — userspace GPU/display server)
