@@ -225,7 +225,7 @@ target_include_directories(libmach PUBLIC
 # Metto gli archivi in export/<system>/lib per compatibilità con l'albero esistente
 set_target_properties(libmach PROPERTIES
   OUTPUT_NAME "mach"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
 # ===========================================================================
@@ -322,7 +322,7 @@ if(UROS_BUILD_MUSL)
 
   set_target_properties(libmach_core PROPERTIES
     OUTPUT_NAME "mach_core"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
   )
 
   # PIC variant for the umbrella libc.so (#234 incr 2b).  Same slim source

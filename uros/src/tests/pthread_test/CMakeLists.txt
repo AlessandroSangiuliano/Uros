@@ -57,5 +57,5 @@ target_link_options(pthread_test_server PRIVATE
 
 set_target_properties(pthread_test_server PROPERTIES
   OUTPUT_NAME "pthread_test"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

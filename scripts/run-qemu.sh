@@ -32,7 +32,8 @@ set -e
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILD_DIR="$REPO_ROOT/uros/build"
 KERNEL="$BUILD_DIR/export/uros/boot/mach_kernel"
-BOOTSTRAP="$BUILD_DIR/export/uros/$(uname -m)/user/sbin/bootstrap"
+ARCH="$(cat "$BUILD_DIR/uros-arch" 2>/dev/null || uname -m)"   # #404 stamp
+BOOTSTRAP="$BUILD_DIR/export/uros/$ARCH/user/sbin/bootstrap"
 DISK_IMG="$BUILD_DIR/disk.img"
 BUNDLE_IMG="$BUILD_DIR/bootstrap.bundle"
 

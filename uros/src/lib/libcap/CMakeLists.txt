@@ -110,7 +110,7 @@ target_include_directories(libcap PUBLIC
 
 set_target_properties(libcap PROPERTIES
   OUTPUT_NAME "cap"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
 # PIC variant for the umbrella libc.so (#234 incr 2b).  cap_verify on every

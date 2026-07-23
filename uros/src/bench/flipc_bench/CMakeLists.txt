@@ -76,5 +76,5 @@ target_link_options(flipc_bench_bin PRIVATE
 
 set_target_properties(flipc_bench_bin PROPERTIES
   OUTPUT_NAME "flipc_bench"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

@@ -64,5 +64,5 @@ target_include_directories(libflipc2 PUBLIC
 
 set_target_properties(libflipc2 PROPERTIES
   OUTPUT_NAME "flipc2"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

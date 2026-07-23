@@ -174,5 +174,5 @@ target_link_options(default_pager_server PRIVATE
 
 set_target_properties(default_pager_server PROPERTIES
   OUTPUT_NAME "default_pager"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

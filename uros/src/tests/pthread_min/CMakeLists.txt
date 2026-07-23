@@ -72,5 +72,5 @@ target_link_options(pthread_min_bin PRIVATE
 
 set_target_properties(pthread_min_bin PROPERTIES
   OUTPUT_NAME "pthread_min"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

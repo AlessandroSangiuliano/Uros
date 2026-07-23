@@ -48,7 +48,7 @@ target_include_directories(libnetname PUBLIC
 
 set_target_properties(libnetname PROPERTIES
   OUTPUT_NAME "netname"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
 # PIC variant for the umbrella libc.so (#234 incr 2b).  Only Mach RPC stubs

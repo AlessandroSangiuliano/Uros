@@ -14,7 +14,7 @@ if(NOT UROS_BUILD_MUSL)
 endif()
 
 set(MUSL_PREFIX  ${CMAKE_BINARY_DIR}/src/contrib/musl-install)
-set(OUT_DIR      ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin)
+set(OUT_DIR      ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin)
 set(DLOPEN_TEST  ${OUT_DIR}/dlopen_test)
 
 execute_process(

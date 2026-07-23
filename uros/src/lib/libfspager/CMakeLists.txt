@@ -80,5 +80,5 @@ target_include_directories(libfspager PUBLIC
 set_target_properties(libfspager PROPERTIES
   OUTPUT_NAME "fspager"
   ARCHIVE_OUTPUT_DIRECTORY
-    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

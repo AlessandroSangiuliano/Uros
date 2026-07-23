@@ -212,7 +212,7 @@ endif()
 
 set_target_properties(libposix-uros PROPERTIES
   OUTPUT_NAME "posix-uros"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
 # ---------------------------------------------------------------------------

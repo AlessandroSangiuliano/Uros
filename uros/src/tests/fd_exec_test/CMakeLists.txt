@@ -74,5 +74,5 @@ target_link_options(fd_exec_test_bin PRIVATE
 
 set_target_properties(fd_exec_test_bin PROPERTIES
   OUTPUT_NAME "fd_exec_test"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

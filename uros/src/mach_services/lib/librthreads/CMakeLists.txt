@@ -40,5 +40,5 @@ file(WRITE "${CMAKE_BINARY_DIR}/generated/include/stdlib.h" "/* Auto-generated w
 
 set_target_properties(librthreads PROPERTIES
   OUTPUT_NAME "rthreads"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

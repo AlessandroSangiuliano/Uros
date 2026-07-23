@@ -75,5 +75,5 @@ target_link_options(hello_world_bin PRIVATE
 
 set_target_properties(hello_world_bin PROPERTIES
   OUTPUT_NAME "hello_world"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

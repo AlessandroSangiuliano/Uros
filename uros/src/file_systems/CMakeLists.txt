@@ -82,5 +82,5 @@ target_include_directories(libsa_fs PUBLIC
 
 set_target_properties(libsa_fs PROPERTIES
   OUTPUT_NAME "sa_fs"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

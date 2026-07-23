@@ -16,7 +16,7 @@ if(NOT UROS_BUILD_MUSL)
 endif()
 
 set(MUSL_PREFIX ${CMAKE_BINARY_DIR}/src/contrib/musl-install)
-set(OUT_DIR     ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib)
+set(OUT_DIR     ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib)
 set(LIBFOO_SO   ${OUT_DIR}/libfoo.so)
 
 add_custom_command(

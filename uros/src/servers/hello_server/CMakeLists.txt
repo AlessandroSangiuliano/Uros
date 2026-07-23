@@ -105,7 +105,7 @@ target_link_options(hello_server_server PRIVATE
 
 set_target_properties(hello_server_server PROPERTIES
   OUTPUT_NAME "hello_server"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
 
 # ===========================================================================
@@ -114,12 +114,12 @@ set_target_properties(hello_server_server PROPERTIES
 
 set(HELLO_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/hello_server.manifest)
 set(HELLO_MANIFEST_OUT
-  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/manifests/hello_server.cmf")
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/hello_server.cmf")
 
 add_custom_command(
   OUTPUT ${HELLO_MANIFEST_OUT}
   COMMAND ${CMAKE_COMMAND} -E make_directory
-          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/manifests"
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
   COMMAND $<TARGET_FILE:mkmanifest> -o ${HELLO_MANIFEST_OUT} ${HELLO_MANIFEST_SRC}
   DEPENDS mkmanifest ${HELLO_MANIFEST_SRC}
   COMMENT "mkmanifest: hello_server.manifest -> hello_server.cmf"

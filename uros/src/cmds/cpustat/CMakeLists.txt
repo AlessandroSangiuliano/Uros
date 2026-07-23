@@ -16,7 +16,7 @@ if(NOT UROS_BUILD_MUSL)
 endif()
 
 set(MUSL_PREFIX ${CMAKE_BINARY_DIR}/src/contrib/musl-install)
-set(OUT_DIR     ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin)
+set(OUT_DIR     ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin)
 set(CPUSTAT     ${OUT_DIR}/cpustat)
 
 # Matching multilib libgcc + its header dir (compiler builtins/headers musl

@@ -46,6 +46,37 @@ if(NOT DEFINED OSFMK_GEN_KSYMS)
     ${OSFMK_GEN_KSYMS_DEFAULT})
 endif()
 
+# ------------------------------------------------------------------ #404
+# Target architecture.  One cache variable drives the arch flags, the MD
+# source selection and the arch component of every export/ path — never
+# uname -m / CMAKE_SYSTEM_PROCESSOR, which name the HOST: this tree spent
+# v0.1-v0.2 exporting an i386 build into an export/uros/x86_64/ directory
+# because the build machine happened to be 64-bit.
+#
+# Two build directories against one unmodified source tree is the
+# contract: configure one with -DUROS_TARGET_ARCH=i386 (default) and a
+# sibling with -DUROS_TARGET_ARCH=x86_64, and nothing in src/ changes.
+set(UROS_TARGET_ARCH "i386" CACHE STRING "Target architecture (i386 | x86_64)")
+set_property(CACHE UROS_TARGET_ARCH PROPERTY STRINGS i386 x86_64)
+
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  set(UROS_ARCH_FLAGS -m32 -march=i686)
+elseif(UROS_TARGET_ARCH STREQUAL "x86_64")
+  set(UROS_ARCH_FLAGS -m64)
+else()
+  message(FATAL_ERROR "UROS_TARGET_ARCH must be i386 or x86_64, got '${UROS_TARGET_ARCH}'")
+endif()
+# String form for raw COMMAND / shell contexts (list form feeds
+# target_compile_options and friends).
+string(JOIN " " UROS_ARCH_FLAGS_STR ${UROS_ARCH_FLAGS})
+message(STATUS "UROS_TARGET_ARCH = ${UROS_TARGET_ARCH} (${UROS_ARCH_FLAGS_STR})")
+
+# Stamp the target into the build dir so the scripts (make-bundle,
+# make-disk-image, run-qemu, ...) stop asking uname -m which arch this
+# build is for.  They fall back to uname -m when the stamp is missing,
+# which keeps them working against pre-#404 build directories.
+file(WRITE ${CMAKE_BINARY_DIR}/uros-arch "${UROS_TARGET_ARCH}\n")
+
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'uros' when building kernel)" "")
 if(NOT EXPORT_PLATFORM)

@@ -36,7 +36,8 @@ REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BUILD="$REPO_ROOT/uros/build"
 
 KERNEL="$BUILD/export/uros/boot/mach_kernel"
-BOOTSTRAP="$BUILD/export/uros/$(uname -m)/user/sbin/bootstrap"
+ARCH="$(cat "$BUILD/uros-arch" 2>/dev/null || uname -m)"   # #404 stamp
+BOOTSTRAP="$BUILD/export/uros/$ARCH/user/sbin/bootstrap"
 BUNDLE="$BUILD/bootstrap.bundle"
 KSYMS="$BUILD/export/uros/boot/ksyms.bin"
 
@@ -80,7 +81,7 @@ done
 
 if [ "$BENCH_ONLY" = 1 ]; then
     BUNDLE="$BUILD/bootstrap-omen-benchonly.bundle"
-    SBIN_DIR="$BUILD/export/uros/$(uname -m)/user/sbin"
+    SBIN_DIR="$BUILD/export/uros/$ARCH/user/sbin"
     MKBUNDLE="$BUILD/tools/mkbundle"
     echo "building minimal bench bundle (name_server + ipc_bench only):${BENCH_ARGS:- default suite}"
     CONF=$(mktemp)

@@ -65,7 +65,7 @@ target_include_directories(libvfs PUBLIC
 
 set_target_properties(libvfs PROPERTIES
   OUTPUT_NAME "vfs"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
 # ---------------------------------------------------------------------------
