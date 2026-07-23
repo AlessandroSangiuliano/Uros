@@ -143,7 +143,7 @@ set_target_properties(char_ps2_module PROPERTIES
   PREFIX ""
   SUFFIX ".so"
   LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/modules/char"
 )
 
 # --- PS/2 mouse module (#215) ---
@@ -165,7 +165,7 @@ set_target_properties(char_ps2_mouse_module PROPERTIES
   PREFIX ""
   SUFFIX ".so"
   LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/modules/char"
 )
 
 # --- 16550 UART module (#207) ---
@@ -186,7 +186,7 @@ set_target_properties(char_uart_module PROPERTIES
   PREFIX ""
   SUFFIX ".so"
   LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/modules/char"
 )
 
 # --- On-screen console TTY module (#363) ---
@@ -205,7 +205,7 @@ set_target_properties(char_console_module PROPERTIES
   PREFIX ""
   SUFFIX ".so"
   LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/modules"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/modules/char"
 )
 
 # ===========================================================================
