@@ -198,8 +198,8 @@ add_dependencies(libmach mig_device_header mig_mach_public_headers)
 target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -mstack-protector-guard=global -include stdint.h>)
 
 # Build assembly files and C as 32-bit where needed
-target_compile_options(libmach PRIVATE -m32 -march=i686 -msse -msse2)
-target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>)
+target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)
+target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS})
 
 # Work around GCC constprop + SSP + va_list code generation bug on i386:
 # GCC creates a constprop clone of _doprnt where the va_list calling
@@ -302,9 +302,9 @@ if(UROS_BUILD_MUSL)
     $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w
                             -mstack-protector-guard=global -include stdint.h>
   )
-  target_compile_options(libmach_core PRIVATE -m32 -march=i686 -msse -msse2)
+  target_compile_options(libmach_core PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)
   target_compile_options(libmach_core PRIVATE
-    $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>
+    ${UROS_ARCH_FLAGS}
   )
 
   target_include_directories(libmach_core BEFORE PUBLIC

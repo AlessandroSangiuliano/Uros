@@ -7,7 +7,7 @@ project(hal_server C)
 
 set(HAL_COMPILE_OPTIONS
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -145,7 +145,7 @@ set_target_properties(hal_pci_scan_module PROPERTIES
   OUTPUT_NAME "pci_scan"
   PREFIX ""
   SUFFIX ".so"
-  LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/hal"
 )
 
@@ -194,7 +194,7 @@ target_link_libraries(hal_server PRIVATE
 )
 
 target_link_options(hal_server PRIVATE
-  -m32 -pie -nostdlib
+  ${UROS_ARCH_FLAGS} -pie -nostdlib
   -Wl,-e,__start_mach
   -Wl,--no-dynamic-linker
   -Wl,--export-dynamic

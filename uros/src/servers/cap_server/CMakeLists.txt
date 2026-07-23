@@ -33,7 +33,7 @@ add_dependencies(cap_server_bin mig_mach_public_headers libcap mig_cap_revoke)
 
 target_compile_options(cap_server_bin PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -82,7 +82,7 @@ target_link_libraries(cap_server_bin PRIVATE
 )
 
 target_link_options(cap_server_bin PRIVATE
-  -m32 -pie -nostdlib
+  ${UROS_ARCH_FLAGS} -pie -nostdlib
   -Wl,-e,__start_mach
   -Wl,--no-dynamic-linker
   -Wl,--export-dynamic

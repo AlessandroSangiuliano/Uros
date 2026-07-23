@@ -30,8 +30,8 @@ add_library(libpthreads STATIC ${LIB_SOURCES})
 add_dependencies(libpthreads mig_mach_public_headers)
 
 target_compile_options(libpthreads PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686 -mstack-protector-guard=global>
-  $<$<COMPILE_LANGUAGE:ASM>:-m32>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -mstack-protector-guard=global>
+  ${UROS_ARCH_FLAGS}
 )
 
 target_compile_definitions(libpthreads PRIVATE

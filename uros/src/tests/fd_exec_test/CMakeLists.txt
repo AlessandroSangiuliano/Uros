@@ -18,19 +18,19 @@ add_dependencies(fd_exec_test_bin mig_mach_public_headers musl_extproj)
 set(MUSL_PREFIX ${CMAKE_BINARY_DIR}/src/contrib/musl-install)
 
 execute_process(
-  COMMAND ${CMAKE_C_COMPILER} -m32 -print-file-name=include
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-file-name=include
   OUTPUT_VARIABLE _GCC_INCLUDE
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 execute_process(
-  COMMAND ${CMAKE_C_COMPILER} -m32 -print-libgcc-file-name
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-libgcc-file-name
   OUTPUT_VARIABLE _LIBGCC_A
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
 target_compile_options(fd_exec_test_bin PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fstack-protector-strong
   -fno-builtin
   -w
@@ -66,7 +66,7 @@ target_link_libraries(fd_exec_test_bin PRIVATE
 )
 
 target_link_options(fd_exec_test_bin PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,-u,__uros_libc_init
   -Wl,--build-id=none

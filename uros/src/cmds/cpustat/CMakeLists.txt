@@ -22,12 +22,12 @@ set(CPUSTAT     ${OUT_DIR}/cpustat)
 # Matching multilib libgcc + its header dir (compiler builtins/headers musl
 # leaves to the toolchain; -nostdinc drops the default search path).
 execute_process(
-  COMMAND ${CMAKE_C_COMPILER} -m32 -print-libgcc-file-name
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-libgcc-file-name
   OUTPUT_VARIABLE CPUSTAT_LIBGCC
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 execute_process(
-  COMMAND ${CMAKE_C_COMPILER} -m32 -print-file-name=include
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-file-name=include
   OUTPUT_VARIABLE CPUSTAT_GCC_INCLUDE
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -41,7 +41,7 @@ add_custom_command(
   # PT_INTERP; -lc resolves musl + the Uros backend and adds DT_NEEDED
   # libc.so; libmach_core-pic (before -lc) supplies the host_processors /
   # processor_info MIG stubs the umbrella does not carry.
-  COMMAND ${CMAKE_C_COMPILER} -m32 -nostdinc -fPIE -pie -fno-stack-protector
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -nostdinc -fPIE -pie -fno-stack-protector
             -std=gnu11 -fno-builtin -w -include stdint.h
             -I${MUSL_PREFIX}/include
             -I${CPUSTAT_GCC_INCLUDE}

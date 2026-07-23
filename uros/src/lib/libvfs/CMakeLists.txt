@@ -43,7 +43,7 @@ add_dependencies(libvfs mig_mach_public_headers)
 
 target_compile_options(libvfs PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -93,7 +93,7 @@ if(UROS_BUILD_MUSL)
   endif()
   set_target_properties(libvfs-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_compile_options(libvfs-pic PRIVATE
-    -std=gnu11 -m32 -march=i686 -fno-builtin -ffreestanding
+    -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -ffreestanding
     -fno-stack-protector -w -include stdint.h
   )
   target_include_directories(libvfs-pic PRIVATE

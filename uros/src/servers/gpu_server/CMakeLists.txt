@@ -7,7 +7,7 @@ project(gpu_server C)
 
 set(GPU_COMPILE_OPTIONS
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -123,7 +123,7 @@ set_target_properties(gpu_vga_module PROPERTIES
   OUTPUT_NAME "vga"
   PREFIX ""
   SUFFIX ".so"
-  LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/gpu"
 )
 
@@ -182,7 +182,7 @@ target_link_libraries(gpu_server PRIVATE
 # host symbols (`gpu_device_port`, `printf`, ...) via the dynamic
 # symbol table.  Mirrors hal_server / block_device_server.
 target_link_options(gpu_server PRIVATE
-  -m32 -pie -nostdlib
+  ${UROS_ARCH_FLAGS} -pie -nostdlib
   -Wl,-e,__start_mach
   -Wl,--no-dynamic-linker
   -Wl,--export-dynamic

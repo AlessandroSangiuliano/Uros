@@ -18,7 +18,7 @@ set(OUT_DIR      ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARC
 set(DLOPEN_TEST  ${OUT_DIR}/dlopen_test)
 
 execute_process(
-  COMMAND cc -m32 -print-libgcc-file-name
+  COMMAND cc ${UROS_ARCH_FLAGS} -print-libgcc-file-name
   OUTPUT_VARIABLE DLOPEN_TEST_LIBGCC
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -28,7 +28,7 @@ set(DLOPEN_TEST_CMF      ${CMAKE_CURRENT_BINARY_DIR}/dlopen_test.cmf)
 
 add_custom_command(
   OUTPUT ${DLOPEN_TEST}
-  COMMAND cc -m32 -nostdinc -fPIE -pie -fno-stack-protector
+  COMMAND cc ${UROS_ARCH_FLAGS} -nostdinc -fPIE -pie -fno-stack-protector
             -I${MUSL_PREFIX}/include
             -nostdlib
             ${MUSL_PREFIX}/lib/Scrt1.o

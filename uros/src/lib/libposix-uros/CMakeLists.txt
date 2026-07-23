@@ -150,10 +150,10 @@ add_library(libposix-uros STATIC ${LIBPOSIX_UROS_SRCS})
 add_dependencies(libposix-uros mig_mach_public_headers)
 
 target_compile_options(libposix-uros PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -m32 -march=i686 -fno-builtin
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin
                           -ffreestanding -fno-stack-protector
                           -Wall -Wextra -Werror>
-  $<$<COMPILE_LANGUAGE:ASM>:-m32>
+  ${UROS_ARCH_FLAGS}
 )
 
 # Phase 6b smoke (#257): the same -DUROS_PTHREAD_SMOKE=1 the user passes

@@ -22,7 +22,7 @@ set(LIBFOO_SO   ${OUT_DIR}/libfoo.so)
 add_custom_command(
   OUTPUT ${LIBFOO_SO}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${OUT_DIR}
-  COMMAND cc -m32 -nostdinc -fPIC -shared -fno-stack-protector
+  COMMAND cc ${UROS_ARCH_FLAGS} -nostdinc -fPIC -shared -fno-stack-protector
             -I${MUSL_PREFIX}/include
             -nostdlib
             ${CMAKE_CURRENT_SOURCE_DIR}/libfoo.c

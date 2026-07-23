@@ -115,7 +115,7 @@ add_dependencies(default_pager_server mig_mach_public_headers)
 
 target_compile_options(default_pager_server PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -167,7 +167,7 @@ target_link_libraries(default_pager_server PRIVATE
 
 # Linker flags: 32-bit static Mach binary, no host libc.
 target_link_options(default_pager_server PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,--build-id=none
 )

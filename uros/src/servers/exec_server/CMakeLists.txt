@@ -62,7 +62,7 @@ set_source_files_properties(${EXEC_SERVER_C} PROPERTIES GENERATED TRUE)
 
 target_compile_options(exec_server_bin PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -111,7 +111,7 @@ target_link_libraries(exec_server_bin PRIVATE
 )
 
 target_link_options(exec_server_bin PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,--build-id=none
 )

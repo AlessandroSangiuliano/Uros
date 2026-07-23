@@ -49,7 +49,7 @@ add_library(libflipc2 STATIC ${LIB_SOURCES})
 add_dependencies(libflipc2 mig_device_header mig_mach_public_headers)
 
 target_compile_options(libflipc2 PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686 -mstack-protector-guard=global>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -mstack-protector-guard=global>
 )
 
 target_include_directories(libflipc2 PUBLIC

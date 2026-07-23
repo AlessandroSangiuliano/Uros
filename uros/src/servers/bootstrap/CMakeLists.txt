@@ -122,7 +122,7 @@ add_executable(bootstrap_server
 add_dependencies(bootstrap_server mig_mach_public_headers)
 
 target_compile_options(bootstrap_server PRIVATE
-  -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2
+  -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h ${UROS_ARCH_FLAGS} -msse -msse2
 )
 
 target_compile_definitions(bootstrap_server PRIVATE
@@ -177,7 +177,7 @@ target_link_libraries(bootstrap_server PRIVATE
 
 # Linker flags: 32-bit static Mach binary, no host libc
 target_link_options(bootstrap_server PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
 )
 

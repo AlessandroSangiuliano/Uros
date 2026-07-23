@@ -18,7 +18,7 @@ add_library(libcthreads STATIC ${LIB_SOURCES})
 add_dependencies(libcthreads mig_mach_public_headers)
 
 # Legacy K&R/gnu89 code: suppress warnings, allow implicit declarations
-target_compile_options(libcthreads PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2>)
+target_compile_options(libcthreads PRIVATE ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -msse -msse2>)
 
 target_include_directories(libcthreads PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
@@ -42,18 +42,18 @@ target_compile_definitions(libcthreads PRIVATE $<$<BOOL:${OSFMK_BUILD_KERNEL}>:O
 # For host builds only: build i386 objects in 32-bit mode to allow assembling legacy i386 asm
 if(NOT OSFMK_BUILD_KERNEL)
   target_compile_options(libcthreads PRIVATE
-    $<$<COMPILE_LANGUAGE:ASM>:-m32>
-    $<$<COMPILE_LANGUAGE:ASM-ATT>:-m32>
-    $<$<COMPILE_LANGUAGE:C>:-m32>
+    ${UROS_ARCH_FLAGS}
+    ${UROS_ARCH_FLAGS}
+    ${UROS_ARCH_FLAGS}
   )
 else()
   # When building the kernel for i386, we still need -m32 to assemble/compile
   # legacy i386 assembly and C code into 32-bit objects.
   if(OSFMK_TARGET_AT386)
     target_compile_options(libcthreads PRIVATE
-      $<$<COMPILE_LANGUAGE:ASM>:-m32>
-      $<$<COMPILE_LANGUAGE:ASM-ATT>:-m32>
-      $<$<COMPILE_LANGUAGE:C>:-m32>
+      ${UROS_ARCH_FLAGS}
+      ${UROS_ARCH_FLAGS}
+      ${UROS_ARCH_FLAGS}
     )
   endif()
 endif()

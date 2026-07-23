@@ -7,7 +7,7 @@ add_dependencies(libblk mig_device_header mig_mach_public_headers)
 
 target_compile_options(libblk PRIVATE
   -std=gnu11 -fno-builtin -w -mstack-protector-guard=global
-  -include stdint.h -m32 -march=i686 -msse -msse2
+  -include stdint.h ${UROS_ARCH_FLAGS} -msse -msse2
 )
 
 target_compile_definitions(libblk PRIVATE

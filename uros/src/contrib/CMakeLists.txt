@@ -49,7 +49,7 @@ if(UROS_BUILD_MUSL)
                         --target=i386-linux-gnu
                         --enable-shared
                         CC=cc
-                        "CFLAGS=-m32 -Os -pipe -fno-stack-protector"
+                        "CFLAGS=${UROS_ARCH_FLAGS_STR} -Os -pipe -fno-stack-protector"
                         AR=ar
                         RANLIB=ranlib
     BUILD_COMMAND     ${CMAKE_COMMAND} -E env make -j
@@ -151,14 +151,14 @@ if(UROS_BUILD_MUSL)
   # leaves to the runtime.  -print-libgcc-file-name is the portable way
   # to locate the matching multilib .a.
   execute_process(
-    COMMAND cc -m32 -print-libgcc-file-name
+    COMMAND cc ${UROS_ARCH_FLAGS} -print-libgcc-file-name
     OUTPUT_VARIABLE MUSL_LIBGCC
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
 
   # Phase 1 host smoke (kept).  Links musl against host libgcc only.
   add_custom_target(musl_smoke
-    COMMAND cc -m32 -nostdinc
+    COMMAND cc ${UROS_ARCH_FLAGS} -nostdinc
               -I${MUSL_PREFIX}/include
               -nostdlib -static
               ${MUSL_PREFIX}/lib/crt1.o
@@ -178,7 +178,7 @@ if(UROS_BUILD_MUSL)
   # __syscallN reference must resolve to libposix-uros's __uros_syscallN).
   # Runtime smoke is deferred to Phase 3, when a real Uros task exists.
   add_custom_target(musl_uros_smoke
-    COMMAND cc -m32 -nostdinc
+    COMMAND cc ${UROS_ARCH_FLAGS} -nostdinc
               -I${MUSL_PREFIX}/include
               -nostdlib -static
               ${MUSL_PREFIX}/lib/crt1.o

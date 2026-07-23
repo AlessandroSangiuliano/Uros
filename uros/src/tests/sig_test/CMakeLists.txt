@@ -39,7 +39,7 @@ add_dependencies(sig_test_bin mig_mach_public_headers)
 
 target_compile_options(sig_test_bin PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -70,7 +70,7 @@ target_link_libraries(sig_test_bin PRIVATE
 )
 
 target_link_options(sig_test_bin PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,--build-id=none
 )

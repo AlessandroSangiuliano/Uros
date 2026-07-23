@@ -12,7 +12,7 @@ add_library(libelf STATIC
 
 target_compile_options(libelf PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
