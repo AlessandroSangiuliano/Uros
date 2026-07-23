@@ -339,4 +339,22 @@ if(UROS_BUILD_MUSL)
   target_include_directories(libmach_core-pic PRIVATE
     $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
   set_target_properties(libmach_core-pic PROPERTIES OUTPUT_NAME "mach_core-pic")
+
+  # #396: the two objects the musl umbrella must receive LOOSE (see
+  # src/contrib/CMakeLists.txt — its --exclude-libs=ALL hides every archive
+  # member, and only loose objects keep the Mach surface exported for
+  # dynamic tools like cpustat, #375).  Compiled here as an OBJECT library
+  # so the umbrella names them as $<TARGET_OBJECTS:...> instead of guessing
+  # this target's internal CMakeFiles object paths — which encoded the
+  # source depth as __/ segments and broke the day libmach moved.
+  add_library(libmach_export_objs OBJECT
+    ${CMAKE_BINARY_DIR}/generated/mach_host_user.c
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S
+  )
+  add_dependencies(libmach_export_objs mig_device_header mig_mach_public_headers)
+  set_target_properties(libmach_export_objs PROPERTIES POSITION_INDEPENDENT_CODE ON)
+  target_compile_options(libmach_export_objs PRIVATE
+    $<TARGET_PROPERTY:libmach_core,COMPILE_OPTIONS>)
+  target_include_directories(libmach_export_objs PRIVATE
+    $<TARGET_PROPERTY:libmach_core,INCLUDE_DIRECTORIES>)
 endif()
