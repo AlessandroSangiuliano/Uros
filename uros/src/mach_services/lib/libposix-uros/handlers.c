@@ -588,6 +588,10 @@ extern int  __uros_sigaction(int signo, const void *act, void *old);
 extern int  __uros_sigprocmask(int how, const void *set, void *old);
 extern int  __uros_kill(unsigned int pid, int signo);
 
+/*
+ * The pointers here are in the *kernel* sigaction ABI (struct
+ * k_sigaction), not the POSIX struct — __uros_sigaction translates.
+ */
 static long h_rt_sigaction(long sig, long act, long old,
                            long a4, long a5, long a6)
 {

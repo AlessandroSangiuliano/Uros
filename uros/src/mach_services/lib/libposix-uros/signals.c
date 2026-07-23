@@ -351,18 +351,54 @@ __uros_record_exit_code(int status)
 /* Public POSIX surface — called by handlers.c via the syscall path   */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The rt_sigaction syscall carries the *kernel* sigaction ABI, which is
+ * not the POSIX struct: musl passes a `struct k_sigaction` — handler,
+ * flags, restorer, then a 2-word mask, 20 bytes on i386 — while the table
+ * above holds `struct sigaction`, 140 bytes (its sigset_t alone is 128).
+ *
+ * Treating the incoming pointer as a POSIX struct therefore wrote 140
+ * bytes into the caller's 20-byte buffer when `old` was requested: a
+ * 120-byte stack smash over musl's own frame that destroyed the return
+ * address, so the first signal()/sigaction() in a process jumped to a
+ * junk address (eip=0x0).  Nothing used this path until a shell had to
+ * ignore SIGINT (#397), which is why it stayed latent this long.
+ *
+ * Convert field by field in both directions instead.
+ */
+struct uros_k_sigaction {
+    void        (*handler)(int);
+    unsigned long flags;
+    void        (*restorer)(void);
+    unsigned      mask[2];
+};
+
 int
-__uros_sigaction(int signo, const struct sigaction *act, struct sigaction *old)
+__uros_sigaction(int signo, const void *act_, void *old_)
 {
+    const struct uros_k_sigaction *act = act_;
+    struct uros_k_sigaction       *old = old_;
+    struct sigaction              *slot;
+
     if (signo <= 0 || signo >= PROC_NSIG)
         return -EINVAL;
     if (signo == PROC_SIGKILL || signo == PROC_SIGSTOP)
         return -EINVAL;
 
-    if (old)
-        *old = __sig_actions[signo];
-    if (act)
-        __sig_actions[signo] = *act;
+    slot = &__sig_actions[signo];
+
+    if (old) {
+        old->handler  = slot->sa_handler;
+        old->flags    = (unsigned long)slot->sa_flags;
+        old->restorer = 0;
+        memcpy(old->mask, &slot->sa_mask, sizeof old->mask);
+    }
+    if (act) {
+        memset(slot, 0, sizeof *slot);
+        slot->sa_handler = act->handler;
+        slot->sa_flags   = (int)act->flags;
+        memcpy(&slot->sa_mask, act->mask, sizeof act->mask);
+    }
     return 0;
 }
 
