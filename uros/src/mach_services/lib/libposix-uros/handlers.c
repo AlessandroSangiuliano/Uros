@@ -396,6 +396,35 @@ STUB(h_set_tid_address, 1)
 #define LX_TIOCSPGRP  0x5410
 #define LX_TIOCGSID   0x5429
 
+/*
+ * TIOCGWINSZ is not job control, and #402 is why it matters: musl builds
+ * both isatty() and its stdout buffering decision on this one request,
+ * so answering -ENOTTY made isatty() false everywhere and left every
+ * program's stdout fully buffered.  Unlike the three above it must be
+ * answered per descriptor — a file or a pipe has to keep saying no.
+ */
+#define LX_TIOCGWINSZ 0x5413
+
+struct lx_winsize {
+    unsigned short ws_row;
+    unsigned short ws_col;
+    unsigned short ws_xpixel;
+    unsigned short ws_ypixel;
+};
+
+/*
+ * Neither terminal we serve reports a geometry: a serial line has none,
+ * and char_server does not expose the on-screen console's grid (its MIG
+ * surface carries baud and parity, not rows and columns).  Report the
+ * conventional 80x24 for both — enough for isatty() and the buffering
+ * mode, which is all this fixes.  Plumbing the real console size
+ * belongs with the code that would need it, not in a patch release.
+ */
+#define LX_WINSZ_ROWS 24
+#define LX_WINSZ_COLS 80
+
+extern int __uros_pfd_is_terminal(int fd);
+
 extern __uros_port_t       __uros_proc_port;
 extern unsigned int        __uros_my_pid;
 
@@ -429,8 +458,27 @@ extern __uros_kern_return_t proc_getpgid(__uros_port_t proc_port,
 static long h_ioctl(long fd, long request, long arg,
                     long a4, long a5, long a6)
 {
-    (void)fd; (void)a4; (void)a5; (void)a6;
+    (void)a4; (void)a5; (void)a6;
 
+    /*
+     * Answered before the proc_server gate below: the window size says
+     * nothing about sessions, and a program that has not registered with
+     * proc_server yet still deserves a line-buffered stdout.
+     */
+    if ((unsigned long)request == LX_TIOCGWINSZ) {
+        struct lx_winsize *ws = (struct lx_winsize *)arg;
+        if (!ws)
+            return -EFAULT;
+        if (!__uros_pfd_is_terminal((int)fd))
+            return -ENOTTY;
+        ws->ws_row    = LX_WINSZ_ROWS;
+        ws->ws_col    = LX_WINSZ_COLS;
+        ws->ws_xpixel = 0;
+        ws->ws_ypixel = 0;
+        return 0;
+    }
+
+    /* The rest is job control, and that does need proc_server. */
     if (__uros_proc_port == 0 || __uros_my_pid == 0)
         return -ENOTTY;
 

@@ -630,6 +630,24 @@ long __uros_statx(int dirfd, const char *path, int flags,
 /* ------------------------------------------------------------------ */
 
 /*
+ * True when the descriptor is a terminal: one of the console streams
+ * bound at startup, or a /dev/tty opened later.  #402: ioctl needs the
+ * distinction to answer TIOCGWINSZ per descriptor, which is what musl
+ * builds isatty() and its stdout buffering decision on.
+ */
+int __uros_pfd_is_terminal(int fd)
+{
+    int r;
+    if (fd < 0 || fd >= POSIX_OPEN_MAX)
+        return 0;
+    pthread_mutex_lock(&pfd_lock);
+    pfd_init_locked();
+    r = pfds[fd].in_use && (pfds[fd].is_console || pfds[fd].is_tty);
+    pthread_mutex_unlock(&pfd_lock);
+    return r;
+}
+
+/*
  * Enumerate the POSIX fds that survive execve: in use, not a console
  * stream, and not O_CLOEXEC.  Writes parallel (posix_fd, vfs_fd) arrays
  * and returns the count (<= max).  posix_exec_fds.c turns each pair into
