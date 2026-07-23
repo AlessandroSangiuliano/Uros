@@ -3,12 +3,12 @@
 Uros is a multiserver operating system originally based on the OSF variant of Mach (the `osfmk` codebase from the MkLinux DR3 project, by the Open Software Foundation and Carnegie Mellon University). The source tree under `uros/` was historically named `osfmk/` and the kernel inside it has since evolved into **UrMach**. The goal is to build a modern, secure, multiserver OS on top of UrMach.
 
 **Target architecture:** i386 (32-bit x86), SMP up to `NCPUS=64`
-**Kernel:** UrMach 0.2.0
+**Kernel:** UrMach 0.2.1
 **Compiler:** GCC, `-std=gnu11` (tested with GCC 15/16)
 **Build system:** CMake / Ninja
 **libc:** musl (static + shared, with an Uros syscall dispatcher)
 
-## Current status (v0.2.0)
+## Current status (v0.2.1)
 
 Uros boots through the full multiserver stack and lands in an interactive shell (`ush`) over the controlling tty, with a working musl-based POSIX runtime: `fork`+`execve`+`waitpid`, job control (`tcsetpgrp`/`tcgetpgrp`, `SIGCONT`/`SIGTSTP`/`SIGINT`), signals via per-thread exception ports, `/proc`, file I/O through libvfs (with a FLIPC v2 read-ahead fast path), and runtime ELF loading through ld-musl + a libc.so umbrella.
 
@@ -32,7 +32,7 @@ ush$ shutdown
 ### What boots
 
 ```
-QEMU / bare metal (BIOS mb1, UEFI mb2 + GOP fbcons) -> UrMach 0.2.0 (SMP) -> bootstrap
+QEMU / bare metal (BIOS mb1, UEFI mb2 + GOP fbcons) -> UrMach 0.2.1 (SMP) -> bootstrap
   -> default_pager       (swap on disk0c)
   -> name_server         (netname_check_in/look_up + mount registry)
   -> cap_server          (capability authority + libcap)
@@ -46,6 +46,17 @@ QEMU / bare metal (BIOS mb1, UEFI mb2 + GOP fbcons) -> UrMach 0.2.0 (SMP) -> boo
   -> exec_server         (userspace ELF loader, PT_INTERP + AT_BASE + auxv)
   -> ush                 (Uros shell — interactive prompt over ctty)
 ```
+
+### v0.2.1 — what validating a release found
+
+v0.2.1 is a patch release with no new features. Every fix in it came from using v0.2.0 rather than testing it: booting the shipped images on real machines and pressing the keys people press. Three defects came out of that, and pulling on the threads they exposed produced three more. Full narrative in [docs/release_notes_0.2.1.md](docs/release_notes_0.2.1.md).
+
+The two that anyone will notice:
+
+- **`^C` and `^Z` now work.** The terminal line discipline that turns an interrupt character into a signal did not exist anywhere in the system — the character simply arrived at the reader as a byte (#397).
+- **Programs that print and keep working are now visible.** musl decides stdout buffering by asking the terminal for its window size, and libposix answered that request with `-ENOTTY`, so every program ran fully buffered and showed nothing until it exited (#402).
+
+Also fixed: `kill` on a fork+exec'd job (#398), disks over 128 GiB all reporting the same capacity (#399), GPT disks skipped without a word (#400), and two kernel-versus-POSIX ABI mismatches in the signal syscalls — one of which was smashing the caller's stack (#397, #401).
 
 ### v0.2.0 release highlights
 
@@ -392,7 +403,16 @@ Exits 0 if every checkpoint passes (UrMach banner, ush prompt, hello_exec AUXV, 
 
 ## Roadmap
 
-### v0.2.0 (this release)
+### v0.2.1 (this release)
+
+- [x] Terminal line discipline — `^C`/`^Z` generate signals from the input producer, ush protects itself (#397)
+- [x] `kill` on a fork+exec'd job — stale `signal_port` dropped at `execve`, POSIX default disposition as a safety net (#398)
+- [x] AHCI capacity from the 48-bit Max LBA instead of the saturating 28-bit field (#399)
+- [x] GPT protective MBR named rather than silently skipped, and the resulting stall explained (#400)
+- [x] Kernel-versus-POSIX ABI in `rt_sigaction` (stack smash) and `rt_sigprocmask` (#397, #401)
+- [x] `ioctl(TIOCGWINSZ)` answered — `isatty()` works and stdout is line buffered on a terminal (#402)
+
+### v0.2.0
 
 - [x] SMP: pipelined AP bring-up to 32 logical CPUs on bare metal (#300-#316, #367)
 - [x] Kernel locking modernization — pmap split locks, `ipc_space` rwlock, radix+seqlock capability table, zone magazines (#327-#331, #338)
@@ -429,7 +449,9 @@ Exits 0 if every checkpoint passes (UrMach banner, ush prompt, hello_exec AUXV, 
 - [ ] IPC profiling (#392) before any IPC redesign (#391)
 - [ ] USB stack (#353) + fbcons→gpu_server handoff (#369) — turns pure-UEFI machines interactive
 - [ ] Source-tree reorganization (#396)
-- [ ] Backlog from the 0.2.0 validation drive: on-screen `^C`/`^Z` (#397), cross-session kill (#398), AHCI 48-bit LBA (#399), GPT recognition (#400)
+- [ ] Full GPT partition parsing — recognised since v0.2.1 (#400), parsing it is the remaining half
+- [ ] `termios` — ISIG is unconditional since v0.2.1; a program cannot yet turn `^C` off
+- [ ] Widen the block stack past its 32-bit sector counts (~2 TiB ceiling made explicit in #399)
 
 ### Later / future
 
