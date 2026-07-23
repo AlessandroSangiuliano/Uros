@@ -58,7 +58,7 @@ target_include_directories(libsa_fs PUBLIC
   # Library headers (file_system.h, externs.h)
   ${CMAKE_CURRENT_SOURCE_DIR}
   # libblk header (blk.h) — ext2fs.c uses the block I/O abstraction
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libblk
+  ${CMAKE_SOURCE_DIR}/src/lib/libblk
   # Filesystem-specific headers (each fs includes its own subdir)
   ${CMAKE_CURRENT_SOURCE_DIR}/ufs
   ${CMAKE_CURRENT_SOURCE_DIR}/ext2fs
@@ -66,8 +66,8 @@ target_include_directories(libsa_fs PUBLIC
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # pthread.h and machine/pthread_impl.h (before system includes)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   # Mach services (mach.h, sa_mach.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # sa_mach standalone types (<types.h> -> sa_mach/types.h)

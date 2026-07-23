@@ -5,7 +5,7 @@
 # USAGE EXAMPLE:
 #   sh scripts/mig \
 #     -cpp "/usr/bin/cpp -Iosfmk/export/powermac/include -Iosfmk/src/mach_kernel" \
-#     -migcom osfmk/build/src/mach_services/lib/migcom/migcom \
+#     -migcom osfmk/build/src/lib/migcom/migcom \
 #     -user your_file_user.c -header your_file.h \
 #     -server your_file_server.c -sheader your_file_server.h \
 #     your_file.defs
@@ -123,7 +123,7 @@
 #
 
 C=/usr/bin/cpp
-M=$PWD/osfmk/build/src/mach_services/lib/migcom/migcom
+M=$PWD/osfmk/build/src/lib/migcom/migcom
 
 cppflags=
 migflags=

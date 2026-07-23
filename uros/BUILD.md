@@ -170,16 +170,16 @@ cmake --build --preset debug-nosan --target migcom
 
 ```bash
 cmake --preset debug-nosan && cmake --build --preset debug-nosan
-gdb ./build-debug-nosan/src/mach_services/lib/migcom/migcom
+gdb ./build-debug-nosan/src/lib/migcom/migcom
 ```
 
 ### With Valgrind (use debug-nosan preset)
 
 ```bash
 cmake --preset debug-nosan && cmake --build --preset debug-nosan
-valgrind --track-origins=yes ./build-debug-nosan/src/mach_services/lib/migcom/migcom \
+valgrind --track-origins=yes ./build-debug-nosan/src/lib/migcom/migcom \
     -V -user /tmp/test.c -server /dev/null -sheader /dev/null -dheader /dev/null \
-    < src/mach_services/lib/migcom/tests/minimal.mig
+    < src/lib/migcom/tests/minimal.mig
 ```
 
 ### With AddressSanitizer (use debug preset)
@@ -188,7 +188,7 @@ The `debug` preset automatically enables ASAN and UBSAN. Just run:
 
 ```bash
 cmake --preset debug && cmake --build --preset debug
-./build-debug/src/mach_services/lib/migcom/migcom -V ...
+./build-debug/src/lib/migcom/migcom -V ...
 ```
 
 Any memory errors will be reported automatically.
@@ -270,7 +270,7 @@ Install Ninja or change the generator in the preset to "Unix Makefiles".
 The test preset for `debug` automatically sets `LSAN_OPTIONS=detect_leaks=0` to suppress benign leaks in this legacy codebase. If you want to see leaks, run manually:
 
 ```bash
-./build-debug/src/mach_services/lib/migcom/migcom ...
+./build-debug/src/lib/migcom/migcom ...
 ```
 
 ---

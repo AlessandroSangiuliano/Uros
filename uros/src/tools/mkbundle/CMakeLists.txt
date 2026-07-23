@@ -3,7 +3,7 @@
 add_executable(mkbundle mkbundle.c)
 
 target_include_directories(mkbundle PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/bootstrap
+  ${CMAKE_SOURCE_DIR}/src/servers/bootstrap
 )
 
 set_target_properties(mkbundle PROPERTIES

@@ -38,6 +38,7 @@ endif()
 # Per ora costruiamo solo i tool host necessari (mig/migcom, librerie base).
 
 if(OSFMK_BUILD_TOOLS)
+  add_subdirectory(lib)
   add_subdirectory(mach_services/lib)
   add_subdirectory(file_systems)
   add_subdirectory(tools/mkbundle)
@@ -51,156 +52,154 @@ endif()
 
 # Build bootstrap server
 if(OSFMK_BUILD_BOOTSTRAP)
-  add_subdirectory(bootstrap)
+  add_subdirectory(servers/bootstrap)
 endif()
 
 # Build default pager server
 if(OSFMK_BUILD_DEFAULT_PAGER)
-  add_subdirectory(default_pager)
+  add_subdirectory(servers/default_pager)
 endif()
 
 # Build hello server (test/demo server)
 if(OSFMK_BUILD_HELLO_SERVER)
-  add_subdirectory(hello_server)
+  add_subdirectory(servers/hello_server)
 endif()
 
 # Build exec_server (userspace ELF loader / process spawner, #228)
 if(OSFMK_BUILD_EXEC_SERVER)
-  add_subdirectory(exec_server)
+  add_subdirectory(servers/exec_server)
 endif()
 
 # Build hello_exec test binary (#228 v0.1.0 acceptance)
 if(OSFMK_BUILD_HELLO_EXEC)
-  add_subdirectory(hello_exec)
+  add_subdirectory(tests/hello_exec)
 endif()
 
 # Build hello_dyn — first dynamically-linked binary (#234 Phase 7).
 if(UROS_BUILD_MUSL)
-  add_subdirectory(hello_dyn)
+  add_subdirectory(tests/hello_dyn)
 endif()
 
 # Build fd_exec_test (#262 step 3: execve fd-inheritance smoke target)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(fd_exec_test)
+  add_subdirectory(tests/fd_exec_test)
 endif()
 
 # Build hello_world (#286: standard printf-to-ctty hello world)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(hello_world)
+  add_subdirectory(tests/hello_world)
 endif()
 
 # Build hello_dyn_world (#289: dynamic twin of hello_world — verifies the
 # dynamic clean-exit/reap path through ld-musl + the umbrella libc.so)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(hello_dyn_world)
+  add_subdirectory(tests/hello_dyn_world)
 endif()
 
 # Build pthread_min (#291: minimal musl pthread regression — proves
 # pthread_create works without any -Wl,-u clone workaround)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(pthread_min)
+  add_subdirectory(tests/pthread_min)
 endif()
 
 # Build flipc_bench (#272: standalone libvfs FLIPC v2 A/B benchmark,
 # launched from the shell post-boot for quiescent, median-of-N numbers)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(flipc_bench)
+  add_subdirectory(bench/flipc_bench)
 endif()
 
 # Build ush — Uros shell (#275.5).
 if(UROS_BUILD_MUSL)
-  add_subdirectory(ush)
+  add_subdirectory(cmds/ush)
 endif()
 
 # Build cpustat (#375) — per-CPU load monitor, the first dynamically-linked
 # real tool (umbrella libc.so + libmach_core-pic), launched from the shell.
 if(UROS_BUILD_MUSL)
-  add_subdirectory(cpustat)
+  add_subdirectory(cmds/cpustat)
 endif()
 
 # Build virtual_terminal_server — VT shell supervisor (#365 phase 2b).
 if(UROS_BUILD_MUSL)
-  add_subdirectory(virtual_terminal_server)
+  add_subdirectory(servers/virtual_terminal_server)
 endif()
 
 # Build libfoo.so + dlopen_test — musl dlopen end-to-end (#234 incr 4)
 if(UROS_BUILD_MUSL)
-  add_subdirectory(libfoo)
-  add_subdirectory(dlopen_test)
+  add_subdirectory(tests/libfoo)
+  add_subdirectory(tests/dlopen_test)
 endif()
 
 # Build proc_server (POSIX process model owner, #237)
 if(OSFMK_BUILD_PROC_SERVER)
-  add_subdirectory(proc_server)
+  add_subdirectory(servers/proc_server)
 endif()
 
 # Build IPC performance benchmark
 if(OSFMK_BUILD_IPC_BENCH)
-  add_subdirectory(ipc_bench)
+  add_subdirectory(bench/ipc_bench)
 endif()
 
 # The standalone AHCI userspace driver (src/ahci_driver) was removed: it was
 # superseded by the modular block_device_server/ahci (ahci.so loaded by blk)
 # and was no longer deployed in the bundle or on disk.  ext_server's MIG
 # ahci_batch stubs now come from block_device_server/ahci/ (identical defs).
-
-# Build virtio-blk userspace driver
-if(OSFMK_BUILD_VIRTIO_BLK)
-  add_subdirectory(virtio_blk)
-endif()
+# The standalone virtio-blk driver (src/virtio_blk) followed it in #396,
+# for the same reason: superseded by block_device_server/virtio_blk
+# (virtio_blk.so), the only thing the bundle ever shipped.
 
 # Build modular block device server
 if(OSFMK_BUILD_BLOCK_SERVER)
-  add_subdirectory(block_device_server)
+  add_subdirectory(servers/block_device_server)
 endif()
 
 # Build HAL server (hardware discovery + device registry)
 if(OSFMK_BUILD_HAL_SERVER)
-  add_subdirectory(hal_server)
+  add_subdirectory(servers/hal_server)
 endif()
 
 # Build name server (netname)
 if(OSFMK_BUILD_NAME_SERVER)
-  add_subdirectory(mach_services/servers/netname)
+  add_subdirectory(servers/name_server)
 endif()
 
 # Build ext filesystem server (ext2/ext3/ext4)
 if(OSFMK_BUILD_EXT2_SERVER)
-  add_subdirectory(ext_server)
+  add_subdirectory(servers/ext_server)
 endif()
 
 # Build pthread test server
 if(OSFMK_BUILD_PTHREAD_TEST)
-  add_subdirectory(pthread_test)
+  add_subdirectory(tests/pthread_test)
 endif()
 
 # Build capability server (Uros cap_server)
 if(OSFMK_BUILD_CAP_SERVER)
-  add_subdirectory(cap_server)
+  add_subdirectory(servers/cap_server)
 endif()
 
 # Build capability negative-test binary
 if(OSFMK_BUILD_CAP_TEST)
-  add_subdirectory(cap_test)
+  add_subdirectory(tests/cap_test)
 endif()
 
 # Build kernel242_test (#242 no-goto kernel exerciser)
-add_subdirectory(kernel242_test)
+add_subdirectory(tests/kernel242_test)
 
 # Build sig_test (#238 proc_server signal exerciser)
-add_subdirectory(sig_test)
+add_subdirectory(tests/sig_test)
 
 # Build gpustat userspace probe for gpu_query_stats (#203)
 if(OSFMK_BUILD_GPUSTAT)
-  add_subdirectory(gpustat)
+  add_subdirectory(cmds/gpustat)
 endif()
 
 # Build gpu_server (#194 — userspace GPU/display server)
 if(OSFMK_BUILD_GPU_SERVER)
-  add_subdirectory(gpu_server)
+  add_subdirectory(servers/gpu_server)
 endif()
 
 # Build char_server (#205 — userspace character device server)
 if(OSFMK_BUILD_CHAR_SERVER)
-  add_subdirectory(char_server)
+  add_subdirectory(servers/char_server)
 endif()

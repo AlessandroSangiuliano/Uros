@@ -56,7 +56,7 @@
 
 
 #include <mach.h>
-#include "../../libmach/strings.h"
+#include "../../../../lib/libmach/strings.h"   /* #396: libmach moved to src/lib */
 
 /*
  * Rthread library imports:

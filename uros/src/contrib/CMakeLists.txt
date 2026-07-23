@@ -122,10 +122,10 @@ if(UROS_BUILD_MUSL)
   # host stubs (host_processors/processor_info) and the trap thunks
   # (mach_host_self) — to the link as loose objects.  Their globals stay
   # exported, letting cpustat run the umbrella's single, initialised Mach
-  # runtime instead of a static duplicate.  (Built by libmach_core-pic, on
-  # which this command already DEPENDS.)
-  set(_MC_PICDIR ${CMAKE_BINARY_DIR}/src/mach_services/lib/libmach/CMakeFiles/libmach_core-pic.dir)
-  set(MACH_EXPORT_OBJS "${_MC_PICDIR}/__/__/__/__/generated/mach_host_user.c.o ${_MC_PICDIR}/generated/asm/mach_traps.s.S.o")
+  # runtime instead of a static duplicate.  The objects come from the
+  # dedicated libmach_export_objs OBJECT library (#396) — named through
+  # $<TARGET_OBJECTS>, not guessed from another target's CMakeFiles layout.
+  set(MACH_EXPORT_OBJS "$<JOIN:$<TARGET_OBJECTS:libmach_export_objs>, >")
 
   set(MUSL_UMBRELLA_STAMP ${CMAKE_CURRENT_BINARY_DIR}/musl-umbrella.stamp)
   add_custom_command(
@@ -137,6 +137,7 @@ if(UROS_BUILD_MUSL)
     COMMAND ${CMAKE_COMMAND} -E touch ${MUSL_UMBRELLA_STAMP}
     DEPENDS musl_extproj
             libposix-uros-pic libvfs-pic libmach_core-pic
+            libmach_export_objs
             libnetname-pic libcap-pic
             ${CMAKE_CURRENT_SOURCE_DIR}/uros_umbrella_mach.list
     COMMENT "Linking umbrella libc.so (musl + Uros PIC backend: posix-uros/vfs/mach/netname/cap)"

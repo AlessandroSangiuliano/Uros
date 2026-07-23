@@ -115,7 +115,7 @@
 
 /*
  * N.B.:	If you add errors, please update
- *			mach_services/lib/libmach/err_kern.sub
+ *			lib/libmach/err_kern.sub
  */
 
 #define KERN_SUCCESS			0
