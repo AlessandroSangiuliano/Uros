@@ -52,22 +52,22 @@ endif()
 
 # Build bootstrap server
 if(OSFMK_BUILD_BOOTSTRAP)
-  add_subdirectory(bootstrap)
+  add_subdirectory(servers/bootstrap)
 endif()
 
 # Build default pager server
 if(OSFMK_BUILD_DEFAULT_PAGER)
-  add_subdirectory(default_pager)
+  add_subdirectory(servers/default_pager)
 endif()
 
 # Build hello server (test/demo server)
 if(OSFMK_BUILD_HELLO_SERVER)
-  add_subdirectory(hello_server)
+  add_subdirectory(servers/hello_server)
 endif()
 
 # Build exec_server (userspace ELF loader / process spawner, #228)
 if(OSFMK_BUILD_EXEC_SERVER)
-  add_subdirectory(exec_server)
+  add_subdirectory(servers/exec_server)
 endif()
 
 # Build hello_exec test binary (#228 v0.1.0 acceptance)
@@ -121,7 +121,7 @@ endif()
 
 # Build virtual_terminal_server — VT shell supervisor (#365 phase 2b).
 if(UROS_BUILD_MUSL)
-  add_subdirectory(virtual_terminal_server)
+  add_subdirectory(servers/virtual_terminal_server)
 endif()
 
 # Build libfoo.so + dlopen_test — musl dlopen end-to-end (#234 incr 4)
@@ -132,7 +132,7 @@ endif()
 
 # Build proc_server (POSIX process model owner, #237)
 if(OSFMK_BUILD_PROC_SERVER)
-  add_subdirectory(proc_server)
+  add_subdirectory(servers/proc_server)
 endif()
 
 # Build IPC performance benchmark
@@ -152,22 +152,22 @@ endif()
 
 # Build modular block device server
 if(OSFMK_BUILD_BLOCK_SERVER)
-  add_subdirectory(block_device_server)
+  add_subdirectory(servers/block_device_server)
 endif()
 
 # Build HAL server (hardware discovery + device registry)
 if(OSFMK_BUILD_HAL_SERVER)
-  add_subdirectory(hal_server)
+  add_subdirectory(servers/hal_server)
 endif()
 
 # Build name server (netname)
 if(OSFMK_BUILD_NAME_SERVER)
-  add_subdirectory(mach_services/servers/netname)
+  add_subdirectory(servers/name_server)
 endif()
 
 # Build ext filesystem server (ext2/ext3/ext4)
 if(OSFMK_BUILD_EXT2_SERVER)
-  add_subdirectory(ext_server)
+  add_subdirectory(servers/ext_server)
 endif()
 
 # Build pthread test server
@@ -177,7 +177,7 @@ endif()
 
 # Build capability server (Uros cap_server)
 if(OSFMK_BUILD_CAP_SERVER)
-  add_subdirectory(cap_server)
+  add_subdirectory(servers/cap_server)
 endif()
 
 # Build capability negative-test binary
@@ -198,10 +198,10 @@ endif()
 
 # Build gpu_server (#194 — userspace GPU/display server)
 if(OSFMK_BUILD_GPU_SERVER)
-  add_subdirectory(gpu_server)
+  add_subdirectory(servers/gpu_server)
 endif()
 
 # Build char_server (#205 — userspace character device server)
 if(OSFMK_BUILD_CHAR_SERVER)
-  add_subdirectory(char_server)
+  add_subdirectory(servers/char_server)
 endif()

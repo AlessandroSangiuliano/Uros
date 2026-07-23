@@ -7,7 +7,7 @@ project(sig_test C)
 # server stubs.
 
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(PROC_DEFS  ${CMAKE_SOURCE_DIR}/src/proc_server/proc.defs)
+set(PROC_DEFS  ${CMAKE_SOURCE_DIR}/src/servers/proc_server/proc.defs)
 set(PROC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/proc_user.c)
 set(PROC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/proc.h)
 
@@ -19,7 +19,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/proc_server
+    -I${CMAKE_SOURCE_DIR}/src/servers/proc_server
     -header ${PROC_USER_H}
     -sheader /dev/null
     -user ${PROC_USER_C}
@@ -57,7 +57,7 @@ target_include_directories(sig_test_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
-  ${CMAKE_SOURCE_DIR}/src/proc_server
+  ${CMAKE_SOURCE_DIR}/src/servers/proc_server
   ${CMAKE_SOURCE_DIR}/include
 )
 

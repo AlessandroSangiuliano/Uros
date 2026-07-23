@@ -3,7 +3,7 @@ project(gpustat C)
 
 # MIG: client stubs for gpu_server.defs (gpu_query_stats).
 set(MIG_SCRIPT   ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(GPU_DEFS     ${CMAKE_SOURCE_DIR}/src/gpu_server/gpu_server.defs)
+set(GPU_DEFS     ${CMAKE_SOURCE_DIR}/src/servers/gpu_server/gpu_server.defs)
 set(GPU_USER_C   ${CMAKE_CURRENT_BINARY_DIR}/gpustat_gpu_user.c)
 set(GPU_USER_H   ${CMAKE_CURRENT_BINARY_DIR}/gpu_server.h)
 

@@ -106,7 +106,7 @@ add_custom_command(
 # MIG-generated hal user stubs (BDS calls hal_register_driver on the HAL port)
 # ===========================================================================
 
-set(HAL_DEFS ${CMAKE_SOURCE_DIR}/src/hal_server/hal.defs)
+set(HAL_DEFS ${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs)
 
 set(HAL_USER_C ${CMAKE_CURRENT_BINARY_DIR}/hal_user.c)
 set(HAL_USER_H ${CMAKE_CURRENT_BINARY_DIR}/hal.h)
@@ -132,7 +132,7 @@ add_custom_command(
 # MIG-generated hal_notify server stubs (BDS receives hal_device_added events)
 # ===========================================================================
 
-set(HAL_NOTIFY_DEFS ${CMAKE_SOURCE_DIR}/src/hal_server/hal_notify.defs)
+set(HAL_NOTIFY_DEFS ${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal_notify.defs)
 
 set(HAL_NOTIFY_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/hal_notify_server.c)
 set(HAL_NOTIFY_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/hal_notify_server.h)

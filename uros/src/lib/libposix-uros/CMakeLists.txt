@@ -18,7 +18,7 @@ project(libposix-uros C ASM)
 # do not need their own MIG rule.
 # -----------------------------------------------------------------------
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(PROC_DEFS   ${CMAKE_SOURCE_DIR}/src/proc_server/proc.defs)
+set(PROC_DEFS   ${CMAKE_SOURCE_DIR}/src/servers/proc_server/proc.defs)
 set(PROC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/proc_user.c)
 set(PROC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/proc.h)
 
@@ -30,7 +30,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/proc_server
+    -I${CMAKE_SOURCE_DIR}/src/servers/proc_server
     -header ${PROC_USER_H}
     -sheader /dev/null
     -user ${PROC_USER_C}
@@ -45,7 +45,7 @@ set_source_files_properties(${PROC_USER_C} ${PROC_USER_H} PROPERTIES GENERATED T
 # Phase 5 (#254): exec_server client stubs.  Same pattern as proc.defs
 # above — generated locally, linked into libposix-uros, so any musl-
 # linked server gets execve() routing through us.
-set(EXEC_DEFS   ${CMAKE_SOURCE_DIR}/src/exec_server/exec.defs)
+set(EXEC_DEFS   ${CMAKE_SOURCE_DIR}/src/servers/exec_server/exec.defs)
 set(EXEC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/exec_user.c)
 set(EXEC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/exec.h)
 
@@ -57,7 +57,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/exec_server
+    -I${CMAKE_SOURCE_DIR}/src/servers/exec_server
     -header ${EXEC_USER_H}
     -sheader /dev/null
     -user ${EXEC_USER_C}
@@ -71,7 +71,7 @@ set_source_files_properties(${EXEC_USER_C} ${EXEC_USER_H} PROPERTIES GENERATED T
 
 # #275.4-bis: char_server.defs user stubs for /dev/tty open + tty fd
 # routing.  Same pattern as proc.defs / exec.defs above.
-set(CHAR_DEFS   ${CMAKE_SOURCE_DIR}/src/char_server/char_server.defs)
+set(CHAR_DEFS   ${CMAKE_SOURCE_DIR}/src/servers/char_server/char_server.defs)
 set(CHAR_USER_C ${CMAKE_CURRENT_BINARY_DIR}/char_server_user.c)
 set(CHAR_USER_H ${CMAKE_CURRENT_BINARY_DIR}/char_server.h)
 
@@ -83,7 +83,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/char_server
+    -I${CMAKE_SOURCE_DIR}/src/servers/char_server
     -header ${CHAR_USER_H}
     -sheader /dev/null
     -user ${CHAR_USER_C}
@@ -198,9 +198,9 @@ target_include_directories(libposix-uros PRIVATE
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/src/proc_server
-  ${CMAKE_SOURCE_DIR}/src/exec_server
-  ${CMAKE_SOURCE_DIR}/src/char_server
+  ${CMAKE_SOURCE_DIR}/src/servers/proc_server
+  ${CMAKE_SOURCE_DIR}/src/servers/exec_server
+  ${CMAKE_SOURCE_DIR}/src/servers/char_server
   ${CMAKE_SOURCE_DIR}/src/lib/libvfs   # libvfs.h, vfs_types.h (#262)
 )
 

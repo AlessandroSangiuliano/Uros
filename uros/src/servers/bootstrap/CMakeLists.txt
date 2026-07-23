@@ -59,7 +59,7 @@ mig_server_stub(
 #    client (#198 log_forwarder).  We only need the user stubs but the
 #    macro emits both; the server-side .c is left unused.
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/src/gpu_server/gpu_server.defs"
+  "${CMAKE_SOURCE_DIR}/src/servers/gpu_server/gpu_server.defs"
   gpu_server  ${MIG_OUT})
 
 set(MIG_SERVER_SOURCES

@@ -27,7 +27,7 @@
  * app set grows.
  *
  * Reference for the eventual non-stub bodies:
- *   uros/src/default_pager/dp_memory_object.c  (study, don't copy —
+ *   uros/src/servers/default_pager/dp_memory_object.c  (study, don't copy —
  *   [[feedback_study_never_copy]]).
  */
 

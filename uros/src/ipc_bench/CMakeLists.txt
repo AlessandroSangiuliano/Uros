@@ -6,7 +6,7 @@ project(ipc_bench C)
 # ===========================================================================
 
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(EXT2_DEFS ${CMAKE_SOURCE_DIR}/src/ext_server/ext2fs_server.defs)
+set(EXT2_DEFS ${CMAKE_SOURCE_DIR}/src/servers/ext_server/ext2fs_server.defs)
 
 set(EXT2_USER_C ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server_user.c)
 set(EXT2_USER_H ${CMAKE_CURRENT_BINARY_DIR}/ext2fs_server.h)
@@ -34,7 +34,7 @@ add_custom_command(
 # MIG-generated exec_server user stubs (#228 v0.1.0 smoke test)
 # ===========================================================================
 
-set(EXEC_DEFS ${CMAKE_SOURCE_DIR}/src/exec_server/exec.defs)
+set(EXEC_DEFS ${CMAKE_SOURCE_DIR}/src/servers/exec_server/exec.defs)
 set(EXEC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/exec_user.c)
 set(EXEC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/exec.h)
 
@@ -46,7 +46,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/exec_server
+    -I${CMAKE_SOURCE_DIR}/src/servers/exec_server
     -header ${EXEC_USER_H}
     -sheader /dev/null
     -user ${EXEC_USER_C}
@@ -61,7 +61,7 @@ add_custom_command(
 # MIG-generated proc_server user stubs (#237 v0.1.0 smoke test)
 # ===========================================================================
 
-set(PROC_DEFS ${CMAKE_SOURCE_DIR}/src/proc_server/proc.defs)
+set(PROC_DEFS ${CMAKE_SOURCE_DIR}/src/servers/proc_server/proc.defs)
 set(PROC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/proc_user.c)
 set(PROC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/proc.h)
 
@@ -73,7 +73,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/proc_server
+    -I${CMAKE_SOURCE_DIR}/src/servers/proc_server
     -header ${PROC_USER_H}
     -sheader /dev/null
     -user ${PROC_USER_C}
@@ -138,7 +138,7 @@ target_include_directories(ipc_bench_server PRIVATE
   # MIG-generated headers (ext2fs_server.h)
   ${CMAKE_CURRENT_BINARY_DIR}
   # ext2fs_types.h (imported by MIG-generated code)
-  ${CMAKE_SOURCE_DIR}/src/ext_server
+  ${CMAKE_SOURCE_DIR}/src/servers/ext_server
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
@@ -157,9 +157,9 @@ target_include_directories(ipc_bench_server PRIVATE
   # libvfs (libvfs.h, vfs_types.h)
   ${CMAKE_SOURCE_DIR}/src/lib/libvfs
   # exec_server (exec_types.h imported by MIG-generated exec.h)
-  ${CMAKE_SOURCE_DIR}/src/exec_server
+  ${CMAKE_SOURCE_DIR}/src/servers/exec_server
   # proc_server (proc_types.h)
-  ${CMAKE_SOURCE_DIR}/src/proc_server
+  ${CMAKE_SOURCE_DIR}/src/servers/proc_server
 )
 
 # Link against Mach userspace libraries.

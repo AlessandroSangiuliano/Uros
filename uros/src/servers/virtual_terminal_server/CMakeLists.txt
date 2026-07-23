@@ -50,7 +50,7 @@ target_include_directories(virtual_terminal_server_bin PRIVATE
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
-  ${CMAKE_SOURCE_DIR}/src/proc_server      # proc_types.h (proc_exit_msg_t)
+  ${CMAKE_SOURCE_DIR}/src/servers/proc_server      # proc_types.h (proc_exit_msg_t)
   ${CMAKE_SOURCE_DIR}/include
 )
 

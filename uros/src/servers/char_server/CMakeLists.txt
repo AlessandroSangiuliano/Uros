@@ -19,7 +19,7 @@ set(CHAR_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/src/lib/libmodload
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
   ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
-  ${CMAKE_SOURCE_DIR}/src/proc_server
+  ${CMAKE_SOURCE_DIR}/src/servers/proc_server
   ${CMAKE_BINARY_DIR}/generated/include
   # mach_services/include MUST come before build/generated so <mach.h>
   # resolves to the libmach userspace version, not the MIG-emitted shim.
@@ -69,7 +69,7 @@ add_custom_command(
 # pattern as device_master.defs above.
 # ===========================================================================
 
-set(PROC_DEFS   ${CMAKE_SOURCE_DIR}/src/proc_server/proc.defs)
+set(PROC_DEFS   ${CMAKE_SOURCE_DIR}/src/servers/proc_server/proc.defs)
 set(PROC_USER_C ${CMAKE_CURRENT_BINARY_DIR}/proc_user.c)
 set(PROC_USER_H ${CMAKE_CURRENT_BINARY_DIR}/proc.h)
 
@@ -81,7 +81,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/proc_server
+    -I${CMAKE_SOURCE_DIR}/src/servers/proc_server
     -header ${PROC_USER_H}
     -sheader /dev/null
     -user ${PROC_USER_C}

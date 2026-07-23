@@ -6,7 +6,7 @@ project(libgpu_console C)
 # ===========================================================================
 
 set(MIG_SCRIPT  ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(GPU_DEFS    ${CMAKE_SOURCE_DIR}/src/gpu_server/gpu_server.defs)
+set(GPU_DEFS    ${CMAKE_SOURCE_DIR}/src/servers/gpu_server/gpu_server.defs)
 set(GPU_USER_C  ${CMAKE_BINARY_DIR}/generated/gpu_console_gpu_user.c)
 set(GPU_USER_H  ${CMAKE_BINARY_DIR}/generated/gpu_console_gpu.h)
 
