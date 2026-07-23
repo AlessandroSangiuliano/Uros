@@ -43,10 +43,10 @@ target_compile_options(ush_bin PRIVATE
 
 target_include_directories(ush_bin PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR}
-  ${CMAKE_BINARY_DIR}/src/mach_services/lib/libposix-uros  # char_server.h, proc.h
+  ${CMAKE_BINARY_DIR}/src/lib/libposix-uros  # char_server.h, proc.h
   ${MUSL_PREFIX}/include
   ${_GCC_INCLUDE}
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libposix-uros/include
+  ${CMAKE_SOURCE_DIR}/src/lib/libposix-uros/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/export/include

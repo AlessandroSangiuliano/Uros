@@ -1,3 +1,4 @@
+#
 # Copyright 1991-1998 by Open Software Foundation, Inc. 
 #              All Rights Reserved 
 #  
@@ -16,27 +17,18 @@
 # LOSS OF USE, DATA OR PROFITS, WHETHER IN ACTION OF CONTRACT, 
 # NEGLIGENCE, OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION 
 # WITH THE USE OR PERFORMANCE OF THIS SOFTWARE. 
-# 
+#
 # MkLinux
 
-${TARGET_MACHINE}_VPATH		= \
-	${MAKETOP}mach_services/lib/libmach/${TARGET_MACHINE}
+${TARGET_MACHINE}_VPATH		= ${MAKETOP}lib/libmach/${MACHINE}
 ${TARGET_MACHINE}_INCDIRS	= ${TARGET_MACHINE}
 
-SFILES			= mach_traps.o mach_host_priv_self.o \
-			  _setjmp.o 
-
-LOCAL_CFLAGS		= -msoft-float -fno-omit-frame-pointer
-
-${TARGET_MACHINE}_OFILES= ${SFILES}
+SFILES				= mach_traps.o mach_host_priv_self.o _setjmp.o
+${TARGET_MACHINE}_OFILES	= ${SFILES}
 
 ${SFILES:.o=.S}: $${.TARGET:.S=.s}
 	${RM} ${_RMFLAGS_} ${.TARGET}
 	${CP} ${${.TARGET:.S=.s}:P} ${.TARGET}
 
 ${SFILES}: $${.TARGET:.o=.S}
-	${_CC_} -E ${_CCFLAGS_} -DASSEMBLER ${${.TARGET:.o=.S}:P} \
-		> ${.TARGET:.o=.pp}
-	${SED} '/^#/d' ${.TARGET:.o=.pp} > ${.TARGET:.o=.s}
-	${_CC_} ${_CCFLAGS_} -m601 -Wa,-Z -c ${.TARGET:.o=.s}
-	${RM} ${_RMFLAGS_} ${.TARGET:.o=.pp} ${.TARGET:.o=.s}
+	${_CC_} -DASSEMBLER ${_CCFLAGS_} -c ${.TARGET:.o=.S}

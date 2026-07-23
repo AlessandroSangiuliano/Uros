@@ -35,8 +35,8 @@ add_custom_command(
 # MIG-generated vfs server stubs (subsystem 3000, #220 sub-step B)
 # ===========================================================================
 
-set(VFS_DEFS ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs/vfs.defs)
-set(VFS_TYPES_H ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs/vfs_types.h)
+set(VFS_DEFS ${CMAKE_SOURCE_DIR}/src/lib/libvfs/vfs.defs)
+set(VFS_TYPES_H ${CMAKE_SOURCE_DIR}/src/lib/libvfs/vfs_types.h)
 
 set(VFS_USER_C ${CMAKE_CURRENT_BINARY_DIR}/vfs_user.c)
 set(VFS_USER_H ${CMAKE_CURRENT_BINARY_DIR}/vfs.h)
@@ -51,7 +51,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
+    -I${CMAKE_SOURCE_DIR}/src/lib/libvfs
     -header ${VFS_USER_H}
     -sheader ${VFS_SERVER_H}
     -user ${VFS_USER_C}
@@ -161,14 +161,14 @@ target_include_directories(ext_server_bin PRIVATE
   # ext2fs_types.h (imported by MIG-generated code)
   ${CMAKE_CURRENT_SOURCE_DIR}
   # vfs_types.h (imported by MIG-generated vfs_server.c)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
+  ${CMAKE_SOURCE_DIR}/src/lib/libvfs
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # pthread.h and machine/pthread_impl.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, servers/netname.h)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
@@ -179,11 +179,11 @@ target_include_directories(ext_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/file_systems
   ${CMAKE_SOURCE_DIR}/src/file_systems/ext2fs
   # libcap.h for capability-gated device_open_cap
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
   # libfspager.h for file-backed mmap (#276)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libfspager
+  ${CMAKE_SOURCE_DIR}/src/lib/libfspager
   # libgpu_console (#199 prep)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
 )
 
 # Link against Mach userspace libraries + filesystem library.

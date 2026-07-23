@@ -21,13 +21,13 @@ target_compile_definitions(cap_test_server PRIVATE
 )
 
 target_include_directories(cap_test_server PRIVATE
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
 )
 
 target_link_libraries(cap_test_server PRIVATE

@@ -139,8 +139,8 @@ target_include_directories(bootstrap_server PRIVATE
   # Mach services include (sa_mach.h, servers/)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # pthread.h and machine/pthread_impl.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   # Filesystem headers — must come before export so the canonical file_system.h
   # is used (export/include copy may be stale)
   ${CMAKE_SOURCE_DIR}/src/file_systems
@@ -152,10 +152,10 @@ target_include_directories(bootstrap_server PRIVATE
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
   # Issue #185: stage-2 reads via BDS (libblk) gated by Uros caps (libcap)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libblk
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  ${CMAKE_SOURCE_DIR}/src/lib/libblk
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
   # libgpu_console (#199 prep) — printf mirror to gpu_server
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
 )
 
 # Link against Mach userspace libraries.

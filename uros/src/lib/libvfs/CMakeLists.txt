@@ -56,8 +56,8 @@ target_include_directories(libvfs PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include          # mach/machine -> i386
   ${CMAKE_SOURCE_DIR}/src/mach_services/include  # sa_mach.h, mach.h
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach  # sys/timers.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   ${CMAKE_SOURCE_DIR}/export/include             # mach/, servers/netname.h
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

@@ -21,17 +21,17 @@ set(HAL_INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/pci_scan
   # libdl + libmodload + libgpu_console (#199 prep) + libcap headers
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libdl
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libmodload
+  ${CMAKE_SOURCE_DIR}/src/lib/libdl
+  ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
+  ${CMAKE_SOURCE_DIR}/src/lib/libmodload
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # pthread.h and machine/pthread_impl.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   # Pre-built export headers
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers

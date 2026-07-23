@@ -38,6 +38,7 @@ endif()
 # Per ora costruiamo solo i tool host necessari (mig/migcom, librerie base).
 
 if(OSFMK_BUILD_TOOLS)
+  add_subdirectory(lib)
   add_subdirectory(mach_services/lib)
   add_subdirectory(file_systems)
   add_subdirectory(tools/mkbundle)

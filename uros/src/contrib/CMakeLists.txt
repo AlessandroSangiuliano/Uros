@@ -124,8 +124,8 @@ if(UROS_BUILD_MUSL)
   # exported, letting cpustat run the umbrella's single, initialised Mach
   # runtime instead of a static duplicate.  (Built by libmach_core-pic, on
   # which this command already DEPENDS.)
-  set(_MC_PICDIR ${CMAKE_BINARY_DIR}/src/mach_services/lib/libmach/CMakeFiles/libmach_core-pic.dir)
-  set(MACH_EXPORT_OBJS "${_MC_PICDIR}/__/__/__/__/generated/mach_host_user.c.o ${_MC_PICDIR}/generated/asm/mach_traps.s.S.o")
+  set(_MC_PICDIR ${CMAKE_BINARY_DIR}/src/lib/libmach/CMakeFiles/libmach_core-pic.dir)
+  set(MACH_EXPORT_OBJS "${_MC_PICDIR}/__/__/__/generated/mach_host_user.c.o ${_MC_PICDIR}/generated/asm/mach_traps.s.S.o")
 
   set(MUSL_UMBRELLA_STAMP ${CMAKE_CURRENT_BINARY_DIR}/musl-umbrella.stamp)
   add_custom_command(

@@ -140,8 +140,8 @@ target_include_directories(ipc_bench_server PRIVATE
   # ext2fs_types.h (imported by MIG-generated code)
   ${CMAKE_SOURCE_DIR}/src/ext_server
   # pthread.h and machine/pthread_impl.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h)
@@ -153,9 +153,9 @@ target_include_directories(ipc_bench_server PRIVATE
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
   # libgpu_console (mirror printf to gpu_server)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   # libvfs (libvfs.h, vfs_types.h)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
+  ${CMAKE_SOURCE_DIR}/src/lib/libvfs
   # exec_server (exec_types.h imported by MIG-generated exec.h)
   ${CMAKE_SOURCE_DIR}/src/exec_server
   # proc_server (proc_types.h)

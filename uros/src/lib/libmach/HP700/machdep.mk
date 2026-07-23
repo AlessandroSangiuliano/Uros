@@ -20,7 +20,7 @@
 # MkLinux
 
 ${TARGET_MACHINE}_VPATH		= \
-	${MAKETOP}mach_services/lib/libmach/${TARGET_MACHINE}
+	${MAKETOP}lib/libmach/${TARGET_MACHINE}
 ${TARGET_MACHINE}_INCDIRS	= ${TARGET_MACHINE}
 
 SFILES			= mach_traps.o bzero.o bcopy.o \

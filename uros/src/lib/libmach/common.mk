@@ -24,12 +24,12 @@ PURE_MACH		= 1
 
 USE_STATIC_LIBRARIES	=
 
-VPATH                   = ${MAKETOP}mach_services/lib/libmach:${${TARGET_MACHINE}_VPATH}:${MAKETOP}mach_kernel/mach:${MAKETOP}mach_kernel/mach_debug:${MAKETOP}mach_kernel/device:${MAKETOP}default_pager/mach
+VPATH                   = ${MAKETOP}lib/libmach:${${TARGET_MACHINE}_VPATH}:${MAKETOP}mach_kernel/mach:${MAKETOP}mach_kernel/mach_debug:${MAKETOP}mach_kernel/device:${MAKETOP}default_pager/mach
 
 LIBRARIES		= ${LOCAL_LIBMACH}
 
-INCFLAGS                = -I${MAKETOP}mach_services/lib/libmach \
-			  -I${MAKETOP}mach_services/lib/libmach/${TARGET_MACHINE}
+INCFLAGS                = -I${MAKETOP}lib/libmach \
+			  -I${MAKETOP}lib/libmach/${TARGET_MACHINE}
 mach_user.c_MIGFLAGS	= -DMIG_USER ${LOCAL_MIGFLAGS}
 mach_debug.c_MIGFLAGS	= -DMIG_USER ${LOCAL_MIGFLAGS}
 bootstrapServer.c_MIGFLAGS = -DTypeCheck=0 -DMIG_SERVER ${LOCAL_MIGFLAGS}

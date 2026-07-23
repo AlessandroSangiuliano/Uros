@@ -9,13 +9,13 @@
 - Comando eseguito dal test:
 
   ```sh
-  /path/to/build/src/mach_services/lib/migcom/migcom -V -user /dev/null -server /dev/null -sheader /dev/null -dheader /dev/null < tests/minimal.mig
+  /path/to/build/src/lib/migcom/migcom -V -user /dev/null -server /dev/null -sheader /dev/null -dheader /dev/null < tests/minimal.mig
   ```
 
 - Passi per eseguirlo manualmente:
   1. Configurare il build: `cmake -S . -B build`
   2. Compilare `migcom`: `cmake --build build --target migcom -j N`
-  3. Eseguire il test di directory: `ctest --test-dir build/src/mach_services/lib/migcom -V`
+  3. Eseguire il test di directory: `ctest --test-dir build/src/lib/migcom -V`
 
 ## Test inclusi nel modulo 🧪
 - `minimal.mig`: test minimale che verifica che `migcom` riconosca un semplice `subsystem` e termini correttamente (smoke test).

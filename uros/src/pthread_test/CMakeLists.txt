@@ -22,7 +22,7 @@ target_compile_definitions(pthread_test_server PRIVATE
 
 target_include_directories(pthread_test_server PRIVATE
   # pthread.h lives in libpthreads source dir
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h)
@@ -34,7 +34,7 @@ target_include_directories(pthread_test_server PRIVATE
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
   # libgpu_console (mirror printf to gpu_server)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
 )
 
 # Link with libpthreads INSTEAD of libcthreads.

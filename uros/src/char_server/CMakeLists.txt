@@ -15,17 +15,17 @@ set(CHAR_COMPILE_OPTIONS
 set(CHAR_INCLUDE_DIRS
   ${CMAKE_CURRENT_BINARY_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libdl
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libmodload
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/lib/libdl
+  ${CMAKE_SOURCE_DIR}/src/lib/libmodload
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
+  ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   ${CMAKE_SOURCE_DIR}/src/proc_server
   ${CMAKE_BINARY_DIR}/generated/include
   # mach_services/include MUST come before build/generated so <mach.h>
   # resolves to the libmach userspace version, not the MIG-emitted shim.
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel

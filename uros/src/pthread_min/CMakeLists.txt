@@ -42,7 +42,7 @@ target_compile_options(pthread_min_bin PRIVATE
 target_include_directories(pthread_min_bin PRIVATE
   ${MUSL_PREFIX}/include
   ${_GCC_INCLUDE}
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libposix-uros/include
+  ${CMAKE_SOURCE_DIR}/src/lib/libposix-uros/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/export/include

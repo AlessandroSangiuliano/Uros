@@ -45,13 +45,13 @@ target_compile_definitions(gpustat_bin PRIVATE
 
 target_include_directories(gpustat_bin PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR}                          # gpu_server.h (MIG)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
 )
 
 target_link_libraries(gpustat_bin PRIVATE

@@ -64,7 +64,7 @@ target_include_directories(hello_server_server PRIVATE
   # gcc internal headers (stddef.h, stdarg.h) — required because of -nostdinc
   ${_GCC_INCLUDE}
   # libposix-uros public ABI (__uros_syscall*, version macros)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libposix-uros/include
+  ${CMAKE_SOURCE_DIR}/src/lib/libposix-uros/include
   # In-tree Mach userspace headers (mach_init.h with mach_cap_port,
   # libcap.h ...) — placed before export/include so the developer copy
   # wins over the public-export stub for symbols not yet promoted.

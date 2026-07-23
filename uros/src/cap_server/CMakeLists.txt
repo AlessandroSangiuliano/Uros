@@ -51,12 +51,12 @@ target_include_directories(cap_server_bin PRIVATE
   # build/generated/mach.h that ships with the user stubs.
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # libcap headers (libcap.h, sha256.h, hmac_sha256.h)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libcap
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
   # libgpu_console headers (#209: async printf mirror to gpu_server)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libgpu_console
+  ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   # pthread.h and machine/pthread_impl.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   # Pre-built export headers (mach/cap_types.h, mach/bootstrap.h, ...)
   ${CMAKE_SOURCE_DIR}/export/include
   # MIG-generated headers (cap_server_server.h, cap_server.h)

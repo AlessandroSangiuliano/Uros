@@ -201,7 +201,7 @@ target_include_directories(libposix-uros PRIVATE
   ${CMAKE_SOURCE_DIR}/src/proc_server
   ${CMAKE_SOURCE_DIR}/src/exec_server
   ${CMAKE_SOURCE_DIR}/src/char_server
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs   # libvfs.h, vfs_types.h (#262)
+  ${CMAKE_SOURCE_DIR}/src/lib/libvfs   # libvfs.h, vfs_types.h (#262)
 )
 
 # Ensure musl has been built before we try to compile against its

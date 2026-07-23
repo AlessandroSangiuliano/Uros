@@ -37,8 +37,8 @@ add_custom_command(
 # MIG-generated server stubs from vfs.defs (proc_server hosts /proc)
 # ===========================================================================
 
-set(VFS_DEFS  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs/vfs.defs)
-set(VFS_TYPES ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs/vfs_types.h)
+set(VFS_DEFS  ${CMAKE_SOURCE_DIR}/src/lib/libvfs/vfs.defs)
+set(VFS_TYPES ${CMAKE_SOURCE_DIR}/src/lib/libvfs/vfs_types.h)
 
 set(VFS_USER_C   ${CMAKE_CURRENT_BINARY_DIR}/vfs_user.c)
 set(VFS_USER_H   ${CMAKE_CURRENT_BINARY_DIR}/vfs.h)
@@ -53,7 +53,7 @@ add_custom_command(
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-    -I${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
+    -I${CMAKE_SOURCE_DIR}/src/lib/libvfs
     -header ${VFS_USER_H}
     -sheader ${VFS_SERVER_H}
     -user ${VFS_USER_C}
@@ -141,10 +141,10 @@ target_include_directories(proc_server_bin PRIVATE
   # proc_types.h (imported)
   ${CMAKE_CURRENT_SOURCE_DIR}
   # vfs_types.h (imported by vfs.defs)
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
+  ${CMAKE_SOURCE_DIR}/src/lib/libvfs
   # pthread.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h)

@@ -79,12 +79,12 @@ target_include_directories(exec_server_bin PRIVATE
   # exec_types.h, exec_internal.h
   ${CMAKE_CURRENT_SOURCE_DIR}
   # libelf.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libelf
+  ${CMAKE_SOURCE_DIR}/src/lib/libelf
   # libvfs.h, vfs_types.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libvfs
+  ${CMAKE_SOURCE_DIR}/src/lib/libvfs
   # pthread.h
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/mach_services/lib/libpthreads/AT386
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h, servers/netname.h via export)
