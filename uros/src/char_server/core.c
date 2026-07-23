@@ -56,6 +56,24 @@ char_core_dev_lookup(char_dev_id_t id)
 	return &devices[id];
 }
 
+/*
+ * Reverse lookup: find the device a module instance belongs to.  Module
+ * ops only ever receive their own priv pointer, but the line discipline
+ * (#397) needs the device entry to reach its controlling-terminal owner.
+ */
+struct char_device_entry *
+char_core_dev_by_priv(void *priv)
+{
+	char_dev_id_t i;
+
+	if (priv == NULL)
+		return NULL;
+	for (i = 1; i < CHAR_MAX_DEVICES; i++)
+		if (devices[i].in_use && devices[i].priv == priv)
+			return &devices[i];
+	return NULL;
+}
+
 unsigned int
 char_core_dev_count(void)
 {

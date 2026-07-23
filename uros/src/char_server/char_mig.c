@@ -194,6 +194,52 @@ tty_session_owner_check(struct char_device_entry *dev, int caller_pid)
 }
 
 /*
+ * char_tty_input_isig — the signal-generating half of the terminal line
+ * discipline (#397).  A TTY module calls this for every byte it is about
+ * to enqueue.  Returns 1 when the byte is an interrupt/suspend character:
+ * the signal has gone to the tty's foreground process group and the byte
+ * must be dropped (POSIX discards it rather than handing it to a reader).
+ * Returns 0 to enqueue normally.
+ *
+ * This lives in the input producer rather than in tty_read because while
+ * a foreground job runs nobody is reading the tty — the shell is parked
+ * in waitpid — and ^C has to take effect right then, not at the next
+ * read.  Ordinary typing costs one comparison; the proc_server round
+ * trips happen only for the two signal characters.
+ */
+int
+char_tty_input_isig(void *priv, uint8_t byte)
+{
+	struct char_device_entry *dev;
+	int signo, fg_pgrp = 0, rc = 0;
+	unsigned n_sent = 0;
+
+	switch (byte) {
+	case 0x03:	signo = PROC_SIGINT;  break;	/* ^C — VINTR */
+	case 0x1a:	signo = PROC_SIGTSTP; break;	/* ^Z — VSUSP */
+	default:	return 0;
+	}
+
+	dev = char_core_dev_by_priv(priv);
+	if (dev == NULL || dev->info.class != CHAR_CLASS_TTY ||
+	    dev->ctty_sid == 0)
+		return 0;		/* no ctty owner — deliver raw */
+
+	char_proc_port_resolve();
+	if (char_proc_port == MACH_PORT_NULL)
+		return 0;
+
+	if (proc_tcgetpgrp(char_proc_port, (proc_pid_t)dev->ctty_sid,
+			   (proc_pid_t *)&fg_pgrp, &rc) != KERN_SUCCESS ||
+	    rc != PROC_OK || fg_pgrp <= 0)
+		return 0;
+
+	(void)proc_killpg(char_proc_port, (proc_pid_t)fg_pgrp, signo,
+			  &n_sent, &rc);
+	return 1;			/* consumed */
+}
+
+/*
  * tty_jobctl_check — implements POSIX background-read/write semantics
  * (#275.2 / #275.3).  Returns CHR_OK if the caller is allowed to
  * proceed; CHR_TTY_BACKGROUND after dispatching SIGTTIN/SIGTTOU to the

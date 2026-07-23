@@ -220,6 +220,13 @@ uart_irq_handler(void *arg)
 			if (b == 0x04 && char_core_ddb_break() == 0)
 				continue;
 
+			/*
+			 * #397: ^C / ^Z generate a signal for the foreground
+			 * process group and are not delivered as input.
+			 */
+			if (char_tty_input_isig(p, b))
+				continue;
+
 			if (next == p->ring_tail) {
 				p->overrun_drops++;
 			} else {

@@ -264,6 +264,9 @@ console_kbd_sink(void *arg, const char_kbd_event_t *ev)
 	p = console_for_surface(console_active_surface);
 	if (p == NULL)
 		return;
+	/* ^C / ^Z go to the foreground pgrp instead of the reader (#397). */
+	if (char_tty_input_isig(p, byte))
+		return;
 	console_ring_push(p, byte);
 	console_notify_subscribers(p);
 }

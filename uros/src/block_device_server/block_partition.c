@@ -98,6 +98,19 @@ blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		       p->relsect, p->numsect, p->numsect / 2048);
 
 		/*
+		 * Issue #400: name the one unsupported layout we are certain
+		 * to meet on any modern machine.  Without this the entry just
+		 * falls through the type filter below and the disk goes by in
+		 * silence, indistinguishable from a blank one.
+		 */
+		if (p->systid == MBR_TYPE_GPT_PROTECTIVE) {
+			printf("blk: %s disk %d is GPT-partitioned "
+			       "(protective MBR) — GPT is not supported, "
+			       "ignoring disk\n", prefix, disk_idx);
+			continue;
+		}
+
+		/*
 		 * Issue #184: also accept Linux swap (0x82) — default_pager
 		 * opens its backing store as a raw partition via BDS.
 		 */
