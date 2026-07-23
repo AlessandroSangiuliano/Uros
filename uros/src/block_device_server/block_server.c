@@ -443,7 +443,16 @@ main(int argc, char **argv)
 	hal_drain_replay();
 
 	if (n_partitions == 0) {
-		printf("blk: no partitions found, exiting\n");
+		/*
+		 * Issue #400: say what follows from this.  Exiting here is
+		 * correct — there is nothing to serve — but downstream it
+		 * leaves ext_server without a root, and the boot then waits
+		 * forever, which on the console is indistinguishable from a
+		 * crash unless we say so here.
+		 */
+		printf("blk: no usable partitions found, exiting\n");
+		printf("blk: ext_server has no root to mount — the boot "
+		       "stops here by design, this is not a hang\n");
 		return 1;
 	}
 
