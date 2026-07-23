@@ -144,11 +144,9 @@ endif()
 # superseded by the modular block_device_server/ahci (ahci.so loaded by blk)
 # and was no longer deployed in the bundle or on disk.  ext_server's MIG
 # ahci_batch stubs now come from block_device_server/ahci/ (identical defs).
-
-# Build virtio-blk userspace driver
-if(OSFMK_BUILD_VIRTIO_BLK)
-  add_subdirectory(virtio_blk)
-endif()
+# The standalone virtio-blk driver (src/virtio_blk) followed it in #396,
+# for the same reason: superseded by block_device_server/virtio_blk
+# (virtio_blk.so), the only thing the bundle ever shipped.
 
 # Build modular block device server
 if(OSFMK_BUILD_BLOCK_SERVER)
