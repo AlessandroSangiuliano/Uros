@@ -86,7 +86,7 @@ log_forwarder_init(void)
 	/* Sanity-check banner: the next libsa_mach printf is mirrored
 	 * to gpu_server, so this line should land on the VGA console
 	 * via vga.so → 0xB8000. */
-	printf("Uros 0.2.0 — userspace text path online.\n");
+	printf("Uros 0.2.1 — userspace text path online.\n");
 
 	/* #200: spawn the kernel ring drain.  Failure is non-fatal —
 	 * bootstrap's own printf still mirrors via libsa_mach. */
