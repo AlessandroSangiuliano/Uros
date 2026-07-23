@@ -6,6 +6,24 @@ The numbering tracks Uros as a whole (multiserver OS + userland). The UrMach ker
 
 ---
 
+## 0.2.1 — 2026-07-23
+
+**Theme**: what validating a release finds. Every fix here comes from actually using v0.2.0 — three from driving the shipped bits on real hardware, three more from pulling on the threads those exposed. No new features; the kernel banner reads `UrMach 0.2.1`.
+
+See [docs/release_notes_0.2.1.md](docs/release_notes_0.2.1.md) for the full narrative.
+
+### Fixed
+
+- **`^C` and `^Z` did nothing on the terminal** (#397) — the ISIG line discipline did not exist anywhere: not in char_server, not in ush's line reader, not in libposix, so an interrupt character arrived at the reader as a literal byte. Signal generation now lives in the input producer (`uart.c` drain and `console.c` keyboard sink, via `char_tty_input_isig`), not in `tty_read` — while a foreground job runs nobody is reading the terminal, and `^C` has to act anyway. ush correspondingly ignores SIGINT/SIGQUIT/SIGTSTP and restores the default disposition in the child before `execve`.
+- **`rt_sigaction` smashed the caller's stack** (#397, found on the way) — the handler declared its parameters as the 140-byte POSIX `struct sigaction` where the syscall carries the kernel's 20-byte `struct k_sigaction`, so requesting the old disposition wrote 120 bytes past the caller's buffer and destroyed the return address. Latent since the musl port: nothing had called `sigaction()` until a shell had to ignore SIGINT.
+- **`kill` did not terminate a fork+exec'd job** (#398) — `execve` left the child's `signal_port` in place, but the receive right had died with the replaced image, so the signal was posted into a dead end and the caller saw success. `proc_S_exec_handoff` now drops the port alongside the task-port swap. As a safety net, `proc_kill` and `proc_killpg` apply the POSIX default disposition both when no port is registered and when the send fails, so one `kill` is enough.
+- **Disks larger than 128 GiB all reported the same size** (#399) — capacity came from IDENTIFY words 60-61, a 28-bit sector count the ATA specification saturates at `0x0FFFFFFF`; every larger disk therefore reported ~131071 MB. Read the 48-bit Max LBA (words 100-103) when the device advertises LBA48. The data path already used the EXT commands, so only the capacity read was wrong. Sector counts remain 32-bit through the block stack, so capacity is now clamped explicitly at ~2 TiB rather than truncated in silence.
+- **A GPT disk was ignored without a word** (#400) — a GPT-partitioned disk carries a valid MBR whose single entry is type `0xEE`, which matched no known type and fell through the filter, leaving block_device_server to exit on an empty partition list and the boot to wait forever. The layout is now named, and the exit explains what it implies downstream instead of looking like a crash. Parsing GPT for real remains future work.
+- **`rt_sigprocmask` read past its arguments** (#401) — same kernel-versus-POSIX confusion as `rt_sigaction`, one function below: the 128-byte POSIX `sigset_t` was aliased over the kernel's two-word set that musl actually passes, so every `fork`, `pthread_create` and `raise` read 120 bytes beyond the mask. Harmless in effect — nothing consults those bits — but undefined, and one small buffer away from being the same frame smash. The `sigsetsize` argument is now honoured instead of discarded.
+- **`isatty()` was always false and stdout was never line buffered** (#402) — musl implements both `isatty()` and its stdout buffering decision on `ioctl(TIOCGWINSZ)`, which libposix answered with `-ENOTTY`. Every musl-linked program therefore ran fully buffered: output appeared only when the buffer filled or the process exited, so a program that printed and kept working showed nothing at all. The request is now answered per descriptor, so files and pipes still say no.
+
+---
+
 ## 0.2.0 — 2026-07-18
 
 **Theme**: SMP. Uros goes from a single-core system to a symmetric multiprocessor: UrMach boots, schedules and benchmarks on 32 logical CPUs on real hardware (Intel i9-13900K hybrid P/E), with modern per-CPU foundations, a phased kernel-locking modernization, idle power management, and a long tail of concurrency bugs found and fixed by running real workloads on real silicon. Kernel banner: `UrMach 0.2.0`.

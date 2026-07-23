@@ -50,6 +50,13 @@
 #define MBR_TYPE_LINUX		0x83
 #define MBR_TYPE_LINUX_SWAP	0x82
 
+/*
+ * GPT protective MBR (#400): a GPT-partitioned disk carries a valid MBR
+ * whose single entry has this type, so it reaches the MBR walker and
+ * simply matches nothing.  Recognised only to report it.
+ */
+#define MBR_TYPE_GPT_PROTECTIVE	0xEE
+
 #define IRQ_NOTIFY_MSGH_BASE	3000
 
 /* ================================================================

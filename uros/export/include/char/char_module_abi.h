@@ -193,6 +193,15 @@ extern void char_core_register_kbd_sink(
 	void (*fn)(void *arg, const char_kbd_event_t *ev), void *arg);
 
 /*
+ * Line discipline, signal-generating part (#397).  A TTY module calls
+ * this for each byte arriving on its input path, passing its own priv.
+ * Returns 1 when the byte was an interrupt/suspend character (^C / ^Z):
+ * the signal has been delivered to the foreground process group and the
+ * byte must NOT be enqueued.  Returns 0 to enqueue it normally.
+ */
+extern int char_tty_input_isig(void *priv, uint8_t byte);
+
+/*
  * Notify the virtual_terminal_server that the on-screen VT changed to
  * `surface` (#365 phase 3).  The console TTY module calls this from its key
  * sink on Ctrl+Alt+Fn so the server can start a shell there lazily if none

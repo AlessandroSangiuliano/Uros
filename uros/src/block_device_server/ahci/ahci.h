@@ -229,6 +229,16 @@ struct ata_fis_h2d {
 #define ATA_ID_QUEUE_DEPTH	75		/* Queue depth - 1 */
 
 /*
+ * Capacity words.  The 28-bit field saturates at 0x0FFFFFFF (128 GiB), so
+ * anything larger must be read from the 48-bit Max LBA — see ahci_identify.
+ */
+#define ATA_ID_LBA28_CAP	60		/* words 60-61: 28-bit sectors */
+#define ATA_ID_CMD_SET_2	83		/* Command set supported (2) */
+#define ATA_ID_CMD_SET_2_LBA48	(1u << 10)	/* LBA48 supported */
+#define ATA_ID_LBA48_CAP	100		/* words 100-103: 48-bit Max LBA */
+#define ATA_LBA28_MAX		0x0FFFFFFFu	/* 28-bit saturation value */
+
+/*
  * Scatter-gather: max PRDT entries per command slot.
  * CT_STRIDE = 640 bytes: 128-byte header + 32 × 16-byte PRDT entries.
  * Each slot can transfer up to 128 KB (32 × 4 KB pages).
