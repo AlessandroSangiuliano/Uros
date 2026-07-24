@@ -63,7 +63,10 @@ SECTIONS
 		*(.data.*)
 	}
 
-	.bss ALIGN(16) (NOLOAD) : AT(ADDR(.bss) - KERNEL_VBASE) {
+	/* 4 KiB, not 16: the pmap's page tables live here, and the hardware
+	 * takes a table's frame from bits 51:12 — a misaligned table is read
+	 * from the wrong address rather than rejected. */
+	.bss ALIGN(4096) (NOLOAD) : AT(ADDR(.bss) - KERNEL_VBASE) {
 		*(.bss)
 		*(.bss.*)
 		*(COMMON)

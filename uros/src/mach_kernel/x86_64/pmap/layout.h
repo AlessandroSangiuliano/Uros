@@ -109,6 +109,19 @@
 #define kernel_phys_to_va(pa)	((uint64_t)(pa) + KERNEL_IMAGE_BASE)
 
 /*
+ * Any physical address, through the direct map.  This is the translation
+ * that replaces the i386 machinery for reaching physical memory: HIGHMEM
+ * (#70), the pmap self-map (#333), the user page-table alias (#334) and the
+ * temporary mappings in the fault path all exist because reaching a
+ * physical page needed a mapping first.  Here it is an addition.
+ *
+ * Only valid once direct_map_init() has run, and only for physical
+ * addresses it actually covers.
+ */
+#define phys_to_direct(pa)	((uint64_t)(pa) + DIRECT_MAP_BASE)
+#define direct_to_phys(va)	((uint64_t)(va) - DIRECT_MAP_BASE)
+
+/*
  * Nail the arithmetic to the chapter at build time.  If an offset is ever
  * mistyped, the build stops here instead of the fault landing somewhere far
  * away with no obvious cause.

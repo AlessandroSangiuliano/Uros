@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include <cpu/regs.h>
+#include <pmap/direct.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
 
@@ -187,6 +188,36 @@ static void cpu_selftest(void)
 			      : ", EFER.LMA CLEAR?!\r\n");
 }
 
+/*
+ * Build the direct map, then prove it by reading the witness a third way:
+ * not through the image mapping, not through the low identity map, but at
+ * DIRECT_MAP_BASE + its physical address.  If that yields the same word,
+ * every physical page is now an addition away.
+ */
+static void direct_map_selftest(void)
+{
+	uint64_t pa = kernel_va_to_phys((uint64_t)(uintptr_t)&phys_witness);
+	uint32_t through_direct;
+
+	direct_map_init();
+
+	kputs("UrMach x86-64: direct map at ");
+	kputhex64(DIRECT_MAP_BASE);
+	kputs(", ");
+	kputdec(direct_map_covered / (1024 * 1024));
+	kputs(" MiB in ");
+	kputdec(direct_map_page_size / (1024 * 1024));
+	kputs(" MiB pages\r\n");
+
+	through_direct = *(const volatile uint32_t *)(uintptr_t)phys_to_direct(pa);
+
+	kputs("UrMach x86-64: witness via direct map ");
+	kputhex64(through_direct);
+	kputs(through_direct == 0x5ec0ffee
+	      ? ", agrees\r\n"
+	      : ", DISAGREES\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -276,6 +307,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	layout_selftest();
 	phys_selftest();
 	cpu_selftest();
+	direct_map_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
