@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include <cpu/regs.h>
+#include <pmap/bootmem.h>
 #include <pmap/direct.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
@@ -266,6 +267,44 @@ static void walk_selftest(void)
 		 : " -> correctly reports no mapping\r\n");
 }
 
+/*
+ * Three frames from the boot pool, checked for the properties a page table
+ * depends on: 4 KiB aligned (the hardware would otherwise read a table from
+ * the wrong address), distinct from each other, and actually zero when read
+ * back through the direct map.
+ */
+static void bootmem_selftest(void)
+{
+	uint64_t a = boot_frame_alloc();
+	uint64_t b = boot_frame_alloc();
+	uint64_t c = boot_frame_alloc();
+	const volatile uint64_t *first;
+	int clean = 1;
+
+	first = (const volatile uint64_t *)(uintptr_t)phys_to_direct(a);
+	for (unsigned i = 0; i < PAGE_SIZE_4K / sizeof(uint64_t); i++)
+		if (first[i] != 0)
+			clean = 0;
+
+	kputs("UrMach x86-64: boot frames ");
+	kputhex64(a);
+	kputs(" ");
+	kputhex64(b);
+	kputs(" ");
+	kputhex64(c);
+	kputs("\r\nUrMach x86-64: ");
+	kputdec(boot_frames_used());
+	kputs(" of ");
+	kputdec(boot_frames_total());
+	kputs(" used, ");
+	kputs(a && b && c
+	      && ((a | b | c) & (PAGE_SIZE_4K - 1)) == 0
+	      && a != b && b != c && a != c
+	      && clean
+	      ? "aligned, distinct and zeroed\r\n"
+	      : "BAD frames\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -357,6 +396,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	cpu_selftest();
 	direct_map_selftest();
 	walk_selftest();
+	bootmem_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
