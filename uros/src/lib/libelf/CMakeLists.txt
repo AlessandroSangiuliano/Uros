@@ -12,7 +12,7 @@ add_library(libelf STATIC
 
 target_compile_options(libelf PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -24,11 +24,12 @@ target_include_directories(libelf PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include          # mach/machine -> i386
   ${CMAKE_SOURCE_DIR}/src/mach_services/include  # sa_mach.h, string.h
   ${CMAKE_SOURCE_DIR}/export/include             # mach/elf.h
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel             # mach/elf.h fallback
   ${CMAKE_SOURCE_DIR}/include
 )
 
 set_target_properties(libelf PROPERTIES
   OUTPUT_NAME "elf"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

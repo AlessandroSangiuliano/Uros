@@ -9,7 +9,7 @@ add_dependencies(pthread_test_server mig_mach_public_headers)
 
 target_compile_options(pthread_test_server PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -30,6 +30,7 @@ target_include_directories(pthread_test_server PRIVATE
   # Pre-built export headers (mach/mach_interface.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
@@ -50,12 +51,12 @@ target_link_libraries(pthread_test_server PRIVATE
 )
 
 target_link_options(pthread_test_server PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,--build-id=none
 )
 
 set_target_properties(pthread_test_server PROPERTIES
   OUTPUT_NAME "pthread_test"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

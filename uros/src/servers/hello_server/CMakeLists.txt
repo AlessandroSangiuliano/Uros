@@ -26,7 +26,7 @@ set(MUSL_PREFIX ${CMAKE_BINARY_DIR}/src/contrib/musl-install)
 # gcc's internal include directory — needed alongside -nostdinc so the
 # compiler can still find stddef.h, stdarg.h, intrinsics, etc.
 execute_process(
-  COMMAND ${CMAKE_C_COMPILER} -m32 -print-file-name=include
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-file-name=include
   OUTPUT_VARIABLE _GCC_INCLUDE
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -34,14 +34,14 @@ execute_process(
 # libgcc.a for compiler builtins (__udivdi3 etc.) once we drop gcc.s
 # from the libmach path.
 execute_process(
-  COMMAND ${CMAKE_C_COMPILER} -m32 -print-libgcc-file-name
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-libgcc-file-name
   OUTPUT_VARIABLE _LIBGCC_A
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
 target_compile_options(hello_server_server PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   # SSP re-enabled (#259): __uros_libc_init() now drives musl's real
   # __init_tls + __init_ssp, so __stack_chk_guard and the per-thread
   # canary are seeded before any protected function runs.
@@ -74,6 +74,7 @@ target_include_directories(hello_server_server PRIVATE
   # Pre-built export headers (mach.h, libcap.h, device/, ...)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers needed by some MIG-generated stubs
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
@@ -92,7 +93,7 @@ target_link_libraries(hello_server_server PRIVATE
 )
 
 target_link_options(hello_server_server PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   # Force-link musl's __uros_libc_init (#259): crt0 references it only
   # weakly (so legacy libmach servers link without it), and a weak ref
@@ -105,7 +106,7 @@ target_link_options(hello_server_server PRIVATE
 
 set_target_properties(hello_server_server PROPERTIES
   OUTPUT_NAME "hello_server"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
 
 # ===========================================================================
@@ -114,12 +115,12 @@ set_target_properties(hello_server_server PROPERTIES
 
 set(HELLO_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/hello_server.manifest)
 set(HELLO_MANIFEST_OUT
-  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/manifests/hello_server.cmf")
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/hello_server.cmf")
 
 add_custom_command(
   OUTPUT ${HELLO_MANIFEST_OUT}
   COMMAND ${CMAKE_COMMAND} -E make_directory
-          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/manifests"
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
   COMMAND $<TARGET_FILE:mkmanifest> -o ${HELLO_MANIFEST_OUT} ${HELLO_MANIFEST_SRC}
   DEPENDS mkmanifest ${HELLO_MANIFEST_SRC}
   COMMENT "mkmanifest: hello_server.manifest -> hello_server.cmf"

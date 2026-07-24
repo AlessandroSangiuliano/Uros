@@ -27,6 +27,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -DSEQNOS
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header  ${MO_USER_H}
     -sheader ${MO_SERVER_H}
@@ -53,7 +54,7 @@ add_dependencies(libfspager mig_mach_public_headers)
 target_compile_options(libfspager PRIVATE
   $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w
                           -mstack-protector-guard=global
-                          -include stdint.h -m32 -march=i686>
+                          -include stdint.h ${UROS_ARCH_FLAGS}>
 )
 
 # Disable MIG's hardcoded msgh_size / disposition TypeCheck on the
@@ -73,6 +74,7 @@ target_include_directories(libfspager PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
@@ -80,5 +82,5 @@ target_include_directories(libfspager PUBLIC
 set_target_properties(libfspager PROPERTIES
   OUTPUT_NAME "fspager"
   ARCHIVE_OUTPUT_DIRECTORY
-    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

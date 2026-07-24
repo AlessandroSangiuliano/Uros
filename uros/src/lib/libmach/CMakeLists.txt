@@ -31,7 +31,7 @@ list(REMOVE_ITEM LIB_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)
 # libsa_mach in #106.  Other files only need stdint.h.
 
 # __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out)
-set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
+set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${UROS_ARCH_INCLUDE} -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/asm")
 
 # Preprocess ALL lowercase .s files (they use #include and need CPP)
@@ -83,7 +83,7 @@ endif()
 set(_KERNEL ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 set(_EXPORT ${CMAKE_SOURCE_DIR}/export/include)
 # MIG include path: export tree first (userspace .defs), then kernel for extras
-set(_MIG_INC ${_EXPORT} ${_KERNEL} ${_EXPORT}/mach_debug)
+set(_MIG_INC ${_EXPORT} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_EXPORT}/mach_debug)
 
 # --- All .defs from the export tree (matching original common.mk MIG_DEFS) ---
 # Use the export tree versions which are the published userspace interfaces.
@@ -198,8 +198,8 @@ add_dependencies(libmach mig_device_header mig_mach_public_headers)
 target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -mstack-protector-guard=global -include stdint.h>)
 
 # Build assembly files and C as 32-bit where needed
-target_compile_options(libmach PRIVATE -m32 -march=i686 -msse -msse2)
-target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>)
+target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)
+target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS})
 
 # Work around GCC constprop + SSP + va_list code generation bug on i386:
 # GCC creates a constprop clone of _doprnt where the va_list calling
@@ -218,6 +218,7 @@ target_include_directories(libmach PUBLIC
   ${CMAKE_SOURCE_DIR}/uapi			# #179 — UAPI split
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
@@ -225,7 +226,7 @@ target_include_directories(libmach PUBLIC
 # Metto gli archivi in export/<system>/lib per compatibilità con l'albero esistente
 set_target_properties(libmach PROPERTIES
   OUTPUT_NAME "mach"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
 # ===========================================================================
@@ -302,9 +303,9 @@ if(UROS_BUILD_MUSL)
     $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w
                             -mstack-protector-guard=global -include stdint.h>
   )
-  target_compile_options(libmach_core PRIVATE -m32 -march=i686 -msse -msse2)
+  target_compile_options(libmach_core PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)
   target_compile_options(libmach_core PRIVATE
-    $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>
+    ${UROS_ARCH_FLAGS}
   )
 
   target_include_directories(libmach_core BEFORE PUBLIC
@@ -316,13 +317,14 @@ if(UROS_BUILD_MUSL)
     ${CMAKE_SOURCE_DIR}/uapi
     ${CMAKE_SOURCE_DIR}/src/mach_services/include
     ${CMAKE_SOURCE_DIR}/export/include
+    ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include
   )
 
   set_target_properties(libmach_core PROPERTIES
     OUTPUT_NAME "mach_core"
-    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
   )
 
   # PIC variant for the umbrella libc.so (#234 incr 2b).  Same slim source

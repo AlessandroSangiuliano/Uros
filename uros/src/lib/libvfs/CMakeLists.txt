@@ -20,6 +20,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_CURRENT_SOURCE_DIR}
     -header ${VFS_USER_H}
@@ -43,7 +44,7 @@ add_dependencies(libvfs mig_mach_public_headers)
 
 target_compile_options(libvfs PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -59,13 +60,14 @@ target_include_directories(libvfs PUBLIC
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   ${CMAKE_SOURCE_DIR}/export/include             # mach/, servers/netname.h
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
 
 set_target_properties(libvfs PROPERTIES
   OUTPUT_NAME "vfs"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
 # ---------------------------------------------------------------------------
@@ -93,7 +95,7 @@ if(UROS_BUILD_MUSL)
   endif()
   set_target_properties(libvfs-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_compile_options(libvfs-pic PRIVATE
-    -std=gnu11 -m32 -march=i686 -fno-builtin -ffreestanding
+    -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -ffreestanding
     -fno-stack-protector -w -include stdint.h
   )
   target_include_directories(libvfs-pic PRIVATE
@@ -103,6 +105,7 @@ if(UROS_BUILD_MUSL)
     ${CMAKE_BINARY_DIR}/generated/include          # mach/machine -> i386
     ${CMAKE_SOURCE_DIR}/src/mach_services/include  # sa_mach.h, mach.h
     ${CMAKE_SOURCE_DIR}/export/include             # mach/, servers/netname.h
+    ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include
   )

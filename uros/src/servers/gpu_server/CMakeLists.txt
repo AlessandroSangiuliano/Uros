@@ -7,7 +7,7 @@ project(gpu_server C)
 
 set(GPU_COMPILE_OPTIONS
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -38,6 +38,7 @@ set(GPU_INCLUDE_DIRS
   # Pre-built export headers (gpu/, mach/, ...)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
@@ -64,6 +65,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DM_USER_H}
     -sheader ${DM_SERVER_H}
@@ -92,6 +94,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${GPU_USER_H}
     -sheader ${GPU_SERVER_H}
@@ -123,8 +126,8 @@ set_target_properties(gpu_vga_module PROPERTIES
   OUTPUT_NAME "vga"
   PREFIX ""
   SUFFIX ".so"
-  LINK_FLAGS "-shared -m32 -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
-  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/modules/gpu"
+  LINK_FLAGS "-shared ${UROS_ARCH_FLAGS_STR} -nostdlib -Wl,--build-id=none -Wl,--unresolved-symbols=ignore-all -Wl,--hash-style=sysv"
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules/gpu"
 )
 
 # ===========================================================================
@@ -182,7 +185,7 @@ target_link_libraries(gpu_server PRIVATE
 # host symbols (`gpu_device_port`, `printf`, ...) via the dynamic
 # symbol table.  Mirrors hal_server / block_device_server.
 target_link_options(gpu_server PRIVATE
-  -m32 -pie -nostdlib
+  ${UROS_ARCH_FLAGS} -pie -nostdlib
   -Wl,-e,__start_mach
   -Wl,--no-dynamic-linker
   -Wl,--export-dynamic
@@ -192,5 +195,5 @@ target_link_options(gpu_server PRIVATE
 
 set_target_properties(gpu_server PROPERTIES
   OUTPUT_NAME "gpu_server"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

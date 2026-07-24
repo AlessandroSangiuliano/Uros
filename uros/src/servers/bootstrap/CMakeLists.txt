@@ -7,6 +7,7 @@ project(bootstrap_server C)
 
 set(MIG_INCLUDE_FLAGS
   -I${CMAKE_SOURCE_DIR}/export/include
+  -I${UROS_ARCH_INCLUDE}
   -I${CMAKE_SOURCE_DIR}/src/mach_kernel
   -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
 )
@@ -122,7 +123,7 @@ add_executable(bootstrap_server
 add_dependencies(bootstrap_server mig_mach_public_headers)
 
 target_compile_options(bootstrap_server PRIVATE
-  -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2
+  -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h ${UROS_ARCH_FLAGS} -msse -msse2
 )
 
 target_compile_definitions(bootstrap_server PRIVATE
@@ -146,6 +147,7 @@ target_include_directories(bootstrap_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/file_systems
   # Kernel headers (mach/, device/, ddb/, i386/) — bootstrap needs kernel-internal
   # extensions (boot_info.h multi-segment support) so kernel must come BEFORE export
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Pre-built export headers (mach/mach_interface.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/include
@@ -177,11 +179,11 @@ target_link_libraries(bootstrap_server PRIVATE
 
 # Linker flags: 32-bit static Mach binary, no host libc
 target_link_options(bootstrap_server PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
 )
 
 set_target_properties(bootstrap_server PROPERTIES
   OUTPUT_NAME "bootstrap"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

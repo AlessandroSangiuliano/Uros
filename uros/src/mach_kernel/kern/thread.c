@@ -1193,14 +1193,18 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 	pset_add_thread(pset, new_thread);
 	/* XXXX if (pset->empty) { suspend new thread? } */
 
-#if	HW_FOOTPRINT
+#if	HW_FOOTPRINT && (NCPUS > 1)
 	/*
 	 *	Need to set last_processor, idle processor would be best, but
 	 *	that requires extra locking nonsense.  Go for tail of
 	 *	processors queue to avoid master.
+	 *
+	 *	The last_processor field itself only exists under NCPUS > 1
+	 *	(kern/thread.h); HW_FOOTPRINT is unconditionally 1 on i386, so
+	 *	without the NCPUS guard this write broke every UP build.
 	 */
 	if (!(pset->empty)) {
-		new_thread->last_processor = 
+		new_thread->last_processor =
 			(processor_t)queue_first(&pset->processors);
 	}
 	else {

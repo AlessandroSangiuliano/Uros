@@ -20,19 +20,19 @@ add_dependencies(virtual_terminal_server_bin musl_extproj libposix-uros)
 set(MUSL_PREFIX ${CMAKE_BINARY_DIR}/src/contrib/musl-install)
 
 execute_process(
-  COMMAND ${CMAKE_C_COMPILER} -m32 -print-file-name=include
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-file-name=include
   OUTPUT_VARIABLE _GCC_INCLUDE
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 execute_process(
-  COMMAND ${CMAKE_C_COMPILER} -m32 -print-libgcc-file-name
+  COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-libgcc-file-name
   OUTPUT_VARIABLE _LIBGCC_A
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
 target_compile_options(virtual_terminal_server_bin PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fstack-protector-strong
   -fno-builtin
   -w
@@ -49,6 +49,7 @@ target_include_directories(virtual_terminal_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/src/servers/proc_server      # proc_types.h (proc_exit_msg_t)
   ${CMAKE_SOURCE_DIR}/include
@@ -68,7 +69,7 @@ target_link_libraries(virtual_terminal_server_bin PRIVATE
 )
 
 target_link_options(virtual_terminal_server_bin PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,-u,__uros_libc_init
   -Wl,--build-id=none
@@ -76,7 +77,7 @@ target_link_options(virtual_terminal_server_bin PRIVATE
 
 set_target_properties(virtual_terminal_server_bin PROPERTIES
   OUTPUT_NAME "virtual_terminal_server"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
 
 # ===========================================================================

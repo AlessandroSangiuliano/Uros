@@ -29,6 +29,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/servers/proc_server
     -header ${PROC_USER_H}
@@ -56,6 +57,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/servers/exec_server
     -header ${EXEC_USER_H}
@@ -82,6 +84,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/servers/char_server
     -header ${CHAR_USER_H}
@@ -109,6 +112,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/i386
     -header ${MACH_I386_USER_H}
@@ -150,10 +154,10 @@ add_library(libposix-uros STATIC ${LIBPOSIX_UROS_SRCS})
 add_dependencies(libposix-uros mig_mach_public_headers)
 
 target_compile_options(libposix-uros PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -m32 -march=i686 -fno-builtin
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin
                           -ffreestanding -fno-stack-protector
                           -Wall -Wextra -Werror>
-  $<$<COMPILE_LANGUAGE:ASM>:-m32>
+  ${UROS_ARCH_FLAGS}
 )
 
 # Phase 6b smoke (#257): the same -DUROS_PTHREAD_SMOKE=1 the user passes
@@ -196,6 +200,7 @@ target_include_directories(libposix-uros PRIVATE
   ${CMAKE_BINARY_DIR}/generated      # generated mach.h / mach_port.h (#276)
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/servers/proc_server
@@ -212,7 +217,7 @@ endif()
 
 set_target_properties(libposix-uros PROPERTIES
   OUTPUT_NAME "posix-uros"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
 
 # ---------------------------------------------------------------------------

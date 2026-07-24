@@ -7,7 +7,7 @@ add_executable(hello_exec_bin
 
 target_compile_options(hello_exec_bin PRIVATE
   -std=gnu11
-  -m32 -march=i686
+  ${UROS_ARCH_FLAGS}
   -fno-builtin
   -fno-stack-protector       # no canary — we have no libc to set one up
   -ffreestanding
@@ -17,7 +17,7 @@ target_compile_options(hello_exec_bin PRIVATE
 # Tiny static binary, no libc, fixed entry _start.  Use ET_EXEC
 # (not PIE) since exec_server v0.1.0 only handles static images.
 target_link_options(hello_exec_bin PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,_start
   -Wl,--build-id=none
   -no-pie
@@ -29,7 +29,7 @@ target_link_options(hello_exec_bin PRIVATE
 
 set_target_properties(hello_exec_bin PROPERTIES
   OUTPUT_NAME "hello_exec"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
 
 # ===========================================================================

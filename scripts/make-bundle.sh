@@ -17,7 +17,8 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$REPO_ROOT/uros/build"
-ARCH="$(uname -m)"
+# #404: the build stamps its target arch; uname -m names the HOST
+ARCH="$(cat "$BUILD_DIR/uros-arch" 2>/dev/null || uname -m)"
 
 BUNDLE_OUT="$BUILD_DIR/bootstrap.bundle"
 MKBUNDLE="$BUILD_DIR/tools/mkbundle"

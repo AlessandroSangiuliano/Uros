@@ -67,7 +67,7 @@ endif()
 # Get GCC's internal include path (for stdarg.h, etc.) EARLY so we can use it in C_FLAGS
 # Must use -m32 to get 32-bit compatible include path
 execute_process(
-    COMMAND ${CMAKE_C_COMPILER} -m32 -print-file-name=include
+    COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -print-file-name=include
     OUTPUT_VARIABLE GCC_INCLUDE_DIR
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
@@ -76,8 +76,7 @@ message(STATUS "GCC internal include path: ${GCC_INCLUDE_DIR}")
 # Kernel-specific compiler flags
 # -isystem is needed with -nostdinc to allow GCC internal headers (stdarg.h, etc.)
 set(KERNEL_C_FLAGS
-    -m32
-    -march=i686
+    ${UROS_ARCH_FLAGS}
     -mno-sse
     -ffreestanding
     -fno-stack-protector
@@ -106,7 +105,7 @@ set(KERNEL_C_FLAGS
 )
 
 set(KERNEL_ASM_FLAGS
-    -m32
+    ${UROS_ARCH_FLAGS}
     -DASSEMBLER
     -nostdinc
     -ffreestanding
@@ -178,6 +177,7 @@ endforeach()
 
 set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/uapi			# #179 — UAPI split: single source of truth
+    ${UROS_ARCH_INCLUDE}
     ${KERNEL_SRC_DIR}
     ${KERNEL_SRC_DIR}/include
     ${KERNEL_SRC_DIR}/i386
@@ -211,11 +211,12 @@ set(ASSYM_OUTPUT ${KERNEL_BUILD_DIR}/assym.S)
 add_custom_command(
     OUTPUT ${GENASSYM_OUTPUT}
     DEPFILE ${GENASSYM_DEPFILE}
-    COMMAND ${CMAKE_C_COMPILER} -m32 -S
+    COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -S
             -nostdinc
             -ffreestanding
             -isystem ${GCC_INCLUDE_DIR}
             -I${CMAKE_SOURCE_DIR}/uapi
+            -I${UROS_ARCH_INCLUDE}
             -I${KERNEL_SRC_DIR}
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386
@@ -270,6 +271,7 @@ function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     add_custom_command(
         OUTPUT ${SERVER_C} ${SERVER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+                -I${UROS_ARCH_INCLUDE}
                 -I${KERNEL_SRC_DIR} 
                 -I${KERNEL_SRC_DIR}/include
                 -I${KERNEL_SRC_DIR}/i386
@@ -304,6 +306,7 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     add_custom_command(
         OUTPUT ${USER_C} ${USER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+                -I${UROS_ARCH_INCLUDE}
                 -I${KERNEL_SRC_DIR}
                 -I${KERNEL_SRC_DIR}/include
                 -I${KERNEL_SRC_DIR}/i386
@@ -375,6 +378,7 @@ add_mig_user(${KERNEL_SRC_DIR}/mach/memory_object.defs
 add_custom_command(
     OUTPUT ${KERNEL_BUILD_DIR}/device/device_pager_server.c ${KERNEL_BUILD_DIR}/device/device_pager_server.h
     COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+            -I${UROS_ARCH_INCLUDE}
             -I${KERNEL_SRC_DIR} 
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386
@@ -814,7 +818,7 @@ target_include_directories(${KERNEL_TARGET} PRIVATE
 set(KERNEL_LINKER_SCRIPT ${KERNEL_SRC_DIR}/i386/AT386/kernel.ld)
 
 target_link_options(${KERNEL_TARGET} PRIVATE
-    -m32
+    ${UROS_ARCH_FLAGS}
     -static
     -nostdlib
     -nostartfiles

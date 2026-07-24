@@ -30,8 +30,8 @@ add_library(libpthreads STATIC ${LIB_SOURCES})
 add_dependencies(libpthreads mig_mach_public_headers)
 
 target_compile_options(libpthreads PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686 -mstack-protector-guard=global>
-  $<$<COMPILE_LANGUAGE:ASM>:-m32>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -mstack-protector-guard=global>
+  ${UROS_ARCH_FLAGS}
 )
 
 target_compile_definitions(libpthreads PRIVATE
@@ -48,6 +48,7 @@ target_include_directories(libpthreads PUBLIC
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
@@ -59,5 +60,5 @@ file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/AT386/pthread_impl.h"
 
 set_target_properties(libpthreads PROPERTIES
   OUTPUT_NAME "pthreads"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

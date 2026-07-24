@@ -57,6 +57,7 @@ endfunction()
 set(MIG_INCLUDES
   -DSEQNOS
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_CURRENT_SOURCE_DIR}/mach
 )
@@ -115,7 +116,7 @@ add_dependencies(default_pager_server mig_mach_public_headers)
 
 target_compile_options(default_pager_server PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -141,6 +142,7 @@ target_include_directories(default_pager_server PRIVATE
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
@@ -167,12 +169,12 @@ target_link_libraries(default_pager_server PRIVATE
 
 # Linker flags: 32-bit static Mach binary, no host libc.
 target_link_options(default_pager_server PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,--build-id=none
 )
 
 set_target_properties(default_pager_server PROPERTIES
   OUTPUT_NAME "default_pager"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )

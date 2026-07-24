@@ -15,8 +15,8 @@ add_library(librthreads STATIC ${LIB_SOURCES})
 add_dependencies(librthreads mig_mach_public_headers)
 
 target_compile_options(librthreads PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -m32 -march=i686>
-  $<$<COMPILE_LANGUAGE:ASM>:-m32 -march=i686>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h>
+  ${UROS_ARCH_FLAGS}
 )
 
 target_compile_definitions(librthreads PRIVATE
@@ -29,6 +29,7 @@ target_include_directories(librthreads PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
@@ -40,5 +41,5 @@ file(WRITE "${CMAKE_BINARY_DIR}/generated/include/stdlib.h" "/* Auto-generated w
 
 set_target_properties(librthreads PROPERTIES
   OUTPUT_NAME "rthreads"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

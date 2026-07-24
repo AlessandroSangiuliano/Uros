@@ -47,7 +47,7 @@ set_target_properties(libsa_fs PROPERTIES POSITION_INDEPENDENT_CODE ON)
 add_dependencies(libsa_fs mig_device_header mig_mach_public_headers)
 
 target_compile_options(libsa_fs PRIVATE
-  -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -m32 -march=i686 -msse -msse2
+  -std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h ${UROS_ARCH_FLAGS} -msse -msse2
 )
 
 target_compile_definitions(libsa_fs PRIVATE
@@ -73,6 +73,7 @@ target_include_directories(libsa_fs PUBLIC
   # sa_mach standalone types (<types.h> -> sa_mach/types.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   # Kernel headers (device/, mach/, mach_debug/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Export headers (mach/mach_interface.h, mach/boot_info.h)
   ${CMAKE_SOURCE_DIR}/export/include
@@ -82,5 +83,5 @@ target_include_directories(libsa_fs PUBLIC
 
 set_target_properties(libsa_fs PROPERTIES
   OUTPUT_NAME "sa_fs"
-  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/lib"
+  ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )

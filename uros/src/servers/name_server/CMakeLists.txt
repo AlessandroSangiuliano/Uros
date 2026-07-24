@@ -22,6 +22,7 @@ macro(mig_all DEFS_FILE STEM)
       -cpp ${CMAKE_C_COMPILER}
       -migcom $<TARGET_FILE:migcom>
       -I${CMAKE_SOURCE_DIR}/export/include
+      -I${UROS_ARCH_INCLUDE}
       -I${CMAKE_SOURCE_DIR}/src/mach_kernel
       -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
       -header  ${_hdr}
@@ -73,7 +74,7 @@ add_dependencies(name_server_bin mig_mach_public_headers)
 
 target_compile_options(name_server_bin PRIVATE
   -std=gnu11
-  -m32 -march=i686 -msse -msse2
+  ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
   -w
@@ -96,6 +97,7 @@ target_include_directories(name_server_bin PRIVATE
   # Pre-built export headers (mach/*, servers/*, device/*)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
@@ -113,12 +115,12 @@ target_link_libraries(name_server_bin PRIVATE
 
 # Linker flags: 32-bit static Mach binary, no host libc.
 target_link_options(name_server_bin PRIVATE
-  -m32 -static -nostdlib
+  ${UROS_ARCH_FLAGS} -static -nostdlib
   -Wl,-e,__start_mach
   -Wl,--build-id=none
 )
 
 set_target_properties(name_server_bin PROPERTIES
   OUTPUT_NAME "name_server"
-  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${CMAKE_SYSTEM_PROCESSOR}/user/sbin"
+  RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
