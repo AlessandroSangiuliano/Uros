@@ -14,6 +14,72 @@ cmake_minimum_required(VERSION 3.21)
 set(CMAKE_C_COMPILER_WORKS 1)
 set(CMAKE_ASM_COMPILER_WORKS 1)
 
+# ------------------------------------------------------------------ #406
+# x86-64 kernel: build the machine-dependent boot stub and stop.
+#
+# The i386 machinery below assembles the whole SMP/pmap/trap kernel, none
+# of which compiles for x86-64 until the MD contracts (#407-#411) land.
+# This branch builds contract 1/6 — the boot entry in x86_64/ — as the
+# `mach_kernel` output, and returns before the i386 code runs.  The stub
+# grows into the real kernel as the other contracts fill x86_64/ in.
+#
+# The image is ELF64: GRUB boots it via multiboot2 (`multiboot2` loads an
+# ELF64 kernel; qemu's `-kernel` multiboot1 loader rejects ELF64 — "give a
+# 32bit one" — so the dev loop is a GRUB rescue ISO, `qemu -cdrom`).  The
+# object is assembled -m64; the entry itself is still 32-bit code (the
+# bootloader hands off in protected mode) via a `.code32` section, and the
+# 64-bit half begins after the long-mode transition — one file, two modes.
+if(UROS_TARGET_ARCH STREQUAL "x86_64")
+  set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot.ld)
+
+  add_executable(mach_kernel
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot_c.c)
+  # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
+  # stddef.h); add just that directory back with -isystem so we get the
+  # fixed-width types without pulling in the hosted system headers.
+  execute_process(COMMAND ${CMAKE_C_COMPILER} -m64 -print-file-name=include
+    OUTPUT_VARIABLE X86_64_GCC_INC OUTPUT_STRIP_TRAILING_WHITESPACE)
+  # The C is bare-metal higher-half: -mcmodel=kernel so absolute references
+  # land in the top-2 GiB where the image is linked; -mno-red-zone because
+  # the red zone is unsafe once interrupts land on these stacks; SSE off
+  # (general regs only) to match the kernel's SSE-free discipline.
+  target_compile_options(mach_kernel PRIVATE
+    $<$<COMPILE_LANGUAGE:ASM>:-m64 -ffreestanding -nostdinc>
+    $<$<COMPILE_LANGUAGE:C>:-m64 -mcmodel=kernel -mno-red-zone
+      -mgeneral-regs-only -fcf-protection=none -ffreestanding -fno-pic
+      -fno-pie -fno-stack-protector -fno-builtin -nostdinc
+      -isystem ${X86_64_GCC_INC} -std=gnu11 -Wall>)
+  target_link_options(mach_kernel PRIVATE
+    -m64 -static -nostdlib -nostartfiles -no-pie
+    -T ${X86_64_BOOT_LD}
+    -Wl,--build-id=none)
+  set_target_properties(mach_kernel PROPERTIES
+    LINK_DEPENDS ${X86_64_BOOT_LD}
+    OUTPUT_NAME "mach_kernel"
+    SUFFIX ""
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/uros/boot")
+
+  # GRUB2 multiboot2 rescue ISO — the dev loop for the x86-64 kernel.
+  # `ninja uros_iso` stages the kernel + a one-entry grub.cfg (timeout 0)
+  # and calls grub-mkrescue; boot with `qemu-system-x86_64 -cdrom`.
+  set(X86_64_ISO_DIR ${CMAKE_BINARY_DIR}/iso-x86_64)
+  set(X86_64_ISO ${CMAKE_BINARY_DIR}/uros-x86_64.iso)
+  add_custom_target(uros_iso
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${X86_64_ISO_DIR}/boot/grub
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:mach_kernel>
+            ${X86_64_ISO_DIR}/boot/mach_kernel
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/grub.cfg
+            ${X86_64_ISO_DIR}/boot/grub/grub.cfg
+    COMMAND grub-mkrescue -o ${X86_64_ISO} ${X86_64_ISO_DIR}
+    DEPENDS mach_kernel ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/grub.cfg
+    COMMENT "Building GRUB2 multiboot2 rescue ISO: ${X86_64_ISO}"
+    VERBATIM)
+
+  message(STATUS "x86-64 kernel: boot stub (#406) — MD contracts #407-#411 pending")
+  return()
+endif()
+
 # =============================================================================
 # Build Type Configuration
 # =============================================================================
