@@ -71,6 +71,19 @@ endif()
 string(JOIN " " UROS_ARCH_FLAGS_STR ${UROS_ARCH_FLAGS})
 message(STATUS "UROS_TARGET_ARCH = ${UROS_TARGET_ARCH} (${UROS_ARCH_FLAGS_STR})")
 
+# The machine-dependent kernel layer lives in src/mach_kernel/<arch>/.
+# For a target whose MD layer has not landed yet (x86_64 until the #406-
+# #411 contracts), the build system, host tools and arch-neutral targets
+# are all in place — but the kernel cannot link, and the failure should
+# say so here rather than as a dangling-symlink error deep in a compile.
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/src/mach_kernel/${UROS_TARGET_ARCH}")
+  message(WARNING
+    "No machine-dependent kernel layer at src/mach_kernel/${UROS_TARGET_ARCH}/ "
+    "— the ${UROS_TARGET_ARCH} port's MD contracts (#406-#411) are not in yet. "
+    "Host tools and architecture-neutral targets build; the kernel does not. "
+    "This is the expected state of a fresh port target, not a misconfiguration.")
+endif()
+
 # Stamp the target into the build dir so the scripts (make-bundle,
 # make-disk-image, run-qemu, ...) stop asking uname -m which arch this
 # build is for.  They fall back to uname -m when the stamp is missing,
