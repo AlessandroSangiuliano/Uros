@@ -507,6 +507,45 @@ static void pmap_verbs_selftest(void)
 	kputs(got == 0 ? ", gone\r\n" : ", STILL MAPPED?!\r\n");
 }
 
+/* A mutable global — lands in .bss, the writable region. */
+static volatile uint32_t wx_data_probe;
+
+/*
+ * Apply W^X to the image, then check each section came out with the right
+ * bits: .text executable and not writable, .rodata neither, .data/.bss
+ * writable and not executable.  The strongest check is liveness: this code
+ * is in .text and keeps running, and the write below lands — so text stayed
+ * executable and data stayed writable across the reprotection, with CR0.WP
+ * now binding the read-only pages.
+ */
+static void wx_selftest(void)
+{
+	pmap_t k = pmap_kernel();
+	uint64_t root = k->root_pa;
+	pt_entry_t *t, *r, *d;
+
+	pmap_protect_kernel();
+
+	t = pmap_walk(root, (uint64_t)(uintptr_t)&wx_selftest, 0);
+	r = pmap_walk(root, (uint64_t)(uintptr_t)&phys_witness, 0);
+	d = pmap_walk(root, (uint64_t)(uintptr_t)&wx_data_probe, 0);
+
+	kputs("UrMach x86-64: W^X text ");
+	kputs(t && !(*t & INTEL_PTE_WRITE) && !(*t & INTEL_PTE_NX)
+	      ? "RX" : "WRONG");
+	kputs(", rodata ");
+	kputs(r && !(*r & INTEL_PTE_WRITE) && (*r & INTEL_PTE_NX)
+	      ? "RO+NX" : "WRONG");
+	kputs(", data ");
+	kputs(d && (*d & INTEL_PTE_WRITE) && (*d & INTEL_PTE_NX)
+	      ? "RW+NX\r\n" : "WRONG\r\n");
+
+	wx_data_probe = 0x1234;
+	kputs("UrMach x86-64: still executing .text, wrote .data = ");
+	kputhex64(wx_data_probe);
+	kputs(wx_data_probe == 0x1234 ? ", W^X live\r\n" : ", WRONG\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -604,6 +643,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	split_selftest();
 	pmap_selftest();
 	pmap_verbs_selftest();
+	wx_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;

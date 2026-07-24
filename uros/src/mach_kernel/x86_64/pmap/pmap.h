@@ -106,4 +106,13 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot);
 /* Remove every mapping in a range. */
 void pmap_remove(pmap_t pmap, uint64_t s, uint64_t e);
 
+/*
+ * Apply W^X to the kernel image.  boot.S maps the whole image with one large
+ * writable-and-executable page; this breaks it to 4 KiB and reprotects each
+ * section to its own permission — .text execute-only-of-reads, .rodata
+ * read-only, .data/.bss writable and never executable — then sets CR0.WP so
+ * the kernel itself honours the read-only pages.  ch.11 §11.5.
+ */
+void pmap_protect_kernel(void);
+
 #endif	/* _X86_64_PMAP_PMAP_H_ */

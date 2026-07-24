@@ -86,3 +86,43 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 		s += sz ? sz : PAGE_SIZE_4K;
 	}
 }
+
+/*
+ * Section bounds from the linker (boot.ld), page-aligned so each belongs to
+ * exactly one protection.
+ */
+extern char __ktext_start[], __ktext_end[];
+extern char __krodata_start[], __krodata_end[];
+extern char __kdata_start[], __kernel_end[];
+
+void pmap_protect_kernel(void)
+{
+	pmap_t k = pmap_kernel();
+	uint64_t t0 = (uint64_t)(uintptr_t)__ktext_start;
+	uint64_t end = (uint64_t)(uintptr_t)__kernel_end;
+	uint64_t va;
+
+	/*
+	 * The image rode in on one large writable-and-executable page (a few,
+	 * if it ever outgrows 2 MiB).  Break every large page across it to
+	 * 4 KiB first, so section boundaries that fall mid-large-page can each
+	 * get their own permission.  Splitting an already-small page is a
+	 * no-op, so this is safe whatever the page size turns out to be.
+	 */
+	for (va = t0 & ~(PAGE_SIZE_2M - 1); va < end; va += PAGE_SIZE_2M)
+		pmap_split_page(k->root_pa, va);
+
+	pmap_protect(k, t0, (uint64_t)(uintptr_t)__ktext_end,
+		     VM_PROT_READ | VM_PROT_EXECUTE);
+	pmap_protect(k, (uint64_t)(uintptr_t)__krodata_start,
+		     (uint64_t)(uintptr_t)__krodata_end, VM_PROT_READ);
+	pmap_protect(k, (uint64_t)(uintptr_t)__kdata_start, end,
+		     VM_PROT_READ | VM_PROT_WRITE);
+
+	/*
+	 * Until now the kernel could write a page marked read-only: CR0.WP
+	 * makes the read-only bit bind at ring 0 too, which is what turns the
+	 * .text and .rodata protections from advisory into real.
+	 */
+	write_cr0(read_cr0() | CR0_WP);
+}
