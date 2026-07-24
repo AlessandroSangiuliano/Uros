@@ -15,22 +15,33 @@
 #include <stdint.h>
 
 /*
- * Build the direct map and install it, using the largest page the CPU
- * offers.  Enables EFER.NXE first, because the mapping is non-executable
- * and that bit is reserved until NXE is on.
+ * Build the direct map and install it, covering physical memory up to
+ * top_of_ram (from the loader's memory map) with the largest page the CPU
+ * offers.  Enables EFER.NXE first, because the mapping is non-executable and
+ * that bit is reserved until NXE is on.
+ *
+ * The extent, not the amount: physical memory has holes — the PCI hole below
+ * 4 GiB pushes high RAM above the total — and a map sized by how much RAM
+ * exists would not reach the RAM beyond them.  Spanning the holes costs only
+ * page-table entries for addresses nobody dereferences.
+ *
+ * Zero means the loader gave no memory map, and a modest default window is
+ * used so boot can continue.  The result is clamped to what the tables can
+ * describe, so compare direct_map_covered against top_of_ram before assuming
+ * every physical address is reachable.
  *
  * Bootstrap-only in one respect: it reaches the live PML4 through the low
  * identity map that boot.S left in place.  Once this has run, the pmap
  * reaches page tables through the direct map instead, which is the whole
  * point of having one.
  */
-void direct_map_init(void);
+void direct_map_init(uint64_t top_of_ram);
 
 /* Page size the mapping was built with: 1 GiB, or 2 MiB if the CPU has no
  * 1 GiB pages.  Zero before direct_map_init() runs. */
 extern uint64_t direct_map_page_size;
 
-/* How much physical memory the mapping currently covers. */
+/* How much physical address space the mapping covers. */
 extern uint64_t direct_map_covered;
 
 #endif	/* _X86_64_PMAP_DIRECT_H_ */

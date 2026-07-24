@@ -24,13 +24,22 @@
 #include <pmap/pte.h>
 
 /*
- * How much physical memory the boot-time map covers.  A fixed window for
- * now: sizing it to the machine means reading the multiboot memory map,
- * which is a separate concern and a later increment.  Four gigabytes is
- * more than enough to bring the VM up, and bounds the fallback path's
- * static tables to something reasonable.
+ * The window used when the loader gave us no memory map at all — enough to
+ * bring the VM up and find out why.
  */
-#define DIRECT_MAP_BOOT_GIB	4
+#define DIRECT_MAP_DEFAULT_GIB	4
+
+/*
+ * Gigabytes the 2 MiB fallback can describe, one static page directory each.
+ * The 1 GiB path needs none of these: its leaves live in the PDPT itself,
+ * which spans 512 GiB on its own.
+ *
+ * Static because of an ordering constraint, not thrift: the frame allocator
+ * clears frames through the direct map, so it cannot be used to build the
+ * direct map.  These tables have to exist before the mechanism that would
+ * otherwise supply them.
+ */
+#define DIRECT_MAP_FALLBACK_GIB	64
 
 uint64_t direct_map_page_size;
 uint64_t direct_map_covered;
@@ -44,7 +53,7 @@ static pt_entry_t direct_pdpt[PTES_PER_TABLE]
 	__attribute__((aligned(4096)));
 
 /* Only used when the CPU has no 1 GiB pages; one PD per gigabyte. */
-static pt_entry_t direct_pd[DIRECT_MAP_BOOT_GIB][PTES_PER_TABLE]
+static pt_entry_t direct_pd[DIRECT_MAP_FALLBACK_GIB][PTES_PER_TABLE]
 	__attribute__((aligned(4096)));
 
 /* The direct map hangs off exactly one PML4 slot. */
@@ -52,14 +61,16 @@ _Static_assert(pml4_index(DIRECT_MAP_BASE) == 256,
 	       "direct map is not where the layout says it is");
 
 /*
- * The window has to fit under one PDPT, which spans 512 GiB.
+ * Everything has to fit under one PDPT, which spans 512 GiB.
  */
-_Static_assert(DIRECT_MAP_BOOT_GIB <= PTES_PER_TABLE,
-	       "boot window does not fit in one PDPT");
+_Static_assert(DIRECT_MAP_FALLBACK_GIB <= PTES_PER_TABLE,
+	       "fallback window does not fit in one PDPT");
+_Static_assert(DIRECT_MAP_DEFAULT_GIB <= DIRECT_MAP_FALLBACK_GIB,
+	       "default window does not fit the fallback tables");
 
-static void fill_1g(void)
+static void fill_1g(unsigned gib)
 {
-	for (unsigned i = 0; i < DIRECT_MAP_BOOT_GIB; i++)
+	for (unsigned i = 0; i < gib; i++)
 		direct_pdpt[i] = ((uint64_t)i * PAGE_SIZE_1G)
 			       | INTEL_PTE_VALID | INTEL_PTE_WRITE
 			       | INTEL_PTE_PS | INTEL_PTE_NX;
@@ -67,9 +78,9 @@ static void fill_1g(void)
 	direct_map_page_size = PAGE_SIZE_1G;
 }
 
-static void fill_2m(void)
+static void fill_2m(unsigned gib)
 {
-	for (unsigned i = 0; i < DIRECT_MAP_BOOT_GIB; i++) {
+	for (unsigned i = 0; i < gib; i++) {
 		for (unsigned j = 0; j < PTES_PER_TABLE; j++)
 			direct_pd[i][j] = ((uint64_t)i * PAGE_SIZE_1G
 					   + (uint64_t)j * PAGE_SIZE_2M)
@@ -83,9 +94,10 @@ static void fill_2m(void)
 	direct_map_page_size = PAGE_SIZE_2M;
 }
 
-void direct_map_init(void)
+void direct_map_init(uint64_t top_of_ram)
 {
 	pt_entry_t *pml4;
+	uint64_t gib;
 
 	/*
 	 * Execute-disable is reserved until NXE is set — writing bit 63
@@ -101,12 +113,25 @@ void direct_map_init(void)
 	for (unsigned i = 0; i < PTES_PER_TABLE; i++)
 		direct_pdpt[i] = 0;
 
-	if (cpu_has_1gb_pages())
-		fill_1g();
-	else
-		fill_2m();
+	/*
+	 * Round up to a whole gigabyte: a PDPT entry covers one either way,
+	 * whether as a single huge leaf or as a page directory below it.
+	 */
+	gib = (top_of_ram + PAGE_SIZE_1G - 1) / PAGE_SIZE_1G;
+	if (gib == 0)
+		gib = DIRECT_MAP_DEFAULT_GIB;
 
-	direct_map_covered = (uint64_t)DIRECT_MAP_BOOT_GIB * PAGE_SIZE_1G;
+	if (cpu_has_1gb_pages()) {
+		if (gib > PTES_PER_TABLE)	/* one PDPT reaches 512 GiB */
+			gib = PTES_PER_TABLE;
+		fill_1g((unsigned)gib);
+	} else {
+		if (gib > DIRECT_MAP_FALLBACK_GIB)
+			gib = DIRECT_MAP_FALLBACK_GIB;
+		fill_2m((unsigned)gib);
+	}
+
+	direct_map_covered = gib * PAGE_SIZE_1G;
 
 	/*
 	 * Reach the live PML4 the only way available before the direct map

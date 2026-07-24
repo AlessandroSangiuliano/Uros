@@ -247,12 +247,13 @@ static void memmap_selftest(uint32_t info)
  * DIRECT_MAP_BASE + its physical address.  If that yields the same word,
  * every physical page is now an addition away.
  */
-static void direct_map_selftest(void)
+static void direct_map_selftest(uint32_t info)
 {
 	uint64_t pa = kernel_va_to_phys((uint64_t)(uintptr_t)&phys_witness);
+	uint64_t top = mb2_top_of_ram(info);
 	uint32_t through_direct;
 
-	direct_map_init();
+	direct_map_init(top);
 
 	kputs("UrMach x86-64: direct map at ");
 	kputhex64(DIRECT_MAP_BASE);
@@ -260,7 +261,9 @@ static void direct_map_selftest(void)
 	kputdec(direct_map_covered / (1024 * 1024));
 	kputs(" MiB in ");
 	kputdec(direct_map_page_size / (1024 * 1024));
-	kputs(" MiB pages\r\n");
+	kputs(" MiB pages, ");
+	kputs(direct_map_covered >= top ? "reaches all ram\r\n"
+					: "CLAMPED below top of ram\r\n");
 
 	through_direct = *(const volatile uint32_t *)(uintptr_t)phys_to_direct(pa);
 
@@ -685,7 +688,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	phys_selftest();
 	cpu_selftest();
 	memmap_selftest(info);
-	direct_map_selftest();
+	direct_map_selftest(info);
 	walk_selftest();
 	bootmem_selftest();
 	map_selftest();
