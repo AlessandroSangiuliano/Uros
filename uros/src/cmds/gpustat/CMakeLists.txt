@@ -13,6 +13,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${GPU_USER_H}
     -user ${GPU_USER_C}
@@ -49,6 +50,7 @@ target_include_directories(gpustat_bin PRIVATE
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/src/lib/libcap

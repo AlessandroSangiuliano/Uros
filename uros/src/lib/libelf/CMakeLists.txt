@@ -24,6 +24,7 @@ target_include_directories(libelf PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include          # mach/machine -> i386
   ${CMAKE_SOURCE_DIR}/src/mach_services/include  # sa_mach.h, string.h
   ${CMAKE_SOURCE_DIR}/export/include             # mach/elf.h
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel             # mach/elf.h fallback
   ${CMAKE_SOURCE_DIR}/include
 )

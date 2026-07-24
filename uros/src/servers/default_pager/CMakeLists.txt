@@ -57,6 +57,7 @@ endfunction()
 set(MIG_INCLUDES
   -DSEQNOS
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_CURRENT_SOURCE_DIR}/mach
 )
@@ -141,6 +142,7 @@ target_include_directories(default_pager_server PRIVATE
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include

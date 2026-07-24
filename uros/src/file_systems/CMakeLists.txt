@@ -73,6 +73,7 @@ target_include_directories(libsa_fs PUBLIC
   # sa_mach standalone types (<types.h> -> sa_mach/types.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   # Kernel headers (device/, mach/, mach_debug/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Export headers (mach/mach_interface.h, mach/boot_info.h)
   ${CMAKE_SOURCE_DIR}/export/include

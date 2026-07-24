@@ -74,6 +74,7 @@ target_include_directories(hello_server_server PRIVATE
   # Pre-built export headers (mach.h, libcap.h, device/, ...)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers needed by some MIG-generated stubs
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )

@@ -63,6 +63,7 @@ target_include_directories(cap_server_bin PRIVATE
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include
   # Kernel headers (mach/, device/, i386/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include

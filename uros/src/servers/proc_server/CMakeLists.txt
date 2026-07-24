@@ -21,6 +21,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_CURRENT_SOURCE_DIR}
     -header ${PROC_USER_H}
@@ -52,6 +53,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/lib/libvfs
     -header ${VFS_USER_H}
@@ -81,6 +83,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${NOTIFY_USER_H}
     -sheader ${NOTIFY_SERVER_H}
@@ -152,6 +155,7 @@ target_include_directories(proc_server_bin PRIVATE
   # Pre-built export headers (mach/, servers/netname.h)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include

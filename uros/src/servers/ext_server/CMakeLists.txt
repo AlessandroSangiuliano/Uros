@@ -20,6 +20,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${EXT2_USER_H}
     -sheader ${EXT2_SERVER_H}
@@ -50,6 +51,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/lib/libvfs
     -header ${VFS_USER_H}
@@ -77,6 +79,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci
     -header ${AB_USER_H}
@@ -104,6 +107,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DM_USER_H}
     -sheader /dev/null
@@ -172,6 +176,7 @@ target_include_directories(ext_server_bin PRIVATE
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, servers/netname.h)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include

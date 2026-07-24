@@ -7,6 +7,7 @@ project(bootstrap_server C)
 
 set(MIG_INCLUDE_FLAGS
   -I${CMAKE_SOURCE_DIR}/export/include
+  -I${UROS_ARCH_INCLUDE}
   -I${CMAKE_SOURCE_DIR}/src/mach_kernel
   -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
 )
@@ -146,6 +147,7 @@ target_include_directories(bootstrap_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/file_systems
   # Kernel headers (mach/, device/, ddb/, i386/) — bootstrap needs kernel-internal
   # extensions (boot_info.h multi-segment support) so kernel must come BEFORE export
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Pre-built export headers (mach/mach_interface.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/include

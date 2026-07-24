@@ -77,6 +77,26 @@ message(STATUS "UROS_TARGET_ARCH = ${UROS_TARGET_ARCH} (${UROS_ARCH_FLAGS_STR})"
 # which keeps them working against pre-#404 build directories.
 file(WRITE ${CMAKE_BINARY_DIR}/uros-arch "${UROS_TARGET_ARCH}\n")
 
+# The machine/ indirection, per target (#404).  Mach dispatches MI code
+# to the active architecture through two include-path names:
+#   <machine/...>       -> src/mach_kernel/<arch>/
+#   <mach/machine/...>  -> src/mach_kernel/mach/<arch>/
+# Historically both were symlinks INSIDE the source tree pointing at
+# i386 — state a build system cannot see, wired to one architecture,
+# and the reason two targets could not share a tree.  The links now
+# live here, in the build directory, created at configure time for
+# whatever this build dir targets; the source tree carries none.
+# Consumers get -I${UROS_ARCH_INCLUDE} immediately before the
+# -I .../src/mach_kernel whose in-tree symlink used to resolve these,
+# so relative include priority is exactly what it was.
+set(UROS_ARCH_INCLUDE ${CMAKE_BINARY_DIR}/arch-include)
+file(MAKE_DIRECTORY ${UROS_ARCH_INCLUDE}/mach)
+file(REMOVE ${UROS_ARCH_INCLUDE}/machine ${UROS_ARCH_INCLUDE}/mach/machine)
+file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/${UROS_TARGET_ARCH}
+     ${UROS_ARCH_INCLUDE}/machine SYMBOLIC)
+file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}
+     ${UROS_ARCH_INCLUDE}/mach/machine SYMBOLIC)
+
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'uros' when building kernel)" "")
 if(NOT EXPORT_PLATFORM)

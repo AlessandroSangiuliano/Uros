@@ -31,7 +31,7 @@ list(REMOVE_ITEM LIB_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)
 # libsa_mach in #106.  Other files only need stdint.h.
 
 # __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out)
-set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
+set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${UROS_ARCH_INCLUDE} -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/asm")
 
 # Preprocess ALL lowercase .s files (they use #include and need CPP)
@@ -83,7 +83,7 @@ endif()
 set(_KERNEL ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 set(_EXPORT ${CMAKE_SOURCE_DIR}/export/include)
 # MIG include path: export tree first (userspace .defs), then kernel for extras
-set(_MIG_INC ${_EXPORT} ${_KERNEL} ${_EXPORT}/mach_debug)
+set(_MIG_INC ${_EXPORT} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_EXPORT}/mach_debug)
 
 # --- All .defs from the export tree (matching original common.mk MIG_DEFS) ---
 # Use the export tree versions which are the published userspace interfaces.
@@ -218,6 +218,7 @@ target_include_directories(libmach PUBLIC
   ${CMAKE_SOURCE_DIR}/uapi			# #179 — UAPI split
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
@@ -316,6 +317,7 @@ if(UROS_BUILD_MUSL)
     ${CMAKE_SOURCE_DIR}/uapi
     ${CMAKE_SOURCE_DIR}/src/mach_services/include
     ${CMAKE_SOURCE_DIR}/export/include
+    ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include
   )

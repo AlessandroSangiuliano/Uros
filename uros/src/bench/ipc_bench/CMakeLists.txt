@@ -19,6 +19,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${EXT2_USER_H}
     -sheader ${EXT2_SERVER_H}
@@ -45,6 +46,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/servers/exec_server
     -header ${EXEC_USER_H}
@@ -72,6 +74,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/servers/proc_server
     -header ${PROC_USER_H}
@@ -149,6 +152,7 @@ target_include_directories(ipc_bench_server PRIVATE
   # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include

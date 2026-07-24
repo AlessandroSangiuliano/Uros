@@ -49,6 +49,7 @@ add_custom_command(
             -I${CMAKE_SOURCE_DIR}/export/include
             -I${CMAKE_BINARY_DIR}/generated/include
             -I${CMAKE_SOURCE_DIR}/src/mach_services/include
+            -I${UROS_ARCH_INCLUDE}
             -I${CMAKE_SOURCE_DIR}/src/mach_kernel
             -nostdlib
             ${MUSL_PREFIX}/lib/Scrt1.o

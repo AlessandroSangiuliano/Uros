@@ -35,6 +35,7 @@ set(HAL_INCLUDE_DIRS
   # Pre-built export headers
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
@@ -59,6 +60,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DM_USER_H}
     -sheader ${DM_SERVER_H}
@@ -87,6 +89,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${HAL_USER_H}
     -sheader ${HAL_SERVER_H}
@@ -116,6 +119,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${HAL_NOTIFY_USER_H}
     -sheader ${HAL_NOTIFY_SERVER_H}

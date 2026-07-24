@@ -5,16 +5,17 @@ cmake_minimum_required(VERSION 3.16)
 set(OSFMK_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
 # The ODE export directory uses pseudo-symlinks ("link ppc") for mach/machine.
-# We target i386, so create a real symlink: mach/machine -> mach/i386 headers.
+# Create a real symlink in the build tree instead: mach/machine -> the
+# target architecture's mach headers (#404 made it per-target; it was
+# hardcoded to i386 behind a never-refreshed EXISTS guard before).
 # This is shared by all subprojects via ${CMAKE_BINARY_DIR}/generated/include.
 set(GEN_MACH_MACHINE "${CMAKE_BINARY_DIR}/generated/include/mach/machine")
-if(NOT EXISTS "${GEN_MACH_MACHINE}")
-  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/mach")
-  file(CREATE_LINK
-    "${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/i386"
-    "${GEN_MACH_MACHINE}"
-    SYMBOLIC)
-endif()
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/mach")
+file(REMOVE "${GEN_MACH_MACHINE}")
+file(CREATE_LINK
+  "${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}"
+  "${GEN_MACH_MACHINE}"
+  SYMBOLIC)
 
 # uros_musl_dispatcher — kept as a no-op INTERFACE for backward
 # compatibility (a few targets still link it).

@@ -177,6 +177,7 @@ endforeach()
 
 set(KERNEL_INCLUDES
     ${CMAKE_SOURCE_DIR}/uapi			# #179 — UAPI split: single source of truth
+    ${UROS_ARCH_INCLUDE}
     ${KERNEL_SRC_DIR}
     ${KERNEL_SRC_DIR}/include
     ${KERNEL_SRC_DIR}/i386
@@ -215,6 +216,7 @@ add_custom_command(
             -ffreestanding
             -isystem ${GCC_INCLUDE_DIR}
             -I${CMAKE_SOURCE_DIR}/uapi
+            -I${UROS_ARCH_INCLUDE}
             -I${KERNEL_SRC_DIR}
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386
@@ -269,6 +271,7 @@ function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     add_custom_command(
         OUTPUT ${SERVER_C} ${SERVER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+                -I${UROS_ARCH_INCLUDE}
                 -I${KERNEL_SRC_DIR} 
                 -I${KERNEL_SRC_DIR}/include
                 -I${KERNEL_SRC_DIR}/i386
@@ -303,6 +306,7 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     add_custom_command(
         OUTPUT ${USER_C} ${USER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+                -I${UROS_ARCH_INCLUDE}
                 -I${KERNEL_SRC_DIR}
                 -I${KERNEL_SRC_DIR}/include
                 -I${KERNEL_SRC_DIR}/i386
@@ -374,6 +378,7 @@ add_mig_user(${KERNEL_SRC_DIR}/mach/memory_object.defs
 add_custom_command(
     OUTPUT ${KERNEL_BUILD_DIR}/device/device_pager_server.c ${KERNEL_BUILD_DIR}/device/device_pager_server.h
     COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+            -I${UROS_ARCH_INCLUDE}
             -I${KERNEL_SRC_DIR} 
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386

@@ -22,6 +22,7 @@ macro(mig_all DEFS_FILE STEM)
       -cpp ${CMAKE_C_COMPILER}
       -migcom $<TARGET_FILE:migcom>
       -I${CMAKE_SOURCE_DIR}/export/include
+      -I${UROS_ARCH_INCLUDE}
       -I${CMAKE_SOURCE_DIR}/src/mach_kernel
       -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
       -header  ${_hdr}
@@ -96,6 +97,7 @@ target_include_directories(name_server_bin PRIVATE
   # Pre-built export headers (mach/*, servers/*, device/*)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include

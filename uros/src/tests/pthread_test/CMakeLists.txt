@@ -30,6 +30,7 @@ target_include_directories(pthread_test_server PRIVATE
   # Pre-built export headers (mach/mach_interface.h, etc.)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include

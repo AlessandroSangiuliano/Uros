@@ -38,6 +38,7 @@ set(GPU_INCLUDE_DIRS
   # Pre-built export headers (gpu/, mach/, ...)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
@@ -64,6 +65,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DM_USER_H}
     -sheader ${DM_SERVER_H}
@@ -92,6 +94,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${GPU_USER_H}
     -sheader ${GPU_SERVER_H}

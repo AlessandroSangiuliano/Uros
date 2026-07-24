@@ -11,6 +11,7 @@ add_custom_command(
   OUTPUT ${SERVICE_USER_C} ${SERVICE_SERVER_C} ${SERVICE_HEADER}
   COMMAND ${CMAKE_C_COMPILER} -E -P -x c
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
     ${SERVICE_DEFS}
@@ -36,6 +37,7 @@ target_include_directories(libservice PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )

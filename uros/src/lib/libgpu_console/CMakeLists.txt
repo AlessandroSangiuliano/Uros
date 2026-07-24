@@ -16,6 +16,7 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${GPU_USER_H}
     -user ${GPU_USER_C}
@@ -66,6 +67,7 @@ target_include_directories(libgpu_console PUBLIC
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )

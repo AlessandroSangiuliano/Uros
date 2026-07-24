@@ -21,6 +21,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_CURRENT_SOURCE_DIR}
     -header ${EXEC_USER_H}
@@ -92,6 +93,7 @@ target_include_directories(exec_server_bin PRIVATE
   # Pre-built export headers (mach/, servers/netname.h)
   ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include

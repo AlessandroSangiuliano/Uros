@@ -27,6 +27,7 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -DSEQNOS
     -I${CMAKE_SOURCE_DIR}/export/include
+    -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header  ${MO_USER_H}
     -sheader ${MO_SERVER_H}
@@ -73,6 +74,7 @@ target_include_directories(libfspager PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/export/include
+  ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
 )
