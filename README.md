@@ -210,8 +210,6 @@ cmake -G Ninja \
   -DOSFMK_BUILD_NAME_SERVER=ON \
   -DOSFMK_BUILD_HAL_SERVER=ON \
   -DOSFMK_BUILD_BLOCK_SERVER=ON \
-  -DOSFMK_BUILD_AHCI_DRIVER=ON \
-  -DOSFMK_BUILD_VIRTIO_BLK=ON \
   -DOSFMK_BUILD_EXT2_SERVER=ON \
   -DOSFMK_BUILD_PROC_SERVER=ON \
   -DOSFMK_BUILD_EXEC_SERVER=ON \
@@ -229,6 +227,20 @@ cmake -G Ninja \
 ninja
 cd ../..
 ./scripts/run-qemu.sh --fresh-disk --ahci          # graphical (QEMU window)
+```
+
+The build targets **i386** by default. A second architecture is selected
+per build directory with `-DUROS_TARGET_ARCH=x86_64`, from the same
+unmodified source tree — the machine-dependent code, arch flags and
+`export/` paths all follow it (#404). The x86_64 machine-dependent kernel
+layer itself lands with the porting contracts (#406–#411); until then an
+`x86_64` configuration builds the host tools and architecture-neutral
+targets and says so for the kernel.
+
+```sh
+# an i386 build and an x86_64 build coexisting, no clean between them:
+cmake -G Ninja -DUROS_TARGET_ARCH=i386   -S uros -B uros/build
+cmake -G Ninja -DUROS_TARGET_ARCH=x86_64 -S uros -B uros/build-x86_64
 ./scripts/run-ush.sh                               # minimal bundle, serial-only, drops into ush$
 ```
 
@@ -240,7 +252,8 @@ Every userspace component is opt-in via a CMake flag.  Defaults keep a kernel-on
 
 | Flag | Default | Component |
 |---|---|---|
-| `OSFMK_TARGET_AT386` | `ON` | Target arch (currently only AT386 / i386) |
+| `UROS_TARGET_ARCH` | `i386` | Target architecture: `i386` or `x86_64` (#404) |
+| `OSFMK_TARGET_AT386` | `ON` | AT386 machine configuration |
 | `OSFMK_BUILD_TOOLS` | `ON` | Host tools (`mig`, `migcom`, ...) |
 | `OSFMK_BUILD_KERNEL` | `ON` | UrMach microkernel |
 | `OSFMK_BUILD_BOOTSTRAP` | `ON` | Bootstrap server |
