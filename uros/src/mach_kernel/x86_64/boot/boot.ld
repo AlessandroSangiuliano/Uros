@@ -1,5 +1,5 @@
 /*
- * x86-64 boot linker script (#406, MD contract 1/6).
+ * x86-64 boot linker script (#406/#407, MD contracts 1-2/6).
  *
  * ELF64 image, loaded by GRUB via multiboot2 (qemu's -kernel multiboot1
  * loader rejects ELF64).  GRUB hands off in 32-bit protected mode, paging
@@ -17,6 +17,13 @@
  *     LOAD address kept low via AT(VMA - KERNEL_VBASE).  GRUB loads them by
  *     physical (LMA); the boot code maps KERNEL_VBASE -> phys 0 before the
  *     jump, so the 64-bit code runs at its high virtual address.
+ *
+ * One segment per permission (#407 W^X): no segment is both writable and
+ * executable, which is what the "RWX load segment" warning was about, and
+ * the kernel sections are page-aligned and bracketed by symbols so the pmap
+ * can reprotect each to its own permission once paging is fully up.  The ELF
+ * flags here document intent and silence the loader; the enforcement is the
+ * page tables, which are ours to set.
  */
 
 OUTPUT_FORMAT("elf64-x86-64")
@@ -26,6 +33,15 @@ ENTRY(_start)
 PHYS_LOAD    = 0x100000;			/* 1 MiB — where GRUB loads us   */
 KERNEL_VBASE = 0xffffffff80000000;		/* higher-half base (-2 GiB)     */
 
+PHDRS
+{
+	boot_text	PT_LOAD FLAGS(5);	/* R-X: mb2 hdr, entry, trampoline */
+	boot_data	PT_LOAD FLAGS(6);	/* RW-: boot data, tables, stack   */
+	ktext		PT_LOAD FLAGS(5);	/* R-X: kernel text                */
+	krodata		PT_LOAD FLAGS(4);	/* R--: kernel rodata              */
+	kdata		PT_LOAD FLAGS(6);	/* RW-: kernel data + bss          */
+}
+
 SECTIONS
 {
 	. = PHYS_LOAD;
@@ -33,44 +49,58 @@ SECTIONS
 	/* ---- low: boot code, tables, stack (VMA == LMA) ---- */
 
 	/* Multiboot2 header must sit in the first 32 KiB of the image. */
-	.multiboot2 ALIGN(8) : { *(.multiboot2) }
+	.multiboot2 ALIGN(8) : { *(.multiboot2) } :boot_text
+	.boot ALIGN(16) : { *(.boot) } :boot_text
+	.boot.rodata ALIGN(16) : { *(.boot.rodata) } :boot_text
 
-	.boot ALIGN(16) : { *(.boot) }
-	.boot.rodata ALIGN(16) : { *(.boot.rodata) }
-	.boot.data ALIGN(16) : { *(.boot.data) }
-	.boot.bss ALIGN(4096) : { *(.boot.bss) }
+	.boot.data ALIGN(16) : { *(.boot.data) } :boot_data
+	.boot.bss ALIGN(4096) : { *(.boot.bss) } :boot_data
 
 	/* Physical cursor where the high kernel image is loaded, right after
 	 * the low boot image — contiguous, no overlap. */
 	. = ALIGN(16);
 	_kernel_lma = .;
 
-	/* ---- high: kernel image (VMA high, LMA low via AT) ---- */
+	/* ---- high: kernel image (VMA high, LMA low via AT) ---- *
+	 * Each section is page-aligned and bracketed, so a page belongs to
+	 * exactly one section and W^X can be applied a page at a time. */
 	. = KERNEL_VBASE + _kernel_lma;
 
-	.text ALIGN(16) : AT(ADDR(.text) - KERNEL_VBASE) {
+	. = ALIGN(4096);
+	__ktext_start = .;
+	.text : AT(ADDR(.text) - KERNEL_VBASE) {
 		*(.text)
 		*(.text.*)
-	}
+	} :ktext
 
-	.rodata ALIGN(16) : AT(ADDR(.rodata) - KERNEL_VBASE) {
+	. = ALIGN(4096);
+	__ktext_end = .;
+	__krodata_start = .;
+	.rodata : AT(ADDR(.rodata) - KERNEL_VBASE) {
 		*(.rodata)
 		*(.rodata.*)
-	}
+	} :krodata
 
-	.data ALIGN(16) : AT(ADDR(.data) - KERNEL_VBASE) {
+	. = ALIGN(4096);
+	__krodata_end = .;
+	__kdata_start = .;
+	.data : AT(ADDR(.data) - KERNEL_VBASE) {
 		*(.data)
 		*(.data.*)
-	}
+	} :kdata
 
-	/* 4 KiB, not 16: the pmap's page tables live here, and the hardware
-	 * takes a table's frame from bits 51:12 — a misaligned table is read
-	 * from the wrong address rather than rejected. */
-	.bss ALIGN(4096) (NOLOAD) : AT(ADDR(.bss) - KERNEL_VBASE) {
+	/* .bss is a normal NOBITS section inside the RW load segment, not
+	 * NOLOAD: that way the loader zeros it (memsz > filesz), so the C
+	 * globals that must start at zero actually do on real hardware — RAM
+	 * is not guaranteed zero the way QEMU's is. */
+	.bss ALIGN(4096) : AT(ADDR(.bss) - KERNEL_VBASE) {
 		*(.bss)
 		*(.bss.*)
 		*(COMMON)
-	}
+	} :kdata
+
+	. = ALIGN(4096);
+	__kernel_end = .;
 
 	/DISCARD/ : { *(.note.*) *(.comment) *(.eh_frame) }
 }
