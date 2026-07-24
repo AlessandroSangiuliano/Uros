@@ -41,6 +41,36 @@ typedef struct pmap *pmap_t;
 pmap_t pmap_kernel(void);
 
 /*
+ * A new, empty address space.  Its lower half is bare; its higher half is
+ * the kernel's, shared by pointing at the very same next-level tables — that
+ * sharing is what lets a trap or a system call keep executing kernel code
+ * without a change of address space.
+ *
+ * The size argument is the MI interface's, and unused: this machine's spaces
+ * are all the same size.  Returns PMAP_NULL if nothing is left to build one.
+ *
+ * The sharing is established by copying the kernel's top-level entries at
+ * create time, which carries a standing obligation: a kernel-half entry
+ * added to the PML4 *after* a space is created will not appear in it.  Every
+ * kernel region therefore has to own its top-level entry before the first
+ * user space exists — true today, since the direct map and the image take
+ * theirs during bootstrap.
+ */
+pmap_t pmap_create(uint64_t size);
+
+void pmap_reference(pmap_t pmap);
+
+/* Drop a reference; the space is torn down when the last one goes. */
+void pmap_destroy(pmap_t pmap);
+
+/*
+ * Make `pmap` the address space this CPU translates through — a CR3 load,
+ * which also flushes every non-global TLB entry.  The kernel half is
+ * identical across spaces, so the kernel keeps running across the switch.
+ */
+void pmap_activate(pmap_t pmap);
+
+/*
  * Adopt the tables boot.S and the direct map already built as the kernel
  * pmap, taking its root from the live CR3.  After this pmap_kernel() is
  * usable; it does not build anything, it names what is already there.

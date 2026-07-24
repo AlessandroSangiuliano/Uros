@@ -8,6 +8,8 @@
 #include <stdint.h>
 
 #include <cpu/regs.h>
+#include <pmap/bootmem.h>
+#include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
@@ -29,6 +31,97 @@ void pmap_bootstrap(void)
 pmap_t pmap_kernel(void)
 {
 	return &kernel_pmap_store;
+}
+
+/*
+ * Somewhere to keep the pmaps themselves until the MI allocator exists.  A
+ * slot with no references is free, so a destroyed space's slot comes back —
+ * unlike its frames, which do not.
+ */
+#define PMAP_BOOT_MAX	16
+
+static struct pmap pmap_pool[PMAP_BOOT_MAX];
+
+/*
+ * The first PML4 slot of the kernel half.  Entries from here up are the
+ * kernel's and are shared into every space; everything below is the space's
+ * own.  Deriving it from the layout keeps the split in one place: five-level
+ * paging moves the boundary along with KERNEL_HALF_BASE.
+ */
+#define KERNEL_PML4_FIRST	pml4_index(KERNEL_HALF_BASE)
+
+_Static_assert(KERNEL_PML4_FIRST == 256, "the halves are not evenly split");
+
+pmap_t pmap_create(uint64_t size)
+{
+	const pt_entry_t *kroot;
+	pt_entry_t *root;
+	uint64_t root_pa;
+	pmap_t pmap = PMAP_NULL;
+
+	/* One size of address space on this machine; the argument is the
+	 * interface's, not ours. */
+	(void)size;
+
+	for (unsigned i = 0; i < PMAP_BOOT_MAX; i++)
+		if (pmap_pool[i].ref_count == 0) {
+			pmap = &pmap_pool[i];
+			break;
+		}
+
+	if (pmap == PMAP_NULL)
+		return PMAP_NULL;
+
+	root_pa = boot_frame_alloc();		/* arrives zeroed */
+	if (root_pa == 0)
+		return PMAP_NULL;
+
+	/*
+	 * Share the kernel half by pointing at the same next-level tables, not
+	 * by copying them: a mapping the kernel changes later is then seen by
+	 * every space at once, because they are all reading the one table.
+	 * Only these top-level entries are duplicated.
+	 */
+	root = (pt_entry_t *)(uintptr_t)phys_to_direct(root_pa);
+	kroot = (const pt_entry_t *)(uintptr_t)
+		phys_to_direct(kernel_pmap_store.root_pa);
+
+	for (unsigned i = KERNEL_PML4_FIRST; i < PTES_PER_TABLE; i++)
+		root[i] = kroot[i];
+
+	pmap->root_pa = root_pa;
+	pmap->ref_count = 1;
+	return pmap;
+}
+
+void pmap_reference(pmap_t pmap)
+{
+	if (pmap != PMAP_NULL)
+		pmap->ref_count++;
+}
+
+void pmap_destroy(pmap_t pmap)
+{
+	if (pmap == PMAP_NULL || pmap == pmap_kernel())
+		return;
+
+	if (--pmap->ref_count > 0)
+		return;
+
+	/*
+	 * The space is gone as far as anyone can tell — the slot is free and
+	 * the root unreachable — but its frames are not given back: the boot
+	 * allocator has no way to take them.  Reclaiming them is the same
+	 * bookkeeping pmap_collect() needs and arrives with the real physical
+	 * allocator, not before.
+	 */
+	pmap->root_pa = 0;
+}
+
+void pmap_activate(pmap_t pmap)
+{
+	if (pmap != PMAP_NULL)
+		write_cr3(pmap->root_pa);
 }
 
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,

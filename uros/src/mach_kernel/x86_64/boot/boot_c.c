@@ -598,6 +598,83 @@ static void wx_selftest(void)
 	kputs(wx_data_probe == 0x1234 ? ", W^X live\r\n" : ", WRONG\r\n");
 }
 
+/*
+ * An address in the lower half, past the 1 GiB the boot identity map covers,
+ * so nothing else has a claim on it.  It shares PML4 slot 0 with that
+ * identity map, which makes it a sharper test: the two spaces must differ
+ * beneath the same top-level slot.
+ */
+#define USER_TEST_VA	0x0000000100000000ULL
+
+/*
+ * Build a second address space and show it is one: the kernel half shared
+ * entry-for-entry, the lower half its own, and a mapping made in it invisible
+ * from the kernel's.
+ *
+ * Then the part that cannot be faked — switch CR3 to it and keep running.
+ * The code executing this, its stack and the page tables it reads are all in
+ * the kernel half, so surviving the switch is exactly the proof that the half
+ * really is shared and not merely copied to look alike.  A write through the
+ * new mapping is read back afterwards from the physical frame, through the
+ * direct map, once the kernel space is restored.
+ */
+static void user_pmap_selftest(void)
+{
+	pmap_t k = pmap_kernel();
+	pmap_t u = pmap_create(0);
+	uint64_t frame = boot_frame_alloc();
+	const pt_entry_t *kroot, *uroot;
+	uint32_t readback;
+	int shared = 1;
+
+	if (u == PMAP_NULL) {
+		kputs("UrMach x86-64: pmap_create FAILED\r\n");
+		return;
+	}
+
+	kroot = (const pt_entry_t *)(uintptr_t)phys_to_direct(k->root_pa);
+	uroot = (const pt_entry_t *)(uintptr_t)phys_to_direct(u->root_pa);
+
+	for (unsigned i = 256; i < 512; i++)
+		if (kroot[i] != uroot[i])
+			shared = 0;
+
+	kputs("UrMach x86-64: pmap_create root ");
+	kputhex64(u->root_pa);
+	kputs(shared ? ", kernel half shared" : ", KERNEL HALF DIFFERS");
+	kputs(uroot[0] == 0 ? ", lower half empty\r\n"
+			    : ", LOWER HALF NOT EMPTY\r\n");
+
+	pmap_enter(u, USER_TEST_VA, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+
+	kputs("UrMach x86-64: mapped ");
+	kputhex64(USER_TEST_VA);
+	kputs(" in the new space -> ");
+	kputhex64(pmap_extract(u, USER_TEST_VA));
+	kputs(pmap_extract(u, USER_TEST_VA) == frame
+	      && pmap_extract(k, USER_TEST_VA) == 0
+	      ? ", unmapped in the kernel's, isolated\r\n"
+	      : ", NOT ISOLATED\r\n");
+
+	/* The switch.  Everything below runs in the new address space. */
+	pmap_activate(u);
+	*(volatile uint32_t *)(uintptr_t)USER_TEST_VA = 0xa11caca0;
+	kputs("UrMach x86-64: running in the new space, wrote through it\r\n");
+	pmap_activate(k);
+
+	readback = *(const volatile uint32_t *)(uintptr_t)phys_to_direct(frame);
+	kputs("UrMach x86-64: back in the kernel space, frame holds ");
+	kputhex64(readback);
+	kputs(readback == 0xa11caca0 && pmap_extract(k, USER_TEST_VA) == 0
+	      ? ", write survived and the address is gone again\r\n"
+	      : ", WRONG\r\n");
+
+	pmap_destroy(u);
+	kputs("UrMach x86-64: pmap_destroy -> ");
+	kputs(u->ref_count == 0 && u->root_pa == 0 ? "space released\r\n"
+						   : "STILL HELD?!\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -697,6 +774,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	pmap_selftest();
 	pmap_verbs_selftest();
 	wx_selftest();
+	user_pmap_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
