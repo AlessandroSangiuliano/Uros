@@ -29,12 +29,26 @@ set(CMAKE_ASM_COMPILER_WORKS 1)
 # object is assembled -m64; the entry itself is still 32-bit code (the
 # bootloader hands off in protected mode) via a `.code32` section, and the
 # 64-bit half begins after the long-mode transition — one file, two modes.
+# The x86-64 tree is one directory per MD contract, so a contract's code,
+# its headers and its build inputs sit together and nothing has to be
+# untangled later:
+#   boot/     #406 long-mode entry, first page tables, descriptor tables
+#   pmap/     #407 four-level paging
+#   thread/   #408 context switch and thread state
+#   trap/     #409 trap and interrupt entry
+#   sync/     #410 atomics, locks, barriers
+#   syscall/  #411 SYSCALL/SYSRET
+# None of those names collide with a top-level kernel directory (vm/, kern/,
+# ipc/ ...), so <pmap/pte.h> can never resolve to the wrong header once the
+# MI tree is on the include path too.
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
-  set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot.ld)
+  set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
 
   add_executable(mach_kernel
-    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot.S
-    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot_c.c)
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c)
+  target_include_directories(mach_kernel PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
   # stddef.h); add just that directory back with -isystem so we get the
   # fixed-width types without pulling in the hosted system headers.
@@ -69,10 +83,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     COMMAND ${CMAKE_COMMAND} -E make_directory ${X86_64_ISO_DIR}/boot/grub
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:mach_kernel>
             ${X86_64_ISO_DIR}/boot/mach_kernel
-    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/grub.cfg
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
             ${X86_64_ISO_DIR}/boot/grub/grub.cfg
     COMMAND grub-mkrescue -o ${X86_64_ISO} ${X86_64_ISO_DIR}
-    DEPENDS mach_kernel ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/grub.cfg
+    DEPENDS mach_kernel ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
     COMMENT "Building GRUB2 multiboot2 rescue ISO: ${X86_64_ISO}"
     VERBATIM)
 

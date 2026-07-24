@@ -23,7 +23,7 @@
 
 #include <stdint.h>
 
-#include "pte.h"
+#include <pmap/pte.h>
 
 #define COM1 0x3F8
 
