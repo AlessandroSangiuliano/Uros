@@ -362,6 +362,45 @@ static void map_selftest(void)
 				     : "NOT refused?!\r\n");
 }
 
+/*
+ * Reprotect then unmap a fresh page.  With no fault handler yet, a write to
+ * a read-only page would triple-fault rather than report anything, so the
+ * check reads the PTE the walk returns instead: after clearing write the
+ * bit is gone while the frame and validity remain, and a read still returns
+ * the value (read-only forbids writes, not reads).  Then unmap clears it and
+ * the walk finds nothing.
+ */
+static void protect_unmap_selftest(void)
+{
+	uint64_t root = read_cr3() & INTEL_PTE_PFN;
+	uint64_t va = KERNEL_HEAP_BASE + 0x4000;
+	uint64_t frame = boot_frame_alloc();
+	volatile uint32_t *page = (volatile uint32_t *)(uintptr_t)va;
+	pt_entry_t *e;
+	uint64_t size;
+
+	pmap_map_page(root, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX);
+	*page = 0xcafe;
+
+	size = pmap_protect_page(root, va, INTEL_PTE_NX);	/* drop write */
+	e = pmap_walk(root, va, 0);
+	kputs("UrMach x86-64: protect read-only -> entry ");
+	kputhex64(*e);
+	kputs(size == PAGE_SIZE_4K && !(*e & INTEL_PTE_WRITE)
+	      && (*e & INTEL_PTE_VALID) && pte_to_pa(*e) == frame
+	      ? "\r\nUrMach x86-64: write bit cleared, frame kept, reads "
+	      : "\r\nUrMach x86-64: WRONG, reads ");
+	kputhex64(*page);
+	kputs(*page == 0xcafe ? " still\r\n" : " CORRUPT\r\n");
+
+	size = pmap_unmap_page(root, va);
+	e = pmap_walk(root, va, 0);
+	kputs("UrMach x86-64: unmap -> ");
+	kputs(size == PAGE_SIZE_4K && e == PT_ENTRY_NULL
+	      ? "cleared, walk finds nothing\r\n"
+	      : "STILL MAPPED?!\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -455,6 +494,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	walk_selftest();
 	bootmem_selftest();
 	map_selftest();
+	protect_unmap_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;

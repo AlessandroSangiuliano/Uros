@@ -86,6 +86,13 @@ typedef uint64_t	pt_entry_t;
 #define INTEL_PTE_NX		0x8000000000000000ULL
 
 /*
+ * The bits a protection change is allowed to touch: who may write, who may
+ * reach it, whether it may execute.  Everything else in a leaf — the frame,
+ * PS, accessed/dirty, caching, global — is preserved across a reprotect.
+ */
+#define INTEL_PTE_PERM		(INTEL_PTE_WRITE | INTEL_PTE_USER | INTEL_PTE_NX)
+
+/*
  * Physical frame masks.  Bits 51:12 hold the frame for a 4 KiB entry; a
  * large leaf must have the bits below its own page size clear, so it gets a
  * narrower mask.

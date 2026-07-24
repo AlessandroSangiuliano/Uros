@@ -31,4 +31,22 @@
  */
 int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags);
 
+/*
+ * Clear the mapping for va.  Returns the size of the page it removed, or
+ * zero if va was not mapped.
+ *
+ * The intermediate tables are left in place: reclaiming a table once its
+ * last entry goes away is collection, a separate operation with its own
+ * bookkeeping, not something to fold into every unmap.
+ */
+uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va);
+
+/*
+ * Change the permission bits (INTEL_PTE_PERM) of the leaf mapping va,
+ * keeping its frame and every other bit.  Returns the size of the page it
+ * changed, or zero if va was not mapped.  Works on a large leaf as readily
+ * as a small one — the protection lives in the entry either way.
+ */
+uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags);
+
 #endif	/* _X86_64_PMAP_MAP_H_ */

@@ -12,6 +12,7 @@
 #include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pte.h>
+#include <pmap/walk.h>
 
 static inline pt_entry_t *table_at(uint64_t table_pa)
 {
@@ -90,4 +91,30 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags)
 	 */
 	invlpg(va);
 	return PMAP_MAP_OK;
+}
+
+uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
+{
+	uint64_t size = 0;
+	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
+
+	if (entry == PT_ENTRY_NULL)
+		return 0;
+
+	*entry = 0;
+	invlpg(va);
+	return size;
+}
+
+uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
+{
+	uint64_t size = 0;
+	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
+
+	if (entry == PT_ENTRY_NULL)
+		return 0;
+
+	*entry = (*entry & ~INTEL_PTE_PERM) | (flags & INTEL_PTE_PERM);
+	invlpg(va);
+	return size;
 }
