@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 
+#include <boot/multiboot2.h>
 #include <cpu/regs.h>
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
@@ -190,6 +191,54 @@ static void cpu_selftest(void)
 				  : ", no 1 GiB pages (2 MiB fallback)");
 	kputs(efer & EFER_LMA ? ", long mode active\r\n"
 			      : ", EFER.LMA CLEAR?!\r\n");
+}
+
+/*
+ * Open the boot information GRUB left us and report what memory the machine
+ * says it has.  Until now the handoff pointer has only been carried; this is
+ * the first thing to read it, and the answer is what the direct map has to
+ * be sized against rather than guessed at.
+ */
+static void memmap_selftest(uint32_t info)
+{
+	const struct mb2_tag_mmap *mm;
+	const uint8_t *p, *end;
+	uint64_t top = mb2_top_of_ram(info);
+	uint64_t usable = mb2_usable_ram(info);
+	unsigned shown = 0;
+
+	mm = (const struct mb2_tag_mmap *)mb2_find_tag(info,
+						       MB2_TAG_MEMORY_MAP);
+	if (mm == 0) {
+		kputs("UrMach x86-64: NO multiboot2 memory map\r\n");
+		return;
+	}
+
+	p = (const uint8_t *)mm + sizeof(*mm);
+	end = (const uint8_t *)mm + mm->size;
+
+	for (; p + mm->entry_size <= end; p += mm->entry_size) {
+		const struct mb2_mmap_entry *e;
+
+		e = (const struct mb2_mmap_entry *)p;
+		if (e->type != MB2_MEM_AVAILABLE)
+			continue;
+
+		kputs("UrMach x86-64:   ram ");
+		kputhex64(e->addr);
+		kputs(" + ");
+		kputdec(e->len / 1024);
+		kputs(" KiB\r\n");
+		shown++;
+	}
+
+	kputs("UrMach x86-64: ");
+	kputdec(shown);
+	kputs(" usable regions, ");
+	kputdec(usable / (1024 * 1024));
+	kputs(" MiB total, top of ram ");
+	kputhex64(top);
+	kputs(top != 0 && usable != 0 ? "\r\n" : " NOTHING?!\r\n");
 }
 
 /*
@@ -635,6 +684,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	layout_selftest();
 	phys_selftest();
 	cpu_selftest();
+	memmap_selftest(info);
 	direct_map_selftest();
 	walk_selftest();
 	bootmem_selftest();
@@ -661,7 +711,6 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputs("UrMach x86-64: definitive GDT + TSS installed (RSP0 + IST1), TR=0x18\r\n");
 	kputs("UrMach x86-64: boot contract #406 (1/6) complete\r\n");
 
-	(void)info;
 	for (;;)
 		__asm__ volatile("cli; hlt");
 }
