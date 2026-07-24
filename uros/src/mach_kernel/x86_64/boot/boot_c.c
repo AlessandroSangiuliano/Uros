@@ -27,6 +27,7 @@
 #include <pmap/direct.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
+#include <pmap/walk.h>
 
 #define COM1 0x3F8
 
@@ -218,6 +219,53 @@ static void direct_map_selftest(void)
 	      : ", DISAGREES\r\n");
 }
 
+/*
+ * Walk the live tables for three addresses whose answers we already know by
+ * other means, so the walk is checked rather than merely exercised:
+ *
+ *   - the witness in the kernel image, whose physical address the
+ *     subtraction in kernel_va_to_phys() gives independently;
+ *   - its direct-map alias, which must land on the same physical page;
+ *   - an address in the kernel heap region, which nothing has mapped, so
+ *     the walk has to report failure instead of inventing a number.
+ */
+static void walk_selftest(void)
+{
+	uint64_t root = read_cr3() & INTEL_PTE_PFN;
+	uint64_t va = (uint64_t)(uintptr_t)&phys_witness;
+	uint64_t expect = kernel_va_to_phys(va);
+	uint64_t pa = 0, size = 0;
+	int ok;
+
+	ok = pmap_resolve(root, va, &pa, &size);
+	kputs("UrMach x86-64: walk image ");
+	kputhex64(va);
+	kputs(" -> ");
+	kputhex64(pa);
+	kputs(" in ");
+	kputdec(size / 1024);
+	kputs(" KiB page, ");
+	kputs(ok && pa == expect ? "matches the subtraction\r\n"
+				 : "DISAGREES with the subtraction\r\n");
+
+	ok = pmap_resolve(root, phys_to_direct(expect), &pa, &size);
+	kputs("UrMach x86-64: walk direct ");
+	kputhex64(phys_to_direct(expect));
+	kputs(" -> ");
+	kputhex64(pa);
+	kputs(" in ");
+	kputdec(size / 1024);
+	kputs(" KiB page, ");
+	kputs(ok && pa == expect ? "same physical page\r\n"
+				 : "WRONG physical page\r\n");
+
+	ok = pmap_resolve(root, KERNEL_HEAP_BASE, &pa, &size);
+	kputs("UrMach x86-64: walk unmapped ");
+	kputhex64(KERNEL_HEAP_BASE);
+	kputs(ok ? " -> claims a mapping?!\r\n"
+		 : " -> correctly reports no mapping\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -308,6 +356,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	phys_selftest();
 	cpu_selftest();
 	direct_map_selftest();
+	walk_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
