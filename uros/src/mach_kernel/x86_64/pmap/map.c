@@ -118,3 +118,56 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 	invlpg(va);
 	return size;
 }
+
+uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
+{
+	uint64_t size = 0;
+	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
+	uint64_t base, perm, sub_size, table_pa;
+	pt_entry_t *sub;
+	int from_1g;
+
+	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K)
+		return 0;
+
+	from_1g = (size == PAGE_SIZE_1G);
+	sub_size = from_1g ? PAGE_SIZE_2M : PAGE_SIZE_4K;
+
+	/* The frame is aligned to the leaf's own size, so mask by that. */
+	base = *entry & (from_1g ? INTEL_PTE_PFN_1G : INTEL_PTE_PFN_2M);
+	perm = *entry & INTEL_PTE_PERM;
+
+	table_pa = boot_frame_alloc();
+	if (table_pa == 0)
+		return 0;
+
+	sub = table_at(table_pa);
+	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {
+		pt_entry_t leaf = (base + (uint64_t)i * sub_size)
+				| INTEL_PTE_VALID | perm;
+
+		/*
+		 * The 2 MiB sub-pages of a split gigabyte are still leaves —
+		 * at the PD, where PS marks a leaf.  The 4 KiB sub-pages of a
+		 * split 2 MiB page are PT entries, where PS is not defined.
+		 */
+		if (from_1g)
+			leaf |= INTEL_PTE_PS;
+
+		sub[i] = leaf;
+	}
+
+	/* The interior entry replacing the leaf carries no policy of its own. */
+	*entry = table_pa | INTEL_PTE_VALID | INTEL_PTE_WRITE;
+
+	/*
+	 * One TLB entry covered the whole large page, and invlpg would only
+	 * clear it for one sub-page's worth of addresses — the rest could
+	 * keep hitting the stale large translation.  A CR3 reload drops every
+	 * non-global entry at once; the direct map is not global, so this
+	 * reaches it.  Split is rare and this is bootstrap, so the blunt tool
+	 * is the right one.
+	 */
+	write_cr3(read_cr3());
+	return sub_size;
+}

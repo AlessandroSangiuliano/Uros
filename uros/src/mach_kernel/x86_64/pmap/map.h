@@ -49,4 +49,18 @@ uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va);
  */
 uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags);
 
+/*
+ * Replace the large leaf covering va with a table of next-level entries that
+ * map the same physical range with the same permissions — one level finer:
+ * a 1 GiB leaf becomes 512 of 2 MiB, a 2 MiB leaf becomes 512 of 4 KiB.
+ * Returns the new (smaller) page size, or zero when there is nothing to
+ * split: va unmapped, or already at 4 KiB.
+ *
+ * This is what pmap_map_page() refuses to do implicitly.  It is transparent
+ * to anything already using the mapping — the same bytes stay reachable at
+ * the same addresses — and is the step that lets a fine-grained operation
+ * then touch one sub-page of what used to be one big one.
+ */
+uint64_t pmap_split_page(uint64_t root_pa, uint64_t va);
+
 #endif	/* _X86_64_PMAP_MAP_H_ */

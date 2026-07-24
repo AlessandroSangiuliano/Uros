@@ -401,6 +401,42 @@ static void protect_unmap_selftest(void)
 	      : "STILL MAPPED?!\r\n");
 }
 
+/*
+ * Split the direct map's large page that covers the witness, and show it
+ * changed nothing observable: the address still resolves to the same
+ * physical page, one size class finer, and reading through the direct map
+ * still returns the witness.  CPU-independent — a 1 GiB leaf becomes 2 MiB,
+ * a 2 MiB leaf becomes 4 KiB — so both models exercise a different level.
+ */
+static void split_selftest(void)
+{
+	uint64_t root = read_cr3() & INTEL_PTE_PFN;
+	uint64_t wpa = kernel_va_to_phys((uint64_t)(uintptr_t)&phys_witness);
+	uint64_t dva = phys_to_direct(wpa);
+	const volatile uint32_t *p = (const volatile uint32_t *)(uintptr_t)dva;
+	uint64_t before = 0, after = 0, s0 = 0, s1 = 0, newsz;
+	uint32_t read_before = *p, read_after;
+
+	pmap_resolve(root, dva, &before, &s0);
+	newsz = pmap_split_page(root, dva);
+	pmap_resolve(root, dva, &after, &s1);
+	read_after = *p;
+
+	kputs("UrMach x86-64: split direct page ");
+	kputdec(s0 / 1024);
+	kputs(" KiB -> ");
+	kputdec(s1 / 1024);
+	kputs(" KiB, pa ");
+	kputhex64(after);
+	kputs(before == after ? " kept" : " CHANGED");
+	kputs(", reads ");
+	kputhex64(read_after);
+	kputs(newsz == s1 && s1 < s0 && before == after
+	      && read_after == read_before && read_after == 0x5ec0ffee
+	      ? ", mapping intact\r\n"
+	      : ", SPLIT BROKE THE MAP\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -495,6 +531,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	bootmem_selftest();
 	map_selftest();
 	protect_unmap_selftest();
+	split_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
