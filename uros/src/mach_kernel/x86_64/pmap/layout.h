@@ -96,6 +96,19 @@
 	va_in_region(va, DIRECT_MAP_BASE, DIRECT_MAP_MAX_SIZE)
 
 /*
+ * Physical address of something in the kernel image.
+ *
+ * boot.ld links the image at KERNEL_IMAGE_BASE while setting each section's
+ * load address to VMA - KERNEL_IMAGE_BASE, so the bootloader deposits the
+ * image at that physical address and the translation is this one
+ * subtraction.  It holds for the image and nothing else: the direct map has
+ * its own offset, and an arbitrary mapping has no closed form at all — for
+ * those, walk the tables.
+ */
+#define kernel_va_to_phys(va)	((uint64_t)(va) - KERNEL_IMAGE_BASE)
+#define kernel_phys_to_va(pa)	((uint64_t)(pa) + KERNEL_IMAGE_BASE)
+
+/*
  * Nail the arithmetic to the chapter at build time.  If an offset is ever
  * mistyped, the build stops here instead of the fault landing somewhere far
  * away with no obvious cause.

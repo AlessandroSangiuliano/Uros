@@ -133,6 +133,40 @@ static void layout_selftest(void)
 	      : ", OUTSIDE the image region\r\n");
 }
 
+/*
+ * A witness with a value we can recognise, living in the kernel image's
+ * .rodata — so it is loaded, and reachable both at its linked high address
+ * and at the physical address the loader put it at.
+ */
+static const volatile uint32_t phys_witness = 0x5ec0ffee;
+
+/*
+ * Prove kernel_va_to_phys() against the machine instead of trusting the
+ * arithmetic: read the witness through the kernel image's high mapping, and
+ * again through the low identity map that boot.S left in place, at the
+ * physical address the macro computes.  Two routes to the same byte — if
+ * they agree, the translation is the one the loader actually used.
+ */
+static void phys_selftest(void)
+{
+	uint64_t va = (uint64_t)(uintptr_t)&phys_witness;
+	uint64_t pa = kernel_va_to_phys(va);
+	uint32_t through_image = phys_witness;
+	uint32_t through_identity = *(const volatile uint32_t *)(uintptr_t)pa;
+
+	kputs("UrMach x86-64: witness at va ");
+	kputhex64(va);
+	kputs(" -> pa ");
+	kputhex64(pa);
+	kputs("\r\nUrMach x86-64: reads ");
+	kputhex64(through_image);
+	kputs(" via image, ");
+	kputhex64(through_identity);
+	kputs(through_image == through_identity && through_image == 0x5ec0ffee
+	      ? " via identity, agree\r\n"
+	      : " via identity, DISAGREE\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -220,6 +254,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 
 	pte_selftest();
 	layout_selftest();
+	phys_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
