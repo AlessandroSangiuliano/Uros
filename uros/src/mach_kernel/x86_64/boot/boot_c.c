@@ -28,6 +28,7 @@
 #include <pmap/direct.h>
 #include <pmap/layout.h>
 #include <pmap/map.h>
+#include <pmap/pmap.h>
 #include <pmap/pte.h>
 #include <pmap/walk.h>
 
@@ -437,6 +438,37 @@ static void split_selftest(void)
 	      : ", SPLIT BROKE THE MAP\r\n");
 }
 
+/*
+ * Adopt the live tables as the kernel pmap and check the two things this
+ * layer adds: that its root is the CR3 we are running on, and that the
+ * protection translation gives the bits each case should — read maps to NX
+ * only (no write, no execute), read/write adds write, anything executable
+ * clears NX, and full access is write with execute allowed.
+ */
+static void pmap_selftest(void)
+{
+	uint64_t cr3root = read_cr3() & INTEL_PTE_PFN;
+	pmap_t k;
+	int prot_ok;
+
+	pmap_bootstrap();
+	k = pmap_kernel();
+
+	kputs("UrMach x86-64: kernel pmap root ");
+	kputhex64(k->root_pa);
+	kputs(k->root_pa == cr3root ? " == CR3\r\n" : " != CR3?!\r\n");
+
+	prot_ok =
+	    pmap_flags_for_prot(VM_PROT_READ) == INTEL_PTE_NX &&
+	    pmap_flags_for_prot(VM_PROT_READ | VM_PROT_WRITE)
+		    == (INTEL_PTE_WRITE | INTEL_PTE_NX) &&
+	    pmap_flags_for_prot(VM_PROT_READ | VM_PROT_EXECUTE) == 0 &&
+	    pmap_flags_for_prot(VM_PROT_ALL) == INTEL_PTE_WRITE;
+
+	kputs("UrMach x86-64: prot R=NX RW=W|NX RX=exec RWX=W: ");
+	kputs(prot_ok ? "all correct\r\n" : "WRONG\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -532,6 +564,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	map_selftest();
 	protect_unmap_selftest();
 	split_selftest();
+	pmap_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
