@@ -1,0 +1,160 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * x86-64 machine register access: control registers, MSRs, CPUID.
+ *
+ * Shared plumbing rather than one contract's property — the pmap needs
+ * EFER and CR3, the trap path will need CR2, the protection posture needs
+ * CR4, and the KPTI decision of ch.11 §11.6 is a CPUID query.  It lives in
+ * cpu/ so none of them owns it.
+ */
+
+#ifndef _X86_64_CPU_REGS_H_
+#define _X86_64_CPU_REGS_H_
+
+#include <stdint.h>
+
+/* ------------------------------------------------------------------ */
+/*  Control registers                                                   */
+/* ------------------------------------------------------------------ */
+#define CR0_WP		(1UL << 16)	/* kernel honours read-only pages   */
+#define CR0_PG		(1UL << 31)	/* paging enabled                   */
+
+#define CR4_PAE		(1UL << 5)	/* physical address extension       */
+#define CR4_PGE		(1UL << 7)	/* global pages enabled             */
+#define CR4_PCIDE	(1UL << 17)	/* process-context identifiers      */
+#define CR4_SMEP	(1UL << 20)	/* no kernel execute of user pages  */
+#define CR4_SMAP	(1UL << 21)	/* no kernel access of user pages   */
+
+static inline uint64_t read_cr0(void)
+{
+	uint64_t v;
+	__asm__ volatile("mov %%cr0, %0" : "=r"(v));
+	return v;
+}
+
+static inline void write_cr0(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%cr0" : : "r"(v) : "memory");
+}
+
+/* The faulting address, set by the CPU on a page fault. */
+static inline uint64_t read_cr2(void)
+{
+	uint64_t v;
+	__asm__ volatile("mov %%cr2, %0" : "=r"(v));
+	return v;
+}
+
+/* Physical address of the PML4, plus flags in the low bits. */
+static inline uint64_t read_cr3(void)
+{
+	uint64_t v;
+	__asm__ volatile("mov %%cr3, %0" : "=r"(v));
+	return v;
+}
+
+/*
+ * Writing CR3 also flushes every non-global TLB entry, which is why it is
+ * the blunt way to make paging changes visible.
+ */
+static inline void write_cr3(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%cr3" : : "r"(v) : "memory");
+}
+
+static inline uint64_t read_cr4(void)
+{
+	uint64_t v;
+	__asm__ volatile("mov %%cr4, %0" : "=r"(v));
+	return v;
+}
+
+static inline void write_cr4(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%cr4" : : "r"(v) : "memory");
+}
+
+/* ------------------------------------------------------------------ */
+/*  Model-specific registers                                            */
+/* ------------------------------------------------------------------ */
+#define MSR_EFER	0xC0000080
+
+#define EFER_SCE	(1UL << 0)	/* SYSCALL/SYSRET enabled (#411)     */
+#define EFER_LME	(1UL << 8)	/* long mode enabled  (boot.S sets)  */
+#define EFER_LMA	(1UL << 10)	/* long mode active   (read-only)    */
+#define EFER_NXE	(1UL << 11)	/* execute-disable bit is usable     */
+
+static inline uint64_t rdmsr(uint32_t msr)
+{
+	uint32_t lo, hi;
+
+	__asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+	return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void wrmsr(uint32_t msr, uint64_t val)
+{
+	__asm__ volatile("wrmsr"
+			 : : "c"(msr), "a"((uint32_t)val),
+			     "d"((uint32_t)(val >> 32)));
+}
+
+/* ------------------------------------------------------------------ */
+/*  CPUID                                                               */
+/* ------------------------------------------------------------------ */
+static inline void cpuid_count(uint32_t leaf, uint32_t subleaf,
+			       uint32_t *a, uint32_t *b,
+			       uint32_t *c, uint32_t *d)
+{
+	__asm__ volatile("cpuid"
+			 : "=a"(*a), "=b"(*b), "=c"(*c), "=d"(*d)
+			 : "a"(leaf), "c"(subleaf));
+}
+
+static inline void cpuid(uint32_t leaf, uint32_t *a, uint32_t *b,
+			 uint32_t *c, uint32_t *d)
+{
+	cpuid_count(leaf, 0, a, b, c, d);
+}
+
+/*
+ * 1 GiB pages are an *optional* feature — unlike 2 MiB pages, which every
+ * x86-64 part has.  Every modern CPU reports it, but the direct map has to
+ * ask rather than assume: discovering its absence by triple-fault on an old
+ * machine is not a diagnosis.
+ *
+ * The leaf itself is optional too, so check the highest extended leaf the
+ * CPU implements before reading it.
+ */
+static inline int cpu_has_1gb_pages(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0x80000000, &a, &b, &c, &d);
+	if (a < 0x80000001)
+		return 0;
+
+	cpuid(0x80000001, &a, &b, &c, &d);
+	return (d & (1U << 26)) != 0;		/* PDPE1GB */
+}
+
+/* Fills a 13-byte buffer with the NUL-terminated vendor string. */
+static inline void cpu_vendor(char *out13)
+{
+	uint32_t a, b, c, d;
+	uint32_t words[3];
+
+	cpuid(0, &a, &b, &c, &d);
+	words[0] = b;				/* the order is ebx, edx, ecx */
+	words[1] = d;
+	words[2] = c;
+
+	for (int i = 0; i < 3; i++)
+		for (int j = 0; j < 4; j++)
+			out13[i * 4 + j] = (char)(words[i] >> (j * 8));
+	out13[12] = '\0';
+}
+
+#endif	/* _X86_64_CPU_REGS_H_ */

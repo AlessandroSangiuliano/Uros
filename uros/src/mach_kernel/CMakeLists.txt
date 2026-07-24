@@ -34,6 +34,7 @@ set(CMAKE_ASM_COMPILER_WORKS 1)
 # untangled later:
 #   boot/     #406 long-mode entry, first page tables, descriptor tables
 #   pmap/     #407 four-level paging
+#   cpu/      shared: control registers, MSRs, CPUID (no single owner)
 #   thread/   #408 context switch and thread state
 #   trap/     #409 trap and interrupt entry
 #   sync/     #410 atomics, locks, barriers

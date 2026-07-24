@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 
+#include <cpu/regs.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
 
@@ -167,6 +168,25 @@ static void phys_selftest(void)
 	      : " via identity, DISAGREE\r\n");
 }
 
+/*
+ * What the machine says about itself.  The page size the direct map can use
+ * is a question for the CPU, not an assumption — and long mode had better
+ * be reporting itself active, since we are executing in it.
+ */
+static void cpu_selftest(void)
+{
+	char vendor[13];
+	uint64_t efer = rdmsr(MSR_EFER);
+
+	cpu_vendor(vendor);
+	kputs("UrMach x86-64: cpu ");
+	kputs(vendor);
+	kputs(cpu_has_1gb_pages() ? ", 1 GiB pages available"
+				  : ", no 1 GiB pages (2 MiB fallback)");
+	kputs(efer & EFER_LMA ? ", long mode active\r\n"
+			      : ", EFER.LMA CLEAR?!\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -255,6 +275,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	pte_selftest();
 	layout_selftest();
 	phys_selftest();
+	cpu_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
