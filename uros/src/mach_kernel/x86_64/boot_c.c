@@ -23,6 +23,8 @@
 
 #include <stdint.h>
 
+#include "pte.h"
+
 #define COM1 0x3F8
 
 /* ------------------------------------------------------------------ */
@@ -60,6 +62,53 @@ static void kputhex64(uint64_t v)
 		uint8_t nib = (v >> i) & 0xF;
 		kputc(nib < 10 ? '0' + nib : 'a' + (nib - 10));
 	}
+}
+
+static void kputdec(uint64_t v)
+{
+	char buf[20];
+	int i = 0;
+
+	if (v == 0) {
+		kputc('0');
+		return;
+	}
+	while (v > 0) {
+		buf[i++] = '0' + (v % 10);
+		v /= 10;
+	}
+	while (i > 0)
+		kputc(buf[--i]);
+}
+
+/* ------------------------------------------------------------------ */
+/*  pte.h against reality                                               */
+/* ------------------------------------------------------------------ */
+/*
+ * Decode the higher-half base with the new index macros and check the
+ * answer against the tables we are demonstrably running on: boot.S built
+ * this window by hand as PML4[511] -> PDPT[510] -> PD[0].  If the macros
+ * agree, they describe the live hardware, not just an intention.
+ */
+static void pte_selftest(void)
+{
+	const uint64_t va = 0xffffffff80000000ULL;
+	uint64_t l4 = pml4_index(va), l3 = pdpt_index(va);
+	uint64_t l2 = pd_index(va),   l1 = pt_index(va);
+
+	kputs("UrMach x86-64: pte decode ");
+	kputhex64(va);
+	kputs(" -> pml4[");
+	kputdec(l4);
+	kputs("] pdpt[");
+	kputdec(l3);
+	kputs("] pd[");
+	kputdec(l2);
+	kputs("] pt[");
+	kputdec(l1);
+	kputs(l4 == 511 && l3 == 510 && l2 == 0 && l1 == 0
+	      ? "] agrees with the live boot tables\r\n"
+	      : "] MISMATCH against the live boot tables\r\n");
 }
 
 /* ------------------------------------------------------------------ */
@@ -146,6 +195,8 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputs("UrMach x86-64: multiboot magic = ");
 	kputhex64(magic);
 	kputs("\r\n");
+
+	pte_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
