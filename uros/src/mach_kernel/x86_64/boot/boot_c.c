@@ -23,6 +23,7 @@
 
 #include <stdint.h>
 
+#include <pmap/layout.h>
 #include <pmap/pte.h>
 
 #define COM1 0x3F8
@@ -111,6 +112,27 @@ static void pte_selftest(void)
 	      : "] MISMATCH against the live boot tables\r\n");
 }
 
+/*
+ * layout.h pins its constants with _Static_assert at build time, so the
+ * only thing left to establish here is the live fact: that the address we
+ * are actually executing from falls inside the region the layout calls the
+ * kernel image, and is canonical.
+ */
+static void layout_selftest(void)
+{
+	uint64_t here = (uint64_t)(uintptr_t)&layout_selftest;
+
+	kputs("UrMach x86-64: layout image base ");
+	kputhex64(KERNEL_IMAGE_BASE);
+	kputs(", direct map ");
+	kputhex64(DIRECT_MAP_BASE);
+	kputs("\r\nUrMach x86-64: running from ");
+	kputhex64(here);
+	kputs(va_in_kernel_image(here) && va_is_canonical(here)
+	      ? ", inside the image region and canonical\r\n"
+	      : ", OUTSIDE the image region\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -197,6 +219,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputs("\r\n");
 
 	pte_selftest();
+	layout_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;
