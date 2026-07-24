@@ -469,6 +469,44 @@ static void pmap_selftest(void)
 	kputs(prot_ok ? "all correct\r\n" : "WRONG\r\n");
 }
 
+/*
+ * A mapping's whole life through the pmap_t interface rather than the naked
+ * primitives: enter it read/write and confirm extract finds the frame and a
+ * write lands; reprotect read-only and confirm the write bit clears; remove
+ * it and confirm extract now finds nothing.  This is the shape the MI side
+ * will call.
+ */
+static void pmap_verbs_selftest(void)
+{
+	pmap_t k = pmap_kernel();
+	uint64_t va = KERNEL_HEAP_BASE + 0x8000;
+	uint64_t frame = boot_frame_alloc();
+	volatile uint32_t *page = (volatile uint32_t *)(uintptr_t)va;
+	pt_entry_t *e;
+	uint64_t got;
+	int rc;
+
+	rc = pmap_enter(k, va, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+	*page = 0xbeef;
+	got = pmap_extract(k, va);
+	kputs("UrMach x86-64: pmap_enter RW, extract -> ");
+	kputhex64(got);
+	kputs(rc == PMAP_MAP_OK && got == frame && *page == 0xbeef
+	      ? ", frame matches, writable\r\n" : ", WRONG\r\n");
+
+	pmap_protect(k, va, va + PAGE_SIZE_4K, VM_PROT_READ);
+	e = pmap_walk(k->root_pa, va, 0);
+	kputs("UrMach x86-64: pmap_protect READ -> ");
+	kputs(e && !(*e & INTEL_PTE_WRITE) ? "write bit cleared\r\n"
+					   : "WRONG\r\n");
+
+	pmap_remove(k, va, va + PAGE_SIZE_4K);
+	got = pmap_extract(k, va);
+	kputs("UrMach x86-64: pmap_remove -> extract ");
+	kputhex64(got);
+	kputs(got == 0 ? ", gone\r\n" : ", STILL MAPPED?!\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -565,6 +603,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	protect_unmap_selftest();
 	split_selftest();
 	pmap_selftest();
+	pmap_verbs_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;

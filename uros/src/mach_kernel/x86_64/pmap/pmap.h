@@ -85,4 +85,25 @@ static inline uint64_t pmap_flags_for_prot(vm_prot_t prot)
 	return flags;
 }
 
+/*
+ * The pmap verbs, shaped like vm/pmap.h.  Addresses are uint64_t here; the
+ * MI vm_offset_t is the same width on x86-64, so the signatures line up when
+ * the tree brings the real types.  Ranges are half-open [s, e) and expected
+ * page-aligned, as the MI callers pass them.
+ */
+
+/* Enter (or, for VM_PROT_NONE, drop) the mapping va -> pa with `prot`. */
+int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
+	       int wired);
+
+/* Physical address va maps to, or 0 if unmapped — the MI conflation, where
+ * physical zero and "no mapping" share a return, is kept on purpose. */
+uint64_t pmap_extract(pmap_t pmap, uint64_t va);
+
+/* Reprotect a range; VM_PROT_NONE removes, as the MI interface specifies. */
+void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot);
+
+/* Remove every mapping in a range. */
+void pmap_remove(pmap_t pmap, uint64_t s, uint64_t e);
+
 #endif	/* _X86_64_PMAP_PMAP_H_ */
