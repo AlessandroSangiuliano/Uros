@@ -38,7 +38,17 @@ endif()
 
 # Per ora costruiamo solo i tool host necessari (mig/migcom, librerie base).
 
-if(OSFMK_BUILD_TOOLS)
+# #406: the userland — host tools, libraries, servers, tests, commands — is
+# i386-only until the x86-64 port carries it across (its own contracts:
+# #414 musl, #421-#431).  An x86-64 build is the kernel alone for now, so
+# the kernel's own CMakeLists can build its boot stub (#406) against an
+# otherwise-empty tree.  Guard everything that is not the kernel on i386.
+set(UROS_USERLAND_ARCH_OK FALSE)
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  set(UROS_USERLAND_ARCH_OK TRUE)
+endif()
+
+if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib)
   add_subdirectory(mach_services/lib)
   add_subdirectory(file_systems)
@@ -46,9 +56,16 @@ if(OSFMK_BUILD_TOOLS)
   add_subdirectory(tools/mkmanifest)
 endif()
 
-# Kernel build (requires migcom to be built first)
+# Kernel build (requires migcom to be built first on i386; the x86-64 boot
+# stub needs no host tools — it is pure assembly).
 if(OSFMK_BUILD_KERNEL)
   add_subdirectory(mach_kernel)
+endif()
+
+# Everything below is userland; skip it wholesale on a non-i386 target.
+if(NOT UROS_USERLAND_ARCH_OK)
+  message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")
+  return()
 endif()
 
 # Build bootstrap server

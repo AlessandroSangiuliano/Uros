@@ -14,6 +14,38 @@ cmake_minimum_required(VERSION 3.21)
 set(CMAKE_C_COMPILER_WORKS 1)
 set(CMAKE_ASM_COMPILER_WORKS 1)
 
+# ------------------------------------------------------------------ #406
+# x86-64 kernel: build the machine-dependent boot stub and stop.
+#
+# The i386 machinery below assembles the whole SMP/pmap/trap kernel, none
+# of which compiles for x86-64 until the MD contracts (#407-#411) land.
+# This branch builds contract 1/6 — the boot entry in x86_64/ — as the
+# `mach_kernel` output, and returns before the i386 code runs.  The stub
+# grows into the real kernel as the other contracts fill x86_64/ in.
+#
+# The entry is 32-bit (elf32): the bootloader hands off in protected mode,
+# so this object is assembled -m32 regardless of the x86-64 target; the
+# -m64 half begins only after the long-mode transition (a later increment).
+if(UROS_TARGET_ARCH STREQUAL "x86_64")
+  set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot.ld)
+
+  add_executable(mach_kernel ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot.S)
+  target_compile_options(mach_kernel PRIVATE
+    $<$<COMPILE_LANGUAGE:ASM>:-m32 -ffreestanding -nostdinc>)
+  target_link_options(mach_kernel PRIVATE
+    -m32 -static -nostdlib -nostartfiles -no-pie
+    -T ${X86_64_BOOT_LD}
+    -Wl,--build-id=none)
+  set_target_properties(mach_kernel PROPERTIES
+    LINK_DEPENDS ${X86_64_BOOT_LD}
+    OUTPUT_NAME "mach_kernel"
+    SUFFIX ""
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/uros/boot")
+
+  message(STATUS "x86-64 kernel: boot stub (#406) — MD contracts #407-#411 pending")
+  return()
+endif()
+
 # =============================================================================
 # Build Type Configuration
 # =============================================================================
