@@ -27,6 +27,7 @@
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
 #include <pmap/layout.h>
+#include <pmap/map.h>
 #include <pmap/pte.h>
 #include <pmap/walk.h>
 
@@ -305,6 +306,62 @@ static void bootmem_selftest(void)
 	      : "BAD frames\r\n");
 }
 
+/*
+ * Map a page where the walk just proved nothing was mapped, then establish
+ * that it is really there — by writing through the new address and finding
+ * the value on the physical frame via the direct map, and by having the walk
+ * resolve the address back to that same frame.
+ *
+ * This is also the first 4 KiB leaf in the port: every mapping so far has
+ * been a large page, so the PT level and the walk's bottom case have had no
+ * coverage until now.
+ *
+ * Then the refusal: asking to map inside the direct map, which a 1 GiB or
+ * 2 MiB page already covers, must be reported as blocked rather than
+ * silently splitting that page.
+ */
+static void map_selftest(void)
+{
+	uint64_t root = read_cr3() & INTEL_PTE_PFN;
+	uint64_t va = KERNEL_HEAP_BASE;
+	uint64_t frame = boot_frame_alloc();
+	uint64_t got = 0, size = 0;
+	volatile uint32_t *page;
+	uint32_t via_direct;
+	int rc, resolved;
+
+	rc = pmap_map_page(root, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX);
+
+	kputs("UrMach x86-64: map ");
+	kputhex64(va);
+	kputs(" -> frame ");
+	kputhex64(frame);
+	kputs(rc == PMAP_MAP_OK ? ", mapped\r\n" : ", FAILED\r\n");
+
+	page = (volatile uint32_t *)(uintptr_t)va;
+	*page = 0x0dd1e5;
+
+	via_direct = *(const volatile uint32_t *)(uintptr_t)phys_to_direct(frame);
+	resolved = pmap_resolve(root, va, &got, &size);
+
+	kputs("UrMach x86-64: wrote through the new page, frame reads ");
+	kputhex64(via_direct);
+	kputs(via_direct == 0x0dd1e5 ? ", agrees\r\n" : ", DISAGREES\r\n");
+
+	kputs("UrMach x86-64: walk now resolves it to ");
+	kputhex64(got);
+	kputs(" in ");
+	kputdec(size / 1024);
+	kputs(" KiB page, ");
+	kputs(resolved && got == frame && size == PAGE_SIZE_4K
+	      ? "as mapped\r\n" : "WRONG\r\n");
+
+	rc = pmap_map_page(root, DIRECT_MAP_BASE, frame, INTEL_PTE_WRITE);
+	kputs("UrMach x86-64: map over a large page ");
+	kputs(rc == PMAP_MAP_BLOCKED ? "correctly refused\r\n"
+				     : "NOT refused?!\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -397,6 +454,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	direct_map_selftest();
 	walk_selftest();
 	bootmem_selftest();
+	map_selftest();
 
 	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
 	gdt[0] = 0;

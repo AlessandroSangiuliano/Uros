@@ -50,6 +50,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/direct.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/map.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/walk.c)
   target_include_directories(mach_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)

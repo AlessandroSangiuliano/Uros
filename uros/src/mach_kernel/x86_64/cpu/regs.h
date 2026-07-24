@@ -64,6 +64,20 @@ static inline void write_cr3(uint64_t v)
 	__asm__ volatile("mov %0, %%cr3" : : "r"(v) : "memory");
 }
 
+/*
+ * Drop the TLB entry for one address — the surgical alternative to
+ * reloading CR3.  Required whenever an existing entry changes; a mapping
+ * that was not present before has nothing cached to drop, but doing it
+ * unconditionally costs one instruction and removes a subtle case.
+ *
+ * This handles the local CPU only.  Making a change visible to the others
+ * is a shootdown, which is its own problem later in this contract.
+ */
+static inline void invlpg(uint64_t va)
+{
+	__asm__ volatile("invlpg (%0)" : : "r"(va) : "memory");
+}
+
 static inline uint64_t read_cr4(void)
 {
 	uint64_t v;
