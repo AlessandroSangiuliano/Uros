@@ -704,9 +704,142 @@ seqlock + radix  capability table                    (lock-free name→entry loo
 
 ---
 
-## 11. Future roadmap
+## 11. x86-64 address-space layout (v0.3.0)
 
-### 11.1 x86-64 migration (v0.3.0 theme)
+The port's foundational design decision, settled in #405 before the boot (#406)
+and pmap (#407) contracts encode it. Both read these constants; deciding them
+once, here, is what keeps the two from disagreeing.
+
+### 11.1 Two halves
+
+i386 is a 3G/1G split in a *shared* 32-bit space: user `0 – 0xc0000000`, kernel
+`0xc0000000 – 0xffffffff`. x86-64 replaces that with two canonical halves either
+side of the non-canonical hole:
+
+```
+0x0000000000000000  ┬ user space          (128 TiB)
+0x00007fffffffffff  ┘
+        ──────────── non-canonical hole ────────────
+0xffff800000000000  ┬ kernel space        (128 TiB)
+0xffffffffffffffff  ┘
+```
+
+The kernel stays mapped into the top half of *every* address space, exactly as
+on i386 — so a syscall or trap never reloads `cr3` and never flushes the TLB on
+kernel entry. The hole between the halves does for free what a guard region does
+by hand: a stray pointer that walks off the end of user space lands in
+non-canonical territory and faults.
+
+### 11.2 Kernel-half region map
+
+A **minimal** set of regions — only what a contract genuinely needs — each at a
+**fixed, widely-spaced base with an implicit guard gap** (the regions sit 16–32
+TiB apart while using far less, so the unmapped span between them is enormous).
+We do **not** carry a Linux-style `vmalloc` or loadable-module area: Uros modules
+are userspace `.so` files, not kernel objects. The bases below are shown as
+4-level absolute values but are defined symbolically as offsets from a single
+`KERNEL_HALF_BASE` (see §11.3).
+
+| base | region | contents | protection |
+|---|---|---|---|
+| `0xffff800000000000` | **direct map** | all physical RAM at a fixed offset, 1 GiB huge pages | NX; global iff KPTI off |
+| `0xffffc00000000000` | **kernel heap** | dynamic kernel allocations | NX by default |
+| `0xffffe00000000000` | **per-CPU** | `%gs`-based per-CPU areas | kernel-only |
+| `0xfffff00000000000` | **CPU entry area** | per-CPU: entry `.text`, IST/trampoline stacks, GDT, TSS | the *only* kernel region mapped in the user table under KPTI |
+| `0xffffffff80000000` | **kernel image** | `.text` / `.rodata` / `.data` / `.bss` | W^X per section |
+
+The kernel image sits in the top 2 GiB because `-mcmodel=kernel` requires it:
+only there do RIP-relative references and 32-bit sign-extended immediates reach
+the whole image, which keeps the code compact. This is a codegen constraint, not
+a preference.
+
+### 11.3 Paging: four levels, five-ready
+
+Four-level paging (PML4 → PDPT → PD → PT), 48-bit canonical, 128 TiB per half.
+Universal on every x86-64 part. Five-level (PML5, 57-bit, 128 PiB) needs Ice
+Lake-class hardware and buys space we have no use for, so it is deferred — but
+not designed out.
+
+The catch that makes "five-ready" a real promise rather than a slogan: the
+canonical higher-half base **moves** between four and five levels (from the
+bit-47 sign extension at `0xffff800000000000` to the bit-56 extension at
+`0xff00000000000000`). So the region bases in §11.2 are not hardcoded hex; they
+are offsets from `KERNEL_HALF_BASE`, and adding a paging level is changing that
+one anchor plus the walk depth — the whole map relocates consistently, no
+region-by-region repaint.
+
+### 11.4 The direct map is the performance
+
+The single largest win of the port lives here. With all of physical memory
+mapped at a fixed offset in 1 GiB huge pages:
+
+- reaching any physical page is an addition, not a temporary mapping — the i386
+  `HIGHMEM` machinery (#70), the pmap self-map (#333) and the user-PT alias
+  (#334) lose their reason to exist and become i386-only or are deleted;
+- a handful of TLB entries cover all of RAM instead of one per 4 KiB page, so
+  the kernel touching physical memory stops thrashing the TLB.
+
+This is why the roadmap has always said x86-64 is the real performance jump, not
+`-march`.
+
+### 11.5 Protection posture
+
+- **NX**: the direct map and every data region are non-executable — an attacker
+  who corrupts a physical page cannot then execute it as code.
+- **W^X**: the kernel image is mapped per section — `.text` is RX, never
+  writable; `.rodata` is read-only; only `.data`/`.bss` are RW.
+- **SMEP/SMAP** (CR4): the kernel cannot inadvertently execute or read user
+  pages. Orthogonal to the layout but part of the same posture.
+- **KASLR** is deferred, deliberately: randomizing a layout that does not boot
+  yet is premature. But the image is built position-independent and the region
+  bases are symbolic (§11.3), so KASLR is a later drop-in, not a rewrite — the
+  same discipline as five-level paging.
+
+### 11.6 KPTI, chosen at runtime per CPU
+
+The shared higher-half design that buys the performance above is exactly the
+condition Meltdown (rogue data-cache load) exploits: userspace speculating
+against kernel memory that is mapped in its own page table. The mitigation is
+**KPTI** — user mode runs on a page table where the kernel half is unmapped save
+the CPU entry area — and Uros selects it **at runtime from what the silicon
+reports**, so one binary is correct on vulnerable and immune parts alike:
+
+1. CPUID vendor `AuthenticAMD` → immune by construction → KPTI **off**.
+2. else if `IA32_ARCH_CAPABILITIES` is present (`CPUID.(7,0):EDX[29]`) and its
+   `RDCL_NO` bit (bit 0) is set → the part declares itself not vulnerable to the
+   rogue data-cache load → KPTI **off**.
+3. otherwise → assume vulnerable → KPTI **on**.
+
+On the project's own hardware this yields KPTI off on the i9-13900K (RDCL_NO
+set) and the Ryzen (AMD), on for the Kaby Lake i7 (pre-fix) — and pre-2018 parts
+will be in the field for years, so the capability is not optional.
+
+For one binary to do both, the layout is built KPTI-able from the start:
+
+- **The CPU entry area (§11.2) is its own region** precisely so it can be the
+  one kernel mapping left in the user page table. It holds the entry `.text`
+  that switches `cr3`, the IST and trampoline stacks, the GDT and TSS.
+- **Page tables become a pair** when KPTI is on: a kernel PGD and a user PGD (the
+  latter maps only user space plus the entry area). Entry and exit swap `cr3`.
+- **This path depends on PCID (#412).** Without it, every `cr3` swap on kernel
+  entry/exit flushes the TLB and KPTI-on is punishingly slow; with it, kernel
+  and user carry distinct ASIDs and the swap flushes nothing. The KPTI-on path
+  is therefore gated on #412 for its performance, and #412 is where the two meet.
+- **Global pages are conditional**: kernel regions are marked global only when
+  KPTI is off. A global kernel page cannot live in a Meltdown-safe user table,
+  and the runtime choice resolves the tension by construction.
+
+None of this is transliterated from another kernel: the MSR and CPUID bits are
+Intel's architectural contract, and separating the entry area is geometry the
+problem forces. The regions, their bases, and the symbolic anchoring are ours.
+
+---
+
+## 12. Future roadmap
+
+### 12.1 x86-64 migration (v0.3.0 theme)
+
+The address-space layout this migration builds on is specified in chapter 11.
 
 - **PCID**: context switches without TLB flush — re-enables direct thread
   switch (the measured i386 loss behind `-D`)
@@ -717,13 +850,13 @@ seqlock + radix  capability table                    (lock-free name→entry loo
 - **MSI/MSI-X**: direct interrupt routing to driver tasks
 - **Long mode pmap**: 4-level page tables, larger address space
 
-### 11.2 Networking
+### 12.2 Networking
 
 - `net_server` with modular drivers (e1000.so, virtio_net.so, ...)
 - TCP/IP stack as userspace server or library
 - Same architecture as block_device_server: HAL notifies, server loads modules
 
-### 11.3 GPU and display
+### 12.3 GPU and display
 
 - `gpu_server` for framebuffer, 2D acceleration
 - Command buffer submission via FLIPC v2 channels
@@ -731,7 +864,7 @@ seqlock + radix  capability table                    (lock-free name→entry loo
 - fbcons→gpu_server console handoff (#369): userspace console on pure-UEFI
   machines
 
-### 11.4 USB
+### 12.4 USB
 
 - `usb_server` managing host controllers (UHCI, OHCI, EHCI, xHCI) (#353)
 - Class drivers as modules: storage, HID, audio, ...
@@ -739,7 +872,7 @@ seqlock + radix  capability table                    (lock-free name→entry loo
 - Unlocks input on pure-UEFI machines (with 11.3, ends their
   headless/bench-only perimeter)
 
-### 11.5 SMP follow-ups
+### 12.5 SMP follow-ups
 
 Core SMP shipped in v0.2.0 (chapter 10). Remaining threads:
 
