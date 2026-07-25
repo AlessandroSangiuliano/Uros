@@ -27,6 +27,7 @@
 #include <cpu/acpi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
+#include <cpu/pic.h>
 #include <cpu/smp.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
@@ -1411,6 +1412,93 @@ static void external_vectors_selftest(void)
 }
 
 /*
+ * The same vector again, raised by the interrupt controller instead of by an
+ * instruction.
+ *
+ * A software interrupt proves the gate; it proves nothing about the hardware
+ * that will actually deliver a message from another processor, because it
+ * never goes near it.  A self-interrupt takes the whole of that path — the
+ * command register, the delivery logic, the priority arbitration, the
+ * acknowledgement — with the one part that could independently be broken,
+ * a second processor, left out.
+ *
+ * Three of them rather than one, and that is the part worth explaining. The
+ * APIC holds a vector's priority level busy from delivery until the end-of-
+ * interrupt is written, and refuses anything of equal priority while it
+ * does. So a handler that forgot to acknowledge would take the first
+ * interrupt and no others — the count would stop at one, having looked
+ * perfectly successful. Asking for three is how the acknowledgement gets
+ * tested rather than assumed.
+ */
+static volatile unsigned self_ipi_hits;
+
+static void self_ipi_handler(struct trap_frame *frame)
+{
+	(void)frame;
+	self_ipi_hits++;
+	lapic_eoi();
+}
+
+/*
+ * The one the APIC raises on its own initiative, when a line it had decided
+ * to report dropped before it got round to reporting it.  Nothing happened,
+ * so there is nothing to do — and deliberately no acknowledgement: the APIC
+ * never marked the level busy, so telling it the interrupt is finished would
+ * be answering for one that was never started.
+ */
+static void spurious_handler(struct trap_frame *frame)
+{
+	(void)frame;
+}
+
+static void self_ipi_selftest(void)
+{
+	unsigned delivered = 0;
+
+	trap_set_handler(LAPIC_SPURIOUS_VECTOR, spurious_handler);
+	trap_set_handler(T_PROBE_VECTOR, self_ipi_handler);
+
+	/*
+	 * The legacy controller first, and only then interrupts. It is still
+	 * pointing where the firmware left it, which is on top of the
+	 * exception vectors — enabling interrupts before silencing it invites
+	 * the firmware's timer to arrive as a double fault.
+	 */
+	pic_disable();
+	lapic_enable();
+	interrupts_enable();
+
+	for (unsigned round = 0; round < 3; round++) {
+		unsigned before = self_ipi_hits;
+		uint64_t spins;
+
+		lapic_send_self(T_PROBE_VECTOR);
+
+		/*
+		 * Bounded, because the failure this is looking for is one that
+		 * never arrives — and waiting forever for it would replace a
+		 * report with a hang.
+		 */
+		for (spins = 0; spins < 100000000ULL; spins++) {
+			if (self_ipi_hits != before)
+				break;
+			cpu_pause();
+		}
+
+		if (self_ipi_hits == before + 1)
+			delivered++;
+	}
+
+	kputs("UrMach x86-64: interrupts on, sent 3 to myself, ");
+	kputdec(delivered);
+	kputs(delivered == 3
+	      ? " arrived — delivery and acknowledgement both work\r\n"
+	      : " arrived — WRONG\r\n");
+
+	trap_set_handler(T_PROBE_VECTOR, 0);
+}
+
+/*
  * The proof that the interrupt stack table earns its place.
  *
  * Point the stack pointer at unmapped memory and push.  The push faults,
@@ -1511,6 +1599,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	reclaim_selftest();
 	percpu_selftest();
 	external_vectors_selftest();
+	self_ipi_selftest();
 	{
 		unsigned asked = acpi_usable_cpu_count();
 		unsigned up = smp_start_others();

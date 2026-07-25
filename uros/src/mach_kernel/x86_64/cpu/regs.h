@@ -108,6 +108,36 @@ static inline void cpu_pause(void)
 	__asm__ volatile("pause" ::: "memory");
 }
 
+/*
+ * Whether this processor will take an interrupt, and the two ways to change
+ * the answer.
+ *
+ * The memory clobbers are not decoration.  Enabling interrupts is a point
+ * after which a handler may run and observe anything this code has written,
+ * and disabling them is a point before which it must not — so neither may
+ * have loads or stores moved across it by the compiler.  The processor's own
+ * ordering is a separate question, and one x86 mostly answers for us.
+ */
+static inline void interrupts_enable(void)
+{
+	__asm__ volatile("sti" ::: "memory");
+}
+
+static inline void interrupts_disable(void)
+{
+	__asm__ volatile("cli" ::: "memory");
+}
+
+#define RFLAGS_IF	(1UL << 9)
+
+static inline int interrupts_enabled(void)
+{
+	uint64_t flags;
+
+	__asm__ volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+	return (flags & RFLAGS_IF) != 0;
+}
+
 static inline uint64_t read_cr4(void)
 {
 	uint64_t v;
