@@ -71,6 +71,27 @@ isr_\vec:
 	ISR_NOERR 31
 
 /*
+ * And the two hundred and twenty-four above them, which are ours to assign.
+ *
+ * None pushes an error code — that is a property of the exceptions, and an
+ * external interrupt never has one — so they are all of the first kind, and
+ * writing them out by hand would be two hundred and twenty-four chances to
+ * type the wrong number in the one field that distinguishes them.
+ *
+ * .altmacro is what makes `isr_\vec` become `isr_240` rather than the
+ * literal text: the % below evaluates the counter instead of passing its
+ * name.  Turned off again immediately, because it also changes how strings
+ * are quoted for everything that follows.
+ */
+	.altmacro
+	vec = 32
+	.rept 224
+	ISR_NOERR %vec
+	vec = vec + 1
+	.endr
+	.noaltmacro
+
+/*
  * The common path.  Registers are pushed in reverse of the order they are
  * declared in struct trap_frame, because a push moves down: whatever goes
  * last ends up at the lowest address, which is the first field.
@@ -207,8 +228,13 @@ trap_probe_gp:
 
 /*
  * The stub addresses, in vector order, so trap_init() can install them
- * without needing thirty-two declarations of things that differ only by a
- * number.
+ * without needing two hundred and fifty-six declarations of things that
+ * differ only by a number.
+ *
+ * The first thirty-two are written out because they are the ones worth
+ * reading against the error-code table above; the rest are generated the
+ * same way they were defined, from the same counter, so the two cannot
+ * disagree about how many there are.
  */
 	.section .rodata
 	.align	8
@@ -218,3 +244,15 @@ isr_table:
 	.quad	isr_8,  isr_9,  isr_10, isr_11, isr_12, isr_13, isr_14, isr_15
 	.quad	isr_16, isr_17, isr_18, isr_19, isr_20, isr_21, isr_22, isr_23
 	.quad	isr_24, isr_25, isr_26, isr_27, isr_28, isr_29, isr_30, isr_31
+
+	.altmacro
+	.macro ISR_ENTRY vec
+	.quad	isr_\vec
+	.endm
+
+	vec = 32
+	.rept 224
+	ISR_ENTRY %vec
+	vec = vec + 1
+	.endr
+	.noaltmacro

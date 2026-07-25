@@ -43,6 +43,39 @@
 #define T_VECTORS		32	/* the architecture reserves 0..31 */
 
 /*
+ * And the rest of the table, which the architecture leaves to us.
+ *
+ * Nothing has arrived through one of these yet — interrupts have been off
+ * since the first instruction — but they are where everything that is not a
+ * fault comes in: device interrupts, and before those, the messages one
+ * processor sends another.  A processor cannot be interrupted at a vector
+ * that has no gate, so the table has to reach this far before any of it can
+ * be tried.
+ *
+ * The assignments below are the whole plan for the space:
+ *
+ *   0x00..0x1F  the architectural exceptions
+ *   0x20..0x2F  the legacy interrupt requests, once they are remapped (#409)
+ *   0xF0..0xFE  processor-to-processor messages
+ *   0xFF        the local APIC's spurious vector
+ *
+ * The high end for the messages on purpose: the interrupt controller
+ * prioritises by vector number, so a message that another processor is
+ * waiting on outranks a device that is not.
+ */
+#define IDT_VECTORS		256
+#define T_EXTERNAL_FIRST	T_VECTORS
+
+/*
+ * One vector reserved for exercising the entry path by hand.  Two hundred
+ * and twenty-four stubs were written by a macro and none of them has ever
+ * run; a software interrupt through one is the cheapest way to find out
+ * whether the macro was right before an asynchronous interrupt arrives and
+ * the answer is a reset.
+ */
+#define T_PROBE_VECTOR		0xE0
+
+/*
  * The page-fault error code, which says what was attempted rather than what
  * is wrong — the distinction that separates "not mapped" from "mapped and
  * refused", and so a missing page from a protection violation.
@@ -121,6 +154,21 @@ void trap_init(void);
 
 /* Entry from the assembly stubs. */
 void trap_dispatch(struct trap_frame *frame);
+
+/*
+ * Claim one of the vectors above T_EXTERNAL_FIRST.
+ *
+ * Only those: an exception vector already means something the kernel has to
+ * decide about, and letting it be overwritten would turn a diagnosis into
+ * whatever the last caller installed.
+ *
+ * The table is written once, by the boot processor, before any processor is
+ * in a position to take an interrupt — so it is shared without a lock and
+ * must stay that way, which is what the check in trap_set_handler() is for.
+ */
+typedef void (*trap_handler_t)(struct trap_frame *frame);
+
+void trap_set_handler(unsigned vector, trap_handler_t handler);
 
 /*
  * Arrange for one expected fault to be survived rather than reported and

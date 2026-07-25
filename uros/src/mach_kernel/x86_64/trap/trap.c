@@ -41,10 +41,25 @@ struct idt_ptr {
 
 #define KERNEL_CS		0x08
 
-static struct idt_gate idt[T_VECTORS];
+static struct idt_gate idt[IDT_VECTORS];
 
 /* Filled by trap/entry.S: one stub address per vector. */
-extern const uint64_t isr_table[T_VECTORS];
+extern const uint64_t isr_table[IDT_VECTORS];
+
+/*
+ * What claims each vector above the architectural ones.  Sparse by nature —
+ * most of the space is unassigned, and an interrupt arriving at one of those
+ * is a fact worth reporting rather than ignoring.
+ */
+static trap_handler_t ext_handler[IDT_VECTORS - T_EXTERNAL_FIRST];
+
+void trap_set_handler(unsigned vector, trap_handler_t handler)
+{
+	if (vector < T_EXTERNAL_FIRST || vector >= IDT_VECTORS)
+		panic("trap: only the vectors above the exceptions can be claimed");
+
+	ext_handler[vector - T_EXTERNAL_FIRST] = handler;
+}
 
 static void idt_set(unsigned vector, uint64_t handler, unsigned ist)
 {
@@ -95,7 +110,7 @@ void trap_init(void)
 	 * the machine down without a word — precisely the failure this is
 	 * here to end.
 	 */
-	for (unsigned v = 0; v < T_VECTORS; v++)
+	for (unsigned v = 0; v < IDT_VECTORS; v++)
 		idt_set(v, isr_table[v], vector_ist(v));
 
 	__asm__ volatile("lidt %0" : : "m"(p) : "memory");
@@ -149,7 +164,9 @@ static const char *trap_name(uint64_t vector)
 	case T_ALIGNMENT_CHECK:		return "alignment check";
 	case T_MACHINE_CHECK:		return "machine check";
 	case T_SIMD_ERROR:		return "SIMD floating-point error";
-	default:			return "reserved vector";
+	default:
+		return vector >= T_EXTERNAL_FIRST ? "unclaimed interrupt"
+						  : "reserved vector";
 	}
 }
 
@@ -274,6 +291,22 @@ const struct trap_record *trap_last(void)
 
 void trap_dispatch(struct trap_frame *frame)
 {
+	/*
+	 * An interrupt somebody asked for, before any of the fault machinery:
+	 * it is not a fault, it has no error code to report, and the expected-
+	 * trap arrangement below is about instructions that failed, which this
+	 * is not.
+	 */
+	if (frame->vector >= T_EXTERNAL_FIRST) {
+		trap_handler_t h = ext_handler[frame->vector - T_EXTERNAL_FIRST];
+
+		if (h != 0) {
+			h(frame);
+			return;
+		}
+		/* Nobody claimed it — fall through and say so. */
+	}
+
 	if (expect_armed && frame->vector == expect_vector) {
 		/*
 		 * Disarm first.  If resuming faults again the expectation is

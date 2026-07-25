@@ -1347,6 +1347,70 @@ static void trap_vectors_selftest(void)
 }
 
 /*
+ * The vectors above the exceptions, which were written by a macro and have
+ * never run.
+ *
+ * Two hundred and twenty-four stubs came out of one .rept, so they are
+ * either all right or all wrong in the same way — and the way they would be
+ * wrong is the number each pushes, which is the one thing the macro varies.
+ * A stub that pushes the wrong vector still returns cleanly; what it breaks
+ * is every decision made downstream about which interrupt this was.
+ *
+ * So the check is what the frame says, not that the machine survived.
+ *
+ * Both encodings, deliberately: a vector under 128 pushes as a byte and one
+ * above it as a full word, so they are different instructions of different
+ * lengths, and the alignment the table's arithmetic assumes has to hold for
+ * the longer one.
+ */
+#define PROBE_VECTOR_LOW	0x21	/* free until the legacy IRQs move here */
+
+#define STRINGIFY_(x)		#x
+#define STRINGIFY(x)		STRINGIFY_(x)
+
+static volatile unsigned probe_vector_hits;
+static volatile uint64_t probe_vector_seen;
+
+static void probe_vector_handler(struct trap_frame *frame)
+{
+	probe_vector_seen = frame->vector;
+	probe_vector_hits++;
+}
+
+static void external_vectors_selftest(void)
+{
+	unsigned hits_low, hits_high;
+	uint64_t seen_low, seen_high;
+
+	trap_set_handler(PROBE_VECTOR_LOW, probe_vector_handler);
+	trap_set_handler(T_PROBE_VECTOR, probe_vector_handler);
+
+	__asm__ volatile("int $" STRINGIFY(PROBE_VECTOR_LOW));
+	hits_low = probe_vector_hits;
+	seen_low = probe_vector_seen;
+
+	__asm__ volatile("int $" STRINGIFY(T_PROBE_VECTOR));
+	hits_high = probe_vector_hits;
+	seen_high = probe_vector_seen;
+
+	kputs("UrMach x86-64: raised vectors ");
+	kputhex64(PROBE_VECTOR_LOW);
+	kputs(" and ");
+	kputhex64(T_PROBE_VECTOR);
+	kputs(", handler saw ");
+	kputhex64(seen_low);
+	kputs(" then ");
+	kputhex64(seen_high);
+	kputs(hits_low == 1 && hits_high == 2
+	      && seen_low == PROBE_VECTOR_LOW && seen_high == T_PROBE_VECTOR
+	      ? " — every stub carries its own number\r\n"
+	      : " — WRONG\r\n");
+
+	trap_set_handler(PROBE_VECTOR_LOW, 0);
+	trap_set_handler(T_PROBE_VECTOR, 0);
+}
+
+/*
  * The proof that the interrupt stack table earns its place.
  *
  * Point the stack pointer at unmapped memory and push.  The push faults,
@@ -1446,6 +1510,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	atomic_selftest();
 	reclaim_selftest();
 	percpu_selftest();
+	external_vectors_selftest();
 	{
 		unsigned asked = acpi_usable_cpu_count();
 		unsigned up = smp_start_others();
