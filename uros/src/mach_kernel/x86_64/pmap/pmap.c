@@ -218,6 +218,107 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 	}
 }
 
+/* ------------------------------------------------------------------ */
+/*  Operations that start from a physical page                          */
+/* ------------------------------------------------------------------ */
+
+void pmap_page_protect(uint64_t pa, vm_prot_t prot)
+{
+	uint64_t flags;
+	pv_entry_t pv;
+
+	if (prot == VM_PROT_NONE) {
+		/*
+		 * Each removal rewrites the list — the head especially, whose
+		 * successor is copied up into it — so take the head afresh
+		 * every time rather than holding a pointer across the change.
+		 */
+		while ((pv = pv_head(pa)) != PV_ENTRY_NULL
+		       && pv->pmap != PMAP_NULL)
+			pmap_forget(pv->pmap, pv->va);
+		return;
+	}
+
+	flags = pmap_flags_for_prot(prot);
+
+	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
+	     pv = pv->next)
+		pmap_protect_page(pv->pmap->root_pa, pv->va, flags);
+}
+
+/*
+ * True if any mapping of the page carries the bits.  The hardware sets them
+ * in whichever entry it walked, so a page read through one mapping is
+ * referenced even though the others say nothing.
+ */
+static int pv_test_bits(uint64_t pa, uint64_t bits)
+{
+	pv_entry_t pv;
+
+	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
+	     pv = pv->next) {
+		pt_entry_t *e = pmap_walk(pv->pmap->root_pa, pv->va, 0);
+
+		if (e != PT_ENTRY_NULL && (*e & bits))
+			return 1;
+	}
+
+	return 0;
+}
+
+static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
+{
+	pv_entry_t pv;
+
+	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
+	     pv = pv->next) {
+		pt_entry_t *e = pmap_walk(pv->pmap->root_pa, pv->va, 0);
+
+		if (e == PT_ENTRY_NULL)
+			continue;
+
+		if (set)
+			*e |= bits;
+		else
+			*e &= ~bits;
+
+		/*
+		 * Dropping the TLB entry is not housekeeping here, it is the
+		 * point: the hardware only writes these bits during a page
+		 * walk, and a cached translation means no walk.  Clearing
+		 * accessed without a flush would leave it clear however often
+		 * the page is touched, and the pager would read that as a page
+		 * nobody wants.
+		 */
+		invlpg(pv->va);
+	}
+}
+
+int pmap_is_referenced(uint64_t pa)
+{
+	return pv_test_bits(pa, INTEL_PTE_REF);
+}
+
+void pmap_clear_reference(uint64_t pa)
+{
+	pv_change_bits(pa, INTEL_PTE_REF, 0);
+}
+
+int pmap_is_modified(uint64_t pa)
+{
+	return pv_test_bits(pa, INTEL_PTE_MOD);
+}
+
+void pmap_clear_modify(uint64_t pa)
+{
+	pv_change_bits(pa, INTEL_PTE_MOD, 0);
+}
+
+void pmap_set_modify(uint64_t pa)
+{
+	pv_change_bits(pa, INTEL_PTE_MOD, 1);
+}
+
 /*
  * Section bounds from the linker (boot.ld), page-aligned so each belongs to
  * exactly one protection.

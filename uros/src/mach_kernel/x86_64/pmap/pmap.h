@@ -137,6 +137,29 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot);
 void pmap_remove(pmap_t pmap, uint64_t s, uint64_t e);
 
 /*
+ * Restrict access to one physical page wherever it is mapped, in every
+ * address space at once.  VM_PROT_NONE removes the mappings outright.
+ *
+ * This is how copy-on-write is armed: taking write permission from every
+ * mapping of a shared page means the next writer, whoever it is, faults —
+ * and only then is a copy made.  It reaches mappings through the physical
+ * index, which is the whole reason that index exists.
+ */
+void pmap_page_protect(uint64_t pa, vm_prot_t prot);
+
+/*
+ * The reference and modify bits, which the hardware sets in a page-table
+ * entry when a page is read or written.  The pager asks about the page, not
+ * about one mapping of it, so these gather across every mapping: referenced
+ * or modified anywhere is referenced or modified.
+ */
+int  pmap_is_referenced(uint64_t pa);
+void pmap_clear_reference(uint64_t pa);
+int  pmap_is_modified(uint64_t pa);
+void pmap_clear_modify(uint64_t pa);
+void pmap_set_modify(uint64_t pa);
+
+/*
  * Apply W^X to the kernel image.  boot.S maps the whole image with one large
  * writable-and-executable page; this breaks it to 4 KiB and reprotects each
  * section to its own permission — .text execute-only-of-reads, .rodata

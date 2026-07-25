@@ -627,6 +627,82 @@ static void pv_selftest(uint32_t info)
 	pmap_destroy(u);
 }
 
+/*
+ * The operations that start from a physical page, which the index has just
+ * made possible.  One frame is mapped twice in the kernel and once in a
+ * second address space, so a change made by physical address has to reach
+ * all three.
+ *
+ * pmap_page_protect(READ) across them is exactly the copy-on-write arming
+ * step: after it, no mapping of the page can be written, so whichever holder
+ * writes next faults and a copy is made only then.
+ */
+static void phys_ops_selftest(void)
+{
+	pmap_t k = pmap_kernel();
+	pmap_t u = pmap_create(0);
+	uint64_t frame = boot_frame_alloc();
+	uint64_t kva1 = KERNEL_HEAP_BASE + 0x20000;
+	uint64_t kva2 = KERNEL_HEAP_BASE + 0x21000;
+	uint64_t uva = 0x0000000300000000ULL;
+	volatile uint32_t *p = (volatile uint32_t *)(uintptr_t)kva1;
+	pt_entry_t *e1, *e2, *e3;
+	int ref, mod;
+
+	pmap_enter(k, kva1, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+	pmap_enter(k, kva2, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+	pmap_enter(u, uva, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+
+	/* Clear first: the frame was just zeroed, which is itself a write. */
+	pmap_clear_reference(frame);
+	pmap_clear_modify(frame);
+	ref = pmap_is_referenced(frame);
+	mod = pmap_is_modified(frame);
+	kputs("UrMach x86-64: after clearing, referenced=");
+	kputdec(ref);
+	kputs(" modified=");
+	kputdec(mod);
+	kputs(ref == 0 && mod == 0 ? ", both clear\r\n" : ", NOT CLEAR\r\n");
+
+	(void)*p;				/* a read sets accessed */
+	ref = pmap_is_referenced(frame);
+	mod = pmap_is_modified(frame);
+	kputs("UrMach x86-64: after a read, referenced=");
+	kputdec(ref);
+	kputs(" modified=");
+	kputdec(mod);
+	kputs(ref == 1 && mod == 0 ? ", read seen, not a write\r\n"
+				   : ", WRONG\r\n");
+
+	*p = 0xf00d;				/* a write sets dirty */
+	kputs("UrMach x86-64: after a write, modified=");
+	kputdec(pmap_is_modified(frame));
+	kputs(pmap_is_modified(frame) == 1 ? ", write seen\r\n" : ", WRONG\r\n");
+
+	/* Arm copy-on-write: no mapping of this page may be written. */
+	pmap_page_protect(frame, VM_PROT_READ);
+	e1 = pmap_walk(k->root_pa, kva1, 0);
+	e2 = pmap_walk(k->root_pa, kva2, 0);
+	e3 = pmap_walk(u->root_pa, uva, 0);
+	kputs("UrMach x86-64: page_protect READ -> ");
+	kputs(e1 && e2 && e3
+	      && !(*e1 & INTEL_PTE_WRITE) && !(*e2 & INTEL_PTE_WRITE)
+	      && !(*e3 & INTEL_PTE_WRITE)
+	      && pte_to_pa(*e1) == frame && pte_to_pa(*e3) == frame
+	      ? "all three mappings read-only, frames kept\r\n"
+	      : "WRONG\r\n");
+
+	pmap_page_protect(frame, VM_PROT_NONE);
+	kputs("UrMach x86-64: page_protect NONE -> pv_count ");
+	kputdec(pv_count(frame));
+	kputs(pv_count(frame) == 0
+	      && pmap_extract(k, kva1) == 0 && pmap_extract(k, kva2) == 0
+	      && pmap_extract(u, uva) == 0
+	      ? ", every mapping gone\r\n" : ", STILL MAPPED\r\n");
+
+	pmap_destroy(u);
+}
+
 /* A mutable global — lands in .bss, the writable region. */
 static volatile uint32_t wx_data_probe;
 
@@ -842,6 +918,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	pmap_selftest();
 	pmap_verbs_selftest();
 	pv_selftest(info);
+	phys_ops_selftest();
 	wx_selftest();
 	user_pmap_selftest();
 
