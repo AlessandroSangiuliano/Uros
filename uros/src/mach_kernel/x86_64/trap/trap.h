@@ -72,6 +72,34 @@ struct trap_frame {
 	uint64_t ss;
 };
 
+/*
+ * Interrupt stack table slots, numbered as the gate field is: 1 to 7, with
+ * zero meaning "whatever stack was current".
+ *
+ * These three get their own stack because they are the ones most likely to
+ * fire when the current stack is the problem — a double fault often *is* a
+ * stack that cannot be pushed to, and an NMI can arrive in the middle of
+ * anything, including that.  Handling them on the broken stack is how a
+ * fault becomes a reset with nothing on the wire.
+ *
+ * A machine check gets one for a different reason: it can arrive at any
+ * point, including inside the handler for something else.
+ */
+#define IST_DOUBLE_FAULT	1
+#define IST_NMI			2
+#define IST_MACHINE_CHECK	3
+#define IST_COUNT		3
+
+struct tss64;
+
+/*
+ * Point the TSS at the stacks the vectors above will run on.  Must happen
+ * before the TSS is loaded, and the TSS must be loaded before trap_init():
+ * a gate naming an IST slot is a promise the CPU will keep by reading the
+ * task register, and it has to have something to read.
+ */
+void trap_ist_setup(struct tss64 *tss);
+
 /* Install the IDT on this CPU. */
 void trap_init(void);
 

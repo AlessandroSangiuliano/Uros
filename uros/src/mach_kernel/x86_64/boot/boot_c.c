@@ -25,6 +25,7 @@
 
 #include <boot/multiboot2.h>
 #include <cpu/regs.h>
+#include <cpu/tss.h>
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
 #include <pmap/layout.h>
@@ -936,27 +937,14 @@ struct gdt_ptr {
 	uint64_t base;
 } __attribute__((packed));
 
-/* 64-bit TSS: only RSP0 and the IST slots matter to us here. */
-struct tss64 {
-	uint32_t reserved0;
-	uint64_t rsp0;
-	uint64_t rsp1;
-	uint64_t rsp2;
-	uint64_t reserved1;
-	uint64_t ist[7];			/* IST1..IST7 */
-	uint64_t reserved2;
-	uint16_t reserved3;
-	uint16_t iomap_base;
-} __attribute__((packed));
-
 /* Five 8-byte slots: null, kernel code, kernel data, then the TSS
  * descriptor which is 16 bytes wide in long mode (spans slots 3 and 4). */
 static uint64_t gdt[5];
 static struct tss64 tss;
 
-/* Dedicated stacks the TSS points at.  16-byte aligned per the ABI. */
+/* The stack a ring 3 -> ring 0 transition lands on.  The interrupt stack
+ * table's stacks belong to trap/, which decides what they are for. */
 static uint8_t rsp0_stack[4096] __attribute__((aligned(16)));
-static uint8_t ist1_stack[4096] __attribute__((aligned(16)));
 
 /* Write a 64-bit available-TSS descriptor into gdt[idx], gdt[idx+1]. */
 static void gdt_set_tss(int idx, uint64_t base, uint32_t limit)
@@ -1000,6 +988,64 @@ static void load_gdt(void)
 		: : : "rax", "memory");
 }
 
+/*
+ * The proof that the interrupt stack table earns its place.
+ *
+ * Point the stack pointer at unmapped memory and push.  The push faults,
+ * and the CPU tries to deliver that page fault — which means pushing a
+ * frame, onto the same broken stack, which fails.  A fault while delivering
+ * a fault is a double fault, and this is the ordinary way one happens: not
+ * two unrelated bugs, but one bug and a stack that cannot carry the news.
+ *
+ * Without an interrupt stack table the double fault has the same broken
+ * stack, fails the same way, and the machine resets with nothing said.
+ * With one, it lands on a stack of its own and can still speak.
+ *
+ * Necessarily last: a double fault is an abort, with no defined state to
+ * resume to, so the report is the end of the boot by design.
+ */
+static void double_fault_selftest(void)
+{
+	kputs("UrMach x86-64: breaking the stack on purpose — "
+	      "expect a double fault, reported from its own stack\r\n");
+
+	__asm__ volatile("movq %0, %%rsp\n\t"
+			 "pushq $0"
+			 : : "r"(KERNEL_HEAP_BASE + 0x100000ULL) : "memory");
+
+	kputs("UrMach x86-64: THE PUSH SUCCEEDED — the stack was not broken\r\n");
+}
+
+/*
+ * The descriptor tables, and then the IDT that depends on them.
+ *
+ * Order is load-bearing: a gate naming an interrupt-stack-table slot is a
+ * promise the CPU keeps by reading the task register, so the TSS has to be
+ * built and loaded before any such gate exists.  Get it backwards and the
+ * first double fault finds no stack to land on, which is the failure the
+ * IST is there to prevent.
+ */
+static void descriptor_tables_init(void)
+{
+	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
+	gdt[0] = 0;
+	gdt[1] = 0x00209A0000000000ULL;		/* code: L, present, DPL0, R/X */
+	gdt[2] = 0x0000920000000000ULL;		/* data: present, DPL0, R/W    */
+	gdt_set_tss(3, (uint64_t)(uintptr_t)&tss, sizeof(tss) - 1);
+
+	tss.rsp0 = (uint64_t)(uintptr_t)(rsp0_stack + sizeof(rsp0_stack));
+	tss.iomap_base = sizeof(tss);		/* no I/O permission bitmap */
+	trap_ist_setup(&tss);
+
+	load_gdt();
+	__asm__ volatile("ltr %w0" : : "r"((uint16_t)0x18));
+
+	trap_init();
+
+	kputs("UrMach x86-64: GDT + TSS + IDT installed, TR=0x18, "
+	      "faults are now reported\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  Entry from boot.S (SysV: %edi = multiboot magic, %esi = info ptr).  */
 /* ------------------------------------------------------------------ */
@@ -1016,8 +1062,8 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	/* Before anything else that could fault: with no IDT a fault is a
 	 * triple fault and a silent reset, so every check below runs
 	 * unprotected until this is installed. */
-	trap_init();
-	kputs("UrMach x86-64: IDT installed, faults are now reported\r\n");
+	descriptor_tables_init();
+	kputs("UrMach x86-64: boot contract #406 (1/6) complete\r\n");
 
 	pte_selftest();
 	layout_selftest();
@@ -1038,23 +1084,8 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	wx_selftest();
 	user_pmap_selftest();
 
-	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
-	gdt[0] = 0;
-	gdt[1] = 0x00209A0000000000ULL;		/* code: L, present, DPL0, R/X */
-	gdt[2] = 0x0000920000000000ULL;		/* data: present, DPL0, R/W    */
-	gdt_set_tss(3, (uint64_t)(uintptr_t)&tss, sizeof(tss) - 1);
-
-	tss.rsp0 = (uint64_t)(uintptr_t)(rsp0_stack + sizeof(rsp0_stack));
-	tss.ist[0] = (uint64_t)(uintptr_t)(ist1_stack + sizeof(ist1_stack));
-	tss.iomap_base = sizeof(tss);		/* no I/O permission bitmap */
-
-	load_gdt();
-	__asm__ volatile("ltr %w0" : : "r"((uint16_t)0x18));
-
-	kputs("UrMach x86-64: definitive GDT + TSS installed (RSP0 + IST1), TR=0x18\r\n");
-	kputs("UrMach x86-64: boot contract #406 (1/6) complete\r\n");
-
 	wx_enforcement_selftest();
+	double_fault_selftest();
 
 	for (;;)
 		__asm__ volatile("cli; hlt");

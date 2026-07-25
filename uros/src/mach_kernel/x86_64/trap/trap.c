@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <cpu/regs.h>
+#include <cpu/tss.h>
 #include <trap/trap.h>
 
 /*
@@ -56,6 +57,32 @@ static void idt_set(unsigned vector, uint64_t handler, unsigned ist)
 	g->reserved = 0;
 }
 
+/*
+ * A stack per interrupt-stack-table slot.  Deliberately not shared: an NMI
+ * arriving while a double fault is being handled would otherwise land on
+ * the stack that fault is using and overwrite the report being written.
+ */
+static uint8_t ist_stacks[IST_COUNT][4096]
+	__attribute__((aligned(16)));
+
+void trap_ist_setup(struct tss64 *tss)
+{
+	for (unsigned i = 0; i < IST_COUNT; i++)
+		tss->ist[i] = (uint64_t)(uintptr_t)
+			(ist_stacks[i] + sizeof(ist_stacks[i]));
+}
+
+/* Which vectors run on a stack of their own, and which one. */
+static unsigned vector_ist(unsigned vector)
+{
+	switch (vector) {
+	case T_DOUBLE_FAULT:	return IST_DOUBLE_FAULT;
+	case T_NMI:		return IST_NMI;
+	case T_MACHINE_CHECK:	return IST_MACHINE_CHECK;
+	default:		return 0;	/* the current stack will do */
+	}
+}
+
 void trap_init(void)
 {
 	struct idt_ptr p = { sizeof(idt) - 1, (uint64_t)(uintptr_t)idt };
@@ -67,7 +94,7 @@ void trap_init(void)
 	 * here to end.
 	 */
 	for (unsigned v = 0; v < T_VECTORS; v++)
-		idt_set(v, isr_table[v], 0);
+		idt_set(v, isr_table[v], vector_ist(v));
 
 	__asm__ volatile("lidt %0" : : "m"(p) : "memory");
 }
@@ -204,6 +231,21 @@ void trap_dispatch(struct trap_frame *frame)
 
 	if (frame->vector == T_PAGE_FAULT)
 		report_page_fault(frame->error);
+
+	/*
+	 * For a vector with a stack of its own, say so and show it: the frame
+	 * sits on the interrupt stack the CPU switched to, while the saved
+	 * stack pointer is the one the interrupted code was using.  Two
+	 * different values are the switch having happened — and for a double
+	 * fault, the reason there is a report at all.
+	 */
+	if (vector_ist(frame->vector)) {
+		tputs("  on interrupt stack ");
+		tputhex((uint64_t)(uintptr_t)frame);
+		tputs(", interrupted stack was ");
+		tputhex(frame->rsp);
+		tputs("\r\n");
+	}
 
 	tputs("  rip ");
 	tputhex(frame->rip);
