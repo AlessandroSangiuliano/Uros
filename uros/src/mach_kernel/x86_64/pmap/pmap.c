@@ -14,6 +14,7 @@
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
 #include <pmap/pv.h>
+#include <trap/trap.h>
 #include <pmap/walk.h>
 
 /*
@@ -304,6 +305,44 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 
 		s += sz ? sz : PAGE_SIZE_4K;
 	}
+}
+
+/*
+ * Next free address in the device region.  A bump, because nothing is ever
+ * returned: see the header.
+ */
+static uint64_t device_next = DEVICE_MAP_BASE;
+
+uint64_t pmap_map_device(uint64_t pa, uint64_t size)
+{
+	uint64_t offset = pa & (PAGE_SIZE_4K - 1);
+	uint64_t first = pa - offset;
+	uint64_t last = (pa + size + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
+	uint64_t va = device_next;
+	uint64_t flags = INTEL_PTE_WRITE | INTEL_PTE_NX
+		       | INTEL_PTE_NCACHE | INTEL_PTE_WTHRU;
+
+	if (size == 0)
+		return 0;
+
+	if (va + (last - first) - DEVICE_MAP_BASE > DEVICE_MAP_MAX_SIZE)
+		panic("pmap: the device region is full");
+
+	/*
+	 * PCD and PWT together are uncacheable in the absence of a page
+	 * attribute table.  When PAT is set up these two bits become an index
+	 * into it instead, and this is the line that has to change with it —
+	 * quietly keeping the old encoding would leave device memory cached
+	 * while looking untouched.
+	 */
+	for (uint64_t p = first; p < last; p += PAGE_SIZE_4K) {
+		if (pmap_map_page(kernel_pmap_store.root_pa,
+				  device_next, p, flags) != PMAP_MAP_OK)
+			panic("pmap: could not map device registers");
+		device_next += PAGE_SIZE_4K;
+	}
+
+	return va + offset;
 }
 
 /* ------------------------------------------------------------------ */

@@ -196,6 +196,22 @@ void pmap_protect_kernel(void);
 uint64_t pmap_enable_smep_smap(void);
 
 /*
+ * Make `size` bytes of device registers at physical `pa` reachable, and
+ * answer with the address to reach them at.
+ *
+ * Uncached, because for registers caching is not a performance choice but a
+ * wrong answer: a read served from a cache line is a read of the past, and
+ * a write sitting in one is an order the device never received.  Also
+ * non-executable and kernel-only, neither of which any device needs.
+ *
+ * The address is taken from the device region of ch.11 and never given
+ * back — a mapped register block belongs to a driver for as long as the
+ * driver exists, and unmapping is a problem to solve when one can be
+ * unloaded.  A `pa` that is not page-aligned keeps its offset in the answer.
+ */
+uint64_t pmap_map_device(uint64_t pa, uint64_t size);
+
+/*
  * Zeroing and copying physical pages (x86_64/pmap/phys.c).  Addresses are
  * physical and reached through the direct map, so unlike the i386 twin
  * these borrow no temporary mapping.  The lpage and rpage forms are the

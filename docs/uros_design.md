@@ -746,6 +746,7 @@ are userspace `.so` files, not kernel objects. The bases below are shown as
 | `0xffffc00000000000` | **kernel heap** | dynamic kernel allocations | NX by default |
 | `0xffffe00000000000` | **per-CPU** | `%gs`-based per-CPU areas | kernel-only |
 | `0xfffff00000000000` | **CPU entry area** | per-CPU: entry `.text`, IST/trampoline stacks, GDT, TSS | the *only* kernel region mapped in the user table under KPTI |
+| `0xfffff80000000000` | **device registers** | MMIO made reachable: local APIC, IOAPIC, HPET, PCI windows | uncached, NX, kernel-only |
 | `0xffffffff80000000` | **kernel image** | `.text` / `.rodata` / `.data` / `.bss` | W^X per section |
 
 The kernel image sits in the top 2 GiB because `-mcmodel=kernel` requires it:

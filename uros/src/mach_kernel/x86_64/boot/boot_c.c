@@ -25,6 +25,7 @@
 
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
+#include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
@@ -1031,6 +1032,51 @@ static void acpi_selftest(uint32_t info)
 			kputs("(off)");
 	}
 	kputs("\r\n");
+
+	/*
+	 * Bring up the local APIC and ask it who we are.  The answer has to
+	 * match what ACPI said about one of the processors it listed — if it
+	 * names a CPU the firmware never mentioned, one of the two is being
+	 * misread, and finding that out here is much cheaper than finding it
+	 * out from an IPI that went to nobody.
+	 */
+	lapic_init(acpi_lapic_base());
+	{
+		uint32_t id = lapic_id();
+		int listed = 0;
+
+		for (unsigned i = 0; i < acpi_cpu_count(); i++)
+			if (acpi_cpu(i)->apic_id == id)
+				listed = 1;
+
+		kputs("UrMach x86-64: local apic mapped, this cpu is id ");
+		kputdec(id);
+		kputs(lapic_is_bsp() ? " (the boot processor)" : " (NOT the bsp?!)");
+		kputs(listed ? ", and acpi lists it\r\n"
+			     : ", WHICH ACPI NEVER MENTIONED\r\n");
+
+		/*
+		 * Check the mapping is uncached, by the bits rather than by
+		 * behaviour — because behaviour will not tell us.  A cached
+		 * mapping of device registers works perfectly under emulation,
+		 * where there is no device and no cache to be wrong about, and
+		 * fails on hardware in ways that look like the device is
+		 * broken.  This is the only place the mistake is visible while
+		 * it is still cheap.
+		 */
+		{
+			extern uint64_t lapic_probe_va(void);
+			uint64_t va = lapic_probe_va();
+			pt_entry_t *e = pmap_walk(pmap_kernel()->root_pa, va, 0);
+
+			kputs("UrMach x86-64: its mapping at ");
+			kputhex64(va);
+			kputs(e && (*e & INTEL_PTE_NCACHE) && (*e & INTEL_PTE_WTHRU)
+			      && (*e & INTEL_PTE_NX) && !(*e & INTEL_PTE_USER)
+			      ? " is uncached, NX and kernel-only\r\n"
+			      : " HAS THE WRONG CACHING OR PERMISSIONS\r\n");
+		}
+	}
 }
 
 /*
