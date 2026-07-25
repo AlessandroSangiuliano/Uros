@@ -227,6 +227,22 @@ static void backtrace(uint64_t rbp)
 	}
 }
 
+void panic(const char *what)
+{
+	tputs("\r\nUrMach x86-64: panic: ");
+	tputs(what);
+	tputs("\r\n");
+
+	/*
+	 * The caller's frame, not this one: what matters is who could not
+	 * continue, and the walk climbs from there.
+	 */
+	backtrace((uint64_t)(uintptr_t)__builtin_frame_address(0));
+
+	for (;;)
+		__asm__ volatile("cli; hlt");
+}
+
 /*
  * One armed expectation.  Not a stack: a fault while recovering from a
  * fault is not something to paper over, and leaving the second one to be

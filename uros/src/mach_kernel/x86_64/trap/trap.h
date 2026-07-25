@@ -100,6 +100,22 @@ struct tss64;
  */
 void trap_ist_setup(struct tss64 *tss);
 
+/*
+ * Stop, and say why.
+ *
+ * For the conditions where carrying on would mean the caller believing
+ * something that is not true — a per-CPU block that was never built, a
+ * mapping that went unrecorded, an index that silently tracks nothing.
+ * Returning quietly from those leaves a kernel that looks like it works and
+ * is wrong somewhere else, later, for reasons that no longer point back
+ * here.
+ *
+ * This is the bootstrap answer, not the final one: once there is a caller
+ * that can do something about a failure, these become returned errors. What
+ * they must not be in the meantime is invisible.
+ */
+void panic(const char *what) __attribute__((noreturn));
+
 /* Install the IDT on this CPU. */
 void trap_init(void);
 

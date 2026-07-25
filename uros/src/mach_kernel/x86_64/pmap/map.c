@@ -13,6 +13,7 @@
 #include <pmap/map.h>
 #include <pmap/pte.h>
 #include <pmap/walk.h>
+#include <trap/trap.h>
 
 static inline pt_entry_t *table_at(uint64_t table_pa)
 {
@@ -137,9 +138,16 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	base = *entry & (from_1g ? INTEL_PTE_PFN_1G : INTEL_PTE_PFN_2M);
 	perm = *entry & INTEL_PTE_PERM;
 
+	/*
+	 * Zero is already this function's way of saying "there was nothing to
+	 * split", so it cannot also mean "there was, and I could not".  The
+	 * caller would read the second as the first and carry on believing the
+	 * range is now fine-grained when it is still one large page — which is
+	 * how a section ends up sharing its permissions with its neighbour.
+	 */
 	table_pa = boot_frame_alloc();
 	if (table_pa == 0)
-		return 0;
+		panic("pmap: no frame to split a large page into");
 
 	sub = table_at(table_pa);
 	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {

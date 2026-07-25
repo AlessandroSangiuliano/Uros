@@ -11,8 +11,10 @@
 #include <cpu/regs.h>
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
+#include <pmap/map.h>
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
+#include <trap/trap.h>
 
 void percpu_init(uint32_t cpu_id)
 {
@@ -20,8 +22,14 @@ void percpu_init(uint32_t cpu_id)
 	uint64_t frame = boot_frame_alloc();
 	struct percpu *p;
 
+	/*
+	 * Returning here would leave %gs based at zero — which the boot
+	 * identity map still makes readable, so %gs:0 would quietly hand back
+	 * whatever is in low memory instead of faulting.  That happened once
+	 * already; it is not a thing to leave available.
+	 */
 	if (frame == 0)
-		return;
+		panic("percpu: no frame for this CPU's block");
 
 	/*
 	 * A page per CPU, at a fixed stride from the region's base, so a
@@ -29,7 +37,9 @@ void percpu_init(uint32_t cpu_id)
 	 * matters at the points where the lookup would need the block it is
 	 * trying to find.
 	 */
-	pmap_enter(pmap_kernel(), va, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+	if (pmap_enter(pmap_kernel(), va, frame,
+		       VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK)
+		panic("percpu: could not map this CPU's block");
 
 	p = (struct percpu *)(uintptr_t)va;
 	p->self = p;
