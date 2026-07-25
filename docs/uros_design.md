@@ -850,6 +850,50 @@ None of this is transliterated from another kernel: the MSR and CPUID bits are
 Intel's architectural contract, and separating the entry area is geometry the
 problem forces. The regions, their bases, and the symbolic anchoring are ours.
 
+### 11.8 Revoking a mapping the other processors are using
+
+A processor caches the translations it walks, and nothing tells it when
+another processor edits the tables underneath. So changing an entry is two
+operations, and only the first is a store: after it, the table says one
+thing while every processor that has walked that address still believes
+another. Forgetting the second produces no fault and no report — only
+unrelated code, later, reading through a translation that should not exist.
+
+The mechanism is one **cross-call**, not a family of special messages
+(#438). A message between processors carries a vector and nothing else, so
+everything above it is an arrangement in memory that the sender writes and
+the receiver reads. The shootdown is the first user of that arrangement and
+will not be the last: a scheduler asking a processor to reconsider what it
+runs, a debugger asking them all to stop. Those differ in what is asked, not
+in how the asking works. The call returns when every processor has
+*finished*, because the caller's next act is usually to reuse the frame.
+
+Two departures from the i386 path, both deliberate:
+
+- **Ranges, not everything.** i386 flushes the whole table on every
+  shootdown — correct, and the right choice for its first SMP pass. Here an
+  address at a time up to a threshold, wholesale beyond it. The threshold is
+  a single constant, unmeasured until #431.
+- **The global-page trap is closed in advance.** A `cr3` reload does not
+  evict a global entry; that is what global means. Since §11.7 marks kernel
+  regions global whenever KPTI is off, a whole-table flush written as a
+  `cr3` reload would silently stop flushing the kernel's own mappings the
+  day #437 lands. The flush therefore toggles `CR4.PGE` when global pages
+  are on, which is the architecture's own answer.
+
+The ordering this rests on costs nothing here and §11.6 says why: the
+page-table store must reach the other processor before it is asked to
+flush, and x86-TSO does not reorder a store with a later store — the
+message is itself a store, to the interrupt command register. On a weakly
+ordered machine this is exactly where a release barrier goes, and the
+requirement is documented at that point in the code rather than the
+instruction that currently satisfies it.
+
+What is **not** yet narrowed: the shootdown goes to every online processor
+rather than to those actually using the address space in question. Narrowing
+it needs a record of which processors have a given `pmap` loaded, which is
+the scheduler's to keep (#408).
+
 ---
 
 ## 12. Future roadmap
