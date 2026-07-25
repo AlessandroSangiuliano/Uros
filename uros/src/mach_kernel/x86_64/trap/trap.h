@@ -126,12 +126,20 @@ struct trap_frame {
 struct tss64;
 
 /*
- * Point the TSS at the stacks the vectors above will run on.  Must happen
- * before the TSS is loaded, and the TSS must be loaded before trap_init():
- * a gate naming an IST slot is a promise the CPU will keep by reading the
- * task register, and it has to have something to read.
+ * Point a TSS at the stacks its vectors will run on: IST_COUNT consecutive
+ * stacks of `stack_size` bytes, the lowest starting at `block`.
+ *
+ * The caller provides the memory and this decides which stack belongs to
+ * which slot, because that is the part that follows from the table above and
+ * would otherwise have to be duplicated by every caller.  Whose memory it is
+ * matters: two processors sharing one of these would be writing over each
+ * other's account of the fault that brought them here.
+ *
+ * Must happen before the TSS is loaded, and the TSS must be loaded before
+ * trap_init(): a gate naming an IST slot is a promise the CPU will keep by
+ * reading the task register, and it has to have something to read.
  */
-void trap_ist_setup(struct tss64 *tss);
+void trap_ist_setup(struct tss64 *tss, uint64_t block, uint64_t stack_size);
 
 /*
  * Stop, and say why.

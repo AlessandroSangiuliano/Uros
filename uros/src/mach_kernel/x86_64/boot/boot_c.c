@@ -25,6 +25,7 @@
 
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
+#include <cpu/desc.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/pic.h>
@@ -937,65 +938,6 @@ static void wx_enforcement_selftest(void)
 	      : "MISBEHAVED — the control says nothing\r\n");
 }
 
-/* ------------------------------------------------------------------ */
-/*  GDT + TSS                                                           */
-/* ------------------------------------------------------------------ */
-struct gdt_ptr {
-	uint16_t limit;
-	uint64_t base;
-} __attribute__((packed));
-
-/* Five 8-byte slots: null, kernel code, kernel data, then the TSS
- * descriptor which is 16 bytes wide in long mode (spans slots 3 and 4). */
-static uint64_t gdt[5];
-static struct tss64 tss;
-
-/* The stack a ring 3 -> ring 0 transition lands on.  The interrupt stack
- * table's stacks belong to trap/, which decides what they are for. */
-static uint8_t rsp0_stack[4096] __attribute__((aligned(16)));
-
-/* Write a 64-bit available-TSS descriptor into gdt[idx], gdt[idx+1]. */
-static void gdt_set_tss(int idx, uint64_t base, uint32_t limit)
-{
-	uint64_t lo = 0;
-
-	lo |= (uint64_t)(limit & 0xFFFF);		/* limit 15:0  */
-	lo |= (base & 0xFFFFFFULL) << 16;		/* base 23:0   */
-	lo |= (uint64_t)0x9 << 40;			/* type: available 64-bit TSS */
-	lo |= (uint64_t)1 << 47;			/* present     */
-	lo |= (uint64_t)((limit >> 16) & 0xF) << 48;	/* limit 19:16 */
-	lo |= ((base >> 24) & 0xFFULL) << 56;		/* base 31:24  */
-
-	gdt[idx] = lo;
-	gdt[idx + 1] = (base >> 32) & 0xFFFFFFFFULL;	/* base 63:32  */
-}
-
-static void load_gdt(void)
-{
-	struct gdt_ptr gp = { sizeof(gdt) - 1, (uint64_t)(uintptr_t)gdt };
-
-	__asm__ volatile("lgdt %0" : : "m"(gp) : "memory");
-
-	/* Reload the data segment registers from the new table. */
-	__asm__ volatile(
-		"movw $0x10, %%ax\n\t"
-		"movw %%ax, %%ds\n\t"
-		"movw %%ax, %%es\n\t"
-		"movw %%ax, %%ss\n\t"
-		"movw %%ax, %%fs\n\t"
-		"movw %%ax, %%gs\n\t"
-		: : : "rax");
-
-	/* Reload CS with a far return to the new 0x08 selector. */
-	__asm__ volatile(
-		"pushq $0x08\n\t"
-		"leaq 1f(%%rip), %%rax\n\t"
-		"pushq %%rax\n\t"
-		"lretq\n\t"
-		"1:\n\t"
-		: : : "rax", "memory");
-}
-
 /*
  * Ask the firmware which processors exist.
  *
@@ -1248,9 +1190,17 @@ static void percpu_selftest(void)
 	uint64_t before = rdmsr(MSR_GS_BASE);
 	struct percpu *p;
 	uint64_t swapped, restored;
+	/*
+	 * The boot processor's own id, not zero.  Nothing guarantees the
+	 * firmware started the processor numbered zero — and if it did not,
+	 * taking zero here hands the boot processor the block that belongs to
+	 * whichever processor really is zero, and the two write over each
+	 * other the moment it wakes.
+	 */
+	uint32_t self = cpu_apic_id();
 
-	percpu_alloc(0);
-	percpu_activate(0);
+	percpu_alloc(self);
+	percpu_activate(self);
 	p = percpu();
 
 	kputs("UrMach x86-64: gs base was ");
@@ -1264,7 +1214,8 @@ static void percpu_selftest(void)
 	kputhex64((uint64_t)(uintptr_t)p);
 	kputs(", cpu_id ");
 	kputdec(p->cpu_id);
-	kputs((uint64_t)(uintptr_t)p == PERCPU_BASE && p->cpu_id == 0
+	kputs((uint64_t)(uintptr_t)p == PERCPU_BASE + (uint64_t)self * PAGE_SIZE_4K
+	      && p->cpu_id == self
 	      ? ", reached through %gs\r\n" : ", WRONG\r\n");
 
 	/* Park a recognisable value in the other half, then swap to it. */
@@ -1527,33 +1478,22 @@ static void double_fault_selftest(void)
 }
 
 /*
- * The descriptor tables, and then the IDT that depends on them.
+ * The descriptor tables, which now belong to a processor rather than to the
+ * boot.
  *
- * Order is load-bearing: a gate naming an interrupt-stack-table slot is a
- * promise the CPU keeps by reading the task register, so the TSS has to be
- * built and loaded before any such gate exists.  Get it backwards and the
- * first double fault finds no stack to land on, which is the failure the
- * IST is there to prevent.
+ * What used to live here was the boot processor's alone — one table of
+ * stacks, loaded once, on the assumption that there would only ever be one
+ * processor to load it.  There are up to sixty-four, each of which needs its
+ * own, and none of which can take so much as a page fault before it has one.
+ * <cpu/desc.h> is where that division of labour is written down.
  */
 static void descriptor_tables_init(void)
 {
-	/* Definitive GDT: null, kernel code (L=1), kernel data, TSS. */
-	gdt[0] = 0;
-	gdt[1] = 0x00209A0000000000ULL;		/* code: L, present, DPL0, R/X */
-	gdt[2] = 0x0000920000000000ULL;		/* data: present, DPL0, R/W    */
-	gdt_set_tss(3, (uint64_t)(uintptr_t)&tss, sizeof(tss) - 1);
+	desc_init_bsp();
 
-	tss.rsp0 = (uint64_t)(uintptr_t)(rsp0_stack + sizeof(rsp0_stack));
-	tss.iomap_base = sizeof(tss);		/* no I/O permission bitmap */
-	trap_ist_setup(&tss);
-
-	load_gdt();
-	__asm__ volatile("ltr %w0" : : "r"((uint16_t)0x18));
-
-	trap_init();
-
-	kputs("UrMach x86-64: GDT + TSS + IDT installed, TR=0x18, "
-	      "faults are now reported\r\n");
+	kputs("UrMach x86-64: GDT + TSS + IDT installed for cpu ");
+	kputdec(cpu_apic_id());
+	kputs(", faults are now reported\r\n");
 }
 
 /* ------------------------------------------------------------------ */

@@ -9,6 +9,7 @@
 
 #include <cpu/acpi.h>
 #include <cpu/ap_trampoline.h>
+#include <cpu/desc.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
@@ -67,19 +68,41 @@ void ap_entry64(void);
 void ap_start_c(uint32_t apic_id)
 {
 	/*
-	 * Descriptor tables and per-CPU state are this processor's own from
-	 * here; nothing below is shared with another.
+	 * Off the trampoline's sixteen bytes of descriptor table and onto the
+	 * kernel's, with a task register and an interrupt descriptor table of
+	 * its own.  First, because until it is done this processor cannot
+	 * report a fault — it can only triple-fault and reset, which is the
+	 * one failure that leaves nothing on the wire to read afterwards.
 	 */
+	desc_activate(apic_id);
+
+	/* Per-CPU state; nothing below is shared with another processor. */
 	percpu_activate(apic_id);
+
+	/*
+	 * And its own interrupt controller, which comes out of a startup
+	 * interrupt accepting nothing.  A message sent to a processor that
+	 * has not done this is discarded, and the sender is told it was
+	 * delivered.
+	 */
+	lapic_enable();
 
 	atomic_test_and_set_bit((volatile uint64_t *)&online_mask, apic_id);
 	atomic_inc64((volatile uint64_t *)&online_count);
 
 	/*
 	 * Nothing to do yet — the scheduler is #408's, and an idle loop is
-	 * what an processor with no threads honestly is.  Halting rather than
+	 * what a processor with no threads honestly is.  Halting rather than
 	 * spinning so a hyperthreaded sibling gets the core.
+	 *
+	 * With interrupts on, and that is the whole difference: a halted
+	 * processor wakes for an interrupt and for nothing else, so this loop
+	 * with them off is not an idle processor but a lost one.  Enabled
+	 * here rather than earlier because the tables above are what makes an
+	 * arriving interrupt survivable.
 	 */
+	interrupts_enable();
+
 	for (;;)
 		__asm__ volatile("hlt");
 }
@@ -132,6 +155,14 @@ unsigned smp_start_others(void)
 		 * would otherwise have.
 		 */
 		percpu_alloc(c->apic_id);
+
+		/*
+		 * Its task-state segment and the stacks a fault will land on,
+		 * for the same reason twice over: this writes into the shared
+		 * descriptor table, and it allocates.  Neither is something to
+		 * have several processors doing at the moment they arrive.
+		 */
+		desc_alloc(c->apic_id);
 	}
 
 	/*

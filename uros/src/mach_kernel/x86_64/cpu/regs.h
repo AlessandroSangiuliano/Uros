@@ -238,6 +238,23 @@ static inline int cpu_has_1gb_pages(void)
  * asked for rather than assumed, like the 1 GiB pages.  Anything relying on
  * it needs a path for when the answer is no.
  */
+/*
+ * This processor's APIC id, from CPUID rather than from the APIC.
+ *
+ * The two agree, and this one can be asked earlier: it needs no mapping, no
+ * enable bit and no memory, which is what makes it the identity a processor
+ * can use before it has anything else.  The trampoline in boot/ already
+ * relies on that — it is how an arriving processor finds its own stack
+ * without being handed one.
+ */
+static inline uint32_t cpu_apic_id(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return b >> 24;
+}
+
 static inline int cpu_has_cmpxchg16b(void)
 {
 	uint32_t a, b, c, d;

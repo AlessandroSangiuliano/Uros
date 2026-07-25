@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <cpu/desc.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
 #include <pmap/layout.h>
@@ -39,8 +40,6 @@ struct idt_ptr {
 #define IDT_PRESENT		0x80
 #define IDT_INTERRUPT_GATE	0x0E	/* clears IF on entry; trap gate 0x0F does not */
 
-#define KERNEL_CS		0x08
-
 static struct idt_gate idt[IDT_VECTORS];
 
 /* Filled by trap/entry.S: one stub address per vector. */
@@ -68,25 +67,24 @@ static void idt_set(unsigned vector, uint64_t handler, unsigned ist)
 	g->offset_low = (uint16_t)handler;
 	g->offset_mid = (uint16_t)(handler >> 16);
 	g->offset_high = (uint32_t)(handler >> 32);
-	g->selector = KERNEL_CS;
+	g->selector = KERNEL_CS_SELECTOR;
 	g->ist = ist & 0x7;
 	g->type_attr = IDT_PRESENT | IDT_INTERRUPT_GATE;
 	g->reserved = 0;
 }
 
 /*
- * A stack per interrupt-stack-table slot.  Deliberately not shared: an NMI
+ * A stack per interrupt-stack-table slot, and never a shared one: an NMI
  * arriving while a double fault is being handled would otherwise land on
  * the stack that fault is using and overwrite the report being written.
+ *
+ * The top of a stack is the bottom of the next, which is what makes one
+ * block of consecutive stacks the natural thing for a caller to hand over.
  */
-static uint8_t ist_stacks[IST_COUNT][4096]
-	__attribute__((aligned(16)));
-
-void trap_ist_setup(struct tss64 *tss)
+void trap_ist_setup(struct tss64 *tss, uint64_t block, uint64_t stack_size)
 {
 	for (unsigned i = 0; i < IST_COUNT; i++)
-		tss->ist[i] = (uint64_t)(uintptr_t)
-			(ist_stacks[i] + sizeof(ist_stacks[i]));
+		tss->ist[i] = block + (i + 1) * stack_size;
 }
 
 /* Which vectors run on a stack of their own, and which one. */
