@@ -22,6 +22,19 @@
 #define MB2_TAG_END		0
 #define MB2_TAG_MEMORY_MAP	6
 
+/*
+ * Where ACPI starts.  The root pointer is normally found by scanning the
+ * BIOS areas for its signature, but the loader has already done that and
+ * hands it over — which is both faster and the only reliable way under UEFI,
+ * where the tables are not in the legacy region at all.
+ *
+ * Two tags because ACPI has two root-pointer formats: the 1.0 one with a
+ * 32-bit RSDT address, and the 2.0 one that adds a 64-bit XSDT address.  A
+ * loader supplies whichever the firmware offered.
+ */
+#define MB2_TAG_ACPI_OLD	14	/* ACPI 1.0 RSDP */
+#define MB2_TAG_ACPI_NEW	15	/* ACPI 2.0+ RSDP */
+
 struct mb2_tag {
 	uint32_t type;
 	uint32_t size;

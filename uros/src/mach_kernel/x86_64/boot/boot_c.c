@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include <boot/multiboot2.h>
+#include <cpu/acpi.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
@@ -993,6 +994,46 @@ static void load_gdt(void)
 }
 
 /*
+ * Ask the firmware which processors exist.
+ *
+ * The count is the whole point: it is what #438 will start, and getting it
+ * from the MADT rather than from a build-time constant is what lets one
+ * binary boot any machine.  i386 could also read the older MP tables; long
+ * mode implies ACPI, so there is one source of truth here where there were
+ * two.
+ *
+ * Enabled and present are different answers — the firmware can describe a
+ * socket that is not populated, or one that could be hot-plugged later —
+ * and only the enabled ones are startable.
+ */
+static void acpi_selftest(uint32_t info)
+{
+	unsigned found = acpi_find_cpus(info);
+
+	if (found == 0) {
+		kputs("UrMach x86-64: no usable ACPI — cannot enumerate cpus\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: acpi reports ");
+	kputdec(acpi_cpu_count());
+	kputs(" processors, ");
+	kputdec(acpi_usable_cpu_count());
+	kputs(" startable, local apic at ");
+	kputhex64(acpi_lapic_base());
+	kputs("\r\nUrMach x86-64:   apic ids");
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		kputs(" ");
+		kputdec(c->apic_id);
+		if (!c->usable)
+			kputs("(off)");
+	}
+	kputs("\r\n");
+}
+
+/*
  * The atomics, against what they claim.
  *
  * One CPU cannot show that these are atomic — that needs a second one racing
@@ -1353,6 +1394,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	wx_selftest();
 	user_pmap_selftest();
 
+	acpi_selftest(info);
 	atomic_selftest();
 	reclaim_selftest();
 	percpu_selftest();
