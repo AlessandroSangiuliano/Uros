@@ -153,6 +153,59 @@ trap_probe_faulted:
 	ret
 
 /*
+ * Probes that raise one particular exception each, so the stubs can be
+ * checked against the machine rather than against the manual I read while
+ * writing them.  Thirty-two of them were assigned an error-code convention
+ * by hand, and until something fires them only two of those assignments have
+ * ever been tested.
+ *
+ * All of them share trap_probe_faulted as their resume point and return the
+ * same way as trap_probe_write: 0 if the instruction completed, 1 if the
+ * handler had to step over it.  None pushes, so the frame the resume lands
+ * in is still the caller's.
+ */
+
+/* Invalid opcode: no error code, and the CPU is certain about it. */
+	.globl	trap_probe_ud
+	.align	16
+trap_probe_ud:
+	ud2
+	xorl	%eax, %eax
+	ret
+
+/* Breakpoint: a trap rather than a fault, so the saved rip is the one after. */
+	.globl	trap_probe_bp
+	.align	16
+trap_probe_bp:
+	int3
+	xorl	%eax, %eax
+	ret
+
+/* Divide error: edx:eax over a zero divisor. */
+	.globl	trap_probe_de
+	.align	16
+trap_probe_de:
+	xorl	%edx, %edx
+	movl	$1, %eax
+	xorl	%ecx, %ecx
+	divl	%ecx
+	xorl	%eax, %eax
+	ret
+
+/*
+ * General protection: load a selector past the end of the GDT.  The point of
+ * this one is the error code — the CPU pushes the offending selector, which
+ * is the case the stubs must *not* invent a zero for.
+ */
+	.globl	trap_probe_gp
+	.align	16
+trap_probe_gp:
+	movw	$0x30, %ax
+	movw	%ax, %ds
+	xorl	%eax, %eax
+	ret
+
+/*
  * The stub addresses, in vector order, so trap_init() can install them
  * without needing thirty-two declarations of things that differ only by a
  * number.

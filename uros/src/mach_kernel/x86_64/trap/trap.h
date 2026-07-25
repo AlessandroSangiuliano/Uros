@@ -124,6 +124,23 @@ void trap_dispatch(struct trap_frame *frame);
 void trap_expect(uint64_t vector, uint64_t resume_rip);
 
 /*
+ * What the last expected trap turned out to be.  Reporting a fault is one
+ * thing; being able to check that the frame carried the right vector, the
+ * right error code and a plausible instruction pointer is what tells us the
+ * entry path built it correctly — which for thirty-two hand-written stubs is
+ * not something to assume.
+ */
+struct trap_record {
+	uint64_t vector;
+	uint64_t error;
+	uint64_t rip;
+	uint64_t cr2;
+	int      caught;
+};
+
+const struct trap_record *trap_last(void);
+
+/*
  * Store TRAP_PROBE_PATTERN at `addr` and report whether the machine allowed
  * it: 0 if the store completed, 1 if it faulted.  Checking for the pattern
  * afterwards distinguishes a store that happened from one that was never
@@ -137,6 +154,19 @@ void trap_expect(uint64_t vector, uint64_t resume_rip);
 #define TRAP_PROBE_PATTERN	0x5a5a5a5a
 
 int trap_probe_write(volatile void *addr);
+
+/*
+ * One probe per exception family, each returning 0 if the instruction
+ * completed and 1 if the handler stepped over it.  Between them they cover
+ * both sides of the error-code asymmetry the stubs exist to hide: the first
+ * three arrive without one and must be given a zero, while a general
+ * protection arrives with the offending selector and must keep it.
+ */
+int trap_probe_ud(void);	/* invalid opcode      */
+int trap_probe_bp(void);	/* breakpoint          */
+int trap_probe_de(void);	/* divide error        */
+int trap_probe_gp(void);	/* general protection  */
+
 extern char trap_probe_faulted[];
 
 #endif	/* _X86_64_TRAP_TRAP_H_ */

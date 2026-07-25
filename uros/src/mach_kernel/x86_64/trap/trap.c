@@ -236,11 +236,19 @@ static uint64_t expect_vector;
 static uint64_t expect_resume;
 static int expect_armed;
 
+static struct trap_record last_trap;
+
 void trap_expect(uint64_t vector, uint64_t resume_rip)
 {
 	expect_vector = vector;
 	expect_resume = resume_rip;
 	expect_armed = 1;
+	last_trap.caught = 0;
+}
+
+const struct trap_record *trap_last(void)
+{
+	return &last_trap;
 }
 
 void trap_dispatch(struct trap_frame *frame)
@@ -252,6 +260,12 @@ void trap_dispatch(struct trap_frame *frame)
 		 * looping through this same path forever.
 		 */
 		expect_armed = 0;
+
+		last_trap.vector = frame->vector;
+		last_trap.error = frame->error;
+		last_trap.rip = frame->rip;
+		last_trap.cr2 = read_cr2();
+		last_trap.caught = 1;
 
 		tputs("UrMach x86-64: expected ");
 		tputs(trap_name(frame->vector));

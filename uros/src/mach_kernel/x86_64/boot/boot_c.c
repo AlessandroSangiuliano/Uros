@@ -989,6 +989,70 @@ static void load_gdt(void)
 }
 
 /*
+ * Fire one exception of each family and check what came back.
+ *
+ * Every stub was given its error-code convention by hand from the manual;
+ * only the page fault and the double fault have ever fired, so thirty of the
+ * thirty-two assignments are still just an intention. A stub that pushes a
+ * dummy error code for a vector that supplies its own — or the reverse —
+ * shifts every field of the frame by eight bytes, which shows up as a
+ * plausible-looking report full of wrong numbers rather than as a crash.
+ *
+ * So the check is on the frame, not on surviving: the vector must be the one
+ * expected, the instruction pointer must land inside the probe that raised
+ * it, and the error code must be zero for the three that have none and the
+ * offending selector for the one that does.
+ */
+static void trap_vectors_selftest(void)
+{
+	static const struct {
+		const char *name;
+		int	  (*probe)(void);
+		uint64_t   vector;
+		uint64_t   fn_addr;
+	} probes[] = {
+		{ "invalid opcode",    trap_probe_ud, T_INVALID_OPCODE,
+		  (uint64_t)(uintptr_t)trap_probe_ud },
+		{ "breakpoint",        trap_probe_bp, T_BREAKPOINT,
+		  (uint64_t)(uintptr_t)trap_probe_bp },
+		{ "divide error",      trap_probe_de, T_DIVIDE_ERROR,
+		  (uint64_t)(uintptr_t)trap_probe_de },
+		{ "general protection", trap_probe_gp, T_GENERAL_PROTECTION,
+		  (uint64_t)(uintptr_t)trap_probe_gp },
+	};
+
+	for (unsigned i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+		const struct trap_record *t;
+		int stepped, rip_ok, error_ok;
+
+		trap_expect(probes[i].vector,
+			    (uint64_t)(uintptr_t)trap_probe_faulted);
+		stepped = probes[i].probe();
+		t = trap_last();
+
+		/*
+		 * The probes are aligned to sixteen and are a few instructions
+		 * long, so a saved rip within a short distance of the entry is
+		 * inside the probe and nowhere else.
+		 */
+		rip_ok = t->rip >= probes[i].fn_addr
+		      && t->rip < probes[i].fn_addr + 64;
+
+		error_ok = probes[i].vector == T_GENERAL_PROTECTION
+			   ? t->error == 0x30 : t->error == 0;
+
+		kputs("UrMach x86-64: ");
+		kputs(probes[i].name);
+		kputs(" -> error ");
+		kputhex64(t->error);
+		kputs(stepped && t->caught && t->vector == probes[i].vector
+		      && rip_ok && error_ok
+		      ? ", vector, frame and error code all as they should be\r\n"
+		      : ", WRONG\r\n");
+	}
+}
+
+/*
  * The proof that the interrupt stack table earns its place.
  *
  * Point the stack pointer at unmapped memory and push.  The push faults,
@@ -1085,6 +1149,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	user_pmap_selftest();
 
 	wx_enforcement_selftest();
+	trap_vectors_selftest();
 	double_fault_selftest();
 
 	for (;;)
