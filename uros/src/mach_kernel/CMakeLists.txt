@@ -14,6 +14,36 @@ cmake_minimum_required(VERSION 3.21)
 set(CMAKE_C_COMPILER_WORKS 1)
 set(CMAKE_ASM_COMPILER_WORKS 1)
 
+# =============================================================================
+# Build Type Configuration
+# =============================================================================
+# Usage: cmake -DCMAKE_BUILD_TYPE=Debug ..   (or Release)
+# Debug:   -O0 -g3 (full debug info, no optimization)
+# Release: -O2 -g  (optimized with basic debug info)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING 
+        "Build type: Debug or Release" FORCE)
+endif()
+
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
+# Set optimization and debug flags based on build type
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(KERNEL_OPT_FLAGS -O0 -g3 -DDEBUG=1)
+    message(STATUS "Debug build: -O0 -g3 (no optimization, full debug)")
+else()
+    set(KERNEL_OPT_FLAGS -O2 -g)
+    message(STATUS "Release build: -O2 -g (optimized)")
+endif()
+
+# ⚠️ The block above sits ahead of the x86-64 branch on purpose: that branch
+# returns before the rest of this file runs, so anything set after it applies
+# to i386 alone.  The optimisation flags were in that position and the x86-64
+# kernel was built at -O0 by omission — which for #410 in particular is the
+# one configuration where a missing volatile or a missing compiler barrier
+# cannot show itself.
+
 # ------------------------------------------------------------------ #406
 # x86-64 kernel: build the machine-dependent boot stub and stop.
 #
@@ -76,7 +106,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # price than not knowing how the machine got where it died.
   target_compile_options(mach_kernel PRIVATE
     $<$<COMPILE_LANGUAGE:ASM>:-m64 -ffreestanding -nostdinc>
-    $<$<COMPILE_LANGUAGE:C>:-m64 -mcmodel=kernel -mno-red-zone
+    $<$<COMPILE_LANGUAGE:C>:${KERNEL_OPT_FLAGS}
+      -m64 -mcmodel=kernel -mno-red-zone
       -mgeneral-regs-only -fcf-protection=none -ffreestanding -fno-pic
       -fno-pie -fno-stack-protector -fno-builtin -nostdinc
       -fno-omit-frame-pointer
@@ -109,29 +140,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
 
   message(STATUS "x86-64 kernel: boot stub (#406) — MD contracts #407-#411 pending")
   return()
-endif()
-
-# =============================================================================
-# Build Type Configuration
-# =============================================================================
-# Usage: cmake -DCMAKE_BUILD_TYPE=Debug ..   (or Release)
-# Debug:   -O0 -g3 (full debug info, no optimization)
-# Release: -O2 -g  (optimized with basic debug info)
-
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING 
-        "Build type: Debug or Release" FORCE)
-endif()
-
-message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
-
-# Set optimization and debug flags based on build type
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(KERNEL_OPT_FLAGS -O0 -g3 -DDEBUG=1)
-    message(STATUS "Debug build: -O0 -g3 (no optimization, full debug)")
-else()
-    set(KERNEL_OPT_FLAGS -O2 -g)
-    message(STATUS "Release build: -O2 -g (optimized)")
 endif()
 
 # =============================================================================

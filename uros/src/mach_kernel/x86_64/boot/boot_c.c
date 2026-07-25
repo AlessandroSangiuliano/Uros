@@ -35,6 +35,8 @@
 #include <pmap/pte.h>
 #include <pmap/pv.h>
 #include <pmap/walk.h>
+#include <sync/atomic.h>
+#include <sync/barrier.h>
 #include <trap/trap.h>
 
 #define COM1 0x3F8
@@ -990,6 +992,67 @@ static void load_gdt(void)
 }
 
 /*
+ * The atomics, against what they claim.
+ *
+ * One CPU cannot show that these are atomic — that needs a second one racing
+ * them, and #438 has to land first.  What one CPU can show is that each does
+ * the arithmetic it promises and answers with the right value, which is the
+ * half that a wrong constraint or a swapped operand breaks. The other half,
+ * that each compiles to a genuinely locked instruction rather than a
+ * sequence that merely works when nobody is looking, is a question for the
+ * disassembly and is checked there (~/uros-tests/audit-atomics-x86_64.sh).
+ */
+static void atomic_selftest(void)
+{
+	volatile uint64_t w = 100;
+	volatile uint64_t bits = 0;
+	struct atomic128 pair __attribute__((aligned(16))) = { 1, 2 };
+	struct atomic128 expect, fresh;
+	uint64_t old;
+	int ok;
+
+	old = atomic_add64(&w, 5);
+	ok = old == 100 && w == 105;
+
+	old = atomic_cmpxchg64(&w, 105, 200);		/* should win */
+	ok = ok && old == 105 && w == 200;
+
+	old = atomic_cmpxchg64(&w, 105, 300);		/* should lose */
+	ok = ok && old == 200 && w == 200;
+
+	old = atomic_swap64(&w, 7);
+	ok = ok && old == 200 && w == 7;
+
+	ok = ok && atomic_test_and_set_bit(&bits, 3) == 0 && bits == 8;
+	ok = ok && atomic_test_and_set_bit(&bits, 3) == 1;
+	ok = ok && atomic_test_and_clear_bit(&bits, 3) == 1 && bits == 0;
+
+	kputs("UrMach x86-64: atomics add/cmpxchg/swap/bit ");
+	kputs(ok ? "all answer with the value they replaced\r\n" : "WRONG\r\n");
+
+	if (!cpu_has_cmpxchg16b()) {
+		kputs("UrMach x86-64: no cmpxchg16b on this cpu, 128-bit path unusable\r\n");
+		return;
+	}
+
+	expect = (struct atomic128){ 1, 2 };
+	fresh = (struct atomic128){ 3, 4 };
+	ok = atomic_cmpxchg128(&pair, &expect, fresh) == 1
+	     && pair.lo == 3 && pair.hi == 4;
+
+	/* Now lose, and check it hands back what it lost to. */
+	expect = (struct atomic128){ 1, 2 };
+	fresh = (struct atomic128){ 5, 6 };
+	ok = ok && atomic_cmpxchg128(&pair, &expect, fresh) == 0
+	     && expect.lo == 3 && expect.hi == 4
+	     && pair.lo == 3 && pair.hi == 4;
+
+	kputs("UrMach x86-64: cmpxchg16b ");
+	kputs(ok ? "swaps both words, and reports the pair it lost to\r\n"
+		 : "WRONG\r\n");
+}
+
+/*
  * The two places the pmap used to say one thing and do another.
  *
  * Wiring was accepted and dropped on the floor, so a caller asking for a
@@ -1265,6 +1328,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	wx_selftest();
 	user_pmap_selftest();
 
+	atomic_selftest();
 	reclaim_selftest();
 	percpu_selftest();
 	wx_enforcement_selftest();

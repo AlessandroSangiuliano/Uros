@@ -184,6 +184,24 @@ static inline int cpu_has_1gb_pages(void)
 }
 
 /*
+ * A 128-bit compare-exchange, which i386 has no equivalent of at all: it is
+ * what lets a pointer and a counter be swapped as one word, and so what
+ * makes an ABA-safe lock-free structure possible without packing the two
+ * into a single 64-bit value.
+ *
+ * Optional, and genuinely absent on the earliest AMD64 parts — so it is
+ * asked for rather than assumed, like the 1 GiB pages.  Anything relying on
+ * it needs a path for when the answer is no.
+ */
+static inline int cpu_has_cmpxchg16b(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return (c & (1U << 13)) != 0;
+}
+
+/*
  * SMEP and SMAP: the kernel may not execute, respectively may not read or
  * write, a page marked user-accessible.  Both are optional features on a
  * leaf that is itself optional, so ask for the leaf before reading it.

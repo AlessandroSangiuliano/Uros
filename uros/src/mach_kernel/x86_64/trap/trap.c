@@ -189,6 +189,11 @@ static void report_page_fault(uint64_t error)
  *
  * Addresses are absolute, and there is no symbol table on this target yet
  * (#211 built one for i386): resolve them with addr2line against the ELF.
+ *
+ * ⚠️ An optimised build has fewer frames than the source suggests, because an
+ * inlined function leaves none — the trace is still complete, it is the
+ * function that is gone.  A short trace is worth resolving before it is
+ * worth suspecting.
  */
 #define BACKTRACE_MAX	16
 
