@@ -55,7 +55,9 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/phys.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pmap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pv.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/walk.c)
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/walk.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c)
   target_include_directories(mach_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,

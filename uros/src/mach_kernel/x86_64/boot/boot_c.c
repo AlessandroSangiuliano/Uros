@@ -33,24 +33,13 @@
 #include <pmap/pte.h>
 #include <pmap/pv.h>
 #include <pmap/walk.h>
+#include <trap/trap.h>
 
 #define COM1 0x3F8
 
 /* ------------------------------------------------------------------ */
 /*  Minimal polled serial (COM1) — enough to narrate the bring-up.     */
 /* ------------------------------------------------------------------ */
-static inline void outb(uint16_t port, uint8_t val)
-{
-	__asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
-}
-
-static inline uint8_t inb(uint16_t port)
-{
-	uint8_t r;
-	__asm__ volatile("inb %1, %0" : "=a"(r) : "Nd"(port));
-	return r;
-}
-
 static void kputc(char c)
 {
 	while (!(inb(COM1 + 5) & 0x20))		/* wait THR empty */
@@ -978,6 +967,12 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputhex64(magic);
 	kputs("\r\n");
 
+	/* Before anything else that could fault: with no IDT a fault is a
+	 * triple fault and a silent reset, so every check below runs
+	 * unprotected until this is installed. */
+	trap_init();
+	kputs("UrMach x86-64: IDT installed, faults are now reported\r\n");
+
 	pte_selftest();
 	layout_selftest();
 	phys_selftest();
@@ -1013,6 +1008,21 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputs("UrMach x86-64: definitive GDT + TSS installed (RSP0 + IST1), TR=0x18\r\n");
 	kputs("UrMach x86-64: boot contract #406 (1/6) complete\r\n");
 
+	/*
+	 * Last, because the handler does not return: write to .rodata.
+	 *
+	 * Two things are being asked at once.  That the IDT works — the same
+	 * store before this increment produced a triple fault and a silent
+	 * reset.  And that W^X is real: this is the check ch.11 §11.5 could
+	 * not have until now, since proving a page is read-only means
+	 * observing the refusal, and observing anything required a handler.
+	 * The expected report is a page fault, a write from the kernel,
+	 * refused by the mapping rather than absent from it.
+	 */
+	kputs("UrMach x86-64: writing to .rodata on purpose — expect a page fault\r\n");
+	*(volatile uint32_t *)(uintptr_t)&phys_witness = 0;
+
+	kputs("UrMach x86-64: THE WRITE SUCCEEDED — .rodata is not read-only\r\n");
 	for (;;)
 		__asm__ volatile("cli; hlt");
 }
