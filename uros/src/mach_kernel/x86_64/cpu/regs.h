@@ -108,7 +108,21 @@ static inline void write_cr4(uint64_t v)
 /* ------------------------------------------------------------------ */
 /*  Model-specific registers                                            */
 /* ------------------------------------------------------------------ */
-#define MSR_EFER	0xC0000080
+#define MSR_EFER		0xC0000080
+
+/*
+ * The segment bases that long mode keeps in MSRs rather than in descriptors.
+ *
+ * ⚠️ Loading %fs or %gs as a segment register zeroes the corresponding base,
+ * so these must be written after any such load, not before.
+ *
+ * IA32_KERNEL_GS_BASE is the other half of the pair swapgs exchanges with
+ * IA32_GS_BASE: the kernel's per-CPU pointer is parked there while user code
+ * runs, and one instruction on entry brings it back.
+ */
+#define MSR_FS_BASE		0xC0000100
+#define MSR_GS_BASE		0xC0000101
+#define MSR_KERNEL_GS_BASE	0xC0000102
 
 #define EFER_SCE	(1UL << 0)	/* SYSCALL/SYSRET enabled (#411)     */
 #define EFER_LME	(1UL << 8)	/* long mode enabled  (boot.S sets)  */

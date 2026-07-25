@@ -24,6 +24,7 @@
 #include <stdint.h>
 
 #include <boot/multiboot2.h>
+#include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
 #include <pmap/bootmem.h>
@@ -989,6 +990,67 @@ static void load_gdt(void)
 }
 
 /*
+ * Bring up this CPU's block and show %gs actually reaches it.
+ *
+ * Runs late by necessity: the block is a mapped page, so it needs the frame
+ * allocator and the kernel pmap, neither of which exists at the point the
+ * descriptor tables go in.  Placing it earlier had percpu_init() find no
+ * frame and return without writing the MSR, leaving %gs based at zero —
+ * where the boot identity map still has something readable, so %gs:0
+ * returned BIOS data instead of faulting.  Exactly the quiet failure the
+ * header warns about, and it took the check to see it.
+ *
+ * The base is read before and after on purpose: the GDT setup loads %gs as
+ * a segment register, and in long mode that zeroes the hidden base, so a
+ * per-CPU area established earlier would have been silently thrown away.
+ * Seeing zero first is that ordering rule being demonstrated rather than
+ * asserted in a comment.
+ *
+ * swapgs is then exercised on its own.  It cannot be tested where it
+ * matters — that is kernel entry from ring 3, which does not exist yet — but
+ * the instruction and the MSR pairing can be: swap, and %gs holds what
+ * IA32_KERNEL_GS_BASE held; swap back, and it is the block again.
+ */
+static void percpu_selftest(void)
+{
+	uint64_t before = rdmsr(MSR_GS_BASE);
+	struct percpu *p;
+	uint64_t swapped, restored;
+
+	percpu_init(0);
+	p = percpu();
+
+	kputs("UrMach x86-64: gs base was ");
+	kputhex64(before);
+	kputs(" after the GDT load, now ");
+	kputhex64(rdmsr(MSR_GS_BASE));
+	kputs(before == 0 ? " — the segment load had cleared it\r\n"
+			  : " — UNEXPECTED, it was not cleared\r\n");
+
+	kputs("UrMach x86-64: per-cpu block at ");
+	kputhex64((uint64_t)(uintptr_t)p);
+	kputs(", cpu_id ");
+	kputdec(p->cpu_id);
+	kputs((uint64_t)(uintptr_t)p == PERCPU_BASE && p->cpu_id == 0
+	      ? ", reached through %gs\r\n" : ", WRONG\r\n");
+
+	/* Park a recognisable value in the other half, then swap to it. */
+	wrmsr(MSR_KERNEL_GS_BASE, 0xdead0000);
+	__asm__ volatile("swapgs" ::: "memory");
+	swapped = rdmsr(MSR_GS_BASE);
+	__asm__ volatile("swapgs" ::: "memory");
+	restored = rdmsr(MSR_GS_BASE);
+	wrmsr(MSR_KERNEL_GS_BASE, (uint64_t)(uintptr_t)p);
+
+	kputs("UrMach x86-64: swapgs took gs to ");
+	kputhex64(swapped);
+	kputs(" and back to ");
+	kputhex64(restored);
+	kputs(swapped == 0xdead0000 && restored == (uint64_t)(uintptr_t)p
+	      ? ", the pair exchanges as it should\r\n" : ", WRONG\r\n");
+}
+
+/*
  * Fire one exception of each family and check what came back.
  *
  * Every stub was given its error-code convention by hand from the manual;
@@ -1148,6 +1210,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	wx_selftest();
 	user_pmap_selftest();
 
+	percpu_selftest();
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
 	double_fault_selftest();
