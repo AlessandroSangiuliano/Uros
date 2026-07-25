@@ -36,6 +36,17 @@ void boot_frame_init(uint32_t info_pa);
  */
 uint64_t boot_frame_alloc(void);
 
+/*
+ * Physical address of `count` consecutive zeroed frames, or zero if no one
+ * region still has that many left.
+ *
+ * Consecutive matters: something indexed by page number has to be one array,
+ * and through the direct map physically contiguous frames are contiguous
+ * virtually too — so a big table needs no mapping of its own, only frames
+ * that sit together.
+ */
+uint64_t boot_frames_alloc(uint64_t count);
+
 uint64_t boot_frames_used(void);
 uint64_t boot_frames_total(void);
 

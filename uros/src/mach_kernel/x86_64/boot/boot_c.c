@@ -31,6 +31,7 @@
 #include <pmap/map.h>
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
+#include <pmap/pv.h>
 #include <pmap/walk.h>
 
 #define COM1 0x3F8
@@ -569,6 +570,63 @@ static void pmap_verbs_selftest(void)
 	kputs(got == 0 ? ", gone\r\n" : ", STILL MAPPED?!\r\n");
 }
 
+/*
+ * Build the physical index, then put one physical page into three mappings
+ * across two address spaces and check the index can name them all — that is
+ * the question the page tables cannot answer, and the reason it exists.
+ *
+ * The third mapping matters on its own: the head of a list is an entry, so
+ * the first mapping costs no allocation and only the ones after it come off
+ * the free list.  Removing the head is the awkward case, since the head
+ * cannot move — its address is what identifies the page — so its successor
+ * has to be copied up into it.
+ */
+static void pv_selftest(uint32_t info)
+{
+	pmap_t k = pmap_kernel();
+	pmap_t u;
+	uint64_t frame;
+	uint64_t va1 = KERNEL_HEAP_BASE + 0x10000;
+	uint64_t va2 = KERNEL_HEAP_BASE + 0x11000;
+	uint64_t uva = 0x0000000200000000ULL;
+
+	pv_bootstrap(mb2_top_of_ram(info));
+
+	frame = boot_frame_alloc();
+	kputs("UrMach x86-64: pv index covers ");
+	kputhex64(frame);
+	kputs(pv_managed(frame) ? ", page is managed" : ", NOT MANAGED");
+	kputs(pv_count(frame) == 0 ? ", no mappings yet\r\n"
+				   : ", ALREADY MAPPED?!\r\n");
+
+	u = pmap_create(0);
+	pmap_enter(k, va1, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+	pmap_enter(k, va2, frame, VM_PROT_READ, 0);
+	pmap_enter(u, uva, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+
+	kputs("UrMach x86-64: one page mapped three ways -> pv_count ");
+	kputdec(pv_count(frame));
+	kputs(pv_count(frame) == 3 ? ", all three found\r\n" : ", WRONG\r\n");
+
+	/* Drop the head's own mapping; the other two must survive it. */
+	pmap_remove(k, va1, va1 + PAGE_SIZE_4K);
+	kputs("UrMach x86-64: removed the head mapping -> pv_count ");
+	kputdec(pv_count(frame));
+	kputs(pv_count(frame) == 2
+	      && pmap_extract(k, va2) == frame
+	      && pmap_extract(u, uva) == frame
+	      ? ", the other two intact\r\n" : ", WRONG\r\n");
+
+	pmap_remove(k, va2, va2 + PAGE_SIZE_4K);
+	pmap_remove(u, uva, uva + PAGE_SIZE_4K);
+	kputs("UrMach x86-64: removed the rest -> pv_count ");
+	kputdec(pv_count(frame));
+	kputs(pv_count(frame) == 0 ? ", page is free of mappings\r\n"
+				   : ", STILL LISTED\r\n");
+
+	pmap_destroy(u);
+}
+
 /* A mutable global — lands in .bss, the writable region. */
 static volatile uint32_t wx_data_probe;
 
@@ -783,6 +841,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	split_selftest();
 	pmap_selftest();
 	pmap_verbs_selftest();
+	pv_selftest(info);
 	wx_selftest();
 	user_pmap_selftest();
 

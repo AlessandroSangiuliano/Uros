@@ -13,6 +13,7 @@
 #include <pmap/map.h>
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
+#include <pmap/pv.h>
 #include <pmap/walk.h>
 
 /*
@@ -124,9 +125,33 @@ void pmap_activate(pmap_t pmap)
 		write_cr3(pmap->root_pa);
 }
 
+/*
+ * Drop the mapping at va and forget it in the physical index too.  Returns
+ * the size removed, or zero if there was nothing there.
+ *
+ * The index is only told about pages it tracks: a large mapping is the
+ * kernel's own — the direct map, the image — and belongs to no VM object, so
+ * nothing will ever ask which pmaps hold it.
+ */
+static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
+{
+	uint64_t pa = 0;
+	uint64_t size;
+
+	pmap_resolve(pmap->root_pa, va, &pa, 0);
+	size = pmap_unmap_page(pmap->root_pa, va);
+
+	if (size == PAGE_SIZE_4K)
+		pv_remove(pa, pmap, va);
+
+	return size;
+}
+
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired)
 {
+	int rc;
+
 	/*
 	 * Wired is MI bookkeeping — a page the pager may not reclaim — with no
 	 * effect on the hardware entry, so it is recorded on the MI side, not
@@ -135,11 +160,24 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	(void)wired;
 
 	if (prot == VM_PROT_NONE) {
-		pmap_unmap_page(pmap->root_pa, va);
+		pmap_forget(pmap, va);
 		return PMAP_MAP_OK;
 	}
 
-	return pmap_map_page(pmap->root_pa, va, pa, pmap_flags_for_prot(prot));
+	/*
+	 * Whatever was here before is no longer mapped at this address, so the
+	 * index must lose that entry before it gains the new one — otherwise
+	 * replacing a mapping would leave the old page believing it still had
+	 * one, and a later page_protect would walk to an address that no
+	 * longer names it.
+	 */
+	pmap_forget(pmap, va);
+
+	rc = pmap_map_page(pmap->root_pa, va, pa, pmap_flags_for_prot(prot));
+	if (rc == PMAP_MAP_OK)
+		pv_enter(pa, pmap, va);
+
+	return rc;
 }
 
 uint64_t pmap_extract(pmap_t pmap, uint64_t va)
@@ -158,7 +196,7 @@ uint64_t pmap_extract(pmap_t pmap, uint64_t va)
 void pmap_remove(pmap_t pmap, uint64_t s, uint64_t e)
 {
 	while (s < e) {
-		uint64_t sz = pmap_unmap_page(pmap->root_pa, s);
+		uint64_t sz = pmap_forget(pmap, s);
 
 		s += sz ? sz : PAGE_SIZE_4K;
 	}
@@ -172,7 +210,7 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 		uint64_t sz;
 
 		if (prot == VM_PROT_NONE)
-			sz = pmap_unmap_page(pmap->root_pa, s);
+			sz = pmap_forget(pmap, s);
 		else
 			sz = pmap_protect_page(pmap->root_pa, s, flags);
 

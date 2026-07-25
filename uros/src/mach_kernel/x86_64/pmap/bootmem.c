@@ -120,31 +120,57 @@ void boot_frame_init(uint32_t info_pa)
 	}
 }
 
-uint64_t boot_frame_alloc(void)
+uint64_t boot_frames_alloc(uint64_t count)
 {
-	uint64_t pa;
-	volatile uint64_t *frame;
+	uint64_t pa, bytes = count * PAGE_SIZE_4K;
+	volatile uint64_t *frames;
 
-	while (current < nregions && regions[current].next >= regions[current].end)
-		current++;
-
-	if (current >= nregions)
+	if (count == 0)
 		return 0;
 
-	pa = regions[current].next;
-	regions[current].next += PAGE_SIZE_4K;
-	frames_used++;
+	/* Retire regions that are spent; they will never serve again. */
+	while (current < nregions
+	       && regions[current].next >= regions[current].end)
+		current++;
+
+	/*
+	 * Then take the run from the first region with room for all of it —
+	 * consecutive is the point, and a run cannot straddle the gap between
+	 * two regions.  Searching rather than advancing past the ones that are
+	 * merely too small keeps their remainder available to the next request
+	 * that does fit.
+	 */
+	{
+		unsigned i = current;
+
+		while (i < nregions
+		       && regions[i].end - regions[i].next < bytes)
+			i++;
+
+		if (i >= nregions)
+			return 0;
+
+		pa = regions[i].next;
+		regions[i].next += bytes;
+	}
+
+	frames_used += count;
 
 	/*
 	 * Clear it through the direct map.  A page table with a stale entry
 	 * is far worse than a bad pointer: it sends the hardware walking into
 	 * memory nobody accounted for.
 	 */
-	frame = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
-	for (unsigned i = 0; i < PAGE_SIZE_4K / sizeof(uint64_t); i++)
-		frame[i] = 0;
+	frames = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
+	for (uint64_t i = 0; i < bytes / sizeof(uint64_t); i++)
+		frames[i] = 0;
 
 	return pa;
+}
+
+uint64_t boot_frame_alloc(void)
+{
+	return boot_frames_alloc(1);
 }
 
 uint64_t boot_frames_used(void)
