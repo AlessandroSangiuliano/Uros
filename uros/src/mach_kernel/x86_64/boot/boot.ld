@@ -81,6 +81,17 @@ SECTIONS
 		*(.rodata.*)
 	} :krodata
 
+	/*
+	 * The AP trampoline travels in the image and is copied to a page
+	 * below 1 MiB before use.  It is never executed from here — read-only
+	 * is the right home for something that is only ever a source.
+	 */
+	.trampoline ALIGN(16) : AT(ADDR(.trampoline) - KERNEL_VBASE) {
+		__trampoline_start = .;
+		*(.trampoline)
+		__trampoline_end = .;
+	} :krodata
+
 	. = ALIGN(4096);
 	__krodata_end = .;
 	__kdata_start = .;

@@ -16,11 +16,15 @@
 #include <pmap/pte.h>
 #include <trap/trap.h>
 
-void percpu_init(uint32_t cpu_id)
+static uint64_t percpu_va(uint32_t cpu_id)
 {
-	uint64_t va = PERCPU_BASE + (uint64_t)cpu_id * PAGE_SIZE_4K;
+	return PERCPU_BASE + (uint64_t)cpu_id * PAGE_SIZE_4K;
+}
+
+void percpu_alloc(uint32_t cpu_id)
+{
+	uint64_t va = percpu_va(cpu_id);
 	uint64_t frame = boot_frame_alloc();
-	struct percpu *p;
 
 	/*
 	 * Returning here would leave %gs based at zero — which the boot
@@ -39,9 +43,18 @@ void percpu_init(uint32_t cpu_id)
 	 */
 	if (pmap_enter(pmap_kernel(), va, frame,
 		       VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK)
-		panic("percpu: could not map this CPU's block");
+		panic("percpu: could not map a CPU's block");
+}
 
-	p = (struct percpu *)(uintptr_t)va;
+void percpu_activate(uint32_t cpu_id)
+{
+	uint64_t va = percpu_va(cpu_id);
+	struct percpu *p = (struct percpu *)(uintptr_t)va;
+
+	/*
+	 * The page is already mapped — by the boot processor, before this one
+	 * was woken — so nothing here touches shared page tables.
+	 */
 	p->self = p;
 	p->cpu_id = cpu_id;
 

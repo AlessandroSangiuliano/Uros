@@ -34,14 +34,25 @@ struct percpu {
 };
 
 /*
- * Build this CPU's block and point %gs at it.
+ * Two halves, and the split is not tidiness.
  *
- * ⚠️ Must run after the last load of %gs as a segment register — the GDT
- * setup does one — because that zeroes the base this then writes.  Ordering
- * the other way leaves %gs:0 reading address zero, which is mapped early in
- * boot and so fails quietly rather than faulting.
+ * percpu_alloc() maps a processor's page, which means editing the kernel's
+ * page tables.  percpu_activate() fills the block and points %gs at it,
+ * which touches only that processor's own page and its own MSR.
+ *
+ * If a processor did both for itself on the way in, every one of them would
+ * be editing the same page tables at the same moment — two arriving
+ * together could both find an intermediate table missing and both build
+ * one.  So the boot processor allocates for everybody before waking anyone,
+ * and an arriving processor only activates.  Prepare, then release.
+ *
+ * ⚠️ percpu_activate() must run after the last load of %gs as a segment
+ * register — the GDT setup does one — because that zeroes the base it
+ * writes.  Ordered the other way, %gs:0 reads address zero, which early in
+ * boot is mapped, so it fails quietly rather than faulting.
  */
-void percpu_init(uint32_t cpu_id);
+void percpu_alloc(uint32_t cpu_id);
+void percpu_activate(uint32_t cpu_id);
 
 /* This CPU's block, via the pointer it keeps at offset zero. */
 static inline struct percpu *percpu(void)

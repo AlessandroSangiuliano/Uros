@@ -27,6 +27,7 @@
 #include <cpu/acpi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
+#include <cpu/smp.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
 #include <pmap/bootmem.h>
@@ -1247,7 +1248,8 @@ static void percpu_selftest(void)
 	struct percpu *p;
 	uint64_t swapped, restored;
 
-	percpu_init(0);
+	percpu_alloc(0);
+	percpu_activate(0);
 	p = percpu();
 
 	kputs("UrMach x86-64: gs base was ");
@@ -1444,6 +1446,34 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	atomic_selftest();
 	reclaim_selftest();
 	percpu_selftest();
+	{
+		unsigned asked = acpi_usable_cpu_count();
+		unsigned up = smp_start_others();
+
+		kputs("UrMach x86-64: woke ");
+		kputdec(asked ? asked - 1 : 0);
+		kputs(" processors, ");
+		kputdec(up);
+		kputs(" reported in — ");
+		kputdec(smp_online_count());
+		kputs(" online\r\n");
+
+		if (asked > 1) {
+			kputs("UrMach x86-64:   awake:");
+			for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+				const struct acpi_cpu *c = acpi_cpu(i);
+
+				if (c->apic_id == lapic_id())
+					continue;
+				kputs(" ");
+				kputdec(c->apic_id);
+				if (!smp_is_online(c->apic_id))
+					kputs("(silent)");
+			}
+			kputs("\r\n");
+		}
+	}
+
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
 	double_fault_selftest();
