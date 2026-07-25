@@ -78,4 +78,33 @@ void trap_init(void);
 /* Entry from the assembly stubs. */
 void trap_dispatch(struct trap_frame *frame);
 
+/*
+ * Arrange for one expected fault to be survived rather than reported and
+ * halted on: if the next trap is `vector`, the handler rewrites the return
+ * address to `resume_rip` and returns, so execution continues there instead
+ * of at the instruction that faulted.
+ *
+ * The kernel already needs this shape of thing on i386, where copyin and
+ * copyout recover from faults on user addresses rather than dying with them
+ * (i386/trap.c). This is the same idea at its smallest: one armed
+ * expectation, cleared as soon as it fires, with none of the address-range
+ * table that the real mechanism will want.
+ *
+ * It is also what lets a deliberate fault be a test instead of the end of
+ * the boot — a protection can only be shown to hold by provoking it.
+ */
+void trap_expect(uint64_t vector, uint64_t resume_rip);
+
+/*
+ * Store a zero at `addr` and report whether the machine allowed it: 0 if
+ * the store completed, 1 if it faulted.  Arm trap_expect() with
+ * trap_probe_faulted first — this is the store, not the arrangement to
+ * survive it.
+ *
+ * The pair lives in trap/entry.S, where the resume point can be a symbol
+ * rather than a label the compiler is entitled to optimise away.
+ */
+int trap_probe_write(volatile void *addr);
+extern char trap_probe_faulted[];
+
 #endif	/* _X86_64_TRAP_TRAP_H_ */

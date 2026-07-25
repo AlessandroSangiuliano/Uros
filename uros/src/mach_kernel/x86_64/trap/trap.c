@@ -144,8 +144,56 @@ static void report_page_fault(uint64_t error)
 	tputs("\r\n");
 }
 
+/*
+ * One armed expectation.  Not a stack: a fault while recovering from a
+ * fault is not something to paper over, and leaving the second one to be
+ * reported and halted on is the honest outcome.
+ */
+static uint64_t expect_vector;
+static uint64_t expect_resume;
+static int expect_armed;
+
+void trap_expect(uint64_t vector, uint64_t resume_rip)
+{
+	expect_vector = vector;
+	expect_resume = resume_rip;
+	expect_armed = 1;
+}
+
 void trap_dispatch(struct trap_frame *frame)
 {
+	if (expect_armed && frame->vector == expect_vector) {
+		/*
+		 * Disarm first.  If resuming faults again the expectation is
+		 * already spent, so the second one is reported rather than
+		 * looping through this same path forever.
+		 */
+		expect_armed = 0;
+
+		tputs("UrMach x86-64: expected ");
+		tputs(trap_name(frame->vector));
+		tputs(" (error ");
+		tputhex(frame->error);
+		if (frame->vector == T_PAGE_FAULT) {
+			tputs(", at ");
+			tputhex(read_cr2());
+			tputs(frame->error & PF_PRESENT
+			      ? ", refused by the mapping"
+			      : ", nothing mapped there");
+		}
+		tputs(") — resuming\r\n");
+
+		/*
+		 * The frame is what iretq will reload, so changing the saved
+		 * instruction pointer changes where the return lands.  The
+		 * stack pointer is untouched, which is why the resume point
+		 * has to be inside the function that armed this: its frame is
+		 * still exactly as the faulting instruction left it.
+		 */
+		frame->rip = expect_resume;
+		return;
+	}
+
 	tputs("\r\nUrMach x86-64: trap ");
 	tputs(trap_name(frame->vector));
 	tputs(" (vector ");

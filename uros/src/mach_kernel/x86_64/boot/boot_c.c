@@ -882,6 +882,43 @@ static void user_pmap_selftest(void)
 						   : "STILL HELD?!\r\n");
 }
 
+/*
+ * Provoke the protection rather than assert it.  A read-only page can only
+ * be shown to be read-only by writing to it and being refused, which needs
+ * both a handler to see the refusal and a way to carry on afterwards.
+ *
+ * The resume point is a label in this same function on purpose: iretq
+ * restores the stack pointer along with the instruction pointer, so the
+ * frame the faulting store left behind is still exactly right — landing
+ * anywhere else would be landing on someone else's stack.
+ */
+static void wx_enforcement_selftest(void)
+{
+	volatile void *ro = (volatile void *)(uintptr_t)&phys_witness;
+	volatile void *rw = (volatile void *)&wx_data_probe;
+	int refused;
+
+	kputs("UrMach x86-64: writing to .rodata on purpose\r\n");
+	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+	refused = trap_probe_write(ro);
+
+	kputs("UrMach x86-64: W^X ");
+	kputs(refused ? "holds — the store was refused, and we resumed\r\n"
+		      : "BROKEN — the store to .rodata succeeded\r\n");
+
+	/*
+	 * The same probe against a writable page, so the result above is
+	 * known to mean something: a probe that reported refusal whatever it
+	 * was given would say nothing about .rodata.
+	 */
+	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
+	refused = trap_probe_write(rw);
+
+	kputs("UrMach x86-64: the same probe on .bss ");
+	kputs(refused ? "was ALSO refused — the probe proves nothing\r\n"
+		      : "went through, so the refusal above was real\r\n");
+}
+
 /* ------------------------------------------------------------------ */
 /*  GDT + TSS                                                           */
 /* ------------------------------------------------------------------ */
@@ -1008,21 +1045,8 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputs("UrMach x86-64: definitive GDT + TSS installed (RSP0 + IST1), TR=0x18\r\n");
 	kputs("UrMach x86-64: boot contract #406 (1/6) complete\r\n");
 
-	/*
-	 * Last, because the handler does not return: write to .rodata.
-	 *
-	 * Two things are being asked at once.  That the IDT works — the same
-	 * store before this increment produced a triple fault and a silent
-	 * reset.  And that W^X is real: this is the check ch.11 §11.5 could
-	 * not have until now, since proving a page is read-only means
-	 * observing the refusal, and observing anything required a handler.
-	 * The expected report is a page fault, a write from the kernel,
-	 * refused by the mapping rather than absent from it.
-	 */
-	kputs("UrMach x86-64: writing to .rodata on purpose — expect a page fault\r\n");
-	*(volatile uint32_t *)(uintptr_t)&phys_witness = 0;
+	wx_enforcement_selftest();
 
-	kputs("UrMach x86-64: THE WRITE SUCCEEDED — .rodata is not read-only\r\n");
 	for (;;)
 		__asm__ volatile("cli; hlt");
 }

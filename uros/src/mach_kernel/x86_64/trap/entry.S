@@ -120,6 +120,33 @@ trap_common:
 	iretq
 
 /*
+ * trap_probe_write(addr) — store a zero at addr and report whether the
+ * machine allowed it.  Returns 0 when the store completed and 1 when it
+ * faulted, the handler having been told to resume at trap_probe_faulted.
+ *
+ * In assembly on purpose.  The obvious C version — take the address of a
+ * label, arm the handler with it, fault, resume there — is exactly the case
+ * the compiler manual warns about: a label whose address escapes into
+ * another function is not reachable in the control-flow graph, so the block
+ * is optimised away and the address resolves to whatever is nearby.  It did
+ * here, landing back in the prologue and looping.
+ *
+ * Two instructions and a known symbol have no such opinions.  The resume
+ * point is in this same frame, which is what makes the return safe: iretq
+ * restores the stack pointer too, and nothing here has moved it.
+ */
+	.globl	trap_probe_write
+	.globl	trap_probe_faulted
+	.align	16
+trap_probe_write:
+	movl	$0, (%rdi)
+	xorl	%eax, %eax		/* the store was allowed */
+	ret
+trap_probe_faulted:
+	movl	$1, %eax		/* the store was refused */
+	ret
+
+/*
  * The stub addresses, in vector order, so trap_init() can install them
  * without needing thirty-two declarations of things that differ only by a
  * number.
