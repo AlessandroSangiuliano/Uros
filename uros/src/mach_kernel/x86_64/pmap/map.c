@@ -12,6 +12,7 @@
 #include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pte.h>
+#include <pmap/tlb.h>
 #include <pmap/walk.h>
 #include <trap/trap.h>
 
@@ -62,6 +63,7 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags)
 	pt_entry_t *table = table_at(root_pa);
 	pt_entry_t *entry;
 	int err = PMAP_MAP_OK;
+	int replaced;
 
 	entry = &table[pml4_index(va)];
 	table = next_table(entry, &err);
@@ -79,18 +81,23 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags)
 		return err;
 
 	entry = &table[pt_index(va)];
+	replaced = pte_is_valid(*entry);
 	*entry = pa_to_pte(pa) | INTEL_PTE_VALID | flags;
 
 	/*
-	 * Local only.  Under SMP this store also has to be ordered against
-	 * the other CPUs' views, which is the shootdown — and the barrier that
-	 * makes it correct was proved necessary and sufficient under x86-TSO
-	 * with herd7 in #350.  x86-64 is still x86-TSO, so that proof carries
-	 * across unchanged.  Worth saying out loud: it is the one place the
-	 * second architecture costs us nothing, and the next one will not be
-	 * so kind.
+	 * Only a mapping that existed can be stale somewhere else.  The
+	 * architecture does not create a cached translation for an entry that
+	 * was not present, so filling an empty slot has nothing to revoke and
+	 * needs no message — and messages are what the whole machine waits on.
+	 *
+	 * The local invalidation is kept in both cases: it is one instruction,
+	 * and it covers implementations that cache the absence of a mapping as
+	 * well as its presence.
 	 */
 	invlpg(va);
+	if (replaced)
+		tlb_flush_range(va, PAGE_SIZE_4K);
+
 	return PMAP_MAP_OK;
 }
 
@@ -103,7 +110,7 @@ uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
 		return 0;
 
 	*entry = 0;
-	invlpg(va);
+	tlb_flush_range(va, size);
 	return size;
 }
 
@@ -116,7 +123,7 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 		return 0;
 
 	*entry = (*entry & ~INTEL_PTE_PERM) | (flags & INTEL_PTE_PERM);
-	invlpg(va);
+	tlb_flush_range(va, size);
 	return size;
 }
 
@@ -169,13 +176,15 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	*entry = table_pa | INTEL_PTE_VALID | INTEL_PTE_WRITE;
 
 	/*
-	 * One TLB entry covered the whole large page, and invlpg would only
-	 * clear it for one sub-page's worth of addresses — the rest could
-	 * keep hitting the stale large translation.  A CR3 reload drops every
-	 * non-global entry at once; the direct map is not global, so this
-	 * reaches it.  Split is rare and this is bootstrap, so the blunt tool
-	 * is the right one.
+	 * One TLB entry covered the whole large page, and naming one sub-page
+	 * would clear it for that address alone — the rest could keep hitting
+	 * the stale large translation.  So the whole table goes, everywhere.
+	 *
+	 * Everywhere is the new part: on one processor this was a CR3 reload,
+	 * which is still what happens locally, but a large page other
+	 * processors have walked is stale on them too.  Split is rare and this
+	 * is bootstrap, so the blunt tool remains the right one.
 	 */
-	write_cr3(read_cr3());
+	tlb_flush_all();
 	return sub_size;
 }

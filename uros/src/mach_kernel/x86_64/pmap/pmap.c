@@ -14,8 +14,9 @@
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
 #include <pmap/pv.h>
-#include <trap/trap.h>
+#include <pmap/tlb.h>
 #include <pmap/walk.h>
+#include <trap/trap.h>
 
 /*
  * The kernel pmap is a single object, not allocated: it has to exist before
@@ -416,8 +417,12 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 * accessed without a flush would leave it clear however often
 		 * the page is touched, and the pager would read that as a page
 		 * nobody wants.
+		 *
+		 * On every processor, for the same reason: it is the processor
+		 * holding the cached translation that will fail to record the
+		 * next touch, and that is exactly the one this did not run on.
 		 */
-		invlpg(pv->va);
+		tlb_flush_page(pv->va);
 	}
 }
 
