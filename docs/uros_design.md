@@ -795,7 +795,23 @@ This is why the roadmap has always said x86-64 is the real performance jump, not
   bases are symbolic (§11.3), so KASLR is a later drop-in, not a rewrite — the
   same discipline as five-level paging.
 
-### 11.6 KPTI, chosen at runtime per CPU
+### 11.6 Memory model: the one thing that does not change
+
+x86-64 is x86-TSO, exactly as i386 is. Store→load remains the only
+reordering the hardware performs, so every cross-CPU protocol written
+against §10.5 keeps its reasoning, and the herd7 suite in
+`uros/tools/litmus/` keeps its verdicts — the proof that the pmap shootdown
+barrier is necessary *and* sufficient (#350) is inherited rather than
+redone. The suite runs green against the x86-64 kernel.
+
+This is the only contract in the port that costs nothing, and saying so is
+the point: the same code on a weakly-ordered architecture would need
+acquire/release where this one needs a single fence per side. Barriers in
+the x86-64 tree are therefore documented by **what they order**, never by
+which instruction they emit (#410) — the instruction is what changes on the
+day a weak model arrives, and the claim is what has to survive it.
+
+### 11.7 KPTI, chosen at runtime per CPU
 
 The shared higher-half design that buys the performance above is exactly the
 condition Meltdown (rogue data-cache load) exploits: userspace speculating
