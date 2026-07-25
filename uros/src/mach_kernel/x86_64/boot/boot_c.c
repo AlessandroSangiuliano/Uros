@@ -740,6 +740,25 @@ static void wx_selftest(void)
 	kputs("UrMach x86-64: still executing .text, wrote .data = ");
 	kputhex64(wx_data_probe);
 	kputs(wx_data_probe == 0x1234 ? ", W^X live\r\n" : ", WRONG\r\n");
+
+	/*
+	 * The rest of the posture.  Each is reported as offered or not,
+	 * because "enabled" on a CPU that does not have it would be a comfort
+	 * rather than a protection — and the emulator's default model does not
+	 * offer them, which is worth seeing.
+	 */
+	{
+		uint64_t on = pmap_enable_smep_smap();
+		uint64_t cr4 = read_cr4();
+
+		kputs("UrMach x86-64: SMEP ");
+		kputs(!cpu_has_smep() ? "not offered by this cpu"
+		      : (cr4 & CR4_SMEP) ? "on" : "OFFERED BUT OFF");
+		kputs(", SMAP ");
+		kputs(!cpu_has_smap() ? "not offered by this cpu"
+		      : (cr4 & CR4_SMAP) ? "on" : "OFFERED BUT OFF");
+		kputs((on & cr4) == on ? "\r\n" : " MISMATCH\r\n");
+	}
 }
 
 /*

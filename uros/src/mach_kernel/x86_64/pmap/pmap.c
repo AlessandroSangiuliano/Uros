@@ -358,3 +358,29 @@ void pmap_protect_kernel(void)
 	 */
 	write_cr0(read_cr0() | CR0_WP);
 }
+
+uint64_t pmap_enable_smep_smap(void)
+{
+	uint64_t want = 0;
+
+	if (cpu_has_smep())
+		want |= CR4_SMEP;
+
+	/*
+	 * SMAP is safe to turn on now precisely because nothing yet sets the
+	 * user bit in a page-table entry: pmap_flags_for_prot() has no case
+	 * for it, so the lower-half mappings this kernel makes are supervisor
+	 * pages that SMAP does not police.  When mappings that userland can
+	 * reach do arrive, the kernel paths that deliberately read or write
+	 * them will need stac and clac around the access — and will fault
+	 * loudly if they forget, which is the point of turning it on early
+	 * rather than once there is something to break.
+	 */
+	if (cpu_has_smap())
+		want |= CR4_SMAP;
+
+	if (want)
+		write_cr4(read_cr4() | want);
+
+	return want;
+}

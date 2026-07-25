@@ -168,4 +168,16 @@ void pmap_set_modify(uint64_t pa);
  */
 void pmap_protect_kernel(void);
 
+/*
+ * The other half of the protection posture of ch.11 §11.5: SMEP and SMAP,
+ * which stop the kernel executing or touching user pages even where it has
+ * been tricked into holding a user pointer.  W^X protects the kernel's own
+ * image from being rewritten; these protect it from running or trusting
+ * memory the other side controls.
+ *
+ * Both are optional in the hardware, so each is enabled only where the CPU
+ * offers it.  Returns the CR4 bits it actually turned on.
+ */
+uint64_t pmap_enable_smep_smap(void);
+
 #endif	/* _X86_64_PMAP_PMAP_H_ */

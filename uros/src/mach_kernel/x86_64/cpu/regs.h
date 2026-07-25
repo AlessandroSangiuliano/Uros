@@ -154,6 +154,39 @@ static inline int cpu_has_1gb_pages(void)
 	return (d & (1U << 26)) != 0;		/* PDPE1GB */
 }
 
+/*
+ * SMEP and SMAP: the kernel may not execute, respectively may not read or
+ * write, a page marked user-accessible.  Both are optional features on a
+ * leaf that is itself optional, so ask for the leaf before reading it.
+ *
+ * SMAP has a deliberate escape — the AC flag, set and cleared by stac and
+ * clac — for the places the kernel really does mean to touch user memory.
+ * Nothing needs it yet: no mapping this kernel makes sets the user bit.
+ */
+static inline int cpu_has_smep(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+	if (a < 7)
+		return 0;
+
+	cpuid_count(7, 0, &a, &b, &c, &d);
+	return (b & (1U << 7)) != 0;
+}
+
+static inline int cpu_has_smap(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+	if (a < 7)
+		return 0;
+
+	cpuid_count(7, 0, &a, &b, &c, &d);
+	return (b & (1U << 20)) != 0;
+}
+
 /* Fills a 13-byte buffer with the NUL-terminated vendor string. */
 static inline void cpu_vendor(char *out13)
 {
