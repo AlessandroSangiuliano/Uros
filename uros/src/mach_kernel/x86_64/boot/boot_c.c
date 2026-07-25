@@ -40,6 +40,7 @@
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
 #include <pmap/pv.h>
+#include <pmap/tlb.h>
 #include <pmap/walk.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
@@ -1531,6 +1532,152 @@ static void ipi_selftest(void)
 }
 
 /*
+ * The shootdown, and the reason there has to be one.
+ *
+ * This is the acceptance criterion #407 has been waiting on, and it is the
+ * one thing in the pmap that cannot be demonstrated on a single processor —
+ * because the failure it prevents is another processor continuing to use a
+ * translation that this one has taken away, and with one processor there is
+ * no other processor.
+ *
+ * So the test is an experiment with a control, in three steps.
+ *
+ *   1. Map an address to a frame holding a recognisable value, and have
+ *      every other processor read it.  That is what puts the translation
+ *      into their caches; without this step the rest proves nothing,
+ *      because there would be nothing stale to find.
+ *
+ *   2. Point the entry at a different frame, holding a different value, and
+ *      tell nobody.  Read it again everywhere.  A processor that still
+ *      reports the old value is using a translation that no longer exists —
+ *      the bug, reproduced deliberately.
+ *
+ *   3. Do it properly, with the shootdown, and read once more.
+ *
+ * The entry is edited by hand rather than through pmap_enter(), and that is
+ * deliberate: the verbs will shortly do the shootdown themselves, and a
+ * control that went through them would stop being a control the moment they
+ * did.  What step 2 needs is a change that genuinely tells nobody.
+ *
+ * If step 2 comes back clean, this machine did not keep the stale entry —
+ * which is a fact about the machine and not a pass.  Emulators differ here.
+ * It is reported as what it is, rather than counted as a success.
+ */
+#define STALE_WITNESS	0xA1A1A1A1A1A1A1A1ULL
+#define FRESH_WITNESS	0xB2B2B2B2B2B2B2B2ULL
+
+struct tlb_probe {
+	uint64_t va;
+	volatile uint64_t seen[SMP_MAX_CPUS];
+};
+
+static void tlb_probe_read(void *arg)
+{
+	struct tlb_probe *p = arg;
+
+	p->seen[cpu_apic_id()] = *(volatile uint64_t *)(uintptr_t)p->va;
+}
+
+/* How many other processors reported `want`, and how many reported anything. */
+static unsigned tlb_probe_count(const struct tlb_probe *p, uint64_t want,
+				uint32_t self)
+{
+	unsigned n = 0;
+
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (c->apic_id == self || !smp_is_online(c->apic_id))
+			continue;
+		if (p->seen[c->apic_id] == want)
+			n++;
+	}
+	return n;
+}
+
+static void tlb_shootdown_selftest(void)
+{
+	static struct tlb_probe probe;
+	uint32_t self = cpu_apic_id();
+	unsigned others = smp_online_count() - 1;
+	uint64_t old_frame, new_frame;
+	uint64_t root = read_cr3() & INTEL_PTE_PFN;
+	pt_entry_t *entry;
+	unsigned stale, fresh;
+
+	if (others == 0) {
+		kputs("UrMach x86-64: alone — a shootdown cannot be tested\r\n");
+		return;
+	}
+
+	old_frame = boot_frame_alloc();
+	new_frame = boot_frame_alloc();
+	if (old_frame == 0 || new_frame == 0) {
+		kputs("UrMach x86-64: no frames for the shootdown test\r\n");
+		return;
+	}
+
+	*(volatile uint64_t *)(uintptr_t)phys_to_direct(old_frame) = STALE_WITNESS;
+	*(volatile uint64_t *)(uintptr_t)phys_to_direct(new_frame) = FRESH_WITNESS;
+
+	/* Somewhere in the heap region that nothing else has claimed. */
+	probe.va = KERNEL_HEAP_BASE + 0x200000ULL;
+
+	if (pmap_enter(pmap_kernel(), probe.va, old_frame,
+		       VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK) {
+		kputs("UrMach x86-64: could not map the shootdown probe\r\n");
+		return;
+	}
+
+	/* 1 — everyone walks it, everyone caches it. */
+	ipi_call_others(tlb_probe_read, &probe);
+	fresh = tlb_probe_count(&probe, STALE_WITNESS, self);
+
+	kputs("UrMach x86-64: shootdown probe mapped, ");
+	kputdec(fresh);
+	kputs(" of ");
+	kputdec(others);
+	kputs(fresh == others ? " processors read it\r\n"
+			      : " processors read it — WRONG\r\n");
+
+	/* 2 — the control: repoint the entry and tell nobody. */
+	entry = pmap_walk(root, probe.va, 0);
+	if (entry == PT_ENTRY_NULL) {
+		kputs("UrMach x86-64: the probe lost its entry\r\n");
+		return;
+	}
+	*entry = pa_to_pte(new_frame) | (*entry & ~INTEL_PTE_PFN);
+
+	ipi_call_others(tlb_probe_read, &probe);
+	stale = tlb_probe_count(&probe, STALE_WITNESS, self);
+
+	kputs("UrMach x86-64: entry repointed silently, ");
+	kputdec(stale);
+	kputs(" of ");
+	kputdec(others);
+	kputs(stale > 0
+	      ? " still saw the old page — that is the bug, reproduced\r\n"
+	      : " still saw the old page — this machine did not keep it, so"
+		" the control is inconclusive here\r\n");
+
+	/* 3 — now say so. */
+	tlb_flush_range(probe.va, PAGE_SIZE_4K);
+
+	ipi_call_others(tlb_probe_read, &probe);
+	fresh = tlb_probe_count(&probe, FRESH_WITNESS, self);
+
+	kputs("UrMach x86-64: after the shootdown, ");
+	kputdec(fresh);
+	kputs(" of ");
+	kputdec(others);
+	kputs(fresh == others
+	      ? " see the new page — every processor let go of it\r\n"
+	      : " see the new page — WRONG\r\n");
+
+	pmap_remove(pmap_kernel(), probe.va, PAGE_SIZE_4K);
+}
+
+/*
  * The proof that the interrupt stack table earns its place.
  *
  * Point the stack pointer at unmapped memory and push.  The push faults,
@@ -1651,6 +1798,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	}
 
 	ipi_selftest();
+	tlb_shootdown_selftest();
 
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
