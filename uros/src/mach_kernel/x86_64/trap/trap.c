@@ -9,6 +9,8 @@
 
 #include <cpu/regs.h>
 #include <cpu/tss.h>
+#include <pmap/layout.h>
+#include <pmap/pmap.h>
 #include <trap/trap.h>
 
 /*
@@ -172,6 +174,60 @@ static void report_page_fault(uint64_t error)
 }
 
 /*
+ * Walk the frame chain and print the return addresses.
+ *
+ * This runs in the worst context the kernel has — after a fault, sometimes
+ * because the stack itself is wrong — so it trusts nothing it is about to
+ * read.  Every frame is checked for alignment, for being a canonical
+ * address, and for being mapped at all, the last through the page tables
+ * rather than by trying it and seeing.  A backtrace that faults while
+ * explaining a fault would replace the diagnosis with a double fault.
+ *
+ * Frames are also required to move upward: a stack grows down, so a caller's
+ * frame is always at a higher address, and anything else is not a chain but
+ * whatever happened to be in the register.
+ *
+ * Addresses are absolute, and there is no symbol table on this target yet
+ * (#211 built one for i386): resolve them with addr2line against the ELF.
+ */
+#define BACKTRACE_MAX	16
+
+static void backtrace(uint64_t rbp)
+{
+	pmap_t kernel = pmap_kernel();
+
+	tputs("  backtrace (resolve with addr2line):\r\n");
+
+	for (unsigned depth = 0; depth < BACKTRACE_MAX; depth++) {
+		const uint64_t *frame;
+		uint64_t next, ret;
+
+		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+			break;
+
+		/* Both words of the frame have to be there before either is read. */
+		if (pmap_extract(kernel, rbp) == 0
+		    || pmap_extract(kernel, rbp + 8) == 0)
+			break;
+
+		frame = (const uint64_t *)(uintptr_t)rbp;
+		next = frame[0];
+		ret = frame[1];
+
+		if (ret == 0)
+			break;
+
+		tputs("    ");
+		tputhex(ret);
+		tputs("\r\n");
+
+		if (next <= rbp)
+			break;
+		rbp = next;
+	}
+}
+
+/*
  * One armed expectation.  Not a stack: a fault while recovering from a
  * fault is not something to paper over, and leaving the second one to be
  * reported and halted on is the honest outcome.
@@ -266,6 +322,8 @@ void trap_dispatch(struct trap_frame *frame)
 	tputs("  rdi ");
 	tputhex(frame->rdi);
 	tputs("\r\n");
+
+	backtrace(frame->rbp);
 
 	/*
 	 * Nothing recovers yet: there is no MI exception path to hand this

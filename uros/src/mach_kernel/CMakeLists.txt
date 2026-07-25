@@ -69,11 +69,16 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # land in the top-2 GiB where the image is linked; -mno-red-zone because
   # the red zone is unsafe once interrupts land on these stacks; SSE off
   # (general regs only) to match the kernel's SSE-free discipline.
+  #
+  # -fno-omit-frame-pointer is kept for the same reason the i386 kernel keeps
+  # it: the backtrace walks the frame chain, and a register is a cheaper
+  # price than not knowing how the machine got where it died.
   target_compile_options(mach_kernel PRIVATE
     $<$<COMPILE_LANGUAGE:ASM>:-m64 -ffreestanding -nostdinc>
     $<$<COMPILE_LANGUAGE:C>:-m64 -mcmodel=kernel -mno-red-zone
       -mgeneral-regs-only -fcf-protection=none -ffreestanding -fno-pic
       -fno-pie -fno-stack-protector -fno-builtin -nostdinc
+      -fno-omit-frame-pointer
       -isystem ${X86_64_GCC_INC} -std=gnu11 -Wall>)
   target_link_options(mach_kernel PRIVATE
     -m64 -static -nostdlib -nostartfiles -no-pie
