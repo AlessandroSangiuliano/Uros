@@ -26,6 +26,7 @@
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
 #include <cpu/desc.h>
+#include <cpu/ipi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/pic.h>
@@ -1450,6 +1451,86 @@ static void self_ipi_selftest(void)
 }
 
 /*
+ * A message to somebody else, which is the first thing in this kernel that
+ * makes another processor act.
+ *
+ * Until now every processor that arrived went straight to a halt loop and
+ * was never heard from again; whether the interrupt path on those
+ * processors worked was untested, and would have stayed untested until the
+ * first shootdown depended on it.
+ *
+ * Two things are being checked and they are not the same. That the function
+ * ran on every other processor — counted by the processors themselves, one
+ * counter each, so a silent one can be named rather than merely missed. And
+ * that the shared count came out exact, which is what says the answers were
+ * one per processor rather than one processor answering repeatedly.
+ *
+ * Three rounds, for the same reason the self-interrupt used three: a
+ * receiver that never acknowledged would serve the first and no others, and
+ * one round cannot tell the difference.
+ */
+static volatile uint64_t cross_call_marks;
+
+static void cross_call_mark(void *arg)
+{
+	atomic_inc64((volatile uint64_t *)arg);
+}
+
+#define CROSS_CALL_ROUNDS	3
+
+static void ipi_selftest(void)
+{
+	unsigned others = smp_online_count() - 1;
+	unsigned answered = 0;
+	uint32_t self = cpu_apic_id();
+
+	if (others == 0) {
+		kputs("UrMach x86-64: alone — no processor to cross-call\r\n");
+		return;
+	}
+
+	for (unsigned round = 0; round < CROSS_CALL_ROUNDS; round++)
+		ipi_call_others(cross_call_mark, (void *)&cross_call_marks);
+
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (c->apic_id == self || !smp_is_online(c->apic_id))
+			continue;
+		if (ipi_calls_served(c->apic_id) == CROSS_CALL_ROUNDS)
+			answered++;
+	}
+
+	kputs("UrMach x86-64: cross-called ");
+	kputdec(others);
+	kputs(" processors ");
+	kputdec(CROSS_CALL_ROUNDS);
+	kputs(" times, the function ran ");
+	kputdec((unsigned)atomic_load64(&cross_call_marks));
+	kputs(" times, ");
+	kputdec(answered);
+	kputs(answered == others
+	      && atomic_load64(&cross_call_marks) == (uint64_t)others * CROSS_CALL_ROUNDS
+	      ? " served every round\r\n" : " served every round — WRONG\r\n");
+
+	/* Name anybody who did not, since the counters can say who. */
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (c->apic_id == self || !smp_is_online(c->apic_id))
+			continue;
+		if (ipi_calls_served(c->apic_id) == CROSS_CALL_ROUNDS)
+			continue;
+
+		kputs("UrMach x86-64:   cpu ");
+		kputdec(c->apic_id);
+		kputs(" served ");
+		kputdec((unsigned)ipi_calls_served(c->apic_id));
+		kputs("\r\n");
+	}
+}
+
+/*
  * The proof that the interrupt stack table earns its place.
  *
  * Point the stack pointer at unmapped memory and push.  The push faults,
@@ -1540,6 +1621,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	percpu_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();
+	ipi_init();
 	{
 		unsigned asked = acpi_usable_cpu_count();
 		unsigned up = smp_start_others();
@@ -1567,6 +1649,8 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 			kputs("\r\n");
 		}
 	}
+
+	ipi_selftest();
 
 	wx_enforcement_selftest();
 	trap_vectors_selftest();

@@ -95,4 +95,20 @@ void lapic_send_startup(uint32_t apic_id, uint64_t entry_pa);
  */
 void lapic_send_self(uint8_t vector);
 
+/*
+ * Interrupt one other processor, or every processor but this one.
+ *
+ * The broadcast is not a convenience wrapper around a loop: it is one write
+ * to the command register instead of one per processor, and the command
+ * register takes a single message at a time — so a loop over thirty-one
+ * processors is thirty-one waits for the previous message to be accepted,
+ * with the last of them delivered long after the first.
+ *
+ * Neither waits for the interrupt to be *handled*, only for the message to
+ * be accepted for delivery.  What the target did about it is the caller's
+ * question, and the reason the layer above this one counts answers.
+ */
+void lapic_send_ipi(uint32_t apic_id, uint8_t vector);
+void lapic_broadcast_ipi(uint8_t vector);
+
 #endif	/* _X86_64_CPU_LAPIC_H_ */

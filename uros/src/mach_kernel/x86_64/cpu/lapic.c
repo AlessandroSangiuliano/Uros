@@ -210,3 +210,16 @@ void lapic_send_self(uint8_t vector)
 	icr_send(0, ICR_DELIVERY_FIXED | ICR_DEST_SELF | ICR_LEVEL_ASSERT
 		 | vector);
 }
+
+void lapic_send_ipi(uint32_t apic_id, uint8_t vector)
+{
+	icr_send(apic_id, ICR_DELIVERY_FIXED | ICR_LEVEL_ASSERT | vector);
+	icr_wait_idle();
+}
+
+void lapic_broadcast_ipi(uint8_t vector)
+{
+	icr_send(0, ICR_DELIVERY_FIXED | ICR_DEST_ALL_BUT_SELF
+		 | ICR_LEVEL_ASSERT | vector);
+	icr_wait_idle();
+}
