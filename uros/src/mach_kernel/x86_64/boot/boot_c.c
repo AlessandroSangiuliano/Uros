@@ -703,6 +703,61 @@ static void phys_ops_selftest(void)
 	pmap_destroy(u);
 }
 
+/*
+ * Zero and copy on physical pages.  The interesting check is not that a copy
+ * copies, but that a partial one touches exactly its own range: a zero that
+ * runs one byte wide destroys a neighbour's data, and a copy that stops one
+ * byte short leaves a page subtly wrong — neither announces itself.
+ */
+static void phys_copy_selftest(void)
+{
+	uint64_t a = boot_frame_alloc();
+	uint64_t b = boot_frame_alloc();
+	uint8_t *pa = (uint8_t *)(uintptr_t)phys_to_direct(a);
+	uint8_t *pb = (uint8_t *)(uintptr_t)phys_to_direct(b);
+	int ok;
+
+	/* A pattern that differs byte to byte, so a misplaced copy shows. */
+	for (unsigned i = 0; i < PAGE_SIZE_4K; i++)
+		pa[i] = (uint8_t)(i * 7 + 1);
+
+	pmap_zero_page(b);
+	pmap_copy_page(a, b);
+
+	ok = 1;
+	for (unsigned i = 0; i < PAGE_SIZE_4K; i++)
+		if (pb[i] != (uint8_t)(i * 7 + 1))
+			ok = 0;
+
+	kputs("UrMach x86-64: copy_page whole page ");
+	kputs(ok ? "matches byte for byte\r\n" : "DIFFERS\r\n");
+
+	/* Zero [0x100, 0x180) and require the bytes either side to survive. */
+	pmap_zero_part_page(b, 0x100, 0x80);
+
+	ok = pb[0x0ff] == (uint8_t)(0xff * 7 + 1)
+	  && pb[0x180] == (uint8_t)(0x180 * 7 + 1);
+	for (unsigned i = 0x100; i < 0x180; i++)
+		if (pb[i] != 0)
+			ok = 0;
+
+	kputs("UrMach x86-64: zero_part_page ");
+	kputs(ok ? "cleared its range and nothing either side\r\n"
+		 : "SPILLED\r\n");
+
+	/* Copy 16 bytes from one offset to a different one. */
+	pmap_zero_page(b);
+	pmap_copy_part_page(a, 0x40, b, 0x200, 16);
+
+	ok = pb[0x1ff] == 0 && pb[0x210] == 0;
+	for (unsigned i = 0; i < 16; i++)
+		if (pb[0x200 + i] != (uint8_t)((0x40 + i) * 7 + 1))
+			ok = 0;
+
+	kputs("UrMach x86-64: copy_part_page ");
+	kputs(ok ? "landed at its offset, bounds clean\r\n" : "WRONG\r\n");
+}
+
 /* A mutable global — lands in .bss, the writable region. */
 static volatile uint32_t wx_data_probe;
 
@@ -938,6 +993,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	pmap_verbs_selftest();
 	pv_selftest(info);
 	phys_ops_selftest();
+	phys_copy_selftest();
 	wx_selftest();
 	user_pmap_selftest();
 

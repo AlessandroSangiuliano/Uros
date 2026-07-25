@@ -180,4 +180,24 @@ void pmap_protect_kernel(void);
  */
 uint64_t pmap_enable_smep_smap(void);
 
+/*
+ * Zeroing and copying physical pages (x86_64/pmap/phys.c).  Addresses are
+ * physical and reached through the direct map, so unlike the i386 twin
+ * these borrow no temporary mapping.  The lpage and rpage forms are the
+ * asymmetric ones: in each, one side is a physical page and the other an
+ * address the caller already holds.
+ *
+ * Offsets and lengths must stay within the page they name — the caller's
+ * obligation, as in the machine-independent interface.
+ */
+void pmap_zero_page(uint64_t p);
+void pmap_zero_part_page(uint64_t p, uint64_t offset, uint64_t len);
+void pmap_copy_page(uint64_t src, uint64_t dst);
+void pmap_copy_part_page(uint64_t src, uint64_t src_offset,
+			 uint64_t dst, uint64_t dst_offset, uint64_t len);
+void pmap_copy_part_lpage(uint64_t src_va, uint64_t dst,
+			  uint64_t dst_offset, uint64_t len);
+void pmap_copy_part_rpage(uint64_t src, uint64_t src_offset,
+			  uint64_t dst_va, uint64_t len);
+
 #endif	/* _X86_64_PMAP_PMAP_H_ */
