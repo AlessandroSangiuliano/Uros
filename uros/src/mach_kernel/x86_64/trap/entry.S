@@ -120,9 +120,15 @@ trap_common:
 	iretq
 
 /*
- * trap_probe_write(addr) — store a zero at addr and report whether the
- * machine allowed it.  Returns 0 when the store completed and 1 when it
- * faulted, the handler having been told to resume at trap_probe_faulted.
+ * trap_probe_write(addr) — store a recognisable pattern at addr and report
+ * whether the machine allowed it.  Returns 0 when the store completed and 1
+ * when it faulted, the handler having been told to resume at
+ * trap_probe_faulted.
+ *
+ * A pattern rather than a zero, so the caller can check that an allowed
+ * store actually landed.  Storing zero would leave a caller unable to tell a
+ * store that happened from one that never needed to: most of what it might
+ * probe is zero already.
  *
  * In assembly on purpose.  The obvious C version — take the address of a
  * label, arm the handler with it, fault, resume there — is exactly the case
@@ -139,7 +145,7 @@ trap_common:
 	.globl	trap_probe_faulted
 	.align	16
 trap_probe_write:
-	movl	$0, (%rdi)
+	movl	$0x5a5a5a5a, (%rdi)
 	xorl	%eax, %eax		/* the store was allowed */
 	ret
 trap_probe_faulted:

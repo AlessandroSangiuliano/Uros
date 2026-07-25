@@ -902,21 +902,30 @@ static void wx_enforcement_selftest(void)
 	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
 	refused = trap_probe_write(ro);
 
+	/*
+	 * Refused, and the witness still holds what it held: the store was
+	 * stopped, not merely reported.
+	 */
 	kputs("UrMach x86-64: W^X ");
-	kputs(refused ? "holds — the store was refused, and we resumed\r\n"
-		      : "BROKEN — the store to .rodata succeeded\r\n");
+	kputs(refused && phys_witness == 0x5ec0ffee
+	      ? "holds — the store was refused, .rodata unchanged\r\n"
+	      : "BROKEN — the store to .rodata got through\r\n");
 
 	/*
-	 * The same probe against a writable page, so the result above is
-	 * known to mean something: a probe that reported refusal whatever it
-	 * was given would say nothing about .rodata.
+	 * The same probe against a writable page.  Two things need saying
+	 * about the result above and only this says them: that the probe does
+	 * not report refusal whatever it is given, and that when it reports
+	 * success the store really landed — which is why it writes a pattern
+	 * rather than a zero, most memory being zero already.
 	 */
+	wx_data_probe = 0;
 	trap_expect(T_PAGE_FAULT, (uint64_t)(uintptr_t)trap_probe_faulted);
 	refused = trap_probe_write(rw);
 
 	kputs("UrMach x86-64: the same probe on .bss ");
-	kputs(refused ? "was ALSO refused — the probe proves nothing\r\n"
-		      : "went through, so the refusal above was real\r\n");
+	kputs(!refused && wx_data_probe == TRAP_PROBE_PATTERN
+	      ? "went through and left its pattern, so the refusal was real\r\n"
+	      : "MISBEHAVED — the control says nothing\r\n");
 }
 
 /* ------------------------------------------------------------------ */

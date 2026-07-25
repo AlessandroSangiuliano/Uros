@@ -96,14 +96,18 @@ void trap_dispatch(struct trap_frame *frame);
 void trap_expect(uint64_t vector, uint64_t resume_rip);
 
 /*
- * Store a zero at `addr` and report whether the machine allowed it: 0 if
- * the store completed, 1 if it faulted.  Arm trap_expect() with
+ * Store TRAP_PROBE_PATTERN at `addr` and report whether the machine allowed
+ * it: 0 if the store completed, 1 if it faulted.  Checking for the pattern
+ * afterwards distinguishes a store that happened from one that was never
+ * needed, which a zero could not.  Arm trap_expect() with
  * trap_probe_faulted first — this is the store, not the arrangement to
  * survive it.
  *
  * The pair lives in trap/entry.S, where the resume point can be a symbol
  * rather than a label the compiler is entitled to optimise away.
  */
+#define TRAP_PROBE_PATTERN	0x5a5a5a5a
+
 int trap_probe_write(volatile void *addr);
 extern char trap_probe_faulted[];
 
