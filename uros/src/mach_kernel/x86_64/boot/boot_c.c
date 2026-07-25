@@ -37,6 +37,7 @@
 #include <pmap/walk.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
+#include <sync/lock.h>
 #include <trap/trap.h>
 
 #define COM1 0x3F8
@@ -1050,6 +1051,30 @@ static void atomic_selftest(void)
 	kputs("UrMach x86-64: cmpxchg16b ");
 	kputs(ok ? "swaps both words, and reports the pair it lost to\r\n"
 		 : "WRONG\r\n");
+
+	/*
+	 * The lock, as far as one CPU can take it: free, taken, refused while
+	 * held, free again.  What one CPU cannot show is the part that
+	 * matters — that two of them cannot both be inside — and that needs
+	 * #438 before it can be asked at all.
+	 */
+	{
+		hw_lock_data_t l;
+
+		hw_lock_init(&l);
+		ok = !hw_lock_held(&l);
+		ok = ok && hw_lock_try(&l) && hw_lock_held(&l);
+		ok = ok && !hw_lock_try(&l);		/* already ours */
+		hw_lock_unlock(&l);
+		ok = ok && !hw_lock_held(&l);
+		hw_lock_lock(&l);			/* uncontended, must not spin */
+		ok = ok && hw_lock_held(&l);
+		hw_lock_unlock(&l);
+		ok = ok && !hw_lock_held(&l);
+
+		kputs("UrMach x86-64: hw_lock takes, refuses while held, releases: ");
+		kputs(ok ? "as specified\r\n" : "WRONG\r\n");
+	}
 }
 
 /*

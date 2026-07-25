@@ -112,6 +112,14 @@ static inline uint64_t atomic_swap64(volatile uint64_t *p, uint64_t v)
 	return v;
 }
 
+static inline uint8_t atomic_swap8(volatile uint8_t *p, uint8_t v)
+{
+	__asm__ volatile("xchgb %0, %1"
+			 : "+q"(v), "+m"(*p)
+			 : : "memory");
+	return v;
+}
+
 /* Set a bit, answering with what it was. */
 static inline int atomic_test_and_set_bit(volatile uint64_t *p, unsigned bit)
 {

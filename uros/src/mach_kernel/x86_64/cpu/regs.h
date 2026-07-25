@@ -93,6 +93,21 @@ static inline void invlpg(uint64_t va)
 	__asm__ volatile("invlpg (%0)" : : "r"(va) : "memory");
 }
 
+/*
+ * Tell the CPU it is spinning on a lock rather than doing work.
+ *
+ * It is a hint with real effects: it lets a hyperthreaded sibling have the
+ * pipeline instead of losing it to a loop that computes nothing, and it
+ * avoids the memory-order violation penalty a tight read loop pays when the
+ * line it is watching finally changes under it.  Not decoration — a spin
+ * loop without it is slower and steals from the thread doing the work the
+ * spinner is waiting for.
+ */
+static inline void cpu_pause(void)
+{
+	__asm__ volatile("pause" ::: "memory");
+}
+
 static inline uint64_t read_cr4(void)
 {
 	uint64_t v;
