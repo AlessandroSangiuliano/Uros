@@ -7,42 +7,138 @@
 
 #include <stdint.h>
 
+#include <boot/multiboot2.h>
 #include <pmap/bootmem.h>
+#include <pmap/direct.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
 
 /*
- * Enough frames to build the early tables several times over, and small
- * enough that the cost of being wrong is a quarter of a megabyte of .bss.
- * Running out is reported, not worked around: if the early pmap ever needs
- * more than this, the interesting question is why.
+ * Usable regions, in the order they will be spent.  Sixteen is well past
+ * what any machine reports: the memory map is a handful of entries, not a
+ * catalogue of pages.
  */
-#define BOOT_FRAMES	64
+#define BOOT_MAX_REGIONS	16
 
-static uint8_t boot_pool[BOOT_FRAMES][PAGE_SIZE_4K]
-	__attribute__((aligned(4096)));
+struct boot_region {
+	uint64_t next;			/* first frame not yet handed out */
+	uint64_t end;
+};
 
-static unsigned boot_next;
+static struct boot_region regions[BOOT_MAX_REGIONS];
+static unsigned nregions;
+static unsigned current;
+
+static uint64_t frames_total;
+static uint64_t frames_used;
+static uint64_t low_water;
+
+/* Physical extent of the loaded image, from the linker. */
+extern char __kernel_end[];
+
+static uint64_t round_up_page(uint64_t v)
+{
+	return (v + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
+}
+
+/*
+ * Everything below one mark is abandoned rather than carved around.
+ *
+ * Below it lie the things that must not be handed out: the first megabyte,
+ * which belongs to the firmware and to the real-mode world an AP will start
+ * in; the loaded image, boot page tables and boot stack included; and the
+ * loader's own boot-information structure, which is still being read.
+ *
+ * Subtracting those individually would mean a range-splitting machine used
+ * once and never again.  A single mark costs the memory below it — a
+ * rounding error against any real machine's RAM — and cannot get the
+ * arithmetic wrong.
+ */
+static uint64_t compute_low_water(uint32_t info_pa)
+{
+	uint64_t mark = 1024 * 1024;
+	uint64_t image_end = kernel_va_to_phys(__kernel_end);
+	uint64_t info_end;
+
+	if (image_end > mark)
+		mark = image_end;
+
+	if (info_pa != 0) {
+		/* First word of the structure is its own total size. */
+		info_end = info_pa + *(const uint32_t *)(uintptr_t)info_pa;
+		if (info_end > mark)
+			mark = info_end;
+	}
+
+	return round_up_page(mark);
+}
+
+void boot_frame_init(uint32_t info_pa)
+{
+	const struct mb2_tag_mmap *mm;
+	const uint8_t *p, *end;
+
+	low_water = compute_low_water(info_pa);
+
+	mm = (const struct mb2_tag_mmap *)mb2_find_tag(info_pa,
+						       MB2_TAG_MEMORY_MAP);
+	if (mm == 0 || mm->entry_size < sizeof(struct mb2_mmap_entry))
+		return;
+
+	p = (const uint8_t *)mm + sizeof(*mm);
+	end = (const uint8_t *)mm + mm->size;
+
+	for (; p + mm->entry_size <= end; p += mm->entry_size) {
+		const struct mb2_mmap_entry *e;
+		uint64_t start, stop;
+
+		e = (const struct mb2_mmap_entry *)p;
+		if (e->type != MB2_MEM_AVAILABLE)
+			continue;
+
+		start = round_up_page(e->addr);
+		stop = (e->addr + e->len) & ~(PAGE_SIZE_4K - 1);
+
+		if (start < low_water)
+			start = low_water;
+
+		/*
+		 * Only what the direct map reaches: a frame is cleared, and
+		 * later read, through that mapping, so one beyond it could be
+		 * allocated but never touched.
+		 */
+		if (stop > direct_map_covered)
+			stop = direct_map_covered;
+
+		if (start >= stop || nregions == BOOT_MAX_REGIONS)
+			continue;
+
+		regions[nregions].next = start;
+		regions[nregions].end = stop;
+		nregions++;
+		frames_total += (stop - start) / PAGE_SIZE_4K;
+	}
+}
 
 uint64_t boot_frame_alloc(void)
 {
 	uint64_t pa;
 	volatile uint64_t *frame;
 
-	if (boot_next >= BOOT_FRAMES)
+	while (current < nregions && regions[current].next >= regions[current].end)
+		current++;
+
+	if (current >= nregions)
 		return 0;
 
-	pa = kernel_va_to_phys(&boot_pool[boot_next][0]);
-	boot_next++;
+	pa = regions[current].next;
+	regions[current].next += PAGE_SIZE_4K;
+	frames_used++;
 
 	/*
-	 * Clear it through the direct map rather than through the pool's own
-	 * address.  Both work today, but only one of them still works once
-	 * frames come from anywhere in RAM instead of out of the image — so
-	 * the allocator is written against that future from the start.
-	 *
-	 * A page table with a stale entry is far worse than a bad pointer: it
-	 * sends the hardware walking into memory nobody accounted for.
+	 * Clear it through the direct map.  A page table with a stale entry
+	 * is far worse than a bad pointer: it sends the hardware walking into
+	 * memory nobody accounted for.
 	 */
 	frame = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
 	for (unsigned i = 0; i < PAGE_SIZE_4K / sizeof(uint64_t); i++)
@@ -51,12 +147,17 @@ uint64_t boot_frame_alloc(void)
 	return pa;
 }
 
-unsigned boot_frames_used(void)
+uint64_t boot_frames_used(void)
 {
-	return boot_next;
+	return frames_used;
 }
 
-unsigned boot_frames_total(void)
+uint64_t boot_frames_total(void)
 {
-	return BOOT_FRAMES;
+	return frames_total;
+}
+
+uint64_t boot_frame_low_water(void)
+{
+	return low_water;
 }

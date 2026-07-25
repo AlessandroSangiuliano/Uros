@@ -327,13 +327,26 @@ static void walk_selftest(void)
  * the wrong address), distinct from each other, and actually zero when read
  * back through the direct map.
  */
-static void bootmem_selftest(void)
+static void bootmem_selftest(uint32_t info)
 {
-	uint64_t a = boot_frame_alloc();
-	uint64_t b = boot_frame_alloc();
-	uint64_t c = boot_frame_alloc();
+	uint64_t a, b, c, mark;
 	const volatile uint64_t *first;
 	int clean = 1;
+
+	boot_frame_init(info);
+	mark = boot_frame_low_water();
+
+	kputs("UrMach x86-64: frames start above ");
+	kputhex64(mark);
+	kputs(", ");
+	kputdec(boot_frames_total());
+	kputs(" available (");
+	kputdec(boot_frames_total() * PAGE_SIZE_4K / (1024 * 1024));
+	kputs(" MiB)\r\n");
+
+	a = boot_frame_alloc();
+	b = boot_frame_alloc();
+	c = boot_frame_alloc();
 
 	first = (const volatile uint64_t *)(uintptr_t)phys_to_direct(a);
 	for (unsigned i = 0; i < PAGE_SIZE_4K / sizeof(uint64_t); i++)
@@ -347,15 +360,12 @@ static void bootmem_selftest(void)
 	kputs(" ");
 	kputhex64(c);
 	kputs("\r\nUrMach x86-64: ");
-	kputdec(boot_frames_used());
-	kputs(" of ");
-	kputdec(boot_frames_total());
-	kputs(" used, ");
 	kputs(a && b && c
 	      && ((a | b | c) & (PAGE_SIZE_4K - 1)) == 0
 	      && a != b && b != c && a != c
+	      && a >= mark && b >= mark && c >= mark
 	      && clean
-	      ? "aligned, distinct and zeroed\r\n"
+	      ? "aligned, distinct, clear of the image, and zeroed\r\n"
 	      : "BAD frames\r\n");
 }
 
@@ -767,7 +777,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	memmap_selftest(info);
 	direct_map_selftest(info);
 	walk_selftest();
-	bootmem_selftest();
+	bootmem_selftest(info);
 	map_selftest();
 	protect_unmap_selftest();
 	split_selftest();
