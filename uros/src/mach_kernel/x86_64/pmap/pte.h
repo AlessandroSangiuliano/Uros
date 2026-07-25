@@ -79,6 +79,16 @@ typedef uint64_t	pt_entry_t;
 #define INTEL_PTE_GLOBAL	0x0000000000000100ULL	/* G   survives a CR3 load */
 
 /*
+ * Bits 11:9 are ignored by the hardware and available to whoever writes the
+ * tables.  The i386 backend spends one of them the same way, on the same
+ * question: whether the mapping is wired — a page the pager may not take
+ * back.  The hardware has no opinion, so the record has to live somewhere,
+ * and the entry itself is where it cannot get out of step with the mapping
+ * it describes.
+ */
+#define INTEL_PTE_WIRED		0x0000000000000200ULL
+
+/*
  * Execute-disable.  Bit 63 is *reserved* until EFER.NXE is set — setting it
  * before then faults rather than protecting anything, so the pmap must turn
  * NXE on before it starts writing this bit.

@@ -60,9 +60,16 @@ pmap_t pmap_create(uint64_t size)
 	uint64_t root_pa;
 	pmap_t pmap = PMAP_NULL;
 
-	/* One size of address space on this machine; the argument is the
-	 * interface's, not ours. */
-	(void)size;
+	/*
+	 * A non-zero size asks for a map covering part of a space rather than
+	 * a space, which this backend does not build — the same answer the
+	 * i386 one gives, and for the same reason: refusing lets the caller
+	 * treat the map as software-only, while handing back a full address
+	 * space would have it believe it got what it asked for and pay a root
+	 * frame for something it will never translate through.
+	 */
+	if (size != 0)
+		return PMAP_NULL;
 
 	for (unsigned i = 0; i < PMAP_BOOT_MAX; i++)
 		if (pmap_pool[i].ref_count == 0) {
@@ -101,21 +108,78 @@ void pmap_reference(pmap_t pmap)
 		pmap->ref_count++;
 }
 
+/* The index shift of each paging level, deepest first. */
+static const unsigned level_shift[] = {
+	PT_SHIFT, PD_SHIFT, PDPT_SHIFT, PML4_SHIFT
+};
+
+/*
+ * Give back every table below `table_pa`, and the table itself.
+ *
+ * What is freed is the space's own scaffolding, never what it was pointing
+ * at: a leaf names a page belonging to some VM object, which outlives the
+ * mapping and is not this layer's to reclaim.  Leaves are visited only to
+ * strike them from the physical index — an entry naming a pmap that no
+ * longer exists would be followed by the next pmap_page_protect on that
+ * page, into a root that has since been handed to someone else.
+ *
+ * `level` counts up from 1 at the page table, so it indexes level_shift
+ * directly and the recursion is at most four deep.
+ */
+static void pmap_free_tables(uint64_t table_pa, unsigned level,
+			     uint64_t va_base, pmap_t pmap)
+{
+	const pt_entry_t *table =
+		(const pt_entry_t *)(uintptr_t)phys_to_direct(table_pa);
+
+	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {
+		pt_entry_t e = table[i];
+		uint64_t va;
+
+		if (!pte_is_valid(e))
+			continue;
+
+		va = va_base + ((uint64_t)i << level_shift[level - 1]);
+
+		if (level == 1) {
+			pv_remove(pte_to_pa(e), pmap, va);
+			continue;
+		}
+
+		/* A large page is a leaf too: no table under it to free. */
+		if (pte_is_leaf(e))
+			continue;
+
+		pmap_free_tables(pte_to_pa(e), level - 1, va, pmap);
+	}
+
+	boot_frame_free(table_pa);
+}
+
 void pmap_destroy(pmap_t pmap)
 {
+	const pt_entry_t *root;
+
 	if (pmap == PMAP_NULL || pmap == pmap_kernel())
 		return;
 
 	if (--pmap->ref_count > 0)
 		return;
 
+	root = (const pt_entry_t *)(uintptr_t)phys_to_direct(pmap->root_pa);
+
 	/*
-	 * The space is gone as far as anyone can tell — the slot is free and
-	 * the root unreachable — but its frames are not given back: the boot
-	 * allocator has no way to take them.  Reclaiming them is the same
-	 * bookkeeping pmap_collect() needs and arrives with the real physical
-	 * allocator, not before.
+	 * The lower half only.  Everything from KERNEL_PML4_FIRST up points at
+	 * tables the kernel owns and every other space is still using — freeing
+	 * those would hand the kernel's own page tables to the next caller who
+	 * asked for a frame, and the damage would surface anywhere but here.
 	 */
+	for (unsigned i = 0; i < KERNEL_PML4_FIRST; i++)
+		if (pte_is_valid(root[i]))
+			pmap_free_tables(pte_to_pa(root[i]), 3,
+					 (uint64_t)i << PML4_SHIFT, pmap);
+
+	boot_frame_free(pmap->root_pa);
 	pmap->root_pa = 0;
 }
 
@@ -150,14 +214,8 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired)
 {
+	uint64_t flags;
 	int rc;
-
-	/*
-	 * Wired is MI bookkeeping — a page the pager may not reclaim — with no
-	 * effect on the hardware entry, so it is recorded on the MI side, not
-	 * here.  Kept in the signature to match the interface.
-	 */
-	(void)wired;
 
 	if (prot == VM_PROT_NONE) {
 		pmap_forget(pmap, va);
@@ -173,11 +231,41 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	 */
 	pmap_forget(pmap, va);
 
-	rc = pmap_map_page(pmap->root_pa, va, pa, pmap_flags_for_prot(prot));
+	flags = pmap_flags_for_prot(prot);
+	if (wired)
+		flags |= INTEL_PTE_WIRED;
+
+	rc = pmap_map_page(pmap->root_pa, va, pa, flags);
 	if (rc == PMAP_MAP_OK)
 		pv_enter(pa, pmap, va);
 
 	return rc;
+}
+
+int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired)
+{
+	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, 0);
+
+	if (entry == PT_ENTRY_NULL)
+		return 0;
+
+	/*
+	 * No invalidation: the hardware never looks at this bit, so nothing it
+	 * has cached can be out of date because of it.
+	 */
+	if (wired)
+		*entry |= INTEL_PTE_WIRED;
+	else
+		*entry &= ~INTEL_PTE_WIRED;
+
+	return 1;
+}
+
+int pmap_is_wired(pmap_t pmap, uint64_t va)
+{
+	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, 0);
+
+	return entry != PT_ENTRY_NULL && (*entry & INTEL_PTE_WIRED) != 0;
 }
 
 uint64_t pmap_extract(pmap_t pmap, uint64_t va)

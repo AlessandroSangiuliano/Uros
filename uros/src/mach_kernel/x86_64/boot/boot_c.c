@@ -990,6 +990,61 @@ static void load_gdt(void)
 }
 
 /*
+ * The two places the pmap used to say one thing and do another.
+ *
+ * Wiring was accepted and dropped on the floor, so a caller asking for a
+ * page the pager must not reclaim got no such promise. It is now a software
+ * bit in the entry, which also means a reprotect must leave it alone — it is
+ * not one of the permission bits, and checking that is checking the mask.
+ *
+ * Destroying a space returned nothing, while reporting the space released.
+ * Counting frames either side is the only way to tell the difference: a
+ * space costs a root and one table per level it needed, and all of them
+ * should come back.
+ */
+static void reclaim_selftest(void)
+{
+	pmap_t k = pmap_kernel();
+	uint64_t frame = boot_frame_alloc();
+	uint64_t va = KERNEL_HEAP_BASE + 0x30000;
+	uint64_t uva = 0x0000000400000000ULL;
+	uint64_t before, after;
+	int on, off, kept;
+	pmap_t u;
+
+	pmap_enter(k, va, frame, VM_PROT_READ | VM_PROT_WRITE, 1);
+	on = pmap_is_wired(k, va);
+	pmap_change_wiring(k, va, 0);
+	off = pmap_is_wired(k, va);
+	pmap_change_wiring(k, va, 1);
+	pmap_protect(k, va, va + PAGE_SIZE_4K, VM_PROT_READ);
+	kept = pmap_is_wired(k, va);
+	pmap_remove(k, va, va + PAGE_SIZE_4K);
+
+	kputs("UrMach x86-64: wired recorded=");
+	kputdec(on);
+	kputs(" cleared=");
+	kputdec(!off);
+	kputs(" survives a reprotect=");
+	kputdec(kept);
+	kputs(on && !off && kept ? ", all three\r\n" : ", WRONG\r\n");
+
+	before = boot_frames_used();
+	u = pmap_create(0);
+	pmap_enter(u, uva, frame, VM_PROT_READ | VM_PROT_WRITE, 0);
+	pmap_destroy(u);
+	after = boot_frames_used();
+
+	kputs("UrMach x86-64: a space cost ");
+	kputdec(after >= before ? after - before : before - after);
+	kputs(after == before ? " frames after being destroyed, all returned"
+			      : " frames it never gave back, LEAKED");
+	kputs(pv_count(frame) == 0
+	      ? ", and left no entry in the index\r\n"
+	      : ", AND LEFT A STALE INDEX ENTRY\r\n");
+}
+
+/*
  * Bring up this CPU's block and show %gs actually reaches it.
  *
  * Runs late by necessity: the block is a mapped page, so it needs the frame
@@ -1210,6 +1265,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	wx_selftest();
 	user_pmap_selftest();
 
+	reclaim_selftest();
 	percpu_selftest();
 	wx_enforcement_selftest();
 	trap_vectors_selftest();

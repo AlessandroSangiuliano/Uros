@@ -46,8 +46,10 @@ pmap_t pmap_kernel(void);
  * sharing is what lets a trap or a system call keep executing kernel code
  * without a change of address space.
  *
- * The size argument is the MI interface's, and unused: this machine's spaces
- * are all the same size.  Returns PMAP_NULL if nothing is left to build one.
+ * A non-zero size requests a map over part of a space, which this backend
+ * does not build: it returns PMAP_NULL, which is the interface's way of
+ * saying the caller should treat the map as software-only.  PMAP_NULL also
+ * comes back when there is nothing left to build a space out of.
  *
  * The sharing is established by copying the kernel's top-level entries at
  * create time, which carries a standing obligation: a kernel-half entry
@@ -122,9 +124,22 @@ static inline uint64_t pmap_flags_for_prot(vm_prot_t prot)
  * page-aligned, as the MI callers pass them.
  */
 
-/* Enter (or, for VM_PROT_NONE, drop) the mapping va -> pa with `prot`. */
+/*
+ * Enter (or, for VM_PROT_NONE, drop) the mapping va -> pa with `prot`.
+ *
+ * `wired` says the pager may not reclaim the page.  The hardware has no bit
+ * for it, so it is recorded in one of the entry's software bits — in the
+ * entry rather than beside it, where it cannot drift out of step with the
+ * mapping it describes.
+ */
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired);
+
+/* Change whether an existing mapping is wired.  Returns 0 if va is unmapped. */
+int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired);
+
+/* Whether the mapping at va is wired.  Zero if it is not, or is not there. */
+int pmap_is_wired(pmap_t pmap, uint64_t va);
 
 /* Physical address va maps to, or 0 if unmapped — the MI conflation, where
  * physical zero and "no mapping" share a return, is kept on purpose. */
