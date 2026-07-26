@@ -46,6 +46,7 @@
 #include <syscall/syscall.h>
 #include <thread/context.h>
 #include <thread/fpu.h>
+#include <thread/state.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
@@ -1777,6 +1778,113 @@ static void context_selftest(void)
 	      : "NOT restored — WRONG\r\n");
 }
 
+
+/*
+ * The shape a debugger sees, and the two things it must do (#408).
+ *
+ * Round-tripping is the easy half: what goes out must come back, or a
+ * debugger that reads registers and writes them back has quietly altered
+ * the thread it was inspecting.
+ *
+ * The half that matters is where the round trip is deliberately *not* the
+ * identity.  Thread state arrives from whoever holds a port to the thread,
+ * so every field is attacker-controlled, and three of them are privilege: a
+ * code segment naming ring 0, I/O privilege in the flags, or interrupts
+ * disabled.  Each is a way to obtain something the caller does not have, and
+ * each is stopped by imposing the field rather than copying it.
+ *
+ * So the test asks for all three at once — the state a hostile caller would
+ * send — and checks the frame that comes out is not the one requested.
+ */
+static void thread_state_selftest(void)
+{
+	struct x86_64_thread_state out, back;
+	struct x86_64_float_state fstate;
+	struct trap_frame frame;
+	uint8_t *area, *copy;
+	uint64_t frames;
+	int regs_ok, refused, float_ok = 1;
+
+	/* Distinct values, so a field copied from its neighbour shows up. */
+	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
+		((uint64_t *)&frame)[i] = 0x5000000000000000ULL + i;
+
+	frame.cs = USER_CS_RPL3;
+	frame.ss = USER_DS_RPL3;
+	frame.rflags = RFLAGS_IF | 2;
+
+	thread_state_from_frame(&frame, &out);
+	thread_state_to_frame(&out, &frame);
+	thread_state_from_frame(&frame, &back);
+
+	regs_ok = out.rax == back.rax && out.rbx == back.rbx
+	       && out.rcx == back.rcx && out.rdx == back.rdx
+	       && out.rdi == back.rdi && out.rsi == back.rsi
+	       && out.rbp == back.rbp && out.rsp == back.rsp
+	       && out.r8  == back.r8  && out.r9  == back.r9
+	       && out.r10 == back.r10 && out.r11 == back.r11
+	       && out.r12 == back.r12 && out.r13 == back.r13
+	       && out.r14 == back.r14 && out.r15 == back.r15
+	       && out.rip == back.rip;
+
+	kputs("UrMach x86-64: thread state is ");
+	kputdec(x86_64_THREAD_STATE_COUNT);
+	kputs(" words, float ");
+	kputdec(x86_64_FLOAT_STATE_COUNT);
+	kputs(", and seventeen registers ");
+	kputs(regs_ok ? "round-trip unchanged\r\n" : "DO NOT round-trip — WRONG\r\n");
+
+	/* Now the state a caller would send to gain something. */
+	out.cs = KERNEL_CS_SELECTOR;
+	out.ss = KERNEL_DS_SELECTOR;
+	out.rflags = 0x3000;			/* I/O privilege 3, interrupts off */
+
+	thread_state_to_frame(&out, &frame);
+
+	refused = frame.cs == USER_CS_RPL3
+	       && frame.ss == USER_DS_RPL3
+	       && (frame.rflags & 0x3000) == 0
+	       && (frame.rflags & RFLAGS_IF) != 0;
+
+	kputs("UrMach x86-64: asked for ring 0, iopl 3 and interrupts off, got cs ");
+	kputhex64(frame.cs);
+	kputs(" rflags ");
+	kputhex64(frame.rflags);
+	kputs(refused ? " — imposed, not copied\r\n"
+			: " — WRONG, the request was honoured\r\n");
+
+	/* And the floating-point image, which must survive a trip through. */
+	frames = boot_frames_alloc(2);
+	if (frames == 0) {
+		kputs("UrMach x86-64: no frames for the float state probe\r\n");
+		return;
+	}
+
+	area = (uint8_t *)(uintptr_t)phys_to_direct(frames);
+	copy = (uint8_t *)(uintptr_t)phys_to_direct(frames + PAGE_SIZE_4K);
+
+	fpu_area_init(area);
+	fpu_save(area);
+	for (unsigned i = 0; i < 512; i++)
+		copy[i] = area[i];
+
+	float_state_from_area(area, &fstate);
+	for (unsigned i = 0; i < 512; i++)
+		area[i] = 0;
+	float_state_to_area(&fstate, area);
+
+	for (unsigned i = 0; i < 512; i++)
+		if (area[i] != copy[i])
+			float_ok = 0;
+
+	kputs("UrMach x86-64: the floating-point image ");
+	kputs(float_ok ? "survives the trip out and back\r\n"
+			: "CHANGED — WRONG\r\n");
+
+	boot_frame_free(frames);
+	boot_frame_free(frames + PAGE_SIZE_4K);
+}
+
 /*
  * What ring 3 carries in %gs while it runs.  Recognisable, and nothing the
  * kernel would ever have there — seeing it afterwards is proof of a swapgs
@@ -2271,6 +2379,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	syscall_init();
 	fpu_init();
 	context_selftest();
+	thread_state_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
 	external_vectors_selftest();
