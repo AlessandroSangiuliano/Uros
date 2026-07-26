@@ -1796,14 +1796,23 @@ static void context_selftest(void)
  * So the test asks for all three at once — the state a hostile caller would
  * send — and checks the frame that comes out is not the one requested.
  */
+/*
+ * A segment base a thread could plausibly have been given: canonical, in the
+ * lower half, and nowhere near anything this kernel maps.  Its only job is to
+ * be the kind of value the reverse conversion must accept, so that the value
+ * it must refuse is distinguished by *where* it points and not by being
+ * strange.
+ */
+#define USER_BASE_PROBE		0x0000700000010000ULL
+
 static void thread_state_selftest(void)
 {
 	struct x86_64_thread_state out, back;
 	struct x86_64_float_state fstate;
-	struct trap_frame frame;
+	struct trap_frame frame, untouched;
 	uint8_t *area, *copy;
 	uint64_t frames;
-	int regs_ok, refused, float_ok = 1;
+	int regs_ok, refused, base_refused, applied, float_ok = 1;
 
 	/* Distinct values, so a field copied from its neighbour shows up. */
 	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
@@ -1814,10 +1823,22 @@ static void thread_state_selftest(void)
 	frame.rflags = RFLAGS_IF | 2;
 
 	thread_state_from_frame(&frame, &out);
-	thread_state_to_frame(&out, &frame);
+
+	/*
+	 * The bases have to be ones a thread could have before the reverse
+	 * direction will take them.  from_frame() reads them from the machine,
+	 * and the machine here is the kernel — so gs_base comes back as the
+	 * per-CPU block, which is exactly the value the reverse direction is
+	 * obliged to refuse (#440).  A real thread's would be a user address;
+	 * these stand in for one.
+	 */
+	out.fs_base = USER_BASE_PROBE;
+	out.gs_base = USER_BASE_PROBE + PAGE_SIZE_4K;
+
+	applied = thread_state_to_frame(&out, &frame) == THREAD_STATE_OK;
 	thread_state_from_frame(&frame, &back);
 
-	regs_ok = out.rax == back.rax && out.rbx == back.rbx
+	regs_ok = applied && out.rax == back.rax && out.rbx == back.rbx
 	       && out.rcx == back.rcx && out.rdx == back.rdx
 	       && out.rdi == back.rdi && out.rsi == back.rsi
 	       && out.rbp == back.rbp && out.rsp == back.rsp
@@ -1852,6 +1873,38 @@ static void thread_state_selftest(void)
 	kputhex64(frame.rflags);
 	kputs(refused ? " — imposed, not copied\r\n"
 			: " — WRONG, the request was honoured\r\n");
+
+	/*
+	 * And the one field that cannot be imposed (#440).
+	 *
+	 * A selector has exactly one right answer, so it is substituted.  A
+	 * segment base does not — the point of the field is that the thread
+	 * chooses it — so the only answers are yes and no, and a base in the
+	 * kernel half has to be no: the trap entry for the four vectors that
+	 * can arrive inside the swapgs window decides by asking whether the
+	 * loaded base is a kernel address, and a caller who could install one
+	 * would be answering that question.
+	 *
+	 * The frame is compared word for word afterwards, because "refused"
+	 * has to mean nothing happened.  A conversion that wrote fifteen
+	 * registers and then returned an error would leave a thread built half
+	 * out of a request that was rejected.
+	 */
+	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
+		((uint64_t *)&untouched)[i] = ((uint64_t *)&frame)[i];
+
+	out.gs_base = (uint64_t)(uintptr_t)percpu();	/* a kernel address */
+
+	base_refused = thread_state_to_frame(&out, &frame) == THREAD_STATE_REFUSED;
+	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
+		if (((uint64_t *)&untouched)[i] != ((uint64_t *)&frame)[i])
+			base_refused = 0;
+
+	kputs("UrMach x86-64: asked for a gs base of ");
+	kputhex64(out.gs_base);
+	kputs(base_refused
+	      ? " — refused, and the frame is untouched\r\n"
+	      : " — WRONG, a thread may name a kernel base\r\n");
 
 	/* And the floating-point image, which must survive a trip through. */
 	frames = boot_frames_alloc(2);

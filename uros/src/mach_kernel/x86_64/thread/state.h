@@ -179,9 +179,44 @@ void thread_state_from_frame(const struct trap_frame *frame,
  *
  * Which means the round trip is deliberately not the identity, and that is
  * the point rather than a defect.
+ *
+ * ── One field that cannot be imposed, and so must be refused ──────────
+ *
+ * The selectors are imposed because there is exactly one right answer for
+ * each: a thread runs at ring 3, and nothing else is available to it.  The
+ * segment bases are the opposite case — the whole purpose of the field is
+ * that the thread chooses the value — so there is nothing to substitute, and
+ * the only two options are to accept or to say no.
+ *
+ * Saying no matters because of the swapgs window (#440).  The trap entry for
+ * the four vectors that can arrive inside it decides what to do by asking
+ * whether the loaded base is a kernel address, and that is a proof only
+ * while a base a thread supplied cannot be one.  CR4.FSGSBASE being clear
+ * keeps ring 3 from writing one directly; this keeps it from asking the
+ * kernel to write one on its behalf.
+ *
+ * So this returns, and a refused state changes nothing at all: a frame half
+ * built from a request that was going to be rejected is worse than either
+ * outcome.
  */
-void thread_state_to_frame(const struct x86_64_thread_state *state,
-			   struct trap_frame *frame);
+#define THREAD_STATE_OK		0
+#define THREAD_STATE_REFUSED	(-1)
+
+int thread_state_to_frame(const struct x86_64_thread_state *state,
+			  struct trap_frame *frame);
+
+/*
+ * Whether the segment bases in a state are ones the kernel may be given:
+ * canonical, because writing a base that is not faults in the kernel at the
+ * moment it is applied, and in the lower half, because the upper half is the
+ * kernel's and a base there would make the window check answerable by the
+ * caller.
+ *
+ * Separate from the conversion above so that the day the bases are applied —
+ * which needs a thread to apply them to, and so needs the scheduler — the
+ * check guarding them is the one already here rather than a second opinion.
+ */
+int thread_state_bases_ok(const struct x86_64_thread_state *state);
 
 /* The floating-point flavour, out of a save area and back into one. */
 void float_state_from_area(const void *area, struct x86_64_float_state *state);

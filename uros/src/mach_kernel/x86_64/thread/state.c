@@ -12,6 +12,7 @@
 
 #include <cpu/desc.h>
 #include <cpu/regs.h>
+#include <pmap/layout.h>
 #include <thread/state.h>
 #include <trap/trap.h>
 
@@ -66,9 +67,22 @@ void thread_state_from_frame(const struct trap_frame *frame,
 #define RFLAGS_USER_SETTABLE	0x0DD5UL	/* CF PF AF ZF SF TF DF OF */
 #define RFLAGS_ALWAYS_ONE	0x0002UL	/* reserved, and must be set */
 
-void thread_state_to_frame(const struct x86_64_thread_state *state,
-			   struct trap_frame *frame)
+int thread_state_bases_ok(const struct x86_64_thread_state *state)
 {
+	return va_is_canonical(state->fs_base) && va_is_user(state->fs_base)
+	    && va_is_canonical(state->gs_base) && va_is_user(state->gs_base);
+}
+
+int thread_state_to_frame(const struct x86_64_thread_state *state,
+			  struct trap_frame *frame)
+{
+	/*
+	 * Before anything is written, because a frame half built from a
+	 * request that is about to be refused is worse than either answer.
+	 */
+	if (!thread_state_bases_ok(state))
+		return THREAD_STATE_REFUSED;
+
 	frame->rax = state->rax;
 	frame->rbx = state->rbx;
 	frame->rcx = state->rcx;
@@ -108,6 +122,15 @@ void thread_state_to_frame(const struct x86_64_thread_state *state,
 	frame->ss = USER_DS_RPL3;
 	frame->rflags = (state->rflags & RFLAGS_USER_SETTABLE)
 		      | RFLAGS_ALWAYS_ONE | RFLAGS_IF;
+
+	/*
+	 * ⚠️ fs_base and gs_base are checked above and go no further, because
+	 * there is nowhere here to put them: they are MSRs, and this builds a
+	 * frame.  Applying them needs a thread to apply them to, which arrives
+	 * with the scheduler.  The check is here now so that it is already the
+	 * guard when the second half lands, rather than something to remember.
+	 */
+	return THREAD_STATE_OK;
 }
 
 /*
