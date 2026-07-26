@@ -2095,6 +2095,138 @@ static void ring3_selftest(void)
  * the right privilege level, the right kind of segment, and for the 64-bit
  * code selector the long-mode bit that makes it 64-bit at all.
  */
+/*
+ * The swapgs window, arranged on purpose (#440).
+ *
+ * There are two instruction boundaries where the processor is at ring 0 and
+ * %gs still belongs to a user program: after SYSCALL and before the entry's
+ * own swapgs, and after the exit's swapgs and before SYSRET.  A vector
+ * delivered there reads a ring-0 code segment, concludes correctly that it
+ * must not swap, and runs the kernel on a base a user chose.
+ *
+ * Two instructions wide and unreachable by anything the kernel schedules,
+ * which is why it has to be arranged rather than waited for.  A
+ * non-maskable interrupt is the instrument: it is one of the four vectors
+ * that can genuinely land there, it arrives when this code says so, and no
+ * flag can hold it back.
+ *
+ * ── Both directions, because one of them is the control ───────────────
+ *
+ * An entry that swapped unconditionally would pass a test that only checked
+ * the window — and would then get every ordinary kernel NMI wrong, in the
+ * direction where the symptom is not a crash.  So the same interrupt is
+ * delivered twice, once outside the window and once inside it, and the
+ * answer is that the two disagree.
+ *
+ * The evidence for "inside" is a conjunction that cannot be arranged by
+ * accident: the code segment says ring 0, so the rule this path replaces
+ * would have refused to swap, *and* the base found there was the user's.
+ * Those two facts together are the hole, reproduced.
+ */
+#define WINDOW_WAIT_LIMIT	(1U << 24)
+
+static int wait_for_paranoid(void)
+{
+	const volatile struct trap_paranoid_record *p = trap_last_paranoid();
+
+	/*
+	 * Bounded.  An interrupt that never arrives is a result — it says the
+	 * delivery is broken — and a boot that hangs waiting for it says
+	 * nothing at all.
+	 */
+	for (uint32_t i = 0; i < WINDOW_WAIT_LIMIT; i++) {
+		if (p->taken)
+			return 1;
+		cpu_pause();
+	}
+	return 0;
+}
+
+static void swapgs_window_selftest(void)
+{
+	struct trap_paranoid_record outside, inside;
+	uint64_t kernel_gs = (uint64_t)(uintptr_t)percpu();
+	uint32_t me;
+	int had_interrupts, arrived;
+
+	if (!lapic_present()) {
+		kputs("UrMach x86-64: no local APIC — the window cannot be arranged\r\n");
+		return;
+	}
+
+	me = lapic_id();
+
+	/* ---- Outside the window: an ordinary kernel NMI. ---- */
+	trap_paranoid_forget();
+	trap_expect(T_NMI, TRAP_RESUME_HERE);
+	lapic_send_nmi(me);
+	arrived = wait_for_paranoid();
+	outside = *trap_last_paranoid();
+
+	if (!arrived) {
+		kputs("UrMach x86-64: sent myself an NMI and it never came"
+		      " — WRONG, the window cannot be tested\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: NMI outside the window, gs ");
+	kputhex64(outside.gs_on_entry);
+	kputs(" -> ");
+	kputhex64(outside.gs_on_dispatch);
+	kputs(outside.swapped == 0 && outside.gs_on_entry == kernel_gs
+	      && outside.gs_on_dispatch == kernel_gs
+	      ? " — left alone, which is the half that must not change\r\n"
+	      : " — WRONG, an ordinary NMI exchanged the pair\r\n");
+
+	/* ---- Inside it: ring 0, with the base a user program would have. ---- */
+	trap_paranoid_forget();
+	trap_expect(T_NMI, TRAP_RESUME_HERE);
+
+	had_interrupts = interrupts_enabled();
+	interrupts_disable();
+
+	/*
+	 * ⚠️ From here to the restore below, %gs does not point at this
+	 * processor's block, and nothing in between may read it — which is the
+	 * same rule the real window lives under, so the arrangement is faithful
+	 * rather than merely similar.  Interrupts are off for the same reason
+	 * they are off there: SYSCALL clears IF through FMASK, so a maskable
+	 * vector cannot land in the real window either, and one landing in this
+	 * one would take the ordinary path and read the sentinel.
+	 */
+	wrmsr(MSR_KERNEL_GS_BASE, kernel_gs);
+	wrmsr(MSR_GS_BASE, GS_SENTINEL);
+
+	lapic_send_nmi(me);
+	arrived = wait_for_paranoid();
+
+	wrmsr(MSR_GS_BASE, kernel_gs);
+	wrmsr(MSR_KERNEL_GS_BASE, kernel_gs);
+
+	if (had_interrupts)
+		interrupts_enable();
+
+	inside = *trap_last_paranoid();
+
+	if (!arrived) {
+		kputs("UrMach x86-64: the NMI in the window never came"
+		      " — WRONG\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: NMI inside it, cs ");
+	kputhex64(inside.cs);
+	kputs(" says ring 0 but gs was ");
+	kputhex64(inside.gs_on_entry);
+	kputs(", handler ran on ");
+	kputhex64(inside.gs_on_dispatch);
+	kputs(inside.swapped == 1 && (inside.cs & 3) == 0
+	      && inside.gs_on_entry == GS_SENTINEL
+	      && inside.gs_on_dispatch == kernel_gs
+	      ? " — the base said what the code segment could not\r\n"
+	      : " — WRONG, the window was not closed\r\n");
+}
+
 static void gdt_layout_selftest(void)
 {
 	uint64_t kdata = desc_gdt_entry(KERNEL_CS_SELECTOR + 8);
@@ -2421,6 +2553,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	thread_state_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
+	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();
 	ipi_init();
