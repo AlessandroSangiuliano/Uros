@@ -102,6 +102,26 @@ isr_\vec:
  * %rsp pointing at the frame itself.
  */
 trap_common:
+	/*
+	 * If this came from ring 3, %gs is the user's and has to become the
+	 * kernel's before anything reads it.
+	 *
+	 * The processor does not do this — unlike the stack, which a gate
+	 * switches, the segment base is left exactly as the interrupted code
+	 * had it.  So a fault from a user program arrives with %gs pointing
+	 * wherever that program put it, and any kernel code reading %gs:0
+	 * would be following a pointer a user chose.  Nothing in this path
+	 * reads it today; the day something does, it must already be right,
+	 * because the symptom then is not a crash.
+	 *
+	 * The saved code segment is the only trustworthy record of where the
+	 * trap came from, and its low two bits are the ring.  It sits three
+	 * words above the vector this stub pushed.
+	 */
+	testb	$3, 24(%rsp)
+	jz	1f
+	swapgs
+1:
 	pushq	%rax
 	pushq	%rbx
 	pushq	%rcx
@@ -137,6 +157,17 @@ trap_common:
 	popq	%rbx
 	popq	%rax
 
+	/*
+	 * And back, on the same evidence — read again rather than remembered,
+	 * because the handler is entitled to change where this returns to.
+	 * The recovery from a fault in ring 3 does exactly that: it rewrites
+	 * the frame to resume in the kernel, and a return that swapped on the
+	 * strength of how it arrived would hand the kernel the user's %gs.
+	 */
+	testb	$3, 24(%rsp)
+	jz	2f
+	swapgs
+2:
 	addq	$16, %rsp		/* drop the vector and error code */
 	iretq
 

@@ -332,6 +332,7 @@ void trap_dispatch(struct trap_frame *frame)
 		last_trap.rip = frame->rip;
 		last_trap.cr2 = read_cr2();
 		last_trap.cs = frame->cs;
+		last_trap.gs_base = rdmsr(MSR_GS_BASE);
 		last_trap.caught = 1;
 
 		/*

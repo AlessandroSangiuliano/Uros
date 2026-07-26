@@ -119,6 +119,12 @@ void syscall_init(void);
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6);
 
+/*
+ * Which per-CPU block the last such call was reached with — the entry
+ * path's swapgs, made observable.  It leaves no other trace.
+ */
+uint64_t syscall_probe_gs(void);
+
 #endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_SYSCALL_SYSCALL_H_ */

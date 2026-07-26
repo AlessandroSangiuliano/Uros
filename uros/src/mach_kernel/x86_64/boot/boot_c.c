@@ -1621,6 +1621,13 @@ static void user_reachable_selftest(void)
 }
 
 /*
+ * What ring 3 carries in %gs while it runs.  Recognisable, and nothing the
+ * kernel would ever have there — seeing it afterwards is proof of a swapgs
+ * that did not happen.
+ */
+#define GS_SENTINEL	0x00000000BADC0FFEULL
+
+/*
  * Ring 3, entered for the first time (#411).
  *
  * Everything this kernel has ever run has been privileged, which is why the
@@ -1656,7 +1663,7 @@ static void ring3_selftest(void)
 	uint64_t code_frame = boot_frame_alloc();
 	uint64_t data_frame = boot_frame_alloc();
 	const struct trap_record *t;
-	uint64_t witness, answer;
+	uint64_t witness, answer, kernel_gs;
 	pmap_t space;
 	uint64_t size;
 	uint8_t *dst;
@@ -1697,10 +1704,21 @@ static void ring3_selftest(void)
 	/*
 	 * The entry arms its own way back, because the stack that return has
 	 * to land on only exists inside it.
+	 *
+	 * The other half of the block pair gets a value of its own first.
+	 * Until now both halves have held the same address, which made swapgs
+	 * a no-op and its absence undetectable — a missing one looked exactly
+	 * like a correct one.  Ring 3 runs carrying the sentinel, so anything
+	 * the kernel sees afterwards names which instruction ran.
 	 */
+	kernel_gs = (uint64_t)(uintptr_t)percpu();
+	wrmsr(MSR_KERNEL_GS_BASE, GS_SENTINEL);
+
 	write_cr3(space->root_pa);
 	user_probe_enter(USER_PROBE_CODE_VA, USER_PROBE_STACK_TOP);
 	write_cr3(kernel_root);
+
+	wrmsr(MSR_KERNEL_GS_BASE, kernel_gs);
 
 	t = trap_last();
 	witness = *(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame);
@@ -1729,6 +1747,26 @@ static void ring3_selftest(void)
 	kputs(answer == USER_PROBE_SYSCALL_RESULT
 	      ? " — six arguments and a return, through SYSCALL and back\r\n"
 	      : " — WRONG, expected 0x060504030201\r\n");
+
+	/*
+	 * And which block each entry path was reached with.  Ring 3 ran with
+	 * the sentinel in %gs, so a path that forgot to swap would have handed
+	 * the kernel that value — and kernel code reading %gs:0 would have
+	 * been following an address a user program chose.
+	 *
+	 * Both are checked because they are different code with the same duty:
+	 * the syscall entry swaps as its first instruction, the trap stubs
+	 * swap only when the saved code segment says the trap came from ring 3.
+	 */
+	kputs("UrMach x86-64: entered with gs ");
+	kputhex64(syscall_probe_gs());
+	kputs(" by syscall, ");
+	kputhex64(t->gs_base);
+	kputs(" by fault, kernel's is ");
+	kputhex64(kernel_gs);
+	kputs(syscall_probe_gs() == kernel_gs && t->gs_base == kernel_gs
+	      ? " — both paths swapped, neither saw the sentinel\r\n"
+	      : " — WRONG, a path kept the user's gs\r\n");
 
 	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
 	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);

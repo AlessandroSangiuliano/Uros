@@ -67,6 +67,16 @@ user_probe_enter:
 	 * user program the machine cannot take away from, which is not a
 	 * thing worth being able to do even once.
 	 */
+	/*
+	 * And %gs becomes the user's, which is what makes the kernel's copy
+	 * reachable again only through swapgs.  Every real return to ring 3
+	 * does this; the probe does it so that the entry paths are tested
+	 * against two different bases rather than against one value stored
+	 * twice — with those equal, a missing swapgs is indistinguishable
+	 * from a correct one.
+	 */
+	swapgs
+
 	pushq	$USER_DS_RPL3
 	pushq	%r13
 	pushq	$0x202

@@ -215,6 +215,7 @@ struct trap_record {
 	uint64_t rip;
 	uint64_t cr2;
 	uint64_t cs;		/* its low two bits are the ring it came from */
+	uint64_t gs_base;	/* which block %gs reached the handler with  */
 	int      caught;
 };
 

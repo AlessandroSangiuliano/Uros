@@ -43,9 +43,26 @@
 
 extern void syscall_entry(void);
 
+/*
+ * Which per-CPU block the last probe call was reached with.
+ *
+ * Recorded because the entry path's swapgs is otherwise unobservable from
+ * outside it: the instruction leaves no trace except which block the kernel
+ * can see afterwards, and that is only a distinguishing answer when the two
+ * bases differ.
+ */
+static uint64_t probe_gs_base;
+
+uint64_t syscall_probe_gs(void)
+{
+	return probe_gs_base;
+}
+
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
+	probe_gs_base = rdmsr(MSR_GS_BASE);
+
 	return  (a1 & 0xFF)
 	     | ((a2 & 0xFF) << 8)
 	     | ((a3 & 0xFF) << 16)
