@@ -10,6 +10,7 @@
 #include <cpu/acpi.h>
 #include <cpu/ap_trampoline.h>
 #include <cpu/desc.h>
+#include <cpu/ipi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
@@ -29,6 +30,32 @@ uint64_t ap_stack_top[SMP_MAX_CPUS];
 /* One bit per processor that has reached C.  Read by the boot processor. */
 static volatile uint64_t online_mask;
 static volatile uint64_t online_count;
+
+/*
+ * The other direction: one processor volunteers to send rather than serve.
+ *
+ * `claimed` is taken by whichever processor arrives first, so nothing here
+ * depends on which identifiers the firmware handed out.  `gate` is the boot
+ * processor's permission to go, withheld until every processor has an
+ * interrupt table — a broadcast issued before that reaches processors that
+ * cannot yet survive one.
+ */
+static volatile uint64_t ap_call_claimed;
+static volatile uint64_t ap_call_gate;
+static volatile uint64_t ap_call_done;
+static volatile uint64_t ap_call_reached_bsp;
+
+/*
+ * What the volunteer asks everybody to run.  It asks the hardware whether it
+ * is the boot processor rather than comparing identifiers, because that is
+ * the actual claim being tested — that the message arrived *there* — and the
+ * controller answers it without anyone having to record the answer earlier.
+ */
+static void ap_call_payload(void *arg)
+{
+	if (lapic_is_bsp())
+		atomic_inc64((volatile uint64_t *)arg);
+}
 
 void ap_trampoline_install(void)
 {
@@ -103,8 +130,53 @@ void ap_start_c(uint32_t apic_id)
 	 */
 	interrupts_enable();
 
+	/*
+	 * The first processor here takes the job of sending one, so that the
+	 * direction nothing else exercises gets exercised.  Whoever wins waits
+	 * for the boot processor to say every processor has a table to take an
+	 * interrupt on; the rest fall straight through to idle.
+	 *
+	 * The wait is bounded, and giving up is reported rather than hidden:
+	 * an unbounded spin here would turn a boot processor that never opens
+	 * the gate into a hung machine, which says less than a probe that
+	 * comes back zero.
+	 */
+	if (atomic_cmpxchg64(&ap_call_claimed, 0, apic_id + 1) == 0) {
+		uint64_t spins;
+
+		for (spins = 0; spins < 400000000ULL; spins++) {
+			if (atomic_load64(&ap_call_gate) != 0)
+				break;
+			cpu_pause();
+		}
+
+		if (atomic_load64(&ap_call_gate) != 0)
+			ipi_call_others(ap_call_payload,
+					(void *)&ap_call_reached_bsp);
+
+		atomic_store64(&ap_call_done, 1);
+	}
+
 	for (;;)
 		__asm__ volatile("hlt");
+}
+
+unsigned smp_ap_call_probe(void)
+{
+	uint64_t spins;
+
+	if (atomic_load64(&ap_call_claimed) == 0)
+		return 0;		/* nobody arrived to volunteer */
+
+	atomic_store64(&ap_call_gate, 1);
+
+	for (spins = 0; spins < 400000000ULL; spins++) {
+		if (atomic_load64(&ap_call_done) != 0)
+			break;
+		cpu_pause();
+	}
+
+	return (unsigned)atomic_load64(&ap_call_reached_bsp);
 }
 
 unsigned smp_online_count(void)

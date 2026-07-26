@@ -1532,6 +1532,46 @@ static void ipi_selftest(void)
 }
 
 /*
+ * The message going the other way.
+ *
+ * Everything above is the boot processor asking and the others answering,
+ * which exercises its command register and their handlers — and says nothing
+ * about theirs or about its own.  Those are different pieces of hardware and
+ * different code paths, and one of them is the one a processor needs in order
+ * to ever initiate a shootdown of its own.  Right now nothing schedules work
+ * on an application processor, so nothing has ever needed it; the moment #408
+ * lands, everything will.
+ *
+ * The evidence is deliberately not "a counter went up somewhere".  The
+ * function the volunteer sends asks the hardware whether the processor
+ * running it is the boot processor, so what is being checked is that the
+ * message arrived *there* rather than merely that it arrived.
+ */
+static void ap_to_bsp_selftest(void)
+{
+	uint32_t self = cpu_apic_id();
+	uint64_t before = ipi_calls_served(self);
+	unsigned reached;
+
+	if (smp_online_count() < 2) {
+		kputs("UrMach x86-64: alone — nobody can call back\r\n");
+		return;
+	}
+
+	reached = smp_ap_call_probe();
+
+	kputs("UrMach x86-64: a processor called back, boot processor ran it ");
+	kputdec(reached);
+	kputs(" time, served count ");
+	kputdec((unsigned)before);
+	kputs(" -> ");
+	kputdec((unsigned)ipi_calls_served(self));
+	kputs(reached == 1 && ipi_calls_served(self) == before + 1
+	      ? " — messages travel both ways\r\n"
+	      : " — WRONG\r\n");
+}
+
+/*
  * The shootdown, and the reason there has to be one.
  *
  * This is the acceptance criterion #407 has been waiting on, and it is the
@@ -1798,6 +1838,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	}
 
 	ipi_selftest();
+	ap_to_bsp_selftest();
 	tlb_shootdown_selftest();
 
 	wx_enforcement_selftest();

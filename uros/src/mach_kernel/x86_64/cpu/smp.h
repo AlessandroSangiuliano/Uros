@@ -29,6 +29,28 @@
  */
 unsigned smp_start_others(void);
 
+/*
+ * Have an application processor cross-call the boot processor, and answer
+ * with how many of them reached it.
+ *
+ * The other direction, which is not the same claim.  Everything so far has
+ * been the boot processor asking and the others answering — which exercises
+ * its command register and their handlers, and says nothing about theirs or
+ * about its own.  A processor that can serve a message but not send one is
+ * a processor that can never initiate a shootdown, and the only thing
+ * keeping it from having to is that nothing schedules work on it yet.
+ *
+ * Timing is the whole difficulty, and why this is a call rather than
+ * something an arriving processor simply does.  A broadcast reaches every
+ * processor in the machine, including ones still in the trampoline: they
+ * have no interrupt table yet, and while they cannot take the message with
+ * interrupts off, it waits in their controller and is taken the moment they
+ * enable them — against a request that finished long before.  So the first
+ * processor to arrive claims the job and then waits, and the boot processor
+ * opens the gate once bring-up is over and everybody has a table.
+ */
+unsigned smp_ap_call_probe(void);
+
 /* How many processors are running, the boot processor included. */
 unsigned smp_online_count(void);
 
