@@ -141,7 +141,7 @@ static void tputhex(uint64_t v)
 	}
 }
 
-static const char *trap_name(uint64_t vector)
+const char *trap_name(uint64_t vector)
 {
 	switch (vector) {
 	case T_DIVIDE_ERROR:		return "divide error";
@@ -282,6 +282,19 @@ void trap_expect(uint64_t vector, uint64_t resume_rip)
 	last_trap.caught = 0;
 }
 
+/* The same idea for the faults that arrive from ring 3; see <trap/trap.h>. */
+static uint64_t user_resume_rip;
+static uint64_t user_resume_rsp;
+static int user_expect_armed;
+
+void trap_expect_user(uint64_t resume_rip, uint64_t resume_rsp)
+{
+	user_resume_rip = resume_rip;
+	user_resume_rsp = resume_rsp;
+	user_expect_armed = 1;
+	last_trap.caught = 0;
+}
+
 const struct trap_record *trap_last(void)
 {
 	return &last_trap;
@@ -305,6 +318,41 @@ void trap_dispatch(struct trap_frame *frame)
 		/* Nobody claimed it — fall through and say so. */
 	}
 
+	/*
+	 * A fault from ring 3, which is recoverable because of where it came
+	 * from rather than what it was.  Checked before the vector-matching
+	 * arrangement below, since that one resumes on the current stack and
+	 * this frame's stack belongs to a user program.
+	 */
+	if (user_expect_armed && (frame->cs & 3) == USER_RPL) {
+		user_expect_armed = 0;
+
+		last_trap.vector = frame->vector;
+		last_trap.error = frame->error;
+		last_trap.rip = frame->rip;
+		last_trap.cr2 = read_cr2();
+		last_trap.cs = frame->cs;
+		last_trap.caught = 1;
+
+		/*
+		 * Every field, not just the instruction pointer: IRETQ in long
+		 * mode reloads the stack segment and stack pointer whatever the
+		 * privilege change, so leaving the user's there would return to
+		 * kernel code standing on a user stack.
+		 *
+		 * Flags carry interrupts enabled back with them. Returning with
+		 * them off would leave the rest of the boot unable to take a
+		 * cross-call — a machine that stops answering, from a line that
+		 * looks like housekeeping.
+		 */
+		frame->rip = user_resume_rip;
+		frame->rsp = user_resume_rsp;
+		frame->cs = KERNEL_CS_SELECTOR;
+		frame->ss = KERNEL_DS_SELECTOR;
+		frame->rflags = 0x202;
+		return;
+	}
+
 	if (expect_armed && frame->vector == expect_vector) {
 		/*
 		 * Disarm first.  If resuming faults again the expectation is
@@ -317,6 +365,7 @@ void trap_dispatch(struct trap_frame *frame)
 		last_trap.error = frame->error;
 		last_trap.rip = frame->rip;
 		last_trap.cr2 = read_cr2();
+		last_trap.cs = frame->cs;
 		last_trap.caught = 1;
 
 		tputs("UrMach x86-64: expected ");

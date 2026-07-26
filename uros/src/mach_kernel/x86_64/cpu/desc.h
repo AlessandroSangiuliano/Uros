@@ -29,8 +29,6 @@
 #ifndef _X86_64_CPU_DESC_H_
 #define _X86_64_CPU_DESC_H_
 
-#include <stdint.h>
-
 /*
  * The fixed selectors, the same on every processor — and their order is not
  * a choice (#411).
@@ -70,6 +68,10 @@
 #define USER_RPL		3
 #define USER_DS_RPL3		(USER_DS_SELECTOR | USER_RPL)
 #define USER_CS_RPL3		(USER_CS_SELECTOR | USER_RPL)
+
+#ifndef __ASSEMBLER__
+
+#include <stdint.h>
 
 /*
  * Build the shared tables and put this processor on them.
@@ -117,5 +119,7 @@ uint64_t desc_gdt_entry(unsigned selector);
 #define DESC_IS_CODE(d)		((((d) >> 43) & 0x1) != 0)
 #define DESC_IS_PRESENT(d)	((((d) >> 47) & 0x1) != 0)
 #define DESC_IS_LONG(d)		((((d) >> 53) & 0x1) != 0)
+
+#endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_CPU_DESC_H_ */

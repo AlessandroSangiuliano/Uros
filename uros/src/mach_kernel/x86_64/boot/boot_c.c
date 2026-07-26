@@ -42,6 +42,7 @@
 #include <pmap/pv.h>
 #include <pmap/tlb.h>
 #include <pmap/walk.h>
+#include <syscall/probe.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
@@ -1411,13 +1412,7 @@ static void self_ipi_selftest(void)
 	trap_set_handler(LAPIC_SPURIOUS_VECTOR, spurious_handler);
 	trap_set_handler(T_PROBE_VECTOR, self_ipi_handler);
 
-	/*
-	 * The legacy controller first, and only then interrupts. It is still
-	 * pointing where the firmware left it, which is on top of the
-	 * exception vectors — enabling interrupts before silencing it invites
-	 * the firmware's timer to arrive as a double fault.
-	 */
-	pic_disable();
+	/* The legacy controller was silenced with the descriptor tables. */
 	lapic_enable();
 	interrupts_enable();
 
@@ -1622,6 +1617,110 @@ static void user_reachable_selftest(void)
 	pmap_remove(space, va, PAGE_SIZE_4K);
 	pmap_destroy(space);
 	boot_frame_free(frame);
+}
+
+/*
+ * Ring 3, entered for the first time (#411).
+ *
+ * Everything this kernel has ever run has been privileged, which is why the
+ * syscall path cannot yet be tested: a syscall's entire meaning is the
+ * privilege change, so issuing one from ring 0 would prove the instruction
+ * exists and nothing more.  There has to be somewhere less privileged to
+ * come from.
+ *
+ * Three separate things are being established, and the third is the one that
+ * matters:
+ *
+ *   that user code *ran* — the witness it stores before doing anything else,
+ *   because a fault on the very first instruction would look identical from
+ *   the kernel's side;
+ *
+ *   that it had no rights — HLT stops the processor in ring 0 and is a
+ *   general protection fault in ring 3, so which of the two happened is the
+ *   answer, and it needs no cooperation from the code being tested;
+ *
+ *   that the processor agrees — the code segment the fault frame carries is
+ *   the machine's own record of the ring it interrupted, and its low two
+ *   bits are the claim.  Everything else is inference; this is testimony.
+ *
+ * It runs in an address space of its own, entered by loading its root and
+ * left by loading the kernel's back.  The kernel half is shared into every
+ * space, so the stack this function is standing on and the code it will
+ * return to are mapped throughout — which is the higher-half design paying
+ * for itself at the first moment anything depended on it.
+ */
+static void ring3_selftest(void)
+{
+	uint64_t kernel_root = read_cr3();
+	uint64_t code_frame = boot_frame_alloc();
+	uint64_t data_frame = boot_frame_alloc();
+	const struct trap_record *t;
+	uint64_t witness;
+	pmap_t space;
+	uint64_t size;
+	uint8_t *dst;
+	const uint8_t *src = (const uint8_t *)__user_probe_start;
+
+	if (code_frame == 0 || data_frame == 0) {
+		kputs("UrMach x86-64: no frames for the ring-3 probe\r\n");
+		return;
+	}
+
+	space = pmap_create(0);
+	if (space == PMAP_NULL) {
+		kputs("UrMach x86-64: no space for the ring-3 probe\r\n");
+		return;
+	}
+
+	/*
+	 * Executable and read-only; writable and not executable.  W^X applies
+	 * to a user program exactly as it does to the kernel, and the first
+	 * one ever mapped is a good place to start as we mean to go on.
+	 */
+	if (pmap_enter(space, USER_PROBE_CODE_VA, code_frame,
+		       VM_PROT_READ | VM_PROT_EXECUTE, 0) != PMAP_MAP_OK
+	 || pmap_enter(space, USER_PROBE_DATA_VA, data_frame,
+		       VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK) {
+		kputs("UrMach x86-64: could not map the ring-3 probe\r\n");
+		return;
+	}
+
+	/* Copied through the direct map: the space it will run in is not ours. */
+	size = (uint64_t)(__user_probe_end - __user_probe_start);
+	dst = (uint8_t *)(uintptr_t)phys_to_direct(code_frame);
+	for (uint64_t i = 0; i < size; i++)
+		dst[i] = src[i];
+
+	*(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame) = 0;
+
+	/*
+	 * The entry arms its own way back, because the stack that return has
+	 * to land on only exists inside it.
+	 */
+	write_cr3(space->root_pa);
+	user_probe_enter(USER_PROBE_CODE_VA, USER_PROBE_STACK_TOP);
+	write_cr3(kernel_root);
+
+	t = trap_last();
+	witness = *(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame);
+
+	kputs("UrMach x86-64: ring 3 ran and left ");
+	kputhex64(witness);
+	kputs(", then ");
+	kputs(trap_name(t->vector));
+	kputs(" from cs ");
+	kputhex64(t->cs);
+	kputs(witness == USER_PROBE_WITNESS && t->caught
+	      && t->vector == T_GENERAL_PROTECTION
+	      && (t->cs & 3) == USER_RPL
+	      ? " — ring 3, on the processor's own testimony\r\n"
+	      : " — WRONG\r\n");
+
+	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
+	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);
+	pmap_destroy(space);
+	boot_frame_free(code_frame);
+	boot_frame_free(data_frame);
 }
 
 /*
@@ -1893,6 +1992,25 @@ static void descriptor_tables_init(void)
 {
 	desc_init_bsp();
 
+	/*
+	 * And silence the legacy interrupt controller in the same breath.
+	 *
+	 * Not later, when something first enables interrupts — here, the
+	 * moment a fault can be reported at all.  The firmware leaves the
+	 * 8259 enabled and pointing at vectors 0x08-0x0F, so its timer
+	 * arrives as vector 8, and vector 8 is the double fault.  Anything
+	 * that runs with interrupts on before this — including the first
+	 * excursion into ring 3, which enables them by construction — takes
+	 * a working timer interrupt and reports it as the fault a kernel
+	 * cannot survive.
+	 *
+	 * That is not hypothetical: it is where this call used to be, and it
+	 * cost an afternoon.  The frame said so, for anyone counting words —
+	 * five pushed where six were expected, because an interrupt has no
+	 * error code and an exception does.
+	 */
+	pic_disable();
+
 	kputs("UrMach x86-64: GDT + TSS + IDT installed for cpu ");
 	kputdec(cpu_apic_id());
 	kputs(", faults are now reported\r\n");
@@ -1942,6 +2060,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	percpu_selftest();
 	gdt_layout_selftest();
 	user_reachable_selftest();
+	ring3_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();
 	ipi_init();

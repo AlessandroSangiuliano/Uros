@@ -164,6 +164,13 @@ void trap_init(void);
 void trap_dispatch(struct trap_frame *frame);
 
 /*
+ * What a vector is called.  Exported because a number on a serial line is a
+ * lookup performed at the worst possible moment, and the tests report faults
+ * they provoked on purpose as often as the handler reports the others.
+ */
+const char *trap_name(uint64_t vector);
+
+/*
  * Claim one of the vectors above T_EXTERNAL_FIRST.
  *
  * Only those: an exception vector already means something the kernel has to
@@ -207,10 +214,31 @@ struct trap_record {
 	uint64_t error;
 	uint64_t rip;
 	uint64_t cr2;
+	uint64_t cs;		/* its low two bits are the ring it came from */
 	int      caught;
 };
 
 const struct trap_record *trap_last(void);
+
+/*
+ * Arrange for the next fault *from ring 3* to return to the kernel instead
+ * of being reported and halted on.
+ *
+ * A separate arrangement from trap_expect(), because the recovery is a
+ * different operation.  That one rewrites the instruction pointer and lets
+ * the return continue on the same stack at the same privilege; there is no
+ * such stack here.  A fault from ring 3 arrives on the task-state segment's
+ * stack, and the frame the processor pushed describes a user context in
+ * every field — code segment, stack segment, stack pointer, flags.  Coming
+ * back means rewriting all of them, which is the same thing the real user
+ * fault path will do once there is a thread to return *to* rather than a
+ * saved kernel frame.
+ *
+ * Any vector, deliberately: what makes a fault recoverable here is where it
+ * came from, not what it was.  A kernel that only expected the one it meant
+ * to provoke would report the others from a context it cannot resume.
+ */
+void trap_expect_user(uint64_t resume_rip, uint64_t resume_rsp);
 
 /*
  * Store TRAP_PROBE_PATTERN at `addr` and report whether the machine allowed
