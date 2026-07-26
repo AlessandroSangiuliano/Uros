@@ -151,6 +151,14 @@ static inline void interrupts_disable(void)
 
 #define RFLAGS_IF	(1UL << 9)
 
+/*
+ * The resume flag, which suppresses instruction breakpoints for exactly one
+ * instruction and is then cleared by the processor.  It is what a debug
+ * exception handler sets in the flags it is returning to when it means to
+ * resume at the instruction that trapped, rather than trap on it again.
+ */
+#define RFLAGS_RF	(1UL << 16)
+
 #ifndef __ASSEMBLER__
 
 static inline int interrupts_enabled(void)
@@ -171,6 +179,48 @@ static inline uint64_t read_cr4(void)
 static inline void write_cr4(uint64_t v)
 {
 	__asm__ volatile("mov %0, %%cr4" : : "r"(v) : "memory");
+}
+
+#endif	/* __ASSEMBLER__ */
+
+/* ------------------------------------------------------------------ */
+/*  Debug registers                                                     */
+/* ------------------------------------------------------------------ */
+/*
+ * DR0 holds an address and DR7 says what to do about it.  The one
+ * combination used here is the simplest: break when the instruction at that
+ * address is about to execute, which is a fault reported *before* it runs —
+ * the only kind that can be aimed at an instruction and observe the state
+ * that instruction was going to change.
+ *
+ * R/W0 and LEN0 are both zero for that case, which is why neither appears
+ * below: an execution breakpoint has no length and no direction.  Bit 10 is
+ * reserved and must be written as one.
+ */
+#define DR7_L0			(1UL << 0)	/* DR0 armed         */
+#define DR7_RESERVED_ONE	(1UL << 10)
+#define DR7_EXEC_DR0		(DR7_L0 | DR7_RESERVED_ONE)
+
+/*
+ * ⚠️ DR6 is sticky: the processor sets the bit for the breakpoint that fired
+ * and never clears it again.  A handler that does not clear it leaves the
+ * next debug exception describing this one as well.
+ */
+#ifndef __ASSEMBLER__
+
+static inline void write_dr0(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%dr0" : : "r"(v));
+}
+
+static inline void write_dr7(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%dr7" : : "r"(v) : "memory");
+}
+
+static inline void write_dr6(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%dr6" : : "r"(v));
 }
 
 #endif	/* __ASSEMBLER__ */

@@ -125,6 +125,14 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
  */
 uint64_t syscall_probe_gs(void);
 
+/*
+ * The first instruction of the syscall path, which is what LSTAR is pointed
+ * at.  Declared here rather than in the one file that installs it, because
+ * the swapgs window of #440 begins at this address and the test that arranges
+ * it has to be able to name it.
+ */
+void syscall_entry(void);
+
 #endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_SYSCALL_SYSCALL_H_ */

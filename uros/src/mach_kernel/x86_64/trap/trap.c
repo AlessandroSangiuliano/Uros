@@ -328,6 +328,7 @@ void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
 	 * against itself; reading it asks whether the instruction actually ran.
 	 */
 	last_paranoid.vector = frame->vector;
+	last_paranoid.rip = frame->rip;
 	last_paranoid.cs = frame->cs;
 	last_paranoid.gs_on_entry = gs_on_entry;
 	last_paranoid.gs_on_dispatch = rdmsr(MSR_GS_BASE);
@@ -430,8 +431,28 @@ void trap_dispatch(struct trap_frame *frame)
 		 * a vector that is not the instruction's fault is the only
 		 * sensible answer — see TRAP_RESUME_HERE in <trap/trap.h>.
 		 */
-		if (expect_resume != TRAP_RESUME_HERE)
+		if (expect_resume != TRAP_RESUME_HERE) {
 			frame->rip = expect_resume;
+			return;
+		}
+
+		/*
+		 * Resuming where an instruction breakpoint fired means running
+		 * into it again, because the exception is reported before the
+		 * instruction executes and returning puts it back in front of
+		 * the same one.  The resume flag is the architecture's answer:
+		 * it suppresses instruction breakpoints for one instruction and
+		 * the processor clears it afterwards.
+		 *
+		 * Set here rather than assumed.  The exception arrives with it
+		 * clear on the emulator this is developed on — measured, rflags
+		 * 0x2 — and a return that trusted the processor to have set it
+		 * walked straight back into the breakpoint and stayed there.
+		 * Setting a bit that is already set costs nothing, so this is
+		 * right on a machine that sets it too.
+		 */
+		if (frame->vector == T_DEBUG)
+			frame->rflags |= RFLAGS_RF;
 		return;
 	}
 

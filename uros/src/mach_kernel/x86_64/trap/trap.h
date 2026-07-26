@@ -292,6 +292,7 @@ const struct trap_record *trap_last(void);
  */
 struct trap_paranoid_record {
 	uint64_t vector;
+	uint64_t rip;			/* and where in the window it landed  */
 	uint64_t cs;			/* what the ring rule would have read */
 	uint64_t gs_on_entry;		/* the base the window left loaded    */
 	uint64_t gs_on_dispatch;	/* and the one the handler ran with   */

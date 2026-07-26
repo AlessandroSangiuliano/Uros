@@ -1929,6 +1929,7 @@ static void ring3_selftest(void)
 	uint64_t data_frame = boot_frame_alloc();
 	const struct trap_record *t;
 	struct trap_record first, bases;
+	struct trap_paranoid_record window;
 	uint64_t witness, answer, kernel_gs;
 	pmap_t space;
 	uint64_t size;
@@ -1993,6 +1994,33 @@ static void ring3_selftest(void)
 	/* And back in, at the other entry point in the same page. */
 	user_probe_enter(USER_PROBE_FSGSBASE_VA, USER_PROBE_STACK_TOP);
 	bases = *trap_last();
+
+	/*
+	 * And a third time, to be caught in the window itself (#440).
+	 *
+	 * The NMI test arranges the window's *state*; this one enters the real
+	 * thing.  A breakpoint is armed on the first instruction of the syscall
+	 * path — the swapgs — and ring 3 issues an ordinary syscall.  An
+	 * execution breakpoint is a fault reported before the instruction runs,
+	 * so the debug exception is delivered at exactly the boundary where the
+	 * processor is at ring 0 and %gs has not been exchanged yet.  Two
+	 * instructions wide, hit deliberately.
+	 *
+	 * Nothing has to be undone afterwards for the syscall to continue: for
+	 * an instruction breakpoint the processor sets the resume flag in the
+	 * flags it saved, so the return runs the instruction instead of
+	 * trapping on it again.
+	 */
+	trap_paranoid_forget();
+	trap_expect(T_DEBUG, TRAP_RESUME_HERE);
+	write_dr0((uint64_t)(uintptr_t)syscall_entry);
+	write_dr7(DR7_EXEC_DR0);
+
+	user_probe_enter(USER_PROBE_CODE_VA, USER_PROBE_STACK_TOP);
+
+	write_dr7(0);
+	write_dr6(0);			/* sticky; the hardware never will */
+	window = *trap_last_paranoid();
 
 	write_cr3(kernel_root);
 
@@ -2071,6 +2099,31 @@ static void ring3_selftest(void)
 	      && (read_cr4() & CR4_FSGSBASE) == 0
 	      ? " — a user program cannot write its own base\r\n"
 	      : " — WRONG, ring 3 reached the segment bases\r\n");
+
+	/*
+	 * And the window as ring 3 actually opens it.
+	 *
+	 * The instruction pointer is the part that makes this the real thing
+	 * rather than a reconstruction: it is the address of syscall_entry, so
+	 * the exception was delivered inside the syscall path and not somewhere
+	 * that merely resembles it.
+	 */
+	kputs("UrMach x86-64: caught in the real window at ");
+	kputhex64(window.rip);
+	kputs(", cs ");
+	kputhex64(window.cs);
+	kputs(", gs ");
+	kputhex64(window.gs_on_entry);
+	kputs(" -> ");
+	kputhex64(window.gs_on_dispatch);
+	kputs(window.taken && window.vector == T_DEBUG
+	      && window.rip == (uint64_t)(uintptr_t)syscall_entry
+	      && (window.cs & 3) == 0
+	      && window.gs_on_entry == GS_SENTINEL
+	      && window.swapped == 1
+	      && window.gs_on_dispatch == kernel_gs
+	      ? " — ring 0 with the user's gs, and the entry knew\r\n"
+	      : " — WRONG, the syscall window is not covered\r\n");
 
 	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
 	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);
