@@ -20,6 +20,7 @@
  */
 static uint64_t area_size = 512;	/* the legacy form, until asked */
 static int use_xsave;
+static int use_xsaveopt;
 
 uint64_t fpu_area_size(void)
 {
@@ -29,6 +30,13 @@ uint64_t fpu_area_size(void)
 int fpu_uses_xsave(void)
 {
 	return use_xsave;
+}
+
+const char *fpu_save_instruction(void)
+{
+	if (use_xsaveopt)
+		return "XSAVEOPT";
+	return use_xsave ? "XSAVE" : "FXSAVE";
 }
 
 void fpu_init(void)
@@ -92,6 +100,30 @@ void fpu_init(void)
 
 	area_size = b;
 	use_xsave = 1;
+
+	/*
+	 * And the optimised form, if the processor has it.
+	 *
+	 * XSAVEOPT writes only the components that have actually changed
+	 * since the last restore from this same address, and skips entirely
+	 * any that are still in their initial state.  Which is precisely the
+	 * laziness the eager decision gave up — recovered here, done by the
+	 * processor from what it knows, with no trap to take and nothing left
+	 * in the registers for a speculative read to find.
+	 *
+	 * It is safe to skip a write only because memory already holds the
+	 * right values in that case: the component was loaded from this area
+	 * and has not been touched since.  So the saved image is always
+	 * consistent to read, which matters for the state a debugger will
+	 * eventually ask for.
+	 *
+	 * The standard format, deliberately — XSAVEC's compacted one saves
+	 * space in the area and costs a different restore path, and space is
+	 * not what is scarce here.
+	 */
+	cpuid_count(0xD, 1, &a, &b, &c, &d);
+	if (a & (1U << 0))
+		use_xsaveopt = 1;
 }
 
 /*
@@ -107,7 +139,11 @@ void fpu_init(void)
  */
 void fpu_save(void *area)
 {
-	if (use_xsave)
+	if (use_xsaveopt)
+		__asm__ volatile("xsaveopt (%0)"
+				 : : "r"(area), "a"(0xFFFFFFFFU), "d"(0xFFFFFFFFU)
+				 : "memory");
+	else if (use_xsave)
 		__asm__ volatile("xsave (%0)"
 				 : : "r"(area), "a"(0xFFFFFFFFU), "d"(0xFFFFFFFFU)
 				 : "memory");

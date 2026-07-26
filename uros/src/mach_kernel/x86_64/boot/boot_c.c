@@ -1767,7 +1767,7 @@ static void context_selftest(void)
 	kputs(" and ");
 	kputhex64(thread_xmm[1]);
 	kputs(", saved by ");
-	kputs(fpu_uses_xsave() ? "XSAVE" : "FXSAVE");
+	kputs(fpu_save_instruction());
 	kputs(thread_xmm[0] == 0 && thread_xmm[1] == 0
 	      ? " — sixteen registers each\r\n" : " — WRONG\r\n");
 

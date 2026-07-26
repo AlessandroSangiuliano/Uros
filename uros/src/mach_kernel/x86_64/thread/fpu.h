@@ -74,6 +74,17 @@ uint64_t fpu_area_size(void);
 int fpu_uses_xsave(void);
 
 /*
+ * Which instruction actually moves the state, by name.
+ *
+ * Reported rather than assumed, because the three differ in what they cost
+ * and the difference is invisible from outside: a kernel taking the legacy
+ * path on a processor that offered better would look exactly like one that
+ * had chosen it.  That is how the optimised form went unnoticed here for a
+ * day — the emulated processor in the test loop does not offer it.
+ */
+const char *fpu_save_instruction(void);
+
+/*
  * Move one thread's state out of the registers, and another's in.
  *
  * The area must be FPU_AREA_ALIGN-aligned and at least fpu_area_size()
