@@ -54,6 +54,7 @@
 struct context {
 	uint64_t rsp;			/* where its saved registers are   */
 	uint64_t kernel_stack_top;	/* where an entry from ring 3 lands */
+	void    *fpu_area;		/* and its floating-point state    */
 };
 
 /*
@@ -69,7 +70,19 @@ struct context {
  * `stack_top` is the high end; stacks grow down.
  */
 void context_init(struct context *ctx, uint64_t stack_top,
-		  void (*entry)(void *), void *arg);
+		  void (*entry)(void *), void *arg, void *fpu_area);
+
+/*
+ * Fill in a context for the thread that is *already running* — the boot
+ * path, which became a thread by being switched away from.
+ *
+ * There is nothing to prepare for resuming it: a running thread's saved
+ * state is wherever the switch will put it.  What it does need beforehand
+ * is somewhere for its floating-point state to go and a record of its stack,
+ * because the first switch away reads both.
+ */
+void context_become_current(struct context *ctx, uint64_t stack_top,
+			    void *fpu_area);
 
 /*
  * Switch: save this thread's registers on its stack, take the other's.

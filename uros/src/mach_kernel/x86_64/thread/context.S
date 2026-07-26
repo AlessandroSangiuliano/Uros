@@ -172,3 +172,97 @@ context_probe:
 	popq	%rbx
 	popq	%rbp
 	ret
+
+/*
+ * fpu_probe(self, other, pattern, rounds) — the same experiment for the
+ * register file the switch does *not* save by ordinary means.
+ *
+ * Sixteen vector registers, each given this thread's pattern, checked after
+ * every switch by what differs.  The same criterion as the general-purpose
+ * probe above, and for the same reason: a register restored as zero has to
+ * be as visible as one restored wrong, and folding the values together
+ * cannot see that.
+ *
+ * Necessarily assembly.  The kernel is compiled without SSE — deliberately,
+ * so that it never dirties state it is holding for someone else — so this
+ * is the only place in the tree where these registers are named at all.
+ */
+	.section .text
+	.globl	fpu_probe
+	.align	16
+fpu_probe:
+	pushq	%rbp
+	pushq	%rbx
+	pushq	%r12
+	pushq	%r13
+	pushq	%r14
+	pushq	%r15
+
+	subq	$40, %rsp
+	movq	%rdi, 0(%rsp)		/* self    */
+	movq	%rsi, 8(%rsp)		/* other   */
+	movl	%ecx, 16(%rsp)		/* rounds  */
+	movq	%rdx, 24(%rsp)		/* pattern */
+
+	movq	%rdx, %xmm0
+	movq	%rdx, %xmm1
+	movq	%rdx, %xmm2
+	movq	%rdx, %xmm3
+	movq	%rdx, %xmm4
+	movq	%rdx, %xmm5
+	movq	%rdx, %xmm6
+	movq	%rdx, %xmm7
+	movq	%rdx, %xmm8
+	movq	%rdx, %xmm9
+	movq	%rdx, %xmm10
+	movq	%rdx, %xmm11
+	movq	%rdx, %xmm12
+	movq	%rdx, %xmm13
+	movq	%rdx, %xmm14
+	movq	%rdx, %xmm15
+
+1:
+	movq	0(%rsp), %rdi
+	movq	8(%rsp), %rsi
+	call	context_switch
+
+	movl	16(%rsp), %eax
+	decl	%eax
+	movl	%eax, 16(%rsp)
+	jnz	1b
+
+	/* What differs, folded: zero means all sixteen came back. */
+	movq	24(%rsp), %rcx
+	xorq	%rax, %rax
+
+	.macro XMMCHK reg
+	movq	\reg, %rdx
+	xorq	%rcx, %rdx
+	orq	%rdx, %rax
+	.endm
+
+	XMMCHK %xmm0
+	XMMCHK %xmm1
+	XMMCHK %xmm2
+	XMMCHK %xmm3
+	XMMCHK %xmm4
+	XMMCHK %xmm5
+	XMMCHK %xmm6
+	XMMCHK %xmm7
+	XMMCHK %xmm8
+	XMMCHK %xmm9
+	XMMCHK %xmm10
+	XMMCHK %xmm11
+	XMMCHK %xmm12
+	XMMCHK %xmm13
+	XMMCHK %xmm14
+	XMMCHK %xmm15
+
+	addq	$40, %rsp
+	popq	%r15
+	popq	%r14
+	popq	%r13
+	popq	%r12
+	popq	%rbx
+	popq	%rbp
+	ret

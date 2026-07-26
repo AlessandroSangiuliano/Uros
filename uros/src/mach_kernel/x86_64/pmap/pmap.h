@@ -125,6 +125,31 @@ static inline uint64_t pmap_flags_for_prot(vm_prot_t prot)
  */
 
 /*
+ * Bracket a kernel access to a page ring 3 can reach.
+ *
+ * SMAP makes such an access fault, which is the whole point: the kernel
+ * touching user memory is nearly always a bug — a stray pointer, an
+ * argument taken on trust — and the few places where it is deliberate
+ * should have to say so.  These are how they say so.
+ *
+ * Deliberate means copyin and copyout and nothing else, once those exist.
+ * The window between them is the only time this kernel can be made to read
+ * a user address by accident, so it should be as short as the access.
+ *
+ * They do nothing when SMAP is not enabled, and that check is not defensive
+ * tidiness: the instructions themselves are invalid opcodes unless CR4.SMAP
+ * is set, so a kernel on a part without it would fault on the guard rather
+ * than on the thing being guarded.  A branch for now; the day it is on a
+ * hot path it becomes patched code, which is what the flag exists to make
+ * possible later without changing any caller.
+ */
+void pmap_user_access_begin(void);
+void pmap_user_access_end(void);
+
+/* Whether SMAP is actually on, which decides whether the pair does anything. */
+int pmap_smap_enabled(void);
+
+/*
  * Whether `pmap` may hold `va` at all.
  *
  * The kernel's map has no user half: §11.1 gives the lower half to the

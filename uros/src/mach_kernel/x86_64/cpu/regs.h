@@ -33,12 +33,18 @@ static inline uint8_t inb(uint16_t port)
 /* ------------------------------------------------------------------ */
 /*  Control registers                                                   */
 /* ------------------------------------------------------------------ */
+#define CR0_MP		(1UL << 1)	/* monitor coprocessor              */
+#define CR0_EM		(1UL << 2)	/* set: no FPU, emulate it          */
+#define CR0_TS		(1UL << 3)	/* the lazy-FPU trap; not used here */
 #define CR0_WP		(1UL << 16)	/* kernel honours read-only pages   */
 #define CR0_PG		(1UL << 31)	/* paging enabled                   */
 
 #define CR4_PAE		(1UL << 5)	/* physical address extension       */
 #define CR4_PGE		(1UL << 7)	/* global pages enabled             */
+#define CR4_OSFXSR	(1UL << 9)	/* FXSAVE/FXRSTOR and SSE usable    */
+#define CR4_OSXMMEXCPT	(1UL << 10)	/* SIMD errors raise #XF, not #UD   */
 #define CR4_PCIDE	(1UL << 17)	/* process-context identifiers      */
+#define CR4_OSXSAVE	(1UL << 18)	/* XSAVE and XCR0 usable            */
 #define CR4_SMEP	(1UL << 20)	/* no kernel execute of user pages  */
 #define CR4_SMAP	(1UL << 21)	/* no kernel access of user pages   */
 
@@ -247,6 +253,31 @@ static inline int cpu_has_1gb_pages(void)
  * relies on that — it is how an arriving processor finds its own stack
  * without being handed one.
  */
+/*
+ * The extended control register, which says which state components XSAVE
+ * will move.  Reached by its own instruction pair rather than by an MSR,
+ * and only once CR4.OSXSAVE says the kernel is prepared to manage them.
+ */
+static inline uint64_t xgetbv(uint32_t index)
+{
+	uint32_t lo, hi;
+
+	__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(index));
+	return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void xsetbv(uint32_t index, uint64_t value)
+{
+	__asm__ volatile("xsetbv"
+			 : : "a"((uint32_t)value), "d"((uint32_t)(value >> 32)),
+			     "c"(index)
+			 : "memory");
+}
+
+#define XCR0_X87	(1UL << 0)	/* always set; the unit cannot be off */
+#define XCR0_SSE	(1UL << 1)	/* the XMM registers                  */
+#define XCR0_AVX	(1UL << 2)	/* their upper halves                 */
+
 static inline uint32_t cpu_apic_id(void)
 {
 	uint32_t a, b, c, d;

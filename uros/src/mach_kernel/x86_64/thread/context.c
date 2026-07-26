@@ -9,6 +9,7 @@
 
 #include <cpu/percpu.h>
 #include <thread/context.h>
+#include <thread/fpu.h>
 #include <trap/trap.h>
 
 extern void context_thread_start(void);
@@ -37,8 +38,16 @@ extern void context_thread_start(void);
 #define CTX_CALLER	7	/* the zero that ends a backtrace */
 #define CTX_WORDS	9
 
+void context_become_current(struct context *ctx, uint64_t stack_top,
+			    void *fpu_area)
+{
+	ctx->rsp = 0;			/* the first switch away writes it */
+	ctx->kernel_stack_top = stack_top;
+	ctx->fpu_area = fpu_area;
+}
+
 void context_init(struct context *ctx, uint64_t stack_top,
-		  void (*entry)(void *), void *arg)
+		  void (*entry)(void *), void *arg, void *fpu_area)
 {
 	uint64_t rsp = stack_top - CTX_WORDS * 8;
 	uint64_t *frame = (uint64_t *)(uintptr_t)rsp;
@@ -58,6 +67,15 @@ void context_init(struct context *ctx, uint64_t stack_top,
 
 	ctx->rsp = rsp;
 	ctx->kernel_stack_top = stack_top;
+	ctx->fpu_area = fpu_area;
+
+	/*
+	 * A thread does not inherit whatever the memory held.  Starting with
+	 * another thread's registers would be a disclosure with extra steps,
+	 * and starting with uninitialised memory is worse — the restore
+	 * instruction accepts some patterns as exceptions waiting to happen.
+	 */
+	fpu_area_init(fpu_area);
 }
 
 void context_switch(struct context *old, struct context *fresh)
@@ -72,6 +90,18 @@ void context_switch(struct context *old, struct context *fresh)
 	 * while there was one thread to arrive on it.
 	 */
 	percpu()->kernel_rsp = fresh->kernel_stack_top;
+
+	/*
+	 * Both halves before the switch, because after it this code is
+	 * running as a different thread and `old` is no longer us.  The
+	 * register file is separate from the stack, so moving it here is not
+	 * early — it is the only place it can be.
+	 */
+	if (old->fpu_area == 0 || fresh->fpu_area == 0)
+		panic("thread: a context switched without anywhere to keep its FPU state");
+
+	fpu_save(old->fpu_area);
+	fpu_restore(fresh->fpu_area);
 
 	context_switch_raw(&old->rsp, fresh->rsp);
 }

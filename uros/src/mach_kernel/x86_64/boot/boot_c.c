@@ -45,6 +45,7 @@
 #include <syscall/probe.h>
 #include <syscall/syscall.h>
 #include <thread/context.h>
+#include <thread/fpu.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
@@ -880,7 +881,22 @@ static void user_pmap_selftest(void)
 
 	/* The switch.  Everything below runs in the new address space. */
 	pmap_activate(u);
+
+	/*
+	 * And the write says so.  The page is in the lower half, which since
+	 * #411 means ring 3 can reach it, which means SMAP forbids the kernel
+	 * from touching it without asking.  This is the kernel asking — the
+	 * same bracket copyin and copyout will use, here because this is the
+	 * first deliberate access of the kind the tree has.
+	 *
+	 * Without it the store faults, and it did: on the first boot with a
+	 * processor model that has SMAP at all.  The default emulated one does
+	 * not, which is why this is a lesson about testing more than one.
+	 */
+	pmap_user_access_begin();
 	*(volatile uint32_t *)(uintptr_t)USER_TEST_VA = 0xa11caca0;
+	pmap_user_access_end();
+
 	kputs("UrMach x86-64: running in the new space, wrote through it\r\n");
 	pmap_activate(k);
 
@@ -1644,6 +1660,10 @@ static void user_reachable_selftest(void)
  */
 extern uint64_t context_probe(struct context *self, struct context *other,
 			      uint64_t pattern, unsigned rounds);
+extern uint64_t fpu_probe(struct context *self, struct context *other,
+			  uint64_t pattern, unsigned rounds);
+
+static volatile uint64_t thread_xmm[2];
 
 static struct context ctx_main, ctx_a, ctx_b;
 static volatile unsigned thread_ran[2];
@@ -1672,6 +1692,7 @@ static void thread_a(void *arg)
 	(void)arg;
 	thread_ran[0] = 1;
 	thread_kept[0] = context_probe(&ctx_a, &ctx_b, PATTERN_A, THREAD_ROUNDS);
+	thread_xmm[0] = fpu_probe(&ctx_a, &ctx_b, PATTERN_A, THREAD_ROUNDS);
 
 	context_switch(&ctx_a, &ctx_b);		/* let the other one finish */
 	panic("thread: resumed a thread that had finished");
@@ -1682,6 +1703,7 @@ static void thread_b(void *arg)
 	(void)arg;
 	thread_ran[1] = 1;
 	thread_kept[1] = context_probe(&ctx_b, &ctx_a, PATTERN_B, THREAD_ROUNDS);
+	thread_xmm[1] = fpu_probe(&ctx_b, &ctx_a, PATTERN_B, THREAD_ROUNDS);
 
 	context_switch(&ctx_b, &ctx_main);	/* and hand the boot back */
 	panic("thread: resumed a thread that had finished");
@@ -1691,18 +1713,34 @@ static void context_selftest(void)
 {
 	uint64_t stack_a = boot_frame_alloc();
 	uint64_t stack_b = boot_frame_alloc();
+	uint64_t fpu_frames = boot_frames_alloc(3);
 	uint64_t saved_kernel_rsp = percpu()->kernel_rsp;
+	void *fpu_a, *fpu_b, *fpu_main;
 
-	if (stack_a == 0 || stack_b == 0) {
-		kputs("UrMach x86-64: no stacks for the context probe\r\n");
+	if (stack_a == 0 || stack_b == 0 || fpu_frames == 0) {
+		kputs("UrMach x86-64: no memory for the context probe\r\n");
 		return;
 	}
 
 	stack_a = phys_to_direct(stack_a) + PAGE_SIZE_4K;
 	stack_b = phys_to_direct(stack_b) + PAGE_SIZE_4K;
 
-	context_init(&ctx_a, stack_a, thread_a, 0);
-	context_init(&ctx_b, stack_b, thread_b, 0);
+	/*
+	 * A page each for the extended state, which is more than it needs and
+	 * far simpler than the alternative: the size is the processor's to
+	 * decide and a page covers every part that exists.  Page-aligned is
+	 * more than the sixty-four bytes the instruction demands.
+	 */
+	if (fpu_area_size() > PAGE_SIZE_4K)
+		panic("thread: the extended state does not fit in a page");
+
+	fpu_a = (void *)(uintptr_t)phys_to_direct(fpu_frames);
+	fpu_b = (void *)(uintptr_t)phys_to_direct(fpu_frames + PAGE_SIZE_4K);
+	fpu_main = (void *)(uintptr_t)phys_to_direct(fpu_frames + 2 * PAGE_SIZE_4K);
+
+	context_init(&ctx_a, stack_a, thread_a, 0, fpu_a);
+	context_init(&ctx_b, stack_b, thread_b, 0, fpu_b);
+	fpu_area_init(fpu_main);
 
 	/*
 	 * The boot path becomes a thread by being switched away from: its
@@ -1710,7 +1748,7 @@ static void context_selftest(void)
 	 * — a running thread's saved state is wherever it was interrupted,
 	 * and there is nothing to prepare in advance.
 	 */
-	ctx_main.kernel_stack_top = saved_kernel_rsp;
+	context_become_current(&ctx_main, saved_kernel_rsp, fpu_main);
 	context_switch(&ctx_main, &ctx_a);
 
 	kputs("UrMach x86-64: two threads ran ");
@@ -1723,6 +1761,15 @@ static void context_selftest(void)
 	      && thread_kept[0] == 0 && thread_kept[1] == 0
 	      ? " — six registers each, across every switch\r\n"
 	      : " — WRONG\r\n");
+
+	kputs("UrMach x86-64: vector state kept across switches, differences ");
+	kputhex64(thread_xmm[0]);
+	kputs(" and ");
+	kputhex64(thread_xmm[1]);
+	kputs(", saved by ");
+	kputs(fpu_uses_xsave() ? "XSAVE" : "FXSAVE");
+	kputs(thread_xmm[0] == 0 && thread_xmm[1] == 0
+	      ? " — sixteen registers each\r\n" : " — WRONG\r\n");
 
 	kputs("UrMach x86-64: the entry stack followed the thread, and is ");
 	kputs(percpu()->kernel_rsp == saved_kernel_rsp
@@ -2222,6 +2269,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	percpu_selftest();
 	gdt_layout_selftest();
 	syscall_init();
+	fpu_init();
 	context_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
