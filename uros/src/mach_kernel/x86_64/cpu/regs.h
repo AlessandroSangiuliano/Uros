@@ -51,6 +51,7 @@ static inline uint8_t inb(uint16_t port)
 
 #define CR4_PAE		(1UL << 5)	/* physical address extension       */
 #define CR4_PGE		(1UL << 7)	/* global pages enabled             */
+#define CR4_FSGSBASE	(1UL << 16)	/* ring 3 may write its own bases   */
 #define CR4_OSFXSR	(1UL << 9)	/* FXSAVE/FXRSTOR and SSE usable    */
 #define CR4_OSXMMEXCPT	(1UL << 10)	/* SIMD errors raise #XF, not #UD   */
 #define CR4_PCIDE	(1UL << 17)	/* process-context identifiers      */
@@ -337,6 +338,27 @@ static inline int cpu_has_smep(void)
 
 	cpuid_count(7, 0, &a, &b, &c, &d);
 	return (b & (1U << 7)) != 0;
+}
+
+/*
+ * Whether this processor has RDFSBASE and its relatives — the instructions
+ * that read and write the segment bases without an MSR access, and which
+ * CR4.FSGSBASE makes available at ring 3 as well as ring 0.
+ *
+ * Asked rather than assumed for the usual reason, and asked at all because
+ * the answer being yes is what makes the bit a decision: see
+ * percpu_activate() for the one that was made and why.
+ */
+static inline int cpu_has_fsgsbase(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+	if (a < 7)
+		return 0;
+
+	cpuid_count(7, 0, &a, &b, &c, &d);
+	return (b & (1U << 0)) != 0;
 }
 
 static inline int cpu_has_smap(void)

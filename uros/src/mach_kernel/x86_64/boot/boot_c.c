@@ -1928,6 +1928,7 @@ static void ring3_selftest(void)
 	uint64_t code_frame = boot_frame_alloc();
 	uint64_t data_frame = boot_frame_alloc();
 	const struct trap_record *t;
+	struct trap_record first, bases;
 	uint64_t witness, answer, kernel_gs;
 	pmap_t space;
 	uint64_t size;
@@ -1981,11 +1982,23 @@ static void ring3_selftest(void)
 
 	write_cr3(space->root_pa);
 	user_probe_enter(USER_PROBE_CODE_VA, USER_PROBE_STACK_TOP);
+
+	/*
+	 * Kept before the second visit overwrites it.  One record, one armed
+	 * expectation: the machinery is deliberately not a stack, so a test
+	 * that wants two answers has to take the first one with it.
+	 */
+	first = *trap_last();
+
+	/* And back in, at the other entry point in the same page. */
+	user_probe_enter(USER_PROBE_FSGSBASE_VA, USER_PROBE_STACK_TOP);
+	bases = *trap_last();
+
 	write_cr3(kernel_root);
 
 	wrmsr(MSR_KERNEL_GS_BASE, kernel_gs);
 
-	t = trap_last();
+	t = &first;
 	witness = *(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame);
 	answer = *(volatile uint64_t *)(uintptr_t)(phys_to_direct(data_frame) + 8);
 
@@ -2032,6 +2045,32 @@ static void ring3_selftest(void)
 	kputs(syscall_probe_gs() == kernel_gs && t->gs_base == kernel_gs
 	      ? " — both paths swapped, neither saw the sentinel\r\n"
 	      : " — WRONG, a path kept the user's gs\r\n");
+
+	/*
+	 * And whether ring 3 could have written that base itself (#440).
+	 *
+	 * The trap entry for NMI and its three relatives decides what to do by
+	 * asking whether the loaded base is a kernel address.  That is a proof
+	 * only while a user program cannot write one, which is why CR4.FSGSBASE
+	 * is cleared rather than left as the firmware had it.
+	 *
+	 * Whether the processor even has the feature is reported alongside,
+	 * because the two runs prove different things: on a processor without
+	 * it the invalid opcode says nothing about the decision, and on one
+	 * with it the same invalid opcode is the decision taking effect.  A
+	 * verdict that read the same in both cases would be the emulated
+	 * default CPU hiding the answer again.
+	 */
+	kputs("UrMach x86-64: rdgsbase in ring 3 -> ");
+	kputs(trap_name(bases.vector));
+	kputs(cpu_has_fsgsbase() ? " (the processor has it, cr4 bit "
+				 : " (the processor has not, cr4 bit ");
+	kputs(read_cr4() & CR4_FSGSBASE ? "set)" : "clear)");
+	kputs(bases.caught && bases.vector == T_INVALID_OPCODE
+	      && (bases.cs & 3) == USER_RPL
+	      && (read_cr4() & CR4_FSGSBASE) == 0
+	      ? " — a user program cannot write its own base\r\n"
+	      : " — WRONG, ring 3 reached the segment bases\r\n");
 
 	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
 	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);

@@ -144,3 +144,27 @@ user_probe_code:
 	movq	%rax, 8(%r11)
 
 	hlt
+
+/*
+ * A second entry into the same page, for a second question (#440): may a
+ * user program read its own segment base?
+ *
+ * The answer is supposed to be no, because CR4.FSGSBASE is cleared on every
+ * processor so that the base in IA32_GS_BASE stays a value only the kernel
+ * ever wrote — which is what the paranoid trap entry relies on.  Asking the
+ * processor is the only way to find out whether that is true of the machine
+ * rather than of the source.
+ *
+ * The two outcomes name themselves.  RDGSBASE with the bit clear is an
+ * invalid opcode, so an invalid opcode is the proof; if the bit were set the
+ * instruction would simply work and the fault would come from the HLT below
+ * instead, arriving as a general protection.  Which vector comes back is the
+ * whole answer, and it needs no cooperation from the code being tested.
+ *
+ * Reached by offset from the start of this section, because the page is
+ * copied whole and a second symbol in it is a second entry point.
+ */
+	.globl	user_probe_fsgsbase
+user_probe_fsgsbase:
+	rdgsbase %rax
+	hlt
