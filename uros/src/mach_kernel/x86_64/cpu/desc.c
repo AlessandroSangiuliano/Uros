@@ -199,6 +199,14 @@ uint64_t desc_gdt_entry(unsigned selector)
 	return gdt[idx];
 }
 
+uint64_t desc_rsp0(uint32_t cpu_id)
+{
+	if (cpu_id >= SMP_MAX_CPUS)
+		panic("desc: asked for the stack of a processor past the tables");
+
+	return tss[cpu_id].rsp0;
+}
+
 void desc_activate(uint32_t cpu_id)
 {
 	load_gdt();

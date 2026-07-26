@@ -48,6 +48,17 @@
  */
 #define USER_PROBE_WITNESS	0x5eeded1eafULL
 
+/*
+ * The arguments the probe passes, and the answer it must get back.
+ *
+ * One to six, one per byte, lowest argument in the lowest byte — so the
+ * result names every register individually.  A sum would be shorter and
+ * would hide the failure worth catching: two arguments delivered into each
+ * other's registers add to the same total, and putting six registers in the
+ * right places is the entry path's entire job.
+ */
+#define USER_PROBE_SYSCALL_RESULT	0x060504030201ULL
+
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>

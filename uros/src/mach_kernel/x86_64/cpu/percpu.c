@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <cpu/desc.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <pmap/bootmem.h>
@@ -57,6 +58,14 @@ void percpu_activate(uint32_t cpu_id)
 	 */
 	p->self = p;
 	p->cpu_id = cpu_id;
+
+	/*
+	 * The stack a syscall will switch to — the same one a trap from ring
+	 * 3 lands on, because the two cannot be in flight at once.  Recorded
+	 * here rather than looked up on entry: the entry path has nowhere to
+	 * put a lookup, since it has not got a stack yet.
+	 */
+	p->kernel_rsp = desc_rsp0(cpu_id);
 
 	wrmsr(MSR_GS_BASE, va);
 

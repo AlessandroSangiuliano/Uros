@@ -113,6 +113,18 @@ void desc_activate(uint32_t cpu_id);
  */
 uint64_t desc_gdt_entry(unsigned selector);
 
+/*
+ * The stack a privilege transition lands on for a given processor.
+ *
+ * One stack, shared by both ways in: a trap gate takes it from the
+ * task-state segment and the syscall entry is handed the same value, which
+ * is safe because the two cannot be in flight at once — a syscall is not
+ * interruptible before it has switched, and a trap from ring 3 is not a
+ * syscall.  Two stacks would mean two things to keep current at every
+ * context switch, for no gain.
+ */
+uint64_t desc_rsp0(uint32_t cpu_id);
+
 /* The fields of a descriptor that decide who may use it and how. */
 #define DESC_ACCESS(d)		(((d) >> 40) & 0xFF)
 #define DESC_DPL(d)		(((d) >> 45) & 0x3)

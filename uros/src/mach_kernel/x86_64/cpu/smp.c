@@ -19,6 +19,7 @@
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
+#include <syscall/syscall.h>
 #include <sync/atomic.h>
 #include <trap/trap.h>
 
@@ -113,6 +114,14 @@ void ap_start_c(uint32_t apic_id)
 	 * delivered.
 	 */
 	lapic_enable();
+
+	/*
+	 * And its own SYSCALL machinery, for the same reason: LSTAR, STAR and
+	 * the enable bit are per-processor, and a startup interrupt leaves
+	 * none of them set.  A processor that missed this would not fail a
+	 * syscall slowly — the instruction would not exist on it.
+	 */
+	syscall_init();
 
 	atomic_test_and_set_bit((volatile uint64_t *)&online_mask, apic_id);
 	atomic_inc64((volatile uint64_t *)&online_count);

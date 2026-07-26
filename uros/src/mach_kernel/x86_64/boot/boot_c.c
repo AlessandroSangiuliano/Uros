@@ -43,6 +43,7 @@
 #include <pmap/tlb.h>
 #include <pmap/walk.h>
 #include <syscall/probe.h>
+#include <syscall/syscall.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
@@ -1655,7 +1656,7 @@ static void ring3_selftest(void)
 	uint64_t code_frame = boot_frame_alloc();
 	uint64_t data_frame = boot_frame_alloc();
 	const struct trap_record *t;
-	uint64_t witness;
+	uint64_t witness, answer;
 	pmap_t space;
 	uint64_t size;
 	uint8_t *dst;
@@ -1703,6 +1704,7 @@ static void ring3_selftest(void)
 
 	t = trap_last();
 	witness = *(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame);
+	answer = *(volatile uint64_t *)(uintptr_t)(phys_to_direct(data_frame) + 8);
 
 	kputs("UrMach x86-64: ring 3 ran and left ");
 	kputhex64(witness);
@@ -1715,6 +1717,18 @@ static void ring3_selftest(void)
 	      && (t->cs & 3) == USER_RPL
 	      ? " — ring 3, on the processor's own testimony\r\n"
 	      : " — WRONG\r\n");
+
+	/*
+	 * And the syscall it made from there.  The answer names each argument
+	 * register separately, so this reports the value rather than a verdict:
+	 * a wrong byte says which register the entry path put in the wrong
+	 * place, which a pass/fail would not.
+	 */
+	kputs("UrMach x86-64: its syscall answered ");
+	kputhex64(answer);
+	kputs(answer == USER_PROBE_SYSCALL_RESULT
+	      ? " — six arguments and a return, through SYSCALL and back\r\n"
+	      : " — WRONG, expected 0x060504030201\r\n");
 
 	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
 	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);
@@ -2059,6 +2073,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	reclaim_selftest();
 	percpu_selftest();
 	gdt_layout_selftest();
+	syscall_init();
 	user_reachable_selftest();
 	ring3_selftest();
 	external_vectors_selftest();

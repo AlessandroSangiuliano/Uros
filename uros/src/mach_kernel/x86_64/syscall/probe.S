@@ -7,6 +7,7 @@
 
 #include <cpu/desc.h>
 #include <syscall/probe.h>
+#include <syscall/syscall.h>
 
 	.section .text
 	.code64
@@ -105,4 +106,31 @@ user_probe_code:
 	movabsq	$USER_PROBE_WITNESS, %rax
 	movabsq	$USER_PROBE_DATA_VA, %r11
 	movq	%rax, (%r11)
+
+	/*
+	 * A syscall, issued the way the contract in <syscall/syscall.h> says
+	 * one is issued: number in rax, six arguments in rdi, rsi, rdx, r10,
+	 * r8, r9 — r10 rather than rcx because the instruction takes rcx for
+	 * the return address.
+	 *
+	 * Distinct small values rather than anything meaningful, so that the
+	 * answer names each register: an argument that arrived in the wrong
+	 * one shows up as a wrong byte, in a known position.
+	 */
+	movq	$SYSCALL_NR_PROBE, %rax
+	movq	$1, %rdi
+	movq	$2, %rsi
+	movq	$3, %rdx
+	movq	$4, %r10
+	movq	$5, %r8
+	movq	$6, %r9
+	syscall
+
+	/*
+	 * r11 has to be reloaded: the instruction destroyed it, which is the
+	 * contract working rather than failing.
+	 */
+	movabsq	$USER_PROBE_DATA_VA, %r11
+	movq	%rax, 8(%r11)
+
 	hlt
