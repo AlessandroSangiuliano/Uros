@@ -1532,6 +1532,47 @@ static void ipi_selftest(void)
 }
 
 /*
+ * The descriptor table, checked against the arithmetic rather than against
+ * its own comments (#411).
+ *
+ * SYSCALL and SYSRET are handed one number and derive four selectors from it
+ * by addition.  That makes the table's order load-bearing in a way an
+ * ordinary GDT's is not: there is no field naming the user code segment, only
+ * an offset the processor will add.  Put the descriptors in a different order
+ * and nothing complains — until the first return to user mode loads whichever
+ * descriptor happens to live at the computed offset, which is how a program
+ * in ring 3 ends up holding a kernel data segment.
+ *
+ * So the check does the processor's arithmetic and looks at what it lands on:
+ * the right privilege level, the right kind of segment, and for the 64-bit
+ * code selector the long-mode bit that makes it 64-bit at all.
+ */
+static void gdt_layout_selftest(void)
+{
+	uint64_t kdata = desc_gdt_entry(KERNEL_CS_SELECTOR + 8);
+	uint64_t udata = desc_gdt_entry(SYSRET_SELECTOR_BASE + 8);
+	uint64_t ucode = desc_gdt_entry(SYSRET_SELECTOR_BASE + 16);
+
+	int kdata_ok = DESC_IS_PRESENT(kdata) && !DESC_IS_CODE(kdata)
+		    && DESC_DPL(kdata) == 0;
+	int udata_ok = DESC_IS_PRESENT(udata) && !DESC_IS_CODE(udata)
+		    && DESC_DPL(udata) == 3;
+	int ucode_ok = DESC_IS_PRESENT(ucode) && DESC_IS_CODE(ucode)
+		    && DESC_DPL(ucode) == 3 && DESC_IS_LONG(ucode);
+
+	kputs("UrMach x86-64: syscall lands on kernel data (dpl ");
+	kputdec(DESC_DPL(kdata));
+	kputs("), sysret on user data (dpl ");
+	kputdec(DESC_DPL(udata));
+	kputs(") and user code (dpl ");
+	kputdec(DESC_DPL(ucode));
+	kputs(ucode_ok ? ", 64-bit)" : ", NOT 64-bit)");
+	kputs(kdata_ok && udata_ok && ucode_ok
+	      ? " — the table suits the arithmetic\r\n"
+	      : " — WRONG\r\n");
+}
+
+/*
  * The message going the other way.
  *
  * Everything above is the boot processor asking and the others answering,
@@ -1806,6 +1847,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	atomic_selftest();
 	reclaim_selftest();
 	percpu_selftest();
+	gdt_layout_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();
 	ipi_init();

@@ -31,9 +31,45 @@
 
 #include <stdint.h>
 
-/* The fixed selectors, the same on every processor. */
+/*
+ * The fixed selectors, the same on every processor — and their order is not
+ * a choice (#411).
+ *
+ * SYSCALL and SYSRET do not take a selector.  They take one number, held in
+ * STAR, and derive four selectors from it by arithmetic:
+ *
+ *   SYSCALL   CS = STAR[47:32]          SS = STAR[47:32] + 8
+ *   SYSRET    CS = STAR[63:48] + 16     SS = STAR[63:48] + 8
+ *
+ * So the descriptor table has to be laid out to suit the arithmetic, rather
+ * than the instruction being told where things are.  Kernel code must be
+ * immediately followed by kernel data; user data must sit eight bytes past
+ * the SYSRET base and user code sixteen — in that order, which puts data
+ * *before* code on the user side and is the opposite of the kernel side.
+ *
+ * Getting it wrong does not fail at setup.  It fails on the first return to
+ * user mode, by loading whatever descriptor happens to live at the computed
+ * offset — which is how a return to ring 3 lands on a kernel data segment
+ * that a user program can then write through.
+ *
+ * The gap at USER_CS32_SELECTOR is the arithmetic's, not ours: the 64-bit
+ * return skips it, and only the compatibility-mode form of SYSRET would load
+ * it.  Nothing emits that form yet.  It holds a correct 32-bit user code
+ * descriptor rather than a null one, because a null there would turn the day
+ * someone adds a 32-bit userland into a fault with no obvious cause.
+ */
 #define KERNEL_CS_SELECTOR	0x08
 #define KERNEL_DS_SELECTOR	0x10
+
+#define SYSRET_SELECTOR_BASE	0x18
+#define USER_CS32_SELECTOR	0x18	/* compatibility mode; unused so far  */
+#define USER_DS_SELECTOR	0x20	/* = base + 8,  loaded into SS        */
+#define USER_CS_SELECTOR	0x28	/* = base + 16, loaded into CS        */
+
+/* What a selector looks like once the processor has added the ring. */
+#define USER_RPL		3
+#define USER_DS_RPL3		(USER_DS_SELECTOR | USER_RPL)
+#define USER_CS_RPL3		(USER_CS_SELECTOR | USER_RPL)
 
 /*
  * Build the shared tables and put this processor on them.
@@ -65,5 +101,21 @@ void desc_alloc(uint32_t cpu_id);
  * register, so the TSS has to be loaded before any such gate exists.
  */
 void desc_activate(uint32_t cpu_id);
+
+/*
+ * One entry of the shared table, named by its selector.
+ *
+ * So that the layout can be checked against the arithmetic the processor
+ * will actually perform, rather than against the comment sitting next to it.
+ * The comment is what would be wrong.
+ */
+uint64_t desc_gdt_entry(unsigned selector);
+
+/* The fields of a descriptor that decide who may use it and how. */
+#define DESC_ACCESS(d)		(((d) >> 40) & 0xFF)
+#define DESC_DPL(d)		(((d) >> 45) & 0x3)
+#define DESC_IS_CODE(d)		((((d) >> 43) & 0x1) != 0)
+#define DESC_IS_PRESENT(d)	((((d) >> 47) & 0x1) != 0)
+#define DESC_IS_LONG(d)		((((d) >> 53) & 0x1) != 0)
 
 #endif	/* _X86_64_CPU_DESC_H_ */
