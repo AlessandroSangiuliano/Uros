@@ -300,6 +300,42 @@ const struct trap_record *trap_last(void)
 	return &last_trap;
 }
 
+/* The other record, for the four vectors that take the paranoid entry. */
+static struct trap_paranoid_record last_paranoid;
+
+const struct trap_paranoid_record *trap_last_paranoid(void)
+{
+	return &last_paranoid;
+}
+
+void trap_paranoid_forget(void)
+{
+	last_paranoid.taken = 0;
+}
+
+void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
+			    uint64_t swapped)
+{
+	/*
+	 * Recorded before the handler runs, because the handler is entitled to
+	 * halt: a machine check that reports and stops should still have left
+	 * behind the evidence that its entry got %gs right, and a record
+	 * written afterwards would only exist for the traps that were survived.
+	 *
+	 * gs_on_dispatch is read from the machine rather than inferred from the
+	 * other two.  Inferring it would be checking the entry's arithmetic
+	 * against itself; reading it asks whether the instruction actually ran.
+	 */
+	last_paranoid.vector = frame->vector;
+	last_paranoid.cs = frame->cs;
+	last_paranoid.gs_on_entry = gs_on_entry;
+	last_paranoid.gs_on_dispatch = rdmsr(MSR_GS_BASE);
+	last_paranoid.swapped = swapped;
+	last_paranoid.taken = 1;
+
+	trap_dispatch(frame);
+}
+
 void trap_dispatch(struct trap_frame *frame)
 {
 	/*
@@ -388,8 +424,13 @@ void trap_dispatch(struct trap_frame *frame)
 		 * stack pointer is untouched, which is why the resume point
 		 * has to be inside the function that armed this: its frame is
 		 * still exactly as the faulting instruction left it.
+		 *
+		 * Unless the caller asked to carry on where it was, which for
+		 * a vector that is not the instruction's fault is the only
+		 * sensible answer — see TRAP_RESUME_HERE in <trap/trap.h>.
 		 */
-		frame->rip = expect_resume;
+		if (expect_resume != TRAP_RESUME_HERE)
+			frame->rip = expect_resume;
 		return;
 	}
 

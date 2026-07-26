@@ -164,6 +164,21 @@ void trap_init(void);
 void trap_dispatch(struct trap_frame *frame);
 
 /*
+ * Entry from the four stubs that cannot decide from the saved code segment
+ * (#440): #DB, NMI, #DF and #MC.  See trap/entry.S for why those four and no
+ * others, and for how the decision is made.
+ *
+ * The two extra arguments are the evidence, passed along rather than
+ * recomputed: `gs_on_entry` is the base the vector arrived with, before the
+ * entry did anything about it, and `swapped` is what the entry decided.
+ * Neither can be recovered afterwards — by the time C runs the base is the
+ * kernel's whichever way the decision went, which is precisely the property
+ * that makes it correct and also the reason it has to be carried.
+ */
+void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
+			    uint64_t swapped);
+
+/*
  * What a vector is called.  Exported because a number on a serial line is a
  * lookup performed at the worst possible moment, and the tests report faults
  * they provoked on purpose as often as the handler reports the others.
@@ -203,6 +218,19 @@ void trap_set_handler(unsigned vector, trap_handler_t handler);
 void trap_expect(uint64_t vector, uint64_t resume_rip);
 
 /*
+ * Resume at the instruction the trap arrived on, rather than somewhere else.
+ *
+ * For the faults trap_expect() was written for, resuming where they happened
+ * would repeat them forever, so a different address is the only useful
+ * answer.  For the ones that are not the instruction's fault — a debug
+ * exception armed from outside, an interrupt that is not maskable — the
+ * instruction has not run yet or has run correctly, and continuing is what
+ * the handler is supposed to do.  Zero is not an address a resume could
+ * legitimately be, which is what lets it mean this.
+ */
+#define TRAP_RESUME_HERE	0UL
+
+/*
  * What the last expected trap turned out to be.  Reporting a fault is one
  * thing; being able to check that the frame carried the right vector, the
  * right error code and a plausible instruction pointer is what tells us the
@@ -220,6 +248,35 @@ struct trap_record {
 };
 
 const struct trap_record *trap_last(void);
+
+/*
+ * What the last vector that took the paranoid entry found there (#440).
+ *
+ * A record of its own rather than two more fields on the one above, because
+ * only one of the two paths can fill them in.  A field that is meaningful
+ * after some traps and stale after the others is worse than no field: it
+ * reads the same either way, and the reader has no way to ask which it got.
+ *
+ * `cs` is here because it is the evidence *against* the rule this path
+ * replaces — a window trap carries a ring-0 code segment, so recording it
+ * alongside a user base is what makes the two disagree in the record rather
+ * than only in the argument.
+ */
+struct trap_paranoid_record {
+	uint64_t vector;
+	uint64_t cs;			/* what the ring rule would have read */
+	uint64_t gs_on_entry;		/* the base the window left loaded    */
+	uint64_t gs_on_dispatch;	/* and the one the handler ran with   */
+	uint64_t swapped;		/* whether the entry exchanged them   */
+	int      taken;
+};
+
+const struct trap_paranoid_record *trap_last_paranoid(void);
+
+/* Forget the last one, so that "it happened" can be distinguished from "it
+ * happened earlier".  A test that only checks the contents of this record
+ * would pass on a stale one from a previous experiment. */
+void trap_paranoid_forget(void);
 
 /*
  * Arrange for the next fault *from ring 3* to return to the kernel instead

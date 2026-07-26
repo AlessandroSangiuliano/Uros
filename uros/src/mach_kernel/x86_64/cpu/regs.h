@@ -8,10 +8,18 @@
  * EFER and CR3, the trap path will need CR2, the protection posture needs
  * CR4, and the KPTI decision of ch.11 §11.6 is a CPUID query.  It lives in
  * cpu/ so none of them owns it.
+ *
+ * Assembly includes this too, for the numbers rather than the accessors: an
+ * entry path that reads an MSR before it has a stack cannot call anything,
+ * and a register number written out a second time in a .S file is a number
+ * that will disagree with this one eventually.  So the constants are outside
+ * the __ASSEMBLER__ guards and everything that generates code is inside.
  */
 
 #ifndef _X86_64_CPU_REGS_H_
 #define _X86_64_CPU_REGS_H_
+
+#ifndef __ASSEMBLER__
 
 #include <stdint.h>
 
@@ -30,6 +38,8 @@ static inline uint8_t inb(uint16_t port)
 	return r;
 }
 
+#endif	/* __ASSEMBLER__ */
+
 /* ------------------------------------------------------------------ */
 /*  Control registers                                                   */
 /* ------------------------------------------------------------------ */
@@ -47,6 +57,8 @@ static inline uint8_t inb(uint16_t port)
 #define CR4_OSXSAVE	(1UL << 18)	/* XSAVE and XCR0 usable            */
 #define CR4_SMEP	(1UL << 20)	/* no kernel execute of user pages  */
 #define CR4_SMAP	(1UL << 21)	/* no kernel access of user pages   */
+
+#ifndef __ASSEMBLER__
 
 static inline uint64_t read_cr0(void)
 {
@@ -134,7 +146,11 @@ static inline void interrupts_disable(void)
 	__asm__ volatile("cli" ::: "memory");
 }
 
+#endif	/* __ASSEMBLER__ */
+
 #define RFLAGS_IF	(1UL << 9)
+
+#ifndef __ASSEMBLER__
 
 static inline int interrupts_enabled(void)
 {
@@ -155,6 +171,8 @@ static inline void write_cr4(uint64_t v)
 {
 	__asm__ volatile("mov %0, %%cr4" : : "r"(v) : "memory");
 }
+
+#endif	/* __ASSEMBLER__ */
 
 /* ------------------------------------------------------------------ */
 /*  Model-specific registers                                            */
@@ -179,6 +197,8 @@ static inline void write_cr4(uint64_t v)
 #define EFER_LME	(1UL << 8)	/* long mode enabled  (boot.S sets)  */
 #define EFER_LMA	(1UL << 10)	/* long mode active   (read-only)    */
 #define EFER_NXE	(1UL << 11)	/* execute-disable bit is usable     */
+
+#ifndef __ASSEMBLER__
 
 static inline uint64_t rdmsr(uint32_t msr)
 {
@@ -274,9 +294,13 @@ static inline void xsetbv(uint32_t index, uint64_t value)
 			 : "memory");
 }
 
+#endif	/* __ASSEMBLER__ */
+
 #define XCR0_X87	(1UL << 0)	/* always set; the unit cannot be off */
 #define XCR0_SSE	(1UL << 1)	/* the XMM registers                  */
 #define XCR0_AVX	(1UL << 2)	/* their upper halves                 */
+
+#ifndef __ASSEMBLER__
 
 static inline uint32_t cpu_apic_id(void)
 {
@@ -343,5 +367,7 @@ static inline void cpu_vendor(char *out13)
 			out13[i * 4 + j] = (char)(words[i] >> (j * 8));
 	out13[12] = '\0';
 }
+
+#endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_CPU_REGS_H_ */
