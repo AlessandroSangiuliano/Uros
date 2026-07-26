@@ -892,7 +892,79 @@ instruction that currently satisfies it.
 What is **not** yet narrowed: the shootdown goes to every online processor
 rather than to those actually using the address space in question. Narrowing
 it needs a record of which processors have a given `pmap` loaded, which is
-the scheduler's to keep (#408).
+the scheduler's to keep (#408, tracked as #439).
+
+### 11.9 The syscall contract, and what it deliberately does not preserve
+
+Every Mach trap and every POSIX call passes through one entry path, so what
+that path costs is a floor under the whole system. The contract is therefore
+a decision, recorded here and implemented in `x86_64/syscall/` (#411):
+
+```
+rax                      call number in, result out
+rdi rsi rdx r10 r8 r9    arguments one to six
+rcx r11                  taken by the instruction — return address and flags
+rbx rbp r12 r13 r14 r15  preserved
+everything else          destroyed
+```
+
+`r10` rather than `rcx` for the fourth argument because `SYSCALL` takes
+`rcx`; the same substitution Linux makes, for the same reason, which costs
+nothing and keeps a musl port (#414, #424) a substitution rather than a
+rewrite.
+
+**Destroying the argument registers is the choice.** Linux preserves them,
+which obliges its entry to save six on the way in and restore six on the way
+out on every call — a compatibility contract thirty years old. Uros controls
+both sides and carries no such debt, so a syscall behaves exactly as a call
+to a C function: the caller assumes it clobbers what a call clobbers.
+
+The cost is narrow and worth stating exactly, because it is a debugging cost
+and those are the ones that get discovered late:
+
+- **Unwinding is unaffected.** The registers a backtrace needs — the
+  callee-saved set, the stack and instruction pointers — survive *for free*,
+  since the C ABI already preserves them and the dispatcher's own compiled
+  code does the work. No entry-path stores are involved.
+- **Signal delivery is unaffected.** A handler returns to the instruction
+  after `SYSCALL`, where the destroyed registers are dead by this contract.
+- **What is lost** is reading or altering a call's *arguments* after it has
+  begun: strace-shaped tooling, and ptrace-style interception at the exit
+  stop. At the entry stop they are still live.
+
+That loss is recoverable, and the recovery is **not an ABI change** —
+userspace cannot observe whether the kernel kept a copy of registers it was
+entitled to destroy. So the full register image can be saved the day
+something wants it, conditionally, off the fast path; the site is marked in
+the entry. The reverse is the one-way door, and that asymmetry is the whole
+reason this contract was chosen now rather than deferred: preserving first
+and stopping later would break every userland wrapper that had come to rely
+on it.
+
+**Two things the hardware layout forces, recorded so they are not rearranged
+by a later tidy-up.** `SYSCALL` and `SYSRET` take no selectors — they take
+one number in `STAR` and derive four by addition, which makes the order of
+the descriptor table load-bearing (§11.2's kernel/user split is not free to
+be reordered). And `SYSRET` faults *in ring 0, on the user's stack*, if the
+return address is non-canonical: CVE-2012-0217, a privilege escalation
+rather than a crash, guarded by three instructions and a branch never taken.
+
+**What the entry path does not do, and why that is a saving.** `SYSCALL`
+does not consult the task-state segment, so there is no per-switch stack
+register to keep current — which is precisely what #348's per-CPU trampoline
+existed to avoid on i386, at a measured ~144 cycles. That machinery is not
+ported because the cost it removed does not exist here. The kernel stack
+comes from the per-CPU block through `%gs`, one load, which is why those
+fields sit together at fixed offsets near the front of the block.
+
+**`swapgs` is a duty in two places.** Neither entry mechanism exchanges the
+segment base on its own: the syscall path does it as its first instruction,
+and the trap path does it only when the saved code segment says ring 3.
+Missing it means kernel code reading `%gs:0` follows an address a user
+program chose. One window remains, between the code-segment change and the
+exchange retiring, where a non-maskable interrupt would decide correctly
+from the code segment and wrongly in fact — closed by deciding from the
+segment base instead, tracked as #440.
 
 ---
 
