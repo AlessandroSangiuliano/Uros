@@ -109,19 +109,47 @@ struct trap_frame {
  * Interrupt stack table slots, numbered as the gate field is: 1 to 7, with
  * zero meaning "whatever stack was current".
  *
- * These three get their own stack because they are the ones most likely to
- * fire when the current stack is the problem — a double fault often *is* a
+ * The first three get their own stack because they are the ones most likely
+ * to fire when the current stack is the problem — a double fault often *is* a
  * stack that cannot be pushed to, and an NMI can arrive in the middle of
  * anything, including that.  Handling them on the broken stack is how a
  * fault becomes a reset with nothing on the wire.
  *
  * A machine check gets one for a different reason: it can arrive at any
  * point, including inside the handler for something else.
+ *
+ * ── And the debug exception, which is here because of #440 ────────────
+ *
+ * A trap that arrives at ring 0 does *not* switch stacks: the processor
+ * changes stacks on a privilege transition, or when the gate names a slot in
+ * this table, and neither applies.  Everywhere else that is exactly right,
+ * because a kernel trapping at ring 0 was already standing on a kernel
+ * stack.
+ *
+ * Not in the syscall window.  SYSCALL does not switch the stack either, so
+ * for the few instructions before the entry loads one, the processor is at
+ * ring 0 with %rsp still holding whatever a user program left in it — and a
+ * user program may leave any value at all in %rsp, including the address of
+ * something the kernel cares about.  A debug exception delivered there would
+ * push its frame at that address, at ring 0, through the kernel's own
+ * mapping.  That is not a leak of information; it is a write.
+ *
+ * Which is why the three vectors that could already arrive in that window
+ * had stacks and this one has to as well.  It is the same list as the one in
+ * entry.S, for the same reason, and the two must not drift apart: the vector
+ * that decides %gs from the base is the vector that cannot trust %rsp
+ * either.
+ *
+ * ⚠️ An IST slot is a fixed address, so a second exception on the same slot
+ * lands on top of the first one's frame.  Nothing here arms a breakpoint
+ * from inside a handler, so it cannot nest today — the day something does,
+ * it inherits this.
  */
 #define IST_DOUBLE_FAULT	1
 #define IST_NMI			2
 #define IST_MACHINE_CHECK	3
-#define IST_COUNT		3
+#define IST_DEBUG		4
+#define IST_COUNT		4
 
 struct tss64;
 

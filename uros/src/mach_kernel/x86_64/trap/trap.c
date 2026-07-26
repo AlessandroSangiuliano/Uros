@@ -94,6 +94,7 @@ static unsigned vector_ist(unsigned vector)
 	case T_DOUBLE_FAULT:	return IST_DOUBLE_FAULT;
 	case T_NMI:		return IST_NMI;
 	case T_MACHINE_CHECK:	return IST_MACHINE_CHECK;
+	case T_DEBUG:		return IST_DEBUG;
 	default:		return 0;	/* the current stack will do */
 	}
 }
