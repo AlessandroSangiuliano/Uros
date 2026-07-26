@@ -213,6 +213,11 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 	return size;
 }
 
+int pmap_may_map(pmap_t pmap, uint64_t va)
+{
+	return !(va_is_user(va) && pmap == pmap_kernel());
+}
+
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired)
 {
@@ -236,6 +241,35 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	flags = pmap_flags_for_prot(prot);
 	if (wired)
 		flags |= INTEL_PTE_WIRED;
+
+	/*
+	 * Whether ring 3 may reach it follows from the address, not from an
+	 * argument.  §11.1 gives the lower half to the address space and the
+	 * upper half to the kernel, so the question is already answered by
+	 * where the caller asked for the mapping — and a caller that had to
+	 * say so as well could say something different, which is a way for a
+	 * kernel page to become reachable that no reviewer would spot.
+	 *
+	 * The 32-bit pmap asks a different question — whether this is the
+	 * kernel's map — because its layout has no halves to ask about: the
+	 * kernel sits at the top of every address space and the two are told
+	 * apart by which map they arrived through.  On this architecture the
+	 * address is the stronger answer of the two: it cannot mark a
+	 * kernel-half page reachable even if the mapping arrives through a
+	 * user's map, which the older test would happily do.
+	 *
+	 * Both are checked, because they are not the same question and each
+	 * catches what the other lets past.  The address decides whether the
+	 * bit is set; the map decides whether the mapping is legitimate at
+	 * all.  The kernel's own map has no user half — anything appearing
+	 * there is a mistake, and one that would otherwise arrive as a page
+	 * ring 3 can read.
+	 */
+	if (!pmap_may_map(pmap, va))
+		panic("pmap: the kernel map has no user half to map into");
+
+	if (va_is_user(va))
+		flags |= INTEL_PTE_USER;
 
 	rc = pmap_map_page(pmap->root_pa, va, pa, flags);
 	if (rc == PMAP_MAP_OK)

@@ -54,6 +54,20 @@
  */
 #define KERNEL_HALF_BASE	0xffff800000000000ULL
 
+/*
+ * Which half an address belongs to, which on this architecture is the same
+ * question as who it belongs to: §11.1 gives the lower half to the address
+ * space and the upper half to the kernel, with nothing in between that is
+ * addressable at all.
+ *
+ * So a mapping's side is a property of its address and does not have to be
+ * passed alongside it — which matters at the one place that has to decide
+ * whether a page is reachable from ring 3, and would otherwise be trusting
+ * a caller to say so.
+ */
+#define va_is_kernel(va)	((uint64_t)(va) >= KERNEL_HALF_BASE)
+#define va_is_user(va)		(!va_is_kernel(va))
+
 /* Offsets of each region from the anchor. */
 #define DIRECT_MAP_OFFSET	0x0000000000000000ULL
 #define KERNEL_HEAP_OFFSET	0x0000400000000000ULL

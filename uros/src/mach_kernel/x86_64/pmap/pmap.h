@@ -125,6 +125,21 @@ static inline uint64_t pmap_flags_for_prot(vm_prot_t prot)
  */
 
 /*
+ * Whether `pmap` may hold `va` at all.
+ *
+ * The kernel's map has no user half: §11.1 gives the lower half to the
+ * address space, so a lower-half mapping in the kernel's own map is a
+ * mistake — and one that would otherwise arrive as a page ring 3 can read,
+ * long after whatever asked for it.
+ *
+ * A predicate rather than a check buried in pmap_enter(), because
+ * pmap_enter()'s answer to a violation is to stop, and a rule whose only
+ * expression is a panic can never be shown to work without ending the boot.
+ * This is the same rule the panic uses, askable.
+ */
+int pmap_may_map(pmap_t pmap, uint64_t va);
+
+/*
  * Enter (or, for VM_PROT_NONE, drop) the mapping va -> pa with `prot`.
  *
  * `wired` says the pager may not reclaim the page.  The hardware has no bit

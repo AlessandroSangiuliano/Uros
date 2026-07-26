@@ -1532,6 +1532,99 @@ static void ipi_selftest(void)
 }
 
 /*
+ * A page ring 3 can actually reach (#411).
+ *
+ * The permission bit for user access is not a property of the leaf. The
+ * processor walks four entries and requires U/S set in *every* one of them —
+ * it is a conjunction, unlike the no-execute bit, which is a disjunction: NX
+ * anywhere on the path forbids execution everywhere below.  Two bits in the
+ * same word, combined in opposite directions.
+ *
+ * Which means a leaf marked user-accessible, correct in every visible
+ * respect, is unreachable if any table above it was built without the bit —
+ * and the fault it produces points at the leaf, which is fine.  So the check
+ * is the whole path, at every level, the way the processor reads it.
+ */
+static void user_reachable_selftest(void)
+{
+	const uint64_t va = 0x0000700000000000ULL;	/* lower half, unused */
+	uint64_t frame = boot_frame_alloc();
+	unsigned levels_set = 0;
+	const pt_entry_t *table;
+	unsigned idx[4];
+	uint64_t root;
+	pmap_t space;
+
+	if (frame == 0) {
+		kputs("UrMach x86-64: no frame for the user-reach probe\r\n");
+		return;
+	}
+
+	/*
+	 * In an address space of its own, because the kernel's map has no
+	 * user half and pmap_enter() now refuses to pretend otherwise.  That
+	 * refusal is the point of the check, so the test has to respect it
+	 * rather than work around it.
+	 */
+	space = pmap_create(0);
+	if (space == PMAP_NULL) {
+		kputs("UrMach x86-64: no space for the user-reach probe\r\n");
+		return;
+	}
+
+	root = space->root_pa;
+
+	if (pmap_enter(space, va, frame,
+		       VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK) {
+		kputs("UrMach x86-64: could not map the user-reach probe\r\n");
+		return;
+	}
+
+	idx[0] = pml4_index(va);
+	idx[1] = pdpt_index(va);
+	idx[2] = pd_index(va);
+	idx[3] = pt_index(va);
+
+	table = (const pt_entry_t *)(uintptr_t)phys_to_direct(root);
+	for (unsigned lvl = 0; lvl < 4; lvl++) {
+		pt_entry_t e = table[idx[lvl]];
+
+		if (!pte_is_valid(e))
+			break;
+		if (e & INTEL_PTE_USER)
+			levels_set++;
+		if (pte_is_leaf(e) && lvl < 3)
+			break;
+		table = (const pt_entry_t *)(uintptr_t)
+			phys_to_direct(pte_to_pa(e));
+	}
+
+	kputs("UrMach x86-64: a lower-half mapping carries the user bit at ");
+	kputdec(levels_set);
+	kputs(levels_set == 4
+	      ? " of 4 levels — ring 3 can reach it\r\n"
+	      : " of 4 levels — WRONG, the walk forbids it\r\n");
+
+	/*
+	 * And the rule that says where such a mapping may live at all, asked
+	 * both ways round.  pmap_enter()'s answer to a violation is to stop,
+	 * so the rule is a predicate as well as a panic — otherwise the only
+	 * way to find out whether it works would be to end the boot.
+	 */
+	kputs("UrMach x86-64: an address space may hold it (");
+	kputdec(pmap_may_map(space, va));
+	kputs("), the kernel map may not (");
+	kputdec(pmap_may_map(pmap_kernel(), va));
+	kputs(pmap_may_map(space, va) && !pmap_may_map(pmap_kernel(), va)
+	      ? ") — the kernel half stays out of reach\r\n"
+	      : ") — WRONG\r\n");
+
+	pmap_remove(space, va, PAGE_SIZE_4K);
+	pmap_destroy(space);
+	boot_frame_free(frame);
+}
+
+/*
  * The descriptor table, checked against the arithmetic rather than against
  * its own comments (#411).
  *
@@ -1848,6 +1941,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	reclaim_selftest();
 	percpu_selftest();
 	gdt_layout_selftest();
+	user_reachable_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();
 	ipi_init();
