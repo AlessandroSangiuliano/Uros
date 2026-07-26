@@ -44,6 +44,7 @@
 #include <pmap/walk.h>
 #include <syscall/probe.h>
 #include <syscall/syscall.h>
+#include <thread/context.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
@@ -1620,6 +1621,115 @@ static void user_reachable_selftest(void)
 	boot_frame_free(frame);
 }
 
+
+/*
+ * Two threads, and the registers that have to survive between them (#408).
+ *
+ * A context switch preserves six registers and no others, because the ABI
+ * has already declared the rest dead across a call and a switch is a call
+ * with a different stack in the middle.  That is an economy, and an economy
+ * is exactly the kind of thing that is right until it is one register short.
+ *
+ * So the test is not "did both threads run" — that would pass with the
+ * saving removed entirely, since the counter lives in memory.  Each thread
+ * loads a distinct pattern into all six callee-saved registers, switches
+ * away, and reports what *differs* on its return: zero means every one of
+ * them came back.  The patterns differ per thread, so a switch that saved
+ * to the wrong place hands a thread its neighbour's values rather than its
+ * own, and that shows up too.
+ *
+ * It is written in assembly because there is no way to say this in C: the
+ * compiler owns those registers and will not let a function observe them
+ * across a call it can see through.
+ */
+extern uint64_t context_probe(struct context *self, struct context *other,
+			      uint64_t pattern, unsigned rounds);
+
+static struct context ctx_main, ctx_a, ctx_b;
+static volatile unsigned thread_ran[2];
+static volatile uint64_t thread_kept[2];
+
+#define THREAD_ROUNDS	8
+#define PATTERN_A	0x1111111100000001ULL
+#define PATTERN_B	0x2222222200000002ULL
+
+/*
+ * The two run as a relay, and the order they finish in is not incidental.
+ *
+ * Each round is one switch away and one switch back, so the two threads
+ * leave the loop one switch apart: whoever finishes first is still owed a
+ * return by the other.  A first attempt had both of them making for the
+ * boot context, and the second never ran again — it was suspended inside
+ * the switch that would have resumed it, waiting for a partner that had
+ * already gone home.
+ *
+ * So the first to finish hands over to the second, and only the second
+ * returns to the boot context.  Neither is ever resumed afterwards, which
+ * is what the panics below assert rather than assume.
+ */
+static void thread_a(void *arg)
+{
+	(void)arg;
+	thread_ran[0] = 1;
+	thread_kept[0] = context_probe(&ctx_a, &ctx_b, PATTERN_A, THREAD_ROUNDS);
+
+	context_switch(&ctx_a, &ctx_b);		/* let the other one finish */
+	panic("thread: resumed a thread that had finished");
+}
+
+static void thread_b(void *arg)
+{
+	(void)arg;
+	thread_ran[1] = 1;
+	thread_kept[1] = context_probe(&ctx_b, &ctx_a, PATTERN_B, THREAD_ROUNDS);
+
+	context_switch(&ctx_b, &ctx_main);	/* and hand the boot back */
+	panic("thread: resumed a thread that had finished");
+}
+
+static void context_selftest(void)
+{
+	uint64_t stack_a = boot_frame_alloc();
+	uint64_t stack_b = boot_frame_alloc();
+	uint64_t saved_kernel_rsp = percpu()->kernel_rsp;
+
+	if (stack_a == 0 || stack_b == 0) {
+		kputs("UrMach x86-64: no stacks for the context probe\r\n");
+		return;
+	}
+
+	stack_a = phys_to_direct(stack_a) + PAGE_SIZE_4K;
+	stack_b = phys_to_direct(stack_b) + PAGE_SIZE_4K;
+
+	context_init(&ctx_a, stack_a, thread_a, 0);
+	context_init(&ctx_b, stack_b, thread_b, 0);
+
+	/*
+	 * The boot path becomes a thread by being switched away from: its
+	 * context is filled in by the switch itself, which is the whole point
+	 * — a running thread's saved state is wherever it was interrupted,
+	 * and there is nothing to prepare in advance.
+	 */
+	ctx_main.kernel_stack_top = saved_kernel_rsp;
+	context_switch(&ctx_main, &ctx_a);
+
+	kputs("UrMach x86-64: two threads ran ");
+	kputdec(thread_ran[0] + thread_ran[1]);
+	kputs(" of 2, register differences ");
+	kputhex64(thread_kept[0]);
+	kputs(" and ");
+	kputhex64(thread_kept[1]);
+	kputs(thread_ran[0] && thread_ran[1]
+	      && thread_kept[0] == 0 && thread_kept[1] == 0
+	      ? " — six registers each, across every switch\r\n"
+	      : " — WRONG\r\n");
+
+	kputs("UrMach x86-64: the entry stack followed the thread, and is ");
+	kputs(percpu()->kernel_rsp == saved_kernel_rsp
+	      ? "back where it started\r\n"
+	      : "NOT restored — WRONG\r\n");
+}
+
 /*
  * What ring 3 carries in %gs while it runs.  Recognisable, and nothing the
  * kernel would ever have there — seeing it afterwards is proof of a swapgs
@@ -2112,6 +2222,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	percpu_selftest();
 	gdt_layout_selftest();
 	syscall_init();
+	context_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
 	external_vectors_selftest();

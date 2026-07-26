@@ -1,0 +1,77 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * Switching from one thread to another (#408, MD contract 3/6).
+ */
+
+#include <stdint.h>
+
+#include <cpu/percpu.h>
+#include <thread/context.h>
+#include <trap/trap.h>
+
+extern void context_thread_start(void);
+
+/*
+ * The frame a never-run thread is resumed from, in the order
+ * context_switch_raw() pops it.  Read the two together: this is a forgery
+ * of what that code expects to find, and it has to be good enough that a
+ * thread which has never run and one that was interrupted are
+ * indistinguishable to it.
+ *
+ * Nine words rather than the seven the switch consumes.  The eighth is a
+ * deliberate zero where context_thread_start()'s return address would be,
+ * so that a backtrace stops at the thread's own beginning rather than
+ * walking into whatever the stack held in a previous life.  The ninth is
+ * alignment: the ABI wants the stack sixteen-byte aligned at a call, and
+ * the thread's first call is the one context_thread_start() makes.
+ */
+#define CTX_R15		0
+#define CTX_R14		1
+#define CTX_R13		2	/* the entry point   */
+#define CTX_R12		3	/* its argument      */
+#define CTX_RBX		4
+#define CTX_RBP		5
+#define CTX_RETURN	6	/* where the switch's `ret` goes */
+#define CTX_CALLER	7	/* the zero that ends a backtrace */
+#define CTX_WORDS	9
+
+void context_init(struct context *ctx, uint64_t stack_top,
+		  void (*entry)(void *), void *arg)
+{
+	uint64_t rsp = stack_top - CTX_WORDS * 8;
+	uint64_t *frame = (uint64_t *)(uintptr_t)rsp;
+
+	if (stack_top & 0xF)
+		panic("thread: a stack that is not sixteen-byte aligned");
+
+	frame[CTX_R15] = 0;
+	frame[CTX_R14] = 0;
+	frame[CTX_R13] = (uint64_t)(uintptr_t)entry;
+	frame[CTX_R12] = (uint64_t)(uintptr_t)arg;
+	frame[CTX_RBX] = 0;
+	frame[CTX_RBP] = 0;
+	frame[CTX_RETURN] = (uint64_t)(uintptr_t)context_thread_start;
+	frame[CTX_CALLER] = 0;
+	frame[CTX_CALLER + 1] = 0;
+
+	ctx->rsp = rsp;
+	ctx->kernel_stack_top = stack_top;
+}
+
+void context_switch(struct context *old, struct context *fresh)
+{
+	/*
+	 * Tell this processor where an entry from ring 3 lands now.
+	 *
+	 * The syscall path reads this out of the per-CPU block before it has
+	 * a stack to look anything up with, so it has to be correct *before*
+	 * the switch rather than discovered after it.  Until now it held the
+	 * processor's single privilege-transition stack, which was right only
+	 * while there was one thread to arrive on it.
+	 */
+	percpu()->kernel_rsp = fresh->kernel_stack_top;
+
+	context_switch_raw(&old->rsp, fresh->rsp);
+}
