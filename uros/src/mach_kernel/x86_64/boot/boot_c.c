@@ -2248,11 +2248,52 @@ static void tsc_selftest(void)
  */
 static volatile uint64_t ticks[SMP_MAX_CPUS];
 
+/*
+ * When the first and the last tick of a window happened, per processor, so
+ * the rate can be measured against a clock that is not the one under test.
+ *
+ * ── Why the average and not the shortest gap ──────────────────────────
+ *
+ * The count says the timer fired; this says how *fast*. They are separated
+ * because they are spoiled by different things: a host that takes the
+ * emulator off the processor deletes ticks from a count, rarely but really —
+ * five boots gave 99 of 100 and a sixth gave 96 — and no bound tight enough
+ * to be worth having can also absorb that.
+ *
+ * ⚠️ The first attempt here took the *shortest* gap, on the reasoning that a
+ * stall can only ever lengthen a gap, never make the timer run fast. That
+ * reasoning is wrong on this emulator, and it was written into a comment
+ * before the machine was asked: the measured minimum came back at 1.99, 2.71
+ * and 2.95 million counter units against a period of 6.00 million. QEMU
+ * catches up after a stall, so ticks do arrive closer together than one
+ * period.
+ *
+ * The average over the whole window survives that, because a stall and the
+ * catch-up that follows it cancel: whatever time was lost is still inside
+ * the span being divided. What it does not survive is a *deleted* tick,
+ * which inflates it by one period's share — a percent or two at this length,
+ * and that is what the tolerance is for.
+ */
+static volatile uint64_t first_tsc[SMP_MAX_CPUS];
+static volatile uint64_t last_tsc[SMP_MAX_CPUS];
+
 static void timer_tick(struct trap_frame *frame)
 {
+	uint32_t id = cpu_apic_id();
+	uint64_t now = rdtsc();
+	uint64_t prev = last_tsc[id];
+
 	(void)frame;
 
-	ticks[cpu_apic_id()]++;
+	ticks[id]++;
+	last_tsc[id] = now;
+
+	/*
+	 * The counter is read unordered on purpose: a handful of cycles of skew
+	 * against a span of millions is not worth an lfence on every tick.
+	 */
+	if (prev == 0)
+		first_tsc[id] = now;
 
 	/*
 	 * Acknowledged here and not by the caller. An interrupt that is never
@@ -2296,6 +2337,22 @@ static void timer_tick(struct trap_frame *frame)
 #define TICK_TEST_US	50000u
 #define TICK_TEST_WINDOWS	4u
 
+static void tick_reset(void)
+{
+	for (unsigned id = 0; id < SMP_MAX_CPUS; id++) {
+		ticks[id] = 0;
+		first_tsc[id] = 0;
+		last_tsc[id] = 0;
+	}
+}
+
+/* What one tick should measure, in counter units. Zero if either clock is
+ * unknown, in which case the period cannot be checked and says so. */
+static uint64_t tick_expected_period(void)
+{
+	return tsc_hz() ? tsc_hz() / TICK_TEST_HZ : 0;
+}
+
 static void tick_window(void)
 {
 	for (unsigned i = 0; i < TICK_TEST_WINDOWS; i++)
@@ -2311,7 +2368,7 @@ static void timer_selftest(void)
 {
 	uint32_t rate = lapic_timer_calibrate();
 	uint32_t me = cpu_apic_id();
-	uint64_t got, off, want = TICK_WANT;
+	uint64_t got, off, want = TICK_WANT, period, expected;
 	int had_interrupts;
 
 	kputs("UrMach x86-64: the local APIC timer counts at ");
@@ -2325,7 +2382,7 @@ static void timer_selftest(void)
 	kputs(", measured against the 8254\r\n");
 
 	trap_set_handler(LAPIC_TIMER_VECTOR, timer_tick);
-	ticks[me] = 0;
+	tick_reset();
 
 	had_interrupts = interrupts_enabled();
 	interrupts_enable();
@@ -2343,6 +2400,15 @@ static void timer_selftest(void)
 
 	got = ticks[me];
 	off = got > want ? got - want : want - got;
+	/*
+	 * The span covers ticks-1 gaps, not ticks: the first tick starts the
+	 * measurement rather than being measured. Dividing by the wrong one of
+	 * those is a one-percent error at a hundred ticks, which is inside the
+	 * tolerance and would therefore never be noticed.
+	 */
+	period = ticks[me] > 1
+	       ? (last_tsc[me] - first_tsc[me]) / (ticks[me] - 1) : 0;
+	expected = tick_expected_period();
 
 	/*
 	 * One tick, plus two percent.
@@ -2373,12 +2439,42 @@ static void timer_selftest(void)
 	 * phase, and 2000 Hz returned 91 of 100 — that is the emulator, not
 	 * the timer.
 	 */
+	/*
+	 * Two claims, kept apart because they can fail for different reasons
+	 * and only one of them can be decided tightly here.
+	 *
+	 * The count says the timer kept firing. Its bound is loose on purpose:
+	 * a host that deschedules the emulator deletes ticks, and no bound
+	 * worth having absorbs that. What it can still catch is a timer that
+	 * stopped, or one out by a factor.
+	 */
 	kputs("UrMach x86-64: asked for ");
 	kputdec((unsigned)want);
 	kputs(" ticks in 200 ms and took ");
 	kputdec((unsigned)got);
-	kputs(off <= TICK_ALLOWED
-	      ? " — the tick fires at the rate it was told\r\n"
+	kputs(got >= want - want / 10 && got <= want + TICK_ALLOWED
+	      ? " — it kept firing\r\n"
+	      : " — WRONG, the tick stopped or ran away\r\n");
+
+	/*
+	 * The period says how fast, and this one is decided tightly, because
+	 * the shortest gap between two ticks cannot be lengthened by anything
+	 * the host does. It is also a comparison of two independent clocks —
+	 * the counter against the APIC timer — which the count is not.
+	 */
+	kputs("UrMach x86-64: the average gap between ticks is ");
+	kputdec((unsigned)period);
+	kputs(" counter units, one period is ");
+	kputdec((unsigned)expected);
+
+	if (expected == 0 || period == 0) {
+		kputs(" — WRONG, one of the two clocks is unknown\r\n");
+		return;
+	}
+
+	off = period > expected ? period - expected : expected - period;
+	kputs(off <= expected / 20
+	      ? " — the tick runs at the rate it was told\r\n"
 	      : " — WRONG, the tick is not at the rate it was told\r\n");
 }
 
@@ -2544,8 +2640,7 @@ static void smp_timer_selftest(void)
 		return;
 	}
 
-	for (unsigned id = 0; id < SMP_MAX_CPUS; id++)
-		ticks[id] = 0;
+	tick_reset();
 
 	ipi_call_others(ap_timer_arm, 0);
 	lapic_timer_start(TICK_TEST_HZ, LAPIC_TIMER_VECTOR);
