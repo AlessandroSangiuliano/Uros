@@ -9,6 +9,7 @@
 
 #include <cpu/desc.h>
 #include <cpu/regs.h>
+#include <ddb/ddb.h>
 #include <ddb/ksym.h>
 #include <cpu/tss.h>
 #include <pmap/layout.h>
@@ -609,10 +610,25 @@ void trap_dispatch(struct trap_frame *frame)
 	backtrace(frame->rbp);
 
 	/*
+	 * And, if the debugger was asked for, the questions the report cannot
+	 * answer in advance: what is at that address, which function is above
+	 * this one, what does the memory the pointer came from look like.
+	 *
+	 * Only when asked. Without `-r` this is not reached, and an unattended
+	 * boot ends in the halt below rather than at a prompt nobody is there
+	 * to answer — which is what keeps every automated run terminating.
+	 */
+	if (ddb_enabled())
+		ddb_enter(frame, trap_name(frame->vector));
+
+	/*
 	 * Nothing recovers yet: there is no MI exception path to hand this
 	 * to, and pretending to resume would turn one diagnosis into an
 	 * endless stream of them.  Stopping here leaves the report as the
 	 * last thing on the wire, which is what it is for.
+	 *
+	 * Reached also when the debugger returns: continuing from a fault
+	 * nobody has fixed means taking it again, so "continue" ends here too.
 	 */
 	tputs("UrMach x86-64: no handler — halted\r\n");
 	for (;;)

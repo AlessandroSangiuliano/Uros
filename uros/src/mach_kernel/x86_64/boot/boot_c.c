@@ -27,6 +27,8 @@
 #include <cpu/acpi.h>
 #include <cpu/desc.h>
 #include <cpu/ioapic.h>
+#include <ddb/cons.h>
+#include <ddb/ddb.h>
 #include <ddb/ksym.h>
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
@@ -349,6 +351,7 @@ static void bootmem_selftest(uint32_t info)
 	 * allocator asks ksym_data_end() what to keep off, so the tables have
 	 * to have been found before the first frame is handed out.
 	 */
+	ddb_init(info);
 	ksym_init(info);
 
 	boot_frame_init(info);
@@ -2573,6 +2576,40 @@ static void timer_selftest(void)
 }
 
 /*
+ * The kernel can hear as well as speak (#428).
+ *
+ * Every line the kernel has ever produced went out of COM1 and nothing came
+ * back. That is enough to narrate a boot and not enough for a debugger,
+ * which is a conversation.
+ *
+ * The receive path cannot be tested by anybody typing, because a kernel
+ * whose console is deaf looks exactly like a kernel nobody has typed at. So
+ * the port is asked to talk to itself: the 16550 will connect its
+ * transmitter to its own receiver, and a byte that makes that trip has
+ * proved the half of the port that has never been used.
+ *
+ * A recognisable byte rather than a zero, and checked for equality rather
+ * than for arrival: a receiver returning a stuck value would satisfy
+ * "something came back" without having received anything.
+ */
+#define CONS_PROBE_BYTE	0xA5
+
+static void cons_selftest(void)
+{
+	int got = cons_loopback_probe(CONS_PROBE_BYTE);
+
+	kputs("UrMach x86-64: sent 0xa5 to the serial port's own receiver and got ");
+	if (got < 0)
+		kputs("nothing");
+	else
+		kputhex64((uint64_t)got);
+
+	kputs(got == CONS_PROBE_BYTE
+	      ? " — the console can hear\r\n"
+	      : " — WRONG, the receive path does not work\r\n");
+}
+
+/*
  * The kernel can name its own functions (#428).
  *
  * The symbols arrive with the kernel: GRUB passes the ELF section headers
@@ -3458,6 +3495,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	thread_state_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
+	cons_selftest();
 	ksym_selftest();
 	ioapic_madt_selftest();
 	tsc_selftest();
