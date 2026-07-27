@@ -379,52 +379,70 @@ WriteFieldDeclPrim(FILE *file, argument_t *arg,
 
 
 /*
- * What migcom believes about a message, stated where a compiler can check it
+ * What migcom believes about a message, checked by the only thing that knows
  * (#416).
  *
- * migcom computes the size of a message by adding up the sizes of its fields.
- * The compiler computes the layout of the same fields by adding up their
- * sizes *and the padding between them*, and the two agree only as long as
- * every field is the same width.  They stop agreeing the moment one is not —
- * a 64-bit address after a 32-bit return code is aligned to eight, and
- * migcom, which only counts, is short by four.
+ * migcom sizes a message by adding up its fields.  The compiler lays out the
+ * same fields by adding up their sizes *and the padding between them*, and
+ * the two agree only while every field is the same width.  #413 made one that
+ * is not, and worse: whether a field needs padding depends on the alignment
+ * of its C type, which migcom cannot know.  It has the wire tag and the type
+ * name as a string — and `unsigned64` is `unsigned long` in one declaration
+ * and `struct { unsigned int val[2]; }` in another, alignment eight and four.
+ * There is no rule from the tag to the answer.
  *
- * That failure does not announce itself.  Both ends of an RPC use migcom's
- * number, so the message is sent with a length that stops before its last
- * field and read by a server that finds one field where the next begins.  It
- * appears as a corrupt argument in an unrelated place, days later, with
- * nothing pointing back at the generator.
+ * That failure is silent in the worst way: both ends of an RPC use migcom's
+ * number, so a message goes out with a length that stops before its last
+ * field and arrives at a server that finds one field where the next begins.
  *
- * So the number is written into the generated code as a condition.  Every
- * stub built for every target checks, at compile time, that the layout the
- * compiler chose is the one migcom assumed — and a generator that gets it
- * wrong stops the build of the thing it got wrong.
+ * So every number migcom emits about a message is written into the generated
+ * code as a condition, and the compiler — which has the alignments, because
+ * it is the one that applies them — decides whether migcom was right.  Two
+ * conditions cover everything it computes:
  *
- * Two forms, because the two structures end differently.  A message whose
- * struct carries a trailer is measured up to the trailer, which is exactly
- * where the message ends.  One without is measured by its size, allowing only
- * the padding the compiler adds at the end to reach the struct's own
- * alignment — trailing padding is never sent and never read, but padding
- * anywhere else means a field moved.
+ *	the largest the message can be   = where the fields end
+ *	the smallest it can be           = that, less every variable array
+ *
+ * The second is not a guess about layout: a variable array is declared at its
+ * maximum, so subtracting the array is exactly the message with that array
+ * empty, which is what a minimum size means.
+ *
+ * ⚠️ Both are measured to `msgh_end`, a zero-length marker emitted at the end
+ * of the message part of every structure.  Not to `sizeof`, which would
+ * include the padding a compiler adds at the end and which the sender never
+ * transmits; and not to the trailer, which only the receiving side declares —
+ * the sender and the receiver must arrive at the *same* number, and a marker
+ * both of them carry is the only thing that guarantees it.
  */
 static void
-WriteStructAssert(FILE *file, char *name, boolean_t has_trailer, u_int expected)
+WriteStructAssert(FILE *file, char *name, argument_t *args, u_int mask,
+		  u_int minsize, u_int maxsize)
 {
-    if (expected == 0)
-	return;
+    register argument_t *arg;
 
-    if (has_trailer) {
-	fprintf(file, "\t_Static_assert(__builtin_offsetof(%s, trailer) == %d,\n",
-		name, expected);
-	fprintf(file, "\t\t\"MIG sized %s differently from the compiler\");\n\n",
-		name);
-	return;
-    }
-
-    fprintf(file, "\t_Static_assert(sizeof(%s)\n", name);
-    fprintf(file, "\t\t== ((%d + _Alignof(%s) - 1) & ~(_Alignof(%s) - 1)),\n",
-	    expected, name, name);
+    fprintf(file, "	_Static_assert(__builtin_offsetof(%s, msgh_end) == %d,\n",
+	    name, maxsize);
     fprintf(file, "\t\t\"MIG sized %s differently from the compiler\");\n\n",
+	    name);
+
+    if (minsize == maxsize)
+	return;
+
+    fprintf(file, "\t_Static_assert(__builtin_offsetof(%s, msgh_end)", name);
+    for (arg = args; arg != argNULL; arg = arg->argNext) {
+	register ipc_type_t *it = arg->argType;
+
+	if (!akCheck(arg->argKind, mask))
+	    continue;
+	if (!IS_VARIABLE_SIZED_UNTYPED(it))
+	    continue;
+
+	fprintf(file, "\n\t\t- sizeof(((%s *) 0)->%s)", name, arg->argMsgField);
+	if (it->itPadSize != 0)
+	    fprintf(file, " - sizeof(((%s *) 0)->%s)", name, arg->argPadName);
+    }
+    fprintf(file, "\n\t\t== %d,\n", minsize);
+    fprintf(file, "\t\t\"MIG sized an empty %s differently from the compiler\");\n\n",
 	    name);
 }
 
@@ -434,10 +452,8 @@ WriteStructDecl(FILE *file, argument_t *args,
                 u_int mask, char *name,
                 boolean_t simple, boolean_t trailer,
                 boolean_t isuser, boolean_t template_only,
-                u_int expected)
+                u_int minsize, u_int maxsize)
 {
-    boolean_t has_trailer;
-
     fprintf(file, "\ttypedef struct {\n");
     fprintf(file, "\t\tmach_msg_header_t Head;\n");
     if (simple == FALSE) {
@@ -450,26 +466,35 @@ WriteStructDecl(FILE *file, argument_t *args,
 	fprintf(file, "\t\t/* end of the kernel processed data */\n");
     }
     /*
+     * Where the message ends, marked (#416).
+     *
+     * A zero-length member: no size, no alignment, so it moves nothing and
+     * costs nothing — and `offsetof` of it is exactly the number both the
+     * sender and the receiver need, on a structure where only one of them
+     * declares a trailer and neither should be counting the padding the
+     * compiler puts at the end.
+     *
      * The trailer belongs to whoever receives the message: the server sees it
-     * on a request, the caller sees it on a reply.  Which one this is decides
-     * how the assertion below has to measure the structure.
+     * on a request, the caller sees it on a reply.  So it goes after the
+     * marker, outside the message proper, which is what it is.
      */
-    has_trailer = !template_only && (mask == akbRequest ? !isuser : isuser);
-
     if (!template_only)
 	if (mask == akbRequest) {
 	    WriteList(file, args, func, mask | akbSendBody, "\n", "\n");
+	    fprintf(file, "\t\tchar msgh_end[0];\n");
 	    if (!isuser)
 		WriteTrailerDecl(file, trailer);
 	} else {
 	    WriteList(file, args, func, mask | akbReturnBody, "\n", "\n");
+	    fprintf(file, "\t\tchar msgh_end[0];\n");
 	    if (isuser)
 		WriteTrailerDecl(file, trailer);
 	}
     fprintf(file, "\t} %s;\n", name);
     fprintf(file, "\n");
 
-    WriteStructAssert(file, name, has_trailer, expected);
+    if (!template_only)
+	WriteStructAssert(file, name, args, mask, minsize, maxsize);
 }
 
 void

@@ -116,7 +116,7 @@ extern void WriteStructDecl(FILE *file, argument_t *args,
 			    boolean_t simple, boolean_t trailer, 
 			    boolean_t isuser,
 			    boolean_t template_only,
-			    u_int expected);
+			    u_int minsize, u_int maxsize);
 
 extern void WriteStaticDecl(FILE *file, argument_t *arg);
 
