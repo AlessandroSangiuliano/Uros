@@ -378,13 +378,66 @@ WriteFieldDeclPrim(FILE *file, argument_t *arg,
 }
 
 
+/*
+ * What migcom believes about a message, stated where a compiler can check it
+ * (#416).
+ *
+ * migcom computes the size of a message by adding up the sizes of its fields.
+ * The compiler computes the layout of the same fields by adding up their
+ * sizes *and the padding between them*, and the two agree only as long as
+ * every field is the same width.  They stop agreeing the moment one is not —
+ * a 64-bit address after a 32-bit return code is aligned to eight, and
+ * migcom, which only counts, is short by four.
+ *
+ * That failure does not announce itself.  Both ends of an RPC use migcom's
+ * number, so the message is sent with a length that stops before its last
+ * field and read by a server that finds one field where the next begins.  It
+ * appears as a corrupt argument in an unrelated place, days later, with
+ * nothing pointing back at the generator.
+ *
+ * So the number is written into the generated code as a condition.  Every
+ * stub built for every target checks, at compile time, that the layout the
+ * compiler chose is the one migcom assumed — and a generator that gets it
+ * wrong stops the build of the thing it got wrong.
+ *
+ * Two forms, because the two structures end differently.  A message whose
+ * struct carries a trailer is measured up to the trailer, which is exactly
+ * where the message ends.  One without is measured by its size, allowing only
+ * the padding the compiler adds at the end to reach the struct's own
+ * alignment — trailing padding is never sent and never read, but padding
+ * anywhere else means a field moved.
+ */
+static void
+WriteStructAssert(FILE *file, char *name, boolean_t has_trailer, u_int expected)
+{
+    if (expected == 0)
+	return;
+
+    if (has_trailer) {
+	fprintf(file, "\t_Static_assert(__builtin_offsetof(%s, trailer) == %d,\n",
+		name, expected);
+	fprintf(file, "\t\t\"MIG sized %s differently from the compiler\");\n\n",
+		name);
+	return;
+    }
+
+    fprintf(file, "\t_Static_assert(sizeof(%s)\n", name);
+    fprintf(file, "\t\t== ((%d + _Alignof(%s) - 1) & ~(_Alignof(%s) - 1)),\n",
+	    expected, name, name);
+    fprintf(file, "\t\t\"MIG sized %s differently from the compiler\");\n\n",
+	    name);
+}
+
 void
 WriteStructDecl(FILE *file, argument_t *args,
                 void (*func)(FILE *file, argument_t *arg),
                 u_int mask, char *name,
                 boolean_t simple, boolean_t trailer,
-                boolean_t isuser, boolean_t template_only)
+                boolean_t isuser, boolean_t template_only,
+                u_int expected)
 {
+    boolean_t has_trailer;
+
     fprintf(file, "\ttypedef struct {\n");
     fprintf(file, "\t\tmach_msg_header_t Head;\n");
     if (simple == FALSE) {
@@ -396,7 +449,14 @@ WriteStructDecl(FILE *file, argument_t *args,
     	    WriteList(file, args, func, mask | akbReturnKPD, "\n", "\n");
 	fprintf(file, "\t\t/* end of the kernel processed data */\n");
     }
-    if (!template_only) 
+    /*
+     * The trailer belongs to whoever receives the message: the server sees it
+     * on a request, the caller sees it on a reply.  Which one this is decides
+     * how the assertion below has to measure the structure.
+     */
+    has_trailer = !template_only && (mask == akbRequest ? !isuser : isuser);
+
+    if (!template_only)
 	if (mask == akbRequest) {
 	    WriteList(file, args, func, mask | akbSendBody, "\n", "\n");
 	    if (!isuser)
@@ -408,6 +468,8 @@ WriteStructDecl(FILE *file, argument_t *args,
 	}
     fprintf(file, "\t} %s;\n", name);
     fprintf(file, "\n");
+
+    WriteStructAssert(file, name, has_trailer, expected);
 }
 
 void

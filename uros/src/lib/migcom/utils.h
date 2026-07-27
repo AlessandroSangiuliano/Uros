@@ -114,8 +114,9 @@ extern void WriteStructDecl(FILE *file, argument_t *args,
 			    void (*func)(FILE *file, argument_t *arg),
 			    u_int mask, char *name,
 			    boolean_t simple, boolean_t trailer, 
-			    boolean_t isuser, 
-			    boolean_t template_only);
+			    boolean_t isuser,
+			    boolean_t template_only,
+			    u_int expected);
 
 extern void WriteStaticDecl(FILE *file, argument_t *arg);
 

@@ -2107,10 +2107,17 @@ WriteRoutine(FILE *file, register routine_t *rt)
     }
 
     fprintf(file, "{\n");
+    /*
+     * A variable-sized message has no one size to assert; the fixed ones are
+     * the ones migcom pins with a constant, and the ones it can be wrong
+     * about silently.
+     */
     WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbRequest, "Request",
-	rt->rtSimpleRequest, rt->rtServerImpl, FALSE, FALSE);
+	rt->rtSimpleRequest, rt->rtServerImpl, FALSE, FALSE,
+	rt->rtRequestMinSize == rt->rtRequestMaxSize ? rt->rtRequestMaxSize : 0);
     WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbReply, "Reply",
-	rt->rtSimpleReply, FALSE, FALSE, FALSE);
+	rt->rtSimpleReply, FALSE, FALSE, FALSE,
+	rt->rtReplyMinSize == rt->rtReplyMaxSize ? rt->rtReplyMaxSize : 0);
     /*
      * Define a Minimal Reply structure to be used in case of errors
      */

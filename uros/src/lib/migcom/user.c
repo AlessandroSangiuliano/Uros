@@ -2668,14 +2668,20 @@ WriteRoutine(FILE *file, register routine_t *rt)
     fprintf(file, "    {\n");
 
     /* typedef of structure for Request and Reply messages */
-    WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbRequest, 
-	"Request", rt->rtSimpleRequest, FALSE, TRUE, FALSE);
+    WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbRequest,
+	"Request", rt->rtSimpleRequest, FALSE, TRUE, FALSE,
+	rt->rtRequestMinSize == rt->rtRequestMaxSize ? rt->rtRequestMaxSize : 0);
     if (!rt->rtOneWay)
-	WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbReply, 
-	"Reply", rt->rtSimpleReply, rt->rtUserImpl, TRUE, FALSE);
+	WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbReply,
+	"Reply", rt->rtSimpleReply, rt->rtUserImpl, TRUE, FALSE,
+	rt->rtReplyMinSize == rt->rtReplyMaxSize ? rt->rtReplyMaxSize : 0);
+    /*
+     * The overwrite template is a shape to copy descriptors from, not a
+     * message, and carries no size migcom has committed to.
+     */
     if (rt->rtOverwrite)
 	WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbReply|akbOverwrite,
-	"OverwriteTemplate", FALSE, FALSE, TRUE, TRUE);
+	"OverwriteTemplate", FALSE, FALSE, TRUE, TRUE, 0);
     /*
      * Define a Minimal Reply structure to be used in case of errors
      */
