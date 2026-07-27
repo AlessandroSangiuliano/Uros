@@ -252,6 +252,7 @@ typedef struct ipc_type
     u_int itTypeSize;		/* size of the C type */
     u_int itPadSize;		/* amount of padding after data */
     u_int itMinTypeSize;	/* minimal amount of space occupied by data */
+    u_int itAlignment;		/* what the target puts in FRONT of it (#416) */
 
     u_int itInName;		/* name supplied to kernel in sent msg */
     u_int itOutName;		/* name in received msg */

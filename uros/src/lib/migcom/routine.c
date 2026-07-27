@@ -396,6 +396,7 @@
 #include "error.h"
 #include "alloc.h"
 #include "global.h"
+#include "target.h"
 #include "routine.h"
 #include "write.h"
 
@@ -631,21 +632,52 @@ rtCheckSimple(argument_t *args, u_int mask, boolean_t *simple)
     *simple = !MustBeComplex;
 }
 
+/*
+ * How large the message is — which is where the fields end, not the sum of
+ * their sizes (#416).
+ *
+ * The two are the same number only when no field needs padding in front of
+ * it, and that is exactly the i386 condition: its ABI aligns even a 64-bit
+ * scalar to four, so nothing in a message is ever displaced.  Give a target
+ * an eight-byte alignment and the sum stops describing the structure, and
+ * every consequence of that is silent — both ends of the RPC agree on a
+ * length that is short, so the message is truncated rather than rejected.
+ *
+ * So this walks the fields the way the compiler lays them out: each one is
+ * pushed to its own alignment before it is counted.  Sizes come from the
+ * target rather than from the host that is running this.
+ */
 static u_int
 rtFindSize(argument_t *args, u_int mask, boolean_t ismax, boolean_t simple)
 {
     register argument_t *arg;
-    u_int size = sizeof(mach_msg_header_t);
+    u_int size = Target->mt_header_size;
 
-    if (!simple)
-	size += sizeof(mach_msg_body_t);
+    if (!simple) {
+	size = TargetAlignUp(size, Target->mt_descriptor_align);
+	size += Target->mt_body_size;
+    }
     for (arg = args; arg != argNULL; arg = arg->argNext)
 	if (akCheck(arg->argKind, mask)) {
 	    register ipc_type_t *it = arg->argType;
 
+	    /*
+	     * A variable-sized array is two fields: a 32-bit count, then the
+	     * array itself, which is aligned like its element and not like
+	     * the count that precedes it.
+	     */
+	    if (IS_VARIABLE_SIZED_UNTYPED(it)) {
+		size = TargetAlignUp(size, 4);
+		size += it->itMinTypeSize;
+		if (ismax) {
+		    size = TargetAlignUp(size, it->itAlignment);
+		    size += it->itTypeSize + it->itPadSize;
+		}
+		continue;
+	    }
+
+	    size = TargetAlignUp(size, it->itAlignment);
 	    size += it->itMinTypeSize;
-	    if (ismax && IS_VARIABLE_SIZED_UNTYPED(it))
-		size += it->itTypeSize + it->itPadSize;
 	}
     return size;
 }
