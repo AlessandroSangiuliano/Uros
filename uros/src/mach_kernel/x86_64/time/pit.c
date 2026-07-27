@@ -10,6 +10,7 @@
 #include <cpu/regs.h>
 #include <time/pit.h>
 
+#define PIT_CHANNEL0	0x40
 #define PIT_CHANNEL2	0x42
 #define PIT_COMMAND	0x43
 
@@ -35,6 +36,16 @@
  * edge to poll for.
  */
 #define PIT_MODE0_CH2	0xB0
+
+/*
+ * Channel 0, access both bytes, mode 2, binary.
+ *
+ * Mode 2 is the rate generator: it reloads itself and pulses the output each
+ * time the count expires, which is one interrupt per period and nothing to
+ * re-arm. Mode 3 halves the count and produces a square wave instead, which
+ * is the same rate expressed differently and one more thing to get wrong.
+ */
+#define PIT_MODE2_CH0	0x34
 
 int pit_delay_us(unsigned us)
 {
@@ -85,4 +96,41 @@ int pit_delay_us(unsigned us)
 
 	outb(PIT_GATE_PORT, gate);
 	return 1;
+}
+
+int pit_periodic_start(unsigned hz)
+{
+	uint32_t count;
+
+	if (hz == 0)
+		return 0;
+
+	count = PIT_HZ / hz;
+
+	/*
+	 * Zero means 65536 to the counter, so a rate too slow to express wraps
+	 * to the fastest one available rather than to nothing — refused, since
+	 * a signal generator running sixty times faster than asked would be a
+	 * test that passes for the wrong reason.
+	 */
+	if (count == 0 || count > 0xFFFF)
+		return 0;
+
+	outb(PIT_COMMAND, PIT_MODE2_CH0);
+	outb(PIT_CHANNEL0, (uint8_t)count);
+	outb(PIT_CHANNEL0, (uint8_t)(count >> 8));
+	return 1;
+}
+
+void pit_periodic_stop(void)
+{
+	/*
+	 * Back to a one-shot with the longest count there is. Mode 2 reloads
+	 * for ever, so leaving it programmed would leave a device raising an
+	 * interrupt through every test that comes after this one; mode 0 runs
+	 * down once and then holds its output high with nothing more to say.
+	 */
+	outb(PIT_COMMAND, 0x30);		/* channel 0, both bytes, mode 0 */
+	outb(PIT_CHANNEL0, 0xFF);
+	outb(PIT_CHANNEL0, 0xFF);
 }

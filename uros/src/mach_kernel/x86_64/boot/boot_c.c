@@ -26,6 +26,7 @@
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
 #include <cpu/desc.h>
+#include <cpu/ioapic.h>
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
@@ -2603,6 +2604,106 @@ static void ioapic_madt_selftest(void)
 }
 
 /*
+ * A device interrupt, routed and actually delivered (#409).
+ *
+ * The 8254's channel 0 is the signal generator — the only legacy device
+ * guaranteed to exist, so the only one that can be made to raise an
+ * interrupt on demand. It is not becoming the clock; the tick is the local
+ * APIC timer's, and this is stopped again at the end.
+ *
+ * ── The control is already in the machine ─────────────────────────────
+ *
+ * The 8259 was remapped and masked before any of this ran, so it cannot
+ * deliver. That means an interrupt arriving on a vector this test programmed
+ * has exactly one path it could have taken. But the stronger control is run
+ * explicitly anyway: the device is started with the pin still masked, and
+ * nothing may arrive. Without that, "the count went up after we unmasked"
+ * would also be true of a kernel where the count had been going up all
+ * along.
+ *
+ * ⚠️ And it exercises the #381 trap in the direction that is safe. The pin
+ * is edge triggered here, and the fronts that arrive while it is masked are
+ * *gone* rather than deferred — the I/O APIC does not hold them the way the
+ * 8259's request register did. That is precisely why the second phase has to
+ * count new interrupts rather than a backlog.
+ */
+#define IRQ0_TEST_HZ	1000u
+
+static volatile uint64_t device_irqs;
+
+static void device_irq(struct trap_frame *frame)
+{
+	(void)frame;
+
+	device_irqs++;
+	lapic_eoi();
+}
+
+static void ioapic_selftest(void)
+{
+	uint32_t gsi = acpi_irq_to_gsi(0);
+	uint16_t flags = acpi_irq_flags(0);
+	uint64_t while_masked, after_routing;
+	int had_interrupts;
+
+	if (!ioapic_init()) {
+		kputs("UrMach x86-64: no I/O APIC to route through — WRONG\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: I/O APIC ");
+	kputdec(ioapic_id());
+	kputs(", version ");
+	kputhex64(ioapic_version());
+	kputs(", ");
+	kputdec(ioapic_pin_count());
+	kputs(" pins, all masked");
+	kputs(ioapic_pin_count() >= 16 && ioapic_is_masked(gsi)
+	      ? " — the firmware's routing is off\r\n"
+	      : " — WRONG, the controller is not in a known state\r\n");
+
+	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, device_irq);
+	device_irqs = 0;
+
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	/*
+	 * The device runs first, with the pin still shut. Anything counted
+	 * here came from somewhere this test does not control.
+	 */
+	if (!pit_periodic_start(IRQ0_TEST_HZ)) {
+		kputs("UrMach x86-64: the 8254 refused the requested rate — WRONG\r\n");
+		return;
+	}
+
+	pit_delay_us(20000);
+	while_masked = device_irqs;
+
+	/* And now the one pin, at this processor. */
+	ioapic_route(gsi, IOAPIC_ISA_VECTOR_BASE, lapic_id(), flags);
+
+	pit_delay_us(20000);
+	after_routing = device_irqs - while_masked;
+
+	ioapic_mask(gsi);
+	pit_periodic_stop();
+	if (!had_interrupts)
+		interrupts_disable();
+
+	kputs("UrMach x86-64: irq 0 on pin ");
+	kputdec((unsigned)gsi);
+	kputs(" delivered ");
+	kputdec((unsigned)while_masked);
+	kputs(" while masked and ");
+	kputdec((unsigned)after_routing);
+	kputs(" once routed to vector 0x40");
+	kputs(while_masked == 0 && after_routing > 0
+	      ? " — a device interrupt arrives, and only through the pin\r\n"
+	      : " — WRONG, the routing is not what delivered it\r\n");
+}
+
+/*
  * And the same tick on every processor (#409).
  *
  * This is the claim the local APIC timer was chosen for, and it is not the
@@ -3148,6 +3249,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ioapic_madt_selftest();
 	tsc_selftest();
 	timer_selftest();
+	ioapic_selftest();
 	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();

@@ -66,4 +66,20 @@
  */
 int pit_delay_us(unsigned us);
 
+/*
+ * Channel 0, which is the one wired to the interrupt controller — the only
+ * legacy device guaranteed to exist and therefore the only one that can be
+ * made to raise a device interrupt on demand (#409).
+ *
+ * This is not the kernel taking its tick from here; the tick is the local
+ * APIC timer's, for the reasons in <cpu/lapic.h>. It is a signal generator,
+ * used to prove that an interrupt routed through the I/O APIC actually
+ * arrives, and stopped again afterwards.
+ *
+ * Independent of the ruler above: channel 2 has its own counter and its own
+ * gate, so a measurement can run while this is generating.
+ */
+int pit_periodic_start(unsigned hz);
+void pit_periodic_stop(void);
+
 #endif	/* _X86_64_TIME_PIT_H_ */
