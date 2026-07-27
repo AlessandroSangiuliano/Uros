@@ -2272,19 +2272,46 @@ static void timer_tick(struct trap_frame *frame)
  * two can disagree — and a rate that is wrong by a factor shows up as a
  * count that is wrong by the same factor.
  *
- * A thousand ticks a second rather than a hundred: fifty milliseconds is
- * about as long as one 8254 countdown reaches, and at a hundred hertz that
- * is five ticks, where being one out is twenty percent. Fifty ticks make the
- * tolerance mean something.
+ * ── Why five hundred hertz and a fifth of a second ───────────────────
+ *
+ * Both numbers were measured rather than picked. One 8254 countdown reaches
+ * about fifty-five milliseconds, so a longer window is several of them —
+ * four here, which makes the phase error below a smaller fraction of the
+ * count and lets the tolerance be tight.
+ *
+ * The rate is where the environment stops keeping up, found by sweeping it
+ * under `-smp 4`:
+ *
+ *     100 Hz -> 19 of 20      500 Hz -> 99 of 100
+ *     200 Hz -> 39 of 40     1000 Hz -> 193, 191, 191, 190 of 200
+ *
+ * Up to five hundred the deficit is exactly one, on every processor, every
+ * time — that is phase and nothing else. At a thousand the emulator starts
+ * losing interrupts, unevenly. So five hundred is the fastest rate this can
+ * ask for and still be measuring the kernel rather than the emulator, and
+ * asking for more would be building a test whose failures have to be
+ * explained away.
  */
-#define TICK_TEST_HZ	1000u
+#define TICK_TEST_HZ	500u
 #define TICK_TEST_US	50000u
+#define TICK_TEST_WINDOWS	4u
+
+static void tick_window(void)
+{
+	for (unsigned i = 0; i < TICK_TEST_WINDOWS; i++)
+		pit_delay_us(TICK_TEST_US);
+}
+
+/* How many ticks the window should hold, and how far out is still the rate. */
+#define TICK_WANT	((uint64_t)TICK_TEST_HZ * TICK_TEST_US		\
+			 * TICK_TEST_WINDOWS / 1000000u)
+#define TICK_ALLOWED	(1 + TICK_WANT / 50)
 
 static void timer_selftest(void)
 {
 	uint32_t rate = lapic_timer_calibrate();
 	uint32_t me = cpu_apic_id();
-	uint64_t got, off, want = (uint64_t)TICK_TEST_HZ * TICK_TEST_US / 1000000u;
+	uint64_t got, off, want = TICK_WANT;
 	int had_interrupts;
 
 	kputs("UrMach x86-64: the local APIC timer counts at ");
@@ -2308,7 +2335,7 @@ static void timer_selftest(void)
 		return;
 	}
 
-	pit_delay_us(TICK_TEST_US);
+	tick_window();
 
 	lapic_timer_stop();
 	if (!had_interrupts)
@@ -2348,11 +2375,97 @@ static void timer_selftest(void)
 	 */
 	kputs("UrMach x86-64: asked for ");
 	kputdec((unsigned)want);
-	kputs(" ticks in 50 ms and took ");
+	kputs(" ticks in 200 ms and took ");
 	kputdec((unsigned)got);
-	kputs(off <= 1 + want / 50
+	kputs(off <= TICK_ALLOWED
 	      ? " — the tick fires at the rate it was told\r\n"
 	      : " — WRONG, the tick is not at the rate it was told\r\n");
+}
+
+/*
+ * And the same tick on every processor (#409).
+ *
+ * This is the claim the local APIC timer was chosen for, and it is not the
+ * same claim as "the tick works". A single global device delivers to one
+ * processor; a timer inside each processor's own APIC delivers to each. The
+ * two are indistinguishable from a total, and are told apart only by asking
+ * every processor separately — which is why the counter is per processor and
+ * why this test exists alongside the one above rather than instead of it.
+ *
+ * Armed through the cross-call rather than from the application processor's
+ * own startup path, for two reasons. A timer left running from boot would
+ * add interrupts to every test that comes after this one, and this way the
+ * measurement window opens at the same moment everywhere: the cross-call
+ * returns when every target has *finished*, not when the message was sent.
+ */
+static void ap_timer_arm(void *arg)
+{
+	(void)arg;
+	lapic_timer_start(TICK_TEST_HZ, LAPIC_TIMER_VECTOR);
+}
+
+static void ap_timer_stop(void *arg)
+{
+	(void)arg;
+	lapic_timer_stop();
+}
+
+static void smp_timer_selftest(void)
+{
+	uint64_t want = TICK_WANT, allowed = TICK_ALLOWED;
+	unsigned counted = 0, good = 0;
+
+	if (smp_online_count() < 2) {
+		kputs("UrMach x86-64: alone — one timer cannot show it is per-CPU\r\n");
+		return;
+	}
+
+	for (unsigned id = 0; id < SMP_MAX_CPUS; id++)
+		ticks[id] = 0;
+
+	ipi_call_others(ap_timer_arm, 0);
+	lapic_timer_start(TICK_TEST_HZ, LAPIC_TIMER_VECTOR);
+
+	tick_window();
+
+	lapic_timer_stop();
+	ipi_call_others(ap_timer_stop, 0);
+
+	kputs("UrMach x86-64: ticks per processor:");
+	for (unsigned id = 0; id < SMP_MAX_CPUS; id++) {
+		uint64_t got, off;
+
+		/*
+		 * The boot processor is not in the online mask — that mask is
+		 * built by processors as they arrive, and the boot processor
+		 * never arrives. Left out, this loop reported three counts on a
+		 * four-processor machine and would have said nothing at all
+		 * about the one processor whose timer everything else was
+		 * calibrated from.
+		 */
+		if (!smp_is_online(id) && id != lapic_id())
+			continue;
+
+		got = ticks[id];
+		off = got > want ? got - want : want - got;
+
+		counted++;
+		if (off <= allowed)
+			good++;
+
+		kputs(" ");
+		kputdec((unsigned)got);
+	}
+
+	kputs(", wanted ");
+	kputdec((unsigned)want);
+	kputs(" each — ");
+	kputdec(good);
+	kputs(" of ");
+	kputdec(counted);
+	kputs(good == counted && counted >= 2
+	      ? " ticked on their own\r\n"
+	      : " — WRONG, the tick is not per processor\r\n");
 }
 
 /*
@@ -2850,6 +2963,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ipi_selftest();
 	ap_to_bsp_selftest();
 	tlb_shootdown_selftest();
+	smp_timer_selftest();
 
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
