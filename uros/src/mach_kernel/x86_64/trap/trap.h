@@ -229,6 +229,23 @@ typedef void (*trap_handler_t)(struct trap_frame *frame);
 void trap_set_handler(unsigned vector, trap_handler_t handler);
 
 /*
+ * Run the handler for `vector` as though it had just arrived.
+ *
+ * For the priority level (<cpu/spl.h>) to replay what it deferred.
+ *
+ * ⚠️ The frame it is handed has **only `vector` valid**. The interrupt this
+ * stands for happened at an earlier moment whose registers are gone, and
+ * they are not reconstructed — the remaining fields are zero, which is not a
+ * plausible frame and is not meant to be one.
+ *
+ * That is a contract on handlers, not a detail: a handler that reads
+ * anything else from the frame must not be reachable through a deferral. The
+ * one handler that reads anything today reads exactly `vector`, which is
+ * why this is the shape it is.
+ */
+void trap_replay_vector(unsigned vector);
+
+/*
  * Arrange for one expected fault to be survived rather than reported and
  * halted on: if the next trap is `vector`, the handler rewrites the return
  * address to `resume_rip` and returns, so execution continues there instead

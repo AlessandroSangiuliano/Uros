@@ -90,6 +90,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/spl.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/smp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/direct.c

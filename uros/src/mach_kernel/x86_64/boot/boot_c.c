@@ -35,6 +35,7 @@
 #include <cpu/percpu.h>
 #include <cpu/pic.h>
 #include <cpu/smp.h>
+#include <cpu/spl.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
 #include <pmap/bootmem.h>
@@ -2937,6 +2938,103 @@ static void ioapic_selftest(void)
 }
 
 /*
+ * The priority level, which is a promise about *when* rather than whether
+ * (#409/#322).
+ *
+ * The claim has two halves and they need testing separately, because an
+ * implementation that got one right and the other wrong would be plausible
+ * in both directions: a level that blocked nothing would look like a fast
+ * kernel, and one that dropped what it blocked would look like a quiet one.
+ *
+ * So: raised, the timer must stop reaching its handler while still arriving
+ * — the deferral counter is what says it arrived. Lowered, what was deferred
+ * must run, and exactly once.
+ *
+ * ⚠️ The timer is at class fifteen and SPLHI is fourteen, so SPLHI cannot
+ * block it — deliberately, because a level that stopped a processor
+ * answering cross-calls would be a deadlock wearing a priority's clothes.
+ * The test therefore raises above it, which is a thing only a test has any
+ * business doing.
+ */
+#define SPL_ABOVE_TIMER	15u
+
+static void spl_selftest(void)
+{
+	uint64_t handled_before, handled_while, handled_after;
+	uint64_t deferred_before, deferred_after, replayed_before, ran_at_spl0;
+	uint32_t me = cpu_apic_id();
+	spl_t old;
+
+	if (lapic_timer_hz() == 0) {
+		kputs("UrMach x86-64: no timer, so no level to test\r\n");
+		return;
+	}
+
+	tick_reset();
+	interrupts_enable();
+	lapic_timer_start(TICK_TEST_HZ, LAPIC_TIMER_VECTOR);
+
+	/* Let it run normally first, so "nothing arrives" cannot pass by the
+	 * timer never having been armed. */
+	pit_delay_us(20000);
+
+	/*
+	 * ⚠️ Raise first, *then* take the readings. The other order has a race
+	 * — in the test, not in the kernel — because a tick arriving between
+	 * the snapshot and the raise is handled legitimately and counted
+	 * against the raised level. Measured: three boots gave eleven events
+	 * each, once as eleven deferred and twice as ten deferred and one
+	 * handled, which is exactly one tick landing in that gap.
+	 */
+	old = splx(SPL_ABOVE_TIMER);
+
+	handled_before = ticks[me];
+	deferred_before = spl_deferred_count();
+	replayed_before = spl_replayed_count();
+
+	pit_delay_us(20000);
+	handled_while = ticks[me] - handled_before;
+	deferred_after = spl_deferred_count();
+
+	/*
+	 * ⚠️ Stop the timer *before* lowering, or the count of what the replay
+	 * ran includes the next real tick: dropping the level lets interrupts
+	 * through again, and at five hundred hertz the following one is two
+	 * milliseconds away — well inside the few instructions between the
+	 * lowering and the reading. Measured: one boot in three reported the
+	 * handler running twice for a single replay.
+	 *
+	 * With the timer stopped, the only thing that can run is what was
+	 * held, which is the whole claim.
+	 */
+	lapic_timer_stop();
+
+	splx(old);
+	handled_after = ticks[me] - handled_before - handled_while;
+	ran_at_spl0 = handled_before;
+
+	kputs("UrMach x86-64: at spl 15 the timer arrived ");
+	kputdec((unsigned)(deferred_after - deferred_before));
+	kputs(" times and ran ");
+	kputdec((unsigned)handled_while);
+	kputs(", before it ran ");
+	kputdec((unsigned)ran_at_spl0);
+	kputs(ran_at_spl0 > 0 && handled_while == 0
+	      && deferred_after > deferred_before
+	      ? " — raised, it is held and not lost\r\n"
+	      : " — WRONG, the level does not hold interrupts\r\n");
+
+	kputs("UrMach x86-64: lowering replayed ");
+	kputdec((unsigned)(spl_replayed_count() - replayed_before));
+	kputs(" of them, handler ran ");
+	kputdec((unsigned)handled_after);
+	kputs(" more time");
+	kputs(spl_replayed_count() - replayed_before == 1 && handled_after == 1
+	      ? " — once, however many were held\r\n"
+	      : " — WRONG, the replay is not exactly one\r\n");
+}
+
+/*
  * And the same tick on every processor (#409).
  *
  * This is the claim the local APIC timer was chosen for, and it is not the
@@ -3501,6 +3599,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	tsc_selftest();
 	timer_selftest();
 	ioapic_selftest();
+	spl_selftest();
 	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();

@@ -8,7 +8,9 @@
 #include <stdint.h>
 
 #include <cpu/desc.h>
+#include <cpu/lapic.h>
 #include <cpu/regs.h>
+#include <cpu/spl.h>
 #include <ddb/ddb.h>
 #include <ddb/ksym.h>
 #include <cpu/tss.h>
@@ -53,6 +55,28 @@ extern const uint64_t isr_table[IDT_VECTORS];
  * is a fact worth reporting rather than ignoring.
  */
 static trap_handler_t ext_handler[IDT_VECTORS - T_EXTERNAL_FIRST];
+
+void trap_replay_vector(unsigned vector)
+{
+	trap_handler_t h;
+
+	if (vector < T_EXTERNAL_FIRST || vector >= IDT_VECTORS)
+		return;
+
+	h = ext_handler[vector - T_EXTERNAL_FIRST];
+	if (h == 0)
+		return;
+
+	/*
+	 * Only the vector, and the rest left at zero rather than filled with
+	 * something that would read as a context. See <trap/trap.h>: this is a
+	 * contract on what a deferrable handler may look at.
+	 */
+	struct trap_frame replay = { 0 };
+
+	replay.vector = vector;
+	h(&replay);
+}
 
 void trap_set_handler(unsigned vector, trap_handler_t handler)
 {
@@ -472,6 +496,18 @@ void trap_dispatch(struct trap_frame *frame)
 		trap_handler_t h = ext_handler[frame->vector - T_EXTERNAL_FIRST];
 
 		if (h != 0) {
+			/*
+			 * The priority level first. A vector whose class is at
+			 * or below it is noted and left for later — the
+			 * acknowledgement below still happens, because the
+			 * local APIC would otherwise hold that class busy and
+			 * the deferral would become a silence.
+			 */
+			if (spl_defer(frame->vector)) {
+				lapic_eoi();
+				return;
+			}
+
 			h(frame);
 			return;
 		}
