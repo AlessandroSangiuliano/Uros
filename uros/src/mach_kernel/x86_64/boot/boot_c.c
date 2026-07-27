@@ -50,6 +50,8 @@
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
+#include <time/pit.h>
+#include <time/tsc.h>
 #include <trap/trap.h>
 
 #define COM1 0x3F8
@@ -2202,6 +2204,40 @@ static void ring3_selftest(void)
  * code selector the long-mode bit that makes it 64-bit at all.
  */
 /*
+ * The kernel learns to measure time (#409).
+ *
+ * Everything proved on this target so far has been a conjunction of facts —
+ * this happened, that value arrived — and never a duration, because there was
+ * nothing to measure one with.  The local APIC timer needs one before it can
+ * be programmed: it counts at a rate derived from a crystal the processor
+ * does not reliably name, so the rate has to be measured against something
+ * that does name itself, and the 8254 does.
+ *
+ * ⚠️ What this line proves, and what it does not.  Under emulation the
+ * measured frequency is not the machine's: how fast the 8254 counts and how
+ * fast the timestamp counter advances are two separate fictions, and their
+ * ratio is invented.  What is established here is that the *mechanism* works
+ * — the ruler counts down, the counter advances, the arithmetic is right,
+ * and two independent measurements agree.  The number itself is a bare-metal
+ * question.  Both runs are printed rather than only the verdict, because the
+ * spread between them is the interesting part and a pass/fail would hide the
+ * one number worth looking at.
+ */
+static void tsc_selftest(void)
+{
+	int ok = tsc_calibrate();
+
+	kputs("UrMach x86-64: timestamp counter measured against the 8254 at ");
+	kputdec((unsigned)(tsc_hz_run(0) / 1000000));
+	kputs(" and ");
+	kputdec((unsigned)(tsc_hz_run(1) / 1000000));
+	kputs(" MHz, ");
+	kputs(tsc_is_invariant() ? "invariant" : "NOT invariant (#318)");
+	kputs(ok ? " — two runs agree, the mechanism counts\r\n"
+		 : " — WRONG, the runs disagree or the ruler never counted\r\n");
+}
+
+/*
  * The swapgs window, arranged on purpose (#440).
  *
  * There are two instruction boundaries where the processor is at ring 0 and
@@ -2659,6 +2695,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	thread_state_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
+	tsc_selftest();
 	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();
