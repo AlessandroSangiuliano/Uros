@@ -32,8 +32,24 @@ struct gdt_ptr {
  * known, since building it is part of finding out.  A kilobyte of table to
  * avoid every processor needing one of its own is a trade worth making once.
  */
-#define GDT_FIXED_SLOTS	3
+#define GDT_FIXED_SLOTS	6
 #define GDT_SLOTS	(GDT_FIXED_SLOTS + 2 * SMP_MAX_CPUS)
+
+/*
+ * The six are fixed by <cpu/desc.h>: null, kernel code, kernel data, and the
+ * three the SYSRET arithmetic reaches.  Checked here rather than trusted,
+ * because the failure is silent at setup and loud in the wrong place — a
+ * return to user mode loading whatever descriptor sits at the computed
+ * offset.
+ */
+_Static_assert(KERNEL_DS_SELECTOR == KERNEL_CS_SELECTOR + 8,
+	       "SYSCALL loads SS from kernel CS + 8");
+_Static_assert(USER_DS_SELECTOR == SYSRET_SELECTOR_BASE + 8,
+	       "SYSRET loads SS from the STAR base + 8");
+_Static_assert(USER_CS_SELECTOR == SYSRET_SELECTOR_BASE + 16,
+	       "SYSRET loads CS from the STAR base + 16");
+_Static_assert(GDT_FIXED_SLOTS * 8 > USER_CS_SELECTOR,
+	       "the fixed slots do not cover the selectors they must hold");
 
 static uint64_t gdt[GDT_SLOTS];
 static struct tss64 tss[SMP_MAX_CPUS];
@@ -136,6 +152,19 @@ void desc_init_bsp(void)
 	gdt[1] = 0x00209A0000000000ULL;		/* code: L, present, DPL0, R/X */
 	gdt[2] = 0x0000920000000000ULL;		/* data: present, DPL0, R/W    */
 
+	/*
+	 * Ring 3.  Nothing runs there yet — that is #411's next step — but the
+	 * descriptors belong here, with the kernel's, because where they sit
+	 * is dictated by the same arithmetic and putting them anywhere else
+	 * would be putting them in the wrong place.
+	 *
+	 * The 32-bit one is a real descriptor for the slot the 64-bit return
+	 * steps over; only the compatibility form of SYSRET would load it.
+	 */
+	gdt[3] = 0x00CFFA000000FFFFULL;		/* code32: G, D, DPL3, R/X     */
+	gdt[4] = 0x0000F20000000000ULL;		/* data:   present, DPL3, R/W  */
+	gdt[5] = 0x0020FA0000000000ULL;		/* code:   L, present, DPL3    */
+
 	tss_build(self, (uint64_t)(uintptr_t)bsp_stacks);
 	desc_activate(self);
 }
@@ -158,6 +187,24 @@ void desc_alloc(uint32_t cpu_id)
 		panic("desc: no memory for a processor's fault stacks");
 
 	tss_build(cpu_id, phys_to_direct(frames));
+}
+
+uint64_t desc_gdt_entry(unsigned selector)
+{
+	unsigned idx = selector / 8;
+
+	if (idx >= GDT_SLOTS)
+		panic("desc: asked for a selector past the table");
+
+	return gdt[idx];
+}
+
+uint64_t desc_rsp0(uint32_t cpu_id)
+{
+	if (cpu_id >= SMP_MAX_CPUS)
+		panic("desc: asked for the stack of a processor past the tables");
+
+	return tss[cpu_id].rsp0;
 }
 
 void desc_activate(uint32_t cpu_id)

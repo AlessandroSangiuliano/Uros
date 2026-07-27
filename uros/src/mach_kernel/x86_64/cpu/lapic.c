@@ -31,6 +31,7 @@
 
 /* Interrupt command, low half. */
 #define ICR_DELIVERY_FIXED	(0U << 8)
+#define ICR_DELIVERY_NMI	(4U << 8)
 #define ICR_DELIVERY_INIT	(5U << 8)
 #define ICR_DELIVERY_STARTUP	(6U << 8)
 #define ICR_LEVEL_ASSERT	(1U << 14)
@@ -214,6 +215,18 @@ void lapic_send_self(uint8_t vector)
 void lapic_send_ipi(uint32_t apic_id, uint8_t vector)
 {
 	icr_send(apic_id, ICR_DELIVERY_FIXED | ICR_LEVEL_ASSERT | vector);
+	icr_wait_idle();
+}
+
+void lapic_send_nmi(uint32_t apic_id)
+{
+	/*
+	 * No vector: NMI delivery ignores the field and the processor takes
+	 * vector 2 by definition.  Named destination rather than the self
+	 * shorthand even when the destination is this processor, because that
+	 * shorthand is defined for fixed delivery only.
+	 */
+	icr_send(apic_id, ICR_DELIVERY_NMI | ICR_LEVEL_ASSERT);
 	icr_wait_idle();
 }
 

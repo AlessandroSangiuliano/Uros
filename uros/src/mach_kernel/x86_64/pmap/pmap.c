@@ -213,6 +213,11 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 	return size;
 }
 
+int pmap_may_map(pmap_t pmap, uint64_t va)
+{
+	return !(va_is_user(va) && pmap == pmap_kernel());
+}
+
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired)
 {
@@ -236,6 +241,35 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	flags = pmap_flags_for_prot(prot);
 	if (wired)
 		flags |= INTEL_PTE_WIRED;
+
+	/*
+	 * Whether ring 3 may reach it follows from the address, not from an
+	 * argument.  §11.1 gives the lower half to the address space and the
+	 * upper half to the kernel, so the question is already answered by
+	 * where the caller asked for the mapping — and a caller that had to
+	 * say so as well could say something different, which is a way for a
+	 * kernel page to become reachable that no reviewer would spot.
+	 *
+	 * The 32-bit pmap asks a different question — whether this is the
+	 * kernel's map — because its layout has no halves to ask about: the
+	 * kernel sits at the top of every address space and the two are told
+	 * apart by which map they arrived through.  On this architecture the
+	 * address is the stronger answer of the two: it cannot mark a
+	 * kernel-half page reachable even if the mapping arrives through a
+	 * user's map, which the older test would happily do.
+	 *
+	 * Both are checked, because they are not the same question and each
+	 * catches what the other lets past.  The address decides whether the
+	 * bit is set; the map decides whether the mapping is legitimate at
+	 * all.  The kernel's own map has no user half — anything appearing
+	 * there is a mistake, and one that would otherwise arrive as a page
+	 * ring 3 can read.
+	 */
+	if (!pmap_may_map(pmap, va))
+		panic("pmap: the kernel map has no user half to map into");
+
+	if (va_is_user(va))
+		flags |= INTEL_PTE_USER;
 
 	rc = pmap_map_page(pmap->root_pa, va, pa, flags);
 	if (rc == PMAP_MAP_OK)
@@ -491,6 +525,31 @@ void pmap_protect_kernel(void)
 	write_cr0(read_cr0() | CR0_WP);
 }
 
+/*
+ * Whether the bit was actually set, which is not the same as whether the
+ * processor has it: a part without SMAP leaves this clear and the access
+ * brackets below become nothing, because their instructions would be
+ * invalid opcodes.
+ */
+static int smap_on;
+
+int pmap_smap_enabled(void)
+{
+	return smap_on;
+}
+
+void pmap_user_access_begin(void)
+{
+	if (smap_on)
+		__asm__ volatile("stac" ::: "cc", "memory");
+}
+
+void pmap_user_access_end(void)
+{
+	if (smap_on)
+		__asm__ volatile("clac" ::: "cc", "memory");
+}
+
 uint64_t pmap_enable_smep_smap(void)
 {
 	uint64_t want = 0;
@@ -499,17 +558,23 @@ uint64_t pmap_enable_smep_smap(void)
 		want |= CR4_SMEP;
 
 	/*
-	 * SMAP is safe to turn on now precisely because nothing yet sets the
-	 * user bit in a page-table entry: pmap_flags_for_prot() has no case
-	 * for it, so the lower-half mappings this kernel makes are supervisor
-	 * pages that SMAP does not police.  When mappings that userland can
-	 * reach do arrive, the kernel paths that deliberately read or write
-	 * them will need stac and clac around the access — and will fault
-	 * loudly if they forget, which is the point of turning it on early
-	 * rather than once there is something to break.
+	 * That prediction has since come true, which is worth recording
+	 * because it is the argument for turning a protection on before there
+	 * is anything for it to protect.
+	 *
+	 * When this was written no page-table entry carried the user bit, so
+	 * SMAP policed nothing; the comment said the deliberate accesses would
+	 * need stac and clac once such mappings arrived, and would fault
+	 * loudly if they forgot.  #411 made lower-half mappings genuinely
+	 * user-reachable, and the next boot on a processor that has SMAP
+	 * faulted on exactly one line — the one place the kernel reads through
+	 * a user address on purpose.  Not on a machine in the field, and not
+	 * as a corruption: as a page fault with an address, in a selftest.
 	 */
-	if (cpu_has_smap())
+	if (cpu_has_smap()) {
 		want |= CR4_SMAP;
+		smap_on = 1;
+	}
 
 	if (want)
 		write_cr4(read_cr4() | want);

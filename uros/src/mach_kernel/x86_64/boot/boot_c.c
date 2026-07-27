@@ -42,6 +42,11 @@
 #include <pmap/pv.h>
 #include <pmap/tlb.h>
 #include <pmap/walk.h>
+#include <syscall/probe.h>
+#include <syscall/syscall.h>
+#include <thread/context.h>
+#include <thread/fpu.h>
+#include <thread/state.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
@@ -877,7 +882,22 @@ static void user_pmap_selftest(void)
 
 	/* The switch.  Everything below runs in the new address space. */
 	pmap_activate(u);
+
+	/*
+	 * And the write says so.  The page is in the lower half, which since
+	 * #411 means ring 3 can reach it, which means SMAP forbids the kernel
+	 * from touching it without asking.  This is the kernel asking — the
+	 * same bracket copyin and copyout will use, here because this is the
+	 * first deliberate access of the kind the tree has.
+	 *
+	 * Without it the store faults, and it did: on the first boot with a
+	 * processor model that has SMAP at all.  The default emulated one does
+	 * not, which is why this is a lesson about testing more than one.
+	 */
+	pmap_user_access_begin();
 	*(volatile uint32_t *)(uintptr_t)USER_TEST_VA = 0xa11caca0;
+	pmap_user_access_end();
+
 	kputs("UrMach x86-64: running in the new space, wrote through it\r\n");
 	pmap_activate(k);
 
@@ -1411,13 +1431,7 @@ static void self_ipi_selftest(void)
 	trap_set_handler(LAPIC_SPURIOUS_VECTOR, spurious_handler);
 	trap_set_handler(T_PROBE_VECTOR, self_ipi_handler);
 
-	/*
-	 * The legacy controller first, and only then interrupts. It is still
-	 * pointing where the firmware left it, which is on top of the
-	 * exception vectors — enabling interrupts before silencing it invites
-	 * the firmware's timer to arrive as a double fault.
-	 */
-	pic_disable();
+	/* The legacy controller was silenced with the descriptor tables. */
 	lapic_enable();
 	interrupts_enable();
 
@@ -1529,6 +1543,819 @@ static void ipi_selftest(void)
 		kputdec((unsigned)ipi_calls_served(c->apic_id));
 		kputs("\r\n");
 	}
+}
+
+/*
+ * A page ring 3 can actually reach (#411).
+ *
+ * The permission bit for user access is not a property of the leaf. The
+ * processor walks four entries and requires U/S set in *every* one of them —
+ * it is a conjunction, unlike the no-execute bit, which is a disjunction: NX
+ * anywhere on the path forbids execution everywhere below.  Two bits in the
+ * same word, combined in opposite directions.
+ *
+ * Which means a leaf marked user-accessible, correct in every visible
+ * respect, is unreachable if any table above it was built without the bit —
+ * and the fault it produces points at the leaf, which is fine.  So the check
+ * is the whole path, at every level, the way the processor reads it.
+ */
+static void user_reachable_selftest(void)
+{
+	const uint64_t va = 0x0000700000000000ULL;	/* lower half, unused */
+	uint64_t frame = boot_frame_alloc();
+	unsigned levels_set = 0;
+	const pt_entry_t *table;
+	unsigned idx[4];
+	uint64_t root;
+	pmap_t space;
+
+	if (frame == 0) {
+		kputs("UrMach x86-64: no frame for the user-reach probe\r\n");
+		return;
+	}
+
+	/*
+	 * In an address space of its own, because the kernel's map has no
+	 * user half and pmap_enter() now refuses to pretend otherwise.  That
+	 * refusal is the point of the check, so the test has to respect it
+	 * rather than work around it.
+	 */
+	space = pmap_create(0);
+	if (space == PMAP_NULL) {
+		kputs("UrMach x86-64: no space for the user-reach probe\r\n");
+		return;
+	}
+
+	root = space->root_pa;
+
+	if (pmap_enter(space, va, frame,
+		       VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK) {
+		kputs("UrMach x86-64: could not map the user-reach probe\r\n");
+		return;
+	}
+
+	idx[0] = pml4_index(va);
+	idx[1] = pdpt_index(va);
+	idx[2] = pd_index(va);
+	idx[3] = pt_index(va);
+
+	table = (const pt_entry_t *)(uintptr_t)phys_to_direct(root);
+	for (unsigned lvl = 0; lvl < 4; lvl++) {
+		pt_entry_t e = table[idx[lvl]];
+
+		if (!pte_is_valid(e))
+			break;
+		if (e & INTEL_PTE_USER)
+			levels_set++;
+		if (pte_is_leaf(e) && lvl < 3)
+			break;
+		table = (const pt_entry_t *)(uintptr_t)
+			phys_to_direct(pte_to_pa(e));
+	}
+
+	kputs("UrMach x86-64: a lower-half mapping carries the user bit at ");
+	kputdec(levels_set);
+	kputs(levels_set == 4
+	      ? " of 4 levels — ring 3 can reach it\r\n"
+	      : " of 4 levels — WRONG, the walk forbids it\r\n");
+
+	/*
+	 * And the rule that says where such a mapping may live at all, asked
+	 * both ways round.  pmap_enter()'s answer to a violation is to stop,
+	 * so the rule is a predicate as well as a panic — otherwise the only
+	 * way to find out whether it works would be to end the boot.
+	 */
+	kputs("UrMach x86-64: an address space may hold it (");
+	kputdec(pmap_may_map(space, va));
+	kputs("), the kernel map may not (");
+	kputdec(pmap_may_map(pmap_kernel(), va));
+	kputs(pmap_may_map(space, va) && !pmap_may_map(pmap_kernel(), va)
+	      ? ") — the kernel half stays out of reach\r\n"
+	      : ") — WRONG\r\n");
+
+	pmap_remove(space, va, PAGE_SIZE_4K);
+	pmap_destroy(space);
+	boot_frame_free(frame);
+}
+
+
+/*
+ * Two threads, and the registers that have to survive between them (#408).
+ *
+ * A context switch preserves six registers and no others, because the ABI
+ * has already declared the rest dead across a call and a switch is a call
+ * with a different stack in the middle.  That is an economy, and an economy
+ * is exactly the kind of thing that is right until it is one register short.
+ *
+ * So the test is not "did both threads run" — that would pass with the
+ * saving removed entirely, since the counter lives in memory.  Each thread
+ * loads a distinct pattern into all six callee-saved registers, switches
+ * away, and reports what *differs* on its return: zero means every one of
+ * them came back.  The patterns differ per thread, so a switch that saved
+ * to the wrong place hands a thread its neighbour's values rather than its
+ * own, and that shows up too.
+ *
+ * It is written in assembly because there is no way to say this in C: the
+ * compiler owns those registers and will not let a function observe them
+ * across a call it can see through.
+ */
+extern uint64_t context_probe(struct context *self, struct context *other,
+			      uint64_t pattern, unsigned rounds);
+extern uint64_t fpu_probe(struct context *self, struct context *other,
+			  uint64_t pattern, unsigned rounds);
+
+static volatile uint64_t thread_xmm[2];
+
+static struct context ctx_main, ctx_a, ctx_b;
+static volatile unsigned thread_ran[2];
+static volatile uint64_t thread_kept[2];
+
+#define THREAD_ROUNDS	8
+#define PATTERN_A	0x1111111100000001ULL
+#define PATTERN_B	0x2222222200000002ULL
+
+/*
+ * The two run as a relay, and the order they finish in is not incidental.
+ *
+ * Each round is one switch away and one switch back, so the two threads
+ * leave the loop one switch apart: whoever finishes first is still owed a
+ * return by the other.  A first attempt had both of them making for the
+ * boot context, and the second never ran again — it was suspended inside
+ * the switch that would have resumed it, waiting for a partner that had
+ * already gone home.
+ *
+ * So the first to finish hands over to the second, and only the second
+ * returns to the boot context.  Neither is ever resumed afterwards, which
+ * is what the panics below assert rather than assume.
+ */
+static void thread_a(void *arg)
+{
+	(void)arg;
+	thread_ran[0] = 1;
+	thread_kept[0] = context_probe(&ctx_a, &ctx_b, PATTERN_A, THREAD_ROUNDS);
+	thread_xmm[0] = fpu_probe(&ctx_a, &ctx_b, PATTERN_A, THREAD_ROUNDS);
+
+	context_switch(&ctx_a, &ctx_b);		/* let the other one finish */
+	panic("thread: resumed a thread that had finished");
+}
+
+static void thread_b(void *arg)
+{
+	(void)arg;
+	thread_ran[1] = 1;
+	thread_kept[1] = context_probe(&ctx_b, &ctx_a, PATTERN_B, THREAD_ROUNDS);
+	thread_xmm[1] = fpu_probe(&ctx_b, &ctx_a, PATTERN_B, THREAD_ROUNDS);
+
+	context_switch(&ctx_b, &ctx_main);	/* and hand the boot back */
+	panic("thread: resumed a thread that had finished");
+}
+
+static void context_selftest(void)
+{
+	uint64_t stack_a = boot_frame_alloc();
+	uint64_t stack_b = boot_frame_alloc();
+	uint64_t fpu_frames = boot_frames_alloc(3);
+	uint64_t saved_kernel_rsp = percpu()->kernel_rsp;
+	void *fpu_a, *fpu_b, *fpu_main;
+
+	if (stack_a == 0 || stack_b == 0 || fpu_frames == 0) {
+		kputs("UrMach x86-64: no memory for the context probe\r\n");
+		return;
+	}
+
+	stack_a = phys_to_direct(stack_a) + PAGE_SIZE_4K;
+	stack_b = phys_to_direct(stack_b) + PAGE_SIZE_4K;
+
+	/*
+	 * A page each for the extended state, which is more than it needs and
+	 * far simpler than the alternative: the size is the processor's to
+	 * decide and a page covers every part that exists.  Page-aligned is
+	 * more than the sixty-four bytes the instruction demands.
+	 */
+	if (fpu_area_size() > PAGE_SIZE_4K)
+		panic("thread: the extended state does not fit in a page");
+
+	fpu_a = (void *)(uintptr_t)phys_to_direct(fpu_frames);
+	fpu_b = (void *)(uintptr_t)phys_to_direct(fpu_frames + PAGE_SIZE_4K);
+	fpu_main = (void *)(uintptr_t)phys_to_direct(fpu_frames + 2 * PAGE_SIZE_4K);
+
+	context_init(&ctx_a, stack_a, thread_a, 0, fpu_a);
+	context_init(&ctx_b, stack_b, thread_b, 0, fpu_b);
+	fpu_area_init(fpu_main);
+
+	/*
+	 * The boot path becomes a thread by being switched away from: its
+	 * context is filled in by the switch itself, which is the whole point
+	 * — a running thread's saved state is wherever it was interrupted,
+	 * and there is nothing to prepare in advance.
+	 */
+	context_become_current(&ctx_main, saved_kernel_rsp, fpu_main);
+	context_switch(&ctx_main, &ctx_a);
+
+	kputs("UrMach x86-64: two threads ran ");
+	kputdec(thread_ran[0] + thread_ran[1]);
+	kputs(" of 2, register differences ");
+	kputhex64(thread_kept[0]);
+	kputs(" and ");
+	kputhex64(thread_kept[1]);
+	kputs(thread_ran[0] && thread_ran[1]
+	      && thread_kept[0] == 0 && thread_kept[1] == 0
+	      ? " — six registers each, across every switch\r\n"
+	      : " — WRONG\r\n");
+
+	kputs("UrMach x86-64: vector state kept across switches, differences ");
+	kputhex64(thread_xmm[0]);
+	kputs(" and ");
+	kputhex64(thread_xmm[1]);
+	kputs(", saved by ");
+	kputs(fpu_save_instruction());
+	kputs(thread_xmm[0] == 0 && thread_xmm[1] == 0
+	      ? " — sixteen registers each\r\n" : " — WRONG\r\n");
+
+	kputs("UrMach x86-64: the entry stack followed the thread, and is ");
+	kputs(percpu()->kernel_rsp == saved_kernel_rsp
+	      ? "back where it started\r\n"
+	      : "NOT restored — WRONG\r\n");
+}
+
+
+/*
+ * The shape a debugger sees, and the two things it must do (#408).
+ *
+ * Round-tripping is the easy half: what goes out must come back, or a
+ * debugger that reads registers and writes them back has quietly altered
+ * the thread it was inspecting.
+ *
+ * The half that matters is where the round trip is deliberately *not* the
+ * identity.  Thread state arrives from whoever holds a port to the thread,
+ * so every field is attacker-controlled, and three of them are privilege: a
+ * code segment naming ring 0, I/O privilege in the flags, or interrupts
+ * disabled.  Each is a way to obtain something the caller does not have, and
+ * each is stopped by imposing the field rather than copying it.
+ *
+ * So the test asks for all three at once — the state a hostile caller would
+ * send — and checks the frame that comes out is not the one requested.
+ */
+/*
+ * A segment base a thread could plausibly have been given: canonical, in the
+ * lower half, and nowhere near anything this kernel maps.  Its only job is to
+ * be the kind of value the reverse conversion must accept, so that the value
+ * it must refuse is distinguished by *where* it points and not by being
+ * strange.
+ */
+#define USER_BASE_PROBE		0x0000700000010000ULL
+
+static void thread_state_selftest(void)
+{
+	struct x86_64_thread_state out, back;
+	struct x86_64_float_state fstate;
+	struct trap_frame frame, untouched;
+	uint8_t *area, *copy;
+	uint64_t frames;
+	int regs_ok, refused, base_refused, applied, float_ok = 1;
+
+	/* Distinct values, so a field copied from its neighbour shows up. */
+	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
+		((uint64_t *)&frame)[i] = 0x5000000000000000ULL + i;
+
+	frame.cs = USER_CS_RPL3;
+	frame.ss = USER_DS_RPL3;
+	frame.rflags = RFLAGS_IF | 2;
+
+	thread_state_from_frame(&frame, &out);
+
+	/*
+	 * The bases have to be ones a thread could have before the reverse
+	 * direction will take them.  from_frame() reads them from the machine,
+	 * and the machine here is the kernel — so gs_base comes back as the
+	 * per-CPU block, which is exactly the value the reverse direction is
+	 * obliged to refuse (#440).  A real thread's would be a user address;
+	 * these stand in for one.
+	 */
+	out.fs_base = USER_BASE_PROBE;
+	out.gs_base = USER_BASE_PROBE + PAGE_SIZE_4K;
+
+	applied = thread_state_to_frame(&out, &frame) == THREAD_STATE_OK;
+	thread_state_from_frame(&frame, &back);
+
+	regs_ok = applied && out.rax == back.rax && out.rbx == back.rbx
+	       && out.rcx == back.rcx && out.rdx == back.rdx
+	       && out.rdi == back.rdi && out.rsi == back.rsi
+	       && out.rbp == back.rbp && out.rsp == back.rsp
+	       && out.r8  == back.r8  && out.r9  == back.r9
+	       && out.r10 == back.r10 && out.r11 == back.r11
+	       && out.r12 == back.r12 && out.r13 == back.r13
+	       && out.r14 == back.r14 && out.r15 == back.r15
+	       && out.rip == back.rip;
+
+	kputs("UrMach x86-64: thread state is ");
+	kputdec(x86_64_THREAD_STATE_COUNT);
+	kputs(" words, float ");
+	kputdec(x86_64_FLOAT_STATE_COUNT);
+	kputs(", and seventeen registers ");
+	kputs(regs_ok ? "round-trip unchanged\r\n" : "DO NOT round-trip — WRONG\r\n");
+
+	/* Now the state a caller would send to gain something. */
+	out.cs = KERNEL_CS_SELECTOR;
+	out.ss = KERNEL_DS_SELECTOR;
+	out.rflags = 0x3000;			/* I/O privilege 3, interrupts off */
+
+	thread_state_to_frame(&out, &frame);
+
+	refused = frame.cs == USER_CS_RPL3
+	       && frame.ss == USER_DS_RPL3
+	       && (frame.rflags & 0x3000) == 0
+	       && (frame.rflags & RFLAGS_IF) != 0;
+
+	kputs("UrMach x86-64: asked for ring 0, iopl 3 and interrupts off, got cs ");
+	kputhex64(frame.cs);
+	kputs(" rflags ");
+	kputhex64(frame.rflags);
+	kputs(refused ? " — imposed, not copied\r\n"
+			: " — WRONG, the request was honoured\r\n");
+
+	/*
+	 * And the one field that cannot be imposed (#440).
+	 *
+	 * A selector has exactly one right answer, so it is substituted.  A
+	 * segment base does not — the point of the field is that the thread
+	 * chooses it — so the only answers are yes and no, and a base in the
+	 * kernel half has to be no: the trap entry for the four vectors that
+	 * can arrive inside the swapgs window decides by asking whether the
+	 * loaded base is a kernel address, and a caller who could install one
+	 * would be answering that question.
+	 *
+	 * The frame is compared word for word afterwards, because "refused"
+	 * has to mean nothing happened.  A conversion that wrote fifteen
+	 * registers and then returned an error would leave a thread built half
+	 * out of a request that was rejected.
+	 */
+	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
+		((uint64_t *)&untouched)[i] = ((uint64_t *)&frame)[i];
+
+	out.gs_base = (uint64_t)(uintptr_t)percpu();	/* a kernel address */
+
+	base_refused = thread_state_to_frame(&out, &frame) == THREAD_STATE_REFUSED;
+	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
+		if (((uint64_t *)&untouched)[i] != ((uint64_t *)&frame)[i])
+			base_refused = 0;
+
+	kputs("UrMach x86-64: asked for a gs base of ");
+	kputhex64(out.gs_base);
+	kputs(base_refused
+	      ? " — refused, and the frame is untouched\r\n"
+	      : " — WRONG, a thread may name a kernel base\r\n");
+
+	/* And the floating-point image, which must survive a trip through. */
+	frames = boot_frames_alloc(2);
+	if (frames == 0) {
+		kputs("UrMach x86-64: no frames for the float state probe\r\n");
+		return;
+	}
+
+	area = (uint8_t *)(uintptr_t)phys_to_direct(frames);
+	copy = (uint8_t *)(uintptr_t)phys_to_direct(frames + PAGE_SIZE_4K);
+
+	fpu_area_init(area);
+	fpu_save(area);
+	for (unsigned i = 0; i < 512; i++)
+		copy[i] = area[i];
+
+	float_state_from_area(area, &fstate);
+	for (unsigned i = 0; i < 512; i++)
+		area[i] = 0;
+	float_state_to_area(&fstate, area);
+
+	for (unsigned i = 0; i < 512; i++)
+		if (area[i] != copy[i])
+			float_ok = 0;
+
+	kputs("UrMach x86-64: the floating-point image ");
+	kputs(float_ok ? "survives the trip out and back\r\n"
+			: "CHANGED — WRONG\r\n");
+
+	boot_frame_free(frames);
+	boot_frame_free(frames + PAGE_SIZE_4K);
+}
+
+/*
+ * What ring 3 carries in %gs while it runs.  Recognisable, and nothing the
+ * kernel would ever have there — seeing it afterwards is proof of a swapgs
+ * that did not happen.
+ */
+#define GS_SENTINEL	0x00000000BADC0FFEULL
+
+/*
+ * Ring 3, entered for the first time (#411).
+ *
+ * Everything this kernel has ever run has been privileged, which is why the
+ * syscall path cannot yet be tested: a syscall's entire meaning is the
+ * privilege change, so issuing one from ring 0 would prove the instruction
+ * exists and nothing more.  There has to be somewhere less privileged to
+ * come from.
+ *
+ * Three separate things are being established, and the third is the one that
+ * matters:
+ *
+ *   that user code *ran* — the witness it stores before doing anything else,
+ *   because a fault on the very first instruction would look identical from
+ *   the kernel's side;
+ *
+ *   that it had no rights — HLT stops the processor in ring 0 and is a
+ *   general protection fault in ring 3, so which of the two happened is the
+ *   answer, and it needs no cooperation from the code being tested;
+ *
+ *   that the processor agrees — the code segment the fault frame carries is
+ *   the machine's own record of the ring it interrupted, and its low two
+ *   bits are the claim.  Everything else is inference; this is testimony.
+ *
+ * It runs in an address space of its own, entered by loading its root and
+ * left by loading the kernel's back.  The kernel half is shared into every
+ * space, so the stack this function is standing on and the code it will
+ * return to are mapped throughout — which is the higher-half design paying
+ * for itself at the first moment anything depended on it.
+ */
+static void ring3_selftest(void)
+{
+	uint64_t kernel_root = read_cr3();
+	uint64_t code_frame = boot_frame_alloc();
+	uint64_t data_frame = boot_frame_alloc();
+	const struct trap_record *t;
+	struct trap_record first, bases;
+	struct trap_paranoid_record window;
+	uint64_t witness, answer, kernel_gs;
+	pmap_t space;
+	uint64_t size;
+	uint8_t *dst;
+	const uint8_t *src = (const uint8_t *)__user_probe_start;
+
+	if (code_frame == 0 || data_frame == 0) {
+		kputs("UrMach x86-64: no frames for the ring-3 probe\r\n");
+		return;
+	}
+
+	space = pmap_create(0);
+	if (space == PMAP_NULL) {
+		kputs("UrMach x86-64: no space for the ring-3 probe\r\n");
+		return;
+	}
+
+	/*
+	 * Executable and read-only; writable and not executable.  W^X applies
+	 * to a user program exactly as it does to the kernel, and the first
+	 * one ever mapped is a good place to start as we mean to go on.
+	 */
+	if (pmap_enter(space, USER_PROBE_CODE_VA, code_frame,
+		       VM_PROT_READ | VM_PROT_EXECUTE, 0) != PMAP_MAP_OK
+	 || pmap_enter(space, USER_PROBE_DATA_VA, data_frame,
+		       VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK) {
+		kputs("UrMach x86-64: could not map the ring-3 probe\r\n");
+		return;
+	}
+
+	/* Copied through the direct map: the space it will run in is not ours. */
+	size = (uint64_t)(__user_probe_end - __user_probe_start);
+	dst = (uint8_t *)(uintptr_t)phys_to_direct(code_frame);
+	for (uint64_t i = 0; i < size; i++)
+		dst[i] = src[i];
+
+	*(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame) = 0;
+
+	/*
+	 * The entry arms its own way back, because the stack that return has
+	 * to land on only exists inside it.
+	 *
+	 * The other half of the block pair gets a value of its own first.
+	 * Until now both halves have held the same address, which made swapgs
+	 * a no-op and its absence undetectable — a missing one looked exactly
+	 * like a correct one.  Ring 3 runs carrying the sentinel, so anything
+	 * the kernel sees afterwards names which instruction ran.
+	 */
+	kernel_gs = (uint64_t)(uintptr_t)percpu();
+	wrmsr(MSR_KERNEL_GS_BASE, GS_SENTINEL);
+
+	write_cr3(space->root_pa);
+	user_probe_enter(USER_PROBE_CODE_VA, USER_PROBE_STACK_TOP);
+
+	/*
+	 * Kept before the second visit overwrites it.  One record, one armed
+	 * expectation: the machinery is deliberately not a stack, so a test
+	 * that wants two answers has to take the first one with it.
+	 */
+	first = *trap_last();
+
+	/* And back in, at the other entry point in the same page. */
+	user_probe_enter(USER_PROBE_FSGSBASE_VA, USER_PROBE_STACK_TOP);
+	bases = *trap_last();
+
+	/*
+	 * And a third time, to be caught in the window itself (#440).
+	 *
+	 * The NMI test arranges the window's *state*; this one enters the real
+	 * thing.  A breakpoint is armed on the first instruction of the syscall
+	 * path — the swapgs — and ring 3 issues an ordinary syscall.  An
+	 * execution breakpoint is a fault reported before the instruction runs,
+	 * so the debug exception is delivered at exactly the boundary where the
+	 * processor is at ring 0 and %gs has not been exchanged yet.  Two
+	 * instructions wide, hit deliberately.
+	 *
+	 * Nothing has to be undone afterwards for the syscall to continue: for
+	 * an instruction breakpoint the processor sets the resume flag in the
+	 * flags it saved, so the return runs the instruction instead of
+	 * trapping on it again.
+	 */
+	trap_paranoid_forget();
+	trap_expect(T_DEBUG, TRAP_RESUME_HERE);
+	write_dr0((uint64_t)(uintptr_t)syscall_entry);
+	write_dr7(DR7_EXEC_DR0);
+
+	user_probe_enter(USER_PROBE_CODE_VA, USER_PROBE_STACK_TOP);
+
+	write_dr7(0);
+	write_dr6(0);			/* sticky; the hardware never will */
+	window = *trap_last_paranoid();
+
+	write_cr3(kernel_root);
+
+	wrmsr(MSR_KERNEL_GS_BASE, kernel_gs);
+
+	t = &first;
+	witness = *(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame);
+	answer = *(volatile uint64_t *)(uintptr_t)(phys_to_direct(data_frame) + 8);
+
+	kputs("UrMach x86-64: ring 3 ran and left ");
+	kputhex64(witness);
+	kputs(", then ");
+	kputs(trap_name(t->vector));
+	kputs(" from cs ");
+	kputhex64(t->cs);
+	kputs(witness == USER_PROBE_WITNESS && t->caught
+	      && t->vector == T_GENERAL_PROTECTION
+	      && (t->cs & 3) == USER_RPL
+	      ? " — ring 3, on the processor's own testimony\r\n"
+	      : " — WRONG\r\n");
+
+	/*
+	 * And the syscall it made from there.  The answer names each argument
+	 * register separately, so this reports the value rather than a verdict:
+	 * a wrong byte says which register the entry path put in the wrong
+	 * place, which a pass/fail would not.
+	 */
+	kputs("UrMach x86-64: its syscall answered ");
+	kputhex64(answer);
+	kputs(answer == USER_PROBE_SYSCALL_RESULT
+	      ? " — six arguments and a return, through SYSCALL and back\r\n"
+	      : " — WRONG, expected 0x060504030201\r\n");
+
+	/*
+	 * And which block each entry path was reached with.  Ring 3 ran with
+	 * the sentinel in %gs, so a path that forgot to swap would have handed
+	 * the kernel that value — and kernel code reading %gs:0 would have
+	 * been following an address a user program chose.
+	 *
+	 * Both are checked because they are different code with the same duty:
+	 * the syscall entry swaps as its first instruction, the trap stubs
+	 * swap only when the saved code segment says the trap came from ring 3.
+	 */
+	kputs("UrMach x86-64: entered with gs ");
+	kputhex64(syscall_probe_gs());
+	kputs(" by syscall, ");
+	kputhex64(t->gs_base);
+	kputs(" by fault, kernel's is ");
+	kputhex64(kernel_gs);
+	kputs(syscall_probe_gs() == kernel_gs && t->gs_base == kernel_gs
+	      ? " — both paths swapped, neither saw the sentinel\r\n"
+	      : " — WRONG, a path kept the user's gs\r\n");
+
+	/*
+	 * And whether ring 3 could have written that base itself (#440).
+	 *
+	 * The trap entry for NMI and its three relatives decides what to do by
+	 * asking whether the loaded base is a kernel address.  That is a proof
+	 * only while a user program cannot write one, which is why CR4.FSGSBASE
+	 * is cleared rather than left as the firmware had it.
+	 *
+	 * Whether the processor even has the feature is reported alongside,
+	 * because the two runs prove different things: on a processor without
+	 * it the invalid opcode says nothing about the decision, and on one
+	 * with it the same invalid opcode is the decision taking effect.  A
+	 * verdict that read the same in both cases would be the emulated
+	 * default CPU hiding the answer again.
+	 */
+	kputs("UrMach x86-64: rdgsbase in ring 3 -> ");
+	kputs(trap_name(bases.vector));
+	kputs(cpu_has_fsgsbase() ? " (the processor has it, cr4 bit "
+				 : " (the processor has not, cr4 bit ");
+	kputs(read_cr4() & CR4_FSGSBASE ? "set)" : "clear)");
+	kputs(bases.caught && bases.vector == T_INVALID_OPCODE
+	      && (bases.cs & 3) == USER_RPL
+	      && (read_cr4() & CR4_FSGSBASE) == 0
+	      ? " — a user program cannot write its own base\r\n"
+	      : " — WRONG, ring 3 reached the segment bases\r\n");
+
+	/*
+	 * And the window as ring 3 actually opens it.
+	 *
+	 * The instruction pointer is the part that makes this the real thing
+	 * rather than a reconstruction: it is the address of syscall_entry, so
+	 * the exception was delivered inside the syscall path and not somewhere
+	 * that merely resembles it.
+	 */
+	kputs("UrMach x86-64: caught in the real window at ");
+	kputhex64(window.rip);
+	kputs(", cs ");
+	kputhex64(window.cs);
+	kputs(", gs ");
+	kputhex64(window.gs_on_entry);
+	kputs(" -> ");
+	kputhex64(window.gs_on_dispatch);
+	kputs(window.taken && window.vector == T_DEBUG
+	      && window.rip == (uint64_t)(uintptr_t)syscall_entry
+	      && (window.cs & 3) == 0
+	      && window.gs_on_entry == GS_SENTINEL
+	      && window.swapped == 1
+	      && window.gs_on_dispatch == kernel_gs
+	      ? " — ring 0 with the user's gs, and the entry knew\r\n"
+	      : " — WRONG, the syscall window is not covered\r\n");
+
+	pmap_remove(space, USER_PROBE_CODE_VA, PAGE_SIZE_4K);
+	pmap_remove(space, USER_PROBE_DATA_VA, PAGE_SIZE_4K);
+	pmap_destroy(space);
+	boot_frame_free(code_frame);
+	boot_frame_free(data_frame);
+}
+
+/*
+ * The descriptor table, checked against the arithmetic rather than against
+ * its own comments (#411).
+ *
+ * SYSCALL and SYSRET are handed one number and derive four selectors from it
+ * by addition.  That makes the table's order load-bearing in a way an
+ * ordinary GDT's is not: there is no field naming the user code segment, only
+ * an offset the processor will add.  Put the descriptors in a different order
+ * and nothing complains — until the first return to user mode loads whichever
+ * descriptor happens to live at the computed offset, which is how a program
+ * in ring 3 ends up holding a kernel data segment.
+ *
+ * So the check does the processor's arithmetic and looks at what it lands on:
+ * the right privilege level, the right kind of segment, and for the 64-bit
+ * code selector the long-mode bit that makes it 64-bit at all.
+ */
+/*
+ * The swapgs window, arranged on purpose (#440).
+ *
+ * There are two instruction boundaries where the processor is at ring 0 and
+ * %gs still belongs to a user program: after SYSCALL and before the entry's
+ * own swapgs, and after the exit's swapgs and before SYSRET.  A vector
+ * delivered there reads a ring-0 code segment, concludes correctly that it
+ * must not swap, and runs the kernel on a base a user chose.
+ *
+ * Two instructions wide and unreachable by anything the kernel schedules,
+ * which is why it has to be arranged rather than waited for.  A
+ * non-maskable interrupt is the instrument: it is one of the four vectors
+ * that can genuinely land there, it arrives when this code says so, and no
+ * flag can hold it back.
+ *
+ * ── Both directions, because one of them is the control ───────────────
+ *
+ * An entry that swapped unconditionally would pass a test that only checked
+ * the window — and would then get every ordinary kernel NMI wrong, in the
+ * direction where the symptom is not a crash.  So the same interrupt is
+ * delivered twice, once outside the window and once inside it, and the
+ * answer is that the two disagree.
+ *
+ * The evidence for "inside" is a conjunction that cannot be arranged by
+ * accident: the code segment says ring 0, so the rule this path replaces
+ * would have refused to swap, *and* the base found there was the user's.
+ * Those two facts together are the hole, reproduced.
+ */
+#define WINDOW_WAIT_LIMIT	(1U << 24)
+
+static int wait_for_paranoid(void)
+{
+	const volatile struct trap_paranoid_record *p = trap_last_paranoid();
+
+	/*
+	 * Bounded.  An interrupt that never arrives is a result — it says the
+	 * delivery is broken — and a boot that hangs waiting for it says
+	 * nothing at all.
+	 */
+	for (uint32_t i = 0; i < WINDOW_WAIT_LIMIT; i++) {
+		if (p->taken)
+			return 1;
+		cpu_pause();
+	}
+	return 0;
+}
+
+static void swapgs_window_selftest(void)
+{
+	struct trap_paranoid_record outside, inside;
+	uint64_t kernel_gs = (uint64_t)(uintptr_t)percpu();
+	uint32_t me;
+	int had_interrupts, arrived;
+
+	if (!lapic_present()) {
+		kputs("UrMach x86-64: no local APIC — the window cannot be arranged\r\n");
+		return;
+	}
+
+	me = lapic_id();
+
+	/* ---- Outside the window: an ordinary kernel NMI. ---- */
+	trap_paranoid_forget();
+	trap_expect(T_NMI, TRAP_RESUME_HERE);
+	lapic_send_nmi(me);
+	arrived = wait_for_paranoid();
+	outside = *trap_last_paranoid();
+
+	if (!arrived) {
+		kputs("UrMach x86-64: sent myself an NMI and it never came"
+		      " — WRONG, the window cannot be tested\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: NMI outside the window, gs ");
+	kputhex64(outside.gs_on_entry);
+	kputs(" -> ");
+	kputhex64(outside.gs_on_dispatch);
+	kputs(outside.swapped == 0 && outside.gs_on_entry == kernel_gs
+	      && outside.gs_on_dispatch == kernel_gs
+	      ? " — left alone, which is the half that must not change\r\n"
+	      : " — WRONG, an ordinary NMI exchanged the pair\r\n");
+
+	/* ---- Inside it: ring 0, with the base a user program would have. ---- */
+	trap_paranoid_forget();
+	trap_expect(T_NMI, TRAP_RESUME_HERE);
+
+	had_interrupts = interrupts_enabled();
+	interrupts_disable();
+
+	/*
+	 * ⚠️ From here to the restore below, %gs does not point at this
+	 * processor's block, and nothing in between may read it — which is the
+	 * same rule the real window lives under, so the arrangement is faithful
+	 * rather than merely similar.  Interrupts are off for the same reason
+	 * they are off there: SYSCALL clears IF through FMASK, so a maskable
+	 * vector cannot land in the real window either, and one landing in this
+	 * one would take the ordinary path and read the sentinel.
+	 */
+	wrmsr(MSR_KERNEL_GS_BASE, kernel_gs);
+	wrmsr(MSR_GS_BASE, GS_SENTINEL);
+
+	lapic_send_nmi(me);
+	arrived = wait_for_paranoid();
+
+	wrmsr(MSR_GS_BASE, kernel_gs);
+	wrmsr(MSR_KERNEL_GS_BASE, kernel_gs);
+
+	if (had_interrupts)
+		interrupts_enable();
+
+	inside = *trap_last_paranoid();
+
+	if (!arrived) {
+		kputs("UrMach x86-64: the NMI in the window never came"
+		      " — WRONG\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: NMI inside it, cs ");
+	kputhex64(inside.cs);
+	kputs(" says ring 0 but gs was ");
+	kputhex64(inside.gs_on_entry);
+	kputs(", handler ran on ");
+	kputhex64(inside.gs_on_dispatch);
+	kputs(inside.swapped == 1 && (inside.cs & 3) == 0
+	      && inside.gs_on_entry == GS_SENTINEL
+	      && inside.gs_on_dispatch == kernel_gs
+	      ? " — the base said what the code segment could not\r\n"
+	      : " — WRONG, the window was not closed\r\n");
+}
+
+static void gdt_layout_selftest(void)
+{
+	uint64_t kdata = desc_gdt_entry(KERNEL_CS_SELECTOR + 8);
+	uint64_t udata = desc_gdt_entry(SYSRET_SELECTOR_BASE + 8);
+	uint64_t ucode = desc_gdt_entry(SYSRET_SELECTOR_BASE + 16);
+
+	int kdata_ok = DESC_IS_PRESENT(kdata) && !DESC_IS_CODE(kdata)
+		    && DESC_DPL(kdata) == 0;
+	int udata_ok = DESC_IS_PRESENT(udata) && !DESC_IS_CODE(udata)
+		    && DESC_DPL(udata) == 3;
+	int ucode_ok = DESC_IS_PRESENT(ucode) && DESC_IS_CODE(ucode)
+		    && DESC_DPL(ucode) == 3 && DESC_IS_LONG(ucode);
+
+	kputs("UrMach x86-64: syscall lands on kernel data (dpl ");
+	kputdec(DESC_DPL(kdata));
+	kputs("), sysret on user data (dpl ");
+	kputdec(DESC_DPL(udata));
+	kputs(") and user code (dpl ");
+	kputdec(DESC_DPL(ucode));
+	kputs(ucode_ok ? ", 64-bit)" : ", NOT 64-bit)");
+	kputs(kdata_ok && udata_ok && ucode_ok
+	      ? " — the table suits the arithmetic\r\n"
+	      : " — WRONG\r\n");
 }
 
 /*
@@ -1759,6 +2586,25 @@ static void descriptor_tables_init(void)
 {
 	desc_init_bsp();
 
+	/*
+	 * And silence the legacy interrupt controller in the same breath.
+	 *
+	 * Not later, when something first enables interrupts — here, the
+	 * moment a fault can be reported at all.  The firmware leaves the
+	 * 8259 enabled and pointing at vectors 0x08-0x0F, so its timer
+	 * arrives as vector 8, and vector 8 is the double fault.  Anything
+	 * that runs with interrupts on before this — including the first
+	 * excursion into ring 3, which enables them by construction — takes
+	 * a working timer interrupt and reports it as the fault a kernel
+	 * cannot survive.
+	 *
+	 * That is not hypothetical: it is where this call used to be, and it
+	 * cost an afternoon.  The frame said so, for anyone counting words —
+	 * five pushed where six were expected, because an interrupt has no
+	 * error code and an exception does.
+	 */
+	pic_disable();
+
 	kputs("UrMach x86-64: GDT + TSS + IDT installed for cpu ");
 	kputdec(cpu_apic_id());
 	kputs(", faults are now reported\r\n");
@@ -1806,6 +2652,14 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	atomic_selftest();
 	reclaim_selftest();
 	percpu_selftest();
+	gdt_layout_selftest();
+	syscall_init();
+	fpu_init();
+	context_selftest();
+	thread_state_selftest();
+	user_reachable_selftest();
+	ring3_selftest();
+	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();
 	ipi_init();
