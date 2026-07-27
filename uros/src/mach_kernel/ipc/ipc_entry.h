@@ -135,23 +135,63 @@ typedef struct ipc_entry {
 #define	IE_BITS_TYPE_MASK	0x001f0000	/* 5 bits of capability type */
 #define	IE_BITS_TYPE(bits)	((bits) & IE_BITS_TYPE_MASK)
 
-#define	IE_BITS_COLLISION	0x00800000	/* 1 bit for collisions */
-
-
+/*
+ * The generation lives at the top of this word and in the low bits of a port
+ * name, and the two must be the same width or a name carries a generation the
+ * entry cannot store.  So both are derived from the one place that states it,
+ * <mach/machine/port_name.h> (#413), and the two fields below follow it down:
+ *
+ *	31 ...................... generation ..... (MACH_PORT_GEN_BITS wide)
+ *	                   collision  (the bit immediately below it)
+ *	20 .. 16  capability type
+ *	15 ..  0  user references
+ *
+ * ⚠️ The collision flag is placed relative to the generation, not at a fixed
+ * bit, because it is what the generation grows into.  On i386 that puts it
+ * back exactly where it has always been (0x00800000); on x86-64 the wider
+ * generation pushes it to 0x00200000, into what is free space there.
+ *
+ * IE_BITS_GEN_ONE is not necessarily the lowest bit of the field: i386 holds
+ * two bits of every name at zero for a tag that was never implemented, and
+ * steps the generation by four to do it.  Where the step is is a property of
+ * the target, so it comes from the same header.
+ */
 #ifndef NO_PORT_GEN
-#define	IE_BITS_GEN_MASK	0xff000000	/* 8 bits for generation */
+#define	IE_BITS_GEN_MASK	\
+		(MACH_PORT_GEN_LOWMASK << MACH_PORT_GEN_SHIFT)
 #define	IE_BITS_GEN(bits)	((bits) & IE_BITS_GEN_MASK)
-#define	IE_BITS_GEN_ONE		0x04000000	/* low bit of generation */
+#define	IE_BITS_GEN_ONE		\
+		(1U << (MACH_PORT_GEN_SHIFT + MACH_PORT_GEN_SKIP))
 #define IE_BITS_NEW_GEN(old)	(((old) + IE_BITS_GEN_ONE) & IE_BITS_GEN_MASK)
+
+#define	IE_BITS_COLLISION	(1U << (MACH_PORT_GEN_SHIFT - 1))
+#define	IE_BITS_RIGHT_MASK	(IE_BITS_COLLISION - 1)
 #else
 #define	IE_BITS_GEN_MASK	0
 #define	IE_BITS_GEN(bits)	0
 #define	IE_BITS_GEN_ONE		0
 #define IE_BITS_NEW_GEN(old)	(old)
+
+#define	IE_BITS_COLLISION	0x00800000	/* 1 bit for collisions */
+#define	IE_BITS_RIGHT_MASK	0x007fffff	/* relevant to the right */
 #endif	/* !USE_PORT_GEN */
 
-
-#define	IE_BITS_RIGHT_MASK	0x007fffff	/* relevant to the right */
+/*
+ * Nothing above may reach down into the capability type or the reference
+ * count, and the generation must actually move — a step wider than the field
+ * would leave every name in one generation forever, which is the failure that
+ * looks like nothing at all.
+ */
+_Static_assert((IE_BITS_TYPE_MASK & ~IE_BITS_RIGHT_MASK) == 0,
+	"the collision flag has been pushed down into the type field");
+_Static_assert((IE_BITS_UREFS_MASK & ~IE_BITS_RIGHT_MASK) == 0,
+	"the collision flag has been pushed down into the reference count");
+#ifndef NO_PORT_GEN
+_Static_assert((IE_BITS_GEN_ONE & IE_BITS_GEN_MASK) == IE_BITS_GEN_ONE,
+	"the generation would step outside its own field");
+_Static_assert((IE_BITS_COLLISION & IE_BITS_GEN_MASK) == 0,
+	"the collision flag overlaps the generation");
+#endif	/* !NO_PORT_GEN */
 
 
 typedef struct ipc_tree_entry {

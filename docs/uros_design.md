@@ -1080,16 +1080,23 @@ generation lives there too: 16 bits of user-references, 5 of capability type,
 of generation fit with nothing displaced; twelve would take two bits from the
 user-reference count, dropping its ceiling from 65,535 to 16,383.
 
-**Recommended: 22 bits of index and 10 of generation, incrementing by one.**
-It is sixteen times today's window, it costs no bit anywhere, and the index
-it gives up was never reachable. What it gives up is the low-bit tag, which
-is disabled at the generator.
+**Taken: 22 bits of index and 10 of generation, incrementing by one.**
+Sixteen times today's window, no bit spent anywhere, and the index given up
+was never reachable. What is given up is the low-bit tag, which is disabled
+at the generator.
 
-**And it need not be a compromise, because it can be per-target.** The
-numbers that bound it — the table ceiling — are already per-target, so the
-split macros belong beside the widths in `mach/machine/`, exactly as
-`vm_offset_t` does. i386 keeps 24/8 bit for bit; x86-64 takes 22/10; nothing
-is changed in the one configuration that currently runs.
+**It is not a compromise, because it is per-target.** The number that bounds
+it — the table ceiling — is per-target already, so the split lives beside the
+widths in `mach/machine/port_name.h`, exactly as `vm_offset_t` does. Each
+target states two things, how many bits are generation and how many of them
+are held still, and everything else is derived from those: the name macros in
+`mach/port.h`, and in `ipc/ipc_entry.h` the generation mask, its increment,
+and **the collision flag, which is placed immediately below the generation
+field rather than at a fixed bit** — it is what the generation grows into.
+i386 comes out of those formulas bit for bit as it always was
+(`0xff000000`, `0x04000000`, `0x00800000`, `0x007fffff`), which was checked by
+rebuilding it: 0 of 205 kernel objects changed in `.text`, `.data` or
+`.rodata`.
 
 **This does not close the sixty-four-bit question, it de-urgents it.** A
 wider name would buy a window of millions rather than a thousand, for eight

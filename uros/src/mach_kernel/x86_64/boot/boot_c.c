@@ -3323,6 +3323,89 @@ static void msg_abi_selftest(void)
 	      : " — the walk and the layout DISAGREE\r\n");
 }
 
+/*
+ * How a port name divides, measured (#413).
+ *
+ * The split is machine-dependent now, and this target's is not i386's: 22
+ * bits of index and 10 of generation, against 24 and 8. The generation is the
+ * number of times a slot can be handed out before a name repeats, which is
+ * what a task holding a stale name has to lose a race against — so the two
+ * bits come off an index whose top four were never reachable (the entry table
+ * stops at 484,608 here) and go somewhere they are worth something.
+ *
+ * What is checked is that the shifts and masks compose: every name the kernel
+ * can build must come apart into the index and generation it was built from.
+ * A split is three macros that must agree, and they are written in terms of
+ * one width precisely so they cannot disagree — this establishes that they
+ * do not, rather than that they were meant not to.
+ *
+ * ⚠️ The other half of the split lives in ipc/ipc_entry.h, which this target
+ * does not compile yet: the generation is stored in an entry's bits as well,
+ * and a name wider than that field would carry a generation the entry cannot
+ * hold. Those checks are static assertions in that header — they run for
+ * i386 today and for this target the day the machine-independent tree builds.
+ */
+static void port_name_selftest(void)
+{
+	const uint32_t index_max = (1u << (32 - MACH_PORT_GEN_BITS)) - 1;
+	unsigned long checked = 0, wrong = 0;
+
+	kputs("UrMach x86-64: a port name is ");
+	kputdec(32 - MACH_PORT_GEN_BITS);
+	kputs(" bits of index and ");
+	kputdec(MACH_PORT_GEN_BITS);
+	kputs(" of generation — ");
+	kputdec(1u << MACH_PORT_GEN_BITS);
+	kputs(" recycles of a slot before a name repeats\r\n");
+
+	/*
+	 * Every generation against a spread of indices, and the edges of both
+	 * exactly. The stride is prime so it does not walk in step with any
+	 * power of two in the masks.
+	 */
+	for (uint32_t gen = 0; gen <= MACH_PORT_GEN_LOWMASK; gen++) {
+		uint32_t gform = gen << MACH_PORT_GEN_SHIFT;
+
+		for (uint32_t i = 0; ; i += 4093) {
+			mach_port_t name = MACH_PORT_MAKE(i, gform);
+
+			checked++;
+			if (MACH_PORT_INDEX(name) != i
+			    || MACH_PORT_GEN(name) != gform)
+				wrong++;
+
+			if (i > index_max - 4093)
+				break;
+		}
+
+		for (uint32_t i = index_max - 1; i <= index_max; i++) {
+			mach_port_t name = MACH_PORT_MAKE(i, gform);
+
+			checked++;
+			if (MACH_PORT_INDEX(name) != i
+			    || MACH_PORT_GEN(name) != gform)
+				wrong++;
+		}
+	}
+
+	kputs("UrMach x86-64: ");
+	kputdec(checked);
+	kputs(" names taken apart, ");
+	kputdec(wrong);
+	kputs(wrong == 0 ? " wrong" : " WRONG");
+
+	/*
+	 * The two names that are not names. NULL must be what an all-zero pair
+	 * makes, and DEAD must sit at the very top of the index space — the
+	 * entry table is required to stop below it, so a table that never
+	 * reaches the last index can never hand out either by accident.
+	 */
+	kputs(MACH_PORT_MAKE(0, 0) == MACH_PORT_NULL
+	      && MACH_PORT_INDEX(MACH_PORT_DEAD) == index_max
+	      ? "; null and dead are outside what a table can reach\r\n"
+	      : "; NULL OR DEAD IS REACHABLE from a valid index\r\n");
+}
+
 static void swapgs_window_selftest(void)
 {
 	struct trap_paranoid_record outside, inside;
@@ -3742,6 +3825,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ioapic_selftest();
 	spl_selftest();
 	msg_abi_selftest();
+	port_name_selftest();
 	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();
