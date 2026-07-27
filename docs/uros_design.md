@@ -1042,6 +1042,43 @@ than discovered.
 on both targets — the one part of the wire format that a widening pointer
 never touches, because nothing in it is a pointer.
 
+#### What the table does not settle: how wide a port name should be
+
+Keeping `natural_t` narrow is not the same as deciding that everything made
+of it should stay narrow, and one of them has an argument on the other side.
+A name today is **24 bits of index and 8 bits of generation**. The index is
+generous to the point of irrelevance — sixteen million ports in one task —
+and the generation is not: **a name is reused after 256 allocate/deallocate
+cycles at the same slot**. That is the window in which a stale name comes
+back meaning a different port, which is a capability question and not a
+capacity one, and it is the only place in this table where sixty-four bits
+would buy something real.
+
+**Widening `natural_t` is the expensive way to buy it.** The header goes from
+24 bytes to 48 and every message pays the copy, to widen counts and sizes
+that had no reason to grow. **Widening `mach_port_t` alone is the cheap way:**
+the header goes to 32, and the message stops growing there — the port
+descriptor's padding *shrinks* to one word, because the padding is the space
+an address needs and a name does not, so a 16-byte descriptor comes out
+either way. That is why the padding is written as a subtraction rather than
+as `sizeof(void *)`: the day a name widens, `mach/message.h` is already
+right, and the test that measures the type byte already covers it.
+
+**Not decided here, and for a reason that is not timidity.** The generation
+does not live only in the name: it is packed into `ie_bits` in
+`ipc/ipc_entry.h` (eight bits at `0xff000000`), and `ipc_entry.c` orders its
+tree assuming the generation is in the low bits of the name. That is 138 uses
+across ten machine-independent files, none of which compiles for x86-64 yet —
+so changing it today means untested surgery whose only running configuration
+is the one it would break. It belongs with #416/#415, when the tree builds
+and the change can be run.
+
+**A cheaper option deserves weighing at the same time:** rebalancing the
+split — 20 bits of index and 12 of generation, or 16 and 16 — costs *zero*
+bytes and multiplies the recycle window by 16 to 256. It is a mitigation
+rather than an answer, but it is free, and "free" changes what the wider name
+has to justify.
+
 **A descriptor is an address, a 32-bit count and a 32-bit flags word**, so it
 is twelve bytes on i386 and sixteen here. All four descriptor structures must
 be exactly that size, for two reasons and only the first is obvious: the

@@ -363,16 +363,25 @@ typedef struct
  *  at the same offset in all four structures, or a port descriptor is read
  *  as whatever happens to be four bytes further on.
  *
- *  The padding is therefore derived rather than chosen: it is exactly the
- *  space an out-of-line descriptor spends on the part of its address that a
- *  name does not need.  One word on i386, where it is the field that has
- *  always been there; two on x86-64.  No target has to be named for this to
- *  come out right, which is the point — the next one will not be either.
+ *  The padding is therefore derived rather than chosen: an out-of-line
+ *  descriptor spends an address and a count before its flags word, a port
+ *  descriptor spends a name, and the padding is the difference.  One word on
+ *  i386, where it is the field that has always been there; two on x86-64.
+ *
+ *  ⚠️ Written as a difference and not as `sizeof(void *)` on purpose.  The
+ *  two are the same only while a name is four bytes, and whether it stays
+ *  four bytes is an open question with a real argument on the other side
+ *  (§11.11 of the design docs: eight bits of generation is a short recycle).
+ *  Subtracting the name means the day it widens, this is already right.
  */
+#define MACH_MSG_PORT_DESCRIPTOR_PAD					\
+	((sizeof(void *) + sizeof(mach_msg_size_t) - sizeof(mach_port_t))\
+	 / sizeof(mach_msg_size_t))
+
 typedef struct
 {
   mach_port_t			name;
-  mach_msg_size_t		pad1[sizeof(void *) / sizeof(mach_msg_size_t)];
+  mach_msg_size_t		pad1[MACH_MSG_PORT_DESCRIPTOR_PAD];
   unsigned int			pad2 : 16;
   mach_msg_type_name_t		disposition : 8;
   mach_msg_descriptor_type_t	type : 8;
@@ -597,6 +606,11 @@ _Static_assert(__builtin_offsetof(mach_msg_ool_descriptor_t, size)
 	"the size follows the whole address, not part of it");
 _Static_assert(__builtin_offsetof(mach_msg_port_descriptor_t, name) == 0,
 	"a port descriptor leads with the name, where an address would be");
+_Static_assert(sizeof(mach_port_t) <= sizeof(void *) + sizeof(mach_msg_size_t),
+	"a name wider than an address and a count leaves no room to pad to");
+_Static_assert((sizeof(void *) + sizeof(mach_msg_size_t) - sizeof(mach_port_t))
+	       % sizeof(mach_msg_size_t) == 0,
+	"the padding must come out a whole number of words");
 _Static_assert(sizeof(mach_msg_base_t) % sizeof(void *) == 0,
 	"the descriptors begin where the body ends, and must land aligned");
 
