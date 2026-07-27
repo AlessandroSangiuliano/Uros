@@ -81,6 +81,30 @@ SECTIONS
 		*(.rodata.*)
 	} :krodata
 
+	/*
+	 * The AP trampoline travels in the image and is copied to a page
+	 * below 1 MiB before use.  It is never executed from here — read-only
+	 * is the right home for something that is only ever a source.
+	 */
+	.trampoline ALIGN(16) : AT(ADDR(.trampoline) - KERNEL_VBASE) {
+		__trampoline_start = .;
+		*(.trampoline)
+		__trampoline_end = .;
+	} :krodata
+
+	/*
+	 * The ring-3 probe travels the same way and for the same reason: it is
+	 * copied into a page an address space owns before it is executed, and
+	 * is never run from here.  Read-only is where a source belongs — and
+	 * here it is also the point, since this is the one piece of code in
+	 * the image that must never be executable by the kernel.
+	 */
+	.user_probe ALIGN(16) : AT(ADDR(.user_probe) - KERNEL_VBASE) {
+		__user_probe_start = .;
+		*(.user_probe)
+		__user_probe_end = .;
+	} :krodata
+
 	. = ALIGN(4096);
 	__krodata_end = .;
 	__kdata_start = .;

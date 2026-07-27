@@ -77,16 +77,31 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
 
   add_executable(mach_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/ap_trampoline.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/desc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/smp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/direct.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/map.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/phys.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pmap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pv.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/tlb.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/walk.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/entry.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/probe.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/syscall.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/state.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)

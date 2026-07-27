@@ -746,6 +746,7 @@ are userspace `.so` files, not kernel objects. The bases below are shown as
 | `0xffffc00000000000` | **kernel heap** | dynamic kernel allocations | NX by default |
 | `0xffffe00000000000` | **per-CPU** | `%gs`-based per-CPU areas | kernel-only |
 | `0xfffff00000000000` | **CPU entry area** | per-CPU: entry `.text`, IST/trampoline stacks, GDT, TSS | the *only* kernel region mapped in the user table under KPTI |
+| `0xfffff80000000000` | **device registers** | MMIO made reachable: local APIC, IOAPIC, HPET, PCI windows | uncached, NX, kernel-only |
 | `0xffffffff80000000` | **kernel image** | `.text` / `.rodata` / `.data` / `.bss` | W^X per section |
 
 The kernel image sits in the top 2 GiB because `-mcmodel=kernel` requires it:
@@ -848,6 +849,164 @@ For one binary to do both, the layout is built KPTI-able from the start:
 None of this is transliterated from another kernel: the MSR and CPUID bits are
 Intel's architectural contract, and separating the entry area is geometry the
 problem forces. The regions, their bases, and the symbolic anchoring are ours.
+
+### 11.8 Revoking a mapping the other processors are using
+
+A processor caches the translations it walks, and nothing tells it when
+another processor edits the tables underneath. So changing an entry is two
+operations, and only the first is a store: after it, the table says one
+thing while every processor that has walked that address still believes
+another. Forgetting the second produces no fault and no report — only
+unrelated code, later, reading through a translation that should not exist.
+
+The mechanism is one **cross-call**, not a family of special messages
+(#438). A message between processors carries a vector and nothing else, so
+everything above it is an arrangement in memory that the sender writes and
+the receiver reads. The shootdown is the first user of that arrangement and
+will not be the last: a scheduler asking a processor to reconsider what it
+runs, a debugger asking them all to stop. Those differ in what is asked, not
+in how the asking works. The call returns when every processor has
+*finished*, because the caller's next act is usually to reuse the frame.
+
+Two departures from the i386 path, both deliberate:
+
+- **Ranges, not everything.** i386 flushes the whole table on every
+  shootdown — correct, and the right choice for its first SMP pass. Here an
+  address at a time up to a threshold, wholesale beyond it. The threshold is
+  a single constant, unmeasured until #431.
+- **The global-page trap is closed in advance.** A `cr3` reload does not
+  evict a global entry; that is what global means. Since §11.7 marks kernel
+  regions global whenever KPTI is off, a whole-table flush written as a
+  `cr3` reload would silently stop flushing the kernel's own mappings the
+  day #437 lands. The flush therefore toggles `CR4.PGE` when global pages
+  are on, which is the architecture's own answer.
+
+The ordering this rests on costs nothing here and §11.6 says why: the
+page-table store must reach the other processor before it is asked to
+flush, and x86-TSO does not reorder a store with a later store — the
+message is itself a store, to the interrupt command register. On a weakly
+ordered machine this is exactly where a release barrier goes, and the
+requirement is documented at that point in the code rather than the
+instruction that currently satisfies it.
+
+What is **not** yet narrowed: the shootdown goes to every online processor
+rather than to those actually using the address space in question. Narrowing
+it needs a record of which processors have a given `pmap` loaded, which is
+the scheduler's to keep (#408, tracked as #439).
+
+### 11.9 The syscall contract, and what it deliberately does not preserve
+
+Every Mach trap and every POSIX call passes through one entry path, so what
+that path costs is a floor under the whole system. The contract is therefore
+a decision, recorded here and implemented in `x86_64/syscall/` (#411):
+
+```
+rax                      call number in, result out
+rdi rsi rdx r10 r8 r9    arguments one to six
+rcx r11                  taken by the instruction — return address and flags
+rbx rbp r12 r13 r14 r15  preserved
+everything else          destroyed
+```
+
+`r10` rather than `rcx` for the fourth argument because `SYSCALL` takes
+`rcx`; the same substitution Linux makes, for the same reason, which costs
+nothing and keeps a musl port (#414, #424) a substitution rather than a
+rewrite.
+
+**Destroying the argument registers is the choice.** Linux preserves them,
+which obliges its entry to save six on the way in and restore six on the way
+out on every call — a compatibility contract thirty years old. Uros controls
+both sides and carries no such debt, so a syscall behaves exactly as a call
+to a C function: the caller assumes it clobbers what a call clobbers.
+
+The cost is narrow and worth stating exactly, because it is a debugging cost
+and those are the ones that get discovered late:
+
+- **Unwinding is unaffected.** The registers a backtrace needs — the
+  callee-saved set, the stack and instruction pointers — survive *for free*,
+  since the C ABI already preserves them and the dispatcher's own compiled
+  code does the work. No entry-path stores are involved.
+- **Signal delivery is unaffected.** A handler returns to the instruction
+  after `SYSCALL`, where the destroyed registers are dead by this contract.
+- **What is lost** is reading or altering a call's *arguments* after it has
+  begun: strace-shaped tooling, and ptrace-style interception at the exit
+  stop. At the entry stop they are still live.
+
+That loss is recoverable, and the recovery is **not an ABI change** —
+userspace cannot observe whether the kernel kept a copy of registers it was
+entitled to destroy. So the full register image can be saved the day
+something wants it, conditionally, off the fast path; the site is marked in
+the entry. The reverse is the one-way door, and that asymmetry is the whole
+reason this contract was chosen now rather than deferred: preserving first
+and stopping later would break every userland wrapper that had come to rely
+on it.
+
+**Two things the hardware layout forces, recorded so they are not rearranged
+by a later tidy-up.** `SYSCALL` and `SYSRET` take no selectors — they take
+one number in `STAR` and derive four by addition, which makes the order of
+the descriptor table load-bearing (§11.2's kernel/user split is not free to
+be reordered). And `SYSRET` faults *in ring 0, on the user's stack*, if the
+return address is non-canonical: CVE-2012-0217, a privilege escalation
+rather than a crash, guarded by three instructions and a branch never taken.
+
+**What the entry path does not do, and why that is a saving.** `SYSCALL`
+does not consult the task-state segment, so there is no per-switch stack
+register to keep current — which is precisely what #348's per-CPU trampoline
+existed to avoid on i386, at a measured ~144 cycles. That machinery is not
+ported because the cost it removed does not exist here. The kernel stack
+comes from the per-CPU block through `%gs`, one load, which is why those
+fields sit together at fixed offsets near the front of the block.
+
+**`swapgs` is a duty in two places.** Neither entry mechanism exchanges the
+segment base on its own: the syscall path does it as its first instruction,
+and the trap path does it only when the saved code segment says ring 3.
+Missing it means kernel code reading `%gs:0` follows an address a user
+program chose.
+
+### 11.10 The swapgs window
+
+Deciding from the saved code segment is right for every vector whose arrival
+the kernel controls, and wrong for the ones whose arrival it does not. There
+are two instruction boundaries where the processor is at ring 0 and `%gs`
+still belongs to a user program: after `SYSCALL` and before the entry's own
+`swapgs`, and after the exit's `swapgs` and before `SYSRET`. A vector
+delivered there reads a ring-0 code segment, concludes correctly that it must
+not swap, and runs the kernel on a base a user chose (#440).
+
+**Which vectors is not a matter of taste.** Both windows run with interrupts
+disabled — `SYSCALL` clears `IF` through `FMASK`, and the way out never sets
+it — so every maskable vector is excluded by the flag, and the set that
+remains is exactly its complement: `#DB`, `NMI`, `#DF`, `#MC`. Those four
+take a separate entry; everything else keeps the cheaper rule.
+
+**They decide from the segment base.** `IA32_GS_BASE` holds what is loaded
+now, which is the one fact the window cannot misrepresent. §11.1 gives the
+two halves of the address space to two different owners, so the sign bit of
+the base is the answer — `WRMSR` refuses a non-canonical base, which makes
+"bit 63 set" and "at or above `KERNEL_HALF_BASE`" the same statement. The
+cost is one `RDMSR` on four vectors, none of which is a path anything is
+optimising.
+
+The exit cannot recompute the decision — by then the base is the kernel's
+either way — and cannot write the old one back either, because `swapgs`
+moves *both* halves of the pair and restoring one would leave the user's base
+where the next entry swaps to it. So the entry carries one bit forward: the
+inverse of `swapgs` is `swapgs`.
+
+**Two conditions the check depends on, both decided rather than assumed.**
+`CR4.FSGSBASE` is cleared on every processor, so ring 3 cannot write a base
+at all; enabling it later — it is a real gain for thread-local storage —
+means teaching the entry to find the per-CPU block without `%gs`, from
+`RDPID` or the descriptor limit. And any base arriving from outside through
+thread state must be refused unless it is in the lower half. Whoever changes
+either owns the entry as well.
+
+**`#DB` also needs a stack of its own,** and for the same window. A trap at
+ring 0 does not switch stacks, and `SYSCALL` has not switched one yet, so
+`%rsp` still holds whatever a user program left in it — a debug exception
+delivered there would push its frame at that address, at ring 0, through the
+kernel's mapping. That is a write, not a disclosure. The other three vectors
+already had interrupt-stack slots for unrelated reasons; this is the fourth.
 
 ---
 

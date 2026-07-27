@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <cpu/desc.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
 #include <pmap/layout.h>
@@ -39,12 +40,25 @@ struct idt_ptr {
 #define IDT_PRESENT		0x80
 #define IDT_INTERRUPT_GATE	0x0E	/* clears IF on entry; trap gate 0x0F does not */
 
-#define KERNEL_CS		0x08
-
-static struct idt_gate idt[T_VECTORS];
+static struct idt_gate idt[IDT_VECTORS];
 
 /* Filled by trap/entry.S: one stub address per vector. */
-extern const uint64_t isr_table[T_VECTORS];
+extern const uint64_t isr_table[IDT_VECTORS];
+
+/*
+ * What claims each vector above the architectural ones.  Sparse by nature —
+ * most of the space is unassigned, and an interrupt arriving at one of those
+ * is a fact worth reporting rather than ignoring.
+ */
+static trap_handler_t ext_handler[IDT_VECTORS - T_EXTERNAL_FIRST];
+
+void trap_set_handler(unsigned vector, trap_handler_t handler)
+{
+	if (vector < T_EXTERNAL_FIRST || vector >= IDT_VECTORS)
+		panic("trap: only the vectors above the exceptions can be claimed");
+
+	ext_handler[vector - T_EXTERNAL_FIRST] = handler;
+}
 
 static void idt_set(unsigned vector, uint64_t handler, unsigned ist)
 {
@@ -53,25 +67,24 @@ static void idt_set(unsigned vector, uint64_t handler, unsigned ist)
 	g->offset_low = (uint16_t)handler;
 	g->offset_mid = (uint16_t)(handler >> 16);
 	g->offset_high = (uint32_t)(handler >> 32);
-	g->selector = KERNEL_CS;
+	g->selector = KERNEL_CS_SELECTOR;
 	g->ist = ist & 0x7;
 	g->type_attr = IDT_PRESENT | IDT_INTERRUPT_GATE;
 	g->reserved = 0;
 }
 
 /*
- * A stack per interrupt-stack-table slot.  Deliberately not shared: an NMI
+ * A stack per interrupt-stack-table slot, and never a shared one: an NMI
  * arriving while a double fault is being handled would otherwise land on
  * the stack that fault is using and overwrite the report being written.
+ *
+ * The top of a stack is the bottom of the next, which is what makes one
+ * block of consecutive stacks the natural thing for a caller to hand over.
  */
-static uint8_t ist_stacks[IST_COUNT][4096]
-	__attribute__((aligned(16)));
-
-void trap_ist_setup(struct tss64 *tss)
+void trap_ist_setup(struct tss64 *tss, uint64_t block, uint64_t stack_size)
 {
 	for (unsigned i = 0; i < IST_COUNT; i++)
-		tss->ist[i] = (uint64_t)(uintptr_t)
-			(ist_stacks[i] + sizeof(ist_stacks[i]));
+		tss->ist[i] = block + (i + 1) * stack_size;
 }
 
 /* Which vectors run on a stack of their own, and which one. */
@@ -81,6 +94,7 @@ static unsigned vector_ist(unsigned vector)
 	case T_DOUBLE_FAULT:	return IST_DOUBLE_FAULT;
 	case T_NMI:		return IST_NMI;
 	case T_MACHINE_CHECK:	return IST_MACHINE_CHECK;
+	case T_DEBUG:		return IST_DEBUG;
 	default:		return 0;	/* the current stack will do */
 	}
 }
@@ -95,7 +109,7 @@ void trap_init(void)
 	 * the machine down without a word — precisely the failure this is
 	 * here to end.
 	 */
-	for (unsigned v = 0; v < T_VECTORS; v++)
+	for (unsigned v = 0; v < IDT_VECTORS; v++)
 		idt_set(v, isr_table[v], vector_ist(v));
 
 	__asm__ volatile("lidt %0" : : "m"(p) : "memory");
@@ -128,7 +142,7 @@ static void tputhex(uint64_t v)
 	}
 }
 
-static const char *trap_name(uint64_t vector)
+const char *trap_name(uint64_t vector)
 {
 	switch (vector) {
 	case T_DIVIDE_ERROR:		return "divide error";
@@ -149,7 +163,9 @@ static const char *trap_name(uint64_t vector)
 	case T_ALIGNMENT_CHECK:		return "alignment check";
 	case T_MACHINE_CHECK:		return "machine check";
 	case T_SIMD_ERROR:		return "SIMD floating-point error";
-	default:			return "reserved vector";
+	default:
+		return vector >= T_EXTERNAL_FIRST ? "unclaimed interrupt"
+						  : "reserved vector";
 	}
 }
 
@@ -267,13 +283,115 @@ void trap_expect(uint64_t vector, uint64_t resume_rip)
 	last_trap.caught = 0;
 }
 
+/* The same idea for the faults that arrive from ring 3; see <trap/trap.h>. */
+static uint64_t user_resume_rip;
+static uint64_t user_resume_rsp;
+static int user_expect_armed;
+
+void trap_expect_user(uint64_t resume_rip, uint64_t resume_rsp)
+{
+	user_resume_rip = resume_rip;
+	user_resume_rsp = resume_rsp;
+	user_expect_armed = 1;
+	last_trap.caught = 0;
+}
+
 const struct trap_record *trap_last(void)
 {
 	return &last_trap;
 }
 
+/* The other record, for the four vectors that take the paranoid entry. */
+static struct trap_paranoid_record last_paranoid;
+
+const struct trap_paranoid_record *trap_last_paranoid(void)
+{
+	return &last_paranoid;
+}
+
+void trap_paranoid_forget(void)
+{
+	last_paranoid.taken = 0;
+}
+
+void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
+			    uint64_t swapped)
+{
+	/*
+	 * Recorded before the handler runs, because the handler is entitled to
+	 * halt: a machine check that reports and stops should still have left
+	 * behind the evidence that its entry got %gs right, and a record
+	 * written afterwards would only exist for the traps that were survived.
+	 *
+	 * gs_on_dispatch is read from the machine rather than inferred from the
+	 * other two.  Inferring it would be checking the entry's arithmetic
+	 * against itself; reading it asks whether the instruction actually ran.
+	 */
+	last_paranoid.vector = frame->vector;
+	last_paranoid.rip = frame->rip;
+	last_paranoid.cs = frame->cs;
+	last_paranoid.gs_on_entry = gs_on_entry;
+	last_paranoid.gs_on_dispatch = rdmsr(MSR_GS_BASE);
+	last_paranoid.swapped = swapped;
+	last_paranoid.taken = 1;
+
+	trap_dispatch(frame);
+}
+
 void trap_dispatch(struct trap_frame *frame)
 {
+	/*
+	 * An interrupt somebody asked for, before any of the fault machinery:
+	 * it is not a fault, it has no error code to report, and the expected-
+	 * trap arrangement below is about instructions that failed, which this
+	 * is not.
+	 */
+	if (frame->vector >= T_EXTERNAL_FIRST) {
+		trap_handler_t h = ext_handler[frame->vector - T_EXTERNAL_FIRST];
+
+		if (h != 0) {
+			h(frame);
+			return;
+		}
+		/* Nobody claimed it — fall through and say so. */
+	}
+
+	/*
+	 * A fault from ring 3, which is recoverable because of where it came
+	 * from rather than what it was.  Checked before the vector-matching
+	 * arrangement below, since that one resumes on the current stack and
+	 * this frame's stack belongs to a user program.
+	 */
+	if (user_expect_armed && (frame->cs & 3) == USER_RPL) {
+		user_expect_armed = 0;
+
+		last_trap.vector = frame->vector;
+		last_trap.error = frame->error;
+		last_trap.rip = frame->rip;
+		last_trap.cr2 = read_cr2();
+		last_trap.cs = frame->cs;
+		last_trap.gs_base = rdmsr(MSR_GS_BASE);
+		last_trap.caught = 1;
+
+		/*
+		 * Every field, not just the instruction pointer: IRETQ in long
+		 * mode reloads the stack segment and stack pointer whatever the
+		 * privilege change, so leaving the user's there would return to
+		 * kernel code standing on a user stack.
+		 *
+		 * Flags carry interrupts enabled back with them. Returning with
+		 * them off would leave the rest of the boot unable to take a
+		 * cross-call — a machine that stops answering, from a line that
+		 * looks like housekeeping.
+		 */
+		frame->rip = user_resume_rip;
+		frame->rsp = user_resume_rsp;
+		frame->cs = KERNEL_CS_SELECTOR;
+		frame->ss = KERNEL_DS_SELECTOR;
+		frame->rflags = 0x202;
+		return;
+	}
+
 	if (expect_armed && frame->vector == expect_vector) {
 		/*
 		 * Disarm first.  If resuming faults again the expectation is
@@ -286,6 +404,7 @@ void trap_dispatch(struct trap_frame *frame)
 		last_trap.error = frame->error;
 		last_trap.rip = frame->rip;
 		last_trap.cr2 = read_cr2();
+		last_trap.cs = frame->cs;
 		last_trap.caught = 1;
 
 		tputs("UrMach x86-64: expected ");
@@ -307,8 +426,33 @@ void trap_dispatch(struct trap_frame *frame)
 		 * stack pointer is untouched, which is why the resume point
 		 * has to be inside the function that armed this: its frame is
 		 * still exactly as the faulting instruction left it.
+		 *
+		 * Unless the caller asked to carry on where it was, which for
+		 * a vector that is not the instruction's fault is the only
+		 * sensible answer — see TRAP_RESUME_HERE in <trap/trap.h>.
 		 */
-		frame->rip = expect_resume;
+		if (expect_resume != TRAP_RESUME_HERE) {
+			frame->rip = expect_resume;
+			return;
+		}
+
+		/*
+		 * Resuming where an instruction breakpoint fired means running
+		 * into it again, because the exception is reported before the
+		 * instruction executes and returning puts it back in front of
+		 * the same one.  The resume flag is the architecture's answer:
+		 * it suppresses instruction breakpoints for one instruction and
+		 * the processor clears it afterwards.
+		 *
+		 * Set here rather than assumed.  The exception arrives with it
+		 * clear on the emulator this is developed on — measured, rflags
+		 * 0x2 — and a return that trusted the processor to have set it
+		 * walked straight back into the breakpoint and stayed there.
+		 * Setting a bit that is already set costs nothing, so this is
+		 * right on a machine that sets it too.
+		 */
+		if (frame->vector == T_DEBUG)
+			frame->rflags |= RFLAGS_RF;
 		return;
 	}
 

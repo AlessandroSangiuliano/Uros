@@ -54,11 +54,26 @@
  */
 #define KERNEL_HALF_BASE	0xffff800000000000ULL
 
+/*
+ * Which half an address belongs to, which on this architecture is the same
+ * question as who it belongs to: §11.1 gives the lower half to the address
+ * space and the upper half to the kernel, with nothing in between that is
+ * addressable at all.
+ *
+ * So a mapping's side is a property of its address and does not have to be
+ * passed alongside it — which matters at the one place that has to decide
+ * whether a page is reachable from ring 3, and would otherwise be trusting
+ * a caller to say so.
+ */
+#define va_is_kernel(va)	((uint64_t)(va) >= KERNEL_HALF_BASE)
+#define va_is_user(va)		(!va_is_kernel(va))
+
 /* Offsets of each region from the anchor. */
 #define DIRECT_MAP_OFFSET	0x0000000000000000ULL
 #define KERNEL_HEAP_OFFSET	0x0000400000000000ULL
 #define PERCPU_OFFSET		0x0000600000000000ULL
 #define CPU_ENTRY_OFFSET	0x0000700000000000ULL
+#define DEVICE_MAP_OFFSET	0x0000780000000000ULL
 #define KERNEL_IMAGE_OFFSET	0x00007fff80000000ULL
 
 #define DIRECT_MAP_BASE		(KERNEL_HALF_BASE + DIRECT_MAP_OFFSET)
@@ -66,6 +81,22 @@
 #define PERCPU_BASE		(KERNEL_HALF_BASE + PERCPU_OFFSET)
 #define CPU_ENTRY_BASE		(KERNEL_HALF_BASE + CPU_ENTRY_OFFSET)
 #define KERNEL_IMAGE_BASE	(KERNEL_HALF_BASE + KERNEL_IMAGE_OFFSET)
+
+/*
+ * Where device registers are made reachable.
+ *
+ * Not RAM, and so not the direct map's business twice over: the physical
+ * addresses lie outside it on any machine with less memory than the local
+ * APIC's address, and the direct map is cached, which for registers is not
+ * a performance choice but a wrong answer — a read that comes from a cache
+ * line is a read of the past, and a write that sits in one is an order the
+ * device never received.
+ *
+ * The local APIC is the first tenant; the IOAPIC, the HPET and the PCI
+ * windows of #427 are the rest.
+ */
+#define DEVICE_MAP_BASE		(KERNEL_HALF_BASE + DEVICE_MAP_OFFSET)
+#define DEVICE_MAP_MAX_SIZE	(KERNEL_IMAGE_OFFSET - DEVICE_MAP_OFFSET)
 
 /*
  * The image occupies the top 2 GiB, which is not a choice: it is exactly
@@ -130,6 +161,7 @@ _Static_assert(DIRECT_MAP_BASE   == 0xffff800000000000ULL, "direct map moved");
 _Static_assert(KERNEL_HEAP_BASE  == 0xffffc00000000000ULL, "kernel heap moved");
 _Static_assert(PERCPU_BASE       == 0xffffe00000000000ULL, "per-CPU area moved");
 _Static_assert(CPU_ENTRY_BASE    == 0xfffff00000000000ULL, "CPU entry area moved");
+_Static_assert(DEVICE_MAP_BASE   == 0xfffff80000000000ULL, "device map moved");
 _Static_assert(KERNEL_IMAGE_BASE == 0xffffffff80000000ULL, "kernel image moved");
 
 /* Every region base must itself be a canonical address. */

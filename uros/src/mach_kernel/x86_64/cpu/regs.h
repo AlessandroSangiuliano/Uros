@@ -8,10 +8,18 @@
  * EFER and CR3, the trap path will need CR2, the protection posture needs
  * CR4, and the KPTI decision of ch.11 §11.6 is a CPUID query.  It lives in
  * cpu/ so none of them owns it.
+ *
+ * Assembly includes this too, for the numbers rather than the accessors: an
+ * entry path that reads an MSR before it has a stack cannot call anything,
+ * and a register number written out a second time in a .S file is a number
+ * that will disagree with this one eventually.  So the constants are outside
+ * the __ASSEMBLER__ guards and everything that generates code is inside.
  */
 
 #ifndef _X86_64_CPU_REGS_H_
 #define _X86_64_CPU_REGS_H_
+
+#ifndef __ASSEMBLER__
 
 #include <stdint.h>
 
@@ -30,17 +38,28 @@ static inline uint8_t inb(uint16_t port)
 	return r;
 }
 
+#endif	/* __ASSEMBLER__ */
+
 /* ------------------------------------------------------------------ */
 /*  Control registers                                                   */
 /* ------------------------------------------------------------------ */
+#define CR0_MP		(1UL << 1)	/* monitor coprocessor              */
+#define CR0_EM		(1UL << 2)	/* set: no FPU, emulate it          */
+#define CR0_TS		(1UL << 3)	/* the lazy-FPU trap; not used here */
 #define CR0_WP		(1UL << 16)	/* kernel honours read-only pages   */
 #define CR0_PG		(1UL << 31)	/* paging enabled                   */
 
 #define CR4_PAE		(1UL << 5)	/* physical address extension       */
 #define CR4_PGE		(1UL << 7)	/* global pages enabled             */
+#define CR4_FSGSBASE	(1UL << 16)	/* ring 3 may write its own bases   */
+#define CR4_OSFXSR	(1UL << 9)	/* FXSAVE/FXRSTOR and SSE usable    */
+#define CR4_OSXMMEXCPT	(1UL << 10)	/* SIMD errors raise #XF, not #UD   */
 #define CR4_PCIDE	(1UL << 17)	/* process-context identifiers      */
+#define CR4_OSXSAVE	(1UL << 18)	/* XSAVE and XCR0 usable            */
 #define CR4_SMEP	(1UL << 20)	/* no kernel execute of user pages  */
 #define CR4_SMAP	(1UL << 21)	/* no kernel access of user pages   */
+
+#ifndef __ASSEMBLER__
 
 static inline uint64_t read_cr0(void)
 {
@@ -108,6 +127,48 @@ static inline void cpu_pause(void)
 	__asm__ volatile("pause" ::: "memory");
 }
 
+/*
+ * Whether this processor will take an interrupt, and the two ways to change
+ * the answer.
+ *
+ * The memory clobbers are not decoration.  Enabling interrupts is a point
+ * after which a handler may run and observe anything this code has written,
+ * and disabling them is a point before which it must not — so neither may
+ * have loads or stores moved across it by the compiler.  The processor's own
+ * ordering is a separate question, and one x86 mostly answers for us.
+ */
+static inline void interrupts_enable(void)
+{
+	__asm__ volatile("sti" ::: "memory");
+}
+
+static inline void interrupts_disable(void)
+{
+	__asm__ volatile("cli" ::: "memory");
+}
+
+#endif	/* __ASSEMBLER__ */
+
+#define RFLAGS_IF	(1UL << 9)
+
+/*
+ * The resume flag, which suppresses instruction breakpoints for exactly one
+ * instruction and is then cleared by the processor.  It is what a debug
+ * exception handler sets in the flags it is returning to when it means to
+ * resume at the instruction that trapped, rather than trap on it again.
+ */
+#define RFLAGS_RF	(1UL << 16)
+
+#ifndef __ASSEMBLER__
+
+static inline int interrupts_enabled(void)
+{
+	uint64_t flags;
+
+	__asm__ volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
+	return (flags & RFLAGS_IF) != 0;
+}
+
 static inline uint64_t read_cr4(void)
 {
 	uint64_t v;
@@ -119,6 +180,50 @@ static inline void write_cr4(uint64_t v)
 {
 	__asm__ volatile("mov %0, %%cr4" : : "r"(v) : "memory");
 }
+
+#endif	/* __ASSEMBLER__ */
+
+/* ------------------------------------------------------------------ */
+/*  Debug registers                                                     */
+/* ------------------------------------------------------------------ */
+/*
+ * DR0 holds an address and DR7 says what to do about it.  The one
+ * combination used here is the simplest: break when the instruction at that
+ * address is about to execute, which is a fault reported *before* it runs —
+ * the only kind that can be aimed at an instruction and observe the state
+ * that instruction was going to change.
+ *
+ * R/W0 and LEN0 are both zero for that case, which is why neither appears
+ * below: an execution breakpoint has no length and no direction.  Bit 10 is
+ * reserved and must be written as one.
+ */
+#define DR7_L0			(1UL << 0)	/* DR0 armed         */
+#define DR7_RESERVED_ONE	(1UL << 10)
+#define DR7_EXEC_DR0		(DR7_L0 | DR7_RESERVED_ONE)
+
+/*
+ * ⚠️ DR6 is sticky: the processor sets the bit for the breakpoint that fired
+ * and never clears it again.  A handler that does not clear it leaves the
+ * next debug exception describing this one as well.
+ */
+#ifndef __ASSEMBLER__
+
+static inline void write_dr0(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%dr0" : : "r"(v));
+}
+
+static inline void write_dr7(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%dr7" : : "r"(v) : "memory");
+}
+
+static inline void write_dr6(uint64_t v)
+{
+	__asm__ volatile("mov %0, %%dr6" : : "r"(v));
+}
+
+#endif	/* __ASSEMBLER__ */
 
 /* ------------------------------------------------------------------ */
 /*  Model-specific registers                                            */
@@ -143,6 +248,8 @@ static inline void write_cr4(uint64_t v)
 #define EFER_LME	(1UL << 8)	/* long mode enabled  (boot.S sets)  */
 #define EFER_LMA	(1UL << 10)	/* long mode active   (read-only)    */
 #define EFER_NXE	(1UL << 11)	/* execute-disable bit is usable     */
+
+#ifndef __ASSEMBLER__
 
 static inline uint64_t rdmsr(uint32_t msr)
 {
@@ -208,6 +315,52 @@ static inline int cpu_has_1gb_pages(void)
  * asked for rather than assumed, like the 1 GiB pages.  Anything relying on
  * it needs a path for when the answer is no.
  */
+/*
+ * This processor's APIC id, from CPUID rather than from the APIC.
+ *
+ * The two agree, and this one can be asked earlier: it needs no mapping, no
+ * enable bit and no memory, which is what makes it the identity a processor
+ * can use before it has anything else.  The trampoline in boot/ already
+ * relies on that — it is how an arriving processor finds its own stack
+ * without being handed one.
+ */
+/*
+ * The extended control register, which says which state components XSAVE
+ * will move.  Reached by its own instruction pair rather than by an MSR,
+ * and only once CR4.OSXSAVE says the kernel is prepared to manage them.
+ */
+static inline uint64_t xgetbv(uint32_t index)
+{
+	uint32_t lo, hi;
+
+	__asm__ volatile("xgetbv" : "=a"(lo), "=d"(hi) : "c"(index));
+	return ((uint64_t)hi << 32) | lo;
+}
+
+static inline void xsetbv(uint32_t index, uint64_t value)
+{
+	__asm__ volatile("xsetbv"
+			 : : "a"((uint32_t)value), "d"((uint32_t)(value >> 32)),
+			     "c"(index)
+			 : "memory");
+}
+
+#endif	/* __ASSEMBLER__ */
+
+#define XCR0_X87	(1UL << 0)	/* always set; the unit cannot be off */
+#define XCR0_SSE	(1UL << 1)	/* the XMM registers                  */
+#define XCR0_AVX	(1UL << 2)	/* their upper halves                 */
+
+#ifndef __ASSEMBLER__
+
+static inline uint32_t cpu_apic_id(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(1, &a, &b, &c, &d);
+	return b >> 24;
+}
+
 static inline int cpu_has_cmpxchg16b(void)
 {
 	uint32_t a, b, c, d;
@@ -235,6 +388,27 @@ static inline int cpu_has_smep(void)
 
 	cpuid_count(7, 0, &a, &b, &c, &d);
 	return (b & (1U << 7)) != 0;
+}
+
+/*
+ * Whether this processor has RDFSBASE and its relatives — the instructions
+ * that read and write the segment bases without an MSR access, and which
+ * CR4.FSGSBASE makes available at ring 3 as well as ring 0.
+ *
+ * Asked rather than assumed for the usual reason, and asked at all because
+ * the answer being yes is what makes the bit a decision: see
+ * percpu_activate() for the one that was made and why.
+ */
+static inline int cpu_has_fsgsbase(void)
+{
+	uint32_t a, b, c, d;
+
+	cpuid(0, &a, &b, &c, &d);
+	if (a < 7)
+		return 0;
+
+	cpuid_count(7, 0, &a, &b, &c, &d);
+	return (b & (1U << 0)) != 0;
 }
 
 static inline int cpu_has_smap(void)
@@ -265,5 +439,7 @@ static inline void cpu_vendor(char *out13)
 			out13[i * 4 + j] = (char)(words[i] >> (j * 8));
 	out13[12] = '\0';
 }
+
+#endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_CPU_REGS_H_ */
