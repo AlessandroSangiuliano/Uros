@@ -1,0 +1,60 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * Starting the other processors (#438).
+ */
+
+#ifndef _X86_64_CPU_SMP_H_
+#define _X86_64_CPU_SMP_H_
+
+#include <stdint.h>
+
+/*
+ * The most processors this kernel will start.  A cap on the stack table,
+ * which has to exist before the count is known — the table is what an AP
+ * indexes with its own id on its way in, so it cannot be sized from the
+ * answer it is part of finding out.
+ */
+#define SMP_MAX_CPUS	64
+
+/*
+ * Wake every processor ACPI listed as startable, and answer with how many
+ * reported in.
+ *
+ * All of them at once: the trampoline shares nothing writable between
+ * processors, so there is no reason to wake them one at a time and no
+ * funnel for them to queue at.  What this waits for is the count, not a
+ * sequence.
+ */
+unsigned smp_start_others(void);
+
+/*
+ * Have an application processor cross-call the boot processor, and answer
+ * with how many of them reached it.
+ *
+ * The other direction, which is not the same claim.  Everything so far has
+ * been the boot processor asking and the others answering — which exercises
+ * its command register and their handlers, and says nothing about theirs or
+ * about its own.  A processor that can serve a message but not send one is
+ * a processor that can never initiate a shootdown, and the only thing
+ * keeping it from having to is that nothing schedules work on it yet.
+ *
+ * Timing is the whole difficulty, and why this is a call rather than
+ * something an arriving processor simply does.  A broadcast reaches every
+ * processor in the machine, including ones still in the trampoline: they
+ * have no interrupt table yet, and while they cannot take the message with
+ * interrupts off, it waits in their controller and is taken the moment they
+ * enable them — against a request that finished long before.  So the first
+ * processor to arrive claims the job and then waits, and the boot processor
+ * opens the gate once bring-up is over and everybody has a table.
+ */
+unsigned smp_ap_call_probe(void);
+
+/* How many processors are running, the boot processor included. */
+unsigned smp_online_count(void);
+
+/* Whether a given APIC id has reported in. */
+int smp_is_online(uint32_t apic_id);
+
+#endif	/* _X86_64_CPU_SMP_H_ */

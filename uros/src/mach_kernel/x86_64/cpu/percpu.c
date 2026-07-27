@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <cpu/desc.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <pmap/bootmem.h>
@@ -16,11 +17,15 @@
 #include <pmap/pte.h>
 #include <trap/trap.h>
 
-void percpu_init(uint32_t cpu_id)
+static uint64_t percpu_va(uint32_t cpu_id)
 {
-	uint64_t va = PERCPU_BASE + (uint64_t)cpu_id * PAGE_SIZE_4K;
+	return PERCPU_BASE + (uint64_t)cpu_id * PAGE_SIZE_4K;
+}
+
+void percpu_alloc(uint32_t cpu_id)
+{
+	uint64_t va = percpu_va(cpu_id);
 	uint64_t frame = boot_frame_alloc();
-	struct percpu *p;
 
 	/*
 	 * Returning here would leave %gs based at zero — which the boot
@@ -39,11 +44,64 @@ void percpu_init(uint32_t cpu_id)
 	 */
 	if (pmap_enter(pmap_kernel(), va, frame,
 		       VM_PROT_READ | VM_PROT_WRITE, 0) != PMAP_MAP_OK)
-		panic("percpu: could not map this CPU's block");
+		panic("percpu: could not map a CPU's block");
+}
 
-	p = (struct percpu *)(uintptr_t)va;
+/*
+ * Ring 3 does not get to write its own segment bases (#440), and that is a
+ * decision made here rather than a setting inherited from the firmware.
+ *
+ * With CR4.FSGSBASE set, WRGSBASE is an ordinary instruction available to a
+ * user program, which would be a real improvement for thread-local storage:
+ * a thread could move its own base without a syscall.  It also means the
+ * value in IA32_GS_BASE stops being something only the kernel ever wrote.
+ *
+ * That matters because the entry path for the four vectors that can arrive
+ * inside the swapgs window decides what to do by asking whether the loaded
+ * base is a kernel address.  The test is sound only while a user base cannot
+ * be one — and with FSGSBASE enabled a user program could simply write one,
+ * turning the check into a question the attacker answers.
+ *
+ * Closing that needs the entry to find the per-CPU block *without* %gs: the
+ * processor number from RDPID or from the descriptor limit, and the block's
+ * address computed from it.  That machinery is worth having on the day the
+ * TLS performance is wanted, and it is a different piece of work from this
+ * one.  So the bit is cleared, explicitly, on every processor — and cleared
+ * rather than merely not set, because "we never enabled it" is not a
+ * statement about what CR4 contains when the kernel is handed the machine.
+ *
+ * ⚠️ Whoever sets this bit owns trap_paranoid() as well.  The two are one
+ * decision wearing two hats.
+ */
+static void deny_user_segment_bases(void)
+{
+	uint64_t cr4 = read_cr4();
+
+	if (cr4 & CR4_FSGSBASE)
+		write_cr4(cr4 & ~CR4_FSGSBASE);
+}
+
+void percpu_activate(uint32_t cpu_id)
+{
+	uint64_t va = percpu_va(cpu_id);
+	struct percpu *p = (struct percpu *)(uintptr_t)va;
+
+	/*
+	 * The page is already mapped — by the boot processor, before this one
+	 * was woken — so nothing here touches shared page tables.
+	 */
 	p->self = p;
 	p->cpu_id = cpu_id;
+
+	/*
+	 * The stack a syscall will switch to — the same one a trap from ring
+	 * 3 lands on, because the two cannot be in flight at once.  Recorded
+	 * here rather than looked up on entry: the entry path has nowhere to
+	 * put a lookup, since it has not got a stack yet.
+	 */
+	p->kernel_rsp = desc_rsp0(cpu_id);
+
+	deny_user_segment_bases();
 
 	wrmsr(MSR_GS_BASE, va);
 
