@@ -46,8 +46,10 @@ pmap_t pmap_kernel(void);
  * sharing is what lets a trap or a system call keep executing kernel code
  * without a change of address space.
  *
- * The size argument is the MI interface's, and unused: this machine's spaces
- * are all the same size.  Returns PMAP_NULL if nothing is left to build one.
+ * A non-zero size requests a map over part of a space, which this backend
+ * does not build: it returns PMAP_NULL, which is the interface's way of
+ * saying the caller should treat the map as software-only.  PMAP_NULL also
+ * comes back when there is nothing left to build a space out of.
  *
  * The sharing is established by copying the kernel's top-level entries at
  * create time, which carries a standing obligation: a kernel-half entry
@@ -122,9 +124,62 @@ static inline uint64_t pmap_flags_for_prot(vm_prot_t prot)
  * page-aligned, as the MI callers pass them.
  */
 
-/* Enter (or, for VM_PROT_NONE, drop) the mapping va -> pa with `prot`. */
+/*
+ * Bracket a kernel access to a page ring 3 can reach.
+ *
+ * SMAP makes such an access fault, which is the whole point: the kernel
+ * touching user memory is nearly always a bug — a stray pointer, an
+ * argument taken on trust — and the few places where it is deliberate
+ * should have to say so.  These are how they say so.
+ *
+ * Deliberate means copyin and copyout and nothing else, once those exist.
+ * The window between them is the only time this kernel can be made to read
+ * a user address by accident, so it should be as short as the access.
+ *
+ * They do nothing when SMAP is not enabled, and that check is not defensive
+ * tidiness: the instructions themselves are invalid opcodes unless CR4.SMAP
+ * is set, so a kernel on a part without it would fault on the guard rather
+ * than on the thing being guarded.  A branch for now; the day it is on a
+ * hot path it becomes patched code, which is what the flag exists to make
+ * possible later without changing any caller.
+ */
+void pmap_user_access_begin(void);
+void pmap_user_access_end(void);
+
+/* Whether SMAP is actually on, which decides whether the pair does anything. */
+int pmap_smap_enabled(void);
+
+/*
+ * Whether `pmap` may hold `va` at all.
+ *
+ * The kernel's map has no user half: §11.1 gives the lower half to the
+ * address space, so a lower-half mapping in the kernel's own map is a
+ * mistake — and one that would otherwise arrive as a page ring 3 can read,
+ * long after whatever asked for it.
+ *
+ * A predicate rather than a check buried in pmap_enter(), because
+ * pmap_enter()'s answer to a violation is to stop, and a rule whose only
+ * expression is a panic can never be shown to work without ending the boot.
+ * This is the same rule the panic uses, askable.
+ */
+int pmap_may_map(pmap_t pmap, uint64_t va);
+
+/*
+ * Enter (or, for VM_PROT_NONE, drop) the mapping va -> pa with `prot`.
+ *
+ * `wired` says the pager may not reclaim the page.  The hardware has no bit
+ * for it, so it is recorded in one of the entry's software bits — in the
+ * entry rather than beside it, where it cannot drift out of step with the
+ * mapping it describes.
+ */
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired);
+
+/* Change whether an existing mapping is wired.  Returns 0 if va is unmapped. */
+int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired);
+
+/* Whether the mapping at va is wired.  Zero if it is not, or is not there. */
+int pmap_is_wired(pmap_t pmap, uint64_t va);
 
 /* Physical address va maps to, or 0 if unmapped — the MI conflation, where
  * physical zero and "no mapping" share a return, is kept on purpose. */
@@ -179,6 +234,22 @@ void pmap_protect_kernel(void);
  * offers it.  Returns the CR4 bits it actually turned on.
  */
 uint64_t pmap_enable_smep_smap(void);
+
+/*
+ * Make `size` bytes of device registers at physical `pa` reachable, and
+ * answer with the address to reach them at.
+ *
+ * Uncached, because for registers caching is not a performance choice but a
+ * wrong answer: a read served from a cache line is a read of the past, and
+ * a write sitting in one is an order the device never received.  Also
+ * non-executable and kernel-only, neither of which any device needs.
+ *
+ * The address is taken from the device region of ch.11 and never given
+ * back — a mapped register block belongs to a driver for as long as the
+ * driver exists, and unmapping is a problem to solve when one can be
+ * unloaded.  A `pa` that is not page-aligned keeps its offset in the answer.
+ */
+uint64_t pmap_map_device(uint64_t pa, uint64_t size);
 
 /*
  * Zeroing and copying physical pages (x86_64/pmap/phys.c).  Addresses are

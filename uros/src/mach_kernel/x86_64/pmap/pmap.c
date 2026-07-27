@@ -14,7 +14,9 @@
 #include <pmap/pmap.h>
 #include <pmap/pte.h>
 #include <pmap/pv.h>
+#include <pmap/tlb.h>
 #include <pmap/walk.h>
+#include <trap/trap.h>
 
 /*
  * The kernel pmap is a single object, not allocated: it has to exist before
@@ -60,9 +62,16 @@ pmap_t pmap_create(uint64_t size)
 	uint64_t root_pa;
 	pmap_t pmap = PMAP_NULL;
 
-	/* One size of address space on this machine; the argument is the
-	 * interface's, not ours. */
-	(void)size;
+	/*
+	 * A non-zero size asks for a map covering part of a space rather than
+	 * a space, which this backend does not build — the same answer the
+	 * i386 one gives, and for the same reason: refusing lets the caller
+	 * treat the map as software-only, while handing back a full address
+	 * space would have it believe it got what it asked for and pay a root
+	 * frame for something it will never translate through.
+	 */
+	if (size != 0)
+		return PMAP_NULL;
 
 	for (unsigned i = 0; i < PMAP_BOOT_MAX; i++)
 		if (pmap_pool[i].ref_count == 0) {
@@ -101,21 +110,78 @@ void pmap_reference(pmap_t pmap)
 		pmap->ref_count++;
 }
 
+/* The index shift of each paging level, deepest first. */
+static const unsigned level_shift[] = {
+	PT_SHIFT, PD_SHIFT, PDPT_SHIFT, PML4_SHIFT
+};
+
+/*
+ * Give back every table below `table_pa`, and the table itself.
+ *
+ * What is freed is the space's own scaffolding, never what it was pointing
+ * at: a leaf names a page belonging to some VM object, which outlives the
+ * mapping and is not this layer's to reclaim.  Leaves are visited only to
+ * strike them from the physical index — an entry naming a pmap that no
+ * longer exists would be followed by the next pmap_page_protect on that
+ * page, into a root that has since been handed to someone else.
+ *
+ * `level` counts up from 1 at the page table, so it indexes level_shift
+ * directly and the recursion is at most four deep.
+ */
+static void pmap_free_tables(uint64_t table_pa, unsigned level,
+			     uint64_t va_base, pmap_t pmap)
+{
+	const pt_entry_t *table =
+		(const pt_entry_t *)(uintptr_t)phys_to_direct(table_pa);
+
+	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {
+		pt_entry_t e = table[i];
+		uint64_t va;
+
+		if (!pte_is_valid(e))
+			continue;
+
+		va = va_base + ((uint64_t)i << level_shift[level - 1]);
+
+		if (level == 1) {
+			pv_remove(pte_to_pa(e), pmap, va);
+			continue;
+		}
+
+		/* A large page is a leaf too: no table under it to free. */
+		if (pte_is_leaf(e))
+			continue;
+
+		pmap_free_tables(pte_to_pa(e), level - 1, va, pmap);
+	}
+
+	boot_frame_free(table_pa);
+}
+
 void pmap_destroy(pmap_t pmap)
 {
+	const pt_entry_t *root;
+
 	if (pmap == PMAP_NULL || pmap == pmap_kernel())
 		return;
 
 	if (--pmap->ref_count > 0)
 		return;
 
+	root = (const pt_entry_t *)(uintptr_t)phys_to_direct(pmap->root_pa);
+
 	/*
-	 * The space is gone as far as anyone can tell — the slot is free and
-	 * the root unreachable — but its frames are not given back: the boot
-	 * allocator has no way to take them.  Reclaiming them is the same
-	 * bookkeeping pmap_collect() needs and arrives with the real physical
-	 * allocator, not before.
+	 * The lower half only.  Everything from KERNEL_PML4_FIRST up points at
+	 * tables the kernel owns and every other space is still using — freeing
+	 * those would hand the kernel's own page tables to the next caller who
+	 * asked for a frame, and the damage would surface anywhere but here.
 	 */
+	for (unsigned i = 0; i < KERNEL_PML4_FIRST; i++)
+		if (pte_is_valid(root[i]))
+			pmap_free_tables(pte_to_pa(root[i]), 3,
+					 (uint64_t)i << PML4_SHIFT, pmap);
+
+	boot_frame_free(pmap->root_pa);
 	pmap->root_pa = 0;
 }
 
@@ -147,17 +213,16 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 	return size;
 }
 
+int pmap_may_map(pmap_t pmap, uint64_t va)
+{
+	return !(va_is_user(va) && pmap == pmap_kernel());
+}
+
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired)
 {
+	uint64_t flags;
 	int rc;
-
-	/*
-	 * Wired is MI bookkeeping — a page the pager may not reclaim — with no
-	 * effect on the hardware entry, so it is recorded on the MI side, not
-	 * here.  Kept in the signature to match the interface.
-	 */
-	(void)wired;
 
 	if (prot == VM_PROT_NONE) {
 		pmap_forget(pmap, va);
@@ -173,11 +238,70 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	 */
 	pmap_forget(pmap, va);
 
-	rc = pmap_map_page(pmap->root_pa, va, pa, pmap_flags_for_prot(prot));
+	flags = pmap_flags_for_prot(prot);
+	if (wired)
+		flags |= INTEL_PTE_WIRED;
+
+	/*
+	 * Whether ring 3 may reach it follows from the address, not from an
+	 * argument.  §11.1 gives the lower half to the address space and the
+	 * upper half to the kernel, so the question is already answered by
+	 * where the caller asked for the mapping — and a caller that had to
+	 * say so as well could say something different, which is a way for a
+	 * kernel page to become reachable that no reviewer would spot.
+	 *
+	 * The 32-bit pmap asks a different question — whether this is the
+	 * kernel's map — because its layout has no halves to ask about: the
+	 * kernel sits at the top of every address space and the two are told
+	 * apart by which map they arrived through.  On this architecture the
+	 * address is the stronger answer of the two: it cannot mark a
+	 * kernel-half page reachable even if the mapping arrives through a
+	 * user's map, which the older test would happily do.
+	 *
+	 * Both are checked, because they are not the same question and each
+	 * catches what the other lets past.  The address decides whether the
+	 * bit is set; the map decides whether the mapping is legitimate at
+	 * all.  The kernel's own map has no user half — anything appearing
+	 * there is a mistake, and one that would otherwise arrive as a page
+	 * ring 3 can read.
+	 */
+	if (!pmap_may_map(pmap, va))
+		panic("pmap: the kernel map has no user half to map into");
+
+	if (va_is_user(va))
+		flags |= INTEL_PTE_USER;
+
+	rc = pmap_map_page(pmap->root_pa, va, pa, flags);
 	if (rc == PMAP_MAP_OK)
 		pv_enter(pa, pmap, va);
 
 	return rc;
+}
+
+int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired)
+{
+	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, 0);
+
+	if (entry == PT_ENTRY_NULL)
+		return 0;
+
+	/*
+	 * No invalidation: the hardware never looks at this bit, so nothing it
+	 * has cached can be out of date because of it.
+	 */
+	if (wired)
+		*entry |= INTEL_PTE_WIRED;
+	else
+		*entry &= ~INTEL_PTE_WIRED;
+
+	return 1;
+}
+
+int pmap_is_wired(pmap_t pmap, uint64_t va)
+{
+	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, 0);
+
+	return entry != PT_ENTRY_NULL && (*entry & INTEL_PTE_WIRED) != 0;
 }
 
 uint64_t pmap_extract(pmap_t pmap, uint64_t va)
@@ -216,6 +340,44 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 
 		s += sz ? sz : PAGE_SIZE_4K;
 	}
+}
+
+/*
+ * Next free address in the device region.  A bump, because nothing is ever
+ * returned: see the header.
+ */
+static uint64_t device_next = DEVICE_MAP_BASE;
+
+uint64_t pmap_map_device(uint64_t pa, uint64_t size)
+{
+	uint64_t offset = pa & (PAGE_SIZE_4K - 1);
+	uint64_t first = pa - offset;
+	uint64_t last = (pa + size + PAGE_SIZE_4K - 1) & ~(PAGE_SIZE_4K - 1);
+	uint64_t va = device_next;
+	uint64_t flags = INTEL_PTE_WRITE | INTEL_PTE_NX
+		       | INTEL_PTE_NCACHE | INTEL_PTE_WTHRU;
+
+	if (size == 0)
+		return 0;
+
+	if (va + (last - first) - DEVICE_MAP_BASE > DEVICE_MAP_MAX_SIZE)
+		panic("pmap: the device region is full");
+
+	/*
+	 * PCD and PWT together are uncacheable in the absence of a page
+	 * attribute table.  When PAT is set up these two bits become an index
+	 * into it instead, and this is the line that has to change with it —
+	 * quietly keeping the old encoding would leave device memory cached
+	 * while looking untouched.
+	 */
+	for (uint64_t p = first; p < last; p += PAGE_SIZE_4K) {
+		if (pmap_map_page(kernel_pmap_store.root_pa,
+				  device_next, p, flags) != PMAP_MAP_OK)
+			panic("pmap: could not map device registers");
+		device_next += PAGE_SIZE_4K;
+	}
+
+	return va + offset;
 }
 
 /* ------------------------------------------------------------------ */
@@ -289,8 +451,12 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 * accessed without a flush would leave it clear however often
 		 * the page is touched, and the pager would read that as a page
 		 * nobody wants.
+		 *
+		 * On every processor, for the same reason: it is the processor
+		 * holding the cached translation that will fail to record the
+		 * next touch, and that is exactly the one this did not run on.
 		 */
-		invlpg(pv->va);
+		tlb_flush_page(pv->va);
 	}
 }
 
@@ -359,6 +525,31 @@ void pmap_protect_kernel(void)
 	write_cr0(read_cr0() | CR0_WP);
 }
 
+/*
+ * Whether the bit was actually set, which is not the same as whether the
+ * processor has it: a part without SMAP leaves this clear and the access
+ * brackets below become nothing, because their instructions would be
+ * invalid opcodes.
+ */
+static int smap_on;
+
+int pmap_smap_enabled(void)
+{
+	return smap_on;
+}
+
+void pmap_user_access_begin(void)
+{
+	if (smap_on)
+		__asm__ volatile("stac" ::: "cc", "memory");
+}
+
+void pmap_user_access_end(void)
+{
+	if (smap_on)
+		__asm__ volatile("clac" ::: "cc", "memory");
+}
+
 uint64_t pmap_enable_smep_smap(void)
 {
 	uint64_t want = 0;
@@ -367,17 +558,23 @@ uint64_t pmap_enable_smep_smap(void)
 		want |= CR4_SMEP;
 
 	/*
-	 * SMAP is safe to turn on now precisely because nothing yet sets the
-	 * user bit in a page-table entry: pmap_flags_for_prot() has no case
-	 * for it, so the lower-half mappings this kernel makes are supervisor
-	 * pages that SMAP does not police.  When mappings that userland can
-	 * reach do arrive, the kernel paths that deliberately read or write
-	 * them will need stac and clac around the access — and will fault
-	 * loudly if they forget, which is the point of turning it on early
-	 * rather than once there is something to break.
+	 * That prediction has since come true, which is worth recording
+	 * because it is the argument for turning a protection on before there
+	 * is anything for it to protect.
+	 *
+	 * When this was written no page-table entry carried the user bit, so
+	 * SMAP policed nothing; the comment said the deliberate accesses would
+	 * need stac and clac once such mappings arrived, and would fault
+	 * loudly if they forgot.  #411 made lower-half mappings genuinely
+	 * user-reachable, and the next boot on a processor that has SMAP
+	 * faulted on exactly one line — the one place the kernel reads through
+	 * a user address on purpose.  Not on a machine in the field, and not
+	 * as a corruption: as a page fault with an address, in a selftest.
 	 */
-	if (cpu_has_smap())
+	if (cpu_has_smap()) {
 		want |= CR4_SMAP;
+		smap_on = 1;
+	}
 
 	if (want)
 		write_cr4(read_cr4() | want);

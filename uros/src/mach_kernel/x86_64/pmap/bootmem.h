@@ -47,6 +47,18 @@ uint64_t boot_frame_alloc(void);
  */
 uint64_t boot_frames_alloc(uint64_t count);
 
+/*
+ * Give a single frame back.  Freed frames are reused before any new ground
+ * is broken, so a space that is created and destroyed costs nothing lasting.
+ *
+ * Single frames only: a run handed out by boot_frames_alloc() is contiguous
+ * by construction and nothing that asks for one ever gives it back, so the
+ * bookkeeping to rejoin runs would be for a case that does not arise.  The
+ * list threads through the frames themselves, which are free memory by
+ * definition — there is nowhere cheaper to keep it.
+ */
+void boot_frame_free(uint64_t pa);
+
 uint64_t boot_frames_used(void);
 uint64_t boot_frames_total(void);
 

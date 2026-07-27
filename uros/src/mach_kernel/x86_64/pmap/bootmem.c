@@ -33,6 +33,9 @@ static uint64_t frames_total;
 static uint64_t frames_used;
 static uint64_t low_water;
 
+/* Frames handed back, threaded through their own first word. */
+static uint64_t free_list;
+
 /* Physical extent of the loaded image, from the linker. */
 extern char __kernel_end[];
 
@@ -168,9 +171,38 @@ uint64_t boot_frames_alloc(uint64_t count)
 	return pa;
 }
 
+void boot_frame_free(uint64_t pa)
+{
+	uint64_t *link = (uint64_t *)(uintptr_t)phys_to_direct(pa);
+
+	*link = free_list;
+	free_list = pa;
+	frames_used--;
+}
+
 uint64_t boot_frame_alloc(void)
 {
-	return boot_frames_alloc(1);
+	uint64_t pa;
+	volatile uint64_t *frame;
+
+	if (free_list == 0)
+		return boot_frames_alloc(1);
+
+	pa = free_list;
+	free_list = *(const uint64_t *)(uintptr_t)phys_to_direct(pa);
+	frames_used++;
+
+	/*
+	 * Cleared on the way out, not on the way in: a frame on the free list
+	 * still holds the link that put it there, and whatever the previous
+	 * owner left.  Callers are promised a zeroed frame, and a page table
+	 * built on stale entries walks into memory nobody accounted for.
+	 */
+	frame = (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
+	for (unsigned i = 0; i < PAGE_SIZE_4K / sizeof(uint64_t); i++)
+		frame[i] = 0;
+
+	return pa;
 }
 
 uint64_t boot_frames_used(void)

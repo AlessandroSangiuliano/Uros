@@ -14,6 +14,36 @@ cmake_minimum_required(VERSION 3.21)
 set(CMAKE_C_COMPILER_WORKS 1)
 set(CMAKE_ASM_COMPILER_WORKS 1)
 
+# =============================================================================
+# Build Type Configuration
+# =============================================================================
+# Usage: cmake -DCMAKE_BUILD_TYPE=Debug ..   (or Release)
+# Debug:   -O0 -g3 (full debug info, no optimization)
+# Release: -O2 -g  (optimized with basic debug info)
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING 
+        "Build type: Debug or Release" FORCE)
+endif()
+
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+
+# Set optimization and debug flags based on build type
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(KERNEL_OPT_FLAGS -O0 -g3 -DDEBUG=1)
+    message(STATUS "Debug build: -O0 -g3 (no optimization, full debug)")
+else()
+    set(KERNEL_OPT_FLAGS -O2 -g)
+    message(STATUS "Release build: -O2 -g (optimized)")
+endif()
+
+# ⚠️ The block above sits ahead of the x86-64 branch on purpose: that branch
+# returns before the rest of this file runs, so anything set after it applies
+# to i386 alone.  The optimisation flags were in that position and the x86-64
+# kernel was built at -O0 by omission — which for #410 in particular is the
+# one configuration where a missing volatile or a missing compiler barrier
+# cannot show itself.
+
 # ------------------------------------------------------------------ #406
 # x86-64 kernel: build the machine-dependent boot stub and stop.
 #
@@ -47,15 +77,34 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
 
   add_executable(mach_kernel
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/ap_trampoline.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/desc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/smp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/direct.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/map.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/phys.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pmap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pv.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/walk.c)
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/tlb.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/walk.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/entry.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/probe.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/syscall.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/state.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
   target_include_directories(mach_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
@@ -67,11 +116,17 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # land in the top-2 GiB where the image is linked; -mno-red-zone because
   # the red zone is unsafe once interrupts land on these stacks; SSE off
   # (general regs only) to match the kernel's SSE-free discipline.
+  #
+  # -fno-omit-frame-pointer is kept for the same reason the i386 kernel keeps
+  # it: the backtrace walks the frame chain, and a register is a cheaper
+  # price than not knowing how the machine got where it died.
   target_compile_options(mach_kernel PRIVATE
     $<$<COMPILE_LANGUAGE:ASM>:-m64 -ffreestanding -nostdinc>
-    $<$<COMPILE_LANGUAGE:C>:-m64 -mcmodel=kernel -mno-red-zone
+    $<$<COMPILE_LANGUAGE:C>:${KERNEL_OPT_FLAGS}
+      -m64 -mcmodel=kernel -mno-red-zone
       -mgeneral-regs-only -fcf-protection=none -ffreestanding -fno-pic
       -fno-pie -fno-stack-protector -fno-builtin -nostdinc
+      -fno-omit-frame-pointer
       -isystem ${X86_64_GCC_INC} -std=gnu11 -Wall>)
   target_link_options(mach_kernel PRIVATE
     -m64 -static -nostdlib -nostartfiles -no-pie
@@ -101,29 +156,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
 
   message(STATUS "x86-64 kernel: boot stub (#406) — MD contracts #407-#411 pending")
   return()
-endif()
-
-# =============================================================================
-# Build Type Configuration
-# =============================================================================
-# Usage: cmake -DCMAKE_BUILD_TYPE=Debug ..   (or Release)
-# Debug:   -O0 -g3 (full debug info, no optimization)
-# Release: -O2 -g  (optimized with basic debug info)
-
-if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING 
-        "Build type: Debug or Release" FORCE)
-endif()
-
-message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
-
-# Set optimization and debug flags based on build type
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(KERNEL_OPT_FLAGS -O0 -g3 -DDEBUG=1)
-    message(STATUS "Debug build: -O0 -g3 (no optimization, full debug)")
-else()
-    set(KERNEL_OPT_FLAGS -O2 -g)
-    message(STATUS "Release build: -O2 -g (optimized)")
 endif()
 
 # =============================================================================

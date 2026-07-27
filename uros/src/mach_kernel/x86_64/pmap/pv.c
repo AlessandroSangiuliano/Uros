@@ -11,6 +11,7 @@
 #include <pmap/layout.h>
 #include <pmap/pte.h>
 #include <pmap/pv.h>
+#include <trap/trap.h>
 
 static pv_entry_t pv_head_table;	/* one entry per physical page */
 static uint64_t   pv_pages;		/* how many pages it covers */
@@ -27,8 +28,14 @@ void pv_bootstrap(uint64_t top_of_ram)
 	uint64_t frames = (bytes + PAGE_SIZE_4K - 1) / PAGE_SIZE_4K;
 	uint64_t table_pa = boot_frames_alloc(frames);
 
+	/*
+	 * Without the table every pv_managed() is false, so pv_enter and
+	 * pv_remove become no-ops and pmap_page_protect goes on to find no
+	 * mappings for pages that have them.  Copy-on-write would arm
+	 * nothing, and say so to nobody.
+	 */
 	if (table_pa == 0)
-		return;			/* pv_managed() stays false throughout */
+		panic("pv: no memory for the physical-to-virtual index");
 
 	/*
 	 * Reached through the direct map: the frames are consecutive, so the
@@ -105,9 +112,16 @@ void pv_enter(uint64_t pa, pmap_t pmap, uint64_t va)
 		return;
 	}
 
+	/*
+	 * The mapping exists whether or not it is recorded, and an unrecorded
+	 * one is invisible to every operation that starts from the physical
+	 * page — so pmap_page_protect would leave it writable while reporting
+	 * that it had protected the page.  There is no honest way to return
+	 * from here.
+	 */
 	e = pv_alloc();
 	if (e == PV_ENTRY_NULL)
-		return;
+		panic("pv: out of entries, a mapping would go unrecorded");
 
 	/*
 	 * Push in after the head rather than at the end: the head cannot move,

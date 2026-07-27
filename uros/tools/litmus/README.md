@@ -126,3 +126,15 @@ freely, and this same code would need explicit acquire/release or fence
 instructions where x86 needs none. These tests are written against the `X86`
 architecture; re-checking the same shapes under a weaker model is the natural
 follow-up when the MD layer grows a second architecture.
+
+**The second architecture has since arrived, and it is the one that needs no
+re-checking.** x86-64 (v0.3.0, #403) is the same memory model as i386 —
+x86-TSO in both cases, store→load the only reordering — so these verdicts
+carry across the port unchanged and the suite is a regression for both
+targets, not just the one it was written for. Confirmed green against the
+x86-64 kernel while #410 was landing its barriers.
+
+That is a gift this particular port received. It is worth being explicit
+that it is the exception rather than the rule: the sentence above still
+applies in full to a genuinely weak model, and the fact that one port cost
+nothing here is not evidence that the next one will.
