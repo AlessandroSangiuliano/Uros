@@ -2383,6 +2383,130 @@ static void timer_selftest(void)
 }
 
 /*
+ * What the firmware says about device interrupts (#409).
+ *
+ * Reported before anything is programmed, because the two facts here are the
+ * ones that cannot be guessed and whose absence is silence rather than a
+ * fault: which controller owns which pins, and which legacy lines are not
+ * where their number says.
+ *
+ * The second is the trap worth naming. The ISA interrupts were numbered when
+ * there was one controller and the number *was* the pin; in the global space
+ * the firmware wires them wherever it likes, and IRQ 0 is almost always on
+ * pin 2. A kernel that programmed pin 0 for the timer would be programming a
+ * pin nobody drives — and the symptom is a timer that never fires, with
+ * nothing on the wire to say why.
+ */
+static void ioapic_madt_selftest(void)
+{
+	unsigned n = acpi_ioapic_count();
+	unsigned overrides = acpi_override_count();
+	int ok = n >= 1;
+
+	kputs("UrMach x86-64: ");
+	kputdec(n);
+	kputs(" I/O APIC");
+	kputs(n == 1 ? " at " : "s, first at ");
+
+	if (n == 0) {
+		kputs("— WRONG, the firmware describes no interrupt controller\r\n");
+		return;
+	}
+
+	kputhex64(acpi_ioapic(0)->address);
+	kputs(", pins from ");
+	kputdec(acpi_ioapic(0)->gsi_base);
+
+	/*
+	 * The first controller must start the global space at zero: the legacy
+	 * lines live at the bottom of it, and a machine whose lowest pin is not
+	 * zero has nowhere to put them.
+	 */
+	ok = ok && acpi_ioapic(0)->address != 0 && acpi_ioapic(0)->gsi_base == 0;
+
+	for (unsigned i = 0; i < n; i++)
+		ok = ok && acpi_ioapic(i)->address != 0;
+
+	kputs(ok ? " — the interrupt space starts where the legacy lines are\r\n"
+		 : " — WRONG, no controller owns the bottom of the space\r\n");
+
+	/*
+	 * And the corrections. Printed one by one rather than counted: which
+	 * line moved where is the whole content, and a count would say only
+	 * that the firmware had opinions.
+	 */
+	kputs("UrMach x86-64: ");
+	kputdec(overrides);
+	kputs(" correction");
+	kputs(overrides == 1 ? "" : "s");
+	kputs(" from the firmware:");
+
+	for (unsigned i = 0; i < overrides; i++) {
+		const struct acpi_irq_override *o = acpi_override(i);
+		uint16_t trigger = o->flags & ACPI_TRIGGER_MASK;
+		uint16_t polarity = o->flags & ACPI_POLARITY_MASK;
+
+		kputs(" irq ");
+		kputdec(o->source);
+
+		/*
+		 * Only say "moved" when it moved. Most of these do not change
+		 * the pin at all — they change the electrical arrangement,
+		 * which is the other half of what an override carries and the
+		 * half that cannot be guessed. Calling all of them relocations
+		 * would misdescribe four out of five here.
+		 */
+		if (o->gsi != o->source) {
+			kputs("->pin ");
+			kputdec((unsigned)o->gsi);
+		}
+
+		kputs(trigger == ACPI_TRIGGER_LEVEL ? "(level"
+		      : trigger == ACPI_TRIGGER_EDGE ? "(edge" : "(bus");
+		kputs(polarity == ACPI_POLARITY_LOW ? ",low)"
+		      : polarity == ACPI_POLARITY_HIGH ? ",high)" : ",bus)");
+	}
+
+	/*
+	 * Two properties, and both are about the lookup rather than the table:
+	 * a line the firmware moved must resolve to where it was moved, and a
+	 * line it did not mention must resolve to itself. The second is the one
+	 * that would be missed — an absent override is not missing information,
+	 * it is the statement that the number is right.
+	 */
+	int lookup_ok = 1;
+
+	for (unsigned i = 0; i < overrides; i++) {
+		const struct acpi_irq_override *o = acpi_override(i);
+
+		if (acpi_irq_to_gsi(o->source) != o->gsi)
+			lookup_ok = 0;
+		if (o->source >= 16)
+			lookup_ok = 0;		/* not a legacy line at all */
+	}
+
+	for (unsigned irq = 0; irq < 16; irq++) {
+		int moved = 0;
+
+		for (unsigned i = 0; i < overrides; i++)
+			if (acpi_override(i)->source == irq)
+				moved = 1;
+
+		if (!moved && acpi_irq_to_gsi((uint8_t)irq) != irq)
+			lookup_ok = 0;
+	}
+
+	kputs(lookup_ok
+	      ? " — and every other one resolves to itself\r\n"
+	      : " — WRONG, the lookup disagrees with the table\r\n");
+
+	/* The timer line by name, because it is the one that will be used. */
+	kputs("UrMach x86-64: the timer line, irq 0, is on pin ");
+	kputdec((unsigned)acpi_irq_to_gsi(0));
+	kputs("\r\n");
+}
+
+/*
  * And the same tick on every processor (#409).
  *
  * This is the claim the local APIC timer was chosen for, and it is not the
@@ -2926,6 +3050,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	thread_state_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
+	ioapic_madt_selftest();
 	tsc_selftest();
 	timer_selftest();
 	swapgs_window_selftest();

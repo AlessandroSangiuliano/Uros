@@ -56,7 +56,39 @@ struct madt_entry {
 } __attribute__((packed));
 
 #define MADT_LOCAL_APIC		0
+#define MADT_IOAPIC		1
+#define MADT_INTERRUPT_OVERRIDE	2
 #define MADT_LOCAL_X2APIC	9
+
+struct madt_ioapic {
+	struct madt_entry entry;
+	uint8_t  id;
+	uint8_t  reserved;
+	uint32_t address;
+	uint32_t gsi_base;	/* the first global interrupt this one owns */
+} __attribute__((packed));
+
+/*
+ * The entry that says an ISA interrupt is not where its number suggests.
+ *
+ * The legacy lines were numbered when there was one interrupt controller and
+ * the number *was* the pin.  With an I/O APIC the pins are a global space
+ * shared by every controller in the machine, and the firmware is free to
+ * wire an ISA line to whichever pin it likes — so IRQ 0 is almost always on
+ * pin 2, and reading it as pin 0 gets a line nobody is driving.
+ *
+ * It also carries the electrical arrangement, which the 8259 kept in a
+ * separate register and which cannot be guessed: getting the polarity
+ * backwards means the controller sees an interrupt whenever the device is
+ * *not* asserting one.
+ */
+struct madt_override {
+	struct madt_entry entry;
+	uint8_t  bus;		/* always 0, meaning ISA */
+	uint8_t  source;	/* the legacy IRQ number */
+	uint32_t gsi;		/* the pin it is really on */
+	uint16_t flags;		/* polarity and trigger mode */
+} __attribute__((packed));
 
 struct madt_local_apic {
 	struct madt_entry entry;
@@ -93,6 +125,42 @@ static struct acpi_cpu cpus[ACPI_MAX_CPUS];
 static unsigned ncpus;
 static unsigned nusable;
 static uint64_t lapic_base;
+
+/*
+ * The interrupt controllers, and the corrections to what their pin numbers
+ * mean.
+ *
+ * Both are capped and both report overflow rather than truncating, for the
+ * reason the processor array is: this runs before an allocator, and a table
+ * that was quietly cut short is a machine with interrupts nobody routes.
+ */
+static struct acpi_ioapic ioapics[ACPI_MAX_IOAPICS];
+static unsigned nioapics;
+
+static struct acpi_irq_override overrides[ACPI_MAX_OVERRIDES];
+static unsigned noverrides;
+
+static void record_ioapic(uint8_t id, uint32_t address, uint32_t gsi_base)
+{
+	if (nioapics >= ACPI_MAX_IOAPICS)
+		panic("acpi: more I/O APICs than there is room to record");
+
+	ioapics[nioapics].id = id;
+	ioapics[nioapics].address = address;
+	ioapics[nioapics].gsi_base = gsi_base;
+	nioapics++;
+}
+
+static void record_override(uint8_t source, uint32_t gsi, uint16_t flags)
+{
+	if (noverrides >= ACPI_MAX_OVERRIDES)
+		panic("acpi: more interrupt overrides than there is room to record");
+
+	overrides[noverrides].source = source;
+	overrides[noverrides].gsi = gsi;
+	overrides[noverrides].flags = flags;
+	noverrides++;
+}
 
 /* Physical memory is reachable by addition; the tables are just there. */
 static const void *at_phys(uint64_t pa)
@@ -168,6 +236,16 @@ static void read_madt(const struct acpi_madt *madt)
 			const struct madt_local_x2apic *l = (const void *)p;
 
 			record_cpu(l->apic_id, l->acpi_id, l->flags);
+		} else if (e->type == MADT_IOAPIC
+			   && e->length >= sizeof(struct madt_ioapic)) {
+			const struct madt_ioapic *io = (const void *)p;
+
+			record_ioapic(io->id, io->address, io->gsi_base);
+		} else if (e->type == MADT_INTERRUPT_OVERRIDE
+			   && e->length >= sizeof(struct madt_override)) {
+			const struct madt_override *o = (const void *)p;
+
+			record_override(o->source, o->gsi, o->flags);
 		}
 
 		p += e->length;
@@ -270,4 +348,49 @@ const struct acpi_cpu *acpi_cpu(unsigned index)
 uint64_t acpi_lapic_base(void)
 {
 	return lapic_base;
+}
+
+unsigned acpi_ioapic_count(void)
+{
+	return nioapics;
+}
+
+const struct acpi_ioapic *acpi_ioapic(unsigned index)
+{
+	return index < nioapics ? &ioapics[index] : 0;
+}
+
+unsigned acpi_override_count(void)
+{
+	return noverrides;
+}
+
+const struct acpi_irq_override *acpi_override(unsigned index)
+{
+	return index < noverrides ? &overrides[index] : 0;
+}
+
+/*
+ * The identity unless the firmware says otherwise, which is what an override
+ * is. Written as a search rather than a table so that a machine with no
+ * overrides at all needs no special case: the loop finds nothing and the
+ * answer is the number that was asked about.
+ */
+uint32_t acpi_irq_to_gsi(uint8_t irq)
+{
+	for (unsigned i = 0; i < noverrides; i++)
+		if (overrides[i].source == irq)
+			return overrides[i].gsi;
+
+	return irq;
+}
+
+uint16_t acpi_irq_flags(uint8_t irq)
+{
+	for (unsigned i = 0; i < noverrides; i++)
+		if (overrides[i].source == irq)
+			return overrides[i].flags;
+
+	/* No override: the bus default, which for ISA is high and edge. */
+	return ACPI_POLARITY_BUS | ACPI_TRIGGER_BUS;
 }
