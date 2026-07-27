@@ -101,6 +101,8 @@
 #ifndef	_TYPE_H
 #define	_TYPE_H
 
+#include <stdio.h>
+
 #include <mach/boolean.h>
 #include <mach/message.h>
 #include "strdefs.h"

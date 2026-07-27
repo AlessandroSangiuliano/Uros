@@ -383,44 +383,100 @@ WriteFieldDeclPrim(FILE *file, argument_t *arg,
  * (#416).
  *
  * migcom sizes a message by adding up its fields.  The compiler lays out the
- * same fields by adding up their sizes *and the padding between them*, and
- * the two agree only while every field is the same width.  #413 made one that
- * is not, and worse: whether a field needs padding depends on the alignment
- * of its C type, which migcom cannot know.  It has the wire tag and the type
- * name as a string — and `unsigned64` is `unsigned long` in one declaration
- * and `struct { unsigned int val[2]; }` in another, alignment eight and four.
- * There is no rule from the tag to the answer.
+ * same fields by adding up their sizes *and the padding between them*, and it
+ * knows something migcom cannot: the alignment of each field's C type.  All
+ * migcom has is the wire tag and the type's name as a string, and
+ * `unsigned64` is `unsigned long` in one declaration and
+ * `struct { unsigned int val[2]; }` in another — eight-aligned and
+ * four-aligned, with no rule leading from the tag to the answer.
  *
- * That failure is silent in the worst way: both ends of an RPC use migcom's
- * number, so a message goes out with a length that stops before its last
+ * The failure is silent in the worst way.  Both ends of an RPC use migcom's
+ * numbers, so a message goes out with a length that stops before its last
  * field and arrives at a server that finds one field where the next begins.
  *
- * So every number migcom emits about a message is written into the generated
- * code as a condition, and the compiler — which has the alignments, because
- * it is the one that applies them — decides whether migcom was right.  Two
- * conditions cover everything it computes:
+ * ── Everything migcom claims, and nothing less ────────────────────────
  *
- *	the largest the message can be   = where the fields end
- *	the smallest it can be           = that, less every variable array
+ * Its beliefs are not only about the whole message.  A field's size is used
+ * as the length of a memcpy into the message, as the multiplier in
+ * `msgh_size = base + n * <size>`, as the constant subtracted when the
+ * structure pointer is slid back over a short array, and as the size of the
+ * buffer the caller allocates.  Every one of those is the same number —
+ * `sizeof` of a C type migcom has never seen — so every one of them is
+ * asserted:
  *
- * The second is not a guess about layout: a variable array is declared at its
- * maximum, so subtracting the array is exactly the message with that array
- * empty, which is what a minimum size means.
+ *	each field	its size, and for an array its element's size too
+ *	each padding	the size migcom declared it
+ *	the message	the largest it can be, and the smallest
  *
- * ⚠️ Both are measured to `msgh_end`, a zero-length marker emitted at the end
- * of the message part of every structure.  Not to `sizeof`, which would
- * include the padding a compiler adds at the end and which the sender never
- * transmits; and not to the trailer, which only the receiving side declares —
- * the sender and the receiver must arrive at the *same* number, and a marker
- * both of them carry is the only thing that guarantees it.
+ * With every field pinned, the derived uses are founded rather than hoped
+ * for; and with the message pinned, so is every msgh_size constant and the
+ * subsystem-wide maximum, which is a maximum over exactly these.
+ *
+ * ⚠️ Both message sizes are measured to `msgh_end`, a zero-length marker at
+ * the end of the message part of every structure.  Not to `sizeof`, which
+ * includes the padding a compiler adds at the end and which the sender never
+ * transmits; not to the trailer, which only the receiving side declares.  The
+ * sender and the receiver must arrive at the *same* number, and a marker both
+ * of them carry is what guarantees it.
  */
 static void
+WriteFieldAssert(FILE *file, char *name, register argument_t *arg)
+{
+    register ipc_type_t *it = arg->argType;
+    boolean_t is_array = IS_VARIABLE_SIZED_UNTYPED(it) || it->itNoOptArray
+			 || IS_MULTIPLE_KPD(it);
+
+    fprintf(file, "\t_Static_assert(sizeof(((%s *) 0)->%s) == %d,\n",
+	    name, arg->argMsgField, it->itTypeSize);
+    fprintf(file, "\t\t\"MIG and the compiler disagree on the size of %s\");\n",
+	    arg->argMsgField);
+
+    /*
+     * The element's size is the multiplier in the run-time length arithmetic,
+     * so it has to be pinned separately: sixteen bytes of array is sixteen
+     * ones or four fours, and only the second is right if the count means
+     * elements.
+     */
+    if (is_array && it->itElement != itNULL) {
+	fprintf(file, "\t_Static_assert(sizeof(((%s *) 0)->%s[0]) == %d,\n",
+		name, arg->argMsgField, it->itElement->itTypeSize);
+	fprintf(file, "\t\t\"MIG counts %s in units the compiler disagrees with\");\n",
+		arg->argMsgField);
+    }
+
+    if (it->itPadSize != 0) {
+	fprintf(file, "\t_Static_assert(sizeof(((%s *) 0)->%s) == %d,\n",
+		name, arg->argPadName, it->itPadSize);
+	fprintf(file, "\t\t\"MIG and the compiler disagree on the padding after %s\");\n",
+		arg->argMsgField);
+    }
+}
+
+static void
 WriteStructAssert(FILE *file, char *name, argument_t *args, u_int mask,
+		  boolean_t simple, boolean_t isuser,
 		  u_int minsize, u_int maxsize)
 {
     register argument_t *arg;
+    u_int kpd  = mask | (mask == akbRequest ? akbSendKPD  : akbReturnKPD);
+    u_int body = mask | (mask == akbRequest ? akbSendBody : akbReturnBody);
 
-    fprintf(file, "	_Static_assert(__builtin_offsetof(%s, msgh_end) == %d,\n",
+    /*
+     * ⚠️ Selected exactly as WriteFieldDeclPrim was selected to declare them
+     * — same predicate, same two groups, same order.  An assertion about a
+     * field that was never declared does not fail, it fails to compile, and
+     * the two lists must be the same list.
+     */
+    if (!simple)
+	for (arg = args; arg != argNULL; arg = arg->argNext)
+	    if (akCheckAll(arg->argKind, kpd))
+		WriteFieldAssert(file, name, arg);
+
+    for (arg = args; arg != argNULL; arg = arg->argNext)
+	if (akCheckAll(arg->argKind, body))
+	    WriteFieldAssert(file, name, arg);
+
+    fprintf(file, "\n\t_Static_assert(__builtin_offsetof(%s, msgh_end) == %d,\n",
 	    name, maxsize);
     fprintf(file, "\t\t\"MIG sized %s differently from the compiler\");\n\n",
 	    name);
@@ -428,11 +484,16 @@ WriteStructAssert(FILE *file, char *name, argument_t *args, u_int mask,
     if (minsize == maxsize)
 	return;
 
+    /*
+     * The smallest the message can be is the largest less every variable
+     * array, and that is not an estimate: the array is declared at its
+     * maximum, so subtracting it *is* the message with that array empty.
+     */
     fprintf(file, "\t_Static_assert(__builtin_offsetof(%s, msgh_end)", name);
     for (arg = args; arg != argNULL; arg = arg->argNext) {
 	register ipc_type_t *it = arg->argType;
 
-	if (!akCheck(arg->argKind, mask))
+	if (!akCheckAll(arg->argKind, body))
 	    continue;
 	if (!IS_VARIABLE_SIZED_UNTYPED(it))
 	    continue;
@@ -494,7 +555,7 @@ WriteStructDecl(FILE *file, argument_t *args,
     fprintf(file, "\n");
 
     if (!template_only)
-	WriteStructAssert(file, name, args, mask, minsize, maxsize);
+	WriteStructAssert(file, name, args, mask, simple, isuser, minsize, maxsize);
 }
 
 void
