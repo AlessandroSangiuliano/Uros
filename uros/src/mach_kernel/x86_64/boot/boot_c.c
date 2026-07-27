@@ -23,6 +23,8 @@
 
 #include <stdint.h>
 
+#include <mach/message.h>
+
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
 #include <cpu/desc.h>
@@ -3182,6 +3184,145 @@ static int wait_for_paranoid(void)
 	return 0;
 }
 
+/*
+ * The message ABI, measured on the target that changed it (#413).
+ *
+ * mach/message.h states the layout twice: once as declarations the compiler
+ * turns into offsets, and once as _Static_asserts that check the offsets it
+ * chose.  Both are compile-time, and both stop short of the one fact the
+ * kernel depends on most: where the `type` byte of a descriptor lands.
+ *
+ * That byte is the discriminator.  Every descriptor in a message is walked
+ * as a member of one union, and which member is meant is decided by reading
+ * `type` through the generic one.  It is a bit-field, so it has no address
+ * to take and no assertion can name its offset — and it is precisely the
+ * field that moved, because the padding around it is what makes descriptors
+ * the same size when a name and an address are not.
+ *
+ * So it is measured: write a value the field can hold, look at the bytes,
+ * report where it went.  Then the operation itself, in both directions — a
+ * descriptor filled with zeros that is told it is an out-of-line descriptor
+ * and must read back as one, and a descriptor filled with ones that is told
+ * it is a port descriptor (whose code is zero) and must read back as one
+ * too.  One direction alone would pass on a field that was never written.
+ */
+#define MSG_ABI_MARKER	0x7f
+
+static void msg_bytes_set(volatile unsigned char *b, unsigned n,
+			  unsigned char v)
+{
+	for (unsigned i = 0; i < n; i++)
+		b[i] = v;
+}
+
+static unsigned msg_marker_byte(const volatile unsigned char *b, unsigned n)
+{
+	for (unsigned i = 0; i < n; i++)
+		if (b[i] == MSG_ABI_MARKER)
+			return i;
+	return ~0u;
+}
+
+static void msg_abi_selftest(void)
+{
+	/*
+	 * A message the way one is actually shaped: the fixed part, then the
+	 * descriptors.  Declaring it as a structure lets the compiler place
+	 * the descriptors, so the check below compares the placement it chose
+	 * against the arithmetic the kernel performs to find them.
+	 */
+	static struct {
+		mach_msg_base_t		base;
+		mach_msg_descriptor_t	dsc[2];
+	} msg;
+	union {
+		mach_msg_descriptor_t	d;
+		volatile unsigned char	b[sizeof(mach_msg_descriptor_t)];
+	} u;
+	const unsigned n = (unsigned)sizeof(mach_msg_descriptor_t);
+	const mach_msg_descriptor_t *walked;
+	unsigned at_port, at_ool, at_ool_ports, at_generic;
+	unsigned told_ool, told_port;
+
+	kputs("UrMach x86-64: message header ");
+	kputdec(sizeof(mach_msg_header_t));
+	kputs(" bytes, body ");
+	kputdec(sizeof(mach_msg_body_t));
+	kputs(", descriptor ");
+	kputdec(n);
+	kputs(sizeof(mach_msg_header_t) == 24 && sizeof(mach_msg_body_t) == 8
+	      && n == 16
+	      ? " — the 64-bit layout\r\n"
+	      : " — NOT the 64-bit layout\r\n");
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.port.type = MSG_ABI_MARKER;
+	at_port = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.out_of_line.type = MSG_ABI_MARKER;
+	at_ool = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.ool_ports.type = MSG_ABI_MARKER;
+	at_ool_ports = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.type.type = MSG_ABI_MARKER;
+	at_generic = msg_marker_byte(u.b, n);
+
+	kputs("UrMach x86-64: descriptor type byte at ");
+	kputdec(at_port);
+	kputs(" ");
+	kputdec(at_ool);
+	kputs(" ");
+	kputdec(at_ool_ports);
+	kputs(" ");
+	kputdec(at_generic);
+	kputs(at_port == n - 1 && at_ool == n - 1 && at_ool_ports == n - 1
+	      && at_generic == n - 1
+	      ? " — all four in the last byte\r\n"
+	      : " — the four descriptors DISAGREE\r\n");
+
+	/* Zeros, then a non-zero kind: the walk must see the kind. */
+	msg_bytes_set(u.b, n, 0);
+	u.d.port.name = 0x1234;
+	u.d.port.disposition = MACH_MSG_TYPE_MOVE_SEND;
+	u.d.port.type = MACH_MSG_OOL_DESCRIPTOR;
+	told_ool = u.d.type.type;
+
+	/* Ones, then the kind whose code is zero: the walk must see zero. */
+	msg_bytes_set(u.b, n, 0xff);
+	u.d.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	told_port = u.d.type.type;
+
+	kputs("UrMach x86-64: a port descriptor told the walk ");
+	kputdec(told_ool);
+	kputs(" and ");
+	kputdec(told_port);
+	kputs(told_ool == MACH_MSG_OOL_DESCRIPTOR
+	      && told_port == MACH_MSG_PORT_DESCRIPTOR
+	      ? " — it was heard both ways\r\n"
+	      : " — the walk read the WRONG byte\r\n");
+
+	/*
+	 * Where the descriptors begin.  The kernel does not look this up: it
+	 * takes the address just past the body and calls it the first
+	 * descriptor.  If the compiler put them anywhere else, every message
+	 * with a descriptor in it is read from four bytes off.
+	 */
+	walked = (const mach_msg_descriptor_t *)(&msg.base.body + 1);
+
+	kputs("UrMach x86-64: descriptors begin at ");
+	kputdec((uint64_t)((const char *)&msg.dsc[0] - (const char *)&msg));
+	kputs(", the walk lands ");
+	kputdec((uint64_t)((const char *)walked - (const char *)&msg));
+	kputs(walked == &msg.dsc[0]
+	      && ((uintptr_t)walked % sizeof(void *)) == 0
+	      ? " — same place, and aligned like the address it starts with\r\n"
+	      : " — the walk and the layout DISAGREE\r\n");
+}
+
 static void swapgs_window_selftest(void)
 {
 	struct trap_paranoid_record outside, inside;
@@ -3600,6 +3741,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	timer_selftest();
 	ioapic_selftest();
 	spl_selftest();
+	msg_abi_selftest();
 	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();

@@ -112,7 +112,20 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
+  # <mach/...> and the per-target <mach/machine/...> behind it (#413).
+  #
+  # The first thing this target has ever taken from outside x86_64/, and it
+  # is deliberately the interface headers rather than any of the code that
+  # uses them: the message layout is a decision, and a decision is worth
+  # nothing until the target that has to live with it compiles the header
+  # and checks it.  The MI tree follows later and follows this.
+  #
+  # ⚠️ Ordered as the i386 target orders them — uapi, then the arch links —
+  # so <mach/machine/vm_types.h> resolves to mach/x86_64/ here for exactly
+  # the same reason it resolves to mach/i386/ there.
   target_include_directories(mach_kernel PRIVATE
+    ${CMAKE_SOURCE_DIR}/uapi
+    ${UROS_ARCH_INCLUDE}
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
   # stddef.h); add just that directory back with -isystem so we get the
