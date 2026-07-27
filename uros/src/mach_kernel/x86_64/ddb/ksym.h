@@ -17,13 +17,17 @@
  * file, and it is smaller than the tool that would have generated the file
  * that was not needed.
  *
- * ⚠️ It costs one thing, and it is not free: those sections are *not* part
- * of the multiboot information structure, so the boot allocator's low-water
- * mark does not cover them. Unprotected, `boot_frame_alloc()` would hand out
- * the page holding the symbol table and the lookup would afterwards return
- * names read out of a page table. That is worse than having no symbols: a
- * wrong name in a backtrace sends the reader somewhere, and it looks exactly
- * like a right one. bootmem.c reserves them for that reason.
+ * ⚠️ It costs one thing: those sections are *not* part of the multiboot
+ * information structure, so nothing in the boot allocator's low-water mark
+ * describes them. Unprotected, `boot_frame_alloc()` could hand out the page
+ * holding the symbol table, and the lookup would afterwards return names
+ * read out of a page table — worse than having no symbols, since a wrong
+ * name sends the reader somewhere and looks exactly like a right one.
+ *
+ * Measured under gdb, this loader happens to place the information structure
+ * immediately above the symbol data, so the existing check already covers
+ * it and the reservation in bootmem.c changes nothing today. It is kept
+ * because that adjacency is an arrangement rather than a guarantee.
  */
 
 #ifndef _X86_64_DDB_KSYM_H_
