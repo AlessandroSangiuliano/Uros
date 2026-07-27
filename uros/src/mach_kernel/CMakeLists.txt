@@ -424,7 +424,7 @@ function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -server ${SERVER_C}
                 -header /dev/null
                 -user /dev/null
-        DEPENDS migcom ${DEFS_FILE}
+        DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
         COMMENT "MIG: ${DEFS_NAME} (server)"
         VERBATIM
     )
@@ -460,7 +460,7 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -header ${USER_H}
                 -user ${USER_C}
                 -server /dev/null
-        DEPENDS migcom ${DEFS_FILE}
+        DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
         COMMENT "MIG: ${DEFS_NAME} (user)"
         VERBATIM
     )
@@ -531,7 +531,7 @@ add_custom_command(
             -server ${KERNEL_BUILD_DIR}/device/device_pager_server.c
             -header /dev/null
             -user /dev/null
-    DEPENDS migcom ${KERNEL_SRC_DIR}/mach/memory_object.defs
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${KERNEL_SRC_DIR}/mach/memory_object.defs
     COMMENT "MIG: memory_object -> device_pager (server)"
     VERBATIM
 )

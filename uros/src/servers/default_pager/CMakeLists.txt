@@ -41,7 +41,7 @@ function(dp_mig_defs DEFS_FILE STEM)
       -user    ${_userC}
       -server  ${_serverC}
       ${DEFS_FILE}
-    DEPENDS migcom ${DEFS_FILE}
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
     COMMENT "MIG: ${STEM}.defs"
     VERBATIM
   )

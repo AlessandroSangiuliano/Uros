@@ -23,7 +23,7 @@ add_custom_command(
     -user ${NETNAME_USER_C}
     -server ${NETNAME_SERVER_C}
     ${NETNAME_DEFS}
-  DEPENDS migcom ${NETNAME_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${NETNAME_DEFS}
   COMMENT "MIG: netname.defs (libnetname)"
   VERBATIM
 )

@@ -29,7 +29,7 @@ add_custom_command(
     -user ${PROC_USER_C}
     -server ${PROC_SERVER_C}
     ${PROC_DEFS}
-  DEPENDS migcom ${PROC_DEFS} ${PROC_TYPES_H}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${PROC_DEFS} ${PROC_TYPES_H}
   COMMENT "MIG: proc.defs (#237 v0.1.0)"
   VERBATIM
 )
@@ -61,7 +61,7 @@ add_custom_command(
     -user ${VFS_USER_C}
     -server ${VFS_SERVER_C}
     ${VFS_DEFS}
-  DEPENDS migcom ${VFS_DEFS} ${VFS_TYPES}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${VFS_DEFS} ${VFS_TYPES}
   COMMENT "MIG: vfs.defs (server stubs for proc_server / proc)"
   VERBATIM
 )
@@ -90,7 +90,7 @@ add_custom_command(
     -user ${NOTIFY_USER_C}
     -server ${NOTIFY_SERVER_C}
     ${NOTIFY_DEFS}
-  DEPENDS migcom ${NOTIFY_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${NOTIFY_DEFS}
   COMMENT "MIG: notify.defs (DEAD_NAME handler for proc_server)"
   VERBATIM
 )

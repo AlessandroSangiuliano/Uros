@@ -29,7 +29,7 @@ add_custom_command(
     -user ${MACH_I386_USER_C}
     -server /dev/null
     ${MACH_I386_DEFS}
-  DEPENDS migcom ${MACH_I386_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${MACH_I386_DEFS}
   COMMENT "MIG: mach_i386.defs (user stubs for kernel242_test)"
   VERBATIM
 )

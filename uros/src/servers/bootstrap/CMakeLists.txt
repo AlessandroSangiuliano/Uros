@@ -27,7 +27,7 @@ macro(mig_server_stub DEFS_FILE STEM OUT_DIR)
         -sheader ${_srvH}
         -user   ${_usrC}
         -server ${_srvC}
-    DEPENDS migcom ${_defs}
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${_defs}
     COMMENT "MIG: ${STEM}.defs -> ${STEM}Server.c"
     VERBATIM
   )

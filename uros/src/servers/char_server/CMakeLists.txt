@@ -59,7 +59,7 @@ add_custom_command(
     -user ${DM_USER_C}
     -server ${DM_SERVER_C}
     ${DEVICE_MASTER_DEFS}
-  DEPENDS migcom ${DEVICE_MASTER_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEVICE_MASTER_DEFS}
   COMMENT "MIG: device_master.defs (user stubs for char_server modules)"
   VERBATIM
 )
@@ -90,7 +90,7 @@ add_custom_command(
     -user ${PROC_USER_C}
     -server /dev/null
     ${PROC_DEFS}
-  DEPENDS migcom ${PROC_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${PROC_DEFS}
   COMMENT "MIG: proc.defs (user stubs for char_server tty class)"
   VERBATIM
 )
@@ -119,7 +119,7 @@ add_custom_command(
     -user ${CHAR_USER_C}
     -server ${CHAR_SERVER_C}
     ${CHAR_DEFS}
-  DEPENDS migcom ${CHAR_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${CHAR_DEFS}
   COMMENT "MIG: char_server.defs (server stubs for char_server)"
   VERBATIM
 )
