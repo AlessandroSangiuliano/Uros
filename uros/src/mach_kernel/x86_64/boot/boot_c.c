@@ -2286,6 +2286,30 @@ static volatile uint64_t ticks[SMP_MAX_CPUS];
 static volatile uint64_t first_tsc[SMP_MAX_CPUS];
 static volatile uint64_t last_tsc[SMP_MAX_CPUS];
 
+/*
+ * Every gap, for one processor, so the rate can be taken as a median.
+ *
+ * ⚠️ The average was the second attempt and it is wrong too, for a reason
+ * the first version of this comment got backwards. It claimed a deleted tick
+ * inflates the mean "by a percent or two". It does not: the mean is the span
+ * divided by the gaps observed, so losing five ticks of a hundred inflates it
+ * by 99/94 — five percent. Measured: 6319223 against a period of 6007462,
+ * which is exactly that, and it tripped a five percent bound.
+ *
+ * So the count and the mean are not two independent views. The same stall
+ * spoils both, and in the same proportion.
+ *
+ * A median is the right estimator here and the reason is the shape of the
+ * contamination: a few gaps are much too long, because the host stalled, and
+ * a few are much too short, because the emulator caught up afterwards. Both
+ * kinds sit at the ends of the sorted order and neither moves the middle.
+ */
+#define TICK_MAX_GAPS	256
+
+static volatile uint64_t gaps[TICK_MAX_GAPS];
+static volatile unsigned ngaps;
+static volatile uint32_t gap_cpu;
+
 static void timer_tick(struct trap_frame *frame)
 {
 	uint32_t id = cpu_apic_id();
@@ -2303,6 +2327,8 @@ static void timer_tick(struct trap_frame *frame)
 	 */
 	if (prev == 0)
 		first_tsc[id] = now;
+	else if (id == gap_cpu && ngaps < TICK_MAX_GAPS)
+		gaps[ngaps++] = now - prev;
 
 	/*
 	 * Acknowledged here and not by the caller. An interrupt that is never
@@ -2353,6 +2379,36 @@ static void tick_reset(void)
 		first_tsc[id] = 0;
 		last_tsc[id] = 0;
 	}
+	ngaps = 0;
+	gap_cpu = cpu_apic_id();
+}
+
+/*
+ * The middle value, by insertion sort in place.
+ *
+ * A hundred elements at boot, so the cost of the simplest algorithm that is
+ * obviously right is nothing, and obviously right is what a measurement
+ * everything else is checked against ought to be.
+ */
+static uint64_t median_gap(void)
+{
+	unsigned n = ngaps;
+
+	if (n == 0)
+		return 0;
+
+	for (unsigned i = 1; i < n; i++) {
+		uint64_t v = gaps[i];
+		unsigned j = i;
+
+		while (j > 0 && gaps[j - 1] > v) {
+			gaps[j] = gaps[j - 1];
+			j--;
+		}
+		gaps[j] = v;
+	}
+
+	return gaps[n / 2];
 }
 
 /* What one tick should measure, in counter units. Zero if either clock is
@@ -2409,14 +2465,7 @@ static void timer_selftest(void)
 
 	got = ticks[me];
 	off = got > want ? got - want : want - got;
-	/*
-	 * The span covers ticks-1 gaps, not ticks: the first tick starts the
-	 * measurement rather than being measured. Dividing by the wrong one of
-	 * those is a one-percent error at a hundred ticks, which is inside the
-	 * tolerance and would therefore never be noticed.
-	 */
-	period = ticks[me] > 1
-	       ? (last_tsc[me] - first_tsc[me]) / (ticks[me] - 1) : 0;
+	period = median_gap();
 	expected = tick_expected_period();
 
 	/*
@@ -2456,6 +2505,19 @@ static void timer_selftest(void)
 	 * a host that deschedules the emulator deletes ticks, and no bound
 	 * worth having absorbs that. What it can still catch is a timer that
 	 * stopped, or one out by a factor.
+	 *
+	 * 🔑 Losing ticks is not an emulator defect to be worked around — it
+	 * happens on real hardware too, and every system that keeps time has
+	 * had to answer for it. An interval with interrupts disabled, a burst
+	 * of higher-priority work, or a system-management interrupt the kernel
+	 * cannot even observe will each swallow one. The emulator only makes
+	 * it frequent enough to see in a twenty-second boot.
+	 *
+	 * Which is why counting them must never become timekeeping. The tick
+	 * is a scheduling event; the time comes from a counter that is read,
+	 * not from events that are counted, because a counter that is read
+	 * cannot be missed. That is the whole argument of #318, and this is
+	 * the measurement behind it.
 	 */
 	kputs("UrMach x86-64: asked for ");
 	kputdec((unsigned)want);
@@ -2466,12 +2528,12 @@ static void timer_selftest(void)
 	      : " — WRONG, the tick stopped or ran away\r\n");
 
 	/*
-	 * The period says how fast, and this one is decided tightly, because
-	 * the shortest gap between two ticks cannot be lengthened by anything
-	 * the host does. It is also a comparison of two independent clocks —
-	 * the counter against the APIC timer — which the count is not.
+	 * The period says how fast, taken as the middle of every gap measured.
+	 * Tightly decided, because the middle of the distribution is where the
+	 * host's interference is not — and it compares two independent clocks,
+	 * the counter against the APIC timer, which the count does not.
 	 */
-	kputs("UrMach x86-64: the average gap between ticks is ");
+	kputs("UrMach x86-64: the median gap between ticks is ");
 	kputdec((unsigned)period);
 	kputs(" counter units, one period is ");
 	kputdec((unsigned)expected);
