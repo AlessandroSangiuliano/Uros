@@ -431,7 +431,14 @@ WriteTemplateKPD_port(FILE *file, register argument_t *arg, boolean_t in)
     fprintf(file, "\tstatic %s %s = {\n", it->itUserKPDType, arg->argTTName);
 
     fprintf(file, "\t\t/* name = */\t\tMACH_PORT_NULL,\n");
-    fprintf(file, "\t\t/* pad1 = */\t\t0,\n");
+    /*
+     * pad1 is an array as of #413 — one word on i386, two on x86-64, derived
+     * from the width of an address so that every descriptor is one size.  A
+     * braced zero initialises it whatever that count turns out to be, which
+     * is what a generator wants: the template stops naming a width it cannot
+     * see from here.
+     */
+    fprintf(file, "\t\t/* pad1 = */\t\t{0},\n");
     fprintf(file, "\t\t/* pad2 = */\t\t0,\n");
     fprintf(file, "\t\t/* disp = */\t\t%s,\n",
 	in ? it->itInNameStr: it->itOutNameStr);

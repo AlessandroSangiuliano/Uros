@@ -82,6 +82,21 @@ typedef struct {
     mach_msg_size_t msgh_descriptor_count;
 } mach_msg_body_t;
 
+/*
+ * ⚠️ These sizes are the i386 wire format, hard-coded, and migcom has no
+ * idea what target it is generating for (#416 is where it learns).  Stating
+ * them as conditions turns "someone made address a void* again" from wrong
+ * msgh_size constants in generated code into a failure to build the tool.
+ *
+ * The real header derives all of this from the width of an address (#413).
+ * This one cannot: the address whose width matters belongs to the target,
+ * and the only pointer this file can measure belongs to the host.
+ */
+_Static_assert(sizeof(mach_msg_descriptor_t) == 12,
+	"migcom emits the i386 wire format: descriptors are 12 bytes");
+_Static_assert(sizeof(mach_msg_body_t) == 4,
+	"migcom emits the i386 wire format: the body is one 32-bit count");
+
 /* Message header used by mig */
 typedef struct {
     mach_msg_bits_t msgh_bits;
