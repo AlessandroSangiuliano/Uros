@@ -1046,13 +1046,55 @@ never touches, because nothing in it is a pointer.
 
 Keeping `natural_t` narrow is not the same as deciding that everything made
 of it should stay narrow, and one of them has an argument on the other side.
-A name today is **24 bits of index and 8 bits of generation**. The index is
-generous to the point of irrelevance — sixteen million ports in one task —
-and the generation is not: **a name is reused after 256 allocate/deallocate
-cycles at the same slot**. That is the window in which a stale name comes
-back meaning a different port, which is a capability question and not a
-capacity one, and it is the only place in this table where sixty-four bits
-would buy something real.
+A name today is **24 bits of index and 8 bits of generation** — and the
+generation is worth less than that says. `IE_BITS_GEN_ONE` is `0x04000000`,
+which advances the eight-bit field by four, so it takes **64 distinct
+values**, and the low two bits of every kernel-allocated name are always
+zero. They were reserved for a fast-path tag on port names that is not
+implemented: the generator emits the test for it disabled, as
+`if (0 /* Should be: !(x & 0x3) XXX */)`.
+
+So the real recycle window is **64 allocate/deallocate cycles at the same
+slot**, after which a stale name comes back meaning a different port. That is
+a capability question, not a capacity one, and it is the only entry in the
+table above where more bits buy something real.
+
+**How many index bits are actually reachable is a measured number, not
+`2^24`.** A task's names come from its entry table, and `ipc_table_fill`
+grows that table through 511 sizes and stops: **967,168 entries on i386 and
+484,608 on x86-64** — the same 14.8 MiB of table, half as many entries
+because an entry is twice the size. Twenty bits of index covers the first,
+nineteen the second. **Everything above bit 20 is unreachable**, which is
+what makes the trade look the way it does.
+
+| split | index limit | recycle window | what it costs |
+|---|---|---|---|
+| 24 / 8 (today) | 16.7M — table stops at 967k | **64** | — |
+| 22 / 10 | 4.2M | **1024** (×16) | the disabled low-bit tag |
+| 20 / 12 | 1.05M | 4096 (×64) | that, plus 2 bits from `ie_bits` |
+| 16 / 16 | **65,536** | 65,536 | **a real cut**: ~967k ports per task → 65k |
+
+**The second constraint is `ie_bits`, and it is tighter than the name.** The
+generation lives there too: 16 bits of user-references, 5 of capability type,
+1 for collisions, 8 for generation — and bits 21 and 22 free. So **ten** bits
+of generation fit with nothing displaced; twelve would take two bits from the
+user-reference count, dropping its ceiling from 65,535 to 16,383.
+
+**Recommended: 22 bits of index and 10 of generation, incrementing by one.**
+It is sixteen times today's window, it costs no bit anywhere, and the index
+it gives up was never reachable. What it gives up is the low-bit tag, which
+is disabled at the generator.
+
+**And it need not be a compromise, because it can be per-target.** The
+numbers that bound it — the table ceiling — are already per-target, so the
+split macros belong beside the widths in `mach/machine/`, exactly as
+`vm_offset_t` does. i386 keeps 24/8 bit for bit; x86-64 takes 22/10; nothing
+is changed in the one configuration that currently runs.
+
+**This does not close the sixty-four-bit question, it de-urgents it.** A
+wider name would buy a window of millions rather than a thousand, for eight
+bytes on every message header and a restructuring of `ie_bits`. Worth
+deciding on its own terms, once there is something to measure it with (#431).
 
 **Widening `natural_t` is the expensive way to buy it.** The header goes from
 24 bytes to 48 and every message pays the copy, to widen counts and sizes
