@@ -9,6 +9,7 @@
 
 #include <cpu/desc.h>
 #include <cpu/regs.h>
+#include <ddb/ksym.h>
 #include <cpu/tss.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
@@ -213,11 +214,35 @@ static void report_page_fault(uint64_t error)
  */
 #define BACKTRACE_MAX	16
 
+/*
+ * The name of whatever contains an address, when there is one.
+ *
+ * Silent when there is not, rather than printing "unknown": the address is
+ * already on the line, and a word that means "no answer" costs a column on
+ * every frame to say what the absence of a name already says.
+ */
+static void report_symbol(uint64_t addr)
+{
+	uint64_t off = 0;
+	const char *name = ksym_lookup(addr, &off);
+
+	if (name == 0)
+		return;
+
+	tputs(" <");
+	tputs(name);
+	if (off != 0) {
+		tputs("+");
+		tputhex(off);
+	}
+	tputs(">");
+}
+
 static void backtrace(uint64_t rbp)
 {
 	pmap_t kernel = pmap_kernel();
 
-	tputs("  backtrace (resolve with addr2line):\r\n");
+	tputs("  backtrace (addr2line for file and line):\r\n");
 
 	for (unsigned depth = 0; depth < BACKTRACE_MAX; depth++) {
 		const uint64_t *frame;
@@ -240,6 +265,7 @@ static void backtrace(uint64_t rbp)
 
 		tputs("    ");
 		tputhex(ret);
+		report_symbol(ret);
 		tputs("\r\n");
 
 		if (next <= rbp)

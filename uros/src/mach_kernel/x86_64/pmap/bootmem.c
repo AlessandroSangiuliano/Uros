@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <boot/multiboot2.h>
+#include <ddb/ksym.h>
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
 #include <pmap/layout.h>
@@ -65,6 +66,23 @@ static uint64_t compute_low_water(uint32_t info_pa)
 
 	if (image_end > mark)
 		mark = image_end;
+
+	/*
+	 * The symbol tables the loader placed in low memory (#428).
+	 *
+	 * They are not part of the information structure, so the two checks
+	 * around this one do not cover them — and handing out the page that
+	 * holds the symbol table would make every later backtrace name
+	 * functions read out of a page table. A wrong name is worse than no
+	 * name: it sends the reader somewhere, and it looks exactly like a
+	 * right one.
+	 */
+	{
+		uint64_t syms_end = ksym_data_end(info_pa);
+
+		if (syms_end > mark)
+			mark = syms_end;
+	}
 
 	if (info_pa != 0) {
 		/* First word of the structure is its own total size. */

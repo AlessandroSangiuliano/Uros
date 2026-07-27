@@ -32,8 +32,26 @@
  * 32-bit RSDT address, and the 2.0 one that adds a 64-bit XSDT address.  A
  * loader supplies whichever the firmware offered.
  */
+#define MB2_TAG_ELF_SECTIONS	9	/* the kernel's own section headers */
 #define MB2_TAG_ACPI_OLD	14	/* ACPI 1.0 RSDP */
 #define MB2_TAG_ACPI_NEW	15	/* ACPI 2.0+ RSDP */
+
+/*
+ * The kernel's own ELF section headers, which the loader passes back because
+ * it has them anyway.  `.symtab` and `.strtab` are among them, which is why
+ * this target needs no separate symbol file (#428).
+ *
+ * `shndx` names the section holding the section *names*; the symbol names
+ * are in a different string table, the one the symbol table itself links to.
+ */
+struct mb2_tag_elf_sections {
+	uint32_t type;
+	uint32_t size;
+	uint32_t num;
+	uint32_t entsize;
+	uint32_t shndx;
+	/* section headers follow */
+};
 
 struct mb2_tag {
 	uint32_t type;

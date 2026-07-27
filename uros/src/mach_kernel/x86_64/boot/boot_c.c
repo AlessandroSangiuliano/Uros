@@ -27,6 +27,7 @@
 #include <cpu/acpi.h>
 #include <cpu/desc.h>
 #include <cpu/ioapic.h>
+#include <ddb/ksym.h>
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
@@ -342,6 +343,13 @@ static void bootmem_selftest(uint32_t info)
 	uint64_t a, b, c, mark;
 	const volatile uint64_t *first;
 	int clean = 1;
+
+	/*
+	 * Symbols before the allocator, and that order is not cosmetic: the
+	 * allocator asks ksym_data_end() what to keep off, so the tables have
+	 * to have been found before the first frame is handed out.
+	 */
+	ksym_init(info);
 
 	boot_frame_init(info);
 	mark = boot_frame_low_water();
@@ -2480,6 +2488,109 @@ static void timer_selftest(void)
 }
 
 /*
+ * The kernel can name its own functions (#428).
+ *
+ * The symbols arrive with the kernel: GRUB passes the ELF section headers
+ * back in the boot information, and `.symtab` and `.strtab` are among them.
+ * No file to build, no module to load — only somebody reading them.
+ *
+ * The check asks the lookup about *this function*, so the answer names the
+ * test: a table read from the wrong place, or a string table belonging to a
+ * different section, gives a name that is a real string from somewhere else,
+ * which reads as a symbol and is not. Comparing against a name known at
+ * compile time is what tells those apart.
+ */
+static int name_is(const char *a, const char *b)
+{
+	while (*a && *a == *b) {
+		a++;
+		b++;
+	}
+	return *a == 0 && *b == 0;
+}
+
+/*
+ * Two frames deep, so the claim is about a *chain* and not about one lookup.
+ *
+ * A return address is the instruction after a call, which is inside the
+ * caller — so naming it is what a backtrace does at every frame, and checking
+ * two of them checks the walk rather than the table.
+ *
+ * ⚠️ Two things here are load-bearing and both were found by getting them
+ * wrong. `noinline`, or these collapse into one function and the test passes
+ * by having nothing to walk. And each level does work *after* its call, which
+ * is what stops the compiler turning `call` plus `ret` into a `jmp`: a tail
+ * call reuses the caller's frame, so the frame simply is not there, and no
+ * walk based on frame pointers can show a frame that does not exist. The
+ * first version of this asked for two levels from one place and got
+ * "ksym_selftest then x86_64_boot" — the middle frame had been optimised
+ * away, and the test was wrong rather than the kernel.
+ *
+ * That is worth knowing beyond this test: a backtrace on an optimised build
+ * is complete, but a function that ends in a tail call is not a frame.
+ */
+static const char *bt_caller;
+static const char *bt_caller_of_caller;
+static volatile int bt_sink;
+
+__attribute__((noinline)) static void bt_leaf(void)
+{
+	bt_caller = ksym_lookup((uint64_t)(uintptr_t)__builtin_return_address(0),
+				0);
+	bt_sink++;
+}
+
+__attribute__((noinline)) static void bt_middle(void)
+{
+	bt_leaf();
+	bt_caller_of_caller =
+		ksym_lookup((uint64_t)(uintptr_t)__builtin_return_address(0), 0);
+	bt_sink++;
+}
+
+static void ksym_selftest(void)
+{
+	uint64_t off = ~0ULL;
+	const char *self = ksym_lookup((uint64_t)(uintptr_t)&ksym_selftest, &off);
+
+	kputs("UrMach x86-64: ");
+	kputdec(ksym_count());
+	kputs(" symbols, and this function calls itself ");
+	kputs(self ? self : "(nothing)");
+	kputs(self && name_is(self, "ksym_selftest") && off == 0
+	      ? " — the kernel can name its own code\r\n"
+	      : " — WRONG, the symbol table is not the one it should be\r\n");
+
+	/*
+	 * And an address no function covers must come back with nothing.
+	 * Without this the lookup could be returning the nearest symbol at any
+	 * distance, which would put a confident name on every wild address a
+	 * broken backtrace produced.
+	 */
+	kputs("UrMach x86-64: an address in no function resolves to ");
+	{
+		const char *none = ksym_lookup(0x1000, 0);
+
+		kputs(none ? none : "nothing");
+		kputs(none ? " — WRONG, a name was invented for it\r\n"
+			   : " — nothing, which is the honest answer\r\n");
+	}
+
+	/* And the same lookup applied the way a backtrace applies it. */
+	bt_middle();
+
+	kputs("UrMach x86-64: two frames up from a leaf are ");
+	kputs(bt_caller ? bt_caller : "(nothing)");
+	kputs(" then ");
+	kputs(bt_caller_of_caller ? bt_caller_of_caller : "(nothing)");
+	kputs(bt_caller && bt_caller_of_caller
+	      && name_is(bt_caller, "bt_middle")
+	      && name_is(bt_caller_of_caller, "ksym_selftest")
+	      ? " — a walk names every frame, not just the first\r\n"
+	      : " — WRONG, the chain does not resolve\r\n");
+}
+
+/*
  * What the firmware says about device interrupts (#409).
  *
  * Reported before anything is programmed, because the two facts here are the
@@ -3246,6 +3357,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	thread_state_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
+	ksym_selftest();
 	ioapic_madt_selftest();
 	tsc_selftest();
 	timer_selftest();
