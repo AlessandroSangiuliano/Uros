@@ -2238,6 +2238,124 @@ static void tsc_selftest(void)
 }
 
 /*
+ * The tick (#409).
+ *
+ * Counted per processor, because the timer is per processor and a single
+ * total could not tell a machine where every processor ticks from one where
+ * the boot processor ticks eight times as often. That distinction is the
+ * entire reason for preferring the local APIC timer to the 8254, so the
+ * counter has to be able to express it.
+ */
+static volatile uint64_t ticks[SMP_MAX_CPUS];
+
+static void timer_tick(struct trap_frame *frame)
+{
+	(void)frame;
+
+	ticks[cpu_apic_id()]++;
+
+	/*
+	 * Acknowledged here and not by the caller. An interrupt that is never
+	 * acknowledged does not repeat, so forgetting this gives exactly one
+	 * tick and then a clock that has stopped — which reads as a timer that
+	 * was never armed rather than as one that was.
+	 */
+	lapic_eoi();
+}
+
+/*
+ * The tick, checked against the ruler that measured it.
+ *
+ * A timer verified against its own calibration would be checking arithmetic
+ * against itself. This counts real interrupts over an interval measured by
+ * the 8254, which is a different device from the one being tested, so the
+ * two can disagree — and a rate that is wrong by a factor shows up as a
+ * count that is wrong by the same factor.
+ *
+ * A thousand ticks a second rather than a hundred: fifty milliseconds is
+ * about as long as one 8254 countdown reaches, and at a hundred hertz that
+ * is five ticks, where being one out is twenty percent. Fifty ticks make the
+ * tolerance mean something.
+ */
+#define TICK_TEST_HZ	1000u
+#define TICK_TEST_US	50000u
+
+static void timer_selftest(void)
+{
+	uint32_t rate = lapic_timer_calibrate();
+	uint32_t me = cpu_apic_id();
+	uint64_t got, off, want = (uint64_t)TICK_TEST_HZ * TICK_TEST_US / 1000000u;
+	int had_interrupts;
+
+	kputs("UrMach x86-64: the local APIC timer counts at ");
+	kputdec((unsigned)(rate / 1000));
+	kputs(" kHz after the divisor");
+
+	if (rate == 0) {
+		kputs(" — WRONG, it never counted\r\n");
+		return;
+	}
+	kputs(", measured against the 8254\r\n");
+
+	trap_set_handler(LAPIC_TIMER_VECTOR, timer_tick);
+	ticks[me] = 0;
+
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	if (!lapic_timer_start(TICK_TEST_HZ, LAPIC_TIMER_VECTOR)) {
+		kputs("UrMach x86-64: the timer refused the requested tick — WRONG\r\n");
+		return;
+	}
+
+	pit_delay_us(TICK_TEST_US);
+
+	lapic_timer_stop();
+	if (!had_interrupts)
+		interrupts_disable();
+
+	got = ticks[me];
+	off = got > want ? got - want : want - got;
+
+	/*
+	 * One tick, plus two percent.
+	 *
+	 * The one is not slack, it is arithmetic: a window of duration T
+	 * contains either floor(T/P) or ceil(T/P) periods depending on the
+	 * phase it is opened at, and nothing here controls that phase. The
+	 * count is systematically one short in practice, because the window
+	 * opens just after the timer is armed and closes just before the tick
+	 * that would land on its edge.
+	 *
+	 * The two percent is for the oscillators: the interval and the tick
+	 * are measured by different clocks and neither is disciplined to the
+	 * other.
+	 *
+	 * ⚠️ This is *tighter* than the tenth it replaces, not looser. At fifty
+	 * ticks a tenth would have accepted a rate wrong by five percent; this
+	 * accepts four percent at most, and less as the count grows. The first
+	 * version of this line failed at 49 of 50 and the temptation was to
+	 * widen the tolerance until it passed — which would have been fitting
+	 * the test to the answer.
+	 *
+	 * A wrong rate and a machine that cannot service the rate look
+	 * different, and the difference is worth knowing: a wrong divisor or
+	 * countdown is out by a factor and in either direction, while a machine
+	 * falling behind is only ever short and gets shorter as more is asked
+	 * of it. Measured here: every rate to 1000 Hz was exact to within the
+	 * phase, and 2000 Hz returned 91 of 100 — that is the emulator, not
+	 * the timer.
+	 */
+	kputs("UrMach x86-64: asked for ");
+	kputdec((unsigned)want);
+	kputs(" ticks in 50 ms and took ");
+	kputdec((unsigned)got);
+	kputs(off <= 1 + want / 50
+	      ? " — the tick fires at the rate it was told\r\n"
+	      : " — WRONG, the tick is not at the rate it was told\r\n");
+}
+
+/*
  * The swapgs window, arranged on purpose (#440).
  *
  * There are two instruction boundaries where the processor is at ring 0 and
@@ -2696,6 +2814,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	user_reachable_selftest();
 	ring3_selftest();
 	tsc_selftest();
+	timer_selftest();
 	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();

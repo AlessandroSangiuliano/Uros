@@ -10,6 +10,7 @@
 #include <cpu/lapic.h>
 #include <cpu/regs.h>
 #include <pmap/pmap.h>
+#include <time/pit.h>
 #include <trap/trap.h>
 
 #define MSR_APIC_BASE		0x1B
@@ -26,6 +27,26 @@
 #define LAPIC_SVR		0x0F0	/* spurious vector, and the enable bit */
 #define LAPIC_ICR_LOW		0x300
 #define LAPIC_ICR_HIGH		0x310
+#define LAPIC_LVT_TIMER		0x320	/* vector, mode and mask   */
+#define LAPIC_TIMER_INIT	0x380	/* what it counts down from */
+#define LAPIC_TIMER_CUR		0x390	/* where it is now          */
+#define LAPIC_TIMER_DIV		0x3E0	/* the divisor, oddly coded */
+
+#define LVT_MASKED		(1U << 16)
+#define LVT_TIMER_PERIODIC	(1U << 17)
+
+/*
+ * The divisor field is not a number: its three bits are 3, 1 and 0, with bit
+ * 2 unused, so the encodings do not run in order.  0b1011 is divide by one,
+ * and 0b0011 — the value below — is divide by sixteen.
+ *
+ * Sixteen because both ends matter.  Undivided, a fast bus overflows the
+ * thirty-two bit counter in a few seconds, which is not enough range for a
+ * slow tick to be expressed as one countdown; divided far harder, a fast
+ * tick starts being quantised by the divisor itself.  Sixteen leaves room at
+ * both ends on every machine this will see.
+ */
+#define TIMER_DIVIDE_16		0x3
 
 #define SVR_APIC_ENABLE		(1U << 8)
 
@@ -228,6 +249,106 @@ void lapic_send_nmi(uint32_t apic_id)
 	 */
 	icr_send(apic_id, ICR_DELIVERY_NMI | ICR_LEVEL_ASSERT);
 	icr_wait_idle();
+}
+
+/* ------------------------------------------------------------------ */
+/*  The timer (#409)                                                    */
+/* ------------------------------------------------------------------ */
+/*
+ * Measured once, on the boot processor, and used by all of them.
+ *
+ * The rate is a property of the machine rather than of a processor — every
+ * local APIC timer counts off the same bus or crystal clock — while the
+ * timer itself is per processor, which is the whole reason for preferring it
+ * to the 8254.  So one measurement is shared and each processor arms its own
+ * countdown from it.
+ *
+ * ⚠️ It has to be measured on one processor at a time regardless: the ruler
+ * is the 8254, and the 8254 is a single global device. Two processors
+ * calibrating at once would be two callers programming one counter.
+ */
+static uint32_t timer_hz;
+
+uint32_t lapic_timer_calibrate(void)
+{
+	uint32_t before, after;
+
+	if (!lapic_present())
+		return 0;
+
+	/*
+	 * Masked throughout.  Calibration is a measurement, not a service, and
+	 * a vector delivered in the middle of it would be an interrupt nobody
+	 * has arranged to handle yet.
+	 */
+	lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
+	lapic_write(LAPIC_TIMER_DIV, TIMER_DIVIDE_16);
+
+	/*
+	 * Count down from the top, so the interval cannot reach zero and wrap
+	 * into a small difference that looks like a slow clock.
+	 */
+	lapic_write(LAPIC_TIMER_INIT, 0xFFFFFFFFu);
+	before = lapic_read(LAPIC_TIMER_CUR);
+
+	if (!pit_delay_us(LAPIC_CALIBRATE_US)) {
+		lapic_write(LAPIC_TIMER_INIT, 0);
+		return 0;
+	}
+
+	after = lapic_read(LAPIC_TIMER_CUR);
+	lapic_write(LAPIC_TIMER_INIT, 0);	/* stop */
+
+	if (after >= before)
+		return 0;			/* it never counted */
+
+	timer_hz = (uint32_t)(((uint64_t)(before - after) * 1000000u)
+			      / LAPIC_CALIBRATE_US);
+	return timer_hz;
+}
+
+uint32_t lapic_timer_hz(void)
+{
+	return timer_hz;
+}
+
+int lapic_timer_start(unsigned hz, uint8_t vector)
+{
+	uint32_t count;
+
+	if (timer_hz == 0 || hz == 0)
+		return 0;
+
+	count = timer_hz / hz;
+
+	/*
+	 * A count of zero means "stopped", not "as fast as possible", so a
+	 * tick faster than the timer can express has to be refused rather than
+	 * silently turned off.  This is the shape of failure that looks like a
+	 * working kernel with no clock.
+	 */
+	if (count == 0)
+		return 0;
+
+	/*
+	 * The divisor again on every processor: it is per-APIC state, and an
+	 * application processor arrives with whatever reset left in it rather
+	 * than with what the boot processor chose during calibration.
+	 */
+	lapic_write(LAPIC_TIMER_DIV, TIMER_DIVIDE_16);
+	lapic_write(LAPIC_LVT_TIMER, LVT_TIMER_PERIODIC | vector);
+	lapic_write(LAPIC_TIMER_INIT, count);
+	return 1;
+}
+
+void lapic_timer_stop(void)
+{
+	if (!lapic_present())
+		return;
+
+	/* Count first, then mask: masking alone leaves it counting. */
+	lapic_write(LAPIC_TIMER_INIT, 0);
+	lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
 }
 
 void lapic_broadcast_ipi(uint8_t vector)

@@ -125,6 +125,55 @@ void lapic_send_ipi(uint32_t apic_id, uint8_t vector);
  * is also what an NMI watchdog will be built on (#355 has one on i386).
  */
 void lapic_send_nmi(uint32_t apic_id);
+
+/* ------------------------------------------------------------------ */
+/*  The timer (#409)                                                    */
+/* ------------------------------------------------------------------ */
+/*
+ * The tick comes from here and not from the 8254, and that is a structural
+ * decision rather than a modernisation.  The 8254 is one device with one
+ * mask for the whole machine, while interrupt priority is per processor — so
+ * a processor sitting at a high priority masks the tick for everybody, which
+ * is the coupling that starved the disk on i386 (#304). A timer that lives
+ * in each processor's own local APIC cannot have that failure.
+ *
+ * The 8254 keeps one job: being a frequency that names itself, so this one
+ * can be measured. See <time/pit.h>.
+ */
+#define LAPIC_TIMER_VECTOR	0xF0
+#define LAPIC_CALIBRATE_US	20000u
+
+/*
+ * Measure how fast the timer counts, on this processor, against the 8254.
+ * Returns the rate in hertz *after* the divisor, which is the number a
+ * countdown is expressed in, or zero if it could not be measured.
+ *
+ * Boot processor only, and once: the ruler is a single global device, so two
+ * processors measuring at the same moment would be two callers programming
+ * one counter. The answer is shared because the rate belongs to the machine;
+ * the timer that uses it belongs to each processor.
+ */
+uint32_t lapic_timer_calibrate(void);
+
+/* The measured rate, or zero if calibration has not run or did not work. */
+uint32_t lapic_timer_hz(void);
+
+/*
+ * Arm this processor's timer to deliver `vector` `hz` times a second.
+ *
+ * Per processor, and called by each: the divisor and the countdown are APIC
+ * state, and an application processor arrives with whatever reset left
+ * behind rather than with what the boot processor chose.
+ *
+ * Returns zero if the rate is unknown or the requested tick is faster than
+ * one countdown can express — refused rather than rounded to zero, because a
+ * countdown of zero means *stopped*, and that failure looks exactly like a
+ * working kernel whose clock never fires.
+ */
+int lapic_timer_start(unsigned hz, uint8_t vector);
+
+/* Stop this processor's timer: the countdown first, then the mask. */
+void lapic_timer_stop(void);
 void lapic_broadcast_ipi(uint8_t vector);
 
 #endif	/* _X86_64_CPU_LAPIC_H_ */
