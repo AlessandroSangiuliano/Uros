@@ -66,6 +66,18 @@ typedef struct mig_target {
 	 * stops being the same computation as laying out a structure.
 	 */
 	u_int		mt_max_align;
+
+	/*
+	 * Whether this target has the RPC-trap glue that the short-circuit
+	 * path calls into — RPC_SIMPLE and its neighbours, declared in
+	 * <mach/machine/rpc.h>.  x86-64 does not: those macros are i386
+	 * register names describing an argument list that, under a convention
+	 * where the first six arguments arrive in registers, is not anywhere.
+	 * Emitting the calls anyway produces stubs that compile against a
+	 * header without them and fail to link, which is a worse way to learn
+	 * it than this one.
+	 */
+	boolean_t	mt_rpc_trap;
 } mig_target_t;
 
 extern const mig_target_t *Target;

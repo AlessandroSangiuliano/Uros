@@ -37,6 +37,7 @@ static const mig_target_t Targets[] = {
 		 * for thirty years.
 		 */
 		.mt_max_align		= 4,
+		.mt_rpc_trap		= TRUE,
 	},
 	{
 		.mt_name		= "x86_64",
@@ -46,6 +47,7 @@ static const mig_target_t Targets[] = {
 		.mt_descriptor_size	= 16,
 		.mt_descriptor_align	= 8,
 		.mt_max_align		= 8,
+		.mt_rpc_trap		= FALSE,
 	},
 };
 

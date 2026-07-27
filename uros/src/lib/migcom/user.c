@@ -228,6 +228,7 @@
 #include "error.h"
 #include "utils.h"
 #include "global.h"
+#include "target.h"
 #include <stdlib.h>
 
 char *MessAllocRoutine = "mig_user_allocate";
@@ -338,7 +339,7 @@ WriteIncludes(FILE *file)
 	fprintf(file, "#include <mach/mach_types.h>\n");
 	fprintf(file, "#include <mach/message.h>\n");
 	fprintf(file, "#include <mach/mig_errors.h>\n");
-	if (ShortCircuit)
+	if (ShortCircuit && Target->mt_rpc_trap)
 		fprintf(file, "#include <mach/rpc.h>\n");
 	if (IsKernelUser) {
 	    fprintf(file, "#include <ipc/ipc_port.h>\n");
@@ -2662,7 +2663,7 @@ WriteRoutine(FILE *file, register routine_t *rt)
 	WriteRPCRoutine(file, rt);
 
     /* write the code for doing a short-circuited RPC: */
-    if (ShortCircuit)
+    if (ShortCircuit && Target->mt_rpc_trap)
 	WriteShortCircRPC(file, rt);
 
     fprintf(file, "    {\n");

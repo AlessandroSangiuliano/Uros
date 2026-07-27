@@ -652,14 +652,34 @@ rtFindSize(argument_t *args, u_int mask, boolean_t ismax, boolean_t simple)
 {
     register argument_t *arg;
     u_int size = Target->mt_header_size;
+    int pass;
 
     if (!simple) {
 	size = TargetAlignUp(size, Target->mt_descriptor_align);
 	size += Target->mt_body_size;
     }
-    for (arg = args; arg != argNULL; arg = arg->argNext)
-	if (akCheck(arg->argKind, mask)) {
+    /*
+     * ⚠️ Twice, and in this order, because that is the order the fields are
+     * declared in (WriteStructDecl): the kernel-processed data comes first,
+     * right after the body, and everything else follows it.
+     *
+     * Walking the arguments in the order they were written works for adding
+     * sizes up, which is why it was never wrong before.  It stops working the
+     * moment padding is involved: a descriptor is eight-aligned on this
+     * target, so meeting it after a four-byte field puts four bytes of
+     * padding in front of it — padding the compiler does not insert, because
+     * in the structure the descriptor never comes after that field at all.
+     * That is four bytes of overcount, and it produced the first two
+     * assertion failures this arrangement ever caught.
+     */
+    for (pass = 0; pass < 2; pass++)
+	for (arg = args; arg != argNULL; arg = arg->argNext) {
 	    register ipc_type_t *it = arg->argType;
+
+	    if (!akCheck(arg->argKind, mask))
+		continue;
+	    if ((pass == 0) != (IS_KERN_PROC_DATA(it) != 0))
+		continue;
 
 	    /*
 	     * A variable-sized array is two fields: a 32-bit count, then the

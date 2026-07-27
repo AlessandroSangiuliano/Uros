@@ -802,6 +802,16 @@ init_type(void)
     itNdrCodeType->itOutNameStr = "NDR_record_t";
     itNdrCodeType->itSize = Target->mt_ndr_size * 8;
     itCalculateSizeInfo(itNdrCodeType);
+    /*
+     * ⚠️ And its alignment is one, which the size cannot tell you (#416).
+     *
+     * NDR_record_t is eight *bytes* — encoding tags, not a scalar — so the
+     * compiler asks nothing of the address it starts at.  itCalculateSizeInfo
+     * has only the width to go on and concludes eight, which on a target
+     * where eight-byte alignment exists inserts padding in front of a field
+     * that needs none.
+     */
+    itNdrCodeType->itAlignment = 1;
     itCalculateNameInfo(itNdrCodeType);
 
     itDummyType = itAlloc();
