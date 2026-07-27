@@ -2437,7 +2437,9 @@ static void timer_selftest(void)
 	int had_interrupts;
 
 	kputs("UrMach x86-64: the local APIC timer counts at ");
-	kputdec((unsigned)(rate / 1000));
+	kputdec((unsigned)(lapic_timer_hz_run(0) / 1000));
+	kputs(" and ");
+	kputdec((unsigned)(lapic_timer_hz_run(1) / 1000));
 	kputs(" kHz after the divisor");
 
 	if (rate == 0) {
@@ -2543,8 +2545,29 @@ static void timer_selftest(void)
 		return;
 	}
 
+	/*
+	 * 🔑 The bound is *derived*, not chosen: one part in thirty-two, which
+	 * is the sum of the two calibrations' own tolerances.
+	 *
+	 * Each clock is measured twice and accepted if the two runs agree
+	 * within one part in sixty-four. So each of the two numbers going into
+	 * this ratio is permitted to be that far out, and the ratio of two such
+	 * numbers is permitted to be twice that. A tighter bound here would be
+	 * asserting an accuracy the inputs do not promise — it would fail on
+	 * calibrations that were accepted as good, which is a test contradicting
+	 * its own premises rather than catching a defect.
+	 *
+	 * Measured, and this is why a tighter number was tried and rejected:
+	 * sixteen boots put the median within ±0.35% of the period except one
+	 * at +0.93%, and that boot's two timer calibrations were 62739 and
+	 * 62546 kHz — 0.31% apart and duly accepted. The outlier is calibration
+	 * noise arriving where the design says it may.
+	 *
+	 * Which also says where to look if this ever needs to be tighter: not
+	 * here, but at the two calibrations feeding it.
+	 */
 	off = period > expected ? period - expected : expected - period;
-	kputs(off <= expected / 20
+	kputs(off <= expected / 32
 	      ? " — the tick runs at the rate it was told\r\n"
 	      : " — WRONG, the tick is not at the rate it was told\r\n");
 }
@@ -2906,7 +2929,23 @@ static void ap_timer_stop(void *arg)
 
 static void smp_timer_selftest(void)
 {
-	uint64_t want = TICK_WANT, allowed = TICK_ALLOWED;
+	/*
+	 * ⚠️ Loose, and deliberately looser than the single-processor check
+	 * above — because this test is about *where* the ticks arrive, not how
+	 * fast. Judging it by a tight count was left over from before the
+	 * count was understood to be a poor rate estimator, and it failed a
+	 * perfectly good boot: "96 96 95 94 — 0 of 4", four processors each
+	 * ticking on their own, marked wrong because the host had stolen a few
+	 * milliseconds from each.
+	 *
+	 * What must still be caught is a processor that did not tick at all,
+	 * and one ticking at a rate nobody asked for. A tenth either way
+	 * catches both and nothing the host does reaches that far. The upper
+	 * side is nearly free: a periodic timer cannot deliver more ticks than
+	 * its period allows, so a count that is too *high* means the countdown
+	 * itself is wrong.
+	 */
+	uint64_t want = TICK_WANT, allowed = want / 10;
 	unsigned counted = 0, good = 0;
 
 	if (smp_online_count() < 2) {

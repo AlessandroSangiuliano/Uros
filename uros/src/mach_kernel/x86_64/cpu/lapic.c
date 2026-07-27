@@ -269,12 +269,9 @@ void lapic_send_nmi(uint32_t apic_id)
  */
 static uint32_t timer_hz;
 
-uint32_t lapic_timer_calibrate(void)
+static uint32_t timer_measure_once(void)
 {
 	uint32_t before, after;
-
-	if (!lapic_present())
-		return 0;
 
 	/*
 	 * Masked throughout.  Calibration is a measurement, not a service, and
@@ -302,9 +299,61 @@ uint32_t lapic_timer_calibrate(void)
 	if (after >= before)
 		return 0;			/* it never counted */
 
-	timer_hz = (uint32_t)(((uint64_t)(before - after) * 1000000u)
-			      / LAPIC_CALIBRATE_US);
+	return (uint32_t)(((uint64_t)(before - after) * 1000000u)
+			  / LAPIC_CALIBRATE_US);
+}
+
+/*
+ * Twice, and the two must agree — the same discipline the timestamp counter's
+ * calibration already had, applied here because the two are compared against
+ * each other later and a bound on that comparison is only as good as the
+ * weaker of the two measurements.
+ *
+ * A single reading cannot tell a frequency from an interval that was
+ * interrupted: a system-management interrupt inside the window, or the host
+ * taking the emulator off its processor, gives a number that is wrong and
+ * looks ordinary. Two that agree are not proof — they share a ruler — but one
+ * that disagrees with itself is proof of the opposite, which is the case this
+ * can decide.
+ *
+ * One part in sixty-four, matching the counter's, so the two sides of the
+ * comparison are held to the same standard rather than to two numbers chosen
+ * separately.
+ */
+#define TIMER_CALIBRATE_TOLERANCE	64
+
+static uint32_t timer_hz_run[2];
+
+uint32_t lapic_timer_calibrate(void)
+{
+	uint32_t spread, allowed;
+
+	timer_hz = 0;
+
+	if (!lapic_present())
+		return 0;
+
+	timer_hz_run[0] = timer_measure_once();
+	timer_hz_run[1] = timer_measure_once();
+
+	if (timer_hz_run[0] == 0 || timer_hz_run[1] == 0)
+		return 0;
+
+	spread = timer_hz_run[0] > timer_hz_run[1]
+	       ? timer_hz_run[0] - timer_hz_run[1]
+	       : timer_hz_run[1] - timer_hz_run[0];
+	allowed = timer_hz_run[0] / TIMER_CALIBRATE_TOLERANCE;
+
+	if (spread > allowed)
+		return 0;
+
+	timer_hz = (timer_hz_run[0] + timer_hz_run[1]) / 2;
 	return timer_hz;
+}
+
+uint32_t lapic_timer_hz_run(unsigned which)
+{
+	return which < 2 ? timer_hz_run[which] : 0;
 }
 
 uint32_t lapic_timer_hz(void)
