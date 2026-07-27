@@ -961,10 +961,52 @@ fields sit together at fixed offsets near the front of the block.
 segment base on its own: the syscall path does it as its first instruction,
 and the trap path does it only when the saved code segment says ring 3.
 Missing it means kernel code reading `%gs:0` follows an address a user
-program chose. One window remains, between the code-segment change and the
-exchange retiring, where a non-maskable interrupt would decide correctly
-from the code segment and wrongly in fact — closed by deciding from the
-segment base instead, tracked as #440.
+program chose.
+
+### 11.10 The swapgs window
+
+Deciding from the saved code segment is right for every vector whose arrival
+the kernel controls, and wrong for the ones whose arrival it does not. There
+are two instruction boundaries where the processor is at ring 0 and `%gs`
+still belongs to a user program: after `SYSCALL` and before the entry's own
+`swapgs`, and after the exit's `swapgs` and before `SYSRET`. A vector
+delivered there reads a ring-0 code segment, concludes correctly that it must
+not swap, and runs the kernel on a base a user chose (#440).
+
+**Which vectors is not a matter of taste.** Both windows run with interrupts
+disabled — `SYSCALL` clears `IF` through `FMASK`, and the way out never sets
+it — so every maskable vector is excluded by the flag, and the set that
+remains is exactly its complement: `#DB`, `NMI`, `#DF`, `#MC`. Those four
+take a separate entry; everything else keeps the cheaper rule.
+
+**They decide from the segment base.** `IA32_GS_BASE` holds what is loaded
+now, which is the one fact the window cannot misrepresent. §11.1 gives the
+two halves of the address space to two different owners, so the sign bit of
+the base is the answer — `WRMSR` refuses a non-canonical base, which makes
+"bit 63 set" and "at or above `KERNEL_HALF_BASE`" the same statement. The
+cost is one `RDMSR` on four vectors, none of which is a path anything is
+optimising.
+
+The exit cannot recompute the decision — by then the base is the kernel's
+either way — and cannot write the old one back either, because `swapgs`
+moves *both* halves of the pair and restoring one would leave the user's base
+where the next entry swaps to it. So the entry carries one bit forward: the
+inverse of `swapgs` is `swapgs`.
+
+**Two conditions the check depends on, both decided rather than assumed.**
+`CR4.FSGSBASE` is cleared on every processor, so ring 3 cannot write a base
+at all; enabling it later — it is a real gain for thread-local storage —
+means teaching the entry to find the per-CPU block without `%gs`, from
+`RDPID` or the descriptor limit. And any base arriving from outside through
+thread state must be refused unless it is in the lower half. Whoever changes
+either owns the entry as well.
+
+**`#DB` also needs a stack of its own,** and for the same window. A trap at
+ring 0 does not switch stacks, and `SYSCALL` has not switched one yet, so
+`%rsp` still holds whatever a user program left in it — a debug exception
+delivered there would push its frame at that address, at ring 0, through the
+kernel's mapping. That is a write, not a disclosure. The other three vectors
+already had interrupt-stack slots for unrelated reasons; this is the fourth.
 
 ---
 

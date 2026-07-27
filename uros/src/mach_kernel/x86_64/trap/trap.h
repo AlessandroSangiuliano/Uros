@@ -109,19 +109,47 @@ struct trap_frame {
  * Interrupt stack table slots, numbered as the gate field is: 1 to 7, with
  * zero meaning "whatever stack was current".
  *
- * These three get their own stack because they are the ones most likely to
- * fire when the current stack is the problem — a double fault often *is* a
+ * The first three get their own stack because they are the ones most likely
+ * to fire when the current stack is the problem — a double fault often *is* a
  * stack that cannot be pushed to, and an NMI can arrive in the middle of
  * anything, including that.  Handling them on the broken stack is how a
  * fault becomes a reset with nothing on the wire.
  *
  * A machine check gets one for a different reason: it can arrive at any
  * point, including inside the handler for something else.
+ *
+ * ── And the debug exception, which is here because of #440 ────────────
+ *
+ * A trap that arrives at ring 0 does *not* switch stacks: the processor
+ * changes stacks on a privilege transition, or when the gate names a slot in
+ * this table, and neither applies.  Everywhere else that is exactly right,
+ * because a kernel trapping at ring 0 was already standing on a kernel
+ * stack.
+ *
+ * Not in the syscall window.  SYSCALL does not switch the stack either, so
+ * for the few instructions before the entry loads one, the processor is at
+ * ring 0 with %rsp still holding whatever a user program left in it — and a
+ * user program may leave any value at all in %rsp, including the address of
+ * something the kernel cares about.  A debug exception delivered there would
+ * push its frame at that address, at ring 0, through the kernel's own
+ * mapping.  That is not a leak of information; it is a write.
+ *
+ * Which is why the three vectors that could already arrive in that window
+ * had stacks and this one has to as well.  It is the same list as the one in
+ * entry.S, for the same reason, and the two must not drift apart: the vector
+ * that decides %gs from the base is the vector that cannot trust %rsp
+ * either.
+ *
+ * ⚠️ An IST slot is a fixed address, so a second exception on the same slot
+ * lands on top of the first one's frame.  Nothing here arms a breakpoint
+ * from inside a handler, so it cannot nest today — the day something does,
+ * it inherits this.
  */
 #define IST_DOUBLE_FAULT	1
 #define IST_NMI			2
 #define IST_MACHINE_CHECK	3
-#define IST_COUNT		3
+#define IST_DEBUG		4
+#define IST_COUNT		4
 
 struct tss64;
 
@@ -164,6 +192,21 @@ void trap_init(void);
 void trap_dispatch(struct trap_frame *frame);
 
 /*
+ * Entry from the four stubs that cannot decide from the saved code segment
+ * (#440): #DB, NMI, #DF and #MC.  See trap/entry.S for why those four and no
+ * others, and for how the decision is made.
+ *
+ * The two extra arguments are the evidence, passed along rather than
+ * recomputed: `gs_on_entry` is the base the vector arrived with, before the
+ * entry did anything about it, and `swapped` is what the entry decided.
+ * Neither can be recovered afterwards — by the time C runs the base is the
+ * kernel's whichever way the decision went, which is precisely the property
+ * that makes it correct and also the reason it has to be carried.
+ */
+void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
+			    uint64_t swapped);
+
+/*
  * What a vector is called.  Exported because a number on a serial line is a
  * lookup performed at the worst possible moment, and the tests report faults
  * they provoked on purpose as often as the handler reports the others.
@@ -203,6 +246,19 @@ void trap_set_handler(unsigned vector, trap_handler_t handler);
 void trap_expect(uint64_t vector, uint64_t resume_rip);
 
 /*
+ * Resume at the instruction the trap arrived on, rather than somewhere else.
+ *
+ * For the faults trap_expect() was written for, resuming where they happened
+ * would repeat them forever, so a different address is the only useful
+ * answer.  For the ones that are not the instruction's fault — a debug
+ * exception armed from outside, an interrupt that is not maskable — the
+ * instruction has not run yet or has run correctly, and continuing is what
+ * the handler is supposed to do.  Zero is not an address a resume could
+ * legitimately be, which is what lets it mean this.
+ */
+#define TRAP_RESUME_HERE	0UL
+
+/*
  * What the last expected trap turned out to be.  Reporting a fault is one
  * thing; being able to check that the frame carried the right vector, the
  * right error code and a plausible instruction pointer is what tells us the
@@ -220,6 +276,36 @@ struct trap_record {
 };
 
 const struct trap_record *trap_last(void);
+
+/*
+ * What the last vector that took the paranoid entry found there (#440).
+ *
+ * A record of its own rather than two more fields on the one above, because
+ * only one of the two paths can fill them in.  A field that is meaningful
+ * after some traps and stale after the others is worse than no field: it
+ * reads the same either way, and the reader has no way to ask which it got.
+ *
+ * `cs` is here because it is the evidence *against* the rule this path
+ * replaces — a window trap carries a ring-0 code segment, so recording it
+ * alongside a user base is what makes the two disagree in the record rather
+ * than only in the argument.
+ */
+struct trap_paranoid_record {
+	uint64_t vector;
+	uint64_t rip;			/* and where in the window it landed  */
+	uint64_t cs;			/* what the ring rule would have read */
+	uint64_t gs_on_entry;		/* the base the window left loaded    */
+	uint64_t gs_on_dispatch;	/* and the one the handler ran with   */
+	uint64_t swapped;		/* whether the entry exchanged them   */
+	int      taken;
+};
+
+const struct trap_paranoid_record *trap_last_paranoid(void);
+
+/* Forget the last one, so that "it happened" can be distinguished from "it
+ * happened earlier".  A test that only checks the contents of this record
+ * would pass on a stale one from a previous experiment. */
+void trap_paranoid_forget(void);
 
 /*
  * Arrange for the next fault *from ring 3* to return to the kernel instead

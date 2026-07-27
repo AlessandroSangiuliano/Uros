@@ -67,6 +67,20 @@
 extern char __user_probe_start[], __user_probe_end[];
 
 /*
+ * The second entry point in that same page (#440): two instructions asking
+ * whether ring 3 may read its own segment base.
+ *
+ * Its address here is the one it has in the kernel image, which is not the
+ * one it will have when it runs — so what is useful is the distance from the
+ * start of the section, and the caller adds that to USER_PROBE_CODE_VA.
+ */
+extern char user_probe_fsgsbase[];
+
+#define USER_PROBE_FSGSBASE_VA					\
+	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_fsgsbase	\
+					 - __user_probe_start))
+
+/*
  * Where a fault from the probe comes back to.  Declared here only so the
  * kernel can recognise it in a report; the arming is done by the entry
  * itself, which is the only code that knows the stack the return needs.

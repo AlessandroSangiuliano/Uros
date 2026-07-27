@@ -109,6 +109,22 @@ void lapic_send_self(uint8_t vector);
  * question, and the reason the layer above this one counts answers.
  */
 void lapic_send_ipi(uint32_t apic_id, uint8_t vector);
+
+/*
+ * A non-maskable interrupt to one processor, which is how the kernel gets to
+ * choose when one arrives instead of waiting for the hardware to send one.
+ *
+ * NMI delivery carries no vector — the processor takes vector 2 by
+ * definition — so there is no number to pass.  Nor is there a shorthand: the
+ * self shorthand is defined for fixed delivery only, so a processor
+ * interrupting itself this way has to name its own APIC id like any other
+ * destination.
+ *
+ * It exists for the swapgs-window test of #440, which needs a vector that
+ * arrives at a moment the kernel chose and that no flag can hold back.  It
+ * is also what an NMI watchdog will be built on (#355 has one on i386).
+ */
+void lapic_send_nmi(uint32_t apic_id);
 void lapic_broadcast_ipi(uint8_t vector);
 
 #endif	/* _X86_64_CPU_LAPIC_H_ */

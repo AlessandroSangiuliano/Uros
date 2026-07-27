@@ -41,7 +41,6 @@
 
 #define SYSCALL_FMASK	(RFLAGS_IF | RFLAGS_DF | RFLAGS_AC | RFLAGS_TF | RFLAGS_NT)
 
-extern void syscall_entry(void);
 
 /*
  * Which per-CPU block the last probe call was reached with.

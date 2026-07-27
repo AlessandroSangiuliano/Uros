@@ -525,6 +525,31 @@ void pmap_protect_kernel(void)
 	write_cr0(read_cr0() | CR0_WP);
 }
 
+/*
+ * Whether the bit was actually set, which is not the same as whether the
+ * processor has it: a part without SMAP leaves this clear and the access
+ * brackets below become nothing, because their instructions would be
+ * invalid opcodes.
+ */
+static int smap_on;
+
+int pmap_smap_enabled(void)
+{
+	return smap_on;
+}
+
+void pmap_user_access_begin(void)
+{
+	if (smap_on)
+		__asm__ volatile("stac" ::: "cc", "memory");
+}
+
+void pmap_user_access_end(void)
+{
+	if (smap_on)
+		__asm__ volatile("clac" ::: "cc", "memory");
+}
+
 uint64_t pmap_enable_smep_smap(void)
 {
 	uint64_t want = 0;
@@ -533,17 +558,23 @@ uint64_t pmap_enable_smep_smap(void)
 		want |= CR4_SMEP;
 
 	/*
-	 * SMAP is safe to turn on now precisely because nothing yet sets the
-	 * user bit in a page-table entry: pmap_flags_for_prot() has no case
-	 * for it, so the lower-half mappings this kernel makes are supervisor
-	 * pages that SMAP does not police.  When mappings that userland can
-	 * reach do arrive, the kernel paths that deliberately read or write
-	 * them will need stac and clac around the access — and will fault
-	 * loudly if they forget, which is the point of turning it on early
-	 * rather than once there is something to break.
+	 * That prediction has since come true, which is worth recording
+	 * because it is the argument for turning a protection on before there
+	 * is anything for it to protect.
+	 *
+	 * When this was written no page-table entry carried the user bit, so
+	 * SMAP policed nothing; the comment said the deliberate accesses would
+	 * need stac and clac once such mappings arrived, and would fault
+	 * loudly if they forgot.  #411 made lower-half mappings genuinely
+	 * user-reachable, and the next boot on a processor that has SMAP
+	 * faulted on exactly one line — the one place the kernel reads through
+	 * a user address on purpose.  Not on a machine in the field, and not
+	 * as a corruption: as a page fault with an address, in a selftest.
 	 */
-	if (cpu_has_smap())
+	if (cpu_has_smap()) {
 		want |= CR4_SMAP;
+		smap_on = 1;
+	}
 
 	if (want)
 		write_cr4(read_cr4() | want);
