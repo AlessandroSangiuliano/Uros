@@ -118,6 +118,9 @@ extern void WriteStructDecl(FILE *file, argument_t *args,
 			    boolean_t template_only,
 			    u_int minsize, u_int maxsize);
 
+extern u_int OolElementUnit(argument_t *arg);
+extern identifier_t OolElementType(argument_t *arg, boolean_t isuser);
+
 extern void WriteStaticDecl(FILE *file, argument_t *arg);
 
 extern void WriteCopyType(FILE *file, ipc_type_t *it,

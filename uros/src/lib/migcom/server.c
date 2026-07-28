@@ -1569,9 +1569,9 @@ WriteKPD_ool(FILE *file, register argument_t *arg)
 	else
 	    fprintf(file, "OutP->%s%s", count->argMsgField, subindex);
 	
-        if (howbig > 8)
+        if (OolElementUnit(arg) > 1)
             fprintf(file, " * %d;\n", 
-		count->argMultiplier * howbig / 8);
+		OolElementUnit(arg));
         else
             fprintf(file, ";\n");
     } 

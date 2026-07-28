@@ -331,6 +331,98 @@ SafeString(FILE *file, const char *s)
     fputs(s, file);
 }
 
+/*
+ * How many bytes one element of an out-of-line region occupies (#416).
+ *
+ * Out-of-line data does not travel in the message: the message carries a
+ * descriptor holding an address and a byte count, and that count is the
+ * caller's element count multiplied by this.  So this number is used on every
+ * call, and no assertion about the message's own layout reaches it — none of
+ * those bytes is in the message.
+ *
+ * ⚠️ It lives here because it was computed in two places with two different
+ * conditions.  The user stub multiplied when `argMultiplier > 1 || howbig >
+ * 8`; the server stub multiplied only when `howbig > 8`.  An element of two
+ * or more components each a byte wide — `array[] of struct[2] of char` — is
+ * therefore counted twice by the sender and once by the receiver: the same
+ * region, two lengths, and nothing in either stub that could notice.  No
+ * .defs in this tree declares such a type, which is why it has never fired;
+ * one function is how it stops being able to.
+ *
+ * A multiplier of zero reaches the same fate as one.  Zero bytes per element
+ * is not a size any declaration means, and the arithmetic that produced it
+ * would silently transfer nothing.
+ */
+u_int
+OolElementUnit(register argument_t *arg)
+{
+    register ipc_type_t *it = arg->argType;
+    register argument_t *count;
+    u_int howbig, mult;
+
+    if (IS_MULTIPLE_KPD(it)) {
+	count = arg->argSubCount;
+	howbig = it->itElement->itSize;
+    } else {
+	count = arg->argCount;
+	howbig = it->itSize;
+    }
+
+    mult = (count != argNULL && count->argMultiplier > 0)
+	   ? count->argMultiplier : 1;
+
+    if (mult > 1 || howbig > 8)
+	return mult * howbig / 8;
+
+    return 1;
+}
+
+/*
+ * And the name of the C type that unit is the size of, when there is one.
+ *
+ * There is one exactly when the unit is wider than a byte.  A region measured
+ * in bytes is measured in bytes on every target and by every declaration —
+ * `pointer_t` is `^array[] of MACH_MSG_TYPE_BYTE`, and its element has no C
+ * type of its own to disagree about.  Above a byte the count means elements,
+ * the element is a real type, and its width is a claim worth settling.
+ */
+identifier_t
+OolElementType(register argument_t *arg, boolean_t isuser)
+{
+    register ipc_type_t *it = arg->argType;
+    register ipc_type_t *element;
+    register const char *c;
+
+    /*
+     * Out-of-line *data* only.  A port argument has no region behind it, and
+     * an out-of-line array of ports is measured in ports — migcom fills in a
+     * count, not a byte size, so there is no multiplier here to settle.  An
+     * assertion on either would be true and would be about nothing, which
+     * teaches a reader to skim them.
+     */
+    if (it->itInLine || it->itPortType)
+	return strNULL;
+    if (OolElementUnit(arg) <= 1)
+	return strNULL;
+
+    element = IS_MULTIPLE_KPD(it) ? it->itElement->itElement : it->itElement;
+    if (element == itNULL)
+	return strNULL;
+
+    c = isuser ? element->itUserType : element->itServerType;
+    if (c == strNULL)
+	return strNULL;
+
+    /* A name with a `*` or a space in it is a derived type whose spelling is
+       not guaranteed to be usable where an assertion needs it. */
+    for (; *c != '\0'; c++)
+	if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z')
+	      || (*c >= '0' && *c <= '9') || *c == '_'))
+	    return strNULL;
+
+    return isuser ? element->itUserType : element->itServerType;
+}
+
 void
 WriteFieldDeclPrim(FILE *file, argument_t *arg,
                    char *(*tfunc)(ipc_type_t *it))
@@ -419,6 +511,35 @@ WriteFieldDeclPrim(FILE *file, argument_t *arg,
  * sender and the receiver must arrive at the *same* number, and a marker both
  * of them carry is what guarantees it.
  */
+/*
+ * And that unit, settled against the compiler (#416).
+ *
+ * This is the last number migcom emits about a message that no other
+ * assertion reaches, because the bytes it measures are not in the message:
+ * the descriptor holds an address, and this is what the caller's element
+ * count is multiplied by to say how many bytes to transfer.  Getting it wrong
+ * transfers the wrong amount of somebody else's memory, on every call, and
+ * nothing in either stub is in a position to notice.
+ *
+ * It is checked against the element type's own name, and it is the *shared*
+ * derivation that is checked — the same call the two stubs use to emit the
+ * multiplier.  Asserting a separately computed copy would compare migcom with
+ * migcom and prove nothing.
+ */
+static void
+WriteOolUnitAssert(FILE *file, register argument_t *arg, boolean_t isuser)
+{
+    identifier_t type = OolElementType(arg, isuser);
+
+    if (type == strNULL)
+	return;
+
+    fprintf(file, "\t_Static_assert(sizeof(%s) == %d,\n",
+	    type, OolElementUnit(arg));
+    fprintf(file, "\t\t\"MIG measures the out-of-line %s in the wrong unit\");\n",
+	    arg->argMsgField);
+}
+
 static void
 WriteFieldAssert(FILE *file, char *name, register argument_t *arg)
 {
@@ -469,8 +590,10 @@ WriteStructAssert(FILE *file, char *name, argument_t *args, u_int mask,
      */
     if (!simple)
 	for (arg = args; arg != argNULL; arg = arg->argNext)
-	    if (akCheckAll(arg->argKind, kpd))
+	    if (akCheckAll(arg->argKind, kpd)) {
 		WriteFieldAssert(file, name, arg);
+		WriteOolUnitAssert(file, arg, isuser);
+	    }
 
     for (arg = args; arg != argNULL; arg = arg->argNext)
 	if (akCheckAll(arg->argKind, body))

@@ -1132,9 +1132,9 @@ WriteOverwriteTemplate(FILE *file, routine_t *rt)
 		    fprintf(file, "\t%ssize = ", string);
 		    if (VarIndex) {
 			cref = count->argByReferenceUser ? "*" : "";
-			if (count->argMultiplier > 1 || howbig > 8)
+			if (OolElementUnit(arg) > 1)
 	 		    fprintf(file, "%s%s%s * %d;\n", cref, count->argVarName, subindex,
-				count->argMultiplier * howbig / 8);
+				OolElementUnit(arg));
 		        else
 	 		    fprintf(file, "%s%s%s;\n", cref, count->argVarName, subindex);
 		    } else
