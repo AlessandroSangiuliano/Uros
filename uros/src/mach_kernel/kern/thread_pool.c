@@ -100,7 +100,7 @@ thread_pool_get_act(ipc_port_t pool_port)
 #if	MACH_ASSERT
 	assert(thread_pool != THREAD_POOL_NULL);
 	if (watchacts & WA_ACT_LNK)
-		printf("thread_pool_block: %x, waiting=%d\n",
+		printf("thread_pool_block: %p, waiting=%d\n",
 		       thread_pool, thread_pool->waiting);
 #endif
 
@@ -121,7 +121,7 @@ thread_pool_get_act(ipc_port_t pool_port)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)
-		printf("thread_pool_block: return %x, next=%x\n",
+		printf("thread_pool_block: return %p, next=%p\n",
 		       thr_act, thread_pool->thr_acts);
 #endif
 	return thr_act;
@@ -177,7 +177,7 @@ thread_pool_wakeup(thread_pool_t thread_pool)
 #if	MACH_ASSERT
 	assert(thread_pool != THREAD_POOL_NULL);
 	if (watchacts & WA_ACT_LNK)
-		printf("thread_pool_wakeup: %x, waiting=%d, head=%x\n",
+		printf("thread_pool_wakeup: %p, waiting=%d, head=%p\n",
 		   thread_pool, thread_pool->waiting, thread_pool->thr_acts);
 #endif	/* MACH_ASSERT */
 

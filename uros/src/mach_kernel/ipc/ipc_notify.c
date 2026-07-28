@@ -302,7 +302,7 @@ ipc_notify_port_deleted(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped port-deleted (0x%08x, 0x%x)\n", port, name);
+		printf("dropped port-deleted (%p, 0x%x)\n", port, name);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -348,7 +348,7 @@ ipc_notify_port_destroyed(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped port-destroyed (0x%08x, 0x%08x)\n",
+		printf("dropped port-destroyed (%p, %p)\n",
 		       port, right);
 		ipc_port_release_sonce(port);
 		ipc_port_release_receive(right);
@@ -393,7 +393,7 @@ ipc_notify_no_senders(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped no-senders (0x%08x, %u)\n", port, mscount);
+		printf("dropped no-senders (%p, %u)\n", port, mscount);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -458,7 +458,7 @@ ipc_notify_send_once(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped send-once (0x%08x)\n", port);
+		printf("dropped send-once (%p)\n", port);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -500,7 +500,7 @@ ipc_notify_dead_name(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped dead-name (0x%08x, 0x%x)\n", port, name);
+		printf("dropped dead-name (%p, 0x%x)\n", port, name);
 		ipc_port_release_sonce(port);
 		return;
 	}

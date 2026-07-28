@@ -452,7 +452,7 @@ task_init(void)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_TASK)
-	    printf("task_init: kernel_task = %x map=%x\n",
+	    printf("task_init: kernel_task = %p map=%p\n",
 				kernel_task, kernel_map);
 #endif	/* MACH_ASSERT */
 }
@@ -540,7 +540,7 @@ kernel_task_create(
 			 * New task created with ref count of 2 -- decrement by
 			 * one to force task deletion.
 			 */
-			printf("kmem_suballoc(%x,%x,%x,1,0,&new) Fails\n",
+			printf("kmem_suballoc(%p,%x,%x,1,0,&new) Fails\n",
 			       kernel_map, map_base, map_size);
 			--new_task->ref_count;
 			task_deallocate(new_task);
@@ -760,7 +760,7 @@ task_create_local(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_TASK)
-	    printf("*** task_create_local(par=%x inh=%x) == 0x%x\n",
+	    printf("*** task_create_local(par=%p inh=%x) == %p\n",
 			parent_task, inherit_memory, new_task);
 #endif	/* MACH_ASSERT */
 
@@ -783,7 +783,7 @@ task_free( register task_t	task )
 #if	MACH_ASSERT
 	assert(task != 0);
 	if (watchacts & (WA_EXIT|WA_TASK))
-	    printf("task_free(%x(%d)) map ref %d\n", task, task->ref_count,
+	    printf("task_free(%p(%d)) map ref %d\n", task, task->ref_count,
 			task->map->ref_count);
 #endif	/* MACH_ASSERT */
 
@@ -870,7 +870,7 @@ task_act_iterate(task_t task, kern_return_t (*func)(thread_act_t inc))
 #if	MACH_ASSERT
 	int c1 = task->thr_act_count, c2 = 0;
 	if (watchacts & WA_TASK)
-	    printf("\ttask_act_iterate(task=%x, func=%x)\n", task, func);
+	    printf("\ttask_act_iterate(task=%p, func=%p)\n", task, func);
 #endif	/* MACH_ASSERT */
 
 	/* During iteration, find the next act _before_ calling the function,

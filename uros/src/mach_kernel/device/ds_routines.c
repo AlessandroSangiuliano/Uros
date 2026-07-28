@@ -2014,7 +2014,7 @@ ds_no_senders(
 		 * doing a ds_device_close(), do it now.
 		 */
 		if ( (rc=ds_device_close(device)) != D_SUCCESS )
-			printf("ds_no_senders() ds_device_close(%x) rc %d\n",
+			printf("ds_no_senders() ds_device_close(%p) rc %d\n",
 				device,rc);
 	}
 }
@@ -2029,7 +2029,7 @@ ds_notify(
 		return TRUE;
 
 		default:
-		printf("ds_notify: strange notification %ld\n", msg->msgh_id);
+		printf("ds_notify: strange notification %d\n", msg->msgh_id);
 		return FALSE;
 	}
 }
