@@ -273,6 +273,14 @@ printnum(
 
 boolean_t	_doprnt_truncates = FALSE;
 
+/*
+ * How wide the next integer argument is (#415).  Named rather than counted
+ * so that the arms of the two fetch switches read as the widths they are.
+ */
+#define	LEN_INT		0
+#define	LEN_LONG	1
+#define	LEN_LONGLONG	2
+
 void 
 _doprnt(
 	register const char	*fmt,
@@ -293,6 +301,7 @@ _doprnt(
 	int		base;
 	register char	c;
 	int		capitals;
+	int		lensize;
 
 	while ((c = *fmt) != '\0') {
 	    if (c != '%') {
@@ -366,8 +375,42 @@ _doprnt(
 		}
 	    }
 
-	    if (c == 'l')
-		c = *++fmt;	/* need it if sizeof(int) < sizeof(long) */
+	    /*
+	     * The length modifier, which this formatter used to read and
+	     * throw away (#415):
+	     *
+	     *   if (c == 'l')
+	     *       c = *++fmt;  // need it if sizeof(int) < sizeof(long)
+	     *
+	     * The comment above it, in the 1987 original, says the rest: "It
+	     * accepts, but ignores, an `l' ... and therefore will not work
+	     * correctly on machines for which sizeof(long) != sizeof(int)."
+	     * That machine is x86-64, and the note has been waiting here for
+	     * thirty-nine years for somebody to arrive on one.
+	     *
+	     * Discarding it was survivable only because every conversion below
+	     * then fetched a long regardless, which on i386 is the same four
+	     * bytes an int would have been.  It is not the same eight bytes:
+	     * an int argument read as a long takes its own value and whatever
+	     * the ABI left in the upper half -- and for a *negative* int that
+	     * upper half is not sign, so `printf("%d", -1)` becomes 4294967295
+	     * and print_signed's `n >= 0` agrees that it is positive.
+	     */
+	    lensize = LEN_INT;
+	    while (c == 'l') {
+		lensize = (lensize == LEN_LONG) ? LEN_LONGLONG : LEN_LONG;
+		c = *++fmt;
+	    }
+	    while (c == 'h') {
+		/*
+		 * Accepted and deliberately not acted on: default argument
+		 * promotion has already widened a short or a char to an int
+		 * by the time it reaches here, so there is nothing narrower
+		 * to fetch. Recorded rather than silently skipped, which is
+		 * how the `l' came to be ignored.
+		 */
+		c = *++fmt;
+	    }
 
 	    truncate = FALSE;
 	    capitals=0;		/* Assume lower case printing */
@@ -380,7 +423,18 @@ _doprnt(
 		    boolean_t	  any;
 		    register int  i;
 
-		    u = va_arg(*argp, unsigned long);
+		    /* #415: the register value at the width asked for. */
+		    switch (lensize) {
+		    case LEN_LONGLONG:
+			u = (unsigned long) va_arg(*argp, unsigned long long);
+			break;
+		    case LEN_LONG:
+			u = va_arg(*argp, unsigned long);
+			break;
+		    default:
+			u = va_arg(*argp, unsigned int);
+			break;
+		    }
 		    p = va_arg(*argp, char *);
 		    base = *p++;
 		    printnum(u, base, putc);
@@ -483,21 +537,39 @@ _doprnt(
 		    break;
 		}
 
+		/*
+		 * The capitalised forms are this dialect's way of saying
+		 * "long", from before C had `l' to say it with: the lower-case
+		 * arm sets `truncate' and the upper-case one does not, and
+		 * truncation was to int.  Now that `l' is honoured they say
+		 * the same thing twice, so they say it the same way -- and
+		 * keep meaning long, which is what their five remaining
+		 * callers in ddb/ were written against (#415).
+		 */
 		case 'o':
 		    truncate = _doprnt_truncates;
+		    base = 8;
+		    goto print_unsigned;
 		case 'O':
+		    lensize = LEN_LONG;
 		    base = 8;
 		    goto print_unsigned;
 
 		case 'd':
 		    truncate = _doprnt_truncates;
+		    base = 10;
+		    goto print_signed;
 		case 'D':
+		    lensize = LEN_LONG;
 		    base = 10;
 		    goto print_signed;
 
 		case 'u':
 		    truncate = _doprnt_truncates;
+		    base = 10;
+		    goto print_unsigned;
 		case 'U':
+		    lensize = LEN_LONG;
 		    base = 10;
 		    goto print_unsigned;
 
@@ -506,6 +578,11 @@ _doprnt(
 		    base = 16;
 		    goto print_unsigned;
 
+		/*
+		 * %X is standard C -- upper-case hex, int-wide -- and not one
+		 * of the capitalised "long" forms above, however much it looks
+		 * like one.  %lX is how you ask for the wide version.
+		 */
 		case 'X':
 		    base = 16;
 		    capitals=16;	/* Print in upper case */
@@ -513,8 +590,13 @@ _doprnt(
 
 		case 'p':
 		    /* Pointer: emit "0x" then the unsigned hex value, zero-
-		     * padded to the host pointer width so columns align. */
-		    truncate = _doprnt_truncates;
+		     * padded to the host pointer width so columns align.
+		     *
+		     * #415: fetched at pointer width, not at whatever the
+		     * format's length modifier happened to say.  A pointer is
+		     * not an int here any more, and reading one as an int is
+		     * how %p comes to print the lower half of an address.
+		     */
 		    base = 16;
 		    if (length == 0) {
 			length = (int)(2 * sizeof(void *));
@@ -522,32 +604,61 @@ _doprnt(
 		    }
 		    (*putc)('0');
 		    (*putc)('x');
-		    goto print_unsigned;
+		    u = (unsigned long)(vm_offset_t) va_arg(*argp, void *);
+		    goto print_num;
 
 		case 'z':
 		    truncate = _doprnt_truncates;
 		    base = 16;
 		    goto print_signed;
-			
+
 		case 'Z':
+		    lensize = LEN_LONG;
 		    base = 16;
 		    capitals=16;	/* Print in upper case */
 		    goto print_signed;
 
 		case 'r':
 		    truncate = _doprnt_truncates;
+		    base = radix;
+		    goto print_signed;
 		case 'R':
+		    lensize = LEN_LONG;
 		    base = radix;
 		    goto print_signed;
 
 		case 'n':
 		    truncate = _doprnt_truncates;
+		    base = radix;
+		    goto print_unsigned;
 		case 'N':
+		    lensize = LEN_LONG;
 		    base = radix;
 		    goto print_unsigned;
 
+		/*
+		 * Fetch at the width the conversion was written for, not at
+		 * one width for all of them (#415).  On i386 every arm below
+		 * reads the same four bytes and the distinction costs
+		 * nothing; on x86-64 it is the difference between a value and
+		 * a value with eight unrelated bytes attached.
+		 *
+		 * The signed side must fetch signed: an int arrives
+		 * sign-extended into its slot, and reading it as a long takes
+		 * that sign for data.
+		 */
 		print_signed:
-		    n = va_arg(*argp, long);
+		    switch (lensize) {
+		    case LEN_LONGLONG:
+			n = (long) va_arg(*argp, long long);
+			break;
+		    case LEN_LONG:
+			n = va_arg(*argp, long);
+			break;
+		    default:
+			n = va_arg(*argp, int);
+			break;
+		    }
 		    if (n >= 0) {
 			u = n;
 			sign_char = plus_sign;
@@ -559,7 +670,17 @@ _doprnt(
 		    goto print_num;
 
 		print_unsigned:
-		    u = va_arg(*argp, unsigned long);
+		    switch (lensize) {
+		    case LEN_LONGLONG:
+			u = (unsigned long) va_arg(*argp, unsigned long long);
+			break;
+		    case LEN_LONG:
+			u = va_arg(*argp, unsigned long);
+			break;
+		    default:
+			u = va_arg(*argp, unsigned int);
+			break;
+		    }
 		    goto print_num;
 
 		print_num:
