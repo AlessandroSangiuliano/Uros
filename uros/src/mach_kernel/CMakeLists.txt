@@ -233,15 +233,37 @@ set(KERNEL_C_FLAGS
     -fno-optimize-sibling-calls
     -std=gnu11
     -Wall
-    -Wno-implicit-function-declaration
-    -Wno-int-conversion  
+    #
+    # #415.  Three suppressions used to live here and all three were about
+    # width: -Wno-implicit-function-declaration, -Wno-int-conversion and
+    # -Wno-format.  They are the two halves of this audit's cheap side, and
+    # they were switched off wholesale.
+    #
+    # implicit-function-declaration is gone: an undeclared function is
+    # assumed to return int, so on the next target every call that returns a
+    # pointer or a physical address is truncated at the call site, silently
+    # and in the caller rather than in the callee where you would look.
+    #
+    # -Wno-format is gone too, and removing it changes nothing today: this
+    # kernel builds -fno-builtin with its own printf, db_printf and kprintf,
+    # none of which carries format(printf,...), so there was never anything
+    # for the warning to check.  It was guarding an empty room.  Annotating
+    # the print functions is what makes it real, and that is its own step --
+    # %x against a vm_offset_t is the thing the issue asks for.
+    #
+    # int-conversion stays visible but not fatal.  Two sites remain, and they
+    # are one fact, not two: the kernel keeps ipc_port_t pointers in message
+    # fields typed mach_port_t, which is exactly pointer-wide on i386 and
+    # will not be on x86-64.  Silencing it would hide the class; making it
+    # fatal would stop the build on a decision that belongs to the message
+    # ABI, not to a compiler flag.  So it warns, every build, by name.
+    -Wno-error=int-conversion
     -Wno-pointer-sign
     -Wno-unused-variable
     -Wno-unused-function
     -Wno-unused-but-set-variable
     -Wno-missing-braces
     -Wno-parentheses
-    -Wno-format
     ${KERNEL_OPT_FLAGS}
 )
 
