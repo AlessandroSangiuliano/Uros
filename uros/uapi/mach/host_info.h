@@ -214,8 +214,17 @@ typedef struct host_load_info	*host_load_info_t;
 #define	HOST_VM_INFO_COUNT \
 		(sizeof(vm_statistics_data_t)/sizeof(integer_t))
 
+/*
+ * #415: unsigned int, which is what Mach's ABI says and what the transport
+ * assumes.  These travel as an array of natural_t whose length is
+ * sizeof(this)/sizeof(natural_t), so with `unsigned long' each counter
+ * occupied two elements on x86-64 and one here -- the count adjusts, so
+ * nothing breaks while both sides are built for the same target, but the
+ * structure stops being the one the interface describes and every reader
+ * that walks the array as integers sees halves of counters.
+ */
 struct host_cpu_load_info {		/* number of ticks while running... */
-	unsigned long	cpu_ticks[CPU_STATE_MAX]; /* ... in the given mode */
+	unsigned int	cpu_ticks[CPU_STATE_MAX]; /* ... in the given mode */
 };
 typedef struct host_cpu_load_info	host_cpu_load_info_data_t;
 typedef struct host_cpu_load_info	*host_cpu_load_info_t;
