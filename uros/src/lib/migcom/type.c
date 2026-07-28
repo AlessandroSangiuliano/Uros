@@ -295,11 +295,14 @@ itCalculateSizeInfo(register ipc_type_t *it)
 	it->itAlignment = Target->mt_descriptor_align;
     }
 
-    /* Unfortunately, these warning messages can't give a type name;
-       we haven't seen a name yet (it might stay anonymous.) */
+    /* Unfortunately, this warning can't give a type name; we haven't seen a
+       name yet (it might stay anonymous.)  It used to say so with a %s and
+       no argument to match it, which reads whatever the calling convention
+       left where the argument would have been: the one diagnostic that fires
+       when a size is wrong was itself undefined behaviour. */
 
     if ((it->itTypeSize == 0) && !it->itVarArray)
-	warn("sizeof(%s) == 0");
+	warn("a fixed-size type computes to zero bytes");
 }
 
 /*
