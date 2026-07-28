@@ -3223,6 +3223,131 @@ static unsigned msg_marker_byte(const volatile unsigned char *b, unsigned n)
 	return ~0u;
 }
 
+/*
+ * The formatter panic() prints through (#415).
+ *
+ * panic became variadic because the machine-independent tree has always
+ * declared it that way and called it that way; what it prints through is new
+ * code, and new code under the last message the machine will ever send is
+ * worth checking before it is needed.  Each case is a format, its arguments,
+ * and the exact characters that must come out -- compared, not eyeballed,
+ * because "looks right on the serial line" is how a missing digit survives.
+ */
+static int str_equal(const char *a, const char *b)
+{
+	while (*a && *a == *b) {
+		a++;
+		b++;
+	}
+	return *a == *b;
+}
+
+/*
+ * The same call without the format attribute, for the cases that are
+ * deliberately malformed.  Three of them below are the point of the exercise
+ * -- a null %s, a conversion the formatter does not implement, a format that
+ * stops mid-conversion -- and cons_printf now refuses to compile exactly
+ * those, which is the attribute doing its job rather than getting in the way.
+ * Routing them through a pointer the compiler cannot fold says "this one is
+ * meant to be wrong" in a way that a suppression pragma would not.
+ */
+static void fmt_unchecked(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	cons_vprintf(fmt, ap);
+	va_end(ap);
+}
+
+static void panic_format_selftest(void)
+{
+	char got[80];
+	unsigned checked = 0, wrong = 0;
+
+	/*
+	 * Wrapped in a macro so each case reads as one line: what was asked
+	 * for, and what must come back.  The capture is started and stopped
+	 * around a single call, so a case that writes nothing is visible as an
+	 * empty result rather than as the previous case's leftovers.
+	 */
+#define FMT_CHECK(want)							\
+	do {								\
+		(void)cons_capture_end();				\
+		checked++;						\
+		if (!str_equal(got, want)) {				\
+			wrong++;					\
+			kputs("UrMach x86-64:   format WRONG: got \"");	\
+			kputs(got);					\
+			kputs("\" want \"");				\
+			kputs(want);					\
+			kputs("\"\r\n");				\
+		}							\
+	} while (0)
+
+#define FMT_CASE(want, ...)						\
+	do {								\
+		cons_capture_begin(got, sizeof(got));			\
+		cons_printf(__VA_ARGS__);				\
+		FMT_CHECK(want);					\
+	} while (0)
+
+/* Deliberately malformed: see fmt_unchecked above. */
+#define FMT_CASE_BAD(want, ...)						\
+	do {								\
+		cons_capture_begin(got, sizeof(got));			\
+		fmt_unchecked(__VA_ARGS__);				\
+		FMT_CHECK(want);					\
+	} while (0)
+
+	FMT_CASE("plain", "plain");
+	FMT_CASE("a string here", "a %s here", "string");
+	FMT_CASE_BAD("(null)", "%s", (const char *)0);
+	FMT_CASE("x", "%c", 'x');
+	FMT_CASE("0", "%d", 0);
+	FMT_CASE("-1", "%d", -1);
+	FMT_CASE("2147483647", "%d", 2147483647);
+	FMT_CASE("-2147483648", "%d", -2147483647 - 1);
+	FMT_CASE("4294967295", "%u", 4294967295u);
+	FMT_CASE("0000002a", "%x", 42u);
+	FMT_CASE("ffffffff", "%x", 4294967295u);
+	FMT_CASE("100%", "100%%");
+	FMT_CASE("a=1 b=two c=00000003", "a=%d b=%s c=%x", 1, "two", 3u);
+
+	/*
+	 * The reason the length modifiers exist.  An address on this target is
+	 * sixty-four bits: %x prints the low half and says nothing about the
+	 * half it dropped, which is a panic reporting a pointer that does not
+	 * exist.  Both are checked so the difference is a fact and not a
+	 * recollection.
+	 */
+	FMT_CASE("89abcdef", "%x", (unsigned int)0x0123456789abcdefUL);
+	FMT_CASE("0123456789abcdef", "%lx", 0x0123456789abcdefUL);
+	FMT_CASE("-9223372036854775808", "%ld", -9223372036854775807L - 1);
+	FMT_CASE("0x0000000012345678", "%p", (void *)0x12345678UL);
+
+	/*
+	 * A conversion the formatter does not implement must be visible rather
+	 * than swallowed: its argument cannot be stepped over without knowing
+	 * how wide it is, so everything after it would be read from the wrong
+	 * place.  Saying so is the only honest option left.
+	 */
+	FMT_CASE_BAD("q=%q <unsupported conversion, rest dropped>", "q=%q done", 1);
+
+	/* A format ending mid-conversion must not read past the string. */
+	FMT_CASE_BAD("end%", "end%");
+
+#undef FMT_CASE_BAD
+#undef FMT_CASE
+#undef FMT_CHECK
+
+	kputs("UrMach x86-64: ");
+	kputdec(checked);
+	kputs(" panic format cases, ");
+	kputdec(wrong);
+	kputs(wrong == 0 ? " wrong\r\n" : " WRONG\r\n");
+}
+
 static void msg_abi_selftest(void)
 {
 	/*
@@ -3824,6 +3949,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	timer_selftest();
 	ioapic_selftest();
 	spl_selftest();
+	panic_format_selftest();
 	msg_abi_selftest();
 	port_name_selftest();
 	swapgs_window_selftest();

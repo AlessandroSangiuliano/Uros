@@ -182,8 +182,19 @@ void trap_ist_setup(struct tss64 *tss, uint64_t block, uint64_t stack_size);
  * This is the bootstrap answer, not the final one: once there is a caller
  * that can do something about a failure, these become returned errors. What
  * they must not be in the meantime is invisible.
+ *
+ * #415: variadic, and not by taste.  kern/misc_protos.h declares
+ * `void panic(const char *string, ...)` and the MI tree calls it that way in
+ * a hundred and thirty-five places.  A non-variadic definition behind that
+ * declaration is undefined behaviour on the SysV ABI, and the concrete cost
+ * is that "%x" arrives as four characters instead of the value it was asked
+ * to print -- at the one moment when the value is the entire message.
+ *
+ * noreturn is deliberately NOT repeated here: the MI declaration does not
+ * carry it, and two declarations that differ are what this issue is about.
+ * The loop at the end of the definition says the same thing to the compiler.
  */
-void panic(const char *what) __attribute__((noreturn));
+void panic(const char *what, ...) __attribute__((format(printf, 1, 2)));
 
 /* Install the IDT on this CPU. */
 void trap_init(void);
