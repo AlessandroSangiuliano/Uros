@@ -274,21 +274,144 @@ printnum(
 boolean_t	_doprnt_truncates = FALSE;
 
 /*
- * How wide the next integer argument is (#415).  Named rather than counted
- * so that the arms of the two fetch switches read as the widths they are.
+ * How wide the next integer argument is (#415).  Short names locally; the
+ * shared spellings the debugger uses are DOPRNT_LEN_* in misc_protos.h, and
+ * they are the same numbers.
  */
-#define	LEN_INT		0
-#define	LEN_LONG	1
-#define	LEN_LONGLONG	2
+#define	LEN_INT		DOPRNT_LEN_INT
+#define	LEN_LONG	DOPRNT_LEN_LONG
+#define	LEN_LONGLONG	DOPRNT_LEN_LONGLONG
 
-void 
+/*
+ * Take the next integer argument at the width the conversion asked for.
+ *
+ * Split out of the parser so that the debugger's extra conversions fetch the
+ * same way this one does, rather than carrying a second copy of the rule
+ * (#415).  The signed side must fetch signed: an int arrives sign-extended
+ * into its slot, and reading it as a long takes that sign for data.
+ */
+long
+_doprnt_signed_arg(
+	const struct doprnt_spec	*spec,
+	va_list				*argp)
+{
+	switch (spec->ds_lensize) {
+	case DOPRNT_LEN_LONGLONG:
+		return (long) va_arg(*argp, long long);
+	case DOPRNT_LEN_LONG:
+		return va_arg(*argp, long);
+	default:
+		return va_arg(*argp, int);
+	}
+}
+
+unsigned long
+_doprnt_unsigned_arg(
+	const struct doprnt_spec	*spec,
+	va_list				*argp)
+{
+	switch (spec->ds_lensize) {
+	case DOPRNT_LEN_LONGLONG:
+		return (unsigned long) va_arg(*argp, unsigned long long);
+	case DOPRNT_LEN_LONG:
+		return va_arg(*argp, unsigned long);
+	default:
+		return va_arg(*argp, unsigned int);
+	}
+}
+
+/*
+ * Emit a number that has already been fetched, with the width, padding, sign
+ * and alternate-form prefix the conversion asked for.
+ *
+ * Also split out for the debugger's benefit: %r and %n differ from %d and %u
+ * only in which base they use, and everything after choosing the base is the
+ * same work.  Duplicating it would mean the two could drift, and the way that
+ * shows up is one conversion padding differently from its neighbour in a
+ * column of output nobody is reading closely.
+ */
+void
+_doprnt_number(
+	unsigned long			u,
+	int				base,
+	int				capitals,
+	int				sign_char,
+	const struct doprnt_spec	*spec,
+	void				(*putc)(char))
+{
+	char		buf[MAXBUF];		/* build number here */
+	register char	*p = &buf[MAXBUF-1];
+	static char	digits[] = "0123456789abcdef0123456789ABCDEF";
+	char		*prefix = 0;
+	int		length = spec->ds_length;
+
+	if (_doprnt_truncates)
+		u = (long)((int)(u));
+
+	if (u != 0 && spec->ds_altfmt) {
+		if (base == 8)
+			prefix = "0";
+		else if (base == 16)
+			prefix = "0x";
+	}
+
+	do {
+		/* Print in the correct case */
+		*p-- = digits[(u % base)+capitals];
+		u /= base;
+	} while (u != 0);
+
+	length -= (&buf[MAXBUF-1] - p);
+	if (sign_char)
+		length--;
+	if (prefix)
+		length -= strlen((const char *) prefix);
+
+	if (spec->ds_padc == ' ' && !spec->ds_ladjust) {
+		/* blank padding goes before prefix */
+		while (--length >= 0)
+			(*putc)(' ');
+	}
+	if (sign_char)
+		(*putc)(sign_char);
+	if (prefix)
+		while (*prefix)
+			(*putc)(*prefix++);
+	if (spec->ds_padc == '0') {
+		/* zero padding goes after sign and prefix */
+		while (--length >= 0)
+			(*putc)('0');
+	}
+	while (++p != &buf[MAXBUF])
+		(*putc)(*p);
+
+	if (spec->ds_ladjust) {
+		while (--length >= 0)
+			(*putc)(' ');
+	}
+}
+
+void
 _doprnt(
 	register const char	*fmt,
 	va_list			*argp,
 						/* character output routine */
 	void			(*putc)(char),
-	int			radix)		/* default radix - for '%r' */
+	int			radix)		/* what %r and %n print in */
 {
+	_doprnt_ext(fmt, argp, putc, radix, (doprnt_ext_t) 0);
+}
+
+void
+_doprnt_ext(
+	register const char	*fmt,
+	va_list			*argp,
+						/* character output routine */
+	void			(*putc)(char),
+	int			radix,		/* what %r and %n print in */
+	doprnt_ext_t		ext)		/* conversions outside C's set */
+{
+	struct doprnt_spec spec;
 	int		length;
 	int		prec;
 	boolean_t	ladjust;
@@ -415,76 +538,22 @@ _doprnt(
 	    truncate = FALSE;
 	    capitals=0;		/* Assume lower case printing */
 
+	    /*
+	     * Everything the parser worked out, in one place, so that a
+	     * formatter built on this one is handed it rather than working it
+	     * out again from a format string it would have to re-walk (#415).
+	     */
+	    spec.ds_conv	= c;
+	    spec.ds_length	= length;
+	    spec.ds_prec	= prec;
+	    spec.ds_ladjust	= ladjust;
+	    spec.ds_padc	= padc;
+	    spec.ds_altfmt	= altfmt;
+	    spec.ds_plus_sign	= plus_sign;
+	    spec.ds_lensize	= lensize;
+	    spec.ds_radix	= radix;
+
 	    switch(c) {
-		case 'b':
-		case 'B':
-		{
-		    register char *p;
-		    boolean_t	  any;
-		    register int  i;
-
-		    /* #415: the register value at the width asked for. */
-		    switch (lensize) {
-		    case LEN_LONGLONG:
-			u = (unsigned long) va_arg(*argp, unsigned long long);
-			break;
-		    case LEN_LONG:
-			u = va_arg(*argp, unsigned long);
-			break;
-		    default:
-			u = va_arg(*argp, unsigned int);
-			break;
-		    }
-		    p = va_arg(*argp, char *);
-		    base = *p++;
-		    printnum(u, base, putc);
-
-		    if (u == 0)
-			break;
-
-		    any = FALSE;
-		    while ((i = *p++) != '\0') {
-			if (*fmt == 'B')
-			    i = 33 - i;
-			if (*p <= 32) {
-			    /*
-			     * Bit field
-			     */
-			    register int j;
-			    if (any)
-				(*putc)(',');
-			    else {
-				(*putc)('<');
-				any = TRUE;
-			    }
-			    j = *p++;
-			    if (*fmt == 'B')
-				j = 32 - j;
-			    for (; (c = *p) > 32; p++)
-				(*putc)(c);
-			    printnum((unsigned)( (u>>(j-1)) & ((2<<(i-j))-1)),
-					base, putc);
-			}
-			else if (u & (1<<(i-1))) {
-			    if (any)
-				(*putc)(',');
-			    else {
-				(*putc)('<');
-				any = TRUE;
-			    }
-			    for (; (c = *p) > 32; p++)
-				(*putc)(c);
-			}
-			else {
-			    for (; *p > 32; p++)
-				continue;
-			}
-		    }
-		    if (any)
-			(*putc)('>');
-		    break;
-		}
-
 		case 'c':
 		    c = va_arg(*argp, int);
 		    (*putc)(c);
@@ -538,51 +607,30 @@ _doprnt(
 		}
 
 		/*
-		 * The capitalised forms are this dialect's way of saying
-		 * "long", from before C had `l' to say it with: the lower-case
-		 * arm sets `truncate' and the upper-case one does not, and
-		 * truncation was to int.  Now that `l' is honoured they say
-		 * the same thing twice, so they say it the same way -- and
-		 * keep meaning long, which is what their five remaining
-		 * callers in ddb/ were written against (#415).
+		 * C's integer conversions, and only those.  The capitalised
+		 * spellings this formatter used to accept -- %D, %O, %U -- were
+		 * how the dialect said "long" before C had `l' to say it with,
+		 * and they have gone to ddb/ with the rest of the dialect
+		 * (#415).  %X stays: it is upper-case hex and standard, however
+		 * much it looks like one of them.
 		 */
 		case 'o':
-		    truncate = _doprnt_truncates;
-		    base = 8;
-		    goto print_unsigned;
-		case 'O':
-		    lensize = LEN_LONG;
 		    base = 8;
 		    goto print_unsigned;
 
 		case 'd':
-		    truncate = _doprnt_truncates;
-		    base = 10;
-		    goto print_signed;
-		case 'D':
-		    lensize = LEN_LONG;
+		case 'i':
 		    base = 10;
 		    goto print_signed;
 
 		case 'u':
-		    truncate = _doprnt_truncates;
-		    base = 10;
-		    goto print_unsigned;
-		case 'U':
-		    lensize = LEN_LONG;
 		    base = 10;
 		    goto print_unsigned;
 
 		case 'x':
-		    truncate = _doprnt_truncates;
 		    base = 16;
 		    goto print_unsigned;
 
-		/*
-		 * %X is standard C -- upper-case hex, int-wide -- and not one
-		 * of the capitalised "long" forms above, however much it looks
-		 * like one.  %lX is how you ask for the wide version.
-		 */
 		case 'X':
 		    base = 16;
 		    capitals=16;	/* Print in upper case */
@@ -607,35 +655,6 @@ _doprnt(
 		    u = (unsigned long)(vm_offset_t) va_arg(*argp, void *);
 		    goto print_num;
 
-		case 'z':
-		    truncate = _doprnt_truncates;
-		    base = 16;
-		    goto print_signed;
-
-		case 'Z':
-		    lensize = LEN_LONG;
-		    base = 16;
-		    capitals=16;	/* Print in upper case */
-		    goto print_signed;
-
-		case 'r':
-		    truncate = _doprnt_truncates;
-		    base = radix;
-		    goto print_signed;
-		case 'R':
-		    lensize = LEN_LONG;
-		    base = radix;
-		    goto print_signed;
-
-		case 'n':
-		    truncate = _doprnt_truncates;
-		    base = radix;
-		    goto print_unsigned;
-		case 'N':
-		    lensize = LEN_LONG;
-		    base = radix;
-		    goto print_unsigned;
-
 		/*
 		 * Fetch at the width the conversion was written for, not at
 		 * one width for all of them (#415).  On i386 every arm below
@@ -648,17 +667,7 @@ _doprnt(
 		 * that sign for data.
 		 */
 		print_signed:
-		    switch (lensize) {
-		    case LEN_LONGLONG:
-			n = (long) va_arg(*argp, long long);
-			break;
-		    case LEN_LONG:
-			n = va_arg(*argp, long);
-			break;
-		    default:
-			n = va_arg(*argp, int);
-			break;
-		    }
+		    n = _doprnt_signed_arg(&spec, argp);
 		    if (n >= 0) {
 			u = n;
 			sign_char = plus_sign;
@@ -670,71 +679,19 @@ _doprnt(
 		    goto print_num;
 
 		print_unsigned:
-		    switch (lensize) {
-		    case LEN_LONGLONG:
-			u = (unsigned long) va_arg(*argp, unsigned long long);
-			break;
-		    case LEN_LONG:
-			u = va_arg(*argp, unsigned long);
-			break;
-		    default:
-			u = va_arg(*argp, unsigned int);
-			break;
-		    }
+		    u = _doprnt_unsigned_arg(&spec, argp);
 		    goto print_num;
 
 		print_num:
-		{
-		    char	buf[MAXBUF];	/* build number here */
-		    register char *	p = &buf[MAXBUF-1];
-		    static char digits[] = "0123456789abcdef0123456789ABCDEF";
-		    char *prefix = 0;
-
-		    if (truncate) u = (long)((int)(u));
-
-		    if (u != 0 && altfmt) {
-			if (base == 8)
-			    prefix = "0";
-			else if (base == 16)
-			    prefix = "0x";
-		    }
-
-		    do {
-			/* Print in the correct case */
-			*p-- = digits[(u % base)+capitals];
-			u /= base;
-		    } while (u != 0);
-
-		    length -= (&buf[MAXBUF-1] - p);
-		    if (sign_char)
-			length--;
-		    if (prefix)
-			length -= strlen((const char *) prefix);
-
-		    if (padc == ' ' && !ladjust) {
-			/* blank padding goes before prefix */
-			while (--length >= 0)
-			    (*putc)(' ');
-		    }
-		    if (sign_char)
-			(*putc)(sign_char);
-		    if (prefix)
-			while (*prefix)
-			    (*putc)(*prefix++);
-		    if (padc == '0') {
-			/* zero padding goes after sign and prefix */
-			while (--length >= 0)
-			    (*putc)('0');
-		    }
-		    while (++p != &buf[MAXBUF])
-			(*putc)(*p);
-
-		    if (ladjust) {
-			while (--length >= 0)
-			    (*putc)(' ');
-		    }
+		    /*
+		     * spec carries the flags the parser found, but %p and the
+		     * debugger's conversions adjust width and padding after
+		     * that, so the two fields they touch are refreshed here.
+		     */
+		    spec.ds_length = length;
+		    spec.ds_padc   = padc;
+		    _doprnt_number(u, base, capitals, sign_char, &spec, putc);
 		    break;
-		}
 
 
 		case 'f':
@@ -917,7 +874,14 @@ _doprnt(
 		    break;
 
 		default:
-		    (*putc)(c);
+		    /*
+		     * Not one of C's.  A formatter built on this one gets it
+		     * first, and only what nobody claims is echoed as the
+		     * character it is -- which is what this did with every
+		     * unknown conversion before there was anyone to ask (#415).
+		     */
+		    if (ext == (doprnt_ext_t) 0 || !(*ext)(&spec, argp, putc))
+			(*putc)(c);
 	    }
 	fmt++;
 	}
