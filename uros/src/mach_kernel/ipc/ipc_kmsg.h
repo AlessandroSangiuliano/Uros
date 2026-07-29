@@ -205,6 +205,8 @@ typedef struct ipc_kmsg {
 #endif	/* DIPC */
 	ipc_port_t ikm_dest;			/* where it is going */
 	ipc_port_t ikm_reply;			/* where the answer goes */
+	ipc_port_t *ikm_ports;			/* one per descriptor (#442) */
+	mach_msg_type_number_t ikm_nports;	/* how many ikm_ports has */
 	mach_msg_header_t ikm_header;
 } *ipc_kmsg_t;
 
@@ -220,6 +222,26 @@ typedef struct ipc_kmsg {
  *	POINTER no longer goes anywhere near a field whose width the interface
  *	fixes at thirty-two bits.
  */
+/*
+ *	The descriptors' ports, out of the message too (#442).
+ *
+ *	Same reason as ikm_dest and ikm_reply: a port descriptor's `name'
+ *	field is a NAME, thirty-two bits by definition of the interface,
+ *	and the kernel was writing an address over it.  One entry per
+ *	descriptor rather than per port descriptor, so the index is the
+ *	descriptor's own position and there is no second numbering for the
+ *	generated stubs to agree with; entries for out-of-line descriptors
+ *	stay IP_NULL.  (Out-of-line port ARRAYS were already outside the
+ *	message, in their own allocation.)
+ *
+ *	Allocated only for complex messages, which the port census measured
+ *	at 1.1% of traffic carrying a mean of 1.45 ports.
+ */
+extern kern_return_t	ikm_ports_alloc(ipc_kmsg_t kmsg,
+					mach_msg_type_number_t count);
+extern void		ikm_ports_free(ipc_kmsg_t kmsg);
+extern void		ikm_ports_report(void);
+
 #define	ikm_set_dest(kmsg, port)					\
 	MACRO_BEGIN							\
 	    (kmsg)->ikm_dest = (port);					\
@@ -322,6 +344,8 @@ MACRO_BEGIN								\
 	(kmsg)->ikm_size = (size);					\
 	(kmsg)->ikm_dest = IP_NULL;					\
 	(kmsg)->ikm_reply = IP_NULL;					\
+	(kmsg)->ikm_ports = (ipc_port_t *) 0;				\
+	(kmsg)->ikm_nports = 0;						\
 	(kmsg)->ikm_header.msgh_bits = 0;				\
 MACRO_END
 #else	/* !DIPC */
@@ -330,6 +354,8 @@ MACRO_BEGIN								\
 	(kmsg)->ikm_size = (size);					\
 	(kmsg)->ikm_dest = IP_NULL;					\
 	(kmsg)->ikm_reply = IP_NULL;					\
+	(kmsg)->ikm_ports = (ipc_port_t *) 0;				\
+	(kmsg)->ikm_nports = 0;						\
 MACRO_END
 #endif	/* DIPC */
 
@@ -356,6 +382,7 @@ MACRO_END
 MACRO_BEGIN								\
 	register vm_size_t _size = (kmsg)->ikm_size;			\
 									\
+	ikm_ports_free(kmsg);		/* #442 */			\
 	if ((integer_t)_size > 0)					\
 		if (KMSG_IS_RT(kmsg))					\
 			rtfree((vm_offset_t) (kmsg), _size);		\
@@ -371,6 +398,7 @@ MACRO_END
 MACRO_BEGIN								\
 	register vm_size_t _size = (kmsg)->ikm_size;			\
 									\
+	ikm_ports_free(kmsg);		/* #442 */			\
 	if ((integer_t)_size > 0)					\
 		kfree((vm_offset_t) (kmsg), _size);			\
 	else								\

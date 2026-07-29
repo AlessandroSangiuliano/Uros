@@ -432,6 +432,78 @@ ipc_kmsg_queue_next(
 }
 
 /*
+ *	The descriptors' ports, in the kmsg (#442).
+ *
+ *	One entry per descriptor rather than per PORT descriptor, so an
+ *	entry's index is the descriptor's own position in the body: the
+ *	generated server stubs then need no second numbering to agree with,
+ *	and the entries belonging to out-of-line descriptors simply stay
+ *	IP_NULL.  Descriptor counts are small -- the census measured 1.1% of
+ *	messages complex at all, carrying a mean of 1.45 ports -- so this is
+ *	one small kalloc on a message that already does several.
+ *
+ *	The counters are not decoration.  An array that outlives its kmsg is
+ *	a leak that no test would notice until the machine ran out, so the
+ *	two numbers are kept and ikm_ports_report prints them.  Call it from
+ *	DDB; do NOT call it periodically from the allocation path.  Doing
+ *	that for one run put fifty thousand serial printf calls inside
+ *	copyin, and pthread_test faulted on its stack-sensitive test -- the
+ *	instrument breaking the thing it was measuring.  Three runs without
+ *	it were clean.
+ *
+ *	The reading that mattered: 50000 allocated, 49999 freed, ONE
+ *	outstanding, steady from the first report to the last.  That one is
+ *	the array being allocated as the line prints.
+ */
+static unsigned long	ikm_ports_allocs;
+static unsigned long	ikm_ports_frees;
+
+kern_return_t
+ikm_ports_alloc(
+	ipc_kmsg_t		kmsg,
+	mach_msg_type_number_t	count)
+{
+	vm_size_t size;
+
+	assert(kmsg->ikm_ports == (ipc_port_t *) 0);
+
+	if (count == 0)
+		return KERN_SUCCESS;
+
+	size = (vm_size_t) count * sizeof(ipc_port_t);
+	kmsg->ikm_ports = (ipc_port_t *) kalloc(size);
+	if (kmsg->ikm_ports == (ipc_port_t *) 0)
+		return KERN_RESOURCE_SHORTAGE;
+
+	(void) memset((void *) kmsg->ikm_ports, 0, size);
+	kmsg->ikm_nports = count;
+	ikm_ports_allocs++;
+	return KERN_SUCCESS;
+}
+
+void
+ikm_ports_free(
+	ipc_kmsg_t	kmsg)
+{
+	if (kmsg->ikm_ports == (ipc_port_t *) 0)
+		return;
+
+	kfree((vm_offset_t) kmsg->ikm_ports,
+	      (vm_size_t) kmsg->ikm_nports * sizeof(ipc_port_t));
+	kmsg->ikm_ports = (ipc_port_t *) 0;
+	kmsg->ikm_nports = 0;
+	ikm_ports_frees++;
+}
+
+void
+ikm_ports_report(void)
+{
+	printf("ikm_ports: %lu allocated, %lu freed, %lu outstanding\n",
+	       ikm_ports_allocs, ikm_ports_frees,
+	       ikm_ports_allocs - ikm_ports_frees);
+}
+
+/*
  *	Routine:	ipc_kmsg_destroy
  *	Purpose:
  *		Destroys a kernel message.  Releases all rights,
@@ -688,6 +760,14 @@ ipc_kmsg_free(
 	ipc_kmsg_t	kmsg)
 {
 	vm_size_t size = kmsg->ikm_size;
+
+	/*
+	 * #442: before any of the branches below, because one of them does
+	 * not free the kmsg at all -- IKM_SIZE_NETWORK hands it back to the
+	 * network pool, and a buffer that comes back out of that pool with
+	 * a stale ikm_ports would leak it at the next ikm_init.
+	 */
+	ikm_ports_free(kmsg);
 
 	switch (size) {
 #if	DIPC
@@ -1542,6 +1622,17 @@ ipc_kmsg_copyin_body(
 	ipc_kmsg_clean_partial(kmsg,0,0,0);
 	return MACH_SEND_MSG_TOO_SMALL;
     }
+
+    /*
+     * #442: room for the descriptors' ports, now that the count has been
+     * checked against the message it arrived in.  Before that check it is
+     * a number from userland and not a size.
+     */
+    if (ikm_ports_alloc(kmsg, body->msgh_descriptor_count)
+							!= KERN_SUCCESS) {
+	ipc_kmsg_clean_partial(kmsg,0,0,0);
+	return MACH_MSG_VM_KERNEL;
+    }
     
     /*
      * Make an initial pass to determine kernal VM space requirements for
@@ -1639,6 +1730,7 @@ ipc_kmsg_copyin_body(
 					       (ipc_port_t) dest)) {
 		    kmsg->ikm_header.msgh_bits |= MACH_MSGH_BITS_CIRCULAR;
 		}
+		kmsg->ikm_ports[i] = (ipc_port_t) object;	/* #442 */
 		dsc->name = (mach_port_t) object;
 		complex = TRUE;
 		break;
@@ -2221,12 +2313,25 @@ ipc_kmsg_copyin_from_kernel(
     {
     	mach_msg_descriptor_t	*saddr, *eaddr;
     	mach_msg_body_t		*body;
+    	mach_msg_type_number_t	i;
 
     	body = (mach_msg_body_t *) (&kmsg->ikm_header + 1);
     	saddr = (mach_msg_descriptor_t *) (body + 1);
     	eaddr = (mach_msg_descriptor_t *) saddr + body->msgh_descriptor_count;
 
-    	for ( ; saddr <  eaddr; saddr++) {
+	/*
+	 * #442: room for the descriptors' ports.  This routine has no way
+	 * to report a failure -- its contract is that the kernel does not
+	 * send malformed messages -- and its callers already panic when
+	 * ipc_kmsg_get_from_kernel cannot allocate, so a shortage says so
+	 * here too rather than carrying on with nowhere to put the ports.
+	 */
+	if (ikm_ports_alloc(kmsg, body->msgh_descriptor_count)
+							!= KERN_SUCCESS)
+		panic("ipc_kmsg_copyin_from_kernel: no room for %u ports",
+		      (unsigned) body->msgh_descriptor_count);
+
+    	for (i = 0; saddr <  eaddr; saddr++, i++) {
 
 	    switch (saddr->type.type) {
 	    
@@ -2246,6 +2351,7 @@ ipc_kmsg_copyin_from_kernel(
 		        break;
 		    }
 
+		    kmsg->ikm_ports[i] = (ipc_port_t) object;	/* #442 */
 		    ipc_object_copyin_from_kernel(object, name);
 		    
 		    if ((dsc->disposition == MACH_MSG_TYPE_PORT_RECEIVE) &&
@@ -3411,6 +3517,13 @@ ikm_cache_put(
 	ipc_kmsg_t	kmsg)
 {
 	register struct kmsg_pcpu	*pc;
+
+	/*
+	 * #442: this stashes the buffer rather than freeing it, so the
+	 * descriptors' ports have to go now.  Four callers reach here
+	 * without passing through ipc_kmsg_free.
+	 */
+	ikm_ports_free(kmsg);
 
 	disable_preemption();
 	pc = &kmsg_pool[cpu_number()];
