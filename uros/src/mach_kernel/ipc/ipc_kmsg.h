@@ -204,16 +204,6 @@ typedef struct ipc_kmsg {
 	mach_msg_header_t ikm_header;
 } *ipc_kmsg_t;
 
-/* #442: fill the two from the header, which copyin has just translated. */
-#define	ikm_ports_from_header(kmsg)					\
-	MACRO_BEGIN							\
-	    (kmsg)->ikm_dest  =						\
-		(ipc_port_t) (kmsg)->ikm_header.msgh_remote_port;	\
-	    (kmsg)->ikm_reply =						\
-		(ipc_port_t) (kmsg)->ikm_header.msgh_local_port;		\
-	MACRO_END
-
-
 /*
  *	Set a kmsg's destination or reply, in both places (#442).
  *
@@ -305,7 +295,7 @@ MACRO_END
  *	A kmsg comes off ikm_cache holding whatever the last message left
  *	in it, and a producer that fills only one of the two leaves a stale
  *	POINTER in the other.  While the header still carries the same
- *	values that is invisible -- ikm_ports_from_header overwrites both a
+ *	values that is invisible -- the producer overwrites both a
  *	moment later -- but the -M census saw it on 15 of 546 kernel sends
  *	(the other 531 got a recycled kmsg whose leftover happened to be
  *	zero), and when the header stops carrying them there is nothing to
@@ -522,7 +512,7 @@ extern void ipc_kmsg_put_to_kernel(
 
 /* Copyin port rights in the header of a message */
 extern mach_msg_return_t ipc_kmsg_copyin_header(
-	mach_msg_header_t	*msg,
+	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	mach_port_t		notify);
 

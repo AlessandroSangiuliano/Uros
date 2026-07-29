@@ -1054,10 +1054,17 @@ ipc_kmsg_put_to_kernel(
 
 mach_msg_return_t
 ipc_kmsg_copyin_header(
-	mach_msg_header_t	*msg,
+	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	mach_port_t		notify)
 {
+	/*
+	 * #442: this is where a NAME became a POINTER in the same four
+	 * bytes.  It reads the names the sender wrote and now puts the
+	 * translated ports in the kmsg, so the message keeps carrying what
+	 * it arrived with and the kernel keeps its pointers next to it.
+	 */
+	mach_msg_header_t *msg = &kmsg->ikm_header;
 	mach_msg_bits_t mbits = msg->msgh_bits &~ MACH_MSGH_BITS_CIRCULAR;
 	mach_port_t dest_name = msg->msgh_remote_port;
 	mach_port_t reply_name = msg->msgh_local_port;
@@ -1447,8 +1454,8 @@ ipc_kmsg_copyin_header(
 
 	msg->msgh_bits = (MACH_MSGH_BITS_OTHER(mbits) |
 			  MACH_MSGH_BITS(dest_type, reply_type));
-	msg->msgh_remote_port = (mach_port_t) dest_port;
-	msg->msgh_local_port = (mach_port_t) reply_port;
+	ikm_set_dest(kmsg, (ipc_port_t) dest_port);	/* #442 */
+	ikm_set_reply(kmsg, (ipc_port_t) reply_port);
     }
 
 	return MACH_MSG_SUCCESS;
@@ -2245,12 +2252,9 @@ ipc_kmsg_copyin(
 {
     mach_msg_return_t 		mr;
     
-    mr = ipc_kmsg_copyin_header(&kmsg->ikm_header, space, notify);
+    mr = ipc_kmsg_copyin_header(kmsg, space, notify);
     if (mr != MACH_MSG_SUCCESS)
 	return mr;
-
-    /* #442: the header now holds objects; record them where they belong. */
-    ikm_ports_from_header(kmsg);
 
     if ((kmsg->ikm_header.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0) {
 	if (ipc_port_hist_enabled)
@@ -2295,8 +2299,6 @@ ipc_kmsg_copyin_from_kernel(
     if (ipc_kmsg_port_check)
 	ipc_kmsg_check_ports(kmsg, IKM_CHECK_FROM_KERNEL, "from_kernel",
 			     __builtin_return_address(0));
-
-    ikm_ports_from_header(kmsg);
 
 	mach_msg_bits_t bits = kmsg->ikm_header.msgh_bits;
 	mach_msg_type_name_t rname = MACH_MSGH_BITS_REMOTE(bits);
