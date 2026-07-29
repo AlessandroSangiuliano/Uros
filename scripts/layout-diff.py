@@ -142,9 +142,15 @@ def main():
     a, err_a = layouts(header, incs, 32, names)
     b, _ = layouts(header, incs, 64, names)
     if not a and not b:
-        first = (err_a or '').strip().split('\n')
-        print('  [??? ] %s: does not compile (%s)'
-              % (header, first[0][:90] if first else '?'))
+        # "Nothing came back" has two causes and they deserve different words.
+        # A header that declares no records at all is a fine answer; saying it
+        # does not compile sends the reader after an include path that is not
+        # broken.
+        if 'error' in (err_a or ''):
+            first = err_a.strip().split('\n')
+            print('  [??? ] %s: does not compile (%s)' % (header, first[0][:90]))
+        else:
+            print('  [ -- ] %s: no records declared' % header)
         return 1
 
     both = sorted(set(a) | set(b))
