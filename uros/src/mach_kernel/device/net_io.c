@@ -643,8 +643,15 @@ net_filter_inline(
 	register device_t	device;
 	mach_msg_type_number_t count = net_kmsg(kmsg)->net_rcv_msg_packet_count;
 
-	ifp = (struct ifnet *) kmsg->ikm_header.msgh_remote_port;
-	device = (device_t) kmsg->ikm_header.msgh_local_port;
+	/*
+	 * #442: not ports at all.  net_packet_pool stashes the interface and
+	 * the cloned device in the kmsg's two port fields, which is a third
+	 * meaning for a slot that already meant both a name and a pointer.
+	 * Reading them here from the typed fields at least keeps the stash
+	 * out of the message the receiver will be handed.
+	 */
+	ifp = (struct ifnet *) kmsg->ikm_dest;
+	device = (device_t) kmsg->ikm_reply;
 	ipc_kmsg_queue_init(send_list);
 
 	/*

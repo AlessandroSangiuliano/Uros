@@ -958,8 +958,7 @@ ipc_port_destroy(
 	while ((kmsg = ipc_kmsg_dequeue(kmqueue)) != IKM_NULL) {
 		imq_unlock(mqueue);
 
-		assert(kmsg->ikm_header.msgh_remote_port ==
-						(mach_port_t) port);
+		assert(kmsg->ikm_dest == port);		/* #442 */
 
 #if	DIPC
 		/*

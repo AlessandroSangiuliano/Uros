@@ -312,7 +312,6 @@ ipc_kobject_server(
 	ipc_kmsg_t reply;
 	kern_return_t kr;
 	mig_routine_t routine;
-	ipc_port_t *destp;
 	mach_msg_format_0_trailer_t *trailer;
 	register mig_hash_t *ptr;
 #if	MACH_RT
@@ -395,7 +394,7 @@ ipc_kobject_server(
 	     * never copied in -- which is how the census found it, and why
 	     * grepping for ikm_header did not: here it is spelt OutP->Head.
 	     */
-	    ikm_set_dest(reply, (ipc_port_t) InP->msgh_local_port);
+	    ikm_set_dest(reply, request->ikm_reply);
 	    ikm_set_reply(reply, IP_NULL);
 	    OutP->Head.msgh_id = InP->msgh_id + 100;
 #if	MACH_RT
@@ -433,23 +432,22 @@ ipc_kobject_server(
 	 *	It also differs in that we only expect send or
 	 *	send-once rights, never receive rights.
 	 *
-	 *	We set msgh_remote_port to IP_NULL so that the kmsg
-	 *	destroy routines don't try to destroy the port twice.
+	 *	We clear the destination so that the kmsg destroy routines
+	 *	don't try to destroy the port twice.
 	 */
-	destp = (ipc_port_t *) &request->ikm_header.msgh_remote_port;
 	switch (MACH_MSGH_BITS_REMOTE(request->ikm_header.msgh_bits)) {
 		case MACH_MSG_TYPE_PORT_SEND:
-		    ipc_port_release_send(*destp);
+		    ipc_port_release_send(request->ikm_dest);	/* #442 */
 		    break;
-		
+
 		case MACH_MSG_TYPE_PORT_SEND_ONCE:
-		    ipc_port_release_sonce(*destp);
+		    ipc_port_release_sonce(request->ikm_dest);	/* #442 */
 		    break;
-		
+
 		default:
 		    panic("ipc_object_destroy: strange destination rights");
 	}
-	*destp = IP_NULL;
+	ikm_set_dest(request, IP_NULL);			/* #442 */
 
         if (!(reply->ikm_header.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
            ((mig_reply_error_t *) &reply->ikm_header)->RetCode != KERN_SUCCESS)

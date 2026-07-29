@@ -546,8 +546,7 @@ mach_msg_receive_continue(void)
 			    kmsg = ipc_kmsg_queue_first(kmsgs);
 			    if (kmsg != IKM_NULL) {
 				ipc_kmsg_rmqueue_first_macro(kmsgs, kmsg);
-				port = (ipc_port_t)
-					kmsg->ikm_header.msgh_remote_port;
+				port = kmsg->ikm_dest;	/* #442 */
 				seqno = port->ip_seqno++;
 				goto finish_receive;
 			    }

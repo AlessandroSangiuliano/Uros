@@ -262,7 +262,7 @@ ipc_mqueue_move(
 
 		/* only move messages sent to port */
 
-		if (kmsg->ikm_header.msgh_remote_port != (mach_port_t) port)
+		if (kmsg->ikm_dest != port)		/* #442 */
 			continue;
 
 		ipc_kmsg_rmqueue(oldq, kmsg);

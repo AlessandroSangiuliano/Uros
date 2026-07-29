@@ -2082,9 +2082,8 @@ ipc_port_hist_report(void)
 /*
  *	Count the port pointers this message would need the kernel to carry:
  *	the header's two, plus one per port descriptor, plus the length of
- *	every out-of-line port array.  Runs after copyin, so the header fields
- *	hold objects rather than names and a null one is a null pointer either
- *	way.
+ *	every out-of-line port array.  Runs after copyin, so the two named
+ *	ports are the kmsg's own and the descriptors are still the message's.
  */
 static void
 ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
@@ -2093,9 +2092,9 @@ ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
 	mach_msg_header_t *hdr = &kmsg->ikm_header;
 	unsigned long n = 0;
 
-	if (hdr->msgh_remote_port != MACH_PORT_NULL)
+	if (kmsg->ikm_dest != IP_NULL)			/* #442 */
 		n++;
-	if (hdr->msgh_local_port != MACH_PORT_NULL)
+	if (kmsg->ikm_reply != IP_NULL)
 		n++;
 
 	if (hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
@@ -2245,8 +2244,8 @@ ipc_kmsg_copyin_from_kernel(
 	mach_msg_bits_t bits = kmsg->ikm_header.msgh_bits;
 	mach_msg_type_name_t rname = MACH_MSGH_BITS_REMOTE(bits);
 	mach_msg_type_name_t lname = MACH_MSGH_BITS_LOCAL(bits);
-	ipc_object_t remote = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
-	ipc_object_t local = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	ipc_object_t remote = (ipc_object_t) kmsg->ikm_dest;	/* #442 */
+	ipc_object_t local = (ipc_object_t) kmsg->ikm_reply;
 
 	/* translate the destination and reply ports */
 
