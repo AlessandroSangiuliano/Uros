@@ -3513,6 +3513,19 @@ ipc_kmsg_copyout_to_kernel(
 		dest_name = MACH_PORT_DEAD;
 	}
 
+	/*
+	 * #442: the last place a port POINTER still goes into a name
+	 * field.  The reply right is handed back to the kernel caller as
+	 * it is -- there is no space to copy it out to -- and the kmsg
+	 * keeps it in ikm_reply either way.
+	 *
+	 * It is left alone rather than guessed at: a full boot plus
+	 * cap_test, sig_test and pthread_test call this routine ZERO
+	 * times (probed, not assumed), so there is no workload here that
+	 * would show a change to be right or wrong.  It only runs when
+	 * the kernel raises a Mach exception to a userland handler, and
+	 * it is lossless at this width.  See #442.
+	 */
 	reply_name = (mach_port_t) reply;
 
 	kmsg->ikm_header.msgh_bits =
