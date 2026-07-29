@@ -239,7 +239,19 @@ typedef struct ipc_kmsg {
  */
 extern kern_return_t	ikm_ports_alloc(ipc_kmsg_t kmsg,
 					mach_msg_type_number_t count);
-extern void		ikm_ports_free(ipc_kmsg_t kmsg);
+extern void		ikm_ports_free_slow(ipc_kmsg_t kmsg);
+
+/*
+ *	The release paths run on EVERY message, and 98.9% of them have no
+ *	descriptors at all -- ikm_cache_put is the recycle step of every
+ *	RPC.  So the common case is a load and a branch that always goes the
+ *	same way, and the call only happens when there is something to free.
+ */
+#define	ikm_ports_free(kmsg)						\
+MACRO_BEGIN								\
+	if ((kmsg)->ikm_ports != (ipc_port_t *) 0)			\
+		ikm_ports_free_slow(kmsg);				\
+MACRO_END
 extern void		ikm_ports_report(void);
 
 #define	ikm_set_dest(kmsg, port)					\

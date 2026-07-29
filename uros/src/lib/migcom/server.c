@@ -850,6 +850,32 @@ WriteCheckMsgSize(FILE *file, register argument_t *arg)
     fprintf(file, "\n");
 }
 
+/*
+ *	The index of an argument's first descriptor among the message's, for
+ *	ikm_ports (#442).
+ *
+ *	The kernel fills that array walking the body in order, and the request
+ *	and reply structures lay their descriptors out in argument order, so
+ *	the two agree by construction rather than by convention.  An argument
+ *	that occupies several descriptors gets the first of them; the stub
+ *	adds its own subscript.
+ */
+static int
+rtKPDIndex(routine_t *rt, argument_t *arg, u_int mask)
+{
+    register argument_t *a;
+    int index = 0;
+
+    for (a = rt->rtArgs; a != argNULL; a = a->argNext) {
+	if (a == arg)
+	    return index;
+	if (akCheckAll(a->argKind, mask))
+	    index += a->argType->itKPD_Number;
+    }
+    fatal("rtKPDIndex(%s): argument is not in the routine", arg->argName);
+    return 0;
+}
+
 static char *
 InArgMsgField(register argument_t *arg)
 {
@@ -1502,7 +1528,32 @@ WriteKPD_port(FILE *file, register argument_t *arg)
 	if (IsKernelServer && streql(real_it->itTransType, "ipc_port_t"))
             recast = "(mach_port_t)";
 
-	if (it->itOutTrans != strNULL && !close)
+	/*
+	 * #442: a kernel server's reply port goes into the kmsg, where a
+	 * pointer fits, and the message field is filled FROM it.
+	 *
+	 * The order matters and is not cosmetic.  itOutTrans is a routine like
+	 * convert_task_to_port that PRODUCES A REFERENCE, so emitting it twice
+	 * -- once per destination -- would leak one reference per reply.  It is
+	 * called once, into the kmsg, and the name field copies that.  When the
+	 * message stops carrying pointers the second line simply goes away.
+	 */
+	if (IsKernelServer) {
+	    char slot[MAX_STR_LEN];
+
+	    SafeSnprintf(slot, MAX_STR_LEN,
+			 "ikm_from_header(&OutP->Head)->ikm_ports[%d%s]",
+			 rtKPDIndex(arg->argRoutine, arg, akbReturnKPD),
+			 close ? " + i" : "");
+
+	    if (it->itOutTrans != strNULL && !close)
+		fprintf(file, "\t%s = (ipc_port_t) %s(%s);\n", slot,
+		    it->itOutTrans, arg->argVarName);
+	    else
+		fprintf(file, "\t%s = (ipc_port_t) %s%s;\n", slot,
+		    arg->argVarName, subindex);
+	    fprintf(file, "\t%sname = (mach_port_t) %s;\n", string, slot);
+	} else if (it->itOutTrans != strNULL && !close)
 	    fprintf(file, "\t%sname = (mach_port_t)%s(%s);\n", string,  
 		it->itOutTrans, arg->argVarName);
 	else
@@ -2168,6 +2219,19 @@ WriteRoutine(FILE *file, register routine_t *rt)
      * would lose data).
      */
     WriteList(file, rt->rtArgs, WriteInitKPDValue, akbReturnKPD, "\n", "\n");
+
+    /*
+     * #442: room for the reply's port pointers, taken BEFORE the routine
+     * runs for the same reason the templates are: afterwards the ports
+     * exist and failing to find room for them would strand rights the
+     * routine has already produced.
+     */
+    if (IsKernelServer && rt->rtReplyKPDs > 0) {
+	fprintf(file, "\tif (ikm_ports_alloc(ikm_from_header(&OutP->Head), %d)\n",
+		rt->rtReplyKPDs);
+	fprintf(file, "\t\t\t\t\t\t!= KERN_SUCCESS)\n");
+	fprintf(file, "\t\t{ MIG_RETURN_ERROR(OutP, KERN_RESOURCE_SHORTAGE); }\n\n");
+    }
 
     WriteList(file, rt->rtArgs, WriteExtractArg, akbNone, "", "");
 

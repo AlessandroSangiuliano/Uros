@@ -482,11 +482,10 @@ ikm_ports_alloc(
 }
 
 void
-ikm_ports_free(
+ikm_ports_free_slow(
 	ipc_kmsg_t	kmsg)
 {
-	if (kmsg->ikm_ports == (ipc_port_t *) 0)
-		return;
+	assert(kmsg->ikm_ports != (ipc_port_t *) 0);
 
 	kfree((vm_offset_t) kmsg->ikm_ports,
 	      (vm_size_t) kmsg->ikm_nports * sizeof(ipc_port_t));
