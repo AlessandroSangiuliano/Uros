@@ -157,7 +157,7 @@
 
 boolean_t
 ipc_kobject_notify(
-        mach_msg_header_t *request_header,
+        ipc_kmsg_t         request,
         mach_msg_header_t *reply_header);
 
 #include <mach/ndr.h>
@@ -413,7 +413,7 @@ ipc_kobject_server(
 	    if (ptr)
 		(*ptr->routine)(&request->ikm_header, &reply->ikm_header);
 	    else {
-		if (!ipc_kobject_notify(&request->ikm_header, &reply->ikm_header)){
+		if (!ipc_kobject_notify(request, &reply->ikm_header)){
 #if	MACH_IPC_TEST
 		    printf("ipc_kobject_server: bogus kernel message, id=%d\n",
 			request->ikm_header.msgh_id);
@@ -602,10 +602,17 @@ ipc_kobject_destroy(
 
 boolean_t
 ipc_kobject_notify(
-	mach_msg_header_t *request_header,
+	ipc_kmsg_t	   request,
 	mach_msg_header_t *reply_header)
 {
-	ipc_port_t port = (ipc_port_t) request_header->msgh_remote_port;
+	/*
+	 * #442: the notification's destination comes from the kmsg, and
+	 * goes DOWN to the handlers rather than each of them digging it
+	 * back out of the header.  Three sites read the same field to
+	 * recover the same port; now it is passed once.
+	 */
+	mach_msg_header_t *request_header = &request->ikm_header;
+	ipc_port_t port = request->ikm_dest;
 
 	((mig_reply_error_t *) reply_header)->RetCode = MIG_NO_REPLY;
 	switch (request_header->msgh_id) {
@@ -621,10 +628,10 @@ ipc_kobject_notify(
 	}
 	switch (ip_kotype(port)) {
 		case IKOT_DEVICE:
-		return ds_notify(request_header);
+		return ds_notify(port, request_header);
 
 		case IKOT_MASTER_DEVICE:
-		return ds_master_notify(request_header);
+		return ds_master_notify(port, request_header);
 
 		default:
                 return FALSE;

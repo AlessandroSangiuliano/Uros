@@ -2432,19 +2432,26 @@ ipc_kmsg_copyin_from_kernel(
 
 mach_msg_return_t
 ipc_kmsg_copyout_header(
-	mach_msg_header_t	*msg,
+	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	mach_port_t		notify)
 {
+	/*
+	 * #442: the kmsg rather than a bare header, because the two ports
+	 * this needs are the kmsg's and not the message's.  The header is
+	 * still what it writes the NAMES back into, which is all a header
+	 * was ever meant to carry.
+	 */
+	mach_msg_header_t *msg = &kmsg->ikm_header;
 	mach_msg_bits_t mbits = msg->msgh_bits;
-	ipc_port_t dest = (ipc_port_t) msg->msgh_remote_port;
+	ipc_port_t dest = kmsg->ikm_dest;
 
 	assert(IP_VALID(dest));
 
     {
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
-	ipc_port_t reply = (ipc_port_t) msg->msgh_local_port;
+	ipc_port_t reply = kmsg->ikm_reply;		/* #442 */
 	mach_port_t dest_name, reply_name;
 	unsigned long protected_payload = 0;
 
@@ -3153,7 +3160,7 @@ ipc_kmsg_copyout(
 	assert(!KMSG_IN_DIPC(kmsg));
 #endif	/* DIPC */
 
-	mr = ipc_kmsg_copyout_header(&kmsg->ikm_header, space, notify);
+	mr = ipc_kmsg_copyout_header(kmsg, space, notify);
 	if (mr != MACH_MSG_SUCCESS)
 		return mr;
 

@@ -519,7 +519,7 @@ extern void ipc_kmsg_copyin_from_kernel(
 
 /* Copyout port rights in the header of a message */
 extern mach_msg_return_t ipc_kmsg_copyout_header(
-	mach_msg_header_t	*msg,
+	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	mach_port_t		notify);
 

@@ -192,9 +192,11 @@ extern boolean_t	device_write_dealloc(
 				io_req_t	ior);
 extern void		ds_init(void);
 extern boolean_t	ds_notify(
+				ipc_port_t	port,
 				mach_msg_header_t
 						* msg);
 extern boolean_t	ds_master_notify(
+				ipc_port_t	port,
 				mach_msg_header_t
 						* msg);
 extern boolean_t	ds_open_done(
