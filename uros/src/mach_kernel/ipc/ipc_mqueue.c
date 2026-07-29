@@ -349,7 +349,8 @@ ipc_mqueue_send(
         kern_return_t           save_wait_result;
 
 	if (ipc_kmsg_port_check)
-		ipc_kmsg_check_ports(kmsg, "ipc_mqueue_send");	/* #442 */
+		ipc_kmsg_check_ports(kmsg, "ipc_mqueue_send",
+				     __builtin_return_address(0));	/* #442 */
 
 	port = (ipc_port_t) kmsg->ikm_header.msgh_remote_port;
 	assert(IP_VALID(port));
@@ -408,7 +409,7 @@ ipc_mqueue_send(
 
 			ip_release(port);
 			ip_check_unlock(port);
-			kmsg->ikm_header.msgh_remote_port = MACH_PORT_NULL;
+			ikm_set_dest(kmsg, IP_NULL);	/* #442 */
 			ipc_kmsg_destroy(kmsg);
 			return MACH_MSG_SUCCESS;
 		}

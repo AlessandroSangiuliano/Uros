@@ -1292,10 +1292,9 @@ mach_msg_overwrite_trap(
 			hdr->msgh_bits =
 				MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND,
 					       MACH_MSG_TYPE_PORT_SEND_ONCE);
-			hdr->msgh_remote_port =
-					(mach_port_t) dest_port;
-			hdr->msgh_local_port =
-					(mach_port_t) reply_port;
+			/* #442: hdr is &kmsg->ikm_header; keep both in step. */
+			ikm_set_dest(kmsg, dest_port);
+			ikm_set_reply(kmsg, reply_port);
 
 			/* make sure we can queue to the destination */
 
@@ -1441,8 +1440,13 @@ mach_msg_overwrite_trap(
 			hdr->msgh_bits =
 				MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE,
 					       0);
-			hdr->msgh_remote_port =
-					(mach_port_t) dest_port;
+			/*
+			 * #442: and no reply, which the bits above already
+			 * say.  The header field is null here; what was not
+			 * null was the kmsg's, left by the message before.
+			 */
+			ikm_set_dest(kmsg, dest_port);
+			ikm_set_reply(kmsg, IP_NULL);
 
 			/* make sure we can queue to the destination */
 

@@ -694,7 +694,7 @@ net_filter_inline(
 		     * Only receiver, so far
 		     */
 		    new_kmsg = kmsg;
-		    new_kmsg->ikm_header.msgh_local_port = MACH_PORT_NULL;
+		    ikm_set_reply(new_kmsg, IP_NULL);	/* #442 */
 		} else {
 		    /*
 		     * Other receivers - must allocate message and copy.
@@ -717,7 +717,7 @@ net_filter_inline(
 		    new_kmsg->ikm_header.msgh_id = kmsg->ikm_header.msgh_id;
 		}
 
-		new_kmsg->ikm_header.msgh_remote_port = (mach_port_t) dest;
+		ikm_set_dest(new_kmsg, dest);	/* #442 */
 		if (kmsg->ikm_header.msgh_id == PROMISC_RCV_MSG_ID &&
 		    infp->device != device)
 		    new_kmsg->ikm_header.msgh_id = NET_RCV_MSG_ID;
@@ -786,7 +786,7 @@ net_package_inline(
 	kmsg->ikm_header.msgh_size = round_msg(sizeof(struct net_rcv_msg)
 					- sizeof(mach_msg_format_0_trailer_t)
 					- NET_RCV_MAX + count);
-	kmsg->ikm_header.msgh_local_port = MACH_PORT_NULL;
+	ikm_set_reply(kmsg, IP_NULL);	/* #442 */
 
 	net_kmsg(kmsg)->NDR = NDR_record;
 	trailer = (mach_msg_format_0_trailer_t *)((char *)&kmsg->ikm_header +
@@ -914,14 +914,14 @@ net_packet_pool(
 	assert(kmsg->ikm_header.msgh_id == NET_RCV_MSG_ID ||
 	       kmsg->ikm_header.msgh_id == PROMISC_RCV_MSG_ID ||
 	       kmsg->ikm_header.msgh_id == NORMA_RCV_MSG_ID);
-	kmsg->ikm_header.msgh_remote_port = (mach_port_t) ifp;
+	ikm_set_dest(kmsg, (ipc_port_t) ifp);	/* #442 */
 	if (ior != (io_req_t)0 &&
 	    ior->io_device != DEVICE_NULL &&
 	    (ior->io_device->flag & D_CLONED)) {
-	    kmsg->ikm_header.msgh_local_port = (mach_port_t)ior->io_device;
+	    ikm_set_reply(kmsg, (ipc_port_t) ior->io_device);	/* #442 */
 	    ior->io_op |= IO_WCLONED;
 	} else
-	    kmsg->ikm_header.msgh_local_port = MACH_PORT_NULL;
+	    ikm_set_reply(kmsg, IP_NULL);	/* #442 */
 
 	switch (p->net_pool_type) {
 	case NET_POOL_INLINE:

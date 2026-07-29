@@ -213,8 +213,29 @@ typedef struct ipc_kmsg {
 		(ipc_port_t) (kmsg)->ikm_header.msgh_local_port;		\
 	MACRO_END
 
+
+/*
+ *	Set a kmsg's destination or reply, in both places (#442).
+ *
+ *	Every path that builds a message inside a kmsg and sends it goes
+ *	through these rather than writing the header field itself, so that
+ *	the typed field is never the one nobody remembered.  Step 3 is then
+ *	one line in each of them: stop writing the header.
+ */
+#define	ikm_set_dest(kmsg, port)					\
+	MACRO_BEGIN							\
+	    (kmsg)->ikm_dest = (port);					\
+	    (kmsg)->ikm_header.msgh_remote_port = (mach_port_t) (port);	\
+	MACRO_END
+
+#define	ikm_set_reply(kmsg, port)				\
+	MACRO_BEGIN							\
+	    (kmsg)->ikm_reply = (port);					\
+	    (kmsg)->ikm_header.msgh_local_port = (mach_port_t) (port);	\
+	MACRO_END
 extern int	ipc_kmsg_port_check;		/* -M: cross-check the two (#442) */
-extern void	ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where);
+extern void	ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where,
+				     void *caller);
 
 #define	IKM_NULL		((ipc_kmsg_t) 0)
 

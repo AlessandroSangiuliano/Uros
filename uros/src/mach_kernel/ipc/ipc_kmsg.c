@@ -2154,7 +2154,7 @@ static unsigned long	ikm_check_seen;
 static unsigned long	ikm_check_bad;
 
 void
-ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where)
+ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where, void *caller)
 {
 	ipc_port_t hdr_dest =
 		(ipc_port_t) kmsg->ikm_header.msgh_remote_port;
@@ -2172,9 +2172,16 @@ ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where)
 	 * that happens on most messages would otherwise drown the boot it is
 	 * trying to describe.
 	 */
-	if (bad && ikm_check_bad <= 5)
-		printf("ipc port check: %s: dest %p vs %p, reply %p vs %p\n",
-		       where, (void *) kmsg->ikm_dest, (void *) hdr_dest,
+	/*
+	 * The caller's return address, because "which send" is the whole
+	 * question: the count says how many paths are left, not which.
+	 * Resolve it against the kernel's symbols.
+	 */
+	if (bad && ikm_check_bad <= 8)
+		printf("ipc port check: %s from %p: dest %p vs %p, "
+		       "reply %p vs %p\n",
+		       where, caller,
+		       (void *) kmsg->ikm_dest, (void *) hdr_dest,
 		       (void *) kmsg->ikm_reply, (void *) hdr_reply);
 
 	if ((ikm_check_seen % 20000) == 0)

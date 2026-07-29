@@ -309,7 +309,7 @@ mach_msg_rpc_from_kernel(
 	}
 
 	/* insert send-once right for the reply port */
-	kmsg->ikm_header.msgh_local_port = (mach_port_t)reply;
+	ikm_set_reply(kmsg, reply);	/* #442 */
 	kmsg->ikm_header.msgh_bits |=
 		MACH_MSGH_BITS(0, MACH_MSG_TYPE_MAKE_SEND_ONCE);
 

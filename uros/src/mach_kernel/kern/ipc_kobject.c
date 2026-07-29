@@ -389,8 +389,14 @@ ipc_kobject_server(
 
 	    OutP->Head.msgh_bits =
 		MACH_MSGH_BITS(MACH_MSGH_BITS_LOCAL(InP->msgh_bits), 0);
-	    OutP->Head.msgh_remote_port = InP->msgh_local_port;
-	    OutP->Head.msgh_local_port  = MACH_PORT_NULL;
+	    /*
+	     * #442: the reply goes back to where the request came from.
+	     * Through the kmsg, because this builds a message the sender
+	     * never copied in -- which is how the census found it, and why
+	     * grepping for ikm_header did not: here it is spelt OutP->Head.
+	     */
+	    ikm_set_dest(reply, (ipc_port_t) InP->msgh_local_port);
+	    ikm_set_reply(reply, IP_NULL);
 	    OutP->Head.msgh_id = InP->msgh_id + 100;
 #if	MACH_RT
 	    if (reply_rt)
@@ -478,7 +484,7 @@ ipc_kobject_server(
 		 *	which is needed in the reply message.
 		 */
 
-		request->ikm_header.msgh_local_port = MACH_PORT_NULL;
+		ikm_set_reply(request, IP_NULL);	/* #442 */
 		ipc_kmsg_destroy(request);
 	}
 

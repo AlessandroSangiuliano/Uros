@@ -315,7 +315,9 @@ ipc_notify_port_deleted(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-	n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 	n->not_port = name;
 
 	ipc_mqueue_send_always(kmsg);
@@ -363,7 +365,9 @@ ipc_notify_port_destroyed(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-	n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 	n->not_port.name = (mach_port_t)right;
 
 	ipc_mqueue_send_always(kmsg);
@@ -406,7 +410,9 @@ ipc_notify_no_senders(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-	n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 	n->not_count = mscount;
 
 	ipc_mqueue_send_always(kmsg);
@@ -471,7 +477,9 @@ ipc_notify_send_once(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-        n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 
 	ipc_mqueue_send_always(kmsg);
 }
@@ -513,7 +521,9 @@ ipc_notify_dead_name(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-	n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 	n->not_port = name;
 
 	ipc_mqueue_send_always(kmsg);
