@@ -175,6 +175,23 @@
  */
 #endif	/* DIPC */
 
+/*
+ *	#442: the destination and reply ports, as pointers, here rather than
+ *	inside the message.
+ *
+ *	A port NAME is thirty-two bits by definition of the interface; a port
+ *	POINTER is a kernel address, four bytes on i386 and eight on x86-64.
+ *	Mach writes the pointer over the name in msgh_remote_port because on
+ *	a 32-bit machine the two are the same size.  That is free there and
+ *	not free here, and it puts kernel pointers inside a buffer whose
+ *	contents arrived from userland.
+ *
+ *	These are filled by copyin.  While the migration is in progress the
+ *	message fields still carry the pointer as well, and ipc_kmsg_port_check
+ *	(the -M boot flag) verifies on every send that the two have not
+ *	drifted -- see ipc_kmsg.c.  When the readers have moved here the
+ *	message keeps the name it arrived with and nothing else.
+ */
 typedef struct ipc_kmsg {
 	struct ipc_kmsg *ikm_next, *ikm_prev;
 	vm_size_t ikm_size;
@@ -182,8 +199,22 @@ typedef struct ipc_kmsg {
 #if	DIPC
 	handle_t ikm_handle;
 #endif	/* DIPC */
+	ipc_port_t ikm_dest;			/* msgh_remote_port, typed */
+	ipc_port_t ikm_reply;			/* msgh_local_port, typed  */
 	mach_msg_header_t ikm_header;
 } *ipc_kmsg_t;
+
+/* #442: fill the two from the header, which copyin has just translated. */
+#define	ikm_ports_from_header(kmsg)					\
+	MACRO_BEGIN							\
+	    (kmsg)->ikm_dest  =						\
+		(ipc_port_t) (kmsg)->ikm_header.msgh_remote_port;	\
+	    (kmsg)->ikm_reply =						\
+		(ipc_port_t) (kmsg)->ikm_header.msgh_local_port;		\
+	MACRO_END
+
+extern int	ipc_kmsg_port_check;		/* -M: cross-check the two (#442) */
+extern void	ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where);
 
 #define	IKM_NULL		((ipc_kmsg_t) 0)
 

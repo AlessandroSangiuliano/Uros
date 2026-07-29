@@ -2128,6 +2128,62 @@ ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
 		ipc_port_hist_report();
 }
 
+/*
+ *	Cross-check the typed port fields against the message (#442).
+ *
+ *	While the migration is in progress a port pointer lives in two places
+ *	at once, which is only safe for as long as they agree.  -M makes every
+ *	send say whether they do.
+ *
+ *	It reports rather than panics, and the first boot says why: the two
+ *	disagree immediately, because copyin is not the only thing that
+ *	produces a sendable message.  Fifty places in this tree write
+ *	msgh_remote_port or msgh_local_port -- notifications, the kernel
+ *	server's replies, the network paths -- and with kmsgs recycled through
+ *	the cache, a field nobody set holds whatever the message before it
+ *	left there.
+ *
+ *	That is the census this needs to be: stopping at the first one would
+ *	tell us there is at least one, which we already knew, while counting
+ *	them says how much of step 2 is real work and which paths it touches.
+ *	A panic here comes later, when the count is meant to be zero.
+ */
+int	ipc_kmsg_port_check __attribute__((section(".data"))) = 0;
+
+static unsigned long	ikm_check_seen;
+static unsigned long	ikm_check_bad;
+
+void
+ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where)
+{
+	ipc_port_t hdr_dest =
+		(ipc_port_t) kmsg->ikm_header.msgh_remote_port;
+	ipc_port_t hdr_reply =
+		(ipc_port_t) kmsg->ikm_header.msgh_local_port;
+	boolean_t  bad = (kmsg->ikm_dest != hdr_dest ||
+			  kmsg->ikm_reply != hdr_reply);
+
+	ikm_check_seen++;
+	if (bad)
+		ikm_check_bad++;
+
+	/*
+	 * The first few in full, then only a periodic tally: a divergence
+	 * that happens on most messages would otherwise drown the boot it is
+	 * trying to describe.
+	 */
+	if (bad && ikm_check_bad <= 5)
+		printf("ipc port check: %s: dest %p vs %p, reply %p vs %p\n",
+		       where, (void *) kmsg->ikm_dest, (void *) hdr_dest,
+		       (void *) kmsg->ikm_reply, (void *) hdr_reply);
+
+	if ((ikm_check_seen % 20000) == 0)
+		printf("ipc port check: %lu sends, %lu with a field the "
+		       "producer did not set (%lu%%)\n",
+		       ikm_check_seen, ikm_check_bad,
+		       ikm_check_bad * 100 / ikm_check_seen);
+}
+
 mach_msg_return_t
 ipc_kmsg_copyin(
 	ipc_kmsg_t	kmsg,
@@ -2140,6 +2196,9 @@ ipc_kmsg_copyin(
     mr = ipc_kmsg_copyin_header(&kmsg->ikm_header, space, notify);
     if (mr != MACH_MSG_SUCCESS)
 	return mr;
+
+    /* #442: the header now holds objects; record them where they belong. */
+    ikm_ports_from_header(kmsg);
 
     if ((kmsg->ikm_header.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0) {
 	if (ipc_port_hist_enabled)
@@ -2173,6 +2232,9 @@ void
 ipc_kmsg_copyin_from_kernel(
 	ipc_kmsg_t	kmsg)
 {
+    /* #442: same as the userland path -- the header holds objects here. */
+    ikm_ports_from_header(kmsg);
+
 	mach_msg_bits_t bits = kmsg->ikm_header.msgh_bits;
 	mach_msg_type_name_t rname = MACH_MSGH_BITS_REMOTE(bits);
 	mach_msg_type_name_t lname = MACH_MSGH_BITS_LOCAL(bits);

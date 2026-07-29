@@ -348,6 +348,9 @@ ipc_mqueue_send(
 	ipc_port_t port;
         kern_return_t           save_wait_result;
 
+	if (ipc_kmsg_port_check)
+		ipc_kmsg_check_ports(kmsg, "ipc_mqueue_send");	/* #442 */
+
 	port = (ipc_port_t) kmsg->ikm_header.msgh_remote_port;
 	assert(IP_VALID(port));
 
