@@ -564,6 +564,7 @@ ipc_kmsg_clean_body(
 {
     mach_msg_descriptor_t 	*saddr, *eaddr;
     boolean_t			rt;
+    mach_msg_type_number_t	i;
 
 #if	DIPC
     assert(!KMSG_IN_DIPC(kmsg));
@@ -572,12 +573,22 @@ ipc_kmsg_clean_body(
     if ( number == 0 )
 	return;
 
+    /*
+     * #442: there are descriptors to clean, so a producer allocated the
+     * ports for them.  All three do -- copyin, copyin_from_kernel, and
+     * the MIG server stub that builds a kernel reply -- and a message
+     * that got here without one is a producer that was missed, which is
+     * worth stopping for rather than reading past a null.
+     */
+    assert(kmsg->ikm_ports != (ipc_port_t *) 0);
+    assert(number <= kmsg->ikm_nports);
+
     rt = KMSG_IS_RT(kmsg);
     saddr = (mach_msg_descriptor_t *) 
 			((mach_msg_base_t *) &kmsg->ikm_header + 1);
     eaddr = saddr + number;
 
-    for ( ; saddr < eaddr; saddr++ ) {
+    for (i = 0; saddr < eaddr; saddr++, i++ ) {
 	
 	switch (saddr->type.type) {
 	    
@@ -589,9 +600,10 @@ ipc_kmsg_clean_body(
 		/* 
 		 * Destroy port rights carried in the message 
 		 */
-		if (!IO_VALID((ipc_object_t) dsc->name))
+		if (!IO_VALID((ipc_object_t) kmsg->ikm_ports[i]))	/* #442 */
 		    continue;
-		ipc_object_destroy((ipc_object_t) dsc->name, dsc->disposition);
+		ipc_object_destroy((ipc_object_t) kmsg->ikm_ports[i],
+				   dsc->disposition);
 		break;
 	    }
 	    case MACH_MSG_OOL_VOLATILE_DESCRIPTOR:
@@ -2843,6 +2855,7 @@ ipc_kmsg_copyout_body(
     kern_return_t 		kr;
     vm_offset_t         	data;
     mach_msg_descriptor_t 	*sstart, *send = MACH_MSG_DESCRIPTOR_NULL;
+    mach_msg_type_number_t	i;			/* #442 */
 #if	MACH_RT
     boolean_t			rt;
 #endif	/* MACH_RT */
@@ -2865,7 +2878,7 @@ ipc_kmsg_copyout_body(
 	sstart = MACH_MSG_DESCRIPTOR_NULL;
     }
 
-    for ( ; saddr < eaddr; saddr++ ) {
+    for (i = 0; saddr < eaddr; saddr++, i++ ) {
 	
 	switch (saddr->type.type) {
 	    
@@ -2873,13 +2886,16 @@ ipc_kmsg_copyout_body(
 		mach_msg_port_descriptor_t *dsc;
 		
 		/* 
-		 * Copyout port right carried in the message 
+		 * Copyout port right carried in the message.  The port comes
+		 * from the kmsg and the NAME goes into the message (#442):
+		 * this is where the two have always been different things
+		 * sharing one field.
 		 */
 		dsc = &saddr->port;
 		mr |= ipc_kmsg_copyout_object(space, 
-					      (ipc_object_t) dsc->name, 
+					      (ipc_object_t) kmsg->ikm_ports[i],
 					      dsc->disposition, 
-					      (mach_port_t *) &dsc->name);
+					      &dsc->name);
 
 		break;
 	    }

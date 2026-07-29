@@ -1161,6 +1161,19 @@ WriteServerCallArg(FILE *file, register argument_t *arg)
 	    /* recast the void *, although it is not necessary */
 	    fprintf(file, "(%s%s)%s(OutP->%s)", 
 		it->itTransType, star, at, msgfield);
+	/*
+	 * #442: an out port the routine fills THROUGH A POINTER, like
+	 * do_bootstrap_ports.  Nothing packs it afterwards -- the routine
+	 * writes it where it is told -- so it is told the kmsg's slot, and
+	 * argKPD_Pack copies the name from there.  Handing it the message
+	 * field instead left the array empty and gave the receiver five
+	 * null bootstrap ports.
+	 */
+	else if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(it) &&
+		 streql(it->itServerType, "ipc_port_t"))
+	    fprintf(file,
+		    "(ipc_port_t%s)%s(ikm_from_header(&OutP->Head)->ikm_ports[%d])",
+		    star, at, rtKPDIndex(arg->argRoutine, arg, akbReturnKPD));
 	else if (IsKernelServer && streql(it->itServerType, "ipc_port_t"))
 	    /* recast the port to the kernel internal form value */
 	    fprintf(file, "(ipc_port_t%s)%s(OutP->%s)", star, at, msgfield);
@@ -1507,10 +1520,21 @@ WriteAdjustMsgCircular(FILE *file, register argument_t *arg)
      *  array of ports. So do I ...
      */
 
-    /* #442: the reply port comes from the kmsg, not from the message. */
-    fprintf(file, "\t  if (IP_VALID(ikm_from_header(&In0P->Head)->ikm_reply) &&\n");
-    fprintf(file, "\t    IP_VALID((ipc_port_t) OutP->%s.name) &&\n", arg->argMsgField);
-    fprintf(file, "\t    ipc_port_check_circularity((ipc_port_t) OutP->%s.name, ikm_from_header(&In0P->Head)->ikm_reply))\n", arg->argMsgField);
+    /*
+     * #442: both ports come from their kmsgs.  Reading the reply's out
+     * of OutP->x.name worked only because the pointer was still being
+     * written there as well; it is a port, so it comes from where ports
+     * live.
+     */
+    {
+	int kpd = rtKPDIndex(arg->argRoutine, arg, akbReturnKPD);
+
+	fprintf(file, "\t  if (IP_VALID(ikm_from_header(&In0P->Head)->ikm_reply) &&\n");
+	fprintf(file, "\t    IP_VALID(ikm_from_header(&OutP->Head)->ikm_ports[%d]) &&\n", kpd);
+	fprintf(file, "\t    ipc_port_check_circularity(\n");
+	fprintf(file, "\t\t\tikm_from_header(&OutP->Head)->ikm_ports[%d],\n", kpd);
+	fprintf(file, "\t\t\tikm_from_header(&In0P->Head)->ikm_reply))\n");
+    }
     fprintf(file, "\t\tOutP->Head.msgh_bits |= MACH_MSGH_BITS_CIRCULAR;\n");
 }
 
@@ -1585,9 +1609,23 @@ WriteKPD_port(FILE *file, register argument_t *arg)
 	if (close) 
 	    fprintf(file, "\t    }\n\t}\n");
 	fprintf(file, "\n");
-    } else  if (arg->argPoly != argNULL && akCheckAll(arg->argPoly->argKind, akbReturnSnd|akbVarNeeded))
-	fprintf(file, "\tOutP->%s.disposition = %s;\n", arg->argMsgField,
-	    arg->argPoly->argVarName);
+    } else {
+	/*
+	 * #442: the routine filled the kmsg's slot through the pointer it
+	 * was handed (see WriteServerCallArg); the message gets the name.
+	 */
+	if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(it) &&
+	    akCheck(arg->argKind, akbReturnKPD) &&
+	    streql(it->itServerType, "ipc_port_t"))
+	    fprintf(file,
+		    "\tOutP->%s.name = (mach_port_t)\n"
+		    "\t\tikm_from_header(&OutP->Head)->ikm_ports[%d];\n",
+		    arg->argMsgField,
+		    rtKPDIndex(arg->argRoutine, arg, akbReturnKPD));
+	if (arg->argPoly != argNULL && akCheckAll(arg->argPoly->argKind, akbReturnSnd|akbVarNeeded))
+	    fprintf(file, "\tOutP->%s.disposition = %s;\n", arg->argMsgField,
+		arg->argPoly->argVarName);
+    }
     /*
      *	If this is a KernelServer, and the reply message contains
      *	a receive right, we must check for the possibility of a
