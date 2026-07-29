@@ -508,7 +508,7 @@ mach_msg_overwrite(
 #if	DIPC
 			if (mr == MACH_RCV_TRANSPORT_ERROR) {
 				ipc_port_t port =
-				  (ipc_port_t)kmsg->ikm_header.msgh_remote_port;
+				  kmsg->ikm_dest;
 
 				/*
 				 * release DIPC delivery reference; we have

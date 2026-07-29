@@ -356,8 +356,8 @@ ipc_kobject_server(
 
 #if	MACH_RT
 	reply_rt =
-	  IP_VALID((ipc_port_t)request->ikm_header.msgh_local_port) ?
-	    IP_RT((ipc_port_t)request->ikm_header.msgh_local_port) :
+	  IP_VALID(request->ikm_reply) ?
+	    IP_RT(request->ikm_reply) :
 	    FALSE;
 	    
 	if (reply_rt)
@@ -503,7 +503,7 @@ ipc_kobject_server(
 				sizeof(int));
 
 		return IKM_NULL;
-	} else if (!IP_VALID((ipc_port_t)reply->ikm_header.msgh_remote_port)) {
+	} else if (!IP_VALID(reply->ikm_dest)) {
 		/*
 		 *	Can't queue the reply message if the destination
 		 *	(the reply port) isn't valid.

@@ -352,7 +352,7 @@ ipc_mqueue_send(
 		ipc_kmsg_check_ports(kmsg, "ipc_mqueue_send",
 				     __builtin_return_address(0));	/* #442 */
 
-	port = (ipc_port_t) kmsg->ikm_header.msgh_remote_port;
+	port = kmsg->ikm_dest;
 	assert(IP_VALID(port));
 
 	ip_lock(port);
@@ -1097,7 +1097,7 @@ ipc_mqueue_receive(
 		if (kmsg != IKM_NULL) {
 			dstat(++c_imr_message_present);
 			ipc_kmsg_rmqueue_first_macro(kmsgs, kmsg);
-			port = (ipc_port_t) kmsg->ikm_header.msgh_remote_port;
+			port = kmsg->ikm_dest;
 			seqno = port->ip_seqno++;
 			break;
 		}
@@ -1155,7 +1155,7 @@ ipc_mqueue_receive(
 			/* pick up the message that was handed to us */
 			kmsg = self->ith_kmsg;
 			seqno = self->ith_seqno;
-			port = (ipc_port_t) kmsg->ikm_header.msgh_remote_port;
+			port = kmsg->ikm_dest;
 			break;
 		}
 
@@ -1298,7 +1298,7 @@ ipc_mqueue_finish_receive(
 	if (mr == MACH_MSG_SUCCESS) {
 		assert((kmsg->ikm_header.msgh_bits & MACH_MSGH_BITS_CIRCULAR)
 									== 0);
-		assert(port == (ipc_port_t) kmsg->ikm_header.msgh_remote_port);
+		assert(port == kmsg->ikm_dest);
 	}
 
 	ip_lock(port);

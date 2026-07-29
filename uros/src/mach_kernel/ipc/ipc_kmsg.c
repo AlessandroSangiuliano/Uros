@@ -1503,7 +1503,7 @@ ipc_kmsg_copyin_body(
     /*
      * Determine if the target is a kernel port.
      */
-    dest = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
+    dest = (ipc_object_t) kmsg->ikm_dest;
     complex = FALSE;
 #if	DIPC
     complex_ool = FALSE;
@@ -3157,8 +3157,8 @@ ipc_kmsg_copyout_pseudo(
 	mach_msg_body_t		*slist)
 {
 	mach_msg_bits_t mbits = kmsg->ikm_header.msgh_bits;
-	ipc_object_t dest = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
-	ipc_object_t reply = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	ipc_object_t dest = (ipc_object_t) kmsg->ikm_dest;
+	ipc_object_t reply = (ipc_object_t) kmsg->ikm_reply;
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 	mach_port_t dest_name, reply_name;
@@ -3224,8 +3224,8 @@ ipc_kmsg_copyout_dest(
 #endif	/* DIPC */
 
 	mbits = kmsg->ikm_header.msgh_bits;
-	dest = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
-	reply = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	dest = (ipc_object_t) kmsg->ikm_dest;
+	reply = (ipc_object_t) kmsg->ikm_reply;
 	dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 
@@ -3545,8 +3545,8 @@ ipc_kmsg_copyout_to_kernel(
 	assert(!KMSG_IN_DIPC(kmsg));
 #endif	/* DIPC */
 
-	dest = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
-	reply = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	dest = (ipc_object_t) kmsg->ikm_dest;
+	reply = (ipc_object_t) kmsg->ikm_reply;
 	dest_type = MACH_MSGH_BITS_REMOTE(kmsg->ikm_header.msgh_bits);
 	reply_type = MACH_MSGH_BITS_LOCAL(kmsg->ikm_header.msgh_bits);
 
