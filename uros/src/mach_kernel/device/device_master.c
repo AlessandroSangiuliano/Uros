@@ -182,10 +182,18 @@ irq_forward_thread(void)
 				msg.msgh_bits =
 				    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 				msg.msgh_size = sizeof(msg);
-				msg.msgh_remote_port = notify;
+				/*
+				 * #442: the destination goes as an
+				 * argument.  It used to be cast into
+				 * msgh_remote_port, which is a NAME
+				 * field: the same four bytes on i386,
+				 * half a pointer on x86-64.
+				 */
+				msg.msgh_remote_port = MACH_PORT_NULL;
 				msg.msgh_local_port  = MACH_PORT_NULL;
 				msg.msgh_id = IRQ_NOTIFY_MSGH_BASE + irq;
-				(void)mach_msg_send_from_kernel(&msg,
+				(void)mach_msg_send_from_kernel(notify,
+								&msg,
 								sizeof(msg));
 			}
 		}

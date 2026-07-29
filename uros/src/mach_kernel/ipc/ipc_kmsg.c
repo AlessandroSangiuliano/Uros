@@ -881,6 +881,7 @@ ipc_kmsg_get(
 
 extern mach_msg_return_t
 ipc_kmsg_get_from_kernel(
+	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
 	mach_msg_size_t		size,
 	ipc_kmsg_t		*kmsgp)
@@ -888,7 +889,6 @@ ipc_kmsg_get_from_kernel(
 	ipc_kmsg_t 	kmsg;
 	mach_msg_size_t	msg_and_trailer_size;
 	mach_msg_format_0_trailer_t *trailer;
-	ipc_port_t	dest_port;
 #if	MACH_RT
 	boolean_t	rt;
 #endif	/* MACH_RT */
@@ -901,10 +901,17 @@ ipc_kmsg_get_from_kernel(
 	if (msg_and_trailer_size < IKM_SAVED_MSG_SIZE)
 	    msg_and_trailer_size = IKM_SAVED_MSG_SIZE;
 
-	assert(IP_VALID((ipc_port_t) msg->msgh_remote_port));
-
 #if	MACH_RT
-	rt = IP_RT((ipc_port_t) msg->msgh_remote_port);
+	/*
+	 * #442: the realtime allocator needs the destination PORT, and
+	 * only the kernel-to-kernel callers have one -- mach_msg_overwrite
+	 * arrives with a message whose fields are NAMES and passes IP_NULL.
+	 * This used to cast the field to a port and ask it either way,
+	 * which for that caller meant reading a namespace index as an
+	 * address.  MACH_RT is 0 in this tree; turning it on needs the name
+	 * translated first, not the cast put back.
+	 */
+	rt = IP_VALID(dest) ? IP_RT(dest) : FALSE;
 
 	if (rt)
 		kmsg = ikm_rtalloc(msg_and_trailer_size);
@@ -2277,7 +2284,18 @@ void
 ipc_kmsg_copyin_from_kernel(
 	ipc_kmsg_t	kmsg)
 {
-    /* #442: same as the userland path -- the header holds objects here. */
+    /*
+     * #442: the kernel-to-kernel path.  The destination arrived as an
+     * argument to mach_msg_send_from_kernel and is already in ikm_dest;
+     * the reply, when there is one, was put there by ikm_set_reply.  The
+     * header still carries the same values while both exist, and this is
+     * the site that says so -- and that says this path runs at all, which
+     * no other counter here does.
+     */
+    if (ipc_kmsg_port_check)
+	ipc_kmsg_check_ports(kmsg, IKM_CHECK_FROM_KERNEL, "from_kernel",
+			     __builtin_return_address(0));
+
     ikm_ports_from_header(kmsg);
 
 	mach_msg_bits_t bits = kmsg->ikm_header.msgh_bits;

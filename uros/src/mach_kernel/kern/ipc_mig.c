@@ -239,19 +239,28 @@ static mach_port_qos_t	qos_template;
 
 mach_msg_return_t
 mach_msg_send_from_kernel(
+	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
 	mach_msg_size_t		send_size)
 {
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
 
-	if (!MACH_PORT_VALID(msg->msgh_remote_port))
+	/*
+	 * #442: the destination is an argument, not a pointer smuggled
+	 * through a header field that is a NAME everywhere else.  The one
+	 * caller in this tree used to write it there with a cast, which is
+	 * the int-conversion warning #415 left standing.
+	 */
+	if (!IP_VALID(dest))
 		return MACH_SEND_INVALID_DEST;
 
-	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
+	mr = ipc_kmsg_get_from_kernel(dest, msg, send_size, &kmsg);
 	if (mr != MACH_MSG_SUCCESS)
 		panic("mach_msg_send_from_kernel");
 
+	ikm_set_dest(kmsg, dest);
+	ikm_set_reply(kmsg, IP_NULL);		/* one-way: say so */
 	ipc_kmsg_copyin_from_kernel(kmsg);
 	ipc_mqueue_send_always(kmsg);
 
@@ -275,6 +284,7 @@ mach_msg_send_from_kernel(
 
 mach_msg_return_t
 mach_msg_rpc_from_kernel(
+	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
 	mach_msg_size_t		send_size,
 	mach_msg_size_t		rcv_size)
@@ -286,14 +296,16 @@ mach_msg_rpc_from_kernel(
 	mach_port_seqno_t seqno;
 	mach_msg_return_t mr;
 
-	assert(MACH_PORT_VALID(msg->msgh_remote_port));
+	assert(IP_VALID(dest));			/* #442 */
 	assert(msg->msgh_local_port == MACH_PORT_NULL);
 
 	self->ith_scatter_list = MACH_MSG_BODY_NULL;
 
-	mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
+	mr = ipc_kmsg_get_from_kernel(dest, msg, send_size, &kmsg);
 	if (mr != MACH_MSG_SUCCESS)
 		panic("mach_msg_rpc_from_kernel");
+
+	ikm_set_dest(kmsg, dest);		/* #442 */
 
 	rpc_lock(self);
 
@@ -466,7 +478,8 @@ mach_msg_overwrite(
 #endif	/* lint */
 
 	if (option & MACH_SEND_MSG) {
-		mr = ipc_kmsg_get_from_kernel(msg, send_size, &kmsg);
+		/* #442: names, not pointers -- ipc_kmsg_copyin translates them. */
+		mr = ipc_kmsg_get_from_kernel(IP_NULL, msg, send_size, &kmsg);
 		if (mr != MACH_MSG_SUCCESS)
 			panic("mach_msg");
 

@@ -241,7 +241,8 @@ typedef struct ipc_kmsg {
 #define	IKM_CHECK_SEND		0
 #define	IKM_CHECK_CLEAN		1
 #define	IKM_CHECK_CLEAN_PART	2
-#define	IKM_CHECK_SITES		3
+#define	IKM_CHECK_FROM_KERNEL	3
+#define	IKM_CHECK_SITES		4
 
 extern int	ipc_kmsg_port_check;
 extern void	ipc_kmsg_check_ports(ipc_kmsg_t kmsg, int site,
@@ -298,6 +299,20 @@ MACRO_BEGIN								\
 	ikm_init_special((kmsg), ikm_plus_overhead(size));		\
 MACRO_END
 
+/*
+ *	#442: the two typed ports start empty.
+ *
+ *	A kmsg comes off ikm_cache holding whatever the last message left
+ *	in it, and a producer that fills only one of the two leaves a stale
+ *	POINTER in the other.  While the header still carries the same
+ *	values that is invisible -- ikm_ports_from_header overwrites both a
+ *	moment later -- but the -M census saw it on 15 of 546 kernel sends
+ *	(the other 531 got a recycled kmsg whose leftover happened to be
+ *	zero), and when the header stops carrying them there is nothing to
+ *	overwrite it with.  Emptying them here costs two stores on a buffer
+ *	the allocator has just touched, and makes "nobody set it" mean
+ *	IP_NULL rather than the previous message.
+ */
 #if	DIPC
 /*
  *	The msgh_bits must be initialized to zero so that
@@ -308,12 +323,16 @@ MACRO_END
 #define	ikm_init_special(kmsg, size)					\
 MACRO_BEGIN								\
 	(kmsg)->ikm_size = (size);					\
+	(kmsg)->ikm_dest = IP_NULL;					\
+	(kmsg)->ikm_reply = IP_NULL;					\
 	(kmsg)->ikm_header.msgh_bits = 0;				\
 MACRO_END
 #else	/* !DIPC */
 #define	ikm_init_special(kmsg, size)					\
 MACRO_BEGIN								\
 	(kmsg)->ikm_size = (size);					\
+	(kmsg)->ikm_dest = IP_NULL;					\
+	(kmsg)->ikm_reply = IP_NULL;					\
 MACRO_END
 #endif	/* DIPC */
 
@@ -484,6 +503,7 @@ extern mach_msg_return_t ipc_kmsg_get(
 
 /* Allocate a kernel message buffer and copy a kernel message to the buffer */
 extern mach_msg_return_t ipc_kmsg_get_from_kernel(
+	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
 	mach_msg_size_t		size,
 	ipc_kmsg_t		*kmsgp);
