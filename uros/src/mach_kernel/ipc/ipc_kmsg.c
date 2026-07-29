@@ -1975,6 +1975,154 @@ ipc_kmsg_copyin_body(
  *		MACH_SEND_MSG_TOO_SMALL	Body is too small for types/data.
  */
 
+/*
+ *	One cache line.  Used by both per-CPU tables in this file: the kmsg
+ *	pool (#323) and the port histogram (#415), which must not share a line
+ *	with anything either.
+ */
+#define KMSG_CACHE_LINE	64
+
+/*
+ *	How many port pointers does a message actually carry? (#415)
+ *
+ *	The kernel keeps ipc_port_t pointers in message fields that are the
+ *	width of a port name, which works because on i386 the two are the same
+ *	four bytes.  On x86-64 they are not, and the choice of what to do about
+ *	it turns on a number nobody has: how many ports a typical message
+ *	carries.  A design that pays per port is cheap if the answer is one and
+ *	expensive if it is twenty.
+ *
+ *	So count them, on the target that still runs, before choosing.  Off
+ *	unless -N is given, and then it costs one predictable branch on the
+ *	send path; with it on, one walk of the descriptors that copyin has
+ *	already walked, which perturbs timings but not counts, and counts are
+ *	what this is for.
+ *
+ *	Per CPU and cache-line aligned for the reason #323 gives: two CPUs
+ *	sharing a line would bounce it on every message, and this measures the
+ *	send path rather than being the reason it got slower.
+ */
+int	ipc_port_hist_enabled __attribute__((section(".data"))) = 0;
+int	ipc_port_hist_every   __attribute__((section(".data"))) = 20000;
+
+#define	PH_BUCKETS	10	/* 0 1 2 3 4 5-8 9-16 17-32 33-64 65+ */
+
+struct ipc_porthist_pcpu {
+	unsigned long	msgs;		/* messages copied in		*/
+	unsigned long	cplx;		/* ... of which carried a body	*/
+	unsigned long	ports;		/* port pointers, in total	*/
+	unsigned long	most;		/* the largest single message	*/
+	unsigned long	hist[PH_BUCKETS];
+} __attribute__((aligned(KMSG_CACHE_LINE)));
+
+static struct ipc_porthist_pcpu	ipc_porthist[NCPUS];
+
+static unsigned int
+ph_bucket(unsigned long n)
+{
+	if (n <= 4)
+		return (unsigned int) n;
+	if (n <= 8)
+		return 5;
+	if (n <= 16)
+		return 6;
+	if (n <= 32)
+		return 7;
+	if (n <= 64)
+		return 8;
+	return 9;
+}
+
+/*
+ *	Fold the per-CPU counters and print them.  Called from the counting
+ *	path every ipc_port_hist_every messages, which is the only way to get
+ *	the numbers out without a debugger: the send path cannot wait for one.
+ */
+static void
+ipc_port_hist_report(void)
+{
+	static const char *label[PH_BUCKETS] = {
+		"0", "1", "2", "3", "4", "5-8", "9-16", "17-32", "33-64", "65+"
+	};
+	unsigned long msgs = 0, cplx = 0, ports = 0, most = 0;
+	unsigned long hist[PH_BUCKETS];
+	int i, c;
+
+	for (i = 0; i < PH_BUCKETS; i++)
+		hist[i] = 0;
+
+	for (c = 0; c < NCPUS; c++) {
+		msgs  += ipc_porthist[c].msgs;
+		cplx  += ipc_porthist[c].cplx;
+		ports += ipc_porthist[c].ports;
+		if (ipc_porthist[c].most > most)
+			most = ipc_porthist[c].most;
+		for (i = 0; i < PH_BUCKETS; i++)
+			hist[i] += ipc_porthist[c].hist[i];
+	}
+
+	if (msgs == 0)
+		return;
+
+	printf("ipc ports/msg: %lu msgs, %lu complex, %lu ports, max %lu, "
+	       "mean %lu.%02lu\n",
+	       msgs, cplx, ports, most,
+	       ports / msgs, (ports % msgs) * 100 / msgs);
+	for (i = 0; i < PH_BUCKETS; i++)
+		if (hist[i] != 0)
+			printf("ipc ports/msg:   %-6s %8lu  %2lu%%\n",
+			       label[i], hist[i], hist[i] * 100 / msgs);
+}
+
+/*
+ *	Count the port pointers this message would need the kernel to carry:
+ *	the header's two, plus one per port descriptor, plus the length of
+ *	every out-of-line port array.  Runs after copyin, so the header fields
+ *	hold objects rather than names and a null one is a null pointer either
+ *	way.
+ */
+static void
+ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
+{
+	struct ipc_porthist_pcpu *p = &ipc_porthist[cpu_number()];
+	mach_msg_header_t *hdr = &kmsg->ikm_header;
+	unsigned long n = 0;
+
+	if (hdr->msgh_remote_port != MACH_PORT_NULL)
+		n++;
+	if (hdr->msgh_local_port != MACH_PORT_NULL)
+		n++;
+
+	if (hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
+		mach_msg_body_t *body = (mach_msg_body_t *) (hdr + 1);
+		mach_msg_descriptor_t *d = (mach_msg_descriptor_t *) (body + 1);
+		mach_msg_descriptor_t *end = d + body->msgh_descriptor_count;
+
+		p->cplx++;
+		for (; d < end; d++)
+			switch (d->type.type) {
+			case MACH_MSG_PORT_DESCRIPTOR:
+				n++;
+				break;
+			case MACH_MSG_OOL_PORTS_DESCRIPTOR:
+				n += d->ool_ports.count;
+				break;
+			default:
+				break;
+			}
+	}
+
+	p->msgs++;
+	p->ports += n;
+	if (n > p->most)
+		p->most = n;
+	p->hist[ph_bucket(n)]++;
+
+	if (ipc_port_hist_every > 0 &&
+	    p->msgs % (unsigned long) ipc_port_hist_every == 0)
+		ipc_port_hist_report();
+}
+
 mach_msg_return_t
 ipc_kmsg_copyin(
 	ipc_kmsg_t	kmsg,
@@ -1987,11 +2135,17 @@ ipc_kmsg_copyin(
     mr = ipc_kmsg_copyin_header(&kmsg->ikm_header, space, notify);
     if (mr != MACH_MSG_SUCCESS)
 	return mr;
-    
-    if ((kmsg->ikm_header.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0)
+
+    if ((kmsg->ikm_header.msgh_bits & MACH_MSGH_BITS_COMPLEX) == 0) {
+	if (ipc_port_hist_enabled)
+	    ipc_kmsg_count_ports(kmsg);
 	return MACH_MSG_SUCCESS;
-    
-    return( ipc_kmsg_copyin_body( kmsg, space, map) );
+    }
+
+    mr = ipc_kmsg_copyin_body( kmsg, space, map);
+    if (mr == MACH_MSG_SUCCESS && ipc_port_hist_enabled)
+	ipc_kmsg_count_ports(kmsg);
+    return mr;
 }
 
 /*
@@ -3159,8 +3313,6 @@ ipc_kmsg_check_scatter(
  *	(16 ptrs) on one line, then avail + per-CPU tries/misses on the next.
  *	The tries/misses are folded only when read (ikm_cache_stats).
  */
-#define KMSG_CACHE_LINE	64
-
 struct kmsg_pcpu {
 	ipc_kmsg_t	stash[IKM_STASH];	/* 16 * 4B = 64B = one line */
 	unsigned int	avail;			/* LIFO depth (stack top)    */
