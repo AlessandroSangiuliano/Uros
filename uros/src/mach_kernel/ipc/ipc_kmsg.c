@@ -575,8 +575,8 @@ ipc_kmsg_clean_body(
 
 		assert(dsc->count != 0);
 
-		KFREE((vm_offset_t) dsc->address, 
-		     (vm_size_t) dsc->count * sizeof(mach_port_t),
+		KFREE((vm_offset_t) dsc->address,
+		     ipc_port_array_size(dsc->count),
 		     rt);
 		break;
 	    }
@@ -1845,8 +1845,13 @@ ipc_kmsg_copyin_body(
 		dsc = &sstart->ool_ports;
 		addr = (vm_offset_t) dsc->address;
 
-		/* calculate length of data in bytes, rounding up */
-		length = dsc->count * sizeof(mach_port_t);
+		/*
+		 * The kernel's copy holds one pointer per port, not one
+		 * name (#415): copyin translates the names it reads from
+		 * user memory into objects, in place, and objects are
+		 * wider here than the names were.
+		 */
+		length = ipc_port_array_size(dsc->count);
 		
 		if (length == 0) {
 		    complex = TRUE;
@@ -2886,16 +2891,25 @@ ipc_kmsg_copyout_body(
 	    }
 	    case MACH_MSG_OOL_PORTS_DESCRIPTOR : {
 		vm_offset_t            		addr;
-		mach_port_t            		*objects;
+		ipc_object_t           		*objects;
+		mach_port_t            		*names;
 		mach_msg_type_number_t 		j;
-    		vm_size_t           		length;
+    		vm_size_t           		length;	/* names, to the caller */
+    		vm_size_t           		klength;/* pointers, allocated here */
 		mach_msg_ool_ports_descriptor_t	*dsc;
 
 		SKIP_PORT_DESCRIPTORS(sstart, send);
 
 		dsc = &saddr->ool_ports;
 
-		length = dsc->count * sizeof(mach_port_t);
+		/*
+		 * Two lengths, not one (#415).  What goes out to the caller
+		 * is one NAME per port; what this end allocated, and must
+		 * free, is one POINTER per port.  A single `length' for both
+		 * frees a buffer at half the size it was taken at.
+		 */
+		length = mach_port_name_array_size(dsc->count);
+		klength = ipc_port_array_size(dsc->count);
 
 		if (length != 0) {
 		    if (sstart != MACH_MSG_DESCRIPTOR_NULL &&
@@ -2950,23 +2964,29 @@ ipc_kmsg_copyout_body(
 		}
 
 		
-		objects = (mach_port_t *) dsc->address ;
-		
+		/*
+		 * In place, and narrowing: the slots hold objects going in
+		 * and names coming out.  Forward order is what makes that
+		 * safe -- name j sits at 4j and object j at 8j, so a write
+		 * never reaches an object still to be read (#415).
+		 */
+		objects = (ipc_object_t *) dsc->address;
+		names   = (mach_port_t *) dsc->address;
+
 		/* copyout port rights carried in the message */
-		
+
 		for ( j = 0; j < dsc->count ; j++) {
-		    ipc_object_t object =
-			(ipc_object_t) objects[j];
-		    
+		    ipc_object_t object = objects[j];
+
 		    mr |= ipc_kmsg_copyout_object(space, object,
-					dsc->disposition, &objects[j]);
+					dsc->disposition, &names[j]);
 		}
 
 		/* copyout to memory allocated above */
 		
 		data = (vm_offset_t) dsc->address;
 		(void) copyoutmap(map, data, addr, length);
-		KFREE(data, length, rt);
+		KFREE(data, klength, rt);
 		
 		dsc->address = (void *) addr;
 		INCREMENT_SCATTER(sstart);

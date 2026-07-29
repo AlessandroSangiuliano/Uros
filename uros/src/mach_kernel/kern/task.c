@@ -1247,7 +1247,13 @@ task_threads(
 		actual = task->thr_act_count;
 
 		/* do we have the memory we need? */
-		size_needed = actual * sizeof(mach_port_t);
+		/*
+		 * One POINTER per thread, not one name (#415): the array is
+		 * filled with thread_act_t and then converted in place to
+		 * ipc_port_t, both of which are wider than a name here.  The
+		 * count is the caller's task's thread count.
+		 */
+		size_needed = ipc_port_array_size(actual);
 		if (size_needed <= size)
 			break;
 
