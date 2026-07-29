@@ -147,11 +147,9 @@
  *	the actual buffer is normally larger.  The rest of the buffer
  *	holds the body of the message.
  *
- *	In a kmsg, the port fields hold pointers to ports instead
- *	of port names.  These pointers hold references.
- *
- *	The ikm_header.msgh_remote_port field is the destination
- *	of the message.
+ *	The kmsg's own ikm_dest and ikm_reply hold pointers to ports, and
+ *	those pointers hold references.  The message itself carries names,
+ *	as it did when it arrived and as it will when it leaves (#442).
  */
 
 #if	DIPC
@@ -186,11 +184,17 @@
  *	not free here, and it puts kernel pointers inside a buffer whose
  *	contents arrived from userland.
  *
- *	These are filled by copyin.  While the migration is in progress the
- *	message fields still carry the pointer as well, and ipc_kmsg_port_check
- *	(the -M boot flag) verifies on every send that the two have not
- *	drifted -- see ipc_kmsg.c.  When the readers have moved here the
- *	message keeps the name it arrived with and nothing else.
+ *	These are filled by copyin, which translates the sender's names, and
+ *	by the kernel's own producers, which have the ports to begin with.
+ *	The message keeps the names it arrived with until copyout replaces
+ *	them with the receiver's, and never holds an address at all.
+ *
+ *	Getting here was a migration, and it was checked rather than assumed:
+ *	a boot flag made every send, every clean and every kernel-side send
+ *	compare the two copies while both existed, per call site so that a
+ *	zero came with the number of times it could have been otherwise.
+ *	The last run before the message stopped carrying them read
+ *	2999279 / 174 / 1 / 546 seen, none diverging.
  */
 typedef struct ipc_kmsg {
 	struct ipc_kmsg *ikm_next, *ikm_prev;
@@ -199,49 +203,52 @@ typedef struct ipc_kmsg {
 #if	DIPC
 	handle_t ikm_handle;
 #endif	/* DIPC */
-	ipc_port_t ikm_dest;			/* msgh_remote_port, typed */
-	ipc_port_t ikm_reply;			/* msgh_local_port, typed  */
+	ipc_port_t ikm_dest;			/* where it is going */
+	ipc_port_t ikm_reply;			/* where the answer goes */
 	mach_msg_header_t ikm_header;
 } *ipc_kmsg_t;
 
 /*
- *	Set a kmsg's destination or reply, in both places (#442).
+ *	Set a kmsg's destination or reply (#442).
  *
  *	Every path that builds a message inside a kmsg and sends it goes
- *	through these rather than writing the header field itself, so that
- *	the typed field is never the one nobody remembered.  Step 3 is then
- *	one line in each of them: stop writing the header.
+ *	through these rather than writing a header field, so that the port
+ *	the kernel will actually use is never the one nobody remembered.
+ *
+ *	They used to write the header as well, so that readers not yet moved
+ *	kept seeing what they expected.  There are none left, and a port
+ *	POINTER no longer goes anywhere near a field whose width the interface
+ *	fixes at thirty-two bits.
  */
 #define	ikm_set_dest(kmsg, port)					\
 	MACRO_BEGIN							\
 	    (kmsg)->ikm_dest = (port);					\
-	    (kmsg)->ikm_header.msgh_remote_port = (mach_port_t) (port);	\
 	MACRO_END
 
 #define	ikm_set_reply(kmsg, port)				\
 	MACRO_BEGIN							\
 	    (kmsg)->ikm_reply = (port);					\
-	    (kmsg)->ikm_header.msgh_local_port = (mach_port_t) (port);	\
 	MACRO_END
-/*
- *	-M: cross-check the two, per call site (#442).  Each site gets its own
- *	slot so that "zero divergences" comes with the count of times the site
- *	ran, which is what makes the zero mean something.
- */
-#define	IKM_CHECK_SEND		0
-#define	IKM_CHECK_CLEAN		1
-#define	IKM_CHECK_CLEAN_PART	2
-#define	IKM_CHECK_FROM_KERNEL	3
-#define	IKM_CHECK_SITES		4
-
-extern int	ipc_kmsg_port_check;
-extern void	ipc_kmsg_check_ports(ipc_kmsg_t kmsg, int site,
-				     const char *where, void *caller);
-
 #define	IKM_NULL		((ipc_kmsg_t) 0)
 
 #define	IKM_OVERHEAD							\
 		(sizeof(struct ipc_kmsg) - sizeof(mach_msg_header_t))
+
+/*
+ *	The message a header belongs to (#442).
+ *
+ *	ikm_header is the last member, so a header the kernel is working on
+ *	sits at a fixed offset inside its kmsg.  This is for the MIG server
+ *	stubs: a server routine is handed a bare mach_msg_header_t because
+ *	that is the signature migcom generates, and it needs the destination
+ *	port, which is no longer in the message.
+ *
+ *	Only valid for a header that IS inside a kmsg.  For a server routine
+ *	it always is -- ipc_kobject_server dispatches with &request->ikm_header
+ *	and nothing else calls one.
+ */
+#define	ikm_from_header(hdr)						\
+	((ipc_kmsg_t) ((vm_offset_t) (hdr) - IKM_OVERHEAD))
 
 #define	ikm_plus_overhead(size)	((vm_size_t)((size) + IKM_OVERHEAD))
 #define	ikm_less_overhead(size)	((mach_msg_size_t)((size) - IKM_OVERHEAD))

@@ -266,6 +266,8 @@ WriteIncludes(FILE *file)
         else
             cp++;       /* skip '/' */
         fprintf(file, "#include \"%s\"\n", cp); 
+	if (IsKernelServer)
+	    fprintf(file, "#include <ipc/ipc_kmsg.h>\n");
     } else {
 	fprintf(file, "#include <string.h>\n");
 	fprintf(file, "#include <mach/ndr.h>\n");
@@ -274,9 +276,10 @@ WriteIncludes(FILE *file)
 	fprintf(file, "#include <mach/message.h>\n");
 	fprintf(file, "#include <mach/mig_errors.h>\n");
 	fprintf(file, "#include <mach/rpc.h>\n");
-	if (IsKernelServer)
+	if (IsKernelServer) {
 	    fprintf(file, "#include <ipc/ipc_port.h>\n");
-	else
+	    fprintf(file, "#include <ipc/ipc_kmsg.h>\n");
+	} else
 	    fprintf(file, "#include <mach/port.h>\n");
     }
     if (UseEventLogger) {
@@ -854,9 +857,14 @@ InArgMsgField(register argument_t *arg)
     char who[20] = {0};
 
     /*
-     *	Inside the kernel, the request and reply port fields
-     *	really hold ipc_port_t values, not mach_port_t values.
-     *	Hence we must cast the values.
+     *	#442: inside the kernel the request and reply ports are
+     *	ipc_port_t, and they used to be read out of the message with a
+     *	cast -- a kernel address taken from a field the interface fixes
+     *	at thirty-two bits.  They now come from the kmsg the header
+     *	sits in, which is where the kernel keeps them.
+     *
+     *	A server routine is always handed &kmsg->ikm_header:
+     *	ipc_kobject_server is the only thing that dispatches one.
      */
 
     if (!(arg->argFlags & flRetCode))
@@ -865,11 +873,12 @@ InArgMsgField(register argument_t *arg)
 	else
 	    SafeSnprintf(who, sizeof(who), "In%dP->", arg->argRequestPos);
 
-    if (IsKernelServer &&
-	((akIdent(arg->argKind) == akeRequestPort) ||
-	 (akIdent(arg->argKind) == akeReplyPort)))
-	SafeSnprintf(buffer, MAX_STR_LEN, "(ipc_port_t) %s%s", who,
-		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
+    if (IsKernelServer && akIdent(arg->argKind) == akeRequestPort)
+	SafeSnprintf(buffer, MAX_STR_LEN,
+		     "ikm_from_header(&%sHead)->ikm_dest", who);
+    else if (IsKernelServer && akIdent(arg->argKind) == akeReplyPort)
+	SafeSnprintf(buffer, MAX_STR_LEN,
+		     "ikm_from_header(&%sHead)->ikm_reply", who);
     else
 	SafeSnprintf(buffer, MAX_STR_LEN, "%s%s", who,
 		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
@@ -1459,9 +1468,10 @@ WriteAdjustMsgCircular(FILE *file, register argument_t *arg)
      *  array of ports. So do I ...
      */
 
-    fprintf(file, "\t  if (IP_VALID((ipc_port_t) In0P->Head.msgh_reply_port) &&\n");
+    /* #442: the reply port comes from the kmsg, not from the message. */
+    fprintf(file, "\t  if (IP_VALID(ikm_from_header(&In0P->Head)->ikm_reply) &&\n");
     fprintf(file, "\t    IP_VALID((ipc_port_t) OutP->%s.name) &&\n", arg->argMsgField);
-    fprintf(file, "\t    ipc_port_check_circularity((ipc_port_t) OutP->%s.name, (ipc_port_t) In0P->Head.msgh_reply_port))\n", arg->argMsgField);
+    fprintf(file, "\t    ipc_port_check_circularity((ipc_port_t) OutP->%s.name, ikm_from_header(&In0P->Head)->ikm_reply))\n", arg->argMsgField);
     fprintf(file, "\t\tOutP->Head.msgh_bits |= MACH_MSGH_BITS_CIRCULAR;\n");
 }
 

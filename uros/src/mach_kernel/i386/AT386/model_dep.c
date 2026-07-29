@@ -324,7 +324,6 @@ extern int	ddb_kbd_break_enabled;	/* #335: -K arms Ctrl+D -> DDB */
 extern int	nmi_watchdog_enabled;	/* #344: -W arms the NMI watchdog */
 extern int	ipc_port_hist_enabled;	/* #415: -N counts ports per message */
 extern int	ipc_port_hist_every;	/* #415: ... and reports every N */
-extern int	ipc_kmsg_port_check;	/* #442: -M cross-checks the kmsg's ports */
 extern void	nmi_watchdog_init(void);
 
 void		parse_arguments(void);
@@ -693,11 +692,6 @@ parse_arguments(void)
 		    break;
 		case 'c':	/* -c??:  cap CPUs brought up (SMP debug, #344) */
 		    boot_cpu_cap = atoi_term(p, &p);
-		    break;
-		case 'M':	/* -M: check that the kmsg's typed port fields
-				 * still agree with the message's, on every send.
-				 * For as long as both carry them (#442). */
-		    ipc_kmsg_port_check = 1;
 		    break;
 		case 'N':	/* -N??: count port pointers per message and
 				 * report every ?? messages (#415).  Off by

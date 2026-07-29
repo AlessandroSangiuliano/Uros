@@ -614,11 +614,6 @@ ipc_kmsg_clean_partial(
 	assert(!KMSG_IN_DIPC(kmsg));
 #endif	/* DIPC */
 
-	if (ipc_kmsg_port_check)		/* #442 */
-		ipc_kmsg_check_ports(kmsg, IKM_CHECK_CLEAN_PART,
-				     "clean_partial",
-				     __builtin_return_address(0));
-
 	object = (ipc_object_t) kmsg->ikm_dest;		/* #442 */
 	assert(IO_VALID(object));
 	ipc_object_destroy(object, MACH_MSGH_BITS_REMOTE(mbits));
@@ -662,10 +657,6 @@ ipc_kmsg_clean(
 			return;
 	}
 #endif	/* DIPC */
-
-	if (ipc_kmsg_port_check)		/* #442 */
-		ipc_kmsg_check_ports(kmsg, IKM_CHECK_CLEAN, "clean",
-				     __builtin_return_address(0));
 
 	mbits = kmsg->ikm_header.msgh_bits;
 	object = (ipc_object_t) kmsg->ikm_dest;		/* #442 */
@@ -2150,99 +2141,6 @@ ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
 		ipc_port_hist_report();
 }
 
-/*
- *	Cross-check the typed port fields against the message (#442).
- *
- *	While the migration is in progress a port pointer lives in two places
- *	at once, which is only safe for as long as they agree.  -M makes every
- *	send say whether they do.
- *
- *	It reports rather than panics, and the first boot says why: the two
- *	disagree immediately, because copyin is not the only thing that
- *	produces a sendable message.  Fifty places in this tree write
- *	msgh_remote_port or msgh_local_port -- notifications, the kernel
- *	server's replies, the network paths -- and with kmsgs recycled through
- *	the cache, a field nobody set holds whatever the message before it
- *	left there.
- *
- *	That is the census this needs to be: stopping at the first one would
- *	tell us there is at least one, which we already knew, while counting
- *	them says how much of step 2 is real work and which paths it touches.
- *	A panic here comes later, when the count is meant to be zero.
- */
-int	ipc_kmsg_port_check __attribute__((section(".data"))) = 0;
-
-/*
- *	Per call site, not one total (#442).
- *
- *	A single pair of counters answers "do the two fields ever disagree",
- *	which is not the question a reader needs answered before it moves.
- *	The question is "do they disagree HERE", and a site that runs a few
- *	thousand times drowns in three million copyins: zero would then mean
- *	either that the site agrees or that it was never reached, and those
- *	are the two readings a check must never leave open.  The per-site
- *	seen column is what says the observation could have seen a failure.
- */
-static struct ikm_check_site {
-	const char	*name;
-	unsigned long	seen;
-	unsigned long	bad;
-} ikm_check_sites[IKM_CHECK_SITES];
-
-static unsigned long	ikm_check_seen;
-static unsigned long	ikm_check_bad;
-
-void
-ipc_kmsg_check_ports(ipc_kmsg_t kmsg, int site, const char *where, void *caller)
-{
-	struct ikm_check_site *s = &ikm_check_sites[site];
-	ipc_port_t hdr_dest =
-		(ipc_port_t) kmsg->ikm_header.msgh_remote_port;
-	ipc_port_t hdr_reply =
-		(ipc_port_t) kmsg->ikm_header.msgh_local_port;
-	boolean_t  bad = (kmsg->ikm_dest != hdr_dest ||
-			  kmsg->ikm_reply != hdr_reply);
-
-	s->name = where;
-	s->seen++;
-	ikm_check_seen++;
-	if (bad) {
-		s->bad++;
-		ikm_check_bad++;
-	}
-
-	/*
-	 * The first few in full, then only a periodic tally: a divergence
-	 * that happens on most messages would otherwise drown the boot it is
-	 * trying to describe.
-	 */
-	/*
-	 * The caller's return address, because "which send" is the whole
-	 * question: the count says how many paths are left, not which.
-	 * Resolve it against the kernel's symbols.
-	 */
-	if (bad && s->bad <= 4)
-		printf("ipc port check: %s from %p: dest %p vs %p, "
-		       "reply %p vs %p\n",
-		       where, caller,
-		       (void *) kmsg->ikm_dest, (void *) hdr_dest,
-		       (void *) kmsg->ikm_reply, (void *) hdr_reply);
-
-	if ((ikm_check_seen % 100000) == 0) {
-		int i;
-
-		printf("ipc port check: %lu seen, %lu diverging\n",
-		       ikm_check_seen, ikm_check_bad);
-		for (i = 0; i < IKM_CHECK_SITES; i++)
-			printf("ipc port check:   %-14s %10lu seen, "
-			       "%lu diverging\n",
-			       ikm_check_sites[i].name ?
-					ikm_check_sites[i].name : "(not reached)",
-			       ikm_check_sites[i].seen,
-			       ikm_check_sites[i].bad);
-	}
-}
-
 mach_msg_return_t
 ipc_kmsg_copyin(
 	ipc_kmsg_t	kmsg,
@@ -2288,18 +2186,6 @@ void
 ipc_kmsg_copyin_from_kernel(
 	ipc_kmsg_t	kmsg)
 {
-    /*
-     * #442: the kernel-to-kernel path.  The destination arrived as an
-     * argument to mach_msg_send_from_kernel and is already in ikm_dest;
-     * the reply, when there is one, was put there by ikm_set_reply.  The
-     * header still carries the same values while both exist, and this is
-     * the site that says so -- and that says this path runs at all, which
-     * no other counter here does.
-     */
-    if (ipc_kmsg_port_check)
-	ipc_kmsg_check_ports(kmsg, IKM_CHECK_FROM_KERNEL, "from_kernel",
-			     __builtin_return_address(0));
-
 	mach_msg_bits_t bits = kmsg->ikm_header.msgh_bits;
 	mach_msg_type_name_t rname = MACH_MSGH_BITS_REMOTE(bits);
 	mach_msg_type_name_t lname = MACH_MSGH_BITS_LOCAL(bits);
