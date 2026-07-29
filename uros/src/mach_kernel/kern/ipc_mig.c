@@ -241,7 +241,9 @@ mach_msg_return_t
 mach_msg_send_from_kernel(
 	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
-	mach_msg_size_t		send_size)
+	mach_msg_size_t		send_size,
+	ipc_port_t		*ports,
+	mach_msg_type_number_t	nports)
 {
 	ipc_kmsg_t kmsg;
 	mach_msg_return_t mr;
@@ -261,7 +263,7 @@ mach_msg_send_from_kernel(
 
 	ikm_set_dest(kmsg, dest);
 	ikm_set_reply(kmsg, IP_NULL);		/* one-way: say so */
-	ipc_kmsg_copyin_from_kernel(kmsg);
+	ipc_kmsg_copyin_from_kernel(kmsg, ports, nports);
 	ipc_mqueue_send_always(kmsg);
 
 	return MACH_MSG_SUCCESS;
@@ -287,7 +289,9 @@ mach_msg_rpc_from_kernel(
 	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
 	mach_msg_size_t		send_size,
-	mach_msg_size_t		rcv_size)
+	mach_msg_size_t		rcv_size,
+	ipc_port_t		*ports,
+	mach_msg_type_number_t	nports)
 {
 	ipc_thread_t self = current_thread();
 	thread_act_t a_self = self->top_act;
@@ -328,7 +332,7 @@ mach_msg_rpc_from_kernel(
 	ipc_port_reference(reply);
 	rpc_unlock(self);
 
-	ipc_kmsg_copyin_from_kernel(kmsg);
+	ipc_kmsg_copyin_from_kernel(kmsg, ports, nports);
 
 	ipc_mqueue_send_always(kmsg);
 

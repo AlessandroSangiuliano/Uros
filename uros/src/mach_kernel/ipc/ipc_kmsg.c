@@ -2291,8 +2291,17 @@ ipc_kmsg_copyin(
 
 void
 ipc_kmsg_copyin_from_kernel(
-	ipc_kmsg_t	kmsg)
+	ipc_kmsg_t		kmsg,
+	ipc_port_t		*ports,
+	mach_msg_type_number_t	nports)
 {
+	/*
+	 * #442: the descriptors' ports come as an argument.  A KernelUser
+	 * stub builds its message on the caller's stack, before there is a
+	 * kmsg to put them in, and used to write them into the descriptors'
+	 * name fields -- the same trick the header's destination used, and
+	 * lossy for the same reason once a pointer stops being four bytes.
+	 */
 	mach_msg_bits_t bits = kmsg->ikm_header.msgh_bits;
 	mach_msg_type_name_t rname = MACH_MSGH_BITS_REMOTE(bits);
 	mach_msg_type_name_t lname = MACH_MSGH_BITS_LOCAL(bits);
@@ -2359,7 +2368,8 @@ ipc_kmsg_copyin_from_kernel(
 		
 		    /* this is really the type SEND, SEND_ONCE, etc. */
 		    name = dsc->disposition;
-		    object = (ipc_object_t) dsc->name;
+		    object = (ipc_object_t)
+			     (i < nports ? ports[i] : IP_NULL);	/* #442 */
 		    dsc->disposition = ipc_object_copyin_type(name);
 		
 		    if (!IO_VALID(object)) {

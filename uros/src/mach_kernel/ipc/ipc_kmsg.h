@@ -572,7 +572,9 @@ extern mach_msg_return_t ipc_kmsg_copyin(
 
 /* Copyin port rights and out-of-line memory from a kernel message */
 extern void ipc_kmsg_copyin_from_kernel(
-	ipc_kmsg_t	kmsg);
+	ipc_kmsg_t		kmsg,
+	ipc_port_t		*ports,
+	mach_msg_type_number_t	nports);
 
 /* Copyout port rights in the header of a message */
 extern mach_msg_return_t ipc_kmsg_copyout_header(

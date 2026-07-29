@@ -193,8 +193,8 @@ irq_forward_thread(void)
 				msg.msgh_local_port  = MACH_PORT_NULL;
 				msg.msgh_id = IRQ_NOTIFY_MSGH_BASE + irq;
 				(void)mach_msg_send_from_kernel(notify,
-								&msg,
-								sizeof(msg));
+							&msg, sizeof(msg),
+							(ipc_port_t *) 0, 0);
 			}
 		}
 

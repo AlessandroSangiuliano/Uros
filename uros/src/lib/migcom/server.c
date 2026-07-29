@@ -850,32 +850,6 @@ WriteCheckMsgSize(FILE *file, register argument_t *arg)
     fprintf(file, "\n");
 }
 
-/*
- *	The index of an argument's first descriptor among the message's, for
- *	ikm_ports (#442).
- *
- *	The kernel fills that array walking the body in order, and the request
- *	and reply structures lay their descriptors out in argument order, so
- *	the two agree by construction rather than by convention.  An argument
- *	that occupies several descriptors gets the first of them; the stub
- *	adds its own subscript.
- */
-static int
-rtKPDIndex(routine_t *rt, argument_t *arg, u_int mask)
-{
-    register argument_t *a;
-    int index = 0;
-
-    for (a = rt->rtArgs; a != argNULL; a = a->argNext) {
-	if (a == arg)
-	    return index;
-	if (akCheckAll(a->argKind, mask))
-	    index += a->argType->itKPD_Number;
-    }
-    fatal("rtKPDIndex(%s): argument is not in the routine", arg->argName);
-    return 0;
-}
-
 static char *
 InArgMsgField(register argument_t *arg)
 {
