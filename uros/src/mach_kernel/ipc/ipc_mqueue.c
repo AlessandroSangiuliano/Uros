@@ -349,7 +349,7 @@ ipc_mqueue_send(
         kern_return_t           save_wait_result;
 
 	if (ipc_kmsg_port_check)
-		ipc_kmsg_check_ports(kmsg, "ipc_mqueue_send",
+		ipc_kmsg_check_ports(kmsg, IKM_CHECK_SEND, "send",
 				     __builtin_return_address(0));	/* #442 */
 
 	port = kmsg->ikm_dest;

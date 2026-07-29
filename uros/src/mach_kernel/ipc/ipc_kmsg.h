@@ -233,9 +233,19 @@ typedef struct ipc_kmsg {
 	    (kmsg)->ikm_reply = (port);					\
 	    (kmsg)->ikm_header.msgh_local_port = (mach_port_t) (port);	\
 	MACRO_END
-extern int	ipc_kmsg_port_check;		/* -M: cross-check the two (#442) */
-extern void	ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where,
-				     void *caller);
+/*
+ *	-M: cross-check the two, per call site (#442).  Each site gets its own
+ *	slot so that "zero divergences" comes with the count of times the site
+ *	ran, which is what makes the zero mean something.
+ */
+#define	IKM_CHECK_SEND		0
+#define	IKM_CHECK_CLEAN		1
+#define	IKM_CHECK_CLEAN_PART	2
+#define	IKM_CHECK_SITES		3
+
+extern int	ipc_kmsg_port_check;
+extern void	ipc_kmsg_check_ports(ipc_kmsg_t kmsg, int site,
+				     const char *where, void *caller);
 
 #define	IKM_NULL		((ipc_kmsg_t) 0)
 

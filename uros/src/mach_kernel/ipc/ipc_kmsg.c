@@ -614,11 +614,16 @@ ipc_kmsg_clean_partial(
 	assert(!KMSG_IN_DIPC(kmsg));
 #endif	/* DIPC */
 
-	object = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
+	if (ipc_kmsg_port_check)		/* #442 */
+		ipc_kmsg_check_ports(kmsg, IKM_CHECK_CLEAN_PART,
+				     "clean_partial",
+				     __builtin_return_address(0));
+
+	object = (ipc_object_t) kmsg->ikm_dest;		/* #442 */
 	assert(IO_VALID(object));
 	ipc_object_destroy(object, MACH_MSGH_BITS_REMOTE(mbits));
 
-	object = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	object = (ipc_object_t) kmsg->ikm_reply;	/* #442 */
 	if (IO_VALID(object))
 		ipc_object_destroy(object, MACH_MSGH_BITS_LOCAL(mbits));
 
@@ -658,12 +663,16 @@ ipc_kmsg_clean(
 	}
 #endif	/* DIPC */
 
+	if (ipc_kmsg_port_check)		/* #442 */
+		ipc_kmsg_check_ports(kmsg, IKM_CHECK_CLEAN, "clean",
+				     __builtin_return_address(0));
+
 	mbits = kmsg->ikm_header.msgh_bits;
-	object = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
+	object = (ipc_object_t) kmsg->ikm_dest;		/* #442 */
 	if (IO_VALID(object))
 		ipc_object_destroy(object, MACH_MSGH_BITS_REMOTE(mbits));
 
-	object = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	object = (ipc_object_t) kmsg->ikm_reply;	/* #442 */
 	if (IO_VALID(object))
 		ipc_object_destroy(object, MACH_MSGH_BITS_LOCAL(mbits));
 
@@ -2149,12 +2158,30 @@ ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
  */
 int	ipc_kmsg_port_check __attribute__((section(".data"))) = 0;
 
+/*
+ *	Per call site, not one total (#442).
+ *
+ *	A single pair of counters answers "do the two fields ever disagree",
+ *	which is not the question a reader needs answered before it moves.
+ *	The question is "do they disagree HERE", and a site that runs a few
+ *	thousand times drowns in three million copyins: zero would then mean
+ *	either that the site agrees or that it was never reached, and those
+ *	are the two readings a check must never leave open.  The per-site
+ *	seen column is what says the observation could have seen a failure.
+ */
+static struct ikm_check_site {
+	const char	*name;
+	unsigned long	seen;
+	unsigned long	bad;
+} ikm_check_sites[IKM_CHECK_SITES];
+
 static unsigned long	ikm_check_seen;
 static unsigned long	ikm_check_bad;
 
 void
-ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where, void *caller)
+ipc_kmsg_check_ports(ipc_kmsg_t kmsg, int site, const char *where, void *caller)
 {
+	struct ikm_check_site *s = &ikm_check_sites[site];
 	ipc_port_t hdr_dest =
 		(ipc_port_t) kmsg->ikm_header.msgh_remote_port;
 	ipc_port_t hdr_reply =
@@ -2162,9 +2189,13 @@ ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where, void *caller)
 	boolean_t  bad = (kmsg->ikm_dest != hdr_dest ||
 			  kmsg->ikm_reply != hdr_reply);
 
+	s->name = where;
+	s->seen++;
 	ikm_check_seen++;
-	if (bad)
+	if (bad) {
+		s->bad++;
 		ikm_check_bad++;
+	}
 
 	/*
 	 * The first few in full, then only a periodic tally: a divergence
@@ -2176,18 +2207,26 @@ ipc_kmsg_check_ports(ipc_kmsg_t kmsg, const char *where, void *caller)
 	 * question: the count says how many paths are left, not which.
 	 * Resolve it against the kernel's symbols.
 	 */
-	if (bad && ikm_check_bad <= 8)
+	if (bad && s->bad <= 4)
 		printf("ipc port check: %s from %p: dest %p vs %p, "
 		       "reply %p vs %p\n",
 		       where, caller,
 		       (void *) kmsg->ikm_dest, (void *) hdr_dest,
 		       (void *) kmsg->ikm_reply, (void *) hdr_reply);
 
-	if ((ikm_check_seen % 20000) == 0)
-		printf("ipc port check: %lu sends, %lu with a field the "
-		       "producer did not set (%lu%%)\n",
-		       ikm_check_seen, ikm_check_bad,
-		       ikm_check_bad * 100 / ikm_check_seen);
+	if ((ikm_check_seen % 100000) == 0) {
+		int i;
+
+		printf("ipc port check: %lu seen, %lu diverging\n",
+		       ikm_check_seen, ikm_check_bad);
+		for (i = 0; i < IKM_CHECK_SITES; i++)
+			printf("ipc port check:   %-14s %10lu seen, "
+			       "%lu diverging\n",
+			       ikm_check_sites[i].name ?
+					ikm_check_sites[i].name : "(not reached)",
+			       ikm_check_sites[i].seen,
+			       ikm_check_sites[i].bad);
+	}
 }
 
 mach_msg_return_t
