@@ -1589,7 +1589,6 @@ WriteKPD_port(FILE *file, register argument_t *arg)
 	    else
 		fprintf(file, "\t%s = (ipc_port_t) %s%s;\n", slot,
 		    arg->argVarName, subindex);
-	    fprintf(file, "\t%sname = (mach_port_t) %s;\n", string, slot);
 	} else if (it->itOutTrans != strNULL && !close)
 	    fprintf(file, "\t%sname = (mach_port_t)%s(%s);\n", string,  
 		it->itOutTrans, arg->argVarName);
@@ -1617,11 +1616,6 @@ WriteKPD_port(FILE *file, register argument_t *arg)
 	if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(it) &&
 	    akCheck(arg->argKind, akbReturnKPD) &&
 	    streql(it->itServerType, "ipc_port_t"))
-	    fprintf(file,
-		    "\tOutP->%s.name = (mach_port_t)\n"
-		    "\t\tikm_from_header(&OutP->Head)->ikm_ports[%d];\n",
-		    arg->argMsgField,
-		    rtKPDIndex(arg->argRoutine, arg, akbReturnKPD));
 	if (arg->argPoly != argNULL && akCheckAll(arg->argPoly->argKind, akbReturnSnd|akbVarNeeded))
 	    fprintf(file, "\tOutP->%s.disposition = %s;\n", arg->argMsgField,
 		arg->argPoly->argVarName);
@@ -1969,10 +1963,6 @@ WriteCopyArgValue(FILE *file, argument_t *arg)
 	fprintf(file, "\t\tikm_from_header(&In%dP->Head)->ikm_ports[%d];\n",
 		arg->argRequestPos,
 		rtKPDIndex(arg->argRoutine, arg, akbSendKPD));
-	fprintf(file, "\tOutP->%s = (mach_port_t)\n",
-		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
-	fprintf(file, "\t\tikm_from_header(&OutP->Head)->ikm_ports[%d];\n",
-		rtKPDIndex(arg->argRoutine, arg, akbReturnKPD));
 	return;
     }
 

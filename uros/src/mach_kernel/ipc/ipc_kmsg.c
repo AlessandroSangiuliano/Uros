@@ -1741,8 +1741,12 @@ ipc_kmsg_copyin_body(
 					       (ipc_port_t) dest)) {
 		    kmsg->ikm_header.msgh_bits |= MACH_MSGH_BITS_CIRCULAR;
 		}
-		kmsg->ikm_ports[i] = (ipc_port_t) object;	/* #442 */
-		dsc->name = (mach_port_t) object;
+		/*
+		 * #442: the port goes in the kmsg.  The descriptor keeps the
+		 * name the sender wrote, until copyout replaces it with the
+		 * receiver's.
+		 */
+		kmsg->ikm_ports[i] = (ipc_port_t) object;
 		complex = TRUE;
 		break;
 	    }
