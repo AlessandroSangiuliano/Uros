@@ -905,6 +905,19 @@ InArgMsgField(register argument_t *arg)
     else if (IsKernelServer && akIdent(arg->argKind) == akeReplyPort)
 	SafeSnprintf(buffer, MAX_STR_LEN,
 		     "ikm_from_header(&%sHead)->ikm_reply", who);
+    /*
+     * #442: a port DESCRIPTOR's port, likewise from the kmsg.  Only the
+     * port itself -- the polymorphic disposition that travels with it is
+     * a separate argument reached through argSuffix, and stays in the
+     * message where it belongs.  Arrays of ports occupy several
+     * descriptors and are emitted by WriteExtractKPD_port with its own
+     * subscript, so they are not this case.
+     */
+    else if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(arg->argType) &&
+	     akCheck(arg->argKind, akbSendKPD))
+	SafeSnprintf(buffer, MAX_STR_LEN,
+		     "ikm_from_header(&%sHead)->ikm_ports[%d]", who,
+		     rtKPDIndex(arg->argRoutine, arg, akbSendKPD));
     else
 	SafeSnprintf(buffer, MAX_STR_LEN, "%s%s", who,
 		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
@@ -1902,6 +1915,29 @@ WriteCopyArgValue(FILE *file, argument_t *arg)
     char __left[256];
     char __right[256];
     fprintf(file, "\n");
+
+    /*
+     * #442: an inout port travels from the request to the reply, and
+     * what travels is the PORT -- which is now in the kmsg, and which
+     * the routine has just written through the pointer it was handed.
+     * Copying the message's name field instead would carry the name the
+     * sender wrote and silently drop the routine's answer.
+     */
+    if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(arg->argType) &&
+	akCheck(arg->argKind, akbSendKPD) &&
+	akCheck(arg->argKind, akbReturnKPD)) {
+	fprintf(file, "\tikm_from_header(&OutP->Head)->ikm_ports[%d] =\n",
+		rtKPDIndex(arg->argRoutine, arg, akbReturnKPD));
+	fprintf(file, "\t\tikm_from_header(&In%dP->Head)->ikm_ports[%d];\n",
+		arg->argRequestPos,
+		rtKPDIndex(arg->argRoutine, arg, akbSendKPD));
+	fprintf(file, "\tOutP->%s = (mach_port_t)\n",
+		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
+	fprintf(file, "\t\tikm_from_header(&OutP->Head)->ikm_ports[%d];\n",
+		rtKPDIndex(arg->argRoutine, arg, akbReturnKPD));
+	return;
+    }
+
     snprintf(__left, sizeof(__left), "/* %d */ OutP->%s", arg->argRequestPos,
              (arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
     snprintf(__right, sizeof(__right), "In%dP->%s", arg->argRequestPos,
