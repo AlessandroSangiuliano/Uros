@@ -20,6 +20,7 @@
 #define MB2_BOOTLOADER_MAGIC	0x36d76289	/* what GRUB leaves in %eax */
 
 #define MB2_TAG_END		0
+#define MB2_TAG_CMDLINE		1	/* the string the loader was given */
 #define MB2_TAG_MEMORY_MAP	6
 
 /*
@@ -32,8 +33,40 @@
  * 32-bit RSDT address, and the 2.0 one that adds a 64-bit XSDT address.  A
  * loader supplies whichever the firmware offered.
  */
+#define MB2_TAG_ELF_SECTIONS	9	/* the kernel's own section headers */
 #define MB2_TAG_ACPI_OLD	14	/* ACPI 1.0 RSDP */
 #define MB2_TAG_ACPI_NEW	15	/* ACPI 2.0+ RSDP */
+
+/*
+ * The kernel's own ELF section headers, which the loader passes back because
+ * it has them anyway.  `.symtab` and `.strtab` are among them, which is why
+ * this target needs no separate symbol file (#428).
+ *
+ * `shndx` names the section holding the section *names*; the symbol names
+ * are in a different string table, the one the symbol table itself links to.
+ */
+/*
+ * The kernel's command line, as one NUL-terminated string after the header.
+ *
+ * ⚠️ Nothing on this target clears .bss — the loader does it, by zeroing each
+ * segment beyond what the file supplies. So a flag parsed in C and kept in a
+ * static is safe here, unlike on i386 where the kernel's own clear ran after
+ * the parse and #337 was the bill for it.
+ */
+struct mb2_tag_string {
+	uint32_t type;
+	uint32_t size;
+	char     string[];
+};
+
+struct mb2_tag_elf_sections {
+	uint32_t type;
+	uint32_t size;
+	uint32_t num;
+	uint32_t entsize;
+	uint32_t shndx;
+	/* section headers follow */
+};
 
 struct mb2_tag {
 	uint32_t type;

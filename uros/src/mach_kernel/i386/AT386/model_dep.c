@@ -322,6 +322,8 @@ int		boot_cpu_cap __attribute__((section(".data"))) = 0;
 extern int	cons_is_com1;
 extern int	ddb_kbd_break_enabled;	/* #335: -K arms Ctrl+D -> DDB */
 extern int	nmi_watchdog_enabled;	/* #344: -W arms the NMI watchdog */
+extern int	ipc_port_hist_enabled;	/* #415: -N counts ports per message */
+extern int	ipc_port_hist_every;	/* #415: ... and reports every N */
 extern void	nmi_watchdog_init(void);
 
 void		parse_arguments(void);
@@ -690,6 +692,18 @@ parse_arguments(void)
 		    break;
 		case 'c':	/* -c??:  cap CPUs brought up (SMP debug, #344) */
 		    boot_cpu_cap = atoi_term(p, &p);
+		    break;
+		case 'N':	/* -N??: count port pointers per message and
+				 * report every ?? messages (#415).  Off by
+				 * default; the design choice for x86-64 turns
+				 * on this number and nobody has it. */
+		    ipc_port_hist_enabled = 1;
+		    {
+			int every = atoi_term(p, &p);
+
+			if (every > 0)
+			    ipc_port_hist_every = every;
+		    }
 		    break;
 		case 'K':	/* -K: arm Ctrl+D on the PS/2 keyboard to break
 				 * into DDB when there is no serial port (bare-

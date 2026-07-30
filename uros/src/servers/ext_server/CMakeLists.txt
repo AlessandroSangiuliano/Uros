@@ -27,7 +27,7 @@ add_custom_command(
     -user ${EXT2_USER_C}
     -server ${EXT2_SERVER_C}
     ${EXT2_DEFS}
-  DEPENDS migcom ${EXT2_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${EXT2_DEFS}
   COMMENT "MIG: ext2fs_server.defs (server stubs for ext2_server)"
   VERBATIM
 )
@@ -59,7 +59,7 @@ add_custom_command(
     -user ${VFS_USER_C}
     -server ${VFS_SERVER_C}
     ${VFS_DEFS}
-  DEPENDS migcom ${VFS_DEFS} ${VFS_TYPES_H}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${VFS_DEFS} ${VFS_TYPES_H}
   COMMENT "MIG: vfs.defs (server stubs for ext_server, #220)"
   VERBATIM
 )
@@ -87,7 +87,7 @@ add_custom_command(
     -user ${AB_USER_C}
     -server /dev/null
     ${AHCI_BATCH_DEFS}
-  DEPENDS migcom ${AHCI_BATCH_DEFS} ${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci/ahci_batch_types.h
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${AHCI_BATCH_DEFS} ${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci/ahci_batch_types.h
   COMMENT "MIG: ahci_batch.defs (user stubs for ext2_server)"
   VERBATIM
 )
@@ -114,7 +114,7 @@ add_custom_command(
     -user ${DM_USER_C}
     -server /dev/null
     ${DEVICE_MASTER_DEFS}
-  DEPENDS migcom ${DEVICE_MASTER_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEVICE_MASTER_DEFS}
   COMMENT "MIG: device_master.defs (user stubs for ext2_server)"
   VERBATIM
 )

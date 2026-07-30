@@ -37,7 +37,7 @@ add_custom_command(
     -user ${PROC_USER_C}
     -server /dev/null
     ${PROC_DEFS}
-  DEPENDS migcom ${PROC_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${PROC_DEFS}
   COMMENT "MIG: proc.defs (libposix-uros)"
   VERBATIM
 )
@@ -65,7 +65,7 @@ add_custom_command(
     -user ${EXEC_USER_C}
     -server /dev/null
     ${EXEC_DEFS}
-  DEPENDS migcom ${EXEC_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${EXEC_DEFS}
   COMMENT "MIG: exec.defs (libposix-uros)"
   VERBATIM
 )
@@ -92,7 +92,7 @@ add_custom_command(
     -user ${CHAR_USER_C}
     -server /dev/null
     ${CHAR_DEFS}
-  DEPENDS migcom ${CHAR_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${CHAR_DEFS}
   COMMENT "MIG: char_server.defs (libposix-uros)"
   VERBATIM
 )
@@ -120,7 +120,7 @@ add_custom_command(
     -user ${MACH_I386_USER_C}
     -server /dev/null
     ${MACH_I386_DEFS}
-  DEPENDS migcom ${MACH_I386_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${MACH_I386_DEFS}
   COMMENT "MIG: mach_i386.defs (libposix-uros)"
   VERBATIM
 )

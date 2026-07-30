@@ -266,6 +266,8 @@ WriteIncludes(FILE *file)
         else
             cp++;       /* skip '/' */
         fprintf(file, "#include \"%s\"\n", cp); 
+	if (IsKernelServer)
+	    fprintf(file, "#include <ipc/ipc_kmsg.h>\n");
     } else {
 	fprintf(file, "#include <string.h>\n");
 	fprintf(file, "#include <mach/ndr.h>\n");
@@ -274,9 +276,10 @@ WriteIncludes(FILE *file)
 	fprintf(file, "#include <mach/message.h>\n");
 	fprintf(file, "#include <mach/mig_errors.h>\n");
 	fprintf(file, "#include <mach/rpc.h>\n");
-	if (IsKernelServer)
+	if (IsKernelServer) {
 	    fprintf(file, "#include <ipc/ipc_port.h>\n");
-	else
+	    fprintf(file, "#include <ipc/ipc_kmsg.h>\n");
+	} else
 	    fprintf(file, "#include <mach/port.h>\n");
     }
     if (UseEventLogger) {
@@ -854,9 +857,14 @@ InArgMsgField(register argument_t *arg)
     char who[20] = {0};
 
     /*
-     *	Inside the kernel, the request and reply port fields
-     *	really hold ipc_port_t values, not mach_port_t values.
-     *	Hence we must cast the values.
+     *	#442: inside the kernel the request and reply ports are
+     *	ipc_port_t, and they used to be read out of the message with a
+     *	cast -- a kernel address taken from a field the interface fixes
+     *	at thirty-two bits.  They now come from the kmsg the header
+     *	sits in, which is where the kernel keeps them.
+     *
+     *	A server routine is always handed &kmsg->ikm_header:
+     *	ipc_kobject_server is the only thing that dispatches one.
      */
 
     if (!(arg->argFlags & flRetCode))
@@ -865,11 +873,25 @@ InArgMsgField(register argument_t *arg)
 	else
 	    SafeSnprintf(who, sizeof(who), "In%dP->", arg->argRequestPos);
 
-    if (IsKernelServer &&
-	((akIdent(arg->argKind) == akeRequestPort) ||
-	 (akIdent(arg->argKind) == akeReplyPort)))
-	SafeSnprintf(buffer, MAX_STR_LEN, "(ipc_port_t) %s%s", who,
-		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
+    if (IsKernelServer && akIdent(arg->argKind) == akeRequestPort)
+	SafeSnprintf(buffer, MAX_STR_LEN,
+		     "ikm_from_header(&%sHead)->ikm_dest", who);
+    else if (IsKernelServer && akIdent(arg->argKind) == akeReplyPort)
+	SafeSnprintf(buffer, MAX_STR_LEN,
+		     "ikm_from_header(&%sHead)->ikm_reply", who);
+    /*
+     * #442: a port DESCRIPTOR's port, likewise from the kmsg.  Only the
+     * port itself -- the polymorphic disposition that travels with it is
+     * a separate argument reached through argSuffix, and stays in the
+     * message where it belongs.  Arrays of ports occupy several
+     * descriptors and are emitted by WriteExtractKPD_port with its own
+     * subscript, so they are not this case.
+     */
+    else if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(arg->argType) &&
+	     akCheck(arg->argKind, akbSendKPD))
+	SafeSnprintf(buffer, MAX_STR_LEN,
+		     "ikm_from_header(&%sHead)->ikm_ports[%d]", who,
+		     rtKPDIndex(arg->argRoutine, arg, akbSendKPD));
     else
 	SafeSnprintf(buffer, MAX_STR_LEN, "%s%s", who,
 		(arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
@@ -1113,6 +1135,19 @@ WriteServerCallArg(FILE *file, register argument_t *arg)
 	    /* recast the void *, although it is not necessary */
 	    fprintf(file, "(%s%s)%s(OutP->%s)", 
 		it->itTransType, star, at, msgfield);
+	/*
+	 * #442: an out port the routine fills THROUGH A POINTER, like
+	 * do_bootstrap_ports.  Nothing packs it afterwards -- the routine
+	 * writes it where it is told -- so it is told the kmsg's slot, and
+	 * argKPD_Pack copies the name from there.  Handing it the message
+	 * field instead left the array empty and gave the receiver five
+	 * null bootstrap ports.
+	 */
+	else if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(it) &&
+		 streql(it->itServerType, "ipc_port_t"))
+	    fprintf(file,
+		    "(ipc_port_t%s)%s(ikm_from_header(&OutP->Head)->ikm_ports[%d])",
+		    star, at, rtKPDIndex(arg->argRoutine, arg, akbReturnKPD));
 	else if (IsKernelServer && streql(it->itServerType, "ipc_port_t"))
 	    /* recast the port to the kernel internal form value */
 	    fprintf(file, "(ipc_port_t%s)%s(OutP->%s)", star, at, msgfield);
@@ -1459,9 +1494,21 @@ WriteAdjustMsgCircular(FILE *file, register argument_t *arg)
      *  array of ports. So do I ...
      */
 
-    fprintf(file, "\t  if (IP_VALID((ipc_port_t) In0P->Head.msgh_reply_port) &&\n");
-    fprintf(file, "\t    IP_VALID((ipc_port_t) OutP->%s.name) &&\n", arg->argMsgField);
-    fprintf(file, "\t    ipc_port_check_circularity((ipc_port_t) OutP->%s.name, (ipc_port_t) In0P->Head.msgh_reply_port))\n", arg->argMsgField);
+    /*
+     * #442: both ports come from their kmsgs.  Reading the reply's out
+     * of OutP->x.name worked only because the pointer was still being
+     * written there as well; it is a port, so it comes from where ports
+     * live.
+     */
+    {
+	int kpd = rtKPDIndex(arg->argRoutine, arg, akbReturnKPD);
+
+	fprintf(file, "\t  if (IP_VALID(ikm_from_header(&In0P->Head)->ikm_reply) &&\n");
+	fprintf(file, "\t    IP_VALID(ikm_from_header(&OutP->Head)->ikm_ports[%d]) &&\n", kpd);
+	fprintf(file, "\t    ipc_port_check_circularity(\n");
+	fprintf(file, "\t\t\tikm_from_header(&OutP->Head)->ikm_ports[%d],\n", kpd);
+	fprintf(file, "\t\t\tikm_from_header(&In0P->Head)->ikm_reply))\n");
+    }
     fprintf(file, "\t\tOutP->Head.msgh_bits |= MACH_MSGH_BITS_CIRCULAR;\n");
 }
 
@@ -1492,7 +1539,31 @@ WriteKPD_port(FILE *file, register argument_t *arg)
 	if (IsKernelServer && streql(real_it->itTransType, "ipc_port_t"))
             recast = "(mach_port_t)";
 
-	if (it->itOutTrans != strNULL && !close)
+	/*
+	 * #442: a kernel server's reply port goes into the kmsg, where a
+	 * pointer fits, and the message field is filled FROM it.
+	 *
+	 * The order matters and is not cosmetic.  itOutTrans is a routine like
+	 * convert_task_to_port that PRODUCES A REFERENCE, so emitting it twice
+	 * -- once per destination -- would leak one reference per reply.  It is
+	 * called once, into the kmsg, and the name field copies that.  When the
+	 * message stops carrying pointers the second line simply goes away.
+	 */
+	if (IsKernelServer) {
+	    char slot[MAX_STR_LEN];
+
+	    SafeSnprintf(slot, MAX_STR_LEN,
+			 "ikm_from_header(&OutP->Head)->ikm_ports[%d%s]",
+			 rtKPDIndex(arg->argRoutine, arg, akbReturnKPD),
+			 close ? " + i" : "");
+
+	    if (it->itOutTrans != strNULL && !close)
+		fprintf(file, "\t%s = (ipc_port_t) %s(%s);\n", slot,
+		    it->itOutTrans, arg->argVarName);
+	    else
+		fprintf(file, "\t%s = (ipc_port_t) %s%s;\n", slot,
+		    arg->argVarName, subindex);
+	} else if (it->itOutTrans != strNULL && !close)
 	    fprintf(file, "\t%sname = (mach_port_t)%s(%s);\n", string,  
 		it->itOutTrans, arg->argVarName);
 	else
@@ -1511,9 +1582,18 @@ WriteKPD_port(FILE *file, register argument_t *arg)
 	if (close) 
 	    fprintf(file, "\t    }\n\t}\n");
 	fprintf(file, "\n");
-    } else  if (arg->argPoly != argNULL && akCheckAll(arg->argPoly->argKind, akbReturnSnd|akbVarNeeded))
-	fprintf(file, "\tOutP->%s.disposition = %s;\n", arg->argMsgField,
-	    arg->argPoly->argVarName);
+    } else {
+	/*
+	 * #442: the routine filled the kmsg's slot through the pointer it
+	 * was handed (see WriteServerCallArg); the message gets the name.
+	 */
+	if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(it) &&
+	    akCheck(arg->argKind, akbReturnKPD) &&
+	    streql(it->itServerType, "ipc_port_t"))
+	if (arg->argPoly != argNULL && akCheckAll(arg->argPoly->argKind, akbReturnSnd|akbVarNeeded))
+	    fprintf(file, "\tOutP->%s.disposition = %s;\n", arg->argMsgField,
+		arg->argPoly->argVarName);
+    }
     /*
      *	If this is a KernelServer, and the reply message contains
      *	a receive right, we must check for the possibility of a
@@ -1569,9 +1649,9 @@ WriteKPD_ool(FILE *file, register argument_t *arg)
 	else
 	    fprintf(file, "OutP->%s%s", count->argMsgField, subindex);
 	
-        if (howbig > 8)
+        if (OolElementUnit(arg) > 1)
             fprintf(file, " * %d;\n", 
-		count->argMultiplier * howbig / 8);
+		OolElementUnit(arg));
         else
             fprintf(file, ";\n");
     } 
@@ -1841,6 +1921,25 @@ WriteCopyArgValue(FILE *file, argument_t *arg)
     char __left[256];
     char __right[256];
     fprintf(file, "\n");
+
+    /*
+     * #442: an inout port travels from the request to the reply, and
+     * what travels is the PORT -- which is now in the kmsg, and which
+     * the routine has just written through the pointer it was handed.
+     * Copying the message's name field instead would carry the name the
+     * sender wrote and silently drop the routine's answer.
+     */
+    if (IsKernelServer && RPCPort(arg) && !IS_MULTIPLE_KPD(arg->argType) &&
+	akCheck(arg->argKind, akbSendKPD) &&
+	akCheck(arg->argKind, akbReturnKPD)) {
+	fprintf(file, "\tikm_from_header(&OutP->Head)->ikm_ports[%d] =\n",
+		rtKPDIndex(arg->argRoutine, arg, akbReturnKPD));
+	fprintf(file, "\t\tikm_from_header(&In%dP->Head)->ikm_ports[%d];\n",
+		arg->argRequestPos,
+		rtKPDIndex(arg->argRoutine, arg, akbSendKPD));
+	return;
+    }
+
     snprintf(__left, sizeof(__left), "/* %d */ OutP->%s", arg->argRequestPos,
              (arg->argSuffix != strNULL) ? arg->argSuffix : arg->argMsgField);
     snprintf(__right, sizeof(__right), "In%dP->%s", arg->argRequestPos,
@@ -2108,9 +2207,11 @@ WriteRoutine(FILE *file, register routine_t *rt)
 
     fprintf(file, "{\n");
     WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbRequest, "Request",
-	rt->rtSimpleRequest, rt->rtServerImpl, FALSE, FALSE);
+	rt->rtSimpleRequest, rt->rtServerImpl, FALSE, FALSE,
+	rt->rtRequestMinSize, rt->rtRequestMaxSize);
     WriteStructDecl(file, rt->rtArgs, WriteFieldDecl, akbReply, "Reply",
-	rt->rtSimpleReply, FALSE, FALSE, FALSE);
+	rt->rtSimpleReply, FALSE, FALSE, FALSE,
+	rt->rtReplyMinSize, rt->rtReplyMaxSize);
     /*
      * Define a Minimal Reply structure to be used in case of errors
      */
@@ -2156,6 +2257,19 @@ WriteRoutine(FILE *file, register routine_t *rt)
      * would lose data).
      */
     WriteList(file, rt->rtArgs, WriteInitKPDValue, akbReturnKPD, "\n", "\n");
+
+    /*
+     * #442: room for the reply's port pointers, taken BEFORE the routine
+     * runs for the same reason the templates are: afterwards the ports
+     * exist and failing to find room for them would strand rights the
+     * routine has already produced.
+     */
+    if (IsKernelServer && rt->rtReplyKPDs > 0) {
+	fprintf(file, "\tif (ikm_ports_alloc(ikm_from_header(&OutP->Head), %d)\n",
+		rt->rtReplyKPDs);
+	fprintf(file, "\t\t\t\t\t\t!= KERN_SUCCESS)\n");
+	fprintf(file, "\t\t{ MIG_RETURN_ERROR(OutP, KERN_RESOURCE_SHORTAGE); }\n\n");
+    }
 
     WriteList(file, rt->rtArgs, WriteExtractArg, akbNone, "", "");
 

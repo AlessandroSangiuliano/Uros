@@ -5,10 +5,16 @@
  * x86-64 trap and interrupt entry (#409, MD contract 4/6).
  */
 
+#include <stdarg.h>
 #include <stdint.h>
 
 #include <cpu/desc.h>
+#include <ddb/cons.h>
+#include <cpu/lapic.h>
 #include <cpu/regs.h>
+#include <cpu/spl.h>
+#include <ddb/ddb.h>
+#include <ddb/ksym.h>
 #include <cpu/tss.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
@@ -51,6 +57,28 @@ extern const uint64_t isr_table[IDT_VECTORS];
  * is a fact worth reporting rather than ignoring.
  */
 static trap_handler_t ext_handler[IDT_VECTORS - T_EXTERNAL_FIRST];
+
+void trap_replay_vector(unsigned vector)
+{
+	trap_handler_t h;
+
+	if (vector < T_EXTERNAL_FIRST || vector >= IDT_VECTORS)
+		return;
+
+	h = ext_handler[vector - T_EXTERNAL_FIRST];
+	if (h == 0)
+		return;
+
+	/*
+	 * Only the vector, and the rest left at zero rather than filled with
+	 * something that would read as a context. See <trap/trap.h>: this is a
+	 * contract on what a deferrable handler may look at.
+	 */
+	struct trap_frame replay = { 0 };
+
+	replay.vector = vector;
+	h(&replay);
+}
 
 void trap_set_handler(unsigned vector, trap_handler_t handler)
 {
@@ -190,6 +218,101 @@ static void report_page_fault(uint64_t error)
 }
 
 /*
+ * One register, named and padded, three to a line.
+ *
+ * Every one of them, which needs saying because the previous version of this
+ * printed nine of sixteen — the eight the 32-bit report had, plus one. On an
+ * architecture whose principal gain is having fifteen general registers
+ * instead of six, a fault report that shows half of them is throwing away
+ * the thing that was gained. The ones left out were r8 to r15, which is
+ * exactly where a compiler puts the values it is working with.
+ */
+static void reg(const char *name, uint64_t value, int newline)
+{
+	tputs(newline ? "\r\n  " : "  ");
+	tputs(name);
+	tputs(" ");
+	tputhex(value);
+}
+
+static void report_registers(const struct trap_frame *frame)
+{
+	reg("rip   ", frame->rip, 1);
+	reg("rsp   ", frame->rsp, 0);
+	reg("rflags", frame->rflags, 0);
+
+	reg("rax   ", frame->rax, 1);
+	reg("rbx   ", frame->rbx, 0);
+	reg("rcx   ", frame->rcx, 0);
+	reg("rdx   ", frame->rdx, 1);
+	reg("rsi   ", frame->rsi, 0);
+	reg("rdi   ", frame->rdi, 0);
+	reg("rbp   ", frame->rbp, 1);
+	reg("r8    ", frame->r8, 0);
+	reg("r9    ", frame->r9, 0);
+	reg("r10   ", frame->r10, 1);
+	reg("r11   ", frame->r11, 0);
+	reg("r12   ", frame->r12, 0);
+	reg("r13   ", frame->r13, 1);
+	reg("r14   ", frame->r14, 0);
+	reg("r15   ", frame->r15, 0);
+
+	/*
+	 * The segments and the page-table root, which are not general
+	 * registers and are not decoration either: the low two bits of cs are
+	 * the ring the fault came from, and cr3 says which address space the
+	 * addresses above are to be read in — without it, an address in a
+	 * report is ambiguous the moment there is more than one space.
+	 */
+	reg("cs    ", frame->cs, 1);
+	reg("ss    ", frame->ss, 0);
+	reg("cr3   ", read_cr3(), 0);
+	tputs("\r\n");
+}
+
+/*
+ * The bytes at the faulting instruction, as bytes.
+ *
+ * ⚠️ Not disassembled, and that is a decision rather than a gap. x86-64 adds
+ * REX prefixes, changes the meaning of several opcodes and extends the
+ * addressing forms, so a decoder carried over from the 32-bit tree would
+ * print something confident and wrong — which is worse than printing nothing
+ * at all, because a wrong mnemonic is acted upon. The bytes are unambiguous
+ * and any disassembler will take them.
+ *
+ * Read through the page tables first. A fault report that faults while
+ * explaining a fault replaces the diagnosis with a double fault, and an
+ * instruction pointer is exactly the field most likely to be wrong when
+ * there is something to report.
+ */
+#define INSTRUCTION_BYTES	16
+
+static void report_instruction(uint64_t rip)
+{
+	pmap_t kernel = pmap_kernel();
+	const uint8_t *p = (const uint8_t *)(uintptr_t)rip;
+
+	if (!va_is_canonical(rip) || pmap_extract(kernel, rip) == 0)
+		return;
+
+	tputs("  bytes at rip:");
+	for (unsigned i = 0; i < INSTRUCTION_BYTES; i++) {
+		uint8_t b;
+
+		/* Each byte checked, because sixteen of them can cross into a
+		 * page that is not there. */
+		if (pmap_extract(kernel, rip + i) == 0)
+			break;
+
+		b = p[i];
+		tputs(" ");
+		tputc("0123456789abcdef"[b >> 4]);
+		tputc("0123456789abcdef"[b & 0xF]);
+	}
+	tputs("\r\n");
+}
+
+/*
  * Walk the frame chain and print the return addresses.
  *
  * This runs in the worst context the kernel has — after a fault, sometimes
@@ -213,11 +336,35 @@ static void report_page_fault(uint64_t error)
  */
 #define BACKTRACE_MAX	16
 
+/*
+ * The name of whatever contains an address, when there is one.
+ *
+ * Silent when there is not, rather than printing "unknown": the address is
+ * already on the line, and a word that means "no answer" costs a column on
+ * every frame to say what the absence of a name already says.
+ */
+static void report_symbol(uint64_t addr)
+{
+	uint64_t off = 0;
+	const char *name = ksym_lookup(addr, &off);
+
+	if (name == 0)
+		return;
+
+	tputs(" <");
+	tputs(name);
+	if (off != 0) {
+		tputs("+");
+		tputhex(off);
+	}
+	tputs(">");
+}
+
 static void backtrace(uint64_t rbp)
 {
 	pmap_t kernel = pmap_kernel();
 
-	tputs("  backtrace (resolve with addr2line):\r\n");
+	tputs("  backtrace (addr2line for file and line):\r\n");
 
 	for (unsigned depth = 0; depth < BACKTRACE_MAX; depth++) {
 		const uint64_t *frame;
@@ -240,6 +387,7 @@ static void backtrace(uint64_t rbp)
 
 		tputs("    ");
 		tputhex(ret);
+		report_symbol(ret);
 		tputs("\r\n");
 
 		if (next <= rbp)
@@ -248,10 +396,14 @@ static void backtrace(uint64_t rbp)
 	}
 }
 
-void panic(const char *what)
+void panic(const char *what, ...)
 {
+	va_list ap;
+
 	tputs("\r\nUrMach x86-64: panic: ");
-	tputs(what);
+	va_start(ap, what);
+	cons_vprintf(what, ap);
+	va_end(ap);
 	tputs("\r\n");
 
 	/*
@@ -350,6 +502,18 @@ void trap_dispatch(struct trap_frame *frame)
 		trap_handler_t h = ext_handler[frame->vector - T_EXTERNAL_FIRST];
 
 		if (h != 0) {
+			/*
+			 * The priority level first. A vector whose class is at
+			 * or below it is noted and left for later — the
+			 * acknowledgement below still happens, because the
+			 * local APIC would otherwise hold that class busy and
+			 * the deferral would become a silence.
+			 */
+			if (spl_defer(frame->vector)) {
+				lapic_eoi();
+				return;
+			}
+
 			h(frame);
 			return;
 		}
@@ -482,33 +646,31 @@ void trap_dispatch(struct trap_frame *frame)
 		tputs("\r\n");
 	}
 
-	tputs("  rip ");
-	tputhex(frame->rip);
-	tputs("  rsp ");
-	tputhex(frame->rsp);
-	tputs("  rflags ");
-	tputhex(frame->rflags);
-	tputs("\r\n  rax ");
-	tputhex(frame->rax);
-	tputs("  rbx ");
-	tputhex(frame->rbx);
-	tputs("  rcx ");
-	tputhex(frame->rcx);
-	tputs("\r\n  rdx ");
-	tputhex(frame->rdx);
-	tputs("  rsi ");
-	tputhex(frame->rsi);
-	tputs("  rdi ");
-	tputhex(frame->rdi);
-	tputs("\r\n");
+	report_registers(frame);
+	report_instruction(frame->rip);
 
 	backtrace(frame->rbp);
+
+	/*
+	 * And, if the debugger was asked for, the questions the report cannot
+	 * answer in advance: what is at that address, which function is above
+	 * this one, what does the memory the pointer came from look like.
+	 *
+	 * Only when asked. Without `-r` this is not reached, and an unattended
+	 * boot ends in the halt below rather than at a prompt nobody is there
+	 * to answer — which is what keeps every automated run terminating.
+	 */
+	if (ddb_enabled())
+		ddb_enter(frame, trap_name(frame->vector));
 
 	/*
 	 * Nothing recovers yet: there is no MI exception path to hand this
 	 * to, and pretending to resume would turn one diagnosis into an
 	 * endless stream of them.  Stopping here leaves the report as the
 	 * last thing on the wire, which is what it is for.
+	 *
+	 * Reached also when the debugger returns: continuing from a fault
+	 * nobody has fixed means taking it again, so "continue" ends here too.
 	 */
 	tputs("UrMach x86-64: no handler — halted\r\n");
 	for (;;)

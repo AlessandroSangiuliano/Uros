@@ -569,8 +569,8 @@ memory_object_data_request(
 #endif /* lint */
 
 	if (device_pager_debug)
-		printf("(device_pager)data_request: pager=%ld, offset=0x%lx, length=0x%lx\n",
-			pager, offset, length);
+		printf("(device_pager)data_request: pager=%p, offset=0x%lx, length=0x%lx\n",
+			pager, (unsigned long) offset, (unsigned long) length);
 
 	ds = dev_pager_hash_lookup((ipc_port_t)pager);
 	if (ds == DEV_PAGER_NULL)
@@ -708,7 +708,7 @@ memory_object_init(
 	vm_object_t			object;
 
 	if (device_pager_debug)
-		printf("(device_pager)init: pager=%ld, request=%ld\n",
+		printf("(device_pager)init: pager=%p, request=%p\n",
 		       pager, pager_request);
 
 	assert(pager_page_size == PAGE_SIZE);

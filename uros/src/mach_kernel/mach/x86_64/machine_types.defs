@@ -1,0 +1,69 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * The widths, as the interface generator sees them — x86-64 (#413).
+ *
+ * This is mach/x86_64/vm_types.h said a second time, in the language the
+ * stub generator reads.  The two have to agree exactly: the header decides
+ * how wide a field is when the compiler lays out a message structure, and
+ * this decides how wide migcom thinks it is when it computes the offsets and
+ * the message size that go into the generated code.  When they disagree the
+ * result is not a build failure — it is a server reading a field from the
+ * wrong place, which is why they sit one directory apart and say the same
+ * thing in the same order.
+ *
+ * ⚠️ Nothing generates stubs for this target yet.  The mapping is written
+ * here because it is a decision about the interface, and #416 is where the
+ * generator is taught to honour it — including the part that is not a width
+ * at all: a sixty-four bit field in a message structure is aligned by the C
+ * compiler and merely counted by migcom, and the two only agree today
+ * because every field is four bytes wide.
+ */
+
+#ifndef	_MACHINE_VM_TYPES_DEFS_
+#define	_MACHINE_VM_TYPES_DEFS_	1
+
+/*
+ * The width the interfaces are written in — counts, sizes, names, ids.
+ *
+ * Thirty-two bits, deliberately, and not the register width the original
+ * definition of natural_t promises.  A port name, a message size and an
+ * element count are numbers, not addresses; widening them would double the
+ * message header and every port array in every message to no purpose.  The
+ * reasoning is in mach/x86_64/vm_types.h, and this is the same decision
+ * where the generator can see it.
+ */
+type natural_t = unsigned32;
+
+/*
+ * The signed counterpart.  Both exist to define other types in a
+ * machine-independent way, and neither is an address.
+ */
+type integer_t = int32;
+
+/*
+ * An address, and a distance between two addresses.
+ *
+ * Here is where this target parts company with i386, and the reason all
+ * three moved out of the machine-independent file: there they were declared
+ * to be natural_t, which was true on a machine where an address is thirty-two
+ * bits and silently false on this one.  A generator reading a
+ * machine-independent file cannot discover the difference; reading this one
+ * it cannot miss it.
+ */
+type vm_address_t = unsigned64;
+type vm_offset_t = unsigned64;
+type vm_size_t = unsigned64;
+
+
+#if	MACH_IPC_COMPAT
+/*
+ * For the old IPC interface
+ */
+#define	MSG_TYPE_PORT_NAME	MACH_MSG_TYPE_INTEGER_32
+
+#endif	/* MACH_IPC_COMPAT */
+
+
+#endif	/* _MACHINE_VM_TYPES_DEFS_ */

@@ -34,7 +34,7 @@ add_custom_command(
     -user    ${MO_USER_C}
     -server  ${MO_SERVER_C}
     ${MO_DEFS}
-  DEPENDS migcom ${MO_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${MO_DEFS}
   COMMENT "MIG: memory_object.defs (libfspager, -DSEQNOS)"
   VERBATIM
 )

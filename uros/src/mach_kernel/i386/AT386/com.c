@@ -409,7 +409,7 @@ comattach(
 	i386_ioport_t	addr = (long)dev->address;
 
 	take_dev_irq(dev);
-	printf(", port = %x, spl = %d, pic = %d. (DOS COM%d)",
+	printf(", port = %p, spl = %p, pic = %ld. (DOS COM%d)",
 		dev->address, dev->sysdep, dev->sysdep1, unit+1);
 
 	cominfo[unit] = dev;

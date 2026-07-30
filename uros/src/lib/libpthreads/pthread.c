@@ -87,6 +87,12 @@ static pthread_lock_t _free_stacks_lock = 0;
 #endif
 
 
+#ifndef	PTHREAD_RESTART_ON_STACK
+#error	"#444: this architecture has no way to re-enter a pooled thread on \
+a fresh stack.  Without one the pool nests a whole exit path per reuse and \
+walks the stack into its guard page."
+#endif
+
 static vm_address_t
 _pthread_allocate_stack(void)
 {
@@ -227,8 +233,38 @@ static pthread_lock_t _thread_pool_lock = 0;	/* Protects pool */
 static void
 _pthread_pool_trampoline(pthread_t self)
 {
+#ifdef	PTHREAD_POOL_DEPTH_PROBE
+	/*
+	 * #444: how deep is a reused thread, and does that change?
+	 *
+	 * This is what proved the fix, and it is left here because the
+	 * absence of a crash could not: the fault it was hunting happened
+	 * about once in nine runs.  Build with -DPTHREAD_POOL_DEPTH_PROBE
+	 * and read the stack pointer across reuses.
+	 *
+	 *   before:  0xbff5ed8c 0xbff5dacc 0xbff5c80c ...  48 bytes per reuse
+	 *   after:   0xbff8ff28 0xbff8ff28 0xbff8ff28 ...  flat
+	 *
+	 * (Compare each line with the previous one, not with the first: the
+	 * first reuse can be on a different thread's stack, so that delta
+	 * measures nothing.)
+	 */
+	{
+		static unsigned long reuses;
+		static unsigned long first_sp;
+		unsigned long sp = (unsigned long) &sp;
+
+		if (first_sp == 0)
+			first_sp = sp;
+		if ((++reuses % 100) == 0)
+			printf("  pool depth: reuse %lu sp=0x%lx "
+			       "(%ld bytes below the first)\n",
+			       reuses, sp, (long) (first_sp - sp));
+	}
+#endif
 	for (;;) {
-		/* Run the user function */
+		/* Run the user function.  fun and arg were published by the
+		 * pthread_create that woke us. */
 		pthread_exit((self->fun)(self->arg));
 		/* NOT REACHED — pthread_exit either parks us or terminates */
 	}
@@ -276,8 +312,18 @@ _pthread_pool_park(pthread_t self)
 	/* Park: block until pthread_create publishes fun/arg and bumps our word */
 	(void) _pthread_futex_wait(PTH_FW(self->pool_wake), wake_seq, 0);
 
-	/* Woken up — self->fun and self->arg have been set by pthread_create */
-	_pthread_pool_trampoline(self);
+	/*
+	 * Woken up — self->fun and self->arg have been set by pthread_create.
+	 *
+	 * #444: re-enter the trampoline on a FRESH stack rather than calling
+	 * it from here.  Calling it left this park, and the whole exit path
+	 * above it, on the stack for the rest of the thread's life -- one
+	 * more set of frames per reuse, until the guard page stopped it.
+	 *
+	 * Everything below the top of this stack belongs to work that has
+	 * already finished; self sits at the top, outside it.
+	 */
+	PTHREAD_RESTART_ON_STACK(self, _pthread_pool_trampoline, self);
 	/* NOT REACHED */
 	return 1;
 }

@@ -91,7 +91,7 @@ testdev_generate_packets(void)
 	}
 
 	if (testdev_debug) {
-		printf("testdev_generate_packets[%x]: port=0x%x type=%d count=%d size=%d\n",
+		printf("testdev_generate_packets[%p]: port=0x%x type=%d count=%d size=%d\n",
 		       self, status->reply_port, status->reply_type,
 		       status->reply_count, status->reply_size);
 	}
@@ -117,7 +117,7 @@ testdev_generate_packets(void)
 	}
 
 	if (testdev_debug) {
-		printf("testdev_generate_packets[%x]: done i=%d count=%d\n", self, i, status->reply_count);
+		printf("testdev_generate_packets[%p]: done i=%d count=%d\n", self, i, status->reply_count);
 	}
 
 	return;
@@ -142,7 +142,7 @@ testdev_generate_replies(void)
 	}
 
 	if (testdev_debug) {
-		printf("testdev_generate_replies[%x]: port=0x%x type=%d count=%d size=%d\n",
+		printf("testdev_generate_replies[%p]: port=0x%x type=%d count=%d size=%d\n",
 		       self, status->reply_port, status->reply_type,
 		       status->reply_count, status->reply_size);
 	}
@@ -241,7 +241,7 @@ testdev_generate_replies(void)
 	}
 
 	if (testdev_debug) {
-		printf("testdev_generate_replies[%x]: done i=%d count=%d\n", self, i, status->reply_count);
+		printf("testdev_generate_replies[%p]: done i=%d count=%d\n", self, i, status->reply_count);
 	}
 
     done:

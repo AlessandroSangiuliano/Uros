@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <boot/multiboot2.h>
+#include <ddb/ksym.h>
 #include <pmap/bootmem.h>
 #include <pmap/direct.h>
 #include <pmap/layout.h>
@@ -65,6 +66,32 @@ static uint64_t compute_low_water(uint32_t info_pa)
 
 	if (image_end > mark)
 		mark = image_end;
+
+	/*
+	 * The symbol tables the loader placed in low memory (#428).
+	 *
+	 * ⚠️ Measured, and it is currently a no-op: this GRUB puts the
+	 * information structure immediately *above* the symbol data, so the
+	 * check below already covers it. Under gdb — image_end 0x16b000,
+	 * syms_end 0x1bef29, info 0x1bef30 + 0x760 = 0x1bf690.
+	 *
+	 * It stays because that adjacency is the loader's arrangement and not
+	 * a promise. If it ever changes, handing out the page holding the
+	 * symbol table would make every later backtrace name functions read
+	 * out of a page table — and a wrong name is worse than no name, since
+	 * it sends the reader somewhere and looks exactly like a right one.
+	 *
+	 * Insurance, in other words, and labelled as insurance: an earlier
+	 * version of this comment claimed it was fixing a live problem, on the
+	 * strength of a comparison between two builds that differed in two
+	 * things at once.
+	 */
+	{
+		uint64_t syms_end = ksym_data_end(info_pa);
+
+		if (syms_end > mark)
+			mark = syms_end;
+	}
 
 	if (info_pa != 0) {
 		/* First word of the structure is its own total size. */

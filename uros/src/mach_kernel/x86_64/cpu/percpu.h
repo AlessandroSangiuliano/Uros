@@ -58,6 +58,24 @@ struct percpu {
 	 */
 	uint64_t kernel_rsp;		/* what a syscall switches to */
 	uint64_t user_rsp;		/* where the user's waits meanwhile */
+
+	/*
+	 * The interrupt priority level, and what arrived while it was raised
+	 * (#409/#322).
+	 *
+	 * Here rather than in a static array indexed by processor, because the
+	 * whole point of the software level is that reading and writing it
+	 * costs one %gs-relative instruction — an array would cost the index
+	 * first, and the index is the thing %gs already is.
+	 *
+	 * One bit per vector, so deferral is exact: a class-wide flag would
+	 * replay every vector in a class because one of them arrived.
+	 */
+	uint32_t ipl;
+	uint32_t reserved_ipl;
+	uint64_t pending[4];
+	uint64_t deferred;
+	uint64_t replayed;
 };
 
 /*

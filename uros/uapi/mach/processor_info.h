@@ -133,8 +133,17 @@ typedef struct processor_basic_info	*processor_basic_info_t;
 
 #define	PROCESSOR_CPU_LOAD_INFO	2		/* cpu load information */
 
+/*
+ * #415: unsigned int, which is what Mach's ABI says and what the transport
+ * assumes.  These travel as an array of natural_t whose length is
+ * sizeof(this)/sizeof(natural_t), so with `unsigned long' each counter
+ * occupied two elements on x86-64 and one here -- the count adjusts, so
+ * nothing breaks while both sides are built for the same target, but the
+ * structure stops being the one the interface describes and every reader
+ * that walks the array as integers sees halves of counters.
+ */
 struct processor_cpu_load_info {		/* number of ticks while running... */
-	unsigned long	cpu_ticks[CPU_STATE_MAX]; /* ... in the given mode */
+	unsigned int	cpu_ticks[CPU_STATE_MAX]; /* ... in the given mode */
 };
 
 typedef struct processor_cpu_load_info	processor_cpu_load_info_data_t;

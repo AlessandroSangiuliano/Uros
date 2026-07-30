@@ -960,7 +960,7 @@ first_free_is_valid(
 			break;
 	}
 	if (map->first_free != entry) {
-		printf("Bad first_free for map 0x%x: 0x%x should be 0x%x\n",
+		printf("Bad first_free for map %p: %p should be %p\n",
 		       map, map->first_free, entry);
 		return FALSE;
 	}
@@ -1670,7 +1670,7 @@ vm_map_pmap_enter(
 
 		if (vm_map_pmap_enter_print) {
 			printf("vm_map_pmap_enter:");
-			printf("map: %x, addr: %x, object: %x, offset: %x\n",
+			printf("map: %p, addr: %x, object: %p, offset: %x\n",
 				map, addr, object, offset);
 		}
 
@@ -4583,7 +4583,7 @@ vm_map_copyout(
 			m = vm_page_lookup(object, offset);
 			if (m == VM_PAGE_NULL || m->wire_count == 0 ||
 			    m->absent)
-			    panic("vm_map_copyout: wiring 0x%x", m);
+			    panic("vm_map_copyout: wiring %p", m);
 
 			m->busy = TRUE;
 			vm_object_unlock(object);
@@ -7753,7 +7753,7 @@ vm_map_copy_cont_is_valid(
 	if (
 	    cont != vm_map_copy_discard_cont &&
 	    cont != vm_map_copyin_page_list_cont ) {
-		printf("vm_map_copy_cont_is_valid:  bogus cont 0x%x\n", cont);
+		printf("vm_map_copy_cont_is_valid:  bogus cont %p\n", cont);
 		assert((integer_t) cont == 0xdeadbeef);
 	}
 	return 1;

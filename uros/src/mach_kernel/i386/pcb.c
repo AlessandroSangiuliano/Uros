@@ -231,9 +231,9 @@ machine_kernel_stack_init(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PCB) {
-		printf("machine_kernel_stack_init(thr=%x,stk=%x,cont=%x)\n",
+		printf("machine_kernel_stack_init(thr=%p,stk=%x,cont=%p)\n",
 				thread,stack,continuation);
-		printf("\tstack_iks=%x, stack_iel=%x\n",
+		printf("\tstack_iks=%p, stack_iel=%p\n",
 			STACK_IKS(stack), STACK_IEL(stack));
 	}
 #endif	/* MACH_ASSERT */
@@ -435,7 +435,7 @@ switch_context(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_SWITCH)
-		printf("\tswitch_context(old=%x con=%x new=%x)\n",
+		printf("\tswitch_context(old=%p con=%p new=%p)\n",
 					    old, continuation, new);
 #endif	/* MACH_ASSERT */
 
@@ -473,7 +473,7 @@ pcb_init( register thread_act_t thr_act )
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PCB)
-		printf("pcb_init(%x) pcb=%x\n", thr_act, pcb);
+		printf("pcb_init(%p) pcb=%p\n", thr_act, pcb);
 #endif	/* MACH_ASSERT */
 
 	/*
@@ -565,7 +565,7 @@ act_machine_set_state(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_STATE)
-	    printf("act_%x act_m_set_state(thr_act=%x,flav=%x,st=%x,cnt=%x)\n",
+	    printf("act_%p act_m_set_state(thr_act=%p,flav=%x,st=%p,cnt=%x)\n",
 		    current_act(), thr_act, flavor, tstate, count);
 #endif	/* MACH_ASSERT */
 
@@ -870,7 +870,7 @@ act_machine_get_state(
 {
 #if	MACH_ASSERT
 	if (watchacts & WA_STATE)
-	    printf("act_%x act_m_get_state(thr_act=%x,flav=%x,st=%x,cnt@%x=%x)\n",
+	    printf("act_%p act_m_get_state(thr_act=%p,flav=%x,st=%p,cnt@%p=%x)\n",
 		current_act(), thr_act, flavor, tstate,
 		count, (count ? *count : 0));
 #endif	/* MACH_ASSERT */
@@ -1098,7 +1098,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act, void (*start_pos)(v
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PCB)
-		printf("thread_machine_create(thr=%x,thr_act=%x,st=%x)\n",
+		printf("thread_machine_create(thr=%p,thr_act=%p,st=%p)\n",
 			thread, thr_act, start_pos);
 #endif	/* MACH_ASSERT */
 
@@ -1189,7 +1189,7 @@ act_machine_create(task_t task, thread_act_t thr_act)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PCB)
-		printf("act_machine_create(task=%x,thr_act=%x) pcb=%x\n",
+		printf("act_machine_create(task=%p,thr_act=%p) pcb=%p\n",
 			task,thr_act, &mact->xxx_pcb);
 #endif	/* MACH_ASSERT */
 
@@ -1209,7 +1209,7 @@ act_create_kernel(task_t task, vm_offset_t stack, vm_size_t stack_size,
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PCB)
-		printf("act_create_kernel(task=%x,stk=%x,&thr_act=%x)\n",
+		printf("act_create_kernel(task=%p,stk=%x,&thr_act=%p)\n",
 				task, stack, out_act);
 #endif	/* MACH_ASSERT */
 
@@ -1223,7 +1223,7 @@ act_machine_destroy(thread_act_t thr_act)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PCB)
-		printf("act_machine_destroy(0x%x)\n", thr_act);
+		printf("act_machine_destroy(%p)\n", thr_act);
 #endif	/* MACH_ASSERT */
 
 	pcb_terminate(thr_act);
@@ -1246,7 +1246,7 @@ act_machine_return(int code)
 	*/
 
 	if (watchacts & WA_EXIT)
-		printf("act_machine_return(0x%x) cur_act=%x(%d) thr=%x(%d)\n",
+		printf("act_machine_return(0x%x) cur_act=%p(%d) thr=%p(%d)\n",
 			code, thr_act, thr_act->ref_count,
 			thr_act->thread, thr_act->thread
 					? thr_act->thread->ref_count : 0);
@@ -1347,11 +1347,11 @@ dump_handlers(thread_act_t thr_act)
     while (rhp) {
 	if (rhp == &thr_act->special_handler){
 	    if (rhp->next)
-		printf("[NON-Zero next ptr(%x)]", rhp->next);
+		printf("[NON-Zero next ptr(%p)]", rhp->next);
 	    printf("special_handler()->");
 	    break;
 	}
-	printf("hdlr_%d(%x)->",counter,rhp->handler);
+	printf("hdlr_%d(%p)->",counter,rhp->handler);
 	rhp = rhp->next;
 	if (++counter > 32) {
 		printf("Aborting: HUGE handler chain\n");
@@ -1381,14 +1381,14 @@ dump_act(thread_act_t thr_act)
 	if (!thr_act)
 		return(0);
 
-	printf("thr_act(0x%x)(%d): thread=%x(%d) task=%x(%d)\n",
+	printf("thr_act(%p)(%d): thread=%p(%d) task=%p(%d)\n",
 	       thr_act, thr_act->ref_count,
 	       thr_act->thread, thr_act->thread ? thr_act->thread->ref_count:0,
 	       thr_act->task,   thr_act->task   ? thr_act->task->ref_count : 0);
 
 	if (thr_act->pool_port) {
 	    thread_pool_t actpp = &thr_act->pool_port->ip_thread_pool;
-	    printf("\tpool(acts_p=%x, waiting=%d) pool_next %x\n",
+	    printf("\tpool(acts_p=%p, waiting=%d) pool_next %p\n",
 		actpp->thr_acts, actpp->waiting, thr_act->thread_pool_next);
 	}else
 	    printf("\tno thread_pool\n");
@@ -1397,14 +1397,14 @@ dump_act(thread_act_t thr_act)
 		       thr_act->alerts, thr_act->alert_mask,
 		       thr_act->suspend_count, thr_act->user_stop_count,
 		       thr_act->active, thr_act->ast);
-	printf("\thi=%x lo=%x\n", thr_act->higher, thr_act->lower);
-	printf("\tpcb=%x, ustk=%x\n",
+	printf("\thi=%p lo=%p\n", thr_act->higher, thr_act->lower);
+	printf("\tpcb=%p, ustk=%x\n",
 		       thr_act->mact.pcb, thr_act->user_stack);
 
 	if (thr_act->thread && thr_act->thread->kernel_stack) {
 	    vm_offset_t stack = thr_act->thread->kernel_stack;
 
-	    printf("\tk_stk %x  eip %x ebx %x esp %x iss %x\n",
+	    printf("\tk_stk %x  eip %x ebx %x esp %x iss %p\n",
 		stack, STACK_IKS(stack)->k_eip, STACK_IKS(stack)->k_ebx,
 		STACK_IKS(stack)->k_esp, STACK_IEL(stack)->saved_state);
 	}

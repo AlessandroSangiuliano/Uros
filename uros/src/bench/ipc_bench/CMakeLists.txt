@@ -26,7 +26,7 @@ add_custom_command(
     -user ${EXT2_USER_C}
     -server ${EXT2_SERVER_C}
     ${EXT2_DEFS}
-  DEPENDS migcom ${EXT2_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${EXT2_DEFS}
   COMMENT "MIG: ext2fs_server.defs (user stubs for ipc_bench)"
   VERBATIM
 )
@@ -54,7 +54,7 @@ add_custom_command(
     -user ${EXEC_USER_C}
     -server /dev/null
     ${EXEC_DEFS}
-  DEPENDS migcom ${EXEC_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${EXEC_DEFS}
   COMMENT "MIG: exec.defs (user stubs for ipc_bench smoke test)"
   VERBATIM
 )
@@ -82,7 +82,7 @@ add_custom_command(
     -user ${PROC_USER_C}
     -server /dev/null
     ${PROC_DEFS}
-  DEPENDS migcom ${PROC_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${PROC_DEFS}
   COMMENT "MIG: proc.defs (user stubs for ipc_bench smoke test)"
   VERBATIM
 )

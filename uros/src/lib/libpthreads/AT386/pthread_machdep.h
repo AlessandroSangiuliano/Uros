@@ -30,3 +30,38 @@ typedef long pthread_lock_t;
 #define LOCK_INITIALIZER 0
 
 #undef STACK_GROWS_UP
+
+/*
+ *	#444: re-enter on a fresh stack.
+ *
+ *	A pooled thread is woken inside the exit path of the work it has just
+ *	finished, several frames deep, and its next act is to run a new user
+ *	function.  Calling that from where it stands nests one whole exit path
+ *	per reuse and never unwinds it: a thousand create/join cycles walk the
+ *	stack into its guard page, which is issue #444.
+ *
+ *	Returning instead of jumping is not an option, because pthread_exit
+ *	may be called by the user at any depth and must not return there.  So
+ *	the thread drops its stack pointer back to the top -- everything below
+ *	is the finished work's frames and is not needed again -- and re-enters.
+ *	Every reuse then starts at the depth the first one did.
+ *
+ *	libpthreads is standalone: these servers link -nostdlib and have no
+ *	musl, so setjmp/longjmp are not available and this is the machine
+ *	-dependent header where the alternative belongs.
+ *
+ *	The alignment dance is the i386 SysV convention: esp must be 16-byte
+ *	aligned at the call instruction, so the argument push has to land it
+ *	back on a multiple of sixteen.
+ */
+#define PTHREAD_RESTART_ON_STACK(top, fn, arg)				\
+	__asm__ __volatile__ ("movl %0, %%esp\n\t"			\
+			      "andl $-16, %%esp\n\t"			\
+			      "subl $12, %%esp\n\t"			\
+			      "pushl %1\n\t"				\
+			      "call *%2"				\
+			      : /* never returns */			\
+			      : "r" ((unsigned long) (top)),		\
+				"r" ((void *) (arg)),			\
+				"r" ((void *) (fn))			\
+			      : "memory")

@@ -135,6 +135,7 @@
 #include "safestr.h"
 #include "alloc.h"
 #include "global.h"
+#include "target.h"
 #include <stdio.h>
 
 ipc_type_t *itRetCodeType;	/* used for return codes */
@@ -194,6 +195,7 @@ itAlloc()
 	0,			/* u_int itTypeSize */
 	0,			/* u_int itPadSize */
 	0,			/* u_int itMinTypeSize */
+	0,			/* u_int itAlignment */
 	0,			/* u_int itInName */
 	0,			/* u_int itOutName */
 	0,			/* u_int itSize */
@@ -254,6 +256,13 @@ itCalculateSizeInfo(register ipc_type_t *it)
 
 	it->itTypeSize = bytes;
 	it->itPadSize = padding;
+	/*
+	 * What the compiler will demand in front of this field (#416).  A
+	 * field is one element or an array of them, and an array is aligned
+	 * like its element — so the width that matters is itSize, never the
+	 * total.
+	 */
+	it->itAlignment = TargetScalarAlign((it->itSize + 7) / 8);
 	if (IS_VARIABLE_SIZED_UNTYPED(it)) {
 	    /*
    	     * for these arrays, the argCount is not a akbRequest|akbReply,
@@ -276,20 +285,24 @@ itCalculateSizeInfo(register ipc_type_t *it)
 	 */
 	u_int bytes;
 	if (IS_MULTIPLE_KPD(it))
-	    bytes = it->itKPD_Number * sizeof(mach_msg_descriptor_t);
-	else 
-	    bytes = sizeof(mach_msg_descriptor_t);
+	    bytes = it->itKPD_Number * Target->mt_descriptor_size;
+	else
+	    bytes = Target->mt_descriptor_size;
 
 	it->itTypeSize = bytes;
 	it->itPadSize = 0;
 	it->itMinTypeSize = bytes;
+	it->itAlignment = Target->mt_descriptor_align;
     }
 
-    /* Unfortunately, these warning messages can't give a type name;
-       we haven't seen a name yet (it might stay anonymous.) */
+    /* Unfortunately, this warning can't give a type name; we haven't seen a
+       name yet (it might stay anonymous.)  It used to say so with a %s and
+       no argument to match it, which reads whatever the calling convention
+       left where the argument would have been: the one diagnostic that fires
+       when a size is wrong was itself undefined behaviour. */
 
     if ((it->itTypeSize == 0) && !it->itVarArray)
-	warn("sizeof(%s) == 0");
+	warn("a fixed-size type computes to zero bytes");
 }
 
 /*
@@ -790,8 +803,18 @@ init_type(void)
     itNdrCodeType->itInNameStr = "NDR_record_t";
     itNdrCodeType->itOutName = 0;
     itNdrCodeType->itOutNameStr = "NDR_record_t";
-    itNdrCodeType->itSize = sizeof(NDR_record_t) * 8;
+    itNdrCodeType->itSize = Target->mt_ndr_size * 8;
     itCalculateSizeInfo(itNdrCodeType);
+    /*
+     * ⚠️ And its alignment is one, which the size cannot tell you (#416).
+     *
+     * NDR_record_t is eight *bytes* — encoding tags, not a scalar — so the
+     * compiler asks nothing of the address it starts at.  itCalculateSizeInfo
+     * has only the width to go on and concludes eight, which on a target
+     * where eight-byte alignment exists inserts padding in front of a field
+     * that needs none.
+     */
+    itNdrCodeType->itAlignment = 1;
     itCalculateNameInfo(itNdrCodeType);
 
     itDummyType = itAlloc();

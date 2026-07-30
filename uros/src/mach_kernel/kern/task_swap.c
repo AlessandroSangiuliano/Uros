@@ -210,7 +210,7 @@ on_swapped_list(task_t task)
 	while (!queue_end(&swapped_tasks, (queue_entry_t)ltask)) {
 		/* check for illegal state */
 		if (ltask->swap_state == TASK_SW_IN) {
-			printf("on_swapped_list and in: 0x%X\n",ltask);
+			printf("on_swapped_list and in: %p\n",ltask);
 			Debugger("");
 		}
 		if (ltask == task)
@@ -390,7 +390,7 @@ task_swapout(task_t task)
 	task_swapper_lock();
 #if	TASK_SW_DEBUG
 	if (task_swap_debug && on_swapped_list(task)) {
-		printf("task 0x%X already on list\n", task);
+		printf("task %p already on list\n", task);
 		Debugger("");
 	}
 #endif	/* TASK_SW_DEBUG */
@@ -665,7 +665,7 @@ task_swapin(task_t task, boolean_t make_unswappable)
 #if	TASK_SW_DEBUG
 			task_swapper_lock();
 			if (task_swap_debug && on_swapped_list(task)) {
-				printf("task 0x%X on list, state is SW_IN\n",
+				printf("task %p on list, state is SW_IN\n",
 					task);
 				Debugger("");
 			}
@@ -714,7 +714,7 @@ task_swapin(task_t task, boolean_t make_unswappable)
 	task_swapper_lock();
 #if	TASK_SW_DEBUG
 	if (task_swap_debug && !on_swapped_list(task)) {
-		printf("task 0x%X not on list\n", task);
+		printf("task %p not on list\n", task);
 		Debugger("");
 	}
 #endif	/* TASK_SW_DEBUG */
@@ -831,7 +831,7 @@ task_swapin(task_t task, boolean_t make_unswappable)
 #if	TASK_SW_DEBUG
 	task_swapper_lock();
 	if (task_swap_debug && on_swapped_list(task)) {
-		printf("task 0x%X on list at end of swap in\n", task);
+		printf("task %p on list at end of swap in\n", task);
 		Debugger("");
 	}
 	task_swapper_unlock();
@@ -1096,7 +1096,7 @@ print_pid(
 	task_lock(task);
 	rescount = pmap_resident_count(task->map->pmap);
 	task_unlock(task);
-	printf("task_swapper: swapped %s task %x; %d %s %d; res=%d\n",
+	printf("task_swapper: swapped %s task %p; %lu %s %lu; res=%ld\n",
 		inout, task, n1, comp, n2, rescount);
 }
 #endif
@@ -1359,7 +1359,7 @@ task_swapout_eligible(task_t task)
 #if	TASK_SW_DEBUG
 	task_swapper_lock();
 	if (task_swap_debug && on_swapped_list(task)) {
-		printf("swapout_eligible: task 0x%X on swapped list\n", task);
+		printf("swapout_eligible: task %p on swapped list\n", task);
 		Debugger("");
 	}
 	task_swapper_unlock();
@@ -1368,7 +1368,7 @@ task_swapout_eligible(task_t task)
 	task_lock(task);
 #if	TASK_SW_DEBUG
 	if (task->swap_flags & TASK_SW_ELIGIBLE) {
-		printf("swapout_eligible: task 0x%X already eligible\n", task);
+		printf("swapout_eligible: task %p already eligible\n", task);
 	}
 #endif	/* TASK_SW_DEBUG */
 	if ((task->swap_state == TASK_SW_IN) &&
@@ -1386,7 +1386,7 @@ task_swapout_ineligible(task_t task)
 #if	TASK_SW_DEBUG
 	task_swapper_lock();
 	if (task_swap_debug && on_swapped_list(task)) {
-		printf("swapout_ineligible: task 0x%X on swapped list\n", task);
+		printf("swapout_ineligible: task %p on swapped list\n", task);
 		Debugger("");
 	}
 	task_swapper_unlock();
@@ -1395,7 +1395,7 @@ task_swapout_ineligible(task_t task)
 	task_lock(task);
 #if	TASK_SW_DEBUG
 	if (!(task->swap_flags & TASK_SW_ELIGIBLE))
-		printf("swapout_ineligible: task 0x%X already inel.\n", task);
+		printf("swapout_ineligible: task %p already inel.\n", task);
 #endif	/* TASK_SW_DEBUG */
 	if ((task->swap_state != TASK_SW_IN) && 
 	    (task->swap_flags & TASK_SW_ELIGIBLE)) {

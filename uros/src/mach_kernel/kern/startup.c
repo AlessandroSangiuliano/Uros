@@ -605,7 +605,7 @@ cpu_launch_first_thread(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_BOOT)
-		printf("cpu_launch_first_thread(%x) cpu=%d\n", th, mycpu);
+		printf("cpu_launch_first_thread(%p) cpu=%d\n", th, mycpu);
 #endif	/* MACH_ASSERT */
 
 	cpu_up(mycpu);
