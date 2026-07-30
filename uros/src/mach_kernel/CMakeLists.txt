@@ -251,13 +251,19 @@ set(KERNEL_C_FLAGS
     # the print functions is what makes it real, and that is its own step --
     # %x against a vm_offset_t is the thing the issue asks for.
     #
-    # int-conversion stays visible but not fatal.  Two sites remain, and they
-    # are one fact, not two: the kernel keeps ipc_port_t pointers in message
-    # fields typed mach_port_t, which is exactly pointer-wide on i386 and
-    # will not be on x86-64.  Silencing it would hide the class; making it
-    # fatal would stop the build on a decision that belongs to the message
-    # ABI, not to a compiler flag.  So it warns, every build, by name.
-    -Wno-error=int-conversion
+    # int-conversion is FATAL again, which is #442's third done-when.
+    #
+    # #415 left it warning-but-not-fatal, and said why: two sites remained,
+    # and they were one fact -- the kernel kept ipc_port_t pointers in
+    # message fields typed mach_port_t, pointer-wide on i386 and not on
+    # x86-64.  Stopping the build on that would have stopped it on a
+    # decision that belonged to the message ABI, not to a compiler flag.
+    #
+    # #442 made that decision and carried it out: the ports live in the
+    # kmsg, the message carries names, and the count is zero.  Fatal is now
+    # the point -- it is what makes "by construction" mean something rather
+    # than a line in a build log nobody reads.  If this ever fails to
+    # compile, something has put an address back in a name field.
     -Wno-pointer-sign
     -Wno-unused-variable
     -Wno-unused-function

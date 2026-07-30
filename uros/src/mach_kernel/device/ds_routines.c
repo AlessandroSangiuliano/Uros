@@ -145,8 +145,7 @@ extern void		log_thread_action (char *, long, long, long);
 extern void		io_done_queue_add(io_done_queue_t queue, io_req_t ior);
 extern void		io_done_thread_continue(void);
 extern void		ds_no_senders(
-				mach_no_senders_notification_t
-						* notification);
+				ipc_port_t	dev_port);
 
 #if	MACH_KDB
 unsigned int db_count_io_done_list(io_done_queue_t	queue);
@@ -1950,13 +1949,10 @@ ds_device_map(
  */
 void
 ds_no_senders(
-	mach_no_senders_notification_t	*notification)
+	ipc_port_t		dev_port)
 {
 	device_t		device;
-	ipc_port_t		dev_port;
 	extern device_t		dev_port_lookup(ipc_port_t);
-
-	dev_port = (ipc_port_t) notification->not_header.msgh_remote_port;
 
 	/*
 	 * convert a port to its device structure.
@@ -2021,11 +2017,12 @@ ds_no_senders(
 
 boolean_t
 ds_notify(
+	ipc_port_t	   port,
 	mach_msg_header_t *msg)
 {
 	switch (msg->msgh_id) {
 		case MACH_NOTIFY_NO_SENDERS:
-		ds_no_senders((mach_no_senders_notification_t *) msg);
+		ds_no_senders(port);			/* #442 */
 		return TRUE;
 
 		default:
@@ -2036,11 +2033,12 @@ ds_notify(
 
 boolean_t
 ds_master_notify(
+	ipc_port_t	   port,
 	mach_msg_header_t *msg)
 {
 	extern ipc_port_t master_device_port;
 
-	assert(msg->msgh_remote_port == (mach_port_t)master_device_port);
+	assert(port == master_device_port);		/* #442 */
 
 	switch (msg->msgh_id) {
 	case MACH_NOTIFY_DEAD_NAME: {

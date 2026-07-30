@@ -432,6 +432,77 @@ ipc_kmsg_queue_next(
 }
 
 /*
+ *	The descriptors' ports, in the kmsg (#442).
+ *
+ *	One entry per descriptor rather than per PORT descriptor, so an
+ *	entry's index is the descriptor's own position in the body: the
+ *	generated server stubs then need no second numbering to agree with,
+ *	and the entries belonging to out-of-line descriptors simply stay
+ *	IP_NULL.  Descriptor counts are small -- the census measured 1.1% of
+ *	messages complex at all, carrying a mean of 1.45 ports -- so this is
+ *	one small kalloc on a message that already does several.
+ *
+ *	The counters are not decoration.  An array that outlives its kmsg is
+ *	a leak that no test would notice until the machine ran out, so the
+ *	two numbers are kept and ikm_ports_report prints them.  Call it from
+ *	DDB; do NOT call it periodically from the allocation path.  Doing
+ *	that for one run put fifty thousand serial printf calls inside
+ *	copyin, and pthread_test faulted on its stack-sensitive test -- the
+ *	instrument breaking the thing it was measuring.  Three runs without
+ *	it were clean.
+ *
+ *	The reading that mattered: 50000 allocated, 49999 freed, ONE
+ *	outstanding, steady from the first report to the last.  That one is
+ *	the array being allocated as the line prints.
+ */
+static unsigned long	ikm_ports_allocs;
+static unsigned long	ikm_ports_frees;
+
+kern_return_t
+ikm_ports_alloc(
+	ipc_kmsg_t		kmsg,
+	mach_msg_type_number_t	count)
+{
+	vm_size_t size;
+
+	assert(kmsg->ikm_ports == (ipc_port_t *) 0);
+
+	if (count == 0)
+		return KERN_SUCCESS;
+
+	size = (vm_size_t) count * sizeof(ipc_port_t);
+	kmsg->ikm_ports = (ipc_port_t *) kalloc(size);
+	if (kmsg->ikm_ports == (ipc_port_t *) 0)
+		return KERN_RESOURCE_SHORTAGE;
+
+	(void) memset((void *) kmsg->ikm_ports, 0, size);
+	kmsg->ikm_nports = count;
+	ikm_ports_allocs++;
+	return KERN_SUCCESS;
+}
+
+void
+ikm_ports_free_slow(
+	ipc_kmsg_t	kmsg)
+{
+	assert(kmsg->ikm_ports != (ipc_port_t *) 0);
+
+	kfree((vm_offset_t) kmsg->ikm_ports,
+	      (vm_size_t) kmsg->ikm_nports * sizeof(ipc_port_t));
+	kmsg->ikm_ports = (ipc_port_t *) 0;
+	kmsg->ikm_nports = 0;
+	ikm_ports_frees++;
+}
+
+void
+ikm_ports_report(void)
+{
+	printf("ikm_ports: %lu allocated, %lu freed, %lu outstanding\n",
+	       ikm_ports_allocs, ikm_ports_frees,
+	       ikm_ports_allocs - ikm_ports_frees);
+}
+
+/*
  *	Routine:	ipc_kmsg_destroy
  *	Purpose:
  *		Destroys a kernel message.  Releases all rights,
@@ -493,6 +564,7 @@ ipc_kmsg_clean_body(
 {
     mach_msg_descriptor_t 	*saddr, *eaddr;
     boolean_t			rt;
+    mach_msg_type_number_t	i;
 
 #if	DIPC
     assert(!KMSG_IN_DIPC(kmsg));
@@ -501,12 +573,22 @@ ipc_kmsg_clean_body(
     if ( number == 0 )
 	return;
 
+    /*
+     * #442: there are descriptors to clean, so a producer allocated the
+     * ports for them.  All three do -- copyin, copyin_from_kernel, and
+     * the MIG server stub that builds a kernel reply -- and a message
+     * that got here without one is a producer that was missed, which is
+     * worth stopping for rather than reading past a null.
+     */
+    assert(kmsg->ikm_ports != (ipc_port_t *) 0);
+    assert(number <= kmsg->ikm_nports);
+
     rt = KMSG_IS_RT(kmsg);
     saddr = (mach_msg_descriptor_t *) 
 			((mach_msg_base_t *) &kmsg->ikm_header + 1);
     eaddr = saddr + number;
 
-    for ( ; saddr < eaddr; saddr++ ) {
+    for (i = 0; saddr < eaddr; saddr++, i++ ) {
 	
 	switch (saddr->type.type) {
 	    
@@ -518,9 +600,10 @@ ipc_kmsg_clean_body(
 		/* 
 		 * Destroy port rights carried in the message 
 		 */
-		if (!IO_VALID((ipc_object_t) dsc->name))
+		if (!IO_VALID((ipc_object_t) kmsg->ikm_ports[i]))	/* #442 */
 		    continue;
-		ipc_object_destroy((ipc_object_t) dsc->name, dsc->disposition);
+		ipc_object_destroy((ipc_object_t) kmsg->ikm_ports[i],
+				   dsc->disposition);
 		break;
 	    }
 	    case MACH_MSG_OOL_VOLATILE_DESCRIPTOR:
@@ -614,11 +697,11 @@ ipc_kmsg_clean_partial(
 	assert(!KMSG_IN_DIPC(kmsg));
 #endif	/* DIPC */
 
-	object = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
+	object = (ipc_object_t) kmsg->ikm_dest;		/* #442 */
 	assert(IO_VALID(object));
 	ipc_object_destroy(object, MACH_MSGH_BITS_REMOTE(mbits));
 
-	object = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	object = (ipc_object_t) kmsg->ikm_reply;	/* #442 */
 	if (IO_VALID(object))
 		ipc_object_destroy(object, MACH_MSGH_BITS_LOCAL(mbits));
 
@@ -659,11 +742,11 @@ ipc_kmsg_clean(
 #endif	/* DIPC */
 
 	mbits = kmsg->ikm_header.msgh_bits;
-	object = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
+	object = (ipc_object_t) kmsg->ikm_dest;		/* #442 */
 	if (IO_VALID(object))
 		ipc_object_destroy(object, MACH_MSGH_BITS_REMOTE(mbits));
 
-	object = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	object = (ipc_object_t) kmsg->ikm_reply;	/* #442 */
 	if (IO_VALID(object))
 		ipc_object_destroy(object, MACH_MSGH_BITS_LOCAL(mbits));
 
@@ -688,6 +771,14 @@ ipc_kmsg_free(
 	ipc_kmsg_t	kmsg)
 {
 	vm_size_t size = kmsg->ikm_size;
+
+	/*
+	 * #442: before any of the branches below, because one of them does
+	 * not free the kmsg at all -- IKM_SIZE_NETWORK hands it back to the
+	 * network pool, and a buffer that comes back out of that pool with
+	 * a stale ikm_ports would leak it at the next ikm_init.
+	 */
+	ikm_ports_free(kmsg);
 
 	switch (size) {
 #if	DIPC
@@ -872,6 +963,7 @@ ipc_kmsg_get(
 
 extern mach_msg_return_t
 ipc_kmsg_get_from_kernel(
+	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
 	mach_msg_size_t		size,
 	ipc_kmsg_t		*kmsgp)
@@ -879,7 +971,6 @@ ipc_kmsg_get_from_kernel(
 	ipc_kmsg_t 	kmsg;
 	mach_msg_size_t	msg_and_trailer_size;
 	mach_msg_format_0_trailer_t *trailer;
-	ipc_port_t	dest_port;
 #if	MACH_RT
 	boolean_t	rt;
 #endif	/* MACH_RT */
@@ -892,10 +983,17 @@ ipc_kmsg_get_from_kernel(
 	if (msg_and_trailer_size < IKM_SAVED_MSG_SIZE)
 	    msg_and_trailer_size = IKM_SAVED_MSG_SIZE;
 
-	assert(IP_VALID((ipc_port_t) msg->msgh_remote_port));
-
 #if	MACH_RT
-	rt = IP_RT((ipc_port_t) msg->msgh_remote_port);
+	/*
+	 * #442: the realtime allocator needs the destination PORT, and
+	 * only the kernel-to-kernel callers have one -- mach_msg_overwrite
+	 * arrives with a message whose fields are NAMES and passes IP_NULL.
+	 * This used to cast the field to a port and ask it either way,
+	 * which for that caller meant reading a namespace index as an
+	 * address.  MACH_RT is 0 in this tree; turning it on needs the name
+	 * translated first, not the cast put back.
+	 */
+	rt = IP_VALID(dest) ? IP_RT(dest) : FALSE;
 
 	if (rt)
 		kmsg = ikm_rtalloc(msg_and_trailer_size);
@@ -1038,10 +1136,17 @@ ipc_kmsg_put_to_kernel(
 
 mach_msg_return_t
 ipc_kmsg_copyin_header(
-	mach_msg_header_t	*msg,
+	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	mach_port_t		notify)
 {
+	/*
+	 * #442: this is where a NAME became a POINTER in the same four
+	 * bytes.  It reads the names the sender wrote and now puts the
+	 * translated ports in the kmsg, so the message keeps carrying what
+	 * it arrived with and the kernel keeps its pointers next to it.
+	 */
+	mach_msg_header_t *msg = &kmsg->ikm_header;
 	mach_msg_bits_t mbits = msg->msgh_bits &~ MACH_MSGH_BITS_CIRCULAR;
 	mach_port_t dest_name = msg->msgh_remote_port;
 	mach_port_t reply_name = msg->msgh_local_port;
@@ -1431,8 +1536,8 @@ ipc_kmsg_copyin_header(
 
 	msg->msgh_bits = (MACH_MSGH_BITS_OTHER(mbits) |
 			  MACH_MSGH_BITS(dest_type, reply_type));
-	msg->msgh_remote_port = (mach_port_t) dest_port;
-	msg->msgh_local_port = (mach_port_t) reply_port;
+	ikm_set_dest(kmsg, (ipc_port_t) dest_port);	/* #442 */
+	ikm_set_reply(kmsg, (ipc_port_t) reply_port);
     }
 
 	return MACH_MSG_SUCCESS;
@@ -1503,7 +1608,7 @@ ipc_kmsg_copyin_body(
     /*
      * Determine if the target is a kernel port.
      */
-    dest = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
+    dest = (ipc_object_t) kmsg->ikm_dest;
     complex = FALSE;
 #if	DIPC
     complex_ool = FALSE;
@@ -1527,6 +1632,17 @@ ipc_kmsg_copyin_body(
 			    kmsg->ikm_header.msgh_size)) {
 	ipc_kmsg_clean_partial(kmsg,0,0,0);
 	return MACH_SEND_MSG_TOO_SMALL;
+    }
+
+    /*
+     * #442: room for the descriptors' ports, now that the count has been
+     * checked against the message it arrived in.  Before that check it is
+     * a number from userland and not a size.
+     */
+    if (ikm_ports_alloc(kmsg, body->msgh_descriptor_count)
+							!= KERN_SUCCESS) {
+	ipc_kmsg_clean_partial(kmsg,0,0,0);
+	return MACH_MSG_VM_KERNEL;
     }
     
     /*
@@ -1625,7 +1741,12 @@ ipc_kmsg_copyin_body(
 					       (ipc_port_t) dest)) {
 		    kmsg->ikm_header.msgh_bits |= MACH_MSGH_BITS_CIRCULAR;
 		}
-		dsc->name = (mach_port_t) object;
+		/*
+		 * #442: the port goes in the kmsg.  The descriptor keeps the
+		 * name the sender wrote, until copyout replaces it with the
+		 * receiver's.
+		 */
+		kmsg->ikm_ports[i] = (ipc_port_t) object;
 		complex = TRUE;
 		break;
 	    }
@@ -2082,9 +2203,8 @@ ipc_port_hist_report(void)
 /*
  *	Count the port pointers this message would need the kernel to carry:
  *	the header's two, plus one per port descriptor, plus the length of
- *	every out-of-line port array.  Runs after copyin, so the header fields
- *	hold objects rather than names and a null one is a null pointer either
- *	way.
+ *	every out-of-line port array.  Runs after copyin, so the two named
+ *	ports are the kmsg's own and the descriptors are still the message's.
  */
 static void
 ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
@@ -2093,9 +2213,9 @@ ipc_kmsg_count_ports(ipc_kmsg_t kmsg)
 	mach_msg_header_t *hdr = &kmsg->ikm_header;
 	unsigned long n = 0;
 
-	if (hdr->msgh_remote_port != MACH_PORT_NULL)
+	if (kmsg->ikm_dest != IP_NULL)			/* #442 */
 		n++;
-	if (hdr->msgh_local_port != MACH_PORT_NULL)
+	if (kmsg->ikm_reply != IP_NULL)
 		n++;
 
 	if (hdr->msgh_bits & MACH_MSGH_BITS_COMPLEX) {
@@ -2137,7 +2257,7 @@ ipc_kmsg_copyin(
 {
     mach_msg_return_t 		mr;
     
-    mr = ipc_kmsg_copyin_header(&kmsg->ikm_header, space, notify);
+    mr = ipc_kmsg_copyin_header(kmsg, space, notify);
     if (mr != MACH_MSG_SUCCESS)
 	return mr;
 
@@ -2171,13 +2291,22 @@ ipc_kmsg_copyin(
 
 void
 ipc_kmsg_copyin_from_kernel(
-	ipc_kmsg_t	kmsg)
+	ipc_kmsg_t		kmsg,
+	ipc_port_t		*ports,
+	mach_msg_type_number_t	nports)
 {
+	/*
+	 * #442: the descriptors' ports come as an argument.  A KernelUser
+	 * stub builds its message on the caller's stack, before there is a
+	 * kmsg to put them in, and used to write them into the descriptors'
+	 * name fields -- the same trick the header's destination used, and
+	 * lossy for the same reason once a pointer stops being four bytes.
+	 */
 	mach_msg_bits_t bits = kmsg->ikm_header.msgh_bits;
 	mach_msg_type_name_t rname = MACH_MSGH_BITS_REMOTE(bits);
 	mach_msg_type_name_t lname = MACH_MSGH_BITS_LOCAL(bits);
-	ipc_object_t remote = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
-	ipc_object_t local = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	ipc_object_t remote = (ipc_object_t) kmsg->ikm_dest;	/* #442 */
+	ipc_object_t local = (ipc_object_t) kmsg->ikm_reply;
 
 	/* translate the destination and reply ports */
 
@@ -2208,12 +2337,25 @@ ipc_kmsg_copyin_from_kernel(
     {
     	mach_msg_descriptor_t	*saddr, *eaddr;
     	mach_msg_body_t		*body;
+    	mach_msg_type_number_t	i;
 
     	body = (mach_msg_body_t *) (&kmsg->ikm_header + 1);
     	saddr = (mach_msg_descriptor_t *) (body + 1);
     	eaddr = (mach_msg_descriptor_t *) saddr + body->msgh_descriptor_count;
 
-    	for ( ; saddr <  eaddr; saddr++) {
+	/*
+	 * #442: room for the descriptors' ports.  This routine has no way
+	 * to report a failure -- its contract is that the kernel does not
+	 * send malformed messages -- and its callers already panic when
+	 * ipc_kmsg_get_from_kernel cannot allocate, so a shortage says so
+	 * here too rather than carrying on with nowhere to put the ports.
+	 */
+	if (ikm_ports_alloc(kmsg, body->msgh_descriptor_count)
+							!= KERN_SUCCESS)
+		panic("ipc_kmsg_copyin_from_kernel: no room for %u ports",
+		      (unsigned) body->msgh_descriptor_count);
+
+    	for (i = 0; saddr <  eaddr; saddr++, i++) {
 
 	    switch (saddr->type.type) {
 	    
@@ -2226,13 +2368,15 @@ ipc_kmsg_copyin_from_kernel(
 		
 		    /* this is really the type SEND, SEND_ONCE, etc. */
 		    name = dsc->disposition;
-		    object = (ipc_object_t) dsc->name;
+		    object = (ipc_object_t)
+			     (i < nports ? ports[i] : IP_NULL);	/* #442 */
 		    dsc->disposition = ipc_object_copyin_type(name);
 		
 		    if (!IO_VALID(object)) {
 		        break;
 		    }
 
+		    kmsg->ikm_ports[i] = (ipc_port_t) object;	/* #442 */
 		    ipc_object_copyin_from_kernel(object, name);
 		    
 		    if ((dsc->disposition == MACH_MSG_TYPE_PORT_RECEIVE) &&
@@ -2325,21 +2469,28 @@ ipc_kmsg_copyin_from_kernel(
 
 mach_msg_return_t
 ipc_kmsg_copyout_header(
-	mach_msg_header_t	*msg,
+	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	mach_port_t		notify)
 {
+	/*
+	 * #442: the kmsg rather than a bare header, because the two ports
+	 * this needs are the kmsg's and not the message's.  The header is
+	 * still what it writes the NAMES back into, which is all a header
+	 * was ever meant to carry.
+	 */
+	mach_msg_header_t *msg = &kmsg->ikm_header;
 	mach_msg_bits_t mbits = msg->msgh_bits;
-	ipc_port_t dest = (ipc_port_t) msg->msgh_remote_port;
+	ipc_port_t dest = kmsg->ikm_dest;
 
 	assert(IP_VALID(dest));
 
     {
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
-	ipc_port_t reply = (ipc_port_t) msg->msgh_local_port;
+	ipc_port_t reply = kmsg->ikm_reply;		/* #442 */
 	mach_port_t dest_name, reply_name;
-	unsigned long protected_payload = 0;
+	natural_t protected_payload = 0;		/* #442 */
 
 	if (IP_VALID(reply)) {
 		ipc_port_t notify_port;
@@ -2420,7 +2571,15 @@ ipc_kmsg_copyout_header(
 				goto copyout_dest;
 			}
 
-			reply_name = (mach_port_t)reply;
+			/*
+			 * #442: no seeding with the port's address.
+			 * ipc_entry_get only WRITES through namep -- it
+			 * never reads what is there -- so this was a dead
+			 * store, and one that read as a pointer being put
+			 * in a name field, which is the exact shape this
+			 * issue removes.  Leaving it would leave noise in
+			 * the search that has to come back empty.
+			 */
 			kr = ipc_entry_get(space,
 				reply_type == MACH_MSG_TYPE_PORT_SEND_ONCE,
 				&reply_name, &entry);
@@ -2624,6 +2783,16 @@ ipc_kmsg_copyout_header(
 
 	msg->msgh_bits = (MACH_MSGH_BITS_OTHER(mbits) |
 			  MACH_MSGH_BITS(reply_type, dest_type));
+	/*
+	 * #442: the payload is delivered in a name-shaped field, so it is
+	 * a name-shaped number.  The assertion is the point: it makes the
+	 * cast width-preserving BY CONSTRUCTION rather than by anyone
+	 * remembering, and it is what would have caught this on the day
+	 * x86-64 first compiled the machine-independent tree.
+	 */
+	_Static_assert(sizeof(natural_t) == sizeof(mach_port_t),
+		       "a protected payload is delivered in a port-name field "
+		       "and cannot be wider than one");
 	if (protected_payload != 0) {
 		msg->msgh_local_port = (mach_port_t) protected_payload;
 		msg->msgh_bits |= MACH_MSGH_BITS_PROTECTED_PAYLOAD;
@@ -2718,6 +2887,7 @@ ipc_kmsg_copyout_body(
     kern_return_t 		kr;
     vm_offset_t         	data;
     mach_msg_descriptor_t 	*sstart, *send = MACH_MSG_DESCRIPTOR_NULL;
+    mach_msg_type_number_t	i;			/* #442 */
 #if	MACH_RT
     boolean_t			rt;
 #endif	/* MACH_RT */
@@ -2740,7 +2910,7 @@ ipc_kmsg_copyout_body(
 	sstart = MACH_MSG_DESCRIPTOR_NULL;
     }
 
-    for ( ; saddr < eaddr; saddr++ ) {
+    for (i = 0; saddr < eaddr; saddr++, i++ ) {
 	
 	switch (saddr->type.type) {
 	    
@@ -2748,13 +2918,16 @@ ipc_kmsg_copyout_body(
 		mach_msg_port_descriptor_t *dsc;
 		
 		/* 
-		 * Copyout port right carried in the message 
+		 * Copyout port right carried in the message.  The port comes
+		 * from the kmsg and the NAME goes into the message (#442):
+		 * this is where the two have always been different things
+		 * sharing one field.
 		 */
 		dsc = &saddr->port;
 		mr |= ipc_kmsg_copyout_object(space, 
-					      (ipc_object_t) dsc->name, 
+					      (ipc_object_t) kmsg->ikm_ports[i],
 					      dsc->disposition, 
-					      (mach_port_t *) &dsc->name);
+					      &dsc->name);
 
 		break;
 	    }
@@ -3046,7 +3219,7 @@ ipc_kmsg_copyout(
 	assert(!KMSG_IN_DIPC(kmsg));
 #endif	/* DIPC */
 
-	mr = ipc_kmsg_copyout_header(&kmsg->ikm_header, space, notify);
+	mr = ipc_kmsg_copyout_header(kmsg, space, notify);
 	if (mr != MACH_MSG_SUCCESS)
 		return mr;
 
@@ -3088,8 +3261,8 @@ ipc_kmsg_copyout_pseudo(
 	mach_msg_body_t		*slist)
 {
 	mach_msg_bits_t mbits = kmsg->ikm_header.msgh_bits;
-	ipc_object_t dest = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
-	ipc_object_t reply = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	ipc_object_t dest = (ipc_object_t) kmsg->ikm_dest;
+	ipc_object_t reply = (ipc_object_t) kmsg->ikm_reply;
 	mach_msg_type_name_t dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 	mach_port_t dest_name, reply_name;
@@ -3155,8 +3328,8 @@ ipc_kmsg_copyout_dest(
 #endif	/* DIPC */
 
 	mbits = kmsg->ikm_header.msgh_bits;
-	dest = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
-	reply = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	dest = (ipc_object_t) kmsg->ikm_dest;
+	reply = (ipc_object_t) kmsg->ikm_reply;
 	dest_type = MACH_MSGH_BITS_REMOTE(mbits);
 	reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 
@@ -3392,6 +3565,13 @@ ikm_cache_put(
 {
 	register struct kmsg_pcpu	*pc;
 
+	/*
+	 * #442: this stashes the buffer rather than freeing it, so the
+	 * descriptors' ports have to go now.  Four callers reach here
+	 * without passing through ipc_kmsg_free.
+	 */
+	ikm_ports_free(kmsg);
+
 	disable_preemption();
 	pc = &kmsg_pool[cpu_number()];
 
@@ -3476,8 +3656,8 @@ ipc_kmsg_copyout_to_kernel(
 	assert(!KMSG_IN_DIPC(kmsg));
 #endif	/* DIPC */
 
-	dest = (ipc_object_t) kmsg->ikm_header.msgh_remote_port;
-	reply = (ipc_object_t) kmsg->ikm_header.msgh_local_port;
+	dest = (ipc_object_t) kmsg->ikm_dest;
+	reply = (ipc_object_t) kmsg->ikm_reply;
 	dest_type = MACH_MSGH_BITS_REMOTE(kmsg->ikm_header.msgh_bits);
 	reply_type = MACH_MSGH_BITS_LOCAL(kmsg->ikm_header.msgh_bits);
 
@@ -3493,7 +3673,30 @@ ipc_kmsg_copyout_to_kernel(
 		dest_name = MACH_PORT_DEAD;
 	}
 
-	reply_name = (mach_port_t) reply;
+	/*
+	 * #442: the reply right stays in the kmsg.  There is no space to
+	 * copy it out to, so there is no NAME for it, and the message says
+	 * that instead of carrying the address.
+	 *
+	 * IO_NULL and IO_DEAD are 0 and -1 and mean the same thing in a
+	 * name field at any width, so they go through unchanged; only a
+	 * real port is different, and that is the case this is here for --
+	 * a kernel address written into a field the interface fixes at
+	 * thirty-two bits.
+	 *
+	 * Nothing reads it.  The chain is short enough to enumerate:
+	 * ipc_kmsg_copyout_to_kernel is called only by
+	 * mach_msg_rpc_from_kernel, which is called only by the three
+	 * generated exc_user.c stubs, and those write the REQUEST's ports
+	 * and never read the reply's.  Destroying the kmsg instead uses
+	 * ikm_reply, not this.
+	 *
+	 * That enumeration is the whole argument, because a probe counting
+	 * calls found a full boot plus cap_test, sig_test and pthread_test
+	 * reach this routine ZERO times: there is no workload here that
+	 * would show the change to be right or wrong, only the callers.
+	 */
+	reply_name = IO_VALID(reply) ? MACH_PORT_NULL : (mach_port_t) reply;
 
 	kmsg->ikm_header.msgh_bits =
 		(MACH_MSGH_BITS_OTHER(kmsg->ikm_header.msgh_bits) |

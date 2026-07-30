@@ -147,11 +147,9 @@
  *	the actual buffer is normally larger.  The rest of the buffer
  *	holds the body of the message.
  *
- *	In a kmsg, the port fields hold pointers to ports instead
- *	of port names.  These pointers hold references.
- *
- *	The ikm_header.msgh_remote_port field is the destination
- *	of the message.
+ *	The kmsg's own ikm_dest and ikm_reply hold pointers to ports, and
+ *	those pointers hold references.  The message itself carries names,
+ *	as it did when it arrived and as it will when it leaves (#442).
  */
 
 #if	DIPC
@@ -175,6 +173,29 @@
  */
 #endif	/* DIPC */
 
+/*
+ *	#442: the destination and reply ports, as pointers, here rather than
+ *	inside the message.
+ *
+ *	A port NAME is thirty-two bits by definition of the interface; a port
+ *	POINTER is a kernel address, four bytes on i386 and eight on x86-64.
+ *	Mach writes the pointer over the name in msgh_remote_port because on
+ *	a 32-bit machine the two are the same size.  That is free there and
+ *	not free here, and it puts kernel pointers inside a buffer whose
+ *	contents arrived from userland.
+ *
+ *	These are filled by copyin, which translates the sender's names, and
+ *	by the kernel's own producers, which have the ports to begin with.
+ *	The message keeps the names it arrived with until copyout replaces
+ *	them with the receiver's, and never holds an address at all.
+ *
+ *	Getting here was a migration, and it was checked rather than assumed:
+ *	a boot flag made every send, every clean and every kernel-side send
+ *	compare the two copies while both existed, per call site so that a
+ *	zero came with the number of times it could have been otherwise.
+ *	The last run before the message stopped carrying them read
+ *	2999279 / 174 / 1 / 546 seen, none diverging.
+ */
 typedef struct ipc_kmsg {
 	struct ipc_kmsg *ikm_next, *ikm_prev;
 	vm_size_t ikm_size;
@@ -182,13 +203,86 @@ typedef struct ipc_kmsg {
 #if	DIPC
 	handle_t ikm_handle;
 #endif	/* DIPC */
+	ipc_port_t ikm_dest;			/* where it is going */
+	ipc_port_t ikm_reply;			/* where the answer goes */
+	ipc_port_t *ikm_ports;			/* one per descriptor (#442) */
+	mach_msg_type_number_t ikm_nports;	/* how many ikm_ports has */
 	mach_msg_header_t ikm_header;
 } *ipc_kmsg_t;
 
+/*
+ *	Set a kmsg's destination or reply (#442).
+ *
+ *	Every path that builds a message inside a kmsg and sends it goes
+ *	through these rather than writing a header field, so that the port
+ *	the kernel will actually use is never the one nobody remembered.
+ *
+ *	They used to write the header as well, so that readers not yet moved
+ *	kept seeing what they expected.  There are none left, and a port
+ *	POINTER no longer goes anywhere near a field whose width the interface
+ *	fixes at thirty-two bits.
+ */
+/*
+ *	The descriptors' ports, out of the message too (#442).
+ *
+ *	Same reason as ikm_dest and ikm_reply: a port descriptor's `name'
+ *	field is a NAME, thirty-two bits by definition of the interface,
+ *	and the kernel was writing an address over it.  One entry per
+ *	descriptor rather than per port descriptor, so the index is the
+ *	descriptor's own position and there is no second numbering for the
+ *	generated stubs to agree with; entries for out-of-line descriptors
+ *	stay IP_NULL.  (Out-of-line port ARRAYS were already outside the
+ *	message, in their own allocation.)
+ *
+ *	Allocated only for complex messages, which the port census measured
+ *	at 1.1% of traffic carrying a mean of 1.45 ports.
+ */
+extern kern_return_t	ikm_ports_alloc(ipc_kmsg_t kmsg,
+					mach_msg_type_number_t count);
+extern void		ikm_ports_free_slow(ipc_kmsg_t kmsg);
+
+/*
+ *	The release paths run on EVERY message, and 98.9% of them have no
+ *	descriptors at all -- ikm_cache_put is the recycle step of every
+ *	RPC.  So the common case is a load and a branch that always goes the
+ *	same way, and the call only happens when there is something to free.
+ */
+#define	ikm_ports_free(kmsg)						\
+MACRO_BEGIN								\
+	if ((kmsg)->ikm_ports != (ipc_port_t *) 0)			\
+		ikm_ports_free_slow(kmsg);				\
+MACRO_END
+extern void		ikm_ports_report(void);
+
+#define	ikm_set_dest(kmsg, port)					\
+	MACRO_BEGIN							\
+	    (kmsg)->ikm_dest = (port);					\
+	MACRO_END
+
+#define	ikm_set_reply(kmsg, port)				\
+	MACRO_BEGIN							\
+	    (kmsg)->ikm_reply = (port);					\
+	MACRO_END
 #define	IKM_NULL		((ipc_kmsg_t) 0)
 
 #define	IKM_OVERHEAD							\
 		(sizeof(struct ipc_kmsg) - sizeof(mach_msg_header_t))
+
+/*
+ *	The message a header belongs to (#442).
+ *
+ *	ikm_header is the last member, so a header the kernel is working on
+ *	sits at a fixed offset inside its kmsg.  This is for the MIG server
+ *	stubs: a server routine is handed a bare mach_msg_header_t because
+ *	that is the signature migcom generates, and it needs the destination
+ *	port, which is no longer in the message.
+ *
+ *	Only valid for a header that IS inside a kmsg.  For a server routine
+ *	it always is -- ipc_kobject_server dispatches with &request->ikm_header
+ *	and nothing else calls one.
+ */
+#define	ikm_from_header(hdr)						\
+	((ipc_kmsg_t) ((vm_offset_t) (hdr) - IKM_OVERHEAD))
 
 #define	ikm_plus_overhead(size)	((vm_size_t)((size) + IKM_OVERHEAD))
 #define	ikm_less_overhead(size)	((mach_msg_size_t)((size) - IKM_OVERHEAD))
@@ -236,6 +330,20 @@ MACRO_BEGIN								\
 	ikm_init_special((kmsg), ikm_plus_overhead(size));		\
 MACRO_END
 
+/*
+ *	#442: the two typed ports start empty.
+ *
+ *	A kmsg comes off ikm_cache holding whatever the last message left
+ *	in it, and a producer that fills only one of the two leaves a stale
+ *	POINTER in the other.  While the header still carries the same
+ *	values that is invisible -- the producer overwrites both a
+ *	moment later -- but the -M census saw it on 15 of 546 kernel sends
+ *	(the other 531 got a recycled kmsg whose leftover happened to be
+ *	zero), and when the header stops carrying them there is nothing to
+ *	overwrite it with.  Emptying them here costs two stores on a buffer
+ *	the allocator has just touched, and makes "nobody set it" mean
+ *	IP_NULL rather than the previous message.
+ */
 #if	DIPC
 /*
  *	The msgh_bits must be initialized to zero so that
@@ -246,12 +354,20 @@ MACRO_END
 #define	ikm_init_special(kmsg, size)					\
 MACRO_BEGIN								\
 	(kmsg)->ikm_size = (size);					\
+	(kmsg)->ikm_dest = IP_NULL;					\
+	(kmsg)->ikm_reply = IP_NULL;					\
+	(kmsg)->ikm_ports = (ipc_port_t *) 0;				\
+	(kmsg)->ikm_nports = 0;						\
 	(kmsg)->ikm_header.msgh_bits = 0;				\
 MACRO_END
 #else	/* !DIPC */
 #define	ikm_init_special(kmsg, size)					\
 MACRO_BEGIN								\
 	(kmsg)->ikm_size = (size);					\
+	(kmsg)->ikm_dest = IP_NULL;					\
+	(kmsg)->ikm_reply = IP_NULL;					\
+	(kmsg)->ikm_ports = (ipc_port_t *) 0;				\
+	(kmsg)->ikm_nports = 0;						\
 MACRO_END
 #endif	/* DIPC */
 
@@ -278,6 +394,7 @@ MACRO_END
 MACRO_BEGIN								\
 	register vm_size_t _size = (kmsg)->ikm_size;			\
 									\
+	ikm_ports_free(kmsg);		/* #442 */			\
 	if ((integer_t)_size > 0)					\
 		if (KMSG_IS_RT(kmsg))					\
 			rtfree((vm_offset_t) (kmsg), _size);		\
@@ -293,6 +410,7 @@ MACRO_END
 MACRO_BEGIN								\
 	register vm_size_t _size = (kmsg)->ikm_size;			\
 									\
+	ikm_ports_free(kmsg);		/* #442 */			\
 	if ((integer_t)_size > 0)					\
 		kfree((vm_offset_t) (kmsg), _size);			\
 	else								\
@@ -422,6 +540,7 @@ extern mach_msg_return_t ipc_kmsg_get(
 
 /* Allocate a kernel message buffer and copy a kernel message to the buffer */
 extern mach_msg_return_t ipc_kmsg_get_from_kernel(
+	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
 	mach_msg_size_t		size,
 	ipc_kmsg_t		*kmsgp);
@@ -440,7 +559,7 @@ extern void ipc_kmsg_put_to_kernel(
 
 /* Copyin port rights in the header of a message */
 extern mach_msg_return_t ipc_kmsg_copyin_header(
-	mach_msg_header_t	*msg,
+	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	mach_port_t		notify);
 
@@ -453,11 +572,13 @@ extern mach_msg_return_t ipc_kmsg_copyin(
 
 /* Copyin port rights and out-of-line memory from a kernel message */
 extern void ipc_kmsg_copyin_from_kernel(
-	ipc_kmsg_t	kmsg);
+	ipc_kmsg_t		kmsg,
+	ipc_port_t		*ports,
+	mach_msg_type_number_t	nports);
 
 /* Copyout port rights in the header of a message */
 extern mach_msg_return_t ipc_kmsg_copyout_header(
-	mach_msg_header_t	*msg,
+	ipc_kmsg_t		kmsg,
 	ipc_space_t		space,
 	mach_port_t		notify);
 
