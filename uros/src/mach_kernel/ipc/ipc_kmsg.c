@@ -3656,19 +3656,29 @@ ipc_kmsg_copyout_to_kernel(
 	}
 
 	/*
-	 * #442: the last place a port POINTER still goes into a name
-	 * field.  The reply right is handed back to the kernel caller as
-	 * it is -- there is no space to copy it out to -- and the kmsg
-	 * keeps it in ikm_reply either way.
+	 * #442: the reply right stays in the kmsg.  There is no space to
+	 * copy it out to, so there is no NAME for it, and the message says
+	 * that instead of carrying the address.
 	 *
-	 * It is left alone rather than guessed at: a full boot plus
-	 * cap_test, sig_test and pthread_test call this routine ZERO
-	 * times (probed, not assumed), so there is no workload here that
-	 * would show a change to be right or wrong.  It only runs when
-	 * the kernel raises a Mach exception to a userland handler, and
-	 * it is lossless at this width.  See #442.
+	 * IO_NULL and IO_DEAD are 0 and -1 and mean the same thing in a
+	 * name field at any width, so they go through unchanged; only a
+	 * real port is different, and that is the case this is here for --
+	 * a kernel address written into a field the interface fixes at
+	 * thirty-two bits.
+	 *
+	 * Nothing reads it.  The chain is short enough to enumerate:
+	 * ipc_kmsg_copyout_to_kernel is called only by
+	 * mach_msg_rpc_from_kernel, which is called only by the three
+	 * generated exc_user.c stubs, and those write the REQUEST's ports
+	 * and never read the reply's.  Destroying the kmsg instead uses
+	 * ikm_reply, not this.
+	 *
+	 * That enumeration is the whole argument, because a probe counting
+	 * calls found a full boot plus cap_test, sig_test and pthread_test
+	 * reach this routine ZERO times: there is no workload here that
+	 * would show the change to be right or wrong, only the callers.
 	 */
-	reply_name = (mach_port_t) reply;
+	reply_name = IO_VALID(reply) ? MACH_PORT_NULL : (mach_port_t) reply;
 
 	kmsg->ikm_header.msgh_bits =
 		(MACH_MSGH_BITS_OTHER(kmsg->ikm_header.msgh_bits) |
