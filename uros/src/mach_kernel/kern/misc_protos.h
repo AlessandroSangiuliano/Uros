@@ -105,26 +105,133 @@ extern boolean_t copyoutmsg(
 	char		*user_addr,
 	mach_msg_size_t nbytes);
 
-extern int sscanf(const char *input, const char *fmt, ...);
+/*
+ * #415: the print family says what it is.
+ *
+ * -Wformat was suppressed in the kernel's flags, and removing the suppression
+ * changed nothing, because there was nothing to check: this kernel builds
+ * -fno-builtin with its own printf, so the compiler had no reason to believe
+ * any of these took a format string.  A warning that cannot fire is worse
+ * than no warning -- from a distance it reads like a tree that has been
+ * checked.
+ *
+ * These could not be added while _doprnt still spoke the debugger's dialect,
+ * because %n means something else there and a check against the wrong grammar
+ * reports on code that is right while staying quiet about code that is not.
+ * The dialect now lives in ddb/db_output.c, and db_printf is deliberately not
+ * annotated below, because it is not printf.
+ */
+extern int sscanf(const char *input, const char *fmt, ...)
+	__attribute__((format(scanf, 2, 3)));
 
-extern integer_t sprintf(char *buf, const char *fmt, ...);
+extern integer_t sprintf(char *buf, const char *fmt, ...)
+	__attribute__((format(printf, 2, 3)));
 
-extern void printf(const char *format, ...);
+extern void printf(const char *format, ...)
+	__attribute__((format(printf, 1, 2)));
 
 extern void printf_init(void);
 
-extern void panic(const char *string, ...);
+extern void panic(const char *string, ...)
+	__attribute__((format(printf, 1, 2)));
 
 extern void panic_init(void);
 
-extern void log(int level, char *fmt, ...);
+extern void log(int level, char *fmt, ...)
+	__attribute__((format(printf, 2, 3)));
 
-void 
+/*
+ * A conversion, as the parser found it (#415).
+ *
+ * _doprnt understands C's conversions and nothing else.  It used to
+ * understand several more -- %r and %n printed in a caller-supplied radix,
+ * %z was signed hex, %b decoded a register into bit names, and the
+ * capitalised forms meant "long" from before C had `l' to say it with.  All
+ * of them belong to the debugger, which is the only thing in this kernel that
+ * still uses them, and ddb/db_output.c is where they live now.
+ *
+ * The reason for the move is %n.  In this dialect it means "unsigned, in the
+ * current radix"; in C it means "store the count so far through a pointer
+ * argument".  While both meanings live in one formatter, no declaration can
+ * carry format(printf,...) honestly, because the compiler would be checking
+ * against a grammar the callee does not implement -- and a check against the
+ * wrong grammar is worse than none, since it reports on code that is right
+ * and stays quiet about code that is not.
+ *
+ * So the debugger extends rather than reimplements: it is handed what the
+ * parser already worked out and the two helpers below, and does not carry a
+ * second copy of the flag handling or of the padding rules.
+ */
+struct doprnt_spec {
+	char		ds_conv;	/* the conversion character */
+	int		ds_length;	/* field width, 0 if none */
+	int		ds_prec;	/* precision, -1 if none */
+	boolean_t	ds_ladjust;	/* '-' seen */
+	char		ds_padc;	/* ' ' or '0' */
+	boolean_t	ds_altfmt;	/* '#' seen */
+	int		ds_plus_sign;	/* '+' or ' ' or 0 */
+	int		ds_lensize;	/* DOPRNT_LEN_* below */
+	int		ds_radix;	/* the radix this caller printed with */
+};
+
+#define	DOPRNT_LEN_INT		0
+#define	DOPRNT_LEN_LONG		1
+#define	DOPRNT_LEN_LONGLONG	2
+
+/*
+ * Handle a conversion _doprnt does not know, or return FALSE to have it
+ * treated as the unknown character it is.
+ */
+typedef boolean_t (*doprnt_ext_t)(
+	const struct doprnt_spec	*spec,
+	va_list				*argp,
+	void				(*putc)(char));
+
+/*
+ * Print a number in a given base, with no padding or sign handling.  Used by
+ * the debugger's %b, which prints a register value and then the names of the
+ * bits set in it.
+ */
+extern void printnum(
+	register unsigned int	u,
+	register int		base,
+	void			(*putc)(char));
+
+/* Take the next integer argument at the width the conversion asked for. */
+extern long _doprnt_signed_arg(
+	const struct doprnt_spec	*spec,
+	va_list				*argp);
+extern unsigned long _doprnt_unsigned_arg(
+	const struct doprnt_spec	*spec,
+	va_list				*argp);
+
+/*
+ * Emit an already-fetched number, honouring width, padding, sign and the
+ * alternate-form prefix.  `capitals' is 16 for upper-case hex digits, 0 for
+ * lower; `sign_char' is what to print before it, or 0.
+ */
+extern void _doprnt_number(
+	unsigned long			u,
+	int				base,
+	int				capitals,
+	int				sign_char,
+	const struct doprnt_spec	*spec,
+	void				(*putc)(char));
+
+void
 _doprnt(
 	register const char	*fmt,
 	va_list			*argp,
 	void			(*putc)(char),
 	int			radix);
+
+/* As _doprnt, with a handler for conversions outside C's set. */
+extern void _doprnt_ext(
+	register const char	*fmt,
+	va_list			*argp,
+	void			(*putc)(char),
+	int			radix,
+	doprnt_ext_t		ext);
 
 extern void safe_gets(
 	char	*str,

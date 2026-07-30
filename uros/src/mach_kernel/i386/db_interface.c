@@ -138,6 +138,7 @@
 #include <i386/trap.h>
 #include <i386/setjmp.h>
 #include <i386/pmap.h>
+#include <i386/proc_reg.h>	/* get_cr3 (#415) */
 #include <i386/misc_protos.h>
 
 #include <mach/vm_param.h>

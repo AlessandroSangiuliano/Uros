@@ -243,9 +243,13 @@ type ipc_space_t = mach_port_t
 #endif	/* KERNEL_SERVER */
 		;
 
-type vm_address_t = natural_t;
-type vm_offset_t = natural_t;
-type vm_size_t = natural_t;
+/*
+ * vm_address_t, vm_offset_t and vm_size_t used to be declared here as
+ * natural_t.  They are addresses, and how wide an address is is the one
+ * thing a machine-independent file cannot know — so they now live in
+ * <mach/machine/machine_types.defs>, included above through std_types.defs,
+ * where each target states its own (#413).
+ */
 type vm_prot_t = int;
 type vm_inherit_t = int;
 type xxx_vm_statistics_data_t = struct[13] of integer_t;

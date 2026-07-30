@@ -3529,7 +3529,7 @@ split_parent_leaf(const char *path, char *parent_out, const char **leaf_out)
  */
 static int
 write_new_inode(struct ext2fs_file *ctx, ino_t ino, int mode,
-		const unsigned long *iblock, unsigned long size,
+		const unsigned int *iblock, unsigned long size,
 		unsigned long blocks, int links)
 {
 	struct ext2_super_block *fs = ctx->f_fs;
@@ -3616,7 +3616,7 @@ free_indirect_tree(struct ext2fs_file *acct, daddr_t ind_block, int level,
  * count of fs blocks (caller scales to 512-byte units for i_blocks).
  */
 static int
-free_file_blocks(struct ext2fs_file *acct, unsigned long *iblock,
+free_file_blocks(struct ext2fs_file *acct, unsigned int *iblock,
 		 daddr_t from, int *freed_blocks)
 {
 	int i;
@@ -3867,7 +3867,7 @@ ext2fs_mkdir(struct device *dev, const char *path, int mode)
 	daddr_t dblk;
 	char *blk;
 	struct ext2_dir_entry *dot, *dotdot;
-	unsigned long iblock[EXT2_N_BLOCKS];
+	unsigned int iblock[EXT2_N_BLOCKS];	/* on-disk block pointers (#415) */
 	int rc, goal, block_size;
 
 	rc = open_parent_dir(dev, path, leafbuf, &leaf, &parent);
@@ -3929,7 +3929,7 @@ ext2fs_mkdir(struct device *dev, const char *path, int mode)
 	/* The new directory inode: links_count 2 (itself via "." and the
 	 * name in the parent), one data block. */
 	memset(iblock, 0, sizeof(iblock));
-	iblock[0] = (unsigned long)dblk;
+	iblock[0] = (unsigned int)dblk;
 	rc = write_new_inode(&parent, ino, IFDIR | (mode & 0777), iblock,
 			     block_size, block_size / 512, 2);
 	if (rc == 0)

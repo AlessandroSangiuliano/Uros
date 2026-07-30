@@ -148,15 +148,27 @@ void lapic_send_nmi(uint32_t apic_id);
  * Returns the rate in hertz *after* the divisor, which is the number a
  * countdown is expressed in, or zero if it could not be measured.
  *
- * Boot processor only, and once: the ruler is a single global device, so two
- * processors measuring at the same moment would be two callers programming
- * one counter. The answer is shared because the rate belongs to the machine;
- * the timer that uses it belongs to each processor.
+ * Boot processor only: the ruler is a single global device, so two processors
+ * measuring at the same moment would be two callers programming one counter.
+ * The answer is shared because the rate belongs to the machine; the timer
+ * that uses it belongs to each processor.
+ *
+ * It measures twice and requires the two to agree within one part in
+ * sixty-four, and returns zero if they do not. Two that agree are not proof
+ * of accuracy — they share a ruler — but one reading that disagrees with
+ * itself proves at least one of them meaningless, which is the case this can
+ * decide.
  */
 uint32_t lapic_timer_calibrate(void);
 
-/* The measured rate, or zero if calibration has not run or did not work. */
+/* The measured rate, or zero if calibration has not run or the two runs
+ * disagreed — zero rather than one of them, because a rate nobody should
+ * trust must not be usable by accident. */
 uint32_t lapic_timer_hz(void);
+
+/* The two runs, for reporting: the spread is the interesting part of a
+ * calibration and a verdict alone would hide it. */
+uint32_t lapic_timer_hz_run(unsigned which);
 
 /*
  * Arm this processor's timer to deliver `vector` `hz` times a second.

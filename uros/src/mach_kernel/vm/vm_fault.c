@@ -1420,7 +1420,7 @@ no_clustering:
 			if (rc != KERN_SUCCESS) {
 				if (rc != MACH_SEND_INTERRUPTED
 				    && vm_fault_debug)
-					printf("%s(0x%x, 0x%x, 0x%x, 0x%x, 0x%x) failed, rc=%d, object=0x%x\n",
+					printf("%s(%p, %p, 0x%x, 0x%x, 0x%x) failed, rc=%d, object=%p\n",
 						"memory_object_data_request",
 						object->pager,
 						object->pager_request,

@@ -1401,7 +1401,7 @@ Restart:
 			VM_PAGE_CHECK(p);
 
 			if (p->busy && !p->absent)
-				panic("vm_object_terminate.2 0x%x 0x%x",
+				panic("vm_object_terminate.2 %p %p",
 				      object, p);
 
 			VM_PAGE_FREE(p);
@@ -1419,7 +1419,7 @@ Restart:
 		VM_PAGE_CHECK(p);
 
 		if (p->busy && !p->absent)
-			panic("vm_object_terminate.3 0x%x 0x%x", object, p);
+			panic("vm_object_terminate.3 %p %p", object, p);
 
 		vm_page_lock_queues();
 		VM_PAGE_QUEUES_REMOVE(p);
@@ -1439,7 +1439,7 @@ Restart:
 		}
 
 		if (p->fictitious)
-			panic("vm_object_terminate.4 0x%x 0x%x", object, p);
+			panic("vm_object_terminate.4 %p %p", object, p);
 
 		if (!p->dirty)
 			p->dirty = pmap_is_modified(p->phys_addr);

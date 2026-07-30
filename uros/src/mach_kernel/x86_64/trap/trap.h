@@ -182,8 +182,19 @@ void trap_ist_setup(struct tss64 *tss, uint64_t block, uint64_t stack_size);
  * This is the bootstrap answer, not the final one: once there is a caller
  * that can do something about a failure, these become returned errors. What
  * they must not be in the meantime is invisible.
+ *
+ * #415: variadic, and not by taste.  kern/misc_protos.h declares
+ * `void panic(const char *string, ...)` and the MI tree calls it that way in
+ * a hundred and thirty-five places.  A non-variadic definition behind that
+ * declaration is undefined behaviour on the SysV ABI, and the concrete cost
+ * is that "%x" arrives as four characters instead of the value it was asked
+ * to print -- at the one moment when the value is the entire message.
+ *
+ * noreturn is deliberately NOT repeated here: the MI declaration does not
+ * carry it, and two declarations that differ are what this issue is about.
+ * The loop at the end of the definition says the same thing to the compiler.
  */
-void panic(const char *what) __attribute__((noreturn));
+void panic(const char *what, ...) __attribute__((format(printf, 1, 2)));
 
 /* Install the IDT on this CPU. */
 void trap_init(void);
@@ -227,6 +238,23 @@ const char *trap_name(uint64_t vector);
 typedef void (*trap_handler_t)(struct trap_frame *frame);
 
 void trap_set_handler(unsigned vector, trap_handler_t handler);
+
+/*
+ * Run the handler for `vector` as though it had just arrived.
+ *
+ * For the priority level (<cpu/spl.h>) to replay what it deferred.
+ *
+ * ⚠️ The frame it is handed has **only `vector` valid**. The interrupt this
+ * stands for happened at an earlier moment whose registers are gone, and
+ * they are not reconstructed — the remaining fields are zero, which is not a
+ * plausible frame and is not meant to be one.
+ *
+ * That is a contract on handlers, not a detail: a handler that reads
+ * anything else from the frame must not be reachable through a deferral. The
+ * one handler that reads anything today reads exactly `vector`, which is
+ * why this is the shape it is.
+ */
+void trap_replay_vector(unsigned vector);
 
 /*
  * Arrange for one expected fault to be survived rather than reported and

@@ -31,14 +31,20 @@
 
 /* Send a message from the kernel */
 extern mach_msg_return_t mach_msg_send_from_kernel(
+	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
-	mach_msg_size_t		send_size);
+	mach_msg_size_t		send_size,
+	ipc_port_t		*ports,
+	mach_msg_type_number_t	nports);
 
 /* Send a message from the kernel and receive a reply */
 extern mach_msg_return_t mach_msg_rpc_from_kernel(
+	ipc_port_t		dest,
 	mach_msg_header_t	*msg,
 	mach_msg_size_t		send_size,
-	mach_msg_size_t		rcv_size);
+	mach_msg_size_t		rcv_size,
+	ipc_port_t		*ports,
+	mach_msg_type_number_t	nports);
 
 /* Destroy the thread's ith_rpc_reply port */
 extern void mach_msg_abort_rpc(

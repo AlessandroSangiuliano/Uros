@@ -110,6 +110,30 @@ file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/${UROS_TARGET_ARCH}
 file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}
      ${UROS_ARCH_INCLUDE}/mach/machine SYMBOLIC)
 
+# The .defs every mig rule reads and none of them declares (#413).
+#
+# A mig rule names the generator and the one interface file it is handed.
+# It does not depend on what that file
+# #includes, which is where the type declarations live: the widths and the
+# translations that decide every offset and every message size in the
+# generated code.  Edit one and nothing rebuilds; the stubs stay as they were
+# until something unrelated forces a regeneration, and in between the build
+# is quietly generating from a definition that is no longer on disk.
+#
+# That is a bad way to find out you changed an ABI.  It also makes the one
+# cheap regression test for #416 — "i386 output unchanged" — impossible to
+# run honestly, because both sides of the comparison are the same generation.
+#
+# Listing both trees is deliberate: the kernel reads src/mach_kernel/mach/,
+# userland reads export/include/mach/, and depending on a file a given rule
+# happens not to read costs a rebuild while missing one costs correctness.
+set(UROS_MIG_COMMON_DEFS
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/std_types.defs
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/mach_types.defs
+    ${CMAKE_SOURCE_DIR}/export/include/mach/std_types.defs
+    ${CMAKE_SOURCE_DIR}/export/include/mach/mach_types.defs
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}/machine_types.defs)
+
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'uros' when building kernel)" "")
 if(NOT EXPORT_PLATFORM)

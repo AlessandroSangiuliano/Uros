@@ -966,7 +966,7 @@ thread_terminate_self(void)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_EXIT)
-		printf("thread_terminate_self() thr_act=%x(%d) thr=%x(%d)\n",
+		printf("thread_terminate_self() thr_act=%p(%d) thr=%p(%d)\n",
 			    current_act(), current_act()->ref_count,
 			    current_thread(), current_thread()->ref_count);
 #endif	/* MACH_ASSERT */
@@ -1123,7 +1123,7 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 
 #if	MACH_ASSERT
 	if (watchacts & WA_THR)
-		printf("thread_create_in(thr_act=%x,st=%x,thr@%x=%x)\n",
+		printf("thread_create_in(thr_act=%p,st=%p,thr@%p=%p)\n",
 			thr_act, start_pos, child_thread, new_thread);
 #endif	/* MACH_ASSERT */
 
@@ -1248,7 +1248,7 @@ thread_create(task_t task, thread_act_t *new_act)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_THR)
-		printf("thread_create(task=%x,&thr_act=%x)\n",task, new_act);
+		printf("thread_create(task=%p,&thr_act=%p)\n",task, new_act);
 #endif	/* MACH_ASSERT */
 
 	if ((rc = act_create(task, 0, 0, &thr_act)) != KERN_SUCCESS) {
@@ -1304,7 +1304,7 @@ thread_create_at(task_t parent_task, thread_t *child_thread,
 
 #if	MACH_ASSERT
 	if (watchacts & WA_THR)
-		printf("thread_create_at(task=%x,&thread=%x,start=%x)\n",
+		printf("thread_create_at(task=%p,&thread=%p,start=%p)\n",
 				parent_task,child_thread,start_pos);
 #endif	/* MACH_ASSERT */
 
@@ -1377,7 +1377,7 @@ kernel_thread(task_t task, void (*start)(void), void *arg)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_THR)
-		printf("kernel_thread(tsk=%x,start=%x)\n",task,start);
+		printf("kernel_thread(tsk=%p,start=%p)\n",task,start);
 #endif	/* MACH_ASSERT */
 
 	kr = thread_create_at(task, &thread, start);
@@ -1393,7 +1393,7 @@ kernel_thread(task_t task, void (*start)(void), void *arg)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_THR)
-		printf("\tkernel_thread  thread = %x\n",thread);
+		printf("\tkernel_thread  thread = %p\n",thread);
 #endif	/* MACH_ASSERT */
 
 	thread_swappable(thread->top_act, FALSE);
@@ -1789,7 +1789,7 @@ reaper_thread(void)
 
 #if	MACH_ASSERT
 			if (watchacts & (WA_EXIT|WA_THR))
-			    printf("Reaper: thr=0x%x(%d) thr_act=%x(%d)\n",
+			    printf("Reaper: thr=%p(%d) thr_act=%p(%d)\n",
 					thread, thread->ref_count,
 					thread->top_act ? thread->top_act : 0,
 					thread->top_act ?

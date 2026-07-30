@@ -64,7 +64,7 @@ int pci_conf_mode (void)
 	for(v=(int *)phystokv(0xe0000); v< (int *)phystokv(0xfffff); v += 4)
 	    if (*v == 0x5f32335f) {
 		    break;
-		    printf("BIOS32 Service Directory found at 0x%x\n",v);
+		    printf("BIOS32 Service Directory found at %p\n",v);
 	    }
 
 

@@ -941,7 +941,7 @@ db_show_shuttle(
 		 thr_act = thr_act->lower) {
 		if (thr_act != shuttle->top_act)
 		    printf(" from");
-		printf(" $task%d.%d(%x)", db_lookup_task(thr_act->task),
+		printf(" $task%d.%d(%p)", db_lookup_task(thr_act->task),
 		       db_lookup_act(thr_act), thr_act);
 	    }
 	    db_printf("\n");

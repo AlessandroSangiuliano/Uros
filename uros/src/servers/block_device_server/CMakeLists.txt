@@ -70,7 +70,7 @@ add_custom_command(
     -user ${DM_USER_C}
     -server ${DM_SERVER_C}
     ${DEVICE_MASTER_DEFS}
-  DEPENDS migcom ${DEVICE_MASTER_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEVICE_MASTER_DEFS}
   COMMENT "MIG: device_master.defs (user stubs for block_device_server)"
   VERBATIM
 )
@@ -100,7 +100,7 @@ add_custom_command(
     -user ${AB_USER_C}
     -server ${AB_SERVER_C}
     ${AHCI_BATCH_DEFS}
-  DEPENDS migcom ${AHCI_BATCH_DEFS} ${CMAKE_CURRENT_SOURCE_DIR}/ahci/ahci_batch_types.h
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${AHCI_BATCH_DEFS} ${CMAKE_CURRENT_SOURCE_DIR}/ahci/ahci_batch_types.h
   COMMENT "MIG: ahci_batch.defs (batch write server stubs for block_device_server)"
   VERBATIM
 )
@@ -127,7 +127,7 @@ add_custom_command(
     -sheader /dev/null
     -server /dev/null
     ${HAL_DEFS}
-  DEPENDS migcom ${HAL_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${HAL_DEFS}
   COMMENT "MIG: hal.defs (user stubs for block_device_server)"
   VERBATIM
 )
@@ -155,7 +155,7 @@ add_custom_command(
     -user /dev/null
     -server ${HAL_NOTIFY_SERVER_C}
     ${HAL_NOTIFY_DEFS}
-  DEPENDS migcom ${HAL_NOTIFY_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${HAL_NOTIFY_DEFS}
   COMMENT "MIG: hal_notify.defs (server stubs for block_device_server)"
   VERBATIM
 )

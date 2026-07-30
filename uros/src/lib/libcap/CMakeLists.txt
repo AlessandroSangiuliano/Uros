@@ -24,7 +24,7 @@ add_custom_command(
     -user ${CAP_USER_C}
     -server ${CAP_SERVER_C}
     ${CAP_DEFS}
-  DEPENDS migcom ${CAP_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${CAP_DEFS}
   COMMENT "MIG: cap_server.defs (libcap)"
   VERBATIM
 )
@@ -62,7 +62,7 @@ add_custom_command(
     -user ${CAP_REVOKE_USER_C}
     -server ${CAP_REVOKE_SERVER_C}
     ${CAP_REVOKE_DEFS}
-  DEPENDS migcom ${CAP_REVOKE_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${CAP_REVOKE_DEFS}
   COMMENT "MIG: cap_revoke.defs (libcap)"
   VERBATIM
 )

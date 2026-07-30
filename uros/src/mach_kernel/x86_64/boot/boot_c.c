@@ -23,15 +23,21 @@
 
 #include <stdint.h>
 
+#include <mach/message.h>
+
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
 #include <cpu/desc.h>
 #include <cpu/ioapic.h>
+#include <ddb/cons.h>
+#include <ddb/ddb.h>
+#include <ddb/ksym.h>
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
 #include <cpu/percpu.h>
 #include <cpu/pic.h>
 #include <cpu/smp.h>
+#include <cpu/spl.h>
 #include <cpu/regs.h>
 #include <cpu/tss.h>
 #include <pmap/bootmem.h>
@@ -342,6 +348,14 @@ static void bootmem_selftest(uint32_t info)
 	uint64_t a, b, c, mark;
 	const volatile uint64_t *first;
 	int clean = 1;
+
+	/*
+	 * Symbols before the allocator, and that order is not cosmetic: the
+	 * allocator asks ksym_data_end() what to keep off, so the tables have
+	 * to have been found before the first frame is handed out.
+	 */
+	ddb_init(info);
+	ksym_init(info);
 
 	boot_frame_init(info);
 	mark = boot_frame_low_water();
@@ -2278,6 +2292,30 @@ static volatile uint64_t ticks[SMP_MAX_CPUS];
 static volatile uint64_t first_tsc[SMP_MAX_CPUS];
 static volatile uint64_t last_tsc[SMP_MAX_CPUS];
 
+/*
+ * Every gap, for one processor, so the rate can be taken as a median.
+ *
+ * ⚠️ The average was the second attempt and it is wrong too, for a reason
+ * the first version of this comment got backwards. It claimed a deleted tick
+ * inflates the mean "by a percent or two". It does not: the mean is the span
+ * divided by the gaps observed, so losing five ticks of a hundred inflates it
+ * by 99/94 — five percent. Measured: 6319223 against a period of 6007462,
+ * which is exactly that, and it tripped a five percent bound.
+ *
+ * So the count and the mean are not two independent views. The same stall
+ * spoils both, and in the same proportion.
+ *
+ * A median is the right estimator here and the reason is the shape of the
+ * contamination: a few gaps are much too long, because the host stalled, and
+ * a few are much too short, because the emulator caught up afterwards. Both
+ * kinds sit at the ends of the sorted order and neither moves the middle.
+ */
+#define TICK_MAX_GAPS	256
+
+static volatile uint64_t gaps[TICK_MAX_GAPS];
+static volatile unsigned ngaps;
+static volatile uint32_t gap_cpu;
+
 static void timer_tick(struct trap_frame *frame)
 {
 	uint32_t id = cpu_apic_id();
@@ -2295,6 +2333,8 @@ static void timer_tick(struct trap_frame *frame)
 	 */
 	if (prev == 0)
 		first_tsc[id] = now;
+	else if (id == gap_cpu && ngaps < TICK_MAX_GAPS)
+		gaps[ngaps++] = now - prev;
 
 	/*
 	 * Acknowledged here and not by the caller. An interrupt that is never
@@ -2345,6 +2385,36 @@ static void tick_reset(void)
 		first_tsc[id] = 0;
 		last_tsc[id] = 0;
 	}
+	ngaps = 0;
+	gap_cpu = cpu_apic_id();
+}
+
+/*
+ * The middle value, by insertion sort in place.
+ *
+ * A hundred elements at boot, so the cost of the simplest algorithm that is
+ * obviously right is nothing, and obviously right is what a measurement
+ * everything else is checked against ought to be.
+ */
+static uint64_t median_gap(void)
+{
+	unsigned n = ngaps;
+
+	if (n == 0)
+		return 0;
+
+	for (unsigned i = 1; i < n; i++) {
+		uint64_t v = gaps[i];
+		unsigned j = i;
+
+		while (j > 0 && gaps[j - 1] > v) {
+			gaps[j] = gaps[j - 1];
+			j--;
+		}
+		gaps[j] = v;
+	}
+
+	return gaps[n / 2];
 }
 
 /* What one tick should measure, in counter units. Zero if either clock is
@@ -2373,7 +2443,9 @@ static void timer_selftest(void)
 	int had_interrupts;
 
 	kputs("UrMach x86-64: the local APIC timer counts at ");
-	kputdec((unsigned)(rate / 1000));
+	kputdec((unsigned)(lapic_timer_hz_run(0) / 1000));
+	kputs(" and ");
+	kputdec((unsigned)(lapic_timer_hz_run(1) / 1000));
 	kputs(" kHz after the divisor");
 
 	if (rate == 0) {
@@ -2401,14 +2473,7 @@ static void timer_selftest(void)
 
 	got = ticks[me];
 	off = got > want ? got - want : want - got;
-	/*
-	 * The span covers ticks-1 gaps, not ticks: the first tick starts the
-	 * measurement rather than being measured. Dividing by the wrong one of
-	 * those is a one-percent error at a hundred ticks, which is inside the
-	 * tolerance and would therefore never be noticed.
-	 */
-	period = ticks[me] > 1
-	       ? (last_tsc[me] - first_tsc[me]) / (ticks[me] - 1) : 0;
+	period = median_gap();
 	expected = tick_expected_period();
 
 	/*
@@ -2448,6 +2513,19 @@ static void timer_selftest(void)
 	 * a host that deschedules the emulator deletes ticks, and no bound
 	 * worth having absorbs that. What it can still catch is a timer that
 	 * stopped, or one out by a factor.
+	 *
+	 * 🔑 Losing ticks is not an emulator defect to be worked around — it
+	 * happens on real hardware too, and every system that keeps time has
+	 * had to answer for it. An interval with interrupts disabled, a burst
+	 * of higher-priority work, or a system-management interrupt the kernel
+	 * cannot even observe will each swallow one. The emulator only makes
+	 * it frequent enough to see in a twenty-second boot.
+	 *
+	 * Which is why counting them must never become timekeeping. The tick
+	 * is a scheduling event; the time comes from a counter that is read,
+	 * not from events that are counted, because a counter that is read
+	 * cannot be missed. That is the whole argument of #318, and this is
+	 * the measurement behind it.
 	 */
 	kputs("UrMach x86-64: asked for ");
 	kputdec((unsigned)want);
@@ -2458,12 +2536,12 @@ static void timer_selftest(void)
 	      : " — WRONG, the tick stopped or ran away\r\n");
 
 	/*
-	 * The period says how fast, and this one is decided tightly, because
-	 * the shortest gap between two ticks cannot be lengthened by anything
-	 * the host does. It is also a comparison of two independent clocks —
-	 * the counter against the APIC timer — which the count is not.
+	 * The period says how fast, taken as the middle of every gap measured.
+	 * Tightly decided, because the middle of the distribution is where the
+	 * host's interference is not — and it compares two independent clocks,
+	 * the counter against the APIC timer, which the count does not.
 	 */
-	kputs("UrMach x86-64: the average gap between ticks is ");
+	kputs("UrMach x86-64: the median gap between ticks is ");
 	kputdec((unsigned)period);
 	kputs(" counter units, one period is ");
 	kputdec((unsigned)expected);
@@ -2473,10 +2551,168 @@ static void timer_selftest(void)
 		return;
 	}
 
+	/*
+	 * 🔑 The bound is *derived*, not chosen: one part in thirty-two, which
+	 * is the sum of the two calibrations' own tolerances.
+	 *
+	 * Each clock is measured twice and accepted if the two runs agree
+	 * within one part in sixty-four. So each of the two numbers going into
+	 * this ratio is permitted to be that far out, and the ratio of two such
+	 * numbers is permitted to be twice that. A tighter bound here would be
+	 * asserting an accuracy the inputs do not promise — it would fail on
+	 * calibrations that were accepted as good, which is a test contradicting
+	 * its own premises rather than catching a defect.
+	 *
+	 * Measured, and this is why a tighter number was tried and rejected:
+	 * sixteen boots put the median within ±0.35% of the period except one
+	 * at +0.93%, and that boot's two timer calibrations were 62739 and
+	 * 62546 kHz — 0.31% apart and duly accepted. The outlier is calibration
+	 * noise arriving where the design says it may.
+	 *
+	 * Which also says where to look if this ever needs to be tighter: not
+	 * here, but at the two calibrations feeding it.
+	 */
 	off = period > expected ? period - expected : expected - period;
-	kputs(off <= expected / 20
+	kputs(off <= expected / 32
 	      ? " — the tick runs at the rate it was told\r\n"
 	      : " — WRONG, the tick is not at the rate it was told\r\n");
+}
+
+/*
+ * The kernel can hear as well as speak (#428).
+ *
+ * Every line the kernel has ever produced went out of COM1 and nothing came
+ * back. That is enough to narrate a boot and not enough for a debugger,
+ * which is a conversation.
+ *
+ * The receive path cannot be tested by anybody typing, because a kernel
+ * whose console is deaf looks exactly like a kernel nobody has typed at. So
+ * the port is asked to talk to itself: the 16550 will connect its
+ * transmitter to its own receiver, and a byte that makes that trip has
+ * proved the half of the port that has never been used.
+ *
+ * A recognisable byte rather than a zero, and checked for equality rather
+ * than for arrival: a receiver returning a stuck value would satisfy
+ * "something came back" without having received anything.
+ */
+#define CONS_PROBE_BYTE	0xA5
+
+static void cons_selftest(void)
+{
+	int got = cons_loopback_probe(CONS_PROBE_BYTE);
+
+	kputs("UrMach x86-64: sent 0xa5 to the serial port's own receiver and got ");
+	if (got < 0)
+		kputs("nothing");
+	else
+		kputhex64((uint64_t)got);
+
+	kputs(got == CONS_PROBE_BYTE
+	      ? " — the console can hear\r\n"
+	      : " — WRONG, the receive path does not work\r\n");
+}
+
+/*
+ * The kernel can name its own functions (#428).
+ *
+ * The symbols arrive with the kernel: GRUB passes the ELF section headers
+ * back in the boot information, and `.symtab` and `.strtab` are among them.
+ * No file to build, no module to load — only somebody reading them.
+ *
+ * The check asks the lookup about *this function*, so the answer names the
+ * test: a table read from the wrong place, or a string table belonging to a
+ * different section, gives a name that is a real string from somewhere else,
+ * which reads as a symbol and is not. Comparing against a name known at
+ * compile time is what tells those apart.
+ */
+static int name_is(const char *a, const char *b)
+{
+	while (*a && *a == *b) {
+		a++;
+		b++;
+	}
+	return *a == 0 && *b == 0;
+}
+
+/*
+ * Two frames deep, so the claim is about a *chain* and not about one lookup.
+ *
+ * A return address is the instruction after a call, which is inside the
+ * caller — so naming it is what a backtrace does at every frame, and checking
+ * two of them checks the walk rather than the table.
+ *
+ * ⚠️ Two things here are load-bearing and both were found by getting them
+ * wrong. `noinline`, or these collapse into one function and the test passes
+ * by having nothing to walk. And each level does work *after* its call, which
+ * is what stops the compiler turning `call` plus `ret` into a `jmp`: a tail
+ * call reuses the caller's frame, so the frame simply is not there, and no
+ * walk based on frame pointers can show a frame that does not exist. The
+ * first version of this asked for two levels from one place and got
+ * "ksym_selftest then x86_64_boot" — the middle frame had been optimised
+ * away, and the test was wrong rather than the kernel.
+ *
+ * That is worth knowing beyond this test: a backtrace on an optimised build
+ * is complete, but a function that ends in a tail call is not a frame.
+ */
+static const char *bt_caller;
+static const char *bt_caller_of_caller;
+static volatile int bt_sink;
+
+__attribute__((noinline)) static void bt_leaf(void)
+{
+	bt_caller = ksym_lookup((uint64_t)(uintptr_t)__builtin_return_address(0),
+				0);
+	bt_sink++;
+}
+
+__attribute__((noinline)) static void bt_middle(void)
+{
+	bt_leaf();
+	bt_caller_of_caller =
+		ksym_lookup((uint64_t)(uintptr_t)__builtin_return_address(0), 0);
+	bt_sink++;
+}
+
+static void ksym_selftest(void)
+{
+	uint64_t off = ~0ULL;
+	const char *self = ksym_lookup((uint64_t)(uintptr_t)&ksym_selftest, &off);
+
+	kputs("UrMach x86-64: ");
+	kputdec(ksym_count());
+	kputs(" symbols, and this function calls itself ");
+	kputs(self ? self : "(nothing)");
+	kputs(self && name_is(self, "ksym_selftest") && off == 0
+	      ? " — the kernel can name its own code\r\n"
+	      : " — WRONG, the symbol table is not the one it should be\r\n");
+
+	/*
+	 * And an address no function covers must come back with nothing.
+	 * Without this the lookup could be returning the nearest symbol at any
+	 * distance, which would put a confident name on every wild address a
+	 * broken backtrace produced.
+	 */
+	kputs("UrMach x86-64: an address in no function resolves to ");
+	{
+		const char *none = ksym_lookup(0x1000, 0);
+
+		kputs(none ? none : "nothing");
+		kputs(none ? " — WRONG, a name was invented for it\r\n"
+			   : " — nothing, which is the honest answer\r\n");
+	}
+
+	/* And the same lookup applied the way a backtrace applies it. */
+	bt_middle();
+
+	kputs("UrMach x86-64: two frames up from a leaf are ");
+	kputs(bt_caller ? bt_caller : "(nothing)");
+	kputs(" then ");
+	kputs(bt_caller_of_caller ? bt_caller_of_caller : "(nothing)");
+	kputs(bt_caller && bt_caller_of_caller
+	      && name_is(bt_caller, "bt_middle")
+	      && name_is(bt_caller_of_caller, "ksym_selftest")
+	      ? " — a walk names every frame, not just the first\r\n"
+	      : " — WRONG, the chain does not resolve\r\n");
 }
 
 /*
@@ -2704,6 +2940,103 @@ static void ioapic_selftest(void)
 }
 
 /*
+ * The priority level, which is a promise about *when* rather than whether
+ * (#409/#322).
+ *
+ * The claim has two halves and they need testing separately, because an
+ * implementation that got one right and the other wrong would be plausible
+ * in both directions: a level that blocked nothing would look like a fast
+ * kernel, and one that dropped what it blocked would look like a quiet one.
+ *
+ * So: raised, the timer must stop reaching its handler while still arriving
+ * — the deferral counter is what says it arrived. Lowered, what was deferred
+ * must run, and exactly once.
+ *
+ * ⚠️ The timer is at class fifteen and SPLHI is fourteen, so SPLHI cannot
+ * block it — deliberately, because a level that stopped a processor
+ * answering cross-calls would be a deadlock wearing a priority's clothes.
+ * The test therefore raises above it, which is a thing only a test has any
+ * business doing.
+ */
+#define SPL_ABOVE_TIMER	15u
+
+static void spl_selftest(void)
+{
+	uint64_t handled_before, handled_while, handled_after;
+	uint64_t deferred_before, deferred_after, replayed_before, ran_at_spl0;
+	uint32_t me = cpu_apic_id();
+	spl_t old;
+
+	if (lapic_timer_hz() == 0) {
+		kputs("UrMach x86-64: no timer, so no level to test\r\n");
+		return;
+	}
+
+	tick_reset();
+	interrupts_enable();
+	lapic_timer_start(TICK_TEST_HZ, LAPIC_TIMER_VECTOR);
+
+	/* Let it run normally first, so "nothing arrives" cannot pass by the
+	 * timer never having been armed. */
+	pit_delay_us(20000);
+
+	/*
+	 * ⚠️ Raise first, *then* take the readings. The other order has a race
+	 * — in the test, not in the kernel — because a tick arriving between
+	 * the snapshot and the raise is handled legitimately and counted
+	 * against the raised level. Measured: three boots gave eleven events
+	 * each, once as eleven deferred and twice as ten deferred and one
+	 * handled, which is exactly one tick landing in that gap.
+	 */
+	old = splx(SPL_ABOVE_TIMER);
+
+	handled_before = ticks[me];
+	deferred_before = spl_deferred_count();
+	replayed_before = spl_replayed_count();
+
+	pit_delay_us(20000);
+	handled_while = ticks[me] - handled_before;
+	deferred_after = spl_deferred_count();
+
+	/*
+	 * ⚠️ Stop the timer *before* lowering, or the count of what the replay
+	 * ran includes the next real tick: dropping the level lets interrupts
+	 * through again, and at five hundred hertz the following one is two
+	 * milliseconds away — well inside the few instructions between the
+	 * lowering and the reading. Measured: one boot in three reported the
+	 * handler running twice for a single replay.
+	 *
+	 * With the timer stopped, the only thing that can run is what was
+	 * held, which is the whole claim.
+	 */
+	lapic_timer_stop();
+
+	splx(old);
+	handled_after = ticks[me] - handled_before - handled_while;
+	ran_at_spl0 = handled_before;
+
+	kputs("UrMach x86-64: at spl 15 the timer arrived ");
+	kputdec((unsigned)(deferred_after - deferred_before));
+	kputs(" times and ran ");
+	kputdec((unsigned)handled_while);
+	kputs(", before it ran ");
+	kputdec((unsigned)ran_at_spl0);
+	kputs(ran_at_spl0 > 0 && handled_while == 0
+	      && deferred_after > deferred_before
+	      ? " — raised, it is held and not lost\r\n"
+	      : " — WRONG, the level does not hold interrupts\r\n");
+
+	kputs("UrMach x86-64: lowering replayed ");
+	kputdec((unsigned)(spl_replayed_count() - replayed_before));
+	kputs(" of them, handler ran ");
+	kputdec((unsigned)handled_after);
+	kputs(" more time");
+	kputs(spl_replayed_count() - replayed_before == 1 && handled_after == 1
+	      ? " — once, however many were held\r\n"
+	      : " — WRONG, the replay is not exactly one\r\n");
+}
+
+/*
  * And the same tick on every processor (#409).
  *
  * This is the claim the local APIC timer was chosen for, and it is not the
@@ -2733,7 +3066,23 @@ static void ap_timer_stop(void *arg)
 
 static void smp_timer_selftest(void)
 {
-	uint64_t want = TICK_WANT, allowed = TICK_ALLOWED;
+	/*
+	 * ⚠️ Loose, and deliberately looser than the single-processor check
+	 * above — because this test is about *where* the ticks arrive, not how
+	 * fast. Judging it by a tight count was left over from before the
+	 * count was understood to be a poor rate estimator, and it failed a
+	 * perfectly good boot: "96 96 95 94 — 0 of 4", four processors each
+	 * ticking on their own, marked wrong because the host had stolen a few
+	 * milliseconds from each.
+	 *
+	 * What must still be caught is a processor that did not tick at all,
+	 * and one ticking at a rate nobody asked for. A tenth either way
+	 * catches both and nothing the host does reaches that far. The upper
+	 * side is nearly free: a periodic timer cannot deliver more ticks than
+	 * its period allows, so a count that is too *high* means the countdown
+	 * itself is wrong.
+	 */
+	uint64_t want = TICK_WANT, allowed = want / 10;
 	unsigned counted = 0, good = 0;
 
 	if (smp_online_count() < 2) {
@@ -2833,6 +3182,353 @@ static int wait_for_paranoid(void)
 		cpu_pause();
 	}
 	return 0;
+}
+
+/*
+ * The message ABI, measured on the target that changed it (#413).
+ *
+ * mach/message.h states the layout twice: once as declarations the compiler
+ * turns into offsets, and once as _Static_asserts that check the offsets it
+ * chose.  Both are compile-time, and both stop short of the one fact the
+ * kernel depends on most: where the `type` byte of a descriptor lands.
+ *
+ * That byte is the discriminator.  Every descriptor in a message is walked
+ * as a member of one union, and which member is meant is decided by reading
+ * `type` through the generic one.  It is a bit-field, so it has no address
+ * to take and no assertion can name its offset — and it is precisely the
+ * field that moved, because the padding around it is what makes descriptors
+ * the same size when a name and an address are not.
+ *
+ * So it is measured: write a value the field can hold, look at the bytes,
+ * report where it went.  Then the operation itself, in both directions — a
+ * descriptor filled with zeros that is told it is an out-of-line descriptor
+ * and must read back as one, and a descriptor filled with ones that is told
+ * it is a port descriptor (whose code is zero) and must read back as one
+ * too.  One direction alone would pass on a field that was never written.
+ */
+#define MSG_ABI_MARKER	0x7f
+
+static void msg_bytes_set(volatile unsigned char *b, unsigned n,
+			  unsigned char v)
+{
+	for (unsigned i = 0; i < n; i++)
+		b[i] = v;
+}
+
+static unsigned msg_marker_byte(const volatile unsigned char *b, unsigned n)
+{
+	for (unsigned i = 0; i < n; i++)
+		if (b[i] == MSG_ABI_MARKER)
+			return i;
+	return ~0u;
+}
+
+/*
+ * The formatter panic() prints through (#415).
+ *
+ * panic became variadic because the machine-independent tree has always
+ * declared it that way and called it that way; what it prints through is new
+ * code, and new code under the last message the machine will ever send is
+ * worth checking before it is needed.  Each case is a format, its arguments,
+ * and the exact characters that must come out -- compared, not eyeballed,
+ * because "looks right on the serial line" is how a missing digit survives.
+ */
+static int str_equal(const char *a, const char *b)
+{
+	while (*a && *a == *b) {
+		a++;
+		b++;
+	}
+	return *a == *b;
+}
+
+/*
+ * The same call without the format attribute, for the cases that are
+ * deliberately malformed.  Three of them below are the point of the exercise
+ * -- a null %s, a conversion the formatter does not implement, a format that
+ * stops mid-conversion -- and cons_printf now refuses to compile exactly
+ * those, which is the attribute doing its job rather than getting in the way.
+ * Routing them through a pointer the compiler cannot fold says "this one is
+ * meant to be wrong" in a way that a suppression pragma would not.
+ */
+static void fmt_unchecked(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	cons_vprintf(fmt, ap);
+	va_end(ap);
+}
+
+static void panic_format_selftest(void)
+{
+	char got[80];
+	unsigned checked = 0, wrong = 0;
+
+	/*
+	 * Wrapped in a macro so each case reads as one line: what was asked
+	 * for, and what must come back.  The capture is started and stopped
+	 * around a single call, so a case that writes nothing is visible as an
+	 * empty result rather than as the previous case's leftovers.
+	 */
+#define FMT_CHECK(want)							\
+	do {								\
+		(void)cons_capture_end();				\
+		checked++;						\
+		if (!str_equal(got, want)) {				\
+			wrong++;					\
+			kputs("UrMach x86-64:   format WRONG: got \"");	\
+			kputs(got);					\
+			kputs("\" want \"");				\
+			kputs(want);					\
+			kputs("\"\r\n");				\
+		}							\
+	} while (0)
+
+#define FMT_CASE(want, ...)						\
+	do {								\
+		cons_capture_begin(got, sizeof(got));			\
+		cons_printf(__VA_ARGS__);				\
+		FMT_CHECK(want);					\
+	} while (0)
+
+/* Deliberately malformed: see fmt_unchecked above. */
+#define FMT_CASE_BAD(want, ...)						\
+	do {								\
+		cons_capture_begin(got, sizeof(got));			\
+		fmt_unchecked(__VA_ARGS__);				\
+		FMT_CHECK(want);					\
+	} while (0)
+
+	FMT_CASE("plain", "plain");
+	FMT_CASE("a string here", "a %s here", "string");
+	FMT_CASE_BAD("(null)", "%s", (const char *)0);
+	FMT_CASE("x", "%c", 'x');
+	FMT_CASE("0", "%d", 0);
+	FMT_CASE("-1", "%d", -1);
+	FMT_CASE("2147483647", "%d", 2147483647);
+	FMT_CASE("-2147483648", "%d", -2147483647 - 1);
+	FMT_CASE("4294967295", "%u", 4294967295u);
+	FMT_CASE("0000002a", "%x", 42u);
+	FMT_CASE("ffffffff", "%x", 4294967295u);
+	FMT_CASE("100%", "100%%");
+	FMT_CASE("a=1 b=two c=00000003", "a=%d b=%s c=%x", 1, "two", 3u);
+
+	/*
+	 * The reason the length modifiers exist.  An address on this target is
+	 * sixty-four bits: %x prints the low half and says nothing about the
+	 * half it dropped, which is a panic reporting a pointer that does not
+	 * exist.  Both are checked so the difference is a fact and not a
+	 * recollection.
+	 */
+	FMT_CASE("89abcdef", "%x", (unsigned int)0x0123456789abcdefUL);
+	FMT_CASE("0123456789abcdef", "%lx", 0x0123456789abcdefUL);
+	FMT_CASE("-9223372036854775808", "%ld", -9223372036854775807L - 1);
+	FMT_CASE("0x0000000012345678", "%p", (void *)0x12345678UL);
+
+	/*
+	 * A conversion the formatter does not implement must be visible rather
+	 * than swallowed: its argument cannot be stepped over without knowing
+	 * how wide it is, so everything after it would be read from the wrong
+	 * place.  Saying so is the only honest option left.
+	 */
+	FMT_CASE_BAD("q=%q <unsupported conversion, rest dropped>", "q=%q done", 1);
+
+	/* A format ending mid-conversion must not read past the string. */
+	FMT_CASE_BAD("end%", "end%");
+
+#undef FMT_CASE_BAD
+#undef FMT_CASE
+#undef FMT_CHECK
+
+	kputs("UrMach x86-64: ");
+	kputdec(checked);
+	kputs(" panic format cases, ");
+	kputdec(wrong);
+	kputs(wrong == 0 ? " wrong\r\n" : " WRONG\r\n");
+}
+
+static void msg_abi_selftest(void)
+{
+	/*
+	 * A message the way one is actually shaped: the fixed part, then the
+	 * descriptors.  Declaring it as a structure lets the compiler place
+	 * the descriptors, so the check below compares the placement it chose
+	 * against the arithmetic the kernel performs to find them.
+	 */
+	static struct {
+		mach_msg_base_t		base;
+		mach_msg_descriptor_t	dsc[2];
+	} msg;
+	union {
+		mach_msg_descriptor_t	d;
+		volatile unsigned char	b[sizeof(mach_msg_descriptor_t)];
+	} u;
+	const unsigned n = (unsigned)sizeof(mach_msg_descriptor_t);
+	const mach_msg_descriptor_t *walked;
+	unsigned at_port, at_ool, at_ool_ports, at_generic;
+	unsigned told_ool, told_port;
+
+	kputs("UrMach x86-64: message header ");
+	kputdec(sizeof(mach_msg_header_t));
+	kputs(" bytes, body ");
+	kputdec(sizeof(mach_msg_body_t));
+	kputs(", descriptor ");
+	kputdec(n);
+	kputs(sizeof(mach_msg_header_t) == 24 && sizeof(mach_msg_body_t) == 8
+	      && n == 16
+	      ? " — the 64-bit layout\r\n"
+	      : " — NOT the 64-bit layout\r\n");
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.port.type = MSG_ABI_MARKER;
+	at_port = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.out_of_line.type = MSG_ABI_MARKER;
+	at_ool = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.ool_ports.type = MSG_ABI_MARKER;
+	at_ool_ports = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.type.type = MSG_ABI_MARKER;
+	at_generic = msg_marker_byte(u.b, n);
+
+	kputs("UrMach x86-64: descriptor type byte at ");
+	kputdec(at_port);
+	kputs(" ");
+	kputdec(at_ool);
+	kputs(" ");
+	kputdec(at_ool_ports);
+	kputs(" ");
+	kputdec(at_generic);
+	kputs(at_port == n - 1 && at_ool == n - 1 && at_ool_ports == n - 1
+	      && at_generic == n - 1
+	      ? " — all four in the last byte\r\n"
+	      : " — the four descriptors DISAGREE\r\n");
+
+	/* Zeros, then a non-zero kind: the walk must see the kind. */
+	msg_bytes_set(u.b, n, 0);
+	u.d.port.name = 0x1234;
+	u.d.port.disposition = MACH_MSG_TYPE_MOVE_SEND;
+	u.d.port.type = MACH_MSG_OOL_DESCRIPTOR;
+	told_ool = u.d.type.type;
+
+	/* Ones, then the kind whose code is zero: the walk must see zero. */
+	msg_bytes_set(u.b, n, 0xff);
+	u.d.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	told_port = u.d.type.type;
+
+	kputs("UrMach x86-64: a port descriptor told the walk ");
+	kputdec(told_ool);
+	kputs(" and ");
+	kputdec(told_port);
+	kputs(told_ool == MACH_MSG_OOL_DESCRIPTOR
+	      && told_port == MACH_MSG_PORT_DESCRIPTOR
+	      ? " — it was heard both ways\r\n"
+	      : " — the walk read the WRONG byte\r\n");
+
+	/*
+	 * Where the descriptors begin.  The kernel does not look this up: it
+	 * takes the address just past the body and calls it the first
+	 * descriptor.  If the compiler put them anywhere else, every message
+	 * with a descriptor in it is read from four bytes off.
+	 */
+	walked = (const mach_msg_descriptor_t *)(&msg.base.body + 1);
+
+	kputs("UrMach x86-64: descriptors begin at ");
+	kputdec((uint64_t)((const char *)&msg.dsc[0] - (const char *)&msg));
+	kputs(", the walk lands ");
+	kputdec((uint64_t)((const char *)walked - (const char *)&msg));
+	kputs(walked == &msg.dsc[0]
+	      && ((uintptr_t)walked % sizeof(void *)) == 0
+	      ? " — same place, and aligned like the address it starts with\r\n"
+	      : " — the walk and the layout DISAGREE\r\n");
+}
+
+/*
+ * How a port name divides, measured (#413).
+ *
+ * The split is machine-dependent now, and this target's is not i386's: 22
+ * bits of index and 10 of generation, against 24 and 8. The generation is the
+ * number of times a slot can be handed out before a name repeats, which is
+ * what a task holding a stale name has to lose a race against — so the two
+ * bits come off an index whose top four were never reachable (the entry table
+ * stops at 484,608 here) and go somewhere they are worth something.
+ *
+ * What is checked is that the shifts and masks compose: every name the kernel
+ * can build must come apart into the index and generation it was built from.
+ * A split is three macros that must agree, and they are written in terms of
+ * one width precisely so they cannot disagree — this establishes that they
+ * do not, rather than that they were meant not to.
+ *
+ * ⚠️ The other half of the split lives in ipc/ipc_entry.h, which this target
+ * does not compile yet: the generation is stored in an entry's bits as well,
+ * and a name wider than that field would carry a generation the entry cannot
+ * hold. Those checks are static assertions in that header — they run for
+ * i386 today and for this target the day the machine-independent tree builds.
+ */
+static void port_name_selftest(void)
+{
+	const uint32_t index_max = (1u << (32 - MACH_PORT_GEN_BITS)) - 1;
+	unsigned long checked = 0, wrong = 0;
+
+	kputs("UrMach x86-64: a port name is ");
+	kputdec(32 - MACH_PORT_GEN_BITS);
+	kputs(" bits of index and ");
+	kputdec(MACH_PORT_GEN_BITS);
+	kputs(" of generation — ");
+	kputdec(1u << MACH_PORT_GEN_BITS);
+	kputs(" recycles of a slot before a name repeats\r\n");
+
+	/*
+	 * Every generation against a spread of indices, and the edges of both
+	 * exactly. The stride is prime so it does not walk in step with any
+	 * power of two in the masks.
+	 */
+	for (uint32_t gen = 0; gen <= MACH_PORT_GEN_LOWMASK; gen++) {
+		uint32_t gform = gen << MACH_PORT_GEN_SHIFT;
+
+		for (uint32_t i = 0; ; i += 4093) {
+			mach_port_t name = MACH_PORT_MAKE(i, gform);
+
+			checked++;
+			if (MACH_PORT_INDEX(name) != i
+			    || MACH_PORT_GEN(name) != gform)
+				wrong++;
+
+			if (i > index_max - 4093)
+				break;
+		}
+
+		for (uint32_t i = index_max - 1; i <= index_max; i++) {
+			mach_port_t name = MACH_PORT_MAKE(i, gform);
+
+			checked++;
+			if (MACH_PORT_INDEX(name) != i
+			    || MACH_PORT_GEN(name) != gform)
+				wrong++;
+		}
+	}
+
+	kputs("UrMach x86-64: ");
+	kputdec(checked);
+	kputs(" names taken apart, ");
+	kputdec(wrong);
+	kputs(wrong == 0 ? " wrong" : " WRONG");
+
+	/*
+	 * The two names that are not names. NULL must be what an all-zero pair
+	 * makes, and DEAD must sit at the very top of the index space — the
+	 * entry table is required to stop below it, so a table that never
+	 * reaches the last index can never hand out either by accident.
+	 */
+	kputs(MACH_PORT_MAKE(0, 0) == MACH_PORT_NULL
+	      && MACH_PORT_INDEX(MACH_PORT_DEAD) == index_max
+	      ? "; null and dead are outside what a table can reach\r\n"
+	      : "; NULL OR DEAD IS REACHABLE from a valid index\r\n");
 }
 
 static void swapgs_window_selftest(void)
@@ -3246,10 +3942,16 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	thread_state_selftest();
 	user_reachable_selftest();
 	ring3_selftest();
+	cons_selftest();
+	ksym_selftest();
 	ioapic_madt_selftest();
 	tsc_selftest();
 	timer_selftest();
 	ioapic_selftest();
+	spl_selftest();
+	panic_format_selftest();
+	msg_abi_selftest();
+	port_name_selftest();
 	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();

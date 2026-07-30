@@ -81,12 +81,16 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ddb.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ksym.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/desc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/spl.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/smp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/direct.c
@@ -108,7 +112,20 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
+  # <mach/...> and the per-target <mach/machine/...> behind it (#413).
+  #
+  # The first thing this target has ever taken from outside x86_64/, and it
+  # is deliberately the interface headers rather than any of the code that
+  # uses them: the message layout is a decision, and a decision is worth
+  # nothing until the target that has to live with it compiles the header
+  # and checks it.  The MI tree follows later and follows this.
+  #
+  # ⚠️ Ordered as the i386 target orders them — uapi, then the arch links —
+  # so <mach/machine/vm_types.h> resolves to mach/x86_64/ here for exactly
+  # the same reason it resolves to mach/i386/ there.
   target_include_directories(mach_kernel PRIVATE
+    ${CMAKE_SOURCE_DIR}/uapi
+    ${UROS_ARCH_INCLUDE}
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
   # stddef.h); add just that directory back with -isystem so we get the
@@ -216,15 +233,43 @@ set(KERNEL_C_FLAGS
     -fno-optimize-sibling-calls
     -std=gnu11
     -Wall
-    -Wno-implicit-function-declaration
-    -Wno-int-conversion  
+    #
+    # #415.  Three suppressions used to live here and all three were about
+    # width: -Wno-implicit-function-declaration, -Wno-int-conversion and
+    # -Wno-format.  They are the two halves of this audit's cheap side, and
+    # they were switched off wholesale.
+    #
+    # implicit-function-declaration is gone: an undeclared function is
+    # assumed to return int, so on the next target every call that returns a
+    # pointer or a physical address is truncated at the call site, silently
+    # and in the caller rather than in the callee where you would look.
+    #
+    # -Wno-format is gone too, and removing it changes nothing today: this
+    # kernel builds -fno-builtin with its own printf, db_printf and kprintf,
+    # none of which carries format(printf,...), so there was never anything
+    # for the warning to check.  It was guarding an empty room.  Annotating
+    # the print functions is what makes it real, and that is its own step --
+    # %x against a vm_offset_t is the thing the issue asks for.
+    #
+    # int-conversion is FATAL again, which is #442's third done-when.
+    #
+    # #415 left it warning-but-not-fatal, and said why: two sites remained,
+    # and they were one fact -- the kernel kept ipc_port_t pointers in
+    # message fields typed mach_port_t, pointer-wide on i386 and not on
+    # x86-64.  Stopping the build on that would have stopped it on a
+    # decision that belonged to the message ABI, not to a compiler flag.
+    #
+    # #442 made that decision and carried it out: the ports live in the
+    # kmsg, the message carries names, and the count is zero.  Fatal is now
+    # the point -- it is what makes "by construction" mean something rather
+    # than a line in a build log nobody reads.  If this ever fails to
+    # compile, something has put an address back in a name field.
     -Wno-pointer-sign
     -Wno-unused-variable
     -Wno-unused-function
     -Wno-unused-but-set-variable
     -Wno-missing-braces
     -Wno-parentheses
-    -Wno-format
     ${KERNEL_OPT_FLAGS}
 )
 
@@ -407,7 +452,7 @@ function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -server ${SERVER_C}
                 -header /dev/null
                 -user /dev/null
-        DEPENDS migcom ${DEFS_FILE}
+        DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
         COMMENT "MIG: ${DEFS_NAME} (server)"
         VERBATIM
     )
@@ -443,7 +488,7 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -header ${USER_H}
                 -user ${USER_C}
                 -server /dev/null
-        DEPENDS migcom ${DEFS_FILE}
+        DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
         COMMENT "MIG: ${DEFS_NAME} (user)"
         VERBATIM
     )
@@ -514,7 +559,7 @@ add_custom_command(
             -server ${KERNEL_BUILD_DIR}/device/device_pager_server.c
             -header /dev/null
             -user /dev/null
-    DEPENDS migcom ${KERNEL_SRC_DIR}/mach/memory_object.defs
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${KERNEL_SRC_DIR}/mach/memory_object.defs
     COMMENT "MIG: memory_object -> device_pager (server)"
     VERBATIM
 )

@@ -1399,7 +1399,9 @@ processor_set_things(
 
 		/* do we have the memory we need? */
 
-		size_needed = actual * sizeof(mach_port_t);
+		/* One pointer per task or thread, not one name (#415): both
+		 * branches below fill this with ipc_port_t. */
+		size_needed = ipc_port_array_size(actual);
 		if (size_needed <= size)
 			break;
 
@@ -1456,7 +1458,9 @@ processor_set_things(
 		}
 		if (i < actual) {
 		  	actual = i;
-			size_needed = actual * sizeof(mach_port_t);
+			/* One pointer per task or thread, not one name (#415): both
+		 * branches below fill this with ipc_port_t. */
+		size_needed = ipc_port_array_size(actual);
 		}
 		break;
 	    }

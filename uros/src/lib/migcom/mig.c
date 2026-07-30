@@ -148,6 +148,7 @@
 #include "error.h"
 #include "lexxer.h"
 #include "global.h"
+#include "target.h"
 #include "write.h"
 
 extern int yyparse();
@@ -213,6 +214,22 @@ parseArgs(int argc, char *argv[])
 	        GenSymTab = FALSE;
 		break;
               case 't':
+		/*
+		 * -target names the machine the stubs are for (#416).  Absent,
+		 * it is i386: every invocation written before this option
+		 * meant i386, and guessing from the host would be the same
+		 * mistake this option exists to end.
+		 */
+		if (streql(argv[0], "-target"))
+		{
+		    --argc; ++argv;
+		    if (argc == 0)
+			fatal("missing name for -target option");
+		    if (!TargetSelect(argv[0]))
+			fatal("unknown target '%s' (known: %s)",
+			      argv[0], TargetNames());
+		    break;
+		}
 		TestRPCTrap = TRUE;
 		UseRPCTrap = TRUE;
                 break;

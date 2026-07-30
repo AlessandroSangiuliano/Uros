@@ -71,7 +71,7 @@ function(add_mig_defs DEFS_FILE)
       -server ${SERVER_C}
       -user ${USER_C}
       ${DEFS_FILE}
-    DEPENDS migcom ${DEFS_FILE}
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
     COMMENT "MIG: ${DEFS_NAME}"
     VERBATIM
   )
@@ -108,7 +108,7 @@ add_custom_command(
     -user ${DEVICE_USER_C}
     -server ${DEVICE_SERVER_C}
     ${DEVICE_DEFS}
-  DEPENDS migcom ${DEVICE_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEVICE_DEFS}
   COMMENT "MIG: device.defs -> device.h + device_server.h"
   VERBATIM
 )
