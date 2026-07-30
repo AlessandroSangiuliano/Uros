@@ -34,6 +34,7 @@
 #include <intel/pmap.h>
 #include <i386/kmap.h>
 #include <kern/lock.h>
+#include <kern/misc_protos.h>	/* panic (#415) */
 #include <kern/spl.h>
 
 /*

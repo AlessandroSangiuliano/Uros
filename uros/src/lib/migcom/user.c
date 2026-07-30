@@ -447,14 +447,16 @@ WriteRequestHead(FILE *file, routine_t *rt)
     fprintf(file, "\t/* msgh_size passed as argument */\n");
 
     /*
-     *	KernelUser stubs need to cast the request and reply ports
-     *	from ipc_port_t to mach_port_t.
+     *	#442: a KernelUser stub holds an ipc_port_t, and this used to
+     *	cast it into a header field that is a port NAME -- the same four
+     *	bytes on i386, half a pointer on x86-64.  The destination now
+     *	travels as an argument to the send (see WriteMsgSend and
+     *	WriteMsgRPC) and the field carries nothing.
      */
 
     if (IsKernelUser)
-	fprintf(file, "\tInP->%s = (mach_port_t) %s;\n",
-		rt->rtRequestPort->argMsgField,
-		rt->rtRequestPort->argVarName);
+	fprintf(file, "\tInP->%s = MACH_PORT_NULL;\n",
+		rt->rtRequestPort->argMsgField);
     else
 	fprintf(file, "\tInP->%s = %s;\n",
 		rt->rtRequestPort->argMsgField,
@@ -488,6 +490,18 @@ static void
 WriteVarDecls(FILE *file, routine_t *rt)
 {
     register i;
+
+    /*
+     * #442: a KernelUser stub holds ipc_port_t and builds its message on
+     * the caller's stack, where there is no kmsg yet.  The ports travel
+     * beside the message and mach_msg_send_from_kernel puts them in the
+     * kmsg, instead of being cast into descriptor name fields that the
+     * interface fixes at thirty-two bits.  Zeroed, because the slots
+     * belonging to out-of-line descriptors stay empty.
+     */
+    if (IsKernelUser && rt->rtRequestKPDs > 0)
+	fprintf(file, "\tipc_port_t __kports[%d] = {0};\n",
+		rt->rtRequestKPDs);
 
     if (rt->rtOverwrite) {
 	fprintf(file, "\tRequest MessRequest;\n");
@@ -638,7 +652,10 @@ WriteMsgSend(FILE *file, routine_t *rt)
     if (IsKernelUser)
     {
 	fprintf(file, "\t%s mach_msg_send_from_kernel(", MsgResult);
-	fprintf(file, "&InP->Head, %s);\n", SendSize);
+	fprintf(file, "(ipc_port_t) %s, &InP->Head, %s, %s, %d);\n",
+		rt->rtRequestPort->argVarName, SendSize,
+		rt->rtRequestKPDs > 0 ? "__kports" : "(ipc_port_t *) 0",
+		rt->rtRequestKPDs);
     }
     else
     {
@@ -757,7 +774,10 @@ WriteMsgRPC(FILE *file, routine_t *rt)
     }
 
     if (IsKernelUser)
-	fprintf(file, "\tmsg_result = mach_msg_rpc_from_kernel(&InP->Head, %s, sizeof(Reply));\n", SendSize);
+	fprintf(file, "\tmsg_result = mach_msg_rpc_from_kernel((ipc_port_t) %s, &InP->Head, %s, sizeof(Reply), %s, %d);\n",
+		rt->rtRequestPort->argVarName, SendSize,
+		rt->rtRequestKPDs > 0 ? "__kports" : "(ipc_port_t *) 0",
+		rt->rtRequestKPDs);
     else {
 	fprintf(file, "\tmsg_result = mach_msg_overwrite(&InP->Head, MACH_SEND_MSG|MACH_RCV_MSG|%s%s%s%s, %s, sizeof(Reply), InP->Head.msgh_reply_port, %s, MACH_PORT_NULL, ",
 	    rt->rtMsgOption->argVarName,
@@ -807,8 +827,15 @@ WriteKPD_port(FILE *file, register argument_t *arg)
     fprintf(file, "\t%s = %s;\n", firststring,
 	arg->argTTName);
     /* ref is required also in the Request part, because of inout parameters */
-    fprintf(file, "\t%sname = %s%s%s%s;\n", string,
-	recast, ref, arg->argVarName, subindex);
+    if (IsKernelUser && streql(real_it->itUserType, "ipc_port_t")) {
+	fprintf(file, "\t__kports[%d%s] = %s%s%s;\n",
+		rtKPDIndex(arg->argRoutine, arg, akbSendKPD),
+		IS_MULTIPLE_KPD(it) ? " + i" : "",
+		ref, arg->argVarName, subindex);
+	fprintf(file, "\t%sname = MACH_PORT_NULL;\n", string);
+    } else
+	fprintf(file, "\t%sname = %s%s%s%s;\n", string,
+	    recast, ref, arg->argVarName, subindex);
     if (arg->argPoly != argNULL && akCheckAll(arg->argPoly->argKind, akbSendSnd)) {
 	register argument_t *poly = arg->argPoly;
 
@@ -816,8 +843,16 @@ WriteKPD_port(FILE *file, register argument_t *arg)
 	    poly->argByReferenceUser ? "*" : "", poly->argVarName);
     }
     fprintf(file, "#else\t/* UseStaticTemplates */\n");
-    fprintf(file, "\t%sname = %s%s%s%s;\n", string,
-	recast, ref, arg->argVarName, subindex);
+    /* #442: same as above -- the port travels beside the message. */
+    if (IsKernelUser && streql(real_it->itUserType, "ipc_port_t")) {
+	fprintf(file, "\t__kports[%d%s] = %s%s%s;\n",
+		rtKPDIndex(arg->argRoutine, arg, akbSendKPD),
+		IS_MULTIPLE_KPD(it) ? " + i" : "",
+		ref, arg->argVarName, subindex);
+	fprintf(file, "\t%sname = MACH_PORT_NULL;\n", string);
+    } else
+	fprintf(file, "\t%sname = %s%s%s%s;\n", string,
+	    recast, ref, arg->argVarName, subindex);
     if (arg->argPoly != argNULL && akCheckAll(arg->argPoly->argKind, akbSendSnd)) {
         register argument_t *poly = arg->argPoly;
 

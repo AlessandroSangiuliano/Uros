@@ -2172,7 +2172,7 @@ db_zone_print_free(
 	vm_offset_t elem;
 
 	freecount = zone_free_count(zone);
-	printf("zone 0x%x, free elements %d\n", zone, freecount);
+	printf("zone %p, free elements %d\n", zone, freecount);
 	printf("free list:\n");
 	elem = zone->free_elements;
 	while (count < freecount) {

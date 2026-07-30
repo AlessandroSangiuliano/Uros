@@ -171,20 +171,20 @@
  */
 struct ext2_acl_header	/* Header of Access Control Lists */
 {
-	unsigned long aclh_size;
-	unsigned long aclh_file_count;
-	unsigned long aclh_acle_count;
-	unsigned long aclh_first_acle;
+	unsigned int aclh_size;
+	unsigned int aclh_file_count;
+	unsigned int aclh_acle_count;
+	unsigned int aclh_first_acle;
 };
 
 struct ext2_acl_entry	/* Access Control List Entry */
 {
-	unsigned long  acle_size;
+	unsigned int  acle_size;
 	unsigned short acle_perms;	/* Access permissions */
 	unsigned short acle_type;	/* Type of entry */
 	unsigned short acle_tag;	/* User or group identity */
 	unsigned short acle_pad1;
-	unsigned long  acle_next;	/* Pointer on next entry for the */
+	unsigned int  acle_next;	/* Pointer on next entry for the */
 					/* same inode or on next free entry */
 };
 
@@ -193,14 +193,14 @@ struct ext2_acl_entry	/* Access Control List Entry */
  */
 struct ext2_group_desc
 {
-	unsigned long  bg_block_bitmap;		/* Blocks bitmap block */
-	unsigned long  bg_inode_bitmap;		/* Inodes bitmap block */
-	unsigned long  bg_inode_table;		/* Inodes table block */
+	unsigned int  bg_block_bitmap;		/* Blocks bitmap block */
+	unsigned int  bg_inode_bitmap;		/* Inodes bitmap block */
+	unsigned int  bg_inode_table;		/* Inodes table block */
 	unsigned short bg_free_blocks_count;	/* Free blocks count */
 	unsigned short bg_free_inodes_count;	/* Free inodes count */
 	unsigned short bg_used_dirs_count;	/* Directories count */
 	unsigned short bg_pad;
-	unsigned long  bg_reserved[3];
+	unsigned int  bg_reserved[3];
 };
 
 /*
@@ -252,25 +252,25 @@ struct ext2_group_desc
 struct ext2_inode {
 	unsigned short i_mode;		/* File mode */
 	unsigned short i_uid;		/* Owner Uid */
-	unsigned long  i_size;		/* Size in bytes */
-	unsigned long  i_atime;		/* Access time */
-	unsigned long  i_ctime;		/* Creation time */
-	unsigned long  i_mtime;		/* Modification time */
-	unsigned long  i_dtime;		/* Deletion Time */
+	unsigned int  i_size;		/* Size in bytes */
+	unsigned int  i_atime;		/* Access time */
+	unsigned int  i_ctime;		/* Creation time */
+	unsigned int  i_mtime;		/* Modification time */
+	unsigned int  i_dtime;		/* Deletion Time */
 	unsigned short i_gid;		/* Group Id */
 	unsigned short i_links_count;	/* Links count */
-	unsigned long  i_blocks;	/* Blocks count */
-	unsigned long  i_flags;		/* File flags */
-	unsigned long  i_reserved1;
-	unsigned long  i_block[EXT2_N_BLOCKS];/* Pointers to blocks */
-	unsigned long  i_version;	/* File version (for NFS) */
-	unsigned long  i_file_acl;	/* File ACL */
-	unsigned long  i_dir_acl;	/* Directory ACL */
-	unsigned long  i_faddr;		/* Fragment address */
+	unsigned int  i_blocks;	/* Blocks count */
+	unsigned int  i_flags;		/* File flags */
+	unsigned int  i_reserved1;
+	unsigned int  i_block[EXT2_N_BLOCKS];/* Pointers to blocks */
+	unsigned int  i_version;	/* File version (for NFS) */
+	unsigned int  i_file_acl;	/* File ACL */
+	unsigned int  i_dir_acl;	/* Directory ACL */
+	unsigned int  i_faddr;		/* Fragment address */
 	unsigned char  i_frag;		/* Fragment number */
 	unsigned char  i_fsize;		/* Fragment size */
 	unsigned short i_pad1;
-	unsigned long  i_reserved2[2];
+	unsigned int  i_reserved2[2];
 };
 
 /*
@@ -316,29 +316,29 @@ struct ext2_inode {
  * Structure of the super block
  */
 struct ext2_super_block {
-	unsigned long  s_inodes_count;	/* Inodes count */
-	unsigned long  s_blocks_count;	/* Blocks count */
-	unsigned long  s_r_blocks_count;/* Reserved blocks count */
-	unsigned long  s_free_blocks_count;/* Free blocks count */
-	unsigned long  s_free_inodes_count;/* Free inodes count */
-	unsigned long  s_first_data_block;/* First Data Block */
-	unsigned long  s_log_block_size;/* Block size */
-	long           s_log_frag_size;	/* Fragment size */
-	unsigned long  s_blocks_per_group;/* # Blocks per group */
-	unsigned long  s_frags_per_group;/* # Fragments per group */
-	unsigned long  s_inodes_per_group;/* # Inodes per group */
-	unsigned long  s_mtime;		/* Mount time */
-	unsigned long  s_wtime;		/* Write time */
+	unsigned int  s_inodes_count;	/* Inodes count */
+	unsigned int  s_blocks_count;	/* Blocks count */
+	unsigned int  s_r_blocks_count;/* Reserved blocks count */
+	unsigned int  s_free_blocks_count;/* Free blocks count */
+	unsigned int  s_free_inodes_count;/* Free inodes count */
+	unsigned int  s_first_data_block;/* First Data Block */
+	unsigned int  s_log_block_size;/* Block size */
+	int           s_log_frag_size;	/* Fragment size */
+	unsigned int  s_blocks_per_group;/* # Blocks per group */
+	unsigned int  s_frags_per_group;/* # Fragments per group */
+	unsigned int  s_inodes_per_group;/* # Inodes per group */
+	unsigned int  s_mtime;		/* Mount time */
+	unsigned int  s_wtime;		/* Write time */
 	unsigned short s_mnt_count;	/* Mount count */
 	short          s_max_mnt_count;	/* Maximal mount count */
 	unsigned short s_magic;		/* Magic signature */
 	unsigned short s_state;		/* File system state */
 	unsigned short s_errors;	/* Behaviour when detecting errors */
 	unsigned short s_minor_rev_level;/* minor revision level */
-	unsigned long  s_lastcheck;	/* time of last check */
-	unsigned long  s_checkinterval;	/* max. time between checks */
-	unsigned long  s_creator_os;	/* OS */
-	unsigned long  s_rev_level;	/* Revision level */
+	unsigned int  s_lastcheck;	/* time of last check */
+	unsigned int  s_checkinterval;	/* max. time between checks */
+	unsigned int  s_creator_os;	/* OS */
+	unsigned int  s_rev_level;	/* Revision level */
 	unsigned short s_def_resuid;	/* Default uid for reserved blocks */
 	unsigned short s_def_resgid;	/* Default gid for reserved blocks */
 	/*
@@ -354,13 +354,13 @@ struct ext2_super_block {
 	 * feature set, it must abort and not try to meddle with
 	 * things it doesn't understand...
 	 */
-	unsigned long	s_first_ino; 		/* First non-reserved inode */
+	unsigned int	s_first_ino; 		/* First non-reserved inode */
 	unsigned short  s_inode_size; 		/* size of inode structure */
 	unsigned short	s_block_group_nr; 	/* block group # of this superblock */
-	unsigned long	s_feature_compat; 	/* compatible feature set */
-	unsigned long	s_feature_incompat; 	/* incompatible feature set */
-	unsigned long	s_feature_ro_compat; 	/* readonly-compatible feature set */
-	unsigned long	s_reserved[230];	/* Padding to the end of the block */
+	unsigned int	s_feature_compat; 	/* compatible feature set */
+	unsigned int	s_feature_incompat; 	/* incompatible feature set */
+	unsigned int	s_feature_ro_compat; 	/* readonly-compatible feature set */
+	unsigned int	s_reserved[230];	/* Padding to the end of the block */
 };
 
 /*
@@ -395,12 +395,44 @@ struct ext2_super_block {
 #define EXT2_NAME_LEN 255
 
 struct ext2_dir_entry {
-	unsigned long  inode;			/* Inode number */
+	unsigned int  inode;			/* Inode number */
 	unsigned short rec_len;			/* Directory entry length */
 	unsigned char  name_len;		/* Name length */
 	unsigned char  file_type;
 	char           name[EXT2_NAME_LEN];	/* File name */
 };
+
+/*
+ * #415: the widths above are the format's, not the compiler's.
+ *
+ * Every field that is four bytes on disk was declared `unsigned long', which
+ * is four bytes on i386 and eight on x86-64.  Nothing was wrong while there
+ * was one target; on the second one the superblock, the group descriptors,
+ * the inodes and the directory entries would each have doubled the width of
+ * most of their fields, and every read would have come back from the wrong
+ * offset -- a filesystem that mounts and returns nonsense rather than one
+ * that refuses to mount, which is the worse of the two failures.
+ *
+ * Both sides of this boundary are in this tree: the bootstrap loader parses
+ * these structures to find the servers, and ext_server parses them again to
+ * serve the filesystem.  The other side of the boundary is the disk, which
+ * does not recompile.
+ *
+ * The sizes below are ext2's, from the format definition and not from what
+ * this compiler happens to produce.  They are here because a struct that has
+ * been accidentally the right size for thirty years is the kind that gets
+ * quietly changed back.
+ */
+_Static_assert(sizeof(struct ext2_super_block) == 1024,
+	"ext2: the superblock is 1024 bytes on disk");
+_Static_assert(sizeof(struct ext2_inode) == 128,
+	"ext2: an inode is 128 bytes on disk");
+_Static_assert(sizeof(struct ext2_group_desc) == 32,
+	"ext2: a group descriptor is 32 bytes on disk");
+_Static_assert(__builtin_offsetof(struct ext2_dir_entry, name) == 8,
+	"ext2: a directory entry's name starts at byte 8");
+_Static_assert(sizeof(struct ext2_acl_header) == 16,
+	"ext2: an ACL header is 16 bytes on disk");
 
 /*
  * EXT2_DIR_PAD defines the directory entries boundaries

@@ -179,6 +179,8 @@
 #define	CR4_VME	0x00000001	/* p5:   Virtual-8086 Mode Extensions */
 
 #ifndef	ASSEMBLER
+#include <mach/machine/vm_types.h>	/* vm_offset_t, for cr3 (#415) */
+
 /* get_cr4/set_cr4 are not inlined below; provided by locore or AT386 code */
 extern unsigned int	get_cr4(void);
 extern void		set_cr4(unsigned int value);
@@ -257,9 +259,19 @@ static __inline__ unsigned int get_cr2(void)
 
 #if	NCPUS > 1 && AT386
 /*
- * get_cr3 and set_cr3 are more complicated for the MPs. cr3 is where
- * the cpu number gets stored. The MP versions live in locore.s
+ * The MP versions live in locore.S.  They used to be there because cr3
+ * carried the cpu number in its low bits; #321 moved that to %gs:cpu_id and
+ * left the low bits clear for PCID, so what remains in assembly is the
+ * compare-before-write that avoids flushing the TLB for a no-op reload.
+ *
+ * #415: these are declared and not merely mentioned.  Without a prototype
+ * every caller got an implicit `int f()`, which is not a description of
+ * either one: get_cr3 returns a physical address, and two callers hand it
+ * straight to phystokv().  A signed 32-bit return is already the wrong shape
+ * for an address on this target and will be the wrong width on the next one.
  */
+extern vm_offset_t	get_cr3(void);
+extern void		set_cr3(vm_offset_t value);
 #else	/* NCPUS > 1 && AT386 */
 static __inline__ unsigned int get_cr3(void)
 {

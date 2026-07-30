@@ -5,6 +5,16 @@
 #ifndef _DMA_SUPPORT_H_
 #define _DMA_SUPPORT_H_
 
-/* Empty stub for now - DMA support not enabled */
+/*
+ * DMA support is not enabled: the real dma_zones_init() lives in
+ * dma_support.c, which this configuration does not compile, and what runs
+ * instead is the empty definition in device/device_stubs.c.
+ *
+ * #415: declared rather than left to an implicit declaration at the one call
+ * site (model_dep.c, under NPCI > 0).  The declaration is not an endorsement
+ * of the stub -- it is what lets the compiler notice if the real one ever
+ * arrives with a different shape.
+ */
+extern void	dma_zones_init(void);
 
 #endif

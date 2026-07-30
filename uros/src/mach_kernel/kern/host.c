@@ -180,7 +180,8 @@ host_processors(
 	if (count == 0)
 		panic("host_processors");
 
-	addr = KALLOC((vm_size_t) (count * sizeof(mach_port_t)), rt);
+	/* One pointer per processor, not one name (#415). */
+	addr = KALLOC(ipc_port_array_size(count), rt);
 	if (addr == 0)
 		return KERN_RESOURCE_SHORTAGE;
 
@@ -196,8 +197,7 @@ host_processors(
 
 	tp = (processor_t *) addr;
 	for (i = 0; i < count; i++)
-		((mach_port_t *) tp)[i] =
-		      (mach_port_t)convert_processor_to_port(tp[i]);
+		((ipc_port_t *) tp)[i] = convert_processor_to_port(tp[i]);
 
 	return KERN_SUCCESS;
 }
@@ -511,7 +511,8 @@ host_processor_sets(
 
 		/* do we have the memory we need? */
 
-		size_needed = actual * sizeof(mach_port_t);
+		/* One pointer per processor set, not one name (#415). */
+		size_needed = ipc_port_array_size(actual);
 		if (size_needed <= size)
 			break;
 
@@ -603,7 +604,9 @@ host_processor_sets(
 	 *	touched while holding a lock.
 	 */
 
-	addr = KALLOC((vm_size_t) sizeof(mach_port_t), rt);
+	/* One pointer, not one name (#415): the line below writes an
+	 * ipc_port_t into this. */
+	addr = KALLOC(ipc_port_array_size(1), rt);
 	if (addr == 0)
 		return KERN_RESOURCE_SHORTAGE;
 

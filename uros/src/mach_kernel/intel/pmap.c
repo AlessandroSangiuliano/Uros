@@ -3939,7 +3939,7 @@ void db_show_page(vm_offset_t pa)
 		printf(" not mapped\n");
 	for (; pv_h; pv_h = pv_h->next)
 		if (pv_h->pmap)
-			printf("%x in pmap %x\n", pv_h->va, pv_h->pmap);
+			printf("%x in pmap %p\n", pv_h->va, pv_h->pmap);
 }
 
 #endif /* MACH_KDB */

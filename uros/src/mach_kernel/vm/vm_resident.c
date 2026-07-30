@@ -2426,7 +2426,7 @@ vm_page_free_list_sort(void)
 	for (m = sort_list, npages = 0; m != VM_PAGE_NULL; m = NEXT_PAGE(m)) {
 		if (m != sort_list &&
 		    m->phys_addr <= addr) {
-			printf("m 0x%x addr 0x%x\n", m, addr);
+			printf("m %p addr 0x%x\n", m, addr);
 			panic("vm_sort_free_list");
 		}
 		addr = m->phys_addr;
@@ -2462,16 +2462,16 @@ vm_page_verify_contiguous(
 	page_count = 1;
 	for (m = NEXT_PAGE(pages); m != VM_PAGE_NULL; m = NEXT_PAGE(m)) {
 		if (m->phys_addr != prev_addr + page_size) {
-			printf("m 0x%x prev_addr 0x%x, current addr 0x%x\n",
+			printf("m %p prev_addr 0x%x, current addr 0x%x\n",
 			       m, prev_addr, m->phys_addr);
-			printf("pages 0x%x page_count %d\n", pages, page_count);
+			printf("pages %p page_count %d\n", pages, page_count);
 			panic("vm_page_verify_contiguous:  not contiguous!");
 		}
 		prev_addr = m->phys_addr;
 		++page_count;
 	}
 	if (page_count != npages) {
-		printf("pages 0x%x actual count 0x%x but requested 0x%x\n",
+		printf("pages %p actual count 0x%x but requested 0x%x\n",
 		       pages, page_count, npages);
 		panic("vm_page_verify_contiguous:  count error");
 	}

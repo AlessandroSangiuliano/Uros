@@ -10,3 +10,6 @@ uros/src/sysenter_test/sysenter_test.S
 *.console
 
 .vscode/settings.json
+
+# scripts/layout-diff.py writes its probe next to itself (#415)
+scripts/.layout-probe.c
