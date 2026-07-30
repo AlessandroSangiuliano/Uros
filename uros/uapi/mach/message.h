@@ -349,10 +349,39 @@ typedef struct
   mach_msg_descriptor_type_t	type : 8;
 } mach_msg_type_descriptor_t;
 
+/*
+ *  A port descriptor names a port; an out-of-line descriptor carries an
+ *  address.  A name is four bytes on every target and an address is not, so
+ *  the two would be different sizes if nothing were done about it — and the
+ *  padding below is what is done about it (#413).
+ *
+ *  It matters for two reasons, and only the first is obvious.  The kernel
+ *  walks the descriptors of a message as an array of the union, so they must
+ *  all be one size or the walk lands in the middle of one.  And the kernel
+ *  learns *which* kind of descriptor it is looking at by reading the `type`
+ *  byte through the generic member of that union — so that byte has to sit
+ *  at the same offset in all four structures, or a port descriptor is read
+ *  as whatever happens to be four bytes further on.
+ *
+ *  The padding is therefore derived rather than chosen: an out-of-line
+ *  descriptor spends an address and a count before its flags word, a port
+ *  descriptor spends a name, and the padding is the difference.  One word on
+ *  i386, where it is the field that has always been there; two on x86-64.
+ *
+ *  ⚠️ Written as a difference and not as `sizeof(void *)` on purpose.  The
+ *  two are the same only while a name is four bytes, and whether it stays
+ *  four bytes is an open question with a real argument on the other side
+ *  (§11.11 of the design docs: eight bits of generation is a short recycle).
+ *  Subtracting the name means the day it widens, this is already right.
+ */
+#define MACH_MSG_PORT_DESCRIPTOR_PAD					\
+	((sizeof(void *) + sizeof(mach_msg_size_t) - sizeof(mach_port_t))\
+	 / sizeof(mach_msg_size_t))
+
 typedef struct
 {
   mach_port_t			name;
-  mach_msg_size_t		pad1;
+  mach_msg_size_t		pad1[MACH_MSG_PORT_DESCRIPTOR_PAD];
   unsigned int			pad2 : 16;
   mach_msg_type_name_t		disposition : 8;
   mach_msg_descriptor_type_t	type : 8;
@@ -411,10 +440,24 @@ typedef union
 				 |= (bits))
 #endif	/* DIPC */
 
+/*
+ *  The descriptors follow the body immediately — the kernel reaches them as
+ *  `(mach_msg_descriptor_t *) (body + 1)` — so where the body ends is where
+ *  they begin, and a descriptor that begins with an address wants to begin
+ *  on an address boundary.
+ *
+ *  Hence the alignment (#413).  It costs nothing on i386, where a count and
+ *  a pointer are the same width and this is already true; on x86-64 it puts
+ *  four bytes of padding after the count and moves the descriptors from
+ *  offset 28 to offset 32.  x86 would have loaded them unaligned without
+ *  complaining, which is exactly why it is written down: the next target
+ *  will not be so forgiving, and a fault in a message walk is a hard thing
+ *  to read backwards.
+ */
 typedef struct
 {
         mach_msg_size_t msgh_descriptor_count;
-} mach_msg_body_t;
+} __attribute__((aligned(sizeof(void *)))) mach_msg_body_t;
 
 #define MACH_MSG_BODY_NULL (mach_msg_body_t *) 0
 #define MACH_MSG_DESCRIPTOR_NULL (mach_msg_descriptor_t *) 0
@@ -523,6 +566,53 @@ typedef struct
         mach_msg_header_t       header;
         mach_msg_body_t         body;
 } mach_msg_base_t;
+
+/*
+ *  The layout, said twice (#413).
+ *
+ *  Everything above is arithmetic the compiler performs — widths of members,
+ *  padding, alignment — and arithmetic performed silently is arithmetic
+ *  nobody checks.  These are the same claims stated as conditions, so a
+ *  change that moves a field fails the build of every consumer instead of
+ *  producing messages that a server reads slightly wrong.
+ *
+ *  ⚠️ What they cannot state is where the `type` byte lands, because a
+ *  bit-field has no address to take.  That one is asserted where it can be:
+ *  at run time, by writing through each descriptor and looking at the bytes
+ *  (x86_64/boot/boot_c.c).
+ */
+_Static_assert(sizeof(mach_msg_header_t) == 24,
+	"the message header is six 32-bit fields on every target");
+_Static_assert(sizeof(mach_msg_descriptor_t) == sizeof(void *) + 8,
+	"a descriptor is an address, a 32-bit count and a 32-bit flags word");
+_Static_assert(_Alignof(mach_msg_descriptor_t) == sizeof(void *),
+	"a descriptor begins with an address and is aligned like one");
+_Static_assert(sizeof(mach_msg_port_descriptor_t)
+	       == sizeof(mach_msg_descriptor_t),
+	"descriptors are walked as an array: they must all be one size");
+_Static_assert(sizeof(mach_msg_ool_descriptor_t)
+	       == sizeof(mach_msg_descriptor_t),
+	"descriptors are walked as an array: they must all be one size");
+_Static_assert(sizeof(mach_msg_ool_ports_descriptor_t)
+	       == sizeof(mach_msg_descriptor_t),
+	"descriptors are walked as an array: they must all be one size");
+_Static_assert(sizeof(mach_msg_type_descriptor_t)
+	       == sizeof(mach_msg_descriptor_t),
+	"descriptors are walked as an array: they must all be one size");
+_Static_assert(__builtin_offsetof(mach_msg_ool_descriptor_t, address) == 0,
+	"an out-of-line descriptor leads with its address");
+_Static_assert(__builtin_offsetof(mach_msg_ool_descriptor_t, size)
+	       == sizeof(void *),
+	"the size follows the whole address, not part of it");
+_Static_assert(__builtin_offsetof(mach_msg_port_descriptor_t, name) == 0,
+	"a port descriptor leads with the name, where an address would be");
+_Static_assert(sizeof(mach_port_t) <= sizeof(void *) + sizeof(mach_msg_size_t),
+	"a name wider than an address and a count leaves no room to pad to");
+_Static_assert((sizeof(void *) + sizeof(mach_msg_size_t) - sizeof(mach_port_t))
+	       % sizeof(mach_msg_size_t) == 0,
+	"the padding must come out a whole number of words");
+_Static_assert(sizeof(mach_msg_base_t) % sizeof(void *) == 0,
+	"the descriptors begin where the body ends, and must land aligned");
 
 typedef	unsigned int mach_msg_trailer_type_t;
 

@@ -19,7 +19,7 @@ add_custom_command(
     -header ${SERVICE_HEADER}
     -user ${SERVICE_USER_C}
     -server ${SERVICE_SERVER_C}
-  DEPENDS migcom ${SERVICE_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${SERVICE_DEFS}
   COMMENT "MIG: service.defs"
   VERBATIM
 )

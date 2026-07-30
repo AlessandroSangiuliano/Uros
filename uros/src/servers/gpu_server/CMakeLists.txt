@@ -72,7 +72,7 @@ add_custom_command(
     -user ${DM_USER_C}
     -server ${DM_SERVER_C}
     ${DEVICE_MASTER_DEFS}
-  DEPENDS migcom ${DEVICE_MASTER_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEVICE_MASTER_DEFS}
   COMMENT "MIG: device_master.defs (user stubs for gpu_server modules)"
   VERBATIM
 )
@@ -101,7 +101,7 @@ add_custom_command(
     -user ${GPU_USER_C}
     -server ${GPU_SERVER_C}
     ${GPU_DEFS}
-  DEPENDS migcom ${GPU_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${GPU_DEFS}
   COMMENT "MIG: gpu_server.defs (server stubs for gpu_server)"
   VERBATIM
 )

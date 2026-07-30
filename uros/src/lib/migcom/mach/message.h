@@ -34,63 +34,22 @@ typedef unsigned int mach_msg_descriptor_type_t;
 #define MACH_MSG_OOL_PORTS_DESCRIPTOR	2
 
 /*
- * Basic descriptor and body structures (simplified for host tools).
+ * There used to be host-side definitions of the descriptors, the body and
+ * the header here, with the address fields declared uint32_t so that the
+ * host would measure them and get the i386 answer.  A comment explained the
+ * trick and pointed at #416 as the place where migcom would learn what it
+ * was generating for.
  *
- * IMPORTANT: Use uint32_t instead of void* for address/pointer fields.
- * MIG runs on the HOST (e.g. x86_64) but generates code for a 32-bit
- * TARGET (i386).  If void* is used, sizeof(mach_msg_descriptor_t) is
- * 16 on a 64-bit host but only 12 on i386, causing MIG to emit wrong
- * msgh_size constants.  Using uint32_t keeps descriptors 12 bytes on
- * any host, matching the 32-bit Mach IPC wire format.
+ * It has learned: every width now comes from the target model in target.c,
+ * and nothing in this tool measures a host type to describe a message.  So
+ * the definitions are gone rather than merely unused.  A structure shaped
+ * like the target, sitting in a header named message.h, answers sizeof()
+ * with a plausible number for whoever asks next -- and plausible is exactly
+ * how the i386 width survived thirty years without being questioned.
+ *
+ * What is left is what migcom actually reads: the names of the descriptor
+ * kinds, which are wire constants and the same on every target.
  */
-#include <stdint.h>
-
-typedef struct {
-    mach_port_t name;
-    mach_msg_size_t pad1;
-    unsigned int pad2 : 16;
-    mach_msg_type_name_t disposition : 8;
-    mach_msg_descriptor_type_t type : 8;
-} mach_msg_port_descriptor_t;
-
-typedef struct {
-    uint32_t address;
-    mach_msg_size_t size;
-    unsigned int deallocate : 8;
-    unsigned int copy : 8;
-    unsigned int pad1 : 8;
-    mach_msg_descriptor_type_t type : 8;
-} mach_msg_ool_descriptor_t;
-
-typedef struct {
-    uint32_t address;
-    mach_msg_size_t count;
-    unsigned int deallocate : 8;
-    unsigned int copy : 8;
-    mach_msg_type_name_t disposition : 8;
-    mach_msg_descriptor_type_t type : 8;
-} mach_msg_ool_ports_descriptor_t;
-
-typedef union {
-    mach_msg_port_descriptor_t port;
-    mach_msg_ool_descriptor_t out_of_line;
-    mach_msg_ool_ports_descriptor_t ool_ports;
-    /* minimal type descriptor */
-} mach_msg_descriptor_t;
-
-typedef struct {
-    mach_msg_size_t msgh_descriptor_count;
-} mach_msg_body_t;
-
-/* Message header used by mig */
-typedef struct {
-    mach_msg_bits_t msgh_bits;
-    mach_msg_size_t msgh_size;
-    mach_port_t msgh_remote_port;
-    mach_port_t msgh_local_port;
-    mach_msg_size_t msgh_reserved;
-    mach_msg_id_t msgh_id;
-} mach_msg_header_t;
 
 /* Polymorphic message type */
 #define MACH_MSG_TYPE_POLYMORPHIC	((mach_msg_type_name_t) -1)

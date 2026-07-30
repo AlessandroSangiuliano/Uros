@@ -27,7 +27,7 @@ add_custom_command(
     -user ${EP_USER_C}
     -server ${EP_SERVER_C}
     ${EP_DEFS}
-  DEPENDS migcom ${EP_DEFS} ${CMAKE_CURRENT_SOURCE_DIR}/flipc2_endpoint_types.h
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${EP_DEFS} ${CMAKE_CURRENT_SOURCE_DIR}/flipc2_endpoint_types.h
   COMMENT "MIG: flipc2_endpoint.defs"
   VERBATIM
 )

@@ -1010,6 +1010,178 @@ already had interrupt-stack slots for unrelated reasons; this is the fourth.
 
 ---
 
+### 11.11 The message ABI at sixty-four bits
+
+**One decision decides the rest: `natural_t` does not widen (#413).** The
+i386 header defines it as whatever the register size is, and uses it both for
+plain unsigned numbers and for casting between integers and pointers. Those
+are the same type there and two types here. Taken literally it would make
+`natural_t` sixty-four bits — which is not one typedef but `mach_port_t`,
+`mach_msg_size_t`, `mach_msg_type_number_t`, every count, every id and every
+sequence number, doubling the message header and every port array in every
+message to express numbers that were never near four billion.
+
+So `natural_t` keeps its width and gives up its second job. An address is a
+`vm_offset_t` and nothing else:
+
+| type | i386 | x86-64 | why |
+|---|---|---|---|
+| `natural_t`, `integer_t` | 32 | 32 | numbers the interfaces exchange |
+| `mach_port_t` | 32 | 32 | a name in a task's port space, not a pointer |
+| `mach_msg_size_t` | 32 | 32 | no message approaches four gigabytes |
+| `boolean_t`, `kern_return_t` | 32 | 32 | fields in messages; width is wire format |
+| `vm_offset_t`, `vm_address_t`, `vm_size_t` | 32 | **64** | an address, and a distance between two |
+
+**On i386 the last row was the same type as the first, and MI code was
+entitled to assume it.** Every place that stored an address in a `natural_t`,
+or printed a `vm_offset_t` with `%x`, still compiles and is now wrong. That is
+what #415 goes looking for, and it is why the split is written down rather
+than discovered.
+
+**The message header does not move.** Six 32-bit fields, twenty-four bytes,
+on both targets — the one part of the wire format that a widening pointer
+never touches, because nothing in it is a pointer.
+
+#### What the table does not settle: how wide a port name should be
+
+Keeping `natural_t` narrow is not the same as deciding that everything made
+of it should stay narrow, and one of them has an argument on the other side.
+A name today is **24 bits of index and 8 bits of generation** — and the
+generation is worth less than that says. `IE_BITS_GEN_ONE` is `0x04000000`,
+which advances the eight-bit field by four, so it takes **64 distinct
+values**, and the low two bits of every kernel-allocated name are always
+zero. They were reserved for a fast-path tag on port names that is not
+implemented: the generator emits the test for it disabled, as
+`if (0 /* Should be: !(x & 0x3) XXX */)`.
+
+So the real recycle window is **64 allocate/deallocate cycles at the same
+slot**, after which a stale name comes back meaning a different port. That is
+a capability question, not a capacity one, and it is the only entry in the
+table above where more bits buy something real.
+
+**How many index bits are actually reachable is a measured number, not
+`2^24`.** A task's names come from its entry table, and `ipc_table_fill`
+grows that table through 511 sizes and stops: **967,168 entries on i386 and
+484,608 on x86-64** — the same 14.8 MiB of table, half as many entries
+because an entry is twice the size. Twenty bits of index covers the first,
+nineteen the second. **Everything above bit 20 is unreachable**, which is
+what makes the trade look the way it does.
+
+| split | index limit | recycle window | what it costs |
+|---|---|---|---|
+| 24 / 8 (today) | 16.7M — table stops at 967k | **64** | — |
+| 22 / 10 | 4.2M | **1024** (×16) | the disabled low-bit tag |
+| 20 / 12 | 1.05M | 4096 (×64) | that, plus 2 bits from `ie_bits` |
+| 16 / 16 | **65,536** | 65,536 | **a real cut**: ~967k ports per task → 65k |
+
+**The second constraint is `ie_bits`, and it is tighter than the name.** The
+generation lives there too: 16 bits of user-references, 5 of capability type,
+1 for collisions, 8 for generation — and bits 21 and 22 free. So **ten** bits
+of generation fit with nothing displaced; twelve would take two bits from the
+user-reference count, dropping its ceiling from 65,535 to 16,383.
+
+**Taken: 22 bits of index and 10 of generation, incrementing by one.**
+Sixteen times today's window, no bit spent anywhere, and the index given up
+was never reachable. What is given up is the low-bit tag, which is disabled
+at the generator.
+
+**It is not a compromise, because it is per-target.** The number that bounds
+it — the table ceiling — is per-target already, so the split lives beside the
+widths in `mach/machine/port_name.h`, exactly as `vm_offset_t` does. Each
+target states two things, how many bits are generation and how many of them
+are held still, and everything else is derived from those: the name macros in
+`mach/port.h`, and in `ipc/ipc_entry.h` the generation mask, its increment,
+and **the collision flag, which is placed immediately below the generation
+field rather than at a fixed bit** — it is what the generation grows into.
+i386 comes out of those formulas bit for bit as it always was
+(`0xff000000`, `0x04000000`, `0x00800000`, `0x007fffff`), which was checked by
+rebuilding it: 0 of 205 kernel objects changed in `.text`, `.data` or
+`.rodata`.
+
+**This does not close the sixty-four-bit question, it de-urgents it.** A
+wider name would buy a window of millions rather than a thousand, for eight
+bytes on every message header and a restructuring of `ie_bits`. Worth
+deciding on its own terms, once there is something to measure it with (#431).
+
+**Widening `natural_t` is the expensive way to buy it.** The header goes from
+24 bytes to 48 and every message pays the copy, to widen counts and sizes
+that had no reason to grow. **Widening `mach_port_t` alone is the cheap way:**
+the header goes to 32, and the message stops growing there — the port
+descriptor's padding *shrinks* to one word, because the padding is the space
+an address needs and a name does not, so a 16-byte descriptor comes out
+either way. That is why the padding is written as a subtraction rather than
+as `sizeof(void *)`: the day a name widens, `mach/message.h` is already
+right, and the test that measures the type byte already covers it.
+
+**Not decided here, and for a reason that is not timidity.** The generation
+does not live only in the name: it is packed into `ie_bits` in
+`ipc/ipc_entry.h` (eight bits at `0xff000000`), and `ipc_entry.c` orders its
+tree assuming the generation is in the low bits of the name. That is 138 uses
+across ten machine-independent files, none of which compiles for x86-64 yet —
+so changing it today means untested surgery whose only running configuration
+is the one it would break. It belongs with #416/#415, when the tree builds
+and the change can be run.
+
+**A cheaper option deserves weighing at the same time:** rebalancing the
+split — 20 bits of index and 12 of generation, or 16 and 16 — costs *zero*
+bytes and multiplies the recycle window by 16 to 256. It is a mitigation
+rather than an answer, but it is free, and "free" changes what the wider name
+has to justify.
+
+**A descriptor is an address, a 32-bit count and a 32-bit flags word**, so it
+is twelve bytes on i386 and sixteen here. All four descriptor structures must
+be exactly that size, for two reasons and only the first is obvious: the
+kernel walks the descriptors of a message as an array of the union, so a
+short one puts every later step inside the previous descriptor; and it learns
+*which* kind it is holding by reading the `type` byte through the generic
+member, so that byte must sit at the same offset in all of them.
+
+A port descriptor carries a name where the others carry an address, so it is
+padded — by exactly the space an out-of-line descriptor spends on the part of
+its address a name does not need. One word on i386, two here, and neither
+target is named in the declaration:
+
+```c
+mach_msg_size_t pad1[sizeof(void *) / sizeof(mach_msg_size_t)];
+```
+
+**The descriptors begin where the body ends**, because that is how the kernel
+finds them — `(mach_msg_descriptor_t *) (body + 1)`. They begin with an
+address, so the body is aligned like one: four bytes of padding after the
+count on x86-64, moving the first descriptor from offset 28 to 32, and
+nothing at all on i386 where a count and a pointer are the same width. x86
+would have loaded them unaligned without complaining; the next target will
+not be so forgiving, and a fault inside a message walk is a hard thing to
+read backwards.
+
+**Checked in three places, deliberately.** The sizes and offsets are repeated
+as `_Static_assert` in `mach/message.h`, so a change that moves a field fails
+the build of every consumer. What no assertion can state is where the `type`
+byte lands — a bit-field has no address to take — so that is measured at run
+time on every x86-64 boot, by writing through each descriptor and looking at
+the bytes, and by telling a port descriptor what it is and asking the walk
+what it heard. And the widths are stated a third time in
+`mach/machine/machine_types.defs`, where the stub generator can read them:
+the header decides how wide a field is when the compiler lays out a message,
+the `.defs` decides how wide `migcom` thinks it is when it computes offsets
+and message sizes, and disagreement between them is not a build failure but a
+server reading a field from the wrong place.
+
+**⚠️ What `migcom` still owes (#416): alignment, not width.** It adds field
+widths; C adds widths *and* padding. Widening `vm_address_t` moves
+`vm_allocate`'s reply from 40 bytes to 44 in the generator's arithmetic, and
+the compiler makes it 48 — the 64-bit field after `kern_return_t` is aligned
+to eight and the generator does not know it. Measured on this tree, not
+predicted.
+
+**No 32-bit userland on a 64-bit kernel.** A compatibility layer is a project
+of its own — a second marshalling path in the kernel, a second descriptor
+layout, and a per-task decision on every message — and pretending it might
+arrive later costs design decisions everywhere in the meantime. The answer for
+this release is no, recorded here so nobody builds half of one by accident.
+
+---
+
 ## 12. Future roadmap
 
 ### 12.1 x86-64 migration (v0.3.0 theme)

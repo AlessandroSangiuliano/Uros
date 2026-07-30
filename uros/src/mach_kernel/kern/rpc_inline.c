@@ -713,7 +713,7 @@ thread_pool_get_act(ipc_port_t pool_port)
 #if	MACH_ASSERT
 	assert(thread_pool != THREAD_POOL_NULL);
 	if (watchacts & WA_ACT_LNK)
-		printf("thread_pool_block: %x, waiting=%d\n",
+		printf("thread_pool_block: %p, waiting=%d\n",
 		       thread_pool, thread_pool->waiting);
 #endif
 
@@ -734,7 +734,7 @@ thread_pool_get_act(ipc_port_t pool_port)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)
-		printf("thread_pool_block: return %x, next=%x\n",
+		printf("thread_pool_block: return %p, next=%p\n",
 		       thr_act, thread_pool->thr_acts);
 #endif
 	return thr_act;
@@ -753,7 +753,7 @@ act_attach(
 #if	MACH_ASSERT
 	assert(thread == current_thread() || thread->top_act == THR_ACT_NULL);
 	if (watchacts & WA_ACT_LNK)
-		printf("act_attach(thr_act %x(%d) thread %x(%d) mask %d)\n",
+		printf("act_attach(thr_act %p(%d) thread %p(%d) mask %d)\n",
 		       thr_act, thr_act->ref_count, thread, thread->ref_count,
 		       init_alert_mask);
 #endif	/* MACH_ASSERT */
@@ -787,7 +787,7 @@ act_detach(
 
 #if     MACH_ASSERT
         if (watchacts & (WA_EXIT|WA_ACT_LNK))
-                printf("act_detach: thr_act %x(%d), thrd %x(%d) task=%x(%d)\n",
+                printf("act_detach: thr_act %p(%d), thrd %p(%d) task=%p(%d)\n",
                        cur_act, cur_act->ref_count,
                        cur_thread, cur_thread->ref_count,
                        cur_act->task,

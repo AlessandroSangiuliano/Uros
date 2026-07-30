@@ -30,7 +30,7 @@ macro(mig_all DEFS_FILE STEM)
       -user    ${_usrC}
       -server  ${_srvC}
       ${_defs}
-    DEPENDS migcom ${_defs}
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${_defs}
     COMMENT "MIG: ${STEM}.defs (name_server)"
     VERBATIM
   )

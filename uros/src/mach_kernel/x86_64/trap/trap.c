@@ -5,9 +5,11 @@
  * x86-64 trap and interrupt entry (#409, MD contract 4/6).
  */
 
+#include <stdarg.h>
 #include <stdint.h>
 
 #include <cpu/desc.h>
+#include <ddb/cons.h>
 #include <cpu/lapic.h>
 #include <cpu/regs.h>
 #include <cpu/spl.h>
@@ -394,10 +396,14 @@ static void backtrace(uint64_t rbp)
 	}
 }
 
-void panic(const char *what)
+void panic(const char *what, ...)
 {
+	va_list ap;
+
 	tputs("\r\nUrMach x86-64: panic: ");
-	tputs(what);
+	va_start(ap, what);
+	cons_vprintf(what, ap);
+	va_end(ap);
 	tputs("\r\n");
 
 	/*

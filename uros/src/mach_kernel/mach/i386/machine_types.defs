@@ -50,6 +50,23 @@ type natural_t = unsigned32;
  */
 type integer_t = int32;
 
+/*
+ * An address, and a distance between two addresses (#413).
+ *
+ * These arrived here from mach_types.defs, which is machine-independent and
+ * declared all three to be natural_t.  On this target that is true and cost
+ * nothing to say in the wrong place: an address and a natural_t are both
+ * thirty-two bits, so the declaration was never wrong and never checked.
+ *
+ * It is wrong on a target where an address is wider, and a generator reading
+ * a machine-independent file has no way to find that out.  So the three
+ * moved to where the width is known, and say the width rather than borrowing
+ * it from a type that means something else.
+ */
+type vm_address_t = unsigned32;
+type vm_offset_t = unsigned32;
+type vm_size_t = unsigned32;
+
 
 #if	MACH_IPC_COMPAT
 /*

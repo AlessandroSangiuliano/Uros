@@ -131,6 +131,114 @@ wait_for_cap_server(void)
     }
 }
 
+/*
+ * Test [6]: a complex message the kernel must refuse halfway (#442).
+ *
+ * ipc_kmsg_copyin_body translates the descriptors one at a time and calls
+ * ipc_kmsg_clean_partial when one of them is bad, to give back the rights
+ * it has already taken.  Nothing in this tree exercised that path: a boot
+ * plus the whole benchmark suite reaches it zero times, so any claim about
+ * it was a claim about code that had never run.
+ *
+ * The message below carries two port descriptors.  The first names a port
+ * this task really owns, so the kernel acquires a right for it; the second
+ * names nothing, so the translation fails with the first already done.
+ *
+ * What is being checked is not the error code alone -- it is that the port
+ * survives.  If the unwind released the first right twice the port would be
+ * gone, and if it released it not at all the right would leak; sending on
+ * the same port afterwards and receiving that message back says the count
+ * came home.
+ */
+static int
+bad_descriptor_unwind(void)
+{
+    typedef struct {
+        mach_msg_header_t          head;
+        mach_msg_body_t            body;
+        mach_msg_port_descriptor_t good;
+        mach_msg_port_descriptor_t bad;
+    } bad_msg_t;
+
+    typedef struct {
+        mach_msg_header_t   head;
+        mach_msg_trailer_t  trailer;
+    } plain_recv_t;
+
+    mach_port_t   port = MACH_PORT_NULL;
+    bad_msg_t     msg;
+    plain_recv_t  back;
+    kern_return_t kr;
+    int           ok = 1;
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [6] port allocate FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+    kr = mach_port_insert_right(mach_task_self(), port, port,
+                                MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [6] insert right FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+
+    memset(&msg, 0, sizeof(msg));
+    msg.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) |
+                         MACH_MSGH_BITS_COMPLEX;
+    msg.head.msgh_size        = sizeof(msg);
+    msg.head.msgh_remote_port = port;
+    msg.head.msgh_local_port  = MACH_PORT_NULL;
+    msg.head.msgh_id          = 442;
+    msg.body.msgh_descriptor_count = 2;
+
+    msg.good.name        = port;
+    msg.good.disposition = MACH_MSG_TYPE_MAKE_SEND;
+    msg.good.type        = MACH_MSG_PORT_DESCRIPTOR;
+
+    /* A name no task holds: the generation bits alone make it impossible. */
+    msg.bad.name         = (mach_port_t) 0xdeadbeefu;
+    msg.bad.disposition  = MACH_MSG_TYPE_COPY_SEND;
+    msg.bad.type         = MACH_MSG_PORT_DESCRIPTOR;
+
+    kr = mach_msg(&msg.head, MACH_SEND_MSG, sizeof(msg), 0,
+                  MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr == MACH_MSG_SUCCESS) {
+        printf("cap_test: [6] bad descriptor was ACCEPTED — FAIL\n");
+        return 0;
+    }
+    printf("cap_test: [6] bad descriptor rejected kr=0x%x\n", (unsigned)kr);
+
+    /* The port must still be usable, exactly once. */
+    memset(&back, 0, sizeof(back));
+    back.head.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    back.head.msgh_size        = sizeof(back.head);
+    back.head.msgh_remote_port = port;
+    back.head.msgh_local_port  = MACH_PORT_NULL;
+    back.head.msgh_id          = 443;
+
+    kr = mach_msg(&back.head, MACH_SEND_MSG, sizeof(back.head), 0,
+                  MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr != MACH_MSG_SUCCESS) {
+        printf("cap_test: [6] port did not survive the unwind kr=0x%x\n",
+               (unsigned)kr);
+        ok = 0;
+    } else {
+        kr = mach_msg(&back.head, MACH_RCV_MSG, 0, sizeof(back),
+                      port, 2000, MACH_PORT_NULL);
+        if (kr != MACH_MSG_SUCCESS || back.head.msgh_id != 443) {
+            printf("cap_test: [6] follow-up receive FAIL kr=0x%x id=%d\n",
+                   (unsigned)kr, (int)back.head.msgh_id);
+            ok = 0;
+        } else {
+            printf("cap_test: [6] port survived the unwind: OK\n");
+        }
+    }
+
+    (void)mach_port_destroy(mach_task_self(), port);
+    return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -509,6 +617,9 @@ main(int argc, char **argv)
             }
         }
     }
+
+    if (!bad_descriptor_unwind())
+        pass = 0;
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");

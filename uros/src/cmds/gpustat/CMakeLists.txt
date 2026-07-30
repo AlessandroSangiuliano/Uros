@@ -18,7 +18,7 @@ add_custom_command(
     -header ${GPU_USER_H}
     -user ${GPU_USER_C}
     ${GPU_DEFS}
-  DEPENDS migcom ${GPU_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${GPU_DEFS}
   COMMENT "MIG: gpu_server.defs (user stubs for gpustat)"
   VERBATIM
 )

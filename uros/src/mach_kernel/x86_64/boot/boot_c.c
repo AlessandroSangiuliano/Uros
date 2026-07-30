@@ -23,6 +23,8 @@
 
 #include <stdint.h>
 
+#include <mach/message.h>
+
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
 #include <cpu/desc.h>
@@ -3182,6 +3184,353 @@ static int wait_for_paranoid(void)
 	return 0;
 }
 
+/*
+ * The message ABI, measured on the target that changed it (#413).
+ *
+ * mach/message.h states the layout twice: once as declarations the compiler
+ * turns into offsets, and once as _Static_asserts that check the offsets it
+ * chose.  Both are compile-time, and both stop short of the one fact the
+ * kernel depends on most: where the `type` byte of a descriptor lands.
+ *
+ * That byte is the discriminator.  Every descriptor in a message is walked
+ * as a member of one union, and which member is meant is decided by reading
+ * `type` through the generic one.  It is a bit-field, so it has no address
+ * to take and no assertion can name its offset — and it is precisely the
+ * field that moved, because the padding around it is what makes descriptors
+ * the same size when a name and an address are not.
+ *
+ * So it is measured: write a value the field can hold, look at the bytes,
+ * report where it went.  Then the operation itself, in both directions — a
+ * descriptor filled with zeros that is told it is an out-of-line descriptor
+ * and must read back as one, and a descriptor filled with ones that is told
+ * it is a port descriptor (whose code is zero) and must read back as one
+ * too.  One direction alone would pass on a field that was never written.
+ */
+#define MSG_ABI_MARKER	0x7f
+
+static void msg_bytes_set(volatile unsigned char *b, unsigned n,
+			  unsigned char v)
+{
+	for (unsigned i = 0; i < n; i++)
+		b[i] = v;
+}
+
+static unsigned msg_marker_byte(const volatile unsigned char *b, unsigned n)
+{
+	for (unsigned i = 0; i < n; i++)
+		if (b[i] == MSG_ABI_MARKER)
+			return i;
+	return ~0u;
+}
+
+/*
+ * The formatter panic() prints through (#415).
+ *
+ * panic became variadic because the machine-independent tree has always
+ * declared it that way and called it that way; what it prints through is new
+ * code, and new code under the last message the machine will ever send is
+ * worth checking before it is needed.  Each case is a format, its arguments,
+ * and the exact characters that must come out -- compared, not eyeballed,
+ * because "looks right on the serial line" is how a missing digit survives.
+ */
+static int str_equal(const char *a, const char *b)
+{
+	while (*a && *a == *b) {
+		a++;
+		b++;
+	}
+	return *a == *b;
+}
+
+/*
+ * The same call without the format attribute, for the cases that are
+ * deliberately malformed.  Three of them below are the point of the exercise
+ * -- a null %s, a conversion the formatter does not implement, a format that
+ * stops mid-conversion -- and cons_printf now refuses to compile exactly
+ * those, which is the attribute doing its job rather than getting in the way.
+ * Routing them through a pointer the compiler cannot fold says "this one is
+ * meant to be wrong" in a way that a suppression pragma would not.
+ */
+static void fmt_unchecked(const char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	cons_vprintf(fmt, ap);
+	va_end(ap);
+}
+
+static void panic_format_selftest(void)
+{
+	char got[80];
+	unsigned checked = 0, wrong = 0;
+
+	/*
+	 * Wrapped in a macro so each case reads as one line: what was asked
+	 * for, and what must come back.  The capture is started and stopped
+	 * around a single call, so a case that writes nothing is visible as an
+	 * empty result rather than as the previous case's leftovers.
+	 */
+#define FMT_CHECK(want)							\
+	do {								\
+		(void)cons_capture_end();				\
+		checked++;						\
+		if (!str_equal(got, want)) {				\
+			wrong++;					\
+			kputs("UrMach x86-64:   format WRONG: got \"");	\
+			kputs(got);					\
+			kputs("\" want \"");				\
+			kputs(want);					\
+			kputs("\"\r\n");				\
+		}							\
+	} while (0)
+
+#define FMT_CASE(want, ...)						\
+	do {								\
+		cons_capture_begin(got, sizeof(got));			\
+		cons_printf(__VA_ARGS__);				\
+		FMT_CHECK(want);					\
+	} while (0)
+
+/* Deliberately malformed: see fmt_unchecked above. */
+#define FMT_CASE_BAD(want, ...)						\
+	do {								\
+		cons_capture_begin(got, sizeof(got));			\
+		fmt_unchecked(__VA_ARGS__);				\
+		FMT_CHECK(want);					\
+	} while (0)
+
+	FMT_CASE("plain", "plain");
+	FMT_CASE("a string here", "a %s here", "string");
+	FMT_CASE_BAD("(null)", "%s", (const char *)0);
+	FMT_CASE("x", "%c", 'x');
+	FMT_CASE("0", "%d", 0);
+	FMT_CASE("-1", "%d", -1);
+	FMT_CASE("2147483647", "%d", 2147483647);
+	FMT_CASE("-2147483648", "%d", -2147483647 - 1);
+	FMT_CASE("4294967295", "%u", 4294967295u);
+	FMT_CASE("0000002a", "%x", 42u);
+	FMT_CASE("ffffffff", "%x", 4294967295u);
+	FMT_CASE("100%", "100%%");
+	FMT_CASE("a=1 b=two c=00000003", "a=%d b=%s c=%x", 1, "two", 3u);
+
+	/*
+	 * The reason the length modifiers exist.  An address on this target is
+	 * sixty-four bits: %x prints the low half and says nothing about the
+	 * half it dropped, which is a panic reporting a pointer that does not
+	 * exist.  Both are checked so the difference is a fact and not a
+	 * recollection.
+	 */
+	FMT_CASE("89abcdef", "%x", (unsigned int)0x0123456789abcdefUL);
+	FMT_CASE("0123456789abcdef", "%lx", 0x0123456789abcdefUL);
+	FMT_CASE("-9223372036854775808", "%ld", -9223372036854775807L - 1);
+	FMT_CASE("0x0000000012345678", "%p", (void *)0x12345678UL);
+
+	/*
+	 * A conversion the formatter does not implement must be visible rather
+	 * than swallowed: its argument cannot be stepped over without knowing
+	 * how wide it is, so everything after it would be read from the wrong
+	 * place.  Saying so is the only honest option left.
+	 */
+	FMT_CASE_BAD("q=%q <unsupported conversion, rest dropped>", "q=%q done", 1);
+
+	/* A format ending mid-conversion must not read past the string. */
+	FMT_CASE_BAD("end%", "end%");
+
+#undef FMT_CASE_BAD
+#undef FMT_CASE
+#undef FMT_CHECK
+
+	kputs("UrMach x86-64: ");
+	kputdec(checked);
+	kputs(" panic format cases, ");
+	kputdec(wrong);
+	kputs(wrong == 0 ? " wrong\r\n" : " WRONG\r\n");
+}
+
+static void msg_abi_selftest(void)
+{
+	/*
+	 * A message the way one is actually shaped: the fixed part, then the
+	 * descriptors.  Declaring it as a structure lets the compiler place
+	 * the descriptors, so the check below compares the placement it chose
+	 * against the arithmetic the kernel performs to find them.
+	 */
+	static struct {
+		mach_msg_base_t		base;
+		mach_msg_descriptor_t	dsc[2];
+	} msg;
+	union {
+		mach_msg_descriptor_t	d;
+		volatile unsigned char	b[sizeof(mach_msg_descriptor_t)];
+	} u;
+	const unsigned n = (unsigned)sizeof(mach_msg_descriptor_t);
+	const mach_msg_descriptor_t *walked;
+	unsigned at_port, at_ool, at_ool_ports, at_generic;
+	unsigned told_ool, told_port;
+
+	kputs("UrMach x86-64: message header ");
+	kputdec(sizeof(mach_msg_header_t));
+	kputs(" bytes, body ");
+	kputdec(sizeof(mach_msg_body_t));
+	kputs(", descriptor ");
+	kputdec(n);
+	kputs(sizeof(mach_msg_header_t) == 24 && sizeof(mach_msg_body_t) == 8
+	      && n == 16
+	      ? " — the 64-bit layout\r\n"
+	      : " — NOT the 64-bit layout\r\n");
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.port.type = MSG_ABI_MARKER;
+	at_port = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.out_of_line.type = MSG_ABI_MARKER;
+	at_ool = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.ool_ports.type = MSG_ABI_MARKER;
+	at_ool_ports = msg_marker_byte(u.b, n);
+
+	msg_bytes_set(u.b, n, 0);
+	u.d.type.type = MSG_ABI_MARKER;
+	at_generic = msg_marker_byte(u.b, n);
+
+	kputs("UrMach x86-64: descriptor type byte at ");
+	kputdec(at_port);
+	kputs(" ");
+	kputdec(at_ool);
+	kputs(" ");
+	kputdec(at_ool_ports);
+	kputs(" ");
+	kputdec(at_generic);
+	kputs(at_port == n - 1 && at_ool == n - 1 && at_ool_ports == n - 1
+	      && at_generic == n - 1
+	      ? " — all four in the last byte\r\n"
+	      : " — the four descriptors DISAGREE\r\n");
+
+	/* Zeros, then a non-zero kind: the walk must see the kind. */
+	msg_bytes_set(u.b, n, 0);
+	u.d.port.name = 0x1234;
+	u.d.port.disposition = MACH_MSG_TYPE_MOVE_SEND;
+	u.d.port.type = MACH_MSG_OOL_DESCRIPTOR;
+	told_ool = u.d.type.type;
+
+	/* Ones, then the kind whose code is zero: the walk must see zero. */
+	msg_bytes_set(u.b, n, 0xff);
+	u.d.port.type = MACH_MSG_PORT_DESCRIPTOR;
+	told_port = u.d.type.type;
+
+	kputs("UrMach x86-64: a port descriptor told the walk ");
+	kputdec(told_ool);
+	kputs(" and ");
+	kputdec(told_port);
+	kputs(told_ool == MACH_MSG_OOL_DESCRIPTOR
+	      && told_port == MACH_MSG_PORT_DESCRIPTOR
+	      ? " — it was heard both ways\r\n"
+	      : " — the walk read the WRONG byte\r\n");
+
+	/*
+	 * Where the descriptors begin.  The kernel does not look this up: it
+	 * takes the address just past the body and calls it the first
+	 * descriptor.  If the compiler put them anywhere else, every message
+	 * with a descriptor in it is read from four bytes off.
+	 */
+	walked = (const mach_msg_descriptor_t *)(&msg.base.body + 1);
+
+	kputs("UrMach x86-64: descriptors begin at ");
+	kputdec((uint64_t)((const char *)&msg.dsc[0] - (const char *)&msg));
+	kputs(", the walk lands ");
+	kputdec((uint64_t)((const char *)walked - (const char *)&msg));
+	kputs(walked == &msg.dsc[0]
+	      && ((uintptr_t)walked % sizeof(void *)) == 0
+	      ? " — same place, and aligned like the address it starts with\r\n"
+	      : " — the walk and the layout DISAGREE\r\n");
+}
+
+/*
+ * How a port name divides, measured (#413).
+ *
+ * The split is machine-dependent now, and this target's is not i386's: 22
+ * bits of index and 10 of generation, against 24 and 8. The generation is the
+ * number of times a slot can be handed out before a name repeats, which is
+ * what a task holding a stale name has to lose a race against — so the two
+ * bits come off an index whose top four were never reachable (the entry table
+ * stops at 484,608 here) and go somewhere they are worth something.
+ *
+ * What is checked is that the shifts and masks compose: every name the kernel
+ * can build must come apart into the index and generation it was built from.
+ * A split is three macros that must agree, and they are written in terms of
+ * one width precisely so they cannot disagree — this establishes that they
+ * do not, rather than that they were meant not to.
+ *
+ * ⚠️ The other half of the split lives in ipc/ipc_entry.h, which this target
+ * does not compile yet: the generation is stored in an entry's bits as well,
+ * and a name wider than that field would carry a generation the entry cannot
+ * hold. Those checks are static assertions in that header — they run for
+ * i386 today and for this target the day the machine-independent tree builds.
+ */
+static void port_name_selftest(void)
+{
+	const uint32_t index_max = (1u << (32 - MACH_PORT_GEN_BITS)) - 1;
+	unsigned long checked = 0, wrong = 0;
+
+	kputs("UrMach x86-64: a port name is ");
+	kputdec(32 - MACH_PORT_GEN_BITS);
+	kputs(" bits of index and ");
+	kputdec(MACH_PORT_GEN_BITS);
+	kputs(" of generation — ");
+	kputdec(1u << MACH_PORT_GEN_BITS);
+	kputs(" recycles of a slot before a name repeats\r\n");
+
+	/*
+	 * Every generation against a spread of indices, and the edges of both
+	 * exactly. The stride is prime so it does not walk in step with any
+	 * power of two in the masks.
+	 */
+	for (uint32_t gen = 0; gen <= MACH_PORT_GEN_LOWMASK; gen++) {
+		uint32_t gform = gen << MACH_PORT_GEN_SHIFT;
+
+		for (uint32_t i = 0; ; i += 4093) {
+			mach_port_t name = MACH_PORT_MAKE(i, gform);
+
+			checked++;
+			if (MACH_PORT_INDEX(name) != i
+			    || MACH_PORT_GEN(name) != gform)
+				wrong++;
+
+			if (i > index_max - 4093)
+				break;
+		}
+
+		for (uint32_t i = index_max - 1; i <= index_max; i++) {
+			mach_port_t name = MACH_PORT_MAKE(i, gform);
+
+			checked++;
+			if (MACH_PORT_INDEX(name) != i
+			    || MACH_PORT_GEN(name) != gform)
+				wrong++;
+		}
+	}
+
+	kputs("UrMach x86-64: ");
+	kputdec(checked);
+	kputs(" names taken apart, ");
+	kputdec(wrong);
+	kputs(wrong == 0 ? " wrong" : " WRONG");
+
+	/*
+	 * The two names that are not names. NULL must be what an all-zero pair
+	 * makes, and DEAD must sit at the very top of the index space — the
+	 * entry table is required to stop below it, so a table that never
+	 * reaches the last index can never hand out either by accident.
+	 */
+	kputs(MACH_PORT_MAKE(0, 0) == MACH_PORT_NULL
+	      && MACH_PORT_INDEX(MACH_PORT_DEAD) == index_max
+	      ? "; null and dead are outside what a table can reach\r\n"
+	      : "; NULL OR DEAD IS REACHABLE from a valid index\r\n");
+}
+
 static void swapgs_window_selftest(void)
 {
 	struct trap_paranoid_record outside, inside;
@@ -3600,6 +3949,9 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	timer_selftest();
 	ioapic_selftest();
 	spl_selftest();
+	panic_format_selftest();
+	msg_abi_selftest();
+	port_name_selftest();
 	swapgs_window_selftest();
 	external_vectors_selftest();
 	self_ipi_selftest();

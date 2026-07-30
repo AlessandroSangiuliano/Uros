@@ -28,7 +28,7 @@ add_custom_command(
     -user ${VFS_USER_C}
     -server /dev/null
     ${VFS_DEFS}
-  DEPENDS migcom ${VFS_DEFS} ${VFS_TYPES}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${VFS_DEFS} ${VFS_TYPES}
   COMMENT "MIG: vfs.defs (libvfs user stubs)"
   VERBATIM
 )

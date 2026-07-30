@@ -101,6 +101,8 @@
 #ifndef	_TYPE_H
 #define	_TYPE_H
 
+#include <stdio.h>
+
 #include <mach/boolean.h>
 #include <mach/message.h>
 #include "strdefs.h"
@@ -252,6 +254,7 @@ typedef struct ipc_type
     u_int itTypeSize;		/* size of the C type */
     u_int itPadSize;		/* amount of padding after data */
     u_int itMinTypeSize;	/* minimal amount of space occupied by data */
+    u_int itAlignment;		/* what the target puts in FRONT of it (#416) */
 
     u_int itInName;		/* name supplied to kernel in sent msg */
     u_int itOutName;		/* name in received msg */
