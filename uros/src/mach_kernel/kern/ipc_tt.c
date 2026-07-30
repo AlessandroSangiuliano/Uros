@@ -776,7 +776,7 @@ mach_ports_register(
 
 	if (portsCnt != 0)
 		kfree((vm_offset_t) memory,
-		      (vm_size_t) (portsCnt * sizeof(mach_port_t)));
+		      ipc_port_array_size(portsCnt));
 
 	return KERN_SUCCESS;
 }

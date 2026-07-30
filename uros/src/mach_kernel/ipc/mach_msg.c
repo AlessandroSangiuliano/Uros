@@ -515,7 +515,7 @@ mach_msg_receive_continue(void)
 		/* pick up the message that was handed to us */
 		kmsg = self->ith_kmsg;
 		seqno = self->ith_seqno;
-		port = (ipc_port_t) kmsg->ikm_header.msgh_remote_port;
+		port = kmsg->ikm_dest;
 		goto finish_receive;
 	}
 
@@ -546,8 +546,7 @@ mach_msg_receive_continue(void)
 			    kmsg = ipc_kmsg_queue_first(kmsgs);
 			    if (kmsg != IKM_NULL) {
 				ipc_kmsg_rmqueue_first_macro(kmsgs, kmsg);
-				port = (ipc_port_t)
-					kmsg->ikm_header.msgh_remote_port;
+				port = kmsg->ikm_dest;	/* #442 */
 				seqno = port->ip_seqno++;
 				goto finish_receive;
 			    }
@@ -1292,10 +1291,9 @@ mach_msg_overwrite_trap(
 			hdr->msgh_bits =
 				MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND,
 					       MACH_MSG_TYPE_PORT_SEND_ONCE);
-			hdr->msgh_remote_port =
-					(mach_port_t) dest_port;
-			hdr->msgh_local_port =
-					(mach_port_t) reply_port;
+			/* #442: hdr is &kmsg->ikm_header; keep both in step. */
+			ikm_set_dest(kmsg, dest_port);
+			ikm_set_reply(kmsg, reply_port);
 
 			/* make sure we can queue to the destination */
 
@@ -1441,8 +1439,13 @@ mach_msg_overwrite_trap(
 			hdr->msgh_bits =
 				MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND_ONCE,
 					       0);
-			hdr->msgh_remote_port =
-					(mach_port_t) dest_port;
+			/*
+			 * #442: and no reply, which the bits above already
+			 * say.  The header field is null here; what was not
+			 * null was the kmsg's, left by the message before.
+			 */
+			ikm_set_dest(kmsg, dest_port);
+			ikm_set_reply(kmsg, IP_NULL);
 
 			/* make sure we can queue to the destination */
 
@@ -1961,7 +1964,7 @@ mach_msg_overwrite_trap(
 		 */
 		kmsg = self->ith_kmsg;
 		assert(kmsg != IKM_NULL);
-		dest_port = (ipc_port_t)kmsg->ikm_header.msgh_remote_port;
+		dest_port = kmsg->ikm_dest;
 
 #if	DIPC
 		if (KMSG_IN_DIPC(kmsg)) {
@@ -2024,9 +2027,9 @@ mach_msg_overwrite_trap(
 		    case MACH_MSGH_BITS(MACH_MSG_TYPE_PORT_SEND,
 					MACH_MSG_TYPE_PORT_SEND_ONCE): {
 			ipc_port_t reply_port =
-				(ipc_port_t) hdr->msgh_local_port;
+				kmsg->ikm_reply;
 			mach_port_t dest_name, reply_name;
-			unsigned long fast_pp = 0;
+			natural_t fast_pp = 0;		/* #442 */
 
 			/* receiving a request message */
 
@@ -2330,7 +2333,7 @@ mach_msg_overwrite_trap(
 			goto slow_send;
 		}
 
-		dest_port = (ipc_port_t) hdr->msgh_remote_port;
+		dest_port = kmsg->ikm_dest;
 		assert(IP_VALID(dest_port));
 
 		ip_lock(dest_port);
@@ -2355,7 +2358,7 @@ mach_msg_overwrite_trap(
 
 		    register ipc_port_t reply_port;
 
-		    reply_port = (ipc_port_t) hdr->msgh_local_port;
+		    reply_port = kmsg->ikm_reply;
 		    if (IP_VALID(reply_port)) {
 			if (ip_lock_try(reply_port)) {
 			    if (ip_active(reply_port) &&
@@ -2430,7 +2433,7 @@ mach_msg_overwrite_trap(
 		bcopy((char *)&trailer_template,
 		      (char *)trailer, sizeof(trailer_template));
 
-		reply_port = (ipc_port_t) hdr->msgh_remote_port;
+		reply_port = kmsg->ikm_dest;
 		ip_lock(reply_port);
 
 		if ((!ip_active(reply_port)) ||
@@ -2585,7 +2588,7 @@ mach_msg_overwrite_trap(
 			trailer->msgh_seqno = temp_seqno;	
 			trailer->msgh_trailer_size = REQUESTED_TRAILER_SIZE(option);
 		}
-		dest_port = (ipc_port_t) hdr->msgh_remote_port;
+		dest_port = kmsg->ikm_dest;
 		HOT(c_mmot_cold_055++);
 		goto fast_copyout;
 

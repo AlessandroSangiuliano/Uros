@@ -63,7 +63,7 @@ ledger_enter(
 		if (ledger->ledger_limit != LEDGER_ITEM_INFINITY &&
 		    ledger->ledger_balance + amount > ledger->ledger_limit) {
 			/* XXX this is where you do BAD things */
-			printf("Ledger limit exceeded ! ledger=%x lim=%d balance=%d\n",
+			printf("Ledger limit exceeded ! ledger=%p lim=%d balance=%d\n",
 			       ledger, ledger->ledger_limit,
 			       ledger->ledger_balance);
 			ledger_unlock(ledger);

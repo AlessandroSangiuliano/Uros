@@ -700,7 +700,7 @@ __assert_wait(
 		      (unsigned)(unsigned long)__builtin_return_address(2));
 	}
 	if (thread->wait_event != NO_EVENT) {
-		panic("assert_wait: already asserted event 0x%x\n",
+		panic("assert_wait: already asserted event %p\n",
 			thread->wait_event);
 	}
 
@@ -1523,9 +1523,9 @@ thread_invoke(
 #if	MACH_ASSERT
 	if (watchacts & WA_SWITCH) {
 	    vm_offset_t stack = new_thread->kernel_stack;
-	    printf("thread_invoke(old=%x,new=%x) \n",
+	    printf("thread_invoke(old=%p,new=%p) \n",
 			old_thread, new_thread);
-	    printf("\tcurrent_thr=%x continuation = %x\n",
+	    printf("\tcurrent_thr=%p continuation = %p\n",
 			current_thread(), new_thread->continuation);
 	}
 #endif	/* MACH_ASSERT */
@@ -1607,7 +1607,7 @@ thread_continue(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_SCHED) {
-		printf("thread_continue(old=%x) thr_self=%x, continuation=%x\n",
+		printf("thread_continue(old=%p) thr_self=%p, continuation=%p\n",
 			old_thread, self, continuation);
 	}
 #endif	/* MACH_ASSERT */
@@ -1912,7 +1912,7 @@ thread_run(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_SWITCH)
-		printf("thread_run(cont=%x,thr=%x) self=%x\n",
+		printf("thread_run(cont=%p,thr=%p) self=%p\n",
 			continuation, new_thread, thread);
 #endif	/* MACH_ASSERT */
 
@@ -1932,7 +1932,7 @@ thread_run(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_SWITCH)
-		printf("\tthread_run BACK AS thr=%x\n", current_thread());
+		printf("\tthread_run BACK AS thr=%p\n", current_thread());
 #endif	/* MACH_ASSERT */
 }
 
@@ -1953,7 +1953,7 @@ thread_dispatch(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_SWITCH)
-		printf("\tthread_dispatch(thr=%x)\n", thread);
+		printf("\tthread_dispatch(thr=%p)\n", thread);
 #endif	/* MACH_ASSERT */
 
 	/*
@@ -3452,18 +3452,18 @@ void
 dump_processor_set(
 	processor_set_t	ps)
 {
-    printf("processor_set: %08x\n",ps);
-    printf("idle_queue: %08x %08x, idle_count:      0x%x\n",
+    printf("processor_set: %p\n",ps);
+    printf("idle_queue: %p %p, idle_count:      0x%x\n",
 	ps->idle_queue.next,ps->idle_queue.prev,ps->idle_count);
-    printf("processors: %08x %08x, processor_count: 0x%x, empty: %x\n",
-	ps->processors.next,ps->processors.prev,ps->processor_count);
-    printf("tasks:      %08x %08x, task_count:      0x%x\n",
+    printf("processors: %p %p, processor_count: 0x%x, empty: %x\n",
+	ps->processors.next,ps->processors.prev,ps->processor_count,ps->empty);
+    printf("tasks:      %p %p, task_count:      0x%x\n",
 	ps->tasks.next,ps->tasks.prev,ps->task_count);
-    printf("threads:    %08x %08x, thread_count:    0x%x\n",
+    printf("threads:    %p %p, thread_count:    0x%x\n",
 	ps->threads.next,ps->threads.prev,ps->thread_count);
-    printf("ref_count: 0x%x, all_psets: %08x %08x, active: %x\n",
+    printf("ref_count: 0x%x, all_psets: %p %p, active: %x\n",
 	ps->ref_count, ps->all_psets.next,ps->all_psets.prev,ps->active);
-    printf("pset_self: %08x, pset_name_self: %08x\n",ps->pset_self, ps->pset_name_self);
+    printf("pset_self: %p, pset_name_self: %p\n",ps->pset_self, ps->pset_name_self);
     printf("max_priority: 0x%x, policies: 0x%x, set_quantum: 0x%x\n",
 	ps->max_priority, ps->policies, ps->set_quantum);
 }
@@ -3477,17 +3477,17 @@ dump_processor(
     char *states[]={"OFF_LINE","RUNNING","IDLE","DISPATCHING",
 		   "ASSIGN","SHUTDOWN","VIDLE"};
 
-    printf("processor: %08x\n",p);
-    printf("processor_queue: %08x %08x\n",
+    printf("processor: %p\n",p);
+    printf("processor_queue: %p %p\n",
 	p->processor_queue.next,p->processor_queue.prev);
-    printf("state: %8s, next_thread: %08x, idle_thread: %08x\n",
+    printf("state: %8s, next_thread: %p, idle_thread: %p\n",
 	processor_state(p->state), p->next_thread, p->idle_thread);
     printf("quantum: %u, first_quantum: %x, last_quantum: %u\n",
 	p->quantum, p->first_quantum, p->last_quantum);
-    printf("processor_set: %08x, processor_set_next: %08x\n",
+    printf("processor_set: %p, processor_set_next: %p\n",
 	p->processor_set, p->processor_set_next);
-    printf("processors: %08x %08x\n", p->processors.next,p->processors.prev);
-    printf("processor_self: %08x, slot_num: 0x%x\n", p->processor_self, p->slot_num);
+    printf("processors: %p %p\n", p->processors.next,p->processors.prev);
+    printf("processor_self: %p, slot_num: 0x%x\n", p->processor_self, p->slot_num);
 }
 
 void
@@ -3505,7 +3505,7 @@ dump_run_queue_struct(
 	    if( rq->runq[i].next == &rq->runq[i] )
 		printf( " --------");
 	    else
-		printf(" %08x",rq->runq[i].next);
+		printf(" %p",rq->runq[i].next);
 	}
 	printf("\n");
     }
@@ -3542,7 +3542,7 @@ dump_run_queues(
 
 		printf("[%u]",i);
 		for (t_cnt=0, e = q1->next; e != q1; e = e->next) {
-		    printf("\t0x%08x",e);
+		    printf("\t%p",e);
 		    if( (t_cnt = (t_cnt + 1) % 4) == 0 )
 			printf("\n");
 		}

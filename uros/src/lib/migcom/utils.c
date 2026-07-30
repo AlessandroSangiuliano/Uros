@@ -331,6 +331,98 @@ SafeString(FILE *file, const char *s)
     fputs(s, file);
 }
 
+/*
+ * How many bytes one element of an out-of-line region occupies (#416).
+ *
+ * Out-of-line data does not travel in the message: the message carries a
+ * descriptor holding an address and a byte count, and that count is the
+ * caller's element count multiplied by this.  So this number is used on every
+ * call, and no assertion about the message's own layout reaches it — none of
+ * those bytes is in the message.
+ *
+ * ⚠️ It lives here because it was computed in two places with two different
+ * conditions.  The user stub multiplied when `argMultiplier > 1 || howbig >
+ * 8`; the server stub multiplied only when `howbig > 8`.  An element of two
+ * or more components each a byte wide — `array[] of struct[2] of char` — is
+ * therefore counted twice by the sender and once by the receiver: the same
+ * region, two lengths, and nothing in either stub that could notice.  No
+ * .defs in this tree declares such a type, which is why it has never fired;
+ * one function is how it stops being able to.
+ *
+ * A multiplier of zero reaches the same fate as one.  Zero bytes per element
+ * is not a size any declaration means, and the arithmetic that produced it
+ * would silently transfer nothing.
+ */
+u_int
+OolElementUnit(register argument_t *arg)
+{
+    register ipc_type_t *it = arg->argType;
+    register argument_t *count;
+    u_int howbig, mult;
+
+    if (IS_MULTIPLE_KPD(it)) {
+	count = arg->argSubCount;
+	howbig = it->itElement->itSize;
+    } else {
+	count = arg->argCount;
+	howbig = it->itSize;
+    }
+
+    mult = (count != argNULL && count->argMultiplier > 0)
+	   ? count->argMultiplier : 1;
+
+    if (mult > 1 || howbig > 8)
+	return mult * howbig / 8;
+
+    return 1;
+}
+
+/*
+ * And the name of the C type that unit is the size of, when there is one.
+ *
+ * There is one exactly when the unit is wider than a byte.  A region measured
+ * in bytes is measured in bytes on every target and by every declaration —
+ * `pointer_t` is `^array[] of MACH_MSG_TYPE_BYTE`, and its element has no C
+ * type of its own to disagree about.  Above a byte the count means elements,
+ * the element is a real type, and its width is a claim worth settling.
+ */
+identifier_t
+OolElementType(register argument_t *arg, boolean_t isuser)
+{
+    register ipc_type_t *it = arg->argType;
+    register ipc_type_t *element;
+    register const char *c;
+
+    /*
+     * Out-of-line *data* only.  A port argument has no region behind it, and
+     * an out-of-line array of ports is measured in ports — migcom fills in a
+     * count, not a byte size, so there is no multiplier here to settle.  An
+     * assertion on either would be true and would be about nothing, which
+     * teaches a reader to skim them.
+     */
+    if (it->itInLine || it->itPortType)
+	return strNULL;
+    if (OolElementUnit(arg) <= 1)
+	return strNULL;
+
+    element = IS_MULTIPLE_KPD(it) ? it->itElement->itElement : it->itElement;
+    if (element == itNULL)
+	return strNULL;
+
+    c = isuser ? element->itUserType : element->itServerType;
+    if (c == strNULL)
+	return strNULL;
+
+    /* A name with a `*` or a space in it is a derived type whose spelling is
+       not guaranteed to be usable where an assertion needs it. */
+    for (; *c != '\0'; c++)
+	if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z')
+	      || (*c >= '0' && *c <= '9') || *c == '_'))
+	    return strNULL;
+
+    return isuser ? element->itUserType : element->itServerType;
+}
+
 void
 WriteFieldDeclPrim(FILE *file, argument_t *arg,
                    char *(*tfunc)(ipc_type_t *it))
@@ -378,12 +470,173 @@ WriteFieldDeclPrim(FILE *file, argument_t *arg,
 }
 
 
+/*
+ * What migcom believes about a message, checked by the only thing that knows
+ * (#416).
+ *
+ * migcom sizes a message by adding up its fields.  The compiler lays out the
+ * same fields by adding up their sizes *and the padding between them*, and it
+ * knows something migcom cannot: the alignment of each field's C type.  All
+ * migcom has is the wire tag and the type's name as a string, and
+ * `unsigned64` is `unsigned long` in one declaration and
+ * `struct { unsigned int val[2]; }` in another — eight-aligned and
+ * four-aligned, with no rule leading from the tag to the answer.
+ *
+ * The failure is silent in the worst way.  Both ends of an RPC use migcom's
+ * numbers, so a message goes out with a length that stops before its last
+ * field and arrives at a server that finds one field where the next begins.
+ *
+ * ── Everything migcom claims, and nothing less ────────────────────────
+ *
+ * Its beliefs are not only about the whole message.  A field's size is used
+ * as the length of a memcpy into the message, as the multiplier in
+ * `msgh_size = base + n * <size>`, as the constant subtracted when the
+ * structure pointer is slid back over a short array, and as the size of the
+ * buffer the caller allocates.  Every one of those is the same number —
+ * `sizeof` of a C type migcom has never seen — so every one of them is
+ * asserted:
+ *
+ *	each field	its size, and for an array its element's size too
+ *	each padding	the size migcom declared it
+ *	the message	the largest it can be, and the smallest
+ *
+ * With every field pinned, the derived uses are founded rather than hoped
+ * for; and with the message pinned, so is every msgh_size constant and the
+ * subsystem-wide maximum, which is a maximum over exactly these.
+ *
+ * ⚠️ Both message sizes are measured to `msgh_end`, a zero-length marker at
+ * the end of the message part of every structure.  Not to `sizeof`, which
+ * includes the padding a compiler adds at the end and which the sender never
+ * transmits; not to the trailer, which only the receiving side declares.  The
+ * sender and the receiver must arrive at the *same* number, and a marker both
+ * of them carry is what guarantees it.
+ */
+/*
+ * And that unit, settled against the compiler (#416).
+ *
+ * This is the last number migcom emits about a message that no other
+ * assertion reaches, because the bytes it measures are not in the message:
+ * the descriptor holds an address, and this is what the caller's element
+ * count is multiplied by to say how many bytes to transfer.  Getting it wrong
+ * transfers the wrong amount of somebody else's memory, on every call, and
+ * nothing in either stub is in a position to notice.
+ *
+ * It is checked against the element type's own name, and it is the *shared*
+ * derivation that is checked — the same call the two stubs use to emit the
+ * multiplier.  Asserting a separately computed copy would compare migcom with
+ * migcom and prove nothing.
+ */
+static void
+WriteOolUnitAssert(FILE *file, register argument_t *arg, boolean_t isuser)
+{
+    identifier_t type = OolElementType(arg, isuser);
+
+    if (type == strNULL)
+	return;
+
+    fprintf(file, "\t_Static_assert(sizeof(%s) == %d,\n",
+	    type, OolElementUnit(arg));
+    fprintf(file, "\t\t\"MIG measures the out-of-line %s in the wrong unit\");\n",
+	    arg->argMsgField);
+}
+
+static void
+WriteFieldAssert(FILE *file, char *name, register argument_t *arg)
+{
+    register ipc_type_t *it = arg->argType;
+    boolean_t is_array = IS_VARIABLE_SIZED_UNTYPED(it) || it->itNoOptArray
+			 || IS_MULTIPLE_KPD(it);
+
+    fprintf(file, "\t_Static_assert(sizeof(((%s *) 0)->%s) == %d,\n",
+	    name, arg->argMsgField, it->itTypeSize);
+    fprintf(file, "\t\t\"MIG and the compiler disagree on the size of %s\");\n",
+	    arg->argMsgField);
+
+    /*
+     * The element's size is the multiplier in the run-time length arithmetic,
+     * so it has to be pinned separately: sixteen bytes of array is sixteen
+     * ones or four fours, and only the second is right if the count means
+     * elements.
+     */
+    if (is_array && it->itElement != itNULL) {
+	fprintf(file, "\t_Static_assert(sizeof(((%s *) 0)->%s[0]) == %d,\n",
+		name, arg->argMsgField, it->itElement->itTypeSize);
+	fprintf(file, "\t\t\"MIG counts %s in units the compiler disagrees with\");\n",
+		arg->argMsgField);
+    }
+
+    if (it->itPadSize != 0) {
+	fprintf(file, "\t_Static_assert(sizeof(((%s *) 0)->%s) == %d,\n",
+		name, arg->argPadName, it->itPadSize);
+	fprintf(file, "\t\t\"MIG and the compiler disagree on the padding after %s\");\n",
+		arg->argMsgField);
+    }
+}
+
+static void
+WriteStructAssert(FILE *file, char *name, argument_t *args, u_int mask,
+		  boolean_t simple, boolean_t isuser,
+		  u_int minsize, u_int maxsize)
+{
+    register argument_t *arg;
+    u_int kpd  = mask | (mask == akbRequest ? akbSendKPD  : akbReturnKPD);
+    u_int body = mask | (mask == akbRequest ? akbSendBody : akbReturnBody);
+
+    /*
+     * ⚠️ Selected exactly as WriteFieldDeclPrim was selected to declare them
+     * — same predicate, same two groups, same order.  An assertion about a
+     * field that was never declared does not fail, it fails to compile, and
+     * the two lists must be the same list.
+     */
+    if (!simple)
+	for (arg = args; arg != argNULL; arg = arg->argNext)
+	    if (akCheckAll(arg->argKind, kpd)) {
+		WriteFieldAssert(file, name, arg);
+		WriteOolUnitAssert(file, arg, isuser);
+	    }
+
+    for (arg = args; arg != argNULL; arg = arg->argNext)
+	if (akCheckAll(arg->argKind, body))
+	    WriteFieldAssert(file, name, arg);
+
+    fprintf(file, "\n\t_Static_assert(__builtin_offsetof(%s, msgh_end) == %d,\n",
+	    name, maxsize);
+    fprintf(file, "\t\t\"MIG sized %s differently from the compiler\");\n\n",
+	    name);
+
+    if (minsize == maxsize)
+	return;
+
+    /*
+     * The smallest the message can be is the largest less every variable
+     * array, and that is not an estimate: the array is declared at its
+     * maximum, so subtracting it *is* the message with that array empty.
+     */
+    fprintf(file, "\t_Static_assert(__builtin_offsetof(%s, msgh_end)", name);
+    for (arg = args; arg != argNULL; arg = arg->argNext) {
+	register ipc_type_t *it = arg->argType;
+
+	if (!akCheckAll(arg->argKind, body))
+	    continue;
+	if (!IS_VARIABLE_SIZED_UNTYPED(it))
+	    continue;
+
+	fprintf(file, "\n\t\t- sizeof(((%s *) 0)->%s)", name, arg->argMsgField);
+	if (it->itPadSize != 0)
+	    fprintf(file, " - sizeof(((%s *) 0)->%s)", name, arg->argPadName);
+    }
+    fprintf(file, "\n\t\t== %d,\n", minsize);
+    fprintf(file, "\t\t\"MIG sized an empty %s differently from the compiler\");\n\n",
+	    name);
+}
+
 void
 WriteStructDecl(FILE *file, argument_t *args,
                 void (*func)(FILE *file, argument_t *arg),
                 u_int mask, char *name,
                 boolean_t simple, boolean_t trailer,
-                boolean_t isuser, boolean_t template_only)
+                boolean_t isuser, boolean_t template_only,
+                u_int minsize, u_int maxsize)
 {
     fprintf(file, "\ttypedef struct {\n");
     fprintf(file, "\t\tmach_msg_header_t Head;\n");
@@ -396,18 +649,36 @@ WriteStructDecl(FILE *file, argument_t *args,
     	    WriteList(file, args, func, mask | akbReturnKPD, "\n", "\n");
 	fprintf(file, "\t\t/* end of the kernel processed data */\n");
     }
-    if (!template_only) 
+    /*
+     * Where the message ends, marked (#416).
+     *
+     * A zero-length member: no size, no alignment, so it moves nothing and
+     * costs nothing — and `offsetof` of it is exactly the number both the
+     * sender and the receiver need, on a structure where only one of them
+     * declares a trailer and neither should be counting the padding the
+     * compiler puts at the end.
+     *
+     * The trailer belongs to whoever receives the message: the server sees it
+     * on a request, the caller sees it on a reply.  So it goes after the
+     * marker, outside the message proper, which is what it is.
+     */
+    if (!template_only)
 	if (mask == akbRequest) {
 	    WriteList(file, args, func, mask | akbSendBody, "\n", "\n");
+	    fprintf(file, "\t\tchar msgh_end[0];\n");
 	    if (!isuser)
 		WriteTrailerDecl(file, trailer);
 	} else {
 	    WriteList(file, args, func, mask | akbReturnBody, "\n", "\n");
+	    fprintf(file, "\t\tchar msgh_end[0];\n");
 	    if (isuser)
 		WriteTrailerDecl(file, trailer);
 	}
     fprintf(file, "\t} %s;\n", name);
     fprintf(file, "\n");
+
+    if (!template_only)
+	WriteStructAssert(file, name, args, mask, simple, isuser, minsize, maxsize);
 }
 
 void

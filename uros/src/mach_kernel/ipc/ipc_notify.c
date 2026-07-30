@@ -302,7 +302,7 @@ ipc_notify_port_deleted(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped port-deleted (0x%08x, 0x%x)\n", port, name);
+		printf("dropped port-deleted (%p, 0x%x)\n", port, name);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -315,7 +315,9 @@ ipc_notify_port_deleted(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-	n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 	n->not_port = name;
 
 	ipc_mqueue_send_always(kmsg);
@@ -348,7 +350,7 @@ ipc_notify_port_destroyed(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped port-destroyed (0x%08x, 0x%08x)\n",
+		printf("dropped port-destroyed (%p, %p)\n",
 		       port, right);
 		ipc_port_release_sonce(port);
 		ipc_port_release_receive(right);
@@ -363,8 +365,26 @@ ipc_notify_port_destroyed(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-	n->not_header.msgh_remote_port = (mach_port_t) port;
-	n->not_port.name = (mach_port_t)right;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
+
+	/*
+	 * #442: the only notification that is a COMPLEX message -- the
+	 * template carries the bit and one port descriptor, which is why
+	 * searching for who SETS that bit does not find this: it is copied
+	 * in wholesale with the template.  The right goes in the kmsg like
+	 * every other descriptor's port.
+	 */
+	if (ikm_ports_alloc(kmsg, 1) != KERN_SUCCESS) {
+		printf("dropped port-destroyed (%p, %p): no room for ports\n",
+		       port, right);
+		ikm_free(kmsg);
+		ipc_port_release_sonce(port);
+		ipc_port_release_receive(right);
+		return;
+	}
+	kmsg->ikm_ports[0] = right;
 
 	ipc_mqueue_send_always(kmsg);
 }
@@ -393,7 +413,7 @@ ipc_notify_no_senders(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped no-senders (0x%08x, %u)\n", port, mscount);
+		printf("dropped no-senders (%p, %u)\n", port, mscount);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -406,7 +426,9 @@ ipc_notify_no_senders(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-	n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 	n->not_count = mscount;
 
 	ipc_mqueue_send_always(kmsg);
@@ -458,7 +480,7 @@ ipc_notify_send_once(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped send-once (0x%08x)\n", port);
+		printf("dropped send-once (%p)\n", port);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -471,7 +493,9 @@ ipc_notify_send_once(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-        n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 
 	ipc_mqueue_send_always(kmsg);
 }
@@ -500,7 +524,7 @@ ipc_notify_dead_name(
 #endif	/* MACH_RT */
 		kmsg = ikm_alloc(sizeof *n);
 	if (kmsg == IKM_NULL) {
-		printf("dropped dead-name (0x%08x, 0x%x)\n", port, name);
+		printf("dropped dead-name (%p, 0x%x)\n", port, name);
 		ipc_port_release_sonce(port);
 		return;
 	}
@@ -513,7 +537,9 @@ ipc_notify_dead_name(
 		KMSG_MARK_RT(kmsg);
 #endif	/* MACH_RT */
 
-	n->not_header.msgh_remote_port = (mach_port_t) port;
+	/* #442: the template just set both fields; say so to the kmsg. */
+	ikm_set_dest(kmsg, port);
+	ikm_set_reply(kmsg, IP_NULL);
 	n->not_port = name;
 
 	ipc_mqueue_send_always(kmsg);

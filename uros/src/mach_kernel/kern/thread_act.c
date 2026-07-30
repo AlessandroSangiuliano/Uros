@@ -784,7 +784,7 @@ thread_get_special_port(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PORT)
-	    printf("thread_get_special_port(thr_act=%x, which=%x port@%x=%x\n",
+	    printf("thread_get_special_port(thr_act=%p, which=%x port@%p=%p\n",
 		thr_act, which, portp, (portp ? *portp : 0));
 #endif	/* MACH_ASSERT */
 
@@ -840,7 +840,7 @@ thread_set_special_port(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PORT)
-		printf("thread_set_special_port(thr_act=%x,which=%x,port=%x\n",
+		printf("thread_set_special_port(thr_act=%p,which=%x,port=%p\n",
 			thr_act, which, port);
 #endif	/* MACH_ASSERT */
 
@@ -1058,7 +1058,7 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)
-		printf("act_create(task=%x,stk=%x,thr_act@%x=%x)\n",
+		printf("act_create(task=%p,stk=%x,thr_act@%p=%p)\n",
 			task, user_stack, new_act, thr_act);
 #endif	/* MACH_ASSERT */
 
@@ -1173,7 +1173,7 @@ act_free(thread_act_t thr_act)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_EXIT)
-		printf("act_free(%x(%d)) thr=%x tsk=%x(%d) pport=%x%sactive\n",
+		printf("act_free(%p(%d)) thr=%p tsk=%p(%d) pport=%p%sactive\n",
 			thr_act, thr_act->ref_count, thr_act->thread,
 			thr_act->task,
 			thr_act->task ? thr_act->task->ref_count : 0,
@@ -1388,7 +1388,7 @@ act_attach(
 #if	MACH_ASSERT
 	assert(thread == current_thread() || thread->top_act == THR_ACT_NULL);
 	if (watchacts & WA_ACT_LNK)
-		printf("act_attach(thr_act %x(%d) thread %x(%d) mask %d)\n",
+		printf("act_attach(thr_act %p(%d) thread %p(%d) mask %d)\n",
 		       thr_act, thr_act->ref_count, thread, thread->ref_count,
 		       init_alert_mask);
 #endif	/* MACH_ASSERT */
@@ -1426,7 +1426,7 @@ act_detach(
 
 #if	MACH_ASSERT
 	if (watchacts & (WA_EXIT|WA_ACT_LNK))
-		printf("act_detach: thr_act %x(%d), thrd %x(%d) task=%x(%d)\n",
+		printf("act_detach: thr_act %p(%d), thrd %p(%d) task=%p(%d)\n",
 		       cur_act, cur_act->ref_count,
 		       cur_thread, cur_thread->ref_count,
 		       cur_act->task,
@@ -1576,7 +1576,7 @@ install_special_handler(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_HDLR)
-	    printf("act_%x: install_special_hdlr(%x)\n",current_act(),thr_act);
+	    printf("act_%p: install_special_hdlr(%p)\n",current_act(),thr_act);
 #endif	/* MACH_ASSERT */
 
 	spl = splsched();
@@ -1645,7 +1645,7 @@ kern_return_t act_set_thread_pool(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)
-		printf("act_set_thread_pool: %x(%d) -> %x\n",
+		printf("act_set_thread_pool: %p(%d) -> %p\n",
 			thr_act, thr_act->ref_count, thread_pool);
 #endif	/* MACH_ASSERT */
 
@@ -1675,7 +1675,7 @@ kern_return_t act_set_thread_pool(
 		if (thr_act->pool_port != 0) {
 #if	MACH_ASSERT
 			if (watchacts & WA_ACT_LNK)
-			    printf("act_set_thread_pool found %x!\n",
+			    printf("act_set_thread_pool found %p!\n",
 							thr_act->pool_port);
 #endif	/* MACH_ASSERT */
 			return(KERN_FAILURE);
@@ -1725,7 +1725,7 @@ kern_return_t act_locked_act_set_thread_pool(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)
-		printf("act_set_thread_pool: %x(%d) -> %x\n",
+		printf("act_set_thread_pool: %p(%d) -> %p\n",
 			thr_act, thr_act->ref_count, thread_pool);
 #endif	/* MACH_ASSERT */
 
@@ -1754,7 +1754,7 @@ kern_return_t act_locked_act_set_thread_pool(
 		if (thr_act->pool_port != 0) {
 #if	MACH_ASSERT
 			if (watchacts & WA_ACT_LNK)
-			    printf("act_set_thread_pool found %x!\n",
+			    printf("act_set_thread_pool found %p!\n",
 							thr_act->pool_port);
 #endif	/* MACH_ASSERT */
 			return(KERN_FAILURE);
@@ -1802,7 +1802,7 @@ void act_execute_returnhandlers(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_HDLR)
-		printf("execute_rtn_hdlrs: thr_act=%x\n", thr_act);
+		printf("execute_rtn_hdlrs: thr_act=%p\n", thr_act);
 #endif	/* MACH_ASSERT */
 
 	s = splsched();
@@ -1830,7 +1830,7 @@ void act_execute_returnhandlers(
 #if	MACH_ASSERT
 		if (watchacts & WA_ACT_HDLR)
 		    printf( (rh == &thr_act->special_handler) ?
-			"\tspecial_handler\n" : "\thandler=%x\n",
+			"\tspecial_handler\n" : "\thandler=%p\n",
 				    rh->handler);
 #endif	/* MACH_ASSERT */
 
@@ -1860,7 +1860,7 @@ special_handler(
 	assert(thread != THREAD_NULL);
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_HDLR)
-	    printf("\t\tspecial_handler(thr_act=%x(%d))\n", cur_act,
+	    printf("\t\tspecial_handler(thr_act=%p(%d))\n", cur_act,
 				(cur_act ? cur_act->ref_count : 0));
 #endif	/* MACH_ASSERT */
 
@@ -2007,7 +2007,7 @@ nudge(thread_act_t	thr_act)
 {
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_HDLR)
-	    printf("\tact_%x: nudge(%x)\n", current_act(), thr_act);
+	    printf("\tact_%p: nudge(%p)\n", current_act(), thr_act);
 #endif	/* MACH_ASSERT */
 
 	/*
@@ -2066,12 +2066,12 @@ act_disable_task_locked(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_EXIT) {
-		printf("act_%x: act_disable_tl(thr_act=%x(%d))%sactive task=%x(%d)",
+		printf("act_%p: act_disable_tl(thr_act=%p(%d))%sactive task=%p(%d)",
 			       current_act(), thr_act, thr_act->ref_count,
 			       (thr_act->active ? " " : " !"),
 			       thr_act->task, thr_act->task? thr_act->task->ref_count : 0);
 		if (thr_act->pool_port)
-			printf(", pool_port %x", thr_act->pool_port);
+			printf(", pool_port %p", thr_act->pool_port);
 		printf("\n");
 		(void) dump_act(thr_act);
 	}
@@ -2146,7 +2146,7 @@ act_alert(thread_act_t thr_act, unsigned alerts)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)
-		printf("act_alert %x: %x\n", thr_act, alerts);
+		printf("act_alert %p: %x\n", thr_act, alerts);
 #endif	/* MACH_ASSERT */
 
 	if (thread) {
@@ -2219,12 +2219,12 @@ get_set_state(thread_act_t thr_act, int flavor, thread_state_t state, int *pcoun
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_HDLR) {
-	    printf("act_%x: get_set_state(thr_act=%x flv=%x state=%x ptr@%x=%x)",
+	    printf("act_%p: get_set_state(thr_act=%p flv=%x state=%p ptr@%p=%x)",
 		    current_act(), thr_act, flavor, state,
 		    pcount, (pcount ? *pcount : 0));
 	    printf((handler == get_state_handler ? "get_state_hdlr\n" :
 		    (handler == set_state_handler ? "set_state_hdlr\n" :
-			"hndler=%x\n")), handler); 
+			"hndler=%p\n")), handler); 
 	}
 #endif	/* MACH_ASSERT */
 
@@ -2249,7 +2249,7 @@ get_set_state(thread_act_t thr_act, int flavor, thread_state_t state, int *pcoun
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_HDLR)
-	    printf("act_%x: get_set_state returns %x\n",
+	    printf("act_%p: get_set_state returns %x\n",
 			    current_act(), gss.result);
 #endif	/* MACH_ASSERT */
 
@@ -2263,7 +2263,7 @@ set_state_handler(ReturnHandler *rh, thread_act_t thr_act)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_HDLR)
-		printf("act_%x: set_state_handler(rh=%x,thr_act=%x)\n",
+		printf("act_%p: set_state_handler(rh=%p,thr_act=%p)\n",
 			current_act(), rh, thr_act);
 #endif	/* MACH_ASSERT */
 
@@ -2279,7 +2279,7 @@ get_state_handler(ReturnHandler *rh, thread_act_t thr_act)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_HDLR)
-		printf("act_%x: get_state_handler(rh=%x,thr_act=%x)\n",
+		printf("act_%p: get_state_handler(rh=%p,thr_act=%p)\n",
 			current_act(), rh, thr_act);
 #endif	/* MACH_ASSERT */
 
@@ -2295,7 +2295,7 @@ act_get_state_locked(thread_act_t thr_act, int flavor, thread_state_t state,
 {
 #if	MACH_ASSERT
     if (watchacts & WA_ACT_HDLR)
-	printf("act_%x: act_get_state_L(thr_act=%x,flav=%x,st=%x,pcnt@%x=%x)\n",
+	printf("act_%p: act_get_state_L(thr_act=%p,flav=%x,st=%p,pcnt@%p=%x)\n",
 		current_act(), thr_act, flavor, state, pcount,
 		(pcount? *pcount : 0));
 #endif	/* MACH_ASSERT */
@@ -2309,7 +2309,7 @@ act_set_state_locked(thread_act_t thr_act, int flavor, thread_state_t state,
 {
 #if	MACH_ASSERT
     if (watchacts & WA_ACT_HDLR)
-	printf("act_%x: act_set_state_L(thr_act=%x,flav=%x,st=%x,pcnt@%x=%x)\n",
+	printf("act_%p: act_set_state_L(thr_act=%p,flav=%x,st=%p,pcnt@%x=%x)\n",
 		current_act(), thr_act, flavor, state, count, count);
 #endif	/* MACH_ASSERT */
 

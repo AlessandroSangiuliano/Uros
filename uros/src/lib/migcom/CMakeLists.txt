@@ -25,6 +25,7 @@ set(MIGCOM_SOURCES
   ${SRC_DIR}/routine.c
   ${SRC_DIR}/server.c
   ${SRC_DIR}/statement.c
+  ${SRC_DIR}/target.c
   ${SRC_DIR}/string.c
   ${SRC_DIR}/type.c
   ${SRC_DIR}/user.c

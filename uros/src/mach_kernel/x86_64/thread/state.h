@@ -65,71 +65,17 @@
 
 #include <stdint.h>
 
-/*
- * The unit the interface counts in.  Mach passes thread state as an array of
- * natural_t and a count of them, which is why every structure here has to be
- * a whole number of these — asserted below rather than hoped for.
- */
-typedef unsigned int state_word_t;
-
-#define x86_64_THREAD_STATE		1
-#define x86_64_FLOAT_STATE		2
-#define x86_64_EXCEPTION_STATE		3
-#define THREAD_STATE_NONE		4
+#include <mach/machine/thread_state.h>
 
 /*
- * The general-purpose registers, the instruction pointer, the flags, the two
- * segment selectors that still mean something, and the two segment bases
- * that replaced the ones that do not.
+ * The exported shape lives in <mach/machine/thread_status.h> (#416): these
+ * structures cross the port interface, so a debugger, an exception handler in
+ * another task and libmach all declare them, and none of those can reach a
+ * header inside the kernel's machine-dependent tree.  What stays here is what
+ * is genuinely the kernel's own — the conversions to and from the trap frame,
+ * and the refusal of bases that arrive from outside.
  */
-struct x86_64_thread_state {
-	uint64_t rax, rbx, rcx, rdx;
-	uint64_t rdi, rsi, rbp, rsp;
-	uint64_t r8,  r9,  r10, r11;
-	uint64_t r12, r13, r14, r15;
-	uint64_t rip;
-	uint64_t rflags;
-	uint64_t cs;			/* its low two bits are the ring */
-	uint64_t ss;
-	uint64_t fs_base;		/* thread-local storage lives here */
-	uint64_t gs_base;
-};
-
-#define x86_64_THREAD_STATE_COUNT \
-	(sizeof(struct x86_64_thread_state) / sizeof(state_word_t))
-
-/*
- * The floating-point and SSE registers, in the layout the processor itself
- * writes.  `valid` distinguishes a thread that has state from one that has
- * never run — the difference between "these are the registers" and "these
- * are whatever the buffer held".
- */
-struct x86_64_float_state {
-	uint32_t valid;
-	uint32_t reserved;
-	uint8_t  fx_image[512];
-};
-
-#define x86_64_FLOAT_STATE_COUNT \
-	(sizeof(struct x86_64_float_state) / sizeof(state_word_t))
-
-/*
- * Why a thread stopped, for the handler that has to decide what to do about
- * it.  Separate from the registers because it is not a register: it does not
- * round-trip, and setting it would mean nothing.
- */
-struct x86_64_exception_state {
-	uint64_t trapno;
-	uint64_t err;
-	uint64_t faultvaddr;
-};
-
-#define x86_64_EXCEPTION_STATE_COUNT \
-	(sizeof(struct x86_64_exception_state) / sizeof(state_word_t))
-
-#define MACHINE_THREAD_STATE		x86_64_THREAD_STATE
-#define MACHINE_THREAD_STATE_COUNT	x86_64_THREAD_STATE_COUNT
-#define THREAD_MACHINE_STATE_MAX	x86_64_FLOAT_STATE_COUNT
+#include <mach/machine/thread_status.h>
 
 /*
  * Whole numbers of words, checked rather than assumed.  A structure that is
@@ -153,6 +99,20 @@ _Static_assert(sizeof(struct x86_64_exception_state) % sizeof(state_word_t) == 0
  */
 _Static_assert(sizeof(struct x86_64_thread_state) == 176, "thread state size changed");
 _Static_assert(sizeof(struct x86_64_float_state) == 520, "float state size changed");
+
+/*
+ * And that the interface can actually carry the largest of them (#416).
+ *
+ * <mach/machine/thread_state.h> gives the stub generator a literal, because
+ * that header is read by the preprocessor while it digests a .defs file and
+ * has no structure in scope to measure.  This is the other end of that
+ * number: a flavour that outgrows it does not fail to travel, it travels
+ * short — the count comes back smaller than it went out and the registers at
+ * the end are simply absent.  So the two are tied together here, and the
+ * kernel stops building rather than shipping a truncating interface.
+ */
+_Static_assert(THREAD_MACHINE_STATE_MAX <= THREAD_STATE_MAX,
+	       "a state flavour is larger than a message can carry");
 
 struct trap_frame;
 

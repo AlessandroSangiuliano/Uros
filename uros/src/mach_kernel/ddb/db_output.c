@@ -319,6 +319,172 @@ db_end_line(void)
  * Printing
  */
 
+/*
+ * The debugger's own conversions (#415).
+ *
+ * These used to live in _doprnt, where every printf in the kernel could see
+ * them and none of them used them.  The comment at the head of this file
+ * still records the merge that put them there -- "Put extra features of
+ * db_doprnt in _doprnt" -- and this undoes it.
+ *
+ * The reason is %n.  Here it means "unsigned, in the radix the user selected
+ * with $radix"; in C it means "store the count so far through a pointer".
+ * While both meanings shared one formatter, no print function in this kernel
+ * could carry format(printf,...) truthfully, so the compiler could not be
+ * asked to check any of them.  Now printf, panic, sprintf and log are checked
+ * and db_printf deliberately is not, because it is not printf.
+ *
+ * What is inherited rather than repeated: the flag and width parsing, the
+ * argument fetch, and the padding rules.  This gets the parse already done
+ * and calls the same emitter, so a column printed by %r lines up with the
+ * one printed by %d for the same reason rather than by coincidence.
+ *
+ *   %r %R   signed, in the current radix	%n %N   unsigned, ditto
+ *   %z %Z   signed hexadecimal
+ *   %D %O %U  long decimal, octal, unsigned -- the spelling this dialect
+ *             used before C had `l', kept because ddb/ still says it
+ *   %b %B   decode a register into bit names, %B numbering from the top
+ */
+static boolean_t
+db_doprnt_ext(
+	const struct doprnt_spec	*spec,
+	va_list				*argp,
+	void				(*putc)(char))
+{
+	struct doprnt_spec	sp = *spec;
+	unsigned long		u;
+	long			n;
+	int			base;
+	int			capitals = 0;
+	int			sign_char = 0;
+
+	switch (sp.ds_conv) {
+	case 'b':
+	case 'B':
+	{
+		register char	*p;
+		boolean_t	any;
+		register int	i;
+		char		c;
+
+		u = _doprnt_unsigned_arg(&sp, argp);
+		p = va_arg(*argp, char *);
+		base = *p++;
+		printnum(u, base, putc);
+
+		if (u == 0)
+			return TRUE;
+
+		any = FALSE;
+		while ((i = *p++) != '\0') {
+			if (sp.ds_conv == 'B')
+				i = 33 - i;
+			if (*p <= 32) {
+				/*
+				 * Bit field
+				 */
+				register int j;
+
+				if (any)
+					(*putc)(',');
+				else {
+					(*putc)('<');
+					any = TRUE;
+				}
+				j = *p++;
+				if (sp.ds_conv == 'B')
+					j = 32 - j;
+				for (; (c = *p) > 32; p++)
+					(*putc)(c);
+				printnum((unsigned)((u>>(j-1)) & ((2<<(i-j))-1)),
+					 base, putc);
+			}
+			else if (u & (1<<(i-1))) {
+				if (any)
+					(*putc)(',');
+				else {
+					(*putc)('<');
+					any = TRUE;
+				}
+				for (; (c = *p) > 32; p++)
+					(*putc)(c);
+			}
+			else {
+				for (; *p > 32; p++)
+					continue;
+			}
+		}
+		if (any)
+			(*putc)('>');
+		return TRUE;
+	}
+
+	/*
+	 * The capitalised forms mean long.  They set the width themselves
+	 * rather than relying on the absence of truncation, which is how they
+	 * used to mean it and would now mean nothing.
+	 */
+	case 'D':
+		sp.ds_lensize = DOPRNT_LEN_LONG;
+		base = 10;
+		goto signed_conv;
+	case 'O':
+		sp.ds_lensize = DOPRNT_LEN_LONG;
+		base = 8;
+		goto unsigned_conv;
+	case 'U':
+		sp.ds_lensize = DOPRNT_LEN_LONG;
+		base = 10;
+		goto unsigned_conv;
+
+	case 'z':
+		base = 16;
+		goto signed_conv;
+	case 'Z':
+		sp.ds_lensize = DOPRNT_LEN_LONG;
+		base = 16;
+		capitals = 16;
+		goto signed_conv;
+
+	case 'r':
+		base = sp.ds_radix;
+		goto signed_conv;
+	case 'R':
+		sp.ds_lensize = DOPRNT_LEN_LONG;
+		base = sp.ds_radix;
+		goto signed_conv;
+
+	case 'n':
+		base = sp.ds_radix;
+		goto unsigned_conv;
+	case 'N':
+		sp.ds_lensize = DOPRNT_LEN_LONG;
+		base = sp.ds_radix;
+		goto unsigned_conv;
+
+	default:
+		return FALSE;
+	}
+
+signed_conv:
+	n = _doprnt_signed_arg(&sp, argp);
+	if (n >= 0) {
+		u = n;
+		sign_char = sp.ds_plus_sign;
+	}
+	else {
+		u = -n;
+		sign_char = '-';
+	}
+	_doprnt_number(u, base, capitals, sign_char, &sp, putc);
+	return TRUE;
+
+unsigned_conv:
+	u = _doprnt_unsigned_arg(&sp, argp);
+	_doprnt_number(u, base, capitals, 0, &sp, putc);
+	return TRUE;
+}
+
 void
 db_printf(char *fmt, ...)
 {
@@ -328,7 +494,7 @@ db_printf(char *fmt, ...)
 	db_printing();
 #endif
 	va_start(listp, fmt);
-	_doprnt(fmt, &listp, db_putchar, db_radix);
+	_doprnt_ext(fmt, &listp, db_putchar, db_radix, db_doprnt_ext);
 	va_end(listp);
 }
 
@@ -340,7 +506,7 @@ kdbprintf(char *fmt, ...)
 	va_list	listp;
 
 	va_start(listp, fmt);
-	_doprnt(fmt, &listp, db_putchar, db_radix);
+	_doprnt_ext(fmt, &listp, db_putchar, db_radix, db_doprnt_ext);
 	va_end(listp);
 }
 
@@ -367,7 +533,7 @@ iprintf(char *fmt, ...)
 	}
 
 	va_start(listp, fmt);
-	_doprnt(fmt, &listp, db_putchar, db_radix);
+	_doprnt_ext(fmt, &listp, db_putchar, db_radix, db_doprnt_ext);
 	va_end(listp);
 }
 

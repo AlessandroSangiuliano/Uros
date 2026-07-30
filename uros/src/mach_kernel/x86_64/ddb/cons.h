@@ -27,11 +27,29 @@
 #ifndef _X86_64_DDB_CONS_H_
 #define _X86_64_DDB_CONS_H_
 
+#include <stdarg.h>
 #include <stdint.h>
 
 /* One character out, waiting for room. */
 void cons_putc(char c);
 void cons_puts(const char *s);
+
+/*
+ * Formatted output (#415), for panic() and anything else that has a value to
+ * report rather than a sentence.  %s %c %d %u %x %p %%, with l/ll; no field
+ * widths and no precision.  See cons.c for why that set and not another.
+ */
+void cons_printf(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void cons_vprintf(const char *fmt, va_list ap)
+	__attribute__((format(printf, 1, 0)));
+
+/*
+ * Point the console at memory instead of the port, so a selftest can read
+ * back what the formatter produced. Always terminated; returns the length
+ * written, which is short of max only because the terminator has room.
+ */
+void cons_capture_begin(char *buf, unsigned max);
+unsigned cons_capture_end(void);
 
 /*
  * Numbers, because three copies of this had accumulated — one in the boot

@@ -142,9 +142,9 @@ mach_subsystem_create(
 		    (char *)&routine->arg_descr[routine->descr_count] >
 		    (char *)&new_subsystem->user + (int)user_subsysCount
 		   ) {
-			printf("Arg descr out of bounds: arg_descr=%x, &routine.num_routines=%x\n",
+			printf("Arg descr out of bounds: arg_descr=%p, &routine.num_routines=%p\n",
 				&routine->arg_descr[0], &new_subsystem->user.routine[num_routines]);
-			printf("		new_subsys->user + subsysCount = %x\n",
+			printf("		new_subsys->user + subsysCount = %p\n",
 						    (char *)&new_subsystem->user + (int)user_subsysCount);
 #if 	MACH_DEBUG && MACH_KDB
 			subsystem_print(new_subsystem);

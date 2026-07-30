@@ -233,15 +233,43 @@ set(KERNEL_C_FLAGS
     -fno-optimize-sibling-calls
     -std=gnu11
     -Wall
-    -Wno-implicit-function-declaration
-    -Wno-int-conversion  
+    #
+    # #415.  Three suppressions used to live here and all three were about
+    # width: -Wno-implicit-function-declaration, -Wno-int-conversion and
+    # -Wno-format.  They are the two halves of this audit's cheap side, and
+    # they were switched off wholesale.
+    #
+    # implicit-function-declaration is gone: an undeclared function is
+    # assumed to return int, so on the next target every call that returns a
+    # pointer or a physical address is truncated at the call site, silently
+    # and in the caller rather than in the callee where you would look.
+    #
+    # -Wno-format is gone too, and removing it changes nothing today: this
+    # kernel builds -fno-builtin with its own printf, db_printf and kprintf,
+    # none of which carries format(printf,...), so there was never anything
+    # for the warning to check.  It was guarding an empty room.  Annotating
+    # the print functions is what makes it real, and that is its own step --
+    # %x against a vm_offset_t is the thing the issue asks for.
+    #
+    # int-conversion is FATAL again, which is #442's third done-when.
+    #
+    # #415 left it warning-but-not-fatal, and said why: two sites remained,
+    # and they were one fact -- the kernel kept ipc_port_t pointers in
+    # message fields typed mach_port_t, pointer-wide on i386 and not on
+    # x86-64.  Stopping the build on that would have stopped it on a
+    # decision that belonged to the message ABI, not to a compiler flag.
+    #
+    # #442 made that decision and carried it out: the ports live in the
+    # kmsg, the message carries names, and the count is zero.  Fatal is now
+    # the point -- it is what makes "by construction" mean something rather
+    # than a line in a build log nobody reads.  If this ever fails to
+    # compile, something has put an address back in a name field.
     -Wno-pointer-sign
     -Wno-unused-variable
     -Wno-unused-function
     -Wno-unused-but-set-variable
     -Wno-missing-braces
     -Wno-parentheses
-    -Wno-format
     ${KERNEL_OPT_FLAGS}
 )
 
