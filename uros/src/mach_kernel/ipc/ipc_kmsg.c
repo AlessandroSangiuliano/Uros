@@ -2490,7 +2490,7 @@ ipc_kmsg_copyout_header(
 	mach_msg_type_name_t reply_type = MACH_MSGH_BITS_LOCAL(mbits);
 	ipc_port_t reply = kmsg->ikm_reply;		/* #442 */
 	mach_port_t dest_name, reply_name;
-	unsigned long protected_payload = 0;
+	natural_t protected_payload = 0;		/* #442 */
 
 	if (IP_VALID(reply)) {
 		ipc_port_t notify_port;
@@ -2571,7 +2571,15 @@ ipc_kmsg_copyout_header(
 				goto copyout_dest;
 			}
 
-			reply_name = (mach_port_t)reply;
+			/*
+			 * #442: no seeding with the port's address.
+			 * ipc_entry_get only WRITES through namep -- it
+			 * never reads what is there -- so this was a dead
+			 * store, and one that read as a pointer being put
+			 * in a name field, which is the exact shape this
+			 * issue removes.  Leaving it would leave noise in
+			 * the search that has to come back empty.
+			 */
 			kr = ipc_entry_get(space,
 				reply_type == MACH_MSG_TYPE_PORT_SEND_ONCE,
 				&reply_name, &entry);
@@ -2775,6 +2783,16 @@ ipc_kmsg_copyout_header(
 
 	msg->msgh_bits = (MACH_MSGH_BITS_OTHER(mbits) |
 			  MACH_MSGH_BITS(reply_type, dest_type));
+	/*
+	 * #442: the payload is delivered in a name-shaped field, so it is
+	 * a name-shaped number.  The assertion is the point: it makes the
+	 * cast width-preserving BY CONSTRUCTION rather than by anyone
+	 * remembering, and it is what would have caught this on the day
+	 * x86-64 first compiled the machine-independent tree.
+	 */
+	_Static_assert(sizeof(natural_t) == sizeof(mach_port_t),
+		       "a protected payload is delivered in a port-name field "
+		       "and cannot be wider than one");
 	if (protected_payload != 0) {
 		msg->msgh_local_port = (mach_port_t) protected_payload;
 		msg->msgh_bits |= MACH_MSGH_BITS_PROTECTED_PAYLOAD;

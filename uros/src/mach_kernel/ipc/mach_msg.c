@@ -2029,7 +2029,7 @@ mach_msg_overwrite_trap(
 			ipc_port_t reply_port =
 				kmsg->ikm_reply;
 			mach_port_t dest_name, reply_name;
-			unsigned long fast_pp = 0;
+			natural_t fast_pp = 0;		/* #442 */
 
 			/* receiving a request message */
 

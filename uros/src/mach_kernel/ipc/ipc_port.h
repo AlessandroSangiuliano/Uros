@@ -230,7 +230,18 @@ struct ipc_port {
 	struct ipc_mqueue ip_messages;
 	struct ipc_thread_queue ip_blocked;
 	ipc_port_flags_t ip_flags;
-	unsigned long	ip_protected_payload;	/* receiver payload (0=none) */
+	/*
+	 * #442: a natural_t, not an unsigned long.
+	 *
+	 * Every other point on this value's path is thirty-two bits: the
+	 * .defs declares it `unsigned', the kernel entry takes an `unsigned',
+	 * and it is DELIVERED in msgh_local_port, which is a mach_port_t.
+	 * Storing it wider promised a range nothing could fill -- the setter
+	 * cannot accept more -- and on x86-64 the delivery would have
+	 * truncated it.  natural_t is what #413 kept at thirty-two bits
+	 * precisely for numbers the interfaces exchange.
+	 */
+	natural_t	ip_protected_payload;	/* receiver payload (0=none) */
 
 #if	NORMA_VM
 	/*
