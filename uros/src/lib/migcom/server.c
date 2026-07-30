@@ -342,6 +342,30 @@ WriteGlobalDecls(FILE *file)
     fprintf(file, "\t\t\t\treturn;\\\n");
     fprintf(file, "\t\t\t\t}\n");
     fprintf(file, "\n");
+
+    /*
+     * #443: name the check that refused.
+     *
+     * The argument checks are compiled in again, and a rejection has to
+     * be diagnosable from the console alone: which routine, and which
+     * field.  Otherwise it reaches whoever made the call as a bare
+     * MIG_BAD_ARGUMENTS, far from the cause -- and a check nobody can
+     * read gets switched off the first time it fires, which is the
+     * history this issue is undoing.
+     *
+     * The counter is per site and stops at three: a sender in a loop
+     * would otherwise drown the console it is reporting to, and after
+     * three the reader knows everything the fourth would say.
+     */
+    if (IsKernelServer) {
+	fprintf(file, "#define MIG_CHECK_FAILED(rtn, what)\t{\\\n");
+	fprintf(file, "\t\t\t\tstatic int _mig_seen;\\\n");
+	fprintf(file, "\t\t\t\tif (_mig_seen++ < 3)\\\n");
+	fprintf(file, "\t\t\t\t\tprintf(\"mig: %%s refused a message: %%s\\n\", \\\n");
+	fprintf(file, "\t\t\t\t\t       rtn, what);\\\n");
+	fprintf(file, "\t\t\t\t}\n");
+	fprintf(file, "\n");
+    }
 }
 
 static void

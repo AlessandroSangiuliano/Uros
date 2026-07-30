@@ -1187,8 +1187,27 @@ WriteReturnMsgError(FILE *file, routine_t *rt, boolean_t isuser, argument_t *arg
 
         fprintf(file, "%sreturn %s; }\n", string, error);
     }
-    else
+    else {
+	/*
+	 * #443: say WHICH routine refused, and why.
+	 *
+	 * Every TypeCheck failure in a kernel server stub funnels through
+	 * here, and what it used to hand back was a bare MIG_BAD_ARGUMENTS:
+	 * an error that surfaces far away, inside whichever server made the
+	 * call, with nothing saying which of three hundred and fourteen
+	 * checks fired or on what.  A check nobody can diagnose is a check
+	 * that gets switched off again the first time it fires -- which is
+	 * how these came to be off in the first place.
+	 *
+	 * Costs nothing until it fires, and rate-limits itself so one bad
+	 * sender in a loop cannot drown the console it is reporting to.
+	 */
+	if (IsKernelServer)
+	    fprintf(file, "MIG_CHECK_FAILED(\"%s\", \"%s\"); ",
+		    rt->rtName,
+		    (arg != argNULL) ? arg->argVarName : error);
         fprintf(file, "%sMIG_RETURN_ERROR(OutP, %s); }\n", string, error);
+    }
 }
 
 /* executed iff elements are defined */

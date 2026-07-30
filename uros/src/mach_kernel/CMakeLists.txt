@@ -317,7 +317,7 @@ endif()
 # MIG-specific flags - disable type checking for kernel stubs
 set(MIG_CFLAGS
     -Dmig_internal=
-    -DTypeCheck=0
+    -DTypeCheck=1
 )
 
 # =============================================================================
@@ -974,7 +974,7 @@ target_compile_definitions(${KERNEL_TARGET} PRIVATE
     # replicate that here so the kernel skips MIG type-checking
     # (which can fail spuriously, e.g. OOL-ports disposition not
     # translated by ipc_kmsg_copyin when count==0).
-    TypeCheck=0
+    TypeCheck=1
     mig_internal=
 )
 
