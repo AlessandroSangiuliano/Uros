@@ -1191,21 +1191,25 @@ WriteReturnMsgError(FILE *file, routine_t *rt, boolean_t isuser, argument_t *arg
 	/*
 	 * #443: say WHICH routine refused, and why.
 	 *
-	 * Every TypeCheck failure in a kernel server stub funnels through
-	 * here, and what it used to hand back was a bare MIG_BAD_ARGUMENTS:
-	 * an error that surfaces far away, inside whichever server made the
-	 * call, with nothing saying which of three hundred and fourteen
-	 * checks fired or on what.  A check nobody can diagnose is a check
-	 * that gets switched off again the first time it fires -- which is
-	 * how these came to be off in the first place.
+	 * Every TypeCheck failure in a server stub funnels through here, and
+	 * what it used to hand back was a bare MIG_BAD_ARGUMENTS: an error
+	 * that surfaces far away, inside whichever task made the call, with
+	 * nothing saying which check fired or on what.  A check nobody can
+	 * diagnose is a check that gets switched off again the first time it
+	 * fires -- which is how the kernel's came to be off in the first
+	 * place.
+	 *
+	 * Userland servers get it as well.  They are the majority of the
+	 * stubs and the half where these checks have always been on, so a
+	 * silent rejection there has had far longer to hide than in the
+	 * kernel; there is no argument for diagnosing the smaller half only.
 	 *
 	 * Costs nothing until it fires, and rate-limits itself so one bad
 	 * sender in a loop cannot drown the console it is reporting to.
 	 */
-	if (IsKernelServer)
-	    fprintf(file, "MIG_CHECK_FAILED(\"%s\", \"%s\"); ",
-		    rt->rtName,
-		    (arg != argNULL) ? arg->argVarName : error);
+	fprintf(file, "MIG_CHECK_FAILED(\"%s\", \"%s\"); ",
+		rt->rtName,
+		(arg != argNULL) ? arg->argVarName : error);
         fprintf(file, "%sMIG_RETURN_ERROR(OutP, %s); }\n", string, error);
     }
 }

@@ -288,10 +288,22 @@ WriteIncludes(FILE *file)
 	    fprintf(file, "#include <mig_debug.h>\n");
 	    fprintf(file, "#endif\t/* MACH_KERNEL */\n");
         }
-	fprintf(file, "#if  MIG_DEBUG\n"); 
+	fprintf(file, "#if  MIG_DEBUG\n");
 	fprintf(file, "#include <mach/mig_log.h>\n");
-	fprintf(file, "#endif /* MIG_DEBUG */\n"); 
+	fprintf(file, "#endif /* MIG_DEBUG */\n");
     }
+    /*
+     * #443: MIG_CHECK_FAILED calls printf, and a userland stub has no
+     * declaration for it -- these files include no <stdio.h>, and pulling
+     * one in here would drag the hosted headers into every generated stub
+     * (sa_mach/types.h and musl already disagree about off_t, and this is
+     * not the place to find out).  Declare just the one function instead.
+     * It matches both userland definitions, libmach/printf.c and
+     * libpthreads/fprintf.c, and the declaration already in sa_mach/stdio.h.
+     * The kernel gets printf from its own headers and is left alone.
+     */
+    if (!IsKernelServer)
+	fprintf(file, "extern int printf(const char *, ...);\n");
     fprintf(file, "\n");
 }
 
@@ -356,16 +368,23 @@ WriteGlobalDecls(FILE *file)
      * The counter is per site and stops at three: a sender in a loop
      * would otherwise drown the console it is reporting to, and after
      * three the reader knows everything the fourth would say.
+     *
+     * Emitted for userland servers too, not just the kernel.  They are
+     * where these checks have always been on -- 179 stubs against the
+     * kernel's 18 -- so they are also where a rejection has been silent
+     * for longest.  A userland server that starts refusing well-formed
+     * messages after an interface change presents as an RPC that returns
+     * -304 from somewhere, with nothing naming the routine; that is the
+     * same dead end this issue is undoing in the kernel, and there is no
+     * reason to leave it standing on the larger half of the tree.
      */
-    if (IsKernelServer) {
-	fprintf(file, "#define MIG_CHECK_FAILED(rtn, what)\t{\\\n");
-	fprintf(file, "\t\t\t\tstatic int _mig_seen;\\\n");
-	fprintf(file, "\t\t\t\tif (_mig_seen++ < 3)\\\n");
-	fprintf(file, "\t\t\t\t\tprintf(\"mig: %%s refused a message: %%s\\n\", \\\n");
-	fprintf(file, "\t\t\t\t\t       rtn, what);\\\n");
-	fprintf(file, "\t\t\t\t}\n");
-	fprintf(file, "\n");
-    }
+    fprintf(file, "#define MIG_CHECK_FAILED(rtn, what)\t{\\\n");
+    fprintf(file, "\t\t\t\tstatic int _mig_seen;\\\n");
+    fprintf(file, "\t\t\t\tif (_mig_seen++ < 3)\\\n");
+    fprintf(file, "\t\t\t\t\tprintf(\"mig: %%s refused a message: %%s\\n\", \\\n");
+    fprintf(file, "\t\t\t\t\t       rtn, what);\\\n");
+    fprintf(file, "\t\t\t\t}\n");
+    fprintf(file, "\n");
 }
 
 static void
