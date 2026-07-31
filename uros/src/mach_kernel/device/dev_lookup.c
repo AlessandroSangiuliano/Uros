@@ -250,7 +250,16 @@ device_lookup_mode(
 	    device = dev_number_lookup(dev_ops, dev_minor);
 	    if (device == DEVICE_NULL)
 		mutex_unlock(&dev_number_lock);
-	}
+	} else
+	    /*
+	     * #445: a clone open never looks one up, so there is no existing
+	     * device -- which is what DEVICE_NULL means.  Every read below is
+	     * already guarded by !clone and so could never see this, but the
+	     * guard is a correlation the compiler cannot follow, and saying it
+	     * outright costs nothing and matches how new_device is handled ten
+	     * lines down.
+	     */
+	    device = DEVICE_NULL;
 
 	if (clone || device == DEVICE_NULL) {
 	    new_device = (device_t) zalloc(dev_hdr_zone);
