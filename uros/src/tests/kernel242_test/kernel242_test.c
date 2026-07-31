@@ -42,7 +42,7 @@
  *                         budget exhausted from inside the pager (#449)
  *   device/dev_name.c     dev_lookup_register path     -> covered by I/O
  *                         (no userspace API)
- *   device/ds_routines.c  device read done callback    -> NOT COVERED (#449)
+ *   device/ds_routines.c  ds_read_done NULL-data clamp  -> test_device_read
  *   i386/fpu.c            FPU state save/restore       -> test_fpu_state
  *   i386/iopb.c           i386_io_port_list (#445)     -> test_io_port_list
  *   i386/user_ldt.c       user LDT install             -> test_user_ldt
@@ -69,6 +69,12 @@
 #include <mach/i386/thread_status.h>
 #include <mach/i386/fp_reg.h>
 #include <mach/i386/mach_i386_types.h>
+#include <device/device.h>		/* #449: device_open/read/close --
+					 * declared by MIG, not by hand.  Getting
+					 * device_open's arity wrong by hand is how
+					 * this test first faulted, and declaring a
+					 * MIG interface by hand is what #448 was. */
+#include <device/device_types.h>
 #include <servers/netname.h>
 
 extern kern_return_t bootstrap_ports(mach_port_t bootstrap,
@@ -83,6 +89,7 @@ static unsigned int g_pass = 0;
 static unsigned int g_fail = 0;
 static const char *g_current_test = "?";
 static mach_port_t g_host_priv = MACH_PORT_NULL;	/* from bootstrap */
+static mach_port_t g_device_master = MACH_PORT_NULL;	/* #449: for device_open */
 
 #define EXPECT(expr, msg) do {                                      \
     if (!(expr)) {                                                  \
@@ -657,6 +664,69 @@ test_evc_wait(void)
 }
 
 /* =========================================================================
+ * device/ds_routines.c  ds_read_done  — the NULL io_data clamp, on purpose.
+ *
+ * The map used to promise a test_device_read for this file.  There was none,
+ * and the path is more interesting than "a device read completes": right
+ * above ds_read_done sits a clamp added after a real crash, and conf.c
+ * explains in a comment why the console had to be made NO_READ --
+ *
+ *	a bogus read "success" leaves io_data == NULL and io_residual == 0,
+ *	so ds_read_done() computes size_read == io_count and marshals that
+ *	many bytes from a NULL buffer -- a near-NULL bcopy crash
+ *
+ * -- and then, twenty lines further down the same table, "time" and
+ * "rtclock" are declared NULL_OPEN / NULL_READ, which is precisely that
+ * combination.  Anyone may open them and read them, and the read succeeds
+ * having transferred nothing from nowhere.
+ *
+ * So this reads "time".  If the clamp holds, the answer is a short read and
+ * the kernel keeps going.  If it were ever removed, this test does not fail
+ * politely -- it takes the kernel with it, which is the correct behaviour for
+ * a test guarding a fault.
+ * ========================================================================= */
+static void
+test_device_read(void)
+{
+    mach_port_t             dev = MACH_PORT_NULL;
+    security_token_t        sec = { { 0, 0 } };
+    char                    name[] = "time";
+    io_buf_ptr_t            data = NULL;
+    mach_msg_type_number_t  count = 0xdeadbeef;
+    kern_return_t           kr;
+
+    BEGIN_TEST("device_read on \"time\" (ds_read_done NULL-data clamp)");
+
+    /* Six arguments, not four: master, ledger, mode, security token, name,
+     * out.  bootstrap.c passes MACH_PORT_NULL for the ledger and its own
+     * token; a zero token is what an unprivileged caller has. */
+    kr = device_open(g_device_master, MACH_PORT_NULL, D_READ, sec, name, &dev);
+    if (kr != D_SUCCESS) {
+        printf("  device_open(\"time\") kr=%d -- cannot reach ds_read_done "
+               "from here, path left unexercised\n", (int)kr);
+        g_fail++;
+        return;
+    }
+
+    /*
+     * 512 wanted from a device that transfers nothing.  What comes back
+     * must be a short read, not 512 bytes copied out of address zero.
+     */
+    kr = device_read(dev, 0, 0, 512, &data, &count);
+    printf("  device_read kr=%d count=%u\n", (int)kr, (unsigned)count);
+    EXPECT(kr == D_SUCCESS || kr == D_INVALID_OPERATION,
+           "read should answer, not fault");
+    EXPECT(count == 0, "a device that transferred nothing must report 0");
+    printf("  clamp held: short read, kernel alive\n");
+
+    if (data != NULL && count != 0)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)data, count);
+    (void)device_close(dev);
+    (void)mach_port_deallocate(mach_task_self(), dev);
+    PASS();
+}
+
+/* =========================================================================
  * i386/fpu.c  thread_set_state(i386_FLOAT_STATE)  -> alloc retry loop
  * ========================================================================= */
 extern kern_return_t thread_set_state(mach_port_t target_act,
@@ -723,6 +793,7 @@ main(int argc, char **argv)
         != KERN_SUCCESS)
         return 1;
     g_host_priv = host;
+    g_device_master = device;	/* #449 */
     printf_init(device);
 
     printf("\n=== kernel242_test (#242 no-goto kernel exerciser) ===\n");
@@ -740,6 +811,7 @@ main(int argc, char **argv)
     test_user_ldt();
     test_io_port_list();
     test_evc_wait();
+    test_device_read();
     test_fpu_state();
 
     printf("\n=== kernel242_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);
