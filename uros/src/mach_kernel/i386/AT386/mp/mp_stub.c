@@ -41,6 +41,11 @@
 #include <i386/mp_desc.h>	/* mp_desc_table / interrupt_stack (#308) */
 #include <i386/lock.h>		/* atomic_incl (#344 bring-up barrier) */
 #include <i386/pic.h>		/* NINTR */
+#include <i386/proc_reg.h>	/* #445: CR4_PGE, get_cr4, set_cr4 -- this file
+				 * used to redefine CR4_PGE and re-declare both
+				 * accessors.  The two definitions agreed, which
+				 * is exactly why a divergence would have been
+				 * silent: one hardware bit, one header. */
 #include <i386/ipl.h>		/* SPLHI */
 #include <chips/busses.h>	/* intr_t */
 
@@ -275,9 +280,6 @@ start_other_cpus(void)
  * the scheduler.
  */
 extern void init_fpu(void);
-extern unsigned int get_cr4(void);
-extern void set_cr4(unsigned int);
-#define	CR4_PGE	0x80	/* enable global PTEs */
 
 static void
 ap_machine_init(void)

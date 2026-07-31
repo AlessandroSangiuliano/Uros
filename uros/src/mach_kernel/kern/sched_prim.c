@@ -691,13 +691,29 @@ __assert_wait(
 		 * event and the caller so future occurrences land closer to
 		 * their root cause.
 		 */
+		/*
+		 * #445: one return address, not three.
+		 *
+		 * __builtin_return_address(1) and (2) ask for the caller's
+		 * caller, which the C standard does not define and GCC warns
+		 * about: with a tail call, with inlining, or with the frame
+		 * pointer omitted, that walk has nothing to walk and may
+		 * return garbage or fault.  It worked here only because this
+		 * kernel is built -fno-omit-frame-pointer -- an unrelated flag
+		 * chosen for the backtracer, which anyone could reasonably
+		 * change.  A diagnostic that lies when a build flag moves is
+		 * worse than one that says less.
+		 *
+		 * Argument 0 is well-defined and stays.  The rest of the chain
+		 * is not lost: panic() enters the debugger, and `trace` at that
+		 * prompt walks the stack properly instead of guessing at it.
+		 */
 		panic("assert_wait: no current_thread "
-		      "(event=0x%x ra1=0x%x ra2=0x%x ra3=0x%x) — caller "
-		      "invoked sleep before scheduler is up",
+		      "(event=0x%x ra=0x%x) — caller invoked sleep before "
+		      "scheduler is up; use `trace` at the ddb prompt for the "
+		      "rest of the chain",
 		      (unsigned)event,
-		      (unsigned)(unsigned long)__builtin_return_address(0),
-		      (unsigned)(unsigned long)__builtin_return_address(1),
-		      (unsigned)(unsigned long)__builtin_return_address(2));
+		      (unsigned)(unsigned long)__builtin_return_address(0));
 	}
 	if (thread->wait_event != NO_EVENT) {
 		panic("assert_wait: already asserted event %p\n",
