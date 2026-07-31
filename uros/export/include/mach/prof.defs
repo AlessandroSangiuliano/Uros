@@ -65,7 +65,7 @@
 subsystem
 #if	KERNEL_USER
 	  KernelUser
-#endif	KERNEL_USER
+#endif	/* KERNEL_USER */
 		prof 2450;		/* exc.defs from 2400 - 2449 */
 
 #include <mach/std_types.defs>

@@ -99,4 +99,4 @@ type region_info_t = struct[8] of int;
 
 import <servers/machid_types.h>;
 
-#endif	_MACHID_TYPES_DEFS_
+#endif	/* _MACHID_TYPES_DEFS_ */

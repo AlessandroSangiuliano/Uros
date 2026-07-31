@@ -546,8 +546,27 @@ i386_io_port_list(thread, list, list_count)
 	register iopb_tss_t io_tss;
 	unsigned int	count = 0, alloc_count;
 	device_t	*devices = NULL;
-	vm_size_t	size_needed, size;
-	vm_offset_t	addr;
+	/*
+	 * #445: both must start at zero, and GCC was right to say so.
+	 *
+	 * The loop below reads `size` before anything writes it -- once to
+	 * decide whether the buffer it has is big enough, and once to decide
+	 * whether it holds a buffer at all:
+	 *
+	 *	if (size_needed <= size)  break;
+	 *	if (size != 0)            KFREE(addr, size, rt);
+	 *
+	 * so a non-zero value left on the stack makes the first pass either
+	 * leave the loop with nothing allocated and then use `addr`, or hand
+	 * kfree() an arbitrary address with an arbitrary length.  This is a
+	 * MIG routine, so the caller is userland.
+	 *
+	 * `size == 0` is the loop's way of saying "nothing held yet"; that is
+	 * a contract, not a hint, and host.c's twin (processor_set_list) has
+	 * always stated it explicitly.  This one never did.
+	 */
+	vm_size_t	size_needed, size = 0;
+	vm_offset_t	addr = 0;
 	int		i;
 	boolean_t rt = FALSE; /* ### This boolean is FALSE, because there
 			       * currently exists no mechanism to determine

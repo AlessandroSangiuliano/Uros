@@ -117,8 +117,6 @@
 #include <signal.h>
 #include <execinfo.h>
 
-/* Forward declaration for SafeString to avoid implicit-declaration warnings */
-void SafeString(FILE *file, const char *s);
 
 extern char *MessFreeRoutine;
 

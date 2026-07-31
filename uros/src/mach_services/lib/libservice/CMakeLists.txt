@@ -9,7 +9,7 @@ set(SERVICE_HEADER "${CMAKE_BINARY_DIR}/generated/service.h")
 
 add_custom_command(
   OUTPUT ${SERVICE_USER_C} ${SERVICE_SERVER_C} ${SERVICE_HEADER}
-  COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+  COMMAND ${CMAKE_C_COMPILER} -E -x c
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
