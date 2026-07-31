@@ -37,9 +37,9 @@
  *   kern/sched_prim.c     idle loop retry (implicit, every thread_block)
  *   vm/vm_user.c          msync re_iterate (overlap)   -> test_vm_msync
  *   vm/memory_object.c    retry_lookup (pager busy)    -> test_pager_busy
- *   default_pager dpo_nomemory                          -> SKIP: only on
- *                         vm_allocate_wired failure, which needs the wired
- *                         budget exhausted from inside the pager (#449)
+ *   default_pager dpo_nomemory                          -> test_default_pager_objects
+ *                         but ONLY when the pager is launched `dpofail=N`;
+ *                         a default boot takes the success arm (#449)
  *   device/dev_name.c     dev_lookup_register path     -> covered by I/O
  *                         (no userspace API)
  *   device/ds_routines.c  ds_read_done NULL-data clamp  -> test_device_read
@@ -75,6 +75,8 @@
 					 * this test first faulted, and declaring a
 					 * MIG interface by hand is what #448 was. */
 #include <device/device_types.h>
+#include <default_pager_object.h>	/* #449: object_create -- MIG's
+					 * declaration, not mine */
 #include <servers/netname.h>
 
 extern kern_return_t bootstrap_ports(mach_port_t bootstrap,
@@ -446,9 +448,6 @@ test_pager_busy(void)
 extern kern_return_t host_default_memory_manager(mach_port_t host_priv,
                                                  mach_port_t *def_mgr_inout,
                                                  vm_size_t cluster);
-extern kern_return_t default_pager_objects(mach_port_t default_pager,
-    pointer_t *objects, mach_msg_type_number_t *objectsCnt,
-    mach_port_array_t *ports, mach_msg_type_number_t *portsCnt);
 extern kern_return_t mach_host_self_trap(void);   /* declared elsewhere */
 
 static void
@@ -456,7 +455,13 @@ test_default_pager_objects(void)
 {
     mach_port_t hp = g_host_priv;
     mach_port_t dpager = MACH_PORT_NULL;
-    pointer_t   objects = 0;
+    /* #449: the array element is a two-word struct, not a word.  The
+     * hand-written extern this file used to carry said pointer_t, which is
+     * the same size and the wrong type, and the deallocate below inherited
+     * the mistake -- it freed objCnt*4 bytes of an objCnt*8 buffer.  It never
+     * showed because objCnt was always zero: nothing ever created a pager
+     * object before asking for the list. */
+    default_pager_object_array_t objects = NULL;
     mach_msg_type_number_t objCnt = 0;
     mach_port_array_t ports = 0;
     mach_msg_type_number_t prtCnt = 0;
@@ -475,8 +480,25 @@ test_default_pager_objects(void)
         return;
     }
 
-    /* Pass null inline arrays to force vm_allocate_wired allocation
-     * inside default_pager_objects (opotential < actual). */
+    /*
+     * #449: create an object first, because otherwise there is nothing to
+     * enumerate and the branch this test is named for never runs.
+     *
+     * The comment that used to sit here said passing null inline arrays
+     * forces the vm_allocate_wired inside default_pager_objects.  It does
+     * not: the allocation is guarded by `if (opotential < actual)`, and with
+     * no pager objects alive `actual` is zero, so the call returns an empty
+     * list having allocated nothing.  Every run of this test reported
+     * objCnt=0 and nobody read it as the answer to that claim.
+     */
+    {
+        mach_port_t mem_obj = MACH_PORT_NULL;
+        kern_return_t ckr = default_pager_object_create(dpager, &mem_obj,
+                                                        vm_page_size);
+        printf("  object_create kr=%d (need >=1 object for the "
+               "allocation branch)\n", ckr);
+    }
+
     kr = default_pager_objects(dpager,
                                &objects, &objCnt,
                                (mach_port_array_t *)&ports, &prtCnt);
@@ -485,11 +507,35 @@ test_default_pager_objects(void)
     EXPECT(kr == KERN_SUCCESS || kr == KERN_RESOURCE_SHORTAGE,
            "default_pager_objects survived");
 
+    /*
+     * #449: KERN_RESOURCE_SHORTAGE means the pager was launched with
+     * `dpofail=N` and this call went down dpo_nomemory -- the cleanup arm,
+     * which releases the port rights already taken and frees whichever of
+     * the two buffers had been allocated.
+     *
+     * Seeing the error code is the boring half.  What matters is whether the
+     * cleanup left the server whole, so ask again: the counter is consumed
+     * one per allocation, so a later call finds it at zero and must succeed.
+     * A dpo_nomemory that released a right twice, or forgot one, or freed a
+     * buffer it did not own, does not show up in the return value -- it shows
+     * up here, on the call after.
+     */
+    if (kr == KERN_RESOURCE_SHORTAGE) {
+        printf("  dpo_nomemory taken (dpofail armed); re-asking\n");
+        objCnt = prtCnt = 0;
+        kr = default_pager_objects(dpager, &objects, &objCnt,
+                                   (mach_port_array_t *)&ports, &prtCnt);
+        printf("  after cleanup: kr=%d objCnt=%u prtCnt=%u\n",
+               kr, objCnt, prtCnt);
+        EXPECT(kr == KERN_SUCCESS,
+               "the pager must still work after dpo_nomemory");
+    }
+
     if (kr == KERN_SUCCESS) {
         if (objCnt > 0)
             (void)vm_deallocate(mach_task_self(),
                                 (vm_address_t)objects,
-                                objCnt * sizeof(unsigned));
+                                objCnt * sizeof(default_pager_object_t));
         if (prtCnt > 0) {
             unsigned i;
             mach_port_t *parr = (mach_port_t *)ports;
