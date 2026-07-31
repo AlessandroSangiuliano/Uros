@@ -2163,7 +2163,6 @@ InitKPD_Disciplines(argument_t *args)
     extern void WriteTemplateKPD_port(FILE *file, argument_t *arg, boolean_t in);
     extern void WriteTemplateKPD_ool(FILE *file, argument_t *arg, boolean_t in);
     extern void WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in);
-    extern void SafeString(FILE *file, const char *s);
 
     /*
      * WriteInitKPD_port, WriteKPD_port,  WriteExtractKPD_port, 

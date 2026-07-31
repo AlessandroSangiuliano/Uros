@@ -150,4 +150,13 @@ extern void  WriteRPCRoutineDescriptor(FILE *file, routine_t *rt,
 
 extern void WriteRPCRoutineArgDescriptor(FILE *file, routine_t *rt);
 
+/*
+ * #445: declared here rather than at each call site.  server.c called it
+ * six times before declaring it, so the compiler built an implicit
+ * declaration from the first call and then reported the explicit `extern`
+ * further down as a conflict -- even though the two agreed.  One
+ * declaration, in the header both files already include.
+ */
+extern void SafeString(FILE *file, const char *s);
+
 #endif	/* _UTILS_H */

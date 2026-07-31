@@ -91,7 +91,7 @@ routine cap_acquire(
 	in	resource_id	: cap_u64_t;
 	in	ops		: cap_u64_t;
 	in	lifetime_ms	: cap_u32_t;
-	out	token		: cap_token_t, Dealloc);
+	out	token		: cap_token_t);	/* #445: inline array -- Dealloc means nothing here */
 
 /*
  *	cap_derive — delegate a reduced subset of a parent token's ops to
@@ -103,7 +103,7 @@ routine cap_derive(
 	in	parent		: cap_token_t;
 	in	reduced_ops	: cap_u64_t;
 	in	lifetime_ms	: cap_u32_t;
-	out	child		: cap_token_t, Dealloc);
+	out	child		: cap_token_t);	/* #445: inline array -- Dealloc means nothing here */
 
 /*
  *	cap_revoke — revoke a capability and all its descendants.
