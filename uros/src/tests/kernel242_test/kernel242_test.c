@@ -28,14 +28,18 @@
  *   ipc/ipc_port.c        set_seqno fast/slow path     -> test_set_seqno
  *                         circularity fast/slow path   -> test_circularity
  *   ipc/ipc_entry.c       tree_lookup (collision)       -> test_many_ports
- *   kern/eventcount.c     (signal/wait via mach_msg)    -> NOT COVERED (#449)
+ *   kern/eventcount.c     evc_wait argument check       -> test_evc_wait
+ *                         (blocking arm: no driver in this build creates an
+ *                          eventcounter, so no id is ever valid -- #449)
  *   kern/syscall_subr.c   thread_switch handoff hint   -> test_thread_switch
  *   kern/thread_act.c     thread_terminate active path -> test_thread_terminate
  *   kern/thread.c         (pset move — requires deactivated pset, SKIP)
  *   kern/sched_prim.c     idle loop retry (implicit, every thread_block)
  *   vm/vm_user.c          msync re_iterate (overlap)   -> test_vm_msync
  *   vm/memory_object.c    retry_lookup (pager busy)    -> test_pager_busy
- *   default_pager dpo_nomemory                          -> NOT COVERED (#449)
+ *   default_pager dpo_nomemory                          -> SKIP: only on
+ *                         vm_allocate_wired failure, which needs the wired
+ *                         budget exhausted from inside the pager (#449)
  *   device/dev_name.c     dev_lookup_register path     -> covered by I/O
  *                         (no userspace API)
  *   device/ds_routines.c  device read done callback    -> NOT COVERED (#449)
@@ -608,6 +612,51 @@ test_io_port_list(void)
 }
 
 /* =========================================================================
+ * kern/eventcount.c  evc_wait  — trap 17, and nobody had ever taken it.
+ *
+ * The map used to claim a test_msg_pingpong for this file.  There is no such
+ * function, and a ping-pong would not have reached eventcount anyway: this
+ * is not IPC, it is a counting semaphore that device drivers signal from
+ * interrupt context.
+ *
+ * What is reachable is the argument check, and it is worth taking because
+ * evc_wait is a Mach trap (syscall_sw.c slot 17, kernel_trap(evc_wait,-17,1))
+ * that userland can call at any time with any number.  Both arms:
+ *
+ *	if ((ev_id >= MAX_EVCS) ||
+ *	    ((ev = all_eventcounters[ev_id]) == 0) || ...
+ *
+ * -- an id past the table, and an id inside it whose slot is empty.
+ *
+ * The blocking arm below them is not reachable here, and not for lack of
+ * trying: an eventcounter only exists once a driver calls evc_init, and the
+ * three that do (scsi/mapped_scsi.c, chips/lance_mapped.c, chips/atm.c) are
+ * not in this build.  So every slot is empty and every id is refused, which
+ * is exactly why the trap has never been exercised: there was nothing to
+ * wait for and nobody to call it.
+ * ========================================================================= */
+extern kern_return_t evc_wait(unsigned int ev_id);
+
+static void
+test_evc_wait(void)
+{
+    BEGIN_TEST("evc_wait (eventcount.c, trap 17)");
+
+    /* Inside the table (MAX_EVCS is 10), but no driver ever filled it. */
+    EXPECT_KR(evc_wait(0), KERN_INVALID_ARGUMENT,
+              "evc_wait(0) with an empty table");
+
+    /* Past the end of it -- the bounds arm of the same condition. */
+    EXPECT_KR(evc_wait(10), KERN_INVALID_ARGUMENT,
+              "evc_wait(MAX_EVCS) should be out of range");
+    EXPECT_KR(evc_wait(0xffffffffu), KERN_INVALID_ARGUMENT,
+              "evc_wait(~0) should be out of range");
+
+    printf("  every id refused, trap survived\n");
+    PASS();
+}
+
+/* =========================================================================
  * i386/fpu.c  thread_set_state(i386_FLOAT_STATE)  -> alloc retry loop
  * ========================================================================= */
 extern kern_return_t thread_set_state(mach_port_t target_act,
@@ -690,6 +739,7 @@ main(int argc, char **argv)
     test_default_pager_objects();
     test_user_ldt();
     test_io_port_list();
+    test_evc_wait();
     test_fpu_state();
 
     printf("\n=== kernel242_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);
