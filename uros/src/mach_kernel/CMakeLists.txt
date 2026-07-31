@@ -314,7 +314,9 @@ if(UROS_S319_INSTRUMENT)
     message(STATUS "#319 s319 scheduler instrumentation: ON")
 endif()
 
-# MIG-specific flags - disable type checking for kernel stubs
+# MIG-specific flags.  TypeCheck is the argument validation in the generated
+# server stubs — see the target_compile_definitions below, which has to carry
+# the same value; #443 for why it spent the port at 0.
 set(MIG_CFLAGS
     -Dmig_internal=
     -DTypeCheck=1
@@ -969,11 +971,25 @@ target_compile_options(${KERNEL_TARGET} PRIVATE
 
 target_compile_definitions(${KERNEL_TARGET} PRIVATE
     ${KERNEL_DEFINES}
-    # MIG server stubs default to TypeCheck=1 via #ifndef guard.
-    # The original ODE build passed -DTypeCheck=0 in MIG_CFLAGS;
-    # replicate that here so the kernel skips MIG type-checking
-    # (which can fail spuriously, e.g. OOL-ports disposition not
-    # translated by ipc_kmsg_copyin when count==0).
+    # MIG server stubs validate the message they are handed; this compiles
+    # those blocks in.  It has to be set in both places or it is not set at
+    # all: MIG_CFLAGS above reaches the stubs migcom generates, this one
+    # reaches everything else the kernel target compiles.
+    #
+    # #443: it was 0 from the port until 2026-07-30, inherited from the ODE
+    # build and then written into this file by d443de8a for a real reason —
+    # task_create failed MIG_TYPE_ERROR because ipc_kmsg_copyin did not
+    # translate the OOL_PORTS disposition at count==0.  That bug was fixed in
+    # the same commit and the flag was never turned back on, so the other 313
+    # blocks were never observed either way.  They are now: 314 checks, 4 CPUs,
+    # boot + cap/sig/pthread + `ipc_bench --bench all`, nothing fires.
+    #
+    # Cost, measured rather than argued (#443 part B): below what the
+    # instrument can resolve.  The same kernel compared against itself reports
+    # -2.4%, the two kernels report +2.8% — the floor is +-3% and the effect is
+    # under it.  On task-to-task IPC the cost is zero by construction, since
+    # ipc_mqueue_send only runs a server stub when the destination is the
+    # kernel's own space.
     TypeCheck=1
     mig_internal=
 )
