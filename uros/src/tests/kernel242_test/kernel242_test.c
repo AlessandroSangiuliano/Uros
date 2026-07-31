@@ -15,22 +15,30 @@
  *
  * Each test prints "TEST: <name>" before, "  PASS" / "  FAIL" after.
  *
+ * ⚠️ This map is load-bearing: it is what anyone asking "is this path
+ * exercised?" reads instead of grepping.  It named four tests that do not
+ * exist, and one of the four files it wrongly claimed -- iopb.c -- turned out
+ * to hold three RPCs that page-faulted the kernel from any task (#448).  A
+ * map that promises coverage it does not have is worse than no map: it
+ * answers the question before anybody asks it.  Every entry below now names
+ * either a function in this file or nobody.
+ *
  * Coverage map (file -> test):
  *   ipc/mach_port.c       MACH_PORT_RECEIVE_STATUS path -> test_recv_status
  *   ipc/ipc_port.c        set_seqno fast/slow path     -> test_set_seqno
  *                         circularity fast/slow path   -> test_circularity
  *   ipc/ipc_entry.c       tree_lookup (collision)       -> test_many_ports
- *   kern/eventcount.c     (signal/wait via mach_msg)    -> test_msg_pingpong
+ *   kern/eventcount.c     (signal/wait via mach_msg)    -> NOT COVERED (#449)
  *   kern/syscall_subr.c   thread_switch handoff hint   -> test_thread_switch
  *   kern/thread_act.c     thread_terminate active path -> test_thread_terminate
  *   kern/thread.c         (pset move — requires deactivated pset, SKIP)
  *   kern/sched_prim.c     idle loop retry (implicit, every thread_block)
  *   vm/vm_user.c          msync re_iterate (overlap)   -> test_vm_msync
  *   vm/memory_object.c    retry_lookup (pager busy)    -> test_pager_busy
- *   default_pager dpo_nomemory                          -> test_pager_query
+ *   default_pager dpo_nomemory                          -> NOT COVERED (#449)
  *   device/dev_name.c     dev_lookup_register path     -> covered by I/O
  *                         (no userspace API)
- *   device/ds_routines.c  device read done callback    -> test_device_read
+ *   device/ds_routines.c  device read done callback    -> NOT COVERED (#449)
  *   i386/fpu.c            FPU state save/restore       -> test_fpu_state
  *   i386/iopb.c           i386_io_port_list (#445)     -> test_io_port_list
  *   i386/user_ldt.c       user LDT install             -> test_user_ldt
