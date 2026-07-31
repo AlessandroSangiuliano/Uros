@@ -57,14 +57,24 @@ target_compile_options(libfspager PRIVATE
                           -include stdint.h ${UROS_ARCH_FLAGS}>
 )
 
-# Disable MIG's hardcoded msgh_size / disposition TypeCheck on the
-# generated server stubs.  The kernel's memory_object_init message
-# shape may differ slightly from what the host-compiled .defs predict
-# (different Mach branches send slightly different trailers / port
-# dispositions); without this every well-formed call silently fails
-# MIG_BAD_ARGUMENTS in the wrapper before our seqnos_* handler runs.
-set_source_files_properties(${MO_SERVER_C} PROPERTIES
-  COMPILE_DEFINITIONS "TypeCheck=0")
+# #443 part C: this used to carry a TypeCheck=0 exception for the generated
+# memory_object server stubs.  Its recorded reason was that the host-compiled
+# .defs predicted a message shape the kernel does not send — which is exactly
+# what #416 removed, by having migcom ask the target compiler for the sizes
+# instead of taking sizeof on the host.  The reason expired, so the exception
+# goes: these stubs now check their arguments like the other 179 in userland.
+#
+# ⚠️ Removed on the static argument, NOT on a passing run, and the difference
+# matters.  Nothing in the tree reaches these stubs today: the only client of
+# file-backed mmap is libposix-uros' h_mmap2, which still handles MAP_ANONYMOUS
+# alone (dlopen_test documents itself as failing until that lands, and
+# exec_load defers mmap-backed loading to #228).  A green boot therefore proves
+# nothing here — the path is not entered, so no check can fire.  The first real
+# exercise of this stub arrives with #276's file-backed mmap, and it should
+# arrive with the checks on rather than inherit a disabled one for another two
+# years.  If the shape does disagree then, note that a userland stub has no
+# equivalent of the kernel's MIG_CHECK_FAILED diagnostic: it will fail as a
+# bare MIG_BAD_ARGUMENTS, and this comment is the pointer to why.
 
 target_include_directories(libfspager PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
