@@ -34,17 +34,20 @@
 #include <mach/port.h>
 #include <vm/vm_map.h>
 #include <vm/vm_kern.h>         /* for kernel_map, ipc_kernel_map */
+#include <mach/mach_server.h>	/* #448: interfaccia contro implementazione */
 
 /*
  *	Forwards
  */
 
-kern_return_t
-etap_get_info(mach_port_t, int*, int*, vm_offset_t*, vm_offset_t*,
-	      int*, int*, int*, int*);
-
-kern_return_t
-etap_trace_thread(thread_act_t, boolean_t);
+/*
+ * #448: etap_get_info and etap_trace_thread are declared by
+ * <mach/mach_server.h>, included above.  The forward declarations that used
+ * to sit here said mach_port_t for the first argument of etap_get_info,
+ * where the interface says host_t -- a kernel host structure, not a port
+ * name.  Same shape as #448, latent only because the body never touches the
+ * argument.  Declaring them twice is what let the two drift.
+ */
 
 void
 etap_trace_reset(int);
@@ -722,7 +725,7 @@ etap_event_table_assign(struct event_table_chain *chainp, etap_event_t event)
 
 kern_return_t
 etap_get_info(
-	mach_port_t  port,
+	host_t       host_priv,		/* #448: host_t, not mach_port_t */
 	int          *et_entries,
 	int          *st_entries,
 	vm_offset_t  *et_offset,
