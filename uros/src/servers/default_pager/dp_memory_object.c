@@ -968,6 +968,17 @@ default_pager_object_create(
 	return KERN_SUCCESS;
 }
 
+/*
+ * #449: how many more wired allocations in default_pager_objects to refuse.
+ *
+ * Set by the pager's `dpofail=N` argument and consumed one per allocation, so
+ * `dpofail=1` sends exactly the next call down the dpo_nomemory path and
+ * leaves every call after it alone.  Zero -- the default, and the only value
+ * anybody gets without asking -- makes the two tests below compile to a
+ * compare against a global that is never written.
+ */
+unsigned int	dp_fail_wired = 0;
+
 static kern_return_t
 dpo_nomemory(default_pager_object_array_t	objects_inline,
 	     mach_port_array_t			ports_inline,
@@ -1039,7 +1050,12 @@ default_pager_objects(
 
 		newsize = 2 * round_page(actual * sizeof * objects);
 
-		kr = vm_allocate_wired(default_pager_self, &newaddr, newsize, TRUE);
+		if (dp_fail_wired != 0) {		/* #449 */
+			dp_fail_wired--;
+			kr = KERN_RESOURCE_SHORTAGE;
+		} else
+			kr = vm_allocate_wired(default_pager_self, &newaddr,
+					       newsize, TRUE);
 		if (kr != KERN_SUCCESS)
 			return dpo_nomemory(*objectsp, *portsp,
 					    objects, ports, num_objects,
@@ -1057,7 +1073,12 @@ default_pager_objects(
 
 		newsize = 2 * round_page(actual * sizeof * ports);
 
-		kr = vm_allocate_wired(default_pager_self, &newaddr, newsize, TRUE);
+		if (dp_fail_wired != 0) {		/* #449 */
+			dp_fail_wired--;
+			kr = KERN_RESOURCE_SHORTAGE;
+		} else
+			kr = vm_allocate_wired(default_pager_self, &newaddr,
+					       newsize, TRUE);
 		if (kr != KERN_SUCCESS)
 			return dpo_nomemory(*objectsp, *portsp,
 					    objects, ports, num_objects,

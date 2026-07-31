@@ -98,6 +98,23 @@
 #include <i386/iopb.h>
 #include <i386/seg.h>
 #include <i386/iopb_entries.h>
+/*
+ * #448/#449: the interface, so the compiler can compare it with what is
+ * implemented below.
+ *
+ * These three routines are MIG entry points, and the generated stub is
+ * compiled in its own translation unit against mach_i386_server.h -- which
+ * declares them from the .defs, correctly.  This file declared them itself,
+ * differently, and both units were internally consistent: C compares nothing
+ * across them and the linker matches on the name alone, so a thread_t here
+ * against a thread_act_t there was a page fault waiting for the first caller
+ * to arrive through the interface rather than from inside the kernel.
+ *
+ * user_ldt.c, in the same subsystem, has always included this header and has
+ * always had the right type.  That is not a coincidence, it is the mechanism:
+ * with both declarations in one unit the mismatch is a build error.
+ */
+#include <mach/mach_i386_server.h>
 
 /*
  * A set of ports for an IO device.

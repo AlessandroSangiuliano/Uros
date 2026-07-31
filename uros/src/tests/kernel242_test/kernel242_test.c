@@ -28,17 +28,21 @@
  *   ipc/ipc_port.c        set_seqno fast/slow path     -> test_set_seqno
  *                         circularity fast/slow path   -> test_circularity
  *   ipc/ipc_entry.c       tree_lookup (collision)       -> test_many_ports
- *   kern/eventcount.c     (signal/wait via mach_msg)    -> NOT COVERED (#449)
+ *   kern/eventcount.c     evc_wait argument check       -> test_evc_wait
+ *                         (blocking arm: no driver in this build creates an
+ *                          eventcounter, so no id is ever valid -- #449)
  *   kern/syscall_subr.c   thread_switch handoff hint   -> test_thread_switch
  *   kern/thread_act.c     thread_terminate active path -> test_thread_terminate
  *   kern/thread.c         (pset move — requires deactivated pset, SKIP)
  *   kern/sched_prim.c     idle loop retry (implicit, every thread_block)
  *   vm/vm_user.c          msync re_iterate (overlap)   -> test_vm_msync
  *   vm/memory_object.c    retry_lookup (pager busy)    -> test_pager_busy
- *   default_pager dpo_nomemory                          -> NOT COVERED (#449)
+ *   default_pager dpo_nomemory                          -> test_default_pager_objects
+ *                         but ONLY when the pager is launched `dpofail=N`;
+ *                         a default boot takes the success arm (#449)
  *   device/dev_name.c     dev_lookup_register path     -> covered by I/O
  *                         (no userspace API)
- *   device/ds_routines.c  device read done callback    -> NOT COVERED (#449)
+ *   device/ds_routines.c  ds_read_done NULL-data clamp  -> test_device_read
  *   i386/fpu.c            FPU state save/restore       -> test_fpu_state
  *   i386/iopb.c           i386_io_port_list (#445)     -> test_io_port_list
  *   i386/user_ldt.c       user LDT install             -> test_user_ldt
@@ -65,6 +69,14 @@
 #include <mach/i386/thread_status.h>
 #include <mach/i386/fp_reg.h>
 #include <mach/i386/mach_i386_types.h>
+#include <device/device.h>		/* #449: device_open/read/close --
+					 * declared by MIG, not by hand.  Getting
+					 * device_open's arity wrong by hand is how
+					 * this test first faulted, and declaring a
+					 * MIG interface by hand is what #448 was. */
+#include <device/device_types.h>
+#include <default_pager_object.h>	/* #449: object_create -- MIG's
+					 * declaration, not mine */
 #include <servers/netname.h>
 
 extern kern_return_t bootstrap_ports(mach_port_t bootstrap,
@@ -79,6 +91,7 @@ static unsigned int g_pass = 0;
 static unsigned int g_fail = 0;
 static const char *g_current_test = "?";
 static mach_port_t g_host_priv = MACH_PORT_NULL;	/* from bootstrap */
+static mach_port_t g_device_master = MACH_PORT_NULL;	/* #449: for device_open */
 
 #define EXPECT(expr, msg) do {                                      \
     if (!(expr)) {                                                  \
@@ -435,9 +448,6 @@ test_pager_busy(void)
 extern kern_return_t host_default_memory_manager(mach_port_t host_priv,
                                                  mach_port_t *def_mgr_inout,
                                                  vm_size_t cluster);
-extern kern_return_t default_pager_objects(mach_port_t default_pager,
-    pointer_t *objects, mach_msg_type_number_t *objectsCnt,
-    mach_port_array_t *ports, mach_msg_type_number_t *portsCnt);
 extern kern_return_t mach_host_self_trap(void);   /* declared elsewhere */
 
 static void
@@ -445,7 +455,13 @@ test_default_pager_objects(void)
 {
     mach_port_t hp = g_host_priv;
     mach_port_t dpager = MACH_PORT_NULL;
-    pointer_t   objects = 0;
+    /* #449: the array element is a two-word struct, not a word.  The
+     * hand-written extern this file used to carry said pointer_t, which is
+     * the same size and the wrong type, and the deallocate below inherited
+     * the mistake -- it freed objCnt*4 bytes of an objCnt*8 buffer.  It never
+     * showed because objCnt was always zero: nothing ever created a pager
+     * object before asking for the list. */
+    default_pager_object_array_t objects = NULL;
     mach_msg_type_number_t objCnt = 0;
     mach_port_array_t ports = 0;
     mach_msg_type_number_t prtCnt = 0;
@@ -464,8 +480,25 @@ test_default_pager_objects(void)
         return;
     }
 
-    /* Pass null inline arrays to force vm_allocate_wired allocation
-     * inside default_pager_objects (opotential < actual). */
+    /*
+     * #449: create an object first, because otherwise there is nothing to
+     * enumerate and the branch this test is named for never runs.
+     *
+     * The comment that used to sit here said passing null inline arrays
+     * forces the vm_allocate_wired inside default_pager_objects.  It does
+     * not: the allocation is guarded by `if (opotential < actual)`, and with
+     * no pager objects alive `actual` is zero, so the call returns an empty
+     * list having allocated nothing.  Every run of this test reported
+     * objCnt=0 and nobody read it as the answer to that claim.
+     */
+    {
+        mach_port_t mem_obj = MACH_PORT_NULL;
+        kern_return_t ckr = default_pager_object_create(dpager, &mem_obj,
+                                                        vm_page_size);
+        printf("  object_create kr=%d (need >=1 object for the "
+               "allocation branch)\n", ckr);
+    }
+
     kr = default_pager_objects(dpager,
                                &objects, &objCnt,
                                (mach_port_array_t *)&ports, &prtCnt);
@@ -474,11 +507,35 @@ test_default_pager_objects(void)
     EXPECT(kr == KERN_SUCCESS || kr == KERN_RESOURCE_SHORTAGE,
            "default_pager_objects survived");
 
+    /*
+     * #449: KERN_RESOURCE_SHORTAGE means the pager was launched with
+     * `dpofail=N` and this call went down dpo_nomemory -- the cleanup arm,
+     * which releases the port rights already taken and frees whichever of
+     * the two buffers had been allocated.
+     *
+     * Seeing the error code is the boring half.  What matters is whether the
+     * cleanup left the server whole, so ask again: the counter is consumed
+     * one per allocation, so a later call finds it at zero and must succeed.
+     * A dpo_nomemory that released a right twice, or forgot one, or freed a
+     * buffer it did not own, does not show up in the return value -- it shows
+     * up here, on the call after.
+     */
+    if (kr == KERN_RESOURCE_SHORTAGE) {
+        printf("  dpo_nomemory taken (dpofail armed); re-asking\n");
+        objCnt = prtCnt = 0;
+        kr = default_pager_objects(dpager, &objects, &objCnt,
+                                   (mach_port_array_t *)&ports, &prtCnt);
+        printf("  after cleanup: kr=%d objCnt=%u prtCnt=%u\n",
+               kr, objCnt, prtCnt);
+        EXPECT(kr == KERN_SUCCESS,
+               "the pager must still work after dpo_nomemory");
+    }
+
     if (kr == KERN_SUCCESS) {
         if (objCnt > 0)
             (void)vm_deallocate(mach_task_self(),
                                 (vm_address_t)objects,
-                                objCnt * sizeof(unsigned));
+                                objCnt * sizeof(default_pager_object_t));
         if (prtCnt > 0) {
             unsigned i;
             mach_port_t *parr = (mach_port_t *)ports;
@@ -608,6 +665,114 @@ test_io_port_list(void)
 }
 
 /* =========================================================================
+ * kern/eventcount.c  evc_wait  — trap 17, and nobody had ever taken it.
+ *
+ * The map used to claim a test_msg_pingpong for this file.  There is no such
+ * function, and a ping-pong would not have reached eventcount anyway: this
+ * is not IPC, it is a counting semaphore that device drivers signal from
+ * interrupt context.
+ *
+ * What is reachable is the argument check, and it is worth taking because
+ * evc_wait is a Mach trap (syscall_sw.c slot 17, kernel_trap(evc_wait,-17,1))
+ * that userland can call at any time with any number.  Both arms:
+ *
+ *	if ((ev_id >= MAX_EVCS) ||
+ *	    ((ev = all_eventcounters[ev_id]) == 0) || ...
+ *
+ * -- an id past the table, and an id inside it whose slot is empty.
+ *
+ * The blocking arm below them is not reachable here, and not for lack of
+ * trying: an eventcounter only exists once a driver calls evc_init, and the
+ * three that do (scsi/mapped_scsi.c, chips/lance_mapped.c, chips/atm.c) are
+ * not in this build.  So every slot is empty and every id is refused, which
+ * is exactly why the trap has never been exercised: there was nothing to
+ * wait for and nobody to call it.
+ * ========================================================================= */
+extern kern_return_t evc_wait(unsigned int ev_id);
+
+static void
+test_evc_wait(void)
+{
+    BEGIN_TEST("evc_wait (eventcount.c, trap 17)");
+
+    /* Inside the table (MAX_EVCS is 10), but no driver ever filled it. */
+    EXPECT_KR(evc_wait(0), KERN_INVALID_ARGUMENT,
+              "evc_wait(0) with an empty table");
+
+    /* Past the end of it -- the bounds arm of the same condition. */
+    EXPECT_KR(evc_wait(10), KERN_INVALID_ARGUMENT,
+              "evc_wait(MAX_EVCS) should be out of range");
+    EXPECT_KR(evc_wait(0xffffffffu), KERN_INVALID_ARGUMENT,
+              "evc_wait(~0) should be out of range");
+
+    printf("  every id refused, trap survived\n");
+    PASS();
+}
+
+/* =========================================================================
+ * device/ds_routines.c  ds_read_done  — the NULL io_data clamp, on purpose.
+ *
+ * The map used to promise a test_device_read for this file.  There was none,
+ * and the path is more interesting than "a device read completes": right
+ * above ds_read_done sits a clamp added after a real crash, and conf.c
+ * explains in a comment why the console had to be made NO_READ --
+ *
+ *	a bogus read "success" leaves io_data == NULL and io_residual == 0,
+ *	so ds_read_done() computes size_read == io_count and marshals that
+ *	many bytes from a NULL buffer -- a near-NULL bcopy crash
+ *
+ * -- and then, twenty lines further down the same table, "time" and
+ * "rtclock" are declared NULL_OPEN / NULL_READ, which is precisely that
+ * combination.  Anyone may open them and read them, and the read succeeds
+ * having transferred nothing from nowhere.
+ *
+ * So this reads "time".  If the clamp holds, the answer is a short read and
+ * the kernel keeps going.  If it were ever removed, this test does not fail
+ * politely -- it takes the kernel with it, which is the correct behaviour for
+ * a test guarding a fault.
+ * ========================================================================= */
+static void
+test_device_read(void)
+{
+    mach_port_t             dev = MACH_PORT_NULL;
+    security_token_t        sec = { { 0, 0 } };
+    char                    name[] = "time";
+    io_buf_ptr_t            data = NULL;
+    mach_msg_type_number_t  count = 0xdeadbeef;
+    kern_return_t           kr;
+
+    BEGIN_TEST("device_read on \"time\" (ds_read_done NULL-data clamp)");
+
+    /* Six arguments, not four: master, ledger, mode, security token, name,
+     * out.  bootstrap.c passes MACH_PORT_NULL for the ledger and its own
+     * token; a zero token is what an unprivileged caller has. */
+    kr = device_open(g_device_master, MACH_PORT_NULL, D_READ, sec, name, &dev);
+    if (kr != D_SUCCESS) {
+        printf("  device_open(\"time\") kr=%d -- cannot reach ds_read_done "
+               "from here, path left unexercised\n", (int)kr);
+        g_fail++;
+        return;
+    }
+
+    /*
+     * 512 wanted from a device that transfers nothing.  What comes back
+     * must be a short read, not 512 bytes copied out of address zero.
+     */
+    kr = device_read(dev, 0, 0, 512, &data, &count);
+    printf("  device_read kr=%d count=%u\n", (int)kr, (unsigned)count);
+    EXPECT(kr == D_SUCCESS || kr == D_INVALID_OPERATION,
+           "read should answer, not fault");
+    EXPECT(count == 0, "a device that transferred nothing must report 0");
+    printf("  clamp held: short read, kernel alive\n");
+
+    if (data != NULL && count != 0)
+        (void)vm_deallocate(mach_task_self(), (vm_address_t)data, count);
+    (void)device_close(dev);
+    (void)mach_port_deallocate(mach_task_self(), dev);
+    PASS();
+}
+
+/* =========================================================================
  * i386/fpu.c  thread_set_state(i386_FLOAT_STATE)  -> alloc retry loop
  * ========================================================================= */
 extern kern_return_t thread_set_state(mach_port_t target_act,
@@ -674,6 +839,7 @@ main(int argc, char **argv)
         != KERN_SUCCESS)
         return 1;
     g_host_priv = host;
+    g_device_master = device;	/* #449 */
     printf_init(device);
 
     printf("\n=== kernel242_test (#242 no-goto kernel exerciser) ===\n");
@@ -690,6 +856,8 @@ main(int argc, char **argv)
     test_default_pager_objects();
     test_user_ldt();
     test_io_port_list();
+    test_evc_wait();
+    test_device_read();
     test_fpu_state();
 
     printf("\n=== kernel242_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);
