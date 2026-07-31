@@ -187,9 +187,9 @@ routine mips_thread_state(
 		auth		: mach_port_t;
 		thread		: mthread_t;
 	out	state		: mips_thread_state_t);
-#else	mips
+#else	/* mips */
 skip;
-#endif	mips
+#endif	/* mips */
 
 #ifdef	sun3
 routine sun3_thread_state(
@@ -197,9 +197,9 @@ routine sun3_thread_state(
 		auth		: mach_port_t;
 		thread		: mthread_t;
 	out	state		: sun3_thread_state_t);
-#else	sun3
+#else	/* sun3 */
 skip;
-#endif	sun3
+#endif	/* sun3 */
 
 #ifdef	vax
 routine vax_thread_state(
@@ -207,9 +207,9 @@ routine vax_thread_state(
 		auth		: mach_port_t;
 		thread		: mthread_t;
 	out	state		: vax_thread_state_t);
-#else	vax
+#else	/* vax */
 skip;
-#endif	vax
+#endif	/* vax */
 
 #ifdef	i386
 routine i386_thread_state(
@@ -217,9 +217,9 @@ routine i386_thread_state(
 		auth		: mach_port_t;
 		thread		: mthread_t;
 	out	state		: i386_thread_state_t);
-#else	i386
+#else	/* i386 */
 skip;
-#endif	i386
+#endif	/* i386 */
 
 routine task_terminate(
 		server		: mach_port_t;
@@ -450,9 +450,9 @@ routine i860_thread_state(
 		auth		: mach_port_t;
 		thread		: mthread_t;
 	out	state		: i860_thread_state_t);
-#else	i860
+#else	/* i860 */
 skip;
-#endif	i860
+#endif	/* i860 */
 
 routine host_vm_statistics(
 		server		: mach_port_t;
