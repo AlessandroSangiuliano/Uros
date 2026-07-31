@@ -61,6 +61,23 @@
 #include <kern/thread.h>
 #include <kern/kalloc.h>
 
+/*
+ * #448: the interface, so the compiler can compare it with what is below.
+ *
+ * These are MIG entry points.  The generated stub is compiled against
+ * device_master_server.h in its own translation unit; without that header
+ * here, this file's own idea of each signature is never checked against it,
+ * and two self-consistent halves can disagree indefinitely -- which is
+ * exactly how #448 put a thread_t where the interface said thread_act_t and
+ * nothing noticed until a caller finally arrived through MIG.
+ *
+ * The fourteen signatures below agree today, and this include is what will
+ * keep saying so.  It matters most on the way to x86-64: natural_t stays 32
+ * bits while pointers do not, and this is the interface the userland drivers
+ * reach the hardware through.
+ */
+#include <device/device_master_server.h>
+
 /* ================================================================
  * Interrupt forwarding
  * ================================================================ */
