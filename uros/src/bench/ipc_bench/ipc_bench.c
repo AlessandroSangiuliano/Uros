@@ -1952,6 +1952,48 @@ bench_mach_null(int iters)
     print_result("mach_null (noop trap)", elapsed_ns(&t0, &t1), iters);
 }
 
+/*
+ * A round trip to the KERNEL, not to another task (#443).
+ *
+ * The MIG argument checks live in the generated kernel server stubs, so
+ * they are paid by calls like this one and by nothing else: an intra-task
+ * null RPC never touches a server stub, and mach_null is a trap that never
+ * reaches MIG at all.  Measuring either of those to decide what TypeCheck
+ * costs would return zero by construction -- a zero that means the
+ * instrument was pointed the wrong way, not that the cost is absent.
+ *
+ * mach_port_type is chosen for doing almost nothing: one name in, one
+ * word out.  The less work the routine does, the larger the share of the
+ * measurement that IS the path being asked about.
+ */
+static void
+bench_kernel_rpc(int iters)
+{
+    tvalspec_t		t0, t1;
+    mach_port_t		name;
+    mach_port_type_t	type;
+    kern_return_t	kr;
+    int			i;
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &name);
+    if (kr != KERN_SUCCESS) {
+	printf("  krpc: port allocate failed %d\n", kr);
+	return;
+    }
+
+    for (i = 0; i < WARMUP_ITERS; i++)
+	(void) mach_port_type(mach_task_self(), name, &type);
+
+    get_time(&t0);
+    for (i = 0; i < iters; i++)
+	(void) mach_port_type(mach_task_self(), name, &type);
+    get_time(&t1);
+
+    print_result("mach_port_type (kernel RPC)", elapsed_ns(&t0, &t1), iters);
+
+    (void) mach_port_destroy(mach_task_self(), name);
+}
+
 static void
 bench_mach_print(int iters)
 {
@@ -2006,6 +2048,7 @@ bench_mach_print(int iters)
 #define SUITE_FAULT	(1u << 12)	/* concurrent same-space faults (#338) */
 #define SUITE_SCALE	(1u << 13)	/* concurrency sweep, clean numbers (#319) */
 #define SUITE_PORTS	(1u << 14)	/* out-of-line port arrays, by count (#415) */
+#define SUITE_KRPC	(1u << 15)	/* MIG kernel RPC, where TypeCheck lives (#443) */
 #define SUITE_ALL	0xFFFFFFFFu
 
 static int
@@ -2034,6 +2077,7 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "mem"))	    mask |= SUITE_MEM;
 	else if (streq(argv[i], "flipc2"))  mask |= SUITE_FLIPC2;
 	else if (streq(argv[i], "ports"))   mask |= SUITE_PORTS;
+	else if (streq(argv[i], "krpc"))    mask |= SUITE_KRPC;
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
@@ -2448,6 +2492,12 @@ main(int argc, char **argv)
     /* ---------------------------------------------------------
      * Raw syscall benchmarks — measure SYSENTER/SYSEXIT cost
      * --------------------------------------------------------- */
+    if (suites & SUITE_KRPC) {
+	printf("--- Kernel RPC (where the MIG checks are) ---\n");
+	bench_kernel_rpc(SYSCALL_BENCH_ITERS);
+	printf("\n");
+    }
+
     if (suites & SUITE_SYSCALL) {
 	printf("--- Raw syscall (no IPC) ---\n");
 
