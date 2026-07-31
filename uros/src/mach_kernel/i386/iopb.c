@@ -368,7 +368,7 @@ iopb_destroy(
  */
 kern_return_t
 i386_io_port_add(
-	thread_t	thread,
+	thread_act_t	thr_act,
 	device_t	device)
 {
 	pcb_t		pcb;
@@ -376,11 +376,21 @@ i386_io_port_add(
 	io_port_t	io_port;
 	io_use_t	iu, old_iu;
 
-	if (thread == THREAD_NULL
+	/*
+	 * #448: an act, because that is what arrives.  mach_i386.defs declares
+	 * this argument thread_act_t, so migcom translates the port with
+	 * convert_port_to_act and the generated stub hands us one; taking it as
+	 * a thread_t and reaching for ->top_act read a pointer out of a field
+	 * that is not one, and the kernel faulted at cr2=0xec.  Nothing ever
+	 * noticed because nothing ever called this through MIG -- the only
+	 * in-tree caller is io_emulate.c, from inside the kernel, which passed
+	 * a real thread and therefore matched the wrong declaration.
+	 */
+	if (thr_act == THR_ACT_NULL
 	 || device == DEVICE_NULL)
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thr_act->mact.pcb;
 
 	new_io_tss = 0;
 	iu = (io_use_t) kalloc(sizeof(struct io_use));
@@ -469,7 +479,7 @@ i386_io_port_add(
  */
 kern_return_t
 i386_io_port_remove(
-	thread_t	thread,
+	thread_act_t	thr_act,
 	device_t	device)
 {
 	pcb_t		pcb;
@@ -477,11 +487,11 @@ i386_io_port_remove(
 	io_port_t	io_port;
 	io_use_t	iu;
 
-	if (thread == THREAD_NULL
+	if (thr_act == THR_ACT_NULL		/* #448 -- see i386_io_port_add */
 	 || device == DEVICE_NULL)
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thr_act->mact.pcb;
 
 	simple_lock(&iopb_lock);
 
@@ -537,10 +547,10 @@ i386_io_port_remove(
  */
 
 kern_return_t
-i386_io_port_list(thread, list, list_count)
-	thread_t	thread;
-	device_t	**list;
-	unsigned int	*list_count;
+i386_io_port_list(
+	thread_act_t	thr_act,		/* #448 -- an act, not a thread */
+	device_t	**list,
+	unsigned int	*list_count)
 {
 	register pcb_t	pcb;
 	register iopb_tss_t io_tss;
@@ -573,10 +583,10 @@ i386_io_port_list(thread, list, list_count)
 			       * whether or not the reply port is an RT port
 			       */
 
-	if (thread == THREAD_NULL)
+	if (thr_act == THR_ACT_NULL)		/* #448 */
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thr_act->mact.pcb;
 
 	alloc_count = 16;		/* a guess */
 

@@ -189,8 +189,16 @@ emulate_io(
 	 * Map the IOPL port set into the thread.
 	 */
 
-	if (i386_io_port_add(thread, iopl_device)
-	    != KERN_SUCCESS) 
+	/*
+	 * #448: ->top_act made explicit.  i386_io_port_add takes the act,
+	 * because that is what its MIG interface delivers; this caller is
+	 * inside the kernel and holds a thread, so the conversion belongs
+	 * here.  It used to happen by accident -- the routine declared a
+	 * thread, matched this call, and mismatched every call arriving
+	 * through the interface.
+	 */
+	if (i386_io_port_add(thread->top_act, iopl_device)
+	    != KERN_SUCCESS)
 		return EM_IO_ERROR;
 
 #if CBUS	

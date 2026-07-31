@@ -25,14 +25,21 @@
 extern boolean_t	iopb_check_mapping(
 					thread_t	thread,
 					device_t	device);
+/*
+ * #448: the three MIG entry points take an act, because mach_i386.defs
+ * declares their first argument thread_act_t and the generated stub
+ * translates the port with convert_port_to_act.  iopb_check_mapping above
+ * is not a MIG routine and keeps its thread: it is called from inside the
+ * kernel with current_thread().
+ */
 extern kern_return_t	i386_io_port_add(
-					thread_t	thread,
+					thread_act_t	thr_act,
 					device_t	device);
 extern kern_return_t	i386_io_port_remove(
-					thread_t	thread,
+					thread_act_t	thr_act,
 					device_t	device);
 extern kern_return_t	i386_io_port_list(
-					thread_t	thread,
+					thread_act_t	thr_act,
 					device_t	** list,
 					unsigned int	* list_count);
 extern void		iopb_init(void);

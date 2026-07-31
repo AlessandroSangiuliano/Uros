@@ -15,24 +15,32 @@
  *
  * Each test prints "TEST: <name>" before, "  PASS" / "  FAIL" after.
  *
+ * ⚠️ This map is load-bearing: it is what anyone asking "is this path
+ * exercised?" reads instead of grepping.  It named four tests that do not
+ * exist, and one of the four files it wrongly claimed -- iopb.c -- turned out
+ * to hold three RPCs that page-faulted the kernel from any task (#448).  A
+ * map that promises coverage it does not have is worse than no map: it
+ * answers the question before anybody asks it.  Every entry below now names
+ * either a function in this file or nobody.
+ *
  * Coverage map (file -> test):
  *   ipc/mach_port.c       MACH_PORT_RECEIVE_STATUS path -> test_recv_status
  *   ipc/ipc_port.c        set_seqno fast/slow path     -> test_set_seqno
  *                         circularity fast/slow path   -> test_circularity
  *   ipc/ipc_entry.c       tree_lookup (collision)       -> test_many_ports
- *   kern/eventcount.c     (signal/wait via mach_msg)    -> test_msg_pingpong
+ *   kern/eventcount.c     (signal/wait via mach_msg)    -> NOT COVERED (#449)
  *   kern/syscall_subr.c   thread_switch handoff hint   -> test_thread_switch
  *   kern/thread_act.c     thread_terminate active path -> test_thread_terminate
  *   kern/thread.c         (pset move — requires deactivated pset, SKIP)
  *   kern/sched_prim.c     idle loop retry (implicit, every thread_block)
  *   vm/vm_user.c          msync re_iterate (overlap)   -> test_vm_msync
  *   vm/memory_object.c    retry_lookup (pager busy)    -> test_pager_busy
- *   default_pager dpo_nomemory                          -> test_pager_query
+ *   default_pager dpo_nomemory                          -> NOT COVERED (#449)
  *   device/dev_name.c     dev_lookup_register path     -> covered by I/O
  *                         (no userspace API)
- *   device/ds_routines.c  device read done callback    -> test_device_read
+ *   device/ds_routines.c  device read done callback    -> NOT COVERED (#449)
  *   i386/fpu.c            FPU state save/restore       -> test_fpu_state
- *   i386/iopb.c           IO bitmap install            -> test_io_bitmap
+ *   i386/iopb.c           i386_io_port_list (#445)     -> test_io_port_list
  *   i386/user_ldt.c       user LDT install             -> test_user_ldt
  *   i386/db_interface.c   DDB (SKIP — debugger-only)
  *   debug.c panic restart (SKIP — would panic the kernel)
@@ -523,6 +531,83 @@ test_user_ldt(void)
 }
 
 /* =========================================================================
+ * i386/iopb.c  i386_io_port_list  — a path nothing had ever walked.
+ *
+ * #445 found that this routine read `size` and `addr` before writing them:
+ *
+ *	if (size_needed <= size)  break;
+ *	if (size != 0)            KFREE(addr, size, rt);
+ *
+ * so whatever the stack held decided the first pass, and a non-zero value
+ * meant kfree() on an arbitrary address with an arbitrary length -- from a
+ * MIG routine, so reachable by any task.  Fixed by starting both at zero,
+ * which is how the twin in host.c has always written it.
+ *
+ * The fix was made by reading, because nothing here ran the routine: a boot
+ * plus the whole benchmark suite reaches it zero times.  So this exists to
+ * make the number stop being zero.  What it can prove is that the corrected
+ * path works; it cannot reproduce the fault, which needed the right rubbish
+ * on the stack -- and a test that only passes when memory happens to be
+ * dirty would be worse than no test.
+ *
+ * A thread with no I/O ports is the interesting case, not the boring one:
+ * it is the first pass through that loop with alloc_count at its initial 16,
+ * which is exactly where the two unwritten reads were.
+ * ========================================================================= */
+extern kern_return_t i386_io_port_add(mach_port_t target_act,
+                                      mach_port_t device);
+extern kern_return_t i386_io_port_remove(mach_port_t target_act,
+                                         mach_port_t device);
+extern kern_return_t i386_io_port_list(mach_port_t target_act,
+                                       device_list_t *device_list,
+                                       mach_msg_type_number_t *device_listCnt);
+
+static void
+test_io_port_list(void)
+{
+    mach_port_t             th = mach_thread_self();
+    device_list_t           list = NULL;
+    mach_msg_type_number_t  count = 0xdeadbeef;
+
+    BEGIN_TEST("i386_io_port_list (iopb.c, #445)");
+
+    EXPECT_KR(i386_io_port_list(th, &list, &count), KERN_SUCCESS,
+              "io_port_list on a thread with no io ports");
+
+    /* This thread holds no I/O ports, so the answer is an empty list --
+     * and `count` must have been written, which is why it went in as
+     * something no count could be. */
+    EXPECT(count == 0, "expected an empty io port list");
+    printf("  empty list returned, count=0: OK\n");
+
+    /* Again: the routine allocates and frees a buffer on the way through,
+     * so a second clean pass says the free was of something it owned. */
+    count = 0xdeadbeef;
+    EXPECT_KR(i386_io_port_list(th, &list, &count), KERN_SUCCESS,
+              "io_port_list second call");
+    EXPECT(count == 0, "second call should still be empty");
+    printf("  second call still clean: OK\n");
+
+    /*
+     * The other two entry points of this subsystem carried the same wrong
+     * signature, so cross the MIG boundary into both.  A null device port
+     * makes them refuse at the argument check, which is enough
+     * to say the act arrived as an act and the kernel is still standing --
+     * it is not enough to reach thr_act->mact.pcb, which only the list
+     * call above exercises, because a real device_t here needs a capability
+     * and a live driver.
+     */
+    EXPECT_KR(i386_io_port_add(th, MACH_PORT_NULL), KERN_INVALID_ARGUMENT,
+              "io_port_add should refuse a null device, not fault");
+    EXPECT_KR(i386_io_port_remove(th, MACH_PORT_NULL), KERN_INVALID_ARGUMENT,
+              "io_port_remove should refuse a null device, not fault");
+    printf("  add/remove refused a null device without faulting: OK\n");
+
+    (void)mach_port_deallocate(mach_task_self(), th);
+    PASS();
+}
+
+/* =========================================================================
  * i386/fpu.c  thread_set_state(i386_FLOAT_STATE)  -> alloc retry loop
  * ========================================================================= */
 extern kern_return_t thread_set_state(mach_port_t target_act,
@@ -604,6 +689,7 @@ main(int argc, char **argv)
     test_pager_busy();
     test_default_pager_objects();
     test_user_ldt();
+    test_io_port_list();
     test_fpu_state();
 
     printf("\n=== kernel242_test: %u PASS, %u FAIL ===\n", g_pass, g_fail);
