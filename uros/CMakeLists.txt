@@ -110,6 +110,15 @@ file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/${UROS_TARGET_ARCH}
 file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}
      ${UROS_ARCH_INCLUDE}/mach/machine SYMBOLIC)
 
+# The ODE configuration knobs, per target (#450).  Same reasoning as the
+# links above and the same place to do it: state the build needs, wired to
+# one architecture when it lived in the source tree, now written here at
+# configure time for whatever this build dir targets.  See
+# cmake/kernel-config.cmake for why these stopped being tracked files.
+include(${CMAKE_SOURCE_DIR}/cmake/kernel-config.cmake)
+set(UROS_CONFIG_INCLUDE ${CMAKE_BINARY_DIR}/config-include)
+uros_write_config_headers(${UROS_CONFIG_INCLUDE} ${UROS_TARGET_ARCH})
+
 # The .defs every mig rule reads and none of them declares (#413).
 #
 # A mig rule names the generator and the one interface file it is handed.

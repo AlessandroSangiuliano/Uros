@@ -126,7 +126,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   target_include_directories(mach_kernel PRIVATE
     ${CMAKE_SOURCE_DIR}/uapi
     ${UROS_ARCH_INCLUDE}
-    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64
+    ${UROS_CONFIG_INCLUDE})			# #450 — the ODE knobs, generated
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
   # stddef.h); add just that directory back with -isystem so we get the
   # fixed-width types without pulling in the hosted system headers.
@@ -353,6 +354,7 @@ set(KERNEL_INCLUDES
     ${KERNEL_SRC_DIR}/include
     ${KERNEL_SRC_DIR}/i386
     ${KERNEL_SRC_DIR}/i386/AT386
+    ${UROS_CONFIG_INCLUDE}			# #450 — the ODE knobs, generated
     ${KERNEL_BUILD_DIR}
     ${KERNEL_BUILD_DIR}/mach
     ${KERNEL_BUILD_DIR}/mach_debug
@@ -392,6 +394,7 @@ add_custom_command(
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386
             -I${KERNEL_SRC_DIR}/i386/AT386
+            -I${UROS_CONFIG_INCLUDE}
             ${KERNEL_DEFINES}
             -MD -MF ${GENASSYM_DEPFILE}
             -o ${GENASSYM_OUTPUT}
@@ -447,6 +450,7 @@ function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -I${KERNEL_SRC_DIR}/include
                 -I${KERNEL_SRC_DIR}/i386
                 -I${KERNEL_SRC_DIR}/i386/AT386
+            -I${UROS_CONFIG_INCLUDE}
                 ${KERNEL_DEFINES}
                 ${DEFS_FILE} | 
                 $<TARGET_FILE:migcom>
@@ -482,6 +486,7 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -I${KERNEL_SRC_DIR}/include
                 -I${KERNEL_SRC_DIR}/i386
                 -I${KERNEL_SRC_DIR}/i386/AT386
+            -I${UROS_CONFIG_INCLUDE}
                 ${KERNEL_DEFINES}
                 -DKERNEL_USER=1
                 -UKERNEL_SERVER
@@ -554,6 +559,7 @@ add_custom_command(
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386
             -I${KERNEL_SRC_DIR}/i386/AT386
+            -I${UROS_CONFIG_INCLUDE}
             ${KERNEL_DEFINES}
             ${KERNEL_SRC_DIR}/mach/memory_object.defs |
             $<TARGET_FILE:migcom>
