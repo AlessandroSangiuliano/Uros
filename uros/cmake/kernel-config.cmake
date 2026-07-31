@@ -94,6 +94,15 @@ set(UROS_PLATFORM_x86_64 X86PC x86_64)
 # Regenerating on every configure is cheap and keeps the directory honest;
 # file(GENERATE) would leave stale headers behind when an entry is removed,
 # which is the failure this whole change is about.
+#
+# Every value is written under #ifndef, so a -D on the command line wins.
+# Some of these knobs are also set there -- MP_V1_1 and NCPUS follow
+# UROS_NCPUS, TypeCheck follows its own option -- and a header that fights a
+# deliberate override is a bug rather than a default.  Two of the tracked
+# headers had learned this and carried the guard; the rest had not, and the
+# difference was invisible until the values disagreed.  MP_V1_1 was the one
+# that did: forced to 0, cpu_number() falls off the APIC path and the build
+# stops at "#cpus <= 8".
 function(uros_write_config_headers outdir arch)
   file(REMOVE_RECURSE ${outdir})
   file(MAKE_DIRECTORY ${outdir})
@@ -112,7 +121,9 @@ function(uros_write_config_headers outdir arch)
 #ifndef _UROS_CONFIG_${_guard}_H_
 #define _UROS_CONFIG_${_guard}_H_
 
+#ifndef ${_macro}
 #define ${_macro} ${_val}
+#endif
 
 #endif /* _UROS_CONFIG_${_guard}_H_ */
 ")
