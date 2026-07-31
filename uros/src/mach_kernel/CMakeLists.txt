@@ -441,7 +441,7 @@ function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     
     add_custom_command(
         OUTPUT ${SERVER_C} ${SERVER_H}
-        COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+        COMMAND ${CMAKE_C_COMPILER} -E -x c
                 -I${UROS_ARCH_INCLUDE}
                 -I${KERNEL_SRC_DIR} 
                 -I${KERNEL_SRC_DIR}/include
@@ -476,7 +476,7 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     # type conflicts between user-space and kernel type definitions.
     add_custom_command(
         OUTPUT ${USER_C} ${USER_H}
-        COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+        COMMAND ${CMAKE_C_COMPILER} -E -x c
                 -I${UROS_ARCH_INCLUDE}
                 -I${KERNEL_SRC_DIR}
                 -I${KERNEL_SRC_DIR}/include
@@ -548,7 +548,7 @@ add_mig_user(${KERNEL_SRC_DIR}/mach/memory_object.defs
 # The dev_pager.c file includes this with #defines to rename memory_object_* to device_pager_*
 add_custom_command(
     OUTPUT ${KERNEL_BUILD_DIR}/device/device_pager_server.c ${KERNEL_BUILD_DIR}/device/device_pager_server.h
-    COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+    COMMAND ${CMAKE_C_COMPILER} -E -x c
             -I${UROS_ARCH_INCLUDE}
             -I${KERNEL_SRC_DIR} 
             -I${KERNEL_SRC_DIR}/include
