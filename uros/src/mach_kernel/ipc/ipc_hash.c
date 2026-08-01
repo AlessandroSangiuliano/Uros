@@ -94,6 +94,8 @@
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_init.h>
 
+#include <kern/assert.h>
+
 #include <mach_ipc_debug.h>
 
 #if	MACH_IPC_DEBUG

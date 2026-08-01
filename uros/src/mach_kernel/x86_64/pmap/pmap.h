@@ -335,4 +335,16 @@ MACRO_END
 	(((vm_offset_t)(VA) >= VM_MIN_KERNEL_ADDRESS) &&		\
 	 ((vm_offset_t)(VA) <= VM_MAX_KERNEL_ADDRESS))
 
+/*
+ * The physical address behind a kernel virtual one.
+ *
+ * ⚠️ Not direct_to_phys().  That is a subtraction and would be wrong for
+ * every address outside the direct map -- which includes the kernel image
+ * itself, mapped in the top 2 GiB, and everything kmem_alloc() hands out of
+ * kernel_map.  The callers here pass exactly those: test_device.c asks about
+ * memory it allocated.  So it is a walk, like i386's, and the fast
+ * subtraction stays where it is correct, behind its own name.
+ */
+#define	kvtophys(VA)	((vm_offset_t) pmap_extract(pmap_kernel(), (uint64_t)(VA)))
+
 #endif	/* _X86_64_PMAP_PMAP_H_ */

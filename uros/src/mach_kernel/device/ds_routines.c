@@ -1682,7 +1682,7 @@ ds_read_done(
 	     * Mark the data dirty (if the pages were filled by DMA, the
 	     * pmap module may think that they are clean).
 	     */
-	    pmap_modify_pages(kernel_pmap, start_sent, end_sent);
+	    pmap_modify_pages(pmap_kernel(), start_sent, end_sent);
 	}
 
 	/*
