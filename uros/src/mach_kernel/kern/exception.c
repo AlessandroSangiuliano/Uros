@@ -163,7 +163,20 @@
 #include <kern/misc_protos.h>
 #include <string.h>
 #include <mach/exc_user.h>
+
+/*
+ * <machine/machine_rpc.h> holds call_exc_serv(), which enters a collocated
+ * exception server by switching stacks and jumping into it.  Everything in
+ * this file that uses it already sits behind MACHINE_FAST_EXCEPTION -- three
+ * blocks, each with an #else arm that raises the exception as an ordinary
+ * message -- and only the include was unconditional (#453).
+ *
+ * <kern/thread.h> above is what brings the flag in, via <machine/thread.h>,
+ * so the test has to come after it and does.
+ */
+#ifdef	MACHINE_FAST_EXCEPTION
 #include <machine/machine_rpc.h>
+#endif
 
 #if	MACH_KDB
 #include <ddb/db_trap.h>

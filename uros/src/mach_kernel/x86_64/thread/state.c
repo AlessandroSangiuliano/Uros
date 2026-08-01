@@ -173,3 +173,30 @@ void exception_state_from_frame(const struct trap_frame *frame,
 	 */
 	state->faultvaddr = frame->vector == T_PAGE_FAULT ? read_cr2() : 0;
 }
+
+/*
+ * Flavor to size, in natural_t words (#453).
+ *
+ * <kern/exception.c> indexes this directly with the flavor a server asked
+ * for, so the array is indexed by flavor number and entry zero is the hole
+ * where no flavor lives.  THREAD_STATE_NONE has no state and so has size
+ * zero, which is what makes "none" answerable through the same table as the
+ * rest instead of through a special case at every call site.
+ *
+ * The assertion below is the point of writing it as an array with a checked
+ * length: adding a flavor to <mach/x86_64/thread_status.h> without adding
+ * its size here would otherwise read one past the end and return whatever
+ * followed, as a word count, to code about to copy that many words.
+ */
+unsigned int state_count[] = {
+	/* no flavor 0 */		0,
+	/* x86_64_THREAD_STATE */	x86_64_THREAD_STATE_COUNT,
+	/* x86_64_FLOAT_STATE */	x86_64_FLOAT_STATE_COUNT,
+	/* x86_64_EXCEPTION_STATE */	x86_64_EXCEPTION_STATE_COUNT,
+	/* THREAD_STATE_NONE */		0,
+};
+
+_Static_assert(sizeof(state_count) / sizeof(state_count[0])
+	       == THREAD_STATE_NONE + 1,
+	       "state_count[] and the flavor list in "
+	       "<mach/x86_64/thread_status.h> have drifted apart");
