@@ -617,6 +617,13 @@ ds_master_device_dma_alloc_sg(
 		 */
 		if (pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
 			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
+			/*
+			 * vm_map_enter above already took the range, and the
+			 * pages entered before this one are in it.  Releasing
+			 * the range drops both; leaving it would trade a
+			 * silent bad mapping for a silent leak.
+			 */
+			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
 			kmem_free(kernel_map, kva, size);
 			task_deallocate(task);
 			return KERN_RESOURCE_SHORTAGE;
@@ -656,11 +663,14 @@ map_phys_into_task(task_t		task,
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	/* #407: same as above -- report rather than hand back a hole. */
+	/* #407: same as above -- report rather than hand back a hole, and give
+	 * back the range vm_map_enter just took rather than abandon it. */
 	for (i = 0; i < size; i += PAGE_SIZE)
 		if (pmap_enter(map->pmap, uva + i, phys_base + i,
-			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0)
+			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
+			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
 			return KERN_RESOURCE_SHORTAGE;
+		}
 
 	*uva_out = uva;
 	return KERN_SUCCESS;
