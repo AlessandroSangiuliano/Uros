@@ -785,7 +785,6 @@ build-debug/
 |------|-------------|
 | `scripts/mig` | Script shell per pipeline MIG (`cc -E` → `migcom`) |
 | `scripts/run-qemu.sh` | Lancio QEMU per test kernel |
-| `scripts/generate_ode_headers.py` | Genera header dall'export tree ODE |
 | `tools/modernize_knr.py` | Tool per conversione K&R → ANSI C |
 | `tools/check_ascii.py` | Verifica caratteri non-ASCII nei sorgenti |
 | `tools/find_nonascii_write.c` | Trova scritture non-ASCII |

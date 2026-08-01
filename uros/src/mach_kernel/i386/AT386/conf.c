@@ -142,7 +142,6 @@
 #define	rtclockname		"rtclock"
 #define	timename		"time"
 
-#include <flipc.h>
 #if	FLIPC > 0
 #include <flipc/flipc_usermsg.h>
 #define usermsgname		"usermsg"

@@ -29,7 +29,6 @@
 #include <dipc_timer.h>
 #include <kernel_test.h>
 #include <mach_kdb.h>
-#include <flipc.h>
 
 #if	KERNEL_TEST
 
