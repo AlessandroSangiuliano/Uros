@@ -43,6 +43,15 @@
 #ifndef	_MACH_X86_64_VM_TYPES_H_
 #define _MACH_X86_64_VM_TYPES_H_
 
+/*
+ * The mirror of the guard in <mach/i386/vm_types.h>, and here for the same
+ * reason: an architecture's width definitions reached from a build for
+ * another architecture is a defect, whichever direction it goes (#453).
+ */
+#if	!defined(__x86_64__) && !defined(ASSEMBLER)
+#error "<mach/x86_64/vm_types.h> reached on a non-x86-64 build: vm_offset_t here is 64 bits wide"
+#endif
+
 #ifdef	ASSEMBLER
 #else	/* ASSEMBLER */
 
