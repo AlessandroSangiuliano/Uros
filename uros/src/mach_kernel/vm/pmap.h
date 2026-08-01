@@ -205,7 +205,30 @@ extern pmap_t		(pmap_kernel)(void);	/* Return the kernel's pmap */
 extern void		pmap_reference(pmap_t pmap);	/* Gain a reference. */
 extern void		pmap_destroy(pmap_t pmap); /* Release a reference. */
 
-extern void		pmap_enter(	/* Enter a mapping */
+/*
+ * Enter a mapping.  Zero on success, non-zero if the mapping was not made
+ * (#407).
+ *
+ * This used to be declared void, because on i386 it cannot fail: it retries
+ * under a dropped lock until a page table can be built, and pmap_expand
+ * panics for the kernel pmap.  A caller had nothing to ask.
+ *
+ * x86-64 answers instead -- no frame left to build a table in, or a large
+ * page already covering the address -- and that is a deliberate choice by
+ * its author rather than an oversight: a rule whose only expression is a
+ * panic cannot be shown to work without ending the boot.
+ *
+ * The declaration follows the machine that can fail, because the alternative
+ * is a caller that is told nothing and proceeds as though the mapping is
+ * there.  Two of the three callers in the machine-independent tree are MIG
+ * routines that already unwind and return kern_return_t; they were dropping
+ * the answer three lines below their own error handling.
+ *
+ * The failure codes belong to the machine (PMAP_MAP_* on x86-64).  Nothing
+ * machine-independent should read them; zero means the mapping is in place
+ * and that is the whole of the contract here.
+ */
+extern int		pmap_enter(	/* Enter a mapping */
 				pmap_t		pmap,
 				vm_offset_t	v,
 				vm_offset_t	pa,
@@ -313,7 +336,21 @@ extern vm_offset_t	pmap_extract(		/* Return a virtual-to-physical
 extern void		pmap_collect(pmap_t pmap);/* Perform garbage
 						 * collection, if any */
 
-extern void		pmap_change_wiring(	/* Specify pageability */
+/*
+ * Change whether an existing mapping is wired.  Zero on success, non-zero if
+ * there was no mapping at va to change (#407).
+ *
+ * Same family as pmap_enter above, and the same reasoning: i386 cannot fail
+ * -- an absent mapping is simply nothing to do -- while x86-64 says so, and a
+ * caller that asked to unwire something that is not there has learned
+ * something about its own bookkeeping.
+ *
+ * Both machine-independent callers unwire on a path where the mapping is
+ * expected to exist, so a non-zero answer means their map and the pmap
+ * disagree.  Neither acts on it yet; the declaration is what makes it
+ * possible to.
+ */
+extern int		pmap_change_wiring(	/* Specify pageability */
 				pmap_t		pmap,
 				vm_offset_t	va,
 				boolean_t	wired);

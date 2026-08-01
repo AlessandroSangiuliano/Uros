@@ -609,8 +609,18 @@ ds_master_device_dma_alloc_sg(
 	for (i = 0; i < n_pages; i++) {
 		vm_offset_t pa = pmap_extract(kernel_pmap,
 					      kva + i * PAGE_SIZE);
-		pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
-			   VM_PROT_READ | VM_PROT_WRITE, TRUE);
+		/*
+		 * #407: the answer was being dropped three lines below this
+		 * routine's own error handling.  A mapping that does not
+		 * happen and is not reported hands the task an address it
+		 * will fault on, with KERN_SUCCESS to say all is well.
+		 */
+		if (pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
+			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
+			kmem_free(kernel_map, kva, size);
+			task_deallocate(task);
+			return KERN_RESOURCE_SHORTAGE;
+		}
 		paddrs[i] = (unsigned int)pa;
 	}
 
@@ -646,9 +656,11 @@ map_phys_into_task(task_t		task,
 	if (kr != KERN_SUCCESS)
 		return kr;
 
+	/* #407: same as above -- report rather than hand back a hole. */
 	for (i = 0; i < size; i += PAGE_SIZE)
-		pmap_enter(map->pmap, uva + i, phys_base + i,
-			   VM_PROT_READ | VM_PROT_WRITE, TRUE);
+		if (pmap_enter(map->pmap, uva + i, phys_base + i,
+			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0)
+			return KERN_RESOURCE_SHORTAGE;
 
 	*uva_out = uva;
 	return KERN_SUCCESS;
