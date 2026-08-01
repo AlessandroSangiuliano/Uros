@@ -728,7 +728,7 @@ pmap_steal_memory(
 		 * difference is where it says so: here the message can name
 		 * what was being mapped, which three levels down it cannot.
 		 */
-		if (pmap_enter(kernel_pmap, vaddr, paddr,
+		if (pmap_enter(pmap_kernel(), vaddr, paddr,
 			       VM_PROT_READ|VM_PROT_WRITE, FALSE) != 0)
 			panic("pmap_steal_memory: could not map 0x%x -> 0x%x",
 			      vaddr, paddr);

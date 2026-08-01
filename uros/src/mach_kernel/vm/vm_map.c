@@ -6027,7 +6027,7 @@ retry:
 		 * XXX  but don't assume it has VM_PROT_WRITE as the
 		 * XXX  pmap might not all the rights of the object
 		 */
-	        assert(vm_map_pmap(src_map) == kernel_pmap);
+	        assert(vm_map_pmap(src_map) == pmap_kernel());
 	      
 		if ((prot & VM_PROT_WRITE) ||
 		    (pmap_extract(vm_map_pmap(src_map),

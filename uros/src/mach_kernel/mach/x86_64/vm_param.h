@@ -90,4 +90,22 @@ _Static_assert(VM_MIN_KERNEL_ADDRESS == (vm_offset_t) KERNEL_HALF_BASE,
 #define round_x86_64_to_vm(p)	(atop(round_page(x86_64_ptob(p))))
 #define vm_to_x86_64(p)		(x86_64_btop(ptoa(p)))
 
+/*
+ * There is no high memory here, so every physical page is low (#453).
+ *
+ * On i386 pa_is_lowmem() separates the physical memory the kernel can reach
+ * through a permanent mapping from the memory it cannot, and vm_resident.c
+ * uses it to set vm_page.highmem -- the flag that later forces a temporary
+ * mapping for anything above the line.  The direct map removes the line: all
+ * of physical memory is addressable through it, so the answer is TRUE for
+ * every page and no page is ever marked high.
+ *
+ * This is one of the deletions #407 predicted rather than a shim standing in
+ * for work not done.  It is written as a macro yielding TRUE, and not as a
+ * comparison against some very large limit, because a limit would invite the
+ * question of what value it should hold -- and there is no such value: the
+ * concept does not apply to this target.
+ */
+#define	pa_is_lowmem(pa)	((void)(pa), TRUE)
+
 #endif /* _MACH_X86_64_VM_PARAM_H_ */

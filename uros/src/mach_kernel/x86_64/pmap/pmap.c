@@ -23,17 +23,12 @@
  * any allocator does, and it lives as long as the kernel.  Its tables are
  * the ones boot.S and the direct map already built.
  */
-static struct pmap kernel_pmap_store;
+struct pmap kernel_pmap_store;
 
 void pmap_bootstrap(void)
 {
 	kernel_pmap_store.root_pa = read_cr3() & INTEL_PTE_PFN;
 	kernel_pmap_store.ref_count = 1;
-}
-
-pmap_t pmap_kernel(void)
-{
-	return &kernel_pmap_store;
 }
 
 /*

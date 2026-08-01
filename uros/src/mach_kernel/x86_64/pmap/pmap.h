@@ -37,8 +37,25 @@ typedef struct pmap *pmap_t;
 
 #define PMAP_NULL	((pmap_t) 0)
 
-/* The kernel's own map, whose higher half every address space shares. */
-pmap_t pmap_kernel(void);
+/*
+ * The kernel's own map, whose higher half every address space shares.
+ *
+ * A macro over the object rather than a function returning it, because the
+ * machine-independent tree asks for it on paths that run per page fault and
+ * per kernel allocation.  As a macro it is the address of a static object --
+ * an immediate under -mcmodel=kernel, folded at compile time -- where a
+ * function would be a call across a translation unit that no optimiser can
+ * see through without link-time optimisation we do not build with.
+ *
+ * <vm/pmap.h> declares `extern pmap_t (pmap_kernel)(void)`, parenthesised so
+ * this definition wins at every call site; the declaration is never referred
+ * to and so never has to exist.  i386 does exactly the same thing, and the
+ * machine-independent code is written against the name, not against which of
+ * the two it turns out to be (#453).
+ */
+extern struct pmap kernel_pmap_store;
+
+#define	pmap_kernel()	(&kernel_pmap_store)
 
 /*
  * A new, empty address space.  Its lower half is bare; its higher half is
@@ -270,5 +287,52 @@ void pmap_copy_part_lpage(uint64_t src_va, uint64_t dst,
 			  uint64_t dst_offset, uint64_t len);
 void pmap_copy_part_rpage(uint64_t src, uint64_t src_offset,
 			  uint64_t dst_va, uint64_t len);
+
+/*
+ * ── The contract the machine-independent VM calls through (#453) ──────
+ *
+ * <vm/pmap.h> supplies the _USER and _KERNEL forms itself, in terms of the
+ * two below, whenever the machine does not define them.  We let it: those
+ * wrappers are policy about when to switch, and policy is not ours.  What is
+ * ours is what switching means, and here it means one write of CR3.
+ */
+#define	PMAP_ACTIVATE(pmap, act, cpu)	pmap_activate(pmap)
+
+/*
+ * Deactivation records nothing, and that is a statement rather than a gap.
+ *
+ * On i386 the pair maintains a per-pmap bitmap of the processors using it,
+ * for the sole purpose of narrowing TLB shootdown to those processors.  This
+ * target does not have that narrowing yet -- its shootdown goes to every
+ * processor (#439) -- so a bitmap kept here would have no reader, and a
+ * bitmap with no reader is worse than none: it costs a store on every switch
+ * and rots quietly until someone trusts it.
+ *
+ * When #439 lands it lands as a set this macro maintains, and this comment
+ * is the thing that has to change with it.
+ */
+#define	PMAP_DEACTIVATE(pmap, act, cpu)
+
+/*
+ * Move a thread onto another address space.  The order matters and is not
+ * arbitrary: the map has to be recorded before CR3 changes, so that a trap
+ * taken on the very next instruction finds the activation describing the
+ * space the processor is actually in.
+ */
+#define	PMAP_SWITCH_USER(act, new_map, cpu)				\
+MACRO_BEGIN								\
+	(act)->map = (new_map);						\
+	pmap_activate(vm_map_pmap(new_map));				\
+MACRO_END
+
+/*
+ * Is this a kernel virtual address?  The upper bound is the top of the
+ * address space, so the test is really the lower one -- but it is written as
+ * a range because that is what the name promises, and because a canonical
+ * hole sits below VM_MIN_KERNEL_ADDRESS rather than above it.
+ */
+#define	pmap_kernel_va(VA)						\
+	(((vm_offset_t)(VA) >= VM_MIN_KERNEL_ADDRESS) &&		\
+	 ((vm_offset_t)(VA) <= VM_MAX_KERNEL_ADDRESS))
 
 #endif	/* _X86_64_PMAP_PMAP_H_ */
