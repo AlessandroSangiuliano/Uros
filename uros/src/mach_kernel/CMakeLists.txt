@@ -112,6 +112,17 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
+  # ⚠️ sync/mutex.c (#452) is NOT here yet, and the reason is worth stating
+  # rather than leaving as an omission: it compiles, but it cannot link.  Its
+  # slow path calls mutex_lock_wait() and mutex_unlock_wakeup(), which live in
+  # kern/lock.c -- and kern/lock.c is one missing header from compiling for
+  # this target: <machine/db_machdep.h>, which is #428's.
+  #
+  # Nothing in the x86-64 kernel takes a mutex today (there is no
+  # machine-independent code here to take one), so adding a file that breaks
+  # the link would buy nothing.  It goes in with kern/lock.c, in one step,
+  # when DDB's header lands.  Until then scripts/mi-x86_64-probe.sh is what
+  # keeps it honest.
   # <mach/...> and the per-target <mach/machine/...> behind it (#413).
   #
   # The first thing this target has ever taken from outside x86_64/, and it
@@ -123,11 +134,32 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # ⚠️ Ordered as the i386 target orders them — uapi, then the arch links —
   # so <mach/machine/vm_types.h> resolves to mach/x86_64/ here for exactly
   # the same reason it resolves to mach/i386/ there.
+  set(KERNEL_DEFINES_BARE
+      KERNEL MACH_KERNEL KERNEL_PRIVATE KERNEL_SERVER=1
+      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=1 MACH_HOST=1
+      STAT_TIME MACH_MACHINE_ROUTINES TASK_SWAPPER=1 __NO_UNDERSCORES__)
+  list(TRANSFORM KERNEL_DEFINES_BARE PREPEND -D OUTPUT_VARIABLE KERNEL_DEFINES)
+
+  # ⚠️ #452 added the machine-independent tree to this list, and it is the
+  # first time this target has seen it.  sync/mutex.c implements the mutex
+  # kern/lock.h declares, so it has to read that header -- a machine-dependent
+  # file cannot implement a machine-independent contract it cannot see.
+  #
+  # Ordered as the i386 target orders them, and as scripts/mi-x86_64-probe.sh
+  # does: uapi, the arch links, x86_64/, then the MI root.  x86_64/ comes
+  # first so <sync/lock.h> is this target's own; that is also why the x86-64
+  # directories are named after the MD contracts rather than after kern/,
+  # vm/, ipc/ -- none of those names can ever collide.
   target_include_directories(mach_kernel PRIVATE
     ${CMAKE_SOURCE_DIR}/uapi
     ${UROS_ARCH_INCLUDE}
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64
-    ${UROS_CONFIG_INCLUDE})			# #450 — the ODE knobs, generated
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${UROS_CONFIG_INCLUDE}
+    ${X86_64_MIG_DIR}
+    ${X86_64_MIG_DIR}/mach
+    ${CMAKE_SOURCE_DIR}/export/include)			# #450 — the ODE knobs, generated
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
   # stddef.h); add just that directory back with -isystem so we get the
   # fixed-width types without pulling in the hosted system headers.
@@ -149,6 +181,15 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       -fno-pie -fno-stack-protector -fno-builtin -nostdinc
       -fno-omit-frame-pointer
       -isystem ${X86_64_GCC_INC} -std=gnu11 -Wall>)
+  # The same configuration the mig rules generate against, now also for the
+  # code (#452).  Without NCPUS the config header defaults it to 1, and
+  # kern/lock.h compiles every mutex operation away to an empty macro -- so
+  # sync/mutex.c defined functions whose declarations had become `#define
+  # _mutex_lock(l)`, and the error was a syntax error a hundred lines from
+  # the cause.  A kernel built for one processor is a real configuration;
+  # silently becoming one is not.
+  target_compile_definitions(mach_kernel PRIVATE ${KERNEL_DEFINES_BARE})
+
   target_link_options(mach_kernel PRIVATE
     -m64 -static -nostdlib -nostartfiles -no-pie
     -T ${X86_64_BOOT_LD}
@@ -211,10 +252,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
 
   # No AT386, no EISA/HIMEM/NPCI/MP_V1_1: those name i386 hardware, and the
   # generated code is the wire format, which must not depend on them.
-  set(KERNEL_DEFINES
-      -DKERNEL -DMACH_KERNEL -DKERNEL_PRIVATE -DKERNEL_SERVER=1
-      -DNCPUS=64 -DMACH_ASSERT=1 -DMACH_DEBUG=1 -DMACH_KDB=1 -DMACH_HOST=1
-      -DSTAT_TIME -DMACH_MACHINE_ROUTINES -DTASK_SWAPPER=1 -D__NO_UNDERSCORES__)
 
   add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
