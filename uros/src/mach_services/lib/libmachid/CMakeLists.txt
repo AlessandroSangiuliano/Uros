@@ -10,6 +10,16 @@ add_library(libmachid STATIC ${LIB_SOURCES})
 
 add_dependencies(libmachid mig_mach_public_headers)
 
+# This library never had the target's architecture flags, while every one of
+# its siblings does -- so it was compiled at the host's width and archived
+# into export/.../i386/user/lib as if it were i386 code, with <mach/machine/
+# vm_types.h> handing it 32-bit vm_offset_t all the while.
+#
+# Nothing links it, which is why nothing ever said so.  It surfaced only when
+# #453 made a mismatched <mach/i386/vm_types.h> an #error instead of a
+# truncation, and it is the first thing that guard caught.
+target_compile_options(libmachid PRIVATE ${UROS_ARCH_FLAGS})
+
 target_include_directories(libmachid PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
