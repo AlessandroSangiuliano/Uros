@@ -200,12 +200,6 @@ int		dipc_test_obtain_buffer(char *);
 int		dipc_test_verify_buffer(char *);
 int		dipc_test_release_buffer(char *);
 
-#if	FLIPC
-extern void	flipcme_low_level_test(
-			node_name	node,
-			vm_size_t	test_size,
-			unsigned int	*result);
-#endif	/* FLIPC */
 
 decl_simple_lock_data(,dipc_test_lock_data)
 
@@ -2294,7 +2288,7 @@ dtest_send_test_recv_msg(
 #define DMT_RES_SHORT		0x0080
 #define	DMT_MSG_SEND_OOL	0x0100
 #define	DMT_MSG_TEST_GEN	0x0200
-#define	DMT_FLIPC_TEST		0x0400
+/* 0x0400 was DMT_FLIPC_TEST; FLIPC v1 removed under #433 */
 #define	DMT_END			0x1000
 #define	DMT_ALL			0x1fff
 
@@ -2322,10 +2316,6 @@ dipc_return_t			dmt_transport(
 
 extern	void			kern_msg_test(
 					node_name	node);
-#if	FLIPC
-dipc_return_t			dmt_flipc(
-					node_name	node);
-#endif	/* FLIPC */
 
 
 void
@@ -2456,13 +2446,6 @@ dipc_multinode_test_thread(void)
 					    dmt_node);
 				break;
 
-#if	FLIPC
-			    case DMT_FLIPC_TEST:
-				dmt_do_test(dmt_flipc,
-					    "FLIPC low level test",
-					    dmt_node);
-				break;
-#endif	/* FLIPC */
 			}
 		}
 		printf("** DIPC Multinode Tests conclude\n");
@@ -2470,62 +2453,6 @@ dipc_multinode_test_thread(void)
 }
 
 
-#if	FLIPC
-/*
- * Invoke flipc low level test (transport only).
- *
- * The following definitions are intended to work across a broad
- * range of architectures.  Currently, FLIPC does not send anything
- * larger than 128 bytes, but the test allocates a 256 byte region
- * to give a broader picture of the transport capabilities.  We send
- * decrementally sized payloads, decrementing by CACHE_LINE which is
- * 32 bytes on current architectures.
- */
-#define	CACHE_LINE	32
-#define	FLIPC_MAX_PACKET	256
-
-dipc_return_t
-dmt_flipc(
-	node_name	node)
-{
-	unsigned int results[FLIPC_MAX_PACKET/CACHE_LINE+1];
-	int i;
-	int test_size;
-
-	/*
-	 *  FLIPC is optimized to send small packets.  Start with the
-	 *  largest buffer size and decrease the amount sent by a
-	 *  cache-line each time.  A zero length send implies only
-	 *  control information gets sent (the payload is 0 length; it
-	 *  does not imply no message).
-	 */
-	test_size = FLIPC_MAX_PACKET;
-	for (i = 0; test_size >= 0; i++) {
-		/*
-		 * most flipc interfaces are asynchronous, so
-		 * synchronization must occur in the low_level_test
-		 * routine.
-		 */
-		flipcme_low_level_test(node,
-				       (vm_size_t)test_size,
-				       &results[i]);
-		test_size -= CACHE_LINE;
-	}
-
-	/*
-	 * Test complete; print out the results
-	 */
-	printf("Flipc round trip test results:\n\tSize\tusecs\n");
-	test_size = FLIPC_MAX_PACKET;
-	for (i = 0; test_size >= 0; i++) {
-		printf ("\t%d\t%d\n", test_size, results[i]);
-		test_size -= CACHE_LINE;
-	}
-
-	return DIPC_SUCCESS;
-}
-
-#endif	/* FLIPC */
 
 /*
  * send a small inline-only message between nodes,
@@ -4186,24 +4113,6 @@ dipc_test_init(boolean_t startup)
 		/*
 		 *	Find the first compute node--the sending node.
 		 */
-#if	FLIPC
-		/*
-		 *	For a flipc kernel, a node with a revision
-		 *	B NIC chip is needed. Since there is always
-		 *	the chance that the first sending node may not
-		 *	be equipped with this chip, the sender node
-		 *	number may have to be specified via bootmagic.
-		 */
-		if ((auto_dmt_start =  getbootint("DMT_SENDER_NODE", -1)) == 0)
-			sender_node = 2; 
-#else	/* FLIPC */
-
-		for( i = 0; i < numb_nodes; i++)
-			if((char *) node_in_list(i, s2) != 0){
-				sender_node = i;
-				break;
-			}
-#endif	/* FLIPC */
 	}
 	
 #else	/* PARAGON860 */

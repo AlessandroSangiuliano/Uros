@@ -142,11 +142,6 @@
 #define	rtclockname		"rtclock"
 #define	timename		"time"
 
-#if	FLIPC > 0
-#include <flipc/flipc_usermsg.h>
-#define usermsgname		"usermsg"
-#endif /* FLIPC > 0 */
-
 #include <fd.h>
 #if	NFD > 0
 #include <i386/AT386/fd_entries.h>
@@ -359,13 +354,6 @@ struct dev_ops	dev_name_list[] =
 	  NULL_WRITE,	NULL_GETS,	NULL_SETS,	rtclock_map,
 	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
 	  NO_DINFO },
-
-#if FLIPC > 0
-	{ usermsgname,	usermsg_open,	usermsg_close,	NULL_READ,
-	 NULL_WRITE,	usermsg_getstat,usermsg_setstat,usermsg_map,
-	  NO_ASYNC,	NULL_RESET,	NULL_DEATH,	0,
-	  NO_DINFO },
-#endif /* FLIPC > 0 */
 
 #if	NFD > 0
 	{ fdname,	fdopen,		fdclose,	fdread,
