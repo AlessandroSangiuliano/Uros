@@ -28,7 +28,11 @@ FLAGS="-m64 -mcmodel=kernel -mno-red-zone -mgeneral-regs-only -fcf-protection=no
 # The x86-64 target's own include path, in the target's own order:
 # uapi, the machine/ links, x86_64/, then the generated ODE knobs (#450).
 INC_A="-I$UROS/uapi -I$UROS/build-x86_64/arch-include -I$SRC/x86_64
- -I$SRC -I$SRC/include -I$UROS/build-x86_64/config-include -I$UROS/export/include"
+ -I$SRC -I$SRC/include -I$UROS/build-x86_64/config-include
+ -I$UROS/build-x86_64/src/mach_kernel -I$UROS/build-x86_64/src/mach_kernel/mach
+ -I$UROS/build-x86_64/src/mach_kernel/mach_debug
+ -I$UROS/build-x86_64/src/mach_kernel/device
+ -I$UROS/export/include"
 INC_B="$INC_A -I$SRC/i386/AT386 -I$SRC/i386
  -I$UROS/build/src/mach_kernel -I$UROS/build/src/mach_kernel/mach
  -I$UROS/build/src/mach_kernel/mach_debug -I$UROS/build/src/mach_kernel/device"

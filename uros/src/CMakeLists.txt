@@ -48,6 +48,28 @@ if(UROS_TARGET_ARCH STREQUAL "i386")
   set(UROS_USERLAND_ARCH_OK TRUE)
 endif()
 
+# migcom is a HOST tool, not target code (#416): it runs on the build machine
+# and generates stubs for whatever architecture this build directory targets.
+# It used to be reachable only through lib/, which is gated on i386 below --
+# so the x86-64 kernel could not run mig at all, and nine machine-independent
+# sources failed on generated headers that had never been generated.
+#
+# Gated on the KERNEL, not on OSFMK_BUILD_TOOLS: since #416 migcom is not an
+# optional convenience but a build dependency of the kernel, which cannot be
+# assembled without the stubs it generates.  A configuration with the kernel
+# on and tools off used to produce a build that simply had no mig, and said
+# so only as "No target migcom" from inside a generator expression.
+#
+# Added once: lib/CMakeLists.txt adds it too, and only when that whole
+# directory is in the build.
+set(_uros_migcom_from_lib FALSE)
+if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
+  set(_uros_migcom_from_lib TRUE)
+endif()
+if(OSFMK_BUILD_KERNEL AND NOT _uros_migcom_from_lib)
+  add_subdirectory(lib/migcom)
+endif()
+
 if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib)
   add_subdirectory(mach_services/lib)
@@ -56,8 +78,8 @@ if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
   add_subdirectory(tools/mkmanifest)
 endif()
 
-# Kernel build (requires migcom to be built first on i386; the x86-64 boot
-# stub needs no host tools — it is pure assembly).
+# Kernel build.  Both targets need migcom first: since #416 the x86-64 kernel
+# generates its interface stubs with the same host tool i386 does.
 if(OSFMK_BUILD_KERNEL)
   add_subdirectory(mach_kernel)
 endif()
