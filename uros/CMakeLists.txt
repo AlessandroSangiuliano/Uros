@@ -119,6 +119,11 @@ include(${CMAKE_SOURCE_DIR}/cmake/kernel-config.cmake)
 set(UROS_CONFIG_INCLUDE ${CMAKE_BINARY_DIR}/config-include)
 uros_write_config_headers(${UROS_CONFIG_INCLUDE} ${UROS_TARGET_ARCH})
 
+# MIG stub generation, shared by both targets (#416).  The rules used to sit
+# below the x86-64 branch's return() with -I i386 written into them, so the
+# new target could not run mig at all.
+include(${CMAKE_SOURCE_DIR}/cmake/mig.cmake)
+
 # The .defs every mig rule reads and none of them declares (#413).
 #
 # A mig rule names the generator and the one interface file it is handed.

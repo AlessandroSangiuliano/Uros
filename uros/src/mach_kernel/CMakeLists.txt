@@ -175,6 +175,89 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     COMMENT "Building GRUB2 multiboot2 rescue ISO: ${X86_64_ISO}"
     VERBATIM)
 
+
+  # ------------------------------------------------------------------ #416
+  # Run mig for this target.
+  #
+  # The nine machine-independent sources that still fail here all fail the
+  # same way: they include a generated *_server.h that has never been
+  # generated, because the rules lived below this branch's return() with
+  # -I i386 written into them.  They are shared now (cmake/mig.cmake); what
+  # was left was to call them.
+  #
+  # migcom itself needed nothing: run by hand against the x86-64 include path
+  # it produced a server and a header with no diagnostics, and the 415 layout
+  # assertions it emits into that server all hold when the result is compiled
+  # -m64.  So its arithmetic about message layout is already right for an ABI
+  # where vm_address_t, vm_offset_t and vm_size_t are 64 bits wide and
+  # natural_t and integer_t are not.  That was worth checking before building
+  # anything on top of it, and it is what the assertions exist for.
+  #
+  # ⚠️ mach/i386/mach_i386.defs has no counterpart here.  x86-64 has no
+  # mach_x86_64.defs, which is also why <machine/machine_routines.h> is one
+  # of the headers #450 left unwritten: it names MACHINE_SERVER, and there is
+  # no subsystem to name yet.  That is #413's to decide, not something to
+  # invent here.
+  set(X86_64_MIG_DIR ${CMAKE_CURRENT_BINARY_DIR})
+  file(MAKE_DIRECTORY ${X86_64_MIG_DIR}/mach ${X86_64_MIG_DIR}/mach_debug
+                      ${X86_64_MIG_DIR}/device)
+
+  set(UROS_MIG_INCLUDES
+      -I${UROS_ARCH_INCLUDE}
+      -I${CMAKE_CURRENT_SOURCE_DIR}
+      -I${CMAKE_CURRENT_SOURCE_DIR}/include
+      -I${CMAKE_CURRENT_SOURCE_DIR}/x86_64
+      -I${UROS_CONFIG_INCLUDE})
+
+  # No AT386, no EISA/HIMEM/NPCI/MP_V1_1: those name i386 hardware, and the
+  # generated code is the wire format, which must not depend on them.
+  set(KERNEL_DEFINES
+      -DKERNEL -DMACH_KERNEL -DKERNEL_PRIVATE -DKERNEL_SERVER=1
+      -DNCPUS=64 -DMACH_ASSERT=1 -DMACH_DEBUG=1 -DMACH_KDB=1 -DMACH_HOST=1
+      -DSTAT_TIME -DMACH_MACHINE_ROUTINES -DTASK_SWAPPER=1 -D__NO_UNDERSCORES__)
+
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach.defs
+                 ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach_port.defs
+                 ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach_host.defs
+                 ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach_klog.defs
+                 ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/clock.defs
+                 ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/sync.defs
+                 ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/bootstrap.defs
+                 ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/ledger.defs
+                 ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach_debug/mach_debug.defs
+                 ${X86_64_MIG_DIR}/mach_debug X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/device/device.defs
+                 ${X86_64_MIG_DIR}/device X86_64_MIG)
+  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/device/device_master.defs
+                 ${X86_64_MIG_DIR}/device X86_64_MIG)
+  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/mach/exc.defs
+               ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object.defs
+               ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object_default.defs
+               ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/mach/clock_reply.defs
+               ${X86_64_MIG_DIR}/mach X86_64_MIG)
+  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/device/device_reply.defs
+               ${X86_64_MIG_DIR}/device X86_64_MIG)
+
+  # The stubs are not compiled into the kernel yet -- the MI sources they
+  # belong to do not build here.  Without a target depending on them, cmake
+  # would never run the rules at all, and the headers the probe is waiting
+  # for would still not exist.  So they are generated as their own target,
+  # and the kernel depends on it: the interface is produced whenever the
+  # kernel is, which is when a mismatch is worth finding out about.
+  add_custom_target(uros_mig_stubs DEPENDS ${X86_64_MIG_GENERATED})
+  add_dependencies(mach_kernel uros_mig_stubs)
+
   message(STATUS "x86-64 kernel: boot stub (#406) — MD contracts #407-#411 pending")
   return()
 endif()
@@ -435,73 +518,17 @@ file(MAKE_DIRECTORY ${KERNEL_BUILD_DIR}/mach)
 file(MAKE_DIRECTORY ${KERNEL_BUILD_DIR}/mach_debug)
 file(MAKE_DIRECTORY ${KERNEL_BUILD_DIR}/device)
 
-# Helper function to add MIG generation rule
-# Use -x c to force C preprocessing of .defs files (modern GCC ignores unknown extensions)
-function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
-    get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
-    set(SERVER_C ${OUTPUT_DIR}/${DEFS_NAME}_server.c)
-    set(SERVER_H ${OUTPUT_DIR}/${DEFS_NAME}_server.h)
-    
-    add_custom_command(
-        OUTPUT ${SERVER_C} ${SERVER_H}
-        COMMAND ${CMAKE_C_COMPILER} -E -x c
-                -I${UROS_ARCH_INCLUDE}
-                -I${KERNEL_SRC_DIR} 
-                -I${KERNEL_SRC_DIR}/include
-                -I${KERNEL_SRC_DIR}/i386
-                -I${KERNEL_SRC_DIR}/i386/AT386
-            -I${UROS_CONFIG_INCLUDE}
-                ${KERNEL_DEFINES}
-                ${DEFS_FILE} | 
-                $<TARGET_FILE:migcom>
-                -sheader ${SERVER_H}
-                -server ${SERVER_C}
-                -header /dev/null
-                -user /dev/null
-        DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
-        COMMENT "MIG: ${DEFS_NAME} (server)"
-        VERBATIM
-    )
-    
-    set(${SUBSYS_NAME}_GENERATED ${${SUBSYS_NAME}_GENERATED} ${SERVER_C} PARENT_SCOPE)
-endfunction()
+# MIG rules: see cmake/mig.cmake (#416), included from the root CMakeLists.
+#
+# The i386 include path, exactly as the rules carried it before they moved.
+set(UROS_MIG_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${KERNEL_SRC_DIR}
+    -I${KERNEL_SRC_DIR}/include
+    -I${KERNEL_SRC_DIR}/i386
+    -I${KERNEL_SRC_DIR}/i386/AT386
+    -I${UROS_CONFIG_INCLUDE})
 
-function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
-    get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
-    set(USER_C ${OUTPUT_DIR}/${DEFS_NAME}_user.c)
-    # Use _user.h suffix to avoid conflicts with source headers (e.g. mach/memory_object.h)
-    set(USER_H ${OUTPUT_DIR}/${DEFS_NAME}_user.h)
-    
-    # For KernelUser stubs: define KERNEL_USER=1 so .defs files enable
-    # the KernelUser subsystem modifier (generates mach_msg_send_from_kernel
-    # instead of mach_msg_overwrite). Undefine KERNEL_SERVER to prevent
-    # memory_object.defs (which has both guards) from also setting
-    # IsKernelServer, which would emit '#undef MACH_KERNEL' and cause
-    # type conflicts between user-space and kernel type definitions.
-    add_custom_command(
-        OUTPUT ${USER_C} ${USER_H}
-        COMMAND ${CMAKE_C_COMPILER} -E -x c
-                -I${UROS_ARCH_INCLUDE}
-                -I${KERNEL_SRC_DIR}
-                -I${KERNEL_SRC_DIR}/include
-                -I${KERNEL_SRC_DIR}/i386
-                -I${KERNEL_SRC_DIR}/i386/AT386
-            -I${UROS_CONFIG_INCLUDE}
-                ${KERNEL_DEFINES}
-                -DKERNEL_USER=1
-                -UKERNEL_SERVER
-                ${DEFS_FILE} |
-                $<TARGET_FILE:migcom>
-                -header ${USER_H}
-                -user ${USER_C}
-                -server /dev/null
-        DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
-        COMMENT "MIG: ${DEFS_NAME} (user)"
-        VERBATIM
-    )
-    
-    set(${SUBSYS_NAME}_GENERATED ${${SUBSYS_NAME}_GENERATED} ${USER_C} PARENT_SCOPE)
-endfunction()
 
 # ---- Mach subsystem MIG files ----
 
