@@ -459,7 +459,6 @@ boolean_t vm_page_deactivate_hint = TRUE;
  * for physical memory allocation; pmem_reserve_ctl_size is decremented
  * by one to compensate.
  */
-#include <flipc.h>
 #if FLIPC
 #include <flipc/flipc_usermsg.h>
 #endif

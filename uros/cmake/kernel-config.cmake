@@ -36,7 +36,6 @@ set(UROS_KERNEL_CONFIG
     fast_idle              FAST_IDLE 0
     fast_tas               FAST_TAS 0
     fddi                   FDDI 0
-    flipc                  NFLIPC 0
     gprof                  NGPROF 0
     hw_footprint           HW_FOOTPRINT 1
     kernel_test            KERNEL_TEST 0
