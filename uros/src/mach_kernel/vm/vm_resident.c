@@ -718,8 +718,20 @@ pmap_steal_memory(
 		 *	but some pmap modules barf if they are.
 		 */
 
-		pmap_enter(kernel_pmap, vaddr, paddr,
-			   VM_PROT_READ|VM_PROT_WRITE, FALSE);
+		/*
+		 * #407: nothing to unwind to.  This runs before the VM
+		 * exists, stealing the memory the VM will be built out of,
+		 * so a mapping that does not happen leaves the kernel with
+		 * an address it believes in and cannot touch.
+		 *
+		 * i386 would already have panicked inside pmap_expand.  The
+		 * difference is where it says so: here the message can name
+		 * what was being mapped, which three levels down it cannot.
+		 */
+		if (pmap_enter(kernel_pmap, vaddr, paddr,
+			       VM_PROT_READ|VM_PROT_WRITE, FALSE) != 0)
+			panic("pmap_steal_memory: could not map 0x%x -> 0x%x",
+			      vaddr, paddr);
 		/*
 		 * Account for newly stolen memory
 		 */

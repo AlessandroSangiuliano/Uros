@@ -2432,7 +2432,14 @@ pmap_enter_unlock(register pmap_t pmap, int ptl, spl_t spl)
  *	or lose information.  That is, this routine must actually
  *	insert this page into the given map NOW.
  */
-void pmap_enter(
+/*
+ * #407: int rather than void.  i386 cannot fail -- the retry loop below only
+ * leaves when the mapping is in place, and pmap_expand panics for the kernel
+ * pmap -- so the answer here is always success.  The declaration changed
+ * because x86-64 can fail and says so, and a machine-independent caller has
+ * to be able to ask.
+ */
+int pmap_enter(
 	register pmap_t pmap,
 	vm_offset_t v,
 	register vm_offset_t pa,
@@ -2457,7 +2464,7 @@ void pmap_enter(
 	if (pmap_debug)
 		printf("pmap(%x, %x)\n", v, pa);
 	if (pmap == PMAP_NULL)
-		return;
+		return 0;		/* #407: no map to put it in, not a failure */
 
 #if defined(AT386) && defined(i386)
 	if (cpuid_family == CPUID_FAMILY_386)
@@ -2483,7 +2490,7 @@ void pmap_enter(
 					pte + ptes_per_vm_page, -1); /* #338: kernel, pmap->lock */
 			}
 			PMAP_READ_UNLOCK(pmap, spl);
-			return;
+			return 0;	/* #407: the requested change was made */
 		}
 
 	/*
@@ -2845,6 +2852,8 @@ void pmap_enter(
 	}
 
 	pmap_enter_unlock(pmap, ptl, spl);
+
+	return 0;			/* #407: reached only with the mapping made */
 }
 
 /*
@@ -2854,7 +2863,9 @@ void pmap_enter(
  *	In/out conditions:
  *			The mapping must already exist in the pmap.
  */
-void pmap_change_wiring(
+/* #407: int rather than void -- see the declaration in vm/pmap.h.  i386
+ * cannot fail here: an absent mapping is nothing to change. */
+int pmap_change_wiring(
 	register pmap_t map,
 	vm_offset_t v,
 	boolean_t wired)
@@ -2898,6 +2909,8 @@ void pmap_change_wiring(
 	}
 
 	pmap_enter_unlock(map, ptl, spl);
+
+	return 0;			/* #407: i386 cannot fail here */
 }
 
 /*
