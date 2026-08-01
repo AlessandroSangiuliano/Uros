@@ -42,12 +42,17 @@ if [ "$PASS" = A ]; then INC=$INC_A; else INC=$INC_B; fi
 echo "### pass $PASS  $(date -Is)"
 ok=0; bad=0
 while read -r f; do
-	# The compiler's exit status, not whether it printed something.  This
-	# used to test the output for emptiness, and -Wall means a file with a
-	# warning and no error looked exactly like a file that would not
-	# build -- so the count of failures was an overcount, and by an amount
-	# nobody knew.  A warning is worth reading; it is not a failure.
-	err=$(cc $DEFINES $FLAGS $INC -c "$SRC/$f" -o /dev/null 2>&1)
+	# Some of these are generated, not written: the MIG stubs live in the
+	# build directory and there is nothing under $SRC to compile.  Reported
+	# as "File o directory non esistente", they looked for weeks like three
+	# more sources that did not build, when in fact they existed and were
+	# correct.  Second instrument error of the day, so it is fixed rather
+	# than remembered: look in the build tree when the source tree has no
+	# such file, and only call it missing when neither does.
+	src=$SRC/$f
+	[ -f "$src" ] || src=$UROS/build-x86_64/src/mach_kernel/$f
+
+	err=$(cc $DEFINES $FLAGS $INC -c "$src" -o /dev/null 2>&1)
 	rc=$?
 	if [ $rc -eq 0 ]; then
 		ok=$((ok + 1))
