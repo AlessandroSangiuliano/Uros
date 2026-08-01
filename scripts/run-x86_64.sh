@@ -1,0 +1,111 @@
+#!/bin/sh
+# UrMach x86-64 dev loop (#406+): rebuild kernel + ISO, boot in QEMU, and say
+# whether the run was good.
+#
+# The image is ELF64 loaded by GRUB via multiboot2 — qemu's -kernel
+# multiboot1 loader rejects ELF64, so we boot a GRUB rescue ISO with -cdrom.
+#
+# Usage: run-x86_64.sh [seconds] [extra qemu args...]
+#   run-x86_64.sh
+#   run-x86_64.sh 30 -smp 4
+#   run-x86_64.sh 20 -cpu max -m 2G
+#
+# Exit status: 0 the run passed · 1 the run failed · 2 refused to start.
+#
+# The pass-through exists for a reason: running qemu by hand to add a flag
+# skips the ISO rebuild, and the ISO is what boots. That mistake costs a
+# debugging session chasing a kernel that was fixed twenty minutes earlier —
+# so there is no reason to ever invoke qemu directly.
+#
+# ---------------------------------------------------------------- #451
+# This script used to print the interesting lines and exit with grep's
+# status. 130 self-tests, and no way to fail: reading the lines and forming
+# an impression was the whole verification, and what that verified was that
+# the boot reached the end.
+#
+# It had already cost something. The kernel measures its own LAPIC timer,
+# decides the answer is wrong, and says so — in the same voice as the 128
+# lines that passed, so nobody counted it. Same shape as #448, where the
+# coverage map named a test that had never existed: a measurement that is
+# taken and never read.
+set -e
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+BUILD=$REPO/uros/build-x86_64
+LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
+SECS=${1:-15}
+[ $# -gt 0 ] && shift
+
+ninja -C "$BUILD" uros_iso >/dev/null
+
+# One run at a time, enforced rather than remembered.
+#
+# The killall below is how this script guarantees a clean machine, and it is
+# also how two of these destroy each other: each kills the other's qemu
+# mid-boot, and both report processors that never arrived. That happened,
+# and produced twelve consecutive "failures" of a kernel that was fine.
+#
+# So take a lock and refuse rather than interleave. A refusal is a fact; two
+# runs fighting is a lie with a plausible shape.
+LOCK=/tmp/uros-x86_64-run.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+	echo "another run-x86_64.sh is in flight ($LOCK) — refusing to interleave" >&2
+	exit 2
+fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+
+mkdir -p "$(dirname "$LOG")"
+killall qemu-system-x86_64 2>/dev/null || true
+echo "=== booting uros-x86_64.iso (${SECS}s watchdog) $* ==="
+
+# The whole stream goes to the log; the console keeps seeing the lines it
+# always showed. The verdict reads the log, not the filtered view, because a
+# failure that the filter drops is exactly the one worth catching.
+timeout "$SECS" qemu-system-x86_64 "$@" \
+	-cdrom "$BUILD/uros-x86_64.iso" \
+	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 || true
+grep -a "UrMach\|fault\|error\|Error\|panic\|^  " "$LOG" || true
+
+# ------------------------------------------------------------------ verdict
+#
+# Known-emulator exceptions. Named, with the reason, and COUNTED in the
+# output rather than skipped: a verdict that fails on every run is worth
+# exactly as much as one that never fails — both get ignored — and a silent
+# skip is how a real regression hides behind a known one.
+#
+# The TSC one is a property of QEMU, which does not offer an invariant
+# timestamp counter even with -cpu max (measured 27/07 on both cpu models).
+# #318 was rewritten around that fact.
+KNOWN='timestamp counter measured against the 8254'
+
+# The last self-test breaks the stack deliberately so the double fault lands
+# on its own IST. `no handler — halted` is therefore the success terminator,
+# not a crash — and checking that it arrived is what catches a truncated run,
+# which produces fewer lines and no failures at all and reads as a pass under
+# any naive "grep for problems" check.
+TERMINATOR='no handler'
+
+TESTS=$(grep -ac 'UrMach x86-64:' "$LOG" || true)
+EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
+BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic:|kernel: page fault' "$LOG" \
+	| grep -av "$KNOWN" || true)
+NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
+
+echo
+echo "=== verdict: $TESTS self-tests ==="
+[ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: known QEMU artifact (TSC not invariant, #318)"
+
+if ! grep -aq "$TERMINATOR" "$LOG"; then
+	echo "  FAILED: the run never reached '$TERMINATOR' — it was cut short, so"
+	echo "          the tests after that point did not run and cannot have passed"
+	echo "  log: $LOG"
+	exit 1
+fi
+
+if [ "$NBAD" -gt 0 ]; then
+	echo "  FAILED: $NBAD unexplained:"
+	printf '%s\n' "$BAD" | sed 's/^/    /'
+	echo "  log: $LOG"
+	exit 1
+fi
+
+echo "  passed: reached the end, nothing unexplained"
