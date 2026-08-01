@@ -25,6 +25,20 @@
 #ifndef _MACH_X86_64_VM_PARAM_H_
 #define _MACH_X86_64_VM_PARAM_H_
 
+/*
+ * Every address below is cast to vm_offset_t, and the agreement with
+ * <pmap/layout.h> is checked at file scope -- so the type has to be here,
+ * from this header, rather than from whatever the including file happened to
+ * pull in first (#453).
+ *
+ * i386's twin does without because it never uses the type outside a macro
+ * body, where the name is not looked up until the macro is used.  The static
+ * assertion is what moved the requirement to file scope, and it is worth the
+ * include: it is the thing that stops the public header and the page tables
+ * from describing two different machines.
+ */
+#include <mach/machine/vm_types.h>
+
 #define BYTE_SIZE		8	/* byte size in bits */
 
 #define X86_64_PGBYTES		4096	/* bytes per page */

@@ -945,7 +945,7 @@ ref_space_port_locked( ipc_port_t port, ipc_space_t *pspace )
 		 * per-space ref lock out of order and bailed with FALSE on
 		 * contention, forcing the caller to retry.)
 		 */
-		atomic_incl((long *) &space->is_references, 1);
+		atomic_incl(&space->is_references, 1);
 	}
 	*pspace = space;
 	ip_unlock(port);

@@ -19,6 +19,8 @@
 
 #include <stdint.h>
 
+#include <sync/atomic.h>	/* atomic_add64, under the counters below */
+
 typedef volatile uint8_t	hw_lock_data_t;
 typedef hw_lock_data_t		*hw_lock_t;
 
@@ -64,5 +66,37 @@ MACRO_BEGIN								\
 	mutex_lock_assert_safe();					\
 	_mutex_lock((m));						\
 MACRO_END
+
+/*
+ * Counters the machine-independent tree bumps without a lock (#453).
+ *
+ * Typed on `long` and not on a fixed width, which is the whole point: the
+ * machine-independent callers used to cast whatever they had to `long *`,
+ * and a cast is exactly what let a 32-bit field be handed to a 64-bit
+ * read-modify-write.  The casts are gone and the counters are declared as
+ * long, so a mismatch is now a compiler error rather than four neighbouring
+ * bytes changing value.
+ *
+ * atomic_incl() answers nothing; atomic_add_fetchl() answers the value
+ * *after* the addition, which is what a release needs -- it has to know
+ * whether the reference it just dropped was the last one, and the value
+ * before the drop cannot say that without a second read that another
+ * processor could slip between.
+ */
+static inline void atomic_incl(long *p, long delta)
+{
+	(void) atomic_add64((volatile uint64_t *) p, (uint64_t) delta);
+}
+
+static inline void atomic_decl(long *p, long delta)
+{
+	(void) atomic_add64((volatile uint64_t *) p, (uint64_t) -delta);
+}
+
+static inline long atomic_add_fetchl(long *p, long delta)
+{
+	return (long) atomic_add64((volatile uint64_t *) p, (uint64_t) delta)
+	       + delta;
+}
 
 #endif	/* _X86_64_SYNC_LOCK_H_ */
