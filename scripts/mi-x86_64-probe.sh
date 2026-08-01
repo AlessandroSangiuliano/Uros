@@ -42,9 +42,21 @@ if [ "$PASS" = A ]; then INC=$INC_A; else INC=$INC_B; fi
 echo "### pass $PASS  $(date -Is)"
 ok=0; bad=0
 while read -r f; do
+	# The compiler's exit status, not whether it printed something.  This
+	# used to test the output for emptiness, and -Wall means a file with a
+	# warning and no error looked exactly like a file that would not
+	# build -- so the count of failures was an overcount, and by an amount
+	# nobody knew.  A warning is worth reading; it is not a failure.
 	err=$(cc $DEFINES $FLAGS $INC -c "$SRC/$f" -o /dev/null 2>&1)
-	if [ -z "$err" ]; then
-		ok=$((ok + 1)); echo "OK       $f"
+	rc=$?
+	if [ $rc -eq 0 ]; then
+		ok=$((ok + 1))
+		w=$(printf '%s\n' "$err" | grep -c 'warning:' || true)
+		if [ "$w" -gt 0 ]; then
+			printf 'OK  %-4s %s\n' "${w}w" "$f"
+		else
+			printf 'OK       %s\n' "$f"
+		fi
 	else
 		bad=$((bad + 1))
 		first=$(printf '%s\n' "$err" | grep -m1 -E 'error:' | sed 's/.*error: //')

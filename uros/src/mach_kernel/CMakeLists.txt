@@ -112,17 +112,28 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
-  # ⚠️ sync/mutex.c (#452) is NOT here yet, and the reason is worth stating
-  # rather than leaving as an omission: it compiles, but it cannot link.  Its
-  # slow path calls mutex_lock_wait() and mutex_unlock_wakeup(), which live in
-  # kern/lock.c -- and kern/lock.c is one missing header from compiling for
-  # this target: <machine/db_machdep.h>, which is #428's.
+  # sync/mutex.c and kern/lock.c are not in that list, and the boundary is
+  # worth stating exactly rather than as "not yet" (#452/#428).
   #
-  # Nothing in the x86-64 kernel takes a mutex today (there is no
-  # machine-independent code here to take one), so adding a file that breaks
-  # the link would buy nothing.  It goes in with kern/lock.c, in one step,
-  # when DDB's header lands.  Until then scripts/mi-x86_64-probe.sh is what
-  # keeps it honest.
+  # Both COMPILE.  kern/lock.c was one missing header away and #428 supplied
+  # it; the mutex has been compiling since it was written.  What stops them
+  # is the LINK, and the list is short and known:
+  #
+  #   assert_wait, thread_block, thread_wakeup_prim,
+  #   thread_will_wait_with_timeout        kern/sched_prim.c   (compiles)
+  #   Assert, db_printf, db_error          kern/debug.c        (compiles)
+  #   cpu_data, interlock_unlock           kern/ipc_kobject.c  (does not:
+  #                                        wants device_pager_server.h, which
+  #                                        i386 generates from
+  #                                        memory_object.defs with a bespoke
+  #                                        mig rule this target has not got)
+  #   memset                               no MI provider yet
+  #
+  # Ten symbols, three files. That is a different kind of blocker from the
+  # ones this session cleared: not a header anybody can write, but the point
+  # where the machine-independent kernel starts pulling in the scheduler --
+  # and the scheduler pulls in more. It is the beginning of bring-up rather
+  # than the end of header work, and it wants its own issue.
   # <mach/...> and the per-target <mach/machine/...> behind it (#413).
   #
   # The first thing this target has ever taken from outside x86_64/, and it
