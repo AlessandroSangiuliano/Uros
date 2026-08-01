@@ -332,9 +332,11 @@ setup_main(void)
 	subsystem_init();
 	{
 		extern void lock_smoke_test(void);
+		extern void spl_return_check(void);
 		extern void fpu_sanity_check(void);
 		extern void hwp_init_cpu(boolean_t bsp);
 		lock_smoke_test();	/* #303 acceptance */
+		spl_return_check();	/* #410 acceptance */
 		fpu_sanity_check();	/* #309 acceptance (BSP arm) */
 		hwp_init_cpu(TRUE);	/* #358 hardware P-states (BSP arm) */
 	}

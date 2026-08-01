@@ -32,6 +32,7 @@
  */
 
 #include <kern/lock.h>
+#include <kern/spl.h>
 #include <kern/misc_protos.h>		/* printf */
 
 #define	LOCK_SMOKE_ITERS	1000
@@ -59,4 +60,75 @@ lock_smoke_test(void)
 
 	printf("lock_smoke: %d acquire/release cycles, counter ok (#303)\n",
 	       counter);
+}
+
+/*
+ * #410 -- spl_return_check
+ *
+ * splx() and spllo() were declared void and had been for as long as
+ * kern/spl.h existed, while the machine code underneath returned the level
+ * that had been current.  Nothing caught it: the i386 implementation is
+ * assembly, so there was no prototype to disagree with.  The declarations are
+ * fixed; this is what makes the fix a claim about the running machine rather
+ * than about how the assembly reads.
+ *
+ * ⚠️ The first version of this routine passed without proving anything.  It
+ * did splhigh() then splx(), and startup already runs at SPLHI, so the level
+ * never moved: the level left and the argument were the same number, and the
+ * check could not tell "splx answers with the level it left" from "splx
+ * answers with its argument".  An experiment only discriminates when the two
+ * hypotheses predict different outcomes, and that one predicted 8 either way.
+ *
+ * So this moves the level, and asserts that it moved before believing
+ * anything that follows.  It calls splx twice, in opposite directions: the
+ * first answer must be the level on the way in, the second must be the level
+ * in the middle.  Under the wrong hypothesis both are the other number.
+ *
+ * The level is reached by arithmetic rather than by name.  SPLTTY exists on
+ * i386 and not on x86-64, and the property under test is not about any named
+ * level; one step down from wherever we are keeps it above SPL0 on either
+ * target, which matters because dropping to zero at this point in startup
+ * would release deferred interrupts, and this routine has no business doing
+ * that.  Every intermediate level masks identically here -- under MP_V1_1 any
+ * ipl > 0 programs the same LAPIC task priority -- so the step is observable
+ * in curr_ipl and nowhere else.
+ */
+void
+spl_return_check(void)
+{
+	spl_t	entry, lower, first, middle, second;
+
+	entry = getspl();
+
+	if (entry == SPL0) {
+		printf("spl_return_check: skipped, startup is at SPL0 and "
+		       "this test may not lower further (#410)\n");
+		return;
+	}
+	lower = entry - 1;
+
+	first = splx(lower);		/* answer must be `entry` */
+	middle = getspl();
+	second = splx(entry);		/* answer must be `middle` */
+
+	if (middle != lower)
+		panic("spl_return_check: splx(%d) left the level at %d -- the "
+		      "level never moved, so this test proves nothing (#410)",
+		      lower, middle);
+
+	if (first != entry)
+		panic("spl_return_check: splx(%d) answered %d; the level it "
+		      "left was %d (#410)", lower, first, entry);
+
+	if (second != middle)
+		panic("spl_return_check: splx(%d) answered %d; the level it "
+		      "left was %d (#410)", entry, second, middle);
+
+	if (getspl() != entry)
+		panic("spl_return_check: level is %d, entered at %d (#410)",
+		      getspl(), entry);
+
+	printf("spl_return_check: splx answered %d then %d -- the level left, "
+	       "not the argument (%d, %d) (#410)\n",
+	       first, second, lower, entry);
 }
