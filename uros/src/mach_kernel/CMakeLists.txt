@@ -261,6 +261,11 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       -I${CMAKE_CURRENT_SOURCE_DIR}/x86_64
       -I${UROS_CONFIG_INCLUDE})
 
+  # Which machine migcom is generating for.  Not optional: it defaults to
+  # i386, so a missing flag produces i386 message layout silently -- 12-byte
+  # port descriptors where this target's are 16 (#453).
+  set(UROS_MIG_TARGET_ARGS -target x86_64)
+
   # No AT386, no EISA/HIMEM/NPCI/MP_V1_1: those name i386 hardware, and the
   # generated code is the wire format, which must not depend on them.
 
@@ -296,6 +301,45 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
                ${X86_64_MIG_DIR}/mach X86_64_MIG)
   add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/device/device_reply.defs
                ${X86_64_MIG_DIR}/device X86_64_MIG)
+
+  # device_pager_server -- the one rule that is not add_mig_server().
+  #
+  # The device pager answers the memory-object protocol, so its server is
+  # generated from mach/memory_object.defs a second time, into a different
+  # pair of files.  device/dev_pager.c then #defines memory_object_* to
+  # device_pager_* and #includes the generated .c, which is why only the
+  # header is named in a source list and the .c never is.
+  #
+  # It has to be spelled out because add_mig_server() derives its output
+  # names from the .defs name, and here the two differ on purpose.  The
+  # include path is this target's, not i386's: same generator, same input,
+  # different machine_types.defs behind <mach/machine/*> (#416).
+  add_custom_command(
+    OUTPUT ${X86_64_MIG_DIR}/device/device_pager_server.c
+           ${X86_64_MIG_DIR}/device/device_pager_server.h
+    COMMAND ${CMAKE_C_COMPILER} -E -x c
+            -I${CMAKE_SOURCE_DIR}/uapi
+            -I${UROS_ARCH_INCLUDE}
+            -I${CMAKE_CURRENT_SOURCE_DIR}/x86_64
+            -I${CMAKE_CURRENT_SOURCE_DIR}
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include
+            -I${UROS_CONFIG_INCLUDE}
+            ${KERNEL_DEFINES}
+            ${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object.defs |
+            $<TARGET_FILE:migcom>
+            ${UROS_MIG_TARGET_ARGS}
+            -sheader ${X86_64_MIG_DIR}/device/device_pager_server.h
+            -server ${X86_64_MIG_DIR}/device/device_pager_server.c
+            -header /dev/null
+            -user /dev/null
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS}
+            ${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object.defs
+    COMMENT "MIG x86-64: memory_object -> device_pager (server)"
+    VERBATIM
+  )
+  list(APPEND X86_64_MIG_GENERATED
+       ${X86_64_MIG_DIR}/device/device_pager_server.c
+       ${X86_64_MIG_DIR}/device/device_pager_server.h)
 
   # The stubs are not compiled into the kernel yet -- the MI sources they
   # belong to do not build here.  Without a target depending on them, cmake
@@ -576,6 +620,12 @@ set(UROS_MIG_INCLUDES
     -I${KERNEL_SRC_DIR}/i386
     -I${KERNEL_SRC_DIR}/i386/AT386
     -I${UROS_CONFIG_INCLUDE})
+
+# Said out loud even though it is migcom's default.  Relying on a default is
+# how the x86-64 rules generated i386 layout without anyone noticing; the
+# output here is unchanged, which is the point -- the flag states what was
+# already true instead of leaving it to be inferred (#453).
+set(UROS_MIG_TARGET_ARGS -target i386)
 
 
 # ---- Mach subsystem MIG files ----

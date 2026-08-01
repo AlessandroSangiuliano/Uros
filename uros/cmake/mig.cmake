@@ -7,6 +7,13 @@
 # mig at all.  That is why nine machine-independent sources still fail on
 # x86-64: they include a generated *_server.h that has never been generated.
 #
+# ⚠️ So is the target, in ${UROS_MIG_TARGET_ARGS}, and it must be set: migcom
+# defaults to i386 for compatibility with every invocation that predates the
+# option, so a rule that forgets the flag silently generates i386 layout.  That
+# is not hypothetical -- every x86-64 stub generated before #453 carried i386's
+# 12-byte port descriptor, and nobody found out because none of them had yet
+# been compiled.  The generated _Static_asserts caught it the moment one was.
+#
 # The include path is now the caller's, in ${UROS_MIG_INCLUDES}.  Nothing else
 # changed; the regression test is that the i386 output stays byte-identical.
 #
@@ -30,6 +37,7 @@ function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 ${KERNEL_DEFINES}
                 ${DEFS_FILE} | 
                 $<TARGET_FILE:migcom>
+                ${UROS_MIG_TARGET_ARGS}
                 -sheader ${SERVER_H}
                 -server ${SERVER_C}
                 -header /dev/null
@@ -63,6 +71,7 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -UKERNEL_SERVER
                 ${DEFS_FILE} |
                 $<TARGET_FILE:migcom>
+                ${UROS_MIG_TARGET_ARGS}
                 -header ${USER_H}
                 -user ${USER_C}
                 -server /dev/null
