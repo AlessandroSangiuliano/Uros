@@ -51,9 +51,26 @@ extern spl_t	(splimp)(void);		/* Block network interfaces */
 
 extern spl_t	(splnet)(void);		/* Block software interrupts */
 
-extern void	(splx)(spl_t);		/* Restore previous level */
+/*
+ * #410 -- these three return the level that was current when they were
+ * called, exactly as splhigh() and friends above do.  They were declared
+ * void, and had been for as long as the file existed.
+ *
+ * The i386 implementations fall into set_spl(), which ends `popl %eax --
+ * return old level`; spllo() reaches it by `jmp`.  Nothing ever contradicted
+ * the header because that implementation is assembly, and an assembly entry
+ * point has no prototype for the compiler to compare against.  x86-64
+ * implements the same routines in C (x86_64/cpu/spl.c), the two declarations
+ * met in one translation unit for the first time, and 72 of the 102
+ * machine-independent sources stopped there.
+ *
+ * So the value was always produced and always thrown away.  Callers that
+ * ignore it are unaffected; callers that want the symmetry with splhigh()
+ * can now have it.
+ */
+extern spl_t	(splx)(spl_t);		/* Restore previous level, return the one left */
 
-extern void	(spllo)(void);		/* Enable all interrupts */
+extern spl_t	(spllo)(void);		/* Enable all interrupts, return previous level */
 
 extern spl_t	(splvm)(void);
 
@@ -70,7 +87,7 @@ extern spl_t	(getspl)(void);		/* return current level */
 
 extern spl_t	(db_splhigh)(void);	/* Block all interrupts */
 
-extern void	(db_splx)(spl_t);	/* Restore previous level */
+extern spl_t	(db_splx)(spl_t);	/* Restore previous level, return the one left (#410) */
 
 #endif	/* MACH_KDB */
 
