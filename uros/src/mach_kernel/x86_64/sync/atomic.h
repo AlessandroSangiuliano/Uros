@@ -97,6 +97,25 @@ static inline uint32_t atomic_cmpxchg32(volatile uint32_t *p,
 }
 
 /*
+ * A byte-wide compare-exchange (#452).
+ *
+ * The kernel mutex is one byte with three states, and its uncontended
+ * acquire is exactly this: free -> held, or tell me who got there first.
+ * A swap cannot express it — swap always writes, so it cannot fail without
+ * having already disturbed the word, and the whole point of the fast path
+ * is that a failed attempt leaves no trace for the winner's cache line.
+ */
+static inline uint8_t atomic_cmpxchg8(volatile uint8_t *p,
+				      uint8_t expect, uint8_t fresh)
+{
+	__asm__ volatile("lock cmpxchgb %2, %1"
+			 : "+a"(expect), "+m"(*p)
+			 : "r"(fresh)
+			 : "memory", "cc");
+	return expect;
+}
+
+/*
  * Exchange unconditionally, answering with the previous value.
  *
  * No `lock` is written because xchg with a memory operand asserts it by
