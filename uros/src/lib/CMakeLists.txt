@@ -83,7 +83,7 @@ endfunction()
 # Tool host principali: migcom (e in seguito mig se necessario).
 add_subdirectory(migcom)
 
-# Generate device/device.h from device.defs via MIG (shared by libmach, libflipc, etc.)
+# Generate device/device.h from device.defs via MIG (shared by libmach, libflipc2, etc.)
 set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/include/device/device.defs")
 # Public header for #include <device/device.h>
 set(DEVICE_HEADER "${CMAKE_BINARY_DIR}/generated/include/device/device.h")
@@ -132,7 +132,7 @@ maybe_add(libmach)
 maybe_add(libnetname)
 maybe_add(libpthreads)
 maybe_add(libblk)
-maybe_add(libflipc)
+
 maybe_add(libflipc2)
 maybe_add(libvfs)
 maybe_add(libelf)
