@@ -30,6 +30,18 @@ unsigned int hw_lock_held(hw_lock_t l);
 
 
 /*
+ * The address of a hardware lock's word, for code that wants to read the
+ * value rather than operate on the lock.
+ *
+ * It exists because a machine is free to make hw_lock_data_t a struct: the
+ * machine-independent tree writes *hw_lock_addr(l) and gets the word either
+ * way.  Here the type is already the word, so this is the identity -- but
+ * the indirection is the contract, and kern/lock.c uses it in three places
+ * to print lock state under DDB.
+ */
+#define	hw_lock_addr(hwl)	(&(hwl))
+
+/*
  * The mutex, as the machine-independent tree spells it (#452).
  *
  * kern/lock.h declares _mutex_lock / _mutex_try / mutex_unlock and owns
