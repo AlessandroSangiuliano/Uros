@@ -32,6 +32,73 @@ set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BUILD=$REPO/uros/build-x86_64
 LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
+
+# ------------------------------------------------------------------ verdict
+#
+# Split out so it can judge a log it did not produce:
+#
+#	run-x86_64.sh --judge <log>
+#
+# which is how the passing arm gets exercised at all. Every real run of this
+# kernel currently trips the timer line, so without this the "exits zero
+# otherwise" half of the contract would never once have executed -- and a
+# verdict that has only ever said no is not a verdict that has been tested.
+# It is also useful on its own: an old log can be re-judged when the list of
+# known exceptions changes, instead of re-running the boot.
+#
+# Known-emulator exceptions. Named, with the reason, and COUNTED in the
+# output rather than skipped: a verdict that fails on every run is worth
+# exactly as much as one that never fails — both get ignored — and a silent
+# skip is how a real regression hides behind a known one.
+#
+# The TSC one is a property of QEMU, which does not offer an invariant
+# timestamp counter even with -cpu max (measured 27/07 on both cpu models).
+# #318 was rewritten around that fact.
+KNOWN='timestamp counter measured against the 8254'
+
+# The last self-test breaks the stack deliberately so the double fault lands
+# on its own IST. `no handler — halted` is therefore the success terminator,
+# not a crash — and checking that it arrived is what catches a truncated run,
+# which produces fewer lines and no failures at all and reads as a pass under
+# any naive "grep for problems" check.
+TERMINATOR='no handler'
+
+verdict() {
+TESTS=$(grep -ac 'UrMach x86-64:' "$LOG" || true)
+EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
+BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic:|kernel: page fault' "$LOG" \
+	| grep -av "$KNOWN" || true)
+NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
+
+echo
+echo "=== verdict: $TESTS self-tests ==="
+[ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: known QEMU artifact (TSC not invariant, #318)"
+
+if ! grep -aq "$TERMINATOR" "$LOG"; then
+	echo "  FAILED: the run never reached '$TERMINATOR' — it was cut short, so"
+	echo "          the tests after that point did not run and cannot have passed"
+	echo "  log: $LOG"
+	exit 1
+fi
+
+if [ "$NBAD" -gt 0 ]; then
+	echo "  FAILED: $NBAD unexplained:"
+	printf '%s\n' "$BAD" | sed 's/^/    /'
+	echo "  log: $LOG"
+	exit 1
+fi
+
+echo "  passed: reached the end, nothing unexplained"
+}
+
+if [ "${1:-}" = "--judge" ]; then
+	[ -n "${2:-}" ] || { echo "usage: $0 --judge <log>" >&2; exit 2; }
+	LOG=$2
+	verdict
+	exit $?
+fi
+
+
 SECS=${1:-15}
 [ $# -gt 0 ] && shift
 
@@ -65,47 +132,4 @@ timeout "$SECS" qemu-system-x86_64 "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 || true
 grep -a "UrMach\|fault\|error\|Error\|panic\|^  " "$LOG" || true
 
-# ------------------------------------------------------------------ verdict
-#
-# Known-emulator exceptions. Named, with the reason, and COUNTED in the
-# output rather than skipped: a verdict that fails on every run is worth
-# exactly as much as one that never fails — both get ignored — and a silent
-# skip is how a real regression hides behind a known one.
-#
-# The TSC one is a property of QEMU, which does not offer an invariant
-# timestamp counter even with -cpu max (measured 27/07 on both cpu models).
-# #318 was rewritten around that fact.
-KNOWN='timestamp counter measured against the 8254'
-
-# The last self-test breaks the stack deliberately so the double fault lands
-# on its own IST. `no handler — halted` is therefore the success terminator,
-# not a crash — and checking that it arrived is what catches a truncated run,
-# which produces fewer lines and no failures at all and reads as a pass under
-# any naive "grep for problems" check.
-TERMINATOR='no handler'
-
-TESTS=$(grep -ac 'UrMach x86-64:' "$LOG" || true)
-EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
-BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic:|kernel: page fault' "$LOG" \
-	| grep -av "$KNOWN" || true)
-NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
-
-echo
-echo "=== verdict: $TESTS self-tests ==="
-[ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: known QEMU artifact (TSC not invariant, #318)"
-
-if ! grep -aq "$TERMINATOR" "$LOG"; then
-	echo "  FAILED: the run never reached '$TERMINATOR' — it was cut short, so"
-	echo "          the tests after that point did not run and cannot have passed"
-	echo "  log: $LOG"
-	exit 1
-fi
-
-if [ "$NBAD" -gt 0 ]; then
-	echo "  FAILED: $NBAD unexplained:"
-	printf '%s\n' "$BAD" | sed 's/^/    /'
-	echo "  log: $LOG"
-	exit 1
-fi
-
-echo "  passed: reached the end, nothing unexplained"
+verdict
