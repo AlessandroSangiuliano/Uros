@@ -25,6 +25,17 @@
 #define _MACH_I386_RPC_H_
 
 /*
+ * This machine has the short-circuited RPC path: an RPC trap, an activation
+ * chain, and the glue vector below (#453).
+ *
+ * The machine-independent tree used to take all three for granted, because
+ * every machine in the heritage tree had them.  x86-64 does not -- see
+ * <mach/x86_64/rpc.h> for why it is not ported rather than not ported yet --
+ * so the assumption now has a name, and the code that rests on it says so.
+ */
+#define	MACHINE_RPC_GLUE	1
+
+/*
  * Definition of RPC "glue code" operations vector -- entry
  * points needed to accomplish short-circuiting
  */
