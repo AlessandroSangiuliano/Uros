@@ -144,6 +144,11 @@ int spl_defer(unsigned vector);
  * MI tree links and runs here, and they want a measurement in front of them.
  * Until then the bridge stays and says what it is.
  *
+ * ▶️ #454 carries the replacement, including the part that cannot be
+ * skipped: reading each of the ~50 call sites and deciding which of the two
+ * things it meant.  The current level is a superset of all of them, so
+ * narrowing without reading is how a rare SMP crash gets introduced.
+ *
  * The classes come from the vector space (see above), so `device' is where
  * the legacy lines live and SPLHI is everything maskable.
  */
