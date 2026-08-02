@@ -88,6 +88,28 @@ SECTIONS
 	} :krodata
 
 	/*
+	 * The fault-recovery table (#453).
+	 *
+	 * One entry per instruction that is allowed to fault: the address of
+	 * the instruction, and the address to continue at instead.  The page
+	 * fault handler looks the faulting rip up here before deciding it has
+	 * a bug on its hands, which is how copyin() and copyout() survive a
+	 * bad user address and answer an error rather than halting the kernel.
+	 *
+	 * Read-only and bracketed by symbols, so the handler has a range to
+	 * search and the pages can be mapped without write permission.  The
+	 * entries are emitted wherever the annotated instructions are, so the
+	 * order is the linker's -- the search is linear and must not assume
+	 * otherwise.
+	 */
+	. = ALIGN(8);
+	.ex_table : AT(ADDR(.ex_table) - KERNEL_VBASE) {
+		__ex_table_start = .;
+		*(.ex_table)
+		__ex_table_end = .;
+	} :krodata
+
+	/*
 	 * The AP trampoline travels in the image and is copied to a page
 	 * below 1 MiB before use.  It is never executed from here — read-only
 	 * is the right home for something that is only ever a source.

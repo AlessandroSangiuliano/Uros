@@ -18,6 +18,7 @@
 #include <cpu/tss.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
+#include <trap/extable.h>
 #include <trap/trap.h>
 
 /*
@@ -556,6 +557,28 @@ void trap_dispatch(struct trap_frame *frame)
 		return;
 	}
 
+	/*
+	 * An instruction that was allowed to fault (#453).
+	 *
+	 * Checked before the armed expectation and before anything is
+	 * reported, because this is not an exceptional condition: copyin() and
+	 * copyout() reaching an address the task no longer has is ordinary,
+	 * and the kernel's answer is an error return, not a diagnostic.
+	 *
+	 * ⚠️ Only for a fault taken in the kernel.  A fault from ring 3 whose
+	 * rip happened to equal a kernel address in the table would otherwise
+	 * be "recovered" into kernel code with a user context around it, which
+	 * is a privilege escalation rather than a recovery.
+	 */
+	if ((frame->cs & 3) == 0) {
+		uint64_t resume = ex_table_lookup(frame->rip);
+
+		if (resume != 0) {
+			frame->rip = resume;
+			return;
+		}
+	}
+
 	if (expect_armed && frame->vector == expect_vector) {
 		/*
 		 * Disarm first.  If resuming faults again the expectation is
@@ -675,4 +698,24 @@ void trap_dispatch(struct trap_frame *frame)
 	tputs("UrMach x86-64: no handler — halted\r\n");
 	for (;;)
 		__asm__ volatile("cli; hlt");
+}
+
+/*
+ * ── The fault-recovery table (#453) ───────────────────────────────────
+ *
+ * Filled by EX_TABLE() at each instruction that is allowed to fault, and
+ * bracketed by the linker.  See <trap/extable.h> for why this is a table and
+ * not the single armed expectation above it.
+ */
+extern const struct ex_entry	__ex_table_start[], __ex_table_end[];
+
+uint64_t ex_table_lookup(uint64_t rip)
+{
+	const struct ex_entry	*e;
+
+	for (e = __ex_table_start; e < __ex_table_end; e++)
+		if (e->fault_rip == rip)
+			return e->resume_rip;
+
+	return 0;
 }

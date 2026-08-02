@@ -31,6 +31,13 @@
 struct pmap {
 	uint64_t root_pa;		/* PML4 physical address (the CR3 value) */
 	int      ref_count;
+
+	/*
+	 * Pages mapped in this space.  The machine-independent tree reads it
+	 * through pmap_resident_count() and vm_debug.c sizes an array from
+	 * it, so it is a count and not an estimate (#453).
+	 */
+	int      resident_count;
 };
 
 typedef struct pmap *pmap_t;
@@ -345,6 +352,56 @@ MACRO_END
  * memory it allocated.  So it is a walk, like i386's, and the fast
  * subtraction stays where it is correct, behind its own name.
  */
+/*
+ * ── Four the machine-independent tree calls but never defines ─────────
+ *
+ * Each is a macro on i386 and so has no symbol to link against; the MI code
+ * calls them by name and the machine decides whether that name is work or
+ * nothing.  Written out here rather than inherited, because two of the four
+ * are "nothing" and it is worth saying which two and why.
+ */
+
+/*
+ * Pages this map has resident.  A real count, kept by the pmap, because
+ * vm_debug.c sizes an array from it -- an answer that is too small is a
+ * buffer overrun in the caller, so this is not a place for an estimate.
+ *
+ * ⚠️ It lives in the pmap and is therefore a shared line on a machine with
+ * 64 processors.  #349 is the follow-up that makes it per-CPU; until then it
+ * is one counter and its cost is a decision that has been noticed rather
+ * than one that has not.
+ */
+#define	pmap_resident_count(pmap)	((pmap)->resident_count)
+
+/* The address a page frame number names. */
+#define	pmap_phys_address(frame)	((vm_offset_t) x86_64_ptob(frame))
+#define	pmap_phys_to_frame(phys)	((int) x86_64_btop(phys))
+
+/*
+ * Copying mappings from one map to another at fork: nothing, deliberately.
+ *
+ * It is an optimisation, not a requirement -- the interface allows a machine
+ * to pre-populate the child's tables so its first touches do not fault, and
+ * allows it to decline, in which case the faults do the work.  Declining is
+ * right here for now because the cost of the copy is real and the saving is
+ * a guess; #436 is where batched population gets measured, and if it wins
+ * this is where it lands.
+ */
+#define	pmap_copy(dst, src, dst_addr, len, src_addr)			\
+	((void)(dst), (void)(src), (void)(dst_addr), (void)(len),	\
+	 (void)(src_addr))
+
+/*
+ * Machine-specific memory attributes: none on this machine.
+ *
+ * KERN_INVALID_ARGUMENT and not KERN_SUCCESS: the caller asked for an
+ * attribute to be applied and it was not, so answering success would be the
+ * plausible return this project refuses.  i386 answers the same way.
+ */
+#define	pmap_attribute(pmap, addr, size, attr, value)			\
+	((void)(pmap), (void)(addr), (void)(size), (void)(attr),	\
+	 (void)(value), KERN_INVALID_ARGUMENT)
+
 #define	kvtophys(VA)	((vm_offset_t) pmap_extract(pmap_kernel(), (uint64_t)(VA)))
 
 #endif	/* _X86_64_PMAP_PMAP_H_ */

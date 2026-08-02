@@ -205,6 +205,20 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 	if (size == PAGE_SIZE_4K)
 		pv_remove(pa, pmap, va);
 
+	if (size != 0) {
+		/*
+		 * panic() and not assert(), because Assert() lives in
+		 * kern/debug.c and the machine-independent tree is not in this
+		 * kernel yet -- and because an underflow here means the count
+		 * has drifted from the tables, which is not a condition to
+		 * carry on from.
+		 */
+		if (pmap->resident_count == 0)
+			panic("pmap_forget: resident_count underflow at "
+			      "va 0x%lx", (unsigned long) va);
+		pmap->resident_count--;
+	}
+
 	return size;
 }
 
@@ -267,8 +281,21 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 		flags |= INTEL_PTE_USER;
 
 	rc = pmap_map_page(pmap->root_pa, va, pa, flags);
-	if (rc == PMAP_MAP_OK)
+	if (rc == PMAP_MAP_OK) {
 		pv_enter(pa, pmap, va);
+		/*
+		 * The count the machine-independent tree reads through
+		 * pmap_resident_count() (#453).  Kept here, where a mapping is
+		 * actually created, rather than by the caller -- a counter
+		 * maintained anywhere else drifts the first time somebody adds
+		 * a second path in.
+		 *
+		 * Only on a fresh mapping: pmap_map_page() answers PMAP_MAP_OK
+		 * for one that replaces nothing, so re-mapping a page that is
+		 * already there does not count twice.
+		 */
+		pmap->resident_count++;
+	}
 
 	return rc;
 }

@@ -80,6 +80,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/ap_trampoline.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_modules.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/bitmap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/copy.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/string.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
@@ -200,6 +202,23 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # first so <sync/lock.h> is this target's own; that is also why the x86-64
   # directories are named after the MD contracts rather than after kern/,
   # vm/, ipc/ -- none of those names can ever collide.
+  # Where the generated MIG output goes, and where its headers are found.
+  #
+  # ⚠️ Set HERE, before target_include_directories() below, and not beside
+  # the rules that fill it.  It used to be assigned ninety lines further
+  # down, so the include path was built from an empty variable and carried
+  # `-I/mach' -- a directory in the root of the filesystem (#453).
+  #
+  # Nothing noticed for as long as no source needing a generated header was
+  # compiled.  The first four that were -- ipc_kmsg.c, ds_routines.c,
+  # dev_pager.c, device/subrs.c -- all stopped on <mach/mach_server.h>, and
+  # the path in the error message is what gave it away.  cmake does not warn
+  # about an -I that does not exist, and an empty variable in a path
+  # concatenation is silent everywhere.
+  set(X86_64_MIG_DIR ${CMAKE_CURRENT_BINARY_DIR})
+  file(MAKE_DIRECTORY ${X86_64_MIG_DIR}/mach ${X86_64_MIG_DIR}/mach_debug
+                      ${X86_64_MIG_DIR}/device)
+
   target_include_directories(mach_kernel PRIVATE
     ${CMAKE_SOURCE_DIR}/uapi
     ${UROS_ARCH_INCLUDE}
@@ -289,9 +308,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # of the headers #450 left unwritten: it names MACHINE_SERVER, and there is
   # no subsystem to name yet.  That is #413's to decide, not something to
   # invent here.
-  set(X86_64_MIG_DIR ${CMAKE_CURRENT_BINARY_DIR})
-  file(MAKE_DIRECTORY ${X86_64_MIG_DIR}/mach ${X86_64_MIG_DIR}/mach_debug
-                      ${X86_64_MIG_DIR}/device)
 
   set(UROS_MIG_INCLUDES
       -I${UROS_ARCH_INCLUDE}
@@ -386,6 +402,34 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # for would still not exist.  So they are generated as their own target,
   # and the kernel depends on it: the interface is produced whenever the
   # kernel is, which is when a mismatch is worth finding out about.
+  # ---- the machine-independent kernel: measured, not yet in ----------
+  #
+  # 2026-08-02.  Every machine-independent source COMPILES inside this
+  # kernel's own build -- 117 objects, no compile error -- once three things
+  # were fixed: the -I/mach above, x86_64/thread/machine.c for the thread and
+  # activation surface, and the pmap contract macros in <pmap/pmap.h>.
+  #
+  # What is left is not translation.  Adding all of them leaves 97 undefined
+  # symbols and every one is machine-dependent work this target still owes:
+  #
+  #   ~18  DDB           db_printf, db_printsym, db_task_from_space,
+  #                      kdbprintf, machine_callstack, thread_kdb_return (#428)
+  #   ~8   pmap          pmap_next_page, pmap_free_pages, pmap_virtual_space,
+  #                      pmap_pageable, pmap_collect, pmap_verify_free (#407)
+  #   ~5   model_dep     mem_size, machine_boot_info, Debugger, halt_cpu
+  #   ~5   returns       switch_context, thread_exception_return,
+  #                      thread_bootstrap_return, restart_mach_syscall (#408/#411)
+  #   ~6   device tables dev_name_list, dev_indirect_list, device_master_init
+  #   ~3   console       printf, _doprnt, cnputc
+  #   the rest          clock, per-CPU, ast, kmap
+  #
+  # It is a shopping list, not a cascade: each is a function to write in
+  # x86_64/, and none of them pulls another machine-independent file in.
+  #
+  # They are out of this list until that list is empty, because a kernel that
+  # does not link is not a kernel and #453's rule is that every commit leaves
+  # one that does.
+
   add_custom_target(uros_mig_stubs DEPENDS ${X86_64_MIG_GENERATED})
   add_dependencies(mach_kernel uros_mig_stubs)
 
