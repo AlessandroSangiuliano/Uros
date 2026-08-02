@@ -69,10 +69,14 @@ static void ipi_call_handler(struct trap_frame *frame)
 	lapic_eoi();
 }
 
+
+static void ipi_ast_handler(struct trap_frame *frame);
+
 void ipi_init(void)
 {
 	hw_lock_init(&call_lock);
 	trap_set_handler(IPI_VECTOR_CALL, ipi_call_handler);
+	trap_set_handler(IPI_VECTOR_AST, ipi_ast_handler);
 }
 
 uint64_t ipi_calls_served(uint32_t apic_id)
@@ -136,4 +140,24 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 		panic("ipi: a processor never answered a cross-call");
 
 	hw_lock_unlock(&call_lock);
+}
+
+/*
+ * The AST interrupt does nothing, and that is the whole of it (#453).
+ *
+ * The scheduler wanted a processor to reach a point where it checks its
+ * pending asynchronous work.  Taking an interrupt and returning from it IS
+ * that point -- the check lives on the return path, in machine-independent
+ * code, and runs whatever the interrupt was for.  A handler that did
+ * something here would be doing it twice.
+ */
+static void ipi_ast_handler(struct trap_frame *frame)
+{
+	(void) frame;
+	lapic_eoi();
+}
+
+void ipi_ast_check(uint32_t apic_id)
+{
+	lapic_send_ipi(apic_id, IPI_VECTOR_AST);
 }
