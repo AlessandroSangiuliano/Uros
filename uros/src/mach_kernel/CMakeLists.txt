@@ -95,6 +95,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/conf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/model.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
@@ -437,6 +438,37 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # x86_64/, and none of them pulls another machine-independent file in.
   #
   # They are out of this list until that list is empty, because a kernel that
+  # does not link is not a kernel and #453's rule is that every commit leaves
+  # one that does.
+
+  # ---- the machine-independent kernel: measured, not yet in ----------
+  #
+  # Every machine-independent source COMPILES inside this kernel's build.
+  # What is left is machine-dependent work this target owes, and it shrinks
+  # with each commit:
+  #
+  #   2026-08-02, first measurement          97 symbols
+  #   after the VM bootstrap surface (#407)  89
+  #   after mem_size / halt / Debugger       84
+  #   after the console and usimple_lock     79
+  #   after the device and clock tables      64
+  #
+  # What remains, by owner:
+  #
+  #   ~11  DDB              db_printf, db_printsym, db_error, kdbprintf,
+  #                         db_install_inks, indent, iprintf (#428)
+  #     5  SMP glue         cpu_start, cpu_control, real_ncpus,
+  #                         init_ast_check, cause_ast_check
+  #     4  control returns  thread_exception_return, thread_bootstrap_return,
+  #                         restart_mach_syscall,
+  #                         switch_to_shutdown_context (#409/#411)
+  #     3  context switch   switch_context, load_context,
+  #                         thread_machine_set_current (#408)
+  #     2  net filter       out by design -- in-kernel drivers are not ours
+  #     2  lock_smoke       the i386 lock audit's own test file
+  #   the rest              scattered
+  #
+  # They are out of this list until that count is zero, because a kernel that
   # does not link is not a kernel and #453's rule is that every commit leaves
   # one that does.
 
