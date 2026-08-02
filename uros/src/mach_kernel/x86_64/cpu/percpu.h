@@ -60,6 +60,41 @@ struct percpu {
 	uint64_t user_rsp;		/* where the user's waits meanwhile */
 
 	/*
+	 * Who was running here immediately before the thread that is running
+	 * here now (#453).
+	 *
+	 * This is how switch_context() keeps the promise its interface makes.
+	 * Mach's switch_context() answers with the thread that was running
+	 * before the CALLER RESUMED -- not the one it was handed, which the
+	 * caller already has.  When A switches away to B, A's answer is not
+	 * known yet: it is whoever eventually switches back to A, and that may
+	 * be a thread on a processor that does not exist yet.
+	 *
+	 * So the switcher leaves its own identity here on the way out, and the
+	 * thread it resumes reads it on the way in.  The write and the read
+	 * are on the SAME processor -- the one doing the switch -- with the
+	 * switch between them, which is why a per-CPU slot is enough and no
+	 * lock is needed: nothing else can run here in between.
+	 *
+	 * ⚠️ Read after the switch returns, never before.  Before the switch
+	 * it holds the previous switch's answer, which is a real thread
+	 * pointer and therefore a wrong answer rather than an obviously
+	 * missing one.
+	 */
+	void	*prev_thread;
+
+	/*
+	 * Which thread this processor is running.
+	 *
+	 * Kept here rather than derived from the stack pointer, the way some
+	 * kernels do by masking it down to the base of the stack: that trick
+	 * needs kernel stacks aligned to their own size, and these are
+	 * allocated by the machine-independent side, which makes no such
+	 * promise (#453).
+	 */
+	void	*active_thread;
+
+	/*
 	 * The interrupt priority level, and what arrived while it was raised
 	 * (#409/#322).
 	 *

@@ -12,12 +12,9 @@
  * kern/machine.c reach for -- seventeen of them, which the link wanted all
  * at once.
  *
- * ⚠️ switch_context() is deliberately NOT here.  Mach's version returns the
- * thread that was running *before the caller resumed*, which is not the one
- * it was handed and cannot be produced by a switch that returns void.  That
- * convention has to be built into the switch itself rather than wrapped
- * around it, so it gets its own change instead of riding along with
- * seventeen straightforward ones.
+ * switch_context() is here now, and the convention that kept it out is
+ * answered by a slot in the per-CPU block -- see <cpu/percpu.h> and the
+ * routine itself below.
  *
  * ── Where the pcb lives ───────────────────────────────────────────────
  *
@@ -463,4 +460,119 @@ void fpu_area_free(void *area)
 	total = (vm_size_t) fpu_area_size() + FPU_AREA_ALIGN + sizeof(void *);
 
 	kfree(raw, total);
+}
+
+/*
+ * ── The switch ────────────────────────────────────────────────────────
+ *
+ * Everything that has to happen in the right order, and the order is not
+ * negotiable:
+ *
+ *   1. the outgoing thread's floating-point state is saved and the
+ *      incoming one's restored -- by context_switch(), eagerly, because
+ *      this machine does not do lazy FPU (#408);
+ *   2. the address space changes, if it is changing;
+ *   3. the processor is told where an entry from ring 3 lands now, which
+ *      must be true BEFORE the switch, because a system call arriving on
+ *      the first instruction of the new thread reads it out of the
+ *      per-CPU block before it has a stack to look anything up with;
+ *   4. this thread's identity is left where the thread being resumed will
+ *      look for it;
+ *   5. the registers change.
+ *
+ * ⚠️ The answer is read AFTER the switch, and it is not `old'.  Mach's
+ * interface says: the thread that was running before the caller resumed.
+ * From the point of view of the code below the switch, that is whoever
+ * switched *to us*, which is not known when this call is made and may be a
+ * thread that does not exist yet.  Returning `old' would be right only for
+ * the very first switch of each thread and wrong every time after.
+ *
+ * ⚠️ `continuation' is not used, and that is not an omission.  It tells the
+ * machine that the outgoing thread does not need its stack kept, so a
+ * machine that had something cheaper to do in that case would do it here.
+ * This one does not: the stack is the thread's own page and is not returned
+ * on a switch either way, and machine_kernel_stack_init() is what resets it
+ * when the scheduler actually discards the contents.  Ignoring it costs a
+ * saved register file that will be overwritten; noticing it would cost a
+ * branch on every switch to save that.  If a measurement ever says
+ * otherwise, this is the comment that says what to change.
+ */
+thread_t
+switch_context(thread_t old, void (*continuation)(void), thread_t new)
+{
+	thread_act_t	old_act = old->top_act;
+	thread_act_t	new_act = new->top_act;
+
+	(void) continuation;
+
+	assert(old_act != THR_ACT_NULL && old_act->mact.pcb != PCB_NULL);
+	assert(new_act != THR_ACT_NULL && new_act->mact.pcb != PCB_NULL);
+
+	/*
+	 * The address space, if it is changing.  An activation may be
+	 * borrowing another task's map, so this is asked of the activations
+	 * and not of the tasks.
+	 */
+	if (old_act->map != new_act->map)
+		PMAP_SWITCH_USER(new_act, new_act->map, cpu_number());
+
+	/* Where ring 3 lands now, and whose floating-point area is next. */
+	act_machine_switch_pcb(new_act);
+
+	/*
+	 * Leave our identity for whoever we are about to become, then go.
+	 * Everything after context_switch() runs in a different world: a
+	 * later moment, and possibly a different processor.
+	 */
+	percpu()->prev_thread = (void *) old;
+
+	context_switch(&old_act->mact.pcb->ctx, &new_act->mact.pcb->ctx);
+
+	return (thread_t) percpu()->prev_thread;
+}
+
+/*
+ * Become a thread that has never run, from a context that will not be
+ * resumed -- the boot path, which is not a thread and does not need saving.
+ *
+ * ⚠️ Does not return, and must not: there is nowhere to return to.  The
+ * caller's stack belongs to whatever was running before there were threads,
+ * and the first thing the new thread does is take over the processor.
+ */
+void
+load_context(thread_t thread)
+{
+	thread_act_t	act = thread->top_act;
+	struct context	discard;
+
+	assert(act != THR_ACT_NULL && act->mact.pcb != PCB_NULL);
+
+	thread_machine_set_current(thread);
+	act_machine_switch_pcb(act);
+
+	percpu()->prev_thread = (void *) 0;
+
+	/*
+	 * A context to save into that nobody will read.  context_switch()
+	 * wants somewhere to put the outgoing registers and there is no
+	 * outgoing thread, so it gets a local -- which becomes unreachable
+	 * the moment the switch takes effect, which is exactly right.
+	 */
+	context_switch(&discard, &act->mact.pcb->ctx);
+
+	panic("load_context: returned");
+}
+
+/*
+ * Record which thread this processor is running.
+ *
+ * Kept in the per-CPU block rather than derived from the stack pointer, the
+ * way some kernels do: the derivation needs the stack to be aligned to its
+ * own size and this machine's kernel stacks are not, because they are
+ * allocated by the machine-independent side.
+ */
+void
+thread_machine_set_current(thread_t thread)
+{
+	percpu()->active_thread = (void *) thread;
 }
