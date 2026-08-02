@@ -16,10 +16,22 @@ GCCINC=$(cc -m64 -print-file-name=include)
 PASS=A
 [ "${1:-}" = "-b" ] && PASS=B
 
-DEFINES="-DAT386=1 -DEISA=1 -DHIMEM=1 -DKERNEL -DKERNEL_PRIVATE -DKERNEL_SERVER=1
- -DMACH_ASSERT=1 -DMACH_DEBUG=1 -DMACH_HOST=1 -DMACH_KDB=1 -DMACH_KERNEL
- -DMACH_MACHINE_ROUTINES -DMP_V1_1=1 -DNCPUS=64 -DNPCI=1 -DSTAT_TIME
- -DTASK_SWAPPER=1 -DTypeCheck=1 -D__NO_UNDERSCORES__ -Dmig_internal="
+# Exactly the x86-64 target's KERNEL_DEFINES_BARE, and nothing else (#453).
+#
+# It used to carry -DAT386=1 -DEISA=1 -DHIMEM=1 -DMP_V1_1=1 -DNPCI=1 as
+# well -- i386 hardware knobs, on a machine that is not i386 -- and
+# -DMACH_MACHINE_ROUTINES, which this target's configuration now sets to 0.
+# A probe that compiles with different flags from the build is not measuring
+# the build: it can hide a failure the kernel would hit, and manufacture one
+# it would not.  MACH_MACHINE_ROUTINES was doing the second, keeping
+# kern/ipc_kobject.c asking for a <machine/machine_routines.h> that this
+# machine has decided not to have.
+#
+# The rest arrive from the generated configuration headers on the include
+# path below, which is also where the build gets them.
+DEFINES="-DKERNEL -DMACH_KERNEL -DKERNEL_PRIVATE -DKERNEL_SERVER=1
+ -DNCPUS=64 -DMACH_ASSERT=1 -DMACH_DEBUG=1 -DMACH_KDB=1 -DMACH_HOST=1
+ -DSTAT_TIME -DTASK_SWAPPER=1 -D__NO_UNDERSCORES__ -Dmig_internal="
 
 FLAGS="-m64 -mcmodel=kernel -mno-red-zone -mgeneral-regs-only -fcf-protection=none
  -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -nostdinc
