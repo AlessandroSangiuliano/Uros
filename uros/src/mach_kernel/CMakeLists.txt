@@ -131,6 +131,19 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # scheduler and the virtual memory system, together, and neither closes
   # without the other.
   #
+  # ⚠️ The generated MIG user stubs are not a way round this, and it is worth
+  # recording that they were tried.  memory_object_user.c and its four
+  # neighbours have been generated since #416 and compiled by nobody, and on
+  # paper they define 22 of the missing symbols for no new code.  Compiling
+  # them leaves three others -- mach_msg_rpc_from_kernel and
+  # mach_msg_send_from_kernel from kern/ipc_mig.c, and NDR_record, which is
+  # instantiated by whichever translation unit includes <machine/ndr_def.h>
+  # and on i386 is ipc/ipc_init.c.
+  #
+  # Three symbols, and behind them the IPC subsystem.  The offline symbol
+  # closure had said the stubs were free; the linker says they are not, and
+  # the linker is the one that decides.  They come in with the bring-up.
+  #
   # So the door is one file wide and the room behind it is the rest of the
   # kernel.  That is why #453's rule is that the kernel links at the end of
   # every commit: the next step is not another name, it is the bring-up, and
