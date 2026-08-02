@@ -81,3 +81,51 @@ unsigned int hw_lock_held(hw_lock_t l)
 	 */
 	return *l != 0;
 }
+
+#include <kern/lock.h>	/* usimple_lock_t, for the definitions below */
+
+/*
+ * ── usimple_lock: the machine's own (#453) ────────────────────────────
+ *
+ * <kern/lock.h> documents that a machine may supply these, and this one
+ * does.  Not for speed -- the portable version in kern/lock.c is a fine spin
+ * lock -- but because that file's other half is the mutex slow path and the
+ * read/write locks, which reach into the scheduler.  A machine that wants
+ * only a spin lock should not have to take the scheduler with it.
+ *
+ * They are hw_lock underneath, which is what the portable version would end
+ * up calling anyway on a machine with more than one processor.
+ *
+ * ⚠️ No preemption counting.  The machine-independent version bumps a
+ * per-processor preemption level around the hold, so that a thread cannot be
+ * descheduled while holding a spin lock -- which on a spin lock is not an
+ * optimisation but a correctness property: a preempted holder makes every
+ * spinner wait for a scheduling quantum instead of a critical section.  This
+ * target has no preemption to disable yet, and the day it does, that is what
+ * belongs here rather than a comment saying it does not.
+ */
+
+void
+usimple_lock_init(usimple_lock_t l, etap_event_t event)
+{
+	(void) event;
+	hw_lock_init(&l->interlock);
+}
+
+void
+usimple_lock(usimple_lock_t l)
+{
+	hw_lock_lock(&l->interlock);
+}
+
+void
+usimple_unlock(usimple_lock_t l)
+{
+	hw_lock_unlock(&l->interlock);
+}
+
+unsigned int
+usimple_lock_try(usimple_lock_t l)
+{
+	return (unsigned int) hw_lock_try(&l->interlock);
+}

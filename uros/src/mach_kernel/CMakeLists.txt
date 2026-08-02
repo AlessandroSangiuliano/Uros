@@ -80,6 +80,9 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/ap_trampoline.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_modules.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/printf.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/klog.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/cpu_data.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/bitmap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/copy.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/string.c
@@ -188,6 +191,11 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       KERNEL MACH_KERNEL KERNEL_PRIVATE KERNEL_SERVER=1
       NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=1 MACH_HOST=1
       STAT_TIME TASK_SWAPPER=1 __NO_UNDERSCORES__
+      # This machine supplies its own usimple_lock (x86_64/sync/lock.c), so
+      # kern/lock.c leaves them out.  See the guard there: the rest of that
+      # file is the mutex slow path and the read/write locks, which reach
+      # into the scheduler (#453).
+      USIMPLE_LOCK_CALLS=1
       # Zero, and said rather than left undefined: this kernel is built
       # -mgeneral-regs-only so that entry from user mode never has to save
       # vector state, which means no floating point anywhere in it (#453).

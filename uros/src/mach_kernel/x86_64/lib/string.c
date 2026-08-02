@@ -162,3 +162,24 @@ bcmp(const char *a, const char *b, vm_size_t n)
 {
 	return memcmp(a, b, n);
 }
+
+/*
+ * The one string routine the kernel's printf needs, and it needs it for
+ * padding: %s with a width has to know how long the string is before it can
+ * decide how many spaces go in front (#453).
+ *
+ * Byte at a time.  There are word-at-a-time tricks and this is not the place
+ * for them: the strings a kernel formats are short, and a word-wise scan
+ * reads past the terminator by up to seven bytes -- which is harmless on a
+ * mapped page and a fault on the last string of a mapping.
+ */
+vm_size_t
+strlen(const char *s)
+{
+	const char	*p = s;
+
+	while (*p != '\0')
+		p++;
+
+	return (vm_size_t) (p - s);
+}

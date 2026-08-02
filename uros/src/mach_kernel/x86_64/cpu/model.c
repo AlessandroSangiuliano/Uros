@@ -19,6 +19,7 @@
 
 #include <boot/multiboot2.h>
 #include <cpu/ipi.h>
+#include <ddb/cons.h>
 #include <cpu/smp.h>
 #include <kern/boot_modules.h>
 
@@ -141,3 +142,64 @@ Debugger(const char *message)
 	panic("Debugger(\"%s\"): no debugger on this machine yet (#428)",
 	      message ? message : "");
 }
+
+/*
+ * A character to the console (#453).
+ *
+ * The machine-independent printf() reaches the screen through this one name,
+ * so it is the whole of what kern/printf.c needs from a machine: everything
+ * above it -- format parsing, the log buffer, the %-conversions -- is shared,
+ * and everything below is x86_64/ddb/cons.c, which already knows about the
+ * serial port and the framebuffer.
+ *
+ * ⚠️ A thin forwarder and not a rename.  cons_putc() is this target's own
+ * interface and is called directly by early boot, before there is a kernel
+ * to have a printf() in; keeping the two names distinct is what lets the
+ * early path go on working when the machine-independent one is torn out or
+ * replaced.
+ */
+void
+cnputc(char c)
+{
+	cons_putc(c);
+}
+
+/*
+ * A character from the console, or -1 if there is none waiting.
+ *
+ * kern/printf.c uses it for the "more" prompt -- the pause a long listing
+ * offers so an operator can read a screen before the next one arrives.
+ * Nothing else in the kernel reads the console.
+ */
+int
+cngetc(void)
+{
+	return cons_getc();
+}
+
+/*
+ * Which processor keeps time (#453).
+ *
+ * The machine-independent tree reads it to decide who owns the clock and who
+ * answers the "master" questions.  Zero because that is the processor the
+ * firmware started, and because x86_64/cpu/smp.c numbers the others from its
+ * APIC id upwards -- so the boot processor is index zero by construction
+ * rather than by convention.
+ *
+ * ⚠️ It is a variable and not a constant because the interface says so: a
+ * machine may in principle hand the clock to another processor.  This one
+ * does not, and if it ever does -- for a core that is not parked, say -- the
+ * assignment lives here rather than in whoever wanted it moved.
+ */
+int	master_cpu = 0;
+
+/*
+ * Whether the debugger is running.
+ *
+ * Read by kern/printf.c, which routes its output differently while a debugger
+ * has the console, and by anything that must not block when the machine is
+ * stopped.  Always false until #428 makes DDB reachable here; it is defined
+ * rather than assumed absent because every reader tests it and a missing
+ * symbol would not link.
+ */
+int	db_active = 0;
