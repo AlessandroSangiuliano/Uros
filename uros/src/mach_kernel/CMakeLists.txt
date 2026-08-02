@@ -191,7 +191,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # the same reason it resolves to mach/i386/ there.
   set(KERNEL_DEFINES_BARE
       KERNEL MACH_KERNEL KERNEL_PRIVATE KERNEL_SERVER=1
-      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=1 MACH_HOST=1
+      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=0 MACH_HOST=1
       STAT_TIME TASK_SWAPPER=1 __NO_UNDERSCORES__
       # This machine supplies its own usimple_lock (x86_64/sync/lock.c), so
       # kern/lock.c leaves them out.  See the guard there: the rest of that
@@ -332,6 +332,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # i386, so a missing flag produces i386 message layout silently -- 12-byte
   # port descriptors where this target's are 16 (#453).
   set(UROS_MIG_TARGET_ARGS -target x86_64)
+  set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_X86_64=1)
 
   # No AT386, no EISA/HIMEM/NPCI/MP_V1_1: those name i386 hardware, and the
   # generated code is the wire format, which must not depend on them.
@@ -472,6 +473,34 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # They are out of this list until that count is zero, because a kernel that
   # does not link is not a kernel and #453's rule is that every commit leaves
   # one that does.
+
+  # ---- the machine-independent kernel: measured, not yet in ----------
+  #
+  # Every machine-independent source COMPILES inside this kernel's build, and
+  # the generated MIG stubs with them.  What is left is machine-dependent
+  # work this target owes:
+  #
+  #   2026-08-02, first measurement          97 symbols
+  #   after the VM bootstrap surface (#407)  89
+  #   after mem_size / halt / Debugger       84
+  #   after the console and usimple_lock     79
+  #   after the device and clock tables      64
+  #   after the processor surface            61
+  #   after MACH_KDB=0 -- see below          44
+  #   after the context switch and returns   44, and a different 44
+  #
+  # ⚠️ The count stopped falling because removing device/net_io.c uncovered
+  # what it had been hiding.  The remainder is now:
+  #
+  #   12  ds_master_device_*   the device master RPCs -- #427, PCI config
+  #    9  kern/startup.c's     machine_init, pmap_init, cap_init,
+  #        initialisers        urmach_rcu_init, rtclock_reset, getspl ...
+  #    4  convert_*_to_port    the lock-set and semaphore kobjects
+  #    3  net_io_init and kin  callers of the stack that is out by design
+  #   the rest                 kmap, machine_callstack, tr, etap
+  #
+  # Still a shopping list rather than a cascade: each is a function to write
+  # in x86_64/, and none pulls another machine-independent file in.
 
   add_custom_target(uros_mig_stubs DEPENDS ${X86_64_MIG_GENERATED})
   add_dependencies(mach_kernel uros_mig_stubs)
@@ -753,6 +782,7 @@ set(UROS_MIG_INCLUDES
 # output here is unchanged, which is the point -- the flag states what was
 # already true instead of leaving it to be inferred (#453).
 set(UROS_MIG_TARGET_ARGS -target i386)
+set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_I386=1)
 
 
 # ---- Mach subsystem MIG files ----

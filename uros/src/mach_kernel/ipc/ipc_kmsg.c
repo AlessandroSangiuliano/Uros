@@ -275,6 +275,7 @@
 #include <vm/vm_kern.h>
 #include <ipc/port.h>
 #include <ipc/ipc_entry.h>
+#include <mach_net_in_kernel.h>
 #include <ipc/ipc_kmsg.h>
 #include <ipc/ipc_thread.h>
 #include <ipc/ipc_notify.h>
@@ -793,7 +794,18 @@ ipc_kmsg_free(
 
 	    case IKM_SIZE_NETWORK:
 		/* return it to the network code */
+#if	MACH_NET_IN_KERNEL
 		net_kmsg_put(kmsg);
+#else
+		/*
+		 * There is no network code to return it to.  A message of
+		 * this size cannot exist without an in-kernel driver having
+		 * made one, so arriving here means the size field is wrong --
+		 * which is worth saying rather than leaking the buffer.
+		 */
+		panic("ipc_kmsg_free: network kmsg on a machine with no "
+		      "in-kernel network stack (#453)");
+#endif
 		break;
 
 	    default:

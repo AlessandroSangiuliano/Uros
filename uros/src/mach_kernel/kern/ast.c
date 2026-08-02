@@ -149,6 +149,7 @@
 #endif	/* PARAGON860 */
 #include <task_swapper.h>
 
+#include <mach_net_in_kernel.h>
 #include <kern/ast.h>
 #include <kern/counters.h>
 #include <kern/cpu_number.h>
@@ -231,8 +232,10 @@ extern void	log_thread_action(thread_t, char *);
 		mcmsg_ast();
 #endif	/* MCMSG */
 
+#if	MACH_NET_IN_KERNEL
 	if (reasons & AST_NETWORK)
 		net_ast();
+#endif	/* MACH_NET_IN_KERNEL */
 
 #if	MCMSG_ENG
 	if (reasons & AST_RPCREQ)

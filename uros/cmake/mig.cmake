@@ -7,6 +7,14 @@
 # mig at all.  That is why nine machine-independent sources still fail on
 # x86-64: they include a generated *_server.h that has never been generated.
 #
+# ⚠️ And so is the architecture the .defs themselves are preprocessed for, in
+# ${UROS_MIG_DEFS_ARCH}.  The preprocessing runs with the HOST compiler and no
+# -m32/-m64 -- it is producing text for migcom, not code -- so __i386__ and
+# __x86_64__ inside a .defs describe the machine doing the build.  A type
+# whose size follows the target's pointer width cannot be written against
+# them, and writing it against them looks right on whichever machine you are
+# sitting at (#453).
+#
 # ⚠️ So is the target, in ${UROS_MIG_TARGET_ARGS}, and it must be set: migcom
 # defaults to i386 for compatibility with every invocation that predates the
 # option, so a rule that forgets the flag silently generates i386 layout.  That
@@ -35,6 +43,7 @@ function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
         COMMAND ${CMAKE_C_COMPILER} -E -x c
                 ${UROS_MIG_INCLUDES}
                 ${KERNEL_DEFINES}
+                ${UROS_MIG_DEFS_ARCH}
                 ${DEFS_FILE} | 
                 $<TARGET_FILE:migcom>
                 ${UROS_MIG_TARGET_ARGS}
@@ -67,6 +76,7 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
         COMMAND ${CMAKE_C_COMPILER} -E -x c
                 ${UROS_MIG_INCLUDES}
                 ${KERNEL_DEFINES}
+                ${UROS_MIG_DEFS_ARCH}
                 -DKERNEL_USER=1
                 -UKERNEL_SERVER
                 ${DEFS_FILE} |
