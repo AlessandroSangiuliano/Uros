@@ -54,6 +54,13 @@ unsigned smp_ap_call_probe(void);
 /* How many processors are running, the boot processor included. */
 unsigned smp_online_count(void);
 
+/*
+ * Publish that count as real_ncpus, which the machine-independent scheduler
+ * reads to decide when the machine is up.  Called once, after the others
+ * have reported in -- there is nothing to count before that (#453).
+ */
+void machine_real_ncpus_init(void);
+
 /* Whether a given APIC id has reported in. */
 int smp_is_online(uint32_t apic_id);
 

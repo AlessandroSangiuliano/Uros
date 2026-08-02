@@ -152,4 +152,11 @@ const char *mb2_cmdline(void);
 /* What mb2_remember() was given, or zero if it was never called. */
 uint32_t mb2_info(void);
 
+/*
+ * Work out how much memory this machine has and publish it as mem_size,
+ * which the machine-independent VM reads.  Called once, at boot, after
+ * mb2_remember() (#453).
+ */
+void machine_mem_size_init(void);
+
 #endif	/* _X86_64_BOOT_MULTIBOOT2_H_ */

@@ -3906,6 +3906,22 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	kputhex64(magic);
 	kputs("\r\n");
 
+	/*
+	 * Keep the loader's structure where later code can reach it, and work
+	 * out how much memory this machine has, before anything asks (#453).
+	 *
+	 * ⚠️ Both are read long after the handoff has gone out of scope --
+	 * kern/bootstrap.c wants the modules and the command line,
+	 * vm_resident.c wants mem_size -- and both had a value that looked
+	 * plausible if this was never called: real_ncpus would stay 1 and
+	 * mem_size would stay ZERO, which the machine-independent VM turns
+	 * into `atop(0) - vm_page_free_count', an unsigned subtraction going
+	 * the wrong way.  A wired-page count near four billion, from a
+	 * variable that was defined, documented and never filled in.
+	 */
+	mb2_remember(info);
+	machine_mem_size_init();
+
 	/* Before anything else that could fault: with no IDT a fault is a
 	 * triple fault and a silent reset, so every check below runs
 	 * unprotected until this is installed. */
@@ -3967,6 +3983,13 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 		kputs(" reported in — ");
 		kputdec(smp_online_count());
 		kputs(" online\r\n");
+
+		/*
+		 * Now, and not earlier: real_ncpus is what was FOUND, and
+		 * until the others have reported in there is nothing to count
+		 * (#453).
+		 */
+		machine_real_ncpus_init();
 
 		if (asked > 1) {
 			kputs("UrMach x86-64:   awake:");
