@@ -576,3 +576,26 @@ thread_machine_set_current(thread_t thread)
 {
 	percpu()->active_thread = (void *) thread;
 }
+
+/*
+ * Leave this processor's thread behind and run the shutdown context on it.
+ *
+ * ⚠️ Not implemented, and it panics rather than doing something plausible.  The
+ * machine-independent side calls it when a processor is being taken out of
+ * service, and what it wants is for the current thread to be abandoned
+ * safely -- which needs the shutdown context to exist and needs the
+ * processor to be removable from the scheduler's sets.  Neither is true
+ * here yet, and a version that switched somewhere plausible would leave a
+ * processor running an unowned stack.
+ */
+void
+switch_to_shutdown_context(thread_t thread, void (*routine)(processor_t),
+			   processor_t processor)
+{
+	(void) thread;
+	(void) routine;
+	(void) processor;
+
+	panic("switch_to_shutdown_context: taking a processor out of service "
+	      "is not implemented on this machine yet (#453)");
+}

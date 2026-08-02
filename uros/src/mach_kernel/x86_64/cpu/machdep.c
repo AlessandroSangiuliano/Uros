@@ -14,12 +14,15 @@
 
 #include <kern/misc_protos.h>
 #include <kern/processor.h>
+#include <kern/thread.h>
+#include <kern/thread_act.h>
 #include <mach/kern_return.h>
 #include <mach/processor_info.h>	/* processor_info_t */
 
 #include <cpu/ipi.h>
 #include <cpu/percpu.h>
 #include <cpu/smp.h>
+#include <trap/trap.h>
 
 /*
  * How many processors this machine really has.
@@ -118,4 +121,37 @@ cause_ast_check(processor_t processor)
 		return;
 
 	ipi_ast_check((uint32_t) processor->slot_num);
+}
+
+/*
+ * The trap frame of the thread this processor is running.
+ *
+ * Called from assembly, by the three return paths in trap/entry.S, because
+ * reaching a thread's frame is three pointer hops through structures whose
+ * layout the machine-independent tree owns -- and a hop written in assembly
+ * is a constant that goes stale the day one of those structures gains a
+ * field.
+ *
+ * ⚠️ Panics rather than answering zero.  Its callers are about to load the
+ * result into %rsp and execute iretq off it; a null would iretq off address
+ * zero, in ring 0, with the fault arriving somewhere unrecognisable.
+ */
+struct trap_frame *
+act_user_frame(void)
+{
+	thread_t	thread = (thread_t) percpu()->active_thread;
+	thread_act_t	act;
+
+	if (thread == THREAD_NULL)
+		panic("act_user_frame: no thread on this processor");
+
+	act = thread->top_act;
+	if (act == THR_ACT_NULL || act->mact.pcb == PCB_NULL)
+		panic("act_user_frame: thread %p has no activation", thread);
+
+	if (act->mact.pcb->user == (struct trap_frame *) 0)
+		panic("act_user_frame: thread %p has never been to user mode",
+		      thread);
+
+	return act->mact.pcb->user;
 }
