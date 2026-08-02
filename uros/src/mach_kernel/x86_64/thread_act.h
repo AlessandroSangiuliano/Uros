@@ -67,6 +67,8 @@ typedef struct pcb {
 	decl_simple_lock_data(,lock)
 } *pcb_t;
 
+#define	PCB_NULL	((pcb_t) 0)
+
 /*
  * The storage and the pointer both, as on i386: the block lives in the
  * activation, and `pcb` points at it.  The indirection is what the MI tree

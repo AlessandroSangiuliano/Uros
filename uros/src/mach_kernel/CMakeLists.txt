@@ -114,8 +114,28 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
-  # sync/mutex.c and kern/lock.c are not in that list, and the boundary is
-  # worth stating exactly rather than as "not yet" (#452/#428).
+  # sync/mutex.c, thread/machine.c and kern/lock.c are not in that list, and
+  # the boundary is worth stating exactly rather than as "not yet" (#453).
+  #
+  # ── Measured 2026-08-02, and the shape of it changed ─────────────────
+  #
+  # thread/machine.c is the seventeen-name thread and activation surface the
+  # machine-independent tree calls.  It compiles.  Adding it to this list
+  # leaves FIVE undefined symbols -- Assert, printf, kalloc, kfree,
+  # usimple_lock_init -- from four files that also compile: kern/debug.c,
+  # kern/printf.c, kern/kalloc.c, kern/lock.c.
+  #
+  # Adding those four leaves TWENTY-EIGHT, and they are a different kind of
+  # thing: assert_wait, thread_block, thread_wakeup_prim, kmem_alloc,
+  # kmem_suballoc, zinit, zalloc, kernel_map, page_size.  That is the
+  # scheduler and the virtual memory system, together, and neither closes
+  # without the other.
+  #
+  # So the door is one file wide and the room behind it is the rest of the
+  # kernel.  That is why #453's rule is that the kernel links at the end of
+  # every commit: the next step is not another name, it is the bring-up, and
+  # it wants to be attempted as one deliberate thing rather than discovered
+  # halfway through a commit about thread state.
   #
   # Both COMPILE.  kern/lock.c was one missing header away and #428 supplied
   # it; the mutex has been compiling since it was written.  What stops them
@@ -150,7 +170,11 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(KERNEL_DEFINES_BARE
       KERNEL MACH_KERNEL KERNEL_PRIVATE KERNEL_SERVER=1
       NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=1 MACH_HOST=1
-      STAT_TIME TASK_SWAPPER=1 __NO_UNDERSCORES__)
+      STAT_TIME TASK_SWAPPER=1 __NO_UNDERSCORES__
+      # Zero, and said rather than left undefined: this kernel is built
+      # -mgeneral-regs-only so that entry from user mode never has to save
+      # vector state, which means no floating point anywhere in it (#453).
+      KERNEL_FLOAT_OK=0)
   list(TRANSFORM KERNEL_DEFINES_BARE PREPEND -D OUTPUT_VARIABLE KERNEL_DEFINES)
 
   # ⚠️ #452 added the machine-independent tree to this list, and it is the
@@ -469,6 +493,7 @@ set(KERNEL_DEFINES
     -DMACH_HOST=1
     -DKERNEL_PRIVATE
     -DSTAT_TIME
+    -DKERNEL_FLOAT_OK=1
     -DMACH_MACHINE_ROUTINES
     # -DMACH_PROF  # Disabled - requires prof.defs MIG generation
     -DKERNEL_SERVER=1

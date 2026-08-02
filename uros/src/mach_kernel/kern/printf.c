@@ -694,6 +694,27 @@ _doprnt_ext(
 		    break;
 
 
+		/*
+		 * ⚠️ Floating-point output, and only on a machine whose kernel
+		 * may execute floating-point instructions (#453).
+		 *
+		 * The formatting below does real arithmetic on `double' --
+		 * divides by ten to find the exponent, subtracts to split off
+		 * the fraction.  On x86-64 this kernel is built
+		 * -mgeneral-regs-only, deliberately: a kernel that touches
+		 * vector or x87 state has to save and restore it on every
+		 * entry from user mode, which is a cost paid by every system
+		 * call so that printf can render a percentage.
+		 *
+		 * That is not a trade worth making, and it is not a historical
+		 * solution worth keeping either -- a kernel prints diagnostics,
+		 * and a diagnostic that needs a fraction can carry it as two
+		 * integers.  So on a machine without kernel floating point the
+		 * conversion is refused rather than approximated: %f prints
+		 * <no-fp>, which is visible in a log and cannot be mistaken for
+		 * a value.
+		 */
+#if	KERNEL_FLOAT_OK
 		case 'f':
 		case 'F':
 		case 'e':
@@ -868,6 +889,17 @@ _doprnt_ext(
 			while (total < length) { (*putc)(' '); length--; }
 		    break;
 		}
+#else	/* KERNEL_FLOAT_OK */
+		{
+		    static const char	nofp[] = "<no-fp>";
+		    const char		*p = nofp;
+
+		    (void) va_arg(*argp, double);
+		    while (*p != '\0')
+			(*putc)(*p++);
+		    break;
+		}
+#endif	/* KERNEL_FLOAT_OK */
 
 		case '\0':
 		    fmt--;
