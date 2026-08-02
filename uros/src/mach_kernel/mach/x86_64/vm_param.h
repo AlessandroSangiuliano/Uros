@@ -122,4 +122,21 @@ _Static_assert(VM_MIN_KERNEL_ADDRESS == (vm_offset_t) KERNEL_HALF_BASE,
  */
 #define	pa_is_lowmem(pa)	((void)(pa), TRUE)
 
+/*
+ * The kernel virtual address of a physical one, and back (#453).
+ *
+ * i386 answers with a 1:1 window -- phystokv() is an addition of
+ * VM_MIN_KERNEL_ADDRESS, which is zero there, so it is the identity and the
+ * distinction between the two kinds of address never had to be maintained.
+ * Here it is the direct map, a real translation to a real second mapping of
+ * all of physical memory.
+ *
+ * ⚠️ Only for addresses that ARE in the direct map, which is every physical
+ * page but not every kernel virtual address: the image and anything
+ * kmem_alloc() hands out live elsewhere, and going back through kvtophys()
+ * on one of those needs the walk, which is why kvtophys() in
+ * <machine/pmap.h> is a walk and not this subtraction.
+ */
+#define	phystokv(pa)	((vm_offset_t) phys_to_direct((uint64_t)(pa)))
+
 #endif /* _MACH_X86_64_VM_PARAM_H_ */

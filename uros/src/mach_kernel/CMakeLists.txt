@@ -79,6 +79,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/ap_trampoline.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_modules.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
@@ -911,6 +912,7 @@ set(I386_C_SOURCES
     i386/ldt.c
     i386/loose_ends.c
     i386/net_filter.c
+    i386/boot_modules.c
     i386/pcb.c
     i386/phys.c
     i386/kmap.c

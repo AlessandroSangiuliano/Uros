@@ -46,6 +46,12 @@ SECTIONS
 {
 	. = PHYS_LOAD;
 
+	/* The first physical byte the loader writes.  Named so that the
+	 * module-overlap check in boot/boot_modules.c can bound the image
+	 * exactly, instead of assuming the boot half sits somewhere safe
+	 * below the kernel half (#453). */
+	__image_phys_start = .;
+
 	/* ---- low: boot code, tables, stack (VMA == LMA) ---- */
 
 	/* Multiboot2 header must sit in the first 32 KiB of the image. */
