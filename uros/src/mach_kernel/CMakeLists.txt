@@ -103,6 +103,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pmap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pv.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/tlb.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/vminit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/walk.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/probe.S
