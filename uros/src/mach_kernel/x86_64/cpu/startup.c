@@ -46,24 +46,6 @@ machine_init(void)
 }
 
 /*
- * The second half of pmap initialisation, after the VM has taken over the
- * physical pages.
- *
- * Nothing here either, and for a different reason: this pmap has no zone of
- * its own to create and no structure that had to wait for kmem_alloc.  The
- * page tables come from the boot frame allocator and the physical index was
- * sized at bootstrap from the top of RAM.
- *
- * ⚠️ That is a limit rather than an elegance: the pmap pool is a fixed array
- * of sixteen (x86_64/pmap/pmap.c), which is what "no allocator yet" costs.
- * The day it uses a zone, creating it is what this function is for.
- */
-void
-pmap_init(void)
-{
-}
-
-/*
  * This processor's software interrupt level.
  *
  * The machine-independent spelling of what <cpu/spl.h> calls splget().  Two
