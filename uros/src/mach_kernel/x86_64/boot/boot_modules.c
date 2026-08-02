@@ -10,6 +10,8 @@
  * that shape and the one the machine-independent side asks for.
  */
 
+#include <string.h>
+
 #include <kern/boot_modules.h>
 #include <trap/trap.h>	/* panic() */
 #include <boot/multiboot2.h>
@@ -115,7 +117,7 @@ void
 machine_bootstrap_thread_state(vm_offset_t entry, int *flavor,
 			       thread_state_t *state, unsigned int *count)
 {
-	__builtin_memset(&bootstrap_state, 0, sizeof bootstrap_state);
+	memset(&bootstrap_state, 0, sizeof bootstrap_state);
 
 	bootstrap_state.rip = entry;
 
