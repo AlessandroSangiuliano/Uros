@@ -1,0 +1,177 @@
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * What kern/startup.c asks this machine to do, and the two odds and ends
+ * that go with it (#453).
+ *
+ * These are the machine's half of the boot sequence: the machine-independent
+ * side runs a fixed order and calls out at fixed points, and this is what
+ * happens at those points.  Most of the work has already been done by the
+ * time they are reached -- x86_64/boot/ brought the processor up long before
+ * there was a kernel to have a startup path -- so several of them are the
+ * honest answer "already done", written where somebody looking for the work
+ * will find it.
+ */
+
+#include <stdint.h>
+
+#include <kern/misc_protos.h>
+#include <mach/machine/vm_param.h>
+
+#include <cpu/percpu.h>
+#include <cpu/smp.h>
+#include <cpu/spl.h>
+#include <pmap/layout.h>
+#include <pmap/pmap.h>
+#include <thread/fpu.h>
+
+/*
+ * Machine initialisation, called once the machine-independent kernel is far
+ * enough along to want a machine.
+ *
+ * Nothing, because everything it would do has happened: descriptor tables,
+ * the interrupt controllers, the timers, the per-CPU blocks and the paging
+ * structures were all built by x86_64/boot/ before C had a kernel around it.
+ * The order is not ours to change -- a processor that reaches C without an
+ * IDT triple-faults on its first mistake, so those cannot wait for a call
+ * from the scheduler's startup.
+ *
+ * ⚠️ Empty, not absent, and not a panic: kern/startup.c calls it on the path
+ * that must work.
+ */
+void
+machine_init(void)
+{
+}
+
+/*
+ * The second half of pmap initialisation, after the VM has taken over the
+ * physical pages.
+ *
+ * Nothing here either, and for a different reason: this pmap has no zone of
+ * its own to create and no structure that had to wait for kmem_alloc.  The
+ * page tables come from the boot frame allocator and the physical index was
+ * sized at bootstrap from the top of RAM.
+ *
+ * ⚠️ That is a limit rather than an elegance: the pmap pool is a fixed array
+ * of sixteen (x86_64/pmap/pmap.c), which is what "no allocator yet" costs.
+ * The day it uses a zone, creating it is what this function is for.
+ */
+void
+pmap_init(void)
+{
+}
+
+/*
+ * This processor's software interrupt level.
+ *
+ * The machine-independent spelling of what <cpu/spl.h> calls splget().  Two
+ * names for one thing is not worth an inline forwarder in a header the whole
+ * tree includes, so it is a function here.
+ */
+spl_t
+getspl(void)
+{
+	return splget();
+}
+
+/*
+ * Set the clock back to its regular rate after the debugger or a
+ * calibration has been using it.
+ *
+ * Nothing, because nothing on this machine changes the rate: the local APIC
+ * timer is programmed once per processor at bring-up and the TSC is not
+ * programmable at all.  i386 needs this because its 8254 is reprogrammed for
+ * delay loops and calibration and has to be put back.
+ */
+void
+rtclock_reset(void)
+{
+}
+
+/*
+ * Bring the other processors up, and the per-processor half that each of
+ * them runs when it arrives.
+ *
+ * ⚠️ Both are already done by the time the machine-independent kernel asks.
+ * x86_64/cpu/smp.c starts every processor in one pipelined pass during boot,
+ * because the trampoline and the funnel counter pacing it are shared: doing
+ * it one processor at a time would mean building and tearing that machinery
+ * down repeatedly, and the pipelining is what makes the bring-up fast.
+ *
+ * So these are the honest "already" rather than a second bring-up path that
+ * would have to agree with the first.
+ */
+void
+start_other_cpus(void)
+{
+}
+
+void
+slave_machine_init(void)
+{
+	fpu_init();
+}
+
+/*
+ * A window onto a physical page, for the machine-independent code that wants
+ * to read or write one without a mapping of its own.
+ *
+ * The direct map IS the window -- every physical page is already addressable
+ * through it -- so this is an addition and its counterpart is nothing.  i386
+ * cannot do this: it borrows a page-table entry, programs it, and has to
+ * give it back, which is why kunmap() exists there and why kmap() takes a
+ * lock.
+ *
+ * One of the things #407 predicted the direct map would delete, deleted.
+ */
+vm_offset_t
+kmap(vm_offset_t phys_addr)
+{
+	return (vm_offset_t) phys_to_direct((uint64_t) phys_addr);
+}
+
+void
+kunmap(vm_offset_t va)
+{
+	(void) va;
+}
+
+/*
+ * The current call stack, as a list of return addresses, for whoever is
+ * recording where something happened.
+ *
+ * Walks the frame pointer chain, which this kernel keeps precisely so that
+ * this is possible: -fno-omit-frame-pointer is not an accident of the build
+ * flags, it is the price paid for being able to say where the machine was.
+ *
+ * ⚠️ Stops at the first frame pointer that is not a kernel address rather
+ * than trusting the chain.  A corrupted stack is exactly when somebody wants
+ * a call stack, and a walker that followed a wild pointer would fault inside
+ * the code recording the fault.
+ */
+void
+machine_callstack(natural_t *buf, vm_size_t callstack_max)
+{
+	uint64_t	*frame = (uint64_t *) __builtin_frame_address(0);
+	vm_size_t	i;
+
+	for (i = 0; i < callstack_max; i++) {
+		uint64_t	next;
+
+		if (!va_is_kernel((uint64_t) frame))
+			break;
+
+		buf[i] = (natural_t) frame[1];	/* the return address */
+
+		next = frame[0];		/* the caller's frame */
+		if (next <= (uint64_t) frame)	/* stacks grow down */
+			break;
+
+		frame = (uint64_t *) next;
+	}
+
+	for (; i < callstack_max; i++)
+		buf[i] = 0;
+}
