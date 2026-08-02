@@ -102,14 +102,24 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
  * Nothing yet, and this one is a real gap rather than a hint that does not
  * apply: a space that maps and unmaps a large range keeps the empty tables
  * that mapped it, which is up to 2 MiB of tables per GiB of range touched.
- * i386 has the same shape of function and the same emptiness.
  *
- * ⚠️ It is empty rather than absent because the machine-independent side
- * calls it under memory pressure and a missing symbol would not link.  What
- * it should do is walk the space and free tables whose entries are all
- * clear -- which needs the walk to be safe against another processor
- * entering a mapping into the table being freed, and that is a locking
- * question this pmap has not answered yet (#407).
+ * ⚠️ i386 DOES implement this -- intel/pmap.c walks the directory, finds
+ * tables whose pages are unreferenced, and frees them under PMAP_READ_LOCK
+ * and #338's per-table locks.  So the work is known to be possible and the
+ * locking is known to have an answer; what this pmap has not got yet is that
+ * answer, because the walk must be safe against another processor entering a
+ * mapping into the table being freed.
+ *
+ * It is empty rather than absent because kern/task.c and kern/thread_swap.c
+ * call it under memory pressure and a missing symbol would not link.  The
+ * pageout daemon asking for memory back and getting none is a slower kernel;
+ * a freed table another processor is walking into is a corrupted one.
+ *
+ * ▶️ #455 carries it, gated on the pmap's locking discipline -- which is
+ * being decided rather than inherited, alongside the mutex (#452, done) and
+ * the spl levels (#454).  i386's answer is #338's per-table locks, arrived
+ * at by measurement on 8 processors; this kernel is NCPUS=64 and whether
+ * that granularity still holds is a question with a number in front of it.
  */
 void
 pmap_collect(pmap_t pmap)
