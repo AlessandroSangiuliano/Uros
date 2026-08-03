@@ -23,6 +23,20 @@
 #define VAL_PORT	2	/* port */
 #define VAL_TASK	3	/* task port */
 
+/* The value a symbol or an argument carries.  The `type' above says which of
+   these it is at any moment, so one storage class has to be wide enough for
+   all of them: an integer, a string, a port, a task, a pointer to another
+   symbol, and -- for VAL_FUNC -- a pointer to a function (#453).
+
+   This was `int', which held every one of those on i386 because a pointer is
+   four bytes there.  On x86-64 it holds none of the pointers.  The three
+   builtin symbols made that visible at once, because a truncated function
+   address is not a constant the linker can place and so the initialiser
+   would not even compile -- but the same truncation applies to every string
+   and every symbol pointer this script passes around, and those would have
+   compiled quietly.  */
+typedef long boot_script_val_t;
+
 /* This structure describes a command.  */
 struct cmd
 {
@@ -103,11 +117,13 @@ int boot_script_exec (void);
 /* Create an entry in the symbol table for variable NAME,
    whose type is TYPE and value is VAL.  Returns 0 on success,
    non-zero otherwise.  */
-int boot_script_set_variable (const char *name, int type, int val);
+int boot_script_set_variable (const char *name, int type,
+			      boot_script_val_t val);
 
 /* Define the function NAME, which will return type RET_TYPE.  */
 int boot_script_define_function (const char *name, int ret_type,
-				 int (*func) (const struct cmd *cmd, int *val));
+				 int (*func) (const struct cmd *cmd,
+					      boot_script_val_t *val));
 
 /* Returns a string describing the error ERR.  */
 char *boot_script_error_string (int err);

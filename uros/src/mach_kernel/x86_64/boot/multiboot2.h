@@ -17,10 +17,13 @@
 
 #include <stdint.h>
 
+#include <mach/boolean.h>
+
 #define MB2_BOOTLOADER_MAGIC	0x36d76289	/* what GRUB leaves in %eax */
 
 #define MB2_TAG_END		0
 #define MB2_TAG_CMDLINE		1	/* the string the loader was given */
+#define MB2_TAG_MODULE		3	/* a module the loader placed */
 #define MB2_TAG_MEMORY_MAP	6
 
 /*
@@ -56,6 +59,22 @@
 struct mb2_tag_string {
 	uint32_t type;
 	uint32_t size;
+	char     string[];
+};
+
+/*
+ * A module: where the loader put it, and the string it was given with.
+ *
+ * ⚠️ Unlike multiboot 1, there is no array and no count.  Each module is its
+ * own tag in the chain, so "module N" means the N-th tag of this type and
+ * finding it is a walk.  Anything that wants them all should walk once
+ * rather than ask N times.
+ */
+struct mb2_tag_module {
+	uint32_t type;
+	uint32_t size;
+	uint32_t mod_start;	/* physical, inclusive */
+	uint32_t mod_end;	/* physical, exclusive */
 	char     string[];
 };
 
@@ -110,5 +129,34 @@ uint64_t mb2_top_of_ram(uint32_t info_pa);
 
 /* Total bytes marked available — what the machine actually has to spend. */
 uint64_t mb2_usable_ram(uint32_t info_pa);
+
+/*
+ * Remember where the loader's structure is, so that code running long after
+ * boot can still ask.  Called once, from the boot entry (#453).
+ *
+ * Kept here rather than passed down because <kern/boot_modules.h> is asked
+ * its questions from kern/bootstrap.c, which runs after every trace of the
+ * boot handoff has gone out of scope.
+ */
+void mb2_remember(uint32_t info_pa);
+
+/* How many modules the loader placed, by walking the chain. */
+unsigned int mb2_module_count(void);
+
+/* Module n's physical range.  FALSE when there is no such module. */
+boolean_t mb2_module_range(unsigned int n, uint64_t *start, uint64_t *size);
+
+/* The command line, or "" when the loader supplied none. */
+const char *mb2_cmdline(void);
+
+/* What mb2_remember() was given, or zero if it was never called. */
+uint32_t mb2_info(void);
+
+/*
+ * Work out how much memory this machine has and publish it as mem_size,
+ * which the machine-independent VM reads.  Called once, at boot, after
+ * mb2_remember() (#453).
+ */
+void machine_mem_size_init(void);
 
 #endif	/* _X86_64_BOOT_MULTIBOOT2_H_ */

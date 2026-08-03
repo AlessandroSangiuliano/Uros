@@ -103,6 +103,82 @@ static inline spl_t spl0(void)
  */
 int spl_defer(unsigned vector);
 
+/*
+ * ── The names the machine-independent tree calls (#453) ───────────────
+ *
+ * <kern/spl.h> declares each of these parenthesised -- `extern spl_t
+ * (splsched)(void)' -- precisely so that a machine may make them macros, and
+ * here they are one: a level and a call to splx(), which is a byte written
+ * through %gs.  A function per name would be a call into another translation
+ * unit to pass a constant.
+ *
+ * ⚠️ What the levels are is worth reading rather than assuming, because i386
+ * is not the guide it looks like.  There, spl.S sends splclock, splvm,
+ * splsched and splhigh to the *same* label, SPL7, and spltty, splnet and
+ * splimp to another, SPL6.  The names outnumber the levels by three to one,
+ * and have since before this kernel existed: they record which subsystem a
+ * caller thought it was protecting, not a distinct priority.
+ *
+ * ⚠️⚠️ This is a BRIDGE, and it is written down as one rather than dressed
+ * up as a design.
+ *
+ * It is kept only because the callers were written against it -- 27 sites
+ * call splsched and 11 splhigh -- and a level that blocked less than i386's
+ * would silently change what each of them excludes, on a tree whose SMP
+ * locking has not been re-examined for this machine.  It is not kept because
+ * it is good.
+ *
+ * What a modern design would do differently, and what it would be worth:
+ *
+ *   - splsched at SPLHI means taking a scheduler lock blocks the TIMER.
+ *     That is where clock drift and scheduling latency come from, and no
+ *     kernel written this century does it: the modern shape is a per-CPU
+ *     run-queue lock with interrupts disabled across a few instructions,
+ *     not a priority raised across a whole critical section.
+ *   - spl protects by priority, which excludes nothing on another
+ *     processor.  On a machine with 64 of them it is the locks that do the
+ *     work and spl is only about this processor's own interrupts -- so most
+ *     of these calls are asking for something narrower than they say.
+ *
+ * Both are real changes with correctness consequences, they belong after the
+ * MI tree links and runs here, and they want a measurement in front of them.
+ * Until then the bridge stays and says what it is.
+ *
+ * ▶️ #454 carries the replacement, including the part that cannot be
+ * skipped: reading each of the ~50 call sites and deciding which of the two
+ * things it meant.  The current level is a superset of all of them, so
+ * narrowing without reading is how a rare SMP crash gets introduced.
+ *
+ * The classes come from the vector space (see above), so `device' is where
+ * the legacy lines live and SPLHI is everything maskable.
+ */
+#define	splhigh()	splx(SPLHI)
+#define	splsched()	splx(SPLHI)
+#define	splclock()	splx(SPLHI)
+#define	splvm()		splx(SPLHI)
+
+#define	spltty()	splx(SPL_DEVICE)
+#define	splnet()	splx(SPL_DEVICE)
+#define	splimp()	splx(SPL_DEVICE)
+#define	splbio()	splx(SPL_DEVICE)
+
+#define	spllo()		splx(SPL0)
+
+/*
+ * The two that are not levels at all: they close and open the interrupt
+ * flag itself, for the few places that need the processor to take nothing
+ * whatever -- an IDT reload, the last steps of a shutdown.
+ *
+ * ⚠️ sploff() answers the level, like its neighbours, so that a caller can
+ * pair it with splx(); the interrupt flag it also cleared is restored by
+ * splon(), which is why the two must be used together and not crossed with
+ * splx().  splon() answers nothing, and that asymmetry is in <kern/spl.h>
+ * too: there is no previous flag state to hand back that the caller did not
+ * already have.
+ */
+spl_t	sploff(void);
+void	splon(spl_t level);
+
 /* How many interrupts this processor has deferred and replayed, for the
  * tests and, later, for whoever wants to know whether the levels are
  * costing anything. */

@@ -46,6 +46,12 @@ SECTIONS
 {
 	. = PHYS_LOAD;
 
+	/* The first physical byte the loader writes.  Named so that the
+	 * module-overlap check in boot/boot_modules.c can bound the image
+	 * exactly, instead of assuming the boot half sits somewhere safe
+	 * below the kernel half (#453). */
+	__image_phys_start = .;
+
 	/* ---- low: boot code, tables, stack (VMA == LMA) ---- */
 
 	/* Multiboot2 header must sit in the first 32 KiB of the image. */
@@ -75,10 +81,36 @@ SECTIONS
 
 	. = ALIGN(4096);
 	__ktext_end = .;
+	/* The same address under the name the machine-independent tree uses:
+	 * db_interface.c, db_trace.c and mach_clock.c say `extern char etext'
+	 * and take its address (#453). */
+	etext = .;
 	__krodata_start = .;
 	.rodata : AT(ADDR(.rodata) - KERNEL_VBASE) {
 		*(.rodata)
 		*(.rodata.*)
+	} :krodata
+
+	/*
+	 * The fault-recovery table (#453).
+	 *
+	 * One entry per instruction that is allowed to fault: the address of
+	 * the instruction, and the address to continue at instead.  The page
+	 * fault handler looks the faulting rip up here before deciding it has
+	 * a bug on its hands, which is how copyin() and copyout() survive a
+	 * bad user address and answer an error rather than halting the kernel.
+	 *
+	 * Read-only and bracketed by symbols, so the handler has a range to
+	 * search and the pages can be mapped without write permission.  The
+	 * entries are emitted wherever the annotated instructions are, so the
+	 * order is the linker's -- the search is linear and must not assume
+	 * otherwise.
+	 */
+	. = ALIGN(8);
+	.ex_table : AT(ADDR(.ex_table) - KERNEL_VBASE) {
+		__ex_table_start = .;
+		*(.ex_table)
+		__ex_table_end = .;
 	} :krodata
 
 	/*
@@ -117,6 +149,10 @@ SECTIONS
 	 * NOLOAD: that way the loader zeros it (memsz > filesz), so the C
 	 * globals that must start at zero actually do on real hardware — RAM
 	 * is not guaranteed zero the way QEMU's is. */
+	/* edata: the end of initialised data, which is where BSS begins.  The
+	 * machine-independent bootstrap reads it under that name. */
+	edata = .;
+
 	.bss ALIGN(4096) : AT(ADDR(.bss) - KERNEL_VBASE) {
 		*(.bss)
 		*(.bss.*)
@@ -125,6 +161,7 @@ SECTIONS
 
 	. = ALIGN(4096);
 	__kernel_end = .;
+	end = .;
 
 	/DISCARD/ : { *(.note.*) *(.comment) *(.eh_frame) }
 }

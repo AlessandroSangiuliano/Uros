@@ -423,3 +423,91 @@ isr_table:
 	vec = vec + 1
 	.endr
 	.noaltmacro
+
+/*
+ * ⚠️ Back to .text, and this line is not decoration.
+ *
+ * The file switched to .rodata further up for the vector table, and an
+ * assembler stays where it was put: code appended after that lands in a
+ * section the kernel maps read-only and NO-EXECUTE.  It assembles, it links,
+ * and `nm' reports the symbols with a lower-case `r' -- and the first jump
+ * to one of them faults.  Caught here by reading nm's type letter, which is
+ * the only place it showed (#453).
+ */
+	.section .text
+
+/*
+ * ── Returning to a thread rather than from a trap (#453) ──────────────
+ *
+ * The machine-independent kernel has four ways of leaving the kernel that
+ * are not "return from the trap that got us here", and all four end in the
+ * same place: restore the thread's saved user frame and iretq.
+ *
+ * The difference from trap_common's tail above is where the frame comes
+ * from.  There, it is on the stack because the processor and SAVE_REGS put
+ * it there.  Here, the thread is being resumed from somewhere else entirely
+ * -- an exception was handled, a new thread is starting, a system call is
+ * being re-run -- and the frame to restore is the one in the thread's pcb.
+ *
+ * ⚠️ These do not return.  Each switches to its thread's frame and leaves
+ * ring 0; there is no caller left to come back to, which is why they are
+ * written here rather than as C functions with a tail call the compiler
+ * would be entitled to turn into something else.
+ */
+
+	.globl	thread_exception_return
+	.globl	thread_bootstrap_return
+	.globl	restart_mach_syscall
+
+/*
+ * An exception has been handled and the thread should carry on where it was.
+ *
+ * The frame in the pcb is what trap entry saved on the way in, possibly
+ * rewritten by thread_set_state() while the thread was stopped -- which is
+ * the whole point: a debugger that moved the instruction pointer expects the
+ * thread to resume there.
+ */
+thread_exception_return:
+	callq	act_user_frame		/* %rax = this thread's trap frame */
+	movq	%rax, %rsp
+	jmp	thread_frame_return
+
+/*
+ * A thread that has never run, starting for the first time.
+ *
+ * Identical to the above, and separate because the machine-independent side
+ * calls them from different places and a machine may want to distinguish
+ * them.  This one does not -- a thread that has never run has a frame
+ * prepared by thread_set_state(), and resuming it is resuming it.
+ */
+thread_bootstrap_return:
+	callq	act_user_frame
+	movq	%rax, %rsp
+	jmp	thread_frame_return
+
+/*
+ * Run the system call again.
+ *
+ * ⚠️ The frame's rip still points AT the syscall instruction, not past it:
+ * the entry path saves rcx, which SYSCALL loaded with the return address,
+ * and the return path puts it back -- so "again" is achieved by returning
+ * normally to an instruction pointer that was never advanced.  Nothing here
+ * has to rewind anything, and anything that did would be wrong.
+ */
+restart_mach_syscall:
+	callq	act_user_frame
+	movq	%rax, %rsp
+	jmp	thread_frame_return
+
+/*
+ * The tail all three share: the frame is at %rsp, we are going to ring 3.
+ *
+ * swapgs unconditionally, because every one of these is a return TO USER --
+ * unlike trap_common's tail, which has to test, because a trap may have come
+ * from either ring.
+ */
+thread_frame_return:
+	RESTORE_REGS
+	swapgs
+	addq	$16, %rsp		/* drop the vector and error code */
+	iretq

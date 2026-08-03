@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+
 #include <cpu/regs.h>
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
@@ -23,7 +24,7 @@
  * any allocator does, and it lives as long as the kernel.  Its tables are
  * the ones boot.S and the direct map already built.
  */
-static struct pmap kernel_pmap_store;
+struct pmap kernel_pmap_store;
 
 void pmap_bootstrap(void)
 {
@@ -31,19 +32,57 @@ void pmap_bootstrap(void)
 	kernel_pmap_store.ref_count = 1;
 }
 
-pmap_t pmap_kernel(void)
-{
-	return &kernel_pmap_store;
-}
-
 /*
- * Somewhere to keep the pmaps themselves until the MI allocator exists.  A
- * slot with no references is free, so a destroyed space's slot comes back —
- * unlike its frames, which do not.
+ * Where the pmaps themselves come from.
+ *
+ * A fixed pool, because there is no allocator yet: a slot with no references
+ * is free, so a destroyed space's slot comes back -- unlike its frames.
  */
 #define PMAP_BOOT_MAX	16
 
-static struct pmap pmap_pool[PMAP_BOOT_MAX];
+static struct pmap	pmap_pool[PMAP_BOOT_MAX];
+
+/*
+ * ⚠️ SIXTEEN SPACES.  That is the ceiling this machine runs under, and it is
+ * not a design -- it is what fits in a static array chosen when nothing could
+ * be allocated.  A system with a shell, a file server and a driver server is
+ * already close to it, and the seventeenth task fails to be created with no
+ * indication of why.
+ *
+ * The fix is a zone, created by pmap_init() once the machine-independent
+ * allocator is up, with the pool kept for the spaces made before that -- they
+ * outlive the boot, so pmap_destroy() would have to know which it is looking
+ * at.  It is written up in #456 rather than left as a comment here, because a
+ * limit that is only described in the code it limits is one nobody counts.
+ */
+/*
+ * The second half of pmap initialisation, run by the machine-independent
+ * startup once the virtual memory system is up.
+ *
+ * Empty, and the reason is #456 above: what belongs here is the zone that
+ * removes the sixteen-space ceiling, and it cannot be written until this
+ * kernel links kern/zalloc.c.  Empty rather than absent because
+ * kern/startup.c calls it on the path that must work.
+ */
+void
+pmap_init(void)
+{
+}
+
+static pmap_t pmap_alloc(void)
+{
+	for (unsigned i = 0; i < PMAP_BOOT_MAX; i++)
+		if (pmap_pool[i].ref_count == 0)
+			return &pmap_pool[i];
+
+	return PMAP_NULL;
+}
+
+static void pmap_free(pmap_t pmap)
+{
+	(void) pmap;	/* a pool slot with no references is already free */
+}
+
 
 /*
  * The first PML4 slot of the kernel half.  Entries from here up are the
@@ -73,14 +112,11 @@ pmap_t pmap_create(uint64_t size)
 	if (size != 0)
 		return PMAP_NULL;
 
-	for (unsigned i = 0; i < PMAP_BOOT_MAX; i++)
-		if (pmap_pool[i].ref_count == 0) {
-			pmap = &pmap_pool[i];
-			break;
-		}
-
+	pmap = pmap_alloc();
 	if (pmap == PMAP_NULL)
 		return PMAP_NULL;
+
+	pmap->resident_count = 0;
 
 	root_pa = boot_frame_alloc();		/* arrives zeroed */
 	if (root_pa == 0)
@@ -183,6 +219,7 @@ void pmap_destroy(pmap_t pmap)
 
 	boot_frame_free(pmap->root_pa);
 	pmap->root_pa = 0;
+	pmap_free(pmap);
 }
 
 void pmap_activate(pmap_t pmap)
@@ -209,6 +246,20 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 
 	if (size == PAGE_SIZE_4K)
 		pv_remove(pa, pmap, va);
+
+	if (size != 0) {
+		/*
+		 * panic() and not assert(), because Assert() lives in
+		 * kern/debug.c and the machine-independent tree is not in this
+		 * kernel yet -- and because an underflow here means the count
+		 * has drifted from the tables, which is not a condition to
+		 * carry on from.
+		 */
+		if (pmap->resident_count == 0)
+			panic("pmap_forget: resident_count underflow at "
+			      "va 0x%lx", (unsigned long) va);
+		pmap->resident_count--;
+	}
 
 	return size;
 }
@@ -272,8 +323,21 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 		flags |= INTEL_PTE_USER;
 
 	rc = pmap_map_page(pmap->root_pa, va, pa, flags);
-	if (rc == PMAP_MAP_OK)
+	if (rc == PMAP_MAP_OK) {
 		pv_enter(pa, pmap, va);
+		/*
+		 * The count the machine-independent tree reads through
+		 * pmap_resident_count() (#453).  Kept here, where a mapping is
+		 * actually created, rather than by the caller -- a counter
+		 * maintained anywhere else drifts the first time somebody adds
+		 * a second path in.
+		 *
+		 * Only on a fresh mapping: pmap_map_page() answers PMAP_MAP_OK
+		 * for one that replaces nothing, so re-mapping a page that is
+		 * already there does not count twice.
+		 */
+		pmap->resident_count++;
+	}
 
 	return rc;
 }

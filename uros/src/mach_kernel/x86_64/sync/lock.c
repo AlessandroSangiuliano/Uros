@@ -81,3 +81,74 @@ unsigned int hw_lock_held(hw_lock_t l)
 	 */
 	return *l != 0;
 }
+
+#include <kern/lock.h>	/* usimple_lock_t, for the definitions below */
+
+/*
+ * ── usimple_lock: the machine's own (#453) ────────────────────────────
+ *
+ * <kern/lock.h> documents that a machine may supply these, and this one
+ * does.  Not for speed -- the portable version in kern/lock.c is a fine spin
+ * lock -- but because that file's other half is the mutex slow path and the
+ * read/write locks, which reach into the scheduler.  A machine that wants
+ * only a spin lock should not have to take the scheduler with it.
+ *
+ * They are hw_lock underneath, which is what the portable version would end
+ * up calling anyway on a machine with more than one processor.
+ *
+ * ⚠️ No preemption counting.  The machine-independent version bumps a
+ * per-processor preemption level around the hold, so that a thread cannot be
+ * descheduled while holding a spin lock -- which on a spin lock is not an
+ * optimisation but a correctness property: a preempted holder makes every
+ * spinner wait for a scheduling quantum instead of a critical section.  This
+ * target has no preemption to disable yet, and the day it does, that is what
+ * belongs here rather than a comment saying it does not.
+ */
+
+void
+usimple_lock_init(usimple_lock_t l, etap_event_t event)
+{
+	(void) event;
+	hw_lock_init(&l->interlock);
+}
+
+void
+usimple_lock(usimple_lock_t l)
+{
+	hw_lock_lock(&l->interlock);
+}
+
+void
+usimple_unlock(usimple_lock_t l)
+{
+	hw_lock_unlock(&l->interlock);
+}
+
+unsigned int
+usimple_lock_try(usimple_lock_t l)
+{
+	return (unsigned int) hw_lock_try(&l->interlock);
+}
+
+/*
+ * interlock_unlock: the same function under a second name (#453).
+ *
+ * thread_sleep_interlock() in <kern/sched_prim.h> drops a hardware lock as
+ * part of going to sleep, and calls it by this name.  It is handed
+ * `&m->interlock' -- a hw_lock_t, at offset zero of the mutex -- so what it
+ * asks for is exactly hw_lock_unlock().
+ *
+ * On i386 the two are separate entry points in i386_lock.S, because the mutex
+ * was written in assembly there and the C side needed a way in that did not
+ * perform a whole mutex unlock.  This machine's mutex is C (x86_64/sync/
+ * mutex.c), so the reason is gone and only the name is left.
+ *
+ * An alias rather than a forwarder: it costs nothing at run time, and it says
+ * the true thing -- one function, two names -- where a wrapper would suggest
+ * there was a difference worth a call.
+ *
+ * ⚠️ The prototype in <kern/lock.h> says hw_lock_t and so does hw_lock_unlock,
+ * so the alias is type-checked rather than asserted.  If either side ever
+ * changes shape, this stops compiling.
+ */
+void	interlock_unlock(hw_lock_t) __attribute__((alias("hw_lock_unlock")));

@@ -12,20 +12,32 @@
 /* Kernel boot banner — printed once by model_dep.c at machine_startup. */
 const char version[] = URMACH_VERSION_STRING " \xE2\x80\x94 Uros microkernel\n";
 
-/* These symbols are normally provided by the linker */
-/* We define them here as placeholders - they should be
- * properly defined in the linker script */
+/*
+ * etext, edata and end are the linker's, and are declared where they are
+ * used -- `extern char etext;' and so on, taking the address.
+ *
+ * They used to be defined here as `char *etext = (char *)0;', described as
+ * placeholders "until the linker script defines them properly".  Two of the
+ * three already were: a linker-script assignment overrides an object file's
+ * definition, so edata and end came out right and these definitions were dead.
+ * etext was not assigned by the i386 script, so this one won -- and every
+ * reader that said `extern char etext;' was looking at a null pointer variable
+ * in BSS while believing it had the end of the text segment.
+ *
+ * Two incompatible declarations of one name in different translation units:
+ * the C language compares nothing across them, and the linker sees one symbol
+ * (#448).  Fixed where it belonged, in the two linker scripts (#453).
+ */
 
-/* Dummy definitions - actual values set by linker */
-extern char _etext[], _edata[], _end[];
-
-/* Compatibility aliases */
-char *etext = (char *)0;
-char *edata = (char *)0; 
-char *end = (char *)0;
-
-/* Master CPU identifier (declared extern in cpu_number.h) */
-int master_cpu = 0;
+/*
+ * master_cpu used to be defined here, next to etext/edata/end, because
+ * something needed a definition and this file had no opinion.  It is data
+ * about the machine -- which processor the firmware started -- so it now
+ * lives with each machine: i386/AT386/model_dep.c and x86_64/cpu/model.c.
+ *
+ * It collided the moment a second machine claimed it, which is the first time
+ * anything compared the two (#453).
+ */
 
 /* Prof queue (declared extern in profile.h, MACH_PROF disabled) */
 #include <kern/queue.h>

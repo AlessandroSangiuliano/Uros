@@ -229,4 +229,15 @@ extern void		fp_state_alloc(void);
 extern void		fpintr(void);
 extern void		fpflush(thread_act_t);
 
+/*
+ * #309 acceptance: this CPU came up with CR4.OSFXSR (and OSXSAVE where the
+ * hardware has XSAVE) actually programmed.  Run once per processor, the BSP
+ * from machine_kernel_ready() and each AP from slave_machine_init().
+ *
+ * Declared here rather than as an `extern' in each of the two callers, which
+ * is what it was: two private opinions about a signature, neither ever
+ * compared with the definition (#448, #453).
+ */
+extern void		fpu_sanity_check(void);
+
 #endif	/* _I386_FPU_H_ */

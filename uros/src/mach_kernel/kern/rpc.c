@@ -51,6 +51,25 @@
 #endif
 
 
+/*
+ * The whole of this file implements the short-circuited RPC path: the trap
+ * that enters a collocated server -- one linked into the kernel's own
+ * address space -- by migrating the calling thread onto it rather than
+ * composing a message (#453).
+ *
+ * A machine either has that path or does not, and <machine/rpc.h> is where
+ * each one says so.  x86-64 does not, by decision rather than by omission:
+ * see <mach/x86_64/rpc.h> for why the i386 macros cannot be transliterated
+ * (they are register names encoding the i386 calling convention) and why an
+ * IOMMU has taken away the reason collocation existed.
+ *
+ * So on such a machine this file compiles to nothing.  It is guarded rather
+ * than dropped from the build because it is not dead code -- it is live code
+ * for the machines that have the facility, and the guard is what says which
+ * ones those are.
+ */
+#if	MACHINE_RPC_GLUE
+
 #if	!MACH_RT
 #define	IP_RT(port)	(0)
 #endif	/* !MACH_RT */
@@ -2646,3 +2665,4 @@ unwind_invoke_state(thread_act_t thr_act)
 	return ret;
 }
 
+#endif	/* MACHINE_RPC_GLUE */

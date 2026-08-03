@@ -43,6 +43,23 @@ SECTIONS
         *(.text.*)
         *(.gnu.linkonce.t.*)
         _text_end = .;
+
+        /*
+         * etext -- the end of the kernel text, as the C code spells it.
+         *
+         * It was missing, and edata and end below were not: so `extern char
+         * etext;' in db_interface.c, db_trace.c and mach_clock.c resolved
+         * instead to `char *etext = (char *)0;' in kern/version.c, a BSS
+         * variable that nothing ever assigned.  &etext was therefore an
+         * address in BSS, above every section, which made `pc < &etext' true
+         * for the whole image -- right by accident, for the wrong reason,
+         * and only as long as nothing looked (#453).
+         *
+         * A linker-script assignment overrides an object file's definition,
+         * which is why edata and end were correct all along and this one was
+         * not: they were assigned here and it was not.
+         */
+        etext = .;
     }
 
     /* Read-only data */

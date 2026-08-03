@@ -38,6 +38,22 @@
  */
 #define IPI_VECTOR_CALL		0xF1
 
+/*
+ * "Look at your pending work" (#453).
+ *
+ * Sent to one processor, not broadcast, and it carries nothing: the message
+ * is the interrupt.  The machine-independent scheduler asks for this when it
+ * has queued something for a processor that is running, and what it wants is
+ * for that processor to reach a point where it checks -- which is the return
+ * from any interrupt.  So the handler does nothing at all, and the useful
+ * part is the return path it creates.
+ *
+ * Class 15, like the call vector, because a processor that stopped answering
+ * these while holding a lock would be a deadlock rather than a priority (see
+ * <cpu/spl.h>).
+ */
+#define IPI_VECTOR_AST		0xF2
+
 /* Claim the vector.  Boot processor, once, before anybody is woken. */
 void ipi_init(void);
 
@@ -56,6 +72,13 @@ void ipi_init(void);
  * one is done.
  */
 void ipi_call_others(void (*fn)(void *), void *arg);
+
+/*
+ * Ask one processor to look at its asynchronous work.  Returns at once --
+ * there is nothing to wait for, and waiting would be the caller blocking on
+ * a processor it has just asked to go and do something.
+ */
+void ipi_ast_check(uint32_t apic_id);
 
 /*
  * How many cross-calls this processor has served.  For the boot-time proof

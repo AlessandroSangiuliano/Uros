@@ -108,6 +108,19 @@
 #define DIRECT_MAP_MAX_SIZE	(KERNEL_HEAP_OFFSET - DIRECT_MAP_OFFSET)
 
 /*
+ * How far the kernel heap may run: to the next region and not one byte
+ * further (#453).
+ *
+ * Derived rather than written, for the reason the whole file is derived --
+ * a constant here and a constant in PERCPU_OFFSET would agree until one of
+ * them was edited, and the VM would then hand kmem_alloc() addresses that
+ * already belong to the per-CPU blocks.  This is the range
+ * pmap_virtual_space() reports, so it is the range the machine-independent
+ * allocator believes it owns.
+ */
+#define KERNEL_HEAP_SIZE	(PERCPU_OFFSET - KERNEL_HEAP_OFFSET)
+
+/*
  * Containment test, written as a subtraction rather than the obvious
  * (va >= base && va < base + size).
  *

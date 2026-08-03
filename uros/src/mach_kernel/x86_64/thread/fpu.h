@@ -105,6 +105,14 @@ void fpu_restore(const void *area);
  */
 void fpu_area_init(void *area);
 
+/*
+ * One area per thread, allocated because its size is what this processor
+ * needs rather than a constant, and aligned because XSAVE raises #GP on an
+ * area that is not (#453).  fpu_area_alloc() returns it already initialised.
+ */
+void *fpu_area_alloc(void);
+void  fpu_area_free(void *area);
+
 #endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_THREAD_FPU_H_ */

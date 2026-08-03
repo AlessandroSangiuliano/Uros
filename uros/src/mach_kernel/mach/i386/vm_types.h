@@ -86,6 +86,33 @@
 #ifndef	_MACH_I386_VM_TYPES_H_
 #define _MACH_I386_VM_TYPES_H_
 
+/*
+ * This file makes vm_offset_t and vm_size_t 32 bits wide.  That is correct
+ * for i386 and catastrophic anywhere else, so reaching it from a build for
+ * another architecture is a build error rather than a truncation (#453).
+ *
+ * The failure it prevents is a silent one, and the measurement is worth
+ * recording because it is not obvious which way it goes.  When a translation
+ * unit pulls in *both* this header and the target's own, the two typedefs
+ * disagree and C rejects them -- loudly, and in either order.  That is luck
+ * rather than design: the guards happen to be named per architecture
+ * (_MACH_I386_VM_TYPES_H_ against _MACH_X86_64_VM_TYPES_H_), so neither
+ * suppresses the other.  Had they been named for the role they play --
+ * _MACH_MACHINE_VM_TYPES_H_, which is the obvious name and the one a tidying
+ * hand would reach for -- whichever arrived first would silently win.
+ *
+ * The genuinely silent case is a translation unit that pulls in only this
+ * one.  It compiles clean, and every pointer stored in a vm_offset_t loses
+ * its top half.  On 2026-08-01 no source in the kernel was in that state --
+ * two were in the loud state (kern/bootstrap.c through <i386/multiboot.h>,
+ * device/device_master.c through the PCI and PIC headers) and no source was
+ * in the quiet one.  This #error is what keeps that true without anyone
+ * having to check again.
+ */
+#if	!defined(__i386__) && !defined(ASSEMBLER)
+#error "<mach/i386/vm_types.h> reached on a non-i386 build: vm_offset_t here is 32 bits wide"
+#endif
+
 #ifdef	ASSEMBLER
 #else	/* ASSEMBLER */
 

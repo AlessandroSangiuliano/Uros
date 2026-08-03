@@ -79,6 +79,13 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/ap_trampoline.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_modules.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/printf.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/klog.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/cpu_data.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/bitmap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/copy.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/lib/string.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/multiboot2.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
@@ -88,8 +95,12 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/conf.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/machdep.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/model.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/startup.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/spl.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/smp.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/bootmem.c
@@ -99,11 +110,13 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pmap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/pv.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/tlb.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/vminit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/pmap/walk.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/probe.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/syscall/syscall.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pit.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rtc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.c
@@ -112,8 +125,41 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
-  # sync/mutex.c and kern/lock.c are not in that list, and the boundary is
-  # worth stating exactly rather than as "not yet" (#452/#428).
+  # sync/mutex.c, thread/machine.c and kern/lock.c are not in that list, and
+  # the boundary is worth stating exactly rather than as "not yet" (#453).
+  #
+  # ── Measured 2026-08-02, and the shape of it changed ─────────────────
+  #
+  # thread/machine.c is the seventeen-name thread and activation surface the
+  # machine-independent tree calls.  It compiles.  Adding it to this list
+  # leaves FIVE undefined symbols -- Assert, printf, kalloc, kfree,
+  # usimple_lock_init -- from four files that also compile: kern/debug.c,
+  # kern/printf.c, kern/kalloc.c, kern/lock.c.
+  #
+  # Adding those four leaves TWENTY-EIGHT, and they are a different kind of
+  # thing: assert_wait, thread_block, thread_wakeup_prim, kmem_alloc,
+  # kmem_suballoc, zinit, zalloc, kernel_map, page_size.  That is the
+  # scheduler and the virtual memory system, together, and neither closes
+  # without the other.
+  #
+  # ⚠️ The generated MIG user stubs are not a way round this, and it is worth
+  # recording that they were tried.  memory_object_user.c and its four
+  # neighbours have been generated since #416 and compiled by nobody, and on
+  # paper they define 22 of the missing symbols for no new code.  Compiling
+  # them leaves three others -- mach_msg_rpc_from_kernel and
+  # mach_msg_send_from_kernel from kern/ipc_mig.c, and NDR_record, which is
+  # instantiated by whichever translation unit includes <machine/ndr_def.h>
+  # and on i386 is ipc/ipc_init.c.
+  #
+  # Three symbols, and behind them the IPC subsystem.  The offline symbol
+  # closure had said the stubs were free; the linker says they are not, and
+  # the linker is the one that decides.  They come in with the bring-up.
+  #
+  # So the door is one file wide and the room behind it is the rest of the
+  # kernel.  That is why #453's rule is that the kernel links at the end of
+  # every commit: the next step is not another name, it is the bring-up, and
+  # it wants to be attempted as one deliberate thing rather than discovered
+  # halfway through a commit about thread state.
   #
   # Both COMPILE.  kern/lock.c was one missing header away and #428 supplied
   # it; the mutex has been compiling since it was written.  What stops them
@@ -147,8 +193,17 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # the same reason it resolves to mach/i386/ there.
   set(KERNEL_DEFINES_BARE
       KERNEL MACH_KERNEL KERNEL_PRIVATE KERNEL_SERVER=1
-      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=1 MACH_HOST=1
-      STAT_TIME MACH_MACHINE_ROUTINES TASK_SWAPPER=1 __NO_UNDERSCORES__)
+      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=0 MACH_HOST=1
+      STAT_TIME TASK_SWAPPER=1 __NO_UNDERSCORES__
+      # This machine supplies its own usimple_lock (x86_64/sync/lock.c), so
+      # kern/lock.c leaves them out.  See the guard there: the rest of that
+      # file is the mutex slow path and the read/write locks, which reach
+      # into the scheduler (#453).
+      USIMPLE_LOCK_CALLS=1
+      # Zero, and said rather than left undefined: this kernel is built
+      # -mgeneral-regs-only so that entry from user mode never has to save
+      # vector state, which means no floating point anywhere in it (#453).
+      KERNEL_FLOAT_OK=0)
   list(TRANSFORM KERNEL_DEFINES_BARE PREPEND -D OUTPUT_VARIABLE KERNEL_DEFINES)
 
   # ⚠️ #452 added the machine-independent tree to this list, and it is the
@@ -161,6 +216,23 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # first so <sync/lock.h> is this target's own; that is also why the x86-64
   # directories are named after the MD contracts rather than after kern/,
   # vm/, ipc/ -- none of those names can ever collide.
+  # Where the generated MIG output goes, and where its headers are found.
+  #
+  # ⚠️ Set HERE, before target_include_directories() below, and not beside
+  # the rules that fill it.  It used to be assigned ninety lines further
+  # down, so the include path was built from an empty variable and carried
+  # `-I/mach' -- a directory in the root of the filesystem (#453).
+  #
+  # Nothing noticed for as long as no source needing a generated header was
+  # compiled.  The first four that were -- ipc_kmsg.c, ds_routines.c,
+  # dev_pager.c, device/subrs.c -- all stopped on <mach/mach_server.h>, and
+  # the path in the error message is what gave it away.  cmake does not warn
+  # about an -I that does not exist, and an empty variable in a path
+  # concatenation is silent everywhere.
+  set(X86_64_MIG_DIR ${CMAKE_CURRENT_BINARY_DIR})
+  file(MAKE_DIRECTORY ${X86_64_MIG_DIR}/mach ${X86_64_MIG_DIR}/mach_debug
+                      ${X86_64_MIG_DIR}/device)
+
   target_include_directories(mach_kernel PRIVATE
     ${CMAKE_SOURCE_DIR}/uapi
     ${UROS_ARCH_INCLUDE}
@@ -191,7 +263,50 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       -mgeneral-regs-only -fcf-protection=none -ffreestanding -fno-pic
       -fno-pie -fno-stack-protector -fno-builtin -nostdinc
       -fno-omit-frame-pointer
-      -isystem ${X86_64_GCC_INC} -std=gnu11 -Wall>)
+      # ⚠️ Three flags i386 carries and this target did not (#453).
+      #
+      # -fno-strict-aliasing is the one that matters.  This kernel casts
+      # between unrelated struct types constantly -- a queue_entry_t into an
+      # ipc_port_t, a vm_map_copy_t into a page list -- and with strict
+      # aliasing on at -O2 the compiler is entitled to assume writes through
+      # one type cannot be seen through the other, and to keep a stale value
+      # in a register across them.  That is a miscompilation, it is silent,
+      # and it would land on the target that has never executed an
+      # instruction.
+      #
+      # -fno-optimize-sibling-calls keeps the frame chain intact.  A tail
+      # call reuses the caller's frame, so the walker in x86_64/trap/trap.c
+      # loses a level -- and halt_cpu() runs that walker on the panic path,
+      # which is exactly when a missing level is the one you needed.
+      #
+      # -fno-common is the GCC 10 default now, and is stated rather than
+      # assumed: a tentative definition landing in COMMON would let two
+      # translation units share a variable they each believe they own.
+      -fno-common -fno-strict-aliasing -fno-optimize-sibling-calls
+      -isystem ${X86_64_GCC_INC} -std=gnu11 -Wall
+      #
+      # The same six suppressions i386 carries, and for the same reason.
+      #
+      # ⚠️ Measured before adopting, because "the same noise" is a claim.
+      # Built i386 once with this list removed: 356 warnings, and every one
+      # of these six classes is LARGER there than here -- 205 unused
+      # variables against 128, 80 parentheses against 44, 12 missing braces
+      # against none.  i386 compiles more files, so it has more of the same
+      # heritage noise; not one of them is a 64-bit finding.
+      #
+      # What that leaves is the point: the classes i386 reports ZERO of --
+      # pointer-to-int-cast, int-to-pointer-cast, format, overflow -- are
+      # exactly the ones this port exists to find, and they stay on.
+      #
+      # ⚠️ -Wdangling-else is part of -Wparentheses, so it goes quiet with
+      # it.  i386 has five and this target one; worth knowing that turning
+      # -Wparentheses back on is what would show them.
+      -Wno-pointer-sign
+      -Wno-unused-variable
+      -Wno-unused-function
+      -Wno-unused-but-set-variable
+      -Wno-missing-braces
+      -Wno-parentheses>)
   # The same configuration the mig rules generate against, now also for the
   # code (#452).  Without NCPUS the config header defaults it to 1, and
   # kern/lock.h compiles every mutex operation away to an empty macro -- so
@@ -250,9 +365,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # of the headers #450 left unwritten: it names MACHINE_SERVER, and there is
   # no subsystem to name yet.  That is #413's to decide, not something to
   # invent here.
-  set(X86_64_MIG_DIR ${CMAKE_CURRENT_BINARY_DIR})
-  file(MAKE_DIRECTORY ${X86_64_MIG_DIR}/mach ${X86_64_MIG_DIR}/mach_debug
-                      ${X86_64_MIG_DIR}/device)
 
   set(UROS_MIG_INCLUDES
       -I${UROS_ARCH_INCLUDE}
@@ -260,6 +372,12 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       -I${CMAKE_CURRENT_SOURCE_DIR}/include
       -I${CMAKE_CURRENT_SOURCE_DIR}/x86_64
       -I${UROS_CONFIG_INCLUDE})
+
+  # Which machine migcom is generating for.  Not optional: it defaults to
+  # i386, so a missing flag produces i386 message layout silently -- 12-byte
+  # port descriptors where this target's are 16 (#453).
+  set(UROS_MIG_TARGET_ARGS -target x86_64)
+  set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_X86_64=1)
 
   # No AT386, no EISA/HIMEM/NPCI/MP_V1_1: those name i386 hardware, and the
   # generated code is the wire format, which must not depend on them.
@@ -297,12 +415,220 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/device/device_reply.defs
                ${X86_64_MIG_DIR}/device X86_64_MIG)
 
-  # The stubs are not compiled into the kernel yet -- the MI sources they
-  # belong to do not build here.  Without a target depending on them, cmake
-  # would never run the rules at all, and the headers the probe is waiting
-  # for would still not exist.  So they are generated as their own target,
-  # and the kernel depends on it: the interface is produced whenever the
-  # kernel is, which is when a mismatch is worth finding out about.
+  # device_pager_server -- the one rule that is not add_mig_server().
+  #
+  # The device pager answers the memory-object protocol, so its server is
+  # generated from mach/memory_object.defs a second time, into a different
+  # pair of files.  device/dev_pager.c then #defines memory_object_* to
+  # device_pager_* and #includes the generated .c, which is why only the
+  # header is named in a source list and the .c never is.
+  #
+  # It has to be spelled out because add_mig_server() derives its output
+  # names from the .defs name, and here the two differ on purpose.  The
+  # include path is this target's, not i386's: same generator, same input,
+  # different machine_types.defs behind <mach/machine/*> (#416).
+  add_custom_command(
+    OUTPUT ${X86_64_MIG_DIR}/device/device_pager_server.c
+           ${X86_64_MIG_DIR}/device/device_pager_server.h
+    COMMAND ${CMAKE_C_COMPILER} -E -x c
+            -I${CMAKE_SOURCE_DIR}/uapi
+            -I${UROS_ARCH_INCLUDE}
+            -I${CMAKE_CURRENT_SOURCE_DIR}/x86_64
+            -I${CMAKE_CURRENT_SOURCE_DIR}
+            -I${CMAKE_CURRENT_SOURCE_DIR}/include
+            -I${UROS_CONFIG_INCLUDE}
+            ${KERNEL_DEFINES}
+            ${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object.defs |
+            $<TARGET_FILE:migcom>
+            ${UROS_MIG_TARGET_ARGS}
+            -sheader ${X86_64_MIG_DIR}/device/device_pager_server.h
+            -server ${X86_64_MIG_DIR}/device/device_pager_server.c
+            -header /dev/null
+            -user /dev/null
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS}
+            ${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object.defs
+    COMMENT "MIG x86-64: memory_object -> device_pager (server)"
+    VERBATIM
+  )
+  list(APPEND X86_64_MIG_GENERATED
+       ${X86_64_MIG_DIR}/device/device_pager_server.c
+       ${X86_64_MIG_DIR}/device/device_pager_server.h)
+
+  # The generated stubs are their own target as well as sources, because the
+  # HEADERS have readers the .c files do not: ipc_kobject.c wants
+  # device_pager_server.h, and nothing compiles that one.  A rule cmake has no
+  # dependent for never runs at all.
+
+  # ------------------------------------------------------- #453, the bring-up
+  # The machine-independent kernel.
+  #
+  # 2026-08-03: it links.  Everything below this comment is the shared kernel
+  # -- ipc/, kern/, vm/, device/ -- compiled and linked into an x86-64 image
+  # for the first time, together with the MIG stubs generated for this target
+  # and the two machine-dependent files that only it needs
+  # (x86_64/thread/machine.c, x86_64/sync/mutex.c).
+  #
+  # ⚠️ It has still never executed an instruction.  Linking says every name a
+  # caller wanted was defined by somebody; it says nothing about whether the
+  # definition is right.
+  #
+  # ── What is NOT here, and why ────────────────────────────────────────
+  #
+  #   device/net_io.c        the in-kernel network stack, and the pseudo-
+  #   device/net_device.c    device that exists to feed it packets.  Out by
+  #   device/test_device.c   design, not by schedule: network cards belong to
+  #                          user-space servers and the TCP/IP stack is a
+  #                          server too, so there are no producers here.  The
+  #                          hooks the stack planted in the core sit behind
+  #                          MACH_NET_IN_KERNEL, which is 0 for this machine.
+  #
+  #   device/device_master.c the fourteen RPCs a user-space driver reaches
+  #                          hardware through.  It is i386 code living in
+  #                          device/ -- <i386/ipl.h>, <i386/pio.h>,
+  #                          <i386/ioapic.h> outside any conditional -- and
+  #                          almost every one of its RPCs changes mechanism
+  #                          here rather than merely widening: ECAM instead of
+  #                          ports 0xCF8/0xCFC, our own IOAPIC and MSI-X, and
+  #                          IOMMU addresses out of the DMA calls.  A rewrite,
+  #                          behind MACH_DEVICE_MASTER, which is 0 here.
+  #
+  #   ddb/                   no debugger yet (#428): MACH_KDB is 0, and so is
+  #                          MACH_TR, whose trace buffer is read back through
+  #                          db_show_tr and would otherwise promise a facility
+  #                          this tree cannot deliver.
+  #
+  # ── What the count did ───────────────────────────────────────────────
+  #
+  #   2026-08-02, first measurement          97 undefined symbols
+  #   after the VM bootstrap surface (#407)  89
+  #   after mem_size / halt / Debugger       84
+  #   after the console and usimple_lock     79
+  #   after the device and clock tables      64
+  #   after the processor surface            61
+  #   after MACH_KDB=0                       44
+  #   after the context switch and returns   44, and a different 44
+  #   2026-08-03, remeasured                 16
+  #   after MACH_TR=0 and the net knob        7
+  #   after machine_kernel_ready              3
+  #   after MACH_DEVICE_MASTER=0              1
+  #   after x86_64/time/rtc.c                 0
+  #
+  # ⚠️ The jump from 44 to 16 is not work done between the two: it is one file
+  # that had never been in the build.  x86_64/sync/mutex.c defines four names
+  # with 2002 call sites behind them, and it was out because it calls
+  # mutex_lock_wait() in kern/lock.c -- so it could not go in until the
+  # machine-independent tree did.  Nothing had ever consumed it, which is
+  # exactly why nothing had ever checked it.
+  set(X86_64_MIG_C ${X86_64_MIG_GENERATED})
+  list(FILTER X86_64_MIG_C INCLUDE REGEX "\\.c$")
+  list(FILTER X86_64_MIG_C EXCLUDE REGEX "device_pager_server\\.c$")
+  list(FILTER X86_64_MIG_C EXCLUDE REGEX "device_master_server\\.c$")
+  list(FILTER X86_64_MIG_C EXCLUDE REGEX "/device_server\\.c$")
+  list(FILTER X86_64_MIG_C EXCLUDE REGEX "device_reply_user\\.c$")
+  target_sources(mach_kernel PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/machine.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/mutex.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/blkio.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/chario.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/cirbuf.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/data_device.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/dev_lookup.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/dev_name.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/dev_pager.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/device_init.c
+    ${X86_64_MIG_DIR}/device/device_reply_user.c
+    ${X86_64_MIG_DIR}/device/device_server.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/device_stubs.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/driver_lock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/ds_routines.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/io_scatter.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/subrs.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_entry.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_hash.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_init.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_kmsg.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_mqueue.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_notify.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_object.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_port.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_pset.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_radix.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_right.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_space.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_table.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/ipc_thread.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/mach_msg.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/ipc/mach_port.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ast.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/boot_script.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/bootstrap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/cap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/clock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/counters.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/cpu_data.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/debug.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/etap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/eventcount.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/exception.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/hmac_sha256.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/host.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_clock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_host.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_kobject.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_mig.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_subsystem.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_sync.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_tt.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/kalloc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/klog.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/ledger.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/lock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/lock_smoke.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/mach_clock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/mach_factor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/machine.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/norma_bootstrap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/posixtime.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/printf.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/priority.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/processor.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/queue.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/rcu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/rpc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/sched_prim.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/sha256.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/sscanf.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/startup.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/subsystem.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/sync_lock.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/sync_policy.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/sync_sema.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/syscall_emulation.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/syscall_subr.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/syscall_sw.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/task.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/task_swap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/thread.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/thread_act.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/thread_pool.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/thread_swap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/timer.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/version.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/zalloc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/memory_object.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_external.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_fault.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_init.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_kern.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_map.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_object.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_pageout.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_resident.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vm/vm_user.c
+    ${X86_64_MIG_C})
+  set_source_files_properties(${X86_64_MIG_GENERATED} PROPERTIES COMPILE_OPTIONS "-Wno-overflow")
+  # ---------------------------------------------------------------------
+
   add_custom_target(uros_mig_stubs DEPENDS ${X86_64_MIG_GENERATED})
   add_dependencies(mach_kernel uros_mig_stubs)
 
@@ -423,6 +749,7 @@ set(KERNEL_DEFINES
     -DMACH_HOST=1
     -DKERNEL_PRIVATE
     -DSTAT_TIME
+    -DKERNEL_FLOAT_OK=1
     -DMACH_MACHINE_ROUTINES
     # -DMACH_PROF  # Disabled - requires prof.defs MIG generation
     -DKERNEL_SERVER=1
@@ -576,6 +903,13 @@ set(UROS_MIG_INCLUDES
     -I${KERNEL_SRC_DIR}/i386
     -I${KERNEL_SRC_DIR}/i386/AT386
     -I${UROS_CONFIG_INCLUDE})
+
+# Said out loud even though it is migcom's default.  Relying on a default is
+# how the x86-64 rules generated i386 layout without anyone noticing; the
+# output here is unchanged, which is the point -- the flag states what was
+# already true instead of leaving it to be inferred (#453).
+set(UROS_MIG_TARGET_ARGS -target i386)
+set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_I386=1)
 
 
 # ---- Mach subsystem MIG files ----
@@ -861,6 +1195,7 @@ set(I386_C_SOURCES
     i386/ldt.c
     i386/loose_ends.c
     i386/net_filter.c
+    i386/boot_modules.c
     i386/pcb.c
     i386/phys.c
     i386/kmap.c

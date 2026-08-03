@@ -32,6 +32,12 @@
  * Definition of RPC "glue code" operations vector -- entry
  * points needed to accomplish short-circuiting
  */
+/*
+ * This machine has the short-circuited RPC path (#453); x86-64 does not,
+ * so the machine-independent tree tests for this name rather than assuming it.
+ */
+#define	MACHINE_RPC_GLUE	1
+
 typedef struct rpc_glue_vector {
 	kern_return_t	(*rpc_simple)(int, int, void *);
 	boolean_t	(*copyin)(mach_port_t, const char *, char *, int);

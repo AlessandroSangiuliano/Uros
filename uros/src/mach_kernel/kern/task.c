@@ -395,7 +395,13 @@ zone_t	task_zone;
 /*
  * Define glue vector used by short-circuited RPC, and a pointer
  * to it.
+ *
+ * Only on a machine that has the short-circuited path at all (#453).  The
+ * glue is what lets a collocated server -- one linked into the kernel's own
+ * address space -- be entered by a stack switch instead of a message, and a
+ * machine without an RPC trap has nothing to enter that way.
  */
+#if	MACHINE_RPC_GLUE
 static struct rpc_glue_vector _rpc_glue_vector_data = {
 	machine_rpc_simple,	/* migrate shuttle to server */
 	klcopyin,		/* short-circuit server copyin */
@@ -405,6 +411,7 @@ static struct rpc_glue_vector _rpc_glue_vector_data = {
 	klthread_depress_abort,	/* short-circuit user thread_depress_abort */
 };
 rpc_glue_vector_t _rpc_glue_vector = &_rpc_glue_vector_data;
+#endif	/* MACHINE_RPC_GLUE */
 
 /* Forwards */
 
@@ -540,18 +547,28 @@ kernel_task_create(
 			 * New task created with ref count of 2 -- decrement by
 			 * one to force task deletion.
 			 */
-			printf("kmem_suballoc(%p,%x,%x,1,0,&new) Fails\n",
-			       kernel_map, map_base, map_size);
+			printf("kmem_suballoc(%p,%lx,%lx,1,0,&new) Fails\n",
+			       kernel_map, (unsigned long) map_base,
+			       (unsigned long) map_size);
 			--new_task->ref_count;
 			task_deallocate(new_task);
 			return (retval);
 		}
 		vm_map_deallocate(old_map);
+#if	MACHINE_RPC_GLUE
 		user_data.user_data = (void *)_rpc_glue_vector;
 		(void)task_set_info(new_task,
 				    TASK_USER_DATA,
 				    (task_info_t)&user_data,
 				    TASK_USER_DATA_COUNT);
+#endif	/* MACHINE_RPC_GLUE */
+		/*
+		 * Nothing is published where there is no glue, and that is the
+		 * case libmach already handles: mach_init() reads TASK_USER_DATA
+		 * and, finding it unset, points _rpc_glue_vector at its own slot.
+		 * The fallback is not new code -- it is the path taken today by
+		 * any task the kernel did not reach in time.
+		 */
 		*child_task = new_task;
 	}
 

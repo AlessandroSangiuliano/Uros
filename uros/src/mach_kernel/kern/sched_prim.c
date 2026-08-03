@@ -459,8 +459,27 @@ timer_elt_data_t recompute_priorities_timer;
 queue_head_t		wait_queue[NUMQUEUES];
 decl_simple_lock_data(,wait_lock[NUMQUEUES])
 
+/*
+ * Which bucket an event waits in.
+ *
+ * The event is a pointer used as a token, so the bits that distinguish two
+ * events are the low ones -- the allocator's granularity and above.  It is
+ * hashed at pointer width, which on a 64-bit machine is the whole of it: the
+ * old form cast to int, discarding the upper half and taking two events that
+ * differ only above bit 31 to the same bucket.
+ *
+ * The `< 0 ? ~x : x' dance went with that cast.  It existed because a
+ * pointer cast to a SIGNED int is negative whenever the top bit is set, and
+ * % of a negative value in C truncates toward zero -- so it would have
+ * indexed the array from below.  Hashing unsigned removes the question
+ * rather than answering it.
+ *
+ * ⚠️ NUMQUEUES is 59, a prime, and the modulo is what mixes: with a power of
+ * two it would keep only the low bits and every event in one allocation slab
+ * would land in the same bucket.  The prime is load-bearing, not a taste.
+ */
 #define wait_hash(event) \
-	((((int)(event) < 0) ? ~(int)(event) : (int)(event)) % NUMQUEUES)
+	(((vm_offset_t)(event)) % NUMQUEUES)
 
 void
 sched_init(void)
@@ -709,11 +728,10 @@ __assert_wait(
 		 * prompt walks the stack properly instead of guessing at it.
 		 */
 		panic("assert_wait: no current_thread "
-		      "(event=0x%x ra=0x%x) — caller invoked sleep before "
+		      "(event=%p ra=%p) — caller invoked sleep before "
 		      "scheduler is up; use `trace` at the ddb prompt for the "
 		      "rest of the chain",
-		      (unsigned)event,
-		      (unsigned)(unsigned long)__builtin_return_address(0));
+		      event, __builtin_return_address(0));
 	}
 	if (thread->wait_event != NO_EVENT) {
 		panic("assert_wait: already asserted event %p\n",
@@ -1780,16 +1798,17 @@ thread_block_reason(
 	thread_lock(thread);
 	/*
 	 * Distinguish safe-point sentinels from real continuations.
-	 * Sentinels (SAFE_*) are small negative values (-1..-7,
-	 * i.e. unsigned >= 0xFFFFFFF9): store in at_safe_point,
-	 * zero the continuation (it's not a real function pointer).
-	 * Real continuations are valid kernel addresses: the caller
-	 * must pre-set at_safe_point before calling thread_block().
-	 * NULL means no continuation and no safe-point.
+	 * Sentinels (SAFE_*) are small negative values, so as addresses
+	 * they sit in the last SAFE_POINT_SENTINEL_MAX bytes of the
+	 * address space, where no function can be: store in
+	 * at_safe_point, zero the continuation (it's not a real function
+	 * pointer).  Real continuations are valid kernel addresses: the
+	 * caller must pre-set at_safe_point before calling
+	 * thread_block().  NULL means no continuation and no safe-point.
 	 */
-	if ((unsigned int)continuation >= 0xFFFFFFF9u) {
+	if ((vm_offset_t)continuation >= (vm_offset_t)-SAFE_POINT_SENTINEL_MAX) {
 		/* Sentinel: use for at_safe_point, zero continuation */
-		thread->at_safe_point = (int) continuation;
+		thread->at_safe_point = (int)(long) continuation;
 		continuation = (void (*)(void)) 0;
 	} else if (continuation == (void (*)(void)) 0) {
 		thread->at_safe_point = NOT_AT_SAFE_POINT;
@@ -1935,8 +1954,8 @@ thread_run(
 	s = splsched();
 	thread_lock(thread);
 	/* Apply same sentinel detection as thread_block_reason */
-	if ((unsigned int)continuation >= 0xFFFFFFF9u) {
-		thread->at_safe_point = (int) continuation;
+	if ((vm_offset_t)continuation >= (vm_offset_t)-SAFE_POINT_SENTINEL_MAX) {
+		thread->at_safe_point = (int)(long) continuation;
 		continuation = (void (*)(void)) 0;
 	} else if (continuation == (void (*)(void)) 0) {
 		thread->at_safe_point = NOT_AT_SAFE_POINT;

@@ -40,6 +40,7 @@
 #ifndef _X86_64_THREAD_ACT_H_
 #define _X86_64_THREAD_ACT_H_
 
+#include <kern/assert.h>	/* Assert(), inside USER_REGS() below */
 #include <kern/lock.h>
 #include <thread/context.h>
 #include <trap/trap.h>
@@ -66,6 +67,8 @@ typedef struct pcb {
 	decl_simple_lock_data(,lock)
 } *pcb_t;
 
+#define	PCB_NULL	((pcb_t) 0)
+
 /*
  * The storage and the pointer both, as on i386: the block lives in the
  * activation, and `pcb` points at it.  The indirection is what the MI tree
@@ -87,5 +90,73 @@ typedef struct MachineThrAct {
  * is that there is nothing to unwire.
  */
 #define THREAD_SWAP_UNWIRE_USER_STACK	FALSE
+
+/*
+ * ── Reaching a thread's user registers (#453) ─────────────────────────
+ *
+ * The machine-independent tree asks four questions of an activation, and
+ * they all resolve to the frame trap entry left behind.
+ *
+ * ⚠️ USER_REGS() answers a pointer that is NULL for a thread which has never
+ * left the kernel -- a kernel thread, or a user thread between creation and
+ * its first return to ring 3.  i386 cannot produce that answer, because
+ * there the frame is a member of the pcb and so always has an address.  Here
+ * it is a pointer into the thread's own stack, which is the arrangement that
+ * gives us one copy of the user's registers instead of two, and the price is
+ * that the caller has to have a thread that has been to user space.  Every
+ * machine-independent caller does -- they run on the exception and system
+ * call paths, which start in ring 3 -- and the assertion carried inside the
+ * macro is there so that a future one which does not says so immediately,
+ * rather than dereferencing NULL several frames further on.
+ *
+ * The check is written against Assert() rather than assert(), because
+ * assert() expands to a statement and USER_REGS() has to stay an expression
+ * -- i386's is one, and the machine-independent callers use it inside
+ * initialisers and casts.  Under MACH_ASSERT off it becomes the plain member
+ * access and costs nothing.
+ */
+#if	MACH_ASSERT
+#define	USER_REGS(ThrAct)						\
+	(((ThrAct)->mact.pcb->user != (struct trap_frame *) 0 ? (void) 0 \
+	  : Assert(__FILE__, __LINE__, "USER_REGS: thread has no user frame")), \
+	 (ThrAct)->mact.pcb->user)
+#else	/* MACH_ASSERT */
+#define	USER_REGS(ThrAct)	((ThrAct)->mact.pcb->user)
+#endif	/* MACH_ASSERT */
+
+#define	act_machine_state_ptr(ThrAct)	((thread_state_t) USER_REGS(ThrAct))
+
+/*
+ * Came from ring 3?  The saved code segment says so, and it is the segment
+ * rather than the address that decides -- a kernel address in rip proves
+ * nothing about where the trap came from.
+ *
+ * i386 also tests EFL_VM here, for virtual-8086 mode.  Long mode does not
+ * have virtual-8086 at all, so there is no second case to ask about; the
+ * absence is architectural rather than unfinished.
+ */
+#define	is_user_thread(ThrAct)	((USER_REGS(ThrAct)->cs & 3) != 0)
+
+#define	user_pc(ThrAct)		(USER_REGS(ThrAct)->rip)
+#define	user_sp(ThrAct)		(USER_REGS(ThrAct)->rsp)
+
+/*
+ * Nothing to synchronise: system call emulation is a per-task vector the MI
+ * code edits under the task lock, and i386 needs this hook only because its
+ * emulation vector is reachable through the LDT, which is per-thread and has
+ * to be re-pointed on every thread of the task.  There is no LDT here -- the
+ * decision recorded in x86_64/cpu/desc.c -- so there is nothing that could
+ * be out of date.
+ *
+ * Defined as (void)(task) rather than empty so that a call site keeps
+ * evaluating nothing but still type-checks its argument.
+ */
+#define	syscall_emulation_sync(task)	((void)(task))
+
+/*
+ * Flavor to size in words, indexed by flavor number.  Defined in
+ * x86_64/thread/state.c, next to the flavors it measures.
+ */
+extern unsigned int	state_count[];
 
 #endif /* _X86_64_THREAD_ACT_H_ */

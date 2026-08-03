@@ -216,9 +216,23 @@ typedef void	*pc_t;
 #endif	/* USLOCK_DEBUG || ETAP_LOCK_TRACE */
 
 
-/* #ifndef	USIMPLE_LOCK_CALLS
- * The i386 production version of usimple_locks isn't ready yet.
+/*
+ * The machine may supply its own usimple_locks, and this is the guard that
+ * lets it -- <kern/lock.h> documents the override at USIMPLE_LOCK_PROTOS and
+ * this is the other half of it.
+ *
+ * It was commented out with the note "the i386 production version of
+ * usimple_locks isn't ready yet", which was true in 1998 and has been
+ * carried since.  i386 still does not define USIMPLE_LOCK_CALLS, so nothing
+ * changes there: it gets this portable implementation exactly as before.
+ *
+ * x86-64 does define it, because it has a hw_lock of its own and because
+ * this file's other half -- the mutex slow path and the read/write locks --
+ * reaches into the scheduler, which that target cannot link yet.  A machine
+ * that only wants the spin lock should not have to take the scheduler with
+ * it (#453).
  */
+#ifndef	USIMPLE_LOCK_CALLS
 /*
  *	Portable lock package implementation of usimple_locks.
  */
@@ -918,7 +932,7 @@ db_show_all_slocks(void)
 
 #endif	/* USLOCK_DEBUG */
 
-/* #endif	USIMPLE_LOCK_CALLS */
+#endif	/* USIMPLE_LOCK_CALLS */
 
 
 /*

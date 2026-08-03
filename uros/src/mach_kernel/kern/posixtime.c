@@ -118,12 +118,7 @@
 
 #include <mach/mach_host_server.h>
  
-/* Externs */
-extern kern_return_t	bbc_gettime(
-				time_value_t *time);
-
-extern kern_return_t	bbc_settime(
-				time_value_t *time);
+/* bbc_gettime / bbc_settime are declared in <kern/posixtime.h> (#453). */
 
 #if	HZ > 500
 int		tickadj = 1;		/* can adjust HZ usecs per second */
@@ -180,7 +175,23 @@ utime_init(void)
 		bzero((char *)mtime, PAGE_SIZE);
 	}
 #endif
-	(void)bbc_gettime((time_value_t *)&time);
+	{
+		/*
+		 * Seed wall-clock time from the battery-backed clock.
+		 *
+		 * Converted rather than cast: bbc_gettime speaks tvalspec_t,
+		 * whose sub-second field is nanoseconds, and `time' is a
+		 * time_value_t, whose sub-second field is microseconds.  The
+		 * old cast put one into the other unconverted (#453).
+		 */
+		tvalspec_t	bbc;
+
+		if (bbc_gettime(&bbc) == KERN_SUCCESS) {
+			time.seconds	  = (integer_t) bbc.tv_sec;
+			time.microseconds = (integer_t)
+					    (bbc.tv_nsec / NSEC_PER_USEC);
+		}
+	}
 }
 
 /*

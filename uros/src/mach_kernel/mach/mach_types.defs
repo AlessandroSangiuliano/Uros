@@ -445,7 +445,26 @@ type ledger_port_t = mach_port_t ctype: mach_port_t
 type ledger_port_array_t 	= ^array[] of ledger_port_t;
 type ledger_item_t		= integer_t;
 
-type security_token_t		= MACH_MSG_TYPE_INTEGER_64;
+/*
+ * Two 32-bit integers, and declared as such (#453).
+ *
+ * It said MACH_MSG_TYPE_INTEGER_64, which is what the value means but not
+ * what the C type is: security_token_t is `struct { unsigned int val[2]; }`,
+ * so the compiler aligns it to four bytes while the tag says eight.  On i386
+ * that costs nothing, because no message field is ever aligned to more than
+ * four there, and the disagreement stayed invisible for thirty years.  On
+ * x86-64 migcom padded to eight and the compiler did not, so every field
+ * after it in a request sat four bytes from where the generator believed --
+ * caught by the generated assertion on device_open's Request.
+ *
+ * Declaring the element rather than the total is the fix: an array is
+ * aligned like its element, so migcom now derives four from the same place
+ * the compiler does.  The wire format does not move on either target -- it
+ * was, and remains, eight bytes -- and i386's generated stubs come out
+ * byte-identical.
+ */
+type security_token_t		= array[2] of MACH_MSG_TYPE_INTEGER_32
+	ctype: security_token_t;
 
 		/* memory_object_info_t: variable-size inline array:
 		 * memory_object_attr_info_t (5 ints)

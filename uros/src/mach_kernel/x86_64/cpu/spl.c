@@ -108,3 +108,31 @@ uint64_t spl_replayed_count(void)
 {
 	return percpu()->replayed;
 }
+
+/*
+ * Interrupts off at the processor, and back on (#453).
+ *
+ * Distinct from the levels above, which are a software priority this
+ * processor keeps in its own block: these two touch the interrupt flag, for
+ * the places that must take nothing at all -- reloading the IDT, the last
+ * steps of a halt.
+ *
+ * sploff() answers the level rather than the flag, matching its neighbours
+ * so a caller can pair it with splx() for the level part; the flag is
+ * splon()'s to restore.  Crossing the two -- sploff() then splx() -- leaves
+ * interrupts disabled with the level lowered, which looks like a hang and is
+ * one.
+ */
+spl_t sploff(void)
+{
+	spl_t	level = splx(SPLHI);
+
+	__asm__ volatile("cli" : : : "memory");
+	return level;
+}
+
+void splon(spl_t level)
+{
+	__asm__ volatile("sti" : : : "memory");
+	(void) splx(level);
+}

@@ -31,14 +31,38 @@
 struct pmap {
 	uint64_t root_pa;		/* PML4 physical address (the CR3 value) */
 	int      ref_count;
+
+	/*
+	 * Pages mapped in this space.  The machine-independent tree reads it
+	 * through pmap_resident_count() and vm_debug.c sizes an array from
+	 * it, so it is a count and not an estimate (#453).
+	 */
+	int      resident_count;
 };
 
 typedef struct pmap *pmap_t;
 
 #define PMAP_NULL	((pmap_t) 0)
 
-/* The kernel's own map, whose higher half every address space shares. */
-pmap_t pmap_kernel(void);
+/*
+ * The kernel's own map, whose higher half every address space shares.
+ *
+ * A macro over the object rather than a function returning it, because the
+ * machine-independent tree asks for it on paths that run per page fault and
+ * per kernel allocation.  As a macro it is the address of a static object --
+ * an immediate under -mcmodel=kernel, folded at compile time -- where a
+ * function would be a call across a translation unit that no optimiser can
+ * see through without link-time optimisation we do not build with.
+ *
+ * <vm/pmap.h> declares `extern pmap_t (pmap_kernel)(void)`, parenthesised so
+ * this definition wins at every call site; the declaration is never referred
+ * to and so never has to exist.  i386 does exactly the same thing, and the
+ * machine-independent code is written against the name, not against which of
+ * the two it turns out to be (#453).
+ */
+extern struct pmap kernel_pmap_store;
+
+#define	pmap_kernel()	(&kernel_pmap_store)
 
 /*
  * A new, empty address space.  Its lower half is bare; its higher half is
@@ -80,24 +104,23 @@ void pmap_activate(pmap_t pmap);
 void pmap_bootstrap(void);
 
 /*
- * Protection: the machine-independent way in, the machine's bits out.  These
- * mirror mach/vm_prot.h and are replaced by that header when the MI tree
- * arrives (guarded so whichever is seen first wins, since the values match).
+ * Protection: the machine-independent way in, the machine's bits out.
  *
  * READ is implicit on x86-64 — a present page is readable, there is no
  * read-disable — so it maps to no bit.  WRITE and the *absence* of EXECUTE
  * are the two that move: no-execute is a bit you set, so lack of EXECUTE
  * becomes INTEL_PTE_NX.
+ *
+ * ⚠️ These used to be defined here behind `#ifndef VM_PROT_NONE', with a
+ * note saying they would be "replaced by that header when the MI tree
+ * arrives".  It has (#453), and the guard did not do what it promised:
+ * <mach/vm_prot.h> defines them unconditionally, so when this header was
+ * seen first the two definitions collided and the tree compiled with five
+ * redefinition warnings and no rule about which set won.
+ *
+ * Now there is one definition and it is the interface's.
  */
-#ifndef VM_PROT_NONE
-typedef int vm_prot_t;
-
-#define VM_PROT_NONE	0x0
-#define VM_PROT_READ	0x1
-#define VM_PROT_WRITE	0x2
-#define VM_PROT_EXECUTE	0x4
-#define VM_PROT_ALL	(VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)
-#endif
+#include <mach/vm_prot.h>
 
 /*
  * The policy bits of a leaf mapping with protection `prot`.  The present bit
@@ -270,5 +293,114 @@ void pmap_copy_part_lpage(uint64_t src_va, uint64_t dst,
 			  uint64_t dst_offset, uint64_t len);
 void pmap_copy_part_rpage(uint64_t src, uint64_t src_offset,
 			  uint64_t dst_va, uint64_t len);
+
+/*
+ * ── The contract the machine-independent VM calls through (#453) ──────
+ *
+ * <vm/pmap.h> supplies the _USER and _KERNEL forms itself, in terms of the
+ * two below, whenever the machine does not define them.  We let it: those
+ * wrappers are policy about when to switch, and policy is not ours.  What is
+ * ours is what switching means, and here it means one write of CR3.
+ */
+#define	PMAP_ACTIVATE(pmap, act, cpu)	pmap_activate(pmap)
+
+/*
+ * Deactivation records nothing, and that is a statement rather than a gap.
+ *
+ * On i386 the pair maintains a per-pmap bitmap of the processors using it,
+ * for the sole purpose of narrowing TLB shootdown to those processors.  This
+ * target does not have that narrowing yet -- its shootdown goes to every
+ * processor (#439) -- so a bitmap kept here would have no reader, and a
+ * bitmap with no reader is worse than none: it costs a store on every switch
+ * and rots quietly until someone trusts it.
+ *
+ * When #439 lands it lands as a set this macro maintains, and this comment
+ * is the thing that has to change with it.
+ */
+#define	PMAP_DEACTIVATE(pmap, act, cpu)
+
+/*
+ * Move a thread onto another address space.  The order matters and is not
+ * arbitrary: the map has to be recorded before CR3 changes, so that a trap
+ * taken on the very next instruction finds the activation describing the
+ * space the processor is actually in.
+ */
+#define	PMAP_SWITCH_USER(act, new_map, cpu)				\
+MACRO_BEGIN								\
+	(act)->map = (new_map);						\
+	pmap_activate(vm_map_pmap(new_map));				\
+MACRO_END
+
+/*
+ * Is this a kernel virtual address?  The upper bound is the top of the
+ * address space, so the test is really the lower one -- but it is written as
+ * a range because that is what the name promises, and because a canonical
+ * hole sits below VM_MIN_KERNEL_ADDRESS rather than above it.
+ */
+#define	pmap_kernel_va(VA)						\
+	(((vm_offset_t)(VA) >= VM_MIN_KERNEL_ADDRESS) &&		\
+	 ((vm_offset_t)(VA) <= VM_MAX_KERNEL_ADDRESS))
+
+/*
+ * The physical address behind a kernel virtual one.
+ *
+ * ⚠️ Not direct_to_phys().  That is a subtraction and would be wrong for
+ * every address outside the direct map -- which includes the kernel image
+ * itself, mapped in the top 2 GiB, and everything kmem_alloc() hands out of
+ * kernel_map.  The callers here pass exactly those: test_device.c asks about
+ * memory it allocated.  So it is a walk, like i386's, and the fast
+ * subtraction stays where it is correct, behind its own name.
+ */
+/*
+ * ── Four the machine-independent tree calls but never defines ─────────
+ *
+ * Each is a macro on i386 and so has no symbol to link against; the MI code
+ * calls them by name and the machine decides whether that name is work or
+ * nothing.  Written out here rather than inherited, because two of the four
+ * are "nothing" and it is worth saying which two and why.
+ */
+
+/*
+ * Pages this map has resident.  A real count, kept by the pmap, because
+ * vm_debug.c sizes an array from it -- an answer that is too small is a
+ * buffer overrun in the caller, so this is not a place for an estimate.
+ *
+ * ⚠️ It lives in the pmap and is therefore a shared line on a machine with
+ * 64 processors.  #349 is the follow-up that makes it per-CPU; until then it
+ * is one counter and its cost is a decision that has been noticed rather
+ * than one that has not.
+ */
+#define	pmap_resident_count(pmap)	((pmap)->resident_count)
+
+/* The address a page frame number names. */
+#define	pmap_phys_address(frame)	((vm_offset_t) x86_64_ptob(frame))
+#define	pmap_phys_to_frame(phys)	((int) x86_64_btop(phys))
+
+/*
+ * Copying mappings from one map to another at fork: nothing, deliberately.
+ *
+ * It is an optimisation, not a requirement -- the interface allows a machine
+ * to pre-populate the child's tables so its first touches do not fault, and
+ * allows it to decline, in which case the faults do the work.  Declining is
+ * right here for now because the cost of the copy is real and the saving is
+ * a guess; #436 is where batched population gets measured, and if it wins
+ * this is where it lands.
+ */
+#define	pmap_copy(dst, src, dst_addr, len, src_addr)			\
+	((void)(dst), (void)(src), (void)(dst_addr), (void)(len),	\
+	 (void)(src_addr))
+
+/*
+ * Machine-specific memory attributes: none on this machine.
+ *
+ * KERN_INVALID_ARGUMENT and not KERN_SUCCESS: the caller asked for an
+ * attribute to be applied and it was not, so answering success would be the
+ * plausible return this project refuses.  i386 answers the same way.
+ */
+#define	pmap_attribute(pmap, addr, size, attr, value)			\
+	((void)(pmap), (void)(addr), (void)(size), (void)(attr),	\
+	 (void)(value), KERN_INVALID_ARGUMENT)
+
+#define	kvtophys(VA)	((vm_offset_t) pmap_extract(pmap_kernel(), (uint64_t)(VA)))
 
 #endif	/* _X86_64_PMAP_PMAP_H_ */

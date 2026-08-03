@@ -117,7 +117,40 @@
 type zone_name_t = struct[80] of char;
 type zone_name_array_t = array[] of zone_name_t;
 
+/*
+ * The zone report, whose size follows the machine's (#453).
+ *
+ * Five integer_t and four vm_size_t in <mach_debug/zone_info.h>.  On a
+ * machine where a size is 32 bits that is nine 32-bit words, which is what
+ * this said for thirty years.  On x86-64 a vm_size_t is 64 bits and the
+ * structure is fourteen -- four sizes twice as wide, and four bytes of
+ * padding after the leading count to align the first of them.
+ *
+ * ⚠️ Written as a count of integer_t rather than as the structure it is,
+ * because MIG's type language has no structures: it has a size and an
+ * element.  So this number is a layout computed by hand, and the generated
+ * _Static_assert against sizeof(zone_info_t) is what keeps it honest -- it
+ * is how the x86-64 value was found, by the i386 one failing.
+ *
+ * The alternative was to make the fields fixed-width so the wire format
+ * matched everywhere.  Refused: a debug interface that reports zone sizes
+ * should be able to report a zone larger than 4 GiB, and this target's ABI
+ * has 64-bit sizes by decision (#413).
+ */
+/*
+ * ⚠️ MIG_ARCH_*, not __x86_64__.  These files are preprocessed with the HOST
+ * compiler and no -m32/-m64, because the output is text for migcom rather
+ * than code -- so the compiler's own architecture macros describe the
+ * machine doing the build.  Written against __x86_64__ this was correct on
+ * whichever target happened to be generated first and wrong on the other,
+ * and it stayed wrong quietly because the .defs of types is not among the
+ * dependencies that retrigger generation.
+ */
+#if defined(MIG_ARCH_X86_64)
+type zone_info_t = struct[14] of integer_t;
+#else
 type zone_info_t = struct[9] of integer_t;
+#endif
 type zone_info_array_t = array[] of zone_info_t;
 
 type hash_info_bucket_t = struct[1] of natural_t;

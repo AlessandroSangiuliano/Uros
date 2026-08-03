@@ -369,8 +369,17 @@ queue_head_t	dev_pager_hashtable[DEV_PAGER_HASH_COUNT];
 zone_t		dev_pager_hash_zone;
 decl_mutex_data(,dev_pager_hash_lock)
 
+/*
+ * ⚠️ Hashed at pointer width, and without the & 0xffffff.
+ *
+ * The mask kept 24 bits of a 32-bit pointer, which on that machine threw
+ * away nothing a 127-bucket modulo would have used.  Here it would throw
+ * away forty, and the cast to natural_t another thirty-two before that --
+ * so two ports whose addresses differ only above bit 23 would collide by
+ * construction rather than by luck (#453).
+ */
 #define	dev_pager_hash(name_port) \
-		(((natural_t)(name_port) & 0xffffff) % DEV_PAGER_HASH_COUNT)
+		(((vm_offset_t)(name_port)) % DEV_PAGER_HASH_COUNT)
 
 void
 dev_pager_hash_init(void)

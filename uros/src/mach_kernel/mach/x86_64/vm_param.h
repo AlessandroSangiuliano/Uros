@@ -25,6 +25,20 @@
 #ifndef _MACH_X86_64_VM_PARAM_H_
 #define _MACH_X86_64_VM_PARAM_H_
 
+/*
+ * Every address below is cast to vm_offset_t, and the agreement with
+ * <pmap/layout.h> is checked at file scope -- so the type has to be here,
+ * from this header, rather than from whatever the including file happened to
+ * pull in first (#453).
+ *
+ * i386's twin does without because it never uses the type outside a macro
+ * body, where the name is not looked up until the macro is used.  The static
+ * assertion is what moved the requirement to file scope, and it is worth the
+ * include: it is the thing that stops the public header and the page tables
+ * from describing two different machines.
+ */
+#include <mach/machine/vm_types.h>
+
 #define BYTE_SIZE		8	/* byte size in bits */
 
 #define X86_64_PGBYTES		4096	/* bytes per page */
@@ -89,5 +103,40 @@ _Static_assert(VM_MIN_KERNEL_ADDRESS == (vm_offset_t) KERNEL_HALF_BASE,
 #define trunc_x86_64_to_vm(p)	(atop(trunc_page(x86_64_ptob(p))))
 #define round_x86_64_to_vm(p)	(atop(round_page(x86_64_ptob(p))))
 #define vm_to_x86_64(p)		(x86_64_btop(ptoa(p)))
+
+/*
+ * There is no high memory here, so every physical page is low (#453).
+ *
+ * On i386 pa_is_lowmem() separates the physical memory the kernel can reach
+ * through a permanent mapping from the memory it cannot, and vm_resident.c
+ * uses it to set vm_page.highmem -- the flag that later forces a temporary
+ * mapping for anything above the line.  The direct map removes the line: all
+ * of physical memory is addressable through it, so the answer is TRUE for
+ * every page and no page is ever marked high.
+ *
+ * This is one of the deletions #407 predicted rather than a shim standing in
+ * for work not done.  It is written as a macro yielding TRUE, and not as a
+ * comparison against some very large limit, because a limit would invite the
+ * question of what value it should hold -- and there is no such value: the
+ * concept does not apply to this target.
+ */
+#define	pa_is_lowmem(pa)	((void)(pa), TRUE)
+
+/*
+ * The kernel virtual address of a physical one, and back (#453).
+ *
+ * i386 answers with a 1:1 window -- phystokv() is an addition of
+ * VM_MIN_KERNEL_ADDRESS, which is zero there, so it is the identity and the
+ * distinction between the two kinds of address never had to be maintained.
+ * Here it is the direct map, a real translation to a real second mapping of
+ * all of physical memory.
+ *
+ * ⚠️ Only for addresses that ARE in the direct map, which is every physical
+ * page but not every kernel virtual address: the image and anything
+ * kmem_alloc() hands out live elsewhere, and going back through kvtophys()
+ * on one of those needs the walk, which is why kvtophys() in
+ * <machine/pmap.h> is a walk and not this subtraction.
+ */
+#define	phystokv(pa)	((vm_offset_t) phys_to_direct((uint64_t)(pa)))
 
 #endif /* _MACH_X86_64_VM_PARAM_H_ */

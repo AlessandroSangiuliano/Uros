@@ -667,7 +667,7 @@ kmem_alloc_pages(
 	/*
 	 *	Mark the pmap region as not pageable.
 	 */
-	pmap_pageable(kernel_pmap, start, end, FALSE);
+	pmap_pageable(pmap_kernel(), start, end, FALSE);
 
 	while (start < end) {
 	    register vm_page_t	mem;
@@ -695,7 +695,7 @@ kmem_alloc_pages(
 	    /*
 	     *	Enter it in the kernel pmap
 	     */
-	    PMAP_ENTER(kernel_pmap, start, mem,
+	    PMAP_ENTER(pmap_kernel(), start, mem,
 		       protection, TRUE);
 
 	    vm_object_lock(object);
@@ -724,7 +724,7 @@ kmem_remap_pages(
 	/*
 	 *	Mark the pmap region as not pageable.
 	 */
-	pmap_pageable(kernel_pmap, start, end, FALSE);
+	pmap_pageable(pmap_kernel(), start, end, FALSE);
 
 	while (start < end) {
 	    register vm_page_t	mem;
@@ -749,7 +749,7 @@ kmem_remap_pages(
 	     *	Enter it in the kernel pmap.  The page isn't busy,
 	     *	but this shouldn't be a problem because it is wired.
 	     */
-	    PMAP_ENTER(kernel_pmap, start, mem,
+	    PMAP_ENTER(pmap_kernel(), start, mem,
 		       protection, TRUE);
 
 	    start += PAGE_SIZE;

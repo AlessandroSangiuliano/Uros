@@ -206,6 +206,7 @@
 #include <device/conf.h>
 #include <device/subrs.h>
 #include <i386/fpu.h>
+#include <i386/hwp.h>		/* hwp_init_cpu (#358) */
 #include <i386/pmap.h>
 #include <i386/ipl.h>
 #include <i386/pio.h>
@@ -956,6 +957,32 @@ machine_init(void)
 	 * Configure clock devices.
 	 */
 	clock_config();
+}
+
+/*
+ * Which processor keeps time.
+ *
+ * Zero: the processor the BIOS started.  Moved here from kern/version.c,
+ * where it sat among the etext/edata compatibility aliases -- it is an answer
+ * about this machine, and every machine has to give it (#453).
+ */
+int	master_cpu = 0;
+
+/*
+ * The kernel is up: run what had to wait for it (#453).
+ *
+ * Both of these need a working kernel around them and so cannot go in
+ * machine_init() above.  fpu_sanity_check() faults deliberately and wants a
+ * trap handler that can print; hwp_init_cpu() prints its verdict.
+ *
+ * The AP arm of both is in mp_stub.c's slave_machine_init(), which is the
+ * per-processor counterpart of this one -- this is the BSP's.
+ */
+void
+machine_kernel_ready(void)
+{
+	fpu_sanity_check();	/* #309 acceptance (BSP arm) */
+	hwp_init_cpu(TRUE);	/* #358 hardware P-states (BSP arm) */
 }
 
 /*

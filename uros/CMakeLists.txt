@@ -5,6 +5,15 @@ project(uros
   LANGUAGES C ASM
 )
 
+# Emit compile_commands.json.
+#
+# Not for editors, though they benefit: it is so that a tool which needs to
+# know how this tree compiles something can ASK, instead of keeping its own
+# copy of the flags.  scripts/mi-x86_64-probe.sh kept one, and it drifted --
+# three separate measurement errors came from a probe that was compiling with
+# -DMACH_KDB=1 and -DAT386=1 while the build was not (#453).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Opzioni principali di configurazione
 option(OSFMK_TARGET_AT386 "Abilita configurazione Mach per AT386 (x86)" ON)
 option(OSFMK_BUILD_TOOLS "Costruisci i tool host (mig, migcom, ecc.)" ON)

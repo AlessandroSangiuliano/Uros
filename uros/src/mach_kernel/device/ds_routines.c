@@ -66,6 +66,7 @@
 #include <norma_device.h>
 #include <zone_debug.h>
 #include <mach_kdb.h>
+#include <mach_net_in_kernel.h>
 #if	NORMA_DEVICE
 #include <dipc.h>
 #endif
@@ -1646,10 +1647,10 @@ ds_read_done(
 	    if (!warned) {
 		warned = 1;
 		printf("ds_read_done: NULL io_data, size_read=%d "
-		       "(op=0x%x count=%d residual=%d err=%d dev=0x%x name=%s) -- "
+		       "(op=0x%x count=%d residual=%d err=%d dev=%p name=%s) -- "
 		       "clamping (warn-once)\n",
 		       size_read, ior->io_op, ior->io_count, ior->io_residual,
-		       ior->io_error, (unsigned int)ior->io_device,
+		       ior->io_error, ior->io_device,
 		       (ior->io_device && ior->io_device->dev_ops &&
 			ior->io_device->dev_ops->d_name)
 			   ? ior->io_device->dev_ops->d_name : "?");
@@ -1682,7 +1683,7 @@ ds_read_done(
 	     * Mark the data dirty (if the pages were filled by DMA, the
 	     * pmap module may think that they are clean).
 	     */
-	    pmap_modify_pages(kernel_pmap, start_sent, end_sent);
+	    pmap_modify_pages(pmap_kernel(), start_sent, end_sent);
 	}
 
 	/*
@@ -2042,11 +2043,20 @@ ds_master_notify(
 
 	switch (msg->msgh_id) {
 	case MACH_NOTIFY_DEAD_NAME: {
+#if	MACH_NET_IN_KERNEL
 		mach_dead_name_notification_t *m;
 
 		m = (mach_dead_name_notification_t *)msg;
 		if (net_unset_filter((ipc_port_t)m->not_port))
 			return TRUE;
+#endif	/* MACH_NET_IN_KERNEL */
+		/*
+		 * The only thing that ever registered for a dead-name
+		 * notification on the master device port was a packet filter,
+		 * so with no in-kernel network there is nothing here to
+		 * recognise and the notification falls through to the report
+		 * below (#453).
+		 */
 		break;
 	}
 	default:

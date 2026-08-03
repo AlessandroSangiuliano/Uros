@@ -94,6 +94,8 @@
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_init.h>
 
+#include <kern/assert.h>
+
 #include <mach_ipc_debug.h>
 
 #if	MACH_IPC_DEBUG
@@ -419,8 +421,17 @@ ipc_hash_global_delete(
  *	So possibly a small win; probably nothing significant.
  */
 
+/*
+ * ⚠️ Shifted and taken modulo at pointer width.
+ *
+ * mach_port_index_t is 32 bits on every target, so casting to it first
+ * discarded the upper half of a 64-bit object address before the shift ever
+ * ran.  The >> 6 is the real intent -- ipc_object allocations are at least
+ * 64 bytes apart, so the bottom six bits are always zero and hashing them
+ * would waste a factor of 64 of the table (#453).
+ */
 #define	IH_LOCAL_HASH(obj, size)				\
-		((((mach_port_index_t) (obj)) >> 6) % (size))
+		((((vm_offset_t) (obj)) >> 6) % (size))
 
 /*
  *	Routine:	ipc_hash_local_lookup
