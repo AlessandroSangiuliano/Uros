@@ -1,85 +1,169 @@
 #!/bin/sh
-# Probe: compile the machine-independent kernel sources with x86-64 flags and
-# classify the FIRST error of each.  This is a MEASUREMENT, not a build --
-# it deliberately borrows i386 header directories so that we can see what lies
-# *underneath* the missing configuration headers.
+# What the x86-64 kernel leaves out of the machine-independent tree, and
+# whether the reason still holds (#453).
 #
-#   pass A  (default)  x86-64 include path only         -> what the tree does today
-#   pass B  (-b)       + i386/AT386 + generated MIG hdr -> the real 64-bit inventory
+# ── What this used to be, and why it is not that any more ────────────────
 #
-# Usage: mi-x86_64-probe.sh [-b] > log
+# It used to compile all 102 machine-independent sources with a hand-written
+# copy of the kernel's flags, to find out which ones would build for x86-64
+# before any of them was in the build.  That question is answered: they are in
+# the build, and `ninja -C uros/build-x86_64' compiles them.  A second
+# instrument measuring what the build already measures is not redundancy, it
+# is a second opinion that can be wrong -- and this one was, three times:
+#
+#   * it reported every file that PRINTED anything as a failure, so 8 out of
+#     94 became 73 out of 29 when that was fixed;
+#   * it looked for generated files in the source tree, giving three false
+#     failures that hid a real one;
+#   * it compiled with -DAT386=1 -DMP_V1_1=1 -DMACH_MACHINE_ROUTINES on a
+#     machine that is not i386 and does not set them, manufacturing a failure
+#     the kernel does not have.
+#
+# All three were the same defect: a copy of the build's configuration, kept by
+# hand, next to a build that had moved on.  So the copy is gone.  The flags
+# below come from compile_commands.json -- the build's own record of how it
+# compiles this target -- and cannot disagree with it.
+#
+# ── The question that is left ────────────────────────────────────────────
+#
+# Four machine-independent sources are deliberately NOT in the x86-64 kernel.
+# The build cannot tell you whether that is still right, because a file it
+# does not compile is a file it knows nothing about.  That is this script's
+# job now: compile the excluded ones, and say what happens.
+#
+# Usage: mi-x86_64-probe.sh
 
 set -u
-UROS=$(cd "$(dirname "$0")/../uros" && pwd)
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+UROS=$ROOT/uros
 SRC=$UROS/src/mach_kernel
-GCCINC=$(cc -m64 -print-file-name=include)
-PASS=A
-[ "${1:-}" = "-b" ] && PASS=B
+BUILD=$UROS/build-x86_64
+CC_JSON=$BUILD/compile_commands.json
 
-# Exactly the x86-64 target's KERNEL_DEFINES_BARE, and nothing else (#453).
+[ -f "$CC_JSON" ] || {
+	echo "no $CC_JSON -- configure the x86-64 build first:"
+	echo "  cmake -S $UROS -B $BUILD -DUROS_TARGET_ARCH=x86_64"
+	exit 1
+}
+
+# The exclusions, and the reason each is out.  This is the only list kept by
+# hand, and the cross-check below is what keeps it honest: a file that is
+# neither compiled nor named here is reported, so the two cannot drift apart
+# in silence.
+excluded_reason() {
+	case "$1" in
+	device/net_io.c)
+		echo "in-kernel network stack: no drivers here, MACH_NET_IN_KERNEL=0" ;;
+	device/net_device.c)
+		echo "in-kernel network device glue: same" ;;
+	device/test_device.c)
+		echo "pseudo-device whose only purpose is to feed net_io packets" ;;
+	device/device_master.c)
+		echo "i386 code in device/: needs ECAM, MSI-X and IOMMU here (#457)" ;;
+	device/device_master_server.c)
+		echo "its MIG stub: the subsystem is absent, not stubbed -- callers get MIG_BAD_ID (#457)" ;;
+	*)	echo "" ;;
+	esac
+}
+
+# The compile line the build actually uses, borrowed from a file that is in
+# it.  Everything except the input and output is what the kernel gets.
+BORROW=$(python3 - "$CC_JSON" <<'PY'
+import json, shlex, sys
+db = json.load(open(sys.argv[1]))
+for e in db:
+    if e["file"].endswith("/kern/startup.c"):
+        argv = shlex.split(e["command"])
+        out = []
+        skip = False
+        for i, a in enumerate(argv[1:]):
+            if skip:
+                skip = False
+                continue
+            if a in ("-o", "-c"):
+                skip = a == "-o"
+                continue
+            if a.endswith(".c"):
+                continue
+            out.append(a)
+        print(" ".join(shlex.quote(a) for a in out))
+        break
+else:
+    sys.exit("kern/startup.c is not in the build -- borrow a different file")
+PY
+) || exit 1
+
+# Which machine-independent files the build compiles.
 #
-# It used to carry -DAT386=1 -DEISA=1 -DHIMEM=1 -DMP_V1_1=1 -DNPCI=1 as
-# well -- i386 hardware knobs, on a machine that is not i386 -- and
-# -DMACH_MACHINE_ROUTINES, which this target's configuration now sets to 0.
-# A probe that compiles with different flags from the build is not measuring
-# the build: it can hide a failure the kernel would hit, and manufacture one
-# it would not.  MACH_MACHINE_ROUTINES was doing the second, keeping
-# kern/ipc_kobject.c asking for a <machine/machine_routines.h> that this
-# machine has decided not to have.
-#
-# The rest arrive from the generated configuration headers on the include
-# path below, which is also where the build gets them.
-DEFINES="-DKERNEL -DMACH_KERNEL -DKERNEL_PRIVATE -DKERNEL_SERVER=1
- -DNCPUS=64 -DMACH_ASSERT=1 -DMACH_DEBUG=1 -DMACH_KDB=1 -DMACH_HOST=1
- -DSTAT_TIME -DTASK_SWAPPER=1 -D__NO_UNDERSCORES__ -Dmig_internal="
+# WARNING: two roots, not one.  Some of them are GENERATED -- the MIG stubs --
+# and live in the build tree with no counterpart under src/.  Looking only at
+# src/ reports them as missing, which is the exact shape of the second
+# measurement error this script made before it was rewritten.  Here it would
+# have been caught anyway, because a file that is neither compiled nor
+# explained is reported rather than assumed; that is the point of the
+# cross-check.
+COMPILED=$(python3 - "$CC_JSON" "$SRC" "$BUILD/src/mach_kernel" <<'EOPY'
+import json, sys, os
+db = json.load(open(sys.argv[1]))
+roots = [os.path.realpath(r) for r in sys.argv[2:]]
+for e in db:
+    f = os.path.realpath(e["file"])
+    for r in roots:
+        if f.startswith(r + os.sep):
+            rel = f[len(r) + 1:]
+            if rel.split(os.sep)[0] in ("kern", "ipc", "vm", "device"):
+                print(rel)
+            break
+EOPY
+)
 
-FLAGS="-m64 -mcmodel=kernel -mno-red-zone -mgeneral-regs-only -fcf-protection=none
- -ffreestanding -fno-pic -fno-pie -fno-stack-protector -fno-builtin -nostdinc
- -fno-omit-frame-pointer -isystem $GCCINC -std=gnu11 -Wall -fsyntax-only"
+echo "### x86-64 exclusions  $(date -Is)"
+echo
 
-# The x86-64 target's own include path, in the target's own order:
-# uapi, the machine/ links, x86_64/, then the generated ODE knobs (#450).
-INC_A="-I$UROS/uapi -I$UROS/build-x86_64/arch-include -I$SRC/x86_64
- -I$SRC -I$SRC/include -I$UROS/build-x86_64/config-include
- -I$UROS/build-x86_64/src/mach_kernel -I$UROS/build-x86_64/src/mach_kernel/mach
- -I$UROS/build-x86_64/src/mach_kernel/mach_debug
- -I$UROS/build-x86_64/src/mach_kernel/device
- -I$UROS/export/include"
-INC_B="$INC_A -I$SRC/i386/AT386 -I$SRC/i386
- -I$UROS/build/src/mach_kernel -I$UROS/build/src/mach_kernel/mach
- -I$UROS/build/src/mach_kernel/mach_debug -I$UROS/build/src/mach_kernel/device"
-
-if [ "$PASS" = A ]; then INC=$INC_A; else INC=$INC_B; fi
-
-echo "### pass $PASS  $(date -Is)"
-ok=0; bad=0
+rc=0
+unexplained=0
 while read -r f; do
-	# Some of these are generated, not written: the MIG stubs live in the
-	# build directory and there is nothing under $SRC to compile.  Reported
-	# as "File o directory non esistente", they looked for weeks like three
-	# more sources that did not build, when in fact they existed and were
-	# correct.  Second instrument error of the day, so it is fixed rather
-	# than remembered: look in the build tree when the source tree has no
-	# such file, and only call it missing when neither does.
-	src=$SRC/$f
-	[ -f "$src" ] || src=$UROS/build-x86_64/src/mach_kernel/$f
+	[ -n "$f" ] || continue
+	case "
+$COMPILED
+" in
+	*"
+$f
+"*)	continue ;;			# in the build: not this script's business
+	esac
 
-	err=$(cc $DEFINES $FLAGS $INC -c "$src" -o /dev/null 2>&1)
-	rc=$?
-	if [ $rc -eq 0 ]; then
-		ok=$((ok + 1))
-		w=$(printf '%s\n' "$err" | grep -c 'warning:' || true)
-		if [ "$w" -gt 0 ]; then
-			printf 'OK  %-4s %s\n' "${w}w" "$f"
-		else
-			printf 'OK       %s\n' "$f"
-		fi
-	else
-		bad=$((bad + 1))
-		first=$(printf '%s\n' "$err" | grep -m1 -E 'error:' | sed 's/.*error: //')
-		[ -z "$first" ] && first=$(printf '%s\n' "$err" | head -1)
-		n=$(printf '%s\n' "$err" | grep -c 'error:')
-		printf 'FAIL %-4s %-34s %s\n' "$n" "$f" "$first"
+	why=$(excluded_reason "$f")
+	if [ -z "$why" ]; then
+		printf '?? %-26s NOT compiled and NOT explained\n' "$f"
+		unexplained=$((unexplained + 1))
+		rc=1
+		continue
 	fi
-done < $(dirname "$0")/mi-files.txt
-echo "### pass $PASS: $ok compile, $bad fail"
+
+	# Would it compile if it were let in?
+	#
+	# Generated sources have no counterpart under src/, so look in the
+	# build tree when the source tree has none -- and only call it missing
+	# when neither does.
+	path=$SRC/$f
+	[ -f "$path" ] || path=$BUILD/src/mach_kernel/$f
+	if [ ! -f "$path" ]; then
+		printf 'OUT %-26s NOT GENERATED -- %s\n' "$f" "$why"
+		continue
+	fi
+	err=$(eval "cc $BORROW -fsyntax-only \"$path\"" 2>&1)
+	if [ $? -eq 0 ]; then
+		printf 'OUT %-26s compiles  -- %s\n' "$f" "$why"
+	else
+		first=$(printf '%s\n' "$err" | grep -m1 'error:' | sed 's/.*error: //')
+		printf 'OUT %-26s DOES NOT  -- %s\n' "$f" "$why"
+		printf '    %-26s   first error: %s\n' "" "$first"
+	fi
+done <<EOF
+$(cat "$(dirname "$0")/mi-files.txt")
+EOF
+
+echo
+echo "### $(printf '%s\n' "$COMPILED" | grep -c .) machine-independent files in the build"
+[ $unexplained -eq 0 ] || echo "### $unexplained unexplained -- add a reason or add it to the build"
+exit $rc
