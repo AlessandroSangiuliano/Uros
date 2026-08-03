@@ -1670,8 +1670,9 @@ vm_map_pmap_enter(
 
 		if (vm_map_pmap_enter_print) {
 			printf("vm_map_pmap_enter:");
-			printf("map: %p, addr: %x, object: %p, offset: %x\n",
-				map, addr, object, offset);
+			printf("map: %p, addr: %lx, object: %p, offset: %lx\n",
+				map, (unsigned long) addr, object,
+				(unsigned long) offset);
 		}
 
 		m->busy = TRUE;
@@ -7754,7 +7755,18 @@ vm_map_copy_cont_is_valid(
 	    cont != vm_map_copy_discard_cont &&
 	    cont != vm_map_copyin_page_list_cont ) {
 		printf("vm_map_copy_cont_is_valid:  bogus cont %p\n", cont);
-		assert((integer_t) cont == 0xdeadbeef);
+		/*
+		 * Deliberately unsatisfiable: control reaching here means the
+		 * continuation is neither of the two valid ones, and the point
+		 * is to stop with the pointer already printed above.
+		 *
+		 * It used to be written `assert((integer_t) cont ==
+		 * 0xdeadbeef)', which reads as a comparison and is not one --
+		 * and on a 64-bit machine the cast made it compare the low
+		 * half, so a pointer whose bottom 32 bits happened to be
+		 * 0xdeadbeef would have satisfied it and carried on (#453).
+		 */
+		assert(!"vm_map_copy_cont_is_valid: bogus continuation");
 	}
 	return 1;
 }

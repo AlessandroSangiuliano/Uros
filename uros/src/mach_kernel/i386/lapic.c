@@ -277,7 +277,7 @@ lapic_timer_handler(struct i386_interrupt_state *regs)
 	nmi_cpu_tick[cpu_number()]++;
 
 	usermode = (regs->efl & EFL_VM) || ((regs->cs & 0x03) != 0);
-	hertz_tick(usermode, (natural_t)regs->eip);
+	hertz_tick(usermode, (vm_offset_t)regs->eip);
 
 	lapic_eoi();
 	mp_enable_preemption_no_check();

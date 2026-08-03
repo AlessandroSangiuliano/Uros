@@ -730,8 +730,8 @@ pmap_steal_memory(
 		 */
 		if (pmap_enter(pmap_kernel(), vaddr, paddr,
 			       VM_PROT_READ|VM_PROT_WRITE, FALSE) != 0)
-			panic("pmap_steal_memory: could not map 0x%x -> 0x%x",
-			      vaddr, paddr);
+			panic("pmap_steal_memory: could not map 0x%lx -> 0x%lx",
+			      (unsigned long) vaddr, (unsigned long) paddr);
 		/*
 		 * Account for newly stolen memory
 		 */
@@ -1427,8 +1427,8 @@ vm_page_grab(void)
 	vm_page_free_count_lowmem--;
 	mem->free = FALSE;
 	if (mem->highmem)
-		panic("vm_page_grab: highmem page 0x%x on lowmem list!",
-		      mem->phys_addr);
+		panic("vm_page_grab: highmem page 0x%lx on lowmem list!",
+		      (unsigned long) mem->phys_addr);
 	mutex_unlock(&vm_page_queue_free_lock);
 
 #if	MACH_ASSERT
@@ -1447,13 +1447,14 @@ vm_page_grab(void)
 		mem->poisoned = FALSE;
 		for (i = 0; i < PAGE_SIZE / 4; i++) {
 			if (w[i] != 0xF5EEF5EE) {
-				printf("#385: free page 0x%x dirtied at +0x%x:"
+				printf("#385: free page 0x%lx dirtied at +0x%x:"
 				       " %08x %08x %08x %08x %08x %08x %08x %08x\n",
-				       mem->phys_addr, i * 4,
+				       (unsigned long) mem->phys_addr, i * 4,
 				       w[i], w[i+1], w[i+2], w[i+3],
 				       w[i+4], w[i+5], w[i+6], w[i+7]);
-				panic("vm_page_grab: page 0x%x written while "
-				      "free (#385 layer 4)", mem->phys_addr);
+				panic("vm_page_grab: page 0x%lx written while "
+				      "free (#385 layer 4)",
+				      (unsigned long) mem->phys_addr);
 			}
 		}
 		kunmap(mem->phys_addr);
@@ -1535,14 +1536,14 @@ vm_page_grab_any(void)
 		mem->poisoned = FALSE;
 		for (i = 0; i < PAGE_SIZE / 4; i++) {
 			if (w[i] != 0xF5EEF5EE) {
-				printf("#385: free page 0x%x dirtied at +0x%x:"
+				printf("#385: free page 0x%lx dirtied at +0x%x:"
 				       " %08x %08x %08x %08x %08x %08x %08x %08x\n",
-				       mem->phys_addr, i * 4,
+				       (unsigned long) mem->phys_addr, i * 4,
 				       w[i], w[i+1], w[i+2], w[i+3],
 				       w[i+4], w[i+5], w[i+6], w[i+7]);
-				panic("vm_page_grab_any: page 0x%x written "
+				panic("vm_page_grab_any: page 0x%lx written "
 				      "while free (#385 layer 4)",
-				      mem->phys_addr);
+				      (unsigned long) mem->phys_addr);
 			}
 		}
 		kunmap(mem->phys_addr);
@@ -1586,8 +1587,8 @@ vm_page_release(
 	 * MACH_ASSERT so release/bench builds shed it.
 	 */
 	if (pmap_page_still_mapped(mem->phys_addr))
-		panic("vm_page_release: page 0x%x still mapped (#385)",
-		      mem->phys_addr);
+		panic("vm_page_release: page 0x%lx still mapped (#385)",
+		      (unsigned long) mem->phys_addr);
 
 	/*
 	 * #385 hunt, layer 4: poison the page on its way into the free
@@ -2430,7 +2431,7 @@ vm_page_free_list_sort(void)
 	for (m = sort_list, npages = 0; m != VM_PAGE_NULL; m = NEXT_PAGE(m)) {
 		if (m != sort_list &&
 		    m->phys_addr <= addr) {
-			printf("m %p addr 0x%x\n", m, addr);
+			printf("m %p addr 0x%lx\n", m, (unsigned long) addr);
 			panic("vm_sort_free_list");
 		}
 		addr = m->phys_addr;
@@ -2466,8 +2467,9 @@ vm_page_verify_contiguous(
 	page_count = 1;
 	for (m = NEXT_PAGE(pages); m != VM_PAGE_NULL; m = NEXT_PAGE(m)) {
 		if (m->phys_addr != prev_addr + page_size) {
-			printf("m %p prev_addr 0x%x, current addr 0x%x\n",
-			       m, prev_addr, m->phys_addr);
+			printf("m %p prev_addr 0x%lx, current addr 0x%lx\n",
+			       m, (unsigned long) prev_addr,
+			       (unsigned long) m->phys_addr);
 			printf("pages %p page_count %d\n", pages, page_count);
 			panic("vm_page_verify_contiguous:  not contiguous!");
 		}

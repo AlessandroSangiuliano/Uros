@@ -547,8 +547,9 @@ kernel_task_create(
 			 * New task created with ref count of 2 -- decrement by
 			 * one to force task deletion.
 			 */
-			printf("kmem_suballoc(%p,%x,%x,1,0,&new) Fails\n",
-			       kernel_map, map_base, map_size);
+			printf("kmem_suballoc(%p,%lx,%lx,1,0,&new) Fails\n",
+			       kernel_map, (unsigned long) map_base,
+			       (unsigned long) map_size);
 			--new_task->ref_count;
 			task_deallocate(new_task);
 			return (retval);

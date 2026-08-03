@@ -1059,8 +1059,8 @@ act_create(task_t task, vm_offset_t user_stack, vm_size_t stack_size,
 
 #if	MACH_ASSERT
 	if (watchacts & WA_ACT_LNK)
-		printf("act_create(task=%p,stk=%x,thr_act@%p=%p)\n",
-			task, user_stack, new_act, thr_act);
+		printf("act_create(task=%p,stk=%lx,thr_act@%p=%p)\n",
+			task, (unsigned long) user_stack, new_act, thr_act);
 #endif	/* MACH_ASSERT */
 
 	/* Start by zeroing everything; then init non-zero items only */

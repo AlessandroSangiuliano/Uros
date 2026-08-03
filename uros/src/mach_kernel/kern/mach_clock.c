@@ -225,7 +225,7 @@ extern void kernel_test_intr(void);
 void
 hertz_tick(
 	boolean_t	usermode,	/* executing user code */
-	natural_t	pc)
+	vm_offset_t	pc)
 {
 	extern char		etext;
 	thread_act_t		thr_act;
@@ -257,7 +257,15 @@ hertz_tick(
 		return;
 	}
 
-	inkernel = !usermode && (pc < (unsigned int)&etext);
+	/*
+	 * In kernel TEXT, which is narrower than "not in user mode": a sample
+	 * taken at interrupt level in a trampoline, or past the end of the
+	 * image, is neither.  Compared at pointer width -- the old cast to
+	 * unsigned int kept the low half of both sides, which agreed with
+	 * itself only for as long as the whole image sat inside one 4 GiB
+	 * window (#453).
+	 */
+	inkernel = !usermode && (pc < (vm_offset_t)&etext);
 
 	/*
 	 * Hertz processing performed by all processors

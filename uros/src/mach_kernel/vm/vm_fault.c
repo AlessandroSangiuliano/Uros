@@ -1420,12 +1420,14 @@ no_clustering:
 			if (rc != KERN_SUCCESS) {
 				if (rc != MACH_SEND_INTERRUPTED
 				    && vm_fault_debug)
-					printf("%s(%p, %p, 0x%x, 0x%x, 0x%x) failed, rc=%d, object=%p\n",
+					printf("%s(%p, %p, 0x%lx, 0x%lx, 0x%x) failed, rc=%d, object=%p\n",
 						"memory_object_data_request",
 						object->pager,
 						object->pager_request,
-						cluster_start + object->paging_offset, 
-						length, access_required,
+						(unsigned long)
+						(cluster_start + object->paging_offset),
+						(unsigned long) length,
+						access_required,
 						rc, object);
 				/*
 				 *	Don't want to leave a busy page around,

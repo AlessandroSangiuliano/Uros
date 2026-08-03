@@ -1668,8 +1668,8 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       task_set_special_port(task,
                             TASK_BOOTSTRAP_PORT,
                             ipc_port_make_send(master_bootstrap_port));
-      printf("boot_script_exec_cmd: set BOOTSTRAP_PORT master=0x%x task=0x%x\n",
-             (unsigned int)master_bootstrap_port, (unsigned int)task);
+      printf("boot_script_exec_cmd: set BOOTSTRAP_PORT master=%p task=%p\n",
+             master_bootstrap_port, task);
       
       thread_act->thread->saved.other = (char *) &info;
       thread_start(thread_act->thread, user_bootstrap);

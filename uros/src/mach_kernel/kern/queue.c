@@ -173,13 +173,13 @@ insque(
 	pred->next = entry;
 }
 
-int
+queue_entry_t
 remque(
 	register queue_entry_t elt)
 {
 	(elt->next)->prev = elt->prev;
 	(elt->prev)->next = elt->next;
-	return((int)elt);
+	return(elt);
 }
 
 #endif
