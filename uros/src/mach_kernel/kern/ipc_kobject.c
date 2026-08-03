@@ -122,6 +122,7 @@
  */
 
 #include <mach_debug.h>
+#include <mach_device_master.h>
 #include <mach_ipc_test.h>
 #include <mach_machine_routines.h>
 #include <norma_task.h>
@@ -191,7 +192,9 @@ mach_msg_size_t mig_reply_size;
 #include <mach/ledger_server.h>
 #include <mach/sync_server.h>
 #include <device/device_server.h>
+#if	MACH_DEVICE_MASTER
 #include <device/device_master_server.h>
+#endif	/* MACH_DEVICE_MASTER */
 #include <device/device_pager_server.h>
 #if     MACH_DEBUG
 #include <mach_debug/mach_debug_server.h>
@@ -219,7 +222,9 @@ rpc_subsystem_t mig_e[] = {
         (rpc_subsystem_t)&clock_subsystem,
         (rpc_subsystem_t)&do_bootstrap_subsystem,
         (rpc_subsystem_t)&ds_device_subsystem,
+#if	MACH_DEVICE_MASTER
 	(rpc_subsystem_t)&ds_master_device_master_subsystem,
+#endif	/* MACH_DEVICE_MASTER */
 	(rpc_subsystem_t)&sync_subsystem,
 	(rpc_subsystem_t)&ledger_subsystem,
 #if     MACH_DEBUG
@@ -593,8 +598,9 @@ ipc_kobject_destroy(
 
 	    default:
 #if	MACH_ASSERT
-		printf("ipc_kobject_destroy: port %p, kobj 0x%x, type %d\n",
-		       port, port->ip_kobject, ip_kotype(port));
+		printf("ipc_kobject_destroy: port %p, kobj 0x%lx, type %d\n",
+		       port, (unsigned long) port->ip_kobject,
+		       ip_kotype(port));
 #endif	/* MACH_ASSERT */
 		break;
 	}

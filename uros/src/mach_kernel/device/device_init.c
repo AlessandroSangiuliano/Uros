@@ -99,6 +99,8 @@
  */
 #include <xkmachkernel.h>
 #include <dipc_xkern.h>
+#include <mach_net_in_kernel.h>
+#include <mach_device_master.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
 #include <kern/task.h>
@@ -126,13 +128,25 @@ device_service_create(void)
 
 	ipc_kobject_set(master_device_port, 1, IKOT_MASTER_DEVICE);
 	ds_init();
+#if	MACH_NET_IN_KERNEL
 	net_io_init();
+#endif	/* MACH_NET_IN_KERNEL */
 	device_pager_init();
+#if	MACH_DEVICE_MASTER
 	device_master_init();
+#endif	/* MACH_DEVICE_MASTER */
 	datadev_init();
 
 	(void) kernel_thread(kernel_task, io_done_thread, (char *)0);
+#if	MACH_NET_IN_KERNEL
+	/*
+	 * The network input thread: it dequeues packets an in-kernel driver
+	 * put there and runs them past the packet filters.  With no driver in
+	 * the kernel there is nothing to dequeue, and a thread that can only
+	 * ever sleep is not worth its stack (#453).
+	 */
 	(void) kernel_thread(kernel_task, net_thread, (char *)0);
+#endif	/* MACH_NET_IN_KERNEL */
 #if	XKMACHKERNEL && !DIPC_XKERN
 	/*
 	 * Initialize the x-kernel
