@@ -26,10 +26,29 @@
 #define	_KERN_POSIXTIME_H_
 
 #include <mach_assert.h>
+#include <mach/clock_types.h>
 
 /*
  * Universal (Posix) time declarations.
  */
+
+/*
+ * The battery-backed clock: the machine's only source of wall-clock time at
+ * boot, read once by utime_init() to seed `time'.
+ *
+ * ⚠️ tvalspec_t, and it matters.  This is also the c_gettime slot of struct
+ * clock_ops in <kern/clock.h>, which is where i386 installs the same function
+ * -- so tvalspec_t (seconds and NANOseconds) is the real contract.
+ *
+ * kern/posixtime.c used to carry its own `extern' saying time_value_t
+ * (seconds and MICROseconds) and then cast `&time' to match.  Both structures
+ * are two 32-bit words, so the compiler saw nothing and the sub-second field
+ * came out in the wrong unit -- invisible only because this clock has no
+ * sub-second resolution and always writes zero there.  Declared once, here,
+ * so the two halves are finally compared (#448, #453).
+ */
+extern kern_return_t	bbc_gettime(tvalspec_t *cur_time);
+extern kern_return_t	bbc_settime(tvalspec_t *new_time);
 
 /*
  * Universal (Posix) time initialization.
