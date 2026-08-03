@@ -164,22 +164,20 @@ bcmp(const char *a, const char *b, vm_size_t n)
 }
 
 /*
- * The one string routine the kernel's printf needs, and it needs it for
- * padding: %s with a width has to know how long the string is before it can
- * decide how many spaces go in front (#453).
+ * ⚠️ strlen() is deliberately NOT here, and it used to be.
  *
- * Byte at a time.  There are word-at-a-time tricks and this is not the place
- * for them: the strings a kernel formats are short, and a word-wise scan
- * reads past the terminator by up to seven bytes -- which is harmless on a
- * mapped page and a fault on the last string of a mapping.
+ * It was written during bring-up, when nothing machine-independent was in the
+ * build and printf still needed one for %s padding.  device/subrs.c has had
+ * the same byte-at-a-time loop all along, and once the MI tree came in the
+ * two collided at link time (#453).
+ *
+ * The MI one wins because this machine has nothing better to offer.  memcpy
+ * and memset above are here for a reason -- `rep movsb' is a single
+ * instruction the hardware runs at cache-line width -- and there is no
+ * equivalent for strlen: the word-at-a-time trick reads up to seven bytes
+ * past the terminator, which faults on the last string of a mapping, and the
+ * SIMD version is unavailable in a kernel built -mgeneral-regs-only.
+ *
+ * A machine-dependent file should hold what the machine does better, not a
+ * second copy of what it does the same.
  */
-vm_size_t
-strlen(const char *s)
-{
-	const char	*p = s;
-
-	while (*p != '\0')
-		p++;
-
-	return (vm_size_t) (p - s);
-}

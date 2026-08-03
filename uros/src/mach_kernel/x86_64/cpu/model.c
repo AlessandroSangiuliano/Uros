@@ -21,6 +21,7 @@
 #include <cpu/ipi.h>
 #include <ddb/cons.h>
 #include <cpu/smp.h>
+#include <trap/trap.h>		/* x86_64_backtrace on the panic path */
 #include <kern/boot_modules.h>
 
 /*
@@ -78,10 +79,27 @@ machine_boot_info(char *buf, vm_size_t buf_len)
  * which cli does not stop -- does the same; and hlt rather than a spin so a
  * halted processor stops drawing power and stops competing for the memory
  * bus with whichever one is still doing something.
+ *
+ * ⚠️ On the way past, the backtrace -- but only when the machine is dying.
+ *
+ * kern/debug.c's panic() ends here: with no debugger on this machine (#428)
+ * it prints its message and calls halt_cpu(), so this is the last machine-
+ * dependent code to run and the last moment the stack still means something.
+ * A symbolised call stack is the single most useful thing to have on a
+ * machine that is being brought up, and this is where it belongs -- not in a
+ * second panic() competing with the real one (#453).
+ *
+ * panicstr is what distinguishes the two ways in.  An orderly halt -- an
+ * operator asking for one, the last processor in halt_all_cpus -- has nothing
+ * to report and says nothing.
  */
 void
 halt_cpu(void)
 {
+	if (panicstr != (const char *) 0)
+		x86_64_backtrace((uint64_t)(uintptr_t)
+				 __builtin_frame_address(0));
+
 	for (;;)
 		__asm__ volatile("cli; hlt");
 }

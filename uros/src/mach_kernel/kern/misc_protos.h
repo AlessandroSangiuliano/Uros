@@ -137,6 +137,20 @@ extern void panic(const char *string, ...)
 
 extern void panic_init(void);
 
+/*
+ * The message of the panic in progress, or NULL.
+ *
+ * Machine-dependent shutdown code reads it to tell an orderly halt from a
+ * fatal one: on the way out of panic() there is a report worth making, on the
+ * way out of a reboot there is not.
+ *
+ * ⚠️ `const char *', and declared here for that reason.  Every reader used to
+ * write its own `extern char *panicstr;' inside a function body -- dropping
+ * the const, and never once compared with the definition in kern/debug.c
+ * (#448, #453).
+ */
+extern const char *panicstr;
+
 extern void log(int level, char *fmt, ...)
 	__attribute__((format(printf, 2, 3)));
 

@@ -384,4 +384,14 @@ int trap_probe_gp(void);	/* general protection  */
 
 extern char trap_probe_faulted[];
 
+/*
+ * Print the call stack above a frame pointer, symbolised, straight to the
+ * console.
+ *
+ * Not machine_callstack(), which fills an array for a caller that will do
+ * something with it later: this prints, now, on the assumption that there may
+ * be no later.  That is why halt_cpu() uses it on the panic path (#453).
+ */
+void	x86_64_backtrace(uint64_t rbp);
+
 #endif	/* _X86_64_TRAP_TRAP_H_ */

@@ -104,24 +104,23 @@ void pmap_activate(pmap_t pmap);
 void pmap_bootstrap(void);
 
 /*
- * Protection: the machine-independent way in, the machine's bits out.  These
- * mirror mach/vm_prot.h and are replaced by that header when the MI tree
- * arrives (guarded so whichever is seen first wins, since the values match).
+ * Protection: the machine-independent way in, the machine's bits out.
  *
  * READ is implicit on x86-64 — a present page is readable, there is no
  * read-disable — so it maps to no bit.  WRITE and the *absence* of EXECUTE
  * are the two that move: no-execute is a bit you set, so lack of EXECUTE
  * becomes INTEL_PTE_NX.
+ *
+ * ⚠️ These used to be defined here behind `#ifndef VM_PROT_NONE', with a
+ * note saying they would be "replaced by that header when the MI tree
+ * arrives".  It has (#453), and the guard did not do what it promised:
+ * <mach/vm_prot.h> defines them unconditionally, so when this header was
+ * seen first the two definitions collided and the tree compiled with five
+ * redefinition warnings and no rule about which set won.
+ *
+ * Now there is one definition and it is the interface's.
  */
-#ifndef VM_PROT_NONE
-typedef int vm_prot_t;
-
-#define VM_PROT_NONE	0x0
-#define VM_PROT_READ	0x1
-#define VM_PROT_WRITE	0x2
-#define VM_PROT_EXECUTE	0x4
-#define VM_PROT_ALL	(VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)
-#endif
+#include <mach/vm_prot.h>
 
 /*
  * The policy bits of a leaf mapping with protection `prot`.  The present bit

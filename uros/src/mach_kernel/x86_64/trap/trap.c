@@ -361,7 +361,7 @@ static void report_symbol(uint64_t addr)
 	tputs(">");
 }
 
-static void backtrace(uint64_t rbp)
+void x86_64_backtrace(uint64_t rbp)
 {
 	pmap_t kernel = pmap_kernel();
 
@@ -397,25 +397,21 @@ static void backtrace(uint64_t rbp)
 	}
 }
 
-void panic(const char *what, ...)
-{
-	va_list ap;
-
-	tputs("\r\nUrMach x86-64: panic: ");
-	va_start(ap, what);
-	cons_vprintf(what, ap);
-	va_end(ap);
-	tputs("\r\n");
-
-	/*
-	 * The caller's frame, not this one: what matters is who could not
-	 * continue, and the walk climbs from there.
-	 */
-	backtrace((uint64_t)(uintptr_t)__builtin_frame_address(0));
-
-	for (;;)
-		__asm__ volatile("cli; hlt");
-}
+/*
+ * ⚠️ panic() is deliberately NOT here, and it used to be.
+ *
+ * It was written during bring-up, when there was no machine-independent
+ * kernel and something had to stop the machine and say why.  kern/debug.c has
+ * the real one, and it does what a bring-up panic cannot: it takes a lock so
+ * two processors panicking at once produce one legible report rather than two
+ * interleaved ones, it names the processor that died first, and it recognises
+ * a second panic instead of recursing into it.
+ *
+ * What was lost with this one is the symbolising backtrace, and that is not
+ * lost: halt_cpu() in x86_64/cpu/model.c prints it, which is the machine's
+ * last call on the panic path and the point where it is still true.  The
+ * walker above is exported for it (#453).
+ */
 
 /*
  * One armed expectation.  Not a stack: a fault while recovering from a
@@ -672,7 +668,7 @@ void trap_dispatch(struct trap_frame *frame)
 	report_registers(frame);
 	report_instruction(frame->rip);
 
-	backtrace(frame->rbp);
+	x86_64_backtrace(frame->rbp);
 
 	/*
 	 * And, if the debugger was asked for, the questions the report cannot

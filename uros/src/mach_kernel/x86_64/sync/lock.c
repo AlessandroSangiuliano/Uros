@@ -129,3 +129,26 @@ usimple_lock_try(usimple_lock_t l)
 {
 	return (unsigned int) hw_lock_try(&l->interlock);
 }
+
+/*
+ * interlock_unlock: the same function under a second name (#453).
+ *
+ * thread_sleep_interlock() in <kern/sched_prim.h> drops a hardware lock as
+ * part of going to sleep, and calls it by this name.  It is handed
+ * `&m->interlock' -- a hw_lock_t, at offset zero of the mutex -- so what it
+ * asks for is exactly hw_lock_unlock().
+ *
+ * On i386 the two are separate entry points in i386_lock.S, because the mutex
+ * was written in assembly there and the C side needed a way in that did not
+ * perform a whole mutex unlock.  This machine's mutex is C (x86_64/sync/
+ * mutex.c), so the reason is gone and only the name is left.
+ *
+ * An alias rather than a forwarder: it costs nothing at run time, and it says
+ * the true thing -- one function, two names -- where a wrapper would suggest
+ * there was a difference worth a call.
+ *
+ * ⚠️ The prototype in <kern/lock.h> says hw_lock_t and so does hw_lock_unlock,
+ * so the alias is type-checked rather than asserted.  If either side ever
+ * changes shape, this stops compiling.
+ */
+void	interlock_unlock(hw_lock_t) __attribute__((alias("hw_lock_unlock")));
