@@ -37,6 +37,26 @@ extern void	setup_main(void);
 /* Initialize machine dependent stuff */
 extern void	machine_init(void);
 
+/*
+ * The second machine-dependent point in setup_main(), and the one that has a
+ * working kernel around it (#453).
+ *
+ * machine_init() above runs early, when nothing else exists.  This one runs
+ * after task_init(), act_init(), thread_init() and subsystem_init(), so the
+ * machine may do here what it could not do there: take a lock, print, fail an
+ * assertion, or trip a fault it can survive.  Everything a machine wants to
+ * check about itself, and every late initialisation that needs the kernel to
+ * be up, belongs here.
+ *
+ * ⚠️ Declared here rather than as an `extern' inside setup_main().  It used to
+ * be four block-local externs naming i386 functions by hand -- fpu_sanity_check
+ * and hwp_init_cpu among them -- which means the machine-independent kernel
+ * held a private opinion about their signatures that no other machine could
+ * satisfy and no compiler could ever check against the definitions (#448).
+ * Every machine must define this, and the empty body is a legitimate answer.
+ */
+extern void	machine_kernel_ready(void);
+
 #if	NCPUS > 1
 
 extern void	slave_main(void);

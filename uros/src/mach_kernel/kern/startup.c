@@ -209,6 +209,7 @@
 #include <kern/clock.h>
 #include <kern/cpu_number.h>
 #include <kern/etap_macros.h>
+#include <kern/lock_smoke.h>
 #include <kern/machine.h>
 #include <kern/posixtime.h>
 #include <kern/processor.h>
@@ -330,16 +331,9 @@ setup_main(void)
 	act_init();
 	thread_init();
 	subsystem_init();
-	{
-		extern void lock_smoke_test(void);
-		extern void spl_return_check(void);
-		extern void fpu_sanity_check(void);
-		extern void hwp_init_cpu(boolean_t bsp);
-		lock_smoke_test();	/* #303 acceptance */
-		spl_return_check();	/* #410 acceptance */
-		fpu_sanity_check();	/* #309 acceptance (BSP arm) */
-		hwp_init_cpu(TRUE);	/* #358 hardware P-states (BSP arm) */
-	}
+	lock_smoke_test();		/* #303 acceptance -- kern/lock_smoke.c */
+	spl_return_check();		/* #410 acceptance -- kern/lock_smoke.c */
+	machine_kernel_ready();		/* whatever this machine was waiting for */
 	cap_init();
 	{
 		extern void futexv_init(void);

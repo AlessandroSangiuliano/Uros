@@ -33,6 +33,7 @@
 
 #include <kern/lock.h>
 #include <kern/spl.h>
+#include <kern/lock_smoke.h>		/* #448: the interface, so it is checked */
 #include <kern/misc_protos.h>		/* printf */
 
 #define	LOCK_SMOKE_ITERS	1000

@@ -17,6 +17,7 @@
 #include <stdint.h>
 
 #include <kern/misc_protos.h>
+#include <kern/startup.h>	/* #448: the interface, so it is checked */
 #include <mach/machine/vm_param.h>
 
 #include <cpu/percpu.h>
@@ -42,6 +43,33 @@
  */
 void
 machine_init(void)
+{
+}
+
+/*
+ * The kernel is up: run what had to wait for it.
+ *
+ * Nothing yet, and the two things i386 does here are worth naming so that the
+ * emptiness is a statement rather than a gap:
+ *
+ *   fpu_sanity_check()  confirms CR4.OSFXSR survived bring-up, because on
+ *                       i386 an AP once reached this point without it.  This
+ *                       machine does not lazy-switch the FPU at all -- state
+ *                       is saved eagerly with XSAVE and CR0.TS is never armed
+ *                       (#408) -- so the bit it checks is programmed on the
+ *                       one path that programs anything, and there is no
+ *                       second path for it to disagree with.
+ *
+ *   hwp_init_cpu()      enables hardware P-states.  Real work here too, and
+ *                       wanted, but it is not bring-up: it changes what the
+ *                       clock does under measurement, so it belongs with the
+ *                       numbers rather than ahead of them (#358 is i386's).
+ *
+ * ⚠️ Empty, not absent, and not a panic: kern/startup.c calls it on the path
+ * that must work, and every machine has to define it.
+ */
+void
+machine_kernel_ready(void)
 {
 }
 

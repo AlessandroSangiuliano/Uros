@@ -81,6 +81,10 @@ SECTIONS
 
 	. = ALIGN(4096);
 	__ktext_end = .;
+	/* The same address under the name the machine-independent tree uses:
+	 * db_interface.c, db_trace.c and mach_clock.c say `extern char etext'
+	 * and take its address (#453). */
+	etext = .;
 	__krodata_start = .;
 	.rodata : AT(ADDR(.rodata) - KERNEL_VBASE) {
 		*(.rodata)
@@ -145,6 +149,10 @@ SECTIONS
 	 * NOLOAD: that way the loader zeros it (memsz > filesz), so the C
 	 * globals that must start at zero actually do on real hardware — RAM
 	 * is not guaranteed zero the way QEMU's is. */
+	/* edata: the end of initialised data, which is where BSS begins.  The
+	 * machine-independent bootstrap reads it under that name. */
+	edata = .;
+
 	.bss ALIGN(4096) : AT(ADDR(.bss) - KERNEL_VBASE) {
 		*(.bss)
 		*(.bss.*)
@@ -153,6 +161,7 @@ SECTIONS
 
 	. = ALIGN(4096);
 	__kernel_end = .;
+	end = .;
 
 	/DISCARD/ : { *(.note.*) *(.comment) *(.eh_frame) }
 }
