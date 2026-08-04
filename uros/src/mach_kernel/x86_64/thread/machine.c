@@ -130,6 +130,24 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	if (pcb == PCB_NULL)
 		return KERN_FAILURE;
 
+	/*
+	 * The kernel stack is allocated HERE, and that is this function's job
+	 * rather than its precondition (#458).
+	 *
+	 * ⚠️ This used to test `thread->kernel_stack == 0' and answer
+	 * KERN_RESOURCE_SHORTAGE, on the reading that the stack arrives with
+	 * the thread.  It does not: kern/thread.c's thread_create_in() calls
+	 * this before anything has given the shuttle a stack, so the test was
+	 * true on the very first kernel thread and the boot stopped there --
+	 * with a resource shortage on a machine with 116 MiB free, which is
+	 * the kind of answer that sends you looking in the wrong place.
+	 *
+	 * i386 does the same thing in the same function.  The interface reads
+	 * as though the stack were an input because the field is already in
+	 * the structure; what settles it is who assigns it, and nobody else
+	 * does.
+	 */
+	thread->kernel_stack = stack_alloc();
 	if (thread->kernel_stack == 0)
 		return KERN_RESOURCE_SHORTAGE;
 
@@ -390,21 +408,26 @@ act_machine_return(kern_return_t code)
 }
 
 /*
- * An activation for a kernel-loaded task, which is the same facility again.
- * kern/thread.c calls it only on that path.
+ * An activation for a thread of the KERNEL's own making.
+ *
+ * ⚠️ The name misleads, and it misled me.  "kernel" here qualifies the thread
+ * being created, not the "kernel-loaded" (collocated) task facility that
+ * pcb_user_to_kernel and act_machine_return above belong to.  Every kernel
+ * thread comes through here: kern/thread.c's thread_create_at() calls it
+ * unconditionally, which is the first thing the boot proved when this
+ * panicked on the startup thread (#458).
+ *
+ * So it is what i386's is -- a forwarder to the machine-independent
+ * act_create() -- and there is no machine-dependent work in it on either
+ * machine.  The hook exists because a machine COULD need to do something
+ * here; this one does not, and the ones above genuinely refuse a facility
+ * we have decided against.  Two different things that share a word.
  */
 kern_return_t
 act_create_kernel(task_t task, vm_offset_t stack, vm_size_t stack_size,
 		  thread_act_t *out_act)
 {
-	(void) task;
-	(void) stack;
-	(void) stack_size;
-	(void) out_act;
-
-	panic("act_create_kernel: this machine has no kernel-loaded tasks "
-	      "(#453)");
-	return KERN_FAILURE;
+	return act_create(task, stack, stack_size, out_act);
 }
 
 /*
@@ -543,7 +566,14 @@ void
 load_context(thread_t thread)
 {
 	thread_act_t	act = thread->top_act;
-	struct context	discard;
+	/*
+	 * ⚠️ Zeroed, and that is not tidiness.  context_switch() reads
+	 * old->fpu_area to decide whether there is outgoing state to save,
+	 * and an uninitialised local would offer it whatever the stack last
+	 * held -- a pointer it would then write a register file through.  The
+	 * zero is the statement that there is no outgoing thread (#458).
+	 */
+	struct context	discard = { 0 };
 
 	assert(act != THR_ACT_NULL && act->mact.pcb != PCB_NULL);
 
@@ -574,6 +604,24 @@ load_context(thread_t thread)
 void
 thread_machine_set_current(thread_t thread)
 {
+	/*
+	 * ⚠️ TWO places, and the machine-independent one is the one that
+	 * counts (#458).
+	 *
+	 * current_thread() is `cpu_data[cpu_number()].active_thread' --
+	 * <kern/cpu_data.h>, an array the shared kernel owns.  This function
+	 * used to set only the per-CPU block below, so the whole
+	 * machine-independent tree asked cpu_data[] and got NULL: the first
+	 * thread reached thread_continue(), read self->continuation through a
+	 * null self, and called whatever the low physical page happened to
+	 * hold.  Two halves that never met, again.
+	 *
+	 * The per-CPU copy is kept, and is not redundant: the syscall entry
+	 * path reads it out of %gs before it has a stack to index an array
+	 * with.  It is a cache of the line above, and this is the one place
+	 * that writes either.
+	 */
+	cpu_data[cpu_number()].active_thread = thread;
 	percpu()->active_thread = (void *) thread;
 }
 

@@ -97,10 +97,27 @@ void context_switch(struct context *old, struct context *fresh)
 	 * register file is separate from the stack, so moving it here is not
 	 * early — it is the only place it can be.
 	 */
-	if (old->fpu_area == 0 || fresh->fpu_area == 0)
-		panic("thread: a context switched without anywhere to keep its FPU state");
+	/*
+	 * Two different questions, and they were one check until the first
+	 * boot asked them (#458).
+	 *
+	 * An outgoing context with no FPU area is legitimate exactly once per
+	 * processor: load_context() starts the first thread and there is no
+	 * thread being left behind, so it hands a zeroed context whose null
+	 * area means "nothing to save".  Saving anyway would write a register
+	 * file through a pointer nobody owns.
+	 *
+	 * An incoming context with no FPU area is never legitimate.  The
+	 * thread is about to run, and the first instruction that touches a
+	 * vector register would restore from nowhere.
+	 */
+	if (old->fpu_area != 0)
+		fpu_save(old->fpu_area);
 
-	fpu_save(old->fpu_area);
+	if (fresh->fpu_area == 0)
+		panic("thread: switching to a thread with nowhere to restore "
+		      "its FPU state from");
+
 	fpu_restore(fresh->fpu_area);
 
 	context_switch_raw(&old->rsp, fresh->rsp);
