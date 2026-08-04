@@ -61,6 +61,10 @@
 #include <time/tsc.h>
 #include <trap/trap.h>
 
+#include <boot/bootarg.h>
+#include <kern/startup.h>	/* setup_main -- the machine-independent kernel */
+#include <kern/misc_protos.h>	/* printf */
+
 #define COM1 0x3F8
 
 /* ------------------------------------------------------------------ */
@@ -4014,8 +4018,54 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
-	double_fault_selftest();
 
-	for (;;)
-		__asm__ volatile("cli; hlt");
+	/*
+	 * The double-fault self-test is TERMINAL, and that is why it is behind
+	 * a flag rather than in the ordinary path (#458).
+	 *
+	 * It breaks the stack deliberately, so the fault lands on its own IST
+	 * and can be reported at all.  There is nothing to return to
+	 * afterwards: the stack it was using no longer exists, and the run ends
+	 * in `no handler — halted', which is the success terminator the harness
+	 * looks for.
+	 *
+	 * setup_main() below does not return either.  Two endings cannot share
+	 * one boot, so they are two boots -- `-D' runs this one, and the second
+	 * GRUB entry gives it.  The coverage is not lost, it has moved into a
+	 * run of its own.
+	 *
+	 * ⚠️ Making this test survivable is real and belongs to #409: the
+	 * handler would have to reset rsp to a known-good stack and resume,
+	 * which is a different thing from the expect/resume mechanism the other
+	 * trap probes use, because those still have the stack they faulted on.
+	 */
+	if (boot_flag('D')) {
+		double_fault_selftest();
+		panic("double_fault_selftest returned");
+	}
+
+	/*
+	 * Into the machine-independent kernel (#458).
+	 *
+	 * Everything above this line is this machine proving it works: paging,
+	 * traps, the other processors, the timers, the syscall entry.  Below it
+	 * is the kernel those things exist to run, and it has never executed an
+	 * instruction on this machine -- #453 linked it and stopped there,
+	 * deliberately, because linking says every name was defined by somebody
+	 * and nothing about whether the definition is right.
+	 *
+	 * setup_main() does not return: it ends by launching the first thread.
+	 * The halt loop that used to be here is gone rather than left after the
+	 * call, because code after a call that cannot return is a claim that it
+	 * can.
+	 *
+	 * ⚠️ Its contract is "running in virtual memory, on the interrupt
+	 * stack, with master_cpu set".  All three hold here: paging has been on
+	 * since long before C, master_cpu is 0 from x86_64/cpu/model.c, and
+	 * this is the boot stack the trampoline set up.
+	 */
+	kputs("UrMach x86-64: entering setup_main (#458)\r\n");
+	setup_main();
+
+	panic("setup_main returned");
 }
