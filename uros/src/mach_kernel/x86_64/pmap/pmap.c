@@ -19,6 +19,9 @@
 #include <pmap/walk.h>
 #include <trap/trap.h>
 
+#include <pmap/direct.h>
+#include <vm/vm_page.h>	/* vm_page_grab / vm_page_wire (#458) */
+
 /*
  * The kernel pmap is a single object, not allocated: it has to exist before
  * any allocator does, and it lives as long as the kernel.  Its tables are
@@ -56,17 +59,108 @@ static struct pmap	pmap_pool[PMAP_BOOT_MAX];
  * limit that is only described in the code it limits is one nobody counts.
  */
 /*
+ * Has pmap_init() run?  It is what pmap_table_frame() below asks, and the
+ * whole reason this variable exists (#458).
+ */
+int	pmap_initialized = 0;
+
+/*
  * The second half of pmap initialisation, run by the machine-independent
  * startup once the virtual memory system is up.
  *
- * Empty, and the reason is #456 above: what belongs here is the zone that
- * removes the sixteen-space ceiling, and it cannot be written until this
- * kernel links kern/zalloc.c.  Empty rather than absent because
- * kern/startup.c calls it on the path that must work.
+ * What it does today is flip one flag, and that flag is load-bearing: it is
+ * the moment this pmap stops taking physical frames from the boot allocator
+ * and starts taking them from the VM.  See pmap_table_frame().
+ *
+ * What still belongs here is the zone that removes the sixteen-space ceiling
+ * of #456, which could not be written until this kernel linked kern/zalloc.c.
  */
 void
 pmap_init(void)
 {
+	pmap_initialized = 1;
+}
+
+/*
+ * A zeroed physical frame to hold a page table (#458).
+ *
+ * ⚠️ The two eras, and why this cannot be one call.
+ *
+ * Before the virtual memory system exists, physical memory belongs to
+ * x86_64/pmap/bootmem.c and boot_frame_alloc() is the only way to get any.
+ *
+ * After it exists, that allocator is EMPTY -- and not by accident.  The VM
+ * takes every remaining physical page during vm_page_bootstrap(), one at a
+ * time, through pmap_next_page(), and pmap_next_page() on this machine *is*
+ * boot_frame_alloc().  So the moment the VM has finished counting memory, the
+ * boot allocator has none left to give, forever.
+ *
+ * That is exactly the bug this function was written for.  next_table() called
+ * boot_frame_alloc() unconditionally, so the first mapping that needed a new
+ * page table after the VM came up got PMAP_MAP_NO_FRAME -- and the machine-
+ * independent PMAP_ENTER() macro DISCARDS pmap_enter's return value, so
+ * nothing noticed.  kmem_alloc() reported success, handed back an address
+ * with no physical page behind it, and the kernel died on the first byte it
+ * wrote there, three subsystems later, in ipc_hash_init().
+ *
+ * i386 has the same two eras and the same flag; it calls vm_page_grab() in
+ * pmap_expand() once pmap_initialized is set.
+ */
+uint64_t
+pmap_table_frame(void)
+{
+	vm_page_t	m;
+	uint64_t	pa;
+	volatile uint64_t *frame;
+
+	if (!pmap_initialized)
+		return boot_frame_alloc();
+
+	m = vm_page_grab();
+	if (m == VM_PAGE_NULL) {
+		/*
+		 * ⚠️ i386 blocks here -- `while ((m = vm_page_grab()) == NULL)
+		 * VM_PAGE_WAIT();' -- and that is the right answer for a
+		 * running system, because a page will be freed eventually.
+		 *
+		 * It is not the right answer yet: VM_PAGE_WAIT() blocks the
+		 * calling thread, and this machine reaches pmap_enter() before
+		 * there is a scheduler to block on.  Returning zero would put
+		 * back exactly the silence this function exists to remove, so
+		 * it says so instead, and waiting arrives with preemption.
+		 */
+		panic("pmap_table_frame: out of physical memory for a page "
+		      "table, and nothing to wait on yet (#458)");
+	}
+
+	/*
+	 * Wired, so the pageout daemon never takes back a page that a page
+	 * table is living in.
+	 *
+	 * ⚠️ Not inserted into a vm_object, which is what i386 does with its
+	 * pmap_object -- so nothing can find this page again to free it when
+	 * the address space goes away.  That is the same hole #455 describes
+	 * for empty tables, and it is written down there rather than papered
+	 * over with a comment here that says "TODO".
+	 */
+	vm_page_lock_queues();
+	vm_page_wire(m);
+	vm_page_unlock_queues();
+
+	pa = (uint64_t) m->phys_addr;
+
+	/*
+	 * Zeroed, because a page table built on whatever the previous owner
+	 * left walks into memory nobody accounted for.  Through the direct
+	 * map: every physical page is already addressable there, so this needs
+	 * no temporary mapping -- which is fortunate, since making one is what
+	 * we are in the middle of.
+	 */
+	frame = (volatile uint64_t *) (uintptr_t) phys_to_direct(pa);
+	for (unsigned i = 0; i < PAGE_SIZE_4K / sizeof(uint64_t); i++)
+		frame[i] = 0;
+
+	return pa;
 }
 
 static pmap_t pmap_alloc(void)
