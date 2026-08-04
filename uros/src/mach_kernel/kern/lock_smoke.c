@@ -93,43 +93,74 @@ lock_smoke_test(void)
  * that.  Every intermediate level masks identically here -- under MP_V1_1 any
  * ipl > 0 programs the same LAPIC task priority -- so the step is observable
  * in curr_ipl and nowhere else.
+ *
+ * ⚠️ It RAISES first when it has to, and that is the second time this routine
+ * has been fixed for the same kind of reason (#458).
+ *
+ * It used to give up when called at SPL0 -- "this test may not lower
+ * further" -- and print that it had skipped.  On i386 that never happened,
+ * because startup reaches this line at 8; on x86-64 it reaches it at 0, so
+ * the check compiled, linked, executed and tested nothing, every boot, while
+ * reading as a line of output like any other.
+ *
+ * A test that works only from one starting state is a test that will keep
+ * skipping, and the state it needed was never a property of what is under
+ * test.  So it makes the state it needs: raise to SPLHI, run the check
+ * between SPLHI and SPLHI-1, and return to where the caller was.  Raising is
+ * safe where lowering is not -- the level never goes below the one we were
+ * called at, so nothing deferred is released early.
  */
 void
 spl_return_check(void)
 {
-	spl_t	entry, lower, first, middle, second;
+	spl_t	entry, base, lower, first, middle, second;
+	boolean_t raised = FALSE;
 
 	entry = getspl();
 
-	if (entry == SPL0) {
-		printf("spl_return_check: skipped, startup is at SPL0 and "
-		       "this test may not lower further (#410)\n");
-		return;
-	}
-	lower = entry - 1;
+	base = entry;
+	if (base == SPL0) {
+		(void) splhigh();
+		base = getspl();
+		raised = TRUE;
 
-	first = splx(lower);		/* answer must be `entry` */
+		if (base == SPL0) {
+			panic("spl_return_check: splhigh() left the level at "
+			      "SPL0, so there is no level to test (#410)");
+		}
+	}
+	lower = base - 1;
+
+	first = splx(lower);		/* answer must be `base` */
 	middle = getspl();
-	second = splx(entry);		/* answer must be `middle` */
+	second = splx(base);		/* answer must be `middle` */
 
 	if (middle != lower)
 		panic("spl_return_check: splx(%d) left the level at %d -- the "
 		      "level never moved, so this test proves nothing (#410)",
 		      lower, middle);
 
-	if (first != entry)
+	if (first != base)
 		panic("spl_return_check: splx(%d) answered %d; the level it "
-		      "left was %d (#410)", lower, first, entry);
+		      "left was %d (#410)", lower, first, base);
 
 	if (second != middle)
 		panic("spl_return_check: splx(%d) answered %d; the level it "
-		      "left was %d (#410)", entry, second, middle);
+		      "left was %d (#410)", base, second, middle);
+
+	if (getspl() != base)
+		panic("spl_return_check: level is %d, tested from %d (#410)",
+		      getspl(), base);
+
+	if (raised)
+		(void) splx(entry);
 
 	if (getspl() != entry)
-		panic("spl_return_check: level is %d, entered at %d (#410)",
-		      getspl(), entry);
+		panic("spl_return_check: left the level at %d, entered at %d "
+		      "(#410)", getspl(), entry);
 
 	printf("spl_return_check: splx answered %d then %d -- the level left, "
-	       "not the argument (%d, %d) (#410)\n",
-	       first, second, lower, entry);
+	       "not the argument (%d, %d)%s (#410)\n",
+	       first, second, lower, base,
+	       raised ? ", raised from SPL0 to have a level to test" : "");
 }
