@@ -9,6 +9,7 @@
 
 #include <cpu/regs.h>
 #include <pmap/bootmem.h>
+#include <pmap/pmap.h>		/* pmap_table_frame (#458) */
 #include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pte.h>
@@ -41,7 +42,12 @@ static pt_entry_t *next_table(pt_entry_t *entry, int *err)
 		return table_at(pte_to_pa(*entry));
 	}
 
-	frame = boot_frame_alloc();
+	/*
+	 * Not boot_frame_alloc() (#458).  The boot allocator is drained by the
+	 * VM during vm_page_bootstrap(), so asking it after that always
+	 * answers zero; pmap_table_frame() knows which era it is in.
+	 */
+	frame = pmap_table_frame();
 	if (frame == 0) {
 		*err = PMAP_MAP_NO_FRAME;
 		return PT_ENTRY_NULL;

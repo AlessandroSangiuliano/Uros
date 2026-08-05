@@ -46,6 +46,7 @@
 #include <mach/clock.h>
 #include <mach/clock_types.h>
 #include <mach/thread_switch.h>
+#include <mach/mach_syscalls.h>	/* syscall_thread_switch */
 #include <mach/i386/thread_status.h>
 #include <sa_mach.h>
 #include <pthread.h>
@@ -2131,8 +2132,28 @@ cc_worker_func(void *arg)
     bench_recv_buf_t	recv_buf;
     int			i;
 
-    while (!g_cc_go)		/* all workers begin together */
-	;
+    /*
+     * All workers begin together -- but YIELD while waiting, do not spin.
+     *
+     * ⚠️ This loop used to be a naked spin, and that is a livelock: the
+     * thread that sets g_cc_go is the one still inside the pthread_create
+     * loop above, so every worker already created is burning a processor
+     * while the releaser needs one.  At eight workers on four processors it
+     * wedges -- measured at 13% of runs on the current tree and 50% on the
+     * tree before it, always at the tail of the #319 scaling sweep, never
+     * earlier, because that is where the spinners first outnumber the
+     * processors by enough to starve the creator.
+     *
+     * A barrier whose waiters can starve its releaser is not a barrier.
+     *
+     * ⚠️ thread_switch and not swtch_pri: swtch_pri depresses the caller's
+     * priority until it next blocks, which would still be in force during
+     * the timed region immediately below -- a fix that silently changes the
+     * number the benchmark exists to produce.  This one gives up the
+     * processor and nothing else.
+     */
+    while (!g_cc_go)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
 
     for (i = 0; i < w->iters; i++) {
 	send_buf.head.msgh_bits =
@@ -2301,8 +2322,9 @@ fault_worker_func(void *arg)
     int			it;
     vm_size_t		off;
 
-    while (!g_fault_go)		/* all workers start together */
-	;
+    /* Same barrier, same defect, same fix -- see cc_worker_func above. */
+    while (!g_fault_go)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
 
     for (it = 0; it < w->iters; it++) {
 	vm_address_t	addr = 0;

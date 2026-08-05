@@ -198,6 +198,14 @@ int pmap_may_map(pmap_t pmap, uint64_t va);
 int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	       int wired);
 
+/*
+ * A zeroed physical frame for a page table, from whichever allocator owns
+ * physical memory right now.  See the comment on the definition (#458).
+ */
+uint64_t pmap_table_frame(void);
+
+extern int pmap_initialized;
+
 /* Change whether an existing mapping is wired.  Returns 0 if va is unmapped. */
 int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired);
 

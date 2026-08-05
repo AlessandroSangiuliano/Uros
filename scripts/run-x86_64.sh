@@ -56,25 +56,73 @@ LOG=${UROS_X86_64_LOG:-$HOME/uros-tests/run-x86_64.log}
 # #318 was rewritten around that fact.
 KNOWN='timestamp counter measured against the 8254'
 
-# The last self-test breaks the stack deliberately so the double fault lands
-# on its own IST. `no handler — halted` is therefore the success terminator,
-# not a crash — and checking that it arrived is what catches a truncated run,
-# which produces fewer lines and no failures at all and reads as a pass under
-# any naive "grep for problems" check.
+# There are two kinds of run now, and they end differently (#458).
+#
+# The `-D' run ends in the double-fault self-test, which breaks the stack
+# deliberately so the fault lands on its own IST.  `no handler — halted' is
+# its success terminator, not a crash, and checking that it arrived is what
+# catches a truncated run -- which produces fewer lines and no failures at
+# all, and reads as a pass under any naive "grep for problems" check.
+#
+# The ordinary run enters the machine-independent kernel, and there
+# `no handler' means exactly what it says.  A trap with no handler is how a
+# kernel that has never run announces the first thing it got wrong.
+#
+# ⚠️ This distinction is not decoration.  The first boot into setup_main
+# faulted in ipc_hash_init and this script called it PASSED, because the
+# terminator it was looking for had arrived -- from a page fault instead of
+# from the test that used to produce it.  A verdict that says yes to the run
+# it was written to judge, and yes to a run it has never seen, is not a
+# verdict.
 TERMINATOR='no handler'
+MI_ENTRY='entering setup_main'
+
+# Where the machine-independent kernel currently stops, and why that is not a
+# failure: it reaches bootstrap_create() and finds no userland bundle, because
+# nothing loads one for this target yet (#422).  Named here so it is EXCUSED
+# rather than ignored -- the day a bundle is loaded, this line disappears from
+# the log and the check below starts asking for the next thing instead of
+# silently continuing to pass.
+EXPECTED_END='No bootstrap code loaded with the kernel'
 
 verdict() {
 TESTS=$(grep -ac 'UrMach x86-64:' "$LOG" || true)
 EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
-BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic:|kernel: page fault' "$LOG" \
-	| grep -av "$KNOWN" || true)
+# ⚠️ `^panic\(', not `^panic:'.  This kernel prints `panic(cpu 0): ...' --
+# kern/debug.c puts the processor number in parentheses -- so the old pattern
+# could never match a single panic this kernel has ever produced.  It was
+# checked against nothing for as long as nothing panicked (#458).
+BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|kernel: page fault' "$LOG" \
+	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" || true)
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
 echo
 echo "=== verdict: $TESTS self-tests ==="
 [ "$EXCUSED" -gt 0 ] && echo "  $EXCUSED excused: known QEMU artifact (TSC not invariant, #318)"
 
-if ! grep -aq "$TERMINATOR" "$LOG"; then
+if grep -aq "$MI_ENTRY" "$LOG"; then
+	# The machine-dependent self-tests all passed -- setup_main is reached
+	# only after them -- so from here the subject is the kernel.
+	if grep -aq "$TERMINATOR" "$LOG"; then
+		echo "  FAILED: trapped inside the machine-independent kernel with no"
+		echo "          handler.  Everything before setup_main passed; what"
+		echo "          follows is the first thing this kernel got wrong:"
+		awk "/$MI_ENTRY/,0" "$LOG" | sed -n '2,20p' | sed 's/^/    /'
+		echo "  log: $LOG"
+		exit 1
+	fi
+	if grep -aq "$EXPECTED_END" "$LOG"; then
+		echo "  excused: stopped at bootstrap_create -- no userland bundle"
+		echo "           is loaded for this target yet (#422)"
+	fi
+	if ! grep -aq 'startup: first thread' "$LOG"; then
+		echo "  FAILED: entered setup_main and neither reached the first"
+		echo "          thread nor trapped -- it is wedged, which is the case"
+		echo "          #428 exists for"
+		echo "  log: $LOG"
+		exit 1
+	fi
+elif ! grep -aq "$TERMINATOR" "$LOG"; then
 	echo "  FAILED: the run never reached '$TERMINATOR' — it was cut short, so"
 	echo "          the tests after that point did not run and cannot have passed"
 	echo "  log: $LOG"
@@ -98,6 +146,18 @@ if [ "${1:-}" = "--judge" ]; then
 	exit $?
 fi
 
+
+# --entry N picks the GRUB menu entry, and therefore which kind of run this is
+# (#458).  Entry 0 is the ordinary boot, which now goes on into the
+# machine-independent kernel; entry 2 is the terminal double-fault self-test,
+# which cannot share a boot with it.  Without this the other entries are
+# unreachable, because grub.cfg has timeout=0.
+if [ "${1:-}" = "--entry" ]; then
+	[ -n "${2:-}" ] || { echo "usage: $0 --entry <n> [seconds] [qemu args]" >&2; exit 2; }
+	UROS_X86_64_BOOT_ENTRY=$2
+	export UROS_X86_64_BOOT_ENTRY
+	shift 2
+fi
 
 SECS=${1:-15}
 [ $# -gt 0 ] && shift

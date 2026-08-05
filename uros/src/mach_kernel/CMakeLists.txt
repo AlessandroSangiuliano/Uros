@@ -80,6 +80,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/ap_trampoline.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_c.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot_modules.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/bootarg.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/printf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/klog.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/cpu_data.c
@@ -331,12 +332,27 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # and calls grub-mkrescue; boot with `qemu-system-x86_64 -cdrom`.
   set(X86_64_ISO_DIR ${CMAKE_BINARY_DIR}/iso-x86_64)
   set(X86_64_ISO ${CMAKE_BINARY_DIR}/uros-x86_64.iso)
+  #
+  # ⚠️ Which menu entry boots is written at BUILD time, from the environment
+  # (#458).
+  #
+  # grub.cfg has three entries and `timeout=0', so whichever `default' names
+  # is the one an unattended run gets -- and until this existed, that was
+  # always entry 0 and the other two could not be reached by any automated
+  # boot at all.  The `-r' debugger entry had been in that position since it
+  # was written, under a comment saying "a flag that cannot be given is a flag
+  # that is never used", which was true of itself.
+  #
+  # It matters more now: the terminal double-fault self-test moved to entry 2
+  # when the ordinary boot went on into the machine-independent kernel, and a
+  # test nothing can select is a test that has stopped running.
   add_custom_target(uros_iso
     COMMAND ${CMAKE_COMMAND} -E make_directory ${X86_64_ISO_DIR}/boot/grub
     COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:mach_kernel>
             ${X86_64_ISO_DIR}/boot/mach_kernel
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
             ${X86_64_ISO_DIR}/boot/grub/grub.cfg
+    COMMAND sh -c "echo set default=$\{UROS_X86_64_BOOT_ENTRY:-0\} > ${X86_64_ISO_DIR}/boot/grub/entry.cfg"
     COMMAND grub-mkrescue -o ${X86_64_ISO} ${X86_64_ISO_DIR}
     DEPENDS mach_kernel ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
     COMMENT "Building GRUB2 multiboot2 rescue ISO: ${X86_64_ISO}"

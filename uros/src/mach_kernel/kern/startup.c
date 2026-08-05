@@ -403,6 +403,17 @@ start_kernel_threads(void)
 	register int	i;
 
 	/*
+	 * The first thread is running.
+	 *
+	 * Everything above this point ran on the boot stack, in a context the
+	 * machine invented; from here the kernel is scheduling itself.  It is
+	 * worth one line because it is the boundary a bring-up spends its time
+	 * trying to cross, and because a harness needs something to look for
+	 * that a trap cannot produce (#458).
+	 */
+	printf("startup: first thread running, kernel threads starting\n");
+
+	/*
 	 *	Create the idle threads and the other
 	 *	service threads.
 	 */
