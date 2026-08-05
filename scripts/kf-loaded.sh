@@ -9,7 +9,11 @@
 # KFAULT auto-backtrace fires.  ONE qemu at a time.  Burners killed by PID only
 # (never qemu, never pkill).
 set -u
-ROOT=/home/slex/Scrivania/osfmk-mklinux
+# ⚠️ Derived, not written down.  It used to be the literal path
+# /home/slex/Scrivania/osfmk-mklinux, which does not exist -- so this script
+# could not run, and nothing said so, because a tool nobody invokes is
+# checked by nothing.
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
 NBURN=${1:-8}
 MAXR=${2:-15}
 
