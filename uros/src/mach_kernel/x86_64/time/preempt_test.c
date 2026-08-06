@@ -51,6 +51,7 @@
 #include <x86_64/time/clock_event.h>
 #include <x86_64/time/tsc.h>
 #include <x86_64/cpu/regs.h>
+#include <x86_64/cpu/spl.h>
 #include <kern/misc_protos.h>
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
@@ -78,7 +79,18 @@ preempt_worker_a(void)
 	 * it -- a thread that never runs and a thread that runs without being
 	 * observed produce the same silence.
 	 */
-	printf("preempt_test: worker a running\n");
+	/*
+	 * The interrupt flag, reported because it is the property this thread
+	 * depends on and the one that was wrong: a thread resumed on a fresh
+	 * stack used to arrive here with IF clear, run forever, and take the
+	 * clock down with it.
+	 */
+	{
+		uint64_t fl;
+		__asm__ __volatile__("pushfq; popq %0" : "=r"(fl));
+		printf("preempt_test: worker a running (IF=%d)\n",
+		       (int)((fl >> 9) & 1));
+	}
 	while (!preempt_done)
 		preempt_count_a++;
 	/* Nothing to tidy: the reporter ends the run, and a worker that

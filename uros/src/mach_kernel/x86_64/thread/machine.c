@@ -291,10 +291,33 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	pcb = thr_act->mact.pcb;
 	assert(pcb != PCB_NULL);
 
+	/*
+	 * Through the trampoline, exactly as thread_machine_create does (#459).
+	 *
+	 * This is the OTHER way a thread comes to start on a fresh stack, and
+	 * it is the one the scheduler uses most: every thread that blocks with
+	 * a continuation has its stack reset here and resumes through this
+	 * context.  Naming the continuation as the entry point sends it
+	 * straight into its own code, skipping thread_dispatch(), the balanced
+	 * enable_preemption(), spllo() -- and the STI, so it resumes with
+	 * interrupts disabled and is never interrupted again.
+	 *
+	 * Measured before this was fixed: a thread preempted into ran with
+	 * IF=0 and spl=0 -- the software level correctly lowered, the hardware
+	 * flag never restored -- and the clock delivered exactly two ticks for
+	 * the life of the machine.
+	 *
+	 * ⚠️ The continuation is NOT lost by not being named here: thread_start()
+	 * put it in self->continuation, and thread_continue() -- which the
+	 * trampoline ends in -- is what calls it.  That is where a continuation
+	 * is supposed to be invoked from, and going directly is what bypassed
+	 * everything owed to a thread arriving on a fresh stack.
+	 */
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
-		     (void (*)(void *)) continuation, (void *) 0,
+		     thread_begin_trampoline, (void *) 0,
 		     pcb->ctx.fpu_area);
+	(void) continuation;
 }
 
 /*
