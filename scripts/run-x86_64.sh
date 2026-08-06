@@ -92,7 +92,19 @@ EXCUSED=$(grep -a 'WRONG' "$LOG" | grep -ac "$KNOWN" || true)
 # kern/debug.c puts the processor number in parentheses -- so the old pattern
 # could never match a single panic this kernel has ever produced.  It was
 # checked against nothing for as long as nothing panicked (#458).
-BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|kernel: page fault' "$LOG" \
+# ⚠️ `panic(cpu' matches ANYWHERE in the line, not only at the start (#461).
+#
+# The pattern was anchored, and the day several processors panicked at once
+# that anchor was the difference between a verdict and nothing. Three
+# application processors failed identically in the same microsecond, their
+# reports came out interleaved character by character, and not one line began
+# with `panic'. The run was reported as PASSED.
+#
+# The interleaving itself is fixed -- x86_64/trap/trap.c serialises the report
+# now -- but a verdict that only works while the output is tidy is a verdict
+# that fails exactly when the machine is in the worst trouble. Unanchored, it
+# survives a shredded log.
+BAD=$(grep -aE 'WRONG|FAIL|Assertion failed|^panic[:(]|panic\(cpu|kernel: page fault' "$LOG" \
 	| grep -av "$KNOWN" | grep -av "$EXPECTED_END" || true)
 NBAD=$(test -n "$BAD" && printf '%s\n' "$BAD" | wc -l || echo 0)
 
@@ -115,7 +127,17 @@ if grep -aq "$MI_ENTRY" "$LOG"; then
 		echo "  excused: stopped at bootstrap_create -- no userland bundle"
 		echo "           is loaded for this target yet (#422)"
 	fi
-	if ! grep -aq 'startup: first thread' "$LOG"; then
+	# ⚠️ Unless this boot IS the preemption test, on a machine with one
+	# processor (#461).
+	#
+	# There the test is started from load_context() and takes the place of
+	# the first thread -- deliberately, because the ordinary first thread
+	# reaches bootstrap_create and panics there in less time than the test
+	# needs -- so `startup: first thread running' never prints and cannot.
+	# Demanding it of that boot is demanding the one thing it was arranged
+	# not to do, and the test's own verdict below is its contract instead.
+	if ! grep -aq 'startup: first thread' "$LOG" \
+	   && ! grep -aq 'preempt_test: starting' "$LOG"; then
 		echo "  FAILED: entered setup_main and neither reached the first"
 		echo "          thread nor trapped -- it is wedged, which is the case"
 		echo "          #428 exists for"
@@ -127,6 +149,29 @@ elif ! grep -aq "$TERMINATOR" "$LOG"; then
 	echo "          the tests after that point did not run and cannot have passed"
 	echo "  log: $LOG"
 	exit 1
+fi
+
+# A test boot has to reach its own verdict (#461).
+#
+# Entry 5 is the preemption test, and its failure mode is SILENCE by design:
+# without preemption the first thread scheduled runs forever and prints
+# nothing. That is only a failure if somebody is asking. Nobody was -- a run
+# that announced the test and then stopped dead had every other box ticked
+# (it entered setup_main, it reached the first thread, it trapped on nothing)
+# and was reported as passed.
+#
+# So: having started, it must finish. This is the general shape -- a boot that
+# exists to answer a question fails when the question goes unanswered.
+if grep -aq 'preempt_test: starting' "$LOG"; then
+	if ! grep -aq 'preempt_test: PASS' "$LOG"; then
+		echo "  FAILED: the preemption test started and never reported."
+		echo "          Its failure mode is silence: a processor that is"
+		echo "          never taken from a thread that will not yield"
+		echo "          prints nothing at all (#459/#461)"
+		echo "  log: $LOG"
+		exit 1
+	fi
+	echo "  preemption test: PASS"
 fi
 
 if [ "$NBAD" -gt 0 ]; then
