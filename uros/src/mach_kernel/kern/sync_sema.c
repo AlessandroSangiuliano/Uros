@@ -705,6 +705,50 @@ futex_recheck_drain(void)
 		thread_block((void (*)(void)) 0);
 }
 
+/*
+ * A waiter that gives up after asserting its wait may have EATEN a wake, and
+ * must hand it on (#460).
+ *
+ * The order here is assert_wait() first, re-read second -- so between the two
+ * this thread is on the wait hash and is a legitimate target for
+ * thread_wakeup_one().  When it then discovers the word already changed and
+ * returns KERN_NOT_WAITING, the wake that picked it dies with it: its own
+ * caller retries in user space and has no reason to wake anybody, while a
+ * thread that was properly blocked on the same key is never woken at all.
+ *
+ * That is a lost wakeup, and it is real -- but it is NOT what wedged the boot
+ * in #460, and this comment used to claim it was.  The evidence offered was
+ * "fifteen threads of one task asleep on one key, and `show runq' answering
+ * No runnable threads", and both halves were misread: those threads sit on
+ * DISTINCT keys (the low bits of futex_combine collide in the listing, not
+ * the keys), that state is the ordinary libpthreads thread-pool park, and
+ * `No runnable threads' only means every runnable thread was already ON a
+ * processor.  The two real causes were elsewhere: syscall_thread_switch()
+ * skipping thread_block() with TH_WAIT set, and block_device_server exiting
+ * main() on a startup race.  Closing this window did not move the rate.
+ *
+ * It stays because the window is genuine and cheap to close, not because it
+ * ever explained anything.
+ *
+ * Linux does not have this window because its futex_wait checks the word
+ * while holding the hash-bucket lock, so a thread that will bail out is never
+ * enqueued.  Reordering to match would mean holding the wait-hash lock across
+ * a copyin from user memory, which can fault -- exactly what the #299 comment
+ * above this function exists to avoid.  So the wake is passed on instead.
+ *
+ * ⚠️ Unconditional, and deliberately so.  Working out whether a wake was
+ * really consumed means inspecting wait_result after clear_wait() and racing
+ * the waker for the answer; posting one extra is free by comparison, because
+ * a futex waiter that wakes without cause re-reads its word and blocks again.
+ * The tree already relies on that: see the note on key collisions above.
+ * This path runs only when a waiter bails out, which is rare.
+ */
+static void
+futex_pass_on_wake(event_t key)
+{
+	thread_wakeup_one(key);
+}
+
 static kern_return_t
 futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 	   boolean_t is_private)
@@ -754,12 +798,14 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
 		futex_recheck_drain();
+		futex_pass_on_wake(key);
 		return KERN_INVALID_ADDRESS;
 	}
 	if (cur != val) {
 		clear_wait(self, THREAD_AWAKENED, TRUE);
 		splx(s);
 		futex_recheck_drain();
+		futex_pass_on_wake(key);
 		return KERN_NOT_WAITING;	/* value already changed: caller retries */
 	}
 	splx(s);
