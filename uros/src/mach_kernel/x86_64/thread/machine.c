@@ -29,6 +29,7 @@
 #include <kern/kalloc.h>
 
 #include <kern/thread.h>
+#include <time/clock_event.h>	/* #459: start this processor's clock */
 #include <kern/thread_act.h>
 #include <kern/task.h>
 #include <kern/sched_prim.h>
@@ -581,6 +582,32 @@ load_context(thread_t thread)
 	act_machine_switch_pcb(act);
 
 	percpu()->prev_thread = (void *) 0;
+
+	/*
+	 * Start this processor's clock (#459).
+	 *
+	 * Here, and not in machine_init(), because this is the first instant
+	 * at which a tick could be handled: hertz_tick() charges time to
+	 * current_thread() and raises an AST against it, and until the line
+	 * above there was no current thread to charge.
+	 *
+	 * ⚠️ i386 can arm earlier because its timer sits in a class that spl
+	 * masks, so the first tick simply waits at the door until the AP drops
+	 * to spllo inside the scheduler.  Here it cannot: SPLHI is 14 and the
+	 * timer is class 15, left deliberately unmaskable so that a processor
+	 * holding a lock never stops answering the others.  So the clock is
+	 * started when it is safe rather than held back after it is started.
+	 *
+	 * Every processor runs this for its own first thread, which is what
+	 * makes the tick per-processor: scheduler accounting on 64 processors
+	 * cannot be one CPU's business, and i386's boot processor already
+	 * shows what happens when it is -- it receives no LAPIC tick at all.
+	 */
+	clock_event_setup_cpu();
+	if (!clock_event_arm_tick())
+		panic("load_context: the %s clock would not arm — this "
+		      "processor would run the first thread and never be "
+		      "preempted (#459)", clock_event_name());
 
 	/*
 	 * A context to save into that nobody will read.  context_switch()
