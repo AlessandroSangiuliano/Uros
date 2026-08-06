@@ -35,6 +35,7 @@
 #include <trap/trap.h>			/* struct trap_frame */
 #include <mach/machine/vm_types.h>	/* vm_offset_t */
 #include <cpu/regs.h>			/* cpu_pause */
+#include <kern/ast.h>			/* #459 TEMP */
 
 /* ------------------------------------------------------------------ rate */
 
