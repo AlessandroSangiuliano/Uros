@@ -11,6 +11,9 @@
 #include <cpu/desc.h>
 #include <ddb/cons.h>
 #include <cpu/lapic.h>
+#include <kern/ast.h>		/* #459: need_ast, ast_taken */
+#include <kern/cpu_number.h>
+#include <kern/cpu_data.h>	/* #459: get_preemption_level */
 #include <cpu/regs.h>
 #include <cpu/spl.h>
 #include <ddb/ddb.h>
@@ -487,6 +490,64 @@ void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
 	trap_dispatch(frame);
 }
 
+/*
+ * Turn a pending AST into a context switch, on the way out of an interrupt
+ * (#459).
+ *
+ * hertz_tick() decrementing a quantum and raising AST_QUANTUM is only half of
+ * preemption: something has to look at what was raised.  Nothing did -- the
+ * word `need_ast' did not appear in this file or in entry.S -- so the clock
+ * ticked, the quantum expired, and the processor carried on running the same
+ * thread forever.  Measured before this existed: three threads bound to one
+ * processor, the first one scheduled ran for a full second and the other two
+ * counters stayed at zero.
+ *
+ * In C rather than in the return path in assembly, unlike i386, which checks
+ * need_ast in three places in locore.S.  There is one return path here and it
+ * already calls into C with the frame in hand, so a check written here is
+ * read by anyone reading the dispatch -- and a context switch that happens
+ * from a C frame is easier to reason about than one that happens between two
+ * instructions of an epilogue.
+ *
+ * ⚠️ Only on the way back to a preemptable context.  Switching away from a
+ * kernel path that is holding a lock is not preemption, it is a deadlock with
+ * extra steps: the level is raised precisely so this cannot happen, and
+ * ast_taken() is entitled to assume the caller is at a point where blocking
+ * is legal.
+ */
+static void
+trap_take_ast(struct trap_frame *frame)
+{
+	unsigned cpu = cpu_number();
+
+	if (need_ast[cpu] == AST_NONE)
+		return;
+
+	/*
+	 * Ring 3 is always safe to preempt.  Ring 0 is safe only where the
+	 * kernel says so, and it says so with the preemption level: that
+	 * counter exists precisely to mark the spans in which a processor must
+	 * not be taken away, and every path that holds something raises it.
+	 *
+	 * Consulting it rather than refusing ring 0 outright, because until
+	 * #422 brings up userland every thread this kernel has IS a kernel
+	 * thread -- a rule of "ring 3 only" would mean nothing is ever
+	 * preempted, on a machine whose whole scheduler is kernel threads.
+	 *
+	 * ⚠️ It is a weaker guarantee than i386's marked safe points, and the
+	 * difference is real: a path that holds a lock without raising the
+	 * level would be preempted here and not there.  Narrowing this is
+	 * exactly the reading #454 carries -- deciding, call site by call
+	 * site, which of the two things each one meant.  Until then the level
+	 * is what the tree offers, and the alternative is no preemption at
+	 * all.
+	 */
+	if ((frame->cs & 3) != USER_RPL && get_preemption_level() != 0)
+		return;
+
+	ast_taken(FALSE, AST_ALL, splsched());
+}
+
 void trap_dispatch(struct trap_frame *frame)
 {
 	/*
@@ -512,6 +573,7 @@ void trap_dispatch(struct trap_frame *frame)
 			}
 
 			h(frame);
+			trap_take_ast(frame);
 			return;
 		}
 		/* Nobody claimed it — fall through and say so. */
