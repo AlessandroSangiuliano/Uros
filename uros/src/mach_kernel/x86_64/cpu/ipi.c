@@ -7,6 +7,8 @@
 
 #include <stdint.h>
 
+#include <kern/misc_protos.h>	/* #461: halt_cpu, panic */
+
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
 #include <cpu/regs.h>
@@ -71,12 +73,14 @@ static void ipi_call_handler(struct trap_frame *frame)
 
 
 static void ipi_ast_handler(struct trap_frame *frame);
+static void ipi_halt_handler(struct trap_frame *frame);
 
 void ipi_init(void)
 {
 	hw_lock_init(&call_lock);
 	trap_set_handler(IPI_VECTOR_CALL, ipi_call_handler);
 	trap_set_handler(IPI_VECTOR_AST, ipi_ast_handler);
+	trap_set_handler(IPI_VECTOR_HALT, ipi_halt_handler);
 }
 
 uint64_t ipi_calls_served(uint32_t apic_id)
@@ -160,4 +164,26 @@ static void ipi_ast_handler(struct trap_frame *frame)
 void ipi_ast_check(uint32_t apic_id)
 {
 	lapic_send_ipi(apic_id, IPI_VECTOR_AST);
+}
+
+/*
+ * The stop interrupt, which does not return (#461).
+ *
+ * No acknowledgement, because there is nobody left waiting for one, and no
+ * end-of-interrupt either: this processor is not going to take another
+ * interrupt.  halt_cpu() prints where it was, on the way past, and stops.
+ */
+static void ipi_halt_handler(struct trap_frame *frame)
+{
+	(void) frame;
+	halt_cpu();
+	/*NOTREACHED*/
+}
+
+void ipi_halt_others(void)
+{
+	if (smp_online_count() <= 1)
+		return;
+
+	lapic_broadcast_ipi(IPI_VECTOR_HALT);
 }

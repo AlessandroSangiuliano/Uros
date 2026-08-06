@@ -54,6 +54,28 @@
  */
 #define IPI_VECTOR_AST		0xF2
 
+/*
+ * "Stop" (#461).
+ *
+ * The dying kernel's message, and the one cross-call that must not be built
+ * out of ipi_call_others(): that one takes a lock, refuses to run with
+ * interrupts off, and panics if a processor does not answer.  All three are
+ * right for a shootdown and all three are wrong on the path out of a panic,
+ * where interrupts are off, a lock may be held by the processor that died,
+ * and a second panic is the last thing anybody needs.
+ *
+ * So this is broadcast and forgotten.  No lock, no acknowledgement, nothing
+ * to wait for -- the sender has nothing left to do that depends on the
+ * answer, and a processor that never takes it was not going to be stopped by
+ * being asked politely.  Its handler does not return.
+ *
+ * ⚠️ A maskable interrupt, therefore a processor spinning with them off does
+ * not stop.  Naming the limit rather than papering over it: the mechanism
+ * that reaches such a processor is a non-maskable interrupt, and this machine
+ * already uses the NMI for the watchdog.
+ */
+#define IPI_VECTOR_HALT		0xF3
+
 /* Claim the vector.  Boot processor, once, before anybody is woken. */
 void ipi_init(void);
 
@@ -79,6 +101,15 @@ void ipi_call_others(void (*fn)(void *), void *arg);
  * a processor it has just asked to go and do something.
  */
 void ipi_ast_check(uint32_t apic_id);
+
+/*
+ * Stop every other processor, and do not wait for any of them (#461).
+ *
+ * For the panic path and for halt_all_cpus().  Returns immediately: the
+ * targets never return from the handler, so there is nothing that could ever
+ * be waited for.
+ */
+void ipi_halt_others(void);
 
 /*
  * How many cross-calls this processor has served.  For the boot-time proof
