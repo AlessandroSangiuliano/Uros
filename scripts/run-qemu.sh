@@ -247,5 +247,46 @@ if [ "$USE_VIRTIO" = true ]; then
     QEMU_ARGS="$QEMU_ARGS -device virtio-blk-pci,drive=virtiodisk0"
 fi
 
+# ------------------------------------------------------- host state (#460)
+#
+# Say what the host was doing, on the same line as the run.
+#
+# A slow run and a wedged run reach the harness as the same red X, and #460
+# was first explained away as "the governor is on powersave" -- an arithmetic
+# built on a duration nobody had measured.  The real figures: 11 s green on
+# AC, and a wedge burning the full 420 s timeout.  2.85x the clock cannot
+# turn 11 into 420, so the explanation was false, but nothing in the output
+# made that checkable after the fact.
+#
+# ⚠️ The governor NAME is not the measurement -- the FREQUENCY is.  On this
+# laptop `performance' on battery still reported 3.99 GHz while `powersave'
+# gave 1.40, so reading the name alone would have compared runs taken at
+# clocks that differ by 2.85x without noticing.
+host_state() {
+	gov=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor \
+	      2>/dev/null || echo "?")
+	mhz=$(awk '/cpu MHz/ {printf "%.0f", $4; exit}' /proc/cpuinfo \
+	      2>/dev/null || echo "?")
+	ac="?"
+	for p in /sys/class/power_supply/A*/online; do
+		[ -r "$p" ] && ac=$(cat "$p") && break
+	done
+	case "$ac" in
+	1) ac="AC" ;;
+	0) ac="battery" ;;
+	*) ac="AC?" ;;
+	esac
+	echo "host: governor=$gov cpu=${mhz}MHz power=$ac started=$(date +%H:%M:%S)"
+}
+host_state
+
+# ⚠️ `exec' stays.  Without it this shell remains qemu's parent, and every
+# harness here starts the script with Popen() and later calls terminate() on
+# that pid -- which would then kill the shell and leave qemu running.  Stray
+# qemus are not a cosmetic problem: two overlapping runs kill each other and
+# manufacture the very failure being hunted (12 false failures in #438).
+#
+# So the elapsed time is not measured here: the start timestamp is printed
+# above, and the callers already report per-verdict seconds.
 # shellcheck disable=SC2086
 exec qemu-system-i386 $QEMU_ARGS $EXTRA_ARGS

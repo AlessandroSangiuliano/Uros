@@ -370,7 +370,30 @@ syscall_thread_switch(
     mp_disable_preemption();
     myprocessor = current_processor();
 #if	NCPUS > 1
-    if (myprocessor->processor_set->runq.count > 0 ||
+    /*
+     * #460: the "nothing else is runnable, so don't bother blocking"
+     * shortcut is only sound while THIS thread is still runnable.
+     *
+     * SWITCH_OPTION_WAIT has already called thread_will_wait_with_timeout()
+     * above, which sets TH_WAIT and arms the timer.  Skipping the block then
+     * returns to user space with TH_WAIT still set -- and the
+     * reset_timeout_check() a few lines below immediately disarms the timer
+     * that was the only thing left to wake it.  The thread keeps running,
+     * marked asleep, until the first AST after that: i386_astintr ->
+     * ast_taken -> thread_block_reason then parks it for good, with
+     * wait_event == NO_EVENT and no continuation, so nothing can ever wake
+     * it again.
+     *
+     * That is the late wedge of #460.  It struck at a different test every
+     * time because the park happens wherever the next AST lands, not where
+     * the thread_switch was: kernel242_test calls this once in
+     * wait_for_quiet_boot() and was then found blocked -- with its main
+     * thread alive and TH_WAIT set -- somewhere in the tests that followed.
+     *
+     * So take the shortcut only when the caller did not ask to wait.
+     */
+    if (option == SWITCH_OPTION_WAIT ||
+	myprocessor->processor_set->runq.count > 0 ||
 	myprocessor->runq.count > 0)
 #endif	/* NCPUS > 1 */
     {

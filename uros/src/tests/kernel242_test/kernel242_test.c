@@ -78,6 +78,7 @@
 #include <default_pager_object.h>	/* #449: object_create -- MIG's
 					 * declaration, not mine */
 #include <servers/netname.h>
+#include <pthread.h>			/* #460: pthread_setname_np */
 
 extern kern_return_t bootstrap_ports(mach_port_t bootstrap,
                                      mach_port_t *host_port,
@@ -841,6 +842,17 @@ main(int argc, char **argv)
     g_host_priv = host;
     g_device_master = device;	/* #449 */
     printf_init(device);
+
+    /*
+     * #460: name this thread so a DDB dump identifies it directly.
+     *
+     * `show all acts' prints thread->name in brackets, and without one a
+     * task can only be picked out of the listing by counting creation
+     * order -- which is wrong the moment any task exits, and cap_test
+     * exits before this one runs.  Two diagnoses in this hunt were drawn
+     * from a task index that had already shifted by one.
+     */
+    pthread_setname_np(pthread_self(), "k242-main");
 
     printf("\n=== kernel242_test (#242 no-goto kernel exerciser) ===\n");
     wait_for_quiet_boot();
