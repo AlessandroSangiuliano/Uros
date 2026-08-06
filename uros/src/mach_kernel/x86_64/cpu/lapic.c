@@ -34,6 +34,7 @@
 
 #define LVT_MASKED		(1U << 16)
 #define LVT_TIMER_PERIODIC	(1U << 17)
+#define LVT_TIMER_DEADLINE	(2U << 17)	/* #459: bits 18:17 = 10b */
 
 /*
  * The divisor field is not a number: its three bits are 3, 1 and 0, with bit
@@ -398,6 +399,65 @@ void lapic_timer_stop(void)
 	/* Count first, then mask: masking alone leaves it counting. */
 	lapic_write(LAPIC_TIMER_INIT, 0);
 	lapic_write(LAPIC_LVT_TIMER, LVT_MASKED);
+}
+
+/*
+ * TSC-deadline mode (#459).  The LVT still selects the vector -- the deadline
+ * replaces the COUNTDOWN, not the delivery path -- with mode bits 18:17 set
+ * to 10b.  The countdown registers are ignored in this mode; the MSR is the
+ * whole interface, and clock_event.c owns it.
+ *
+ * ⚠️ The SDM requires an MFENCE between the mode write and the first deadline
+ * write: without it the WRMSR can be observed before the mode is in effect,
+ * and the deadline is then read by a timer still in one-shot mode -- an arm
+ * that appears to succeed and never fires.
+ */
+void lapic_timer_deadline_setup(uint8_t vector)
+{
+	if (!lapic_present())
+		return;
+
+	lapic_write(LAPIC_TIMER_INIT, 0);	/* leave no countdown behind */
+	lapic_write(LAPIC_LVT_TIMER, LVT_TIMER_DEADLINE | vector);
+	__asm__ __volatile__("mfence" : : : "memory");
+}
+
+/*
+ * One-shot mode (#459).  Point the LVT at `vector' with the periodic bit
+ * clear and leave the countdown stopped; lapic_timer_oneshot_arm() starts it.
+ *
+ * Separate from lapic_timer_start() rather than a flag on it, because the two
+ * differ in more than a bit: a periodic timer is armed once and forgotten,
+ * a one-shot one is dead until somebody arms it, and a caller that confuses
+ * them gets a kernel whose clock fires exactly once.
+ */
+void lapic_timer_oneshot_setup(uint8_t vector)
+{
+	if (!lapic_present())
+		return;
+
+	/* The divisor on every processor: it is per-APIC state, and an
+	 * application processor arrives with whatever reset left in it. */
+	lapic_write(LAPIC_TIMER_DIV, TIMER_DIVIDE_16);
+	lapic_write(LAPIC_TIMER_INIT, 0);		/* stopped until armed */
+	lapic_write(LAPIC_LVT_TIMER, vector);		/* one-shot: no periodic */
+}
+
+/*
+ * Start the countdown.  `count' is in calibrated timer ticks, so the caller
+ * converts from time using lapic_timer_hz().
+ *
+ * A count of zero is refused rather than written: zero means STOPPED, so
+ * writing it would arm nothing while looking like success -- the failure that
+ * presents as a working kernel with no clock.
+ */
+int lapic_timer_oneshot_arm(uint32_t count)
+{
+	if (!lapic_present() || count == 0)
+		return 0;
+
+	lapic_write(LAPIC_TIMER_INIT, count);
+	return 1;
 }
 
 void lapic_broadcast_ipi(uint8_t vector)
