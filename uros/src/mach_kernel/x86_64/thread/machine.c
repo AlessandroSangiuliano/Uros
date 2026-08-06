@@ -30,6 +30,8 @@
 
 #include <kern/thread.h>
 #include <time/clock_event.h>	/* #459: start this processor's clock */
+#include <boot/bootarg.h>		/* #459: boot_flag */
+extern thread_t preempt_test_run(void);	/* #459: x86_64/time/preempt_test.c */
 #include <kern/thread_act.h>
 #include <kern/task.h>
 #include <kern/sched_prim.h>
@@ -540,6 +542,30 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	if (old_act->map != new_act->map)
 		PMAP_SWITCH_USER(new_act, new_act->map, cpu_number());
 
+	/*
+	 * Who this processor is running, BEFORE the switch (#459).
+	 *
+	 * load_context() has always done this and switch_context() did not --
+	 * two functions doing the same job, one of which updated the
+	 * processor's idea of its current thread and the other of which left
+	 * it naming the thread being switched away from.
+	 *
+	 * It stayed invisible because nothing executed it: load_context()
+	 * starts the FIRST thread, and a switch to a thread that has never run
+	 * only happens once something takes a processor away and gives it to a
+	 * new one -- which is preemption, and preemption did not work until
+	 * this issue made it.
+	 *
+	 * ⚠️ Same shape as the defect #458 records in thread_machine_set_current
+	 * below: current_thread() is cpu_data[cpu_number()].active_thread, the
+	 * machine-independent array, and a thread that starts while that still
+	 * names somebody else reads its own fields through the wrong pointer.
+	 * The symptom was a call through a null function pointer into the low
+	 * physical page -- rip 0x3, with the interrupt vector table
+	 * disassembling as instructions.
+	 */
+	thread_machine_set_current(new);
+
 	/* Where ring 3 lands now, and whose floating-point area is next. */
 	act_machine_switch_pcb(new_act);
 
@@ -615,6 +641,32 @@ load_context(thread_t thread)
 	 * outgoing thread, so it gets a local -- which becomes unreachable
 	 * the moment the switch takes effect, which is exactly right.
 	 */
+	/*
+	 * -P: prove the clock actually preempts, before handing the processor
+	 * to the first thread (#459).
+	 *
+	 * Here because this is the first point at which threads can be created
+	 * -- task_init() and thread_init() have run, which they had not when
+	 * machine_init() was called -- and because the test needs the processor
+	 * for a second, which the ordinary boot does not have to give: it stops
+	 * at bootstrap_create (#422) within a few milliseconds.
+	 *
+	 * The three threads it creates are bound to this processor and simply
+	 * become runnable; the switch below still goes to `thread', and the
+	 * scheduler reaches them the moment it takes the processor back -- which
+	 * is exactly the property under test.
+	 */
+	if (boot_flag('P')) {
+		thread_t reporter = preempt_test_run();
+
+		if (reporter != THREAD_NULL) {
+			thread = reporter;
+			act = thread->top_act;
+			thread_machine_set_current(thread);
+			act_machine_switch_pcb(act);
+		}
+	}
+
 	context_switch(&discard, &act->mact.pcb->ctx);
 
 	panic("load_context: returned");
