@@ -7,6 +7,11 @@
 
 #include <stdint.h>
 
+#include <kern/misc_protos.h>		/* panic */
+#include <kern/startup.h>		/* #461: slave_main */
+#include <kern/processor.h>		/* #461: real_ncpus */
+#include <mach/machine.h>		/* #461: machine_info.avail_cpus */
+
 #include <cpu/acpi.h>
 #include <cpu/ap_trampoline.h>
 #include <cpu/desc.h>
@@ -46,6 +51,13 @@ static volatile uint64_t ap_call_claimed;
 static volatile uint64_t ap_call_gate;
 static volatile uint64_t ap_call_done;
 static volatile uint64_t ap_call_reached_bsp;
+
+/*
+ * And the gate that holds a processor out of the scheduler until there is one
+ * to enter (#461).  See <cpu/smp.h> for why this target needs it and i386
+ * does not.
+ */
+static volatile uint64_t ap_sched_gate;
 
 /*
  * What the volunteer asks everybody to run.  It asks the hardware whether it
@@ -174,8 +186,96 @@ void ap_start_c(uint32_t apic_id)
 		atomic_store64(&ap_call_done, 1);
 	}
 
-	for (;;)
-		__asm__ volatile("hlt");
+	/*
+	 * Wait for a scheduler to exist, then join it (#461).
+	 *
+	 * WAITING RATHER THAN SPINNING, and the three instructions below are the
+	 * whole of why this is written out.  The obvious loop -- test the gate,
+	 * `pause', test again -- costs a processor's full attention for the
+	 * entire length of setup_main(), which under emulation is taken out of
+	 * the boot processor's share.  Three processors doing it would make the
+	 * kernel's own start-up three times slower to watch nothing happen.
+	 *
+	 * So: interrupts off, test, and if the gate is shut, `sti; hlt' as one
+	 * step.  x86 does not recognise an interrupt between those two, which is
+	 * what closes the window the plain version has -- a doorbell that arrives
+	 * after the test and before the halt would otherwise be answered by a
+	 * processor that is no longer listening, and a processor halted with no
+	 * second doorbell coming is a processor the machine has lost.
+	 *
+	 * ⚠️ The `sti' inside the loop is why interrupts are re-enabled after it
+	 * rather than left as the break found them: the exit path leaves this
+	 * processor with them OFF, and slave_main() is entitled to a processor in
+	 * the state bring-up left.
+	 */
+	for (;;) {
+		interrupts_disable();
+		if (atomic_load64(&ap_sched_gate) != 0)
+			break;
+		__asm__ volatile("sti; hlt");
+	}
+	interrupts_enable();
+
+	/*
+	 * Into the machine-independent kernel, on this processor.
+	 *
+	 * slave_main() does not return -- it ends in cpu_launch_first_thread(),
+	 * which takes this processor's idle thread and never comes back -- so
+	 * anything after the call is a claim that it can, and the panic says so
+	 * rather than falling into a halt that would look like an idle processor.
+	 */
+	slave_main();
+
+	panic("smp: slave_main returned on processor %u — it must not (#461)",
+	      apic_id);
+}
+
+unsigned
+smp_ap_release_to_scheduler(void)
+{
+	unsigned	want = (unsigned) real_ncpus;
+	uint64_t	spins;
+
+	/*
+	 * Nothing to release, and nothing to wait for.  Said explicitly because
+	 * the wait below would otherwise spend its whole budget proving it on a
+	 * uniprocessor boot, which is the configuration the harness runs by
+	 * default.
+	 */
+	if (want <= 1)
+		return 1;
+
+	atomic_store64(&ap_sched_gate, 1);
+
+	/*
+	 * And knock, because they are halted.  The AST vector is the right one
+	 * to knock with: its handler does nothing at all and exists only for the
+	 * return path it creates, which is exactly what is wanted from a
+	 * processor that has to wake up and re-read a word in memory.
+	 */
+	for (unsigned i = 0; i < acpi_cpu_count(); i++) {
+		const struct acpi_cpu *c = acpi_cpu(i);
+
+		if (!c->usable || c->apic_id == lapic_id())
+			continue;
+		if (smp_is_online(c->apic_id))
+			ipi_ast_check(c->apic_id);
+	}
+
+	/*
+	 * Counted from what cpu_up() increments, not from anything this file
+	 * writes: the claim is that they reached the SCHEDULER, and only the
+	 * scheduler can say so.  Volatile because the writers are other
+	 * processors and this loop reads nothing else.
+	 */
+	for (spins = 0; spins < 400000000ULL; spins++) {
+		if ((unsigned) *(volatile integer_t *) &machine_info.avail_cpus
+		    >= want)
+			break;
+		cpu_pause();
+	}
+
+	return (unsigned) *(volatile integer_t *) &machine_info.avail_cpus;
 }
 
 unsigned smp_ap_call_probe(void)

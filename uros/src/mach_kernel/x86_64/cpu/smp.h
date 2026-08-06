@@ -83,4 +83,29 @@ void machine_slots_init(void);
 /* Whether a given APIC id has reported in. */
 int smp_is_online(uint32_t apic_id);
 
+/*
+ * Let the application processors into the scheduler, and answer with how many
+ * of them got there (#461).
+ *
+ * THE GATE EXISTS BECAUSE THE TWO EVENTS ARE IN THE WRONG ORDER HERE.  An AP
+ * entering the scheduler ends in cpu_launch_first_thread(THREAD_NULL), which
+ * takes the idle thread its processor was given -- and idle threads are made
+ * by start_kernel_threads(), running as the first thread, long after
+ * smp_start_others() has woken everybody.  i386 has no such problem: it wakes
+ * its processors from inside start_kernel_threads(), after the idle threads
+ * exist.  This target wakes them before the machine-independent kernel is
+ * entered at all, because the bring-up self-tests need them.
+ *
+ * So the processors are woken early and held here, and this is the release.
+ * Called from machine_processors_ready() -- the machine-independent kernel's
+ * own statement that every processor now has an idle thread -- so the
+ * ordering is not a convention this file keeps privately but one kern/startup.c
+ * makes and can be read at its call site.
+ *
+ * The answer is counted from machine_info.avail_cpus, which cpu_up()
+ * increments: the number that reached the scheduler, not the number that were
+ * let go.  A gate that reported its own opening would say nothing.
+ */
+unsigned smp_ap_release_to_scheduler(void);
+
 #endif	/* _X86_64_CPU_SMP_H_ */
