@@ -21,6 +21,7 @@
 #include <cpu/tss.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
+#include <sync/atomic.h>	/* #461: one backtrace at a time */
 #include <trap/extable.h>
 #include <trap/trap.h>
 
@@ -172,6 +173,23 @@ static void tputhex(uint64_t v)
 		uint8_t nib = (v >> i) & 0xF;
 		tputc(nib < 10 ? '0' + nib : 'a' + (nib - 10));
 	}
+}
+
+static void tputdec(uint64_t v)
+{
+	char	buf[20];
+	int	i = 0;
+
+	if (v == 0) {
+		tputc('0');
+		return;
+	}
+	while (v != 0 && i < (int) sizeof(buf)) {
+		buf[i++] = '0' + (char)(v % 10);
+		v /= 10;
+	}
+	while (i-- > 0)
+		tputc(buf[i]);
 }
 
 const char *trap_name(uint64_t vector)
@@ -364,11 +382,54 @@ static void report_symbol(uint64_t addr)
 	tputs(">");
 }
 
+/*
+ * One report at a time, and one that says whose it is (#461).
+ *
+ * ⚠️ THIS WROTE STRAIGHT TO THE PORT, AND FOR AS LONG AS ONE PROCESSOR EVER
+ * DIED THAT WAS FINE.  The first boot with the application processors in the
+ * scheduler had three of them fail the same way at the same instant, and the
+ * three reports came out interleaved character by character: not one line of
+ * the panic message survived, the harness's `^panic' pattern matched nothing,
+ * and the run was reported as passed.  The one message worth having is the
+ * one that gets destroyed, because everything is failing at once precisely
+ * when several processors fail at once.
+ *
+ * The comment above panic_bringup() says kern/debug.c's panic() takes a lock
+ * so that two processors panicking together produce one legible report -- and
+ * then hands the backtrace to this, which took none.  Half of the guarantee,
+ * which is the expensive half.
+ *
+ * The lock is bounded and released before the caller halts.  A processor that
+ * faults while holding it must not take the others' last words down with it,
+ * so the wait gives up and prints anyway: interleaved output is worse than
+ * serialised output and far better than none.
+ *
+ * ⚠️ The label is asked of the interrupt controller, not of cpu_number().
+ * cpu_number() reads this processor's per-CPU block through %gs, and before
+ * percpu_activate() the segment base is zero -- which early in boot is mapped,
+ * so it answers a small plausible number rather than faulting.  A backtrace
+ * labelled with a processor that is not the one that died is worse than one
+ * with no label at all.
+ */
+static volatile uint64_t backtrace_lock;
+
 void x86_64_backtrace(uint64_t rbp)
 {
 	pmap_t kernel = pmap_kernel();
+	uint64_t spins;
 
-	tputs("  backtrace (addr2line for file and line):\r\n");
+	for (spins = 0; spins < 200000000ULL; spins++) {
+		if (atomic_cmpxchg64(&backtrace_lock, 0, 1) == 0)
+			break;
+		cpu_pause();
+	}
+
+	tputs("  cpu ");
+	if (lapic_present())
+		tputdec(lapic_id());
+	else
+		tputc('?');
+	tputs(" backtrace (addr2line for file and line):\r\n");
 
 	for (unsigned depth = 0; depth < BACKTRACE_MAX; depth++) {
 		const uint64_t *frame;
@@ -398,6 +459,8 @@ void x86_64_backtrace(uint64_t rbp)
 			break;
 		rbp = next;
 	}
+
+	atomic_store64(&backtrace_lock, 0);
 }
 
 /*
