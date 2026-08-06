@@ -124,6 +124,60 @@ act_machine_switch_pcb(thread_act_t thr_act)
  * switched out, which is what context_init() does and why a never-run thread
  * and an interrupted one are indistinguishable to the switch.
  */
+/*
+ * Where a thread that has never run begins.
+ *
+ * context_init() can only place a function and one argument, and the argument
+ * a new thread needs -- which thread it took the processor from -- is not
+ * known when its context is built.  It is known at the switch, and
+ * switch_context() leaves it in this processor's prev_thread, so it is read
+ * here rather than carried.
+ */
+static void
+thread_begin_trampoline(void *unused)
+{
+	thread_t prev = (thread_t) percpu()->prev_thread;
+
+	(void) unused;
+
+	/*
+	 * The thread we took the processor from, first: it is still accounted
+	 * as running until somebody says otherwise, and nothing else may
+	 * happen on this processor until it has been said.
+	 */
+	if (prev != THREAD_NULL)
+		thread_dispatch(prev);
+
+	/*
+	 * Interrupts on, HERE and not sooner (#459).
+	 *
+	 * A thread that has never run reaches this from inside the interrupt
+	 * that preempted its predecessor, so it inherits IF clear -- and on
+	 * this machine nothing else will set it.  spl is a software priority
+	 * kept in the per-CPU block (x86_64/cpu/spl.c): splx() moves the level
+	 * and does not touch the flag, and only sploff()/splon() do.  A resumed
+	 * thread gets its flag back from the IRETQ of its own trap; a new one
+	 * has no trap to return from.
+	 *
+	 * ⚠️ Order measured, not assumed.  Enabling at the top of the
+	 * trampoline -- before the dispatch above -- lets the next tick in
+	 * while the switch is still letting go of the previous thread, and the
+	 * machine stops on that first tick.  After the dispatch, there is
+	 * nothing left half-done for an interrupt to walk into.
+	 */
+	__asm__ __volatile__("sti" : : : "memory");
+
+	/*
+	 * And the rest to the machine-independent trampoline, with THREAD_NULL
+	 * because the dispatch is already done: enable_preemption() -- which
+	 * thread_invoke() disabled on the way in and which a new thread never
+	 * reaches the way out of -- then spllo(), then this thread's own
+	 * function through self->continuation.
+	 */
+	thread_continue(THREAD_NULL);
+	/*NOTREACHED*/
+}
+
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
@@ -154,9 +208,40 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	if (thread->kernel_stack == 0)
 		return KERN_RESOURCE_SHORTAGE;
 
+	/*
+	 * The entry point is the MI trampoline, not the thread's own function
+	 * (#459).
+	 *
+	 * kern/sched_prim.c says why, in thread_continue() itself: "the first
+	 * time a newly-created thread executes, it magically appears here, and
+	 * never executes the enable_preemption() call in thread_invoke()".
+	 * Three things are owed to a thread that has never run, and every one
+	 * of them is done by code the resumed path runs and the new path skips:
+	 *
+	 *   thread_dispatch(old)   the thread we took the processor FROM is
+	 *                          still holding it in its own accounting.
+	 *   enable_preemption()    thread_invoke() disabled it on the way in
+	 *                          and re-enables on the way out, and a new
+	 *                          thread never reaches that way out.
+	 *   spllo()                the level, and with it the interrupt flag.
+	 *                          Without it the first thread preempted into
+	 *                          runs forever with interrupts off: no tick
+	 *                          arrives, no quantum expires, and the
+	 *                          processor is never taken back.
+	 *
+	 * ⚠️ Measured, and fixing the last one alone is not enough: an STI at
+	 * the top of the trampoline lets the tick in BEFORE the switch has
+	 * finished letting go, and the machine stops on the first one.  The
+	 * three belong together and in this order, which is what
+	 * thread_continue() already does.
+	 *
+	 * The thread's own function is reached from there through
+	 * self->continuation, which thread_start() set to this same start_pos.
+	 */
+	(void) start_pos;
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
-		     (void (*)(void *)) start_pos, (void *) 0,
+		     thread_begin_trampoline, (void *) 0,
 		     fpu_area_alloc());
 
 	return KERN_SUCCESS;

@@ -31,6 +31,7 @@
 #include <kern/misc_protos.h>		/* printf */
 #include <kern/time_out.h>		/* hertz_tick -- the whole point */
 #include <kern/cpu_number.h>		/* cpu_number */
+#include <kern/cpu_data.h>		/* #459: disable_preemption */
 #include <cpus.h>			/* NCPUS */
 #include <trap/trap.h>			/* struct trap_frame */
 #include <mach/machine/vm_types.h>	/* vm_offset_t */
@@ -342,6 +343,14 @@ burnin_handler(struct trap_frame *frame)
 	burnin_ticks++;
 	lapic_eoi();
 	(void) clock_event_arm_tick();
+
+	/*
+	 * _no_check: the balanced re-enable, WITHOUT the preemption check it
+	 * would otherwise run.  Taking the switch here would put it back
+	 * inside the interrupt, which is the thing being avoided; the AST
+	 * raised above is taken on the way out of the trap instead.
+	 */
+	enable_preemption_no_check();
 }
 
 void
@@ -516,6 +525,30 @@ clock_event_tick(struct trap_frame *frame)
 		usermode = (frame->cs & 3) != 0;
 		pc = (vm_offset_t) frame->rip;
 	}
+
+	/*
+	 * Preemption held off ACROSS hertz_tick (#459).
+	 *
+	 * Not a precaution: hertz_tick() disables and re-enables preemption
+	 * internally, and its re-enable reaches kernel_preempt_check() -- which
+	 * context-switches.  From inside an interrupt handler that means the
+	 * switch happens with IF clear and the frame on the interrupt stack,
+	 * and this function never returns: the EOI below is never written and
+	 * the timer is never re-armed, so the local APIC holds this vector's
+	 * priority busy and not one further tick is ever delivered.
+	 *
+	 * Measured exactly so, three runs out of three: the first tick arrived,
+	 * one thread was preempted into, and the processor was never
+	 * interrupted again.  The AST check that follows this handler was
+	 * called zero times, because the handler it follows never came back.
+	 *
+	 * i386 holds it off here for the same reason and says so at
+	 * lapic_timer_handler; that comment was read this morning and its
+	 * consequence was not.  The switch still happens -- it happens on the
+	 * way OUT of the trap, where the frame is a real one and the hardware
+	 * has already been put back.
+	 */
+	disable_preemption();
 
 	/*
 	 * ⚠️ The full rip, not its low half.  #453 widened this argument to
