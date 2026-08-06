@@ -469,6 +469,14 @@ clock_selftest(unsigned cpu)
 		 * silence there is indistinguishable from a clock that never
 		 * ticked at all.
 		 */
+		/*
+		 * Per processor, because the claim is per processor.  Scheduler
+		 * accounting on 64 processors cannot be one CPU's business, and
+		 * i386 shows what the alternative costs: its boot processor
+		 * receives no LAPIC tick at all and takes its accounting from a
+		 * device the whole machine shares.  A report only from the boot
+		 * processor would be silent about exactly the case that differs.
+		 */
 		printf("clock_event: cpu %u — first tick arrived (%s)\n",
 		       cpu, clock_event_name());
 		return;
