@@ -62,6 +62,7 @@
 #include <trap/trap.h>
 
 #include <boot/bootarg.h>
+#include <time/clock_event.h>	/* #459 */
 #include <kern/startup.h>	/* setup_main -- the machine-independent kernel */
 #include <kern/misc_protos.h>	/* printf */
 
@@ -4064,6 +4065,20 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	 * since long before C, master_cpu is 0 from x86_64/cpu/model.c, and
 	 * this is the boot stack the trampoline set up.
 	 */
+	/*
+	 * -C: measure the scheduler clock before entering the kernel (#459).
+	 *
+	 * Here rather than inside the kernel because the kernel does not live
+	 * long enough to be measured: it stops at bootstrap_create (#422)
+	 * within a few milliseconds of starting its first thread, which is
+	 * less than one tick.  A rate cannot be read from a run that ends
+	 * before the second sample.
+	 */
+	if (boot_flag('C')) {
+		clock_event_init(LAPIC_TIMER_VECTOR);
+		clock_event_burnin(2);
+	}
+
 	kputs("UrMach x86-64: entering setup_main (#458)\r\n");
 	setup_main();
 
