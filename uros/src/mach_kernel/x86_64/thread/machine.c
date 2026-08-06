@@ -29,6 +29,9 @@
 #include <kern/kalloc.h>
 
 #include <kern/thread.h>
+#include <time/clock_event.h>	/* #459: start this processor's clock */
+#include <boot/bootarg.h>		/* #459: boot_flag */
+extern thread_t preempt_test_run(void);	/* #459: x86_64/time/preempt_test.c */
 #include <kern/thread_act.h>
 #include <kern/task.h>
 #include <kern/sched_prim.h>
@@ -121,6 +124,60 @@ act_machine_switch_pcb(thread_act_t thr_act)
  * switched out, which is what context_init() does and why a never-run thread
  * and an interrupted one are indistinguishable to the switch.
  */
+/*
+ * Where a thread that has never run begins.
+ *
+ * context_init() can only place a function and one argument, and the argument
+ * a new thread needs -- which thread it took the processor from -- is not
+ * known when its context is built.  It is known at the switch, and
+ * switch_context() leaves it in this processor's prev_thread, so it is read
+ * here rather than carried.
+ */
+static void
+thread_begin_trampoline(void *unused)
+{
+	thread_t prev = (thread_t) percpu()->prev_thread;
+
+	(void) unused;
+
+	/*
+	 * The thread we took the processor from, first: it is still accounted
+	 * as running until somebody says otherwise, and nothing else may
+	 * happen on this processor until it has been said.
+	 */
+	if (prev != THREAD_NULL)
+		thread_dispatch(prev);
+
+	/*
+	 * Interrupts on, HERE and not sooner (#459).
+	 *
+	 * A thread that has never run reaches this from inside the interrupt
+	 * that preempted its predecessor, so it inherits IF clear -- and on
+	 * this machine nothing else will set it.  spl is a software priority
+	 * kept in the per-CPU block (x86_64/cpu/spl.c): splx() moves the level
+	 * and does not touch the flag, and only sploff()/splon() do.  A resumed
+	 * thread gets its flag back from the IRETQ of its own trap; a new one
+	 * has no trap to return from.
+	 *
+	 * ⚠️ Order measured, not assumed.  Enabling at the top of the
+	 * trampoline -- before the dispatch above -- lets the next tick in
+	 * while the switch is still letting go of the previous thread, and the
+	 * machine stops on that first tick.  After the dispatch, there is
+	 * nothing left half-done for an interrupt to walk into.
+	 */
+	__asm__ __volatile__("sti" : : : "memory");
+
+	/*
+	 * And the rest to the machine-independent trampoline, with THREAD_NULL
+	 * because the dispatch is already done: enable_preemption() -- which
+	 * thread_invoke() disabled on the way in and which a new thread never
+	 * reaches the way out of -- then spllo(), then this thread's own
+	 * function through self->continuation.
+	 */
+	thread_continue(THREAD_NULL);
+	/*NOTREACHED*/
+}
+
 kern_return_t
 thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
@@ -151,9 +208,40 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	if (thread->kernel_stack == 0)
 		return KERN_RESOURCE_SHORTAGE;
 
+	/*
+	 * The entry point is the MI trampoline, not the thread's own function
+	 * (#459).
+	 *
+	 * kern/sched_prim.c says why, in thread_continue() itself: "the first
+	 * time a newly-created thread executes, it magically appears here, and
+	 * never executes the enable_preemption() call in thread_invoke()".
+	 * Three things are owed to a thread that has never run, and every one
+	 * of them is done by code the resumed path runs and the new path skips:
+	 *
+	 *   thread_dispatch(old)   the thread we took the processor FROM is
+	 *                          still holding it in its own accounting.
+	 *   enable_preemption()    thread_invoke() disabled it on the way in
+	 *                          and re-enables on the way out, and a new
+	 *                          thread never reaches that way out.
+	 *   spllo()                the level, and with it the interrupt flag.
+	 *                          Without it the first thread preempted into
+	 *                          runs forever with interrupts off: no tick
+	 *                          arrives, no quantum expires, and the
+	 *                          processor is never taken back.
+	 *
+	 * ⚠️ Measured, and fixing the last one alone is not enough: an STI at
+	 * the top of the trampoline lets the tick in BEFORE the switch has
+	 * finished letting go, and the machine stops on the first one.  The
+	 * three belong together and in this order, which is what
+	 * thread_continue() already does.
+	 *
+	 * The thread's own function is reached from there through
+	 * self->continuation, which thread_start() set to this same start_pos.
+	 */
+	(void) start_pos;
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
-		     (void (*)(void *)) start_pos, (void *) 0,
+		     thread_begin_trampoline, (void *) 0,
 		     fpu_area_alloc());
 
 	return KERN_SUCCESS;
@@ -203,10 +291,33 @@ machine_kernel_stack_init(thread_t thread, void (*continuation)(void))
 	pcb = thr_act->mact.pcb;
 	assert(pcb != PCB_NULL);
 
+	/*
+	 * Through the trampoline, exactly as thread_machine_create does (#459).
+	 *
+	 * This is the OTHER way a thread comes to start on a fresh stack, and
+	 * it is the one the scheduler uses most: every thread that blocks with
+	 * a continuation has its stack reset here and resumes through this
+	 * context.  Naming the continuation as the entry point sends it
+	 * straight into its own code, skipping thread_dispatch(), the balanced
+	 * enable_preemption(), spllo() -- and the STI, so it resumes with
+	 * interrupts disabled and is never interrupted again.
+	 *
+	 * Measured before this was fixed: a thread preempted into ran with
+	 * IF=0 and spl=0 -- the software level correctly lowered, the hardware
+	 * flag never restored -- and the clock delivered exactly two ticks for
+	 * the life of the machine.
+	 *
+	 * ⚠️ The continuation is NOT lost by not being named here: thread_start()
+	 * put it in self->continuation, and thread_continue() -- which the
+	 * trampoline ends in -- is what calls it.  That is where a continuation
+	 * is supposed to be invoked from, and going directly is what bypassed
+	 * everything owed to a thread arriving on a fresh stack.
+	 */
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
-		     (void (*)(void *)) continuation, (void *) 0,
+		     thread_begin_trampoline, (void *) 0,
 		     pcb->ctx.fpu_area);
+	(void) continuation;
 }
 
 /*
@@ -539,6 +650,30 @@ switch_context(thread_t old, void (*continuation)(void), thread_t new)
 	if (old_act->map != new_act->map)
 		PMAP_SWITCH_USER(new_act, new_act->map, cpu_number());
 
+	/*
+	 * Who this processor is running, BEFORE the switch (#459).
+	 *
+	 * load_context() has always done this and switch_context() did not --
+	 * two functions doing the same job, one of which updated the
+	 * processor's idea of its current thread and the other of which left
+	 * it naming the thread being switched away from.
+	 *
+	 * It stayed invisible because nothing executed it: load_context()
+	 * starts the FIRST thread, and a switch to a thread that has never run
+	 * only happens once something takes a processor away and gives it to a
+	 * new one -- which is preemption, and preemption did not work until
+	 * this issue made it.
+	 *
+	 * ⚠️ Same shape as the defect #458 records in thread_machine_set_current
+	 * below: current_thread() is cpu_data[cpu_number()].active_thread, the
+	 * machine-independent array, and a thread that starts while that still
+	 * names somebody else reads its own fields through the wrong pointer.
+	 * The symptom was a call through a null function pointer into the low
+	 * physical page -- rip 0x3, with the interrupt vector table
+	 * disassembling as instructions.
+	 */
+	thread_machine_set_current(new);
+
 	/* Where ring 3 lands now, and whose floating-point area is next. */
 	act_machine_switch_pcb(new_act);
 
@@ -583,11 +718,63 @@ load_context(thread_t thread)
 	percpu()->prev_thread = (void *) 0;
 
 	/*
+	 * Start this processor's clock (#459).
+	 *
+	 * Here, and not in machine_init(), because this is the first instant
+	 * at which a tick could be handled: hertz_tick() charges time to
+	 * current_thread() and raises an AST against it, and until the line
+	 * above there was no current thread to charge.
+	 *
+	 * ⚠️ i386 can arm earlier because its timer sits in a class that spl
+	 * masks, so the first tick simply waits at the door until the AP drops
+	 * to spllo inside the scheduler.  Here it cannot: SPLHI is 14 and the
+	 * timer is class 15, left deliberately unmaskable so that a processor
+	 * holding a lock never stops answering the others.  So the clock is
+	 * started when it is safe rather than held back after it is started.
+	 *
+	 * Every processor runs this for its own first thread, which is what
+	 * makes the tick per-processor: scheduler accounting on 64 processors
+	 * cannot be one CPU's business, and i386's boot processor already
+	 * shows what happens when it is -- it receives no LAPIC tick at all.
+	 */
+	clock_event_setup_cpu();
+	if (!clock_event_arm_tick())
+		panic("load_context: the %s clock would not arm — this "
+		      "processor would run the first thread and never be "
+		      "preempted (#459)", clock_event_name());
+
+	/*
 	 * A context to save into that nobody will read.  context_switch()
 	 * wants somewhere to put the outgoing registers and there is no
 	 * outgoing thread, so it gets a local -- which becomes unreachable
 	 * the moment the switch takes effect, which is exactly right.
 	 */
+	/*
+	 * -P: prove the clock actually preempts, before handing the processor
+	 * to the first thread (#459).
+	 *
+	 * Here because this is the first point at which threads can be created
+	 * -- task_init() and thread_init() have run, which they had not when
+	 * machine_init() was called -- and because the test needs the processor
+	 * for a second, which the ordinary boot does not have to give: it stops
+	 * at bootstrap_create (#422) within a few milliseconds.
+	 *
+	 * The three threads it creates are bound to this processor and simply
+	 * become runnable; the switch below still goes to `thread', and the
+	 * scheduler reaches them the moment it takes the processor back -- which
+	 * is exactly the property under test.
+	 */
+	if (boot_flag('P')) {
+		thread_t reporter = preempt_test_run();
+
+		if (reporter != THREAD_NULL) {
+			thread = reporter;
+			act = thread->top_act;
+			thread_machine_set_current(thread);
+			act_machine_switch_pcb(act);
+		}
+	}
+
 	context_switch(&discard, &act->mact.pcb->ctx);
 
 	panic("load_context: returned");

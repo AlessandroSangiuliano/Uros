@@ -186,6 +186,24 @@ int lapic_timer_start(unsigned hz, uint8_t vector);
 
 /* Stop this processor's timer: the countdown first, then the mask. */
 void lapic_timer_stop(void);
+
+/*
+ * One-shot mode (#459), the backend under clock_event.
+ *
+ * setup() points the LVT at the vector with the countdown stopped; arm()
+ * starts one countdown of `count' calibrated ticks (convert from time with
+ * lapic_timer_hz()).  arm() refuses a count of zero instead of writing it,
+ * because zero means stopped and would arm nothing while returning success.
+ */
+void lapic_timer_oneshot_setup(uint8_t vector);
+
+/*
+ * TSC-deadline mode: the LVT selects the vector with mode bits 18:17 = 10b.
+ * The countdown is unused; the deadline is an MSR write owned by
+ * clock_event.c.
+ */
+void lapic_timer_deadline_setup(uint8_t vector);
+int  lapic_timer_oneshot_arm(uint32_t count);
 void lapic_broadcast_ipi(uint8_t vector);
 
 #endif	/* _X86_64_CPU_LAPIC_H_ */

@@ -187,7 +187,24 @@ echo "=== booting uros-x86_64.iso (${SECS}s watchdog) $* ==="
 # The whole stream goes to the log; the console keeps seeing the lines it
 # always showed. The verdict reads the log, not the filtered view, because a
 # failure that the filter drops is exactly the one worth catching.
-timeout "$SECS" qemu-system-x86_64 "$@" \
+# A CPU model, unless the caller named one (#459).
+#
+# The default without -cpu is qemu64, which does NOT advertise the TSC
+# deadline timer -- so the kernel would silently fall back to the LAPIC
+# one-shot backend on every run and the deadline path would be collaudated by
+# nobody.  `max' advertises it, and KVM emulates it in its in-kernel LAPIC
+# even on hosts whose silicon lacks it (verified on this Zen 2 machine, which
+# has no tsc_deadline_timer flag at all).
+#
+# Named explicitly rather than left to the default so that which backend ran
+# is a property of the command line, not of whatever qemu picks this year.
+case " $* " in
+*" -cpu "*)	CPU_ARGS="" ;;
+*)		CPU_ARGS="-cpu max" ;;
+esac
+
+# shellcheck disable=SC2086
+timeout "$SECS" qemu-system-x86_64 $CPU_ARGS "$@" \
 	-cdrom "$BUILD/uros-x86_64.iso" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 || true
 grep -a "UrMach\|fault\|error\|Error\|panic\|^  " "$LOG" || true

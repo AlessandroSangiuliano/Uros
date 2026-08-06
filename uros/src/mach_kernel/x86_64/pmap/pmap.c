@@ -20,7 +20,8 @@
 #include <trap/trap.h>
 
 #include <pmap/direct.h>
-#include <vm/vm_page.h>	/* vm_page_grab / vm_page_wire (#458) */
+#include <vm/vm_page.h>
+#include <kern/thread.h>	/* #459: current_thread */	/* vm_page_grab / vm_page_wire (#458) */
 
 /*
  * The kernel pmap is a single object, not allocated: it has to exist before
@@ -116,21 +117,28 @@ pmap_table_frame(void)
 	if (!pmap_initialized)
 		return boot_frame_alloc();
 
-	m = vm_page_grab();
-	if (m == VM_PAGE_NULL) {
-		/*
-		 * ⚠️ i386 blocks here -- `while ((m = vm_page_grab()) == NULL)
-		 * VM_PAGE_WAIT();' -- and that is the right answer for a
-		 * running system, because a page will be freed eventually.
-		 *
-		 * It is not the right answer yet: VM_PAGE_WAIT() blocks the
-		 * calling thread, and this machine reaches pmap_enter() before
-		 * there is a scheduler to block on.  Returning zero would put
-		 * back exactly the silence this function exists to remove, so
-		 * it says so instead, and waiting arrives with preemption.
-		 */
-		panic("pmap_table_frame: out of physical memory for a page "
-		      "table, and nothing to wait on yet (#458)");
+	/*
+	 * Wait for a page rather than fail, now that there is something to
+	 * wait on (#459).
+	 *
+	 * #458 left a panic here, under a comment saying waiting was the right
+	 * answer for a running system and would arrive with preemption.  It
+	 * has: the clock ticks, quanta expire, and a thread that blocks is
+	 * resumed.  So this is the loop i386 has always had.
+	 *
+	 * ⚠️ Gated on there being a thread to block, not on pmap_initialized.
+	 * Those are different moments: the pmap is initialised well before the
+	 * first thread runs, and VM_PAGE_WAIT() in that window would block a
+	 * boot path no scheduler will ever come back to -- a hang with no
+	 * message, which is worse than the panic it replaces.  Before there is
+	 * a thread, saying so and stopping is still the only honest answer.
+	 */
+	while ((m = vm_page_grab()) == VM_PAGE_NULL) {
+		if (current_thread() == THREAD_NULL)
+			panic("pmap_table_frame: out of physical memory for a "
+			      "page table, and no thread yet to wait on one "
+			      "(#459)");
+		VM_PAGE_WAIT();
 	}
 
 	/*

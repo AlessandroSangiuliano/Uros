@@ -26,6 +26,9 @@
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <thread/fpu.h>
+#include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
+#include <time/clock_event.h>	/* #459: the scheduler clock */
+#include <trap/trap.h>		/* trap_set_handler */
 
 /*
  * Machine initialisation, called once the machine-independent kernel is far
@@ -44,6 +47,19 @@
 void
 machine_init(void)
 {
+	/*
+	 * Choose the clock backend and put its handler in the IDT (#459).
+	 *
+	 * Here because kern/startup.c calls this after init_timers() and
+	 * timeout_init() and before any thread runs: the wheel the tick feeds
+	 * exists, and nothing can tick yet.
+	 *
+	 * ⚠️ Chosen here, ARMED elsewhere.  No processor's timer is started
+	 * by this call -- load_context() does that, for each processor, at the
+	 * moment it acquires the first thread there is to charge time to.
+	 */
+	trap_set_handler(LAPIC_TIMER_VECTOR, clock_event_tick);
+	clock_event_init(LAPIC_TIMER_VECTOR);
 }
 
 /*
