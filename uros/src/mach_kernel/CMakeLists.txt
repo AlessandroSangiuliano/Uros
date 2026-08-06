@@ -119,6 +119,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/pit.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/rtc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/tsc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/time/clock_event.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu.c
