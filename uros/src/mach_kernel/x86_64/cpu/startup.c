@@ -27,8 +27,11 @@
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <thread/fpu.h>
+#include <boot/bootarg.h>	/* #461: boot_flag */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
+#include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
+#include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <trap/trap.h>		/* trap_set_handler */
 
 /*
@@ -155,7 +158,54 @@ machine_processors_ready(void)
 	unsigned	got = smp_ap_release_to_scheduler();
 
 	if (got >= want) {
+		unsigned	spins;
+		int		idle;
+
 		printf("startup: %u processors in the scheduler\n", got);
+
+		/*
+		 * And what the scheduler thinks it has (#461).
+		 *
+		 * cpu_up() is where a processor joins the processor set; going
+		 * IDLE is a second thing that happens a little later, when its
+		 * idle thread reaches the point of having nothing to run.  The
+		 * two are worth separating: a processor that is in the set but
+		 * never idle is one the scheduler will never dispatch to, and
+		 * on the console that is indistinguishable from a processor
+		 * that arrived.
+		 *
+		 * Every processor but this one, because this one is running the
+		 * thread that is asking.  Bounded, and the count is printed
+		 * whether or not it is reached -- the number is the answer, and
+		 * a wait that gave up silently would turn a wrong number into
+		 * no number.
+		 */
+		for (spins = 0; spins < 200000000U; spins++) {
+			idle = *(volatile int *) &default_pset.idle_count;
+			if (idle >= (int) (got - 1))
+				break;
+			cpu_pause();
+		}
+
+		idle = *(volatile int *) &default_pset.idle_count;
+		printf("startup: %d of %u processors idle in the scheduler%s\n",
+		       idle, got,
+		       idle >= (int) (got - 1) ? "" :
+		       " — WRONG, one that never goes idle is one the "
+		       "scheduler will never dispatch to (#461)");
+
+		/*
+		 * -P on a machine with more than one processor: prove that an
+		 * APPLICATION processor preempts, which is the claim #461 makes
+		 * and the one the uniprocessor form of this test cannot reach.
+		 *
+		 * Here rather than in load_context(), which is where the
+		 * uniprocessor form runs: the three threads have to be bound to
+		 * a processor that is already in the scheduler, and this is the
+		 * first instant at which one is.  Does not return.
+		 */
+		if (boot_flag('P') && want > 1)
+			preempt_test_run_remote();
 		return;
 	}
 
