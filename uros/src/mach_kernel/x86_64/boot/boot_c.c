@@ -3996,6 +3996,14 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 		 */
 		machine_real_ncpus_init();
 
+		/*
+		 * And register them as slots, which is a different claim from
+		 * counting them: the count tells the scheduler when the
+		 * machine is up, the slots are what start_kernel_threads()
+		 * walks to give each processor an idle thread (#461).
+		 */
+		machine_slots_init();
+
 		if (asked > 1) {
 			kputs("UrMach x86-64:   awake:");
 			for (unsigned i = 0; i < acpi_cpu_count(); i++) {

@@ -58,8 +58,27 @@ unsigned smp_online_count(void);
  * Publish that count as real_ncpus, which the machine-independent scheduler
  * reads to decide when the machine is up.  Called once, after the others
  * have reported in -- there is nothing to count before that (#453).
+ *
+ * ⚠️ real_ncpus is declared HERE, beside the call that sets it, and this is
+ * the first header in the tree to declare it at all.  Every one of its users
+ * -- kern/sched_prim.c, i386's power_save.c and mp_table.c -- writes its own
+ * `extern int real_ncpus;' at the point of use, which is the arrangement that
+ * makes a type change invisible to the compiler and to the linker both (#448).
+ * x86_64/cpu/machdep.c defines it and includes this, so on this target the
+ * two halves meet.
  */
+extern int real_ncpus;
+
 void machine_real_ncpus_init(void);
+
+/*
+ * Register those processors as slots of machine_slot[], which is what the
+ * machine-independent kernel walks to give each one an idle thread (#461).
+ *
+ * Called immediately after machine_real_ncpus_init(), and it checks the two
+ * against each other rather than trusting either.
+ */
+void machine_slots_init(void);
 
 /* Whether a given APIC id has reported in. */
 int smp_is_online(uint32_t apic_id);
