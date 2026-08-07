@@ -201,3 +201,30 @@ _Static_assert(sizeof(state_count) / sizeof(state_count[0])
 	       "state_count[] and the flavor list in "
 	       "<mach/x86_64/thread_status.h> have drifted apart");
 
+/*
+ * And that every size in it fits the buffer the exception path puts on its
+ * stack (#408).
+ *
+ * <kern/exception.c> declares `natural_t state[THREAD_MACHINE_STATE_MAX]',
+ * reads state_count[flavor] into the count, and hands both to
+ * act_machine_get_state().  Nothing between those three lines compares the
+ * table against the buffer, so a flavor whose size exceeded the maximum would
+ * be written past the end of a kernel stack array — by a flavor number that
+ * arrives from whoever registered the exception port.
+ *
+ * The assertion in <thread/state.h> does not cover this: it ties
+ * THREAD_MACHINE_STATE_MAX to what a *message* can carry, and
+ * THREAD_MACHINE_STATE_MAX is itself defined as the float flavor's count, so
+ * a new and larger flavor would satisfy it while overflowing the buffer.
+ * These are the other direction, one per flavor, so that adding one stops the
+ * build until the maximum is raised with it.
+ */
+_Static_assert(x86_64_THREAD_STATE_COUNT <= THREAD_MACHINE_STATE_MAX,
+	       "the thread state flavor no longer fits the buffer "
+	       "kern/exception.c reads it into");
+_Static_assert(x86_64_FLOAT_STATE_COUNT <= THREAD_MACHINE_STATE_MAX,
+	       "the float state flavor no longer fits the buffer "
+	       "kern/exception.c reads it into");
+_Static_assert(x86_64_EXCEPTION_STATE_COUNT <= THREAD_MACHINE_STATE_MAX,
+	       "the exception state flavor no longer fits the buffer "
+	       "kern/exception.c reads it into");
