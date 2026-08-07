@@ -579,10 +579,52 @@ void trap_dispatch_paranoid(struct trap_frame *frame, uint64_t gs_on_entry,
  * ast_taken() is entitled to assume the caller is at a point where blocking
  * is legal.
  */
+/*
+ * What a return to RING 0 is entitled to take (#463).
+ *
+ * Not everything.  ast_taken() dispatches several kinds of work, and they do
+ * not all belong at an arbitrary instruction boundary inside the kernel:
+ *
+ *   AST_BLOCK, AST_QUANTUM, AST_URGENT are about which thread owns this
+ *   processor.  Their handler is thread_block_reason(), they are the whole
+ *   point of preemption, and they are legal anywhere the preemption level
+ *   says so -- which is the test below.
+ *
+ *   AST_APC is a RETURN-TO-USER hook, and kern/thread_act.c says so in as
+ *   many words: nudge() exists to "ensure that the activation will execute
+ *   its returnhandlers before it next executes any of its USER-level code".
+ *   Its handler, act_execute_returnhandlers(), takes act_lock_thread() -- a
+ *   mutex -- and special_handler() ends by parking the thread in
+ *   assert_wait()/thread_block() when it is suspended.  Neither is safe in
+ *   the middle of kernel work.
+ *
+ * Taking it there cost both of the failures this issue records.  A thread
+ * with an assert_wait() outstanding reached for that mutex and tripped
+ * kern/lock.c's mutex_lock_assert_safe(), which forbids exactly that because
+ * the mutex would block and the pending wakeup would be lost.  And a thread
+ * still suspended between thread_setrun() and thread_resume() was parked by
+ * special_handler() on &suspend_count after the wakeup for it had already
+ * gone by -- a machine that simply stopped, with no assertion at all.
+ *
+ * ⚠️ Deferred, not dropped, and that is a property of ast_taken() rather than
+ * a hope: it computes `reasons = need_ast[cpu] & mask' and clears only what
+ * it took, so a bit outside the mask stays pending for the next return that
+ * can have it.  The nine other callers of act_execute_returnhandlers() are
+ * unaffected -- every one of them is a point where a thread CHOSE to check,
+ * which is what makes them safe and what makes this one different.
+ *
+ * ⚠️ And it is what i386 already does.  There the kernel is not preemptible
+ * at all and ASTs from kernel mode are AST_URGENT alone.  This does not
+ * invent a rule; it stops x86-64 being the only machine that breaks the one
+ * the machine-independent code was written against.
+ */
+#define	AST_KERNEL_SAFE		AST_PREEMPT
+
 static void
 trap_take_ast(struct trap_frame *frame)
 {
 	unsigned cpu = cpu_number();
+	ast_t	 take;
 
 	if (need_ast[cpu] == AST_NONE)
 		return;
@@ -627,10 +669,28 @@ trap_take_ast(struct trap_frame *frame)
 	 * a machine says it has one.  The test below is unchanged and finally
 	 * tests something.
 	 */
-	if ((frame->cs & 3) != USER_RPL && get_preemption_level() != 0)
+	if ((frame->cs & 3) == USER_RPL)
+		take = AST_ALL;
+	else {
+		if (get_preemption_level() != 0)
+			return;
+		take = AST_KERNEL_SAFE;
+	}
+
+	/*
+	 * And nothing at all if none of what is pending is ours to take.
+	 *
+	 * ⚠️ Asked again, against the mask, and not left to the AST_NONE test
+	 * at the top.  A kernel thread with AST_APC pending and nothing else
+	 * would otherwise fail that test on EVERY trap return for as long as
+	 * the bit stayed set -- which, until this target has user mode (#422),
+	 * is for ever -- and pay for the whole of ast_taken() each time to
+	 * decide there was nothing to do.
+	 */
+	if ((need_ast[cpu] & take) == 0)
 		return;
 
-	ast_taken(FALSE, AST_ALL, splsched());
+	ast_taken(FALSE, take, splsched());
 }
 
 void trap_dispatch(struct trap_frame *frame)

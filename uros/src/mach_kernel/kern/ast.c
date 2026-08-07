@@ -391,9 +391,30 @@ ast_check(void)
 		/*
 		 *	Propagate thread ast to processor.  If we already
 		 *	need an ast, don't look for more reasons.
+		 *
+		 *	⚠️ A SCHEDULING ast, and not merely any ast (#463).
+		 *
+		 *	The only thing below this test is the context-switch
+		 *	check, and all it can add is AST_BLOCK or AST_QUANTUM.
+		 *	So the question that belongs here is whether one of those
+		 *	is already pending -- not whether anything at all is,
+		 *	which is what it used to ask.
+		 *
+		 *	The difference is invisible while every pending ast is
+		 *	consumed at the next return, and that was true of every
+		 *	machine this was written for.  It stopped being true when
+		 *	x86-64 began DEFERRING AST_APC on kernel-mode returns,
+		 *	because AST_APC is a return-to-user hook and its handler
+		 *	takes a mutex.  A kernel thread then carries that bit for
+		 *	as long as it stays in the kernel -- which, until this
+		 *	target has user mode (#422), is for ever -- and this test
+		 *	answered yes on every tick, so the quantum was never
+		 *	checked and the thread was never preempted.  Measured:
+		 *	four boots of the preemption test in four, one worker
+		 *	running and the other two never scheduled.
 		 */
 		ast_propagate(current_act(), mycpu);
-		if (ast_needed(mycpu))
+		if (need_ast[mycpu] & AST_PREEMPT)
 			break;
 
 		/*
