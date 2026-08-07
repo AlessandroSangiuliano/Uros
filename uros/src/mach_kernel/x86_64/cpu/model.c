@@ -19,8 +19,10 @@
 
 #include <boot/multiboot2.h>
 #include <cpu/ipi.h>
+#include <cpu/regs.h>		/* #461: cpu_pause while the panic prints */
 #include <ddb/cons.h>
 #include <cpu/smp.h>
+#include <sync/atomic.h>	/* #461: one stop broadcast, not four */
 #include <trap/trap.h>		/* x86_64_backtrace on the panic path */
 #include <kern/boot_modules.h>
 
@@ -93,23 +95,59 @@ machine_boot_info(char *buf, vm_size_t buf_len)
  * operator asking for one, the last processor in halt_all_cpus -- has nothing
  * to report and says nothing.
  */
+static volatile uint64_t halt_broadcast;
+
 void
 halt_cpu(void)
 {
-	if (panicstr != (const char *) 0)
+	if (panicstr != (const char *) 0) {
+		uint64_t spins;
+
+		/*
+		 * Stop the rest of the machine, once, from whoever gets here
+		 * first (#461).
+		 *
+		 * ⚠️ NEW, AND NEW BECAUSE THE PROCESSORS ARE.  panic() ends in
+		 * halt_cpu(), which stops THIS processor -- and until #461 the
+		 * others were parked in a halt loop of their own, so there was
+		 * nothing else running to stop.  Now they are scheduling: the
+		 * first four-processor boot with them in the scheduler ended
+		 * with the boot processor panicking at bootstrap_create (#422)
+		 * and three processors carrying on, running the idle threads of
+		 * a kernel that had declared itself broken.
+		 *
+		 * The guard is what keeps this from being a broadcast storm: a
+		 * processor arriving here through the stop interrupt must not
+		 * send another.
+		 */
+		if (atomic_cmpxchg64(&halt_broadcast, 0, 1) == 0)
+			ipi_halt_others();
+
+		/*
+		 * Let the processor that got there first finish saying what
+		 * happened (#461).
+		 *
+		 * Every processor but one arrives here through panic()'s
+		 * `somebody else is already panicking' arm, and arrives at once
+		 * -- the first boot with the application processors scheduling
+		 * had three of them fail identically in the same microsecond.
+		 * Their backtraces are worth having, and printed during the
+		 * message they destroy it: the run that produced them had not
+		 * one legible line of the panic itself.
+		 *
+		 * panicwait is what panic() raises around the message.  Bounded,
+		 * because a processor that dies mid-message must not silence the
+		 * rest: after the wait the report is made anyway.
+		 */
+		for (spins = 0; spins < 200000000ULL && panicwait; spins++)
+			cpu_pause();
+
 		x86_64_backtrace((uint64_t)(uintptr_t)
 				 __builtin_frame_address(0));
+	}
 
 	for (;;)
 		__asm__ volatile("cli; hlt");
-}
-
-/* What the other processors are asked to run.  See halt_all_cpus below. */
-static void
-halt_this_cpu(void *unused)
-{
-	(void) unused;
-	halt_cpu();
 }
 
 /*
@@ -136,13 +174,20 @@ halt_all_cpus(boolean_t reboot)
 	 * The others first, then this one: stopping this processor first would
 	 * leave the rest running with nobody to stop them.
 	 *
-	 * Over the general call-others IPI rather than a halt-specific one:
-	 * the message this machine has is "run this function", and halting is
-	 * a function.  A dedicated halt IPI would be a second path through the
-	 * same hardware for no gain, and one used once at shutdown would be
-	 * the least exercised code in the kernel.
+	 * ⚠️ NOT over the general call-others IPI, which is what stood here and
+	 * was wrong (#461).  The argument was that halting is a function and
+	 * the machine already has "run this function", so a dedicated vector
+	 * would be a second path for no gain.  What that missed is what
+	 * ipi_call_others() is: it refuses to run with interrupts off, it takes
+	 * a lock, and it waits for every target to ACKNOWLEDGE -- which a
+	 * processor that halts inside the handler can never do.  So it would
+	 * have spun its whole budget and then panicked about a processor that
+	 * never answered, from inside a shutdown.
+	 *
+	 * Never noticed because nothing has ever called this.  Produced, and
+	 * consumed by nobody.
 	 */
-	ipi_call_others(halt_this_cpu, (void *) 0);
+	ipi_halt_others();
 	halt_cpu();
 }
 

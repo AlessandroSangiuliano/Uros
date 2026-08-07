@@ -31,7 +31,8 @@
 #include <kern/thread.h>
 #include <time/clock_event.h>	/* #459: start this processor's clock */
 #include <boot/bootarg.h>		/* #459: boot_flag */
-extern thread_t preempt_test_run(void);	/* #459: x86_64/time/preempt_test.c */
+#include <cpu/smp.h>			/* #461: real_ncpus */
+#include <time/preempt_test.h>		/* #459/#461: the -P boot */
 #include <kern/thread_act.h>
 #include <kern/task.h>
 #include <kern/sched_prim.h>
@@ -764,7 +765,20 @@ load_context(thread_t thread)
 	 * scheduler reaches them the moment it takes the processor back -- which
 	 * is exactly the property under test.
 	 */
-	if (boot_flag('P')) {
+	/*
+	 * ⚠️ Only on a machine with one processor, and only on the boot
+	 * processor (#461).
+	 *
+	 * Every processor entering the scheduler comes through here, so
+	 * unguarded this would start four copies of the test, each creating
+	 * three threads and each displacing the first thread its processor was
+	 * given.  And on a machine with application processors the interesting
+	 * question is not this one: the test that matters runs the three
+	 * threads on a processor that is NOT the one the firmware started, from
+	 * machine_processors_ready(), once they are in the scheduler to run
+	 * them.
+	 */
+	if (boot_flag('P') && real_ncpus == 1 && cpu_number() == master_cpu) {
 		thread_t reporter = preempt_test_run();
 
 		if (reporter != THREAD_NULL) {

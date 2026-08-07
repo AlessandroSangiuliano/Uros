@@ -28,6 +28,7 @@
 #define PERCPU_CPU_ID		8
 #define PERCPU_KERNEL_RSP	16
 #define PERCPU_USER_RSP		24
+#define PERCPU_PREEMPT_LEVEL	48
 
 #ifndef __ASSEMBLER__
 
@@ -95,6 +96,32 @@ struct percpu {
 	void	*active_thread;
 
 	/*
+	 * How many reasons this processor has not to change hands (#461).
+	 *
+	 * ⚠️ THE KERNEL BELIEVED IT ALREADY HAD THIS.  <kern/cpu_data.h> defines
+	 * disable_preemption() as nothing and get_preemption_level() as the
+	 * constant 0 whenever MACH_RT is off, which it is here -- so every
+	 * caller that thought it was holding preemption off was holding nothing
+	 * off, and the guard #459 wrote into the trap return (`do not preempt
+	 * inside a critical section') tested a constant.
+	 *
+	 * It cost a deadlock, and the shape is worth keeping: a thread is
+	 * preempted while holding a spin lock; the other processors take the
+	 * same lock from interrupt context, where the gate has already cleared
+	 * IF; and now nobody can make progress, because the only thing that
+	 * would release the lock is a thread that no processor is free to
+	 * schedule.  Four processors, one instruction, interrupts off.
+	 * Measured at one boot in six before idle processors halted, and four in
+	 * six after -- a halted processor is one fewer that might have run the
+	 * holder.
+	 *
+	 * Here rather than in cpu_data[] because it is read on the trap return
+	 * path, which has %gs and would otherwise pay for an array index first.
+	 */
+	uint32_t preemption_level;
+	uint32_t reserved_preempt;
+
+	/*
 	 * The interrupt priority level, and what arrived while it was raised
 	 * (#409/#322).
 	 *
@@ -124,6 +151,8 @@ _Static_assert(__builtin_offsetof(struct percpu, cpu_id) == PERCPU_CPU_ID,
 	       "percpu cpu_id moved");
 _Static_assert(__builtin_offsetof(struct percpu, kernel_rsp) == PERCPU_KERNEL_RSP,
 	       "percpu kernel_rsp moved");
+_Static_assert(__builtin_offsetof(struct percpu, preemption_level)
+	       == PERCPU_PREEMPT_LEVEL, "percpu preemption_level moved");
 _Static_assert(__builtin_offsetof(struct percpu, user_rsp) == PERCPU_USER_RSP,
 	       "percpu user_rsp moved");
 
@@ -155,6 +184,41 @@ static inline struct percpu *percpu(void)
 
 	__asm__ volatile("movq %%gs:0, %0" : "=r"(p));
 	return p;
+}
+
+/*
+ * Entering and leaving a spin-lock section (#461).
+ *
+ * Plain increments, not atomics: the counter belongs to one processor and is
+ * only ever written by it.  What it has to survive is an INTERRUPT on this
+ * processor between the read and the write, and a read-modify-write to a
+ * %gs-relative address is a single instruction, which an interrupt cannot
+ * land inside.
+ *
+ * ⚠️ Every acquire needs its release.  A counter left standing disables
+ * preemption on this processor for good, and the symptom is not a crash but a
+ * processor that quietly stops sharing -- so the pair belongs in the lock
+ * package and nowhere else.
+ */
+static inline void percpu_preempt_disable(void)
+{
+	__asm__ volatile("incl %%gs:%c0"
+			 : : "i"(PERCPU_PREEMPT_LEVEL) : "memory");
+}
+
+static inline void percpu_preempt_enable(void)
+{
+	__asm__ volatile("decl %%gs:%c0"
+			 : : "i"(PERCPU_PREEMPT_LEVEL) : "memory");
+}
+
+static inline uint32_t percpu_preempt_level(void)
+{
+	uint32_t d;
+
+	__asm__ volatile("movl %%gs:%c1, %0"
+			 : "=r"(d) : "i"(PERCPU_PREEMPT_LEVEL));
+	return d;
 }
 
 #endif	/* __ASSEMBLER__ */

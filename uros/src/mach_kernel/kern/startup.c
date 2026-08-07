@@ -555,6 +555,16 @@ start_kernel_threads(void)
 	}
 #endif	/* MACH_KDB */
 
+#if	NCPUS > 1
+	/*
+	 *	Every processor has an idle thread now, so a machine that woke
+	 *	its processors before there was a scheduler may let them into it
+	 *	(#461).  See <kern/startup.h> for why this is not the same point
+	 *	as start_other_cpus() below, and why it is safe here.
+	 */
+	machine_processors_ready();
+#endif	/* NCPUS > 1 */
+
 	/*
 	 *	Start the user bootstrap.
 	 */

@@ -49,6 +49,7 @@
  */
 
 #include <x86_64/time/clock_event.h>
+#include <x86_64/time/preempt_test.h>
 #include <x86_64/time/tsc.h>
 #include <x86_64/cpu/regs.h>
 #include <x86_64/cpu/spl.h>
@@ -57,6 +58,10 @@
 #include <kern/sched_prim.h>
 #include <kern/processor.h>
 #include <kern/task.h>
+#include <kern/thread_swap.h>
+#include <kern/cpu_data.h>		/* #461: get_preemption_level */
+#include <kern/cpu_number.h>
+#include <mach/machine.h>		/* #461: machine_slot[] */
 #include <mach/machine/vm_types.h>
 
 /*
@@ -69,6 +74,92 @@
 static volatile unsigned long	preempt_count_a;
 static volatile unsigned long	preempt_count_b;
 static volatile int		preempt_done;
+
+/*
+ * Whether the three are running on a processor other than this one, and
+ * whether they have finished (#461).
+ *
+ * When they are, the reporter must NOT end the run: it is on an application
+ * processor, and stopping that one would leave the boot processor waiting for
+ * a verdict from a processor that has halted.  It raises `preempt_reported'
+ * instead and the waiter ends the run, which also puts the machine's own
+ * stop-everybody path under the one boot that has a reason to use it.
+ */
+static volatile int		preempt_remote;
+static volatile int		preempt_reported;
+
+/*
+ * Where each of the three actually ran, and where they were asked to (#461).
+ *
+ * ⚠️ RECORDED AND CHECKED, because the binding failed silently once and the
+ * result read as a pass.  The claim this test makes is "one processor, three
+ * threads, none yielding", and it is only a claim about preemption while the
+ * first three words are true: two counters advancing on two processors is two
+ * threads running side by side, which a kernel with no clock at all would
+ * produce.  A test whose precondition is a comment is a test that will one day
+ * measure something else and say the same thing.
+ */
+static volatile int		preempt_slot_a = -1;
+static volatile int		preempt_slot_b = -1;
+static volatile int		preempt_slot_r = -1;
+static volatile int		preempt_slot_want = -1;
+static volatile int		preempt_probes;
+
+/*
+ * A kernel thread that is bound BEFORE it can run (#461).
+ *
+ * ⚠️ kernel_thread() followed by thread_bind() does not do this, and the
+ * difference is the whole validity of the test.  kernel_thread() sets TH_RUN
+ * and calls thread_setrun() itself, so by the time it returns the thread is on
+ * a run queue and any idle processor may already have taken it; the bind that
+ * follows arrives after the race it was meant to prevent.
+ *
+ * That is not a subtle failure and it was not caught by reading.  The first
+ * four-processor run of this test asked for three threads on processor 1 and
+ * printed its verdict from processor 3 -- and a verdict about "one processor,
+ * three threads" produced by threads that were on three processors is not a
+ * weaker claim, it is a different one.  Two counters advancing means the
+ * processor changed hands only if there was one processor to change.
+ *
+ * (The historical code knew: kern/thread.c binds inside kernel_thread() under
+ * PARAGON860, for exactly this reason.)
+ *
+ * Everything else here mirrors kernel_thread() deliberately, including the
+ * order of act_deallocate() and thread_resume(): this is that function with
+ * one call inserted, not a second way of making a kernel thread.
+ */
+static thread_t
+preempt_thread_bound(void (*fn)(void), processor_t target)
+{
+	thread_t	th;
+	thread_act_t	act;
+	spl_t		s;
+
+	if (thread_create_at(kernel_task, &th, fn) != KERN_SUCCESS)
+		return THREAD_NULL;
+
+	thread_swappable(th->top_act, FALSE);
+
+	s = splsched();
+	thread_lock(th);
+
+	act = th->top_act;
+	th->max_priority = BASEPRI_SYSTEM;
+	th->priority = BASEPRI_SYSTEM;
+	th->sched_pri = BASEPRI_SYSTEM;
+
+	thread_bind_locked(th, target);
+
+	th->state |= TH_RUN;
+	thread_setrun(th, TRUE, TAIL_Q);
+	thread_unlock(th);
+	splx(s);
+
+	act_deallocate(act);
+	thread_resume(act);
+
+	return th;
+}
 
 static void
 preempt_worker_a(void)
@@ -87,12 +178,45 @@ preempt_worker_a(void)
 	 */
 	{
 		uint64_t fl;
+		int lvl;
+
 		__asm__ __volatile__("pushfq; popq %0" : "=r"(fl));
-		printf("preempt_test: worker a running (IF=%d)\n",
-		       (int)((fl >> 9) & 1));
+		/*
+		 * Read BEFORE the printf, which raises the level itself: asked
+		 * afterwards it would answer about printf and not about this
+		 * thread (#461).
+		 *
+		 * Reported because a level that never returns to zero is
+		 * indistinguishable from a clock that never fires -- both leave
+		 * a thread running forever -- and the counter is new enough
+		 * that "which of the two" is the first question.
+		 */
+		lvl = get_preemption_level();
+		preempt_slot_a = current_processor()->slot_num;
+		printf("preempt_test: worker a running on processor %d "
+		       "(IF=%d, preemption level %d)\n", preempt_slot_a,
+		       (int)((fl >> 9) & 1), lvl);
 	}
-	while (!preempt_done)
+	/*
+	 * The level again, a few times, while this thread runs (#461).
+	 *
+	 * Read once at entry it says the thread started clean; it cannot say
+	 * whether the counter DRIFTS.  An unbalanced pair anywhere in the
+	 * kernel would walk it away from zero -- and since it is unsigned, one
+	 * decrement too many wraps it to something enormous, at which point
+	 * every trap return refuses to preempt and this loop runs forever.
+	 * That failure and "the clock never fired" look identical from outside,
+	 * which is why the counter is sampled rather than assumed.
+	 */
+	while (!preempt_done) {
+		if ((preempt_count_a & 0xFFFFFFF) == 0 && preempt_probes < 4) {
+			preempt_probes++;
+			printf("preempt_test: worker a still here, preemption "
+			       "level %d after %lu turns\n",
+			       get_preemption_level(), preempt_count_a);
+		}
 		preempt_count_a++;
+	}
 	/* Nothing to tidy: the reporter ends the run, and a worker that
 	 * outlives it would only be racing the halt. */
 	for (;;)
@@ -102,7 +226,9 @@ preempt_worker_a(void)
 static void
 preempt_worker_b(void)
 {
-	printf("preempt_test: worker b running\n");
+	preempt_slot_b = current_processor()->slot_num;
+	printf("preempt_test: worker b running on processor %d\n",
+	       preempt_slot_b);
 	while (!preempt_done)
 		preempt_count_b++;
 	for (;;)
@@ -120,7 +246,9 @@ preempt_reporter(void)
 	 * gives roughly a hundred opportunities to switch, so a single
 	 * unlucky handover cannot be mistaken for the mechanism working.
 	 */
-	printf("preempt_test: reporter running\n");
+	preempt_slot_r = current_processor()->slot_num;
+	printf("preempt_test: reporter running on processor %d\n",
+	       preempt_slot_r);
 	t0 = rdtsc();
 	deadline = tsc_hz() ? tsc_hz() : 0;
 	if (deadline == 0) {
@@ -152,15 +280,38 @@ preempt_reporter(void)
 		      "ran (a=%lu b=%lu) — the quantum is not being taken "
 		      "away (#459)", a, b);
 
-	printf("preempt_test: PASS — the processor was taken from a running "
+	/*
+	 * And the precondition, checked last because it is checked against
+	 * where the threads REALLY ran rather than where they were sent.
+	 */
+	if (preempt_slot_a != preempt_slot_want ||
+	    preempt_slot_b != preempt_slot_want ||
+	    preempt_slot_r != preempt_slot_want)
+		panic("preempt_test: the three threads were meant to share "
+		      "processor %d and ran on %d, %d and %d — they were not "
+		      "confined, so two counters advancing says nothing about "
+		      "preemption (#461)", preempt_slot_want,
+		      preempt_slot_a, preempt_slot_b, preempt_slot_r);
+
+	printf("preempt_test: PASS — processor %d was taken from a running "
 	       "thread and given to another, %u times a second\n",
-	       clock_event_hz());
+	       current_processor()->slot_num, clock_event_hz());
 
 	/*
-	 * End the run here.  This boot exists to answer one question and it
-	 * has been answered; going on into bootstrap_create would end it in
-	 * the #422 panic and bury the verdict under a backtrace.
+	 * End the run here -- but only when "here" is the boot processor.
+	 *
+	 * This boot exists to answer one question and it has been answered;
+	 * going on into bootstrap_create would end it in the #422 panic and
+	 * bury the verdict under a backtrace.  On an application processor the
+	 * same halt would strand the boot processor waiting for a verdict from
+	 * a processor that has stopped, so it hands the ending back (#461).
 	 */
+	if (preempt_remote) {
+		preempt_reported = 1;
+		for (;;)
+			cpu_pause();
+	}
+
 	printf("preempt_test: halted — this boot was the test (#459)\n");
 	for (;;)
 		__asm__ __volatile__("cli; hlt");
@@ -184,21 +335,20 @@ preempt_test_run(void)
 	       "clock %s at %u Hz\n",
 	       here->slot_num, clock_event_name(), clock_event_hz());
 
-	a = kernel_thread(kernel_task, preempt_worker_a, (void *) 0);
-	b = kernel_thread(kernel_task, preempt_worker_b, (void *) 0);
-	r = kernel_thread(kernel_task, preempt_reporter, (void *) 0);
-
-	if (a == THREAD_NULL || b == THREAD_NULL || r == THREAD_NULL)
-		panic("preempt_test: could not create the test threads");
-
 	/*
 	 * All three on this processor, so that two counters advancing can
 	 * only mean the processor changed hands.  On four processors they
-	 * would run side by side and prove nothing.
+	 * would run side by side and prove nothing -- which is why they are
+	 * bound before they are runnable and not after.
 	 */
-	thread_bind(a, here);
-	thread_bind(b, here);
-	thread_bind(r, here);
+	preempt_slot_want = here->slot_num;
+
+	a = preempt_thread_bound(preempt_worker_a, here);
+	b = preempt_thread_bound(preempt_worker_b, here);
+	r = preempt_thread_bound(preempt_reporter, here);
+
+	if (a == THREAD_NULL || b == THREAD_NULL || r == THREAD_NULL)
+		panic("preempt_test: could not create the test threads");
 
 	/*
 	 * The reporter is handed back to load_context() to be started IN PLACE
@@ -220,4 +370,118 @@ preempt_test_run(void)
 		splx(s);
 	}
 	return r;
+}
+
+/*
+ * The same three threads, on an application processor, watched from here
+ * (#461).
+ *
+ * WHY THIS IS THE STRONGER TEST.  The uniprocessor form above shows that a
+ * clock takes a processor away from a thread that will not give it up.  It
+ * shows it on the processor the firmware started, which is the one processor
+ * whose clock, quantum accounting and AST delivery had already run.  Every one
+ * of those is per-processor state, and an application processor reaches all of
+ * it through code that -- until this issue -- had never executed there.
+ *
+ * ⚠️ And the boot processor deliberately does nothing but wait.  If it went on
+ * into bootstrap_create() it would panic there (#422) and, since #461, that
+ * panic now stops every other processor -- including the three under test,
+ * mid-measurement.  Waiting is not idleness here; it is the test.
+ */
+void
+preempt_test_run_remote(void)
+{
+	thread_t	a, b, r;
+	processor_t	target = PROCESSOR_NULL;
+	uint64_t	t0, limit;
+	int		me = cpu_number();
+	int		i;
+
+	/*
+	 * The first processor that is neither this one nor the one the
+	 * firmware started.  By slot rather than by position, because the slots
+	 * are sparse: firmware does not promise consecutive APIC identifiers
+	 * and this kernel indexes by them.
+	 *
+	 * ⚠️ master_cpu is excluded deliberately, and not because running there
+	 * would be wrong.  The thread calling this is start_kernel_threads(),
+	 * which is unbound -- so once the application processors are in the
+	 * scheduler it may itself be running on one, and the "first processor
+	 * that is not me" was observed to be processor 0.  That run proved
+	 * something real, and it did not prove THIS: that a processor which has
+	 * never in the history of this port run a thread can be given one and
+	 * have it taken away again.
+	 */
+	for (i = 0; i < NCPUS; i++) {
+		if (i == me || i == master_cpu)
+			continue;
+		if (!machine_slot[i].is_cpu || !machine_slot[i].running)
+			continue;
+		target = cpu_to_processor(i);
+		break;
+	}
+
+	if (target == PROCESSOR_NULL) {
+		printf("preempt_test: WRONG — asked for an application "
+		       "processor other than the boot processor and this "
+		       "machine has none running; nothing was measured "
+		       "(#461)\n");
+		return;
+	}
+
+	printf("preempt_test: starting — three threads bound to processor %d, "
+	       "watched from processor %d, clock %s at %u Hz\n",
+	       target->slot_num, me, clock_event_name(), clock_event_hz());
+
+	preempt_remote = 1;
+
+	preempt_slot_want = target->slot_num;
+
+	a = preempt_thread_bound(preempt_worker_a, target);
+	b = preempt_thread_bound(preempt_worker_b, target);
+	r = preempt_thread_bound(preempt_reporter, target);
+
+	if (a == THREAD_NULL || b == THREAD_NULL || r == THREAD_NULL)
+		panic("preempt_test: could not create the test threads");
+
+	/*
+	 * Nothing is taken off a run queue here, unlike the uniprocessor form.
+	 * There the reporter had to displace the first thread because it was to
+	 * run on THIS processor; here all three simply become runnable on a
+	 * processor that is sitting in its idle thread, and the scheduler
+	 * dispatching them to it is part of what is being tested.
+	 */
+
+	/*
+	 * Ten seconds of this processor's TSC, against a test that needs one.
+	 * Bounded because the failure this exists to catch is silence, and
+	 * waiting forever for a verdict turns a failed test into a hung boot --
+	 * which says strictly less.
+	 */
+	t0 = rdtsc();
+	limit = tsc_hz() ? tsc_hz() * 10 : 0;
+
+	while (!preempt_reported) {
+		if (limit != 0 && rdtsc() - t0 > limit) {
+			printf("preempt_test: WRONG — processor %d never "
+			       "reported in ten seconds.  It reached the "
+			       "scheduler and runs an idle thread, but work "
+			       "bound to it either never arrives or never "
+			       "yields (#461)\n", target->slot_num);
+			break;
+		}
+		clock_event_drain_reports();
+		cpu_pause();
+	}
+
+	/*
+	 * The run is over either way, and ending it through halt_all_cpus() is
+	 * deliberate: it is the one path on this machine that stops every
+	 * processor, it has never been called by anything, and this is the only
+	 * boot with three processors running and a reason to stop them.
+	 */
+	printf("preempt_test: halting the machine — this boot was the test "
+	       "(#461)\n");
+	halt_all_cpus(FALSE);
+	/*NOTREACHED*/
 }

@@ -985,6 +985,24 @@ machine_kernel_ready(void)
 	hwp_init_cpu(TRUE);	/* #358 hardware P-states (BSP arm) */
 }
 
+#if	NCPUS > 1
+/*
+ * Every processor has an idle thread now (#461).
+ *
+ * Nothing to do, and the emptiness is a property of this machine rather than
+ * an omission: i386 starts its processors from start_other_cpus(), at the end
+ * of start_kernel_threads(), so none of them exists yet to be let anywhere.
+ * The hook is for machines that wake their processors before the kernel is
+ * entered -- x86-64 does, because its own bring-up checks need them -- and
+ * therefore have processors waiting for the idle threads this point
+ * guarantees.
+ */
+void
+machine_processors_ready(void)
+{
+}
+#endif	/* NCPUS > 1 */
+
 /*
  * Halt a cpu.
  */

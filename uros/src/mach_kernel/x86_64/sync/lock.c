@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#include <kern/cpu_data.h>	/* #461: the preemption level */
 #include <cpu/regs.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
@@ -24,12 +25,38 @@ unsigned int hw_lock_try(hw_lock_t l)
 	 * lock was free and is now ours.  The exchange is a full barrier, so
 	 * nothing inside the section that follows can be observed before the
 	 * lock is seen taken.
+	 *
+	 * Preemption is raised before the attempt and dropped again if the
+	 * attempt fails, so that the successful path leaves exactly what
+	 * hw_lock_lock() leaves and the caller cannot tell the two apart (#461).
 	 */
-	return atomic_swap8(l, 1) == 0;
+	disable_preemption();
+
+	if (atomic_swap8(l, 1) == 0)
+		return 1;
+
+	enable_preemption_no_check();
+	return 0;
 }
 
 void hw_lock_lock(hw_lock_t l)
 {
+	/*
+	 * Preemption off for the whole hold (#461).
+	 *
+	 * Before the acquire, not after: between a successful exchange and the
+	 * increment there is a window in which this thread holds the lock and
+	 * can be taken off the processor, which is the exact failure being
+	 * closed.  Raising it first costs nothing if the acquire fails -- the
+	 * spin below is a fine place not to be preempted either.
+	 *
+	 * On a spin lock this is not an optimisation.  A preempted holder does
+	 * not merely make the spinners wait a quantum: the spinners may be in
+	 * interrupt context, where the gate has already cleared IF, and then no
+	 * processor is left to schedule the holder at all.
+	 */
+	disable_preemption();
+
 	for (;;) {
 		if (atomic_swap8(l, 1) == 0)
 			return;
@@ -68,6 +95,22 @@ void hw_lock_unlock(hw_lock_t l)
 	 */
 	barrier();
 	*l = 0;
+
+	/*
+	 * And preemption back, after the release rather than before it (#461).
+	 *
+	 * The other order would leave a window in which the lock is still held
+	 * and this thread can be taken off the processor -- the failure the
+	 * increment exists to prevent, moved to the end of the section instead
+	 * of the beginning.
+	 *
+	 * ⚠️ No AST is taken here.  A processor that has just dropped a lock is
+	 * about to reach a trap return or another preemption point of its own
+	 * accord, and switching from inside the lock package would mean every
+	 * unlock in the kernel is a place a thread can vanish -- including the
+	 * ones called with interrupts off.
+	 */
+	enable_preemption_no_check();
 }
 
 unsigned int hw_lock_held(hw_lock_t l)
@@ -96,13 +139,22 @@ unsigned int hw_lock_held(hw_lock_t l)
  * They are hw_lock underneath, which is what the portable version would end
  * up calling anyway on a machine with more than one processor.
  *
- * ⚠️ No preemption counting.  The machine-independent version bumps a
- * per-processor preemption level around the hold, so that a thread cannot be
- * descheduled while holding a spin lock -- which on a spin lock is not an
- * optimisation but a correctness property: a preempted holder makes every
- * spinner wait for a scheduling quantum instead of a critical section.  This
+ * Preemption is counted, in hw_lock_lock() and hw_lock_unlock() underneath,
+ * so every direct user of a hardware lock is covered and not only these.
+ *
+ * ⚠️ This comment used to say there was no preemption counting, because "this
  * target has no preemption to disable yet, and the day it does, that is what
- * belongs here rather than a comment saying it does not.
+ * belongs here".  #459 was that day and nobody came back here (#461).
+ *
+ * What made it hard to notice is that the machine-independent kernel appears
+ * to do it already: kern/lock.c's usimple_lock calls disable_preemption(), and
+ * printf and half the scheduler call it too.  With MACH_RT off -- which it is
+ * on both of this kernel's targets -- <kern/cpu_data.h> defines that as
+ * nothing and get_preemption_level() as the constant 0.  So the property was
+ * asserted everywhere and held nowhere, and the bill arrived as a deadlock:
+ * a thread preempted holding a spin lock, the other processors reaching for it
+ * from interrupt context with IF already clear, and nothing left able to
+ * schedule the holder.
  */
 
 void

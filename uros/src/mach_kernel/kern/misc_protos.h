@@ -151,6 +151,23 @@ extern void panic_init(void);
  */
 extern const char *panicstr;
 
+/*
+ * Set while the first panicking processor is still printing its message, and
+ * cleared when it has finished (#461).
+ *
+ * panic() raises it before the message and drops it after, so that the
+ * processors it beat to panicstr have something to wait on.  They already do
+ * under MACH_KDB, where each one goes on to enter the debugger; a machine
+ * without a debugger has the same need for a different reason -- it prints a
+ * backtrace on its way to a halt, and several of those arriving during the
+ * message leave nothing readable.
+ *
+ * ⚠️ volatile, and declared here rather than as an `extern' at each point of
+ * use, for the same reason as panicstr above: a reader that dropped the
+ * volatile would be entitled to read it once and spin on the copy (#448).
+ */
+extern volatile int panicwait;
+
 extern void log(int level, char *fmt, ...)
 	__attribute__((format(printf, 2, 3)));
 

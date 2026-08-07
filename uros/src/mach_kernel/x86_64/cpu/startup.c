@@ -17,6 +17,7 @@
 #include <stdint.h>
 
 #include <kern/misc_protos.h>
+#include <kern/processor.h>	/* #461: real_ncpus */
 #include <kern/startup.h>	/* #448: the interface, so it is checked */
 #include <mach/machine/vm_param.h>
 
@@ -26,8 +27,11 @@
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <thread/fpu.h>
+#include <boot/bootarg.h>	/* #461: boot_flag */
 #include <cpu/lapic.h>		/* #459: LAPIC_TIMER_VECTOR */
+#include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
+#include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <trap/trap.h>		/* trap_set_handler */
 
 /*
@@ -117,23 +121,127 @@ rtclock_reset(void)
 }
 
 /*
- * Bring the other processors up, and the per-processor half that each of
- * them runs when it arrives.
+ * Bring the other processors up.
  *
- * ⚠️ Both are already done by the time the machine-independent kernel asks.
- * x86_64/cpu/smp.c starts every processor in one pipelined pass during boot,
- * because the trampoline and the funnel counter pacing it are shared: doing
- * it one processor at a time would mean building and tearing that machinery
- * down repeatedly, and the pipelining is what makes the bring-up fast.
+ * ⚠️ Already done, and unlike the version of this comment that stood here
+ * until #461, that is now the whole truth.  x86_64/cpu/smp.c starts every
+ * processor in one pipelined pass during boot, because the trampoline and the
+ * funnel counter pacing it are shared: doing it one processor at a time would
+ * mean building and tearing that machinery down repeatedly, and the
+ * pipelining is what makes the bring-up fast.
  *
- * So these are the honest "already" rather than a second bring-up path that
- * would have to agree with the first.
+ * What the old comment left out was the other half — woken is not scheduling.
+ * The processors reached long mode, took their tables and their controllers,
+ * and then halted, because nothing called slave_main().  Four processors, and
+ * a scheduler that owned one.  That half is machine_processors_ready() below,
+ * and it cannot be done here: this call comes after bootstrap_create(), which
+ * on this target does not return (#422).
  */
 void
 start_other_cpus(void)
 {
 }
 
+/*
+ * Let them into the scheduler (#461).
+ *
+ * Here, at the point where kern/startup.c guarantees every processor has an
+ * idle thread, because the idle thread is exactly what an arriving processor
+ * takes: slave_main() ends in cpu_launch_first_thread(THREAD_NULL), and the
+ * THREAD_NULL means "use the one you were given".  Released one line earlier
+ * and an AP finds THREAD_NULL where its first thread should be.
+ */
+void
+machine_processors_ready(void)
+{
+	unsigned	want = (unsigned) real_ncpus;
+	unsigned	got = smp_ap_release_to_scheduler();
+
+	if (got >= want) {
+		unsigned	spins;
+		int		idle;
+
+		printf("startup: %u processors in the scheduler\n", got);
+
+		/*
+		 * And what the scheduler thinks it has (#461).
+		 *
+		 * cpu_up() is where a processor joins the processor set; going
+		 * IDLE is a second thing that happens a little later, when its
+		 * idle thread reaches the point of having nothing to run.  The
+		 * two are worth separating: a processor that is in the set but
+		 * never idle is one the scheduler will never dispatch to, and
+		 * on the console that is indistinguishable from a processor
+		 * that arrived.
+		 *
+		 * Every processor but this one, because this one is running the
+		 * thread that is asking.  Bounded, and the count is printed
+		 * whether or not it is reached -- the number is the answer, and
+		 * a wait that gave up silently would turn a wrong number into
+		 * no number.
+		 */
+		for (spins = 0; spins < 200000000U; spins++) {
+			idle = *(volatile int *) &default_pset.idle_count;
+			if (idle >= (int) (got - 1))
+				break;
+			cpu_pause();
+		}
+
+		idle = *(volatile int *) &default_pset.idle_count;
+		printf("startup: %d of %u processors idle in the scheduler%s\n",
+		       idle, got,
+		       idle >= (int) (got - 1) ? "" :
+		       " — WRONG, one that never goes idle is one the "
+		       "scheduler will never dispatch to (#461)");
+
+		/*
+		 * -P on a machine with more than one processor: prove that an
+		 * APPLICATION processor preempts, which is the claim #461 makes
+		 * and the one the uniprocessor form of this test cannot reach.
+		 *
+		 * Here rather than in load_context(), which is where the
+		 * uniprocessor form runs: the three threads have to be bound to
+		 * a processor that is already in the scheduler, and this is the
+		 * first instant at which one is.  Does not return.
+		 */
+		if (boot_flag('P') && want > 1)
+			preempt_test_run_remote();
+		return;
+	}
+
+	/*
+	 * Reported and survived, not panicked on.  A processor that was woken
+	 * and did not arrive is a fact about this boot, and the machine can run
+	 * on the ones that did — real_ncpus is what was found, and the
+	 * scheduler's own "is the machine up" test reads avail_cpus, so a
+	 * machine short of a processor stays honestly short rather than
+	 * pretending.
+	 *
+	 * ⚠️ It is said loudly, in the word the harness greps for, because the
+	 * failure is otherwise invisible: a processor stuck before cpu_up() is a
+	 * processor nothing ever dispatches to, which on the console looks
+	 * exactly like a machine that has fewer processors.
+	 */
+	printf("startup: WRONG — %u of %u processors reached the scheduler; "
+	       "the rest were woken and never arrived (#461)\n", got, want);
+}
+
+/*
+ * What a processor runs on its way into the scheduler, before it has a thread.
+ *
+ * fpu_init() again, and it is not redundant: ap_start_c() does it during
+ * bring-up so that the processor can execute a vector instruction at all, and
+ * this is the machine-independent kernel's own call site for the same
+ * question.  The boot processor reaches here by neither path — setup_main()
+ * does not call this — so the two are the AP's only coverage of it.
+ *
+ * ⚠️ i386 does two more things here and this machine deliberately does
+ * neither.  fpu_sanity_check() is its answer to a bring-up path that once left
+ * CR4.OSFXSR clear on an AP; here the bit is programmed on the one path that
+ * programs anything.  hwp_init_cpu() is real work and wanted, but it changes
+ * what the clock does under measurement, so it belongs with the numbers rather
+ * than ahead of them.
+ */
 void
 slave_machine_init(void)
 {
