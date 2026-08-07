@@ -61,4 +61,14 @@ int ddb_enabled(void);
  */
 void ddb_enter(struct trap_frame *frame, const char *why);
 
+/*
+ * Whether the breakpoint that just arrived was a Debugger() request, and if
+ * so what it said.  Answers NULL for a breakpoint from anywhere else -- an
+ * `int3' in the code under test, or the boot self-test's own -- so the two
+ * can never be confused for one another.
+ *
+ * Consumes: a reason is reported once, to the trap that it belongs to.
+ */
+const char *ddb_debugger_taken(void);
+
 #endif	/* _X86_64_DDB_DDB_H_ */

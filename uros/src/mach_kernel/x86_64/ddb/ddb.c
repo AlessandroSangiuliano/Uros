@@ -7,37 +7,50 @@
 
 #include <stdint.h>
 
+#include <boot/bootarg.h>
 #include <boot/multiboot2.h>
 #include <ddb/cons.h>
 #include <ddb/ddb.h>
 #include <ddb/ksym.h>
+#include <kern/cpu_number.h>
+#include <kern/misc_protos.h>	/* panic */
+#include <mach/machine/vm_types.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <trap/trap.h>
 
 static int enabled;
 
+/*
+ * ⚠️ ASKS boot_flag(), and used to parse the command line itself (#428).
+ *
+ * The private parse required `-r' to stand alone -- `p[2]' had to be a space
+ * or the end -- and its reason was sound as far as it went: an `r' inside a
+ * path or a device name must not turn the debugger on.
+ *
+ * But boot/bootarg.c already answers that question, for every other flag on
+ * this machine, and answers it better: it opens a flag word only on a leading
+ * dash and reads the letters within it, so `-rB' is r AND B exactly as `-CT'
+ * is C and T.  Two parsers for one command line, agreeing on the simple case
+ * and disagreeing on the useful one -- and nothing compares them, because
+ * they are in different files and neither is wrong on its own (#448 again).
+ *
+ * It cost the first attempt at demonstrating this issue's own done-when.
+ * Booting `-rB' gave B and silently not r, so Debugger() reported that the
+ * debugger had not been asked for -- on the boot arranged to ask for it.  The
+ * message was correct and the machine was right; the flag had genuinely not
+ * arrived.
+ *
+ * ⚠️ The `info_pa' argument stays, and stays unused, because the caller has
+ * it and a future reader will ask why this does not need it: the multiboot
+ * information is found once by boot/multiboot2.c, and asking it twice is how
+ * two answers appear.
+ */
 void ddb_init(uint32_t info_pa)
 {
-	const struct mb2_tag_string *t;
-	const char *p;
+	(void) info_pa;
 
-	t = (const struct mb2_tag_string *)mb2_find_tag(info_pa,
-						        MB2_TAG_CMDLINE);
-	if (t == 0)
-		return;
-
-	/*
-	 * A flag is a `-r` standing on its own, not an `r` anywhere in the
-	 * string: a path or a device name in the command line would otherwise
-	 * turn the debugger on by containing the wrong letter.
-	 */
-	for (p = t->string; *p; p++) {
-		if (p[0] != '-' || p[1] != 'r')
-			continue;
-		if (p[2] == '\0' || p[2] == ' ')
-			enabled = 1;
-	}
+	enabled = boot_flag('r');
 }
 
 int ddb_enabled(void)
@@ -263,6 +276,64 @@ static void usage(void)
 		  "  s <addr>     which function contains addr\r\n"
 		  "  c            continue\r\n"
 		  "  h            halt\r\n");
+}
+
+/*
+ * ── Debugger(), and why it goes through a breakpoint ──────────────────
+ *
+ * This is the machine-independent kernel's own way in.  Every assert() that
+ * fails reaches it (kern/debug.c), and so does panic() -- twice, because on a
+ * double panic it deliberately unwinds, restores the level and RETURNS, so
+ * that an operator can carry on from the prompt.  Until now this machine
+ * answered all of that with a panic saying there was no debugger, which was
+ * true when it was written and stopped being true in the same issue.
+ *
+ * ⚠️ It raises a breakpoint rather than calling ddb_enter() directly, and the
+ * reason is the frame.  ddb_enter() shows registers and walks a stack, and an
+ * assert() does not arrive from a trap -- so a frame built here would be
+ * THIS function's registers, not the ones the caller died with.  A debugger
+ * that answers confidently about the wrong context is worse than none: the
+ * numbers look like an answer.
+ *
+ * `int3' costs nothing and solves it exactly: the entry stubs save the real
+ * register file into a real trap frame, which is the machinery that exists
+ * for precisely this.  i386's Debugger() is one `int3' and nothing else, and
+ * that part of it is right.
+ *
+ * What is added here is the two things it drops.  The message is kept, so the
+ * prompt says WHY it opened instead of only "breakpoint".  And the flag is
+ * per-processor: two processors failing an assertion in the same microsecond
+ * is not hypothetical -- it happened twice while #463 was being chased -- and
+ * a single global would have one of them reading the other's reason.
+ */
+static const char *debugger_why[NCPUS];
+
+const char *ddb_debugger_taken(void)
+{
+	unsigned	cpu = cpu_number();
+	const char	*why = debugger_why[cpu];
+
+	debugger_why[cpu] = (const char *) 0;
+	return why;
+}
+
+void Debugger(const char *message)
+{
+	/*
+	 * ⚠️ Still a panic when the debugger was not asked for, and that is
+	 * the property every unattended boot depends on: a run that stopped at
+	 * a prompt nobody is there to answer would hang the harness instead of
+	 * failing it.  What changed is that the message no longer says there
+	 * is no debugger -- there is one, and this says how to get it.
+	 */
+	if (!ddb_enabled())
+		panic("Debugger(\"%s\"): the debugger is present but was not "
+		      "asked for — boot with -r to stop here instead (#428)",
+		      message ? message : "");
+
+	debugger_why[cpu_number()] = message && *message ? message : "Debugger";
+
+	__asm__ volatile ("int3");
 }
 
 void ddb_enter(struct trap_frame *frame, const char *why)

@@ -725,6 +725,31 @@ void trap_dispatch(struct trap_frame *frame)
 	}
 
 	/*
+	 * The machine-independent kernel asking for the debugger (#428).
+	 *
+	 * Debugger() raises a breakpoint precisely so that this frame exists
+	 * and describes its caller rather than the debugger.  Checked here,
+	 * against a per-processor flag that only Debugger() sets, so that a
+	 * breakpoint from anywhere else -- the boot self-test's, or an `int3'
+	 * left in code under examination -- cannot be mistaken for one.
+	 *
+	 * ⚠️ Returns, where every other arm of this function halts, and it
+	 * must: Debugger() is a CALL and its callers carry on afterwards.
+	 * kern/debug.c's panic() is the one that proves it -- on a double
+	 * panic it unlocks, restores the level and returns from Debugger() so
+	 * an operator can continue.  `int3' is a trap rather than a fault, so
+	 * the saved rip is already past it and resuming needs nothing else.
+	 */
+	if (frame->vector == T_BREAKPOINT) {
+		const char *why = ddb_debugger_taken();
+
+		if (why != (const char *) 0) {
+			ddb_enter(frame, why);
+			return;
+		}
+	}
+
+	/*
 	 * A fault from ring 3, which is recoverable because of where it came
 	 * from rather than what it was.  Checked before the vector-matching
 	 * arrangement below, since that one resumes on the current stack and

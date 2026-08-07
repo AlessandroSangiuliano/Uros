@@ -34,6 +34,7 @@
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
+#include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/trap.h>		/* trap_set_handler */
 
@@ -111,6 +112,35 @@ machine_kernel_ready(void)
 	 * executed.
 	 */
 	thread_state_dispatch_test();
+
+	/*
+	 * -B: does the machine-independent kernel's way into the debugger
+	 * actually work? (#428)
+	 *
+	 * Debugger() is the name every failed assert() and both panic() paths
+	 * reach, and until this issue it answered with a panic saying there was
+	 * no debugger.  Now it raises a breakpoint and the trap path opens the
+	 * prompt -- and "DDB can be entered" is the one done-when of #428 that
+	 * had never been demonstrated, on a target whose every boot log is a
+	 * self-test run the debugger never opens.
+	 *
+	 * ⚠️ Called from ordinary kernel context on purpose, and not from a
+	 * fault.  A fault already has a trap frame; this is the case that does
+	 * NOT, and it is the case that decides whether the frame the debugger
+	 * shows describes the caller or describes the debugger.
+	 *
+	 * ⚠️ And its return is part of the test.  Debugger() is a call, and
+	 * kern/debug.c's panic() carries on after it on a double panic.  A
+	 * debugger that could only be entered by never coming back would break
+	 * the one caller that matters most.
+	 */
+	if (boot_flag('B')) {
+		printf("ddb_test: calling Debugger() from ordinary kernel "
+		       "context — the prompt should open (#428)\n");
+		Debugger("boot flag -B");
+		printf("ddb_test: Debugger() RETURNED — a call that comes back, "
+		       "which is what panic() needs on a double panic (#428)\n");
+	}
 }
 
 /*
