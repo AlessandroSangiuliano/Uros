@@ -32,6 +32,7 @@
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
+#include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <trap/trap.h>		/* trap_set_handler */
 
 /*
@@ -206,6 +207,20 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('P') && want > 1)
 			preempt_test_run_remote();
+
+		/*
+		 * -F: does vector state survive an involuntary switch? (#408)
+		 *
+		 * Here for the same reason as -P: the threads have to be bound
+		 * to a processor that is already in the scheduler, and this is
+		 * the first instant at which one is.
+		 */
+		if (boot_flag('F') && want > 1) {
+			fpu_stress_run();
+			printf("fpu_stress: halting the machine — this boot "
+			       "was the test (#408)\n");
+			halt_all_cpus(FALSE);
+		}
 		return;
 	}
 

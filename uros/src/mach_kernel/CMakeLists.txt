@@ -125,6 +125,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/context.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu_stress.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/fpu_stress.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/state.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
