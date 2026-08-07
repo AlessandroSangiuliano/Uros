@@ -193,6 +193,8 @@ must_report 'fpu_stress: 3 threads' 'fpu_stress: PASS' \
 	'The threads hold vector state for a second and then report; a boot cut short before that answers nothing (#408).'
 must_report 'state_test: the target is parked' 'state_test: PASS — 11' \
 	'thread_get_state() on a target that never stops waits for it for ever, and waiting for ever looks exactly like a short run (#408).'
+must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
+	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
 
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
@@ -260,7 +262,7 @@ fi
 # this list falls through to the deadline and is reported as CUT SHORT rather
 # than judged -- silence about a run nobody watched to the end is the failure
 # this whole file exists to stop.
-DONE_RE='No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|Assertion failed|panic\(cpu'
+DONE_RE='No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|Assertion failed|panic\(cpu'
 
 SECS=${1:-90}
 [ $# -gt 0 ] && shift

@@ -2457,7 +2457,23 @@ static void timer_selftest(void)
 		kputs(" — WRONG, it never counted\r\n");
 		return;
 	}
-	kputs(", measured against the 8254\r\n");
+	kputs(", measured against the 8254");
+
+	/*
+	 * And how many tries that took (#464).
+	 *
+	 * Printed only when it took more than one, so the ordinary boot reads
+	 * exactly as it always did -- but printed, because a retry nobody can
+	 * see is one nobody can tell from an absent one.  Every line of this
+	 * kind here is a boot that used to end in "no usable timer backend" on
+	 * a machine whose timer was fine.
+	 */
+	if (lapic_timer_calibrate_attempts() > 1) {
+		kputs(" (agreed on attempt ");
+		kputdec(lapic_timer_calibrate_attempts());
+		kputs(" — an earlier window was interfered with, #464)");
+	}
+	kputs("\r\n");
 
 	trap_set_handler(LAPIC_TIMER_VECTOR, timer_tick);
 	tick_reset();

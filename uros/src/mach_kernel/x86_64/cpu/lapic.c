@@ -323,33 +323,81 @@ static uint32_t timer_measure_once(void)
  */
 #define TIMER_CALIBRATE_TOLERANCE	64
 
+/*
+ * And how many times to ASK (#464).
+ *
+ * The agreement test above is right and stays exactly as it is.  What was
+ * wrong was the conclusion drawn from a single disagreement: the pair is
+ * evidence about that pair, not about the timer.  The host taking the
+ * emulator off its processor inside one of the two windows is a transient,
+ * and the answer to a transient is to measure again -- not to declare the
+ * hardware unusable and stop the machine before it has a scheduler.
+ *
+ * It cost one boot in fifteen, measured, and the panic named the wrong thing:
+ * "no usable timer backend" on a machine whose timer was fine.
+ *
+ * Four, because the failure being defended against is one interference in one
+ * window; four consecutive interferences is a machine that is not going to
+ * calibrate anything and should say so rather than spin.
+ */
+#define TIMER_CALIBRATE_ATTEMPTS	4
+
 static uint32_t timer_hz_run[2];
+static unsigned timer_hz_attempts;
 
 uint32_t lapic_timer_calibrate(void)
 {
 	uint32_t spread, allowed;
+	unsigned attempt;
 
 	timer_hz = 0;
+	timer_hz_attempts = 0;
 
 	if (!lapic_present())
 		return 0;
 
-	timer_hz_run[0] = timer_measure_once();
-	timer_hz_run[1] = timer_measure_once();
+	for (attempt = 1; attempt <= TIMER_CALIBRATE_ATTEMPTS; attempt++) {
+		timer_hz_attempts = attempt;
 
-	if (timer_hz_run[0] == 0 || timer_hz_run[1] == 0)
-		return 0;
+		timer_hz_run[0] = timer_measure_once();
+		timer_hz_run[1] = timer_measure_once();
 
-	spread = timer_hz_run[0] > timer_hz_run[1]
-	       ? timer_hz_run[0] - timer_hz_run[1]
-	       : timer_hz_run[1] - timer_hz_run[0];
-	allowed = timer_hz_run[0] / TIMER_CALIBRATE_TOLERANCE;
+		/*
+		 * ⚠️ Not retried, and that is the distinction the retry must
+		 * not blur.  A zero here is timer_measure_once() reporting
+		 * that the counter never moved or that the PIT delay failed --
+		 * a fact about the machine, not about this window -- and a
+		 * loop that kept asking would turn a broken timer into a
+		 * slower boot with the same ending.
+		 */
+		if (timer_hz_run[0] == 0 || timer_hz_run[1] == 0)
+			return 0;
 
-	if (spread > allowed)
-		return 0;
+		spread = timer_hz_run[0] > timer_hz_run[1]
+		       ? timer_hz_run[0] - timer_hz_run[1]
+		       : timer_hz_run[1] - timer_hz_run[0];
+		allowed = timer_hz_run[0] / TIMER_CALIBRATE_TOLERANCE;
 
-	timer_hz = (timer_hz_run[0] + timer_hz_run[1]) / 2;
-	return timer_hz;
+		if (spread <= allowed) {
+			timer_hz = (timer_hz_run[0] + timer_hz_run[1]) / 2;
+			return timer_hz;
+		}
+	}
+
+	return 0;
+}
+
+/*
+ * How many attempts the calibration needed, for whoever prints the boot line.
+ *
+ * Exported rather than kept private because a retry nobody can see is a retry
+ * nobody can tell from an absent one: a build where it never engages and a
+ * build where it engages on every boot produce identical logs, and the first
+ * regression in it would be invisible.  The number is the presence.
+ */
+unsigned lapic_timer_calibrate_attempts(void)
+{
+	return timer_hz_attempts;
 }
 
 uint32_t lapic_timer_hz_run(unsigned which)

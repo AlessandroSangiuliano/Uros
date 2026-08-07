@@ -34,6 +34,7 @@
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
+#include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/trap.h>		/* trap_set_handler */
 
 /*
@@ -243,6 +244,16 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('G') && want > 1)
 			thread_state_entry_test();
+
+		/*
+		 * -A: may a return to ring 0 run an AST_APC handler? (#463)
+		 *
+		 * Here for the same reason as the tests around it: the probe
+		 * has to be bound to a processor already in the scheduler.
+		 * Returns, so the boot goes on to bootstrap_create() as usual.
+		 */
+		if (boot_flag('A') && want > 1)
+			kernel_ast_test();
 
 		/*
 		 * -F: does vector state survive an involuntary switch? (#408)
