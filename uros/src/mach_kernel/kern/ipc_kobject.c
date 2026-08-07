@@ -122,6 +122,7 @@
  */
 
 #include <mach_debug.h>
+#include <mach_device_master.h>
 #include <mach_ipc_test.h>
 #include <mach_machine_routines.h>
 #include <norma_task.h>
@@ -157,7 +158,7 @@
 
 boolean_t
 ipc_kobject_notify(
-        mach_msg_header_t *request_header,
+        ipc_kmsg_t         request,
         mach_msg_header_t *reply_header);
 
 #include <mach/ndr.h>
@@ -191,7 +192,9 @@ mach_msg_size_t mig_reply_size;
 #include <mach/ledger_server.h>
 #include <mach/sync_server.h>
 #include <device/device_server.h>
+#if	MACH_DEVICE_MASTER
 #include <device/device_master_server.h>
+#endif	/* MACH_DEVICE_MASTER */
 #include <device/device_pager_server.h>
 #if     MACH_DEBUG
 #include <mach_debug/mach_debug_server.h>
@@ -219,7 +222,9 @@ rpc_subsystem_t mig_e[] = {
         (rpc_subsystem_t)&clock_subsystem,
         (rpc_subsystem_t)&do_bootstrap_subsystem,
         (rpc_subsystem_t)&ds_device_subsystem,
+#if	MACH_DEVICE_MASTER
 	(rpc_subsystem_t)&ds_master_device_master_subsystem,
+#endif	/* MACH_DEVICE_MASTER */
 	(rpc_subsystem_t)&sync_subsystem,
 	(rpc_subsystem_t)&ledger_subsystem,
 #if     MACH_DEBUG
@@ -312,7 +317,6 @@ ipc_kobject_server(
 	ipc_kmsg_t reply;
 	kern_return_t kr;
 	mig_routine_t routine;
-	ipc_port_t *destp;
 	mach_msg_format_0_trailer_t *trailer;
 	register mig_hash_t *ptr;
 #if	MACH_RT
@@ -356,8 +360,8 @@ ipc_kobject_server(
 
 #if	MACH_RT
 	reply_rt =
-	  IP_VALID((ipc_port_t)request->ikm_header.msgh_local_port) ?
-	    IP_RT((ipc_port_t)request->ikm_header.msgh_local_port) :
+	  IP_VALID(request->ikm_reply) ?
+	    IP_RT(request->ikm_reply) :
 	    FALSE;
 	    
 	if (reply_rt)
@@ -389,8 +393,14 @@ ipc_kobject_server(
 
 	    OutP->Head.msgh_bits =
 		MACH_MSGH_BITS(MACH_MSGH_BITS_LOCAL(InP->msgh_bits), 0);
-	    OutP->Head.msgh_remote_port = InP->msgh_local_port;
-	    OutP->Head.msgh_local_port  = MACH_PORT_NULL;
+	    /*
+	     * #442: the reply goes back to where the request came from.
+	     * Through the kmsg, because this builds a message the sender
+	     * never copied in -- which is how the census found it, and why
+	     * grepping for ikm_header did not: here it is spelt OutP->Head.
+	     */
+	    ikm_set_dest(reply, request->ikm_reply);
+	    ikm_set_reply(reply, IP_NULL);
 	    OutP->Head.msgh_id = InP->msgh_id + 100;
 #if	MACH_RT
 	    if (reply_rt)
@@ -408,7 +418,7 @@ ipc_kobject_server(
 	    if (ptr)
 		(*ptr->routine)(&request->ikm_header, &reply->ikm_header);
 	    else {
-		if (!ipc_kobject_notify(&request->ikm_header, &reply->ikm_header)){
+		if (!ipc_kobject_notify(request, &reply->ikm_header)){
 #if	MACH_IPC_TEST
 		    printf("ipc_kobject_server: bogus kernel message, id=%d\n",
 			request->ikm_header.msgh_id);
@@ -427,23 +437,22 @@ ipc_kobject_server(
 	 *	It also differs in that we only expect send or
 	 *	send-once rights, never receive rights.
 	 *
-	 *	We set msgh_remote_port to IP_NULL so that the kmsg
-	 *	destroy routines don't try to destroy the port twice.
+	 *	We clear the destination so that the kmsg destroy routines
+	 *	don't try to destroy the port twice.
 	 */
-	destp = (ipc_port_t *) &request->ikm_header.msgh_remote_port;
 	switch (MACH_MSGH_BITS_REMOTE(request->ikm_header.msgh_bits)) {
 		case MACH_MSG_TYPE_PORT_SEND:
-		    ipc_port_release_send(*destp);
+		    ipc_port_release_send(request->ikm_dest);	/* #442 */
 		    break;
-		
+
 		case MACH_MSG_TYPE_PORT_SEND_ONCE:
-		    ipc_port_release_sonce(*destp);
+		    ipc_port_release_sonce(request->ikm_dest);	/* #442 */
 		    break;
-		
+
 		default:
 		    panic("ipc_object_destroy: strange destination rights");
 	}
-	*destp = IP_NULL;
+	ikm_set_dest(request, IP_NULL);			/* #442 */
 
         if (!(reply->ikm_header.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
            ((mig_reply_error_t *) &reply->ikm_header)->RetCode != KERN_SUCCESS)
@@ -478,7 +487,7 @@ ipc_kobject_server(
 		 *	which is needed in the reply message.
 		 */
 
-		request->ikm_header.msgh_local_port = MACH_PORT_NULL;
+		ikm_set_reply(request, IP_NULL);	/* #442 */
 		ipc_kmsg_destroy(request);
 	}
 
@@ -497,7 +506,7 @@ ipc_kobject_server(
 				sizeof(int));
 
 		return IKM_NULL;
-	} else if (!IP_VALID((ipc_port_t)reply->ikm_header.msgh_remote_port)) {
+	} else if (!IP_VALID(reply->ikm_dest)) {
 		/*
 		 *	Can't queue the reply message if the destination
 		 *	(the reply port) isn't valid.
@@ -589,8 +598,9 @@ ipc_kobject_destroy(
 
 	    default:
 #if	MACH_ASSERT
-		printf("ipc_kobject_destroy: port 0x%x, kobj 0x%x, type %d\n",
-		       port, port->ip_kobject, ip_kotype(port));
+		printf("ipc_kobject_destroy: port %p, kobj 0x%lx, type %d\n",
+		       port, (unsigned long) port->ip_kobject,
+		       ip_kotype(port));
 #endif	/* MACH_ASSERT */
 		break;
 	}
@@ -598,10 +608,17 @@ ipc_kobject_destroy(
 
 boolean_t
 ipc_kobject_notify(
-	mach_msg_header_t *request_header,
+	ipc_kmsg_t	   request,
 	mach_msg_header_t *reply_header)
 {
-	ipc_port_t port = (ipc_port_t) request_header->msgh_remote_port;
+	/*
+	 * #442: the notification's destination comes from the kmsg, and
+	 * goes DOWN to the handlers rather than each of them digging it
+	 * back out of the header.  Three sites read the same field to
+	 * recover the same port; now it is passed once.
+	 */
+	mach_msg_header_t *request_header = &request->ikm_header;
+	ipc_port_t port = request->ikm_dest;
 
 	((mig_reply_error_t *) reply_header)->RetCode = MIG_NO_REPLY;
 	switch (request_header->msgh_id) {
@@ -617,10 +634,10 @@ ipc_kobject_notify(
 	}
 	switch (ip_kotype(port)) {
 		case IKOT_DEVICE:
-		return ds_notify(request_header);
+		return ds_notify(port, request_header);
 
 		case IKOT_MASTER_DEVICE:
-		return ds_master_notify(request_header);
+		return ds_master_notify(port, request_header);
 
 		default:
                 return FALSE;

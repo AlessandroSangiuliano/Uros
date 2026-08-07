@@ -113,7 +113,26 @@
  *
  */
 
-typedef natural_t ipc_space_refs_t;
+/*
+ * The width the atomics below actually operate on (#453).
+ *
+ * It was natural_t -- 32 bits on every target -- and the call sites cast it
+ * to `long *` to reach atomic_incl().  On i386 the cast is a no-op, because
+ * long is 32 bits there too, and that is why it went unnoticed for as long
+ * as there was only one target.  On x86-64 long is 64 bits, so the same cast
+ * asks for a 64-bit read-modify-write on a 32-bit field: it would compile,
+ * and it would carry the four bytes after the counter along with it on every
+ * reference and every release.
+ *
+ * So the type is now what the operation needs, and the casts are gone -- the
+ * compiler checks the match instead of a reader having to.  A cast is what
+ * made the mismatch invisible, and removing it is the actual fix; widening
+ * the type only makes the removal possible.
+ *
+ * i386 is unaffected: long is 32 bits there, so the field keeps its width
+ * and the structure its layout.
+ */
+typedef long ipc_space_refs_t;
 
 struct ipc_space {
 	ipc_space_refs_t is_references;	/* #329: lock-free atomic refcount */
@@ -168,11 +187,11 @@ extern ipc_space_t default_pager_space;
 #define	is_ref_lock_init(is)	/* no lock: refcount is atomic */
 
 #define	ipc_space_reference_macro(is)					\
-	atomic_incl((long *) &(is)->is_references, 1)
+	atomic_incl(&(is)->is_references, 1)
 
 #define	ipc_space_release_macro(is)					\
 MACRO_BEGIN								\
-	long _refs = atomic_add_fetchl((long *) &(is)->is_references, -1);\
+	long _refs = atomic_add_fetchl(&(is)->is_references, -1);\
 									\
 	assert(_refs >= 0);						\
 	if (_refs == 0)							\

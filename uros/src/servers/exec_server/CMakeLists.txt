@@ -29,7 +29,7 @@ add_custom_command(
     -user ${EXEC_USER_C}
     -server ${EXEC_SERVER_C}
     ${EXEC_DEFS}
-  DEPENDS migcom ${EXEC_DEFS} ${EXEC_TYPES_H}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${EXEC_DEFS} ${EXEC_TYPES_H}
   COMMENT "MIG: exec.defs (#228 v0.1.0)"
   VERBATIM
 )

@@ -62,7 +62,14 @@ type clock_id_t = int;
 
 type alarm_port_t = mach_port_t
 #if	KERNEL_SERVER
-		ctype: ipc_port_t
+		/*
+		 * #445: no `ctype: ipc_port_t` here.  It set the server type,
+		 * the intran below then set it again from its own argument,
+		 * and migcom reported the two as conflicting.  The intran is
+		 * what says the kernel sees an ipc_port_t; saying it twice,
+		 * differently, said nothing extra.  Every other port type in
+		 * the tree with a null_conversion intran is written this way.
+		 */
 		intran: ipc_port_t null_conversion(mach_port_t) ;
 #else
 		ctype: mach_port_t ;

@@ -776,7 +776,7 @@ mach_ports_register(
 
 	if (portsCnt != 0)
 		kfree((vm_offset_t) memory,
-		      (vm_size_t) (portsCnt * sizeof(mach_port_t)));
+		      ipc_port_array_size(portsCnt));
 
 	return KERN_SUCCESS;
 }
@@ -945,7 +945,7 @@ ref_space_port_locked( ipc_port_t port, ipc_space_t *pspace )
 		 * per-space ref lock out of order and bailed with FALSE on
 		 * contention, forcing the caller to retry.)
 		 */
-		atomic_incl((long *) &space->is_references, 1);
+		atomic_incl(&space->is_references, 1);
 	}
 	*pspace = space;
 	ip_unlock(port);

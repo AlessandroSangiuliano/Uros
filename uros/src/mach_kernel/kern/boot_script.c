@@ -16,8 +16,8 @@ struct sym
   /* Type of value returned by function.  */
   int type;
 
-  /* Symbol value.  */
-  int val;
+  /* Symbol value: an integer, or a pointer of any kind (#453). */
+  boot_script_val_t val;
 
   /* For function symbols; type of value returned by function.  */
   int ret_type;
@@ -43,8 +43,8 @@ struct arg
   /* Type of value assigned.  0 if none.  */
   int type;
 
-  /* Argument value.  */
-  int val;
+  /* Argument value: an integer, or a pointer of any kind (#453). */
+  boot_script_val_t val;
 };
 
 /* List of commands.  */
@@ -67,23 +67,23 @@ static int symtab_index = 0;
 
 /* Create a task and suspend it.  */
 static int
-create_task (struct cmd *cmd, int *val)
+create_task (struct cmd *cmd, boot_script_val_t *val)
 {
   int err = boot_script_task_create (cmd);
-  *val = (int) cmd->task;
+  *val = (boot_script_val_t) cmd->task;
   return err;
 }
 
 /* Resume a task.  */
 static int
-resume_task (struct cmd *cmd, int *val)
+resume_task (struct cmd *cmd, boot_script_val_t *val)
 {
   return boot_script_task_resume (cmd);
 }
 
 /* Resume a task when the user hits return.  */
 static int
-prompt_resume_task (struct cmd *cmd, int *val)
+prompt_resume_task (struct cmd *cmd, boot_script_val_t *val)
 {
   return boot_script_prompt_task_resume (cmd);
 }
@@ -91,9 +91,9 @@ prompt_resume_task (struct cmd *cmd, int *val)
 /* List of builtin symbols.  */
 static struct sym builtin_symbols[] =
 {
-  { "task-create", VAL_FUNC, (int) create_task, VAL_TASK, 0 },
-  { "task-resume", VAL_FUNC, (int) resume_task, VAL_NONE, 1 },
-  { "prompt-task-resume", VAL_FUNC, (int) prompt_resume_task, VAL_NONE, 1 },
+  { "task-create", VAL_FUNC, (boot_script_val_t) create_task, VAL_TASK, 0 },
+  { "task-resume", VAL_FUNC, (boot_script_val_t) resume_task, VAL_NONE, 1 },
+  { "prompt-task-resume", VAL_FUNC, (boot_script_val_t) prompt_resume_task, VAL_NONE, 1 },
 };
 #define NUM_BUILTIN (sizeof (builtin_symbols) / sizeof (builtin_symbols[0]))
 
@@ -172,7 +172,7 @@ add_list (void *ptr, void ***ptr_list, int *alloc, int *index, int incr)
 /* Create an argument with TEXT, value type TYPE, and value VAL.
    Add the argument to the argument list of CMD.  */
 static struct arg *
-add_arg (struct cmd *cmd, char *text, int type, int val)
+add_arg (struct cmd *cmd, char *text, int type, boot_script_val_t val)
 {
   struct arg *arg;
 
@@ -295,7 +295,8 @@ boot_script_parse_line (vm_offset_t start, vm_size_t size, char *cmdline)
 	  for (p += 2;;)
 	    {
 	      char c;
-	      int i, val, type;
+	      int i, type;
+	      boot_script_val_t val;
 	      struct sym *s;
 
 	      /* Parse symbol name.  */
@@ -350,7 +351,7 @@ boot_script_parse_line (vm_offset_t start, vm_size_t size, char *cmdline)
 		  if (! s->run_on_exec)
 		    {
 		      (error
-		       = ((*((int (*) (struct cmd *, int *)) s->val))
+		       = ((*((int (*) (struct cmd *, boot_script_val_t *)) s->val))
 			  (cmd, &val)));
 		      if (error)
 			goto bad;
@@ -372,7 +373,7 @@ boot_script_parse_line (vm_offset_t start, vm_size_t size, char *cmdline)
 	      else if (s->type == VAL_NONE)
 		{
 		  type = VAL_SYM;
-		  val = (int) s;
+		  val = (boot_script_val_t) s;
  		}
 	      else
 		{
@@ -642,7 +643,7 @@ boot_script_exec ()
       for (i = 0; i < cmd->exec_funcs_index; i++)
 	{
 	  struct sym *sym = cmd->exec_funcs[i];
-	  int error = ((*((int (*) (struct cmd *, int *)) sym->val))
+	  int error = ((*((int (*) (struct cmd *, boot_script_val_t *)) sym->val))
 		       (cmd, 0));
 	  if (error)
 	    {
@@ -659,7 +660,7 @@ boot_script_exec ()
 /* Create an entry for the variable NAME with TYPE and value VAL,
    in the symbol table.  */
 int
-boot_script_set_variable (const char *name, int type, int val)
+boot_script_set_variable (const char *name, int type, boot_script_val_t val)
 {
   struct sym *sym = sym_enter (name);
 
@@ -675,14 +676,15 @@ boot_script_set_variable (const char *name, int type, int val)
 /* Define the function NAME, which will return type RET_TYPE.  */
 int
 boot_script_define_function (const char *name, int ret_type,
-			     int (*func) (const struct cmd *cmd, int *val))
+			     int (*func) (const struct cmd *cmd,
+					  boot_script_val_t *val))
 {
   struct sym *sym = sym_enter (name);
 
   if (sym)
     {
       sym->type = VAL_FUNC;
-      sym->val = (int) func;
+      sym->val = (boot_script_val_t) func;
       sym->ret_type = ret_type;
       sym->run_on_exec = ret_type == VAL_NONE;
     }
@@ -761,10 +763,10 @@ main (int argc, char **argv)
     }
   host_port = 1;
   device_port = 2;
-  boot_script_set_variable ("host-port", VAL_PORT, (int) host_port);
-  boot_script_set_variable ("device-port", VAL_PORT, (int) device_port);
-  boot_script_set_variable ("root-device", VAL_STR, (int) "hd0a");
-  boot_script_set_variable ("boot-args", VAL_STR, (int) "-ad");
+  boot_script_set_variable ("host-port", VAL_PORT, (boot_script_val_t) host_port);
+  boot_script_set_variable ("device-port", VAL_PORT, (boot_script_val_t) device_port);
+  boot_script_set_variable ("root-device", VAL_STR, (boot_script_val_t) "hd0a");
+  boot_script_set_variable ("boot-args", VAL_STR, (boot_script_val_t) "-ad");
   p = buf;
   len = sizeof (buf);
   while (fgets (p, len, fp))

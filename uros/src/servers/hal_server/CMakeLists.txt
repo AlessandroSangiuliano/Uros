@@ -67,7 +67,7 @@ add_custom_command(
     -user ${DM_USER_C}
     -server ${DM_SERVER_C}
     ${DEVICE_MASTER_DEFS}
-  DEPENDS migcom ${DEVICE_MASTER_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEVICE_MASTER_DEFS}
   COMMENT "MIG: device_master.defs (user stubs for hal_server)"
   VERBATIM
 )
@@ -96,7 +96,7 @@ add_custom_command(
     -user ${HAL_USER_C}
     -server ${HAL_SERVER_C}
     ${HAL_DEFS}
-  DEPENDS migcom ${HAL_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${HAL_DEFS}
   COMMENT "MIG: hal.defs (server stubs for hal_server)"
   VERBATIM
 )
@@ -126,7 +126,7 @@ add_custom_command(
     -user ${HAL_NOTIFY_USER_C}
     -server ${HAL_NOTIFY_SERVER_C}
     ${HAL_NOTIFY_DEFS}
-  DEPENDS migcom ${HAL_NOTIFY_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${HAL_NOTIFY_DEFS}
   COMMENT "MIG: hal_notify.defs (user stubs for hal_server)"
   VERBATIM
 )

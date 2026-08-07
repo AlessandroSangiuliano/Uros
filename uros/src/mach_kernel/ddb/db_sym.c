@@ -1276,7 +1276,7 @@ qsort_checker(
 
 	while (prev < last) {
 		if ((*compfun)(prev, curr) > 0) {
-			printf("**** qsort_checker: error between 0x%x and 0x%x!!!\n", prev, curr);
+			printf("**** qsort_checker: error between %p and %p!!!\n", prev, curr);
 			break;
 		}
 		prev = curr;
@@ -1315,18 +1315,18 @@ db_qsort_limit_search(
 			if (left == oleft)
 				break;
 			if (qsort_search_debug > 1)
-				printf(" [ Moved left from 0x%x to 0x%x]\n",
+				printf(" [ Moved left from %p to %p]\n",
 				       oleft, left);
 		} else if (comp < 0) {
 			oright = right;
 			oleft = left;
 			right = part;
 			if (qsort_search_debug > 1)
-				printf(" [ Moved right from 0x%x to 0x%x]\n",
+				printf(" [ Moved right from %p to %p]\n",
 				       oright, right);
 		} else {
 			if (qsort_search_debug > 1)
-				printf(" [ FOUND! left=0x%x right=0x%x]\n",
+				printf(" [ FOUND! left=%p right=%p]\n",
 				       left, right);
 			for (left = part;
 			     left > *start && (*compfun)(left, part) == 0;
@@ -1341,7 +1341,7 @@ db_qsort_limit_search(
 	}
 	
 	if (qsort_search_debug)
-		printf("[ Limited from %x-%x to %x-%x in %d iters ]\n",
+		printf("[ Limited from %p-%p to %p-%p in %d iters ]\n",
 			  *start, *end, oleft, oright, nbiter);
 	*start = oleft;
 	*end = oright;

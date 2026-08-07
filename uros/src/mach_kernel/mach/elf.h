@@ -69,12 +69,36 @@
 #ifndef _SYS_ELF_H_
 #define _SYS_ELF_H_
 
-typedef unsigned long 	Elf32_Addr;
-typedef unsigned long 	Elf32_Off;
-typedef unsigned long 	Elf32_Word;
+/*
+ * #415: these are the widths the ELF32 format specifies, not the widths of
+ * whatever the compiler calls a long.
+ *
+ * They were `unsigned long', which on i386 is thirty-two bits and so has been
+ * right for as long as this has been the only target.  It is not a property
+ * of the file format that it agrees with the host's long -- the format says
+ * four bytes, and on x86-64 a long is eight.  Every structure below would
+ * have grown, and the offsets used to walk a program header table would have
+ * stepped past the fields they were reading: not a wrong number, a header
+ * parsed out of alignment from its second field onward.
+ *
+ * This is what the issue means by a structure that crosses a boundary.  The
+ * boundary here is the file on disk, and the other side of it is every ELF
+ * object the bootstrap loads.  The static assertions below say the widths out
+ * loud, because a typedef that has been accidentally right for thirty years
+ * is exactly the kind that gets quietly changed back.
+ */
+typedef unsigned int	Elf32_Addr;
+typedef unsigned int	Elf32_Off;
+typedef unsigned int	Elf32_Word;
 
 typedef unsigned short 	Elf32_Half;
-typedef long	 	Elf32_Sword;
+typedef int		Elf32_Sword;
+
+_Static_assert(sizeof(Elf32_Addr)  == 4, "ELF32: an address is four bytes");
+_Static_assert(sizeof(Elf32_Off)   == 4, "ELF32: an offset is four bytes");
+_Static_assert(sizeof(Elf32_Word)  == 4, "ELF32: a word is four bytes");
+_Static_assert(sizeof(Elf32_Sword) == 4, "ELF32: a signed word is four bytes");
+_Static_assert(sizeof(Elf32_Half)  == 2, "ELF32: a half is two bytes");
 
 /* ELF Header - figure 4-3, page 4-4 */
 

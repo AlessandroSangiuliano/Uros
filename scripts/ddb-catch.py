@@ -10,7 +10,12 @@
 # send `trace`, `show all acts`, and per-cpu `trace` and capture the output.
 import os, socket, subprocess, sys, time, signal
 
-ROOT = "/home/slex/Scrivania/osfmk-mklinux"
+# ⚠️ Derived, not written down.  This was the literal path
+# "/home/slex/Scrivania/osfmk-mklinux" -- a directory that does not exist and
+# has not for some time, so the script could not run at all and nobody
+# noticed: a tool in the repo with no consumer is not checked by anything.
+# Deriving it from the script's own location cannot go stale.
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RUN  = ROOT + "/scripts/run-qemu.sh"
 SER  = "/tmp/uros-ddb-com1.sock"
 MON  = "/tmp/uros-ddb-mon.sock"

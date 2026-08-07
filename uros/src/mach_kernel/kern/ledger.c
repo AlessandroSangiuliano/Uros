@@ -63,7 +63,7 @@ ledger_enter(
 		if (ledger->ledger_limit != LEDGER_ITEM_INFINITY &&
 		    ledger->ledger_balance + amount > ledger->ledger_limit) {
 			/* XXX this is where you do BAD things */
-			printf("Ledger limit exceeded ! ledger=%x lim=%d balance=%d\n",
+			printf("Ledger limit exceeded ! ledger=%p lim=%d balance=%d\n",
 			       ledger, ledger->ledger_limit,
 			       ledger->ledger_balance);
 			ledger_unlock(ledger);
@@ -304,8 +304,18 @@ kern_return_t ledger_terminate(
 	/* XXX the parent ledger inherits the debt ?? */
 	(void) ledger_enter(ledger->ledger_parent, ledger->ledger_balance);
 	
-	/* adjust the balance of the creation ledger */
-	(void) ledger_enter(ledger->ledger_ledger, -sizeof(*ledger));
+	/*
+	 * Adjust the balance of the creation ledger.
+	 *
+	 * ⚠️ The cast is before the minus, not after.  sizeof yields an
+	 * unsigned type, so `-sizeof(*ledger)' negates unsigned and wraps: on
+	 * this machine it produced 18446744073709551568, which then truncated
+	 * to -48 on the way into ledger_item_t and happened to be the value
+	 * intended.  Right by two's complement and by truncation, twice, at a
+	 * width nobody chose (#453).
+	 */
+	(void) ledger_enter(ledger->ledger_ledger,
+			    -(ledger_item_t) sizeof(*ledger));
 
 	/* delete the ledger */
 	ledger_deallocate(ledger);

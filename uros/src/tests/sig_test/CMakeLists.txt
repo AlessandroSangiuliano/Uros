@@ -26,7 +26,7 @@ add_custom_command(
     -user ${PROC_USER_C}
     -server /dev/null
     ${PROC_DEFS}
-  DEPENDS migcom ${PROC_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${PROC_DEFS}
   COMMENT "MIG: proc.defs (user stubs for sig_test)"
   VERBATIM
 )

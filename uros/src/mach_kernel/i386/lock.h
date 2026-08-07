@@ -362,7 +362,21 @@ extern void bit_unlock(
  *	of "production" locks v. stats-gathering on top
  *	of portable, C-based locks.
  */
-#define	USIMPLE_LOCK_CALLS
+/*
+ * ⚠️ i386 does NOT define USIMPLE_LOCK_CALLS, and used to (#453).
+ *
+ * The macro means "this machine supplies its own usimple_locks".  i386 never
+ * did -- the comment above says so itself, "punt entirely to the portable
+ * lock package" -- and the claim was harmless only because the matching
+ * guard in kern/lock.c was commented out with the note that the production
+ * version "isn't ready yet".  Two halves that disagreed, and a third change
+ * holding them apart.
+ *
+ * The guard is live now, because x86-64 does supply its own and needs the
+ * override to work.  So the claim has to become true or go, and here it
+ * goes: i386 uses the portable implementation, which is what it has always
+ * actually done.
+ */
 #endif	/* !(USLOCK_DEBUG || USLOCK_STATS) */
 
 

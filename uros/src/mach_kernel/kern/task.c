@@ -395,7 +395,13 @@ zone_t	task_zone;
 /*
  * Define glue vector used by short-circuited RPC, and a pointer
  * to it.
+ *
+ * Only on a machine that has the short-circuited path at all (#453).  The
+ * glue is what lets a collocated server -- one linked into the kernel's own
+ * address space -- be entered by a stack switch instead of a message, and a
+ * machine without an RPC trap has nothing to enter that way.
  */
+#if	MACHINE_RPC_GLUE
 static struct rpc_glue_vector _rpc_glue_vector_data = {
 	machine_rpc_simple,	/* migrate shuttle to server */
 	klcopyin,		/* short-circuit server copyin */
@@ -405,6 +411,7 @@ static struct rpc_glue_vector _rpc_glue_vector_data = {
 	klthread_depress_abort,	/* short-circuit user thread_depress_abort */
 };
 rpc_glue_vector_t _rpc_glue_vector = &_rpc_glue_vector_data;
+#endif	/* MACHINE_RPC_GLUE */
 
 /* Forwards */
 
@@ -452,7 +459,7 @@ task_init(void)
 
 #if	MACH_ASSERT
 	if (watchacts & WA_TASK)
-	    printf("task_init: kernel_task = %x map=%x\n",
+	    printf("task_init: kernel_task = %p map=%p\n",
 				kernel_task, kernel_map);
 #endif	/* MACH_ASSERT */
 }
@@ -540,18 +547,28 @@ kernel_task_create(
 			 * New task created with ref count of 2 -- decrement by
 			 * one to force task deletion.
 			 */
-			printf("kmem_suballoc(%x,%x,%x,1,0,&new) Fails\n",
-			       kernel_map, map_base, map_size);
+			printf("kmem_suballoc(%p,%lx,%lx,1,0,&new) Fails\n",
+			       kernel_map, (unsigned long) map_base,
+			       (unsigned long) map_size);
 			--new_task->ref_count;
 			task_deallocate(new_task);
 			return (retval);
 		}
 		vm_map_deallocate(old_map);
+#if	MACHINE_RPC_GLUE
 		user_data.user_data = (void *)_rpc_glue_vector;
 		(void)task_set_info(new_task,
 				    TASK_USER_DATA,
 				    (task_info_t)&user_data,
 				    TASK_USER_DATA_COUNT);
+#endif	/* MACHINE_RPC_GLUE */
+		/*
+		 * Nothing is published where there is no glue, and that is the
+		 * case libmach already handles: mach_init() reads TASK_USER_DATA
+		 * and, finding it unset, points _rpc_glue_vector at its own slot.
+		 * The fallback is not new code -- it is the path taken today by
+		 * any task the kernel did not reach in time.
+		 */
 		*child_task = new_task;
 	}
 
@@ -760,7 +777,7 @@ task_create_local(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_TASK)
-	    printf("*** task_create_local(par=%x inh=%x) == 0x%x\n",
+	    printf("*** task_create_local(par=%p inh=%x) == %p\n",
 			parent_task, inherit_memory, new_task);
 #endif	/* MACH_ASSERT */
 
@@ -783,7 +800,7 @@ task_free( register task_t	task )
 #if	MACH_ASSERT
 	assert(task != 0);
 	if (watchacts & (WA_EXIT|WA_TASK))
-	    printf("task_free(%x(%d)) map ref %d\n", task, task->ref_count,
+	    printf("task_free(%p(%d)) map ref %d\n", task, task->ref_count,
 			task->map->ref_count);
 #endif	/* MACH_ASSERT */
 
@@ -870,7 +887,7 @@ task_act_iterate(task_t task, kern_return_t (*func)(thread_act_t inc))
 #if	MACH_ASSERT
 	int c1 = task->thr_act_count, c2 = 0;
 	if (watchacts & WA_TASK)
-	    printf("\ttask_act_iterate(task=%x, func=%x)\n", task, func);
+	    printf("\ttask_act_iterate(task=%p, func=%p)\n", task, func);
 #endif	/* MACH_ASSERT */
 
 	/* During iteration, find the next act _before_ calling the function,
@@ -1247,7 +1264,13 @@ task_threads(
 		actual = task->thr_act_count;
 
 		/* do we have the memory we need? */
-		size_needed = actual * sizeof(mach_port_t);
+		/*
+		 * One POINTER per thread, not one name (#415): the array is
+		 * filled with thread_act_t and then converted in place to
+		 * ipc_port_t, both of which are wider than a name here.  The
+		 * count is the caller's task's thread count.
+		 */
+		size_needed = ipc_port_array_size(actual);
 		if (size_needed <= size)
 			break;
 

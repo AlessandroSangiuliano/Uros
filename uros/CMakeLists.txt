@@ -5,6 +5,15 @@ project(uros
   LANGUAGES C ASM
 )
 
+# Emit compile_commands.json.
+#
+# Not for editors, though they benefit: it is so that a tool which needs to
+# know how this tree compiles something can ASK, instead of keeping its own
+# copy of the flags.  scripts/mi-x86_64-probe.sh kept one, and it drifted --
+# three separate measurement errors came from a probe that was compiling with
+# -DMACH_KDB=1 and -DAT386=1 while the build was not (#453).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Opzioni principali di configurazione
 option(OSFMK_TARGET_AT386 "Abilita configurazione Mach per AT386 (x86)" ON)
 option(OSFMK_BUILD_TOOLS "Costruisci i tool host (mig, migcom, ecc.)" ON)
@@ -109,6 +118,44 @@ file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/${UROS_TARGET_ARCH}
      ${UROS_ARCH_INCLUDE}/machine SYMBOLIC)
 file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}
      ${UROS_ARCH_INCLUDE}/mach/machine SYMBOLIC)
+
+# The ODE configuration knobs, per target (#450).  Same reasoning as the
+# links above and the same place to do it: state the build needs, wired to
+# one architecture when it lived in the source tree, now written here at
+# configure time for whatever this build dir targets.  See
+# cmake/kernel-config.cmake for why these stopped being tracked files.
+include(${CMAKE_SOURCE_DIR}/cmake/kernel-config.cmake)
+set(UROS_CONFIG_INCLUDE ${CMAKE_BINARY_DIR}/config-include)
+uros_write_config_headers(${UROS_CONFIG_INCLUDE} ${UROS_TARGET_ARCH})
+
+# MIG stub generation, shared by both targets (#416).  The rules used to sit
+# below the x86-64 branch's return() with -I i386 written into them, so the
+# new target could not run mig at all.
+include(${CMAKE_SOURCE_DIR}/cmake/mig.cmake)
+
+# The .defs every mig rule reads and none of them declares (#413).
+#
+# A mig rule names the generator and the one interface file it is handed.
+# It does not depend on what that file
+# #includes, which is where the type declarations live: the widths and the
+# translations that decide every offset and every message size in the
+# generated code.  Edit one and nothing rebuilds; the stubs stay as they were
+# until something unrelated forces a regeneration, and in between the build
+# is quietly generating from a definition that is no longer on disk.
+#
+# That is a bad way to find out you changed an ABI.  It also makes the one
+# cheap regression test for #416 — "i386 output unchanged" — impossible to
+# run honestly, because both sides of the comparison are the same generation.
+#
+# Listing both trees is deliberate: the kernel reads src/mach_kernel/mach/,
+# userland reads export/include/mach/, and depending on a file a given rule
+# happens not to read costs a rebuild while missing one costs correctness.
+set(UROS_MIG_COMMON_DEFS
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/std_types.defs
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/mach_types.defs
+    ${CMAKE_SOURCE_DIR}/export/include/mach/std_types.defs
+    ${CMAKE_SOURCE_DIR}/export/include/mach/mach_types.defs
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}/machine_types.defs)
 
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'uros' when building kernel)" "")

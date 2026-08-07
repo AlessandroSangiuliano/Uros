@@ -749,15 +749,26 @@ zget_space(
 	vm_offset_t *result)
 {
 	vm_offset_t	new_space = 0;
-	vm_size_t	space_to_add;
+	/*
+	 *	#445: computed once, not once per iteration.
+	 *
+	 *	`size` never changes here, so round_page(size) was loop-invariant
+	 *	and this only ever recomputed the same number.  Hoisting it also
+	 *	answers GCC, which warned that the kmem_free() after the loop may
+	 *	read it uninitialised: that read is guarded by `new_space != 0`,
+	 *	which can only be true if the loop body ran and assigned it, but
+	 *	that correlation is not something the compiler can prove.  The
+	 *	warning was wrong and the code was still worth changing -- an
+	 *	initialiser to silence it would have hidden the question instead
+	 *	of removing it.
+	 */
+	vm_size_t	space_to_add = round_page(size);
 
 	simple_lock(&zget_space_lock);
 	while ((zalloc_next_space + size) > zalloc_end_of_space) {
 		/*
 		 *	Add at least one page to allocation area.
 		 */
-
-		space_to_add = round_page(size);
 
 		if (new_space == 0) {
 			kern_return_t retval;
@@ -2172,7 +2183,7 @@ db_zone_print_free(
 	vm_offset_t elem;
 
 	freecount = zone_free_count(zone);
-	printf("zone 0x%x, free elements %d\n", zone, freecount);
+	printf("zone %p, free elements %d\n", zone, freecount);
 	printf("free list:\n");
 	elem = zone->free_elements;
 	while (count < freecount) {

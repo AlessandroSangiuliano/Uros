@@ -1,0 +1,167 @@
+/*
+ * x86-64 boot linker script (#406/#407, MD contracts 1-2/6).
+ *
+ * ELF64 image, loaded by GRUB via multiboot2 (qemu's -kernel multiboot1
+ * loader rejects ELF64).  GRUB hands off in 32-bit protected mode, paging
+ * off, and jumps to the ELF entry point _start — so _start is 32-bit code
+ * that must live at a LOW physical address, reachable in 32 bits.
+ *
+ * Two address worlds in one image (the classic higher-half split):
+ *
+ *   - the .boot* sections stay LOW (VMA == LMA at 1 MiB): the 32-bit entry,
+ *     the long-mode trampoline, the initial page tables and boot stack, the
+ *     GDT — everything touched while paging is off or by physical address.
+ *
+ *   - the kernel sections (.text/.rodata/.data/.bss) are linked HIGH at the
+ *     higher-half base KERNEL_VBASE (docs/uros_design.md ch.11), with their
+ *     LOAD address kept low via AT(VMA - KERNEL_VBASE).  GRUB loads them by
+ *     physical (LMA); the boot code maps KERNEL_VBASE -> phys 0 before the
+ *     jump, so the 64-bit code runs at its high virtual address.
+ *
+ * One segment per permission (#407 W^X): no segment is both writable and
+ * executable, which is what the "RWX load segment" warning was about, and
+ * the kernel sections are page-aligned and bracketed by symbols so the pmap
+ * can reprotect each to its own permission once paging is fully up.  The ELF
+ * flags here document intent and silence the loader; the enforcement is the
+ * page tables, which are ours to set.
+ */
+
+OUTPUT_FORMAT("elf64-x86-64")
+OUTPUT_ARCH(i386:x86-64)
+ENTRY(_start)
+
+PHYS_LOAD    = 0x100000;			/* 1 MiB — where GRUB loads us   */
+KERNEL_VBASE = 0xffffffff80000000;		/* higher-half base (-2 GiB)     */
+
+PHDRS
+{
+	boot_text	PT_LOAD FLAGS(5);	/* R-X: mb2 hdr, entry, trampoline */
+	boot_data	PT_LOAD FLAGS(6);	/* RW-: boot data, tables, stack   */
+	ktext		PT_LOAD FLAGS(5);	/* R-X: kernel text                */
+	krodata		PT_LOAD FLAGS(4);	/* R--: kernel rodata              */
+	kdata		PT_LOAD FLAGS(6);	/* RW-: kernel data + bss          */
+}
+
+SECTIONS
+{
+	. = PHYS_LOAD;
+
+	/* The first physical byte the loader writes.  Named so that the
+	 * module-overlap check in boot/boot_modules.c can bound the image
+	 * exactly, instead of assuming the boot half sits somewhere safe
+	 * below the kernel half (#453). */
+	__image_phys_start = .;
+
+	/* ---- low: boot code, tables, stack (VMA == LMA) ---- */
+
+	/* Multiboot2 header must sit in the first 32 KiB of the image. */
+	.multiboot2 ALIGN(8) : { *(.multiboot2) } :boot_text
+	.boot ALIGN(16) : { *(.boot) } :boot_text
+	.boot.rodata ALIGN(16) : { *(.boot.rodata) } :boot_text
+
+	.boot.data ALIGN(16) : { *(.boot.data) } :boot_data
+	.boot.bss ALIGN(4096) : { *(.boot.bss) } :boot_data
+
+	/* Physical cursor where the high kernel image is loaded, right after
+	 * the low boot image — contiguous, no overlap. */
+	. = ALIGN(16);
+	_kernel_lma = .;
+
+	/* ---- high: kernel image (VMA high, LMA low via AT) ---- *
+	 * Each section is page-aligned and bracketed, so a page belongs to
+	 * exactly one section and W^X can be applied a page at a time. */
+	. = KERNEL_VBASE + _kernel_lma;
+
+	. = ALIGN(4096);
+	__ktext_start = .;
+	.text : AT(ADDR(.text) - KERNEL_VBASE) {
+		*(.text)
+		*(.text.*)
+	} :ktext
+
+	. = ALIGN(4096);
+	__ktext_end = .;
+	/* The same address under the name the machine-independent tree uses:
+	 * db_interface.c, db_trace.c and mach_clock.c say `extern char etext'
+	 * and take its address (#453). */
+	etext = .;
+	__krodata_start = .;
+	.rodata : AT(ADDR(.rodata) - KERNEL_VBASE) {
+		*(.rodata)
+		*(.rodata.*)
+	} :krodata
+
+	/*
+	 * The fault-recovery table (#453).
+	 *
+	 * One entry per instruction that is allowed to fault: the address of
+	 * the instruction, and the address to continue at instead.  The page
+	 * fault handler looks the faulting rip up here before deciding it has
+	 * a bug on its hands, which is how copyin() and copyout() survive a
+	 * bad user address and answer an error rather than halting the kernel.
+	 *
+	 * Read-only and bracketed by symbols, so the handler has a range to
+	 * search and the pages can be mapped without write permission.  The
+	 * entries are emitted wherever the annotated instructions are, so the
+	 * order is the linker's -- the search is linear and must not assume
+	 * otherwise.
+	 */
+	. = ALIGN(8);
+	.ex_table : AT(ADDR(.ex_table) - KERNEL_VBASE) {
+		__ex_table_start = .;
+		*(.ex_table)
+		__ex_table_end = .;
+	} :krodata
+
+	/*
+	 * The AP trampoline travels in the image and is copied to a page
+	 * below 1 MiB before use.  It is never executed from here — read-only
+	 * is the right home for something that is only ever a source.
+	 */
+	.trampoline ALIGN(16) : AT(ADDR(.trampoline) - KERNEL_VBASE) {
+		__trampoline_start = .;
+		*(.trampoline)
+		__trampoline_end = .;
+	} :krodata
+
+	/*
+	 * The ring-3 probe travels the same way and for the same reason: it is
+	 * copied into a page an address space owns before it is executed, and
+	 * is never run from here.  Read-only is where a source belongs — and
+	 * here it is also the point, since this is the one piece of code in
+	 * the image that must never be executable by the kernel.
+	 */
+	.user_probe ALIGN(16) : AT(ADDR(.user_probe) - KERNEL_VBASE) {
+		__user_probe_start = .;
+		*(.user_probe)
+		__user_probe_end = .;
+	} :krodata
+
+	. = ALIGN(4096);
+	__krodata_end = .;
+	__kdata_start = .;
+	.data : AT(ADDR(.data) - KERNEL_VBASE) {
+		*(.data)
+		*(.data.*)
+	} :kdata
+
+	/* .bss is a normal NOBITS section inside the RW load segment, not
+	 * NOLOAD: that way the loader zeros it (memsz > filesz), so the C
+	 * globals that must start at zero actually do on real hardware — RAM
+	 * is not guaranteed zero the way QEMU's is. */
+	/* edata: the end of initialised data, which is where BSS begins.  The
+	 * machine-independent bootstrap reads it under that name. */
+	edata = .;
+
+	.bss ALIGN(4096) : AT(ADDR(.bss) - KERNEL_VBASE) {
+		*(.bss)
+		*(.bss.*)
+		*(COMMON)
+	} :kdata
+
+	. = ALIGN(4096);
+	__kernel_end = .;
+	end = .;
+
+	/DISCARD/ : { *(.note.*) *(.comment) *(.eh_frame) }
+}

@@ -209,6 +209,7 @@
 #include <kern/clock.h>
 #include <kern/cpu_number.h>
 #include <kern/etap_macros.h>
+#include <kern/lock_smoke.h>
 #include <kern/machine.h>
 #include <kern/posixtime.h>
 #include <kern/processor.h>
@@ -330,14 +331,9 @@ setup_main(void)
 	act_init();
 	thread_init();
 	subsystem_init();
-	{
-		extern void lock_smoke_test(void);
-		extern void fpu_sanity_check(void);
-		extern void hwp_init_cpu(boolean_t bsp);
-		lock_smoke_test();	/* #303 acceptance */
-		fpu_sanity_check();	/* #309 acceptance (BSP arm) */
-		hwp_init_cpu(TRUE);	/* #358 hardware P-states (BSP arm) */
-	}
+	lock_smoke_test();		/* #303 acceptance -- kern/lock_smoke.c */
+	spl_return_check();		/* #410 acceptance -- kern/lock_smoke.c */
+	machine_kernel_ready();		/* whatever this machine was waiting for */
 	cap_init();
 	{
 		extern void futexv_init(void);
@@ -405,6 +401,17 @@ void
 start_kernel_threads(void)
 {
 	register int	i;
+
+	/*
+	 * The first thread is running.
+	 *
+	 * Everything above this point ran on the boot stack, in a context the
+	 * machine invented; from here the kernel is scheduling itself.  It is
+	 * worth one line because it is the boundary a bring-up spends its time
+	 * trying to cross, and because a harness needs something to look for
+	 * that a trap cannot produce (#458).
+	 */
+	printf("startup: first thread running, kernel threads starting\n");
 
 	/*
 	 *	Create the idle threads and the other
@@ -548,6 +555,16 @@ start_kernel_threads(void)
 	}
 #endif	/* MACH_KDB */
 
+#if	NCPUS > 1
+	/*
+	 *	Every processor has an idle thread now, so a machine that woke
+	 *	its processors before there was a scheduler may let them into it
+	 *	(#461).  See <kern/startup.h> for why this is not the same point
+	 *	as start_other_cpus() below, and why it is safe here.
+	 */
+	machine_processors_ready();
+#endif	/* NCPUS > 1 */
+
 	/*
 	 *	Start the user bootstrap.
 	 */
@@ -605,7 +622,7 @@ cpu_launch_first_thread(
 
 #if	MACH_ASSERT
 	if (watchacts & WA_BOOT)
-		printf("cpu_launch_first_thread(%x) cpu=%d\n", th, mycpu);
+		printf("cpu_launch_first_thread(%p) cpu=%d\n", th, mycpu);
 #endif	/* MACH_ASSERT */
 
 	cpu_up(mycpu);

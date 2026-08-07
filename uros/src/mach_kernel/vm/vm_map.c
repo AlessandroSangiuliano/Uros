@@ -960,7 +960,7 @@ first_free_is_valid(
 			break;
 	}
 	if (map->first_free != entry) {
-		printf("Bad first_free for map 0x%x: 0x%x should be 0x%x\n",
+		printf("Bad first_free for map %p: %p should be %p\n",
 		       map, map->first_free, entry);
 		return FALSE;
 	}
@@ -1670,8 +1670,9 @@ vm_map_pmap_enter(
 
 		if (vm_map_pmap_enter_print) {
 			printf("vm_map_pmap_enter:");
-			printf("map: %x, addr: %x, object: %x, offset: %x\n",
-				map, addr, object, offset);
+			printf("map: %p, addr: %lx, object: %p, offset: %lx\n",
+				map, (unsigned long) addr, object,
+				(unsigned long) offset);
 		}
 
 		m->busy = TRUE;
@@ -4583,7 +4584,7 @@ vm_map_copyout(
 			m = vm_page_lookup(object, offset);
 			if (m == VM_PAGE_NULL || m->wire_count == 0 ||
 			    m->absent)
-			    panic("vm_map_copyout: wiring 0x%x", m);
+			    panic("vm_map_copyout: wiring %p", m);
 
 			m->busy = TRUE;
 			vm_object_unlock(object);
@@ -6027,7 +6028,7 @@ retry:
 		 * XXX  but don't assume it has VM_PROT_WRITE as the
 		 * XXX  pmap might not all the rights of the object
 		 */
-	        assert(vm_map_pmap(src_map) == kernel_pmap);
+	        assert(vm_map_pmap(src_map) == pmap_kernel());
 	      
 		if ((prot & VM_PROT_WRITE) ||
 		    (pmap_extract(vm_map_pmap(src_map),
@@ -7753,8 +7754,19 @@ vm_map_copy_cont_is_valid(
 	if (
 	    cont != vm_map_copy_discard_cont &&
 	    cont != vm_map_copyin_page_list_cont ) {
-		printf("vm_map_copy_cont_is_valid:  bogus cont 0x%x\n", cont);
-		assert((integer_t) cont == 0xdeadbeef);
+		printf("vm_map_copy_cont_is_valid:  bogus cont %p\n", cont);
+		/*
+		 * Deliberately unsatisfiable: control reaching here means the
+		 * continuation is neither of the two valid ones, and the point
+		 * is to stop with the pointer already printed above.
+		 *
+		 * It used to be written `assert((integer_t) cont ==
+		 * 0xdeadbeef)', which reads as a comparison and is not one --
+		 * and on a 64-bit machine the cast made it compare the low
+		 * half, so a pointer whose bottom 32 bits happened to be
+		 * 0xdeadbeef would have satisfied it and carried on (#453).
+		 */
+		assert(!"vm_map_copy_cont_is_valid: bogus continuation");
 	}
 	return 1;
 }

@@ -57,7 +57,17 @@ typedef struct trace_event {
 	char		*file;
 	char		*fmt;
 #if	NCPUS > 1
-	char		cpu_number;
+	/*
+	 * #445: int, not char.  It is written from cpu_number(), which
+	 * returns int, and read back as a subscript into tr_indent[NCPUS];
+	 * a plain char is signed here, so it would start indexing backwards
+	 * the day NCPUS passes 127.  It cannot today (NCPUS is 64), which is
+	 * why this has never misbehaved -- but the type has been wrong the
+	 * whole time, and it costs nothing to fix: the field sits between
+	 * three pointers and an unsigned int, so alignment already pads it
+	 * out to four bytes.
+	 */
+	int		cpu_number;
 #endif	/* NCPUS > 1 */
 	unsigned int	lineno;
 	unsigned int	tag1;
@@ -106,7 +116,7 @@ tr(
 	int	s;
 	register unsigned long ti, tn;
 #if	NCPUS > 1
-	char cpu;
+	int	cpu;		/* #445: subscripts tr_indent[] -- see above */
 #endif	/* NCPUS > 1 */
 
 #if	PARAGON860
@@ -247,6 +257,18 @@ show_tr(
 			blanks[level] = '\0';
 		} 
 
+		/*
+		 * #445: start at the whole path, then walk past each '/'.
+		 *
+		 * This used to assign only when it found a separator, so a
+		 * file recorded without one -- any __FILE__ that is a bare
+		 * name -- left filename holding whatever was on the stack,
+		 * and the db_printf("%s") below read from it.  Inside DDB,
+		 * while looking at a crash.  The basename of a path with no
+		 * directory is the path, so this is also what it meant to
+		 * say.
+		 */
+		filename = trace_buffer[i].file;
 		for (cp = trace_buffer[i].file; *cp; ++cp)
 			if (*cp == '/')
 				filename = cp + 1;
@@ -350,6 +372,18 @@ parse_tr(
 		}
 		if (!matches(string, trace_buffer[i].fmt))
 			continue;
+		/*
+		 * #445: start at the whole path, then walk past each '/'.
+		 *
+		 * This used to assign only when it found a separator, so a
+		 * file recorded without one -- any __FILE__ that is a bare
+		 * name -- left filename holding whatever was on the stack,
+		 * and the db_printf("%s") below read from it.  Inside DDB,
+		 * while looking at a crash.  The basename of a path with no
+		 * directory is the path, so this is also what it meant to
+		 * say.
+		 */
+		filename = trace_buffer[i].file;
 		for (cp = trace_buffer[i].file; *cp; ++cp)
 			if (*cp == '/')
 				filename = cp + 1;

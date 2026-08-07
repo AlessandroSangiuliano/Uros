@@ -476,8 +476,8 @@ void thread_doswapin(
 		 */
 #if	THREAD_SW_DEBUG
 		if (thread_swap_debug) {
-			printf("thread_doswapin(%x): wiring stack %x\n",
-			       thr_act, trunc_page(addr));
+			printf("thread_doswapin(%p): wiring stack %lx\n",
+			       thr_act, (unsigned long) trunc_page(addr));
 		}
 #endif	/* THREAD_SW_DEBUG */
 #if	MACH_ASSERT
@@ -514,7 +514,7 @@ void thread_doswapin(
 #endif
 #if	THREAD_SW_DEBUG
 		if (thread_swap_debug) {
-			printf("thread_doswapin(%x): wiring user stack %x\n",
+			printf("thread_doswapin(%p): wiring user stack %x\n",
 			       thr_act, trunc_page(user_stack));
 		}
 #endif	/* THREAD_SW_DEBUG */
@@ -641,8 +641,8 @@ void thread_swapout(
 		addr = thread->kernel_stack;
 #if	THREAD_SW_DEBUG
 		if (thread_swap_debug) {
-			printf("thread_swapout(%x):unwiring stack %x\n",
-			       thread, trunc_page(addr));
+			printf("thread_swapout(%p):unwiring stack %lx\n",
+			       thread, (unsigned long) trunc_page(addr));
 		}
 #endif	/* THREAD_SW_DEBUG */
 #if	MACH_ASSERT
@@ -673,7 +673,7 @@ void thread_swapout(
 #endif
 #if	THREAD_SW_DEBUG
 		if (thread_swap_debug) {
-			printf("thread_swapout(%x):unwiring user stack %x\n",
+			printf("thread_swapout(%p):unwiring user stack %x\n",
 			       thr_act, trunc_page(user_stack));
 		}
 #endif	/* THREAD_SW_DEBUG */

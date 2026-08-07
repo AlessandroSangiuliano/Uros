@@ -37,6 +37,7 @@
 
 #include <mach.h>
 #include <mach/mach_traps.h>
+#include <mach/thread_switch.h>		/* #460: wait for HAL to check in */
 #include <mach/bootstrap.h>
 #include <mach/mach_port.h>
 #include <mach/message.h>
@@ -209,16 +210,63 @@ pci_probe_module(const struct block_driver_ops *ops,
  * HAL subscription — look up "hal", register, drain initial replay
  * ================================================================ */
 
+/*
+ * #460: how long to wait for "hal" to check in, and how long to sleep
+ * between tries.  100 x 100ms = ten seconds, the same order as the wait
+ * kernel242_test uses for ipc_bench.  Far longer than the window this
+ * closes (a few milliseconds), and still short enough that a HAL which
+ * genuinely never arrives is reported rather than waited on forever.
+ */
+#define	BLK_HAL_WAIT_TRIES	100
+#define	BLK_HAL_WAIT_MS		100
+
 static int
 hal_subscribe(void)
 {
-	kern_return_t kr;
+	kern_return_t	kr;
+	int		tries;
 
-	kr = netname_look_up(name_server_port, "", "hal", &hal_service_port);
-	if (kr != KERN_SUCCESS) {
-		printf("blk: netname_look_up(\"hal\") failed (kr=%d)\n", kr);
-		return -1;
+	/*
+	 * Wait for HAL to check in rather than giving up on the first look.
+	 *
+	 * bootstrap starts hal_server before this one, but *starting* is not
+	 * *registering*: hal publishes its netname only after bringing up its
+	 * module loader, and this server can reach the lookup first.  On a
+	 * wedged boot the failed lookup was logged FOUR lines before "hal:
+	 * registered service"; on a healthy boot hal registered eighteen
+	 * lines before the lookup.  Same two events, opposite order -- a
+	 * plain startup race (#460).
+	 *
+	 * Losing that race used to end main() with a single printf, and a
+	 * server whose main() returns does NOT die: the crt calls
+	 * pthread_exit(), the last thread parks in the libpthreads pool, and
+	 * the task stays alive answering nothing.  So 'disk0a' was never
+	 * registered, bootstrap sat in "stage-2: waiting for 'disk0a'"
+	 * forever, no test ever ran, and all four processors went idle --
+	 * a boot that looks hung from outside with nothing in the log to say
+	 * why.  That is the whole early-wedge mode of #460.
+	 */
+	for (tries = 0; ; tries++) {
+		kr = netname_look_up(name_server_port, "", "hal",
+				     &hal_service_port);
+		if (kr == KERN_SUCCESS)
+			break;
+		if (tries >= BLK_HAL_WAIT_TRIES) {
+			printf("blk: netname_look_up(\"hal\") failed (kr=%d) "
+			       "after %d tries over %d ms — HAL never checked "
+			       "in; no disks will be registered and the boot "
+			       "will wait for 'disk0a' forever\n",
+			       kr, tries, tries * BLK_HAL_WAIT_MS);
+			return -1;
+		}
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+				     BLK_HAL_WAIT_MS);
 	}
+	if (tries > 0)
+		printf("blk: HAL checked in after %d retr%s (%d ms) — "
+		       "startup race, not an error\n",
+		       tries, tries == 1 ? "y" : "ies",
+		       tries * BLK_HAL_WAIT_MS);
 
 	kr = mach_port_allocate(mach_task_self(),
 		MACH_PORT_RIGHT_RECEIVE, &hal_driver_port);

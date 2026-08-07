@@ -206,6 +206,7 @@
 #include <device/conf.h>
 #include <device/subrs.h>
 #include <i386/fpu.h>
+#include <i386/hwp.h>		/* hwp_init_cpu (#358) */
 #include <i386/pmap.h>
 #include <i386/ipl.h>
 #include <i386/pio.h>
@@ -322,6 +323,8 @@ int		boot_cpu_cap __attribute__((section(".data"))) = 0;
 extern int	cons_is_com1;
 extern int	ddb_kbd_break_enabled;	/* #335: -K arms Ctrl+D -> DDB */
 extern int	nmi_watchdog_enabled;	/* #344: -W arms the NMI watchdog */
+extern int	ipc_port_hist_enabled;	/* #415: -N counts ports per message */
+extern int	ipc_port_hist_every;	/* #415: ... and reports every N */
 extern void	nmi_watchdog_init(void);
 
 void		parse_arguments(void);
@@ -691,6 +694,18 @@ parse_arguments(void)
 		case 'c':	/* -c??:  cap CPUs brought up (SMP debug, #344) */
 		    boot_cpu_cap = atoi_term(p, &p);
 		    break;
+		case 'N':	/* -N??: count port pointers per message and
+				 * report every ?? messages (#415).  Off by
+				 * default; the design choice for x86-64 turns
+				 * on this number and nobody has it. */
+		    ipc_port_hist_enabled = 1;
+		    {
+			int every = atoi_term(p, &p);
+
+			if (every > 0)
+			    ipc_port_hist_every = every;
+		    }
+		    break;
 		case 'K':	/* -K: arm Ctrl+D on the PS/2 keyboard to break
 				 * into DDB when there is no serial port (bare-
 				 * metal debug, #335). */
@@ -943,6 +958,50 @@ machine_init(void)
 	 */
 	clock_config();
 }
+
+/*
+ * Which processor keeps time.
+ *
+ * Zero: the processor the BIOS started.  Moved here from kern/version.c,
+ * where it sat among the etext/edata compatibility aliases -- it is an answer
+ * about this machine, and every machine has to give it (#453).
+ */
+int	master_cpu = 0;
+
+/*
+ * The kernel is up: run what had to wait for it (#453).
+ *
+ * Both of these need a working kernel around them and so cannot go in
+ * machine_init() above.  fpu_sanity_check() faults deliberately and wants a
+ * trap handler that can print; hwp_init_cpu() prints its verdict.
+ *
+ * The AP arm of both is in mp_stub.c's slave_machine_init(), which is the
+ * per-processor counterpart of this one -- this is the BSP's.
+ */
+void
+machine_kernel_ready(void)
+{
+	fpu_sanity_check();	/* #309 acceptance (BSP arm) */
+	hwp_init_cpu(TRUE);	/* #358 hardware P-states (BSP arm) */
+}
+
+#if	NCPUS > 1
+/*
+ * Every processor has an idle thread now (#461).
+ *
+ * Nothing to do, and the emptiness is a property of this machine rather than
+ * an omission: i386 starts its processors from start_other_cpus(), at the end
+ * of start_kernel_threads(), so none of them exists yet to be let anywhere.
+ * The hook is for machines that wake their processors before the kernel is
+ * entered -- x86-64 does, because its own bring-up checks need them -- and
+ * therefore have processors waiting for the idle threads this point
+ * guarantees.
+ */
+void
+machine_processors_ready(void)
+{
+}
+#endif	/* NCPUS > 1 */
 
 /*
  * Halt a cpu.

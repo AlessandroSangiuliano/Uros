@@ -28,6 +28,7 @@
  * slave_machine_init() on every AP, after ap_machine_init/init_fpu.
  */
 
+#include <i386/fpu.h>			/* #448: the interface, so it is checked */
 #include <kern/cpu_data.h>		/* current_cpu_id() */
 #include <kern/misc_protos.h>		/* printf, panic */
 

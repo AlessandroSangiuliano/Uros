@@ -746,6 +746,7 @@ are userspace `.so` files, not kernel objects. The bases below are shown as
 | `0xffffc00000000000` | **kernel heap** | dynamic kernel allocations | NX by default |
 | `0xffffe00000000000` | **per-CPU** | `%gs`-based per-CPU areas | kernel-only |
 | `0xfffff00000000000` | **CPU entry area** | per-CPU: entry `.text`, IST/trampoline stacks, GDT, TSS | the *only* kernel region mapped in the user table under KPTI |
+| `0xfffff80000000000` | **device registers** | MMIO made reachable: local APIC, IOAPIC, HPET, PCI windows | uncached, NX, kernel-only |
 | `0xffffffff80000000` | **kernel image** | `.text` / `.rodata` / `.data` / `.bss` | W^X per section |
 
 The kernel image sits in the top 2 GiB because `-mcmodel=kernel` requires it:
@@ -795,7 +796,23 @@ This is why the roadmap has always said x86-64 is the real performance jump, not
   bases are symbolic (§11.3), so KASLR is a later drop-in, not a rewrite — the
   same discipline as five-level paging.
 
-### 11.6 KPTI, chosen at runtime per CPU
+### 11.6 Memory model: the one thing that does not change
+
+x86-64 is x86-TSO, exactly as i386 is. Store→load remains the only
+reordering the hardware performs, so every cross-CPU protocol written
+against §10.5 keeps its reasoning, and the herd7 suite in
+`uros/tools/litmus/` keeps its verdicts — the proof that the pmap shootdown
+barrier is necessary *and* sufficient (#350) is inherited rather than
+redone. The suite runs green against the x86-64 kernel.
+
+This is the only contract in the port that costs nothing, and saying so is
+the point: the same code on a weakly-ordered architecture would need
+acquire/release where this one needs a single fence per side. Barriers in
+the x86-64 tree are therefore documented by **what they order**, never by
+which instruction they emit (#410) — the instruction is what changes on the
+day a weak model arrives, and the claim is what has to survive it.
+
+### 11.7 KPTI, chosen at runtime per CPU
 
 The shared higher-half design that buys the performance above is exactly the
 condition Meltdown (rogue data-cache load) exploits: userspace speculating
@@ -832,6 +849,336 @@ For one binary to do both, the layout is built KPTI-able from the start:
 None of this is transliterated from another kernel: the MSR and CPUID bits are
 Intel's architectural contract, and separating the entry area is geometry the
 problem forces. The regions, their bases, and the symbolic anchoring are ours.
+
+### 11.8 Revoking a mapping the other processors are using
+
+A processor caches the translations it walks, and nothing tells it when
+another processor edits the tables underneath. So changing an entry is two
+operations, and only the first is a store: after it, the table says one
+thing while every processor that has walked that address still believes
+another. Forgetting the second produces no fault and no report — only
+unrelated code, later, reading through a translation that should not exist.
+
+The mechanism is one **cross-call**, not a family of special messages
+(#438). A message between processors carries a vector and nothing else, so
+everything above it is an arrangement in memory that the sender writes and
+the receiver reads. The shootdown is the first user of that arrangement and
+will not be the last: a scheduler asking a processor to reconsider what it
+runs, a debugger asking them all to stop. Those differ in what is asked, not
+in how the asking works. The call returns when every processor has
+*finished*, because the caller's next act is usually to reuse the frame.
+
+Two departures from the i386 path, both deliberate:
+
+- **Ranges, not everything.** i386 flushes the whole table on every
+  shootdown — correct, and the right choice for its first SMP pass. Here an
+  address at a time up to a threshold, wholesale beyond it. The threshold is
+  a single constant, unmeasured until #431.
+- **The global-page trap is closed in advance.** A `cr3` reload does not
+  evict a global entry; that is what global means. Since §11.7 marks kernel
+  regions global whenever KPTI is off, a whole-table flush written as a
+  `cr3` reload would silently stop flushing the kernel's own mappings the
+  day #437 lands. The flush therefore toggles `CR4.PGE` when global pages
+  are on, which is the architecture's own answer.
+
+The ordering this rests on costs nothing here and §11.6 says why: the
+page-table store must reach the other processor before it is asked to
+flush, and x86-TSO does not reorder a store with a later store — the
+message is itself a store, to the interrupt command register. On a weakly
+ordered machine this is exactly where a release barrier goes, and the
+requirement is documented at that point in the code rather than the
+instruction that currently satisfies it.
+
+What is **not** yet narrowed: the shootdown goes to every online processor
+rather than to those actually using the address space in question. Narrowing
+it needs a record of which processors have a given `pmap` loaded, which is
+the scheduler's to keep (#408, tracked as #439).
+
+### 11.9 The syscall contract, and what it deliberately does not preserve
+
+Every Mach trap and every POSIX call passes through one entry path, so what
+that path costs is a floor under the whole system. The contract is therefore
+a decision, recorded here and implemented in `x86_64/syscall/` (#411):
+
+```
+rax                      call number in, result out
+rdi rsi rdx r10 r8 r9    arguments one to six
+rcx r11                  taken by the instruction — return address and flags
+rbx rbp r12 r13 r14 r15  preserved
+everything else          destroyed
+```
+
+`r10` rather than `rcx` for the fourth argument because `SYSCALL` takes
+`rcx`; the same substitution Linux makes, for the same reason, which costs
+nothing and keeps a musl port (#414, #424) a substitution rather than a
+rewrite.
+
+**Destroying the argument registers is the choice.** Linux preserves them,
+which obliges its entry to save six on the way in and restore six on the way
+out on every call — a compatibility contract thirty years old. Uros controls
+both sides and carries no such debt, so a syscall behaves exactly as a call
+to a C function: the caller assumes it clobbers what a call clobbers.
+
+The cost is narrow and worth stating exactly, because it is a debugging cost
+and those are the ones that get discovered late:
+
+- **Unwinding is unaffected.** The registers a backtrace needs — the
+  callee-saved set, the stack and instruction pointers — survive *for free*,
+  since the C ABI already preserves them and the dispatcher's own compiled
+  code does the work. No entry-path stores are involved.
+- **Signal delivery is unaffected.** A handler returns to the instruction
+  after `SYSCALL`, where the destroyed registers are dead by this contract.
+- **What is lost** is reading or altering a call's *arguments* after it has
+  begun: strace-shaped tooling, and ptrace-style interception at the exit
+  stop. At the entry stop they are still live.
+
+That loss is recoverable, and the recovery is **not an ABI change** —
+userspace cannot observe whether the kernel kept a copy of registers it was
+entitled to destroy. So the full register image can be saved the day
+something wants it, conditionally, off the fast path; the site is marked in
+the entry. The reverse is the one-way door, and that asymmetry is the whole
+reason this contract was chosen now rather than deferred: preserving first
+and stopping later would break every userland wrapper that had come to rely
+on it.
+
+**Two things the hardware layout forces, recorded so they are not rearranged
+by a later tidy-up.** `SYSCALL` and `SYSRET` take no selectors — they take
+one number in `STAR` and derive four by addition, which makes the order of
+the descriptor table load-bearing (§11.2's kernel/user split is not free to
+be reordered). And `SYSRET` faults *in ring 0, on the user's stack*, if the
+return address is non-canonical: CVE-2012-0217, a privilege escalation
+rather than a crash, guarded by three instructions and a branch never taken.
+
+**What the entry path does not do, and why that is a saving.** `SYSCALL`
+does not consult the task-state segment, so there is no per-switch stack
+register to keep current — which is precisely what #348's per-CPU trampoline
+existed to avoid on i386, at a measured ~144 cycles. That machinery is not
+ported because the cost it removed does not exist here. The kernel stack
+comes from the per-CPU block through `%gs`, one load, which is why those
+fields sit together at fixed offsets near the front of the block.
+
+**`swapgs` is a duty in two places.** Neither entry mechanism exchanges the
+segment base on its own: the syscall path does it as its first instruction,
+and the trap path does it only when the saved code segment says ring 3.
+Missing it means kernel code reading `%gs:0` follows an address a user
+program chose.
+
+### 11.10 The swapgs window
+
+Deciding from the saved code segment is right for every vector whose arrival
+the kernel controls, and wrong for the ones whose arrival it does not. There
+are two instruction boundaries where the processor is at ring 0 and `%gs`
+still belongs to a user program: after `SYSCALL` and before the entry's own
+`swapgs`, and after the exit's `swapgs` and before `SYSRET`. A vector
+delivered there reads a ring-0 code segment, concludes correctly that it must
+not swap, and runs the kernel on a base a user chose (#440).
+
+**Which vectors is not a matter of taste.** Both windows run with interrupts
+disabled — `SYSCALL` clears `IF` through `FMASK`, and the way out never sets
+it — so every maskable vector is excluded by the flag, and the set that
+remains is exactly its complement: `#DB`, `NMI`, `#DF`, `#MC`. Those four
+take a separate entry; everything else keeps the cheaper rule.
+
+**They decide from the segment base.** `IA32_GS_BASE` holds what is loaded
+now, which is the one fact the window cannot misrepresent. §11.1 gives the
+two halves of the address space to two different owners, so the sign bit of
+the base is the answer — `WRMSR` refuses a non-canonical base, which makes
+"bit 63 set" and "at or above `KERNEL_HALF_BASE`" the same statement. The
+cost is one `RDMSR` on four vectors, none of which is a path anything is
+optimising.
+
+The exit cannot recompute the decision — by then the base is the kernel's
+either way — and cannot write the old one back either, because `swapgs`
+moves *both* halves of the pair and restoring one would leave the user's base
+where the next entry swaps to it. So the entry carries one bit forward: the
+inverse of `swapgs` is `swapgs`.
+
+**Two conditions the check depends on, both decided rather than assumed.**
+`CR4.FSGSBASE` is cleared on every processor, so ring 3 cannot write a base
+at all; enabling it later — it is a real gain for thread-local storage —
+means teaching the entry to find the per-CPU block without `%gs`, from
+`RDPID` or the descriptor limit. And any base arriving from outside through
+thread state must be refused unless it is in the lower half. Whoever changes
+either owns the entry as well.
+
+**`#DB` also needs a stack of its own,** and for the same window. A trap at
+ring 0 does not switch stacks, and `SYSCALL` has not switched one yet, so
+`%rsp` still holds whatever a user program left in it — a debug exception
+delivered there would push its frame at that address, at ring 0, through the
+kernel's mapping. That is a write, not a disclosure. The other three vectors
+already had interrupt-stack slots for unrelated reasons; this is the fourth.
+
+---
+
+### 11.11 The message ABI at sixty-four bits
+
+**One decision decides the rest: `natural_t` does not widen (#413).** The
+i386 header defines it as whatever the register size is, and uses it both for
+plain unsigned numbers and for casting between integers and pointers. Those
+are the same type there and two types here. Taken literally it would make
+`natural_t` sixty-four bits — which is not one typedef but `mach_port_t`,
+`mach_msg_size_t`, `mach_msg_type_number_t`, every count, every id and every
+sequence number, doubling the message header and every port array in every
+message to express numbers that were never near four billion.
+
+So `natural_t` keeps its width and gives up its second job. An address is a
+`vm_offset_t` and nothing else:
+
+| type | i386 | x86-64 | why |
+|---|---|---|---|
+| `natural_t`, `integer_t` | 32 | 32 | numbers the interfaces exchange |
+| `mach_port_t` | 32 | 32 | a name in a task's port space, not a pointer |
+| `mach_msg_size_t` | 32 | 32 | no message approaches four gigabytes |
+| `boolean_t`, `kern_return_t` | 32 | 32 | fields in messages; width is wire format |
+| `vm_offset_t`, `vm_address_t`, `vm_size_t` | 32 | **64** | an address, and a distance between two |
+
+**On i386 the last row was the same type as the first, and MI code was
+entitled to assume it.** Every place that stored an address in a `natural_t`,
+or printed a `vm_offset_t` with `%x`, still compiles and is now wrong. That is
+what #415 goes looking for, and it is why the split is written down rather
+than discovered.
+
+**The message header does not move.** Six 32-bit fields, twenty-four bytes,
+on both targets — the one part of the wire format that a widening pointer
+never touches, because nothing in it is a pointer.
+
+#### What the table does not settle: how wide a port name should be
+
+Keeping `natural_t` narrow is not the same as deciding that everything made
+of it should stay narrow, and one of them has an argument on the other side.
+A name today is **24 bits of index and 8 bits of generation** — and the
+generation is worth less than that says. `IE_BITS_GEN_ONE` is `0x04000000`,
+which advances the eight-bit field by four, so it takes **64 distinct
+values**, and the low two bits of every kernel-allocated name are always
+zero. They were reserved for a fast-path tag on port names that is not
+implemented: the generator emits the test for it disabled, as
+`if (0 /* Should be: !(x & 0x3) XXX */)`.
+
+So the real recycle window is **64 allocate/deallocate cycles at the same
+slot**, after which a stale name comes back meaning a different port. That is
+a capability question, not a capacity one, and it is the only entry in the
+table above where more bits buy something real.
+
+**How many index bits are actually reachable is a measured number, not
+`2^24`.** A task's names come from its entry table, and `ipc_table_fill`
+grows that table through 511 sizes and stops: **967,168 entries on i386 and
+484,608 on x86-64** — the same 14.8 MiB of table, half as many entries
+because an entry is twice the size. Twenty bits of index covers the first,
+nineteen the second. **Everything above bit 20 is unreachable**, which is
+what makes the trade look the way it does.
+
+| split | index limit | recycle window | what it costs |
+|---|---|---|---|
+| 24 / 8 (today) | 16.7M — table stops at 967k | **64** | — |
+| 22 / 10 | 4.2M | **1024** (×16) | the disabled low-bit tag |
+| 20 / 12 | 1.05M | 4096 (×64) | that, plus 2 bits from `ie_bits` |
+| 16 / 16 | **65,536** | 65,536 | **a real cut**: ~967k ports per task → 65k |
+
+**The second constraint is `ie_bits`, and it is tighter than the name.** The
+generation lives there too: 16 bits of user-references, 5 of capability type,
+1 for collisions, 8 for generation — and bits 21 and 22 free. So **ten** bits
+of generation fit with nothing displaced; twelve would take two bits from the
+user-reference count, dropping its ceiling from 65,535 to 16,383.
+
+**Taken: 22 bits of index and 10 of generation, incrementing by one.**
+Sixteen times today's window, no bit spent anywhere, and the index given up
+was never reachable. What is given up is the low-bit tag, which is disabled
+at the generator.
+
+**It is not a compromise, because it is per-target.** The number that bounds
+it — the table ceiling — is per-target already, so the split lives beside the
+widths in `mach/machine/port_name.h`, exactly as `vm_offset_t` does. Each
+target states two things, how many bits are generation and how many of them
+are held still, and everything else is derived from those: the name macros in
+`mach/port.h`, and in `ipc/ipc_entry.h` the generation mask, its increment,
+and **the collision flag, which is placed immediately below the generation
+field rather than at a fixed bit** — it is what the generation grows into.
+i386 comes out of those formulas bit for bit as it always was
+(`0xff000000`, `0x04000000`, `0x00800000`, `0x007fffff`), which was checked by
+rebuilding it: 0 of 205 kernel objects changed in `.text`, `.data` or
+`.rodata`.
+
+**This does not close the sixty-four-bit question, it de-urgents it.** A
+wider name would buy a window of millions rather than a thousand, for eight
+bytes on every message header and a restructuring of `ie_bits`. Worth
+deciding on its own terms, once there is something to measure it with (#431).
+
+**Widening `natural_t` is the expensive way to buy it.** The header goes from
+24 bytes to 48 and every message pays the copy, to widen counts and sizes
+that had no reason to grow. **Widening `mach_port_t` alone is the cheap way:**
+the header goes to 32, and the message stops growing there — the port
+descriptor's padding *shrinks* to one word, because the padding is the space
+an address needs and a name does not, so a 16-byte descriptor comes out
+either way. That is why the padding is written as a subtraction rather than
+as `sizeof(void *)`: the day a name widens, `mach/message.h` is already
+right, and the test that measures the type byte already covers it.
+
+**Not decided here, and for a reason that is not timidity.** The generation
+does not live only in the name: it is packed into `ie_bits` in
+`ipc/ipc_entry.h` (eight bits at `0xff000000`), and `ipc_entry.c` orders its
+tree assuming the generation is in the low bits of the name. That is 138 uses
+across ten machine-independent files, none of which compiles for x86-64 yet —
+so changing it today means untested surgery whose only running configuration
+is the one it would break. It belongs with #416/#415, when the tree builds
+and the change can be run.
+
+**A cheaper option deserves weighing at the same time:** rebalancing the
+split — 20 bits of index and 12 of generation, or 16 and 16 — costs *zero*
+bytes and multiplies the recycle window by 16 to 256. It is a mitigation
+rather than an answer, but it is free, and "free" changes what the wider name
+has to justify.
+
+**A descriptor is an address, a 32-bit count and a 32-bit flags word**, so it
+is twelve bytes on i386 and sixteen here. All four descriptor structures must
+be exactly that size, for two reasons and only the first is obvious: the
+kernel walks the descriptors of a message as an array of the union, so a
+short one puts every later step inside the previous descriptor; and it learns
+*which* kind it is holding by reading the `type` byte through the generic
+member, so that byte must sit at the same offset in all of them.
+
+A port descriptor carries a name where the others carry an address, so it is
+padded — by exactly the space an out-of-line descriptor spends on the part of
+its address a name does not need. One word on i386, two here, and neither
+target is named in the declaration:
+
+```c
+mach_msg_size_t pad1[sizeof(void *) / sizeof(mach_msg_size_t)];
+```
+
+**The descriptors begin where the body ends**, because that is how the kernel
+finds them — `(mach_msg_descriptor_t *) (body + 1)`. They begin with an
+address, so the body is aligned like one: four bytes of padding after the
+count on x86-64, moving the first descriptor from offset 28 to 32, and
+nothing at all on i386 where a count and a pointer are the same width. x86
+would have loaded them unaligned without complaining; the next target will
+not be so forgiving, and a fault inside a message walk is a hard thing to
+read backwards.
+
+**Checked in three places, deliberately.** The sizes and offsets are repeated
+as `_Static_assert` in `mach/message.h`, so a change that moves a field fails
+the build of every consumer. What no assertion can state is where the `type`
+byte lands — a bit-field has no address to take — so that is measured at run
+time on every x86-64 boot, by writing through each descriptor and looking at
+the bytes, and by telling a port descriptor what it is and asking the walk
+what it heard. And the widths are stated a third time in
+`mach/machine/machine_types.defs`, where the stub generator can read them:
+the header decides how wide a field is when the compiler lays out a message,
+the `.defs` decides how wide `migcom` thinks it is when it computes offsets
+and message sizes, and disagreement between them is not a build failure but a
+server reading a field from the wrong place.
+
+**⚠️ What `migcom` still owes (#416): alignment, not width.** It adds field
+widths; C adds widths *and* padding. Widening `vm_address_t` moves
+`vm_allocate`'s reply from 40 bytes to 44 in the generator's arithmetic, and
+the compiler makes it 48 — the 64-bit field after `kern_return_t` is aligned
+to eight and the generator does not know it. Measured on this tree, not
+predicted.
+
+**No 32-bit userland on a 64-bit kernel.** A compatibility layer is a project
+of its own — a second marshalling path in the kernel, a second descriptor
+layout, and a per-task decision on every message — and pretending it might
+arrive later costs design decisions everywhere in the meantime. The answer for
+this release is no, recorded here so nobody builds half of one by accident.
 
 ---
 

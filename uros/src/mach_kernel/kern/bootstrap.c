@@ -202,7 +202,13 @@
 #include <mach/mach_port_server.h>
 #include <mach/bootstrap_server.h>
 #include <mach/elf.h>
-#include <i386/multiboot.h>
+/*
+ * The boot protocol is asked through <kern/boot_modules.h> now, not read
+ * from a structure this file knows the shape of (#453).  i386 is loaded by
+ * multiboot 1 and x86-64 by multiboot 2, whose module list is a chain of
+ * tags rather than an array, and there is no structure the two share.
+ */
+#include <kern/boot_modules.h>
 
 #include <device/device_port.h>
 #include <device/ds_routines.h>
@@ -248,7 +254,6 @@ mach_port_t	bootstrap_host_security_port;	/* local name */
 mach_port_t	bootstrap_wired_ledger_port;	/* local name */
 mach_port_t	bootstrap_paged_ledger_port;	/* local name */
 
-extern struct multiboot_info mb_info;
 vm_offset_t	kern_sym_start = 0;	/* pointer to kernel symbols */
 vm_size_t	kern_sym_size = 0;	/* size of kernel symbols */
 vm_offset_t	kern_args_start = 0;	/* kernel arguments */
@@ -272,7 +277,22 @@ vm_size_t	env_size = 0;		/* size of environment */
 vm_offset_t	load_info_start = 0;	/* pointer to bootstrap load info */
 vm_size_t	load_info_size = 0;	/* size of bootstrap load info */
 
-#define	SYS_REBOOT_COMPAT	defined(i386) || defined(i860) || defined(hp_pa)
+/*
+ * Which machines load the bootstrap task the old way: an ELF read into
+ * regions, a stack placed by hand, and a thread started on it.
+ *
+ * x86-64 joins the list because it does exactly that -- the alternative
+ * arm is for machines whose loader hands over an already-built task, and
+ * ours does not (#453).
+ *
+ * ⚠️ __x86_64__ with underscores, unlike its neighbours.  gcc defines the
+ * bare `i386' in gnu mode for the 32-bit target and defines no bare
+ * `x86_64' for this one, so the two spellings are not a style choice: the
+ * plain name would be false here and the block would vanish again, taking
+ * regions[], STACK_BASE and STACK_SIZE with it while their users stayed.
+ */
+#define	SYS_REBOOT_COMPAT	defined(i386) || defined(__x86_64__) || \
+				defined(i860) || defined(hp_pa)
 
 void ovbcopy_ints(vm_offset_t,vm_offset_t,vm_size_t); /* forward; */
 vm_offset_t move_bootstrap(void);	 /* forward; */
@@ -291,8 +311,39 @@ extern void set_bootstrap_args(void);
 
 int	startup_single_user = 0;
 
-struct thread_syscall_state thread_state;
-struct region_desc regions[4];
+/*
+ * The bootstrap image's regions: one per PT_LOAD segment, plus the stack.
+ *
+ * ⚠️ This was `regions[4]', and the bootstrap server now has four loadable
+ * segments -- so the stack made five, and the fifth was written one past the
+ * end on every single boot (#453).
+ *
+ * It never showed because of where it landed.  `struct thread_syscall_state
+ * thread_state' was declared immediately before this array and absorbed the
+ * overflow harmlessly; the moment that object moved out of this file, the
+ * write landed on something live and the boot died in memcpy with a NULL
+ * source, four subsystems away from the cause.  That is what an overflow
+ * into a quiet neighbour buys: not safety, only a delay and a worse symptom.
+ *
+ * Sixteen because an ELF may have more segments than we have ever loaded and
+ * the array costs nothing, and BOOT_REGION_MAX is checked rather than
+ * trusted -- refusing to boot with a clear message beats writing past the
+ * end and finding out later.
+ */
+#define	BOOT_REGION_MAX	16
+
+struct region_desc regions[BOOT_REGION_MAX];
+
+/*
+ * Room for one more, or say why not.  Every append goes through this: the
+ * bug above existed because the appends were open-coded and nobody counted.
+ */
+#define	BOOT_REGION_ROOM()						\
+MACRO_BEGIN								\
+	if (boot_region_count >= BOOT_REGION_MAX)			\
+		panic("bootstrap image needs more than %d regions -- "	\
+		      "raise BOOT_REGION_MAX (#453)", BOOT_REGION_MAX);	\
+MACRO_END
 char kernel_args_buf[256] = "/mach_kernel";
 char boot_args_buf[256] = "/mach_servers/bootstrap";
 char env_buf[256] = "";
@@ -333,6 +384,7 @@ do_bootstrap_compat(void)
 		case PT_LOAD:
 			if (ph->p_flags == (PF_R | PF_X)) {
 				dprintf("Found text region\n");
+				BOOT_REGION_ROOM();
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_EXECUTE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_filesz) - trunc_page(ph->p_vaddr);
@@ -341,6 +393,7 @@ do_bootstrap_compat(void)
 			}
 			else if (ph->p_flags == (PF_R | PF_W)) {
 				dprintf("Found data region\n");
+				BOOT_REGION_ROOM();
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_WRITE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_memsz) - trunc_page(ph->p_vaddr);
@@ -366,6 +419,7 @@ do_bootstrap_compat(void)
 
 	dprintf("I've found: %d sections\n", boot_region_count);
 
+	BOOT_REGION_ROOM();
 	regions[boot_region_count].addr = STACK_BASE;
 	regions[boot_region_count].size = STACK_SIZE;
 	regions[boot_region_count].offset = 0;
@@ -375,27 +429,17 @@ do_bootstrap_compat(void)
 
 	boot_region_desc = (vm_offset_t) regions;
 
-	bzero((char *)&thread_state, sizeof(thread_state));
-#if	defined(i386)
-	thread_state.eip = entry;
-	thread_state.esp = STACK_PTR;
-	boot_thread_state_count = i386_THREAD_SYSCALL_STATE_COUNT;
-#endif	/* defined(i386) */
-#if	defined(i860)
-	thread_state.pc =  entry;
-	thread_state.sp =  STACK_PTR;
-	boot_thread_state_count = i860_THREAD_STATE_COUNT;
-#endif	/* defined(i860) */
-#if     defined(hp_pa)
-	thread_state.iioq_head |= lp->entry_1;
-	thread_state.iioq_tail |= (lp->entry_1+4);
-	thread_state.dp = lp->entry_2;
-	thread_state.sp = STACK_BASE;
-	boot_thread_state_count = HP700_SYSCALL_STATE_COUNT;
-#endif  /* defined(hp_pa) */
-
-	boot_thread_state_flavor = THREAD_SYSCALL_STATE;
-	boot_thread_state = (thread_state_t) &thread_state;
+	/*
+	 * Where the first thread begins, and on what stack.  Which registers
+	 * those are, and which flavor describes them, is the machine's answer
+	 * -- this used to be a ladder of #ifs naming eip/esp, pc/sp and
+	 * iioq_head/dp in a file that should know none of them (#453).
+	 */
+	machine_bootstrap_thread_state(entry,
+				       &boot_thread_state_flavor,
+				       &boot_thread_state,
+				       &boot_thread_state_count);
+	machine_bootstrap_thread_sp(STACK_PTR);
 
 #if 0
 #ifndef hp_pa
@@ -544,6 +588,7 @@ exec_load(vm_offset_t start, vm_size_t size)
 		case PT_LOAD:
 			if (ph->p_flags == (PF_R | PF_X)) {
 				dprintf("Found text region\n");
+				BOOT_REGION_ROOM();
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_EXECUTE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_filesz) - trunc_page(ph->p_vaddr);
@@ -552,6 +597,7 @@ exec_load(vm_offset_t start, vm_size_t size)
 			}
 			else if (ph->p_flags == (PF_R | PF_W)) {
 				dprintf("Found data region\n");
+				BOOT_REGION_ROOM();
 				regions[boot_region_count].prot = VM_PROT_READ|VM_PROT_WRITE;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_memsz) - trunc_page(ph->p_vaddr);
@@ -586,6 +632,7 @@ exec_load(vm_offset_t start, vm_size_t size)
 
 	dprintf("I've found: %d sections\n", boot_region_count);
 
+	BOOT_REGION_ROOM();
 	regions[boot_region_count].addr = STACK_BASE;
 	regions[boot_region_count].size = STACK_SIZE;
 	regions[boot_region_count].offset = 0;
@@ -595,14 +642,15 @@ exec_load(vm_offset_t start, vm_size_t size)
 
 	boot_region_desc = (vm_offset_t) regions;
 
-	bzero((char *)&thread_state, sizeof(thread_state));
-
-	thread_state.eip = entry;
-	//thread_state.esp = STACK_PTR;
-	boot_thread_state_count = i386_THREAD_SYSCALL_STATE_COUNT;
-
-	boot_thread_state_flavor = THREAD_SYSCALL_STATE;
-	boot_thread_state = (thread_state_t) &thread_state;
+	/*
+	 * The entry point only.  The stack pointer is set later, by
+	 * set_arg_stack(), once the argument block has been laid out at the
+	 * top of the stack and its address is known (#453).
+	 */
+	machine_bootstrap_thread_state(entry,
+				       &boot_thread_state_flavor,
+				       &boot_thread_state,
+				       &boot_thread_state_count);
 }    
 
 static void
@@ -623,7 +671,7 @@ exec_map(vm_offset_t start, vm_size_t size)
 		while ((page = vm_page_grab_fictitious()) == VM_PAGE_NULL)
 			vm_page_more_fictitious();
 		vm_object_lock(object);
-		addr = pmap_extract(kernel_pmap, start + off);
+		addr = pmap_extract(pmap_kernel(), start + off);
 
 		if (!addr) {
 			printf("Warning: bootstrap task has bogus page mapping\n");
@@ -694,7 +742,7 @@ set_user_regs(vm_offset_t stack_base, vm_size_t stack_size,
     arg_size = (arg_size + sizeof(int) - 1) & ~(sizeof(int)-1);
     arg_addr = stack_base + stack_size - arg_size;
 
-	thread_state.esp = (int)arg_addr;
+    machine_bootstrap_thread_sp(arg_addr);
 
     return (arg_addr);
 }
@@ -963,7 +1011,7 @@ user_bootstrap_old(void)
 		while ((page = vm_page_grab_fictitious()) == VM_PAGE_NULL)
 			vm_page_more_fictitious();
 		vm_object_lock(object);
-		addr = pmap_extract(kernel_pmap, boot_start + off);
+		addr = pmap_extract(pmap_kernel(), boot_start + off);
 
 		if (!addr) {
 			printf("Warning: bootstrap task has bogus page mapping\n");
@@ -1217,42 +1265,34 @@ do_bootstrap_completed(
 
 void	load_info_print(void);
 
-extern struct multiboot_module *mb_module;
 
 void
 bootstrap_create(void)
 {
     int i, losers, maxlen, err;
     vm_offset_t foobar;
-    char *kernel_cmdline = (char *) mb_info.cmdline;
-    struct multiboot_module *bmods = ((struct multiboot_module *)
-				    boot_start);
+    const char *kernel_cmdline = machine_boot_cmdline();
+    unsigned int mod_count = machine_boot_module_count();
+    vm_offset_t mod_phys;
+    vm_size_t mod_size;
 
-    /* Dump raw multiboot_info fields so we can verify what QEMU passed. */
-    dprintf("mb_info @ 0x%x  flags=0x%x\n", &mb_info, mb_info.flags);
-    dprintf("  mods_count=%d  mods_addr=0x%x\n",
-           mb_info.mods_count, mb_info.mods_addr);
-    dprintf("  cmdline=0x%x  mem_lower=%u KB  mem_upper=%u KB\n",
-           mb_info.cmdline, mb_info.mem_lower, mb_info.mem_upper);
-    dprintf("parse_multiboot result: mb_module=0x%x  boot_start=0x%x  boot_size=0x%x\n",
-           mb_module, boot_start, boot_size);
+    dprintf("boot modules: %u  boot_start=0x%lx  boot_size=0x%lx\n",
+            mod_count, (unsigned long) boot_start,
+            (unsigned long) boot_size);
 
-    /* If parse_multiboot failed to read mods_addr (e.g. the physical address
-     * was not yet mapped at early-boot time), read it here where the kernel VM
-     * is fully up.  mods_addr is a physical address; with KVTOPHYS=0 it equals
-     * the virtual address. */
-    if (boot_start == 0 && mb_info.mods_addr != 0) {
-        struct multiboot_module *mods =
-            (struct multiboot_module *) phystokv(mb_info.mods_addr);
-        dprintf("  late-read mods[0]: mod_start=0x%x  mod_end=0x%x\n",
-               mods[0].mod_start, mods[0].mod_end);
-        /* mod_start/mod_end are physical addresses from the multiboot loader.
-         * boot_start must be a kernel virtual address because exec_load(),
-         * exec_map() and do_bootstrap_compat() dereference it directly. */
-        boot_start = phystokv(mods[0].mod_start);
-        boot_size  = mods[0].mod_end - mods[0].mod_start;
-        dprintf("  corrected: boot_start=0x%x  boot_size=0x%x\n",
-               boot_start, boot_size);
+    /* If the early parse could not read the module list -- on i386 the
+     * physical address may not have been mapped yet -- ask again here, where
+     * the kernel VM is fully up.
+     *
+     * The address that comes back is PHYSICAL, and boot_start has to be a
+     * kernel virtual one because exec_load(), exec_map() and
+     * do_bootstrap_compat() dereference it directly. */
+    if (boot_start == 0 && machine_boot_module(0, &mod_phys, &mod_size)) {
+        boot_start = phystokv(mod_phys);
+        boot_size  = mod_size;
+        dprintf("  late-read module 0: phys=0x%lx -> boot_start=0x%lx "
+                "size=0x%lx\n", (unsigned long) mod_phys,
+                (unsigned long) boot_start, (unsigned long) boot_size);
     }
 
     /* Peek at the first 4 bytes of the module to check for ELF magic. */
@@ -1261,65 +1301,51 @@ bootstrap_create(void)
         dprintf("  module[0] header bytes: %02x %02x %02x %02x\n",
                hdr[0], hdr[1], hdr[2], hdr[3]);
     }
-    dprintf("mods_count: %d\n", mb_info.mods_count);
 
     /*
-     * Issue #186: if the loader passed a stage-1 bundle as mod[1],
-     * stash its physical-base / size in exec_start/exec_size.  user_bootstrap()
+     * Issue #186: if the loader passed a stage-1 bundle as module 1, stash
+     * its physical base and size in exec_start/exec_size.  user_bootstrap()
      * later vm_allocate's a region in the bootstrap task, copyout's the
      * bytes, and injects "--bundle=ADDR,SIZE" into argv.
+     *
+     * Physical on purpose, unlike boot_start above: these two are handed to
+     * the bootstrap task as numbers, not dereferenced here.
      */
-    if (mb_info.mods_count >= 2 && mb_info.mods_addr != 0) {
-        struct multiboot_module *mods =
-            (struct multiboot_module *) phystokv(mb_info.mods_addr);
-        exec_start = mods[1].mod_start;
-        exec_size  = mods[1].mod_end - mods[1].mod_start;
-        dprintf("bundle: mod[1] phys=0x%lx size=0x%lx\n",
-                (unsigned long)exec_start, (unsigned long)exec_size);
+    if (machine_boot_module(1, &mod_phys, &mod_size)) {
+        exec_start = mod_phys;
+        exec_size  = mod_size;
+        dprintf("bundle: module 1 phys=0x%lx size=0x%lx\n",
+                (unsigned long) exec_start, (unsigned long) exec_size);
     }
 
-    if (/*(mb_info.flags & MULTIBOOT_MODS)
-          ||*/ (mb_info.mods_count == 0))
+    if (mod_count == 0)
         panic ("No bootstrap code loaded with the kernel!");
 
     /*
-     * #359 belt: start.S places the boot page directory/tables above the
-     * highest multiboot module end (module walk on both the mb1 and mb2
-     * paths).  If any module still reaches past the page-table base, the
-     * early boot has ALREADY silently corrupted its tail (#241/#359
-     * class: zeroed ELFs, "unloadable file format") -- refuse to limp
-     * on and say exactly what happened instead.
+     * That the modules are still intact -- each machine checks whatever its
+     * own early boot could have written over them, and panics naming it.
+     * The failure guarded against is the #241/#359 class, where a module's
+     * tail is overwritten before anyone reads it and the symptom arrives
+     * much later as an unloadable ELF.
      */
-    if (mb_info.mods_addr != 0) {
-        extern vm_offset_t (kvtophys)(vm_offset_t addr);
-        extern char *kpde;	/* VA of the boot page directory (start.S) */
-        vm_offset_t ptbase = kvtophys((vm_offset_t) kpde);
-        struct multiboot_module *mods =
-            (struct multiboot_module *) phystokv(mb_info.mods_addr);
-
-        for (i = 0; i < mb_info.mods_count; i++)
-            if (mods[i].mod_end > ptbase)
-                panic("multiboot mod[%d] ends at phys 0x%x, past the boot "
-                      "page tables at 0x%x -- module tail clobbered (#359)",
-                      i, mods[i].mod_end, (unsigned int) ptbase);
-    }
+    machine_boot_modules_verify();
 
     /* Initialize boot script variables.  We leak these send rights.  */
     losers = boot_script_set_variable
         ("host-port", VAL_PORT,
-         (int)ipc_port_make_send(realhost.host_priv_self));
+         (boot_script_val_t) ipc_port_make_send(realhost.host_priv_self));
     if (losers)
         panic ("cannot set boot-script variable host-port: %s",
                boot_script_error_string (losers));
     losers = boot_script_set_variable
         ("device-port", VAL_PORT,
-         (int) ipc_port_make_send(master_device_port));
+         (boot_script_val_t) ipc_port_make_send(master_device_port));
     if (losers)
         panic ("cannot set boot-script variable device-port: %s",
                boot_script_error_string (losers));
     
     losers = boot_script_set_variable ("kernel-command-line", VAL_STR,
-                                       (int) kernel_cmdline);
+                                       (boot_script_val_t) kernel_cmdline);
     if (losers)
         panic ("cannot set boot-script variable %s: %s",
                "kernel-command-line", boot_script_error_string (losers));
@@ -1338,7 +1364,7 @@ bootstrap_create(void)
             if (eq == 0)
                 continue;
             *eq++ = '\0';
-            losers = boot_script_set_variable (word, VAL_STR, (int) eq);
+            losers = boot_script_set_variable (word, VAL_STR, (boot_script_val_t) eq);
             if (losers)
                 panic ("cannot set boot-script variable %s: %s",
                        word, boot_script_error_string (losers));
@@ -1642,8 +1668,8 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       task_set_special_port(task,
                             TASK_BOOTSTRAP_PORT,
                             ipc_port_make_send(master_bootstrap_port));
-      printf("boot_script_exec_cmd: set BOOTSTRAP_PORT master=0x%x task=0x%x\n",
-             (unsigned int)master_bootstrap_port, (unsigned int)task);
+      printf("boot_script_exec_cmd: set BOOTSTRAP_PORT master=%p task=%p\n",
+             master_bootstrap_port, task);
       
       thread_act->thread->saved.other = (char *) &info;
       thread_start(thread_act->thread, user_bootstrap);

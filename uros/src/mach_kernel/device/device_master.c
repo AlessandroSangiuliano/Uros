@@ -61,6 +61,23 @@
 #include <kern/thread.h>
 #include <kern/kalloc.h>
 
+/*
+ * #448: the interface, so the compiler can compare it with what is below.
+ *
+ * These are MIG entry points.  The generated stub is compiled against
+ * device_master_server.h in its own translation unit; without that header
+ * here, this file's own idea of each signature is never checked against it,
+ * and two self-consistent halves can disagree indefinitely -- which is
+ * exactly how #448 put a thread_t where the interface said thread_act_t and
+ * nothing noticed until a caller finally arrived through MIG.
+ *
+ * The fourteen signatures below agree today, and this include is what will
+ * keep saying so.  It matters most on the way to x86-64: natural_t stays 32
+ * bits while pointers do not, and this is the interface the userland drivers
+ * reach the hardware through.
+ */
+#include <device/device_master_server.h>
+
 /* ================================================================
  * Interrupt forwarding
  * ================================================================ */
@@ -182,11 +199,19 @@ irq_forward_thread(void)
 				msg.msgh_bits =
 				    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
 				msg.msgh_size = sizeof(msg);
-				msg.msgh_remote_port = notify;
+				/*
+				 * #442: the destination goes as an
+				 * argument.  It used to be cast into
+				 * msgh_remote_port, which is a NAME
+				 * field: the same four bytes on i386,
+				 * half a pointer on x86-64.
+				 */
+				msg.msgh_remote_port = MACH_PORT_NULL;
 				msg.msgh_local_port  = MACH_PORT_NULL;
 				msg.msgh_id = IRQ_NOTIFY_MSGH_BASE + irq;
-				(void)mach_msg_send_from_kernel(&msg,
-								sizeof(msg));
+				(void)mach_msg_send_from_kernel(notify,
+							&msg, sizeof(msg),
+							(ipc_port_t *) 0, 0);
 			}
 		}
 
@@ -584,8 +609,25 @@ ds_master_device_dma_alloc_sg(
 	for (i = 0; i < n_pages; i++) {
 		vm_offset_t pa = pmap_extract(kernel_pmap,
 					      kva + i * PAGE_SIZE);
-		pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
-			   VM_PROT_READ | VM_PROT_WRITE, TRUE);
+		/*
+		 * #407: the answer was being dropped three lines below this
+		 * routine's own error handling.  A mapping that does not
+		 * happen and is not reported hands the task an address it
+		 * will fault on, with KERN_SUCCESS to say all is well.
+		 */
+		if (pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
+			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
+			/*
+			 * vm_map_enter above already took the range, and the
+			 * pages entered before this one are in it.  Releasing
+			 * the range drops both; leaving it would trade a
+			 * silent bad mapping for a silent leak.
+			 */
+			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+			kmem_free(kernel_map, kva, size);
+			task_deallocate(task);
+			return KERN_RESOURCE_SHORTAGE;
+		}
 		paddrs[i] = (unsigned int)pa;
 	}
 
@@ -621,9 +663,14 @@ map_phys_into_task(task_t		task,
 	if (kr != KERN_SUCCESS)
 		return kr;
 
+	/* #407: same as above -- report rather than hand back a hole, and give
+	 * back the range vm_map_enter just took rather than abandon it. */
 	for (i = 0; i < size; i += PAGE_SIZE)
-		pmap_enter(map->pmap, uva + i, phys_base + i,
-			   VM_PROT_READ | VM_PROT_WRITE, TRUE);
+		if (pmap_enter(map->pmap, uva + i, phys_base + i,
+			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
+			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+			return KERN_RESOURCE_SHORTAGE;
+		}
 
 	*uva_out = uva;
 	return KERN_SUCCESS;

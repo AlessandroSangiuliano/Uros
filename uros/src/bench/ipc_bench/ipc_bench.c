@@ -46,6 +46,7 @@
 #include <mach/clock.h>
 #include <mach/clock_types.h>
 #include <mach/thread_switch.h>
+#include <mach/mach_syscalls.h>	/* syscall_thread_switch */
 #include <mach/i386/thread_status.h>
 #include <sa_mach.h>
 #include <pthread.h>
@@ -1498,6 +1499,254 @@ bench_ool_intra_rpc(const char *label, vm_size_t ool_size, int iters)
 }
 
 /* ===================================================================
+ * Out-of-line PORT arrays, swept by port count (#415)
+ *
+ * The kernel keeps ipc_port_t pointers in message fields that are the
+ * width of a port name.  On i386 those are the same four bytes; on
+ * x86-64 they are not, and the candidate designs cost differently
+ * depending on how many ports a message carries.  Counting live traffic
+ * said 99.94% of messages carry one or two and nothing in three million
+ * carried more than six -- but that is what this workload does, not an
+ * upper bound.  task_threads() returns one port per thread, so a large
+ * task asks for as many as it has.
+ *
+ * This measures the part that need not be guessed: what a message with
+ * N ports costs, as N grows.  The ns/port column is the one to read.
+ * Flat means the cost is proportional, and a design that pays per port
+ * pays fairly.  A rise means something in the path is worse than linear
+ * and the tail matters more than the average suggests.
+ *
+ * Each port travels as MAKE_SEND from a receive right this task holds,
+ * so the same set can be sent every iteration; the echo side drops the
+ * send right it was handed and frees the array, leaving the port count
+ * where it started.
+ * =================================================================== */
+
+typedef struct {
+    mach_msg_header_t			head;
+    mach_msg_body_t			body;
+    mach_msg_ool_ports_descriptor_t	ports;
+} bench_oolp_send_msg_t;
+
+typedef struct {
+    mach_msg_header_t			head;
+    mach_msg_body_t			body;
+    mach_msg_ool_ports_descriptor_t	ports;
+    mach_msg_trailer_t			trailer;
+} bench_oolp_recv_msg_t;
+
+/*
+ * Echo thread for out-of-line port arrays.
+ *
+ * Releasing the rights matters here in a way it does not for OOL data:
+ * every message hands this side one send right per port, and a
+ * benchmark that leaked them would be measuring a port table growing
+ * underneath it rather than the cost of carrying ports.
+ */
+static void *
+oolp_echo_thread_func(void *arg)
+{
+    mach_port_t			port = (mach_port_t)(unsigned long)arg;
+    bench_oolp_recv_msg_t	msg;
+    bench_null_msg_t		reply;
+    kern_return_t		kr;
+
+    echo_signal_ready();
+
+    for (;;) {
+	kr = mach_msg(&msg.head, MACH_RCV_MSG, 0, sizeof(msg),
+		      port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	if (kr != MACH_MSG_SUCCESS) {
+	    if (kr == MACH_RCV_PORT_DIED ||
+		kr == MACH_RCV_PORT_CHANGED ||
+		kr == MACH_RCV_INVALID_NAME ||
+		kr == MACH_RCV_TIMED_OUT)
+		break;
+	    continue;
+	}
+
+	if ((msg.head.msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+	    msg.body.msgh_descriptor_count == 1 &&
+	    msg.ports.address != 0 && msg.ports.count > 0) {
+	    mach_port_t	   *names = (mach_port_t *) msg.ports.address;
+	    unsigned int    n = msg.ports.count;
+	    unsigned int    j;
+
+	    for (j = 0; j < n; j++)
+		if (names[j] != MACH_PORT_NULL)
+		    mach_port_deallocate(mach_task_self(), names[j]);
+
+	    vm_deallocate(mach_task_self(),
+			  (vm_offset_t) msg.ports.address,
+			  (vm_size_t) n * sizeof(mach_port_t));
+	}
+
+	reply.head.msgh_bits =
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_MOVE_SEND_ONCE, 0);
+	reply.head.msgh_size	    = sizeof(reply);
+	reply.head.msgh_remote_port = msg.head.msgh_remote_port;
+	reply.head.msgh_local_port  = MACH_PORT_NULL;
+	reply.head.msgh_id	    = msg.head.msgh_id + 100;
+	mach_msg(&reply.head, MACH_SEND_MSG, sizeof(reply), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    return (void *) 0;
+}
+
+/*
+ * Constant work per point rather than constant iterations: a sweep
+ * whose points take wildly different wall time measures the slow end on
+ * fewest samples, which is where the noise is worst.  Bounded at both
+ * ends so a small count still gets a decent sample and a large one
+ * still finishes.
+ */
+static int
+oolp_iters_for(unsigned int nports)
+{
+    unsigned int iters = 40000u / nports;
+
+    if (iters > 2000u)
+	iters = 2000u;
+    if (iters < 30u)
+	iters = 30u;
+    return (int) iters;
+}
+
+/*
+ * Returns FALSE when the port count could not be built, so the sweep
+ * stops rather than going on to report numbers for arrays it did not
+ * manage to make.
+ */
+static boolean_t
+bench_ool_ports(unsigned int nports)
+{
+    mach_port_t			echo_port, reply_port;
+    mach_port_t		       *names = 0;
+    bench_oolp_send_msg_t	send_buf;
+    bench_oolp_recv_msg_t	recv_buf;
+    kern_return_t		kr;
+    tvalspec_t			t0, t1;
+    unsigned long		ns, per_op;
+    int				iters = oolp_iters_for(nports);
+    unsigned int		i, made;
+
+    kr = mach_port_allocate(mach_task_self(),
+			    MACH_PORT_RIGHT_RECEIVE, &echo_port);
+    if (kr) {
+	printf("  %5u ports: echo port alloc failed %d\n", nports, kr);
+	return FALSE;
+    }
+    kr = mach_port_insert_right(mach_task_self(), echo_port, echo_port,
+				MACH_MSG_TYPE_MAKE_SEND);
+    if (kr) {
+	printf("  %5u ports: insert right failed %d\n", nports, kr);
+	return FALSE;
+    }
+    reply_port = mach_reply_port();
+    spawn_echo("oolp-echo", oolp_echo_thread_func, echo_port);
+
+    /*
+     * The ports to carry, made once and outside the timing: what is
+     * being measured is carrying them, not creating them.
+     */
+    kr = vm_allocate(mach_task_self(), (vm_offset_t *) &names,
+		     (vm_size_t) nports * sizeof(mach_port_t), TRUE);
+    if (kr) {
+	printf("  %5u ports: array alloc failed %d\n", nports, kr);
+	return FALSE;
+    }
+
+    for (made = 0; made < nports; made++) {
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &names[made]);
+	if (kr != KERN_SUCCESS) {
+	    printf("  %5u ports: only %u could be allocated (%d)"
+		   " -- sweep stops here\n", nports, made, kr);
+	    for (i = 0; i < made; i++)
+		mach_port_destroy(mach_task_self(), names[i]);
+	    return FALSE;
+	}
+    }
+
+#define OOLP_FILL()							\
+    do {								\
+	send_buf.head.msgh_bits =					\
+	    MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,			\
+			   MACH_MSG_TYPE_MAKE_SEND_ONCE) |		\
+	    MACH_MSGH_BITS_COMPLEX;					\
+	send_buf.head.msgh_size		= sizeof(send_buf);		\
+	send_buf.head.msgh_remote_port	= echo_port;			\
+	send_buf.head.msgh_local_port	= reply_port;			\
+	send_buf.head.msgh_id		= 1;				\
+	send_buf.body.msgh_descriptor_count = 1;			\
+	send_buf.ports.address		= (void *) names;		\
+	send_buf.ports.count		= nports;			\
+	send_buf.ports.deallocate	= FALSE;			\
+	send_buf.ports.copy		= MACH_MSG_PHYSICAL_COPY;	\
+	send_buf.ports.disposition	= MACH_MSG_TYPE_MAKE_SEND;	\
+	send_buf.ports.type		= MACH_MSG_OOL_PORTS_DESCRIPTOR;\
+    } while (0)
+
+    for (i = 0; i < 20u; i++) {
+	OOLP_FILL();
+	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+
+    get_time(&t0);
+    for (i = 0; i < (unsigned int) iters; i++) {
+	OOLP_FILL();
+	mach_msg(&send_buf.head, MACH_SEND_MSG, sizeof(send_buf), 0,
+		 MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	mach_msg(&recv_buf.head, MACH_RCV_MSG, 0, sizeof(recv_buf),
+		 reply_port, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    }
+    get_time(&t1);
+#undef OOLP_FILL
+
+    ns = elapsed_ns(&t0, &t1);
+    per_op = ns / (unsigned long) iters;
+    printf("  %5u %-11s %5lu.%02lu us/op  %6lu ns/port  (%d iters)\n",
+	   nports, nports == 1 ? "port" : "ports",
+	   per_op / 1000, (per_op % 1000) / 10,
+	   per_op / (unsigned long) nports, iters);
+
+    for (i = 0; i < nports; i++)
+	mach_port_destroy(mach_task_self(), names[i]);
+    vm_deallocate(mach_task_self(), (vm_offset_t) names,
+		  (vm_size_t) nports * sizeof(mach_port_t));
+    mach_port_destroy(mach_task_self(), echo_port);
+    return TRUE;
+}
+
+static void
+bench_ool_ports_sweep(void)
+{
+    /*
+     * The 1-port point is measured twice, first and last, and the two
+     * do not agree: 173 us against 7.81, same count and same code.
+     * Whatever the first measurement in a sweep pays for -- the echo
+     * thread's first run, the port table growing, the kernel's zones
+     * touched for the first time -- it pays once, and the first point
+     * is where it lands.
+     *
+     * Kept rather than worked around.  A sweep that quietly discarded
+     * its first point would be hiding the one number that says how
+     * much of what follows is warm.  Read the repeat, not the opener.
+     */
+    static const unsigned int counts[] = {
+	1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 1
+    };
+    unsigned int i;
+
+    for (i = 0; i < sizeof(counts) / sizeof(counts[0]); i++)
+	if (!bench_ool_ports(counts[i]))
+	    return;
+}
+
+/* ===================================================================
  * OOL inter-task benchmark
  *
  * Creates a child task (like bench_inter_rpc), but the parent sends
@@ -1704,6 +1953,48 @@ bench_mach_null(int iters)
     print_result("mach_null (noop trap)", elapsed_ns(&t0, &t1), iters);
 }
 
+/*
+ * A round trip to the KERNEL, not to another task (#443).
+ *
+ * The MIG argument checks live in the generated kernel server stubs, so
+ * they are paid by calls like this one and by nothing else: an intra-task
+ * null RPC never touches a server stub, and mach_null is a trap that never
+ * reaches MIG at all.  Measuring either of those to decide what TypeCheck
+ * costs would return zero by construction -- a zero that means the
+ * instrument was pointed the wrong way, not that the cost is absent.
+ *
+ * mach_port_type is chosen for doing almost nothing: one name in, one
+ * word out.  The less work the routine does, the larger the share of the
+ * measurement that IS the path being asked about.
+ */
+static void
+bench_kernel_rpc(int iters)
+{
+    tvalspec_t		t0, t1;
+    mach_port_t		name;
+    mach_port_type_t	type;
+    kern_return_t	kr;
+    int			i;
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &name);
+    if (kr != KERN_SUCCESS) {
+	printf("  krpc: port allocate failed %d\n", kr);
+	return;
+    }
+
+    for (i = 0; i < WARMUP_ITERS; i++)
+	(void) mach_port_type(mach_task_self(), name, &type);
+
+    get_time(&t0);
+    for (i = 0; i < iters; i++)
+	(void) mach_port_type(mach_task_self(), name, &type);
+    get_time(&t1);
+
+    print_result("mach_port_type (kernel RPC)", elapsed_ns(&t0, &t1), iters);
+
+    (void) mach_port_destroy(mach_task_self(), name);
+}
+
 static void
 bench_mach_print(int iters)
 {
@@ -1739,6 +2030,7 @@ bench_mach_print(int iters)
  *   disk     — disk I/O (ahci + ext2)
  *   mem      — memory bandwidth
  *   flipc2   — all FLIPC v2 benchmarks
+ *   ports    — out-of-line port arrays, swept by port count (#415)
  *   all      — everything (same as no arguments)
  * =================================================================== */
 
@@ -1756,6 +2048,8 @@ bench_mach_print(int iters)
 #define SUITE_CC	(1u << 11)	/* concurrent same-space (#327) */
 #define SUITE_FAULT	(1u << 12)	/* concurrent same-space faults (#338) */
 #define SUITE_SCALE	(1u << 13)	/* concurrency sweep, clean numbers (#319) */
+#define SUITE_PORTS	(1u << 14)	/* out-of-line port arrays, by count (#415) */
+#define SUITE_KRPC	(1u << 15)	/* MIG kernel RPC, where TypeCheck lives (#443) */
 #define SUITE_ALL	0xFFFFFFFFu
 
 static int
@@ -1783,6 +2077,8 @@ parse_suites(int argc, char **argv)
 	else if (streq(argv[i], "disk"))    mask |= SUITE_DISK;
 	else if (streq(argv[i], "mem"))	    mask |= SUITE_MEM;
 	else if (streq(argv[i], "flipc2"))  mask |= SUITE_FLIPC2;
+	else if (streq(argv[i], "ports"))   mask |= SUITE_PORTS;
+	else if (streq(argv[i], "krpc"))    mask |= SUITE_KRPC;
 	else if (streq(argv[i], "comb"))    mask |= SUITE_COMB;
 	else if (streq(argv[i], "cc"))	    mask |= SUITE_CC;
 	else if (streq(argv[i], "fault"))   mask |= SUITE_FAULT;
@@ -1836,8 +2132,28 @@ cc_worker_func(void *arg)
     bench_recv_buf_t	recv_buf;
     int			i;
 
-    while (!g_cc_go)		/* all workers begin together */
-	;
+    /*
+     * All workers begin together -- but YIELD while waiting, do not spin.
+     *
+     * ⚠️ This loop used to be a naked spin, and that is a livelock: the
+     * thread that sets g_cc_go is the one still inside the pthread_create
+     * loop above, so every worker already created is burning a processor
+     * while the releaser needs one.  At eight workers on four processors it
+     * wedges -- measured at 13% of runs on the current tree and 50% on the
+     * tree before it, always at the tail of the #319 scaling sweep, never
+     * earlier, because that is where the spinners first outnumber the
+     * processors by enough to starve the creator.
+     *
+     * A barrier whose waiters can starve its releaser is not a barrier.
+     *
+     * ⚠️ thread_switch and not swtch_pri: swtch_pri depresses the caller's
+     * priority until it next blocks, which would still be in force during
+     * the timed region immediately below -- a fix that silently changes the
+     * number the benchmark exists to produce.  This one gives up the
+     * processor and nothing else.
+     */
+    while (!g_cc_go)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
 
     for (i = 0; i < w->iters; i++) {
 	send_buf.head.msgh_bits =
@@ -2006,8 +2322,9 @@ fault_worker_func(void *arg)
     int			it;
     vm_size_t		off;
 
-    while (!g_fault_go)		/* all workers start together */
-	;
+    /* Same barrier, same defect, same fix -- see cc_worker_func above. */
+    while (!g_fault_go)
+	(void) syscall_thread_switch(MACH_PORT_NULL, SWITCH_OPTION_NONE, 0);
 
     for (it = 0; it < w->iters; it++) {
 	vm_address_t	addr = 0;
@@ -2197,6 +2514,12 @@ main(int argc, char **argv)
     /* ---------------------------------------------------------
      * Raw syscall benchmarks — measure SYSENTER/SYSEXIT cost
      * --------------------------------------------------------- */
+    if (suites & SUITE_KRPC) {
+	printf("--- Kernel RPC (where the MIG checks are) ---\n");
+	bench_kernel_rpc(SYSCALL_BENCH_ITERS);
+	printf("\n");
+    }
+
     if (suites & SUITE_SYSCALL) {
 	printf("--- Raw syscall (no IPC) ---\n");
 
@@ -2372,6 +2695,15 @@ main(int argc, char **argv)
     /* ---------------------------------------------------------
      * OOL (out-of-line) data benchmarks
      * --------------------------------------------------------- */
+    /* -----------------------------------------------------------
+     * Out-of-line port arrays, by count (#415)
+     * ----------------------------------------------------------- */
+    if (suites & SUITE_PORTS) {
+	printf("--- Out-of-line port arrays (intra-task) ---\n");
+	bench_ool_ports_sweep();
+	printf("\n");
+    }
+
     if (suites & SUITE_OOL) {
 	printf("--- OOL data (intra-task, PHYSICAL_COPY) ---\n");
 

@@ -66,6 +66,7 @@
 #include <norma_device.h>
 #include <zone_debug.h>
 #include <mach_kdb.h>
+#include <mach_net_in_kernel.h>
 #if	NORMA_DEVICE
 #include <dipc.h>
 #endif
@@ -145,8 +146,7 @@ extern void		log_thread_action (char *, long, long, long);
 extern void		io_done_queue_add(io_done_queue_t queue, io_req_t ior);
 extern void		io_done_thread_continue(void);
 extern void		ds_no_senders(
-				mach_no_senders_notification_t
-						* notification);
+				ipc_port_t	dev_port);
 
 #if	MACH_KDB
 unsigned int db_count_io_done_list(io_done_queue_t	queue);
@@ -1647,10 +1647,10 @@ ds_read_done(
 	    if (!warned) {
 		warned = 1;
 		printf("ds_read_done: NULL io_data, size_read=%d "
-		       "(op=0x%x count=%d residual=%d err=%d dev=0x%x name=%s) -- "
+		       "(op=0x%x count=%d residual=%d err=%d dev=%p name=%s) -- "
 		       "clamping (warn-once)\n",
 		       size_read, ior->io_op, ior->io_count, ior->io_residual,
-		       ior->io_error, (unsigned int)ior->io_device,
+		       ior->io_error, ior->io_device,
 		       (ior->io_device && ior->io_device->dev_ops &&
 			ior->io_device->dev_ops->d_name)
 			   ? ior->io_device->dev_ops->d_name : "?");
@@ -1683,7 +1683,7 @@ ds_read_done(
 	     * Mark the data dirty (if the pages were filled by DMA, the
 	     * pmap module may think that they are clean).
 	     */
-	    pmap_modify_pages(kernel_pmap, start_sent, end_sent);
+	    pmap_modify_pages(pmap_kernel(), start_sent, end_sent);
 	}
 
 	/*
@@ -1950,13 +1950,10 @@ ds_device_map(
  */
 void
 ds_no_senders(
-	mach_no_senders_notification_t	*notification)
+	ipc_port_t		dev_port)
 {
 	device_t		device;
-	ipc_port_t		dev_port;
 	extern device_t		dev_port_lookup(ipc_port_t);
-
-	dev_port = (ipc_port_t) notification->not_header.msgh_remote_port;
 
 	/*
 	 * convert a port to its device structure.
@@ -2014,41 +2011,52 @@ ds_no_senders(
 		 * doing a ds_device_close(), do it now.
 		 */
 		if ( (rc=ds_device_close(device)) != D_SUCCESS )
-			printf("ds_no_senders() ds_device_close(%x) rc %d\n",
+			printf("ds_no_senders() ds_device_close(%p) rc %d\n",
 				device,rc);
 	}
 }
 
 boolean_t
 ds_notify(
+	ipc_port_t	   port,
 	mach_msg_header_t *msg)
 {
 	switch (msg->msgh_id) {
 		case MACH_NOTIFY_NO_SENDERS:
-		ds_no_senders((mach_no_senders_notification_t *) msg);
+		ds_no_senders(port);			/* #442 */
 		return TRUE;
 
 		default:
-		printf("ds_notify: strange notification %ld\n", msg->msgh_id);
+		printf("ds_notify: strange notification %d\n", msg->msgh_id);
 		return FALSE;
 	}
 }
 
 boolean_t
 ds_master_notify(
+	ipc_port_t	   port,
 	mach_msg_header_t *msg)
 {
 	extern ipc_port_t master_device_port;
 
-	assert(msg->msgh_remote_port == (mach_port_t)master_device_port);
+	assert(port == master_device_port);		/* #442 */
 
 	switch (msg->msgh_id) {
 	case MACH_NOTIFY_DEAD_NAME: {
+#if	MACH_NET_IN_KERNEL
 		mach_dead_name_notification_t *m;
 
 		m = (mach_dead_name_notification_t *)msg;
 		if (net_unset_filter((ipc_port_t)m->not_port))
 			return TRUE;
+#endif	/* MACH_NET_IN_KERNEL */
+		/*
+		 * The only thing that ever registered for a dead-name
+		 * notification on the master device port was a packet filter,
+		 * so with no in-kernel network there is nothing here to
+		 * recognise and the notification falls through to the report
+		 * below (#453).
+		 */
 		break;
 	}
 	default:

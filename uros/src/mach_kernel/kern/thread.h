@@ -547,6 +547,23 @@ typedef struct thread_shuttle	*thread_shuttle_t;
 #define SAFE_MISCELLANEOUS		-6
 #define SAFE_INTERNAL_RECEIVE		-7
 
+/*
+ * The most negative sentinel above.
+ *
+ * thread_block() is handed either a real continuation -- a function pointer --
+ * or one of these sentinels smuggled through the same argument, and has to
+ * tell them apart.  It does so by address: a sentinel sits in the last
+ * SAFE_POINT_SENTINEL_MAX addresses of the address space, where no function
+ * can be.
+ *
+ * ⚠️ Update this when a sentinel is added.  It used to be spelled out at the
+ * test site as the literal 0xFFFFFFF9 -- which is (unsigned int)-7, correct
+ * only for a 32-bit machine and only for as long as the list ended at -7.
+ * Two facts that had to agree, written down in two places, in two forms, one
+ * of which did not mention the other (#453).
+ */
+#define SAFE_POINT_SENTINEL_MAX		7
+
 extern thread_act_t active_kloaded[NCPUS];	/* "" kernel-loaded acts */
 extern vm_offset_t active_stacks[NCPUS];	/* active kernel stacks */
 extern vm_offset_t kernel_stack[NCPUS];

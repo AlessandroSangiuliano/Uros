@@ -98,6 +98,23 @@
 #include <i386/iopb.h>
 #include <i386/seg.h>
 #include <i386/iopb_entries.h>
+/*
+ * #448/#449: the interface, so the compiler can compare it with what is
+ * implemented below.
+ *
+ * These three routines are MIG entry points, and the generated stub is
+ * compiled in its own translation unit against mach_i386_server.h -- which
+ * declares them from the .defs, correctly.  This file declared them itself,
+ * differently, and both units were internally consistent: C compares nothing
+ * across them and the linker matches on the name alone, so a thread_t here
+ * against a thread_act_t there was a page fault waiting for the first caller
+ * to arrive through the interface rather than from inside the kernel.
+ *
+ * user_ldt.c, in the same subsystem, has always included this header and has
+ * always had the right type.  That is not a coincidence, it is the mechanism:
+ * with both declarations in one unit the mismatch is a build error.
+ */
+#include <mach/mach_i386_server.h>
 
 /*
  * A set of ports for an IO device.
@@ -368,7 +385,7 @@ iopb_destroy(
  */
 kern_return_t
 i386_io_port_add(
-	thread_t	thread,
+	thread_act_t	thr_act,
 	device_t	device)
 {
 	pcb_t		pcb;
@@ -376,11 +393,21 @@ i386_io_port_add(
 	io_port_t	io_port;
 	io_use_t	iu, old_iu;
 
-	if (thread == THREAD_NULL
+	/*
+	 * #448: an act, because that is what arrives.  mach_i386.defs declares
+	 * this argument thread_act_t, so migcom translates the port with
+	 * convert_port_to_act and the generated stub hands us one; taking it as
+	 * a thread_t and reaching for ->top_act read a pointer out of a field
+	 * that is not one, and the kernel faulted at cr2=0xec.  Nothing ever
+	 * noticed because nothing ever called this through MIG -- the only
+	 * in-tree caller is io_emulate.c, from inside the kernel, which passed
+	 * a real thread and therefore matched the wrong declaration.
+	 */
+	if (thr_act == THR_ACT_NULL
 	 || device == DEVICE_NULL)
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thr_act->mact.pcb;
 
 	new_io_tss = 0;
 	iu = (io_use_t) kalloc(sizeof(struct io_use));
@@ -469,7 +496,7 @@ i386_io_port_add(
  */
 kern_return_t
 i386_io_port_remove(
-	thread_t	thread,
+	thread_act_t	thr_act,
 	device_t	device)
 {
 	pcb_t		pcb;
@@ -477,11 +504,11 @@ i386_io_port_remove(
 	io_port_t	io_port;
 	io_use_t	iu;
 
-	if (thread == THREAD_NULL
+	if (thr_act == THR_ACT_NULL		/* #448 -- see i386_io_port_add */
 	 || device == DEVICE_NULL)
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thr_act->mact.pcb;
 
 	simple_lock(&iopb_lock);
 
@@ -537,27 +564,46 @@ i386_io_port_remove(
  */
 
 kern_return_t
-i386_io_port_list(thread, list, list_count)
-	thread_t	thread;
-	device_t	**list;
-	unsigned int	*list_count;
+i386_io_port_list(
+	thread_act_t	thr_act,		/* #448 -- an act, not a thread */
+	device_t	**list,
+	unsigned int	*list_count)
 {
 	register pcb_t	pcb;
 	register iopb_tss_t io_tss;
 	unsigned int	count = 0, alloc_count;
 	device_t	*devices = NULL;
-	vm_size_t	size_needed, size;
-	vm_offset_t	addr;
+	/*
+	 * #445: both must start at zero, and GCC was right to say so.
+	 *
+	 * The loop below reads `size` before anything writes it -- once to
+	 * decide whether the buffer it has is big enough, and once to decide
+	 * whether it holds a buffer at all:
+	 *
+	 *	if (size_needed <= size)  break;
+	 *	if (size != 0)            KFREE(addr, size, rt);
+	 *
+	 * so a non-zero value left on the stack makes the first pass either
+	 * leave the loop with nothing allocated and then use `addr`, or hand
+	 * kfree() an arbitrary address with an arbitrary length.  This is a
+	 * MIG routine, so the caller is userland.
+	 *
+	 * `size == 0` is the loop's way of saying "nothing held yet"; that is
+	 * a contract, not a hint, and host.c's twin (processor_set_list) has
+	 * always stated it explicitly.  This one never did.
+	 */
+	vm_size_t	size_needed, size = 0;
+	vm_offset_t	addr = 0;
 	int		i;
 	boolean_t rt = FALSE; /* ### This boolean is FALSE, because there
 			       * currently exists no mechanism to determine
 			       * whether or not the reply port is an RT port
 			       */
 
-	if (thread == THREAD_NULL)
+	if (thr_act == THR_ACT_NULL)		/* #448 */
 	    return KERN_INVALID_ARGUMENT;
 
-	pcb = thread->top_act->mact.pcb;
+	pcb = thr_act->mact.pcb;
 
 	alloc_count = 16;		/* a guess */
 

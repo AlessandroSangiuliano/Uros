@@ -1823,9 +1823,9 @@ thread_activation_create(task_t task, mach_port_t name,
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PORT)
-		printf("thr_act on %s=%x stack=%x thr_act=%x\n",
+		printf("thr_act on %s=%p stack=%lx thr_act=%p\n",
 		       (is_port ? "port" : "pset"),
-		       object, user_stack, thr_act);
+		       object, (unsigned long) user_stack, thr_act);
 #endif	/* MACH_ASSERT */
 
 	/* Assign the activation to the thread_pool.  */
@@ -1840,7 +1840,7 @@ thread_activation_create(task_t task, mach_port_t name,
 
 #if	MACH_ASSERT
 	if (watchacts & WA_PORT)
-		printf("\tpool_port=%x thr_act=%x\n", (ipc_port_t)object, thr_act);
+		printf("\tpool_port=%p thr_act=%p\n", (ipc_port_t)object, thr_act);
 #endif	/* MACH_ASSERT */
 
 	/* Pass our reference to the activation back to the user.  */

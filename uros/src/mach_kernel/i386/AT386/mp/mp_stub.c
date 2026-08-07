@@ -37,10 +37,17 @@
 #include <vm/vm_kern.h>		/* kmem_alloc (#308) */
 #include <i386/cpu_number.h>	/* cpu_number() (#304) */
 #include <i386/lapic.h>		/* lapic_enable / lapic_send_ipi (#302) */
+#include <i386/fpu.h>		/* fpu_sanity_check (#309) */
+#include <i386/hwp.h>		/* hwp_init_cpu (#358) */
 #include <kern/spl.h>		/* splhigh (#370) */
 #include <i386/mp_desc.h>	/* mp_desc_table / interrupt_stack (#308) */
 #include <i386/lock.h>		/* atomic_incl (#344 bring-up barrier) */
 #include <i386/pic.h>		/* NINTR */
+#include <i386/proc_reg.h>	/* #445: CR4_PGE, get_cr4, set_cr4 -- this file
+				 * used to redefine CR4_PGE and re-declare both
+				 * accessors.  The two definitions agreed, which
+				 * is exactly why a divergence would have been
+				 * silent: one hardware bit, one header. */
 #include <i386/ipl.h>		/* SPLHI */
 #include <chips/busses.h>	/* intr_t */
 
@@ -275,9 +282,6 @@ start_other_cpus(void)
  * the scheduler.
  */
 extern void init_fpu(void);
-extern unsigned int get_cr4(void);
-extern void set_cr4(unsigned int);
-#define	CR4_PGE	0x80	/* enable global PTEs */
 
 static void
 ap_machine_init(void)
@@ -316,20 +320,14 @@ slave_machine_init(void)
 	}
 
 	/* #309 acceptance (AP arm): same SSE2 + x87 sanity check the
-	 * BSP runs from setup_main.  Will #UD here if ap_machine_init
-	 * didn't program CR4 / FPU correctly. */
-	{
-		extern void fpu_sanity_check(void);
-		fpu_sanity_check();
-	}
+	 * BSP runs from machine_kernel_ready.  Will #UD here if
+	 * ap_machine_init didn't program CR4 / FPU correctly. */
+	fpu_sanity_check();
 
 	/* #358: hardware P-states on this AP -- enable HWP if the firmware
 	 * did not, apply the -E EPP bias.  Silent: the BSP printed the
 	 * verdict line, start_other_cpus prints the per-CPU summary. */
-	{
-		extern void hwp_init_cpu(boolean_t bsp);
-		hwp_init_cpu(FALSE);
-	}
+	hwp_init_cpu(FALSE);
 
 	/* #344: announce this AP is fully past CPU-state init (LAPIC enabled,
 	 * FPU sane).  The BSP gates ap_can_run on every AP reaching here, so the

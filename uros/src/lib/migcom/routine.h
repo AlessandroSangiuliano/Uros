@@ -573,6 +573,9 @@ extern int rtCountArgDescriptors(argument_t *args, int *argcount);
 			       RPCOutStruct(arg))
 
 
+/* #442: the index of an argument's first descriptor among the message's */
+int rtKPDIndex(routine_t *rt, argument_t *arg, u_int mask);
+
 #endif	/* _ROUTINE_H */
 
 

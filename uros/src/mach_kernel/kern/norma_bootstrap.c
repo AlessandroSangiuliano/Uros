@@ -36,7 +36,6 @@
 #include <norma_task.h>
 #include <norma_vm.h>
 #include <kern/misc_protos.h>
-#include <flipc.h>
 
 #if	DIPC
 #include <dipc/dipc_funcs.h>
@@ -44,10 +43,6 @@
 
 #if	NORMA_VM
 #include <xmm/xmm_obj.h>
-#endif
-
-#if	FLIPC
-#include <flipc/flipc_usermsg.h>
 #endif
 
 void
@@ -60,8 +55,4 @@ norma_bootstrap(void)
 #if	NORMA_VM
 	norma_vm_init();
 #endif	/* NORMA_VM */
-
-#if	FLIPC
-	flipc_system_init();
-#endif	/* FLIPC */	
 }

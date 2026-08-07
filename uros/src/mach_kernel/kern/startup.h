@@ -37,6 +37,26 @@ extern void	setup_main(void);
 /* Initialize machine dependent stuff */
 extern void	machine_init(void);
 
+/*
+ * The second machine-dependent point in setup_main(), and the one that has a
+ * working kernel around it (#453).
+ *
+ * machine_init() above runs early, when nothing else exists.  This one runs
+ * after task_init(), act_init(), thread_init() and subsystem_init(), so the
+ * machine may do here what it could not do there: take a lock, print, fail an
+ * assertion, or trip a fault it can survive.  Everything a machine wants to
+ * check about itself, and every late initialisation that needs the kernel to
+ * be up, belongs here.
+ *
+ * ⚠️ Declared here rather than as an `extern' inside setup_main().  It used to
+ * be four block-local externs naming i386 functions by hand -- fpu_sanity_check
+ * and hwp_init_cpu among them -- which means the machine-independent kernel
+ * held a private opinion about their signatures that no other machine could
+ * satisfy and no compiler could ever check against the definitions (#448).
+ * Every machine must define this, and the empty body is a legitimate answer.
+ */
+extern void	machine_kernel_ready(void);
+
 #if	NCPUS > 1
 
 extern void	slave_main(void);
@@ -50,6 +70,34 @@ extern void	slave_machine_init(void);
 
 /* Start slave processors */
 extern void	start_other_cpus(void);
+
+/*
+ * Every processor has an idle thread now (#461).
+ *
+ * Called from start_kernel_threads(), after the loop that gives each
+ * configured processor an idle thread and before bootstrap_create().  It
+ * exists for machines that wake their processors BEFORE the kernel is
+ * entered, which is a thing a machine may reasonably do -- x86-64 needs its
+ * processors online for its own bring-up checks, long before there is a
+ * scheduler -- and which leaves them with nowhere to go.  An idle thread is
+ * the first thing such a processor needs and the last thing to appear, so
+ * this is the earliest moment at which one of them can be let in.
+ *
+ * ⚠️ NOT the same point as start_other_cpus(), and the difference is the
+ * whole reason this exists.  That call is deliberately the last thing in
+ * start_kernel_threads(), after bootstrap_create() -- and on a machine whose
+ * bootstrap_create() cannot complete, everything after it is unreachable.
+ *
+ * Safe here because the reason start_other_cpus() is last is closed by
+ * construction rather than by ordering: bootstrap_create() builds its child
+ * thread SUSPENDED and resumes it in its own last statement, so no processor
+ * can pick the child up half-built however early it starts scheduling.
+ *
+ * Every machine must define this, and the empty body is a legitimate answer:
+ * a machine that starts its processors from start_other_cpus() has nothing
+ * to release here.
+ */
+extern void	machine_processors_ready(void);
 
 #endif	/* NCPUS > 1 */
 #endif	/* _KERN_STARTUP_H_ */

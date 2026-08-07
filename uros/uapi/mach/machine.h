@@ -231,6 +231,21 @@ extern struct machine_slot	machine_slot[NCPUS];
 #define CPU_TYPE_POWERPC	((cpu_type_t) 20)
 
 /*
+ * x86-64 (#461).
+ *
+ * A type of its own and not CPU_TYPE_I386 with a wider word.  machine_slot[]
+ * is what host_info() and processor_info() answer with, so this is the number
+ * a task gets when it asks what it is running on -- and a task told "i386" on
+ * a machine with a different register file, a different calling convention and
+ * a different pointer width has been told something it cannot act on.
+ *
+ * Added rather than reused because the alternative is the plausible wrong
+ * answer, which is the kind that is never questioned.  Additive: no existing
+ * value moves, and nothing that runs today reports it.
+ */
+#define CPU_TYPE_X86_64		((cpu_type_t) 21)
+
+/*
  *	Machine subtypes (these are defined here, instead of in a machine
  *	dependent directory, so that any program can get all definitions
  *	regardless of where is it compiled).
@@ -319,6 +334,12 @@ extern struct machine_slot	machine_slot[NCPUS];
 #define	CPU_SUBTYPE_CBUS	((cpu_subtype_t) 5)	/* Cbus (Compaq) */
 #define	CPU_SUBTYPE_MBUS	((cpu_subtype_t) 6)	/* Mbus (Corollary) */
 #define	CPU_SUBTYPE_MPS		((cpu_subtype_t) 7)	/* Intel MP Spec. */
+
+/*
+ *	x86-64 subtypes (#461).
+ */
+
+#define	CPU_SUBTYPE_X86_64_ALL	((cpu_subtype_t) 1)	/* long mode, ACPI */
 
 /*
  *	Mips subtypes.

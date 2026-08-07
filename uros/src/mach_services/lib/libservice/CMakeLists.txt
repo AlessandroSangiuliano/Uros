@@ -9,7 +9,7 @@ set(SERVICE_HEADER "${CMAKE_BINARY_DIR}/generated/service.h")
 
 add_custom_command(
   OUTPUT ${SERVICE_USER_C} ${SERVICE_SERVER_C} ${SERVICE_HEADER}
-  COMMAND ${CMAKE_C_COMPILER} -E -P -x c
+  COMMAND ${CMAKE_C_COMPILER} -E -x c
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
@@ -19,7 +19,7 @@ add_custom_command(
     -header ${SERVICE_HEADER}
     -user ${SERVICE_USER_C}
     -server ${SERVICE_SERVER_C}
-  DEPENDS migcom ${SERVICE_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${SERVICE_DEFS}
   COMMENT "MIG: service.defs"
   VERBATIM
 )

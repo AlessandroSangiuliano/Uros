@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <mach.h>
+#include <mach/mig_errors.h>	/* #443: MIG_BAD_ARGUMENTS, mig_reply_error_t */
 #include <mach/bootstrap.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
@@ -129,6 +130,200 @@ wait_for_cap_server(void)
             return port;
         thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 50);
     }
+}
+
+/*
+ * Test [6]: a complex message the kernel must refuse halfway (#442).
+ *
+ * ipc_kmsg_copyin_body translates the descriptors one at a time and calls
+ * ipc_kmsg_clean_partial when one of them is bad, to give back the rights
+ * it has already taken.  Nothing in this tree exercised that path: a boot
+ * plus the whole benchmark suite reaches it zero times, so any claim about
+ * it was a claim about code that had never run.
+ *
+ * The message below carries two port descriptors.  The first names a port
+ * this task really owns, so the kernel acquires a right for it; the second
+ * names nothing, so the translation fails with the first already done.
+ *
+ * What is being checked is not the error code alone -- it is that the port
+ * survives.  If the unwind released the first right twice the port would be
+ * gone, and if it released it not at all the right would leak; sending on
+ * the same port afterwards and receiving that message back says the count
+ * came home.
+ */
+static int
+bad_descriptor_unwind(void)
+{
+    typedef struct {
+        mach_msg_header_t          head;
+        mach_msg_body_t            body;
+        mach_msg_port_descriptor_t good;
+        mach_msg_port_descriptor_t bad;
+    } bad_msg_t;
+
+    typedef struct {
+        mach_msg_header_t   head;
+        mach_msg_trailer_t  trailer;
+    } plain_recv_t;
+
+    mach_port_t   port = MACH_PORT_NULL;
+    bad_msg_t     msg;
+    plain_recv_t  back;
+    kern_return_t kr;
+    int           ok = 1;
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [6] port allocate FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+    kr = mach_port_insert_right(mach_task_self(), port, port,
+                                MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [6] insert right FAIL kr=%d\n", (int)kr);
+        return 0;
+    }
+
+    memset(&msg, 0, sizeof(msg));
+    msg.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0) |
+                         MACH_MSGH_BITS_COMPLEX;
+    msg.head.msgh_size        = sizeof(msg);
+    msg.head.msgh_remote_port = port;
+    msg.head.msgh_local_port  = MACH_PORT_NULL;
+    msg.head.msgh_id          = 442;
+    msg.body.msgh_descriptor_count = 2;
+
+    msg.good.name        = port;
+    msg.good.disposition = MACH_MSG_TYPE_MAKE_SEND;
+    msg.good.type        = MACH_MSG_PORT_DESCRIPTOR;
+
+    /* A name no task holds: the generation bits alone make it impossible. */
+    msg.bad.name         = (mach_port_t) 0xdeadbeefu;
+    msg.bad.disposition  = MACH_MSG_TYPE_COPY_SEND;
+    msg.bad.type         = MACH_MSG_PORT_DESCRIPTOR;
+
+    kr = mach_msg(&msg.head, MACH_SEND_MSG, sizeof(msg), 0,
+                  MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr == MACH_MSG_SUCCESS) {
+        printf("cap_test: [6] bad descriptor was ACCEPTED — FAIL\n");
+        return 0;
+    }
+    printf("cap_test: [6] bad descriptor rejected kr=0x%x\n", (unsigned)kr);
+
+    /* The port must still be usable, exactly once. */
+    memset(&back, 0, sizeof(back));
+    back.head.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+    back.head.msgh_size        = sizeof(back.head);
+    back.head.msgh_remote_port = port;
+    back.head.msgh_local_port  = MACH_PORT_NULL;
+    back.head.msgh_id          = 443;
+
+    kr = mach_msg(&back.head, MACH_SEND_MSG, sizeof(back.head), 0,
+                  MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (kr != MACH_MSG_SUCCESS) {
+        printf("cap_test: [6] port did not survive the unwind kr=0x%x\n",
+               (unsigned)kr);
+        ok = 0;
+    } else {
+        kr = mach_msg(&back.head, MACH_RCV_MSG, 0, sizeof(back),
+                      port, 2000, MACH_PORT_NULL);
+        if (kr != MACH_MSG_SUCCESS || back.head.msgh_id != 443) {
+            printf("cap_test: [6] follow-up receive FAIL kr=0x%x id=%d\n",
+                   (unsigned)kr, (int)back.head.msgh_id);
+            ok = 0;
+        } else {
+            printf("cap_test: [6] port survived the unwind: OK\n");
+        }
+    }
+
+    (void)mach_port_destroy(mach_task_self(), port);
+    return ok;
+}
+
+/*
+ * [7]/[8] (#443): the MIG argument checks fire, and say who refused.
+ *
+ * The suites have been reporting "zero checks fired" ever since these were
+ * compiled back in, and that number was worth nothing: an observation that
+ * has never been shown able to see a firing cannot be read as evidence that
+ * none happened.  Nothing in the tree sends a malformed message, so the
+ * whole diagnostic path -- the check, the rate-limited counter, the printf
+ * -- had never once executed.  These two cases execute it deliberately.
+ *
+ * The trick is which size the stub actually reads.  Not the msgh_size the
+ * caller writes into the header: ipc_kmsg_get overwrites that with the
+ * send_size argument of mach_msg (ipc_kmsg.c, `kmsg->ikm_header.msgh_size =
+ * size`).  So the malformed message is made by lying to mach_msg about how
+ * much to send, not by lying in the header.
+ *
+ * Both sides of the tree are covered on purpose, because they are compiled
+ * differently: the kernel's 18 server stubs had TypeCheck off from the port
+ * until this issue, userland's 179 have always had it on and until now
+ * rejected in silence.
+ */
+static int
+mig_check_fires(const char *label, mach_port_t dest,
+                mach_msg_id_t id, mach_msg_size_t bad_size)
+{
+    /*
+     * One buffer, not two.  mach_msg sends from and receives into the same
+     * storage, so the reply lands on top of the request; a separate reply
+     * struct is never written, and telling mach_msg it may receive more
+     * than this buffer holds is how the message after it gets corrupted.
+     * rcv_size below is sizeof(msg) for that reason and no other.
+     */
+    union {
+        mach_msg_header_t  head;
+        mig_reply_error_t  err;
+        char               space[512];
+    } msg;
+
+    mach_port_t   reply = MACH_PORT_NULL;
+    kern_return_t kr;
+
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &reply);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: %s reply port allocate FAIL kr=%d\n", label, (int)kr);
+        return 0;
+    }
+
+    memset(&msg, 0, sizeof(msg));
+    msg.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND,
+                                        MACH_MSG_TYPE_MAKE_SEND_ONCE);
+    msg.head.msgh_size        = bad_size;
+    msg.head.msgh_remote_port = dest;
+    msg.head.msgh_local_port  = reply;
+    msg.head.msgh_id          = id;
+
+    kr = mach_msg(&msg.head, MACH_SEND_MSG | MACH_RCV_MSG, bad_size,
+                  sizeof(msg), reply, 5000, MACH_PORT_NULL);
+
+    if (kr != MACH_MSG_SUCCESS) {
+        printf("cap_test: %s no reply kr=0x%x — check did not answer\n",
+               label, (unsigned)kr);
+        (void)mach_port_destroy(mach_task_self(), reply);
+        return 0;
+    }
+
+    (void)mach_port_destroy(mach_task_self(), reply);
+
+    if (msg.err.RetCode != MIG_BAD_ARGUMENTS) {
+        printf("cap_test: %s expected MIG_BAD_ARGUMENTS (%d), got %d "
+               "(reply id=%d size=%d bits=0x%x)\n",
+               label, MIG_BAD_ARGUMENTS, (int)msg.err.RetCode,
+               (int)msg.err.Head.msgh_id, (int)msg.err.Head.msgh_size,
+               (unsigned)msg.err.Head.msgh_bits);
+        return 0;
+    }
+
+    /*
+     * The routine name goes to the console, not into this reply, so what is
+     * asserted here is that the check fired; that it named the routine is
+     * read from the serial log ("mig: <routine> refused a message: ...").
+     */
+    printf("cap_test: %s refused with MIG_BAD_ARGUMENTS: OK "
+           "(console must name the routine above)\n", label);
+    return 1;
 }
 
 int
@@ -509,6 +704,29 @@ main(int argc, char **argv)
             }
         }
     }
+
+    if (!bad_descriptor_unwind())
+        pass = 0;
+
+    /*
+     * #443.  Two stubs compiled on opposite sides of the tree.
+     *
+     * [7] mach_port_type is msgh_id 3204 and wants exactly 36 bytes; the
+     *     kernel is the half where these checks were off from the port.
+     * [8] netname_look_up is msgh_id 1041 and wants 48 upwards; name_server
+     *     is userland, where they have always been on and always silent.
+     *
+     * Sizes and ids come from the generated stubs, and the _Static_asserts
+     * #416 put around them are what keeps those numbers honest per target.
+     */
+    if (!mig_check_fires("[7] kernel stub (mach_port_allocate)",
+                         mach_task_self(), 3204, 32))
+        pass = 0;
+
+    if (name_server_port != MACH_PORT_NULL &&
+        !mig_check_fires("[8] userland stub (netname_look_up)",
+                         name_server_port, 1041, 40))
+        pass = 0;
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");

@@ -40,4 +40,4 @@ type backing_store_info_t		= array[*:20] of integer_t;
 
 import <mach/default_pager_types.h>;
 
-#endif	_MACH_DEFAULT_PAGER_TYPES_DEFS_
+#endif	/* _MACH_DEFAULT_PAGER_TYPES_DEFS_ */

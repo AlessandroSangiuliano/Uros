@@ -22,6 +22,7 @@
 #include <kern/klog.h>
 #include <kern/host.h>
 #include <string.h>
+#include <mach/mach_klog_server.h>	/* #448: interfaccia contro implementazione */
 
 static char		klog_buf[KLOG_BUF_SIZE];
 static natural_t		klog_head;
@@ -103,7 +104,10 @@ klog_read(natural_t start,
 kern_return_t
 host_get_log(host_t host,
 	     natural_t start,
-	     char *buf,
+	     klog_data_t buf,		/* #448: the interface's type, which
+					 * carries the bound this writes within;
+					 * `char *` decays the same but throws
+					 * that away */
 	     mach_msg_type_number_t *count,
 	     natural_t *next)
 {

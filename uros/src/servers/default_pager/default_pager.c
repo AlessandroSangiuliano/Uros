@@ -969,6 +969,32 @@ boolean_t dp_parse_argument(char *av)
 				dprintf(("Bad argument (%s) - ignored\n", av));
 			return(TRUE);
 		}
+		/*
+		 * #449: dpofail=N -- make the next N wired allocations inside
+		 * default_pager_objects fail, so dpo_nomemory runs.
+		 *
+		 * That cleanup path is only reachable when vm_allocate_wired
+		 * fails, and the only ways to make it fail for real are to
+		 * exhaust the wired budget or to create enough pager objects
+		 * to need megabytes of it.  Both take the whole system with
+		 * them, so neither tells you whether dpo_nomemory releases
+		 * what it took -- something else falls over first.
+		 *
+		 * Zero by default: with no argument this costs one compare on
+		 * a path that already does two allocations.  It stays in the
+		 * tree for the same reason #444's stack probe did -- a path
+		 * verified once and then made unreachable again is a claim,
+		 * not a test.
+		 */
+		if (strprefix(av,"dpofail")) {
+			extern unsigned int dp_fail_wired;
+			dp_fail_wired = d_to_i(rhs);
+			printf("(default_pager): dpofail=%u -- the next %u "
+			       "wired allocations in default_pager_objects "
+			       "will be refused (#449)\n",
+			       dp_fail_wired, dp_fail_wired);
+			return(TRUE);
+		}
 		/* else if strprefix(av,"another_argument")) {
 			handle_another_argument(av);
 			return(TRUE);

@@ -71,7 +71,7 @@ function(add_mig_defs DEFS_FILE)
       -server ${SERVER_C}
       -user ${USER_C}
       ${DEFS_FILE}
-    DEPENDS migcom ${DEFS_FILE}
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
     COMMENT "MIG: ${DEFS_NAME}"
     VERBATIM
   )
@@ -83,7 +83,7 @@ endfunction()
 # Tool host principali: migcom (e in seguito mig se necessario).
 add_subdirectory(migcom)
 
-# Generate device/device.h from device.defs via MIG (shared by libmach, libflipc, etc.)
+# Generate device/device.h from device.defs via MIG (shared by libmach, libflipc2, etc.)
 set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/include/device/device.defs")
 # Public header for #include <device/device.h>
 set(DEVICE_HEADER "${CMAKE_BINARY_DIR}/generated/include/device/device.h")
@@ -108,7 +108,7 @@ add_custom_command(
     -user ${DEVICE_USER_C}
     -server ${DEVICE_SERVER_C}
     ${DEVICE_DEFS}
-  DEPENDS migcom ${DEVICE_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEVICE_DEFS}
   COMMENT "MIG: device.defs -> device.h + device_server.h"
   VERBATIM
 )
@@ -132,7 +132,7 @@ maybe_add(libmach)
 maybe_add(libnetname)
 maybe_add(libpthreads)
 maybe_add(libblk)
-maybe_add(libflipc)
+
 maybe_add(libflipc2)
 maybe_add(libvfs)
 maybe_add(libelf)

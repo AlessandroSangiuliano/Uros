@@ -168,8 +168,20 @@ extern void		insque(
 				queue_entry_t	entry,
 				queue_entry_t	pred);
 
-/* Dequeue element */
-extern int		remque(
+/*
+ * Dequeue element.
+ *
+ * ⚠️ Returns queue_entry_t, and used to return int.  The element it unlinks
+ * is a pointer, so on a 64-bit machine the old return type handed back the
+ * low half of it -- a value that is not the element and not anything else.
+ *
+ * It was harmless in the sense that nothing has ever used the result: all
+ * seven callers in the tree discard it, one of them explicitly with (void).
+ * It was not harmless as a declaration, which is what 105 of this target's
+ * warnings were saying -- one per translation unit that includes this header
+ * (#453, and the class #415 is about).
+ */
+extern queue_entry_t	remque(
 				queue_entry_t elt);
 
 #else
@@ -246,14 +258,14 @@ insque(
 	pred->next = entry;
 }
 
-static __inline__ integer_t
+static __inline__ queue_entry_t
 remque(
 	register queue_entry_t elt)
 {
 	(elt->next)->prev = elt->prev;
 	(elt->prev)->next = elt->next;
 
-	return((integer_t)elt);
+	return(elt);
 }
 
 #endif	/* defined(__GNUC__) */

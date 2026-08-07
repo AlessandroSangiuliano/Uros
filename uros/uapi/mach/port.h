@@ -113,6 +113,7 @@
 
 #include <mach/boolean.h>
 #include <mach/machine/vm_types.h>
+#include <mach/machine/port_name.h>
 
 typedef natural_t mach_port_t;
 typedef mach_port_t mach_port_name_t;
@@ -146,11 +147,27 @@ typedef mach_port_t *mach_port_array_t;
  *  numbers changes, be sure to update IE_BITS_GEN_MASK and
  *  friends in ipc/ipc_entry.h.
  */
+/*
+ *  How many bits are generation is machine-dependent (#413): it is a trade
+ *  against the index, and how much index is reachable depends on how far the
+ *  entry table can grow, which depends on how large an entry is.  i386 keeps
+ *  what it has always had; x86-64 spends two unreachable index bits on the
+ *  window instead.  <mach/machine/port_name.h> is where each says so.
+ *
+ *  A generation arrives here left-justified in a word — that is the form it
+ *  has in ie_bits, and these macros exist to move it between that form and
+ *  the low bits of a name.  Written in terms of the width so the shifts
+ *  follow it instead of being repeated as numbers that can disagree.
+ */
 #ifndef NO_PORT_GEN
-#define	MACH_PORT_INDEX(name)		((name) >> 8)
-#define	MACH_PORT_GEN(name)		(((name) & 0xff) << 24)
+#define	MACH_PORT_GEN_SHIFT		(32 - MACH_PORT_GEN_BITS)
+#define	MACH_PORT_GEN_LOWMASK		((1U << MACH_PORT_GEN_BITS) - 1)
+
+#define	MACH_PORT_INDEX(name)		((name) >> MACH_PORT_GEN_BITS)
+#define	MACH_PORT_GEN(name)		\
+		(((name) & MACH_PORT_GEN_LOWMASK) << MACH_PORT_GEN_SHIFT)
 #define	MACH_PORT_MAKE(index, gen)	\
-		(((index) << 8) | (gen) >> 24)
+		(((index) << MACH_PORT_GEN_BITS) | (gen) >> MACH_PORT_GEN_SHIFT)
 #else
 #define	MACH_PORT_INDEX(name)		(name)
 #define	MACH_PORT_GEN(name)		(0)

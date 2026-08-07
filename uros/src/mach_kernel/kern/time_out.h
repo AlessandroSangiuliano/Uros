@@ -126,9 +126,18 @@ extern void	timeout_init(void);
 /* Softclock timer thread */
 extern void	timeout_thread(void);
 
+/*
+ * ⚠️ vm_offset_t, not natural_t.
+ *
+ * The argument is a program counter, and natural_t is 32 bits on every
+ * target -- so on a 64-bit machine the interface itself truncated the
+ * instruction pointer before the profiler ever saw it, and every kernel
+ * sample would have carried the low half of an address whose upper half is
+ * what says it is a kernel address at all (#453, #415).
+ */
 extern void	hertz_tick(
 			boolean_t	usermode, /* executing user code */
-			natural_t	pc);
+			vm_offset_t	pc);
 
 extern	void	softclock(void);
 

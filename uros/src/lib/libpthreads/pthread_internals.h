@@ -122,6 +122,20 @@ typedef struct _pthread
 					 * previous (already pool_get'd) thread is woken, so a
 					 * slot-keyed futex piles two threads on one key and
 					 * thread_wakeup_one() strands one of them. */
+	/*
+	 * #444: where a pooled thread resumes when it is reused.
+	 *
+	 * _pthread_pool_park used to CALL _pthread_pool_trampoline on
+	 * waking, from inside the frames of the pthread_exit that parked
+	 * it -- so every reuse nested another trampoline + user function +
+	 * exit + park onto the same stack and nothing unwound it.  A
+	 * thousand create/join cycles walked the stack into its guard page.
+	 *
+	 * Returning from the park is not enough: pthread_exit can be called
+	 * by the user at any depth, so the thread has to be put back at the
+	 * depth it started from, not one frame up -- see
+	 * PTHREAD_RESTART_ON_STACK in the machine-dependent header.
+	 */
 	void	       *tsd[_POSIX_THREAD_KEYS_MAX];  /* Thread specific data */
 } *pthread_t;
 

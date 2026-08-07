@@ -310,6 +310,7 @@
 #include <vm/vm_map.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <mach_net_in_kernel.h>
 #include <vm/vm_pageout.h>
 #include <machine/vm_tuning.h>
 #if	NORMA_VM
@@ -1548,7 +1549,9 @@ vm_pageout_scan(void)
 #endif	/* THREAD_SWAPPER */
 
 	stack_collect();
+#if	MACH_NET_IN_KERNEL
 	net_kmsg_collect();
+#endif
 	consider_task_collect();
 	consider_thread_collect();
 	cleanup_limbo_queue();

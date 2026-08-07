@@ -166,4 +166,4 @@ type mach_port_poly_t = polymorphic
 
 import <mach/std_types.h>;
 
-#endif	_MACH_STD_TYPES_DEFS_
+#endif	/* _MACH_STD_TYPES_DEFS_ */

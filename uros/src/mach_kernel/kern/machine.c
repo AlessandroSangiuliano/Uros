@@ -353,6 +353,20 @@ processor_request_action(
 	default:
 	    printf("state: %d\n", processor->state);
 	    panic("processor_request_action: bad state");
+	    /*
+	     * #445: panic() is not noreturn, and it means it -- on a double
+	     * panic under MACH_KDB it unlocks, restores spl and returns, so
+	     * the operator can carry on from the debugger.  That path reaches
+	     * the return below, which is why GCC called old_next_pset
+	     * possibly-uninitialised and was right to.
+	     *
+	     * NULL is the defined answer here, not a placeholder: this
+	     * function's contract is that a non-NULL result is a pset the
+	     * caller must deallocate, so NULL says "nothing to hand back",
+	     * which is exactly true when we never got far enough to take one.
+	     */
+	    old_next_pset = PROCESSOR_SET_NULL;
+	    break;
     }
     simple_unlock(&action_lock);
     simple_unlock(&pset->idle_lock);

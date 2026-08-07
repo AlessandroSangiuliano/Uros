@@ -21,13 +21,13 @@ macro(mig_server_stub DEFS_FILE STEM OUT_DIR)
   set(_hdr   "${OUT_DIR}/${STEM}.h")
   add_custom_command(
     OUTPUT ${_srvC} ${_usrC} ${_hdr} ${_srvH}
-    COMMAND ${CMAKE_C_COMPILER} -E -P -x c ${MIG_INCLUDE_FLAGS} ${_defs}
+    COMMAND ${CMAKE_C_COMPILER} -E -x c ${MIG_INCLUDE_FLAGS} ${_defs}
       | $<TARGET_FILE:migcom>
         -header ${_hdr}
         -sheader ${_srvH}
         -user   ${_usrC}
         -server ${_srvC}
-    DEPENDS migcom ${_defs}
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${_defs}
     COMMENT "MIG: ${STEM}.defs -> ${STEM}Server.c"
     VERBATIM
   )
