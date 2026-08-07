@@ -159,9 +159,37 @@ void thread_state_from_frame(const struct trap_frame *frame,
  * built from a request that was going to be rejected is worse than either
  * outcome.
  */
-#define THREAD_STATE_OK		0
-#define THREAD_STATE_REFUSED	(-1)
-
+/*
+ * ⚠️ IT ANSWERS A QUESTION, NOT A STATUS CODE, AND THAT IS THE FIX (#408).
+ *
+ * This used to answer THREAD_STATE_OK (0) or THREAD_STATE_REFUSED (-1) — the
+ * shape of a kern_return_t — and act_machine_set_state() read the answer as a
+ * plain boolean:
+ *
+ *	if (!thread_state_to_frame(state, pcb->user))
+ *		return KERN_INVALID_ARGUMENT;
+ *
+ * which is exactly backwards for a code where zero means yes.  Both answers
+ * came out wrong, which is worse than getting one of them wrong: a valid state
+ * was WRITTEN to the frame and then reported as KERN_INVALID_ARGUMENT, and a
+ * state naming a segment base in the kernel half was refused by the conversion,
+ * changed nothing, and was reported as KERN_SUCCESS.  Two halves each
+ * reasonable on its own, no compiler able to compare them, standing from the
+ * day it was written until something finally called it — #448's shape again.
+ *
+ * So the two constants are gone rather than renumbered.  A named pair with zero
+ * for success is an *invitation* to read the answer as a status code, and the
+ * invitation was accepted; renumbering them would have made both spellings
+ * agree and left the invitation standing.  What is left is a predicate, like
+ * thread_state_bases_ok() below and answering in the same coin: NONZERO if the
+ * state was applied, zero if it was refused and the frame was not touched.
+ * There is one way to read that and it is right.
+ *
+ * ⚠️ It is deliberately not carried further into a type a wrong reading could
+ * not compile — a one-member structure would do that.  It would buy nothing
+ * here: with a predicate, every spelling a caller might reach for already gives
+ * the right answer, so there is no wrong reading left for a compiler to catch.
+ */
 int thread_state_to_frame(const struct x86_64_thread_state *state,
 			  struct trap_frame *frame);
 

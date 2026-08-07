@@ -162,16 +162,52 @@ fi
 #
 # So: having started, it must finish. This is the general shape -- a boot that
 # exists to answer a question fails when the question goes unanswered.
-if grep -aq 'preempt_test: starting' "$LOG"; then
-	if ! grep -aq 'preempt_test: PASS' "$LOG"; then
-		echo "  FAILED: the preemption test started and never reported."
-		echo "          Its failure mode is silence: a processor that is"
-		echo "          never taken from a thread that will not yield"
-		echo "          prints nothing at all (#459/#461)"
-		echo "  log: $LOG"
-		exit 1
+#
+# ── One mechanism, not one arm per test (#408) ─────────────────────────────
+#
+# This was written for preempt_test and then copied for the thread state
+# dispatch, and the third test proved the copying was the bug: fpu_stress
+# announced "3 threads on processor 1" on a machine that had dropped to
+# battery, ran out of watchdog before its verdict, and was reported as PASSED,
+# because nobody had copied the arm a third time. A rule that has to be
+# restated for each new test is a rule that is missing for the newest one.
+#
+# So the list is the thing to add to, and it is one line per test.
+must_report() {
+	# $1 the line that says it started · $2 the line that says it finished
+	# $3 what the silence means
+	grep -aq "$1" "$LOG" || return 0
+	if grep -aq "$2" "$LOG"; then
+		echo "  ${1%%:*}: reported"
+		return 0
 	fi
-	echo "  preemption test: PASS"
+	echo "  FAILED: '$1' appeared and '$2' never did."
+	echo "          $3"
+	echo "  log: $LOG"
+	exit 1
+}
+
+must_report 'preempt_test: starting' 'preempt_test: PASS' \
+	'Its failure mode is silence: a processor never taken from a thread that will not yield prints nothing at all (#459/#461).'
+must_report 'fpu_stress: 3 threads' 'fpu_stress: PASS' \
+	'The threads hold vector state for a second and then report; a boot cut short before that answers nothing (#408).'
+must_report 'state_test: the target is parked' 'state_test: PASS — 11' \
+	'thread_get_state() on a target that never stops waits for it for ever, and waiting for ever looks exactly like a short run (#408).'
+must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
+	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
+
+# And the one that must report on EVERY boot that gets far enough, which is a
+# different claim: it has no "started" line to pair with, because it runs
+# unconditionally from machine_kernel_ready() on the path kern/startup.c must
+# take. Silence there means it was not reached, and the reason is upstream of
+# the test.
+if grep -aq "$MI_ENTRY" "$LOG" && ! grep -aq 'state_test:' "$LOG"; then
+	echo "  FAILED: entered setup_main and the thread state dispatch test"
+	echo "          never reported.  It runs unconditionally from"
+	echo "          machine_kernel_ready(), so silence means it was not"
+	echo "          reached (#408)"
+	echo "  log: $LOG"
+	exit 1
 fi
 
 if [ "$NBAD" -gt 0 ]; then
@@ -204,7 +240,31 @@ if [ "${1:-}" = "--entry" ]; then
 	shift 2
 fi
 
-SECS=${1:-15}
+# ── The seconds are a BACKSTOP, not the instrument (#408) ──────────────────
+#
+# This used to be `timeout $SECS qemu ...', so how long the caller guessed
+# decided the verdict.  It decided one: fpu_stress announced its three threads,
+# the machine dropped to battery and ran at 1.40 GHz instead of 3.99, the boot
+# took three times as long, the watchdog cut it off before the answer and the
+# run was reported as PASSED.
+#
+# Losing performance to the governor is expected.  Losing the ANSWER to it is
+# not, and a verdict that depends on the processor's clock is not a verdict.
+#
+# So the run now ends when the KERNEL says it has ended, and the seconds only
+# stop a machine that is genuinely wedged.  A slower processor makes the run
+# take longer and changes nothing else -- which is the property the number
+# never had.
+#
+# ⚠️ The terminators are exhaustive on purpose, and each one is a real end:
+# the ordinary boot stops at bootstrap_create (#422), the double-fault boot
+# halts, and each test boot prints its own verdict.  A run whose end is not on
+# this list falls through to the deadline and is reported as CUT SHORT rather
+# than judged -- silence about a run nobody watched to the end is the failure
+# this whole file exists to stop.
+DONE_RE='No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|Assertion failed|panic\(cpu'
+
+SECS=${1:-90}
 [ $# -gt 0 ] && shift
 
 ninja -C "$BUILD" uros_iso >/dev/null
@@ -227,7 +287,7 @@ trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 
 mkdir -p "$(dirname "$LOG")"
 killall qemu-system-x86_64 2>/dev/null || true
-echo "=== booting uros-x86_64.iso (${SECS}s watchdog) $* ==="
+echo "=== booting uros-x86_64.iso (watchdog ${SECS}s, a backstop only) $* ==="
 
 # The whole stream goes to the log; the console keeps seeing the lines it
 # always showed. The verdict reads the log, not the filtered view, because a
@@ -248,10 +308,53 @@ case " $* " in
 *)		CPU_ARGS="-cpu max" ;;
 esac
 
+: > "$LOG"
+
 # shellcheck disable=SC2086
-timeout "$SECS" qemu-system-x86_64 $CPU_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS "$@" \
 	-cdrom "$BUILD/uros-x86_64.iso" \
-	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 || true
+	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
+QPID=$!
+
+# Watch the log, not the clock.
+#
+# A grace second after the terminator, because the last lines of a panic or of
+# a test verdict are still on their way out of the serial port when the line
+# that matched arrives -- killing on the instant would truncate exactly the
+# output somebody needs.
+DEADLINE=$(( $(date +%s) + SECS ))
+CUT_SHORT=0
+while kill -0 "$QPID" 2>/dev/null; do
+	if grep -aqE "$DONE_RE" "$LOG"; then
+		sleep 1
+		break
+	fi
+	if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+		CUT_SHORT=1
+		break
+	fi
+	sleep 0.2
+done
+
+kill "$QPID" 2>/dev/null || true
+wait "$QPID" 2>/dev/null || true
+
 grep -a "UrMach\|fault\|error\|Error\|panic\|^  " "$LOG" || true
+
+# Said here rather than left to the verdict, because it is a fact about the
+# OBSERVATION and not about the kernel: nothing was judged, because nothing was
+# watched to the end.
+if [ "$CUT_SHORT" = 1 ]; then
+	echo
+	echo "=== verdict ==="
+	echo "  FAILED: ${SECS}s elapsed and the kernel never reached an end this"
+	echo "          script recognises.  That is a run nobody watched to the"
+	echo "          end, not a run that passed -- if the machine is simply"
+	echo "          slow (check the governor: this one drops to 1.4 GHz on"
+	echo "          battery) give it more seconds; if it is wedged, that is"
+	echo "          the bug."
+	echo "  log: $LOG"
+	exit 1
+fi
 
 verdict

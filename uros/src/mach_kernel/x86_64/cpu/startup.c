@@ -32,6 +32,9 @@
 #include <cpu/regs.h>		/* #461: cpu_pause */
 #include <time/clock_event.h>	/* #459: the scheduler clock */
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
+#include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
+#include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
+#include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/trap.h>		/* trap_set_handler */
 
 /*
@@ -85,12 +88,29 @@ machine_init(void)
  *                       clock does under measurement, so it belongs with the
  *                       numbers rather than ahead of them (#358 is i386's).
  *
- * ⚠️ Empty, not absent, and not a panic: kern/startup.c calls it on the path
- * that must work, and every machine has to define it.
+ * ⚠️ Not empty any more, and the one thing in it is a test rather than
+ * bring-up: see below.
  */
 void
 machine_kernel_ready(void)
 {
+	/*
+	 * The thread state flavour dispatch, checked here because this is the
+	 * first point at which it can be (#408).
+	 *
+	 * It needs a task to hang a probe activation off and an allocator for
+	 * a floating-point area, which is task_init() and vm_mem_init(), both
+	 * of which kern/startup.c has run by now.  It needs nothing later — no
+	 * scheduler, no second processor, no user space — so it runs on every
+	 * boot rather than behind a flag.
+	 *
+	 * ⚠️ Before the first thread and before any port exists, which is the
+	 * point: act_machine_get_state() and act_machine_set_state() are the
+	 * only validation between a flavour number arriving from outside and a
+	 * copy into a caller's buffer, and on this target neither had ever
+	 * executed.
+	 */
+	thread_state_dispatch_test();
 }
 
 /*
@@ -206,6 +226,48 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('P') && want > 1)
 			preempt_test_run_remote();
+
+		/*
+		 * -G: thread_get_state() and thread_set_state() themselves,
+		 * against a thread that is genuinely stopped (#408).
+		 *
+		 * Here for the same reason as -P: the target has to be bound to
+		 * a processor that is already in the scheduler, and this is the
+		 * first instant at which one is.
+		 *
+		 * ⚠️ Returns, unlike the two around it, so the boot goes on to
+		 * bootstrap_create() as usual and the ordinary end-of-run checks
+		 * still apply.  What it leaves behind is one thread parked for
+		 * ever in a wait nobody will signal -- which is the price of a
+		 * target that thread_stop_wait() can actually stop, and why this
+		 * is not on the ordinary boot.
+		 */
+		if (boot_flag('G') && want > 1)
+			thread_state_entry_test();
+
+		/*
+		 * -A: may a return to ring 0 run an AST_APC handler? (#463)
+		 *
+		 * Here for the same reason as the tests around it: the probe
+		 * has to be bound to a processor already in the scheduler.
+		 * Returns, so the boot goes on to bootstrap_create() as usual.
+		 */
+		if (boot_flag('A') && want > 1)
+			kernel_ast_test();
+
+		/*
+		 * -F: does vector state survive an involuntary switch? (#408)
+		 *
+		 * Here for the same reason as -P: the threads have to be bound
+		 * to a processor that is already in the scheduler, and this is
+		 * the first instant at which one is.
+		 */
+		if (boot_flag('F') && want > 1) {
+			fpu_stress_run();
+			printf("fpu_stress: halting the machine — this boot "
+			       "was the test (#408)\n");
+			halt_all_cpus(FALSE);
+		}
 		return;
 	}
 

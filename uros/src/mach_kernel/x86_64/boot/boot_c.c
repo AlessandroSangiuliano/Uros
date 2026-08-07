@@ -1857,7 +1857,7 @@ static void thread_state_selftest(void)
 	out.fs_base = USER_BASE_PROBE;
 	out.gs_base = USER_BASE_PROBE + PAGE_SIZE_4K;
 
-	applied = thread_state_to_frame(&out, &frame) == THREAD_STATE_OK;
+	applied = thread_state_to_frame(&out, &frame);
 	thread_state_from_frame(&frame, &back);
 
 	regs_ok = applied && out.rax == back.rax && out.rbx == back.rbx
@@ -1917,7 +1917,7 @@ static void thread_state_selftest(void)
 
 	out.gs_base = (uint64_t)(uintptr_t)percpu();	/* a kernel address */
 
-	base_refused = thread_state_to_frame(&out, &frame) == THREAD_STATE_REFUSED;
+	base_refused = !thread_state_to_frame(&out, &frame);
 	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
 		if (((uint64_t *)&untouched)[i] != ((uint64_t *)&frame)[i])
 			base_refused = 0;
@@ -2457,7 +2457,23 @@ static void timer_selftest(void)
 		kputs(" — WRONG, it never counted\r\n");
 		return;
 	}
-	kputs(", measured against the 8254\r\n");
+	kputs(", measured against the 8254");
+
+	/*
+	 * And how many tries that took (#464).
+	 *
+	 * Printed only when it took more than one, so the ordinary boot reads
+	 * exactly as it always did -- but printed, because a retry nobody can
+	 * see is one nobody can tell from an absent one.  Every line of this
+	 * kind here is a boot that used to end in "no usable timer backend" on
+	 * a machine whose timer was fine.
+	 */
+	if (lapic_timer_calibrate_attempts() > 1) {
+		kputs(" (agreed on attempt ");
+		kputdec(lapic_timer_calibrate_attempts());
+		kputs(" — an earlier window was interfered with, #464)");
+	}
+	kputs("\r\n");
 
 	trap_set_handler(LAPIC_TIMER_VECTOR, timer_tick);
 	tick_reset();
