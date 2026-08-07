@@ -113,6 +113,17 @@ const char	*clock_event_name(void);
 
 /* The scheduler tick rate, in Hz, and its period in nanoseconds. */
 unsigned	clock_event_hz(void);
+
+/*
+ * Print whatever the tick handlers have recorded and not yet said (#461).
+ *
+ * ⚠️ THREAD CONTEXT ONLY.  The reports are recorded in the timer interrupt and
+ * printed here because printf() takes a lock that a thread on the same
+ * processor may already hold -- and the handler, reached through a gate that
+ * clears IF, would wait for it forever.  Calling this from an interrupt puts
+ * that deadlock straight back.
+ */
+void	clock_event_drain_reports(void);
 uint64_t	clock_event_tick_ns(void);
 
 /*

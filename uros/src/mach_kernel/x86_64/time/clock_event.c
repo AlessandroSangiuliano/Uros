@@ -30,6 +30,7 @@
 #include <x86_64/boot/bootarg.h>
 #include <kern/misc_protos.h>		/* printf */
 #include <kern/time_out.h>		/* hertz_tick -- the whole point */
+#include <sync/barrier.h>		/* #461: publish the tick reports */
 #include <kern/cpu_number.h>		/* cpu_number */
 #include <kern/cpu_data.h>		/* #459: disable_preemption */
 #include <cpus.h>			/* NCPUS */
@@ -449,10 +450,43 @@ unsigned long	clock_tick_delivered[NCPUS];
 static unsigned long	selftest_ticks[NCPUS];
 static uint64_t		selftest_tsc0[NCPUS];
 
+/*
+ * 🔥 RECORDED HERE, PRINTED SOMEWHERE ELSE, AND THAT IS NOT TIDINESS (#461).
+ *
+ * This used to call printf() directly, from the timer interrupt handler.  It
+ * deadlocked the machine.
+ *
+ * printf() takes printf_lock.  A thread holding it can be interrupted -- the
+ * timer is class 15 on this machine, deliberately unmaskable, so it arrives
+ * wherever the processor happens to be -- and the handler then reaches for the
+ * same lock, on the same processor, with IF already cleared by the gate.  It
+ * waits for a lock that only it could release.  The other processors pile onto
+ * the same lock the next time any of them prints, and the machine stops: four
+ * processors, one instruction, interrupts off.  Measured at three boots in six
+ * of the #461 test; the mid-message truncation in the log was the holder being
+ * caught in the act.
+ *
+ * A lock shared between thread context and interrupt context has to be taken
+ * with interrupts off on BOTH sides, and printf_lock is not -- so the rule
+ * that applies is the older and simpler one: a timer interrupt handler does
+ * not print.  It leaves a note, and a thread reads it.
+ *
+ * The bits are published after the data with a write barrier, and read before
+ * it with a read one, so a reader that sees the flag sees the numbers.
+ */
+#define CLOCK_REPORT_FIRST	0x1
+#define CLOCK_REPORT_RATE	0x2
+
+struct clock_report {
+	volatile uint32_t	pending;
+	uint64_t		elapsed;
+};
+
+static struct clock_report clock_report[NCPUS];
+
 static void
 clock_selftest(unsigned cpu)
 {
-	uint64_t	now, elapsed, expect;
 	unsigned long	n;
 
 	if (cpu >= NCPUS || tsc_hz() == 0)
@@ -464,21 +498,18 @@ clock_selftest(unsigned cpu)
 		/*
 		 * Two questions, not one, and the first has to be answered on
 		 * its own: DID a tick arrive.  Reporting only a rate after a
-		 * second of them means a boot that ends sooner prints nothing
-		 * -- which is what happened on the first run of this test, and
-		 * silence there is indistinguishable from a clock that never
-		 * ticked at all.
-		 */
-		/*
+		 * second of them means a boot that ends sooner says nothing --
+		 * and silence there is indistinguishable from a clock that
+		 * never ticked at all.
+		 *
 		 * Per processor, because the claim is per processor.  Scheduler
-		 * accounting on 64 processors cannot be one CPU's business, and
+		 * accounting on 64 processors cannot be one CPU\'s business, and
 		 * i386 shows what the alternative costs: its boot processor
 		 * receives no LAPIC tick at all and takes its accounting from a
-		 * device the whole machine shares.  A report only from the boot
-		 * processor would be silent about exactly the case that differs.
+		 * device the whole machine shares.
 		 */
-		printf("clock_event: cpu %u — first tick arrived (%s)\n",
-		       cpu, clock_event_name());
+		smp_wmb();
+		clock_report[cpu].pending |= CLOCK_REPORT_FIRST;
 		return;
 	}
 	/*
@@ -490,25 +521,61 @@ clock_selftest(unsigned cpu)
 	if (n != (unsigned long) (event_hz / 10) + 1)
 		return;
 
-	now = rdtsc();
-	elapsed = now - selftest_tsc0[cpu];
-	expect = tsc_hz() / 10;		/* a tenth of a second of it */
+	clock_report[cpu].elapsed = rdtsc() - selftest_tsc0[cpu];
+	smp_wmb();
+	clock_report[cpu].pending |= CLOCK_REPORT_RATE;
+}
+
+void
+clock_event_drain_reports(void)
+{
+	unsigned	cpu;
 
 	/*
-	 * Reported as a ratio in tenths of a percent rather than as a verdict.
-	 * A tolerance here would be a number invented at the desk: under TCG
-	 * the guest's TSC and its emulated APIC are not driven by the same
-	 * thing at all, and a threshold tuned to that would say nothing about
-	 * hardware.  The number is printed so it can be READ; the harness can
-	 * decide later, once there is a figure from real silicon to decide
-	 * against.
+	 * ⚠️ Thread context only.  This prints, and printing is exactly what the
+	 * handler may not do -- calling this from an interrupt would put the
+	 * deadlock back where it was found.
+	 *
+	 * Any processor may drain any other\'s: the numbers are written once by
+	 * their owner and never changed, and the flag is what says they are
+	 * there.  Cleared before printing rather than after, so that two
+	 * processors draining at once produce one report rather than two.
 	 */
-	printf("clock_event: cpu %u — %u ticks took %llu TSC, a tenth of a "
-	       "second is %llu (%llu per mille of nominal), backend %s\n",
-	       cpu, event_hz / 10,
-	       (unsigned long long) elapsed, (unsigned long long) expect,
-	       (unsigned long long) (expect ? (elapsed * 1000ULL) / expect : 0),
-	       clock_event_name());
+	for (cpu = 0; cpu < NCPUS; cpu++) {
+		uint32_t	bits = clock_report[cpu].pending;
+		uint64_t	elapsed, expect;
+
+		if (bits == 0)
+			continue;
+
+		smp_rmb();
+		clock_report[cpu].pending &= ~bits;
+
+		if (bits & CLOCK_REPORT_FIRST)
+			printf("clock_event: cpu %u — first tick arrived (%s)\n",
+			       cpu, clock_event_name());
+
+		if ((bits & CLOCK_REPORT_RATE) == 0)
+			continue;
+
+		elapsed = clock_report[cpu].elapsed;
+		expect = tsc_hz() / 10;		/* a tenth of a second of it */
+
+		/*
+		 * Reported as a ratio in tenths of a percent rather than as a
+		 * verdict.  A tolerance here would be a number invented at the
+		 * desk: under TCG the guest\'s TSC and its emulated APIC are not
+		 * driven by the same thing at all.  The number is printed so it
+		 * can be READ.
+		 */
+		printf("clock_event: cpu %u — %u ticks took %llu TSC, a tenth of "
+		       "a second is %llu (%llu per mille of nominal), backend "
+		       "%s\n", cpu, event_hz / 10,
+		       (unsigned long long) elapsed, (unsigned long long) expect,
+		       (unsigned long long) (expect ? (elapsed * 1000ULL) / expect
+						   : 0),
+		       clock_event_name());
+	}
 }
 
 void
@@ -580,4 +647,322 @@ clock_event_tick(struct trap_frame *frame)
 	 */
 	lapic_eoi();
 	(void) clock_event_arm_tick();
+
+}
+
+void
+clock_event_burnin(unsigned seconds)
+{
+	uint64_t	t0, t1, expect, got;
+	unsigned long	want = (unsigned long) event_hz * seconds;
+
+	if (tsc_hz() == 0) {
+		printf("clock_event: burn-in skipped — no calibrated TSC to "
+		       "check the tick against, and checking a timer against "
+		       "itself proves nothing\n");
+		return;
+	}
+
+	trap_set_handler(event_vector, burnin_handler);
+	clock_event_setup_cpu();
+	burnin_ticks = 0;
+
+	t0 = rdtsc();
+	if (!clock_event_arm_tick()) {
+		printf("clock_event: burn-in could not arm %s\n",
+		       clock_event_name());
+		return;
+	}
+
+	/*
+	 * Interrupts on, and a bounded wait.  Bounded against the TSC and not
+	 * against the tick count, because the failure being looked for is
+	 * exactly "the tick stops arriving" -- a loop that waited for ticks
+	 * would hang on the bug instead of reporting it.
+	 */
+	__asm__ __volatile__("sti");
+	expect = tsc_hz() * (uint64_t) seconds;
+	do {
+		cpu_pause();
+		t1 = rdtsc();
+	} while (t1 - t0 < expect);
+	__asm__ __volatile__("cli");
+
+	clock_event_stop();
+	got = burnin_ticks;
+
+	printf("clock_event: burn-in %s — %llu ticks in %u s, expected %lu "
+	       "(%llu per mille)\n",
+	       clock_event_name(), (unsigned long long) got, seconds, want,
+	       (unsigned long long) (want ? (got * 1000ULL) / want : 0));
+
+	if (got == 0)
+		panic("clock_event: the timer armed and never fired — the "
+		      "kernel would have no clock at all (#459)");
+}
+
+/* ------------------------------------------------------- the tick ------ */
+
+/*
+ * The wire from the timer to the kernel (#459).
+ *
+ * This is what did not exist: hertz_tick() had zero callers on x86-64, so no
+ * quantum was ever decremented, no AST was ever raised, and the scheduler --
+ * up, and having run the first thread -- would never have taken a processor
+ * back.
+ *
+ * ⚠️ THE FRAME MAY BE A STUB.  trap.h's contract: a handler reached through
+ * an spl deferral is handed a frame with only `vector` valid; the interrupt it
+ * stands for happened at a moment whose registers are gone.  This handler
+ * reads cs and rip, so it must cope with their absence rather than believe
+ * zeros -- a cs of zero would read as ring 0 and charge userland's time to the
+ * kernel, quietly, forever.
+ *
+ * i386 solved the same problem with a per-CPU masked_pc[] captured when the
+ * tick was deferred (hardclock.c).  Doing the same here means reaching into
+ * the spl path, which belongs to #454; until then a replayed tick is counted
+ * as kernel time with pc 0 AND COUNTED SEPARATELY, so the accounting says how
+ * much of itself is approximate instead of hiding it.
+ */
+unsigned long	clock_tick_replayed[NCPUS];
+unsigned long	clock_tick_delivered[NCPUS];
+
+/*
+ * Does the clock actually tick, and at the rate it claims?
+ *
+ * Asked because everything else here only shows that the code RUNS: the boot
+ * reaching setup_main proves the timer was armed, not that a single interrupt
+ * ever arrived.  A clock that is armed and silent looks exactly like a clock
+ * that works until something needs preempting.
+ *
+ * Checked against the TSC, which is a different counter driven by a different
+ * thing than the APIC's bus clock -- so agreement between them is evidence,
+ * where the timer counting its own ticks would only be a tautology.
+ *
+ * One report per processor, at one second's worth of ticks.  Not repeated:
+ * this answers "did it start and is the rate right", and a line per second
+ * forever would bury every other message on the console.
+ */
+static unsigned long	selftest_ticks[NCPUS];
+static uint64_t		selftest_tsc0[NCPUS];
+
+/*
+ * 🔥 RECORDED HERE, PRINTED SOMEWHERE ELSE, AND THAT IS NOT TIDINESS (#461).
+ *
+ * This used to call printf() directly, from the timer interrupt handler.  It
+ * deadlocked the machine.
+ *
+ * printf() takes printf_lock.  A thread holding it can be interrupted -- the
+ * timer is class 15 on this machine, deliberately unmaskable, so it arrives
+ * wherever the processor happens to be -- and the handler then reaches for the
+ * same lock, on the same processor, with IF already cleared by the gate.  It
+ * waits for a lock that only it could release.  The other processors pile onto
+ * the same lock the next time any of them prints, and the machine stops: four
+ * processors, one instruction, interrupts off.  Measured at three boots in six
+ * of the #461 test; the mid-message truncation in the log was the holder being
+ * caught in the act.
+ *
+ * A lock shared between thread context and interrupt context has to be taken
+ * with interrupts off on BOTH sides, and printf_lock is not -- so the rule
+ * that applies is the older and simpler one: a timer interrupt handler does
+ * not print.  It leaves a note, and a thread reads it.
+ *
+ * The bits are published after the data with a write barrier, and read before
+ * it with a read one, so a reader that sees the flag sees the numbers.
+ */
+#define CLOCK_REPORT_FIRST	0x1
+#define CLOCK_REPORT_RATE	0x2
+
+struct clock_report {
+	volatile uint32_t	pending;
+	uint64_t		elapsed;
+};
+
+static struct clock_report clock_report[NCPUS];
+
+static void
+clock_selftest(unsigned cpu)
+{
+	unsigned long	n;
+
+	if (cpu >= NCPUS || tsc_hz() == 0)
+		return;
+
+	n = ++selftest_ticks[cpu];
+	if (n == 1) {
+		selftest_tsc0[cpu] = rdtsc();
+		/*
+		 * Two questions, not one, and the first has to be answered on
+		 * its own: DID a tick arrive.  Reporting only a rate after a
+		 * second of them means a boot that ends sooner says nothing --
+		 * and silence there is indistinguishable from a clock that
+		 * never ticked at all.
+		 *
+		 * Per processor, because the claim is per processor.  Scheduler
+		 * accounting on 64 processors cannot be one CPU\'s business, and
+		 * i386 shows what the alternative costs: its boot processor
+		 * receives no LAPIC tick at all and takes its accounting from a
+		 * device the whole machine shares.
+		 */
+		smp_wmb();
+		clock_report[cpu].pending |= CLOCK_REPORT_FIRST;
+		return;
+	}
+	/*
+	 * The rate, over as many ticks as the boot lives long enough to give.
+	 * A tenth of a second is enough to catch a rate that is wrong by a
+	 * factor, which is the failure worth catching early; a full second is
+	 * longer than this kernel currently runs before it stops at #422.
+	 */
+	if (n != (unsigned long) (event_hz / 10) + 1)
+		return;
+
+	clock_report[cpu].elapsed = rdtsc() - selftest_tsc0[cpu];
+	smp_wmb();
+	clock_report[cpu].pending |= CLOCK_REPORT_RATE;
+}
+
+void
+clock_event_drain_reports(void)
+{
+	unsigned	cpu;
+
+	/*
+	 * ⚠️ Thread context only.  This prints, and printing is exactly what the
+	 * handler may not do -- calling this from an interrupt would put the
+	 * deadlock back where it was found.
+	 *
+	 * Any processor may drain any other\'s: the numbers are written once by
+	 * their owner and never changed, and the flag is what says they are
+	 * there.  Cleared before printing rather than after, so that two
+	 * processors draining at once produce one report rather than two.
+	 */
+	for (cpu = 0; cpu < NCPUS; cpu++) {
+		uint32_t	bits = clock_report[cpu].pending;
+		uint64_t	elapsed, expect;
+
+		if (bits == 0)
+			continue;
+
+		smp_rmb();
+		clock_report[cpu].pending &= ~bits;
+
+		if (bits & CLOCK_REPORT_FIRST)
+			printf("clock_event: cpu %u — first tick arrived (%s)\n",
+			       cpu, clock_event_name());
+
+		if ((bits & CLOCK_REPORT_RATE) == 0)
+			continue;
+
+		elapsed = clock_report[cpu].elapsed;
+		expect = tsc_hz() / 10;		/* a tenth of a second of it */
+
+		/*
+		 * Reported as a ratio in tenths of a percent rather than as a
+		 * verdict.  A tolerance here would be a number invented at the
+		 * desk: under TCG the guest\'s TSC and its emulated APIC are not
+		 * driven by the same thing at all.  The number is printed so it
+		 * can be READ.
+		 */
+		printf("clock_event: cpu %u — %u ticks took %llu TSC, a tenth of "
+		       "a second is %llu (%llu per mille of nominal), backend "
+		       "%s\n", cpu, event_hz / 10,
+		       (unsigned long long) elapsed, (unsigned long long) expect,
+		       (unsigned long long) (expect ? (elapsed * 1000ULL) / expect
+						   : 0),
+		       clock_event_name());
+	}
+}
+
+void
+clock_event_tick(struct trap_frame *frame)
+{
+	unsigned	cpu = cpu_number();
+	boolean_t	usermode;
+	vm_offset_t	pc;
+
+	/*
+	 * A real frame always has a code segment with the selector's index
+	 * set; a stub frame is all zeros.  Distinguishing them on cs is exact
+	 * here because no valid cs is zero -- a null selector cannot be the
+	 * one that was executing.
+	 */
+	if (frame->cs == 0) {
+		clock_tick_replayed[cpu]++;
+		usermode = FALSE;
+		pc = 0;
+	} else {
+		clock_tick_delivered[cpu]++;
+		usermode = (frame->cs & 3) != 0;
+		pc = (vm_offset_t) frame->rip;
+	}
+
+	/*
+	 * Preemption held off ACROSS hertz_tick (#459).
+	 *
+	 * Not a precaution: hertz_tick() disables and re-enables preemption
+	 * internally, and its re-enable reaches kernel_preempt_check() -- which
+	 * context-switches.  From inside an interrupt handler that means the
+	 * switch happens with IF clear and the frame on the interrupt stack,
+	 * and this function never returns: the EOI below is never written and
+	 * the timer is never re-armed, so the local APIC holds this vector's
+	 * priority busy and not one further tick is ever delivered.
+	 *
+	 * Measured exactly so, three runs out of three: the first tick arrived,
+	 * one thread was preempted into, and the processor was never
+	 * interrupted again.  The AST check that follows this handler was
+	 * called zero times, because the handler it follows never came back.
+	 *
+	 * i386 holds it off here for the same reason and says so at
+	 * lapic_timer_handler; that comment was read this morning and its
+	 * consequence was not.  The switch still happens -- it happens on the
+	 * way OUT of the trap, where the frame is a real one and the hardware
+	 * has already been put back.
+	 */
+	disable_preemption();
+
+	/*
+	 * ⚠️ The full rip, not its low half.  #453 widened this argument to
+	 * vm_offset_t, and i386 still has one call site casting it to
+	 * natural_t -- harmless where they are the same width and a silent
+	 * truncation to the low 32 bits here.
+	 */
+	hertz_tick(usermode, pc);
+	clock_selftest(cpu);
+
+	/*
+	 * Acknowledge, then re-arm.
+	 *
+	 * In this order because they are not interchangeable: the APIC holds
+	 * this vector's priority busy until the EOI, so arming first would
+	 * schedule an interrupt that the APIC is still refusing to deliver.
+	 *
+	 * And re-arming is not optional the way it was under a periodic timer:
+	 * a one-shot that nobody re-arms fires exactly once, which is a clock
+	 * that ticks a single time and then a machine that looks hung.
+	 */
+	lapic_eoi();
+	(void) clock_event_arm_tick();
+
+	/*
+	 * And the other half of the pair above (#461).
+	 *
+	 * 🔥 IT WAS MISSING, AND NOTHING COULD TELL.  #459 wrote the
+	 * disable_preemption() above together with the paragraph explaining why
+	 * it has to be there, and no matching re-enable.  While the primitive
+	 * expanded to nothing, a missing nothing is still nothing: the leak was
+	 * exactly as invisible as the mechanism.
+	 *
+	 * The moment the counter became real (#461) it grew by one per tick and
+	 * never came back down, so trap_take_ast() -- which refuses to preempt
+	 * above zero -- refused forever.  Measured: 1, then 221, then 440, then
+	 * 660 over eight hundred million turns of a thread that should have
+	 * been taken off the processor a thousand times.
+	 *
+	 * _no_check, deliberately, and for the reason the paragraph above
+	 * gives: taking the switch HERE is the thing being avoided.  The AST is
+	 * taken on the way out of the trap, where the frame is real and the
+	 * hardware has been put back.
+	 */
+	enable_preemption_no_check();
 }
