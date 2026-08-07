@@ -93,6 +93,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ddb.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ksym.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/desc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/idle.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
@@ -203,6 +204,13 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       # file is the mutex slow path and the read/write locks, which reach
       # into the scheduler (#453).
       USIMPLE_LOCK_CALLS=1
+      # This machine supplies the preemption level, without asking for the
+      # whole MACH_RT configuration (#461).  <kern/cpu_data.h> otherwise
+      # defines disable_preemption() as nothing and get_preemption_level() as
+      # the constant 0 -- and since #459 this target preempts on the way out
+      # of every trap, so the spans that say "not here" have to be able to
+      # mean it.  See x86_64/cpu_data.h.
+      MACHINE_PREEMPTION_LEVEL=1
       # Zero, and said rather than left undefined: this kernel is built
       # -mgeneral-regs-only so that entry from user mode never has to save
       # vector state, which means no floating point anywhere in it (#453).

@@ -97,6 +97,33 @@ extern cpu_data_t	cpu_data[NCPUS];
 
 #include <kern/cpu_number.h>
 
+/*
+ * A machine may supply the preemption level without asking for MACH_RT (#461).
+ *
+ * MACH_RT is the real-time configuration -- conf/files: "MACH_RT is real-time.
+ * MACH_TR is debugging.  Unfortunate choice of letters."  Kernel preemption is
+ * one of its two limbs (kern/lock.h: with it on "locks denote critical,
+ * non-preemptable points in the code"); the other is real-time IPC, with an
+ * attribute on a port and out-of-line data from preallocated buffers.  Turning
+ * it on is a decision about the whole kernel and both targets, taken across
+ * some hundreds of gated lines.
+ *
+ * A machine may need less than that.  One that preempts on the way out of a
+ * trap needs a way to say "not in this span", and the empty definitions below
+ * cannot say it -- disable_preemption() does
+ * nothing and get_preemption_level() answers the constant 0, so every caller
+ * that thinks it is holding preemption off is holding nothing off, and every
+ * test of the level is a test of a constant.
+ *
+ * x86-64 found that out as a deadlock (see <machine/cpu_data.h> there).  It
+ * defines this and supplies the counter; i386 does not, and keeps the empty
+ * definitions, which cost it nothing because it does not preempt in kernel
+ * mode at all.
+ */
+#if	MACHINE_PREEMPTION_LEVEL
+#include <machine/cpu_data.h>
+#endif
+
 #if	defined(__GNUC__)
 
 #ifndef __OPTIMIZE__
@@ -105,10 +132,13 @@ extern cpu_data_t	cpu_data[NCPUS];
 
 static struct thread_shuttle __inline__ *current_thread(void);
 static int __inline__		current_cpu_id(void);
+#if	!MACHINE_PREEMPTION_LEVEL
 static int __inline__		get_preemption_level(void);
+#endif
 static int __inline__		get_simple_lock_count(void);
 static int __inline__		get_interrupt_level(void);
 
+#if	!MACHINE_PREEMPTION_LEVEL
 static void __inline__		disable_preemption(void);
 static void __inline__		enable_preemption(void);
 static void __inline__		enable_preemption_no_check(void);
@@ -116,6 +146,7 @@ static void __inline__		enable_preemption_no_check(void);
 static void __inline__		mp_disable_preemption(void);
 static void __inline__		mp_enable_preemption(void);
 static void __inline__		mp_enable_preemption_no_check(void);
+#endif	/* !MACHINE_PREEMPTION_LEVEL */
 
 static struct thread_shuttle __inline__ *current_thread(void)
 {
@@ -132,10 +163,12 @@ static int __inline__	current_cpu_id(void)
 	return (cpu_data[cpu_number()].cpu_id);
 }
 
+#if	!MACHINE_PREEMPTION_LEVEL
 static int __inline__	get_preemption_level(void)
 {
 	return (0);
 }
+#endif	/* !MACHINE_PREEMPTION_LEVEL */
 
 static int __inline__	get_simple_lock_count(void)
 {
@@ -147,6 +180,7 @@ static int __inline__	get_interrupt_level(void)
 	return (cpu_data[cpu_number()].interrupt_level);
 }
 
+#if	!MACHINE_PREEMPTION_LEVEL
 static void __inline__	disable_preemption(void)
 {
 }
@@ -170,6 +204,7 @@ static void __inline__	mp_enable_preemption(void)
 static void __inline__	mp_enable_preemption_no_check(void)
 {
 }
+#endif	/* !MACHINE_PREEMPTION_LEVEL */
 
 #ifndef	__OPTIMIZE__
 #undef 	extern

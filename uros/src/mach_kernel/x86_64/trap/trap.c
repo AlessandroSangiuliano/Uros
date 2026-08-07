@@ -14,6 +14,7 @@
 #include <kern/ast.h>		/* #459: need_ast, ast_taken */
 #include <kern/cpu_number.h>
 #include <kern/cpu_data.h>	/* #459: get_preemption_level */
+#include <cpu/percpu.h>	/* #461: the spin-lock depth */
 #include <cpu/regs.h>
 #include <cpu/spl.h>
 #include <ddb/ddb.h>
@@ -604,6 +605,27 @@ trap_take_ast(struct trap_frame *frame)
 	 * site, which of the two things each one meant.  Until then the level
 	 * is what the tree offers, and the alternative is no preemption at
 	 * all.
+	 *
+	 * 🔥 AND WHAT THE TREE OFFERED WAS A CONSTANT (#461).
+	 *
+	 * get_preemption_level() is defined in <kern/cpu_data.h> as `return 0'
+	 * whenever MACH_RT is off, which it is on both of this kernel's
+	 * targets, and disable_preemption() is defined as nothing.  So the
+	 * paragraph above described a mechanism that was not there: EVERY path
+	 * holding a lock was a path that had not raised the level, and this
+	 * test could never once have been true.
+	 *
+	 * It cost a deadlock.  A thread preempted here while holding a spin
+	 * lock; the other processors reaching for the same lock from interrupt
+	 * context, where the gate has already cleared IF; and then nothing left
+	 * that could schedule the holder.  Four processors spinning on one
+	 * instruction with interrupts off -- one boot in six of the #461 test,
+	 * four in six once idle processors halted instead of polling.
+	 *
+	 * So the level is now real on this target: x86_64/cpu_data.h supplies
+	 * it out of the per-CPU block, and <kern/cpu_data.h> takes it whenever
+	 * a machine says it has one.  The test below is unchanged and finally
+	 * tests something.
 	 */
 	if ((frame->cs & 3) != USER_RPL && get_preemption_level() != 0)
 		return;
