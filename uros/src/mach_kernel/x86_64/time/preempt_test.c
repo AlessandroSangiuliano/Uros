@@ -59,6 +59,7 @@
 #include <kern/processor.h>
 #include <kern/task.h>
 #include <kern/thread_swap.h>
+#include <kern/cpu_data.h>		/* #461: get_preemption_level */
 #include <kern/cpu_number.h>
 #include <mach/machine.h>		/* #461: machine_slot[] */
 #include <mach/machine/vm_types.h>
@@ -102,6 +103,7 @@ static volatile int		preempt_slot_a = -1;
 static volatile int		preempt_slot_b = -1;
 static volatile int		preempt_slot_r = -1;
 static volatile int		preempt_slot_want = -1;
+static volatile int		preempt_probes;
 
 /*
  * A kernel thread that is bound BEFORE it can run (#461).
@@ -176,13 +178,45 @@ preempt_worker_a(void)
 	 */
 	{
 		uint64_t fl;
+		int lvl;
+
 		__asm__ __volatile__("pushfq; popq %0" : "=r"(fl));
+		/*
+		 * Read BEFORE the printf, which raises the level itself: asked
+		 * afterwards it would answer about printf and not about this
+		 * thread (#461).
+		 *
+		 * Reported because a level that never returns to zero is
+		 * indistinguishable from a clock that never fires -- both leave
+		 * a thread running forever -- and the counter is new enough
+		 * that "which of the two" is the first question.
+		 */
+		lvl = get_preemption_level();
 		preempt_slot_a = current_processor()->slot_num;
 		printf("preempt_test: worker a running on processor %d "
-		       "(IF=%d)\n", preempt_slot_a, (int)((fl >> 9) & 1));
+		       "(IF=%d, preemption level %d)\n", preempt_slot_a,
+		       (int)((fl >> 9) & 1), lvl);
 	}
-	while (!preempt_done)
+	/*
+	 * The level again, a few times, while this thread runs (#461).
+	 *
+	 * Read once at entry it says the thread started clean; it cannot say
+	 * whether the counter DRIFTS.  An unbalanced pair anywhere in the
+	 * kernel would walk it away from zero -- and since it is unsigned, one
+	 * decrement too many wraps it to something enormous, at which point
+	 * every trap return refuses to preempt and this loop runs forever.
+	 * That failure and "the clock never fired" look identical from outside,
+	 * which is why the counter is sampled rather than assumed.
+	 */
+	while (!preempt_done) {
+		if ((preempt_count_a & 0xFFFFFFF) == 0 && preempt_probes < 4) {
+			preempt_probes++;
+			printf("preempt_test: worker a still here, preemption "
+			       "level %d after %lu turns\n",
+			       get_preemption_level(), preempt_count_a);
+		}
 		preempt_count_a++;
+	}
 	/* Nothing to tidy: the reporter ends the run, and a worker that
 	 * outlives it would only be racing the halt. */
 	for (;;)
@@ -364,12 +398,24 @@ preempt_test_run_remote(void)
 	int		i;
 
 	/*
-	 * The first processor that is not this one.  By slot rather than by
-	 * position, because the slots are sparse: firmware does not promise
-	 * consecutive APIC identifiers and this kernel indexes by them.
+	 * The first processor that is neither this one nor the one the
+	 * firmware started.  By slot rather than by position, because the slots
+	 * are sparse: firmware does not promise consecutive APIC identifiers
+	 * and this kernel indexes by them.
+	 *
+	 * ⚠️ master_cpu is excluded deliberately, and not because running there
+	 * would be wrong.  The thread calling this is start_kernel_threads(),
+	 * which is unbound -- so once the application processors are in the
+	 * scheduler it may itself be running on one, and the "first processor
+	 * that is not me" was observed to be processor 0.  That run proved
+	 * something real, and it did not prove THIS: that a processor which has
+	 * never in the history of this port run a thread can be given one and
+	 * have it taken away again.
 	 */
 	for (i = 0; i < NCPUS; i++) {
-		if (i == me || !machine_slot[i].is_cpu || !machine_slot[i].running)
+		if (i == me || i == master_cpu)
+			continue;
+		if (!machine_slot[i].is_cpu || !machine_slot[i].running)
 			continue;
 		target = cpu_to_processor(i);
 		break;
@@ -377,8 +423,9 @@ preempt_test_run_remote(void)
 
 	if (target == PROCESSOR_NULL) {
 		printf("preempt_test: WRONG — asked for an application "
-		       "processor and this machine is running on one "
-		       "processor; nothing was measured (#461)\n");
+		       "processor other than the boot processor and this "
+		       "machine has none running; nothing was measured "
+		       "(#461)\n");
 		return;
 	}
 
@@ -423,6 +470,7 @@ preempt_test_run_remote(void)
 			       "yields (#461)\n", target->slot_num);
 			break;
 		}
+		clock_event_drain_reports();
 		cpu_pause();
 	}
 
