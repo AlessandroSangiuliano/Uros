@@ -184,6 +184,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		      void (*start_pos)(void))
 {
 	pcb_t	pcb = thr_act->mact.pcb;
+	void	*fpu_area;
 
 	if (pcb == PCB_NULL)
 		return KERN_FAILURE;
@@ -241,10 +242,37 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 */
 	(void) start_pos;
 
+	/*
+	 * ⚠️ The floating-point area is checked, and it was not (#408).
+	 *
+	 * fpu_area_alloc() calls kalloc() and can answer NULL, and this used to
+	 * pass the answer straight into context_init() and return KERN_SUCCESS.
+	 * context_init() ends in fpu_area_init(), which zeroes the area -- so on
+	 * an allocation that failed, thread creation wrote through a null
+	 * pointer and the machine took a page fault in the kernel.  The stack
+	 * one screen up is checked exactly this way and for exactly this reason;
+	 * this one was not, and nothing noticed because kalloc() has never
+	 * failed on a machine that boots with 116 MiB free.
+	 *
+	 * The alternative -- carrying on with no area -- is worse and is what
+	 * the rest of the file would then have to defend against: context_switch()
+	 * already tests for a null area on both sides, and act_machine_get_state()
+	 * does not, so a thread without one would be a thread a debugger could
+	 * fault the kernel with.  Refusing here is what keeps "a thread with a
+	 * pcb has somewhere to save its registers" an invariant rather than a
+	 * thing to remember at every reader.
+	 */
+	fpu_area = fpu_area_alloc();
+	if (fpu_area == (void *) 0) {
+		stack_free(thread->kernel_stack);
+		thread->kernel_stack = 0;
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
-		     fpu_area_alloc());
+		     fpu_area);
 
 	return KERN_SUCCESS;
 }
