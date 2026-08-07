@@ -81,7 +81,7 @@ int thread_state_to_frame(const struct x86_64_thread_state *state,
 	 * request that is about to be refused is worse than either answer.
 	 */
 	if (!thread_state_bases_ok(state))
-		return THREAD_STATE_REFUSED;
+		return 0;			/* refused, frame untouched */
 
 	frame->rax = state->rax;
 	frame->rbx = state->rbx;
@@ -130,7 +130,7 @@ int thread_state_to_frame(const struct x86_64_thread_state *state,
 	 * with the scheduler.  The check is here now so that it is already the
 	 * guard when the second half lands, rather than something to remember.
 	 */
-	return THREAD_STATE_OK;
+	return 1;				/* applied */
 }
 
 /*
@@ -200,3 +200,4 @@ _Static_assert(sizeof(state_count) / sizeof(state_count[0])
 	       == THREAD_STATE_NONE + 1,
 	       "state_count[] and the flavor list in "
 	       "<mach/x86_64/thread_status.h> have drifted apart");
+

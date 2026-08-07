@@ -240,6 +240,7 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 	 * self->continuation, which thread_start() set to this same start_pos.
 	 */
 	(void) start_pos;
+
 	context_init(&pcb->ctx,
 		     (uint64_t) thread->kernel_stack + KERNEL_STACK_SIZE,
 		     thread_begin_trampoline, (void *) 0,
@@ -417,6 +418,17 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 		 * answers whether they are, and a set_state that quietly
 		 * corrected them would let a task ask for a frame it could
 		 * not otherwise reach and be told it succeeded.
+		 *
+		 * ⚠️ This line is unchanged and used to be wrong, which is the
+		 * whole point (#408).  thread_state_to_frame() answered
+		 * THREAD_STATE_OK == 0 and THREAD_STATE_REFUSED == -1, so
+		 * reading it as a boolean inverted BOTH answers: a valid state
+		 * was written to the frame and then reported as
+		 * KERN_INVALID_ARGUMENT, and a state naming a kernel segment
+		 * base was refused and reported as KERN_SUCCESS.  It is a
+		 * predicate now -- see <thread/state.h> for why the constants
+		 * were deleted rather than renumbered -- and the same spelling
+		 * says what it means.
 		 */
 		if (!thread_state_to_frame((const struct x86_64_thread_state *)
 					   state, pcb->user))

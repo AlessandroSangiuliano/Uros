@@ -1857,7 +1857,7 @@ static void thread_state_selftest(void)
 	out.fs_base = USER_BASE_PROBE;
 	out.gs_base = USER_BASE_PROBE + PAGE_SIZE_4K;
 
-	applied = thread_state_to_frame(&out, &frame) == THREAD_STATE_OK;
+	applied = thread_state_to_frame(&out, &frame);
 	thread_state_from_frame(&frame, &back);
 
 	regs_ok = applied && out.rax == back.rax && out.rbx == back.rbx
@@ -1917,7 +1917,7 @@ static void thread_state_selftest(void)
 
 	out.gs_base = (uint64_t)(uintptr_t)percpu();	/* a kernel address */
 
-	base_refused = thread_state_to_frame(&out, &frame) == THREAD_STATE_REFUSED;
+	base_refused = !thread_state_to_frame(&out, &frame);
 	for (unsigned i = 0; i < sizeof(frame) / 8; i++)
 		if (((uint64_t *)&untouched)[i] != ((uint64_t *)&frame)[i])
 			base_refused = 0;
