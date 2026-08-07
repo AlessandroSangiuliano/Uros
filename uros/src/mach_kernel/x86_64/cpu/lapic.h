@@ -171,6 +171,13 @@ uint32_t lapic_timer_hz(void);
 uint32_t lapic_timer_hz_run(unsigned which);
 
 /*
+ * How many attempts the calibration needed (#464).  One is the ordinary case;
+ * more than one means a window was interfered with and measured again, which
+ * used to be a panic.
+ */
+unsigned lapic_timer_calibrate_attempts(void);
+
+/*
  * Arm this processor's timer to deliver `vector` `hz` times a second.
  *
  * Per processor, and called by each: the divisor and the countdown are APIC
