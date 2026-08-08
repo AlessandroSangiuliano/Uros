@@ -202,6 +202,34 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 }
 
 /*
+ * The wide call, and what it is for (#426).
+ *
+ * Nothing in the kernel calls this: it exists to be called from ring 3 with
+ * eleven arguments, so that the path which pushes the last five onto the
+ * kernel stack is executed by every boot.  Without it the first exercise of
+ * that path would be a real mach_msg, where a misplaced argument is a
+ * message with the wrong reply port rather than a number that does not
+ * match.
+ */
+uint64_t syscall_probe_wide(uint64_t a1, uint64_t a2, uint64_t a3,
+			    uint64_t a4, uint64_t a5, uint64_t a6,
+			    uint64_t a7, uint64_t a8, uint64_t a9,
+			    uint64_t a10, uint64_t a11)
+{
+	return  (a1 & 0xF)
+	     | ((a2 & 0xF) << 4)
+	     | ((a3 & 0xF) << 8)
+	     | ((a4 & 0xF) << 12)
+	     | ((a5 & 0xF) << 16)
+	     | ((a6 & 0xF) << 20)
+	     | ((a7 & 0xF) << 24)
+	     | ((a8 & 0xF) << 28)
+	     | ((a9 & 0xF) << 32)
+	     | ((a10 & 0xF) << 36)
+	     | ((a11 & 0xF) << 40);
+}
+
+/*
  * What each call number does.  Read from ring 3's index, so its length is
  * the only thing standing between a user program and an arbitrary call
  * through kernel memory — which is why the check against it is in the entry
@@ -209,6 +237,24 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
  */
 void *const syscall_table[SYSCALL_NR_MAX] = {
 	[SYSCALL_NR_PROBE] = (void *)syscall_probe,
+	[SYSCALL_NR_PROBE_WIDE] = (void *)syscall_probe_wide,
+};
+
+/*
+ * And how many arguments each of them carries beyond the register six.
+ *
+ * Written out rather than derived, because there is nothing to derive it
+ * from: this kernel's own calls have no table of arities the way the Mach
+ * traps do.  ⚠️ Which means this is the one place in the mechanism where two
+ * halves can disagree — a call added above with seven arguments and a zero
+ * here would take its seventh from whatever the entry left on the stack.
+ * The declaration in <syscall/syscall.h> is the check that exists: the
+ * prototype there and the entry here are compiled together, so a count that
+ * is too small is at least visible in one file.
+ */
+const uint8_t syscall_stack[SYSCALL_NR_MAX] = {
+	[SYSCALL_NR_PROBE] = 0,
+	[SYSCALL_NR_PROBE_WIDE] = 11 - SYSCALL_REG_ARGS,
 };
 
 /*
@@ -227,6 +273,7 @@ void *const syscall_table[SYSCALL_NR_MAX] = {
  * somewhere else.
  */
 void *mach_syscall_table[SYSCALL_MACH_MAX];
+uint8_t mach_syscall_stack[SYSCALL_MACH_MAX];
 uint64_t mach_syscall_count;
 
 static void mach_syscall_table_init(void)
@@ -243,8 +290,30 @@ static void mach_syscall_table_init(void)
 		panic("syscall: %u Mach traps, the entry table holds %u -- "
 		      "raise SYSCALL_MACH_MAX", n, (unsigned) SYSCALL_MACH_MAX);
 
-	for (unsigned i = 0; i < n; i++)
+	for (unsigned i = 0; i < n; i++) {
+		unsigned args = (unsigned) mach_trap_table[i].mach_trap_arg_count;
+
+		/*
+		 * ⚠️ Refused rather than clamped, and this is the check the
+		 * whole wide-argument mechanism rests on.
+		 *
+		 * The entry path pushes the overflow from five named
+		 * registers.  A trap wider than that would have its last
+		 * arguments taken from registers nobody filled -- which is
+		 * not a crash, it is a pointer argument holding whatever the
+		 * caller happened to be using rbx for.  There is no run-time
+		 * symptom to notice, so the noticing happens here.
+		 */
+		if (args > SYSCALL_ARGS_MAX)
+			panic("syscall: Mach trap %u takes %u arguments and "
+			      "the entry path carries %u -- see the register "
+			      "contract in <syscall/syscall.h>",
+			      i, args, (unsigned) SYSCALL_ARGS_MAX);
+
 		mach_syscall_table[i] = (void *) mach_trap_table[i].mach_trap_function;
+		mach_syscall_stack[i] = (uint8_t)
+			(args > SYSCALL_REG_ARGS ? args - SYSCALL_REG_ARGS : 0);
+	}
 
 	mach_syscall_count = n;
 }

@@ -2012,7 +2012,7 @@ static void ring3_selftest(void)
 	const struct trap_record *t;
 	struct trap_record first, bases;
 	struct trap_paranoid_record window;
-	uint64_t witness, answer, kernel_gs;
+	uint64_t witness, answer, wide, kernel_gs;
 	pmap_t space;
 	uint64_t size;
 	uint8_t *dst;
@@ -2078,6 +2078,13 @@ static void ring3_selftest(void)
 	bases = *trap_last();
 
 	/*
+	 * And a third, for the calls too wide for the argument registers
+	 * (#426).  Before the window test below, because that one arms a
+	 * breakpoint on the syscall path and can afford exactly one syscall.
+	 */
+	user_probe_enter(USER_PROBE_WIDE_VA, USER_PROBE_STACK_TOP);
+
+	/*
 	 * And a third time, to be caught in the window itself (#440).
 	 *
 	 * The NMI test arranges the window's *state*; this one enters the real
@@ -2111,6 +2118,7 @@ static void ring3_selftest(void)
 	t = &first;
 	witness = *(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame);
 	answer = *(volatile uint64_t *)(uintptr_t)(phys_to_direct(data_frame) + 8);
+	wide = *(volatile uint64_t *)(uintptr_t)(phys_to_direct(data_frame) + 16);
 
 	kputs("UrMach x86-64: ring 3 ran and left ");
 	kputhex64(witness);
@@ -2135,6 +2143,21 @@ static void ring3_selftest(void)
 	kputs(answer == USER_PROBE_SYSCALL_RESULT
 	      ? " — six arguments and a return, through SYSCALL and back\r\n"
 	      : " — WRONG, expected 0x060504030201\r\n");
+
+	/*
+	 * And the same for a call wider than the argument registers (#426).
+	 *
+	 * Reported separately rather than folded into the line above, because
+	 * they fail for different reasons: the six-argument answer is about
+	 * the register contract, and this one is about five words the entry
+	 * path pushes onto the kernel stack in an order it decides.  Sixteen
+	 * Mach traps take this path, and mach_msg is one of them.
+	 */
+	kputs("UrMach x86-64: and its eleven-argument call answered ");
+	kputhex64(wide);
+	kputs(wide == USER_PROBE_WIDE_RESULT
+	      ? " — the five above the sixth arrived where a C function looks\r\n"
+	      : " — WRONG, expected 0xba987654321\r\n");
 
 	/*
 	 * And which block each entry path was reached with.  Ring 3 ran with

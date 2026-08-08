@@ -226,3 +226,44 @@ user_probe_fault:
 user_probe_fsgsbase:
 	rdgsbase %rax
 	hlt
+
+/*
+ * A third entry, for a third question (#426): does a call with more
+ * arguments than there are argument registers deliver all of them?
+ *
+ * ⚠️ Its own entry point rather than four more instructions above, and the
+ * reason is a run that halted.  The window test of #440 arms an execution
+ * breakpoint on the first instruction of the syscall path and enters this
+ * page expecting to hit it ONCE — trap_expect() arms a single expectation
+ * and spends it when it fires.  A second syscall anywhere in the probe is
+ * therefore a second debug exception with nothing armed for it, which halts
+ * the machine in the middle of the self-tests.
+ *
+ * So a program that issues one syscall stays a program that issues one
+ * syscall, and a question that needs a different call gets a different
+ * entry — which is the arrangement user_probe_fsgsbase already uses.
+ *
+ * Arguments seven to eleven go in rbx and r12-r15, which the contract says
+ * are the caller's to keep, so a real stub saves and restores them.  This
+ * one need not: user_probe_enter zeroed every register on the way in and
+ * this code is about to fault on purpose.
+ */
+	.globl	user_probe_wide
+user_probe_wide:
+	movq	$SYSCALL_NR_PROBE_WIDE, %rax
+	movq	$1, %rdi
+	movq	$2, %rsi
+	movq	$3, %rdx
+	movq	$4, %r10
+	movq	$5, %r8
+	movq	$6, %r9
+	movq	$7, %rbx
+	movq	$8, %r12
+	movq	$9, %r13
+	movq	$10, %r14
+	movq	$11, %r15
+	syscall
+
+	movabsq	$USER_PROBE_DATA_VA, %r11
+	movq	%rax, 16(%r11)
+	hlt

@@ -59,6 +59,18 @@
  */
 #define USER_PROBE_SYSCALL_RESULT	0x060504030201ULL
 
+/*
+ * And the same question asked of a call too wide for the argument registers
+ * (#426): eleven arguments, one to eleven, a nibble each.
+ *
+ * Eleven is the widest trap in the Mach table, so this is the whole of the
+ * mechanism and not a sample of it.  ⚠️ The five above the sixth travel in
+ * rbx and r12-r15 and are pushed onto the kernel stack by the entry path in
+ * an order it decides — an order reversed puts every one of them somewhere,
+ * which is why each argument is distinguishable rather than summed.
+ */
+#define USER_PROBE_WIDE_RESULT		0x0ba987654321ULL
+
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
@@ -78,6 +90,13 @@ extern char user_probe_fsgsbase[];
 
 #define USER_PROBE_FSGSBASE_VA					\
 	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_fsgsbase	\
+					 - __user_probe_start))
+
+/* And a third (#426): eleven arguments, five of them above the registers. */
+extern char user_probe_wide[];
+
+#define USER_PROBE_WIDE_VA					\
+	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_wide	\
 					 - __user_probe_start))
 
 /*
