@@ -370,9 +370,15 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
             ${X86_64_ISO_DIR}/boot/mach_kernel
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
             ${X86_64_ISO_DIR}/boot/grub/grub.cfg
+    # The first 64-bit user image, as module 0 (#422).  Every entry loads it:
+    # without a module the kernel panics in bootstrap_create(), so an entry
+    # that omitted it would be an entry that cannot reach the end of boot.
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin/boot_probe
+            ${X86_64_ISO_DIR}/boot/boot_probe
     COMMAND sh -c "echo set default=$\{UROS_X86_64_BOOT_ENTRY:-0\} > ${X86_64_ISO_DIR}/boot/grub/entry.cfg"
     COMMAND grub-mkrescue -o ${X86_64_ISO} ${X86_64_ISO_DIR}
-    DEPENDS mach_kernel ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
+    DEPENDS mach_kernel boot_probe ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
     COMMENT "Building GRUB2 multiboot2 rescue ISO: ${X86_64_ISO}"
     VERBATIM)
 

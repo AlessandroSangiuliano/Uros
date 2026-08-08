@@ -123,9 +123,17 @@ if grep -aq "$MI_ENTRY" "$LOG"; then
 		echo "  log: $LOG"
 		exit 1
 	fi
+	# ⚠️ The excuse that used to live here is GONE, and its removal is the
+	# point (#422).  It read "stopped at bootstrap_create -- no userland
+	# bundle is loaded for this target yet", and a boot that stops there now
+	# is a regression, not a known state.  An excuse outliving the condition
+	# it excuses is how a harness reports a failure as a pass.
 	if grep -aq "$EXPECTED_END" "$LOG"; then
-		echo "  excused: stopped at bootstrap_create -- no userland bundle"
-		echo "           is loaded for this target yet (#422)"
+		echo "  FAILED: stopped at bootstrap_create.  A 64-bit boot image"
+		echo "          loads and runs since #422 -- this used to be the"
+		echo "          expected end and is now a regression."
+		echo "  log: $LOG"
+		exit 1
 	fi
 	# ⚠️ Unless this boot IS the preemption test, on a machine with one
 	# processor (#461).
@@ -262,7 +270,7 @@ fi
 # this list falls through to the deadline and is reported as CUT SHORT rather
 # than judged -- silence about a run nobody watched to the end is the failure
 # this whole file exists to stop.
-DONE_RE='No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|Assertion failed|panic\(cpu'
+DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|Assertion failed|panic\(cpu'
 
 SECS=${1:-90}
 [ $# -gt 0 ] && shift

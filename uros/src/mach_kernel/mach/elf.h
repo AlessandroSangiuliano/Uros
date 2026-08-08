@@ -178,7 +178,13 @@ typedef struct {
 #define EM_88K		5
 #define EM_860		7
 #define EM_MIPS		8
-#define EM_PARISC      15	
+#define EM_PARISC      15
+
+/*
+ * Not in the 1990 table this file was copied from, because the architecture
+ * did not exist (#422).  Sixty-two, assigned by the ABI supplement.
+ */
+#define EM_X86_64	62
 
 /* version - page 4-6 */
 
@@ -307,6 +313,91 @@ typedef struct {
   Elf32_Word		p_flags;
   Elf32_Word		p_align;
 } Elf32_Phdr;
+
+/*
+ * ── The 64-bit forms, which are not the 32-bit ones widened (#422) ────
+ *
+ * ⚠️ The program header REORDERS ITS FIELDS.  In ELF32 the flags are second
+ * from last; in ELF64 they are second, immediately after the type.  That is
+ * not a consequence of the widths and no amount of care with typedefs
+ * produces it — a loader that widened Elf32_Phdr field by field would read
+ * `p_flags' out of `p_offset' and get a file offset where it expected
+ * PF_R|PF_X, which for the segments this kernel loads is a number that
+ * happens to name no known combination and so is silently skipped.  The image
+ * would then load with no text.
+ *
+ * The header does not reorder, so its fields are the widened ones and nothing
+ * else.  Both are written out in full rather than generated from a macro: a
+ * macro would hide exactly the asymmetry that matters.
+ */
+typedef unsigned long long	Elf64_Addr;
+typedef unsigned long long	Elf64_Off;
+typedef unsigned long long	Elf64_Xword;
+typedef long long		Elf64_Sxword;
+typedef unsigned int		Elf64_Word;
+typedef int			Elf64_Sword;
+typedef unsigned short		Elf64_Half;
+
+_Static_assert(sizeof(Elf64_Addr)  == 8, "ELF64: an address is eight bytes");
+_Static_assert(sizeof(Elf64_Off)   == 8, "ELF64: an offset is eight bytes");
+_Static_assert(sizeof(Elf64_Xword) == 8, "ELF64: an extended word is eight bytes");
+_Static_assert(sizeof(Elf64_Word)  == 4, "ELF64: a word is still four bytes");
+_Static_assert(sizeof(Elf64_Half)  == 2, "ELF64: a half is still two bytes");
+
+typedef struct {
+  unsigned char		e_ident[EI_NIDENT];
+  Elf64_Half		e_type;
+  Elf64_Half		e_machine;
+  Elf64_Word		e_version;
+  Elf64_Addr		e_entry;
+  Elf64_Off		e_phoff;
+  Elf64_Off		e_shoff;
+  Elf64_Word		e_flags;
+  Elf64_Half		e_ehsize;
+  Elf64_Half		e_phentsize;
+  Elf64_Half		e_phnum;
+  Elf64_Half		e_shentsize;
+  Elf64_Half		e_shnum;
+  Elf64_Half		e_shstrndx;
+} Elf64_Ehdr;
+
+typedef struct {
+  Elf64_Word		p_type;
+  Elf64_Word		p_flags;	/* ⚠️ SECOND here, second-to-last in ELF32 */
+  Elf64_Off		p_offset;
+  Elf64_Addr		p_vaddr;
+  Elf64_Addr		p_paddr;
+  Elf64_Xword		p_filesz;
+  Elf64_Xword		p_memsz;
+  Elf64_Xword		p_align;
+} Elf64_Phdr;
+
+_Static_assert(sizeof(Elf64_Ehdr) == 64, "ELF64: the header is sixty-four bytes");
+_Static_assert(sizeof(Elf64_Phdr) == 56, "ELF64: a program header is fifty-six bytes");
+
+/*
+ * And which of the two this kernel loads.
+ *
+ * ⚠️ One, not either.  A kernel reads a boot image into a task whose address
+ * space it is building, so the class it accepts is fixed by the architecture
+ * and an image of the other class is not a variant to be handled but a file
+ * for a different machine.  Naming the pair here means the loader has no
+ * conditionals in it and the check that refuses the other class has one place
+ * to be, which is what keeps the refusal from being forgotten.
+ */
+#if defined(__x86_64__)
+typedef Elf64_Ehdr	Elf_Ehdr;
+typedef Elf64_Phdr	Elf_Phdr;
+#define ELF_TARGET_CLASS	ELFCLASS64
+#define ELF_TARGET_MACHINE	EM_X86_64
+#define ELF_TARGET_NAME		"x86-64"
+#else
+typedef Elf32_Ehdr	Elf_Ehdr;
+typedef Elf32_Phdr	Elf_Phdr;
+#define ELF_TARGET_CLASS	ELFCLASS32
+#define ELF_TARGET_MACHINE	EM_386
+#define ELF_TARGET_NAME		"i386"
+#endif
 
 /* segment types - page 5-3, figure 5-2 */
 

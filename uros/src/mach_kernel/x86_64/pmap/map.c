@@ -177,7 +177,12 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	 * range is now fine-grained when it is still one large page — which is
 	 * how a section ends up sharing its permissions with its neighbour.
 	 */
-	table_pa = boot_frame_alloc();
+	/*
+	 * pmap_table_frame(), for the reason written above it: after the VM
+	 * comes up the boot allocator has nothing left, and a large page can be
+	 * split at any time (#422).  Same class as pmap_create()'s.
+	 */
+	table_pa = pmap_table_frame();
 	if (table_pa == 0)
 		panic("pmap: no frame to split a large page into");
 

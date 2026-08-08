@@ -73,7 +73,20 @@ static pv_entry_t pv_alloc(void)
 	unsigned per_frame = PAGE_SIZE_4K / sizeof(struct pv_entry);
 
 	if (pv_free_list == PV_ENTRY_NULL) {
-		frame = boot_frame_alloc();
+		/*
+		 * pmap_table_frame(), same class as pmap_create()'s and the
+		 * large-page split's (#422): the boot allocator is empty once
+		 * the VM has taken physical memory over, and this runs on every
+		 * second mapping of a page for as long as the system is up --
+		 * so with boot_frame_alloc() the panic below was not a
+		 * safeguard, it was a wall a few mappings away.
+		 *
+		 * ⚠️ It can block, and today that is safe because nothing holds
+		 * a lock across it: pmap_enter() calls pv_enter() with none
+		 * taken, this pmap having no locking yet.  When it gains some
+		 * (#455), this call is the first place to look.
+		 */
+		frame = pmap_table_frame();
 		if (frame == 0)
 			return PV_ENTRY_NULL;
 

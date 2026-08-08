@@ -360,8 +360,16 @@ static void
 do_bootstrap_compat(void)
 {
 	char *startup_flags_begin = 0;
-	Elf32_Ehdr *ehdr = (Elf32_Ehdr *) boot_start;
-	Elf32_Phdr *phdr, *ph;
+	/*
+	 * ⚠️ Widened with the rest even though SYS_REBOOT_COMPAT is off and this
+	 * does not compile today (#422).  Left at Elf32 it would be a copy of
+	 * the loader below carrying exactly the defect that was just removed,
+	 * waiting for whoever turns the macro on -- and they would turn on a
+	 * path that has never been built, which is the worst moment to inherit
+	 * a parse that reads a 64-bit file at 32-bit strides.
+	 */
+	Elf_Ehdr *ehdr = (Elf_Ehdr *) boot_start;
+	Elf_Phdr *phdr, *ph;
 	vm_offset_t entry;
 	int result, i;
 	int bss_start, bss_size;
@@ -370,7 +378,7 @@ do_bootstrap_compat(void)
 		return;			/* there isn't anything we can do */
 
 	entry = (vm_offset_t) ehdr->e_entry;
-	phdr = (Elf32_Phdr *) (boot_start + ehdr->e_phoff);
+	phdr = (Elf_Phdr *) (boot_start + ehdr->e_phoff);
 	
 	dprintf("entry: 0x%x\n", entry);
 	dprintf("ph offset: 0x%x\n", ehdr->e_phoff);
@@ -557,22 +565,144 @@ do_bootstrap_compat(void)
 #endif /* SYS_REBOOT_COMPAT */
 
 
+/*
+ * Is this an image this kernel can load, and if not, WHY (#422).
+ *
+ * ⚠️ The failure this exists to prevent has no symptom of its own.  An ELF64
+ * file read as ELF32 is not rejected by anything: the magic matches, `e_phoff'
+ * lands in the middle of a 64-bit field and reads as a plausible offset,
+ * `e_phnum' comes out of a byte that means something else, and the walk then
+ * steps through the file at the wrong stride producing segments with
+ * meaningless addresses.  What reaches the console is a task that starts and
+ * dies somewhere else -- which is what happened here: `act_user_frame: thread
+ * has never been to user mode', a message about the thread and not about the
+ * file that was never loaded into it.
+ *
+ * So every field that could make the parse meaningless is checked before the
+ * parse, and each has its own message.  The issue asks for exactly this: "a
+ * bundle that silently means something different per architecture is a
+ * debugging nightmare with no error message".
+ *
+ * `e_phentsize' is the one worth naming.  It is the file stating how far apart
+ * its own program headers are, and comparing it with sizeof(Elf_Phdr) is the
+ * only check here that is not about a constant we chose -- it is the file and
+ * this kernel agreeing about a layout, which is the thing that actually has to
+ * hold for the walk below to mean anything.
+ */
+static boolean_t
+boot_image_ok(vm_offset_t start, vm_size_t size)
+{
+	const Elf_Ehdr *e = (const Elf_Ehdr *) start;
+	unsigned long long ph_end;
+
+	if (size < sizeof(Elf_Ehdr)) {
+		printf("bootstrap: boot image is %lu bytes, too small for an "
+		       "ELF header\n", (unsigned long) size);
+		return FALSE;
+	}
+
+	if (e->e_ident[EI_MAG0] != ELFMAG0 || e->e_ident[EI_MAG1] != ELFMAG1
+	 || e->e_ident[EI_MAG2] != ELFMAG2 || e->e_ident[EI_MAG3] != ELFMAG3) {
+		printf("bootstrap: boot image is not ELF (starts %02x %02x "
+		       "%02x %02x)\n", e->e_ident[0], e->e_ident[1],
+		       e->e_ident[2], e->e_ident[3]);
+		return FALSE;
+	}
+
+	if (e->e_ident[EI_CLASS] != ELF_TARGET_CLASS) {
+		printf("bootstrap: boot image is %d-bit, this kernel loads "
+		       "%d-bit (" ELF_TARGET_NAME ") images\n",
+		       e->e_ident[EI_CLASS] == ELFCLASS64 ? 64 : 32,
+		       ELF_TARGET_CLASS == ELFCLASS64 ? 64 : 32);
+		return FALSE;
+	}
+
+	if (e->e_ident[EI_DATA] != ELFDATA2LSB) {
+		printf("bootstrap: boot image is not little-endian\n");
+		return FALSE;
+	}
+
+	if (e->e_machine != ELF_TARGET_MACHINE) {
+		printf("bootstrap: boot image is for machine %u, this kernel "
+		       "is " ELF_TARGET_NAME " (%u)\n",
+		       (unsigned) e->e_machine, (unsigned) ELF_TARGET_MACHINE);
+		return FALSE;
+	}
+
+	if (e->e_type != ET_EXEC) {
+		printf("bootstrap: boot image is type %u, not a static "
+		       "executable -- a dynamic one needs an interpreter, and "
+		       "there is none this early\n", (unsigned) e->e_type);
+		return FALSE;
+	}
+
+	if (e->e_phentsize != sizeof(Elf_Phdr)) {
+		printf("bootstrap: boot image says its program headers are %u "
+		       "bytes, this kernel reads %lu\n",
+		       (unsigned) e->e_phentsize, (unsigned long) sizeof(Elf_Phdr));
+		return FALSE;
+	}
+
+	if (e->e_phnum == 0) {
+		printf("bootstrap: boot image has no program headers -- "
+		       "nothing to map\n");
+		return FALSE;
+	}
+
+	/*
+	 * And that the table is inside the file.  Computed in the widest type
+	 * available rather than in vm_size_t: the whole point is that these
+	 * numbers came from outside, so the arithmetic that checks them must
+	 * not be the arithmetic that can wrap.
+	 */
+	ph_end = (unsigned long long) e->e_phoff
+	       + (unsigned long long) e->e_phnum * e->e_phentsize;
+	if (ph_end > (unsigned long long) size) {
+		printf("bootstrap: boot image program headers end at %llu, "
+		       "past the end of a %lu-byte image\n",
+		       ph_end, (unsigned long) size);
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 static void
 exec_load(vm_offset_t start, vm_size_t size)
 {
 	char *startup_flags_begin = 0;
-	Elf32_Ehdr *ehdr = (Elf32_Ehdr *) start;
-	Elf32_Phdr *phdr, *ph;
+	Elf_Ehdr *ehdr = (Elf_Ehdr *) start;
+	Elf_Phdr *phdr, *ph;
 	vm_offset_t entry;
 	int result, i;
 	int bss_start, bss_size;
 
 
-	if (size == 0)		/* if we don't have a bootstrap */
-		return;			/* there isn't anything we can do */
+	/*
+	 * ⚠️ And it SAYS so (#422).  This returned in silence, which meant a
+	 * bootstrap task with nothing in it started anyway and died three
+	 * layers away in act_user_frame().  "There isn't anything we can do"
+	 * is a reason to stop, not a reason to say nothing.
+	 */
+	if (size == 0) {
+		printf("bootstrap: the boot image is zero bytes -- nothing to "
+		       "load\n");
+		return;
+	}
+
+	/*
+	 * ⚠️ Returning rather than panicking, and the caller carries on into a
+	 * task with no regions -- which is the behaviour that was already here
+	 * and is worth keeping for one reason: the message above has been
+	 * printed by then.  A panic would be a second message about the same
+	 * event, and on this kernel panic() is not noreturn (#428), so it would
+	 * return into exactly this path anyway.
+	 */
+	if (!boot_image_ok(start, size))
+		return;
 
 	entry = (vm_offset_t) ehdr->e_entry;
-	phdr = (Elf32_Phdr *) (start + ehdr->e_phoff);
+	phdr = (Elf_Phdr *) (start + ehdr->e_phoff);
 	
 	dprintf("entry: 0x%x\n", entry);
 	dprintf("ph offset: 0x%x\n", ehdr->e_phoff);
@@ -610,6 +740,7 @@ exec_load(vm_offset_t start, vm_size_t size)
 			}
 			else if (ph->p_flags == PF_R) {
 				/* Read-only segment (.rodata, notes, etc.) */
+				BOOT_REGION_ROOM();
 				regions[boot_region_count].prot = VM_PROT_READ;
 				regions[boot_region_count].addr = trunc_page(ph->p_vaddr);
 				regions[boot_region_count].size = round_page(ph->p_vaddr + ph->p_filesz) - trunc_page(ph->p_vaddr);
@@ -630,7 +761,19 @@ exec_load(vm_offset_t start, vm_size_t size)
 		}
 	}
 
-	dprintf("I've found: %d sections\n", boot_region_count);
+	/*
+	 * What was loaded, said out loud (#422).
+	 *
+	 * ⚠️ Not a dprintf.  This file's tracing is compiled out of a release
+	 * build, so the only thing an ordinary boot ever said about the image it
+	 * is about to run was nothing at all -- and when the task failed to
+	 * start, the message came from three layers away and was about a thread
+	 * rather than about the file.  One line: which entry point, how many
+	 * regions.  It is the first thing to read when a boot stops on its way
+	 * to user mode.
+	 */
+	printf("bootstrap: image entry 0x%lx, %d regions\n",
+	       (unsigned long) entry, boot_region_count);
 
 	BOOT_REGION_ROOM();
 	regions[boot_region_count].addr = STACK_BASE;
@@ -881,6 +1024,21 @@ user_bootstrap(void)
 {
     struct user_bootstrap_info *info = (struct user_bootstrap_info *) current_thread()->saved.other;
     int err = 0;
+
+    /*
+     * What this thread was ASKED to load, before anything tries to (#422).
+     *
+     * The line exec_load() prints says what came out of the file; this one
+     * says what went in.  Two lines rather than one because the failure that
+     * needed them was between: the loader printed nothing at all, and the
+     * question "was it never called, or called with nothing?" took five boots
+     * to answer.
+     */
+    printf("bootstrap: loading 0x%lx, %lu bytes into map %p, pmap %p\n",
+           info ? (unsigned long) info->start : 0UL,
+           info ? (unsigned long) info->size : 0UL,
+           current_task()->map,
+           current_task()->map ? vm_map_pmap(current_task()->map) : 0);
 
     exec_load(info->start, info->size);
     //    if (err)
@@ -1276,9 +1434,14 @@ bootstrap_create(void)
     vm_offset_t mod_phys;
     vm_size_t mod_size;
 
-    dprintf("boot modules: %u  boot_start=0x%lx  boot_size=0x%lx\n",
-            mod_count, (unsigned long) boot_start,
-            (unsigned long) boot_size);
+    /*
+     * ⚠️ printf and not dprintf (#422).  This file's tracing is compiled out
+     * of a release build, so an ordinary boot said nothing about the image it
+     * was about to run -- and when it failed to run, the message came from
+     * three layers away and was about a thread.  These three numbers are the
+     * first question anyone asks.
+     */
+
 
     /* If the early parse could not read the module list -- on i386 the
      * physical address may not have been mapped yet -- ask again here, where
@@ -1294,6 +1457,16 @@ bootstrap_create(void)
                 "size=0x%lx\n", (unsigned long) mod_phys,
                 (unsigned long) boot_start, (unsigned long) boot_size);
     }
+
+    /*
+     * ⚠️ printf and not dprintf, and AFTER the late read (#422).  This file's
+     * tracing is compiled out of a release build, so an ordinary boot said
+     * nothing at all about the image it was about to run -- and when it failed
+     * to run, the message came from three layers away and was about a thread.
+     * These three numbers are the first question anyone asks.
+     */
+    printf("bootstrap: %u boot modules, module 0 at 0x%lx, %lu bytes\n",
+           mod_count, (unsigned long) boot_start, (unsigned long) boot_size);
 
     /* Peek at the first 4 bytes of the module to check for ELF magic. */
     if (boot_start != 0) {
@@ -1667,6 +1840,7 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
 		      char **argv, char *strings, int stringlen)
 {
   thread_act_t thread_act;
+  thread_t thread;
   ipc_port_t master_bootstrap_port;
   int err;
   int i;
@@ -1689,7 +1863,20 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       if (master_bootstrap_port == IP_NULL)
           panic("can't allocate master bootstrap port");
 
-      err = thread_create ((task_t)task, &thread_act);
+      /*
+       * ⚠️ Created but NOT started (#422).
+       *
+       * thread_create() makes the thread runnable before it returns and leaves
+       * this function to say what it should run -- which is two statements
+       * below, and on a machine with idle processors that is two statements too
+       * late.  An idle processor takes the thread off the queue and runs the
+       * placeholder continuation, into a thread with no user frame.
+       *
+       * Measured: correct on every uniprocessor boot, wrong on every boot with
+       * four processors.  Split, so that everything this thread has to read is
+       * in place before anything can read it.
+       */
+      err = thread_create_unstarted((task_t)task, &thread_act, &thread);
       assert(err == 0);
 
       task_set_special_port(task,
@@ -1700,6 +1887,10 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       
       thread_act->thread->saved.other = (char *) &info;
       thread_start(thread_act->thread, user_bootstrap);
+
+      /* Configured; now it may run. */
+      thread_start_created(thread_act, thread);
+
       err = thread_resume(thread_act);
       assert(err == 0);
 

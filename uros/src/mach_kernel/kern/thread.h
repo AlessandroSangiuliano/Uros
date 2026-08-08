@@ -783,6 +783,23 @@ extern kern_return_t	act_create_running(
 				thread_state_t          new_state,
 				unsigned int            new_state_count,
 				thread_act_t			*child_act);
+/*
+ * Create a thread and let it run as two steps (#422).
+ *
+ * thread_create() does both and returns a thread that may ALREADY be running
+ * on another processor -- so a caller with something to configure first (a
+ * continuation of its own, something for the thread to read out of `saved')
+ * has no window in which to do it.  These two give it one.
+ */
+extern kern_return_t	thread_create_unstarted(
+				task_t		task,
+				thread_act_t	*new_act,
+				thread_t	*new_thread);
+
+extern void		thread_start_created(
+				thread_act_t	thr_act,
+				thread_t	thread);
+
 extern kern_return_t	thread_create_at(
 				task_t			parent_task,
 				thread_t		*child_thread,

@@ -11,6 +11,7 @@
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <syscall/syscall.h>
+#include <kern/misc_protos.h>	/* #422: printf */
 #include <trap/trap.h>
 
 #define MSR_STAR	0xC0000081
@@ -133,6 +134,41 @@ uint64_t syscall_probe_kernel_rsp(void)
 	return probe_kernel_rsp;
 }
 
+/*
+ * The first call from the BOOT IMAGE, said once (#422/#467).
+ *
+ * ⚠️ The proof that a user task is alive cannot be its absence.  Once the boot
+ * image runs, the machine simply carries on -- no panic, no halt, the clock
+ * ticking -- and "nothing went wrong" is exactly what a task that never
+ * started also looks like from outside.  So the task says so, through the only
+ * channel it has, and the kernel repeats it.
+ *
+ * The arguments are what distinguishes it from the ring-3 self-test, which
+ * takes the same path a few hundred milliseconds earlier with 1..6.  A count
+ * both could have produced would prove neither.
+ */
+#define BOOT_IMAGE_A1	0x51
+#define BOOT_IMAGE_A6	0x56
+
+static uint64_t boot_image_calls;
+
+uint64_t syscall_probe_boot_image_calls(void)
+{
+	return boot_image_calls;
+}
+
+static void note_boot_image(uint64_t a1, uint64_t a6)
+{
+	if (a1 != BOOT_IMAGE_A1 || a6 != BOOT_IMAGE_A6)
+		return;
+
+	if (boot_image_calls++ != 0)
+		return;
+
+	printf("boot_probe: the 64-bit boot image is running in ring 3 and "
+	       "has called into the kernel\n");
+}
+
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -148,6 +184,8 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 	probe_kernel_rsp = top;
 	probe_saved_rip = saved[-1];
 	probe_saved_flags = saved[-2];
+	note_boot_image(a1, a6);
+
 	probe_depth = x86_64_backtrace_probe(
 			(uint64_t)(uintptr_t)__builtin_frame_address(0),
 			&probe_top, "syscall_entry", &probe_reached_entry);

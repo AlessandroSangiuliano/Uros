@@ -100,6 +100,39 @@ static uint64_t compute_low_water(uint32_t info_pa)
 			mark = info_end;
 	}
 
+	/*
+	 * 🔥 AND THE BOOT MODULES, which were not here and had to be (#422).
+	 *
+	 * The loader puts modules where it likes.  Everything above accounts for
+	 * things the kernel or the loader placed in a known relation to the
+	 * image; a module is placed in no relation to anything, and this GRUB
+	 * puts it ABOVE the information structure — so the mark stopped below it
+	 * and boot_frame_alloc() handed out the pages holding the first user
+	 * program.
+	 *
+	 * ⚠️ What that looks like is not an allocation failure.  The module is
+	 * still described, its address and size are still right, and the memory
+	 * at that address reads as whatever the kernel has since put there —
+	 * zeroes, in every boot measured.  The first thing to notice it was the
+	 * ELF check three layers up saying "boot image is not ELF (starts 00 00
+	 * 00 00)", and without that check it would have been a task that started
+	 * and died somewhere else entirely.
+	 *
+	 * The same class the symbol-table clause above guards against, with one
+	 * difference worth stating: that one is insurance against an arrangement
+	 * that happens to hold, and this one was a live defect from the first
+	 * boot that carried a module.
+	 */
+	for (unsigned n = 0; ; n++) {
+		uint64_t start, len;
+
+		if (!mb2_module_range(n, &start, &len))
+			break;
+
+		if (start + len > mark)
+			mark = start + len;
+	}
+
 	return round_up_page(mark);
 }
 

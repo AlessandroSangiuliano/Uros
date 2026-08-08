@@ -232,6 +232,32 @@ int desc_on_ist_stack(uint32_t cpu_id, unsigned slot, uint64_t addr)
 	return addr < top && addr >= top - DESC_STACK_SIZE;
 }
 
+/*
+ * Where a trap from ring 3 lands on this processor, from now on (#422).
+ *
+ * ⚠️ This was written ONCE, when the task-state segment was built, and pointed
+ * at a four-kilobyte stack belonging to the processor rather than to any
+ * thread.  That is correct exactly while no thread ever enters the kernel from
+ * ring 3 — which was true until there was a user task, and stops being true on
+ * the first one.
+ *
+ * Two things break without it.  A thread that faults and then BLOCKS leaves
+ * its kernel state on a stack the next thread to enter on this processor will
+ * push over; and the frame thread_set_state() wrote into a thread's own stack
+ * is not where the processor will build the next one, so the two disagree
+ * about where a thread's user registers live.  Neither has a symptom at the
+ * point of the mistake.
+ *
+ * The switch calls this, so the answer is always the thread that is running.
+ */
+void desc_set_rsp0(uint32_t cpu_id, uint64_t rsp0)
+{
+	if (cpu_id >= SMP_MAX_CPUS)
+		panic("desc: set the stack of a processor past the tables");
+
+	tss[cpu_id].rsp0 = rsp0;
+}
+
 void desc_activate(uint32_t cpu_id)
 {
 	load_gdt();

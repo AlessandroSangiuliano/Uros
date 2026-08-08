@@ -43,7 +43,9 @@
 #include <thread/fpu.h>
 #include <thread/state.h>
 #include <trap/trap.h>
+#include <cpu/desc.h>		/* #422: rsp0 follows the thread */
 #include <cpu/percpu.h>
+#include <cpu/regs.h>		/* #422: cpu_apic_id */
 
 /*
  * Module init.  Both halves exist because the machine-independent tree calls
@@ -114,6 +116,23 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * is nothing for this to do about it.
 	 */
 	percpu()->kernel_rsp = pcb->ctx.kernel_stack_top;
+	/*
+	 * ⚠️ TWO places, and only one of them was here (#422).
+	 *
+	 * A syscall reads its stack out of the per-CPU block, which is the line
+	 * above.  A TRAP does not: the processor takes it from the task-state
+	 * segment, in hardware, before a single kernel instruction runs -- so a
+	 * fault or an interrupt arriving from ring 3 landed on whatever stack the
+	 * TSS was built with, which is one four-kilobyte stack per PROCESSOR,
+	 * shared by every thread that ever enters on it.
+	 *
+	 * Correct exactly while nothing ever comes from ring 3, and it was, until
+	 * there was a user task.  Now it is two failures waiting: a thread that
+	 * faults and then blocks leaves its kernel state where the next entry
+	 * pushes over it, and the frame thread_set_state() wrote into a thread's
+	 * own stack is not where the processor would build the next one.
+	 */
+	desc_set_rsp0(cpu_apic_id(), pcb->ctx.kernel_stack_top);
 }
 
 /*
@@ -432,8 +451,42 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 {
 	pcb_t	pcb = thr_act->mact.pcb;
 
-	if (pcb == PCB_NULL || pcb->user == (struct trap_frame *) 0)
+	if (pcb == PCB_NULL)
 		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * ── Where a thread's user registers live, and who first says so ──
+	 *
+	 * A thread that has never been to ring 3 has no frame, and this used to
+	 * refuse for that reason (#422) -- which is right for READING one and
+	 * wrong for writing one, because writing is exactly how a thread that
+	 * has never run acquires its first.
+	 *
+	 * The bootstrap task is that case, and the only one that matters today:
+	 * the loader works out an entry point and a stack, and thread_setstatus()
+	 * is the only way to put them anywhere.  Refusing left the frame null,
+	 * and the machine stopped in act_user_frame() with "thread has never
+	 * been to user mode" -- a message about the thread rather than about the
+	 * state that had been declined on its way in.
+	 *
+	 * ⚠️ The address is not chosen, it is DERIVED, and that is the point.
+	 * A trap from ring 3 switches to the stack the task-state segment names
+	 * -- which act_machine_switch_pcb() now keeps at this thread's
+	 * kernel_stack_top -- and the processor aligns down to sixteen before
+	 * pushing its five words, on top of which the stub adds two and
+	 * SAVE_REGS fifteen.  So the frame the hardware will build is exactly
+	 * here.  Writing one anywhere else would give a thread two places for
+	 * its registers: the one set_state wrote, and the one the next trap
+	 * builds over it.
+	 *
+	 * The expression is the one #409 measured against the hardware on four
+	 * separate entries, which is why it is written as arithmetic rather
+	 * than as a constant somebody would have to trust.
+	 */
+	if (pcb->user == (struct trap_frame *) 0)
+		pcb->user = (struct trap_frame *)
+			((pcb->ctx.kernel_stack_top & ~15UL)
+			 - sizeof(struct trap_frame));
 
 	switch (flavor) {
 
