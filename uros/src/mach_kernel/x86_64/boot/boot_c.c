@@ -2151,6 +2151,92 @@ static void ring3_selftest(void)
 	      : " — WRONG, a path kept the user's gs\r\n");
 
 	/*
+	 * ── And the frames themselves, against addresses known in advance ──
+	 *
+	 * Everything above asks whether ring 3 ran and came back.  These two ask
+	 * whether the entry paths described WHERE it was when it stopped, which
+	 * is the field a debugger and an exception handler will read and the one
+	 * nothing has ever checked (#409).
+	 *
+	 * A fault from ring 3 also switches stacks — not through the interrupt
+	 * stack table but through rsp0, on the privilege change — so the frame's
+	 * address is the other half of that: it must be on the kernel stack the
+	 * task-state segment names, while the stack pointer it saved is the
+	 * user's.  Two numbers from two different owners, and a missing switch
+	 * makes them the same one.
+	 */
+	{
+		uint64_t want_rip = USER_PROBE_FAULT_VA;
+		uint64_t want_frame = (desc_rsp0(cpu_apic_id()) & ~15ULL) - 176;
+		int rip_ok = first.rip == want_rip;
+		int rsp_ok = first.rsp == USER_PROBE_STACK_TOP;
+		int frame_ok = first.frame == want_frame;
+
+		kputs("UrMach x86-64: the fault from ring 3 was at rip ");
+		kputhex64(first.rip);
+		kputs(" rsp ");
+		kputhex64(first.rsp);
+		kputs(", frame on the kernel stack at ");
+		kputhex64(first.frame);
+		kputs(rip_ok && rsp_ok && frame_ok
+		      ? " — the instruction, its user stack, and the switch\r\n"
+		      : " — WRONG, the frame does not describe the probe\r\n");
+
+		if (!rip_ok) {
+			kputs("               the HLT is at ");
+			kputhex64(want_rip);
+			kputs("\r\n");
+		}
+		if (!rsp_ok) {
+			kputs("               its stack was ");
+			kputhex64(USER_PROBE_STACK_TOP);
+			kputs("\r\n");
+		}
+		if (!frame_ok) {
+			kputs("               the frame should be at ");
+			kputhex64(want_frame);
+			kputs("\r\n");
+		}
+	}
+
+	/*
+	 * The syscall has no such structure and must not grow one — see
+	 * syscall_probe() for why the two words it does save are its frame.
+	 * They are read back from the stack the entry switched to, so a switch
+	 * that never happened cannot produce them.
+	 */
+	{
+		uint64_t want_rip = USER_PROBE_AFTER_SYSCALL_VA;
+		uint64_t rsp0 = desc_rsp0(cpu_apic_id());
+		int rip_ok = syscall_probe_saved_rip() == want_rip;
+		int stack_ok = syscall_probe_kernel_rsp() == rsp0;
+		int flags_ok = (syscall_probe_saved_flags() & RFLAGS_IF) != 0;
+
+		kputs("UrMach x86-64: the syscall saved rip ");
+		kputhex64(syscall_probe_saved_rip());
+		kputs(" flags ");
+		kputhex64(syscall_probe_saved_flags());
+		kputs(" on the kernel stack at ");
+		kputhex64(syscall_probe_kernel_rsp());
+		kputs(rip_ok && stack_ok && flags_ok
+		      ? " — where ring 3 resumes, and the state it resumes in\r\n"
+		      : " — WRONG, the entry saved something else\r\n");
+
+		if (!rip_ok) {
+			kputs("               it should resume at ");
+			kputhex64(want_rip);
+			kputs("\r\n");
+		}
+		if (!stack_ok) {
+			kputs("               the kernel stack is at ");
+			kputhex64(rsp0);
+			kputs("\r\n");
+		}
+		if (!flags_ok)
+			kputs("               it would resume with interrupts off\r\n");
+	}
+
+	/*
 	 * And whether ring 3 could have written that base itself (#440).
 	 *
 	 * The trap entry for NMI and its three relatives decides what to do by

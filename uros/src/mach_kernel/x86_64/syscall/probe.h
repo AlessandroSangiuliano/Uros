@@ -81,6 +81,25 @@ extern char user_probe_fsgsbase[];
 					 - __user_probe_start))
 
 /*
+ * And the two addresses the entry paths must report (#409).
+ *
+ * The syscall saves the address of the instruction AFTER it, in rcx, and the
+ * kernel pushes that; the general protection saves the address of the HLT
+ * itself, because it is a fault.  Both are known here, exactly, which is what
+ * turns "a fault arrived from ring 3" into "the frame describes the
+ * instruction that raised it".
+ */
+extern char user_probe_after_syscall[], user_probe_fault[];
+
+#define USER_PROBE_AFTER_SYSCALL_VA				\
+	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_after_syscall \
+					 - __user_probe_start))
+
+#define USER_PROBE_FAULT_VA					\
+	(USER_PROBE_CODE_VA + (uint64_t)(user_probe_fault	\
+					 - __user_probe_start))
+
+/*
  * Where a fault from the probe comes back to.  Declared here only so the
  * kernel can recognise it in a report; the arming is done by the entry
  * itself, which is the only code that knows the stack the return needs.

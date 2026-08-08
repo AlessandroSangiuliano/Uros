@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <cpu/desc.h>
+#include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <syscall/syscall.h>
 
@@ -57,10 +58,59 @@ uint64_t syscall_probe_gs(void)
 	return probe_gs_base;
 }
 
+/*
+ * What the entry left on the kernel stack, read back from the handler (#409).
+ *
+ * ── Why this is the whole of a syscall's "frame" ──────────────────────
+ *
+ * The other five entries build a struct trap_frame and the check is that its
+ * fields describe the interrupted code.  A syscall has no such structure and
+ * must not grow one: the contract in <syscall/syscall.h> declares the argument
+ * registers destroyed precisely so the entry does not save them, and that
+ * absence is measured in cycles on every call in the system.
+ *
+ * What it does save is two words, and they are the two the return cannot do
+ * without: where ring 3 resumes, and the flags it resumes with.  So they are
+ * the frame, and reading them back from the stack the entry chose is the only
+ * way to see BOTH that the stack switch happened and that the right things
+ * went onto it — if `movq %gs:PERCPU_KERNEL_RSP, %rsp' had not run, the pushes
+ * would have landed on the user's stack and these two addresses would hold
+ * whatever was there.
+ */
+static uint64_t probe_saved_rip;
+static uint64_t probe_saved_flags;
+static uint64_t probe_kernel_rsp;
+
+uint64_t syscall_probe_saved_rip(void)
+{
+	return probe_saved_rip;
+}
+
+uint64_t syscall_probe_saved_flags(void)
+{
+	return probe_saved_flags;
+}
+
+uint64_t syscall_probe_kernel_rsp(void)
+{
+	return probe_kernel_rsp;
+}
+
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
+	uint64_t top = percpu()->kernel_rsp;
+	const uint64_t *saved = (const uint64_t *)(uintptr_t)top;
+
 	probe_gs_base = rdmsr(MSR_GS_BASE);
+
+	/*
+	 * In the order the entry pushed them, which is the reverse of the order
+	 * they come off: rcx first, so it is nearest the top.
+	 */
+	probe_kernel_rsp = top;
+	probe_saved_rip = saved[-1];
+	probe_saved_flags = saved[-2];
 
 	return  (a1 & 0xFF)
 	     | ((a2 & 0xFF) << 8)

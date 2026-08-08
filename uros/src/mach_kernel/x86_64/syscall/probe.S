@@ -136,6 +136,23 @@ user_probe_code:
 	movq	$6, %r9
 	syscall
 
+/*
+ * Where the syscall must be seen to resume (#409).
+ *
+ * ⚠️ The instruction immediately after SYSCALL, and nothing else: that is the
+ * address the processor puts in rcx and the entry pushes.  The first version of
+ * this label sat two instructions further down, next to the HLT, and the test
+ * failed against a kernel that was right — the number it wanted was the fault's
+ * address, which is a different question about the same page.
+ *
+ * Both are addresses in a page that has not been copied yet, so neither is
+ * usable as written here — the caller turns each into the address it will have
+ * by adding its offset within the section to USER_PROBE_CODE_VA.  Labels rather
+ * than counted bytes, so that an instruction added above moves them.
+ */
+	.globl	user_probe_after_syscall
+user_probe_after_syscall:
+
 	/*
 	 * r11 has to be reloaded: the instruction destroyed it, which is the
 	 * contract working rather than failing.
@@ -143,6 +160,12 @@ user_probe_code:
 	movabsq	$USER_PROBE_DATA_VA, %r11
 	movq	%rax, 8(%r11)
 
+/*
+ * Where the general protection must be seen to come from (#409).  See the note
+ * at user_probe_after_syscall above for why these are labels.
+ */
+	.globl	user_probe_fault
+user_probe_fault:
 	hlt
 
 /*

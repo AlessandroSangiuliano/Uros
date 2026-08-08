@@ -133,6 +133,14 @@ uint64_t syscall_probe_gs(void);
  */
 void syscall_entry(void);
 
+/*
+ * What the last probe call found on the kernel stack, and which stack that was
+ * (#409).  See syscall.c: for this entry these two words ARE the frame.
+ */
+uint64_t syscall_probe_saved_rip(void);
+uint64_t syscall_probe_saved_flags(void);
+uint64_t syscall_probe_kernel_rsp(void);
+
 #endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_SYSCALL_SYSCALL_H_ */
