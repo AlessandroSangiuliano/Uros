@@ -27,6 +27,7 @@ struct elf64_shdr {
 
 #define SHT_SYMTAB	2
 #define SHT_STRTAB	3
+#define SHF_ALLOC		0x2
 #define SHF_EXECINSTR	0x4
 
 struct elf64_sym {
@@ -66,6 +67,28 @@ static const struct elf64_sym *symbols;
 static const char *strings;
 static unsigned nsymbols;
 static uint64_t strings_size;
+
+/*
+ * Where each loaded section lies, so that an address outside all of them can
+ * be refused rather than attributed to the nearest preceding symbol.
+ */
+struct ksym_span {
+	uint16_t	shndx;
+	uint64_t	start;
+	uint64_t	end;
+};
+
+static struct ksym_span	spans[KSYM_MAX_SECTIONS];
+static unsigned		nspans;
+
+/* The section an address is in, or none. */
+static const struct ksym_span *span_of(uint64_t addr)
+{
+	for (unsigned i = 0; i < nspans; i++)
+		if (addr >= spans[i].start && addr < spans[i].end)
+			return &spans[i];
+	return 0;
+}
 
 static int in_code(uint16_t shndx)
 {
@@ -125,9 +148,36 @@ unsigned ksym_init(uint32_t info_pa)
 		return 0;
 
 	exec_sections = 0;
-	for (unsigned i = 0; i < t->num && i < KSYM_MAX_SECTIONS; i++)
-		if (section(t, i)->flags & SHF_EXECINSTR)
+	nspans = 0;
+	for (unsigned i = 0; i < t->num && i < KSYM_MAX_SECTIONS; i++) {
+		const struct elf64_shdr *sh = section(t, i);
+
+		if (sh->flags & SHF_EXECINSTR)
 			exec_sections |= 1ULL << i;
+
+		/*
+		 * And where every section that is IN MEMORY actually lies
+		 * (#428).
+		 *
+		 * Without this a lookup has only the symbols to go on, and a
+		 * symbol with no size -- every assembly label -- claims
+		 * everything above it for ever.  Asking about a piece of data
+		 * therefore produced a confident function name:
+		 * `<__user_probe_end+0x879e1>' for an address half a megabyte
+		 * past the end of the code, printed beside every wait event
+		 * the debugger reported.
+		 *
+		 * A name that is wrong is worse than no name, because it is
+		 * believed.  These bounds are what let the lookup refuse.
+		 */
+		if ((sh->flags & SHF_ALLOC) && sh->addr != 0 && sh->size != 0
+		    && nspans < KSYM_MAX_SECTIONS) {
+			spans[nspans].shndx = (uint16_t) i;
+			spans[nspans].start = sh->addr;
+			spans[nspans].end = sh->addr + sh->size;
+			nspans++;
+		}
+	}
 
 	for (unsigned i = 0; i < t->num; i++) {
 		const struct elf64_shdr *sh = section(t, i);
@@ -169,11 +219,27 @@ unsigned ksym_count(void)
 const char *ksym_lookup(uint64_t addr, uint64_t *offset)
 {
 	const struct elf64_sym *best = 0;
+	const struct ksym_span *sp = span_of(addr);
+
+	/*
+	 * ⚠️ Outside every loaded section there is no name to give, and the
+	 * honest answer is none.  This used to fall through to the symbol
+	 * scan, where the last sizeless label in the last code section
+	 * matched anything above it.
+	 */
+	if (sp == 0)
+		return 0;
 
 	for (unsigned i = 0; i < nsymbols; i++) {
 		const struct elf64_sym *s = &symbols[i];
 
-		if (s->value == 0 || !in_code(s->shndx))
+		/*
+		 * In the SAME section as the address.  A symbol in another one
+		 * cannot describe it however close it is, and this is what
+		 * lets data be named by data symbols and code by code symbols
+		 * without either borrowing the other's names.
+		 */
+		if (s->value == 0 || s->shndx != sp->shndx)
 			continue;
 
 		if (addr < s->value)

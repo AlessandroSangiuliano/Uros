@@ -34,6 +34,7 @@
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
+#include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
 #include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/trap.h>		/* trap_set_handler */
@@ -284,6 +285,17 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('A') && want > 1)
 			kernel_ast_test();
+
+		/*
+		 * -L: a thread blocked with a continuation, and the prompt
+		 * opened on it (#428).
+		 *
+		 * Here because it needs the scheduler to actually take the
+		 * thread off its processor, which is what resets the stack and
+		 * makes the debugger's refusal meaningful.
+		 */
+		if (boot_flag('L'))
+			cont_probe_start();
 
 		/*
 		 * -F: does vector state survive an involuntary switch? (#408)

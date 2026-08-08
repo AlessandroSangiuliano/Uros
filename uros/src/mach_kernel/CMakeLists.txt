@@ -91,6 +91,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/acpi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cons.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ddb.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/cont_probe.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/ddb/ksym.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/desc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/idle.c

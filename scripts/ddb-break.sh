@@ -53,7 +53,7 @@ ask() {
 	echo "FAILED: '$1' never came back to a prompt"
 	return 1
 }
-for c in r t p; do ask "$c" || break; done
+for c in r t p l; do ask "$c" || break; done
 
 # ⚠️ Ask about a processor that is actually PARKED, read out of `p'.  Which
 # processor panics varies from run to run, and a hardcoded number lands on the

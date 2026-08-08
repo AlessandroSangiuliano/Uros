@@ -12,7 +12,11 @@
 #include <ddb/cons.h>
 #include <ddb/ddb.h>
 #include <ddb/ksym.h>
+#include <kern/cpu_data.h>	/* cpu_data[].active_thread */
 #include <kern/cpu_number.h>
+#include <kern/thread.h>	/* struct thread_shuttle */
+#include <kern/processor.h>	/* default_pset */
+#include <kern/queue.h>
 #include <mach/boolean.h>
 #include <kern/misc_protos.h>	/* panic */
 #include <mach/machine.h>	/* machine_slot[] */
@@ -20,6 +24,7 @@
 #include <cpu/lapic.h>		/* lapic_send_nmi */
 #include <cpu/regs.h>		/* cpu_pause */
 #include <pmap/layout.h>
+#include <pmap/pte.h>		/* PAGE_SIZE_4K */
 #include <pmap/pmap.h>
 #include <trap/trap.h>
 
@@ -587,6 +592,212 @@ static void ddb_release_others(void)
 	ddb_owner = -1;
 }
 
+/*
+ * ── What a thread is doing, and the one case that must not be walked ──
+ *
+ * "Which thread is on which processor and what is it waiting for" is the
+ * question this port has asked most often, and it has been answered with
+ * print statements every time.
+ *
+ * ⚠️ A THREAD BLOCKED WITH A CONTINUATION HAS NO STACK TO WALK, and that is
+ * the whole reason this prints rather than traces.  A continuation is the
+ * thread declaring it does not need its stack kept; machine_kernel_stack_init()
+ * then RESETS that stack to point at the trampoline.  The memory is still
+ * mapped and still walkable, which is what makes it dangerous: a walk does not
+ * come back empty, it comes back with two or three frames of
+ * context_thread_start and thread_begin_trampoline -- confident, well-formed,
+ * and silent about why the thread blocked.  The same failure as a
+ * disassembler that guesses, one level up.
+ *
+ * What is left instead is better than a stack, and is what the operator
+ * actually wants: where it will RESUME (a function pointer, so a symbol) and
+ * what it is waiting ON.
+ *
+ * ⚠️ The `continuation' field alone does not mean "blocked with one" -- every
+ * thread that has never run carries one too, because thread_start() sets it.
+ * The state flags are what separate them, and they are printed rather than
+ * interpreted so the reader can disagree.
+ */
+static int readable(uint64_t va, uint64_t bytes)
+{
+	pmap_t kernel = pmap_kernel();
+
+	for (uint64_t off = 0; off < bytes; off += PAGE_SIZE_4K) {
+		if (!va_is_canonical(va + off)
+		    || pmap_extract(kernel, va + off) == 0)
+			return 0;
+	}
+	return va_is_canonical(va + bytes - 1)
+	    && pmap_extract(kernel, va + bytes - 1) != 0;
+}
+
+/*
+ * A thread's state in the seven columns the machine-independent debugger has
+ * always used, in its order, with its letters (ddb/db_print.c:328).
+ *
+ *	R  running or on a run queue	O  swapped out
+ *	W  waiting			N  waiting uninterruptibly
+ *	S  asked to stop		C  has a continuation
+ *	I  the idle thread
+ *
+ * Deliberately not a set of words of our own.  An operator who knows the
+ * 32-bit debugger must be able to read this one without relearning it, and
+ * the letters are the part of DDB that is worth keeping unchanged -- they
+ * cost nothing to match and everything to diverge from.
+ *
+ * ⚠️ Two differences, and both are stated rather than silent.  The sixth
+ * column there is `F', whether the activation has a floating-point state,
+ * which is asked through db_act_fp_used() and has no answer here yet -- so
+ * this prints `I' for the idle thread in a column of its own instead of
+ * claiming an answer it has not got.  And `C' means the field is set, which
+ * is not the same as "blocked with one": a thread that has never run carries
+ * a continuation too, because thread_start() sets it.  The line below the
+ * list says which case it is.
+ */
+static void put_state(const struct thread_shuttle *t)
+{
+	char	col[8];
+	int	state = t->state;
+
+	col[0] = (state & TH_RUN)   ? 'R' : '.';
+	col[1] = (state & TH_WAIT)  ? 'W' : '.';
+	col[2] = (state & TH_SUSP)  ? 'S' : '.';
+	col[3] = (state & TH_SWAPPED_OUT) ? 'O' : '.';
+	col[4] = (state & TH_UNINT) ? 'N' : '.';
+	col[5] = (state & TH_IDLE)  ? 'I' : '.';
+	col[6] = t->continuation    ? 'C' : '.';
+	col[7] = 0;
+
+	cons_puts(" ");
+	cons_puts(col);
+}
+
+static void describe_thread(uint64_t addr)
+{
+	const struct thread_shuttle *t;
+
+	if (!readable(addr, sizeof *t)) {
+		cons_puts("  no thread readable there\r\n");
+		return;
+	}
+
+	t = (const struct thread_shuttle *)(uintptr_t) addr;
+
+	cons_puts("  thread ");
+	cons_puthex64(addr);
+	cons_puts("  state");
+	put_state(t);
+	cons_puts("\r\n");
+
+	cons_puts("    waiting on ");
+	if (t->wait_event == (event_t) 0) {
+		cons_puts("nothing");
+	} else {
+		cons_puthex64((uint64_t)(uintptr_t) t->wait_event);
+		put_symbol((uint64_t)(uintptr_t) t->wait_event);
+	}
+	cons_puts("\r\n");
+
+	cons_puts("    resumes at ");
+	if (t->continuation == 0) {
+		cons_puts("nowhere — it keeps its stack, so `t' on it is real");
+	} else {
+		cons_puthex64((uint64_t)(uintptr_t) t->continuation);
+		put_symbol((uint64_t)(uintptr_t) t->continuation);
+	}
+	cons_puts("\r\n");
+
+	/*
+	 * Said out loud rather than left for the operator to remember.  A
+	 * thread that is not running and has a continuation gave up its stack
+	 * contents, and walking it would produce a plausible answer about
+	 * nothing.
+	 */
+	if ((t->state & TH_RUN) == 0 && t->continuation != 0)
+		cons_puts("    its stack was reset when it blocked: a "
+			  "backtrace would show the trampoline and not why "
+			  "it stopped\r\n");
+}
+
+/*
+ * Every thread the default processor set knows about, one line each.
+ *
+ * ⚠️ MACH'S TYPED QUEUES DO NOT HOLD LINK ADDRESSES, THEY HOLD ELEMENTS, and
+ * the first version of this walked them as though they did.  kern/queue.h's
+ * queue_enter() is explicit about it:
+ *
+ *	(head)->next = (queue_entry_t) (elt);
+ *	((type)prev)->field.next = (queue_entry_t)(elt);
+ *
+ * -- the head and every `next' carry the ELEMENT pointer, and the chaining
+ * goes through the element's field.  Reading them as intrusive links and
+ * subtracting offsetof(thread_shuttle, pset_threads) landed 0x20 below a real
+ * thread, read `state' and `wait_event' from the wrong place, and wandered
+ * off into another queue inside default_pset itself.  The output looked like
+ * a thread list -- addresses, flag names, wait events -- and was noise.  It
+ * was caught because the same run's `p' printed the real thread addresses one
+ * screen above, and they were 0x20 apart.
+ *
+ * So there is no arithmetic here at all: the pointers are threads.
+ *
+ * ⚠️ Not locked, and cannot be: the other processors are parked in an NMI and
+ * one of them may hold the set's lock.  Waiting for it would hang the
+ * debugger on the machine it exists to examine.  What makes that acceptable
+ * is that everything is READ, bounded, and checked for readability before it
+ * is dereferenced -- the worst outcome is a stale or truncated list, and the
+ * list says so rather than hiding it.
+ */
+#define DDB_THREADS_MAX		256
+
+static void list_threads(void)
+{
+	const queue_head_t	*q = &default_pset.threads;
+	const queue_entry_t	head = (const queue_entry_t) q;
+	queue_entry_t		e = (queue_entry_t) q->next;
+	unsigned		n = 0;
+
+	cons_puts("  ");
+	cons_putdec((uint64_t) default_pset.thread_count);
+	cons_puts(" threads in the default set\r\n");
+
+	while (e != head) {
+		const struct thread_shuttle *t;
+		uint64_t addr = (uint64_t)(uintptr_t) e;
+
+		if (n++ >= DDB_THREADS_MAX) {
+			cons_puts("  ... stopped after ");
+			cons_putdec(DDB_THREADS_MAX);
+			cons_puts(" — the list does not end where it should"
+				  "\r\n");
+			return;
+		}
+
+		if (!readable(addr, sizeof *t)) {
+			cons_puts("  ");
+			cons_puthex64(addr);
+			cons_puts(" is not readable — the list stops here\r\n");
+			return;
+		}
+
+		t = (const struct thread_shuttle *)(uintptr_t) addr;
+
+		cons_puts("  ");
+		cons_puthex64(addr);
+		put_state(t);
+		if (t->continuation != 0 && (t->state & TH_RUN) == 0) {
+			cons_puts("  no stack, resumes at ");
+			put_symbol((uint64_t)(uintptr_t) t->continuation);
+		} else if (t->wait_event != (event_t) 0) {
+			cons_puts("  waiting on ");
+			cons_puthex64((uint64_t)(uintptr_t) t->wait_event);
+			put_symbol((uint64_t)(uintptr_t) t->wait_event);
+		}
+		cons_puts("\r\n");
+
+		e = (queue_entry_t) t->pset_threads.next;
+	}
+}
+
 static void show_processors(void)
 {
 	unsigned me = cpu_number();
@@ -599,6 +810,9 @@ static void show_processors(void)
 		cons_putdec((uint64_t) i);
 		if (i == (int) me) {
 			cons_puts("  at the prompt\r\n");
+			if (cpu_data[i].active_thread != 0)
+				describe_thread((uint64_t)(uintptr_t)
+						cpu_data[i].active_thread);
 			continue;
 		}
 		if (!ddb_parked[i]) {
@@ -610,6 +824,9 @@ static void show_processors(void)
 		cons_puthex64(ddb_frame[i]->rip);
 		put_symbol(ddb_frame[i]->rip);
 		cons_puts("\r\n");
+		if (cpu_data[i].active_thread != 0)
+			describe_thread((uint64_t)(uintptr_t)
+					cpu_data[i].active_thread);
 	}
 }
 
@@ -690,6 +907,18 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why)
 
 		case 'p':
 			show_processors();
+			break;
+
+		case 'l':
+			list_threads();
+			break;
+
+		case 'T':
+			if (parse_hex(p + 1, &arg))
+				describe_thread(arg);
+			else
+				cons_puts("  T needs a thread address — "
+					  "try p\r\n");
 			break;
 
 		case 'P':
