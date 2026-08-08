@@ -79,6 +79,57 @@
 #define SYSCALL_NR_MAX		1
 
 /*
+ * ── Where the Mach traps live in the number space (#411) ──────────────
+ *
+ * i386 puts them at NEGATIVE call numbers: `%eax' negative means a Mach trap
+ * and its index is the negation.  That is not carried over, and the reason is
+ * not taste.
+ *
+ * The entry path's bound check is one unsigned comparison, and the comment
+ * beside it says why: "a number above the table and a number that looked
+ * negative are the same test".  A sign convention takes that away — the entry
+ * would have to test the sign, negate, and then bound-check, and the register
+ * holding the result is the first value in the kernel that a user chose.  One
+ * comparison that cannot be got wrong is worth more than a range of numbers
+ * nobody was using.
+ *
+ * So the split is by RANGE, on an unsigned number, and each half keeps its own
+ * single comparison:
+ *
+ *	0x000 .. SYSCALL_NR_MAX-1	this kernel's own calls
+ *	0x100 + n			Mach trap n
+ *
+ * The base is far enough above the first range that the two can grow for a
+ * long time without meeting, and low enough to be read as a number rather than
+ * decoded.  It is not a bit test: a bit would make trap 0 and call 0 differ by
+ * something invisible in a register dump.
+ */
+#define SYSCALL_MACH_BASE	0x100
+
+/*
+ * How many Mach traps the entry will dispatch, and it is a compile-time bound
+ * on purpose.
+ *
+ * The machine-independent mach_trap_table[] is sized by its own contents and
+ * counted at run time.  The entry cannot index it directly -- its elements are
+ * a structure whose layout would then be written as constants in assembly,
+ * which is the #448 class exactly: two halves that agree until one of them
+ * gains a field.  So syscall_init() copies the function pointers into a plain
+ * array of pointers, and the assembly indexes THAT, knowing only that its
+ * elements are eight bytes.
+ */
+/*
+ * 256, and the number is measured: mach_trap_table[] has 178 entries on this
+ * build.  The first value here was 128, chosen as a round number, and the
+ * kernel refused to boot saying "178 Mach traps, the entry table holds 128" --
+ * which is the check working, and is why it refuses rather than truncating.
+ * Dispatching the first 128 and answering ENOSYS for the rest would be a
+ * kernel where some traps work and some do not, with a boundary that moves
+ * whenever the table does.
+ */
+#define SYSCALL_MACH_MAX	256
+
+/*
  * What a call number the table does not have answers with.
  *
  * A number, because there is nothing else to answer with: the caller gets
@@ -132,6 +183,14 @@ uint64_t syscall_probe_gs(void);
  * it has to be able to name it.
  */
 void syscall_entry(void);
+
+/*
+ * The Mach traps as plain pointers, and how many are usable (#411).  Read by
+ * the entry path; see syscall.c for why this is a copy of mach_trap_table[]
+ * rather than an indirection into it.
+ */
+extern void	*mach_syscall_table[SYSCALL_MACH_MAX];
+extern uint64_t	 mach_syscall_count;
 
 /*
  * What the last probe call found on the kernel stack, and which stack that was

@@ -10,6 +10,9 @@
 #include <cpu/desc.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
+#include <mach/kern_return.h>
+#include <mach/boolean.h>
+#include <kern/syscall_sw.h>	/* #411: mach_trap_table */
 #include <syscall/syscall.h>
 #include <kern/misc_protos.h>	/* #422: printf */
 #include <trap/trap.h>
@@ -208,8 +211,48 @@ void *const syscall_table[SYSCALL_NR_MAX] = {
 	[SYSCALL_NR_PROBE] = (void *)syscall_probe,
 };
 
+/*
+ * The Mach traps, as plain function pointers (#411).
+ *
+ * ⚠️ A copy rather than an indirection into mach_trap_table[], and the copy is
+ * the safe choice.  That table's elements are a structure, and an entry path
+ * indexing it would carry its layout -- element size, the offset of the
+ * function pointer -- as constants in assembly.  Nothing would then compare
+ * those constants with the structure again, and the day it gains a field the
+ * entry calls whatever is now at offset eight, correctly, forever.  #448 is
+ * that shape and it took an issue to find.
+ *
+ * Here the assembly knows one fact, that the elements are pointers, and it is
+ * a fact about the array it is reading rather than about a structure defined
+ * somewhere else.
+ */
+void *mach_syscall_table[SYSCALL_MACH_MAX];
+uint64_t mach_syscall_count;
+
+static void mach_syscall_table_init(void)
+{
+	unsigned n = (unsigned) mach_trap_count;
+
+	/*
+	 * ⚠️ Refused rather than truncated.  Silently dispatching the first 128
+	 * and answering ENOSYS for the rest would be a kernel where some traps
+	 * work and some do not, with nothing saying which -- and the boundary
+	 * would move whenever the table did.
+	 */
+	if (n > SYSCALL_MACH_MAX)
+		panic("syscall: %u Mach traps, the entry table holds %u -- "
+		      "raise SYSCALL_MACH_MAX", n, (unsigned) SYSCALL_MACH_MAX);
+
+	for (unsigned i = 0; i < n; i++)
+		mach_syscall_table[i] = (void *) mach_trap_table[i].mach_trap_function;
+
+	mach_syscall_count = n;
+}
+
 void syscall_init(void)
 {
+	mach_syscall_table_init();
+
 	/*
 	 * STAR carries two selector bases and no selectors: the processor
 	 * derives four from them by addition, which is why <cpu/desc.h> lays
