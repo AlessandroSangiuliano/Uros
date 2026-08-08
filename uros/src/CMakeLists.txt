@@ -84,6 +84,15 @@ if(OSFMK_BUILD_KERNEL)
   add_subdirectory(mach_kernel)
 endif()
 
+# The one user image that is not behind the gate below (#422).
+#
+# Everything in the userland tree needs musl (#414) or libmach (#426), so an
+# x86-64 build has nothing at all to load — and the kernel's ELF64 loader, the
+# task set-up and the argument block would all be written against nothing.
+# boot_probe is a page of assembly with no dependencies of any kind, which is
+# what lets it exist before those issues and what keeps it working after them.
+add_subdirectory(tests/boot_probe)
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")
