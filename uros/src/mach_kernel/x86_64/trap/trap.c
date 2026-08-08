@@ -242,6 +242,56 @@ static void report_page_fault(uint64_t error)
 }
 
 /*
+ * And the other error code, which describes a DESCRIPTOR (#409).
+ *
+ * Six vectors share this format — the segment faults and the general
+ * protection — and every one of them was reported as a bare hexadecimal
+ * number.  #458 said so while chasing a general protection whose register dump
+ * could not be reconciled: "the one thing the handler could say about *why* is
+ * missing on the path where the registers are least trustworthy".
+ *
+ * ⚠️ Zero is not a selector and must not be printed as one.  For these vectors
+ * it means the fault had nothing to do with a descriptor at all — an
+ * instruction that is illegal in the current mode, a non-canonical address, a
+ * write to a reserved bit — which is a different diagnosis and by far the
+ * commonest one in a kernel that loads a segment register perhaps five times
+ * in its life.  A report that answered "GDT entry 0" there would send the
+ * reader to the descriptor tables, which is exactly the wrong place.
+ *
+ * The layout is: bit 0 says the event came from outside the program, bits 2:1
+ * name the table, and the rest is the index — the selector with its low three
+ * bits repurposed, which is why the index is what gets printed rather than the
+ * raw value that looks like a selector and is not one.
+ */
+static int carries_a_selector(uint64_t vector)
+{
+	return vector == T_INVALID_TSS || vector == T_SEGMENT_NOT_PRESENT
+	    || vector == T_STACK_FAULT || vector == T_GENERAL_PROTECTION
+	    || vector == T_ALIGNMENT_CHECK;
+}
+
+static void report_selector_error(uint64_t error)
+{
+	static const char *const table[4] = {
+		"the GDT", "the IDT", "the LDT", "the IDT"
+	};
+
+	if (error == 0) {
+		tputs("  no descriptor involved — an operation the mode or the "
+		      "address did not allow\r\n");
+		return;
+	}
+
+	tputs("  refused by ");
+	tputs(table[(error >> 1) & 3]);
+	tputs(" entry ");
+	tputdec(error >> 3);
+	if (error & 1)
+		tputs(", raised by an event outside the program");
+	tputs("\r\n");
+}
+
+/*
  * One register, named and padded, three to a line.
  *
  * Every one of them, which needs saying because the previous version of this
@@ -1021,6 +1071,19 @@ void trap_dispatch(struct trap_frame *frame)
 		tputs(") — resuming\r\n");
 
 		/*
+		 * ⚠️ Here as well as on the fault report, and that is the point
+		 * of putting it here at all.
+		 *
+		 * The report path only runs on a fault nobody expected, which
+		 * ends the boot -- so a description written only there is
+		 * exercised on the one occasion when nobody can afford to find
+		 * out it was wrong.  The probes take this arm on every boot, so
+		 * the sentence is produced and read where it costs nothing.
+		 */
+		if (carries_a_selector(frame->vector))
+			report_selector_error(frame->error);
+
+		/*
 		 * The frame is what iretq will reload, so changing the saved
 		 * instruction pointer changes where the return lands.  The
 		 * stack pointer is untouched, which is why the resume point
@@ -1066,6 +1129,9 @@ void trap_dispatch(struct trap_frame *frame)
 
 	if (frame->vector == T_PAGE_FAULT)
 		report_page_fault(frame->error);
+
+	if (carries_a_selector(frame->vector))
+		report_selector_error(frame->error);
 
 	/*
 	 * For a vector with a stack of its own, say so and show it: the frame

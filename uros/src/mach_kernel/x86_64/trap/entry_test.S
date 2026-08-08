@@ -130,6 +130,38 @@ entry_probe_int2:
 	movq	%rax, entry_probe_int2_rip(%rip)
 	ret
 
+/*
+ * A general protection that names no descriptor (#409).
+ *
+ * ⚠️ Its error code is zero, and zero is the case the report has to get right
+ * most often: this kernel loads a segment register perhaps five times in its
+ * life, so almost every general protection it will ever take is an operation
+ * the mode or the address did not allow, not a descriptor that refused one.
+ * That is exactly the fault #458 was chasing, and the report said nothing at
+ * all about it.
+ *
+ * A store through a non-canonical address is the way to produce one that the
+ * architecture has to honour: an address whose top bits are not a sign
+ * extension of bit 47 is refused before any translation is attempted, with
+ * vector 13 and an error code of zero, and no page table or descriptor is
+ * consulted.
+ *
+ * ⚠️ Not a non-canonical segment base, which was tried first.  WRMSR is
+ * supposed to refuse one, and this emulator simply accepted it: no fault, the
+ * expectation left armed, and trap_last() still holding the previous probe's
+ * record.  The line said WRONG — because arming clears `caught' — but it said
+ * so while printing vector 6 and error 0, which are the fields of a different
+ * fault entirely.  A stale record reads exactly like a fresh one.
+ */
+	.globl	entry_probe_gp_zero
+	.align	16
+entry_probe_gp_zero:
+	movq	%rsp, entry_probe_rsp(%rip)
+	movabsq	$0x0001000000000000, %rax
+	movq	$0, (%rax)
+	xorl	%eax, %eax		/* never reached; the handler resumes */
+	ret
+
 	.section .data
 	.align	8
 entry_probe_fault_rip:

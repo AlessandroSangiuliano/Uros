@@ -24,6 +24,7 @@ extern uint64_t	 entry_probe_spin(uint64_t turns);
 extern uint64_t	 entry_probe_rsp;
 extern uint64_t	 entry_probe_fault_rip;
 extern void	 entry_probe_int2(void);
+extern void	 entry_probe_gp_zero(void);
 extern uint64_t	 entry_probe_int2_rip;
 extern volatile uint64_t entry_probe_arrived;
 extern char	 entry_probe_lo[], entry_probe_hi[];
@@ -316,6 +317,30 @@ __attribute__((noinline)) static void kernel_fault_entry(void)
 	report_backtrace("a kernel fault", t->rbp);
 }
 
+/*
+ * The general protection whose error code names nothing, so that the sentence
+ * the report prints for it is produced on an ordinary boot rather than for the
+ * first time on the run that ends.
+ */
+__attribute__((noinline)) static void gp_without_selector(void)
+{
+	const struct trap_record *t;
+
+	trap_expect(T_GENERAL_PROTECTION,
+		    (uint64_t)(uintptr_t)trap_probe_faulted);
+	entry_probe_gp_zero();
+	t = trap_last();
+
+	cons_puts("UrMach x86-64: a store through a non-canonical address gave vector ");
+	cons_puthex64(t->vector);
+	cons_puts(" error ");
+	cons_puthex64(t->error);
+	cons_puts(t->caught && t->vector == T_GENERAL_PROTECTION
+		  && t->error == 0 && t->rsp == entry_probe_rsp
+		  ? " — a general protection that names no descriptor\r\n"
+		  : " — WRONG, that is not what the machine should refuse\r\n");
+}
+
 __attribute__((noinline)) static void timer_entry_test(void)
 {
 	int had_interrupts;
@@ -460,6 +485,7 @@ __attribute__((noinline)) static void nmi_gate_test(void)
 void trap_entry_test(void)
 {
 	kernel_fault_entry();
+	gp_without_selector();
 	timer_entry_test();
 	device_entry_test();
 	nmi_delivery_test();
