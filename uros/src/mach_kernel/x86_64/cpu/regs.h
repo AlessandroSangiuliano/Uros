@@ -217,6 +217,28 @@ static inline void write_cr4(uint64_t v)
 #define DR6_HIT(n)		(1UL << (n))
 
 /*
+ * What slot n watches, and how wide (#428).
+ *
+ * R/W is two bits at 16+4n and LEN two bits at 18+4n.  The encodings are the
+ * architecture's and are not guessable: LEN 0b10 means EIGHT bytes and 0b11
+ * means four, which is the one pair in this file worth reading twice.
+ *
+ * ⚠️ An execution breakpoint must have R/W and LEN both zero.  Any other
+ * length with R/W = 0 is undefined behaviour, not a wider breakpoint.
+ */
+#define DR7_RW_SHIFT(n)		(16 + 4 * (n))
+#define DR7_LEN_SHIFT(n)	(18 + 4 * (n))
+
+#define DR7_RW_EXEC		0UL
+#define DR7_RW_WRITE		1UL
+#define DR7_RW_ACCESS		3UL	/* read or write, but not fetch */
+
+#define DR7_LEN_1		0UL
+#define DR7_LEN_2		1UL
+#define DR7_LEN_8		2UL
+#define DR7_LEN_4		3UL
+
+/*
  * ⚠️ DR6 is sticky: the processor sets the bit for the breakpoint that fired
  * and never clears it again.  A handler that does not clear it leaves the
  * next debug exception describing this one as well.

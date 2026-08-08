@@ -533,9 +533,24 @@ void ddb_take_break(struct trap_frame *frame)
  * and each parked one when it is released.  They cannot disagree, because
  * neither of them decides anything.
  */
+/*
+ * The same four slots serve both kinds, because the hardware has four full
+ * stop.  A watchpoint is not a second facility -- it is the same register
+ * with R/W and LEN saying "when this is written" instead of "when this is
+ * executed".
+ *
+ * ⚠️ And the two report at different moments, which the operator has to know
+ * and so does the resume path.  An execution breakpoint is a FAULT: it is
+ * reported before the instruction runs, and returning without RFLAGS.RF walks
+ * back into it.  A data watchpoint is a TRAP: the access has already
+ * happened, rip is past it, and there is nothing to suppress.
+ */
+#define DDB_WATCH_BYTES		8
+
 struct ddb_breakpoint {
 	uint64_t	addr;
 	int		set;
+	int		write;		/* a watchpoint, not an instruction */
 };
 
 static struct ddb_breakpoint	breakpoints[DR_COUNT];
@@ -555,8 +570,17 @@ static void arm_breakpoints(void)
 	for (unsigned i = 0; i < DR_COUNT; i++) {
 		if (!breakpoints[i].set)
 			continue;
+
 		write_dr(i, breakpoints[i].addr);
 		dr7 |= DR7_LOCAL(i);
+
+		if (breakpoints[i].write)
+			dr7 |= (DR7_RW_WRITE << DR7_RW_SHIFT(i))
+			     | (DR7_LEN_8 << DR7_LEN_SHIFT(i));
+		/*
+		 * and nothing for an instruction breakpoint: R/W and LEN must
+		 * both be zero there, which they already are.
+		 */
 	}
 
 	write_dr6(0);
@@ -573,7 +597,7 @@ static void show_breakpoints(void)
 		any = 1;
 		cons_puts("  ");
 		cons_putdec(i);
-		cons_puts("  ");
+		cons_puts(breakpoints[i].write ? "  write  " : "  exec   ");
 		cons_puthex64(breakpoints[i].addr);
 		put_symbol(breakpoints[i].addr);
 		cons_puts("\r\n");
@@ -597,11 +621,23 @@ static void show_breakpoints(void)
 	cons_puts("\r\n");
 }
 
-static void set_breakpoint(uint64_t addr)
+static void set_breakpoint(uint64_t addr, int write)
 {
-	if (span_is_code(addr) == 0) {
+	if (!write && span_is_code(addr) == 0) {
 		cons_puts("  that address is not in any executable section — "
 			  "a breakpoint there would never fire\r\n");
+		return;
+	}
+
+	/*
+	 * ⚠️ Aligned to its own width, because the hardware requires it and
+	 * says nothing when it is not: an unaligned data breakpoint is
+	 * undefined, which in practice means it watches something else or
+	 * nothing, silently.
+	 */
+	if (write && (addr & (DDB_WATCH_BYTES - 1)) != 0) {
+		cons_puts("  a watchpoint covers eight bytes and must be "
+			  "eight-byte aligned\r\n");
 		return;
 	}
 
@@ -619,7 +655,8 @@ static void set_breakpoint(uint64_t addr)
 			continue;
 		breakpoints[i].addr = addr;
 		breakpoints[i].set = 1;
-		cons_puts("  breakpoint ");
+		breakpoints[i].write = write;
+		cons_puts(write ? "  watchpoint " : "  breakpoint ");
 		cons_putdec(i);
 		cons_puts(" at ");
 		cons_puthex64(addr);
@@ -663,18 +700,26 @@ boolean_t ddb_breakpoint_hit(struct trap_frame *frame)
 		 */
 		write_dr6(0);
 
-		ddb_enter(frame, "breakpoint");
+		ddb_enter(frame, breakpoints[i].write ? "watchpoint"
+						     : "breakpoint");
 
 		/*
-		 * ⚠️ RESUME FLAG, set here rather than trusted.  An execution
-		 * breakpoint faults BEFORE the instruction runs, so returning
-		 * without it walks straight back into the same breakpoint and
+		 * ⚠️ RESUME FLAG, and only for an instruction breakpoint.
+		 *
+		 * That kind is a FAULT -- reported before the instruction runs
+		 * -- so returning without RF walks straight back into it and
 		 * stays there.  The processor is supposed to set it; the
 		 * emulator this is developed on arrives with rflags 0x2 and
 		 * does not, which trap_dispatch already records one screen
 		 * below for the same reason.
+		 *
+		 * A watchpoint is a TRAP: the write has already happened and
+		 * rip is past it, so there is nothing to suppress -- and
+		 * setting RF anyway would suppress an instruction breakpoint
+		 * on the NEXT instruction, hiding one the operator set.
 		 */
-		frame->rflags |= RFLAGS_RF;
+		if (!breakpoints[i].write)
+			frame->rflags |= RFLAGS_RF;
 		return TRUE;
 	}
 
@@ -1179,9 +1224,16 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why)
 
 		case 'b':
 			if (parse_hex(p + 1, &arg))
-				set_breakpoint(arg);
+				set_breakpoint(arg, 0);
 			else
 				show_breakpoints();
+			break;
+
+		case 'w':
+			if (parse_hex(p + 1, &arg))
+				set_breakpoint(arg, 1);
+			else
+				cons_puts("  w needs an address to watch\r\n");
 			break;
 
 		case 'd':
