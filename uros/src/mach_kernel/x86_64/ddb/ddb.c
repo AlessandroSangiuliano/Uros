@@ -23,6 +23,7 @@
 #include <mach/machine/vm_types.h>
 #include <cpu/lapic.h>		/* lapic_send_nmi */
 #include <cpu/regs.h>		/* cpu_pause */
+#include <sync/atomic.h>	/* one debugger at a time */
 #include <pmap/layout.h>
 #include <pmap/pte.h>		/* PAGE_SIZE_4K */
 #include <pmap/pmap.h>
@@ -497,6 +498,190 @@ void ddb_take_break(struct trap_frame *frame)
 }
 
 /*
+ * ── Breakpoints, in the debug registers and not in the code (#428) ────
+ *
+ * The classic way is to write 0xCC over the instruction and put the byte back
+ * afterwards.  Not here, and for two reasons that are facts about this kernel
+ * rather than preferences:
+ *
+ *   CR0.WP is on (x86_64/pmap/pmap.c), so ring 0 cannot write a page marked
+ *   read-only and .text is read-only.  A software breakpoint would have to go
+ *   in through the direct map's writable alias of the same physical page --
+ *   possible, and a second way to reach memory that the rest of the debugger
+ *   does not need.
+ *
+ *   And on four processors the byte is shared.  Another processor executing
+ *   that instruction between the write and the restore takes a breakpoint
+ *   nobody set.  The parking makes that safe here, but only by accident of
+ *   when breakpoints happen to be edited.
+ *
+ * The debug registers have neither problem: nothing is modified, so W^X is
+ * untouched, and DR0-DR3 are PER-PROCESSOR state -- which is the catch, and
+ * the reason for the arming rule below.
+ *
+ * ⚠️ FOUR, because the hardware has four.  A fifth is refused rather than
+ * accepted and quietly dropped.
+ *
+ * ── Armed by each processor on itself ─────────────────────────────────
+ *
+ * A breakpoint set at the prompt would otherwise exist only on the processor
+ * that set it, and the operator would watch code run on the other three
+ * without stopping -- which reads as a breakpoint that does not work.
+ *
+ * So the table is shared and every processor programs its own registers from
+ * it on the way out of the debugger: the one at the prompt when it continues,
+ * and each parked one when it is released.  They cannot disagree, because
+ * neither of them decides anything.
+ */
+struct ddb_breakpoint {
+	uint64_t	addr;
+	int		set;
+};
+
+static struct ddb_breakpoint	breakpoints[DR_COUNT];
+
+/*
+ * Program this processor's debug registers from the shared table.
+ *
+ * ⚠️ DR7 is written last and from scratch.  Enabling a slot before its
+ * address register holds the address means a breakpoint at whatever was
+ * there -- which on this machine is zero, and a breakpoint at zero fires on
+ * the first null call and reports itself as the operator's.
+ */
+static void arm_breakpoints(void)
+{
+	uint64_t dr7 = DR7_RESERVED_ONE;
+
+	for (unsigned i = 0; i < DR_COUNT; i++) {
+		if (!breakpoints[i].set)
+			continue;
+		write_dr(i, breakpoints[i].addr);
+		dr7 |= DR7_LOCAL(i);
+	}
+
+	write_dr6(0);
+	write_dr7(dr7);
+}
+
+static void show_breakpoints(void)
+{
+	int any = 0;
+
+	for (unsigned i = 0; i < DR_COUNT; i++) {
+		if (!breakpoints[i].set)
+			continue;
+		any = 1;
+		cons_puts("  ");
+		cons_putdec(i);
+		cons_puts("  ");
+		cons_puthex64(breakpoints[i].addr);
+		put_symbol(breakpoints[i].addr);
+		cons_puts("\r\n");
+	}
+	if (!any)
+		cons_puts("  no breakpoints; b <addr> sets one, and there are "
+			  "four\r\n");
+
+	/*
+	 * And what this processor's registers actually hold.  Printed rather
+	 * than assumed: a table that says a breakpoint is set and a DR7 that
+	 * says nothing is armed are two different claims, and only the second
+	 * one is what the hardware will act on.
+	 */
+	cons_puts("  dr7 ");
+	cons_puthex64(read_dr7());
+	cons_puts("  dr6 ");
+	cons_puthex64(read_dr6());
+	cons_puts("  dr0 ");
+	cons_puthex64(read_dr0());
+	cons_puts("\r\n");
+}
+
+static void set_breakpoint(uint64_t addr)
+{
+	if (span_is_code(addr) == 0) {
+		cons_puts("  that address is not in any executable section — "
+			  "a breakpoint there would never fire\r\n");
+		return;
+	}
+
+	for (unsigned i = 0; i < DR_COUNT; i++) {
+		if (breakpoints[i].set && breakpoints[i].addr == addr) {
+			cons_puts("  already set as ");
+			cons_putdec(i);
+			cons_puts("\r\n");
+			return;
+		}
+	}
+
+	for (unsigned i = 0; i < DR_COUNT; i++) {
+		if (breakpoints[i].set)
+			continue;
+		breakpoints[i].addr = addr;
+		breakpoints[i].set = 1;
+		cons_puts("  breakpoint ");
+		cons_putdec(i);
+		cons_puts(" at ");
+		cons_puthex64(addr);
+		put_symbol(addr);
+		cons_puts("\r\n");
+		return;
+	}
+
+	cons_puts("  all four debug registers are in use — the processor has "
+		  "no more\r\n");
+}
+
+static void clear_breakpoint(uint64_t n)
+{
+	if (n >= DR_COUNT || !breakpoints[n].set) {
+		cons_puts("  no such breakpoint — try b\r\n");
+		return;
+	}
+	breakpoints[n].set = 0;
+	cons_puts("  breakpoint ");
+	cons_putdec(n);
+	cons_puts(" removed\r\n");
+}
+
+/*
+ * A debug exception arrived.  Answers TRUE when it was one of ours, in which
+ * case the prompt has been opened and the frame is ready to resume.
+ */
+boolean_t ddb_breakpoint_hit(struct trap_frame *frame)
+{
+	uint64_t dr6 = read_dr6();
+
+	for (unsigned i = 0; i < DR_COUNT; i++) {
+		if ((dr6 & DR6_HIT(i)) == 0 || !breakpoints[i].set)
+			continue;
+
+		/*
+		 * ⚠️ DR6 is sticky -- the processor sets the bit and never
+		 * clears it -- so a handler that leaves it makes the next
+		 * debug exception describe this one as well.
+		 */
+		write_dr6(0);
+
+		ddb_enter(frame, "breakpoint");
+
+		/*
+		 * ⚠️ RESUME FLAG, set here rather than trusted.  An execution
+		 * breakpoint faults BEFORE the instruction runs, so returning
+		 * without it walks straight back into the same breakpoint and
+		 * stays there.  The processor is supposed to set it; the
+		 * emulator this is developed on arrives with rflags 0x2 and
+		 * does not, which trap_dispatch already records one screen
+		 * below for the same reason.
+		 */
+		frame->rflags |= RFLAGS_RF;
+		return TRUE;
+	}
+
+	return FALSE;
+}
+
+/*
  * ── The other processors, while one is at the prompt (#428) ───────────
  *
  * Not a refinement: without it the prompt is unusable, and the log said so
@@ -518,8 +703,11 @@ void ddb_take_break(struct trap_frame *frame)
  * say where every one of them is and `P n' can walk any of them.  That is the
  * question this port has asked most often and answered with print statements.
  */
-static volatile int		ddb_owner = -1;
+#define DDB_NOBODY		(-1L)
+
+static volatile long		ddb_owner = DDB_NOBODY;
 static volatile int		ddb_parked[NCPUS];
+static volatile int		ddb_stop_sent[NCPUS];
 static struct trap_frame	*ddb_frame[NCPUS];
 
 /*
@@ -527,12 +715,16 @@ static struct trap_frame	*ddb_frame[NCPUS];
  * the debugger asking, and the processor has parked and been released; FALSE
  * when it is a real one and belongs to whoever reports them.
  */
-boolean_t ddb_park_here(struct trap_frame *frame)
+/*
+ * Hold this processor until whoever owns the debugger lets it go.
+ *
+ * Shared by the two ways a processor can arrive here: an NMI sent by the
+ * owner, and reaching ddb_enter() on its own while somebody else already has
+ * the machine.
+ */
+static void park_until_released(struct trap_frame *frame)
 {
 	unsigned me = cpu_number();
-
-	if (ddb_owner < 0 || ddb_owner == (int) me)
-		return FALSE;
 
 	ddb_frame[me] = frame;
 	ddb_parked[me] = 1;
@@ -542,15 +734,76 @@ boolean_t ddb_park_here(struct trap_frame *frame)
 
 	ddb_parked[me] = 0;
 	ddb_frame[me] = (struct trap_frame *) 0;
+
+	/* Whatever the operator set while we were held, on this processor. */
+	arm_breakpoints();
+}
+
+boolean_t ddb_park_here(struct trap_frame *frame)
+{
+	unsigned me = cpu_number();
+
+	/*
+	 * ⚠️ Decided by whether a stop was SENT to this processor, and not by
+	 * whether the debugger still owns the machine (#428).
+	 *
+	 * The broadcast is asynchronous.  A processor that takes its NMI after
+	 * the operator has already typed `c' would, on the second test, find
+	 * ddb_owner cleared, answer "not mine", and fall through to the fault
+	 * report -- which opened a prompt reading `ddb: non-maskable
+	 * interrupt' on a machine where nothing had gone wrong.  Two runs in
+	 * five, and the log named it exactly.
+	 *
+	 * The flag is per-processor and consumed once, so a stop that was sent
+	 * is always absorbed by the processor it was sent to, whenever it
+	 * arrives, and a genuine NMI is still reported as one.
+	 */
+	if (!ddb_stop_sent[me])
+		return FALSE;
+
+	ddb_stop_sent[me] = 0;
+
+	if (ddb_owner >= 0 && ddb_owner != (int) me)
+		park_until_released(frame);
+	else
+		arm_breakpoints();	/* the stop was lifted before it landed */
+
 	return TRUE;
+}
+
+/*
+ * Claim the machine, or answer that somebody else has it (#428).
+ *
+ * ⚠️ ATOMIC, and it has to be.  A processor reaches ddb_enter() by four
+ * routes now, and three of them can happen on any processor at any moment: a
+ * fault, a panic, and a BREAKPOINT.  A breakpoint on code every processor
+ * runs -- the timer tick, say -- fires on several of them within microseconds
+ * of each other, and without a claim they all walk into the prompt together.
+ *
+ * That was not hypothetical.  It is what made the first breakpoint flaky: one
+ * boot in five worked, and breaking back in afterwards found
+ *
+ *	cpu 1  parked at <ddb_enter+0x650>
+ *	cpu 2  at the prompt
+ *
+ * -- two processors inside the debugger, reading the same UART and taking
+ * each other's characters, with the second parked halfway through the first's
+ * entry.  The registers were right the whole time; what was wrong was that
+ * there were two debuggers.
+ */
+static boolean_t claim_machine(void)
+{
+	unsigned me = cpu_number();
+
+	return atomic_cmpxchg64((volatile uint64_t *) &ddb_owner,
+				(uint64_t) DDB_NOBODY, (uint64_t) me)
+	       ? TRUE : FALSE;
 }
 
 static void ddb_stop_others(void)
 {
 	unsigned	me = cpu_number();
 	uint64_t	spins;
-
-	ddb_owner = (int) me;
 
 	for (int i = 0; i < NCPUS; i++) {
 		if (i == (int) me || !machine_slot[i].is_cpu
@@ -562,6 +815,7 @@ static void ddb_stop_others(void)
 		 * (x86_64/cpu/machdep.c).  Said here because the two would
 		 * have to change together.
 		 */
+		ddb_stop_sent[i] = 1;
 		lapic_send_nmi((uint32_t) i);
 	}
 
@@ -589,7 +843,7 @@ static void ddb_stop_others(void)
 
 static void ddb_release_others(void)
 {
-	ddb_owner = -1;
+	ddb_owner = DDB_NOBODY;
 }
 
 /*
@@ -842,6 +1096,18 @@ void ddb_enter(struct trap_frame *frame, const char *why)
 	 * debugger legitimately opens a nested prompt and the outer one is
 	 * still there when it leaves.
 	 */
+	/*
+	 * ⚠️ One debugger at a time.  A processor that arrives while another
+	 * has the machine does NOT open a second prompt -- it parks exactly
+	 * where an NMI would have put it, and carries on when released.  Its
+	 * reason is dropped, which is right: the operator is already looking
+	 * at the machine, and this processor's state is in `p'.
+	 */
+	if (!was_in && !claim_machine()) {
+		park_until_released(frame);
+		return;
+	}
+
 	in_ddb[me] = 1;
 
 	/*
@@ -854,6 +1120,8 @@ void ddb_enter(struct trap_frame *frame, const char *why)
 		ddb_stop_others();
 
 	ddb_enter_body(frame, why);
+
+	arm_breakpoints();
 
 	if (!was_in)
 		ddb_release_others();
@@ -907,6 +1175,21 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why)
 
 		case 'p':
 			show_processors();
+			break;
+
+		case 'b':
+			if (parse_hex(p + 1, &arg))
+				set_breakpoint(arg);
+			else
+				show_breakpoints();
+			break;
+
+		case 'd':
+			if (parse_hex(p + 1, &arg))
+				clear_breakpoint(arg);
+			else
+				cons_puts("  d needs a breakpoint number — "
+					  "try b\r\n");
 			break;
 
 		case 'l':

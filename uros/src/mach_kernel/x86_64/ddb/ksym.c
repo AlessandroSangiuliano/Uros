@@ -216,6 +216,21 @@ unsigned ksym_count(void)
 	return nsymbols;
 }
 
+/*
+ * Whether an address is inside a section that will be EXECUTED (#428).
+ *
+ * A breakpoint on anything else can never fire, and a debugger that accepted
+ * one would report success and then let the operator wait for it -- the
+ * quietest way to waste an afternoon.  The section bounds are already here
+ * for the symbol lookup; this asks the other question of them.
+ */
+int span_is_code(uint64_t addr)
+{
+	const struct ksym_span *sp = span_of(addr);
+
+	return sp != 0 && in_code(sp->shndx);
+}
+
 const char *ksym_lookup(uint64_t addr, uint64_t *offset)
 {
 	const struct elf64_sym *best = 0;

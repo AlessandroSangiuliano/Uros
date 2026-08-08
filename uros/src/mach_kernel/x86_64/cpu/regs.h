@@ -202,6 +202,21 @@ static inline void write_cr4(uint64_t v)
 #define DR7_EXEC_DR0		(DR7_L0 | DR7_RESERVED_ONE)
 
 /*
+ * And the same for the other three, because a debugger wants more than one
+ * (#428).  L<n> is bit 2n; the type and length fields for slot n sit at bits
+ * 16+4n and 18+4n, and both are zero for an execution breakpoint -- which is
+ * why the arming below writes only the enable bits.
+ *
+ * ⚠️ FOUR, and that is the hardware's number, not a policy.  A debugger that
+ * silently accepted a fifth would be arming nothing and reporting success.
+ */
+#define DR_COUNT		4
+#define DR7_LOCAL(n)		(1UL << (2 * (n)))
+
+/* DR6 says which one fired.  Bit n for slot n. */
+#define DR6_HIT(n)		(1UL << (n))
+
+/*
  * ⚠️ DR6 is sticky: the processor sets the bit for the breakpoint that fired
  * and never clears it again.  A handler that does not clear it leaves the
  * next debug exception describing this one as well.
@@ -221,6 +236,41 @@ static inline void write_dr7(uint64_t v)
 static inline void write_dr6(uint64_t v)
 {
 	__asm__ volatile("mov %0, %%dr6" : : "r"(v));
+}
+
+static inline uint64_t read_dr7(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("mov %%dr7, %0" : "=r"(v));
+	return v;
+}
+
+static inline uint64_t read_dr0(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("mov %%dr0, %0" : "=r"(v));
+	return v;
+}
+
+static inline uint64_t read_dr6(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("mov %%dr6, %0" : "=r"(v));
+	return v;
+}
+
+static inline void write_dr(unsigned n, uint64_t v)
+{
+	switch (n) {
+	case 0: __asm__ volatile("mov %0, %%dr0" : : "r"(v)); break;
+	case 1: __asm__ volatile("mov %0, %%dr1" : : "r"(v)); break;
+	case 2: __asm__ volatile("mov %0, %%dr2" : : "r"(v)); break;
+	case 3: __asm__ volatile("mov %0, %%dr3" : : "r"(v)); break;
+	default: break;
+	}
 }
 
 #endif	/* __ASSEMBLER__ */

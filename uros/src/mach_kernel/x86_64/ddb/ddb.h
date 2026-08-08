@@ -111,4 +111,12 @@ void ddb_take_break(struct trap_frame *frame);
  */
 boolean_t ddb_park_here(struct trap_frame *frame);
 
+/*
+ * A debug exception arrived: answers TRUE when it was one of the debugger's
+ * breakpoints, in which case the prompt has been opened and the frame is
+ * ready to resume.  FALSE for anything else, so the boot self-tests' own use
+ * of #DB is untouched.
+ */
+boolean_t ddb_breakpoint_hit(struct trap_frame *frame);
+
 #endif	/* _X86_64_DDB_DDB_H_ */

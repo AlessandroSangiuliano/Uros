@@ -754,6 +754,17 @@ void trap_dispatch(struct trap_frame *frame)
 	if (frame->vector == T_NMI && ddb_park_here(frame))
 		return;
 
+	/*
+	 * One of the debugger's breakpoints (#428).
+	 *
+	 * Before the expected-trap machinery below, and harmless to it: the
+	 * table is empty until an operator sets something, so the boot
+	 * self-test that arms DR0 for the swapgs window (#440) falls straight
+	 * through exactly as before.
+	 */
+	if (frame->vector == T_DEBUG && ddb_breakpoint_hit(frame))
+		return;
+
 	if (frame->vector == T_BREAKPOINT) {
 		const char *why = ddb_debugger_taken();
 
