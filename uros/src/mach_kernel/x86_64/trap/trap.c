@@ -13,6 +13,11 @@
 #include <ddb/disasm.h>
 #include <cpu/lapic.h>
 #include <kern/ast.h>		/* #459: need_ast, ast_taken */
+#include <kern/thread.h>		/* #467: current_act */
+#include <kern/thread_act.h>
+#include <vm/vm_fault.h>		/* #467: hand a fault to the MI kernel */
+#include <vm/vm_kern.h>		/* #467: kernel_map */
+#include <mach/vm_param.h>		/* #467: trunc_page */
 #include <kern/cpu_number.h>
 #include <kern/cpu_data.h>	/* #459: get_preemption_level */
 #include <cpu/percpu.h>	/* #461: the spin-lock depth */
@@ -1154,6 +1159,57 @@ void trap_dispatch(struct trap_frame *frame)
 		if (frame->vector == T_DEBUG)
 			frame->rflags |= RFLAGS_RF;
 		return;
+	}
+
+	/*
+	 * ── A page fault handed to the machine-independent kernel (#467) ──
+	 *
+	 * Everything above this line is an arrangement made in advance: a
+	 * vector somebody armed, an instruction allowed to fault, a debugger
+	 * that owns the machine.  This is the ordinary case, and until now
+	 * there was none -- a page that was in a task's map and had never been
+	 * faulted in stopped the machine, with a report that described the
+	 * fault perfectly and could do nothing about it.
+	 *
+	 * ⚠️ Which map is asked is decided by the ADDRESS, not by the ring.
+	 * A kernel path reaching a user address on a task's behalf -- copyin,
+	 * copyout, the argument block the bootstrap builds -- faults at ring 0
+	 * on an address the task owns, and asking the kernel map about it would
+	 * answer no about the wrong space.  i386 makes the same split, in the
+	 * same place, on the same test.
+	 *
+	 * The protection asked for is what was ATTEMPTED, from the error code,
+	 * and not what would be convenient: asking for write on a read fault
+	 * would quietly make a read-only mapping writable, and asking for less
+	 * than was attempted would return success and fault again forever.
+	 */
+	if (frame->vector == T_PAGE_FAULT) {
+		uint64_t	addr = read_cr2();
+		thread_act_t	act = current_act();
+		vm_map_t	map;
+		vm_prot_t	prot;
+
+		if (va_is_kernel(addr))
+			map = kernel_map;
+		else
+			map = (act != THR_ACT_NULL) ? act->map : VM_MAP_NULL;
+
+		prot = (frame->error & PF_WRITE)
+		     ? (VM_PROT_READ | VM_PROT_WRITE) : VM_PROT_READ;
+		if (frame->error & PF_INSTRUCTION)
+			prot |= VM_PROT_EXECUTE;
+
+		/*
+		 * ⚠️ Only when the map is one this fault can be about.  A fault
+		 * before there is a thread -- and there are plenty, this kernel
+		 * boots a long way before the first one -- has no task to ask,
+		 * and inventing kernel_map for it would hand an early boot
+		 * failure to a subsystem that is not up.
+		 */
+		if (map != VM_MAP_NULL
+		    && vm_fault(map, trunc_page((vm_offset_t) addr), prot,
+				FALSE) == KERN_SUCCESS)
+			return;		/* the instruction runs again */
 	}
 
 	tputs("\r\nUrMach x86-64: trap ");
