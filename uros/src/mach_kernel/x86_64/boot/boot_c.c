@@ -922,6 +922,40 @@ static void user_pmap_selftest(void)
 	pmap_user_access_end();
 
 	kputs("UrMach x86-64: running in the new space, wrote through it\r\n");
+
+	/*
+	 * And the same access through the routines that actually make it
+	 * (#468), which is a different question from the one above.
+	 *
+	 * 🔥 The store above brackets itself, so it passes whatever copyout()
+	 * does — and copyout() did not bracket at all.  The brackets were
+	 * written, correct, and consumed by nothing but their own test, while
+	 * every copy in the kernel faulted on its first byte and was retried
+	 * for ever.  It took a wedged boot and a debugger to see, because a
+	 * fault that vm_fault answers `success' to is not reported anywhere.
+	 *
+	 * So the check goes through copyout() and copyin() themselves.  The
+	 * value is not the one written above: a readback of 0xa11caca0 would
+	 * pass on a copyout that did nothing at all.
+	 */
+	{
+		uint32_t	out = 0xc0ffee01;
+		uint32_t	back = 0;
+		boolean_t	wr, rd;
+
+		wr = copyout((const char *)&out,
+			     (char *)(uintptr_t)(USER_TEST_VA + 8),
+			     sizeof out);
+		rd = copyin((const char *)(uintptr_t)(USER_TEST_VA + 8),
+			    (char *)&back, sizeof back);
+
+		kputs("UrMach x86-64: copyout then copyin through a user page "
+		      "returned ");
+		kputhex64(back);
+		kputs(!wr && !rd && back == out
+		      ? " — the real copy routines reach user memory with SMAP on\r\n"
+		      : " — WRONG, expected 0xc0ffee01 from both\r\n");
+	}
 	pmap_activate(k);
 
 	readback = *(const volatile uint32_t *)(uintptr_t)phys_to_direct(frame);
