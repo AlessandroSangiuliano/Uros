@@ -17,6 +17,7 @@
 #include <kern/cpu_number.h>
 #include <kern/thread.h>	/* struct thread_shuttle */
 #include <kern/processor.h>	/* default_pset */
+#include <kern/zalloc.h>	/* first_zone */
 #include <kern/queue.h>
 #include <mach/boolean.h>
 #include <kern/misc_protos.h>	/* panic */
@@ -1158,6 +1159,118 @@ static void disassemble(uint64_t addr)
 	}
 }
 
+/*
+ * ── The Mach objects, and how they are checked (#428) ─────────────────
+ *
+ * A debugger command that walks a kernel structure is exactly as trustworthy
+ * as the walk, and this issue has already produced one that was not: reading
+ * Mach's typed queues as intrusive lists gave addresses, flag names and wait
+ * events that were all noise, and it LOOKED like a thread list.
+ *
+ * So these are not tested by printing something.  They are tested by CROSS-
+ * CHECKING TWO INDEPENDENT VIEWS of the same fact:
+ *
+ *   the zone named "threads" knows how many shuttles are allocated, because
+ *   zalloc counts them;
+ *   the processor set's list knows how many threads it holds, because the
+ *   scheduler links them;
+ *   and every task's own activation list knows how many it owns.
+ *
+ * Three counters, maintained by three subsystems that do not consult each
+ * other.  They have to agree, and a walk that is wrong breaks the agreement
+ * rather than producing plausible output.  scripts/ddb-objects.sh reads all
+ * three off one prompt and refuses the run if they differ.
+ */
+static void list_zones(void)
+{
+	const struct zone *z;
+	unsigned n = 0;
+
+	cons_puts("  elem  in-use  bytes   name\r\n");
+
+	for (z = first_zone; z != ZONE_NULL; z = z->next_zone) {
+		if (n++ >= DDB_THREADS_MAX
+		    || !readable((uint64_t)(uintptr_t) z, sizeof *z)) {
+			cons_puts("  the zone chain does not end where it "
+				  "should\r\n");
+			return;
+		}
+
+		cons_puts("  ");
+		cons_putdec((uint64_t) z->elem_size);
+		cons_puts("\t");
+		cons_putdec((uint64_t) z->count);
+		cons_puts("\t");
+		cons_putdec((uint64_t) z->cur_size);
+		cons_puts("\t");
+		cons_puts(z->zone_name ? z->zone_name : "(unnamed)");
+		cons_puts("\r\n");
+	}
+}
+
+/*
+ * Every task, and how many activations each one owns.
+ *
+ * ⚠️ The activation list is walked the way the kernel links it, which after
+ * this issue's mistake is worth saying once more: queue_enter() stores the
+ * ELEMENT, so there is no offset arithmetic here and any that appeared would
+ * be the bug coming back.
+ */
+static void list_tasks(void)
+{
+	const queue_head_t	*q = &default_pset.tasks;
+	const queue_entry_t	head = (const queue_entry_t) q;
+	queue_entry_t		e = (queue_entry_t) q->next;
+	unsigned		n = 0, acts_total = 0;
+
+	cons_puts("  ");
+	cons_putdec((uint64_t) default_pset.task_count);
+	cons_puts(" tasks in the default set\r\n");
+
+	while (e != head) {
+		const struct task	*t;
+		queue_entry_t		ahead;
+		queue_entry_t		a;
+		unsigned		acts = 0;
+
+		if (n++ >= DDB_THREADS_MAX
+		    || !readable((uint64_t)(uintptr_t) e, sizeof *t)) {
+			cons_puts("  the task list does not end where it "
+				  "should\r\n");
+			return;
+		}
+
+		t = (const struct task *)(uintptr_t) e;
+
+		ahead = (const queue_entry_t) &t->thr_acts;
+		for (a = (queue_entry_t) t->thr_acts.next;
+		     a != ahead && acts < DDB_THREADS_MAX;
+		     a = (queue_entry_t) ((const struct thread_activation *)
+					  (uintptr_t) a)->thr_acts.next) {
+			if (!readable((uint64_t)(uintptr_t) a,
+				      sizeof(struct thread_activation)))
+				break;
+			acts++;
+		}
+		acts_total += acts;
+
+		cons_puts("  ");
+		cons_puthex64((uint64_t)(uintptr_t) t);
+		cons_puts("  ");
+		cons_putdec((uint64_t) acts);
+		cons_puts(" activations");
+		if ((uint64_t)(uintptr_t) t == (uint64_t)(uintptr_t) kernel_task)
+			cons_puts("  (the kernel task)");
+		cons_puts("\r\n");
+
+		e = (queue_entry_t) t->pset_tasks.next;
+	}
+
+	cons_puts("  ");
+	cons_putdec((uint64_t) acts_total);
+	cons_puts(" activations in total\r\n");
+}
+
 static void show_processors(void)
 {
 	unsigned me = cpu_number();
@@ -1307,6 +1420,14 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why)
 
 		case 'i':
 			disassemble(parse_hex(p + 1, &arg) ? arg : frame->rip);
+			break;
+
+		case 'z':
+			list_zones();
+			break;
+
+		case 'k':
+			list_tasks();
 			break;
 
 		case 'l':
