@@ -1318,8 +1318,35 @@ bootstrap_create(void)
                 (unsigned long) exec_start, (unsigned long) exec_size);
     }
 
-    if (mod_count == 0)
+    if (mod_count == 0) {
         panic ("No bootstrap code loaded with the kernel!");
+
+        /*
+         * ⚠️ REACHABLE, and everything below it assumes what just failed.
+         *
+         * panic() is not noreturn in this kernel and does not pretend to be:
+         * with a debugger it prints, opens the prompt, and RETURNS if the
+         * operator says to continue -- kern/debug.c is explicit about it, and
+         * the whole double-panic arm exists to make that work.  The code
+         * after this line was written on the other assumption, and carries on
+         * to verify modules that are not there, build boot-script variables
+         * from them, and start a task whose image was never loaded.
+         *
+         * What that costs is not a crash, it is a WORSE DIAGNOSIS.  The
+         * bootstrap thread reaches thread_bootstrap_return with no user frame
+         * and the machine stops on
+         *
+         *    act_user_frame: thread ... has never been to user mode
+         *
+         * -- which sends the reader to look at thread state, three layers
+         * away from a missing module.  The first message was the true one and
+         * the second buries it.
+         *
+         * Found by the debugger this issue built, on the first boot where
+         * anybody could type `continue' at a panic (#428).
+         */
+        return;
+    }
 
     /*
      * That the modules are still intact -- each machine checks whatever its
