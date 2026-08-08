@@ -387,6 +387,29 @@ static void report_instruction(uint64_t rip)
 	uint8_t bytes[INSTRUCTION_BYTES];
 	unsigned avail = 0;
 
+	/*
+	 * ⚠️ Kernel addresses only, and that is not caution (#422).
+	 *
+	 * The check below asks the KERNEL's page tables whether the address is
+	 * mapped, and the read that follows goes through whatever CR3 is
+	 * loaded.  For a fault from ring 3 those are two different address
+	 * spaces -- and the kernel's tables still carry the low identity
+	 * mapping left over from early boot, so a user rip of 0x401000 passed
+	 * the check and then faulted on the read, in the kernel, while
+	 * reporting a fault.  One diagnosis replaced by a second one about the
+	 * reporter.
+	 *
+	 * Reading it properly means walking the faulting task's pmap, which is
+	 * worth doing and is not this: the bytes at a user rip belong with the
+	 * rest of what a user fault should report, and there is no path for a
+	 * user fault to report anything yet (#467).
+	 */
+	if (!va_is_kernel(rip)) {
+		tputs("  (no bytes: the instruction is in a user address space, "
+		      "which this report cannot read yet -- #467)\r\n");
+		return;
+	}
+
 	if (!va_is_canonical(rip) || pmap_extract(kernel, rip) == 0)
 		return;
 

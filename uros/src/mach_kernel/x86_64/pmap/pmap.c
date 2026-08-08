@@ -220,7 +220,26 @@ pmap_t pmap_create(uint64_t size)
 
 	pmap->resident_count = 0;
 
-	root_pa = boot_frame_alloc();		/* arrives zeroed */
+	/*
+	 * 🔥 pmap_table_frame() and not boot_frame_alloc(), which is what this
+	 * said and is the same defect #458 fixed one function away (#422).
+	 *
+	 * The boot allocator is EMPTY after vm_page_bootstrap() -- the VM takes
+	 * every remaining page through pmap_next_page(), which on this machine
+	 * *is* boot_frame_alloc().  So this worked for every space created
+	 * during bring-up and for none created afterwards, which means every
+	 * task: the bootstrap task got a map with no address space at all,
+	 * silently, and ran on the kernel's page tables.
+	 *
+	 * ⚠️ The comment above pmap_table_frame() describes this failure exactly
+	 * and was written for a different caller.  Correcting a defect by
+	 * reading closes the one you are looking at and not the one beside it;
+	 * the class here is "asks the boot allocator for a frame after the VM
+	 * has taken it over", and its members are this, the large-page split in
+	 * map.c, and pv_alloc() in pv.c.  pmap_next_page() is the fourth and is
+	 * correct: it is the transfer itself.
+	 */
+	root_pa = pmap_table_frame();		/* arrives zeroed */
 	if (root_pa == 0) {
 		/*
 		 * ⚠️ Said out loud, and it was not (#422).
@@ -237,9 +256,8 @@ pmap_t pmap_create(uint64_t size)
 		 * early boot -- three layers from the allocator that answered
 		 * no.  Everything in between reported success.
 		 */
-		printf("pmap_create: no frame for a page-table root -- the boot "
-		       "allocator is empty, and this task will have no address "
-		       "space (#456)\n");
+		printf("pmap_create: no frame for a page-table root -- this "
+		       "task would have no address space at all\n");
 		pmap->ref_count = 0;	/* give the pool slot back */
 		return PMAP_NULL;
 	}
