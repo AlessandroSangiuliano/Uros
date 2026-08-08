@@ -2734,6 +2734,42 @@ static void ksym_selftest(void)
 	      && name_is(bt_caller_of_caller, "ksym_selftest")
 	      ? " — a walk names every frame, not just the first\r\n"
 	      : " — WRONG, the chain does not resolve\r\n");
+
+	/*
+	 * ── The frame the two above could not reach (#409) ────────────────
+	 *
+	 * Everything so far returns to the middle of its caller, which is where
+	 * a lookup cannot go wrong.  The case that does is a function whose
+	 * LAST instruction is a call: the return address is then the first byte
+	 * past the function, and naming it directly names the next one — or,
+	 * with padding in between, nothing, and the fallback was a label a
+	 * quarter of a megabyte below.
+	 *
+	 * That shape is the scheduler's normal one, so the wrong name was in
+	 * the backtrace of every idle processor on every boot from the first
+	 * one.  It was printed 130 times a run and never read, because
+	 * `<thread_frame_return+0x3c516>' does not look like an error.
+	 *
+	 * Checked over every function in the image rather than the one that
+	 * showed it, since which functions end in a call is a property of the
+	 * build and changes under us.
+	 */
+	{
+		unsigned checked = 0, bad;
+		uint64_t worst = 0;
+
+		bad = ksym_tailcall_check(&checked, &worst);
+
+		kputs("UrMach x86-64: ");
+		kputdec(checked);
+		kputs(" functions, return address past the end names its own in ");
+		kputdec(checked - bad);
+		kputs(", worst stray offset ");
+		kputhex64(worst);
+		kputs(bad == 0 && worst < 0x10000
+		      ? " — a tail call is attributed to the caller\r\n"
+		      : " — WRONG, a frame is named after the wrong function\r\n");
+	}
 }
 
 /*

@@ -392,11 +392,8 @@ static void report_instruction(uint64_t rip)
  * already on the line, and a word that means "no answer" costs a column on
  * every frame to say what the absence of a name already says.
  */
-static void report_symbol(uint64_t addr)
+static void report_named(const char *name, uint64_t off)
 {
-	uint64_t off = 0;
-	const char *name = ksym_lookup(addr, &off);
-
 	if (name == 0)
 		return;
 
@@ -407,6 +404,37 @@ static void report_symbol(uint64_t addr)
 		tputhex(off);
 	}
 	tputs(">");
+}
+
+/*
+ * ⚠️ The lookup on its own line, and not inside the call below it.
+ *
+ * `report_named(ksym_lookup(addr, &off), off)' reads `off' and calls the
+ * function that fills it in as two arguments of one call, and C does not
+ * sequence those against each other: the compiler is entitled to read the
+ * variable first, and this one does.  Every offset in every backtrace came out
+ * as zero — names right, positions gone — and the names being right is what
+ * made it look fine.  Written twice here and once in the debugger before the
+ * output was compared against the previous boot's.
+ */
+static void report_symbol(uint64_t addr)
+{
+	uint64_t off = 0;
+	const char *name = ksym_lookup(addr, &off);
+
+	report_named(name, off);
+}
+
+/*
+ * For an address taken off a stack: it is one past a call, which at the end of
+ * a function belongs to the next one (#409).  See ksym_lookup_call().
+ */
+static void report_return_symbol(uint64_t ret)
+{
+	uint64_t off = 0;
+	const char *name = ksym_lookup_call(ret, &off);
+
+	report_named(name, off);
 }
 
 /*
@@ -479,7 +507,7 @@ void x86_64_backtrace(uint64_t rbp)
 
 		tputs("    ");
 		tputhex(ret);
-		report_symbol(ret);
+		report_return_symbol(ret);
 		tputs("\r\n");
 
 		if (next <= rbp)
