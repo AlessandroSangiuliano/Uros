@@ -221,8 +221,28 @@ pmap_t pmap_create(uint64_t size)
 	pmap->resident_count = 0;
 
 	root_pa = boot_frame_alloc();		/* arrives zeroed */
-	if (root_pa == 0)
+	if (root_pa == 0) {
+		/*
+		 * ⚠️ Said out loud, and it was not (#422).
+		 *
+		 * A PMAP_NULL here becomes a task with a map and no address
+		 * space: vm_map_create() accepts it, task_create_local() returns
+		 * success, and pmap_activate() is then handed a null and does
+		 * nothing -- so the task runs on whatever tables the processor
+		 * already had.  Its own.  The kernel's.
+		 *
+		 * The symptom is not an allocation failure anywhere.  It is a
+		 * user thread taking an instruction fetch refused at an address
+		 * that IS mapped -- by the low identity mapping left over from
+		 * early boot -- three layers from the allocator that answered
+		 * no.  Everything in between reported success.
+		 */
+		printf("pmap_create: no frame for a page-table root -- the boot "
+		       "allocator is empty, and this task will have no address "
+		       "space (#456)\n");
+		pmap->ref_count = 0;	/* give the pool slot back */
 		return PMAP_NULL;
+	}
 
 	/*
 	 * Share the kernel half by pointing at the same next-level tables, not

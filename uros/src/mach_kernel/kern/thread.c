@@ -1250,6 +1250,97 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 	return(KERN_SUCCESS);
 }
 
+/*
+ * ── Why creating and starting are two calls (#422) ────────────────────
+ *
+ * thread_create() below makes the thread RUNNABLE before it returns, with the
+ * comment "it will immediately suspend itself", and leaves its caller to
+ * replace the placeholder continuation thread_create_in() gave it and to fill
+ * in whatever the thread is supposed to read on its way up.
+ *
+ * 🔥 That is safe exactly while nothing else can pick the thread up in
+ * between, and on a machine with idle processors nothing else is exactly what
+ * does happen.  thread_setrun() puts it on a queue, an idle processor is told,
+ * and it starts running the PLACEHOLDER -- while the creator is still two
+ * statements away from saying what it should have run.
+ *
+ * Measured rather than argued: the bootstrap task starts correctly on every
+ * uniprocessor boot and on none with four processors.  What it runs instead is
+ * thread_bootstrap_return, straight into a thread with no user frame, and the
+ * machine stops on a message about thread state -- three layers from a
+ * continuation that was set two microseconds too late.
+ *
+ * The synchronisation this needs was written and then commented out: there is
+ * a `thread_dowait()' block sitting disabled in thread_create() below, whose
+ * whole job was to wait for the new thread to park before returning.
+ *
+ * Rather than re-enable a wait on every thread creation in the system, the
+ * step is separated.  A caller that has something to say to a thread before it
+ * runs says it in between; thread_create() is unchanged for the callers that
+ * do not, which is all of them but one.
+ */
+static void
+thread_start_running(thread_act_t thr_act, thread_t thread)
+{
+	spl_t s;
+
+	/* Start the thread running (it will immediately suspend itself).  */
+	s = splsched();
+	thread_ast_set(thr_act, AST_APC);
+	thread_lock(thread);
+	thread->state |= TH_RUN;
+#if     (THREAD_SWAPPER && ((NCPUS > 1) || MACH_RT))
+	if (thread->state & TH_SWAPPED_OUT)
+		thread_swapin(thread->top_act, FALSE);
+	else
+#endif  /* (THREAD_SWAPPER && ((NCPUS > 1) || MACH_RT)) */
+		thread_setrun(thread, FALSE, TAIL_Q);
+	thread_unlock(thread);
+	splx(s);
+}
+
+/*
+ * Create a thread in `task' and DO NOT let it run yet.
+ *
+ * For a caller that has to configure the thread first -- a continuation of its
+ * own, something for it to read out of `saved' -- because after
+ * thread_start_running() below it may already be executing on another
+ * processor.  Pair the two.
+ */
+kern_return_t
+thread_create_unstarted(task_t task, thread_act_t *new_act,
+			thread_t *new_thread)
+{
+	thread_t thread;
+	thread_act_t thr_act;
+	int rc;
+	extern void thread_bootstrap_return(void);
+
+	if ((rc = act_create(task, 0, 0, &thr_act)) != KERN_SUCCESS)
+		return(rc);
+
+	if ((rc = thread_create_in(thr_act, thread_bootstrap_return, &thread))
+							    != KERN_SUCCESS) {
+		thread_terminate(thr_act);
+		act_deallocate(thr_act);
+		return(rc);
+	}
+
+	if (task->kernel_loaded)
+		thread_user_to_kernel(thread);
+
+	*new_act = thr_act;
+	*new_thread = thread;
+	return(KERN_SUCCESS);
+}
+
+/* And the other half: let a thread created above onto a run queue. */
+void
+thread_start_created(thread_act_t thr_act, thread_t thread)
+{
+	thread_start_running(thr_act, thread);
+}
+
 kern_return_t
 thread_create(task_t task, thread_act_t *new_act)
 {

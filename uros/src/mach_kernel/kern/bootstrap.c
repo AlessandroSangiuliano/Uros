@@ -1034,9 +1034,11 @@ user_bootstrap(void)
      * question "was it never called, or called with nothing?" took five boots
      * to answer.
      */
-    printf("bootstrap: loading 0x%lx, %lu bytes\n",
+    printf("bootstrap: loading 0x%lx, %lu bytes into map %p, pmap %p\n",
            info ? (unsigned long) info->start : 0UL,
-           info ? (unsigned long) info->size : 0UL);
+           info ? (unsigned long) info->size : 0UL,
+           current_task()->map,
+           current_task()->map ? vm_map_pmap(current_task()->map) : 0);
 
     exec_load(info->start, info->size);
     //    if (err)
@@ -1838,6 +1840,7 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
 		      char **argv, char *strings, int stringlen)
 {
   thread_act_t thread_act;
+  thread_t thread;
   ipc_port_t master_bootstrap_port;
   int err;
   int i;
@@ -1860,7 +1863,20 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       if (master_bootstrap_port == IP_NULL)
           panic("can't allocate master bootstrap port");
 
-      err = thread_create ((task_t)task, &thread_act);
+      /*
+       * ⚠️ Created but NOT started (#422).
+       *
+       * thread_create() makes the thread runnable before it returns and leaves
+       * this function to say what it should run -- which is two statements
+       * below, and on a machine with idle processors that is two statements too
+       * late.  An idle processor takes the thread off the queue and runs the
+       * placeholder continuation, into a thread with no user frame.
+       *
+       * Measured: correct on every uniprocessor boot, wrong on every boot with
+       * four processors.  Split, so that everything this thread has to read is
+       * in place before anything can read it.
+       */
+      err = thread_create_unstarted((task_t)task, &thread_act, &thread);
       assert(err == 0);
 
       task_set_special_port(task,
@@ -1871,6 +1887,10 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       
       thread_act->thread->saved.other = (char *) &info;
       thread_start(thread_act->thread, user_bootstrap);
+
+      /* Configured; now it may run. */
+      thread_start_created(thread_act, thread);
+
       err = thread_resume(thread_act);
       assert(err == 0);
 
