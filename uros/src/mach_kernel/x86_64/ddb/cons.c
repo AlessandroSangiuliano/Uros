@@ -294,3 +294,11 @@ int cons_loopback_probe(uint8_t byte)
 	outb(COM1 + UART_MCR, saved_mcr);
 	return result;
 }
+
+void cons_puthex8(uint8_t v)
+{
+	static const char hex[] = "0123456789abcdef";
+
+	cons_putc(hex[(v >> 4) & 0xF]);
+	cons_putc(hex[v & 0xF]);
+}

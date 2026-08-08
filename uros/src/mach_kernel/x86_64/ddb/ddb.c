@@ -11,6 +11,7 @@
 #include <boot/multiboot2.h>
 #include <ddb/cons.h>
 #include <ddb/ddb.h>
+#include <ddb/disasm.h>
 #include <ddb/ksym.h>
 #include <kern/cpu_data.h>	/* cpu_data[].active_thread */
 #include <kern/cpu_number.h>
@@ -1097,6 +1098,66 @@ static void list_threads(void)
 	}
 }
 
+/*
+ * Instructions at an address, named where they can be and refused where they
+ * cannot (#428).
+ *
+ * ⚠️ Stops on a refusal rather than stepping by a guess.  A length the decoder
+ * does not know is not a small gap: every line after it would be a well-formed
+ * instruction that was never there.  The bytes are printed instead, which is
+ * what the fault report has always done and what any external disassembler
+ * will take.
+ */
+#define DDB_DISASM_LINES	8
+
+static void disassemble(uint64_t addr)
+{
+	pmap_t kernel = pmap_kernel();
+
+	for (unsigned line = 0; line < DDB_DISASM_LINES; line++) {
+		uint8_t		bytes[16];
+		char		text[32];
+		unsigned	len, avail = 0;
+
+		for (unsigned i = 0; i < sizeof bytes; i++) {
+			uint64_t at = addr + i;
+
+			if (!va_is_canonical(at) || pmap_extract(kernel, at) == 0)
+				break;
+			bytes[i] = *(const volatile uint8_t *)(uintptr_t) at;
+			avail++;
+		}
+
+		if (avail == 0) {
+			cons_puts("  ");
+			cons_puthex64(addr);
+			cons_puts("  unmapped\r\n");
+			return;
+		}
+
+		cons_puts("  ");
+		cons_puthex64(addr);
+		put_symbol(addr);
+		cons_puts("  ");
+
+		len = disasm(bytes, avail, addr, text, sizeof text);
+		if (len == 0) {
+			cons_puts("? ");
+			for (unsigned i = 0; i < 8 && i < avail; i++) {
+				cons_puthex8(bytes[i]);
+				cons_puts(" ");
+			}
+			cons_puts(" — the form is not known, and stepping past "
+				  "it would be a guess\r\n");
+			return;
+		}
+
+		cons_puts(text);
+		cons_puts("\r\n");
+		addr += len;
+	}
+}
+
 static void show_processors(void)
 {
 	unsigned me = cpu_number();
@@ -1242,6 +1303,10 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why)
 			else
 				cons_puts("  d needs a breakpoint number — "
 					  "try b\r\n");
+			break;
+
+		case 'i':
+			disassemble(parse_hex(p + 1, &arg) ? arg : frame->rip);
 			break;
 
 		case 'l':
