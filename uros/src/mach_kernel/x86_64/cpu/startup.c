@@ -17,7 +17,8 @@
 #include <stdint.h>
 
 #include <kern/misc_protos.h>
-#include <kern/processor.h>	/* #461: real_ncpus */
+#include <kern/processor.h>
+#include <kern/sched_prim.h>	/* #428: -S parks the startup thread */	/* #461: real_ncpus */
 #include <kern/startup.h>	/* #448: the interface, so it is checked */
 #include <mach/machine/vm_param.h>
 
@@ -296,6 +297,46 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('L'))
 			cont_probe_start();
+
+		/*
+		 * -S: stay up (#428).
+		 *
+		 * This kernel reaches bootstrap_create() and panics there
+		 * within milliseconds of its first tick, because no userland
+		 * bundle is loaded for this target yet (#422).  That is fine
+		 * for a self-test run and leaves nothing to walk up to and
+		 * examine: there is no RUNNING machine on x86-64, only a
+		 * machine that has already stopped.
+		 *
+		 * So this parks the thread that would go on to
+		 * bootstrap_create, and the machine simply idles -- four
+		 * processors in machine_idle, the clock ticking, and the
+		 * debugger's console door polled from that tick.  It is what
+		 * the serial door needs to be DEMONSTRATED against rather than
+		 * asserted, and it is worth having on its own: an operator who
+		 * wants to look at a live kernel has had no way to keep one.
+		 *
+		 * ⚠️ Parked with a plain assert_wait and no continuation, on
+		 * purpose.  A continuation would throw this stack away, and
+		 * the stack is precisely what an operator breaking in wants to
+		 * see -- the thread would be reported by its resume point,
+		 * correctly, and uselessly.
+		 */
+		if (boot_flag('S')) {
+			static int stay_up_event;
+
+			printf("startup: staying up on request (-S) — the "
+			       "machine idles here; press Ctrl-\\ on the "
+			       "console for the debugger (#428)\n");
+
+			for (;;) {
+				spl_t s = splsched();
+
+				assert_wait((event_t) &stay_up_event, TRUE);
+				splx(s);
+				thread_block((void (*)(void)) 0);
+			}
+		}
 
 		/*
 		 * -F: does vector state survive an involuntary switch? (#408)

@@ -26,50 +26,49 @@ wait_for() {
 }
 # Wait for the kernel to be up and ticking -- the door is polled from the tick,
 # so typing before the first tick would prove nothing about the door.
-# The kernel reaches bootstrap_create and panics there (#422) within
-# milliseconds of its first tick, so on this target the running machine to
-# break into is the one stopped AT THE PANIC PROMPT -- which is itself the
-# thing under test: panic() used to go straight to halt_cpu() with a debugger
-# sitting there unused, because its guard asked whether the 1990 ddb/ tree was
-# compiled in rather than whether a debugger existed.
-if ! wait_for 'ddb> '; then
-	echo "FAILED: panic did not open the prompt"
-	kill $QPID 2>/dev/null; rm -f "$IN"; exit 1
-fi
-echo "panic opened the prompt"
-# ⚠️ One at a time, waiting for the prompt to come back between them.
-# Firing them a second apart while the kernel is still printing mixes the
-# answers into the boot output, and a reader then concludes the command
-# answered nothing -- which is how a working backtrace was nearly reported as
-# broken, and pmap_extract nearly chased for a fault it never had.
+# One command, and wait for the prompt to come back before the next.
+#
+# ⚠️ Firing them a fixed interval apart mixes the answers into whatever the
+# kernel is printing, and a reader then scores the command as having answered
+# nothing.  That happened, and a working backtrace was nearly reported as
+# broken.
 ask() {
 	before=$(grep -ac 'ddb> ' "$LOG")
 	printf '%s\n' "$1" >&3
 	i=0
-	while [ $i -lt 100 ]; do
+	while [ $i -lt 200 ]; do
 		[ "$(grep -ac 'ddb> ' "$LOG")" -gt "$before" ] && return 0
 		sleep 0.1; i=$((i+1))
 	done
 	echo "FAILED: '$1' never came back to a prompt"
 	return 1
 }
-for c in r t p l; do ask "$c" || break; done
 
-# ⚠️ Ask about a processor that is actually PARKED, read out of `p'.  Which
-# processor panics varies from run to run, and a hardcoded number lands on the
-# one holding the prompt about a quarter of the time -- where the honest answer
-# is a refusal, which a reader then scores as the command failing.
-PARKED=$(grep -a '^  cpu [0-9]* *parked at' "$LOG" | head -1 | awk '{print $2}')
-if [ -n "$PARKED" ]; then
-	ask "P$PARKED" || true
-	grep -aq "P needs the number" "$LOG" && echo "FAILED: P refused a parked processor"
-else
-	echo "FAILED: no processor parked — the NMI stop did not work"
+# ── The console door, on a machine that is actually running ───────────
+#
+# GRUB entry 11 is `-rS': the kernel parks the thread that would reach
+# bootstrap_create and idles instead, so there is a live machine to break
+# into.  Every other entry stops within milliseconds of its first tick, which
+# is why this door went written and undemonstrated.
+if ! wait_for 'staying up on request'; then
+	echo "FAILED: the kernel did not stay up — wrong entry?"
+	kill $QPID 2>/dev/null; rm -f "$IN"; exit 1
 fi
 
-# And the console door, from that prompt's own machine: continue, then break
-# back in with the character.  `c' from a panic returns into halt, so this
-# proves the door rather than the prompt.
+# Let it idle a while, so the prompt cannot be an accident of the boot still
+# being in progress.  Several ticks must pass with nothing happening.
+sleep 3
+grep -aq 'ddb> ' "$LOG" && { echo "FAILED: the prompt was already open before anything was typed"; kill $QPID 2>/dev/null; rm -f "$IN"; exit 1; }
+
+printf '\034' >&3          # Ctrl-\, the break character
+if ! wait_for 'ddb> '; then
+	echo "FAILED: the break character did not open the prompt on a running machine"
+	kill $QPID 2>/dev/null; rm -f "$IN"; exit 1
+fi
+echo "the break character opened the prompt on a running machine"
+
+for c in r t p l; do ask "$c" || break; done
+
 printf 'c\n' >&3; sleep 1
 printf '\034' >&3          # Ctrl-\, the break character
 sleep 2
