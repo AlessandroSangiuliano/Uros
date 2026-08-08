@@ -88,6 +88,29 @@ syscall_entry:
 	 * This is the boundary. Everything before it was arranged by the
 	 * processor; %rax is the first value in the kernel that a user chose.
 	 */
+	/*
+	 * Mach traps live above SYSCALL_MACH_BASE (#411).  Taken first because
+	 * it is the branch that will carry the traffic: every message in the
+	 * system comes through here, and the kernel's own calls are a handful.
+	 *
+	 * ⚠️ The subtraction happens AFTER the range test, not before.  Doing it
+	 * first and testing the result would be arithmetic on a number a user
+	 * chose, and a number below the base would wrap to an enormous one --
+	 * still caught by the unsigned bound below, but caught by accident
+	 * rather than by the test that is written.
+	 */
+	cmpq	$SYSCALL_MACH_BASE, %rax
+	jb	.Lown_call
+
+	subq	$SYSCALL_MACH_BASE, %rax
+	cmpq	mach_syscall_count(%rip), %rax
+	jae	.Lbad_call
+
+	leaq	mach_syscall_table(%rip), %r11
+	callq	*(%r11, %rax, 8)
+	jmp	.Lreturn
+
+.Lown_call:
 	cmpq	$SYSCALL_NR_MAX, %rax
 	jae	.Lbad_call
 

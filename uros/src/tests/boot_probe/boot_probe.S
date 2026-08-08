@@ -55,10 +55,54 @@
 #define PROBE_A5	0x55
 #define PROBE_A6	0x56
 
+/*
+ * And the one Mach trap it makes, which is the point of #411.
+ *
+ * ⚠️ Not a number this file invented: SYSCALL_MACH_BASE is where
+ * <syscall/syscall.h> puts the Mach traps in the call-number space, and 14 is
+ * mach_print's index in the machine-independent mach_trap_table[].  Written as
+ * the sum so that a reader can check both halves.
+ *
+ * mach_null is chosen -- trap 15, no arguments, returns at once -- because
+ * what has to be proved here is the DISPATCH: the range test, the bound
+ * against mach_syscall_count, the call through the pointer table, and the way
+ * back out through SYSRET.  A trap that does nothing proves all of that and
+ * nothing else, so a failure has one meaning.
+ *
+ * ⚠️ mach_print (trap 14) was tried first, because a line printed by the user
+ * program would be visible proof.  It does not come back, and the reason is
+ * worth writing down rather than working around: mach_print() is
+ * `printf("%s", s)' with a pointer the USER supplied, so the kernel walks a
+ * string in a task's address space with the console lock already held.  When
+ * that page is not resident the fault is taken inside printf, and the fault
+ * handler wants to block -- with the lock held.  The dispatch is not what
+ * fails there; mach_print's own contract is.  It needs to copy the string in
+ * before printing it, which is a change to machine-independent code that i386
+ * shares and is not this issue's to make in passing.
+ */
+#define SYSCALL_MACH_BASE	0x100
+#define MACH_TRAP_NULL		(SYSCALL_MACH_BASE + 15)
+
 	.section .text
 	.code64
 	.globl	_start
 _start:
+	/*
+	 * First the Mach trap, once, before the loop: what it proves is that
+	 * the dispatch works, and proving it once is proving it.
+	 */
+	movq	$MACH_TRAP_NULL, %rax
+	syscall
+
+	movq	$SYSCALL_NR_PROBE, %rax
+	movq	$PROBE_A1, %rdi
+	movq	$PROBE_A2, %rsi
+	movq	$PROBE_A3, %rdx
+	movq	$PROBE_A4, %r10
+	movq	$PROBE_A5, %r8
+	movq	$PROBE_A6, %r9
+	syscall
+
 	/*
 	 * The argument registers of the contract in <syscall/syscall.h>: rdi,
 	 * rsi, rdx, r10, r8, r9 — r10 and not rcx, because the instruction
