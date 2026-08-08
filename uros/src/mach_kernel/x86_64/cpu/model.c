@@ -192,20 +192,14 @@ halt_all_cpus(boolean_t reboot)
 }
 
 /*
- * Enter the debugger with a message.
+ * Debugger() is not here any more (#428).
  *
- * ⚠️ Not implemented, and a panic rather than a return.  Debugger() is called
- * from places that have decided they cannot continue and expect a human to
- * take over; returning would carry on into code written on the assumption
- * that somebody had looked.  #428 is where this becomes an entry into DDB.
+ * It lives in x86_64/ddb/ddb.c, because what it now does is the debugger's
+ * business: it raises a breakpoint so that the entry stubs build a REAL trap
+ * frame, rather than handing the debugger a frame describing itself.  This
+ * file used to answer it with a panic saying there was no debugger, which was
+ * true when it was written.
  */
-void
-Debugger(const char *message)
-{
-	panic("Debugger(\"%s\"): no debugger on this machine yet (#428)",
-	      message ? message : "");
-}
-
 /*
  * A character to the console (#453).
  *

@@ -17,7 +17,8 @@
 #include <stdint.h>
 
 #include <kern/misc_protos.h>
-#include <kern/processor.h>	/* #461: real_ncpus */
+#include <kern/processor.h>
+#include <kern/sched_prim.h>	/* #428: -S parks the startup thread */	/* #461: real_ncpus */
 #include <kern/startup.h>	/* #448: the interface, so it is checked */
 #include <mach/machine/vm_param.h>
 
@@ -34,6 +35,8 @@
 #include <time/preempt_test.h>	/* #461: -P on an application processor */
 #include <thread/fpu_stress.h>	/* #408: -F, vector state across preemption */
 #include <thread/state_test.h>	/* #408: the thread state flavour dispatch */
+#include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
+#include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
 #include <trap/trap.h>		/* trap_set_handler */
 
@@ -111,6 +114,35 @@ machine_kernel_ready(void)
 	 * executed.
 	 */
 	thread_state_dispatch_test();
+
+	/*
+	 * -B: does the machine-independent kernel's way into the debugger
+	 * actually work? (#428)
+	 *
+	 * Debugger() is the name every failed assert() and both panic() paths
+	 * reach, and until this issue it answered with a panic saying there was
+	 * no debugger.  Now it raises a breakpoint and the trap path opens the
+	 * prompt -- and "DDB can be entered" is the one done-when of #428 that
+	 * had never been demonstrated, on a target whose every boot log is a
+	 * self-test run the debugger never opens.
+	 *
+	 * ⚠️ Called from ordinary kernel context on purpose, and not from a
+	 * fault.  A fault already has a trap frame; this is the case that does
+	 * NOT, and it is the case that decides whether the frame the debugger
+	 * shows describes the caller or describes the debugger.
+	 *
+	 * ⚠️ And its return is part of the test.  Debugger() is a call, and
+	 * kern/debug.c's panic() carries on after it on a double panic.  A
+	 * debugger that could only be entered by never coming back would break
+	 * the one caller that matters most.
+	 */
+	if (boot_flag('B')) {
+		printf("ddb_test: calling Debugger() from ordinary kernel "
+		       "context — the prompt should open (#428)\n");
+		Debugger("boot flag -B");
+		printf("ddb_test: Debugger() RETURNED — a call that comes back, "
+		       "which is what panic() needs on a double panic (#428)\n");
+	}
 }
 
 /*
@@ -254,6 +286,57 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('A') && want > 1)
 			kernel_ast_test();
+
+		/*
+		 * -L: a thread blocked with a continuation, and the prompt
+		 * opened on it (#428).
+		 *
+		 * Here because it needs the scheduler to actually take the
+		 * thread off its processor, which is what resets the stack and
+		 * makes the debugger's refusal meaningful.
+		 */
+		if (boot_flag('L'))
+			cont_probe_start();
+
+		/*
+		 * -S: stay up (#428).
+		 *
+		 * This kernel reaches bootstrap_create() and panics there
+		 * within milliseconds of its first tick, because no userland
+		 * bundle is loaded for this target yet (#422).  That is fine
+		 * for a self-test run and leaves nothing to walk up to and
+		 * examine: there is no RUNNING machine on x86-64, only a
+		 * machine that has already stopped.
+		 *
+		 * So this parks the thread that would go on to
+		 * bootstrap_create, and the machine simply idles -- four
+		 * processors in machine_idle, the clock ticking, and the
+		 * debugger's console door polled from that tick.  It is what
+		 * the serial door needs to be DEMONSTRATED against rather than
+		 * asserted, and it is worth having on its own: an operator who
+		 * wants to look at a live kernel has had no way to keep one.
+		 *
+		 * ⚠️ Parked with a plain assert_wait and no continuation, on
+		 * purpose.  A continuation would throw this stack away, and
+		 * the stack is precisely what an operator breaking in wants to
+		 * see -- the thread would be reported by its resume point,
+		 * correctly, and uselessly.
+		 */
+		if (boot_flag('S')) {
+			static int stay_up_event;
+
+			printf("startup: staying up on request (-S) — the "
+			       "machine idles here; press Ctrl-\\ on the "
+			       "console for the debugger (#428)\n");
+
+			for (;;) {
+				spl_t s = splsched();
+
+				assert_wait((event_t) &stay_up_event, TRUE);
+				splx(s);
+				thread_block((void (*)(void)) 0);
+			}
+		}
 
 		/*
 		 * -F: does vector state survive an involuntary switch? (#408)

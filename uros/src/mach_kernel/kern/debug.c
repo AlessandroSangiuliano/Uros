@@ -327,6 +327,43 @@ panic(const char *str, ...)
 	panicstr = (char *)0;
 	PANIC_UNLOCK();
 	splx(s);
+#elif	MACH_DEBUGGER
+	/*
+	 * ⚠️ The guard above asks whether the 1990 debugger is COMPILED IN,
+	 * and means "is there a debugger to enter" (#428).  Those were the
+	 * same question until a target had one of its own: x86-64 builds with
+	 * MACH_KDB off -- the machine-independent ddb/ tree is not in its
+	 * build -- and has a debugger regardless, so a panic went straight to
+	 * halt_cpu() with a prompt sitting there unused.  A panic is the
+	 * moment that prompt is worth most.
+	 *
+	 * ⚠️ HALTS FIRST when there is nothing to enter, and the order is the
+	 * whole of it.  The first version of this arm asked for the debugger
+	 * and then fell into the KDB path's tail -- release panicstr, splx,
+	 * return -- which is right there because an operator at the prompt
+	 * asked to continue, and is a catastrophe without one: panic() stopped
+	 * halting.  The kernel printed "No bootstrap code loaded" and then
+	 * carried on into the boot script, three boot entries deep, before the
+	 * harness caught it.
+	 *
+	 * Asked at RUNTIME and not only at compile time, because the answer
+	 * depends on a boot flag: without -r there is nothing to enter, and
+	 * calling Debugger() then would panic from inside panic -- which
+	 * recurses through the double-panic arm until the stack is gone.
+	 */
+	if (!debugger_available())
+		halt_cpu();
+		/* NOTREACHED */
+
+	Debugger("panic");
+
+	/*
+	 * Release panicstr so that we can handle normally other panics.
+	 */
+	PANIC_LOCK();
+	panicstr = (char *)0;
+	PANIC_UNLOCK();
+	splx(s);
 #else	/* MACH_KDB || MACH_KGDB */
 	halt_cpu();
 	/* NOTREACHED */

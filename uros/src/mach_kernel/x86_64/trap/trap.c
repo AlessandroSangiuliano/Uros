@@ -10,6 +10,7 @@
 
 #include <cpu/desc.h>
 #include <ddb/cons.h>
+#include <ddb/disasm.h>
 #include <cpu/lapic.h>
 #include <kern/ast.h>		/* #459: need_ast, ast_taken */
 #include <kern/cpu_number.h>
@@ -294,14 +295,19 @@ static void report_registers(const struct trap_frame *frame)
 }
 
 /*
- * The bytes at the faulting instruction, as bytes.
+ * The faulting instruction: named if it can be, and its bytes either way.
  *
- * ⚠️ Not disassembled, and that is a decision rather than a gap. x86-64 adds
- * REX prefixes, changes the meaning of several opcodes and extends the
- * addressing forms, so a decoder carried over from the 32-bit tree would
- * print something confident and wrong — which is worse than printing nothing
- * at all, because a wrong mnemonic is acted upon. The bytes are unambiguous
- * and any disassembler will take them.
+ * ⚠️ It used to be bytes alone, with the reason written here that a decoder
+ * carried over from the 32-bit tree would print something confident and wrong
+ * — worse than nothing, because a wrong mnemonic is acted upon.  That reason
+ * was right and is why <ddb/disasm.h> refuses instead of guessing, and why it
+ * is measured: scripts/disasm-coverage.sh runs it over all 149,229
+ * instructions of this kernel's own .text against objdump, and the contract
+ * is zero disagreements on length and on every name it pronounces.  It
+ * declines about one in eighteen and prints `?' for those.
+ *
+ * The bytes stay regardless.  They are what an external disassembler takes,
+ * and they are the answer when ours has none.
  *
  * Read through the page tables first. A fault report that faults while
  * explaining a fault replaces the diagnosis with a double fault, and an
@@ -314,6 +320,8 @@ static void report_instruction(uint64_t rip)
 {
 	pmap_t kernel = pmap_kernel();
 	const uint8_t *p = (const uint8_t *)(uintptr_t)rip;
+	uint8_t bytes[INSTRUCTION_BYTES];
+	unsigned avail = 0;
 
 	if (!va_is_canonical(rip) || pmap_extract(kernel, rip) == 0)
 		return;
@@ -328,11 +336,29 @@ static void report_instruction(uint64_t rip)
 			break;
 
 		b = p[i];
+		bytes[avail++] = b;
 		tputs(" ");
 		tputc("0123456789abcdef"[b >> 4]);
 		tputc("0123456789abcdef"[b & 0xF]);
 	}
 	tputs("\r\n");
+
+	/*
+	 * ⚠️ Decoded from the copy that was just checked, never from `p'
+	 * again.  Re-reading through the pointer would be a second trip
+	 * through memory the first trip proved nothing about -- the mapping
+	 * can have gone in between, and this is the one function that must
+	 * not fault.
+	 */
+	if (avail != 0) {
+		char text[32];
+
+		if (disasm(bytes, avail, rip, text, sizeof text) != 0) {
+			tputs("  instruction: ");
+			tputs(text);
+			tputs("\r\n");
+		}
+	}
 }
 
 /*
@@ -722,6 +748,56 @@ void trap_dispatch(struct trap_frame *frame)
 			return;
 		}
 		/* Nobody claimed it — fall through and say so. */
+	}
+
+	/*
+	 * The machine-independent kernel asking for the debugger (#428).
+	 *
+	 * Debugger() raises a breakpoint precisely so that this frame exists
+	 * and describes its caller rather than the debugger.  Checked here,
+	 * against a per-processor flag that only Debugger() sets, so that a
+	 * breakpoint from anywhere else -- the boot self-test's, or an `int3'
+	 * left in code under examination -- cannot be mistaken for one.
+	 *
+	 * ⚠️ Returns, where every other arm of this function halts, and it
+	 * must: Debugger() is a CALL and its callers carry on afterwards.
+	 * kern/debug.c's panic() is the one that proves it -- on a double
+	 * panic it unlocks, restores the level and returns from Debugger() so
+	 * an operator can continue.  `int3' is a trap rather than a fault, so
+	 * the saved rip is already past it and resuming needs nothing else.
+	 */
+	/*
+	 * The debugger stopping this processor (#428).
+	 *
+	 * Checked before the fault report, because an NMI that reaches the
+	 * report is treated as a fault and halts -- which is the right answer
+	 * for a real one and the wrong one for a processor being held still so
+	 * that an operator can look at it.
+	 *
+	 * ddb_park_here() answers FALSE when no debugger owns the machine, so
+	 * a genuine NMI falls through to the report exactly as before.
+	 */
+	if (frame->vector == T_NMI && ddb_park_here(frame))
+		return;
+
+	/*
+	 * One of the debugger's breakpoints (#428).
+	 *
+	 * Before the expected-trap machinery below, and harmless to it: the
+	 * table is empty until an operator sets something, so the boot
+	 * self-test that arms DR0 for the swapgs window (#440) falls straight
+	 * through exactly as before.
+	 */
+	if (frame->vector == T_DEBUG && ddb_breakpoint_hit(frame))
+		return;
+
+	if (frame->vector == T_BREAKPOINT) {
+		const char *why = ddb_debugger_taken();
+
+		if (why != (const char *) 0) {
+			ddb_enter(frame, why);
+			return;
+		}
 	}
 
 	/*
