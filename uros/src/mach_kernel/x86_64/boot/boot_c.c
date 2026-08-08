@@ -1360,7 +1360,13 @@ static void trap_vectors_selftest(void)
  * lengths, and the alignment the table's arithmetic assumes has to hold for
  * the longer one.
  */
-#define PROBE_VECTOR_LOW	0x21	/* free until the legacy IRQs move here */
+/*
+ * Free, and it stays free: the legacy lines land at 0x40 (<cpu/ioapic.h>), not
+ * here.  This said "until the legacy IRQs move here" back when the plan in
+ * <trap/trap.h> put them at 0x20 — they never did, and the note outlived the
+ * plan it referred to.
+ */
+#define PROBE_VECTOR_LOW	0x21
 
 #define STRINGIFY_(x)		#x
 #define STRINGIFY(x)		STRINGIFY_(x)

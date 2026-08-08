@@ -55,13 +55,22 @@
  * The assignments below are the whole plan for the space:
  *
  *   0x00..0x1F  the architectural exceptions
- *   0x20..0x2F  the legacy interrupt requests, once they are remapped (#409)
+ *   0x40..0x4F  the legacy interrupt requests, on their I/O APIC pins
+ *   0xE0        one vector kept for exercising this path by hand
  *   0xF0..0xFE  processor-to-processor messages
  *   0xFF        the local APIC's spurious vector
  *
  * The high end for the messages on purpose: the interrupt controller
  * prioritises by vector number, so a message that another processor is
  * waiting on outranks a device that is not.
+ *
+ * ⚠️ 0x40 and not the 0x20 this said until the pins were actually routed.
+ * The number is arbitrary, and <cpu/ioapic.h> takes i386's for the reason that
+ * two architectures picking the same arbitrary number is one fewer thing to
+ * remember.  What is not arbitrary is that the plan written here and the base
+ * the code uses were different numbers for as long as nobody compared them —
+ * and a table of assignments is read precisely by someone who is not going to
+ * go and check.
  */
 #define IDT_VECTORS		256
 #define T_EXTERNAL_FIRST	T_VECTORS
