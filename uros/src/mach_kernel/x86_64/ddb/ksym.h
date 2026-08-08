@@ -58,6 +58,29 @@ unsigned ksym_count(void);
 const char *ksym_lookup(uint64_t addr, uint64_t *offset);
 
 /*
+ * The same for a RETURN address, which is one byte past the call and so is
+ * not always inside the function it belongs to (#409).
+ *
+ * Everything a backtrace reads off a stack is one of these, and the case where
+ * it matters is the common one rather than an exotic one: a function whose last
+ * instruction is a call — every continuation in the scheduler — returns to the
+ * first byte of the next function.  Use this for a frame's saved address and
+ * ksym_lookup() for an instruction pointer; the difference between them is one
+ * byte and an entirely different name.
+ */
+const char *ksym_lookup_call(uint64_t ret, uint64_t *offset);
+
+/*
+ * Check the tail-call property over every function in the image (#409).
+ *
+ * Returns how many failed; `checked` how many were looked at, and `worst` the
+ * largest offset a plain lookup produced at those same addresses — the number
+ * that made the defect visible, since a wrong name here does not look wrong,
+ * it looks like a large offset.
+ */
+unsigned ksym_tailcall_check(unsigned *checked, uint64_t *worst);
+
+/*
  * The span the loaded symbol data occupies, so the boot allocator can keep
  * off it. Zero when there is nothing to protect.
  */

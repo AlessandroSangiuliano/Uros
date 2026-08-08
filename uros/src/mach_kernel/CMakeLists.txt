@@ -134,6 +134,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/ast_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)
   # sync/mutex.c, thread/machine.c and kern/lock.c are not in that list, and
   # the boundary is worth stating exactly rather than as "not yet" (#453).

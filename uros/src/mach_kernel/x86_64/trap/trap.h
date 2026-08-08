@@ -55,13 +55,22 @@
  * The assignments below are the whole plan for the space:
  *
  *   0x00..0x1F  the architectural exceptions
- *   0x20..0x2F  the legacy interrupt requests, once they are remapped (#409)
+ *   0x40..0x4F  the legacy interrupt requests, on their I/O APIC pins
+ *   0xE0        one vector kept for exercising this path by hand
  *   0xF0..0xFE  processor-to-processor messages
  *   0xFF        the local APIC's spurious vector
  *
  * The high end for the messages on purpose: the interrupt controller
  * prioritises by vector number, so a message that another processor is
  * waiting on outranks a device that is not.
+ *
+ * ⚠️ 0x40 and not the 0x20 this said until the pins were actually routed.
+ * The number is arbitrary, and <cpu/ioapic.h> takes i386's for the reason that
+ * two architectures picking the same arbitrary number is one fewer thing to
+ * remember.  What is not arbitrary is that the plan written here and the base
+ * the code uses were different numbers for as long as nobody compared them —
+ * and a table of assignments is read precisely by someone who is not going to
+ * go and check.
  */
 #define IDT_VECTORS		256
 #define T_EXTERNAL_FIRST	T_VECTORS
@@ -300,6 +309,22 @@ struct trap_record {
 	uint64_t cr2;
 	uint64_t cs;		/* its low two bits are the ring it came from */
 	uint64_t gs_base;	/* which block %gs reached the handler with  */
+	/*
+	 * And the two the fault report gets wrong most invisibly (#409).
+	 *
+	 * `rsp` is the interrupted stack pointer, which the report prints and
+	 * nothing has ever checked; `frame` is where the frame was built, which
+	 * is not in the frame at all and is the only evidence of whether a gate
+	 * naming an IST slot actually switched stacks.
+	 *
+	 * They are here because #458 spent two hours reconciling an rsp that
+	 * could not be right: a report is the primary instrument for every
+	 * fault on this target and is believed, so the numbers in it have to be
+	 * checkable against something the test knows independently.
+	 */
+	uint64_t rsp;
+	uint64_t frame;
+	uint64_t rbp;		/* what a backtrace has to be walked from     */
 	int      caught;
 };
 
@@ -393,5 +418,21 @@ extern char trap_probe_faulted[];
  * be no later.  That is why halt_cpu() uses it on the panic path (#453).
  */
 void	x86_64_backtrace(uint64_t rbp);
+
+/*
+ * The same walk, answered rather than printed, so a backtrace can be CHECKED
+ * (#409).
+ *
+ * Returns how many frames were reached; `first` comes back with the name just
+ * above the interrupted code, which says the entry did not lose the frame
+ * pointer, and `found` says whether `want` appeared anywhere in the chain,
+ * which is what separates a whole chain from a merely non-empty one — a walk
+ * that breaks in the middle still returns frames and they still have names.
+ *
+ * Any of the three may be null, and `first` may come back null when no symbol
+ * covers that return address.
+ */
+unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
+				const char *want, int *found);
 
 #endif	/* _X86_64_TRAP_TRAP_H_ */

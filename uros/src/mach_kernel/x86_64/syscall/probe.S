@@ -82,6 +82,41 @@ user_probe_enter:
 	pushq	$0x202
 	pushq	$USER_CS_RPL3
 	pushq	%r12
+
+	/*
+	 * ⚠️ And nothing else goes down with it (#409).
+	 *
+	 * Everything the frame needs is on the stack by now, so what is left in
+	 * the registers is only what this function happened to be holding — and
+	 * that was kernel stack addresses, handed to ring 3 for free.  The real
+	 * return path does not do this: thread_frame_return restores a thread's
+	 * own saved registers, so the value ring 3 gets is one it owned already.
+	 * The probe was the exception, and being a test is not a reason to teach
+	 * a user program where the kernel's stack is.
+	 *
+	 * It also makes an observation possible.  With the kernel's frame
+	 * pointer left in %rbp, a backtrace from the fault this raises walks the
+	 * kernel chain and looks entirely correct — while for any real thread
+	 * that register belongs to the user and walking it would be following a
+	 * pointer ring 3 chose.  Zeroed, the fault reports the frame pointer a
+	 * user program actually has, and the walker is seen to refuse it.
+	 */
+	xorl	%eax, %eax
+	xorl	%ebx, %ebx
+	xorl	%ecx, %ecx
+	xorl	%edx, %edx
+	xorl	%esi, %esi
+	xorl	%edi, %edi
+	xorl	%ebp, %ebp
+	xorl	%r8d, %r8d
+	xorl	%r9d, %r9d
+	xorl	%r10d, %r10d
+	xorl	%r11d, %r11d
+	xorl	%r12d, %r12d
+	xorl	%r13d, %r13d
+	xorl	%r14d, %r14d
+	xorl	%r15d, %r15d
+
 	iretq
 
 user_probe_return:
@@ -136,6 +171,23 @@ user_probe_code:
 	movq	$6, %r9
 	syscall
 
+/*
+ * Where the syscall must be seen to resume (#409).
+ *
+ * ⚠️ The instruction immediately after SYSCALL, and nothing else: that is the
+ * address the processor puts in rcx and the entry pushes.  The first version of
+ * this label sat two instructions further down, next to the HLT, and the test
+ * failed against a kernel that was right — the number it wanted was the fault's
+ * address, which is a different question about the same page.
+ *
+ * Both are addresses in a page that has not been copied yet, so neither is
+ * usable as written here — the caller turns each into the address it will have
+ * by adding its offset within the section to USER_PROBE_CODE_VA.  Labels rather
+ * than counted bytes, so that an instruction added above moves them.
+ */
+	.globl	user_probe_after_syscall
+user_probe_after_syscall:
+
 	/*
 	 * r11 has to be reloaded: the instruction destroyed it, which is the
 	 * contract working rather than failing.
@@ -143,6 +195,12 @@ user_probe_code:
 	movabsq	$USER_PROBE_DATA_VA, %r11
 	movq	%rax, 8(%r11)
 
+/*
+ * Where the general protection must be seen to come from (#409).  See the note
+ * at user_probe_after_syscall above for why these are labels.
+ */
+	.globl	user_probe_fault
+user_probe_fault:
 	hlt
 
 /*

@@ -277,6 +277,46 @@ const char *ksym_lookup(uint64_t addr, uint64_t *offset)
 	if (best == 0)
 		return 0;
 
+	/*
+	 * ⚠️ And a sizeless symbol stops where the next one begins (#409).
+	 *
+	 * #428 gave the lookup section bounds so that an address outside every
+	 * loaded section could be refused instead of attributed to the last
+	 * label before it.  That closed the failure across sections and left it
+	 * standing INSIDE one: a symbol with no size — which is every assembly
+	 * label — still claimed everything above it up to the end of .text.
+	 *
+	 * It was not hypothetical.  Every boot printed, in the backtrace of
+	 * every idle processor, `<thread_frame_return+0x3c516>' for an address
+	 * that is in `idle_thread': the sized symbol that really covered it was
+	 * correctly declined (see ksym_lookup_call below for why), and the
+	 * fallback was the last sizeless label in the section, a quarter of a
+	 * megabyte away.  It had been there since the first backtrace and
+	 * nobody read it, which is what a plausible wrong answer buys.
+	 *
+	 * A label says nothing about where it ends, but the symbol above it
+	 * does: whatever that is, this one cannot reach past it.  So the bound
+	 * exists after all, and refusing is what is left when the address is
+	 * beyond it.  Second pass rather than a second tracker, because `best'
+	 * is not known until the first one finishes.
+	 */
+	if (best->size == 0) {
+		uint64_t limit = 0;
+
+		for (unsigned i = 0; i < nsymbols; i++) {
+			const struct elf64_sym *s = &symbols[i];
+
+			if (s->value <= best->value || s->shndx != sp->shndx)
+				continue;
+
+			if (limit == 0 || s->value < limit)
+				limit = s->value;
+		}
+
+		if (limit != 0 && addr >= limit)
+			return 0;
+	}
+
 	if (best->name >= strings_size)
 		return 0;		/* a name outside its own table */
 
@@ -284,6 +324,106 @@ const char *ksym_lookup(uint64_t addr, uint64_t *offset)
 		*offset = addr - best->value;
 
 	return strings + best->name;
+}
+
+/*
+ * The same, for an address that came off a stack as a RETURN address (#409).
+ *
+ * ⚠️ A return address is not an address in the function that is returning to
+ * it — it is one byte past the end of the call.  Everywhere in the middle of a
+ * function the difference does not show.  At the end of one it is the whole
+ * answer: when the last instruction a function executes is a call, the byte
+ * after it is the first byte of the NEXT function, and looking the return
+ * address up directly names that one, or, if alignment padding sits between,
+ * names nothing and falls back to whatever came before.
+ *
+ * That is not a corner case here.  A continuation is exactly this shape —
+ * `idle_thread' ends with `call idle_thread_continue' and the call does not
+ * come back — so the frame that gets misnamed is the one every blocked thread
+ * in the system has.
+ *
+ * The instruction is what is looked up, therefore, and the address is what is
+ * printed: `ret - 1' is inside the call whatever its length, so it lands in
+ * the calling function without needing to know how long the call was.  The
+ * offset is then measured from the symbol to the address that was printed, so
+ * the two agree on the same line.
+ */
+const char *ksym_lookup_call(uint64_t ret, uint64_t *offset)
+{
+	const char *name;
+	uint64_t off = 0;
+
+	if (ret == 0)
+		return 0;
+
+	name = ksym_lookup(ret - 1, &off);
+	if (name == 0)
+		return 0;
+
+	if (offset != 0)
+		*offset = off + 1;
+
+	return name;
+}
+
+/*
+ * The tail-call property, checked over every function in the kernel (#409).
+ *
+ * ⚠️ The point is that it is not checked against this file's own rule.  A test
+ * that asked "does the lookup return a symbol that covers the address" would be
+ * restating the implementation and would have passed on the broken one.
+ *
+ * What is checked instead is an outside fact: for a function that ends in a
+ * call, the byte after that call is where the return address points, and the
+ * name for it must be THAT function, at offset exactly its size.  The symbol
+ * table states each function's size independently of anything the lookup does,
+ * so `off == size' is an agreement between two sources rather than one source
+ * with itself.
+ *
+ * Every sized function, because a defect here is a property of a *shape* — a
+ * call as the last instruction — and which functions have that shape changes
+ * with every build.  Three thousand of them cost a few milliseconds once.
+ *
+ * `worst' comes back with the largest offset any of the plain lookups produced
+ * over the same addresses, and that is the number worth printing: the failure
+ * this replaces did not look like an error, it looked like `+0x3c516'.
+ */
+unsigned ksym_tailcall_check(unsigned *checked, uint64_t *worst)
+{
+	unsigned bad = 0, n = 0;
+	uint64_t far = 0;
+
+	for (unsigned i = 0; i < nsymbols; i++) {
+		const struct elf64_sym *s = &symbols[i];
+		uint64_t past, off = 0;
+		const char *name;
+
+		if (s->value == 0 || s->size == 0 || !in_code(s->shndx))
+			continue;
+
+		past = s->value + s->size;
+		n++;
+
+		name = ksym_lookup_call(past, &off);
+		if (name == 0 || off != s->size)
+			bad++;
+
+		/*
+		 * And the plain lookup at the same address, which is entitled to
+		 * refuse — padding belongs to nobody — but not to answer with a
+		 * symbol a quarter of a megabyte below it.
+		 */
+		off = 0;
+		if (ksym_lookup(past, &off) != 0 && off > far)
+			far = off;
+	}
+
+	if (checked != 0)
+		*checked = n;
+	if (worst != 0)
+		*worst = far;
+
+	return bad;
 }
 
 uint64_t ksym_data_end(uint32_t info_pa)

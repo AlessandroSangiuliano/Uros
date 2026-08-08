@@ -49,6 +49,7 @@
 #include <pmap/pv.h>
 #include <pmap/tlb.h>
 #include <pmap/walk.h>
+#include <trap/entry_test.h>
 #include <syscall/probe.h>
 #include <syscall/syscall.h>
 #include <thread/context.h>
@@ -1359,7 +1360,13 @@ static void trap_vectors_selftest(void)
  * lengths, and the alignment the table's arithmetic assumes has to hold for
  * the longer one.
  */
-#define PROBE_VECTOR_LOW	0x21	/* free until the legacy IRQs move here */
+/*
+ * Free, and it stays free: the legacy lines land at 0x40 (<cpu/ioapic.h>), not
+ * here.  This said "until the legacy IRQs move here" back when the plan in
+ * <trap/trap.h> put them at 0x20 — they never did, and the note outlived the
+ * plan it referred to.
+ */
+#define PROBE_VECTOR_LOW	0x21
 
 #define STRINGIFY_(x)		#x
 #define STRINGIFY(x)		STRINGIFY_(x)
@@ -2150,6 +2157,140 @@ static void ring3_selftest(void)
 	      : " — WRONG, a path kept the user's gs\r\n");
 
 	/*
+	 * ── And the frames themselves, against addresses known in advance ──
+	 *
+	 * Everything above asks whether ring 3 ran and came back.  These two ask
+	 * whether the entry paths described WHERE it was when it stopped, which
+	 * is the field a debugger and an exception handler will read and the one
+	 * nothing has ever checked (#409).
+	 *
+	 * A fault from ring 3 also switches stacks — not through the interrupt
+	 * stack table but through rsp0, on the privilege change — so the frame's
+	 * address is the other half of that: it must be on the kernel stack the
+	 * task-state segment names, while the stack pointer it saved is the
+	 * user's.  Two numbers from two different owners, and a missing switch
+	 * makes them the same one.
+	 */
+	{
+		uint64_t want_rip = USER_PROBE_FAULT_VA;
+		uint64_t want_frame = (desc_rsp0(cpu_apic_id()) & ~15ULL) - 176;
+		int rip_ok = first.rip == want_rip;
+		int rsp_ok = first.rsp == USER_PROBE_STACK_TOP;
+		int frame_ok = first.frame == want_frame;
+
+		kputs("UrMach x86-64: the fault from ring 3 was at rip ");
+		kputhex64(first.rip);
+		kputs(" rsp ");
+		kputhex64(first.rsp);
+		kputs(", frame on the kernel stack at ");
+		kputhex64(first.frame);
+		kputs(rip_ok && rsp_ok && frame_ok
+		      ? " — the instruction, its user stack, and the switch\r\n"
+		      : " — WRONG, the frame does not describe the probe\r\n");
+
+		if (!rip_ok) {
+			kputs("               the HLT is at ");
+			kputhex64(want_rip);
+			kputs("\r\n");
+		}
+		if (!rsp_ok) {
+			kputs("               its stack was ");
+			kputhex64(USER_PROBE_STACK_TOP);
+			kputs("\r\n");
+		}
+		if (!frame_ok) {
+			kputs("               the frame should be at ");
+			kputhex64(want_frame);
+			kputs("\r\n");
+		}
+	}
+
+	/*
+	 * The syscall has no such structure and must not grow one — see
+	 * syscall_probe() for why the two words it does save are its frame.
+	 * They are read back from the stack the entry switched to, so a switch
+	 * that never happened cannot produce them.
+	 */
+	{
+		uint64_t want_rip = USER_PROBE_AFTER_SYSCALL_VA;
+		uint64_t rsp0 = desc_rsp0(cpu_apic_id());
+		int rip_ok = syscall_probe_saved_rip() == want_rip;
+		int stack_ok = syscall_probe_kernel_rsp() == rsp0;
+		int flags_ok = (syscall_probe_saved_flags() & RFLAGS_IF) != 0;
+
+		kputs("UrMach x86-64: the syscall saved rip ");
+		kputhex64(syscall_probe_saved_rip());
+		kputs(" flags ");
+		kputhex64(syscall_probe_saved_flags());
+		kputs(" on the kernel stack at ");
+		kputhex64(syscall_probe_kernel_rsp());
+		kputs(rip_ok && stack_ok && flags_ok
+		      ? " — where ring 3 resumes, and the state it resumes in\r\n"
+		      : " — WRONG, the entry saved something else\r\n");
+
+		if (!rip_ok) {
+			kputs("               it should resume at ");
+			kputhex64(want_rip);
+			kputs("\r\n");
+		}
+		if (!stack_ok) {
+			kputs("               the kernel stack is at ");
+			kputhex64(rsp0);
+			kputs("\r\n");
+		}
+		if (!flags_ok)
+			kputs("               it would resume with interrupts off\r\n");
+	}
+
+	/*
+	 * ── And a backtrace from each of these two ────────────────────────
+	 *
+	 * Both answers are shorter than the four kernel entries', and both are
+	 * right to be.
+	 *
+	 * A fault from ring 3 arrives with the frame pointer a USER program was
+	 * holding, and there is no kernel chain above it — the kernel frames
+	 * belong to the stack the privilege change switched to, which the
+	 * debugger reaches from the trap frame's own address and not from this
+	 * register.  So the only correct thing to do with it is refuse, and that
+	 * is what is checked.  Walking it would produce names, and they would be
+	 * believed.
+	 *
+	 * ⚠️ This check could not be made until the probe stopped handing ring 3
+	 * the kernel's own frame pointer: with that value in place the walk
+	 * succeeded, reached x86_64_boot, and looked perfect.
+	 */
+	{
+		unsigned depth = x86_64_backtrace_probe(first.rbp, 0, 0, 0);
+
+		kputs("UrMach x86-64: the frame pointer from ring 3 is ");
+		kputhex64(first.rbp);
+		kputs(", walked to ");
+		kputdec(depth);
+		kputs(depth == 0
+		      ? " frames — a user's chain is not the kernel's to walk\r\n"
+		      : " frames — WRONG, it invented a kernel chain\r\n");
+	}
+
+	/*
+	 * The syscall's chain runs to its entry and stops there, because the
+	 * entry keeps no frame pointer: below it is the register ring 3 was
+	 * holding.  See syscall_probe_rbp() for why that is a decision and not
+	 * an omission.
+	 */
+	{
+		const char *top = syscall_probe_top();
+
+		kputs("UrMach x86-64: the backtrace from a syscall is ");
+		kputdec(syscall_probe_depth());
+		kputs(" frames from ");
+		kputs(top != 0 ? top : "(no name)");
+		kputs(syscall_probe_reached_entry()
+		      ? " — it reaches the entry, and stops where ring 3 begins\r\n"
+		      : " — WRONG, it does not reach syscall_entry\r\n");
+	}
+
+	/*
 	 * And whether ring 3 could have written that base itself (#440).
 	 *
 	 * The trap entry for NMI and its three relatives decides what to do by
@@ -2734,6 +2875,42 @@ static void ksym_selftest(void)
 	      && name_is(bt_caller_of_caller, "ksym_selftest")
 	      ? " — a walk names every frame, not just the first\r\n"
 	      : " — WRONG, the chain does not resolve\r\n");
+
+	/*
+	 * ── The frame the two above could not reach (#409) ────────────────
+	 *
+	 * Everything so far returns to the middle of its caller, which is where
+	 * a lookup cannot go wrong.  The case that does is a function whose
+	 * LAST instruction is a call: the return address is then the first byte
+	 * past the function, and naming it directly names the next one — or,
+	 * with padding in between, nothing, and the fallback was a label a
+	 * quarter of a megabyte below.
+	 *
+	 * That shape is the scheduler's normal one, so the wrong name was in
+	 * the backtrace of every idle processor on every boot from the first
+	 * one.  It was printed 130 times a run and never read, because
+	 * `<thread_frame_return+0x3c516>' does not look like an error.
+	 *
+	 * Checked over every function in the image rather than the one that
+	 * showed it, since which functions end in a call is a property of the
+	 * build and changes under us.
+	 */
+	{
+		unsigned checked = 0, bad;
+		uint64_t worst = 0;
+
+		bad = ksym_tailcall_check(&checked, &worst);
+
+		kputs("UrMach x86-64: ");
+		kputdec(checked);
+		kputs(" functions, return address past the end names its own in ");
+		kputdec(checked - bad);
+		kputs(", worst stray offset ");
+		kputhex64(worst);
+		kputs(bad == 0 && worst < 0x10000
+		      ? " — a tail call is attributed to the caller\r\n"
+		      : " — WRONG, a frame is named after the wrong function\r\n");
+	}
 }
 
 /*
@@ -4043,6 +4220,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
+	trap_entry_test();
 
 	/*
 	 * The double-fault self-test is TERMINAL, and that is why it is behind

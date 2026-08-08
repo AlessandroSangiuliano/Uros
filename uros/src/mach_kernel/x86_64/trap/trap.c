@@ -242,6 +242,56 @@ static void report_page_fault(uint64_t error)
 }
 
 /*
+ * And the other error code, which describes a DESCRIPTOR (#409).
+ *
+ * Six vectors share this format — the segment faults and the general
+ * protection — and every one of them was reported as a bare hexadecimal
+ * number.  #458 said so while chasing a general protection whose register dump
+ * could not be reconciled: "the one thing the handler could say about *why* is
+ * missing on the path where the registers are least trustworthy".
+ *
+ * ⚠️ Zero is not a selector and must not be printed as one.  For these vectors
+ * it means the fault had nothing to do with a descriptor at all — an
+ * instruction that is illegal in the current mode, a non-canonical address, a
+ * write to a reserved bit — which is a different diagnosis and by far the
+ * commonest one in a kernel that loads a segment register perhaps five times
+ * in its life.  A report that answered "GDT entry 0" there would send the
+ * reader to the descriptor tables, which is exactly the wrong place.
+ *
+ * The layout is: bit 0 says the event came from outside the program, bits 2:1
+ * name the table, and the rest is the index — the selector with its low three
+ * bits repurposed, which is why the index is what gets printed rather than the
+ * raw value that looks like a selector and is not one.
+ */
+static int carries_a_selector(uint64_t vector)
+{
+	return vector == T_INVALID_TSS || vector == T_SEGMENT_NOT_PRESENT
+	    || vector == T_STACK_FAULT || vector == T_GENERAL_PROTECTION
+	    || vector == T_ALIGNMENT_CHECK;
+}
+
+static void report_selector_error(uint64_t error)
+{
+	static const char *const table[4] = {
+		"the GDT", "the IDT", "the LDT", "the IDT"
+	};
+
+	if (error == 0) {
+		tputs("  no descriptor involved — an operation the mode or the "
+		      "address did not allow\r\n");
+		return;
+	}
+
+	tputs("  refused by ");
+	tputs(table[(error >> 1) & 3]);
+	tputs(" entry ");
+	tputdec(error >> 3);
+	if (error & 1)
+		tputs(", raised by an event outside the program");
+	tputs("\r\n");
+}
+
+/*
  * One register, named and padded, three to a line.
  *
  * Every one of them, which needs saying because the previous version of this
@@ -392,11 +442,8 @@ static void report_instruction(uint64_t rip)
  * already on the line, and a word that means "no answer" costs a column on
  * every frame to say what the absence of a name already says.
  */
-static void report_symbol(uint64_t addr)
+static void report_named(const char *name, uint64_t off)
 {
-	uint64_t off = 0;
-	const char *name = ksym_lookup(addr, &off);
-
 	if (name == 0)
 		return;
 
@@ -407,6 +454,37 @@ static void report_symbol(uint64_t addr)
 		tputhex(off);
 	}
 	tputs(">");
+}
+
+/*
+ * ⚠️ The lookup on its own line, and not inside the call below it.
+ *
+ * `report_named(ksym_lookup(addr, &off), off)' reads `off' and calls the
+ * function that fills it in as two arguments of one call, and C does not
+ * sequence those against each other: the compiler is entitled to read the
+ * variable first, and this one does.  Every offset in every backtrace came out
+ * as zero — names right, positions gone — and the names being right is what
+ * made it look fine.  Written twice here and once in the debugger before the
+ * output was compared against the previous boot's.
+ */
+static void report_symbol(uint64_t addr)
+{
+	uint64_t off = 0;
+	const char *name = ksym_lookup(addr, &off);
+
+	report_named(name, off);
+}
+
+/*
+ * For an address taken off a stack: it is one past a call, which at the end of
+ * a function belongs to the next one (#409).  See ksym_lookup_call().
+ */
+static void report_return_symbol(uint64_t ret)
+{
+	uint64_t off = 0;
+	const char *name = ksym_lookup_call(ret, &off);
+
+	report_named(name, off);
 }
 
 /*
@@ -479,7 +557,7 @@ void x86_64_backtrace(uint64_t rbp)
 
 		tputs("    ");
 		tputhex(ret);
-		report_symbol(ret);
+		report_return_symbol(ret);
 		tputs("\r\n");
 
 		if (next <= rbp)
@@ -488,6 +566,96 @@ void x86_64_backtrace(uint64_t rbp)
 	}
 
 	atomic_store64(&backtrace_lock, 0);
+}
+
+/*
+ * The same walk, answered instead of printed (#409).
+ *
+ * The issue asks for a correct backtrace from each of the six entries, and a
+ * backtrace is only correct if something checks it.  Printing six of them into
+ * the boot log and letting a reader form an impression is what #451 removed
+ * from the harness — 130 self-tests with no way to fail.
+ *
+ * So this walks the chain exactly as the printer above and the debugger's `t'
+ * do, and answers three things: how deep it got, what sits immediately above
+ * the interrupted code, and whether a named function was reached.  The last is
+ * what separates a chain that is whole from one that is merely non-empty — a
+ * walk that breaks in the middle still returns frames, and they still have
+ * names, and nothing about them says the bottom is missing.
+ *
+ * ⚠️ The first name is the CALLER, not the interrupted function.  A frame
+ * pointer names where its own function will return to, so the function that
+ * was executing is described by the saved rip and never appears in the chain.
+ * A test asking for it here would be asking for something that is not there.
+ *
+ * ⚠️ And the caller is asked for by NAME rather than compared against one
+ * chosen in advance, because a static function called once is a function the
+ * compiler is entitled to inline — the frame a test predicted would then
+ * simply not exist, and the test would be measuring the optimiser.
+ */
+static int name_matches(const char *a, const char *b)
+{
+	if (a == 0 || b == 0)
+		return 0;
+
+	while (*a != '\0' && *a == *b) {
+		a++;
+		b++;
+	}
+
+	return *a == *b;
+}
+
+unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
+				const char *want, int *found)
+{
+	pmap_t kernel = pmap_kernel();
+	unsigned depth, walked = 0;
+
+	if (first != 0)
+		*first = 0;
+	if (found != 0)
+		*found = 0;
+
+	for (depth = 0; depth < BACKTRACE_MAX; depth++) {
+		const uint64_t *f;
+		uint64_t next, ret;
+		const char *name;
+
+		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+			break;
+		if (pmap_extract(kernel, rbp) == 0
+		    || pmap_extract(kernel, rbp + 8) == 0)
+			break;
+
+		f = (const uint64_t *)(uintptr_t)rbp;
+		next = f[0];
+		ret = f[1];
+
+		if (ret == 0)
+			break;
+
+		name = ksym_lookup_call(ret, 0);
+		if (depth == 0 && first != 0)
+			*first = name;
+		if (found != 0 && name_matches(name, want))
+			*found = 1;
+
+		/*
+		 * ⚠️ Counted after the frame is accepted, not by the loop
+		 * variable.  The loop leaves as soon as the chain ends, so its
+		 * counter is one short of what was reported — which printed
+		 * "0 frames from syscall_entry", a line that names a frame and
+		 * denies it in the same breath.
+		 */
+		walked++;
+
+		if (next <= rbp)
+			break;
+		rbp = next;
+	}
+
+	return walked;
 }
 
 /*
@@ -516,6 +684,33 @@ static uint64_t expect_resume;
 static int expect_armed;
 
 static struct trap_record last_trap;
+
+/*
+ * ⚠️ One place that fills the record, because there were two and they differed.
+ *
+ * The ring-3 arm recorded the segment base %gs arrived with and the kernel arm
+ * did not, so that field read as "the base was zero" after a kernel fault
+ * instead of "this path does not know" — the same field meaning two things
+ * depending on which arm ran, which <trap/trap.h> says about the paranoid
+ * record is worse than having no field at all.
+ *
+ * Nothing had noticed because only the ring-3 test read it.  A second reader
+ * is all it would have taken, and adding two more fields (#409) is exactly
+ * that second reader.
+ */
+static void trap_record_frame(const struct trap_frame *frame)
+{
+	last_trap.vector = frame->vector;
+	last_trap.error = frame->error;
+	last_trap.rip = frame->rip;
+	last_trap.cr2 = read_cr2();
+	last_trap.cs = frame->cs;
+	last_trap.gs_base = rdmsr(MSR_GS_BASE);
+	last_trap.rsp = frame->rsp;
+	last_trap.frame = (uint64_t)(uintptr_t)frame;
+	last_trap.rbp = frame->rbp;
+	last_trap.caught = 1;
+}
 
 void trap_expect(uint64_t vector, uint64_t resume_rip)
 {
@@ -809,13 +1004,7 @@ void trap_dispatch(struct trap_frame *frame)
 	if (user_expect_armed && (frame->cs & 3) == USER_RPL) {
 		user_expect_armed = 0;
 
-		last_trap.vector = frame->vector;
-		last_trap.error = frame->error;
-		last_trap.rip = frame->rip;
-		last_trap.cr2 = read_cr2();
-		last_trap.cs = frame->cs;
-		last_trap.gs_base = rdmsr(MSR_GS_BASE);
-		last_trap.caught = 1;
+		trap_record_frame(frame);
 
 		/*
 		 * Every field, not just the instruction pointer: IRETQ in long
@@ -866,12 +1055,7 @@ void trap_dispatch(struct trap_frame *frame)
 		 */
 		expect_armed = 0;
 
-		last_trap.vector = frame->vector;
-		last_trap.error = frame->error;
-		last_trap.rip = frame->rip;
-		last_trap.cr2 = read_cr2();
-		last_trap.cs = frame->cs;
-		last_trap.caught = 1;
+		trap_record_frame(frame);
 
 		tputs("UrMach x86-64: expected ");
 		tputs(trap_name(frame->vector));
@@ -885,6 +1069,19 @@ void trap_dispatch(struct trap_frame *frame)
 			      : ", nothing mapped there");
 		}
 		tputs(") — resuming\r\n");
+
+		/*
+		 * ⚠️ Here as well as on the fault report, and that is the point
+		 * of putting it here at all.
+		 *
+		 * The report path only runs on a fault nobody expected, which
+		 * ends the boot -- so a description written only there is
+		 * exercised on the one occasion when nobody can afford to find
+		 * out it was wrong.  The probes take this arm on every boot, so
+		 * the sentence is produced and read where it costs nothing.
+		 */
+		if (carries_a_selector(frame->vector))
+			report_selector_error(frame->error);
 
 		/*
 		 * The frame is what iretq will reload, so changing the saved
@@ -932,6 +1129,9 @@ void trap_dispatch(struct trap_frame *frame)
 
 	if (frame->vector == T_PAGE_FAULT)
 		report_page_fault(frame->error);
+
+	if (carries_a_selector(frame->vector))
+		report_selector_error(frame->error);
 
 	/*
 	 * For a vector with a stack of its own, say so and show it: the frame

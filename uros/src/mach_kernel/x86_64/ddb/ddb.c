@@ -174,11 +174,8 @@ static const char *parse_hex(const char *p, uint64_t *out)
 /* ------------------------------------------------------------------ */
 /*  What the commands say                                               */
 /* ------------------------------------------------------------------ */
-static void put_symbol(uint64_t addr)
+static void put_named(const char *name, uint64_t off)
 {
-	uint64_t off = 0;
-	const char *name = ksym_lookup(addr, &off);
-
 	if (name == 0)
 		return;
 
@@ -189,6 +186,33 @@ static void put_symbol(uint64_t addr)
 		cons_puthex64(off);
 	}
 	cons_puts(">");
+}
+
+/*
+ * ⚠️ The lookup is a statement of its own on purpose — see the same note in
+ * x86_64/trap/trap.c.  Passing it and the offset it fills in as two arguments
+ * of one call leaves them unsequenced, and the offset is then read before it
+ * is written.
+ */
+static void put_symbol(uint64_t addr)
+{
+	uint64_t off = 0;
+	const char *name = ksym_lookup(addr, &off);
+
+	put_named(name, off);
+}
+
+/*
+ * For an address read off a stack rather than one the processor is at: it is
+ * one past a call, and at the end of a function that is a different function
+ * (#409).  See ksym_lookup_call().
+ */
+static void put_return_symbol(uint64_t ret)
+{
+	uint64_t off = 0;
+	const char *name = ksym_lookup_call(ret, &off);
+
+	put_named(name, off);
 }
 
 static void put_reg(const char *name, uint64_t v, int newline)
@@ -285,7 +309,7 @@ static void trace(uint64_t rbp)
 
 		cons_puts("  ");
 		cons_puthex64(ret);
-		put_symbol(ret);
+		put_return_symbol(ret);
 		cons_puts("\r\n");
 
 		if (next <= rbp)
