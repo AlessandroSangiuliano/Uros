@@ -81,4 +81,34 @@ const char *ddb_debugger_taken(void);
  */
 void ddb_poll_console(struct trap_frame *frame);
 
+/*
+ * A character from ANY console — serial today, the frame buffer's keyboard
+ * next, a user-space gpu_server after that.  Answers TRUE when it was the
+ * break and has been taken, so the caller drops it.
+ *
+ * This is the single place that knows which key opens the debugger.  Every
+ * source translates its own input to a character and asks here, so the
+ * combination is the same everywhere by construction rather than by three
+ * drivers agreeing to agree.
+ *
+ * ⚠️ It records the request; it does not enter.  The next return from a trap
+ * opens the prompt with its own real frame, which is what lets a door exist
+ * without being able to produce one — the position user space will be in.
+ */
+boolean_t ddb_break_char(int c);
+
+/* Open the prompt if ddb_break_char() took a break.  Called from a trap
+ * return, which is where a real frame exists. */
+void ddb_take_break(struct trap_frame *frame);
+
+/*
+ * Park this processor because another one is at the prompt.  Answers TRUE
+ * when this NMI was the debugger asking and the processor has been held and
+ * released; FALSE when it is a real NMI and belongs to whoever reports those.
+ *
+ * ⚠️ An NMI and not an ordinary IPI, because the processors worth stopping
+ * are the ones not taking interrupts.
+ */
+boolean_t ddb_park_here(struct trap_frame *frame);
+
 #endif	/* _X86_64_DDB_DDB_H_ */

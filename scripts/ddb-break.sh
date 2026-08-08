@@ -37,7 +37,35 @@ if ! wait_for 'ddb> '; then
 	kill $QPID 2>/dev/null; rm -f "$IN"; exit 1
 fi
 echo "panic opened the prompt"
-for c in r t; do printf '%s\n' "$c" >&3; sleep 1; done
+# ⚠️ One at a time, waiting for the prompt to come back between them.
+# Firing them a second apart while the kernel is still printing mixes the
+# answers into the boot output, and a reader then concludes the command
+# answered nothing -- which is how a working backtrace was nearly reported as
+# broken, and pmap_extract nearly chased for a fault it never had.
+ask() {
+	before=$(grep -ac 'ddb> ' "$LOG")
+	printf '%s\n' "$1" >&3
+	i=0
+	while [ $i -lt 100 ]; do
+		[ "$(grep -ac 'ddb> ' "$LOG")" -gt "$before" ] && return 0
+		sleep 0.1; i=$((i+1))
+	done
+	echo "FAILED: '$1' never came back to a prompt"
+	return 1
+}
+for c in r t p; do ask "$c" || break; done
+
+# ⚠️ Ask about a processor that is actually PARKED, read out of `p'.  Which
+# processor panics varies from run to run, and a hardcoded number lands on the
+# one holding the prompt about a quarter of the time -- where the honest answer
+# is a refusal, which a reader then scores as the command failing.
+PARKED=$(grep -a '^  cpu [0-9]* *parked at' "$LOG" | head -1 | awk '{print $2}')
+if [ -n "$PARKED" ]; then
+	ask "P$PARKED" || true
+	grep -aq "P needs the number" "$LOG" && echo "FAILED: P refused a parked processor"
+else
+	echo "FAILED: no processor parked — the NMI stop did not work"
+fi
 
 # And the console door, from that prompt's own machine: continue, then break
 # back in with the character.  `c' from a panic returns into halt, so this

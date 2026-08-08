@@ -15,7 +15,10 @@
 #include <kern/cpu_number.h>
 #include <mach/boolean.h>
 #include <kern/misc_protos.h>	/* panic */
+#include <mach/machine.h>	/* machine_slot[] */
 #include <mach/machine/vm_types.h>
+#include <cpu/lapic.h>		/* lapic_send_nmi */
+#include <cpu/regs.h>		/* cpu_pause */
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
 #include <trap/trap.h>
@@ -387,24 +390,227 @@ void Debugger(const char *message)
  * from -- but that stops being true the day there is a console driver, and
  * this is the line that will need to change.
  */
-#define DDB_BREAK_CHAR		0x1C		/* Ctrl-\ */
+/*
+ * ── ONE break character, and ONE place that knows it (#428) ───────────
+ *
+ * The kernel will have several ways in: the serial line today, the frame
+ * buffer console with a PS/2 keyboard next, and a gpu_server in USER SPACE
+ * after that.  Every one of them must open the debugger the same way, and the
+ * only arrangement that keeps that true is one function that decides, fed by
+ * all of them.
+ *
+ * Not because three copies would be untidy -- because they would DRIFT.  This
+ * tree has produced that failure twice in two days: two parsers for one
+ * command line, agreeing on the simple case and disagreeing on the useful one
+ * (#428, fixed this morning), and a harness rule restated per test so that it
+ * was missing for the newest one (#408).  Each source translates its own input
+ * to a character; this decides what a character means.
+ *
+ * ⚠️ It does NOT enter the debugger -- it RECORDS that somebody asked, and the
+ * next return from a trap opens the prompt with its own real frame.  That is
+ * what lets a door exist without being able to produce a trap frame, which is
+ * exactly the position a user-space gpu_server will be in, and it is the same
+ * deferral the AST path uses for the same reason.
+ *
+ * ── The character ─────────────────────────────────────────────────────
+ *
+ * A single byte and not a sequence: a machine in trouble is not the place for
+ * a state machine, and i386's serial door is broken (#382) partly for having
+ * one.
+ *
+ * Ctrl-\ by default, and settable at boot with -k<char>.  i386 uses Ctrl-D,
+ * which is a crowded choice -- in its own keyboard map CTRL('d') is also
+ * delete-char and the `~' escape lands on it (i386/AT386/ddb_kbd.c:123,220),
+ * and on a host terminal it is end-of-file.  Settable because the right key
+ * depends on what sits between the operator and the machine: a terminal
+ * server, telnet, screen and tmux each steal different ones, and a constant
+ * would make that an argument instead of a flag.
+ */
+#define DDB_BREAK_DEFAULT	0x1C		/* Ctrl-\ */
+
+static int	in_ddb[NCPUS];
+static int	break_char = DDB_BREAK_DEFAULT;
+static int	break_requested;
 
 static void ddb_enter_body(struct trap_frame *frame, const char *why);
 
-static int in_ddb[NCPUS];
+/*
+ * A character from any console.  Answers TRUE when it was the break and has
+ * been taken, so the caller drops it; FALSE when it belongs to whoever was
+ * reading.
+ */
+boolean_t ddb_break_char(int c)
+{
+	if (!enabled || c != break_char)
+		return FALSE;
 
+	break_requested = 1;
+	return TRUE;
+}
+
+/*
+ * The serial line's own caller: read what is waiting and offer it.
+ *
+ * Polled from the timer tick rather than driven by a UART interrupt on
+ * purpose -- the machine this is for has stopped servicing things properly,
+ * and a door that needs the interrupt controller in good order is shut
+ * exactly when it is wanted.  One `inb' every ten milliseconds.
+ *
+ * ⚠️ ONE processor may call this: the UART is a single device, and two
+ * readers would take each other's characters, with the loser reporting that
+ * nothing was typed.
+ *
+ * ⚠️ And it reaches only a processor whose interrupts are on.  A wedge with
+ * IF clear takes no tick and so is never asked; that case needs an NMI from
+ * another processor and is not this door.
+ */
 void ddb_poll_console(struct trap_frame *frame)
 {
 	int c;
 
-	if (!enabled || in_ddb[cpu_number()])
+	if (!enabled)
 		return;
 
 	c = cons_getc_nowait();
-	if (c != DDB_BREAK_CHAR)
+	if (c >= 0)
+		(void) ddb_break_char(c);
+
+	ddb_take_break(frame);
+}
+
+/*
+ * Open the prompt if somebody asked for it.  Called from a trap return, which
+ * is where a real frame exists.
+ */
+void ddb_take_break(struct trap_frame *frame)
+{
+	if (!break_requested || in_ddb[cpu_number()])
 		return;
 
-	ddb_enter(frame, "break on the console");
+	break_requested = 0;
+	ddb_enter(frame, "break requested on the console");
+}
+
+/*
+ * ── The other processors, while one is at the prompt (#428) ───────────
+ *
+ * Not a refinement: without it the prompt is unusable, and the log said so
+ * before the code did.  The first panic that opened the prompt had three
+ * other processors still running, and they wrote their clock reports across
+ * the operator's typing.  Worse than the mess is what it means -- what you
+ * are looking at is not the machine, it is a quarter of a machine moving
+ * underneath you, and every answer is about a moment that has passed.
+ *
+ * ⚠️ STOPPED WITH AN NMI, and nothing else would do.  An ordinary IPI is
+ * delivered only to a processor whose interrupts are on, and the processors
+ * worth stopping are precisely the ones that are not taking interrupts --
+ * #461's deadlock was four of them spinning with IF clear.  The NMI is the
+ * only thing that reaches those, which is also why this same mechanism is
+ * the door onto a wedged machine: the operator's processor is at the prompt,
+ * and the wedged one is parked where it can be examined.
+ *
+ * Each parked processor leaves its frame behind before it spins, so `p' can
+ * say where every one of them is and `P n' can walk any of them.  That is the
+ * question this port has asked most often and answered with print statements.
+ */
+static volatile int		ddb_owner = -1;
+static volatile int		ddb_parked[NCPUS];
+static struct trap_frame	*ddb_frame[NCPUS];
+
+/*
+ * Called from the NMI arm of trap_dispatch().  Answers TRUE when this NMI was
+ * the debugger asking, and the processor has parked and been released; FALSE
+ * when it is a real one and belongs to whoever reports them.
+ */
+boolean_t ddb_park_here(struct trap_frame *frame)
+{
+	unsigned me = cpu_number();
+
+	if (ddb_owner < 0 || ddb_owner == (int) me)
+		return FALSE;
+
+	ddb_frame[me] = frame;
+	ddb_parked[me] = 1;
+
+	while (ddb_owner >= 0 && ddb_owner != (int) me)
+		cpu_pause();
+
+	ddb_parked[me] = 0;
+	ddb_frame[me] = (struct trap_frame *) 0;
+	return TRUE;
+}
+
+static void ddb_stop_others(void)
+{
+	unsigned	me = cpu_number();
+	uint64_t	spins;
+
+	ddb_owner = (int) me;
+
+	for (int i = 0; i < NCPUS; i++) {
+		if (i == (int) me || !machine_slot[i].is_cpu
+		    || !machine_slot[i].running)
+			continue;
+		/*
+		 * The slot number IS the APIC id on this target --
+		 * cause_ast_check() targets an IPI the same way
+		 * (x86_64/cpu/machdep.c).  Said here because the two would
+		 * have to change together.
+		 */
+		lapic_send_nmi((uint32_t) i);
+	}
+
+	/*
+	 * Bounded, and the count is reported rather than waited on for ever.
+	 * A processor that does not park is a fact about this machine worth
+	 * knowing -- and a debugger that hung waiting for one would be the
+	 * failure it exists to diagnose.
+	 */
+	for (spins = 0; spins < 200000000ULL; spins++) {
+		int missing = 0;
+
+		for (int i = 0; i < NCPUS; i++) {
+			if (i == (int) me || !machine_slot[i].is_cpu
+			    || !machine_slot[i].running)
+				continue;
+			if (!ddb_parked[i])
+				missing++;
+		}
+		if (missing == 0)
+			return;
+		cpu_pause();
+	}
+}
+
+static void ddb_release_others(void)
+{
+	ddb_owner = -1;
+}
+
+static void show_processors(void)
+{
+	unsigned me = cpu_number();
+
+	for (int i = 0; i < NCPUS; i++) {
+		if (!machine_slot[i].is_cpu || !machine_slot[i].running)
+			continue;
+
+		cons_puts("  cpu ");
+		cons_putdec((uint64_t) i);
+		if (i == (int) me) {
+			cons_puts("  at the prompt\r\n");
+			continue;
+		}
+		if (!ddb_parked[i]) {
+			cons_puts("  DID NOT PARK — it is not taking NMIs, "
+				  "and nothing here describes it\r\n");
+			continue;
+		}
+		cons_puts("  parked at ");
+		cons_puthex64(ddb_frame[i]->rip);
+		put_symbol(ddb_frame[i]->rip);
+		cons_puts("\r\n");
+	}
 }
 
 void ddb_enter(struct trap_frame *frame, const char *why)
@@ -421,7 +627,19 @@ void ddb_enter(struct trap_frame *frame, const char *why)
 	 */
 	in_ddb[me] = 1;
 
+	/*
+	 * ⚠️ Only the outermost entry stops the others.  A fault taken INSIDE
+	 * the debugger opens a nested prompt, and a nested stop would send
+	 * NMIs to processors already parked in one -- which they cannot take,
+	 * because an NMI is blocked until the first one returns.
+	 */
+	if (!was_in)
+		ddb_stop_others();
+
 	ddb_enter_body(frame, why);
+
+	if (!was_in)
+		ddb_release_others();
 
 	in_ddb[me] = was_in;
 }
@@ -467,6 +685,21 @@ static void ddb_enter_body(struct trap_frame *frame, const char *why)
 				cons_puts("\r\n");
 			} else {
 				cons_puts("  s needs an address\r\n");
+			}
+			break;
+
+		case 'p':
+			show_processors();
+			break;
+
+		case 'P':
+			if (parse_hex(p + 1, &arg) && arg < NCPUS
+			    && ddb_parked[arg]) {
+				show_registers(ddb_frame[arg]);
+				trace(ddb_frame[arg]->rbp);
+			} else {
+				cons_puts("  P needs the number of a parked "
+					  "processor — try p\r\n");
 			}
 			break;
 

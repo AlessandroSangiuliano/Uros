@@ -740,6 +740,20 @@ void trap_dispatch(struct trap_frame *frame)
 	 * an operator can continue.  `int3' is a trap rather than a fault, so
 	 * the saved rip is already past it and resuming needs nothing else.
 	 */
+	/*
+	 * The debugger stopping this processor (#428).
+	 *
+	 * Checked before the fault report, because an NMI that reaches the
+	 * report is treated as a fault and halts -- which is the right answer
+	 * for a real one and the wrong one for a processor being held still so
+	 * that an operator can look at it.
+	 *
+	 * ddb_park_here() answers FALSE when no debugger owns the machine, so
+	 * a genuine NMI falls through to the report exactly as before.
+	 */
+	if (frame->vector == T_NMI && ddb_park_here(frame))
+		return;
+
 	if (frame->vector == T_BREAKPOINT) {
 		const char *why = ddb_debugger_taken();
 
