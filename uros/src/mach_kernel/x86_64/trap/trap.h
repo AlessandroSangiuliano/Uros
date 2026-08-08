@@ -315,6 +315,7 @@ struct trap_record {
 	 */
 	uint64_t rsp;
 	uint64_t frame;
+	uint64_t rbp;		/* what a backtrace has to be walked from     */
 	int      caught;
 };
 
@@ -408,5 +409,21 @@ extern char trap_probe_faulted[];
  * be no later.  That is why halt_cpu() uses it on the panic path (#453).
  */
 void	x86_64_backtrace(uint64_t rbp);
+
+/*
+ * The same walk, answered rather than printed, so a backtrace can be CHECKED
+ * (#409).
+ *
+ * Returns how many frames were reached; `first` comes back with the name just
+ * above the interrupted code, which says the entry did not lose the frame
+ * pointer, and `found` says whether `want` appeared anywhere in the chain,
+ * which is what separates a whole chain from a merely non-empty one — a walk
+ * that breaks in the middle still returns frames and they still have names.
+ *
+ * Any of the three may be null, and `first` may come back null when no symbol
+ * covers that return address.
+ */
+unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
+				const char *want, int *found);
 
 #endif	/* _X86_64_TRAP_TRAP_H_ */

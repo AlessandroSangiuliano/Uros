@@ -51,6 +51,7 @@ struct entry_check {
 	uint64_t	 cs;
 	uint64_t	 rflags;
 	uint64_t	 frame;		/* where the frame itself was built       */
+	uint64_t	 rbp;		/* and what a backtrace walks from        */
 	uint64_t	 vector;
 	uint64_t	 error;
 	uint64_t	 handler_flags;	/* the flags the HANDLER ran with         */
@@ -96,6 +97,7 @@ static void note(struct entry_check *c, const struct trap_frame *f)
 	c->cs = f->cs;
 	c->rflags = f->rflags;
 	c->frame = (uint64_t)(uintptr_t)f;
+	c->rbp = f->rbp;
 	c->vector = f->vector;
 	c->error = f->error;
 	c->handler_flags = interrupts_enabled();
@@ -228,10 +230,50 @@ static void report(const struct entry_check *c, uint64_t want_vector,
 }
 
 /*
+ * And the other half of the issue's requirement: a correct backtrace from each.
+ *
+ * ⚠️ Correct is not the same as non-empty, which is why this asks for a name at
+ * the far end rather than a depth.  A chain that breaks halfway still returns
+ * frames, they still resolve to real functions, and nothing about the result
+ * says the bottom is missing — the reader sees a short stack and assumes the
+ * fault happened near the top.  Reaching x86_64_boot is the only thing that
+ * distinguishes a whole walk from a plausible fragment.
+ *
+ * The probes are hand-written assembly and set up no frame of their own, so the
+ * first name is the C function that called them.  That is not a shortcoming:
+ * a frame pointer describes where its function returns to, so the interrupted
+ * function is named by the saved rip and is never in the chain.
+ *
+ * ⚠️ And the depth is reported, not required.  The first version of this asked
+ * for at least two frames and every entry failed with one — because the static
+ * functions below had all been inlined into x86_64_boot, so the chain really
+ * was one frame long and really was complete.  The test was measuring the
+ * optimiser.  They are noinline now so the walk has something to walk, but what
+ * is CHECKED is the name at the far end, which no inlining decision can move.
+ */
+static void report_backtrace(const char *what, uint64_t rbp)
+{
+	const char *first = 0;
+	int found = 0;
+	unsigned depth = x86_64_backtrace_probe(rbp, &first, "x86_64_boot",
+						&found);
+
+	cons_puts("UrMach x86-64: the backtrace from ");
+	cons_puts(what);
+	cons_puts(" is ");
+	cons_putdec(depth);
+	cons_puts(" frames from ");
+	cons_puts(first != 0 ? first : "(no name)");
+	cons_puts(found
+		  ? " down to x86_64_boot — the chain is whole\r\n"
+		  : " — WRONG, the chain does not reach the bottom\r\n");
+}
+
+/*
  * A kernel fault, at an instruction whose address the probe wrote down before
  * executing it.
  */
-static void kernel_fault_entry(void)
+__attribute__((noinline)) static void kernel_fault_entry(void)
 {
 	const struct trap_record *t;
 	int rip_ok, rsp_ok, frame_ok;
@@ -270,9 +312,11 @@ static void kernel_fault_entry(void)
 		cons_puthex64(frame_should_be(t->rsp));
 		cons_puts("\r\n");
 	}
+
+	report_backtrace("a kernel fault", t->rbp);
 }
 
-static void timer_entry_test(void)
+__attribute__((noinline)) static void timer_entry_test(void)
 {
 	int had_interrupts;
 
@@ -295,9 +339,10 @@ static void timer_entry_test(void)
 		interrupts_disable();
 
 	report(&timer_seen, LAPIC_TIMER_VECTOR, 0, 0);
+	report_backtrace("a timer interrupt", timer_seen.rbp);
 }
 
-static void device_entry_test(void)
+__attribute__((noinline)) static void device_entry_test(void)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
 	int had_interrupts;
@@ -325,6 +370,7 @@ static void device_entry_test(void)
 		interrupts_disable();
 
 	report(&device_seen, IOAPIC_ISA_VECTOR_BASE, 0, 0);
+	report_backtrace("a device interrupt", device_seen.rbp);
 }
 
 /*
@@ -346,7 +392,7 @@ static void device_entry_test(void)
  * Neither half claims the other's ground: a software interrupt is not an NMI,
  * and where a real one landed is not a check of the fields it carried.
  */
-static void nmi_delivery_test(void)
+__attribute__((noinline)) static void nmi_delivery_test(void)
 {
 	const struct trap_record *t;
 	int on_ist, rsp_elsewhere;
@@ -375,9 +421,11 @@ static void nmi_delivery_test(void)
 		  && on_ist && rsp_elsewhere
 		  ? " — the gate switched stacks, which is what the slot is for\r\n"
 		  : " — WRONG, it did not run on the stack the table names\r\n");
+
+	report_backtrace("an NMI", t->rbp);
 }
 
-static void nmi_gate_test(void)
+__attribute__((noinline)) static void nmi_gate_test(void)
 {
 	struct entry_check c = { 0 };
 	const struct trap_record *t;
@@ -403,8 +451,10 @@ static void nmi_gate_test(void)
 	 * would make a handler which steps over an instruction step over two.
 	 */
 	c.want_rip = entry_probe_int2_rip;
+	c.rbp = t->rbp;
 
 	report(&c, T_NMI, 1, IST_NMI);
+	report_backtrace("vector 2", c.rbp);
 }
 
 void trap_entry_test(void)

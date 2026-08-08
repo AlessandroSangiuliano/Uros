@@ -2237,6 +2237,54 @@ static void ring3_selftest(void)
 	}
 
 	/*
+	 * ── And a backtrace from each of these two ────────────────────────
+	 *
+	 * Both answers are shorter than the four kernel entries', and both are
+	 * right to be.
+	 *
+	 * A fault from ring 3 arrives with the frame pointer a USER program was
+	 * holding, and there is no kernel chain above it — the kernel frames
+	 * belong to the stack the privilege change switched to, which the
+	 * debugger reaches from the trap frame's own address and not from this
+	 * register.  So the only correct thing to do with it is refuse, and that
+	 * is what is checked.  Walking it would produce names, and they would be
+	 * believed.
+	 *
+	 * ⚠️ This check could not be made until the probe stopped handing ring 3
+	 * the kernel's own frame pointer: with that value in place the walk
+	 * succeeded, reached x86_64_boot, and looked perfect.
+	 */
+	{
+		unsigned depth = x86_64_backtrace_probe(first.rbp, 0, 0, 0);
+
+		kputs("UrMach x86-64: the frame pointer from ring 3 is ");
+		kputhex64(first.rbp);
+		kputs(", walked to ");
+		kputdec(depth);
+		kputs(depth == 0
+		      ? " frames — a user's chain is not the kernel's to walk\r\n"
+		      : " frames — WRONG, it invented a kernel chain\r\n");
+	}
+
+	/*
+	 * The syscall's chain runs to its entry and stops there, because the
+	 * entry keeps no frame pointer: below it is the register ring 3 was
+	 * holding.  See syscall_probe_rbp() for why that is a decision and not
+	 * an omission.
+	 */
+	{
+		const char *top = syscall_probe_top();
+
+		kputs("UrMach x86-64: the backtrace from a syscall is ");
+		kputdec(syscall_probe_depth());
+		kputs(" frames from ");
+		kputs(top != 0 ? top : "(no name)");
+		kputs(syscall_probe_reached_entry()
+		      ? " — it reaches the entry, and stops where ring 3 begins\r\n"
+		      : " — WRONG, it does not reach syscall_entry\r\n");
+	}
+
+	/*
 	 * And whether ring 3 could have written that base itself (#440).
 	 *
 	 * The trap entry for NMI and its three relatives decides what to do by

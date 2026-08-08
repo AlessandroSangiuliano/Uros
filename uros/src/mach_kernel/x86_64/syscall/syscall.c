@@ -11,6 +11,7 @@
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <syscall/syscall.h>
+#include <trap/trap.h>
 
 #define MSR_STAR	0xC0000081
 #define MSR_LSTAR	0xC0000082
@@ -80,6 +81,42 @@ uint64_t syscall_probe_gs(void)
 static uint64_t probe_saved_rip;
 static uint64_t probe_saved_flags;
 static uint64_t probe_kernel_rsp;
+static unsigned probe_depth;
+static const char *probe_top;
+static int probe_reached_entry;
+
+/*
+ * The backtrace from inside a syscall, taken WHERE IT IS TRUE (#409).
+ *
+ * ⚠️ Recorded as a result and not as a frame pointer to walk later, and that
+ * distinction cost a run: the first version handed the caller this function's
+ * %rbp, and by the time anything walked it the kernel stack had been reused by
+ * every trap since.  The walk came back empty and looked like a syscall entry
+ * with no chain at all.  A backtrace is a live thing; the address of a dead
+ * frame is not one.
+ *
+ * ⚠️ And the answer is short on purpose.  The entry keeps no frame pointer —
+ * it pushes two words and calls — so the chain runs through this function to
+ * `syscall_entry' and STOPS: below that is the register ring 3 was holding,
+ * which is not the kernel's to walk.  That is the right answer rather than a
+ * missing one.  Establishing a frame in the entry would put instructions on
+ * the one path every call in the system takes, to add a frame at a boundary
+ * where there is nothing further to say.
+ */
+unsigned syscall_probe_depth(void)
+{
+	return probe_depth;
+}
+
+const char *syscall_probe_top(void)
+{
+	return probe_top;
+}
+
+int syscall_probe_reached_entry(void)
+{
+	return probe_reached_entry;
+}
 
 uint64_t syscall_probe_saved_rip(void)
 {
@@ -111,6 +148,9 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 	probe_kernel_rsp = top;
 	probe_saved_rip = saved[-1];
 	probe_saved_flags = saved[-2];
+	probe_depth = x86_64_backtrace_probe(
+			(uint64_t)(uintptr_t)__builtin_frame_address(0),
+			&probe_top, "syscall_entry", &probe_reached_entry);
 
 	return  (a1 & 0xFF)
 	     | ((a2 & 0xFF) << 8)

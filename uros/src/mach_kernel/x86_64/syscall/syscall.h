@@ -141,6 +141,14 @@ uint64_t syscall_probe_saved_rip(void);
 uint64_t syscall_probe_saved_flags(void);
 uint64_t syscall_probe_kernel_rsp(void);
 
+/*
+ * And the backtrace, taken inside the call rather than handed out as a frame
+ * pointer to walk afterwards: by then the kernel stack has been reused.
+ */
+unsigned syscall_probe_depth(void);
+const char *syscall_probe_top(void);
+int syscall_probe_reached_entry(void);
+
 #endif	/* __ASSEMBLER__ */
 
 #endif	/* _X86_64_SYSCALL_SYSCALL_H_ */

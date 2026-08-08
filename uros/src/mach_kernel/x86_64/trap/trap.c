@@ -519,6 +519,96 @@ void x86_64_backtrace(uint64_t rbp)
 }
 
 /*
+ * The same walk, answered instead of printed (#409).
+ *
+ * The issue asks for a correct backtrace from each of the six entries, and a
+ * backtrace is only correct if something checks it.  Printing six of them into
+ * the boot log and letting a reader form an impression is what #451 removed
+ * from the harness — 130 self-tests with no way to fail.
+ *
+ * So this walks the chain exactly as the printer above and the debugger's `t'
+ * do, and answers three things: how deep it got, what sits immediately above
+ * the interrupted code, and whether a named function was reached.  The last is
+ * what separates a chain that is whole from one that is merely non-empty — a
+ * walk that breaks in the middle still returns frames, and they still have
+ * names, and nothing about them says the bottom is missing.
+ *
+ * ⚠️ The first name is the CALLER, not the interrupted function.  A frame
+ * pointer names where its own function will return to, so the function that
+ * was executing is described by the saved rip and never appears in the chain.
+ * A test asking for it here would be asking for something that is not there.
+ *
+ * ⚠️ And the caller is asked for by NAME rather than compared against one
+ * chosen in advance, because a static function called once is a function the
+ * compiler is entitled to inline — the frame a test predicted would then
+ * simply not exist, and the test would be measuring the optimiser.
+ */
+static int name_matches(const char *a, const char *b)
+{
+	if (a == 0 || b == 0)
+		return 0;
+
+	while (*a != '\0' && *a == *b) {
+		a++;
+		b++;
+	}
+
+	return *a == *b;
+}
+
+unsigned x86_64_backtrace_probe(uint64_t rbp, const char **first,
+				const char *want, int *found)
+{
+	pmap_t kernel = pmap_kernel();
+	unsigned depth, walked = 0;
+
+	if (first != 0)
+		*first = 0;
+	if (found != 0)
+		*found = 0;
+
+	for (depth = 0; depth < BACKTRACE_MAX; depth++) {
+		const uint64_t *f;
+		uint64_t next, ret;
+		const char *name;
+
+		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+			break;
+		if (pmap_extract(kernel, rbp) == 0
+		    || pmap_extract(kernel, rbp + 8) == 0)
+			break;
+
+		f = (const uint64_t *)(uintptr_t)rbp;
+		next = f[0];
+		ret = f[1];
+
+		if (ret == 0)
+			break;
+
+		name = ksym_lookup_call(ret, 0);
+		if (depth == 0 && first != 0)
+			*first = name;
+		if (found != 0 && name_matches(name, want))
+			*found = 1;
+
+		/*
+		 * ⚠️ Counted after the frame is accepted, not by the loop
+		 * variable.  The loop leaves as soon as the chain ends, so its
+		 * counter is one short of what was reported — which printed
+		 * "0 frames from syscall_entry", a line that names a frame and
+		 * denies it in the same breath.
+		 */
+		walked++;
+
+		if (next <= rbp)
+			break;
+		rbp = next;
+	}
+
+	return walked;
+}
+
+/*
  * ⚠️ panic() is deliberately NOT here, and it used to be.
  *
  * It was written during bring-up, when there was no machine-independent
@@ -568,6 +658,7 @@ static void trap_record_frame(const struct trap_frame *frame)
 	last_trap.gs_base = rdmsr(MSR_GS_BASE);
 	last_trap.rsp = frame->rsp;
 	last_trap.frame = (uint64_t)(uintptr_t)frame;
+	last_trap.rbp = frame->rbp;
 	last_trap.caught = 1;
 }
 
