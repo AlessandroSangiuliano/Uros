@@ -105,6 +105,15 @@ void desc_alloc(uint32_t cpu_id);
 void desc_activate(uint32_t cpu_id);
 
 /*
+ * Is `addr` on the interrupt stack belonging to IST slot `slot` (#409)?
+ *
+ * The one observable difference between a gate that switched stacks and a gate
+ * that did not is where the frame was built, so this is what turns the IST
+ * assignment from a table somebody wrote into something a test can check.
+ */
+int desc_on_ist_stack(uint32_t cpu_id, unsigned slot, uint64_t addr);
+
+/*
  * One entry of the shared table, named by its selector.
  *
  * So that the layout can be checked against the arithmetic the processor

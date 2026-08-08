@@ -207,6 +207,31 @@ uint64_t desc_rsp0(uint32_t cpu_id)
 	return tss[cpu_id].rsp0;
 }
 
+/*
+ * Whether `addr` is on the interrupt stack that `slot` names (#409).
+ *
+ * A predicate rather than the bounds, because the bounds are two numbers and a
+ * caller given two numbers has to get the comparison right; and because the
+ * size is this file's arrangement, not a fact anybody else should repeat.
+ *
+ * What it is for: a gate that names an IST slot is a promise the processor
+ * switches stacks, and the only way to see whether it kept it is where the
+ * frame ended up.  A double fault whose frame is on the stack that overflowed
+ * is the failure this exists to prevent, and it looks exactly like success
+ * until the stack is the problem.
+ */
+int desc_on_ist_stack(uint32_t cpu_id, unsigned slot, uint64_t addr)
+{
+	uint64_t top;
+
+	if (cpu_id >= SMP_MAX_CPUS || slot == 0 || slot > IST_COUNT)
+		return 0;
+
+	top = tss[cpu_id].ist[slot - 1];
+
+	return addr < top && addr >= top - DESC_STACK_SIZE;
+}
+
 void desc_activate(uint32_t cpu_id)
 {
 	load_gdt();

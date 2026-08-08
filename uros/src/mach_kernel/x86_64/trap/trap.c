@@ -545,6 +545,32 @@ static int expect_armed;
 
 static struct trap_record last_trap;
 
+/*
+ * ⚠️ One place that fills the record, because there were two and they differed.
+ *
+ * The ring-3 arm recorded the segment base %gs arrived with and the kernel arm
+ * did not, so that field read as "the base was zero" after a kernel fault
+ * instead of "this path does not know" — the same field meaning two things
+ * depending on which arm ran, which <trap/trap.h> says about the paranoid
+ * record is worse than having no field at all.
+ *
+ * Nothing had noticed because only the ring-3 test read it.  A second reader
+ * is all it would have taken, and adding two more fields (#409) is exactly
+ * that second reader.
+ */
+static void trap_record_frame(const struct trap_frame *frame)
+{
+	last_trap.vector = frame->vector;
+	last_trap.error = frame->error;
+	last_trap.rip = frame->rip;
+	last_trap.cr2 = read_cr2();
+	last_trap.cs = frame->cs;
+	last_trap.gs_base = rdmsr(MSR_GS_BASE);
+	last_trap.rsp = frame->rsp;
+	last_trap.frame = (uint64_t)(uintptr_t)frame;
+	last_trap.caught = 1;
+}
+
 void trap_expect(uint64_t vector, uint64_t resume_rip)
 {
 	expect_vector = vector;
@@ -837,13 +863,7 @@ void trap_dispatch(struct trap_frame *frame)
 	if (user_expect_armed && (frame->cs & 3) == USER_RPL) {
 		user_expect_armed = 0;
 
-		last_trap.vector = frame->vector;
-		last_trap.error = frame->error;
-		last_trap.rip = frame->rip;
-		last_trap.cr2 = read_cr2();
-		last_trap.cs = frame->cs;
-		last_trap.gs_base = rdmsr(MSR_GS_BASE);
-		last_trap.caught = 1;
+		trap_record_frame(frame);
 
 		/*
 		 * Every field, not just the instruction pointer: IRETQ in long
@@ -894,12 +914,7 @@ void trap_dispatch(struct trap_frame *frame)
 		 */
 		expect_armed = 0;
 
-		last_trap.vector = frame->vector;
-		last_trap.error = frame->error;
-		last_trap.rip = frame->rip;
-		last_trap.cr2 = read_cr2();
-		last_trap.cs = frame->cs;
-		last_trap.caught = 1;
+		trap_record_frame(frame);
 
 		tputs("UrMach x86-64: expected ");
 		tputs(trap_name(frame->vector));

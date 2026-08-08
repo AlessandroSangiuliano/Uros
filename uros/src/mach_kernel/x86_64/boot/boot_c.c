@@ -49,6 +49,7 @@
 #include <pmap/pv.h>
 #include <pmap/tlb.h>
 #include <pmap/walk.h>
+#include <trap/entry_test.h>
 #include <syscall/probe.h>
 #include <syscall/syscall.h>
 #include <thread/context.h>
@@ -4079,6 +4080,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 
 	wx_enforcement_selftest();
 	trap_vectors_selftest();
+	trap_entry_test();
 
 	/*
 	 * The double-fault self-test is TERMINAL, and that is why it is behind

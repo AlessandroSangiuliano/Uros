@@ -300,6 +300,21 @@ struct trap_record {
 	uint64_t cr2;
 	uint64_t cs;		/* its low two bits are the ring it came from */
 	uint64_t gs_base;	/* which block %gs reached the handler with  */
+	/*
+	 * And the two the fault report gets wrong most invisibly (#409).
+	 *
+	 * `rsp` is the interrupted stack pointer, which the report prints and
+	 * nothing has ever checked; `frame` is where the frame was built, which
+	 * is not in the frame at all and is the only evidence of whether a gate
+	 * naming an IST slot actually switched stacks.
+	 *
+	 * They are here because #458 spent two hours reconciling an rsp that
+	 * could not be right: a report is the primary instrument for every
+	 * fault on this target and is believed, so the numbers in it have to be
+	 * checkable against something the test knows independently.
+	 */
+	uint64_t rsp;
+	uint64_t frame;
 	int      caught;
 };
 
