@@ -201,7 +201,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # the same reason it resolves to mach/i386/ there.
   set(KERNEL_DEFINES_BARE
       KERNEL MACH_KERNEL KERNEL_PRIVATE KERNEL_SERVER=1
-      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=0 MACH_HOST=1
+      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=0 MACH_DEBUGGER=1 MACH_HOST=1
       STAT_TIME TASK_SWAPPER=1 __NO_UNDERSCORES__
       # This machine supplies its own usimple_lock (x86_64/sync/lock.c), so
       # kern/lock.c leaves them out.  See the guard there: the rest of that

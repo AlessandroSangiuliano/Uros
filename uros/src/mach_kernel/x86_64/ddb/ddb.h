@@ -71,4 +71,14 @@ void ddb_enter(struct trap_frame *frame, const char *why);
  */
 const char *ddb_debugger_taken(void);
 
+/*
+ * Look for the break character on the console and open the prompt if it is
+ * there.  Called from the timer tick, on ONE processor -- the UART is a
+ * single device and two readers would take each other's characters.
+ *
+ * ⚠️ Reaches only a processor whose interrupts are on.  A wedge with IF clear
+ * gets no tick and therefore no poll; that door is an NMI and is not this one.
+ */
+void ddb_poll_console(struct trap_frame *frame);
+
 #endif	/* _X86_64_DDB_DDB_H_ */

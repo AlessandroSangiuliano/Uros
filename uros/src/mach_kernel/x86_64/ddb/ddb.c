@@ -13,6 +13,7 @@
 #include <ddb/ddb.h>
 #include <ddb/ksym.h>
 #include <kern/cpu_number.h>
+#include <mach/boolean.h>
 #include <kern/misc_protos.h>	/* panic */
 #include <mach/machine/vm_types.h>
 #include <pmap/layout.h>
@@ -56,6 +57,20 @@ void ddb_init(uint32_t info_pa)
 int ddb_enabled(void)
 {
 	return enabled;
+}
+
+/*
+ * The same answer under the machine-independent kernel's own name (#428).
+ *
+ * kern/debug.c asks it before calling Debugger() from panic(), because the
+ * compile-time MACH_KDB test it used to rely on stopped meaning "there is a
+ * debugger" the moment a target had one without the ddb/ tree.  A forwarder
+ * rather than a rename: `ddb_enabled' is what this file's own code asks, and
+ * one of the two names had to be the machine-independent spelling.
+ */
+boolean_t debugger_available(void)
+{
+	return enabled ? TRUE : FALSE;
 }
 
 /* ------------------------------------------------------------------ */
@@ -336,7 +351,82 @@ void Debugger(const char *message)
 	__asm__ volatile ("int3");
 }
 
+/*
+ * ── A way in on a machine that is already RUNNING (#428) ──────────────
+ *
+ * Until now the prompt opened at a fault or at a deliberate Debugger(), which
+ * covers a machine that has died and not one that has stopped answering.
+ * That second case is the expensive one: three boot entries wedged repeatedly
+ * while #463 was being found, and the only recourse was reading the log
+ * afterwards and guessing.
+ *
+ * So: a character on the console opens it.  Polled from the timer tick rather
+ * than driven by a UART interrupt, deliberately -- the machine this is for is
+ * one that is not servicing things properly any more, and a door that needs
+ * the interrupt controller to be in good order is a door that is shut exactly
+ * when it is wanted.  One `inb' every ten milliseconds is the whole cost.
+ *
+ * ⚠️ ONE processor polls, and it has to be so: the UART is a single device,
+ * and two processors reading its data register would take each other's
+ * characters -- with the loser reporting that nothing was typed.
+ *
+ * ⚠️ And this does NOT reach a processor spinning with interrupts disabled,
+ * which is what a real wedge often is (#461's deadlock was four of them at
+ * once).  No tick arrives there, so no poll happens.  That case needs an NMI
+ * from another processor and is the next piece of this issue; saying so here
+ * because a door that quietly does not work in the case it was built for is
+ * worse than an absent one.
+ *
+ * The character is Ctrl-\.  Something that is never part of ordinary output
+ * and never typed by accident, and a single byte rather than a sequence: a
+ * machine in trouble is not the place for a state machine, and i386's own
+ * serial entry is broken (#382) partly for having one.
+ *
+ * ⚠️ Anything else typed is CONSUMED and discarded.  Nothing outside the
+ * debugger reads the console on this target, so there is nobody to take it
+ * from -- but that stops being true the day there is a console driver, and
+ * this is the line that will need to change.
+ */
+#define DDB_BREAK_CHAR		0x1C		/* Ctrl-\ */
+
+static void ddb_enter_body(struct trap_frame *frame, const char *why);
+
+static int in_ddb[NCPUS];
+
+void ddb_poll_console(struct trap_frame *frame)
+{
+	int c;
+
+	if (!enabled || in_ddb[cpu_number()])
+		return;
+
+	c = cons_getc_nowait();
+	if (c != DDB_BREAK_CHAR)
+		return;
+
+	ddb_enter(frame, "break on the console");
+}
+
 void ddb_enter(struct trap_frame *frame, const char *why)
+{
+	unsigned	me = cpu_number();
+	int		was_in = in_ddb[me];
+
+	/*
+	 * Marked before anything is printed, so that a tick arriving while the
+	 * prompt is open cannot poll its way into a second one underneath it.
+	 * Restored rather than cleared, because a fault taken INSIDE the
+	 * debugger legitimately opens a nested prompt and the outer one is
+	 * still there when it leaves.
+	 */
+	in_ddb[me] = 1;
+
+	ddb_enter_body(frame, why);
+
+	in_ddb[me] = was_in;
+}
+
+static void ddb_enter_body(struct trap_frame *frame, const char *why)
 {
 	cons_puts("\r\nddb: ");
 	cons_puts(why);
