@@ -63,4 +63,10 @@ const char *ksym_lookup(uint64_t addr, uint64_t *offset);
  */
 uint64_t ksym_data_end(uint32_t info_pa);
 
+/*
+ * Is this address in a section that gets executed?  Asked before a breakpoint
+ * is accepted: one anywhere else can never fire (#428).
+ */
+int span_is_code(uint64_t addr);
+
 #endif	/* _X86_64_DDB_KSYM_H_ */

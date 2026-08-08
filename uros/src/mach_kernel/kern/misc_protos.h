@@ -315,4 +315,16 @@ extern boolean_t	no_bootstrap_task(void);
 extern ipc_port_t	get_root_master_device_port(void);
 #endif	/* DIPC */
 
+/*
+ * Whether Debugger() would actually enter a debugger if called now (#428).
+ *
+ * A question only the machine can answer, and one the machine-independent
+ * code needs because MACH_KDB no longer means what it used to: a target can
+ * have a debugger of its own without the ddb/ tree in its build, and on that
+ * target the answer also depends on a boot flag.  Callers use it to avoid
+ * asking for a debugger that is not there -- from panic(), where the
+ * alternative is a recursive panic.
+ */
+extern boolean_t	debugger_available(void);
+
 #endif	/* _MISC_PROTOS_H_ */

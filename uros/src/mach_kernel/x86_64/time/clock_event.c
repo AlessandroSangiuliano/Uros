@@ -29,6 +29,7 @@
 #include <x86_64/cpu/regs.h>
 #include <x86_64/boot/bootarg.h>
 #include <kern/misc_protos.h>		/* printf */
+#include <ddb/ddb.h>		/* #428: the console door */
 #include <kern/time_out.h>		/* hertz_tick -- the whole point */
 #include <sync/barrier.h>		/* #461: publish the tick reports */
 #include <kern/cpu_number.h>		/* cpu_number */
@@ -623,6 +624,20 @@ clock_event_tick(struct trap_frame *frame)
 	 * way OUT of the trap, where the frame is a real one and the hardware
 	 * has already been put back.
 	 */
+	/*
+	 * The debugger's console door (#428), before the tick's own work.
+	 *
+	 * Here because this is the one thing that runs on every processor at a
+	 * fixed rate whatever else the machine is doing, which is exactly the
+	 * property a way in has to have.  Before hertz_tick() rather than
+	 * after, so that a machine wedged INSIDE the scheduler's own accounting
+	 * can still be interrupted by an operator.
+	 *
+	 * ⚠️ Only the boot processor asks.  The UART is one device.
+	 */
+	if (cpu == (unsigned) master_cpu)
+		ddb_poll_console(frame);
+
 	disable_preemption();
 
 	/*

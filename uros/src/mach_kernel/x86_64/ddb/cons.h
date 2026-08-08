@@ -93,4 +93,7 @@ int cons_getc(void);
  */
 int cons_loopback_probe(uint8_t byte);
 
+/* One byte, two digits — for instruction bytes the decoder declined. */
+void cons_puthex8(uint8_t v);
+
 #endif	/* _X86_64_DDB_CONS_H_ */

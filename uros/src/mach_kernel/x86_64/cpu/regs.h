@@ -202,6 +202,43 @@ static inline void write_cr4(uint64_t v)
 #define DR7_EXEC_DR0		(DR7_L0 | DR7_RESERVED_ONE)
 
 /*
+ * And the same for the other three, because a debugger wants more than one
+ * (#428).  L<n> is bit 2n; the type and length fields for slot n sit at bits
+ * 16+4n and 18+4n, and both are zero for an execution breakpoint -- which is
+ * why the arming below writes only the enable bits.
+ *
+ * ⚠️ FOUR, and that is the hardware's number, not a policy.  A debugger that
+ * silently accepted a fifth would be arming nothing and reporting success.
+ */
+#define DR_COUNT		4
+#define DR7_LOCAL(n)		(1UL << (2 * (n)))
+
+/* DR6 says which one fired.  Bit n for slot n. */
+#define DR6_HIT(n)		(1UL << (n))
+
+/*
+ * What slot n watches, and how wide (#428).
+ *
+ * R/W is two bits at 16+4n and LEN two bits at 18+4n.  The encodings are the
+ * architecture's and are not guessable: LEN 0b10 means EIGHT bytes and 0b11
+ * means four, which is the one pair in this file worth reading twice.
+ *
+ * ⚠️ An execution breakpoint must have R/W and LEN both zero.  Any other
+ * length with R/W = 0 is undefined behaviour, not a wider breakpoint.
+ */
+#define DR7_RW_SHIFT(n)		(16 + 4 * (n))
+#define DR7_LEN_SHIFT(n)	(18 + 4 * (n))
+
+#define DR7_RW_EXEC		0UL
+#define DR7_RW_WRITE		1UL
+#define DR7_RW_ACCESS		3UL	/* read or write, but not fetch */
+
+#define DR7_LEN_1		0UL
+#define DR7_LEN_2		1UL
+#define DR7_LEN_8		2UL
+#define DR7_LEN_4		3UL
+
+/*
  * ⚠️ DR6 is sticky: the processor sets the bit for the breakpoint that fired
  * and never clears it again.  A handler that does not clear it leaves the
  * next debug exception describing this one as well.
@@ -221,6 +258,41 @@ static inline void write_dr7(uint64_t v)
 static inline void write_dr6(uint64_t v)
 {
 	__asm__ volatile("mov %0, %%dr6" : : "r"(v));
+}
+
+static inline uint64_t read_dr7(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("mov %%dr7, %0" : "=r"(v));
+	return v;
+}
+
+static inline uint64_t read_dr0(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("mov %%dr0, %0" : "=r"(v));
+	return v;
+}
+
+static inline uint64_t read_dr6(void)
+{
+	uint64_t v;
+
+	__asm__ volatile("mov %%dr6, %0" : "=r"(v));
+	return v;
+}
+
+static inline void write_dr(unsigned n, uint64_t v)
+{
+	switch (n) {
+	case 0: __asm__ volatile("mov %0, %%dr0" : : "r"(v)); break;
+	case 1: __asm__ volatile("mov %0, %%dr1" : : "r"(v)); break;
+	case 2: __asm__ volatile("mov %0, %%dr2" : : "r"(v)); break;
+	case 3: __asm__ volatile("mov %0, %%dr3" : : "r"(v)); break;
+	default: break;
+	}
 }
 
 #endif	/* __ASSEMBLER__ */

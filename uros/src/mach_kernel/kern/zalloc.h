@@ -318,4 +318,16 @@ extern void		zone_debug_disable(
 				zone_t		z);
 #endif	/* ZONE_DEBUG */
 
+/*
+ * The head of the all-zones chain (#428).
+ *
+ * ⚠️ Declared here rather than left as an extern at the one call site.  A
+ * declaration that matches its user and nothing else is invisible to the
+ * compiler and to the linker both, which is how this tree has produced the
+ * same class of defect four times (#448) -- and `first_zone' is a zone_t, a
+ * pointer to a structure whose layout a wrong declaration would silently
+ * disagree about.
+ */
+extern zone_t	first_zone;
+
 #endif	/* _KERN_ZALLOC_H_ */
