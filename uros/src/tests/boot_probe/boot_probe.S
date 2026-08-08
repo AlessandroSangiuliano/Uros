@@ -82,6 +82,11 @@
  */
 #define SYSCALL_MACH_BASE	0x100
 #define MACH_TRAP_NULL		(SYSCALL_MACH_BASE + 15)
+#define MACH_TRAP_PRINT		(SYSCALL_MACH_BASE + 14)
+
+	.section .rodata
+hello:
+	.asciz	"boot_probe: hello from ring 3, through a Mach trap\r\n"
 
 	.section .text
 	.code64
@@ -92,6 +97,11 @@ _start:
 	 * the dispatch works, and proving it once is proving it.
 	 */
 	movq	$MACH_TRAP_NULL, %rax
+	syscall
+
+	/* And one that does something, and says so in our own words. */
+	movq	$MACH_TRAP_PRINT, %rax
+	leaq	hello(%rip), %rdi
 	syscall
 
 	movq	$SYSCALL_NR_PROBE, %rax

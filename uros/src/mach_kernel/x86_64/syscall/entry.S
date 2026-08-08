@@ -81,6 +81,25 @@ syscall_entry:
 	movq	%r10, %rcx
 
 	/*
+	 * 🔥 Interrupts ON, and not before here (#411).
+	 *
+	 * SYSCALL clears IF through FMASK, which is a saving on the way in --
+	 * no CLI to execute -- and becomes a trap if nothing turns it back on:
+	 * the whole call then runs with interrupts disabled.  Anything that
+	 * blocks cannot be woken, and anything that needs the other processors
+	 * deadlocks outright.  Found as `ipi: a cross-call with interrupts off
+	 * would deadlock', from a page fault inside a copyin that wanted a TLB
+	 * shootdown.
+	 *
+	 * ⚠️ Here and not earlier.  Above this point the kernel is not yet
+	 * standing on its own stack or its own %gs, and an interrupt arriving
+	 * in that window would push a frame at an address ring 3 chose.  The
+	 * swapgs and the stack switch come first for exactly that reason, and
+	 * this has to come after both.
+	 */
+	sti
+
+	/*
 	 * An index from ring 3 into a table of function pointers, checked.
 	 * Unsigned, so one comparison covers both ends: a number above the
 	 * table and a number that looked negative are the same test.
@@ -142,6 +161,12 @@ syscall_entry:
 	cmpq	%rcx, %r10
 	jne	.Lreturn_the_slow_way
 
+	/*
+	 * ⚠️ And off again before the way out begins.  From here to SYSRET the
+	 * stack pointer and %gs belong to ring 3 for a few instructions, and an
+	 * interrupt in that window is the one #440 exists about.
+	 */
+	cli
 	movq	%gs:PERCPU_USER_RSP, %rsp
 	swapgs
 	sysretq
@@ -172,6 +197,7 @@ syscall_entry:
  * pops it.
  */
 .Lreturn_the_slow_way:
+	cli
 	movq	%gs:PERCPU_USER_RSP, %r10
 	swapgs
 

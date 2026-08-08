@@ -625,10 +625,50 @@ mach_null(void)
  *  Used by ipc_bench to measure the cost of a syscall that does some work 
  *  in the kernel (printing a string) without IPC overhead.
  */
+/*
+ * ⚠️ COPIED IN, not walked in place.
+ *
+ * This was `printf("%s", s)' with a pointer the USER supplied, which means the
+ * kernel walks a string in a task's address space while printf already holds
+ * the console lock.  When that page is not resident the fault arrives inside
+ * printf, and the fault handler wants to block -- with the lock held.  The
+ * machine goes quiet, with no report, because the thing that would report it is
+ * what is stuck.
+ *
+ * It survived on i386 because its one caller is ipc_bench, whose string has
+ * been touched by the program long before it asks the kernel to print it.  The
+ * first caller that had not touched it was the x86-64 boot image (#411), which
+ * hands over a string in a page it has only ever executed near.
+ *
+ * So the copy happens outside the lock, and can fault there safely.  Bounded,
+ * because the length is the caller's to choose and an unbounded copy of a
+ * user string is an unbounded amount of kernel stack; and terminated by hand,
+ * because copyinstr() fills the buffer without promising a NUL when the string
+ * is longer than it.
+ *
+ * A refused copy says so rather than printing nothing: an address the task does
+ * not own is a fact about the caller, and silence would read as a print that
+ * happened and had nothing to say.
+ */
+#define MACH_PRINT_MAX	256
+
 void
 mach_print(const char *s)
 {
-	printf("%s", s);
+	char		buf[MACH_PRINT_MAX];
+	vm_size_t	got = 0;
+	boolean_t	rc;
+
+	rc = copyinstr(s, buf, sizeof buf, &got);
+	buf[sizeof buf - 1] = 0;
+
+	if (rc != 0 || got == 0 || buf[0] == 0) {
+		printf("mach_print: could not read the string at %p (copyinstr=%d, %lu bytes)\n",
+		       s, (int) rc, (unsigned long) got);
+		return;
+	}
+
+	printf("%s", buf);
 }
 
 /*
