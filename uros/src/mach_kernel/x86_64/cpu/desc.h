@@ -134,6 +134,15 @@ uint64_t desc_gdt_entry(unsigned selector);
  */
 uint64_t desc_rsp0(uint32_t cpu_id);
 
+/*
+ * Point a processor's ring-3 entry at a different stack (#422).
+ *
+ * Called by the context switch: a trap from ring 3 has to land on the kernel
+ * stack of the thread it came from, and until there was a user task nothing
+ * needed to say so.
+ */
+void desc_set_rsp0(uint32_t cpu_id, uint64_t rsp0);
+
 /* The fields of a descriptor that decide who may use it and how. */
 #define DESC_ACCESS(d)		(((d) >> 40) & 0xFF)
 #define DESC_DPL(d)		(((d) >> 45) & 0x3)

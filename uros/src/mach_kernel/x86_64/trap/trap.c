@@ -341,6 +341,20 @@ static void report_registers(const struct trap_frame *frame)
 	reg("cs    ", frame->cs, 1);
 	reg("ss    ", frame->ss, 0);
 	reg("cr3   ", read_cr3(), 0);
+
+	/*
+	 * And whether that is the KERNEL's cr3, which for a fault from ring 3
+	 * is the whole diagnosis (#422).
+	 *
+	 * A user address is in every space; what differs is what it maps to.  A
+	 * report that prints cr3 alone leaves the reader to know by heart which
+	 * root belongs to whom — and the failure this was added for looked like
+	 * a permission problem: an instruction fetch refused at a mapped page,
+	 * which is exactly what the low identity mapping left over from early
+	 * boot answers when a user thread is running on the kernel's tables.
+	 */
+	if (read_cr3() == pmap_kernel()->root_pa)
+		tputs("  (the kernel's own tables)");
 	tputs("\r\n");
 }
 
