@@ -23,6 +23,9 @@ project(libmach C)
 # is saying "I want to reach the kernel and I am bringing my own everything
 # else", which is exactly what boot_probe is.
 if(NOT UROS_TARGET_ARCH STREQUAL "i386")
+  set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
+  set(_E ${CMAKE_SOURCE_DIR}/export/include)
+
   set(_traps_src ${CMAKE_CURRENT_SOURCE_DIR}/mach_traps.s)
   set(_traps_pp  ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S)
 
@@ -48,16 +51,140 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   )
   set_source_files_properties(${_traps_pp} PROPERTIES GENERATED TRUE)
 
-  add_library(libmach_traps STATIC ${_traps_pp})
-  set_target_properties(libmach_traps PROPERTIES
-    OUTPUT_NAME "mach_traps"
-    LINKER_LANGUAGE C
+  # ── The MIG stub surface (#426) ──────────────────────────────────────
+  #
+  # Everything in libmach above the traps reaches <mach/mach_interface.h>,
+  # which is generated from mach.defs and does not exist until mig has run.
+  # That one missing header is what stops mach_init.c, mig_support.c and the
+  # mach_msg_* wrappers -- and it reports itself as a missing FILE, which
+  # names the symptom rather than the generator nobody invoked.
+  set(UROS_MIG_ARCH_UPPER X86_64)
+  set(UROS_MIG_USERLAND_INCLUDES
+      -I${_E}
+      -I${UROS_ARCH_INCLUDE}
+      -I${_K}
+      -I${_E}/mach_debug)
+
+  set(_MIG_OUT ${CMAKE_BINARY_DIR}/generated)
+  set(_DEFS
+    ${_E}/mach/mach.defs
+    ${_E}/mach/mach_port.defs
+    ${_E}/mach/mach_host.defs
+    ${_E}/mach/clock.defs
+    ${_E}/mach/bootstrap.defs
+    ${_E}/mach/exc.defs
+    ${_E}/mach/notify.defs
+    # ⚠️ device.defs is NOT here (#470).  Its stubs fail their own
+    # _Static_asserts at -m64, and the cause is worse than padding: the two
+    # .defs trees describe security_token_t DIFFERENTLY -- the kernel's says
+    # `array[2] of MACH_MSG_TYPE_INTEGER_32', the export tree's says
+    # MACH_MSG_TYPE_INTEGER_64.  Same name, same C type, two wire layouts,
+    # identical on i386 and four bytes apart here.  Copying the kernel's
+    # spelling across does not fix it: it is right for SERVER stubs, where
+    # the token is a struct member, and wrong for USER stubs, where it is a
+    # value and migcom emits a cast to a pointer type that does not compile.
+    # That is migcom's to settle, not a line in a .defs.
+  )
+  set(LIBMACH_MIG_GENERATED)
+  foreach(d IN LISTS _DEFS)
+    add_mig_userland(${d} ${_MIG_OUT} LIBMACH_MIG)
+  endforeach()
+
+  # #169: published under the names consumers actually include.
+  set(_PUB "${CMAKE_BINARY_DIR}/generated/include/mach")
+  file(MAKE_DIRECTORY "${_PUB}")
+  set(_PUB_MAP  mach.h mach_interface.h  mach_port.h mach_port.h
+                mach_host.h mach_host.h  clock.h clock.h
+                bootstrap.h bootstrap.h  exc.h exc_user.h
+                exc_server.h exc_server.h  notify_server.h notify_server.h)
+  # device/device.h goes under its own directory, which is how it is spelled.
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
+  set(_PUB_HDRS)
+  list(LENGTH _PUB_MAP _n_map)
+  math(EXPR _last "${_n_map} - 1")
+  foreach(_i RANGE 0 ${_last} 2)
+    math(EXPR _j "${_i} + 1")
+    list(GET _PUB_MAP ${_i} _from)
+    list(GET _PUB_MAP ${_j} _to)
+    add_custom_command(OUTPUT ${_PUB}/${_to}
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${_MIG_OUT}/${_from} ${_PUB}/${_to}
+      DEPENDS ${_MIG_OUT}/${_from}
+      COMMENT "Publish mach/${_to} (from ${_from})" VERBATIM)
+    list(APPEND _PUB_HDRS ${_PUB}/${_to})
+  endforeach()
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/device/device.h
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_MIG_OUT}/device.h ${CMAKE_BINARY_DIR}/generated/include/device/device.h
+    DEPENDS ${_MIG_OUT}/device.h
+    COMMENT "Publish device/device.h" VERBATIM)
+  list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
+
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/device/device.h
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_MIG_OUT}/device.h ${CMAKE_BINARY_DIR}/generated/include/device/device.h
+    DEPENDS ${_MIG_OUT}/device.h
+    COMMENT "Publish device/device.h" VERBATIM)
+  list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
+
+  add_custom_target(mig_mach_headers_x86_64 DEPENDS ${_PUB_HDRS})
+
+  # ── The library itself ───────────────────────────────────────────────
+  #
+  # Every one of libmach's C sources compiles for this target except strtod.c,
+  # which i386 does not build either.
+  #
+  # crt0.c and stack_protector.c came in with #426: both carried a machine's
+  # assembly inside C, and both now carry two.  They are written twice rather
+  # than parameterised because the sequences differ in kind and not in width
+  # -- the entry argument travels on the stack on one and in a register on the
+  # other -- and because a `%esp' that means half a register is the sort of
+  # thing an assembler should refuse rather than a macro should paper over.
+  #
+  # printf.c is still out: it reaches the console through <device/device.h>,
+  # which is blocked on #470 above.  ⚠️ That has a consequence beyond
+  # printing -- crt0 pulls exit, which pulls panic, which calls printf -- so
+  # no program can be entered through __start_mach here until #470 is done.
+  # boot_probe keeps its own _start for that reason.
+  file(GLOB _MACH_C CONFIGURE_DEPENDS "*.c")
+  file(GLOB _MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
+  list(REMOVE_ITEM _MACH_C ${_MS_WRAPPERS})
+  list(REMOVE_ITEM _MACH_C
+    ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)           # needs float.h macros
+
+  add_library(libmach STATIC ${_traps_pp} ${_MACH_C} ${LIBMACH_MIG_GENERATED})
+  add_dependencies(libmach mig_mach_headers_x86_64)
+  set_target_properties(libmach PROPERTIES
+    OUTPUT_NAME "mach"
     ARCHIVE_OUTPUT_DIRECTORY
       "${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/lib")
-  target_compile_options(libmach_traps PRIVATE ${UROS_ARCH_FLAGS})
-  target_include_directories(libmach_traps INTERFACE
+
+  target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS})
+  target_compile_options(libmach PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -include stdint.h>)
+
+  # ⚠️ The MIG OUTPUT directory is deliberately NOT here.  It holds a file
+  # called mach.h -- the header for mach.defs -- and libmach has its own
+  # mach.h, the umbrella that pulls in mach_init.h and with it the
+  # `#define mach_task_self() mach_task_self_' every one of these files
+  # needs.  Put the raw directory on the path and the generated one wins,
+  # the macro disappears, and seven sources fail with an implicit
+  # declaration that names a function nobody ever calls.  The generated
+  # stubs still find their own headers: they include them with quotes, and
+  # a quoted include looks in the including file's own directory first.
+  target_include_directories(libmach PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/uapi
+    ${CMAKE_BINARY_DIR}/generated/include
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include
     ${CMAKE_SOURCE_DIR}/export/include
-    ${UROS_ARCH_INCLUDE})
+    ${UROS_ARCH_INCLUDE}
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel
+    ${CMAKE_SOURCE_DIR}/include)
 
   return()
 endif()
