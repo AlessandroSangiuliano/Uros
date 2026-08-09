@@ -70,6 +70,15 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${_E}/mach/mach.defs
     ${_E}/mach/mach_port.defs
     ${_E}/mach/mach_host.defs
+    ${_E}/mach/clock.defs
+    ${_E}/mach/bootstrap.defs
+    ${_E}/mach/exc.defs
+    ${_E}/mach/notify.defs
+    # ⚠️ device.defs is NOT here (#470).  Its generated stubs fail their own
+    # _Static_asserts at -m64: migcom has every field's size right and the
+    # total wrong, which is padding it does not model.  Excluded rather than
+    # excused -- the assertions stay, and the day they pass this line comes
+    # back.  It costs printf.c, below.
   )
   set(LIBMACH_MIG_GENERATED)
   foreach(d IN LISTS _DEFS)
@@ -80,7 +89,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_PUB "${CMAKE_BINARY_DIR}/generated/include/mach")
   file(MAKE_DIRECTORY "${_PUB}")
   set(_PUB_MAP  mach.h mach_interface.h  mach_port.h mach_port.h
-                mach_host.h mach_host.h)
+                mach_host.h mach_host.h  clock.h clock.h
+                bootstrap.h bootstrap.h  exc.h exc_user.h
+                exc_server.h exc_server.h  notify_server.h notify_server.h)
   set(_PUB_HDRS)
   list(LENGTH _PUB_MAP _n_map)
   math(EXPR _last "${_n_map} - 1")
@@ -97,16 +108,62 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   endforeach()
   add_custom_target(mig_mach_headers_x86_64 DEPENDS ${_PUB_HDRS})
 
-  add_library(libmach_traps STATIC ${_traps_pp})
-  set_target_properties(libmach_traps PROPERTIES
-    OUTPUT_NAME "mach_traps"
-    LINKER_LANGUAGE C
+  # ── The library itself ───────────────────────────────────────────────
+  #
+  # 59 of libmach's 61 C sources compile for this target once the interface
+  # headers exist.  The two that do not are the two with 32-bit assembly
+  # inside them, and they are real machine-dependent work rather than an
+  # include away:
+  #
+  #   crt0.c              its ELF entry trampoline is written in i386
+  #                       assembly -- `movl %esp,%eax', `pushl' -- because it
+  #                       has to capture the argument frame before the C
+  #                       prologue moves the stack pointer.  A 64-bit twin is
+  #                       a different sequence, not a wider one.
+  #   stack_protector.c   likewise, at the canary.
+  #
+  # ⚠️ So this is libmach WITHOUT A STARTUP.  A program linking it brings its
+  # own _start, which is what boot_probe does.  Servers cannot until crt0 is
+  # ported, and that is named here rather than discovered at link time.
+  file(GLOB _MACH_C CONFIGURE_DEPENDS "*.c")
+  file(GLOB _MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
+  list(REMOVE_ITEM _MACH_C ${_MS_WRAPPERS})
+  list(REMOVE_ITEM _MACH_C
+    ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c            # needs float.h macros
+    ${CMAKE_CURRENT_SOURCE_DIR}/crt0.c              # i386 assembly
+    ${CMAKE_CURRENT_SOURCE_DIR}/stack_protector.c   # i386 assembly
+    ${CMAKE_CURRENT_SOURCE_DIR}/printf.c)           # <device/device.h>, #470
+
+  add_library(libmach STATIC ${_traps_pp} ${_MACH_C} ${LIBMACH_MIG_GENERATED})
+  add_dependencies(libmach mig_mach_headers_x86_64)
+  set_target_properties(libmach PROPERTIES
+    OUTPUT_NAME "mach"
     ARCHIVE_OUTPUT_DIRECTORY
       "${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/lib")
-  target_compile_options(libmach_traps PRIVATE ${UROS_ARCH_FLAGS})
-  target_include_directories(libmach_traps INTERFACE
+
+  target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS})
+  target_compile_options(libmach PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -include stdint.h>)
+
+  # ⚠️ The MIG OUTPUT directory is deliberately NOT here.  It holds a file
+  # called mach.h -- the header for mach.defs -- and libmach has its own
+  # mach.h, the umbrella that pulls in mach_init.h and with it the
+  # `#define mach_task_self() mach_task_self_' every one of these files
+  # needs.  Put the raw directory on the path and the generated one wins,
+  # the macro disappears, and seven sources fail with an implicit
+  # declaration that names a function nobody ever calls.  The generated
+  # stubs still find their own headers: they include them with quotes, and
+  # a quoted include looks in the including file's own directory first.
+  target_include_directories(libmach PUBLIC
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/uapi
+    ${CMAKE_BINARY_DIR}/generated/include
+    ${CMAKE_SOURCE_DIR}/src/mach_services/include
     ${CMAKE_SOURCE_DIR}/export/include
-    ${UROS_ARCH_INCLUDE})
+    ${UROS_ARCH_INCLUDE}
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel
+    ${CMAKE_SOURCE_DIR}/include)
 
   return()
 endif()
