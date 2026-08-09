@@ -159,14 +159,27 @@ static inline void interrupts_disable(void)
  */
 #define RFLAGS_RF	(1UL << 16)
 
+/*
+ * Alignment check at ring 3, and — the reason it is named here — the bit
+ * that switches SMAP off for the code that sets it (#468).  STAC sets it,
+ * CLAC clears it, and the processor leaves it alone on a fault, which is
+ * why a trap taken inside a bracketed copy has to put it back.
+ */
+#define RFLAGS_AC	(1UL << 18)
+
 #ifndef __ASSEMBLER__
 
-static inline int interrupts_enabled(void)
+static inline uint64_t read_rflags(void)
 {
 	uint64_t flags;
 
 	__asm__ volatile("pushfq; popq %0" : "=r"(flags) :: "memory");
-	return (flags & RFLAGS_IF) != 0;
+	return flags;
+}
+
+static inline int interrupts_enabled(void)
+{
+	return (read_rflags() & RFLAGS_IF) != 0;
 }
 
 static inline uint64_t read_cr4(void)

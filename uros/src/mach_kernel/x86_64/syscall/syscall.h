@@ -17,8 +17,32 @@
  *              return address in rcx and the flags in r11, so they cannot
  *              carry anything and are gone on return
  *
- *   rbx rbp r12 r13 r14 r15    preserved
+ *   rbx r12 r13 r14 r15        arguments seven to eleven, for the calls
+ *                              that have that many — and preserved, either
+ *                              way, because the stub saves them
+ *   rbp                        preserved
  *   everything else            DESTROYED
+ *
+ * ── Why arguments seven and up are in registers ───────────────────────
+ *
+ * Because there are registers left, and the alternative reaches into a
+ * user's memory.  i386 had no choice: with eight registers it put every
+ * argument on the user stack and the entry copied them in, one word at a
+ * time, through a fault-recoverable access — see mach_call_addr in
+ * i386/locore.S.  That copy is a range check, a page that may not be
+ * resident, and a recovery path, all on the way into every message in the
+ * system.
+ *
+ * Here eleven arguments fit in registers with four to spare, so none of
+ * that machinery exists: no user memory is read by the entry path at all,
+ * and there is nothing for a caller to point at that it does not own.
+ * Eleven is not a round number, it is the widest trap in the table
+ * (syscall_vm_map, syscall_vm_remap), and syscall_init() refuses to boot
+ * if the table ever grows one wider than the registers allotted here.
+ *
+ * The cost lands where it belongs: a call with six arguments or fewer —
+ * which is all but sixteen of them — pays a compare and a branch, and the
+ * stub is three instructions exactly as before.
  *
  * That last line is the choice, and it is not what Linux does.  Linux
  * preserves the argument registers, which obliges its entry path to save
@@ -76,7 +100,27 @@
  * it can be closed.
  */
 #define SYSCALL_NR_PROBE	0
-#define SYSCALL_NR_MAX		1
+/*
+ * The same proof for a call too wide to fit in the argument registers, and
+ * it exists because the wide path had nothing else exercising it: every
+ * Mach trap with more than six arguments needs a task that calls one, and
+ * the first of those is mach_msg.  This one is reachable from the boot's
+ * own self-test, so the mechanism is checked on every boot rather than on
+ * the day something finally uses it.
+ */
+#define SYSCALL_NR_PROBE_WIDE	1
+#define SYSCALL_NR_MAX		2
+
+/*
+ * How many arguments a call carries in registers, and how many it may have.
+ *
+ * The first six are the C ABI's own; the rest are in the callee-saved
+ * registers, which is why they stop at eleven — see the contract above.
+ * Both numbers are used by the entry path and by the userland stubs, so
+ * they are stated once, here, and read by both.
+ */
+#define SYSCALL_REG_ARGS	6
+#define SYSCALL_ARGS_MAX	11
 
 /*
  * ── Where the Mach traps live in the number space (#411) ──────────────
@@ -171,6 +215,21 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6);
 
 /*
+ * The same, one argument short of the widest trap in the table.
+ *
+ * Eleven, and not seven, because seven would prove only that one register
+ * arrived: the five that come through rbx and r12-r15 are pushed by the
+ * entry path in an order it decides, and an order reversed by one puts
+ * every one of them somewhere a shorter call would never notice.  It
+ * answers with each argument in its own nibble, lowest argument lowest, so
+ * a swapped pair is a different answer rather than the same sum.
+ */
+uint64_t syscall_probe_wide(uint64_t a1, uint64_t a2, uint64_t a3,
+			    uint64_t a4, uint64_t a5, uint64_t a6,
+			    uint64_t a7, uint64_t a8, uint64_t a9,
+			    uint64_t a10, uint64_t a11);
+
+/*
  * Which per-CPU block the last such call was reached with — the entry
  * path's swapgs, made observable.  It leaves no other trace.
  */
@@ -191,6 +250,25 @@ void syscall_entry(void);
  */
 extern void	*mach_syscall_table[SYSCALL_MACH_MAX];
 extern uint64_t	 mach_syscall_count;
+
+/*
+ * How many arguments each trap has beyond the six the C ABI passes in
+ * registers — zero for all but sixteen of them.
+ *
+ * A separate array of bytes rather than a field beside the pointer, for the
+ * same reason the pointers are a copy of mach_trap_table[] and not an
+ * indirection into it (see syscall.c): the entry path indexes this, so
+ * whatever it indexes must be something whose element size is a fact about
+ * the array itself.  A byte array is; a structure would not be.
+ *
+ * ⚠️ Read on the way into every Mach trap, so it shares cache lines with
+ * nothing else on purpose: 178 bytes is three lines, against the 1424 the
+ * pointer table occupies.
+ */
+extern uint8_t	 mach_syscall_stack[SYSCALL_MACH_MAX];
+
+/* The same, for this kernel's own calls. */
+extern const uint8_t syscall_stack[SYSCALL_NR_MAX];
 
 /*
  * What the last probe call found on the kernel stack, and which stack that was

@@ -991,8 +991,57 @@ fault_in(vm_map_t map, uint64_t addr, vm_prot_t prot,
 	return ok;
 }
 
+/*
+ * How many traps arrived with SMAP switched off, and whether the last one was
+ * still switched off once this had run (#468).
+ *
+ * Counted rather than flagged because the interesting number is not zero: a
+ * fault inside copyin or copyout is ordinary — it is how an address a task
+ * does not own becomes an error return — so these say the window exists and
+ * is being closed, not that something went wrong.
+ */
+static uint64_t	ac_traps;
+static uint64_t	ac_after_last;
+
+uint64_t trap_smap_lifted_count(void)
+{
+	return ac_traps;
+}
+
+uint64_t trap_smap_after_last(void)
+{
+	return ac_after_last;
+}
+
 void trap_dispatch(struct trap_frame *frame)
 {
+	/*
+	 * ── SMAP back on, for the handler (#468) ──────────────────────────
+	 *
+	 * The processor does not clear EFLAGS.AC on a fault.  So a trap taken
+	 * inside a bracketed copy — which is the ordinary way copyin reports
+	 * an address a task does not own — runs every line below with SMAP
+	 * lifted, and any stray kernel pointer into the user half quietly
+	 * works instead of faulting.  The one place the kernel is allowed to
+	 * touch user memory would be lending that permission to the whole
+	 * fault path.
+	 *
+	 * Clearing it here rather than restoring it on the way out is what
+	 * makes it free to get right: IRETQ reloads the flags the trap saved,
+	 * so the interrupted copy resumes with its own AC still set and needs
+	 * no cooperation from this end.
+	 *
+	 * ⚠️ The paranoid entry (#440) writes its record a few instructions
+	 * before calling this, and those instructions read MSRs and kernel
+	 * memory only.  Every other entry — fault, interrupt, IPI — reaches
+	 * this line first.
+	 */
+	if (read_rflags() & RFLAGS_AC) {
+		pmap_user_access_end();
+		ac_traps++;
+		ac_after_last = read_rflags() & RFLAGS_AC;
+	}
+
 	/*
 	 * An interrupt somebody asked for, before any of the fault machinery:
 	 * it is not a fault, it has no error code to report, and the expected-

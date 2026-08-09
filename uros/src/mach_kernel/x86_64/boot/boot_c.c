@@ -922,6 +922,95 @@ static void user_pmap_selftest(void)
 	pmap_user_access_end();
 
 	kputs("UrMach x86-64: running in the new space, wrote through it\r\n");
+
+	/*
+	 * And the same access through the routines that actually make it
+	 * (#468), which is a different question from the one above.
+	 *
+	 * 🔥 The store above brackets itself, so it passes whatever copyout()
+	 * does — and copyout() did not bracket at all.  The brackets were
+	 * written, correct, and consumed by nothing but their own test, while
+	 * every copy in the kernel faulted on its first byte and was retried
+	 * for ever.  It took a wedged boot and a debugger to see, because a
+	 * fault that vm_fault answers `success' to is not reported anywhere.
+	 *
+	 * So the check goes through copyout() and copyin() themselves.  The
+	 * value is not the one written above: a readback of 0xa11caca0 would
+	 * pass on a copyout that did nothing at all.
+	 */
+	{
+		uint32_t	out = 0xc0ffee01;
+		uint32_t	back = 0;
+		boolean_t	wr, rd;
+
+		wr = copyout((const char *)&out,
+			     (char *)(uintptr_t)(USER_TEST_VA + 8),
+			     sizeof out);
+		rd = copyin((const char *)(uintptr_t)(USER_TEST_VA + 8),
+			    (char *)&back, sizeof back);
+
+		kputs("UrMach x86-64: copyout then copyin through a user page "
+		      "returned ");
+		kputhex64(back);
+		kputs(!wr && !rd && back == out
+		      ? " — the real copy routines reach user memory with SMAP on\r\n"
+		      : " — WRONG, expected 0xc0ffee01 from both\r\n");
+	}
+
+	/*
+	 * And what a trap taken INSIDE the window sees (#468).
+	 *
+	 * The processor does not clear EFLAGS.AC on a fault, so a trap raised
+	 * while a copy has SMAP lifted would run the whole fault path with the
+	 * kernel's one deliberate permission to touch user memory still
+	 * granted.  This asks whether it does.
+	 *
+	 * ⚠️ An invalid opcode and not a real copy fault, and the difference is
+	 * a run.  The first version provoked the natural case — a copyout to
+	 * an address in the user half that this space does not have — and the
+	 * machine died in recursive page faults before it could report
+	 * anything.  Which is a finding rather than a nuisance, and it is
+	 * recorded on #467: here, before setup_main, the fault path asks
+	 * vm_fault() with whatever map current_act() offers, and for a low
+	 * address that answer is evidently not `no'.  It is a different
+	 * question from this one, so it gets a different issue instead of
+	 * being smuggled into this test.
+	 *
+	 * Isolated, the question needs no VM at all: the invalid-opcode probe
+	 * the entry tests already use, called between the brackets.  ⚠️ Its
+	 * resume address is trap_probe_faulted and not TRAP_RESUME_HERE —
+	 * that one means "the same instruction", which for a FAULT is the
+	 * instruction that just failed, and the machine executed the ud2 a
+	 * second time with nothing armed for it.  A fault needs somewhere past
+	 * itself to go.
+	 *
+	 * Both numbers are checked and they answer different halves.  The
+	 * count says the observation can see the condition at all — a test
+	 * that only asked whether AC was clear afterwards would pass on a
+	 * machine where the window never opened, which is a test that cannot
+	 * fail.
+	 */
+	{
+		uint64_t	seen, after;
+
+		trap_expect(T_INVALID_OPCODE,
+			    (uint64_t)(uintptr_t)trap_probe_faulted);
+
+		pmap_user_access_begin();
+		(void) trap_probe_ud();
+		pmap_user_access_end();
+
+		seen = trap_smap_lifted_count();
+		after = trap_smap_after_last();
+
+		kputs("UrMach x86-64: a trap raised inside a copy's window — ");
+		kputhex64(seen);
+		kputs(" arrived with SMAP lifted, left at ");
+		kputhex64(after);
+		kputs(seen > 0 && after == 0
+		      ? " — the fault path does not inherit the copy's permission\r\n"
+		      : " — WRONG\r\n");
+	}
 	pmap_activate(k);
 
 	readback = *(const volatile uint32_t *)(uintptr_t)phys_to_direct(frame);
@@ -2012,7 +2101,7 @@ static void ring3_selftest(void)
 	const struct trap_record *t;
 	struct trap_record first, bases;
 	struct trap_paranoid_record window;
-	uint64_t witness, answer, kernel_gs;
+	uint64_t witness, answer, wide, kernel_gs;
 	pmap_t space;
 	uint64_t size;
 	uint8_t *dst;
@@ -2078,6 +2167,13 @@ static void ring3_selftest(void)
 	bases = *trap_last();
 
 	/*
+	 * And a third, for the calls too wide for the argument registers
+	 * (#426).  Before the window test below, because that one arms a
+	 * breakpoint on the syscall path and can afford exactly one syscall.
+	 */
+	user_probe_enter(USER_PROBE_WIDE_VA, USER_PROBE_STACK_TOP);
+
+	/*
 	 * And a third time, to be caught in the window itself (#440).
 	 *
 	 * The NMI test arranges the window's *state*; this one enters the real
@@ -2111,6 +2207,7 @@ static void ring3_selftest(void)
 	t = &first;
 	witness = *(volatile uint64_t *)(uintptr_t)phys_to_direct(data_frame);
 	answer = *(volatile uint64_t *)(uintptr_t)(phys_to_direct(data_frame) + 8);
+	wide = *(volatile uint64_t *)(uintptr_t)(phys_to_direct(data_frame) + 16);
 
 	kputs("UrMach x86-64: ring 3 ran and left ");
 	kputhex64(witness);
@@ -2135,6 +2232,21 @@ static void ring3_selftest(void)
 	kputs(answer == USER_PROBE_SYSCALL_RESULT
 	      ? " — six arguments and a return, through SYSCALL and back\r\n"
 	      : " — WRONG, expected 0x060504030201\r\n");
+
+	/*
+	 * And the same for a call wider than the argument registers (#426).
+	 *
+	 * Reported separately rather than folded into the line above, because
+	 * they fail for different reasons: the six-argument answer is about
+	 * the register contract, and this one is about five words the entry
+	 * path pushes onto the kernel stack in an order it decides.  Sixteen
+	 * Mach traps take this path, and mach_msg is one of them.
+	 */
+	kputs("UrMach x86-64: and its eleven-argument call answered ");
+	kputhex64(wide);
+	kputs(wide == USER_PROBE_WIDE_RESULT
+	      ? " — the five above the sixth arrived where a C function looks\r\n"
+	      : " — WRONG, expected 0xba987654321\r\n");
 
 	/*
 	 * And which block each entry path was reached with.  Ring 3 ran with

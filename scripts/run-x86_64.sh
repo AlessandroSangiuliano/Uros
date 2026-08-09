@@ -77,6 +77,24 @@ KNOWN='timestamp counter measured against the 8254'
 TERMINATOR='no handler'
 MI_ENTRY='entering setup_main'
 
+# Which run announces that `no handler' is where it meant to stop (#426).
+#
+# ⚠️ The distinction above was drawn and then used in ONE direction: a run that
+# reached setup_main and then trapped was judged, and a run that trapped BEFORE
+# setup_main fell through the else and was reported as passed -- because the
+# terminator it was looking for had arrived, from a trap instead of from the
+# test that produces it.  Which is the same sentence the comment above warns
+# about, in a branch it did not cover.
+#
+# It cost a run: an unexpected debug exception halted the machine in the middle
+# of the machine-dependent self-tests, the log ended `no handler — halted', and
+# the verdict said `passed: reached the end, nothing unexplained' over 82 of the
+# 155 lines a good boot prints.
+#
+# Read from the LOG and not from --entry, so that --judge on an old log reaches
+# the same verdict as the run that produced it.
+DOUBLE_FAULT='breaking the stack on purpose'
+
 # Where the machine-independent kernel currently stops, and why that is not a
 # failure: it reaches bootstrap_create() and finds no userland bundle, because
 # nothing loads one for this target yet (#422).  Named here so it is EXCUSED
@@ -152,9 +170,30 @@ if grep -aq "$MI_ENTRY" "$LOG"; then
 		echo "  log: $LOG"
 		exit 1
 	fi
-elif ! grep -aq "$TERMINATOR" "$LOG"; then
-	echo "  FAILED: the run never reached '$TERMINATOR' — it was cut short, so"
-	echo "          the tests after that point did not run and cannot have passed"
+elif grep -aq "$DOUBLE_FAULT" "$LOG"; then
+	# The double-fault self-test, which is terminal by design: it never
+	# reaches setup_main and `no handler' is how it succeeds.
+	if ! grep -aq "$TERMINATOR" "$LOG"; then
+		echo "  FAILED: the run never reached '$TERMINATOR' — it was cut short, so"
+		echo "          the tests after that point did not run and cannot have passed"
+		echo "  log: $LOG"
+		exit 1
+	fi
+elif grep -aq "$TERMINATOR" "$LOG"; then
+	echo "  FAILED: halted before entering the machine-independent kernel."
+	echo "          A trap with no handler, in a run that is not the"
+	echo "          double-fault self-test, is the first thing this kernel"
+	echo "          got wrong:"
+	grep -an "$TERMINATOR" "$LOG" | head -1 | cut -d: -f1 \
+		| while read -r n; do
+			sed -n "$((n > 24 ? n - 24 : 1)),${n}p" "$LOG" | sed 's/^/    /'
+		done
+	echo "  log: $LOG"
+	exit 1
+else
+	echo "  FAILED: the run reached neither setup_main nor an end it announces"
+	echo "          — it was cut short, so the tests after that point did not"
+	echo "          run and cannot have passed"
 	echo "  log: $LOG"
 	exit 1
 fi
