@@ -121,6 +121,15 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     COMMENT "Publish device/device.h" VERBATIM)
   list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
 
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/device/device.h
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_MIG_OUT}/device.h ${CMAKE_BINARY_DIR}/generated/include/device/device.h
+    DEPENDS ${_MIG_OUT}/device.h
+    COMMENT "Publish device/device.h" VERBATIM)
+  list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
+
   add_custom_target(mig_mach_headers_x86_64 DEPENDS ${_PUB_HDRS})
 
   # ── The library itself ───────────────────────────────────────────────
@@ -144,8 +153,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   file(GLOB _MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
   list(REMOVE_ITEM _MACH_C ${_MS_WRAPPERS})
   list(REMOVE_ITEM _MACH_C
-    ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c            # needs float.h macros
-    ${CMAKE_CURRENT_SOURCE_DIR}/printf.c)           # <device/device.h>, #470
+    ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)           # needs float.h macros
 
   add_library(libmach STATIC ${_traps_pp} ${_MACH_C} ${LIBMACH_MIG_GENERATED})
   add_dependencies(libmach mig_mach_headers_x86_64)
