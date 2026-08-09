@@ -56,33 +56,37 @@
 #define PROBE_A6	0x56
 
 /*
- * And the one Mach trap it makes, which is the point of #411.
+ * And the Mach traps it makes — through libmach's stubs since #426.
  *
- * ⚠️ Not a number this file invented: SYSCALL_MACH_BASE is where
- * <syscall/syscall.h> puts the Mach traps in the call-number space, and 14 is
- * mach_print's index in the machine-independent mach_trap_table[].  Written as
- * the sum so that a reader can check both halves.
+ * ⚠️ The trap numbers used to be spelled out here, as SYSCALL_MACH_BASE + 14
+ * and + 15, in a file that could not include the header that defines the base.
+ * Two halves that agreed by inspection: exactly the shape of #448, in a place
+ * where nothing would ever have compared them again.
  *
- * mach_null is chosen -- trap 15, no arguments, returns at once -- because
- * what has to be proved here is the DISPATCH: the range test, the bound
- * against mach_syscall_count, the call through the pointer table, and the way
- * back out through SYSRET.  A trap that does nothing proves all of that and
+ * They are gone.  `call mach_print' names a symbol that the linker resolves
+ * against a stub generated from the machine-independent list of every trap in
+ * the system, expanded by <mach/x86_64/syscall_sw.h>, which reads the base
+ * from the kernel's own <syscall/syscall.h>.  One definition, three files
+ * downstream of it, and a number that cannot be got wrong here because it is
+ * not written here.
+ *
+ * This also makes the image a CONSUMER of the stubs rather than an imitation
+ * of them.  What #426 delivers is the translation between two calling
+ * conventions -- the C ABI's fourth argument in rcx, the kernel's in r10, and
+ * arguments seven and up off the caller's stack and into the callee-saved
+ * registers -- and none of that was exercised by a hand-written `syscall'
+ * with one argument.
+ *
+ * mach_null is called first -- no arguments, returns at once -- because what
+ * it proves is the DISPATCH: the range test, the bound against
+ * mach_syscall_count, the call through the pointer table, and the way back
+ * out through SYSRET.  A trap that does nothing proves all of that and
  * nothing else, so a failure has one meaning.
  *
- * ⚠️ mach_print (trap 14) was tried first, because a line printed by the user
- * program would be visible proof.  It does not come back, and the reason is
- * worth writing down rather than working around: mach_print() is
- * `printf("%s", s)' with a pointer the USER supplied, so the kernel walks a
- * string in a task's address space with the console lock already held.  When
- * that page is not resident the fault is taken inside printf, and the fault
- * handler wants to block -- with the lock held.  The dispatch is not what
- * fails there; mach_print's own contract is.  It needs to copy the string in
- * before printing it, which is a change to machine-independent code that i386
- * shares and is not this issue's to make in passing.
+ * ⚠️ mach_print needs the copy that #411 gave it: it is `printf("%s", s)'
+ * with a pointer the USER supplied, and before that change the kernel walked
+ * a string in a task's address space with the console lock already held.
  */
-#define SYSCALL_MACH_BASE	0x100
-#define MACH_TRAP_NULL		(SYSCALL_MACH_BASE + 15)
-#define MACH_TRAP_PRINT		(SYSCALL_MACH_BASE + 14)
 
 	.section .rodata
 hello:
@@ -93,16 +97,18 @@ hello:
 	.globl	_start
 _start:
 	/*
-	 * First the Mach trap, once, before the loop: what it proves is that
-	 * the dispatch works, and proving it once is proving it.
+	 * ⚠️ A CALL, which means this needs a stack — and needing one is part
+	 * of what is being proved.  The stack and the argument block are built
+	 * by build_args_and_stack() with copyout(), and until #468 those
+	 * copies silently wrote nothing: the region was allocated and the
+	 * words never arrived.  An image that only ever issued `syscall'
+	 * touched its stack pointer never and could not have noticed.
 	 */
-	movq	$MACH_TRAP_NULL, %rax
-	syscall
+	call	mach_null
 
 	/* And one that does something, and says so in our own words. */
-	movq	$MACH_TRAP_PRINT, %rax
 	leaq	hello(%rip), %rdi
-	syscall
+	call	mach_print
 
 	movq	$SYSCALL_NR_PROBE, %rax
 	movq	$PROBE_A1, %rdi

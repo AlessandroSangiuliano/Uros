@@ -17,6 +17,16 @@ endif()
 
 add_executable(boot_probe boot_probe.S)
 
+# The Mach trap stubs (#426), and the only thing this image links.
+#
+# ⚠️ It used to link nothing at all, and the comment above still says the
+# gate does not apply because it needs neither musl nor libmach.  Half of
+# that is now out of date on purpose: libmach's TRAP STUBS are exactly what
+# an image with no libc can use, which is why they are built ahead of the
+# gate too.  What it still does not need is a C library, a startup, or a
+# heap — the stubs are three instructions each and reference nothing.
+target_link_libraries(boot_probe PRIVATE libmach_traps)
+
 # ⚠️ -nostdlib AND -static AND no entry symbol from a runtime: this must be an
 # ET_EXEC with its own _start and nothing linked in behind it.  A dynamic image
 # would need an interpreter (#423), and a runtime would need a libc.

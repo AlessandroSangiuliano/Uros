@@ -84,6 +84,17 @@ if(OSFMK_BUILD_KERNEL)
   add_subdirectory(mach_kernel)
 endif()
 
+# The Mach trap stubs, ahead of the gate below (#426).
+#
+# lib/ as a whole is i386-only, and will be until musl and the servers cross
+# (#414, #429).  But the stubs are not a library: they are the one file that
+# lets anything at all call the kernel, and every issue behind the gate needs
+# them before it can begin.  See lib/libmach/CMakeLists.txt for what it builds
+# there and why it is a stage rather than the library.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libmach)
+endif()
+
 # The one user image that is not behind the gate below (#422).
 #
 # Everything in the userland tree needs musl (#414) or libmach (#426), so an
