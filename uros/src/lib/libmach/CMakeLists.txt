@@ -159,8 +159,22 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
       "${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/lib")
 
   target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS})
+  # ⚠️ -mstack-protector-guard=global, and the i386 half below has always had
+  # it.  Without it gcc reads the canary from %fs:0x28 -- the TLS slot, which
+  # is the sane default on a system whose libc installs a TCB before any
+  # protected function runs.  Here nothing does: this library IS the startup,
+  # FS base is zero when mach_init is called, and the first canary prologue
+  # reads address 0x28 and takes a page fault at the second instruction of the
+  # first function crt0 calls.
+  #
+  # 🔥 stack_protector.c defines __stack_chk_guard and crt0 calls
+  # init_stack_guard() to fill it -- a global canary, written on every startup
+  # and read by nothing, because the compiler was emitting the other kind.
+  # The two halves were consistent with each other and with nothing in
+  # between; on i386 the flag is what joined them, and it was never copied.
   target_compile_options(libmach PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -include stdint.h>)
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w
+                            -mstack-protector-guard=global -include stdint.h>)
 
   # ⚠️ The MIG OUTPUT directory is deliberately NOT here.  It holds a file
   # called mach.h -- the header for mach.defs -- and libmach has its own
