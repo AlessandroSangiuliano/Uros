@@ -172,6 +172,52 @@ static void note_boot_image(uint64_t a1, uint64_t a6)
 	       "has called into the kernel\n");
 }
 
+/*
+ * The first message, reported by the only thing that can judge it (#426).
+ *
+ * The boot image sends a message to a port it holds the receive right for and
+ * takes it off again — the whole IPC path, from a task, with no server in it.
+ * What it cannot do is say whether the answer was right: it has no way to
+ * print a number.  So it hands the kernel four, under a marker of its own, and
+ * the kernel says.
+ *
+ * ⚠️ msgh_local_port is the field that decides, and the identifier is not.
+ * Both come out of a buffer the sender filled, so an id that comes back is
+ * equally consistent with "the message went round" and with "the receive did
+ * nothing and this is still what I wrote".  The sender zeroes the local port;
+ * the kernel fills it in on the way out — ipc_kmsg_copyout_header does
+ * `msg->msgh_local_port = dest_name'.  So it is the one field in the answer
+ * that ring 3 could not have produced, and the one this asserts on.
+ */
+#define BOOT_IPC_A1	0x60
+#define BOOT_IPC_A6	0x66
+#define BOOT_IPC_ID	0x5eed
+
+static uint64_t boot_ipc_calls;
+
+uint64_t syscall_probe_boot_ipc_calls(void)
+{
+	return boot_ipc_calls;
+}
+
+static void note_boot_ipc(uint64_t a1, uint64_t kr, uint64_t id,
+			  uint64_t local, uint64_t port, uint64_t a6)
+{
+	if (a1 != BOOT_IPC_A1 || a6 != BOOT_IPC_A6)
+		return;
+
+	if (boot_ipc_calls++ != 0)
+		return;
+
+	printf("boot_probe: mach_msg on port 0x%lx answered 0x%lx, id 0x%lx "
+	       "back, and the kernel wrote local port 0x%lx%s\n",
+	       (unsigned long) port, (unsigned long) kr, (unsigned long) id,
+	       (unsigned long) local,
+	       (kr == 0 && id == BOOT_IPC_ID && port != 0 && local == port)
+	       ? " — the first IPC on x86-64, through the nine-argument stub"
+	       : " — WRONG");
+}
+
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -188,6 +234,7 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 	probe_saved_rip = saved[-1];
 	probe_saved_flags = saved[-2];
 	note_boot_image(a1, a6);
+	note_boot_ipc(a1, a2, a3, a4, a5, a6);
 
 	probe_depth = x86_64_backtrace_probe(
 			(uint64_t)(uintptr_t)__builtin_frame_address(0),
