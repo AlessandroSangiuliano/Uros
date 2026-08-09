@@ -88,12 +88,39 @@ void __start_mach(void);                       /* asm trampoline, below */
 void __start_mach_c(unsigned long entry_sp);
 
 /*
- * ELF entry trampoline.  The kernel / exec_server start us with %esp
- * pointing at the System V argument frame ([argc][argv..][0][envp..][0]
- * [auxv..]).  Capture that pointer before the C prologue perturbs %esp,
- * then call the C startup with it.  Static, non-PIE binaries only — the
- * direct call needs no PLT.
+ * ELF entry trampoline.  The kernel / exec_server start us with the stack
+ * pointer at the System V argument frame ([argc][argv..][0][envp..][0]
+ * [auxv..]).  Capture that pointer before the C prologue perturbs it, then
+ * call the C startup with it.  Static, non-PIE binaries only — the direct
+ * call needs no PLT.
+ *
+ * ⚠️ The two are not the same sequence at different widths, and that is the
+ * whole reason this is written twice rather than parameterised.  The
+ * argument travels differently — the stack on one, a register on the other —
+ * so on x86-64 there is nothing to push and nothing to make room for.
+ *
+ * ⚠️ Alignment is the part to get right in both, and the rule is about the
+ * CALL and not about this function: the ABI wants the stack pointer
+ * sixteen-byte aligned AT the call instruction, so that the callee sees it
+ * eight past a boundary once the return address is on.  i386 aligns and then
+ * subtracts twelve so its one pushed argument lands the total back on
+ * sixteen; x86-64 aligns and calls, because it pushes nothing.
  */
+#if defined(__x86_64__)
+
+__asm__(
+    ".text\n"
+    ".globl __start_mach\n"
+    ".type __start_mach,@function\n"
+    "__start_mach:\n"
+    "    xorl %ebp, %ebp\n"        /* outermost frame                     */
+    "    movq %rsp, %rdi\n"        /* &argc — the first argument register */
+    "    andq $-16, %rsp\n"        /* 16-byte align, nothing to push      */
+    "    call __start_mach_c\n"
+    "    hlt\n");
+
+#elif defined(__i386__)
+
 __asm__(
     ".text\n"
     ".globl __start_mach\n"
@@ -106,6 +133,10 @@ __asm__(
     "    pushl %eax\n"             /* arg: entry_sp */
     "    call __start_mach_c\n"
     "    hlt\n");
+
+#else
+#error "crt0: no entry trampoline for this architecture"
+#endif
 
 /*
  * __attribute__((optimize("no-stack-protector"))) ensures this function
@@ -152,7 +183,31 @@ __start_mach_c(unsigned long entry_sp)
 		new_sp = (*_threadlib_init_routine)();
 
 		if (new_sp)
+			/*
+			 * 🔥 A 64-bit TRUNCATION that assembles cleanly.
+			 *
+			 * `movl %0, %%esp' is a legal x86-64 instruction: %esp
+			 * is the low half of the stack pointer, so this would
+			 * have set the top half to zero and carried on with a
+			 * stack pointer below four gigabytes.  It compiled
+			 * without a word, and it has not fired only because
+			 * _threadlib_init_routine is null until libpthreads
+			 * arrives (#425).
+			 *
+			 * ⚠️ The real fix is not here: new_sp is an `int'
+			 * because _threadlib_init_routine is declared to
+			 * return one, and a stack pointer does not fit in an
+			 * int on this architecture.  Widening that is #425's,
+			 * where the thread library that supplies the value
+			 * lives.  Until then this instruction moves what it is
+			 * given and the declaration is the thing that lies.
+			 */
+#if defined(__x86_64__)
+			__asm__ volatile("movq %0, %%rsp"
+					 : : "g" ((unsigned long) new_sp));
+#else
 			__asm__ volatile("movl %0, %%esp" : : "g" (new_sp) );
+#endif
 	}
 
 	retval = main(__argc, __argv);

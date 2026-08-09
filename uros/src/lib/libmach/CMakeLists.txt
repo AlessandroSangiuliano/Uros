@@ -115,23 +115,20 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # inside them, and they are real machine-dependent work rather than an
   # include away:
   #
-  #   crt0.c              its ELF entry trampoline is written in i386
-  #                       assembly -- `movl %esp,%eax', `pushl' -- because it
-  #                       has to capture the argument frame before the C
-  #                       prologue moves the stack pointer.  A 64-bit twin is
-  #                       a different sequence, not a wider one.
-  #   stack_protector.c   likewise, at the canary.
+  # The one that is still out is printf.c, which reaches the console through
+  # <device/device.h> -- and device.defs is excluded (#470).
   #
-  # ⚠️ So this is libmach WITHOUT A STARTUP.  A program linking it brings its
-  # own _start, which is what boot_probe does.  Servers cannot until crt0 is
-  # ported, and that is named here rather than discovered at link time.
+  # crt0.c and stack_protector.c came in with #426: both carried a machine's
+  # assembly inside C, and both now carry two.  They are written twice rather
+  # than parameterised because the sequences differ in kind and not in width
+  # -- the entry argument travels on the stack on one and in a register on the
+  # other -- and because a `%esp' that means half a register is the sort of
+  # thing an assembler should refuse rather than a macro should paper over.
   file(GLOB _MACH_C CONFIGURE_DEPENDS "*.c")
   file(GLOB _MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
   list(REMOVE_ITEM _MACH_C ${_MS_WRAPPERS})
   list(REMOVE_ITEM _MACH_C
     ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c            # needs float.h macros
-    ${CMAKE_CURRENT_SOURCE_DIR}/crt0.c              # i386 assembly
-    ${CMAKE_CURRENT_SOURCE_DIR}/stack_protector.c   # i386 assembly
     ${CMAKE_CURRENT_SOURCE_DIR}/printf.c)           # <device/device.h>, #470
 
   add_library(libmach STATIC ${_traps_pp} ${_MACH_C} ${LIBMACH_MIG_GENERATED})
