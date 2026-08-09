@@ -73,6 +73,21 @@ void
 init_stack_guard(void)
 {
 	unsigned long sp;
+
+	/*
+	 * ⚠️ The instruction has to name the right register, and `%esp' on
+	 * x86-64 is the low half of the stack pointer -- an operand-size
+	 * mismatch the assembler refuses rather than a value silently
+	 * truncated, which is the good outcome.  Reading the whole register
+	 * also means the entropy is not thrown away above bit 32.
+	 */
+#if defined(__x86_64__)
+	__asm__ volatile("movq %%rsp, %0" : "=r" (sp));
+#elif defined(__i386__)
 	__asm__ volatile("movl %%esp, %0" : "=r" (sp));
+#else
+#error "stack guard: no stack pointer for this architecture"
+#endif
+
 	__stack_chk_guard = sp ^ 0xDEAD00FF;
 }

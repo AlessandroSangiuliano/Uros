@@ -157,6 +157,7 @@
 /* What the kernel is told, so that a stray probe call cannot look like this. */
 #define IPC_A1			0x60
 #define IPC_A1_NARROW		0x61
+#define IPC_A1_ERROR		0x62
 #define IPC_A6			0x66
 
 	.section .rodata
@@ -284,6 +285,58 @@ _start:
 	movl	MSGH_LOCAL_OFF(%r15), %r10d
 	movq	$SYSCALL_NR_PROBE, %rax
 	movq	$IPC_A1_NARROW, %rdi
+	movq	%r14, %r8
+	movq	$IPC_A6, %r9
+	syscall
+
+	/*
+	 * ── And a call that FAILS, on purpose ────────────────────────
+	 *
+	 * The two above answered zero, which tells us a success comes back
+	 * and nothing about an error.  A Mach trap returns kern_return_t,
+	 * and kern_return_t is an `int' -- mach_trap_table's function
+	 * pointer says so.  On this architecture that means the answer is
+	 * in %eax and the TOP HALF OF %rax IS WHATEVER THE CALLEE LEFT
+	 * THERE: the ABI does not require a function returning int to
+	 * clear it.
+	 *
+	 * ⚠️ So the whole register is reported, not the low half.  A stub's
+	 * C prototype says kern_return_t and a C caller reads %eax and is
+	 * safe either way; this asks the other question, the one nobody has
+	 * asked yet -- what does ring 3 actually get back in the register?
+	 *
+	 * ⚠️ There is no poisoning it beforehand: the stub puts the trap
+	 * NUMBER in %rax two instructions before the syscall, so anything
+	 * written here is gone.  What the answer shows is therefore what the
+	 * kernel left, which is the question -- but it cannot distinguish
+	 * "the kernel cleared the top half" from "nothing ever set it".
+	 *
+	 * Sending to MACH_PORT_NULL is the smallest way to make it fail
+	 * with a value that is not zero and not small: 0x10000003.  Small
+	 * negative numbers are the entry path's own answer for a call that
+	 * does not exist (-38), so an error that is neither confirms the
+	 * two conventions do not overlap.
+	 */
+	movl	$MSGH_BITS, MSGH_BITS_OFF(%r15)
+	movl	$MSGH_SIZE, MSGH_SIZE_OFF(%r15)
+	movl	$0, MSGH_REMOTE_OFF(%r15)	/* MACH_PORT_NULL */
+	movl	$0, MSGH_LOCAL_OFF(%r15)
+	movl	$0, MSGH_RESERVED_OFF(%r15)
+	movl	$MSG_ID, MSGH_ID_OFF(%r15)
+
+	movq	%r15, %rdi
+	movq	$MACH_SEND_MSG, %rsi		/* send only: it must not wait */
+	movq	$MSGH_SIZE, %rdx
+	movq	$0, %rcx
+	movq	$0, %r8
+	movq	$0, %r9
+	call	urmach_msg
+
+	movq	%rax, %rsi			/* the whole 64 bits */
+	movq	$0, %rdx
+	movq	$0, %r10
+	movq	$SYSCALL_NR_PROBE, %rax
+	movq	$IPC_A1_ERROR, %rdi
 	movq	%r14, %r8
 	movq	$IPC_A6, %r9
 	syscall

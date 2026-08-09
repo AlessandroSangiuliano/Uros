@@ -463,7 +463,7 @@ type ledger_item_t		= integer_t;
  * was, and remains, eight bytes -- and i386's generated stubs come out
  * byte-identical.
  */
-type security_token_t		= array[2] of MACH_MSG_TYPE_INTEGER_32
+type security_token_t		= struct[2] of MACH_MSG_TYPE_INTEGER_32
 	ctype: security_token_t;
 
 		/* memory_object_info_t: variable-size inline array:

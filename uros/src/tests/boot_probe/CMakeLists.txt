@@ -25,7 +25,13 @@ add_executable(boot_probe boot_probe.S)
 # an image with no libc can use, which is why they are built ahead of the
 # gate too.  What it still does not need is a C library, a startup, or a
 # heap — the stubs are three instructions each and reference nothing.
-target_link_libraries(boot_probe PRIVATE libmach_traps)
+# ⚠️ By PATH and not as a target, and the difference is the whole link.
+# libmach is a C library, so naming it as a target makes CMake propagate the C
+# language's implicit link libraries -- -lgcc, -lc, -lgcc_s_asneeded -- into a
+# link that is -nostdlib -static and has none of them.  The failure does not
+# name libmach at all: it is `cannot find -lgcc_s_asneeded'.
+target_link_libraries(boot_probe PRIVATE $<TARGET_FILE:libmach>)
+add_dependencies(boot_probe libmach)
 
 # ⚠️ -nostdlib AND -static AND no entry symbol from a runtime: this must be an
 # ET_EXEC with its own _start and nothing linked in behind it.  A dynamic image

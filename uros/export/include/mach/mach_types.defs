@@ -464,7 +464,32 @@ type ledger_port_t = mach_port_t
 type ledger_port_array_t 	= ^array[] of ledger_port_t;
 type ledger_item_t		= integer_t;
 
-type security_token_t		= MACH_MSG_TYPE_INTEGER_64;
+/*
+ * Two 32-bit integers, passed by value (#470).
+ *
+ * ⚠️ THE SAME TYPE WAS DECLARED DIFFERENTLY IN THE TWO .defs TREES: the
+ * kernel's said `array[2] of MACH_MSG_TYPE_INTEGER_32' (fixed for #453) and
+ * this one said MACH_MSG_TYPE_INTEGER_64.  Same name, same C type, two wire
+ * layouts -- identical on i386, where nothing is aligned above four, and four
+ * bytes apart on x86-64, where the kernel's server would read a field the
+ * client did not put there.  A fix applied where a defect was found and not
+ * across the class it belongs to, and a pair of .defs trees is a class.
+ *
+ * 🔑 `struct[2] of', not `array[2] of', and that is the whole repair.  The
+ * tag decides two things at once.  Its ALIGNMENT: an aggregate is aligned
+ * like its element, so migcom derives four from the same place the compiler
+ * does, instead of eight from the total width.  And how it is COPIED:
+ * <type.h> says itStruct means "passed by value and can be assigned with =",
+ * where an array is "passed by reference".  `array' gets both right for
+ * SERVER stubs, where the token is a struct member, and produces
+ * `* (sp) InP->sec_token = * (sp) sec_token' for USER stubs -- a cast of a
+ * struct value to a pointer type, which does not compile.
+ *
+ * The wire format does not move on either target: it was, and remains, eight
+ * bytes.
+ */
+type security_token_t		= struct[2] of MACH_MSG_TYPE_INTEGER_32
+	ctype: security_token_t;
 
 		/* memory_object_info_t: variable-size inline array:
 		 * memory_object_attr_info_t (5 ints)
