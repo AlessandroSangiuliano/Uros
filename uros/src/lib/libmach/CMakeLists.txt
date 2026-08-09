@@ -74,16 +74,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${_E}/mach/bootstrap.defs
     ${_E}/mach/exc.defs
     ${_E}/mach/notify.defs
-    # ⚠️ device.defs is NOT here (#470).  Its stubs fail their own
-    # _Static_asserts at -m64, and the cause is worse than padding: the two
-    # .defs trees describe security_token_t DIFFERENTLY -- the kernel's says
-    # `array[2] of MACH_MSG_TYPE_INTEGER_32', the export tree's says
-    # MACH_MSG_TYPE_INTEGER_64.  Same name, same C type, two wire layouts,
-    # identical on i386 and four bytes apart here.  Copying the kernel's
-    # spelling across does not fix it: it is right for SERVER stubs, where
-    # the token is a struct member, and wrong for USER stubs, where it is a
-    # value and migcom emits a cast to a pointer type that does not compile.
-    # That is migcom's to settle, not a line in a .defs.
+    # device.defs used to be held out of this list: its stubs failed their own
+    # _Static_asserts at -m64, because the two .defs trees described
+    # security_token_t differently and were four bytes apart here.  #470 fixed
+    # that in mach_types.defs -- `struct[2] of', which says what the C type is
+    # -- and this is the line that makes the repair reachable from a clean
+    # tree.  ⚠️ It was missing while the commit that closed #470 said device
+    # generated: what generated was a HAND RUN of migcom whose output stayed in
+    # the build directory, so printf.c compiled against a header no rule
+    # produced and the stubs it calls were in no archive.
+    ${_E}/device/device.defs
   )
   set(LIBMACH_MIG_GENERATED)
   foreach(d IN LISTS _DEFS)
@@ -121,15 +121,6 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     COMMENT "Publish device/device.h" VERBATIM)
   list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
 
-  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
-  add_custom_command(
-    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/device/device.h
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${_MIG_OUT}/device.h ${CMAKE_BINARY_DIR}/generated/include/device/device.h
-    DEPENDS ${_MIG_OUT}/device.h
-    COMMENT "Publish device/device.h" VERBATIM)
-  list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
-
   add_custom_target(mig_mach_headers_x86_64 DEPENDS ${_PUB_HDRS})
 
   # ── The library itself ───────────────────────────────────────────────
@@ -144,11 +135,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # other -- and because a `%esp' that means half a register is the sort of
   # thing an assembler should refuse rather than a macro should paper over.
   #
-  # printf.c is still out: it reaches the console through <device/device.h>,
-  # which is blocked on #470 above.  ⚠️ That has a consequence beyond
-  # printing -- crt0 pulls exit, which pulls panic, which calls printf -- so
-  # no program can be entered through __start_mach here until #470 is done.
-  # boot_probe keeps its own _start for that reason.
+  # printf.c is in, and with it the reason it was ever out: it reaches the
+  # console through <device/device.h>, and crt0 pulls exit, which pulls panic,
+  # which calls printf -- so until device.defs generated here, no program on
+  # this target could be entered through __start_mach at all.
+  #
+  # ⚠️ Compiling printf.c is only half of that.  It CALLS device_open and
+  # device_write_inband, which live in the stubs device.defs generates, and an
+  # archive that holds the caller and not the callee links for exactly as long
+  # as nobody calls printf.  The two arrive together above or neither is worth
+  # anything.
   file(GLOB _MACH_C CONFIGURE_DEPENDS "*.c")
   file(GLOB _MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
   list(REMOVE_ITEM _MACH_C ${_MS_WRAPPERS})
