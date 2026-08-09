@@ -918,6 +918,52 @@ urmach_msg_lockfree_resolve(
 }
 
 /*
+ *	Routine:	urmach_msg [mach trap]
+ *	Purpose:
+ *		The same as mach_msg_overwrite_trap, for the callers that use
+ *		none of its last three arguments — which is every ordinary
+ *		mach_msg() in the system (#469).
+ *
+ *		`rcv_msg' and `rcv_limit' are the scatter list; `notify' is
+ *		read only when the notify options are set.  A caller that
+ *		wants none of them passes three constants across the boundary
+ *		on every message, and on both targets those three are the
+ *		difference between arguments that fit in registers and
+ *		arguments that have to go through memory.
+ *	Conditions:
+ *		Nothing locked.
+ *	Returns:
+ *		Whatever mach_msg_overwrite_trap returns.
+ *
+ *	⚠️ AN ENTRY, NOT AN IMPLEMENTATION, and that distinction is the whole
+ *	design.  The body below is some seventeen hundred lines with a fast
+ *	path, continuations and interruption handling; a second copy of it
+ *	would be a second place for the option handling to drift.  Whatever
+ *	the reason was for fusing mach_msg_trap into the overwrite form —
+ *	nothing in the source records one — keeping a single implementation
+ *	is the part worth preserving, and it costs nothing to preserve.
+ *
+ *	⚠️ The continuation path does not return through here, and does not
+ *	need to: a blocking receive leaves through thread_syscall_return(),
+ *	which goes to user mode directly.  This frame is simply never
+ *	unwound in that case, exactly as the caller's would not have been.
+ */
+
+mach_msg_return_t
+urmach_msg(
+	mach_msg_header_t	*msg,
+	mach_msg_option_t	option,
+	mach_msg_size_t		send_size,
+	mach_msg_size_t		rcv_size,
+	mach_port_t		rcv_name,
+	mach_msg_timeout_t	timeout)
+{
+	return mach_msg_overwrite_trap(msg, option, send_size, rcv_size,
+				       rcv_name, timeout,
+				       MACH_PORT_NULL, MACH_MSG_NULL, 0);
+}
+
+/*
  *	Routine:	mach_msg_overwrite_trap [mach trap]
  *	Purpose:
  *		Possibly send a message; possibly receive a message.

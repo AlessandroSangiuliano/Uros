@@ -152,9 +152,11 @@
 
 /* Ours, and recognisable in a hexadecimal dump. */
 #define MSG_ID			0x5eed
+#define MSG_ID_NARROW		0x5ee6
 
 /* What the kernel is told, so that a stray probe call cannot look like this. */
 #define IPC_A1			0x60
+#define IPC_A1_NARROW		0x61
 #define IPC_A6			0x66
 
 	.section .rodata
@@ -249,6 +251,40 @@ _start:
 	movq	$SYSCALL_NR_PROBE, %rax
 	movq	$IPC_A1, %rdi
 	movq	%r14, %r8			/* the port it all went through */
+	movq	$IPC_A6, %r9
+	syscall
+
+	/*
+	 * And again through the SIX-argument trap (#469), which is the one an
+	 * ordinary mach_msg() uses now.  Same port, same buffers, one
+	 * identifier apart — so the two shapes are compared on the same work
+	 * rather than described.
+	 *
+	 * ⚠️ Six arguments means nothing on the stack at all: the trap number
+	 * changes and the three pushes above simply are not there.  Its stub
+	 * is `mov %rcx,%r10; mov $0x121,%rax; syscall; ret'.
+	 */
+	movl	$MSGH_BITS, MSGH_BITS_OFF(%r15)
+	movl	$MSGH_SIZE, MSGH_SIZE_OFF(%r15)
+	movl	%r14d, MSGH_REMOTE_OFF(%r15)
+	movl	$0, MSGH_LOCAL_OFF(%r15)
+	movl	$0, MSGH_RESERVED_OFF(%r15)
+	movl	$MSG_ID_NARROW, MSGH_ID_OFF(%r15)
+
+	movq	%r15, %rdi
+	movq	$(MACH_SEND_MSG|MACH_RCV_MSG), %rsi
+	movq	$MSGH_SIZE, %rdx
+	movq	$MSG_BUF_SIZE, %rcx
+	movq	%r14, %r8
+	movq	$0, %r9
+	call	urmach_msg
+
+	movq	%rax, %rsi			/* what the narrow trap answered */
+	movl	MSGH_ID_OFF(%r15), %edx		/* it replies into the send buffer */
+	movl	MSGH_LOCAL_OFF(%r15), %r10d
+	movq	$SYSCALL_NR_PROBE, %rax
+	movq	$IPC_A1_NARROW, %rdi
+	movq	%r14, %r8
 	movq	$IPC_A6, %r9
 	syscall
 

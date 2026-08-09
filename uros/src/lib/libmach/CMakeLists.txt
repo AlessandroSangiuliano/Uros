@@ -251,6 +251,17 @@ set_source_files_properties(
 
 add_library(libmach STATIC ${LIB_SOURCES})
 
+# #469: which trap mach_msg() reaches the kernel through.  OFF is the narrow
+# six-argument urmach_msg; ON restores the nine-argument overwrite form
+# verbatim, so that the two can be built and measured against each other.
+#
+# ⚠️ On mach_msg.c ONLY.  A definition applied to the whole library would
+# rebuild eighty objects between the A and the B of a measurement, and the
+# difference would no longer be one function.
+option(UROS_MACH_MSG_WIDE "mach_msg() uses the nine-argument trap (#469)" OFF)
+set_source_files_properties(mach_msg.c PROPERTIES COMPILE_DEFINITIONS
+  "$<$<BOOL:${UROS_MACH_MSG_WIDE}>:UROS_MACH_MSG_WIDE>")
+
 # Depend on MIG-generated device/device.h (defined in parent CMakeLists)
 add_dependencies(libmach mig_device_header mig_mach_public_headers)
 

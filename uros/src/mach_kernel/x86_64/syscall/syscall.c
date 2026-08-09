@@ -218,6 +218,42 @@ static void note_boot_ipc(uint64_t a1, uint64_t kr, uint64_t id,
 	       : " — WRONG");
 }
 
+/*
+ * And the same message through the six-argument trap (#469).
+ *
+ * A separate line because it is a separate claim: that urmach_msg reaches the
+ * same body and answers the same, with nothing on the stack at all.  Without
+ * a caller on this target the trap would be produced and consumed by nobody
+ * -- and the measurement that justified it was taken on the OTHER one.
+ *
+ * ⚠️ The narrow form has no rcv_msg, so the reply necessarily lands in the
+ * send buffer.  msgh_local_port is still the field that decides: the sender
+ * zeroes it and the kernel writes it.
+ */
+#define BOOT_IPC_A1_NARROW	0x61
+#define BOOT_IPC_ID_NARROW	0x5ee6
+
+static uint64_t boot_ipc_narrow_calls;
+
+static void note_boot_ipc_narrow(uint64_t a1, uint64_t kr, uint64_t id,
+				 uint64_t local, uint64_t port, uint64_t a6)
+{
+	if (a1 != BOOT_IPC_A1_NARROW || a6 != BOOT_IPC_A6)
+		return;
+
+	if (boot_ipc_narrow_calls++ != 0)
+		return;
+
+	printf("boot_probe: urmach_msg on port 0x%lx answered 0x%lx, id 0x%lx "
+	       "back, local port 0x%lx%s\n",
+	       (unsigned long) port, (unsigned long) kr, (unsigned long) id,
+	       (unsigned long) local,
+	       (kr == 0 && id == BOOT_IPC_ID_NARROW && port != 0
+		&& local == port)
+	       ? " — six arguments, nothing on the stack"
+	       : " — WRONG");
+}
+
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -235,6 +271,7 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 	probe_saved_flags = saved[-2];
 	note_boot_image(a1, a6);
 	note_boot_ipc(a1, a2, a3, a4, a5, a6);
+	note_boot_ipc_narrow(a1, a2, a3, a4, a5, a6);
 
 	probe_depth = x86_64_backtrace_probe(
 			(uint64_t)(uintptr_t)__builtin_frame_address(0),

@@ -160,6 +160,11 @@ kernel_trap(mach_host_self,-29,0)
 kernel_trap(syscall_vm_read_overwrite,-30,5)
 kernel_trap(syscall_vm_write,-31,4)
 kernel_trap(mach_msg_overwrite_trap,-32,9)
+/*
+ *	The plain form, six arguments (#469).  Slot 33 was reserved for
+ *	task_by_pid in 1990 and nobody ever came for it.
+ */
+kernel_trap(urmach_msg,-33,6)
 rpc_trap(mach_rpc_trap,-35,4)
 rpc_trap(mach_rpc_return_trap,-36,0)
 
