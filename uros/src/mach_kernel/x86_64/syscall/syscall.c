@@ -254,6 +254,46 @@ static void note_boot_ipc_narrow(uint64_t a1, uint64_t kr, uint64_t id,
 	       : " — WRONG");
 }
 
+/*
+ * What ring 3 gets back when a trap FAILS (#426).
+ *
+ * The issue asks for "return-value and error conventions matching what the
+ * kernel side actually does", and two calls that answered zero do not show
+ * that.  A Mach trap returns kern_return_t, which mach_trap_table declares as
+ * `int' -- so the answer is a 32-bit value in %eax, and the ABI does not
+ * oblige the callee to clear the top half of %rax.
+ *
+ * ⚠️ This reports the WHOLE register, which is the question userland has to
+ * answer and has never been asked here.  It cannot be poisoned beforehand --
+ * the stub puts the trap number in %rax two instructions before the syscall
+ * -- so a clean upper half means "the kernel left it clean", not "the kernel
+ * cleared it".  That is still the fact a caller needs: if a Mach error ever
+ * arrives with rubbish above bit 31, this line says so, and the convention
+ * would have to be written down as "read the low half".
+ */
+#define BOOT_IPC_A1_ERROR	0x62
+#define BOOT_IPC_ERR_EXPECT	0x10000003	/* MACH_SEND_INVALID_DEST */
+
+static uint64_t boot_ipc_error_calls;
+
+static void note_boot_ipc_error(uint64_t a1, uint64_t kr, uint64_t port,
+				uint64_t a6)
+{
+	if (a1 != BOOT_IPC_A1_ERROR || a6 != BOOT_IPC_A6)
+		return;
+
+	if (boot_ipc_error_calls++ != 0)
+		return;
+
+	printf("boot_probe: a send to MACH_PORT_NULL answered 0x%lx in the "
+	       "whole register (expected 0x%x)%s\n",
+	       (unsigned long) kr, (unsigned) BOOT_IPC_ERR_EXPECT,
+	       kr == BOOT_IPC_ERR_EXPECT
+	       ? " — an error comes back exact, and clean above bit 31"
+	       : " — WRONG");
+	(void) port;
+}
+
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -272,6 +312,7 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 	note_boot_image(a1, a6);
 	note_boot_ipc(a1, a2, a3, a4, a5, a6);
 	note_boot_ipc_narrow(a1, a2, a3, a4, a5, a6);
+	note_boot_ipc_error(a1, a2, a5, a6);
 
 	probe_depth = x86_64_backtrace_probe(
 			(uint64_t)(uintptr_t)__builtin_frame_address(0),
