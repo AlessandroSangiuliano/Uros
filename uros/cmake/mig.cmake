@@ -92,3 +92,61 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     
     set(${SUBSYS_NAME}_GENERATED ${${SUBSYS_NAME}_GENERATED} ${USER_C} PARENT_SCOPE)
 endfunction()
+
+# ── Userland stubs (#426) ────────────────────────────────────────────────
+#
+# The third kind, and the one libmach is made of: a task calling the kernel,
+# so neither KERNEL_SERVER nor KERNEL_USER is defined.  Both halves come out
+# of one run -- the user stubs a client links, and the server stubs a server
+# demultiplexes with -- because migcom writes them from one parse.
+#
+# ⚠️ i386 does NOT come through here.  It generates its userland stubs from
+# src/lib/CMakeLists.txt via the scripts/mig wrapper, which never passes
+# -target: harmless there, because migcom's default IS i386.  Adding a target
+# flag to that wrapper is not a one-line change -- its argument loop routes
+# any flag it does not recognise to the C PREPROCESSOR, so `-target x86_64'
+# would arrive at cc and the architecture would never reach migcom at all.
+#
+# So this calls migcom directly, the way add_mig_server and add_mig_user
+# above already do, and inherits their target handling rather than teaching a
+# 1990 shell script a new option.  When i386's userland moves here too, that
+# wrapper can go.
+#
+# ⚠️ The target is derived here and not taken from ${UROS_MIG_TARGET_ARGS}:
+# that variable is set inside the kernel's directory scope and is empty
+# everywhere else, and an empty target argument is exactly the silent i386
+# layout the note at the top of this file is about.  It is not silent for
+# long -- migcom emits _Static_asserts that the target compiler checks -- but
+# a build that fails on an assertion in generated code is a worse way to find
+# out than not making the mistake.
+function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
+    get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
+    set(USER_C   ${OUTPUT_DIR}/${DEFS_NAME}_user.c)
+    set(SERVER_C ${OUTPUT_DIR}/${DEFS_NAME}_server.c)
+    set(USER_H   ${OUTPUT_DIR}/${DEFS_NAME}.h)
+    set(SERVER_H ${OUTPUT_DIR}/${DEFS_NAME}_server.h)
+
+    file(MAKE_DIRECTORY ${OUTPUT_DIR})
+    set_source_files_properties(${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H}
+                                PROPERTIES GENERATED TRUE)
+
+    add_custom_command(
+        OUTPUT ${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H}
+        COMMAND ${CMAKE_C_COMPILER} -E -x c
+                ${UROS_MIG_USERLAND_INCLUDES}
+                -DMIG_ARCH_${UROS_MIG_ARCH_UPPER}=1
+                ${DEFS_FILE} |
+                $<TARGET_FILE:migcom>
+                -target ${UROS_TARGET_ARCH}
+                -header ${USER_H}
+                -sheader ${SERVER_H}
+                -user ${USER_C}
+                -server ${SERVER_C}
+        DEPENDS migcom ${DEFS_FILE}
+        COMMENT "MIG: ${DEFS_NAME} (userland, ${UROS_TARGET_ARCH})"
+        VERBATIM
+    )
+
+    set(${SUBSYS_NAME}_GENERATED ${${SUBSYS_NAME}_GENERATED}
+        ${USER_C} ${SERVER_C} PARENT_SCOPE)
+endfunction()

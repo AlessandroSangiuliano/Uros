@@ -23,6 +23,9 @@ project(libmach C)
 # is saying "I want to reach the kernel and I am bringing my own everything
 # else", which is exactly what boot_probe is.
 if(NOT UROS_TARGET_ARCH STREQUAL "i386")
+  set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
+  set(_E ${CMAKE_SOURCE_DIR}/export/include)
+
   set(_traps_src ${CMAKE_CURRENT_SOURCE_DIR}/mach_traps.s)
   set(_traps_pp  ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S)
 
@@ -47,6 +50,52 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     VERBATIM
   )
   set_source_files_properties(${_traps_pp} PROPERTIES GENERATED TRUE)
+
+  # ── The MIG stub surface (#426) ──────────────────────────────────────
+  #
+  # Everything in libmach above the traps reaches <mach/mach_interface.h>,
+  # which is generated from mach.defs and does not exist until mig has run.
+  # That one missing header is what stops mach_init.c, mig_support.c and the
+  # mach_msg_* wrappers -- and it reports itself as a missing FILE, which
+  # names the symptom rather than the generator nobody invoked.
+  set(UROS_MIG_ARCH_UPPER X86_64)
+  set(UROS_MIG_USERLAND_INCLUDES
+      -I${_E}
+      -I${UROS_ARCH_INCLUDE}
+      -I${_K}
+      -I${_E}/mach_debug)
+
+  set(_MIG_OUT ${CMAKE_BINARY_DIR}/generated)
+  set(_DEFS
+    ${_E}/mach/mach.defs
+    ${_E}/mach/mach_port.defs
+    ${_E}/mach/mach_host.defs
+  )
+  set(LIBMACH_MIG_GENERATED)
+  foreach(d IN LISTS _DEFS)
+    add_mig_userland(${d} ${_MIG_OUT} LIBMACH_MIG)
+  endforeach()
+
+  # #169: published under the names consumers actually include.
+  set(_PUB "${CMAKE_BINARY_DIR}/generated/include/mach")
+  file(MAKE_DIRECTORY "${_PUB}")
+  set(_PUB_MAP  mach.h mach_interface.h  mach_port.h mach_port.h
+                mach_host.h mach_host.h)
+  set(_PUB_HDRS)
+  list(LENGTH _PUB_MAP _n_map)
+  math(EXPR _last "${_n_map} - 1")
+  foreach(_i RANGE 0 ${_last} 2)
+    math(EXPR _j "${_i} + 1")
+    list(GET _PUB_MAP ${_i} _from)
+    list(GET _PUB_MAP ${_j} _to)
+    add_custom_command(OUTPUT ${_PUB}/${_to}
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${_MIG_OUT}/${_from} ${_PUB}/${_to}
+      DEPENDS ${_MIG_OUT}/${_from}
+      COMMENT "Publish mach/${_to} (from ${_from})" VERBATIM)
+    list(APPEND _PUB_HDRS ${_PUB}/${_to})
+  endforeach()
+  add_custom_target(mig_mach_headers_x86_64 DEPENDS ${_PUB_HDRS})
 
   add_library(libmach_traps STATIC ${_traps_pp})
   set_target_properties(libmach_traps PROPERTIES
