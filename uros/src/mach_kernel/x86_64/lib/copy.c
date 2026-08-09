@@ -25,19 +25,39 @@
  *
  * Both are needed and neither covers the other.
  *
- * ⚠️ There is no SMAP handling here yet.  Supervisor Mode Access Prevention
- * makes a kernel touch of a user page fault unless the access is bracketed
- * by STAC/CLAC, and this kernel does not enable it -- so these work.  The
- * moment CR4.SMAP is set, every routine in this file faults on its first
- * byte and the recovery below turns that into "copy failed" for every copy
- * in the system, which would look like user memory being unreadable rather
- * than like a missing STAC.  Whoever turns SMAP on turns it on here first.
+ * ── SMAP, and the sentence that used to be here (#468) ────────────────
+ *
+ * Supervisor Mode Access Prevention makes a kernel touch of a user page
+ * fault unless the access is bracketed by STAC/CLAC.  This file used to say
+ * "this kernel does not enable it -- so these work", and end with "whoever
+ * turns SMAP on turns it on here first".
+ *
+ * Whoever turned it on did not.  boot_c.c has called pmap_enable_smep_smap()
+ * unconditionally since it was written, and every boot log since has said
+ * `SMEP on, SMAP on' -- next to a file asserting the opposite, in a comment
+ * no compiler reads.
+ *
+ * 🔥 And the prediction the old comment made was wrong in the direction that
+ * mattered.  It expected "copy failed for every copy in the system".  What
+ * actually happened is worse and quieter: the fault handler asks vm_fault()
+ * before the recovery table (#411/#467, and rightly -- see trap.c), vm_fault
+ * finds nothing wrong with a page that is mapped and resident, answers
+ * success, and the instruction is retried.  Forever.  A machine-independent
+ * caller that ignores the result -- build_args_and_stack() discards every
+ * one of its copyout() answers with (void) -- got a silent nothing before
+ * that ordering changed, and an unbreakable loop after it.
+ *
+ * 🔑 So the bracket is here, in the one routine all five entry points pass
+ * through, and the checking of it is a self-test that calls THESE functions
+ * rather than a store bracketed by hand.  The brackets were written and
+ * correct for months; what was missing was a consumer that could fail.
  */
 
 #include <stdint.h>
 
 #include <kern/misc_protos.h>
 #include <mach/machine/vm_param.h>
+#include <pmap/pmap.h>
 #include <trap/extable.h>
 
 /*
@@ -82,6 +102,16 @@ copy_with_recovery(const void *from, void *to, vm_size_t len)
 {
 	boolean_t	failed = FALSE;
 
+	/*
+	 * ⚠️ The end runs after a fault as well as after a completed copy, and
+	 * that is not luck: the recovery address in the table is label 2,
+	 * INSIDE this asm block, so a fault resumes here and falls out to the
+	 * next statement.  A recovery that jumped somewhere else would leave
+	 * EFLAGS.AC set on a path out of the copy, which is SMAP switched off
+	 * for whatever the kernel did next.
+	 */
+	pmap_user_access_begin();
+
 	__asm__ volatile(
 		"1:\n\t"
 		"rep movsb\n\t"
@@ -89,6 +119,8 @@ copy_with_recovery(const void *from, void *to, vm_size_t len)
 		EX_TABLE(1, 2)
 		: "+D"(to), "+S"(from), "+c"(len), "+r"(failed)
 		: : "memory");
+
+	pmap_user_access_end();
 
 	/*
 	 * A fault resumes at 2 with the count register holding what was left,

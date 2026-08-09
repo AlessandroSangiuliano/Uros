@@ -956,8 +956,92 @@ trap_take_ast(struct trap_frame *frame)
 	ast_taken(FALSE, take, splsched());
 }
 
+
+/*
+ * Resolve a fault, with interrupts as the interrupted code had them (#411).
+ *
+ * 🔥 A trap gate clears IF, so a handler runs with interrupts off -- and
+ * vm_fault() is not a leaf.  It reaches pmap_enter(), which can unmap a page it
+ * is replacing, which shoots the translation down on every processor, which is
+ * a cross-call: `ipi: a cross-call with interrupts off would deadlock', and
+ * ipi_call_others() says so rather than hanging, which is the only reason this
+ * took minutes instead of an afternoon.
+ *
+ * ⚠️ Restored from the FRAME, not enabled unconditionally.  A fault taken in a
+ * section that had interrupts off on purpose must not come back with them on;
+ * the interrupted code's own flags are the only right answer, and they are
+ * sitting in the frame the entry saved.
+ */
+static boolean_t
+fault_in(vm_map_t map, uint64_t addr, vm_prot_t prot,
+	 const struct trap_frame *frame)
+{
+	boolean_t	ok;
+	boolean_t	had = (frame->rflags & RFLAGS_IF) != 0;
+
+	if (had)
+		interrupts_enable();
+
+	ok = vm_fault(map, trunc_page((vm_offset_t) addr), prot, FALSE)
+	     == KERN_SUCCESS;
+
+	if (had)
+		interrupts_disable();
+
+	return ok;
+}
+
+/*
+ * How many traps arrived with SMAP switched off, and whether the last one was
+ * still switched off once this had run (#468).
+ *
+ * Counted rather than flagged because the interesting number is not zero: a
+ * fault inside copyin or copyout is ordinary — it is how an address a task
+ * does not own becomes an error return — so these say the window exists and
+ * is being closed, not that something went wrong.
+ */
+static uint64_t	ac_traps;
+static uint64_t	ac_after_last;
+
+uint64_t trap_smap_lifted_count(void)
+{
+	return ac_traps;
+}
+
+uint64_t trap_smap_after_last(void)
+{
+	return ac_after_last;
+}
+
 void trap_dispatch(struct trap_frame *frame)
 {
+	/*
+	 * ── SMAP back on, for the handler (#468) ──────────────────────────
+	 *
+	 * The processor does not clear EFLAGS.AC on a fault.  So a trap taken
+	 * inside a bracketed copy — which is the ordinary way copyin reports
+	 * an address a task does not own — runs every line below with SMAP
+	 * lifted, and any stray kernel pointer into the user half quietly
+	 * works instead of faulting.  The one place the kernel is allowed to
+	 * touch user memory would be lending that permission to the whole
+	 * fault path.
+	 *
+	 * Clearing it here rather than restoring it on the way out is what
+	 * makes it free to get right: IRETQ reloads the flags the trap saved,
+	 * so the interrupted copy resumes with its own AC still set and needs
+	 * no cooperation from this end.
+	 *
+	 * ⚠️ The paranoid entry (#440) writes its record a few instructions
+	 * before calling this, and those instructions read MSRs and kernel
+	 * memory only.  Every other entry — fault, interrupt, IPI — reaches
+	 * this line first.
+	 */
+	if (read_rflags() & RFLAGS_AC) {
+		pmap_user_access_end();
+		ac_traps++;
+		ac_after_last = read_rflags() & RFLAGS_AC;
+	}
+
 	/*
 	 * An interrupt somebody asked for, before any of the fault machinery:
 	 * it is not a fault, it has no error code to report, and the expected-
@@ -1080,6 +1164,34 @@ void trap_dispatch(struct trap_frame *frame)
 	 * be "recovered" into kernel code with a user context around it, which
 	 * is a privilege escalation rather than a recovery.
 	 */
+	if ((frame->cs & 3) == 0 && frame->vector == T_PAGE_FAULT
+	    && !va_is_kernel(read_cr2())) {
+		/*
+		 * ⚠️ A user address gets vm_fault() FIRST, and the exception
+		 * table only if that fails (#411/#467).
+		 *
+		 * The table is how copyin() and copyout() survive an address a
+		 * task does not own: the instruction is allowed to fault and
+		 * the call returns an error.  Reaching it first makes it also
+		 * the answer for an address the task DOES own and has simply
+		 * never touched -- a page that is in the map and not yet
+		 * resident -- so a perfectly valid copy fails, and the caller
+		 * is told the task does not have the memory it does have.
+		 *
+		 * i386 makes the same distinction in user_page_fault_continue():
+		 * fault it in, and only report a failure when the fault itself
+		 * says no.
+		 */
+		thread_act_t	act = current_act();
+		vm_map_t	map = (act != THR_ACT_NULL) ? act->map : VM_MAP_NULL;
+		vm_prot_t	prot = (frame->error & PF_WRITE)
+				     ? (VM_PROT_READ | VM_PROT_WRITE)
+				     : VM_PROT_READ;
+
+		if (map != VM_MAP_NULL && fault_in(map, read_cr2(), prot, frame))
+			return;		/* the copy runs again and succeeds */
+	}
+
 	if ((frame->cs & 3) == 0) {
 		uint64_t resume = ex_table_lookup(frame->rip);
 
@@ -1206,9 +1318,7 @@ void trap_dispatch(struct trap_frame *frame)
 		 * and inventing kernel_map for it would hand an early boot
 		 * failure to a subsystem that is not up.
 		 */
-		if (map != VM_MAP_NULL
-		    && vm_fault(map, trunc_page((vm_offset_t) addr), prot,
-				FALSE) == KERN_SUCCESS)
+		if (map != VM_MAP_NULL && fault_in(map, addr, prot, frame))
 			return;		/* the instruction runs again */
 	}
 

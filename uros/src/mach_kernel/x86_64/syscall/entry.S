@@ -20,6 +20,47 @@
 	.code64
 
 /*
+ * Arguments seven and up, put where a C function with that many looks for
+ * them (#426).
+ *
+ * They arrive in rbx and r12-r15 — see the contract in <syscall/syscall.h>
+ * for why registers and not the user's stack — and the C ABI wants them in
+ * memory just below the return address, seventh nearest.  So they are
+ * pushed in reverse, and the count is a run-time value, which is why this
+ * is a descending chain of compares rather than a loop: five pushes at
+ * most, no induction variable, and no register to hold one in.
+ *
+ * ⚠️ The padding is not decoration.  The ABI wants rsp sixteen-byte aligned
+ * at the call, the entry has pushed an odd number of words by the time it
+ * gets here (two, plus rbp), so an EVEN number of arguments needs one word
+ * of padding and an odd number needs none.  Getting this backwards does not
+ * fail: it misaligns every stack frame under the trap, which the kernel
+ * survives only because it is compiled -mno-sse and nothing executes an
+ * aligned vector move.  It would fail the day that changed, somewhere else.
+ *
+ * Expects: r11d = how many, 1..5.  Clobbers nothing.
+ */
+	.macro	PUSH_WIDE_ARGS
+	testb	$1, %r11b
+	jnz	1f
+	pushq	$0
+1:
+	cmpl	$5, %r11d
+	jb	2f
+	pushq	%r15			/* argument eleven */
+2:	cmpl	$4, %r11d
+	jb	3f
+	pushq	%r14			/* ten   */
+3:	cmpl	$3, %r11d
+	jb	4f
+	pushq	%r13			/* nine  */
+4:	cmpl	$2, %r11d
+	jb	5f
+	pushq	%r12			/* eight */
+5:	pushq	%rbx			/* seven, nearest the top */
+	.endm
+
+/*
  * Entry from ring 3.  The processor has already done, in the instruction
  * itself and without touching memory:
  *
@@ -81,6 +122,25 @@ syscall_entry:
 	movq	%r10, %rcx
 
 	/*
+	 * 🔥 Interrupts ON, and not before here (#411).
+	 *
+	 * SYSCALL clears IF through FMASK, which is a saving on the way in --
+	 * no CLI to execute -- and becomes a trap if nothing turns it back on:
+	 * the whole call then runs with interrupts disabled.  Anything that
+	 * blocks cannot be woken, and anything that needs the other processors
+	 * deadlocks outright.  Found as `ipi: a cross-call with interrupts off
+	 * would deadlock', from a page fault inside a copyin that wanted a TLB
+	 * shootdown.
+	 *
+	 * ⚠️ Here and not earlier.  Above this point the kernel is not yet
+	 * standing on its own stack or its own %gs, and an interrupt arriving
+	 * in that window would push a frame at an address ring 3 chose.  The
+	 * swapgs and the stack switch come first for exactly that reason, and
+	 * this has to come after both.
+	 */
+	sti
+
+	/*
 	 * An index from ring 3 into a table of function pointers, checked.
 	 * Unsigned, so one comparison covers both ends: a number above the
 	 * table and a number that looked negative are the same test.
@@ -88,8 +148,52 @@ syscall_entry:
 	 * This is the boundary. Everything before it was arranged by the
 	 * processor; %rax is the first value in the kernel that a user chose.
 	 */
+	/*
+	 * Mach traps live above SYSCALL_MACH_BASE (#411).  Taken first because
+	 * it is the branch that will carry the traffic: every message in the
+	 * system comes through here, and the kernel's own calls are a handful.
+	 *
+	 * ⚠️ The subtraction happens AFTER the range test, not before.  Doing it
+	 * first and testing the result would be arithmetic on a number a user
+	 * chose, and a number below the base would wrap to an enormous one --
+	 * still caught by the unsigned bound below, but caught by accident
+	 * rather than by the test that is written.
+	 */
+	cmpq	$SYSCALL_MACH_BASE, %rax
+	jb	.Lown_call
+
+	subq	$SYSCALL_MACH_BASE, %rax
+	cmpq	mach_syscall_count(%rip), %rax
+	jae	.Lbad_call
+
+	/*
+	 * Does this trap have arguments beyond the six in the C ABI's
+	 * registers?  All but sixteen do not (#426).
+	 *
+	 * ⚠️ This load is on the hot path, and it is here rather than folded
+	 * into the pointer table on purpose.  The alternative — pointing the
+	 * table at a thunk for the wide traps — costs nothing here and a call
+	 * and a return THERE, and `there' is mach_msg: the widest trap in the
+	 * table is also the one every message in the system goes through.
+	 * Four instructions for everybody beats a call for the hot path.
+	 */
+	leaq	mach_syscall_stack(%rip), %r11
+	movzbl	(%r11, %rax), %r11d
+	testl	%r11d, %r11d
+	jnz	.Lmach_wide
+
+	leaq	mach_syscall_table(%rip), %r11
+	callq	*(%r11, %rax, 8)
+	jmp	.Lreturn
+
+.Lown_call:
 	cmpq	$SYSCALL_NR_MAX, %rax
 	jae	.Lbad_call
+
+	leaq	syscall_stack(%rip), %r11
+	movzbl	(%r11, %rax), %r11d
+	testl	%r11d, %r11d
+	jnz	.Lown_wide
 
 	leaq	syscall_table(%rip), %r11
 	callq	*(%r11, %rax, 8)
@@ -119,6 +223,12 @@ syscall_entry:
 	cmpq	%rcx, %r10
 	jne	.Lreturn_the_slow_way
 
+	/*
+	 * ⚠️ And off again before the way out begins.  From here to SYSRET the
+	 * stack pointer and %gs belong to ring 3 for a few instructions, and an
+	 * interrupt in that window is the one #440 exists about.
+	 */
+	cli
 	movq	%gs:PERCPU_USER_RSP, %rsp
 	swapgs
 	sysretq
@@ -137,6 +247,41 @@ syscall_entry:
 	jmp	.Lreturn
 
 /*
+ * The two calls that are too wide for the argument registers alone.
+ *
+ * rbp anchors the stack because the count is not knowable again after the
+ * call: rax comes back holding a result, and recomputing the count from the
+ * index would mean keeping the index somewhere, which is the same problem
+ * one register further along.  The C function preserves rbp, so restoring
+ * from it is one instruction and holds across everything the trap does —
+ * including blocking, being switched away from, and coming back on another
+ * processor, which is precisely what a per-CPU scratch slot would NOT have
+ * survived.
+ *
+ * The user's rbp is saved by the push and restored by the pop, so it stays
+ * preserved exactly as the contract says.
+ */
+.Lmach_wide:
+	pushq	%rbp
+	movq	%rsp, %rbp
+	PUSH_WIDE_ARGS
+	leaq	mach_syscall_table(%rip), %r11
+	callq	*(%r11, %rax, 8)
+	movq	%rbp, %rsp
+	popq	%rbp
+	jmp	.Lreturn
+
+.Lown_wide:
+	pushq	%rbp
+	movq	%rsp, %rbp
+	PUSH_WIDE_ARGS
+	leaq	syscall_table(%rip), %r11
+	callq	*(%r11, %rax, 8)
+	movq	%rbp, %rsp
+	popq	%rbp
+	jmp	.Lreturn
+
+/*
  * The return that cannot use SYSRET.
  *
  * IRETQ costs several times what SYSRET does, which is exactly why it is
@@ -149,6 +294,7 @@ syscall_entry:
  * pops it.
  */
 .Lreturn_the_slow_way:
+	cli
 	movq	%gs:PERCPU_USER_RSP, %r10
 	swapgs
 
