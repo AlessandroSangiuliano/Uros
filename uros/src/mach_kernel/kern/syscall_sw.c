@@ -312,7 +312,14 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(syscall_vm_read_overwrite, 5),	/* 30 */
 	MACH_TRAP(syscall_vm_write, 4),			/* 31 */
 	MACH_TRAP_STACK(mach_msg_overwrite_trap, 9),	/* 32 */
-	MACH_TRAP(kern_invalid, 0),		/* 33 rsvd for task_by_pid */
+	/*
+	 * ⚠️ 33 was reserved for task_by_pid and is taken (#469).  Reserved
+	 * since 1990 for a call that never arrived, and a trap number is not
+	 * a thing to leave empty out of politeness to a plan nobody is
+	 * carrying out.  MACH_TRAP_STACK because it is an entry into
+	 * mach_msg_overwrite_trap, which may discard its kernel stack.
+	 */
+	MACH_TRAP_STACK(urmach_msg, 6),	/* 33 */
 	MACH_TRAP(kern_invalid, 0),		/* 34 rsvd for pid_by_task */
 #ifdef	i386
 	MACH_TRAP(mach_rpc_trap, 4),		/* 35 */

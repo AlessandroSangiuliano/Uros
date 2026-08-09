@@ -929,6 +929,32 @@ typedef kern_return_t mach_msg_return_t;
 #define MACH_RCV_IN_PROGRESS_TIMED      0x10004011
                 /* Waiting for receive with timeout. (Internal use only.) */
 
+/*
+ * The plain form (#469).
+ *
+ * The same operation without the three arguments the overwrite variant needs:
+ * `rcv_msg' and `rcv_limit' belong to the scatter list, and `notify' is only
+ * read when the notify options are set.  A mach_msg() that uses none of them
+ * passes MACH_PORT_NULL, MACH_MSG_NULL and 0 on every call — three arguments
+ * carried across the user/kernel boundary, on every message in the system,
+ * to say "not this time".
+ *
+ * Six is what fits in registers with nothing on the stack, on both targets.
+ *
+ * ⚠️ It is an ENTRY, not an implementation.  There is one body and it stays
+ * one: two trap entries into the thousand-odd lines of
+ * mach_msg_overwrite_trap would be two places for the option handling and the
+ * fast path to drift apart, which is the likeliest reason the two were fused
+ * in the first place.  See ipc/mach_msg.c.
+ */
+extern mach_msg_return_t	urmach_msg(
+					mach_msg_header_t *msg,
+					mach_msg_option_t option,
+					mach_msg_size_t send_size,
+					mach_msg_size_t rcv_size,
+					mach_port_t rcv_name,
+					mach_msg_timeout_t timeout);
+
 extern mach_msg_return_t	mach_msg_overwrite_trap(
 					mach_msg_header_t *msg,
 					mach_msg_option_t option,
