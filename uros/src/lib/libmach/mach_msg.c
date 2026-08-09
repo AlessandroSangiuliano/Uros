@@ -52,6 +52,24 @@
 
 #define LIBMACH_OPTIONS	(MACH_SEND_INTERRUPT|MACH_RCV_INTERRUPT)
 
+/*
+ * Which trap mach_msg() reaches the kernel through (#469).
+ *
+ * The plain six-argument form, or the nine-argument overwrite form with three
+ * constants that say "not this time".  The two are the A and the B of a
+ * measurement, and the switch is compile-time on purpose: a run-time choice
+ * would put a branch on the path being measured.
+ *
+ * Define UROS_MACH_MSG_WIDE to build the old shape.
+ */
+#ifdef	UROS_MACH_MSG_WIDE
+
+/*
+ * ⚠️ The original body, VERBATIM, and not a delegation to
+ * mach_msg_overwrite().  Delegating would have been shorter and would have
+ * made the comparison worthless: A has to be what the tree had, or the
+ * measurement is of two changes at once.
+ */
 mach_msg_return_t
 mach_msg(mach_msg_header_t *msg, mach_msg_option_t option,
 	 mach_msg_size_t send_size, mach_msg_size_t rcv_size,
@@ -59,18 +77,6 @@ mach_msg(mach_msg_header_t *msg, mach_msg_option_t option,
 	 mach_port_t notify)
 {
 	mach_msg_return_t mr;
-
-	/*
-	 * Consider the following cases:
-	 *	1) Errors in pseudo-receive (eg, MACH_SEND_INTERRUPTED
-	 *	plus special bits).
-	 *	2) Use of MACH_SEND_INTERRUPT/MACH_RCV_INTERRUPT options.
-	 *	3) RPC calls with interruptions in one/both halves.
-	 *
-	 * We refrain from passing the option bits that we implement
-	 * to the kernel.  This prevents their presence from inhibiting
-	 * the kernel's fast paths (when it checks the option value).
-	 */
 
 	mr = mach_msg_overwrite_trap(msg, option &~ LIBMACH_OPTIONS,
 			   send_size, rcv_size, rcv_name,
@@ -94,6 +100,61 @@ mach_msg(mach_msg_header_t *msg, mach_msg_option_t option,
 
 	return mr;
 }
+
+#else	/* the narrow trap */
+
+/*
+ * ⚠️ The test on `notify' is ONCE, at the top, and that is not a style
+ * preference — it cost a measurement.
+ *
+ * The first version chose the trap at each of the three call sites, with a
+ * conditional expression inside a macro.  It compiles: gcc emits both calls
+ * three times over, and the function goes from 69 instructions to 122.  A
+ * benchmark run against that would have measured a function twice the size
+ * and reported it as the narrow trap's number.
+ *
+ * A caller that wants a notify port is rare and already has a home: the
+ * nine-argument path is exactly mach_msg_overwrite() with no scatter list,
+ * retry loops and all.  So the branch is taken once, almost never, and what
+ * remains below has one call shape in it.
+ */
+mach_msg_return_t
+mach_msg(mach_msg_header_t *msg, mach_msg_option_t option,
+	 mach_msg_size_t send_size, mach_msg_size_t rcv_size,
+	 mach_port_t rcv_name, mach_msg_timeout_t timeout,
+	 mach_port_t notify)
+{
+	mach_msg_return_t mr;
+
+	if (notify != MACH_PORT_NULL)
+		return mach_msg_overwrite(msg, option, send_size, rcv_size,
+					  rcv_name, timeout, notify,
+					  MACH_MSG_NULL, 0);
+
+	/*
+	 * The option bits libmach implements itself are kept from the kernel,
+	 * so that their presence does not inhibit its fast path.
+	 */
+	mr = urmach_msg(msg, option &~ LIBMACH_OPTIONS,
+			send_size, rcv_size, rcv_name, timeout);
+	if (mr == MACH_MSG_SUCCESS)
+		return MACH_MSG_SUCCESS;
+
+	if ((option & MACH_SEND_INTERRUPT) == 0)
+		while (mr == MACH_SEND_INTERRUPTED)
+			mr = urmach_msg(msg, option &~ LIBMACH_OPTIONS,
+					send_size, rcv_size, rcv_name, timeout);
+
+	if ((option & MACH_RCV_INTERRUPT) == 0)
+		while (mr == MACH_RCV_INTERRUPTED)
+			mr = urmach_msg(msg,
+					option &~ (LIBMACH_OPTIONS|MACH_SEND_MSG),
+					0, rcv_size, rcv_name, timeout);
+
+	return mr;
+}
+
+#endif	/* UROS_MACH_MSG_WIDE */
 
 mach_msg_return_t
 mach_msg_overwrite(mach_msg_header_t *msg, mach_msg_option_t option,
