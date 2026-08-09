@@ -142,7 +142,14 @@ function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
                 -sheader ${SERVER_H}
                 -user ${USER_C}
                 -server ${SERVER_C}
-        DEPENDS migcom ${DEFS_FILE}
+        # ⚠️ ${UROS_MIG_COMMON_DEFS} and not just the .defs named here.  A
+        # .defs `import's others -- mach_types.defs, std_types.defs -- and a
+        # rule that depends only on the file it is given does not rebuild
+        # when a TYPE changes underneath it.  That is not theoretical: the
+        # security_token_t fix of #470 was made and the stubs kept their old
+        # layout, so the build went on failing an assertion about a file
+        # that had just been corrected.
+        DEPENDS migcom ${DEFS_FILE} ${UROS_MIG_COMMON_DEFS}
         COMMENT "MIG: ${DEFS_NAME} (userland, ${UROS_TARGET_ARCH})"
         VERBATIM
     )

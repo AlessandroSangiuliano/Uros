@@ -74,11 +74,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${_E}/mach/bootstrap.defs
     ${_E}/mach/exc.defs
     ${_E}/mach/notify.defs
-    # ⚠️ device.defs is NOT here (#470).  Its generated stubs fail their own
-    # _Static_asserts at -m64: migcom has every field's size right and the
-    # total wrong, which is padding it does not model.  Excluded rather than
-    # excused -- the assertions stay, and the day they pass this line comes
-    # back.  It costs printf.c, below.
+    # ⚠️ device.defs is NOT here (#470).  Its stubs fail their own
+    # _Static_asserts at -m64, and the cause is worse than padding: the two
+    # .defs trees describe security_token_t DIFFERENTLY -- the kernel's says
+    # `array[2] of MACH_MSG_TYPE_INTEGER_32', the export tree's says
+    # MACH_MSG_TYPE_INTEGER_64.  Same name, same C type, two wire layouts,
+    # identical on i386 and four bytes apart here.  Copying the kernel's
+    # spelling across does not fix it: it is right for SERVER stubs, where
+    # the token is a struct member, and wrong for USER stubs, where it is a
+    # value and migcom emits a cast to a pointer type that does not compile.
+    # That is migcom's to settle, not a line in a .defs.
   )
   set(LIBMACH_MIG_GENERATED)
   foreach(d IN LISTS _DEFS)
@@ -92,6 +97,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
                 mach_host.h mach_host.h  clock.h clock.h
                 bootstrap.h bootstrap.h  exc.h exc_user.h
                 exc_server.h exc_server.h  notify_server.h notify_server.h)
+  # device/device.h goes under its own directory, which is how it is spelled.
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
   set(_PUB_HDRS)
   list(LENGTH _PUB_MAP _n_map)
   math(EXPR _last "${_n_map} - 1")
@@ -106,17 +113,20 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
       COMMENT "Publish mach/${_to} (from ${_from})" VERBATIM)
     list(APPEND _PUB_HDRS ${_PUB}/${_to})
   endforeach()
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/device/device.h
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_MIG_OUT}/device.h ${CMAKE_BINARY_DIR}/generated/include/device/device.h
+    DEPENDS ${_MIG_OUT}/device.h
+    COMMENT "Publish device/device.h" VERBATIM)
+  list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
+
   add_custom_target(mig_mach_headers_x86_64 DEPENDS ${_PUB_HDRS})
 
   # ── The library itself ───────────────────────────────────────────────
   #
-  # 59 of libmach's 61 C sources compile for this target once the interface
-  # headers exist.  The two that do not are the two with 32-bit assembly
-  # inside them, and they are real machine-dependent work rather than an
-  # include away:
-  #
-  # The one that is still out is printf.c, which reaches the console through
-  # <device/device.h> -- and device.defs is excluded (#470).
+  # Every one of libmach's C sources compiles for this target except strtod.c,
+  # which i386 does not build either.
   #
   # crt0.c and stack_protector.c came in with #426: both carried a machine's
   # assembly inside C, and both now carry two.  They are written twice rather
@@ -124,6 +134,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # -- the entry argument travels on the stack on one and in a register on the
   # other -- and because a `%esp' that means half a register is the sort of
   # thing an assembler should refuse rather than a macro should paper over.
+  #
+  # printf.c is still out: it reaches the console through <device/device.h>,
+  # which is blocked on #470 above.  ⚠️ That has a consequence beyond
+  # printing -- crt0 pulls exit, which pulls panic, which calls printf -- so
+  # no program can be entered through __start_mach here until #470 is done.
+  # boot_probe keeps its own _start for that reason.
   file(GLOB _MACH_C CONFIGURE_DEPENDS "*.c")
   file(GLOB _MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
   list(REMOVE_ITEM _MACH_C ${_MS_WRAPPERS})
