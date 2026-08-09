@@ -361,6 +361,19 @@ const struct trap_paranoid_record *trap_last_paranoid(void);
 void trap_paranoid_forget(void);
 
 /*
+ * How many traps arrived with SMAP lifted, and whether the last such trap was
+ * still lifted after the dispatcher had done what it does about it (#468).
+ *
+ * Two numbers rather than a verdict because they answer different halves of
+ * the same question, and a test needs both: the count says the observation
+ * can see the condition at all, and the second says it was closed.  A test
+ * that only checked the second would pass on a machine where the window
+ * never opened.
+ */
+uint64_t trap_smap_lifted_count(void);
+uint64_t trap_smap_after_last(void);
+
+/*
  * Arrange for the next fault *from ring 3* to return to the kernel instead
  * of being reported and halted on.
  *
