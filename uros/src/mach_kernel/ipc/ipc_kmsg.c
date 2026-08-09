@@ -296,6 +296,24 @@
 #include <device/net_io.h>
 #include <string.h>
 
+/*
+ *	The two numbers a kmsg is described by, checked against each other by
+ *	the compiler that lays it out (#426).
+ *
+ *	IKM_OVERHEAD is what an allocation adds to a message size;
+ *	IKM_HEADER_OFFSET is where the message begins.  They are equal only
+ *	while ikm_header is the last member and leaves no tail padding behind
+ *	it -- true on i386, false on x86-64, where they are 64 and 60.
+ *
+ *	What must hold on any machine is this: a buffer big enough for the
+ *	overhead is big enough to reach the header.  Reorder the struct so a
+ *	member lands after ikm_header and it stops holding -- every allocation
+ *	would then be short by the difference, and the first symptom would be
+ *	a corrupted neighbour rather than a message that looked wrong.
+ */
+_Static_assert(IKM_OVERHEAD >= IKM_HEADER_OFFSET,
+	"a kmsg allocation must reach its own header");
+
 extern vm_map_t		ipc_kernel_copy_map;
 extern vm_size_t	ipc_kmsg_max_vm_space;
 extern vm_size_t	msg_ool_size_small;
