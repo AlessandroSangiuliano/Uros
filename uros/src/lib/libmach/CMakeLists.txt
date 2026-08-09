@@ -1,6 +1,67 @@
 cmake_minimum_required(VERSION 3.16)
 project(libmach C)
 
+# ===========================================================================
+# The Mach trap stubs, alone, on a target whose userland is not up yet (#426)
+# ===========================================================================
+#
+# The rest of this file builds a C library: MIG stubs generated from eighteen
+# .defs, a startup whose entry trampoline is written in 32-bit assembly, a
+# printf, a malloc.  None of that is ready on a new architecture, and none of
+# it is what blocks the port -- what blocks the port is that nothing can call
+# the kernel at all.
+#
+# So this half builds the ONE file that is the trap surface.  mach_traps.s is
+# `#include <mach/syscall_sw.h>' and nothing else: the list of every trap in
+# the system, expanded by the macros in <mach/machine/syscall_sw.h>, which is
+# where the whole of #426 lives.  A page of generated stubs, no C, no libc, no
+# startup -- linkable by a freestanding image today.
+#
+# ⚠️ It is a STAGE, and it is named so it cannot be mistaken for the library.
+# The day libmach itself builds here (#429, #431) this branch goes and the
+# consumers move to `libmach'.  Until then a target that links libmach_traps
+# is saying "I want to reach the kernel and I am bringing my own everything
+# else", which is exactly what boot_probe is.
+if(NOT UROS_TARGET_ARCH STREQUAL "i386")
+  set(_traps_src ${CMAKE_CURRENT_SOURCE_DIR}/mach_traps.s)
+  set(_traps_pp  ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S)
+
+  file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/generated/asm)
+
+  # Same include path the i386 half uses below, minus the parts that only
+  # exist once the MIG stubs are generated -- these stubs need none of them.
+  # ⚠️ ${UROS_ARCH_INCLUDE} is what makes <mach/machine/syscall_sw.h> and
+  # <machine/syscall/syscall.h> resolve to THIS architecture: it holds the
+  # two symlinks the top-level CMakeLists creates per build directory.
+  add_custom_command(
+    OUTPUT ${_traps_pp}
+    COMMAND ${CMAKE_C_COMPILER} -E -x assembler-with-cpp -D__ASSEMBLER__
+            -I${UROS_ARCH_INCLUDE}
+            -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+            -I${CMAKE_SOURCE_DIR}/export/include
+            ${_traps_src} -o ${_traps_pp}
+    DEPENDS ${_traps_src}
+            ${CMAKE_SOURCE_DIR}/export/include/mach/syscall_sw.h
+            ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}/syscall_sw.h
+    COMMENT "Preprocessing the Mach trap stubs for ${UROS_TARGET_ARCH}"
+    VERBATIM
+  )
+  set_source_files_properties(${_traps_pp} PROPERTIES GENERATED TRUE)
+
+  add_library(libmach_traps STATIC ${_traps_pp})
+  set_target_properties(libmach_traps PROPERTIES
+    OUTPUT_NAME "mach_traps"
+    LINKER_LANGUAGE C
+    ARCHIVE_OUTPUT_DIRECTORY
+      "${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/lib")
+  target_compile_options(libmach_traps PRIVATE ${UROS_ARCH_FLAGS})
+  target_include_directories(libmach_traps INTERFACE
+    ${CMAKE_SOURCE_DIR}/export/include
+    ${UROS_ARCH_INCLUDE})
+
+  return()
+endif()
+
 # Raccolgo le sorgenti locali (only .c and .S; lowercase .s needs preprocessing)
 file(GLOB LIB_SOURCES CONFIGURE_DEPENDS "*.c" "*.S")
 file(GLOB TOP_S_LOWER_S CONFIGURE_DEPENDS "*.s")
@@ -189,6 +250,17 @@ set_source_files_properties(
 )
 
 add_library(libmach STATIC ${LIB_SOURCES})
+
+# #469: which trap mach_msg() reaches the kernel through.  OFF is the narrow
+# six-argument urmach_msg; ON restores the nine-argument overwrite form
+# verbatim, so that the two can be built and measured against each other.
+#
+# ⚠️ On mach_msg.c ONLY.  A definition applied to the whole library would
+# rebuild eighty objects between the A and the B of a measurement, and the
+# difference would no longer be one function.
+option(UROS_MACH_MSG_WIDE "mach_msg() uses the nine-argument trap (#469)" OFF)
+set_source_files_properties(mach_msg.c PROPERTIES COMPILE_DEFINITIONS
+  "$<$<BOOL:${UROS_MACH_MSG_WIDE}>:UROS_MACH_MSG_WIDE>")
 
 # Depend on MIG-generated device/device.h (defined in parent CMakeLists)
 add_dependencies(libmach mig_device_header mig_mach_public_headers)
