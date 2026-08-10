@@ -104,6 +104,16 @@ endif()
 # what lets it exist before those issues and what keeps it working after them.
 add_subdirectory(tests/boot_probe)
 
+# And the first server, also ahead of the gate (#426).
+#
+# The gate below is about musl and the C library; the name server needs
+# neither.  It links libmach and nothing else, which is precisely the claim
+# #426 has to end on -- so it is built here rather than waiting for #414 to
+# open the door for a server that does not use what is behind it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/name_server)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")

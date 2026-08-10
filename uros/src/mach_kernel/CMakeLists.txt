@@ -376,9 +376,17 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     COMMAND ${CMAKE_COMMAND} -E copy
             ${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin/boot_probe
             ${X86_64_ISO_DIR}/boot/boot_probe
+    # And the name server (#426), for the entry that boots it in place of
+    # boot_probe.  A server that is built and never started is collaudated by
+    # nothing -- and what it exercises is not what boot_probe does: MIG in both
+    # directions, a message loop, and printf through the device port.
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin/name_server
+            ${X86_64_ISO_DIR}/boot/name_server
     COMMAND sh -c "echo set default=$\{UROS_X86_64_BOOT_ENTRY:-0\} > ${X86_64_ISO_DIR}/boot/grub/entry.cfg"
     COMMAND grub-mkrescue -o ${X86_64_ISO} ${X86_64_ISO_DIR}
-    DEPENDS mach_kernel boot_probe ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
+    DEPENDS mach_kernel boot_probe name_server_bin
+            ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
     COMMENT "Building GRUB2 multiboot2 rescue ISO: ${X86_64_ISO}"
     VERBATIM)
 
