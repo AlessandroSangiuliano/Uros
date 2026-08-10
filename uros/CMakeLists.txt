@@ -80,6 +80,22 @@ endif()
 string(JOIN " " UROS_ARCH_FLAGS_STR ${UROS_ARCH_FLAGS})
 message(STATUS "UROS_TARGET_ARCH = ${UROS_TARGET_ARCH} (${UROS_ARCH_FLAGS_STR})")
 
+# Which machine migcom generates message layout for, said once (#426).
+#
+# ⚠️ Here and not in a directory, and that is the point.  It used to be set
+# twice inside src/mach_kernel/CMakeLists.txt -- once per architecture, in
+# that directory's scope -- so it was EMPTY in every other directory that runs
+# mig, and an empty target argument is not a missing flag: migcom defaults to
+# i386 and generates i386 layout in silence.  cmake/mig.cmake says so at
+# length, and add_mig_userland derives the target again by hand for exactly
+# this reason.
+#
+# A variable that must be right in twenty CMakeLists is a variable that will
+# be wrong in one of them.  Setting it where the architecture is decided means
+# no caller has to know the spelling, and none of them can be somewhere it has
+# not reached.
+set(UROS_MIG_TARGET_ARGS -target ${UROS_TARGET_ARCH})
+
 # The machine-dependent kernel layer lives in src/mach_kernel/<arch>/.
 # For a target whose MD layer has not landed yet (x86_64 until the #406-
 # #411 contracts), the build system, host tools and arch-neutral targets
