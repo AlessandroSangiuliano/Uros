@@ -120,4 +120,21 @@ mach_port_t	(mach_task_self)(void);
 
 mach_port_t	mach_host_self(void);
 
+/*
+ *	Print a string on the kernel's own console.
+ *
+ *	⚠️ It had no prototype anywhere, and the trap has existed since the
+ *	beginning: <mach/syscall_sw.h> emits `kernel_trap(mach_print,-14,1)',
+ *	which is an ASSEMBLY stub, and assembly carries no types.  So every C
+ *	caller declared it implicitly and the two halves were compared by
+ *	nothing -- the shape of #448, with the other half in another language.
+ *	Harmless while the argument is a pointer and the ABI passes it in a
+ *	register on both targets; not harmless as a habit.
+ *
+ *	It is the one printing path that needs no port, no device and no
+ *	initialisation, which is what makes it the right instrument for
+ *	reporting a failure in the paths that set those up.
+ */
+void		mach_print(const char *);
+
 #endif	/* _MACH_MACH_TRAPS_H_ */

@@ -50,6 +50,8 @@
 #define EXPORT_BOOLEAN
 #include <mach/boolean.h>
 #include <mach.h>
+#include <mach/mach_traps.h>	/* mach_print: the console that needs no port */
+#include <mach_error.h>		/* mach_error_string */
 #include <sa_mach.h>
 #include <device/device.h>
 #include <device/tty_status.h>
@@ -528,6 +530,33 @@ printf_set_mirror(void (*hook)(const char *buf, size_t len))
 	printf_mirror_hook = hook;
 }
 
+/*
+ * A number, printed by the path that cannot use printf.
+ *
+ * ⚠️ Needed because mach_error_string does not know every code it can be
+ * handed: the device layer's are not in the Mach error space at all -- they
+ * are small decimals in <device/device_types.h>, D_NO_SUCH_DEVICE is 2502 --
+ * so an honest table answers "unknown error code" and the caller is left with
+ * a sentence that names no cause.  Sixteen lines of hexadecimal is the whole
+ * difference between a report and a shrug.
+ */
+static void
+mach_print_code(kern_return_t code)
+{
+	static const char digits[] = "0123456789abcdef";
+	unsigned int v = (unsigned int) code;
+	char buf[11];
+	int i;
+
+	buf[0] = '0';
+	buf[1] = 'x';
+	for (i = 0; i < 8; i++)
+		buf[2 + i] = digits[(v >> ((7 - i) * 4)) & 0xF];
+	buf[10] = '\0';
+
+	mach_print(buf);
+}
+
 void
 printf_init(mach_port_t device_server_port)
 {
@@ -545,10 +574,32 @@ printf_init(mach_port_t device_server_port)
 	
 	if (kr != KERN_SUCCESS) {
 		/*
-		 * Cannot print without a console port.  Trigger a
-		 * deliberate page fault with a recognizable sentinel
-		 * in cr2 so the kernel trap handler shows it.
+		 * Say why, before saying that.
+		 *
+		 * The sentinel below is a deliberate page fault with a
+		 * recognizable address in cr2, and on its own it is a report
+		 * with the reason removed: every way this call can fail
+		 * arrives as the same address, and the one thing worth
+		 * knowing -- which failure -- is the thing it does not carry.
+		 *
+		 * mach_print is the right instrument for it and the only one
+		 * available here: this IS the printing path, so it cannot
+		 * report through itself, and the trap needs no port, no
+		 * device and no initialisation.  mach_error_string is already
+		 * in this library.
+		 *
+		 * ⚠️ It matters most on a target with no console device at
+		 * all -- x86-64 has dev_name_count == 0 on purpose, rather
+		 * than a stub console that would report success and write
+		 * nowhere -- because there the FIRST thing every server does
+		 * is fail here, and it used to fail as a bare address.
 		 */
+		mach_print("libmach: device_open(\"console\") failed: ");
+		mach_print(mach_error_string(kr));
+		mach_print(" (");
+		mach_print_code(kr);
+		mach_print(")\r\n");
+
 		*(volatile int *)0xDEADBEEF = 0xDEADBEEF;
 		console_port = MACH_PORT_NULL;
 	}
