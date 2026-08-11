@@ -821,7 +821,7 @@ test_mutex_bench(void)
  * Test 16: thread name kernel propagation
  * ---------------------------------------------------------------- */
 
-extern kern_return_t mach_thread_set_name(const char *name);
+/* Declared in <mach/mach_traps.h>, already included above (#426). */
 
 static void *
 thread_set_own_name(void *arg)

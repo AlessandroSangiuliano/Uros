@@ -146,7 +146,7 @@ cap_hmac_check(const struct uros_cap *token)
  * CAP_ERR_INVALID_TOKEN on a bad user pointer.
  */
 static kern_return_t
-cap_copyin_token(struct uros_cap *user_token, struct uros_cap *out)
+cap_copyin_token(const struct uros_cap *user_token, struct uros_cap *out)
 {
     if (user_token == NULL)
         return CAP_ERR_INVALID_TOKEN;
@@ -203,7 +203,7 @@ cap_init(void)
 }
 
 kern_return_t
-urmach_cap_verify(struct uros_cap *user_token,
+urmach_cap_verify(const struct uros_cap *user_token,
                   uint32_t op,
                   uint64_t resource_id)
 {
@@ -219,7 +219,7 @@ urmach_cap_verify(struct uros_cap *user_token,
 }
 
 kern_return_t
-urmach_cap_use(struct uros_cap *user_token,
+urmach_cap_use(const struct uros_cap *user_token,
                uint32_t op,
                uint64_t resource_id)
 {
@@ -283,7 +283,7 @@ urmach_cap_revoke(uint64_t cap_id)
 }
 
 kern_return_t
-urmach_cap_register(struct uros_cap *user_token)
+urmach_cap_register(const struct uros_cap *user_token)
 {
     struct uros_cap t;
     kern_return_t kr = cap_copyin_token(user_token, &t);

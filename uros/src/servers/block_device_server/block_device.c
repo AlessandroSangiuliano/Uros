@@ -44,9 +44,7 @@
  * from having to pull in the full libcap public header — we only need
  * the fast-path syscall, not cap_server RPC.
  */
-extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
-                                       uint32_t op,
-                                       uint64_t resource_id);
+#include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
 /*
  * Linked list of every live blk_handle, used by the no-senders

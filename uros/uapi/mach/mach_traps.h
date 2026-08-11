@@ -111,6 +111,9 @@
 #define _MACH_MACH_TRAPS_H_
 
 #include <mach/port.h>
+#include <mach/boolean.h>
+#include <mach/kern_return.h>
+#include <mach/cap_types.h>
 
 mach_port_t	mach_reply_port(void);
 
@@ -136,5 +139,41 @@ mach_port_t	mach_host_self(void);
  *	reporting a failure in the paths that set those up.
  */
 void		mach_print(const char *);
+
+/*
+ *	The rest of the traps C actually calls (#426).
+ *
+ *	<mach/syscall_sw.h> emits a stub for 117 traps and 41 of them had no
+ *	prototype anywhere.  Most of those 41 are dead -- the old msg_*_trap
+ *	IPC, the RDMA and RPC experiments, the three obsolete self traps whose
+ *	table slots hold kern_invalid -- and are not declared here, because a
+ *	declaration for something no caller has and no kernel answers would be
+ *	an invitation.  ⚠️ Which ones are LIVE was not judged by reading: the
+ *	names below are the intersection of the 41 with the symbols that are
+ *	actually UNDEFINED in the objects of a full build, so each one is a
+ *	call the linker really has to resolve against the assembly stub.
+ *
+ *	⚠️ The types come from the kernel's own definitions and not from the
+ *	call sites, and the point of putting them here is that kern/syscall_sw.c
+ *	-- the file holding mach_trap_table -- includes this header.  So the two
+ *	halves are in one translation unit at last, and a disagreement is a
+ *	build error on both targets instead of a truncation on one.
+ */
+kern_return_t	mach_null(void);
+kern_return_t	mach_thread_set_name(const char *);
+boolean_t	swtch(void);
+boolean_t	swtch_pri(int);
+
+/*
+ *	The capability fast path (#216).  These are the ones that could have
+ *	cost something: a token is a POINTER, and until now libcap declared
+ *	them for itself while nothing compared that declaration with the
+ *	kernel's.  const, because none of the three writes through the pointer
+ *	-- they copyin and work on the copy.
+ */
+kern_return_t	urmach_cap_verify(const struct uros_cap *, uint32_t, uint64_t);
+kern_return_t	urmach_cap_use(const struct uros_cap *, uint32_t, uint64_t);
+kern_return_t	urmach_cap_register(const struct uros_cap *);
+kern_return_t	urmach_cap_revoke(uint64_t);
 
 #endif	/* _MACH_MACH_TRAPS_H_ */

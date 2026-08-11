@@ -47,11 +47,16 @@
 #include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
 
 /*
- * Trap stub emitted by libmach (mach_traps.s): slot 40.
+ * The cap traps come from <mach/mach_traps.h>, included above (#426).
+ *
+ * ⚠️ This file used to declare two of them here as well -- with the header
+ * already on the include list, four lines above -- and one of the two was
+ * WRONG: `struct uros_cap *' where the kernel takes a const pointer.  A local
+ * extern does not merely duplicate a header, it OVERRIDES the question: the
+ * other half of a trap is an assembly stub, which carries no types, so nothing
+ * compared either declaration with the kernel.  One of twenty such private
+ * declarations in the tree.
  */
-extern kern_return_t urmach_cap_register(struct uros_cap *token);
-extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
-                                       uint32_t op, uint64_t resource_id);
 
 /*
  * #395 probe — XMM survival across the kernel cap-verify path.

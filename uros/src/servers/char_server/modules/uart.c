@@ -189,7 +189,7 @@ uart_notify_subscribers(struct uart_priv *p)
  * — see device_master.c #206 fix).
  * ============================================================ */
 
-extern void mach_print(const char *);
+/* Declared in <mach/mach_traps.h>, already included above (#426). */
 
 static void
 uart_irq_handler(void *arg)

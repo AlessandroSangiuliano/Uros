@@ -18,6 +18,7 @@
 #include "cap_table.h"
 
 #include <string.h>
+#include <mach/mach_traps.h>	/* urmach_cap_register (#426) */
 
 #include "hmac_sha256.h"
 
@@ -185,7 +186,7 @@ void cap_key_init(void) {
  * hmac[] as the HMAC key and captures the caller as the trusted
  * cap_server task (trust-on-first-use).
  */
-extern kern_return_t urmach_cap_register(struct uros_cap *token);
+/* Declared in <mach/mach_traps.h>, included at the top of this file (#426). */
 
 int cap_key_export_to_kernel(void) {
     struct uros_cap setup;

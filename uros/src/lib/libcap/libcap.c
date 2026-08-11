@@ -31,6 +31,7 @@
 #include <mach/mach_port.h>
 #include <mach_init.h>
 #include <mach/cap_types.h>
+#include <mach/mach_traps.h>	/* the cap traps, declared once (#426) */
 
 #include "libcap.h"
 
@@ -178,16 +179,14 @@ __attribute__((weak)) cap_verify(const struct uros_cap *token, uint64_t op, uint
 }
 
 /*
- * libmach-emitted trap stubs for the UrMach capability fast path.
- * Declared here because they are a private implementation detail of
- * libcap — no kernel-facing header ships them to clients.
+ * ⚠️ The declarations of urmach_cap_verify and urmach_cap_use used to be
+ * HERE, with a comment saying no kernel-facing header shipped them.  That was
+ * true and it was the problem: a token is a pointer, the other half of these
+ * calls is an assembly stub that carries no types, and nothing anywhere
+ * compared this file's idea of them with the kernel's.  They are declared in
+ * <mach/mach_traps.h> now -- which kern/syscall_sw.c also includes, so the
+ * trap table and this call site finally see one prototype (#426, #448).
  */
-extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
-                                       uint32_t op,
-                                       uint64_t resource_id);
-extern kern_return_t urmach_cap_use(const struct uros_cap *token,
-                                    uint32_t op,
-                                    uint64_t resource_id);
 
 kern_return_t
 cap_verify_local(const struct uros_cap *token,
