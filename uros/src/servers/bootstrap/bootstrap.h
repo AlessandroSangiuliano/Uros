@@ -190,4 +190,16 @@ extern mach_port_t bootstrap_notification_port;
 
 #ifndef	PATH_MAX
 #define PATH_MAX	512
+/*
+ * The switch parse_args() sets that was not already declared here (#422).
+ *
+ * ⚠️ `prompt' was declared `extern boolean_t' inside i386/boot_dep.c and again
+ * inside POWERMAC/boot_dep.c -- one private copy per machine, for a variable
+ * defined once in bootstrap.c -- while collocation_autotry and
+ * collocation_prohibit, which the same function sets, were already declared in
+ * this header a few lines below.  Half the inputs of one parser were public
+ * and half were private, and nothing made that visible.
+ */
+extern boolean_t	prompt;
+
 #endif	/* PATH_MAX */

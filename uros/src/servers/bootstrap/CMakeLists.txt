@@ -103,6 +103,7 @@ list(APPEND BOOTSTRAP_SOURCES
 
 # Architecture-specific (i386)
 list(APPEND BOOTSTRAP_SOURCES
+  parse_args.c
   i386/boot_dep.c
   i386/set_regs.c
   i386/formats.c
