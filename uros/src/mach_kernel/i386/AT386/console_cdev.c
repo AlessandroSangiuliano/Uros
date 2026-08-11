@@ -96,6 +96,8 @@ kdreboot(void)
 }
 
 
+#include <device/console_cdev.h>
+
 io_return_t
 consoleopen(dev_t dev, dev_mode_t flag, io_req_t ior)
 {
