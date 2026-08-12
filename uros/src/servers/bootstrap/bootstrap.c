@@ -573,12 +573,22 @@ main(int argc, char **argv)
 	 */
 	{
 		int j, k;
-		uint32_t baddr = 0, bsize = 0;
+		/*
+		 * ⚠️ uintptr_t and not uint32_t: this is where the bundle was
+		 * MAPPED, and the kernel prints it with %lx (#422).  strtoul
+		 * already returns a wide enough value on both machines -- what
+		 * truncated was the cast into a 32-bit variable, which on this
+		 * target reads as a plausible address rather than a failure.
+		 * The SIZE stays 32-bit, because the offsets inside the bundle
+		 * are (see bundle.h).
+		 */
+		uintptr_t baddr = 0;
+		uint32_t bsize = 0;
 		for (j = 1; j < argc; j++) {
 			if (strncmp(argv[j], "--bundle=", 9) != 0)
 				continue;
 			char *end = NULL;
-			baddr = (uint32_t) strtoul(argv[j] + 9, &end, 0);
+			baddr = (uintptr_t) strtoul(argv[j] + 9, &end, 0);
 			if (end != NULL && *end == ',')
 				bsize = (uint32_t) strtoul(end + 1, NULL, 0);
 			for (k = j; k < argc - 1; k++)

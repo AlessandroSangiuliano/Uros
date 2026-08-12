@@ -40,6 +40,7 @@
 #include <mach_init.h>
 #include <mach/mach_interface.h>
 #include <mach/bootstrap.h>
+#include <threadlib_init.h>
 
 
 /*
@@ -53,10 +54,15 @@
  * _pthread_allocate_stack.  Marking them weak makes any strong
  * library def take precedence, while still building servers like
  * name_server that don't link a thread library.
+ *
+ * ⚠️ The TYPES are in <threadlib_init.h> now and not written out here, which
+ * is a different point from the weakness: this file and the three thread
+ * libraries each declared the same object in their own words, and one of them
+ * called a stack pointer an int.  See that header for what that cost.
  */
-__attribute__((weak)) int  (*_mach_init_routine)(void)      = 0;
-__attribute__((weak)) int  (*_threadlib_init_routine)(void) = 0;
-__attribute__((weak)) void (*_threadlib_exit_routine)(int)  = 0;
+__attribute__((weak)) int	  (*_mach_init_routine)(void)      = 0;
+__attribute__((weak)) vm_offset_t (*_threadlib_init_routine)(void) = 0;
+__attribute__((weak)) void	  (*_threadlib_exit_routine)(int)  = 0;
 
 /*
  * musl libc init (#259).  Provided by the patched musl
@@ -178,35 +184,34 @@ __start_mach_c(unsigned long entry_sp)
 		__uros_libc_init();
 
 	if (*_threadlib_init_routine) {
-		int new_sp;
+		vm_offset_t new_sp;
 
 		new_sp = (*_threadlib_init_routine)();
 
 		if (new_sp)
 			/*
-			 * 🔥 A 64-bit TRUNCATION that assembles cleanly.
+			 * 🔥 This was `int new_sp' and a `movl %0, %%esp', and
+			 * both halves of that were a truncation that assembles
+			 * cleanly: %esp is the low half of the stack pointer,
+			 * so the instruction was legal and would have carried
+			 * on below four gigabytes.
 			 *
-			 * `movl %0, %%esp' is a legal x86-64 instruction: %esp
-			 * is the low half of the stack pointer, so this would
-			 * have set the top half to zero and carried on with a
-			 * stack pointer below four gigabytes.  It compiled
-			 * without a word, and it has not fired only because
-			 * _threadlib_init_routine is null until libpthreads
-			 * arrives (#425).
+			 * The movq was written first, with a note saying the
+			 * declaration was the thing that lied and that
+			 * widening it belonged to #425.  #425 closed without
+			 * it, so the cast to unsigned long widened a value
+			 * that had already lost its top half -- pthread_init
+			 * returns a stack pointer and was declared to return
+			 * an int -- and the sign extension put it at
+			 * 0xffffffffffeffde0, where `call main' faulted.
 			 *
-			 * ⚠️ The real fix is not here: new_sp is an `int'
-			 * because _threadlib_init_routine is declared to
-			 * return one, and a stack pointer does not fit in an
-			 * int on this architecture.  Widening that is #425's,
-			 * where the thread library that supplies the value
-			 * lives.  Until then this instruction moves what it is
-			 * given and the declaration is the thing that lies.
+			 * The types are one declaration now, in
+			 * <threadlib_init.h>, so this reads what it is given.
 			 */
 #if defined(__x86_64__)
-			__asm__ volatile("movq %0, %%rsp"
-					 : : "g" ((unsigned long) new_sp));
+			__asm__ volatile("movq %0, %%rsp" : : "g" (new_sp));
 #else
-			__asm__ volatile("movl %0, %%esp" : : "g" (new_sp) );
+			__asm__ volatile("movl %0, %%esp" : : "g" (new_sp));
 #endif
 	}
 

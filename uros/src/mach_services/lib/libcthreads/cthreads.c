@@ -63,6 +63,7 @@
 #include <cthread_filter.h>
 #include "cthread_internals.h"
 #include <mach/mach_traps.h>
+#include <threadlib_init.h>
 #include <mach/mach_host.h>
 #include <stdio.h>
 #include <string.h>

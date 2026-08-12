@@ -110,14 +110,14 @@ static struct fs_ops bundle_ops = {
 };
 
 int
-bundle_init(uint32_t base_addr, uint32_t total_size)
+bundle_init(uintptr_t base_addr, uint32_t total_size)
 {
 	const struct boot_bundle_header *hdr;
 
 	if (base_addr == 0 || total_size < sizeof(*hdr))
 		return -1;
 
-	hdr = (const struct boot_bundle_header *)(uintptr_t)base_addr;
+	hdr = (const struct boot_bundle_header *)base_addr;
 	if (hdr->magic0 != BOOT_BUNDLE_MAGIC0 ||
 	    hdr->magic1 != BOOT_BUNDLE_MAGIC1) {
 		printf("bundle: bad magic 0x%x 0x%x\n",
@@ -141,8 +141,8 @@ bundle_init(uint32_t base_addr, uint32_t total_size)
 	bundle_entries    = (const struct boot_bundle_entry *)(hdr + 1);
 	bundle_n_entries  = hdr->n_entries;
 
-	printf("bundle: %u entries at 0x%x (%u bytes)\n",
-	       bundle_n_entries, base_addr, total_size);
+	printf("bundle: %u entries at 0x%lx (%u bytes)\n",
+	       bundle_n_entries, (unsigned long) base_addr, total_size);
 	for (uint32_t i = 0; i < bundle_n_entries; i++)
 		printf("bundle:   %-40s %8u bytes\n",
 		       bundle_entries[i].name,
