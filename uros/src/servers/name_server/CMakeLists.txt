@@ -24,7 +24,6 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_E ${CMAKE_SOURCE_DIR}/export/include)
   set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 
-  set(UROS_MIG_ARCH_UPPER X86_64)
   set(UROS_MIG_USERLAND_INCLUDES
       -I${_E}
       -I${UROS_ARCH_INCLUDE}

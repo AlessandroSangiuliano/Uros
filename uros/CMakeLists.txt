@@ -70,8 +70,10 @@ set_property(CACHE UROS_TARGET_ARCH PROPERTY STRINGS i386 x86_64)
 
 if(UROS_TARGET_ARCH STREQUAL "i386")
   set(UROS_ARCH_FLAGS -m32 -march=i686)
+  set(UROS_PTR_BITS 32)
 elseif(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(UROS_ARCH_FLAGS -m64)
+  set(UROS_PTR_BITS 64)
 else()
   message(FATAL_ERROR "UROS_TARGET_ARCH must be i386 or x86_64, got '${UROS_TARGET_ARCH}'")
 endif()
@@ -95,6 +97,30 @@ message(STATUS "UROS_TARGET_ARCH = ${UROS_TARGET_ARCH} (${UROS_ARCH_FLAGS_STR})"
 # no caller has to know the spelling, and none of them can be somewhere it has
 # not reached.
 set(UROS_MIG_TARGET_ARGS -target ${UROS_TARGET_ARCH})
+
+# What the .defs themselves are preprocessed with, said in the same one place.
+#
+# A .defs is text for migcom, and it is preprocessed by the HOST compiler with
+# no -m32/-m64 -- so __i386__ and __x86_64__ inside one describe the machine
+# doing the build and not the machine being built for.  These two macros are
+# how a .defs asks about the target instead.
+#
+# 🔑 MIG_PTR_BITS, and it is the one to reach for first.  A type like
+# zone_info_t is not larger on x86-64 because the target is called x86_64: it
+# is larger because a vm_size_t is 64 bits there.  Written as a width, the
+# condition states the actual reason, and the next 64-bit machine -- rv64 is
+# where this tree is going -- inherits every one of them by saying how wide it
+# is.  Written as `defined(MIG_ARCH_X86_64)' each of those types would go
+# quietly back to the 32-bit layout on that machine, and each would have to be
+# found again.
+#
+# MIG_ARCH_<NAME> stays, for the questions whose answer really is the machine:
+# i386's descriptor_t is about the i386, not about four-byte pointers.  The
+# two are not interchangeable, and the one that names the reason is the one to
+# use.
+string(TOUPPER "${UROS_TARGET_ARCH}" UROS_MIG_ARCH_UPPER)
+set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_${UROS_MIG_ARCH_UPPER}=1
+                       -DMIG_PTR_BITS=${UROS_PTR_BITS})
 
 # The machine-dependent kernel layer lives in src/mach_kernel/<arch>/.
 # For a target whose MD layer has not landed yet (x86_64 until the #406-
@@ -166,12 +192,24 @@ include(${CMAKE_SOURCE_DIR}/cmake/mig.cmake)
 # Listing both trees is deliberate: the kernel reads src/mach_kernel/mach/,
 # userland reads export/include/mach/, and depending on a file a given rule
 # happens not to read costs a rebuild while missing one costs correctness.
-set(UROS_MIG_COMMON_DEFS
-    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/std_types.defs
-    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/mach_types.defs
-    ${CMAKE_SOURCE_DIR}/export/include/mach/std_types.defs
-    ${CMAKE_SOURCE_DIR}/export/include/mach/mach_types.defs
-    ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}/machine_types.defs)
+#
+# 🔥 Found by GLOB and not by hand, and that is the repair of this list rather
+# than a tidying of it.  Written out, it named four files and the target's
+# machine_types.defs -- and left out mach_debug_types.defs, clock_types.defs,
+# device_types.defs and default_pager_types.defs, which declare types by
+# exactly the same rules.  So the paragraph above described a defect the list
+# underneath it still had: mach_debug_types.defs was corrected for x86-64 and
+# nothing regenerated, and the way that was noticed was a deliberately WRONG
+# number failing to break the build (#422).
+#
+# A list of the files that declare types is a list somebody has to remember to
+# add to.  A pattern is not: any *_types.defs in either tree is one of these by
+# construction, and CONFIGURE_DEPENDS makes a new one re-run cmake rather than
+# wait to be noticed.  It sweeps up the machine_types.defs of machines this
+# build has never targeted, which costs nothing -- nobody edits hp_pa.
+file(GLOB_RECURSE UROS_MIG_COMMON_DEFS CONFIGURE_DEPENDS
+     ${CMAKE_SOURCE_DIR}/src/mach_kernel/*_types.defs
+     ${CMAKE_SOURCE_DIR}/export/include/*_types.defs)
 
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'uros' when building kernel)" "")

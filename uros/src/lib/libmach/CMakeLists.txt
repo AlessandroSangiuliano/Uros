@@ -58,7 +58,6 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # That one missing header is what stops mach_init.c, mig_support.c and the
   # mach_msg_* wrappers -- and it reports itself as a missing FILE, which
   # names the symptom rather than the generator nobody invoked.
-  set(UROS_MIG_ARCH_UPPER X86_64)
   set(UROS_MIG_USERLAND_INCLUDES
       -I${_E}
       -I${UROS_ARCH_INCLUDE}
@@ -86,17 +85,22 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${_E}/device/device.defs
     # mach_klog.defs: bootstrap's log_forwarder includes <mach/mach_klog.h>.
     ${_E}/mach/mach_klog.defs
-    # ⚠️ mach_debug.defs is NOT here, and it is the one .defs that could not
-    # simply be added.  bootstrap's elf.c calls host_load_symbol_table, whose
-    # stub lives there -- and generating it fails its own _Static_asserts:
+    # mach_debug.defs: bootstrap's elf.c calls host_load_symbol_table.
+    #
+    # 🔥 This line was held out with a comment saying migcom had a defect on
+    # this target, and that was WRONG -- migcom was right and the .defs lied.
+    # Its stubs failed two of their own assertions:
     #
     #   "MIG measures the out-of-line info in the wrong unit"
     #   "MIG and the compiler disagree on the size of region"
     #
-    # That is a migcom defect on this target (#416), not a .defs problem, and
-    # it is the assertion machinery #416 added doing exactly its job.  Adding
-    # the file back is one line once migcom counts out-of-line arrays in bytes
-    # rather than elements here.
+    # Both name a type whose size follows the pointer width, declared in
+    # mach_debug_types.defs as a fixed count of 32-bit words: vm_info_region_t
+    # is 40 bytes on i386 and 56 here, vm_info_object_t 84 and 120.  Four more
+    # beside them were equally wrong.  Same class as #470, in another file, and
+    # the assertion machinery of #416 doing exactly the job it was added for --
+    # naming the wrong number rather than sending it.
+    ${_E}/mach_debug/mach_debug.defs
   )
   set(LIBMACH_MIG_GENERATED)
   foreach(d IN LISTS _DEFS)

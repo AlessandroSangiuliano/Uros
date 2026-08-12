@@ -422,11 +422,12 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       -I${CMAKE_CURRENT_SOURCE_DIR}/x86_64
       -I${UROS_CONFIG_INCLUDE})
 
-  # ⚠️ UROS_MIG_TARGET_ARGS is NOT set here any more.  It said `-target
-  # x86_64' in this directory and nothing anywhere else, which is how a rule
-  # written in another CMakeLists got i386 layout in silence.  It comes from
-  # the top-level CMakeLists now, where the architecture is decided (#426).
-  set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_X86_64=1)
+  # ⚠️ Neither UROS_MIG_TARGET_ARGS nor UROS_MIG_DEFS_ARCH is set here any
+  # more.  Both said x86_64 in this directory and nothing anywhere else, which
+  # is how a rule written in another CMakeLists got i386 layout in silence --
+  # and how MIG_PTR_BITS would have failed to reach the userland .defs at all.
+  # They come from the top-level CMakeLists now, where the architecture is
+  # decided (#426, #422).
 
   # No AT386, no EISA/HIMEM/NPCI/MP_V1_1: those name i386 hardware, and the
   # generated code is the wire format, which must not depend on them.
@@ -955,10 +956,10 @@ set(UROS_MIG_INCLUDES
 
 # Said out loud even though it is migcom's default: relying on a default is
 # how the x86-64 rules generated i386 layout without anyone noticing.  ⚠️ It
-# is said at the TOP LEVEL now and not here -- see UROS_MIG_TARGET_ARGS in
-# uros/CMakeLists.txt -- so that it is also said in the directories that never
-# had it.  The output here is unchanged, which is the point (#453, #426).
-set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_I386=1)
+# is said at the TOP LEVEL now and not here -- see UROS_MIG_TARGET_ARGS and
+# UROS_MIG_DEFS_ARCH in uros/CMakeLists.txt -- so that it is also said in the
+# directories that never had it.  The output here is unchanged, which is the
+# point (#453, #426).
 
 
 # ---- Mach subsystem MIG files ----
