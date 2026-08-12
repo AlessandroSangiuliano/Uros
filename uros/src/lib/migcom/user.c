@@ -237,6 +237,36 @@ char *MessFreeRoutine = "mig_user_deallocate";
 char stRetCode[] = "ReturnValue";
 char stRetNone[] = "";
 
+/*
+ * How many bytes a fixed-size request actually PUTS ON THE WIRE (#422).
+ *
+ * ⚠️ Not sizeof(Request).  A message ends at msgh_end -- the zero-length
+ * marker WriteFieldDeclPrim places after the last field -- and sizeof adds the
+ * padding the compiler puts after it to round the structure up to its own
+ * alignment.  That padding is never transmitted, and the receiver's type check
+ * is written against the marker: utils.c measures both message sizes to
+ * msgh_end and says at length why.  So the two ends disagreed by exactly the
+ * tail padding, and the assertion machinery could not catch it -- it was
+ * asserting the marker, which was right, while this line sent something else.
+ *
+ * On i386 there is no tail padding to disagree about: the ABI aligns every
+ * scalar to four, a message structure is therefore four-aligned, and its last
+ * field always ends on a boundary.  sizeof and the marker are the same number
+ * there and have been for thirty years -- the same coincidence target.c
+ * records for mt_max_align.
+ *
+ * On x86-64 a request whose last field is 32 bits is four bytes shorter than
+ * its own sizeof, and every one of those calls was refused with
+ * MIG_BAD_ARGUMENTS.  vm_allocate is one: 52 bytes to the marker, 56 to
+ * sizeof, and it is the first call bootstrap makes.
+ *
+ * ⚠️ The VARIABLE-size path never had this: it builds msgh_size from
+ * rtRequestMinSize, which migcom computes itself and which has always been the
+ * transmitted size.  Only the fixed-size path asked the compiler, and only the
+ * fixed-size path asked it the wrong question.
+ */
+char stSendSize[] = "__builtin_offsetof(Request, msgh_end)";
+
 void WriteLogDefines(FILE *file, string_t who);
 void WriteIdentificationString(FILE *file);
 
@@ -634,7 +664,7 @@ WriteMsgSend(FILE *file, routine_t *rt)
     char *MsgResult = "";
 
     if (rt->rtNumRequestVar == 0)
-	SendSize = "sizeof(Request)";
+	SendSize = stSendSize;
     else
 	SendSize = "msgh_size";
 
@@ -720,7 +750,7 @@ WriteMsgSendReceive(FILE *file, routine_t *rt)
     char string[MAX_STR_LEN];
 
     if (rt->rtNumRequestVar == 0)
-	SendSize = "sizeof(Request)";
+	SendSize = stSendSize;
     else
 	SendSize = "msgh_size";
 
@@ -763,7 +793,7 @@ WriteMsgRPC(FILE *file, routine_t *rt)
     char string[MAX_STR_LEN];
 
     if (rt->rtNumRequestVar == 0)
-	SendSize = "sizeof(Request)";
+	SendSize = stSendSize;
     else
 	SendSize = "msgh_size";
 
