@@ -453,6 +453,14 @@ isr_table:
  * ring 0; there is no caller left to come back to, which is why they are
  * written here rather than as C functions with a tail call the compiler
  * would be entitled to turn into something else.
+ *
+ * ⚠️ And each takes pending ASTs FIRST, which they did not (#422).  i386 gets
+ * this for nothing -- its thread_bootstrap_return is a label on
+ * return_from_trap, whose first act is the AST check -- and here the three
+ * went straight to act_user_frame.  A thread created by thread_create() has
+ * AST_APC pending and suspends itself when it takes it; without the check it
+ * never took it, and reached act_user_frame with no frame to return to.  See
+ * thread_return_ast() in trap/trap.c.
  */
 
 	.globl	thread_exception_return
@@ -468,6 +476,7 @@ isr_table:
  * thread to resume there.
  */
 thread_exception_return:
+	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	callq	act_user_frame		/* %rax = this thread's trap frame */
 	movq	%rax, %rsp
 	jmp	thread_frame_return
@@ -481,6 +490,7 @@ thread_exception_return:
  * prepared by thread_set_state(), and resuming it is resuming it.
  */
 thread_bootstrap_return:
+	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	callq	act_user_frame
 	movq	%rax, %rsp
 	jmp	thread_frame_return
@@ -495,6 +505,7 @@ thread_bootstrap_return:
  * has to rewind anything, and anything that did would be wrong.
  */
 restart_mach_syscall:
+	callq	thread_return_ast	/* AST_APC first: see trap.c */
 	callq	act_user_frame
 	movq	%rax, %rsp
 	jmp	thread_frame_return

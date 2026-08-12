@@ -485,8 +485,7 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 	 */
 	if (pcb->user == (struct trap_frame *) 0)
 		pcb->user = (struct trap_frame *)
-			((pcb->ctx.kernel_stack_top & ~15UL)
-			 - sizeof(struct trap_frame));
+			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
 
 	switch (flavor) {
 

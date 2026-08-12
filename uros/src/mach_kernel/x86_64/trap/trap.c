@@ -956,6 +956,45 @@ trap_take_ast(struct trap_frame *frame)
 	ast_taken(FALSE, take, splsched());
 }
 
+/*
+ * The same check, for the four ways of leaving the kernel that are not a trap
+ * return (#422).
+ *
+ * 🔥 They did not have one, and that is how bootstrap could not create a
+ * thread.
+ *
+ * thread_create() makes a new thread runnable with AST_APC pending and its
+ * activation's suspend_count at one, and the comment beside it says it "will
+ * immediately suspend itself".  The suspending is done BY the AST: the handler
+ * sees suspend_count and blocks the thread, and it is that block which holds
+ * the thread still until its creator has called thread_set_state and
+ * thread_resume.
+ *
+ * On i386 thread_bootstrap_return is a label on return_from_trap, so the check
+ * is simply there.  Here the three entry points in entry.S went straight to
+ * act_user_frame -- which panics, correctly, because a thread that has never
+ * run has no frame yet.  The message was about thread state and the cause was
+ * an AST nobody looked at: pthread_create's first thread died before its
+ * creator could reach the next statement.
+ *
+ * ⚠️ AST_ALL unconditionally, and no preemption-level test.  Every one of these
+ * paths is a return TO USER by construction -- entry.S says so where it
+ * swapgs's without testing -- so the ring-0 question trap_take_ast has to ask
+ * does not arise here.
+ *
+ * ⚠️ A loop, as i386's `jmp return_from_trap' is a loop: taking one AST can
+ * raise another, and the thread must not reach ring 3 with one outstanding.
+ * If the handler blocks instead of returning, this stack is discarded and the
+ * thread resumes at its continuation -- thread_bootstrap_return, which arrives
+ * back here.  Either road ends with nothing pending.
+ */
+void
+thread_return_ast(void)
+{
+	while (need_ast[cpu_number()] & AST_ALL)
+		ast_taken(FALSE, AST_ALL, splsched());
+}
+
 
 /*
  * Resolve a fault, with interrupts as the interrupted code had them (#411).
