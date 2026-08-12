@@ -1,6 +1,25 @@
 cmake_minimum_required(VERSION 3.16)
 project(libpthreads C ASM)
 
+# Which machine's half of this library to build.
+#
+# ⚠️ Set HERE, above the first use.  It was being chosen further down, beside
+# the source list, while the include path a hundred lines earlier already
+# named a directory -- so the variable was empty where it was first read and
+# CMake said nothing.
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  set(_PTHREAD_MD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/AT386)
+  # ⚠️ The target that publishes the MIG headers has a different NAME per
+  # architecture -- libmach's two halves each make their own -- so depending on
+  # the i386 one here is a configure error on the other target rather than a
+  # missing header at compile time.  Which is the good failure, and the reason
+  # it is named once here instead of twice below.
+  set(_PTHREAD_MIG_HEADERS mig_mach_public_headers)
+else()
+  set(_PTHREAD_MD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)
+  set(_PTHREAD_MIG_HEADERS mig_mach_headers_x86_64)
+endif()
+
 # ===========================================================================
 # The sizes in <pthread_impl.h>, generated instead of carried (#425)
 # ===========================================================================
@@ -43,7 +62,7 @@ target_compile_definitions(mk_pthread_impl PRIVATE __POSIX_LIB__)
 # would be a number that is right about nothing.
 target_include_directories(mk_pthread_impl PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/AT386
+  ${_PTHREAD_MD_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
@@ -53,7 +72,7 @@ target_include_directories(mk_pthread_impl PRIVATE
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/uapi)
 
-add_dependencies(mk_pthread_impl mig_mach_public_headers)
+add_dependencies(mk_pthread_impl ${_PTHREAD_MIG_HEADERS})
 
 set(_PTHREAD_IMPL ${CMAKE_BINARY_DIR}/generated/include/pthread_impl.h)
 add_custom_command(
@@ -80,18 +99,30 @@ set(LIB_SOURCES
   thread_switch.c
 )
 
-# AT386 (i386) architecture-specific sources
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/AT386")
+# Architecture-specific sources.
+#
+# ⚠️ Chosen by UROS_TARGET_ARCH and not by `if(EXISTS <dir>)', which is what
+# this said before: the AT386 directory exists in every checkout, so the test
+# was true on every target and an x86-64 build would have compiled i386's
+# assembly.  A directory being present is not evidence that it is the right
+# one.
+if(UROS_TARGET_ARCH STREQUAL "i386")
   list(APPEND LIB_SOURCES
     AT386/i386_thread.c
     AT386/i386_lock.S
     AT386/i386_stack.S
   )
+else()
+  list(APPEND LIB_SOURCES
+    x86_64/x86_64_thread.c
+    x86_64/x86_64_lock.S
+    x86_64/x86_64_stack.S
+  )
 endif()
 
 add_library(libpthreads STATIC ${LIB_SOURCES})
 
-add_dependencies(libpthreads mig_mach_public_headers pthread_impl_header)
+add_dependencies(libpthreads ${_PTHREAD_MIG_HEADERS} pthread_impl_header)
 
 target_compile_options(libpthreads PRIVATE
   ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -mstack-protector-guard=global>
@@ -107,7 +138,7 @@ target_compile_definitions(libpthreads PRIVATE
 
 target_include_directories(libpthreads PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/AT386
+  ${_PTHREAD_MD_DIR}
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/mach_services/include

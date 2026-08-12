@@ -104,6 +104,16 @@ endif()
 # what lets it exist before those issues and what keeps it working after them.
 add_subdirectory(tests/boot_probe)
 
+# libpthreads, ahead of the gate (#425).
+#
+# It needs neither musl nor a filesystem: it is Mach threads, a spin lock and
+# a stack.  bootstrap does not link without it -- the thread that answers
+# service_checkin while the main thread is busy is a pthread -- so it comes
+# before every server rather than after the gate that waits for #414.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libpthreads)
+endif()
+
 # And the first server, also ahead of the gate (#426).
 #
 # The gate below is about musl and the C library; the name server needs
