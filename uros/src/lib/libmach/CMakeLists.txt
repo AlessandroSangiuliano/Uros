@@ -121,7 +121,20 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     COMMENT "Publish device/device.h" VERBATIM)
   list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
 
-  add_custom_target(mig_mach_headers_x86_64 DEPENDS ${_PUB_HDRS})
+  # ⚠️ The SAME NAME the i386 half uses, and that is the whole point.  It was
+  # mig_mach_headers_x86_64, so every consumer had to know which target it was
+  # built for -- and 41 CMakeLists in this tree name mig_mach_public_headers.
+  # Making each of them choose would have been forty-one copies of a
+  # conditional; one name for one role is correct by construction, and only one
+  # of the two halves is ever configured.
+  add_custom_target(mig_mach_public_headers DEPENDS ${_PUB_HDRS})
+
+  # And the device header under the name its consumers already use.  ⚠️ Same
+  # argument: libblk and libsa_fs depend on `mig_device_header', which the i386
+  # tree defines beside its own device.defs rule.  Publishing the identical
+  # header under a different target name would make every consumer choose.
+  add_custom_target(mig_device_header
+    DEPENDS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
 
   # ── The library itself ───────────────────────────────────────────────
   #
@@ -152,7 +165,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)           # needs float.h macros
 
   add_library(libmach STATIC ${_traps_pp} ${_MACH_C} ${LIBMACH_MIG_GENERATED})
-  add_dependencies(libmach mig_mach_headers_x86_64)
+  add_dependencies(libmach mig_mach_public_headers)
   set_target_properties(libmach PROPERTIES
     OUTPUT_NAME "mach"
     ARCHIVE_OUTPUT_DIRECTORY

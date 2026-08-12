@@ -37,12 +37,7 @@ add_custom_command(
 # Library only contains the user-side MIG stub
 add_library(libnetname STATIC ${NETNAME_USER_C})
 
-# ⚠️ The target that publishes the MIG headers has one name per architecture.
-if(UROS_TARGET_ARCH STREQUAL "i386")
-  add_dependencies(libnetname mig_mach_public_headers)
-else()
-  add_dependencies(libnetname mig_mach_headers_x86_64)
-endif()
+add_dependencies(libnetname mig_mach_public_headers)
 
 target_compile_options(libnetname PRIVATE
   ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h>

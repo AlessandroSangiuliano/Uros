@@ -78,7 +78,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
 
   # By PATH, and with -u for the entry: see tests/boot_probe/CMakeLists.txt.
   target_link_libraries(name_server_bin PRIVATE $<TARGET_FILE:libmach>)
-  add_dependencies(name_server_bin libmach mig_mach_headers_x86_64)
+  add_dependencies(name_server_bin libmach mig_mach_public_headers)
 
   target_link_options(name_server_bin PRIVATE
     ${UROS_ARCH_FLAGS} -static -nostdlib -nostartfiles

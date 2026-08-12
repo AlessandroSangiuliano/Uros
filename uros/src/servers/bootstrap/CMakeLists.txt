@@ -23,6 +23,9 @@ macro(mig_server_stub DEFS_FILE STEM OUT_DIR)
     OUTPUT ${_srvC} ${_usrC} ${_hdr} ${_srvH}
     COMMAND ${CMAKE_C_COMPILER} -E -x c ${MIG_INCLUDE_FLAGS} ${_defs}
       | $<TARGET_FILE:migcom>
+        # ⚠️ Which machine the stubs are for (#453/#426).  migcom defaults to
+        # i386, so a rule without this generates i386 layout in silence.
+        ${UROS_MIG_TARGET_ARGS}
         -header ${_hdr}
         -sheader ${_srvH}
         -user   ${_usrC}
@@ -96,18 +99,29 @@ set(BOOTSTRAP_SOURCES
 
 # Executable format loaders
 # i386: a_out + elf (formats.c selects them; coff/rose/som are for other archs)
-list(APPEND BOOTSTRAP_SOURCES
-  a_out.c
-  elf.c
-)
+# ⚠️ a_out.c only on i386: there is no 64-bit a.out, so x86_64/formats.c names
+# elf_switch alone and this file would define a loader nothing points at.
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  list(APPEND BOOTSTRAP_SOURCES a_out.c)
+endif()
+list(APPEND BOOTSTRAP_SOURCES elf.c)
 
-# Architecture-specific (i386)
-list(APPEND BOOTSTRAP_SOURCES
-  parse_args.c
-  i386/boot_dep.c
-  i386/set_regs.c
-  i386/formats.c
-)
+# The parser is shared; the rest is the machine's own -- which formats it
+# loads, where a task starts, and what it can do with an image besides run it.
+list(APPEND BOOTSTRAP_SOURCES parse_args.c)
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  list(APPEND BOOTSTRAP_SOURCES
+    i386/boot_dep.c
+    i386/set_regs.c
+    i386/formats.c
+  )
+else()
+  list(APPEND BOOTSTRAP_SOURCES
+    x86_64/boot_dep.c
+    x86_64/set_regs.c
+    x86_64/formats.c
+  )
+endif()
 
 # ===========================================================================
 # Build target: Mach standalone executable

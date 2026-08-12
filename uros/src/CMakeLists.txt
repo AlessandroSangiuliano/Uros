@@ -134,6 +134,30 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libgpu_console)
 endif()
 
+# libsa_fs and libblk, ahead of the gate (#422).
+#
+# Stage 2: the filesystem bootstrap reads server images from once the bundle
+# has got the first ones running.  ⚠️ libblk is here because libsa_fs uses it,
+# not because bootstrap does -- bootstrap references nothing in it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libblk)
+  add_subdirectory(file_systems)
+endif()
+
+# bootstrap is NOT here yet (#422), and the reason is written down rather than
+# left as an absence.
+#
+# Its CMakeLists is arch-aware now and its machine-dependent half exists, and
+# the libraries it links -- libpthreads, libnetname, libcap, libgpu_console,
+# libsa_fs, libblk, libelf, libmach -- all build for this target.  What is
+# missing is its include path: elf.c cannot see <libelf.h>, and bootstrap.c
+# and log_forwarder.c want mach/bootstrap_server.h and mach/mach_klog.h, which
+# libmach's x86-64 half does not publish yet (its i386 half publishes eighteen
+# headers, this one publishes nine).
+#
+# ⚠️ Adding the subdirectory before that is fixed breaks the DEFAULT x86-64
+# build, which is worse than a server that is not built: everything else here
+# stops being verifiable.
 # And the first server, also ahead of the gate (#426).
 #
 # The gate below is about musl and the C library; the name server needs

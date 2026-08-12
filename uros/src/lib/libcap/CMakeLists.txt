@@ -102,12 +102,7 @@ add_library(libcap STATIC
   ${CAP_USER_C}
 )
 
-# ⚠️ The target that publishes the MIG headers has one name per architecture.
-if(UROS_TARGET_ARCH STREQUAL "i386")
-  add_dependencies(libcap mig_mach_public_headers)
-else()
-  add_dependencies(libcap mig_mach_headers_x86_64)
-endif()
+add_dependencies(libcap mig_mach_public_headers)
 
 target_compile_options(libcap PRIVATE
   ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h>
@@ -140,12 +135,7 @@ if(UROS_BUILD_MUSL)
     hmac_sha256.c
     ${CAP_USER_C}
   )
-  # ⚠️ The target that publishes the MIG headers has one name per architecture.
-if(UROS_TARGET_ARCH STREQUAL "i386")
   add_dependencies(libcap-pic mig_mach_public_headers)
-else()
-  add_dependencies(libcap-pic mig_mach_headers_x86_64)
-endif()
   set_target_properties(libcap-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_compile_options(libcap-pic PRIVATE
     $<TARGET_PROPERTY:libcap,COMPILE_OPTIONS>)

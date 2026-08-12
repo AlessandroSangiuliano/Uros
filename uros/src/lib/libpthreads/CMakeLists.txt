@@ -9,15 +9,8 @@ project(libpthreads C ASM)
 # CMake said nothing.
 if(UROS_TARGET_ARCH STREQUAL "i386")
   set(_PTHREAD_MD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/AT386)
-  # ⚠️ The target that publishes the MIG headers has a different NAME per
-  # architecture -- libmach's two halves each make their own -- so depending on
-  # the i386 one here is a configure error on the other target rather than a
-  # missing header at compile time.  Which is the good failure, and the reason
-  # it is named once here instead of twice below.
-  set(_PTHREAD_MIG_HEADERS mig_mach_public_headers)
 else()
   set(_PTHREAD_MD_DIR ${CMAKE_CURRENT_SOURCE_DIR}/x86_64)
-  set(_PTHREAD_MIG_HEADERS mig_mach_headers_x86_64)
 endif()
 
 # ===========================================================================
@@ -72,7 +65,7 @@ target_include_directories(mk_pthread_impl PRIVATE
   ${CMAKE_SOURCE_DIR}/include
   ${CMAKE_SOURCE_DIR}/uapi)
 
-add_dependencies(mk_pthread_impl ${_PTHREAD_MIG_HEADERS})
+add_dependencies(mk_pthread_impl mig_mach_public_headers)
 
 set(_PTHREAD_IMPL ${CMAKE_BINARY_DIR}/generated/include/pthread_impl.h)
 add_custom_command(
@@ -122,7 +115,7 @@ endif()
 
 add_library(libpthreads STATIC ${LIB_SOURCES})
 
-add_dependencies(libpthreads ${_PTHREAD_MIG_HEADERS} pthread_impl_header)
+add_dependencies(libpthreads mig_mach_public_headers pthread_impl_header)
 
 target_compile_options(libpthreads PRIVATE
   ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -mstack-protector-guard=global>
