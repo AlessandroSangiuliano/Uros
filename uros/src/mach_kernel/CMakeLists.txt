@@ -384,9 +384,21 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     COMMAND ${CMAKE_COMMAND} -E copy
             ${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin/name_server
             ${X86_64_ISO_DIR}/boot/name_server
+    # And bootstrap with its bundle, for the entry that boots the system the
+    # way the system is meant to boot (#422): module 0 is init and module 1 is
+    # what init reads.  ⚠️ Two files and not one -- a bootstrap staged without
+    # its bundle starts, finds nothing to start, and says so in a sentence that
+    # sounds like the kernel's fault.
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin/bootstrap
+            ${X86_64_ISO_DIR}/boot/bootstrap
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_BINARY_DIR}/bootstrap.bundle
+            ${X86_64_ISO_DIR}/boot/bootstrap.bundle
     COMMAND sh -c "echo set default=$\{UROS_X86_64_BOOT_ENTRY:-0\} > ${X86_64_ISO_DIR}/boot/grub/entry.cfg"
     COMMAND grub-mkrescue -o ${X86_64_ISO} ${X86_64_ISO_DIR}
     DEPENDS mach_kernel boot_probe name_server_bin
+            bootstrap_server bootstrap_bundle
             ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
     COMMENT "Building GRUB2 multiboot2 rescue ISO: ${X86_64_ISO}"
     VERBATIM)

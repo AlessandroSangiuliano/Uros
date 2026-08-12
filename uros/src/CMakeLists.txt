@@ -78,6 +78,21 @@ if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
   add_subdirectory(tools/mkmanifest)
 endif()
 
+# mkbundle, for the target whose userland is not complete either (#422).
+#
+# It is a host tool exactly as migcom is: it reads files and writes an archive
+# of fixed-width little-endian records, and knows nothing whatever about the
+# machine those files are for.  Sitting in the block above -- gated on the
+# architecture whose userland IS complete -- meant an x86-64 build could not
+# make a bundle at all, and a bundle is the difference between bootstrap being
+# a binary that links and bootstrap being init.
+#
+# Same shape as the migcom line above, and added the same way: only when the
+# block above has not already added it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tools/mkbundle)
+endif()
+
 # Kernel build.  Both targets need migcom first: since #416 the x86-64 kernel
 # generates its interface stubs with the same host tool i386 does.
 if(OSFMK_BUILD_KERNEL)

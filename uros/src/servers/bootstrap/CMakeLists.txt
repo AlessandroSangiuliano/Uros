@@ -206,3 +206,44 @@ set_target_properties(bootstrap_server PROPERTIES
   OUTPUT_NAME "bootstrap"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The stage-1 bundle, built by the build (#422)
+# ===========================================================================
+#
+# The bundle is what turns this binary into init: the kernel maps it into the
+# bootstrap task and says where on argv, and bootstrap reads bootstrap.conf out
+# of it and starts what that names.  Without one there is nothing to start,
+# which is what "No bootstrap code loaded with the kernel" has been saying on
+# this target since the beginning.
+#
+# ⚠️ Made here and not by scripts/make-bundle.sh, and that is not a rewrite of
+# it.  That script describes an i386 system -- twenty servers, two disk stages,
+# a bench selector, driver plug-ins -- and every one of those things is a
+# REQUIRED_FILE it checks for.  On this target none of them exists yet.  What
+# does exist is one server, so the bundle is two entries; and a rule that knows
+# when either of them changed is worth more than a script somebody has to
+# remember to re-run after a rebuild.  mkbundle is the piece that is shared,
+# which is the piece that was worth sharing.
+if(NOT UROS_TARGET_ARCH STREQUAL "i386")
+  set(_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap.bundle)
+  set(_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap.conf)
+  set(_SBIN   ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin)
+
+  # One line, and the lines that are NOT here are the point: i386's
+  # bootstrap.conf names hal_server, block_device_server, default_pager,
+  # ext_server and a dozen more, and bootstrap would go looking for each of
+  # them in turn.  It names what has crossed, which is the name server.
+  file(GENERATE OUTPUT ${_CONF} CONTENT "name_server name_server\n")
+
+  add_custom_command(
+    OUTPUT ${_BUNDLE}
+    COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
+            bootstrap.conf:${_CONF}
+            name_server:${_SBIN}/name_server
+    DEPENDS mkbundle name_server_bin ${_CONF}
+    COMMENT "Bundle: bootstrap.conf + name_server"
+    VERBATIM)
+
+  add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})
+endif()
