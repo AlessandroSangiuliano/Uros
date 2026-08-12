@@ -140,24 +140,32 @@ endif()
 # has got the first ones running.  ⚠️ libblk is here because libsa_fs uses it,
 # not because bootstrap does -- bootstrap references nothing in it.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  # ⚠️ libelf was NEVER configured for this target.  Its ELF64 support was
+  # written and checked with a host compile, and reported as done -- while no
+  # build here consumed it.  The consumer is what collaudates the producer.
+  add_subdirectory(lib/libelf)
   add_subdirectory(lib/libblk)
   add_subdirectory(file_systems)
 endif()
 
-# bootstrap is NOT here yet (#422), and the reason is written down rather than
-# left as an absence.
+# bootstrap is one symbol away from linking here (#422), and the symbol names
+# its own reason.
 #
-# Its CMakeLists is arch-aware now and its machine-dependent half exists, and
-# the libraries it links -- libpthreads, libnetname, libcap, libgpu_console,
-# libsa_fs, libblk, libelf, libmach -- all build for this target.  What is
-# missing is its include path: elf.c cannot see <libelf.h>, and bootstrap.c
-# and log_forwarder.c want mach/bootstrap_server.h and mach/mach_klog.h, which
-# libmach's x86-64 half does not publish yet (its i386 half publishes eighteen
-# headers, this one publishes nine).
+# Every source of it now COMPILES for x86-64 -- the machine-dependent trio, the
+# loaders, the libraries, the include path.  What is left is
+# host_load_symbol_table, which elf.c calls to hand the kernel a server's
+# symbols: its stub comes from mach_debug.defs, and migcom cannot generate that
+# for this target yet.  See the note in lib/libmach/CMakeLists.txt -- the
+# generated stubs fail their own _Static_asserts about out-of-line array units
+# (#416).
 #
-# ⚠️ Adding the subdirectory before that is fixed breaks the DEFAULT x86-64
-# build, which is worse than a server that is not built: everything else here
-# stops being verifiable.
+# ⚠️ Left out of the build rather than added broken: a default build that fails
+# makes every other thing here unverifiable, and that was tried and undone once
+# already today.
+#if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+#  add_subdirectory(servers/bootstrap)
+#endif()
+
 # And the first server, also ahead of the gate (#426).
 #
 # The gate below is about musl and the C library; the name server needs

@@ -156,7 +156,11 @@ target_include_directories(bootstrap_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  # ⚠️ The machine's half of libpthreads, chosen rather than named: AT386 was
+  # hardcoded here, and on this target it would have shadowed x86_64's
+  # pthread_machdep.h with i386's -- a lock type of the wrong width and a
+  # stack-switch sequence in 32-bit assembly.
+  $<IF:$<STREQUAL:${UROS_TARGET_ARCH},i386>,${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386,${CMAKE_SOURCE_DIR}/src/lib/libpthreads/x86_64>
   # Filesystem headers — must come before export so the canonical file_system.h
   # is used (export/include copy may be stale)
   ${CMAKE_SOURCE_DIR}/src/file_systems

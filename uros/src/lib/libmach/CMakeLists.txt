@@ -84,6 +84,19 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # the build directory, so printf.c compiled against a header no rule
     # produced and the stubs it calls were in no archive.
     ${_E}/device/device.defs
+    # mach_klog.defs: bootstrap's log_forwarder includes <mach/mach_klog.h>.
+    ${_E}/mach/mach_klog.defs
+    # ⚠️ mach_debug.defs is NOT here, and it is the one .defs that could not
+    # simply be added.  bootstrap's elf.c calls host_load_symbol_table, whose
+    # stub lives there -- and generating it fails its own _Static_asserts:
+    #
+    #   "MIG measures the out-of-line info in the wrong unit"
+    #   "MIG and the compiler disagree on the size of region"
+    #
+    # That is a migcom defect on this target (#416), not a .defs problem, and
+    # it is the assertion machinery #416 added doing exactly its job.  Adding
+    # the file back is one line once migcom counts out-of-line arrays in bytes
+    # rather than elements here.
   )
   set(LIBMACH_MIG_GENERATED)
   foreach(d IN LISTS _DEFS)
@@ -93,10 +106,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # #169: published under the names consumers actually include.
   set(_PUB "${CMAKE_BINARY_DIR}/generated/include/mach")
   file(MAKE_DIRECTORY "${_PUB}")
+  # ⚠️ i386 publishes eighteen of these and this published nine, which is not a
+  # judgement about what the target needs -- it is the list that happened to be
+  # written when only libmach itself consumed them.  bootstrap wants two more:
+  # the SERVER half of bootstrap.defs, which it demultiplexes, and mach_klog.
   set(_PUB_MAP  mach.h mach_interface.h  mach_port.h mach_port.h
                 mach_host.h mach_host.h  clock.h clock.h
                 bootstrap.h bootstrap.h  exc.h exc_user.h
-                exc_server.h exc_server.h  notify_server.h notify_server.h)
+                exc_server.h exc_server.h  notify_server.h notify_server.h
+                bootstrap_server.h bootstrap_server.h
+                mach_klog.h mach_klog.h)
   # device/device.h goes under its own directory, which is how it is spelled.
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
   set(_PUB_HDRS)

@@ -16,6 +16,7 @@
 
 #include <mach.h>
 #include <mach/mach_traps.h>
+#include <mach/mach_host.h>	/* vm_wire: it is a HOST call, not a vm one */
 #include <mach/x86_64/thread_status.h>
 #include <mach/x86_64/vm_param.h>
 

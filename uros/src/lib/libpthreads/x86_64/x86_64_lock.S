@@ -28,6 +28,30 @@
  * processor asserts it for that instruction alone.  Written out because the
  * missing prefix looks like an omission and is not.
  */
+/*
+ * How many times to try before yielding.
+ *
+ * ⚠️ In .data, EXPLICITLY, and that bracket is the whole of #310.  i386's copy
+ * carries the story: the DATA() macro emits .globl/.align/label and does NOT
+ * switch section, so this landed in .text and was mapped read-only.  On a
+ * uniprocessor nothing noticed -- pthread_init leaves it at 1 and never writes
+ * -- and on SMP the store faulted, reported by vm_fault as
+ * KERN_INVALID_ADDRESS rather than a protection violation, which is what made
+ * it hard to find.  There is no DATA() macro here, so the section is named
+ * outright and cannot be forgotten by a macro.
+ *
+ * ⚠️ .long, not .quad: pthread.c declares it `int' and x86_64_lock.S reads it
+ * with movl.  Widening it here would be a definition the C side does not
+ * share -- the same shape as the trap prototypes of #448.
+ */
+	.data
+	.globl	_spin_tries
+	.align	4
+	.type	_spin_tries,@object
+	.size	_spin_tries, 4
+_spin_tries:
+	.long	1
+
 	.text
 	.globl	_spin_lock
 	.type	_spin_lock,@function
