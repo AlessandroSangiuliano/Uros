@@ -46,12 +46,31 @@ main(void)
 	printf("#define __PTHREAD_CONDATTR_SIZE__  %ld\n", (long) sizeof(pthread_condattr_t)-sizeof(long));
 	printf("#define __PTHREAD_COND_SIZE__      %ld\n", (long) sizeof(pthread_cond_t)-sizeof(long));
 	printf("#define __PTHREAD_ONCE_SIZE__      %ld\n", (long) sizeof(pthread_once_t)-sizeof(long));
+	/*
+	 * ⚠️ The five below were in the generated header and NOT in this
+	 * generator.  pthread_rwlock, pthread_barrier and pthread_spin arrived
+	 * with #82 and their sizes were written into AT386/pthread_impl.h by
+	 * hand -- into a file whose first line says "*** CAUTION!! Do not
+	 * edit!!" -- because no rule ran this program to say otherwise.
+	 *
+	 * They are the ones that could cost something.  pthread_t is a POINTER
+	 * to a library-allocated object, so a short __PTHREAD_SIZE__ never
+	 * reaches a caller's memory; a rwlock, a barrier and a spinlock are
+	 * declared BY VALUE by the client, so their opaque buffer is the
+	 * client's own storage and a number that is too small is written past.
+	 */
+	printf("#define __PTHREAD_RWLOCKATTR_SIZE__ %ld\n", (long) sizeof(pthread_rwlockattr_t)-sizeof(long));
+	printf("#define __PTHREAD_RWLOCK_SIZE__    %ld\n", (long) sizeof(pthread_rwlock_t)-sizeof(long));
+	printf("#define __PTHREAD_BARRIERATTR_SIZE__ %ld\n", (long) sizeof(pthread_barrierattr_t)-sizeof(long));
+	printf("#define __PTHREAD_BARRIER_SIZE__   %ld\n", (long) sizeof(pthread_barrier_t)-sizeof(long));
+	printf("#define __PTHREAD_SPIN_SIZE__      %ld\n", (long) sizeof(pthread_spinlock_t)-sizeof(long));
 	printf("/*\n");
 	printf(" * [Internal] data structure signatures\n");
 	printf(" */\n");
 	printf("#define _PTHREAD_MUTEX_SIG_init		0x%08X\n", _PTHREAD_MUTEX_SIG_init);
 	printf("#define _PTHREAD_COND_SIG_init		0x%08X\n", _PTHREAD_COND_SIG_init);
 	printf("#define _PTHREAD_ONCE_SIG_init		0x%08X\n", _PTHREAD_ONCE_SIG_init);
+	printf("#define _PTHREAD_RWLOCK_SIG		0x%08X\n", _PTHREAD_RWLOCK_SIG);
 	printf("/*\n");
 	printf(" * POSIX scheduling policies \n");
 	printf(" */\n");
@@ -60,5 +79,12 @@ main(void)
 	printf("#define SCHED_FIFO       %d\n", SCHED_FIFO);
 	printf("#define SCHED_RR         %d\n", SCHED_RR);
 	printf("#define __SCHED_PARAM_SIZE__       %ld\n", (long) sizeof(struct sched_param)-sizeof(int));
-	exit(0);
+	/*
+	 * ⚠️ return, not exit(): this file includes <stdio.h> and nothing else,
+	 * and the tree's stdio does not declare exit().  It compiled in 1994
+	 * because an implicit declaration was a warning; it is an error now, and
+	 * that is one of the reasons nothing had run this generator in years.
+	 * main returning zero says the same thing and needs no header.
+	 */
+	return 0;
 } 
