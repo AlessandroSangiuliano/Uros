@@ -148,23 +148,20 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(file_systems)
 endif()
 
-# bootstrap is one symbol away from linking here (#422), and the symbol names
-# its own reason.
+# bootstrap, ahead of the gate (#422).
 #
-# Every source of it now COMPILES for x86-64 -- the machine-dependent trio, the
-# loaders, the libraries, the include path.  What is left is
-# host_load_symbol_table, which elf.c calls to hand the kernel a server's
-# symbols: its stub comes from mach_debug.defs, and migcom cannot generate that
-# for this target yet.  See the note in lib/libmach/CMakeLists.txt -- the
-# generated stubs fail their own _Static_asserts about out-of-line array units
-# (#416).
+# It is init on this target as it is on i386: the first task the kernel starts,
+# and the one that creates every server after it.  So it comes before the gate
+# for the same reason the six libraries above do -- it needs none of what is
+# behind it, and everything behind it needs to be started by it.
 #
-# ⚠️ Left out of the build rather than added broken: a default build that fails
-# makes every other thing here unverifiable, and that was tried and undone once
-# already today.
-#if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
-#  add_subdirectory(servers/bootstrap)
-#endif()
+# The one symbol that used to hold it out was host_load_symbol_table, from
+# mach_debug.defs; what kept that .defs from generating was six types in
+# mach_debug_types.defs declared as a fixed count of 32-bit words when their
+# size follows the pointer width.  See the note in lib/libmach/CMakeLists.txt.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/bootstrap)
+endif()
 
 # And the first server, also ahead of the gate (#426).
 #
