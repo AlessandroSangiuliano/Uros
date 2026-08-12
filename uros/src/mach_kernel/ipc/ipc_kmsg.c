@@ -1989,6 +1989,8 @@ ipc_kmsg_copyin_body(
 		vm_offset_t             		data;
 		vm_offset_t             		addr;
 		ipc_object_t            		*objects;
+		mach_port_t             		*names;
+		vm_size_t               		names_length;
 		int					j;
 		mach_msg_type_name_t    		name;
 		mach_msg_ool_ports_descriptor_t 	*dsc;
@@ -1997,12 +1999,25 @@ ipc_kmsg_copyin_body(
 		addr = (vm_offset_t) dsc->address;
 
 		/*
-		 * The kernel's copy holds one pointer per port, not one
-		 * name (#415): copyin translates the names it reads from
-		 * user memory into objects, in place, and objects are
-		 * wider here than the names were.
+		 * The kernel's copy holds one pointer per port and the user's
+		 * array holds one NAME per port (#415), so TWO sizes are
+		 * needed here and there was one.
+		 *
+		 * 🔥 The buffer was sized at pointer width, which is right,
+		 * and then that same number was handed to copyinmap: a
+		 * three-port array read twenty-four bytes out of a user buffer
+		 * holding twelve.  The translation then walked the result at
+		 * the wrong stride, so objects[0] was names[0] and names[1]
+		 * side by side, read as one address.
+		 *
+		 * What reached the console was three calls away and looked
+		 * like something else.  bootstrap's mach_ports_register()
+		 * SUCCEEDED, storing user addresses in itk_registered[]; the
+		 * first task it created inherited them; and the kernel took a
+		 * mutex on 0x4d8da8 from ring 0, inside ipc_task_init.
 		 */
 		length = ipc_port_array_size(dsc->count);
+		names_length = mach_port_name_array_size(dsc->count);
 		
 		if (length == 0) {
 		    complex = TRUE;
@@ -2028,14 +2043,20 @@ ipc_kmsg_copyin_body(
 		    return MACH_SEND_NO_BUFFER;
 		}
 		
-		if (copyinmap(map, addr, data, length)) {
+		/*
+		 * ⚠️ names_length, and the buffer is length: what comes FROM
+		 * the user is names, and what stays here is pointers.  Reading
+		 * `length' bytes would read past the end of the user's array,
+		 * with the count coming from the caller.
+		 */
+		if (copyinmap(map, addr, data, names_length)) {
 		    KFREE(data, length, rt);
 		    ipc_kmsg_clean_partial(kmsg, i, paddr, space_needed);
 		    return MACH_SEND_INVALID_MEMORY;
 		}
 
 		if (dsc->deallocate) {
-			(void) vm_deallocate(map, addr, length);
+			(void) vm_deallocate(map, addr, names_length);
 		}
 		
 		dsc->address = (void *) data;
@@ -2045,36 +2066,56 @@ ipc_kmsg_copyin_body(
 		dsc->disposition = ipc_object_copyin_type(name);
 		
 		objects = (ipc_object_t *) data;
-		
-		for ( j = 0; j < dsc->count; j++) {
-		    mach_port_t port = (mach_port_t) objects[j];
+		names   = (mach_port_t *) data;
+
+		/*
+		 * ⚠️ BACKWARDS, and that is what makes widening in place safe.
+		 * Name j sits at 4j and object j at 8j, so the write for j
+		 * begins at or above the end of name j -- every name still to be
+		 * read is below it.  Forwards, the very first write would
+		 * destroy the second name.
+		 */
+		for (j = (int) dsc->count - 1; j >= 0; j--) {
+		    mach_port_t port = names[j];
 		    ipc_object_t object;
-		    
-		    if (!MACH_PORT_VALID(port))
+
+		    /*
+		     * ⚠️ Written, not skipped.  A null name used to be left
+		     * alone because a name and a pointer were the same four
+		     * bytes; here the slot still holds two names, and leaving it
+		     * hands the receiver one of them as an address.
+		     */
+		    if (!MACH_PORT_VALID(port)) {
+			objects[j] = IO_NULL;
 			continue;
-		    
+		    }
+
 		    kr = ipc_object_copyin(space, port, name, &object);
 
 		    if (kr != KERN_SUCCESS) {
 			int k;
 
-			for(k = 0; k < j; k++) {
-			    object = objects[k];
-		    	    if (!MACH_PORT_VALID(port))
-			 	continue;
-		    	    ipc_object_destroy(object, dsc->disposition);
-			}
+			/*
+			 * The ones already converted are ABOVE j now.  ⚠️ And
+			 * each is tested for itself: this loop used to ask
+			 * MACH_PORT_VALID of `port', the name from the FAILING
+			 * iteration, which does not change inside it -- so it
+			 * destroyed all of them or none of them.
+			 */
+			for (k = j + 1; k < (int) dsc->count; k++)
+			    if (IO_VALID(objects[k]))
+				ipc_object_destroy(objects[k],
+						   dsc->disposition);
 			KFREE(data, length, rt);
 			ipc_kmsg_clean_partial(kmsg, i, paddr, space_needed);
 			return MACH_SEND_INVALID_RIGHT;
 		    }
-		    
+
 		    if ((dsc->disposition == MACH_MSG_TYPE_PORT_RECEIVE) &&
-			ipc_port_check_circularity(
-						   (ipc_port_t) object,
+			ipc_port_check_circularity((ipc_port_t) object,
 						   (ipc_port_t) dest))
 			kmsg->ikm_header.msgh_bits |= MACH_MSGH_BITS_CIRCULAR;
-		    
+
 		    objects[j] = object;
 		}
 		
