@@ -14,6 +14,12 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    # ⚠️ The target, which this could not pass until scripts/mig learned to
+    # (#426): everything the wrapper did not recognise went to the C
+    # PREPROCESSOR, so -target arrived at cc and migcom generated i386 layout
+    # in silence.  ${UROS_MIG_TARGET_ARGS} is set at the top level, so it is
+    # never empty here.
+    ${UROS_MIG_TARGET_ARGS}
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
@@ -31,7 +37,12 @@ add_custom_command(
 # Library only contains the user-side MIG stub
 add_library(libnetname STATIC ${NETNAME_USER_C})
 
-add_dependencies(libnetname mig_mach_public_headers)
+# ⚠️ The target that publishes the MIG headers has one name per architecture.
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  add_dependencies(libnetname mig_mach_public_headers)
+else()
+  add_dependencies(libnetname mig_mach_headers_x86_64)
+endif()
 
 target_compile_options(libnetname PRIVATE
   ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h>

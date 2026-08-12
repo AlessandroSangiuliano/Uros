@@ -114,6 +114,26 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libpthreads)
 endif()
 
+# libnetname, ahead of the gate (#422).
+#
+# It has no C of its own: it is the MIG stubs of netname.defs, which is what a
+# client calls to reach the name server.  bootstrap needs one symbol from it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libnetname)
+endif()
+
+# libcap and libgpu_console, ahead of the gate (#422).
+#
+# bootstrap uses two symbols from each -- cap_provision/cap_request, and
+# gpu_console_init/gpu_console_puts.  ⚠️ libgpu_console is a CLIENT of
+# gpu_server, which does not run on this target yet (#427): it builds and it
+# will fail to connect, which is what it already does on i386 before
+# gpu_server is up.  Not building it would mean a different bootstrap here.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libcap)
+  add_subdirectory(lib/libgpu_console)
+endif()
+
 # And the first server, also ahead of the gate (#426).
 #
 # The gate below is about musl and the C library; the name server needs
