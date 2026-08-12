@@ -17,6 +17,7 @@
 #include <trap/trap.h>
 
 void thread_state_from_frame(const struct trap_frame *frame,
+			     uint64_t fs_base, uint64_t gs_base,
 			     struct x86_64_thread_state *state)
 {
 	state->rax = frame->rax;
@@ -42,18 +43,24 @@ void thread_state_from_frame(const struct trap_frame *frame,
 	state->ss = frame->ss;
 
 	/*
-	 * The bases come from the machine, not from the frame, because the
-	 * frame has nowhere to keep them: they are MSRs, and nothing pushes
-	 * them.  Read here rather than saved on entry so that the answer is
-	 * the one that is true, not the one that was true.
+	 * The bases are the CALLER's to supply, because the frame has nowhere
+	 * to keep them -- they are MSRs, and nothing pushes them.
 	 *
-	 * ⚠️ Which makes this correct only while the thread being asked about
-	 * is the one running.  A thread state read of a *stopped* thread has
-	 * to take these from wherever the switch left them, and that place
-	 * arrives with the scheduler.
+	 * 🔥 This used to read them with rdmsr(), under a note saying that was
+	 * correct only while the thread being asked about was the one running.
+	 * It was not: act_machine_get_state() is asked about a thread that is
+	 * STOPPED, by definition -- thread_get_state() waits for it to block
+	 * before asking -- so the answer was the running kernel's bases, and
+	 * gs_base was this processor's per-CPU block.  A kernel base is exactly
+	 * what the write direction must refuse (#440), so every read-modify-
+	 * write of a stopped thread's state was refused.
+	 *
+	 * A parameter rather than a read, so that each caller says where its
+	 * answer comes from: the pcb for a real thread, a chosen value for the
+	 * self-test that has no thread at all.
 	 */
-	state->fs_base = rdmsr(MSR_FS_BASE);
-	state->gs_base = rdmsr(MSR_KERNEL_GS_BASE);
+	state->fs_base = fs_base;
+	state->gs_base = gs_base;
 }
 
 /*
@@ -66,6 +73,49 @@ void thread_state_from_frame(const struct trap_frame *frame,
  */
 #define RFLAGS_USER_SETTABLE	0x0DD5UL	/* CF PF AF ZF SF TF DF OF */
 #define RFLAGS_ALWAYS_ONE	0x0002UL	/* reserved, and must be set */
+
+/*
+ * The frame a thread is born with (#422).
+ *
+ * 🔥 On i386 this has always existed and is why the loader works there.  Its
+ * pcb carries the user frame INSIDE it, and pcb_init() fills the selectors in
+ * at activation creation under a comment that says exactly what it is for:
+ * "Guarantee that the bootstrapped thread will be in user mode."  So on that
+ * machine a thread that has never run still HAS registers, and
+ * thread_get_state() on it answers.
+ *
+ * Here the frame is a POINTER into the kernel stack, and it used to be null
+ * until somebody wrote one.  act_machine_get_state() refuses a null frame --
+ * correctly, there is nothing to read -- so thread_get_state() on a fresh
+ * thread returned KERN_INVALID_ARGUMENT.
+ *
+ * ⚠️ Which nobody saw, because the loader does not look.  bootstrap's
+ * set_regs() reads the state, changes rip and rsp, and writes it back, and it
+ * ignores both return values -- the same eleven lines on both machines, and
+ * correct on the one where the read answers.  Here the read failed, the
+ * structure it was to fill stayed as the stack had left it, and fifteen
+ * general registers of somebody else's locals were written into the frame of
+ * a task about to enter ring 3.
+ *
+ * The selectors and rflags were never at risk: thread_state_to_frame() imposes
+ * those below and always has.  That is precisely why this was quiet -- the
+ * thread started at the right address, on the right stack, at ring 3, with
+ * interrupts on, and with rubbish in rbx.
+ *
+ * So a thread is given its frame when it is given its stack, and this is the
+ * one place that says what an untouched one contains.
+ */
+void thread_frame_init(struct trap_frame *frame)
+{
+	unsigned i;
+
+	for (i = 0; i < sizeof *frame; i++)
+		((volatile unsigned char *) frame)[i] = 0;
+
+	frame->cs     = USER_CS_RPL3;
+	frame->ss     = USER_DS_RPL3;
+	frame->rflags = RFLAGS_ALWAYS_ONE | RFLAGS_IF;
+}
 
 int thread_state_bases_ok(const struct x86_64_thread_state *state)
 {

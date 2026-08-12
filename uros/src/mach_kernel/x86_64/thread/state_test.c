@@ -98,6 +98,22 @@
 #define USER_BASE_PROBE		0x0000700000010000ULL
 
 /*
+ * An address a thread may NOT have, said outright (#422).
+ *
+ * 🔥 The refusal arm of the round trip used to get one for free: the read
+ * direction reported the running machine's own MSRs, so gs_base came back as
+ * this processor's per-CPU block and the arm had a kernel base without asking
+ * for one.  That was a DEFECT standing in for a fixture -- the same defect
+ * that made every read-modify-write of a stopped thread refuse, and that sent
+ * the name server to ring 3 with a frame still full of zeroes.
+ *
+ * With the read answering from the thread, the free kernel base is gone.  The
+ * arm names its own now, which is what it meant all along and which cannot go
+ * vacuous the way an inherited one could.
+ */
+#define KERNEL_BASE_PROBE	(KERNEL_HALF_BASE + 0x1000ULL)
+
+/*
  * What an untouched word of the caller's buffer looks like.  Distinct per
  * word, so that "nothing was written" and "the same thing was written twice"
  * are different observations.
@@ -264,8 +280,9 @@ test_round_trip(void)
 				  "user frame failed");
 	memcpy(&first, buf, sizeof first);
 
-	claim(va_is_kernel(first.gs_base),
-	      "the read did not report the machine's own gs base, so the "
+	out->gs_base = KERNEL_BASE_PROBE;
+	claim(va_is_kernel(out->gs_base),
+	      "the base this arm refuses is not a kernel address, so the "
 	      "refusal below proves nothing");
 
 	frame_snapshot();

@@ -125,6 +125,7 @@ struct trap_frame;
  * mean a change to the entry path silently changing an external ABI.
  */
 void thread_state_from_frame(const struct trap_frame *frame,
+			     uint64_t fs_base, uint64_t gs_base,
 			     struct x86_64_thread_state *state);
 
 /*
@@ -190,6 +191,14 @@ void thread_state_from_frame(const struct trap_frame *frame,
  * here: with a predicate, every spelling a caller might reach for already gives
  * the right answer, so there is no wrong reading left for a compiler to catch.
  */
+/*
+ * Fill in the frame a thread that has never run to ring 3 should have: zeroed
+ * general registers, the ring-3 selectors, and interrupts enabled.  Called
+ * where a thread gets its kernel stack, so that reading a fresh thread's state
+ * answers rather than refusing -- see the note above the definition.
+ */
+void thread_frame_init(struct trap_frame *frame);
+
 int thread_state_to_frame(const struct x86_64_thread_state *state,
 			  struct trap_frame *frame);
 

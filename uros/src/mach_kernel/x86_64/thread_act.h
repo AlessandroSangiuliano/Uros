@@ -64,6 +64,29 @@ typedef struct pcb {
 	 */
 	struct trap_frame	*user;
 
+	/*
+	 * The segment bases this thread uses, which the frame has nowhere to
+	 * keep: they are MSRs and no trap pushes them (#422).
+	 *
+	 * 🔥 thread_state_from_frame() used to answer with rdmsr() -- the
+	 * bases of whatever thread is running -- which is right only when that
+	 * is the thread being asked about.  Reading a STOPPED thread reported
+	 * the kernel's own gs_base, and the write direction is obliged to
+	 * refuse a kernel base (#440), so a read-modify-write of another
+	 * thread's state was refused every time.  bootstrap's loader does
+	 * exactly that read-modify-write, checks neither return value, and on
+	 * i386 never needed to: the name server entered ring 3 with the whole
+	 * frame still zero, at rip 0.
+	 *
+	 * ⚠️ Stored and reported, but NOT yet loaded on a context switch --
+	 * that is the second half of TLS on this machine and is not here.  So
+	 * a thread that sets a base does not get it applied; what it gets is a
+	 * consistent answer when it reads back, which is what the round trip
+	 * needs and what the loader was silently failing.
+	 */
+	uint64_t		fs_base;
+	uint64_t		gs_base;
+
 	decl_simple_lock_data(,lock)
 } *pcb_t;
 

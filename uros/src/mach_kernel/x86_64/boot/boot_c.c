@@ -1940,7 +1940,8 @@ static void thread_state_selftest(void)
 	frame.ss = USER_DS_RPL3;
 	frame.rflags = RFLAGS_IF | 2;
 
-	thread_state_from_frame(&frame, &out);
+	thread_state_from_frame(&frame, USER_BASE_PROBE,
+				USER_BASE_PROBE + PAGE_SIZE_4K, &out);
 
 	/*
 	 * The bases have to be ones a thread could have before the reverse
@@ -1954,7 +1955,8 @@ static void thread_state_selftest(void)
 	out.gs_base = USER_BASE_PROBE + PAGE_SIZE_4K;
 
 	applied = thread_state_to_frame(&out, &frame);
-	thread_state_from_frame(&frame, &back);
+	thread_state_from_frame(&frame, USER_BASE_PROBE,
+				USER_BASE_PROBE + PAGE_SIZE_4K, &back);
 
 	regs_ok = applied && out.rax == back.rax && out.rbx == back.rbx
 	       && out.rcx == back.rcx && out.rdx == back.rdx

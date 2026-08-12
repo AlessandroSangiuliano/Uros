@@ -293,6 +293,25 @@ thread_machine_create(thread_t thread, thread_act_t thr_act,
 		     thread_begin_trampoline, (void *) 0,
 		     fpu_area);
 
+	/*
+	 * And its user frame, here, because here is where the stack it lives on
+	 * comes from (#422).
+	 *
+	 * i386 does this in pcb_init(): the frame is embedded in the pcb there,
+	 * so a thread has one from the moment it has an activation.  A thread
+	 * on this machine had none until something wrote one, and
+	 * thread_get_state() on a thread that has never run answered
+	 * KERN_INVALID_ARGUMENT -- which the loader does not check, on either
+	 * machine, and which on i386 it never needed to.
+	 *
+	 * ⚠️ The address is derived and not chosen; trap.h's KERNEL_STACK_USER_FRAME
+	 * says why, and act_machine_set_state() below uses the same expression
+	 * because it is the same claim about the same bytes.
+	 */
+	pcb->user = (struct trap_frame *)
+		KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+	thread_frame_init(pcb->user);
+
 	return KERN_SUCCESS;
 }
 
@@ -419,7 +438,7 @@ act_machine_get_state(thread_act_t thr_act, thread_flavor_t flavor,
 	case x86_64_THREAD_STATE:
 		if (*count < x86_64_THREAD_STATE_COUNT)
 			return KERN_INVALID_ARGUMENT;
-		thread_state_from_frame(pcb->user,
+		thread_state_from_frame(pcb->user, pcb->fs_base, pcb->gs_base,
 					(struct x86_64_thread_state *) state);
 		*count = x86_64_THREAD_STATE_COUNT;
 		return KERN_SUCCESS;
@@ -457,35 +476,27 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 	/*
 	 * ── Where a thread's user registers live, and who first says so ──
 	 *
-	 * A thread that has never been to ring 3 has no frame, and this used to
-	 * refuse for that reason (#422) -- which is right for READING one and
-	 * wrong for writing one, because writing is exactly how a thread that
-	 * has never run acquires its first.
+	 * thread_machine_create() -- a thread is given its frame where it is
+	 * given the kernel stack the frame lives on, which is how i386 has
+	 * always done it (pcb_init) and why the loader works there.
 	 *
-	 * The bootstrap task is that case, and the only one that matters today:
-	 * the loader works out an entry point and a stack, and thread_setstatus()
-	 * is the only way to put them anywhere.  Refusing left the frame null,
-	 * and the machine stopped in act_user_frame() with "thread has never
-	 * been to user mode" -- a message about the thread rather than about the
-	 * state that had been declined on its way in.
+	 * 🔥 This used to CREATE one here when it found none, and that was a
+	 * repair aimed one function too late.  It made writing work and left
+	 * READING refusing, so bootstrap's set_regs() -- which reads the state,
+	 * changes rip and rsp, writes it back, and checks neither return value
+	 * on either machine -- wrote fifteen registers of uninitialised stack
+	 * into the frame of a task about to enter ring 3.
 	 *
-	 * ⚠️ The address is not chosen, it is DERIVED, and that is the point.
-	 * A trap from ring 3 switches to the stack the task-state segment names
-	 * -- which act_machine_switch_pcb() now keeps at this thread's
-	 * kernel_stack_top -- and the processor aligns down to sixteen before
-	 * pushing its five words, on top of which the stub adds two and
-	 * SAVE_REGS fifteen.  So the frame the hardware will build is exactly
-	 * here.  Writing one anywhere else would give a thread two places for
-	 * its registers: the one set_state wrote, and the one the next trap
-	 * builds over it.
-	 *
-	 * The expression is the one #409 measured against the hardware on four
-	 * separate entries, which is why it is written as arithmetic rather
-	 * than as a constant somebody would have to trust.
+	 * ⚠️ And the address it computed for a pcb with no kernel stack was
+	 * KERNEL_STACK_USER_FRAME(0), which is near the top of the address
+	 * space and mapped nowhere.  Nothing dereferenced it, because
+	 * thread_state_to_frame() refuses before it writes -- so #408's
+	 * "registers were set on a thread that has no frame" passed on the
+	 * strength of a bases check rather than on the claim it makes.  It
+	 * passes for its own reason now.
 	 */
 	if (pcb->user == (struct trap_frame *) 0)
-		pcb->user = (struct trap_frame *)
-			KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
+		return KERN_INVALID_ARGUMENT;
 
 	switch (flavor) {
 
@@ -513,6 +524,14 @@ act_machine_set_state(thread_act_t thr_act, thread_flavor_t flavor,
 		if (!thread_state_to_frame((const struct x86_64_thread_state *)
 					   state, pcb->user))
 			return KERN_INVALID_ARGUMENT;
+		/*
+		 * ⚠️ After, and only after, the frame was accepted: the same
+		 * call is what checked that these two are addresses this thread
+		 * may have (#440), so storing them earlier would keep a pair
+		 * that had just been refused.
+		 */
+		pcb->fs_base = ((const struct x86_64_thread_state *) state)->fs_base;
+		pcb->gs_base = ((const struct x86_64_thread_state *) state)->gs_base;
 		return KERN_SUCCESS;
 
 	case x86_64_FLOAT_STATE:
