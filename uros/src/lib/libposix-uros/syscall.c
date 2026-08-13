@@ -16,7 +16,7 @@
 #include "internal.h"
 
 #ifdef UROS_PTHREAD_SMOKE
-extern void mach_print(const char *);
+#include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
 /* Tiny "sys=<decimal>\n" tracer — used to localise pthread_create hang
  * in Phase 6b.  Compiled in only when the smoke is enabled. */

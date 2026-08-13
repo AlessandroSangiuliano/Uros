@@ -56,7 +56,25 @@ void *
 cthread_sp(void)
 {
 	void *sp;
+
+	/*
+	 * ⚠️ The instruction has to name the whole register: `%esp' on x86-64 is
+	 * the low half of the stack pointer, and the assembler refuses the
+	 * mismatch rather than returning an address missing its top half.  That
+	 * is the good outcome -- pthread_self() masks this value to find the
+	 * thread, so a truncated one would answer with a pointer into nothing
+	 * instead of failing.
+	 *
+	 * The fourth copy of this defect in the tree, after libmach's
+	 * init_stack_guard, its crt0, and name_server's own nostdlib_stubs.
+	 */
+#if defined(__x86_64__)
+	__asm__ __volatile__("movq %%rsp, %0" : "=r" (sp));
+#elif defined(__i386__)
 	__asm__ __volatile__("movl %%esp, %0" : "=r" (sp));
+#else
+#error "cthread_sp: no stack pointer for this architecture"
+#endif
 	return sp;
 }
 

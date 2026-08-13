@@ -100,6 +100,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/ioapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/lapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/conf.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/console_cdev.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/machdep.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/model.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/percpu.c
@@ -376,9 +377,29 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     COMMAND ${CMAKE_COMMAND} -E copy
             ${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin/boot_probe
             ${X86_64_ISO_DIR}/boot/boot_probe
+    # And the name server (#426), for the entry that boots it in place of
+    # boot_probe.  A server that is built and never started is collaudated by
+    # nothing -- and what it exercises is not what boot_probe does: MIG in both
+    # directions, a message loop, and printf through the device port.
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin/name_server
+            ${X86_64_ISO_DIR}/boot/name_server
+    # And bootstrap with its bundle, for the entry that boots the system the
+    # way the system is meant to boot (#422): module 0 is init and module 1 is
+    # what init reads.  ⚠️ Two files and not one -- a bootstrap staged without
+    # its bundle starts, finds nothing to start, and says so in a sentence that
+    # sounds like the kernel's fault.
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin/bootstrap
+            ${X86_64_ISO_DIR}/boot/bootstrap
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_BINARY_DIR}/bootstrap.bundle
+            ${X86_64_ISO_DIR}/boot/bootstrap.bundle
     COMMAND sh -c "echo set default=$\{UROS_X86_64_BOOT_ENTRY:-0\} > ${X86_64_ISO_DIR}/boot/grub/entry.cfg"
     COMMAND grub-mkrescue -o ${X86_64_ISO} ${X86_64_ISO_DIR}
-    DEPENDS mach_kernel boot_probe ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
+    DEPENDS mach_kernel boot_probe name_server_bin
+            bootstrap_server bootstrap_bundle
+            ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/grub.cfg
     COMMENT "Building GRUB2 multiboot2 rescue ISO: ${X86_64_ISO}"
     VERBATIM)
 
@@ -413,11 +434,12 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       -I${CMAKE_CURRENT_SOURCE_DIR}/x86_64
       -I${UROS_CONFIG_INCLUDE})
 
-  # Which machine migcom is generating for.  Not optional: it defaults to
-  # i386, so a missing flag produces i386 message layout silently -- 12-byte
-  # port descriptors where this target's are 16 (#453).
-  set(UROS_MIG_TARGET_ARGS -target x86_64)
-  set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_X86_64=1)
+  # ⚠️ Neither UROS_MIG_TARGET_ARGS nor UROS_MIG_DEFS_ARCH is set here any
+  # more.  Both said x86_64 in this directory and nothing anywhere else, which
+  # is how a rule written in another CMakeLists got i386 layout in silence --
+  # and how MIG_PTR_BITS would have failed to reach the userland .defs at all.
+  # They come from the top-level CMakeLists now, where the architecture is
+  # decided (#426, #422).
 
   # No AT386, no EISA/HIMEM/NPCI/MP_V1_1: those name i386 hardware, and the
   # generated code is the wire format, which must not depend on them.
@@ -944,12 +966,12 @@ set(UROS_MIG_INCLUDES
     -I${KERNEL_SRC_DIR}/i386/AT386
     -I${UROS_CONFIG_INCLUDE})
 
-# Said out loud even though it is migcom's default.  Relying on a default is
-# how the x86-64 rules generated i386 layout without anyone noticing; the
-# output here is unchanged, which is the point -- the flag states what was
-# already true instead of leaving it to be inferred (#453).
-set(UROS_MIG_TARGET_ARGS -target i386)
-set(UROS_MIG_DEFS_ARCH -DMIG_ARCH_I386=1)
+# Said out loud even though it is migcom's default: relying on a default is
+# how the x86-64 rules generated i386 layout without anyone noticing.  ⚠️ It
+# is said at the TOP LEVEL now and not here -- see UROS_MIG_TARGET_ARGS and
+# UROS_MIG_DEFS_ARCH in uros/CMakeLists.txt -- so that it is also said in the
+# directories that never had it.  The output here is unchanged, which is the
+# point (#453, #426).
 
 
 # ---- Mach subsystem MIG files ----

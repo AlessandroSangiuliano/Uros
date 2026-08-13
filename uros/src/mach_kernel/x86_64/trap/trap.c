@@ -16,6 +16,9 @@
 #include <kern/thread.h>		/* #467: current_act */
 #include <kern/thread_act.h>
 #include <vm/vm_fault.h>		/* #467: hand a fault to the MI kernel */
+#include <kern/exception.h>		/* #467: exception() */
+#include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
+#include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
 #include <vm/vm_kern.h>		/* #467: kernel_map */
 #include <mach/vm_param.h>		/* #467: trunc_page */
 #include <kern/cpu_number.h>
@@ -956,6 +959,45 @@ trap_take_ast(struct trap_frame *frame)
 	ast_taken(FALSE, take, splsched());
 }
 
+/*
+ * The same check, for the four ways of leaving the kernel that are not a trap
+ * return (#422).
+ *
+ * 🔥 They did not have one, and that is how bootstrap could not create a
+ * thread.
+ *
+ * thread_create() makes a new thread runnable with AST_APC pending and its
+ * activation's suspend_count at one, and the comment beside it says it "will
+ * immediately suspend itself".  The suspending is done BY the AST: the handler
+ * sees suspend_count and blocks the thread, and it is that block which holds
+ * the thread still until its creator has called thread_set_state and
+ * thread_resume.
+ *
+ * On i386 thread_bootstrap_return is a label on return_from_trap, so the check
+ * is simply there.  Here the three entry points in entry.S went straight to
+ * act_user_frame -- which panics, correctly, because a thread that has never
+ * run has no frame yet.  The message was about thread state and the cause was
+ * an AST nobody looked at: pthread_create's first thread died before its
+ * creator could reach the next statement.
+ *
+ * ⚠️ AST_ALL unconditionally, and no preemption-level test.  Every one of these
+ * paths is a return TO USER by construction -- entry.S says so where it
+ * swapgs's without testing -- so the ring-0 question trap_take_ast has to ask
+ * does not arise here.
+ *
+ * ⚠️ A loop, as i386's `jmp return_from_trap' is a loop: taking one AST can
+ * raise another, and the thread must not reach ring 3 with one outstanding.
+ * If the handler blocks instead of returning, this stack is discarded and the
+ * thread resumes at its continuation -- thread_bootstrap_return, which arrives
+ * back here.  Either road ends with nothing pending.
+ */
+void
+thread_return_ast(void)
+{
+	while (need_ast[cpu_number()] & AST_ALL)
+		ast_taken(FALSE, AST_ALL, splsched());
+}
+
 
 /*
  * Resolve a fault, with interrupts as the interrupted code had them (#411).
@@ -972,23 +1014,29 @@ trap_take_ast(struct trap_frame *frame)
  * the interrupted code's own flags are the only right answer, and they are
  * sitting in the frame the entry saved.
  */
-static boolean_t
+/*
+ * ⚠️ Returns the kern_return_t and not a boolean, and the difference is not
+ * tidiness (#467).  When a fault from ring 3 cannot be resolved, the task's
+ * exception handler is told WHY -- EXC_BAD_ACCESS carries the code as its
+ * first word -- and a boolean has already thrown that away.  i386 passes the
+ * same value to the same place, through user_page_fault_continue().
+ */
+static kern_return_t
 fault_in(vm_map_t map, uint64_t addr, vm_prot_t prot,
 	 const struct trap_frame *frame)
 {
-	boolean_t	ok;
+	kern_return_t	kr;
 	boolean_t	had = (frame->rflags & RFLAGS_IF) != 0;
 
 	if (had)
 		interrupts_enable();
 
-	ok = vm_fault(map, trunc_page((vm_offset_t) addr), prot, FALSE)
-	     == KERN_SUCCESS;
+	kr = vm_fault(map, trunc_page((vm_offset_t) addr), prot, FALSE);
 
 	if (had)
 		interrupts_disable();
 
-	return ok;
+	return kr;
 }
 
 /*
@@ -1013,8 +1061,116 @@ uint64_t trap_smap_after_last(void)
 	return ac_after_last;
 }
 
+/*
+ * ── A fault from ring 3, handed to the task (#467) ────────────────────
+ *
+ * The machine-independent kernel already knows what to do with a thread that
+ * has faulted: exception() finds the handler the task or the thread named,
+ * sends it a message describing the fault, and either resumes the thread from
+ * the state the handler wrote back or terminates it.  Every part of that
+ * exists; what did not exist on this target was anything that called it, so a
+ * user program that faulted stopped the machine.
+ *
+ * ⚠️ exception() DOES NOT RETURN.  It ends in thread_exception_return() on the
+ * way back to ring 3, or in the thread's termination; the i386 caller marks
+ * every call site NOTREACHED for the same reason.  So nothing may be written
+ * after it that the fault path still needs.
+ *
+ * ⚠️ The frame this was called with IS the thread's saved user frame -- a trap
+ * from ring 3 lands at KERNEL_STACK_USER_FRAME(top), which is where pcb->user
+ * points -- so the state the handler reads is the state that faulted, and the
+ * state it writes back is what resumes.  That is not a coincidence to rely on
+ * quietly: trap.h derives both from one expression precisely so there is one
+ * claim about those bytes.
+ */
+static void
+x86_64_exception(int exc, int code, int subcode)
+{
+	exception_data_type_t	codes[EXCEPTION_CODE_MAX];
+
+	codes[0] = code;
+	codes[1] = subcode;
+
+	exception(exc, codes, 2);
+	/*NOTREACHED*/
+}
+
+/*
+ * Which Mach exception a vector is, and what the handler is told about it.
+ *
+ * Straight from i386's user_trap(), because it is the same architecture
+ * answering the same question -- the codes even have the same values, under
+ * EXC_X86_64_* names that <mach/x86_64/exception.h> has carried since #413 and
+ * that nothing had ever used.  This is their first consumer.
+ *
+ * ⚠️ The subcode for the four faults that carry a selector is the error code's
+ * low sixteen bits, which name the descriptor -- not the whole error word.
+ * The upper bits are the flags that say WHERE the selector came from, and a
+ * handler reading them as part of a selector would be told about a descriptor
+ * that does not exist.
+ */
+static boolean_t
+user_fault_exception(const struct trap_frame *frame,
+		     int *exc, int *code, int *subcode)
+{
+	*code = 0;
+	*subcode = 0;
+
+	switch (frame->vector) {
+	case T_DIVIDE_ERROR:
+		*exc = EXC_ARITHMETIC;	*code = EXC_X86_64_DIVERR;	break;
+	case T_DEBUG:
+		*exc = EXC_BREAKPOINT;	*code = EXC_X86_64_SGLSTP;	break;
+	case T_BREAKPOINT:
+		*exc = EXC_BREAKPOINT;	*code = EXC_X86_64_BPTFLT;	break;
+	case T_OVERFLOW:
+		*exc = EXC_ARITHMETIC;	*code = EXC_X86_64_INTOFLT;	break;
+	case T_BOUND_RANGE:
+		*exc = EXC_SOFTWARE;	*code = EXC_X86_64_BOUNDFLT;	break;
+	case T_INVALID_OPCODE:
+		*exc = EXC_BAD_INSTRUCTION; *code = EXC_X86_64_INVOPFLT; break;
+	case T_INVALID_TSS:
+		*exc = EXC_BAD_INSTRUCTION; *code = EXC_X86_64_INVTSSFLT;
+		*subcode = (int) (frame->error & 0xffff);		break;
+	case T_SEGMENT_NOT_PRESENT:
+		*exc = EXC_BAD_INSTRUCTION; *code = EXC_X86_64_SEGNPFLT;
+		*subcode = (int) (frame->error & 0xffff);		break;
+	case T_STACK_FAULT:
+		*exc = EXC_BAD_INSTRUCTION; *code = EXC_X86_64_STKFLT;
+		*subcode = (int) (frame->error & 0xffff);		break;
+	case T_GENERAL_PROTECTION:
+		*exc = EXC_BAD_INSTRUCTION; *code = EXC_X86_64_GPFLT;
+		*subcode = (int) (frame->error & 0xffff);		break;
+	case T_ALIGNMENT_CHECK:
+		*exc = EXC_BAD_INSTRUCTION; *code = EXC_X86_64_ALIGNFLT;	break;
+	case T_FPU_ERROR:
+		*exc = EXC_ARITHMETIC;	*code = EXC_X86_64_EXTERRFLT;	break;
+	case T_SIMD_ERROR:
+		*exc = EXC_ARITHMETIC;	*code = EXC_X86_64_SSEFLT;	break;
+	default:
+		/*
+		 * ⚠️ FALSE, not a default exception.  A vector with no meaning
+		 * for a user program -- a double fault, a machine check, an
+		 * unclaimed interrupt -- is not the task's business, and
+		 * inventing an exception for it would send a server a message
+		 * it cannot act on while losing the report that says what
+		 * really happened.  Those still stop the machine, and should.
+		 */
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
 void trap_dispatch(struct trap_frame *frame)
 {
+	/*
+	 * Why the page fault below could not be resolved, kept for the task's
+	 * exception handler (#467).  KERN_SUCCESS while no fault has been
+	 * attempted, so a non-page-fault carries a code that means "not this".
+	 */
+	kern_return_t	fault_kr = KERN_SUCCESS;
+
 	/*
 	 * ── SMAP back on, for the handler (#468) ──────────────────────────
 	 *
@@ -1188,7 +1344,8 @@ void trap_dispatch(struct trap_frame *frame)
 				     ? (VM_PROT_READ | VM_PROT_WRITE)
 				     : VM_PROT_READ;
 
-		if (map != VM_MAP_NULL && fault_in(map, read_cr2(), prot, frame))
+		if (map != VM_MAP_NULL
+		    && fault_in(map, read_cr2(), prot, frame) == KERN_SUCCESS)
 			return;		/* the copy runs again and succeeds */
 	}
 
@@ -1318,8 +1475,44 @@ void trap_dispatch(struct trap_frame *frame)
 		 * and inventing kernel_map for it would hand an early boot
 		 * failure to a subsystem that is not up.
 		 */
-		if (map != VM_MAP_NULL && fault_in(map, addr, prot, frame))
-			return;		/* the instruction runs again */
+		if (map != VM_MAP_NULL) {
+			fault_kr = fault_in(map, addr, prot, frame);
+			if (fault_kr == KERN_SUCCESS)
+				return;	/* the instruction runs again */
+		}
+	}
+
+	/*
+	 * ── And if it came from ring 3, the task hears about it (#467) ────
+	 *
+	 * Below this line is the report, which ends in a halt: right for a
+	 * fault in the kernel, and wrong for a user program, whose faults are
+	 * ordinary and whose task has somewhere to send them.
+	 *
+	 * ⚠️ After the page-fault attempt above and not before it.  A page a
+	 * task owns and has never touched is not an exception at all -- it is
+	 * resolved and the instruction runs again -- and raising first would
+	 * turn every first touch of every page into a message.
+	 */
+	if ((frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
+		int	exc, code, subcode;
+
+		if (frame->vector == T_PAGE_FAULT) {
+			/*
+			 * EXC_BAD_ACCESS, carrying WHY the fault could not be
+			 * resolved and the address that could not be reached --
+			 * exactly what i386 passes from
+			 * user_page_fault_continue().
+			 */
+			x86_64_exception(EXC_BAD_ACCESS, (int) fault_kr,
+					 (int) read_cr2());
+			/*NOTREACHED*/
+		}
+
+		if (user_fault_exception(frame, &exc, &code, &subcode)) {
+			x86_64_exception(exc, code, subcode);
+			/*NOTREACHED*/
+		}
 	}
 
 	tputs("\r\nUrMach x86-64: trap ");

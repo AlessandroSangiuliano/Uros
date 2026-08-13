@@ -265,8 +265,27 @@ extern void		ikm_ports_report(void);
 	MACRO_END
 #define	IKM_NULL		((ipc_kmsg_t) 0)
 
+/*
+ *	How much of a kmsg is NOT message: what an allocation must add to a
+ *	message size to hold one.
+ *
+ *	⚠️ This is a SIZE and not an offset, and on x86-64 the two are
+ *	different numbers.  struct ipc_kmsg is pointer-aligned and its last
+ *	member is a header of four-byte members, so the compiler puts four
+ *	bytes of tail padding after it: the struct is 88 bytes, the header is
+ *	24, and the header begins at 60 -- not at 88 - 24.  On i386 there is
+ *	no padding and both are 32, which is why one number did for both jobs
+ *	for thirty years.
+ */
 #define	IKM_OVERHEAD							\
 		(sizeof(struct ipc_kmsg) - sizeof(mach_msg_header_t))
+
+/*
+ *	Where the message begins inside its kmsg -- the offset, taken from the
+ *	compiler rather than computed.
+ */
+#define	IKM_HEADER_OFFSET						\
+		((vm_size_t) __builtin_offsetof(struct ipc_kmsg, ikm_header))
 
 /*
  *	The message a header belongs to (#442).
@@ -280,9 +299,16 @@ extern void		ikm_ports_report(void);
  *	Only valid for a header that IS inside a kmsg.  For a server routine
  *	it always is -- ipc_kobject_server dispatches with &request->ikm_header
  *	and nothing else calls one.
+ *
+ *	🔥 It subtracted IKM_OVERHEAD until #426, and on x86-64 that landed
+ *	four bytes short of the kmsg: every server stub read ikm_dest from the
+ *	wrong place and locked a port made of half a pointer.  The general
+ *	protection fault was the good outcome -- the same arithmetic reaches a
+ *	valid kernel address whenever the four bytes before ikm_dest happen to
+ *	suit, and then a stub operates on some other object entirely.
  */
 #define	ikm_from_header(hdr)						\
-	((ipc_kmsg_t) ((vm_offset_t) (hdr) - IKM_OVERHEAD))
+	((ipc_kmsg_t) ((vm_offset_t) (hdr) - IKM_HEADER_OFFSET))
 
 #define	ikm_plus_overhead(size)	((vm_size_t)((size) + IKM_OVERHEAD))
 #define	ikm_less_overhead(size)	((mach_msg_size_t)((size) - IKM_OVERHEAD))

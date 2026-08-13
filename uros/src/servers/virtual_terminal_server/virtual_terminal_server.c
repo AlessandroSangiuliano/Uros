@@ -53,7 +53,7 @@ extern mach_port_t __uros_proc_port;
 
 /* mach_print is libmach_core's direct serial write — bypasses musl stdio
  * buffering so bring-up traces show up even when printf hasn't flushed. */
-extern void mach_print(const char *);
+#include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
 #define VTSLOG(s) mach_print("virtual_terminal_server: " s "\n")
 

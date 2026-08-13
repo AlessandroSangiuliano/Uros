@@ -193,9 +193,7 @@ gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
  * token of exactly sizeof(struct uros_cap).
  * ================================================================ */
 
-extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
-				       uint32_t op,
-				       uint64_t resource_id);
+#include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
 int
 gpu_core_cap_check(const char *token, unsigned int token_count,

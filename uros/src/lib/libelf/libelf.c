@@ -81,6 +81,56 @@ shdr_at(const elf_image_t *img, int idx)
 /*  elf_open — validate, populate elf_image_t                           */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The ELF64 half of elf_open (#422).
+ *
+ * Written as its own function rather than as branches inside the one below,
+ * because almost every line of that one names a type: Elf32_Ehdr for the size
+ * check, Elf32_Phdr for the table extent, Elf32_Shdr for the sections.  Two
+ * bodies that each say one thing are shorter than one body that says which
+ * thing at every step, and neither can quietly read the other's layout.
+ *
+ * ⚠️ It is the PROGRAM headers this handles, and deliberately not the
+ * sections.  Loading an image needs PT_LOAD and nothing else, and that is
+ * what the bootstrap server and exec_server ask for.  Sections, symbols and
+ * the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn, which
+ * <mach/elf.h> does not define yet -- so _shnum stays zero and the accessors
+ * refuse by class instead of reporting an image with no sections, which is a
+ * different and false statement.
+ */
+static int
+elf_open64(elf_image_t *img)
+{
+    const Elf64_Ehdr *e;
+    uint64_t phdr_off, phdr_span;
+
+    if (img->_len < sizeof(Elf64_Ehdr))
+        return ELF_ERR_TRUNCATED;
+
+    e = (const Elf64_Ehdr *)(const void *)img->_buf;
+    img->_ehdr = e;
+
+    if (e->e_machine != EM_X86_64)
+        return ELF_ERR_BAD_MACHINE;
+
+    if (e->e_ehsize != sizeof(Elf64_Ehdr))
+        return ELF_ERR_BAD_VERSION;
+    if (e->e_phnum != 0 && e->e_phentsize != sizeof(Elf64_Phdr))
+        return ELF_ERR_BAD_VERSION;
+
+    if (e->e_phnum > 0) {
+        phdr_off  = e->e_phoff;
+        phdr_span = (uint64_t)e->e_phnum * sizeof(Elf64_Phdr);
+        if (!range_ok(img, phdr_off, phdr_span))
+            return ELF_ERR_TRUNCATED;
+        img->_phdr  = img->_buf + phdr_off;
+        img->_phnum = (int)e->e_phnum;
+    }
+
+    return ELF_OK;
+}
+
+
 int
 elf_open(const void *buf, size_t len, elf_image_t *img)
 {
@@ -112,18 +162,25 @@ elf_open(const void *buf, size_t len, elf_image_t *img)
         e->e_ident[EI_MAG3] != ELFMAG3)
         return ELF_ERR_BAD_MAGIC;
 
-    /* v0.1 — ELF32 little-endian only. */
-    if (e->e_ident[EI_CLASS] != ELFCLASS32)
+    /* Both classes now (#422).  e_ident is the one part of the header
+     * that is identical in ELF32 and ELF64 -- sixteen bytes, same
+     * layout -- which is what makes it safe to read the class through
+     * an Elf32_Ehdr pointer before knowing which one this is. */
+    if (e->e_ident[EI_CLASS] != ELFCLASS32 &&
+        e->e_ident[EI_CLASS] != ELFCLASS64)
         return ELF_ERR_BAD_CLASS;
     if (e->e_ident[EI_DATA] != ELFDATA2LSB)
         return ELF_ERR_BAD_DATA;
     if (e->e_ident[EI_VERSION] != EV_CURRENT)
         return ELF_ERR_BAD_VERSION;
-    img->_is_64 = 0;
+    img->_is_64 = (e->e_ident[EI_CLASS] == ELFCLASS64);
 
-    /* Architecture allowlist — i386 today.  Reject anything else
-     * loudly so we notice when somebody hands us an aarch64 binary
-     * by accident. */
+    if (img->_is_64)
+        return elf_open64(img);
+
+    /* Architecture allowlist — i386 for this class.  Reject anything
+     * else loudly so we notice when somebody hands us an aarch64
+     * binary by accident. */
     if (e->e_machine != EM_386)
         return ELF_ERR_BAD_MACHINE;
 
@@ -197,9 +254,27 @@ elf_type(const elf_image_t *img)
     return ehdr_of(img)->e_type;
 }
 
+/*
+ * ⚠️ Three of the header accessors could NOT stay as they were, and which
+ * three is not guessable from the field names (#422).
+ *
+ * e_machine and e_type are at the same offset and the same width in both
+ * classes, so reading them through an Elf32_Ehdr is correct for either.
+ * e_entry is at the same offset and is FOUR bytes in one and EIGHT in the
+ * other -- so the ELF32 read returns the low half of a 64-bit entry point,
+ * which is right for every image we load today at 0x400000 and silently wrong
+ * for the first one above four gigabytes.  And e_phoff is at a different
+ * OFFSET as well as a different width, because the eight-byte e_entry ahead of
+ * it moved everything along.
+ *
+ * That is the argument for views in one paragraph: the fields that need a
+ * branch are not the ones that look like they would.
+ */
 uintptr_t
 elf_entry(const elf_image_t *img)
 {
+    if (img->_is_64)
+        return (uintptr_t)((const Elf64_Ehdr *)img->_ehdr)->e_entry;
     return (uintptr_t)ehdr_of(img)->e_entry;
 }
 
@@ -218,12 +293,16 @@ elf_is_64bit(const elf_image_t *img)
 uint64_t
 elf_phoff(const elf_image_t *img)
 {
+    if (img->_is_64)
+        return (uint64_t)((const Elf64_Ehdr *)img->_ehdr)->e_phoff;
     return (uint64_t)ehdr_of(img)->e_phoff;
 }
 
 uint32_t
 elf_phentsize(const elf_image_t *img)
 {
+    if (img->_is_64)
+        return (uint32_t)((const Elf64_Ehdr *)img->_ehdr)->e_phentsize;
     return (uint32_t)ehdr_of(img)->e_phentsize;
 }
 
@@ -241,9 +320,37 @@ int
 elf_phdr_get(const elf_image_t *img, int idx, elf_phdr_view_t *out)
 {
     const Elf32_Phdr *p;
+    uint64_t off, fsz;
 
     if (idx < 0 || idx >= img->_phnum || !out)
         return ELF_ERR_OUT_OF_RANGE;
+
+    /*
+     * ⚠️ The two program headers hold the same eight fields and NOT in the
+     * same order: p_flags is second in ELF64 and second-to-last in ELF32.
+     * <mach/elf.h> says so where it defines them.  A cast from one to the
+     * other would therefore read the flags out of the offset -- which is why
+     * this fills a view instead of handing the caller a struct, and why the
+     * view has been sixty-four bits wide since before there was anything to
+     * put in it.
+     */
+    if (img->_is_64) {
+        const Elf64_Phdr *q = (const Elf64_Phdr *)img->_phdr + idx;
+
+        out->type   = q->p_type;
+        out->flags  = q->p_flags;
+        out->offset = q->p_offset;
+        out->vaddr  = (uintptr_t)q->p_vaddr;
+        out->paddr  = (uintptr_t)q->p_paddr;
+        out->filesz = q->p_filesz;
+        out->memsz  = q->p_memsz;
+        out->align  = q->p_align;
+
+        off = q->p_offset;
+        fsz = q->p_filesz;
+        out->data = range_ok(img, off, fsz) ? img->_buf + off : NULL;
+        return ELF_OK;
+    }
 
     p = phdr_at(img, idx);
     out->type   = p->p_type;
@@ -273,6 +380,16 @@ elf_phdr_get(const elf_image_t *img, int idx, elf_phdr_view_t *out)
 int
 elf_shdr_count(const elf_image_t *img)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     return img->_shnum;
 }
 
@@ -287,6 +404,16 @@ shstr(const elf_image_t *img, uint32_t name_off)
 int
 elf_shdr_get(const elf_image_t *img, int idx, elf_shdr_view_t *out)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     const Elf32_Shdr *s;
 
     if (idx < 0 || idx >= img->_shnum || !out)
@@ -319,6 +446,16 @@ int
 elf_shdr_find(const elf_image_t *img, const char *name,
               elf_shdr_view_t *out)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     int i;
 
     if (!name || !out)
@@ -380,6 +517,16 @@ ensure_symtab(elf_image_t *img)
 int
 elf_sym_count(const elf_image_t *img)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     /* Const accessor — work on a non-const copy via cast.  The cache
      * is observably idempotent (same cached pointers regardless of
      * who triggered the fill), so this is a benign mutation. */
@@ -400,6 +547,16 @@ symstr(const elf_image_t *img, uint32_t name_off)
 int
 elf_sym_get(const elf_image_t *img, int idx, elf_sym_view_t *out)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     elf_image_t *m = (elf_image_t *)img;
     const Elf32_Sym *t;
     const Elf32_Sym *e;
@@ -427,6 +584,16 @@ int
 elf_sym_lookup(const elf_image_t *img, const char *name,
                elf_sym_view_t *out)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     elf_image_t *m = (elf_image_t *)img;
     const Elf32_Sym *t;
     int rc, i;
@@ -482,6 +649,16 @@ ensure_dyntab(elf_image_t *img)
 int
 elf_dyn_count(const elf_image_t *img)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     elf_image_t *m = (elf_image_t *)img;
     if (ensure_dyntab(m) != ELF_OK)
         return 0;
@@ -491,6 +668,16 @@ elf_dyn_count(const elf_image_t *img)
 int
 elf_dyn_get(const elf_image_t *img, int idx, elf_dyn_view_t *out)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     elf_image_t *m = (elf_image_t *)img;
     const Elf32_Dyn *t;
     int rc;
@@ -511,6 +698,16 @@ elf_dyn_get(const elf_image_t *img, int idx, elf_dyn_view_t *out)
 int
 elf_dyn_find(const elf_image_t *img, int64_t tag, uint64_t *value)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return ELF_ERR_BAD_CLASS;
+
     elf_image_t *m = (elf_image_t *)img;
     const Elf32_Dyn *t;
     int rc, i;
@@ -539,6 +736,16 @@ elf_dyn_find(const elf_image_t *img, int64_t tag, uint64_t *value)
 const char *
 elf_interp(const elf_image_t *img)
 {
+    /*
+     * ⚠️ Refused by CLASS, not answered with "none" (#422).  ELF64 sections,
+     * symbols and the dynamic table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn,
+     * which <mach/elf.h> does not define yet -- program headers are all a
+     * loader needs and all that was added.  Reporting zero sections would be
+     * a different statement, and a false one: the image has them.
+     */
+    if (img->_is_64)
+        return 0;
+
     int i;
 
     for (i = 0; i < img->_phnum; i++) {

@@ -84,7 +84,7 @@ typedef void *(*rthread_fn_t)(void *arg);
  * Real-Time Threads package initialization.
  */
 
-extern int rthread_init(void);
+extern vm_offset_t rthread_init(void);	/* the stack crt0 switches to */
 
 /*
  * Threads.

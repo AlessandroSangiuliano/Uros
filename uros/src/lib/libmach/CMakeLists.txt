@@ -58,7 +58,6 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # That one missing header is what stops mach_init.c, mig_support.c and the
   # mach_msg_* wrappers -- and it reports itself as a missing FILE, which
   # names the symptom rather than the generator nobody invoked.
-  set(UROS_MIG_ARCH_UPPER X86_64)
   set(UROS_MIG_USERLAND_INCLUDES
       -I${_E}
       -I${UROS_ARCH_INCLUDE}
@@ -74,16 +73,34 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${_E}/mach/bootstrap.defs
     ${_E}/mach/exc.defs
     ${_E}/mach/notify.defs
-    # ⚠️ device.defs is NOT here (#470).  Its stubs fail their own
-    # _Static_asserts at -m64, and the cause is worse than padding: the two
-    # .defs trees describe security_token_t DIFFERENTLY -- the kernel's says
-    # `array[2] of MACH_MSG_TYPE_INTEGER_32', the export tree's says
-    # MACH_MSG_TYPE_INTEGER_64.  Same name, same C type, two wire layouts,
-    # identical on i386 and four bytes apart here.  Copying the kernel's
-    # spelling across does not fix it: it is right for SERVER stubs, where
-    # the token is a struct member, and wrong for USER stubs, where it is a
-    # value and migcom emits a cast to a pointer type that does not compile.
-    # That is migcom's to settle, not a line in a .defs.
+    # device.defs used to be held out of this list: its stubs failed their own
+    # _Static_asserts at -m64, because the two .defs trees described
+    # security_token_t differently and were four bytes apart here.  #470 fixed
+    # that in mach_types.defs -- `struct[2] of', which says what the C type is
+    # -- and this is the line that makes the repair reachable from a clean
+    # tree.  ⚠️ It was missing while the commit that closed #470 said device
+    # generated: what generated was a HAND RUN of migcom whose output stayed in
+    # the build directory, so printf.c compiled against a header no rule
+    # produced and the stubs it calls were in no archive.
+    ${_E}/device/device.defs
+    # mach_klog.defs: bootstrap's log_forwarder includes <mach/mach_klog.h>.
+    ${_E}/mach/mach_klog.defs
+    # mach_debug.defs: bootstrap's elf.c calls host_load_symbol_table.
+    #
+    # 🔥 This line was held out with a comment saying migcom had a defect on
+    # this target, and that was WRONG -- migcom was right and the .defs lied.
+    # Its stubs failed two of their own assertions:
+    #
+    #   "MIG measures the out-of-line info in the wrong unit"
+    #   "MIG and the compiler disagree on the size of region"
+    #
+    # Both name a type whose size follows the pointer width, declared in
+    # mach_debug_types.defs as a fixed count of 32-bit words: vm_info_region_t
+    # is 40 bytes on i386 and 56 here, vm_info_object_t 84 and 120.  Four more
+    # beside them were equally wrong.  Same class as #470, in another file, and
+    # the assertion machinery of #416 doing exactly the job it was added for --
+    # naming the wrong number rather than sending it.
+    ${_E}/mach_debug/mach_debug.defs
   )
   set(LIBMACH_MIG_GENERATED)
   foreach(d IN LISTS _DEFS)
@@ -93,10 +110,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # #169: published under the names consumers actually include.
   set(_PUB "${CMAKE_BINARY_DIR}/generated/include/mach")
   file(MAKE_DIRECTORY "${_PUB}")
+  # ⚠️ i386 publishes eighteen of these and this published nine, which is not a
+  # judgement about what the target needs -- it is the list that happened to be
+  # written when only libmach itself consumed them.  bootstrap wants two more:
+  # the SERVER half of bootstrap.defs, which it demultiplexes, and mach_klog.
   set(_PUB_MAP  mach.h mach_interface.h  mach_port.h mach_port.h
                 mach_host.h mach_host.h  clock.h clock.h
                 bootstrap.h bootstrap.h  exc.h exc_user.h
-                exc_server.h exc_server.h  notify_server.h notify_server.h)
+                exc_server.h exc_server.h  notify_server.h notify_server.h
+                bootstrap_server.h bootstrap_server.h
+                mach_klog.h mach_klog.h)
   # device/device.h goes under its own directory, which is how it is spelled.
   file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
   set(_PUB_HDRS)
@@ -121,16 +144,20 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     COMMENT "Publish device/device.h" VERBATIM)
   list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
 
-  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/device")
-  add_custom_command(
-    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/device/device.h
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${_MIG_OUT}/device.h ${CMAKE_BINARY_DIR}/generated/include/device/device.h
-    DEPENDS ${_MIG_OUT}/device.h
-    COMMENT "Publish device/device.h" VERBATIM)
-  list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
+  # ⚠️ The SAME NAME the i386 half uses, and that is the whole point.  It was
+  # mig_mach_headers_x86_64, so every consumer had to know which target it was
+  # built for -- and 41 CMakeLists in this tree name mig_mach_public_headers.
+  # Making each of them choose would have been forty-one copies of a
+  # conditional; one name for one role is correct by construction, and only one
+  # of the two halves is ever configured.
+  add_custom_target(mig_mach_public_headers DEPENDS ${_PUB_HDRS})
 
-  add_custom_target(mig_mach_headers_x86_64 DEPENDS ${_PUB_HDRS})
+  # And the device header under the name its consumers already use.  ⚠️ Same
+  # argument: libblk and libsa_fs depend on `mig_device_header', which the i386
+  # tree defines beside its own device.defs rule.  Publishing the identical
+  # header under a different target name would make every consumer choose.
+  add_custom_target(mig_device_header
+    DEPENDS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
 
   # ── The library itself ───────────────────────────────────────────────
   #
@@ -144,11 +171,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # other -- and because a `%esp' that means half a register is the sort of
   # thing an assembler should refuse rather than a macro should paper over.
   #
-  # printf.c is still out: it reaches the console through <device/device.h>,
-  # which is blocked on #470 above.  ⚠️ That has a consequence beyond
-  # printing -- crt0 pulls exit, which pulls panic, which calls printf -- so
-  # no program can be entered through __start_mach here until #470 is done.
-  # boot_probe keeps its own _start for that reason.
+  # printf.c is in, and with it the reason it was ever out: it reaches the
+  # console through <device/device.h>, and crt0 pulls exit, which pulls panic,
+  # which calls printf -- so until device.defs generated here, no program on
+  # this target could be entered through __start_mach at all.
+  #
+  # ⚠️ Compiling printf.c is only half of that.  It CALLS device_open and
+  # device_write_inband, which live in the stubs device.defs generates, and an
+  # archive that holds the caller and not the callee links for exactly as long
+  # as nobody calls printf.  The two arrive together above or neither is worth
+  # anything.
   file(GLOB _MACH_C CONFIGURE_DEPENDS "*.c")
   file(GLOB _MS_WRAPPERS CONFIGURE_DEPENDS "ms_*.c")
   list(REMOVE_ITEM _MACH_C ${_MS_WRAPPERS})
@@ -156,15 +188,30 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)           # needs float.h macros
 
   add_library(libmach STATIC ${_traps_pp} ${_MACH_C} ${LIBMACH_MIG_GENERATED})
-  add_dependencies(libmach mig_mach_headers_x86_64)
+  add_dependencies(libmach mig_mach_public_headers)
   set_target_properties(libmach PROPERTIES
     OUTPUT_NAME "mach"
     ARCHIVE_OUTPUT_DIRECTORY
       "${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/lib")
 
   target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS})
+  # ⚠️ -mstack-protector-guard=global, and the i386 half below has always had
+  # it.  Without it gcc reads the canary from %fs:0x28 -- the TLS slot, which
+  # is the sane default on a system whose libc installs a TCB before any
+  # protected function runs.  Here nothing does: this library IS the startup,
+  # FS base is zero when mach_init is called, and the first canary prologue
+  # reads address 0x28 and takes a page fault at the second instruction of the
+  # first function crt0 calls.
+  #
+  # 🔥 stack_protector.c defines __stack_chk_guard and crt0 calls
+  # init_stack_guard() to fill it -- a global canary, written on every startup
+  # and read by nothing, because the compiler was emitting the other kind.
+  # The two halves were consistent with each other and with nothing in
+  # between; on i386 the flag is what joined them, and it was never copied.
   target_compile_options(libmach PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -include stdint.h>)
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w
+                            -mstack-protector-guard=global -include stdint.h>)
+
 
   # ⚠️ The MIG OUTPUT directory is deliberately NOT here.  It holds a file
   # called mach.h -- the header for mach.defs -- and libmach has its own

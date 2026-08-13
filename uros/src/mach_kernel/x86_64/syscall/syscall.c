@@ -10,8 +10,10 @@
 #include <cpu/desc.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
+#include <string.h>		/* #426: the name in argv[0] */
 #include <mach/kern_return.h>
 #include <mach/boolean.h>
+#include <mach/vm_param.h>	/* #426: PAGE_SIZE, to judge what the RPC said */
 #include <kern/syscall_sw.h>	/* #411: mach_trap_table */
 #include <syscall/syscall.h>
 #include <kern/misc_protos.h>	/* #422: printf */
@@ -294,6 +296,85 @@ static void note_boot_ipc_error(uint64_t a1, uint64_t kr, uint64_t port,
 	(void) port;
 }
 
+/*
+ * The startup itself, reported from the far end of it (#426).
+ *
+ * Every line above this one was produced by an image that was its own crt0.
+ * This one is produced by main(), which means libmach's __start_mach ran, and
+ * with it mach_init — so what is being reported is not a program's own state
+ * but what the STARTUP found and handed on.
+ *
+ * Four claims, and each is checked against something the image could not have
+ * invented:
+ *
+ *   argc, argv[0]  came out of build_args_and_stack(), which copied them into
+ *                  the task's stack.  ⚠️ The name is the KERNEL'S -- the boot
+ *                  script's `/mach_servers/bootstrap' (bootstrap.c), not the
+ *                  module name GRUB was given -- and it appears in no string
+ *                  constant in the image, so a wrong pointer cannot produce
+ *                  it by accident.  It is also the name every server on the
+ *                  other target is started under, which is the point: this
+ *                  image is now entered the way they are.
+ *
+ *   argv[argc]     the null terminator.  An argc that is right by luck (a
+ *                  register that happened to hold 1) is caught here: the
+ *                  terminator only sits at that index if the count is the
+ *                  frame's own.
+ *
+ *   vm_page_size   the one that is different in kind.  mach_init did not
+ *                  compute it; it called host_page_size(), a MIG remote
+ *                  procedure call -- a message built by a generated stub,
+ *                  sent to the host port, dispatched by the kernel's server
+ *                  and answered.  A 4096 here is a full RPC round trip from
+ *                  ring 3 on this architecture, which is what a server does
+ *                  all day and what nothing here had done before.
+ *
+ * ⚠️ The name arrives as EIGHT BYTES IN A REGISTER and not as a pointer, on
+ * purpose: judging it otherwise would mean copyin from a task whose argument
+ * block is what is in question, and a check that has to trust its subject to
+ * read it is not a check.  Eight bytes is `boot_pro' -- enough to be wrong in
+ * a way random data would not be, and short enough to travel in a register.
+ */
+#define BOOT_ARGS_A1	0x63
+#define BOOT_ARGS_NAME	"/mach_se"	/* of "/mach_servers/bootstrap" */
+
+static uint64_t boot_args_calls;
+
+/*
+ * ⚠️ `answered' and not `page_size'.  PAGE_SIZE is a MACRO for the kernel's
+ * own `page_size' variable, so a parameter of that name shadows the thing it
+ * is meant to be checked against and the comparison becomes `x == x' -- a
+ * test that passes on every value, including the ones that mean the RPC
+ * failed.  The compiler said so (-Wtautological-compare); nothing in a boot
+ * log ever would have.
+ */
+static void note_boot_args(uint64_t a1, uint64_t argc, uint64_t name,
+			   uint64_t terminator, uint64_t answered, uint64_t a6)
+{
+	char first8[9];
+	int i;
+
+	if (a1 != BOOT_ARGS_A1 || a6 != BOOT_IPC_A6)
+		return;
+
+	if (boot_args_calls++ != 0)
+		return;
+
+	for (i = 0; i < 8; i++)
+		first8[i] = (char) ((name >> (i * 8)) & 0xFF);
+	first8[8] = '\0';
+
+	printf("boot_probe: main() ran with argc %lu, argv[0] starting \"%s\", "
+	       "argv[argc] 0x%lx and vm_page_size %lu%s\n",
+	       (unsigned long) argc, first8,
+	       (unsigned long) terminator, (unsigned long) answered,
+	       (argc == 1 && strcmp(first8, BOOT_ARGS_NAME) == 0
+		&& terminator == 0 && answered == PAGE_SIZE)
+	       ? " — entered through libmach's crt0, and the page size came "
+		 "back from an RPC"
+	       : " — WRONG");
+}
+
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
@@ -313,6 +394,7 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 	note_boot_ipc(a1, a2, a3, a4, a5, a6);
 	note_boot_ipc_narrow(a1, a2, a3, a4, a5, a6);
 	note_boot_ipc_error(a1, a2, a5, a6);
+	note_boot_args(a1, a2, a3, a4, a5, a6);
 
 	probe_depth = x86_64_backtrace_probe(
 			(uint64_t)(uintptr_t)__builtin_frame_address(0),

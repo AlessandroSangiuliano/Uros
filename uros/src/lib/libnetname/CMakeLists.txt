@@ -14,6 +14,12 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    # ⚠️ The target, which this could not pass until scripts/mig learned to
+    # (#426): everything the wrapper did not recognise went to the C
+    # PREPROCESSOR, so -target arrived at cc and migcom generated i386 layout
+    # in silence.  ${UROS_MIG_TARGET_ARGS} is set at the top level, so it is
+    # never empty here.
+    ${UROS_MIG_TARGET_ARGS}
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel

@@ -11,10 +11,20 @@ set(SA_FS_SOURCES
   page_cache.c
 )
 
-# i386 (AT386) filesystem dispatcher: UFS, EXT2FS, MINIXFS
-list(APPEND SA_FS_SOURCES
-  AT386/fs_switch.c
-)
+# Which filesystems this machine's boot path can read.
+#
+# ⚠️ Genuinely per machine, which took a check to establish: the three existing
+# copies list DIFFERENT sets -- AT386 ufs/ext2fs/minixfs, HP700 ufs/ext2fs/
+# bext2fs, POWERMAC minixfs/ext2fs/bext2fs/hfs.  It encodes which media a
+# machine is expected to boot from, and fs_switch is tried in order, so it is a
+# preference and not a set.  The obvious move -- lifting ten lines of table into
+# the shared directory the way parse_args went -- would have been wrong for two
+# machines out of three.
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  list(APPEND SA_FS_SOURCES AT386/fs_switch.c)
+else()
+  list(APPEND SA_FS_SOURCES x86_64/fs_switch.c)
+endif()
 
 # UFS (BSD Unix File System)
 # NOTE: ufs/strfcns.c excluded — strbuild() is only used by the bootstrap

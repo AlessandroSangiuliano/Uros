@@ -62,7 +62,18 @@ struct boot_bundle_entry {
 /* In-bootstrap parsed view of the bundle (built once at startup). */
 struct file;
 
-extern int  bundle_init(uint32_t base_addr, uint32_t total_size);
+/*
+ * ⚠️ The ADDRESS is pointer-wide and the sizes are not, and the asymmetry is
+ * the format speaking (#422).  Everything inside the bundle is an offset from
+ * its own start, declared uint32_t above, so a bundle cannot exceed 4 GiB by
+ * construction and a 32-bit size is the truth rather than a limit.  Where it
+ * was MAPPED is a different question: the kernel vm_allocate()s it in the
+ * bootstrap task and tells it the address on argv, and on a 64-bit machine
+ * that address has no reason to fit in 32 bits.  It did fit here -- the first
+ * allocation in a fresh task lands low -- which is exactly what makes a
+ * truncating cast the kind of defect that waits.
+ */
+extern int  bundle_init(uintptr_t base_addr, uint32_t total_size);
 extern int  bundle_open(const char *name, struct file *fp);
 extern int  bundle_list(const char *prefix,
 			char *out, uint32_t out_max, uint32_t *out_used,

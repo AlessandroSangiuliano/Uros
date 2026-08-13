@@ -114,59 +114,108 @@
 
 #include <mach/std_types.defs>
 
+/*
+ * The debugging interface reports addresses and sizes, so most of what
+ * follows is a count of 32-bit words that moves with the width of a pointer
+ * (#422).  MIG's type language has no structures -- it has a size and an
+ * element -- so every number below is a layout worked out by hand, and the
+ * _Static_assert migcom emits against the compiler's own sizeof is what keeps
+ * it honest.
+ *
+ * Each was measured at both widths before it was written here, including the
+ * three that did NOT move: a number that stayed the same by measurement reads
+ * exactly like one nobody checked, so those say so.
+ *
+ * 🔑 MIG_PTR_BITS, and not MIG_ARCH_X86_64.  None of these is larger because
+ * the machine is called x86_64 -- it is larger because a vm_offset_t is 64
+ * bits there.  Asked as a width, the next 64-bit machine inherits all of them
+ * at once; asked as a name, every one of them returns to the 32-bit layout on
+ * that machine, in silence, and has to be found again.  Which is how this
+ * file came to be wrong: zone_info_t was corrected for x86-64 in the kernel's
+ * copy of this file and the other six types beside it were not looked at.
+ *
+ * ⚠️ And not __x86_64__ either.  A .defs is preprocessed by the HOST compiler
+ * with no -m32/-m64, because what comes out is text for migcom rather than
+ * code, so the compiler's own macros describe the machine doing the build.
+ */
+#ifndef	MIG_PTR_BITS
+#error	"MIG_PTR_BITS undefined: see UROS_MIG_DEFS_ARCH in uros/CMakeLists.txt and scripts/mig"
+#endif
+
+/* Eighty characters, and a character is a byte everywhere. */
 type zone_name_t = struct[80] of char;
 type zone_name_array_t = array[] of zone_name_t;
 
 /*
- * The zone report, whose size follows the machine's (#453).
+ * Five integer_t and four vm_size_t in <mach_debug/zone_info.h>.  Nine 32-bit
+ * words where a size is 32 bits, and fourteen where it is 64: four sizes
+ * twice as wide, and four bytes of padding after the leading count to align
+ * the first of them.
  *
- * Five integer_t and four vm_size_t in <mach_debug/zone_info.h>.  On a
- * machine where a size is 32 bits that is nine 32-bit words, which is what
- * this said for thirty years.  On x86-64 a vm_size_t is 64 bits and the
- * structure is fourteen -- four sizes twice as wide, and four bytes of
- * padding after the leading count to align the first of them.
- *
- * ⚠️ Written as a count of integer_t rather than as the structure it is,
- * because MIG's type language has no structures: it has a size and an
- * element.  So this number is a layout computed by hand, and the generated
- * _Static_assert against sizeof(zone_info_t) is what keeps it honest -- it
- * is how the x86-64 value was found, by the i386 one failing.
- *
- * The alternative was to make the fields fixed-width so the wire format
- * matched everywhere.  Refused: a debug interface that reports zone sizes
- * should be able to report a zone larger than 4 GiB, and this target's ABI
- * has 64-bit sizes by decision (#413).
+ * The alternative was to fix the field widths so the wire format matched
+ * everywhere.  Refused: a debug interface that reports zone sizes should be
+ * able to report a zone larger than 4 GiB, and this target's ABI has 64-bit
+ * sizes by decision (#413).
  */
-/*
- * ⚠️ MIG_ARCH_*, not __x86_64__.  These files are preprocessed with the HOST
- * compiler and no -m32/-m64, because the output is text for migcom rather
- * than code -- so the compiler's own architecture macros describe the
- * machine doing the build.  Written against __x86_64__ this was correct on
- * whichever target happened to be generated first and wrong on the other,
- * and it stayed wrong quietly because the .defs of types is not among the
- * dependencies that retrigger generation.
- */
-#if defined(MIG_ARCH_X86_64)
-type zone_info_t = struct[14] of integer_t;
+#if	MIG_PTR_BITS == 64
+type zone_info_t = struct[14] of integer_t;		/* 56 bytes */
 #else
-type zone_info_t = struct[9] of integer_t;
+type zone_info_t = struct[9] of integer_t;		/* 36 bytes */
 #endif
 type zone_info_array_t = array[] of zone_info_t;
 
+/* One natural_t, and a natural_t is 32 bits on both: 4 bytes. */
 type hash_info_bucket_t = struct[1] of natural_t;
 type hash_info_bucket_array_t = array[] of hash_info_bucket_t;
 
+/* Six natural_t and not an address among them: 24 bytes on both. */
 type ipc_info_space_t = struct[6] of natural_t;
 
-type ipc_info_name_t = struct[7] of natural_t;
+/*
+ * Six 32-bit fields and one vm_offset_t (iin_object).  The wide one costs four
+ * bytes and nothing else: it lands on a boundary already, so there is no
+ * padding to account for.
+ */
+#if	MIG_PTR_BITS == 64
+type ipc_info_name_t = struct[8] of natural_t;		/* 32 bytes */
+#else
+type ipc_info_name_t = struct[7] of natural_t;		/* 28 bytes */
+#endif
 type ipc_info_name_array_t = array[] of ipc_info_name_t;
 
-type ipc_info_tree_name_t = struct[9] of natural_t;
+/* An ipc_info_name_t and two port names, so it moves with the one above. */
+#if	MIG_PTR_BITS == 64
+type ipc_info_tree_name_t = struct[10] of natural_t;	/* 40 bytes */
+#else
+type ipc_info_tree_name_t = struct[9] of natural_t;	/* 36 bytes */
+#endif
 type ipc_info_tree_name_array_t = array[] of ipc_info_tree_name_t;
 
-type vm_info_region_t = struct[10] of natural_t;
+/* Four vm_offset_t and six 32-bit fields: the four addresses lead, so again
+   there is no padding, only sixteen more bytes. */
+#if	MIG_PTR_BITS == 64
+type vm_info_region_t = struct[14] of natural_t;	/* 56 bytes */
+#else
+type vm_info_region_t = struct[10] of natural_t;	/* 40 bytes */
+#endif
 
-type vm_info_object_t = struct[21] of natural_t;
+/*
+ * Seven vm_offset_t and fourteen 32-bit fields, and here the padding is real:
+ * three counts sit between vio_size and vio_copy and one strategy sits between
+ * vio_paging_offset and vio_last_alloc, so the wide layout gains four bytes
+ * twice over on top of the seven wider addresses.  84 becomes 120, not 112.
+ *
+ * ⚠️ This type is also the UNIT of an out-of-line array, so its size is the
+ * multiplier in how many bytes to transfer as well as the length of a field.
+ * Wrong here, the descriptor moves the wrong amount of somebody else's memory
+ * on every call and neither stub is in a position to notice -- which is why
+ * migcom asserts the out-of-line unit separately from the field.
+ */
+#if	MIG_PTR_BITS == 64
+type vm_info_object_t = struct[30] of natural_t;	/* 120 bytes */
+#else
+type vm_info_object_t = struct[21] of natural_t;	/* 84 bytes */
+#endif
 type vm_info_object_array_t = ^array[] of vm_info_object_t;
 
 type page_address_array_t = ^array[] of integer_t;
