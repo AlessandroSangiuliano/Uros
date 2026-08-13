@@ -37,16 +37,35 @@ thread_switch(mach_port_t thread, int option, mach_msg_timeout_t option_time)
 	return syscall_thread_switch(thread, option, option_time);
 }
 
+/*
+ * ⚠️ The instruction has to name the whole register.  `%esp' on x86-64 is the
+ * low half of the stack pointer, and the assembler refuses the mismatch
+ * rather than quietly returning an address with its top half missing -- which
+ * is the good outcome, and the reason this is written twice instead of once
+ * with a width nobody looks at.
+ */
 void *
 cthread_sp(void)
 {
 	void *sp;
+#if defined(__x86_64__)
+	__asm__ __volatile__("movq %%rsp, %0" : "=r" (sp));
+#elif defined(__i386__)
 	__asm__ __volatile__("movl %%esp, %0" : "=r" (sp));
+#else
+#error "cthread_sp: no stack pointer for this architecture"
+#endif
 	return sp;
 }
 
+/*
+ * ⚠️ size_t and not unsigned int.  These are the C library's own names, and
+ * on x86-64 the caller's count is 64 bits wide: a parameter of the wrong
+ * width takes the low half of it and copies a fraction of what was asked for.
+ * Identical on i386, where the two types are the same size.
+ */
 void *
-memset(void *s, int c, unsigned int n)
+memset(void *s, int c, __SIZE_TYPE__ n)
 {
 	unsigned char *p = (unsigned char *)s;
 	while (n--)
@@ -55,7 +74,7 @@ memset(void *s, int c, unsigned int n)
 }
 
 void *
-memcpy(void *dst, const void *src, unsigned int n)
+memcpy(void *dst, const void *src, __SIZE_TYPE__ n)
 {
 	unsigned char *d = (unsigned char *)dst;
 	const unsigned char *s2 = (const unsigned char *)src;

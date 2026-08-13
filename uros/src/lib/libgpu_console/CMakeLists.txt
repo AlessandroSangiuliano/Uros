@@ -15,6 +15,10 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    # ⚠️ The target (#426): scripts/mig sent unknown flags to the C
+    # preprocessor until it learned this one, so migcom generated i386 layout
+    # in silence.  ${UROS_MIG_TARGET_ARGS} comes from the top level.
+    ${UROS_MIG_TARGET_ARGS}
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel

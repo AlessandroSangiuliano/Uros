@@ -33,9 +33,17 @@ add_executable(boot_probe boot_probe.S)
 target_link_libraries(boot_probe PRIVATE $<TARGET_FILE:libmach>)
 add_dependencies(boot_probe libmach)
 
-# ⚠️ -nostdlib AND -static AND no entry symbol from a runtime: this must be an
-# ET_EXEC with its own _start and nothing linked in behind it.  A dynamic image
-# would need an interpreter (#423), and a runtime would need a libc.
+# ⚠️ -nostdlib AND -static: still no host runtime, but no longer no runtime at
+# all.  The entry point is libmach's __start_mach and not this image's _start,
+# which is the whole of the change — crt0 runs mach_init, finds argc and argv,
+# and calls main.  A dynamic image would still need an interpreter (#423).
+#
+# ⚠️ crt0.o lives INSIDE libmach.a here, so the entry symbol is what pulls it
+# out: an archive member is extracted only to satisfy an undefined reference,
+# and with -e naming a symbol nothing else mentions, that reference has to be
+# the entry itself.  GNU ld does add the entry symbol to the undefined list
+# for exactly this reason; -u says so in the link line rather than relying on
+# it, and costs nothing when the linker would have done it anyway.
 #
 # The load address is stated rather than left to the linker's default, which
 # for x86-64 is 0x400000 and would work — but the number ends up in the ELF
@@ -43,7 +51,8 @@ add_dependencies(boot_probe libmach)
 # that should be visible in the file that decides it rather than inherited.
 target_link_options(boot_probe PRIVATE
   -m64 -nostdlib -nostartfiles -static
-  -Wl,-e,_start
+  -Wl,-e,__start_mach
+  -Wl,-u,__start_mach
   -Wl,--build-id=none
   -Wl,-Ttext-segment=0x400000
 )

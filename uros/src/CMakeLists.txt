@@ -78,6 +78,21 @@ if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
   add_subdirectory(tools/mkmanifest)
 endif()
 
+# mkbundle, for the target whose userland is not complete either (#422).
+#
+# It is a host tool exactly as migcom is: it reads files and writes an archive
+# of fixed-width little-endian records, and knows nothing whatever about the
+# machine those files are for.  Sitting in the block above -- gated on the
+# architecture whose userland IS complete -- meant an x86-64 build could not
+# make a bundle at all, and a bundle is the difference between bootstrap being
+# a binary that links and bootstrap being init.
+#
+# Same shape as the migcom line above, and added the same way: only when the
+# block above has not already added it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tools/mkbundle)
+endif()
+
 # Kernel build.  Both targets need migcom first: since #416 the x86-64 kernel
 # generates its interface stubs with the same host tool i386 does.
 if(OSFMK_BUILD_KERNEL)
@@ -103,6 +118,75 @@ endif()
 # boot_probe is a page of assembly with no dependencies of any kind, which is
 # what lets it exist before those issues and what keeps it working after them.
 add_subdirectory(tests/boot_probe)
+
+# libpthreads, ahead of the gate (#425).
+#
+# It needs neither musl nor a filesystem: it is Mach threads, a spin lock and
+# a stack.  bootstrap does not link without it -- the thread that answers
+# service_checkin while the main thread is busy is a pthread -- so it comes
+# before every server rather than after the gate that waits for #414.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libpthreads)
+endif()
+
+# libnetname, ahead of the gate (#422).
+#
+# It has no C of its own: it is the MIG stubs of netname.defs, which is what a
+# client calls to reach the name server.  bootstrap needs one symbol from it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libnetname)
+endif()
+
+# libcap and libgpu_console, ahead of the gate (#422).
+#
+# bootstrap uses two symbols from each -- cap_provision/cap_request, and
+# gpu_console_init/gpu_console_puts.  ⚠️ libgpu_console is a CLIENT of
+# gpu_server, which does not run on this target yet (#427): it builds and it
+# will fail to connect, which is what it already does on i386 before
+# gpu_server is up.  Not building it would mean a different bootstrap here.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libcap)
+  add_subdirectory(lib/libgpu_console)
+endif()
+
+# libsa_fs and libblk, ahead of the gate (#422).
+#
+# Stage 2: the filesystem bootstrap reads server images from once the bundle
+# has got the first ones running.  ⚠️ libblk is here because libsa_fs uses it,
+# not because bootstrap does -- bootstrap references nothing in it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  # ⚠️ libelf was NEVER configured for this target.  Its ELF64 support was
+  # written and checked with a host compile, and reported as done -- while no
+  # build here consumed it.  The consumer is what collaudates the producer.
+  add_subdirectory(lib/libelf)
+  add_subdirectory(lib/libblk)
+  add_subdirectory(file_systems)
+endif()
+
+# bootstrap, ahead of the gate (#422).
+#
+# It is init on this target as it is on i386: the first task the kernel starts,
+# and the one that creates every server after it.  So it comes before the gate
+# for the same reason the six libraries above do -- it needs none of what is
+# behind it, and everything behind it needs to be started by it.
+#
+# The one symbol that used to hold it out was host_load_symbol_table, from
+# mach_debug.defs; what kept that .defs from generating was six types in
+# mach_debug_types.defs declared as a fixed count of 32-bit words when their
+# size follows the pointer width.  See the note in lib/libmach/CMakeLists.txt.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/bootstrap)
+endif()
+
+# And the first server, also ahead of the gate (#426).
+#
+# The gate below is about musl and the C library; the name server needs
+# neither.  It links libmach and nothing else, which is precisely the claim
+# #426 has to end on -- so it is built here rather than waiting for #414 to
+# open the door for a server that does not use what is behind it.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/name_server)
+endif()
 
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)

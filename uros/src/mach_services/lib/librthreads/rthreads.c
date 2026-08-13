@@ -105,8 +105,8 @@ struct rthread_control_struct rthread_control = {
  *		as well as, the state of the first rthread.
  */
 
-int
-rthread_init()
+vm_offset_t
+rthread_init(void)
 {
 	static int 		rthreads_started = FALSE;
 	rthread_t 	parent;
@@ -153,10 +153,15 @@ rthread_init()
 
 /*
  *  Used for automatic initialization by crt0.
- *  Cast needed since too many C compilers choke on the type void (*)().
+ *
+ *  ⚠️ The cast is gone, and with it the reason given for it: "too many C
+ *  compilers choke on the type void (*)()" was true of 1990 and is what hid
+ *  the type from anyone reading.  What this returns is a stack, so it is a
+ *  vm_offset_t, and the declaration that says so is in <threadlib_init.h> --
+ *  in front of this definition and of the three others that disagreed with it.
  */
 
-int (*_thread_init_routine)() = (int (*)()) rthread_init;
+vm_offset_t (*_thread_init_routine)(void) = rthread_init;
 
 /*
  * Function: rthread_stack_base - Return the base of the thread's stack.

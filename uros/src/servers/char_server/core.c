@@ -20,9 +20,7 @@
 #include "char_server.h"
 #include "device_master.h"	/* MIG: device_intr_{register,unregister} */
 
-extern kern_return_t urmach_cap_verify(const struct uros_cap *token,
-				       uint32_t op,
-				       uint64_t resource_id);
+#include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
 /* ============================================================
  * Device table

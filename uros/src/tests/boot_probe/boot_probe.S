@@ -13,16 +13,24 @@
  * ELF64 loader, the task set-up and the argument block with nothing to run
  * against them — the shape that cost #453 and #459 five defects each.
  *
- * So this exists to be loaded.  It has no libc, no runtime, no relocations and
- * no dependence on any of those issues, which means it can be built today and
- * cannot break when they land.  What it proves is exactly what the loader has
- * to be right about first: an ELF64 image was read, its segments were mapped,
- * a task and a thread were built around it, and the entry point reached ring 3
- * and asked the kernel something.
+ * So this exists to be loaded.  It had no libc, no runtime, no relocations and
+ * no dependence on any of those issues, which means it could be built the day
+ * the loader existed and could not break when they landed.  What it proved is
+ * exactly what the loader has to be right about first: an ELF64 image was
+ * read, its segments were mapped, a task and a thread were built around it,
+ * and the entry point reached ring 3 and asked the kernel something.
  *
- * ⚠️ It is NOT a substitute for the done-when.  A server needs argv, a bundle,
- * ports and a C runtime; this needs a page of text and a stack.  Passing here
- * says the loader works, not that the fleet boots.
+ * ── And what it is now (#426) ─────────────────────────────────────────
+ *
+ * The list above has one entry left on it.  libmach builds here, so this is
+ * no longer its own startup: it is entered at __start_mach, mach_init runs
+ * before it does, and it is called as `main(argc, argv)' — which is what a
+ * server is.  The image kept its shape and changed what stands behind it.
+ *
+ * ⚠️ Still NOT the done-when.  A server also needs a bundle, a name server
+ * and ports it did not make itself.  What can be said now is narrower and
+ * new: the startup path a server comes through works on this architecture,
+ * and the arguments the kernel wrote arrive at the far end of it.
  *
  * ── How it says it is alive ───────────────────────────────────────────
  *
@@ -158,11 +166,16 @@
 #define IPC_A1			0x60
 #define IPC_A1_NARROW		0x61
 #define IPC_A1_ERROR		0x62
+#define IPC_A1_ARGS		0x63
 #define IPC_A6			0x66
 
 	.section .rodata
 hello:
 	.asciz	"boot_probe: hello from ring 3, through a Mach trap\r\n"
+argv0_prefix:
+	.asciz	"boot_probe: the startup handed me argv[0] = "
+newline:
+	.asciz	"\r\n"
 
 /*
  * ⚠️ A WRITABLE segment, which this image did not have until now — the loader
@@ -178,21 +191,80 @@ reply:
 
 	.section .text
 	.code64
-	.globl	_start
-_start:
+	.globl	main
+	.type	main,@function
+main:
 	/*
-	 * ⚠️ A CALL, which means this needs a stack — and needing one is part
-	 * of what is being proved.  The stack and the argument block are built
-	 * by build_args_and_stack() with copyout(), and until #468 those
-	 * copies silently wrote nothing: the region was allocated and the
-	 * words never arrived.  An image that only ever issued `syscall'
-	 * touched its stack pointer never and could not have noticed.
+	 * ⚠️ A FUNCTION now, and not the entry point.  This image used to be
+	 * its own crt0: it was entered at `_start', aligned the stack itself
+	 * and answered to nobody.  It is entered at __start_mach today —
+	 * libmach's startup, the one every server on the other target comes
+	 * through — which runs mach_init and hands this argc and argv.
 	 *
-	 * Aligned down first, because the C ABI requires it at every call and
-	 * nothing here has promised what the kernel left in rsp.  A crt0 would
-	 * do this; this image is its own.
+	 * So the prologue is the ABI's and not an image's: the six registers a
+	 * function must give back, saved because a callee-saved register is a
+	 * promise and this one makes it now.  The `andq $-16, %rsp' that used
+	 * to be the first instruction is gone — a function that realigns its
+	 * caller's stack has lost the frame it must return on, and the crt0
+	 * has already done it at the one place the ABI names.
+	 *
+	 * ⚠️ Six pushes leave rsp eight past a boundary and not on one: it
+	 * arrives that way, one return address deep, and 48 bytes do not
+	 * change a value modulo 16.  Hence the subq — the ABI wants rsp
+	 * aligned AT the call, so that the callee sees it eight past once its
+	 * own return address is on.
 	 */
-	andq	$-16, %rsp
+	pushq	%rbp
+	movq	%rsp, %rbp
+	pushq	%rbx
+	pushq	%r12
+	pushq	%r13
+	pushq	%r14
+	pushq	%r15
+	subq	$8, %rsp
+
+	movl	%edi, %r13d			/* argc */
+	movq	%rsi, %r12			/* argv */
+
+	/*
+	 * ── What the startup brought (#426) ──────────────────────────
+	 *
+	 * Four things the kernel can decide, and none of which this image
+	 * could have produced on its own:
+	 *
+	 *   argc         from the argument block build_args_and_stack()
+	 *                copied out, walked by crt0 and passed here;
+	 *   argv[0]      its first eight bytes, as a value — the name the boot
+	 *                script starts a bootstrap task under, which appears
+	 *                nowhere in this file and is the kernel's own;
+	 *   argv[argc]   the null terminator, so a count that happened to be
+	 *                right for the wrong reason is still caught;
+	 *   vm_page_size which mach_init did NOT compute: it asked, with
+	 *                host_page_size(), and that is a MIG remote procedure
+	 *                call — a message to the kernel and a reply back.
+	 *
+	 * ⚠️ The last is the one that is new.  Every trap so far has been one
+	 * instruction into the kernel and out; this is the whole IPC path
+	 * carrying a request a server would carry, from a startup nobody wrote
+	 * for this architecture.  A page size of 4096 here is a round trip.
+	 */
+	movq	(%r12), %rax			/* argv[0]                  */
+	movq	(%rax), %rdx			/* its first eight bytes    */
+	movq	(%r12, %r13, 8), %r10		/* argv[argc] — must be zero */
+	movq	vm_page_size(%rip), %r8
+	movq	$SYSCALL_NR_PROBE, %rax
+	movq	$IPC_A1_ARGS, %rdi
+	movq	%r13, %rsi			/* argc */
+	movq	$IPC_A6, %r9
+	syscall
+
+	/* And the name itself, in its own words, through the kernel. */
+	leaq	argv0_prefix(%rip), %rdi
+	call	mach_print
+	movq	(%r12), %rdi
+	call	mach_print
+	leaq	newline(%rip), %rdi
+	call	mach_print
 
 	call	mach_null
 

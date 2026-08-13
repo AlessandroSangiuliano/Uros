@@ -28,6 +28,7 @@
  */
 
 #include "pthread_internals.h"
+#include <threadlib_init.h>
 #include <stdio.h>	/* For printf(). */
 #include <errno.h>	/* For __mach_errno_addr() prototype. */
 #include <mach/thread_info.h>	/* For THREAD_SCHED_RR_INFO (#153). */
@@ -1512,7 +1513,7 @@ pthread_getconcurrency(void)
  * Perform package initialization - called automatically when application starts
  */
 
-static int
+static vm_offset_t
 pthread_init(void)
 {
 	vm_address_t new_stack;
@@ -1573,8 +1574,14 @@ __mach_errno_addr(void)
  *   _thread_init_routine    — legacy alias (some startup code uses this)
  *   _threadlib_exit_routine — called after main() returns
  */
-int (*_thread_init_routine)(void) = pthread_init;
-int (*_threadlib_init_routine)(void) = pthread_init;
+/*
+ * ⚠️ vm_offset_t, because what pthread_init returns is the STACK it just
+ * allocated.  These said `int' -- and so did crt0, which reads them -- so on
+ * x86-64 the address lost its top half and came back sign-extended.  The types
+ * live in <threadlib_init.h> now, in front of every definition of them.
+ */
+vm_offset_t (*_thread_init_routine)(void) = pthread_init;
+vm_offset_t (*_threadlib_init_routine)(void) = pthread_init;
 
 static void
 _pthread_exit_routine(int status)

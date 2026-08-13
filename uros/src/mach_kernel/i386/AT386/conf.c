@@ -233,9 +233,7 @@
  * dev_indirect_list) is now a minimal cnputc-based byte-pipe so
  * userspace printf_init() (libsa_mach) keeps working through
  * device_write_inband. */
-extern io_return_t consoleopen(dev_t, dev_mode_t, io_req_t);
-extern void        consoleclose(dev_t);
-extern io_return_t consolewrite(dev_t, io_req_t);
+#include <device/console_cdev.h>	/* the three below, declared once (#426) */
 
 #include <com.h>
 #if	NCOM > 0

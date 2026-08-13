@@ -737,10 +737,28 @@ mach_ports_register(
 
 	/*
 	 *	Pad the port rights with nulls.
+	 *
+	 *	🔥 Read at POINTER width, and it used to be read through
+	 *	`memory' itself (#422).  The parameter is a mach_port_array_t
+	 *	because that is what mach.defs calls the argument -- one NAME
+	 *	per port, which is what the CALLER sent -- but what arrives
+	 *	here is the kernel's copy, and ipc_kmsg_copyin_body has
+	 *	already translated every name into an ipc_port_t.  Those are
+	 *	four bytes on i386 and eight here, so `memory[i]' walked an
+	 *	array of pointers at the stride of names and handed back the
+	 *	low half of the first one.
+	 *
+	 *	A truncated kernel pointer does not look wrong: 0xffffc000-
+	 *	004d8d78 became 0x004d8d78, which reads as a user address and
+	 *	was stored in itk_registered[] without complaint.  The machine
+	 *	stopped later, in ipc_task_init, taking a mutex on it.
 	 */
+	{
+		const ipc_port_t *arrived = (const ipc_port_t *) memory;
 
-	for (i = 0; i < portsCnt; i++)
-		ports[i] = (ipc_port_t) memory[i];
+		for (i = 0; i < portsCnt; i++)
+			ports[i] = arrived[i];
+	}
 	for (; i < TASK_PORT_REGISTER_MAX; i++)
 		ports[i] = IP_NULL;
 

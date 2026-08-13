@@ -23,6 +23,9 @@ macro(mig_server_stub DEFS_FILE STEM OUT_DIR)
     OUTPUT ${_srvC} ${_usrC} ${_hdr} ${_srvH}
     COMMAND ${CMAKE_C_COMPILER} -E -x c ${MIG_INCLUDE_FLAGS} ${_defs}
       | $<TARGET_FILE:migcom>
+        # ⚠️ Which machine the stubs are for (#453/#426).  migcom defaults to
+        # i386, so a rule without this generates i386 layout in silence.
+        ${UROS_MIG_TARGET_ARGS}
         -header ${_hdr}
         -sheader ${_srvH}
         -user   ${_usrC}
@@ -96,17 +99,29 @@ set(BOOTSTRAP_SOURCES
 
 # Executable format loaders
 # i386: a_out + elf (formats.c selects them; coff/rose/som are for other archs)
-list(APPEND BOOTSTRAP_SOURCES
-  a_out.c
-  elf.c
-)
+# ⚠️ a_out.c only on i386: there is no 64-bit a.out, so x86_64/formats.c names
+# elf_switch alone and this file would define a loader nothing points at.
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  list(APPEND BOOTSTRAP_SOURCES a_out.c)
+endif()
+list(APPEND BOOTSTRAP_SOURCES elf.c)
 
-# Architecture-specific (i386)
-list(APPEND BOOTSTRAP_SOURCES
-  i386/boot_dep.c
-  i386/set_regs.c
-  i386/formats.c
-)
+# The parser is shared; the rest is the machine's own -- which formats it
+# loads, where a task starts, and what it can do with an image besides run it.
+list(APPEND BOOTSTRAP_SOURCES parse_args.c)
+if(UROS_TARGET_ARCH STREQUAL "i386")
+  list(APPEND BOOTSTRAP_SOURCES
+    i386/boot_dep.c
+    i386/set_regs.c
+    i386/formats.c
+  )
+else()
+  list(APPEND BOOTSTRAP_SOURCES
+    x86_64/boot_dep.c
+    x86_64/set_regs.c
+    x86_64/formats.c
+  )
+endif()
 
 # ===========================================================================
 # Build target: Mach standalone executable
@@ -141,7 +156,11 @@ target_include_directories(bootstrap_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  # ⚠️ The machine's half of libpthreads, chosen rather than named: AT386 was
+  # hardcoded here, and on this target it would have shadowed x86_64's
+  # pthread_machdep.h with i386's -- a lock type of the wrong width and a
+  # stack-switch sequence in 32-bit assembly.
+  $<IF:$<STREQUAL:${UROS_TARGET_ARCH},i386>,${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386,${CMAKE_SOURCE_DIR}/src/lib/libpthreads/x86_64>
   # Filesystem headers — must come before export so the canonical file_system.h
   # is used (export/include copy may be stale)
   ${CMAKE_SOURCE_DIR}/src/file_systems
@@ -187,3 +206,44 @@ set_target_properties(bootstrap_server PROPERTIES
   OUTPUT_NAME "bootstrap"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The stage-1 bundle, built by the build (#422)
+# ===========================================================================
+#
+# The bundle is what turns this binary into init: the kernel maps it into the
+# bootstrap task and says where on argv, and bootstrap reads bootstrap.conf out
+# of it and starts what that names.  Without one there is nothing to start,
+# which is what "No bootstrap code loaded with the kernel" has been saying on
+# this target since the beginning.
+#
+# ⚠️ Made here and not by scripts/make-bundle.sh, and that is not a rewrite of
+# it.  That script describes an i386 system -- twenty servers, two disk stages,
+# a bench selector, driver plug-ins -- and every one of those things is a
+# REQUIRED_FILE it checks for.  On this target none of them exists yet.  What
+# does exist is one server, so the bundle is two entries; and a rule that knows
+# when either of them changed is worth more than a script somebody has to
+# remember to re-run after a rebuild.  mkbundle is the piece that is shared,
+# which is the piece that was worth sharing.
+if(NOT UROS_TARGET_ARCH STREQUAL "i386")
+  set(_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap.bundle)
+  set(_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap.conf)
+  set(_SBIN   ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin)
+
+  # One line, and the lines that are NOT here are the point: i386's
+  # bootstrap.conf names hal_server, block_device_server, default_pager,
+  # ext_server and a dozen more, and bootstrap would go looking for each of
+  # them in turn.  It names what has crossed, which is the name server.
+  file(GENERATE OUTPUT ${_CONF} CONTENT "name_server name_server\n")
+
+  add_custom_command(
+    OUTPUT ${_BUNDLE}
+    COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
+            bootstrap.conf:${_CONF}
+            name_server:${_SBIN}/name_server
+    DEPENDS mkbundle name_server_bin ${_CONF}
+    COMMENT "Bundle: bootstrap.conf + name_server"
+    VERBATIM)
+
+  add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})
+endif()

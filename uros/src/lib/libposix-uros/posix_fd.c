@@ -30,7 +30,7 @@
 #include <servers/netname.h>    /* netname_look_up */
 #include "proc.h"               /* proc_getsid */
 #include "char_server.h"        /* char_tty_get_ctty/read/write/set_tostop */
-extern boolean_t swtch_pri(int pri); /* mach kernel trap — voluntary yield */
+#include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
 /* Console write sink — same SYSENTER trap handlers.c reaches for. */
 extern void mach_print(const char *);

@@ -148,6 +148,20 @@ do
 	-iheader ) iheader="$2"; migflags="$migflags $1 $2"; shift; shift;;
 	-dheader ) dheader="$2"; migflags="$migflags $1 $2"; shift; shift;;
 	-maxonstack ) migflags="$migflags $1 $2"; shift; shift;;
+	# Which machine the stubs are for (#416).
+	#
+	# ⚠️ It has to be named HERE, above the `-*' catch-all, and that is the
+	# whole of the bug this line fixes: everything this loop does not
+	# recognise goes to the C PREPROCESSOR, so `-target x86_64' arrived at
+	# cc -- which ignores it -- and migcom never saw it.  migcom's default
+	# is i386, deliberately, so what came out was i386 message layout with
+	# nothing said: 12-byte port descriptors where x86-64's are 16.
+	#
+	# It was the ONLY migcom option the catch-all swallowed.  Every other
+	# one -- the single letters and -server, -sheader, -user, -header,
+	# -iheader, -dheader, -maxonstack -- already has a case above; checked
+	# against parseArgs() in src/lib/migcom/mig.c rather than assumed.
+	-target ) migflags="$migflags $1 $2"; target="$2"; shift; shift;;
 	-MD ) sawMD=1; cppflags="$cppflags $1"; shift;;
 	-cpp) C=$2;shift; shift;;
 #	-cc) C=$2; shift; shift;;
@@ -156,6 +170,30 @@ do
 	* ) files="$files $1"; shift;;
     esac
 done
+
+# How wide an address is on that machine, told to the PREPROCESSOR (#422).
+#
+# A .defs runs through cc -E with no -m32/-m64, so __i386__ and __x86_64__
+# inside one describe the machine doing the build.  A type whose size follows
+# the target's pointer width -- zone_info_t, vm_info_region_t, every structure
+# with a vm_offset_t in it -- has to ask something else, and this is it.
+#
+# ⚠️ Derived from -target rather than accepted as an option of its own, and
+# that is the point: a width passed separately is a second thing to keep in
+# step with the first, and the two disagreeing is a wrong message layout with
+# nothing said.  One answer, from the one flag that already names the machine.
+#
+# i386 when nothing was said, because that is migcom's own default and every
+# invocation that predates -target means i386.  An unrecognised name stops
+# here instead of guessing: a new machine has to say how wide it is, and
+# finding out by generating the wrong stubs is not saying it.
+case "${target-i386}" in
+    i386 )	ptrbits=32;;
+    x86_64 )	ptrbits=64;;
+    * )		echo "mig: unknown -target '$target': say its pointer width here" >&2
+		exit 1;;
+esac
+cppflags="$cppflags -DMIG_PTR_BITS=$ptrbits"
 
 for file in $files
 do

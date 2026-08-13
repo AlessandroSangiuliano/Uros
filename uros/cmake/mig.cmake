@@ -15,6 +15,12 @@
 # them, and writing it against them looks right on whichever machine you are
 # sitting at (#453).
 #
+# That variable carries TWO macros -- MIG_ARCH_<NAME> and MIG_PTR_BITS -- and
+# the top-level CMakeLists says at length which question each one answers.  It
+# is set there and nowhere else: it used to be set once per architecture inside
+# the kernel's directory, which is how the width never reached the .defs the
+# userland libraries generate (#422).
+#
 # ⚠️ So is the target, in ${UROS_MIG_TARGET_ARGS}, and it must be set: migcom
 # defaults to i386 for compatibility with every invocation that predates the
 # option, so a rule that forgets the flag silently generates i386 layout.  That
@@ -112,13 +118,13 @@ endfunction()
 # 1990 shell script a new option.  When i386's userland moves here too, that
 # wrapper can go.
 #
-# ⚠️ The target is derived here and not taken from ${UROS_MIG_TARGET_ARGS}:
-# that variable is set inside the kernel's directory scope and is empty
-# everywhere else, and an empty target argument is exactly the silent i386
-# layout the note at the top of this file is about.  It is not silent for
-# long -- migcom emits _Static_asserts that the target compiler checks -- but
-# a build that fails on an assertion in generated code is a worse way to find
-# out than not making the mistake.
+# ⚠️ The target is spelled out here rather than taken from
+# ${UROS_MIG_TARGET_ARGS}, and that is now only a habit: when this function was
+# written that variable was set inside the kernel's directory scope and was
+# empty everywhere else, which is exactly the silent i386 layout the note at
+# the top of this file is about.  It is set at the top level today, so the two
+# say the same thing -- left as it is because it is one expression either way
+# and this one cannot be emptied by a scope.
 function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
     set(USER_C   ${OUTPUT_DIR}/${DEFS_NAME}_user.c)
@@ -134,7 +140,7 @@ function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
         OUTPUT ${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -x c
                 ${UROS_MIG_USERLAND_INCLUDES}
-                -DMIG_ARCH_${UROS_MIG_ARCH_UPPER}=1
+                ${UROS_MIG_DEFS_ARCH}
                 ${DEFS_FILE} |
                 $<TARGET_FILE:migcom>
                 -target ${UROS_TARGET_ARCH}

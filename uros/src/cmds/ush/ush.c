@@ -42,7 +42,7 @@
 
 /* mach_print is libmach_core's direct serial write — bypasses musl stdio
  * buffering, useful for bring-up tracing where printf may not flush. */
-extern void mach_print(const char *);
+#include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 
 #define USHLOG(s) mach_print("ush: " s "\n")
 

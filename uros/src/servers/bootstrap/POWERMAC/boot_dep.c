@@ -53,8 +53,6 @@
 #include <mach/machine/vm_param.h>
 
 
-extern boolean_t prompt;
-
 /*
  * Is c part of a word?  (Newline is a delimiter, to cope with
  * bootmagic strings appended to normal boot_info by NORMA

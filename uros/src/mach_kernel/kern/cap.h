@@ -54,7 +54,7 @@ extern void cap_init(void);
  * authorizes `op` on `resource_id`, and that it has not been revoked or
  * expired.  Pure check — no side effects on the token or on kernel state.
  */
-extern kern_return_t urmach_cap_verify(struct uros_cap *user_token,
+extern kern_return_t urmach_cap_verify(const struct uros_cap *user_token,
                                        uint32_t op,
                                        uint64_t resource_id);
 
@@ -64,7 +64,7 @@ extern kern_return_t urmach_cap_verify(struct uros_cap *user_token,
  * table (cap_id keyed) and returns CAP_ERR_EXHAUSTED once the budget
  * is gone.
  */
-extern kern_return_t urmach_cap_use(struct uros_cap *user_token,
+extern kern_return_t urmach_cap_use(const struct uros_cap *user_token,
                                     uint32_t op,
                                     uint64_t resource_id);
 
@@ -85,6 +85,6 @@ extern kern_return_t urmach_cap_revoke(uint64_t cap_id);
  *   - If cap_id != 0 the call is reserved for future cap bookkeeping
  *     (e.g. populating kernel-side metadata); v1 accepts and ignores it.
  */
-extern kern_return_t urmach_cap_register(struct uros_cap *user_token);
+extern kern_return_t urmach_cap_register(const struct uros_cap *user_token);
 
 #endif /* _KERN_CAP_H_ */

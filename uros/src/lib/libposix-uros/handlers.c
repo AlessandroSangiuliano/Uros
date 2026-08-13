@@ -41,7 +41,7 @@
  * libmach_core's public exports verbatim — the linker resolves them
  * to the SYSENTER stubs <mach/syscall_sw.h> emits.
  */
-extern void                  mach_print(const char *);
+#include <mach/mach_traps.h>	/* the traps, declared once (#426) */
 extern __uros_port_t         mach_task_self(void);
 extern __uros_kern_return_t  syscall_vm_allocate(__uros_port_t task,
                                                  unsigned long *addr,

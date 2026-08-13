@@ -49,7 +49,13 @@ void context_become_current(struct context *ctx, uint64_t stack_top,
 void context_init(struct context *ctx, uint64_t stack_top,
 		  void (*entry)(void *), void *arg, void *fpu_area)
 {
-	uint64_t rsp = stack_top - CTX_WORDS * 8;
+	/*
+	 * ⚠️ Below the reserved user frame, not at the top of the stack.
+	 * <trap/trap.h> says why: those bytes belong to the trap frame,
+	 * which act_machine_set_state() may write while this thread is
+	 * running kernel code on the same stack.
+	 */
+	uint64_t rsp = KERNEL_STACK_USER_FRAME(stack_top) - CTX_WORDS * 8;
 	uint64_t *frame = (uint64_t *)(uintptr_t)rsp;
 
 	if (stack_top & 0xF)
