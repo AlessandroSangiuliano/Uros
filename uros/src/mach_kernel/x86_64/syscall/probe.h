@@ -60,6 +60,24 @@
 #define USER_PROBE_SYSCALL_RESULT	0x060504030201ULL
 
 /*
+ * The stack pointer a syscall must NOT come back on (#473).
+ *
+ * syscall_probe() writes this into the per-CPU block while the probe's call
+ * is running — which is precisely what another thread entering the kernel on
+ * this processor used to do by accident, and what sent a thread woken out of
+ * mach_msg back to ring 3 on that other thread's stack.
+ *
+ * The probe records its own %rsp after the syscall, so the two kernels give
+ * two different numbers: one that reads the per-CPU block answers with this,
+ * and one that pops the word the entry pushed answers with
+ * USER_PROBE_STACK_TOP.  ⚠️ Canonical and in the lower half, so that a kernel
+ * which does hand it over merely returns to a wrong stack instead of faulting
+ * somewhere that would be read as a different defect.  Nothing dereferences
+ * it: the probe pushes nothing between the syscall and its HLT.
+ */
+#define USER_PROBE_STOLEN_RSP		0x00007fff5eeded00ULL
+
+/*
  * And the same question asked of a call too wide for the argument registers
  * (#426): eleven arguments, one to eleven, a nibble each.
  *

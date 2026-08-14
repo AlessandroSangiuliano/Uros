@@ -195,6 +195,20 @@ user_probe_after_syscall:
 	movabsq	$USER_PROBE_DATA_VA, %r11
 	movq	%rax, 8(%r11)
 
+	/*
+	 * And the stack it came back on (#473).
+	 *
+	 * The kernel poisoned the per-CPU slot while this call was running, so
+	 * this word names which of the two the return path believed: the
+	 * thread's own stack, which is USER_PROBE_STACK_TOP, or the
+	 * processor's, which is USER_PROBE_STOLEN_RSP.
+	 *
+	 * ⚠️ Nothing between the syscall and the HLT may touch the stack, or a
+	 * kernel with the defect would fault here instead of reporting — and a
+	 * fault at the wrong address reads as some other test failing.
+	 */
+	movq	%rsp, 24(%r11)
+
 /*
  * Where the general protection must be seen to come from (#409).  See the note
  * at user_probe_after_syscall above for why these are labels.

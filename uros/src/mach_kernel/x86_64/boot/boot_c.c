@@ -2321,7 +2321,7 @@ static void ring3_selftest(void)
 
 	/*
 	 * The syscall has no such structure and must not grow one — see
-	 * syscall_probe() for why the two words it does save are its frame.
+	 * syscall_probe() for why the three words it does save are its frame.
 	 * They are read back from the stack the entry switched to, so a switch
 	 * that never happened cannot produce them.
 	 */
@@ -2331,14 +2331,18 @@ static void ring3_selftest(void)
 		int rip_ok = syscall_probe_saved_rip() == want_rip;
 		int stack_ok = syscall_probe_kernel_rsp() == rsp0;
 		int flags_ok = (syscall_probe_saved_flags() & RFLAGS_IF) != 0;
+		int user_rsp_ok =
+			syscall_probe_saved_user_rsp() == USER_PROBE_STACK_TOP;
 
 		kputs("UrMach x86-64: the syscall saved rip ");
 		kputhex64(syscall_probe_saved_rip());
 		kputs(" flags ");
 		kputhex64(syscall_probe_saved_flags());
+		kputs(" rsp ");
+		kputhex64(syscall_probe_saved_user_rsp());
 		kputs(" on the kernel stack at ");
 		kputhex64(syscall_probe_kernel_rsp());
-		kputs(rip_ok && stack_ok && flags_ok
+		kputs(rip_ok && stack_ok && flags_ok && user_rsp_ok
 		      ? " — where ring 3 resumes, and the state it resumes in\r\n"
 		      : " — WRONG, the entry saved something else\r\n");
 
@@ -2352,8 +2356,50 @@ static void ring3_selftest(void)
 			kputhex64(rsp0);
 			kputs("\r\n");
 		}
+		if (!user_rsp_ok) {
+			kputs("               its user stack was ");
+			kputhex64(USER_PROBE_STACK_TOP);
+			kputs("\r\n");
+		}
 		if (!flags_ok)
 			kputs("               it would resume with interrupts off\r\n");
+	}
+
+	/*
+	 * And the one that #473 exists about: WHICH stack pointer the return
+	 * actually gave back to ring 3.
+	 *
+	 * The line above says the entry saved the right word.  This one says
+	 * the return used it.  They are different claims and only the second
+	 * one was ever false: the entry had always parked the value in the
+	 * per-CPU block correctly, and the return had always read it back from
+	 * there — correctly too, for as long as no other thread entered the
+	 * kernel in between.  Any thread that blocked inside a syscall broke
+	 * that, and mach_msg blocks on every reply it waits for.
+	 *
+	 * syscall_probe() poisoned the block while the call was running, which
+	 * is that other thread's entry with the scheduling taken out, so the
+	 * two kernels answer with two different numbers rather than with the
+	 * same number more or less often.
+	 */
+	{
+		uint64_t back = *(volatile uint64_t *)(uintptr_t)
+				(phys_to_direct(data_frame) + 24);
+
+		kputs("UrMach x86-64: and came back on stack ");
+		kputhex64(back);
+		kputs(back == USER_PROBE_STACK_TOP
+		      ? " — the thread's own, with the per-CPU slot poisoned "
+			"mid-call (#473)\r\n"
+		      : " — WRONG, the return took the processor's slot\r\n");
+
+		if (back != USER_PROBE_STACK_TOP) {
+			kputs("               the probe's stack is ");
+			kputhex64(USER_PROBE_STACK_TOP);
+			kputs(", the poison is ");
+			kputhex64(USER_PROBE_STOLEN_RSP);
+			kputs("\r\n");
+		}
 	}
 
 	/*
