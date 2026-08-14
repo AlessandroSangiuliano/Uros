@@ -93,7 +93,15 @@ mach_port_t boot_script_read_file (const char *file);
 int boot_script_task_create (struct cmd *); /* task_create + task_suspend */
 int boot_script_task_resume (struct cmd *);
 int boot_script_prompt_task_resume (struct cmd *);
-int boot_script_insert_right (struct cmd *, mach_port_t, mach_port_t *namep);
+/*
+ * ⚠️ The right is a boot_script_val_t and not a mach_port_t (#415).  What the
+ * caller holds is a port POINTER -- #453 widened boot_script_val_t to a long
+ * for exactly this, saying `an integer, or a pointer of any kind' -- and
+ * narrowing it here truncated it on the way in and the callee widened it back
+ * on the way out, losing the top half of every port the bootstrap task is
+ * given.  The compiler said so on every x86-64 build.
+ */
+int boot_script_insert_right (struct cmd *, boot_script_val_t, mach_port_t *namep);
 int boot_script_insert_task_port (struct cmd *, task_t, mach_port_t *namep);
 
 /* The user must define this function to clean up the `task_t'

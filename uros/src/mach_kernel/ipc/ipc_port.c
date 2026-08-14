@@ -1269,7 +1269,7 @@ ipc_port_copyout_send(
 				name = MACH_PORT_NULL;
 		}
 	} else
-		name = (mach_port_t) sright;
+		name = io_sentinel_to_name((ipc_object_t) sright);
 
 	return name;
 }
