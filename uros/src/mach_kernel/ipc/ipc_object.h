@@ -95,6 +95,7 @@
 
 #include <mach/kern_return.h>
 #include <mach/message.h>
+#include <kern/assert.h>
 #include <kern/lock.h>
 #include <kern/macro_help.h>
 #include <kern/zalloc.h>
@@ -107,6 +108,43 @@ typedef struct ipc_object *ipc_object_t;
 #define	IO_DEAD			((ipc_object_t) -1)
 
 #define	IO_VALID(io)		(((io) != IO_NULL) && ((io) != IO_DEAD))
+
+/*
+ * The two sentinels, carried across the pointer/name divide (#415).
+ *
+ * A name is thirty-two bits by definition of the interface and an object is a
+ * pointer, so the two are different widths on this machine.  Almost nowhere
+ * does that matter, because a name is looked up and an object is a lookup's
+ * answer -- but there are twenty-one places where the kernel converts one
+ * straight into the other with a cast, and every one of them is in a branch
+ * where the value is NOT a real object: it is IO_NULL or IO_DEAD, and the
+ * cast is there to carry the sentinel through, not a pointer.
+ *
+ * It works by arithmetic: IO_DEAD is (ipc_object_t) -1 and MACH_PORT_DEAD is
+ * (mach_port_t) ~0, so truncating sixty-four ones to thirty-two leaves
+ * thirty-two ones.  🔥 That is a coincidence of representation, and it made
+ * the compiler warn `cast from pointer to integer of different size' on every
+ * x86-64 build -- twenty-one times, in a stream nobody read, saying something
+ * that was true (a pointer was being truncated) about code that was right.
+ *
+ * ⚠️ Which is worse than a warning that is simply wrong: a warning that is
+ * correct and harmless trains the reader to skip the ones that are correct
+ * and fatal.  So the conversion is spelled out here, the two callers of it
+ * assert what they already rely on, and the twenty-one casts go away.
+ */
+static __inline mach_port_t
+io_sentinel_to_name(ipc_object_t io)
+{
+	assert(!IO_VALID(io));
+	return (io == IO_DEAD) ? MACH_PORT_DEAD : MACH_PORT_NULL;
+}
+
+static __inline ipc_object_t
+name_sentinel_to_io(mach_port_t name)
+{
+	assert((name == MACH_PORT_NULL) || (name == MACH_PORT_DEAD));
+	return (name == MACH_PORT_DEAD) ? IO_DEAD : IO_NULL;
+}
 
 /*
  *	IPC steals the high-order bits from the kotype to use

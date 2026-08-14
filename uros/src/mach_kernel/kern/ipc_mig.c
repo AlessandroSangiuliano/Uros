@@ -1095,7 +1095,7 @@ syscall_vm_map(
 			return result;
 		}
 	} else
-		port = (ipc_port_t) memory_object;
+		port = (ipc_port_t) name_sentinel_to_io(memory_object);
 
 	if (copyin((char *)address, (char *)&addr, sizeof(vm_offset_t)))
 		result = KERN_INVALID_ADDRESS;
@@ -1489,7 +1489,7 @@ syscall_task_set_special_port(
 			return result;
 		}
 	} else
-		port = (ipc_port_t) port_name;
+		port = (ipc_port_t) name_sentinel_to_io(port_name);
 
 	result = task_set_special_port(t, which_port, port);
 	if ((result != KERN_SUCCESS) && IP_VALID(port))
@@ -1524,7 +1524,7 @@ syscall_thread_set_exception_ports(
 			return result;
 		}
 	} else {
-		port = (ipc_port_t) new_port;
+		port = (ipc_port_t) name_sentinel_to_io(new_port);
 	}
 
 	result = thread_set_exception_ports(thr_act, new_mask, port,
@@ -1562,7 +1562,7 @@ syscall_task_set_exception_ports(
 			return result;
 		}
 	} else {
-		port = (ipc_port_t) new_port;
+		port = (ipc_port_t) name_sentinel_to_io(new_port);
 	}
 
 	result = task_set_exception_ports(t, new_mask, port,
@@ -1713,7 +1713,7 @@ syscall_mach_port_insert_right(
 			return kr;
 		}
 	} else
-		object = (ipc_object_t) right;
+		object = name_sentinel_to_io(right);
 	newtype = ipc_object_copyin_type(rightType);
 
 	kr = mach_port_insert_right(space, name, (ipc_port_t) object, newtype);
@@ -3082,7 +3082,7 @@ syscall_mach_port_request_notification(
 			return result;
 		}
 	} else {
-		notify_port = (ipc_port_t) notify_name;
+		notify_port = (ipc_port_t) name_sentinel_to_io(notify_name);
 	}
 
 	result = mach_port_request_notification(space, name, id, sync,
@@ -3096,7 +3096,7 @@ syscall_mach_port_request_notification(
 						       MACH_MSG_TYPE_PORT_SEND_ONCE,
 						       &our_prev_name);
 		} else {
-			our_prev_name = (mach_port_t) our_prev_port;
+			our_prev_name = io_sentinel_to_name((ipc_object_t) our_prev_port);
 		}
 		if (copyout((char *) &our_prev_name, (char *) previousp,
 			    sizeof (mach_port_t))) {
@@ -3149,7 +3149,7 @@ syscall_memory_object_change_attributes(
 			return result;
 		}
 	} else {
-		reply_to = (ipc_port_t) reply_to_name;
+		reply_to = (ipc_port_t) name_sentinel_to_io(reply_to_name);
 	}
 
 	result = memory_object_change_attributes(object, flavor,
@@ -3247,7 +3247,7 @@ syscall_memory_object_lock_request(
 			return result;
 		}
 	} else {
-		reply_to = (ipc_port_t) reply_to_name;
+		reply_to = (ipc_port_t) name_sentinel_to_io(reply_to_name);
 	}
 
 	result = memory_object_lock_request(object, offset, size,
@@ -3289,7 +3289,7 @@ syscall_memory_object_discard_reply(
 			return result;
 		}
 	} else {
-		reply_to = (ipc_port_t) reply_to_name;
+		reply_to = (ipc_port_t) name_sentinel_to_io(reply_to_name);
 	}
 
 	result = memory_object_discard_reply(object,
@@ -3335,7 +3335,7 @@ syscall_memory_object_data_supply(
 			return result;
 		}
 	} else {
-		reply_to = (ipc_port_t) reply_to_name;
+		reply_to = (ipc_port_t) name_sentinel_to_io(reply_to_name);
 	}
 
 	result = vm_map_copyin_page_list(current_act()->map,

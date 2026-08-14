@@ -580,9 +580,7 @@ boot_script_exec ()
 		      (cmd, (task_t) arg->val, &name);
 		  else
 		    /* Insert send right.  */
-		    error = boot_script_insert_right (cmd,
-						      (mach_port_t) arg->val,
-						      &name);
+		    error = boot_script_insert_right (cmd, arg->val, &name);
 		  if (error)
 		    goto done;
 

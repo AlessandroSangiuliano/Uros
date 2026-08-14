@@ -15,6 +15,7 @@
 #include <mach/boolean.h>
 #include <mach/vm_param.h>	/* #426: PAGE_SIZE, to judge what the RPC said */
 #include <kern/syscall_sw.h>	/* #411: mach_trap_table */
+#include <syscall/probe.h>	/* #473: the stack pointer a return must not use */
 #include <syscall/syscall.h>
 #include <kern/misc_protos.h>	/* #422: printf */
 #include <trap/trap.h>
@@ -76,14 +77,21 @@ uint64_t syscall_probe_gs(void)
  * registers destroyed precisely so the entry does not save them, and that
  * absence is measured in cycles on every call in the system.
  *
- * What it does save is two words, and they are the two the return cannot do
- * without: where ring 3 resumes, and the flags it resumes with.  So they are
- * the frame, and reading them back from the stack the entry chose is the only
- * way to see BOTH that the stack switch happened and that the right things
- * went onto it — if `movq %gs:PERCPU_KERNEL_RSP, %rsp' had not run, the pushes
- * would have landed on the user's stack and these two addresses would hold
- * whatever was there.
+ * What it does save is three words, and they are the three the return cannot
+ * do without: the stack ring 3 came in on, where it resumes, and the flags it
+ * resumes with.  So they are the frame, and reading them back from the stack
+ * the entry chose is the only way to see BOTH that the stack switch happened
+ * and that the right things went onto it — if `movq %gs:PERCPU_KERNEL_RSP,
+ * %rsp' had not run, the pushes would have landed on the user's stack and
+ * these addresses would hold whatever was there.
+ *
+ * ⚠️ THREE since #473, and this file is how the change was noticed rather than
+ * merely accompanied: these offsets are the only place in the kernel that
+ * reads the entry's layout back, so adding a push here moved every one of
+ * them, and the self-test said so on the first boot.  That is what a
+ * consumer is for.
  */
+static uint64_t probe_saved_user_rsp;
 static uint64_t probe_saved_rip;
 static uint64_t probe_saved_flags;
 static uint64_t probe_kernel_rsp;
@@ -122,6 +130,11 @@ const char *syscall_probe_top(void)
 int syscall_probe_reached_entry(void)
 {
 	return probe_reached_entry;
+}
+
+uint64_t syscall_probe_saved_user_rsp(void)
+{
+	return probe_saved_user_rsp;
 }
 
 uint64_t syscall_probe_saved_rip(void)
@@ -385,11 +398,36 @@ uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 
 	/*
 	 * In the order the entry pushed them, which is the reverse of the order
-	 * they come off: rcx first, so it is nearest the top.
+	 * they come off: the user stack pointer first, so it is nearest the
+	 * top, then rcx, then r11, then the word that keeps the count even.
 	 */
 	probe_kernel_rsp = top;
-	probe_saved_rip = saved[-1];
-	probe_saved_flags = saved[-2];
+	probe_saved_user_rsp = saved[-1];
+	probe_saved_rip = saved[-2];
+	probe_saved_flags = saved[-3];
+
+	/*
+	 * 🔥 And now take the per-CPU slot away (#473).
+	 *
+	 * The defect was that the return read the caller's stack pointer out of
+	 * the per-CPU block, which any other thread entering the kernel on this
+	 * processor overwrites — so a thread that blocked in mach_msg came back
+	 * to ring 3 standing on somebody else's stack.
+	 *
+	 * Reproducing that with two threads and a scheduler would be a race to
+	 * arrange and a race to believe.  This is the same event without the
+	 * race: the slot is poisoned HERE, in the middle of a syscall, exactly
+	 * as another thread's entry would have poisoned it, and the probe
+	 * records the stack pointer it actually resumes on.  A kernel that
+	 * reads the block hands ring 3 the poison; one that pops the thread's
+	 * own word does not.  The two answers are different values, which is
+	 * what makes this a measurement rather than a hope.
+	 *
+	 * Safe to leave poisoned: the slot is scratch across two instructions
+	 * of the next entry, which writes it before anything reads it.
+	 */
+	percpu()->user_rsp = USER_PROBE_STOLEN_RSP;
+
 	note_boot_image(a1, a6);
 	note_boot_ipc(a1, a2, a3, a4, a5, a6);
 	note_boot_ipc_narrow(a1, a2, a3, a4, a5, a6);

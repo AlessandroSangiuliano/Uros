@@ -32,9 +32,11 @@
  *
  * ⚠️ The padding is not decoration.  The ABI wants rsp sixteen-byte aligned
  * at the call, the entry has pushed an odd number of words by the time it
- * gets here (two, plus rbp), so an EVEN number of arguments needs one word
- * of padding and an odd number needs none.  Getting this backwards does not
- * fail: it misaligns every stack frame under the trap, which the kernel
+ * gets here (four, plus rbp — it was two before #473 added the user stack
+ * pointer and the word that keeps the count even, and what matters here is
+ * the parity, which has not moved), so an EVEN number of arguments needs one
+ * word of padding and an odd number needs none.  Getting this backwards does
+ * not fail: it misaligns every stack frame under the trap, which the kernel
  * survives only because it is compiled -mno-sse and nothing executes an
  * aligned vector move.  It would fail the day that changed, somewhere else.
  *
@@ -95,10 +97,32 @@ syscall_entry:
 	movq	%gs:PERCPU_KERNEL_RSP, %rsp
 
 	/*
-	 * The two words the return needs, and no others.  The contract says
+	 * The three values the return needs, and no others.  The contract says
 	 * the argument registers are destroyed, so they are not saved — that
 	 * is six stores and six loads that this path does not perform, on
 	 * every call in the system.
+	 *
+	 * 🔥 THREE, and the third is the whole of #473.
+	 *
+	 * The stack pointer was left in the per-CPU block a moment ago because
+	 * there was nowhere else to put it: %gs had just been swapped and this
+	 * thread's kernel stack was not yet under %rsp.  That block belongs to
+	 * the PROCESSOR, and a syscall is not over when it returns from the
+	 * processor's point of view -- mach_msg blocks waiting for a reply, the
+	 * scheduler runs another thread, and that thread's own entry writes the
+	 * same slot.  The first thread then woke up on the second one's stack.
+	 *
+	 * The resume address never suffered, and that is what named the defect:
+	 * SYSCALL leaves it in %rcx and the push below puts it on THIS thread's
+	 * stack.  One of the two was per-thread by construction, the other was
+	 * remembered, and only the remembered one was wrong.  So the fix is not
+	 * to remember it more carefully -- it is one push, here, after which
+	 * the value cannot be another thread's.
+	 *
+	 * The per-CPU slot keeps its job as the scratch across the two
+	 * instructions above, and there it is safe for a reason rather than by
+	 * luck: SYSCALL masks interrupts through FMASK, so nothing runs between
+	 * the store and this load.
 	 *
 	 * ── Where the full register image would go ────────────────────────
 	 *
@@ -110,8 +134,31 @@ syscall_entry:
 	 * ABI change, which is the reason the contract could be chosen
 	 * without deciding this now.
 	 */
+	pushq	%gs:PERCPU_USER_RSP	/* the stack it came in on */
 	pushq	%rcx			/* where ring 3 resumes */
 	pushq	%r11			/* the flags it resumes with */
+	pushq	$0			/* and sixteen: see below */
+
+	/*
+	 * ⚠️ FOUR words for three values, and the fourth is not slack.
+	 *
+	 * The System V ABI wants %rsp sixteen-byte aligned AT the call, so that
+	 * the callee sees it eight past a boundary once the return address is
+	 * on.  kernel_stack_top is a multiple of sixteen, so an EVEN number of
+	 * pushes here is what makes the calls below legal -- with three, every
+	 * C function this path enters would be eight off, and the first SSE
+	 * spill in one of them would fault.  Two pushes were even; three are
+	 * not; four are.
+	 *
+	 * A zero rather than a fourth register, because a saved register that
+	 * nothing reads is a value nobody is checking.  This one is never read:
+	 * .Lreturn steps over it with an `addq' rather than popping it into
+	 * somewhere it could be mistaken for state.
+	 *
+	 * ⚠️ The two wide paths lean on the same parity: they push %rbp and an
+	 * odd number of stacked arguments on top of this, which lands their
+	 * callee on the boundary only because what is under them is even.
+	 */
 
 	/*
 	 * The fourth argument moves into the register the C ABI expects.  The
@@ -199,6 +246,7 @@ syscall_entry:
 	callq	*(%r11, %rax, 8)
 
 .Lreturn:
+	addq	$8, %rsp		/* the alignment word the entry pushed */
 	popq	%r11			/* flags */
 	popq	%rcx			/* resume address */
 
@@ -229,7 +277,7 @@ syscall_entry:
 	 * interrupt in that window is the one #440 exists about.
 	 */
 	cli
-	movq	%gs:PERCPU_USER_RSP, %rsp
+	popq	%rsp			/* this thread's, not this processor's */
 	swapgs
 	sysretq
 
@@ -292,10 +340,15 @@ syscall_entry:
  *
  * The frame is built by hand from what the entry saved, in the order IRETQ
  * pops it.
+ *
+ * ⚠️ The stack pointer comes off this thread's stack, not out of the per-CPU
+ * block (#473).  .Lreturn has already popped the flags and the resume
+ * address, so it is what is under %rsp now; the iretq frame is then built
+ * below it, on the kernel stack, which is why the pop has to come first.
  */
 .Lreturn_the_slow_way:
 	cli
-	movq	%gs:PERCPU_USER_RSP, %r10
+	popq	%r10			/* the stack ring 3 came in on */
 	swapgs
 
 	pushq	$USER_DS_RPL3		/* ss     */
