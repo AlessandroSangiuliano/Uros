@@ -1395,7 +1395,7 @@ ipc_kmsg_copyin_header(
 		if (IE_BITS_TYPE(entry->ie_bits) == MACH_PORT_TYPE_NONE)
 			ipc_entry_dealloc(space, dest_name, entry);
 
-		reply_port = (ipc_object_t) reply_name;
+		reply_port = name_sentinel_to_io(reply_name);
 		reply_soright = IP_NULL;
 	} else {
 		ipc_entry_t dest_entry, reply_entry;
@@ -2769,7 +2769,7 @@ ipc_kmsg_copyout_header(
 		ip_lock(dest);
 		is_read_unlock(space);
 
-		reply_name = (mach_port_t) reply;
+		reply_name = io_sentinel_to_name((ipc_object_t) reply);
 	}
 
 	/*
@@ -3420,7 +3420,7 @@ ipc_kmsg_copyout_dest(
 		ipc_object_destroy(reply, reply_type);
 		reply_name = MACH_PORT_NULL;
 	} else
-		reply_name = (mach_port_t) reply;
+		reply_name = io_sentinel_to_name((ipc_object_t) reply);
 
 	kmsg->ikm_header.msgh_bits = (MACH_MSGH_BITS_OTHER(mbits) |
 				      MACH_MSGH_BITS(reply_type, dest_type));
@@ -3767,7 +3767,8 @@ ipc_kmsg_copyout_to_kernel(
 	 * reach this routine ZERO times: there is no workload here that
 	 * would show the change to be right or wrong, only the callers.
 	 */
-	reply_name = IO_VALID(reply) ? MACH_PORT_NULL : (mach_port_t) reply;
+	reply_name = IO_VALID(reply) ? MACH_PORT_NULL
+				     : io_sentinel_to_name((ipc_object_t) reply);
 
 	kmsg->ikm_header.msgh_bits =
 		(MACH_MSGH_BITS_OTHER(kmsg->ikm_header.msgh_bits) |

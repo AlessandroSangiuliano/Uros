@@ -303,7 +303,12 @@ ipc_object_alloc(
 	}
 
 	io_lock_init(object);
-	*namep = (mach_port_t)object;
+	/*
+	 * ⚠️ `*namep = (mach_port_t) object' stood here and was DEAD (#415):
+	 * ipc_entry_alloc reaches ipc_entry_get, which writes *namep from
+	 * MACH_PORT_MAKE() without ever reading it.  It cost nothing and
+	 * read as though a pointer were being used as a name.
+	 */
 	kr = ipc_entry_alloc(space,
 		type == MACH_PORT_TYPE_SEND_ONCE, namep, &entry);
 	if (kr != KERN_SUCCESS) {
@@ -680,7 +685,7 @@ ipc_object_copyout(
 			break;
 		}
 
-		name = (mach_port_t)object;
+		/* Dead store removed (#415): ipc_entry_get writes `name'. */
 		kr = ipc_entry_get(space, 
 			msgt_name == MACH_MSG_TYPE_PORT_SEND_ONCE,
 			&name, &entry);

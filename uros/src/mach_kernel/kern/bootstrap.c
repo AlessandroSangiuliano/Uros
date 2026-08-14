@@ -1820,9 +1820,10 @@ boot_script_free_task (task_t task, int aborting)
 }
 
 int
-boot_script_insert_right (struct cmd *cmd, mach_port_t port, mach_port_t *name)
+boot_script_insert_right (struct cmd *cmd, boot_script_val_t port,
+			  mach_port_t *name)
 {
-  *name = task_insert_send_right (cmd->task, (ipc_port_t)port);
+  *name = task_insert_send_right (cmd->task, (ipc_port_t) port);
   return 0;
 }
 

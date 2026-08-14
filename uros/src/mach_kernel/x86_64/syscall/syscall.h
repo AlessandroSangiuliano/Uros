@@ -272,8 +272,9 @@ extern const uint8_t syscall_stack[SYSCALL_NR_MAX];
 
 /*
  * What the last probe call found on the kernel stack, and which stack that was
- * (#409).  See syscall.c: for this entry these two words ARE the frame.
+ * (#409).  See syscall.c: for this entry these three words ARE the frame.
  */
+uint64_t syscall_probe_saved_user_rsp(void);	/* #473 */
 uint64_t syscall_probe_saved_rip(void);
 uint64_t syscall_probe_saved_flags(void);
 uint64_t syscall_probe_kernel_rsp(void);
