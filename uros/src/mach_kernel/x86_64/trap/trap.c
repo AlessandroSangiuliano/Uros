@@ -16,6 +16,34 @@
 #include <kern/thread.h>		/* #467: current_act */
 #include <kern/thread_act.h>
 #include <vm/vm_fault.h>		/* #467: hand a fault to the MI kernel */
+
+/*
+ * ── Taking #467 back out again, one arm at a time (#467) ──────────────
+ *
+ * The issue asks for each of the three arms to be "shown with a test that
+ * fails on the kernel before the change", and the only honest way to show
+ * that is to remove the arm and watch the test go red -- a correction is
+ * verified by TAKING IT AWAY, not by the test passing beside it.
+ *
+ * ⚠️ One at a time, and not all three together.  All three absent is what the
+ * kernel was, but with the first arm gone the task halts on its first page
+ * fault and the other two arms are never reached: the run would say nothing
+ * about them.  Isolating each is what makes each report attributable.
+ *
+ * Zero in every build that ships.  These exist to be set from the compiler
+ * command line for one run and then unset; nothing in the tree turns them on,
+ * which is why they are plain zeros here rather than a configuration option
+ * somebody could leave enabled.
+ */
+#ifndef ABLATE_467_ARM1
+#define ABLATE_467_ARM1	0	/* a ring-3 page fault gets vm_fault()      */
+#endif
+#ifndef ABLATE_467_ARM2
+#define ABLATE_467_ARM2	0	/* an unresolvable ring-3 fault -> the task */
+#endif
+#ifndef ABLATE_467_ARM3
+#define ABLATE_467_ARM3	0	/* a ring-0 fault on a user address         */
+#endif
 #include <kern/exception.h>		/* #467: exception() */
 #include <mach/exception.h>		/* #467: EXC_BAD_ACCESS and friends */
 #include <mach/machine/exception.h>	/* #467: EXC_X86_64_*, first consumer */
@@ -1344,7 +1372,7 @@ void trap_dispatch(struct trap_frame *frame)
 				     ? (VM_PROT_READ | VM_PROT_WRITE)
 				     : VM_PROT_READ;
 
-		if (map != VM_MAP_NULL
+		if (!ABLATE_467_ARM3 && map != VM_MAP_NULL
 		    && fault_in(map, read_cr2(), prot, frame) == KERN_SUCCESS)
 			return;		/* the copy runs again and succeeds */
 	}
@@ -1475,7 +1503,7 @@ void trap_dispatch(struct trap_frame *frame)
 		 * and inventing kernel_map for it would hand an early boot
 		 * failure to a subsystem that is not up.
 		 */
-		if (map != VM_MAP_NULL) {
+		if (!ABLATE_467_ARM1 && map != VM_MAP_NULL) {
 			fault_kr = fault_in(map, addr, prot, frame);
 			if (fault_kr == KERN_SUCCESS)
 				return;	/* the instruction runs again */
@@ -1494,7 +1522,8 @@ void trap_dispatch(struct trap_frame *frame)
 	 * resolved and the instruction runs again -- and raising first would
 	 * turn every first touch of every page into a message.
 	 */
-	if ((frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
+	if (!ABLATE_467_ARM2
+	    && (frame->cs & 3) == USER_RPL && current_act() != THR_ACT_NULL) {
 		int	exc, code, subcode;
 
 		if (frame->vector == T_PAGE_FAULT) {
