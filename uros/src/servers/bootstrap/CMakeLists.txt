@@ -244,6 +244,17 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   file(GENERATE OUTPUT ${_CONF}
        CONTENT "name_server name_server\nfault_test fault_test\n")
 
+  # ⚠️ fault_test SECOND, and the order is load-bearing rather than tidy.  Its
+  # second arm faults on purpose and its handler repairs the address; if it
+  # went first, a kernel that mishandled that would take the boot down before
+  # the name server had been started, and a #422 result would look like a
+  # #467 regression.
+  #
+  # ⚠️ Two entries, and it was briefly four while #476 was being hunted --
+  # three copies of the same image under three names, to multiply the STARTING
+  # of a task without adding a second program's behaviour to the measurement.
+  # That was an experiment and is not a configuration: it belongs in the issue
+  # and in ~/uros-tests, not in what the build ships.
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
