@@ -37,7 +37,7 @@
 #include <kern/mutex_track.h>
 #include <vm/vm_page.h>
 #include <sync/mutex_trace.h>
-#include <kern/quiet_census.h>
+#include <cpu/quiet_census.h>
 
 /*
  * How long "quiet" is.
