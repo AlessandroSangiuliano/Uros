@@ -772,8 +772,15 @@ exec_load(vm_offset_t start, vm_size_t size)
 	 * regions.  It is the first thing to read when a boot stops on its way
 	 * to user mode.
 	 */
-	printf("bootstrap: image entry 0x%lx, %d regions\n",
-	       (unsigned long) entry, boot_region_count);
+	/*
+	 * ⚠️ %lu and a cast, not %d.  boot_region_count is a vm_size_t, which
+	 * is eight bytes here and four on i386 -- printf would read four of
+	 * the eight and the next conversion would read the rest, so the first
+	 * wrong number is not even the one that is wrong.  Same family as
+	 * #415, said by the compiler and not by a run.
+	 */
+	printf("bootstrap: image entry 0x%lx, %lu regions\n",
+	       (unsigned long) entry, (unsigned long) boot_region_count);
 
 	BOOT_REGION_ROOM();
 	regions[boot_region_count].addr = STACK_BASE;

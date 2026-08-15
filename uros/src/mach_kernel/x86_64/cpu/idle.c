@@ -48,6 +48,7 @@
 #include <kern/cpu_number.h>
 #include <kern/processor.h>
 #include <kern/thread.h>		/* THREAD_NULL */
+#include <kern/quiet_census.h>		/* #476: who never ran */
 #include <mach/machine.h>		/* machine_info.avail_cpus */
 
 #include <cpu/ipi.h>
@@ -111,6 +112,14 @@ machine_idle(int mycpu)
 	clock_event_drain_reports();
 
 	/*
+	 * And, for the same reason, what every thread in the system is doing
+	 * once nothing is doing anything (#476).  Prints once, after a long
+	 * stretch of quiet; see kern/quiet_census.c for why this is not a gdb
+	 * script.
+	 */
+	quiet_census_pass(mycpu);
+
+	/*
 	 * Never while processors are still arriving.  Bring-up runs with
 	 * interrupt routing that is only partly built, and a boot that hangs is
 	 * far easier to read as a spin than as a halt -- a halted processor and
@@ -162,6 +171,9 @@ machine_idle_exit(int mycpu)
 
 	idle_state[mycpu].dry = 0;
 	idle_state[mycpu].halted = 0;
+
+	/* Work arrived: the quiet stretch #476 is waiting for starts again. */
+	quiet_census_busy(mycpu);
 }
 
 void
