@@ -264,7 +264,6 @@
 #include <vm/vm_init.h>
 #include <vm/vm_map.h>
 #include <vm/vm_page.h>
-#include <sync/mutex_trace.h>		/* #476 */
 #include <vm/vm_pageout.h>
 #include <vm/vm_kern.h>			/* kernel_memory_allocate() */
 #include <kern/misc_protos.h>
@@ -561,15 +560,6 @@ vm_page_bootstrap(
 
 	mutex_init(&vm_page_queue_free_lock, ETAP_VM_PAGEQ_FREE);
 	mutex_init(&vm_page_queue_lock, ETAP_VM_PAGEQ);
-
-	/*
-	 * #476: this is the mutex a stopped boot is found asleep on -- free,
-	 * unheld, and with its waiter count still saying one.  Watched from
-	 * here because here is where it exists; the trace records every
-	 * transition it goes through so the interleaving can be read instead
-	 * of derived.  See <x86_64/sync/mutex_trace.h>.
-	 */
-	mutex_trace_watch(&vm_page_queue_lock);
 	simple_lock_init(&vm_page_preppin_lock, ETAP_VM_PREPPIN);
 
 	vm_page_queue_free = VM_PAGE_NULL;

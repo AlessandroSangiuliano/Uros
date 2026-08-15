@@ -48,7 +48,7 @@
 #include <kern/cpu_number.h>
 #include <kern/processor.h>
 #include <kern/thread.h>		/* THREAD_NULL */
-#include <kern/quiet_census.h>		/* #476: who never ran */
+#include <cpu/quiet_census.h>		/* #476: who never ran */
 #include <mach/machine.h>		/* machine_info.avail_cpus */
 
 #include <cpu/ipi.h>

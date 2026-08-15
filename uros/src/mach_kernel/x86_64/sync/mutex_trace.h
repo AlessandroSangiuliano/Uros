@@ -57,6 +57,16 @@
  * Worth paying while hunting, not worth shipping.  Set this to 1, rebuild,
  * and call mutex_trace_watch() on the lock in question.
  *
+ * ⚠️ NOTHING IN THE TREE CALLS mutex_trace_watch(), and that is deliberate.
+ * The lock worth watching is different every time, and the natural place to
+ * arm it -- beside its mutex_init() -- is machine-independent code, which
+ * must not reach a header that exists only under x86_64/.  It did once: a
+ * line in vm/vm_resident.c broke the i386 build outright, and the i386 suites
+ * went on "passing" because run-qemu.sh had a stale kernel to boot.  A build
+ * that fails must not be able to look like a run that succeeded.
+ *
+ * So the hunter adds the call where the hunt needs it and takes it out again.
+ *
  * ⚠️ AND BUILD IT after turning it on, before believing anything it says.
  * The bodies below are not compiled while this is 0, and code that is not
  * compiled does not know it is broken -- which is not a general worry but a
