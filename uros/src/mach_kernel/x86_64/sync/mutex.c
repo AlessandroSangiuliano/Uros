@@ -72,6 +72,7 @@
 #include <kern/sched_prim.h>
 #include <sync/atomic.h>
 #include <sync/mutex.h>
+#include <sync/mutex_trace.h>
 
 void
 mutex_init(mutex_t *m, etap_event_t event)
@@ -121,6 +122,7 @@ _mutex_lock(mutex_t *m)
 	state = atomic_cmpxchg8(&m->locked, MUTEX_FREE, MUTEX_HELD);
 	if (state == MUTEX_FREE) {
 		MUTEX_NOTE_ACQUIRED(m);
+		MUTEX_TRACE(m, MTR_LOCK_FAST, 0);
 		return;
 	}
 
@@ -138,7 +140,9 @@ _mutex_lock(mutex_t *m)
 		 * wasted wakeup against a possible lost one is not a close
 		 * call.
 		 */
-		if (atomic_swap8(&m->locked, MUTEX_WAIT) == MUTEX_FREE) {
+		state = atomic_swap8(&m->locked, MUTEX_WAIT);
+		MUTEX_TRACE(m, MTR_ANNOUNCE, state);
+		if (state == MUTEX_FREE) {
 			MUTEX_NOTE_ACQUIRED(m);
 			return;
 		}
@@ -151,11 +155,14 @@ _mutex_lock(mutex_t *m)
 		 */
 		hw_lock_lock(&m->interlock);
 		if (m->locked == MUTEX_FREE) {
+			MUTEX_TRACE(m, MTR_ILK_FREE, 0);
 			hw_lock_unlock(&m->interlock);
 			continue;
 		}
 		MUTEX_NOTE_BLOCKING(m);
+		MUTEX_TRACE(m, MTR_SLEEP, m->waiters + 1);
 		mutex_lock_wait(m);		/* releases the interlock */
+		MUTEX_TRACE(m, MTR_WOKE, 0);
 	}
 }
 
@@ -166,11 +173,58 @@ mutex_unlock(mutex_t *m)
 
 	/*
 	 * Clear and learn in one step.  A previous value of 1 means nobody
-	 * announced themselves, so there is nothing to wake and no interlock
-	 * to take -- which is the whole of the release for the common case.
+	 * announced themselves -- and 🔥 THAT IS NOT ENOUGH, which is #476.
+	 *
+	 * The word is not a record of whether anyone is queued.  It is a record
+	 * of whether anyone announced themselves SINCE IT WAS LAST TAKEN, and
+	 * those are different things.  Three threads, and the order is the
+	 * whole defect:
+	 *
+	 *   1  A holds it                                          word = 1
+	 *   2  B  swap(2) -> 1   announces, heads for the interlock  word = 2
+	 *   3  A  swap(0) -> 2   releases, heads for the interlock   word = 0
+	 *   4  A gets the interlock FIRST: waiters is still 0, because B has
+	 *      not reached its increment yet.  A wakes nobody and lets go.
+	 *   5  C  cmpxchg 0->1   takes it on the fast path           word = 1
+	 *   6  B gets the interlock: re-reads the word, finds 1 and not FREE,
+	 *      so it does not loop -- it commits.  waiters++ and sleeps.
+	 *   7  C  swap(0) -> 1   "nobody announced" -- returns, wakes no one
+	 *
+	 * From step 7 the announcement is gone for good.  B is asleep and
+	 * waiters is 1, but the word only oscillates between 0 and 1 after
+	 * that, and every release reads 1 and leaves without ever looking at
+	 * waiters -- because waiters is consulted only on the path the word 2
+	 * opens.  Two processors handing the lock back and forth over a
+	 * sleeping thread, forever.
+	 *
+	 * ⚠️ Step 4 before step 6 is the whole of it, and it is also why the
+	 * re-read under the interlock -- which exists to catch exactly this --
+	 * does not: B re-reads and sees a word that is taken *again*, which
+	 * looks like every ordinary reason to sleep.
+	 *
+	 * The trace of a stopped boot is that state for as far back as it goes:
+	 * hundreds of lock-fast/unlock-quiet pairs, `waiters=1' on every one.
+	 * The comment on the announce above chose "a rare wasted wakeup against
+	 * a possible lost one"; the lost one happens anyway.
+	 *
+	 * So the release asks BOTH the word and the count.  Reading waiters
+	 * costs nothing measurable -- it is in the line this processor has just
+	 * made exclusive with the exchange -- and reading it without the
+	 * interlock is sound in the only case where its answer decides
+	 * anything: if the word came back 1 while a thread is queued, that
+	 * thread is already asleep and incremented under the interlock long
+	 * before, so there is no in-flight waiter to miss.  A waiter still on
+	 * its way has by definition written 2, and the word alone already
+	 * sends us the slow way.
 	 */
-	if (atomic_swap8(&m->locked, MUTEX_FREE) == MUTEX_HELD)
-		return;
+	{
+		uint8_t was = atomic_swap8(&m->locked, MUTEX_FREE);
+
+		MUTEX_TRACE(m, was == MUTEX_HELD ? MTR_UNLOCK_QUIET : MTR_UNLOCK,
+			    was);
+		if (was == MUTEX_HELD && m->waiters == 0)
+			return;
+	}
 
 	/*
 	 * Somebody announced.  They are either asleep, or between announcing
@@ -179,7 +233,10 @@ mutex_unlock(mutex_t *m)
 	 * it held.
 	 */
 	hw_lock_lock(&m->interlock);
-	if (m->waiters)
+	if (m->waiters) {
 		mutex_unlock_wakeup(m);
+		MUTEX_TRACE(m, MTR_WAKEUP, m->waiters);
+	} else
+		MUTEX_TRACE(m, MTR_WAKEUP, -1);	/* announced, nobody queued */
 	hw_lock_unlock(&m->interlock);
 }

@@ -590,6 +590,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   target_sources(mach_kernel PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/thread/machine.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/mutex.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/mutex_trace.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/blkio.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/chario.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/cirbuf.c
@@ -655,6 +656,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/priority.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/processor.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/queue.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/quiet_census.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/rcu.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/rpc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/sched_prim.c

@@ -188,6 +188,17 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/name_server)
 endif()
 
+# And the task that asks the kernel for a fault (#467).
+#
+# Here rather than behind the gate for the same reason as the name server: it
+# links libmach and libpthreads and needs nothing else.  It is ahead of the
+# gate and BEHIND libpthreads, because the arm that hands a fault to the task's
+# exception port needs a second thread -- a thread suspended in
+# exception_raise() cannot be the one that receives the message it just sent.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/fault_test)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")
