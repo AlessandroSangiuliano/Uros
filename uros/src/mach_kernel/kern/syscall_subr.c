@@ -649,6 +649,34 @@ mach_null(void)
  * A refused copy says so rather than printing nothing: an address the task does
  * not own is a fact about the caller, and silence would read as a print that
  * happened and had nothing to say.
+ *
+ * ── An empty string is not a refused copy ─────────────────────────────
+ *
+ * 🔥 That last paragraph was right and its test was wrong.  One condition
+ * covered three different things --
+ *
+ *	if (rc != 0 || got == 0 || buf[0] == 0)
+ *		printf("mach_print: could not read the string at %p ...")
+ *
+ * -- and only the first of them is a refused copy.  The other two are a
+ * caller that asked to print nothing, which is a legal thing to ask and which
+ * the kernel answered with a line saying it could not read a string it had
+ * just read successfully.  `copyinstr=0' is printed IN that line and means it
+ * worked.
+ *
+ * One i386 boot produced 16390 of them, all at the same address, filling the
+ * log after the suites had finished and giving the run the appearance of
+ * being busy.  Earlier logs have it too -- 5959 on 14/08, 21 on 09/08 -- so
+ * it has been growing quietly for as long as anyone kept a log.
+ *
+ * An empty string prints as nothing.  That is not silence standing in for a
+ * report; it is the report.
+ *
+ * ⚠️ And the refusal now names the TASK, because the address alone never
+ * identified anybody: every task has its own space, so 0x08095bcc is four
+ * different places in four programs, and working out which one it was meant
+ * reading the symbol tables of every image in the bundle and still guessing.
+ * The kernel has current_task() in its hand while it prints.
  */
 #define MACH_PRINT_MAX	256
 
@@ -662,11 +690,21 @@ mach_print(const char *s)
 	rc = copyinstr(s, buf, sizeof buf, &got);
 	buf[sizeof buf - 1] = 0;
 
-	if (rc != 0 || got == 0 || buf[0] == 0) {
-		printf("mach_print: could not read the string at %p (copyinstr=%d, %lu bytes)\n",
-		       s, (int) rc, (unsigned long) got);
+	if (rc != 0) {
+		printf("mach_print: could not read the string at %p "
+		       "(copyinstr=%d, %lu bytes) -- task %p, thread \"%s\"\n",
+		       s, (int) rc, (unsigned long) got,
+		       (void *) current_task(), current_thread()->name);
 		return;
 	}
+
+	/*
+	 * Nothing to print, so nothing is printed.  Deliberately not counted
+	 * or announced: a caller is entitled to hand over an empty string, and
+	 * a kernel that remarked on it would be back where this started.
+	 */
+	if (got == 0 || buf[0] == 0)
+		return;
 
 	printf("%s", buf);
 }
