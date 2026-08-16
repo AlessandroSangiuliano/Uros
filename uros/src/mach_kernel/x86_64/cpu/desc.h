@@ -59,15 +59,62 @@
 #define KERNEL_CS_SELECTOR	0x08
 #define KERNEL_DS_SELECTOR	0x10
 
-#define SYSRET_SELECTOR_BASE	0x18
 #define USER_CS32_SELECTOR	0x18	/* compatibility mode; unused so far  */
 #define USER_DS_SELECTOR	0x20	/* = base + 8,  loaded into SS        */
 #define USER_CS_SELECTOR	0x28	/* = base + 16, loaded into CS        */
 
-/* What a selector looks like once the processor has added the ring. */
+/* The ring a return to user mode arrives at. */
 #define USER_RPL		3
 #define USER_DS_RPL3		(USER_DS_SELECTOR | USER_RPL)
 #define USER_CS_RPL3		(USER_CS_SELECTOR | USER_RPL)
+
+/*
+ * 🔥 And the base carries the ring, which is not decoration (#477).
+ *
+ * The line above used to say "what a selector looks like once the processor
+ * has added the ring", and that is true of CS and is NOT true of SS.  SYSRET
+ * forces CS to ring 3 because the instruction's whole purpose is to arrive
+ * there and CPL is taken from CS; the stack selector it composes is plain
+ * arithmetic on this field, ring bits included.  With a base of 0x18 the
+ * result was SS = 0x20 -- the right descriptor with the WRONG ring.
+ *
+ * iretq then refuses to return through any frame that trap entry built while
+ * that was the case, because it requires SS.RPL to equal CS.RPL, and the
+ * refusal is a general protection at ring 0 naming a descriptor index and
+ * nothing about where the value came from.
+ *
+ * ⚠️ Not visible under TCG, which accepts the mismatched frame, and that is
+ * how this survived every run the port has ever made: the whole x86-64 side
+ * has been emulated, and the emulator does not perform the check.  Measured
+ * instead of read: every ring-3 entry reached by iretq arrived with SS =
+ * 0x23, every one reached by SYSRET with 0x20, on the same boot.
+ *
+ * So the ring goes in here, once, and the arithmetic carries it to both:
+ * SS = base + 8 = 0x23 and CS = base + 16 = 0x2b.  The descriptor INDICES
+ * are unchanged -- the processor masks the low three bits to reach the table
+ * -- so the layout above still says what it said.
+ */
+/*
+ * Putting #477 back the way it was, for one run.
+ *
+ * ⚠️ It restores the ASSERTIONS as well as the constant, in <cpu/desc.c>, and
+ * that is the point rather than tidiness: with the strict ones in place the
+ * old base does not compile, which is the guarantee this fix is really made
+ * of.  An ablation that only moved the constant would demonstrate the
+ * assertion, not the defect.
+ *
+ * Zero in every build that ships.  Set it from the compiler command line for
+ * one run and unset it; nothing in the tree turns it on.
+ */
+#ifndef ABLATE_477
+#define ABLATE_477		0	/* SYSRET's base carries ring 3 */
+#endif
+
+#if	ABLATE_477
+#define SYSRET_SELECTOR_BASE	USER_CS32_SELECTOR
+#else
+#define SYSRET_SELECTOR_BASE	(USER_CS32_SELECTOR | USER_RPL)
+#endif
 
 #ifndef __ASSEMBLER__
 

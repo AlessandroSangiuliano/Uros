@@ -44,10 +44,27 @@ struct gdt_ptr {
  */
 _Static_assert(KERNEL_DS_SELECTOR == KERNEL_CS_SELECTOR + 8,
 	       "SYSCALL loads SS from kernel CS + 8");
+/*
+ * ⚠️ Against the RPL3 spellings, not the bare selectors (#477).
+ *
+ * These two used to assert that the arithmetic reached the right descriptor,
+ * which it did, and that is the weaker of the two claims: the processor
+ * masks the low three bits to index the table, so a base with the wrong ring
+ * reaches the right entry and returns to ring 3 with a stack selector no
+ * iretq will accept afterwards.  The assertion that catches that is the one
+ * about the whole selector.
+ */
+#if	ABLATE_477
 _Static_assert(USER_DS_SELECTOR == SYSRET_SELECTOR_BASE + 8,
 	       "SYSRET loads SS from the STAR base + 8");
 _Static_assert(USER_CS_SELECTOR == SYSRET_SELECTOR_BASE + 16,
 	       "SYSRET loads CS from the STAR base + 16");
+#else
+_Static_assert(USER_DS_RPL3 == SYSRET_SELECTOR_BASE + 8,
+	       "SYSRET composes SS as the STAR base + 8, ring bits included");
+_Static_assert(USER_CS_RPL3 == SYSRET_SELECTOR_BASE + 16,
+	       "SYSRET composes CS as the STAR base + 16, ring bits included");
+#endif
 _Static_assert(GDT_FIXED_SLOTS * 8 > USER_CS_SELECTOR,
 	       "the fixed slots do not cover the selectors they must hold");
 
