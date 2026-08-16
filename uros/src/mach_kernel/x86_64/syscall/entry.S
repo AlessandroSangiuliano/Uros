@@ -16,6 +16,18 @@
 #include <cpu/percpu.h>
 #include <syscall/syscall.h>
 
+/*
+ * Taking the second half of #475 back out, for one run (#475).
+ *
+ * The other half is in x86_64/thread/machine.c and has its own switch; they
+ * are separate because they fail differently and a run that removed both
+ * would only ever report the first thing to go wrong.  Zero in every build
+ * that ships.
+ */
+#ifndef ABLATE_475_AST
+#define ABLATE_475_AST	0	/* a syscall return runs its AST handlers */
+#endif
+
 	.section .text
 	.code64
 
@@ -246,6 +258,68 @@ syscall_entry:
 	callq	*(%r11, %rax, 8)
 
 .Lreturn:
+	/*
+	 * 🔥 Pending ASTs FIRST, and this path did not have the check (#475).
+	 *
+	 * i386 gets it for nothing: its system call return joins
+	 * return_from_trap, whose first act is the AST check.  Here SYSCALL has
+	 * its own way out and the check was in the OTHER one -- trap/entry.S
+	 * tests it on every trap return and on the three thread-return entry
+	 * points -- so the whole of it was missing from the road every message
+	 * in the system travels.
+	 *
+	 * What that costs is not a missed opportunity, it is a promise the
+	 * kernel breaks.  AST_APC is how kern/thread_act.c stops a thread:
+	 * thread_terminate, thread_abort and thread_suspend all end in
+	 * install_special_handler() and nudge(), and nudge()'s own comment says
+	 * it "ensures that the activation will execute its returnhandlers
+	 * before it next executes any of its USER-level code."  A thread that
+	 * leaves through here executed its user-level code with the handler
+	 * still installed, so:
+	 *
+	 *   - thread_abort left TH_ABORT set for ever, because clearing it is
+	 *     the first thing special_handler() does.  The thread's NEXT wait
+	 *     then returned THREAD_INTERRUPTED immediately, and the one after
+	 *     that, and so on -- one abort poisoning every subsequent sleep.
+	 *   - thread_suspend never suspended anything: the parking is done BY
+	 *     the handler, so the thread ran on while its suspender's
+	 *     thread_wait() believed it had stopped.
+	 *
+	 * Both are shown by act_test (#475), each with its own ablation.
+	 *
+	 * ⚠️ What it looked like from far away is worth recording, because it
+	 * is why the cause took a while to name.  OBSERVED: after this program
+	 * aborted one worker thread, a later pthread_create() returned success
+	 * and the thread it promised never executed an instruction.  INFERRED,
+	 * from reading lib/libpthreads/pthread.c rather than from measuring it:
+	 * pthread_create() recycles parked workers, a parked worker waits on a
+	 * futex, and a thread carrying a stale TH_ABORT cannot stay in a wait
+	 * -- so the pool would hand out a thread that was counted as parked and
+	 * was in fact asleep somewhere else.  Nothing in that sentence mentions
+	 * an AST, which is the point.
+	 *
+	 * ⚠️ A call rather than a test-and-branch, deliberately, on the hottest
+	 * path in the kernel.  thread_return_ast() opens by reading
+	 * need_ast[cpu_number()] and returning, so the fast case is a call, a
+	 * load through %gs, an indexed load and a return.  Spelling that test
+	 * here in assembly would save the call and would put a second copy of
+	 * need_ast's type and indexing in a file the C declaration cannot
+	 * check: ast_t is an int TODAY.  If this ever measures, it becomes an
+	 * inline guard with a number behind it, not before.
+	 *
+	 * ⚠️ %rax is the trap's answer and thread_return_ast() is entitled to
+	 * destroy it.  Sixteen bytes rather than eight so the stack stays
+	 * aligned for the call, which is the same arithmetic the entry path's
+	 * fourth push exists for.
+	 */
+#if	!ABLATE_475_AST
+	subq	$16, %rsp
+	movq	%rax, (%rsp)
+	callq	thread_return_ast
+	movq	(%rsp), %rax
+	addq	$16, %rsp
+#endif
+
 	addq	$8, %rsp		/* the alignment word the entry pushed */
 	popq	%r11			/* flags */
 	popq	%rcx			/* resume address */
