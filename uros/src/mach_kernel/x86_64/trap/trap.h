@@ -102,6 +102,9 @@
  * exceptions that do not have one — a zero in place of the error code, so
  * that every vector arrives in the same shape.
  */
+/* The offsets the syscall entry uses; asserted against this struct below. */
+#include <trap/frame.h>
+
 struct trap_frame {
 	uint64_t r15, r14, r13, r12, r11, r10, r9, r8;
 	uint64_t rbp, rdi, rsi, rdx, rcx, rbx, rax;
@@ -136,6 +139,26 @@ struct trap_frame {
  */
 #define	KERNEL_STACK_USER_FRAME(top)					\
 	((((uint64_t) (top)) & ~15UL) - sizeof(struct trap_frame))
+
+/*
+ * The same fields as numbers, for the assembly that writes them (#474).
+ *
+ * The offsets live in <trap/frame.h> because the syscall entry needs them and
+ * cannot see this structure.  They are checked HERE, against the structure
+ * itself, because that is the only place both halves exist at once: adding a
+ * field above moves the real offsets and stops the build on the line below,
+ * rather than in a boot three weeks later.
+ */
+_Static_assert(TF_RIP    == __builtin_offsetof(struct trap_frame, rip),
+	       "TF_RIP and struct trap_frame disagree");
+_Static_assert(TF_CS     == __builtin_offsetof(struct trap_frame, cs),
+	       "TF_CS and struct trap_frame disagree");
+_Static_assert(TF_RFLAGS == __builtin_offsetof(struct trap_frame, rflags),
+	       "TF_RFLAGS and struct trap_frame disagree");
+_Static_assert(TF_RSP    == __builtin_offsetof(struct trap_frame, rsp),
+	       "TF_RSP and struct trap_frame disagree");
+_Static_assert(TF_SS     == __builtin_offsetof(struct trap_frame, ss),
+	       "TF_SS and struct trap_frame disagree");
 
 /*
  * Interrupt stack table slots, numbered as the gate field is: 1 to 7, with

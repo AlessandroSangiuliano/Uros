@@ -95,7 +95,13 @@ void context_switch(struct context *old, struct context *fresh)
 	 * processor's single privilege-transition stack, which was right only
 	 * while there was one thread to arrive on it.
 	 */
-	percpu()->kernel_rsp = fresh->kernel_stack_top;
+	/*
+	 * ⚠️ Below the reserved user frame, the same as the initial stack this
+	 * file already sets that way (#474).  The syscall entry starts using
+	 * this as a stack; the top belongs to the frame a trap builds and
+	 * pcb->user names.
+	 */
+	percpu()->kernel_rsp = KERNEL_STACK_USER_FRAME(fresh->kernel_stack_top);
 
 	/*
 	 * Both halves before the switch, because after it this code is
