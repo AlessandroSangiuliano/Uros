@@ -37,6 +37,7 @@
 #include <string.h>
 #include <mach.h>
 #include <mach/mig_errors.h>	/* #443: MIG_BAD_ARGUMENTS, mig_reply_error_t */
+#include <mach/mach_syscalls.h>	/* #472: trap 100, called directly */
 #include <mach/bootstrap.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
@@ -266,6 +267,76 @@ bad_descriptor_unwind(void)
  * until this issue, userland's 179 have always had it on and until now
  * rejected in silence.
  */
+/*
+ * #472.  Trap 100 took a port NAME from ring 3 and used it as a pointer.
+ *
+ * `syscall_mach_port_allocate_subsystem' handed its second argument straight
+ * to convert_port_to_subsystem() as an ipc_port_t, which locks it and reads
+ * ip_kotype() out of it -- so the kernel wrote to and read from an address
+ * the caller chose, and only afterwards decided whether it liked what it
+ * found.  IP_VALID(), the only guard on the road, rejects 0 and ~0.
+ *
+ * ⚠️ Tested HERE, on i386, and that is the point rather than convenience:
+ * the routine is machine-independent and the defect is exactly as present on
+ * the mature target.  What the 64-bit build added was only the report -- a
+ * name is 32 bits and a pointer is 64, so the cast finally warned.
+ *
+ * ⚠️ And the trap is called directly rather than through libmach, because
+ * libmach does not call it: mach_port_allocate_subsystem() goes to the
+ * neighbouring trap instead.  Nothing in userland reaches this one, which is
+ * precisely the situation in which a hole stays open -- an attacker does not
+ * use libmach either.
+ *
+ * Two values, because they fail two different checks and only both together
+ * say the argument is being TRANSLATED rather than merely screened:
+ *
+ *   - a number that is not a name in this space at all.  The lookup must
+ *     refuse it at the table bounds or the generation.
+ *   - a name that IS ours and is emphatically not a subsystem.  The lookup
+ *     must get as far as the port and refuse it on its kind.  A guard that
+ *     only rejected implausible numbers would pass the first and fail this.
+ */
+static int
+subsystem_name_is_not_a_pointer(void)
+{
+    /*
+     * Not zero and not ~0, which IP_VALID() already rejected, so a pass here
+     * cannot be the old guard doing its old job.  Past any plausible port
+     * table, so the lookup refuses it on the index.
+     */
+    const mach_port_t   not_a_name = (mach_port_t) 0x0FFFFFF0u;
+    mach_port_t         name = MACH_PORT_NULL;
+    kern_return_t       kr;
+    int                 ok = 1;
+
+    kr = syscall_mach_port_allocate_subsystem(mach_task_self(), not_a_name,
+                                              &name);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [9] trap 100 accepted 0x%x as a subsystem — WRONG\n",
+               (unsigned) not_a_name);
+        (void) mach_port_destroy(mach_task_self(), name);
+        ok = 0;
+    } else {
+        printf("cap_test: [9] trap 100 refused a number that is not a name: "
+               "kr=%d\n", (int) kr);
+    }
+
+    name = MACH_PORT_NULL;
+    kr = syscall_mach_port_allocate_subsystem(mach_task_self(),
+                                              mach_task_self(), &name);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [9] trap 100 accepted the task port as a "
+               "subsystem — WRONG\n");
+        (void) mach_port_destroy(mach_task_self(), name);
+        ok = 0;
+    } else {
+        printf("cap_test: [9] trap 100 refused a real name that is not a "
+               "subsystem: kr=%d\n", (int) kr);
+    }
+
+    return ok;
+}
+
 static int
 mig_check_fires(const char *label, mach_port_t dest,
                 mach_msg_id_t id, mach_msg_size_t bad_size)
@@ -731,6 +802,9 @@ main(int argc, char **argv)
     if (name_server_port != MACH_PORT_NULL &&
         !mig_check_fires("[8] userland stub (netname_look_up)",
                          name_server_port, 1041, 40))
+        pass = 0;
+
+    if (!subsystem_name_is_not_a_pointer())
         pass = 0;
 
     if (pass) {

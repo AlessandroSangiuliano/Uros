@@ -2906,10 +2906,56 @@ syscall_mach_port_allocate_subsystem(
 	if (space == IS_NULL)
 		return(MACH_SEND_INTERRUPTED);
 
-	subsys = convert_port_to_subsystem((ipc_port_t)subsystem_name);
-	if (subsys == SUBSYSTEM_NULL) {
-		is_release(space);
-		return(MACH_SEND_INTERRUPTED);
+	/*
+	 * 🔥 A LOOKUP, and it used to be a cast (#472).
+	 *
+	 *	subsys = convert_port_to_subsystem((ipc_port_t)subsystem_name);
+	 *
+	 * `subsystem_name' is a number chosen in ring 3.  That line handed it
+	 * to convert_port_to_subsystem() as an ipc_port_t, which locks it and
+	 * reads ip_kotype() out of it -- so the kernel wrote to and read from
+	 * an address the caller picked, and only then decided whether it liked
+	 * what it found.  The type check came after the dereference, which is
+	 * the same as not having one.  IP_VALID(), the only guard on the road,
+	 * rejects 0 and ~0.
+	 *
+	 * Not a 64-bit defect: it is wrong on i386 in exactly the same way.
+	 * What the wider target added was the REPORT -- a name is 32 bits and
+	 * a pointer is 64, so the cast finally warned, and the warning is how
+	 * it was found while auditing the other twenty-one (#415).
+	 *
+	 * port_name_to_subsystem() is the translation the line above already
+	 * uses for `task': it looks the name up in the CALLER's space, checks
+	 * the index against the table size, checks the generation, requires a
+	 * send right, and only then -- under the port's own lock -- checks
+	 * that the port is active and really is IKOT_SUBSYSTEM.
+	 *
+	 * ⚠️ And it is not a new routine.  It sits two thousand lines above in
+	 * this file and the neighbouring trap, syscall_mach_port_allocate_full,
+	 * already calls it with the same argument.  Two traps taking the same
+	 * name; one translated it and one did not.
+	 */
+	/*
+	 * ⚠️ Putting it back, for one run.  Zero in every build that ships;
+	 * set it from the compiler command line and cap_test's [9] goes red --
+	 * or the machine stops, which is the same finding said louder.
+	 */
+#ifndef ABLATE_472
+#define ABLATE_472	0
+#endif
+	if (ABLATE_472) {
+		subsys = convert_port_to_subsystem((ipc_port_t)(uintptr_t)
+						   subsystem_name);
+		if (subsys == SUBSYSTEM_NULL) {
+			is_release(space);
+			return(MACH_SEND_INTERRUPTED);
+		}
+	} else if (subsystem_name != MACH_PORT_NULL) {
+		subsys = port_name_to_subsystem(subsystem_name);
+		if (subsys == SUBSYSTEM_NULL) {
+			is_release(space);
+			return(MACH_SEND_INTERRUPTED);
+		}
 	}
 
 	kr = mach_port_allocate_full(space, MACH_PORT_RIGHT_RECEIVE,
@@ -2921,7 +2967,29 @@ syscall_mach_port_allocate_subsystem(
 	    }
 	}
 
-	subsystem_deallocate(subsys);
+	/*
+	 * ⚠️ NO subsystem_deallocate() here, and the neighbouring trap's is a
+	 * defect rather than a precedent.
+	 *
+	 * port_name_to_subsystem() returns a BORROWED pointer: its fast path
+	 * reads ip_kobject under the port lock and unlocks, and its slow path
+	 * releases the send right it took.  Neither takes a subsystem
+	 * reference -- whatever convert_port_to_subsystem()'s comment claims
+	 * about producing one.
+	 *
+	 * subsystem_deallocate()'s own contract is "the caller has a
+	 * reference, which is consumed".  Calling it on a borrowed pointer
+	 * balances only because mach_port_allocate_full() happens to take a
+	 * reference of its own -- and it takes that one INSIDE its
+	 * `if (kr == KERN_SUCCESS)', so on the failure path the count goes
+	 * down without ever having gone up.
+	 *
+	 * That is a second defect, in a second trap, and it is recorded as its
+	 * own issue rather than fixed here: getting it right means deciding
+	 * whether port_name_to_subsystem() should reference what it returns,
+	 * which changes a routine the MIG intran contract in mach_types.defs
+	 * also names.  This one takes nothing, so it releases nothing.
+	 */
 
 	is_release(space);
 
