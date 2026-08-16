@@ -1834,6 +1834,19 @@ static void context_selftest(void)
 	uint64_t stack_b = boot_frame_alloc();
 	uint64_t fpu_frames = boot_frames_alloc(3);
 	uint64_t saved_kernel_rsp = percpu()->kernel_rsp;
+	/*
+	 * ⚠️ The TOP, which is no longer the same value as kernel_rsp (#474).
+	 *
+	 * context_become_current() is given a stack top and stores it, and the
+	 * switch back derives the entry stack from it with
+	 * KERNEL_STACK_USER_FRAME().  Handing it kernel_rsp -- as this did,
+	 * correctly, while the two were one number -- meant the derivation ran
+	 * a second time and the entry stack came back 176 bytes low.
+	 *
+	 * desc_rsp0() is where the top actually lives, and is what the syscall
+	 * probe below compares against for the same reason.
+	 */
+	uint64_t boot_stack_top = desc_rsp0(cpu_apic_id());
 	void *fpu_a, *fpu_b, *fpu_main;
 
 	if (stack_a == 0 || stack_b == 0 || fpu_frames == 0) {
@@ -1867,7 +1880,7 @@ static void context_selftest(void)
 	 * — a running thread's saved state is wherever it was interrupted,
 	 * and there is nothing to prepare in advance.
 	 */
-	context_become_current(&ctx_main, saved_kernel_rsp, fpu_main);
+	context_become_current(&ctx_main, boot_stack_top, fpu_main);
 	context_switch(&ctx_main, &ctx_a);
 
 	kputs("UrMach x86-64: two threads ran ");
@@ -2320,16 +2333,26 @@ static void ring3_selftest(void)
 	}
 
 	/*
-	 * The syscall has no such structure and must not grow one — see
-	 * syscall_probe() for why the three words it does save are its frame.
-	 * They are read back from the stack the entry switched to, so a switch
-	 * that never happened cannot produce them.
+	 * The syscall writes its saved state into the frame reserved at the top
+	 * of the thread's kernel stack, the one pcb->user names (#474) — it used
+	 * to push three words onto a stack that started at the very top, which
+	 * is the same memory and is why thread_get_state() answered a debugger
+	 * with kernel stack.  They are read back from the frame the entry
+	 * switched to, so a switch that never happened cannot produce them.
+	 *
+	 * ⚠️ And the stack check is against KERNEL_STACK_USER_FRAME(rsp0), not
+	 * rsp0.  The two values are deliberately different now: the processor
+	 * pushes DOWNWARD from the TSS value, so that one is the top, while the
+	 * syscall entry starts USING its value as a stack and must therefore
+	 * begin below the frame.  This check read `== rsp0' and failed the
+	 * moment they parted, which is what it is for.
 	 */
 	{
 		uint64_t want_rip = USER_PROBE_AFTER_SYSCALL_VA;
 		uint64_t rsp0 = desc_rsp0(cpu_apic_id());
 		int rip_ok = syscall_probe_saved_rip() == want_rip;
-		int stack_ok = syscall_probe_kernel_rsp() == rsp0;
+		int stack_ok = syscall_probe_kernel_rsp()
+			       == KERNEL_STACK_USER_FRAME(rsp0);
 		int flags_ok = (syscall_probe_saved_flags() & RFLAGS_IF) != 0;
 		int user_rsp_ok =
 			syscall_probe_saved_user_rsp() == USER_PROBE_STACK_TOP;

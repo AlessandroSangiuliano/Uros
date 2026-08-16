@@ -15,6 +15,7 @@
 #include <cpu/desc.h>
 #include <cpu/percpu.h>
 #include <syscall/syscall.h>
+#include <trap/frame.h>	/* #474: where the saved user frame's fields are */
 
 /*
  * Taking the second half of #475 back out, for one run (#475).
@@ -109,67 +110,86 @@ syscall_entry:
 	movq	%gs:PERCPU_KERNEL_RSP, %rsp
 
 	/*
-	 * The three values the return needs, and no others.  The contract says
-	 * the argument registers are destroyed, so they are not saved — that
-	 * is six stores and six loads that this path does not perform, on
-	 * every call in the system.
+	 * 🔥 WRITTEN, not pushed, and into the frame this thread already owns
+	 * (#474).
 	 *
-	 * 🔥 THREE, and the third is the whole of #473.
+	 * %rsp now holds PERCPU_KERNEL_RSP, and that value is the BASE of the
+	 * trap frame reserved at the top of this thread's kernel stack -- the
+	 * one pcb->user points at, the one <trap/trap.h> reserves and
+	 * KERNEL_STACK_USER_FRAME() names.  It used to be the stack TOP, so
+	 * every push below and every C frame after it ran straight down through
+	 * those 176 bytes: the saved user frame and the syscall's working stack
+	 * were the same memory.
 	 *
-	 * The stack pointer was left in the per-CPU block a moment ago because
-	 * there was nowhere else to put it: %gs had just been swapped and this
-	 * thread's kernel stack was not yet under %rsp.  That block belongs to
-	 * the PROCESSOR, and a syscall is not over when it returns from the
-	 * processor's point of view -- mach_msg blocks waiting for a reply, the
-	 * scheduler runs another thread, and that thread's own entry writes the
-	 * same slot.  The first thread then woke up on the second one's stack.
+	 * What that cost was not theoretical.  thread_get_state() on a thread
+	 * asleep in mach_msg -- which is where a server thread spends its life,
+	 * and exactly the thread a debugger stops -- answered out of pcb->user
+	 * and therefore out of the kernel's own stack, reporting KERN_SUCCESS.
+	 * Measured, before this changed: `cs 0x0 ss 0x7ffffff8fd38 rip
+	 * 0xffffffff8011ba19'.  The fields read one slot out of step, because
+	 * the four pushes landed on ss/rsp/rflags/cs in that order -- and the
+	 * rip a user program got back was a KERNEL TEXT ADDRESS.  A disclosure
+	 * through a call that succeeds, not merely a wrong answer.
 	 *
-	 * The resume address never suffered, and that is what named the defect:
-	 * SYSCALL leaves it in %rcx and the push below puts it on THIS thread's
-	 * stack.  One of the two was per-thread by construction, the other was
-	 * remembered, and only the remembered one was wrong.  So the fix is not
-	 * to remember it more carefully -- it is one push, here, after which
-	 * the value cannot be another thread's.
+	 * So the five words a return needs go into the frame, at their own
+	 * offsets, and the frame then describes the caller for as long as the
+	 * thread is inside the kernel.  It is the same number of stores as the
+	 * pushes were, in the same place on the same cache line, and it lands
+	 * somewhere a reader can make sense of.
 	 *
-	 * The per-CPU slot keeps its job as the scratch across the two
-	 * instructions above, and there it is safe for a reason rather than by
-	 * luck: SYSCALL masks interrupts through FMASK, so nothing runs between
-	 * the store and this load.
+	 * ⚠️ And they are per-THREAD by construction, which is what #473 had to
+	 * arrange by hand: the frame is on this thread's stack, so mach_msg can
+	 * block, the scheduler can run somebody else, and no other entry can
+	 * write these words.  The per-CPU slot keeps only its job as the scratch
+	 * across the two instructions above, where it is safe for a reason
+	 * rather than by luck -- SYSCALL masks interrupts through FMASK, so
+	 * nothing runs between the store and the load.
 	 *
-	 * ── Where the full register image would go ────────────────────────
-	 *
-	 * If something ever needs to see a thread's registers at a syscall
-	 * boundary — a debugger, ptrace-style interception — this is the
-	 * place: push the rest here and pop them before the return below.
-	 * Doing it conditionally, on a flag in the block %gs already points
-	 * at, keeps it off this path when nobody is watching. It is not an
-	 * ABI change, which is the reason the contract could be chosen
-	 * without deciding this now.
+	 * ⚠️ Order matters in one place only: %rcx carries the return address
+	 * and is then reused, so TF_RIP is written before anything else touches
+	 * it.
 	 */
-	pushq	%gs:PERCPU_USER_RSP	/* the stack it came in on */
-	pushq	%rcx			/* where ring 3 resumes */
-	pushq	%r11			/* the flags it resumes with */
-	pushq	$0			/* and sixteen: see below */
+	movq	%rcx, TF_RIP(%rsp)		/* where ring 3 resumes    */
+	movq	%r11, TF_RFLAGS(%rsp)		/* the flags it resumes on */
+	movq	%gs:PERCPU_USER_RSP, %rcx
+	movq	%rcx, TF_RSP(%rsp)		/* the stack it came in on */
+	movq	$USER_CS_RPL3, TF_CS(%rsp)
+	movq	$USER_DS_RPL3, TF_SS(%rsp)
 
 	/*
-	 * ⚠️ FOUR words for three values, and the fourth is not slack.
+	 * ⚠️ The fifteen general-purpose registers above are NOT written, and
+	 * that is the contract rather than an omission: <syscall/syscall.h>
+	 * declares them destroyed, and storing them on every call in the system
+	 * to preserve values the caller has already written off would be the
+	 * most expensive thing this kernel does.
+	 *
+	 * What is left in them is the frame's PREVIOUS contents -- what
+	 * thread_frame_init() zeroed, what thread_set_state() wrote, or the
+	 * ring-3 registers the thread's last trap saved.  Never kernel stack:
+	 * these bytes stopped being working stack the moment kernel_rsp moved
+	 * below them, which is the whole of this fix.
+	 *
+	 * ⚠️ A mark saying "a syscall wrote this" lived here briefly, so that
+	 * readers could blank those fifteen.  It came out: with the stack change
+	 * in place the ablation showed the blanking changed nothing, because
+	 * there is no longer a path that puts kernel memory there.  A store on
+	 * this path, for a value no reader needed, is exactly what this file
+	 * spends its comments refusing.
+	 */
+
+	/*
+	 * ⚠️ NOTHING is pushed, and the alignment that used to need a fourth
+	 * word now comes for free.
 	 *
 	 * The System V ABI wants %rsp sixteen-byte aligned AT the call, so that
 	 * the callee sees it eight past a boundary once the return address is
-	 * on.  kernel_stack_top is a multiple of sixteen, so an EVEN number of
-	 * pushes here is what makes the calls below legal -- with three, every
-	 * C function this path enters would be eight off, and the first SSE
-	 * spill in one of them would fault.  Two pushes were even; three are
-	 * not; four are.
+	 * on.  The frame base is sixteen-byte aligned -- kernel_stack_top is,
+	 * and sizeof(struct trap_frame) is a multiple of sixteen -- so the
+	 * calls below are legal with zero pushes, and zero is even.
 	 *
-	 * A zero rather than a fourth register, because a saved register that
-	 * nothing reads is a value nobody is checking.  This one is never read:
-	 * .Lreturn steps over it with an `addq' rather than popping it into
-	 * somewhere it could be mistaken for state.
-	 *
-	 * ⚠️ The two wide paths lean on the same parity: they push %rbp and an
-	 * odd number of stacked arguments on top of this, which lands their
-	 * callee on the boundary only because what is under them is even.
+	 * ⚠️ The two wide paths lean on that parity: they push %rbp and an odd
+	 * number of stacked arguments on top of this, and land their callee on
+	 * the boundary only because what is under them is even.  It still is.
 	 */
 
 	/*
@@ -320,9 +340,14 @@ syscall_entry:
 	addq	$16, %rsp
 #endif
 
-	addq	$8, %rsp		/* the alignment word the entry pushed */
-	popq	%r11			/* flags */
-	popq	%rcx			/* resume address */
+	/*
+	 * Read back out of the frame the entry filled (#474), rather than
+	 * popped off a working stack that no longer holds them.  %rsp is the
+	 * frame base again here: the plain paths never moved it, and the wide
+	 * paths restore it from %rbp before jumping here.
+	 */
+	movq	TF_RFLAGS(%rsp), %r11	/* flags */
+	movq	TF_RIP(%rsp), %rcx	/* resume address */
 
 	/*
 	 * SYSRET takes the return address from rcx, and on Intel parts it
@@ -351,7 +376,7 @@ syscall_entry:
 	 * interrupt in that window is the one #440 exists about.
 	 */
 	cli
-	popq	%rsp			/* this thread's, not this processor's */
+	movq	TF_RSP(%rsp), %rsp	/* this thread's, not this processor's */
 	swapgs
 	sysretq
 
@@ -422,8 +447,15 @@ syscall_entry:
  */
 .Lreturn_the_slow_way:
 	cli
-	popq	%r10			/* the stack ring 3 came in on */
+	movq	TF_RSP(%rsp), %r10	/* the stack ring 3 came in on (#474) */
 	swapgs
+
+	/*
+	 * ⚠️ The five words below are pushed BELOW the frame, not into it: %rsp
+	 * is the frame's base, so these land in the working stack under it and
+	 * leave the saved user frame exactly as the entry wrote it.  Which is
+	 * what iretq wants anyway -- it consumes them from where they are.
+	 */
 
 	pushq	$USER_DS_RPL3		/* ss     */
 	pushq	%r10			/* rsp    */

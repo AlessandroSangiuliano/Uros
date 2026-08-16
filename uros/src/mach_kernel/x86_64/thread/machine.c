@@ -137,7 +137,25 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * later (#408 chose eager XSAVE over CR0.TS deliberately), so there
 	 * is nothing for this to do about it.
 	 */
-	percpu()->kernel_rsp = pcb->ctx.kernel_stack_top;
+	/*
+	 * 🔥 BELOW the reserved frame, not at the top of the stack (#474).
+	 *
+	 * The two lines here look like they should carry the same value and
+	 * must not.  The processor takes the TSS one and pushes DOWNWARD from
+	 * it, building the trap frame in exactly the reserved bytes -- so that
+	 * one is the top.  The syscall entry is handed its value and starts
+	 * USING it as a stack, so if it were the top too, every C frame of
+	 * every system call would run down through the frame pcb->user names.
+	 *
+	 * It did, and thread_get_state() on a thread inside mach_msg answered
+	 * out of the kernel's own stack with KERN_SUCCESS -- including a kernel
+	 * text address where ring 3 expected its rip.
+	 *
+	 * context_init() was corrected for exactly this and says so; this was
+	 * the other half, and the two are now the same expression.
+	 */
+	percpu()->kernel_rsp =
+		KERNEL_STACK_USER_FRAME(pcb->ctx.kernel_stack_top);
 	/*
 	 * ⚠️ TWO places, and only one of them was here (#422).
 	 *
