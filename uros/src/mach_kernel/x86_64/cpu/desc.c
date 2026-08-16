@@ -199,6 +199,17 @@ uint64_t desc_gdt_entry(unsigned selector)
 	return gdt[idx];
 }
 
+int desc_gdt_peek(unsigned selector, uint64_t *out)
+{
+	unsigned idx = selector / 8;
+
+	if (idx >= GDT_SLOTS)
+		return 0;
+
+	*out = gdt[idx];
+	return 1;
+}
+
 uint64_t desc_rsp0(uint32_t cpu_id)
 {
 	if (cpu_id >= SMP_MAX_CPUS)

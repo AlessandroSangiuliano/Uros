@@ -123,6 +123,22 @@ int desc_on_ist_stack(uint32_t cpu_id, unsigned slot, uint64_t addr);
 uint64_t desc_gdt_entry(unsigned selector);
 
 /*
+ * The same entry, for a caller that must not be right (#477).
+ *
+ * desc_gdt_entry() panics on a selector past the table, which is the correct
+ * contract for code that knows which selector it is asking about.  A FAULT
+ * REPORT does not: the selector it asks about is one the processor handed it
+ * in an error code, from a fault that may have happened precisely because
+ * something was wrong with it.  Answering a bad selector with a panic there
+ * would replace the diagnosis with a second fault about the reporter -- the
+ * same reason the backtrace and the instruction bytes check every address
+ * before touching it.
+ *
+ * Returns 0 and writes nothing if the selector is past the table.
+ */
+int desc_gdt_peek(unsigned selector, uint64_t *out);
+
+/*
  * The stack a privilege transition lands on for a given processor.
  *
  * One stack, shared by both ways in: a trap gate takes it from the
