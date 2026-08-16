@@ -35,6 +35,7 @@
 #include <mach/exception.h>
 #include <mach/task_special_ports.h>
 #include <mach/vm_prot.h>
+#include <mach/thread_status.h>	/* #474: x86_64_THREAD_STATE */
 
 /*
  * ⚠️ mach_host.h and not mach.h: task_set_exception_ports is generated from
@@ -655,6 +656,164 @@ arm_three_suspend_in_mach_msg(void)
 	return 1;
 }
 
+/*
+ * ── Arm four: ask a thread that is inside the kernel what it was doing ─
+ *
+ * A debugger stops a thread and reads its registers.  The thread it stops is
+ * almost never in ring 3 at that moment -- it is asleep in mach_msg, which is
+ * where a server thread spends its life -- so "the registers of a thread
+ * inside a Mach trap" is the ordinary case rather than the awkward one.
+ *
+ * thread_get_state() answers out of `pcb->user', the frame reserved at the top
+ * of the thread's kernel stack.  On this machine the SYSCALL entry does not
+ * honour that reservation: it takes %rsp from the stack TOP and runs its C
+ * frames straight down through the 176 bytes the frame occupies (#474).  So
+ * the answer is kernel stack contents, reported with KERN_SUCCESS.
+ *
+ * ⚠️ What is checked is cs and ss, and not the general registers, because
+ * only the selectors have an answer this test can know in advance.  A thread
+ * in ring 3 has cs = 0x2b and ss = 0x23 -- imposed by the kernel, never the
+ * thread's to choose -- so anything else is not a ring-3 context at all.
+ * Checking rip or rsp would mean predicting where libmach's mach_msg sits.
+ *
+ * ⚠️ And it is a DISCLOSURE as much as a wrong answer: those bytes are the
+ * kernel's own stack, handed to ring 3 through a call that reports success.
+ */
+static volatile mach_port_t	arm_four_thread;
+static mach_port_t		arm_four_port;
+
+static void *
+the_thread_that_gets_inspected(void *arg)
+{
+	struct roomy_msg	msg;
+
+	(void) arg;
+
+	arm_four_thread = mach_thread_self();
+
+	/*
+	 * Parked here for the rest of the run.  Nothing sends to this port and
+	 * nothing interrupts it: the arm wants a thread that is definitely
+	 * inside the trap while it is being asked about, and a receive that
+	 * could end on its own would be a thread that might not be.
+	 */
+	(void) mach_msg(&msg.h, MACH_RCV_MSG, 0, sizeof msg, arm_four_port,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	return NULL;
+}
+
+static int
+arm_four_state_of_a_thread_in_a_trap(void)
+{
+	pthread_t			victim;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	kern_return_t			kr;
+	int				i;
+
+	kr = mach_port_allocate(mach_task_self(),
+				MACH_PORT_RIGHT_RECEIVE, &arm_four_port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [4] mach_port_allocate failed (%d) — WRONG\n",
+		       kr);
+		return 0;
+	}
+
+	if (pthread_create(&victim, NULL, the_thread_that_gets_inspected,
+			   NULL) != 0) {
+		printf("act_test: [4] pthread_create failed — WRONG\n");
+		return 0;
+	}
+
+	for (i = 0; i < PATIENCE && arm_four_thread == MACH_PORT_NULL; i++)
+		nap(100);
+	if (arm_four_thread == MACH_PORT_NULL) {
+		printf("act_test: [4] the thread never published its port "
+		       "— WRONG\n");
+		return 0;
+	}
+
+	/* Let it reach the receive and settle inside the trap. */
+	nap(400);
+
+	/*
+	 * Suspended first, because that is what a debugger does and because an
+	 * unsuspended thread could in principle be anywhere.  thread_suspend()
+	 * returns once the thread has stopped, so what is read below is a
+	 * thread that is stopped inside mach_msg.
+	 */
+	kr = thread_suspend(arm_four_thread);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [4] thread_suspend answered %d — WRONG\n", kr);
+		return 0;
+	}
+
+	kr = thread_get_state(arm_four_thread, x86_64_THREAD_STATE,
+			      (thread_state_t) &state, &count);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [4] thread_get_state answered %d — WRONG\n",
+		       kr);
+		(void) thread_resume(arm_four_thread);
+		return 0;
+	}
+
+	(void) thread_resume(arm_four_thread);
+
+	if (state.cs != 0x2bULL || state.ss != 0x23ULL) {
+		printf("act_test: [4] a thread stopped inside mach_msg reports "
+		       "cs 0x%llx ss 0x%llx, not 0x2b/0x23 — its saved frame is "
+		       "kernel stack, and rip reads 0x%llx rsp 0x%llx — WRONG\n",
+		       (unsigned long long) state.cs,
+		       (unsigned long long) state.ss,
+		       (unsigned long long) state.rip,
+		       (unsigned long long) state.rsp);
+		return 0;
+	}
+
+	/*
+	 * ⚠️ And no general register may hold a KERNEL address.
+	 *
+	 * The selectors above say the frame describes ring 3; this says the
+	 * rest of it is not the kernel's own stack.  The syscall entry does not
+	 * fill the fifteen general registers -- the contract declares them
+	 * destroyed -- so before #474 they were whatever the kernel had last
+	 * left in those bytes, and thread_get_state() handed them over with
+	 * KERN_SUCCESS.
+	 *
+	 * The test is the upper half of the address space rather than a
+	 * particular value, because what the kernel puts there is not
+	 * predictable and does not need to be: any canonical high-half address
+	 * in a register a user program just read is a kernel address it now
+	 * knows, and that is the whole of the finding.  Checking for zeroes
+	 * instead would be checking how the kernel cleans up rather than
+	 * whether anything leaked.
+	 */
+	{
+		const unsigned long long	*r = (const unsigned long long *) &state;
+		const char			*name[16] = {
+			"rax","rbx","rcx","rdx","rdi","rsi","rbp","rsp",
+			"r8","r9","r10","r11","r12","r13","r14","r15"
+		};
+		int	i;
+
+		for (i = 0; i < 16; i++) {
+			if (r[i] < 0xffff800000000000ULL)
+				continue;
+			printf("act_test: [4] %s holds 0x%llx — a kernel address, "
+			       "read out of the thread's saved frame by a call "
+			       "that succeeded — WRONG\n", name[i], r[i]);
+			return 0;
+		}
+	}
+
+	printf("act_test: [4] a thread stopped inside mach_msg reports its own "
+	       "ring-3 context: cs 0x%llx ss 0x%llx rip 0x%llx rsp 0x%llx, and "
+	       "no general register holds a kernel address\n",
+	       (unsigned long long) state.cs, (unsigned long long) state.ss,
+	       (unsigned long long) state.rip, (unsigned long long) state.rsp);
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -664,7 +823,7 @@ main(int argc, char **argv)
 	(void) argc;
 	(void) argv;
 
-	printf("act_test: started (#475)\n");
+	printf("act_test: started (#475, #474)\n");
 
 	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
 				&nap_port);
@@ -676,6 +835,7 @@ main(int argc, char **argv)
 	passed += arm_one_terminate_in_exception();
 	passed += arm_two_abort_in_mach_msg();
 	passed += arm_three_suspend_in_mach_msg();
+	passed += arm_four_state_of_a_thread_in_a_trap();
 
 	/*
 	 * The last thing arm one is owed, asked now that the two arms after it
@@ -688,7 +848,7 @@ main(int argc, char **argv)
 		passed--;
 	}
 
-	printf("act_test: %d of 3 arms passed\n", passed);
+	printf("act_test: %d of 4 arms passed\n", passed);
 
 	/*
 	 * ⚠️ Does not exit.  There is no proc server on this target to reap a

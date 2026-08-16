@@ -391,20 +391,27 @@ static void note_boot_args(uint64_t a1, uint64_t argc, uint64_t name,
 uint64_t syscall_probe(uint64_t a1, uint64_t a2, uint64_t a3,
 		       uint64_t a4, uint64_t a5, uint64_t a6)
 {
-	uint64_t top = percpu()->kernel_rsp;
-	const uint64_t *saved = (const uint64_t *)(uintptr_t)top;
+	uint64_t base = percpu()->kernel_rsp;
+	const struct trap_frame *saved = (const struct trap_frame *)(uintptr_t) base;
 
 	probe_gs_base = rdmsr(MSR_GS_BASE);
 
 	/*
-	 * In the order the entry pushed them, which is the reverse of the order
-	 * they come off: the user stack pointer first, so it is nearest the
-	 * top, then rcx, then r11, then the word that keeps the count even.
+	 * Read out of the frame the entry wrote (#474), by name.
+	 *
+	 * This used to index backwards from the stack pointer -- saved[-1],
+	 * saved[-2], saved[-3] -- because the entry pushed the three values and
+	 * the probe had to know the order it pushed them in.  That is two halves
+	 * again: the order lived in entry.S and the arithmetic that undid it
+	 * lived here, and nothing compared them.
+	 *
+	 * The entry now writes a whole trap frame at this address, so the values
+	 * have names, and a field that moves moves for both readers at once.
 	 */
-	probe_kernel_rsp = top;
-	probe_saved_user_rsp = saved[-1];
-	probe_saved_rip = saved[-2];
-	probe_saved_flags = saved[-3];
+	probe_kernel_rsp = base;
+	probe_saved_user_rsp = saved->rsp;
+	probe_saved_rip = saved->rip;
+	probe_saved_flags = saved->rflags;
 
 	/*
 	 * 🔥 And now take the per-CPU slot away (#473).
