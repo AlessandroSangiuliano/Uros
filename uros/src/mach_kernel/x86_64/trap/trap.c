@@ -325,6 +325,92 @@ static void report_selector_error(uint64_t error)
 	if (error & 1)
 		tputs(", raised by an event outside the program");
 	tputs("\r\n");
+
+	/*
+	 * And what is actually IN that entry (#477).
+	 *
+	 * Naming the index sends the reader to the descriptor tables, which is
+	 * the right place and is where the reading stops: the next question is
+	 * always "so what does it say?", and answering it from the source is
+	 * answering it about the table the source BUILDS rather than the one
+	 * this processor is using.  Those are the same thing right up until the
+	 * moment a report is needed.
+	 *
+	 * ⚠️ GDT only.  desc_gdt_entry() reads the kernel's own table, so
+	 * printing it for an error that named the IDT or an LDT would be
+	 * printing one table's contents under another table's name.
+	 */
+	if (((error >> 1) & 3) == 0) {
+		uint64_t d;
+
+		if (desc_gdt_peek((unsigned)(error & ~7ULL), &d)) {
+			tputs("  that entry holds ");
+			tputhex(d);
+			tputs("\r\n");
+		} else {
+			tputs("  that entry is past the end of the table\r\n");
+		}
+	}
+}
+
+/*
+ * The frame an `iretq' was refusing (#477).
+ *
+ * A general protection on an iretq says which selector it would not load and
+ * nothing about where that selector came from -- and the answer is five
+ * quadwords sitting at the stack pointer the report already prints, which is
+ * exactly the sort of thing a reader reconstructs by hand, wrongly, at two in
+ * the morning.
+ *
+ * The processor pushes SS:RSP for every fault in long mode, including one that
+ * did not change privilege level, so `frame->rsp' IS the stack pointer the
+ * instruction had: the frame it was consuming starts there.
+ *
+ * ⚠️ Gated on the two bytes being 48 CF, an iretq, and not on the disassembler
+ * having pronounced the name.  These five words mean nothing after any other
+ * instruction, and a report that laid them out as rip/cs/rflags/rsp/ss after,
+ * say, a `mov %ax,%ss' would be inventing a diagnosis rather than declining
+ * one.
+ */
+static void report_iret_frame(const struct trap_frame *frame)
+{
+	static const char *const field[5] = {
+		"rip   ", "cs    ", "rflags", "rsp   ", "ss    "
+	};
+	pmap_t		kernel = pmap_kernel();
+	const uint8_t	*insn = (const uint8_t *)(uintptr_t)frame->rip;
+	const uint64_t	*f = (const uint64_t *)(uintptr_t)frame->rsp;
+
+	if (!va_is_kernel(frame->rip) || !va_is_canonical(frame->rip)
+	    || pmap_extract(kernel, frame->rip) == 0
+	    || pmap_extract(kernel, frame->rip + 1) == 0)
+		return;
+	if (insn[0] != 0x48 || insn[1] != 0xCF)
+		return;
+
+	if (!va_is_canonical(frame->rsp))
+		return;
+
+	tputs("  the frame it would not return through:");
+	for (unsigned i = 0; i < 5; i++) {
+		uint64_t at = frame->rsp + i * 8;
+
+		/*
+		 * Each word checked, as the instruction bytes are: a stack
+		 * pointer is one of the fields most likely to be wrong when
+		 * there is something to report, and this is a function that
+		 * must not fault while explaining a fault.
+		 */
+		if (!va_is_kernel(at) || pmap_extract(kernel, at) == 0) {
+			tputs("\r\n  (the rest is not mapped)");
+			break;
+		}
+		tputs(i == 3 ? "\r\n  " : "  ");
+		tputs(field[i]);
+		tputs(" ");
+		tputhex(f[i]);
+	}
+	tputs("\r\n");
 }
 
 /*
@@ -1227,6 +1313,19 @@ void trap_dispatch(struct trap_frame *frame)
 	}
 
 	/*
+	 * ⚠️ What ring 3 was using as a stack selector was printed here while
+	 * #477 was being found, with the count of SYSRETs beside it, and that
+	 * pairing is what named the cause: every entry reached by iretq showed
+	 * 0x23 and every entry reached by SYSRET showed 0x20, on one boot.
+	 *
+	 * It is not here now because the invariant is checked instead of
+	 * watched -- <cpu/desc.h>'s two static assertions make the base that
+	 * produced 0x20 refuse to compile, and act_user_frame() refuses to hand
+	 * out a frame whose selectors have been overwritten.  A measurement
+	 * that has become a check does not need to keep printing.
+	 */
+
+	/*
 	 * An interrupt somebody asked for, before any of the fault machinery:
 	 * it is not a fault, it has no error code to report, and the expected-
 	 * trap arrangement below is about instructions that failed, which this
@@ -1575,6 +1674,7 @@ void trap_dispatch(struct trap_frame *frame)
 
 	report_registers(frame);
 	report_instruction(frame->rip);
+	report_iret_frame(frame);
 
 	x86_64_backtrace(frame->rbp);
 

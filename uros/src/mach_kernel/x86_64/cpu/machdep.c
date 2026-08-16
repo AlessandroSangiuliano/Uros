@@ -21,6 +21,7 @@
 #include <mach/processor_info.h>	/* processor_info_t */
 
 #include <cpu/acpi.h>			/* #461: which processors exist */
+#include <cpu/desc.h>			/* #477: the selectors a return imposes */
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>			/* #461: lapic_id */
 #include <cpu/percpu.h>
@@ -231,6 +232,36 @@ act_user_frame(void)
 	if (act->mact.pcb->user == (struct trap_frame *) 0)
 		panic("act_user_frame: thread %p has never been to user mode",
 		      thread);
+
+	/*
+	 * 🔥 And the two selectors, checked here, on the way out (#477).
+	 *
+	 * The caller is about to iretq off this frame, and iretq will not tell
+	 * us anything useful if it dislikes what it finds: it raises a general
+	 * protection at RING 0, naming a descriptor index and nothing about
+	 * where the value came from.  Under TCG it does not even do that -- the
+	 * emulator accepts an SS whose RPL does not match the CS's, so the
+	 * thread enters ring 3 on a stack selector no real processor would have
+	 * loaded, and the port's "it works" rests on that.
+	 *
+	 * These two fields are imposed by thread_state_to_frame() and by
+	 * thread_frame_init() and are never a thread's to choose, so anything
+	 * other than these values means something wrote over the frame.  That
+	 * is a claim worth testing every time rather than a thing to remember:
+	 * pcb->user lives IN the kernel stack, at its top, sharing those bytes
+	 * with the frame a trap builds -- deliberately -- which makes "who else
+	 * writes there" a permanent question rather than a bug that gets fixed
+	 * once.
+	 */
+	if (act->mact.pcb->user->cs != USER_CS_RPL3
+	    || act->mact.pcb->user->ss != USER_DS_RPL3)
+		panic("act_user_frame: thread %p is about to return to ring 3 "
+		      "with cs 0x%lx ss 0x%lx, not 0x%x/0x%x -- something wrote "
+		      "over its frame (#477)",
+		      thread,
+		      (unsigned long) act->mact.pcb->user->cs,
+		      (unsigned long) act->mact.pcb->user->ss,
+		      USER_CS_RPL3, USER_DS_RPL3);
 
 	return act->mact.pcb->user;
 }

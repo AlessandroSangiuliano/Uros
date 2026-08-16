@@ -344,9 +344,7 @@ echo "=== booting uros-x86_64.iso (watchdog ${SECS}s, a backstop only) $* ==="
 # The default without -cpu is qemu64, which does NOT advertise the TSC
 # deadline timer -- so the kernel would silently fall back to the LAPIC
 # one-shot backend on every run and the deadline path would be collaudated by
-# nobody.  `max' advertises it, and KVM emulates it in its in-kernel LAPIC
-# even on hosts whose silicon lacks it (verified on this Zen 2 machine, which
-# has no tsc_deadline_timer flag at all).
+# nobody.  `max' advertises it under either accelerator.
 #
 # Named explicitly rather than left to the default so that which backend ran
 # is a property of the command line, not of whatever qemu picks this year.
@@ -354,6 +352,27 @@ case " $* " in
 *" -cpu "*)	CPU_ARGS="" ;;
 *)		CPU_ARGS="-cpu max" ;;
 esac
+
+# 🔥 And WHICH ACCELERATOR, said out loud (#477).
+#
+# This script has never passed -enable-kvm, so every x86-64 run this port has
+# ever made was TCG -- while the comment above used to reason about what "KVM
+# emulates in its in-kernel LAPIC", which is a sentence about a thing that was
+# not happening.  Nobody noticed because nothing said.
+#
+# It matters beyond tidiness: TCG does not perform every check the hardware
+# does.  It accepted an iretq whose SS.RPL did not match its CS.RPL, so a
+# kernel that could not have entered ring 3 twice on a real processor booted
+# here for months (#477).  A run under one is not evidence about the other.
+#
+# Still opt-in rather than the default: on a rare or SMP-timing defect,
+# accelerating CHANGES the experiment, and those hunts want TCG.  What changes
+# here is only that the answer is on the screen instead of in someone's head.
+case " $* " in
+*" -enable-kvm "*|*" -accel "*)	ACCEL="KVM (asked for on the command line)" ;;
+*)				ACCEL="TCG (no -enable-kvm; add it to use the host)" ;;
+esac
+echo "=== accelerator: $ACCEL ==="
 
 : > "$LOG"
 
