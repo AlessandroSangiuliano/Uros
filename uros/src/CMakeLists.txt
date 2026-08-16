@@ -199,6 +199,13 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/fault_test)
 endif()
 
+# And the task that takes its own threads out of calls they will not finish
+# (#475).  Same placement and the same reason: libmach, libpthreads, and a
+# second thread, because every arm of it is one thread acting on another.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/act_test)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")

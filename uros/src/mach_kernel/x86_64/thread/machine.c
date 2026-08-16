@@ -48,6 +48,28 @@
 #include <cpu/regs.h>		/* #422: cpu_apic_id */
 
 /*
+ * ── Putting #475 back the way it was, for one run (#475) ──────────────
+ *
+ * The issue asks for a test that panics the kernel before the change and
+ * passes after, and the only honest way to show the first half is to restore
+ * what was there and watch the machine stop.  A correction is verified by
+ * TAKING IT AWAY.
+ *
+ * ⚠️ One of two, and the other is in x86_64/syscall/entry.S.  They are
+ * separate switches because they fail differently -- this one halts the
+ * machine, that one leaves it running and quietly wrong -- and a run that
+ * removed both would only ever report the first thing to go wrong.
+ *
+ * Zero in every build that ships.  This exists to be set from the compiler
+ * command line for one run and then unset; nothing in the tree turns it on,
+ * which is why it is a plain zero here rather than a configuration option
+ * somebody could leave enabled.
+ */
+#ifndef ABLATE_475_RETURN
+#define ABLATE_475_RETURN	0	/* a killed activation returns through here */
+#endif
+
+/*
  * Module init.  Both halves exist because the machine-independent tree calls
  * them at different moments -- act_machine_init() before any activation and
  * thread_machine_init() before any thread -- and on this machine there is
@@ -603,17 +625,17 @@ dump_act(thread_act_t thr_act)
 }
 
 /*
- * ── The two that belong to a facility this machine does not have ──────
+ * ── One that belongs to a facility this machine does not have ─────────
  *
- * Both exist for tasks created by kernel_task_create() -- servers linked
- * into the kernel's own address space.  x86-64 has no collocation and no RPC
- * trap (#453, <mach/x86_64/rpc.h>), so there is no such task to convert an
- * activation for and no short-circuited call to return from.
+ * It exists for tasks created by kernel_task_create() -- servers linked into
+ * the kernel's own address space.  x86-64 has no collocation and no RPC trap
+ * (#453, <mach/x86_64/rpc.h>), so there is no such task to convert an
+ * activation for.
  *
- * They panic rather than doing nothing.  A silent no-op here would let a
+ * It panics rather than doing nothing.  A silent no-op here would let a
  * caller believe an activation had been converted and continue with one that
  * had not, which is the failure this project refuses on purpose: the
- * plausible return.  If collocation ever arrives, it arrives with these.
+ * plausible return.  If collocation ever arrives, it arrives with this.
  */
 void
 pcb_user_to_kernel(thread_act_t thr_act)
@@ -623,11 +645,54 @@ pcb_user_to_kernel(thread_act_t thr_act)
 	      "(#453)");
 }
 
+/*
+ * ── How a thread leaves an RPC it is not going to finish (#475) ───────
+ *
+ * special_handler() calls this when it finds the activation it is running on
+ * top of no longer active -- somebody called thread_terminate() on a thread
+ * that was stopped inside a call.  Every blocking crossing arrives here:
+ * exception_raise() waiting for a debugger's reply, a user thread asleep in
+ * mach_msg, a device read.  All of them are reachable from ring 3 by a task
+ * holding a thread port, so what this function does is what a user program
+ * can ask for on purpose.
+ *
+ * It panicked until now, and the panic was not wrong when it was written:
+ * i386's version has two cases and #453 had ported neither.
+ *
+ *   1. the activation is the only one on its thread -- terminate the thread
+ *   2. it is one of several stacked by the short-circuited RPC path --
+ *      unlink it, hand KERN_RPC_SERVER_TERMINATED to the one below, and
+ *      resume that one on its own stack
+ *
+ * The second is the RPC activation chain, and it is the half that does not
+ * exist here.  But the FIRST needs nothing machine-dependent at all: it is a
+ * thread ending, and kern/thread.c already knows how to end one.  A stub
+ * covering both was a stub covering one case too many, and the case it
+ * refused is the only case this machine can reach.
+ *
+ * ⚠️ Nothing below checks that the chain is absent, and that is deliberate
+ * rather than an omission: thread_terminate_self() opens by asserting
+ * `thr_act->lower == THR_ACT_NULL' for exactly this reason, on every thread
+ * that ends rather than only on the ones that end this way.  A second copy
+ * of the same assertion here would be a second place to keep true.
+ */
 void
 act_machine_return(kern_return_t code)
 {
-	panic("act_machine_return(0x%x): this machine has no RPC activation "
-	      "chain to return through (#453)", code);
+	if (ABLATE_475_RETURN)
+		panic("act_machine_return(0x%x): this machine has no RPC "
+		      "activation chain to return through (#453)", code);
+
+	/*
+	 * The one caller passes KERN_TERMINATED and the name says why: an
+	 * activation returns, on this machine, for no other reason.
+	 */
+	assert(code == KERN_TERMINATED);
+	(void) code;
+
+	thread_terminate_self();
+	/*NOTREACHED*/
+	panic("act_machine_return: a thread came back from its own end (#475)");
 }
 
 /*
