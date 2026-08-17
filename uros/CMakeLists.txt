@@ -207,9 +207,15 @@ include(${CMAKE_SOURCE_DIR}/cmake/mig.cmake)
 # construction, and CONFIGURE_DEPENDS makes a new one re-run cmake rather than
 # wait to be noticed.  It sweeps up the machine_types.defs of machines this
 # build has never targeted, which costs nothing -- nobody edits hp_pa.
+#
+# 🔥 AND uapi, NOT export/include (#481).  The interface .defs moved to uapi in
+# #471 and this pattern did not follow them, so from that day mach_types.defs
+# was in no rule's dependencies: the very file #470 corrected and #478 changed
+# could be edited with the stubs keeping their old layout -- the failure this
+# list exists to prevent, reintroduced by the move that was meant to end it.
 file(GLOB_RECURSE UROS_MIG_COMMON_DEFS CONFIGURE_DEPENDS
      ${CMAKE_SOURCE_DIR}/src/mach_kernel/*_types.defs
-     ${CMAKE_SOURCE_DIR}/export/include/*_types.defs)
+     ${CMAKE_SOURCE_DIR}/uapi/*_types.defs)
 
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'uros' when building kernel)" "")
