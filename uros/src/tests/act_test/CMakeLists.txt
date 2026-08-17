@@ -17,15 +17,13 @@ if(UROS_TARGET_ARCH STREQUAL "i386")
   return()
 endif()
 
-set(_E ${CMAKE_SOURCE_DIR}/export/include)
 set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 
 set(UROS_MIG_USERLAND_INCLUDES
-    -I${_E}
     -I${UROS_ARCH_INCLUDE}
     -I${_K}
     -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
-    -I${_E}/mach_debug)
+    )
 
 # exc.defs, for the server half only.  The task is the one being told about a
 # fault, so what it needs is the demultiplexer and the three catch_ routines
@@ -45,9 +43,8 @@ target_compile_options(act_test_bin PRIVATE
 
 target_compile_definitions(act_test_bin PRIVATE MACH_IPC_COMPAT=0)
 
-# ⚠️ ${_AT_OUT} first, and NOT the shared generated/ MIG directory: it holds a
-# mach.h that shadows libmach's umbrella header.  libmach's CMakeLists gives
-# the long version.
+# ⚠️ ${_AT_OUT} first: the stubs include each other by quoted name.  The shared
+# generated/ MIG directory is not needed here -- this test's stubs are its own.
 target_include_directories(act_test_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${_AT_OUT}
@@ -58,7 +55,6 @@ target_include_directories(act_test_bin PRIVATE
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/uapi
-  ${_E}
   ${UROS_ARCH_INCLUDE}
   ${_K}
   ${CMAKE_SOURCE_DIR}/include)

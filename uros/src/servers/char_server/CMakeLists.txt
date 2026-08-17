@@ -20,14 +20,14 @@ set(CHAR_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
   ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   ${CMAKE_SOURCE_DIR}/src/servers/proc_server
+  # vt/vt_ipc.h lives with the terminal server that defines it
+  ${CMAKE_SOURCE_DIR}/src/servers/virtual_terminal_server
   ${CMAKE_BINARY_DIR}/generated/include
-  # mach_services/include MUST come before build/generated so <mach.h>
-  # resolves to the libmach userspace version, not the MIG-emitted shim.
+  # Mach services include (mach.h, sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
   ${CMAKE_BINARY_DIR}/generated
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
@@ -51,7 +51,6 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DM_USER_H}
@@ -81,7 +80,6 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -I${CMAKE_BINARY_DIR}/generated/include
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/servers/proc_server
@@ -111,7 +109,6 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${CHAR_USER_H}

@@ -46,9 +46,7 @@ target_compile_definitions(cap_server_bin PRIVATE
 
 target_include_directories(cap_server_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
-  # Mach services include FIRST so <mach.h> resolves to mach_services/include/mach.h
-  # (which declares panic_init/mach_msg_server) and not to the MIG-generated
-  # build/generated/mach.h that ships with the user stubs.
+  # Mach services include (mach.h, sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # libcap headers (libcap.h, sha256.h, hmac_sha256.h)
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
@@ -57,8 +55,6 @@ target_include_directories(cap_server_bin PRIVATE
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
-  # Pre-built export headers (mach/cap_types.h, mach/bootstrap.h, ...)
-  ${CMAKE_SOURCE_DIR}/export/include
   # MIG-generated headers (cap_server_server.h, cap_server.h)
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include

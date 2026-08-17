@@ -12,7 +12,6 @@ add_custom_command(
   # #471: uapi first, and no pipe -- see cmake/mig.cmake for why both.
   COMMAND ${CMAKE_C_COMPILER} -E -x c
     -I${UROS_UAPI_DIR}
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
@@ -39,7 +38,6 @@ target_compile_options(libservice PRIVATE
 target_include_directories(libservice PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

@@ -262,7 +262,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${UROS_CONFIG_INCLUDE}
     ${X86_64_MIG_DIR}
     ${X86_64_MIG_DIR}/mach
-    ${CMAKE_SOURCE_DIR}/export/include)			# #450 — the ODE knobs, generated
+    )
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
   # stddef.h); add just that directory back with -isystem so we get the
   # fixed-width types without pulling in the hosted system headers.
@@ -883,10 +883,6 @@ set(KERNEL_INCLUDES
     ${KERNEL_BUILD_DIR}/mach
     ${KERNEL_BUILD_DIR}/mach_debug
     ${KERNEL_BUILD_DIR}/device
-    # Public Uros export headers (LAST so kernel-internal mach/ wins on
-    # duplicates).  Lets the kernel pull header-only public headers like
-    # <mach/urmach_version.h> from a single source of truth.
-    ${CMAKE_SOURCE_DIR}/export/include
 )
 
 # =============================================================================
@@ -1426,7 +1422,7 @@ list(TRANSFORM AT386_ASM_SOURCES PREPEND ${KERNEL_SRC_DIR}/)
 # Generate an empty mach_interface.h stub in the kernel build directory.
 # Needed because migcom emits #include <mach/mach_interface.h> in user stubs;
 # the kernel doesn't need its contents.  This file lives ONLY in the build dir
-# so it doesn't shadow the real export/include/mach/mach_interface.h
+# so it doesn't shadow the real generated/include/mach/mach_interface.h
 # that the userspace build uses.
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/mach/mach_interface.h"
     "#ifndef _MACH_MACH_INTERFACE_H_\n"

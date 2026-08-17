@@ -46,7 +46,6 @@ add_custom_command(
             -I${MUSL_PREFIX}/include
             -I${CPUSTAT_GCC_INCLUDE}
             -I${CMAKE_SOURCE_DIR}/uapi
-            -I${CMAKE_SOURCE_DIR}/export/include
             -I${CMAKE_BINARY_DIR}/generated/include
             -I${CMAKE_SOURCE_DIR}/src/mach_services/include
             -I${UROS_ARCH_INCLUDE}

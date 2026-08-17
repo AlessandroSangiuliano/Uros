@@ -15,14 +15,19 @@ cmake_minimum_required(VERSION 3.16)
 # follow-up issues (Phase 3+ of #164).
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Create small generated forwarding headers so legacy includes like
-# "machine/types.h" and <machine/va_list.h> resolve to the
-# architecture-specific headers (use i386 for libmach builds).
-file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/machine")
-set(GEN_MACHINE_TYPES "${CMAKE_BINARY_DIR}/generated/include/machine/types.h")
-set(GEN_MACHINE_VALIST "${CMAKE_BINARY_DIR}/generated/include/machine/va_list.h")
-file(WRITE ${GEN_MACHINE_TYPES} "#ifndef _GEN_MACHINE_TYPES_H_\n#define _GEN_MACHINE_TYPES_H_\n#include <sa_mach/i386/types.h>\n#endif\n")
-file(WRITE ${GEN_MACHINE_VALIST} "#ifndef _GEN_MACHINE_VALIST_H_\n#define _GEN_MACHINE_VALIST_H_\n#include <sa_mach/i386/va_list.h>\n#endif\n")
+# 🔥 THE TWO FORWARDING HEADERS THIS USED TO WRITE ARE GONE (#481).
+#
+# It wrote generated/include/machine/{types,va_list}.h, each a wrapper naming
+# sa_mach/i386/ outright, into a directory 489 units have on their include path
+# ahead of src/mach_services/include.  The wrappers of the same name that live
+# there choose the architecture from the compiler's own macro -- which is what
+# #426 changed them to do, after a userland built for another machine got
+# i386's varargs in silence.
+#
+# So for 477 of those 489 units the repair was not in force: a second file,
+# with the architecture frozen at configure time, answered first.  Writing a
+# header into a shared include directory is the same move that made #434's
+# clean build fail, and it is removed for the same reason.
 
 # Path to the mig shell script (handles cc -E | migcom pipeline)
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
@@ -32,13 +37,13 @@ set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
 function(add_mig_defs DEFS_FILE)
   get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
 
+  mig_user_header_name(${DEFS_NAME} USER_H_NAME)
+
   set(USER_C ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_user.c)
   set(SERVER_C ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_server.c)
-  # Place MIG headers alongside the .c files (NOT in generated/include/)
-  # to avoid shadowing real userspace headers like mach.h.
   # When both -header and -sheader are given, migcom makes _user.c include
   # the -header file and _server.c include the -sheader file.
-  set(USER_H   ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}.h)
+  set(USER_H   ${CMAKE_BINARY_DIR}/generated/${USER_H_NAME}.h)
   set(SERVER_H ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_server.h)
   file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 
@@ -103,7 +108,6 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DEVICE_USER_H}

@@ -56,7 +56,6 @@ endfunction()
 # which the default_pager source code expects.
 set(MIG_INCLUDES
   -DSEQNOS
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_CURRENT_SOURCE_DIR}/mach
@@ -139,8 +138,6 @@ target_include_directories(default_pager_server PRIVATE
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
-  # Pre-built export headers (mach/mach_interface.h, device/device_reply.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/, i386/)
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel

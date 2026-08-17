@@ -20,7 +20,6 @@ add_custom_command(
     # in silence.  ${UROS_MIG_TARGET_ARGS} is set at the top level, so it is
     # never empty here.
     ${UROS_MIG_TARGET_ARGS}
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/mach_services/servers/netname
@@ -33,6 +32,32 @@ add_custom_command(
   COMMENT "MIG: netname.defs (libnetname)"
   VERBATIM
 )
+
+# 🔥 PUBLISH THE STUB UNDER THE NAME ITS CONSUMERS INCLUDE (#481).
+#
+# Twenty-eight files write #include <servers/netname.h>, and until now that
+# resolved to a copy of this very stub checked in under export/include -- a
+# MIG output, from 1998, versioned.  It still matched byte for byte, which is
+# exactly why nobody noticed: an edit to netname.defs regenerated this header
+# and reached the four files that include it by the short name, while the
+# other twenty-eight went on compiling against the checked-in one.
+#
+# ⚠️ Hung on mig_mach_public_headers, not on each consumer.  That target is
+# the gate twenty of them already wait for, and #434 is what naming them one
+# by one looks like when one gets forgotten: not a late header, a missing
+# dependency edge that is silent until a build from an empty directory.
+set(_NETNAME_PUB "${CMAKE_BINARY_DIR}/generated/include/servers")
+file(MAKE_DIRECTORY "${_NETNAME_PUB}")
+add_custom_command(
+  OUTPUT ${_NETNAME_PUB}/netname.h
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+          ${NETNAME_USER_H} ${_NETNAME_PUB}/netname.h
+  DEPENDS ${NETNAME_USER_H}
+  COMMENT "Publish servers/netname.h"
+  VERBATIM
+)
+add_custom_target(netname_public_header DEPENDS ${_NETNAME_PUB}/netname.h)
+add_dependencies(mig_mach_public_headers netname_public_header)
 
 # Library only contains the user-side MIG stub
 add_library(libnetname STATIC ${NETNAME_USER_C})
@@ -48,7 +73,6 @@ target_include_directories(libnetname PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/servers/netname
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

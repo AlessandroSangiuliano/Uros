@@ -26,7 +26,6 @@ add_custom_command(
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
     -DSEQNOS
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header  ${MO_USER_H}
@@ -78,12 +77,11 @@ target_compile_options(libfspager PRIVATE
 
 target_include_directories(libfspager PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
-  # generated/ exposes mach.h, mach_port.h (user stubs vm_allocate,
+  # generated/ exposes mach_interface.h, mach_port.h (user stubs vm_allocate,
   # memory_object_data_supply, mach_port_*).
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
