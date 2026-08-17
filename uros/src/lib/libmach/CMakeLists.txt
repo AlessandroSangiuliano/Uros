@@ -214,15 +214,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
                             -mstack-protector-guard=global -include stdint.h>)
 
 
-  # ⚠️ The MIG OUTPUT directory is deliberately NOT here.  It holds a file
-  # called mach.h -- the header for mach.defs -- and libmach has its own
-  # mach.h, the umbrella that pulls in mach_init.h and with it the
-  # `#define mach_task_self() mach_task_self_' every one of these files
-  # needs.  Put the raw directory on the path and the generated one wins,
-  # the macro disappears, and seven sources fail with an implicit
-  # declaration that names a function nobody ever calls.  The generated
-  # stubs still find their own headers: they include them with quotes, and
-  # a quoted include looks in the including file's own directory first.
+  # The MIG OUTPUT directory is not here, and does not need to be: the
+  # generated stubs include their own headers with quotes, and a quoted
+  # include looks in the including file's own directory first.  What is
+  # published from there is published by name, under generated/include/mach.
   target_include_directories(libmach PUBLIC
     ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
     ${CMAKE_CURRENT_SOURCE_DIR}

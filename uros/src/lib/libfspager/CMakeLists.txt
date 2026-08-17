@@ -78,7 +78,7 @@ target_compile_options(libfspager PRIVATE
 
 target_include_directories(libfspager PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
-  # generated/ exposes mach.h, mach_port.h (user stubs vm_allocate,
+  # generated/ exposes mach_interface.h, mach_port.h (user stubs vm_allocate,
   # memory_object_data_supply, mach_port_*).
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include

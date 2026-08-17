@@ -47,9 +47,8 @@ target_compile_options(fault_test_bin PRIVATE
 
 target_compile_definitions(fault_test_bin PRIVATE MACH_IPC_COMPAT=0)
 
-# ⚠️ ${_FT_OUT} first, and NOT the shared generated/ MIG directory: it holds a
-# mach.h that shadows libmach's umbrella header.  libmach's CMakeLists gives
-# the long version.
+# ⚠️ ${_FT_OUT} first: the stubs include each other by quoted name.  The shared
+# generated/ MIG directory is not needed here -- this test's stubs are its own.
 target_include_directories(fault_test_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${_FT_OUT}

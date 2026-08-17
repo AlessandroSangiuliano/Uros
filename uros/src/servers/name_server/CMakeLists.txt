@@ -59,9 +59,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   target_compile_definitions(name_server_bin PRIVATE MACH_IPC_COMPAT=0)
 
   # ⚠️ ${_NS_OUT} first: netname.c includes "netname_server.h" and the stubs
-  # include each other by quoted name.  And NOT the shared generated/ MIG
-  # directory, for the reason libmach's CMakeLists gives at length -- it holds
-  # a mach.h that shadows libmach's umbrella header.
+  # include each other by quoted name.  The shared generated/ MIG directory is
+  # not needed here -- this server's stubs are its own.
   target_include_directories(name_server_bin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${_NS_OUT}
