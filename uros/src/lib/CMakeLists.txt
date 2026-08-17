@@ -32,13 +32,13 @@ set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
 function(add_mig_defs DEFS_FILE)
   get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
 
+  mig_user_header_name(${DEFS_NAME} USER_H_NAME)
+
   set(USER_C ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_user.c)
   set(SERVER_C ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_server.c)
-  # Place MIG headers alongside the .c files (NOT in generated/include/)
-  # to avoid shadowing real userspace headers like mach.h.
   # When both -header and -sheader are given, migcom makes _user.c include
   # the -header file and _server.c include the -sheader file.
-  set(USER_H   ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}.h)
+  set(USER_H   ${CMAKE_BINARY_DIR}/generated/${USER_H_NAME}.h)
   set(SERVER_H ${CMAKE_BINARY_DIR}/generated/${DEFS_NAME}_server.h)
   file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/generated)
 

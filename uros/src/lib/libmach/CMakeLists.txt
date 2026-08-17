@@ -115,7 +115,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # judgement about what the target needs -- it is the list that happened to be
   # written when only libmach itself consumed them.  bootstrap wants two more:
   # the SERVER half of bootstrap.defs, which it demultiplexes, and mach_klog.
-  set(_PUB_MAP  mach.h mach_interface.h  mach_port.h mach_port.h
+  set(_PUB_MAP  mach_interface.h mach_interface.h  mach_port.h mach_port.h
                 mach_host.h mach_host.h  clock.h clock.h
                 bootstrap.h bootstrap.h  exc.h exc_user.h
                 exc_server.h exc_server.h  notify_server.h notify_server.h
@@ -365,8 +365,7 @@ endforeach()
 # etc. from the regenerated copy instead of a checked-in stale one.
 #
 # Rows: <build-generated filename>  <public filename under mach/>
-# Two renames preserve the legacy public names to avoid a source-wide rename:
-#   mach.h                       -> mach_interface.h
+# One rename preserves a legacy public name to avoid a source-wide rename:
 #   memory_object_default_user.h -> memory_object_default.h
 set(_PUB_MACH_DIR "${CMAKE_BINARY_DIR}/generated/include/mach")
 file(MAKE_DIRECTORY "${_PUB_MACH_DIR}")
@@ -383,7 +382,7 @@ set(_MIG_PUBLIC_MAP
   ledger.h                       ledger.h
   mach_host.h                    mach_host.h
   mach_klog.h                    mach_klog.h
-  mach.h                         mach_interface.h
+  mach_interface.h               mach_interface.h
   mach_norma.h                   mach_norma.h
   mach_port.h                    mach_port.h
   memory_object_default.h        memory_object_default.h
