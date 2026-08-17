@@ -33,9 +33,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
 
   set(_NS_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
   set(NS_MIG_GENERATED)
-  add_mig_userland(${_E}/servers/netname.defs ${_NS_OUT} NS_MIG)
-  add_mig_userland(${_E}/servers/service.defs ${_NS_OUT} NS_MIG)
-  add_mig_userland(${_E}/mach/notify.defs     ${_NS_OUT} NS_MIG)
+  add_mig_userland(${UROS_UAPI_DIR}/servers/netname.defs ${_NS_OUT} NS_MIG)
+  add_mig_userland(${UROS_UAPI_DIR}/servers/service.defs ${_NS_OUT} NS_MIG)
+  add_mig_userland(${UROS_UAPI_DIR}/mach/notify.defs     ${_NS_OUT} NS_MIG)
 
   # ⚠️ migcom writes both halves of a .defs from one parse, and the unused
   # half is NOT free: a server stub REFERENCES the do_<routine> the program
@@ -130,17 +130,17 @@ endmacro()
 
 # 1) netname.defs — server stubs (netname_server demux)
 mig_all(
-  "${CMAKE_SOURCE_DIR}/export/include/servers/netname.defs"
+  "${UROS_UAPI_DIR}/servers/netname.defs"
   netname)
 
 # 2) notify.defs — server stubs (do_mach_notify_dead_name etc.)
 mig_all(
-  "${CMAKE_SOURCE_DIR}/export/include/mach/notify.defs"
+  "${UROS_UAPI_DIR}/mach/notify.defs"
   notify)
 
 # 3) service.defs — user stubs (service_checkin)
 mig_all(
-  "${CMAKE_SOURCE_DIR}/export/include/servers/service.defs"
+  "${UROS_UAPI_DIR}/servers/service.defs"
   service)
 
 # ===========================================================================

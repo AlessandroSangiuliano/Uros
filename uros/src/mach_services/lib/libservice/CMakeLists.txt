@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.16)
 project(libservice C)
 
 # Generate MIG stubs from service.defs
-set(SERVICE_DEFS "${CMAKE_SOURCE_DIR}/src/mach_services/include/servers/service.defs")
+set(SERVICE_DEFS "${UROS_UAPI_DIR}/servers/service.defs")
 set(SERVICE_USER_C "${CMAKE_BINARY_DIR}/generated/service_user.c")
 set(SERVICE_SERVER_C "${CMAKE_BINARY_DIR}/generated/service_server.c")
 set(SERVICE_HEADER "${CMAKE_BINARY_DIR}/generated/service.h")

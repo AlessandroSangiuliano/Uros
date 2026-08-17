@@ -64,7 +64,7 @@ set(MIG_INCLUDES
 
 # 1) default_pager_object.defs — the pager's own MIG interface
 dp_mig_defs(
-  "${CMAKE_CURRENT_SOURCE_DIR}/mach/default_pager_object.defs"
+  "${UROS_UAPI_DIR}/mach/default_pager_object.defs"
   default_pager_object
   ${MIG_INCLUDES}
 )

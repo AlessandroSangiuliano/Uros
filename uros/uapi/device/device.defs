@@ -101,10 +101,28 @@ import <mach/cap_types.h>;
 
 serverprefix	ds_;
 
-type reply_port_t = MACH_MSG_TYPE_MAKE_SEND_ONCE | polymorphic
-	ctype: mach_port_t;
+/* Note: no spaces around | for polymorphic types to work with MIG parser */
 
-skip; /* nmk15: device_open */
+/*
+ * 🔑 The one place where the two copies of a .defs differed ON PURPOSE (#471).
+ *
+ * A reply port is a kernel POINTER to the server that receives on it and a
+ * NAME to the task that sends to it, so export/include said `mach_port_t'
+ * and src/mach_kernel said `ipc_port_t' -- each right for its own reader,
+ * and no way to tell from either file that the other existed.
+ *
+ * That is what `#if KERNEL_SERVER' is for.  Said here, the difference is a
+ * property of the type with both halves visible at once, instead of a
+ * property of which directory you opened.
+ */
+type reply_port_t = MACH_MSG_TYPE_MAKE_SEND_ONCE|polymorphic
+#if	KERNEL_SERVER
+		ctype: ipc_port_t;
+#else
+		ctype: mach_port_t;
+#endif	/* KERNEL_SERVER */
+
+skip;	/* nmk15: device_open */
 
 routine device_close(
 		device		: device_t
@@ -200,14 +218,9 @@ routine io_done_queue_terminate(
 	);
 
 /*
- * Uros capability-gated variant of device_open.  The caller passes a
- * signed uros_cap token (opaque 256-byte blob, see mach/cap_types.h)
- * in addition to the usual arguments.  Servers verify the token via
- * urmach_cap_verify before completing the open; failure returns
- * KERN_NO_ACCESS and the device port is never returned.
- *
- * Subsystem msg_id: 2800 + routine_index.  This routine must remain
- * the last entry here so old client stubs keep matching ids.
+ * Uros capability-gated device_open.  Server-side (block_device_server)
+ * calls urmach_cap_verify on the supplied uros_cap token before opening.
+ * See osfmk/export/include/device/device.defs for documentation.
  */
 type cap_token_t = array[*:256] of char;
 
@@ -219,12 +232,5 @@ routine device_open_cap(
 	in	sec_token	: security_token_t;
 	in	name		: dev_name_t;
 	in	token		: cap_token_t;
-	/*
-	 * Disposition is MAKE_SEND so the kernel mints the client's send
-	 * right from the receive right held by BDS.  This means BDS does
-	 * NOT keep a send right of its own, which is required for the
-	 * no-senders notification (Issue #181 cleanup) to fire when the
-	 * client drops the last copy.
-	 */
 	out	device		: mach_port_make_send_t
 	);
