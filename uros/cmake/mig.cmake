@@ -37,26 +37,46 @@
 # what makes migcom's beliefs about message layout checkable by the compiler
 # that will lay the message out.
 
-# Helper function to add MIG generation rule
+# 🔥 TWO COMMANDS, NOT A PIPE (#471).
+#
+# These rules used to read `cc -E ... ${DEFS_FILE} | migcom ...', and a shell
+# gives a pipeline the exit status of its LAST command.  So a preprocessor
+# that died -- on a missing include, say -- left migcom parsing a truncated
+# stream, which it did without complaint, and the build saw zero.  The stub
+# that came out was missing routines: service_checkin absent from
+# service_user.c, every _X absent from device_pager_server.c, no diagnostic
+# anywhere.  A client would have found out at link time; a server would have
+# found out by not answering a message id it believed it implemented.
+#
+# The preprocessed text goes to ${MIG_PP} and migcom is handed the NAME.
+# CMake stops a custom command at the first COMMAND that fails, so cc's exit
+# status is now the rule's.  `set -o pipefail' would have done it on this
+# machine and not in POSIX sh, and would have had to be remembered at each
+# call site; this cannot be forgotten because there is no pipe left to forget
+# about.
+#
 # Use -x c to force C preprocessing of .defs files (modern GCC ignores unknown extensions)
 function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
+    set(MIG_PP ${OUTPUT_DIR}/${DEFS_NAME}_server.mig.i)
     set(SERVER_C ${OUTPUT_DIR}/${DEFS_NAME}_server.c)
     set(SERVER_H ${OUTPUT_DIR}/${DEFS_NAME}_server.h)
     
     add_custom_command(
         OUTPUT ${SERVER_C} ${SERVER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -x c
+                -I${UROS_UAPI_DIR}
                 ${UROS_MIG_INCLUDES}
                 ${KERNEL_DEFINES}
                 ${UROS_MIG_DEFS_ARCH}
-                ${DEFS_FILE} | 
-                $<TARGET_FILE:migcom>
+                ${DEFS_FILE} -o ${MIG_PP}
+        COMMAND $<TARGET_FILE:migcom>
                 ${UROS_MIG_TARGET_ARGS}
                 -sheader ${SERVER_H}
                 -server ${SERVER_C}
                 -header /dev/null
                 -user /dev/null
+                ${MIG_PP}
         DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
         COMMENT "MIG: ${DEFS_NAME} (server)"
         VERBATIM
@@ -67,6 +87,7 @@ endfunction()
 
 function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
+    set(MIG_PP ${OUTPUT_DIR}/${DEFS_NAME}_user.mig.i)
     set(USER_C ${OUTPUT_DIR}/${DEFS_NAME}_user.c)
     # Use _user.h suffix to avoid conflicts with source headers (e.g. mach/memory_object.h)
     set(USER_H ${OUTPUT_DIR}/${DEFS_NAME}_user.h)
@@ -80,17 +101,19 @@ function(add_mig_user DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     add_custom_command(
         OUTPUT ${USER_C} ${USER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -x c
+                -I${UROS_UAPI_DIR}
                 ${UROS_MIG_INCLUDES}
                 ${KERNEL_DEFINES}
                 ${UROS_MIG_DEFS_ARCH}
                 -DKERNEL_USER=1
                 -UKERNEL_SERVER
-                ${DEFS_FILE} |
-                $<TARGET_FILE:migcom>
+                ${DEFS_FILE} -o ${MIG_PP}
+        COMMAND $<TARGET_FILE:migcom>
                 ${UROS_MIG_TARGET_ARGS}
                 -header ${USER_H}
                 -user ${USER_C}
                 -server /dev/null
+                ${MIG_PP}
         DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEFS_FILE}
         COMMENT "MIG: ${DEFS_NAME} (user)"
         VERBATIM
@@ -127,6 +150,7 @@ endfunction()
 # and this one cannot be emptied by a scope.
 function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
+    set(MIG_PP ${OUTPUT_DIR}/${DEFS_NAME}.mig.i)
     set(USER_C   ${OUTPUT_DIR}/${DEFS_NAME}_user.c)
     set(SERVER_C ${OUTPUT_DIR}/${DEFS_NAME}_server.c)
     set(USER_H   ${OUTPUT_DIR}/${DEFS_NAME}.h)
@@ -139,15 +163,17 @@ function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     add_custom_command(
         OUTPUT ${USER_C} ${SERVER_C} ${USER_H} ${SERVER_H}
         COMMAND ${CMAKE_C_COMPILER} -E -x c
+                -I${UROS_UAPI_DIR}
                 ${UROS_MIG_USERLAND_INCLUDES}
                 ${UROS_MIG_DEFS_ARCH}
-                ${DEFS_FILE} |
-                $<TARGET_FILE:migcom>
+                ${DEFS_FILE} -o ${MIG_PP}
+        COMMAND $<TARGET_FILE:migcom>
                 -target ${UROS_TARGET_ARCH}
                 -header ${USER_H}
                 -sheader ${SERVER_H}
                 -user ${USER_C}
                 -server ${SERVER_C}
+                ${MIG_PP}
         # ⚠️ ${UROS_MIG_COMMON_DEFS} and not just the .defs named here.  A
         # .defs `import's others -- mach_types.defs, std_types.defs -- and a
         # rule that depends only on the file it is given does not rebuild

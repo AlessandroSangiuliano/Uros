@@ -95,3 +95,11 @@ set_target_properties(libsa_fs PROPERTIES
   OUTPUT_NAME "sa_fs"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"
 )
+
+# #434: <pthread.h> pulls <machine/pthread_impl.h>, which libpthreads
+# PUBLISHES into generated/include.  This target uses the header without
+# linking the library, so nothing ordered it before the copy and a build
+# from an empty directory could compile first and fail.
+if(TARGET libsa_fs)
+  add_dependencies(libsa_fs pthread_impl_published)
+endif()

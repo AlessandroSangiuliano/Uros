@@ -444,37 +444,37 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # No AT386, no EISA/HIMEM/NPCI/MP_V1_1: those name i386 hardware, and the
   # generated code is the wire format, which must not depend on them.
 
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach/mach.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach_port.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach/mach_port.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach_host.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach/mach_host.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/mach_klog.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach/mach_klog.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
   add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/clock.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/sync.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach/sync.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/bootstrap.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach/bootstrap.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/ledger.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach/ledger.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach_debug/mach_debug.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach_debug/mach_debug.defs
                  ${X86_64_MIG_DIR}/mach_debug X86_64_MIG)
   add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/device/device.defs
                  ${X86_64_MIG_DIR}/device X86_64_MIG)
   add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/device/device_master.defs
                  ${X86_64_MIG_DIR}/device X86_64_MIG)
-  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/mach/exc.defs
+  add_mig_user(${UROS_UAPI_DIR}/mach/exc.defs
                ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object.defs
+  add_mig_user(${UROS_UAPI_DIR}/mach/memory_object.defs
                ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object_default.defs
+  add_mig_user(${UROS_UAPI_DIR}/mach/memory_object_default.defs
                ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/mach/clock_reply.defs
+  add_mig_user(${UROS_UAPI_DIR}/mach/clock_reply.defs
                ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_user(${CMAKE_CURRENT_SOURCE_DIR}/device/device_reply.defs
+  add_mig_user(${UROS_UAPI_DIR}/device/device_reply.defs
                ${X86_64_MIG_DIR}/device X86_64_MIG)
 
   # device_pager_server -- the one rule that is not add_mig_server().
@@ -500,15 +500,17 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
             -I${CMAKE_CURRENT_SOURCE_DIR}/include
             -I${UROS_CONFIG_INCLUDE}
             ${KERNEL_DEFINES}
-            ${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object.defs |
-            $<TARGET_FILE:migcom>
+            ${UROS_UAPI_DIR}/mach/memory_object.defs
+            -o ${X86_64_MIG_DIR}/device/device_pager.mig.i
+    COMMAND $<TARGET_FILE:migcom>
             ${UROS_MIG_TARGET_ARGS}
             -sheader ${X86_64_MIG_DIR}/device/device_pager_server.h
             -server ${X86_64_MIG_DIR}/device/device_pager_server.c
             -header /dev/null
             -user /dev/null
+            ${X86_64_MIG_DIR}/device/device_pager.mig.i
     DEPENDS migcom ${UROS_MIG_COMMON_DEFS}
-            ${CMAKE_CURRENT_SOURCE_DIR}/mach/memory_object.defs
+            ${UROS_UAPI_DIR}/mach/memory_object.defs
     COMMENT "MIG x86-64: memory_object -> device_pager (server)"
     VERBATIM
   )
@@ -979,19 +981,19 @@ set(UROS_MIG_INCLUDES
 # ---- Mach subsystem MIG files ----
 
 # mach_server.c - kernel receives mach messages
-add_mig_server(${KERNEL_SRC_DIR}/mach/mach.defs 
+add_mig_server(${UROS_UAPI_DIR}/mach/mach.defs 
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # mach_port_server.c - kernel receives mach_port messages  
-add_mig_server(${KERNEL_SRC_DIR}/mach/mach_port.defs
+add_mig_server(${UROS_UAPI_DIR}/mach/mach_port.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # mach_host_server.c - kernel receives mach_host messages
-add_mig_server(${KERNEL_SRC_DIR}/mach/mach_host.defs
+add_mig_server(${UROS_UAPI_DIR}/mach/mach_host.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # mach_klog_server.c - #200, kernel printf ring drain
-add_mig_server(${KERNEL_SRC_DIR}/mach/mach_klog.defs
+add_mig_server(${UROS_UAPI_DIR}/mach/mach_klog.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # clock_server.c - kernel receives clock messages
@@ -999,15 +1001,15 @@ add_mig_server(${KERNEL_SRC_DIR}/mach/clock.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # sync_server.c - kernel receives sync messages  
-add_mig_server(${KERNEL_SRC_DIR}/mach/sync.defs
+add_mig_server(${UROS_UAPI_DIR}/mach/sync.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # bootstrap_server.c - kernel receives bootstrap messages
-add_mig_server(${KERNEL_SRC_DIR}/mach/bootstrap.defs
+add_mig_server(${UROS_UAPI_DIR}/mach/bootstrap.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # ledger_server.c - kernel receives ledger messages
-add_mig_server(${KERNEL_SRC_DIR}/mach/ledger.defs
+add_mig_server(${UROS_UAPI_DIR}/mach/ledger.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # mach_i386_server.c - kernel receives i386-specific messages
@@ -1015,11 +1017,11 @@ add_mig_server(${KERNEL_SRC_DIR}/mach/i386/mach_i386.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # exc_user.c - kernel sends exception messages
-add_mig_user(${KERNEL_SRC_DIR}/mach/exc.defs
+add_mig_user(${UROS_UAPI_DIR}/mach/exc.defs
              ${KERNEL_BUILD_DIR}/mach MACH)
 
 # memory_object_user.c - kernel sends memory object messages
-add_mig_user(${KERNEL_SRC_DIR}/mach/memory_object.defs
+add_mig_user(${UROS_UAPI_DIR}/mach/memory_object.defs
              ${KERNEL_BUILD_DIR}/mach MACH)
 
 # device_pager_server.c - generated from memory_object.defs for device pager
@@ -1027,20 +1029,23 @@ add_mig_user(${KERNEL_SRC_DIR}/mach/memory_object.defs
 add_custom_command(
     OUTPUT ${KERNEL_BUILD_DIR}/device/device_pager_server.c ${KERNEL_BUILD_DIR}/device/device_pager_server.h
     COMMAND ${CMAKE_C_COMPILER} -E -x c
+            -I${UROS_UAPI_DIR}
             -I${UROS_ARCH_INCLUDE}
-            -I${KERNEL_SRC_DIR} 
+            -I${KERNEL_SRC_DIR}
             -I${KERNEL_SRC_DIR}/include
             -I${KERNEL_SRC_DIR}/i386
             -I${KERNEL_SRC_DIR}/i386/AT386
             -I${UROS_CONFIG_INCLUDE}
             ${KERNEL_DEFINES}
-            ${KERNEL_SRC_DIR}/mach/memory_object.defs |
-            $<TARGET_FILE:migcom>
+            ${UROS_UAPI_DIR}/mach/memory_object.defs
+            -o ${KERNEL_BUILD_DIR}/device/device_pager.mig.i
+    COMMAND $<TARGET_FILE:migcom>
             -sheader ${KERNEL_BUILD_DIR}/device/device_pager_server.h
             -server ${KERNEL_BUILD_DIR}/device/device_pager_server.c
             -header /dev/null
             -user /dev/null
-    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${KERNEL_SRC_DIR}/mach/memory_object.defs
+            ${KERNEL_BUILD_DIR}/device/device_pager.mig.i
+    DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${UROS_UAPI_DIR}/mach/memory_object.defs
     COMMENT "MIG: memory_object -> device_pager (server)"
     VERBATIM
 )
@@ -1048,15 +1053,15 @@ add_custom_command(
 # dev_pager.c does #include <device/device_pager_server.c>
 
 # memory_object_default_user.c - kernel sends default pager messages
-add_mig_user(${KERNEL_SRC_DIR}/mach/memory_object_default.defs
+add_mig_user(${UROS_UAPI_DIR}/mach/memory_object_default.defs
              ${KERNEL_BUILD_DIR}/mach MACH)
 
 # clock_reply_user.c - kernel sends clock reply messages
-add_mig_user(${KERNEL_SRC_DIR}/mach/clock_reply.defs
+add_mig_user(${UROS_UAPI_DIR}/mach/clock_reply.defs
              ${KERNEL_BUILD_DIR}/mach MACH)
 
 # ---- Mach debug subsystem ----
-add_mig_server(${KERNEL_SRC_DIR}/mach_debug/mach_debug.defs
+add_mig_server(${UROS_UAPI_DIR}/mach_debug/mach_debug.defs
                ${KERNEL_BUILD_DIR}/mach_debug MACH_DEBUG)
 
 # ---- Device subsystem ----
@@ -1064,7 +1069,7 @@ add_mig_server(${KERNEL_SRC_DIR}/device/device.defs
                ${KERNEL_BUILD_DIR}/device DEVICE)
 
 # device_reply_user.c - kernel sends async device replies
-add_mig_user(${KERNEL_SRC_DIR}/device/device_reply.defs
+add_mig_user(${UROS_UAPI_DIR}/device/device_reply.defs
              ${KERNEL_BUILD_DIR}/device DEVICE)
 
 # ---- Device master subsystem (userspace driver primitives) ----

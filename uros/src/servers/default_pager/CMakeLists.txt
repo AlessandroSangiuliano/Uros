@@ -71,14 +71,14 @@ dp_mig_defs(
 
 # 2) memory_object_default.defs — kernel→pager interface (data_request, data_return, etc.)
 dp_mig_defs(
-  "${CMAKE_SOURCE_DIR}/export/include/mach/memory_object_default.defs"
+  "${CMAKE_SOURCE_DIR}/uapi/mach/memory_object_default.defs"
   memory_object_default
   ${MIG_INCLUDES}
 )
 
 # 3) memory_object.defs — pager→kernel interface (data_supply, lock_request, etc.)
 dp_mig_defs(
-  "${CMAKE_SOURCE_DIR}/export/include/mach/memory_object.defs"
+  "${CMAKE_SOURCE_DIR}/uapi/mach/memory_object.defs"
   memory_object
   ${MIG_INCLUDES}
 )
