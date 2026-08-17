@@ -46,20 +46,15 @@ typedef int             vfs_fd_t;
 #define VFS_SEEK_END    2
 
 /*
- * size_t comes via <stddef.h> already pulled in by vfs_types.h.
- * ssize_t and off_t are not consistently defined across sa_mach
- * (off_t is u32 in sa_mach/types.h, ssize_t is absent), so we provide
- * local typedefs guarded against the most common system definitions.
- * Wire-side offsets always use vfs_u64_t regardless of off_t width.
+ * size_t, ssize_t and off_t come from <sa_mach/types.h> or from musl,
+ * whichever the including target has -- they agree now (#480).  This
+ * header used to declare ssize_t and off_t itself, behind a guard
+ * (_OFF_T_DEFINED) that neither of the other two had heard of, so it
+ * protected against nothing; the widths it picked then had to be worked
+ * around by keeping every wire-side offset in vfs_u64_t.  The wire types
+ * stay as they are: they are 64-bit by design and not by workaround.
  */
-#ifndef _SSIZE_T_DEFINED
-#define _SSIZE_T_DEFINED
-typedef long            ssize_t;
-#endif
-#ifndef _OFF_T_DEFINED
-#define _OFF_T_DEFINED
-typedef unsigned int    off_t;          /* matches sa_mach/types.h */
-#endif
+#include <sa_mach/types.h>
 
 /*
  * Initialise libvfs once per task.  Idempotent and cheap; safe to

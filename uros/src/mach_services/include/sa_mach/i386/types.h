@@ -25,11 +25,14 @@
 #ifndef	_MACH_MACHINE_TYPES_H_
 #define _MACH_MACHINE_TYPES_H_ 1
 
-/* Avoid type conflict with sys/types.h */
-#ifndef _DEV_T_DECLARED
-typedef long		dev_t;		/* device number (major+minor) */
-#define _DEV_T_DECLARED
-#endif
+/*
+ * ⚠️ dev_t is NOT declared here any more (#480).  It was declared in this
+ * per-architecture header AND in sa_mach/types.h, and only the copy in
+ * types.h sat behind the guard that yields to libc -- so this one fired
+ * first (types.h includes us on its second line) and won against musl's,
+ * which is one of the two conflicts the compiler reported.  One
+ * declaration, in types.h, where the guard is.
+ */
 
 typedef signed char	bit8_t;		/* signed 8-bit quantity */
 typedef unsigned char	u_bit8_t;	/* unsigned 8-bit quantity */
