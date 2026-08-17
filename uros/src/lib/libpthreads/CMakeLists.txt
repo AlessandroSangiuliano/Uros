@@ -167,6 +167,39 @@ add_custom_target(pthread_impl_published
   DEPENDS ${CMAKE_BINARY_DIR}/generated/include/machine/pthread_impl.h)
 add_dependencies(libpthreads pthread_impl_published)
 
+# 🔥 And every other consumer, not just libpthreads (#434).
+#
+# <pthread.h> includes <machine/pthread_impl.h>, and plenty of targets
+# include the first while linking none of this library -- libvfs, the file
+# systems, libgpu_console, half the servers.  They carry generated/include
+# on their path and nothing more, so whether the header exists when they
+# compile is decided by build order.  On a warm tree it always does; from
+# an empty directory it is a coin toss, and the loser gets `fatal error:
+# machine/pthread_impl.h'.
+#
+# mig_mach_public_headers is this tree's de-facto "the generated public
+# headers are ready" gate -- sixty targets already depend on it -- so the
+# ordering is stated once here rather than remembered at each consumer.
+# The name says MIG and this header is not MIG's; what the target actually
+# means is what is published into generated/include, and this is published
+# there.
+# ⚠️ The ordering is NOT hung on mig_mach_public_headers, though that is the
+# tree's de-facto "generated headers are ready" gate and sixty targets
+# already depend on it (#434).  It cannot be: mk_pthread_impl -- the program
+# that WRITES this header -- depends on that gate itself, so hanging the gate
+# on the header closes a cycle, and CMake says so:
+#
+#   mig_mach_public_headers -> pthread_impl_published
+#   pthread_impl_published  -> mk_pthread_impl
+#   mk_pthread_impl         -> mig_mach_public_headers
+#
+# So the dependency goes on the consumers instead.  Targets that LINK this
+# library already have it -- linking orders them after libpthreads and
+# everything it depends on.  What needed saying out loud is the other kind:
+# a target that includes <pthread.h> and links something else entirely.
+# Those name pthread_impl_published themselves; see libvfs, libgpu_console,
+# libsa_fs and libposix-uros.
+
 set_target_properties(libpthreads PROPERTIES
   OUTPUT_NAME "pthreads"
   ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/lib"

@@ -211,7 +211,20 @@ target_include_directories(libposix-uros PRIVATE
 
 # Ensure musl has been built before we try to compile against its
 # headers.
-if(TARGET musl_extproj)
+# 🔥 UROS_BUILD_MUSL, not `if(TARGET musl_extproj)' (#434).
+#
+# This target is created from add_subdirectory(src), which runs BEFORE
+# add_subdirectory(src/contrib) -- so when the old guard was evaluated
+# musl_extproj did not exist yet, the condition was false, and the
+# dependency was never added.  Silently: a guard written to guarantee an
+# ordering was the reason there was none.
+#
+# It is not that add_dependencies() needs the target to exist; a dozen
+# other call sites in src/ name musl_extproj with no guard at all and are
+# ordered correctly, because CMake resolves the name at generate time.
+# The option is known at configure time and does not depend on directory
+# order, so it is what the condition asks about.
+if(UROS_BUILD_MUSL)
   add_dependencies(libposix-uros musl_extproj)
 endif()
 
@@ -237,7 +250,7 @@ set_target_properties(libposix-uros PROPERTIES
 # do not need it.
 add_library(libposix-uros-pic STATIC ${LIBPOSIX_UROS_SRCS} dyn_bootstrap.c)
 add_dependencies(libposix-uros-pic mig_mach_public_headers)
-if(TARGET musl_extproj)
+if(UROS_BUILD_MUSL)
   add_dependencies(libposix-uros-pic musl_extproj)
 endif()
 set_target_properties(libposix-uros-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -246,3 +259,14 @@ target_compile_options(libposix-uros-pic PRIVATE
 target_include_directories(libposix-uros-pic PRIVATE
   $<TARGET_PROPERTY:libposix-uros,INCLUDE_DIRECTORIES>)
 set_target_properties(libposix-uros-pic PROPERTIES OUTPUT_NAME "posix-uros-pic")
+
+# #434: <pthread.h> pulls <machine/pthread_impl.h>, which libpthreads
+# PUBLISHES into generated/include.  This target uses the header without
+# linking the library, so nothing ordered it before the copy and a build
+# from an empty directory could compile first and fail.
+if(TARGET libposix-uros)
+  add_dependencies(libposix-uros pthread_impl_published)
+endif()
+if(TARGET libposix-uros-pic)
+  add_dependencies(libposix-uros-pic pthread_impl_published)
+endif()

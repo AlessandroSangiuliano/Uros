@@ -90,7 +90,20 @@ if(UROS_BUILD_MUSL)
     ${VFS_USER_C}
   )
   add_dependencies(libvfs-pic mig_mach_public_headers)
-  if(TARGET musl_extproj)
+  # 🔥 UROS_BUILD_MUSL, not `if(TARGET musl_extproj)' (#434).
+  #
+  # This target is created from add_subdirectory(src), which runs BEFORE
+  # add_subdirectory(src/contrib) -- so when the old guard was evaluated
+  # musl_extproj did not exist yet, the condition was false, and the
+  # dependency was never added.  Silently: a guard written to guarantee an
+  # ordering was the reason there was none.
+  #
+  # It is not that add_dependencies() needs the target to exist; a dozen
+  # other call sites in src/ name musl_extproj with no guard at all and are
+  # ordered correctly, because CMake resolves the name at generate time.
+  # The option is known at configure time and does not depend on directory
+  # order, so it is what the condition asks about.
+  if(UROS_BUILD_MUSL)
     add_dependencies(libvfs-pic musl_extproj)
   endif()
   set_target_properties(libvfs-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -110,4 +123,15 @@ if(UROS_BUILD_MUSL)
     ${CMAKE_SOURCE_DIR}/include
   )
   set_target_properties(libvfs-pic PROPERTIES OUTPUT_NAME "vfs-pic")
+endif()
+
+# #434: <pthread.h> pulls <machine/pthread_impl.h>, which libpthreads
+# PUBLISHES into generated/include.  This target uses the header without
+# linking the library, so nothing ordered it before the copy and a build
+# from an empty directory could compile first and fail.
+if(TARGET libvfs)
+  add_dependencies(libvfs pthread_impl_published)
+endif()
+if(TARGET libvfs-pic)
+  add_dependencies(libvfs-pic pthread_impl_published)
 endif()
