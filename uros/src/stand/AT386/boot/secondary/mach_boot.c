@@ -81,7 +81,7 @@ WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #include "boot.h"
 #include "bios.h"
 #include <sys/reboot.h>
-#include <mach/fs/file_system.h>
+#include <file_system.h>
 #include <i386/disk.h>
 #include <secondary/net.h>
 #include <secondary/net/dlink.h>

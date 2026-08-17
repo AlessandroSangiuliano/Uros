@@ -165,8 +165,7 @@ target_include_directories(bootstrap_server PRIVATE
   # pthread_machdep.h with i386's -- a lock type of the wrong width and a
   # stack-switch sequence in 32-bit assembly.
   $<IF:$<STREQUAL:${UROS_TARGET_ARCH},i386>,${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386,${CMAKE_SOURCE_DIR}/src/lib/libpthreads/x86_64>
-  # Filesystem headers — must come before export so the canonical file_system.h
-  # is used (export/include copy may be stale)
+  # Filesystem headers (file_system.h, externs.h)
   ${CMAKE_SOURCE_DIR}/src/file_systems
   # Kernel headers (mach/, device/, ddb/, i386/) — bootstrap needs kernel-internal
   # extensions (boot_info.h multi-segment support) so kernel must come BEFORE export
