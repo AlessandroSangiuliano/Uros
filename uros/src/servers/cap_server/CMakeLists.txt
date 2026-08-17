@@ -55,8 +55,6 @@ target_include_directories(cap_server_bin PRIVATE
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
-  # Pre-built export headers (mach/cap_types.h, mach/bootstrap.h, ...)
-  ${CMAKE_SOURCE_DIR}/export/include
   # MIG-generated headers (cap_server_server.h, cap_server.h)
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include

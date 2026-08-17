@@ -20,7 +20,6 @@ add_custom_command(
     # preprocessor until it learned this one, so migcom generated i386 layout
     # in silence.  ${UROS_MIG_TARGET_ARGS} comes from the top level.
     ${UROS_MIG_TARGET_ARGS}
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${CAP_USER_H}
@@ -62,7 +61,6 @@ add_custom_command(
     # preprocessor until it learned this one, so migcom generated i386 layout
     # in silence.  ${UROS_MIG_TARGET_ARGS} comes from the top level.
     ${UROS_MIG_TARGET_ARGS}
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${CAP_REVOKE_USER_H}
@@ -113,7 +111,6 @@ target_include_directories(libcap PUBLIC
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

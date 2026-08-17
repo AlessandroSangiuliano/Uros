@@ -25,7 +25,6 @@ target_include_directories(libblk PRIVATE
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
-  ${CMAKE_SOURCE_DIR}/export/include
   ${CMAKE_SOURCE_DIR}/include
 )
 

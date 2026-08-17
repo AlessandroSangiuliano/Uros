@@ -19,7 +19,6 @@ add_custom_command(
     # preprocessor until it learned this one, so migcom generated i386 layout
     # in silence.  ${UROS_MIG_TARGET_ARGS} comes from the top level.
     ${UROS_MIG_TARGET_ARGS}
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${GPU_USER_H}
@@ -70,7 +69,6 @@ target_include_directories(libgpu_console PUBLIC
   # pthread.h for #209 async init worker
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

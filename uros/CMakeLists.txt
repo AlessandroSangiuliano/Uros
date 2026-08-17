@@ -190,7 +190,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/mig.cmake)
 # run honestly, because both sides of the comparison are the same generation.
 #
 # Listing both trees is deliberate: the kernel reads src/mach_kernel/mach/,
-# userland reads export/include/mach/, and depending on a file a given rule
+# userland reads uapi/mach/, and depending on a file a given rule
 # happens not to read costs a rebuild while missing one costs correctness.
 #
 # 🔥 Found by GLOB and not by hand, and that is the repair of this list rather

@@ -24,7 +24,6 @@ project(libmach C)
 # else", which is exactly what boot_probe is.
 if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
-  set(_E ${CMAKE_SOURCE_DIR}/export/include)
   set(_U ${UROS_UAPI_DIR})
 
   set(_traps_src ${CMAKE_CURRENT_SOURCE_DIR}/mach_traps.s)
@@ -40,12 +39,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   add_custom_command(
     OUTPUT ${_traps_pp}
     COMMAND ${CMAKE_C_COMPILER} -E -x assembler-with-cpp -D__ASSEMBLER__
+            -I${UROS_UAPI_DIR}
             -I${UROS_ARCH_INCLUDE}
             -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-            -I${CMAKE_SOURCE_DIR}/export/include
             ${_traps_src} -o ${_traps_pp}
     DEPENDS ${_traps_src}
-            ${CMAKE_SOURCE_DIR}/export/include/mach/syscall_sw.h
+            ${UROS_UAPI_DIR}/mach/syscall_sw.h
             ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}/syscall_sw.h
     COMMENT "Preprocessing the Mach trap stubs for ${UROS_TARGET_ARCH}"
     VERBATIM
@@ -60,10 +59,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # mach_msg_* wrappers -- and it reports itself as a missing FILE, which
   # names the symptom rather than the generator nobody invoked.
   set(UROS_MIG_USERLAND_INCLUDES
-      -I${_E}
       -I${UROS_ARCH_INCLUDE}
-      -I${_K}
-      -I${_E}/mach_debug)
+      -I${_K})
 
   set(_MIG_OUT ${CMAKE_BINARY_DIR}/generated)
   set(_DEFS
@@ -236,7 +233,6 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${CMAKE_SOURCE_DIR}/uapi
     ${CMAKE_BINARY_DIR}/generated/include
     ${CMAKE_SOURCE_DIR}/src/mach_services/include
-    ${CMAKE_SOURCE_DIR}/export/include
     ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include)
@@ -274,7 +270,9 @@ list(REMOVE_ITEM LIB_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)
 # libsa_mach in #106.  Other files only need stdint.h.
 
 # __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out)
-set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${UROS_ARCH_INCLUDE} -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
+# ⚠️ uapi is on this line because mach_traps.s is `#include <mach/syscall_sw.h>'
+# and nothing else -- the trap table, which #481 moved there from export/include.
+set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${UROS_UAPI_DIR} -I${UROS_ARCH_INCLUDE} -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/asm")
 
 # Preprocess ALL lowercase .s files (they use #include and need CPP)
@@ -285,7 +283,7 @@ foreach(sfile IN LISTS TOP_S_LOWER_S)
     OUTPUT ${pp_output}
     COMMAND /bin/sh -c "${CMAKE_C_COMPILER} -E -x assembler-with-cpp -D__ASSEMBLER__ ${ASM_PREPROCESS_INCLUDES} ${sfile} | sed -e 's#/ # #g' -e 's/\\.align ALIGN/.align 2/g' -e 's/^ \\+zero /# zero /g' > ${pp_output}"
     DEPENDS ${sfile}
-            ${CMAKE_SOURCE_DIR}/export/include/mach/syscall_sw.h
+            ${UROS_UAPI_DIR}/mach/syscall_sw.h
     COMMENT "Preprocessing asm ${sfile}"
     VERBATIM
   )
@@ -324,10 +322,9 @@ endif()
 # either fail MIG parsing or are not used by userspace.
 
 set(_KERNEL ${CMAKE_SOURCE_DIR}/src/mach_kernel)
-set(_EXPORT ${CMAKE_SOURCE_DIR}/export/include)
 set(_UAPI   ${UROS_UAPI_DIR})
 # MIG include path: export tree first (userspace .defs), then kernel for extras
-set(_MIG_INC ${_UAPI} ${_EXPORT} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_UAPI}/mach_debug ${_EXPORT}/mach_debug)
+set(_MIG_INC ${_UAPI} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_UAPI}/mach_debug)
 
 # --- All .defs userland needs (matching original common.mk MIG_DEFS) ---
 # ⚠️ This list used to say it took the export tree on purpose, because "the
@@ -505,7 +502,6 @@ target_include_directories(libmach PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/uapi			# #179 — UAPI split
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
@@ -604,7 +600,6 @@ if(UROS_BUILD_MUSL)
     ${CMAKE_BINARY_DIR}/generated/include
     ${CMAKE_SOURCE_DIR}/uapi
     ${CMAKE_SOURCE_DIR}/src/mach_services/include
-    ${CMAKE_SOURCE_DIR}/export/include
     ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include

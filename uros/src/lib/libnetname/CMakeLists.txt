@@ -20,7 +20,6 @@ add_custom_command(
     # in silence.  ${UROS_MIG_TARGET_ARGS} is set at the top level, so it is
     # never empty here.
     ${UROS_MIG_TARGET_ARGS}
-    -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/mach_services/servers/netname
@@ -74,7 +73,6 @@ target_include_directories(libnetname PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/servers/netname
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

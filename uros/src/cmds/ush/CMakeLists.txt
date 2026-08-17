@@ -49,7 +49,6 @@ target_include_directories(ush_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/lib/libposix-uros/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_BINARY_DIR}/generated/include
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/src/servers/char_server

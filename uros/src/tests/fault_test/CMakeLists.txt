@@ -19,15 +19,12 @@ if(UROS_TARGET_ARCH STREQUAL "i386")
   return()
 endif()
 
-set(_E ${CMAKE_SOURCE_DIR}/export/include)
 set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 
 set(UROS_MIG_USERLAND_INCLUDES
-    -I${_E}
     -I${UROS_ARCH_INCLUDE}
     -I${_K}
-    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
-    -I${_E}/mach_debug)
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers)
 
 # exc.defs, for the server half only.  The task is the one being told about a
 # fault, so what it needs is the demultiplexer and the three catch_ routines
@@ -59,7 +56,6 @@ target_include_directories(fault_test_bin PRIVATE
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/uapi
-  ${_E}
   ${UROS_ARCH_INCLUDE}
   ${_K}
   ${CMAKE_SOURCE_DIR}/include)
