@@ -21,15 +21,12 @@ project(name_server C)
 #
 # The i386 half below is untouched and still uses the wrapper.
 if(NOT UROS_TARGET_ARCH STREQUAL "i386")
-  set(_E ${CMAKE_SOURCE_DIR}/export/include)
   set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 
   set(UROS_MIG_USERLAND_INCLUDES
-      -I${_E}
       -I${UROS_ARCH_INCLUDE}
       -I${_K}
-      -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
-      -I${_E}/mach_debug)
+      -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers)
 
   set(_NS_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
   set(NS_MIG_GENERATED)
@@ -59,9 +56,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   target_compile_definitions(name_server_bin PRIVATE MACH_IPC_COMPAT=0)
 
   # ⚠️ ${_NS_OUT} first: netname.c includes "netname_server.h" and the stubs
-  # include each other by quoted name.  And NOT the shared generated/ MIG
-  # directory, for the reason libmach's CMakeLists gives at length -- it holds
-  # a mach.h that shadows libmach's umbrella header.
+  # include each other by quoted name.  The shared generated/ MIG directory is
+  # not needed here -- this server's stubs are its own.
   target_include_directories(name_server_bin PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${_NS_OUT}
@@ -70,7 +66,6 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${CMAKE_BINARY_DIR}/generated/include
     ${CMAKE_SOURCE_DIR}/src/mach_services/include
     ${CMAKE_SOURCE_DIR}/uapi
-    ${_E}
     ${UROS_ARCH_INCLUDE}
     ${_K}
     ${CMAKE_SOURCE_DIR}/include)
@@ -113,7 +108,6 @@ macro(mig_all DEFS_FILE STEM)
     COMMAND ${MIG_SCRIPT}
       -cpp ${CMAKE_C_COMPILER}
       -migcom $<TARGET_FILE:migcom>
-      -I${CMAKE_SOURCE_DIR}/export/include
       -I${UROS_ARCH_INCLUDE}
       -I${CMAKE_SOURCE_DIR}/src/mach_kernel
       -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
@@ -186,8 +180,6 @@ target_include_directories(name_server_bin PRIVATE
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, cthreads.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  # Pre-built export headers (mach/*, servers/*, device/*)
-  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers (mach/, device/)
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel

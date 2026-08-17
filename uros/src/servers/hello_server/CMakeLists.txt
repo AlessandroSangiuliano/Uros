@@ -65,14 +65,10 @@ target_include_directories(hello_server_server PRIVATE
   ${_GCC_INCLUDE}
   # libposix-uros public ABI (__uros_syscall*, version macros)
   ${CMAKE_SOURCE_DIR}/src/lib/libposix-uros/include
-  # In-tree Mach userspace headers (mach_init.h with mach_cap_port,
-  # libcap.h ...) — placed before export/include so the developer copy
-  # wins over the public-export stub for symbols not yet promoted.
+  # In-tree Mach userspace headers (mach.h, mach_init.h, libcap.h ...)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # Generated MIG headers (mach/bootstrap.h, mach/mach_port.h, ...)
   ${CMAKE_BINARY_DIR}/generated/include
-  # Pre-built export headers (mach.h, libcap.h, device/, ...)
-  ${CMAKE_SOURCE_DIR}/export/include
   # Kernel headers needed by some MIG-generated stubs
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel

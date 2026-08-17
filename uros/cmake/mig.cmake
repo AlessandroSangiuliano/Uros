@@ -55,6 +55,27 @@
 # call site; this cannot be forgotten because there is no pipe left to forget
 # about.
 #
+# 🔑 THE USER HEADER IS NAMED AFTER THE .defs, AND IT LANDS ON AN INCLUDE PATH (#481).
+#
+# MIG writes the user header as <defs-basename>.h into build/generated, and
+# build/generated is an -I root for 61 translation units.  For mach.defs that
+# name is <mach.h>, which is also libmach's umbrella header -- so those units
+# resolved #include <mach.h> to the mach.defs stubs instead, silently, decided
+# by the order of their -I flags.
+#
+# The public name has always been <mach/mach_interface.h>; mach.h was only the
+# intermediate that got copied there.  So the intermediate is given the public
+# name from the start.  migcom emits #include "<basename>" for its own header,
+# quoted, which resolves next to the generated .c -- the rename needs nothing
+# else to agree with it.
+function(mig_user_header_name DEFS_NAME OUT_VAR)
+    if(DEFS_NAME STREQUAL "mach")
+        set(${OUT_VAR} mach_interface PARENT_SCOPE)
+    else()
+        set(${OUT_VAR} ${DEFS_NAME} PARENT_SCOPE)
+    endif()
+endfunction()
+
 # Use -x c to force C preprocessing of .defs files (modern GCC ignores unknown extensions)
 function(add_mig_server DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
@@ -150,10 +171,11 @@ endfunction()
 # and this one cannot be emptied by a scope.
 function(add_mig_userland DEFS_FILE OUTPUT_DIR SUBSYS_NAME)
     get_filename_component(DEFS_NAME ${DEFS_FILE} NAME_WE)
+    mig_user_header_name(${DEFS_NAME} USER_H_NAME)
     set(MIG_PP ${OUTPUT_DIR}/${DEFS_NAME}.mig.i)
     set(USER_C   ${OUTPUT_DIR}/${DEFS_NAME}_user.c)
     set(SERVER_C ${OUTPUT_DIR}/${DEFS_NAME}_server.c)
-    set(USER_H   ${OUTPUT_DIR}/${DEFS_NAME}.h)
+    set(USER_H   ${OUTPUT_DIR}/${USER_H_NAME}.h)
     set(SERVER_H ${OUTPUT_DIR}/${DEFS_NAME}_server.h)
 
     file(MAKE_DIRECTORY ${OUTPUT_DIR})

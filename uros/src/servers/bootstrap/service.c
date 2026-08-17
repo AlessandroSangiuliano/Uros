@@ -80,7 +80,7 @@
 #include <mach/notify.h>
 #include <mach/notify_server.h>
 #include <mach/mig_errors.h>
-#include <servers/service_server.h>
+#include "serviceServer.h"
 
 #include "bootstrap.h"
 

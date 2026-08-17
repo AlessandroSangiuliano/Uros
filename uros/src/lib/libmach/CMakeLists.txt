@@ -24,7 +24,6 @@ project(libmach C)
 # else", which is exactly what boot_probe is.
 if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
-  set(_E ${CMAKE_SOURCE_DIR}/export/include)
   set(_U ${UROS_UAPI_DIR})
 
   set(_traps_src ${CMAKE_CURRENT_SOURCE_DIR}/mach_traps.s)
@@ -40,12 +39,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   add_custom_command(
     OUTPUT ${_traps_pp}
     COMMAND ${CMAKE_C_COMPILER} -E -x assembler-with-cpp -D__ASSEMBLER__
+            -I${UROS_UAPI_DIR}
             -I${UROS_ARCH_INCLUDE}
             -I${CMAKE_SOURCE_DIR}/src/mach_kernel
-            -I${CMAKE_SOURCE_DIR}/export/include
             ${_traps_src} -o ${_traps_pp}
     DEPENDS ${_traps_src}
-            ${CMAKE_SOURCE_DIR}/export/include/mach/syscall_sw.h
+            ${UROS_UAPI_DIR}/mach/syscall_sw.h
             ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}/syscall_sw.h
     COMMENT "Preprocessing the Mach trap stubs for ${UROS_TARGET_ARCH}"
     VERBATIM
@@ -60,10 +59,8 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # mach_msg_* wrappers -- and it reports itself as a missing FILE, which
   # names the symptom rather than the generator nobody invoked.
   set(UROS_MIG_USERLAND_INCLUDES
-      -I${_E}
       -I${UROS_ARCH_INCLUDE}
-      -I${_K}
-      -I${_E}/mach_debug)
+      -I${_K})
 
   set(_MIG_OUT ${CMAKE_BINARY_DIR}/generated)
   set(_DEFS
@@ -115,7 +112,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # judgement about what the target needs -- it is the list that happened to be
   # written when only libmach itself consumed them.  bootstrap wants two more:
   # the SERVER half of bootstrap.defs, which it demultiplexes, and mach_klog.
-  set(_PUB_MAP  mach.h mach_interface.h  mach_port.h mach_port.h
+  set(_PUB_MAP  mach_interface.h mach_interface.h  mach_port.h mach_port.h
                 mach_host.h mach_host.h  clock.h clock.h
                 bootstrap.h bootstrap.h  exc.h exc_user.h
                 exc_server.h exc_server.h  notify_server.h notify_server.h
@@ -144,6 +141,18 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     DEPENDS ${_MIG_OUT}/device.h
     COMMENT "Publish device/device.h" VERBATIM)
   list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
+
+  # #481: and mach_debug/mach_debug.h, which bootstrap.h includes.  What used
+  # to answer that spelling was a checked-in copy of this same stub.
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/mach_debug")
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/mach_debug/mach_debug.h
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_MIG_OUT}/mach_debug.h
+            ${CMAKE_BINARY_DIR}/generated/include/mach_debug/mach_debug.h
+    DEPENDS ${_MIG_OUT}/mach_debug.h
+    COMMENT "Publish mach_debug/mach_debug.h" VERBATIM)
+  list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/mach_debug/mach_debug.h)
 
   # ⚠️ The SAME NAME the i386 half uses, and that is the whole point.  It was
   # mig_mach_headers_x86_64, so every consumer had to know which target it was
@@ -214,22 +223,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
                             -mstack-protector-guard=global -include stdint.h>)
 
 
-  # ⚠️ The MIG OUTPUT directory is deliberately NOT here.  It holds a file
-  # called mach.h -- the header for mach.defs -- and libmach has its own
-  # mach.h, the umbrella that pulls in mach_init.h and with it the
-  # `#define mach_task_self() mach_task_self_' every one of these files
-  # needs.  Put the raw directory on the path and the generated one wins,
-  # the macro disappears, and seven sources fail with an implicit
-  # declaration that names a function nobody ever calls.  The generated
-  # stubs still find their own headers: they include them with quotes, and
-  # a quoted include looks in the including file's own directory first.
+  # The MIG OUTPUT directory is not here, and does not need to be: the
+  # generated stubs include their own headers with quotes, and a quoted
+  # include looks in the including file's own directory first.  What is
+  # published from there is published by name, under generated/include/mach.
   target_include_directories(libmach PUBLIC
     ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/uapi
     ${CMAKE_BINARY_DIR}/generated/include
     ${CMAKE_SOURCE_DIR}/src/mach_services/include
-    ${CMAKE_SOURCE_DIR}/export/include
     ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include)
@@ -267,7 +270,9 @@ list(REMOVE_ITEM LIB_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)
 # libsa_mach in #106.  Other files only need stdint.h.
 
 # __NO_UNDERSCORES__: ELF does not prefix symbols with '_' (unlike Mach-O/a.out)
-set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${CMAKE_SOURCE_DIR}/export/include -I${UROS_ARCH_INCLUDE} -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
+# ⚠️ uapi is on this line because mach_traps.s is `#include <mach/syscall_sw.h>'
+# and nothing else -- the trap table, which #481 moved there from export/include.
+set(ASM_PREPROCESS_INCLUDES "-D__NO_UNDERSCORES__ -I${CMAKE_CURRENT_SOURCE_DIR} -I${CMAKE_BINARY_DIR}/generated/include -I${CMAKE_SOURCE_DIR}/src/mach_services/include -I${UROS_UAPI_DIR} -I${UROS_ARCH_INCLUDE} -I${CMAKE_SOURCE_DIR}/src/mach_kernel -I${CMAKE_SOURCE_DIR}/include")
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated/asm")
 
 # Preprocess ALL lowercase .s files (they use #include and need CPP)
@@ -278,7 +283,7 @@ foreach(sfile IN LISTS TOP_S_LOWER_S)
     OUTPUT ${pp_output}
     COMMAND /bin/sh -c "${CMAKE_C_COMPILER} -E -x assembler-with-cpp -D__ASSEMBLER__ ${ASM_PREPROCESS_INCLUDES} ${sfile} | sed -e 's#/ # #g' -e 's/\\.align ALIGN/.align 2/g' -e 's/^ \\+zero /# zero /g' > ${pp_output}"
     DEPENDS ${sfile}
-            ${CMAKE_SOURCE_DIR}/export/include/mach/syscall_sw.h
+            ${UROS_UAPI_DIR}/mach/syscall_sw.h
     COMMENT "Preprocessing asm ${sfile}"
     VERBATIM
   )
@@ -317,10 +322,9 @@ endif()
 # either fail MIG parsing or are not used by userspace.
 
 set(_KERNEL ${CMAKE_SOURCE_DIR}/src/mach_kernel)
-set(_EXPORT ${CMAKE_SOURCE_DIR}/export/include)
 set(_UAPI   ${UROS_UAPI_DIR})
 # MIG include path: export tree first (userspace .defs), then kernel for extras
-set(_MIG_INC ${_UAPI} ${_EXPORT} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_UAPI}/mach_debug ${_EXPORT}/mach_debug)
+set(_MIG_INC ${_UAPI} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_UAPI}/mach_debug)
 
 # --- All .defs userland needs (matching original common.mk MIG_DEFS) ---
 # ⚠️ This list used to say it took the export tree on purpose, because "the
@@ -365,8 +369,7 @@ endforeach()
 # etc. from the regenerated copy instead of a checked-in stale one.
 #
 # Rows: <build-generated filename>  <public filename under mach/>
-# Two renames preserve the legacy public names to avoid a source-wide rename:
-#   mach.h                       -> mach_interface.h
+# One rename preserves a legacy public name to avoid a source-wide rename:
 #   memory_object_default_user.h -> memory_object_default.h
 set(_PUB_MACH_DIR "${CMAKE_BINARY_DIR}/generated/include/mach")
 file(MAKE_DIRECTORY "${_PUB_MACH_DIR}")
@@ -383,7 +386,7 @@ set(_MIG_PUBLIC_MAP
   ledger.h                       ledger.h
   mach_host.h                    mach_host.h
   mach_klog.h                    mach_klog.h
-  mach.h                         mach_interface.h
+  mach_interface.h               mach_interface.h
   mach_norma.h                   mach_norma.h
   mach_port.h                    mach_port.h
   memory_object_default.h        memory_object_default.h
@@ -413,6 +416,35 @@ foreach(_i RANGE 0 ${_map_last} 2)
     VERBATIM
   )
   list(APPEND _MIG_PUBLIC_HEADERS ${_dst})
+endforeach()
+
+# #481: the three that are published outside mach/.  Each of these spellings
+# used to be answered by a checked-in copy of the very stub generated here --
+# _mach_debug_user_, _device_reply_user_, _device_request_user_ -- so an edit
+# to the .defs reached the stub and not the header its callers included.
+# Rows: <subdirectory under generated/include>  <generated name>
+set(_MIG_PUBLIC_SUBDIR_MAP
+  mach_debug  mach_debug.h
+  device      device_reply.h
+  device      device_request.h
+)
+list(LENGTH _MIG_PUBLIC_SUBDIR_MAP _sub_len)
+math(EXPR _sub_last "${_sub_len} - 1")
+foreach(_i RANGE 0 ${_sub_last} 2)
+  math(EXPR _j "${_i} + 1")
+  list(GET _MIG_PUBLIC_SUBDIR_MAP ${_i} _sub)
+  list(GET _MIG_PUBLIC_SUBDIR_MAP ${_j} _name)
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/${_sub}")
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/${_sub}/${_name}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_BINARY_DIR}/generated/${_name}
+            ${CMAKE_BINARY_DIR}/generated/include/${_sub}/${_name}
+    DEPENDS ${CMAKE_BINARY_DIR}/generated/${_name}
+    COMMENT "Publish ${_sub}/${_name}"
+    VERBATIM
+  )
+  list(APPEND _MIG_PUBLIC_HEADERS ${CMAKE_BINARY_DIR}/generated/include/${_sub}/${_name})
 endforeach()
 
 add_custom_target(mig_mach_public_headers DEPENDS ${_MIG_PUBLIC_HEADERS})
@@ -470,7 +502,6 @@ target_include_directories(libmach PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/uapi			# #179 — UAPI split
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
-  ${CMAKE_SOURCE_DIR}/export/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
@@ -569,7 +600,6 @@ if(UROS_BUILD_MUSL)
     ${CMAKE_BINARY_DIR}/generated/include
     ${CMAKE_SOURCE_DIR}/uapi
     ${CMAKE_SOURCE_DIR}/src/mach_services/include
-    ${CMAKE_SOURCE_DIR}/export/include
     ${UROS_ARCH_INCLUDE}
     ${CMAKE_SOURCE_DIR}/src/mach_kernel
     ${CMAKE_SOURCE_DIR}/include

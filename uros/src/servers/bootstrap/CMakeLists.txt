@@ -6,7 +6,6 @@ project(bootstrap_server C)
 # ===========================================================================
 
 set(MIG_INCLUDE_FLAGS
-  -I${CMAKE_SOURCE_DIR}/export/include
   -I${UROS_ARCH_INCLUDE}
   -I${CMAKE_SOURCE_DIR}/src/mach_kernel
   -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
@@ -165,15 +164,12 @@ target_include_directories(bootstrap_server PRIVATE
   # pthread_machdep.h with i386's -- a lock type of the wrong width and a
   # stack-switch sequence in 32-bit assembly.
   $<IF:$<STREQUAL:${UROS_TARGET_ARCH},i386>,${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386,${CMAKE_SOURCE_DIR}/src/lib/libpthreads/x86_64>
-  # Filesystem headers — must come before export so the canonical file_system.h
-  # is used (export/include copy may be stale)
+  # Filesystem headers (file_system.h, externs.h)
   ${CMAKE_SOURCE_DIR}/src/file_systems
   # Kernel headers (mach/, device/, ddb/, i386/) — bootstrap needs kernel-internal
   # extensions (boot_info.h multi-segment support) so kernel must come BEFORE export
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
-  # Pre-built export headers (mach/mach_interface.h, etc.)
-  ${CMAKE_SOURCE_DIR}/export/include
   # Top-level include
   ${CMAKE_SOURCE_DIR}/include
   # Issue #185: stage-2 reads via BDS (libblk) gated by Uros caps (libcap)

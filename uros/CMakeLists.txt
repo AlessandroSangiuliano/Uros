@@ -190,7 +190,7 @@ include(${CMAKE_SOURCE_DIR}/cmake/mig.cmake)
 # run honestly, because both sides of the comparison are the same generation.
 #
 # Listing both trees is deliberate: the kernel reads src/mach_kernel/mach/,
-# userland reads export/include/mach/, and depending on a file a given rule
+# userland reads uapi/mach/, and depending on a file a given rule
 # happens not to read costs a rebuild while missing one costs correctness.
 #
 # 🔥 Found by GLOB and not by hand, and that is the repair of this list rather
@@ -207,9 +207,15 @@ include(${CMAKE_SOURCE_DIR}/cmake/mig.cmake)
 # construction, and CONFIGURE_DEPENDS makes a new one re-run cmake rather than
 # wait to be noticed.  It sweeps up the machine_types.defs of machines this
 # build has never targeted, which costs nothing -- nobody edits hp_pa.
+#
+# 🔥 AND uapi, NOT export/include (#481).  The interface .defs moved to uapi in
+# #471 and this pattern did not follow them, so from that day mach_types.defs
+# was in no rule's dependencies: the very file #470 corrected and #478 changed
+# could be edited with the stubs keeping their old layout -- the failure this
+# list exists to prevent, reintroduced by the move that was meant to end it.
 file(GLOB_RECURSE UROS_MIG_COMMON_DEFS CONFIGURE_DEPENDS
      ${CMAKE_SOURCE_DIR}/src/mach_kernel/*_types.defs
-     ${CMAKE_SOURCE_DIR}/export/include/*_types.defs)
+     ${CMAKE_SOURCE_DIR}/uapi/*_types.defs)
 
 # Export layout customization: platform name for exported artifacts (can be overridden by user)
 option(EXPORT_PLATFORM "Platform name used for export directory (default: ${CMAKE_SYSTEM_NAME} or 'uros' when building kernel)" "")
