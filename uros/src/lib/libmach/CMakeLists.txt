@@ -145,6 +145,18 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     COMMENT "Publish device/device.h" VERBATIM)
   list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/device/device.h)
 
+  # #481: and mach_debug/mach_debug.h, which bootstrap.h includes.  What used
+  # to answer that spelling was a checked-in copy of this same stub.
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/mach_debug")
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/mach_debug/mach_debug.h
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${_MIG_OUT}/mach_debug.h
+            ${CMAKE_BINARY_DIR}/generated/include/mach_debug/mach_debug.h
+    DEPENDS ${_MIG_OUT}/mach_debug.h
+    COMMENT "Publish mach_debug/mach_debug.h" VERBATIM)
+  list(APPEND _PUB_HDRS ${CMAKE_BINARY_DIR}/generated/include/mach_debug/mach_debug.h)
+
   # ⚠️ The SAME NAME the i386 half uses, and that is the whole point.  It was
   # mig_mach_headers_x86_64, so every consumer had to know which target it was
   # built for -- and 41 CMakeLists in this tree name mig_mach_public_headers.
@@ -407,6 +419,35 @@ foreach(_i RANGE 0 ${_map_last} 2)
     VERBATIM
   )
   list(APPEND _MIG_PUBLIC_HEADERS ${_dst})
+endforeach()
+
+# #481: the three that are published outside mach/.  Each of these spellings
+# used to be answered by a checked-in copy of the very stub generated here --
+# _mach_debug_user_, _device_reply_user_, _device_request_user_ -- so an edit
+# to the .defs reached the stub and not the header its callers included.
+# Rows: <subdirectory under generated/include>  <generated name>
+set(_MIG_PUBLIC_SUBDIR_MAP
+  mach_debug  mach_debug.h
+  device      device_reply.h
+  device      device_request.h
+)
+list(LENGTH _MIG_PUBLIC_SUBDIR_MAP _sub_len)
+math(EXPR _sub_last "${_sub_len} - 1")
+foreach(_i RANGE 0 ${_sub_last} 2)
+  math(EXPR _j "${_i} + 1")
+  list(GET _MIG_PUBLIC_SUBDIR_MAP ${_i} _sub)
+  list(GET _MIG_PUBLIC_SUBDIR_MAP ${_j} _name)
+  file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/generated/include/${_sub}")
+  add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/generated/include/${_sub}/${_name}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${CMAKE_BINARY_DIR}/generated/${_name}
+            ${CMAKE_BINARY_DIR}/generated/include/${_sub}/${_name}
+    DEPENDS ${CMAKE_BINARY_DIR}/generated/${_name}
+    COMMENT "Publish ${_sub}/${_name}"
+    VERBATIM
+  )
+  list(APPEND _MIG_PUBLIC_HEADERS ${CMAKE_BINARY_DIR}/generated/include/${_sub}/${_name})
 endforeach()
 
 add_custom_target(mig_mach_public_headers DEPENDS ${_MIG_PUBLIC_HEADERS})
