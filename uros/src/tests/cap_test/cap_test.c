@@ -38,6 +38,7 @@
 #include <mach.h>
 #include <mach/mig_errors.h>	/* #443: MIG_BAD_ARGUMENTS, mig_reply_error_t */
 #include <mach/mach_syscalls.h>	/* #472: trap 100, called directly */
+#include <mach/rpc.h>		/* #478: struct rpc_subsystem */
 #include <mach/bootstrap.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
@@ -333,6 +334,128 @@ subsystem_name_is_not_a_pointer(void)
         printf("cap_test: [9] trap 100 refused a real name that is not a "
                "subsystem: kr=%d\n", (int) kr);
     }
+
+    return ok;
+}
+
+/*
+ * #478.  A subsystem must survive an allocation that fails.
+ *
+ * `syscall_mach_port_allocate_full' released a subsystem reference on every
+ * path, and mach_port_allocate_full() takes the matching one only INSIDE its
+ * `if (kr == KERN_SUCCESS)'.  So a failing allocation decremented a count
+ * that had never been incremented.  A subsystem is created with a count of
+ * one, which means one call: it reached zero, the subsystem was freed, and
+ * the port that names it was left pointing into the hole.
+ *
+ * Nothing privileged is needed to make the allocation fail -- `qos.name'
+ * with a name that already denotes a right returns KERN_NAME_EXISTS, and
+ * the name is chosen in ring 3.
+ *
+ * ⚠️ The trap is called directly rather than through libmach, and here that
+ * is not only the #472 reason.  libmach's mach_port_allocate_full() falls
+ * back to the MIG route on MACH_SEND_INTERRUPTED, which is exactly what a
+ * destroyed subsystem produces -- and the MIG route would then allocate
+ * happily with no subsystem at all and report success.  The fallback would
+ * convert the finding into a pass.
+ *
+ * ⚠️ The subsystem is probed BEFORE the failing call as well as after it.
+ * The whole test rests on reading "the subsystem is gone" out of a refusal
+ * from trap 100, and a refusal that was never shown able to be an
+ * acceptance is not evidence of anything.  The first probe is what makes
+ * the second one mean something.
+ *
+ * The port from the first probe is destroyed straight away, and that is
+ * load-bearing rather than tidiness: destroying the receive right releases
+ * the reference mach_port_allocate_full() took for it, which puts the count
+ * back to one on both kernels.  Leave it alive and the broken kernel goes
+ * from two to one instead of from one to zero, and passes.
+ */
+static int
+subsystem_survives_a_failed_allocation(void)
+{
+    /*
+     * The smallest subsystem mach_subsystem_create() accepts: no routines,
+     * so `end - start' is zero and the validation loop over the routine
+     * array never runs.  Nothing in it is ever called -- what is under test
+     * is the object's lifetime, not the RPC it describes.
+     */
+    struct rpc_subsystem  desc;
+    mach_port_qos_t       qos;
+    mach_port_t           subsys = MACH_PORT_NULL;
+    mach_port_t           taken  = MACH_PORT_NULL;
+    mach_port_t           probe  = MACH_PORT_NULL;
+    mach_port_t           name;
+    kern_return_t         kr;
+    int                   ok = 1;
+
+    memset(&desc, 0, sizeof desc);
+    desc.start     = 0;
+    desc.end       = 0;
+    desc.base_addr = (vm_address_t)(uintptr_t) &desc;
+
+    kr = mach_subsystem_create(mach_task_self(), (user_subsystem_t) &desc,
+                               (mach_msg_type_number_t) sizeof desc, &subsys);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [10] mach_subsystem_create failed kr=%d — the test "
+               "could not run, which is not a pass\n", (int) kr);
+        return 0;
+    }
+
+    /* The probe, on a subsystem known to be alive. */
+    kr = syscall_mach_port_allocate_subsystem(mach_task_self(), subsys,
+                                              &probe);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [10] trap 100 refused a subsystem that was just "
+               "created: kr=%d — the observation cannot see a live one, so "
+               "it cannot report a dead one\n", (int) kr);
+        (void) mach_port_deallocate(mach_task_self(), subsys);
+        return 0;
+    }
+    printf("cap_test: [10] trap 100 accepted a live subsystem — the probe "
+           "below can tell the two answers apart\n");
+    (void) mach_port_destroy(mach_task_self(), probe);
+
+    /* A name that already denotes a right, so the allocation must fail. */
+    kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &taken);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [10] could not allocate a name to collide with: "
+               "kr=%d\n", (int) kr);
+        (void) mach_port_deallocate(mach_task_self(), subsys);
+        return 0;
+    }
+
+    memset(&qos, 0, sizeof qos);
+    qos.name = TRUE;
+    name = taken;
+
+    kr = syscall_mach_port_allocate_full(mach_task_self(),
+                                         MACH_PORT_RIGHT_RECEIVE,
+                                         subsys, &qos, &name);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [10] trap 103 allocated a name already in use — "
+               "the failure path this tests was never taken\n");
+        ok = 0;
+    } else {
+        printf("cap_test: [10] trap 103 refused a name already in use: "
+               "kr=%d\n", (int) kr);
+    }
+
+    /* The assertion: the failed call must not have consumed the subsystem. */
+    name = MACH_PORT_NULL;
+    kr = syscall_mach_port_allocate_subsystem(mach_task_self(), subsys, &name);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [10] the subsystem survived a failed allocation\n");
+        (void) mach_port_destroy(mach_task_self(), name);
+    } else {
+        printf("cap_test: [10] the subsystem is GONE after one failed "
+               "allocation: kr=%d — its count was decremented without ever "
+               "having been incremented\n", (int) kr);
+        ok = 0;
+    }
+
+    (void) mach_port_destroy(mach_task_self(), taken);
+    (void) mach_port_deallocate(mach_task_self(), subsys);
 
     return ok;
 }
@@ -805,6 +928,9 @@ main(int argc, char **argv)
         pass = 0;
 
     if (!subsystem_name_is_not_a_pointer())
+        pass = 0;
+
+    if (!subsystem_survives_a_failed_allocation())
         pass = 0;
 
     if (pass) {

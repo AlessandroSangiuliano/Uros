@@ -40,6 +40,14 @@
 	simple_lock_init(&(subsys)->lock, ETAP_MISC_RPC_SUBSYS)
 #define subsystem_lock(subsys)		simple_lock(&(subsys)->lock)
 #define subsystem_unlock(subsys)	simple_unlock(&(subsys)->lock)
+/*
+ *	⚠️ Lock order is subsystem_lock() before ip_lock(), and it is not a
+ *	preference: subsystem_deallocate() holds the subsystem across
+ *	ipc_subsystem_disable(), which locks the port.  Anyone who already
+ *	holds a port lock and wants the subsystem is going the wrong way and
+ *	must use the try-and-retry form -- see ref_subsystem_port_locked().
+ */
+#define subsystem_lock_try(subsys)	simple_lock_try(&(subsys)->lock)
 
 /*
  *	A subsystem describes a set of server routines that can be invoked by
@@ -73,6 +81,38 @@ extern kern_return_t	mach_subsystem_create(
 				user_subsystem_t	user_subsys,
 				mach_msg_type_number_t	user_subsysCount,
 				subsystem_t		*subsystem);
+
+/*
+ *	🔑 WHO OWNS A SUBSYSTEM POINTER (#478).  This is the one place that
+ *	says it; everything below and in ipc_subsystem.h states its own half
+ *	in these terms rather than describing the rule again.
+ *
+ *	A subsystem pointer obtained from a port or from a port NAME is
+ *	OWNED -- the routine that hands it over has taken a reference for
+ *	you, and you release it with subsystem_deallocate() on every path
+ *	out, the failing ones included.  The routines are
+ *	convert_port_to_subsystem() and port_name_to_subsystem(); MIG names
+ *	the first as an intran in mach/mach_types.defs and pairs it with
+ *	subsystem_deallocate() as the destructor, which is what keeps the
+ *	generated server stubs balanced.
+ *
+ *	It reads as the obvious rule, and it was the other one until #478:
+ *	both routines returned a BORROWED pointer while their comments
+ *	claimed otherwise, so the count only balanced where a later step
+ *	happened to take a reference of its own.  Where that step was
+ *	skipped -- an allocation that failed -- the release still ran, and a
+ *	single failed call from ring 3 drove the count to zero and freed a
+ *	subsystem its port still pointed at.
+ *
+ *	⚠️ Creation is the exception, and it is deliberate:
+ *	mach_subsystem_create() returns with one reference which MIG's
+ *	outtran turns into a send right and nobody afterwards releases.
+ *	That reference is what keeps the subsystem alive for as long as its
+ *	port names it.  Nothing yet drops it when the port dies, so a
+ *	subsystem is never freed by that route -- a leak, recorded rather
+ *	than fixed here, because closing it means giving the port's death a
+ *	hook that does not exist today.
+ */
 
 /* Take additional reference on subsystem (make sure it doesn't go away) */
 extern void		subsystem_reference(

@@ -52,6 +52,12 @@ extern void ipc_subsystem_terminate(
 extern subsystem_t convert_port_to_subsystem(
 	ipc_port_t	port);
 
+/* The reference-taking half of it, for a caller that already holds the
+   port lock.  Returns FALSE having dropped the lock if it has to retry. */
+extern boolean_t ref_subsystem_port_locked(
+	ipc_port_t	port,
+	subsystem_t	*psubsystem);
+
 /* Convert from a subsystem to a port */
 extern ipc_port_t convert_subsystem_to_port(
 	subsystem_t	subsystem);

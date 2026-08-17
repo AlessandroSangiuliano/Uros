@@ -33,6 +33,8 @@
 #include <kern/task.h>
 #include <kern/ipc_subsystem.h>
 #include <kern/subsystem.h>
+#include <kern/lock.h>
+#include <kern/spl.h>
 #include <kern/misc_protos.h>
 #include <ipc/ipc_port.h>
 #include <ipc/ipc_space.h>
@@ -96,22 +98,80 @@ ipc_subsystem_disable(
  *		which may be null.
  *	Conditions:
  *		Nothing locked.
+ *
+ *	🔥 The three lines above are older than the body that now keeps them
+ *	(#478).  Until this issue the routine took no reference at all, and
+ *	every caller was left to guess which of the two contracts was real --
+ *	the comment's or the code's.  kern/subsystem.h states the answer once;
+ *	this is the routine that has to make it true.
  */
 subsystem_t
 convert_port_to_subsystem(
 	ipc_port_t	port)
 {
+	boolean_t		r = FALSE;
 	subsystem_t		subsystem = SUBSYSTEM_NULL;
 
-	if (IP_VALID(port)) {
+	while (!r && IP_VALID(port)) {
 		ip_lock(port);
-		if (ip_active(port) &&
-		    (ip_kotype(port) == IKOT_SUBSYSTEM)) {
-			subsystem = (subsystem_t) port->ip_kobject;
-		}
-		ip_unlock(port);
+		r = ref_subsystem_port_locked(port, &subsystem);
+		/* port unlocked */
 	}
 	return (subsystem);
+}
+
+
+/*
+ *	Routine:	ref_subsystem_port_locked
+ *	Purpose:
+ *		Take a reference on the subsystem a port names, for a caller
+ *		that already holds the port lock and wants to keep the
+ *		lookup and the reference in the same critical section.
+ *	Conditions:
+ *		The port is locked.  On return it is unlocked either way.
+ *	Returns:
+ *		TRUE with *psubsystem set -- possibly to SUBSYSTEM_NULL, if
+ *		the port is dead or names something else.
+ *		FALSE if the lock order made it retry; the caller relocks the
+ *		port and asks again.
+ */
+boolean_t
+ref_subsystem_port_locked(
+	ipc_port_t	port,
+	subsystem_t	*psubsystem)
+{
+	subsystem_t	subsystem = SUBSYSTEM_NULL;
+	spl_t		s;
+
+	if (ip_active(port) &&
+	    (ip_kotype(port) == IKOT_SUBSYSTEM)) {
+		subsystem = (subsystem_t) port->ip_kobject;
+		assert(subsystem != SUBSYSTEM_NULL);
+
+		/*
+		 * Backwards, and knowingly: kern/subsystem.h puts
+		 * subsystem_lock() before ip_lock(), because
+		 * subsystem_deallocate() holds the subsystem across
+		 * ipc_subsystem_disable() and that locks the port.  Taking
+		 * the two in this order can only be a try, so
+		 * subsystem_reference() is inlined here to accommodate it --
+		 * the same accommodation, for the same reason, that
+		 * ref_task_port_locked() makes for task_reference().
+		 */
+		s = splsched();
+		if (!subsystem_lock_try(subsystem)) {
+			splx(s);
+			ip_unlock(port);
+			mutex_pause();
+			return (FALSE);
+		}
+		subsystem->ref_count++;
+		subsystem_unlock(subsystem);
+		splx(s);
+	}
+	*psubsystem = subsystem;
+	ip_unlock(port);
+	return (TRUE);
 }
 
 

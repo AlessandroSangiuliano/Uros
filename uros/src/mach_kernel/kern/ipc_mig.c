@@ -736,24 +736,47 @@ port_name_to_act(
     }
 }
 
+/*
+ *	Produces a subsystem reference, on both paths, which the caller
+ *	releases with subsystem_deallocate().  kern/subsystem.h says why that
+ *	is the rule and what it costs to get it wrong (#478).
+ */
+/*
+ * ⚠️ Handing the reference back, for one run.  Zero in every build that
+ * ships; set it from the compiler command line and this routine returns the
+ * borrowed pointer it used to return, the trap that used to release nothing
+ * releases nothing again, and cap_test's [10] goes red -- the subsystem is
+ * destroyed by a single failed allocation from ring 3.
+ *
+ * It has to reach into two files because that is where the defect lived:
+ * one routine that promised a reference it did not take, and two callers
+ * that disagreed about whether they had one.
+ */
+#ifndef	ABLATE_478
+#define	ABLATE_478	0
+#endif
+
 subsystem_t
 port_name_to_subsystem(
 	mach_port_t	name)
 {
 	register ipc_port_t port;
-	register subsystem_t subsys;
+	subsystem_t subsys;		/* not `register': its address is taken */
+	boolean_t r;
 
+	r = FALSE;
 	subsys = SUBSYSTEM_NULL;
-	fast_send_right_lookup(name, port, goto abort);
-	/* port is locked */
+	while (!r) {
+		fast_send_right_lookup(name, port, goto abort);
+		/* port is locked */
 
-	if (ip_active(port) &&
-		(ip_kotype(port) == IKOT_SUBSYSTEM)) {
-		subsys = (subsystem_t) port->ip_kobject;
-		assert(subsys != SUBSYSTEM_NULL);
+		r = ref_subsystem_port_locked(port, &subsys);
+		/* port unlocked */
 	}
 
-	ip_unlock(port);
+	if (ABLATE_478)
+		subsystem_deallocate(subsys);
+
 	return subsys;
 
 abort: {
@@ -768,6 +791,8 @@ abort: {
 		if (IP_VALID(kern_port))
 			ipc_port_release_send(kern_port);
 	}
+	if (ABLATE_478)
+		subsystem_deallocate(subsys);
 	return subsys;
 	}
 }
@@ -2968,28 +2993,17 @@ syscall_mach_port_allocate_subsystem(
 	}
 
 	/*
-	 * ⚠️ NO subsystem_deallocate() here, and the neighbouring trap's is a
-	 * defect rather than a precedent.
+	 * The reference port_name_to_subsystem() took, released on every path
+	 * out of here rather than only the successful one (#478).
 	 *
-	 * port_name_to_subsystem() returns a BORROWED pointer: its fast path
-	 * reads ip_kobject under the port lock and unlocks, and its slow path
-	 * releases the send right it took.  Neither takes a subsystem
-	 * reference -- whatever convert_port_to_subsystem()'s comment claims
-	 * about producing one.
-	 *
-	 * subsystem_deallocate()'s own contract is "the caller has a
-	 * reference, which is consumed".  Calling it on a borrowed pointer
-	 * balances only because mach_port_allocate_full() happens to take a
-	 * reference of its own -- and it takes that one INSIDE its
-	 * `if (kr == KERN_SUCCESS)', so on the failure path the count goes
-	 * down without ever having gone up.
-	 *
-	 * That is a second defect, in a second trap, and it is recorded as its
-	 * own issue rather than fixed here: getting it right means deciding
-	 * whether port_name_to_subsystem() should reference what it returns,
-	 * which changes a routine the MIG intran contract in mach_types.defs
-	 * also names.  This one takes nothing, so it releases nothing.
+	 * Unconditional, and not guarded by `subsystem_name != MACH_PORT_NULL'
+	 * the way the lookup above is: subsystem_deallocate() returns at once
+	 * on SUBSYSTEM_NULL, so the guard buys nothing and costs the chance
+	 * for the condition and the value to stop agreeing.  What is being
+	 * released is `subsys', so `subsys' is what the line names.
 	 */
+	if (!ABLATE_478)
+		subsystem_deallocate(subsys);
 
 	is_release(space);
 
@@ -3070,8 +3084,25 @@ syscall_mach_port_allocate_full(
 		}
 	}
 
-	if (subsystem_name != MACH_PORT_NULL)
-		subsystem_deallocate (subsys);
+	/*
+	 * 🔥 This line is unchanged and it was the defect (#478).  What
+	 * changed is that there is now a reference under it.
+	 *
+	 * port_name_to_subsystem() used to hand back a borrowed pointer, so
+	 * the release balanced nothing of its own -- it balanced the
+	 * reference mach_port_allocate_full() takes for the port, and that
+	 * one is taken INSIDE its `if (kr == KERN_SUCCESS)'.  Give the
+	 * allocation a reason to fail and the count went down without ever
+	 * having gone up.  `qos.name' with a name already in use is such a
+	 * reason, and it is chosen in ring 3: one call took a freshly created
+	 * subsystem's count from one to zero, freed it, and left its port
+	 * pointing at the hole.
+	 *
+	 * The guard came off with it.  It asked about `subsystem_name', a
+	 * name, while the thing being released is `subsys', a pointer -- two
+	 * values that were only ever equivalent by argument.
+	 */
+	subsystem_deallocate (subsys);
 
 	is_release (space);
 
