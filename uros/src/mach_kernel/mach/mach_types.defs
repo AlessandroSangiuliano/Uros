@@ -413,9 +413,18 @@ type time_value_t = struct[2] of integer_t;
 
 type user_subsystem_t		= array[*:16384] of char;
 
+/*
+ * The destructor is not decoration (#478).  The intran produces a
+ * reference, so without it every server stub taking a subsystem_t leaks
+ * one -- and it was missing while the intran took none, which is how the
+ * pair stayed balanced by accident.  It is also what makes MIG give the
+ * translated value a name of its own instead of inlining the call into
+ * the argument list, which is the difference between releasing on every
+ * path out of the stub and releasing on none.
+ */
 type subsystem_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER
-		intran: subsystem_t convert_port_to_subsystem(mach_port_t) outtran: mach_port_t convert_subsystem_to_port(subsystem_t) ;
+		intran: subsystem_t convert_port_to_subsystem(mach_port_t) outtran: mach_port_t convert_subsystem_to_port(subsystem_t) destructor: subsystem_deallocate(subsystem_t) ;
 #else
 		;
 #endif	/* KERNEL_SERVER */
