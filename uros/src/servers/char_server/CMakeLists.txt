@@ -20,6 +20,8 @@ set(CHAR_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
   ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   ${CMAKE_SOURCE_DIR}/src/servers/proc_server
+  # vt/vt_ipc.h lives with the terminal server that defines it
+  ${CMAKE_SOURCE_DIR}/src/servers/virtual_terminal_server
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (mach.h, sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include

@@ -14,6 +14,8 @@ add_custom_command(
     -migcom $<TARGET_FILE:migcom>
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    # gpu_server.defs imports <mach/gpu_server_types.h>, which lives beside it
+    -I${CMAKE_SOURCE_DIR}/src/servers/gpu_server
     -header ${GPU_USER_H}
     -user ${GPU_USER_C}
     ${GPU_DEFS}
@@ -46,6 +48,8 @@ target_compile_definitions(gpustat_bin PRIVATE
 target_include_directories(gpustat_bin PRIVATE
   ${CMAKE_CURRENT_BINARY_DIR}                          # gpu_server.h (MIG)
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
+  # gpu/ and mach/gpu_*.h live with the server that defines them
+  ${CMAKE_SOURCE_DIR}/src/servers/gpu_server
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${UROS_ARCH_INCLUDE}

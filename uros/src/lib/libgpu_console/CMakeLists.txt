@@ -21,6 +21,8 @@ add_custom_command(
     ${UROS_MIG_TARGET_ARGS}
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    # gpu_server.defs imports <mach/gpu_server_types.h>, which lives beside it
+    -I${CMAKE_SOURCE_DIR}/src/servers/gpu_server
     -header ${GPU_USER_H}
     -user ${GPU_USER_C}
     ${GPU_DEFS}
@@ -60,6 +62,8 @@ target_compile_definitions(libgpu_console PRIVATE
 target_include_directories(libgpu_console PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_BINARY_DIR}        # gpu_server.h forwarding
+  # gpu/gpu_types.h and mach/gpu_stats.h live with the server that defines them
+  ${CMAKE_SOURCE_DIR}/src/servers/gpu_server
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # libpthreads' pthread.h includes <sys/timers.h>, which lives under

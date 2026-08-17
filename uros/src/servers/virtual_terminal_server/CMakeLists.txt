@@ -47,6 +47,8 @@ target_include_directories(virtual_terminal_server_bin PRIVATE
   ${_GCC_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/lib/libposix-uros/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # vt/vt_ipc.h, this server's own published header
+  ${CMAKE_SOURCE_DIR}/src/servers/virtual_terminal_server
   ${CMAKE_BINARY_DIR}/generated/include
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
