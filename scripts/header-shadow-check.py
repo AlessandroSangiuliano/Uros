@@ -85,6 +85,33 @@ ACCEPTED = {
     # copy of MIG output is what #481 removed, and it would land right here.
     "notify.h", "notify_server.h", "service.h", "device_server.h",
     "memory_object.h", "memory_object_default.h", "default_pager_object.h",
+    "exc.h",
+
+    # MIG output named after a subsystem that also has a hand-written header of
+    # that name.  Checked one includer at a time rather than assumed: every
+    # file that writes #include "char_server.h" or "gpu_server.h" gets the
+    # _*_user_ stub out of its own generated directory, because a quoted
+    # include searches the including file's directory first and each consumer
+    # generates its own; the server's private header is only reachable from
+    # inside the server.  bootstrap is the same with a published name on top --
+    # 23 files write <mach/bootstrap.h>, 21 write "bootstrap.h", and nobody
+    # writes <bootstrap.h>, which is the only spelling that would be ambiguous.
+    "bootstrap.h", "char_server.h", "gpu_server.h",
+
+    # migcom's own mach/ headers, and deliberately so: it is a HOST tool, so it
+    # ships stubs without the <mach/machine/...> indirection it cannot resolve
+    # on the host.  Its CMakeLists puts them BEFORE uapi with that reason (#179),
+    # which is why they diverge by a thousand lines and why that is correct.
+    "mach/boolean.h", "mach/kern_return.h", "mach/message.h",
+
+    # The kernel's i386/cpuid.h beside the compiler's.  Latent, not live: no
+    # file in the tree writes #include <cpuid.h>, so no unit picks between them.
+    "cpuid.h",
+
+    # <mach/sync.h>: the kernel's own beside the stub generated from sync.defs.
+    # The split follows the boundary -- 522 kernel units get the kernel's, 489
+    # userland units get the stub -- which is what the two files are for.
+    "mach/sync.h",
 
     # default_pager's own types.h, which is its private struct definitions and
     # not a libc header despite the name.  Reachable beside sa_mach/types.h
@@ -105,15 +132,13 @@ ACCEPTED = {
 # bootstrap.defs, exc.defs, char_server.defs and gpu_server.defs.
 # ---------------------------------------------------------------------------
 RECORDED = {
-    "bootstrap.h", "exc.h", "char_server.h", "gpu_server.h",
-    # migcom carries frozen copies of four Mach headers so it can be built
-    # before the tree it generates for.  Whether that is still true is the
-    # question; that it disagrees with uapi is not in doubt.
-    "mach/boolean.h", "mach/kern_return.h", "mach/message.h",
-    # generated against hand-written, one name each.
-    "mach/sync.h", "machine/types.h",
-    # the kernel's own cpuid.h against the compiler's, on 193 units.
-    "cpuid.h",
+    # <machine/types.h>, nine lines apart, and the split does NOT follow a
+    # boundary: 477 units get the per-architecture one published under
+    # generated/include, 155 get src/mach_services/include/machine/types.h.
+    # It is reached from sa_mach/types.h -- the file #480 was about -- so this
+    # is that issue's last copy, and settling it means deciding which of the
+    # two is the machine's word on its own types.
+    "machine/types.h",
 }
 
 
