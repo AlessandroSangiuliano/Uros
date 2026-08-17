@@ -741,6 +741,21 @@ port_name_to_act(
  *	releases with subsystem_deallocate().  kern/subsystem.h says why that
  *	is the rule and what it costs to get it wrong (#478).
  */
+/*
+ * ⚠️ Handing the reference back, for one run.  Zero in every build that
+ * ships; set it from the compiler command line and this routine returns the
+ * borrowed pointer it used to return, the trap that used to release nothing
+ * releases nothing again, and cap_test's [10] goes red -- the subsystem is
+ * destroyed by a single failed allocation from ring 3.
+ *
+ * It has to reach into two files because that is where the defect lived:
+ * one routine that promised a reference it did not take, and two callers
+ * that disagreed about whether they had one.
+ */
+#ifndef	ABLATE_478
+#define	ABLATE_478	0
+#endif
+
 subsystem_t
 port_name_to_subsystem(
 	mach_port_t	name)
@@ -759,6 +774,9 @@ port_name_to_subsystem(
 		/* port unlocked */
 	}
 
+	if (ABLATE_478)
+		subsystem_deallocate(subsys);
+
 	return subsys;
 
 abort: {
@@ -773,6 +791,8 @@ abort: {
 		if (IP_VALID(kern_port))
 			ipc_port_release_send(kern_port);
 	}
+	if (ABLATE_478)
+		subsystem_deallocate(subsys);
 	return subsys;
 	}
 }
@@ -2982,7 +3002,8 @@ syscall_mach_port_allocate_subsystem(
 	 * for the condition and the value to stop agreeing.  What is being
 	 * released is `subsys', so `subsys' is what the line names.
 	 */
-	subsystem_deallocate(subsys);
+	if (!ABLATE_478)
+		subsystem_deallocate(subsys);
 
 	is_release(space);
 
