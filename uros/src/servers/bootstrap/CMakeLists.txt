@@ -55,12 +55,12 @@ mig_server_stub(
 
 # 3) notify.defs  (subsystem 64, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/include/mach/notify.defs"
+  "${UROS_UAPI_DIR}/mach/notify.defs"
   notify  ${MIG_OUT})
 
 # 4) service.defs  (subsystem 400, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/include/servers/service.defs"
+  "${UROS_UAPI_DIR}/servers/service.defs"
   service  ${MIG_OUT})
 
 # 5) gpu_server.defs (subsystem 4000) — bootstrap is the gpu_text_puts

@@ -5,7 +5,7 @@ project(libcap C)
 # emitted: user stubs are linked into libcap for clients; server stubs are
 # compiled by the cap_server executable target (uros/src/servers/cap_server/).
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(CAP_DEFS "${CMAKE_SOURCE_DIR}/export/include/mach/cap_server.defs")
+set(CAP_DEFS "${UROS_UAPI_DIR}/mach/cap_server.defs")
 set(CAP_USER_C   "${CMAKE_BINARY_DIR}/generated/cap_server_user.c")
 set(CAP_SERVER_C "${CMAKE_BINARY_DIR}/generated/cap_server_server.c")
 set(CAP_USER_H   "${CMAKE_BINARY_DIR}/generated/cap_server.h")
@@ -46,7 +46,7 @@ set(CAP_SERVER_MIG_H ${CAP_SERVER_H} PARENT_SCOPE)
 # Issue #183: cap_revoke.defs — back-channel from cap_server to
 # subscribers.  cap_server uses the *user* stub (it fires the notify
 # RPC), subscribers (e.g. block_device_server) use the *server* demux.
-set(CAP_REVOKE_DEFS "${CMAKE_SOURCE_DIR}/export/include/mach/cap_revoke.defs")
+set(CAP_REVOKE_DEFS "${UROS_UAPI_DIR}/mach/cap_revoke.defs")
 set(CAP_REVOKE_USER_C   "${CMAKE_BINARY_DIR}/generated/cap_revoke_user.c")
 set(CAP_REVOKE_SERVER_C "${CMAKE_BINARY_DIR}/generated/cap_revoke_server.c")
 set(CAP_REVOKE_USER_H   "${CMAKE_BINARY_DIR}/generated/cap_revoke.h")
