@@ -154,6 +154,25 @@
 extern int yyparse();
 static FILE *myfopen(char *name, char *mode);
 
+/*
+ * The preprocessed .defs to read, when it is named instead of piped (#471).
+ *
+ * 🔥 This exists because of how the pipe failed.  Every caller ran
+ * `cc -E ... | migcom ...', and a shell hands the pipeline the exit status of
+ * its LAST command -- so a preprocessor that died on a missing include left
+ * migcom reading a truncated stream, which it parsed happily, and the build
+ * saw zero.  What came out was a stub with routines silently absent from it:
+ * service_checkin gone from service_user.c, every _X gone from
+ * device_pager_server.c, and nothing anywhere saying so.
+ *
+ * Naming the file removes the pipe rather than guarding it.  `set -o
+ * pipefail' would have worked on this machine and not in POSIX sh, and would
+ * have had to be remembered at four separate call sites; a missing input file
+ * now stops migcom itself, wherever it is invoked from.
+ */
+static string_t InputFileName = strNULL;
+extern FILE *yyin;
+
 static void
 parseArgs(int argc, char *argv[])
 {
@@ -307,8 +326,11 @@ parseArgs(int argc, char *argv[])
 		/*NOTREACHED*/
 	    }
 	}
+	else if (InputFileName == strNULL)
+	    InputFileName = *argv;
 	else
-	    fatal("bad argument: '%s'", *argv);
+	    fatal("more than one input file: '%s' and '%s'",
+		  InputFileName, *argv);
 }
 
 FILE *uheader, *server, *user;
@@ -322,10 +344,33 @@ main(int argc, char *argv[])
 
     set_program_name("mig");
     parseArgs(argc, argv);
+
     init_global();
     init_type();
     loc = time((time_t *)0);
     GenerationDate = ctime(&loc);
+
+    /*
+     * After init_global(), which sets yyinname itself -- putting this before
+     * it would name the file and then have the name overwritten.
+     *
+     * Reading stdin stays the default so every existing invocation keeps
+     * working; what the name buys is that a caller CAN drop the pipe, and
+     * once it has, a preprocessor that fails takes the build down with it.
+     */
+    if (InputFileName != strNULL)
+    {
+	yyin = fopen(InputFileName, "r");
+	if (yyin == NULL)
+	    fatal("cannot open '%s'", InputFileName);
+	/*
+	 * A COPY, not the argv pointer: init_global() builds this name with
+	 * strmake() and something downstream frees it, so handing it storage
+	 * the allocator never gave out aborts the process -- which is how
+	 * this line was found.
+	 */
+	yyinname = strmake(InputFileName);
+    }
 
     LookNormal();
     (void) yyparse();
