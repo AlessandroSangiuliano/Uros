@@ -25,6 +25,7 @@ project(libmach C)
 if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
   set(_E ${CMAKE_SOURCE_DIR}/export/include)
+  set(_U ${UROS_UAPI_DIR})
 
   set(_traps_src ${CMAKE_CURRENT_SOURCE_DIR}/mach_traps.s)
   set(_traps_pp  ${CMAKE_CURRENT_BINARY_DIR}/generated/asm/mach_traps.s.S)
@@ -66,12 +67,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
 
   set(_MIG_OUT ${CMAKE_BINARY_DIR}/generated)
   set(_DEFS
-    ${_E}/mach/mach.defs
-    ${_E}/mach/mach_port.defs
-    ${_E}/mach/mach_host.defs
+    ${_U}/mach/mach.defs
+    ${_U}/mach/mach_port.defs
+    ${_U}/mach/mach_host.defs
     ${_E}/mach/clock.defs
-    ${_E}/mach/bootstrap.defs
-    ${_E}/mach/exc.defs
+    ${_U}/mach/bootstrap.defs
+    ${_U}/mach/exc.defs
     ${_E}/mach/notify.defs
     # device.defs used to be held out of this list: its stubs failed their own
     # _Static_asserts at -m64, because the two .defs trees described
@@ -84,7 +85,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # produced and the stubs it calls were in no archive.
     ${_E}/device/device.defs
     # mach_klog.defs: bootstrap's log_forwarder includes <mach/mach_klog.h>.
-    ${_E}/mach/mach_klog.defs
+    ${_U}/mach/mach_klog.defs
     # mach_debug.defs: bootstrap's elf.c calls host_load_symbol_table.
     #
     # 🔥 This line was held out with a comment saying migcom had a defect on
@@ -100,7 +101,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # beside them were equally wrong.  Same class as #470, in another file, and
     # the assertion machinery of #416 doing exactly the job it was added for --
     # naming the wrong number rather than sending it.
-    ${_E}/mach_debug/mach_debug.defs
+    ${_U}/mach_debug/mach_debug.defs
   )
   set(LIBMACH_MIG_GENERATED)
   foreach(d IN LISTS _DEFS)
@@ -317,32 +318,38 @@ endif()
 
 set(_KERNEL ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 set(_EXPORT ${CMAKE_SOURCE_DIR}/export/include)
+set(_UAPI   ${UROS_UAPI_DIR})
 # MIG include path: export tree first (userspace .defs), then kernel for extras
-set(_MIG_INC ${_EXPORT} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_EXPORT}/mach_debug)
+set(_MIG_INC ${_UAPI} ${_EXPORT} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_UAPI}/mach_debug ${_EXPORT}/mach_debug)
 
-# --- All .defs from the export tree (matching original common.mk MIG_DEFS) ---
-# Use the export tree versions which are the published userspace interfaces.
-# The kernel tree's .defs have kernel-internal definitions (alarm_port_t, SEQNOS
-# conditionals, etc.) that produce incompatible MIG output for userspace code.
+# --- All .defs userland needs (matching original common.mk MIG_DEFS) ---
+# ⚠️ This list used to say it took the export tree on purpose, because "the
+# kernel tree's .defs have kernel-internal definitions (alarm_port_t, SEQNOS
+# conditionals, etc.) that produce incompatible MIG output for userspace".
+# The two are one file now (#471), and the claim did not survive being
+# tested: alarm_port_t carries an `#else ctype: mach_port_t' that hands
+# userland exactly what the export copy handed it, and the SEQNOS difference
+# was `#endif SEQNOS' against `#endif' -- trailing tokens on a directive, not
+# a branch.  What settles it is that the generated stubs did not move.
 set(EXPORT_MIG_DEFS
-  ${_EXPORT}/mach/bootstrap.defs
+  ${_UAPI}/mach/bootstrap.defs
   ${_EXPORT}/mach/clock.defs
-  ${_EXPORT}/mach/clock_reply.defs
+  ${_UAPI}/mach/clock_reply.defs
   ${_EXPORT}/mach/default_pager_object.defs
-  ${_EXPORT}/mach/exc.defs
-  ${_EXPORT}/mach/ledger.defs
-  ${_EXPORT}/mach/mach.defs
-  ${_EXPORT}/mach/mach_host.defs
-  ${_EXPORT}/mach/mach_klog.defs
+  ${_UAPI}/mach/exc.defs
+  ${_UAPI}/mach/ledger.defs
+  ${_UAPI}/mach/mach.defs
+  ${_UAPI}/mach/mach_host.defs
+  ${_UAPI}/mach/mach_klog.defs
   ${_EXPORT}/mach/mach_norma.defs
-  ${_EXPORT}/mach/mach_port.defs
-  ${_EXPORT}/mach/memory_object.defs
-  ${_EXPORT}/mach/memory_object_default.defs
+  ${_UAPI}/mach/mach_port.defs
+  ${_UAPI}/mach/memory_object.defs
+  ${_UAPI}/mach/memory_object_default.defs
   ${_EXPORT}/mach/notify.defs
-  ${_EXPORT}/mach/sync.defs
-  ${_EXPORT}/mach_debug/mach_debug.defs
-  ${_EXPORT}/device/device_request.defs
-  ${_EXPORT}/device/device_reply.defs
+  ${_UAPI}/mach/sync.defs
+  ${_UAPI}/mach_debug/mach_debug.defs
+  ${_UAPI}/device/device_request.defs
+  ${_UAPI}/device/device_reply.defs
 )
 foreach(DEFS IN LISTS EXPORT_MIG_DEFS)
   add_mig_defs(${DEFS} ${_MIG_INC})
