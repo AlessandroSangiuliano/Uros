@@ -232,6 +232,21 @@ target_include_directories(uros_uapi INTERFACE
   ${CMAKE_SOURCE_DIR}/uapi
 )
 
+# #471 — the .defs live here too, and for a stronger reason than the headers.
+# A .defs file IS the user/kernel boundary rather than a convenience for
+# reaching it, so having two of them is having two boundaries.  There were
+# two, in export/include/mach and src/mach_kernel/mach, and neither build
+# could see the other's: the kernel's MIG run does not put export on its
+# path and userland's does not put the kernel tree first.  In a year they
+# accumulated no difference in content and then, in one evening, one -- a
+# `destructor:' that #478 needed, which landed in one copy.
+#
+# MIG resolves `import <mach/foo.defs>' off its include path, so the way to
+# make that unrepeatable is the path itself: one directory holds the files,
+# the old two hold none, and a second copy cannot be found rather than
+# merely being discouraged.
+set(UROS_UAPI_DIR ${CMAKE_SOURCE_DIR}/uapi)
+
 # Quick-and-broad: also add it to the global include path so legacy
 # CMakeLists with hand-rolled include paths don't need per-file edits
 # during the migration.  Once every consumer goes through uros_uapi this

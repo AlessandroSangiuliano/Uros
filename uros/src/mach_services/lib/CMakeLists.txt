@@ -24,9 +24,30 @@ maybe_add(libmach_maxonstack)
 # CMakeLists, so uncommenting is all it takes if something ever needs the
 # Mach ID service.  Verdict belongs to #433, the heritage-husk inventory.
 #maybe_add(libmachid)
-maybe_add(libcthreads)
-maybe_add(libcthreads_p)
-maybe_add(librthreads)
+# libcthreads / librthreads: NOT BUILT (#434).
+#
+# Both are deprecated -- the live path is libpthreads plus libmach's crt0 --
+# and nothing links either of them: no target_link_libraries in the tree
+# names them.  They were still compiled, and that cost more than it sounds:
+#
+#   - librthreads wrote, at CONFIGURE time and unconditionally, a
+#     `generated/include/stdlib.h' forwarding to <sa_mach/stdlib.h> into a
+#     directory forty-eight targets share with musl.  That wrapper is what
+#     turned a missing musl header into `conflicting types for time_t' and
+#     made a clean build stop.  Not building librthreads removes the writer
+#     rather than conditioning it.
+#
+#   - libcthreads includes <sa_mach/stdio.h> directly, whose off_t is an
+#     `unsigned int' against musl's.  It only compiled because it happened
+#     to run before musl was installed; once the ordering above was made
+#     real, the conflict was no longer avoidable.  Fixing it would mean
+#     reconciling sa_mach's types with musl's inside a library nobody uses.
+#
+# The sources stay in the tree as study material -- this is the build list,
+# not a deletion.  Their disposal belongs to #425 and #433.
+#maybe_add(libcthreads)
+#maybe_add(libcthreads_p)
+#maybe_add(librthreads)
 #maybe_add(libxmm)  # excluded for now: needs K&R modernization
 maybe_add(libservice)
 maybe_add(libnetmemory)

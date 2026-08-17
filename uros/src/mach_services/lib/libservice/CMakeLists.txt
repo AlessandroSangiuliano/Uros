@@ -9,16 +9,19 @@ set(SERVICE_HEADER "${CMAKE_BINARY_DIR}/generated/service.h")
 
 add_custom_command(
   OUTPUT ${SERVICE_USER_C} ${SERVICE_SERVER_C} ${SERVICE_HEADER}
+  # #471: uapi first, and no pipe -- see cmake/mig.cmake for why both.
   COMMAND ${CMAKE_C_COMPILER} -E -x c
+    -I${UROS_UAPI_DIR}
     -I${CMAKE_SOURCE_DIR}/export/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers
-    ${SERVICE_DEFS}
-    | $<TARGET_FILE:migcom>
+    ${SERVICE_DEFS} -o ${CMAKE_CURRENT_BINARY_DIR}/service.mig.i
+  COMMAND $<TARGET_FILE:migcom>
     -header ${SERVICE_HEADER}
     -user ${SERVICE_USER_C}
     -server ${SERVICE_SERVER_C}
+    ${CMAKE_CURRENT_BINARY_DIR}/service.mig.i
   DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${SERVICE_DEFS}
   COMMENT "MIG: service.defs"
   VERBATIM

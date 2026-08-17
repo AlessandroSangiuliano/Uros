@@ -14,7 +14,7 @@ set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
 # care about the *server* side (the pager).  No user stub needed by
 # libfspager itself — fs servers that want to *issue* data_supply etc.
 # pull in the user stubs from libmach.
-set(MO_DEFS     "${CMAKE_SOURCE_DIR}/export/include/mach/memory_object.defs")
+set(MO_DEFS     "${CMAKE_SOURCE_DIR}/uapi/mach/memory_object.defs")
 set(MO_USER_C   "${CMAKE_BINARY_DIR}/generated/libfspager_memory_object_user.c")
 set(MO_SERVER_C "${CMAKE_BINARY_DIR}/generated/libfspager_memory_object_server.c")
 set(MO_USER_H   "${CMAKE_BINARY_DIR}/generated/libfspager_memory_object.h")

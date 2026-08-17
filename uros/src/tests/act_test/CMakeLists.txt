@@ -33,7 +33,7 @@ set(UROS_MIG_USERLAND_INCLUDES
 # referencing it here would ask this program to implement the kernel's end.
 set(_AT_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
 set(AT_MIG_GENERATED)
-add_mig_userland(${_K}/mach/exc.defs ${_AT_OUT} AT_MIG)
+add_mig_userland(${UROS_UAPI_DIR}/mach/exc.defs ${_AT_OUT} AT_MIG)
 list(REMOVE_ITEM AT_MIG_GENERATED ${_AT_OUT}/exc_user.c)
 
 add_executable(act_test_bin

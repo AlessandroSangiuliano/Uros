@@ -135,7 +135,7 @@ add_test(NAME migcom-flag-K
 
 # Advanced tests using a real .defs file and file generation checks
 add_test(NAME migcom-device-request
-  COMMAND sh -c "${LSAN_SUPPRESS} cpp -P -I ${CMAKE_SOURCE_DIR}/export/include ${CMAKE_SOURCE_DIR}/export/include/device/device_request.defs | ${LSAN_SUPPRESS} $<TARGET_FILE:migcom> -V -user /dev/null -server /dev/null -sheader /dev/null -dheader /dev/null"
+  COMMAND sh -c "${LSAN_SUPPRESS} cpp -P -I ${CMAKE_SOURCE_DIR}/export/include ${CMAKE_SOURCE_DIR}/uapi/device/device_request.defs | ${LSAN_SUPPRESS} $<TARGET_FILE:migcom> -V -user /dev/null -server /dev/null -sheader /dev/null -dheader /dev/null"
 )
 
 add_test(NAME migcom-generate-user-file
