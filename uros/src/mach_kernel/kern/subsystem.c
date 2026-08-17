@@ -226,8 +226,11 @@ subsystem_reference(
  *		destroys the subsystem.  Must have no ports registered on it
  *		when it is destroyed.
  *	Conditions:
- *		The subsystem is locked, and
- *		the caller has a reference, which is consumed.
+ *		Nothing locked -- the body takes the subsystem lock itself,
+ *		and a caller who believed the old line here and locked it
+ *		first would deadlock on the spot.
+ *		The caller has a reference, which is consumed.  See
+ *		kern/subsystem.h for who has one.
  */
 
 void
