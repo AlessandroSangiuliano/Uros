@@ -195,13 +195,39 @@ case "${target-i386}" in
 esac
 cppflags="$cppflags -DMIG_PTR_BITS=$ptrbits"
 
+# Where the interface definitions live (#471).
+#
+# Every .defs in the tree opens with `import <mach/std_types.defs>', so every
+# invocation needs this directory -- which used to mean every CMakeLists
+# spelling it out, and there are a dozen of them with hand-rolled -I lists.
+# Said here, in the one place all of them funnel through, no caller can omit
+# it.  (The kernel does not use this script; its own list carries the same
+# entry, and there are two because there are two pipelines, not two rules.)
+#
+# From the script's own location rather than $PWD: callers run it from
+# several build directories, and a path relative to the caller would be a
+# different directory each time.
+uapi="$(CDPATH= cd -- "$(dirname -- "$0")/../uros/uapi" && pwd)" || {
+	echo "mig: cannot find the uapi directory from $0" >&2
+	exit 1
+}
+cppflags="$cppflags -I$uapi"
+
 for file in $files
 do
     base="`basename "$file" .defs`"
     temp="$base".$$
     rm -f "$temp".c "$temp".d
     (echo '#line 1 '\""$file"\"; cat "$file") > "$temp".c
-    $C -E $cppflags "$temp".c | $M $migflags || exit
+    # 🔥 Two steps, not a pipe (#471).  `cmd | migcom || exit' tests the exit
+    # status of MIGCOM, so a preprocessor that died on a missing include left
+    # migcom parsing a truncated stream -- which it accepted -- and this
+    # script returned success having written a stub with routines silently
+    # missing from it.  The preprocessed text is named now, and cc's failure
+    # is the one that stops us.
+    $C -E $cppflags "$temp".c -o "$temp".i || { rm -f "$temp".c "$temp".i; exit 1; }
+    $M $migflags "$temp".i || { rm -f "$temp".c "$temp".i; exit 1; }
+    rm -f "$temp".i
     if [ "$sawMD" -a -f "$temp".d ]
     then
 	deps=

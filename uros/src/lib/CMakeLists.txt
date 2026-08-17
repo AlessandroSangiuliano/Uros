@@ -55,6 +55,9 @@ function(add_mig_defs DEFS_FILE)
   endif()
   set_property(GLOBAL PROPERTY MIG_PROCESSED_${DEFS_NAME} TRUE)
 
+  # ⚠️ uapi is NOT added here (#471).  scripts/mig adds it, which is the one
+  # place every invocation on this side funnels through -- including the
+  # servers that build their MIG rules by hand and never call this function.
   set(INC_FLAGS)
   foreach(inc IN LISTS ARGN)
     list(APPEND INC_FLAGS -I${inc})

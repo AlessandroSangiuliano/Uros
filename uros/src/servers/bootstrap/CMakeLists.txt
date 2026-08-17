@@ -19,10 +19,13 @@ macro(mig_server_stub DEFS_FILE STEM OUT_DIR)
   set(_srvH  "${OUT_DIR}/${STEM}Server.h")
   set(_usrC  "${OUT_DIR}/${STEM}User.c")
   set(_hdr   "${OUT_DIR}/${STEM}.h")
+  set(_mig_pp "${OUT_DIR}/${STEM}.mig.i")
   add_custom_command(
     OUTPUT ${_srvC} ${_usrC} ${_hdr} ${_srvH}
-    COMMAND ${CMAKE_C_COMPILER} -E -x c ${MIG_INCLUDE_FLAGS} ${_defs}
-      | $<TARGET_FILE:migcom>
+    # #471: uapi first, and no pipe -- see cmake/mig.cmake for why both.
+    COMMAND ${CMAKE_C_COMPILER} -E -x c -I${UROS_UAPI_DIR} ${MIG_INCLUDE_FLAGS}
+            ${_defs} -o ${_mig_pp}
+    COMMAND $<TARGET_FILE:migcom>
         # ⚠️ Which machine the stubs are for (#453/#426).  migcom defaults to
         # i386, so a rule without this generates i386 layout in silence.
         ${UROS_MIG_TARGET_ARGS}
@@ -30,6 +33,7 @@ macro(mig_server_stub DEFS_FILE STEM OUT_DIR)
         -sheader ${_srvH}
         -user   ${_usrC}
         -server ${_srvC}
+        ${_mig_pp}
     DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${_defs}
     COMMENT "MIG: ${STEM}.defs -> ${STEM}Server.c"
     VERBATIM
@@ -41,12 +45,12 @@ file(MAKE_DIRECTORY "${MIG_OUT}")
 
 # 1) bootstrap.defs  (subsystem 999999, ServerPrefix do_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/include/mach/bootstrap.defs"
+  "${CMAKE_SOURCE_DIR}/uapi/mach/bootstrap.defs"
   bootstrap  ${MIG_OUT})
 
 # 2) exc.defs  (subsystem 2400, ServerPrefix catch_)
 mig_server_stub(
-  "${CMAKE_SOURCE_DIR}/export/include/mach/exc.defs"
+  "${CMAKE_SOURCE_DIR}/uapi/mach/exc.defs"
   exc  ${MIG_OUT})
 
 # 3) notify.defs  (subsystem 64, ServerPrefix do_)
