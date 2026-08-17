@@ -452,7 +452,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
   add_mig_server(${UROS_UAPI_DIR}/mach/mach_klog.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/mach/clock.defs
+  add_mig_server(${UROS_UAPI_DIR}/mach/clock.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
   add_mig_server(${UROS_UAPI_DIR}/mach/sync.defs
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
@@ -462,9 +462,9 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
                  ${X86_64_MIG_DIR}/mach X86_64_MIG)
   add_mig_server(${UROS_UAPI_DIR}/mach_debug/mach_debug.defs
                  ${X86_64_MIG_DIR}/mach_debug X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/device/device.defs
+  add_mig_server(${UROS_UAPI_DIR}/device/device.defs
                  ${X86_64_MIG_DIR}/device X86_64_MIG)
-  add_mig_server(${CMAKE_CURRENT_SOURCE_DIR}/device/device_master.defs
+  add_mig_server(${UROS_UAPI_DIR}/device/device_master.defs
                  ${X86_64_MIG_DIR}/device X86_64_MIG)
   add_mig_user(${UROS_UAPI_DIR}/mach/exc.defs
                ${X86_64_MIG_DIR}/mach X86_64_MIG)
@@ -997,7 +997,7 @@ add_mig_server(${UROS_UAPI_DIR}/mach/mach_klog.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # clock_server.c - kernel receives clock messages
-add_mig_server(${KERNEL_SRC_DIR}/mach/clock.defs
+add_mig_server(${UROS_UAPI_DIR}/mach/clock.defs
                ${KERNEL_BUILD_DIR}/mach MACH)
 
 # sync_server.c - kernel receives sync messages  
@@ -1065,7 +1065,7 @@ add_mig_server(${UROS_UAPI_DIR}/mach_debug/mach_debug.defs
                ${KERNEL_BUILD_DIR}/mach_debug MACH_DEBUG)
 
 # ---- Device subsystem ----
-add_mig_server(${KERNEL_SRC_DIR}/device/device.defs
+add_mig_server(${UROS_UAPI_DIR}/device/device.defs
                ${KERNEL_BUILD_DIR}/device DEVICE)
 
 # device_reply_user.c - kernel sends async device replies
@@ -1073,7 +1073,7 @@ add_mig_user(${UROS_UAPI_DIR}/device/device_reply.defs
              ${KERNEL_BUILD_DIR}/device DEVICE)
 
 # ---- Device master subsystem (userspace driver primitives) ----
-add_mig_server(${KERNEL_SRC_DIR}/device/device_master.defs
+add_mig_server(${UROS_UAPI_DIR}/device/device_master.defs
                ${KERNEL_BUILD_DIR}/device DEVICE_MASTER)
 
 # Collect all generated MIG sources

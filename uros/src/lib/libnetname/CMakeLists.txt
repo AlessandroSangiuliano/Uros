@@ -3,7 +3,7 @@ project(libnetname C)
 
 # Generate MIG stubs from netname.defs (via scripts/mig)
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(NETNAME_DEFS "${CMAKE_SOURCE_DIR}/export/include/servers/netname.defs")
+set(NETNAME_DEFS "${UROS_UAPI_DIR}/servers/netname.defs")
 set(NETNAME_USER_C "${CMAKE_BINARY_DIR}/generated/netname_user.c")
 set(NETNAME_SERVER_C "${CMAKE_BINARY_DIR}/generated/netname_server.c")
 set(NETNAME_USER_H "${CMAKE_BINARY_DIR}/generated/netname.h")

@@ -70,7 +70,7 @@ add_custom_command(
 # MIG-generated server stubs from notify.defs (DEAD_NAME handler)
 # ===========================================================================
 
-set(NOTIFY_DEFS  ${CMAKE_SOURCE_DIR}/export/include/mach/notify.defs)
+set(NOTIFY_DEFS  ${UROS_UAPI_DIR}/mach/notify.defs)
 set(NOTIFY_USER_C   ${CMAKE_CURRENT_BINARY_DIR}/notify_user.c)
 set(NOTIFY_USER_H   ${CMAKE_CURRENT_BINARY_DIR}/notify.h)
 set(NOTIFY_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/notify_server.c)

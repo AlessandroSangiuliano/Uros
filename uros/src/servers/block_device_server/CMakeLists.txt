@@ -50,7 +50,7 @@ set(BLK_INCLUDE_DIRS
 # ===========================================================================
 
 set(MIG_SCRIPT ${CMAKE_SOURCE_DIR}/../scripts/mig)
-set(DEVICE_MASTER_DEFS ${CMAKE_SOURCE_DIR}/src/mach_kernel/device/device_master.defs)
+set(DEVICE_MASTER_DEFS ${UROS_UAPI_DIR}/device/device_master.defs)
 
 set(DM_USER_C ${CMAKE_CURRENT_BINARY_DIR}/device_master_user.c)
 set(DM_USER_H ${CMAKE_CURRENT_BINARY_DIR}/device_master.h)

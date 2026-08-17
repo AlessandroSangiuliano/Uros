@@ -149,4 +149,23 @@ typedef struct mapped_tvalspec	mapped_tvalspec_t;
 #define BAD_ALRMTYPE(t)	\
 	(((t) & 0xfe) != 0)
 
+/*
+ * The C name for the port an alarm is delivered to (#471).
+ *
+ * clock_types.defs has always declared `alarm_port_t' and the generated
+ * clock.h has always used it, but the only typedef was kern/clock.h's --
+ * `ipc_port_t', kernel-side.  Userland never had the name, and never
+ * needed it: its copy of clock.defs said plain `mach_port_t' at the call,
+ * so the type existed in one tree and not the other and neither could see
+ * the other's version.  With one .defs there is one signature, and the
+ * name has to mean something on both sides of it.
+ *
+ * A port is a pointer to the kernel and a name to everyone else, which is
+ * exactly what the two typedefs say.  MACH_KERNEL picks; kern/clock.h
+ * keeps its own and is not touched.
+ */
+#ifndef	MACH_KERNEL
+typedef mach_port_t	alarm_port_t;
+#endif	/* MACH_KERNEL */
+
 #endif /* _MACH_CLOCK_TYPES_H_ */

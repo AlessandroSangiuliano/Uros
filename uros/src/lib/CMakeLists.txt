@@ -87,7 +87,7 @@ endfunction()
 add_subdirectory(migcom)
 
 # Generate device/device.h from device.defs via MIG (shared by libmach, libflipc2, etc.)
-set(DEVICE_DEFS "${CMAKE_SOURCE_DIR}/export/include/device/device.defs")
+set(DEVICE_DEFS "${UROS_UAPI_DIR}/device/device.defs")
 # Public header for #include <device/device.h>
 set(DEVICE_HEADER "${CMAKE_BINARY_DIR}/generated/include/device/device.h")
 # Co-located headers for MIG .c files (#include "device.h" / "device_server.h")

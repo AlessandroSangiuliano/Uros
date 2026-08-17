@@ -70,10 +70,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${_U}/mach/mach.defs
     ${_U}/mach/mach_port.defs
     ${_U}/mach/mach_host.defs
-    ${_E}/mach/clock.defs
+    ${UROS_UAPI_DIR}/mach/clock.defs
     ${_U}/mach/bootstrap.defs
     ${_U}/mach/exc.defs
-    ${_E}/mach/notify.defs
+    ${UROS_UAPI_DIR}/mach/notify.defs
     # device.defs used to be held out of this list: its stubs failed their own
     # _Static_asserts at -m64, because the two .defs trees described
     # security_token_t differently and were four bytes apart here.  #470 fixed
@@ -83,7 +83,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # generated: what generated was a HAND RUN of migcom whose output stayed in
     # the build directory, so printf.c compiled against a header no rule
     # produced and the stubs it calls were in no archive.
-    ${_E}/device/device.defs
+    ${UROS_UAPI_DIR}/device/device.defs
     # mach_klog.defs: bootstrap's log_forwarder includes <mach/mach_klog.h>.
     ${_U}/mach/mach_klog.defs
     # mach_debug.defs: bootstrap's elf.c calls host_load_symbol_table.
@@ -333,19 +333,19 @@ set(_MIG_INC ${_UAPI} ${_EXPORT} ${UROS_ARCH_INCLUDE} ${_KERNEL} ${_UAPI}/mach_d
 # a branch.  What settles it is that the generated stubs did not move.
 set(EXPORT_MIG_DEFS
   ${_UAPI}/mach/bootstrap.defs
-  ${_EXPORT}/mach/clock.defs
+  ${UROS_UAPI_DIR}/mach/clock.defs
   ${_UAPI}/mach/clock_reply.defs
-  ${_EXPORT}/mach/default_pager_object.defs
+  ${UROS_UAPI_DIR}/mach/default_pager_object.defs
   ${_UAPI}/mach/exc.defs
   ${_UAPI}/mach/ledger.defs
   ${_UAPI}/mach/mach.defs
   ${_UAPI}/mach/mach_host.defs
   ${_UAPI}/mach/mach_klog.defs
-  ${_EXPORT}/mach/mach_norma.defs
+  ${UROS_UAPI_DIR}/mach/mach_norma.defs
   ${_UAPI}/mach/mach_port.defs
   ${_UAPI}/mach/memory_object.defs
   ${_UAPI}/mach/memory_object_default.defs
-  ${_EXPORT}/mach/notify.defs
+  ${UROS_UAPI_DIR}/mach/notify.defs
   ${_UAPI}/mach/sync.defs
   ${_UAPI}/mach_debug/mach_debug.defs
   ${_UAPI}/device/device_request.defs
