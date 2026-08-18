@@ -237,6 +237,37 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
  * through a recycled table would translate a live address to another space's
  * page.  The shootdown is required by either answer.
  *
+ * ── 🔥 WHAT RCU DOES NOT SOLVE, AND IT IS THE HARD HALF ──────────────
+ *
+ * RCU answers READER against FREE.  pmap_collect() against pmap_enter() is
+ * WRITER against WRITER, and no grace period touches it.
+ *
+ * The inserter writes INSIDE the table; the collector's cmpxchg is on the
+ * PARENT entry.  They do not meet.  So this sequence is admissible:
+ *
+ *   collector: scans the table, finds it empty
+ *   inserter:  reads the parent entry, gets the table
+ *   collector: cmpxchg parent -> 0.  Succeeds: the parent never changed.
+ *   inserter:  writes its mapping into the now-unlinked table
+ *
+ * The mapping is lost, silently, and the caller was told it succeeded.  A
+ * second scan after synchronize_rcu() detects it -- by then the inserter has
+ * finished -- but there is nothing useful to do with the answer: republishing
+ * the table can lose to a next_table() that has already put a fresh one in
+ * that slot, and freeing it drops the mapping.
+ *
+ * ⇒ THE EMPTINESS TEST AND THE UNLINK MUST EXCLUDE INSERTERS, not merely be
+ * atomic with each other.  That is a writer-writer exclusion on the slot, and
+ * it is the one place in this design where something has to be held.  It is
+ * also small: it does not cover the walk, it does not cover the leaf writes,
+ * and readers never take it -- which is what keeps the common path free.
+ *
+ * ⚠️ This is where i386's per-table locks (#338) come back, and on their own
+ * terms rather than by inheritance.  The question the bench has to answer is
+ * no longer "lock or no lock" -- it is how wide the writer-writer exclusion
+ * has to be: one lock per pmap, one per table, or a per-table generation
+ * counter the inserter bumps and the collector's cmpxchg includes.
+ *
  * ── WHY NOT #338's PER-TABLE LOCKS ───────────────────────────────────
  *
  * i386 reclaims under PMAP_READ_LOCK plus the per-table locks of #338, arrived
