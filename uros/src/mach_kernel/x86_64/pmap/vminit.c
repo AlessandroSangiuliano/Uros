@@ -115,11 +115,75 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
  * pageout daemon asking for memory back and getting none is a slower kernel;
  * a freed table another processor is walking into is a corrupted one.
  *
- * ▶️ #455 carries it, gated on the pmap's locking discipline -- which is
- * being decided rather than inherited, alongside the mutex (#452, done) and
- * the spl levels (#454).  i386's answer is #338's per-table locks, arrived
- * at by measurement on 8 processors; this kernel is NCPUS=64 and whether
- * that granularity still holds is a question with a number in front of it.
+ * ▶️ #455 carries it.  The discipline it needs is written out below, because
+ * the issue asks for a discipline and not for a lock -- and because two of the
+ * three races it has to survive are already closed without one.
+ *
+ * ── THE DISCIPLINE FOR FREEING A PAGE TABLE ──────────────────────────
+ *
+ * 🔑 The hard part is not other threads.  It is that THE HARDWARE WALKS THESE
+ * TABLES TOO, and the MMU passes no quiescent state, takes no lock and cannot
+ * be asked to wait.  Any scheme that only orders software is wrong here, which
+ * is what makes this different from every other reclaim in the kernel.
+ *
+ * Four steps, and the order is the whole of it:
+ *
+ *   1. UNLINK, with cmpxchg, from `table | VALID' to 0.  A plain store would
+ *      lose whatever another processor put there; a failed exchange means the
+ *      entry changed under us and the table is in use again, so abandon it.
+ *      This is the same arbitration next_table() uses to publish (map.c), read
+ *      in the other direction.
+ *
+ *   2. SHOOT DOWN, on every processor that may have this pmap loaded.  Until
+ *      that returns, a processor's TLB can still hold a translation that was
+ *      derived THROUGH this table, and an in-flight hardware walk can still be
+ *      inside it.  Step 1 removed the way to reach it; only this removes the
+ *      copies already taken.  ⚠️ #439 is the size of this: today the shootdown
+ *      goes to every processor rather than the ones using the pmap, so on 64
+ *      it costs 63 interrupts to reclaim one page.  That is a cost question,
+ *      not a correctness one, and it does not gate this.
+ *
+ *   3. WAIT FOR SOFTWARE WALKERS -- urmach_synchronize_rcu().  A walk that
+ *      read the parent entry before step 1 holds a pointer into the table and
+ *      is entitled to finish.  QSBR says that when synchronize returns, every
+ *      processor has passed a quiescent state, so no such walk is outstanding.
+ *      ⚠️ This requires pmap_walk() to run inside a read section; it does not
+ *      today, and that is the one piece of this that is code rather than
+ *      ordering.
+ *
+ *   4. FREE the frame.  Not before.
+ *
+ * ── WHAT A CONCURRENT pmap_enter IS GUARANTEED TO SEE ────────────────
+ *
+ * It reads the parent entry once, and gets one of two answers:
+ *
+ *   - the table, because its read happened before step 1.  The table is still
+ *     allocated -- step 4 has not run and cannot until step 3 lets it -- so
+ *     the entry it writes lands in a live table.  The collector's cmpxchg in
+ *     step 1 then fails, because installing a mapping does not change the
+ *     parent entry but the RCU read section keeps the grace period open, and
+ *     a collector that got past step 1 before the mapping was written would
+ *     free a table with a live entry in it.  ⇒ THE EMPTINESS TEST AND THE
+ *     UNLINK MUST BE ONE OPERATION, or the test is a value that was true once.
+ *
+ *   - zero, because its read happened after.  next_table() then creates a
+ *     fresh table and publishes it with cmpxchg, which is step 1's exchange
+ *     seen from the other side: exactly one of the two wins the entry.
+ *
+ * There is no third answer, and in particular there is no answer that is a
+ * pointer to a freed table -- which is the whole property.
+ *
+ * ── WHY NOT #338's PER-TABLE LOCKS ───────────────────────────────────
+ *
+ * i386 reclaims under PMAP_READ_LOCK plus the per-table locks of #338, arrived
+ * at by measurement on eight processors.  This kernel is NCPUS=64, and the
+ * question the issue asks is whether that granularity is still the right one
+ * rather than merely the inherited one.  What the four steps above show is
+ * that the READER never needs to exclude anybody: walking is a read section,
+ * publishing is a cmpxchg, and the collector pays for the rarity of its own
+ * operation.  A lock would put the cost on the common path to spare the rare
+ * one.  x86_64/pmap/collect_bench.c is the load that decides it, and it is
+ * already written.
  */
 void
 pmap_collect(pmap_t pmap)
