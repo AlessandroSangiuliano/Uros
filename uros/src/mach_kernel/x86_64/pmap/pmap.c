@@ -101,10 +101,13 @@ static boolean_t	pmap_from_pool(pmap_t pmap);
  * next_table) and decremented where one is released, so the difference across
  * a map/unmap pair is what pmap_collect() would have to give back.
  *
- * ⚠️ A plain unsigned, deliberately: it is read by the self-tests to report a
- * number, not by anything that acts on it, and this pmap has no locking to
- * make it exact under (see pv.c).  When #455's discipline lands it becomes a
- * per-pmap count under that discipline.
+ * ⚠️ Maintained atomically, because the whole point of it is to be exact.  It
+ * was a plain unsigned under a comment saying that was deliberate -- true
+ * while it was only ever touched from a boot self-test, and false the moment
+ * eight processors build tables at once, which is precisely the run it exists
+ * to judge.  A counter of lost updates that itself loses updates reports the
+ * instrument instead of the subject, and this bench has already made that
+ * mistake once with its own workers-done tally.
  */
 unsigned	pmap_table_frames_live;
 /*
@@ -514,10 +517,20 @@ pmap_t pmap_create(uint64_t size)
 	return pmap;
 }
 
+/*
+ * ⚠️ Atomic, and this one decides whether an address space is torn down while
+ * somebody still holds it (#455).
+ *
+ * Two processors taking a reference at once with `count++' lose one of the
+ * two increments, and the loss does not show up here -- it shows up as the
+ * last pmap_destroy() finding a count of zero one release too early and
+ * freeing the tables under whoever still had the map.  The same class as
+ * resident_count above, with a much worse failure at the end of it.
+ */
 void pmap_reference(pmap_t pmap)
 {
 	if (pmap != PMAP_NULL)
-		pmap->ref_count++;
+		atomic_add32((volatile uint32_t *) &pmap->ref_count, 1);
 }
 
 /* The index shift of each paging level, deepest first. */
@@ -566,7 +579,8 @@ static void pmap_free_tables(uint64_t table_pa, unsigned level,
 	}
 
 	pmap_table_frame_free(table_pa);
-	pmap_table_frames_live--;
+	atomic_add32((volatile uint32_t *) &pmap_table_frames_live,
+		     (uint32_t) -1);
 }
 
 void pmap_destroy(pmap_t pmap)
@@ -576,7 +590,14 @@ void pmap_destroy(pmap_t pmap)
 	if (pmap == PMAP_NULL || pmap == pmap_kernel())
 		return;
 
-	if (--pmap->ref_count > 0)
+	/*
+	 * The release, and it is the same operation as the acquire read the
+	 * other way: what the exchange answers is what the count held at the
+	 * instant it subtracted.  One means this call took the last reference
+	 * away; anything greater means somebody else still holds one.
+	 */
+	if (atomic_add32((volatile uint32_t *) &pmap->ref_count,
+			 (uint32_t) -1) != 1)
 		return;
 
 	root = (const pt_entry_t *)(uintptr_t)phys_to_direct(pmap->root_pa);
@@ -624,16 +645,34 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 
 	if (size != 0) {
 		/*
+		 * 🔥 ONE COUNTER, EIGHT PROCESSORS, AND `count--' IS THREE
+		 * INSTRUCTIONS (#455).
+		 *
+		 * The same lost update as pmap_protect_page's and
+		 * next_table's, on a word the machine-independent tree reads:
+		 * two processors unmapping at once each read the same value,
+		 * each write it back decremented, and one decrement is gone.
+		 * The count then drifts ABOVE the truth and vm_debug.c sizes an
+		 * array from it -- and the mirror case, two enters, drifts it
+		 * below, which is what the bench found as an underflow after a
+		 * few thousand map/unmap pairs at -smp 8.
+		 *
+		 * ⚠️ The check has to be the SAME operation, not one before it.
+		 * Reading zero and then decrementing is a decision taken about
+		 * a value that another processor may already have changed; the
+		 * exchange answers what was actually there at the instant it
+		 * subtracted, so the panic below reports a fact.
+		 *
 		 * panic() and not assert(), because Assert() lives in
 		 * kern/debug.c and the machine-independent tree is not in this
 		 * kernel yet -- and because an underflow here means the count
 		 * has drifted from the tables, which is not a condition to
 		 * carry on from.
 		 */
-		if (pmap->resident_count == 0)
+		if (atomic_add32((volatile uint32_t *) &pmap->resident_count,
+				 (uint32_t) -1) == 0)
 			panic("pmap_forget: resident_count underflow at "
 			      "va 0x%lx", (unsigned long) va);
-		pmap->resident_count--;
 	}
 
 	return size;
@@ -710,8 +749,12 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 		 * Only on a fresh mapping: pmap_map_page() answers PMAP_MAP_OK
 		 * for one that replaces nothing, so re-mapping a page that is
 		 * already there does not count twice.
+		 *
+		 * Atomic for the reason written over the decrement in
+		 * pmap_forget(): it is one word and every processor mapping
+		 * into this space writes it.
 		 */
-		pmap->resident_count++;
+		atomic_add32((volatile uint32_t *) &pmap->resident_count, 1);
 	}
 
 	return rc;

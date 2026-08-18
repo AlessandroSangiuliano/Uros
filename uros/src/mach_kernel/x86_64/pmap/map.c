@@ -124,7 +124,8 @@ static pt_entry_t *next_table(pt_entry_t *entry, int *err)
 		}
 	}
 
-	pmap_table_frames_live++;		/* #455 */
+	/* Atomic for the reason written over the counter itself (#455). */
+	atomic_add32((volatile uint32_t *) &pmap_table_frames_live, 1);
 	return table_at(frame);
 }
 
