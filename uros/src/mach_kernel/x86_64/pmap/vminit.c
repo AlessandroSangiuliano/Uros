@@ -147,9 +147,24 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
  *      read the parent entry before step 1 holds a pointer into the table and
  *      is entitled to finish.  QSBR says that when synchronize returns, every
  *      processor has passed a quiescent state, so no such walk is outstanding.
- *      ⚠️ This requires pmap_walk() to run inside a read section; it does not
- *      today, and that is the one piece of this that is code rather than
- *      ordering.
+ *      ⚠️ The read section CANNOT go inside pmap_walk(), and getting that
+ *      wrong is the easy mistake here.  pmap_walk() returns a POINTER INTO the
+ *      table it found, and all nine of its callers dereference that pointer
+ *      after it has returned -- so a section opened and closed inside the walk
+ *      would end while the reference is still live, and protect the lookup
+ *      instead of the use.  It would also look right.
+ *
+ *      The section belongs to the caller, spanning the walk AND every access
+ *      through what it returned: pmap_protect_page and pmap_unmap_page in
+ *      map.c, pmap_extract and pmap_page_protect's pv loop in pmap.c, and the
+ *      rest of the nine.  That is the one piece of this that is code rather
+ *      than ordering, and it is nine small edits rather than one.
+ *
+ *      ⚠️ It depends on the kernel being non-preemptive.  rcu.h says so in as
+ *      many words -- rcu_read_depth is per-CPU and "if this kernel becomes
+ *      preemptive this per-CPU scheme breaks" -- and MACH_RT is 0 here, which
+ *      is what makes it true rather than hoped.  A depth counted per processor
+ *      by a thread that can move between processors counts nothing.
  *
  *   4. FREE the frame.  Not before.
  *
