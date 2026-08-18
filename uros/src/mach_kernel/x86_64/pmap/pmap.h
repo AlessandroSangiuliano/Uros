@@ -97,6 +97,9 @@ void pmap_destroy(pmap_t pmap);
  */
 void pmap_boundary_probe_arm(void);
 
+/* #455: interior page-table frames alive right now.  See pmap.c. */
+extern unsigned pmap_table_frames_live;
+
 /*
  * Make `pmap` the address space this CPU translates through — a CR3 load,
  * which also flushes every non-global TLB entry.  The kernel half is

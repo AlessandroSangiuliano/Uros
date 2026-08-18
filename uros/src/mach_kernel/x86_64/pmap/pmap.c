@@ -90,6 +90,21 @@ static pmap_t		pmap_boundary_probe = PMAP_NULL;
 static unsigned		pmap_pool_frees;
 
 static boolean_t	pmap_from_pool(pmap_t pmap);
+
+/*
+ * Page-table frames alive right now (#455).
+ *
+ * The interior tables only -- the leaves name pages owned by VM objects and
+ * are not this layer's.  Incremented where a table is created (map.c's
+ * next_table) and decremented where one is released, so the difference across
+ * a map/unmap pair is what pmap_collect() would have to give back.
+ *
+ * ⚠️ A plain unsigned, deliberately: it is read by the self-tests to report a
+ * number, not by anything that acts on it, and this pmap has no locking to
+ * make it exact under (see pv.c).  When #455's discipline lands it becomes a
+ * per-pmap count under that discipline.
+ */
+unsigned	pmap_table_frames_live;
 /*
  * Has pmap_init() run?  It is what pmap_table_frame() below asks, and the
  * whole reason this variable exists (#458).
@@ -461,6 +476,7 @@ static void pmap_free_tables(uint64_t table_pa, unsigned level,
 	}
 
 	boot_frame_free(table_pa);
+	pmap_table_frames_live--;
 }
 
 void pmap_destroy(pmap_t pmap)

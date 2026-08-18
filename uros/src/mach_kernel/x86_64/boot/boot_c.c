@@ -1032,6 +1032,53 @@ static void user_pmap_selftest(void)
 	 * zfree() onto the zone's free list -- is available to give.
 	 */
 	pmap_boundary_probe_arm();
+
+	/*
+	 * #455: how much a sparse space keeps after it has unmapped everything.
+	 *
+	 * A 64-bit space is wide, so a server that maps and unmaps scattered
+	 * addresses builds interior tables all over the lower half and none of
+	 * them shares a parent with another.  Eight pages, one per PML4 slot,
+	 * is the cheapest shape that shows it: every one costs a full descent.
+	 *
+	 * The point is the AFTER number.  pmap_remove() clears the leaves and
+	 * leaves the scaffolding standing, so what this prints is what
+	 * pmap_collect() would have to give back -- and today gives back none of.
+	 */
+	{
+		pmap_t   sp = pmap_create(0);
+		unsigned before, built, after;
+		uint64_t pa;
+
+		if (sp != PMAP_NULL) {
+			before = pmap_table_frames_live;
+
+			for (int i = 0; i < 8; i++) {
+				uint64_t va = ((uint64_t) i << PML4_SHIFT) + 0x40000;
+				pa = pmap_table_frame();
+				if (pa == 0)
+					break;
+				(void) pmap_enter(sp, va, pa, VM_PROT_READ, FALSE);
+			}
+			built = pmap_table_frames_live;
+
+			for (int i = 0; i < 8; i++) {
+				uint64_t va = ((uint64_t) i << PML4_SHIFT) + 0x40000;
+				pmap_remove(sp, va, va + PAGE_SIZE_4K);
+			}
+			after = pmap_table_frames_live;
+
+			kputs("UrMach x86-64: sparse space held ");
+			kputdec(built - before);
+			kputs(" interior tables, and after unmapping every page it holds ");
+			kputdec(after - before);
+			kputs(built > before && after == built
+			      ? " -- pmap_collect gives back none of them (#455)\r\n"
+			      : " -- UNEXPECTED\r\n");
+
+			pmap_destroy(sp);
+		}
+	}
 }
 
 /*

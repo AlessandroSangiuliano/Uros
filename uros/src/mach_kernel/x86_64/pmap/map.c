@@ -80,6 +80,7 @@ static pt_entry_t *next_table(pt_entry_t *entry, int *err)
 	 * hardware rule forces.
 	 */
 	*entry = frame | INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_USER;
+	pmap_table_frames_live++;		/* #455 */
 	return table_at(frame);
 }
 
