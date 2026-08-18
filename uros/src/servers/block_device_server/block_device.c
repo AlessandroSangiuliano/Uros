@@ -262,7 +262,19 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 			resource_id = alias_id;
 	}
 	if (kr != KERN_SUCCESS) {
-		printf("blk: cap verify FAIL for %s (op=0x%x id=0x%llx): kr=%d\n",
+		/*
+		 * ⚠️ "refused", not "FAIL".  Turning away a token that does not
+		 * verify is this routine working, and cap_test's negative test
+		 * [2] provokes this very line on every i386 boot by opening
+		 * ahci0a with a zero-filled token -- the console reads
+		 * "cap_test: [2] ... zero-token rejected: OK" just after it.
+		 * Spelled FAIL it cost a reader an afternoon of chasing a
+		 * defect that was a passing test, the same way `grep -c panic'
+		 * counts successes.  A denial that reads like a malfunction
+		 * gets investigated; one that reads like a denial gets read.
+		 */
+		printf("blk: refused %s: token does not grant op=0x%x on "
+		       "id=0x%llx (kr=%d)\n",
 		       part->name, op, (unsigned long long)resource_id, kr);
 		return KERN_NO_ACCESS;
 	}

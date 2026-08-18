@@ -1942,9 +1942,22 @@ main(int argc, char **argv)
 
 	/* MIG server loop — receives from port set covering all mounts.
 	 * Demux dispatches to ext2fs_server (subsystem 2920, legacy) and
-	 * vfs (subsystem 3000, common interface for libvfs). */
+	 * vfs (subsystem 3000, common interface for libvfs).
+	 *
+	 * ⚠️ MACH_RCV_TRAILER_SEQNO, because the third demux arm is
+	 * libfspager's and its stubs are generated with -DSEQNOS: every
+	 * seqnos_memory_object_* routine takes the sequence number as an
+	 * argument, so the stub reads it out of the trailer and refuses the
+	 * message when the trailer is too short to hold one.  The receive is
+	 * the only place that can ask for it, and asking was left to
+	 * MACH_MSG_OPTION_NONE here while default_pager -- same stubs, same
+	 * flag -- asks for it in both of its loops.  The two halves were
+	 * decided in different files and nothing compared them: file-backed
+	 * mmap died at the first memory_object_init with "mig:
+	 * memory_object_init refused a message: seqno" on the console.
+	 */
 	mach_msg_server(ext_server_demux, 8192, port_set,
-			MACH_MSG_OPTION_NONE);
+			MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_SEQNO));
 
 	return 0;
 }
