@@ -78,6 +78,18 @@ static zone_t		pmap_zone;		/* ZONE_NULL until pmap_init() */
  * moment the pool stops growing.
  */
 static unsigned		pmap_pool_high_water;
+
+/*
+ * The case the two-allocator split lives or dies on (#456): a space made from
+ * the pool, still alive when the zone appears, destroyed afterwards.  A test
+ * written after the boot cannot construct it -- by then pmap_alloc() only
+ * hands out zone elements -- so it is armed from the machine-dependent
+ * self-tests and collected by pmap_init().
+ */
+static pmap_t		pmap_boundary_probe = PMAP_NULL;
+static unsigned		pmap_pool_frees;
+
+static boolean_t	pmap_from_pool(pmap_t pmap);
 /*
  * Has pmap_init() run?  It is what pmap_table_frame() below asks, and the
  * whole reason this variable exists (#458).
@@ -116,7 +128,42 @@ pmap_init(void)
 	printf("pmap: %u of %u boot pool slots used before the zone existed\n",
 	       pmap_pool_high_water, (unsigned) PMAP_BOOT_MAX);
 
+	/*
+	 * And the space that straddles the boundary, destroyed here -- with the
+	 * zone open, so pmap_free() has a wrong answer available to give.
+	 * ⚠️ Before pmap_initialized is set: pmap_destroy() releases page-table
+	 * frames, and until that flag flips they go back to the allocator they
+	 * came from.
+	 */
+	if (pmap_boundary_probe != PMAP_NULL) {
+		pmap_t	 probe = pmap_boundary_probe;
+		unsigned frees  = pmap_pool_frees;
+		boolean_t pooled = pmap_from_pool(probe);
+
+		pmap_boundary_probe = PMAP_NULL;
+		pmap_destroy(probe);
+
+		printf("pmap: a space made before the zone went back to the "
+		       "%s after it -- %s\n",
+		       pooled ? "pool" : "zone",
+		       (pooled && pmap_pool_frees == frees + 1)
+		       ? "the allocators are told apart across the boundary"
+		       : "WRONG");
+	}
+
 	pmap_initialized = 1;
+}
+
+/*
+ * Keep one pool pmap alive past pmap_init(), so the boundary case above has a
+ * subject.  Called from the machine-dependent self-tests, which are the only
+ * code that runs while the pool is the only allocator.
+ */
+void
+pmap_boundary_probe_arm(void)
+{
+	if (pmap_boundary_probe == PMAP_NULL)
+		pmap_boundary_probe = pmap_create(0);
 }
 
 /*
@@ -254,6 +301,7 @@ static void pmap_free(pmap_t pmap)
 	 */
 	if (pmap_from_pool(pmap)) {
 		pmap->ref_count = 0;
+		pmap_pool_frees++;
 		return;
 	}
 
