@@ -225,4 +225,19 @@ pmap_collect_bench(void)
 	       pmap_table_frames_live == bench_frames_at_start + (unsigned) want
 	       ? "one leaf each, nothing lost"
 	       : "TABLES LOST TO A RACE -- the pmap needs a lock (#455)");
+
+	/*
+	 * And then destroy the space, which is the question a lock does not
+	 * answer: pmap_destroy() reclaims by WALKING THE TREE, and a table lost
+	 * to the race is linked to nothing -- it is not in the tree to be
+	 * found.  So whatever is left standing here is leaked for the lifetime
+	 * of the machine, and no collector that walks can ever see it.
+	 */
+	pmap_destroy(bench_pmap);
+	printf("pmap_bench: after pmap_destroy, interior tables %u (started at "
+	       "%u) -- %s\n",
+	       pmap_table_frames_live, bench_frames_at_start,
+	       pmap_table_frames_live == bench_frames_at_start
+	       ? "every table came back"
+	       : "the lost ones are UNREACHABLE: a walk cannot find them");
 }
