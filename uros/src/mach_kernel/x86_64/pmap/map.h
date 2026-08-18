@@ -17,6 +17,13 @@
 #define PMAP_MAP_OK		0
 #define PMAP_MAP_NO_FRAME	1	/* nothing left to build a table in */
 #define PMAP_MAP_BLOCKED	2	/* a large page already covers this */
+/*
+ * Internal to pmap_map_page(): a table is missing and the descent is holding
+ * a read section it may not allocate in (#455).  Never returned to a caller —
+ * the retry loop turns it into a frame and another attempt, or into
+ * PMAP_MAP_NO_FRAME when there is no frame to be had.
+ */
+#define PMAP_MAP_NEED_FRAME	3
 
 /*
  * Map va to the physical page pa in the tables rooted at root_pa, with
