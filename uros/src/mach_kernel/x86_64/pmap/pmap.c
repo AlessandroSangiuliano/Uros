@@ -22,6 +22,7 @@
 #include <pmap/direct.h>
 #include <vm/vm_page.h>
 #include <kern/thread.h>	/* #459: current_thread */	/* vm_page_grab / vm_page_wire (#458) */
+#include <sync/atomic.h>		/* atomic_cmpxchg64 (#455) */
 #include <kern/zalloc.h>	/* #456: the pmap zone, once there is one */
 
 /*
@@ -627,30 +628,70 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	return rc;
 }
 
+/*
+ * Set and clear bits in a page-table entry without losing what the hardware
+ * or another processor put there in between (#455).
+ *
+ * ⚠️ The retry reloads from cmpxchg's answer and never re-reads *entry:  what
+ * it hands back is what the word held at the instant it refused, and building
+ * the next attempt out of anything else is building it out of a value that was
+ * never in the word.
+ */
+static void pmap_pte_update(pt_entry_t *entry, uint64_t set, uint64_t clear)
+{
+	pt_entry_t found = *entry;
+
+	for (;;) {
+		pt_entry_t fresh = (found & ~clear) | set;
+		pt_entry_t seen;
+
+		if (fresh == found)
+			return;
+
+		seen = atomic_cmpxchg64((volatile uint64_t *) entry,
+					found, fresh);
+		if (seen == found)
+			return;
+		found = seen;
+	}
+}
+
 int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired)
 {
+	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, 0);
 
-	if (entry == PT_ENTRY_NULL)
+	if (entry == PT_ENTRY_NULL) {
+		pmap_read_leave(held);
 		return 0;
+	}
 
 	/*
 	 * No invalidation: the hardware never looks at this bit, so nothing it
 	 * has cached can be out of date because of it.
+	 *
+	 * ⚠️ But it looks at the OTHERS in this word.  `*entry |= WIRED' is a
+	 * read-modify-write on a word the processor sets ACCESSED and DIRTY in
+	 * without asking, so the plain form discards whatever it recorded in
+	 * between -- and losing a dirty bit is losing the fact that a page must
+	 * be written back (#455).
 	 */
-	if (wired)
-		*entry |= INTEL_PTE_WIRED;
-	else
-		*entry &= ~INTEL_PTE_WIRED;
+	pmap_pte_update(entry, wired ? INTEL_PTE_WIRED : 0,
+			wired ? 0 : INTEL_PTE_WIRED);
 
+	pmap_read_leave(held);
 	return 1;
 }
 
 int pmap_is_wired(pmap_t pmap, uint64_t va)
 {
+	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, 0);
+	int	    answer = entry != PT_ENTRY_NULL
+			     && (*entry & INTEL_PTE_WIRED) != 0;
 
-	return entry != PT_ENTRY_NULL && (*entry & INTEL_PTE_WIRED) != 0;
+	pmap_read_leave(held);
+	return answer;
 }
 
 uint64_t pmap_extract(pmap_t pmap, uint64_t va)
@@ -768,9 +809,12 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
+		boolean_t   held = pmap_read_enter();
 		pt_entry_t *e = pmap_walk(pv->pmap->root_pa, pv->va, 0);
+		int	    hit = e != PT_ENTRY_NULL && (*e & bits) != 0;
 
-		if (e != PT_ENTRY_NULL && (*e & bits))
+		pmap_read_leave(held);
+		if (hit)
 			return 1;
 	}
 
@@ -783,15 +827,26 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
+		boolean_t   held = pmap_read_enter();
 		pt_entry_t *e = pmap_walk(pv->pmap->root_pa, pv->va, 0);
 
-		if (e == PT_ENTRY_NULL)
+		if (e == PT_ENTRY_NULL) {
+			pmap_read_leave(held);
 			continue;
+		}
 
-		if (set)
-			*e |= bits;
-		else
-			*e &= ~bits;
+		/*
+		 * 🔥 THE SHARPEST OF THE READ-MODIFY-WRITES (#455).
+		 *
+		 * This is pmap_clear_modify's and pmap_clear_reference's path:
+		 * it CLEARS the very bits the hardware SETS, on the word the
+		 * hardware sets them in.  `*e &= ~bits' reads, clears, writes --
+		 * and a processor that dirtied the page in between has its bit
+		 * discarded.  The page then goes to the pageout daemon looking
+		 * clean and its contents are dropped.
+		 */
+		pmap_pte_update(e, set ? bits : 0, set ? 0 : bits);
+		pmap_read_leave(held);
 
 		/*
 		 * Dropping the TLB entry is not housekeeping here, it is the

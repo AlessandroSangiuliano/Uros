@@ -100,6 +100,40 @@ void pmap_boundary_probe_arm(void);
 /* #455: interior page-table frames alive right now.  See pmap.c. */
 extern unsigned pmap_table_frames_live;
 
+#include <mach/boolean.h>
+#include <kern/rcu.h>		/* the read sections below (#455) */
+extern int pmap_initialized;
+
+/*
+ * The read section that keeps a collector from freeing a table a walk is
+ * standing in (#455), taken only once there is a per-CPU area to count it in.
+ *
+ * 🔥 urmach_rcu_read_lock() is `cpu_data[cpu_number()].rcu_read_depth++', and
+ * boot_c.c walks these tables long before cpu_data exists -- taking the section
+ * unconditionally corrupted whatever that address happened to be, and showed up
+ * as garbage on the console rather than as a fault.  pmap_initialized is the
+ * same two-era boundary pmap_table_frame() asks about, and the right one for a
+ * reason beyond convenience: nothing collects before it.
+ *
+ * ⚠️ CAPTURE the answer and hand it back on exit; never re-test.  The flag
+ * flips once, and a walk that entered before the flip and re-tested on the way
+ * out would leave a section it never took -- an unbalanced depth that never
+ * returns to zero, stalling every future grace period in silence.
+ */
+static __inline__ boolean_t pmap_read_enter(void)
+{
+	if (!pmap_initialized)
+		return FALSE;
+	urmach_rcu_read_lock();
+	return TRUE;
+}
+
+static __inline__ void pmap_read_leave(boolean_t held)
+{
+	if (held)
+		urmach_rcu_read_unlock();
+}
+
 /* #455: -C, what concurrency does to a pmap that has no locking. */
 void pmap_collect_bench(void);
 
