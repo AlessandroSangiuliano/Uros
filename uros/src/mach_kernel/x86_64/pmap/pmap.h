@@ -90,6 +90,14 @@ void pmap_reference(pmap_t pmap);
 void pmap_destroy(pmap_t pmap);
 
 /*
+ * #456: keep one pool-allocated space alive past pmap_init(), so that the
+ * boundary between the two allocators has a subject to be tested on.  Called
+ * from the machine-dependent self-tests; a caller after the boot would get a
+ * zone element and prove nothing.
+ */
+void pmap_boundary_probe_arm(void);
+
+/*
  * Make `pmap` the address space this CPU translates through — a CR3 load,
  * which also flushes every non-global TLB entry.  The kernel half is
  * identical across spaces, so the kernel keeps running across the switch.

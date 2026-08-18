@@ -1024,6 +1024,14 @@ static void user_pmap_selftest(void)
 	kputs("UrMach x86-64: pmap_destroy -> ");
 	kputs(u->ref_count == 0 && u->root_pa == 0 ? "space released\r\n"
 						   : "STILL HELD?!\r\n");
+
+	/*
+	 * #456: and one space that is NOT destroyed here.  It is held until
+	 * pmap_init() has opened the zone and torn down there, which is the
+	 * only way to exercise a pool slot being freed while a wrong answer --
+	 * zfree() onto the zone's free list -- is available to give.
+	 */
+	pmap_boundary_probe_arm();
 }
 
 /*
