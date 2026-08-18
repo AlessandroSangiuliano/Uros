@@ -40,6 +40,7 @@
 
 #include <kern/thread.h>
 #include <kern/sched_prim.h>
+#include <kern/lock.h>			/* mutex_pause (#455) */
 #include <kern/processor.h>
 #include <kern/task.h>
 #include <kern/thread_swap.h>		/* thread_swappable */
@@ -47,6 +48,9 @@
 #include <kern/misc_protos.h>
 #include <x86_64/cpu/spl.h>
 #include <mach/vm_prot.h>
+
+#include <vm/pmap.h>			/* pmap_collect (#455) */
+#include <vm/vm_page.h>			/* vm_page_free_count (#455) */
 
 #include <pmap/pmap.h>
 #include <pmap/layout.h>
@@ -58,7 +62,36 @@
  * builds.  That is the arrangement a per-table lock is for.
  */
 #define BENCH_PML4_SLOT		9
-#define BENCH_ITERATIONS	2000
+/*
+ * ⚠️ It was 2000, and the collector's arm is what changed it.  Eight workers
+ * times two thousand map/unmap pairs takes about thirty seconds on its own and
+ * nearly four minutes with a collector meeting them; a thousand keeps eight
+ * thousand pairs -- far more than enough for the frame count to catch a lost
+ * table, which it counts exactly rather than as a rate -- and brings the run
+ * back inside a sensible watchdog.
+ */
+#define BENCH_ITERATIONS	400
+
+/*
+ * How many collections race the workers before the collector stands down.
+ *
+ * ⚠️ A bound, and it is a measured one.  A collection that takes anything costs
+ * two grace periods and a shootdown to every processor, and with one running
+ * per clock tick for the whole run the workers went FIFTEEN TIMES slower --
+ * 600 iterations in two hundred seconds against 1600 in thirty.  The bench
+ * would then have been measuring the collector's price rather than its safety.
+ *
+ * A hundred is enough because bench_va() makes the meeting deterministic
+ * rather than lucky: every worker leaves one of its two leaf tables empty for
+ * sixty-four iterations at a time, so a collection that runs at all finds
+ * something to take.
+ *
+ * Stopping early is sound for what this arm asks.  A mapping lost to a
+ * collector is lost permanently, so the witnesses and the resident count at the
+ * end still answer the question; what the collector has to do is meet the
+ * workers at all, and bench_taken reports whether it did.
+ */
+#define BENCH_COLLECTIONS	60
 
 static pmap_t		bench_pmap;
 /*
@@ -75,16 +108,82 @@ static volatile int	bench_done[NCPUS];
 static volatile int	bench_start;
 static unsigned		bench_frames_at_start;
 
+/*
+ * The frame each worker maps, kept so the witness below can be checked against
+ * the right one -- every worker grabs its own, so "a mapping is there" is a
+ * weaker claim than "the right mapping is there" (#455).
+ */
+static uint64_t		bench_pa[NCPUS];
+/*
+ * How far each worker has got.  Written by its own processor and read only
+ * when the wait gives up, so there is nothing to lose.
+ *
+ * ⚠️ Not decoration.  A wait that expires can mean a deadlock or merely a
+ * budget that is too small, and those want opposite responses; without this
+ * the bench said "only 4 of 8 workers finished" and left the difference to be
+ * guessed at.  With it the same run said `iteration 1604 of 2000' and the
+ * answer was the budget.
+ */
+static volatile int	bench_iter[NCPUS];
+
+/*
+ * What the collector actually managed to do while the workers ran.
+ *
+ * ⚠️ Reported, and not as a statistic.  Everything this arm concludes is of
+ * the form "nothing was lost", and a run in which the collector never took a
+ * table out from under anybody would conclude exactly the same thing while
+ * having tested nothing.  The presence has to be visible for the absence to
+ * mean anything.
+ */
+static unsigned		bench_collections;
+static unsigned		bench_taken;
+
 static uint64_t bench_va(int worker, int i)
 {
 	/*
-	 * Worker w owns PD slot w, so its leaf table is its own; the PML4 and
-	 * PDPT entries above are shared by every worker.  `i' moves within the
-	 * leaf, which is the part that is never contended.
+	 * Worker w owns PD slots w and w + NCPUS, so its leaf tables are its
+	 * own; the PML4 and PDPT entries above are shared by every worker.
+	 * `i' moves within the leaf, which is the part that is never contended.
+	 *
+	 * 🔥 TWO SLOTS, ALTERNATING EVERY 64 ITERATIONS, and that is what turns
+	 * the collector's arm from a lottery into a test.  With one slot a leaf
+	 * table is empty only in the instant between a pmap_remove and the next
+	 * pmap_enter, so a collection almost never finds one: 758 attempts took
+	 * 8 tables.  Alternating leaves the OTHER table empty for sixty-four
+	 * iterations at a stretch, so the collector reliably takes a table the
+	 * worker is about to come back and use -- which is the case that
+	 * matters, and the one a probabilistic arm might never produce.
+	 */
+	int slot = worker + (((i / 64) & 1) ? NCPUS : 0);
+
+	return ((uint64_t) BENCH_PML4_SLOT << PML4_SHIFT)
+	     | ((uint64_t) slot << PD_SHIFT)
+	     | ((uint64_t) (i % 64) << PT_SHIFT);
+}
+
+/*
+ * The one mapping a worker leaves behind, outside the range its loop uses.
+ *
+ * ⚠️ This is what makes the concurrent-collector arm a test rather than a
+ * demonstration.  A collector racing a worker can only be shown harmless by
+ * something that would notice harm, and "the machine did not crash" is not
+ * that: a table unlinked while a mapping was going into it loses the mapping
+ * SILENTLY and pmap_enter still answers success (#455).  So each worker
+ * installs one mapping it never removes, and the run ends by asking whether
+ * every one of them is still there and still names the right frame.
+ */
+static uint64_t bench_witness_va(int worker)
+{
+	/*
+	 * ⚠️ A PAGE DIRECTORY SLOT OF ITS OWN, not a spare index in the leaf the
+	 * loop uses.  It was written that way first, and it quietly disarmed the
+	 * whole arm: a leaf table holding the witness is never empty, so
+	 * pmap_collect() could never consider it and the collector and the
+	 * workers never met at all.  The witness has to be somewhere the loop's
+	 * table can still go empty between two iterations.
 	 */
 	return ((uint64_t) BENCH_PML4_SLOT << PML4_SHIFT)
-	     | ((uint64_t) worker << PD_SHIFT)
-	     | ((uint64_t) (i % 64) << PT_SHIFT);
+	     | ((uint64_t) (worker + 256) << PD_SHIFT);
 }
 
 static void bench_worker(void)
@@ -97,7 +196,7 @@ static void bench_worker(void)
 	 * ⚠️ ONE frame, taken once and mapped over and over.
 	 *
 	 * The first version of this took a fresh one per iteration and never
-	 * gave it back: 64 workers times 2000 iterations is 128000 pages
+	 * gave it back: at 64 workers that is tens of thousands of pages
 	 * against the 29776 this machine has free, so every worker blocked in
 	 * VM_PAGE_WAIT and none of the 64 ever finished.  The bench reported
 	 * "only 0 of 64 workers finished" rather than hanging, which is the
@@ -112,13 +211,23 @@ static void bench_worker(void)
 		bench_done[me] = 1;
 		thread_terminate_self();
 	}
+	bench_pa[me] = pa;
 
 	while (bench_start == 0)
 		/* spin: the point is to start together, not to be polite */;
 
+	/*
+	 * The witness first, so that it is in place for the whole run and every
+	 * moment of the collector's racing with this worker is a moment it
+	 * could have lost it.
+	 */
+	(void) pmap_enter(bench_pmap, bench_witness_va(me), pa, VM_PROT_READ,
+			  FALSE);
+
 	for (i = 0; i < BENCH_ITERATIONS; i++) {
 		uint64_t va = bench_va(me, i);
 
+		bench_iter[me] = i;
 		(void) pmap_enter(bench_pmap, va, pa, VM_PROT_READ, FALSE);
 		pmap_remove(bench_pmap, va, va + PAGE_SIZE_4K);
 	}
@@ -165,12 +274,175 @@ static thread_t bench_thread_bound(void (*fn)(void), processor_t target)
 	return th;
 }
 
+/*
+ * The measurement the issue asks for, with nothing else running: a space that
+ * maps a wide sparse range and unmaps it, and the count of frames it holds
+ * before and after -- reported rather than asserted.
+ *
+ * Sparse on purpose, one page per page directory slot, so every page needs a
+ * page table of its own and unmapping leaves that table empty.  That is the
+ * behaviour the issue describes -- "a server doing mmap/munmap across
+ * scattered addresses builds tables all over the lower half" -- and on a
+ * 64-bit space it is the ordinary case rather than a contrived one.
+ */
+#define BENCH_SPARSE_PAGES	40
+#define BENCH_SPARSE_SLOT	11
+
+static uint64_t bench_sparse_va(int i)
+{
+	return ((uint64_t) BENCH_SPARSE_SLOT << PML4_SHIFT)
+	     | ((uint64_t) i << PD_SHIFT);
+}
+
+/*
+ * The page-directory entry above `va', which is the entry pmap_collect()
+ * examines when it decides about the page table below it.
+ *
+ * Written out here rather than borrowed from pmap_walk(), which answers with
+ * the LEAF and so cannot name the thing under test.
+ */
+static pt_entry_t *bench_pd_entry(pmap_t p, uint64_t va)
+{
+	pt_entry_t	*table;
+	pt_entry_t	 e;
+
+	table = (pt_entry_t *)(uintptr_t)phys_to_direct(p->root_pa);
+	e = table[pml4_index(va)];
+	if (!pte_is_valid(e) || pte_is_leaf(e))
+		return PT_ENTRY_NULL;
+
+	table = (pt_entry_t *)(uintptr_t)phys_to_direct(pte_to_pa(e));
+	e = table[pdpt_index(va)];
+	if (!pte_is_valid(e) || pte_is_leaf(e))
+		return PT_ENTRY_NULL;
+
+	table = (pt_entry_t *)(uintptr_t)phys_to_direct(pte_to_pa(e));
+	if (!pte_is_valid(table[pd_index(va)]))
+		return PT_ENTRY_NULL;
+
+	return &table[pd_index(va)];
+}
+
+/* Collect until a call gives nothing back.  Answers how many tables went. */
+static unsigned bench_collect_all(pmap_t p, int *rounds_out)
+{
+	unsigned	start = pmap_table_frames_live;
+	int		rounds;
+
+	/*
+	 * Bounded: one call takes at most a batch, so a loop is needed, and a
+	 * loop that cannot stop would turn a wrong answer into a hang.
+	 */
+	for (rounds = 0; rounds < 64; rounds++) {
+		unsigned before = pmap_table_frames_live;
+
+		pmap_collect(p);
+		if (pmap_table_frames_live == before)
+			break;
+	}
+
+	if (rounds_out)
+		*rounds_out = rounds + 1;
+
+	return start - pmap_table_frames_live;
+}
+
+static void bench_collect_quiet(void)
+{
+	pmap_t		p = pmap_create(0);
+	uint64_t	pa;
+	unsigned	held, freed, refused, armed = 0;
+	unsigned	free_before, free_after;
+	int		i, rounds;
+
+	if (p == PMAP_NULL) {
+		printf("pmap_bench: no pmap for the quiet measurement -- WRONG\n");
+		return;
+	}
+
+	pa = pmap_table_frame();
+	if (pa == 0) {
+		printf("pmap_bench: no frame for the quiet measurement -- WRONG\n");
+		pmap_destroy(p);
+		return;
+	}
+
+	for (i = 0; i < BENCH_SPARSE_PAGES; i++)
+		(void) pmap_enter(p, bench_sparse_va(i), pa, VM_PROT_READ,
+				  FALSE);
+
+	held = pmap_table_frames_live;
+	free_before = vm_page_free_count;
+
+	for (i = 0; i < BENCH_SPARSE_PAGES; i++)
+		pmap_remove(p, bench_sparse_va(i),
+			    bench_sparse_va(i) + PAGE_SIZE_4K);
+
+	/*
+	 * ── The reference-bit hint, with a control ───────────────────────
+	 *
+	 * ⚠️ The hardware cannot arm it here, and that is a property of the
+	 * experiment rather than of the hint.  ACCESSED is set when the
+	 * processor WALKS an entry, and this space has never been in CR3:
+	 * nothing has ever translated an address through these tables, so
+	 * every parent entry is cold whatever the space did.
+	 *
+	 * So it is armed by hand, which turns "the hint exists" into a
+	 * measurement with two sides: with the bit set on every parent, a
+	 * collection must give back NOTHING and clear the bits; the next one
+	 * must give back everything.  A hint that is only described is a hint
+	 * that has never been shown to refuse anything.
+	 */
+	for (i = 0; i < BENCH_SPARSE_PAGES; i++) {
+		pt_entry_t *pde = bench_pd_entry(p, bench_sparse_va(i));
+
+		if (pde != PT_ENTRY_NULL) {
+			*pde |= INTEL_PTE_REF;
+			armed++;
+		}
+	}
+
+	refused = bench_collect_all(p, &rounds);
+	printf("pmap_bench: %u parents marked referenced by hand; a full "
+	       "collection gave back %u tables (%s)\n",
+	       armed, refused,
+	       refused == 0
+	       ? "the second chance refused every one"
+	       : "THE REFERENCE BIT DID NOT REFUSE -- WRONG");
+
+	freed = bench_collect_all(p, &rounds);
+	free_after = vm_page_free_count;
+
+	printf("pmap_bench: %d sparse pages held %u interior tables; after "
+	       "unmapping and a second pass, %u came back in %d rounds, "
+	       "leaving %u\n",
+	       BENCH_SPARSE_PAGES, held, freed, rounds,
+	       pmap_table_frames_live);
+
+	printf("pmap_bench: free pages %u -> %u, so %d went back to the VM "
+	       "rather than onto a list nobody pops -- %s\n",
+	       free_before, free_after, (int) free_after - (int) free_before,
+	       free_after > free_before
+	       ? "the pageout daemon gets something for asking"
+	       : "NOTHING WAS RECLAIMED (#455)");
+
+	pmap_table_frame_free(pa);
+	pmap_destroy(p);
+}
+
 void
 pmap_collect_bench(void)
 {
 	int	 want = 0;
 	int	 i;
 	unsigned expect;
+
+	/*
+	 * The quiet measurement first, while nothing else is building tables:
+	 * it reads a global count, so anything running beside it would be
+	 * measuring the neighbour.
+	 */
+	bench_collect_quiet();
 
 	bench_pmap = pmap_create(0);
 	if (bench_pmap == PMAP_NULL) {
@@ -196,6 +468,9 @@ pmap_collect_bench(void)
 	printf("pmap_bench: %d workers, %d iterations each, one leaf table "
 	       "apiece under a shared PDPT and PD\n", want, BENCH_ITERATIONS);
 
+	bench_collections = 0;
+	bench_taken = 0;
+
 	bench_start = 1;
 
 	/*
@@ -204,10 +479,54 @@ pmap_collect_bench(void)
 	 * run to find out; one that says how many finished names the failure.
 	 */
 	{
-		int spins, done = 0;
+		/*
+		 * ⚠️ THE WAIT YIELDS, IT DOES NOT SPIN, AND THAT IS THE WHOLE
+		 * DIFFERENCE BETWEEN A RACE AND A FAMINE.
+		 *
+		 * This was a busy loop with a spin budget, and the budget kept
+		 * becoming the verdict: three runs reported "only 1 of 8
+		 * workers finished -- WRONG" with the workers at iteration
+		 * 1604, then 721, then 576 of 2000 and still climbing.  Raising
+		 * the budget tenfold made it WORSE, which is the clue -- the
+		 * spinner is a ninth runnable thread on eight processors, and
+		 * every processor it holds is one a BOUND worker cannot run on
+		 * at all.  The instrument was eating the subject.
+		 *
+		 * mutex_pause() gives the processor up for a tick instead.  The
+		 * collector then runs about once per tick for the whole run,
+		 * which is frequent enough to meet the workers and cheap enough
+		 * to leave them the machine.
+		 */
+		int done = 0, waits;
 
-		for (spins = 0; spins < 200000000 && done < want; spins++) {
-			int k;
+		for (waits = 0; waits < 20000 && done < want; waits++) {
+			int	 k;
+			unsigned was = pmap_table_frames_live;
+
+			/*
+			 * 🔥 THE COLLECTOR RUNS HERE, against them: eight
+			 * workers building and tearing down leaf tables while
+			 * pmap_collect() tries to take the empty ones away.
+			 *
+			 * ⚠️ A collection that finds anything to take costs TWO
+			 * GRACE PERIODS, and a grace period ends only when
+			 * every processor has passed through depth zero -- so
+			 * its latency is set by how often the readers are
+			 * OUTSIDE a read section.  These workers are inside one
+			 * much of the time, so one collection can cost several
+			 * clock ticks.  That cost is real, it is paid by the
+			 * rare operation exactly as intended, and it is why
+			 * this cannot be run in a tight loop.
+			 */
+			if (bench_collections < BENCH_COLLECTIONS) {
+				pmap_collect(bench_pmap);
+				bench_collections++;
+				if (pmap_table_frames_live < was)
+					bench_taken += was
+						     - pmap_table_frames_live;
+			}
+
+			mutex_pause();
 
 			done = 0;
 			for (k = 0; k < NCPUS; k++)
@@ -215,10 +534,98 @@ pmap_collect_bench(void)
 		}
 
 		if (done < want) {
+			/*
+			 * ⚠️ How far each one got, not just how many finished.
+			 * That is what tells a wedged run from a slow one, and
+			 * without it three separate runs were reported as
+			 * failures of the pmap when they were failures of the
+			 * budget.
+			 */
 			printf("pmap_bench: only %d of %d workers finished "
-			       "-- WRONG\n", done, want);
+			       "after %d waits, %u collections, %u tables "
+			       "taken -- WRONG\n",
+			       done, want, waits, bench_collections,
+			       bench_taken);
+			for (i = 0; i < NCPUS; i++)
+				if (bench_pa[i] != 0)
+					printf("  cpu %d reached iteration "
+					       "%d of %d\n", i,
+					       bench_iter[i],
+					       BENCH_ITERATIONS);
 			return;
 		}
+	}
+
+	/*
+	 * Every witness, and the frame it names.
+	 *
+	 * This is the check that a concurrent collector loses nothing.  A table
+	 * unlinked while a mapping was being written into it takes the mapping
+	 * with it and pmap_enter still answers success, so nothing else in this
+	 * run would notice.
+	 */
+	{
+		int lost = 0, wrong = 0;
+
+		for (i = 0; i < NCPUS; i++) {
+			uint64_t got;
+
+			if (bench_done[i] == 0 || bench_pa[i] == 0)
+				continue;
+
+			got = pmap_extract(bench_pmap, bench_witness_va(i));
+			if (got == 0)
+				lost++;
+			else if (got != bench_pa[i])
+				wrong++;
+		}
+
+		printf("pmap_bench: the collector ran %u times during the run "
+		       "and took %u tables out from under the workers -- %s\n",
+		       bench_collections, bench_taken,
+		       bench_taken > 0
+		       ? "the race happened"
+		       : "IT NEVER RACED: what follows tests nothing");
+
+		printf("pmap_bench: %d witness mappings across a running "
+		       "collector: %d lost, %d naming the wrong frame (%s)\n",
+		       want, lost, wrong,
+		       (lost == 0 && wrong == 0)
+		       ? "every mapping survived the race"
+		       : "A MAPPING WAS LOST TO pmap_collect -- WRONG");
+
+		/*
+		 * And the count, which catches what the witnesses cannot.
+		 *
+		 * A mapping written into a table the collector had just
+		 * unlinked is not lost to the caller -- pmap_enter answers
+		 * success -- and the following pmap_remove then finds nothing
+		 * to remove, so the space is left believing it holds one more
+		 * page than it does.  Each worker ends with exactly its
+		 * witness, so the count is answerable to the last unit.
+		 */
+		printf("pmap_bench: resident pages %d, expected %d (%s)\n",
+		       pmap_resident_count(bench_pmap), want,
+		       pmap_resident_count(bench_pmap) == want
+		       ? "every map/unmap pair balanced across the collector"
+		       : "A MAPPING WENT INTO AN UNLINKED TABLE -- WRONG");
+	}
+
+	/*
+	 * Now collect what the run left behind, with nothing else running.
+	 *
+	 * Each worker's loop table is empty at this point -- its last act was a
+	 * pmap_remove -- so a collection to exhaustion must take every one of
+	 * them and leave exactly the witnesses' tables plus the page directory
+	 * and PDPT they share.  Which is the same expectation the run already
+	 * had, arrived at through the collector rather than around it.
+	 */
+	{
+		int	 rounds;
+		unsigned reclaimed = bench_collect_all(bench_pmap, &rounds);
+
+		printf("pmap_bench: a final collection took %u empty leaf "
+		       "tables in %d rounds\n", reclaimed, rounds);
 	}
 
 	/*
@@ -237,7 +644,8 @@ pmap_collect_bench(void)
 	       "expected %u (%s)\n",
 	       want, bench_frames_at_start, pmap_table_frames_live, expect,
 	       pmap_table_frames_live == expect
-	       ? "one leaf each plus the shared PD and PDPT, nothing lost"
+	       ? "one witness leaf each plus the shared PD and PDPT, "
+		 "nothing lost"
 	       : "TABLES LOST TO A RACE -- the pmap needs a lock (#455)");
 
 	/*
