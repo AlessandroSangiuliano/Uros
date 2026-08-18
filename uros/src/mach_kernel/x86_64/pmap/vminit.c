@@ -268,6 +268,46 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
  * has to be: one lock per pmap, one per table, or a per-table generation
  * counter the inserter bumps and the collector's cmpxchg includes.
  *
+ * ── THE WRITER-WRITER PROTOCOL: A GENERATION IN THE PARENT ───────────
+ *
+ * The reason cmpxchg cannot see an insertion is that the inserter writes
+ * inside the table and the collector exchanges the parent.  So make the
+ * inserter touch the parent too, and the exchange sees everything.
+ *
+ * An interior entry has room: bits 11:9 are ignored by the hardware, and on
+ * x86-64 so are 62:52.  An interior entry also carries no policy of its own --
+ * map.c says so where it writes one -- so INTEL_PTE_WIRED, which spends bit 9
+ * in a LEAF, is free here.  That is up to 14 bits with nothing else in them.
+ *
+ *   inserter (map.c, after installing a leaf):
+ *       bump the generation in the parent entry, with cmpxchg
+ *   collector:
+ *       parent = *entry            (table | VALID | gen = N)
+ *       scan the table; if not empty, done
+ *       cmpxchg(entry, parent, 0)  -- fails if ANY insertion happened,
+ *                                     because the generation moved
+ *
+ * The emptiness test and the unlink are now atomic with respect to insertions,
+ * which is what "one operation" had to mean and what the parent alone could
+ * not give.
+ *
+ * ⚠️ IT IS ABA, AND THE WIDTH IS THE WHOLE ARGUMENT.  A generation that wraps
+ * back to N between the read and the exchange lets the collector free a table
+ * that was refilled.  Three bits wrap after eight insertions, which is
+ * reachable in a page fault storm; the eleven above them make it 2048, which
+ * is not reachable in the window between two adjacent instructions but is not
+ * a proof either.  ⇒ USE ALL FOURTEEN, and say in the code that the safety is
+ * a width and not an invariant -- a counter that cannot wrap would be a
+ * different design (a pointer-sized side table), and it is not obviously worth
+ * it.
+ *
+ * ⚠️ AND THE GENERATION COSTS EVERY MAPPING, not every collection.  One extra
+ * cmpxchg on the parent per pmap_enter, forever, to make a rare operation
+ * cheap.  That is the trade a per-table LOCK inverts: the lock costs the
+ * collector and costs the inserter only when they meet.  Which is right is
+ * exactly what collect_bench.c was built to answer, and it is now a question
+ * with two implementable arms rather than a preference.
+ *
  * ── WHY NOT #338's PER-TABLE LOCKS ───────────────────────────────────
  *
  * i386 reclaims under PMAP_READ_LOCK plus the per-table locks of #338, arrived
