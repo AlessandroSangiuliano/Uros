@@ -27,6 +27,29 @@
 	.globl	context_switch_raw
 	.align	16
 context_switch_raw:
+	/*
+	 * 🔥 RFLAGS FIRST, AND IT IS THE INTERRUPT FLAG THAT MATTERS.
+	 *
+	 * <thread/context.h> argues that the ABI already says which registers
+	 * survive a call, so the switch need only keep the callee-saved six.
+	 * That is true of the arithmetic flags and of DF, and it is not true of
+	 * IF -- because IF is not something a C function can change, so the ABI
+	 * has no opinion about it, and the kernel changes it constantly.
+	 *
+	 * Without this the interrupt flag is not part of a thread at all: it is
+	 * a property of the PROCESSOR that whoever runs next inherits.  A thread
+	 * preempted from an interrupt gate switches out with IF clear -- the
+	 * gate cleared it -- and the thread it switches to, which blocked
+	 * voluntarily with interrupts on, resumes with them off and never turns
+	 * them back on.  It then runs indefinitely unable to take a timer tick
+	 * or answer a cross-call, which is how it was found: a TLB shootdown
+	 * from that thread reached ipi_call_others() and panicked, three
+	 * subsystems away from the switch that disarmed it.
+	 *
+	 * Pushed first so it lies immediately below the return address, popped
+	 * last so it is restored with everything else already in place.
+	 */
+	pushfq
 	pushq	%rbp
 	pushq	%rbx
 	pushq	%r12
@@ -43,6 +66,7 @@ context_switch_raw:
 	popq	%r12
 	popq	%rbx
 	popq	%rbp
+	popfq
 	ret
 
 /*
