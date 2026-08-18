@@ -22,6 +22,7 @@
 #include <pmap/direct.h>
 #include <vm/vm_page.h>
 #include <kern/thread.h>	/* #459: current_thread */	/* vm_page_grab / vm_page_wire (#458) */
+#include <kern/zalloc.h>	/* #456: the pmap zone, once there is one */
 
 /*
  * The kernel pmap is a single object, not allocated: it has to exist before
@@ -37,28 +38,46 @@ void pmap_bootstrap(void)
 }
 
 /*
- * Where the pmaps themselves come from.
+ * Where the pmaps themselves come from (#456).
  *
- * A fixed pool, because there is no allocator yet: a slot with no references
- * is free, so a destroyed space's slot comes back -- unlike its frames.
+ * TWO allocators, and which one a given pmap came from has to be answerable
+ * for the lifetime of the system rather than during boot:
+ *
+ *   - before pmap_init(), a fixed pool, because there is no allocator yet.
+ *     A slot with no references is free, so a destroyed space's slot comes
+ *     back -- unlike its frames;
+ *   - after it, a zone, and no ceiling.
+ *
+ * ⚠️ The pool does NOT go away when the zone appears.  Spaces made before
+ * pmap_init() outlive the boot, so pmap_free() has to recognise a slot and
+ * must never hand one to zfree(): that writes a pointer into static storage
+ * onto the zone's free list, and the fault surfaces at some unrelated
+ * allocation, arbitrarily far from here.  The address range answers it, and
+ * the array is the only thing that can.
  */
-#define PMAP_BOOT_MAX	16
+/*
+ * 🔑 FOUR, and the number is a measurement.  The boot reports its own high
+ * water mark from pmap_init() -- "pmap: N of M boot pool slots used before the
+ * zone existed" -- and N is ONE: the space the machine-dependent self-tests
+ * build and tear down before the VM is up.  Sixteen was never a count of
+ * anything; it was what somebody wrote when nothing could be allocated.
+ *
+ * Four rather than one because the pool costs 4 * 24 bytes of BSS and a
+ * self-test that wants two spaces at once should not have to come back here.
+ * And if it ever does run out, pmap_alloc() now says so by name and by number
+ * instead of returning PMAP_NULL into a resource error that mentions neither.
+ */
+#define PMAP_BOOT_MAX	4
 
 static struct pmap	pmap_pool[PMAP_BOOT_MAX];
+static zone_t		pmap_zone;		/* ZONE_NULL until pmap_init() */
 
 /*
- * ⚠️ SIXTEEN SPACES.  That is the ceiling this machine runs under, and it is
- * not a design -- it is what fits in a static array chosen when nothing could
- * be allocated.  A system with a shell, a file server and a driver server is
- * already close to it, and the seventeenth task fails to be created with no
- * indication of why.
- *
- * The fix is a zone, created by pmap_init() once the machine-independent
- * allocator is up, with the pool kept for the spaces made before that -- they
- * outlive the boot, so pmap_destroy() would have to know which it is looking
- * at.  It is written up in #456 rather than left as a comment here, because a
- * limit that is only described in the code it limits is one nobody counts.
+ * The high-water mark of the pool, so its size can be a measurement rather
+ * than a number somebody once wrote.  Reported by pmap_init(), which is the
+ * moment the pool stops growing.
  */
+static unsigned		pmap_pool_high_water;
 /*
  * Has pmap_init() run?  It is what pmap_table_frame() below asks, and the
  * whole reason this variable exists (#458).
@@ -69,16 +88,34 @@ int	pmap_initialized = 0;
  * The second half of pmap initialisation, run by the machine-independent
  * startup once the virtual memory system is up.
  *
- * What it does today is flip one flag, and that flag is load-bearing: it is
- * the moment this pmap stops taking physical frames from the boot allocator
- * and starts taking them from the VM.  See pmap_table_frame().
+ * It flips one flag, and that flag is load-bearing: it is the moment this
+ * pmap stops taking physical frames from the boot allocator and starts taking
+ * them from the VM.  See pmap_table_frame().
  *
- * What still belongs here is the zone that removes the sixteen-space ceiling
- * of #456, which could not be written until this kernel linked kern/zalloc.c.
+ * And it creates the zone that removes the sixteen-space ceiling (#456).
+ *
+ * ⚠️ zinit() before zone_init(), which is three lines further down in
+ * vm_mem_bootstrap().  That is not an oversight to tidy up: vm_map_init()
+ * creates four zones from the line above this call, so a zone made here is as
+ * ready as those are.  zone_init() gives the zones their backing map; zinit()
+ * only describes one.
  */
 void
 pmap_init(void)
 {
+	pmap_zone = zinit((vm_size_t) sizeof(struct pmap),
+			  512 * (vm_size_t) sizeof(struct pmap),
+			  (vm_size_t) PAGE_SIZE,
+			  "physical maps");
+
+	/*
+	 * What the boot actually needed, said out loud once, so the pool's size
+	 * is answerable.  The number is the thing #456 asked to be measured
+	 * rather than assumed, and this is the only moment it is final.
+	 */
+	printf("pmap: %u of %u boot pool slots used before the zone existed\n",
+	       pmap_pool_high_water, (unsigned) PMAP_BOOT_MAX);
+
 	pmap_initialized = 1;
 }
 
@@ -171,18 +208,56 @@ pmap_table_frame(void)
 	return pa;
 }
 
+/* Is this pmap one of the boot pool's slots, rather than a zone element? */
+static boolean_t pmap_from_pool(pmap_t pmap)
+{
+	return pmap >= &pmap_pool[0] && pmap < &pmap_pool[PMAP_BOOT_MAX];
+}
+
 static pmap_t pmap_alloc(void)
 {
-	for (unsigned i = 0; i < PMAP_BOOT_MAX; i++)
-		if (pmap_pool[i].ref_count == 0)
-			return &pmap_pool[i];
+	unsigned i;
 
+	if (pmap_zone != ZONE_NULL)
+		return (pmap_t) zalloc(pmap_zone);
+
+	for (i = 0; i < PMAP_BOOT_MAX; i++)
+		if (pmap_pool[i].ref_count == 0) {
+			if (i + 1 > pmap_pool_high_water)
+				pmap_pool_high_water = i + 1;
+			return &pmap_pool[i];
+		}
+
+	/*
+	 * ⚠️ The limit, by name and by number.
+	 *
+	 * Returning PMAP_NULL here becomes a task_create that fails with a
+	 * resource error, and nothing between the two mentions a pool or a
+	 * count -- so the report names neither the thing that ran out nor how
+	 * much of it there was.  That is the shape #456 was opened about, and
+	 * it costs one line to not have.
+	 */
+	printf("pmap_alloc: the boot pool of %u address spaces is full, and "
+	       "pmap_init() has not run yet to open the zone\n",
+	       (unsigned) PMAP_BOOT_MAX);
 	return PMAP_NULL;
 }
 
 static void pmap_free(pmap_t pmap)
 {
-	(void) pmap;	/* a pool slot with no references is already free */
+	/*
+	 * A pool slot is freed by having no references -- there is nowhere to
+	 * return it to.  ref_count is already zero on the path from
+	 * pmap_destroy(); it is set here as well because pmap_create()'s error
+	 * path frees a pmap it never finished, and that one still holds
+	 * whatever the slot had.
+	 */
+	if (pmap_from_pool(pmap)) {
+		pmap->ref_count = 0;
+		return;
+	}
+
+	zfree(pmap_zone, (vm_offset_t) pmap);
 }
 
 
@@ -258,7 +333,13 @@ pmap_t pmap_create(uint64_t size)
 		 */
 		printf("pmap_create: no frame for a page-table root -- this "
 		       "task would have no address space at all\n");
-		pmap->ref_count = 0;	/* give the pool slot back */
+		/*
+		 * ⚠️ pmap_free() and not `ref_count = 0'.  Zeroing the count is
+		 * how a POOL slot is returned, and it was the whole of this path
+		 * while the pool was the only allocator; on a zone element it
+		 * returns nothing and leaks one pmap per failure (#456).
+		 */
+		pmap_free(pmap);
 		return PMAP_NULL;
 	}
 
