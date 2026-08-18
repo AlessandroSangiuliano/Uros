@@ -24,15 +24,19 @@
  * compare against a constant printed in plain hex so the result
  * is unambiguous in the serial log.
  *
- * Current status (#234 incr 4, 2026-05-23): the chain reaches
- * vfs_open on /lib/libfoo.so successfully (the dyn_bootstrap ctor
- * in libposix-uros-pic now seeds the Mach port globals so open()
- * routes correctly), but musl then calls mmap2(fd, ...) on the .so
- * fd and libposix-uros's h_mmap2 only supports MAP_ANONYMOUS — file-
- * backed mmap (vm_map against an ext_server memory object) is the
- * next blocker for any dynamic dlopen.  Tracked as a follow-up
- * issue; this binary stays in tree as the regression target that
- * will start PASSing the day file-backed mmap lands.
+ * Current status (2026-08-18): PASSes.  The whole chain runs --
+ * vfs_open on /lib/libfoo.so, mmap2 against an ext_server memory
+ * object, the fault, data_supply, and a call into the mapped code
+ * that returns FOO_ANSWER_MAGIC.
+ *
+ * ⚠️ It was written expecting to fail "until file-backed mmap lands",
+ * and file-backed mmap landed in #276 while this went on dying -- at
+ * the first message of the pager protocol, because ext_server did not
+ * ask for the seqno trailer libfspager's -DSEQNOS stubs read.  So for
+ * a while the comment and the log agreed on the symptom and were both
+ * wrong about the cause, which is exactly how a regression target
+ * stops being one.  It is a regression target again now: it fails if
+ * anything in that chain stops working, and it says so.
  */
 
 #include <stdint.h>

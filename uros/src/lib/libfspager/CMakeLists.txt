@@ -63,17 +63,25 @@ target_compile_options(libfspager PRIVATE
 # instead of taking sizeof on the host.  The reason expired, so the exception
 # goes: these stubs now check their arguments like the other 179 in userland.
 #
-# ⚠️ Removed on the static argument, NOT on a passing run, and the difference
-# matters.  Nothing in the tree reaches these stubs today: the only client of
-# file-backed mmap is libposix-uros' h_mmap2, which still handles MAP_ANONYMOUS
-# alone (dlopen_test documents itself as failing until that lands, and
-# exec_load defers mmap-backed loading to #228).  A green boot therefore proves
-# nothing here — the path is not entered, so no check can fire.  The first real
-# exercise of this stub arrives with #276's file-backed mmap, and it should
-# arrive with the checks on rather than inherit a disabled one for another two
-# years.  If the shape does disagree then, note that a userland stub has no
-# equivalent of the kernel's MIG_CHECK_FAILED diagnostic: it will fail as a
-# bare MIG_BAD_ARGUMENTS, and this comment is the pointer to why.
+# ⚠️ Removed on the static argument, NOT on a passing run.  This paragraph used
+# to go on to say that a green boot proved nothing because "the path is not
+# entered, so no check can fire", the only client of file-backed mmap being an
+# h_mmap2 that still handled MAP_ANONYMOUS alone.  That was already wrong when
+# it was written: dlopen_test enters this path on every i386 boot, and the check
+# fired there — a memory_object_init refused for a trailer too short to carry a
+# seqno, which is where every dlopen died until ext_server asked for one.
+#
+# 🔑 The prediction it made about the shape of the failure was wrong in the
+# useful direction.  It said a userland stub has no equivalent of the kernel's
+# MIG_CHECK_FAILED diagnostic and would surface as a bare MIG_BAD_ARGUMENTS.
+# #443 gave userland that diagnostic, so the console named the routine and the
+# check instead:
+#
+#     mig: memory_object_init refused a message: seqno
+#
+# which is the difference between an afternoon and a month.  That is the whole
+# argument for leaving the checks on, and it has now been collected rather than
+# merely asserted.
 
 target_include_directories(libfspager PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
