@@ -10,6 +10,8 @@
 #include <cpu/regs.h>
 #include <pmap/bootmem.h>
 #include <pmap/pmap.h>		/* pmap_table_frame (#458) */
+#include <pmap/bootmem.h>		/* boot_frame_free (#455) */
+#include <sync/atomic.h>		/* atomic_cmpxchg64 (#455) */
 #include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pte.h>
@@ -79,7 +81,47 @@ static pt_entry_t *next_table(pt_entry_t *entry, int *err)
 	 * on the wider architecture.  It is the same conclusion the same
 	 * hardware rule forces.
 	 */
-	*entry = frame | INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_USER;
+	/*
+	 * 🔥 PUBLISHED WITH A cmpxchg, NOT A STORE (#455).
+	 *
+	 * `*entry = frame | ...' is what this was, and it loses page tables.
+	 * Two processors descending into the same missing table both arrive
+	 * here, both allocate, and both store; the second store replaces the
+	 * first, and the first table is now linked to nothing.  Nothing faults
+	 * and nothing panics -- the space simply holds a page no walk can
+	 * reach, so neither pmap_destroy() nor a future pmap_collect() can ever
+	 * give it back.  Measured at -smp 8: thirty-three pages leaked in
+	 * sixteen thousand operations (x86_64/pmap/collect_bench.c).
+	 *
+	 * i386 solves it with a lock: pmap_expand() allocates outside
+	 * PMAP_READ_LOCK, takes it, and asks "see if someone else expanded us
+	 * first" -- returning its own page to the pool if so.  That is correct
+	 * and it needs a lock this pmap does not have yet.
+	 *
+	 * It does not need one.  An interior entry is a single naturally
+	 * aligned 64-bit word and this machine has cmpxchg, so the publish is
+	 * the arbitration: exactly one processor can move the entry from empty
+	 * to its own frame.  The loser is told what it lost to, frees its
+	 * table, and descends into the winner's -- the same outcome i386 gets,
+	 * without excluding anybody from anything.
+	 *
+	 * ⚠️ This closes THIS race and no other.  It says nothing about a table
+	 * being freed underneath a walk, which is what pmap_collect() will need
+	 * a discipline for; what it removes is the one that leaks silently, and
+	 * it removes it rather than making it rarer.
+	 */
+	{
+		pt_entry_t fresh = frame | INTEL_PTE_VALID | INTEL_PTE_WRITE
+				 | INTEL_PTE_USER;
+		pt_entry_t found;
+
+		found = atomic_cmpxchg64((volatile uint64_t *) entry, 0, fresh);
+		if (found != 0) {
+			boot_frame_free(frame);
+			return table_at(pte_to_pa(found));
+		}
+	}
+
 	pmap_table_frames_live++;		/* #455 */
 	return table_at(frame);
 }

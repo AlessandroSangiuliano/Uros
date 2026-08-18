@@ -170,6 +170,7 @@ pmap_collect_bench(void)
 {
 	int	 want = 0;
 	int	 i;
+	unsigned expect;
 
 	bench_pmap = pmap_create(0);
 	if (bench_pmap == PMAP_NULL) {
@@ -220,10 +221,23 @@ pmap_collect_bench(void)
 		}
 	}
 
-	printf("pmap_bench: %d workers done, interior tables %u -> %u (%s)\n",
-	       want, bench_frames_at_start, pmap_table_frames_live,
-	       pmap_table_frames_live == bench_frames_at_start + (unsigned) want
-	       ? "one leaf each, nothing lost"
+	/*
+	 * ⚠️ want + 2, and the two are the point of the arrangement.
+	 *
+	 * Every worker builds its own LEAF, and they all share one PDPT and one
+	 * PD above it -- which also have to be created, once, by whichever
+	 * worker gets there first.  The first version of this expected `want'
+	 * and reported a race on a run that had none: an expectation that
+	 * forgets part of what it asked for reads a correct result as a defect,
+	 * which is the same way round as a check that cannot fail.
+	 */
+	expect = bench_frames_at_start + (unsigned) want + 2;
+
+	printf("pmap_bench: %d workers done, interior tables %u -> %u, "
+	       "expected %u (%s)\n",
+	       want, bench_frames_at_start, pmap_table_frames_live, expect,
+	       pmap_table_frames_live == expect
+	       ? "one leaf each plus the shared PD and PDPT, nothing lost"
 	       : "TABLES LOST TO A RACE -- the pmap needs a lock (#455)");
 
 	/*
