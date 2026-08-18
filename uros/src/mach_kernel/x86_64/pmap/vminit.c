@@ -200,6 +200,43 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
  * There is no third answer, and in particular there is no answer that is a
  * pointer to a freed table -- which is the whole property.
  *
+ * ── 🔥 AND THERE IS A CHEAPER ANSWER THAN ALL OF IT ──────────────────
+ *
+ * I wrote "i386 solves this with a lock" three times before reading what i386
+ * actually does about THIS race, and it is not a lock.  #330:
+ *
+ *   "pmap_extract() now walks page tables lock-free.  A concurrent
+ *    pmap_collect() can unlink the PDE of an empty PT page while a reader
+ *    still holds a pointer into it.  To make that safe WITHOUT a grace period
+ *    ... reclaimed PT pages are never returned to the VM allocator:
+ *    pmap_collect() pushes them here and pmap_expand() pops them back ... so a
+ *    stale reader only ever dereferences PT-SHAPED MEMORY (an empty PT page
+ *    reads as invalid PTEs; a recycled one reads as some other pmap's PTEs --
+ *    never freed or repurposed memory)."
+ *
+ * TYPE STABILITY.  The stale reader is not excluded and not waited for -- it is
+ * made HARMLESS.  Whatever it reads is a page-table entry, valid or not, and a
+ * walk that lands on some other space's mapping returns a wrong answer to a
+ * question about an address that is no longer mapped, which the caller was
+ * already prepared for.  No section, no shootdown ordering for the software
+ * side, no grace period.
+ *
+ * ⚠️ Its stated reason -- that a grace period is what "a non-preemptive kernel
+ * cannot provide cheaply (see #336)" -- may no longer hold: kern/rcu.c gives
+ * this kernel a QSBR synchronize that #330 did not have.  So the choice is
+ * open rather than settled, and it is the one the issue means by "decided with
+ * a number in front of it":
+ *
+ *   - type stability costs a pool that never shrinks and a walk that can read
+ *     another space's entries;
+ *   - the grace period costs read sections on every walker and a
+ *     synchronize per collection, and gives back memory for real.
+ *
+ * ⚠️ Type stability does NOT remove step 2.  The hardware walker is not a
+ * stale reader that can be satisfied with plausible bytes: a TLB entry derived
+ * through a recycled table would translate a live address to another space's
+ * page.  The shootdown is required by either answer.
+ *
  * ── WHY NOT #338's PER-TABLE LOCKS ───────────────────────────────────
  *
  * i386 reclaims under PMAP_READ_LOCK plus the per-table locks of #338, arrived
