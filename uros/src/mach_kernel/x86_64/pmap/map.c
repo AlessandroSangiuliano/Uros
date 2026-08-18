@@ -12,12 +12,48 @@
 #include <pmap/pmap.h>		/* pmap_table_frame (#458) */
 #include <pmap/bootmem.h>		/* boot_frame_free (#455) */
 #include <sync/atomic.h>		/* atomic_cmpxchg64 (#455) */
+#include <mach/boolean.h>
+#include <kern/rcu.h>			/* read sections around a walk (#455) */
 #include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pte.h>
 #include <pmap/tlb.h>
 #include <pmap/walk.h>
 #include <trap/trap.h>
+
+/*
+ * The read section that keeps a collector from freeing a table this walk is
+ * standing in (#455) -- and only once there is somewhere to count it.
+ *
+ * 🔥 urmach_rcu_read_lock() is `cpu_data[cpu_number()].rcu_read_depth++', and
+ * boot_c.c exercises these functions long before cpu_data exists.  Taking the
+ * section unconditionally killed the boot: the increment landed at whatever
+ * that address happened to be, and the corruption showed up as garbage on the
+ * console rather than as a fault.
+ *
+ * pmap_initialized is the same two-era boundary pmap_table_frame() already
+ * asks about, and it is the right one here for a reason beyond convenience:
+ * nothing collects before it, so before it there is no table to be freed under
+ * a walk and nothing for a section to protect.
+ *
+ * ⚠️ The answer is CAPTURED and handed back on exit rather than re-tested.
+ * The flag flips once, and a walk that entered before the flip and re-tested
+ * on the way out would leave a section it never took -- an unbalanced depth
+ * that never returns to zero, which stalls every future grace period silently.
+ */
+static inline boolean_t pmap_read_enter(void)
+{
+	if (!pmap_initialized)
+		return FALSE;
+	urmach_rcu_read_lock();
+	return TRUE;
+}
+
+static inline void pmap_read_leave(boolean_t held)
+{
+	if (held)
+		urmach_rcu_read_unlock();
+}
 
 static inline pt_entry_t *table_at(uint64_t table_pa)
 {
@@ -172,12 +208,16 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags)
 uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
 {
 	uint64_t size = 0;
+	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 
-	if (entry == PT_ENTRY_NULL)
+	if (entry == PT_ENTRY_NULL) {
+		pmap_read_leave(held);
 		return 0;
+	}
 
 	*entry = 0;
+	pmap_read_leave(held);
 	tlb_flush_range(va, size);
 	return size;
 }
@@ -185,10 +225,13 @@ uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
 uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 {
 	uint64_t size = 0;
+	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 
-	if (entry == PT_ENTRY_NULL)
+	if (entry == PT_ENTRY_NULL) {
+		pmap_read_leave(held);
 		return 0;
+	}
 
 	/*
 	 * 🔥 A READ-MODIFY-WRITE ON A SHARED WORD (#455).
@@ -230,6 +273,8 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 			found = seen;
 		}
 	}
+
+	pmap_read_leave(held);
 
 	tlb_flush_range(va, size);
 	return size;
