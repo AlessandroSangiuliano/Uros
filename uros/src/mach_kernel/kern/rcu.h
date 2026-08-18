@@ -50,11 +50,14 @@
  *	architectural self-consistency).  rcu_read_depth is therefore never
  *	touched cross-CPU -- no atomics, no fences.
  *
- *	TRAP for the future: if kernel preemption is ever enabled (MACH_RT!=0
+ *	TRAP that HAS SPRUNG: if kernel preemption is ever enabled (MACH_RT!=0
  *	or an explicit preempt point), a reader could migrate CPU mid-section
- *	and this per-CPU scheme breaks.  Then rcu_read_lock() must either
- *	disable_preemption() for the duration of the read section, or
- *	rcu_read_depth must move into the thread structure.
+ *	and this per-CPU scheme breaks.  x86-64 added the explicit preempt
+ *	point in #459/#463 -- an AST on the way out of any trap, ring 0
+ *	included -- so rcu_read_lock() now takes the first of the two remedies
+ *	named here and disables preemption for the duration of the section.
+ *	See the note on it below; the second remedy, moving the depth into the
+ *	thread, would not have been sufficient by itself.
  *
  *	Memory ordering.  i386 is TSO: the only cross-CPU datum is rcu_qs_seq,
  *	and the reader->writer handoff (last deref of the old object, then the
@@ -82,6 +85,48 @@
 static __inline__ void
 urmach_rcu_read_lock(void)
 {
+	/*
+	 *	🔥 PREEMPTION OFF FIRST, AND THE TRAP BELOW HAS ALREADY SPRUNG.
+	 *
+	 *	The note further down says this scheme breaks "if kernel
+	 *	preemption is ever enabled (MACH_RT!=0 or an explicit preempt
+	 *	point)".  #459/#463 added exactly that on x86-64: the kernel takes
+	 *	an AST on the way out of any trap, including in ring 0, so a
+	 *	reader can be preempted mid-section and resumed on ANOTHER
+	 *	processor -- and then the increment lands on one CPU's counter and
+	 *	the decrement on another's.
+	 *
+	 *	What that costs is not a lost update, it is a permanent one: the
+	 *	CPU that took the increment never sees depth 0 again, so it never
+	 *	reports a quiescent state again, so EVERY FUTURE GRACE PERIOD ON
+	 *	THE MACHINE WAITS FOR IT FOR EVER.  Observed as a wedged boot with
+	 *
+	 *	  urmach_rcu: WARNING cpu 1 not quiescent (qs_seq=4 snap=4)
+	 *
+	 *	repeating, and confirmed by a temporary check that recorded the
+	 *	processor at lock and compared it at unlock:
+	 *
+	 *	  panic(cpu 1): pmap read section entered on cpu 3, left on cpu 1
+	 *
+	 *	Of the two remedies the note names -- disable preemption, or move
+	 *	the depth into the thread -- this is the first, because it is the
+	 *	one that keeps the counter per-CPU and therefore keeps the
+	 *	quiescent state meaning what it says.  Moving the depth into the
+	 *	thread would NOT be enough on its own: a preempted reader holds a
+	 *	reference while running on no processor at all, so a CPU whose
+	 *	current thread has depth zero would report a quiescence that is not
+	 *	true of the machine.
+	 *
+	 *	⚠️ It costs read sections the right to block, which QSBR forbade
+	 *	anyway ("read sections must not block or voluntarily
+	 *	context-switch"), so the rule is unchanged and now enforced rather
+	 *	than asked for.
+	 *
+	 *	⚠️ On i386 disable_preemption() is still the empty definition from
+	 *	<kern/cpu_data.h> and that target does not preempt in kernel mode,
+	 *	so this generates nothing there.
+	 */
+	disable_preemption();
 	cpu_data[cpu_number()].rcu_read_depth++;
 	urmach_rcu_barrier();
 }
@@ -94,6 +139,7 @@ urmach_rcu_read_unlock(void)
 {
 	urmach_rcu_barrier();
 	cpu_data[cpu_number()].rcu_read_depth--;
+	enable_preemption();
 }
 
 /*

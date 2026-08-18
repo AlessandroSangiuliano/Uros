@@ -73,19 +73,24 @@ urmach_synchronize_rcu(void)
 	int		me = cpu_number();
 
 	/*
-	 *	#336 LANDMINE: `me` is read without disabling preemption.  This is
-	 *	safe ONLY because the kernel is non-preemptive (MACH_RT == 0): this
-	 *	function never voluntarily blocks (it spins on a bare PAUSE), so the
-	 *	thread cannot migrate and `me` stays the CPU we actually run on --
-	 *	which is quiescent by definition (the caller holds no read ref), so
-	 *	skipping it below (c == me) is correct.  If MACH_RT is ever enabled,
-	 *	an involuntary preempt+migrate between here and the wait loop makes
-	 *	`me` name a CPU we left; its last quiescent state may predate the
-	 *	publish barrier below, so skipping it would end the grace period
-	 *	while a reader there still holds the old pointer -- a use-after-free.
-	 *	Before enabling kernel preemption, pin this: mp_disable_preemption()
-	 *	around the read (and the skip), or re-read `me` after any yield.
+	 *	#336 LANDMINE, DISARMED: `me` used to be read without disabling
+	 *	preemption, safe only while the kernel could not preempt in kernel
+	 *	mode.  x86-64 can since #459/#463 -- an AST on the way out of any
+	 *	trap -- so an involuntary preempt and migrate between here and the
+	 *	wait loop would make `me` name a CPU we left; its last quiescent
+	 *	state may predate the publish barrier below, so skipping it would
+	 *	end the grace period while a reader there still holds the old
+	 *	pointer -- a use-after-free.  The remedy this comment already named
+	 *	is taken: preemption is off for the whole function, which is also
+	 *	what makes the "never migrates" claim above true rather than hoped.
+	 *
+	 *	⚠️ It is off across a spin that can last several clock ticks.  That
+	 *	is a deliberate trade and not an oversight: this processor was
+	 *	going to spin here either way, and being moved off it in the middle
+	 *	would not have made the wait shorter -- it would have made the
+	 *	answer wrong.
 	 */
+	disable_preemption();
 
 	/*
 	 *	Publish the unlink before sampling: after this fence no CPU can
@@ -136,10 +141,16 @@ urmach_synchronize_rcu(void)
 			urmach_rcu_cpu_pause();
 			if (++spins >= URMACH_RCU_STALL_SPINS) {
 				printf("urmach_rcu: WARNING cpu %d not quiescent "
-				       "(qs_seq=%u snap=%u), still waiting\n",
-				       c, cpu_data[c].rcu_qs_seq, snap[c]);
+				       "(qs_seq=%u snap=%u depth=%d idle=%d "
+				       "running=%d), still waiting\n",
+				       c, cpu_data[c].rcu_qs_seq, snap[c],
+				       cpu_data[c].rcu_read_depth,
+				       (int) cpu_data[c].rcu_cpu_idle,
+				       (int) machine_slot[c].running);
 				spins = 0;
 			}
 		}
 	}
+
+	enable_preemption();
 }
