@@ -119,7 +119,7 @@ static pt_entry_t *next_table(pt_entry_t *entry, int *err)
 
 		found = atomic_cmpxchg64((volatile uint64_t *) entry, 0, fresh);
 		if (found != 0) {
-			boot_frame_free(frame);
+			pmap_table_frame_free(frame);
 			return table_at(pte_to_pa(found));
 		}
 	}
@@ -280,7 +280,7 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	entry = pmap_walk(root_pa, va, &size);
 	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
 		pmap_read_leave(held);
-		boot_frame_free(table_pa);
+		pmap_table_frame_free(table_pa);
 		return 0;
 	}
 

@@ -21,6 +21,7 @@
 
 #include <pmap/direct.h>
 #include <vm/vm_page.h>
+#include <vm/vm_object.h>	/* #455: the object a table frame is findable in */
 #include <kern/thread.h>	/* #459: current_thread */	/* vm_page_grab / vm_page_wire (#458) */
 #include <sync/atomic.h>		/* atomic_cmpxchg64 (#455) */
 #include <kern/zalloc.h>	/* #456: the pmap zone, once there is one */
@@ -113,6 +114,41 @@ unsigned	pmap_table_frames_live;
 int	pmap_initialized = 0;
 
 /*
+ * The object every page-table frame taken from the VM is registered in (#455).
+ *
+ * 🔑 It exists so that a frame can be GIVEN BACK.  vm_page_grab() answers with
+ * a vm_page_t and the pmap keeps only the physical address out of it; nothing
+ * in the machine-independent tree maps a physical address back to its page, so
+ * without a record of our own a table frame could be allocated and never
+ * released.  That is not a theoretical gap: before this, freeing a table called
+ * boot_frame_free(), which after vm_page_bootstrap() threads the frame onto a
+ * list that nothing pops from -- so every table pmap_destroy() "reclaimed"
+ * after the VM came up was lost to both allocators.  A pmap_collect() built on
+ * that would have given the pageout daemon nothing, which is the complaint #455
+ * was opened about.
+ *
+ * The offset is the physical address, so vm_page_lookup() is the reverse map.
+ * i386 does the same thing under the name pmap_object.
+ *
+ * ⚠️ STATIC STORAGE, like kernel_pmap_store at the top of this file and for the
+ * same reason: it has to exist before the allocator that would allocate it.
+ * vm_object_allocate() was tried first and the boot said no --
+ *
+ *   panic(cpu 0): zalloc: recursive grow on zone "non-kernel map entries"
+ *                 before scheduler is up
+ *   ... zalloc <- vm_map_find_space <- kernel_memory_allocate <- zalloc
+ *       <- vm_object_allocate <- pmap_init
+ *
+ * -- because pmap_init() runs three lines before zone_init(), so growing a zone
+ * there goes to kernel_memory_allocate() and back into the pmap.  i386 dodges
+ * this by creating its object lazily at the first table growth, which merely
+ * moves the recursion somewhere less predictable; _vm_object_allocate() removes
+ * it, because storage the caller owns needs no allocator at all.
+ */
+static struct vm_object	pmap_table_object_store;
+static vm_object_t	pmap_table_object = VM_OBJECT_NULL;
+
+/*
  * The second half of pmap initialisation, run by the machine-independent
  * startup once the virtual memory system is up.
  *
@@ -135,6 +171,18 @@ pmap_init(void)
 			  512 * (vm_size_t) sizeof(struct pmap),
 			  (vm_size_t) PAGE_SIZE,
 			  "physical maps");
+
+	/*
+	 * And the object that makes a table frame findable again (#455).
+	 *
+	 * Its size bounds the offsets it will be asked about, and the offsets
+	 * are physical addresses: direct_map_covered is where the boot
+	 * allocator stops handing out frames, so it is exactly the bound and
+	 * not a guess.  vm_page_insert() asserts against it.
+	 */
+	_vm_object_allocate((vm_size_t) direct_map_covered,
+			    &pmap_table_object_store);
+	pmap_table_object = &pmap_table_object_store;
 
 	/*
 	 * What the boot actually needed, said out loud once, so the pool's size
@@ -213,7 +261,6 @@ pmap_table_frame(void)
 	vm_page_t	m;
 	uint64_t	pa;
 	volatile uint64_t *frame;
-
 	if (!pmap_initialized)
 		return boot_frame_alloc();
 
@@ -241,21 +288,21 @@ pmap_table_frame(void)
 		VM_PAGE_WAIT();
 	}
 
+	pa = (uint64_t) m->phys_addr;
+
 	/*
 	 * Wired, so the pageout daemon never takes back a page that a page
-	 * table is living in.
-	 *
-	 * ⚠️ Not inserted into a vm_object, which is what i386 does with its
-	 * pmap_object -- so nothing can find this page again to free it when
-	 * the address space goes away.  That is the same hole #455 describes
-	 * for empty tables, and it is written down there rather than papered
-	 * over with a comment here that says "TODO".
+	 * table is living in -- and registered, so that this page can be found
+	 * again from its physical address when the table it holds is released
+	 * (#455).  The registration is the half that was missing: the wire is
+	 * what keeps the page, the object is what lets it go.
 	 */
+	vm_object_lock(pmap_table_object);
+	vm_page_insert(m, pmap_table_object, (vm_offset_t) pa);
 	vm_page_lock_queues();
 	vm_page_wire(m);
 	vm_page_unlock_queues();
-
-	pa = (uint64_t) m->phys_addr;
+	vm_object_unlock(pmap_table_object);
 
 	/*
 	 * Zeroed, because a page table built on whatever the previous owner
@@ -269,6 +316,48 @@ pmap_table_frame(void)
 		frame[i] = 0;
 
 	return pa;
+}
+
+/*
+ * Give a page-table frame back to whichever allocator it came from (#455).
+ *
+ * The two eras of pmap_table_frame(), read in the other direction -- and the
+ * era cannot be read off pmap_initialized here, because a frame taken before
+ * the flag flipped is very often released after it.  The frame's own
+ * membership answers instead: a page taken from the VM is registered in
+ * pmap_table_object, a boot frame is not, so the lookup IS the question.
+ * That is the same shape #456 uses to tell a pool pmap from a zone element,
+ * and for the same reason -- the boundary outlives the boot.
+ *
+ * ⚠️ It can block: vm_page_lookup() takes a bucket mutex and the queues lock is
+ * a mutex too.  So it must not be called from inside an RCU read section, which
+ * is why map.c hoists the frame it has to hand back out past pmap_read_leave()
+ * and why pmap_collect() frees only after its grace period has ended.
+ */
+void
+pmap_table_frame_free(uint64_t pa)
+{
+	vm_page_t	m = VM_PAGE_NULL;
+
+	if (pmap_table_object != VM_OBJECT_NULL) {
+		vm_object_lock(pmap_table_object);
+		m = vm_page_lookup(pmap_table_object, (vm_offset_t) pa);
+		if (m != VM_PAGE_NULL) {
+			/*
+			 * vm_page_free() unwires it, takes it out of the
+			 * object, and puts it on the free list -- the whole
+			 * point of the exercise, and the reason the pageout
+			 * daemon gets something back for asking.
+			 */
+			vm_page_lock_queues();
+			vm_page_free(m);
+			vm_page_unlock_queues();
+		}
+		vm_object_unlock(pmap_table_object);
+	}
+
+	if (m == VM_PAGE_NULL)
+		boot_frame_free(pa);
 }
 
 /* Is this pmap one of the boot pool's slots, rather than a zone element? */
@@ -476,7 +565,7 @@ static void pmap_free_tables(uint64_t table_pa, unsigned level,
 		pmap_free_tables(pte_to_pa(e), level - 1, va, pmap);
 	}
 
-	boot_frame_free(table_pa);
+	pmap_table_frame_free(table_pa);
 	pmap_table_frames_live--;
 }
 
@@ -503,7 +592,7 @@ void pmap_destroy(pmap_t pmap)
 			pmap_free_tables(pte_to_pa(root[i]), 3,
 					 (uint64_t)i << PML4_SHIFT, pmap);
 
-	boot_frame_free(pmap->root_pa);
+	pmap_table_frame_free(pmap->root_pa);
 	pmap->root_pa = 0;
 	pmap_free(pmap);
 }

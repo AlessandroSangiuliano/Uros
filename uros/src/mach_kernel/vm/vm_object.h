@@ -394,6 +394,20 @@ extern void		vm_object_init(void);
 extern vm_object_t	vm_object_allocate(
 					vm_size_t	size);
 
+/*
+ * The same, into storage the caller already owns.
+ *
+ * It is how vm_object_bootstrap() builds kernel_object and vm_submap_object,
+ * and it is the only form available to an object that has to exist before the
+ * zone that would allocate one -- vm_object_allocate() calls zalloc(), which
+ * on a zone that still has to grow reaches kernel_memory_allocate() and from
+ * there back into the pmap.  Declared here rather than re-declared at each use
+ * so that the declaration and the definition are checked against each other.
+ */
+extern void		_vm_object_allocate(
+					vm_size_t	size,
+					vm_object_t	object);
+
 #if	MACH_ASSERT
 extern void		vm_object_reference(
 					vm_object_t	object);

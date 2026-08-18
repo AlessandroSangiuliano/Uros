@@ -252,6 +252,13 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
  */
 uint64_t pmap_table_frame(void);
 
+/*
+ * And its counterpart: give one back to whichever allocator it came from,
+ * which is answered by the frame itself rather than by the era (#455).  ⚠️ It
+ * blocks -- never call it from inside a read section.
+ */
+void pmap_table_frame_free(uint64_t pa);
+
 extern int pmap_initialized;
 
 /* Change whether an existing mapping is wired.  Returns 0 if va is unmapped. */
