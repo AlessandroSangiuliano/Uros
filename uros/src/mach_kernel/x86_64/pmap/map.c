@@ -12,7 +12,6 @@
 #include <pmap/pmap.h>		/* pmap_table_frame (#458) */
 #include <pmap/bootmem.h>		/* boot_frame_free (#455) */
 #include <sync/atomic.h>		/* atomic_cmpxchg64 (#455) */
-#include <kern/rcu.h>			/* read sections around a walk (#455) */
 #include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pte.h>
@@ -173,27 +172,12 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags)
 uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
 {
 	uint64_t size = 0;
-	pt_entry_t *entry;
+	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 
-	/*
-	 * ⚠️ The read section spans the walk AND the write through what it
-	 * returned (#455).  pmap_walk() hands back a pointer INTO a table, so a
-	 * section that ended at its return would protect the lookup and leave
-	 * the use bare -- and would look right.  What it keeps out is
-	 * pmap_collect() freeing the table between the two.
-	 */
-	urmach_rcu_read_lock();
-
-	entry = pmap_walk(root_pa, va, &size);
-	if (entry == PT_ENTRY_NULL) {
-		urmach_rcu_read_unlock();
+	if (entry == PT_ENTRY_NULL)
 		return 0;
-	}
 
 	*entry = 0;
-
-	urmach_rcu_read_unlock();
-
 	tlb_flush_range(va, size);
 	return size;
 }
@@ -201,15 +185,10 @@ uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
 uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 {
 	uint64_t size = 0;
-	pt_entry_t *entry;
+	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 
-	urmach_rcu_read_lock();		/* spans the walk and the exchange (#455) */
-
-	entry = pmap_walk(root_pa, va, &size);
-	if (entry == PT_ENTRY_NULL) {
-		urmach_rcu_read_unlock();
+	if (entry == PT_ENTRY_NULL)
 		return 0;
-	}
 
 	/*
 	 * 🔥 A READ-MODIFY-WRITE ON A SHARED WORD (#455).
@@ -252,8 +231,6 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 		}
 	}
 
-	urmach_rcu_read_unlock();
-
 	tlb_flush_range(va, size);
 	return size;
 }
@@ -261,37 +238,13 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 {
 	uint64_t size = 0;
-	pt_entry_t *entry;
+	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 	uint64_t base, perm, sub_size, table_pa;
 	pt_entry_t *sub;
 	int from_1g;
 
-	/*
-	 * 🔥 THE FRAME IS TAKEN BEFORE THE READ SECTION OPENS (#455).
-	 *
-	 * pmap_table_frame() can BLOCK -- after the VM is up it is vm_page_grab
-	 * and a VM_PAGE_WAIT behind it -- and a QSBR read section must not
-	 * block or voluntarily switch, because the quiescent state that ends
-	 * somebody else's grace period is exactly what blocking reports.  A
-	 * section held across a wait would let a collector free a table this
-	 * walk is standing in.
-	 *
-	 * So it is allocated first and handed back if the split turns out not
-	 * to be needed -- which is i386's pmap_expand() shape: allocate
-	 * outside, decide inside, return the page if you lost the argument.
-	 */
-	table_pa = pmap_table_frame();
-	if (table_pa == 0)
-		panic("pmap: no frame to split a large page into");
-
-	urmach_rcu_read_lock();
-
-	entry = pmap_walk(root_pa, va, &size);
-	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
-		urmach_rcu_read_unlock();
-		boot_frame_free(table_pa);
+	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K)
 		return 0;
-	}
 
 	from_1g = (size == PAGE_SIZE_1G);
 	sub_size = from_1g ? PAGE_SIZE_2M : PAGE_SIZE_4K;
@@ -312,6 +265,10 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	 * comes up the boot allocator has nothing left, and a large page can be
 	 * split at any time (#422).  Same class as pmap_create()'s.
 	 */
+	table_pa = pmap_table_frame();
+	if (table_pa == 0)
+		panic("pmap: no frame to split a large page into");
+
 	sub = table_at(table_pa);
 	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {
 		pt_entry_t leaf = (base + (uint64_t)i * sub_size)
@@ -342,7 +299,5 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	 * is bootstrap, so the blunt tool remains the right one.
 	 */
 	tlb_flush_all();
-	urmach_rcu_read_unlock();
-
 	return sub_size;
 }
