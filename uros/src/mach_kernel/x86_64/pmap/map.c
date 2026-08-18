@@ -283,13 +283,40 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 {
 	uint64_t size = 0;
-	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 	uint64_t base, perm, sub_size, table_pa;
+	pt_entry_t *entry;
 	pt_entry_t *sub;
+	boolean_t held;
 	int from_1g;
 
-	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K)
+	/*
+	 * 🔥 THE FRAME IS TAKEN BEFORE THE SECTION OPENS (#455).
+	 *
+	 * pmap_table_frame() can BLOCK -- after the VM is up it is vm_page_grab
+	 * with a VM_PAGE_WAIT behind it -- and a QSBR read section must not,
+	 * because blocking is exactly how a processor reports the quiescent
+	 * state that ends somebody else's grace period.  A section held across
+	 * a wait would tell every collector this processor is done reading
+	 * while it is standing in a table.
+	 *
+	 * So it is allocated unconditionally and handed back when the split
+	 * turns out not to be needed.  That costs one frame taken and returned
+	 * on a path that does nothing, which is affordable because splitting a
+	 * large page is rare -- and it is i386's pmap_expand() shape: allocate
+	 * outside, decide inside, give the page back if you lost the argument.
+	 */
+	table_pa = pmap_table_frame();
+	if (table_pa == 0)
+		panic("pmap: no frame to split a large page into");
+
+	held = pmap_read_enter();
+
+	entry = pmap_walk(root_pa, va, &size);
+	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
+		pmap_read_leave(held);
+		boot_frame_free(table_pa);
 		return 0;
+	}
 
 	from_1g = (size == PAGE_SIZE_1G);
 	sub_size = from_1g ? PAGE_SIZE_2M : PAGE_SIZE_4K;
@@ -305,15 +332,6 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	 * range is now fine-grained when it is still one large page — which is
 	 * how a section ends up sharing its permissions with its neighbour.
 	 */
-	/*
-	 * pmap_table_frame(), for the reason written above it: after the VM
-	 * comes up the boot allocator has nothing left, and a large page can be
-	 * split at any time (#422).  Same class as pmap_create()'s.
-	 */
-	table_pa = pmap_table_frame();
-	if (table_pa == 0)
-		panic("pmap: no frame to split a large page into");
-
 	sub = table_at(table_pa);
 	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {
 		pt_entry_t leaf = (base + (uint64_t)i * sub_size)
@@ -344,5 +362,7 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	 * is bootstrap, so the blunt tool remains the right one.
 	 */
 	tlb_flush_all();
+	pmap_read_leave(held);
+
 	return sub_size;
 }
