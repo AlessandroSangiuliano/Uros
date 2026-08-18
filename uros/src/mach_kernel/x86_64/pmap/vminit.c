@@ -160,6 +160,18 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
  *      rest of the nine.  That is the one piece of this that is code rather
  *      than ordering, and it is nine small edits rather than one.
  *
+ *      🔥 AND IT CANNOT BE DONE BEFORE THE PER-CPU DATA EXISTS.  Tried, and
+ *      the boot died in the pmap self-tests with garbage on the console:
+ *      urmach_rcu_read_lock() is `cpu_data[cpu_number()].rcu_read_depth++',
+ *      and x86_64/boot/boot_c.c exercises pmap_split_page() long before
+ *      cpu_data is set up -- so the increment landed in whatever that address
+ *      happened to be.  A read section is not free of prerequisites just
+ *      because it compiles to one increment.
+ *
+ *      ⇒ the sections have to be either gated on the system being up, or
+ *      confined to the callers that only run after it is.  The boot-time
+ *      walkers do not need them: nothing collects during the self-tests.
+ *
  *      ⚠️ It depends on the kernel being non-preemptive.  rcu.h says so in as
  *      many words -- rcu_read_depth is per-CPU and "if this kernel becomes
  *      preemptive this per-CPU scheme breaks" -- and MACH_RT is 0 here, which
