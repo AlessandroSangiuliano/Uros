@@ -190,7 +190,47 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 	if (entry == PT_ENTRY_NULL)
 		return 0;
 
-	*entry = (*entry & ~INTEL_PTE_PERM) | (flags & INTEL_PTE_PERM);
+	/*
+	 * 🔥 A READ-MODIFY-WRITE ON A SHARED WORD (#455).
+	 *
+	 * This read the entry, changed the permission bits, and wrote it back.
+	 * Every other processor mapping, unmapping or protecting through the
+	 * same entry is writing that word too, and whatever any of them did
+	 * between the read and the write is gone -- most sharply the hardware's
+	 * own ACCESSED and DIRTY bits, which the processor sets in this word
+	 * without asking anyone.  Losing a dirty bit is losing the fact that a
+	 * page must be written back.
+	 *
+	 * The same arbitration as next_table(), for the same reason: one
+	 * aligned 64-bit word, and cmpxchg tells the loser what it lost to.
+	 * Here the loser retries rather than gives up -- it still has a change
+	 * to apply, and it applies it to what it now finds.
+	 *
+	 * ⚠️ It reloads through `found' and never re-reads *entry.  Reading the
+	 * word again would open the same window one instruction wide: what
+	 * cmpxchg hands back is what the word held at the instant it refused,
+	 * and building the next attempt out of anything else is building it out
+	 * of a value that was never there.
+	 */
+	{
+		pt_entry_t found = *entry;
+
+		for (;;) {
+			pt_entry_t fresh = (found & ~INTEL_PTE_PERM)
+					 | (flags & INTEL_PTE_PERM);
+			pt_entry_t seen;
+
+			if (fresh == found)
+				break;		/* already what it should be */
+
+			seen = atomic_cmpxchg64((volatile uint64_t *) entry,
+						found, fresh);
+			if (seen == found)
+				break;
+			found = seen;
+		}
+	}
+
 	tlb_flush_range(va, size);
 	return size;
 }
