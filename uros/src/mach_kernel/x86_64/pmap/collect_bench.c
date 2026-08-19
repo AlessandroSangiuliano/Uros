@@ -48,11 +48,13 @@
 #include <kern/misc_protos.h>
 #include <x86_64/cpu/spl.h>
 #include <mach/vm_prot.h>
+#include <time/tsc.h>			/* rdtsc, for the two arms (#455) */
 
 #include <vm/pmap.h>			/* pmap_collect (#455) */
 #include <vm/vm_page.h>			/* vm_page_free_count (#455) */
 
 #include <pmap/pmap.h>
+#include <pmap/map.h>
 #include <pmap/layout.h>
 #include <pmap/pte.h>
 
@@ -125,6 +127,30 @@ static uint64_t		bench_pa[NCPUS];
  * answer was the budget.
  */
 static volatile int	bench_iter[NCPUS];
+
+/*
+ * What the cost measurement times, and it is timed BY THE WORKER.
+ *
+ * ⚠️ The first version took the clock in the waiting thread, around the whole
+ * phase.  That thread notices the workers have finished by polling once a
+ * clock tick, so ten milliseconds of quantisation sat on top of a loop that
+ * takes microseconds: it reported 37000 cycles for a mapping that costs a
+ * couple of hundred, and the two arms came out within half a per cent of each
+ * other because neither of them was what was being measured.
+ */
+static volatile uint64_t bench_cycles[NCPUS];
+
+/*
+ * Mappings per worker in the cost arm, and eight leaf tables to put them in.
+ *
+ * Bigger than the safety arm's loop on purpose: what is being priced is a few
+ * hundred cycles, so the loop has to be long enough to stand above the cost of
+ * starting the threads.  Eight page-directory slots each, 512 entries apiece,
+ * and nothing is ever unmapped -- so no entry is ever replaced and no shootdown
+ * is ever sent.
+ */
+#define BENCH_COST_MAPS		4096
+#define BENCH_COST_SLOTS	8
 
 /*
  * What the collector actually managed to do while the workers ran.
@@ -430,6 +456,259 @@ static void bench_collect_quiet(void)
 	pmap_destroy(p);
 }
 
+/*
+ * The worker of the cost measurement: mappings only, into addresses of its own,
+ * and never removed.
+ *
+ * ⚠️ Not the same loop as the safety arm, and the difference is the point.  A
+ * map/unmap pair costs a TLB shootdown to every other processor and WAITS for
+ * it -- measured at some 57000 cycles a pair, which is twenty microseconds of
+ * inter-processor round trip with the exclusion somewhere inside it.  Anything
+ * measured that way is a measurement of #439's shootdown.
+ *
+ * Mapping into an empty slot revokes nothing, so pmap_map_page() sends no
+ * message (map.c says why), and what is left in the loop is the descent, the
+ * leaf write and the exclusion -- which is the common path the two arms differ
+ * on.  Four hundred addresses fit in one leaf table, so the tables are built
+ * once and the rest of the run is pure descent.
+ */
+static void bench_cost_worker(void)
+{
+	int	 me = cpu_number();
+	uint64_t pa;
+	int	 i;
+
+	pa = pmap_table_frame();
+	if (pa == 0) {
+		bench_done[me] = 1;
+		thread_terminate_self();
+	}
+	bench_pa[me] = pa;
+
+	while (bench_start == 0)
+		/* spin: the point is to start together, not to be polite */;
+
+	bench_cycles[me] = rdtsc();
+
+	for (i = 0; i < BENCH_COST_MAPS; i++) {
+		uint64_t slot = (uint64_t) me * BENCH_COST_SLOTS
+			      + (uint64_t) (i / PTES_PER_TABLE);
+		uint64_t va = ((uint64_t) BENCH_PML4_SLOT << PML4_SHIFT)
+			    | (slot << PD_SHIFT)
+			    | ((uint64_t) (i % PTES_PER_TABLE) << PT_SHIFT);
+
+		bench_iter[me] = i;
+
+		/*
+		 * ⚠️ pmap_map_page() and not pmap_enter(), because the two arms
+		 * differ INSIDE this function and nowhere else.  Going through
+		 * pmap_enter() would add pmap_forget()'s two walks and a
+		 * physical-index insertion to every iteration -- work both arms
+		 * pay equally, which does not cancel out of a ratio, it dilutes
+		 * it.  It also grew the pv list of the one frame every worker
+		 * maps to four hundred entries and wedged the run.
+		 */
+		(void) pmap_map_page(bench_pmap->root_pa, va, pa,
+				     INTEL_PTE_USER,
+				     &bench_pmap->collect_lock);
+	}
+
+	bench_cycles[me] = rdtsc() - bench_cycles[me];
+
+	bench_done[me] = 1;
+	thread_terminate_self();
+}
+
+/*
+ * ══ The number the issue asks for ═════════════════════════════════════
+ *
+ * "Whether that discipline is #338's granularity or a different one is decided
+ * with a number in front of it at NCPUS=64, not inherited."
+ *
+ * The two arms run BACK TO BACK IN ONE BOOT, on one binary, and that is not a
+ * convenience: a rate measured in one build and a rate measured in another
+ * differ by everything the compiler did differently, so what would be compared
+ * is the builds.  Same kernel, same processors, same workload, one branch on a
+ * global apart.
+ *
+ * The load is the one this file was built for: every worker maps into its own
+ * leaf table, so they never touch the same page-table entry and a per-table
+ * lock would let them all run.  Under ONE lock for the address space they
+ * serialise completely.  That is deliberately the worst case for the lock arm
+ * -- if a single lock is cheap enough here it is cheap enough anywhere, and if
+ * it is not, the answer is #338's granularity rather than none.
+ *
+ * ⚠️ No collector runs during this.  What is being priced is what the WRITER
+ * pays for the exclusion to exist, which it pays on every mapping whether a
+ * collection ever happens or not.  The collector's own cost is the other half
+ * of the trade and it is measured where it happens, in the arm below.
+ */
+static uint64_t bench_arm_cost(int arm, int *want_out)
+{
+	int	 want = 0, i;
+
+	pmap_writer_arm = arm;
+
+	bench_pmap = pmap_create(0);
+	if (bench_pmap == PMAP_NULL) {
+		*want_out = 0;
+		return 0;
+	}
+
+	for (i = 0; i < NCPUS; i++) {
+		bench_done[i] = 0;
+		bench_iter[i] = 0;
+		bench_pa[i] = 0;
+		bench_cycles[i] = 0;
+	}
+	bench_start = 0;
+
+	for (i = 0; i < NCPUS; i++) {
+		processor_t p = cpu_to_processor(i);
+
+		if (p == PROCESSOR_NULL || p->state == PROCESSOR_OFF_LINE)
+			continue;
+		if (bench_thread_bound(bench_cost_worker, p) == THREAD_NULL)
+			continue;
+		want++;
+	}
+
+	bench_start = 1;
+
+	{
+		int done = 0, waits;
+
+		for (waits = 0; waits < 1500 && done < want; waits++) {
+			int k;
+
+			mutex_pause();
+			done = 0;
+			for (k = 0; k < NCPUS; k++)
+				done += bench_done[k];
+		}
+
+		if (done < want) {
+			printf("pmap_bench: arm %d: only %d of %d workers "
+			       "finished -- the number below is WRONG\n",
+			       arm, done, want);
+			for (i = 0; i < NCPUS; i++)
+				if (bench_pa[i] != 0)
+					printf("    cpu %d at %d of %d\n", i,
+					       bench_iter[i],
+					       BENCH_COST_MAPS);
+		}
+	}
+
+	/*
+	 * The mean of what each worker measured for itself, which is what a
+	 * mapping costs A PROCESSOR while `want' of them are mapping at once --
+	 * exactly the quantity a shared lock changes and a bit does not.
+	 */
+	{
+		uint64_t total = 0;
+
+		for (i = 0; i < NCPUS; i++)
+			total += bench_cycles[i];
+
+		pmap_destroy(bench_pmap);
+		bench_pmap = PMAP_NULL;
+		pmap_writer_arm = PMAP_ARM_COLLECT_BIT;
+
+		*want_out = want;
+		return want ? total / ((uint64_t) want * BENCH_COST_MAPS) : 0;
+	}
+}
+
+/* The middle of five, by insertion -- five numbers do not need a real sort. */
+static uint64_t bench_median5(uint64_t *v)
+{
+	uint64_t a[5];
+	int	 i, j;
+
+	for (i = 0; i < 5; i++)
+		a[i] = v[i];
+
+	for (i = 1; i < 5; i++) {
+		uint64_t k = a[i];
+
+		for (j = i; j > 0 && a[j - 1] > k; j--)
+			a[j] = a[j - 1];
+		a[j] = k;
+	}
+
+	return a[2];
+}
+
+static void bench_compare_arms(void)
+{
+	uint64_t bit[5], lock[5];
+	uint64_t warm;
+	int	 want = 0, w, r;
+
+	/*
+	 * ⚠️ FIVE SAMPLES OF EACH, ALTERNATING, AND A DISCARDED FIRST RUN.
+	 *
+	 * One sample of each answered that the LOCK was nearly twice as FAST as
+	 * the bit, which is not a result: the first arm to run builds its page
+	 * tables out of pages the VM has never handed out and the second reuses
+	 * the ones the first gave back.  Five alternating samples make the
+	 * warm-up one point instead of one arm, and the median is what gets
+	 * compared.
+	 *
+	 * The spread of the five is printed with them, because a difference
+	 * smaller than the spread is not a difference -- at two processors it
+	 * is exactly that, and saying so is the honest half of the answer.
+	 */
+	warm = bench_arm_cost(PMAP_ARM_COLLECT_BIT, &want);
+
+	for (r = 0; r < 5; r++) {
+		bit[r]  = bench_arm_cost(PMAP_ARM_COLLECT_BIT, &w);
+		if (w != want)
+			want = 0;
+		lock[r] = bench_arm_cost(PMAP_ARM_PMAP_LOCK, &w);
+		if (w != want)
+			want = 0;
+	}
+
+	if (want == 0) {
+		printf("pmap_bench: the arms did not run the same load "
+		       "-- WRONG\n");
+		return;
+	}
+
+	printf("pmap_bench: %d mappings on %d processors, cycles each\n",
+	       BENCH_COST_MAPS * want, want);
+	printf("  collect bit:      %llu %llu %llu %llu %llu (median %llu, "
+	       "warm-up %llu)\n",
+	       (unsigned long long) bit[0], (unsigned long long) bit[1],
+	       (unsigned long long) bit[2], (unsigned long long) bit[3],
+	       (unsigned long long) bit[4],
+	       (unsigned long long) bench_median5(bit),
+	       (unsigned long long) warm);
+	printf("  one lock a space: %llu %llu %llu %llu %llu (median %llu)\n",
+	       (unsigned long long) lock[0], (unsigned long long) lock[1],
+	       (unsigned long long) lock[2], (unsigned long long) lock[3],
+	       (unsigned long long) lock[4],
+	       (unsigned long long) bench_median5(lock));
+	/*
+	 * ⚠️ The one thing a reader has to know to use these numbers.
+	 *
+	 * The lock arm spins, and a spinning guest processor under pure
+	 * emulation holds the emulator's own thread for a whole scheduling
+	 * quantum while the holder waits its turn -- so an unaccelerated run
+	 * prices QEMU rather than the design.  The safety arm below is the
+	 * opposite: it wants emulation, because that is where the interleavings
+	 * it hunts are widest.  Two questions, two instruments.
+	 */
+	printf("  ⚠️ only meaningful accelerated or on iron: a spin lock under "
+	       "pure emulation measures the emulator\n");
+	printf("  the lock costs %llu per mille of the bit\n",
+	       (unsigned long long) (bench_median5(bit)
+				     ? (bench_median5(lock) * 1000ULL)
+					/ bench_median5(bit)
+				     : 0));
+}
+
 void
 pmap_collect_bench(void)
 {
@@ -443,6 +722,13 @@ pmap_collect_bench(void)
 	 * measuring the neighbour.
 	 */
 	bench_collect_quiet();
+
+	/*
+	 * Then the price of each arm on the common path, before the arm that
+	 * decides whether the chosen one is SAFE.  Order matters only in that
+	 * both want a quiet machine.
+	 */
+	bench_compare_arms();
 
 	bench_pmap = pmap_create(0);
 	if (bench_pmap == PMAP_NULL) {
@@ -580,12 +866,23 @@ pmap_collect_bench(void)
 				wrong++;
 		}
 
+		/*
+		 * ⚠️ One processor is not a failure to race, it is a
+		 * configuration in which there is no race to have: the
+		 * collector runs on the same processor as the worker, so the
+		 * two can never be inside the tables at the same instant.
+		 * Saying "IT NEVER RACED" there would put an alarm on the
+		 * uniprocessor for behaving exactly as it must.
+		 */
 		printf("pmap_bench: the collector ran %u times during the run "
 		       "and took %u tables out from under the workers -- %s\n",
 		       bench_collections, bench_taken,
 		       bench_taken > 0
 		       ? "the race happened"
-		       : "IT NEVER RACED: what follows tests nothing");
+		       : want > 1
+		       ? "IT NEVER RACED: what follows tests nothing"
+		       : "one processor, so there was no overlap to have -- "
+			 "what follows is the uniprocessor's own answer");
 
 		printf("pmap_bench: %d witness mappings across a running "
 		       "collector: %d lost, %d naming the wrong frame (%s)\n",

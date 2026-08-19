@@ -304,8 +304,17 @@ machine_processors_ready(void)
 		 * measures, so a run that loses tables to it is the ANSWER and
 		 * not a regression; putting that on every boot would make the
 		 * end-of-run checks report a finding as a failure.
+		 *
+		 * ⚠️ It used to be gated on `want > 1' as well, from when the
+		 * bench was only about concurrency.  It is not any more: it also
+		 * measures what a collection gives back and what each arm of
+		 * the exclusion costs, and the one-processor figure is the
+		 * BASELINE of that curve -- the point where a lock is
+		 * uncontended and free.  A bench that skips the uniprocessor is
+		 * a bench that cannot say anything about the configuration this
+		 * project treats as first class.
 		 */
-		if (boot_flag('M') && want > 1)
+		if (boot_flag('M'))
 			pmap_collect_bench();
 
 		/*

@@ -238,17 +238,39 @@ static int map_page_attempt(uint64_t root_pa, uint64_t va, uint64_t pa,
 	return PMAP_MAP_OK;
 }
 
-int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags)
+int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
+		  volatile uint8_t *lock)
 {
 	uint64_t spare = 0;
 	int	 replaced = 0;
 	int	 rc;
 
 	for (;;) {
-		boolean_t held = pmap_read_enter();
+		boolean_t held;
+
+		/*
+		 * ⚠️ THE READ SECTION FIRST, AND THE ORDER IS NOT A STYLE.
+		 *
+		 * The lock arm's spin lock is taken INSIDE the read section
+		 * because entering the section is what holds preemption off
+		 * (#455), and a spin lock whose holder can be preempted is the
+		 * deadlock #461 closed: the holder is taken off its processor
+		 * and the spinners -- bound threads, on processors of their
+		 * own -- keep it from ever being scheduled again.  Written the
+		 * other way round first, and the bench duly reported "arm 1:
+		 * only 0 of 2 workers finished".
+		 *
+		 * Both are released before the retry allocates, so neither a
+		 * grace period nor a sleep is ever taken with the lock held.
+		 * In the bit arm the two lock calls compile to a load and a
+		 * branch that is never taken.
+		 */
+		held = pmap_read_enter();
+		pmap_writer_lock(lock);
 
 		rc = map_page_attempt(root_pa, va, pa, flags, &spare,
 				      &replaced);
+		pmap_writer_unlock(lock);
 		pmap_read_leave(held);
 
 		if (rc != PMAP_MAP_NEED_FRAME)

@@ -36,7 +36,14 @@
  * smaller ones, which is a real operation with its own shootdown
  * consequences and does not belong hidden inside this one.
  */
-int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags);
+/*
+ * `lock' is the address space's writer lock, or NULL for a caller that has no
+ * pmap yet -- the boot paths in x86_64/boot/boot_c.c.  It is taken only in
+ * PMAP_ARM_PMAP_LOCK, which exists to be measured against the other arm
+ * (#455); in PMAP_ARM_COLLECT_BIT it is not touched at all.
+ */
+int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
+		  volatile uint8_t *lock);
 
 /*
  * Clear the mapping for va.  Returns the size of the page it removed, or

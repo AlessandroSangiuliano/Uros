@@ -343,22 +343,32 @@ static void collect_flush(struct collect_batch *b)
 	if (b->count == 0)
 		return;
 
-	urmach_synchronize_rcu();			/* step 2 */
+	/*
+	 * In the lock arm the tables are already unlinked: they were scanned
+	 * and unlinked with every inserter excluded, so steps 2 to 4 have
+	 * nothing left to do.  Steps 5 to 7 are the same in both arms, because
+	 * they answer the hardware and the readers rather than the writers, and
+	 * neither of those is excluded by anything.
+	 */
+	if (pmap_writer_arm != PMAP_ARM_PMAP_LOCK) {
+		urmach_synchronize_rcu();		/* step 2 */
 
-	for (i = 0; i < b->count; i++) {		/* steps 3 and 4 */
-		if (!collect_table_empty(b->slot[i].table_pa)) {
-			collect_unmark(b->slot[i].parent);
-			continue;
+		for (i = 0; i < b->count; i++) {	/* steps 3 and 4 */
+			if (!collect_table_empty(b->slot[i].table_pa)) {
+				collect_unmark(b->slot[i].parent);
+				continue;
+			}
+			if (!collect_unlink(b->slot[i].parent,
+					    b->slot[i].table_pa))
+				continue;
+
+			b->slot[kept++] = b->slot[i];
 		}
-		if (!collect_unlink(b->slot[i].parent, b->slot[i].table_pa))
-			continue;
 
-		b->slot[kept++] = b->slot[i];
+		b->count = kept;
+		if (b->count == 0)
+			return;
 	}
-
-	b->count = kept;
-	if (b->count == 0)
-		return;
 
 	tlb_flush_all();				/* step 5 */
 	urmach_synchronize_rcu();			/* step 6 */
@@ -378,6 +388,33 @@ static void collect_consider(pt_entry_t *parent, struct collect_batch *b)
 {
 	pt_entry_t	found = *parent;
 	uint64_t	table_pa = pte_to_pa(found);
+
+	/*
+	 * ── The other arm, and it is here to be measured (#455) ──────
+	 *
+	 * With one lock for the whole address space held across this scan, no
+	 * inserter can be inside any of these tables, so the claim and the
+	 * grace period that waits for pre-claim writers are both unnecessary:
+	 * the emptiness test and the unlink are atomic because nothing else is
+	 * running.  The collector gets cheaper -- one grace period instead of
+	 * two, and no second scan -- and every pmap_enter in the system pays
+	 * for it.  Which trade is right is what collect_bench.c measures.
+	 */
+	if (pmap_writer_arm == PMAP_ARM_PMAP_LOCK) {
+		if (!collect_table_empty(table_pa))
+			return;
+
+		if (found & INTEL_PTE_REF) {
+			*parent = found & ~INTEL_PTE_REF;
+			return;
+		}
+
+		*parent = 0;
+		b->slot[b->count].parent   = parent;
+		b->slot[b->count].table_pa = table_pa;
+		b->count++;
+		return;
+	}
 
 	/*
 	 * Somebody else's claim.  Only one collector may hold a table at a
@@ -489,8 +526,10 @@ pmap_collect(pmap_t pmap)
 	 * into every space.
 	 */
 	held = pmap_read_enter();
+	pmap_writer_lock(&pmap->collect_lock);
 	collect_scan((pt_entry_t *)(uintptr_t)phys_to_direct(pmap->root_pa),
 		     4, pml4_index(KERNEL_HALF_BASE), &batch);
+	pmap_writer_unlock(&pmap->collect_lock);
 	pmap_read_leave(held);
 
 	collect_flush(&batch);

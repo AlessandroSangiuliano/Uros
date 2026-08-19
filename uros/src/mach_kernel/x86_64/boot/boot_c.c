@@ -423,7 +423,7 @@ static void map_selftest(void)
 	uint32_t via_direct;
 	int rc, resolved;
 
-	rc = pmap_map_page(root, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX);
+	rc = pmap_map_page(root, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX, 0);
 
 	kputs("UrMach x86-64: map ");
 	kputhex64(va);
@@ -449,7 +449,7 @@ static void map_selftest(void)
 	kputs(resolved && got == frame && size == PAGE_SIZE_4K
 	      ? "as mapped\r\n" : "WRONG\r\n");
 
-	rc = pmap_map_page(root, DIRECT_MAP_BASE, frame, INTEL_PTE_WRITE);
+	rc = pmap_map_page(root, DIRECT_MAP_BASE, frame, INTEL_PTE_WRITE, 0);
 	kputs("UrMach x86-64: map over a large page ");
 	kputs(rc == PMAP_MAP_BLOCKED ? "correctly refused\r\n"
 				     : "NOT refused?!\r\n");
@@ -472,7 +472,7 @@ static void protect_unmap_selftest(void)
 	pt_entry_t *e;
 	uint64_t size;
 
-	pmap_map_page(root, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX);
+	pmap_map_page(root, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX, 0);
 	*page = 0xcafe;
 
 	size = pmap_protect_page(root, va, INTEL_PTE_NX);	/* drop write */

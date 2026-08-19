@@ -38,11 +38,45 @@ struct pmap {
 	 * it, so it is a count and not an estimate (#453).
 	 */
 	int      resident_count;
+
+	/*
+	 * The second arm of #455's writer-writer exclusion, and it exists to be
+	 * MEASURED against the first rather than to be used.
+	 *
+	 * The issue asks that the granularity be "decided with a number in
+	 * front of it at NCPUS=64, not inherited", i386's inherited answer
+	 * being #338's per-table locks.  A number needs two things to compare,
+	 * and they have to be in ONE BINARY: a rate measured in one build and a
+	 * rate measured in another differ by everything the compiler did
+	 * differently, so the comparison would be of the builds.
+	 *
+	 * So both arms are here and pmap_writer_arm chooses at run time.  This
+	 * one is the cheapest possible answer -- one lock for the whole address
+	 * space -- which is the arm collect_bench.c was built to make look as
+	 * bad as it can.
+	 *
+	 * A spin lock and not a mutex, because it is taken on the descent and
+	 * the descent must not block; the collector holds it only across a scan
+	 * and an unlink, never across a grace period.
+	 */
+	volatile uint8_t collect_lock;
 };
 
 typedef struct pmap *pmap_t;
 
 #define PMAP_NULL	((pmap_t) 0)
+
+/*
+ * Which writer-writer exclusion pmap_collect() and pmap_enter() use (#455).
+ *
+ * ⚠️ A measurement switch, not a tuning knob.  The bit is the design; the lock
+ * is here so that "the bit is cheaper on the common path" is a number rather
+ * than an argument.  Nothing outside x86_64/pmap/collect_bench.c writes it.
+ */
+#define PMAP_ARM_COLLECT_BIT	0	/* a claim in the parent entry */
+#define PMAP_ARM_PMAP_LOCK	1	/* one spin lock for the whole space */
+
+extern int pmap_writer_arm;
 
 /*
  * The kernel's own map, whose higher half every address space shares.
@@ -136,6 +170,30 @@ static __inline__ void pmap_read_leave(boolean_t held)
 
 /* #455: -C, what concurrency does to a pmap that has no locking. */
 void pmap_collect_bench(void);
+
+/*
+ * The per-pmap spin lock of PMAP_ARM_PMAP_LOCK, and nothing at all in the
+ * other arm -- so the branch is what the measurement is measuring.
+ */
+#include <sync/atomic.h>
+#include <cpu/regs.h>
+
+static __inline__ void pmap_writer_lock(volatile uint8_t *l)
+{
+	if (pmap_writer_arm != PMAP_ARM_PMAP_LOCK || l == 0)
+		return;
+
+	while (atomic_cmpxchg8(l, 0, 1) != 0)
+		cpu_pause();
+}
+
+static __inline__ void pmap_writer_unlock(volatile uint8_t *l)
+{
+	if (pmap_writer_arm != PMAP_ARM_PMAP_LOCK || l == 0)
+		return;
+
+	(void) atomic_swap8(l, 0);
+}
 
 /*
  * Make `pmap` the address space this CPU translates through — a CR3 load,

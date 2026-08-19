@@ -117,6 +117,12 @@ unsigned	pmap_table_frames_live;
 int	pmap_initialized = 0;
 
 /*
+ * Which arm of the writer-writer exclusion is in force (#455).  The bit, until
+ * collect_bench.c asks for the other one to measure it.
+ */
+int	pmap_writer_arm = PMAP_ARM_COLLECT_BIT;
+
+/*
  * The object every page-table frame taken from the VM is registered in (#455).
  *
  * 🔑 It exists so that a frame can be GIVEN BACK.  vm_page_grab() answers with
@@ -450,6 +456,13 @@ pmap_t pmap_create(uint64_t size)
 		return PMAP_NULL;
 
 	pmap->resident_count = 0;
+	/*
+	 * ⚠️ And the lock, because zalloc() does not zero.  A zone element
+	 * arrives holding whatever the previous owner left, so a field added to
+	 * this struct is uninitialised until somebody writes it -- and a spin
+	 * lock that arrives already taken is never released by anybody (#455).
+	 */
+	pmap->collect_lock = 0;
 
 	/*
 	 * 🔥 pmap_table_frame() and not boot_frame_alloc(), which is what this
@@ -736,7 +749,7 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	if (va_is_user(va))
 		flags |= INTEL_PTE_USER;
 
-	rc = pmap_map_page(pmap->root_pa, va, pa, flags);
+	rc = pmap_map_page(pmap->root_pa, va, pa, flags, &pmap->collect_lock);
 	if (rc == PMAP_MAP_OK) {
 		pv_enter(pa, pmap, va);
 		/*
@@ -893,8 +906,9 @@ uint64_t pmap_map_device(uint64_t pa, uint64_t size)
 	 * while looking untouched.
 	 */
 	for (uint64_t p = first; p < last; p += PAGE_SIZE_4K) {
-		if (pmap_map_page(kernel_pmap_store.root_pa,
-				  device_next, p, flags) != PMAP_MAP_OK)
+		if (pmap_map_page(kernel_pmap_store.root_pa, device_next, p,
+				  flags, &kernel_pmap_store.collect_lock)
+		    != PMAP_MAP_OK)
 			panic("pmap: could not map device registers");
 		device_next += PAGE_SIZE_4K;
 	}
