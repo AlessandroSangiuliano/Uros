@@ -89,6 +89,24 @@ typedef uint64_t	pt_entry_t;
 #define INTEL_PTE_WIRED		0x0000000000000200ULL
 
 /*
+ * The second of those bits, and it means something only in an INTERIOR entry
+ * (#455): pmap_collect() is trying to take the table below this entry away.
+ *
+ * It is how the collector and pmap_enter() exclude each other without a lock.
+ * The collector writes it, waits a grace period, then checks the table is
+ * empty and exchanges the entry to zero *from this value* -- so the exchange
+ * fails if anyone cleared the bit in between.  A descent that finds the bit
+ * set clears it before writing into the table below, which is exactly that
+ * "anyone".  See the protocol in x86_64/pmap/vminit.c.
+ *
+ * ⚠️ Interior only, and that is what makes bit 10 spendable here: a leaf spends
+ * bit 9 on WIRED and this one is untouched, while an interior entry spends
+ * neither.  A leaf never carries it, so nothing that reads a leaf has to know
+ * about it.
+ */
+#define INTEL_PTE_COLLECT	0x0000000000000400ULL
+
+/*
  * Execute-disable.  Bit 63 is *reserved* until EFER.NXE is set — setting it
  * before then faults rather than protecting anything, so the pmap must turn
  * NXE on before it starts writing this bit.

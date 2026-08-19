@@ -38,6 +38,7 @@
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
 #include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
+#include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
 
 /*
@@ -286,6 +287,35 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('A') && want > 1)
 			kernel_ast_test();
+
+		/*
+		 * -M: what concurrency does to a pmap with no locking (#455).
+		 *
+		 * ⚠️ -M and not -C: C is the clock burn-in, and the flags are a
+		 * single namespace across boot_c.c and this file.  Enumerated
+		 * from the whole tree rather than from this file, which is how
+		 * the collision was found.
+		 *
+		 * Here for the same reason as the tests around it -- the workers
+		 * are bound to processors already in the scheduler.  Returns, so
+		 * the boot goes on to bootstrap_create() as usual.
+		 *
+		 * ⚠️ Off the ordinary boot on purpose.  It provokes the race it
+		 * measures, so a run that loses tables to it is the ANSWER and
+		 * not a regression; putting that on every boot would make the
+		 * end-of-run checks report a finding as a failure.
+		 *
+		 * ⚠️ It used to be gated on `want > 1' as well, from when the
+		 * bench was only about concurrency.  It is not any more: it also
+		 * measures what a collection gives back and what each arm of
+		 * the exclusion costs, and the one-processor figure is the
+		 * BASELINE of that curve -- the point where a lock is
+		 * uncontended and free.  A bench that skips the uniprocessor is
+		 * a bench that cannot say anything about the configuration this
+		 * project treats as first class.
+		 */
+		if (boot_flag('M'))
+			pmap_collect_bench();
 
 		/*
 		 * -L: a thread blocked with a continuation, and the prompt

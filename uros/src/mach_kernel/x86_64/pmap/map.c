@@ -10,6 +10,10 @@
 #include <cpu/regs.h>
 #include <pmap/bootmem.h>
 #include <pmap/pmap.h>		/* pmap_table_frame (#458) */
+#include <pmap/bootmem.h>		/* boot_frame_free (#455) */
+#include <sync/atomic.h>		/* atomic_cmpxchg64 (#455) */
+#include <mach/boolean.h>
+#include <kern/rcu.h>			/* read sections around a walk (#455) */
 #include <pmap/layout.h>
 #include <pmap/map.h>
 #include <pmap/pte.h>
@@ -23,35 +27,68 @@ static inline pt_entry_t *table_at(uint64_t table_pa)
 }
 
 /*
- * The table below `entry`, created if it is not there yet.  Returns NULL and
- * sets *err when the descent cannot continue.
+ * The table below `entry`, created out of *spare if it is not there yet.
+ * Returns NULL and sets *err when the descent cannot continue.
+ *
+ * ⚠️ It does NOT allocate.  The frame arrives through *spare, taken by the
+ * caller outside its read section, and is consumed by being published --
+ * pmap_map_page() below says why that had to move out of here (#455).
  */
-static pt_entry_t *next_table(pt_entry_t *entry, int *err)
+static pt_entry_t *next_table(pt_entry_t *entry, uint64_t *spare, int *err)
 {
-	uint64_t frame;
+    for (;;) {
+	pt_entry_t found = *entry;
+	uint64_t   frame;
 
-	if (pte_is_valid(*entry)) {
+	if (pte_is_valid(found)) {
 		/*
 		 * A large page here means the range is already mapped at a
 		 * coarser grain, and there is no table below to descend into.
 		 */
-		if (pte_is_leaf(*entry)) {
+		if (pte_is_leaf(found)) {
 			*err = PMAP_MAP_BLOCKED;
 			return PT_ENTRY_NULL;
 		}
-		return table_at(pte_to_pa(*entry));
+
+		/*
+		 * 🔥 TAKE THE TABLE BACK FROM THE COLLECTOR (#455).
+		 *
+		 * pmap_collect() has marked this entry and is about to check
+		 * that the table below is empty and unlink it.  Clearing the
+		 * bit is what makes its exchange fail, and it has to happen
+		 * BEFORE anything is written into that table -- which is why
+		 * it is here, at the descent, and not at the leaf: the write
+		 * that must be protected may be one level further down.
+		 *
+		 * ⚠️ And the cmpxchg's answer is not optional.  If it fails the
+		 * collector got there first and this entry is now zero, so
+		 * `found' names a table that is being freed; using it would put
+		 * a mapping into a page about to go back to the VM.  Looking
+		 * again is the whole of the fix, and the loop is why this
+		 * function is shaped as one.
+		 */
+		if (found & INTEL_PTE_COLLECT) {
+			if (atomic_cmpxchg64((volatile uint64_t *) entry,
+					     found,
+					     found & ~INTEL_PTE_COLLECT)
+			    != found)
+				continue;
+			found &= ~INTEL_PTE_COLLECT;
+		}
+
+		return table_at(pte_to_pa(found));
 	}
 
 	/*
-	 * Not boot_frame_alloc() (#458).  The boot allocator is drained by the
-	 * VM during vm_page_bootstrap(), so asking it after that always
-	 * answers zero; pmap_table_frame() knows which era it is in.
+	 * Nothing here, and nothing to build it out of.  The caller leaves
+	 * its read section, takes a frame, and comes back -- see
+	 * pmap_map_page().
 	 */
-	frame = pmap_table_frame();
-	if (frame == 0) {
-		*err = PMAP_MAP_NO_FRAME;
+	if (*spare == 0) {
+		*err = PMAP_MAP_NEED_FRAME;
 		return PT_ENTRY_NULL;
 	}
+	frame = *spare;
 
 	/*
 	 * An interior entry carries no policy of its own — and getting that
@@ -79,35 +116,177 @@ static pt_entry_t *next_table(pt_entry_t *entry, int *err)
 	 * on the wider architecture.  It is the same conclusion the same
 	 * hardware rule forces.
 	 */
-	*entry = frame | INTEL_PTE_VALID | INTEL_PTE_WRITE | INTEL_PTE_USER;
-	return table_at(frame);
+	/*
+	 * 🔥 PUBLISHED WITH A cmpxchg, NOT A STORE (#455).
+	 *
+	 * `*entry = frame | ...' is what this was, and it loses page tables.
+	 * Two processors descending into the same missing table both arrive
+	 * here, both allocate, and both store; the second store replaces the
+	 * first, and the first table is now linked to nothing.  Nothing faults
+	 * and nothing panics -- the space simply holds a page no walk can
+	 * reach, so neither pmap_destroy() nor a future pmap_collect() can ever
+	 * give it back.  Measured at -smp 8: thirty-three pages leaked in
+	 * sixteen thousand operations (x86_64/pmap/collect_bench.c).
+	 *
+	 * i386 solves it with a lock: pmap_expand() allocates outside
+	 * PMAP_READ_LOCK, takes it, and asks "see if someone else expanded us
+	 * first" -- returning its own page to the pool if so.  That is correct
+	 * and it needs a lock this pmap does not have yet.
+	 *
+	 * It does not need one.  An interior entry is a single naturally
+	 * aligned 64-bit word and this machine has cmpxchg, so the publish is
+	 * the arbitration: exactly one processor can move the entry from empty
+	 * to its own frame.  The loser is told what it lost to, frees its
+	 * table, and descends into the winner's -- the same outcome i386 gets,
+	 * without excluding anybody from anything.
+	 *
+	 * ⚠️ This closes THIS race and no other.  It says nothing about a table
+	 * being freed underneath a walk, which is what pmap_collect() will need
+	 * a discipline for; what it removes is the one that leaks silently, and
+	 * it removes it rather than making it rarer.
+	 */
+	{
+		pt_entry_t fresh = frame | INTEL_PTE_VALID | INTEL_PTE_WRITE
+				 | INTEL_PTE_USER;
+
+		if (atomic_cmpxchg64((volatile uint64_t *) entry, 0, fresh) != 0)
+			continue;	/* somebody else published; look again */
+
+		/*
+		 * Ours, and the spare is spent.  It is cleared rather than
+		 * freed because freeing blocks (pmap_table_frame_free takes
+		 * mutexes) and this runs inside a read section; a spare that
+		 * survives the descent is handed back by pmap_map_page() after
+		 * the section closes.
+		 */
+		*spare = 0;
+
+		/* Atomic for the reason written over the counter itself. */
+		atomic_add32((volatile uint32_t *) &pmap_table_frames_live, 1);
+		return table_at(frame);
+	}
+    }
 }
 
-int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags)
+/*
+ * ── The descent runs inside a read section, and cannot allocate in it ──
+ *
+ * Two obligations meet here (#455), and neither is optional:
+ *
+ *   - the whole descent AND the leaf write must be one RCU read section, so
+ *     that pmap_collect()'s grace period covers a mapping installed through
+ *     a parent entry read before the collector marked it.  That is what makes
+ *     "the collector scans after synchronize" enough: any writer that could
+ *     have gone unseen has finished by then, and any writer that starts after
+ *     sees the mark and clears it.
+ *
+ *   - a read section must not block, and pmap_table_frame() blocks -- after
+ *     the VM is up it is vm_page_grab() with a VM_PAGE_WAIT() behind it.
+ *     Blocking is exactly how a processor reports the quiescent state that
+ *     ends somebody else's grace period, so a section held across a wait
+ *     tells every collector this processor is done reading while it is
+ *     standing in a table.
+ *
+ * So the frame is taken OUTSIDE and the descent is retried.  A descent that
+ * needs a table it has no frame for answers PMAP_MAP_NEED_FRAME, the section
+ * closes, one frame is taken, and the whole descent runs again.  At most
+ * three retries -- one per interior level -- and none at all on the common
+ * path, where every table already exists.
+ *
+ * ⚠️ The spare is carried ACROSS the retry and reused at the next level down
+ * rather than freed and re-taken.  That is not only cheaper: it is what keeps
+ * the frame's disposal out of the section entirely, since a descent that
+ * loses the publish race keeps its frame instead of handing it back from a
+ * place it may not block in.
+ *
+ * This is i386's pmap_expand() shape -- allocate outside, decide inside, give
+ * the page back if the argument was already settled -- reached from the other
+ * direction: there the constraint is a lock that must not be held across an
+ * allocation, here it is a grace period that must not be held across a sleep.
+ */
+/*
+ * One attempt: the four levels and the leaf write, all of it inside the
+ * caller's read section and none of it able to block.  Split out so that the
+ * retry above it is a loop rather than a jump backwards.
+ */
+static int map_page_attempt(uint64_t root_pa, uint64_t va, uint64_t pa,
+			    uint64_t flags, uint64_t *spare, int *replaced)
 {
 	pt_entry_t *table = table_at(root_pa);
 	pt_entry_t *entry;
-	int err = PMAP_MAP_OK;
-	int replaced;
+	int	    rc = PMAP_MAP_OK;
 
 	entry = &table[pml4_index(va)];
-	table = next_table(entry, &err);
+	table = next_table(entry, spare, &rc);
 	if (table == PT_ENTRY_NULL)
-		return err;
+		return rc;
 
 	entry = &table[pdpt_index(va)];
-	table = next_table(entry, &err);
+	table = next_table(entry, spare, &rc);
 	if (table == PT_ENTRY_NULL)
-		return err;
+		return rc;
 
 	entry = &table[pd_index(va)];
-	table = next_table(entry, &err);
+	table = next_table(entry, spare, &rc);
 	if (table == PT_ENTRY_NULL)
-		return err;
+		return rc;
 
 	entry = &table[pt_index(va)];
-	replaced = pte_is_valid(*entry);
+	*replaced = pte_is_valid(*entry);
 	*entry = pa_to_pte(pa) | INTEL_PTE_VALID | flags;
+
+	return PMAP_MAP_OK;
+}
+
+int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
+		  volatile uint8_t *lock)
+{
+	uint64_t spare = 0;
+	int	 replaced = 0;
+	int	 rc;
+
+	for (;;) {
+		boolean_t held;
+
+		/*
+		 * ⚠️ THE READ SECTION FIRST, AND THE ORDER IS NOT A STYLE.
+		 *
+		 * The lock arm's spin lock is taken INSIDE the read section
+		 * because entering the section is what holds preemption off
+		 * (#455), and a spin lock whose holder can be preempted is the
+		 * deadlock #461 closed: the holder is taken off its processor
+		 * and the spinners -- bound threads, on processors of their
+		 * own -- keep it from ever being scheduled again.  Written the
+		 * other way round first, and the bench duly reported "arm 1:
+		 * only 0 of 2 workers finished".
+		 *
+		 * Both are released before the retry allocates, so neither a
+		 * grace period nor a sleep is ever taken with the lock held.
+		 * In the bit arm the two lock calls compile to a load and a
+		 * branch that is never taken.
+		 */
+		held = pmap_read_enter();
+		pmap_writer_lock(lock);
+
+		rc = map_page_attempt(root_pa, va, pa, flags, &spare,
+				      &replaced);
+		pmap_writer_unlock(lock);
+		pmap_read_leave(held);
+
+		if (rc != PMAP_MAP_NEED_FRAME)
+			break;
+
+		/*
+		 * Outside the section, where blocking is allowed.  #458's two
+		 * eras still apply: pmap_table_frame() knows which allocator
+		 * owns physical memory right now.
+		 */
+		spare = pmap_table_frame();
+		if (spare == 0) {
+			rc = PMAP_MAP_NO_FRAME;
+			break;
+		}
+	}
 
 	/*
 	 * Only a mapping that existed can be stale somewhere else.  The
@@ -118,23 +297,37 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags)
 	 * The local invalidation is kept in both cases: it is one instruction,
 	 * and it covers implementations that cache the absence of a mapping as
 	 * well as its presence.
+	 *
+	 * ⚠️ After the section, not inside it.  tlb_flush_range() waits for every
+	 * other processor to answer, and one of those may be spinning in
+	 * urmach_synchronize_rcu() waiting for this processor to leave the very
+	 * section we would be holding.
 	 */
-	invlpg(va);
-	if (replaced)
-		tlb_flush_range(va, PAGE_SIZE_4K);
+	if (rc == PMAP_MAP_OK) {
+		invlpg(va);
+		if (replaced)
+			tlb_flush_range(va, PAGE_SIZE_4K);
+	}
 
-	return PMAP_MAP_OK;
+	if (spare != 0)
+		pmap_table_frame_free(spare);
+
+	return rc;
 }
 
 uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
 {
 	uint64_t size = 0;
+	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 
-	if (entry == PT_ENTRY_NULL)
+	if (entry == PT_ENTRY_NULL) {
+		pmap_read_leave(held);
 		return 0;
+	}
 
 	*entry = 0;
+	pmap_read_leave(held);
 	tlb_flush_range(va, size);
 	return size;
 }
@@ -142,12 +335,57 @@ uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
 uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 {
 	uint64_t size = 0;
+	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 
-	if (entry == PT_ENTRY_NULL)
+	if (entry == PT_ENTRY_NULL) {
+		pmap_read_leave(held);
 		return 0;
+	}
 
-	*entry = (*entry & ~INTEL_PTE_PERM) | (flags & INTEL_PTE_PERM);
+	/*
+	 * 🔥 A READ-MODIFY-WRITE ON A SHARED WORD (#455).
+	 *
+	 * This read the entry, changed the permission bits, and wrote it back.
+	 * Every other processor mapping, unmapping or protecting through the
+	 * same entry is writing that word too, and whatever any of them did
+	 * between the read and the write is gone -- most sharply the hardware's
+	 * own ACCESSED and DIRTY bits, which the processor sets in this word
+	 * without asking anyone.  Losing a dirty bit is losing the fact that a
+	 * page must be written back.
+	 *
+	 * The same arbitration as next_table(), for the same reason: one
+	 * aligned 64-bit word, and cmpxchg tells the loser what it lost to.
+	 * Here the loser retries rather than gives up -- it still has a change
+	 * to apply, and it applies it to what it now finds.
+	 *
+	 * ⚠️ It reloads through `found' and never re-reads *entry.  Reading the
+	 * word again would open the same window one instruction wide: what
+	 * cmpxchg hands back is what the word held at the instant it refused,
+	 * and building the next attempt out of anything else is building it out
+	 * of a value that was never there.
+	 */
+	{
+		pt_entry_t found = *entry;
+
+		for (;;) {
+			pt_entry_t fresh = (found & ~INTEL_PTE_PERM)
+					 | (flags & INTEL_PTE_PERM);
+			pt_entry_t seen;
+
+			if (fresh == found)
+				break;		/* already what it should be */
+
+			seen = atomic_cmpxchg64((volatile uint64_t *) entry,
+						found, fresh);
+			if (seen == found)
+				break;
+			found = seen;
+		}
+	}
+
+	pmap_read_leave(held);
+
 	tlb_flush_range(va, size);
 	return size;
 }
@@ -155,13 +393,40 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 {
 	uint64_t size = 0;
-	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
 	uint64_t base, perm, sub_size, table_pa;
+	pt_entry_t *entry;
 	pt_entry_t *sub;
+	boolean_t held;
 	int from_1g;
 
-	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K)
+	/*
+	 * 🔥 THE FRAME IS TAKEN BEFORE THE SECTION OPENS (#455).
+	 *
+	 * pmap_table_frame() can BLOCK -- after the VM is up it is vm_page_grab
+	 * with a VM_PAGE_WAIT behind it -- and a QSBR read section must not,
+	 * because blocking is exactly how a processor reports the quiescent
+	 * state that ends somebody else's grace period.  A section held across
+	 * a wait would tell every collector this processor is done reading
+	 * while it is standing in a table.
+	 *
+	 * So it is allocated unconditionally and handed back when the split
+	 * turns out not to be needed.  That costs one frame taken and returned
+	 * on a path that does nothing, which is affordable because splitting a
+	 * large page is rare -- and it is i386's pmap_expand() shape: allocate
+	 * outside, decide inside, give the page back if you lost the argument.
+	 */
+	table_pa = pmap_table_frame();
+	if (table_pa == 0)
+		panic("pmap: no frame to split a large page into");
+
+	held = pmap_read_enter();
+
+	entry = pmap_walk(root_pa, va, &size);
+	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
+		pmap_read_leave(held);
+		pmap_table_frame_free(table_pa);
 		return 0;
+	}
 
 	from_1g = (size == PAGE_SIZE_1G);
 	sub_size = from_1g ? PAGE_SIZE_2M : PAGE_SIZE_4K;
@@ -177,15 +442,6 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	 * range is now fine-grained when it is still one large page — which is
 	 * how a section ends up sharing its permissions with its neighbour.
 	 */
-	/*
-	 * pmap_table_frame(), for the reason written above it: after the VM
-	 * comes up the boot allocator has nothing left, and a large page can be
-	 * split at any time (#422).  Same class as pmap_create()'s.
-	 */
-	table_pa = pmap_table_frame();
-	if (table_pa == 0)
-		panic("pmap: no frame to split a large page into");
-
 	sub = table_at(table_pa);
 	for (unsigned i = 0; i < PTES_PER_TABLE; i++) {
 		pt_entry_t leaf = (base + (uint64_t)i * sub_size)
@@ -216,5 +472,7 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	 * is bootstrap, so the blunt tool remains the right one.
 	 */
 	tlb_flush_all();
+	pmap_read_leave(held);
+
 	return sub_size;
 }
