@@ -28,6 +28,15 @@
 # that quietly counts what it could not look at as agreement is the shape this
 # project keeps finding in its own instruments.
 #
+# 🔑 And the blind spot is named rather than left to be discovered: this reads
+# the two KERNELS, and the servers are separate binaries built WITHOUT debug
+# information, so a structure only they use is invisible here. That is why
+# every absent structure is also counted against the source tree -- "nobody
+# mentions it" is a dead declaration and crosses no boundary, while "twelve
+# files mention it" is this check failing to reach something. struct
+# loader_info is the second kind: twelve files, and the kernel's own reference
+# is inside `#if DEBUG', which is why neither kernel emits it.
+#
 # ── What a difference means ───────────────────────────────────────────
 #
 # Not every difference is a defect. A structure that is kernel-private, or one
@@ -191,6 +200,36 @@ def layout(kernel, kind, name):
     return (total, members)
 
 
+def source_references(name):
+    """How many source files mention this type at all.
+
+    ⚠️ The reason this is here rather than left to the reader: DWARF only
+    covers the two KERNELS, and the servers are separate binaries built
+    without debug information -- so "absent" conflates two very different
+    things.  A structure nothing mentions is a dead declaration and crosses no
+    boundary because nothing crosses.  A structure the tree does mention but
+    neither kernel emits is this check's blind spot, and saying which is which
+    is the difference between a gap that has been measured and one that has
+    been skipped.
+    """
+    src = os.path.join(REPO, "uros", "src")
+    pat = re.compile(r"\b%s\b" % re.escape(name))
+    seen = 0
+
+    for root, _dirs, files in os.walk(src):
+        for f in files:
+            if not (f.endswith(".c") or f.endswith(".h") or f.endswith(".S")):
+                continue
+            try:
+                with open(os.path.join(root, f), errors="replace") as fh:
+                    if pat.search(fh.read()):
+                        seen += 1
+            except OSError:
+                pass
+
+    return seen
+
+
 def main():
     verbose = "--verbose" in sys.argv
 
@@ -255,7 +294,13 @@ def main():
     print("  %d not in one build's debug information, so NOT CHECKED:"
           % len(absent))
     for name, where in absent:
-        print("      %-40s absent from %s" % (name, where))
+        n = source_references(name)
+        print("      %-32s absent from %-18s %s"
+              % (name, where,
+                 "referenced nowhere in src/ -- a dead declaration"
+                 if n == 0 else
+                 "referenced in %d source file%s -- SOMETHING USES IT"
+                 % (n, "" if n == 1 else "s")))
 
     if stale:
         # An acceptance for a structure that no longer differs is a note about
