@@ -87,11 +87,14 @@ set(BOOTSTRAP_SOURCES
   service.c
   load.c
   strfcns.c
-  # Issue #185: stage-2 reads via BDS handle, which isn't a kernel device
-  # port — the libmach syscall_device_read_overwrite path returns
-  # MACH_SEND_INTERRUPTED and the mig_device_read fallback is missing in
-  # this build, so override device_read_overwrite to call device_read.
-  device_read_overwrite.c
+  # ⚠️ device_read_overwrite.c was here, and is gone rather than moved: it was
+  # a private copy of a libmach call, written because the mig_device_read
+  # fallback the real wrapper needs was missing from this build.  It is not
+  # missing any more -- libmach/syscall_wrappers.c supplies it, calling
+  # device_read() which is the same stub under the name this build gives it --
+  # and the copy here skipped the trap on the way, which is right for
+  # bootstrap's own BDS handle and wrong for a kernel device.  ext_server had
+  # the identical file, byte for byte.
   # Issue #186: stage-1 multiboot bundle parser (early-stage server
   # binaries pre-loaded into RAM, removing the need for kernel IDE).
   bundle.c
