@@ -34,6 +34,7 @@
 #include <sync/barrier.h>		/* #461: publish the tick reports */
 #include <kern/cpu_number.h>		/* cpu_number */
 #include <kern/cpu_data.h>		/* #459: disable_preemption */
+#include <kern/rcu.h>		/* the tick's quiescent state (#455) */
 #include <cpus.h>			/* NCPUS */
 #include <trap/trap.h>			/* struct trap_frame */
 #include <mach/machine/vm_types.h>	/* vm_offset_t */
@@ -647,6 +648,36 @@ clock_event_tick(struct trap_frame *frame)
 	 * truncation to the low 32 bits here.
 	 */
 	hertz_tick(usermode, pc);
+
+	/*
+	 * 🔥 QSBR's THIRD CHECKPOINT, and it was never ported (#455).
+	 *
+	 * <kern/rcu.h> names three places a processor reports that it holds no
+	 * read reference: a context switch, the idle loop, and this tick.  The
+	 * first two are in kern/sched_prim.c and so arrived with the
+	 * machine-independent tree; the third is machine-dependent -- i386 has
+	 * it in hardclock.c -- and x86-64 had no equivalent at all.
+	 *
+	 * The tick is not a redundant third: it is the BACKSTOP, and it is the
+	 * only one that covers a processor which neither switches nor idles.  A
+	 * thread spinning in a tight loop is exactly that, and without this
+	 * every grace period on the machine waits for it for ever.  Observed as
+	 * a wedged bench with
+	 *
+	 *   urmach_rcu: WARNING cpu 5 not quiescent
+	 *               (qs_seq=5 snap=5 depth=0 idle=0 running=1)
+	 *
+	 * -- depth ZERO, so the processor was not holding anything; it simply
+	 * had no way to say so.
+	 *
+	 * ⚠️ Inside the preemption-disabled region and after hertz_tick(), which
+	 * is where i386 puts it, and it reports nothing when the interrupted
+	 * code was itself inside a read section -- the depth gate in
+	 * urmach_rcu_quiescent_state() is what makes a tick landing mid-lookup
+	 * safe.
+	 */
+	urmach_rcu_quiescent_state();
+
 	clock_selftest(cpu);
 
 	/*

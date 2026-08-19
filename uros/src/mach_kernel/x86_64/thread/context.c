@@ -21,10 +21,10 @@ extern void context_thread_start(void);
  * thread which has never run and one that was interrupted are
  * indistinguishable to it.
  *
- * Nine words rather than the seven the switch consumes.  The eighth is a
+ * Ten words rather than the eight the switch consumes.  The ninth is a
  * deliberate zero where context_thread_start()'s return address would be,
  * so that a backtrace stops at the thread's own beginning rather than
- * walking into whatever the stack held in a previous life.  The ninth is
+ * walking into whatever the stack held in a previous life.  The tenth is
  * alignment: the ABI wants the stack sixteen-byte aligned at a call, and
  * the thread's first call is the one context_thread_start() makes.
  */
@@ -34,9 +34,22 @@ extern void context_thread_start(void);
 #define CTX_R12		3	/* its argument      */
 #define CTX_RBX		4
 #define CTX_RBP		5
-#define CTX_RETURN	6	/* where the switch's `ret` goes */
-#define CTX_CALLER	7	/* the zero that ends a backtrace */
-#define CTX_WORDS	9
+#define CTX_RFLAGS	6	/* the interrupt flag it begins with */
+#define CTX_RETURN	7	/* where the switch's `ret` goes */
+#define CTX_CALLER	8	/* the zero that ends a backtrace */
+#define CTX_WORDS	10
+
+/*
+ * What a thread starts with in RFLAGS: interrupts on, and bit 1, which the
+ * architecture requires to be set.  Nothing else -- no direction flag (the
+ * ABI requires it clear at every call), no trap flag, no I/O privilege.
+ *
+ * It has to be stated because RFLAGS is now saved and restored across a
+ * switch, so a thread that has never run needs a value to be resumed with,
+ * and zero is not one: it would start the thread with interrupts disabled,
+ * which is the exact failure the saving was added to close.
+ */
+#define CTX_RFLAGS_INITIAL	0x202ULL
 
 void context_become_current(struct context *ctx, uint64_t stack_top,
 			    void *fpu_area)
@@ -67,6 +80,7 @@ void context_init(struct context *ctx, uint64_t stack_top,
 	frame[CTX_R12] = (uint64_t)(uintptr_t)arg;
 	frame[CTX_RBX] = 0;
 	frame[CTX_RBP] = 0;
+	frame[CTX_RFLAGS] = CTX_RFLAGS_INITIAL;
 	frame[CTX_RETURN] = (uint64_t)(uintptr_t)context_thread_start;
 	frame[CTX_CALLER] = 0;
 	frame[CTX_CALLER + 1] = 0;

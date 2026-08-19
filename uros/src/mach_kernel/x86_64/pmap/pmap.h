@@ -38,11 +38,45 @@ struct pmap {
 	 * it, so it is a count and not an estimate (#453).
 	 */
 	int      resident_count;
+
+	/*
+	 * The second arm of #455's writer-writer exclusion, and it exists to be
+	 * MEASURED against the first rather than to be used.
+	 *
+	 * The issue asks that the granularity be "decided with a number in
+	 * front of it at NCPUS=64, not inherited", i386's inherited answer
+	 * being #338's per-table locks.  A number needs two things to compare,
+	 * and they have to be in ONE BINARY: a rate measured in one build and a
+	 * rate measured in another differ by everything the compiler did
+	 * differently, so the comparison would be of the builds.
+	 *
+	 * So both arms are here and pmap_writer_arm chooses at run time.  This
+	 * one is the cheapest possible answer -- one lock for the whole address
+	 * space -- which is the arm collect_bench.c was built to make look as
+	 * bad as it can.
+	 *
+	 * A spin lock and not a mutex, because it is taken on the descent and
+	 * the descent must not block; the collector holds it only across a scan
+	 * and an unlink, never across a grace period.
+	 */
+	volatile uint8_t collect_lock;
 };
 
 typedef struct pmap *pmap_t;
 
 #define PMAP_NULL	((pmap_t) 0)
+
+/*
+ * Which writer-writer exclusion pmap_collect() and pmap_enter() use (#455).
+ *
+ * ⚠️ A measurement switch, not a tuning knob.  The bit is the design; the lock
+ * is here so that "the bit is cheaper on the common path" is a number rather
+ * than an argument.  Nothing outside x86_64/pmap/collect_bench.c writes it.
+ */
+#define PMAP_ARM_COLLECT_BIT	0	/* a claim in the parent entry */
+#define PMAP_ARM_PMAP_LOCK	1	/* one spin lock for the whole space */
+
+extern int pmap_writer_arm;
 
 /*
  * The kernel's own map, whose higher half every address space shares.
@@ -96,6 +130,70 @@ void pmap_destroy(pmap_t pmap);
  * zone element and prove nothing.
  */
 void pmap_boundary_probe_arm(void);
+
+/* #455: interior page-table frames alive right now.  See pmap.c. */
+extern unsigned pmap_table_frames_live;
+
+#include <mach/boolean.h>
+#include <kern/rcu.h>		/* the read sections below (#455) */
+extern int pmap_initialized;
+
+/*
+ * The read section that keeps a collector from freeing a table a walk is
+ * standing in (#455), taken only once there is a per-CPU area to count it in.
+ *
+ * 🔥 urmach_rcu_read_lock() is `cpu_data[cpu_number()].rcu_read_depth++', and
+ * boot_c.c walks these tables long before cpu_data exists -- taking the section
+ * unconditionally corrupted whatever that address happened to be, and showed up
+ * as garbage on the console rather than as a fault.  pmap_initialized is the
+ * same two-era boundary pmap_table_frame() asks about, and the right one for a
+ * reason beyond convenience: nothing collects before it.
+ *
+ * ⚠️ CAPTURE the answer and hand it back on exit; never re-test.  The flag
+ * flips once, and a walk that entered before the flip and re-tested on the way
+ * out would leave a section it never took -- an unbalanced depth that never
+ * returns to zero, stalling every future grace period in silence.
+ */
+static __inline__ boolean_t pmap_read_enter(void)
+{
+	if (!pmap_initialized)
+		return FALSE;
+	urmach_rcu_read_lock();
+	return TRUE;
+}
+
+static __inline__ void pmap_read_leave(boolean_t held)
+{
+	if (held)
+		urmach_rcu_read_unlock();
+}
+
+/* #455: -C, what concurrency does to a pmap that has no locking. */
+void pmap_collect_bench(void);
+
+/*
+ * The per-pmap spin lock of PMAP_ARM_PMAP_LOCK, and nothing at all in the
+ * other arm -- so the branch is what the measurement is measuring.
+ */
+#include <sync/atomic.h>
+#include <cpu/regs.h>
+
+static __inline__ void pmap_writer_lock(volatile uint8_t *l)
+{
+	if (pmap_writer_arm != PMAP_ARM_PMAP_LOCK || l == 0)
+		return;
+
+	while (atomic_cmpxchg8(l, 0, 1) != 0)
+		cpu_pause();
+}
+
+static __inline__ void pmap_writer_unlock(volatile uint8_t *l)
+{
+	if (pmap_writer_arm != PMAP_ARM_PMAP_LOCK || l == 0)
+		return;
+
+	(void) atomic_swap8(l, 0);
+}
 
 /*
  * Make `pmap` the address space this CPU translates through — a CR3 load,
@@ -211,6 +309,13 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
  * physical memory right now.  See the comment on the definition (#458).
  */
 uint64_t pmap_table_frame(void);
+
+/*
+ * And its counterpart: give one back to whichever allocator it came from,
+ * which is answered by the frame itself rather than by the era (#455).  ⚠️ It
+ * blocks -- never call it from inside a read section.
+ */
+void pmap_table_frame_free(uint64_t pa);
 
 extern int pmap_initialized;
 

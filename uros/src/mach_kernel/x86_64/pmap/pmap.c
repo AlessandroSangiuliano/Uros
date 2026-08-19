@@ -21,7 +21,9 @@
 
 #include <pmap/direct.h>
 #include <vm/vm_page.h>
+#include <vm/vm_object.h>	/* #455: the object a table frame is findable in */
 #include <kern/thread.h>	/* #459: current_thread */	/* vm_page_grab / vm_page_wire (#458) */
+#include <sync/atomic.h>		/* atomic_cmpxchg64 (#455) */
 #include <kern/zalloc.h>	/* #456: the pmap zone, once there is one */
 
 /*
@@ -90,11 +92,70 @@ static pmap_t		pmap_boundary_probe = PMAP_NULL;
 static unsigned		pmap_pool_frees;
 
 static boolean_t	pmap_from_pool(pmap_t pmap);
+
+/*
+ * Page-table frames alive right now (#455).
+ *
+ * The interior tables only -- the leaves name pages owned by VM objects and
+ * are not this layer's.  Incremented where a table is created (map.c's
+ * next_table) and decremented where one is released, so the difference across
+ * a map/unmap pair is what pmap_collect() would have to give back.
+ *
+ * ⚠️ Maintained atomically, because the whole point of it is to be exact.  It
+ * was a plain unsigned under a comment saying that was deliberate -- true
+ * while it was only ever touched from a boot self-test, and false the moment
+ * eight processors build tables at once, which is precisely the run it exists
+ * to judge.  A counter of lost updates that itself loses updates reports the
+ * instrument instead of the subject, and this bench has already made that
+ * mistake once with its own workers-done tally.
+ */
+unsigned	pmap_table_frames_live;
 /*
  * Has pmap_init() run?  It is what pmap_table_frame() below asks, and the
  * whole reason this variable exists (#458).
  */
 int	pmap_initialized = 0;
+
+/*
+ * Which arm of the writer-writer exclusion is in force (#455).  The bit, until
+ * collect_bench.c asks for the other one to measure it.
+ */
+int	pmap_writer_arm = PMAP_ARM_COLLECT_BIT;
+
+/*
+ * The object every page-table frame taken from the VM is registered in (#455).
+ *
+ * 🔑 It exists so that a frame can be GIVEN BACK.  vm_page_grab() answers with
+ * a vm_page_t and the pmap keeps only the physical address out of it; nothing
+ * in the machine-independent tree maps a physical address back to its page, so
+ * without a record of our own a table frame could be allocated and never
+ * released.  That is not a theoretical gap: before this, freeing a table called
+ * boot_frame_free(), which after vm_page_bootstrap() threads the frame onto a
+ * list that nothing pops from -- so every table pmap_destroy() "reclaimed"
+ * after the VM came up was lost to both allocators.  A pmap_collect() built on
+ * that would have given the pageout daemon nothing, which is the complaint #455
+ * was opened about.
+ *
+ * The offset is the physical address, so vm_page_lookup() is the reverse map.
+ * i386 does the same thing under the name pmap_object.
+ *
+ * ⚠️ STATIC STORAGE, like kernel_pmap_store at the top of this file and for the
+ * same reason: it has to exist before the allocator that would allocate it.
+ * vm_object_allocate() was tried first and the boot said no --
+ *
+ *   panic(cpu 0): zalloc: recursive grow on zone "non-kernel map entries"
+ *                 before scheduler is up
+ *   ... zalloc <- vm_map_find_space <- kernel_memory_allocate <- zalloc
+ *       <- vm_object_allocate <- pmap_init
+ *
+ * -- because pmap_init() runs three lines before zone_init(), so growing a zone
+ * there goes to kernel_memory_allocate() and back into the pmap.  i386 dodges
+ * this by creating its object lazily at the first table growth, which merely
+ * moves the recursion somewhere less predictable; _vm_object_allocate() removes
+ * it, because storage the caller owns needs no allocator at all.
+ */
+static struct vm_object	pmap_table_object_store;
+static vm_object_t	pmap_table_object = VM_OBJECT_NULL;
 
 /*
  * The second half of pmap initialisation, run by the machine-independent
@@ -119,6 +180,18 @@ pmap_init(void)
 			  512 * (vm_size_t) sizeof(struct pmap),
 			  (vm_size_t) PAGE_SIZE,
 			  "physical maps");
+
+	/*
+	 * And the object that makes a table frame findable again (#455).
+	 *
+	 * Its size bounds the offsets it will be asked about, and the offsets
+	 * are physical addresses: direct_map_covered is where the boot
+	 * allocator stops handing out frames, so it is exactly the bound and
+	 * not a guess.  vm_page_insert() asserts against it.
+	 */
+	_vm_object_allocate((vm_size_t) direct_map_covered,
+			    &pmap_table_object_store);
+	pmap_table_object = &pmap_table_object_store;
 
 	/*
 	 * What the boot actually needed, said out loud once, so the pool's size
@@ -197,7 +270,6 @@ pmap_table_frame(void)
 	vm_page_t	m;
 	uint64_t	pa;
 	volatile uint64_t *frame;
-
 	if (!pmap_initialized)
 		return boot_frame_alloc();
 
@@ -225,21 +297,21 @@ pmap_table_frame(void)
 		VM_PAGE_WAIT();
 	}
 
+	pa = (uint64_t) m->phys_addr;
+
 	/*
 	 * Wired, so the pageout daemon never takes back a page that a page
-	 * table is living in.
-	 *
-	 * ⚠️ Not inserted into a vm_object, which is what i386 does with its
-	 * pmap_object -- so nothing can find this page again to free it when
-	 * the address space goes away.  That is the same hole #455 describes
-	 * for empty tables, and it is written down there rather than papered
-	 * over with a comment here that says "TODO".
+	 * table is living in -- and registered, so that this page can be found
+	 * again from its physical address when the table it holds is released
+	 * (#455).  The registration is the half that was missing: the wire is
+	 * what keeps the page, the object is what lets it go.
 	 */
+	vm_object_lock(pmap_table_object);
+	vm_page_insert(m, pmap_table_object, (vm_offset_t) pa);
 	vm_page_lock_queues();
 	vm_page_wire(m);
 	vm_page_unlock_queues();
-
-	pa = (uint64_t) m->phys_addr;
+	vm_object_unlock(pmap_table_object);
 
 	/*
 	 * Zeroed, because a page table built on whatever the previous owner
@@ -253,6 +325,48 @@ pmap_table_frame(void)
 		frame[i] = 0;
 
 	return pa;
+}
+
+/*
+ * Give a page-table frame back to whichever allocator it came from (#455).
+ *
+ * The two eras of pmap_table_frame(), read in the other direction -- and the
+ * era cannot be read off pmap_initialized here, because a frame taken before
+ * the flag flipped is very often released after it.  The frame's own
+ * membership answers instead: a page taken from the VM is registered in
+ * pmap_table_object, a boot frame is not, so the lookup IS the question.
+ * That is the same shape #456 uses to tell a pool pmap from a zone element,
+ * and for the same reason -- the boundary outlives the boot.
+ *
+ * ⚠️ It can block: vm_page_lookup() takes a bucket mutex and the queues lock is
+ * a mutex too.  So it must not be called from inside an RCU read section, which
+ * is why map.c hoists the frame it has to hand back out past pmap_read_leave()
+ * and why pmap_collect() frees only after its grace period has ended.
+ */
+void
+pmap_table_frame_free(uint64_t pa)
+{
+	vm_page_t	m = VM_PAGE_NULL;
+
+	if (pmap_table_object != VM_OBJECT_NULL) {
+		vm_object_lock(pmap_table_object);
+		m = vm_page_lookup(pmap_table_object, (vm_offset_t) pa);
+		if (m != VM_PAGE_NULL) {
+			/*
+			 * vm_page_free() unwires it, takes it out of the
+			 * object, and puts it on the free list -- the whole
+			 * point of the exercise, and the reason the pageout
+			 * daemon gets something back for asking.
+			 */
+			vm_page_lock_queues();
+			vm_page_free(m);
+			vm_page_unlock_queues();
+		}
+		vm_object_unlock(pmap_table_object);
+	}
+
+	if (m == VM_PAGE_NULL)
+		boot_frame_free(pa);
 }
 
 /* Is this pmap one of the boot pool's slots, rather than a zone element? */
@@ -342,6 +456,13 @@ pmap_t pmap_create(uint64_t size)
 		return PMAP_NULL;
 
 	pmap->resident_count = 0;
+	/*
+	 * ⚠️ And the lock, because zalloc() does not zero.  A zone element
+	 * arrives holding whatever the previous owner left, so a field added to
+	 * this struct is uninitialised until somebody writes it -- and a spin
+	 * lock that arrives already taken is never released by anybody (#455).
+	 */
+	pmap->collect_lock = 0;
 
 	/*
 	 * 🔥 pmap_table_frame() and not boot_frame_alloc(), which is what this
@@ -409,10 +530,20 @@ pmap_t pmap_create(uint64_t size)
 	return pmap;
 }
 
+/*
+ * ⚠️ Atomic, and this one decides whether an address space is torn down while
+ * somebody still holds it (#455).
+ *
+ * Two processors taking a reference at once with `count++' lose one of the
+ * two increments, and the loss does not show up here -- it shows up as the
+ * last pmap_destroy() finding a count of zero one release too early and
+ * freeing the tables under whoever still had the map.  The same class as
+ * resident_count above, with a much worse failure at the end of it.
+ */
 void pmap_reference(pmap_t pmap)
 {
 	if (pmap != PMAP_NULL)
-		pmap->ref_count++;
+		atomic_add32((volatile uint32_t *) &pmap->ref_count, 1);
 }
 
 /* The index shift of each paging level, deepest first. */
@@ -460,7 +591,9 @@ static void pmap_free_tables(uint64_t table_pa, unsigned level,
 		pmap_free_tables(pte_to_pa(e), level - 1, va, pmap);
 	}
 
-	boot_frame_free(table_pa);
+	pmap_table_frame_free(table_pa);
+	atomic_add32((volatile uint32_t *) &pmap_table_frames_live,
+		     (uint32_t) -1);
 }
 
 void pmap_destroy(pmap_t pmap)
@@ -470,7 +603,14 @@ void pmap_destroy(pmap_t pmap)
 	if (pmap == PMAP_NULL || pmap == pmap_kernel())
 		return;
 
-	if (--pmap->ref_count > 0)
+	/*
+	 * The release, and it is the same operation as the acquire read the
+	 * other way: what the exchange answers is what the count held at the
+	 * instant it subtracted.  One means this call took the last reference
+	 * away; anything greater means somebody else still holds one.
+	 */
+	if (atomic_add32((volatile uint32_t *) &pmap->ref_count,
+			 (uint32_t) -1) != 1)
 		return;
 
 	root = (const pt_entry_t *)(uintptr_t)phys_to_direct(pmap->root_pa);
@@ -486,7 +626,7 @@ void pmap_destroy(pmap_t pmap)
 			pmap_free_tables(pte_to_pa(root[i]), 3,
 					 (uint64_t)i << PML4_SHIFT, pmap);
 
-	boot_frame_free(pmap->root_pa);
+	pmap_table_frame_free(pmap->root_pa);
 	pmap->root_pa = 0;
 	pmap_free(pmap);
 }
@@ -518,16 +658,34 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 
 	if (size != 0) {
 		/*
+		 * 🔥 ONE COUNTER, EIGHT PROCESSORS, AND `count--' IS THREE
+		 * INSTRUCTIONS (#455).
+		 *
+		 * The same lost update as pmap_protect_page's and
+		 * next_table's, on a word the machine-independent tree reads:
+		 * two processors unmapping at once each read the same value,
+		 * each write it back decremented, and one decrement is gone.
+		 * The count then drifts ABOVE the truth and vm_debug.c sizes an
+		 * array from it -- and the mirror case, two enters, drifts it
+		 * below, which is what the bench found as an underflow after a
+		 * few thousand map/unmap pairs at -smp 8.
+		 *
+		 * ⚠️ The check has to be the SAME operation, not one before it.
+		 * Reading zero and then decrementing is a decision taken about
+		 * a value that another processor may already have changed; the
+		 * exchange answers what was actually there at the instant it
+		 * subtracted, so the panic below reports a fact.
+		 *
 		 * panic() and not assert(), because Assert() lives in
 		 * kern/debug.c and the machine-independent tree is not in this
 		 * kernel yet -- and because an underflow here means the count
 		 * has drifted from the tables, which is not a condition to
 		 * carry on from.
 		 */
-		if (pmap->resident_count == 0)
+		if (atomic_add32((volatile uint32_t *) &pmap->resident_count,
+				 (uint32_t) -1) == 0)
 			panic("pmap_forget: resident_count underflow at "
 			      "va 0x%lx", (unsigned long) va);
-		pmap->resident_count--;
 	}
 
 	return size;
@@ -591,7 +749,7 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	if (va_is_user(va))
 		flags |= INTEL_PTE_USER;
 
-	rc = pmap_map_page(pmap->root_pa, va, pa, flags);
+	rc = pmap_map_page(pmap->root_pa, va, pa, flags, &pmap->collect_lock);
 	if (rc == PMAP_MAP_OK) {
 		pv_enter(pa, pmap, va);
 		/*
@@ -604,37 +762,81 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 		 * Only on a fresh mapping: pmap_map_page() answers PMAP_MAP_OK
 		 * for one that replaces nothing, so re-mapping a page that is
 		 * already there does not count twice.
+		 *
+		 * Atomic for the reason written over the decrement in
+		 * pmap_forget(): it is one word and every processor mapping
+		 * into this space writes it.
 		 */
-		pmap->resident_count++;
+		atomic_add32((volatile uint32_t *) &pmap->resident_count, 1);
 	}
 
 	return rc;
 }
 
+/*
+ * Set and clear bits in a page-table entry without losing what the hardware
+ * or another processor put there in between (#455).
+ *
+ * ⚠️ The retry reloads from cmpxchg's answer and never re-reads *entry:  what
+ * it hands back is what the word held at the instant it refused, and building
+ * the next attempt out of anything else is building it out of a value that was
+ * never in the word.
+ */
+static void pmap_pte_update(pt_entry_t *entry, uint64_t set, uint64_t clear)
+{
+	pt_entry_t found = *entry;
+
+	for (;;) {
+		pt_entry_t fresh = (found & ~clear) | set;
+		pt_entry_t seen;
+
+		if (fresh == found)
+			return;
+
+		seen = atomic_cmpxchg64((volatile uint64_t *) entry,
+					found, fresh);
+		if (seen == found)
+			return;
+		found = seen;
+	}
+}
+
 int pmap_change_wiring(pmap_t pmap, uint64_t va, int wired)
 {
+	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, 0);
 
-	if (entry == PT_ENTRY_NULL)
+	if (entry == PT_ENTRY_NULL) {
+		pmap_read_leave(held);
 		return 0;
+	}
 
 	/*
 	 * No invalidation: the hardware never looks at this bit, so nothing it
 	 * has cached can be out of date because of it.
+	 *
+	 * ⚠️ But it looks at the OTHERS in this word.  `*entry |= WIRED' is a
+	 * read-modify-write on a word the processor sets ACCESSED and DIRTY in
+	 * without asking, so the plain form discards whatever it recorded in
+	 * between -- and losing a dirty bit is losing the fact that a page must
+	 * be written back (#455).
 	 */
-	if (wired)
-		*entry |= INTEL_PTE_WIRED;
-	else
-		*entry &= ~INTEL_PTE_WIRED;
+	pmap_pte_update(entry, wired ? INTEL_PTE_WIRED : 0,
+			wired ? 0 : INTEL_PTE_WIRED);
 
+	pmap_read_leave(held);
 	return 1;
 }
 
 int pmap_is_wired(pmap_t pmap, uint64_t va)
 {
+	boolean_t held = pmap_read_enter();
 	pt_entry_t *entry = pmap_walk(pmap->root_pa, va, 0);
+	int	    answer = entry != PT_ENTRY_NULL
+			     && (*entry & INTEL_PTE_WIRED) != 0;
 
-	return entry != PT_ENTRY_NULL && (*entry & INTEL_PTE_WIRED) != 0;
+	pmap_read_leave(held);
+	return answer;
 }
 
 uint64_t pmap_extract(pmap_t pmap, uint64_t va)
@@ -704,8 +906,9 @@ uint64_t pmap_map_device(uint64_t pa, uint64_t size)
 	 * while looking untouched.
 	 */
 	for (uint64_t p = first; p < last; p += PAGE_SIZE_4K) {
-		if (pmap_map_page(kernel_pmap_store.root_pa,
-				  device_next, p, flags) != PMAP_MAP_OK)
+		if (pmap_map_page(kernel_pmap_store.root_pa, device_next, p,
+				  flags, &kernel_pmap_store.collect_lock)
+		    != PMAP_MAP_OK)
 			panic("pmap: could not map device registers");
 		device_next += PAGE_SIZE_4K;
 	}
@@ -752,9 +955,12 @@ static int pv_test_bits(uint64_t pa, uint64_t bits)
 
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
+		boolean_t   held = pmap_read_enter();
 		pt_entry_t *e = pmap_walk(pv->pmap->root_pa, pv->va, 0);
+		int	    hit = e != PT_ENTRY_NULL && (*e & bits) != 0;
 
-		if (e != PT_ENTRY_NULL && (*e & bits))
+		pmap_read_leave(held);
+		if (hit)
 			return 1;
 	}
 
@@ -767,15 +973,26 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next) {
+		boolean_t   held = pmap_read_enter();
 		pt_entry_t *e = pmap_walk(pv->pmap->root_pa, pv->va, 0);
 
-		if (e == PT_ENTRY_NULL)
+		if (e == PT_ENTRY_NULL) {
+			pmap_read_leave(held);
 			continue;
+		}
 
-		if (set)
-			*e |= bits;
-		else
-			*e &= ~bits;
+		/*
+		 * 🔥 THE SHARPEST OF THE READ-MODIFY-WRITES (#455).
+		 *
+		 * This is pmap_clear_modify's and pmap_clear_reference's path:
+		 * it CLEARS the very bits the hardware SETS, on the word the
+		 * hardware sets them in.  `*e &= ~bits' reads, clears, writes --
+		 * and a processor that dirtied the page in between has its bit
+		 * discarded.  The page then goes to the pageout daemon looking
+		 * clean and its contents are dropped.
+		 */
+		pmap_pte_update(e, set ? bits : 0, set ? 0 : bits);
+		pmap_read_leave(held);
 
 		/*
 		 * Dropping the TLB entry is not housekeeping here, it is the
