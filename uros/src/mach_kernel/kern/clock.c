@@ -434,7 +434,14 @@ long		cs_stamp[2];
 #if 0
 extern void	cyctm05_stamp(long *);
 #endif
-extern void	log_thread_action(thread_t, char *);
+/*
+ * #415: the declaration that disagreed.  Its only caller is inside `#if 0'
+ * below, and the function -- now defined in kern/debug.c, where thirteen
+ * other call sites needed it -- takes (char *, long, long, long).  Two
+ * declarations of one name with different argument lists, in two translation
+ * units, are something C will never compare; leaving the wrong one here
+ * because its caller is disabled is how it survived this long.
+ */
 
 /*
  * Sleep on a clock. System trap. User-level libmach clock_sleep
