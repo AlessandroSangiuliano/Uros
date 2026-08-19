@@ -113,6 +113,28 @@ struct uros_cap {
     /* ownership & delegation */
     mach_port_t owner;
     char      owner_name[CAP_OWNER_NAME_LEN];
+
+    /*
+     * 🔥 AN EXPLICIT HOLE, BECAUSE THE COMPILER WAS DIGGING A DIFFERENT ONE
+     * ON EACH TARGET (#415).
+     *
+     * owner_name ends at offset 100, and parent_cap_id below is a uint64_t.
+     * i386 aligns a 64-bit integer to FOUR bytes and x86-64 to EIGHT -- the
+     * one alignment rule the two disagree about -- so the compiler put
+     * parent_cap_id at 100 on one and 104 on the other, and every field after
+     * it moved with it, including the hmac.  A structure whose own comment
+     * three lines up calls its field order and sizes "wire-format" had a
+     * layout that was not the same on two machines, and nothing said so:
+     * padding is invisible, and sizeof() answering 188 in one build and 192
+     * in another is not something any compiler warns about.
+     *
+     * Named rather than removed by reordering, because the order is the
+     * format: moving a field to close the hole would change every offset
+     * rather than one, for a saving of four bytes in a token that is already
+     * signed with thirty-two.
+     */
+    uint32_t  _pad_owner;
+
     uint64_t  parent_cap_id;
     uint8_t   depth;
     uint8_t   delegable;
@@ -133,6 +155,27 @@ struct uros_cap {
     /* verification (MUST be last — HMAC input is every preceding byte) */
     uint8_t   hmac[CAP_HMAC_SIZE];
 };
+
+/*
+ * And the claim above, made checkable (#415).
+ *
+ * "Field order and sizes are wire-format" is a promise the compiler is under
+ * no obligation to keep, and it did not keep it: an alignment rule the two
+ * targets disagree about moved half the structure on one of them, silently.
+ * These two lines are what makes the promise hold by construction rather than
+ * by anybody remembering to look -- the offset of the hmac is the one that
+ * matters most, because the signature covers every byte before it, so a field
+ * that moves invalidates every token ever minted.
+ *
+ * ⚠️ If either of these ever fails to compile, the format has changed.  That
+ * is not a reason to update the number: it is a reason to decide whether the
+ * change was intended and, if it was, to give the format a version.
+ */
+_Static_assert(sizeof(struct uros_cap) == 192,
+	       "the capability token is a wire format and its size has moved");
+_Static_assert(__builtin_offsetof(struct uros_cap, hmac) == 160,
+	       "the signature covers every byte before the hmac, so the hmac's "
+	       "offset is part of the format");
 
 /*
  * MIG blob transport.  Clients and servers send/receive an opaque byte
