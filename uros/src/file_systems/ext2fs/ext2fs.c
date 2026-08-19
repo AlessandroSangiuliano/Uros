@@ -3580,7 +3580,7 @@ free_indirect_tree(struct ext2fs_file *acct, daddr_t ind_block, int level,
 	int per = EXT2_ADDR_PER_BLOCK(fs);
 	vm_offset_t buf;
 	vm_size_t bsz;
-	unsigned long *ptr;
+	daddr_t *ptr;
 	int i;
 
 	if (ind_block == 0)
@@ -3588,7 +3588,15 @@ free_indirect_tree(struct ext2fs_file *acct, daddr_t ind_block, int level,
 	if (read_disk_block(acct, ind_block, &buf, &bsz) != 0)
 		return;
 
-	ptr = (unsigned long *)buf;
+	/*
+	 * 🔥 daddr_t and not `unsigned long' (#415).  The entries on the disk
+	 * are four bytes each; an `unsigned long *' strides eight of them on
+	 * x86-64, so this walked one entry in two -- and le32_to_cpu() then
+	 * took the low half of a pair, which on a little-endian machine is the
+	 * first of the two, so it looked like it was working.  Half the blocks
+	 * of every indirectly-addressed file would have been left allocated.
+	 */
+	ptr = (daddr_t *)buf;
 	for (i = 0; i < per; i++) {
 		daddr_t blk = le32_to_cpu(ptr[i]);
 		if (blk == 0)

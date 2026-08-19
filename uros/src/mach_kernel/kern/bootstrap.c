@@ -380,9 +380,15 @@ do_bootstrap_compat(void)
 	entry = (vm_offset_t) ehdr->e_entry;
 	phdr = (Elf_Phdr *) (boot_start + ehdr->e_phoff);
 	
-	dprintf("entry: 0x%x\n", entry);
-	dprintf("ph offset: 0x%x\n", ehdr->e_phoff);
-	dprintf("phdr: 0x%x\n", phdr);
+	/*
+	 * %lx and %p, not %x (#415).  entry is a vm_offset_t, e_phoff is an
+	 * Elf64_Off and phdr is a pointer -- all eight bytes here and all
+	 * printed as four.  A debug trace of where an image was loaded is
+	 * worth nothing if it prints the lower half of the address.
+	 */
+	dprintf("entry: 0x%lx\n", (unsigned long) entry);
+	dprintf("ph offset: 0x%llx\n", (unsigned long long) ehdr->e_phoff);
+	dprintf("phdr: %p\n", (void *) phdr);
     dprintf("Looking for program sections\n");
 	dprintf("Theorical number of sections: %d\n", ehdr->e_phnum);
 
@@ -425,7 +431,7 @@ do_bootstrap_compat(void)
 		}
 	}
 
-	dprintf("I've found: %d sections\n", boot_region_count);
+	dprintf("I've found: %ld sections\n", (long) boot_region_count);
 
 	BOOT_REGION_ROOM();
 	regions[boot_region_count].addr = STACK_BASE;
@@ -704,9 +710,15 @@ exec_load(vm_offset_t start, vm_size_t size)
 	entry = (vm_offset_t) ehdr->e_entry;
 	phdr = (Elf_Phdr *) (start + ehdr->e_phoff);
 	
-	dprintf("entry: 0x%x\n", entry);
-	dprintf("ph offset: 0x%x\n", ehdr->e_phoff);
-	dprintf("phdr: 0x%x\n", phdr);
+	/*
+	 * %lx and %p, not %x (#415).  entry is a vm_offset_t, e_phoff is an
+	 * Elf64_Off and phdr is a pointer -- all eight bytes here and all
+	 * printed as four.  A debug trace of where an image was loaded is
+	 * worth nothing if it prints the lower half of the address.
+	 */
+	dprintf("entry: 0x%lx\n", (unsigned long) entry);
+	dprintf("ph offset: 0x%llx\n", (unsigned long long) ehdr->e_phoff);
+	dprintf("phdr: %p\n", (void *) phdr);
         dprintf("Looking for program sections\n");
 	dprintf("Theorical number of sections: %d\n", ehdr->e_phnum);
 
@@ -1676,15 +1688,23 @@ load_info_print(void)
 {
 	struct loader_info *lp = (struct loader_info *)load_info_start;
 
-	dprintf("Load info: text (%#x, %#x, %#x)\n",
-		lp->text_start, lp->text_size, lp->text_offset);
-	dprintf("           data (%#x, %#x, %#x)\n",
-		lp->data_start, lp->data_size, lp->data_offset);
-	dprintf("           bss  (%#x)\n", lp->bss_size);
-	dprintf("           syms (%#x, %#x)\n",
-		lp->sym_offset, lp->sym_size);
-	dprintf("	   entry(%#x, %#x)\n",
-		lp->entry_1, lp->entry_2);
+	/*
+	 * Every one of these is a vm_offset_t or a vm_size_t, printed with %#x
+	 * (#415).  On this target that is the lower half of each of them, in
+	 * the one routine whose whole job is to say where the bootstrap image
+	 * was put.
+	 */
+	dprintf("Load info: text (%#lx, %#lx, %#lx)\n",
+		(unsigned long) lp->text_start, (unsigned long) lp->text_size,
+		(unsigned long) lp->text_offset);
+	dprintf("           data (%#lx, %#lx, %#lx)\n",
+		(unsigned long) lp->data_start, (unsigned long) lp->data_size,
+		(unsigned long) lp->data_offset);
+	dprintf("           bss  (%#lx)\n", (unsigned long) lp->bss_size);
+	dprintf("           syms (%#lx, %#lx)\n",
+		(unsigned long) lp->sym_offset, (unsigned long) lp->sym_size);
+	dprintf("	   entry(%#lx, %#lx)\n",
+		(unsigned long) lp->entry_1, (unsigned long) lp->entry_2);
 }
 #endif
 

@@ -2902,8 +2902,18 @@ ipc_kmsg_copyout_object(
 {
 	kern_return_t kr;
 
+	/*
+	 * The twenty-second (#415).
+	 *
+	 * <ipc/ipc_object.h> spells this conversion out precisely so that the
+	 * truncating casts could go away, and twenty-one of them did.  This one
+	 * was missed, and the compiler said so on every x86-64 build -- which is
+	 * the whole reason the helper exists: a warning that is correct and
+	 * harmless trains the reader to skip the ones that are correct and
+	 * fatal.
+	 */
 	if (!IO_VALID(object)) {
-		*namep = (mach_port_t) object;
+		*namep = io_sentinel_to_name(object);
 		return MACH_MSG_SUCCESS;
 	}
 

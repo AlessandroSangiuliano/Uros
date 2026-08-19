@@ -478,3 +478,32 @@ myfopen(char *name, char *mode)
 
     return file;
 }
+
+#if	defined(__SANITIZE_ADDRESS__)
+/*
+ * Leak detection off, and only leak detection (#415).
+ *
+ * migcom is a one-shot compiler: it allocates a syntax tree and never frees
+ * it, which is a reasonable choice for a process that is about to exit.
+ * LeakSanitizer disagrees at exit and exits NON-ZERO -- and migcom runs
+ * INSIDE the build, so in a Debug configuration every MIG step failed and the
+ * tree did not reach a single compiled file.
+ *
+ * 🔑 Which is why there was something to find: a configuration nobody can
+ * build is a configuration nobody checks, and behind `#if DEBUG' had
+ * accumulated twenty-six format conversions printing sixty-four-bit values as
+ * thirty-two.
+ *
+ * ⚠️ Said here rather than through ASAN_OPTIONS in the environment, because an
+ * environment variable is a thing every future caller has to remember and
+ * this is a property of the program.  The rest of AddressSanitizer -- the
+ * out-of-bounds and use-after-free checking it is actually here for -- stays
+ * on.
+ */
+const char *__asan_default_options(void);
+const char *
+__asan_default_options(void)
+{
+	return "detect_leaks=0";
+}
+#endif	/* __SANITIZE_ADDRESS__ */
