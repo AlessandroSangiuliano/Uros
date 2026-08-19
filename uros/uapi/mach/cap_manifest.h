@@ -97,6 +97,26 @@ typedef struct cap_manifest_header {
 } cap_manifest_header_t;
 
 /*
+ * The two sizes above, made checkable (#415).
+ *
+ * This format is written by mkmanifest ON A 64-BIT HOST and parsed by
+ * cap_server on the target, which is the one case in this system where a
+ * producer and a consumer really are different toolchains -- so it is the one
+ * where "sizeof == 16" being true matters most, and it was said in a comment.
+ * The entry is the sharper of the two: header_size travels in the blob and an
+ * old server can skip a header it does not know, but the entry width is
+ * implicit in every offset+count the header carries, and the format note says
+ * so -- "version bumps only on incompatible format changes (e.g. entry width
+ * change)".  A width change nobody noticed would not bump anything.
+ */
+_Static_assert(sizeof(cap_manifest_entry_t) == 16,
+	       "a manifest entry's width is implicit in every offset and count "
+	       "in the header; changing it is a format version bump");
+_Static_assert(sizeof(cap_manifest_header_t) == 48,
+	       "the manifest header is a wire format; growing it means "
+	       "appending fields and bumping header_size, not moving them");
+
+/*
  * MIG/C interop: cap_server.defs declares
  *   type cap_manifest_blob_t = array[*:16384] of char
  * which generates a `cap_manifest_blob_t buf` parameter in the user
