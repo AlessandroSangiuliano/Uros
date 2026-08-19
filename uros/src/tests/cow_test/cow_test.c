@@ -251,10 +251,16 @@ measure_page_copy(void)
  * evidence that there is no problem.
  *
  * Which is also what makes the second half a real control rather than a
- * postscript: the same measurement is taken again on fresh pages after every
- * child is terminated.  If the first half climbs and the second is flat, the
- * climb was the chain and collapse works.  If the second half climbs too, the
- * chain is not being folded, and that is a finding rather than a slow test.
+ * postscript: the same measurement is taken again on fresh pages once all but
+ * one of the children are gone.  If the first half climbs and the second is
+ * flat, the climb was the chain and collapse works.  If the second half climbs
+ * too, the chain is not being folded, and that is a finding rather than a slow
+ * test.
+ *
+ * ⚠️ All but ONE, and the survivor is load-bearing -- see the comment at the
+ * termination below.  With nobody left the second half stops being a
+ * copy-on-write fault at all, and comparing it to the first would be comparing
+ * two different events.
  */
 static void
 measure_chain_depth(void)
@@ -312,12 +318,26 @@ measure_chain_depth(void)
 	printf("\n");
 
 	/*
-	 * And now take the references away.  Nothing here waits for the
-	 * collapse -- there is nothing to wait on -- so what the second half
-	 * measures is whatever the kernel has managed by the time the next
-	 * fault asks, which is the honest question anyway.
+	 * And now take the references away -- all but ONE.
+	 *
+	 * 🔑 Keeping the first child alive is what makes the two halves
+	 * comparable, and the first version of this arm got it wrong by
+	 * terminating every one of them.  With no child left at all, the
+	 * collapse is free to fold the whole chain away, and a write to a page
+	 * afterwards need not copy anything: it can be a plain protection
+	 * upgrade.  That is a DIFFERENT EVENT, not the same event made faster,
+	 * so the two halves would have been measuring two things and the
+	 * difference between them would have looked like a speed-up.
+	 *
+	 * One survivor forces at least one shadow to stay, so the second half
+	 * is still a genuine copy-on-write fault and the only thing that has
+	 * changed between the halves is how deep the chain is.
+	 *
+	 * Nothing here waits for the collapse -- there is nothing to wait on --
+	 * so what the second half measures is whatever the kernel has managed
+	 * by the time the next fault asks, which is the honest question anyway.
 	 */
-	for (i = 0; i < forked; i++)
+	for (i = 1; i < forked; i++)
 		(void) task_terminate(kids[i]);
 
 	for (i = 0; i < forked; i++) {
@@ -329,10 +349,13 @@ measure_chain_depth(void)
 		shallow[i] = t1 - t0;
 	}
 
-	printf("cow_test: [5] the same depths after every child is gone:");
+	printf("cow_test: [5] the same pages with one child left, chain shallow:");
 	for (i = 0; i < forked; i++)
 		printf(" %llu", shallow[i]);
 	printf("\n");
+
+	if (forked > 0)
+		(void) task_terminate(kids[0]);
 
 	(void) vm_deallocate(mach_task_self(), region, size);
 }
