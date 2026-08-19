@@ -70,6 +70,25 @@
 
 #include <i386/asm.h>
 
+/*
+ * ── What this file is, now that its name says so (#415) ──────────────
+ *
+ * It was called gcc.S, which named the COMPILER rather than the contents.
+ * These are the runtime helpers a compiler emits calls to when a machine has
+ * no instruction for an operation -- and this kernel links -nostdlib, so it
+ * does not get them from the compiler's own runtime library and has to
+ * supply them itself.  divide64.c beside it is the same job for operands
+ * twice this wide, which is what made the naming worth fixing: two files
+ * doing one thing cannot both be called after the compiler.
+ *
+ * ⚠️ Nothing calls these two.  `nm' on the linked kernel finds __divsi3 and
+ * __udivsi3 defined and referenced nowhere: dividing a 32-bit value on i386
+ * is one instruction, so no compiler of this century emits a call for it.
+ * They are kept because deleting inherited code that still builds is #433's
+ * question and not this issue's -- but the fact is recorded here rather than
+ * left for the next reader to measure again.
+ */
+
 ENTRY(__divsi3)
 	movl	4(%esp), %eax
 	cdq

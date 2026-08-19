@@ -1272,6 +1272,7 @@ set(I386_C_SOURCES
     i386/ktss.c
     i386/ldt.c
     i386/loose_ends.c
+    i386/divide64.c
     i386/net_filter.c
     i386/boot_modules.c
     i386/pcb.c
@@ -1382,7 +1383,7 @@ set(I386_ASM_SOURCES
     i386/_setjmp.S
     i386/bcopy.S
     i386/bzero.S
-    i386/gcc.S
+    i386/divide.S
     i386/i386_lock.S
     i386/idt.S
     i386/interrupt.S

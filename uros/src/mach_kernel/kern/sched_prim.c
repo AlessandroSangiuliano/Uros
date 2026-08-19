@@ -1029,7 +1029,7 @@ clear_wait_locked(
 	}
 }
 
-#if	MACH_LDEBUG || MACH_KDB
+#if	MACH_LDEBUG || MACH_KDB || DEBUG
 void		log_thread_action (char *, long, long, long);
 #endif
 
@@ -1650,7 +1650,7 @@ thread_continue(
 	/*NOTREACHED*/
 }
 
-#if	MACH_LDEBUG || MACH_KDB
+#if	MACH_LDEBUG || MACH_KDB || DEBUG
 
 #define THREAD_LOG_SIZE		300
 
@@ -1687,6 +1687,26 @@ check_thread_time(long us)
 }
 #endif
 
+/*
+ * 🔥 THE GUARD ON THE DEFINITION DID NOT COVER THE GUARD ON THE CALLERS (#415).
+ *
+ * This is compiled under `#if MACH_LDEBUG || MACH_KDB' -- see the block that
+ * opens above -- and device/ds_routines.c calls it under `#if DEBUG'.  Two
+ * conditions, never compared, and on i386 they happened to overlap because
+ * that target builds with MACH_KDB=1.  x86-64 builds with MACH_KDB=0, so a
+ * Debug configuration there compiled thirteen calls to a function nothing
+ * defined and did not link.
+ *
+ * ⚠️ And the declarations disagreed as well: kern/clock.c said
+ * `void (thread_t, char *)' against this `(char *, long, long, long)'.  C
+ * compares nothing across translation units, and the linker was never asked
+ * because no configuration that compiled the callers had ever been built.
+ *
+ * ⚠️ I first "fixed" this by adding a second definition in kern/debug.c,
+ * having concluded from a grep truncated by `head' that there was none.  The
+ * i386 Debug build said `multiple definition' immediately.  An enumeration
+ * that has been cut short is not an enumeration.
+ */
 void
 log_thread_action(char * action, long info1, long info2, long info3)
 {

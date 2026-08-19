@@ -435,12 +435,11 @@ long		cs_stamp[2];
 extern void	cyctm05_stamp(long *);
 #endif
 /*
- * #415: the declaration that disagreed.  Its only caller is inside `#if 0'
- * below, and the function -- now defined in kern/debug.c, where thirteen
- * other call sites needed it -- takes (char *, long, long, long).  Two
- * declarations of one name with different argument lists, in two translation
- * units, are something C will never compare; leaving the wrong one here
- * because its caller is disabled is how it survived this long.
+ * #415: the declaration that disagreed, removed.  The function is defined in
+ * kern/sched_prim.c as (char *, long, long, long) and this said
+ * (thread_t, char *).  Two declarations of one name with different argument
+ * lists, in two translation units, are something C will never compare; the
+ * only caller here is inside `#if 0' below, which is how it survived.
  */
 
 /*

@@ -388,35 +388,3 @@ log(int level, char *fmt, ...)
 	va_end(listp);
 }
 
-#if	DEBUG
-/*
- * The tracing hook thirteen call sites wanted and nobody ever wrote (#415).
- *
- * It was declared twice, in kern/clock.c as `void (thread_t, char *)' and in
- * kern/sched_prim.c as `void (char *, long, long, long)', and defined in
- * neither -- so the two declarations disagreed about their own argument list
- * and no compiler ever compared them, because C compares nothing across
- * translation units and the linker was never asked: every call is inside
- * `#if DEBUG', and a Debug build of this tree did not link.
- *
- * That is the whole reason it is here.  A configuration nobody can build is a
- * configuration nobody checks, and behind this one had accumulated
- * twenty-six format conversions printing sixty-four-bit values as thirty-two.
- * Making it link is what lets the compiler see that code at all.
- *
- * The four-argument form is the one the live callers use -- device/
- * ds_routines.c's log_io_map(), which passes a message and three longs.
- * clock.c's is inside `#if 0' and its declaration went with the call.
- *
- * ⚠️ It prints rather than records.  A ring buffer would be the useful
- * version and is not this issue's to design; what this issue owes the hook is
- * an existence, so that its callers are compiled and checked.
- */
-void
-log_thread_action(char *msg, long a, long b, long c)
-{
-	printf("thread %p: %s (%#lx, %#lx, %#lx)\n",
-	       (void *) current_thread(), msg,
-	       (unsigned long) a, (unsigned long) b, (unsigned long) c);
-}
-#endif	/* DEBUG */

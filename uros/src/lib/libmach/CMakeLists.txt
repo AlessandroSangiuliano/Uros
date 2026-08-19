@@ -299,6 +299,26 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/i386")
   # in #106) provides both memset AND bzero with SSE2.  Drop the duplicate.
   list(FILTER ARCH_S_LOWER_S EXCLUDE REGEX "/bzero\\.s$")
   list(APPEND LIB_SOURCES ${ARCH_SOURCES})
+
+  # Le divisioni a 64 bit, e UNA copia sola (#415).
+  #
+  # i386 non ha un'istruzione che divida un valore a 64 bit, quindi il
+  # compilatore emette una chiamata a un helper; libmach si linka -nostdlib e
+  # non lo riceve dalla runtime del compilatore.  Serve qui per lo stesso
+  # motivo per cui serve al kernel: doprnt.c stampa un `long long' da quando
+  # il #415 gli ha insegnato il modificatore di lunghezza che scartava.
+  #
+  # 🔑 Si compila IL FILE DEL KERNEL invece di copiarlo.  Il formatter in
+  # questo albero esiste gia' in due copie (kern/printf.c e libmach/doprnt.c),
+  # e quella e' una divergenza che si vede leggendo; due copie di una
+  # divisione lunga divergerebbero in silenzio e produrrebbero cifre
+  # plausibili -- che e' il peggior guasto possibile per qualcosa il cui
+  # unico compito e' riportare altri guasti.
+  #
+  # ⚠️ Non e' codice del kernel: e' una proprieta' dell'ARCHITETTURA, e sta in
+  # i386/ perche' quello e' l'unico posto per l'arch che questo albero ha.
+  list(APPEND LIB_SOURCES
+    ${CMAKE_SOURCE_DIR}/src/mach_kernel/i386/divide64.c)
   foreach(sfile IN LISTS ARCH_S_LOWER_S)
     get_filename_component(sname ${sfile} NAME)
     set(pp_output "${CMAKE_CURRENT_BINARY_DIR}/generated/asm/${sname}.S")
