@@ -423,7 +423,7 @@ static void map_selftest(void)
 	uint32_t via_direct;
 	int rc, resolved;
 
-	rc = pmap_map_page(root, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX, 0);
+	rc = pmap_map_page(PMAP_NULL, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX, 0);
 
 	kputs("UrMach x86-64: map ");
 	kputhex64(va);
@@ -449,7 +449,7 @@ static void map_selftest(void)
 	kputs(resolved && got == frame && size == PAGE_SIZE_4K
 	      ? "as mapped\r\n" : "WRONG\r\n");
 
-	rc = pmap_map_page(root, DIRECT_MAP_BASE, frame, INTEL_PTE_WRITE, 0);
+	rc = pmap_map_page(PMAP_NULL, DIRECT_MAP_BASE, frame, INTEL_PTE_WRITE, 0);
 	kputs("UrMach x86-64: map over a large page ");
 	kputs(rc == PMAP_MAP_BLOCKED ? "correctly refused\r\n"
 				     : "NOT refused?!\r\n");
@@ -472,10 +472,10 @@ static void protect_unmap_selftest(void)
 	pt_entry_t *e;
 	uint64_t size;
 
-	pmap_map_page(root, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX, 0);
+	pmap_map_page(PMAP_NULL, va, frame, INTEL_PTE_WRITE | INTEL_PTE_NX, 0);
 	*page = 0xcafe;
 
-	size = pmap_protect_page(root, va, INTEL_PTE_NX);	/* drop write */
+	size = pmap_protect_page(PMAP_NULL, va, INTEL_PTE_NX);	/* drop write */
 	e = pmap_walk(root, va, 0);
 	kputs("UrMach x86-64: protect read-only -> entry ");
 	kputhex64(*e);
@@ -486,7 +486,7 @@ static void protect_unmap_selftest(void)
 	kputhex64(*page);
 	kputs(*page == 0xcafe ? " still\r\n" : " CORRUPT\r\n");
 
-	size = pmap_unmap_page(root, va);
+	size = pmap_unmap_page(PMAP_NULL, va);
 	e = pmap_walk(root, va, 0);
 	kputs("UrMach x86-64: unmap -> ");
 	kputs(size == PAGE_SIZE_4K && e == PT_ENTRY_NULL
@@ -511,7 +511,7 @@ static void split_selftest(void)
 	uint32_t read_before = *p, read_after;
 
 	pmap_resolve(root, dva, &before, &s0);
-	newsz = pmap_split_page(root, dva);
+	newsz = pmap_split_page(PMAP_NULL, dva);
 	pmap_resolve(root, dva, &after, &s1);
 	read_after = *p;
 
@@ -4247,7 +4247,7 @@ static void tlb_shootdown_selftest(void)
 		" the control is inconclusive here\r\n");
 
 	/* 3 — now say so. */
-	tlb_flush_range(probe.va, PAGE_SIZE_4K);
+	tlb_flush_range(PMAP_NULL, probe.va, PAGE_SIZE_4K);
 
 	ipi_call_others(tlb_probe_read, &probe);
 	fresh = tlb_probe_count(&probe, FRESH_WITNESS, self);

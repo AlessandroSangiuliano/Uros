@@ -90,7 +90,7 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
 	return atomic_load64(&served[apic_id]);
 }
 
-void tlb_flush_range(uint64_t va, uint64_t size)
+void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 {
 	/*
 	 * On the stack, read by other processors — which is safe for exactly
@@ -98,6 +98,22 @@ void tlb_flush_range(uint64_t va, uint64_t size)
 	 * has finished with it, so this frame outlives every reader of it.
 	 */
 	struct tlb_request r = { va, size };
+
+	/*
+	 * ⚠️ Named and not yet used, and that is the whole of this step (#439).
+	 *
+	 * Narrowing the shootdown to the processors that could hold the mapping
+	 * needs two things: a set on the pmap, maintained on both sides of an
+	 * address-space switch, and a caller that says WHICH pmap.  The second
+	 * is this parameter and it is a change to nine call sites; the first
+	 * changes what the machine does.  Doing them in one step would mean a
+	 * commit whose behaviour changed and whose call sites all moved, and no
+	 * way to tell which of the two broke a boot.
+	 *
+	 * So this one moves the call sites and keeps the broadcast.  If it is
+	 * right, nothing at all changes.
+	 */
+	(void) pmap;
 
 	/*
 	 * This processor first.  Not for correctness — the order between the
@@ -116,7 +132,7 @@ void tlb_flush_range(uint64_t va, uint64_t size)
 	ipi_call_others(tlb_flush_handler, &r);
 }
 
-void tlb_flush_all(void)
+void tlb_flush_all(struct pmap *pmap)
 {
-	tlb_flush_range(0, 0);
+	tlb_flush_range(pmap, 0, 0);
 }

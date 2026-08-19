@@ -209,6 +209,27 @@ static pt_entry_t *next_table(pt_entry_t *entry, uint64_t *spare, int *err)
  * caller's read section and none of it able to block.  Split out so that the
  * retry above it is a loop rather than a jump backwards.
  */
+/*
+ * The root to walk, and what PMAP_NULL means here (#439).
+ *
+ * Since the shootdown has to know whose translations it is discarding, these
+ * calls take a pmap.  Three boot-time self-tests have no pmap to give: they
+ * run before pmap_bootstrap() has adopted the boot tables, so pmap_kernel()
+ * is not yet usable, and they were passing the live CR3 by hand.
+ *
+ * ⚠️ The alternative was to hand them a stack-allocated pmap, and it is worth
+ * saying why that is worse rather than merely uglier: its processor set would
+ * be empty, so the shootdown would skip EVERY processor -- a set that says
+ * "nobody holds this" when the answer is unknown, which is the exact failure
+ * #439 exists to avoid.  PMAP_NULL says the opposite: the address space is
+ * whatever is loaded, and every processor is to be told.
+ */
+static inline uint64_t map_root_of(pmap_t pmap)
+{
+	return pmap == PMAP_NULL ? (read_cr3() & INTEL_PTE_PFN)
+				 : pmap->root_pa;
+}
+
 static int map_page_attempt(uint64_t root_pa, uint64_t va, uint64_t pa,
 			    uint64_t flags, uint64_t *spare, int *replaced)
 {
@@ -238,7 +259,7 @@ static int map_page_attempt(uint64_t root_pa, uint64_t va, uint64_t pa,
 	return PMAP_MAP_OK;
 }
 
-int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
+int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 		  volatile uint8_t *lock)
 {
 	uint64_t spare = 0;
@@ -268,7 +289,7 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
 		held = pmap_read_enter();
 		pmap_writer_lock(lock);
 
-		rc = map_page_attempt(root_pa, va, pa, flags, &spare,
+		rc = map_page_attempt(map_root_of(pmap), va, pa, flags, &spare,
 				      &replaced);
 		pmap_writer_unlock(lock);
 		pmap_read_leave(held);
@@ -306,7 +327,7 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
 	if (rc == PMAP_MAP_OK) {
 		invlpg(va);
 		if (replaced)
-			tlb_flush_range(va, PAGE_SIZE_4K);
+			tlb_flush_range(pmap, va, PAGE_SIZE_4K);
 	}
 
 	if (spare != 0)
@@ -315,11 +336,11 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
 	return rc;
 }
 
-uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
+uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va)
 {
 	uint64_t size = 0;
 	boolean_t held = pmap_read_enter();
-	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
+	pt_entry_t *entry = pmap_walk(map_root_of(pmap), va, &size);
 
 	if (entry == PT_ENTRY_NULL) {
 		pmap_read_leave(held);
@@ -328,15 +349,15 @@ uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va)
 
 	*entry = 0;
 	pmap_read_leave(held);
-	tlb_flush_range(va, size);
+	tlb_flush_range(pmap, va, size);
 	return size;
 }
 
-uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
+uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags)
 {
 	uint64_t size = 0;
 	boolean_t held = pmap_read_enter();
-	pt_entry_t *entry = pmap_walk(root_pa, va, &size);
+	pt_entry_t *entry = pmap_walk(map_root_of(pmap), va, &size);
 
 	if (entry == PT_ENTRY_NULL) {
 		pmap_read_leave(held);
@@ -386,11 +407,11 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags)
 
 	pmap_read_leave(held);
 
-	tlb_flush_range(va, size);
+	tlb_flush_range(pmap, va, size);
 	return size;
 }
 
-uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
+uint64_t pmap_split_page(pmap_t pmap, uint64_t va)
 {
 	uint64_t size = 0;
 	uint64_t base, perm, sub_size, table_pa;
@@ -421,7 +442,7 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 
 	held = pmap_read_enter();
 
-	entry = pmap_walk(root_pa, va, &size);
+	entry = pmap_walk(map_root_of(pmap), va, &size);
 	if (entry == PT_ENTRY_NULL || size == PAGE_SIZE_4K) {
 		pmap_read_leave(held);
 		pmap_table_frame_free(table_pa);
@@ -471,7 +492,7 @@ uint64_t pmap_split_page(uint64_t root_pa, uint64_t va)
 	 * processors have walked is stale on them too.  Split is rare and this
 	 * is bootstrap, so the blunt tool remains the right one.
 	 */
-	tlb_flush_all();
+	tlb_flush_all(pmap);
 	pmap_read_leave(held);
 
 	return sub_size;

@@ -38,6 +38,17 @@
 #include <stdint.h>
 
 /*
+ * Forward-declared rather than included (#439).
+ *
+ * These calls need to name an address space and nothing more; pulling in
+ * <pmap/pmap.h> for that would put the whole pmap interface -- and rcu.h,
+ * and atomic.h, and regs.h behind it -- into every file that only wants to
+ * discard a translation.  The pointer is all the type information a
+ * prototype needs.
+ */
+struct pmap;
+
+/*
  * Above this many pages, discard everything rather than name each address.
  *
  * An address at a time is cheaper until it is not: each one is an
@@ -60,25 +71,35 @@ void tlb_flush_local_range(uint64_t va, uint64_t size);
 void tlb_flush_local_all(void);
 
 /*
- * Discard them everywhere, and return when every processor has.
+ * Discard them everywhere they could be, and return when every processor
+ * asked has done it.
  *
  * Return, not send: the caller's next act is usually to reuse the frame
  * that translation pointed at, and it may not do that while another
- * processor could still reach the old page.  So this waits, and every
- * processor in the machine is stopped for as long as it takes — which is
- * the reason for the range form rather than only the whole-table one.
+ * processor could still reach the old page.  So this waits — which is the
+ * reason for the range form rather than only the whole-table one.
+ *
+ * ⚠️ WHOSE translations, and it is not a convenience parameter (#439).  A
+ * shootdown only concerns processors that could be holding this mapping,
+ * which means the processors with this pmap loaded; for a user address
+ * space that is usually one, or none.  Without the pmap this call has no
+ * way to ask that question and can only broadcast, which is what it did.
+ *
+ * PMAP_NULL means "everybody", and is what the kernel's own mappings use:
+ * every processor has the kernel half loaded at all times, so for those the
+ * broadcast is not pessimism, it is the answer.
  *
  * Must be called with interrupts enabled; see <cpu/ipi.h> for why.  Before
  * the other processors are woken it costs nothing and does the local half,
  * so early callers need no special case.
  */
-void tlb_flush_range(uint64_t va, uint64_t size);
-void tlb_flush_all(void);
+void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size);
+void tlb_flush_all(struct pmap *pmap);
 
 /* One page, the common case, spelt so the call sites read as what they do. */
-static inline void tlb_flush_page(uint64_t va)
+static inline void tlb_flush_page(struct pmap *pmap, uint64_t va)
 {
-	tlb_flush_range(va, 0x1000);
+	tlb_flush_range(pmap, va, 0x1000);
 }
 
 /* How many shootdowns this processor has serviced, for the boot-time proof. */

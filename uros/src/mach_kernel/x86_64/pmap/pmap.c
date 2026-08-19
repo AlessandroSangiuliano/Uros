@@ -651,7 +651,7 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 	uint64_t size;
 
 	pmap_resolve(pmap->root_pa, va, &pa, 0);
-	size = pmap_unmap_page(pmap->root_pa, va);
+	size = pmap_unmap_page(pmap, va);
 
 	if (size == PAGE_SIZE_4K)
 		pv_remove(pa, pmap, va);
@@ -749,7 +749,7 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	if (va_is_user(va))
 		flags |= INTEL_PTE_USER;
 
-	rc = pmap_map_page(pmap->root_pa, va, pa, flags, &pmap->collect_lock);
+	rc = pmap_map_page(pmap, va, pa, flags, &pmap->collect_lock);
 	if (rc == PMAP_MAP_OK) {
 		pv_enter(pa, pmap, va);
 		/*
@@ -871,7 +871,7 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 		if (prot == VM_PROT_NONE)
 			sz = pmap_forget(pmap, s);
 		else
-			sz = pmap_protect_page(pmap->root_pa, s, flags);
+			sz = pmap_protect_page(pmap, s, flags);
 
 		s += sz ? sz : PAGE_SIZE_4K;
 	}
@@ -906,7 +906,7 @@ uint64_t pmap_map_device(uint64_t pa, uint64_t size)
 	 * while looking untouched.
 	 */
 	for (uint64_t p = first; p < last; p += PAGE_SIZE_4K) {
-		if (pmap_map_page(kernel_pmap_store.root_pa, device_next, p,
+		if (pmap_map_page(&kernel_pmap_store, device_next, p,
 				  flags, &kernel_pmap_store.collect_lock)
 		    != PMAP_MAP_OK)
 			panic("pmap: could not map device registers");
@@ -941,7 +941,7 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next)
-		pmap_protect_page(pv->pmap->root_pa, pv->va, flags);
+		pmap_protect_page(pv->pmap, pv->va, flags);
 }
 
 /*
@@ -1006,7 +1006,7 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 * holding the cached translation that will fail to record the
 		 * next touch, and that is exactly the one this did not run on.
 		 */
-		tlb_flush_page(pv->va);
+		tlb_flush_page(pv->pmap, pv->va);
 	}
 }
 
@@ -1058,7 +1058,7 @@ void pmap_protect_kernel(void)
 	 * no-op, so this is safe whatever the page size turns out to be.
 	 */
 	for (va = t0 & ~(PAGE_SIZE_2M - 1); va < end; va += PAGE_SIZE_2M)
-		pmap_split_page(k->root_pa, va);
+		pmap_split_page(k, va);
 
 	pmap_protect(k, t0, (uint64_t)(uintptr_t)__ktext_end,
 		     VM_PROT_READ | VM_PROT_EXECUTE);
