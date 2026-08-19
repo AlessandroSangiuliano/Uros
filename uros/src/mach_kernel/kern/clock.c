@@ -434,7 +434,13 @@ long		cs_stamp[2];
 #if 0
 extern void	cyctm05_stamp(long *);
 #endif
-extern void	log_thread_action(thread_t, char *);
+/*
+ * #415: the declaration that disagreed, removed.  The function is defined in
+ * kern/sched_prim.c as (char *, long, long, long) and this said
+ * (thread_t, char *).  Two declarations of one name with different argument
+ * lists, in two translation units, are something C will never compare; the
+ * only caller here is inside `#if 0' below, which is how it survived.
+ */
 
 /*
  * Sleep on a clock. System trap. User-level libmach clock_sleep

@@ -236,7 +236,7 @@ extern void		dev_pager_hash_delete(
 extern dev_pager_t	dev_pager_hash_lookup(
 				ipc_port_t		port);
 extern void		device_pager_release(
-				memory_object_t		object);
+				ipc_port_t		pager);
 extern boolean_t	device_pager_data_write_done(
 				io_req_t		ior);
 extern vm_offset_t	device_map_page(
@@ -527,13 +527,34 @@ device_pager_setup(
  *		Relinquish any references or rights that were
  *		associated with the result of a call to
  *		device_pager_setup.
+ *
+ * 🔥 It took a NAME and released a POINTER (#415).
+ *
+ * `memory_object_t' is `mach_port_t' -- a thirty-two-bit name by definition of
+ * the interface -- and this cast it straight to ipc_port_t and released a send
+ * right on the result.  On i386 the two are the same width and the cast is
+ * nothing; on x86-64 it builds a sixty-four-bit pointer out of thirty-two bits
+ * of name and calls ipc_port_release_send() on it.  That is the defect #472
+ * closed elsewhere, still standing here.
+ *
+ * The type it should have had was never in doubt: its own comment says it
+ * releases what device_pager_setup() produced, and that function's last
+ * argument is `ipc_port_t *'.  The two halves have contradicted each other
+ * since they were written and nothing compared them -- because NOTHING CALLS
+ * THIS.  A signature no caller checks is a signature no compiler checks
+ * either, which is why a wrong one can sit in a file for thirty years.
+ *
+ * ⚠️ Kept rather than deleted: device_pager_setup() hands out a send right and
+ * something must one day give it back, and the deletion of dead code from this
+ * era is #433's question, not this issue's.  What #415 owes it is the right
+ * type.
  */
 void
 device_pager_release(
-	memory_object_t		object)
+	ipc_port_t		pager)
 {
-	if (MACH_PORT_VALID(object))
-		ipc_port_release_send((ipc_port_t) object);
+	if (IP_VALID(pager))
+		ipc_port_release_send(pager);
 }
 
 /*

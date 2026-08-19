@@ -115,25 +115,34 @@ void
 cb_check(
 	struct cirbuf		*cb)
 {
+	/*
+	 * %p for the pointers and %ld for the differences between them (#415).
+	 *
+	 * These were %x against char * and against ptrdiff_t, which on i386
+	 * printed the whole of both and on x86-64 prints the lower half of an
+	 * address -- in a panic that exists to say WHERE a circular buffer went
+	 * out of range.  Nothing warned, because the file is compiled only in a
+	 * DEBUG build and this project does not make one.
+	 */
 	if (!(cb->c_cf >= cb->c_start && cb->c_cf < cb->c_end))
-	    panic("cf %x out of range [%x..%x)",
+	    panic("cf %p out of range [%p..%p)",
 		cb->c_cf, cb->c_start, cb->c_end);
 	if (!(cb->c_cl >= cb->c_start && cb->c_cl < cb->c_end))
-	    panic("cl %x out of range [%x..%x)",
+	    panic("cl %p out of range [%p..%p)",
 		cb->c_cl, cb->c_start, cb->c_end);
 	if (cb->c_cf <= cb->c_cl) {
 	    if (!(cb->c_cc == cb->c_cl - cb->c_cf))
-		panic("cc %x should be %x",
+		panic("cc %x should be %ld",
 			cb->c_cc,
-			cb->c_cl - cb->c_cf);
+			(long)(cb->c_cl - cb->c_cf));
 	}
 	else {
 	    if (!(cb->c_cc == cb->c_end - cb->c_cf
 			    + cb->c_cl - cb->c_start))
-		panic("cc %x should be %x",
+		panic("cc %x should be %ld",
 			cb->c_cc,
-			cb->c_end - cb->c_cf +
-			cb->c_cl - cb->c_start);
+			(long)(cb->c_end - cb->c_cf +
+			cb->c_cl - cb->c_start));
 	}
 }
 #else	/* DEBUG */

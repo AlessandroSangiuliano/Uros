@@ -98,6 +98,22 @@ target_compile_options(migcom PRIVATE
 )
 
 # Solo in Debug aggiungi AddressSanitizer
+#
+# ⚠️ Il conteggio delle perdite si spegne in mig.c, con __asan_default_options,
+# e non da qui (#415).  migcom e' un compilatore
+# a colpo solo: alloca l'albero sintattico e non lo libera mai, che e' una scelta
+# ragionevole per un processo che esce subito.  LeakSanitizer pero' esce
+# NON-ZERO quando trova una perdita, e migcom gira DENTRO il build: il risultato
+# era che ogni singolo passo MIG falliva e una configurazione Debug di questo
+# albero non arrivava nemmeno a compilare un file.
+#
+# 🔑 Ed e' il motivo per cui c'era qualcosa da trovare: dietro `#if DEBUG' si
+# erano accumulate ventisei conversioni di formato che stampavano valori a
+# sessantaquattro bit come trentadue.  Una configurazione che nessuno puo'
+# costruire e' una configurazione che nessuno controlla.
+#
+# Il controllo degli ERRORI di memoria -- quello per cui ASan sta qui -- resta
+# acceso; si spegne solo il conteggio delle perdite.
 target_link_options(migcom PRIVATE
   $<$<CONFIG:Debug>:-fsanitize=address>
 )

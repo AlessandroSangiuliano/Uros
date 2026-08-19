@@ -193,6 +193,19 @@ struct flipc2_desc {
     uint32_t    _reserved;      /* pad to 64 bytes                       */
 };
 
+/*
+ * Compile-time check: a descriptor must be exactly FLIPC2_DESC_SIZE (#415).
+ *
+ * The two headers below already carry one and this did not, which left the
+ * ring's element size to a comment saying "pad to 64 bytes" and to
+ * desc_size in the channel header -- a runtime field, checked by whoever
+ * remembers to look at it.  The ring is shared memory written by one party
+ * and read by another, and a stride that disagrees does not fail: it reads
+ * the second half of one descriptor as the first half of the next.
+ */
+typedef char _flipc2_desc_size_check
+    [(sizeof(struct flipc2_desc) == FLIPC2_DESC_SIZE) ? 1 : -1];
+
 /* ------------------------------------------------------------------ */
 /*  Channel Header (256 bytes, at offset 0 of shared memory)           */
 /* ------------------------------------------------------------------ */

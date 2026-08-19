@@ -387,3 +387,4 @@ log(int level, char *fmt, ...)
 	_doprnt(fmt, &listp, cnputc, 0);
 	va_end(listp);
 }
+

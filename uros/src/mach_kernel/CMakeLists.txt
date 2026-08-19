@@ -769,12 +769,24 @@ set(KERNEL_C_FLAGS
     # pointer or a physical address is truncated at the call site, silently
     # and in the caller rather than in the callee where you would look.
     #
-    # -Wno-format is gone too, and removing it changes nothing today: this
-    # kernel builds -fno-builtin with its own printf, db_printf and kprintf,
-    # none of which carries format(printf,...), so there was never anything
-    # for the warning to check.  It was guarding an empty room.  Annotating
-    # the print functions is what makes it real, and that is its own step --
-    # %x against a vm_offset_t is the thing the issue asks for.
+    # -Wno-format is gone too.  This note used to say that removing it
+    # changed nothing, because the kernel builds -fno-builtin with its own
+    # print functions and none of them carried format(printf,...) -- so the
+    # warning was guarding an empty room, and annotating them was a step
+    # still to come.
+    #
+    # That step has been taken and the note had not noticed.  Enumerated
+    # rather than believed: printf, sprintf, panic, log and sscanf all carry
+    # the attribute in <kern/misc_protos.h>, on both targets, and both trees
+    # build clean against it.  The room is not empty.
+    #
+    # The three that do not carry it -- db_printf, kdbprintf, iprintf -- are
+    # bare on purpose, and misc_protos.h says why where the conversion parser
+    # is defined: the debugger's formatter implements a different grammar
+    # (%r, %z, %b, and %n meaning "unsigned in the current radix" rather than
+    # C's store-through-a-pointer).  An annotation there would check against a
+    # grammar the callee does not implement, and a check against the wrong
+    # grammar is worse than none.
     #
     # int-conversion is FATAL again, which is #442's third done-when.
     #
@@ -1260,6 +1272,7 @@ set(I386_C_SOURCES
     i386/ktss.c
     i386/ldt.c
     i386/loose_ends.c
+    i386/divide64.c
     i386/net_filter.c
     i386/boot_modules.c
     i386/pcb.c
@@ -1370,7 +1383,7 @@ set(I386_ASM_SOURCES
     i386/_setjmp.S
     i386/bcopy.S
     i386/bzero.S
-    i386/gcc.S
+    i386/divide.S
     i386/i386_lock.S
     i386/idt.S
     i386/interrupt.S
