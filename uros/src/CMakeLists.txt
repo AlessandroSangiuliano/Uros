@@ -206,6 +206,16 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/act_test)
 endif()
 
+# And the task that forks with copy-on-write (#407) -- the fifth clause of that
+# issue's done-when, and the only one nothing else exercises.
+#
+# One thread, unlike the two above: the subject is an address space, and the
+# cleanest subject is a child task with nothing running inside it, because
+# nothing there can move while it is being read.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/cow_test)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")

@@ -242,6 +242,13 @@ must_report 'state_test: the target is parked' 'state_test: PASS — 11' \
 	'thread_get_state() on a target that never stops waits for it for ever, and waiting for ever looks exactly like a short run (#408).'
 must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 	'A kernel that takes AST_APC on a ring-0 return panics in the first round; one that hangs instead is the same defect with its quiet face (#463).'
+# ⚠️ The terminator matches any count, not `3 of 3'.  A run that reported "2 of
+# 3" DID finish and its failing arm is already caught as a WRONG line; asking
+# here for the passing count as well would report one defect as two, and would
+# report a cut-short run and a failed arm as the same thing.  This line asks
+# only whether the program reached its own last sentence (#407).
+must_report 'cow_test: started' 'cow_test: [0-9] of 3 arms passed' \
+	'It forks a task with inherit_memory, which is the first thing on this target ever to call vm_map_fork; a kernel that cannot do it dies inside task_create and prints nothing further (#407).'
 
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
