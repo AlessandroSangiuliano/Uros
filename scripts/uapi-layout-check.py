@@ -32,15 +32,22 @@
 #
 # Not every difference is a defect. A structure that is kernel-private, or one
 # that deliberately holds a pointer, is entitled to be wider on a wider
-# machine. What the issue asks is that each difference be looked at and either
-# confirmed harmless or made explicit -- so this prints them and counts them,
-# and refuses to decide on anyone's behalf.
+# machine. So a difference is not the verdict: what the issue asks is that
+# each one be LOOKED AT and either confirmed harmless or made explicit, and
+# the ACCEPTED table below is where that examining is recorded, one sentence
+# each.
+#
+# 🔑 Which makes the useful output the SHORT list, not the long one. A
+# difference that is not in the table is one nobody has examined yet, and that
+# is what this fails on -- along with an acceptance that no longer describes
+# any difference, because a note about code that has moved on will let the
+# next reader think a decision was made about the shape in front of them.
 #
 # Usage:
 #   scripts/uapi-layout-check.py [--verbose]
 #
-# Exit status: 0 if every structure that both builds contain agrees, 1 if any
-# differ, 2 if it could not run at all.
+# Exit status: 0 when every difference is one that has been examined, 1 when
+# one has not (or when an acceptance has gone stale), 2 if it could not run.
 
 import os
 import re
@@ -49,6 +56,75 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 UAPI = os.path.join(REPO, "uros", "uapi")
+# ── The differences that have been looked at, and why each is allowed ──
+#
+# #415 asks that every cross-boundary structure be "examined and either
+# confirmed width-stable or explicitly versioned".  This is where the
+# examining is recorded, so that the next difference to appear is the one
+# nobody has looked at yet -- which is the only useful thing a check like this
+# can tell you.
+#
+# ⚠️ The question is NOT "do the two targets agree".  A kernel and its tasks
+# are always the same architecture here, so a layout that differs between
+# targets is harmless unless a producer and a consumer were compiled for
+# DIFFERENT ones -- a host tool writing bytes a kernel reads, an on-disk
+# header, a ring shared between nodes.  Every entry below answers that
+# question and not the easier one.
+#
+# 🔑 The entry that is NOT here is the one that made this file worth writing:
+# struct uros_cap declared itself a wire format, was 188 bytes on i386 and 192
+# on x86-64, and now agrees by construction with a _Static_assert holding it
+# there.
+ACCEPTED = {
+    # Pointer-wide by definition: the structure IS a pointer, or is made of
+    # them.  A wider machine must lay these out wider.
+    "task_user_data":
+        "one member, `void *user_data' -- it is a pointer",
+    "urmach_futexv":
+        "holds `unsigned int *uaddr', an address in the caller's own space",
+    "exception_action":
+        "kernel-private (inside #if MACH_KERNEL) and holds struct ipc_port *; "
+        "it lives inside task and thread_act, never in a message",
+    "routine_descriptor":
+        "two function pointers and a pointer to an argument array, generated "
+        "by MIG into the user's own address space",
+    "mach_rpc_signature":
+        "a routine_descriptor and its argument descriptors -- see above",
+    "rpc_subsystem":
+        "MIG generates one per subsystem IN THE USER'S ADDRESS SPACE and says "
+        "so in the struct: `vm_address_t base_addr; /* Address of this struct "
+        "in user */'.  The kernel copies it in and rewrites the pointers "
+        "against that address, so it cannot be width-stable and must not be",
+    "rpc_copy_state":
+        "holds `vm_offset_t alloc_addr', the address to free",
+
+    # MIG info flavours: kernel to user, marshalled as an array of natural_t
+    # whose length travels with it -- and every one of those _COUNT macros is
+    # `sizeof(struct)/sizeof(natural_t)', computed rather than written down,
+    # so the count follows the target of its own accord.  Checked, not
+    # assumed: no _COUNT in uapi/ is a literal.
+    "host_basic_info":       "host_info flavour, HOST_BASIC_INFO_COUNT computed",
+    "machine_info":          "host_info flavour, count computed from sizeof",
+    "task_basic_info":       "task_info flavour, TASK_BASIC_INFO_COUNT computed",
+    "vm_region_basic_info":  "vm_region flavour, count computed from sizeof",
+    "memory_object_attr_info":
+        "memory_object_get_attributes flavour, count computed from sizeof",
+    "memory_object_perf_info":
+        "memory_object_get_attributes flavour, count computed from sizeof",
+
+    # The loader's description of the bootstrap task, in memory, read by the
+    # kernel that was loaded beside it.  Never on disk and never across a
+    # build: the ON-DISK boot format is the bundle, and that one is fixed
+    # width by construction (uint32_t throughout, with a note in
+    # servers/bootstrap/bundle.h saying why the mapped address is the one
+    # exception).
+    "boot_info":
+        "three vm_size_t the loader leaves for the kernel in the same boot",
+    "region_desc":
+        "vm_offset_t/vm_size_t describing the bootstrap task's address space, "
+        "in memory, same target",
+}
+
 KERNELS = {
     "i386": os.path.join(REPO, "uros", "build", "export", "uros", "boot",
                          "mach_kernel"),
@@ -126,6 +202,7 @@ def main():
 
     agreed = []
     differ = []
+    differ_ok = []
     absent = []
 
     for kind, name in uapi_structs():
@@ -144,10 +221,18 @@ def main():
                 print("  = %-40s %d bytes" % (name, a[0]))
             continue
 
+        if name in ACCEPTED:
+            differ_ok.append(name)
+            if verbose:
+                print("  ~ %-32s differs, accepted: %s"
+                      % (name, ACCEPTED[name]))
+            continue
+
         differ.append((name, a, b))
 
     for name, a, b in differ:
-        print("≠ %s: %d bytes on i386, %d on x86-64" % (name, a[0], b[0]))
+        print("≠ %s: %d bytes on i386, %d on x86-64 -- NOT ACCEPTED"
+              % (name, a[0], b[0]))
         amap = dict((m, (o, s)) for m, o, s in a[1])
         bmap = dict((m, (o, s)) for m, o, s in b[1])
         for m, o, s in a[1]:
@@ -160,16 +245,28 @@ def main():
             if m not in amap:
                 print("    %-28s x86-64 only (offset %d, %d bytes)" % (m, o, s))
 
+    stale = sorted(set(ACCEPTED) - set(differ_ok))
+
     print()
     print("%d structures declared in uapi/" % len(uapi_structs()))
     print("  %d agree on both targets" % len(agreed))
-    print("  %d differ" % len(differ))
+    print("  %d differ and have been examined (see ACCEPTED)" % len(differ_ok))
+    print("  %d differ and have NOT" % len(differ))
     print("  %d not in one build's debug information, so NOT CHECKED:"
           % len(absent))
     for name, where in absent:
         print("      %-40s absent from %s" % (name, where))
 
-    return 1 if differ else 0
+    if stale:
+        # An acceptance for a structure that no longer differs is a note about
+        # code that has moved on, and leaving it would let the next reader
+        # think a decision had been made about the shape in front of them.
+        print()
+        print("  %d acceptances no longer describe a difference:" % len(stale))
+        for name in stale:
+            print("      %s" % name)
+
+    return 1 if differ or stale else 0
 
 
 if __name__ == "__main__":
