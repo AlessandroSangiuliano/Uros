@@ -233,29 +233,34 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap.conf)
   set(_SBIN   ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin)
 
-  # Three lines, and the lines that are NOT here are the point: i386's
+  # Four lines, and the lines that are NOT here are the point: i386's
   # bootstrap.conf names hal_server, block_device_server, default_pager,
   # ext_server and a dozen more, and bootstrap would go looking for each of
   # them in turn.  It names what has crossed: the name server, the task that
-  # asks the kernel for a fault (#467), and the task that takes its own
-  # threads out of calls they will not finish (#475).
+  # asks the kernel for a fault (#467), the task that takes its own threads out
+  # of calls they will not finish (#475), and the task that forks with
+  # copy-on-write (#407).
   #
   # ⚠️ The ORDER is load-bearing rather than tidy, and it is least-damage
   # first.  fault_test faults on purpose and act_test kills a thread on
   # purpose; either one, on a kernel that mishandles it, takes the boot down
   # where it stands.  With the name server first, a failure in either can be
   # read as a failure in that one -- put either ahead of it and a #422 result
-  # would look like a regression in whatever ran first.  act_test is last for
-  # the same reason applied to the pair: it is the one that ends with a thread
-  # destroyed at an instruction boundary another thread chose.
+  # would look like a regression in whatever ran first.
+  #
+  # cow_test is last, and by the strongest form of that same rule rather than
+  # by seniority: it is the only entry that asks the kernel for a mechanism no
+  # boot on this target has ever used, so it is the one most likely to end the
+  # run.  Last means every other verdict is already in the log when it does,
+  # and the blame cannot land anywhere else.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nfault_test fault_test\nact_test act_test\n")
+       CONTENT "name_server name_server\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
 
-  # ⚠️ Three entries, and it was briefly four while #476 was being hunted --
-  # three copies of the same image under three names, to multiply the STARTING
-  # of a task without adding a second program's behaviour to the measurement.
-  # That was an experiment and is not a configuration: it belongs in the issue
-  # and in ~/uros-tests, not in what the build ships.
+  # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
+  # same image under three names, to multiply the STARTING of a task without
+  # adding a second program's behaviour to the measurement.  That was an
+  # experiment and is not a configuration: it belongs in the issue and in
+  # ~/uros-tests, not in what the build ships.
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
@@ -263,8 +268,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             name_server:${_SBIN}/name_server
             fault_test:${_SBIN}/fault_test
             act_test:${_SBIN}/act_test
-    DEPENDS mkbundle name_server_bin fault_test_bin act_test_bin ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + name_server + fault_test + act_test"
+            cow_test:${_SBIN}/cow_test
+    DEPENDS mkbundle name_server_bin fault_test_bin act_test_bin cow_test_bin
+            ${_CONF}
+    COMMENT "Bundle: bootstrap.conf + name_server + fault_test + act_test + cow_test"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})
