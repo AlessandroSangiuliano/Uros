@@ -150,7 +150,13 @@
 # define BEXT2_BLOCK_SIZE(s)		(BEXT2_MIN_BLOCK_SIZE << (s)->s_log_block_size)
 #endif
 #define BEXT2_ACLE_PER_BLOCK(s)		(BEXT2_BLOCK_SIZE(s) / sizeof (struct bext2_acl_entry))
-#define	BEXT2_ADDR_PER_BLOCK(s)		(BEXT2_BLOCK_SIZE(s) / sizeof (unsigned long))
+/*
+ * 🔥 Four bytes, because that is what an ext2 indirect block holds -- not
+ * sizeof(unsigned long), which is eight on x86-64.  The same defect and the
+ * same reasoning as ext2fs/ext2_fs.h; this is the boot loader's copy (#415).
+ */
+#define	BEXT2_ADDR_SIZE			4
+#define	BEXT2_ADDR_PER_BLOCK(s)		(BEXT2_BLOCK_SIZE(s) / BEXT2_ADDR_SIZE)
 #ifdef __KERNEL__
 # define BEXT2_BLOCK_SIZE_BITS(s)	((s)->u.bext2_sb.s_es->s_log_block_size + 10)
 #else

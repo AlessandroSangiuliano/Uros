@@ -132,7 +132,27 @@
 # define EXT2_BLOCK_SIZE(s)		(EXT2_MIN_BLOCK_SIZE << (s)->s_log_block_size)
 #endif
 #define EXT2_ACLE_PER_BLOCK(s)		(EXT2_BLOCK_SIZE(s) / sizeof (struct ext2_acl_entry))
-#define	EXT2_ADDR_PER_BLOCK(s)		(EXT2_BLOCK_SIZE(s) / sizeof (unsigned long))
+/*
+ * 🔥 THE SIZE OF AN ON-DISK BLOCK POINTER, AND IT IS NOT sizeof(unsigned long).
+ *
+ * An ext2 indirect block is an array of little-endian 32-bit block numbers --
+ * four bytes each, on every ext2 that has ever existed, because it is a
+ * property of the filesystem on the disk and not of the machine reading it.
+ * This macro divided by sizeof(unsigned long), which is four on i386 and
+ * EIGHT on x86-64, so on the wider target it answered that a 4 KiB indirect
+ * block holds 512 entries instead of 1024 (#415).
+ *
+ * It is not a cosmetic error.  NINDIR() is this macro, and f_nindir[] is built
+ * from it -- so the map from a file offset to a disk block is wrong for every
+ * file that reaches its first indirect block, on a filesystem written by
+ * anything else.  And free_indirect_tree() walked the block with a matching
+ * `unsigned long *', taking one entry in two.
+ *
+ * Both targets compile this file, which is what makes it a defect rather than
+ * a hazard: it is in the x86-64 binary today.
+ */
+#define	EXT2_ADDR_SIZE			4
+#define	EXT2_ADDR_PER_BLOCK(s)		(EXT2_BLOCK_SIZE(s) / EXT2_ADDR_SIZE)
 #ifdef __KERNEL__
 # define EXT2_BLOCK_SIZE_BITS(s)	((s)->s_blocksize_bits)
 #else
