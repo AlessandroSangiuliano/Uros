@@ -93,7 +93,14 @@
 #define	FP_MAPLOCK	1	/* vm_map_lock_read()                    */
 #define	FP_LOOKUP	2	/* vm_map_lookup_locked()                */
 #define	FP_CHAIN	3	/* the walk down the shadow chain        */
-#define	FP_OBJLOCK	4	/* vm_object_lock(), every acquisition   */
+/*
+ * ⚠️ FP_OBJLOCK is a bucket and not a stretch of the path: the fast
+ * copy-on-write path takes and drops object locks in four separate places, and
+ * a slice is charged from each.  The issue asks for the locks "separately from
+ * what they protect", which is what this is; it is not one contiguous phase and
+ * the number is a total rather than a duration.  Same for FP_QUEUES.
+ */
+#define	FP_OBJLOCK	4	/* vm_object lock/unlock/paging, every one */
 #define	FP_ALLOC	5	/* vm_page_alloc() for the new top page  */
 #define	FP_COPY		6	/* vm_page_copy() -- the known 228       */
 #define	FP_PROTECT	7	/* pmap_page_protect(): SHOOTDOWN        */
