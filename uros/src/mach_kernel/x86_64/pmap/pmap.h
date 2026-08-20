@@ -60,6 +60,34 @@ struct pmap {
 	 * and an unlink, never across a grace period.
 	 */
 	volatile uint8_t collect_lock;
+
+	/*
+	 * Which processors could be holding translations from this space
+	 * (#439).  One bit per local APIC id; SMP_MAX_CPUS is 64, so the set
+	 * is one word and maintaining it is one atomic instruction.
+	 *
+	 * 🔑 The two errors are not symmetric, and every decision about this
+	 * field follows from that.  A bit set for a processor that has moved
+	 * on costs one interrupt that finds nothing to do.  A bit CLEAR for a
+	 * processor that still holds the translation means the shootdown skips
+	 * exactly the processor that needed it — silently, and only under
+	 * load, and the symptom is a stale translation surviving an unmap.
+	 * So every window is arranged to fall on the expensive side: the bit
+	 * goes on before CR3 changes and comes off after.
+	 *
+	 * ⚠️ It is not cleared when a processor merely stops running the
+	 * space's threads.  Mach leaves the user half loaded across a trap and
+	 * across the idle loop, so "stopped running it" is not "stopped being
+	 * able to reach it"; the bit clears when CR3 is written to something
+	 * else, which is the moment the translations actually go.
+	 *
+	 * ⚠️ PCID (#412) is where this stops being true, and it is worth
+	 * saying here rather than discovering it there: with PCID a space's
+	 * entries survive on a processor that has switched away, so the
+	 * question becomes what is CACHED and not what is current, and this
+	 * field's meaning changes with it.
+	 */
+	volatile uint64_t cpus_using;
 };
 
 typedef struct pmap *pmap_t;
@@ -201,6 +229,23 @@ static __inline__ void pmap_writer_unlock(volatile uint8_t *l)
  * identical across spaces, so the kernel keeps running across the switch.
  */
 void pmap_activate(pmap_t pmap);
+
+/*
+ * The same switch, for the boot self-tests, which run before there is a
+ * per-CPU block to record it in (#439).
+ *
+ * 🔥 Separate rather than a test inside pmap_activate(), and the reason is a
+ * measurement: the test WAS inside it, spelled percpu_ready(), which is an
+ * rdmsr -- a serialising instruction that under KVM can leave the guest.  It
+ * cost about 45% of a copy-on-write fault on ONE processor, paid on every
+ * address-space switch for the whole life of the system, to answer a question
+ * that is only ever "no" during three self-tests.
+ *
+ * ⚠️ Tracks nothing, and needs to track nothing: it runs on the boot
+ * processor before any other is awake, so the set it would maintain has
+ * nobody to name and the shootdown it would narrow is already a local flush.
+ */
+void pmap_activate_boot(pmap_t pmap);
 
 /*
  * Adopt the tables boot.S and the direct map already built as the kernel

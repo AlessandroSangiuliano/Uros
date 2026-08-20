@@ -247,6 +247,14 @@ pmap_pageable(pmap_t pmap, vm_offset_t start, vm_offset_t end,
 #define PMAP_COLLECT_BATCH	32
 
 struct collect_batch {
+	/*
+	 * Whose tables these are (#439).  A batch is built while walking one
+	 * address space and freed for that one space, so the shootdown at the
+	 * end of collect_flush() can be narrowed to the processors that could
+	 * be holding its translations -- which it could not, while the only
+	 * thing here was a list of frames.
+	 */
+	pmap_t		pmap;
 	struct {
 		pt_entry_t	*parent;
 		uint64_t	 table_pa;
@@ -370,7 +378,7 @@ static void collect_flush(struct collect_batch *b)
 			return;
 	}
 
-	tlb_flush_all();				/* step 5 */
+	tlb_flush_all(b->pmap);				/* step 5 */
 	urmach_synchronize_rcu();			/* step 6 */
 
 	for (i = 0; i < b->count; i++) {		/* step 7 */
@@ -512,6 +520,7 @@ pmap_collect(pmap_t pmap)
 	if (!pmap_initialized)
 		return;
 
+	batch.pmap = pmap;
 	batch.count = 0;
 	batch.freed = 0;
 

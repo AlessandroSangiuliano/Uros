@@ -9,6 +9,7 @@
 
 
 #include <cpu/regs.h>
+#include <cpu/percpu.h>		/* which space this processor has loaded (#439) */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/map.h>
@@ -465,6 +466,21 @@ pmap_t pmap_create(uint64_t size)
 	pmap->collect_lock = 0;
 
 	/*
+	 * 🔥 And the processor set, for exactly the reason the paragraph above
+	 * gives -- which was written for #455 and then did not stop #439 making
+	 * the same mistake three lines later.
+	 *
+	 * A new space is loaded on nobody.  Left uninitialised it arrives
+	 * holding the zone's poison, and the first shootdown reads that as the
+	 * set of processors to interrupt: `ipi: a processor in a targeted
+	 * cross-call never answered (mask 0xf5eef5eef5eef5ee, 48 expected, 6
+	 * arrived)'.  The mask in that message is what made it one look instead
+	 * of an afternoon, which is the argument for putting the value in a
+	 * panic rather than the fact of it.
+	 */
+	pmap->cpus_using = 0;
+
+	/*
 	 * 🔥 pmap_table_frame() and not boot_frame_alloc(), which is what this
 	 * said and is the same defect #458 fixed one function away (#422).
 	 *
@@ -631,10 +647,60 @@ void pmap_destroy(pmap_t pmap)
 	pmap_free(pmap);
 }
 
-void pmap_activate(pmap_t pmap)
+void pmap_activate_boot(pmap_t pmap)
 {
 	if (pmap != PMAP_NULL)
 		write_cr3(pmap->root_pa);
+}
+
+void pmap_activate(pmap_t pmap)
+{
+	struct percpu	*pc;
+	pmap_t		 old;
+	unsigned	 bit;
+
+	if (pmap == PMAP_NULL)
+		return;
+
+	pc  = percpu();
+	old = (pmap_t) pc->loaded_pmap;
+
+	if (old == pmap) {
+		/*
+		 * Already here.  Not merely an optimisation: writing CR3 to
+		 * the value it already holds would discard every non-global
+		 * translation this processor has, for nothing.
+		 */
+		write_cr3(pmap->root_pa);
+		return;
+	}
+
+	bit = pc->cpu_id & 63;
+
+	/*
+	 * ── The order, which is the whole correctness argument (#439) ──
+	 *
+	 * Joining the new set BEFORE the switch, and leaving the old one
+	 * AFTER, so that at no instant is this processor able to reach a
+	 * space whose set does not name it.
+	 *
+	 * Between the first store and the CR3 write this processor is in
+	 * `pmap's set while holding none of its translations: a shootdown for
+	 * pmap would send us an interrupt we did not need.  Between the CR3
+	 * write and the last store it is still in `old's set while holding
+	 * none of ITS translations either — CR3 discarded them — so again an
+	 * interrupt for nothing.  Both windows cost a wasted interrupt and
+	 * neither can lose one, which is the only asymmetry that matters:
+	 * the opposite order would open a window in which this processor
+	 * holds translations nobody knows to shoot down.
+	 */
+	(void) atomic_test_and_set_bit(&pmap->cpus_using, bit);
+	pc->loaded_pmap = pmap;
+
+	write_cr3(pmap->root_pa);
+
+	if (old != PMAP_NULL)
+		(void) atomic_test_and_clear_bit(&old->cpus_using, bit);
 }
 
 /*
@@ -651,7 +717,7 @@ static uint64_t pmap_forget(pmap_t pmap, uint64_t va)
 	uint64_t size;
 
 	pmap_resolve(pmap->root_pa, va, &pa, 0);
-	size = pmap_unmap_page(pmap->root_pa, va);
+	size = pmap_unmap_page(pmap, va);
 
 	if (size == PAGE_SIZE_4K)
 		pv_remove(pa, pmap, va);
@@ -749,7 +815,7 @@ int pmap_enter(pmap_t pmap, uint64_t va, uint64_t pa, vm_prot_t prot,
 	if (va_is_user(va))
 		flags |= INTEL_PTE_USER;
 
-	rc = pmap_map_page(pmap->root_pa, va, pa, flags, &pmap->collect_lock);
+	rc = pmap_map_page(pmap, va, pa, flags, &pmap->collect_lock);
 	if (rc == PMAP_MAP_OK) {
 		pv_enter(pa, pmap, va);
 		/*
@@ -871,7 +937,7 @@ void pmap_protect(pmap_t pmap, uint64_t s, uint64_t e, vm_prot_t prot)
 		if (prot == VM_PROT_NONE)
 			sz = pmap_forget(pmap, s);
 		else
-			sz = pmap_protect_page(pmap->root_pa, s, flags);
+			sz = pmap_protect_page(pmap, s, flags);
 
 		s += sz ? sz : PAGE_SIZE_4K;
 	}
@@ -906,7 +972,7 @@ uint64_t pmap_map_device(uint64_t pa, uint64_t size)
 	 * while looking untouched.
 	 */
 	for (uint64_t p = first; p < last; p += PAGE_SIZE_4K) {
-		if (pmap_map_page(kernel_pmap_store.root_pa, device_next, p,
+		if (pmap_map_page(&kernel_pmap_store, device_next, p,
 				  flags, &kernel_pmap_store.collect_lock)
 		    != PMAP_MAP_OK)
 			panic("pmap: could not map device registers");
@@ -941,7 +1007,7 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 
 	for (pv = pv_head(pa); pv != PV_ENTRY_NULL && pv->pmap != PMAP_NULL;
 	     pv = pv->next)
-		pmap_protect_page(pv->pmap->root_pa, pv->va, flags);
+		pmap_protect_page(pv->pmap, pv->va, flags);
 }
 
 /*
@@ -1006,7 +1072,7 @@ static void pv_change_bits(uint64_t pa, uint64_t bits, int set)
 		 * holding the cached translation that will fail to record the
 		 * next touch, and that is exactly the one this did not run on.
 		 */
-		tlb_flush_page(pv->va);
+		tlb_flush_page(pv->pmap, pv->va);
 	}
 }
 
@@ -1058,7 +1124,7 @@ void pmap_protect_kernel(void)
 	 * no-op, so this is safe whatever the page size turns out to be.
 	 */
 	for (va = t0 & ~(PAGE_SIZE_2M - 1); va < end; va += PAGE_SIZE_2M)
-		pmap_split_page(k->root_pa, va);
+		pmap_split_page(k, va);
 
 	pmap_protect(k, t0, (uint64_t)(uintptr_t)__ktext_end,
 		     VM_PROT_READ | VM_PROT_EXECUTE);

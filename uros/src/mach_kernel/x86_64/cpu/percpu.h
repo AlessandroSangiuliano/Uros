@@ -138,6 +138,27 @@ struct percpu {
 	uint64_t pending[4];
 	uint64_t deferred;
 	uint64_t replayed;
+
+	/*
+	 * Which address space this processor has in CR3 (#439).
+	 *
+	 * A `struct pmap *', kept as void * so that the whole pmap interface
+	 * does not have to be visible to everything that includes this — the
+	 * same reason <pmap/tlb.h> forward-declares it.
+	 *
+	 * 🔑 It exists so that pmap_activate() can maintain the per-pmap
+	 * processor set from ONE place.  The alternative was to have the
+	 * caller supply both the space being left and the space being entered,
+	 * and that is the shape this tree keeps getting hurt by: two halves
+	 * that must agree, kept in step by whoever remembers.  A processor
+	 * already knows what it is running; asking it costs one %gs-relative
+	 * load and cannot disagree with itself.
+	 *
+	 * ⚠️ Added at the END.  The offsets asserted below are what the
+	 * assembly entry paths use, and a field inserted above them would move
+	 * every one of them silently.
+	 */
+	void *loaded_pmap;
 };
 
 /*
@@ -184,6 +205,27 @@ static inline struct percpu *percpu(void)
 
 	__asm__ volatile("movq %%gs:0, %0" : "=r"(p));
 	return p;
+}
+
+
+/*
+ * This processor's local APIC id, without paying CPUID for it (#439).
+ *
+ * 🔥 cpu_apic_id() in <cpu/regs.h> asks the hardware, and asking costs a
+ * CPUID -- unconditionally serialising, and under KVM an exit to the
+ * hypervisor every single time.  It was on the shootdown path and on the
+ * address-space switch, and it cost about 45% of a copy-on-write fault on ONE
+ * processor: a measurement that says nothing about shootdowns at all, because
+ * a machine with one processor sends none.
+ *
+ * percpu_activate() is handed the APIC id and stores it, so the answer is
+ * already here and reading it is one %gs-relative load.  CPUID remains the
+ * right call exactly once per processor -- when there is no block yet to read
+ * it from, which is how it got in there.
+ */
+static inline uint32_t percpu_apic_id(void)
+{
+	return percpu()->cpu_id;
 }
 
 /*

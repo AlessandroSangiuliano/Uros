@@ -11,6 +11,7 @@
 
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
+#include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/smp.h>
 #include <sync/atomic.h>
@@ -57,7 +58,7 @@ static void ipi_call_handler(struct trap_frame *frame)
 	if (fn != 0)
 		fn(arg);
 
-	served[cpu_apic_id()]++;
+	served[percpu_apic_id()]++;
 
 	barrier();
 	atomic_inc64(&call_acks);
@@ -142,6 +143,73 @@ void ipi_call_others(void (*fn)(void *), void *arg)
 
 	if (atomic_load64(&call_acks) < targets)
 		panic("ipi: a processor never answered a cross-call");
+
+	hw_lock_unlock(&call_lock);
+}
+
+void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
+{
+	uint64_t spins;
+	unsigned targets;
+	unsigned id;
+
+	/*
+	 * Never ourselves.  A processor inside this function is not going to
+	 * take the interrupt it just sent, so a bit for the caller would be a
+	 * target that can never acknowledge — the wait below would spin out
+	 * its budget and panic, on a mask that was perfectly correct.
+	 */
+	mask &= ~(1ULL << (percpu_apic_id() & 63));
+
+	if (mask == 0)
+		return;
+
+	/* Same reason as ipi_call_others(): see the comment there. */
+	if (!interrupts_enabled())
+		panic("ipi: a cross-call with interrupts off would deadlock");
+
+	hw_lock_lock(&call_lock);
+
+	call_fn = fn;
+	call_arg = arg;
+	atomic_store64(&call_acks, 0);
+
+	smp_wmb();
+
+	/*
+	 * One message per target, and the loop is the difference from the
+	 * broadcast: sending costs a store to the interrupt command register
+	 * per processor, so a mask with sixty-three bits set is dearer to send
+	 * than one broadcast.  It is still the right shape, because the mask
+	 * that matters in practice has one bit or two — and because a
+	 * broadcast to sixty-four processors to reach two of them makes the
+	 * other sixty-two take an interrupt for nothing.
+	 */
+	/*
+	 * ⚠️ Counted here rather than with __builtin_popcountll(), and the
+	 * linker is what said so: gcc turns that builtin into a call to
+	 * libgcc's __popcountdi2, and this kernel links no libgcc (#415).  The
+	 * loop has to visit every set bit anyway, so counting in it costs an
+	 * increment and removes the dependency rather than working around it.
+	 */
+	targets = 0;
+	for (id = 0; id < 64; id++)
+		if (mask & (1ULL << id)) {
+			lapic_send_ipi((uint32_t) id, IPI_VECTOR_CALL);
+			targets++;
+		}
+
+	for (spins = 0; spins < 400000000ULL; spins++) {
+		if (atomic_load64(&call_acks) >= targets)
+			break;
+		cpu_pause();
+	}
+
+	if (atomic_load64(&call_acks) < targets)
+		panic("ipi: a processor in a targeted cross-call never "
+		      "answered (mask 0x%llx, %u expected, %llu arrived)",
+		      (unsigned long long) mask, targets,
+		      (unsigned long long) atomic_load64(&call_acks));
 
 	hw_lock_unlock(&call_lock);
 }

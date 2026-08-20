@@ -8,8 +8,10 @@
 #include <stdint.h>
 
 #include <cpu/ipi.h>
+#include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/smp.h>
+#include <pmap/pmap.h>	/* cpus_using, pmap_kernel (#439) */
 #include <pmap/pte.h>
 #include <pmap/tlb.h>
 #include <sync/atomic.h>
@@ -79,7 +81,7 @@ static void tlb_flush_handler(void *arg)
 	const struct tlb_request *r = arg;
 
 	tlb_flush_local_range(r->va, r->size);
-	served[cpu_apic_id()]++;
+	served[percpu_apic_id()]++;
 }
 
 uint64_t tlb_flushes_served(uint32_t apic_id)
@@ -90,7 +92,7 @@ uint64_t tlb_flushes_served(uint32_t apic_id)
 	return atomic_load64(&served[apic_id]);
 }
 
-void tlb_flush_range(uint64_t va, uint64_t size)
+void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 {
 	/*
 	 * On the stack, read by other processors — which is safe for exactly
@@ -98,6 +100,8 @@ void tlb_flush_range(uint64_t va, uint64_t size)
 	 * has finished with it, so this frame outlives every reader of it.
 	 */
 	struct tlb_request r = { va, size };
+
+	uint64_t using;
 
 	/*
 	 * This processor first.  Not for correctness — the order between the
@@ -109,14 +113,66 @@ void tlb_flush_range(uint64_t va, uint64_t size)
 	tlb_flush_local_range(va, size);
 
 	/*
-	 * Costs nothing while there is nobody else: ipi_call_others() returns
-	 * at once when this is the only processor online, which is what lets
-	 * every path through pmap use this form from the first page it maps.
+	 * ── Who else has to be told (#439) ────────────────────────────────
+	 *
+	 * PMAP_NULL means the caller has no address space object to name, or
+	 * means the kernel's own: every processor keeps the kernel half loaded
+	 * at all times, so for those mappings the broadcast is the right
+	 * answer rather than a pessimistic one.
+	 *
+	 * ⚠️ pmap_kernel() is asked as well as PMAP_NULL, and it must be: the
+	 * kernel pmap is a real object with a real cpus_using, and that set is
+	 * NOT the set of processors holding kernel translations.  It records
+	 * who has that root in CR3, which is nobody once user threads are
+	 * running — every one of them is in some user space whose upper half
+	 * is a copy of the kernel's.  Trusting the set here would silently
+	 * stop shooting down kernel mappings on every processor in the
+	 * machine, and the first symptom would be somewhere else entirely.
 	 */
-	ipi_call_others(tlb_flush_handler, &r);
+	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
+		/*
+		 * Costs nothing while there is nobody else: ipi_call_others()
+		 * returns at once when this is the only processor online.
+		 */
+		ipi_call_others(tlb_flush_handler, &r);
+		return;
+	}
+
+	/*
+	 * Read once.  A processor joining the set after this load is a
+	 * processor that is about to load CR3 with this root — and CR3 is
+	 * written after the entry we just changed was already gone from the
+	 * table, so what it walks is the new state.  It has nothing stale to
+	 * discard, which is why missing it here is not a hole.
+	 *
+	 * A processor LEAVING after this load still gets its interrupt and
+	 * flushes something it no longer needs, which costs a message.
+	 */
+	using = atomic_load64(&pmap->cpus_using);
+
+	/*
+	 * Nobody has this space loaded, so the local flush above was the whole
+	 * job.  This is the ORDINARY case, not an edge one: a freshly forked
+	 * address space is loaded on the processor doing the forking and on no
+	 * other, and that processor's own bit is not in the set it would send
+	 * to anyway.
+	 *
+	 * ⚠️ It is also what keeps the boot self-tests working, and that is
+	 * worth naming rather than leaving as a happy accident.  They build
+	 * pmaps and unmap from them before percpu_activate() has run, and
+	 * ipi_call_mask() needs this processor's APIC id to strike its own bit
+	 * out -- which it reads from the per-CPU block that does not exist yet.
+	 * Returning here means it is never asked.  A pmap can only have a bit
+	 * set by pmap_activate(), which cannot run before that block exists, so
+	 * "the set is empty" and "there is no block" cannot come apart.
+	 */
+	if (using == 0)
+		return;
+
+	ipi_call_mask(using, tlb_flush_handler, &r);
 }
 
-void tlb_flush_all(void)
+void tlb_flush_all(struct pmap *pmap)
 {
-	tlb_flush_range(0, 0);
+	tlb_flush_range(pmap, 0, 0);
 }

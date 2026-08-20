@@ -508,7 +508,7 @@ static void bench_cost_worker(void)
 		 * it.  It also grew the pv list of the one frame every worker
 		 * maps to four hundred entries and wedged the run.
 		 */
-		(void) pmap_map_page(bench_pmap->root_pa, va, pa,
+		(void) pmap_map_page(bench_pmap, va, pa,
 				     INTEL_PTE_USER,
 				     &bench_pmap->collect_lock);
 	}

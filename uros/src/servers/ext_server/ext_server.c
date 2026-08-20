@@ -66,6 +66,23 @@
 #include "ext2fs_server_server.h"
 #include "vfs_server.h"
 #include "vfs_types.h"
+
+/*
+ * Whether the ordinary opens are announced (-v).
+ *
+ * Off, because a boot printed 561 lines from one function -- 450 successful
+ * opens and 111 misses, 103 of the misses from a benchmark measuring how fast
+ * a lookup fails.  A log where the ordinary shouts as loudly as the broken
+ * teaches its reader to skip lines, and the line skipped next is the one that
+ * mattered.
+ *
+ * ⚠️ A switch and not a deletion, and the difference is that the switch can be
+ * thrown without a rebuild: bootstrap.conf's second field onwards is argv and
+ * it reaches the server -- name_server has read `-d' from it since it was
+ * written.  This server was not refusing arguments, it was not looking at
+ * them: `(void)argc; (void)argv;'.
+ */
+static int ext2_verbose = 0;
 #include "vfs_flipc.h"                   /* fast-path protocol (#232) */
 #include "ahci_batch.h"
 #include "device_master.h"
@@ -466,14 +483,43 @@ ds_ext2_open(
 			mnt->open_files[fid].in_use = 0;
 			mnt->open_files[fid].path[0] = '\0';
 			pthread_mutex_unlock(&mnt->of_lock);
-			printf("ext2: open \"%s\" failed (rc=%d)\n",
-			       path, rc);
+
+			/*
+			 * ⚠️ An absent file is an ANSWER, not a fault, and it
+			 * used to be announced as one.
+			 *
+			 * A single boot printed 111 of these, and 103 of them
+			 * came from one benchmark measuring how fast a lookup
+			 * misses -- so the loudest thing in the log was a test
+			 * getting exactly the result it asked for.  The caller
+			 * already receives VFS_ERR_NOENT and every test that
+			 * cares reports its own verdict; nothing was learning
+			 * anything from the line.
+			 *
+			 * 🔑 What that costs is not tidiness.  A log where the
+			 * ordinary shouts as loudly as the broken teaches its
+			 * reader to skip lines, and the line skipped next is
+			 * the one that mattered.  Real failures -- I/O,
+			 * corruption, a mount gone -- still print here, and now
+			 * they print alone.
+			 */
+			if (rc != FS_NO_ENTRY || ext2_verbose)
+				printf("ext2: open \"%s\" failed (rc=%d)\n",
+				       path, rc);
 			return KERN_FAILURE;
 		}
 		pthread_mutex_lock(&mnt->of_lock);
 		mnt->open_files[fid].private = priv;
 		pthread_mutex_unlock(&mnt->of_lock);
-		printf("ext2: opened \"%s\" -> fid=%u\n", path, fid + 1);
+		/*
+		 * And the successful open, 450 lines in the same boot: bring-up
+		 * scaffolding from when the question was whether this server
+		 * could open a file at all.  The fid goes back to the caller,
+		 * which is where it is used.
+		 */
+		if (ext2_verbose)
+			printf("ext2: opened \"%s\" -> fid=%u\n",
+			       path, fid + 1);
 	}
 
 	*fid_out = (natural_t)(fid + 1);
@@ -1852,7 +1898,17 @@ int
 main(int argc, char **argv)
 {
 	kern_return_t kr;
-	(void)argc; (void)argv;
+	int	      i;
+
+	/*
+	 * Unknown arguments are ignored rather than fatal: this server is
+	 * started by bootstrap from a line in bootstrap.conf, and a server that
+	 * refuses to boot over a flag it does not know is a worse failure than
+	 * one that ignores it.
+	 */
+	for (i = 1; i < argc; i++)
+		if (strcmp(argv[i], "-v") == 0)
+			ext2_verbose = 1;
 
 	kr = bootstrap_ports(bootstrap_port,
 			     &host_port, &device_port,
@@ -1868,7 +1924,7 @@ main(int argc, char **argv)
 	 * if gpu_server isn't reachable; serial console keeps working. */
 	(void)gpu_console_init("ext");
 
-	printf("\n=== ext2 filesystem server ===\n");
+	printf("\n=== ext2 filesystem server " EXT2_SERVER_VERSION_STRING " ===\n");
 
 	/* Create port set for all mount ports */
 	kr = mach_port_allocate(mach_task_self(),

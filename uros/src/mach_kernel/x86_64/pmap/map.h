@@ -14,6 +14,13 @@
 
 #include <stdint.h>
 
+/*
+ * For pmap_t.  A real dependency rather than a convenience: since #439 these
+ * calls take the address space and not its root, because the shootdown each
+ * of them ends in has to know whose translations it is discarding.
+ */
+#include <pmap/pmap.h>
+
 #define PMAP_MAP_OK		0
 #define PMAP_MAP_NO_FRAME	1	/* nothing left to build a table in */
 #define PMAP_MAP_BLOCKED	2	/* a large page already covers this */
@@ -42,7 +49,19 @@
  * PMAP_ARM_PMAP_LOCK, which exists to be measured against the other arm
  * (#455); in PMAP_ARM_COLLECT_BIT it is not touched at all.
  */
-int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
+
+/*
+ * ⚠️ These four take the pmap and not its root (#439).
+ *
+ * Every one of them ends in a shootdown, and a shootdown cannot be narrowed
+ * to the processors that could hold the mapping unless it knows whose
+ * mapping it is.  A raw root_pa is the CR3 value and nothing else: it names
+ * the tables and not the address space, so it cannot answer "who has this
+ * loaded".  Each of these already read the root out of a pmap at every call
+ * site -- `pmap->root_pa' -- so the pmap was always the caller's real
+ * subject and the root was the part of it this layer happened to want.
+ */
+int pmap_map_page(pmap_t pmap, uint64_t va, uint64_t pa, uint64_t flags,
 		  volatile uint8_t *lock);
 
 /*
@@ -53,7 +72,7 @@ int pmap_map_page(uint64_t root_pa, uint64_t va, uint64_t pa, uint64_t flags,
  * last entry goes away is collection, a separate operation with its own
  * bookkeeping, not something to fold into every unmap.
  */
-uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va);
+uint64_t pmap_unmap_page(pmap_t pmap, uint64_t va);
 
 /*
  * Change the permission bits (INTEL_PTE_PERM) of the leaf mapping va,
@@ -61,7 +80,7 @@ uint64_t pmap_unmap_page(uint64_t root_pa, uint64_t va);
  * changed, or zero if va was not mapped.  Works on a large leaf as readily
  * as a small one — the protection lives in the entry either way.
  */
-uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags);
+uint64_t pmap_protect_page(pmap_t pmap, uint64_t va, uint64_t flags);
 
 /*
  * Replace the large leaf covering va with a table of next-level entries that
@@ -75,6 +94,6 @@ uint64_t pmap_protect_page(uint64_t root_pa, uint64_t va, uint64_t flags);
  * the same addresses — and is the step that lets a fine-grained operation
  * then touch one sub-page of what used to be one big one.
  */
-uint64_t pmap_split_page(uint64_t root_pa, uint64_t va);
+uint64_t pmap_split_page(pmap_t pmap, uint64_t va);
 
 #endif	/* _X86_64_PMAP_MAP_H_ */
