@@ -266,6 +266,7 @@
 #include <kern/macro_help.h>
 #include <kern/zalloc.h>
 #include <kern/misc_protos.h>
+#include <kern/fault_profile.h>	/* #482: where a copy-on-write fault goes */
 
 #if	NORMA_VM
 #include <kern/host.h>
@@ -1611,6 +1612,24 @@ no_clustering:
 	    "vm_f_page: page_copy obj 0x%X, offset 0x%X, m 0x%X, copy_m 0x%X\n",
 				(integer_t)object, offset,
 				(integer_t)m, (integer_t)copy_m, 0);
+			/*
+			 * #482.  The same event as the fast path's copy, on
+			 * the road that has to talk to a pager -- counted and
+			 * not profiled.
+			 *
+			 * 🔑 The count is what makes the breakdown mean
+			 * anything.  It describes the fast path, and a table
+			 * that describes the fast path while the faults are
+			 * going the other way describes nothing; zero here is
+			 * the presence that turns "the fast path is what runs"
+			 * from an assumption into an observation.
+			 *
+			 * ⚠️ Only this copy.  The other vm_page_copy() in this
+			 * function pushes a page into a copy object, which is
+			 * the symmetric-copy strategy and a different event
+			 * wearing the same instruction.
+			 */
+			FP_SLOW();
 			vm_page_copy(m, copy_m);
 			vm_object_lock(object);
 
@@ -2082,11 +2101,19 @@ vm_fault(
 	 *	it to begin the search.
 	 */
 
+	/*
+	 * #482.  RetryFault: is above, so a fault that goes round again runs
+	 * these marks a second time and its slices carry both attempts.  That
+	 * is what happened and the sample says so -- it appears as an outlier,
+	 * which the median is chosen to survive.
+	 */
 	vm_map_lock_read(map);
+	FP_MARK(FP_MAPLOCK);
 	kr = vm_map_lookup_locked(&map, vaddr, fault_type, &version,
 				&object, &offset,
 				&prot, &wired,
 				&behavior, &lo_offset, &hi_offset);
+	FP_MARK(FP_LOOKUP);
 
 	if (kr != KERN_SUCCESS) {
 		vm_map_unlock_read(map);
@@ -2222,6 +2249,14 @@ FastPmapEnter:
 #endif	/* STATIC_CONFIG */
 
 
+				/*
+				 * #482, shootdown site two of two.  This one
+				 * is about the space that faulted: the entry
+				 * being replaced has to stop being cached on
+				 * whichever processors hold it, which is the
+				 * cost #439 narrowed from every processor to
+				 * the ones that could.
+				 */
 				PMAP_ENTER(vm_map_pmap(map), vaddr, m,
 					   prot, wired);
 				/* Sync I & D caches for new mapping */
@@ -2230,6 +2265,7 @@ FastPmapEnter:
 					       PAGE_SIZE,
 					       MATTR_CACHE,
 					       &mv_cache_sync);
+				FP_MARK(FP_ENTER);
 
 				/*
 				 *	Grab the object lock to manipulate
@@ -2245,7 +2281,9 @@ FastPmapEnter:
 				 */
 
 				vm_object_lock(object);
+				FP_MARK(FP_OBJLOCK);
 				vm_page_lock_queues();
+				FP_MARK(FP_QLOCK);
 				if (!m->reference)
 					m->reference = TRUE;
 				if (change_wiring) {
@@ -2278,6 +2316,7 @@ FastPmapEnter:
 				vm_object_paging_end(object);
 				vm_object_unlock(object);
 				vm_map_unlock_read(map);
+				FP_MARK(FP_QTAIL);
 				return KERN_SUCCESS;
 			}
 
@@ -2319,9 +2358,25 @@ FastPmapEnter:
 			 *	source of the copy.
 			 */
 
+			/*
+			 * #482.  From here the sample has a shape the
+			 * breakdown can describe, and FP_COW() is what makes
+			 * it committable: every other route through this
+			 * function runs the same marks and is thrown away.
+			 */
+			FP_MARK(FP_CHAIN);
+			FP_COW();
+
+			/*
+			 * #482.  The two marks for this call are INSIDE
+			 * vm_page_alloc() -- it is two operations wearing one
+			 * name, and the first measurement made it 46% of the
+			 * fault, which is too much to leave unattributed.
+			 */
 			cur_m = m;
 			m = vm_page_alloc(object, offset);
 			if (m == VM_PAGE_NULL) {
+				FP_ABANDON();	/* a fragment, not a fault */
 				break;
 			}
 
@@ -2340,8 +2395,10 @@ FastPmapEnter:
 			vm_object_unlock(cur_object);
 			vm_object_paging_begin(object);
 			vm_object_unlock(object);
+			FP_MARK(FP_OBJLOCK);
 
 			vm_page_copy(cur_m, m);
+			FP_MARK(FP_COPY);	/* #407 measured this at 228 */
 			VM_STAT(cow_faults++);
 
 			/*
@@ -2367,12 +2424,29 @@ FastPmapEnter:
 
 			vm_object_lock(object);
 			vm_object_lock(cur_object);
+			FP_MARK(FP_OBJLOCK);
 
+			/*
+			 * #482.  The acquire gets a slice of its own, and it
+			 * earns one: this lock is released only after
+			 * pmap_page_protect() below, so it is held ACROSS a
+			 * cross-processor shootdown, and everyone else who
+			 * wants it waits for that shootdown to finish.
+			 */
 			vm_page_lock_queues();
+			FP_MARK(FP_QLOCK);
 			vm_page_deactivate(cur_m);
 			m->dirty = TRUE;
+			FP_MARK(FP_QDEACT);
+			/*
+			 * #482, shootdown site one of two.  This one is about
+			 * the SOURCE page: it severs the mapping in every
+			 * space that had it, so its cost is a function of how
+			 * many spaces those are, not of this fault.
+			 */
 			pmap_page_protect(cur_m->phys_addr,
 					  VM_PROT_NONE);
+			FP_MARK(FP_PROTECT);
 			vm_page_unlock_queues();
 
 			PAGE_WAKEUP_DONE(cur_m);
@@ -2386,9 +2460,12 @@ FastPmapEnter:
 			 */
 
 			vm_object_paging_end(object);
+			FP_MARK(FP_QREL);
 			vm_object_collapse(object);
+			FP_MARK(FP_COLLAPSE);
 			vm_object_paging_begin(object);
 			vm_object_unlock(object);
+			FP_MARK(FP_OBJLOCK);
 
 			goto FastPmapEnter;
 		}

@@ -72,6 +72,27 @@ endif()
 # None of those names collide with a top-level kernel directory (vm/, kern/,
 # ipc/ ...), so <pmap/pte.h> can never resolve to the wrong header once the
 # MI tree is on the include path too.
+
+# #482 copy-on-write phase breakdown: a timestamp at the top of trap_dispatch()
+# and twelve more down the fast fault path, kept per processor and printed
+# every sixteen faults.  It widens the fault it measures -- the dump says by
+# how much -- so it is a measuring build, not a normal or a perf one.
+#
+# 🔴 DECLARED HERE, above the branch, and appended inside BOTH arms.  The two
+# targets do not share a define list: x86-64 builds KERNEL_DEFINES_BARE in its
+# own arm and i386 builds KERNEL_DEFINES in the other, so an option declared in
+# one arm is not merely absent from the other -- it is accepted on the command
+# line and silently does nothing there.  That is how a measuring build comes to
+# look exactly like a measuring build and behave like an ordinary one.
+option(UROS_FAULT_PROFILE "Build the #482 copy-on-write fault phase profile" OFF)
+
+# #385 layer four: poison a page on its way into the free list and verify it on
+# the way out.  Forensic, not an invariant: it fingerprints whoever wrote a page
+# while it was free.  #482 measured the read side at 44% of a copy-on-write
+# fault, so it no longer rides on MACH_ASSERT -- which is ON in Release.
+# Same both-arms rule as above: declared here, appended in each arm.
+option(UROS_VM_PAGE_POISON "Build the #385 free-page poison (expensive: two page traversals per recycle)" OFF)
+
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
 
@@ -225,6 +246,14 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       # -mgeneral-regs-only so that entry from user mode never has to save
       # vector state, which means no floating point anywhere in it (#453).
       KERNEL_FLOAT_OK=0)
+  if(UROS_FAULT_PROFILE)
+      list(APPEND KERNEL_DEFINES_BARE FAULT_PROFILE=1)
+      message(STATUS "#482 copy-on-write fault phase profile: ON (x86_64)")
+  endif()
+  if(UROS_VM_PAGE_POISON)
+      list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
+      message(STATUS "#385 free-page poison: ON (x86_64)")
+  endif()
   list(TRANSFORM KERNEL_DEFINES_BARE PREPEND -D OUTPUT_VARIABLE KERNEL_DEFINES)
 
   # ⚠️ #452 added the machine-independent tree to this list, and it is the
@@ -637,6 +666,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/etap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/eventcount.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/exception.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/fault_profile.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/hmac_sha256.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/host.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_clock.c
@@ -850,6 +880,20 @@ option(UROS_S319_INSTRUMENT "Build the #319 runq instrumentation (s319 counters 
 if(UROS_S319_INSTRUMENT)
     list(APPEND KERNEL_DEFINES -DS319_INSTRUMENT=1)
     message(STATUS "#319 s319 scheduler instrumentation: ON")
+endif()
+
+# The other arm of the #482 option declared above the arch branch.  Nothing on
+# i386 opens a sample -- the hook that does lives in the x86-64 trap path -- so
+# what this buys here is that the facility is COMPILED on both targets and
+# cannot rot behind a switch only one of them can turn on.
+if(UROS_FAULT_PROFILE)
+    list(APPEND KERNEL_DEFINES -DFAULT_PROFILE=1)
+    message(STATUS "#482 copy-on-write fault phase profile: ON (i386)")
+endif()
+
+if(UROS_VM_PAGE_POISON)
+    list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
+    message(STATUS "#385 free-page poison: ON (i386)")
 endif()
 
 # MIG-specific flags.  TypeCheck is the argument validation in the generated
@@ -1119,6 +1163,7 @@ set(KERN_SOURCES
     kern/exception.c
     kern/eventcount.c
     kern/etap.c
+    kern/fault_profile.c
     kern/lock.c
     kern/host.c
     kern/ipc_clock.c

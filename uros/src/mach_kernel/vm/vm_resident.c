@@ -267,6 +267,7 @@
 #include <vm/vm_pageout.h>
 #include <vm/vm_kern.h>			/* kernel_memory_allocate() */
 #include <kern/misc_protos.h>
+#include <kern/fault_profile.h>	/* #482 */
 #include <zone_debug.h>
 #include <vm/cpm.h>
 #include <mach/machine/vm_param.h>	/* pa_is_lowmem */
@@ -1175,6 +1176,41 @@ vm_page_init(
  *	Remove a fictitious page from the free list.
  *	Returns VM_PAGE_NULL if there are no free pages.
  */
+/*
+ * ── #385 layer four: the poison, and why it now has its own switch (#482) ──
+ *
+ * The hunt for #385 left two layers behind, and they cost very different
+ * things.  The canary is a pvh list-head read on each free -- "is anything
+ * still mapping the page somebody is releasing" -- and it is the one that
+ * actually caught the bug, with the freeing call chain on the stack.  Layer
+ * four is forensic: vm_page_release() writes 0xF5EEF5EE over the whole page,
+ * and vm_page_grab()/grab_any() read all 1024 words back, so that a word which
+ * changed while the page sat free fingerprints whoever wrote it.
+ *
+ * 🔥 #482 measured what that costs, and it is not an assertion's worth.  In a
+ * copy-on-write fault at one processor the read side alone was 8,910 cycles of
+ * a 20,400-cycle fault -- 44% -- against 240 for the allocation it is bolted
+ * to, and nearly three times the page copy the fault exists to perform.  The
+ * write side is the same page again on every free.  Two whole-page traversals
+ * and two kmap/kunmap pairs per page recycle.
+ *
+ * ⚠️ Being under MACH_ASSERT was not enough, and that is the actual mistake
+ * rather than the cost.  MACH_ASSERT is on in Release on both targets, and
+ * everything else under it is a comparison -- so an expensive forensic layer
+ * filed beside cheap invariant checks is paid by everyone who never asked for
+ * it, and every performance number this port has taken has had it in.
+ *
+ * So: its own switch, off, with the canary left where it is.
+ *
+ *	cmake -DUROS_VM_PAGE_POISON=ON
+ *
+ * Worth turning on the day a page is suspected of being written while free --
+ * which is what it is for -- and not before.
+ */
+#ifndef	VM_PAGE_POISON
+#define	VM_PAGE_POISON	0
+#endif
+
 int	c_vm_page_grab_fictitious = 0;
 int	c_vm_page_release_fictitious = 0;
 int	c_vm_page_more_fictitious = 0;
@@ -1430,8 +1466,9 @@ vm_page_grab(void)
 		panic("vm_page_grab: highmem page 0x%lx on lowmem list!",
 		      (unsigned long) mem->phys_addr);
 	mutex_unlock(&vm_page_queue_free_lock);
+	FP_MARK(FP_GRAB);		/* #482: allocating ends here */
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && VM_PAGE_POISON
 	/*
 	 * #385 hunt, layer 4: verify the free-list poison (see
 	 * vm_page_release).  A changed word means somebody wrote the
@@ -1460,6 +1497,12 @@ vm_page_grab(void)
 		kunmap(mem->phys_addr);
 	}
 #endif	/* MACH_ASSERT */
+	/*
+	 * #482.  Outside the #if, so the slice exists in both builds and reads
+	 * zero in the one that does not scan -- a phase that vanishes with its
+	 * cost leaves a table that cannot be compared against the other build.
+	 */
+	FP_MARK(FP_POISON);
 
 	/*
 	 *	Decide if we should poke the pageout daemon.
@@ -1525,7 +1568,7 @@ vm_page_grab_any(void)
 	mem->free = FALSE;
 	mutex_unlock(&vm_page_queue_free_lock);
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && VM_PAGE_POISON
 	/* #385 hunt, layer 4: same poison check as vm_page_grab() —
 	 * this is the grab user-space faults come through. */
 	if (mem->poisoned) {
@@ -1590,6 +1633,7 @@ vm_page_release(
 		panic("vm_page_release: page 0x%lx still mapped (#385)",
 		      (unsigned long) mem->phys_addr);
 
+#if	VM_PAGE_POISON
 	/*
 	 * #385 hunt, layer 4: poison the page on its way into the free
 	 * list.  vm_page_grab()/grab_any() verify the poison on the way
@@ -1609,6 +1653,7 @@ vm_page_release(
 		kunmap(mem->phys_addr);
 		mem->poisoned = TRUE;
 	}
+#endif	/* VM_PAGE_POISON */
 #endif	/* MACH_ASSERT */
 
 	mutex_lock(&vm_page_queue_free_lock);
@@ -1775,11 +1820,25 @@ vm_page_alloc(
 {
 	register vm_page_t	mem;
 
+	/*
+	 * #482.  Two marks, because this is two operations: taking a page off
+	 * the free list, and putting it into an object and into the global page
+	 * hash.  Together they were 46% of a copy-on-write fault -- by a wide
+	 * margin the largest phase, larger than the copy and larger than the
+	 * shootdown -- and "vm_page_alloc" names the function rather than the
+	 * work, which is what an optimisation would have to touch.
+	 *
+	 * ⚠️ Charged to whatever sample is open, so a call from anywhere else
+	 * during an armed fault would land in these buckets.  The fast
+	 * copy-on-write path calls this exactly once, between two marks of its
+	 * own, and nothing else in that stretch allocates.
+	 */
 	mem = vm_page_grab();
 	if (mem == VM_PAGE_NULL)
 		return VM_PAGE_NULL;
 
 	vm_page_insert(mem, object, offset);
+	FP_MARK(FP_INSERT);
 
 	return(mem);
 }

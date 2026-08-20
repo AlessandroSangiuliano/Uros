@@ -129,7 +129,31 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * stop shooting down kernel mappings on every processor in the
 	 * machine, and the first symptom would be somewhere else entirely.
 	 */
-	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
+	/*
+	 * ── Putting the broadcast back, to find out what it cost (#482) ────
+	 *
+	 * #439 narrowed this on an ARGUMENT: the page copy did not move a cycle
+	 * between one processor and eight while the whole fault rose thirty
+	 * times over, and the shootdown was the one part of the path whose cost
+	 * is a function of processor count.  The narrowing worked -- 35,490 down
+	 * to 5,790 -- and a result is not a premise.
+	 *
+	 * The phase breakdown cannot confirm the premise on its own, because
+	 * what it now measures is a fault with no broadcast in it: the growth
+	 * the argument was about is gone, and "nothing grows" is consistent with
+	 * the argument having been right and with its having been right for the
+	 * wrong reason.  🔥 A correction is verified by TAKING IT AWAY.
+	 *
+	 * So this switch restores the broadcast and nothing else -- same kernel,
+	 * same run, same instrument -- and the question becomes an observation:
+	 * does FP_PROTECT plus FP_ENTER swell while every other phase stays
+	 * where it was?  Off in every build that is not answering that question.
+	 */
+#ifndef	ABLATE_439
+#define	ABLATE_439	0
+#endif
+
+	if (ABLATE_439 || pmap == PMAP_NULL || pmap == pmap_kernel()) {
 		/*
 		 * Costs nothing while there is nobody else: ipi_call_others()
 		 * returns at once when this is the only processor online.

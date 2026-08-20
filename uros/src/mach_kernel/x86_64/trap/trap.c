@@ -16,6 +16,7 @@
 #include <kern/thread.h>		/* #467: current_act */
 #include <kern/thread_act.h>
 #include <vm/vm_fault.h>		/* #467: hand a fault to the MI kernel */
+#include <kern/fault_profile.h>	/* #482: open and close the sample     */
 
 /*
  * ── Taking #467 back out again, one arm at a time (#467) ──────────────
@@ -1145,6 +1146,19 @@ fault_in(vm_map_t map, uint64_t addr, vm_prot_t prot,
 	if (had)
 		interrupts_enable();
 
+	/*
+	 * #482.  This closes FP_ENTRY, so that phase is everything from the
+	 * handler's first C instruction to the call: the SMAP restore, the
+	 * vector dispatch, CR2, choosing the map, and this function's own
+	 * decision about the interrupt flag.
+	 *
+	 * 🔴 What is NOT in it is the assembly entry -- swapgs, the frame save,
+	 * and IRETQ on the way back.  Those sit outside every slice and are not
+	 * lost: cow_test times the same fault from ring 3, and the difference
+	 * between its whole and this one is exactly that assembly.
+	 */
+	FP_MARK(FP_ENTRY);
+
 	kr = vm_fault(map, trunc_page((vm_offset_t) addr), prot, FALSE);
 
 	if (had)
@@ -1284,6 +1298,23 @@ void trap_dispatch(struct trap_frame *frame)
 	 * attempted, so a non-page-fault carries a code that means "not this".
 	 */
 	kern_return_t	fault_kr = KERN_SUCCESS;
+
+	/*
+	 * #482, and it is the first statement for a reason: "trap entry" is one
+	 * of the phases, and a phase cannot be measured from a point after it.
+	 *
+	 * ⚠️ For every trap this kernel takes, not only for page faults.  The
+	 * cost is one timestamp and a dozen stores on every interrupt in a
+	 * measuring build, and the alternative -- deciding first whether this
+	 * trap is interesting -- puts the decision inside the interval it is
+	 * timing.  A trap that turns out not to be a copy-on-write fault simply
+	 * never commits.
+	 *
+	 * The frame's address is the sample's owner, which is how a nested trap
+	 * is caught without a counter anyone has to remember to decrement on
+	 * each of this function's ten exits.
+	 */
+	FP_BEGIN(frame);
 
 	/*
 	 * ── SMAP back on, for the handler (#468) ──────────────────────────
@@ -1472,8 +1503,17 @@ void trap_dispatch(struct trap_frame *frame)
 				     : VM_PROT_READ;
 
 		if (!ABLATE_467_ARM3 && map != VM_MAP_NULL
-		    && fault_in(map, read_cr2(), prot, frame) == KERN_SUCCESS)
+		    && fault_in(map, read_cr2(), prot, frame) == KERN_SUCCESS) {
+			/*
+			 * #482 here too.  A copyout into a page the task holds
+			 * copy-on-write faults at ring 0 on a user address, and
+			 * it is the same fault down the same path -- leaving it
+			 * out would report a subset while claiming the whole.
+			 */
+			FP_MARK(FP_RETURN);
+			FP_COMMIT(frame);
 			return;		/* the copy runs again and succeeds */
+		}
 	}
 
 	if ((frame->cs & 3) == 0) {
@@ -1604,8 +1644,17 @@ void trap_dispatch(struct trap_frame *frame)
 		 */
 		if (!ABLATE_467_ARM1 && map != VM_MAP_NULL) {
 			fault_kr = fault_in(map, addr, prot, frame);
-			if (fault_kr == KERN_SUCCESS)
+			if (fault_kr == KERN_SUCCESS) {
+				/*
+				 * #482.  FP_RETURN closes here and not on the
+				 * far side of vm_fault(), so it covers the
+				 * unwind the fault actually pays: the interrupt
+				 * flag going back, the returns, and this test.
+				 */
+				FP_MARK(FP_RETURN);
+				FP_COMMIT(frame);
 				return;	/* the instruction runs again */
+			}
 		}
 	}
 
