@@ -100,6 +100,27 @@
  *      the scan            3,120 (44%)     60 (1.4%)
  *      ring 3, cow_test        7,320        4,830
  *
+ * 🔥 And on the kernel that actually ships -- this instrument compiled OUT, so
+ * no marks in the path at all -- cow_test measuring from ring 3, five boots
+ * each, AC and performance:
+ *
+ *      poison ON    5,790 cycles/page      poison OFF   3,390      -41%
+ *
+ * ⚠️ 5,790 is #407's recorded baseline, to the digit, three boots out of five
+ * on the number.  That was not aimed for and it is the most useful thing in
+ * this block: the "before" arm reproduces a measurement taken a month earlier
+ * in the same state, which is what makes the "after" arm a comparison rather
+ * than two numbers from two different worlds.
+ *
+ * 🔑 It moves the break-even too.  The page copy is 225 cycles, so
+ * copy-on-write now pays up to 225/(3,390+225) = 6.2% of pages written,
+ * against #407's ~4%: the fault it defers got cheaper, so deferring is worth
+ * more.
+ *
+ * ⚠️ And it is worth being exact about WHAT improved.  Nothing in the fault
+ * path is faster -- it is identical, line for line.  A debugging cost nobody
+ * knew they were paying stopped being paid.
+ *
  * 🔑 The fixed fraction -- entry, map lock, lookup, return -- is 15%.
  * Clustering copy-on-write faults could amortise at most that, and only by
  * copying pages speculatively, which #407's break-even says is the expensive
