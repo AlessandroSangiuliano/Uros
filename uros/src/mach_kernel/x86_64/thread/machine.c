@@ -172,7 +172,22 @@ act_machine_switch_pcb(thread_act_t thr_act)
 	 * pushes over it, and the frame thread_set_state() wrote into a thread's
 	 * own stack is not where the processor would build the next one.
 	 */
-	desc_set_rsp0(cpu_apic_id(), pcb->ctx.kernel_stack_top);
+	/*
+	 * ⚠️ percpu_apic_id() and not cpu_apic_id(), which is a CPUID (#439).
+	 *
+	 * This runs on every context switch -- switch_context() and
+	 * machine_switch_act() are its only callers here -- and CPUID is
+	 * unconditionally serialising, and under KVM an exit to the hypervisor.
+	 * All desc_set_rsp0() wants the id for is to index tss[], and the
+	 * processor's own block has held it since percpu_activate() was handed
+	 * it.  Both callers are scheduler paths, so that block exists.
+	 *
+	 * 🔑 Found by enumerating the class after taking two of these off the
+	 * shootdown path, rather than by noticing this one: an instruction that
+	 * costs a hypervisor exit reads in C exactly like a field access, and no
+	 * warning distinguishes them.
+	 */
+	desc_set_rsp0(percpu_apic_id(), pcb->ctx.kernel_stack_top);
 }
 
 /*
