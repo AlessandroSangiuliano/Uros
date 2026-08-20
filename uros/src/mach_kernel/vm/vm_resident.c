@@ -1176,6 +1176,41 @@ vm_page_init(
  *	Remove a fictitious page from the free list.
  *	Returns VM_PAGE_NULL if there are no free pages.
  */
+/*
+ * ── #385 layer four: the poison, and why it now has its own switch (#482) ──
+ *
+ * The hunt for #385 left two layers behind, and they cost very different
+ * things.  The canary is a pvh list-head read on each free -- "is anything
+ * still mapping the page somebody is releasing" -- and it is the one that
+ * actually caught the bug, with the freeing call chain on the stack.  Layer
+ * four is forensic: vm_page_release() writes 0xF5EEF5EE over the whole page,
+ * and vm_page_grab()/grab_any() read all 1024 words back, so that a word which
+ * changed while the page sat free fingerprints whoever wrote it.
+ *
+ * 🔥 #482 measured what that costs, and it is not an assertion's worth.  In a
+ * copy-on-write fault at one processor the read side alone was 8,910 cycles of
+ * a 20,400-cycle fault -- 44% -- against 240 for the allocation it is bolted
+ * to, and nearly three times the page copy the fault exists to perform.  The
+ * write side is the same page again on every free.  Two whole-page traversals
+ * and two kmap/kunmap pairs per page recycle.
+ *
+ * ⚠️ Being under MACH_ASSERT was not enough, and that is the actual mistake
+ * rather than the cost.  MACH_ASSERT is on in Release on both targets, and
+ * everything else under it is a comparison -- so an expensive forensic layer
+ * filed beside cheap invariant checks is paid by everyone who never asked for
+ * it, and every performance number this port has taken has had it in.
+ *
+ * So: its own switch, off, with the canary left where it is.
+ *
+ *	cmake -DUROS_VM_PAGE_POISON=ON
+ *
+ * Worth turning on the day a page is suspected of being written while free --
+ * which is what it is for -- and not before.
+ */
+#ifndef	VM_PAGE_POISON
+#define	VM_PAGE_POISON	0
+#endif
+
 int	c_vm_page_grab_fictitious = 0;
 int	c_vm_page_release_fictitious = 0;
 int	c_vm_page_more_fictitious = 0;
@@ -1433,7 +1468,7 @@ vm_page_grab(void)
 	mutex_unlock(&vm_page_queue_free_lock);
 	FP_MARK(FP_GRAB);		/* #482: allocating ends here */
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && VM_PAGE_POISON
 	/*
 	 * #385 hunt, layer 4: verify the free-list poison (see
 	 * vm_page_release).  A changed word means somebody wrote the
@@ -1533,7 +1568,7 @@ vm_page_grab_any(void)
 	mem->free = FALSE;
 	mutex_unlock(&vm_page_queue_free_lock);
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && VM_PAGE_POISON
 	/* #385 hunt, layer 4: same poison check as vm_page_grab() —
 	 * this is the grab user-space faults come through. */
 	if (mem->poisoned) {
@@ -1598,6 +1633,7 @@ vm_page_release(
 		panic("vm_page_release: page 0x%lx still mapped (#385)",
 		      (unsigned long) mem->phys_addr);
 
+#if	VM_PAGE_POISON
 	/*
 	 * #385 hunt, layer 4: poison the page on its way into the free
 	 * list.  vm_page_grab()/grab_any() verify the poison on the way
@@ -1617,6 +1653,7 @@ vm_page_release(
 		kunmap(mem->phys_addr);
 		mem->poisoned = TRUE;
 	}
+#endif	/* VM_PAGE_POISON */
 #endif	/* MACH_ASSERT */
 
 	mutex_lock(&vm_page_queue_free_lock);

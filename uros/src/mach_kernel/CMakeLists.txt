@@ -86,6 +86,13 @@ endif()
 # look exactly like a measuring build and behave like an ordinary one.
 option(UROS_FAULT_PROFILE "Build the #482 copy-on-write fault phase profile" OFF)
 
+# #385 layer four: poison a page on its way into the free list and verify it on
+# the way out.  Forensic, not an invariant: it fingerprints whoever wrote a page
+# while it was free.  #482 measured the read side at 44% of a copy-on-write
+# fault, so it no longer rides on MACH_ASSERT -- which is ON in Release.
+# Same both-arms rule as above: declared here, appended in each arm.
+option(UROS_VM_PAGE_POISON "Build the #385 free-page poison (expensive: two page traversals per recycle)" OFF)
+
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
 
@@ -242,6 +249,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_FAULT_PROFILE)
       list(APPEND KERNEL_DEFINES_BARE FAULT_PROFILE=1)
       message(STATUS "#482 copy-on-write fault phase profile: ON (x86_64)")
+  endif()
+  if(UROS_VM_PAGE_POISON)
+      list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
+      message(STATUS "#385 free-page poison: ON (x86_64)")
   endif()
   list(TRANSFORM KERNEL_DEFINES_BARE PREPEND -D OUTPUT_VARIABLE KERNEL_DEFINES)
 
@@ -878,6 +889,11 @@ endif()
 if(UROS_FAULT_PROFILE)
     list(APPEND KERNEL_DEFINES -DFAULT_PROFILE=1)
     message(STATUS "#482 copy-on-write fault phase profile: ON (i386)")
+endif()
+
+if(UROS_VM_PAGE_POISON)
+    list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
+    message(STATUS "#385 free-page poison: ON (i386)")
 endif()
 
 # MIG-specific flags.  TypeCheck is the argument validation in the generated
