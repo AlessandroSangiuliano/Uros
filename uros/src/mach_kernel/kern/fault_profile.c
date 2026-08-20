@@ -36,8 +36,11 @@ static const char *const	fp_name[FP_PHASES] = {
 	"lookup    ",	/* FP_LOOKUP   */
 	"chain     ",	/* FP_CHAIN    */
 	"obj lock  ",	/* FP_OBJLOCK  */
-	"alloc     ",	/* FP_ALLOC    */
+	"grab      ",	/* FP_GRAB     */
+	"385 poison",	/* FP_POISON   */
+	"insert    ",	/* FP_INSERT   */
 	"copy      ",	/* FP_COPY     */
+	"queue lock",	/* FP_QLOCK    */
 	"protect  *",	/* FP_PROTECT  */
 	"collapse  ",	/* FP_COLLAPSE */
 	"enter    *",	/* FP_ENTER    */
@@ -49,7 +52,7 @@ static const char *const	fp_name[FP_PHASES] = {
  * What one pair of timestamps costs on the machine that is running, measured
  * there rather than assumed.
  *
- * 🔑 Thirteen marks bracket one fault, so this multiplied by thirteen is how
+ * 🔑 FP_MARKS timestamps bracket one fault, so this multiplied by that is how
  * much wider the fault got by being watched.  Printing it is what separates a
  * measurement from a claim: the reader subtracts a number they were given,
  * instead of trusting that the instrument is small enough not to matter.
@@ -140,10 +143,10 @@ fault_profile_dump(void)
 	 * its own slices are what gets printed.
 	 *
 	 * 🔴 Not the per-phase medians, which is the tempting table and the
-	 * wrong one: twelve independent medians come from twelve different
-	 * faults and sum to nothing that ever happened.  One real fault, chosen
-	 * for being the middle one, has slices that add up because they were
-	 * cut out of the same interval.  [technique: measurement discipline]
+	 * wrong one: a median per phase comes from a different fault in every
+	 * column, and they sum to nothing that ever happened.  One real fault,
+	 * chosen for being the middle one, has slices that add up because they
+	 * were cut out of one interval.  [technique: measurement discipline]
 	 */
 	for (i = 0; i < n; i++)
 		col[i] = fp->total[i];
@@ -157,9 +160,10 @@ fault_profile_dump(void)
 	}
 
 	printf("fault_profile[%d] #%u: %d faults, %u interrupted, %u via "
-	       "vm_fault_page; 13 marks x %u cyc = %u\n",
+	       "vm_fault_page; %u marks x %u cyc = %u\n",
 	       cpu, fp->ndumps + 1, n, fp->ndropped, fp->nslow,
-	       fp_pair_cost, 13u * fp_pair_cost);
+	       (unsigned int) FP_MARKS, fp_pair_cost,
+	       (unsigned int) FP_MARKS * fp_pair_cost);
 	printf("fault_profile[%d]   median fault %u cyc (spread %u..%u)\n",
 	       cpu, whole, col[0], col[n - 1]);
 

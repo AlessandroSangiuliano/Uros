@@ -2281,7 +2281,9 @@ FastPmapEnter:
 				 */
 
 				vm_object_lock(object);
+				FP_MARK(FP_OBJLOCK);
 				vm_page_lock_queues();
+				FP_MARK(FP_QLOCK);
 				if (!m->reference)
 					m->reference = TRUE;
 				if (change_wiring) {
@@ -2365,9 +2367,14 @@ FastPmapEnter:
 			FP_MARK(FP_CHAIN);
 			FP_COW();
 
+			/*
+			 * #482.  The two marks for this call are INSIDE
+			 * vm_page_alloc() -- it is two operations wearing one
+			 * name, and the first measurement made it 46% of the
+			 * fault, which is too much to leave unattributed.
+			 */
 			cur_m = m;
 			m = vm_page_alloc(object, offset);
-			FP_MARK(FP_ALLOC);
 			if (m == VM_PAGE_NULL) {
 				FP_ABANDON();	/* a fragment, not a fault */
 				break;
@@ -2419,7 +2426,15 @@ FastPmapEnter:
 			vm_object_lock(cur_object);
 			FP_MARK(FP_OBJLOCK);
 
+			/*
+			 * #482.  The acquire gets a slice of its own, and it
+			 * earns one: this lock is released only after
+			 * pmap_page_protect() below, so it is held ACROSS a
+			 * cross-processor shootdown, and everyone else who
+			 * wants it waits for that shootdown to finish.
+			 */
 			vm_page_lock_queues();
+			FP_MARK(FP_QLOCK);
 			vm_page_deactivate(cur_m);
 			m->dirty = TRUE;
 			FP_MARK(FP_QUEUES);

@@ -101,14 +101,59 @@
  * the number is a total rather than a duration.  Same for FP_QUEUES.
  */
 #define	FP_OBJLOCK	4	/* vm_object lock/unlock/paging, every one */
-#define	FP_ALLOC	5	/* vm_page_alloc() for the new top page  */
-#define	FP_COPY		6	/* vm_page_copy() -- the known 228       */
-#define	FP_PROTECT	7	/* pmap_page_protect(): SHOOTDOWN        */
-#define	FP_COLLAPSE	8	/* vm_object_collapse()                  */
-#define	FP_ENTER	9	/* PMAP_ENTER(): SHOOTDOWN               */
-#define	FP_QUEUES	10	/* page queues, wakeups, the unlocks     */
-#define	FP_RETURN	11	/* vm_fault() returned -> end of handler */
-#define	FP_PHASES	12
+/*
+ * 🔥 vm_page_alloc() split in two, because it is two things and the first
+ * measurement said it was 46% of the whole fault.  vm_page_grab() takes a page
+ * off the free list; vm_page_insert() puts it into the object and into the
+ * global page hash.  A single number covering both names the function and not
+ * the work, and the work is what an optimisation would have to touch.
+ */
+#define	FP_GRAB		5	/* vm_page_grab(): off the free list     */
+/*
+ * 🔥 And then a third, which is not part of allocating a page at all.
+ *
+ * Under MACH_ASSERT -- which this target builds with ON -- vm_page_grab() maps
+ * the page it just took, reads all 1024 words of it looking for the
+ * 0xF5EEF5EE poison that vm_page_release() wrote, and unmaps it.  That is
+ * layer four of the #385 hunt, and #385 is closed.  It reads a whole page,
+ * which is the same quantity of work as the copy this fault exists to do.
+ *
+ * It gets its own slice because a debugging scan inside a phase named after
+ * allocation is a cost attributed to the wrong thing -- and every performance
+ * number this port has taken on x86-64 has had it in.
+ */
+#define	FP_POISON	6	/* MACH_ASSERT: the #385 free-page scan  */
+#define	FP_INSERT	7	/* vm_page_insert(): object + page hash  */
+#define	FP_COPY		8	/* vm_page_copy() -- the known 228       */
+/*
+ * 🔥 Acquiring vm_page_lock_queues(), on its own, because of what it is next
+ * to.  vm_fault.c takes that lock BEFORE pmap_page_protect() and releases it
+ * after -- so the global page-queue lock is held across a cross-processor
+ * shootdown, and every other processor wanting it waits for somebody else's
+ * shootdown to finish.
+ *
+ * With the shootdown narrowed (#439) this is invisible: the set is usually
+ * empty and the lock is held for a few hundred cycles.  With the broadcast put
+ * back it was 43% of the fault -- the same magnitude as the shootdown itself,
+ * and it does not appear anywhere in #439's reasoning or in this issue's.  It
+ * had been folded into the page-queue bucket, where it read as bookkeeping.
+ */
+#define	FP_QLOCK	9	/* waiting for vm_page_lock_queues()     */
+#define	FP_PROTECT	10	/* pmap_page_protect(): SHOOTDOWN        */
+#define	FP_COLLAPSE	11	/* vm_object_collapse()                  */
+#define	FP_ENTER	12	/* PMAP_ENTER(): SHOOTDOWN               */
+#define	FP_QUEUES	13	/* page queues, wakeups, the unlocks     */
+#define	FP_RETURN	14	/* vm_fault() returned -> end of handler */
+#define	FP_PHASES	15
+
+/*
+ * How many timestamps one fault costs: the one FP_BEGIN takes, plus one per
+ * phase.  🔑 Derived and not written down as a number, because the dump
+ * multiplies it by the cost of a pair to say how much wider the fault got by
+ * being watched -- and a literal there goes stale the first time a phase is
+ * added, silently, in the one line whose job is to keep the instrument honest.
+ */
+#define	FP_MARKS	(FP_PHASES + 1)
 
 /*
  * How many faults are kept before the breakdown is printed.

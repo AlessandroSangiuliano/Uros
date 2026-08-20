@@ -267,6 +267,7 @@
 #include <vm/vm_pageout.h>
 #include <vm/vm_kern.h>			/* kernel_memory_allocate() */
 #include <kern/misc_protos.h>
+#include <kern/fault_profile.h>	/* #482 */
 #include <zone_debug.h>
 #include <vm/cpm.h>
 #include <mach/machine/vm_param.h>	/* pa_is_lowmem */
@@ -1430,6 +1431,7 @@ vm_page_grab(void)
 		panic("vm_page_grab: highmem page 0x%lx on lowmem list!",
 		      (unsigned long) mem->phys_addr);
 	mutex_unlock(&vm_page_queue_free_lock);
+	FP_MARK(FP_GRAB);		/* #482: allocating ends here */
 
 #if	MACH_ASSERT
 	/*
@@ -1460,6 +1462,12 @@ vm_page_grab(void)
 		kunmap(mem->phys_addr);
 	}
 #endif	/* MACH_ASSERT */
+	/*
+	 * #482.  Outside the #if, so the slice exists in both builds and reads
+	 * zero in the one that does not scan -- a phase that vanishes with its
+	 * cost leaves a table that cannot be compared against the other build.
+	 */
+	FP_MARK(FP_POISON);
 
 	/*
 	 *	Decide if we should poke the pageout daemon.
@@ -1775,11 +1783,25 @@ vm_page_alloc(
 {
 	register vm_page_t	mem;
 
+	/*
+	 * #482.  Two marks, because this is two operations: taking a page off
+	 * the free list, and putting it into an object and into the global page
+	 * hash.  Together they were 46% of a copy-on-write fault -- by a wide
+	 * margin the largest phase, larger than the copy and larger than the
+	 * shootdown -- and "vm_page_alloc" names the function rather than the
+	 * work, which is what an optimisation would have to touch.
+	 *
+	 * ⚠️ Charged to whatever sample is open, so a call from anywhere else
+	 * during an armed fault would land in these buckets.  The fast
+	 * copy-on-write path calls this exactly once, between two marks of its
+	 * own, and nothing else in that stretch allocates.
+	 */
 	mem = vm_page_grab();
 	if (mem == VM_PAGE_NULL)
 		return VM_PAGE_NULL;
 
 	vm_page_insert(mem, object, offset);
+	FP_MARK(FP_INSERT);
 
 	return(mem);
 }
