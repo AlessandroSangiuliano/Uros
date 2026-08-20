@@ -15,6 +15,15 @@
 struct fault_profile_cpu	fault_profile[NCPUS];
 
 /*
+ * Zero until the machine says otherwise, and it lives in the kernel's own
+ * image on purpose: every address space maps the kernel half, so reading it is
+ * safe from inside any of them.  The thing it is standing in for -- %gs -- is
+ * not.  See the comment on fault_profile_ready in the header for the boot that
+ * went silent proving it.
+ */
+volatile int	fault_profile_ready;
+
+/*
  * What each slice is.
  *
  * ⚠️ The two marked `*' are the calls that end in a shootdown, and they are
@@ -102,16 +111,24 @@ fp_percent(uint32_t part, uint32_t whole)
 void
 fault_profile_dump(void)
 {
-	struct fault_profile_cpu	*fp = &fault_profile[cpu_number()];
+	struct fault_profile_cpu	*fp = fault_profile_slot();
 	uint32_t			col[FP_SAMPLES];
 	uint32_t			whole;
-	int				n = (int) fp->nsamples;
+	int				cpu = cpu_number();
+	int				n;
 	int				median = 0;
 	int				i, p;
 
+	if (fp == (struct fault_profile_cpu *) 0) {
+		printf("fault_profile: asked before this processor has an "
+		       "identity — nothing recorded\n");
+		return;
+	}
+
+	n = (int) fp->nsamples;
 	if (n == 0) {
 		printf("fault_profile[%d]: armed, no copy-on-write fault seen\n",
-		       cpu_number());
+		       cpu);
 		return;
 	}
 
@@ -141,10 +158,10 @@ fault_profile_dump(void)
 
 	printf("fault_profile[%d] #%u: %d faults, %u interrupted, %u via "
 	       "vm_fault_page; 13 marks x %u cyc = %u\n",
-	       cpu_number(), fp->ndumps + 1, n, fp->ndropped, fp->nslow,
+	       cpu, fp->ndumps + 1, n, fp->ndropped, fp->nslow,
 	       fp_pair_cost, 13u * fp_pair_cost);
 	printf("fault_profile[%d]   median fault %u cyc (spread %u..%u)\n",
-	       cpu_number(), whole, col[0], col[n - 1]);
+	       cpu, whole, col[0], col[n - 1]);
 
 	for (p = 0; p < FP_PHASES; p++) {
 		for (i = 0; i < n; i++)
@@ -152,7 +169,7 @@ fault_profile_dump(void)
 		fp_sort(col, n);
 
 		printf("fault_profile[%d]   %s %6u  %2u%%  [%u..%u]\n",
-		       cpu_number(), fp_name[p], fp->sample[median][p],
+		       cpu, fp_name[p], fp->sample[median][p],
 		       fp_percent(fp->sample[median][p], whole),
 		       col[0], col[n - 1]);
 	}
@@ -160,7 +177,7 @@ fault_profile_dump(void)
 	fp->ndumps++;
 	if (fp->ndumps >= FP_MAX_DUMPS)
 		printf("fault_profile[%d]: %u breakdowns printed, no more from "
-		       "this processor\n", cpu_number(), fp->ndumps);
+		       "this processor\n", cpu, fp->ndumps);
 }
 
 /*
@@ -176,16 +193,22 @@ fault_profile_dump(void)
 void
 fault_profile_slow(void)
 {
-	fault_profile[cpu_number()].nslow++;
+	struct fault_profile_cpu	*fp = fault_profile_slot();
+
+	if (fp != (struct fault_profile_cpu *) 0)
+		fp->nslow++;
 }
 
 void
 fault_profile_commit(const void *token)
 {
-	struct fault_profile_cpu	*fp = &fault_profile[cpu_number()];
+	struct fault_profile_cpu	*fp = fault_profile_slot();
 	uint32_t			sum = 0;
 	uint32_t			whole;
 	int				i;
+
+	if (fp == (struct fault_profile_cpu *) 0)
+		return;
 
 	if (!fp->cow)
 		return;			/* not a fast copy-on-write fault */

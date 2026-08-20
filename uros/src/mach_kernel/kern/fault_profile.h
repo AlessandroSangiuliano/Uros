@@ -207,6 +207,59 @@ fault_profile_tsc(void)
 }
 
 /*
+ * Whether asking which processor this is, is a question with an answer yet.
+ *
+ * 🔥 THIS FLAG IS WHY THE KERNEL BOOTS, and the reason is sharper than "not
+ * initialised yet".  cpu_number() reads the id out of this processor's per-CPU
+ * block through %gs, and before percpu_activate() the segment base is zero --
+ * so the read goes to address zero.  The received wisdom, written down after
+ * #439, is that this CANNOT FAIL: address zero is identity-mapped early in
+ * boot, so it returns a byte of the interrupt vector table as a processor
+ * number, and a plausible answer is worse than none.
+ *
+ * That is true only while the kernel is running in the kernel's own address
+ * space.  x86_64/boot/boot_c.c builds a test pmap whose lower half is EMPTY --
+ * it prints "lower half empty" and then runs several self-tests inside it --
+ * and in that space address zero is not mapped at all.  So there cpu_number()
+ * does not lie, it FAULTS: a page fault raised inside the trap handler, which
+ * re-enters the trap handler, which reads %gs again.  The machine went silent
+ * after 71 lines of a 256-line boot with nothing printed, because there was no
+ * path left that could print.
+ *
+ * 🔑 So the guard cannot be a bound on the answer -- the first version was,
+ * and it changed nothing.  It has to be a question that does not go through
+ * %gs at all: a word in the kernel's own image, which every address space maps
+ * because they all share the kernel half.
+ *
+ * The NCPUS bound below stays as the second line, for an application processor
+ * that traps between coming up and reaching its own percpu_activate(): there
+ * the low half IS mapped, so the read is the old failure mode -- a plausible
+ * number -- and a plausible number is what a bound is for.
+ */
+extern volatile int	fault_profile_ready;
+
+/*
+ * This processor's slot, or nothing at all.
+ *
+ * Returning nothing is the honest answer rather than a convenient one: before
+ * the per-CPU block exists there is no processor identity to charge a sample
+ * to, so there is no sample.
+ */
+static __inline__ struct fault_profile_cpu *
+fault_profile_slot(void)
+{
+	unsigned int	cpu;
+
+	if (!fault_profile_ready)
+		return (struct fault_profile_cpu *) 0;
+
+	cpu = (unsigned int) cpu_number();
+	if (cpu >= (unsigned int) NCPUS)
+		return (struct fault_profile_cpu *) 0;
+	return &fault_profile[cpu];
+}
+
+/*
  * Open a sample, owned by this trap's frame.  Called from the trap handler's
  * first C instruction, for every trap -- most of which are not copy-on-write
  * faults and will simply never commit.
@@ -228,8 +281,11 @@ fault_profile_tsc(void)
 static __inline__ void
 fault_profile_begin(const void *token)
 {
-	struct fault_profile_cpu	*fp = &fault_profile[cpu_number()];
+	struct fault_profile_cpu	*fp = fault_profile_slot();
 	int				i;
+
+	if (fp == (struct fault_profile_cpu *) 0)
+		return;
 
 	for (i = 0; i < FP_PHASES; i++)
 		fp->slice[i] = 0;
@@ -245,9 +301,13 @@ fault_profile_begin(const void *token)
 static __inline__ void
 fault_profile_mark(int phase)
 {
-	struct fault_profile_cpu	*fp = &fault_profile[cpu_number()];
-	uint64_t			now = fault_profile_tsc();
+	struct fault_profile_cpu	*fp = fault_profile_slot();
+	uint64_t			now;
 
+	if (fp == (struct fault_profile_cpu *) 0)
+		return;
+
+	now = fault_profile_tsc();
 	fp->slice[phase] += (uint32_t) (now - fp->cursor);
 	fp->cursor = now;
 }
@@ -259,7 +319,10 @@ fault_profile_mark(int phase)
 static __inline__ void
 fault_profile_cow(void)
 {
-	fault_profile[cpu_number()].cow = 1;
+	struct fault_profile_cpu	*fp = fault_profile_slot();
+
+	if (fp != (struct fault_profile_cpu *) 0)
+		fp->cow = 1;
 }
 
 /*
@@ -270,13 +333,21 @@ fault_profile_cow(void)
 static __inline__ void
 fault_profile_abandon(void)
 {
-	fault_profile[cpu_number()].cow = 0;
+	struct fault_profile_cpu	*fp = fault_profile_slot();
+
+	if (fp != (struct fault_profile_cpu *) 0)
+		fp->cow = 0;
 }
 
 extern void	fault_profile_commit(const void *token);
 extern void	fault_profile_slow(void);
 extern void	fault_profile_dump(void);
 
+/*
+ * Said once, by the machine, when asking which processor this is has become a
+ * question with an answer.  Everything above is inert until then.
+ */
+#define	FP_READY()	(fault_profile_ready = 1)
 #define	FP_BEGIN(t)	fault_profile_begin(t)
 #define	FP_MARK(p)	fault_profile_mark(p)
 #define	FP_COW()	fault_profile_cow()
@@ -286,6 +357,7 @@ extern void	fault_profile_dump(void);
 
 #else	/* !FAULT_PROFILE */
 
+#define	FP_READY()	MACRO_BEGIN MACRO_END
 #define	FP_BEGIN(t)	MACRO_BEGIN MACRO_END
 #define	FP_MARK(p)	MACRO_BEGIN MACRO_END
 #define	FP_COW()	MACRO_BEGIN MACRO_END

@@ -66,6 +66,7 @@
 #include <time/clock_event.h>	/* #459 */
 #include <kern/startup.h>	/* setup_main -- the machine-independent kernel */
 #include <kern/misc_protos.h>	/* printf */
+#include <kern/fault_profile.h>	/* #482: arm the instrument once %gs is real */
 
 #define COM1 0x3F8
 
@@ -1391,6 +1392,16 @@ static void percpu_selftest(void)
 	percpu_alloc(self);
 	percpu_activate(self);
 	p = percpu();
+
+	/*
+	 * #482.  From this line on, asking which processor this is has an
+	 * answer; before it the question reads %gs with a zero base, which is
+	 * address zero -- a byte of the interrupt vector table in the kernel's
+	 * own space, and an unmapped page in the test pmap the self-tests above
+	 * run inside.  The instrument's trap hook is on the path that both of
+	 * those would take, so it stays inert until here.
+	 */
+	FP_READY();
 
 	kputs("UrMach x86-64: gs base was ");
 	kputhex64(before);
