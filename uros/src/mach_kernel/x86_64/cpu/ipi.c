@@ -11,6 +11,7 @@
 
 #include <cpu/ipi.h>
 #include <cpu/lapic.h>
+#include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/smp.h>
 #include <sync/atomic.h>
@@ -57,7 +58,7 @@ static void ipi_call_handler(struct trap_frame *frame)
 	if (fn != 0)
 		fn(arg);
 
-	served[cpu_apic_id()]++;
+	served[percpu_apic_id()]++;
 
 	barrier();
 	atomic_inc64(&call_acks);
@@ -158,7 +159,7 @@ void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg)
 	 * target that can never acknowledge — the wait below would spin out
 	 * its budget and panic, on a mask that was perfectly correct.
 	 */
-	mask &= ~(1ULL << (cpu_apic_id() & 63));
+	mask &= ~(1ULL << (percpu_apic_id() & 63));
 
 	if (mask == 0)
 		return;

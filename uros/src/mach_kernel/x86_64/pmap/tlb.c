@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <cpu/ipi.h>
+#include <cpu/percpu.h>
 #include <cpu/regs.h>
 #include <cpu/smp.h>
 #include <pmap/pmap.h>	/* cpus_using, pmap_kernel (#439) */
@@ -80,7 +81,7 @@ static void tlb_flush_handler(void *arg)
 	const struct tlb_request *r = arg;
 
 	tlb_flush_local_range(r->va, r->size);
-	served[cpu_apic_id()]++;
+	served[percpu_apic_id()]++;
 }
 
 uint64_t tlb_flushes_served(uint32_t apic_id)
@@ -148,6 +149,25 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 * flushes something it no longer needs, which costs a message.
 	 */
 	using = atomic_load64(&pmap->cpus_using);
+
+	/*
+	 * Nobody has this space loaded, so the local flush above was the whole
+	 * job.  This is the ORDINARY case, not an edge one: a freshly forked
+	 * address space is loaded on the processor doing the forking and on no
+	 * other, and that processor's own bit is not in the set it would send
+	 * to anyway.
+	 *
+	 * ⚠️ It is also what keeps the boot self-tests working, and that is
+	 * worth naming rather than leaving as a happy accident.  They build
+	 * pmaps and unmap from them before percpu_activate() has run, and
+	 * ipi_call_mask() needs this processor's APIC id to strike its own bit
+	 * out -- which it reads from the per-CPU block that does not exist yet.
+	 * Returning here means it is never asked.  A pmap can only have a bit
+	 * set by pmap_activate(), which cannot run before that block exists, so
+	 * "the set is empty" and "there is no block" cannot come apart.
+	 */
+	if (using == 0)
+		return;
 
 	ipi_call_mask(using, tlb_flush_handler, &r);
 }

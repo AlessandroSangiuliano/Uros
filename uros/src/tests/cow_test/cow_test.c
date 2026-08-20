@@ -587,20 +587,41 @@ run_the_arms(void)
 		unsigned long long f = 0;
 		unsigned long long breakeven;
 
+		unsigned long long sorted[COW_PAGES];
+		int j, k;
+
 		/*
 		 * The first page is dropped, and it is named rather than
 		 * quietly excluded: it carries whatever this task pays once --
 		 * the first shadow object, the first walk of a chain nothing
 		 * has cached.  Seven and not eight, and the eight are printed
 		 * above so the drop can be checked.
+		 *
+		 * 🔑 MEDIAN of the seven, not their mean, and the difference is
+		 * not pedantry.  This number gets compared between builds to
+		 * judge changes worth a few percent, and a mean of seven is
+		 * dragged by one sample: a single page that took forty thousand
+		 * cycles because the host descheduled the guest moves it by
+		 * five thousand, which is the size of the whole quantity being
+		 * measured.  The mean reported a 45% regression that repeated
+		 * sampling could not find.
 		 */
-		for (i = 1; i < COW_PAGES; i++)
-			f += fault_cycles[i];
-		f /= (COW_PAGES - 1);
+		for (j = 1; j < COW_PAGES; j++)
+			sorted[j - 1] = fault_cycles[j];
+
+		for (j = 1; j < COW_PAGES - 1; j++) {
+			unsigned long long v = sorted[j];
+
+			for (k = j - 1; k >= 0 && sorted[k] > v; k--)
+				sorted[k + 1] = sorted[k];
+			sorted[k + 1] = v;
+		}
+
+		f = sorted[(COW_PAGES - 1) / 2];
 
 		breakeven = (copy_cycles * 100) / (f + copy_cycles);
 
-		printf("cow_test: [4] fault %llu cycles/page (first dropped), "
+		printf("cow_test: [4] fault %llu cycles/page (median of 7, first dropped), "
 		       "page copy %llu — copy-on-write is the cheaper choice "
 		       "only while under %llu%% of the pages get written\n",
 		       f, copy_cycles, breakeven);

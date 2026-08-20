@@ -647,6 +647,12 @@ void pmap_destroy(pmap_t pmap)
 	pmap_free(pmap);
 }
 
+void pmap_activate_boot(pmap_t pmap)
+{
+	if (pmap != PMAP_NULL)
+		write_cr3(pmap->root_pa);
+}
+
 void pmap_activate(pmap_t pmap)
 {
 	struct percpu	*pc;
@@ -655,19 +661,6 @@ void pmap_activate(pmap_t pmap)
 
 	if (pmap == PMAP_NULL)
 		return;
-
-	/*
-	 * Before the per-CPU block exists there is nothing to record the
-	 * transition in — and nothing that needs it: this is the boot
-	 * processor, alone, running the machine-dependent self-tests, and a
-	 * shootdown with no other processor to reach is already a local flush.
-	 * The set starts being maintained at the first switch after
-	 * percpu_activate(), which is before any second processor is woken.
-	 */
-	if (!percpu_ready()) {
-		write_cr3(pmap->root_pa);
-		return;
-	}
 
 	pc  = percpu();
 	old = (pmap_t) pc->loaded_pmap;
@@ -682,7 +675,7 @@ void pmap_activate(pmap_t pmap)
 		return;
 	}
 
-	bit = cpu_apic_id() & 63;
+	bit = pc->cpu_id & 63;
 
 	/*
 	 * ── The order, which is the whole correctness argument (#439) ──

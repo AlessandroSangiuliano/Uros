@@ -904,7 +904,7 @@ static void user_pmap_selftest(void)
 	      : ", NOT ISOLATED\r\n");
 
 	/* The switch.  Everything below runs in the new address space. */
-	pmap_activate(u);
+	pmap_activate_boot(u);
 
 	/*
 	 * And the write says so.  The page is in the lower half, which since
@@ -1011,7 +1011,7 @@ static void user_pmap_selftest(void)
 		      ? " — the fault path does not inherit the copy's permission\r\n"
 		      : " — WRONG\r\n");
 	}
-	pmap_activate(k);
+	pmap_activate_boot(k);
 
 	readback = *(const volatile uint32_t *)(uintptr_t)phys_to_direct(frame);
 	kputs("UrMach x86-64: back in the kernel space, frame holds ");

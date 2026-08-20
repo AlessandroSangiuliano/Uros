@@ -231,6 +231,23 @@ static __inline__ void pmap_writer_unlock(volatile uint8_t *l)
 void pmap_activate(pmap_t pmap);
 
 /*
+ * The same switch, for the boot self-tests, which run before there is a
+ * per-CPU block to record it in (#439).
+ *
+ * 🔥 Separate rather than a test inside pmap_activate(), and the reason is a
+ * measurement: the test WAS inside it, spelled percpu_ready(), which is an
+ * rdmsr -- a serialising instruction that under KVM can leave the guest.  It
+ * cost about 45% of a copy-on-write fault on ONE processor, paid on every
+ * address-space switch for the whole life of the system, to answer a question
+ * that is only ever "no" during three self-tests.
+ *
+ * ⚠️ Tracks nothing, and needs to track nothing: it runs on the boot
+ * processor before any other is awake, so the set it would maintain has
+ * nobody to name and the shootdown it would narrow is already a local flush.
+ */
+void pmap_activate_boot(pmap_t pmap);
+
+/*
  * Adopt the tables boot.S and the direct map already built as the kernel
  * pmap, taking its root from the live CR3.  After this pmap_kernel() is
  * usable; it does not build anything, it names what is already there.

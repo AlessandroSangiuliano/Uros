@@ -33,7 +33,6 @@
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
-#include <cpu/regs.h>	/* rdmsr, MSR_GS_BASE — percpu_ready() (#439) */
 
 struct percpu {
 	/*
@@ -208,26 +207,25 @@ static inline struct percpu *percpu(void)
 	return p;
 }
 
+
 /*
- * Is there a block to read yet (#439)?
+ * This processor's local APIC id, without paying CPUID for it (#439).
  *
- * 🔥 percpu() is a load through %gs and it cannot fail: before
- * percpu_activate() has written MSR_GS_BASE the base is zero, so `%gs:0'
- * reads physical address zero — the interrupt vector table — and hands back
- * whatever the BIOS left there as if it were a pointer.  The first
- * dereference then faults somewhere that names neither the caller nor the
- * cause: 0xf000ff53 in a register, a general protection in a self-test, and
- * `cpu ?' in the backtrace because the reporting code cannot find the
- * processor either.
+ * 🔥 cpu_apic_id() in <cpu/regs.h> asks the hardware, and asking costs a
+ * CPUID -- unconditionally serialising, and under KVM an exit to the
+ * hypervisor every single time.  It was on the shootdown path and on the
+ * address-space switch, and it cost about 45% of a copy-on-write fault on ONE
+ * processor: a measurement that says nothing about shootdowns at all, because
+ * a machine with one processor sends none.
  *
- * That is exactly what pmap_activate() did the first time it tried to
- * maintain its processor set, so the question is asked rather than assumed.
- * MSR_GS_BASE is what percpu_activate() writes and nothing else does, which
- * makes a non-zero base the one honest signature of "the block exists".
+ * percpu_activate() is handed the APIC id and stores it, so the answer is
+ * already here and reading it is one %gs-relative load.  CPUID remains the
+ * right call exactly once per processor -- when there is no block yet to read
+ * it from, which is how it got in there.
  */
-static inline int percpu_ready(void)
+static inline uint32_t percpu_apic_id(void)
 {
-	return rdmsr(MSR_GS_BASE) != 0;
+	return percpu()->cpu_id;
 }
 
 /*
