@@ -9,6 +9,7 @@
 
 
 #include <cpu/regs.h>
+#include <cpu/percpu.h>		/* which space this processor has loaded (#439) */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/map.h>
@@ -465,6 +466,21 @@ pmap_t pmap_create(uint64_t size)
 	pmap->collect_lock = 0;
 
 	/*
+	 * 🔥 And the processor set, for exactly the reason the paragraph above
+	 * gives -- which was written for #455 and then did not stop #439 making
+	 * the same mistake three lines later.
+	 *
+	 * A new space is loaded on nobody.  Left uninitialised it arrives
+	 * holding the zone's poison, and the first shootdown reads that as the
+	 * set of processors to interrupt: `ipi: a processor in a targeted
+	 * cross-call never answered (mask 0xf5eef5eef5eef5ee, 48 expected, 6
+	 * arrived)'.  The mask in that message is what made it one look instead
+	 * of an afternoon, which is the argument for putting the value in a
+	 * panic rather than the fact of it.
+	 */
+	pmap->cpus_using = 0;
+
+	/*
 	 * 🔥 pmap_table_frame() and not boot_frame_alloc(), which is what this
 	 * said and is the same defect #458 fixed one function away (#422).
 	 *
@@ -633,8 +649,65 @@ void pmap_destroy(pmap_t pmap)
 
 void pmap_activate(pmap_t pmap)
 {
-	if (pmap != PMAP_NULL)
+	struct percpu	*pc;
+	pmap_t		 old;
+	unsigned	 bit;
+
+	if (pmap == PMAP_NULL)
+		return;
+
+	/*
+	 * Before the per-CPU block exists there is nothing to record the
+	 * transition in — and nothing that needs it: this is the boot
+	 * processor, alone, running the machine-dependent self-tests, and a
+	 * shootdown with no other processor to reach is already a local flush.
+	 * The set starts being maintained at the first switch after
+	 * percpu_activate(), which is before any second processor is woken.
+	 */
+	if (!percpu_ready()) {
 		write_cr3(pmap->root_pa);
+		return;
+	}
+
+	pc  = percpu();
+	old = (pmap_t) pc->loaded_pmap;
+
+	if (old == pmap) {
+		/*
+		 * Already here.  Not merely an optimisation: writing CR3 to
+		 * the value it already holds would discard every non-global
+		 * translation this processor has, for nothing.
+		 */
+		write_cr3(pmap->root_pa);
+		return;
+	}
+
+	bit = cpu_apic_id() & 63;
+
+	/*
+	 * ── The order, which is the whole correctness argument (#439) ──
+	 *
+	 * Joining the new set BEFORE the switch, and leaving the old one
+	 * AFTER, so that at no instant is this processor able to reach a
+	 * space whose set does not name it.
+	 *
+	 * Between the first store and the CR3 write this processor is in
+	 * `pmap's set while holding none of its translations: a shootdown for
+	 * pmap would send us an interrupt we did not need.  Between the CR3
+	 * write and the last store it is still in `old's set while holding
+	 * none of ITS translations either — CR3 discarded them — so again an
+	 * interrupt for nothing.  Both windows cost a wasted interrupt and
+	 * neither can lose one, which is the only asymmetry that matters:
+	 * the opposite order would open a window in which this processor
+	 * holds translations nobody knows to shoot down.
+	 */
+	(void) atomic_test_and_set_bit(&pmap->cpus_using, bit);
+	pc->loaded_pmap = pmap;
+
+	write_cr3(pmap->root_pa);
+
+	if (old != PMAP_NULL)
+		(void) atomic_test_and_clear_bit(&old->cpus_using, bit);
 }
 
 /*

@@ -10,6 +10,7 @@
 #include <cpu/ipi.h>
 #include <cpu/regs.h>
 #include <cpu/smp.h>
+#include <pmap/pmap.h>	/* cpus_using, pmap_kernel (#439) */
 #include <pmap/pte.h>
 #include <pmap/tlb.h>
 #include <sync/atomic.h>
@@ -99,21 +100,7 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	 */
 	struct tlb_request r = { va, size };
 
-	/*
-	 * ⚠️ Named and not yet used, and that is the whole of this step (#439).
-	 *
-	 * Narrowing the shootdown to the processors that could hold the mapping
-	 * needs two things: a set on the pmap, maintained on both sides of an
-	 * address-space switch, and a caller that says WHICH pmap.  The second
-	 * is this parameter and it is a change to nine call sites; the first
-	 * changes what the machine does.  Doing them in one step would mean a
-	 * commit whose behaviour changed and whose call sites all moved, and no
-	 * way to tell which of the two broke a boot.
-	 *
-	 * So this one moves the call sites and keeps the broadcast.  If it is
-	 * right, nothing at all changes.
-	 */
-	(void) pmap;
+	uint64_t using;
 
 	/*
 	 * This processor first.  Not for correctness — the order between the
@@ -125,11 +112,44 @@ void tlb_flush_range(struct pmap *pmap, uint64_t va, uint64_t size)
 	tlb_flush_local_range(va, size);
 
 	/*
-	 * Costs nothing while there is nobody else: ipi_call_others() returns
-	 * at once when this is the only processor online, which is what lets
-	 * every path through pmap use this form from the first page it maps.
+	 * ── Who else has to be told (#439) ────────────────────────────────
+	 *
+	 * PMAP_NULL means the caller has no address space object to name, or
+	 * means the kernel's own: every processor keeps the kernel half loaded
+	 * at all times, so for those mappings the broadcast is the right
+	 * answer rather than a pessimistic one.
+	 *
+	 * ⚠️ pmap_kernel() is asked as well as PMAP_NULL, and it must be: the
+	 * kernel pmap is a real object with a real cpus_using, and that set is
+	 * NOT the set of processors holding kernel translations.  It records
+	 * who has that root in CR3, which is nobody once user threads are
+	 * running — every one of them is in some user space whose upper half
+	 * is a copy of the kernel's.  Trusting the set here would silently
+	 * stop shooting down kernel mappings on every processor in the
+	 * machine, and the first symptom would be somewhere else entirely.
 	 */
-	ipi_call_others(tlb_flush_handler, &r);
+	if (pmap == PMAP_NULL || pmap == pmap_kernel()) {
+		/*
+		 * Costs nothing while there is nobody else: ipi_call_others()
+		 * returns at once when this is the only processor online.
+		 */
+		ipi_call_others(tlb_flush_handler, &r);
+		return;
+	}
+
+	/*
+	 * Read once.  A processor joining the set after this load is a
+	 * processor that is about to load CR3 with this root — and CR3 is
+	 * written after the entry we just changed was already gone from the
+	 * table, so what it walks is the new state.  It has nothing stale to
+	 * discard, which is why missing it here is not a hole.
+	 *
+	 * A processor LEAVING after this load still gets its interrupt and
+	 * flushes something it no longer needs, which costs a message.
+	 */
+	using = atomic_load64(&pmap->cpus_using);
+
+	ipi_call_mask(using, tlb_flush_handler, &r);
 }
 
 void tlb_flush_all(struct pmap *pmap)

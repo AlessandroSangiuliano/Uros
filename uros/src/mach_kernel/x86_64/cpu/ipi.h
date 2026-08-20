@@ -96,6 +96,25 @@ void ipi_init(void);
 void ipi_call_others(void (*fn)(void *), void *arg);
 
 /*
+ * The same thing asked of a named few (#439).
+ *
+ * `mask' has one bit per local APIC id.  This processor's own bit is ignored
+ * if it is set: the caller does its own half directly, and a processor cannot
+ * answer a cross-call it is inside.
+ *
+ * An empty mask returns at once and sends nothing, which is the common case
+ * for a freshly forked address space -- one processor has it loaded, and that
+ * processor is usually the one asking.
+ *
+ * ⚠️ The saving is not the message, it is the WAIT.  ipi_call_others() does
+ * not return until the slowest processor in the machine has answered, so the
+ * cost of a broadcast is the tail of eight or sixty-four latencies rather
+ * than one.  Sending to the two that matter is a different operation, not a
+ * cheaper version of the same one.
+ */
+void ipi_call_mask(uint64_t mask, void (*fn)(void *), void *arg);
+
+/*
  * Ask one processor to look at its asynchronous work.  Returns at once --
  * there is nothing to wait for, and waiting would be the caller blocking on
  * a processor it has just asked to go and do something.

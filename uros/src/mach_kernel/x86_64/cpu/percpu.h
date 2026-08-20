@@ -33,6 +33,7 @@
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
+#include <cpu/regs.h>	/* rdmsr, MSR_GS_BASE — percpu_ready() (#439) */
 
 struct percpu {
 	/*
@@ -138,6 +139,27 @@ struct percpu {
 	uint64_t pending[4];
 	uint64_t deferred;
 	uint64_t replayed;
+
+	/*
+	 * Which address space this processor has in CR3 (#439).
+	 *
+	 * A `struct pmap *', kept as void * so that the whole pmap interface
+	 * does not have to be visible to everything that includes this — the
+	 * same reason <pmap/tlb.h> forward-declares it.
+	 *
+	 * 🔑 It exists so that pmap_activate() can maintain the per-pmap
+	 * processor set from ONE place.  The alternative was to have the
+	 * caller supply both the space being left and the space being entered,
+	 * and that is the shape this tree keeps getting hurt by: two halves
+	 * that must agree, kept in step by whoever remembers.  A processor
+	 * already knows what it is running; asking it costs one %gs-relative
+	 * load and cannot disagree with itself.
+	 *
+	 * ⚠️ Added at the END.  The offsets asserted below are what the
+	 * assembly entry paths use, and a field inserted above them would move
+	 * every one of them silently.
+	 */
+	void *loaded_pmap;
 };
 
 /*
@@ -184,6 +206,28 @@ static inline struct percpu *percpu(void)
 
 	__asm__ volatile("movq %%gs:0, %0" : "=r"(p));
 	return p;
+}
+
+/*
+ * Is there a block to read yet (#439)?
+ *
+ * 🔥 percpu() is a load through %gs and it cannot fail: before
+ * percpu_activate() has written MSR_GS_BASE the base is zero, so `%gs:0'
+ * reads physical address zero — the interrupt vector table — and hands back
+ * whatever the BIOS left there as if it were a pointer.  The first
+ * dereference then faults somewhere that names neither the caller nor the
+ * cause: 0xf000ff53 in a register, a general protection in a self-test, and
+ * `cpu ?' in the backtrace because the reporting code cannot find the
+ * processor either.
+ *
+ * That is exactly what pmap_activate() did the first time it tried to
+ * maintain its processor set, so the question is asked rather than assumed.
+ * MSR_GS_BASE is what percpu_activate() writes and nothing else does, which
+ * makes a non-zero base the one honest signature of "the block exists".
+ */
+static inline int percpu_ready(void)
+{
+	return rdmsr(MSR_GS_BASE) != 0;
 }
 
 /*
