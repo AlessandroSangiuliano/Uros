@@ -2316,7 +2316,7 @@ FastPmapEnter:
 				vm_object_paging_end(object);
 				vm_object_unlock(object);
 				vm_map_unlock_read(map);
-				FP_MARK(FP_QUEUES);
+				FP_MARK(FP_QTAIL);
 				return KERN_SUCCESS;
 			}
 
@@ -2437,7 +2437,7 @@ FastPmapEnter:
 			FP_MARK(FP_QLOCK);
 			vm_page_deactivate(cur_m);
 			m->dirty = TRUE;
-			FP_MARK(FP_QUEUES);
+			FP_MARK(FP_QDEACT);
 			/*
 			 * #482, shootdown site one of two.  This one is about
 			 * the SOURCE page: it severs the mapping in every
@@ -2460,7 +2460,7 @@ FastPmapEnter:
 			 */
 
 			vm_object_paging_end(object);
-			FP_MARK(FP_QUEUES);
+			FP_MARK(FP_QREL);
 			vm_object_collapse(object);
 			FP_MARK(FP_COLLAPSE);
 			vm_object_paging_begin(object);

@@ -82,8 +82,9 @@
  * the calls in the path that end in a shootdown, and #482 was opened to find
  * out what their share is at one processor and at eight.
  *
- * 🔥 TWO shootdown sites, not one.  The issue's own list says "the shootdown"
- * in the singular; the code says otherwise.  pmap_page_protect() severs every
+ * 🔥 THREE shootdown sites, not one.  The issue's own list says "the
+ * shootdown" in the singular; the code says two, and measuring said three --
+ * see FP_QDEACT below, which is the largest of them.  pmap_page_protect() severs every
  * mapping of the SOURCE page across every space that had it, and PMAP_ENTER
  * installs the copy over whatever the faulting space had there.  #439 narrowed
  * both, and a measurement that folded them together could not say which
@@ -142,9 +143,34 @@
 #define	FP_PROTECT	10	/* pmap_page_protect(): SHOOTDOWN        */
 #define	FP_COLLAPSE	11	/* vm_object_collapse()                  */
 #define	FP_ENTER	12	/* PMAP_ENTER(): SHOOTDOWN               */
-#define	FP_QUEUES	13	/* page queues, wakeups, the unlocks     */
-#define	FP_RETURN	14	/* vm_fault() returned -> end of handler */
-#define	FP_PHASES	15
+/*
+ * 🔥 And the page-queue bucket in three, for the same reason as the two
+ * before it: with the broadcast put back it was 74,550 cycles -- the same
+ * magnitude as the shootdown itself and the second largest number in the
+ * whole measurement -- and "page queues, wakeups, the unlocks" names three
+ * places at once, which is not a finding.
+ *
+ * The three are where they are: one before the shootdown with the queue lock
+ * already held, one after it, and one in the tail that every fault reaches
+ * through FastPmapEnter.
+ */
+/*
+ * 🔥 FP_QDEACT is the THIRD shootdown site, and the measurement is what said
+ * so.  vm_page_deactivate() calls pmap_clear_reference(), which walks the pv
+ * list and does a tlb_flush_page() per mapping -- an Accessed bit that is
+ * cleared in the table but still set in somebody's TLB has not been cleared.
+ * Under the ablated broadcast it was 116,430 cycles, MORE than
+ * pmap_page_protect(): the most expensive shootdown in a copy-on-write fault
+ * lives inside a function whose name promises queue bookkeeping.
+ *
+ * The issue's phase list says "the shootdown", singular.  Reading the code
+ * found two.  Only measuring found the third.
+ */
+#define	FP_QDEACT	13	/* deactivate the source page: SHOOTDOWN  */
+#define	FP_QREL		14	/* unlock queues, wake, drop the objects  */
+#define	FP_QTAIL	15	/* the FastPmapEnter tail to the return   */
+#define	FP_RETURN	16	/* vm_fault() returned -> end of handler  */
+#define	FP_PHASES	17
 
 /*
  * How many timestamps one fault costs: the one FP_BEGIN takes, plus one per

@@ -26,9 +26,11 @@ volatile int	fault_profile_ready;
 /*
  * What each slice is.
  *
- * ⚠️ The two marked `*' are the calls that end in a shootdown, and they are
- * the reason the issue exists.  Reading the table without knowing which two
- * they are is reading it without knowing what it was taken to answer.
+ * ⚠️ The three marked `*' are the calls that end in a shootdown, and they are
+ * the reason the issue exists.  Reading the table without knowing which three
+ * they are is reading it without knowing what it was taken to answer -- and
+ * the third one, `deact', is there because the measurement found it and not
+ * because anybody expected a shootdown inside vm_page_deactivate().
  */
 static const char *const	fp_name[FP_PHASES] = {
 	"entry     ",	/* FP_ENTRY    */
@@ -44,7 +46,9 @@ static const char *const	fp_name[FP_PHASES] = {
 	"protect  *",	/* FP_PROTECT  */
 	"collapse  ",	/* FP_COLLAPSE */
 	"enter    *",	/* FP_ENTER    */
-	"queues    ",	/* FP_QUEUES   */
+	"deact    *",	/* FP_QDEACT   */
+	"q release ",	/* FP_QREL     */
+	"q tail    ",	/* FP_QTAIL    */
 	"return    "	/* FP_RETURN   */
 };
 
