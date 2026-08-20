@@ -4264,6 +4264,118 @@ static void tlb_shootdown_selftest(void)
 }
 
 /*
+ * The other half of the shootdown: who does NOT get told, and why that is
+ * safe (#439).
+ *
+ * The test above proves a processor that holds a translation is reached.
+ * This one proves the complement, which is the claim the narrowing actually
+ * rests on: a processor that is skipped is skipped because it CANNOT be
+ * holding the mapping — not because a bitmap happened to have a zero in it.
+ *
+ * 🔑 Those are different statements and only the second is worth anything.  A
+ * set that is merely wrong also skips processors; what makes skipping correct
+ * is that the address is absent from every space those processors have
+ * loaded.  So the test asserts both halves: nobody was interrupted, AND there
+ * was nothing for them to discard.
+ *
+ * The control is the third arm, and without it the first is unreadable: a
+ * counter that never moves proves nothing if it could not have moved.  The
+ * same address, shot down with PMAP_NULL, must move every counter.
+ */
+static void tlb_targeted_selftest(void)
+{
+	pmap_t		u;
+	uint64_t	frame;
+	uint64_t	va = 0x0000600000000000ULL;	/* lower half, ours */
+	uint64_t	before[SMP_MAX_CPUS];
+	unsigned	moved, others, i;
+
+	others = smp_online_count() - 1;
+	if (others == 0) {
+		kputs("UrMach x86-64: alone — a skipped processor cannot be "
+		      "tested\r\n");
+		return;
+	}
+
+	u = pmap_create(0);
+	if (u == PMAP_NULL) {
+		kputs("UrMach x86-64: no pmap for the targeted shootdown "
+		      "test\r\n");
+		return;
+	}
+
+	frame = boot_frame_alloc();
+	if (frame == 0 || pmap_enter(u, va, frame,
+				     VM_PROT_READ | VM_PROT_WRITE, 0)
+			  != PMAP_MAP_OK) {
+		kputs("UrMach x86-64: could not map the targeted probe\r\n");
+		pmap_destroy(u);
+		return;
+	}
+
+	/*
+	 * ⚠️ Nobody has run in this space, so nobody can have walked it.  That
+	 * is the precondition the whole test is about, and it is asserted
+	 * rather than assumed: if some path did load this pmap, the set would
+	 * say so and the arms below would be measuring something else.
+	 */
+	kputs("UrMach x86-64: a space nobody has loaded, its processor set is ");
+	kputhex64(u->cpus_using);
+	kputs(u->cpus_using == 0 ? " — empty\r\n" : " — WRONG, not empty\r\n");
+
+	for (i = 0; i < SMP_MAX_CPUS; i++)
+		before[i] = tlb_flushes_served((uint32_t) i);
+
+	tlb_flush_range(u, va, PAGE_SIZE_4K);
+
+	moved = 0;
+	for (i = 0; i < SMP_MAX_CPUS; i++)
+		if (tlb_flushes_served((uint32_t) i) != before[i])
+			moved++;
+
+	kputs("UrMach x86-64: shootdown on that space interrupted ");
+	kputdec(moved);
+	kputs(moved == 0 ? " processors — every one was skipped\r\n"
+			 : " processors — WRONG, somebody was told\r\n");
+
+	/*
+	 * And the reason that was safe, which is a different question from
+	 * whether it happened.  Every other processor is running the kernel's
+	 * tables; the probe address is not in them.  A translation it cannot
+	 * walk is a translation it cannot have cached.
+	 */
+	kputs("UrMach x86-64: the probe address in the space they DO have "
+	      "loaded: ");
+	kputs(pmap_walk(pmap_kernel()->root_pa, va, 0) == PT_ENTRY_NULL
+	      ? "absent — nothing for them to discard\r\n"
+	      : "PRESENT — WRONG, skipping them would have been a bug\r\n");
+
+	/* The control: the same address, told to everybody, must be seen. */
+	for (i = 0; i < SMP_MAX_CPUS; i++)
+		before[i] = tlb_flushes_served((uint32_t) i);
+
+	tlb_flush_range(PMAP_NULL, va, PAGE_SIZE_4K);
+
+	moved = 0;
+	for (i = 0; i < SMP_MAX_CPUS; i++)
+		if (tlb_flushes_served((uint32_t) i) != before[i])
+			moved++;
+
+	kputs("UrMach x86-64: control — broadcast on the same address reached ");
+	kputdec(moved);
+	kputs(" of ");
+	kputdec(others);
+	kputs(moved == others
+	      ? " — the counter can see a shootdown, so the zero above is an "
+		"observation\r\n"
+	      : " — WRONG, the counter cannot see one and the zero above "
+		"means nothing\r\n");
+
+	pmap_remove(u, va, PAGE_SIZE_4K);
+	pmap_destroy(u);
+}
+
+/*
  * The proof that the interrupt stack table earns its place.
  *
  * Point the stack pointer at unmapped memory and push.  The push faults,
@@ -4454,6 +4566,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ipi_selftest();
 	ap_to_bsp_selftest();
 	tlb_shootdown_selftest();
+	tlb_targeted_selftest();
 	smp_timer_selftest();
 
 	wx_enforcement_selftest();
