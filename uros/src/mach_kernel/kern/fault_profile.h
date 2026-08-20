@@ -42,12 +42,59 @@
  * the difference between its whole and this one is exactly that assembly.  Two
  * instruments, and the gap between them is the third measurement.
  *
- * 🔴 rdtsc is not free and this calls it thirteen times per fault.  The dump
+ * 🔴 rdtsc is not free and this calls it FP_MARKS times per fault.  The dump
  * reports the cost of one back-to-back pair, measured on the machine that is
  * running, beside the count of marks -- so the reader subtracts an instrument
  * they were told the size of, instead of trusting a fault path that has been
  * quietly widened by the act of watching it.  [feedback: the instrument lies]
+ *
+ * ── What it found (2026-08-20) ────────────────────────────────────────
+ *
+ * ⚠️ State, beside the numbers rather than remembered: QEMU + KVM, powersave
+ * governor pinned at 1397 MHz, on battery, ten dumps of sixteen faults per
+ * arm, all three arms in one session.  A flat 1397 is a BETTER controlled
+ * state than `performance' on this machine, which swings between 1.4 and 3.0
+ * GHz on battery.  🔴 The TSC is invariant and does not slow down with the
+ * core, so these cycle counts are inflated against a full-speed machine by the
+ * ratio of the two clocks -- every number here is a share or a within-session
+ * comparison for that reason, and the magnitudes belong to #431 on hardware.
+ *
+ *                        @1 targeted   @8 targeted   @8 broadcast (#439 out)
+ *      median fault           10,530        10,800                   210,960
+ *      vm_page_copy       3,000 (24%)   2,610 (24%)               3,750 (2%)
+ *      deact       *      1,530  (9%)     600  (7%)           116,430 (46%)
+ *      protect     *        690  (7%)     630  (6%)            82,140 (45%)
+ *      enter       *        600  (6%)     630  (6%)               840 (0.5%)
+ *      chain              660 (10%)     1,170 (11%)             1,260 (0.7%)
+ *      lookup             510 (10%)      1,140 (10%)            1,710 (0.7%)
+ *
+ * 🔑 Four things, and three of them were not what anybody expected.
+ *
+ * ONE: at eight processors a copy-on-write fault costs what it costs at one --
+ * 10,530 against 10,800, which is noise.  #439 did what it set out to do.
+ *
+ * TWO: #439's PREMISE is confirmed, and by taking the correction away rather
+ * than by admiring the result.  With the broadcast restored the fault is 20
+ * times dearer and the growth is entirely in the shootdown sites; every other
+ * phase stands still in absolute cycles.
+ *
+ * THREE: there are THREE shootdown sites and the largest is in
+ * vm_page_deactivate().  Together they are 21% of the fault as it ships.
+ *
+ * FOUR: the copy is 24% and is the largest single phase.  🔴 This REPLACES
+ * #407's "the copy is 4% of the fault, so optimising it works on a
+ * twenty-fifth of the problem".  That 4% compared a WARM copy timed in
+ * isolation (228 cycles) against a fault which was 44% #385 poison scan.  In
+ * the fault, cold, with the scan gated off, the copy is a quarter of the whole
+ * -- so large pages and non-temporal stores are worth arguing about after all.
+ *
+ * 🔑 And the fixed fraction -- entry, map lock, lookup, return -- is 15%.
+ * Clustering copy-on-write faults could amortise at most that, and only by
+ * copying pages speculatively, which #407's break-even says is the expensive
+ * direction.  So: no.  Decided by arithmetic, which is what the issue asked
+ * for.
  */
+
 
 #ifndef	_KERN_FAULT_PROFILE_H_
 #define	_KERN_FAULT_PROFILE_H_
