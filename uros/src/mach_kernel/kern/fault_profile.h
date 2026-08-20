@@ -50,45 +50,57 @@
  *
  * ── What it found (2026-08-20) ────────────────────────────────────────
  *
- * ⚠️ State, beside the numbers rather than remembered: QEMU + KVM, powersave
- * governor pinned at 1397 MHz, on battery, ten dumps of sixteen faults per
- * arm, all three arms in one session.  A flat 1397 is a BETTER controlled
- * state than `performance' on this machine, which swings between 1.4 and 3.0
- * GHz on battery.  🔴 The TSC is invariant and does not slow down with the
- * core, so these cycle counts are inflated against a full-speed machine by the
- * ratio of the two clocks -- every number here is a share or a within-session
- * comparison for that reason, and the magnitudes belong to #431 on hardware.
+ * ⚠️ State, beside the numbers rather than remembered: QEMU + KVM, AC,
+ * performance governor, 3993 MHz -- the same state #407's baseline was taken
+ * in, deliberately, so these are comparable with the 5,790 recorded there.
+ * Ten dumps of sixteen faults per arm, every arm in one session.
+ * 🔴 The TSC is invariant and does NOT slow down with the core, so a cycle
+ * count taken on a throttled machine is inflated by the ratio of the two
+ * clocks.  The whole campaign was repeated at a pinned 1397 MHz and every
+ * share below held to within a point or two; magnitudes belong to #431, on
+ * hardware.
  *
  *                        @1 targeted   @8 targeted   @8 broadcast (#439 out)
- *      median fault           10,530        10,800                   210,960
- *      vm_page_copy       3,000 (24%)   2,610 (24%)               3,750 (2%)
- *      deact       *      1,530  (9%)     600  (7%)           116,430 (46%)
- *      protect     *        690  (7%)     630  (6%)            82,140 (45%)
- *      enter       *        600  (6%)     630  (6%)               840 (0.5%)
- *      chain              660 (10%)     1,170 (11%)             1,260 (0.7%)
- *      lookup             510 (10%)      1,140 (10%)            1,710 (0.7%)
+ *      median fault            4,410         4,440                    61,680
+ *      vm_page_copy        1,230 (28%)     930 (21%)             1,830 (3.0%)
+ *      deact       *        960 (22%)      240 (5.4%)           26,430 (43%)
+ *      protect     *        390 (8.8%)     210 (4.7%)           27,540 (45%)
+ *      enter       *        240 (5.4%)     210 (4.7%)              720 (1.2%)
+ *      shadow chain         390 (8.8%)     780 (18%)              510 (0.8%)
  *
  * 🔑 Four things, and three of them were not what anybody expected.
  *
  * ONE: at eight processors a copy-on-write fault costs what it costs at one --
- * 10,530 against 10,800, which is noise.  #439 did what it set out to do.
+ * 4,410 against 4,440, which is noise.  #439 did what it set out to do.
  *
  * TWO: #439's PREMISE is confirmed, and by taking the correction away rather
- * than by admiring the result.  With the broadcast restored the fault is 20
- * times dearer and the growth is entirely in the shootdown sites; every other
- * phase stands still in absolute cycles.
+ * than by admiring the result.  With the broadcast restored the fault is
+ * fourteen times dearer and 88% of it is two of the three shootdown sites;
+ * every other phase stands still in absolute cycles.  "Nothing grows" on its
+ * own was equally consistent with the argument having been right for the
+ * wrong reason.
  *
- * THREE: there are THREE shootdown sites and the largest is in
- * vm_page_deactivate().  Together they are 21% of the fault as it ships.
+ * THREE: there are THREE shootdown sites and the largest is inside
+ * vm_page_deactivate().  Together they are about a third of the fault at one
+ * processor.
  *
- * FOUR: the copy is 24% and is the largest single phase.  🔴 This REPLACES
+ * FOUR: the copy is the largest single phase, 21-28%.  🔴 This REPLACES
  * #407's "the copy is 4% of the fault, so optimising it works on a
  * twenty-fifth of the problem".  That 4% compared a WARM copy timed in
- * isolation (228 cycles) against a fault which was 44% #385 poison scan.  In
- * the fault, cold, with the scan gated off, the copy is a quarter of the whole
- * -- so large pages and non-temporal stores are worth arguing about after all.
+ * isolation (228 cycles, a userland loop over one page) against a fault which
+ * was 44% #385 poison scan.  In the fault, cold, with the scan gated off, the
+ * copy is a quarter of the whole -- so large pages and non-temporal stores
+ * are worth arguing about after all.
  *
- * 🔑 And the fixed fraction -- entry, map lock, lookup, return -- is 15%.
+ * And gating that scan (see VM_PAGE_POISON in vm/vm_resident.c), same state,
+ * same session, the switch the only difference:
+ *
+ *                          poison ON   poison OFF
+ *      median fault            7,050        4,410      -37%
+ *      the scan            3,120 (44%)     60 (1.4%)
+ *      ring 3, cow_test        7,320        4,830
+ *
+ * 🔑 The fixed fraction -- entry, map lock, lookup, return -- is 15%.
  * Clustering copy-on-write faults could amortise at most that, and only by
  * copying pages speculatively, which #407's break-even says is the expensive
  * direction.  So: no.  Decided by arithmetic, which is what the issue asked
