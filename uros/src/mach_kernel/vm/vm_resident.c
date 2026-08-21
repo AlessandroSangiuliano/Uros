@@ -1223,10 +1223,26 @@ vm_page_grab_fictitious(void)
 	m = (vm_page_t)zget(vm_page_zone);
 	if (m) {
 		m->free = FALSE;
-#if	MACH_ASSERT || ZONE_DEBUG
+		/*
+		 * 🔥 Unconditional (#485).  This was inside
+		 * `#if MACH_ASSERT || ZONE_DEBUG\', and `fictitious\' is read
+		 * from 113 places that are not -- vm_fault.c among them.  With
+		 * both switches off a fictitious page came back with
+		 * fictitious == FALSE, which is not a check going missing, it
+		 * is the wrong answer.
+		 *
+		 * ⚠️ Not redundant with vm_page_more_fictitious(), which does
+		 * set both on every element on the way INTO the zone.  An
+		 * element that has been through zfree/zget has had its first
+		 * word used as the zone's free-list link, and vm_page_init is
+		 * what puts that back.
+		 *
+		 * The cost is one vm_page_init per fictitious page, which is
+		 * correctness rather than a check, and is why it is not behind
+		 * a switch of any kind now.
+		 */
 		vm_page_init(m, vm_page_fictitious_addr);
 		m->fictitious = TRUE;
-#endif	/* MACH_ASSERT || ZONE_DEBUG */
 	}
 
 	c_vm_page_grab_fictitious++;

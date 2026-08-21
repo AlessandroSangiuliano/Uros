@@ -256,6 +256,19 @@ ANY_ENDIF = re.compile(r"^\s*#\s*endif\b")
 
 # What makes a block look like it costs something.  Heuristics, and labelled.
 SIGNALS = (
+    # What KIND of thing it is -- these map onto the three categories #485
+    # asks for, and they are the ones worth sorting by.
+    #
+    #   ddb     only the debugger reaches it: text size, not path cost
+    #   panic   it stops the machine: a real invariant
+    #   repair  it ASSIGNS to something that outlives the block -- so the two
+    #           builds do not merely check differently, they behave
+    #           differently, and turning the switch off removes a repair
+    ("ddb", re.compile(r"<ddb/|\bdb_[a-z_]+\s*\(")),
+    ("panic", re.compile(r"\bpanic\s*\(")),
+    ("repair", re.compile(r"^\s*[a-z_][A-Za-z0-9_]*(->|\.)[A-Za-z0-9_>.\-]*\s*=[^=]",
+                          re.M)),
+    # ... and what it COSTS.
     ("loop", re.compile(r"\b(for|while)\s*\(")),
     ("page", re.compile(r"\bPAGE_SIZE\b|\bkmap\b|\bkunmap\b")),
     ("walk", re.compile(r"\bpv_|\bqueue_|->next\b|->pv_")),

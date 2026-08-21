@@ -1440,11 +1440,17 @@ act_detach(
 
 	thread_pool_put_act(cur_act);
 
-#if	MACH_ASSERT
-	cur_act->lower = cur_act->higher = THR_ACT_NULL; 
+	/*
+	 * 🔥 Unconditional (#485).  These were inside `#if MACH_ASSERT\', and
+	 * `higher\'/`lower\' are the activation stack's own links, read from 55
+	 * places that are not.  Clearing them only when assertions are built
+	 * means a build without them leaves stale pointers in a live
+	 * structure -- a behaviour difference between two kernels, not a check
+	 * that stops being made.
+	 */
+	cur_act->lower = cur_act->higher = THR_ACT_NULL;
 	if (cur_thread->top_act)
 		cur_thread->top_act->higher = THR_ACT_NULL;
-#endif	/* MACH_ASSERT */
 
 	return;
 }
