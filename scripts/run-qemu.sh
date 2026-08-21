@@ -30,7 +30,16 @@
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BUILD_DIR="$REPO_ROOT/uros/build"
+# Overridable so a measurement can run against a tree nobody is rebuilding.
+#
+# ⚠️ Not a convenience.  A campaign was once launched against uros/build while
+# the same directory was being edited and re-ninja'd for unrelated work: this
+# script rebuilds the kernel and the bundle on every invocation, so each boot
+# picked up whatever the source happened to be at that moment, and the two arms
+# of the A/B no longer differed by one thing.  The logs were discarded.
+#
+#	UROS_BUILD_DIR=/path/to/build-measure scripts/run-qemu.sh ...
+BUILD_DIR="${UROS_BUILD_DIR:-$REPO_ROOT/uros/build}"
 KERNEL="$BUILD_DIR/export/uros/boot/mach_kernel"
 ARCH="$(cat "$BUILD_DIR/uros-arch" 2>/dev/null || uname -m)"   # #404 stamp
 BOOTSTRAP="$BUILD_DIR/export/uros/$ARCH/user/sbin/bootstrap"

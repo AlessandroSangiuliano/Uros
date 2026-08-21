@@ -19,7 +19,12 @@
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-BUILD_DIR="$REPO_ROOT/uros/build"
+# Overridable, like run-qemu.sh: a measurement must be able to run against a
+# tree nobody else is rebuilding (#485).  ⚠️ It has to be honoured in EVERY
+# script the run touches -- run-qemu.sh alone was not enough, and the first
+# attempt booted a kernel from the measurement tree with a bundle from the
+# working one.
+BUILD_DIR="${UROS_BUILD_DIR:-$REPO_ROOT/uros/build}"
 KERNEL="$BUILD_DIR/export/uros/boot/mach_kernel"
 ARCH="$(cat "$BUILD_DIR/uros-arch" 2>/dev/null || uname -m)"   # #404 stamp
 BOOTSTRAP="$BUILD_DIR/export/uros/$ARCH/user/sbin/bootstrap"
