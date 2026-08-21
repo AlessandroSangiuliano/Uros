@@ -1642,8 +1642,23 @@ vm_page_release(
 	 * / skipped pmap_page_protect) — the poisoned-page corruption.
 	 * Trap the culprit red-handed: this is what caught the #385
 	 * COW-fast-path bug, with the freeing call chain on the stack.
-	 * Cost: one pvh-locked list-head read per page free; tied to
-	 * MACH_ASSERT so release/bench builds shed it.
+	 * Cost: one pvh-locked list-head read per page free.
+	 *
+	 * 🔥 This comment used to end "tied to MACH_ASSERT so release/bench
+	 * builds shed it", and that has never been true (#485): MACH_ASSERT is
+	 * ON in Release on both targets, so release and bench builds have been
+	 * paying for it all along.  The sentence described an intention the
+	 * build contradicted, and nobody compared the two.
+	 *
+	 * ⚠️ Which leaves a decision rather than a correction.  What this
+	 * catches -- a page reaching the free list while some pmap still maps
+	 * it -- is a page somebody can still write through after it has been
+	 * handed to someone else.  That is not an invariant, it is the same
+	 * category as the free-list range check in REMOVE_FROM_ZONE, and it is
+	 * what actually caught #385 with the freeing call chain on the stack.
+	 * It arguably belongs outside MACH_ASSERT entirely.  What stops that
+	 * being done here is the cost, which is a per-page-free lock and has
+	 * never been measured; #485 owes that number before moving it.
 	 */
 	if (pmap_page_still_mapped(mem->phys_addr))
 		panic("vm_page_release: page 0x%lx still mapped (#385)",

@@ -1246,6 +1246,24 @@ zfree(
 {
 	spl_t	s = 0;
 
+	/*
+	 * ── One of these three is not an assertion (#485) ────────────────
+	 *
+	 * The range check is outside MACH_ASSERT and the other two are inside,
+	 * and the split is the same one REMOVE_FROM_ZONE now makes.  A NULL
+	 * zone and a free into zone_zone are invariants: the caller is wrong,
+	 * and a kernel built without assertions may take the caller's word for
+	 * it.  An element that is not from this zone's map is a WILD FREE --
+	 * a pointer from somewhere else about to be linked into this zone's
+	 * free list, where the next allocation will hand it out.  Catching it
+	 * here is catching it at the door; the check in REMOVE_FROM_ZONE is
+	 * the one that has to catch it afterwards, and by then the corrupt
+	 * link is already in place.
+	 */
+	if (zone->collectable && !zone->allows_foreign &&
+	    (!from_zone_map(elem) || !from_zone_map(elem + zone->elem_size - 1)))
+		panic("zfree: non-allocated memory in collectable zone!");
+
 #if MACH_ASSERT
 	/* Basic sanity checks */
 	if (zone == ZONE_NULL || elem == (vm_offset_t)0)
@@ -1253,9 +1271,6 @@ zfree(
 	/* zone_gc assumes zones are never freed */
 	if (zone == zone_zone)
 		panic("zfree: freeing to zone_zone breaks zone_gc!");
-	if (zone->collectable && !zone->allows_foreign &&
-	    (!from_zone_map(elem) || !from_zone_map(elem+zone->elem_size-1)))
-		panic("zfree: non-allocated memory in collectable zone!");
 #endif
 
 	/*

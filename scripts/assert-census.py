@@ -251,6 +251,11 @@ def report_config():
 
 
 BLOCK_START = re.compile(r"^\s*#\s*if(n?def)?\s+.*\bMACH_ASSERT\b")
+# A guard that names a SECOND switch has already been decided about: somebody
+# read it, put it in a category and gave it a name of its own.  A bare
+# `#if MACH_ASSERT\' has not.  Keeping the two apart is what turns this report
+# from a fixed list into a work queue that shrinks.
+BLOCK_TRIAGED = re.compile(r"^\s*#\s*if(n?def)?\s+.*\bMACH_ASSERT\b\s*&&")
 ANY_IF = re.compile(r"^\s*#\s*if(n?def)?\b")
 ANY_ENDIF = re.compile(r"^\s*#\s*endif\b")
 
@@ -307,6 +312,35 @@ def sources():
                 yield os.path.join(base, f)
 
 
+FUNC_DEF = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
+
+
+def enclosing_function(lines, idx):
+    """The function a block sits in, by scanning back for a definition.
+
+    🔑 File granularity is not enough to answer the question this is for.
+    "Is there another #482 hiding" means "is an expensive block on a path that
+    runs often", and vm_resident.c holds both vm_page_grab -- every page
+    allocation in the kernel -- and vm_sort_free_list, which runs when somebody
+    asks for physically contiguous memory.  The file cannot tell them apart and
+    the function name can.
+
+    ⚠️ Heuristic: it looks for an identifier at column zero followed by `(\',
+    which is this tree\'s style, and gives up rather than guessing.
+    """
+    for j in range(idx, max(0, idx - 400), -1):
+        line = lines[j]
+        if not line or line[0] in " \t#*/":
+            continue
+        m = FUNC_DEF.match(line)
+        if m and m.group(1) not in ("if", "for", "while", "switch", "return"):
+            return m.group(1)
+        if line.startswith("}"):
+            # left the previous function without finding a header
+            continue
+    return "?"
+
+
 def report_blocks(show_all=False):
     print("\n== 2. BLOCKS: the multi-line #if MACH_ASSERT regions ==")
     built = built_sources()
@@ -339,26 +373,30 @@ def report_blocks(show_all=False):
                 # is -- which cannot be answered from object files, so headers
                 # are reported and marked rather than dropped.
                 is_built = (path in built) or path.endswith(".h") or not built
+                triaged = bool(BLOCK_TRIAGED.match(lines[i]))
                 found.append((len(hits), len(code), path, i + 1, hits,
-                              is_built))
+                              is_built and not triaged, triaged,
+                              enclosing_function(lines, i)))
                 i = j
                 continue
             i += 1
 
     found.sort(key=lambda t: (-t[0], -t[1]))
+    triaged = [f for f in found if f[6]]
     live = [f for f in found if f[5]]
-    dead = len(found) - len(live)
+    dead = len(found) - len(live) - len(triaged)
     loud = [f for f in live if f[0] or f[1] > 10]
     print(f"   {len(found)} blocks across {len({f[2] for f in found})} files;"
-          f" {dead} of them in sources NOTHING COMPILES.")
-    print(f"   {len(live)} are in the kernel that builds, and {len(loud)} of"
-          " those carry a cost")
-    print("   signal or exceed ten lines of code — those are the ones to"
-          " read.\n")
-    for hits, n, path, line, names, _ in (live if show_all else loud):
+          f" {dead} in sources NOTHING COMPILES,")
+    print(f"   {len(triaged)} already triaged onto a switch of their own.")
+    print(f"   {len(live)} are left in the kernel that builds, and {len(loud)}"
+          " of those carry a")
+    print("   cost signal or exceed ten lines of code — those are the ones"
+          " still to read.\n")
+    for hits, n, path, line, names, _, _t, fn in (live if show_all else loud):
         rel = os.path.relpath(path, ROOT)
         tag = ",".join(names) if names else "-"
-        print(f"   {n:>4} lines  [{tag:<16}] {rel}:{line}")
+        print(f"   {n:>4} lines  [{tag:<16}] {fn}()  {rel}:{line}")
     if not show_all:
         print("\n   (--all to list the quiet ones too)")
 
