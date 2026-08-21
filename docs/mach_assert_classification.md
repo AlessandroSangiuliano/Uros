@@ -74,7 +74,14 @@ code **is**, so that there is a function body to assert inside:
   `locore.S`). Fixed, not deleted: what heritage stays is #433's question.
 - `i386/AT386/mp/mp.h` — `DISABLE_PREEMPTION` becomes a **call** with three
   registers saved around it instead of an inline sequence, and `interrupt.S`
-  uses it on every interrupt entry and exit.
+  uses it on every interrupt entry and exit. 🔥 And the four functions it calls
+  are `ret` — i386 does not declare `MACHINE_PREEMPTION_LEVEL` — so the two
+  branches do not merely cost differently, they **behave** differently: the
+  inline one maintains the level and calls `kernel_preempt_check()`, which
+  raises `int $0xff` on a pending urgent AST. A build option decides whether
+  i386 preempts on interrupt exit, and the development kernel is the one that
+  does not. **#486**, and it is why a flavour A/B cannot attribute a
+  difference to assertions alone.
 - `vm/vm_map.h` — `vm_map_reference` and its siblings become **functions**
   instead of macros that inline lock-and-increment. 24 call sites.
 
@@ -124,6 +131,27 @@ the field is #373 and no setting here substitutes for it.
 
 ⚠️ Before this issue, `MACH_ASSERT=OFF` had **never once compiled**. Three
 latent defects had to be fixed to make it a configuration that exists.
+
+## The numbers
+
+Three runs per arm, a dedicated build tree, performance governor on AC at
+3993 MHz, i386, suites green and identical in both:
+
+| | `port alloc + destroy` | `.text` |
+|---|---|---|
+| development | 1.34 µs/op | 786,596 |
+| release | **1.28 µs/op** | **692,900** |
+| | −4.5% | −93,696 (−11.9%) |
+
+⚠️ The 4.5% is **not** what assertions cost. The two kernels also differ in
+de-inlining, in whether the port tracking is compiled, and — per #486 — in
+whether i386 preempts on interrupt exit. Separating those needs one arm each,
+not one number.
+
+🔑 The result that matters more than the percentage: **a release kernel boots
+and passes.** 850 lines, eleven verdicts, including the `device_open_cap`
+zero-token rejection, checked by presence in both logs rather than inferred
+from a diff that had merely reordered it.
 
 ## Still open
 
