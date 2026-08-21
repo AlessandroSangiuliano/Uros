@@ -74,6 +74,73 @@ def cmake_block(text, name):
     return text[m.end():i - 1]
 
 
+def ninja_deps(build_dir):
+    """What each object actually included, asked of ninja's own database.
+
+    🔴 Not the .d files -- ninja keeps dependencies in a binary .ninja_deps and
+    writes no .d at all, so a scan for them returns zero, and zero looks like
+    an answer.  It cost one wrong report here before the implausibility of it
+    was noticed.
+    """
+    import subprocess
+    d = os.path.join(ROOT, build_dir)
+    if not os.path.isdir(d):
+        return {}
+    try:
+        out = subprocess.run(["ninja", "-t", "deps"], cwd=d, text=True,
+                             capture_output=True, timeout=120).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    deps, cur = {}, None
+    for line in out.splitlines():
+        if not line.startswith(" "):
+            m = re.match(r"(\S+):\s+#deps", line)
+            cur = m.group(1) if m else None
+            if cur:
+                deps[cur] = []
+        elif cur:
+            deps[cur].append(line.strip())
+    return deps
+
+
+def header_reaches(build_dir, macro, header):
+    """Does every compiled TU that tests `macro' also see `header'?
+
+    This is what makes dropping a redundant -D a demonstrable change rather
+    than a hopeful one: if some translation unit tests the macro without the
+    header that defaults it, removing the -D leaves that unit with the macro
+    undefined -- `#if UNDEFINED' is 0 -- and switches its code off in silence.
+    """
+    deps = ninja_deps(build_dir)
+    if not deps:
+        return None
+    rx = re.compile(r"^\s*#\s*if(n?def)?\s+.*\b" + macro + r"\b", re.M)
+    base = os.path.join(ROOT, build_dir)
+    uses = sees = 0
+    blind = []
+    for tgt, incs in deps.items():
+        if not tgt.endswith(".c.o"):
+            continue
+        src = next((i for i in incs if i.endswith(".c")), None)
+        if not src:
+            continue
+        path = src if os.path.isabs(src) else os.path.normpath(
+            os.path.join(base, src))
+        if not os.path.exists(path):
+            continue
+        try:
+            if not rx.search(open(path, errors="replace").read()):
+                continue
+        except OSError:
+            continue
+        uses += 1
+        if any(header in i for i in incs):
+            sees += 1
+        else:
+            blind.append(os.path.relpath(path, ROOT))
+    return uses, sees, blind
+
+
 def report_config():
     """Is the switch operable from one place?"""
     table = {}
@@ -108,16 +175,72 @@ def report_config():
     print('     "The values live here ... There is no other place, and that '
           'is the point."')
 
+    per_target = {}
     for label, var, dashed in (("i386", "KERNEL_DEFINES", True),
                                ("x86-64", "KERNEL_DEFINES_BARE", False)):
         d = defines(var, dashed)
+        per_target[label] = d
         both = sorted(k for k in d if k in table)
+        redundant = [k for k in both if table[k] == d[k]]
         print(f"\n   {label} ({var}): {len(d)} defines, "
-              f"{len(both)} of them ALSO in the table")
+              f"{len(both)} of them ALSO in the table, "
+              f"{len(redundant)} redundantly")
         for k in both:
             a, b = table[k], d[k]
-            mark = "   <-- DISAGREE" if a != b else ""
+            # ⚠️ A -D that DIFFERS is not a defect: the generator writes every
+            # value under #ifndef precisely so a per-target -D can override the
+            # shared default, and says so in as many words.  MACH_KDB is 1 in
+            # the table and 0 here on purpose.
+            #
+            # The one worth flagging is the opposite.  A -D that REPEATS the
+            # table value overrides nothing -- it just puts the same knob in
+            # two places, and that is what makes it unsettable from either:
+            # clearing one leaves the other standing.
+            if a == b:
+                mark = "   <-- REDUNDANT: two sources, one value"
+            else:
+                mark = "   (deliberate per-target override)"
             print(f"     {k:<26} table={a:<3} -D={b:<3}{mark}")
+
+    print("\n   Can the redundant -D be dropped?  Only if every compiled unit"
+          " that tests")
+    print("   the macro also sees the header that defaults it — otherwise"
+          " dropping it")
+    print("   leaves `#if UNDEFINED\', which is 0, and switches code off in"
+          " silence.\n")
+    for macro, header in (("MACH_ASSERT", "mach_assert.h"),
+                          ("MACH_DEBUG", "mach_debug.h"),
+                          ("MACH_HOST", "mach_host.h"),
+                          ("MACH_KDB", "mach_kdb.h"),
+                          ("STAT_TIME", "stat_time.h"),
+                          ("TASK_SWAPPER", "task_swapper.h")):
+        for label, bd in (("i386", "uros/build"),
+                          ("x86-64", "uros/build-x86_64")):
+            r = header_reaches(bd, macro, header)
+            if r is None:
+                print(f"     {macro:<14} {label:<7} (no build to ask)")
+                continue
+            uses, sees, blind = r
+            if uses == 0:
+                verdict = "nothing tests it here"
+            elif sees == uses:
+                # ⚠️ Two different safeties, and conflating them would be a
+                # report that is true in one sense and misleading in the one
+                # that matters.  The header reaching every unit says dropping
+                # the -D changes no unit's VISIBILITY of the macro; it says
+                # nothing about its VALUE.  Where the -D overrides the table,
+                # dropping it silently moves the knob.
+                dl = per_target.get(label, {})
+                if macro in dl and macro in table and dl[macro] != table[macro]:
+                    verdict = (f"{sees}/{uses} see <{header}> — but this -D "
+                               f"OVERRIDES: dropping it moves the value "
+                               f"{dl[macro]} -> {table[macro]}")
+                else:
+                    verdict = f"{sees}/{uses} see <{header}> — safe to drop"
+            else:
+                verdict = (f"{sees}/{uses} see <{header}> — NOT SAFE: "
+                           + ", ".join(blind[:3]))
+            print(f"     {macro:<14} {label:<7} {verdict}")
 
     print("""
    🔑 The generated <mach_assert.h> is `#ifndef MACH_ASSERT / #define

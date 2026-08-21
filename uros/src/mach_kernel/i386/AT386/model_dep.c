@@ -717,7 +717,24 @@ parse_arguments(void)
 		    break;
 		case 'Z':	/* -Z: poison freed zone elements + verify on
 				 * realloc to catch use-after-free (#344). */
+		    /*
+		     * ⚠️ #485.  zfree_clear and the poison it arms live inside
+		     * `#if MACH_ASSERT\' in kern/zalloc.c, and this reference was
+		     * unconditional -- so the kernel linked only because assertions
+		     * have never been switched off.  Guarded here rather than by
+		     * defining the flag anyway: a `-Z\' that sets a boolean nothing
+		     * reads is worse than one that says it cannot.
+		     *
+		     * The real answer is that the zone poison is a debugging
+		     * facility and belongs on its own switch, like #482 gave the
+		     * #385 page poison.  That is the classification step of #485.
+		     */
+#if	MACH_ASSERT
 		    { extern boolean_t zfree_clear; zfree_clear = TRUE; }
+#else
+		    printf("-Z: the zone poison is not built in this kernel "
+			   "(MACH_ASSERT off)\n");
+#endif
 		    break;
 		case 'S':	/* -S: spin -- disable the #357 idle HLT and
 				 * revert to the legacy always-poll idle loop

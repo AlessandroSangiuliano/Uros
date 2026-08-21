@@ -21,6 +21,35 @@
 # Adding a knob: one line below.  Changing one: change it here.  There is no
 # other place, and that is the point.
 
+# ── The one knob with a switch of its own (#485) ────────────────────────────
+#
+# MACH_ASSERT decides whether every assert() in the kernel is a comparison and
+# a branch or is ((void)0).  It was set in TWO places -- this table and each
+# target's -D list, at the same value -- so it could not be turned off from
+# either: clearing one left the other standing, and clearing the -D left this
+# table's default, which the generated header writes back.
+#
+# 🔥 That is not a tidiness complaint.  #482 measured a single site under this
+# switch at 44% of a copy-on-write fault (the #385 free-page poison, a whole
+# page read on every allocation, for a hunt that closed months ago), and
+# gating it took the fault from 5,790 cycles to 3,390.  The switch has to be
+# operable before what it switches can be decided.
+#
+# Now: one option, feeding the table, feeding the header.  The -D is gone from
+# both targets, which is safe and was checked rather than assumed -- every
+# compiled unit that tests MACH_ASSERT also includes <mach_assert.h>, 25 of 25
+# on i386 and 22 of 22 on x86-64, per scripts/assert-census.py --config.
+#
+# ⚠️ ON is still the default, and #485 has not decided otherwise.  What this
+# buys today is that the question can be ASKED of a build.
+option(UROS_MACH_ASSERT "Build the kernel's assert() calls (MACH_ASSERT)" ON)
+if(UROS_MACH_ASSERT)
+    set(UROS_MACH_ASSERT_VALUE 1)
+else()
+    set(UROS_MACH_ASSERT_VALUE 0)
+    message(STATUS "#485 MACH_ASSERT: OFF — assert() compiles to nothing")
+endif()
+
 # name              macro                 value
 set(UROS_KERNEL_CONFIG
     advisory_pageout       ADVISORY_PAGEOUT 1
@@ -39,7 +68,7 @@ set(UROS_KERNEL_CONFIG
     gprof                  NGPROF 0
     hw_footprint           HW_FOOTPRINT 1
     kernel_test            KERNEL_TEST 0
-    mach_assert            MACH_ASSERT 1
+    mach_assert            MACH_ASSERT ${UROS_MACH_ASSERT_VALUE}
     mach_cluster_stats     MACH_CLUSTER_STATS 0
     mach_counters          MACH_COUNTERS 0
     mach_debug             MACH_DEBUG 1

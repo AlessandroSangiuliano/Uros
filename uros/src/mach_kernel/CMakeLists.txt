@@ -228,7 +228,11 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # the same reason it resolves to mach/i386/ there.
   set(KERNEL_DEFINES_BARE
       KERNEL MACH_KERNEL KERNEL_PRIVATE KERNEL_SERVER=1
-      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=0 MACH_DEBUGGER=1 MACH_HOST=1
+      # ⚠️ MACH_ASSERT is NOT here (#485).  It comes from the knob table in
+      # cmake/kernel-config.cmake, through <mach_assert.h>, driven by
+      # -DUROS_MACH_ASSERT.  Repeating it here at the same value overrode
+      # nothing and made the switch unsettable from either place.
+      NCPUS=64 MACH_DEBUG=1 MACH_KDB=0 MACH_DEBUGGER=1 MACH_HOST=1
       STAT_TIME TASK_SWAPPER=1 __NO_UNDERSCORES__
       # This machine supplies its own usimple_lock (x86_64/sync/lock.c), so
       # kern/lock.c leaves them out.  See the guard there: the rest of that
@@ -852,7 +856,8 @@ set(KERNEL_DEFINES
     -DMACH_KERNEL
     -DAT386=1
     -DNCPUS=${UROS_NCPUS}
-    -DMACH_ASSERT=1
+    # ⚠️ MACH_ASSERT is NOT here (#485) — see the note in the x86-64 arm and
+    # the knob table in cmake/kernel-config.cmake.
     -DMACH_DEBUG=1
     -DMACH_KDB=1
     -DMACH_HOST=1
