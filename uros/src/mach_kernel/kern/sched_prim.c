@@ -2801,9 +2801,21 @@ choose_thread(
 	simple_lock(&runq->lock);
 	if (runq->count > 0 && runq->low <= pset->runq.low) {
 		q = runq->runq + runq->low;
-#if	MACH_ASSERT
+		/*
+		 * ⚠️ Outside MACH_ASSERT (#485).  The queue is not empty
+		 * because runq->count and the bitmap say a thread sits at
+		 * runq->low -- and if those disagree with the queue, q->next
+		 * is the queue HEAD, cast to thread_t, and the next line
+		 * writes through it.  A run-queue inconsistency becomes a wild
+		 * write inside the scheduler.
+		 *
+		 * That is not an invariant a build may take on trust: it costs
+		 * one comparison, on a path that has already taken the lock
+		 * and loaded the pointer, and what it buys is that a corrupt
+		 * structure stops here instead of spreading.  Same category as
+		 * the free-list range check in REMOVE_FROM_ZONE.
+		 */
 		if (!queue_empty(q)) {
-#endif	/*MACH_ASSERT*/
 			th = (thread_t)q->next;
 			((queue_entry_t)th)->next->prev = q;
 			q->next = ((queue_entry_t)th)->next;
@@ -2817,10 +2829,8 @@ choose_thread(
 			}
 			simple_unlock(&runq->lock);
 			return(th);
-#if	MACH_ASSERT
 		}
 		panic("choose_thread");
-#endif	/*MACH_ASSERT*/
 		/*NOTREACHED*/
 	}
 	simple_unlock(&runq->lock);
@@ -2853,9 +2863,21 @@ choose_pset_thread(
 	runq = &pset->runq;
 	if (runq->count > 0) {
 		q = runq->runq + runq->low;
-#if	MACH_ASSERT
+		/*
+		 * ⚠️ Outside MACH_ASSERT (#485).  The queue is not empty
+		 * because runq->count and the bitmap say a thread sits at
+		 * runq->low -- and if those disagree with the queue, q->next
+		 * is the queue HEAD, cast to thread_t, and the next line
+		 * writes through it.  A run-queue inconsistency becomes a wild
+		 * write inside the scheduler.
+		 *
+		 * That is not an invariant a build may take on trust: it costs
+		 * one comparison, on a path that has already taken the lock
+		 * and loaded the pointer, and what it buys is that a corrupt
+		 * structure stops here instead of spreading.  Same category as
+		 * the free-list range check in REMOVE_FROM_ZONE.
+		 */
 		if (!queue_empty(q)) {
-#endif	/*MACH_ASSERT*/
 			th = (thread_t)q->next;
 			((queue_entry_t)th)->next->prev = q;
 			q->next = ((queue_entry_t)th)->next;
@@ -2869,10 +2891,8 @@ choose_pset_thread(
 			}
 			simple_unlock(&runq->lock);
 			return(th);
-#if	MACH_ASSERT
 		}
 		panic("choose_pset_thread");
-#endif	/*MACH_ASSERT*/
 		/*NOTREACHED*/
 	}
 	simple_unlock(&runq->lock);

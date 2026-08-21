@@ -269,7 +269,19 @@ struct ipc_port {
 	struct dipc_port *ip_dipc;
 #endif
 
-#if	MACH_ASSERT
+/*
+ * ⚠️ These follow IPC_PORT_TRACK and not MACH_ASSERT (#485), because they are
+ * that facility's storage: ip_port_links is the link into the global list of
+ * allocated ports, and the rest is what ipc_port_init_debug() records so the
+ * debugger can say who made a port and when.
+ *
+ * 🔥 They are ~150 bytes on x86-64 -- a queue_chain, two counters, a
+ * ten-deep call stack and ten spares -- ON EVERY PORT, and MACH_ASSERT is on
+ * in Release, so every shipping port has carried them.  A microkernel's ports
+ * are its most numerous object; this is the debugging apparatus taxing the
+ * object the system has most of.
+ */
+#if	MACH_ASSERT && IPC_PORT_TRACK
 #define	IP_NSPARES		10
 #define	IP_CALLSTACK_MAX	10
 	queue_chain_t	ip_port_links;	/* all allocated ports */
@@ -277,7 +289,7 @@ struct ipc_port {
 	unsigned long	ip_timetrack;	/* give an idea of "when" created */
 	natural_t	ip_callstack[IP_CALLSTACK_MAX]; /* stack trace */
 	unsigned long	ip_spares[IP_NSPARES]; /* for debugging */
-#endif	/* MACH_ASSERT */
+#endif	/* MACH_ASSERT && IPC_PORT_TRACK */
 };
 
 

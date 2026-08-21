@@ -1691,7 +1691,7 @@ ipc_port_print(
 		port->ip_norma_xmm_object_refs, port->ip_norma_xmm_object);
 #endif	/* NORMA_VM */
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK
 	/* don't bother printing callstack or queue links */
 	iprintf("ip_thread=0x%x, ip_timetrack=0x%x\n",
 		port->ip_thread, port->ip_timetrack);

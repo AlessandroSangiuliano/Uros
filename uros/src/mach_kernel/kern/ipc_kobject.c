@@ -556,9 +556,9 @@ ipc_kobject_set(
 {
 	ip_lock(port);
 	assert(ip_active(port) || (ip_kotype(port) == IKOT_PAGER_TERMINATING));
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK
 	port->ip_spares[2] = (port->ip_bits & IO_BITS_KOTYPE);
-#endif	/* MACH_ASSERT */
+#endif	/* MACH_ASSERT && IPC_PORT_TRACK */
 	port->ip_bits = (port->ip_bits &~ IO_BITS_KOTYPE) | type;
 	port->ip_kobject = kobject;
 	ip_unlock(port);
