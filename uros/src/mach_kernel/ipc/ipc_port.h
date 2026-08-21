@@ -567,14 +567,45 @@ extern void ipc_port_dealloc_special(
 	ipc_port_t	port,
 	ipc_space_t	space);
 
-#if	MACH_ASSERT
+/*
+ * ── The list of every allocated port (#485) ──────────────────────────────
+ *
+ * ipc_port_init() puts every port it creates on a global queue under a global
+ * mutex, and ipc_object_destroy() takes it off again the same way.  What that
+ * buys is the debugger's ability to enumerate ports -- db_port_walk(),
+ * db_find_rcvr(), db_port_stack_trace() -- and a warning when more than
+ * port_count_warning of them exist.
+ *
+ * 🔥 It was filed under MACH_ASSERT, which is ON in Release on both targets,
+ * so a shipping kernel took a GLOBAL MUTEX on every port allocation and every
+ * port free.  That is a debugging facility on the allocation path of the
+ * object a microkernel creates more of than any other, and at NCPUS=64 a
+ * global lock is the shape #455 measured as linear in the number of
+ * processors.
+ *
+ * ⚠️ The cost is not the mistake; the filing is.  This is exactly the family
+ * #482 found in vm_page_grab() -- a hunt's apparatus wearing the word
+ * "assert" -- and it gets the same treatment the tree already gives
+ * first_free_check and vm_page_free_verify: its own switch, off.
+ *
+ *	cmake -DUROS_IPC_PORT_TRACK=ON
+ *
+ * ⚠️ Turning it OFF disables the debugger's port enumeration with it.  That is
+ * the trade, said here rather than discovered at a `show ports' that prints
+ * nothing.
+ */
+#ifndef	IPC_PORT_TRACK
+#define	IPC_PORT_TRACK	0
+#endif
+
+#if	MACH_ASSERT && IPC_PORT_TRACK
 /* Track low-level port deallocation */
 extern void ipc_port_track_dealloc(
 	ipc_port_t	port);
 
 /* Initialize general port debugging state */
 extern void ipc_port_debug_init(void);
-#endif	/* MACH_ASSERT */
+#endif	/* MACH_ASSERT && IPC_PORT_TRACK */
 
 #define	ipc_port_alloc_kernel()		\
 		ipc_port_alloc_special(ipc_space_kernel)

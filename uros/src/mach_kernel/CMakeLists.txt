@@ -93,6 +93,12 @@ option(UROS_FAULT_PROFILE "Build the #482 copy-on-write fault phase profile" OFF
 # Same both-arms rule as above: declared here, appended in each arm.
 option(UROS_VM_PAGE_POISON "Build the #385 free-page poison (expensive: two page traversals per recycle)" OFF)
 
+# #485: the global list of every allocated port, and the global mutex that
+# maintains it on each port alloc and free.  It buys the debugger's port
+# enumeration; it was filed under MACH_ASSERT, which is ON in Release.
+# Same both-arms rule as above.
+option(UROS_IPC_PORT_TRACK "Build the port allocation tracking (a global mutex per port alloc/free)" OFF)
+
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
 
@@ -257,6 +263,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
       message(STATUS "#385 free-page poison: ON (x86_64)")
+  endif()
+  if(UROS_IPC_PORT_TRACK)
+      list(APPEND KERNEL_DEFINES_BARE IPC_PORT_TRACK=1)
+      message(STATUS "#485 port allocation tracking: ON (x86_64)")
   endif()
   list(TRANSFORM KERNEL_DEFINES_BARE PREPEND -D OUTPUT_VARIABLE KERNEL_DEFINES)
 
@@ -899,6 +909,11 @@ endif()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
     message(STATUS "#385 free-page poison: ON (i386)")
+endif()
+
+if(UROS_IPC_PORT_TRACK)
+    list(APPEND KERNEL_DEFINES -DIPC_PORT_TRACK=1)
+    message(STATUS "#485 port allocation tracking: ON (i386)")
 endif()
 
 # MIG-specific flags.  TypeCheck is the argument validation in the generated

@@ -268,7 +268,7 @@ ipc_bootstrap(void)
 
 	/* initialize modules with hidden data structures */
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK
 	ipc_port_debug_init();
 #endif
 	mig_init();

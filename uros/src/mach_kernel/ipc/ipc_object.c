@@ -93,6 +93,7 @@
 #include <ipc/ipc_space.h>
 #include <ipc/ipc_entry.h>
 #include <ipc/ipc_object.h>
+#include <ipc/ipc_port.h>	/* #485: IPC_PORT_TRACK — explicit, not transitive */
 #include <ipc/ipc_hash.h>
 #include <ipc/ipc_right.h>
 #include <ipc/ipc_notify.h>
@@ -1003,7 +1004,7 @@ io_free(
 			ip_unlock_absolute(port);
 		}
 #endif	/* DIPC */
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK
 		ipc_port_track_dealloc(port);
 #endif	/* MACH_ASSERT */
 	}
