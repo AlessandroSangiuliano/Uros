@@ -269,14 +269,18 @@
 #include <kern/cpu_number.h>			/* #330: cpu_number() */
 
 
-#if	MACH_ASSERT
-
-/* Detect use of zone elt after freeing it by two methods:
+/*
+ * Detect use of a zone element after freeing it, by two methods:
  * (1) Range-check the free-list "next" ptr for sanity.
  * (2) Store the ptr in two different words, and compare them against
- *     each other when re-using the zone elt, to detect modifications;
+ *     each other when re-using the zone elt, to detect modifications.
+ *
+ * ⚠️ (1) is OUTSIDE the MACH_ASSERT block (#485) and (2) is inside, and the
+ * split is the point.  The range check is what stands between a corrupted
+ * free list and the kernel following a pointer somebody else wrote; it costs
+ * one comparison and it is not an assertion.  The poison is a hunt\'s
+ * apparatus, already behind its own runtime flag, and may compile out.
  */
-
 #if defined(__alpha)
 
 #define is_kernel_data_addr(a)						\
@@ -289,6 +293,8 @@
 		    (a) <= VM_MAX_KERNEL_ADDRESS && !((a) & 0x3))
 
 #endif /* defined(__alpha) */
+
+#if	MACH_ASSERT
 
 /* Should we set all words of the zone element to an illegal address
  * when it is freed, to help catch usage after freeing?  The down-side
@@ -357,12 +363,33 @@ MACRO_BEGIN								\
 		(zone)->count--;					\
 MACRO_END
 
+/*
+ * ⚠️ The free-list head is still checked here (#485), and that is the whole
+ * difference between this and what it used to be.
+ *
+ * The check is not an assertion.  An assertion says "this cannot happen and
+ * the program is wrong if it does"; this one says "the first word of a freed
+ * element is not a kernel data address, so something has written into freed
+ * memory" -- and the very next line would take the kernel to whatever address
+ * that writer chose.  It is the last thing standing between a use-after-free
+ * and a wild dereference, and it costs one range comparison on a path that
+ * already touches the word.
+ *
+ * It used to be inside `#if MACH_ASSERT\' with the rest, so a kernel built
+ * without assertions popped the free list unvalidated.  #485 is about telling
+ * the three kinds apart: invariants, which may compile out; a hunt\'s
+ * apparatus, which belongs behind its own switch; and this, which protects
+ * something and belongs to neither.
+ */
 #define REMOVE_FROM_ZONE(zone, ret, type)				\
 MACRO_BEGIN								\
 	(ret) = (type) (zone)->free_elements;				\
 	if ((ret) != (type) 0) {					\
-		(zone)->count++;					\
-		(zone)->free_elements = *((vm_offset_t *)(ret));	\
+	    if (!is_kernel_data_addr(((vm_offset_t *)(ret))[0])) {	\
+		panic("A freed zone element has been modified.\n");	\
+	    }								\
+	    (zone)->count++;						\
+	    (zone)->free_elements = *((vm_offset_t *)(ret));		\
 	}								\
 MACRO_END
 
