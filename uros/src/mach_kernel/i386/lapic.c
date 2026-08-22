@@ -49,6 +49,7 @@
 #include <i386/spl.h>			/* splhi/splx */
 #include <i386/pit.h>			/* PIT ports for 8254 calibration ref */
 #include <i386/pio.h>			/* inb/outb */
+#include <kern/uslock_census.h>		/* #486: uslock_census_sample */
 
 extern unsigned char	mp_bsp_lapic_id_get(void);
 extern unsigned char	mp_cpu_lapic_id_get(int slot);
@@ -481,24 +482,49 @@ ipi_mp_handler(struct i386_interrupt_state *regs)
 {
 	int		mycpu;
 	int		word;
-	boolean_t	sched_safe;
 
 	/*
-	 * Capture the INTERRUPTED preemption level before we disable it below.
-	 * thread_lock() and every other scheduler simple_lock disable
-	 * preemption while held, so a nonzero level here means the code we cut
-	 * into already holds one.  ast_check() and
-	 * hertz_tick()->thread_quantum_update() re-take exactly those locks;
-	 * running them now would self-deadlock — the IPI vector (0xF1) sits
-	 * above splsched's TPR class, so unlike the spl-gated mp_intr() of old
-	 * it is NOT masked while a CPU holds a scheduler lock.  When it is
-	 * unsafe we leave the MP_AST / MP_CLOCK bits pending and let the next
-	 * clock IPI retry them: the per-CPU accounting is approximate and the
-	 * cross-CPU reschedule ends up at most one tick late.  The TLB
-	 * shootdown is lock-free and always safe.
+	 * #486: the question this handler used to ask, put to an observable
+	 * that can answer it.  Must come first, before the
+	 * mp_disable_preemption() below, because what it reads is the state of
+	 * the code the interrupt cut into.  Compiles to nothing unless the
+	 * kernel was configured -DUROS_USLOCK_CENSUS=ON.
 	 */
-	sched_safe = (get_preemption_level() == 0);
+	uslock_census_sample();
 
+	/*
+	 * There is no gate on MP_AST / MP_CLOCK here, and that is a decision
+	 * with a measurement behind it (#486).
+	 *
+	 * #316 put one here: `sched_safe = (get_preemption_level() == 0)', on
+	 * the reasoning that a scheduler lock held by the interrupted code
+	 * would be re-taken by ast_check() or hertz_tick() and self-deadlock —
+	 * the IPI vector (0xF1) sits above splsched's TPR class, so unlike the
+	 * spl-gated mp_intr() of old it is NOT masked while a CPU holds one.
+	 * The reasoning was right and the gate never worked: on i386
+	 * get_preemption_level() is `return (0)' (<kern/cpu_data.h>, the arm
+	 * for a machine with neither MACH_RT nor MACHINE_PREEMPTION_LEVEL), so
+	 * sched_safe was a constant and the compiler folded both tests away.
+	 *
+	 * What the census measured, over seven processors and six million
+	 * interrupts: one in two hundred does land on a processor holding a
+	 * simple lock, and 2,500 landed inside thread_quantum_update() itself.
+	 * So the hazard is real and reached.  It is also narrow — enumerated
+	 * from the source rather than feared:
+	 *
+	 *   - ast_check() takes no simple lock at all;
+	 *   - thread_quantum_update() takes thread->lock, simple_lock_try()
+	 *     since #317, and pset->quantum_adj_lock, simple_lock_try() since
+	 *     #486.  Both are the same hazard, closed where the lock is.
+	 *
+	 * A gate here would have been the wrong shape for it: it suppresses
+	 * every cross-CPU reschedule and every clock tick that happens to
+	 * arrive while ANY simple lock is held, to avoid re-entering two named
+	 * ones.  Closing it at the two locks costs nothing and cannot be
+	 * bypassed by a caller who does not know about the gate.
+	 *
+	 * The TLB shootdown is lock-free and was always serviced regardless.
+	 */
 	mp_disable_preemption();
 	mycpu = cpu_number();
 
@@ -528,7 +554,7 @@ ipi_mp_handler(struct i386_interrupt_state *regs)
 	 * Evaluate this CPU's run state and raise need_ast[] if a switch
 	 * is due; ipi_ast_return consumes it on the way out.
 	 */
-	if (sched_safe && (word & (1 << MP_AST))) {
+	if (word & (1 << MP_AST)) {
 		i_bit_clear(MP_AST, &cpu_int_word[mycpu]);
 		ast_check();
 	}
@@ -540,7 +566,7 @@ ipi_mp_handler(struct i386_interrupt_state *regs)
 	 * AST_QUANTUM when it expires — then pass the tick to the next
 	 * running CPU.
 	 */
-	if (sched_safe && (word & (1 << MP_CLOCK))) {
+	if (word & (1 << MP_CLOCK)) {
 		boolean_t usermode;
 
 		i_bit_clear(MP_CLOCK, &cpu_int_word[mycpu]);
