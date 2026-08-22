@@ -188,6 +188,27 @@ static inline int at386_io_lock(int op __attribute__((unused))) { return 1; }
 #endif	/* MP_V1_1 */
 #endif	/* NCPUS > 1 */
 
+/*
+ * ⚠️ EVERYTHING BELOW NEEDS MACH_RT, AND NO TARGET SETS IT.
+ *
+ * cmake/kernel-config.cmake gives MACH_RT the value 0 on both i386 and x86-64,
+ * so the arm that compiles is the `#else' at the bottom of this file, where all
+ * six macros are nothing.  i386 does not preempt in kernel mode; the machinery
+ * here is switched off, not absent, and x86_64/cpu_data.h explains why that is
+ * a decision rather than an omission.
+ *
+ * 🔴 Which is why the fork below selects on MACH_PREEMPT_DEBUG and not on
+ * MACH_ASSERT, as it did until #486.  It is a choice about whether the assembly
+ * routes through the checked C entry points -- debugging apparatus, in the
+ * classification #485 arrived at, so its own switch and off by default.  Named
+ * after assertions it read as a statement about SCHEDULING, and was read that
+ * way: #485 reported that a build option decided whether i386 takes urgent ASTs
+ * on interrupt exit.  It never did, because none of this compiles.
+ */
+#ifndef	MACH_PREEMPT_DEBUG
+#define	MACH_PREEMPT_DEBUG	0
+#endif
+
 #if	MACH_RT
 #define _DISABLE_PREEMPTION(r) 					\
 	movl	$CPD_PREEMPTION_LEVEL,r			;	\
@@ -210,7 +231,7 @@ static inline int at386_io_lock(int op __attribute__((unused))) { return 1; }
 	movl	$CPD_PREEMPTION_LEVEL,r			;	\
 	decl	%gs:(r)
 
-#if	MACH_ASSERT
+#if	MACH_PREEMPT_DEBUG
 #define DISABLE_PREEMPTION(r)					\
 	pushl	%eax;						\
 	pushl	%ecx;						\
@@ -265,7 +286,7 @@ static inline int at386_io_lock(int op __attribute__((unused))) { return 1; }
 #define MP_ENABLE_PREEMPTION(r)
 #define MP_ENABLE_PREEMPTION_NO_CHECK(r)
 #endif	/* NCPUS > 1 */
-#else	/* MACH_ASSERT */
+#else	/* MACH_PREEMPT_DEBUG */
 #define DISABLE_PREEMPTION(r)			_DISABLE_PREEMPTION(r)
 #define ENABLE_PREEMPTION(r)			_ENABLE_PREEMPTION(r)
 #define ENABLE_PREEMPTION_NO_CHECK(r)		_ENABLE_PREEMPTION_NO_CHECK(r)
@@ -278,7 +299,7 @@ static inline int at386_io_lock(int op __attribute__((unused))) { return 1; }
 #define MP_ENABLE_PREEMPTION(r)
 #define MP_ENABLE_PREEMPTION_NO_CHECK(r)
 #endif	/* NCPUS > 1 */
-#endif	/* MACH_ASSERT */
+#endif	/* MACH_PREEMPT_DEBUG */
 
 #else	/* MACH_RT */
 #define DISABLE_PREEMPTION(r)

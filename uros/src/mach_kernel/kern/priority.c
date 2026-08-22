@@ -102,6 +102,7 @@
 #include <kern/spl.h>
 #include <kern/thread.h>
 #include <kern/time_out.h>
+#include <kern/uslock_census.h>		/* #486 */
 #include <machine/machparam.h>
 
 
@@ -142,6 +143,8 @@ thread_quantum_update(
 	register processor_set_t	pset;
 #endif	/* NCPUS > 1 */
 	spl_t				s;
+
+	uslock_census_tick_enter();		/* #486 */
 
 	myprocessor = cpu_to_processor(mycpu);
 #if	NCPUS > 1
@@ -195,6 +198,7 @@ thread_quantum_update(
 			}
 			splx(s);
 			ast_check();
+			uslock_census_tick_leave();	/* #486 */
 			return;
 		}
 		myprocessor->quantum -= nticks;
@@ -205,15 +209,48 @@ thread_quantum_update(
 		 */
 		if ((quantum != myprocessor->last_quantum) &&
 		    (pset->processor_count > 1)) {
-			myprocessor->last_quantum = quantum;
-			simple_lock(&pset->quantum_adj_lock);
-			quantum = min_quantum + (pset->quantum_adj_index *
-				(quantum - min_quantum)) / 
-					(pset->processor_count - 1);
-			if (++(pset->quantum_adj_index) >=
-			    pset->processor_count)
-				pset->quantum_adj_index = 0;
-			simple_unlock(&pset->quantum_adj_lock);
+			/*
+			 * #486: try-lock, never spin here.  The same shape
+			 * #317 gave thread_lock a few lines below, arrived at
+			 * the same way and for the same reason.
+			 *
+			 * hertz_tick() reaches this from TWO places on one
+			 * processor: its own LAPIC timer, and ipi_mp_handler()
+			 * on the MP inter-processor interrupt -- vector 0xF1,
+			 * above splsched's TPR class, so not masked while this
+			 * span runs.  quantum_adj_lock has exactly one
+			 * acquirer in the kernel, which is this line, so a
+			 * processor interrupted inside the span comes back to
+			 * spin on a lock it holds itself.  For ever.
+			 *
+			 * 🔥 Not a hypothesis: measured.  The MP interrupt was
+			 * counted landing inside this span, and the reason it
+			 * has not hung the machine is an accident of ordering
+			 * -- last_quantum used to be assigned BEFORE the lock,
+			 * so the re-entrant call usually recomputed the same
+			 * quantum and skipped the branch.  Usually.
+			 *
+			 * So last_quantum is now assigned only once the lock
+			 * is actually held: a tick that skips the adjustment
+			 * is retried at the next one instead of being recorded
+			 * as done.  Skipping costs a tick of stagger -- the
+			 * adjustment exists to desynchronise quantum expiry
+			 * across processors, and is advisory.
+			 */
+			uslock_census_qadj_enter();	/* #486 */
+			if (simple_lock_try(&pset->quantum_adj_lock)) {
+				myprocessor->last_quantum = quantum;
+				quantum = min_quantum +
+					(pset->quantum_adj_index *
+					 (quantum - min_quantum)) /
+						(pset->processor_count - 1);
+				if (++(pset->quantum_adj_index) >=
+				    pset->processor_count)
+					pset->quantum_adj_index = 0;
+				simple_unlock(&pset->quantum_adj_lock);
+			} else
+				uslock_census_qadj_missed();	/* #486 */
+			uslock_census_qadj_leave();	/* #486 */
 		}
 #endif	/* NCPUS > 1 */
 		if (myprocessor->quantum <= 0) {
@@ -283,6 +320,8 @@ thread_quantum_update(
 		 */
 		ast_check();
 	}
+
+	uslock_census_tick_leave();		/* #486 */
 }
 
 #if	0

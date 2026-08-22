@@ -330,6 +330,7 @@
 #include <kern/thread.h>
 #include <kern/thread_swap.h>
 #include <kern/time_out.h>
+#include <kern/uslock_census.h>		/* #486 */
 #include <vm/pmap.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
@@ -3333,6 +3334,17 @@ sched_thread(void)
     thread_swappable(current_act(), FALSE);
 
     /*
+     * #486: arm the simple-lock census here rather than in the boot path.  By
+     * the time this thread exists every processor is up and its %gs carries a
+     * real CPU_DATA descriptor, which is what cpu_number() reads -- and the
+     * census hooks sit on every simple lock in the kernel, including ones
+     * taken long before that is true.  What is lost is the boot, which is not
+     * what the question is about; a release that crosses the arming point is
+     * counted as an underflow and reported rather than hidden.
+     */
+    uslock_census_arm();
+
+    /*
      *	Sleep on event NO_EVENT, recompute_priorities() will awaken
      *	us by calling clear_wait().
      */
@@ -3360,6 +3372,22 @@ sched_thread(void)
 		if (++s319_beats >= 5) {
 			s319_beats = 0;
 			s319_dump();
+		}
+	}
+#endif
+
+#if	USLOCK_CENSUS
+	/*
+	 * #486: same cadence and the same reason as #319 above -- process
+	 * context, because printing from the interrupt level this measures is
+	 * what wedged the 32-CPU bring-up.
+	 */
+	{
+		static unsigned int	uslock_beats;
+
+		if (++uslock_beats >= 5) {
+			uslock_beats = 0;
+			uslock_census_report();
 		}
 	}
 #endif

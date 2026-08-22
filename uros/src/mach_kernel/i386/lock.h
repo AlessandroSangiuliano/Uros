@@ -406,7 +406,14 @@ MACRO_END
 #define	mutex_lock	_mutex_lock
 #endif	/* MACH_RT || (NCPUS > 1) || MACH_LDEBUG */
 
+/*
+ * #486: under the same condition as the definition (i386/trap.c) and as every
+ * caller.  A header that promises a symbol no archive delivers is how a link
+ * error becomes a surprise instead of a statement.
+ */
+#if	MACH_RT
 extern void		kernel_preempt_check (void);
+#endif	/* MACH_RT */
 
 #endif	/* _I386_LOCK_H_ */
 

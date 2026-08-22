@@ -99,6 +99,14 @@ option(UROS_VM_PAGE_POISON "Build the #385 free-page poison (expensive: two page
 # Same both-arms rule as above.
 option(UROS_IPC_PORT_TRACK "Build the port allocation tracking (a global mutex per port alloc/free)" OFF)
 
+# #486: count, per processor, how many simple locks are held when the MP
+# inter-processor interrupt lands, and from which acquisition site.  It is the
+# observable ipi_mp_handler()'s sched_safe guard needs and does not have -- on
+# i386 get_preemption_level() is the constant 0, so that guard folds away.
+# A measuring build: the hooks sit on every simple lock in the kernel.
+# Same both-arms rule as above.
+option(UROS_USLOCK_CENSUS "Build the #486 simple-lock census (hooks on every simple lock)" OFF)
+
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
 
@@ -267,6 +275,15 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_IPC_PORT_TRACK)
       list(APPEND KERNEL_DEFINES_BARE IPC_PORT_TRACK=1)
       message(STATUS "#485 port allocation tracking: ON (x86_64)")
+  endif()
+  # The other arm of the #486 option.  Nothing on x86-64 feeds the census --
+  # this target supplies its own usimple_lock (x86_64/sync/lock.c, #453), so
+  # kern/lock.c's hooks are not compiled here at all.  What the switch buys on
+  # this target is that the facility COMPILES, and cannot rot behind a switch
+  # only the other machine can turn on.
+  if(UROS_USLOCK_CENSUS)
+      list(APPEND KERNEL_DEFINES_BARE USLOCK_CENSUS=1)
+      message(STATUS "#486 simple-lock census: ON (x86_64, storage only)")
   endif()
   list(TRANSFORM KERNEL_DEFINES_BARE PREPEND -D OUTPUT_VARIABLE KERNEL_DEFINES)
 
@@ -681,6 +698,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/eventcount.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/exception.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/fault_profile.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/uslock_census.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/hmac_sha256.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/host.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/ipc_clock.c
@@ -914,6 +932,11 @@ endif()
 if(UROS_IPC_PORT_TRACK)
     list(APPEND KERNEL_DEFINES -DIPC_PORT_TRACK=1)
     message(STATUS "#485 port allocation tracking: ON (i386)")
+endif()
+
+if(UROS_USLOCK_CENSUS)
+    list(APPEND KERNEL_DEFINES -DUSLOCK_CENSUS=1)
+    message(STATUS "#486 simple-lock census: ON (i386)")
 endif()
 
 # MIG-specific flags.  TypeCheck is the argument validation in the generated
@@ -1184,6 +1207,7 @@ set(KERN_SOURCES
     kern/eventcount.c
     kern/etap.c
     kern/fault_profile.c
+    kern/uslock_census.c
     kern/lock.c
     kern/host.c
     kern/ipc_clock.c
