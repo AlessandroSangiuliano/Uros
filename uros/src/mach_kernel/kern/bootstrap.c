@@ -1616,10 +1616,78 @@ bootstrap_create(void)
                losers, mb_info.mods_count);
     */
 
-    /* Load the bootstrap server (multiboot module 0) as the first user task.
-     * The buffer must be writable: boot_script_parse_line inserts null terminators. */
-    static char bootstrap_cmd[] = "/mach_servers/bootstrap $(task-create) $(task-resume)";
-    err = boot_script_parse_line(boot_start, boot_size, bootstrap_cmd);
+    /*
+     * Load multiboot module 0 as the first user task, under the name the
+     * loader gave it (#488).
+     *
+     * This used to be a constant -- "/mach_servers/bootstrap" -- so every
+     * boot task was told it was bootstrap whatever had actually been loaded.
+     * The cost is not cosmetic: a task's own panic() prints argv[0], so the
+     * name server booted directly reported a failure under the name of a
+     * program that was not running, and the first reader of that line went
+     * looking for the wrong task.
+     *
+     * The string comes from the module itself -- GRUB writes everything after
+     * the path in `module2 /boot/foo the rest of this line' -- and the
+     * directives are appended, because they are ours and not the loader's:
+     * $(task-create) and $(task-resume) are what tell the boot script to make
+     * a task of it, and no loader knows to say them.
+     *
+     * ⚠️ boot_args_buf is in .data and initialised, which is required twice
+     * over: parse_arguments runs before the BSS clear (#337), and
+     * boot_script_parse_line writes NUL terminators into the line it is
+     * given, so a string literal would be a write to read-only memory.
+     */
+    {
+	static const char	directives[] = " $(task-create) $(task-resume)";
+	const char		*modstr = machine_boot_module_string(0);
+	const char		*slash;
+	size_t			namelen;
+
+	/*
+	 * A loader that gave no string keeps the historical name rather than
+	 * an empty one: an unnamed task is worse than a conventionally named
+	 * one, and this is the case where there is nothing better to say.
+	 */
+	if (modstr[0] == '\0')
+		modstr = "/mach_servers/bootstrap";
+
+	/*
+	 * The last component, and this is measured rather than tidiness.
+	 *
+	 * The two loaders do not agree on what they put here.  GRUB writes
+	 * what the config line says -- `module2 /boot/name_server name_server'
+	 * gives "name_server" -- while QEMU's -initrd, which is how i386 is
+	 * booted, writes the HOST path it was handed:
+	 *
+	 *   boot task is "/home/.../uros/build/export/uros/i386/user/sbin/bootstrap"
+	 *
+	 * Taking it whole would tell a task inside this system that it lives
+	 * in somebody's build directory.  The last component is the one part
+	 * that means the same thing from both loaders and inside the system,
+	 * and it is the program's name, which is what argv[0] is for.
+	 */
+	for (slash = modstr; *slash != '\0'; slash++)
+		if (*slash == '/')
+			modstr = slash + 1;
+
+	if (modstr[0] == '\0')		/* a string ending in a slash */
+		modstr = "bootstrap";
+
+	namelen = strlen(modstr);
+	if (namelen + sizeof directives > sizeof boot_args_buf)
+		panic("boot module 0 command line is %d bytes, and the boot "
+		      "task's argument buffer holds %d (#488)",
+		      (int) (namelen + sizeof directives),
+		      (int) sizeof boot_args_buf);
+
+	bcopy(modstr, boot_args_buf, namelen);
+	bcopy(directives, boot_args_buf + namelen, sizeof directives);
+
+	printf("bootstrap: boot task is \"%s\"\n", modstr);
+    }
+
+    err = boot_script_parse_line(boot_start, boot_size, boot_args_buf);
     if (err)
         panic("bootstrap boot script parse: %s", boot_script_error_string(err));
     

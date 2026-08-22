@@ -417,10 +417,25 @@ main(int argc, char **argv)
 {
 	int	passed = 0;
 
-	(void) argc;
-	(void) argv;
-
 	printf("fault_test: started (#467)\n");
+
+	/*
+	 * #488: what this task was told it is called, and where that came
+	 * from -- which is not the stack.
+	 *
+	 * A server bootstrap loads gets argv by RPC: crt0 calls
+	 * bootstrap_arguments() on the task port, and reads a System V frame
+	 * off the entry stack only when that fails, which is the execve'd
+	 * case.  Printing it here is the consumer that tests that path: a task
+	 * that cannot say its own name is a boot-path failure and not a
+	 * failure of this test's own subject.
+	 */
+	if (argc > 0 && argv != 0 && argv[0] != 0)
+		printf("fault_test: argv[0] is \"%s\", argc %d (#488)\n",
+		       argv[0], argc);
+	else
+		printf("fault_test: NO arguments — argc %d, argv %p (#488)\n",
+		       argc, (void *) argv);
 
 	passed += arm_one_fault_and_resume();
 	passed += arm_three_copyin_not_resident();

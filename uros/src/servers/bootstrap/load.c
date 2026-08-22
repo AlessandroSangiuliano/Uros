@@ -698,11 +698,24 @@ boot_load_program(mach_port_t master_host_port,
         }
 
 	/*
-	 * Allocate space for:
-	 *    dummy 0 argument count
-	 *    dummy 0 pointer to arguments
-	 *    dummy 0 pointer to environment variables
-	 *    and align to integer boundary
+	 * Space reserved below the entry stack pointer, and NOT an argument
+	 * frame -- which is what it looks like and what it cost an hour to
+	 * establish it is not (#488).
+	 *
+	 * A server bootstrap loads gets its argv and envp by RPC: crt0 calls
+	 * __get_arguments(), which is bootstrap_arguments() keyed on the task
+	 * port, and only falls back to reading a System V frame off the entry
+	 * stack when that answers KERN_INVALID_ARGUMENT -- which is the
+	 * execve'd case, where exec_server built the frame. So the zeroed
+	 * stack below is deliberate: crt0 reads argc there, sees 0, and leaves
+	 * the RPC's answer alone.
+	 *
+	 * ⚠️ Which means set_regs() ignoring this number is CORRECT, and the
+	 * `(void) arg_size;' in x86_64/set_regs.c is the truth rather than an
+	 * oversight. It reads like a defect -- a value computed, passed through
+	 * two functions and consumed by nobody -- and the other half of the
+	 * story lives in crt0, in a different library. Named here so the next
+	 * reader is not the third.
 	 */
 	arg_len = sizeof(int) + 2 * sizeof(char *);
 	arg_len = (arg_len + (sizeof(int) - 1)) & ~(sizeof(int)-1);
@@ -756,4 +769,49 @@ ex_get_header(struct file *fp, objfmt_t ofmt)
 	return result;
     }
     return EX_NOT_EXECUTABLE;
+}
+
+/*
+ * The argument frame for a server started from the bundle (#488).
+ *
+ * ── Why it is here and not in set_regs() ──
+ *
+ * The layout is not a property of the machine.  It is the contract between
+ * whoever starts a task and <libmach/crt0.c>, which reads
+ *
+ *	frame = (int *) entry_sp;
+ *	argc  = frame[0];
+ *	argv  = (char **) &frame[1];
+ *
+ * and it is the same frame kern/bootstrap.c already writes for the boot task
+ * with copyout().  So there is one copy of it, and the machines are left with
+ * the only thing that IS theirs: where the stack pointer lands.
+ *
+ * ⚠️ `argc' is an int and the pointers follow it immediately, so on a 64-bit
+ * target they sit at a four-byte offset and are not eight-aligned.  That is
+ * not an oversight to tidy: it is what crt0 reads and what the kernel writes,
+ * and x86-64 loads unaligned without complaint.  Changing it here would break
+ * the boot task, which uses the other writer.
+ */
+
+/*
+ * The program's name: the last component of the path it was loaded from.
+ *
+ * Bundle entries arrive as `/dev/boot_device/mach_servers/name_server', and
+ * what a program calls itself is the last part -- the rest says where this
+ * boot happened to find it.
+ */
+const char *
+boot_program_name(const char *path)
+{
+	const char	*p, *name = path;
+
+	if (path == 0 || *path == '\0')
+		return "?";
+
+	for (p = path; *p != '\0'; p++)
+		if (*p == '/')
+			name = p + 1;
+
+	return (*name != '\0') ? name : "?";
 }

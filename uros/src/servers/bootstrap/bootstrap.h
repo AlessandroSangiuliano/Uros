@@ -174,9 +174,17 @@ extern void map_init(struct server **, boolean_t);
 extern char *strbuild(char *, ...);
 extern kern_return_t bootstrap_notify_dead_name(mach_port_t name);
 
-extern void set_regs(mach_port_t, task_port_t, 
+extern void set_regs(mach_port_t, task_port_t,
 		     thread_port_t, struct loader_info *,
 		     unsigned long, vm_size_t);
+
+/*
+ * The program's name: the last component of the path it was loaded from
+ * (#488).  Bundle entries arrive as `/dev/boot_device/mach_servers/foo', and
+ * what a program calls itself is the last part -- the rest says where this
+ * boot happened to find it.
+ */
+extern const char *boot_program_name(const char *path);
 extern int ex_get_header(struct file *, objfmt_t);
 
 extern boolean_t is_kernel_loadable(struct server *, struct objfmt *);

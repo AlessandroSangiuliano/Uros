@@ -90,7 +90,19 @@ main(int argc, char **argv)
     mach_port_t host_port;
     mach_port_t device_port;
 
-    program = argv[0];
+    /*
+     * #488: argv[0], and a fallback, because until #488 there was no argument
+     * frame to read it from.
+     *
+     * This line is where the whole of #488 surfaced: booted as the first task,
+     * this server panicked under the name "/mach_servers/bootstrap" -- a
+     * constant the kernel wrote into every boot task's frame -- and sent its
+     * reader looking for a program that was not running.
+     */
+    program = (argc > 0 && argv != 0 && argv[0] != 0 && argv[0][0] != '\0')
+	      ? argv[0] : (char *) "name_server";
+
+    printf("%s: started, argc %d (#488)\n", program, argc);
 
     kr = bootstrap_ports(bootstrap_port,
 		&host_port,

@@ -600,6 +600,22 @@ main(int argc, char **argv)
 			(void) bundle_init(baddr, bsize);
 	}
 
+	/*
+	 * #488: this task's own name, from the frame the kernel built rather
+	 * than from a constant below.
+	 *
+	 * It was `"(bootstrap)"' -- correct, and correct for the wrong reason:
+	 * it was right because this program happens to be the one the kernel
+	 * starts, not because anything had asked.  Taking it from argv[0]
+	 * makes every `bootstrap: ...' line in every boot log the consumer
+	 * that tests the kernel's half of #488, on both machines, for free.
+	 *
+	 * The constant stays as the fallback, for a kernel that starts this
+	 * task without a frame -- which is what every kernel did until today.
+	 */
+	if (argc > 0 && argv != 0 && argv[0] != 0 && argv[0][0] != '\0')
+		program_name = (char *) boot_program_name(argv[0]);
+
 	parse_args(argc, argv, pathname);
 
 	/*
