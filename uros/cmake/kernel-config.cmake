@@ -21,6 +21,96 @@
 # Adding a knob: one line below.  Changing one: change it here.  There is no
 # other place, and that is the point.
 
+# ── Which KIND of kernel this is (#485) ─────────────────────────────────────
+#
+# 🔑 Optimisation level and assertion policy are two different axes, and
+# conflating them in one name is what made this question unanswerable for as
+# long as it was.  What this tree builds every day is CMAKE_BUILD_TYPE=Release
+# with -O3 -DNDEBUG -- and it is not a release kernel.  It is a development
+# kernel that runs fast, which is what measuring anything requires.
+#
+# That mismatch is why "MACH_ASSERT is on in Release" went unnoticed: what is
+# called Release is not release.  So the kind of kernel gets a name of its own
+# and the build says which one it is on every configure, rather than leaving a
+# reader to infer it from an optimisation flag that answers a different
+# question.
+#
+#   development  assertions on.  Checks that name their cause are worth more
+#                than the cycles they cost, because the cause is what is being
+#                looked for.  This is what we build.
+#   release      assertions off.  panic() and every always-on integrity check
+#                remain -- they are not tied to this switch -- so a release
+#                kernel still stops and still reports; it reports at the
+#                consequence rather than at the cause.
+#
+# ⚠️ Nothing ships yet, so `release\' exists to be BUILDABLE and measured, not
+# because anything is being released.  #485 made it buildable at all; before
+# that it had never once compiled.
+set(UROS_KERNEL_FLAVOR "development" CACHE STRING
+    "Which kind of kernel: development (assertions on) or release (off)")
+set_property(CACHE UROS_KERNEL_FLAVOR PROPERTY STRINGS development release)
+
+if(UROS_KERNEL_FLAVOR STREQUAL "release")
+    set(_uros_assert_default OFF)
+else()
+    set(_uros_assert_default ON)
+endif()
+
+# 🔥 The flavour has to MOVE the switch, and option() does not: it leaves an
+# existing cache entry alone, so the first version of this printed
+# "assertions OFF" while <mach_assert.h> carried MACH_ASSERT 1.  A message
+# announcing one thing while the compile does another is the exact defect this
+# issue is about, reproduced inside its own fix.
+#
+# So the last flavour is remembered, and a change to it forces the derived
+# switch.  An explicit -DUROS_MACH_ASSERT= on the same command line still wins,
+# because it is set after this runs; what is gone is the silent disagreement.
+if(NOT "${UROS_KERNEL_FLAVOR}" STREQUAL "${UROS_KERNEL_FLAVOR_LAST}")
+    set(UROS_MACH_ASSERT ${_uros_assert_default} CACHE BOOL
+        "Build the kernel's assert() calls (MACH_ASSERT)" FORCE)
+    set(UROS_KERNEL_FLAVOR_LAST "${UROS_KERNEL_FLAVOR}" CACHE INTERNAL
+        "flavour this cache was last configured for")
+endif()
+
+# ── The one knob with a switch of its own (#485) ────────────────────────────
+#
+# MACH_ASSERT decides whether every assert() in the kernel is a comparison and
+# a branch or is ((void)0).  It was set in TWO places -- this table and each
+# target's -D list, at the same value -- so it could not be turned off from
+# either: clearing one left the other standing, and clearing the -D left this
+# table's default, which the generated header writes back.
+#
+# 🔥 That is not a tidiness complaint.  #482 measured a single site under this
+# switch at 44% of a copy-on-write fault (the #385 free-page poison, a whole
+# page read on every allocation, for a hunt that closed months ago), and
+# gating it took the fault from 5,790 cycles to 3,390.  The switch has to be
+# operable before what it switches can be decided.
+#
+# Now: one option, feeding the table, feeding the header.  The -D is gone from
+# both targets, which is safe and was checked rather than assumed -- every
+# compiled unit that tests MACH_ASSERT also includes <mach_assert.h>, 25 of 25
+# on i386 and 22 of 22 on x86-64, per scripts/assert-census.py --config.
+#
+# ⚠️ ON is still the default, and #485 has not decided otherwise.  What this
+# buys today is that the question can be ASKED of a build.
+option(UROS_MACH_ASSERT "Build the kernel's assert() calls (MACH_ASSERT)" ${_uros_assert_default})
+
+# ⚠️ Printed AFTER the value settles, and it prints the value that will be
+# compiled -- not the one the flavour would imply.  The two can differ, when
+# somebody overrides the switch on purpose, and the build saying which is which
+# is the whole point.
+message(STATUS "UrMach kernel flavor: ${UROS_KERNEL_FLAVOR}, "
+               "MACH_ASSERT=${UROS_MACH_ASSERT} "
+               "(CMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE} is the optimisation "
+               "axis, a different question)")
+
+if(UROS_MACH_ASSERT)
+    set(UROS_MACH_ASSERT_VALUE 1)
+else()
+    set(UROS_MACH_ASSERT_VALUE 0)
+    message(STATUS "#485 MACH_ASSERT: OFF — assert() compiles to nothing")
+endif()
+
 # name              macro                 value
 set(UROS_KERNEL_CONFIG
     advisory_pageout       ADVISORY_PAGEOUT 1
@@ -39,7 +129,7 @@ set(UROS_KERNEL_CONFIG
     gprof                  NGPROF 0
     hw_footprint           HW_FOOTPRINT 1
     kernel_test            KERNEL_TEST 0
-    mach_assert            MACH_ASSERT 1
+    mach_assert            MACH_ASSERT ${UROS_MACH_ASSERT_VALUE}
     mach_cluster_stats     MACH_CLUSTER_STATS 0
     mach_counters          MACH_COUNTERS 0
     mach_debug             MACH_DEBUG 1

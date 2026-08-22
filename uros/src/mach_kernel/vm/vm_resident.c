@@ -1223,10 +1223,26 @@ vm_page_grab_fictitious(void)
 	m = (vm_page_t)zget(vm_page_zone);
 	if (m) {
 		m->free = FALSE;
-#if	MACH_ASSERT || ZONE_DEBUG
+		/*
+		 * 🔥 Unconditional (#485).  This was inside
+		 * `#if MACH_ASSERT || ZONE_DEBUG\', and `fictitious\' is read
+		 * from 113 places that are not -- vm_fault.c among them.  With
+		 * both switches off a fictitious page came back with
+		 * fictitious == FALSE, which is not a check going missing, it
+		 * is the wrong answer.
+		 *
+		 * ⚠️ Not redundant with vm_page_more_fictitious(), which does
+		 * set both on every element on the way INTO the zone.  An
+		 * element that has been through zfree/zget has had its first
+		 * word used as the zone's free-list link, and vm_page_init is
+		 * what puts that back.
+		 *
+		 * The cost is one vm_page_init per fictitious page, which is
+		 * correctness rather than a check, and is why it is not behind
+		 * a switch of any kind now.
+		 */
 		vm_page_init(m, vm_page_fictitious_addr);
 		m->fictitious = TRUE;
-#endif	/* MACH_ASSERT || ZONE_DEBUG */
 	}
 
 	c_vm_page_grab_fictitious++;
@@ -1620,14 +1636,21 @@ vm_page_release(
 #if	MACH_ASSERT
 	/*
 	 * #385 canary: this is the single gate through which every page
-	 * enters a free list (see the #344 note below).  A page arriving
-	 * here while some pmap still maps it means somebody is freeing
-	 * memory that is still in use (double deallocate / refcount race
-	 * / skipped pmap_page_protect) — the poisoned-page corruption.
-	 * Trap the culprit red-handed: this is what caught the #385
-	 * COW-fast-path bug, with the freeing call chain on the stack.
-	 * Cost: one pvh-locked list-head read per page free; tied to
-	 * MACH_ASSERT so release/bench builds shed it.
+	 * enters a free list.  A page arriving here while some pmap still
+	 * maps it means somebody is freeing memory that is still in use --
+	 * double deallocate, refcount race, a skipped pmap_page_protect --
+	 * and it is caught with the freeing call chain still on the stack,
+	 * which is how #385 was found.
+	 *
+	 * Cost: one pvh-locked list-head read per page free, on every page
+	 * free in the kernel.
+	 *
+	 * ⚠️ OPEN (#485): what this catches is a page somebody can still write
+	 * through after it has been handed to someone else, which is the same
+	 * category as the free-list range check in REMOVE_FROM_ZONE -- and
+	 * that one is outside MACH_ASSERT now.  This one is not, because its
+	 * cost is a lock rather than a comparison and has never been measured.
+	 * The measurement decides it.
 	 */
 	if (pmap_page_still_mapped(mem->phys_addr))
 		panic("vm_page_release: page 0x%lx still mapped (#385)",

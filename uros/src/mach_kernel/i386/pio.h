@@ -140,8 +140,34 @@ extern void		loutb(
 				char		* data,
 				int		count);
 
+/*
+ * 🔥 The gate is on the wrong switch, and #485 is where that gets decided.
+ *
+ * "Should port I/O be inline" and "should assertions run" are two unrelated
+ * questions, and tying the first to the second is why this block existed for
+ * the life of the tree without once being compiled -- MACH_ASSERT has never
+ * been off.  The out-of-line versions in i386/locore.S are what actually runs,
+ * and they are a second copy of the same six accessors.
+ *
+ * Kept and made to compile rather than deleted: which heritage stays as
+ * history is #433's question, not this one's.  What #485 needs from it is only
+ * that -DUROS_MACH_ASSERT=OFF should produce a kernel rather than an
+ * assembler error.
+ */
 #if defined(__GNUC__) && (!MACH_ASSERT)
-extern __inline__ unsigned long	inl(
+/*
+ * ⚠️ `gnu_inline\' (#485).  Under the GNU89 model `extern __inline__\' meant
+ * "inline at every call site, defined elsewhere"; under -std=gnu11, which
+ * this tree builds with, it EMITS an external definition -- and i386/locore.S
+ * already exports all six, so the link failed with `multiple definition of
+ * inl\'.  The attribute asks for the old meaning back, which is what the code
+ * was written against.  `static\' would not do: these are also declared
+ * extern at the top of this header, and the two disagree.
+ *
+ * 🔑 The keyword changed meaning underneath code that no build ever compiled,
+ * so nothing said so for as long as the standard has been gnu11.
+ */
+extern __inline__ __attribute__((gnu_inline)) unsigned long	inl(
 				i386_ioport_t port)
 {
 	unsigned long datum;
@@ -149,15 +175,26 @@ extern __inline__ unsigned long	inl(
 	return(datum);
 }
 
-extern __inline__ unsigned short inw(
+/*
+ * ⚠️ `inw\' and not `.byte 0x66; inl\' (#485).
+ *
+ * The prefix was written by hand because a 1990s assembler had no 16-bit
+ * mnemonic here; a current one has, and rejects the old form outright --
+ * "incorrect register `%ax\' used with `l\' suffix", because gcc quite
+ * reasonably allocates %ax for an unsigned short and the mnemonic says
+ * long.  Nobody found out, because this whole block is behind
+ * `#if !MACH_ASSERT\' and MACH_ASSERT has been on for the life of the tree:
+ * code that is not compiled does not know it is broken.
+ */
+extern __inline__ __attribute__((gnu_inline)) unsigned short inw(
 				i386_ioport_t port)
 {
 	unsigned short datum;
-	__asm__ volatile(".byte 0x66; inl %1, %0" : "=a" (datum) : "d" (port));
+	__asm__ volatile("inw %1, %0" : "=a" (datum) : "d" (port));
 	return(datum);
 }
 
-extern __inline__ unsigned char inb(
+extern __inline__ __attribute__((gnu_inline)) unsigned char inb(
 				i386_ioport_t port)
 {
 	unsigned char datum;
@@ -165,21 +202,21 @@ extern __inline__ unsigned char inb(
 	return(datum);
 }
 
-extern __inline__ void outl(
+extern __inline__ __attribute__((gnu_inline)) void outl(
 				i386_ioport_t port,
 				unsigned long datum)
 {
 	__asm__ volatile("outl %0, %1" : : "a" (datum), "d" (port));
 }
 
-extern __inline__ void outw(
+extern __inline__ __attribute__((gnu_inline)) void outw(		/* `outw\', see inw above (#485) */
 				i386_ioport_t port,
 				unsigned short datum)
 {
-	__asm__ volatile(".byte 0x66; outl %0, %1" : : "a" (datum), "d" (port));
+	__asm__ volatile("outw %0, %1" : : "a" (datum), "d" (port));
 }
 
-extern __inline__ void outb(
+extern __inline__ __attribute__((gnu_inline)) void outb(
 				i386_ioport_t port,
 				unsigned char datum)
 {

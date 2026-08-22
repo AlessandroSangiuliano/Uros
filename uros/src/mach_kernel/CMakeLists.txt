@@ -93,6 +93,12 @@ option(UROS_FAULT_PROFILE "Build the #482 copy-on-write fault phase profile" OFF
 # Same both-arms rule as above: declared here, appended in each arm.
 option(UROS_VM_PAGE_POISON "Build the #385 free-page poison (expensive: two page traversals per recycle)" OFF)
 
+# #485: the global list of every allocated port, and the global mutex that
+# maintains it on each port alloc and free.  It buys the debugger's port
+# enumeration; it was filed under MACH_ASSERT, which is ON in Release.
+# Same both-arms rule as above.
+option(UROS_IPC_PORT_TRACK "Build the port allocation tracking (a global mutex per port alloc/free)" OFF)
+
 if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_BOOT_LD ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/boot/boot.ld)
 
@@ -228,7 +234,11 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   # the same reason it resolves to mach/i386/ there.
   set(KERNEL_DEFINES_BARE
       KERNEL MACH_KERNEL KERNEL_PRIVATE KERNEL_SERVER=1
-      NCPUS=64 MACH_ASSERT=1 MACH_DEBUG=1 MACH_KDB=0 MACH_DEBUGGER=1 MACH_HOST=1
+      # ⚠️ MACH_ASSERT is NOT here (#485).  It comes from the knob table in
+      # cmake/kernel-config.cmake, through <mach_assert.h>, driven by
+      # -DUROS_MACH_ASSERT.  Repeating it here at the same value overrode
+      # nothing and made the switch unsettable from either place.
+      NCPUS=64 MACH_DEBUG=1 MACH_KDB=0 MACH_DEBUGGER=1 MACH_HOST=1
       STAT_TIME TASK_SWAPPER=1 __NO_UNDERSCORES__
       # This machine supplies its own usimple_lock (x86_64/sync/lock.c), so
       # kern/lock.c leaves them out.  See the guard there: the rest of that
@@ -253,6 +263,10 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   if(UROS_VM_PAGE_POISON)
       list(APPEND KERNEL_DEFINES_BARE VM_PAGE_POISON=1)
       message(STATUS "#385 free-page poison: ON (x86_64)")
+  endif()
+  if(UROS_IPC_PORT_TRACK)
+      list(APPEND KERNEL_DEFINES_BARE IPC_PORT_TRACK=1)
+      message(STATUS "#485 port allocation tracking: ON (x86_64)")
   endif()
   list(TRANSFORM KERNEL_DEFINES_BARE PREPEND -D OUTPUT_VARIABLE KERNEL_DEFINES)
 
@@ -852,7 +866,8 @@ set(KERNEL_DEFINES
     -DMACH_KERNEL
     -DAT386=1
     -DNCPUS=${UROS_NCPUS}
-    -DMACH_ASSERT=1
+    # ⚠️ MACH_ASSERT is NOT here (#485) — see the note in the x86-64 arm and
+    # the knob table in cmake/kernel-config.cmake.
     -DMACH_DEBUG=1
     -DMACH_KDB=1
     -DMACH_HOST=1
@@ -894,6 +909,11 @@ endif()
 if(UROS_VM_PAGE_POISON)
     list(APPEND KERNEL_DEFINES -DVM_PAGE_POISON=1)
     message(STATUS "#385 free-page poison: ON (i386)")
+endif()
+
+if(UROS_IPC_PORT_TRACK)
+    list(APPEND KERNEL_DEFINES -DIPC_PORT_TRACK=1)
+    message(STATUS "#485 port allocation tracking: ON (i386)")
 endif()
 
 # MIG-specific flags.  TypeCheck is the argument validation in the generated

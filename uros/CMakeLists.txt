@@ -167,6 +167,30 @@ file(CREATE_LINK ${CMAKE_SOURCE_DIR}/src/mach_kernel/mach/${UROS_TARGET_ARCH}
 # configure time for whatever this build dir targets.  See
 # cmake/kernel-config.cmake for why these stopped being tracked files.
 include(${CMAKE_SOURCE_DIR}/cmake/kernel-config.cmake)
+
+# ── One assertion policy for the whole system (#485) ────────────────────────
+#
+# 🔥 The two halves had opposite ones, and nobody chose that.  CMake's Release
+# flags carry -DNDEBUG, which turns off the C library's assert(); the kernel
+# never noticed because <kern/assert.h> defines its own assert() on
+# MACH_ASSERT and ignores NDEBUG.  So the kernel we build has assertions on
+# and the userland beside it has had them off for the life of the tree --
+# same build, same command, opposite policy.
+#
+# The flavour decides for both now.  A development kernel with a userland that
+# checks nothing is not a development system.
+#
+# ⚠️ What this switches on is small and known: eight assert() calls, all in
+# default_pager, the only compiled userland code that uses them.  They have
+# never once been evaluated, which is reason to run them rather than reason to
+# leave them alone -- the same argument that turned up three latent defects
+# when MACH_ASSERT=OFF was built for the first time.
+if(NOT UROS_KERNEL_FLAVOR STREQUAL "release")
+    string(REPLACE "-DNDEBUG" "" CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE}")
+    string(REPLACE "-DNDEBUG" "" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+    message(STATUS "UrMach: userland assert() is ON as well "
+                   "(NDEBUG dropped from the ${CMAKE_BUILD_TYPE} flags)")
+endif()
 set(UROS_CONFIG_INCLUDE ${CMAKE_BINARY_DIR}/config-include)
 uros_write_config_headers(${UROS_CONFIG_INCLUDE} ${UROS_TARGET_ARCH})
 

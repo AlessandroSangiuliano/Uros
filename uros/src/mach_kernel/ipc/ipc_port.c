@@ -231,7 +231,7 @@ decl_mutex_data(,	ipc_port_multiple_lock_data)
 decl_mutex_data(,	ipc_port_timestamp_lock_data)
 ipc_port_timestamp_t	ipc_port_timestamp_data;
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK
 void	ipc_port_init_debug(
 		ipc_port_t	port);
 #endif	/* MACH_ASSERT */
@@ -718,7 +718,7 @@ ipc_port_init(
 	DIPC_INIT_POINTER(port);
 #endif	/* DIPC */
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK
 	ipc_port_init_debug(port);
 #endif	/* MACH_ASSERT */
 
@@ -1473,7 +1473,7 @@ ipc_port_dealloc_special(
 }
 
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK
 /*
  *	Keep a list of all allocated ports.
  *	Allocation is intercepted via ipc_port_init;
@@ -1691,7 +1691,7 @@ ipc_port_print(
 		port->ip_norma_xmm_object_refs, port->ip_norma_xmm_object);
 #endif	/* NORMA_VM */
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK
 	/* don't bother printing callstack or queue links */
 	iprintf("ip_thread=0x%x, ip_timetrack=0x%x\n",
 		port->ip_thread, port->ip_timetrack);
@@ -1993,7 +1993,7 @@ db_port_queue_print(
 }
 
 
-#if	MACH_ASSERT
+#if	MACH_ASSERT && IPC_PORT_TRACK	/* #485: needs the port list */
 #include <ddb/db_sym.h>
 #include <ddb/db_access.h>
 
@@ -2342,6 +2342,6 @@ db_find_rcvr(
 	}
 }
 
-#endif	/* MACH_ASSERT */
+#endif	/* MACH_ASSERT && IPC_PORT_TRACK */
 
 #endif	/* MACH_KDB */

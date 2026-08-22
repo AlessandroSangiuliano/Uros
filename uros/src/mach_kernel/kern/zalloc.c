@@ -269,14 +269,18 @@
 #include <kern/cpu_number.h>			/* #330: cpu_number() */
 
 
-#if	MACH_ASSERT
-
-/* Detect use of zone elt after freeing it by two methods:
+/*
+ * Detect use of a zone element after freeing it, by two methods:
  * (1) Range-check the free-list "next" ptr for sanity.
  * (2) Store the ptr in two different words, and compare them against
- *     each other when re-using the zone elt, to detect modifications;
+ *     each other when re-using the zone elt, to detect modifications.
+ *
+ * ⚠️ (1) is OUTSIDE the MACH_ASSERT block (#485) and (2) is inside, and the
+ * split is the point.  The range check is what stands between a corrupted
+ * free list and the kernel following a pointer somebody else wrote; it costs
+ * one comparison and it is not an assertion.  The poison is a hunt\'s
+ * apparatus, already behind its own runtime flag, and may compile out.
  */
-
 #if defined(__alpha)
 
 #define is_kernel_data_addr(a)						\
@@ -289,6 +293,8 @@
 		    (a) <= VM_MAX_KERNEL_ADDRESS && !((a) & 0x3))
 
 #endif /* defined(__alpha) */
+
+#if	MACH_ASSERT
 
 /* Should we set all words of the zone element to an illegal address
  * when it is freed, to help catch usage after freeing?  The down-side
@@ -357,12 +363,33 @@ MACRO_BEGIN								\
 		(zone)->count--;					\
 MACRO_END
 
+/*
+ * ⚠️ The free-list head is still checked here (#485), and that is the whole
+ * difference between this and what it used to be.
+ *
+ * The check is not an assertion.  An assertion says "this cannot happen and
+ * the program is wrong if it does"; this one says "the first word of a freed
+ * element is not a kernel data address, so something has written into freed
+ * memory" -- and the very next line would take the kernel to whatever address
+ * that writer chose.  It is the last thing standing between a use-after-free
+ * and a wild dereference, and it costs one range comparison on a path that
+ * already touches the word.
+ *
+ * It used to be inside `#if MACH_ASSERT\' with the rest, so a kernel built
+ * without assertions popped the free list unvalidated.  #485 is about telling
+ * the three kinds apart: invariants, which may compile out; a hunt\'s
+ * apparatus, which belongs behind its own switch; and this, which protects
+ * something and belongs to neither.
+ */
 #define REMOVE_FROM_ZONE(zone, ret, type)				\
 MACRO_BEGIN								\
 	(ret) = (type) (zone)->free_elements;				\
 	if ((ret) != (type) 0) {					\
-		(zone)->count++;					\
-		(zone)->free_elements = *((vm_offset_t *)(ret));	\
+	    if (!is_kernel_data_addr(((vm_offset_t *)(ret))[0])) {	\
+		panic("A freed zone element has been modified.\n");	\
+	    }								\
+	    (zone)->count++;						\
+	    (zone)->free_elements = *((vm_offset_t *)(ret));		\
 	}								\
 MACRO_END
 
@@ -1219,6 +1246,24 @@ zfree(
 {
 	spl_t	s = 0;
 
+	/*
+	 * ── One of these three is not an assertion (#485) ────────────────
+	 *
+	 * The range check is outside MACH_ASSERT and the other two are inside,
+	 * and the split is the same one REMOVE_FROM_ZONE now makes.  A NULL
+	 * zone and a free into zone_zone are invariants: the caller is wrong,
+	 * and a kernel built without assertions may take the caller's word for
+	 * it.  An element that is not from this zone's map is a WILD FREE --
+	 * a pointer from somewhere else about to be linked into this zone's
+	 * free list, where the next allocation will hand it out.  Catching it
+	 * here is catching it at the door; the check in REMOVE_FROM_ZONE is
+	 * the one that has to catch it afterwards, and by then the corrupt
+	 * link is already in place.
+	 */
+	if (zone->collectable && !zone->allows_foreign &&
+	    (!from_zone_map(elem) || !from_zone_map(elem + zone->elem_size - 1)))
+		panic("zfree: non-allocated memory in collectable zone!");
+
 #if MACH_ASSERT
 	/* Basic sanity checks */
 	if (zone == ZONE_NULL || elem == (vm_offset_t)0)
@@ -1226,9 +1271,6 @@ zfree(
 	/* zone_gc assumes zones are never freed */
 	if (zone == zone_zone)
 		panic("zfree: freeing to zone_zone breaks zone_gc!");
-	if (zone->collectable && !zone->allows_foreign &&
-	    (!from_zone_map(elem) || !from_zone_map(elem+zone->elem_size-1)))
-		panic("zfree: non-allocated memory in collectable zone!");
 #endif
 
 	/*
