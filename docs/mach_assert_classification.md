@@ -143,6 +143,38 @@ Three runs per arm, a dedicated build tree, performance governor on AC at
 | release | **1.28 µs/op** | **692,900** |
 | | −4.5% | −93,696 (−11.9%) |
 
+### The port tracking arm, and what it could not see
+
+One arm differing in exactly one thing — `IPC_PORT_TRACK` on, everything else
+identical — against the development baseline:
+
+| | runs | median |
+|---|---|---|
+| development | 1.37 · 1.28 · 1.34 | 1.34 |
+| **+ port tracking** | 1.29 · 1.50 · 1.30 | **1.30** |
+
+The arm **with** the extra work measures **faster**. That is impossible: adding
+a global mutex to port allocation cannot speed it up.
+
+🔑 Which is what makes the run useful instead of ambiguous. The impossibility
+says the instrument's noise floor is above the effect — spread 17%
+(1.28–1.50) against an effect predicted below 1%. A result of *+0.03* could
+have been told as "the cost of the lock"; the wrong sign removes that option.
+
+⚠️ The conclusion is **not** "the tracking is free". It is that `ipc_bench` is
+single-threaded, so the global mutex is never contended and what is being paid
+is one uncontended acquisition — tens of cycles on a 1.3 µs operation. The
+real cost of a global lock is contention at `NCPUS=64`, which a one-thread
+benchmark cannot produce by construction. Seeing it needs either a counter
+inside `ipc_port_init` (the shape of #482's `fault_profile`) or a
+multiprocessor workload.
+
+This changes no decision. The tracking stays off because it is debugging
+apparatus, and its 96/152 bytes per port were measured directly with gdb
+rather than inferred from a benchmark.
+
+### On the flavour comparison
+
 ⚠️ The 4.5% is **not** what assertions cost. The two kernels also differ in
 de-inlining, in whether the port tracking is compiled, and — per #486 — in
 whether i386 preempts on interrupt exit. Separating those needs one arm each,
@@ -155,11 +187,23 @@ from a diff that had merely reordered it.
 
 ## Still open
 
-- **The number.** What survives into a development kernel has not been measured
-  — and it is not only the checks, it is the de-inlining above.
 - **The #385 canary** in `vm_page_release`. Same category as the integrity
   checks moved out, but its cost is a lock per page free rather than a
-  comparison, and no one has measured it. Deciding without that number would be
-  the same kind of sentence as the one this work deleted from its comment
-  ("tied to MACH_ASSERT so release/bench builds shed it" — never true).
-- **The port-tracking A/B**, on a build directory nothing else is rebuilding.
+  comparison, and no one has measured it.
+
+  ⚠️ Note what clause this does and does not fall under. The done-when asks for
+  the cost of *what survives into Release*, and the canary does not: it is
+  still inside `MACH_ASSERT`. The measurement is owed by the comment this work
+  wrote, not by the issue. It wants a targeted counter, not another blunt A/B —
+  the port-tracking arm above is the demonstration of what a blunt one is worth
+  here.
+
+- **What survives into Release is four comparisons** — the zone free-list range
+  check, the wild free, and the run-queue check in two functions. Their cost is
+  below the measurement floor of every instrument this project has, and that
+  floor is now a number rather than an excuse: 17% on the benchmark above.
+  Saying "a comparison costs less than 17% of 1.3 µs" is true and useless;
+  measuring it needs an instrument nobody has built, and the reason to build
+  one would be a suspicion, which there is not.
+
+- **#486**, which has to be settled before another flavour A/B means anything.
