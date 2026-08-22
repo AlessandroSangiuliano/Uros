@@ -72,16 +72,29 @@ code **is**, so that there is a function body to assert inside:
   hand-written `0x66` prefix a current assembler rejects) and did not link
   (`extern __inline__` emits a definition under `-std=gnu11`, colliding with
   `locore.S`). Fixed, not deleted: what heritage stays is #433's question.
-- `i386/AT386/mp/mp.h` — `DISABLE_PREEMPTION` becomes a **call** with three
-  registers saved around it instead of an inline sequence, and `interrupt.S`
-  uses it on every interrupt entry and exit. 🔥 And the four functions it calls
-  are `ret` — i386 does not declare `MACHINE_PREEMPTION_LEVEL` — so the two
-  branches do not merely cost differently, they **behave** differently: the
-  inline one maintains the level and calls `kernel_preempt_check()`, which
-  raises `int $0xff` on a pending urgent AST. A build option decides whether
-  i386 preempts on interrupt exit, and the development kernel is the one that
-  does not. **#486**, and it is why a flavour A/B cannot attribute a
-  difference to assertions alone.
+- ❌ `i386/AT386/mp/mp.h` — **retracted.** This entry said `MACH_ASSERT`
+  selects between a call and an inline sequence for `DISABLE_PREEMPTION`, so
+  that a build option decided whether i386 preempts on interrupt exit. It does
+  not. That `#if MACH_ASSERT` fork sits **inside** `#if MACH_RT`, and `MACH_RT`
+  is **0** on both targets — `cmake/kernel-config.cmake`, through
+  `config-include/mach_rt.h`, with no `-D` on any command line. The arm that
+  compiles is `#else /* MACH_RT */`, which defines all six macros as nothing.
+  The fork is dead code in every kernel this tree builds, in both flavours, and
+  **the two flavours do not schedule differently.**
+
+  🔑 The error was reading the header instead of asking the build, and the
+  evidence quoted for it — `_disable_preemption: ret` in the linked kernel —
+  was consistent with **both** explanations, so it discriminated nothing. What
+  discriminates: `interrupt.S` uses the macros 7 times and its object contains
+  no preemption instruction; of every assembly object in the kernel exactly one
+  mentions `preemption`, and those are the six stubs, `ret` because of a
+  `#if MACH_RT` in `i386_lock.S` itself. 39 macro uses across three files
+  compile to nothing. [feedback: ask the build]
+
+  What is underneath is worse and is now **#486**: `get_preemption_level()` is
+  the constant `0` on i386, and `ipi_mp_handler()` tests it to decide whether
+  it may run `ast_check()` and `hertz_tick()` on a processor holding a
+  scheduler lock. That guard has never been able to fire.
 - `vm/vm_map.h` — `vm_map_reference` and its siblings become **functions**
   instead of macros that inline lock-and-increment. 24 call sites.
 
@@ -176,9 +189,13 @@ rather than inferred from a benchmark.
 ### On the flavour comparison
 
 ⚠️ The 4.5% is **not** what assertions cost. The two kernels also differ in
-de-inlining, in whether the port tracking is compiled, and — per #486 — in
-whether i386 preempts on interrupt exit. Separating those needs one arm each,
-not one number.
+de-inlining and in whether the port tracking is compiled. Separating those
+needs one arm each, not one number.
+
+❌ This paragraph used to name a third difference — that the two flavours
+preempt differently on interrupt exit — and that was wrong; see the retraction
+above. The two flavours schedule identically. It changes the list of confounds,
+not the conclusion: 4.5% still cannot be attributed to assertions alone.
 
 🔑 The result that matters more than the percentage: **a release kernel boots
 and passes.** 850 lines, eleven verdicts, including the `device_open_cap`
@@ -206,4 +223,7 @@ from a diff that had merely reordered it.
   measuring it needs an instrument nobody has built, and the reason to build
   one would be a suspicion, which there is not.
 
-- **#486**, which has to be settled before another flavour A/B means anything.
+- **#486**. It no longer blocks a flavour A/B — the retraction above is why —
+  but it is the live defect this classification turned up, and the sharper
+  one: a guard against a self-deadlock that cannot fire, in the mature
+  target's interrupt path.
