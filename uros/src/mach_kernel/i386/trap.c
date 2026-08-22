@@ -1443,6 +1443,20 @@ check_io_fault(
 	return FALSE;
 }
 
+#if	MACH_RT
+/*
+ * #486: under the same condition as every one of its callers.
+ *
+ * They are the ENABLE_PREEMPTION macro in i386/AT386/mp/mp.h and
+ * enable_preemption() in i386/cpu_data.h, and both are inside `#if MACH_RT',
+ * which no target sets.  The definition was not, so this was compiled into
+ * every kernel this tree has ever built with no caller anywhere in it -- a
+ * function that raises int $0xff, sitting in .text, reachable by nothing.
+ *
+ * Guarded rather than deleted, because it is not dead code: it is the working
+ * half of a facility that is switched off.  x86_64/cpu_data.h says which half
+ * and why, and #462 is the same question on the target that does preempt.
+ */
 void
 kernel_preempt_check (void)
 {
@@ -1460,6 +1474,7 @@ kernel_preempt_check (void)
 		mp_enable_preemption_no_check();
 	}
 }
+#endif	/* MACH_RT */
 
 #if	MACH_KDB
 
