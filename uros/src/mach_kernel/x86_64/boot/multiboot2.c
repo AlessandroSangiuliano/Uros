@@ -193,6 +193,16 @@ boolean_t mb2_module_range(unsigned int n, uint64_t *start, uint64_t *size)
 	return TRUE;
 }
 
+const char *mb2_module_string(unsigned int n)
+{
+	const struct mb2_tag_module *m = mb2_module(n);
+
+	if (m == 0)
+		return "";
+
+	return m->string;
+}
+
 const char *mb2_cmdline(void)
 {
 	const struct mb2_tag_string *t;

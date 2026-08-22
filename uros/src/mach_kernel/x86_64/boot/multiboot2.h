@@ -146,6 +146,13 @@ unsigned int mb2_module_count(void);
 /* Module n's physical range.  FALSE when there is no such module. */
 boolean_t mb2_module_range(unsigned int n, uint64_t *start, uint64_t *size);
 
+/*
+ * The string the loader was given with module N -- for GRUB, everything after
+ * the path in `module2 /boot/foo the rest of this line'.  Never NULL: "" when
+ * the module has none, because every caller hands it to strlen (#488).
+ */
+const char *mb2_module_string(unsigned int n);
+
 /* The command line, or "" when the loader supplied none. */
 const char *mb2_cmdline(void);
 

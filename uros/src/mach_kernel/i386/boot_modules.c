@@ -69,6 +69,31 @@ machine_boot_module(unsigned int n, vm_offset_t *phys_start, vm_size_t *size)
 	return TRUE;
 }
 
+const char *
+machine_boot_module_string(unsigned int n)
+{
+	struct multiboot_module	*mods;
+
+	if (mb_info.mods_addr == 0 || n >= mb_info.mods_count)
+		return "";
+
+	mods = (struct multiboot_module *) phystokv(mb_info.mods_addr);
+
+	if (mods[n].string == 0)
+		return "";
+
+	/*
+	 * phystokv() here and not on machine_boot_cmdline() above, and the
+	 * difference is not an oversight in either place: the module string is
+	 * a physical pointer in the module array that this function has just
+	 * translated, so it is reached the same way its array was.  The
+	 * kernel command line arrives by a route that depends on which
+	 * multiboot version delivered it -- see the warning on
+	 * machine_boot_cmdline().
+	 */
+	return (const char *) phystokv(mods[n].string);
+}
+
 /*
  * The #359 belt.
  *

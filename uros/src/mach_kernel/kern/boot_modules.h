@@ -52,6 +52,22 @@ extern boolean_t machine_boot_module(unsigned int n,
 				     vm_size_t *size);
 
 /*
+ * The string the loader was given with module N (#488).
+ *
+ * Every boot protocol carries one -- GRUB writes everything after the path in
+ * `module2 /boot/foo the rest of this line' -- and until #488 the kernel read
+ * it from neither, naming the first task with a constant instead.  That made
+ * a task's own panic say the name of a program that was not running.
+ *
+ * ⚠️ Unlike machine_boot_module() above, this returns a pointer the caller may
+ * dereference: the conversion from whatever the loader reported is the
+ * machine's business here, because the two protocols do not agree on whether
+ * there is one to do.  Never NULL -- "" for a module with no string -- because
+ * the callers pass it to strlen().
+ */
+extern const char *machine_boot_module_string(unsigned int n);
+
+/*
  * Check that the modules survived early boot, and panic naming what did not.
  *
  * Each machine checks something different because each one puts different

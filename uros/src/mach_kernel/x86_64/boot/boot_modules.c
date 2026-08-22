@@ -42,6 +42,17 @@ machine_boot_module(unsigned int n, vm_offset_t *phys_start, vm_size_t *size)
 	return TRUE;
 }
 
+const char *
+machine_boot_module_string(unsigned int n)
+{
+	/*
+	 * No translation, unlike i386: multiboot 2 leaves the string inside
+	 * the tag chain, and boot/multiboot2.c already reaches that through a
+	 * mapping this kernel set up.
+	 */
+	return mb2_module_string(n);
+}
+
 /*
  * What this machine can check, which is not what i386 checks.
  *
