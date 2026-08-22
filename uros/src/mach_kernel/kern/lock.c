@@ -123,6 +123,7 @@
 #include <kern/sched_prim.h>
 #include <kern/ipc_sched.h>
 #include <kern/xpr.h>
+#include <kern/uslock_census.h>	/* #486: who holds a lock when the IPI lands */
 #include <string.h>
 
 #if	MACH_KDB
@@ -350,6 +351,7 @@ usimple_lock(
 	}
 	ETAPCALL(etap_simplelock_hold(l, pc, start_wait_time));
 	USLDBG(usld_lock_post(l, pc));
+	uslock_census_acquired((unsigned long) __builtin_return_address(0));
 }
 
 
@@ -369,6 +371,7 @@ usimple_unlock(
 	OBTAIN_PC(pc, l);
 	USLDBG(usld_unlock(l, pc));
 	ETAPCALL(etap_simplelock_unlock(l));
+	uslock_census_released();
 	hw_lock_unlock(&l->interlock);
 }
 
@@ -399,6 +402,8 @@ usimple_lock_try(
 		USLDBG(usld_lock_try_post(l, pc));
 		ETAP_TIME_CLEAR(zero_time);
 		ETAPCALL(etap_simplelock_hold(l, pc, zero_time));
+		uslock_census_acquired(
+			(unsigned long) __builtin_return_address(0));
 	}
 	return success;
 }
