@@ -250,6 +250,9 @@ must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 must_report 'cow_test: started' 'cow_test: [0-9] of 3 arms passed' \
 	'It forks a task with inherit_memory, which is the first thing on this target ever to call vm_map_fork; a kernel that cannot do it dies inside task_create and prints nothing further (#407).'
 
+must_report 'fault_test: started' 'fault_test: [0-9] of 3 arms passed' \
+	'It is the last thing a bundle boot does, so it is also what tells this script the run is over (#489) -- a fault_test that starts and says nothing leaves the machine idling until the watchdog, which used to be reported as the run failing rather than as this test not answering.'
+
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
 # unconditionally from machine_kernel_ready() on the path kern/startup.c must
@@ -316,7 +319,31 @@ fi
 # this list falls through to the deadline and is reported as CUT SHORT rather
 # than judged -- silence about a run nobody watched to the end is the failure
 # this whole file exists to stop.
-DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|Assertion failed|panic\(cpu'
+# ⚠️ A BUNDLE BOOT ENDS HERE TOO, AND FOR A WHILE IT DID NOT (#489).
+#
+# `No bootstrap code loaded with the kernel' below is the end of a boot that
+# found no userland to run, and the comment on EXPECTED_END says what happens
+# the day one appears: this list "starts asking for the next thing".  #422
+# brought that day, the line stopped being printed, and the next thing was not
+# added -- so every bundle boot did all of its work, went idle, and was killed
+# by the watchdog and reported as a failure.  A verdict that says no to a run
+# that did everything asked of it teaches its reader to stop reading it.
+#
+# fault_test is the bundle's last line of work, so it is what ends the run.
+#
+# 🔴 cow_test is deliberately NOT here, and the reason is the direction of the
+# two lists.  It finishes BEFORE fault_test -- `cow_test: 3 of 3' at log line
+# 225, `fault_test: 3 of 3' at 228 -- so ending the run on it would cut the
+# boot off three lines early and lose the result of the test after it.  That is
+# the exact failure this file exists to stop, arrived at from the other side.
+#
+# 🔑 So the rule is not "both tests in both lists".  It is: EVERY test must be
+# in must_report, which fails a run for staying silent, and only the LAST one
+# may be in this list, which ends it.  Being in must_report and not here is
+# correct for cow_test and was the defect for fault_test -- the same asymmetry
+# reads as a bug or as the design depending on which test finishes last, which
+# is why it needs saying rather than pattern-matching.
+DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|fault_test: [0-9]+ of [0-9]+ arms passed|Assertion failed|panic\(cpu'
 
 SECS=${1:-90}
 [ $# -gt 0 ] && shift
