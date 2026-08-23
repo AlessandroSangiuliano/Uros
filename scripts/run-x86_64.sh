@@ -250,8 +250,20 @@ must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 must_report 'cow_test: started' 'cow_test: [0-9] of 3 arms passed' \
 	'It forks a task with inherit_memory, which is the first thing on this target ever to call vm_map_fork; a kernel that cannot do it dies inside task_create and prints nothing further (#407).'
 
+must_report 'act_test: started' 'act_test: [0-9] of 4 arms passed' \
+	'It was in NEITHER list until #425 -- not the one that ends the run and not the one that fails it for silence -- so it could start, stop dead, and be reported as a pass by omission.'
+
 must_report 'netname_test: started' 'netname_test: [0-9] of 2 arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
+
+# ⚠️ The terminator matches either verdict -- `ALL n TESTS PASSED' or `SOME
+# TESTS FAILED' -- and deliberately does not demand the count.  This list asks
+# whether the program reached its own last sentence; a failing arm already
+# prints its own FAIL line and is caught by the pattern above.  Demanding 23
+# here would report one defect as two, and would make a run where an arm was
+# skipped look identical to a thread library that stopped dead (#425).
+must_report 'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
+	'Twenty-three arms of mutexes, condition variables, joins and thread-local storage (#425).  Its silence is a thread library that stopped, which on this target ends the boot rather than failing an arm -- and unlike a failing arm, that has no line of its own.'
 
 must_report 'fault_test: started' 'fault_test: [0-9] of 3 arms passed' \
 	'It is the last thing a bundle boot does, so it is also what tells this script the run is over (#489) -- a fault_test that starts and says nothing leaves the machine idling until the watchdog, which used to be reported as the run failing rather than as this test not answering.'
@@ -332,21 +344,26 @@ fi
 # by the watchdog and reported as a failure.  A verdict that says no to a run
 # that did everything asked of it teaches its reader to stop reading it.
 #
-# fault_test is the bundle's last line of work, so it is what ends the run.
+# cow_test ends the run, because it is the LAST ENTRY IN THE BUNDLE.
 #
-# 🔴 cow_test is deliberately NOT here, and the reason is the direction of the
-# two lists.  It finishes BEFORE fault_test -- `cow_test: 3 of 3' at log line
-# 225, `fault_test: 3 of 3' at 228 -- so ending the run on it would cut the
-# boot off three lines early and lose the result of the test after it.  That is
-# the exact failure this file exists to stop, arrived at from the other side.
+# ❌ This was `fault_test' for a day, and getting it wrong is the useful part.
+# The choice was made by reading one boot's log, where `fault_test: 3 of 3'
+# happened to appear three lines after `cow_test: 3 of 3' -- and that is the
+# order two concurrent tasks FINISHED in on that particular run, not the order
+# the bundle starts them.  Adding pthread_test in front changed the timing,
+# fault_test finished first, DONE_RE fired, and act_test and cow_test were cut
+# off mid-run -- reported as `passed', which is precisely the failure this file
+# exists to prevent (#425).
 #
-# 🔑 So the rule is not "both tests in both lists".  It is: EVERY test must be
-# in must_report, which fails a run for staying silent, and only the LAST one
-# may be in this list, which ends it.  Being in must_report and not here is
-# correct for cow_test and was the defect for fault_test -- the same asymmetry
-# reads as a bug or as the design depending on which test finishes last, which
-# is why it needs saying rather than pattern-matching.
-DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|fault_test: [0-9]+ of [0-9]+ arms passed|Assertion failed|panic\(cpu'
+# 🔑 The marker must be the last thing the bundle STARTS, which is a property
+# of bootstrap.conf and does not move with timing.  An interleaving is not an
+# order.
+#
+# 🔑 And the rule about the two lists: EVERY test in must_report, which fails a
+# run for staying silent, and only the last-started one here, which ends it.
+# act_test was in neither until #425 -- it could stop dead and be passed by
+# omission -- which is what a list nobody re-reads does.
+DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|cow_test: [0-9]+ of 3 arms passed|Assertion failed|panic\(cpu'
 
 SECS=${1:-90}
 [ $# -gt 0 ] && shift
@@ -425,14 +442,97 @@ QPID=$!
 # a test verdict are still on their way out of the serial port when the line
 # that matched arrives -- killing on the instant would truncate exactly the
 # output somebody needs.
+# ── The watchdog measures PROGRESS, not wall time (#425) ───────────────────
+#
+# 🔴 It measured seconds, and that made the verdict a function of the CPU
+# governor.  The same kernel and the same images were reported FAILED at
+# 1397 MHz and passed at 3988: the machine had gone onto battery between the
+# two runs.  A verdict that changes with the clock rate is not a verdict, and
+# #408 had already paid for this once -- fpu_stress announced its threads,
+# ran out of watchdog before its answer, and was reported as PASSED.
+#
+# The question a watchdog should ask is not "have N seconds passed" but "is it
+# still getting anywhere".  A slow machine makes progress slowly; a wedged one
+# makes none.  So the deadline is pushed forward every time the log gains a
+# line that MEANS something, and only a run that has gone quiet hits it.
+#
+# ⚠️ "Means something" has to exclude the idle chatter, or this never fires:
+# quiet_census prints forever once the machine has nothing to do, so counting
+# any output as progress would keep a wedged boot alive until the hard cap.
+# What is excluded is named here rather than pattern-matched loosely -- an
+# exclusion that grows silently is how a watchdog stops being one.
+IDLE_CHATTER='quiet_census:'
+
+# The hard cap, which is still wall time and still needed: a livelock that
+# keeps printing meaningful lines forever is progress by this measure and has
+# to end somehow.  Ten times the asked-for seconds, so it is never the thing
+# that decides an ordinary run.
+HARD_DEADLINE=$(( $(date +%s) + SECS * 10 ))
 DEADLINE=$(( $(date +%s) + SECS ))
+
+# How many meaningful lines the log holds.
+#
+# 🔴 `|| true', never `|| echo 0'.  grep -c EXITS 1 when the count is zero and
+# PRINTS the zero anyway, so the fallback appended a SECOND number and the
+# variable became "0\n0".  Here that happened on every boot -- the log is empty
+# until qemu writes its first line -- and it poisoned LAST_PROGRESS for the
+# whole run: every `-gt' below then failed with "integer expected", the
+# deadline was never pushed forward, and the watchdog silently degraded back to
+# the fixed number of seconds it exists to replace.
+#
+# ⚠️ It said so, ~35 times a run, in every log since this watchdog was written,
+# and nobody read it.  A guard that is always broken is worse than no guard,
+# because the runs that do not need it still pass and hide that it is gone.
+progress_count() {
+	_n=$(grep -avc "$IDLE_CHATTER" "$LOG" 2>/dev/null || true)
+	[ -n "$_n" ] || _n=0
+	echo "$_n"
+}
+LAST_PROGRESS=$(progress_count)
 CUT_SHORT=0
+# ── Every test that STARTED must have reported (#425) ──────────────────────
+#
+# 🔑 A single end marker cannot be right here, and two days were spent picking
+# better ones before that became clear.  The bundle starts its tasks in order
+# and they run CONCURRENTLY: which one prints its last line first is a
+# property of the run, not of the configuration.  `fault_test' was chosen
+# because it finished last in one log; adding pthread_test in front made
+# cow_test finish last; making cow_test the marker then cut off act_test,
+# which was still going.  An interleaving is not an order, and no amount of
+# choosing better markers fixes a question asked of the wrong thing.
+#
+# So do not choose.  A run is over when everything that announced itself has
+# also concluded -- which is the same set must_report judges afterwards, asked
+# a few seconds earlier so the machine is not killed mid-sentence.
+all_reported() {
+	# $1 the "started" pattern · $2 the "finished" pattern, in pairs
+	while [ $# -ge 2 ]; do
+		if grep -aq "$1" "$LOG" && ! grep -aq "$2" "$LOG"; then
+			return 1
+		fi
+		shift 2
+	done
+	return 0
+}
+
 while kill -0 "$QPID" 2>/dev/null; do
-	if grep -aqE "$DONE_RE" "$LOG"; then
+	if grep -aqE "$DONE_RE" "$LOG" \
+	   && all_reported \
+		'netname_test: started' 'netname_test: [0-9] of 2 arms passed' \
+		'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
+		'fault_test: started'   'fault_test: [0-9] of 3 arms passed' \
+		'act_test: started'     'act_test: [0-9] of 4 arms passed' \
+		'cow_test: started'     'cow_test: [0-9] of 3 arms passed'; then
 		sleep 1
 		break
 	fi
-	if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+	NOW_PROGRESS=$(progress_count)
+	if [ "$NOW_PROGRESS" -gt "$LAST_PROGRESS" ]; then
+		LAST_PROGRESS=$NOW_PROGRESS
+		DEADLINE=$(( $(date +%s) + SECS ))
+	fi
+	if [ "$(date +%s)" -ge "$DEADLINE" ] \
+	   || [ "$(date +%s)" -ge "$HARD_DEADLINE" ]; then
 		CUT_SHORT=1
 		break
 	fi
