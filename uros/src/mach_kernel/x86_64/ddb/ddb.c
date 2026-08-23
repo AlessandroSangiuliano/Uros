@@ -1044,6 +1044,21 @@ static void describe_thread(uint64_t addr)
 	}
 	cons_puts("\r\n");
 
+	/*
+	 * And which word, when the wait is a futex (#425).
+	 *
+	 * The event above is futex_key(), a hash, so for a futex it names
+	 * nothing a reader can act on: five threads asleep on five hashes are
+	 * five different words and no more.  urmach_futex records the address
+	 * itself; printed here it is a USER address, to be resolved against the
+	 * program rather than against the kernel's symbols.
+	 */
+	if (t->futex_uaddr != 0) {
+		cons_puts("    the futex word is ");
+		cons_puthex64((uint64_t) t->futex_uaddr);
+		cons_puts("  (a USER address)\r\n");
+	}
+
 	cons_puts("    resumes at ");
 	if (t->continuation == 0) {
 		cons_puts("nowhere — it keeps its stack, so `t' on it is real");

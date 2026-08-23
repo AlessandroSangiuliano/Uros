@@ -507,6 +507,22 @@ typedef struct thread_shuttle {
 	char		name[16];	/* User-visible thread name (NUL-terminated) */
 
 	/*
+	 * The futex word this thread is asleep on, or 0.
+	 *
+	 * ⚠️ Not a duplicate of wait_event, and it exists because wait_event
+	 * CANNOT answer this.  A futex waits on futex_key(), which is a hash of
+	 * (address space, virtual address) chosen so that distinct words almost
+	 * never collide -- so it is not invertible, and a report showing five
+	 * threads asleep on five different hashes says only that they are five
+	 * different words.  Which word is the whole question: a thread waiting
+	 * on its own death futex and one waiting on a contended mutex look
+	 * identical without it.
+	 *
+	 * One store, on the path that is about to context switch anyway.
+	 */
+	vm_offset_t	futex_uaddr;
+
+	/*
 	 * End of thread_shuttle proper
 	 */
 
