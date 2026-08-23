@@ -375,27 +375,10 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
 	while (old != 0)
 	{
-		struct timespec now;
-		tvalspec_t then;
-		getclock(TIMEOFDAY, &now);
-		then.tv_nsec = abstime->tv_nsec - now.tv_nsec;
-		then.tv_sec = abstime->tv_sec - now.tv_sec;
-		if (then.tv_nsec < 0)
-		{
-			then.tv_nsec += 1000000000;
-			then.tv_sec--;
-		}
-		if (((int)then.tv_sec < 0) ||
-		    ((then.tv_sec == 0) && (then.tv_nsec == 0)))
-		{
+		unsigned int tmo_ms;
+
+		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
 			return (ETIMEDOUT);
-		}
-		/* Relative remaining time in ms; urmach_futex treats 0 as
-		 * "block forever", so round a sub-ms remainder up to 1. */
-		unsigned int tmo_ms = (unsigned int)then.tv_sec * 1000u
-				    + (unsigned int)(then.tv_nsec / 1000000);
-		if (tmo_ms == 0)
-			tmo_ms = 1;
 		kern_res = _pthread_futex_wait(&mutex->state, 2, tmo_ms);
 		if (kern_res == KERN_OPERATION_TIMED_OUT)
 			return (ETIMEDOUT);

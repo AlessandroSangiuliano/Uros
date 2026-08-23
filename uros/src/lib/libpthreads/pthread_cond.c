@@ -282,30 +282,12 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	UNLOCK(cond->lock);
 	if (abstime)
 	{
-		struct timespec now;
-		getclock(TIMEOFDAY, &now);
-		/* Compute relative time to sleep */
-		then.tv_nsec = abstime->tv_nsec - now.tv_nsec;
-	        then.tv_sec = abstime->tv_sec - now.tv_sec;
-		if (then.tv_nsec < 0)
-		{
-			then.tv_nsec += 1000000000;  /* nsec/sec */
-			then.tv_sec--;
-		}
-		if (((int)then.tv_sec < 0) ||
-		    ((then.tv_sec == 0) && (then.tv_nsec == 0)))
-		{
+		unsigned int tmo_ms;
+
+		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
 			kern_res = KERN_OPERATION_TIMED_OUT;
-		} else
-		{
-			/* Relative ms; 0 means "forever" to urmach_futex, so
-			 * round a sub-ms remainder up to 1. */
-			unsigned int tmo_ms = (unsigned int)then.tv_sec * 1000u
-					    + (unsigned int)(then.tv_nsec / 1000000);
-			if (tmo_ms == 0)
-				tmo_ms = 1;
+		else
 			kern_res = _pthread_futex_wait(COND_SEQ(cond), seq, tmo_ms);
-		}
 	} else
 	{
 		kern_res = _pthread_futex_wait(COND_SEQ(cond), seq, 0);
