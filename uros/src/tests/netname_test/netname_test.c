@@ -121,21 +121,36 @@ main(int argc, char **argv)
 	 *
 	 * This is the control.  Without it, [1] cannot tell a working server
 	 * from a stub that says NETNAME_SUCCESS to everything.
+	 *
+	 * ⚠️ It asserts the WHOLE value, not merely "not NETNAME_SUCCESS", and
+	 * that is the difference between a control and a decoration.  Written
+	 * the loose way it accepted MIG_SERVER_DIED (-308) -- the reply port
+	 * coming back with a send-once notification instead of an answer, i.e.
+	 * the RPC never reaching the name server at all -- and reported the arm
+	 * as passed.  Measured at 1.40 GHz with four processors it did exactly
+	 * that in three runs out of seven: [1] failed with -308, [2] "passed"
+	 * with -308, and the run above them said one arm of two.  A control
+	 * that passes when the server is dead is passing in precisely the case
+	 * it exists to exclude.
 	 */
 	arms++;
 	got = MACH_PORT_NULL;
 	kr = netname_look_up(name_server_port, "",
 			     ABSENT_NAME, &got);
-	if (kr == NETNAME_SUCCESS)
+	if (kr == NETNAME_NOT_CHECKED_IN) {
+		printf("netname_test: [2] an unregistered name is refused "
+		       "with NETNAME_NOT_CHECKED_IN — the answer to [1] was "
+		       "about that name and not about every name\n");
+		passed++;
+	} else if (kr == NETNAME_SUCCESS)
 		printf("netname_test: [2] WRONG — \"%s\" was never registered "
 		       "and the look-up succeeded, handing back 0x%x\n",
 		       ABSENT_NAME, got);
-	else {
-		printf("netname_test: [2] an unregistered name is refused "
-		       "(%d) — the answer to [1] was about that name and not "
-		       "about every name\n", kr);
-		passed++;
-	}
+	else
+		printf("netname_test: [2] WRONG — \"%s\" was refused with %d, "
+		       "not NETNAME_NOT_CHECKED_IN(%d): the name server did "
+		       "not answer this call\n",
+		       ABSENT_NAME, kr, NETNAME_NOT_CHECKED_IN);
 
 	printf("netname_test: %d of %d arms passed\n", passed, arms);
 	return (passed == arms) ? 0 : 1;
