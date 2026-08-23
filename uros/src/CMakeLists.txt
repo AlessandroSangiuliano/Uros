@@ -216,6 +216,18 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/cow_test)
 endif()
 
+# And the task that CONTACTS the name server (#426), which is the last clause
+# of that issue's done-when and the one nothing else could show.
+#
+# ⚠️ It goes here, after libnetname above, and not beside the name server: this
+# is the CLIENT half.  The server starting proves it can reach bootstrap; only
+# a second task sending it a message proves anybody can reach the server, and
+# on this target there is no other netname client -- cap_server and proc_server
+# are not ported, and bootstrap's own look-up is in stage 2, behind a disk.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/netname_test)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")
