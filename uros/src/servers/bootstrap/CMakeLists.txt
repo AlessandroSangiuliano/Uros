@@ -255,13 +255,19 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # in the log rather than separated by three programs that fault and kill
   # threads on purpose.
   #
+  # pthread_test is THIRD, and it is the biggest program here by an order of
+  # magnitude (#425).  It goes after the two that only send messages and before
+  # the three that fault, kill threads and fork on purpose: it does nothing
+  # deliberately fatal, so a boot that ends inside it is a finding about the
+  # thread library rather than collateral from a neighbour.
+  #
   # cow_test is last, and by the strongest form of that same rule rather than
   # by seniority: it is the only entry that asks the kernel for a mechanism no
   # boot on this target has ever used, so it is the one most likely to end the
   # run.  Last means every other verdict is already in the log when it does,
   # and the blame cannot land anywhere else.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\npthread_test pthread_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -274,12 +280,13 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             bootstrap.conf:${_CONF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
+            pthread_test:${_SBIN}/pthread_test
             fault_test:${_SBIN}/fault_test
             act_test:${_SBIN}/act_test
             cow_test:${_SBIN}/cow_test
-    DEPENDS mkbundle name_server_bin netname_test_bin fault_test_bin act_test_bin cow_test_bin
+    DEPENDS mkbundle name_server_bin netname_test_bin pthread_test_server fault_test_bin act_test_bin cow_test_bin
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + fault_test + act_test + cow_test"
+    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + pthread_test + fault_test + act_test + cow_test"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})

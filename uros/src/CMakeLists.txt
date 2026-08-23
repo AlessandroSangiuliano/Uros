@@ -228,6 +228,20 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/netname_test)
 endif()
 
+# And the POSIX thread suite (#425), which is that issue's whole done-when.
+#
+# Nothing new has to cross for it: the five libraries it links -- libpthreads,
+# libmach, libgpu_console, libcap, libnetname -- are every one of them already
+# above this gate for their own reasons.  What was missing was asking.
+#
+# ⚠️ It is the biggest program on this target by an order of magnitude, and that
+# is the point rather than a risk: act_test proves pthread_create works, which
+# is one thread created once.  Twenty-three arms of mutexes, condition
+# variables, joins, cancellation and thread-local storage prove the library.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/pthread_test)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")
