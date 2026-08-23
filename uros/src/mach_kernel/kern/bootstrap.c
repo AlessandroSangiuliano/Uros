@@ -1157,10 +1157,26 @@ user_bootstrap(void)
 
     dprintf("check3\n");
 
+    /*
+     * #487: hand the flag over and LET GO.
+     *
+     * This used to take the lock and never release it, because the next
+     * statement does not return -- thread_bootstrap_return() leaves for user
+     * mode.  `info' is at file scope, so the lock word stayed set for the life
+     * of the kernel rather than dying with a frame.
+     *
+     * Nothing ever asked for that lock again, so it cost nothing directly.
+     * What it cost was every attempt to account for locks per processor: #486
+     * counted simple locks held at each MP interrupt and the boot processor
+     * reported 1,085,079 of 1,085,079 -- 100.0% -- because one unbalanced
+     * acquisition pins the count above zero for the rest of the boot.  A
+     * number that is exactly 100.0% of a million samples is not a measurement.
+     */
     simple_lock(&info->lock);
     assert (!info->done);
     info->done = 1;
     thread_wakeup ((event_t) info);
+    simple_unlock(&info->lock);
 
 	/*
 	 * start running user thread.
@@ -1990,12 +2006,34 @@ boot_script_exec_cmd (vm_offset_t start, vm_size_t size, task_t task, char *path
       err = thread_resume(thread_act);
       assert(err == 0);
 
-      /* We need to synchronize with the new thread and block this
-	 main thread until it has finished referring to our local state.  */
+      /*
+       * We need to synchronize with the new thread and block this
+       * main thread until it has finished referring to our local state.
+       *
+       * #487: the lock is RE-ACQUIRED on the way round, and released once
+       * after.  thread_sleep_simple_lock() is assert_wait + simple_unlock +
+       * thread_block -- it drops the lock and does not take it back -- so the
+       * loop as written was correct for exactly one iteration and, on a second,
+       * would have unlocked a lock this thread does not hold and re-tested
+       * `done' with no lock at all.
+       *
+       * It never went round twice, because the waker sets `done' before the
+       * wakeup.  A loop that is correct only while its condition is already
+       * true is a loop nobody is testing.
+       *
+       * ⚠️ No acquisition before the loop: the lock has been held since
+       * simple_lock() above, before the thread was created, which is what
+       * makes the wait race-free.  Taking it again here is a self-deadlock on
+       * a simple lock, and was written and removed inside a minute -- the
+       * `held from far away' shape is easy to miss when the loop reads as
+       * self-contained.
+       */
       while (! info.done)
 	{
 	  thread_sleep_simple_lock((event_t) &info, simple_lock_addr(info.lock), FALSE);
+	  simple_lock(&info.lock);
 	}
+      simple_unlock(&info.lock);
       printf("\n");
     }
 
