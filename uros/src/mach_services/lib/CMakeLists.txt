@@ -44,7 +44,31 @@ maybe_add(libmach_maxonstack)
 #     reconciling sa_mach's types with musl's inside a library nobody uses.
 #
 # The sources stay in the tree as study material -- this is the build list,
-# not a deletion.  Their disposal belongs to #425 and #433.
+# not a deletion.
+#
+# ── #425's verdict: RETIRED, not ported ─────────────────────────────────
+#
+# That issue asked for one of the two, in writing, and this is it.  They are
+# NOT being ported to x86-64, and the reason is the one its own body gives:
+# porting two obsolete thread packages to a new architecture to keep them
+# compiling is work with no consumer.  libpthreads is the 1:1 POSIX
+# implementation (#82) and is what everything uses -- pthread_test passes 23
+# of 23 on x86-64 through it, which is the evidence that the live path needs
+# nothing from these two.
+#
+# 🔑 Recorded here rather than left as an omission, because a package that is
+# simply never mentioned again reads as forgotten, and the next person to
+# notice `librthreads/AT386/lock.S' has no x86-64 sibling cannot tell whether
+# that is a decision or a gap.  It is a decision, taken 12/08.
+#
+# ⚠️ A stale artefact outlives the rule: builds from before #434 left
+# `export/uros/i386/user/lib/librthreads.a' behind, and nothing rebuilds or
+# removes it.  Anything that linked -lrthreads would silently pick up a
+# month-old library rather than fail.  Deleted; if one reappears, it means
+# something turned these back on.
+#
+# What is left of them belongs to #433, the heritage-husk inventory: whether
+# the sources stay as study material or go.
 #maybe_add(libcthreads)
 #maybe_add(libcthreads_p)
 #maybe_add(librthreads)
