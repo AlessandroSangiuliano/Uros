@@ -213,8 +213,21 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 		int rc = _pthread_mutex_robust_check(mutex);
 		if (rc == EOWNERDEAD)
 		{
-			/* Force acquire — owner is dead, state is stale */
-			__atomic_store_n(&mutex->state, 1, __ATOMIC_ACQUIRE);
+			/*
+			 * Take it: the owner is dead and the state is stale.
+			 *
+			 * 🔴 RELEASE and not ACQUIRE, which is what this said
+			 * until #425.  Acquire is not a valid order for a
+			 * STORE -- gcc says so, "invalid memory model
+			 * 'memory_order_acquire' for '__atomic_store_4'" --
+			 * and this library is built -w, so it said it to
+			 * nobody.  What the store has to do is publish: every
+			 * write made before it must be visible to the next
+			 * thread that reads `state' with acquire, and that is
+			 * release.  Acquire here ordered nothing the code
+			 * wanted ordered.
+			 */
+			__atomic_store_n(&mutex->state, 1, __ATOMIC_RELEASE);
 			_pthread_mutex_add(mutex);
 			UNLOCK(mutex->lock);
 			return (EOWNERDEAD);
@@ -343,7 +356,8 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 		int rc = _pthread_mutex_robust_check(mutex);
 		if (rc == EOWNERDEAD)
 		{
-			__atomic_store_n(&mutex->state, 1, __ATOMIC_ACQUIRE);
+			/* #425: RELEASE, for the reason given above. */
+			__atomic_store_n(&mutex->state, 1, __ATOMIC_RELEASE);
 			_pthread_mutex_add(mutex);
 			UNLOCK(mutex->lock);
 			return (EOWNERDEAD);
