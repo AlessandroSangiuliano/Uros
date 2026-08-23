@@ -48,7 +48,29 @@
 static int
 _pthread_cond_lazy_init(pthread_cond_t *cond)
 {
-	int expected = _PTHREAD_COND_SIG_init;
+	/*
+	 * 🔴 `long', because `sig' is a long -- and this was an `int' until
+	 * #425, which is the whole of that defect.
+	 *
+	 * __atomic_compare_exchange_n takes the expected value BY ADDRESS and
+	 * operates at the width of the object, so on a 64-bit target it reads
+	 * eight bytes from a four-byte stack slot and, when the compare fails,
+	 * writes eight bytes back into it.  The compare therefore fails for
+	 * every thread -- the upper four bytes are whatever the stack held --
+	 * every thread takes the losing branch, and every one of them spins
+	 * for a magic word nobody is left to publish.  pthread_test stopped
+	 * there, on the second of twenty-three arms.
+	 *
+	 * ⚠️ i386 never saw it: `long' is four bytes there, so the two widths
+	 * agree by accident of the target rather than by anything written.
+	 *
+	 * 🔑 gcc names it exactly -- "__atomic_compare_exchange_8 writing 8
+	 * bytes into a region of size 4 overflows the destination" -- and this
+	 * library is compiled -w, so it was thrown away.  pthread_once() has
+	 * the same lazy-init written correctly in another file, which is what
+	 * made the intent unambiguous.
+	 */
+	long expected = _PTHREAD_COND_SIG_init;
 	if (__atomic_compare_exchange_n(&cond->sig, &expected,
 					_PTHREAD_NO_SIG, 0,
 					__ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
