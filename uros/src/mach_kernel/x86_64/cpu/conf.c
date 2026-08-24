@@ -84,18 +84,34 @@ int			dev_indirect_count = sizeof(dev_indirect_list)
 					/ sizeof(dev_indirect_list[0]);
 
 /*
- * No clock devices.
+ * List of clock devices.
  *
- * ⚠️ This is NOT the same as having no timekeeping.  x86_64/time/ has the
- * PIT and the TSC and the local APIC timer, and they are what makes the
- * scheduler tick.  clock_list[] is the *device* interface -- the one a task
- * opens to read or set a wall clock, which on i386 is the battery-backed
- * RTC.
+ * ⚠️ This is NOT the timekeeping.  x86_64/time/ has the PIT and the TSC and
+ * the local APIC timer, and they are what makes the scheduler tick.
+ * clock_list[] is the *device* interface -- the one a task reaches through
+ * host_get_clock_service().  The operations live in x86_64/time/clock_dev.c,
+ * which explains what backs each of them.
  *
- * That is a real gap rather than a decision, and it is a small one with a
- * clear shape: a wall clock belongs to whoever owns the RTC, and on this
- * machine that will be a user-space server for the same reason every other
- * device driver is.  #318 is where the timebase itself is settled.
+ * 🔥 This list used to be empty, with a comment calling that "a real gap
+ * rather than a decision".  An empty list is not a missing feature here: it
+ * makes host_get_clock_service() take its `clock_id >= clock_count' branch
+ * for every id, so it refused every caller, so libmach's getclock() failed,
+ * so every absolute deadline in libpthreads was computed from an
+ * uninitialised struct.  The gap was named; its consumer was not.
+ *
+ * HIGHRES_CLOCK is absent rather than null-filled: kern/clock.c reads
+ * clock_count, and a third entry would only be a slot that answers
+ * KERN_FAILURE more slowly than a range check does.
  */
-struct clock	clock_list[1];
-int		clock_count = 0;
+extern	struct clock_ops	rtc_ops;
+extern	struct clock_ops	bbc_ops;
+
+struct	clock	clock_list[] = {
+
+	/* REALTIME_CLOCK */
+	{ &rtc_ops,	0,		0,		0 },
+
+	/* BATTERY_CLOCK */
+	{ &bbc_ops,	0,		0,		0 },
+};
+int	clock_count = sizeof(clock_list) / sizeof(clock_list[0]);
