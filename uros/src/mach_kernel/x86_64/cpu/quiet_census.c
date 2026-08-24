@@ -170,6 +170,22 @@ quiet_census_pass(int mycpu)
 	       "passes; %d tasks and %d threads\n",
 	       quiet_passes, default_pset.task_count, default_pset.thread_count);
 
+	/*
+	 * ⚠️ The NAME as well as the pointer (#425).
+	 *
+	 * This report used to give `task=0xffffc000004d83a0' and nothing else,
+	 * and struct task has no name field -- so a wedge log listed five live
+	 * user tasks that could not be told apart, and the debugger was no help
+	 * because list_tasks() prints the same bare pointer.  Twice in one
+	 * afternoon the question "which program is stuck?" had to be answered by
+	 * guessing from who had failed to report.
+	 *
+	 * thread->name is filled by libmach's crt0 from argv[0] before main()
+	 * runs, so every task carries its own program name on its first thread
+	 * from its first instruction -- no new kernel field and no new RPC.
+	 * ⚠️ Sixteen bytes: the bundle's names all fit, but a long server name
+	 * (block_device_server, virtual_terminal_server) arrives truncated.
+	 */
 	queue_iterate(&default_pset.threads, th, thread_t, pset_threads) {
 		printf("quiet_census:   th=%p state=%#x", th, th->state);
 		census_state(th->state);
@@ -177,6 +193,8 @@ quiet_census_pass(int mycpu)
 		if (th->top_act != THR_ACT_NULL)
 			printf(" task=%p susp=%d",
 			       th->top_act->task, th->top_act->suspend_count);
+		if (th->name[0] != '\0')
+			printf(" name=\"%s\"", th->name);
 		printf("\n");
 		n++;
 	}

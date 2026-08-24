@@ -219,7 +219,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # The two halves were consistent with each other and with nothing in
   # between; on i386 the flag is what joined them, and it was never copied.
   target_compile_options(libmach PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin 
                             -mstack-protector-guard=global -include stdint.h>)
 
 
@@ -500,7 +500,7 @@ add_dependencies(libmach mig_device_header mig_mach_public_headers)
 
 # Compat: il codice è storico (K&R/gnu89); impostiamo opzioni less strict per compilare
 # Apply C-only options (including -include stdint.h) only when compiling C sources
-target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w -mstack-protector-guard=global -include stdint.h>)
+target_compile_options(libmach PRIVATE $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin  -mstack-protector-guard=global -include stdint.h>)
 
 # Build assembly files and C as 32-bit where needed
 target_compile_options(libmach PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)
@@ -604,7 +604,7 @@ if(UROS_BUILD_MUSL)
   # Mirror libmach's compile + include configuration so the two stay
   # ABI-compatible (same gnu11, same SSE2, same SSP guard mode).
   target_compile_options(libmach_core PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin -w
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin 
                             -mstack-protector-guard=global -include stdint.h>
   )
   target_compile_options(libmach_core PRIVATE ${UROS_ARCH_FLAGS} -msse -msse2)

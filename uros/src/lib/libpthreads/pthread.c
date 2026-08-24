@@ -1023,39 +1023,20 @@ pthread_timedjoin_np(pthread_t thread,
 	}
 
 	if (thread->detached == PTHREAD_CREATE_JOINABLE) {
-		struct timespec now;
-		tvalspec_t then;
+		unsigned int tmo_ms;
 		int j_snap;
 
 		thread->num_joiners++;
 		j_snap = *PTH_FW(thread->joiners);  /* snapshot under lock */
 		UNLOCK(thread->lock);
 
-		getclock(TIMEOFDAY, &now);
-		then.tv_nsec = abstime->tv_nsec - now.tv_nsec;
-		then.tv_sec  = abstime->tv_sec  - now.tv_sec;
-		if (then.tv_nsec < 0) {
-			then.tv_nsec += 1000000000;
-			then.tv_sec--;
-		}
-		if ((int)then.tv_sec < 0) {
-			then.tv_sec  = 0;
-			then.tv_nsec = 0;
-		}
-
 		/* #324: deadline already passed -> immediate timeout (don't
 		 * pass 0 ms to the futex, which would mean "wait forever"). */
-		if (then.tv_sec == 0 && then.tv_nsec == 0) {
+		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
 			kern_res = KERN_OPERATION_TIMED_OUT;
-		} else {
-			unsigned int tmo_ms =
-				(unsigned int)then.tv_sec * 1000u +
-				(unsigned int)(then.tv_nsec / 1000000);
-			if (tmo_ms == 0)
-				tmo_ms = 1;
+		else
 			kern_res = _pthread_futex_wait(PTH_FW(thread->joiners),
 						       j_snap, tmo_ms);
-		}
 		LOCK(thread->lock);
 		thread->num_joiners--;
 

@@ -2,16 +2,12 @@
 # Does the debugger refuse to walk a thread blocked with a continuation? (#428)
 set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+. "$(dirname "$0")/ddb-common.sh"	# count, wait_for, ask (#428)
 LOG=${1:-$HOME/uros-tests/ddb-continuation.log}
 IN=$(mktemp -u /tmp/ddb-cont.XXXXXX); mkfifo "$IN"; : > "$LOG"
 qemu-system-x86_64 -cpu max -smp 4 -cdrom "$REPO/uros/build-x86_64/uros-x86_64.iso" \
 	-nographic -serial mon:stdio -no-reboot < "$IN" > "$LOG" 2>&1 &
 Q=$!; exec 3>"$IN"
-wait_for() { i=0; while [ $i -lt 900 ]; do grep -aq "$1" "$LOG" && return 0
-	kill -0 "$Q" 2>/dev/null || return 1; sleep 0.1; i=$((i+1)); done; return 1; }
-ask() { b=$(grep -ac 'ddb> ' "$LOG"); printf '%s\n' "$1" >&3
-	i=0; while [ $i -lt 100 ]; do [ "$(grep -ac 'ddb> ' "$LOG")" -gt "$b" ] && return 0
-	sleep 0.1; i=$((i+1)); done; echo "FAILED: '$1' never answered"; return 1; }
 
 wait_for 'ddb> ' || { echo "FAILED: the prompt never opened"; kill $Q 2>/dev/null; rm -f "$IN"; exit 1; }
 ask l || true

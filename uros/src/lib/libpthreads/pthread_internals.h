@@ -42,6 +42,15 @@
 #include <mach/mach_host.h>
 #include <mach.h>			/* For generic MACH support */
 #include <mach/urmach_futex.h>		/* #324 futex block/wake primitive */
+/*
+ * ⚠️ For _pthread_timeout_ms() below, and named here rather than left to the
+ * includers (#425).  It compiled without them only because every file that
+ * includes this one happens to include <sys/timers.h> and <errno.h> first --
+ * a header whose correctness depends on its users' include order is a contract
+ * nothing checks, and the first file to include this one alone would find out.
+ */
+#include <sys/timers.h>			/* struct timespec, getclock, TIMEOFDAY */
+#include <errno.h>			/* ETIMEDOUT */
 #include "posix_sched.h"		/* For POSIX scheduling policy & parameter */
 #include "pthread_machdep.h"		/* Machine-dependent definitions. */
 #include <signal.h>			/* For sigset_t, signal constants */
@@ -347,5 +356,73 @@ extern void _spin_unlock(pthread_lock_t *lockp);
 extern void _pthread_setup(pthread_t th, void (*f)(pthread_t), vm_address_t sp);
 
 extern void _pthread_tsd_cleanup(pthread_t self);
+
+/*
+ * How long is left until `abstime', in the milliseconds urmach_futex wants.
+ *
+ * Returns 0 with *out_ms set, or ETIMEDOUT if the deadline has already passed
+ * -- or if the clock cannot be read at all, which is the same answer for the
+ * same reason: a timed wait whose deadline cannot be evaluated must not become
+ * an untimed one.  Every caller of this already handles ETIMEDOUT; none of
+ * them can handle waiting for ever.
+ *
+ * ⚠️ Written once and used by all four timed waits (mutex, cond, rwlock,
+ * join), because each of them had its own copy and every copy had the same two
+ * defects.
+ *
+ * 🔥 THE RETURN VALUE OF getclock() WAS IGNORED.  It fails -- it is an RPC to
+ * the clock service, and if host_get_clock_service() ever fails the port stays
+ * null and every later call fails with it -- and on failure it returns without
+ * writing through its pointer.  So `now' stayed an UNINITIALISED STACK
+ * VARIABLE and the deadline was computed from whatever was there.  A `then'
+ * that comes out positive reads as "not expired yet", and the wait that
+ * follows is as long as the garbage says.
+ *
+ * 🔥 AND THE ARITHMETIC WAS DONE IN THE NARROW TYPE.  `struct timespec' has
+ * `unsigned long tv_sec' and `long tv_nsec' -- 64 bits each here -- while
+ * tvalspec_t has `unsigned int' and `clock_res_t' (an int), so each caller
+ * subtracted two 64-bit values and assigned the result to 32 bits.  It
+ * survived only because the differences were small; it is the same shape as
+ * the int-against-long compare-exchange that hung this library, and it is not
+ * worth keeping one of those per file.
+ */
+static __inline__ int
+_pthread_timeout_ms(const struct timespec *abstime, unsigned int *out_ms)
+{
+	struct timespec	now;
+	long long	secs, nsecs;
+
+	now.tv_sec = 0;
+	now.tv_nsec = 0;
+	if (getclock(TIMEOFDAY, &now) != 0)
+		return (ETIMEDOUT);
+
+	secs  = (long long) abstime->tv_sec  - (long long) now.tv_sec;
+	nsecs = (long long) abstime->tv_nsec - (long long) now.tv_nsec;
+	if (nsecs < 0)
+	{
+		nsecs += 1000000000LL;
+		secs--;
+	}
+	if (secs < 0 || (secs == 0 && nsecs == 0))
+		return (ETIMEDOUT);
+
+	/*
+	 * urmach_futex reads 0 as "block for ever", so a sub-millisecond
+	 * remainder rounds up to 1 rather than becoming an untimed wait.  And a
+	 * deadline further off than the field can hold is clamped rather than
+	 * wrapped: waking early is a spurious wakeup, which every caller
+	 * already tolerates, while wrapping is another way to wait for ever.
+	 */
+	if (secs > 4000000LL)
+		*out_ms = 0xfffffffful;
+	else
+	{
+		unsigned long long ms = (unsigned long long) secs * 1000ULL
+				      + (unsigned long long) (nsecs / 1000000);
+		*out_ms = (ms == 0) ? 1u : (unsigned int) ms;
+	}
+	return (0);
+}
 
 #endif /* _POSIX_PTHREAD_INTERNALS_H */

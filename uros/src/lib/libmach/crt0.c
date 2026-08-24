@@ -39,6 +39,7 @@
 
 #include <mach_init.h>
 #include <mach/mach_interface.h>
+#include <mach/mach_traps.h>		/* mach_thread_set_name (#425) */
 #include <mach/bootstrap.h>
 #include <threadlib_init.h>
 
@@ -174,6 +175,43 @@ __start_mach_c(unsigned long entry_sp)
 	 */
 	if (__argc == 0)
 		__setup_args_from_stack(entry_sp);
+
+	/*
+	 * Say who we are, before main() (#425).
+	 *
+	 * struct task has no name, so a kernel report that lists tasks can only
+	 * give their addresses -- and when the machine wedges, a log naming five
+	 * live user tasks as five pointers cannot say which program stopped.
+	 * That happened twice in one afternoon: the census printed
+	 * `task=0xffffc000004d83a0 susp=2' and the answer had to be guessed from
+	 * which test had failed to report.  The debugger was no better; its
+	 * list_tasks() prints the same bare pointer.
+	 *
+	 * thread->name already exists and already survives into every kernel
+	 * report, so the identity goes there instead of into a new field and a
+	 * new RPC: one trap here, and from its first instruction every task
+	 * carries its own name.  Naming a task by its first thread is exact for
+	 * as long as that thread lives, which for a bundle task is its whole
+	 * run.
+	 *
+	 * The last path component, not the whole string, for the reason #488
+	 * found: the loaders disagree about what argv[0] holds -- GRUB writes
+	 * the module name and QEMU -initrd writes the HOST path -- and the tail
+	 * is the part they agree on.  ⚠️ Sixteen bytes including the NUL, so a
+	 * long server name arrives truncated; copyinstr in the trap does the
+	 * truncating, which is why no local buffer is needed here.
+	 */
+	if (__argc > 0 && __argv != 0 && __argv[0] != 0) {
+		const char *base = __argv[0];
+		const char *p;
+
+		for (p = __argv[0]; *p != '\0'; p++)
+			if (*p == '/')
+				base = p + 1;
+
+		if (*base != '\0')
+			(void) mach_thread_set_name(base);
+	}
 
 	/*
 	 * musl-linked servers: bring up TLS + stack canary before main()

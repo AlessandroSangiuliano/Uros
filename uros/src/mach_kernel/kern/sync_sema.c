@@ -812,7 +812,25 @@ futex_wait(unsigned int *uaddr, unsigned int val, unsigned int timeout_ms,
 
 	if (ticks != 0)
 		thread_set_timeout(ticks);
+
+	/*
+	 * Say which word, for whoever has to look at this thread later.
+	 *
+	 * The wait event is futex_key(), a hash of (address space, virtual
+	 * address) picked so distinct words rarely collide -- which is right
+	 * for matching a wake to a waiter and useless for reading a report.
+	 * A stalled machine showing six threads on six different hashes says
+	 * only that they are six different words; whether one of them is a
+	 * thread's own death futex or a contended mutex is the entire question,
+	 * and it could not be asked at all.
+	 *
+	 * Recorded here rather than at assert_wait() because this is the last
+	 * point that still has the address, and it is one store on a path that
+	 * is about to give up the processor.
+	 */
+	self->futex_uaddr = (vm_offset_t) uaddr;
 	thread_block((void (*)(void)) 0);
+	self->futex_uaddr = 0;
 
 	if (self->wait_result == THREAD_TIMED_OUT)
 		return KERN_OPERATION_TIMED_OUT;

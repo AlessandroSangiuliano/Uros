@@ -264,17 +264,38 @@ host_get_time(
 }
 
 /*
- * Set the Universal (Posix) time. Privileged call.
+ * Read the Universal (Posix) time, without asking who wants it.
+ *
+ * The seqlock the mapped copy was built for: utime_tick() writes
+ * check_seconds first and seconds last, so a reader that finds them equal
+ * read a value nobody was in the middle of changing.  Extracted from
+ * host_set_time()'s neighbour rather than reimplemented, because a second
+ * copy of a lock-free protocol is a second chance to get it wrong -- the
+ * x86-64 clock device (x86_64/time/clock_dev.c) is the caller that needs it
+ * without a host port in hand.
  */
-kern_return_t
-host_set_time(
-	host_t		host,
-	time_value_t	new_time)
+void
+utime_get(time_value_t *current_time)
+{
+	do {
+	    current_time->seconds = mtime->seconds;
+	    current_time->microseconds = mtime->microseconds;
+	} while (current_time->seconds != mtime->check_seconds);
+}
+
+/*
+ * Set the Universal (Posix) time, without asking who wants it.
+ *
+ * ⚠️ The master-processor binding is not decoration: `time' is advanced by
+ * utime_tick(), which hertz_tick() calls on the master processor only, so a
+ * writer running anywhere else would be racing the one place that writes it.
+ * Any caller that sets the wall clock needs this, which is why it is here and
+ * not copied into each of them.
+ */
+void
+utime_set(time_value_t new_time)
 {
 	spl_t	s;
-
-	if (host == HOST_NULL)
-		return(KERN_INVALID_HOST);
 
 #if	NCPUS > 1
 	thread_bind(current_thread(), master_processor);
@@ -301,6 +322,20 @@ host_set_time(
 #if	NCPUS > 1
 	thread_bind(current_thread(), PROCESSOR_NULL);
 #endif	/* NCPUS > 1 */
+}
+
+/*
+ * Set the Universal (Posix) time. Privileged call.
+ */
+kern_return_t
+host_set_time(
+	host_t		host,
+	time_value_t	new_time)
+{
+	if (host == HOST_NULL)
+		return(KERN_INVALID_HOST);
+
+	utime_set(new_time);
 
 	return (KERN_SUCCESS);
 }

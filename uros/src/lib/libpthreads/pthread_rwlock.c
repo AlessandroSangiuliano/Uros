@@ -155,42 +155,19 @@ pthread_rwlock_tryrdlock(pthread_rwlock_t *rwlock)
 }
 
 /*
- * Compute relative deadline from absolute timespec.
- * Returns 0 if deadline already passed, 1 if 'then' is filled.
+ * The two helpers this file had are gone (#425): both are _pthread_timeout_ms()
+ * in <pthread_internals.h> now, which is where the other three timed waits get
+ * theirs.  They were a private copy of the same arithmetic, with the same two
+ * defects -- getclock()'s failure ignored, leaving `now' uninitialised, and a
+ * 64-bit subtraction assigned into tvalspec_t's 32-bit fields.
  */
-static int
-_pthread_rwlock_deadline(const struct timespec *abstime, tvalspec_t *then)
-{
-	struct timespec now;
-	getclock(TIMEOFDAY, &now);
-	then->tv_nsec = abstime->tv_nsec - now.tv_nsec;
-	then->tv_sec = abstime->tv_sec - now.tv_sec;
-	if (then->tv_nsec < 0)
-	{
-		then->tv_nsec += 1000000000;
-		then->tv_sec--;
-	}
-	if (((int)then->tv_sec < 0) ||
-	    ((then->tv_sec == 0) && (then->tv_nsec == 0)))
-		return (0);
-	return (1);
-}
-
-/* Relative tvalspec -> ms for urmach_futex; never 0 (which means forever). */
-static unsigned int
-_pthread_rwlock_ms(const tvalspec_t *then)
-{
-	unsigned int ms = (unsigned int)then->tv_sec * 1000u
-			+ (unsigned int)(then->tv_nsec / 1000000);
-	return ms == 0 ? 1u : ms;
-}
 
 int
 pthread_rwlock_timedrdlock(pthread_rwlock_t *rwlock,
 			   const struct timespec *abstime)
 {
 	kern_return_t kr;
-	tvalspec_t then;
+	unsigned int tmo_ms;
 
 	if (rwlock->sig != _PTHREAD_RWLOCK_SIG)
 		return (EINVAL);
@@ -199,10 +176,9 @@ pthread_rwlock_timedrdlock(pthread_rwlock_t *rwlock,
 	while (rwlock->writer || rwlock->blocked_writers > 0) {
 		int s = *RWL_RSEQ(rwlock);
 		UNLOCK(rwlock->lock);
-		if (!_pthread_rwlock_deadline(abstime, &then))
+		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
 			return (ETIMEDOUT);
-		kr = _pthread_futex_wait(RWL_RSEQ(rwlock), s,
-					 _pthread_rwlock_ms(&then));
+		kr = _pthread_futex_wait(RWL_RSEQ(rwlock), s, tmo_ms);
 		if (kr == KERN_OPERATION_TIMED_OUT)
 			return (ETIMEDOUT);
 		LOCK(rwlock->lock);
@@ -217,7 +193,7 @@ pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock,
 			   const struct timespec *abstime)
 {
 	kern_return_t kr;
-	tvalspec_t then;
+	unsigned int tmo_ms;
 
 	if (rwlock->sig != _PTHREAD_RWLOCK_SIG)
 		return (EINVAL);
@@ -227,15 +203,14 @@ pthread_rwlock_timedwrlock(pthread_rwlock_t *rwlock,
 	while (rwlock->writer || rwlock->readers > 0) {
 		int s = *RWL_WSEQ(rwlock);
 		UNLOCK(rwlock->lock);
-		if (!_pthread_rwlock_deadline(abstime, &then))
+		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
 		{
 			LOCK(rwlock->lock);
 			rwlock->blocked_writers--;
 			UNLOCK(rwlock->lock);
 			return (ETIMEDOUT);
 		}
-		kr = _pthread_futex_wait(RWL_WSEQ(rwlock), s,
-					 _pthread_rwlock_ms(&then));
+		kr = _pthread_futex_wait(RWL_WSEQ(rwlock), s, tmo_ms);
 		if (kr == KERN_OPERATION_TIMED_OUT)
 		{
 			LOCK(rwlock->lock);

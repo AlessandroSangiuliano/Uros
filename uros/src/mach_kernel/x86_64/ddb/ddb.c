@@ -320,10 +320,31 @@ static void trace(uint64_t rbp)
 
 static void usage(void)
 {
+	/*
+	 * ⚠️ ALL of them, which this used to list six of.
+	 *
+	 * The switch below has fourteen cases and this text named r, t, x, s,
+	 * c and h -- so k, l, T and p, which are the only way to ask this
+	 * debugger who is running and where they are parked, were reachable
+	 * and undiscoverable.  A prompt that hides half of itself sends its
+	 * operator to read the source, and the operator who does not know to
+	 * read the source concludes the debugger cannot answer (#425: it cost
+	 * a boot, a break-in and a session before the source said `k').
+	 */
 	cons_puts("  r            registers\r\n"
 		  "  t [rbp]      backtrace, from rbp or from the frame\r\n"
 		  "  x <addr>     eight words at addr\r\n"
 		  "  s <addr>     which function contains addr\r\n"
+		  "  i [addr]     disassemble at addr or at rip\r\n"
+		  "  b [addr]     set a breakpoint, or list them\r\n"
+		  "  w <addr>     watch eight bytes at addr\r\n"
+		  "  d <n>        clear breakpoint n\r\n"
+		  "  k            tasks\r\n"
+		  "  l            threads\r\n"
+		  "  T <addr>     describe one thread\r\n"
+		  "  p            processors, and where each is parked\r\n"
+		  "  P <n>        registers of parked processor n\r\n"
+		  "  z            zones\r\n"
 		  "  c            continue\r\n"
 		  "  h            halt\r\n");
 }
@@ -1023,6 +1044,21 @@ static void describe_thread(uint64_t addr)
 	}
 	cons_puts("\r\n");
 
+	/*
+	 * And which word, when the wait is a futex (#425).
+	 *
+	 * The event above is futex_key(), a hash, so for a futex it names
+	 * nothing a reader can act on: five threads asleep on five hashes are
+	 * five different words and no more.  urmach_futex records the address
+	 * itself; printed here it is a USER address, to be resolved against the
+	 * program rather than against the kernel's symbols.
+	 */
+	if (t->futex_uaddr != 0) {
+		cons_puts("    the futex word is ");
+		cons_puthex64((uint64_t) t->futex_uaddr);
+		cons_puts("  (a USER address)\r\n");
+	}
+
 	cons_puts("    resumes at ");
 	if (t->continuation == 0) {
 		cons_puts("nowhere — it keeps its stack, so `t' on it is real");
@@ -1042,6 +1078,94 @@ static void describe_thread(uint64_t addr)
 		cons_puts("    its stack was reset when it blocked: a "
 			  "backtrace would show the trampoline and not why "
 			  "it stopped\r\n");
+
+	/*
+	 * And for a thread that KEPT its stack, walk it (#425).
+	 *
+	 * Until this existed the report said "it keeps its stack, so `t' on it
+	 * is real" and then offered no way to do so: `t' takes a frame pointer
+	 * and the operator had no way to find a blocked thread's.  So a machine
+	 * with five threads asleep on five different futex words could be
+	 * described exactly and still not say which line of the thread library
+	 * each was waiting in -- which is the only question being asked.
+	 *
+	 * The frame pointer comes from the switch's own save area.  context.S
+	 * pushes RFLAGS, rbp, rbx, r12, r13, r14, r15 in that order and leaves
+	 * ctx.rsp at the last of them, so counting back up:
+	 *
+	 *	ctx.rsp + 0	r15	+24	r12	+48	RFLAGS
+	 *	        + 8	r14	+32	rbx	+56	return address
+	 *	        +16	r13	+40	rbp
+	 *
+	 * ⚠️ That offset is the ONE thing here that context.S could invalidate,
+	 * so it is CHECKED rather than trusted.  A comment saying "keep these
+	 * two in step" is the half of a contract that the obvious reading
+	 * cannot see; if the push order ever changes, +40 holds RFLAGS or a
+	 * callee-saved register instead, and this would print a well-formed
+	 * backtrace of somewhere the thread has never been -- an answer that
+	 * looks exactly like a real one.  A frame pointer of a blocked thread
+	 * must lie inside that thread's OWN kernel stack, which no unrelated
+	 * register plausibly does, so the check refuses instead of inventing.
+	 */
+	if ((t->state & TH_RUN) == 0 && t->continuation == 0
+	    && t->top_act != THR_ACT_NULL) {
+		uint64_t	sp = t->top_act->mact.xxx_pcb.ctx.rsp;
+		uint64_t	low = (uint64_t)(uintptr_t) t->kernel_stack;
+		uint64_t	high = low + KERNEL_STACK_SIZE;
+		const uint64_t	*saved;
+		uint64_t	rbp;
+
+		if (sp == 0 || !readable(sp, 64)) {
+			cons_puts("    its saved stack pointer is not "
+				  "readable — no backtrace\r\n");
+			return;
+		}
+
+		saved = (const uint64_t *)(uintptr_t) sp;
+		rbp = saved[5];
+
+		if (low == 0 || rbp < low || rbp >= high) {
+			cons_puts("    the word the switch frame should hold "
+				  "its frame pointer in (");
+			cons_puthex64(rbp);
+			cons_puts(") is not inside this thread's kernel "
+				  "stack — refusing to walk it: context.S and "
+				  "this reader have gone out of step\r\n");
+			return;
+		}
+
+		cons_puts("    switched out at ");
+		cons_puthex64(saved[7]);
+		put_symbol(saved[7]);
+		cons_puts("\r\n");
+		trace(rbp);
+
+		/*
+		 * And where it was in RING 3 (#425).
+		 *
+		 * The kernel backtrace above ends at syscall_entry, which is
+		 * true and not the answer: five threads asleep in urmach_futex
+		 * produce five identical kernel stacks, and the question is
+		 * which call in the thread library each of them made.  The user
+		 * frame is the one the trap pushed on the way in, kept in the
+		 * thread's own kernel stack, so it is still exactly where it
+		 * was left.
+		 *
+		 * ⚠️ Printed as a bare address, deliberately: put_symbol()
+		 * knows the KERNEL's symbols, and naming a user address from
+		 * them would produce a confident wrong name.  Resolve it
+		 * outside, against the program's own binary.
+		 */
+		if (t->top_act->mact.xxx_pcb.user != 0
+		    && readable((uint64_t)(uintptr_t)
+				t->top_act->mact.xxx_pcb.user,
+				sizeof(struct trap_frame))) {
+			cons_puts("    ring 3 was at ");
+			cons_puthex64(t->top_act->mact.xxx_pcb.user->rip);
+			cons_puts("  (a USER address — resolve it against "
+				  "the program, not the kernel)\r\n");
+		}
+	}
 }
 
 /*
@@ -1108,6 +1232,19 @@ static void list_threads(void)
 
 		cons_puts("  ");
 		cons_puthex64(addr);
+		/*
+		 * The name, when there is one (#425).  struct task has none, so
+		 * this is what says WHICH PROGRAM a thread belongs to: crt0 puts
+		 * argv[0] here before main(), and thread_create_in() passes it
+		 * to every thread the task makes afterwards.  Without it this
+		 * listing is a column of addresses that cannot be told apart --
+		 * which is how two wedges in one afternoon went unattributed.
+		 */
+		if (t->name[0] != '\0') {
+			cons_puts("  \"");
+			cons_puts(t->name);
+			cons_puts("\"");
+		}
 		put_state(t);
 		if (t->continuation != 0 && (t->state & TH_RUN) == 0) {
 			cons_puts("  no stack, resumes at ");
@@ -1256,6 +1393,7 @@ static void list_tasks(void)
 		queue_entry_t		ahead;
 		queue_entry_t		a;
 		unsigned		acts = 0;
+		const char		*name = 0;
 
 		if (n++ >= DDB_THREADS_MAX
 		    || !readable((uint64_t)(uintptr_t) e, sizeof *t)) {
@@ -1271,10 +1409,28 @@ static void list_tasks(void)
 		     a != ahead && acts < DDB_THREADS_MAX;
 		     a = (queue_entry_t) ((const struct thread_activation *)
 					  (uintptr_t) a)->thr_acts.next) {
+			const struct thread_activation *act;
+
 			if (!readable((uint64_t)(uintptr_t) a,
 				      sizeof(struct thread_activation)))
 				break;
 			acts++;
+
+			/*
+			 * Which program is this task?  struct task cannot say
+			 * -- it has no name -- so take the first named thread
+			 * it has (#425).  crt0 names the main thread from
+			 * argv[0] and thread_create_in() hands that on inside
+			 * the task, so any live task that reached main() has
+			 * one.  A task still between task_create and its own
+			 * crt0 has none, and prints unnamed rather than wrong.
+			 */
+			act = (const struct thread_activation *)(uintptr_t) a;
+			if (name == 0 && act->thread != 0
+			    && readable((uint64_t)(uintptr_t) act->thread,
+					sizeof(struct thread_shuttle))
+			    && act->thread->name[0] != '\0')
+				name = act->thread->name;
 		}
 		acts_total += acts;
 
@@ -1283,6 +1439,11 @@ static void list_tasks(void)
 		cons_puts("  ");
 		cons_putdec((uint64_t) acts);
 		cons_puts(" activations");
+		if (name != 0) {
+			cons_puts("  \"");
+			cons_puts(name);
+			cons_puts("\"");
+		}
 		if ((uint64_t)(uintptr_t) t == (uint64_t)(uintptr_t) kernel_task)
 			cons_puts("  (the kernel task)");
 		cons_puts("\r\n");

@@ -39,7 +39,7 @@ endif()
 add_executable(mk_pthread_impl mk_pthread_impl.c)
 
 target_compile_options(mk_pthread_impl PRIVATE
-  ${UROS_ARCH_FLAGS} -std=gnu11 -w -include stdint.h)
+  ${UROS_ARCH_FLAGS} -std=gnu11  -include stdint.h)
 target_link_options(mk_pthread_impl PRIVATE ${UROS_ARCH_FLAGS})
 
 # ⚠️ __POSIX_LIB__, the same definition the library is built with, and without
@@ -116,8 +116,28 @@ add_library(libpthreads STATIC ${LIB_SOURCES})
 
 add_dependencies(libpthreads mig_mach_public_headers pthread_impl_header)
 
+# 🔴 NO -w, and its removal is the point (#425).
+#
+# It was here, and it threw away the one line that named the defect that hung
+# this library on x86-64:
+#
+#   pthread_cond.c:52: warning: '__atomic_compare_exchange_8' writing 8 bytes
+#   into a region of size 4 overflows the destination [-Wstringop-overflow=]
+#
+# An `int' expected-value against a `long' field: the compare failed for every
+# thread, every thread took the losing branch of the lazy init, and every one
+# spun for a magic word nobody was left to publish.  pthread_test stopped on
+# arm 2 of 23 and no log could say why, because a thread parked in a spin
+# prints nothing.  It cost a debugger session to find what gcc had written
+# down and this flag had discarded.
+#
+# ⚠️ Removing it is free TODAY, and that is a fact with a date on it: with the
+# two defects fixed, both targets compile this library with zero warnings, so
+# nothing is being suppressed and nothing has to be triaged first.  Whoever
+# adds the next warning here gets to decide what to do about it, which is the
+# whole arrangement.
 target_compile_options(libpthreads PRIVATE
-  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h -mstack-protector-guard=global>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -include stdint.h -mstack-protector-guard=global>
   ${UROS_ARCH_FLAGS}
 )
 

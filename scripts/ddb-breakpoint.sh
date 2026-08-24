@@ -6,6 +6,7 @@
 # ten milliseconds, and one that does not is not slow, it is broken.
 set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+. "$(dirname "$0")/ddb-common.sh"	# count, wait_for, ask (#428)
 LOG=${1:-$HOME/uros-tests/ddb-breakpoint.log}
 TARGET=$(nm "$REPO/uros/build-x86_64/iso-x86_64/boot/mach_kernel" | awk '$3=="clock_event_tick"{print $1}')
 [ -n "$TARGET" ] || { echo "FAILED: no clock_event_tick symbol"; exit 1; }
@@ -13,11 +14,6 @@ IN=$(mktemp -u /tmp/ddb-bp.XXXXXX); mkfifo "$IN"; : > "$LOG"
 qemu-system-x86_64 -cpu max -smp 4 -cdrom "$REPO/uros/build-x86_64/uros-x86_64.iso" \
 	-nographic -serial mon:stdio -no-reboot < "$IN" > "$LOG" 2>&1 &
 Q=$!; exec 3>"$IN"
-wait_for() { i=0; while [ $i -lt 900 ]; do grep -aq "$1" "$LOG" && return 0
-	kill -0 "$Q" 2>/dev/null || return 1; sleep 0.1; i=$((i+1)); done; return 1; }
-ask() { b=$(grep -ac 'ddb> ' "$LOG"); printf '%s\n' "$1" >&3
-	i=0; while [ $i -lt 200 ]; do [ "$(grep -ac 'ddb> ' "$LOG")" -gt "$b" ] && return 0
-	sleep 0.1; i=$((i+1)); done; return 1; }
 
 wait_for 'staying up on request' || { echo "FAILED: the kernel did not stay up"; kill $Q 2>/dev/null; rm -f "$IN"; exit 1; }
 sleep 2
@@ -40,9 +36,9 @@ ask "d 0" || true
 printf 'c\n' >&3; sleep 2
 
 # And once removed it must NOT fire again.
-n=$(grep -ac 'ddb: breakpoint' "$LOG")
+n=$(count 'ddb: breakpoint' "$LOG")
 sleep 2
-m=$(grep -ac 'ddb: breakpoint' "$LOG")
+m=$(count 'ddb: breakpoint' "$LOG")
 kill $Q 2>/dev/null || true; wait $Q 2>/dev/null || true; exec 3>&-; rm -f "$IN"
 [ "$n" = "$m" ] && echo "PASS: removed, and it stopped firing" \
                  || echo "FAILED: it kept firing after being removed ($n -> $m)"

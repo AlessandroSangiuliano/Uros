@@ -10,7 +10,7 @@ set(BLK_COMPILE_OPTIONS
   ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
-  -w
+  
   -include stdint.h
 )
 

@@ -52,10 +52,14 @@ getclock(int clktype, struct timespec *val)
 
     if (clktype != TIMEOFDAY)
 	return EINVAL;
+    /* ⚠️ Two different failures, two different answers.  Both used to be
+       EIO, so a caller that reported "getclock failed" could not say whether
+       the clock service was never obtained or a call on it was refused --
+       and those have nothing in common but the word failure. */
     if (realtime_clock_port == MACH_PORT_NULL) {
 	if (host_get_clock_service(mach_host_self(), REALTIME_CLOCK,
 				   &realtime_clock_port) != KERN_SUCCESS)
-	    return EIO;
+	    return ENXIO;
     }
     if (clock_get_time(realtime_clock_port, &now) != KERN_SUCCESS)
 	return EIO;

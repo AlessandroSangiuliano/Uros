@@ -20,6 +20,7 @@
 #include <kern/processor.h>
 #include <kern/sched_prim.h>	/* #428: -S parks the startup thread */	/* #461: real_ncpus */
 #include <kern/startup.h>	/* #448: the interface, so it is checked */
+#include <kern/clock.h>		/* #425: clock_config, the clock devices */
 #include <mach/machine/vm_param.h>
 
 #include <cpu/percpu.h>
@@ -71,6 +72,18 @@ machine_init(void)
 	 */
 	trap_set_handler(LAPIC_TIMER_VECTOR, clock_event_tick);
 	clock_event_init(LAPIC_TIMER_VECTOR);
+
+	/*
+	 * Configure the clock devices (#425).
+	 *
+	 * ⚠️ Here because kern/startup.c calls machine_init() before
+	 * clock_init(), and clock_config() has to run first: it is what asks
+	 * each device whether it is there, and clock_init() calls c_init only
+	 * on the ones that said yes.  Every other machine calls it from its
+	 * model_dep.c for the same reason; this one had no call at all, which
+	 * is the second half of why clock_list[] was empty and nobody noticed.
+	 */
+	clock_config();
 }
 
 /*

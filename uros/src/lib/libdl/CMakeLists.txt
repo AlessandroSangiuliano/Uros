@@ -14,7 +14,7 @@ add_library(libdl STATIC ${LIB_SOURCES})
 add_dependencies(libdl mig_mach_public_headers)
 
 target_compile_options(libdl PRIVATE
-  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin  -mstack-protector-guard=global -include stdint.h>
 )
 
 target_include_directories(libdl PUBLIC

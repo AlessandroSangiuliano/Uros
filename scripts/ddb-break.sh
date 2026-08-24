@@ -7,6 +7,7 @@
 # missing, the one for a machine that has stopped answering rather than died.
 set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+. "$(dirname "$0")/ddb-common.sh"	# count, wait_for, ask (#428)
 LOG=${1:-$HOME/uros-tests/ddb-break.log}
 IN=$(mktemp -u /tmp/ddb-brk.XXXXXX)
 mkfifo "$IN"; : > "$LOG"
@@ -15,15 +16,6 @@ qemu-system-x86_64 -cpu max -smp 4 \
 	-nographic -serial mon:stdio -no-reboot < "$IN" > "$LOG" 2>&1 &
 QPID=$!
 exec 3>"$IN"
-wait_for() {
-	i=0
-	while [ $i -lt 900 ]; do
-		grep -aq "$1" "$LOG" && return 0
-		kill -0 "$QPID" 2>/dev/null || return 1
-		sleep 0.1; i=$((i+1))
-	done
-	return 1
-}
 # Wait for the kernel to be up and ticking -- the door is polled from the tick,
 # so typing before the first tick would prove nothing about the door.
 # One command, and wait for the prompt to come back before the next.
@@ -32,17 +24,6 @@ wait_for() {
 # kernel is printing, and a reader then scores the command as having answered
 # nothing.  That happened, and a working backtrace was nearly reported as
 # broken.
-ask() {
-	before=$(grep -ac 'ddb> ' "$LOG")
-	printf '%s\n' "$1" >&3
-	i=0
-	while [ $i -lt 200 ]; do
-		[ "$(grep -ac 'ddb> ' "$LOG")" -gt "$before" ] && return 0
-		sleep 0.1; i=$((i+1))
-	done
-	echo "FAILED: '$1' never came back to a prompt"
-	return 1
-}
 
 # ── The console door, on a machine that is actually running ───────────
 #

@@ -36,7 +36,7 @@ target_compile_options(ush_bin PRIVATE
   ${UROS_ARCH_FLAGS} -msse -msse2
   -fstack-protector-strong
   -fno-builtin
-  -w
+  
   -include stdint.h
   -nostdinc
 )

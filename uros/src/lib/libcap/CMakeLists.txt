@@ -103,7 +103,7 @@ add_library(libcap STATIC
 add_dependencies(libcap mig_mach_public_headers)
 
 target_compile_options(libcap PRIVATE
-  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin  -mstack-protector-guard=global -include stdint.h>
 )
 
 target_include_directories(libcap PUBLIC

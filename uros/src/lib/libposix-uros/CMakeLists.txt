@@ -165,21 +165,42 @@ if(CMAKE_C_FLAGS MATCHES "UROS_PTHREAD_SMOKE")
     $<$<COMPILE_LANGUAGE:ASM>:-DUROS_PTHREAD_SMOKE=1>)
 endif()
 
-# Loosen warnings on the MIG-generated proc_user.c — migcom emits
-# constructs (uninitialised stack out-args, K&R-ish casts) that trip
-# -Wall/-Wextra unconditionally.  Same convention used by every other
-# Uros client of MIG.
+# Narrow the diagnostics on the MIG-generated stubs to the two classes migcom
+# actually emits, instead of turning them all off.
+#
+# ⚠️ It was `-w', which hides every class forever -- including one that appears
+# for the first time tomorrow in a stub nobody reread.  A guard that is always
+# true is worse than none.  Measured rather than guessed: with the flag off,
+# these four files produce exactly
+#
+#   suggest parentheses around `+' in operand of `&'   [-Wparentheses]
+#   unused variable `_MIG_Ignore_Count_' / `_devicesTemp_' [-Wunused-variable]
+#
+# plus, in mach_i386_user.c, a third that is NOT cosmetic:
+#
+#   dereferencing type-punned pointer will break strict-aliasing rules
+#
+# from migcom's copy-in idiom `*(char **)&desc_list = _desc_listTemp_;'.  That
+# one is answered with -fno-strict-aliasing rather than -Wno-: at -O2 the
+# compiler is entitled to reorder that store past the RPC that reads the
+# variable, so silencing the message would leave the miscompilation and remove
+# the notice.  The flag makes the code mean what it is written to mean.
+#
+# All three come out of migcom's templates and cannot be fixed by editing
+# a generated file.  The generator is where they belong, and #493 is where
+# that is written down -- including the two classes in OTHER generated stubs
+# that are not merely cosmetic.
 set_source_files_properties(${PROC_USER_C} PROPERTIES
-  COMPILE_OPTIONS "-w"
+  COMPILE_OPTIONS "-Wno-parentheses;-Wno-unused-variable;-fno-strict-aliasing"
 )
 set_source_files_properties(${EXEC_USER_C} PROPERTIES
-  COMPILE_OPTIONS "-w"
+  COMPILE_OPTIONS "-Wno-parentheses;-Wno-unused-variable;-fno-strict-aliasing"
 )
 set_source_files_properties(${CHAR_USER_C} PROPERTIES
-  COMPILE_OPTIONS "-w"
+  COMPILE_OPTIONS "-Wno-parentheses;-Wno-unused-variable;-fno-strict-aliasing"
 )
 set_source_files_properties(${MACH_I386_USER_C} PROPERTIES
-  COMPILE_OPTIONS "-w"
+  COMPILE_OPTIONS "-Wno-parentheses;-Wno-unused-variable;-fno-strict-aliasing"
 )
 
 # musl headers (errno.h, signal.h, ...) — published by Phase 1

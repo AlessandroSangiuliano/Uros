@@ -42,7 +42,7 @@ add_custom_command(
   # libc.so; libmach_core-pic (before -lc) supplies the host_processors /
   # processor_info MIG stubs the umbrella does not carry.
   COMMAND ${CMAKE_C_COMPILER} ${UROS_ARCH_FLAGS} -nostdinc -fPIE -pie -fno-stack-protector
-            -std=gnu11 -fno-builtin -w -include stdint.h
+            -std=gnu11 -fno-builtin  -include stdint.h
             -I${MUSL_PREFIX}/include
             -I${CPUSTAT_GCC_INCLUDE}
             -I${CMAKE_SOURCE_DIR}/uapi

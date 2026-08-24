@@ -213,8 +213,21 @@ pthread_mutex_lock(pthread_mutex_t *mutex)
 		int rc = _pthread_mutex_robust_check(mutex);
 		if (rc == EOWNERDEAD)
 		{
-			/* Force acquire — owner is dead, state is stale */
-			__atomic_store_n(&mutex->state, 1, __ATOMIC_ACQUIRE);
+			/*
+			 * Take it: the owner is dead and the state is stale.
+			 *
+			 * 🔴 RELEASE and not ACQUIRE, which is what this said
+			 * until #425.  Acquire is not a valid order for a
+			 * STORE -- gcc says so, "invalid memory model
+			 * 'memory_order_acquire' for '__atomic_store_4'" --
+			 * and this library is built -w, so it said it to
+			 * nobody.  What the store has to do is publish: every
+			 * write made before it must be visible to the next
+			 * thread that reads `state' with acquire, and that is
+			 * release.  Acquire here ordered nothing the code
+			 * wanted ordered.
+			 */
+			__atomic_store_n(&mutex->state, 1, __ATOMIC_RELEASE);
 			_pthread_mutex_add(mutex);
 			UNLOCK(mutex->lock);
 			return (EOWNERDEAD);
@@ -343,7 +356,8 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 		int rc = _pthread_mutex_robust_check(mutex);
 		if (rc == EOWNERDEAD)
 		{
-			__atomic_store_n(&mutex->state, 1, __ATOMIC_ACQUIRE);
+			/* #425: RELEASE, for the reason given above. */
+			__atomic_store_n(&mutex->state, 1, __ATOMIC_RELEASE);
 			_pthread_mutex_add(mutex);
 			UNLOCK(mutex->lock);
 			return (EOWNERDEAD);
@@ -361,27 +375,10 @@ pthread_mutex_timedlock(pthread_mutex_t *mutex,
 		old = __atomic_exchange_n(&mutex->state, 2, __ATOMIC_ACQUIRE);
 	while (old != 0)
 	{
-		struct timespec now;
-		tvalspec_t then;
-		getclock(TIMEOFDAY, &now);
-		then.tv_nsec = abstime->tv_nsec - now.tv_nsec;
-		then.tv_sec = abstime->tv_sec - now.tv_sec;
-		if (then.tv_nsec < 0)
-		{
-			then.tv_nsec += 1000000000;
-			then.tv_sec--;
-		}
-		if (((int)then.tv_sec < 0) ||
-		    ((then.tv_sec == 0) && (then.tv_nsec == 0)))
-		{
+		unsigned int tmo_ms;
+
+		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
 			return (ETIMEDOUT);
-		}
-		/* Relative remaining time in ms; urmach_futex treats 0 as
-		 * "block forever", so round a sub-ms remainder up to 1. */
-		unsigned int tmo_ms = (unsigned int)then.tv_sec * 1000u
-				    + (unsigned int)(then.tv_nsec / 1000000);
-		if (tmo_ms == 0)
-			tmo_ms = 1;
 		kern_res = _pthread_futex_wait(&mutex->state, 2, tmo_ms);
 		if (kern_res == KERN_OPERATION_TIMED_OUT)
 			return (ETIMEDOUT);

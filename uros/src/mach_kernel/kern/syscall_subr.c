@@ -719,10 +719,39 @@ kern_return_t
 mach_thread_set_name(const char *name)
 {
 	thread_t	thread = current_thread();
-	int		i;
+	char		buf[sizeof thread->name];
+	vm_size_t	got = 0;
 
-	for (i = 0; i < 15 && name[i] != '\0'; i++)
-		thread->name[i] = name[i];
-	thread->name[i] = '\0';
+	/*
+	 * 🔴 copyinstr, and it was a plain dereference until #425.
+	 *
+	 * `name' is a pointer chosen in ring 3.  The loop that was here read
+	 * it a byte at a time straight out of the kernel:
+	 *
+	 *	for (i = 0; i < 15 && name[i] != '\0'; i++)
+	 *		thread->name[i] = name[i];
+	 *
+	 * On i386 that works, which is why it was written and why it survived.
+	 * On x86-64 it cannot: this kernel enables SMAP (CR4.SMAP, #468), and
+	 * SMAP is precisely the processor refusing kernel loads from user
+	 * pages outside a stac/clac window.  The copy routines open that
+	 * window; nothing else may.  pthread_test stopped on arm 16 of 23 with
+	 * every processor idle, and no line printed, because the first
+	 * statement of the arm was this trap.
+	 *
+	 * 🔑 mach_print(), thirty lines up in this same file, takes the same
+	 * kind of argument and has always used copyinstr.  The pattern was
+	 * here; this one function did not follow it.
+	 *
+	 * ⚠️ And it is not only about faulting.  A user pointer read without
+	 * copyin is also unchecked: nothing said the address belonged to the
+	 * caller.  copyinstr answers both at once, which is why it is the
+	 * whole fix rather than a stac/clac pair around the old loop.
+	 */
+	if (copyinstr(name, buf, sizeof buf, &got) != 0)
+		return KERN_INVALID_ADDRESS;
+
+	buf[sizeof buf - 1] = '\0';
+	bcopy(buf, thread->name, sizeof thread->name);
 	return KERN_SUCCESS;
 }

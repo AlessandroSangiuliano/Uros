@@ -36,6 +36,7 @@
 #include <mach/policy.h>		/* POLICY_TIMESHARE_INFO (#153) */
 #include <mach/thread_info.h>		/* THREAD_SCHED_TIMESHARE_INFO (#153) */
 #include <mach.h>			/* thread_info() user stub (#153) */
+#include <mach/clock.h>			/* host_get_clock_service, REALTIME_CLOCK */
 #include <signal.h>
 #include <mach/port.h>
 #include "gpu_console.h"
@@ -742,7 +743,29 @@ test_mutex_timedlock(void)
 	pthread_mutex_init(&timedlock_mtx, NULL);
 
 	/* Test 1: timedlock on uncontended mutex — should succeed */
-	getclock(TIMEOFDAY, &deadline);
+	rc = getclock(TIMEOFDAY, &deadline);
+	if (rc != 0) {
+		char		buf[128];
+		mach_port_t	host = mach_host_self();
+		mach_port_t	clk = MACH_PORT_NULL;
+		kern_return_t	kr;
+
+		/* getclock() collapses three kernel refusals into one errno.
+		 * Ask the same question again here, where the answer can be
+		 * printed: HOST_NULL, a clock_id out of range and a clock with
+		 * no operations are three different bugs. */
+		kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+		/* ⚠️ Two short lines, not one long one: libmach's printf
+		 * flushes at 128 characters, so a diagnostic that runs past
+		 * that is delivered in pieces. */
+		printf("  clock: host 0x%x, hgcs 0x%x, port 0x%x\n",
+		       (unsigned)host, (unsigned)kr, (unsigned)clk);
+		snprintf(buf, sizeof(buf), "getclock %d (ENXIO %d, EIO %d)",
+			 rc, ENXIO, EIO);
+		test_fail("timedlock uncontended", buf);
+		pthread_mutex_destroy(&timedlock_mtx);
+		return;
+	}
 	deadline.tv_sec += 5;
 	rc = pthread_mutex_timedlock(&timedlock_mtx, &deadline);
 	if (rc != 0) {
@@ -998,11 +1021,41 @@ test_thread_pool_bench(void)
  *   b) success after the joinee terminates
  * ---------------------------------------------------------------- */
 
+/*
+ * #425: check (a) only means something while the joinee is still ALIVE -- a
+ * timedjoin of a thread that has already terminated harvests it and returns 0
+ * without ever consulting the deadline, exactly as an uncontended timedlock
+ * legitimately returns 0.  So the joinee has to be provably running, and
+ * thread_switch(DEPRESS, 200) cannot arrange that: it is a scheduler hint, not
+ * a sleep.  thread_depress_priority() lowers the caller's priority and arms a
+ * timer to restore it (kern/syscall_subr.c) -- the thread stays runnable and
+ * merely runs last, so with a processor of its own the "slow" joinee ran
+ * straight to completion.
+ *
+ * That made the check a measurement of the processor's clock: it won the race
+ * at 3.99 GHz and lost it at 1.40 GHz, four runs out of four.
+ *
+ * This is the correction #393 already made to test 14, applied there and not
+ * here.  The two flags below make the ordering explicit and total, so the
+ * check asserts the timeout and nothing about the scheduler or the CPU count.
+ */
+static pthread_mutex_t tj_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  tj_cv  = PTHREAD_COND_INITIALIZER;
+static int	       tj_running;	/* joinee -> main: I am alive */
+static int	       tj_may_exit;	/* main -> joinee: you may finish */
+
 static void *
-slow_joinee(void *arg)
+timedjoin_joinee(void *arg)
 {
 	(void)arg;
-	thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 200);
+
+	pthread_mutex_lock(&tj_mtx);
+	tj_running = 1;
+	pthread_cond_broadcast(&tj_cv);
+	while (!tj_may_exit)
+		pthread_cond_wait(&tj_cv, &tj_mtx);
+	pthread_mutex_unlock(&tj_mtx);
+
 	return (void *)0x42424242;
 }
 
@@ -1014,30 +1067,78 @@ test_timedjoin_np(void)
 	void *retval = NULL;
 	int rc;
 
-	if (pthread_create(&t, NULL, slow_joinee, NULL) != 0) {
+	tj_running = 0;
+	tj_may_exit = 0;
+
+	if (pthread_create(&t, NULL, timedjoin_joinee, NULL) != 0) {
 		test_fail("timedjoin_np", "pthread_create failed");
 		return;
 	}
 
-	/* (a) Past deadline → must return ETIMEDOUT immediately. */
+	/* Wait until the joinee provably exists -- never assume a yield handed
+	 * it the CPU (#393). */
+	pthread_mutex_lock(&tj_mtx);
+	while (!tj_running)
+		pthread_cond_wait(&tj_cv, &tj_mtx);
+	pthread_mutex_unlock(&tj_mtx);
+
+	/* (a) Past deadline, joinee alive → must return ETIMEDOUT immediately. */
 	deadline.tv_sec = 0;
 	deadline.tv_nsec = 0;
 	rc = pthread_timedjoin_np(t, NULL, &deadline);
+
+	/* Release the joinee before judging rc: on the failure path it would
+	 * otherwise stay parked on tj_may_exit for ever. */
+	pthread_mutex_lock(&tj_mtx);
+	tj_may_exit = 1;
+	pthread_cond_broadcast(&tj_cv);
+	pthread_mutex_unlock(&tj_mtx);
+
 	if (rc != ETIMEDOUT) {
 		char buf[80];
 		snprintf(buf, sizeof(buf), "(a) expected ETIMEDOUT(%d), got %d",
 			 ETIMEDOUT, rc);
 		test_fail("timedjoin_np", buf);
-		pthread_join(t, NULL);
+		/* Join only if (a) did NOT already harvest the thread.  A
+		 * pthread_t whose join succeeded describes a stack that has
+		 * gone back on the free list, and joining it a second time
+		 * reads recycled bytes: if they still look like a joinable
+		 * thread, the join parks on the joiners futex with no timeout
+		 * and never returns.  A failing test that wedges the machine
+		 * reports nothing at all. */
+		if (rc != 0)
+			pthread_join(t, NULL);
 		return;
 	}
 
-	/* (b) Generous deadline → succeed once the joinee finishes. */
-	getclock(TIMEOFDAY, &deadline);
+	/* (b) Generous deadline → succeed once the joinee finishes.
+	 *
+	 * `deadline' still holds the expired {0,0} from (a).  A getclock that
+	 * fails silently would leave it there, +5 would name five seconds
+	 * after the epoch, and the join would report ETIMEDOUT the instant it
+	 * was called -- a wrong answer indistinguishable from a real timeout.
+	 * That is the defect this file was already carrying in four places
+	 * inside libpthreads; the test must not carry it too. */
+	rc = getclock(TIMEOFDAY, &deadline);
+	if (rc != 0) {
+		char buf[80];
+		snprintf(buf, sizeof(buf),
+			 "(b) getclock(TIMEOFDAY) returned %d (ENXIO %d, EIO %d)",
+			 rc, ENXIO, EIO);
+		test_fail("timedjoin_np", buf);
+		return;
+	}
 	deadline.tv_sec += 5;
 	rc = pthread_timedjoin_np(t, &retval, &deadline);
 	if (rc != 0 || retval != (void *)0x42424242) {
-		test_fail("timedjoin_np", "(b) join did not return exit value");
+		char buf[96];
+		/* Name both halves: a join that timed out and a join that
+		 * harvested the wrong value are different defects, and one
+		 * message for the two cannot tell them apart. */
+		snprintf(buf, sizeof(buf),
+			 "(b) rc %d (want 0), retval %p (want 0x42424242)",
+			 rc, retval);
+		test_fail("timedjoin_np", buf);
 		return;
 	}
 

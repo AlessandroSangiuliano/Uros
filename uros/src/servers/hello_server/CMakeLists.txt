@@ -47,7 +47,7 @@ target_compile_options(hello_server_server PRIVATE
   # canary are seeded before any protected function runs.
   -fstack-protector-strong
   -fno-builtin
-  -w
+  
   -include stdint.h
   # nostdinc: drop /usr/include entirely so <stdio.h> resolves to musl's
   # copy, not gcc's host glibc wrapper.

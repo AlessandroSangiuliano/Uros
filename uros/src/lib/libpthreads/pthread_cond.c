@@ -48,7 +48,29 @@
 static int
 _pthread_cond_lazy_init(pthread_cond_t *cond)
 {
-	int expected = _PTHREAD_COND_SIG_init;
+	/*
+	 * 🔴 `long', because `sig' is a long -- and this was an `int' until
+	 * #425, which is the whole of that defect.
+	 *
+	 * __atomic_compare_exchange_n takes the expected value BY ADDRESS and
+	 * operates at the width of the object, so on a 64-bit target it reads
+	 * eight bytes from a four-byte stack slot and, when the compare fails,
+	 * writes eight bytes back into it.  The compare therefore fails for
+	 * every thread -- the upper four bytes are whatever the stack held --
+	 * every thread takes the losing branch, and every one of them spins
+	 * for a magic word nobody is left to publish.  pthread_test stopped
+	 * there, on the second of twenty-three arms.
+	 *
+	 * ⚠️ i386 never saw it: `long' is four bytes there, so the two widths
+	 * agree by accident of the target rather than by anything written.
+	 *
+	 * 🔑 gcc names it exactly -- "__atomic_compare_exchange_8 writing 8
+	 * bytes into a region of size 4 overflows the destination" -- and this
+	 * library is compiled -w, so it was thrown away.  pthread_once() has
+	 * the same lazy-init written correctly in another file, which is what
+	 * made the intent unambiguous.
+	 */
+	long expected = _PTHREAD_COND_SIG_init;
 	if (__atomic_compare_exchange_n(&cond->sig, &expected,
 					_PTHREAD_NO_SIG, 0,
 					__ATOMIC_ACQUIRE, __ATOMIC_ACQUIRE))
@@ -260,30 +282,12 @@ _pthread_cond_wait(pthread_cond_t *cond,
 	UNLOCK(cond->lock);
 	if (abstime)
 	{
-		struct timespec now;
-		getclock(TIMEOFDAY, &now);
-		/* Compute relative time to sleep */
-		then.tv_nsec = abstime->tv_nsec - now.tv_nsec;
-	        then.tv_sec = abstime->tv_sec - now.tv_sec;
-		if (then.tv_nsec < 0)
-		{
-			then.tv_nsec += 1000000000;  /* nsec/sec */
-			then.tv_sec--;
-		}
-		if (((int)then.tv_sec < 0) ||
-		    ((then.tv_sec == 0) && (then.tv_nsec == 0)))
-		{
+		unsigned int tmo_ms;
+
+		if (_pthread_timeout_ms(abstime, &tmo_ms) != 0)
 			kern_res = KERN_OPERATION_TIMED_OUT;
-		} else
-		{
-			/* Relative ms; 0 means "forever" to urmach_futex, so
-			 * round a sub-ms remainder up to 1. */
-			unsigned int tmo_ms = (unsigned int)then.tv_sec * 1000u
-					    + (unsigned int)(then.tv_nsec / 1000000);
-			if (tmo_ms == 0)
-				tmo_ms = 1;
+		else
 			kern_res = _pthread_futex_wait(COND_SEQ(cond), seq, tmo_ms);
-		}
 	} else
 	{
 		kern_res = _pthread_futex_wait(COND_SEQ(cond), seq, 0);

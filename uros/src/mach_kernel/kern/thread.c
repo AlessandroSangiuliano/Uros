@@ -1107,6 +1107,7 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 {
 	task_t			parent_task = thr_act->task;
 	thread_t		new_thread;
+	thread_t		creator;
 	processor_set_t		pset;
 	int			rc, sc, max;
 	spl_t			s;
@@ -1124,6 +1125,32 @@ thread_create_in(thread_act_t thr_act, void (*start_pos)(void),
 	rpc_lock_init(new_thread);
 	wake_lock_init(new_thread);
 	new_thread->sleep_stamp = sched_tick;
+
+	/*
+	 * Inherit the creator's name, WITHIN the same task only (#425).
+	 *
+	 * struct task has no name, so what identifies a task in a kernel report
+	 * is the name on one of its threads -- libmach's crt0 puts the program
+	 * there before main() runs.  Naming only that first thread leaves a
+	 * hole: a task whose main thread has exited while its workers run on
+	 * keeps no name at all, and that is precisely a wedged task, which is
+	 * when the question gets asked.  Inheriting closes it -- every thread
+	 * carries the name, and a task that is alive has a thread.
+	 *
+	 * ⚠️ Same task ONLY, and the guard is the whole point.  Threads are also
+	 * created ACROSS tasks -- the bootstrap server calls thread_create on
+	 * the task it has just made -- so inheriting from the creator
+	 * unconditionally would stamp "bootstrap" on every bundle task for the
+	 * window before its own crt0 corrects it.  A report that names a task
+	 * wrongly is worse than one that leaves it blank: blank asks a question,
+	 * wrong answers it.  So a task's first thread starts nameless and stays
+	 * so for that window, by design.
+	 */
+	creator = current_thread();
+	if (creator != THREAD_NULL && creator->top_act != THR_ACT_NULL
+	    && creator->top_act->task == parent_task)
+		bcopy(creator->name, new_thread->name,
+		      sizeof new_thread->name);
 
 	/*
 	 * No need to lock thr_act, since it can't be known to anyone --

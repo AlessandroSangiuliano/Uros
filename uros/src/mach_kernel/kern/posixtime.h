@@ -27,6 +27,7 @@
 
 #include <mach_assert.h>
 #include <mach/clock_types.h>
+#include <mach/time_value.h>	/* time_value_t -- utime_get/utime_set speak it */
 
 /*
  * Universal (Posix) time declarations.
@@ -60,5 +61,18 @@ extern void	utime_init(void);
  * interrupt path at splclock() interrupt level.
  */
 extern void	utime_tick(void);
+
+/*
+ * Read and write the Universal (Posix) time, with no host port involved.
+ *
+ * host_get_time() and host_set_time() are these two plus the privilege check;
+ * a clock device sits below that check, having been reached through a port
+ * the kernel handed out, so it needs the mechanism without the question.
+ * ⚠️ utime_get() carries the mapped copy's seqlock and utime_set() the
+ * master-processor binding -- both are why these exist as functions instead
+ * of as two lines each caller writes for itself.
+ */
+extern void	utime_get(time_value_t *current_time);
+extern void	utime_set(time_value_t new_time);
 
 #endif	/* _KERN_POSIXTIME_H_ */
