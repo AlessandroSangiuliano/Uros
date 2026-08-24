@@ -17,6 +17,7 @@
 # breaks the agreement instead of producing plausible output.
 set -e
 REPO=$(cd "$(dirname "$0")/.." && pwd)
+. "$(dirname "$0")/ddb-common.sh"	# count, wait_for, ask (#428)
 LOG=${1:-$HOME/uros-tests/ddb-objects.log}
 IN=$(mktemp -u /tmp/ddb-obj.XXXXXX); mkfifo "$IN"; : > "$LOG"
 qemu-system-x86_64 -cpu max -smp 4 -cdrom "$REPO/uros/build-x86_64/uros-x86_64.iso" \
@@ -24,9 +25,6 @@ qemu-system-x86_64 -cpu max -smp 4 -cdrom "$REPO/uros/build-x86_64/uros-x86_64.i
 Q=$!; exec 3>"$IN"
 w() { i=0; while [ $i -lt 900 ]; do grep -aq "$1" "$LOG" && return 0
 	kill -0 "$Q" 2>/dev/null || return 1; sleep 0.1; i=$((i+1)); done; return 1; }
-ask() { b=$(grep -ac 'ddb> ' "$LOG"); printf '%s\n' "$1" >&3
-	i=0; while [ $i -lt 200 ]; do [ "$(grep -ac 'ddb> ' "$LOG")" -gt "$b" ] && return 0
-	sleep 0.1; i=$((i+1)); done; return 1; }
 fail() { echo "FAILED: $1"; kill $Q 2>/dev/null; rm -f "$IN"; exit 1; }
 
 w 'staying up on request' || fail "the kernel did not stay up"
@@ -37,7 +35,7 @@ kill $Q 2>/dev/null || true; wait $Q 2>/dev/null || true; exec 3>&-; rm -f "$IN"
 
 # The scheduler's view: the count the set declares, and the rows actually walked.
 DECLARED=$(grep -a 'threads in the default set' "$LOG" | head -1 | awk '{print $1}')
-WALKED=$(sed -n "/threads in the default set/,/ddb> /p" "$LOG" | grep -ac '^  0xffff')
+WALKED=$(sed -n "/threads in the default set/,/ddb> /p" "$LOG" | count_stdin '^  0xffff')
 # zalloc's view.
 ZONED=$(grep -aE '^  [0-9]+\s+[0-9]+\s+[0-9]+\s+threads' "$LOG" | head -1 | awk '{print $2}')
 # The tasks' view.
