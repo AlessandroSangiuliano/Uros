@@ -263,8 +263,23 @@ else
     PTHREAD_TEST_LINE="pthread_test pthread_test"
 fi
 
+# ⚠️ `-w' sul name_server (#492): bootstrap non carica il server successivo
+# finche' questo non ha mandato bootstrap_completed.
+#
+# 🔥 Le due meta' dell'handshake esistevano gia' ed erano scollegate.
+# name_server/netname.c chiama bootstrap_completed() da sempre, e bootstrap
+# onora SERVER_SERIALIZE_F da sempre -- ma il flag che li unisce non era mai
+# stato messo, quindi il name server era soltanto PRIMO NELLA LISTA, che
+# decide l'ordine in cui i task vengono creati e non l'ordine in cui parte la
+# loro prima istruzione.  netname_test vinceva quella corsa in 5 boot su 5:
+# stampava il verdetto, falliva entrambi gli arm con MIG_SERVER_DIED, e veniva
+# terminato PRIMA che il name server stampasse "started".
+#
+# ⚠️ I flag stanno all'INIZIO della riga: parse_boot_args() gira prima che
+# venga letto symtab_name e si ferma al primo token che non comincia per `-'.
+# Un flag scritto dopo il nome viene ignorato in silenzio.
 cat > "$BOOTSTRAP_CONF" <<CONF
-name_server name_server
+-w name_server name_server
 ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
 ${CHAR_SERVER_CONF_LINE}
