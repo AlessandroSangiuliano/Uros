@@ -46,7 +46,7 @@ target_compile_options(libvfs PRIVATE
   ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
-  -w
+  
   -include stdint.h
 )
 
@@ -107,7 +107,7 @@ if(UROS_BUILD_MUSL)
   set_target_properties(libvfs-pic PROPERTIES POSITION_INDEPENDENT_CODE ON)
   target_compile_options(libvfs-pic PRIVATE
     -std=gnu11 ${UROS_ARCH_FLAGS} -fno-builtin -ffreestanding
-    -fno-stack-protector -w -include stdint.h
+    -fno-stack-protector  -include stdint.h
   )
   target_include_directories(libvfs-pic PRIVATE
     ${_MUSL_INC}                                   # musl headers FIRST

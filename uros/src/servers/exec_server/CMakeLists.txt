@@ -65,7 +65,7 @@ target_compile_options(exec_server_bin PRIVATE
   ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
-  -w
+  
   -include stdint.h
 )
 

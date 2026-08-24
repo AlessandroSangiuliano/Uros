@@ -39,7 +39,7 @@ endif()
 add_executable(mk_pthread_impl mk_pthread_impl.c)
 
 target_compile_options(mk_pthread_impl PRIVATE
-  ${UROS_ARCH_FLAGS} -std=gnu11 -w -include stdint.h)
+  ${UROS_ARCH_FLAGS} -std=gnu11  -include stdint.h)
 target_link_options(mk_pthread_impl PRIVATE ${UROS_ARCH_FLAGS})
 
 # ⚠️ __POSIX_LIB__, the same definition the library is built with, and without

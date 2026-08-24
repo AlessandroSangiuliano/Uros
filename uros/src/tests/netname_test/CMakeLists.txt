@@ -23,7 +23,7 @@ set(_K ${CMAKE_SOURCE_DIR}/src/mach_kernel)
 add_executable(netname_test_bin netname_test.c)
 
 target_compile_options(netname_test_bin PRIVATE
-  ${UROS_ARCH_FLAGS} -std=gnu11 -fno-builtin -w
+  ${UROS_ARCH_FLAGS} -std=gnu11 -fno-builtin 
   -mstack-protector-guard=global -include stdint.h)
 
 target_compile_definitions(netname_test_bin PRIVATE MACH_IPC_COMPAT=0)

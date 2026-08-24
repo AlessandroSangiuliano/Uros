@@ -15,7 +15,7 @@ add_library(librthreads STATIC ${LIB_SOURCES})
 add_dependencies(librthreads mig_mach_public_headers)
 
 target_compile_options(librthreads PRIVATE
-  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -include stdint.h>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin  -include stdint.h>
   ${UROS_ARCH_FLAGS}
 )
 

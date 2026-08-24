@@ -18,7 +18,7 @@ add_library(libcthreads STATIC ${LIB_SOURCES})
 add_dependencies(libcthreads mig_mach_public_headers)
 
 # Legacy K&R/gnu89 code: suppress warnings, allow implicit declarations
-target_compile_options(libcthreads PRIVATE ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h -msse -msse2>)
+target_compile_options(libcthreads PRIVATE ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin  -mstack-protector-guard=global -include stdint.h -msse -msse2>)
 
 target_include_directories(libcthreads PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}

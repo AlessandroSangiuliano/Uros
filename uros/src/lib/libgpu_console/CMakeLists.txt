@@ -52,7 +52,7 @@ add_library(libgpu_console STATIC
 add_dependencies(libgpu_console mig_mach_public_headers)
 
 target_compile_options(libgpu_console PRIVATE
-  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w -mstack-protector-guard=global -include stdint.h>
+  ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin  -mstack-protector-guard=global -include stdint.h>
 )
 
 target_compile_definitions(libgpu_console PRIVATE

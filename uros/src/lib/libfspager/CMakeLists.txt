@@ -51,7 +51,7 @@ add_library(libfspager STATIC
 add_dependencies(libfspager mig_mach_public_headers)
 
 target_compile_options(libfspager PRIVATE
-  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin -w
+  $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin 
                           -mstack-protector-guard=global
                           -include stdint.h ${UROS_ARCH_FLAGS}>
 )

@@ -50,7 +50,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     netname.c nprocs.c nostdlib_stubs.c ${NS_MIG_GENERATED})
 
   target_compile_options(name_server_bin PRIVATE
-    ${UROS_ARCH_FLAGS} -std=gnu11 -fno-builtin -w
+    ${UROS_ARCH_FLAGS} -std=gnu11 -fno-builtin 
     -mstack-protector-guard=global -include stdint.h)
 
   target_compile_definitions(name_server_bin PRIVATE MACH_IPC_COMPAT=0)
@@ -163,7 +163,7 @@ target_compile_options(name_server_bin PRIVATE
   ${UROS_ARCH_FLAGS} -msse -msse2
   -fno-builtin
   -mstack-protector-guard=global
-  -w
+  
   -include stdint.h
 )
 

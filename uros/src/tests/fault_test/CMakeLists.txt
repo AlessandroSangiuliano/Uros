@@ -39,7 +39,7 @@ add_executable(fault_test_bin
   fault_test.c ${FT_MIG_GENERATED})
 
 target_compile_options(fault_test_bin PRIVATE
-  ${UROS_ARCH_FLAGS} -std=gnu11 -fno-builtin -w
+  ${UROS_ARCH_FLAGS} -std=gnu11 -fno-builtin 
   -mstack-protector-guard=global -include stdint.h)
 
 target_compile_definitions(fault_test_bin PRIVATE MACH_IPC_COMPAT=0)
