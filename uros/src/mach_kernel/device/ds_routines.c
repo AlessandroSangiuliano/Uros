@@ -294,7 +294,7 @@ ds_device_open_cap(
 	ledger_t                ledger,
 	dev_mode_t		mode,
 	security_token_t        sec_token,
-	char *			name,
+	dev_name_t		name,
 	char *			token,
 	mach_msg_type_number_t	token_len,
 	ipc_port_t		*device_p)
@@ -315,7 +315,7 @@ ds_device_open(
 	ledger_t                ledger,
 	dev_mode_t		mode,
 	security_token_t        sec_token,
-	char *			name,
+	dev_name_t		name,
 	device_t		*device_p)	/* out */
 {
 	device_t		device;

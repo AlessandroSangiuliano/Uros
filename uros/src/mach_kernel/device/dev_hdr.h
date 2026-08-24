@@ -150,7 +150,7 @@ struct io_done_queue {
  * To find and remove device entries
  */
 extern kern_return_t	device_lookup_mode(
-					char		*name,
+					const char	*name,
 					dev_mode_t	mode,
 					device_t	*dev);
 extern device_t		device_lookup(	/* by name */

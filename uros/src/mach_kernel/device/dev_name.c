@@ -94,9 +94,9 @@ decl_simple_lock_data(,dev_name_lock)
 /* Forward */
 
 extern boolean_t	name_equal(
-				char		* src,
+				const char	* src,
 				int		len,
-				char		* target);
+				const char	* target);
 
 /*
  * Routines placed in empty entries in the device tables
@@ -125,9 +125,9 @@ nodev(void)
  */
 boolean_t
 name_equal(
-	char		* src,
+	const char	* src,
 	int		len,
-	char		* target)
+	const char	* target)
 {
 	while (--len >= 0)
 	    if (*src++ != *target++)
@@ -145,7 +145,7 @@ name_equal(
  */
 boolean_t
 dev_name_lookup(
-	char		* name,
+	const char	* name,
 	dev_ops_t	*ops,	/* out */
 	int		*unit)	/* out */
 {
@@ -160,7 +160,7 @@ dev_name_lookup(
 	 * <partition>		is a letter in [a-h]
 	 */
 
-	register char *	cp = name;
+	register const char *	cp = name;
 	int		len, lenunit;
 	register int	j = 0;
 	register int	c;

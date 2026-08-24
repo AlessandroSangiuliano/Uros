@@ -116,7 +116,23 @@
 /*
  * Device name string
  */
-typedef	char	dev_name_t[128];	/* must match device_types.defs */
+/*
+ * A device name, as it appears in an RPC.
+ *
+ * ⚠️ A POINTER, not `char[128]'.  It is only ever an input parameter -- every
+ * use of dev_name_t in device.defs and device_request.defs is `in', and no C
+ * declaration stores one -- and mig_strncpy reads it to its terminator, never
+ * to 128 bytes.  Declared as an array it told the compiler that every caller
+ * supplies 128 readable bytes, and gcc reported the ones that pass a literal:
+ *
+ *   bootstrap.c:1952: 'device_open' accessing 128 bytes in a region of size 12
+ *
+ * The bound itself has not moved: it lives in device_types.defs, which is what
+ * enforces it on the wire, and that is the only place it can be enforced.  The
+ * comment that used to sit here saying this "must match device_types.defs" was
+ * a check that could not fail; now there is nothing to keep in step.
+ */
+typedef	const char	*dev_name_t;
 
 /*
  * Mode for open/read/write
