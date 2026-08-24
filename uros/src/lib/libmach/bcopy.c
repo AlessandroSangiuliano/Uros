@@ -88,8 +88,19 @@
 /*
  * sizeof(word) MUST BE A POWER OF TWO
  * SO THAT wmask BELOW IS ALL ONES
+ *
+ * ⚠️ As wide as a pointer, which is the whole point of the type and is what
+ * "optimal copy speed" meant when it was written.  It said `int', and on the
+ * machine it was written for that was the same thing; on x86-64 it is half.
+ * Every memcpy, memmove and bcopy in user space was moving 32 bits per
+ * iteration on a 64-bit machine, and aligning its preamble to four bytes
+ * rather than eight.
+ *
+ * uintptr_t rather than `long' so the intent is stated rather than inferred
+ * from a type that happens to be right on both targets.  On i386 it is four
+ * bytes, exactly as before, which is why i386 does not move.
  */
-typedef	int word;		/* "word" used for optimal copy speed */
+typedef	uintptr_t word;		/* "word" used for optimal copy speed */
 
 #define	wsize	sizeof(word)
 #define	wmask	(wsize - 1)
@@ -128,13 +139,21 @@ bcopy(const void *src0, void *dst0, size_t length)
 		/*
 		 * Copy forward.
 		 */
-		t = (int)src;	/* only need low bits */
-		if ((t | (int)dst) & wmask) {
+		/*
+		 * ⚠️ uintptr_t, not int.  Only the low bits are read -- every
+		 * use below is masked with wmask -- so truncating to int was
+		 * harmless, and that is exactly what made it worth removing:
+		 * a diagnosis that is correct and harmless is the kind that
+		 * teaches a reader to skip the class, and this class had a
+		 * real one in it.
+		 */
+		t = (uintptr_t)src;	/* only need low bits */
+		if ((t | (uintptr_t)dst) & wmask) {
 			/*
 			 * Try to align operands.  This cannot be done
 			 * unless the low bits match.
 			 */
-			if ((t ^ (int)dst) & wmask || length < wsize)
+			if ((t ^ (uintptr_t)dst) & wmask || length < wsize)
 				t = length;
 			else
 				t = wsize - (t & wmask);
@@ -157,9 +176,9 @@ bcopy(const void *src0, void *dst0, size_t length)
 		 */
 		src += length;
 		dst += length;
-		t = (int)src;
-		if ((t | (int)dst) & wmask) {
-			if ((t ^ (int)dst) & wmask || length <= wsize)
+		t = (uintptr_t)src;
+		if ((t | (uintptr_t)dst) & wmask) {
+			if ((t ^ (uintptr_t)dst) & wmask || length <= wsize)
 				t = length;
 			else
 				t &= wmask;
