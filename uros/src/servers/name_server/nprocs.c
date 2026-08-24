@@ -232,7 +232,7 @@ typedef struct watcher_record {
 static watcher_record_t watchers;
 
 static boolean_t
-netname_find(netname_name_t key, name_record_t *thisp, name_record_t **prevp)
+netname_find(netname_name_in_t key, name_record_t *thisp, name_record_t **prevp)
 {
     register name_record_t *prev, this;
 
@@ -315,7 +315,7 @@ notify_watcher(mach_port_t notify, mach_port_t service_port)
  * Watchers are one-shot: removed from the list after notification.
  */
 static void
-notify_watchers_for(netname_name_t key, mach_port_t service_port)
+notify_watchers_for(netname_name_in_t key, mach_port_t service_port)
 {
     watcher_record_t *prev, this;
 
@@ -341,7 +341,7 @@ notify_watchers_for(netname_name_t key, mach_port_t service_port)
 }
 
 kern_return_t
-do_netname_check_in(mach_port_t server, netname_name_t key,
+do_netname_check_in(mach_port_t server, netname_name_in_t key,
 		    mach_port_t sig, mach_port_t name)
 {
     name_record_t *prev, this;
@@ -363,7 +363,13 @@ do_netname_check_in(mach_port_t server, netname_name_t key,
 
 	this->name = name;
 	this->sig = sig;
-	(void) strncpy(this->key, key, 80);
+	/* ⚠️ strncpy does NOT terminate when the source fills the bound, so
+	 * a bound equal to the destination leaves an unterminated key --
+	 * and the strcmp that runs off it runs for the NEXT client, not
+	 * for the one that sent the long name.  Same shape as the
+	 * mount-prefix copy below, which already had it right. */
+	(void) strncpy(this->key, key, sizeof(netname_name_t) - 1);
+	this->key[sizeof(netname_name_t) - 1] = '\0';
     }
 
     this->next = list;
@@ -381,15 +387,15 @@ do_netname_check_in(mach_port_t server, netname_name_t key,
 }
 
 kern_return_t
-do_netname_register_send_right(mach_port_t server, netname_name_t key,
+do_netname_register_send_right(mach_port_t server, netname_name_in_t key,
 			       mach_port_t sig, mach_port_t name)
 {
     return do_netname_check_in(server, key, sig, name);
 }
 
 kern_return_t
-do_netname_look_up(mach_port_t server, netname_name_t host,
-		   netname_name_t key, mach_port_t *namep)
+do_netname_look_up(mach_port_t server, netname_name_in_t host,
+		   netname_name_in_t key, mach_port_t *namep)
 {
     name_record_t *prev, this;
 
@@ -418,7 +424,7 @@ do_netname_look_up(mach_port_t server, netname_name_t host,
 }
 
 kern_return_t
-do_netname_check_out(mach_port_t server, netname_name_t key, mach_port_t sig)
+do_netname_check_out(mach_port_t server, netname_name_in_t key, mach_port_t sig)
 {
     name_record_t *prev, this;
 
@@ -493,7 +499,7 @@ mount_prefix_match(const char *path, const char *prefix)
 }
 
 kern_return_t
-do_netname_check_in_mount(mach_port_t server, netname_name_t prefix,
+do_netname_check_in_mount(mach_port_t server, netname_name_in_t prefix,
 			  mach_port_t sig, mach_port_t port)
 {
     mount_record_t this;
@@ -527,7 +533,7 @@ do_netname_check_in_mount(mach_port_t server, netname_name_t prefix,
 }
 
 kern_return_t
-do_netname_check_out_mount(mach_port_t server, netname_name_t prefix,
+do_netname_check_out_mount(mach_port_t server, netname_name_in_t prefix,
 			   mach_port_t sig)
 {
     mount_record_t *prev, this;
@@ -552,7 +558,7 @@ do_netname_check_out_mount(mach_port_t server, netname_name_t prefix,
 }
 
 kern_return_t
-do_netname_look_up_mount(mach_port_t server, netname_path_t path,
+do_netname_look_up_mount(mach_port_t server, netname_path_in_t path,
 			 mach_port_t *out_port, netname_name_t out_matched)
 {
     mount_record_t this, best = NULL;
@@ -661,7 +667,7 @@ do_mach_notify_dead_name(mach_port_t notify, mach_port_t name)
 }
 
 kern_return_t
-do_netname_notify(mach_port_t server, netname_name_t key,
+do_netname_notify(mach_port_t server, netname_name_in_t key,
 		  mach_port_t notify)
 {
     name_record_t *prev, this;
@@ -690,7 +696,8 @@ do_netname_notify(mach_port_t server, netname_name_t key,
 	if (w == NULL)
 	    return KERN_RESOURCE_SHORTAGE;
 
-	(void) strncpy(w->key, key, 80);
+	(void) strncpy(w->key, key, sizeof(netname_name_t) - 1);
+	w->key[sizeof(netname_name_t) - 1] = '\0';
 	w->notify = notify;
 	w->next = watchers;
 	watchers = w;

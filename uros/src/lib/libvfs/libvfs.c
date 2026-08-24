@@ -71,7 +71,10 @@
 
 struct vfs_mount_cache_entry {
     int             in_use;
-    char            prefix[80]; /* matches netname_name_t */
+    /* ⚠️ Was `prefix[80]' with a comment saying it matched netname_name_t.
+     * A comment is the one kind of check that cannot fail, and it was
+     * wrong: the wire carried 128.  Now it is the same macro. */
+    char            prefix[NETNAME_NAME_MAX];
     mach_port_t     fs_port;
 };
 

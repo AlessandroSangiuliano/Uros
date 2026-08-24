@@ -70,8 +70,31 @@
 #define NETNAME_NO_MOUNT	(1005)	/* no mount prefix matched (#220) */
 #define NETNAME_MOUNT_EXISTS	(1006)	/* prefix already registered (#220) */
 
-typedef char netname_name_t[80];
-typedef char netname_path_t[1024];
+/*
+ * ⚠️ Both sizes come from <servers/netname_size.h>, which netname.defs also
+ * includes.  They used to be literals here and different literals there; see
+ * that header for what the disagreement cost.
+ */
+#include <servers/netname_size.h>
+
+typedef char netname_name_t[NETNAME_NAME_MAX];
+typedef char netname_path_t[NETNAME_PATH_MAX];
+
+/*
+ * The same two, as INPUTS.
+ *
+ * ⚠️ A parameter declared `char[N]' tells the compiler the caller supplies N
+ * readable bytes, and for an `out' name that is exactly right.  For an `in'
+ * name it is a promise nobody keeps: the value is a string, mig_strncpy stops
+ * at its terminator, and every call site passes a literal far shorter than N.
+ * gcc reported that at each one, correctly, about code that was fine -- and a
+ * warning that is right and harmless at every call site is how a whole class
+ * gets ignored.
+ *
+ * netname.defs gives these to its `in' parameters; see the note there.
+ */
+typedef const char *netname_name_in_t;
+typedef const char *netname_path_in_t;
 
 /*
  * Notification message sent by the name server to watchers when

@@ -60,32 +60,65 @@ serverprefix do_;
 
 #include <mach/std_types.defs>
 
-type netname_name_t	= c_string[*:128];
+/*
+ * ⚠️ The sizes are NOT literals here.  This file runs through cpp before
+ * migcom sees it, so it takes them from the same header the C side does --
+ * <servers/netname_size.h>, which holds preprocessor definitions and nothing
+ * else for exactly this reason.  They were 128 here and 80 there, and nothing
+ * in either language compared them.
+ */
+#include <servers/netname_size.h>
+
+type netname_name_t	= c_string[*:NETNAME_NAME_MAX];
+
+/*
+ * The same name, as an INPUT.
+ *
+ * ⚠️ Two types for one thing, and the difference is the direction.  An `out'
+ * name is written into a buffer the caller supplies, so `char[N]' is the
+ * truth: the caller really must provide N bytes and the compiler should say
+ * so.  An `in' name is only READ, and mig_strncpy stops at the terminator --
+ * it never touches N bytes.  Declaring the parameter as an array made every
+ * call site promise storage it does not have, and gcc said so at each one:
+ *
+ *   netname_test.c:95: 'netname_check_in' accessing 128 bytes in a region of
+ *                      size 13 [-Wstringop-overflow=]
+ *
+ * A diagnosis that fires on correct code at every call site is one people
+ * learn to skip, and this file's neighbours were built with -w partly for
+ * that reason.  So the input takes a pointer, which is what it is.
+ */
+type netname_name_in_t	= c_string[*:NETNAME_NAME_MAX]
+				ctype: netname_name_in_t;
 
 /*
  * netname_path_t — full filesystem path (mount lookup input).
  * Sized for a typical PATH_MAX; the mount registry entries
  * (prefixes) fit in netname_name_t.
  */
-type netname_path_t	= c_string[*:1024];
+type netname_path_t	= c_string[*:NETNAME_PATH_MAX];
+
+/* The same, for a path that is only read.  See netname_name_in_t. */
+type netname_path_in_t	= c_string[*:NETNAME_PATH_MAX]
+				ctype: netname_path_in_t;
 
 import <servers/netname_defs.h>;
 
 routine netname_check_in(
 	server_port	: mach_port_t;
-	port_name	: netname_name_t;
+	port_name	: netname_name_in_t;
 	signature	: mach_port_copy_send_t;
 	port_id		: mach_port_make_send_t);
 
 routine netname_look_up(
 	server_port	: mach_port_t;
-	host_name	: netname_name_t;
-	port_name	: netname_name_t;
+	host_name	: netname_name_in_t;
+	port_name	: netname_name_in_t;
     out	port_id		: mach_port_move_send_t);
 
 routine netname_check_out(
 	server_port	: mach_port_t;
-	port_name	: netname_name_t;
+	port_name	: netname_name_in_t;
 	signature	: mach_port_copy_send_t);
 
 routine netname_version(
@@ -94,7 +127,7 @@ routine netname_version(
 
 routine netname_register_send_right(
 	server_port	: mach_port_t;
-	port_name	: netname_name_t;
+	port_name	: netname_name_in_t;
 	signature	: mach_port_copy_send_t;
 	port_id		: mach_port_copy_send_t);
 
@@ -112,7 +145,7 @@ routine netname_debug_off(
  */
 routine netname_notify(
 	server_port	: mach_port_t;
-	port_name	: netname_name_t;
+	port_name	: netname_name_in_t;
 	notify_port	: mach_port_make_send_once_t);
 
 /*
@@ -125,13 +158,13 @@ routine netname_notify(
 
 routine netname_check_in_mount(
 	server_port	: mach_port_t;
-	prefix		: netname_name_t;
+	prefix		: netname_name_in_t;
 	signature	: mach_port_copy_send_t;
 	port_id		: mach_port_make_send_t);
 
 routine netname_check_out_mount(
 	server_port	: mach_port_t;
-	prefix		: netname_name_t;
+	prefix		: netname_name_in_t;
 	signature	: mach_port_copy_send_t);
 
 /*
@@ -143,7 +176,7 @@ routine netname_check_out_mount(
  */
 routine netname_look_up_mount(
 	server_port	: mach_port_t;
-	path		: netname_path_t;
+	path		: netname_path_in_t;
     out	port_id		: mach_port_move_send_t;
     out	matched		: netname_name_t);
 
