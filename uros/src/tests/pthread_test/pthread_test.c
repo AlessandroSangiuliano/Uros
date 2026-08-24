@@ -36,6 +36,7 @@
 #include <mach/policy.h>		/* POLICY_TIMESHARE_INFO (#153) */
 #include <mach/thread_info.h>		/* THREAD_SCHED_TIMESHARE_INFO (#153) */
 #include <mach.h>			/* thread_info() user stub (#153) */
+#include <mach/clock.h>			/* host_get_clock_service, REALTIME_CLOCK */
 #include <signal.h>
 #include <mach/port.h>
 #include "gpu_console.h"
@@ -742,7 +743,29 @@ test_mutex_timedlock(void)
 	pthread_mutex_init(&timedlock_mtx, NULL);
 
 	/* Test 1: timedlock on uncontended mutex — should succeed */
-	getclock(TIMEOFDAY, &deadline);
+	rc = getclock(TIMEOFDAY, &deadline);
+	if (rc != 0) {
+		char		buf[128];
+		mach_port_t	host = mach_host_self();
+		mach_port_t	clk = MACH_PORT_NULL;
+		kern_return_t	kr;
+
+		/* getclock() collapses three kernel refusals into one errno.
+		 * Ask the same question again here, where the answer can be
+		 * printed: HOST_NULL, a clock_id out of range and a clock with
+		 * no operations are three different bugs. */
+		kr = host_get_clock_service(host, REALTIME_CLOCK, &clk);
+		/* ⚠️ Two short lines, not one long one: libmach's printf
+		 * flushes at 128 characters, so a diagnostic that runs past
+		 * that is delivered in pieces. */
+		printf("  clock: host 0x%x, hgcs 0x%x, port 0x%x\n",
+		       (unsigned)host, (unsigned)kr, (unsigned)clk);
+		snprintf(buf, sizeof(buf), "getclock %d (ENXIO %d, EIO %d)",
+			 rc, ENXIO, EIO);
+		test_fail("timedlock uncontended", buf);
+		pthread_mutex_destroy(&timedlock_mtx);
+		return;
+	}
 	deadline.tv_sec += 5;
 	rc = pthread_mutex_timedlock(&timedlock_mtx, &deadline);
 	if (rc != 0) {
@@ -1088,12 +1111,34 @@ test_timedjoin_np(void)
 		return;
 	}
 
-	/* (b) Generous deadline → succeed once the joinee finishes. */
-	getclock(TIMEOFDAY, &deadline);
+	/* (b) Generous deadline → succeed once the joinee finishes.
+	 *
+	 * `deadline' still holds the expired {0,0} from (a).  A getclock that
+	 * fails silently would leave it there, +5 would name five seconds
+	 * after the epoch, and the join would report ETIMEDOUT the instant it
+	 * was called -- a wrong answer indistinguishable from a real timeout.
+	 * That is the defect this file was already carrying in four places
+	 * inside libpthreads; the test must not carry it too. */
+	rc = getclock(TIMEOFDAY, &deadline);
+	if (rc != 0) {
+		char buf[80];
+		snprintf(buf, sizeof(buf),
+			 "(b) getclock(TIMEOFDAY) returned %d (ENXIO %d, EIO %d)",
+			 rc, ENXIO, EIO);
+		test_fail("timedjoin_np", buf);
+		return;
+	}
 	deadline.tv_sec += 5;
 	rc = pthread_timedjoin_np(t, &retval, &deadline);
 	if (rc != 0 || retval != (void *)0x42424242) {
-		test_fail("timedjoin_np", "(b) join did not return exit value");
+		char buf[96];
+		/* Name both halves: a join that timed out and a join that
+		 * harvested the wrong value are different defects, and one
+		 * message for the two cannot tell them apart. */
+		snprintf(buf, sizeof(buf),
+			 "(b) rc %d (want 0), retval %p (want 0x42424242)",
+			 rc, retval);
+		test_fail("timedjoin_np", buf);
 		return;
 	}
 
