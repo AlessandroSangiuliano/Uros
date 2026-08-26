@@ -89,9 +89,22 @@
  *
  * That absence is a saving, not a burden: it is precisely the per-switch
  * write of IA32_SYSENTER_ESP that #348 built a per-CPU trampoline on i386
- * to avoid, measured there at about 144 cycles. There is no such register
- * here and nothing to keep up to date, so that machinery is not ported —
- * the cost it removed does not exist on this architecture.
+ * to avoid, measured there at about 144 cycles.  There is no such register
+ * here, so that machinery is not ported — the cost it removed does not
+ * exist on this architecture.
+ *
+ * ⚠️ Which is not the same as "nothing to keep up to date", as this said
+ * before.  Every context switch still writes TWO stack pointers:
+ * percpu()->kernel_rsp for this path, and tss[cpu].rsp0 for the trap gates,
+ * which DO take a stack from the task-state segment — both in
+ * act_machine_switch_pcb().  i386 writes its tss.esp0 for the same reason.
+ *
+ * 🔑 So the honest sum is: x86-64 is i386 MINUS the WRMSR.  What remains is
+ * two ordinary stores into memory this processor already owns — nothing
+ * serialising, no exit to a hypervisor — and a trampoline that spent an
+ * indirection on every syscall to remove two stores per switch would cost
+ * more than it saved.  The expensive thing on that path was never the stack
+ * write: it was cpu_apic_id(), a CPUID, which #439 replaced.
  *
  * Aligned to a cache line because the first instruction of a syscall is
  * fetched cold more often than almost anything else in the kernel.
