@@ -503,9 +503,8 @@ syscall_entry:
  * pops it.
  *
  * ⚠️ The stack pointer comes off this thread's stack, not out of the per-CPU
- * block (#473).  .Lreturn has already popped the flags and the resume
- * address, so it is what is under %rsp now; the iretq frame is then built
- * below it, on the kernel stack, which is why the pop has to come first.
+ * block (#473): TF_RSP, read from the frame the same way .Lreturn read the
+ * flags and the resume address.  Nothing is popped anywhere along here.
  */
 .Lreturn_the_slow_way:
 	cli
