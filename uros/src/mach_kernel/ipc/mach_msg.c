@@ -163,6 +163,7 @@
 #include <mach/message.h>
 #include <mach/mig_errors.h>
 #include <kern/assert.h>
+#include <kern/syscall_profile.h>	/* #411: the per-trap phase sample */
 #include <kern/counters.h>
 #include <kern/cpu_number.h>
 #include <kern/lock.h>
@@ -958,9 +959,30 @@ urmach_msg(
 	mach_port_t		rcv_name,
 	mach_msg_timeout_t	timeout)
 {
-	return mach_msg_overwrite_trap(msg, option, send_size, rcv_size,
-				       rcv_name, timeout,
-				       MACH_PORT_NULL, MACH_MSG_NULL, 0);
+	mach_msg_return_t	mr;
+
+	/*
+	 * #411/#392: the entry phase closes here, at the first instruction of
+	 * the trap that could close it.  Everything before it is the fixed
+	 * floor -- the stub, the frame, the dispatch -- which is the thing the
+	 * two copies have to be weighed against.
+	 */
+	SP_ENTER(33);		/* urmach_msg, kern/syscall_sw.c */
+
+	mr = mach_msg_overwrite_trap(msg, option, send_size, rcv_size,
+				     rcv_name, timeout,
+				     MACH_PORT_NULL, MACH_MSG_NULL, 0);
+
+	/*
+	 * ⚠️ NOT reached by a blocking receive, which leaves through the
+	 * continuation and never unwinds this frame -- the comment above says
+	 * so, and it is the reason thread_set_syscall_return() closes the
+	 * sample too.  Anything that still escapes both is counted as dropped
+	 * and printed, so the instrument reports its own coverage rather than
+	 * quietly describing a subset.
+	 */
+	SP_LEAVE();
+	return mr;
 }
 
 /*

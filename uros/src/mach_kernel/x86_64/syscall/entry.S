@@ -76,6 +76,50 @@
 	.endm
 
 /*
+ * The return path, timed against itself (#411, for #392).
+ *
+ * ⚠️ The whole of it is in assembly and it stays there.  Charging it to the
+ * per-thread sample would mean putting the offset of a field of `struct
+ * thread' into this file, which <syscall/syscall.c> refuses in as many words
+ * for the Mach trap table: an entry path carrying another structure's layout
+ * as constants is #448's shape, and the day that structure gains a field the
+ * assembly reads whatever is now at that offset, correctly, for ever.
+ *
+ * So it accumulates into the PER-PROCESSOR block, whose offsets are asserted
+ * against the structure a few lines from where they are defined.  Nothing is
+ * lost: this path runs the same instructions whatever the message was, so
+ * there is no per-message variation to attribute to a message.
+ *
+ * rdtsc lands in edx:eax.  %rax is the trap's answer and is saved; %rdx is
+ * dead here -- the clearing below is about to zero it either way.
+ */
+	.macro	SYSCALL_PROFILE_MARK slot
+#if	SYSCALL_PROFILE
+	pushq	%rax
+	lfence
+	rdtsc
+	shlq	$32, %rdx
+	orq	%rdx, %rax
+	movq	%rax, %gs:\slot
+	popq	%rax
+#endif
+	.endm
+
+	.macro	SYSCALL_PROFILE_RETURN
+#if	SYSCALL_PROFILE
+	pushq	%rax
+	lfence
+	rdtsc
+	shlq	$32, %rdx
+	orq	%rdx, %rax
+	subq	%gs:PERCPU_SYSCALL_RET_MARK, %rax
+	addq	%rax, %gs:PERCPU_SYSCALL_RET_CYC
+	incq	%gs:PERCPU_SYSCALL_RET_CNT
+	popq	%rax
+#endif
+	.endm
+
+/*
  * Entry from ring 3.  The processor has already done, in the instruction
  * itself and without touching memory:
  *
@@ -89,9 +133,22 @@
  *
  * That absence is a saving, not a burden: it is precisely the per-switch
  * write of IA32_SYSENTER_ESP that #348 built a per-CPU trampoline on i386
- * to avoid, measured there at about 144 cycles. There is no such register
- * here and nothing to keep up to date, so that machinery is not ported —
- * the cost it removed does not exist on this architecture.
+ * to avoid, measured there at about 144 cycles.  There is no such register
+ * here, so that machinery is not ported — the cost it removed does not
+ * exist on this architecture.
+ *
+ * ⚠️ Which is not the same as "nothing to keep up to date", as this said
+ * before.  Every context switch still writes TWO stack pointers:
+ * percpu()->kernel_rsp for this path, and tss[cpu].rsp0 for the trap gates,
+ * which DO take a stack from the task-state segment — both in
+ * act_machine_switch_pcb().  i386 writes its tss.esp0 for the same reason.
+ *
+ * 🔑 So the honest sum is: x86-64 is i386 MINUS the WRMSR.  What remains is
+ * two ordinary stores into memory this processor already owns — nothing
+ * serialising, no exit to a hypervisor — and a trampoline that spent an
+ * indirection on every syscall to remove two stores per switch would cost
+ * more than it saved.  The expensive thing on that path was never the stack
+ * write: it was cpu_apic_id(), a CPUID, which #439 replaced.
  *
  * Aligned to a cache line because the first instruction of a syscall is
  * fetched cold more often than almost anything else in the kernel.
@@ -108,6 +165,38 @@ syscall_entry:
 
 	movq	%rsp, %gs:PERCPU_USER_RSP
 	movq	%gs:PERCPU_KERNEL_RSP, %rsp
+
+	/*
+	 * The clock, as early as this path can read it (#411, for #392).
+	 *
+	 * 🔑 Here and not in C, because "trap entry" is a phase and a phase
+	 * cannot be measured from after it.  Everything below -- the frame
+	 * writes, the argument marshalling, the table dispatch -- is the fixed
+	 * floor #392 has to weigh the two message copies against, and a floor
+	 * measured from its own far end reads as zero and flatters every
+	 * conclusion drawn from it.
+	 *
+	 * ⚠️ THREE INSTRUCTIONS ARE OUTSIDE IT, named rather than glossed: the
+	 * swapgs and the two stack moves above.  Nothing can be recorded before
+	 * them -- there is no kernel %gs to write through and no stack to save
+	 * a register on -- so the phase begins here and the reader is owed the
+	 * fact that it does.
+	 *
+	 * rdtsc lands in edx:eax, both of which are live (%rax is the trap
+	 * number), so they are saved.  The pushes go BELOW the frame, like the
+	 * slow return path's, and are undone before anything reads it.
+	 */
+#if	SYSCALL_PROFILE
+	pushq	%rax
+	pushq	%rdx
+	lfence
+	rdtsc
+	shlq	$32, %rdx
+	orq	%rdx, %rax
+	movq	%rax, %gs:PERCPU_SYSCALL_TSC
+	popq	%rdx
+	popq	%rax
+#endif	/* SYSCALL_PROFILE */
 
 	/*
 	 * 🔥 WRITTEN, not pushed, and into the frame this thread already owns
@@ -359,6 +448,30 @@ syscall_entry:
 	 * frame base again here: the plain paths never moved it, and the wide
 	 * paths restore it from %rbp before jumping here.
 	 */
+	/*
+	 * The return path's clock starts HERE, after the AST handling and not
+	 * before the trap function returned (#411, for #392).
+	 *
+	 * 🔥 It was taken right after the callq, which is where "the return
+	 * began" reads correctly and measures wrongly.  thread_return_ast()
+	 * above CAN BLOCK: the thread gives up the processor, another one runs
+	 * here and writes its own mark into this same per-processor slot, and
+	 * the sysret below then subtracts a stranger's timestamp.  That is why
+	 * the first run of this profile reported a mean return of ninety-four
+	 * million cycles.
+	 *
+	 * ⚠️ The same aliasing this file's own header refuses for the sample,
+	 * reintroduced for the return because the slot looked harmless.  A
+	 * per-processor scratch is safe across instructions that cannot block
+	 * and is a trap everywhere else.
+	 *
+	 * So the phase is the exit sequence proper -- everything from here to
+	 * ring 3, with no scheduler in it -- and that is also the honest thing
+	 * for #392 to weigh: an AST that parks the thread is not part of what
+	 * a message costs.
+	 */
+	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK
+
 	movq	TF_RFLAGS(%rsp), %r11	/* flags */
 	movq	TF_RIP(%rsp), %rcx	/* resume address */
 
@@ -425,6 +538,8 @@ syscall_entry:
  * fear was: it is six zeroing idioms, which x86-64 resolves at register
  * rename and which cost no store, no port and no latency.
  */
+
+
 	.macro CLEAR_CLOBBERED
 #if	!ABLATE_474_CLEAR
 	xorl	%edi, %edi
@@ -444,6 +559,7 @@ syscall_entry:
 	 * stack pointer and %gs belong to ring 3 for a few instructions, and an
 	 * interrupt in that window is the one #440 exists about.
 	 */
+	SYSCALL_PROFILE_RETURN
 	CLEAR_CLOBBERED
 
 	cli
@@ -537,6 +653,7 @@ syscall_entry:
 	 * them has consumed it.  iretq takes rip and rflags off the stack, so
 	 * rcx and r11 need nothing here -- and they hold the frame's own
 	 * values, which are ring 3's. */
+	SYSCALL_PROFILE_RETURN
 	CLEAR_CLOBBERED
 
 	iretq
