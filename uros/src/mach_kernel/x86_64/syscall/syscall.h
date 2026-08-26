@@ -23,6 +23,27 @@
  *   rbp                        preserved
  *   everything else            DESTROYED
  *
+ * ── What DESTROYED means on the kernel's side ─────────────────────────
+ *
+ * 🔥 Both halves, because for a long time only one of them was written down
+ * and the other was assumed.
+ *
+ * To the CALLER it means: do not read these after a trap, their contents are
+ * not yours.  That half was always here, and the entry path honours it by not
+ * SAVING them -- which is the whole reason a syscall is cheap.
+ *
+ * To the KERNEL it means: they must not come back holding anything of ours.
+ * "You may not read it" is not the same promise as "there is nothing there to
+ * read", and SYSRET hands every one of these registers to ring 3.  Six of
+ * them -- rdi, rsi, rdx, r8, r9, r10 -- carry nothing out, and the return
+ * path zeroes them (CLEAR_CLOBBERED in entry.S).  The other three do carry
+ * something: rax is the answer, and rcx and r11 are what SYSRET resumes from,
+ * both read back out of the frame and therefore ring 3's own.
+ *
+ * ⚠️ Measured before that was true: rsi came back from a Mach trap holding
+ * the thread_t of the very thread that made the call.  act_test's fifth arm
+ * is the standing check, and -DABLATE_474_CLEAR=1 makes it red again.
+ *
  * ── Why arguments seven and up are in registers ───────────────────────
  *
  * Because there are registers left, and the alternative reaches into a

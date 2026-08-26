@@ -169,12 +169,25 @@ syscall_entry:
 	 * these bytes stopped being working stack the moment kernel_rsp moved
 	 * below them, which is the whole of this fix.
 	 *
-	 * ⚠️ A mark saying "a syscall wrote this" lived here briefly, so that
-	 * readers could blank those fifteen.  It came out: with the stack change
-	 * in place the ablation showed the blanking changed nothing, because
-	 * there is no longer a path that puts kernel memory there.  A store on
-	 * this path, for a value no reader needed, is exactly what this file
-	 * spends its comments refusing.
+	 * 🔥 A mark saying "a syscall wrote this" lived here briefly, so that
+	 * readers could blank those fifteen, and it was REMOVED on the strength
+	 * of an ablation that said the blanking changed nothing.
+	 *
+	 * That conclusion was wrong, and this paragraph said so for months:
+	 * "there is no longer a path that puts kernel memory there".  There is,
+	 * and it is not in this direction -- it is the way OUT.  Not saving the
+	 * fifteen is correct; handing back what the kernel left in them is not,
+	 * and SYSRET does exactly that.  See CLEAR_CLOBBERED below.
+	 *
+	 * ⚠️ The ablation could not have seen what it was measuring.  The leak
+	 * is on every return, but noticing it takes a high-half value surviving
+	 * in a register until a later trap saves it into a frame somebody then
+	 * asks for -- one boot in thirty.  A handful of runs reporting "no
+	 * change" was an absence, presented as a confirmation.
+	 *
+	 * 🔑 And the cost that justified removing it was imagined.  It is not a
+	 * store per register on the hottest path: it is six zeroing idioms,
+	 * which this machine resolves at register rename.
 	 */
 
 	/*

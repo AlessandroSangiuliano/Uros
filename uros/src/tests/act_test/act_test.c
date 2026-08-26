@@ -868,9 +868,17 @@ arm_four_state_of_a_thread_in_a_trap(void)
 	 * The selectors above say the frame describes ring 3; this says the
 	 * rest of it is not the kernel's own stack.  The syscall entry does not
 	 * fill the fifteen general registers -- the contract declares them
-	 * destroyed -- so before #474 they were whatever the kernel had last
-	 * left in those bytes, and thread_get_state() handed them over with
-	 * KERN_SUCCESS.
+	 * destroyed -- so they hold whatever was there before, and
+	 * thread_get_state() hands that over with KERN_SUCCESS.
+	 *
+	 * ⚠️ Two different defects have made this arm fire, and they are worth
+	 * keeping apart.  The first was the frame overlapping the syscall's own
+	 * C frames, so the bytes were literally kernel stack; that is what #474
+	 * was opened for.  The second was the RETURN path handing the kernel's
+	 * registers back to ring 3, which then arrived here through a later
+	 * trap that saved them faithfully -- a correct frame with one wrong
+	 * register.  The fifth arm catches the second on purpose; this one
+	 * caught it one boot in thirty.
 	 *
 	 * The test is the upper half of the address space rather than a
 	 * particular value, because what the kernel puts there is not
