@@ -161,6 +161,18 @@ the_thread_that_gets_killed(void *arg)
 }
 
 /*
+ * ⚠️ Arm six's state, up here because the handler below is shared and has to
+ * be able to tell whose exception it is holding.  There is one exception port
+ * for the task and MIG allows one routine of this name, so the arms take turns
+ * on it rather than each having its own.
+ */
+static volatile mach_port_t	arm_six_thread;
+static volatile int		arm_six_armed;
+static volatile int		arm_six_exception = -1;
+static volatile int		arm_six_code;
+static volatile int		arm_six_named_the_victim;
+
+/*
  * What exc_server calls when the message arrives.  MIG demands this name and
  * this shape.
  */
@@ -172,9 +184,20 @@ catch_exception_raise(mach_port_t exception_port, mach_port_t thread,
 	vm_address_t	fix = UNOWNED;
 
 	(void) exception_port;
-	(void) exception;
-	(void) code;
-	(void) codeCnt;
+
+	/*
+	 * ⚠️ Arm six first, and it does not fall through.  Its victim is a
+	 * thread that cannot be repaired -- there is no page to allocate that
+	 * makes a non-canonical address resumable -- so the only ending that
+	 * lets this program keep running is to destroy it.
+	 */
+	if (arm_six_armed) {
+		arm_six_exception = exception;
+		arm_six_code = (codeCnt > 0) ? (int) code[0] : 0;
+		arm_six_named_the_victim = (thread == arm_six_thread);
+		(void) thread_terminate(thread);
+		return KERN_SUCCESS;
+	}
 
 	arm_one_handler_ran = 1;
 	arm_one_kill_kr = thread_terminate(thread);
@@ -914,6 +937,332 @@ arm_four_state_of_a_thread_in_a_trap(void)
 	return 1;
 }
 
+/* ----------------------------------------------------------------
+ * Arm six: returning a thread to an address the machine cannot resume (#411)
+ * ---------------------------------------------------------------- */
+
+/*
+ * 🔥 One bit past the top of the canonical lower half.
+ *
+ * Not a kernel address and not garbage: bit 47 set with bits 63:48 clear is
+ * the first value the processor refuses to load into %rip, and it is refused
+ * for what it IS rather than for what is mapped there.  A test that used a
+ * plausible-looking pointer would be indistinguishable from an ordinary page
+ * fault, which is a different arm's subject.
+ */
+#define NONCANONICAL	((unsigned long long) 0x0000800000000000ULL)
+
+static mach_port_t		arm_six_port;
+
+/*
+ * 🔥 Which processor this is, because it decides what a pass MEANS.
+ *
+ * SYSRET's fault-at-CPL-0 behaviour is Intel's.  On an AMD part the same
+ * instruction with the same non-canonical %rcx faults in ring 3, where a fault
+ * is ordinary -- so on AMD this arm passes whether the guard in entry.S is
+ * there or not.  Measured, not assumed: with -DABLATE_411_CANONICAL=1 the arm
+ * still reported six of six on an AMD model, and the same ablated kernel under
+ * `-cpu Skylake-Client' died in a double fault with `instruction: sysret' and
+ * the kernel standing on a ring-3 stack.
+ *
+ * ⚠️ So the vendor goes in the verdict.  A green line that means two different
+ * things depending on the host, without saying which, is how a guard gets
+ * removed again -- which is exactly what happened to #474's.
+ *
+ * CPUID leaf 0 is unprivileged and needs no library.
+ */
+static void
+cpu_vendor(char out[13])
+{
+	unsigned int	a, b, c, d;
+
+	__asm__ __volatile__("cpuid"
+			     : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+			     : "a"(0));
+	((unsigned int *) out)[0] = b;
+	((unsigned int *) out)[1] = d;
+	((unsigned int *) out)[2] = c;
+	out[12] = '\0';
+}
+
+static int
+is_intel(const char *vendor)
+{
+	int	i;
+
+	for (i = 0; i < 12; i++)
+		if (vendor[i] != "GenuineIntel"[i])
+			return 0;
+	return 1;
+}
+
+static void *
+the_thread_that_returns_badly(void *arg)
+{
+	struct roomy_msg	msg;
+
+	(void) arg;
+
+	arm_six_thread = mach_thread_self();
+
+	/*
+	 * ⚠️ A receive that WILL be satisfied, unlike arm four's.  The point of
+	 * this arm is the ordinary way out of a Mach trap -- the syscall return
+	 * path, with the frame this thread arrived with -- so the trap has to
+	 * end the way traps normally end.  thread_abort() would get the thread
+	 * out too and would be testing the special handler instead (arm two).
+	 */
+	(void) mach_msg(&msg.h, MACH_RCV_MSG, 0, sizeof msg, arm_six_port,
+			MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+
+	/*
+	 * Not reached on any kernel: this thread was told to resume at an
+	 * address that cannot be resumed at.  If it IS reached, the state was
+	 * never installed and the arm is measuring nothing -- which the summary
+	 * has to be able to say, so the flag is set rather than the thread
+	 * quietly returning.
+	 */
+	arm_six_named_the_victim = -1;
+	return NULL;
+}
+
+/*
+ * 🔥 What a user program can do to the machine with one register.
+ *
+ * SYSRET on Intel parts faults when %rcx is not canonical -- AFTER loading the
+ * user's stack pointer and BEFORE leaving ring 0, so the fault handler runs at
+ * CPL 0 on a stack the caller chose.  That is CVE-2012-0217, and entry.S
+ * guards it: the return address is checked and a bad one is sent to the IRETQ
+ * path instead.
+ *
+ * ⚠️ The guard has never been executed.  Its own comment calls it "a branch
+ * never taken" and that is literally true -- nothing in this program, or any
+ * other on this target, has ever made the check fail.  Everything past that
+ * `jne' is assembled, linked and unproven, which is the shape that cost #453
+ * and #459 five defects each.
+ *
+ * So this arm makes the check fail, deliberately, through the plainest route
+ * there is: suspend a thread that is inside a Mach trap, write a non-canonical
+ * rip into the frame it will return through, and let the trap finish.
+ * `thread_set_state' is an ordinary right on an ordinary thread -- a debugger
+ * does this all day -- so nothing here is privileged.
+ *
+ * ⚠️ What is being tested is OUR branch and what follows it, not the
+ * processor's misbehaviour.  Because the guard diverts before SYSRET ever
+ * runs, the outcome is the same on AMD, on Intel, under TCG and under KVM.
+ * An arm that needed the vendor difference would be an arm that only ran on
+ * the machine nobody has.
+ *
+ * 🔥 And the expected end is not "no fault".  IRETQ refuses that address too;
+ * the difference the mitigation buys is WHERE -- kernel stack still in place
+ * rather than the caller's.  What has to be true is that the fault belongs to
+ * the thread that asked for it: an exception delivered to the task, and a
+ * machine still running afterwards.
+ */
+static int
+arm_six_non_canonical_return(void)
+{
+	pthread_t			victim;
+	struct x86_64_thread_state	state;
+	mach_msg_type_number_t		count = x86_64_THREAD_STATE_COUNT;
+	kern_return_t			kr;
+	struct roomy_msg		wake;
+	union {
+		mach_msg_header_t	h;
+		char			room[4096];
+	} req, rep;
+	char				vendor[13];
+	int				i;
+
+	cpu_vendor(vendor);
+
+	if (exc_port == MACH_PORT_NULL) {
+		printf("act_test: [6] no exception port — arm one did not get "
+		       "far enough for this arm to mean anything — WRONG\n");
+		return 0;
+	}
+
+	/*
+	 * ⚠️ BAD_INSTRUCTION and not BAD_ACCESS: a general protection is what
+	 * the processor raises here, and the kernel maps that vector to
+	 * EXC_BAD_INSTRUCTION with EXC_X86_64_GPFLT.  Arm one's BAD_ACCESS
+	 * registration is left alone -- this adds a mask, it does not replace
+	 * the port.
+	 */
+	kr = task_set_exception_ports(mach_task_self(),
+				      EXC_MASK_BAD_INSTRUCTION, exc_port,
+				      EXCEPTION_DEFAULT, THREAD_STATE_NONE);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [6] task_set_exception_ports failed (%d)"
+		       " — WRONG\n", kr);
+		return 0;
+	}
+
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&arm_six_port);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [6] mach_port_allocate failed (%d) — WRONG\n",
+		       kr);
+		return 0;
+	}
+	kr = mach_port_insert_right(mach_task_self(), arm_six_port,
+				    arm_six_port, MACH_MSG_TYPE_MAKE_SEND);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [6] insert_right failed (%d) — WRONG\n", kr);
+		return 0;
+	}
+
+	if (pthread_create(&victim, NULL, the_thread_that_returns_badly,
+			   NULL) != 0) {
+		printf("act_test: [6] pthread_create failed — WRONG\n");
+		return 0;
+	}
+
+	for (i = 0; i < PATIENCE && arm_six_thread == MACH_PORT_NULL; i++)
+		nap(100);
+	if (arm_six_thread == MACH_PORT_NULL) {
+		printf("act_test: [6] the thread never published its port "
+		       "— WRONG\n");
+		return 0;
+	}
+	nap(400);
+
+	kr = thread_suspend(arm_six_thread);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [6] thread_suspend answered %d — WRONG\n", kr);
+		return 0;
+	}
+
+	kr = thread_get_state(arm_six_thread, x86_64_THREAD_STATE,
+			      (thread_state_t) &state, &count);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [6] thread_get_state answered %d — WRONG\n",
+		       kr);
+		(void) thread_resume(arm_six_thread);
+		return 0;
+	}
+
+	/*
+	 * ⚠️ Asked before poisoning it.  If the frame did not describe ring 3
+	 * to begin with, everything below is being done to something other than
+	 * a user context and a passing result would mean nothing.  Arm four
+	 * makes this its whole subject; here it is the precondition.
+	 */
+	if (state.cs != 0x2bULL || state.ss != 0x23ULL) {
+		printf("act_test: [6] the thread's frame is not a ring-3 one "
+		       "(cs 0x%llx ss 0x%llx) — nothing to poison — WRONG\n",
+		       (unsigned long long) state.cs,
+		       (unsigned long long) state.ss);
+		(void) thread_resume(arm_six_thread);
+		return 0;
+	}
+
+	state.rip = NONCANONICAL;
+	kr = thread_set_state(arm_six_thread, x86_64_THREAD_STATE,
+			      (thread_state_t) &state, count);
+	if (kr != KERN_SUCCESS) {
+		/*
+		 * ⚠️ Not a pass.  Refusing the state IS a defensible answer to
+		 * this hazard -- but it is a different one from the guard in
+		 * entry.S, it would leave that guard still unexecuted, and it
+		 * is not what this kernel claims to do.  Reported as itself.
+		 */
+		printf("act_test: [6] thread_set_state refused a non-canonical "
+		       "rip with %d — the guard in entry.S is still unproven "
+		       "— WRONG\n", kr);
+		(void) thread_resume(arm_six_thread);
+		return 0;
+	}
+
+	arm_six_armed = 1;
+
+	/*
+	 * 🔥 Announced BEFORE it is provoked, and this line is not decoration.
+	 *
+	 * If the kernel takes the general protection on its own iretq and stops
+	 * the machine, nothing after this point prints -- not this arm's
+	 * verdict, not the summary, not the tasks that come after this one in
+	 * the bundle.  A boot log ending here says exactly what was being done
+	 * when it ended.  A boot log ending in silence would have cost a day.
+	 */
+	printf("act_test: [6] resuming a thread whose frame says rip 0x%llx "
+	       "(cpu %s); if the machine stops here, that is the answer\n",
+	       NONCANONICAL, vendor);
+
+	/*
+	 * The receive is satisfied rather than interrupted, so the thread
+	 * leaves the trap the way every thread leaves a trap.
+	 */
+	wake.h.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	wake.h.msgh_size = sizeof wake.h;
+	wake.h.msgh_remote_port = arm_six_port;
+	wake.h.msgh_local_port = MACH_PORT_NULL;
+	wake.h.msgh_id = 0;
+	kr = mach_msg(&wake.h, MACH_SEND_MSG, sizeof wake.h, 0,
+		      MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [6] could not wake the thread (%d) — WRONG\n",
+		       kr);
+		(void) thread_resume(arm_six_thread);
+		return 0;
+	}
+
+	(void) thread_resume(arm_six_thread);
+
+	/*
+	 * ⚠️ A receive with a bound, not mach_msg_server_once.
+	 *
+	 * The server helper has no timeout, so on a kernel that delivers
+	 * nothing this arm would wait forever and take the summary of the five
+	 * arms before it down with it.  A new arm must not be able to hide the
+	 * ones that already passed.
+	 */
+	kr = mach_msg(&req.h, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0, sizeof req,
+		      exc_port, 4000, MACH_PORT_NULL);
+	if (kr != KERN_SUCCESS) {
+		printf("act_test: [6] no exception arrived within four seconds "
+		       "(%d) — the thread was resumed at an address that cannot "
+		       "be resumed at and the kernel said nothing — WRONG\n", kr);
+		return 0;
+	}
+
+	(void) exc_server(&req.h, &rep.h);
+	if (rep.h.msgh_remote_port != MACH_PORT_NULL)
+		(void) mach_msg(&rep.h, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+				rep.h.msgh_size, 0, MACH_PORT_NULL, 1000,
+				MACH_PORT_NULL);
+
+	(void) mach_port_destroy(mach_task_self(), arm_six_port);
+	(void) mach_port_deallocate(mach_task_self(), arm_six_thread);
+
+	if (arm_six_named_the_victim == -1) {
+		printf("act_test: [6] the thread returned from its trap and ran "
+		       "on — the frame it resumed through was not the one that "
+		       "was written — WRONG\n");
+		return 0;
+	}
+	if (!arm_six_named_the_victim) {
+		printf("act_test: [6] the exception named a thread that is not "
+		       "the one that was poisoned — WRONG\n");
+		return 0;
+	}
+	if (arm_six_exception != EXC_BAD_INSTRUCTION) {
+		printf("act_test: [6] the exception was %d, not "
+		       "EXC_BAD_INSTRUCTION (%d) — WRONG\n",
+		       arm_six_exception, EXC_BAD_INSTRUCTION);
+		return 0;
+	}
+
+	printf("act_test: [6] a thread told to resume at 0x%llx raised "
+	       "EXC_BAD_INSTRUCTION code %d against itself, and the machine is "
+	       "still running to say so — cpu %s%s\n",
+	       NONCANONICAL, arm_six_code, vendor,
+	       is_intel(vendor) ? ", where an unguarded sysret would have died"
+			        : ", where sysret does not fault at CPL 0: this "
+				  "shows the outcome and not the guard");
+	return 1;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -939,6 +1288,15 @@ main(int argc, char **argv)
 	passed += arm_five_registers_a_trap_leaves();
 
 	/*
+	 * ⚠️ Last, and not by accident.  This is the only arm that can stop the
+	 * machine: it makes the kernel take a fault on its own return
+	 * instruction, and if that fault is not attributed to the thread that
+	 * caused it, nothing after this line runs.  Everything the other arms
+	 * have to say is already printed by the time it is provoked.
+	 */
+	passed += arm_six_non_canonical_return();
+
+	/*
 	 * The last thing arm one is owed, asked now that the two arms after it
 	 * have kept the machine busy for a while: a terminated thread must not
 	 * have run any of its own code again.
@@ -949,7 +1307,7 @@ main(int argc, char **argv)
 		passed--;
 	}
 
-	printf("act_test: %d of 5 arms passed\n", passed);
+	printf("act_test: %d of 6 arms passed\n", passed);
 
 	/*
 	 * ⚠️ Does not exit.  There is no proc server on this target to reap a

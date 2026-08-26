@@ -266,6 +266,24 @@ must_report 'cow_test: started' 'cow_test: [0-9]* of [0-9]* arms passed' \
 must_report 'act_test: started' 'act_test: [0-9]* of [0-9]* arms passed' \
 	'It was in NEITHER list until #425 -- not the one that ends the run and not the one that fails it for silence -- so it could start, stop dead, and be reported as a pass by omission.'
 
+# 🔥 And one of its arms means less than it looks like on this host.
+#
+# act_test's sixth arm (#411) points a thread at a non-canonical address and
+# expects an exception rather than a dead machine.  The hazard it guards is
+# Intel's: SYSRET faults at CPL 0 there, on the caller's stack.  AMD faults in
+# ring 3, where a fault is ordinary -- so on an AMD model the arm passes with
+# the guard in entry.S present OR ablated, which was measured both ways.
+#
+# The default here is `-cpu max', which takes the vendor from the host.  On an
+# AMD host that arm is confirming the outcome and not the guard, and it says so
+# in its own line.  To make it a test, name an Intel model:
+#
+#	run-x86_64.sh 150 -cpu Skylake-Client
+#
+# With the guard ablated that run dies in a double fault reporting
+# `instruction: sysret' with the kernel standing on a ring-3 stack, which is
+# the whole of CVE-2012-0217 on one screen.
+
 must_report 'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
 
