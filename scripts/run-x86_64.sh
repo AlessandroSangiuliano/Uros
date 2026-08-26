@@ -247,13 +247,26 @@ must_report 'ast_test: arming AST_APC' 'ast_test: PASS' \
 # here for the passing count as well would report one defect as two, and would
 # report a cut-short run and a failed arm as the same thing.  This line asks
 # only whether the program reached its own last sentence (#407).
-must_report 'cow_test: started' 'cow_test: [0-9] of 3 arms passed' \
+# ⚠️ The arm COUNT is not in these patterns, deliberately.
+#
+# 🔥 It was: `act_test: [0-9] of 4 arms passed'.  Adding a fifth arm to
+# act_test (#474) left the test passing and this harness unable to see that it
+# had finished, so a green run reported "180s elapsed and the kernel never
+# reached an end this script recognises".  The test and the harness were two
+# halves that had to agree and nothing compared them -- which is the defect
+# class this project keeps finding, arriving here in its own tooling.
+#
+# The count was never being CHECKED by these patterns; it was only part of the
+# shape they matched.  Whether the arms passed is decided by the unexplained
+# scan below, which reads WRONG lines.  So dropping it costs nothing and makes
+# the coupling impossible rather than merely documented.
+must_report 'cow_test: started' 'cow_test: [0-9]* of [0-9]* arms passed' \
 	'It forks a task with inherit_memory, which is the first thing on this target ever to call vm_map_fork; a kernel that cannot do it dies inside task_create and prints nothing further (#407).'
 
-must_report 'act_test: started' 'act_test: [0-9] of 4 arms passed' \
+must_report 'act_test: started' 'act_test: [0-9]* of [0-9]* arms passed' \
 	'It was in NEITHER list until #425 -- not the one that ends the run and not the one that fails it for silence -- so it could start, stop dead, and be reported as a pass by omission.'
 
-must_report 'netname_test: started' 'netname_test: [0-9] of 2 arms passed' \
+must_report 'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 	'It is the only client of the name server on this target (#426), so its silence means the RPC surface went quiet rather than that one arm disagreed -- and it runs second in the bundle, before the three programs that fault and kill threads on purpose, precisely so that a failure here cannot be blamed on them.'
 
 # ⚠️ The terminator matches either verdict -- `ALL n TESTS PASSED' or `SOME
@@ -265,7 +278,7 @@ must_report 'netname_test: started' 'netname_test: [0-9] of 2 arms passed' \
 must_report 'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
 	'Twenty-three arms of mutexes, condition variables, joins and thread-local storage (#425).  Its silence is a thread library that stopped, which on this target ends the boot rather than failing an arm -- and unlike a failing arm, that has no line of its own.'
 
-must_report 'fault_test: started' 'fault_test: [0-9] of 3 arms passed' \
+must_report 'fault_test: started' 'fault_test: [0-9]* of [0-9]* arms passed' \
 	'It is the last thing a bundle boot does, so it is also what tells this script the run is over (#489) -- a fault_test that starts and says nothing leaves the machine idling until the watchdog, which used to be reported as the run failing rather than as this test not answering.'
 
 # And the one that must report on EVERY boot that gets far enough, which is a
@@ -363,7 +376,7 @@ fi
 # run for staying silent, and only the last-started one here, which ends it.
 # act_test was in neither until #425 -- it could stop dead and be passed by
 # omission -- which is what a list nobody re-reads does.
-DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|cow_test: [0-9]+ of 3 arms passed|Assertion failed|panic\(cpu'
+DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded with the kernel|no handler|preempt_test: (PASS|WRONG)|fpu_stress: halting the machine|fpu_stress: [0-9]+ of|state_test: [0-9]+ of|ast_test: (PASS|WRONG)|cow_test: [0-9]+ of [0-9]+ arms passed|Assertion failed|panic\(cpu'
 
 SECS=${1:-90}
 [ $# -gt 0 ] && shift
@@ -516,13 +529,17 @@ all_reported() {
 }
 
 while kill -0 "$QPID" 2>/dev/null; do
+	# ⚠️ Same patterns as must_report above, and the counts are out of these
+	# for the same reason -- see the note there.  🔥 That they are written
+	# TWICE in this file is its own hazard: the first copy was corrected for
+	# act_test's fifth arm and this one would have gone on waiting.
 	if grep -aqE "$DONE_RE" "$LOG" \
 	   && all_reported \
-		'netname_test: started' 'netname_test: [0-9] of 2 arms passed' \
+		'netname_test: started' 'netname_test: [0-9]* of [0-9]* arms passed' \
 		'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
-		'fault_test: started'   'fault_test: [0-9] of 3 arms passed' \
-		'act_test: started'     'act_test: [0-9] of 4 arms passed' \
-		'cow_test: started'     'cow_test: [0-9] of 3 arms passed'; then
+		'fault_test: started'   'fault_test: [0-9]* of [0-9]* arms passed' \
+		'act_test: started'     'act_test: [0-9]* of [0-9]* arms passed' \
+		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
 		sleep 1
 		break
 	fi
