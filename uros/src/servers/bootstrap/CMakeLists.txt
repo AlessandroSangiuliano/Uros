@@ -266,25 +266,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # boot on this target has ever used, so it is the one most likely to end the
   # run.  Last means every other verdict is already in the log when it does,
   # and the blame cannot land anywhere else.
-  # ⚠️ `-w' on the name server (#492): bootstrap does not load the next task
-  # until this one has sent bootstrap_completed.
-  #
-  # 🔥 Both halves of that handshake already existed and neither was reached.
-  # name_server/netname.c has called bootstrap_completed() all along, and
-  # bootstrap has honoured SERVER_SERIALIZE_F all along -- the flag that joins
-  # them had never been set.  So "first in the list" decided the order the
-  # tasks are CREATED and not the order their first instruction runs, and
-  # netname_test won that race in five boots out of five: it printed its
-  # verdict, failed both arms with MIG_SERVER_DIED, and was reaped before the
-  # name server printed "started".  The ordering rationale above is about
-  # which failure is legible, and it was silently doing nothing about which
-  # task is READY.
-  #
-  # ⚠️ The flag goes at the START of the line: parse_boot_args() runs before
-  # symtab_name is read and stops at the first token not beginning with `-'.
-  # Written after the name it is ignored, in silence.
+  # ⚠️ No `-w' on the name server here: bootstrap waits for it by itself
+  # (#492).  The decision lives in parse_config_file(), because this file is
+  # one of FOUR that write that same line and a flag remembered in four
+  # places is a flag that will be missing from the fifth.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "-w name_server name_server\nnetname_test netname_test\npthread_test pthread_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\npthread_test pthread_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
