@@ -656,6 +656,98 @@ arm_three_suspend_in_mach_msg(void)
 	return 1;
 }
 
+/* ----------------------------------------------------------------
+ * Arm five: what a Mach trap leaves in the registers it destroys (#474)
+ * ---------------------------------------------------------------- */
+
+/*
+ * ⚠️ Arm four catches this by luck; this one catches it on purpose.
+ *
+ * The syscall contract declares rdi, rsi, rdx, rcx, r8, r9, r10, r11 and rax
+ * destroyed, and the entry honours that by not SAVING them.  The way out owes
+ * the other half: "destroyed" tells the CALLER it may not read them, it does
+ * not license the kernel to leave its own values there -- and SYSRET hands
+ * every one of them to ring 3.
+ *
+ * Three of the eight legitimately carry something out: rax is the answer, and
+ * rcx and r11 are what SYSRET resumes from, both read back out of the frame
+ * and so ring 3's own.  These six are the ones with nothing to say.
+ *
+ * 🔥 Arm four found this only when the leaked value happened to be a
+ * high-half address AND survived in the register until a later trap saved it
+ * into the frame -- one boot in thirty.  The leak itself is on EVERY return.
+ * So this arm reads the six registers directly, immediately after a trap,
+ * many times: a kernel that leaks cannot get through the loop.
+ *
+ * ⚠️ It tests for a KERNEL ADDRESS and not for zero.  Zero is how this kernel
+ * happens to clean up today; a high-half value in a register a user program
+ * just read is the finding, whatever the cleanup looks like.
+ */
+static int
+arm_five_registers_a_trap_leaves(void)
+{
+	unsigned long long	r[6];
+	unsigned long long	bad = 0;
+	const char		*name = 0;
+	static const char *const nm[6] = {
+		"rdi", "rsi", "rdx", "r8", "r9", "r10"
+	};
+	int			i, j;
+
+	for (i = 0; i < 128 && bad == 0; i++) {
+		mach_port_t	self;
+
+		/*
+		 * A trap whose registers afterwards came from the kernel and
+		 * not from the call.  The asm block reads them before anything
+		 * else can touch them -- there is no C between the two.
+		 *
+		 * ⚠️ And the right is GIVEN BACK.  mach_thread_self() hands out
+		 * a send right on every call; the first version of this arm
+		 * took five hundred and twelve and released none, and the task
+		 * that followed it in the bundle -- fault_test -- stopped
+		 * finishing.  A test that damages the machine it is measuring
+		 * is not measuring the machine.
+		 */
+		self = mach_thread_self();
+
+		__asm__ __volatile__(
+			"movq %%rdi, %0\n\t"
+			"movq %%rsi, %1\n\t"
+			"movq %%rdx, %2\n\t"
+			"movq %%r8,  %3\n\t"
+			"movq %%r9,  %4\n\t"
+			"movq %%r10, %5"
+			: "=m"(r[0]), "=m"(r[1]), "=m"(r[2]),
+			  "=m"(r[3]), "=m"(r[4]), "=m"(r[5])
+			:
+			: "memory");
+
+		for (j = 0; j < 6; j++)
+			if ((r[j] >> 63) != 0) {
+				bad = r[j];
+				name = nm[j];
+				break;
+			}
+
+		(void) mach_port_deallocate(mach_task_self(), self);
+	}
+
+	if (bad != 0) {
+		printf("act_test: [5] %s came back from a Mach trap holding "
+		       "0x%llx — a kernel address in a register ring 3 can "
+		       "read — WRONG\n", name, bad);
+		return 0;
+	}
+
+	printf("act_test: [5] 128 returns from a Mach trap and not one of "
+	       "rdi/rsi/rdx/r8/r9/r10 came back holding a kernel address — "
+	       "what the contract calls destroyed is not the kernel's to "
+	       "leave behind\n");
+	return 1;
+}
+
+
 /*
  * ── Arm four: ask a thread that is inside the kernel what it was doing ─
  *
@@ -836,6 +928,7 @@ main(int argc, char **argv)
 	passed += arm_two_abort_in_mach_msg();
 	passed += arm_three_suspend_in_mach_msg();
 	passed += arm_four_state_of_a_thread_in_a_trap();
+	passed += arm_five_registers_a_trap_leaves();
 
 	/*
 	 * The last thing arm one is owed, asked now that the two arms after it
@@ -848,7 +941,7 @@ main(int argc, char **argv)
 		passed--;
 	}
 
-	printf("act_test: %d of 4 arms passed\n", passed);
+	printf("act_test: %d of 5 arms passed\n", passed);
 
 	/*
 	 * ⚠️ Does not exit.  There is no proc server on this target to reap a
