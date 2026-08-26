@@ -138,9 +138,8 @@
 #include <ddb/nlist.h>
 
 /*
- * Apply R_386_RELATIVE relocations to a position-independent (ET_DYN)
- * executable image sitting in a local buffer, before it's written to
- * the user task.
+ * Apply RELATIVE relocations to a position-independent (ET_DYN) executable
+ * image sitting in a local buffer, before it is written to the user task.
  *
  *   area_start  — local buffer holding the segment data
  *   alloc_start — VA that area_start represents (= seg_lo, post-bias)
@@ -148,11 +147,30 @@
  *   load_bias   — bias added to every PT_LOAD vaddr by elf_load()
  *   dyn_vaddr   — runtime VA (post-bias) of the .dynamic array
  *   dyn_size    — size of .dynamic in bytes
+ *   is_64       — which class the image was; see below
  *
- * Returns KERN_SUCCESS or an error code.  Fails loudly on any
- * relocation type other than R_386_RELATIVE; static-PIE executables
- * linked with -pie -Bsymbolic -Wl,--no-dynamic-linker should only
- * emit RELATIVE relocations.
+ * Fails loudly on any relocation type other than RELATIVE: a static PIE linked
+ * with -pie -Bsymbolic -Wl,--no-dynamic-linker emits nothing else.
+ *
+ * ── The two classes are two different tables (#422) ───────────────────
+ *
+ * 🔴 i386 uses DT_REL: the addend lives in the word being relocated, so
+ * applying one is `*slot += bias'.  x86-64 uses DT_RELA and ONLY DT_RELA: the
+ * addend is in the entry, and applying one is `*slot = addend + bias' -- the
+ * previous contents of the slot are not read at all.
+ *
+ * ⚠️ Which is why a 32-bit-only loader does not fail politely on x86-64.  It
+ * scans for DT_REL, finds nothing because the tags are simply absent, reports
+ * "no relocations — nothing to do", and hands the task an UNRELOCATED image
+ * whose every absolute reference points into the low addresses the linker
+ * assumed.  A silent success, not a refusal.
+ *
+ * 🔑 And the widths are the file format's, not the host's.  The types in
+ * <elf.h> are asserted against the specification there, because the version of
+ * this code that used `unsigned long' had sizeof(Elf32_Rel) == 16 on this
+ * target -- and the guard below, whose whole job is to refuse a table whose
+ * DT_RELENT disagrees, was comparing against that 16 and agreeing for the
+ * wrong reason.
  */
 static int
 apply_pie_relocations(vm_offset_t area_start,
@@ -160,14 +178,18 @@ apply_pie_relocations(vm_offset_t area_start,
 		      vm_size_t   alloc_size,
 		      vm_offset_t load_bias,
 		      vm_offset_t dyn_vaddr,
-		      vm_size_t   dyn_size)
+		      vm_size_t   dyn_size,
+		      int         is_64)
 {
-	const Elf32_Dyn *dyn;
-	vm_offset_t rel_vaddr = 0;
-	unsigned long rel_size = 0;
-	unsigned long rel_ent  = sizeof(Elf32_Rel);
-	unsigned long i, n;
-	const Elf32_Rel *rel;
+	vm_offset_t	rel_vaddr = 0;
+	unsigned long	rel_size = 0;
+	unsigned long	rel_ent;
+	unsigned long	i, n;
+	unsigned long	dyn_ent = is_64 ? sizeof(Elf64_Dyn)
+					: sizeof(Elf32_Dyn);
+	const char	*want = is_64 ? "DT_RELA" : "DT_REL";
+
+	rel_ent = is_64 ? sizeof(Elf64_Rela) : sizeof(Elf32_Rel);
 
 	if (dyn_vaddr < alloc_start
 	    || dyn_vaddr + dyn_size > alloc_start + alloc_size) {
@@ -177,80 +199,189 @@ apply_pie_relocations(vm_offset_t area_start,
 		return EX_NOT_EXECUTABLE;
 	}
 
-	dyn = (const Elf32_Dyn *)(area_start + (dyn_vaddr - alloc_start));
-	for (i = 0; i < dyn_size / sizeof(Elf32_Dyn); i++) {
-		if (dyn[i].d_tag == DT_NULL)
-			break;
-		switch (dyn[i].d_tag) {
-		case DT_REL:
-			rel_vaddr = (vm_offset_t)dyn[i].d_un.d_ptr + load_bias;
-			break;
-		case DT_RELSZ:
-			rel_size = (unsigned long)dyn[i].d_un.d_val;
-			break;
-		case DT_RELENT:
-			rel_ent = (unsigned long)dyn[i].d_un.d_val;
-			break;
-		case DT_RELA:
-		case DT_RELASZ:
-			BOOTSTRAP_IO_LOCK();
-			printf("PIE: DT_RELA not supported on i386\n");
-			BOOTSTRAP_IO_UNLOCK();
-			return EX_NOT_EXECUTABLE;
-		default:
-			break;
+	/*
+	 * ⚠️ The two scans are written out rather than folded behind a union,
+	 * because d_tag is a different WIDTH in the two classes and reading a
+	 * 64-bit tag through a 32-bit view finds the right value on a
+	 * little-endian machine for exactly as long as nobody uses a tag above
+	 * 2^31.  That is the kind of correctness that stops being correct
+	 * without anything changing.
+	 */
+	if (is_64) {
+		const Elf64_Dyn *dyn = (const Elf64_Dyn *)
+			(area_start + (dyn_vaddr - alloc_start));
+
+		for (i = 0; i < dyn_size / dyn_ent; i++) {
+			if (dyn[i].d_tag == DT_NULL)
+				break;
+			switch (dyn[i].d_tag) {
+			case DT_RELA:
+				rel_vaddr = (vm_offset_t) dyn[i].d_un.d_ptr
+					    + load_bias;
+				break;
+			case DT_RELASZ:
+				rel_size = (unsigned long) dyn[i].d_un.d_val;
+				break;
+			case DT_RELAENT:
+				rel_ent = (unsigned long) dyn[i].d_un.d_val;
+				break;
+			case DT_REL:
+			case DT_RELSZ:
+				BOOTSTRAP_IO_LOCK();
+				printf("PIE: DT_REL on a 64-bit image — this "
+				       "architecture uses RELA\n");
+				BOOTSTRAP_IO_UNLOCK();
+				return EX_NOT_EXECUTABLE;
+			default:
+				break;
+			}
+		}
+	} else {
+		const Elf32_Dyn *dyn = (const Elf32_Dyn *)
+			(area_start + (dyn_vaddr - alloc_start));
+
+		for (i = 0; i < dyn_size / dyn_ent; i++) {
+			if (dyn[i].d_tag == DT_NULL)
+				break;
+			switch (dyn[i].d_tag) {
+			case DT_REL:
+				rel_vaddr = (vm_offset_t) dyn[i].d_un.d_ptr
+					    + load_bias;
+				break;
+			case DT_RELSZ:
+				rel_size = (unsigned long) dyn[i].d_un.d_val;
+				break;
+			case DT_RELENT:
+				rel_ent = (unsigned long) dyn[i].d_un.d_val;
+				break;
+			case DT_RELA:
+			case DT_RELASZ:
+				BOOTSTRAP_IO_LOCK();
+				printf("PIE: DT_RELA on a 32-bit image — this "
+				       "architecture uses REL\n");
+				BOOTSTRAP_IO_UNLOCK();
+				return EX_NOT_EXECUTABLE;
+			default:
+				break;
+			}
 		}
 	}
 
-	if (rel_size == 0)
-		return KERN_SUCCESS;	/* no relocations — nothing to do */
+	/*
+	 * 🔥 No table is not "nothing to do" for a PIE.
+	 *
+	 * This returned KERN_SUCCESS on an empty scan, which is right for an
+	 * image that genuinely has no relocations and is the exact shape of the
+	 * silent failure above: a loader looking for the wrong tag finds none
+	 * and reports success.  An ET_DYN image with a load bias and no
+	 * RELATIVE table has not been relocated, and saying so costs a line.
+	 */
+	if (rel_size == 0) {
+		BOOTSTRAP_IO_LOCK();
+		printf("PIE: biased image with no %s table — nothing was "
+		       "relocated\n", want);
+		BOOTSTRAP_IO_UNLOCK();
+		return EX_NOT_EXECUTABLE;
+	}
 
 	if (rel_vaddr < alloc_start
 	    || rel_vaddr + rel_size > alloc_start + alloc_size) {
 		BOOTSTRAP_IO_LOCK();
-		printf("PIE: DT_REL table outside mapped range\n");
+		printf("PIE: %s table outside mapped range\n", want);
 		BOOTSTRAP_IO_UNLOCK();
 		return EX_NOT_EXECUTABLE;
 	}
-	if (rel_ent != sizeof(Elf32_Rel)) {
+	if (rel_ent != (is_64 ? sizeof(Elf64_Rela) : sizeof(Elf32_Rel))) {
 		BOOTSTRAP_IO_LOCK();
-		printf("PIE: unexpected DT_RELENT %lu\n", rel_ent);
+		printf("PIE: unexpected %sENT %lu, wanted %lu\n", want, rel_ent,
+		       (unsigned long) (is_64 ? sizeof(Elf64_Rela)
+					      : sizeof(Elf32_Rel)));
 		BOOTSTRAP_IO_UNLOCK();
 		return EX_NOT_EXECUTABLE;
 	}
 
-	rel = (const Elf32_Rel *)(area_start + (rel_vaddr - alloc_start));
 	n = rel_size / rel_ent;
 	for (i = 0; i < n; i++) {
-		unsigned char type = ELF32_R_TYPE(rel[i].r_info);
-		vm_offset_t target_vaddr;
-		unsigned long *slot;
+		vm_offset_t	target_vaddr;
+		vm_offset_t	r_offset;
+		unsigned long	type;
+		vm_offset_t	addend = 0;
+		int		has_addend = is_64;
 
-		if (type == R_386_NONE)
-			continue;
-		if (type != R_386_RELATIVE) {
-			BOOTSTRAP_IO_LOCK();
-			printf("PIE: unsupported reloc type %u at 0x%lx\n",
-			       (unsigned)type,
-			       (unsigned long)rel[i].r_offset);
-			BOOTSTRAP_IO_UNLOCK();
-			return EX_NOT_EXECUTABLE;
+		if (is_64) {
+			const Elf64_Rela *r = (const Elf64_Rela *)
+				(area_start + (rel_vaddr - alloc_start));
+
+			type = ELF64_R_TYPE(r[i].r_info);
+			r_offset = (vm_offset_t) r[i].r_offset;
+			addend = (vm_offset_t) r[i].r_addend;
+			if (type == R_X86_64_NONE)
+				continue;
+			if (type != R_X86_64_RELATIVE) {
+				BOOTSTRAP_IO_LOCK();
+				printf("PIE: unsupported reloc type %lu at "
+				       "0x%lx\n", type,
+				       (unsigned long) r_offset);
+				BOOTSTRAP_IO_UNLOCK();
+				return EX_NOT_EXECUTABLE;
+			}
+		} else {
+			const Elf32_Rel *r = (const Elf32_Rel *)
+				(area_start + (rel_vaddr - alloc_start));
+
+			type = ELF32_R_TYPE(r[i].r_info);
+			r_offset = (vm_offset_t) r[i].r_offset;
+			if (type == R_386_NONE)
+				continue;
+			if (type != R_386_RELATIVE) {
+				BOOTSTRAP_IO_LOCK();
+				printf("PIE: unsupported reloc type %lu at "
+				       "0x%lx\n", type,
+				       (unsigned long) r_offset);
+				BOOTSTRAP_IO_UNLOCK();
+				return EX_NOT_EXECUTABLE;
+			}
 		}
 
-		target_vaddr = (vm_offset_t)rel[i].r_offset + load_bias;
+		target_vaddr = r_offset + load_bias;
 		if (target_vaddr < alloc_start
-		    || target_vaddr + sizeof(unsigned long)
+		    || target_vaddr + sizeof(vm_offset_t)
 		       > alloc_start + alloc_size) {
 			BOOTSTRAP_IO_LOCK();
 			printf("PIE: reloc target 0x%lx outside mapped range\n",
-			       (unsigned long)target_vaddr);
+			       (unsigned long) target_vaddr);
 			BOOTSTRAP_IO_UNLOCK();
 			return EX_NOT_EXECUTABLE;
 		}
 
-		slot = (unsigned long *)(area_start
-					 + (target_vaddr - alloc_start));
-		*slot += load_bias;
+		{
+			vm_offset_t *slot = (vm_offset_t *)
+				(area_start + (target_vaddr - alloc_start));
+
+			/*
+			 * ⚠️ RELA REPLACES, REL adds.  Writing `*slot += bias'
+			 * for a RELA entry would add the bias to whatever the
+			 * linker happened to leave in the slot, which for a
+			 * RELA image is usually zero and therefore usually
+			 * right -- a coincidence that would hold until the
+			 * first entry where it did not.
+			 */
+#if	!ABLATE_422_RELOC
+			if (has_addend)
+				*slot = addend + load_bias;
+			else
+				*slot += load_bias;
+#else
+			/*
+			 * Build with -DABLATE_422_RELOC=1: the table is walked
+			 * and validated, and nothing is written.  A PIE image
+			 * in the bundle must then fail to run -- which is what
+			 * says the relocations are load-bearing rather than
+			 * that the image happened not to need them.
+			 */
+			(void) slot; (void) addend; (void) has_addend;
+#endif
+		}
 	}
 
 	return KERN_SUCCESS;
@@ -359,7 +490,8 @@ load_program_file(struct file	*fp,
 							   - alloc_start),
 					       lp->load_bias,
 					       lp->dyn_vaddr,
-					       lp->dyn_filesz);
+					       lp->dyn_filesz,
+					       lp->elf_is_64);
 		if (result) {
 		    (void) vm_deallocate(mach_task_self(), area_start,
 					 (vm_size_t)(alloc_end - alloc_start));
