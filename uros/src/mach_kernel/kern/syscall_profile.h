@@ -71,7 +71,8 @@
  */
 #define	SP_ENTRY	0	/* SYSCALL -> the trap function's first C     */
 #define	SP_BODY		1	/* the trap function itself (#392 splits this) */
-#define	SP_PHASES	2
+#define	SP_WAIT		2	/* off the processor, waiting for a message   */
+#define	SP_PHASES	3
 
 /*
  * 🔴 And the return is NOT one of them, which is a decision and not an
@@ -172,6 +173,8 @@ struct syscall_profile_thread {
 	uint32_t	nsamples;
 	uint32_t	ndumps;
 	uint32_t	ndropped;	/* a trap opened while one was open  */
+	uint32_t	nblocked;	/* how many of them went to sleep    */
+	uint32_t	waiting;	/* off the processor right now       */
 	uint32_t	nseen;		/* profiled traps this thread made   */
 	uint32_t	open;		/* a sample is being built           */
 };
@@ -231,6 +234,7 @@ syscall_profile_begin(struct syscall_profile_thread *p, uint64_t entry_tsc)
 
 	p->nseen++;
 	p->open = 1;
+	p->waiting = 0;
 	p->first = entry_tsc;
 	p->cursor = entry_tsc;
 	for (i = 0; i < SP_PHASES; i++)
@@ -249,6 +253,59 @@ syscall_profile_mark(struct syscall_profile_thread *p, int phase)
 	p->slice[phase] += (uint32_t) (now - p->cursor);
 	p->cursor = now;
 }
+
+/*
+ * 🔥 The wait is a phase, and getting there took two wrong answers.
+ *
+ * The first run reported a median Mach trap of three hundred MILLION cycles.
+ * The arithmetic was right: that is what a blocking receive costs -- a thread
+ * waiting for its next message -- and the body phase was swallowing the sleep.
+ *
+ * ❌ The first fix was to DISCARD any sample that blocked, reasoning that a
+ * receive which sleeps is a different event from the hot path.  A boot then
+ * printed nothing at all, which is the measurement that refuted it: in an RPC
+ * somebody always blocks.  The client sends and waits for its reply; the
+ * server waits for the next request.  Discarding every trap that sleeps
+ * discards the entire subject.
+ *
+ * 🔑 So the sleep is separated rather than avoided.  What #392 needs is not a
+ * trap that never waited -- there is no such trap -- it is the wait charged to
+ * its own column, so that body means work and the floor means floor.
+ *
+ * ⚠️ syscall_profile_waiting() is called for the thread being switched AWAY
+ * from, not for current_thread(), which by then is somebody else.
+ */
+static __inline__ void
+syscall_profile_waiting(struct syscall_profile_thread *p)
+{
+	if (!p->open || p->waiting)
+		return;
+
+	syscall_profile_mark(p, SP_BODY);
+	p->waiting = 1;
+	p->nblocked++;
+}
+
+/*
+ * And the other end of it, on the thread that has just come back.
+ *
+ * ⚠️ TWO call sites, because Mach has two ways to resume: a thread with no
+ * continuation returns from switch_context(), and a thread with one appears
+ * in thread_continue() having never returned from anywhere.  Hooking only the
+ * first is the mistake that leaves a server thread's whole sleep charged to
+ * whatever phase was open -- and a server thread is the one that always has a
+ * continuation.
+ */
+static __inline__ void
+syscall_profile_resumed(struct syscall_profile_thread *p)
+{
+	if (!p->open || !p->waiting)
+		return;
+
+	syscall_profile_mark(p, SP_WAIT);
+	p->waiting = 0;
+}
+
 
 /*
  * Close the sample, and print once the window is full.
@@ -293,6 +350,15 @@ extern void	syscall_profile_enter(int trap_number);
 extern void	syscall_profile_leave(void);
 
 /*
+ * The scheduler's one line: a thread about to give up the processor cannot be
+ * a sample of what a trap costs.  Takes the thread rather than reading
+ * current_thread(), because at the call site the answer would be wrong.
+ */
+struct thread_shuttle;
+extern void	syscall_profile_blocked(struct thread_shuttle *);
+extern void	syscall_profile_back(void);
+
+/*
  * What the entry stub left in this processor's block, machine-dependent by
  * nature: only the stub knows when the trap began.
  */
@@ -306,11 +372,15 @@ extern void	syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count);
 
 #define	SP_ENTER(n)	syscall_profile_enter(n)
 #define	SP_LEAVE()	syscall_profile_leave()
+#define	SP_BLOCKED(t)	syscall_profile_blocked(t)
+#define	SP_BACK()	syscall_profile_back()
 
 #else	/* !SYSCALL_PROFILE */
 
 #define	SP_ENTER(n)	MACRO_BEGIN MACRO_END
 #define	SP_LEAVE()	MACRO_BEGIN MACRO_END
+#define	SP_BLOCKED(t)	MACRO_BEGIN MACRO_END
+#define	SP_BACK()	MACRO_BEGIN MACRO_END
 
 #endif	/* SYSCALL_PROFILE */
 

@@ -42,6 +42,7 @@ static uint32_t	sp_pair_cost;
 static const char *const sp_name[SP_PHASES] = {
 	"entry ",	/* SP_ENTRY */
 	"body  ",	/* SP_BODY  */
+	"wait  ",	/* SP_WAIT  */
 };
 
 static void
@@ -88,9 +89,25 @@ sp_measure_self(void)
 static int
 sp_percent(uint32_t part, uint32_t whole)
 {
-	if (whole == 0 || part > 42000000u)
+	if (whole == 0)
 		return -1;
-	return (int) ((part * 100u) / whole);
+
+	/*
+	 * ⚠️ Multiply-then-divide only while it fits.  fault_profile refuses
+	 * anything over forty-two million, which is right THERE -- a slice that
+	 * big is a broken sample -- and wrong here: a trap that waited three
+	 * hundred million cycles for a message is not broken, it is a server
+	 * doing its job, and refusing to compute its share printed "??" for the
+	 * one number in the table that was never in doubt.
+	 *
+	 * Above the limit, divide first.  It costs the last digit or two of
+	 * precision on a figure that is being printed as a whole percent.
+	 */
+	if (part <= 42000000u)
+		return (int) ((part * 100u) / whole);
+	if (whole < 100u)
+		return -1;
+	return (int) (part / (whole / 100u));
 }
 
 static void
@@ -111,6 +128,7 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	int		median = 0;
 	int		i, ph;
 	uint64_t	ret_cyc, ret_n;
+	uint32_t	work;
 
 	if (sp_pair_cost == 0)
 		sp_measure_self();
@@ -136,13 +154,31 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 		}
 	}
 
-	printf("syscall_profile trap %d #%u: %d of %u traps this thread made, "
-	       "%u dropped; %u marks x %u cyc = %u of instrument\n",
-	       syscall_profile_trap, p->ndumps, n, p->nseen, p->ndropped,
+	printf("syscall_profile trap %d #%u: %d of %u traps this thread made "
+	       "(%u of them slept, %u dropped); "
+	       "%u marks x %u cyc = %u of instrument\n",
+	       syscall_profile_trap, p->ndumps, n, p->nseen, p->nblocked,
+	       p->ndropped,
 	       (unsigned int) SP_MARKS, sp_pair_cost,
 	       (unsigned int) SP_MARKS * sp_pair_cost);
 	printf("syscall_profile   median trap %u cyc (spread %u..%u)\n",
 	       whole, col[0], col[n - 1]);
+
+	/*
+	 * ⚠️ The on-processor phases are a share of WORK, and the wait is a
+	 * share of the wall clock, and the header says which is which.
+	 *
+	 * 🔥 They were all taken against the wall clock, and every one of them
+	 * printed `0%%' -- arithmetically correct and useless, because a trap
+	 * that waited three hundred million cycles for a message makes every
+	 * real phase a rounding error against its own total.  A table of zeroes
+	 * reads as "these cost nothing"; what it meant was "the denominator is
+	 * mostly sleep".
+	 */
+	work = 0;
+	for (ph = 0; ph < SP_PHASES; ph++)
+		if (ph != SP_WAIT)
+			work += p->sample[median][ph];
 
 	for (ph = 0; ph < SP_PHASES; ph++) {
 		for (i = 0; i < n; i++)
@@ -151,8 +187,11 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 
 		printf("syscall_profile   %s %10u ", sp_name[ph],
 		       p->sample[median][ph]);
-		sp_print_pct(sp_percent(p->sample[median][ph], whole));
-		printf("  [%u..%u]\n", col[0], col[n - 1]);
+		sp_print_pct(sp_percent(p->sample[median][ph],
+				        ph == SP_WAIT ? whole : work));
+		printf(" %s  [%u..%u]\n",
+		       ph == SP_WAIT ? "of wall " : "of work",
+		       col[0], col[n - 1]);
 	}
 
 	/*
@@ -181,12 +220,20 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 		 * bound, and a bound is what says whether the split is worth
 		 * doing at all.
 		 */
+		/*
+		 * ⚠️ The share is of WORK, not of the trap.  A trap that waited
+		 * for a message spent most of its life off the processor, and a
+		 * percentage taken against that total would say the copies are
+		 * negligible -- which is true of the wall clock and false of
+		 * everything #392 is deciding.
+		 */
+		work += ret_mean;
 		printf("syscall_profile   floor entry+return %u cyc, ceiling "
 		       "body %u cyc, body share",
 		       p->sample[median][SP_ENTRY] + ret_mean,
 		       p->sample[median][SP_BODY]);
-		sp_print_pct(sp_percent(p->sample[median][SP_BODY], whole));
-		printf(" of the median trap\n");
+		sp_print_pct(sp_percent(p->sample[median][SP_BODY], work));
+		printf(" of the %u cyc this trap spent ON a processor\n", work);
 	}
 
 	if (p->ndumps >= SP_MAX_DUMPS)
@@ -217,6 +264,26 @@ syscall_profile_enter(int trap_number)
 	 * asked.  That is the number #392 weighs the copies against.
 	 */
 	syscall_profile_mark(&t->syscall_profile, SP_ENTRY);
+}
+
+void
+syscall_profile_blocked(thread_t t)
+{
+	if (t == THREAD_NULL)
+		return;
+
+	syscall_profile_waiting(&t->syscall_profile);
+}
+
+void
+syscall_profile_back(void)
+{
+	thread_t	t = current_thread();
+
+	if (t == THREAD_NULL)
+		return;
+
+	syscall_profile_resumed(&t->syscall_profile);
 }
 
 void

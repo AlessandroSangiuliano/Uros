@@ -325,6 +325,7 @@
 #include <kern/rcu.h>
 #include <kern/sched.h>
 #include <kern/sched_prim.h>
+#include <kern/syscall_profile.h>	/* #411 */
 #include <kern/ipc_sched.h>
 #include <kern/syscall_subr.h>
 #include <kern/thread.h>
@@ -1577,9 +1578,20 @@ thread_invoke(
 	 * stale thread pointer.
 	 */
 
+	/*
+	 * #411/#392: the trap this thread is inside stops doing work here and
+	 * starts waiting.  Charged to its own column rather than left in the
+	 * body phase, which is what made the first run of that profile report
+	 * a Mach trap of three hundred million cycles.
+	 */
+	SP_BLOCKED(old_thread);
+
 	disable_preemption();
 	old_thread = switch_context(old_thread, old_thread->continuation,
 				    new_thread);
+
+	/* #411: back on a processor — one of the two ways (see SP_BACK). */
+	SP_BACK();
 
 	/*
 	 *	We're back.  Now old_thread is the thread that resumed
@@ -1617,6 +1629,14 @@ thread_continue(
 {
 	register thread_t self = current_thread();
 	register void (*continuation)(void) = self->continuation;
+
+	/*
+	 * #411: the OTHER way back, and the one that matters most here — a
+	 * server thread parked in mach_msg has a continuation, so it never
+	 * returns from switch_context() and would otherwise have its whole
+	 * sleep charged to whatever phase was open.
+	 */
+	SP_BACK();
 
 	/*
 	 *	We must dispatch the old thread and then

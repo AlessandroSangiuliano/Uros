@@ -76,6 +76,50 @@
 	.endm
 
 /*
+ * The return path, timed against itself (#411, for #392).
+ *
+ * ⚠️ The whole of it is in assembly and it stays there.  Charging it to the
+ * per-thread sample would mean putting the offset of a field of `struct
+ * thread' into this file, which <syscall/syscall.c> refuses in as many words
+ * for the Mach trap table: an entry path carrying another structure's layout
+ * as constants is #448's shape, and the day that structure gains a field the
+ * assembly reads whatever is now at that offset, correctly, for ever.
+ *
+ * So it accumulates into the PER-PROCESSOR block, whose offsets are asserted
+ * against the structure a few lines from where they are defined.  Nothing is
+ * lost: this path runs the same instructions whatever the message was, so
+ * there is no per-message variation to attribute to a message.
+ *
+ * rdtsc lands in edx:eax.  %rax is the trap's answer and is saved; %rdx is
+ * dead here -- the clearing below is about to zero it either way.
+ */
+	.macro	SYSCALL_PROFILE_MARK slot
+#if	SYSCALL_PROFILE
+	pushq	%rax
+	lfence
+	rdtsc
+	shlq	$32, %rdx
+	orq	%rdx, %rax
+	movq	%rax, %gs:\slot
+	popq	%rax
+#endif
+	.endm
+
+	.macro	SYSCALL_PROFILE_RETURN
+#if	SYSCALL_PROFILE
+	pushq	%rax
+	lfence
+	rdtsc
+	shlq	$32, %rdx
+	orq	%rdx, %rax
+	subq	%gs:PERCPU_SYSCALL_RET_MARK, %rax
+	addq	%rax, %gs:PERCPU_SYSCALL_RET_CYC
+	incq	%gs:PERCPU_SYSCALL_RET_CNT
+	popq	%rax
+#endif
+	.endm
+
+/*
  * Entry from ring 3.  The processor has already done, in the instruction
  * itself and without touching memory:
  *
@@ -404,6 +448,30 @@ syscall_entry:
 	 * frame base again here: the plain paths never moved it, and the wide
 	 * paths restore it from %rbp before jumping here.
 	 */
+	/*
+	 * The return path's clock starts HERE, after the AST handling and not
+	 * before the trap function returned (#411, for #392).
+	 *
+	 * 🔥 It was taken right after the callq, which is where "the return
+	 * began" reads correctly and measures wrongly.  thread_return_ast()
+	 * above CAN BLOCK: the thread gives up the processor, another one runs
+	 * here and writes its own mark into this same per-processor slot, and
+	 * the sysret below then subtracts a stranger's timestamp.  That is why
+	 * the first run of this profile reported a mean return of ninety-four
+	 * million cycles.
+	 *
+	 * ⚠️ The same aliasing this file's own header refuses for the sample,
+	 * reintroduced for the return because the slot looked harmless.  A
+	 * per-processor scratch is safe across instructions that cannot block
+	 * and is a trap everywhere else.
+	 *
+	 * So the phase is the exit sequence proper -- everything from here to
+	 * ring 3, with no scheduler in it -- and that is also the honest thing
+	 * for #392 to weigh: an AST that parks the thread is not part of what
+	 * a message costs.
+	 */
+	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK
+
 	movq	TF_RFLAGS(%rsp), %r11	/* flags */
 	movq	TF_RIP(%rsp), %rcx	/* resume address */
 
@@ -471,49 +539,6 @@ syscall_entry:
  * rename and which cost no store, no port and no latency.
  */
 
-/*
- * The return path, timed against itself (#411, for #392).
- *
- * ⚠️ The whole of it is in assembly and it stays there.  Charging it to the
- * per-thread sample would mean putting the offset of a field of `struct
- * thread' into this file, which <syscall/syscall.c> refuses in as many words
- * for the Mach trap table: an entry path carrying another structure's layout
- * as constants is #448's shape, and the day that structure gains a field the
- * assembly reads whatever is now at that offset, correctly, for ever.
- *
- * So it accumulates into the PER-PROCESSOR block, whose offsets are asserted
- * against the structure a few lines from where they are defined.  Nothing is
- * lost: this path runs the same instructions whatever the message was, so
- * there is no per-message variation to attribute to a message.
- *
- * rdtsc lands in edx:eax.  %rax is the trap's answer and is saved; %rdx is
- * dead here -- the clearing below is about to zero it either way.
- */
-	.macro	SYSCALL_PROFILE_MARK slot
-#if	SYSCALL_PROFILE
-	pushq	%rax
-	lfence
-	rdtsc
-	shlq	$32, %rdx
-	orq	%rdx, %rax
-	movq	%rax, %gs:\slot
-	popq	%rax
-#endif
-	.endm
-
-	.macro	SYSCALL_PROFILE_RETURN
-#if	SYSCALL_PROFILE
-	pushq	%rax
-	lfence
-	rdtsc
-	shlq	$32, %rdx
-	orq	%rdx, %rax
-	subq	%gs:PERCPU_SYSCALL_RET_MARK, %rax
-	addq	%rax, %gs:PERCPU_SYSCALL_RET_CYC
-	incq	%gs:PERCPU_SYSCALL_RET_CNT
-	popq	%rax
-#endif
-	.endm
 
 	.macro CLEAR_CLOBBERED
 #if	!ABLATE_474_CLEAR
@@ -576,7 +601,6 @@ syscall_entry:
 	PUSH_WIDE_ARGS
 	leaq	mach_syscall_table(%rip), %r11
 	callq	*(%r11, %rax, 8)
-	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK
 	movq	%rbp, %rsp
 	popq	%rbp
 	jmp	.Lreturn
@@ -587,7 +611,6 @@ syscall_entry:
 	PUSH_WIDE_ARGS
 	leaq	syscall_table(%rip), %r11
 	callq	*(%r11, %rax, 8)
-	SYSCALL_PROFILE_MARK PERCPU_SYSCALL_RET_MARK
 	movq	%rbp, %rsp
 	popq	%rbp
 	jmp	.Lreturn
