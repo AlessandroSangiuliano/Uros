@@ -10,6 +10,7 @@
 #include <cpu/desc.h>
 #include <cpu/percpu.h>
 #include <cpu/regs.h>
+#include <kern/syscall_profile.h>	/* #411: the entry stub's clock reading */
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/map.h>
@@ -122,3 +123,33 @@ void percpu_activate(uint32_t cpu_id)
 	 */
 	wrmsr(MSR_KERNEL_GS_BASE, va);
 }
+
+#if	SYSCALL_PROFILE
+/*
+ * What the syscall entry stub left here on its way in (#411, for #392).
+ *
+ * The one machine-dependent line of the profile: only the stub knows when the
+ * trap began, and only this file knows where it put it.  Everything else about
+ * the sample is machine-independent and lives in <kern/syscall_profile.h>.
+ */
+uint64_t
+syscall_profile_entry_tsc(void)
+{
+	return percpu()->syscall_tsc;
+}
+#endif	/* SYSCALL_PROFILE */
+
+#if	SYSCALL_PROFILE
+/*
+ * What the return path has cost this processor so far (#411, for #392).
+ *
+ * The sum and the count rather than a mean, so the caller decides how to
+ * report them -- and so that a caller which wants to reset them can.
+ */
+void
+syscall_profile_return_cycles(uint64_t *cycles, uint64_t *count)
+{
+	*cycles = percpu()->syscall_ret_cycles;
+	*count  = percpu()->syscall_ret_count;
+}
+#endif	/* SYSCALL_PROFILE */

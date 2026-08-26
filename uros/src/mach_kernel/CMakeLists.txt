@@ -85,6 +85,7 @@ endif()
 # line and silently does nothing there.  That is how a measuring build comes to
 # look exactly like a measuring build and behave like an ordinary one.
 option(UROS_FAULT_PROFILE "Build the #482 copy-on-write fault phase profile" OFF)
+option(UROS_SYSCALL_PROFILE "Build the #411 Mach trap phase profile, which #392 consumes" OFF)
 
 # #385 layer four: poison a page on its way into the free list and verify it on
 # the way out.  Forensic, not an invariant: it fingerprints whoever wrote a page
@@ -265,6 +266,9 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
       # -mgeneral-regs-only so that entry from user mode never has to save
       # vector state, which means no floating point anywhere in it (#453).
       KERNEL_FLOAT_OK=0)
+  if(UROS_SYSCALL_PROFILE)
+      list(APPEND KERNEL_DEFINES_BARE SYSCALL_PROFILE=1)
+  endif()
   if(UROS_FAULT_PROFILE)
       list(APPEND KERNEL_DEFINES_BARE FAULT_PROFILE=1)
       message(STATUS "#482 copy-on-write fault phase profile: ON (x86_64)")
@@ -699,6 +703,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/eventcount.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/exception.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/fault_profile.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/kern/syscall_profile.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/uslock_census.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/hmac_sha256.c
     ${CMAKE_CURRENT_SOURCE_DIR}/kern/host.c
@@ -920,6 +925,9 @@ endif()
 # i386 opens a sample -- the hook that does lives in the x86-64 trap path -- so
 # what this buys here is that the facility is COMPILED on both targets and
 # cannot rot behind a switch only one of them can turn on.
+if(UROS_SYSCALL_PROFILE)
+    list(APPEND KERNEL_DEFINES -DSYSCALL_PROFILE=1)
+endif()
 if(UROS_FAULT_PROFILE)
     list(APPEND KERNEL_DEFINES -DFAULT_PROFILE=1)
     message(STATUS "#482 copy-on-write fault phase profile: ON (i386)")
@@ -1208,6 +1216,7 @@ set(KERN_SOURCES
     kern/eventcount.c
     kern/etap.c
     kern/fault_profile.c
+    kern/syscall_profile.c
     kern/uslock_census.c
     kern/lock.c
     kern/host.c

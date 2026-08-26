@@ -29,6 +29,10 @@
 #define PERCPU_KERNEL_RSP	16
 #define PERCPU_USER_RSP		24
 #define PERCPU_PREEMPT_LEVEL	48
+#define PERCPU_SYSCALL_TSC	120
+#define PERCPU_SYSCALL_RET_CYC	128
+#define PERCPU_SYSCALL_RET_CNT	136
+#define PERCPU_SYSCALL_RET_MARK	144
 
 #ifndef __ASSEMBLER__
 
@@ -159,6 +163,47 @@ struct percpu {
 	 * every one of them silently.
 	 */
 	void *loaded_pmap;
+
+	/*
+	 * The clock reading the syscall entry stub took, on its way to the
+	 * thread that owns it (#411, for #392).
+	 *
+	 * ⚠️ A SCRATCH ACROSS TWO INSTRUCTIONS, not storage.  The sample it
+	 * opens lives on the thread, because a Mach trap blocks -- a receive
+	 * parks it, a hand-off switches to the receiver -- and a per-processor
+	 * cursor would be picked up by whichever thread ran here next.  This
+	 * slot exists only because the entry stub cannot reach
+	 * current_thread(): the stub writes it and the first C instruction of
+	 * the dispatcher reads it, on the same processor, with nothing between
+	 * them that can make a syscall.
+	 *
+	 * Exactly the argument that lets user_rsp live up there, and it is
+	 * repeated rather than referenced because the next person to move a
+	 * field here needs to know which of the two kinds this is.
+	 *
+	 * ⚠️ At the END, like loaded_pmap and for the same reason: the offsets
+	 * asserted below are what the assembly uses, and a field inserted above
+	 * them would move every one of them in silence.
+	 */
+	uint64_t syscall_tsc;
+
+	/*
+	 * The return path, timed against itself (#411, for #392).
+	 *
+	 * 🔴 A per-processor SUM and count rather than a column in the
+	 * per-thread table, because reaching that table from entry.S would put
+	 * the offset of a field of `struct thread' into assembly -- the thing
+	 * syscall.c refuses by name for the Mach trap table, and #448's shape.
+	 * A processor's own block is the one structure assembly may index,
+	 * because the offsets are asserted against it a few lines below.
+	 *
+	 * Nothing is lost: the return path executes the same instructions
+	 * whatever the message was, so there is no per-message variation to
+	 * attribute to a message.
+	 */
+	uint64_t syscall_ret_cycles;
+	uint64_t syscall_ret_count;
+	uint64_t syscall_ret_mark;	/* scratch: the trap function returned */
 };
 
 /*
@@ -176,6 +221,14 @@ _Static_assert(__builtin_offsetof(struct percpu, preemption_level)
 	       == PERCPU_PREEMPT_LEVEL, "percpu preemption_level moved");
 _Static_assert(__builtin_offsetof(struct percpu, user_rsp) == PERCPU_USER_RSP,
 	       "percpu user_rsp moved");
+_Static_assert(__builtin_offsetof(struct percpu, syscall_tsc)
+	       == PERCPU_SYSCALL_TSC, "percpu syscall_tsc moved");
+_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_cycles)
+	       == PERCPU_SYSCALL_RET_CYC, "percpu syscall_ret_cycles moved");
+_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_count)
+	       == PERCPU_SYSCALL_RET_CNT, "percpu syscall_ret_count moved");
+_Static_assert(__builtin_offsetof(struct percpu, syscall_ret_mark)
+	       == PERCPU_SYSCALL_RET_MARK, "percpu syscall_ret_mark moved");
 
 /*
  * Two halves, and the split is not tidiness.

@@ -263,6 +263,7 @@
 #include <mach/thread_info.h>
 #include <kern/ast.h>
 #include <kern/kern_types.h>
+#include <kern/syscall_profile.h>	/* #411: the per-trap phase sample */
 #include <kern/cpu_number.h>
 #include <kern/queue.h>
 #include <kern/processor.h>
@@ -530,6 +531,22 @@ typedef struct thread_shuttle {
 	 * Migration and thread_activation linkage information
 	 */
 	struct thread_activation *top_act; /* "current" thr_act */
+
+#if	SYSCALL_PROFILE
+	/*
+	 * Where this thread's Mach trap is spending its cycles (#411, for
+	 * #392).
+	 *
+	 * ⚠️ On the SHUTTLE and not on the activation, and not on the
+	 * processor.  A sample has to survive the two things this path does
+	 * that the copy-on-write path never does: block, and hand off to
+	 * another thread.  The shuttle is what goes through both.
+	 *
+	 * Zero-sized in every shipping build -- the field is not compiled
+	 * unless the profile is.
+	 */
+	struct syscall_profile_thread	syscall_profile;
+#endif	/* SYSCALL_PROFILE */
 
 } Thread_Shuttle;
 

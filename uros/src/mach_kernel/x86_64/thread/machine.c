@@ -29,6 +29,7 @@
 #include <kern/kalloc.h>
 
 #include <kern/thread.h>
+#include <kern/syscall_profile.h>	/* #411 */
 #include <time/clock_event.h>	/* #459: start this processor's clock */
 #include <boot/bootarg.h>		/* #459: boot_flag */
 #include <cpu/smp.h>			/* #461: real_ncpus */
@@ -477,6 +478,17 @@ thread_set_syscall_return(thread_t thread, kern_return_t retval)
 	assert(thr_act->mact.pcb->user != (struct trap_frame *) 0);
 
 	thr_act->mact.pcb->user->rax = (uint64_t) retval;
+	/*
+	 * #411/#392: the other way out of a Mach trap.
+	 *
+	 * A blocking receive leaves through the continuation and never unwinds
+	 * urmach_msg's frame, so the sample it opened would stay open and the
+	 * next trap on this thread would be counted as dropped.  Closing it
+	 * here is what makes the breakdown describe the receive as well as the
+	 * hand-off.
+	 */
+	SP_LEAVE();
+
 }
 
 kern_return_t
