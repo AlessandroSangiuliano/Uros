@@ -213,7 +213,7 @@ unsigned char	io_in_progress_default = IO_IN_PROGRESS_DEFAULT;
  */
 kern_return_t
 device_lookup_mode(
-	char *		name,
+	const char *	name,
 	dev_mode_t	mode,
 	device_t	*dev)
 {

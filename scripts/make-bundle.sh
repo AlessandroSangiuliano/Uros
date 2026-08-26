@@ -184,6 +184,9 @@ if [ "$DISKLESS" = "1" ]; then
     IPC_BENCH_LINE=""
 fi
 
+# ⚠️ Il name server NON porta un flag `-w' qui: bootstrap lo aspetta da
+# solo (#492).  La decisione sta in parse_config_file(), perche' questo
+# file e' uno di QUATTRO che scrivono la stessa riga.
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
 ${CAP_SERVER_CONF_LINE}

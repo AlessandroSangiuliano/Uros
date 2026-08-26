@@ -109,7 +109,7 @@ extern kern_return_t	device_write_get(
 extern boolean_t	device_write_dealloc(
 				io_req_t	ior);
 extern boolean_t	dev_name_lookup(
-				char		* name,
+				const char	* name,
 				dev_ops_t	* ops,
 				int		* unit);
 extern void		dev_set_indirection(

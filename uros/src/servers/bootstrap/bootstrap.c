@@ -1295,6 +1295,29 @@ parse_boot_args(char **data, struct server **sp)
     }
 }
 
+/*
+ * Is this conf entry the name server?
+ *
+ * By the last path component, because the entry names a file: the bundle
+ * spells it `name_server' and the disk spells it
+ * `/dev/boot_device/mach_servers/name_server', and both are it.
+ */
+static boolean_t
+server_is_name_server(struct server *sp)
+{
+	const char	*p, *base;
+
+	if (sp->server_name == NULL)
+		return FALSE;
+
+	base = sp->server_name;
+	for (p = sp->server_name; *p != '\0'; p++)
+		if (*p == '/')
+			base = p + 1;
+
+	return strcmp(base, "name_server") == 0;
+}
+
 static int
 parse_config_file(char *conf, size_t size)
 {
@@ -1379,6 +1402,33 @@ parse_config_file(char *conf, size_t size)
 	    sp->server_name = "";
 	    sp->args_size = 1;
 	    parse_path(sp, ptr);
+
+	    /*
+	     * The name server is waited for whether or not the line says so
+	     * (#492).
+	     *
+	     * 🔥 SERVER_SERIALIZE_F and bootstrap_completed() are two halves of
+	     * a handshake that both worked and were never joined: name_server
+	     * has sent the message since it was written, this loop has honoured
+	     * the flag since it was written, and no configuration file on any
+	     * target set it.  So "first in the list" decided the order tasks are
+	     * CREATED and not the order their first instruction runs, and
+	     * netname_test lost that race in five boots out of five -- printing
+	     * its verdict and being reaped before the server said "started".
+	     *
+	     * 🔑 Set HERE and not in the configuration files, because there are
+	     * four of them: CMake generates x86-64's, make-bundle.sh and
+	     * make-disk-image.sh write i386's two stages, and default_config[]
+	     * above is the fallback when none is found.  A flag that has to be
+	     * remembered in four places is a flag that will be missing from the
+	     * fifth.  One decision, where the name is known.
+	     *
+	     * ⚠️ It is still a flag, so a line MAY carry -w for any other
+	     * server; this only guarantees the one case everything depends on.
+	     */
+	    if (server_is_name_server(sp))
+		sp->flags |= SERVER_SERIALIZE_F;
+
 	    if (c == '\n' || c == '\r')
 		line++;
 	}

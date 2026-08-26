@@ -266,6 +266,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # boot on this target has ever used, so it is the one most likely to end the
   # run.  Last means every other verdict is already in the log when it does,
   # and the blame cannot land anywhere else.
+  # ⚠️ No `-w' on the name server here: bootstrap waits for it by itself
+  # (#492).  The decision lives in parse_config_file(), because this file is
+  # one of FOUR that write that same line and a flag remembered in four
+  # places is a flag that will be missing from the fifth.
   file(GENERATE OUTPUT ${_CONF}
        CONTENT "name_server name_server\nnetname_test netname_test\npthread_test pthread_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
 
