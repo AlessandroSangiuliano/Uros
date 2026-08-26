@@ -228,6 +228,13 @@ set_target_properties(bootstrap_server PROPERTIES
 # when either of them changed is worth more than a script somebody has to
 # remember to re-run after a rebuild.  mkbundle is the piece that is shared,
 # which is the piece that was worth sharing.
+# #422: -DABLATE_422_RELOC=1 walks the relocation table and writes nothing,
+# so a PIE image in the bundle must stop working.  Off in every build.
+option(UROS_ABLATE_422_RELOC "Verify the PIE relocations by not applying them" OFF)
+if(UROS_ABLATE_422_RELOC)
+  target_compile_definitions(bootstrap_server PRIVATE ABLATE_422_RELOC=1)
+endif()
+
 if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap.bundle)
   set(_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap.conf)

@@ -217,6 +217,17 @@ struct loader_info {
     vm_offset_t		load_bias;
     vm_offset_t		dyn_vaddr;
     vm_size_t		dyn_filesz;
+
+    /*
+     * Which ELF class the image was, because the relocation tables are laid
+     * out differently and the loader cannot tell from the segment data alone
+     * (#422).
+     *
+     * ⚠️ Appended, like every field before it: this structure is read by more
+     * than one server and a field inserted above would move the rest for
+     * readers that were not rebuilt.
+     */
+    int			elf_is_64;
 } ;
 
 #define	EX_NOT_EXECUTABLE	6000

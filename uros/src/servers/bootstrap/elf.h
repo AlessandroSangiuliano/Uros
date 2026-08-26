@@ -69,12 +69,49 @@
 #ifndef _SYS_ELF_H_
 #define _SYS_ELF_H_
 
-typedef unsigned long 	Elf32_Addr;
-typedef unsigned long 	Elf32_Off;
-typedef unsigned long 	Elf32_Word;
+/*
+ * 🔥 EXACT WIDTHS, and they were not.
+ *
+ * These were `unsigned long', which is four bytes on i386 and EIGHT on
+ * x86-64 -- so every structure below was the right size on one target and
+ * wrong on both counts on the other: too big for the ELF32 it is named for,
+ * and not the shape of the ELF64 it accidentally resembled.  sizeof(Elf32_Rel)
+ * came out 16, against 8 for a real ELF32 relocation and 24 for an ELF64 one.
+ *
+ * ⚠️ What made that dangerous rather than merely wrong is where the number was
+ * USED.  load.c refuses a table whose DT_RELENT disagrees with
+ * sizeof(Elf32_Rel) -- a guard written to catch exactly this class -- and a
+ * guard comparing against a wrong constant does not refuse.  It agrees, for
+ * the wrong reason, and 446 relocations get written at addresses computed with
+ * the wrong stride.  [a guard that is always true is worse than none]
+ *
+ * 🔑 The file format defines these widths; the host's `long' has nothing to do
+ * with them.  A type named for a width is now the width it is named for, and
+ * the assertions at the end of this file are what keep it that way rather than
+ * a comment asking to be remembered.
+ */
+#include <stdint.h>
 
-typedef unsigned short 	Elf32_Half;
-typedef long	 	Elf32_Sword;
+typedef uint32_t	Elf32_Addr;
+typedef uint32_t	Elf32_Off;
+typedef uint32_t	Elf32_Word;
+
+typedef uint16_t	Elf32_Half;
+typedef int32_t		Elf32_Sword;
+
+/*
+ * And the 64-bit set, which this file never had.  ⚠️ Elf64_Sword stays 32 bits
+ * -- the class widens addresses and offsets, not every signed field -- and
+ * Elf64_Sxword is the one that widens.  Getting that pair backwards is how a
+ * `d_tag' ends up reading half of the value beside it.
+ */
+typedef uint64_t	Elf64_Addr;
+typedef uint64_t	Elf64_Off;
+typedef uint64_t	Elf64_Xword;
+typedef int64_t		Elf64_Sxword;
+typedef uint32_t	Elf64_Word;
+typedef int32_t		Elf64_Sword;
+typedef uint16_t	Elf64_Half;
 
 /* ELF Header - figure 4-3, page 4-4 */
 
@@ -342,11 +379,59 @@ typedef struct {
 #define DT_TEXTREL	22
 #define DT_JMPREL	23
 
+/*
+ * The 64-bit dynamic and relocation entries.
+ *
+ * ⚠️ x86-64 uses RELA and only RELA: relocations carry their addend in the
+ * entry instead of reading it out of the place being relocated.  A loader that
+ * knows DT_REL alone does not fail politely on this target, because the tags
+ * it is scanning for are simply never present -- it finds no relocations and
+ * runs an unrelocated image.
+ */
+typedef struct {
+	Elf64_Sxword	d_tag;
+	union {
+		Elf64_Xword	d_val;
+		Elf64_Addr	d_ptr;
+	} d_un;
+} Elf64_Dyn;
+
+typedef struct {
+	Elf64_Addr	r_offset;
+	Elf64_Xword	r_info;
+	Elf64_Sxword	r_addend;
+} Elf64_Rela;
+
+#define ELF64_R_TYPE(__i)	((uint32_t) ((__i) & 0xffffffffUL))
+#define ELF64_R_SYM(__i)	((uint32_t) ((__i) >> 32))
+
 /* i386 relocation types — used for ET_DYN (PIE) relocation */
 
 #define R_386_NONE		0
 #define R_386_32		1
 #define R_386_PC32		2
 #define R_386_RELATIVE		8
+
+/* x86-64 relocation types, the same three that matter for a static PIE */
+
+#define R_X86_64_NONE		0
+#define R_X86_64_64		1
+#define R_X86_64_RELATIVE	8
+
+/*
+ * 🔑 The widths, asserted rather than described.
+ *
+ * Every one of these numbers is in the ELF specification, so a build that
+ * disagrees with them is a build whose reader would misparse a file that is
+ * itself correct.  This is the check that would have caught `unsigned long'
+ * the day it was written instead of on the day a PIE image loaded wrong.
+ */
+_Static_assert(sizeof(Elf32_Rel)  ==  8, "Elf32_Rel is not 8 bytes");
+_Static_assert(sizeof(Elf32_Rela) == 12, "Elf32_Rela is not 12 bytes");
+_Static_assert(sizeof(Elf32_Dyn)  ==  8, "Elf32_Dyn is not 8 bytes");
+_Static_assert(sizeof(Elf32_Ehdr) == 52, "Elf32_Ehdr is not 52 bytes");
+_Static_assert(sizeof(Elf32_Phdr) == 32, "Elf32_Phdr is not 32 bytes");
+_Static_assert(sizeof(Elf64_Rela) == 24, "Elf64_Rela is not 24 bytes");
+_Static_assert(sizeof(Elf64_Dyn)  == 16, "Elf64_Dyn is not 16 bytes");
 
 #endif /* _SYS_ELF_H_ */

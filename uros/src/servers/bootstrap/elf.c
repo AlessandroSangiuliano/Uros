@@ -142,6 +142,13 @@ elf_load(struct file *fp, objfmt_t ofmt, void *hdr)
      * point, and PT_DYNAMIC's VA are shifted by this bias.  Relocations
      * are applied later by the loader (load.c) before vm_write.
      */
+    /*
+     * #422: which class, carried to the relocation pass.  Only the reader
+     * that opened the file knows this, and by the time load.c walks the
+     * .dynamic array the header is no longer in reach.
+     */
+    lp->elf_is_64 = elf_is_64bit(&img);
+
     if (elf_type(&img) == ET_DYN)
         lp->load_bias = 0x40000000;
     else
