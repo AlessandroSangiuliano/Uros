@@ -53,10 +53,25 @@ target_link_libraries(cow_test_bin PRIVATE
   -Wl,--end-group)
 add_dependencies(cow_test_bin libmach libpthreads mig_mach_public_headers)
 
+# 🔥 Linked as a static PIE (#422), and that is not about this test.
+#
+# The bootstrap loader's relocation pass had never been executed on this
+# target: every image in the bundle was ET_EXEC, so the code that applies
+# RELATIVE relocations was written, linked and never run -- and on x86-64 it
+# was 32-bit-only, which fails by finding no DT_REL and reporting success.
+#
+# The fleet (#429) starts with cap_server, which on i386 is ET_DYN with 446
+# relocations.  Rather than wait for it to arrive and discover the loader
+# there, one image already in the bundle is built the way it will be.  If the
+# relocations are applied wrongly this test does not report a wrong answer, it
+# faults before printing anything -- which is exactly the property wanted from
+# a subject.
 target_link_options(cow_test_bin PRIVATE
-  ${UROS_ARCH_FLAGS} -static -nostdlib -nostartfiles
+  ${UROS_ARCH_FLAGS} -pie -nostdlib -nostartfiles
   -Wl,-e,__start_mach
   -Wl,-u,__start_mach
+  -Wl,--no-dynamic-linker
+  -Wl,--hash-style=sysv
   -Wl,--build-id=none)
 
 set_target_properties(cow_test_bin PROPERTIES
