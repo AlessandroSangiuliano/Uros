@@ -370,11 +370,60 @@ syscall_entry:
 	cmpq	%rcx, %r10
 	jne	.Lreturn_the_slow_way
 
+
+/*
+ * 🔥 What ring 3 must not be handed back (#474).
+ *
+ * The contract above declares rdi, rsi, rdx, rcx, r8, r9, r10, r11 and rax
+ * destroyed, and the entry honours that by not SAVING them.  The way out has
+ * to honour the other half: "destroyed" is a promise to the caller that it
+ * may not read them, not permission for the kernel to leave its own values
+ * there -- and SYSRET hands every one of them straight to ring 3.
+ *
+ * Of the destroyed set, three are legitimately carrying something out: rax is
+ * the trap's answer, and rcx and rflags-in-r11 are what SYSRET resumes from,
+ * both read back out of the frame and therefore ring 3's own.  These six are
+ * carrying whatever the kernel last put in them.
+ *
+ * Measured: act_test's fourth arm caught `rsi' holding the thread_t of the
+ * very thread being examined -- exact equality with pcb->ctx's owner, not a
+ * lookalike -- and, in three earlier captures, `rdi' holding pointers from
+ * the same zone region.  Both are in this list and neither observation ever
+ * fell outside it.  The leak is on EVERY syscall return; what is rare is
+ * catching it, because it takes a high-half value surviving in the register
+ * until a later trap saves it into the frame where thread_get_state can read
+ * it.  One boot in thirty is the odds of that coincidence, not of a race.
+ *
+ * ⚠️ This is the mark-and-blank that #474 removed, done the cheaper way it
+ * should have been done in the first place.  The ablation that removed it
+ * concluded the blanking "changed nothing" -- over far too few runs to see a
+ * one-in-thirty event.  An absence, reported as a confirmation.
+ *
+ * 🔑 And it is not "fifteen stores on the hottest path", which is what the
+ * fear was: it is six zeroing idioms, which x86-64 resolves at register
+ * rename and which cost no store, no port and no latency.
+ */
+	.macro CLEAR_CLOBBERED
+#if	!ABLATE_474_CLEAR
+	xorl	%edi, %edi
+	xorl	%esi, %esi
+	xorl	%edx, %edx
+	xorl	%r8d, %r8d
+	xorl	%r9d, %r9d
+	xorl	%r10d, %r10d
+#endif	/* !ABLATE_474_CLEAR — build with -DABLATE_474_CLEAR=1 and act_test's
+	 * fifth arm must go red.  A correction is verified by taking it away;
+	 * this one exists because the previous attempt at it was removed on an
+	 * ablation that could not have seen the event it was measuring. */
+	.endm
+
 	/*
 	 * ⚠️ And off again before the way out begins.  From here to SYSRET the
 	 * stack pointer and %gs belong to ring 3 for a few instructions, and an
 	 * interrupt in that window is the one #440 exists about.
 	 */
+	CLEAR_CLOBBERED
+
 	cli
 	movq	TF_RSP(%rsp), %rsp	/* this thread's, not this processor's */
 	swapgs
@@ -462,4 +511,11 @@ syscall_entry:
 	pushq	%r11			/* rflags */
 	pushq	$USER_CS_RPL3		/* cs     */
 	pushq	%rcx			/* rip    */
+
+	/* ⚠️ After the pushes: r10 carries ring 3's stack pointer until one of
+	 * them has consumed it.  iretq takes rip and rflags off the stack, so
+	 * rcx and r11 need nothing here -- and they hold the frame's own
+	 * values, which are ring 3's. */
+	CLEAR_CLOBBERED
+
 	iretq
