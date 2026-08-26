@@ -371,17 +371,26 @@ syscall_entry:
 	 * a privilege escalation rather than a crash.
 	 *
 	 * The address is checked instead, which is three instructions and a
-	 * branch never taken. Canonical here means bit 47 sign-extended,
-	 * because the tables are four levels deep; five-level paging moves
-	 * the bit to 56 and this shift with it (#405 keeps that door open).
+	 * branch taken only by a program that has already asked for it.
+	 * Canonical here means bit 47 sign-extended, because the tables are
+	 * four levels deep; five-level paging moves the bit to 56 and this
+	 * shift with it (#405 keeps that door open).
 	 *
 	 * r10 is scratch: the contract already declares it destroyed.
+	 *
+	 * ⚠️ This comment used to call it "a branch never taken", which was
+	 * true in a way it did not mean: nothing had ever executed it.
+	 * act_test's sixth arm does now, and -DABLATE_411_CANONICAL=1 is how
+	 * the next person confirms the arm is still watching this and not
+	 * something the emulator does for free.
 	 */
+#if	!ABLATE_411_CANONICAL
 	movq	%rcx, %r10
 	shlq	$16, %r10
 	sarq	$16, %r10
 	cmpq	%rcx, %r10
 	jne	.Lreturn_the_slow_way
+#endif
 
 
 /*
