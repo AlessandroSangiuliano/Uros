@@ -117,6 +117,24 @@ ACCEPTED = {
     # not a libc header despite the name.  Reachable beside sa_mach/types.h
     # only from default_pager itself, which includes it by quoted name.
     "types.h",
+
+    # <machine/machlimits.h>: the kernel's i386 copy against a three-line stub
+    # in mach_services/include that does nothing but #include <limits.h>.
+    #
+    # Both are right where they are reachable, and only one build can reach
+    # both: src/mach_kernel/i386 is an -I root on 420 i386 compile commands
+    # and on ZERO x86-64 ones, so the 311 units that see this shadow are all
+    # i386, where the kernel's values and the compiler's agree.
+    #
+    # ⚠️ The tripwire, because the day it trips there will be no diagnostic:
+    # the i386 header defines LONG_MAX as INT_MAX and ULONG_MAX as UINT_MAX,
+    # which is true of a 32-bit long and false by a factor of four billion
+    # otherwise.  If mach_kernel/<arch> ever reaches a build of a different
+    # arch, this entry stops being an acceptance and becomes the defect --
+    # and the stub, which defers to the compiler, is the copy that would have
+    # been right.  There is no x86_64/machlimits.h; nothing needs one while
+    # nobody reaches for the i386 one.
+    "machine/machlimits.h",
 }
 
 # ---------------------------------------------------------------------------
@@ -169,7 +187,27 @@ def index_of(root):
     if root not in _index_cache:
         m = {}
         if os.path.isdir(root):
-            for dirpath, _dirs, files in os.walk(root):
+            # 🔥 followlinks, and without it this check could not see the half
+            # that matters (#505).
+            #
+            # The build publishes per-architecture headers by SYMLINKING a
+            # directory: generated/include/mach/machine -> mach_kernel/mach/
+            # x86_64.  os.walk() does not descend into a symlinked directory
+            # unless asked, so every header behind that link was invisible --
+            # and a shadow is only visible if BOTH copies are.  The check
+            # therefore reported "no new shadowed headers" while looking
+            # straight at seven i386 headers shadowing their x86-64 
+            # counterparts, for cap_server, which is what #505 is about.
+            #
+            # ⚠️ It answered "no" rather than failing, which is the worst
+            # thing a guard can do: #481 left this script as the defence
+            # against exactly that recurrence, and it had a hole the shape of
+            # the recurrence.
+            #
+            # 🔑 Symlink loops would hang this; there are none here, and the
+            # alternative -- teaching it every publishing mechanism the build
+            # might use -- is the kind of knowledge that goes stale silently.
+            for dirpath, _dirs, files in os.walk(root, followlinks=True):
                 for f in files:
                     if f.endswith((".h", ".defs")):
                         p = os.path.join(dirpath, f)

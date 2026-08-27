@@ -71,9 +71,23 @@ set_property(CACHE UROS_TARGET_ARCH PROPERTY STRINGS i386 x86_64)
 if(UROS_TARGET_ARCH STREQUAL "i386")
   set(UROS_ARCH_FLAGS -m32 -march=i686)
   set(UROS_PTR_BITS 32)
+  # 🔥 libpthreads' machine-dependent directory, named ONCE (#505).
+  #
+  # It holds pthread_machdep.h, the lock and the stack-switch assembly, and
+  # the two copies are not compatible: i386's lock type is a different width
+  # and its stack sequence is 32-bit assembly.  Eight CMakeLists hardcoded
+  # `libpthreads/AT386' and one of them -- bootstrap -- was fixed in place,
+  # with a comment explaining exactly what it would have cost, while the other
+  # seven kept the i386 path on an x86-64 build.
+  #
+  # 🔑 That is the shape this tree keeps paying for: the instance is corrected
+  # and the class is not enumerated.  A name defined here cannot be got wrong
+  # in the eighth place, because there is no eighth place to get it wrong in.
+  set(UROS_LIBPTHREADS_MD "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/libpthreads/AT386")
 elseif(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(UROS_ARCH_FLAGS -m64)
   set(UROS_PTR_BITS 64)
+  set(UROS_LIBPTHREADS_MD "${CMAKE_CURRENT_SOURCE_DIR}/src/lib/libpthreads/x86_64")
 else()
   message(FATAL_ERROR "UROS_TARGET_ARCH must be i386 or x86_64, got '${UROS_TARGET_ARCH}'")
 endif()

@@ -141,7 +141,7 @@ target_include_directories(ipc_bench_server PRIVATE
   ${CMAKE_SOURCE_DIR}/src/servers/ext_server
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h)
