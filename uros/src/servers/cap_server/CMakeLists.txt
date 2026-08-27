@@ -54,7 +54,7 @@ target_include_directories(cap_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   # MIG-generated headers (cap_server_server.h, cap_server.h)
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include

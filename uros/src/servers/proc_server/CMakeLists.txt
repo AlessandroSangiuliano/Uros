@@ -144,7 +144,7 @@ target_include_directories(proc_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/lib/libvfs
   # pthread.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   # Generated includes (mach/machine -> i386 symlink)
   # char/char_module_abi.h lives with the server that defines it
   ${CMAKE_SOURCE_DIR}/src/servers/char_server

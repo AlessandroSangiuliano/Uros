@@ -57,7 +57,7 @@ target_include_directories(libvfs PUBLIC
   ${CMAKE_SOURCE_DIR}/src/mach_services/include  # sa_mach.h, mach.h
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach  # sys/timers.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

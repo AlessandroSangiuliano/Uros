@@ -33,7 +33,7 @@ set(BLK_INCLUDE_DIRS
   ${CMAKE_BINARY_DIR}/generated
   # pthread.h and machine/pthread_impl.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   # Kernel headers (mach/, device/, i386/)
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
