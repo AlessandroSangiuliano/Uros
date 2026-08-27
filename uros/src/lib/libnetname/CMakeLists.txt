@@ -68,10 +68,15 @@ target_compile_options(libnetname PRIVATE
   ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin  -mstack-protector-guard=global -include stdint.h>
 )
 
+# ⚠️ See the note in libcap/CMakeLists.txt: sa_mach is the only root here that
+# has a <string.h>, and a target without it reaches the host's glibc one
+# instead of failing.  libnetname builds nothing but MIG stubs, and those call
+# memcpy -- so it was taking that declaration from the build machine.
 target_include_directories(libnetname PUBLIC
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/mach_services/servers/netname
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
