@@ -113,11 +113,25 @@ typedef struct elf_image {
 /* ------------------------------------------------------------------ */
 
 /*
- * Validate magic / class / data / version / machine, cache header
- * pointers.  Returns ELF_OK or one of ELF_ERR_*.
+ * Validate magic / class / data / version / machine, check that the
+ * header tables fall inside the buffer, and cache header pointers.
+ * Returns ELF_OK or one of ELF_ERR_*.
  *
- * v0.1: only ELFCLASS32 + ELFDATA2LSB + EM_386 are accepted.  The
- * ELF64 path is reserved for the future x86_64 port.
+ * Both classes, each with the machine that goes with it: ELFCLASS32 +
+ * EM_386, or ELFCLASS64 + EM_X86_64.  Little-endian only.
+ *
+ * ⚠️ This paragraph said "v0.1: only ELFCLASS32 + ELFDATA2LSB + EM_386
+ * are accepted.  The ELF64 path is reserved for the future x86_64 port"
+ * for as long as that was false: #422 taught elf_open both classes and
+ * did not come back here.  It mattered from #423, where libdl started
+ * reading through this header instead of parsing images itself -- and a
+ * caller decides what to check for itself by what the contract says it
+ * has already checked.
+ *
+ * 🔑 Which class an image is does NOT tell a loader it may map it.
+ * dlopen maps into its own address space, so libdl asks elf_machine()
+ * and refuses anything that is not its own; a reader accepting both is
+ * the reason that question has to be asked out here.
  */
 int  elf_open(const void *buf, size_t len, elf_image_t *img);
 

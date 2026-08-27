@@ -33,29 +33,49 @@
 #include <mach/mach_traps.h>
 #include <string.h>
 #include <stdio.h>
+#include <libelf.h>
 #include "dl_internal.h"
 
-/* Page size — i386 */
+/* Page size — 4 KiB on both targets */
 #define DL_PAGE_SIZE	4096
 #define DL_PAGE_MASK	(DL_PAGE_SIZE - 1)
 
-static inline Elf32_Addr
-dl_trunc_page(Elf32_Addr v)
+/*
+ * The machine this copy of libdl runs on (#423).
+ *
+ * ⚠️ Not decoration, and not the same check the old code made.  It used to
+ * refuse a foreign object by CLASS -- `e_ident[EI_CLASS] != ELFCLASS32' --
+ * which worked only while libelf could not read ELF64 either.  elf_open()
+ * accepts both classes now, so refusing an object that does not match the
+ * loader has to be said here or it stops being said at all: dlopen maps into
+ * ITS OWN address space, so a 64-bit object in a 32-bit loader is not a
+ * format to support, it is a file to reject.
+ */
+#if defined(__x86_64__)
+#define DL_ELF_MACHINE	EM_X86_64
+#elif defined(__i386__)
+#define DL_ELF_MACHINE	EM_386
+#else
+#error "libdl: no ELF machine for this target"
+#endif
+
+static inline uintptr_t
+dl_trunc_page(uintptr_t v)
 {
-	return v & ~DL_PAGE_MASK;
+	return v & ~(uintptr_t)DL_PAGE_MASK;
 }
 
-static inline Elf32_Addr
-dl_round_page(Elf32_Addr v)
+static inline uintptr_t
+dl_round_page(uintptr_t v)
 {
-	return (v + DL_PAGE_MASK) & ~DL_PAGE_MASK;
+	return (v + DL_PAGE_MASK) & ~(uintptr_t)DL_PAGE_MASK;
 }
 
 /*
  * Convert ELF segment flags to Mach VM protection.
  */
 static vm_prot_t
-convert_prot(Elf32_Word flags)
+convert_prot(uint32_t flags)
 {
 	vm_prot_t prot = 0;
 
@@ -82,85 +102,95 @@ convert_prot(Elf32_Word flags)
 struct dl_object *
 dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 {
-	const Elf32_Ehdr *ehdr;
-	const Elf32_Phdr *phdr, *ph;
-	int i, nsegs;
-	Elf32_Addr base_vaddr, base_vlimit;
+	int i, nsegs, nphdr, rc;
+	uintptr_t base_vaddr, base_vlimit;
 	vm_size_t mapsize;
 	vm_offset_t mapbase;
 	kern_return_t kr;
-	const Elf32_Phdr *dyn_phdr;
+	uintptr_t dyn_vaddr;
+	int have_dyn;
 	struct dl_object *obj;
-	const Elf32_Phdr *segs[16];	/* max 16 PT_LOAD segments */
+	elf_image_t img;
+	elf_phdr_view_t segs[16];	/* max 16 PT_LOAD segments */
 
-	/* --- Validate ELF header --- */
+	/* --- Read the header and the segment table --- */
 
-	if (filesize < sizeof(Elf32_Ehdr)) {
+	/*
+	 * ⚠️ This used to be ninety lines of header validation and a phdr walk
+	 * written here, which made libdl the SECOND ELF reader in this tree
+	 * (#423).  libelf is the first, it reads both classes, and bootstrap
+	 * exercises its ELF64 path on every x86-64 boot -- so the duplicate was
+	 * also the half that would have had to be taught ELF64 a second time.
+	 *
+	 * 🔑 elf_open() checks strictly MORE than what it replaces: magic,
+	 * class, byte order, version, machine, e_ehsize and e_phentsize, AND
+	 * that the header tables fall inside the buffer -- which the code here
+	 * never did.  A truncated module used to be walked off the end.
+	 */
+	rc = elf_open(filebuf, (size_t)filesize, &img);
+	if (rc != ELF_OK) {
 		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
-			 "%s: file too small", path);
+			 "%s: not a loadable ELF image (elf_open=%d)", path, rc);
 		return NULL;
 	}
 
-	ehdr = (const Elf32_Ehdr *)filebuf;
-
-	if (ehdr->e_ident[EI_MAG0] != ELFMAG0 ||
-	    ehdr->e_ident[EI_MAG1] != ELFMAG1 ||
-	    ehdr->e_ident[EI_MAG2] != ELFMAG2 ||
-	    ehdr->e_ident[EI_MAG3] != ELFMAG3) {
+	if (elf_machine(&img) != DL_ELF_MACHINE) {
 		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
-			 "%s: not an ELF file", path);
+			 "%s: wrong architecture (e_machine=%u, this loader is %u)",
+			 path, (unsigned)elf_machine(&img),
+			 (unsigned)DL_ELF_MACHINE);
+		elf_close(&img);
 		return NULL;
 	}
 
-	if (ehdr->e_ident[EI_CLASS] != ELFCLASS32) {
+	if (elf_type(&img) != ET_DYN) {
 		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
-			 "%s: not 32-bit ELF", path);
-		return NULL;
-	}
-
-	if (ehdr->e_type != ET_DYN) {
-		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
-			 "%s: not a shared object (e_type=%d)", path,
-			 ehdr->e_type);
-		return NULL;
-	}
-
-	if (ehdr->e_machine != EM_386) {
-		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
-			 "%s: wrong architecture (e_machine=%d)", path,
-			 ehdr->e_machine);
-		return NULL;
-	}
-
-	if (ehdr->e_phentsize != sizeof(Elf32_Phdr)) {
-		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
-			 "%s: unexpected phentsize %d", path,
-			 ehdr->e_phentsize);
+			 "%s: not a shared object (e_type=%u)", path,
+			 (unsigned)elf_type(&img));
+		elf_close(&img);
 		return NULL;
 	}
 
 	/* --- Scan program headers --- */
 
-	phdr = (const Elf32_Phdr *)((const char *)filebuf + ehdr->e_phoff);
 	nsegs = 0;
-	dyn_phdr = NULL;
+	have_dyn = 0;
+	dyn_vaddr = 0;
+	nphdr = elf_phdr_count(&img);
 
-	for (i = 0; i < ehdr->e_phnum; i++) {
-		ph = &phdr[i];
+	for (i = 0; i < nphdr; i++) {
+		elf_phdr_view_t ph;
 
-		if (ph->p_type == PT_LOAD) {
+		if (elf_phdr_get(&img, i, &ph) != ELF_OK) {
+			snprintf(dl_error_msg, DL_ERRMSG_SIZE,
+				 "%s: program header %d unreadable", path, i);
+			elf_close(&img);
+			return NULL;
+		}
+
+		if (ph.type == PT_LOAD) {
 			if (nsegs >= 16) {
 				snprintf(dl_error_msg, DL_ERRMSG_SIZE,
 					 "%s: too many PT_LOAD segments",
 					 path);
+				elf_close(&img);
 				return NULL;
 			}
 			segs[nsegs++] = ph;
 		}
 
-		if (ph->p_type == PT_DYNAMIC)
-			dyn_phdr = ph;
+		if (ph.type == PT_DYNAMIC) {
+			dyn_vaddr = ph.vaddr;
+			have_dyn = 1;
+		}
 	}
+
+	/*
+	 * The views above are copies, so nothing below reads through img.  The
+	 * file buffer stays the caller's until this function returns, which is
+	 * what the segment copy below still needs.
+	 */
+	elf_close(&img);
 
 	if (nsegs == 0) {
 		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
@@ -168,7 +198,7 @@ dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 		return NULL;
 	}
 
-	if (dyn_phdr == NULL) {
+	if (!have_dyn) {
 		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
 			 "%s: no PT_DYNAMIC segment", path);
 		return NULL;
@@ -176,9 +206,9 @@ dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 
 	/* --- Compute total VM footprint --- */
 
-	base_vaddr = dl_trunc_page(segs[0]->p_vaddr);
-	base_vlimit = dl_round_page(segs[nsegs - 1]->p_vaddr +
-				    segs[nsegs - 1]->p_memsz);
+	base_vaddr = dl_trunc_page(segs[0].vaddr);
+	base_vlimit = dl_round_page(segs[nsegs - 1].vaddr +
+				    segs[nsegs - 1].memsz);
 	mapsize = base_vlimit - base_vaddr;
 
 	/* --- Allocate contiguous VM region --- */
@@ -195,10 +225,10 @@ dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 	/* --- Copy each PT_LOAD segment into the mapped region --- */
 
 	for (i = 0; i < nsegs; i++) {
-		Elf32_Addr seg_vaddr = segs[i]->p_vaddr;
-		Elf32_Off seg_offset = segs[i]->p_offset;
-		Elf32_Word seg_filesz = segs[i]->p_filesz;
-		Elf32_Word seg_memsz = segs[i]->p_memsz;
+		uintptr_t seg_vaddr = segs[i].vaddr;
+		uint64_t seg_offset = segs[i].offset;
+		uint64_t seg_filesz = segs[i].filesz;
+		uint64_t seg_memsz = segs[i].memsz;
 		vm_offset_t dest;
 
 		/* Bounds check against input file */
@@ -216,23 +246,33 @@ dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 		if (seg_filesz > 0)
 			memcpy((void *)dest,
 			       (const char *)filebuf + seg_offset,
-			       seg_filesz);
+			       (size_t)seg_filesz);
 
-		/* Zero BSS (memsz > filesz) */
+		/*
+		 * Zero BSS (memsz > filesz).
+		 *
+		 * ⚠️ The narrowing is at the pointer and not on the values,
+		 * deliberately: filesz and memsz are 64-bit because the view
+		 * is class-neutral, and adding one of them to a 32-bit
+		 * vm_offset_t would promote the sum and then cut it on the
+		 * cast.  The bound above -- seg_offset + seg_filesz <=
+		 * filesize -- is what makes this narrowing safe, so it has to
+		 * stay in front of it.
+		 */
 		if (seg_memsz > seg_filesz)
-			memset((void *)(dest + seg_filesz), 0,
-			       seg_memsz - seg_filesz);
+			memset((void *)(dest + (vm_size_t)seg_filesz), 0,
+			       (size_t)(seg_memsz - seg_filesz));
 	}
 
 	/* --- Set page protections for each segment --- */
 
 	for (i = 0; i < nsegs; i++) {
-		Elf32_Addr seg_start = dl_trunc_page(segs[i]->p_vaddr);
-		Elf32_Addr seg_end = dl_round_page(segs[i]->p_vaddr +
-						   segs[i]->p_memsz);
+		uintptr_t seg_start = dl_trunc_page(segs[i].vaddr);
+		uintptr_t seg_end = dl_round_page(segs[i].vaddr +
+						  segs[i].memsz);
 		vm_offset_t addr = mapbase + (seg_start - base_vaddr);
 		vm_size_t size = seg_end - seg_start;
-		vm_prot_t prot = convert_prot(segs[i]->p_flags);
+		vm_prot_t prot = convert_prot(segs[i].flags);
 
 		/*
 		 * Skip vm_protect if RWX — that's the default from
@@ -268,7 +308,7 @@ dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 	obj->mapsize = mapsize;
 	obj->vaddrbase = base_vaddr;
 	obj->relocbase = mapbase - base_vaddr;
-	obj->dynamic = (const Elf32_Dyn *)(obj->relocbase + dyn_phdr->p_vaddr);
+	obj->dynamic = (const Elf32_Dyn *)(obj->relocbase + dyn_vaddr);
 	obj->ref_count = 1;
 
 	/* Copy path string */

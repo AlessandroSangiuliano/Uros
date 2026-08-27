@@ -21,10 +21,17 @@ target_include_directories(libdl PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# #423: libdl reads the file image through libelf instead of parsing it a
+# second time.  PUBLIC on the link, because a static library's dependency has
+# to reach whoever links libdl -- the four servers that load driver modules do
+# not name libelf themselves.
+target_link_libraries(libdl PUBLIC libelf)
+
 target_include_directories(libdl PRIVATE
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
+  ${CMAKE_SOURCE_DIR}/src/lib/libelf
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include
