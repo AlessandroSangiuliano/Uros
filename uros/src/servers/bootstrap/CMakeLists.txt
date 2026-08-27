@@ -299,7 +299,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # needs cap_server up already blocks until it is.  A second guard over the
   # same race hides which one is holding.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -315,13 +315,14 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             cap_server:${_SBIN}/cap_server
             pthread_test:${_SBIN}/pthread_test
             cap_test:${_SBIN}/cap_test
+            dl_test:${_SBIN}/dl_test
             fault_test:${_SBIN}/fault_test
             act_test:${_SBIN}/act_test
             cow_test:${_SBIN}/cow_test
     DEPENDS mkbundle name_server_bin netname_test_bin cap_server_bin pthread_test_server
-            cap_test_server fault_test_bin act_test_bin cow_test_bin
+            cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + cap_server + pthread_test + cap_test + fault_test + act_test + cow_test"
+    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + cap_server + pthread_test + cap_test + dl_test + fault_test + act_test + cow_test"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})

@@ -163,6 +163,27 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(file_systems)
 endif()
 
+# The dynamic loader and the module loader (#423).
+#
+# These are not a server, and they are here rather than beside the fleet
+# because they are what four of its members are WAITING for: hal_server,
+# block_device_server, char_server and gpu_server all link libmodload and
+# libdl, and all four load driver plug-ins at runtime.  #429 lists the fleet in
+# boot order, which does not show that one library gates four of them.
+#
+# ⚠️ libdl reads the file image through libelf now instead of parsing it a
+# second time, so it must come after libelf above -- that ordering is the
+# dependency and not a preference.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(lib/libdl)
+  add_subdirectory(lib/libmodload)
+  # And what proves it, which crosses WITH it (#423).  A loader that builds is
+  # not a loader that relocates: the three relocation types the driver plug-ins
+  # use are checked one at a time, each by a wrong ANSWER rather than a fault.
+  add_subdirectory(tests/dl_module)
+  add_subdirectory(tests/dl_test)
+endif()
+
 # bootstrap, ahead of the gate (#422).
 #
 # It is init on this target as it is on i386: the first task the kernel starts,

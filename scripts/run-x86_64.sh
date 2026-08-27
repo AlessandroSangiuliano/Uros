@@ -311,6 +311,13 @@ must_report 'fault_test: started' 'fault_test: [0-9]* of [0-9]* arms passed' \
 must_report 'cap_test: starting' 'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)' \
 	'Its device arms poll for a block_device_server partition that has not crossed to this target, so its silence is indistinguishable from a run that ended early -- and the arms after them ([6]-[10]) test MIG and kernel refusals that need no device at all (#495).'
 
+# 🔑 Added in the same change as the bundle entry, which is the lesson #495
+# left here: cap_test went into the bundle and into neither list, and one run
+# was enough for it to stop dead and be reported as a pass by omission.
+must_report 'dl_test: starting' 'dl_test: [0-9]* of [0-9]* arms passed' \
+	'It loads a shared object through libdl and follows pointers the loader relocated (#423).  A wrong relocation is a plausible pointer, so its failure mode is a fault partway through rather than a WRONG line -- which looks exactly like a run that ended early.'
+
+
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
 # unconditionally from machine_kernel_ready() on the path kern/startup.c must
@@ -570,6 +577,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'fault_test: started'   'fault_test: [0-9]* of [0-9]* arms passed' \
 		'act_test: started'     'act_test: [0-9]* of [0-9]* arms passed' \
 		'cap_test: starting'    'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)' \
+		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
 		sleep 1
 		break
