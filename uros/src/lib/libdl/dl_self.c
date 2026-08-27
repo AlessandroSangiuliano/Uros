@@ -75,7 +75,7 @@ static struct dl_object self_obj;
 int
 dl_bootstrap_self(void)
 {
-	const Elf32_Dyn *dyn;
+	const Elf_Dyn *dyn;
 	vm_offset_t load_bias;
 	struct dl_object *obj = &self_obj;
 
@@ -94,7 +94,7 @@ dl_bootstrap_self(void)
 
 	memset(obj, 0, sizeof(*obj));
 	obj->path = "(main)";
-	obj->dynamic = (const Elf32_Dyn *)&_DYNAMIC[0];
+	obj->dynamic = (const Elf_Dyn *)&_DYNAMIC[0];
 	obj->relocbase = load_bias;
 
 	/*
@@ -104,7 +104,7 @@ dl_bootstrap_self(void)
 	for (dyn = obj->dynamic; dyn->d_tag != DT_NULL; dyn++) {
 		switch (dyn->d_tag) {
 		case DT_SYMTAB:
-			obj->symtab = (const Elf32_Sym *)
+			obj->symtab = (const Elf_Sym *)
 				(dyn->d_un.d_ptr + load_bias);
 			break;
 		case DT_STRTAB:
@@ -115,7 +115,7 @@ dl_bootstrap_self(void)
 			obj->strsize = dyn->d_un.d_val;
 			break;
 		case DT_HASH: {
-			const Elf32_Word *h = (const Elf32_Word *)
+			const Elf_Word *h = (const Elf_Word *)
 				(dyn->d_un.d_ptr + load_bias);
 			obj->nbuckets = h[0];
 			obj->nchains  = h[1];

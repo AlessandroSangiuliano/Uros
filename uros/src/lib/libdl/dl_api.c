@@ -180,7 +180,7 @@ dlsym(void *handle, const char *name)
 {
 	struct dl_object *obj;
 	unsigned long hash;
-	const Elf32_Sym *sym;
+	const Elf_Sym *sym;
 
 	dl_error_msg[0] = '\0';
 
