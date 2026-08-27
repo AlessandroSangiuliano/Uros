@@ -299,6 +299,18 @@ must_report 'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|S
 must_report 'fault_test: started' 'fault_test: [0-9]* of [0-9]* arms passed' \
 	'It is the last thing a bundle boot does, so it is also what tells this script the run is over (#489) -- a fault_test that starts and says nothing leaves the machine idling until the watchdog, which used to be reported as the run failing rather than as this test not answering.'
 
+# ⚠️ The terminator matches either verdict, like pthread_test's above.
+#
+# 🔥 cap_test crossed in #495 and was in NEITHER list for exactly one run,
+# which was enough: it started, printed two arms, went into a poll for a block
+# device server this target does not have, and the run ended and called itself
+# finished without it.  The verdict named five programs and cap_test was not
+# among them -- passed by omission, which is the thing the note above act_test
+# says this file exists to prevent, arriving again the next time the bundle
+# grew.  🔑 Adding to the bundle and adding to these lists are one change.
+must_report 'cap_test: starting' 'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)' \
+	'Its device arms poll for a block_device_server partition that has not crossed to this target, so its silence is indistinguishable from a run that ended early -- and the arms after them ([6]-[10]) test MIG and kernel refusals that need no device at all (#495).'
+
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
 # unconditionally from machine_kernel_ready() on the path kern/startup.c must
@@ -557,6 +569,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'pthread_test: starting' 'pthread_test: \(ALL [0-9]* TESTS PASSED\|SOME TESTS FAILED\)' \
 		'fault_test: started'   'fault_test: [0-9]* of [0-9]* arms passed' \
 		'act_test: started'     'act_test: [0-9]* of [0-9]* arms passed' \
+		'cap_test: starting'    'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
 		sleep 1
 		break
