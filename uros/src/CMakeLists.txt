@@ -242,6 +242,29 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/pthread_test)
 endif()
 
+# And the first server of the fleet (#495, part of #429).
+#
+# ⚠️ The issue says cap_server "links libmach and libpthreads and nothing
+# else".  It links FIVE -- libcap, libpthreads, libmach, libnetname and
+# libgpu_console -- and the conclusion survives only because all five happen to
+# be above this gate already, each for its own reason.  Checked rather than
+# inherited: the premise was optimistic and the answer was still yes.
+#
+# It is second in boot order, after the name server, because what comes above
+# it asks it for capabilities.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/cap_server)
+endif()
+
+# And its test, which crosses WITH the server and not after it (#495).
+#
+# 🔑 A server that starts and says so is not evidence that it works; cap_test
+# is the only thing on either target that asks it for a capability and checks
+# the answer.  Landing the server alone would mean landing an unmeasured one.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/cap_test)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")

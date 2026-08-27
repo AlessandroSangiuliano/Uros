@@ -106,11 +106,18 @@ target_compile_options(libcap PRIVATE
   ${UROS_ARCH_FLAGS} $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -fno-builtin  -mstack-protector-guard=global -include stdint.h>
 )
 
+# ⚠️ sa_mach holds the freestanding libc headers, and it is the only root in
+# this tree that has a <string.h>.  Without it a target does not fail to build:
+# it silently reaches the HOST's glibc <string.h> instead, so libcap and
+# cap_server -- two halves of one -nostdlib binary -- were compiling against
+# two different C libraries.  Nothing diverged, because libcap uses only
+# memcpy and both declarations agree; the point is that nothing was checking.
 target_include_directories(libcap PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

@@ -240,13 +240,14 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap.conf)
   set(_SBIN   ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin)
 
-  # Four lines, and the lines that are NOT here are the point: i386's
-  # bootstrap.conf names hal_server, block_device_server, default_pager,
-  # ext_server and a dozen more, and bootstrap would go looking for each of
-  # them in turn.  It names what has crossed: the name server, the task that
-  # asks the kernel for a fault (#467), the task that takes its own threads out
-  # of calls they will not finish (#475), and the task that forks with
-  # copy-on-write (#407).
+  # The lines that are NOT here are the point: i386's bootstrap.conf names
+  # hal_server, block_device_server, default_pager, ext_server and a dozen
+  # more, and bootstrap would go looking for each of them in turn.  It names
+  # what has crossed: the name server, the task that asks the kernel for a
+  # fault (#467), the task that takes its own threads out of calls they will
+  # not finish (#475), the task that forks with copy-on-write (#407), and --
+  # since #495 -- the first server of the fleet plus the only program on
+  # either target that asks it for a capability and checks the answer.
   #
   # ⚠️ The ORDER is load-bearing rather than tidy, and it is least-damage
   # first.  fault_test faults on purpose and act_test kills a thread on
@@ -273,12 +274,32 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # boot on this target has ever used, so it is the one most likely to end the
   # run.  Last means every other verdict is already in the log when it does,
   # and the blame cannot land anywhere else.
+  #
+  # cap_server (#495) is THIRD, and it is the first entry here that is a
+  # server rather than a program that finishes: it is placed right after the
+  # test that just proved the name service answers, because registering with
+  # that service is the whole of its startup.
+  #
+  # cap_test is placed LATE and not next to its server, against the habit that
+  # put netname_test next to the name server.  It waits for cap_server itself
+  # -- wait_for_cap_server() spins on netname_look_up with no upper bound --
+  # so adjacency buys nothing, and it deliberately hands the kernel a message
+  # that must be refused halfway (#442).  That is behaviour from the fault_test
+  # end of this list, not the netname_test end, so it is ranked by what it does
+  # to the kernel rather than by who it talks to.
+  #
   # ⚠️ No `-w' on the name server here: bootstrap waits for it by itself
   # (#492).  The decision lives in parse_config_file(), because this file is
   # one of FOUR that write that same line and a flag remembered in four
   # places is a flag that will be missing from the fifth.
+  #
+  # ⚠️ And no `-w' on cap_server either, for the opposite reason: the flag
+  # exists and cap_server does send bootstrap_completed(), so it would work --
+  # and it would be a guard that can never fire, because the only task that
+  # needs cap_server up already blocks until it is.  A second guard over the
+  # same race hides which one is holding.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\npthread_test pthread_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -291,13 +312,16 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             bootstrap.conf:${_CONF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
+            cap_server:${_SBIN}/cap_server
             pthread_test:${_SBIN}/pthread_test
+            cap_test:${_SBIN}/cap_test
             fault_test:${_SBIN}/fault_test
             act_test:${_SBIN}/act_test
             cow_test:${_SBIN}/cow_test
-    DEPENDS mkbundle name_server_bin netname_test_bin pthread_test_server fault_test_bin act_test_bin cow_test_bin
+    DEPENDS mkbundle name_server_bin netname_test_bin cap_server_bin pthread_test_server
+            cap_test_server fault_test_bin act_test_bin cow_test_bin
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + pthread_test + fault_test + act_test + cow_test"
+    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + cap_server + pthread_test + cap_test + fault_test + act_test + cow_test"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})
