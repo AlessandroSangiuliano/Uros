@@ -42,25 +42,25 @@ struct dl_object {
 	char		*path;		/* pathname of the .so file */
 	vm_offset_t	mapbase;	/* base address of mapped region */
 	vm_size_t	mapsize;	/* total size of mapped region */
-	Elf32_Addr	vaddrbase;	/* lowest vaddr from PT_LOAD segments */
+	Elf_Addr	vaddrbase;	/* lowest vaddr from PT_LOAD segments */
 	vm_offset_t	relocbase;	/* relocation delta = mapbase - vaddrbase */
 
 	/* Pointers into the mapped image (set by digest_dynamic) */
-	const Elf32_Dyn	*dynamic;	/* .dynamic section */
-	const Elf32_Sym	*symtab;	/* DT_SYMTAB */
+	const Elf_Dyn	*dynamic;	/* .dynamic section */
+	const Elf_Sym	*symtab;	/* DT_SYMTAB */
 	const char	*strtab;	/* DT_STRTAB */
 	unsigned long	strsize;	/* DT_STRSZ */
 
 	/* SYSV hash table */
-	const Elf32_Word *buckets;	/* hash buckets array */
+	const Elf_Word *buckets;	/* hash buckets array */
 	unsigned long	nbuckets;
-	const Elf32_Word *chains;	/* hash chains array */
+	const Elf_Word *chains;	/* hash chains array */
 	unsigned long	nchains;
 
 	/* Relocations */
-	const Elf32_Rel	*rel;		/* DT_REL */
+	const Elf_Reloc	*rel;		/* DT_REL on i386, DT_RELA on x86-64 */
 	unsigned long	relsize;	/* DT_RELSZ */
-	const Elf32_Rel	*pltrel;	/* DT_JMPREL (PLT relocations) */
+	const Elf_Reloc	*pltrel;	/* DT_JMPREL (PLT relocations) */
 	unsigned long	pltrelsize;	/* DT_PLTRELSZ */
 
 	/* Init/fini */
@@ -132,7 +132,7 @@ int			dl_relocate(struct dl_object *obj);
 unsigned long		dl_elf_hash(const char *name);
 
 /* elf_symbol.c — Look up symbol in one object's hash table */
-const Elf32_Sym		*dl_symlook_obj(const char *name,
+const Elf_Sym		*dl_symlook_obj(const char *name,
 					unsigned long hash,
 					const struct dl_object *obj);
 

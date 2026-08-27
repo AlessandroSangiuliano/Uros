@@ -41,23 +41,21 @@
 #define DL_PAGE_MASK	(DL_PAGE_SIZE - 1)
 
 /*
- * The machine this copy of libdl runs on (#423).
+ * The machine this copy of libdl runs on comes from <mach/elf.h> as
+ * ELF_TARGET_MACHINE (#423).
  *
- * ⚠️ Not decoration, and not the same check the old code made.  It used to
- * refuse a foreign object by CLASS -- `e_ident[EI_CLASS] != ELFCLASS32' --
- * which worked only while libelf could not read ELF64 either.  elf_open()
- * accepts both classes now, so refusing an object that does not match the
- * loader has to be said here or it stops being said at all: dlopen maps into
- * ITS OWN address space, so a 64-bit object in a 32-bit loader is not a
- * format to support, it is a file to reject.
+ * ⚠️ Not decoration, and not the check the old code made.  That one refused a
+ * foreign object by CLASS -- `e_ident[EI_CLASS] != ELFCLASS32' -- which worked
+ * only while nothing here could read ELF64 either.  elf_open() accepts both
+ * classes now, correctly, so the refusal has to be said here or it stops being
+ * said at all: dlopen maps into ITS OWN address space, so a 64-bit object in a
+ * 32-bit loader is not a format to support, it is a file to reject.
+ *
+ * 🔑 And taken from the shared header rather than defined here.  The first
+ * version of this did define its own, which would have been a second answer to
+ * "which machine am I" in a tree that already had one -- the same duplication
+ * this issue exists to remove, reintroduced one file over.
  */
-#if defined(__x86_64__)
-#define DL_ELF_MACHINE	EM_X86_64
-#elif defined(__i386__)
-#define DL_ELF_MACHINE	EM_386
-#else
-#error "libdl: no ELF machine for this target"
-#endif
 
 static inline uintptr_t
 dl_trunc_page(uintptr_t v)
@@ -134,11 +132,11 @@ dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 		return NULL;
 	}
 
-	if (elf_machine(&img) != DL_ELF_MACHINE) {
+	if (elf_machine(&img) != ELF_TARGET_MACHINE) {
 		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
 			 "%s: wrong architecture (e_machine=%u, this loader is %u)",
 			 path, (unsigned)elf_machine(&img),
-			 (unsigned)DL_ELF_MACHINE);
+			 (unsigned)ELF_TARGET_MACHINE);
 		elf_close(&img);
 		return NULL;
 	}
@@ -308,7 +306,7 @@ dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 	obj->mapsize = mapsize;
 	obj->vaddrbase = base_vaddr;
 	obj->relocbase = mapbase - base_vaddr;
-	obj->dynamic = (const Elf32_Dyn *)(obj->relocbase + dyn_vaddr);
+	obj->dynamic = (const Elf_Dyn *)(obj->relocbase + dyn_vaddr);
 	obj->ref_count = 1;
 
 	/* Copy path string */
@@ -339,13 +337,13 @@ dl_map_object(const void *filebuf, unsigned int filesize, const char *path)
 void
 dl_digest_dynamic(struct dl_object *obj)
 {
-	const Elf32_Dyn *dyn;
+	const Elf_Dyn *dyn;
 
 	for (dyn = obj->dynamic; dyn->d_tag != DT_NULL; dyn++) {
 		switch (dyn->d_tag) {
 
 		case DT_SYMTAB:
-			obj->symtab = (const Elf32_Sym *)
+			obj->symtab = (const Elf_Sym *)
 				(obj->relocbase + dyn->d_un.d_ptr);
 			break;
 
@@ -360,7 +358,10 @@ dl_digest_dynamic(struct dl_object *obj)
 
 		case DT_HASH:
 		{
-			const Elf32_Word *hashtab = (const Elf32_Word *)
+			/* ⚠️ Elf_Word and not Elf_Addr: the SYSV hash table is
+			 * four-byte entries on both classes.  ELF64 widens
+			 * addresses, not counts. */
+			const Elf_Word *hashtab = (const Elf_Word *)
 				(obj->relocbase + dyn->d_un.d_ptr);
 			obj->nbuckets = hashtab[0];
 			obj->nchains = hashtab[1];
@@ -369,17 +370,38 @@ dl_digest_dynamic(struct dl_object *obj)
 			break;
 		}
 
-		case DT_REL:
-			obj->rel = (const Elf32_Rel *)
+		/*
+		 * ⚠️ ELF_DT_REL, not DT_REL: x86-64 uses RELA exclusively, so
+		 * the tag to look for there is DT_RELA and this table would
+		 * otherwise stay NULL -- and a NULL relocation table is not an
+		 * error anywhere below, it is a loop that runs zero times and
+		 * reports success (#423).
+		 *
+		 * #423: -DABLATE_423_RELTAG=1 looks for the other machine's
+		 * tag, so nothing is ever found.  Off in every build.
+		 *
+		 * 🔑 This is the ablation that discriminates, and it is the
+		 * SECOND one tried.  The first swapped where the addend is
+		 * read from and changed nothing at all, because GNU ld writes
+		 * the addend into the slot as well as into the entry -- see
+		 * reloc_addend() in elf_reloc.c.  Choosing the wrong tag is
+		 * the mistake with no second source to fall back on.
+		 */
+#if defined(ABLATE_423_RELTAG)
+		case (ELF_RELA_HAS_ADDEND ? DT_REL : DT_RELA):
+#else
+		case ELF_DT_REL:
+#endif
+			obj->rel = (const Elf_Reloc *)
 				(obj->relocbase + dyn->d_un.d_ptr);
 			break;
 
-		case DT_RELSZ:
+		case ELF_DT_RELSZ:
 			obj->relsize = dyn->d_un.d_val;
 			break;
 
 		case DT_JMPREL:
-			obj->pltrel = (const Elf32_Rel *)
+			obj->pltrel = (const Elf_Reloc *)
 				(obj->relocbase + dyn->d_un.d_ptr);
 			break;
 

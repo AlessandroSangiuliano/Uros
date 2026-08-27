@@ -54,15 +54,15 @@ dl_elf_hash(const char *name)
 /* ================================================================
  * Look up a symbol in one loaded object's SYSV hash table.
  *
- * Returns the Elf32_Sym pointer if found and defined, NULL otherwise.
+ * Returns the Elf_Sym pointer if found and defined, NULL otherwise.
  * ================================================================ */
 
-const Elf32_Sym *
+const Elf_Sym *
 dl_symlook_obj(const char *name, unsigned long hash,
 	       const struct dl_object *obj)
 {
 	unsigned long symnum;
-	const Elf32_Sym *symp;
+	const Elf_Sym *symp;
 	const char *strp;
 
 	if (obj->buckets == NULL)
@@ -102,7 +102,7 @@ void *
 dl_resolve_symbol(const char *name, const struct dl_object *obj)
 {
 	unsigned long hash;
-	const Elf32_Sym *sym;
+	const Elf_Sym *sym;
 	const struct dl_object *o;
 	const struct dl_host_sym *hs;
 

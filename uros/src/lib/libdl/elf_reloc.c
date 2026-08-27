@@ -21,11 +21,18 @@
  */
 
 /*
- * elf_reloc.c — i386 ELF relocation processing for libdl.
+ * elf_reloc.c — ELF relocation processing for libdl, both machines (#423).
  *
  * Relocation logic derived from FreeBSD rtld-elf i386/reloc.c
  * by John D. Polstra (BSD 2-clause license), adapted for Uros:
  * symbol resolution via host symbol table, no goto.
+ *
+ * ⚠️ The heading said "i386" and this file now serves both, which is not the
+ * same as having been widened: the loop was reshaped.  i386 relocations ADD to
+ * the slot and x86-64 relocations REPLACE it, so the cases are written as
+ * "*where = f(symbol, addend, base)" with the addend coming from
+ * reloc_addend() below -- one body that is correct on both rather than one
+ * that is correct on one and quietly wrong on the other.
  */
 
 #include <mach.h>
@@ -43,10 +50,10 @@
  *
  * Returns the resolved address, or 0 with dl_error_msg set on failure.
  */
-static Elf32_Addr
+static Elf_Addr
 resolve_reloc_sym(const struct dl_object *obj, unsigned long symnum)
 {
-	const Elf32_Sym *sym;
+	const Elf_Sym *sym;
 	const char *name;
 	void *addr;
 
@@ -62,15 +69,15 @@ resolve_reloc_sym(const struct dl_object *obj, unsigned long symnum)
 
 	/* If the symbol is defined in this object, use it directly */
 	if (sym->st_shndx != SHN_UNDEF)
-		return (Elf32_Addr)(obj->relocbase + sym->st_value);
+		return (Elf_Addr)(obj->relocbase + sym->st_value);
 
 	/* Otherwise resolve via object hash + host symtab */
 	addr = dl_resolve_symbol(name, obj);
 	if (addr != NULL)
-		return (Elf32_Addr)addr;
+		return (Elf_Addr)addr;
 
 	/* Weak undefined symbols resolve to zero */
-	if (ELF32_ST_BIND(sym->st_info) == STB_WEAK)
+	if (ELF_ST_BIND(sym->st_info) == STB_WEAK)
 		return 0;
 
 	snprintf(dl_error_msg, DL_ERRMSG_SIZE,
@@ -90,13 +97,53 @@ resolve_reloc_sym(const struct dl_object *obj, unsigned long symnum)
  * Returns 0 on success, -1 on failure (dl_error_msg set).
  * ================================================================ */
 
+/*
+ * The addend of one relocation entry (#423).
+ *
+ * 🔑 This is the whole shape difference between the two machines, and it is
+ * not a type: i386 uses REL, where the addend is already sitting in the slot
+ * and a relocation ADDS to it; x86-64 uses RELA, where the addend travels in
+ * the entry and the relocation REPLACES the slot.  Writing every case as
+ * "*where = f(S, A, B)" with A read from here makes one body correct for both,
+ * where "*where += ..." is correct for exactly one and silently doubles the
+ * bias on the other.
+ *
+ * ⚠️ And a measured caveat, because the obvious claim about this is FALSE.
+ *
+ * It is tempting to say that reading the wrong source gives a pointer wrong by
+ * one load address.  It does not, with this linker: GNU ld writes the addend
+ * into the slot as well as into the entry, so on dl_module.so the three
+ * RELATIVE entries carry addends 0x1020, 0x2000, 0x2000 and their slots hold
+ * exactly those.  Reading *where instead of r_addend gives the same number,
+ * and the ablation that swapped them changed nothing -- 4 of 4 either way.
+ *
+ * 🔑 So the RELA source is used because it is the one the format DEFINES, not
+ * because the other is observably broken here.  The slot agreeing is this
+ * linker's courtesy: a RELA producer is permitted to leave zeros there, and
+ * anything that relocates twice reads its own first pass.  A correctness that
+ * depends on a courtesy is not one that should be relied on, and it is exactly
+ * the kind that holds until the day it does not.
+ */
+
+static inline Elf_Addr
+reloc_addend(const Elf_Reloc *rel, const Elf_Addr *where)
+{
+#if ELF_RELA_HAS_ADDEND
+	(void)where;
+	return (Elf_Addr)rel->r_addend;
+#else
+	(void)rel;
+	return *where;
+#endif
+}
+
 int
 dl_relocate(struct dl_object *obj)
 {
-	const Elf32_Rel *rel, *rellim;
-	Elf32_Addr *where;
+	const Elf_Reloc *rel, *rellim;
+	Elf_Addr *where;
 	unsigned long sym_idx;
-	Elf32_Addr sym_addr;
+	Elf_Addr sym_addr, addend;
 	int reltype;
 
 	/* Make text writable if needed */
@@ -109,43 +156,55 @@ dl_relocate(struct dl_object *obj)
 	/* --- Process DT_REL relocations --- */
 
 	if (obj->rel != NULL && obj->relsize > 0) {
-		rellim = (const Elf32_Rel *)
+		rellim = (const Elf_Reloc *)
 			((const char *)obj->rel + obj->relsize);
 
 		for (rel = obj->rel; rel < rellim; rel++) {
-			where = (Elf32_Addr *)
+			where = (Elf_Addr *)
 				(obj->relocbase + rel->r_offset);
-			reltype = ELF32_R_TYPE(rel->r_info);
-			sym_idx = ELF32_R_SYM(rel->r_info);
+			reltype = (int)ELF_R_TYPE(rel->r_info);
+			sym_idx = (unsigned long)ELF_R_SYM(rel->r_info);
+			addend = reloc_addend(rel, where);
 
 			switch (reltype) {
 
-			case R_386_NONE:
+			case ELF_R_NONE:
 				break;
 
-			case R_386_32:
+			case ELF_R_DIRECT:
 				sym_addr = resolve_reloc_sym(obj, sym_idx);
 				if (sym_addr == 0 && dl_error_msg[0] != '\0')
 					return -1;
-				*where += sym_addr;
+				*where = sym_addr + addend;
 				break;
 
-			case R_386_PC32:
+			case ELF_R_PC32:
 				sym_addr = resolve_reloc_sym(obj, sym_idx);
 				if (sym_addr == 0 && dl_error_msg[0] != '\0')
 					return -1;
-				*where += sym_addr - (Elf32_Addr)where;
+				/*
+				 * ⚠️ Thirty-two bits on BOTH machines, and the
+				 * only case here where that is true: the name
+				 * says so and R_X86_64_PC32 means it -- the
+				 * displacement is a 32-bit field even though
+				 * addresses are 64.  Storing through where as
+				 * an Elf_Addr would write eight bytes over the
+				 * four the linker reserved, and over whatever
+				 * follows them.
+				 */
+				*(Elf_Word *)where = (Elf_Word)
+					(sym_addr + addend - (Elf_Addr)where);
 				break;
 
-			case R_386_GLOB_DAT:
+			case ELF_R_GLOB_DAT:
 				sym_addr = resolve_reloc_sym(obj, sym_idx);
 				if (sym_addr == 0 && dl_error_msg[0] != '\0')
 					return -1;
 				*where = sym_addr;
 				break;
 
-			case R_386_RELATIVE:
-				*where += (Elf32_Addr)obj->relocbase;
+			case ELF_R_RELATIVE:
+				*where = (Elf_Addr)obj->relocbase + addend;
 				break;
 
 			default:
@@ -161,14 +220,24 @@ dl_relocate(struct dl_object *obj)
 	/* --- Process DT_JMPREL (PLT) relocations eagerly --- */
 
 	if (obj->pltrel != NULL && obj->pltrelsize > 0) {
-		rellim = (const Elf32_Rel *)
+		rellim = (const Elf_Reloc *)
 			((const char *)obj->pltrel + obj->pltrelsize);
 
 		for (rel = obj->pltrel; rel < rellim; rel++) {
-			where = (Elf32_Addr *)
+			where = (Elf_Addr *)
 				(obj->relocbase + rel->r_offset);
-			sym_idx = ELF32_R_SYM(rel->r_info);
+			sym_idx = (unsigned long)ELF_R_SYM(rel->r_info);
 
+			/*
+			 * ⚠️ The type is NOT checked here, and that was true
+			 * before this issue too: everything in DT_JMPREL is
+			 * assumed to be a JMP_SLOT.  It holds -- a PLT table
+			 * carries nothing else -- but it means the assumption
+			 * is the only thing keeping a foreign entry from being
+			 * written as an address.  Named rather than fixed,
+			 * because refusing it needs a decision about what a
+			 * mixed table should do.
+			 */
 			sym_addr = resolve_reloc_sym(obj, sym_idx);
 			if (sym_addr == 0 && dl_error_msg[0] != '\0')
 				return -1;

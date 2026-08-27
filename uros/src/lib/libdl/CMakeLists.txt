@@ -9,7 +9,24 @@ set(LIB_SOURCES
   dl_self.c
 )
 
+# #423: -DUROS_ABLATE_423_RELTAG=ON makes libdl look for the OTHER machine's
+# relocation tag, so the table is never found and nothing is relocated.  Off in
+# every build.  It exists because dl_test's four arms passed at the first
+# attempt, and arms that have never been red are a claim about the test rather
+# than about the loader.
+#
+# 🔑 The second ablation tried.  The first swapped the SOURCE of the addend --
+# r_addend against the slot -- and changed nothing: GNU ld writes the addend
+# into both, so the two readings agree on every entry dl_module.so has.  A
+# negative result, and the reason the comment in elf_reloc.c no longer claims
+# that reading the wrong one is observably wrong.
+option(UROS_ABLATE_423_RELTAG "Verify dl_test by looking for the wrong relocation tag" OFF)
+
 add_library(libdl STATIC ${LIB_SOURCES})
+
+if(UROS_ABLATE_423_RELTAG)
+  target_compile_definitions(libdl PRIVATE ABLATE_423_RELTAG=1)
+endif()
 
 add_dependencies(libdl mig_mach_public_headers)
 
