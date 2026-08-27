@@ -187,8 +187,21 @@ main(int argc, char **argv)
 
 	/*
 	 * [2] The ops table — the shape the driver plug-ins use.  Its magic
-	 * needs no relocation and its pointers each need one, so this arm
-	 * checks the pointers by their VALUES rather than by calling them.
+	 * needs no relocation and each of its pointers needs one.
+	 *
+	 * 🔥 Checked by COMPARING the pointer, not by following it.  The first
+	 * version read `*ops->answer_ptr' to see whether it named the magic --
+	 * which is the same mistake as the guard below it, one field over: an
+	 * unrelocated pointer holds a link-time address, and dereferencing it
+	 * is either a fault or a garbage read, neither of which is a verdict.
+	 * It cost a run whose arm [2] was counted and printed nothing.
+	 *
+	 * ⚠️ And it needs no dereference to be decided: arm [1] has already
+	 * validated the SAME address by a route that cannot lie -- dlsym plus
+	 * the load bias -- so the two must be equal.  A pointer compared
+	 * against a known-good pointer is a stronger check than a value read
+	 * through it, because a wrong pointer that happens to point at the
+	 * right bytes would pass the second and fails this one.
 	 */
 	ops = (const struct dl_module_ops *)dlsym(h, "dl_test_module_ops");
 	if (ops == NULL) {
@@ -198,13 +211,26 @@ main(int argc, char **argv)
 		arm("[2] ops table", 0,
 		    "the struct itself did not survive relocation",
 		    ops->magic, DL_MODULE_MAGIC);
+	} else if (answer_ptr == NULL || failed > 0) {
+		/*
+		 * 🔥 Gated on arm [1] having PASSED, not merely having run.
+		 *
+		 * Its reference is arm [1]'s pointer, so if that one is wrong
+		 * this comparison is between two values that are wrong in the
+		 * same way -- and they agree, because nothing relocated either
+		 * of them.  Measured: under the ablation this arm reported OK
+		 * one line after arm [1] reported WRONG about the same address.
+		 * A comparison is only a check when one side is known good.
+		 */
+		printf("dl_test: [2] ops table: SKIPPED — arm [1] did not "
+		       "validate the pointer this one compares against\n");
 	} else {
 		arm("[2] ops table",
-		    ops->answer_ptr != NULL &&
-		    *ops->answer_ptr == DL_MODULE_MAGIC,
-		    "a relocated pointer inside the struct names the wrong thing",
-		    ops->answer_ptr ? (unsigned)*ops->answer_ptr : 0,
-		    DL_MODULE_MAGIC);
+		    ops->answer_ptr == *answer_ptr,
+		    "the relocated pointer in the struct is not the one arm [1] "
+		    "validated",
+		    (unsigned)(uintptr_t)ops->answer_ptr,
+		    (unsigned)(uintptr_t)*answer_ptr);
 	}
 
 	/*
