@@ -399,6 +399,10 @@ typedef Elf32_Phdr	Elf_Phdr;
 #define ELF_TARGET_NAME		"i386"
 #endif
 
+/* The rest of the pair -- Elf_Sym, Elf_Dyn, Elf_Rela and the relocation
+ * tags -- is at the END of this file, because it names the ELF64 structures
+ * and those are declared after the dynamic-array tags below. */
+
 /* segment types - page 5-3, figure 5-2 */
 
 #define PT_NULL		0
@@ -474,6 +478,190 @@ typedef struct {
 #define R_386_RELATIVE	8
 #define R_386_GOTOFF	9
 #define R_386_GOTPC	10
+
+/*
+ * ================================================================
+ * ELF64: the tables a loader reads after the program headers (#423)
+ * ================================================================
+ *
+ * The header above stops at Elf64_Ehdr and Elf64_Phdr, which is what a boot
+ * image needs -- PT_LOAD and nothing else.  A dynamic loader needs more, and
+ * libelf says so at six of its accessors: "sections, symbols and the dynamic
+ * table need Elf64_Shdr, Elf64_Sym and Elf64_Dyn, which <mach/elf.h> does not
+ * define yet -- so _shnum stays zero and the accessors refuse by class".
+ *
+ * They are defined here now because libdl loads driver modules and reads all
+ * three.  ⚠️ Defining them does not implement libelf's ELF64 accessors: those
+ * still refuse, and their comments are updated to say the types now exist
+ * rather than that they do not.  Writing six accessors nobody calls is the
+ * mistake libelf's own ELF64 was reported as done by.
+ *
+ * 🔑 The asymmetries, which are why these are written out rather than derived
+ * from the ELF32 ones by a macro:
+ *
+ *   Elf64_Sym    st_name, st_info, st_other, st_shndx come FIRST -- ELF32 puts
+ *                st_value and st_size before st_info.  A macro would hide it.
+ *   r_info       is 64 bits wide, and the split moves: the symbol index is the
+ *                top 32 bits and the type is the bottom 32, where ELF32 uses
+ *                24 and 8.  ELF64_R_TYPE is NOT a cast to unsigned char.
+ *   Rela         is the norm on x86-64 and REL is not used at all, which is a
+ *                difference in the relocation LOOP and not only in the type:
+ *                RELA replaces the slot with addend + base, REL adds to what
+ *                the slot already holds (#422 in the bootstrap loader).
+ */
+
+typedef struct {
+	Elf64_Word	sh_name;
+	Elf64_Word	sh_type;
+	Elf64_Xword	sh_flags;
+	Elf64_Addr	sh_addr;
+	Elf64_Off	sh_offset;
+	Elf64_Xword	sh_size;
+	Elf64_Word	sh_link;
+	Elf64_Word	sh_info;
+	Elf64_Xword	sh_addralign;
+	Elf64_Xword	sh_entsize;
+} Elf64_Shdr;
+
+typedef struct {
+	Elf64_Word	st_name;
+	unsigned char	st_info;	/* ⚠️ third here, sixth in ELF32 */
+	unsigned char	st_other;
+	Elf64_Half	st_shndx;
+	Elf64_Addr	st_value;
+	Elf64_Xword	st_size;
+} Elf64_Sym;
+
+typedef struct {
+	Elf64_Addr	r_offset;
+	Elf64_Xword	r_info;
+} Elf64_Rel;
+
+typedef struct {
+	Elf64_Addr	r_offset;
+	Elf64_Xword	r_info;
+	Elf64_Sxword	r_addend;
+} Elf64_Rela;
+
+typedef struct {
+	Elf64_Sxword	d_tag;
+	union {
+	    Elf64_Xword	d_val;
+	    Elf64_Addr	d_ptr;
+	} d_un;
+} Elf64_Dyn;
+
+_Static_assert(sizeof(Elf64_Shdr) == 64, "ELF64: a section header is sixty-four bytes");
+_Static_assert(sizeof(Elf64_Sym)  == 24, "ELF64: a symbol is twenty-four bytes");
+_Static_assert(sizeof(Elf64_Rel)  == 16, "ELF64: a REL entry is sixteen bytes");
+_Static_assert(sizeof(Elf64_Rela) == 24, "ELF64: a RELA entry is twenty-four bytes");
+_Static_assert(sizeof(Elf64_Dyn)  == 16, "ELF64: a dynamic entry is sixteen bytes");
+
+#define ELF64_ST_BIND(i)	((i) >> 4)
+#define ELF64_ST_TYPE(i)	((i) & 0xf)
+
+#define ELF64_R_SYM(__i)	((Elf64_Word) ((__i) >> 32))
+#define ELF64_R_TYPE(__i)	((Elf64_Word) ((__i) & 0xffffffffULL))
+
+/*
+ * x86-64 relocations.  A separate namespace from R_386_*, not a superset:
+ * R_X86_64_GLOB_DAT is 6 and R_386_GLOB_DAT is also 6, and they mean the same
+ * thing -- but R_X86_64_64 is 1 where R_386_32 is 1, and the two describe
+ * different widths.  Nothing may compare a type number without knowing which
+ * machine produced it.
+ */
+#define R_X86_64_NONE		0
+#define R_X86_64_64		1
+#define R_X86_64_PC32		2
+#define R_X86_64_GOT32		3
+#define R_X86_64_PLT32		4
+#define R_X86_64_COPY		5
+#define R_X86_64_GLOB_DAT	6
+#define R_X86_64_JUMP_SLOT	7
+#define R_X86_64_RELATIVE	8
+#define R_X86_64_GOTPCREL	9
+#define R_X86_64_32		10
+#define R_X86_64_32S		11
+
+/*
+ * The rest of the target-class pair, for a userspace loader (#423).
+ *
+ * 🔑 The same argument as the Elf_Ehdr/Elf_Phdr block above, one level out:
+ * dlopen maps an object into the address space it is already running in, so
+ * the class it can accept is fixed by the loader itself, and an object of the
+ * other class is not a variant to handle but a file for a different machine.
+ * That is why libdl compares elf_machine() against ELF_TARGET_MACHINE from
+ * here rather than defining its own -- libelf reads both classes now, so every
+ * caller that has to refuse one needs the same answer to "which am I".
+ */
+#if defined(__x86_64__)
+typedef Elf64_Shdr	Elf_Shdr;
+typedef Elf64_Sym	Elf_Sym;
+typedef Elf64_Dyn	Elf_Dyn;
+typedef Elf64_Rel	Elf_Rel;
+typedef Elf64_Rela	Elf_Rela;
+typedef Elf64_Addr	Elf_Addr;
+typedef Elf64_Xword	Elf_Xword;
+typedef Elf64_Word	Elf_Word;
+#define ELF_R_SYM(i)	ELF64_R_SYM(i)
+#define ELF_R_TYPE(i)	ELF64_R_TYPE(i)
+#define ELF_ST_BIND(i)	ELF64_ST_BIND(i)
+#define ELF_ST_TYPE(i)	ELF64_ST_TYPE(i)
+/*
+ * ⚠️ Which table the relocations come out of, and it is not a style choice:
+ * x86-64 uses RELA exclusively and i386 uses REL, so DT_RELA/DT_RELASZ are the
+ * tags to read on one and DT_REL/DT_RELSZ on the other.  A loop that reads the
+ * wrong pair does not fail -- it finds no table and returns success, and an
+ * empty relocation table is indistinguishable from a pass over nothing.
+ */
+#define ELF_DT_REL	DT_RELA
+#define ELF_DT_RELSZ	DT_RELASZ
+#define ELF_RELA_HAS_ADDEND	1
+/* The entry the dynamic relocation tables actually hold on this machine.
+ * ⚠️ A separate name from Elf_Rel because the two are different SIZES -- 24
+ * bytes against 16 -- so a pointer walk over the wrong one lands between
+ * entries rather than failing. */
+typedef Elf64_Rela	Elf_Reloc;
+#else
+typedef Elf32_Shdr	Elf_Shdr;
+typedef Elf32_Sym	Elf_Sym;
+typedef Elf32_Dyn	Elf_Dyn;
+typedef Elf32_Rel	Elf_Rel;
+typedef Elf32_Rela	Elf_Rela;
+typedef Elf32_Addr	Elf_Addr;
+typedef Elf32_Word	Elf_Xword;
+typedef Elf32_Word	Elf_Word;
+#define ELF_R_SYM(i)	ELF32_R_SYM(i)
+#define ELF_R_TYPE(i)	ELF32_R_TYPE(i)
+#define ELF_ST_BIND(i)	ELF32_ST_BIND(i)
+#define ELF_ST_TYPE(i)	ELF32_ST_TYPE(i)
+#define ELF_DT_REL	DT_REL
+#define ELF_DT_RELSZ	DT_RELSZ
+#define ELF_RELA_HAS_ADDEND	0
+typedef Elf32_Rel	Elf_Reloc;
+#endif
+
+/*
+ * 🔑 One name per relocation ACTION, not per number.  The two namespaces are
+ * separate -- R_386_JMP_SLOT is 7 and R_X86_64_JUMP_SLOT is 7, which is a
+ * coincidence of numbering and not a shared meaning -- so the loop matches on
+ * these and a type number never crosses machines.
+ */
+#if defined(__x86_64__)
+#define ELF_R_NONE	R_X86_64_NONE
+#define ELF_R_DIRECT	R_X86_64_64		/* S + A, pointer-wide */
+#define ELF_R_PC32	R_X86_64_PC32
+#define ELF_R_GLOB_DAT	R_X86_64_GLOB_DAT
+#define ELF_R_JMP_SLOT	R_X86_64_JUMP_SLOT
+#define ELF_R_RELATIVE	R_X86_64_RELATIVE
+#else
+#define ELF_R_NONE	R_386_NONE
+#define ELF_R_DIRECT	R_386_32
+#define ELF_R_PC32	R_386_PC32
+#define ELF_R_GLOB_DAT	R_386_GLOB_DAT
+#define ELF_R_JMP_SLOT	R_386_JMP_SLOT
+#define ELF_R_RELATIVE	R_386_RELATIVE
+#endif
 
 /*
  *	Bootstrap doesn't need machine dependent extensions.
