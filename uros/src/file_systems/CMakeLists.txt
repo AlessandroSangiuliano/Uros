@@ -77,7 +77,7 @@ target_include_directories(libsa_fs PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   # pthread.h and machine/pthread_impl.h (before system includes)
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   # Mach services (mach.h, sa_mach.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   # sa_mach standalone types (<types.h> -> sa_mach/types.h)

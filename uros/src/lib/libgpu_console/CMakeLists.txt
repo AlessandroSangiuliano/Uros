@@ -72,7 +72,7 @@ target_include_directories(libgpu_console PUBLIC
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
   # pthread.h for #209 async init worker
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

@@ -26,7 +26,7 @@ set(CHAR_INCLUDE_DIRS
   # Mach services include (mach.h, sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   ${CMAKE_BINARY_DIR}/generated
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel

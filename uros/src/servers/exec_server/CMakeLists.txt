@@ -84,7 +84,7 @@ target_include_directories(exec_server_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/src/lib/libvfs
   # pthread.h
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
-  ${CMAKE_SOURCE_DIR}/src/lib/libpthreads/AT386
+  ${UROS_LIBPTHREADS_MD}
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h, servers/netname.h via export)
