@@ -33,6 +33,7 @@
 #define _BLOCK_SERVER_H_
 
 #include <mach.h>
+#include <pci_bar.h>		/* #427: struct pci_bar_region */
 #include <mach/mach_types.h>
 #include <stdint.h>
 
@@ -94,8 +95,20 @@ struct block_driver_ops {
 	 * On success, stores an opaque private handle in *priv and
 	 * returns 0.  On failure returns negative.
 	 */
+	/*
+	 * #427: `bars' is the device's regions as the HAL decoded them, and
+	 * `n_bars' is how many there are -- a count and not a constant,
+	 * because a 64-bit memory BAR occupies two of the six slots.  A
+	 * module finds its region by asking which slot it starts at rather
+	 * than by indexing, since the two numbers are not the same.
+	 *
+	 * ⚠️ BORROWED.  The buffer is out-of-line memory the framework
+	 * releases as soon as probe() returns; a module that needs a region
+	 * after that copies it.
+	 */
 	int  (*probe)(unsigned int bus, unsigned int slot, unsigned int func,
 		      mach_port_t master_device, mach_port_t irq_port,
+		      const struct pci_bar_region *bars, unsigned int n_bars,
 		      void **priv);
 
 	/*

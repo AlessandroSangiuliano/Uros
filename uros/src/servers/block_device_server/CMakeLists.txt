@@ -24,6 +24,8 @@ set(BLK_INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}
   # libdl + libgpu_console (#199 prep) headers
   ${CMAKE_SOURCE_DIR}/src/lib/libdl
+  # The BAR decode's type, shared with the HAL that produces it (#427).
+  ${CMAKE_SOURCE_DIR}/src/lib/libpci
   ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include

@@ -36,14 +36,11 @@
 #include <stdio.h>
 #include "../block_server.h"
 #include "virtio_module.h"
+#include <device/pci.h>
 #include "device_master.h"
 
 /* PCI configuration registers */
-#define PCI_COMMAND		0x04
-#define PCI_BAR0		0x10
-#define PCI_INTERRUPT_LINE	0x3C
-#define PCI_CMD_IO_ENABLE	(1 << 0)
-#define PCI_CMD_BUS_MASTER	(1 << 2)
+/* The configuration header comes from <device/pci.h> (#427). */
 
 /* Static state — one virtio-blk controller */
 static struct virtio_state virtio_st;
@@ -266,11 +263,14 @@ virtio_blk_request(struct virtio_state *st, uint32_t type,
 static int
 virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	     mach_port_t master_dev, mach_port_t irq,
+	     const struct pci_bar_region *bars, unsigned int n_bars,
 	     void **priv)
 {
 	struct virtio_state *st = &virtio_st;
 	kern_return_t kr;
-	unsigned int bar0, cmd_reg, irq_reg;
+	const struct pci_bar_region *io_region;
+	unsigned int cmd_reg, irq_reg;
+	int i;
 	uint32_t host_features, cap_lo;
 
 	st->pci_bus  = bus;
@@ -278,14 +278,28 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	st->pci_func = func;
 	st->master_device = master_dev;
 
-	/* Read BAR0 */
-	kr = device_pci_config_read(master_dev, bus, slot, func,
-				    PCI_BAR0, &bar0);
-	if (kr != KERN_SUCCESS || !(bar0 & 1u)) {
-		printf("virtio: BAR0 is not I/O space (0x%08X)\n", bar0);
+	/*
+	 * The I/O region, from what the HAL decoded (#427).
+	 *
+	 * 🔑 The check that mattered here is kept, not dropped: legacy virtio
+	 * lives in I/O space, and a region that is not I/O is not this
+	 * device's.  It used to be `bar0 & 1' on the raw value -- which was
+	 * right, and is the reason the ~3 mask below it was right too, since
+	 * an I/O BAR keeps two address bits a memory BAR does not.  The decode
+	 * now answers the same question by flag, and applied the correct mask
+	 * when it did.
+	 */
+	io_region = NULL;
+	for (i = 0; i < (int)n_bars; i++)
+		if (bars[i].slot == 0 && (bars[i].flags & PCI_REGION_IO))
+			io_region = &bars[i];
+
+	if (io_region == NULL) {
+		printf("virtio: BAR slot 0 is not I/O space among %u "
+		       "region(s)\n", n_bars);
 		return -1;
 	}
-	st->iobase = bar0 & ~3u;
+	st->iobase = (unsigned int)io_region->base;
 	printf("virtio: I/O base = 0x%04X\n", st->iobase);
 
 	/* Enable I/O space + bus master */
