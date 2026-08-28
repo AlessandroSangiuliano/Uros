@@ -306,6 +306,42 @@ if(UROS_BUILD_MUSL)
   add_subdirectory(src/contrib)
 endif()
 
+# Does anything built FOR Uros read a header of the machine that built it?
+# (#506)
+#
+# 🔑 A TEST, and deliberately not a step of the build.
+#
+# It reads the preprocessor's own record of the files it opened, and that
+# record exists only once things have been compiled -- so the check has to run
+# after the build, not inside it.  Two attempts to make it a build step failed
+# in ways worth writing down rather than rediscovering:
+#
+#   - reading the record means `ninja -t deps', and a ninja invoked from
+#     inside a running ninja waits on the build it is part of;
+#   - and a target that depends on "every target" collects the ones CTest
+#     generates from enable_testing() above -- Continuous, Experimental,
+#     Nightly and their Configure/Start/Update variants -- which reconfigure
+#     the build tree.  Depending on them wiped generated headers mid-build
+#     and turned a 429-target graph into a 298-target one.
+#
+# ⚠️ -ffreestanding stops the IMPLICIT chain (GCC's <stdint.h> falling through
+# to glibc's).  It does not stop a deliberate `#include <execinfo.h>': the
+# system directory is still on the path, and a header we do not have is still
+# found there.  So the flag and this check cover different halves, and the
+# half the check covers is the one a person can add tomorrow.
+add_test(NAME host_headers
+         COMMAND python3 ${CMAKE_SOURCE_DIR}/../scripts/host-header-check.py
+                 ${CMAKE_BINARY_DIR})
+
+# And by hand, without ctest: `ninja check-host-headers'.
+add_custom_target(check-host-headers
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/../scripts/host-header-check.py
+          ${CMAKE_BINARY_DIR}
+  COMMENT "host-header-check (#506)"
+  USES_TERMINAL
+  VERBATIM
+)
+
 # Target clean-all: rimuove completamente la directory di build
 add_custom_target(clean-all
   COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}

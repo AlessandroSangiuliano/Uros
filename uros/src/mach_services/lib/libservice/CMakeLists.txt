@@ -38,6 +38,9 @@ target_compile_options(libservice PRIVATE
 target_include_directories(libservice PUBLIC
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # <string.h> lives in sa_mach/, not in the directory above it (#506,
+  # same class as #495): without this root it came from the host's glibc.
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel
   ${CMAKE_SOURCE_DIR}/include

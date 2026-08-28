@@ -22,7 +22,13 @@ target_compile_options(libelf PRIVATE
 target_include_directories(libelf PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}                    # libelf.h (public API)
   ${CMAKE_BINARY_DIR}/generated/include          # mach/machine -> i386
-  ${CMAKE_SOURCE_DIR}/src/mach_services/include  # sa_mach.h, string.h
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include  # sa_mach.h, mach.h
+  # ⚠️ <string.h> is in sa_mach/, not in the directory above it, so the line
+  # above never supplied it and the comment that said so was wrong: libelf's
+  # memcmp and strcmp were declared by the build machine's glibc (#506).
+  # Same class as #495, where libcap and cap_server ended up compiled against
+  # two different C libraries and agreed only by luck.
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${UROS_ARCH_INCLUDE}
   ${CMAKE_SOURCE_DIR}/src/mach_kernel             # mach/elf.h fallback
   ${CMAKE_SOURCE_DIR}/include

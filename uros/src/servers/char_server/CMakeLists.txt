@@ -25,6 +25,9 @@ set(CHAR_INCLUDE_DIRS
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (mach.h, sa_mach.h, stdio.h, string.h)
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
+  # <string.h> lives in sa_mach/, not in the directory above it (#506,
+  # same class as #495): without this root it came from the host's glibc.
+  ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${UROS_LIBPTHREADS_MD}
   ${CMAKE_BINARY_DIR}/generated
