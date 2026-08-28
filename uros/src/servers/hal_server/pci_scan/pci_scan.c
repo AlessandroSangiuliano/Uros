@@ -117,6 +117,40 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
 		raw_bars[i] = (kr == KERN_SUCCESS) ? bar : 0;
 	}
 
+	/*
+	 * The slots as they were read, before anything decided what they mean.
+	 *
+	 * 🔑 The observation and the interpretation are two different things,
+	 * and a discovery server that keeps only the second cannot answer the
+	 * first question an operator asks: "why is there no region for BAR1?"
+	 * There are two answers with the same symptom -- the device does not
+	 * implement that slot, or the decode threw it away -- and the region
+	 * list alone cannot tell them apart.
+	 *
+	 * ⚠️ Logged here rather than stored in the record.  The wire record
+	 * carries what a client acts on, and nothing acts on raw slots; adding
+	 * a field for them would recreate, one release later, exactly the
+	 * produced-and-never-consumed array this issue removed.  A diagnostic
+	 * belongs where and when the observation is made.
+	 *
+	 * A device with no BARs at all says nothing: the dump's `regions=0'
+	 * already covers it, and six zeros per host bridge is noise.
+	 */
+	{
+		int any = 0;
+
+		for (i = 0; i < PCI_NUM_BAR_SLOTS; i++)
+			if (raw_bars[i] != 0)
+				any = 1;
+
+		if (any)
+			printf("pci_scan: %02u:%02u.%u raw bars: "
+			       "%08x %08x %08x %08x %08x %08x\n",
+			       bus, slot, func,
+			       raw_bars[0], raw_bars[1], raw_bars[2],
+			       raw_bars[3], raw_bars[4], raw_bars[5]);
+	}
+
 	dev->n_bars = pci_bars_decode(raw_bars, PCI_NUM_BAR_SLOTS,
 				      dev->bars, HAL_MAX_BARS);
 

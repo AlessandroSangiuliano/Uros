@@ -149,10 +149,19 @@ dump_registry(void)
 		for (b = 0; b < snapshot[i].n_bars; b++) {
 			const struct pci_bar_region *r = &snapshot[i].bars[b];
 
-			printf("hal:       bar%u  %s%s  base=0x%08x%08x\n",
+			/*
+			 * ⚠️ Every flag the decode sets is printed.  The first
+			 * version showed I/O and 64-bit and silently dropped
+			 * prefetchable -- which the decode had computed and
+			 * the record was carrying.  A field shown in part is
+			 * how a reader concludes it is absent.
+			 */
+			printf("hal:       bar%u  %-5s %s base=0x%08x%08x\n",
 			       r->slot,
-			       (r->flags & PCI_REGION_IO) ? "io " : "mem",
-			       (r->flags & PCI_REGION_MEM_64) ? "64" : "  ",
+			       (r->flags & PCI_REGION_IO) ? "io"
+			         : (r->flags & PCI_REGION_MEM_64) ? "mem64"
+			         : "mem32",
+			       (r->flags & PCI_REGION_PREFETCH) ? "pf" : "  ",
 			       (unsigned int)(r->base >> 32),
 			       (unsigned int)(r->base & 0xFFFFFFFFu));
 		}
