@@ -460,15 +460,19 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	/* Map ABAR */
 	/*
-	 * ⚠️ The RPC still takes and returns 32 bits, so a region above four
-	 * gigabytes cannot be asked for and the user address cannot be given
-	 * back whole.  That is #427's remaining half and it is in the .defs,
-	 * not here: this cast is a driver written correctly against a contract
-	 * that is wrong.
+	 * #427: no casts on either side any more.  This was
+	 *
+	 *	device_mmio_map(..., bar5 & ~0xFu, ..., (unsigned int *)&st->abar)
+	 *
+	 * -- a four-byte store into a pointer that is eight bytes wide on the
+	 * target this is being ported to.  The driver was written correctly
+	 * against a contract that was wrong, and the contract is what changed:
+	 * the RPC now carries vm_address_t in and out, so the physical address
+	 * goes in whole and the user address comes back whole.
 	 */
-	kr = device_mmio_map(master_dev, (unsigned int)abar_phys,
+	kr = device_mmio_map(master_dev, (vm_address_t)abar_phys,
 			     AHCI_ABAR_SIZE,
-			     mach_task_self(), (unsigned int *)&st->abar);
+			     mach_task_self(), (vm_address_t *)&st->abar);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: device_mmio_map failed (kr=%d)\n", kr);
 		return -1;

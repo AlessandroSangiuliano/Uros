@@ -475,9 +475,9 @@ ds_master_device_intr_enable(
 kern_return_t
 ds_master_device_dma_alloc(
 	ipc_port_t		master_port,
-	unsigned int		size,
-	unsigned int		*vaddr_out,
-	unsigned int		*paddr_out)
+	vm_size_t		size,
+	vm_address_t		*vaddr_out,
+	vm_address_t		*paddr_out)
 {
 	kern_return_t kr;
 	vm_offset_t kva;
@@ -510,16 +510,16 @@ ds_master_device_dma_alloc(
 		return KERN_FAILURE;
 	}
 
-	*vaddr_out = (unsigned int)kva;
-	*paddr_out = (unsigned int)pa;
+	*vaddr_out = kva;		/* #427: no narrowing cast */
+	*paddr_out = pa;
 	return KERN_SUCCESS;
 }
 
 kern_return_t
 ds_master_device_dma_free(
 	ipc_port_t		master_port,
-	unsigned int		vaddr,
-	unsigned int		size)
+	vm_address_t		vaddr,
+	vm_size_t		size)
 {
 	kern_return_t kr;
 
@@ -552,8 +552,8 @@ ds_master_device_dma_alloc_sg(
 	ipc_port_t		master_port,
 	unsigned int		n_pages,
 	ipc_port_t		task_port,
-	unsigned int		*kva_out,
-	unsigned int		*uva_out,
+	vm_address_t		*kva_out,
+	vm_address_t		*uva_out,
 	unsigned int		*paddrs,
 	unsigned int		*paddrs_count)
 {
@@ -633,8 +633,8 @@ ds_master_device_dma_alloc_sg(
 
 	task_deallocate(task);
 
-	*kva_out = (unsigned int)kva;
-	*uva_out = (unsigned int)uva;
+	*kva_out = kva;			/* #427: no narrowing cast */
+	*uva_out = uva;
 	*paddrs_count = n_pages;
 	return KERN_SUCCESS;
 }
@@ -684,10 +684,10 @@ map_phys_into_task(task_t		task,
 kern_return_t
 ds_master_device_dma_map_user(
 	ipc_port_t		master_port,
-	unsigned int		kva,
-	unsigned int		size,
+	vm_address_t		kva,
+	vm_size_t		size,
 	ipc_port_t		task_port,
-	unsigned int		*uva_out)
+	vm_address_t		*uva_out)
 {
 	task_t		task;
 	vm_offset_t	uva;
@@ -716,7 +716,7 @@ ds_master_device_dma_map_user(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	*uva_out = (unsigned int)uva;
+	*uva_out = uva;			/* #427: no narrowing cast */
 	return KERN_SUCCESS;
 }
 
@@ -728,10 +728,10 @@ ds_master_device_dma_map_user(
 kern_return_t
 ds_master_device_mmio_map(
 	ipc_port_t		master_port,
-	unsigned int		phys_addr,
-	unsigned int		size,
+	vm_address_t		phys_addr,
+	vm_size_t		size,
 	ipc_port_t		task_port,
-	unsigned int		*uva_out)
+	vm_address_t		*uva_out)
 {
 	task_t		task;
 	vm_offset_t	phys_base;
@@ -760,7 +760,16 @@ ds_master_device_mmio_map(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	*uva_out = (unsigned int)(uva + page_offset);
+	/*
+	 * #427: no cast.  This used to be `(unsigned int)(uva + page_offset)'
+	 * -- an EXPLICIT narrowing of a 64-bit vm_offset_t, so the compiler
+	 * said nothing, and the address a task was told to use was the low
+	 * half of the one it had been given.  It would have worked anyway for
+	 * a long time: vm_map_enter() searches from the map's min_offset, so
+	 * the first hole in a sparse task is low.  Which is the worst shape a
+	 * defect can have -- right until the low four gigabytes are busy.
+	 */
+	*uva_out = uva + page_offset;
 	return KERN_SUCCESS;
 }
 
@@ -770,8 +779,8 @@ ds_master_device_mmio_map(
 kern_return_t
 ds_master_device_mmio_unmap(
 	ipc_port_t		master_port,
-	unsigned int		uva,
-	unsigned int		size,
+	vm_address_t		uva,
+	vm_size_t		size,
 	ipc_port_t		task_port)
 {
 	task_t		task;
