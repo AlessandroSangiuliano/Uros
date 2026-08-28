@@ -330,12 +330,12 @@ endif()
 # found there.  So the flag and this check cover different halves, and the
 # half the check covers is the one a person can add tomorrow.
 add_test(NAME host_headers
-         COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/host-header-check.py
+         COMMAND python3 ${CMAKE_SOURCE_DIR}/../scripts/host-header-check.py
                  ${CMAKE_BINARY_DIR})
 
 # And by hand, without ctest: `ninja check-host-headers'.
 add_custom_target(check-host-headers
-  COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/host-header-check.py
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/../scripts/host-header-check.py
           ${CMAKE_BINARY_DIR}
   COMMENT "host-header-check (#506)"
   USES_TERMINAL
