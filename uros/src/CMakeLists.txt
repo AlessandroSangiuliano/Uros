@@ -93,6 +93,15 @@ if(OSFMK_BUILD_KERNEL AND NOT _uros_migcom_from_lib)
   add_subdirectory(lib/migcom)
 endif()
 
+# The BAR decode's unit test, on the build machine (#427).
+#
+# Beside migcom because it is the same kind of thing: a host binary, built in
+# every configuration rather than behind the userland gate.  It is here and not
+# beside hal_server because it needs nothing hal_server needs -- the decode is
+# a pure function, and keeping the test where the server is would have made it
+# arrive only on the target where the server already builds.
+add_subdirectory(tests/pci_bar_test)
+
 if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib)
   add_subdirectory(mach_services/lib)
