@@ -27,6 +27,7 @@
 
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
+#include <cpu/pci_cfg.h>
 #include <cpu/desc.h>
 #include <cpu/ioapic.h>
 #include <ddb/cons.h>
@@ -3322,6 +3323,38 @@ static void device_irq(struct trap_frame *frame)
 	lapic_eoi();
 }
 
+/*
+ * Configuration space: which mechanism, and does it answer? (#457)
+ *
+ * 🔑 The init chooses between ECAM and the port pair, and this is the init
+ * proving what it chose actually works rather than reporting that it chose.
+ * The host bridge is at 00:00.0 on every PC there has ever been, so its
+ * vendor is a value that can be checked without knowing the machine -- and
+ * the wrong answer is not silence but 0xFFFFFFFF, which is what the bus
+ * returns for a function that is not there and what a mechanism pointed at
+ * the wrong place produces.
+ *
+ * ⚠️ Both boards are covered, and they take different paths: an i440FX has no
+ * MCFG and goes through the ports, a Q35 has one and goes through memory.
+ * Neither is the fallback; see cpu/pci_cfg.h.
+ */
+static void pci_cfg_selftest(void)
+{
+	uint32_t id;
+
+	pci_cfg_init();
+
+	id = pci_cfg_read(0, 0, 0, 0, 0x00);
+
+	kputs("UrMach x86-64: configuration space through ");
+	kputs(pci_cfg_is_ecam() ? "ECAM" : "0xCF8/0xCFC");
+	kputs(", host bridge at 00:00.0 reads ");
+	kputhex64(id);
+	kputs(id != 0xFFFFFFFFu && id != 0
+	      ? " — a vendor answered, so the mechanism reaches the bus\r\n"
+	      : " — WRONG, nothing answered where the host bridge has to be\r\n");
+}
+
 static void ioapic_selftest(void)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
@@ -4522,6 +4555,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ioapic_madt_selftest();
 	tsc_selftest();
 	timer_selftest();
+	pci_cfg_selftest();
 	ioapic_selftest();
 	spl_selftest();
 	panic_format_selftest();

@@ -26,15 +26,53 @@
 /* ------------------------------------------------------------------ */
 /*  Port I/O                                                            */
 /* ------------------------------------------------------------------ */
+/*
+ * ⚠️ "memory" in every clobber list, added by #457 and not decoration.  An I/O
+ * access is an event outside the processor; without it the compiler is free to
+ * move an ordinary load or store across one, which for a device register
+ * sequence is not a reordering of instructions but a reordering of what the
+ * device was told.  The two below were written without it and the widths added
+ * beside them would have inherited the omission.
+ *
+ * 🔑 The word and long widths are here rather than in a pio.h of their own.
+ * i386 has a 250-line <i386/pio.h> because it also carries a string-instruction
+ * interface -- linb, loutb and eleven relatives -- that nothing on this target
+ * calls; a second file would have been a second place to look for inb, which
+ * is how the seven copies of nostdlib_stubs.c happened.
+ */
 static inline void outb(uint16_t port, uint8_t val)
 {
-	__asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port));
+	__asm__ volatile("outb %0, %1" : : "a"(val), "Nd"(port) : "memory");
 }
 
 static inline uint8_t inb(uint16_t port)
 {
 	uint8_t r;
-	__asm__ volatile("inb %1, %0" : "=a"(r) : "Nd"(port));
+	__asm__ volatile("inb %1, %0" : "=a"(r) : "Nd"(port) : "memory");
+	return r;
+}
+
+static inline void outw(uint16_t port, uint16_t val)
+{
+	__asm__ volatile("outw %0, %1" : : "a"(val), "Nd"(port) : "memory");
+}
+
+static inline uint16_t inw(uint16_t port)
+{
+	uint16_t r;
+	__asm__ volatile("inw %1, %0" : "=a"(r) : "Nd"(port) : "memory");
+	return r;
+}
+
+static inline void outl(uint16_t port, uint32_t val)
+{
+	__asm__ volatile("outl %0, %1" : : "a"(val), "Nd"(port) : "memory");
+}
+
+static inline uint32_t inl(uint16_t port)
+{
+	uint32_t r;
+	__asm__ volatile("inl %1, %0" : "=a"(r) : "Nd"(port) : "memory");
 	return r;
 }
 

@@ -119,4 +119,26 @@ const struct acpi_irq_override *acpi_override(unsigned index);
 uint32_t acpi_irq_to_gsi(uint8_t irq);
 uint16_t acpi_irq_flags(uint8_t irq);
 
+/* ------------------------------------------------------------------ */
+/*  Where PCI configuration space is (#457)                             */
+/* ------------------------------------------------------------------ */
+/*
+ * The physical base of the memory-mapped configuration space for one bus, or
+ * zero if this machine has no MCFG or no segment group covering it.
+ *
+ * A configuration register of a function on that bus is then at
+ *
+ *	base + (device << 15) + (function << 12) + offset
+ *
+ * the bus part having been folded into the base already, because a segment
+ * does not have to start at bus zero.
+ *
+ * ⚠️ Zero is an answer, not a failure: a machine without an MCFG has a
+ * configuration space that is reachable only through 0xCF8/0xCFC, and the
+ * caller is the one that has to decide what to do about that.  Nothing above
+ * four gigabytes can be described that way, so a caller that needs it must
+ * check rather than assume.
+ */
+uint64_t acpi_ecam_base(uint16_t segment, uint8_t bus);
+
 #endif	/* _X86_64_CPU_ACPI_H_ */
