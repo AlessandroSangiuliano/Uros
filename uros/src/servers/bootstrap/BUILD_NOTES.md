@@ -139,8 +139,10 @@ which call the renamed `mig_*` versions, adding retry logic for
 
 **Fix:** Excluded all 58 `ms_*.c` wrapper files.  Without the sed
 rename, the MIG stubs directly provide the public function names.
-Thin wrappers for `thread_switch` and `device_read_overwrite` are
-provided in `nostdlib_stubs.c` (calling the corresponding Mach traps).
+Thin wrappers for `thread_switch` and `device_read_overwrite` used to be
+provided in a per-server `nostdlib_stubs.c`.  #427 deleted all seven copies
+of that file: `thread_switch` comes from libpthreads, `memcpy`/`memset` from
+libmach's assembly, and `cthread_sp` was called by nothing.
 
 **Trade-off:** The `ms_*.c` wrappers add `MACH_SEND_INTERRUPTED` retry
 logic.  For the bootstrap server (simple, single-threaded, early-boot),
@@ -160,7 +162,10 @@ The out-of-line definition in `i386/thread.c` was disabled (`#if 0`).
 The original build used an AWK script (`cthread_inline.awk`) to
 post-process compiler output and insert inline assembly sequences.
 
-**Fix:** Out-of-line `cthread_sp()` provided in `nostdlib_stubs.c`.
+**Fix (superseded):** an out-of-line `cthread_sp()` was provided in
+`nostdlib_stubs.c`.  #427 removed it: nothing in the tree calls it, and no
+library defines it, so the linker never needed it -- the seven copies were
+supplying a symbol that had no caller.
 
 ---
 

@@ -206,7 +206,6 @@ set(BLK_SOURCES
   block_server.c
   block_partition.c
   block_device.c
-  nostdlib_stubs.c
   ${DM_USER_C}
   ${AB_SERVER_C}
   ${HAL_USER_C}

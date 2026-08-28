@@ -99,7 +99,6 @@ set(DEFAULT_PAGER_SOURCES
   kalloc.c
   wiring.c
   strfcns.c
-  nostdlib_stubs.c
 )
 
 # ===========================================================================

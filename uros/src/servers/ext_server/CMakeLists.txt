@@ -125,7 +125,6 @@ set(EXT2_SERVER_SOURCES
   # libmach call, identical byte for byte to the one bootstrap also carried.
   # libmach/syscall_wrappers.c supplies the real one now, which tries the trap
   # before falling back to device_read() -- the copy went straight to the RPC.
-  nostdlib_stubs.c
   ${EXT2_SERVER_C}
   ${VFS_SERVER_C}
   ${AB_USER_C}

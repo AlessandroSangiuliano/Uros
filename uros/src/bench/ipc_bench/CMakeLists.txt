@@ -105,7 +105,6 @@ set(IPC_BENCH_SOURCES
   libvfs_smoke.c
   exec_smoke.c
   proc_smoke.c
-  nostdlib_stubs.c
   ${EXT2_USER_C}
   ${EXEC_USER_C}
   ${PROC_USER_C}

@@ -62,6 +62,13 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    # ⚠️ Without this migcom does not fail, it defaults to i386 -- and these
+    # three rules are hand-rolled add_custom_command()s rather than the
+    # add_mig_* helpers, which pass it for you.  On x86-64 the silence was
+    # visible in two places at once: a short-circuit block calling RPC_SIMPLE,
+    # which only i386 has a <mach/machine/rpc.h> for, and #415's static
+    # asserts refusing an i386 field layout against x86-64 struct sizes (#427).
+    -target ${UROS_TARGET_ARCH}
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${DM_USER_H}
@@ -90,6 +97,13 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    # ⚠️ Without this migcom does not fail, it defaults to i386 -- and these
+    # three rules are hand-rolled add_custom_command()s rather than the
+    # add_mig_* helpers, which pass it for you.  On x86-64 the silence was
+    # visible in two places at once: a short-circuit block calling RPC_SIMPLE,
+    # which only i386 has a <mach/machine/rpc.h> for, and #415's static
+    # asserts refusing an i386 field layout against x86-64 struct sizes (#427).
+    -target ${UROS_TARGET_ARCH}
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${HAL_USER_H}
@@ -119,6 +133,13 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    # ⚠️ Without this migcom does not fail, it defaults to i386 -- and these
+    # three rules are hand-rolled add_custom_command()s rather than the
+    # add_mig_* helpers, which pass it for you.  On x86-64 the silence was
+    # visible in two places at once: a short-circuit block calling RPC_SIMPLE,
+    # which only i386 has a <mach/machine/rpc.h> for, and #415's static
+    # asserts refusing an i386 field layout against x86-64 struct sizes (#427).
+    -target ${UROS_TARGET_ARCH}
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${HAL_NOTIFY_USER_H}
@@ -166,7 +187,6 @@ set(HAL_SOURCES
   hal_registry.c
   hal_driver_reg.c
   hal_mig.c
-  nostdlib_stubs.c
   ${DM_USER_C}
   ${HAL_SERVER_C}
   ${HAL_NOTIFY_USER_C}

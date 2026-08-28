@@ -35,11 +35,13 @@
  *     with the .defs added deliberately: every previous addition to that list
  *     uncovered a type whose width the two trees disagreed about.
  *
- *   thread_switch -- not missing, over-supplied.  Eight definitions exist in
- *     the tree already, seven of them in per-server nostdlib_stubs.c files and
- *     one in libpthreads.  A ninth here would be a duplicate symbol inside the
- *     --start-group every one of those programs links with, so consolidating
- *     them is a change to every server and needs to be one.
+ *   thread_switch -- was over-supplied, and now is not.  Eight definitions
+ *     existed: seven in per-server nostdlib_stubs.c files and one in
+ *     libpthreads.  This note said consolidating them was a change to every
+ *     server and needed to be one, and #427 is where it was: the seven files
+ *     are gone, every program resolves the libpthreads definition, and nothing
+ *     in the tree links a second.  A definition added HERE would be the
+ *     duplicate now.
  *
  *   mach_port_allocate_rt -- nothing underneath it at all: no trap in
  *     syscall_sw.c and no routine in any .defs.  It is a name from a Mach this
