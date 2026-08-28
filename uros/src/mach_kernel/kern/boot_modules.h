@@ -79,6 +79,21 @@ extern const char *machine_boot_module_string(unsigned int n);
 extern void machine_boot_modules_verify(void);
 
 /*
+ * The name the kernel gave the first user task -- the one it put in argv[0]
+ * (#512).
+ *
+ * 🔑 It exists because #488 made that name a RESULT rather than a constant: it
+ * is the last component of whatever string the loader carried, so it is
+ * `boot_probe' under one GRUB entry and `bootstrap' under another.  Anything
+ * that wants to check what the boot task was told has to ask what was decided,
+ * and a check written against a literal is a check that was true once.
+ *
+ * Set by bootstrap_create() before the first task runs; until then it holds
+ * the pre-#488 constant, so a reader that sees it never reached that point.
+ */
+extern char boot_task_name[64];
+
+/*
  * ── The state the first thread starts in ─────────────────────────────
  *
  * Also a question for the machine, and for the same reason: kern/bootstrap.c

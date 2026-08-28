@@ -348,6 +348,23 @@ char kernel_args_buf[256] = "/mach_kernel";
 char boot_args_buf[256] = "/mach_servers/bootstrap";
 char env_buf[256] = "";
 
+/*
+ * The name the kernel gave the first user task, kept apart from the line it
+ * built (#512).
+ *
+ * boot_args_buf holds that name followed by the boot script's own directives,
+ * and boot_script_parse_line() writes NUL terminators into it as it goes -- so
+ * reading the name back out of it would work only for as long as the parser
+ * keeps splitting words that way.  Recording it under its own name says what
+ * it is and does not depend on what the parser does to the buffer.
+ *
+ * ⚠️ .data and initialised, for the same reason boot_args_buf is: a reader can
+ * run before this is filled in, and the historical constant is a better answer
+ * there than an empty string -- it is what the name WAS before #488, so a
+ * reader that sees it is looking at a boot that never got here.
+ */
+char boot_task_name[64] = "/mach_servers/bootstrap";
+
 extern int halt_in_debugger;
 extern char boot_string_store[];
 #ifdef	SQT
@@ -1699,6 +1716,17 @@ bootstrap_create(void)
 
 	bcopy(modstr, boot_args_buf, namelen);
 	bcopy(directives, boot_args_buf + namelen, sizeof directives);
+
+	/*
+	 * And the same name on its own, for whoever has to check what the
+	 * task was told (#512).  Truncated rather than refused: a name too
+	 * long to record is not a reason to fail a boot, and a check reading
+	 * this compares the leading bytes anyway.
+	 */
+	if (namelen >= sizeof boot_task_name)
+		namelen = sizeof boot_task_name - 1;
+	bcopy(modstr, boot_task_name, namelen);
+	boot_task_name[namelen] = '\0';
 
 	printf("bootstrap: boot task is \"%s\"\n", modstr);
     }

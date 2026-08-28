@@ -18,6 +18,7 @@
 #include <syscall/probe.h>	/* #473: the stack pointer a return must not use */
 #include <syscall/syscall.h>
 #include <kern/misc_protos.h>	/* #422: printf */
+#include <kern/boot_modules.h>	/* #512: boot_task_name, what the kernel decided */
 #include <trap/trap.h>
 
 #define MSR_STAR	0xC0000081
@@ -321,13 +322,27 @@ static void note_boot_ipc_error(uint64_t a1, uint64_t kr, uint64_t port,
  * invented:
  *
  *   argc, argv[0]  came out of build_args_and_stack(), which copied them into
- *                  the task's stack.  ⚠️ The name is the KERNEL'S -- the boot
- *                  script's `/mach_servers/bootstrap' (bootstrap.c), not the
- *                  module name GRUB was given -- and it appears in no string
- *                  constant in the image, so a wrong pointer cannot produce
- *                  it by accident.  It is also the name every server on the
- *                  other target is started under, which is the point: this
- *                  image is now entered the way they are.
+ *                  the task's stack.  ⚠️ The name is the KERNEL'S: it appears
+ *                  in no string constant in this image, so a wrong pointer
+ *                  cannot produce it by accident.
+ *
+ *                  🔥 And it is not a constant HERE either, which is what this
+ *                  check got wrong for a week (#512).  It used to compare
+ *                  against `/mach_se', the first eight bytes of the
+ *                  `/mach_servers/bootstrap' the boot script hardcoded --
+ *                  and #488 retired that name deliberately, because every boot
+ *                  task was being told it was bootstrap whatever had actually
+ *                  been loaded, so a task's own panic() named a program that
+ *                  was not running.  Since then the name is the last component
+ *                  of the loader's module string: `boot_probe' under the
+ *                  default GRUB entry, `bootstrap' under the bundle one.
+ *
+ *                  So it is compared against boot_task_name -- what the kernel
+ *                  decided, asked of the kernel.  A change that alters what a
+ *                  contract guarantees has to carry the assertion of that
+ *                  contract with it, and this is the assertion that was left
+ *                  behind: the default entry has reported WRONG on every boot
+ *                  since, in a suite whose other 157 checks pass.
  *
  *   argv[argc]     the null terminator.  An argc that is right by luck (a
  *                  register that happened to hold 1) is caught here: the
@@ -343,13 +358,18 @@ static void note_boot_ipc_error(uint64_t a1, uint64_t kr, uint64_t port,
  *                  all day and what nothing here had done before.
  *
  * ⚠️ The name arrives as EIGHT BYTES IN A REGISTER and not as a pointer, on
- * purpose: judging it otherwise would mean copyin from a task whose argument
- * block is what is in question, and a check that has to trust its subject to
- * read it is not a check.  Eight bytes is `boot_pro' -- enough to be wrong in
- * a way random data would not be, and short enough to travel in a register.
+ * purpose, and that survives the change above: judging it otherwise would mean
+ * copyin from a task whose argument block is what is in question, and a check
+ * that has to trust its subject to read it is not a check.  Eight bytes is
+ * enough to be wrong in a way random data would not be, and short enough to
+ * travel in a register.
+ *
+ * ⚠️ Which is also why it is strncmp over BOOT_ARGS_NAME_BYTES and not strcmp:
+ * only eight bytes crossed, so only eight can be judged.  A name shorter than
+ * that carries its own NUL and both sides stop there.
  */
-#define BOOT_ARGS_A1	0x63
-#define BOOT_ARGS_NAME	"/mach_se"	/* of "/mach_servers/bootstrap" */
+#define BOOT_ARGS_A1		0x63
+#define BOOT_ARGS_NAME_BYTES	8
 
 static uint64_t boot_args_calls;
 
@@ -377,11 +397,13 @@ static void note_boot_args(uint64_t a1, uint64_t argc, uint64_t name,
 		first8[i] = (char) ((name >> (i * 8)) & 0xFF);
 	first8[8] = '\0';
 
-	printf("boot_probe: main() ran with argc %lu, argv[0] starting \"%s\", "
-	       "argv[argc] 0x%lx and vm_page_size %lu%s\n",
-	       (unsigned long) argc, first8,
+	printf("boot_probe: main() ran with argc %lu, argv[0] starting \"%s\" "
+	       "(the kernel named it \"%s\"), argv[argc] 0x%lx and "
+	       "vm_page_size %lu%s\n",
+	       (unsigned long) argc, first8, boot_task_name,
 	       (unsigned long) terminator, (unsigned long) answered,
-	       (argc == 1 && strcmp(first8, BOOT_ARGS_NAME) == 0
+	       (argc == 1
+		&& strncmp(first8, boot_task_name, BOOT_ARGS_NAME_BYTES) == 0
 		&& terminator == 0 && answered == PAGE_SIZE)
 	       ? " — entered through libmach's crt0, and the page size came "
 		 "back from an RPC"
