@@ -31,23 +31,17 @@
 
 #include <stdint.h>
 
-/* PCI class/subclass for AHCI */
-#define PCI_CLASS_STORAGE	0x01
-#define PCI_SUBCLASS_SATA	0x06
-#define PCI_PROGIF_AHCI		0x01
-
-/* PCI configuration registers */
-#define PCI_VENDOR_ID		0x00
-#define PCI_DEVICE_ID		0x02
-#define PCI_COMMAND		0x04
-#define PCI_STATUS		0x06
-#define PCI_CLASS_REV		0x08
-#define PCI_BAR5		0x24	/* AHCI Base Address (ABAR) */
-#define PCI_INTERRUPT_LINE	0x3C
-
-/* PCI command bits */
-#define PCI_CMD_MEM_ENABLE	(1 << 1)
-#define PCI_CMD_BUS_MASTER	(1 << 2)
+/*
+ * The PCI configuration header, the command bits and the class codes come
+ * from <device/pci.h> (#427).  They were declared here and again in
+ * ahci_module.c, which includes this file's sibling and not this file -- so
+ * the same four constants existed twice inside one driver, agreeing by
+ * nobody's decision.
+ *
+ * What stays below is AHCI's own register map, which is this driver's
+ * business and belongs to it.
+ */
+#include <device/pci.h>
 
 /* ================================================================
  * Generic Host Control registers (HBA memory, offset from ABAR)

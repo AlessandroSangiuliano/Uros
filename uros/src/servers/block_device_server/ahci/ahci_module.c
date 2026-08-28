@@ -37,14 +37,13 @@
 #include <stdio.h>
 #include "../block_server.h"
 #include "ahci_module.h"
+#include <device/pci.h>
 #include "device_master.h"
 
-/* PCI configuration registers */
-#define PCI_COMMAND		0x04
-#define PCI_BAR5		0x24
-#define PCI_INTERRUPT_LINE	0x3C
-#define PCI_CMD_MEM_ENABLE	(1 << 1)
-#define PCI_CMD_BUS_MASTER	(1 << 2)
+/*
+ * The configuration header comes from <device/pci.h> (#427).  It used to be
+ * declared here AND in ahci.h, four lines apart in the same driver.
+ */
 
 /* Static state — we support one AHCI controller for now */
 static struct ahci_state ahci_st;
@@ -396,11 +395,14 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 static int
 ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	   mach_port_t master_dev, mach_port_t irq,
+	   const struct pci_bar_region *bars, unsigned int n_bars,
 	   void **priv)
 {
 	struct ahci_state *st = &ahci_st;
 	kern_return_t kr;
-	unsigned int bar5, cmd_reg, irq_reg;
+	const struct pci_bar_region *abar_region;
+	uint64_t abar_phys;
+	unsigned int cmd_reg, irq_reg;
 	int i;
 
 	st->pci_bus  = bus;
@@ -409,14 +411,35 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	st->master_device = master_dev;
 	st->batch_slots = 1;
 
-	/* Read BAR5 (ABAR) */
-	kr = device_pci_config_read(master_dev, bus, slot, func,
-				    PCI_BAR5, &bar5);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: failed to read BAR5\n");
+	/*
+	 * The ABAR, from the regions the HAL decoded (#427).
+	 *
+	 * 🔑 Found by the SLOT it starts at and not by index.  AHCI puts the
+	 * ABAR in slot 5, and slot 5 is not region 5: this controller reports
+	 * two regions, an I/O one at slot 4 and this one, so indexing would
+	 * have read the wrong one on the machine it was written for.
+	 *
+	 * ⚠️ Slot 5 can only be 32 bits wide -- a 64-bit BAR there would need
+	 * a slot 6, which a type 0 header does not have -- so this driver
+	 * never meets the two-slot case.  The lookup goes through the decode
+	 * anyway, because the reason it is safe is a property of the standard
+	 * and not something this file should be asserting on its own.
+	 */
+	abar_region = NULL;
+	for (i = 0; i < (int)n_bars; i++)
+		if (bars[i].slot == 5 && !(bars[i].flags & PCI_REGION_IO))
+			abar_region = &bars[i];
+
+	if (abar_region == NULL) {
+		printf("ahci: no memory region at BAR slot 5 among %u "
+		       "region(s) — this is not an AHCI controller, or the "
+		       "HAL did not decode it\n", n_bars);
 		return -1;
 	}
-	printf("ahci: ABAR phys = 0x%08X\n", bar5 & ~0xFu);
+	abar_phys = abar_region->base;
+	printf("ahci: ABAR phys = 0x%08X%08X\n",
+	       (unsigned int)(abar_phys >> 32),
+	       (unsigned int)(abar_phys & 0xFFFFFFFFu));
 
 	/* Enable PCI bus master + memory space */
 	kr = device_pci_config_read(master_dev, bus, slot, func,
@@ -436,8 +459,20 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	}
 
 	/* Map ABAR */
-	kr = device_mmio_map(master_dev, bar5 & ~0xFu, AHCI_ABAR_SIZE,
-			     mach_task_self(), (unsigned int *)&st->abar);
+	/*
+	 * #427: no casts on either side any more.  This was
+	 *
+	 *	device_mmio_map(..., bar5 & ~0xFu, ..., (unsigned int *)&st->abar)
+	 *
+	 * -- a four-byte store into a pointer that is eight bytes wide on the
+	 * target this is being ported to.  The driver was written correctly
+	 * against a contract that was wrong, and the contract is what changed:
+	 * the RPC now carries vm_address_t in and out, so the physical address
+	 * goes in whole and the user address comes back whole.
+	 */
+	kr = device_mmio_map(master_dev, (vm_address_t)abar_phys,
+			     AHCI_ABAR_SIZE,
+			     mach_task_self(), (vm_address_t *)&st->abar);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: device_mmio_map failed (kr=%d)\n", kr);
 		return -1;

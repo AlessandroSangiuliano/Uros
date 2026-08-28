@@ -103,14 +103,39 @@ routine device_intr_enable(
 	);
 
 /*
+ * ── An address widens, a number does not (#427) ──────────────────────
+ *
+ * Everything below used to be natural_t, which is 32 bits on both targets by
+ * decision -- it is what mach_port_t is built on, and widening it would
+ * double the header of every message and every port array to no purpose.
+ * That was right for the counts and wrong for the addresses, and on i386
+ * nobody could tell, because there vm_address_t IS natural_t.
+ *
+ * 🔑 So this change costs i386 nothing: the generated stubs are byte-identical
+ * across it, which is the cheapest possible regression test and is checked.
+ * On x86-64 it is the difference between an interface that can name a device
+ * above four gigabytes and one that cannot -- and, sharper, between one that
+ * can return a user virtual address and one that truncates it.
+ *
+ * ⚠️ dma_sg_addr_t below is the one that is NOT widened here.  It is an
+ * INLINE array of addresses, and doubling its element takes the message from
+ * 16 to 32 KiB; that is a message-layout question and belongs to #416.  Until
+ * then, a scatter-gather list cannot describe a page above four gigabytes,
+ * which is #417's subject and is written down rather than left to be found.
+ *
+ * What stays natural_t: bus, slot, func, reg, data, irq, the I/O port number
+ * and n_pages.  They are numbers, not addresses.
+ */
+
+/*
  * Allocate a physically contiguous DMA buffer.
  * Returns the kernel virtual address and the physical address.
  */
 routine device_dma_alloc(
 		master_port	: mach_port_t;
-	in	size		: natural_t;
-	out	vaddr		: natural_t;
-	out	paddr		: natural_t
+	in	size		: vm_size_t;
+	out	vaddr		: vm_address_t;
+	out	paddr		: vm_address_t
 	);
 
 /*
@@ -118,8 +143,8 @@ routine device_dma_alloc(
  */
 routine device_dma_free(
 		master_port	: mach_port_t;
-	in	vaddr		: natural_t;
-	in	size		: natural_t
+	in	vaddr		: vm_address_t;
+	in	size		: vm_size_t
 	);
 
 /*
@@ -128,10 +153,10 @@ routine device_dma_free(
  */
 routine device_dma_map_user(
 		master_port	: mach_port_t;
-	in	kva		: natural_t;
-	in	size		: natural_t;
+	in	kva		: vm_address_t;
+	in	size		: vm_size_t;
 	in	task_port	: mach_port_t;
-	out	uva		: natural_t
+	out	uva		: vm_address_t
 	);
 
 /*
@@ -140,10 +165,10 @@ routine device_dma_map_user(
  */
 routine device_mmio_map(
 		master_port	: mach_port_t;
-	in	phys_addr	: natural_t;
-	in	size		: natural_t;
+	in	phys_addr	: vm_address_t;
+	in	size		: vm_size_t;
 	in	task_port	: mach_port_t;
-	out	uva		: natural_t
+	out	uva		: vm_address_t
 	);
 
 /*
@@ -151,8 +176,8 @@ routine device_mmio_map(
  */
 routine device_mmio_unmap(
 		master_port	: mach_port_t;
-	in	uva		: natural_t;
-	in	size		: natural_t;
+	in	uva		: vm_address_t;
+	in	size		: vm_size_t;
 	in	task_port	: mach_port_t
 	);
 
@@ -169,8 +194,8 @@ routine device_dma_alloc_sg(
 		master_port	: mach_port_t;
 	in	n_pages		: natural_t;
 	in	task_port	: mach_port_t;
-	out	kva		: natural_t;
-	out	uva		: natural_t;
+	out	kva		: vm_address_t;
+	out	uva		: vm_address_t;
 	out	paddrs		: dma_sg_addr_t
 	);
 

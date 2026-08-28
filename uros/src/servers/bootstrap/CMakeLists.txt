@@ -134,7 +134,6 @@ endif()
 # ===========================================================================
 
 # Stubs for symbols normally provided by host libc (-nostdlib build)
-list(APPEND BOOTSTRAP_SOURCES nostdlib_stubs.c)
 
 add_executable(bootstrap_server
   ${BOOTSTRAP_SOURCES}

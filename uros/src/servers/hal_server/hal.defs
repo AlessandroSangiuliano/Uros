@@ -34,8 +34,7 @@ routine get_device_info(
 	in	func		: unsigned;
 	out	vendor_device	: unsigned;
 	out	class_rev	: unsigned;
-	out	irq		: unsigned;
-	out	status		: unsigned);
+	out	irq		: unsigned);
 
 routine register_driver(
 		hal_port	: mach_port_t;
@@ -52,3 +51,32 @@ routine register_driver(
  */
 routine rescan(
 		hal_port	: mach_port_t);
+
+/*
+ * #427 — the device's regions, decoded.
+ *
+ * The out buffer is an array of struct pci_bar_region (see libpci/pci_bar.h)
+ * laid out back-to-back, the same untyped arrangement list_devices uses.
+ *
+ * 🔑 Its own routine and not four more `out' parameters on get_device_info,
+ * because how many regions a device has is not fixed: a 64-bit memory BAR
+ * takes two of the six slots, so the count is a result and not a constant.
+ * An interface that returned six of anything would be the same mistake the
+ * record had, moved to the wire.
+ *
+ * ⚠️ This is what closes the gap that made every driver read configuration
+ * space for itself.  get_device_info hands back the vendor, the class, the
+ * IRQ and the status -- everything except the one field needed to map the
+ * device -- so a driver that wanted its BAR had no way to ask, and went to
+ * the bus.  Four drivers doing that is not four bad decisions; it is an
+ * interface that left no other move.
+ *
+ * Appended at the end so the existing msg ids stay stable.
+ */
+routine get_device_bars(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	out	bars		: pointer_t, Dealloc;
+	out	n_bars		: unsigned);

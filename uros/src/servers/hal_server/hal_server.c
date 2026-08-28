@@ -130,11 +130,40 @@ dump_registry(void)
 	printf("hal: registry has %d device(s):\n", got);
 
 	for (i = 0; i < got; i++) {
+		unsigned int b;
+
 		printf("hal:   %02u:%02u.%u  vendor=0x%08x  "
-		       "class=0x%08x  irq=%u  status=%u\n",
+		       "class=0x%08x  irq=%u  regions=%u\n",
 		       snapshot[i].bus, snapshot[i].slot, snapshot[i].func,
 		       snapshot[i].vendor_device, snapshot[i].class_rev,
-		       snapshot[i].irq, snapshot[i].status);
+		       snapshot[i].irq, snapshot[i].n_bars);
+
+		/*
+		 * #427: and the regions themselves, which nothing printed
+		 * before because nothing read them.  A line per region rather
+		 * than six raw slot values: the two are different counts, and
+		 * printing the slots was part of how "six slots are not six
+		 * regions" stayed invisible.
+		 */
+		for (b = 0; b < snapshot[i].n_bars; b++) {
+			const struct pci_bar_region *r = &snapshot[i].bars[b];
+
+			/*
+			 * ⚠️ Every flag the decode sets is printed.  The first
+			 * version showed I/O and 64-bit and silently dropped
+			 * prefetchable -- which the decode had computed and
+			 * the record was carrying.  A field shown in part is
+			 * how a reader concludes it is absent.
+			 */
+			printf("hal:       bar%u  %-5s %s base=0x%08x%08x\n",
+			       r->slot,
+			       (r->flags & PCI_REGION_IO) ? "io"
+			         : (r->flags & PCI_REGION_MEM_64) ? "mem64"
+			         : "mem32",
+			       (r->flags & PCI_REGION_PREFETCH) ? "pf" : "  ",
+			       (unsigned int)(r->base >> 32),
+			       (unsigned int)(r->base & 0xFFFFFFFFu));
+		}
 	}
 }
 

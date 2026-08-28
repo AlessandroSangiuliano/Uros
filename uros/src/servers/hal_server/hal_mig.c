@@ -72,7 +72,7 @@ kern_return_t
 hal_get_device_info(mach_port_t hal_port,
 		    unsigned int bus, unsigned int slot, unsigned int func,
 		    unsigned int *vendor_device, unsigned int *class_rev,
-		    unsigned int *irq, unsigned int *status)
+		    unsigned int *irq)
 {
 	const struct hal_device_info *d;
 
@@ -85,7 +85,6 @@ hal_get_device_info(mach_port_t hal_port,
 	*vendor_device = d->vendor_device;
 	*class_rev     = d->class_rev;
 	*irq           = d->irq;
-	*status        = d->status;
 	return KERN_SUCCESS;
 }
 
@@ -125,6 +124,52 @@ hal_register_driver(mach_port_t hal_port,
 	}
 
 	hal_driver_reg_replay(slot);
+	return KERN_SUCCESS;
+}
+
+/*
+ * #427 — the device's regions, decoded, for the one device asked about.
+ *
+ * ⚠️ A device with no regions returns success and a null buffer, not an
+ * error: "this device has no BARs" is an answer, and the host bridge and the
+ * ISA bridge on the machine this was measured on give exactly that.  Making
+ * it a failure would have every driver treat a true statement as a fault.
+ */
+kern_return_t
+hal_get_device_bars(mach_port_t hal_port,
+		    unsigned int bus, unsigned int slot, unsigned int func,
+		    vm_offset_t *bars, mach_msg_type_number_t *bars_count,
+		    unsigned int *n_bars)
+{
+	const struct hal_device_info *d;
+	vm_size_t bytes;
+	vm_offset_t buf;
+	kern_return_t kr;
+
+	(void)hal_port;
+
+	d = hal_registry_get(bus, slot, func);
+	if (d == NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	bytes = (vm_size_t)d->n_bars * sizeof(struct pci_bar_region);
+	if (bytes == 0) {
+		*bars = 0;
+		*bars_count = 0;
+		*n_bars = 0;
+		return KERN_SUCCESS;
+	}
+
+	buf = 0;
+	kr = vm_allocate(mach_task_self(), &buf, bytes, TRUE);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	memcpy((void *)buf, d->bars, (size_t)bytes);
+
+	*bars = buf;
+	*bars_count = (mach_msg_type_number_t)bytes;
+	*n_bars = d->n_bars;
 	return KERN_SUCCESS;
 }
 

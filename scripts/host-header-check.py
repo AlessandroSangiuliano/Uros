@@ -88,11 +88,23 @@ def load_commands(build_dir):
 
 
 def classify(cmd):
-    """kernel / target / host, from the command line itself."""
+    """kernel / target / host, from the command line itself.
+
+    ⚠️ The discriminant is -ffreestanding and NOT -m32/-m64, which is what
+    this asked first.  An arch flag says which ABI, not which machine the
+    code is for: a host-run unit test built twice to exercise both ABIs
+    carries -m32 and runs on the build machine, and calling it a target unit
+    would demand it stop reading the headers it is entitled to.
+
+    -ffreestanding is the right question because it is the same declaration
+    the opt-out already makes.  src/ sets it for everything built for Uros;
+    migcom, mkbundle and the host-run tests remove it, in one line, with a
+    comment.  So the classification and the intent are the same fact.
+    """
     words = cmd.split()
     if "-nostdinc" in words:
         return "kernel"
-    if "-m32" in words or "-m64" in words:
+    if "-ffreestanding" in words:
         return "target"
     return "host"
 

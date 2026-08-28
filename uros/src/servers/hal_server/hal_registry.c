@@ -89,17 +89,6 @@ hal_registry_get(unsigned int bus, unsigned int slot, unsigned int func)
 }
 
 int
-hal_registry_set_status(unsigned int bus, unsigned int slot,
-			unsigned int func, uint32_t status)
-{
-	int i = find_index(bus, slot, func);
-	if (i < 0)
-		return -1;
-	registry[i].status = status;
-	return 0;
-}
-
-int
 hal_registry_copy_all(struct hal_device_info *out, unsigned int max)
 {
 	unsigned int n;

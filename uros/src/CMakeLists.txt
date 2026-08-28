@@ -93,6 +93,15 @@ if(OSFMK_BUILD_KERNEL AND NOT _uros_migcom_from_lib)
   add_subdirectory(lib/migcom)
 endif()
 
+# The BAR decode's unit test, on the build machine (#427).
+#
+# Beside migcom because it is the same kind of thing: a host binary, built in
+# every configuration rather than behind the userland gate.  It is here and not
+# beside hal_server because it needs nothing hal_server needs -- the decode is
+# a pure function, and keeping the test where the server is would have made it
+# arrive only on the target where the server already builds.
+add_subdirectory(tests/pci_bar_test)
+
 if(OSFMK_BUILD_TOOLS AND UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib)
   add_subdirectory(mach_services/lib)
@@ -307,6 +316,23 @@ endif()
 # the answer.  Landing the server alone would mean landing an unmeasured one.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/cap_test)
+endif()
+
+# hal_server, built but NOT started, on x86-64 (#427).
+#
+# 🔑 "It compiles" and "it runs" are two steps, and only the second would be a
+# lie here.  Every library it links is across as of #423, and it has never been
+# compiled for this target -- so lifting it finds what a traversal finds, at
+# build time, which is what #495 and #423 both paid for.
+#
+# ⚠️ Deliberately absent from bootstrap.conf.  MACH_DEVICE_MASTER is 0 on this
+# target: the kernel implements none of the fourteen RPCs a discovery module
+# needs, so every device_pci_config_read would answer MIG_BAD_ID and the server
+# would print `module pci_scan scan failed' on every boot, for months.  A known
+# and permanent red line in a suite is how a suite stops being read -- which is
+# exactly what #512 was.  It starts when #457 gives it a bus to scan.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/hal_server)
 endif()
 
 # Everything below is userland; skip it wholesale on a non-i386 target.

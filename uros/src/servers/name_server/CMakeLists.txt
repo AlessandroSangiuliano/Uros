@@ -47,7 +47,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     ${_NS_OUT}/notify_user.c)
 
   add_executable(name_server_bin
-    netname.c nprocs.c nostdlib_stubs.c ${NS_MIG_GENERATED})
+    netname.c nprocs.c ${NS_MIG_GENERATED})
 
   target_compile_options(name_server_bin PRIVATE
     ${UROS_ARCH_FLAGS} -std=gnu11 -fno-builtin 
@@ -144,7 +144,6 @@ mig_all(
 set(NETNAME_SOURCES
   netname.c
   nprocs.c
-  nostdlib_stubs.c
   ${MIG_OUT}/netname_server.c
   ${MIG_OUT}/notify_server.c
   ${MIG_OUT}/service_user.c

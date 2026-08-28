@@ -113,13 +113,12 @@ kern_return_t
 hal_device_added(mach_port_t driver_port,
 		 unsigned int bus, unsigned int slot, unsigned int func,
 		 unsigned int vendor_device, unsigned int class_rev,
-		 unsigned int irq, unsigned int status)
+		 unsigned int irq)
 {
 	int m;
 
 	(void)driver_port;
 	(void)irq;
-	(void)status;
 
 	if (n_controllers >= MAX_CONTROLLERS) {
 		printf("blk: controller table full, ignoring %u:%u.%u\n",
@@ -156,6 +155,10 @@ pci_probe_module(const struct block_driver_ops *ops,
 	kern_return_t kr;
 	mach_port_t irq;
 	void *priv;
+	vm_offset_t bars;
+	mach_msg_type_number_t bars_count;
+	unsigned int n_bars;
+	int rc;
 	int nd, d;
 
 	kr = mach_port_allocate(mach_task_self(),
@@ -172,7 +175,47 @@ pci_probe_module(const struct block_driver_ops *ops,
 	}
 	mach_port_move_member(mach_task_self(), irq, port_set);
 
-	if (ops->probe(bus, slot, func, master_device, irq, &priv) < 0) {
+	/*
+	 * The device's regions, from the HAL that decoded them (#427).
+	 *
+	 * 🔑 Fetched HERE and handed to the module, rather than left for the
+	 * module to fetch.  Every driver used to read its own BAR out of
+	 * configuration space -- not from four bad decisions but because
+	 * hal_get_device_info returned everything except the BARs, so there
+	 * was nothing to ask.  Now there is, and asking once in the server
+	 * keeps a second RPC dependency out of every module.
+	 *
+	 * ⚠️ A failure here is reported and the probe still runs with no
+	 * regions.  A module that needs one says so in its own words, naming
+	 * the region it wanted; a module that does not -- and some devices
+	 * have none -- is not stopped by a question it never asked.
+	 */
+	bars = 0;
+	bars_count = 0;
+	n_bars = 0;
+	kr = hal_get_device_bars(hal_service_port, bus, slot, func,
+				 &bars, &bars_count, &n_bars);
+	if (kr != KERN_SUCCESS) {
+		printf("blk: hal_get_device_bars(%u:%u.%u) failed (kr=%d) — "
+		       "%s probes without regions\n",
+		       bus, slot, func, kr, ops->name);
+		n_bars = 0;
+	}
+
+	rc = ops->probe(bus, slot, func, master_device, irq,
+			(const struct pci_bar_region *)bars, n_bars, &priv);
+
+	/*
+	 * ⚠️ Released on both paths, and before the early return.  The buffer
+	 * is out-of-line memory the RPC handed this task; the probe borrows it
+	 * and does not own it, so a module that keeps the pointer keeps a
+	 * dangling one.  Modules copy what they need -- see ahci_module.c.
+	 */
+	if (bars != 0)
+		(void)vm_deallocate(mach_task_self(), bars,
+				    (vm_size_t)bars_count);
+
+	if (rc < 0) {
 		printf("blk: %s probe failed at PCI %u:%u.%u\n",
 		       ops->name, bus, slot, func);
 		return;

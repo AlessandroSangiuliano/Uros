@@ -41,6 +41,7 @@
 #include <mach.h>
 #include <mach/mach_types.h>
 #include <stdint.h>
+#include <pci_bar.h>		/* #427: struct pci_bar_region */
 
 /* ================================================================
  * Limits
@@ -51,13 +52,25 @@
 #define HAL_MAX_BARS		6
 
 /* ================================================================
- * Device status
+ * Device status — removed (#427)
+ *
+ * There were four values.  Every scan set the record to UNBOUND and nothing
+ * ever set anything else: hal_registry_set_status() existed and no code
+ * called it, so the field was delivered by get_device_info and by
+ * hal_device_added, printed by the registry dump, and was the same number
+ * forever.  Its one consumer discarded it explicitly -- `(void)status;' in
+ * block_server.c.
+ *
+ * 🔑 A field two RPCs report and nothing can change is worse than a field
+ * that is not there, because a reader believes it.  Worse still, a rescan
+ * refreshed the whole record and so would have reset any status that HAD
+ * been set, silently, on a device already bound -- a defect that could not
+ * be observed only because the value it overwrote was the value it wrote.
+ *
+ * ⚠️ What it was reaching for is real: a registry that knows which devices
+ * have drivers.  That needs a driver to say so -- there is no such RPC --
+ * and it is device lifecycle, not BAR decoding.  #513.
  * ================================================================ */
-
-#define HAL_DEV_UNBOUND		0	/* discovered, no driver claimed yet */
-#define HAL_DEV_PROBING		1	/* driver is probing */
-#define HAL_DEV_ACTIVE		2	/* driver took ownership */
-#define HAL_DEV_ERROR		3	/* probe failed */
 
 /* ================================================================
  * Device record
@@ -65,6 +78,11 @@
  * This is the on-the-wire layout returned by hal_list_devices (OOL
  * buffer holds an array of these back-to-back).  Keep it POD and
  * fixed-size so the client can iterate without MIG typing help.
+ *
+ * ⚠️ Untyped means producer and consumer must come from the same build --
+ * true before #427 and still true after it.  It is written down because the
+ * regions below carry 64-bit members, which change this struct's alignment
+ * and padding as well as its size: the half a reader does not see.
  * ================================================================ */
 
 struct hal_device_info {
@@ -74,8 +92,28 @@ struct hal_device_info {
 	uint32_t	vendor_device;		/* PCI 0x00 */
 	uint32_t	class_rev;		/* PCI 0x08 */
 	uint32_t	irq;			/* PCI 0x3C interrupt line */
-	uint32_t	bars[HAL_MAX_BARS];	/* PCI 0x10..0x24 */
-	uint32_t	status;			/* HAL_DEV_* */
+
+	/*
+	 * The device's regions, decoded (#427).
+	 *
+	 * 🔑 REGIONS, and a count, where this was `uint32_t bars[6]' -- the six
+	 * raw slot values, filled on every scan and read by nothing.  Six slots
+	 * are not six regions: a 64-bit memory BAR occupies two of them, so how
+	 * many there are is not known until pci_bars_decode() has walked them,
+	 * and n_bars is what makes that answer sayable at all.
+	 *
+	 * ⚠️ The old field could not have been corrected in place.  A decoded
+	 * BAR is a 64-bit base plus a size plus the space type, and none of the
+	 * three fits in a uint32_t -- fixing the loop while keeping the type
+	 * would have written a truncated address more carefully, with every
+	 * guard still green.
+	 *
+	 * `size' is zero until something probes it; see pci_bar.h for why a
+	 * size is measured rather than read, and hal_registry_add() for why the
+	 * measurement happens once.
+	 */
+	uint32_t		n_bars;
+	struct pci_bar_region	bars[HAL_MAX_BARS];
 };
 
 /* ================================================================
@@ -138,8 +176,6 @@ int  hal_registry_count(void);
 const struct hal_device_info *hal_registry_get(unsigned int bus,
 					       unsigned int slot,
 					       unsigned int func);
-int  hal_registry_set_status(unsigned int bus, unsigned int slot,
-			     unsigned int func, uint32_t status);
 /*
  * Copy the full registry into a caller-supplied buffer.  Returns the
  * number of entries copied.
