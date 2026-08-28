@@ -41,6 +41,7 @@
 #include <mach.h>
 #include <mach/mach_types.h>
 #include <stdint.h>
+#include <pci_bar.h>		/* #427: struct pci_bar_region */
 
 /* ================================================================
  * Limits
@@ -65,6 +66,11 @@
  * This is the on-the-wire layout returned by hal_list_devices (OOL
  * buffer holds an array of these back-to-back).  Keep it POD and
  * fixed-size so the client can iterate without MIG typing help.
+ *
+ * ⚠️ Untyped means producer and consumer must come from the same build --
+ * true before #427 and still true after it.  It is written down because the
+ * regions below carry 64-bit members, which change this struct's alignment
+ * and padding as well as its size: the half a reader does not see.
  * ================================================================ */
 
 struct hal_device_info {
@@ -74,8 +80,29 @@ struct hal_device_info {
 	uint32_t	vendor_device;		/* PCI 0x00 */
 	uint32_t	class_rev;		/* PCI 0x08 */
 	uint32_t	irq;			/* PCI 0x3C interrupt line */
-	uint32_t	bars[HAL_MAX_BARS];	/* PCI 0x10..0x24 */
 	uint32_t	status;			/* HAL_DEV_* */
+
+	/*
+	 * The device's regions, decoded (#427).
+	 *
+	 * 🔑 REGIONS, and a count, where this was `uint32_t bars[6]' -- the six
+	 * raw slot values, filled on every scan and read by nothing.  Six slots
+	 * are not six regions: a 64-bit memory BAR occupies two of them, so how
+	 * many there are is not known until pci_bars_decode() has walked them,
+	 * and n_bars is what makes that answer sayable at all.
+	 *
+	 * ⚠️ The old field could not have been corrected in place.  A decoded
+	 * BAR is a 64-bit base plus a size plus the space type, and none of the
+	 * three fits in a uint32_t -- fixing the loop while keeping the type
+	 * would have written a truncated address more carefully, with every
+	 * guard still green.
+	 *
+	 * `size' is zero until something probes it; see pci_bar.h for why a
+	 * size is measured rather than read, and hal_registry_add() for why the
+	 * measurement happens once.
+	 */
+	uint32_t		n_bars;
+	struct pci_bar_region	bars[HAL_MAX_BARS];
 };
 
 /* ================================================================

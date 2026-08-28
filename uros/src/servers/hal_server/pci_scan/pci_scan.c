@@ -41,11 +41,10 @@
 #include "device_master.h"
 #include "hal_server.h"
 
-/* PCI configuration-space offsets */
-#define PCI_VENDOR_ID		0x00
-#define PCI_CLASS_REV		0x08
-#define PCI_BAR0		0x10
-#define PCI_INTERRUPT_LINE	0x3C
+/*
+ * The configuration header's offsets come from <device/pci.h> now (#427).
+ * They used to be four private copies across this tree; see that header.
+ */
 
 static mach_port_t	pci_master_device;
 
@@ -66,6 +65,7 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
 		struct hal_device_info *dev)
 {
 	unsigned int vendor_device, class_rev, irq_reg, bar;
+	uint32_t raw_bars[PCI_NUM_BAR_SLOTS];
 	kern_return_t kr;
 	int i;
 
@@ -94,12 +94,31 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
 				    PCI_INTERRUPT_LINE, &irq_reg);
 	dev->irq = (kr == KERN_SUCCESS) ? (irq_reg & 0xFFu) : 0;
 
-	for (i = 0; i < HAL_MAX_BARS; i++) {
+	/*
+	 * The BARs: read all six slots, then decode them into regions (#427).
+	 *
+	 * 🔑 Two steps and not one, and the split is the fix.  What comes off
+	 * the bus is six 32-bit slots; what a driver needs is a list of
+	 * regions, and the two counts are not the same number because a 64-bit
+	 * memory BAR occupies two slots.  This loop reads, and knows nothing
+	 * about what the values mean; pci_bars_decode() decides what they are,
+	 * and it is a pure function precisely so that decision can be checked
+	 * without a device -- see tests/pci_bar_test.
+	 *
+	 * ⚠️ A slot whose read fails becomes zero, which the decode treats as
+	 * an unimplemented BAR.  That is the honest reading: a value that did
+	 * not arrive is not a region, and inventing one would hand a driver an
+	 * address that no device answered for.
+	 */
+	for (i = 0; i < PCI_NUM_BAR_SLOTS; i++) {
 		kr = device_pci_config_read(pci_master_device,
 					    bus, slot, func,
-					    PCI_BAR0 + i * 4u, &bar);
-		dev->bars[i] = (kr == KERN_SUCCESS) ? bar : 0;
+					    PCI_BAR(i), &bar);
+		raw_bars[i] = (kr == KERN_SUCCESS) ? bar : 0;
 	}
+
+	dev->n_bars = pci_bars_decode(raw_bars, PCI_NUM_BAR_SLOTS,
+				      dev->bars, HAL_MAX_BARS);
 
 	return 1;
 }

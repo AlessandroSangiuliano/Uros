@@ -25,6 +25,8 @@ set(HAL_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
   ${CMAKE_SOURCE_DIR}/src/lib/libmodload
+  # The BAR decode, a pure translation unit with no RPC in it (#427).
+  ${CMAKE_SOURCE_DIR}/src/lib/libpci
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (sa_mach.h, stdio.h, string.h)
@@ -136,6 +138,10 @@ add_custom_command(
 # --- pci_scan module ---
 add_library(hal_pci_scan_module SHARED
   pci_scan/pci_scan.c
+  # Linked in rather than pulled from a library: the module is loaded by
+  # libdl into hal_server and resolves only what hal_server exports, so a
+  # static archive on the server's link line would not reach it (#427).
+  ${CMAKE_SOURCE_DIR}/src/lib/libpci/pci_bar.c
   ssp_module_stub.c
   ${DM_USER_C}
 )

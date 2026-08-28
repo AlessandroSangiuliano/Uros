@@ -130,11 +130,32 @@ dump_registry(void)
 	printf("hal: registry has %d device(s):\n", got);
 
 	for (i = 0; i < got; i++) {
+		unsigned int b;
+
 		printf("hal:   %02u:%02u.%u  vendor=0x%08x  "
-		       "class=0x%08x  irq=%u  status=%u\n",
+		       "class=0x%08x  irq=%u  status=%u  regions=%u\n",
 		       snapshot[i].bus, snapshot[i].slot, snapshot[i].func,
 		       snapshot[i].vendor_device, snapshot[i].class_rev,
-		       snapshot[i].irq, snapshot[i].status);
+		       snapshot[i].irq, snapshot[i].status,
+		       snapshot[i].n_bars);
+
+		/*
+		 * #427: and the regions themselves, which nothing printed
+		 * before because nothing read them.  A line per region rather
+		 * than six raw slot values: the two are different counts, and
+		 * printing the slots was part of how "six slots are not six
+		 * regions" stayed invisible.
+		 */
+		for (b = 0; b < snapshot[i].n_bars; b++) {
+			const struct pci_bar_region *r = &snapshot[i].bars[b];
+
+			printf("hal:       bar%u  %s%s  base=0x%08x%08x\n",
+			       r->slot,
+			       (r->flags & PCI_REGION_IO) ? "io " : "mem",
+			       (r->flags & PCI_REGION_MEM_64) ? "64" : "  ",
+			       (unsigned int)(r->base >> 32),
+			       (unsigned int)(r->base & 0xFFFFFFFFu));
+		}
 	}
 }
 
