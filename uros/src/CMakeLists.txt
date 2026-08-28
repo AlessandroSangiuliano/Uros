@@ -4,6 +4,29 @@ cmake_minimum_required(VERSION 3.16)
 
 set(OSFMK_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
+# -ffreestanding for everything built for Uros (#506).
+#
+# `-fno-builtin' -- which nearly every target below already passes -- says
+# "do not assume the builtins are the standard ones".  It never says "there
+# is no host C library", and only the second stops GCC's own <stdint.h> from
+# ending in `#include_next <stdint.h>' and landing in the build machine's
+# glibc.  With __STDC_HOSTED__ at 1 that chain reached 158 of 162 objects on
+# x86-64 and 425 of 487 on i386: the integer typedefs of a Mach userland were
+# coming from the Linux system that happened to compile it.
+#
+# 🔑 Set on the DIRECTORY rather than on each target, because the failure is
+# one of omission: with 48 targets naming the flag themselves, the forty-ninth
+# would be written without it and nothing would say so.  Inherited, a new
+# CMakeLists is freestanding before anyone thinks about it, and opting OUT is
+# what has to be written down -- which is the direction that leaves a trace.
+#
+# ⚠️ src/contrib is added from the top-level CMakeLists, not from here, so
+# musl does not inherit this.  It is a hosted C library and builds as one.
+#
+# The kernel already passes -ffreestanding AND -nostdinc; inheriting a flag it
+# sets itself is a no-op, and its zero stays zero either way.
+add_compile_options(-ffreestanding)
+
 # The ODE export directory uses pseudo-symlinks ("link ppc") for mach/machine.
 # Create a real symlink in the build tree instead: mach/machine -> the
 # target architecture's mach headers (#404 made it per-target; it was

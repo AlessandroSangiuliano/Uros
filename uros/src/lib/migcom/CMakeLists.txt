@@ -2,6 +2,17 @@ cmake_minimum_required(VERSION 3.16)
 
 project(migcom_host C)
 
+# Opt out of the tree-wide -ffreestanding (#506).
+#
+# migcom runs on the machine doing the build.  It opens files, allocates and
+# prints, and the C library it must use is that machine's -- so reading that
+# machine's headers is correct here and only here.  Written as a removal of
+# the one flag rather than a wipe of the directory property, so a future
+# option set in src/ still reaches this tool.
+get_directory_property(_uros_dir_opts COMPILE_OPTIONS)
+list(REMOVE_ITEM _uros_dir_opts -ffreestanding)
+set_directory_properties(PROPERTIES COMPILE_OPTIONS "${_uros_dir_opts}")
+
 set(SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Require Flex and Bison (lexer/parser generation)
