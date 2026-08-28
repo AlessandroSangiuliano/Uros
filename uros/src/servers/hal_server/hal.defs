@@ -34,8 +34,7 @@ routine get_device_info(
 	in	func		: unsigned;
 	out	vendor_device	: unsigned;
 	out	class_rev	: unsigned;
-	out	irq		: unsigned;
-	out	status		: unsigned);
+	out	irq		: unsigned);
 
 routine register_driver(
 		hal_port	: mach_port_t;

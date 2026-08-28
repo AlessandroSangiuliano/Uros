@@ -113,13 +113,12 @@ kern_return_t
 hal_device_added(mach_port_t driver_port,
 		 unsigned int bus, unsigned int slot, unsigned int func,
 		 unsigned int vendor_device, unsigned int class_rev,
-		 unsigned int irq, unsigned int status)
+		 unsigned int irq)
 {
 	int m;
 
 	(void)driver_port;
 	(void)irq;
-	(void)status;
 
 	if (n_controllers >= MAX_CONTROLLERS) {
 		printf("blk: controller table full, ignoring %u:%u.%u\n",

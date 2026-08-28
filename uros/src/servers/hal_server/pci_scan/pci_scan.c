@@ -82,7 +82,6 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
 	dev->slot = slot;
 	dev->func = func;
 	dev->vendor_device = vendor_device;
-	dev->status = HAL_DEV_UNBOUND;
 
 	kr = device_pci_config_read(pci_master_device,
 				    bus, slot, func,

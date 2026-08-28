@@ -133,11 +133,10 @@ dump_registry(void)
 		unsigned int b;
 
 		printf("hal:   %02u:%02u.%u  vendor=0x%08x  "
-		       "class=0x%08x  irq=%u  status=%u  regions=%u\n",
+		       "class=0x%08x  irq=%u  regions=%u\n",
 		       snapshot[i].bus, snapshot[i].slot, snapshot[i].func,
 		       snapshot[i].vendor_device, snapshot[i].class_rev,
-		       snapshot[i].irq, snapshot[i].status,
-		       snapshot[i].n_bars);
+		       snapshot[i].irq, snapshot[i].n_bars);
 
 		/*
 		 * #427: and the regions themselves, which nothing printed

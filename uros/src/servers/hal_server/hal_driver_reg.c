@@ -64,7 +64,7 @@ notify_one(const struct hal_driver_reg *reg,
 	kr = hal_device_added(reg->driver_port,
 			      dev->bus, dev->slot, dev->func,
 			      dev->vendor_device, dev->class_rev,
-			      dev->irq, dev->status);
+			      dev->irq);
 	if (kr != KERN_SUCCESS) {
 		printf("hal: notify %u:%u.%u on port 0x%x failed (kr=%d)\n",
 		       dev->bus, dev->slot, dev->func,

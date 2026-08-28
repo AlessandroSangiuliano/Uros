@@ -72,7 +72,7 @@ kern_return_t
 hal_get_device_info(mach_port_t hal_port,
 		    unsigned int bus, unsigned int slot, unsigned int func,
 		    unsigned int *vendor_device, unsigned int *class_rev,
-		    unsigned int *irq, unsigned int *status)
+		    unsigned int *irq)
 {
 	const struct hal_device_info *d;
 
@@ -85,7 +85,6 @@ hal_get_device_info(mach_port_t hal_port,
 	*vendor_device = d->vendor_device;
 	*class_rev     = d->class_rev;
 	*irq           = d->irq;
-	*status        = d->status;
 	return KERN_SUCCESS;
 }
 

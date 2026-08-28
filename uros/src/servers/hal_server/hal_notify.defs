@@ -27,5 +27,4 @@ simpleroutine hal_device_added(
 	in	func		: unsigned;
 	in	vendor_device	: unsigned;
 	in	class_rev	: unsigned;
-	in	irq		: unsigned;
-	in	status		: unsigned);
+	in	irq		: unsigned);
