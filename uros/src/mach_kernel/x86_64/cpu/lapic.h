@@ -63,6 +63,33 @@ void lapic_enable(void);
  */
 void lapic_eoi(void);
 
+/*
+ * Whether this processor still has `vector' in service -- accepted and not
+ * yet acknowledged.
+ *
+ * 🔑 The hardware's own answer to the question a deferred interrupt raises:
+ * an interrupt that was deferred was acknowledged at the moment it arrived,
+ * so by the time its handler runs the bit is clear.  Written for the test
+ * that says so, because "the acknowledgement is not given twice" is otherwise
+ * a claim about code paths rather than an observation.
+ *
+ * ⚠️ A register read, which is an MMIO access and under virtualisation a trip
+ * out of the guest -- the cost #322 rearranged the whole priority mechanism
+ * to avoid.  Not for the interrupt path.
+ */
+int lapic_in_service(uint8_t vector);
+
+/*
+ * How many interrupts this processor has acknowledged.
+ *
+ * 🔑 One per interrupt is the invariant, and it is one nobody can check from
+ * inside a handler: a deferred interrupt is acknowledged by the dispatch that
+ * deferred it and its handler runs later, so the two halves of the count are
+ * in different places and different moments.  Counted here, where the
+ * acknowledgement actually happens, so the claim can be a subtraction.
+ */
+uint64_t lapic_ack_count(void);
+
 /* Whether lapic_init() found a usable local APIC. */
 int lapic_present(void);
 

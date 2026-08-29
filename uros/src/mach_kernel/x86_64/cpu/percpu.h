@@ -204,6 +204,47 @@ struct percpu {
 	uint64_t syscall_ret_cycles;
 	uint64_t syscall_ret_count;
 	uint64_t syscall_ret_mark;	/* scratch: the trap function returned */
+
+	/*
+	 * Whether this processor is inside a replayed handler right now (#457).
+	 *
+	 * 🔑 A handler cannot otherwise tell the two ways it can be entered
+	 * apart, and for one of them it must not acknowledge the interrupt: the
+	 * deferral in trap_dispatch() already did, precisely so that the local
+	 * APIC would not hold the class busy for the length of the deferral.  A
+	 * second acknowledgement does not go nowhere -- EOI clears the highest
+	 * bit currently in service, and during a replay that is whatever
+	 * interrupt the processor is actually in, dismissed early.
+	 *
+	 * <cpu/spl.h> says a handler may not be marked deferrable without being
+	 * read; this is the fact reading one needs, kept where the reading costs
+	 * one %gs-relative load.
+	 *
+	 * A count and not a flag, because splx() can be called from inside a
+	 * replayed handler and replay again beneath it -- rare, but a flag
+	 * cleared by the inner one would tell the outer one it had arrived.
+	 *
+	 * ⚠️ At the END, like loaded_pmap and syscall_tsc and for the same
+	 * reason: the offsets asserted below are what the assembly uses.
+	 */
+	uint32_t in_replay;
+	uint32_t reserved_replay;
+
+	/*
+	 * How many interrupts this processor has acknowledged (#457).
+	 *
+	 * 🔑 Here so that "exactly one acknowledgement per interrupt" is a
+	 * number and not an argument about code paths.  The handler for a
+	 * deferred interrupt is entered twice, and only one of the two entries
+	 * may acknowledge; nothing about that is visible from either entry, so
+	 * the test counts both sides and compares them.
+	 *
+	 * Per processor rather than global for the ordinary reason -- a shared
+	 * counter on the interrupt path is a contended line and a wrong number
+	 * on the machines that matter -- and it costs an increment through %gs
+	 * beside an MMIO store that is already thousands of times dearer.
+	 */
+	uint64_t acked;
 };
 
 /*

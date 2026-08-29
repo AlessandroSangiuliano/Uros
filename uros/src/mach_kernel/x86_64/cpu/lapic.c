@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include <cpu/lapic.h>
+#include <cpu/percpu.h>	/* #457: where the acknowledgement count lives */
 #include <cpu/regs.h>
 #include <pmap/pmap.h>
 #include <time/pit.h>
@@ -25,6 +26,7 @@
 #define LAPIC_TPR		0x080	/* task priority           */
 #define LAPIC_EOI		0x0B0	/* end of interrupt        */
 #define LAPIC_SVR		0x0F0	/* spurious vector, and the enable bit */
+#define LAPIC_ISR		0x100	/* eight registers, 32 vectors apiece */
 #define LAPIC_ICR_LOW		0x300
 #define LAPIC_ICR_HIGH		0x310
 #define LAPIC_LVT_TIMER		0x320	/* vector, mode and mask   */
@@ -136,7 +138,28 @@ void lapic_enable(void)
 
 void lapic_eoi(void)
 {
+	percpu()->acked++;
 	lapic_write(LAPIC_EOI, 0);
+}
+
+uint64_t lapic_ack_count(void)
+{
+	return percpu()->acked;
+}
+
+/*
+ * The in-service register: one bit per vector, set from the moment the
+ * processor accepts the interrupt until EOI clears it.
+ *
+ * Thirty-two vectors per register and sixteen bytes between registers, which
+ * is the architecture's layout and not a choice -- the gaps are where the
+ * other 96 bits of each 128-bit slot would be if they existed.
+ */
+int lapic_in_service(uint8_t vector)
+{
+	unsigned reg = LAPIC_ISR + ((unsigned)vector >> 5) * 0x10;
+
+	return (lapic_read(reg) >> (vector & 31)) & 1;
 }
 
 /* Where the registers ended up, so the mapping itself can be inspected. */

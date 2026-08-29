@@ -121,7 +121,25 @@ void trap_replay_vector(unsigned vector)
 	struct trap_frame replay = { 0 };
 
 	replay.vector = vector;
+
+	/*
+	 * Bracketed, so that the handler can tell this entry from the one it
+	 * gets when the interrupt actually arrives (#457).  The difference is
+	 * not cosmetic: the acknowledgement for this interrupt was issued by
+	 * the deferral, and a handler that acknowledged again here would clear
+	 * whatever the processor has in service now.
+	 *
+	 * Around h() and not around the whole function, because the count is a
+	 * statement about the handler and nothing else here can ask.
+	 */
+	percpu()->in_replay++;
 	h(&replay);
+	percpu()->in_replay--;
+}
+
+int trap_in_replay(void)
+{
+	return percpu()->in_replay != 0;
 }
 
 void trap_set_handler(unsigned vector, trap_handler_t handler)
