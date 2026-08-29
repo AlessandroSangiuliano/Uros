@@ -259,6 +259,21 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/act_test)
 endif()
 
+# And the task that claims an interrupt line and gives it back (#457).
+#
+# 🔑 The only test here that is added on BOTH targets, and deliberately.  The
+# two machines answer <device/device_machdep.h> with different machinery, and
+# the whole reason the contract names the operation rather than the mechanism
+# is that one program above it cannot tell.  Running it on one target would
+# measure an implementation.
+#
+# ⚠️ It is also the only thing that reaches the defect it was written for.
+# ds_master_device_intr_unregister() halted i386 -- take_irq() on a line whose
+# priority its own register had just set -- and nothing exercised it, because
+# the one caller in the tree is a module detach() that core.c reaches only
+# when the device table is full.
+add_subdirectory(tests/irq_claim_test)
+
 # And the task that forks with copy-on-write (#407) -- the fifth clause of that
 # issue's done-when, and the only one nothing else exercises.
 #

@@ -77,6 +77,7 @@ HELLO_SERVER_CMF="$MANIFESTS/hello_server.cmf"
 NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
 CAP_TEST="$SBIN/cap_test"
+IRQ_CLAIM_TEST="$SBIN/irq_claim_test"
 GPUSTAT="$SBIN/gpustat"
 HAL_SERVER="$SBIN/hal_server"
 BLOCK_DEVICE_SERVER="$SBIN/block_device_server"
@@ -126,6 +127,11 @@ CAP_SERVER_CONF_LINE=""
 [ -f "$CAP_SERVER" ] && CAP_SERVER_CONF_LINE="cap_server cap_server"
 CAP_TEST_CONF_LINE=""
 [ -f "$CAP_TEST" ] && CAP_TEST_CONF_LINE="cap_test cap_test"
+# #457: claims an interrupt line and gives it back.  ⚠️ On a kernel where
+# the release halts, nothing after its FIRST line is ever printed -- so a
+# failure here is a missing log rather than a wrong one.
+IRQ_CLAIM_TEST_CONF_LINE=""
+[ -f "$IRQ_CLAIM_TEST" ] && IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
 KERNEL242_TEST_CONF_LINE=""
 [ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="kernel242_test kernel242_test"
 SIG_TEST_CONF_LINE=""
@@ -163,6 +169,7 @@ if [ "$MINIMAL" = "1" ]; then
     IPC_BENCH_LINE=""
     PTHREAD_TEST_LINE=""
     CAP_TEST_CONF_LINE=""
+    IRQ_CLAIM_TEST_CONF_LINE=""
     KERNEL242_TEST_CONF_LINE=""
     SIG_TEST_CONF_LINE=""
     GPUSTAT_CONF_LINE=""
@@ -203,6 +210,7 @@ ${PROC_SERVER_CONF_LINE}
 ${IPC_BENCH_LINE}
 ${PTHREAD_TEST_LINE}
 ${CAP_TEST_CONF_LINE}
+${IRQ_CLAIM_TEST_CONF_LINE}
 ${KERNEL242_TEST_CONF_LINE}
 ${SIG_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
@@ -224,6 +232,7 @@ ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$EXEC_SERVER" ] && ARGS+=("exec_server:$EXEC_SERVER")
 [ -f "$PROC_SERVER" ] && ARGS+=("proc_server:$PROC_SERVER")
 [ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
+[ -f "$IRQ_CLAIM_TEST" ] && ARGS+=("irq_claim_test:$IRQ_CLAIM_TEST")
 [ -f "$KERNEL242_TEST" ] && ARGS+=("kernel242_test:$KERNEL242_TEST")
 [ -f "$SIG_TEST" ] && ARGS+=("sig_test:$SIG_TEST")
 [ -f "$GPUSTAT" ] && ARGS+=("gpustat:$GPUSTAT")
