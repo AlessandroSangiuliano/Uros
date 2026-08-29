@@ -138,7 +138,24 @@ device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 #define	DEVICE_MD_IRQ_MAX	16
 #define	DEVICE_MD_VECTOR(irq)	(IOAPIC_ISA_VECTOR_BASE + (irq))
 
-static device_md_intr_t	irq_handler[DEVICE_MD_IRQ_MAX];
+/*
+ * ── And sixteen more that are not lines ──────────────────────────────
+ *
+ * Message-signalled interrupts continue the numbering rather than starting a
+ * second space: slots 16..31, vectors 0x50..0x5F.  The trampoline below needs
+ * no case for them, because `vector - 0x40' indexes both halves -- which is
+ * the whole point of a numbering that continues instead of restarting.
+ *
+ * ⚠️ The block above is the class ABOVE the pinned one, and <cpu/spl.h>'s
+ * SPL_DEVICE was raised to five so that "the device level" means both kinds.
+ * On this machine the vector IS the priority; putting these somewhere else in
+ * the space would have been changing what a spl call excludes.
+ */
+#define	DEVICE_MD_MSI_BASE	16
+#define	DEVICE_MD_MSI_MAX	16
+#define	DEVICE_MD_SLOTS		(DEVICE_MD_IRQ_MAX + DEVICE_MD_MSI_MAX)
+
+static device_md_intr_t	irq_handler[DEVICE_MD_SLOTS];
 
 /*
  * One trampoline for all sixteen, because the frame carries the vector and
@@ -170,7 +187,7 @@ device_md_irq_trampoline(struct trap_frame *frame)
 	 * (trap_replay_vector()), which is what lets this trampoline be
 	 * reached both ways.
 	 */
-	if (irq < DEVICE_MD_IRQ_MAX) {
+	if (irq < DEVICE_MD_SLOTS) {
 		handler = irq_handler[irq];
 		if (handler != 0)
 			handler((int)irq);
@@ -262,4 +279,119 @@ device_md_debugger_break(void)
 
 	Debugger("console break");
 	return 1;
+}
+
+/*
+ * ── An interrupt that is not a wire ──────────────────────────────────
+ *
+ * 🔑 The whole of "delivering" an MSI is an ordinary 32-bit store to an
+ * ordinary physical address.  What makes it an interrupt is only where that
+ * address points: 0xFEE00000 and up is the region the local APICs answer, and
+ * the bits of the address say WHICH processor while the bits of the value say
+ * WHICH vector.  There is nothing to route and no controller to program --
+ * which is exactly why a device with MSI needs no entry in the firmware's
+ * interrupt routing table, and why sixteen ISA lines stop being the ceiling.
+ *
+ * ⚠️ And exactly why an MSI-X table a driver could write is the same hole as
+ * a DMA engine a driver could aim: from the device's side this is a store, and
+ * the address it stores to is whatever the table says.  A driver that could
+ * write 0x0 there would have the device scribble on page zero instead; one
+ * that could write another processor's APIC address would deliver interrupts
+ * nobody asked for.  It is the kernel that programs the table (#432, #511).
+ *
+ * The encodings below are the architecture's, in its "compatibility" format,
+ * which is the one that exists on every x86 with a local APIC:
+ *
+ *   address   0xFEE00000 | (destination APIC id << 12)
+ *             the low bits select redirection hints this does not use --
+ *             physical destination, no redirection, for the reason
+ *             ioapic_route() gives: an interrupt handled twice is worse than
+ *             one handled slowly, and lowest-priority delivery hands the
+ *             choice to the hardware before there is a scheduler with an
+ *             opinion.
+ *
+ *   data      the vector, with delivery mode 000 (fixed) and the trigger bits
+ *             clear.  ⚠️ An MSI is always edge -- the spec says level-trigger
+ *             in the data word is for a bridge translating a wire, and a real
+ *             MSI has no wire to be level ON.  So the #381 note about masking
+ *             an edge line applies here in full.
+ */
+#define	MSI_ADDRESS_BASE	0xFEE00000ULL
+#define	MSI_ADDRESS_DEST(id)	(((unsigned long long)(id) & 0xFFu) << 12)
+
+static unsigned int	msi_next;	/* slots are handed out in order */
+
+int
+device_md_msi_register(device_md_intr_t handler, unsigned int *slot_out,
+		       unsigned long long *addr_out, unsigned int *data_out)
+{
+	unsigned int	slot;
+	unsigned int	vector;
+
+	if (handler == 0 || slot_out == 0 || addr_out == 0 || data_out == 0)
+		return 0;
+
+	/*
+	 * ⚠️ No local APIC means no address that means anything.  Answering an
+	 * address anyway would hand back a number a device would faithfully
+	 * write to, and the write would land in whatever is at 0xFEE00000 on a
+	 * machine that has no APIC there.
+	 */
+	if (!lapic_present())
+		return 0;
+
+	/*
+	 * Handed out in order and never reclaimed by search, because a search
+	 * would need the table to say which slots are free and the handler
+	 * pointer is not that: a slot whose handler is zero may be one that was
+	 * never used or one a device is still programmed to write to.  ⚠️ Which
+	 * makes unregister leave the slot spent -- see below.
+	 */
+	if (msi_next >= DEVICE_MD_MSI_MAX)
+		return 0;
+
+	slot = DEVICE_MD_MSI_BASE + msi_next;
+	msi_next++;
+	vector = DEVICE_MD_VECTOR(slot);
+
+	/*
+	 * The handler before the address, for the reason register does it in
+	 * that order for a line: the address is what makes the interrupt
+	 * possible, and a caller that programmed a device with it could see the
+	 * first one arrive before this call returns.
+	 */
+	irq_handler[slot] = handler;
+	trap_set_handler(vector, device_md_irq_trampoline);
+
+	*slot_out = slot;
+	*addr_out = MSI_ADDRESS_BASE | MSI_ADDRESS_DEST(lapic_id());
+	*data_out = vector;
+
+	return 1;
+}
+
+/*
+ * 🔴 THE SLOT IS SPENT, NOT FREED, and that is a decision rather than an
+ * omission.
+ *
+ * Giving up a line means masking a pin: after that the controller will not
+ * deliver, whatever the device does.  There is no equivalent here.  The
+ * address and the value are in the device's own table, this side cannot see
+ * them, and nothing this function does can stop a device that still has them
+ * from writing.  Handing the slot to a second caller would mean two
+ * subsystems sharing a vector, one of which does not know the other exists.
+ *
+ * So the handler goes -- an arriving message finds nothing to run and is
+ * acknowledged, which is a lost interrupt and not a wild call -- and the slot
+ * is not reused.  Sixteen of them, and reclaiming one honestly means the
+ * kernel owning the device's table, which is where #457 is going anyway.
+ */
+void
+device_md_msi_unregister(unsigned int slot)
+{
+	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS)
+		return;
+
+	irq_handler[slot] = 0;
+	trap_set_handler(DEVICE_MD_VECTOR(slot), 0);
 }

@@ -3555,6 +3555,130 @@ static void pci_cap_selftest(void)
 		      : " — WRONG, MSI-X found on a 1996 chipset\r\n");
 }
 
+/*
+ * An interrupt with no wire behind it (#457).
+ *
+ * 🔑 Delivering an MSI is an ordinary 32-bit store.  Which means this test
+ * needs no device at all: it asks for the address and the value a device
+ * would be programmed to write, and then WRITES THEM ITSELF.  The processor
+ * cannot tell the difference, because there is no difference — the local APIC
+ * answers a physical address, and who put the bytes on the bus is not part of
+ * what it sees.
+ *
+ * ⚠️ Which is also the limit of what this proves, and the limit is the point:
+ * it proves the vector, the encoding and the delivery, and it proves NOTHING
+ * about a device's MSI-X table being programmed correctly.  Those are two
+ * claims and this is the first — the second needs a device to raise one, and
+ * saying so here is what stops the first from being mistaken for both.
+ *
+ * ⚠️ The store is to a mapping made for it rather than to lapic_probe_va().
+ * For APIC id 0 the message address IS the local APIC's own base, so the
+ * existing mapping would work — and would work by a coincidence of that id,
+ * which is exactly the kind of thing that is right until the day a test runs
+ * on the second processor.
+ */
+static volatile uint64_t	msi_hits;
+static volatile int		msi_slot_seen;
+
+static void msi_handler(int slot)
+{
+	msi_hits++;
+	msi_slot_seen = slot;
+}
+
+static void msi_selftest(void)
+{
+	unsigned int		slot = 0, data = 0;
+	unsigned long long	addr = 0;
+	uint64_t		before, deferred_before;
+	volatile uint32_t	*doorbell;
+	int			had_interrupts;
+	spl_t			old;
+
+	if (!device_md_msi_register(msi_handler, &slot, &addr, &data)) {
+		kputs("UrMach x86-64: no message-signalled interrupt to claim"
+		      " — WRONG\r\n");
+		return;
+	}
+
+	doorbell = (volatile uint32_t *)(uintptr_t)
+		   pmap_map_device(addr & ~0xFFFULL, 0x1000);
+	if (doorbell == 0) {
+		kputs("UrMach x86-64: the message address could not be mapped"
+		      " — WRONG\r\n");
+		device_md_msi_unregister(slot);
+		return;
+	}
+	doorbell = (volatile uint32_t *)((uintptr_t)doorbell
+					 + (uintptr_t)(addr & 0xFFFULL));
+
+	msi_hits = 0;
+	msi_slot_seen = -1;
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	/*
+	 * One store, and the interrupt is the store.  ⚠️ The read afterwards
+	 * is not decoration: the write is to device memory and the handler
+	 * runs on an interrupt, so without something that orders them the
+	 * count could be read before the store has left the processor.
+	 */
+	*doorbell = data;
+	(void) *doorbell;
+
+	for (unsigned spin = 0; spin < 1000000u && msi_hits == 0; spin++)
+		cpu_pause();
+
+	before = msi_hits;
+
+	kputs("UrMach x86-64: slot ");
+	kputdec(slot);
+	kputs(" answers address ");
+	kputhex64(addr);
+	kputs(" value ");
+	kputhex64(data);
+	kputs(", and one store to it ran the handler ");
+	kputdec((unsigned)before);
+	kputs(" time");
+	kputs(before == 1 && msi_slot_seen == (int)slot
+	      ? " — an interrupt arrived with nothing wired to anything\r\n"
+	      : " — WRONG, the message did not become an interrupt\r\n");
+
+	/*
+	 * And it obeys the priority level, which on this machine is not a
+	 * separate claim: the vector's class IS its priority, so an MSI at
+	 * class five is held by SPL_DEVICE exactly as a pinned line at class
+	 * four is.  ⚠️ Worth asking rather than deducing, because SPL_DEVICE
+	 * was FOUR until this change and four would have let these through --
+	 * a level named for devices that stopped one kind and not the other.
+	 */
+	deferred_before = spl_deferred_count();
+	old = splx(SPL_DEVICE);
+	*doorbell = data;
+	(void) *doorbell;
+	for (unsigned spin = 0; spin < 1000000u; spin++)
+		cpu_pause();
+	before = msi_hits;
+	splx(old);
+
+	kputs("UrMach x86-64: at the device level it was deferred ");
+	kputdec((unsigned)(spl_deferred_count() - deferred_before));
+	kputs(" time, ran ");
+	kputdec((unsigned)(before - 1));
+	kputs(" while held and ");
+	kputdec((unsigned)(msi_hits - before));
+	kputs(" on lowering");
+	kputs(spl_deferred_count() - deferred_before == 1
+	      && before == 1 && msi_hits - before == 1
+	      ? " — SPL_DEVICE covers the messages too, which is why it is"
+		" five\r\n"
+	      : " — WRONG, the device level does not hold a message\r\n");
+
+	if (!had_interrupts)
+		interrupts_disable();
+	device_md_msi_unregister(slot);
+}
+
 static void ioapic_selftest(void)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
@@ -4935,6 +5059,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	timer_selftest();
 	pci_cfg_selftest();
 	pci_cap_selftest();
+	msi_selftest();
 	ioapic_selftest();
 	spl_selftest();
 	device_master_irq_selftest();

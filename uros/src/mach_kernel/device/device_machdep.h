@@ -166,4 +166,42 @@ extern void		device_md_irq_unregister(unsigned int irq);
  */
 extern int		device_md_debugger_break(void);
 
+/*
+ * ── An interrupt that is not a wire ──────────────────────────────────
+ *
+ * Claim a message-signalled interrupt: answer the address and the value a
+ * device must be programmed to WRITE in order to raise it, and make
+ * `handler' the thing that runs when it does.
+ *
+ * 🔑 Nothing is routed, because there is nothing to route.  A pin is a
+ * property of the machine's wiring that the firmware describes and the
+ * interrupt controller has to be told about; a message is an ordinary store
+ * to an ordinary address, and what makes it an interrupt is only where that
+ * address points.  Which is why this operation takes no device, no bus and no
+ * line: it hands out an address and a value, and who writes them is the
+ * caller's business.
+ *
+ * ⚠️ AND WHY IT IS THE KERNEL THAT PROGRAMS THE DEVICE.  The address is
+ * ordinary as far as the device is concerned, so a driver that could write
+ * its own MSI-X table could aim the device at any address in the machine --
+ * the same hole #432 and #511 exist to close.  This operation exists so that
+ * the caller above can be the kernel rather than the driver.
+ *
+ * `slot' comes back as an interrupt number in the caller's own numbering,
+ * continuing the lines rather than starting a second space: from the
+ * forwarding table's point of view a notification slot is a notification
+ * slot, and whether it arrives on a pin or in a store is exactly what this
+ * file exists to keep out of that table.
+ *
+ * Answers zero if the machine has no message-signalled interrupts, or none
+ * left.  ⚠️ i386 answers zero always and means it: this tree's i386 has no
+ * MSI at all, and a machine that cannot must say so rather than hand back an
+ * address that is not one.
+ */
+extern int		device_md_msi_register(device_md_intr_t handler,
+					       unsigned int *slot_out,
+					       unsigned long long *addr_out,
+					       unsigned int *data_out);
+extern void		device_md_msi_unregister(unsigned int slot);
+
 #endif	/* _DEVICE_DEVICE_MACHDEP_H_ */

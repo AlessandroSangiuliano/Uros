@@ -66,7 +66,21 @@ typedef unsigned int spl_t;
  * which is a deadlock rather than a priority.
  */
 #define SPL0		0u
-#define SPL_DEVICE	4u	/* the legacy lines, at vector 0x40 and up */
+
+/*
+ * The device level, and it covers BOTH kinds of device interrupt (#457).
+ *
+ * 🔑 Five and not four.  The legacy lines are class four, at vector 0x40 and
+ * up; message-signalled interrupts have no pin and live in class five, at
+ * 0x50 and up (<trap/trap.h>).  A level is "at or below", so four would block
+ * the pinned half and let the messages through -- and a level called the
+ * device level that stops one kind of device interrupt and not the other is a
+ * level whose name is a lie the day the first MSI driver arrives.
+ *
+ * ⚠️ Raising it BLOCKS MORE than it did, never less, so no caller that was
+ * excluding something has stopped excluding it.
+ */
+#define SPL_DEVICE	5u
 #define SPLHI		14u
 
 /* The class a vector belongs to, which is the hardware's own definition. */
