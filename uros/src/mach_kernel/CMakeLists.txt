@@ -659,7 +659,6 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   set(X86_64_MIG_C ${X86_64_MIG_GENERATED})
   list(FILTER X86_64_MIG_C INCLUDE REGEX "\\.c$")
   list(FILTER X86_64_MIG_C EXCLUDE REGEX "device_pager_server\\.c$")
-  list(FILTER X86_64_MIG_C EXCLUDE REGEX "device_master_server\\.c$")
   list(FILTER X86_64_MIG_C EXCLUDE REGEX "/device_server\\.c$")
   list(FILTER X86_64_MIG_C EXCLUDE REGEX "device_reply_user\\.c$")
   target_sources(mach_kernel PRIVATE
@@ -675,6 +674,8 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/device/dev_name.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/dev_pager.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/device_init.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/device/device_master.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/device_machdep.c
     ${X86_64_MIG_DIR}/device/device_reply_user.c
     ${X86_64_MIG_DIR}/device/device_server.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/device_stubs.c
