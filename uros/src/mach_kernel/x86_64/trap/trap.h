@@ -312,6 +312,23 @@ void trap_set_handler(unsigned vector, trap_handler_t handler);
 void trap_replay_vector(unsigned vector);
 
 /*
+ * Whether this processor is inside a replayed handler (#457).
+ *
+ * 🔑 Asked by a handler that acknowledges its own interrupt, because on the
+ * replay path the acknowledgement has already been given -- trap_dispatch()
+ * issues it when it defers, so that the local APIC does not hold the class
+ * busy for the length of the deferral.  Giving it a second time is not a
+ * harmless repeat: EOI clears the highest bit in service at that moment,
+ * which during a replay is some other interrupt, dismissed before it is done.
+ *
+ * ⚠️ This is the second half of the contract in <cpu/spl.h>.  The first is
+ * that a replayed handler may read only `vector' from its frame; this is that
+ * it may not acknowledge.  Both exist because the interrupt happened at an
+ * earlier moment that is over.
+ */
+int trap_in_replay(void);
+
+/*
  * Arrange for one expected fault to be survived rather than reported and
  * halted on: if the next trap is `vector`, the handler rewrites the return
  * address to `resume_rip` and returns, so execution continues there instead

@@ -43,6 +43,38 @@ struct acpi_header {
 	uint32_t creator_revision;
 } __attribute__((packed));
 
+/*
+ * MCFG — where PCI configuration space is memory-mapped (#457).
+ *
+ * The header is followed by eight reserved bytes and then one entry per
+ * *segment group*: a base physical address, the segment number, and the range
+ * of buses that base covers.  A configuration register is then read at
+ *
+ *	base + (bus << 20) + (device << 15) + (function << 12) + offset
+ *
+ * 🔑 Which is the whole reason this is worth doing rather than keeping
+ * 0xCF8/0xCFC.  The port pair is two 32-bit registers that every access on
+ * every processor has to take turns on, it has no room to name a segment at
+ * all, and it cannot reach past bus 255.  ECAM is a memory access with none of
+ * those three properties.
+ */
+struct acpi_mcfg_entry {
+	uint64_t	base;
+	uint16_t	segment;
+	uint8_t		bus_start;
+	uint8_t		bus_end;
+	uint32_t	reserved;
+} __attribute__((packed));
+
+struct acpi_mcfg {
+	struct acpi_header	header;
+	uint64_t		reserved;
+	struct acpi_mcfg_entry	entries[];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct acpi_mcfg_entry) == 16,
+	       "an MCFG allocation entry is sixteen bytes");
+
 struct acpi_madt {
 	struct acpi_header header;
 	uint32_t lapic_address;
@@ -125,6 +157,14 @@ static struct acpi_cpu cpus[ACPI_MAX_CPUS];
 static unsigned ncpus;
 static unsigned nusable;
 static uint64_t lapic_base;
+
+/*
+ * The root table, kept from the boot walk so a later caller can ask for a
+ * table by name without repeating the RSDP decision.  Zero means the walk has
+ * not run, or found no ACPI at all.
+ */
+static uint64_t root_table_pa;
+static unsigned root_entry_bytes;
 
 /*
  * The interrupt controllers, and the corrections to what their pin numbers
@@ -253,7 +293,23 @@ static void read_madt(const struct acpi_madt *madt)
 }
 
 /* Walk a root table of `entry_bytes`-wide pointers looking for the MADT. */
-static const struct acpi_madt *find_madt(uint64_t root_pa, unsigned entry_bytes)
+/*
+ * Find one table under the root, by signature (#457).
+ *
+ * 🔑 This was find_madt(), with "APIC" written into the comparison.  The walk
+ * -- checksum the root, step the packed entries, follow each to a header --
+ * is the same for every table there is; the only thing that was ever specific
+ * to the MADT was the four characters.  Generalising it is what lets the MCFG
+ * be found without a second copy of a loop that has one subtle thing in it,
+ * namely that the entries are packed and a 64-bit one need not be aligned.
+ *
+ * ⚠️ A table that fails its checksum stops the walk rather than being skipped.
+ * The firmware is describing the machine; a description that does not add up
+ * is not a reason to look for a better one.
+ */
+static const struct acpi_header *find_table(uint64_t root_pa,
+					    unsigned entry_bytes,
+					    const char *signature)
 {
 	const struct acpi_header *root = at_phys(root_pa);
 	unsigned count;
@@ -278,13 +334,13 @@ static const struct acpi_madt *find_madt(uint64_t root_pa, unsigned entry_bytes)
 			pa |= (uint64_t)slot[b] << (b * 8);
 
 		h = at_phys(pa);
-		if (!signature_is(h->signature, "APIC", 4))
+		if (!signature_is(h->signature, signature, 4))
 			continue;
 
 		if (!checksum_ok(h, h->length))
-			panic("acpi: the MADT fails its checksum");
+			panic("acpi: a table fails its checksum");
 
-		return (const struct acpi_madt *)h;
+		return h;
 	}
 
 	return 0;
@@ -317,16 +373,32 @@ unsigned acpi_find_cpus(uint32_t mb2_info_pa)
 	if (!checksum_ok(rsdp, 20))
 		panic("acpi: root pointer fails its checksum");
 
+	/*
+	 * ⚠️ Remembered, not just used (#457).  This walk runs once, early,
+	 * because the processors have to be found before anything else can
+	 * start -- but the MCFG is wanted much later, when the device master
+	 * initialises.  Keeping the root here is three lines; walking the
+	 * RSDP a second time from a different caller would be a second place
+	 * that has to make the same 1.0-versus-2.0 decision, and get it right.
+	 */
 	if (rsdp->revision >= 2 && checksum_ok(rsdp, rsdp->length)
-	    && rsdp->xsdt_address != 0)
-		madt = find_madt(rsdp->xsdt_address, 8);
-	else
-		madt = find_madt(rsdp->rsdt_address, 4);
+	    && rsdp->xsdt_address != 0) {
+		root_table_pa = rsdp->xsdt_address;
+		root_entry_bytes = 8;
+	} else {
+		root_table_pa = rsdp->rsdt_address;
+		root_entry_bytes = 4;
+	}
+
+	madt = (const struct acpi_madt *)
+		find_table(root_table_pa, root_entry_bytes, "APIC");
 
 	if (madt == 0)
 		return 0;
 
 	read_madt(madt);
+
+
 	return ncpus;
 }
 
@@ -393,4 +465,66 @@ uint16_t acpi_irq_flags(uint8_t irq)
 
 	/* No override: the bus default, which for ISA is high and edge. */
 	return ACPI_POLARITY_BUS | ACPI_TRIGGER_BUS;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Where PCI configuration space is (#457)                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The ECAM base for one bus, or zero if this machine has no MCFG or no
+ * segment covering that bus.
+ *
+ * ⚠️ Zero is a real answer and not an error code.  A machine can describe
+ * fewer buses than it has, and one that has no MCFG at all is a machine where
+ * configuration space is reachable only through the port pair -- which is a
+ * thing the caller has to be able to find out and decide about, rather than
+ * something to panic over.  Nothing above four gigabytes can be described
+ * without one, so the caller that needs that has to check.
+ *
+ * ⚠️ Looked up on each call rather than cached.  It is called once per bus at
+ * initialisation and never in a data path -- the mapping the caller builds
+ * from it is what gets used -- and a cache here would be a second thing that
+ * can be stale about a table that never changes.
+ */
+uint64_t acpi_ecam_base(uint16_t segment, uint8_t bus)
+{
+	const struct acpi_mcfg *mcfg;
+	unsigned count;
+
+	if (root_table_pa == 0)
+		return 0;
+
+	mcfg = (const struct acpi_mcfg *)
+		find_table(root_table_pa, root_entry_bytes, "MCFG");
+	if (mcfg == 0)
+		return 0;
+
+	/*
+	 * The entry count is what is left after the header and the eight
+	 * reserved bytes, and it is derived rather than stated: the table has
+	 * no count field, only a length.
+	 */
+	count = (mcfg->header.length - sizeof(struct acpi_header)
+		 - sizeof(uint64_t)) / sizeof(struct acpi_mcfg_entry);
+
+	for (unsigned i = 0; i < count; i++) {
+		const struct acpi_mcfg_entry *e = &mcfg->entries[i];
+
+		if (e->segment != segment)
+			continue;
+		if (bus < e->bus_start || bus > e->bus_end)
+			continue;
+
+		/*
+		 * The base names bus_start, not bus zero.  A segment whose
+		 * first bus is not zero is rare and is exactly the case a
+		 * reader assumes away; subtracting it here is the difference
+		 * between addressing the right bus and addressing one that
+		 * happens to be at the same offset from a different origin.
+		 */
+		return e->base + ((uint64_t)(bus - e->bus_start) << 20);
+	}
+
+	return 0;
 }

@@ -238,6 +238,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap.bundle)
   set(_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap.conf)
   set(_SBIN   ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin)
+  set(_MOD    ${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/modules)
 
   # The lines that are NOT here are the point: i386's bootstrap.conf names
   # hal_server, block_device_server, default_pager, ext_server and a dozen
@@ -262,7 +263,15 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # in the log rather than separated by three programs that fault and kill
   # threads on purpose.
   #
-  # pthread_test is THIRD, and it is the biggest program here by an order of
+  # irq_claim_test is THIRD, beside netname_test and by the same rule: it only
+  # makes RPCs and reads the answers, so it belongs at the harmless end (#457).
+  # ⚠️ It is the one entry here whose failure mode is not a wrong line but a
+  # MISSING one -- on a kernel where giving an interrupt back halts, nothing
+  # after its first line is ever printed, including every entry below it.  That
+  # is why it is early rather than last: a halt there is unmistakable, where the
+  # same halt at the end would look like a run that simply finished.
+  #
+  # pthread_test is FOURTH, and it is the biggest program here by an order of
   # magnitude (#425).  It goes after the two that only send messages and before
   # the three that fault, kill threads and fork on purpose: it does nothing
   # deliberately fatal, so a boot that ends inside it is a finding about the
@@ -298,7 +307,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # needs cap_server up already blocks until it is.  A second guard over the
   # same race hides which one is holding.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -311,6 +320,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             bootstrap.conf:${_CONF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
+            irq_claim_test:${_SBIN}/irq_claim_test
             cap_server:${_SBIN}/cap_server
             pthread_test:${_SBIN}/pthread_test
             cap_test:${_SBIN}/cap_test
@@ -318,10 +328,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             fault_test:${_SBIN}/fault_test
             act_test:${_SBIN}/act_test
             cow_test:${_SBIN}/cow_test
-    DEPENDS mkbundle name_server_bin netname_test_bin cap_server_bin pthread_test_server
-            cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin
+            hal_server:${_SBIN}/hal_server
+            modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
+    DEPENDS mkbundle name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
+            cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + cap_server + pthread_test + cap_test + dl_test + fault_test + act_test + cow_test"
+    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + irq_claim_test + cap_server + pthread_test + cap_test + dl_test + fault_test + act_test + cow_test + hal_server"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})

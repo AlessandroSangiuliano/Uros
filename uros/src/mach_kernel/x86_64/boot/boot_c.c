@@ -27,6 +27,8 @@
 
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
+#include <cpu/pci_cfg.h>
+#include <device/device_machdep.h>	/* #457: claim a line as a driver does */
 #include <cpu/desc.h>
 #include <cpu/ioapic.h>
 #include <ddb/cons.h>
@@ -3322,6 +3324,38 @@ static void device_irq(struct trap_frame *frame)
 	lapic_eoi();
 }
 
+/*
+ * Configuration space: which mechanism, and does it answer? (#457)
+ *
+ * 🔑 The init chooses between ECAM and the port pair, and this is the init
+ * proving what it chose actually works rather than reporting that it chose.
+ * The host bridge is at 00:00.0 on every PC there has ever been, so its
+ * vendor is a value that can be checked without knowing the machine -- and
+ * the wrong answer is not silence but 0xFFFFFFFF, which is what the bus
+ * returns for a function that is not there and what a mechanism pointed at
+ * the wrong place produces.
+ *
+ * ⚠️ Both boards are covered, and they take different paths: an i440FX has no
+ * MCFG and goes through the ports, a Q35 has one and goes through memory.
+ * Neither is the fallback; see cpu/pci_cfg.h.
+ */
+static void pci_cfg_selftest(void)
+{
+	uint32_t id;
+
+	pci_cfg_init();
+
+	id = pci_cfg_read(0, 0, 0, 0, 0x00);
+
+	kputs("UrMach x86-64: configuration space through ");
+	kputs(pci_cfg_is_ecam() ? "ECAM" : "0xCF8/0xCFC");
+	kputs(", host bridge at 00:00.0 reads ");
+	kputhex64(id);
+	kputs(id != 0xFFFFFFFFu && id != 0
+	      ? " — a vendor answered, so the mechanism reaches the bus\r\n"
+	      : " — WRONG, nothing answered where the host bridge has to be\r\n");
+}
+
 static void ioapic_selftest(void)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
@@ -3374,6 +3408,13 @@ static void ioapic_selftest(void)
 	if (!had_interrupts)
 		interrupts_disable();
 
+	/*
+	 * And give the vector back.  A test that leaves a handler installed
+	 * has changed the machine every later test runs on, and this one is
+	 * followed by the test that claims the same line properly.
+	 */
+	trap_set_handler(IOAPIC_ISA_VECTOR_BASE, 0);
+
 	kputs("UrMach x86-64: irq 0 on pin ");
 	kputdec((unsigned)gsi);
 	kputs(" delivered ");
@@ -3384,6 +3425,177 @@ static void ioapic_selftest(void)
 	kputs(while_masked == 0 && after_routing > 0
 	      ? " — a device interrupt arrives, and only through the pin\r\n"
 	      : " — WRONG, the routing is not what delivered it\r\n");
+}
+
+/*
+ * A line claimed the way a user-space driver claims one (#457).
+ *
+ * ioapic_selftest() above routes a pin by hand, which proves the controller.
+ * This proves the OPERATION -- device_md_irq_register(), the thing
+ * ds_master_device_intr_register() calls -- and the two are not the same
+ * claim: between them sit the choice of vector, the claim in the dispatch
+ * table, the translation from line number to pin, and the release.
+ *
+ * ── 🔑 What it is really for ──────────────────────────────────────────
+ *
+ * A device interrupt on this machine can be DEFERRED, and a deferred one has
+ * already been acknowledged -- trap_dispatch() acknowledges when it defers,
+ * so the local APIC does not hold the class busy for the length of the
+ * deferral. So the handler is entered by two different roads and must
+ * acknowledge on only one of them.
+ *
+ * That premise is what this checks, and it checks it by asking the hardware
+ * rather than by trusting the argument: on each entry the handler reads
+ * whether its own vector is still in service. Arriving, it must be. Replayed,
+ * it must NOT be -- and a handler that acknowledged there would be clearing
+ * whatever interrupt the processor is actually in.
+ *
+ * ⚠️ Every entry has to be exactly one of the two. "In service and replayed"
+ * or "neither" would both mean the two roads are not the two roads, which is
+ * why the counts are compared against the total rather than reported beside
+ * it.
+ */
+static volatile uint64_t	dm_irqs;	/* handler entries, both roads */
+static volatile uint64_t	dm_arrived;	/*   ... with the vector in service */
+static volatile uint64_t	dm_replayed;	/*   ... entered through the replay */
+
+static void dm_irq_handler(int irq)
+{
+	dm_irqs++;
+
+	if (trap_in_replay())
+		dm_replayed++;
+
+	if (lapic_in_service((uint8_t)(IOAPIC_ISA_VECTOR_BASE + irq)))
+		dm_arrived++;
+}
+
+static void device_master_irq_selftest(void)
+{
+	uint64_t	at_spl0, while_raised, after_lowering, after_release;
+	uint64_t	replays, acks, deferrals;
+	int		had_interrupts;
+	spl_t		old;
+
+	dm_irqs = dm_arrived = dm_replayed = 0;
+	acks = lapic_ack_count();
+	deferrals = spl_deferred_count();
+
+	if (!device_md_irq_register(0, dm_irq_handler)) {
+		kputs("UrMach x86-64: no machine answer for irq 0 — WRONG\r\n");
+		return;
+	}
+
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	if (!pit_periodic_start(IRQ0_TEST_HZ)) {
+		kputs("UrMach x86-64: the 8254 refused the requested rate — WRONG\r\n");
+		device_md_irq_unregister(0);
+		return;
+	}
+
+	/* One: the whole path, at a level that holds nothing. */
+	pit_delay_us(20000);
+	at_spl0 = dm_irqs;
+
+	/*
+	 * Two: raised to the device class.  splbio() and spltty() are this
+	 * level -- the interrupts still arrive and are acknowledged, and the
+	 * handler must not run.
+	 *
+	 * ⚠️ Raise first and read after, for the reason spl_selftest() found
+	 * the hard way: an interrupt landing between the reading and the raise
+	 * is handled legitimately and counted against the raised level.
+	 */
+	old = splx(SPL_DEVICE);
+	while_raised = dm_irqs;
+	pit_delay_us(20000);
+	while_raised = dm_irqs - while_raised;
+
+	/*
+	 * ⚠️ The device stops BEFORE the level drops, so that what runs on the
+	 * way down is only what was held.  With it running, the next front is
+	 * a millisecond away and lands inside the few instructions between the
+	 * lowering and the reading.
+	 */
+	pit_periodic_stop();
+	replays = dm_replayed;
+
+	splx(old);
+	after_lowering = dm_irqs - at_spl0 - while_raised;
+	replays = dm_replayed - replays;
+
+	/* Three: given up, and the line goes quiet with the device running. */
+	device_md_irq_unregister(0);
+	after_release = dm_irqs;
+	(void)pit_periodic_start(IRQ0_TEST_HZ);
+	pit_delay_us(20000);
+	after_release = dm_irqs - after_release;
+
+	pit_periodic_stop();
+	if (!had_interrupts)
+		interrupts_disable();
+
+	acks = lapic_ack_count() - acks;
+	deferrals = spl_deferred_count() - deferrals;
+
+	kputs("UrMach x86-64: irq 0 claimed as a driver claims it, ran ");
+	kputdec((unsigned)at_spl0);
+	kputs(" times, then 0 while held and ");
+	kputdec((unsigned)after_release);
+	kputs(" after release");
+	kputs(at_spl0 > 0 && while_raised == 0 && after_release == 0
+	      ? " — the claim and the release both take effect\r\n"
+	      : " — WRONG, the line does not follow the claim\r\n");
+
+	kputs("UrMach x86-64: lowering ran the held interrupt ");
+	kputdec((unsigned)after_lowering);
+	kputs(" time from ");
+	kputdec((unsigned)replays);
+	kputs(" replay");
+	kputs(after_lowering == 1 && replays == 1
+	      ? " — one, however many fronts were held\r\n"
+	      : " — WRONG, the deferral is not replayed exactly once\r\n");
+
+	kputs("UrMach x86-64: of ");
+	kputdec((unsigned)dm_irqs);
+	kputs(" entries ");
+	kputdec((unsigned)dm_arrived);
+	kputs(" found the vector in service and ");
+	kputdec((unsigned)dm_replayed);
+	kputs(" were replays");
+	kputs(dm_arrived + dm_replayed == dm_irqs && dm_replayed > 0
+	      ? " — every entry is one road or the other, and a replay is"
+		" already acknowledged\r\n"
+	      : " — WRONG, the two entry paths are not the two entry paths\r\n");
+
+	/*
+	 * 🔑 And the claim itself: ONE acknowledgement PER INTERRUPT.
+	 *
+	 * The line above proves the premise -- a replayed vector is already out
+	 * of service -- but it would read the same whether or not the handler
+	 * acknowledged a second time there, because clearing an empty
+	 * in-service register changes nothing this test can see.  The damage a
+	 * second acknowledgement does is to a DIFFERENT interrupt, the one the
+	 * processor is in at that moment, and that is not reachable from here.
+	 *
+	 * So count the acknowledgements instead.  Every interrupt is
+	 * acknowledged exactly once, by whichever of the two got it first: the
+	 * dispatch when it defers, the trampoline when it does not.  Which
+	 * makes the total a subtraction, and makes the missing guard show up
+	 * as an acknowledgement with no interrupt behind it.
+	 */
+	kputs("UrMach x86-64: ");
+	kputdec((unsigned)acks);
+	kputs(" acknowledgements for ");
+	kputdec((unsigned)(dm_arrived + deferrals));
+	kputs(" interrupts, ");
+	kputdec((unsigned)deferrals);
+	kputs(" of them deferred");
+	kputs(acks == dm_arrived + deferrals && deferrals > 0
+	      ? " — one each, and the replay did not add a second\r\n"
+	      : " — WRONG, the acknowledgements do not match the interrupts\r\n");
 }
 
 /*
@@ -4522,8 +4734,10 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	ioapic_madt_selftest();
 	tsc_selftest();
 	timer_selftest();
+	pci_cfg_selftest();
 	ioapic_selftest();
 	spl_selftest();
+	device_master_irq_selftest();
 	panic_format_selftest();
 	msg_abi_selftest();
 	port_name_selftest();

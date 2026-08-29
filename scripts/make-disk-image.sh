@@ -103,6 +103,7 @@ EXT2_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/ext_server"
 PTHREAD_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/pthread_test"
 CAP_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_server"
 CAP_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_test"
+IRQ_CLAIM_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/irq_claim_test"
 GPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpustat"
 EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
@@ -207,6 +208,14 @@ fi
 # cap_test (if built) must run AFTER cap_server has registered the
 # HMAC key: the test's whole point is that a non-cap_server task
 # attempting urmach_cap_register must be rejected.
+# #457: claims an interrupt line and gives it back.  ⚠️ On a kernel where
+# the release halts, nothing after its FIRST line is ever printed -- so a
+# failure here is a missing log rather than a wrong one.
+IRQ_CLAIM_TEST_CONF_LINE=""
+if [ -f "$IRQ_CLAIM_TEST" ]; then
+    IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
+fi
+
 CAP_TEST_CONF_LINE=""
 if [ -f "$CAP_TEST" ]; then
     CAP_TEST_CONF_LINE="cap_test cap_test"
@@ -256,6 +265,7 @@ if [ "$MINIMAL" = "1" ]; then
     IPC_BENCH_LINE=""
     PTHREAD_TEST_LINE=""
     CAP_TEST_CONF_LINE=""
+    IRQ_CLAIM_TEST_CONF_LINE=""
     GPUSTAT_CONF_LINE=""
 else
     HELLO_SERVER_LINE="hello_server hello_server"
@@ -281,6 +291,7 @@ ${PROC_SERVER_CONF_LINE}
 ${IPC_BENCH_LINE}
 ${PTHREAD_TEST_LINE}
 ${CAP_TEST_CONF_LINE}
+${IRQ_CLAIM_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
 ${USH_CONF_LINE}
 CONF
@@ -344,6 +355,13 @@ CAP_SERVER_WRITE_LINE=""
 if [ -f "$CAP_SERVER" ]; then
     CAP_SERVER_WRITE_LINE="write $CAP_SERVER cap_server"
 fi
+# #457: claims an interrupt line and gives it back.  ⚠️ On a kernel where
+# the release halts, nothing after its FIRST line is ever printed.
+IRQ_CLAIM_TEST_WRITE_LINE=""
+if [ -f "$IRQ_CLAIM_TEST" ]; then
+    IRQ_CLAIM_TEST_WRITE_LINE="write $IRQ_CLAIM_TEST irq_claim_test"
+fi
+
 CAP_TEST_WRITE_LINE=""
 if [ -f "$CAP_TEST" ]; then
     CAP_TEST_WRITE_LINE="write $CAP_TEST cap_test"
@@ -495,6 +513,7 @@ write $EXT2_SERVER ext_server
 write $PTHREAD_TEST pthread_test
 ${CAP_SERVER_WRITE_LINE}
 ${CAP_TEST_WRITE_LINE}
+${IRQ_CLAIM_TEST_WRITE_LINE}
 ${GPUSTAT_WRITE_LINE}
 ${EXEC_SERVER_WRITE_LINE}
 ${PROC_SERVER_WRITE_LINE}
