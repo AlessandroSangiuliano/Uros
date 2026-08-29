@@ -333,19 +333,21 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/cap_test)
 endif()
 
-# hal_server, built but NOT started, on x86-64 (#427).
+# hal_server on x86-64 (#427), and STARTED as of #457.
 #
-# 🔑 "It compiles" and "it runs" are two steps, and only the second would be a
-# lie here.  Every library it links is across as of #423, and it has never been
-# compiled for this target -- so lifting it finds what a traversal finds, at
-# build time, which is what #495 and #423 both paid for.
+# 🔑 "It compiles" and "it runs" are two steps, and #427 took the first: every
+# library it links came across with #423, and lifting it found what a traversal
+# finds, at build time.
 #
-# ⚠️ Deliberately absent from bootstrap.conf.  MACH_DEVICE_MASTER is 0 on this
-# target: the kernel implements none of the fourteen RPCs a discovery module
-# needs, so every device_pci_config_read would answer MIG_BAD_ID and the server
-# would print `module pci_scan scan failed' on every boot, for months.  A known
-# and permanent red line in a suite is how a suite stops being read -- which is
-# exactly what #512 was.  It starts when #457 gives it a bus to scan.
+# It was then deliberately absent from bootstrap.conf, because MACH_DEVICE_MASTER
+# was 0 here and the kernel implemented none of the fourteen RPCs a discovery
+# module needs -- every device_pci_config_read would have answered MIG_BAD_ID
+# and the server would have printed `module pci_scan scan failed' on every boot,
+# for months.  A known and permanent red line is how a suite stops being read,
+# which is exactly what #512 was.
+#
+# That premise fell with #457: the knob is 1, config space answers by ECAM or by
+# the port pair depending on the board, and the server is in the bundle.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/hal_server)
 endif()
