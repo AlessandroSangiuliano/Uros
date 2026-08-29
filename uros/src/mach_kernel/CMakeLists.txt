@@ -615,15 +615,19 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
   #                          hooks the stack planted in the core sit behind
   #                          MACH_NET_IN_KERNEL, which is 0 for this machine.
   #
-  #   device/device_master.c the fourteen RPCs a user-space driver reaches
-  #                          hardware through.  It is i386 code living in
-  #                          device/ -- <i386/ipl.h>, <i386/pio.h>,
-  #                          <i386/ioapic.h> outside any conditional -- and
-  #                          almost every one of its RPCs changes mechanism
-  #                          here rather than merely widening: ECAM instead of
-  #                          ports 0xCF8/0xCFC, our own IOAPIC and MSI-X, and
-  #                          IOMMU addresses out of the DMA calls.  A rewrite,
-  #                          behind MACH_DEVICE_MASTER, which is 0 here.
+  #   device/device_master.c IN, as of #457.  It was out because it was i386
+  #                          code living in device/ -- <i386/ipl.h>,
+  #                          <i386/pio.h>, <i386/ioapic.h> outside any
+  #                          conditional, so compiling it here pulled
+  #                          <mach/i386/vm_types.h> in behind them, where
+  #                          vm_offset_t is thirty-two bits.  #457 named the
+  #                          six operations it needs from the machine in
+  #                          <device/device_machdep.h>; config space is the
+  #                          one that genuinely changes mechanism, and does so
+  #                          per BOARD rather than per architecture -- ECAM
+  #                          where the MCFG describes one, the port pair where
+  #                          it does not.  ⚠️ The DMA half is on without an
+  #                          IOMMU behind it, which is #432.
   #
   #   ddb/                   no debugger yet (#428): MACH_KDB is 0, and so is
   #                          MACH_TR, whose trace buffer is read back through
@@ -1429,6 +1433,8 @@ if(UROS_NCPUS GREATER 1)
         i386/mp_desc.c
         i386/lapic.c
         i386/ioapic.c
+        # The six operations device_master.c needs from the machine (#457).
+        i386/device_machdep.c
         i386/AT386/mp/mp.c
         i386/AT386/mp/mp_stub.c
         i386/AT386/mp/mp_table.c
