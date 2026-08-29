@@ -62,15 +62,22 @@ struct pci_msix {
  * Find the capability, decode the BAR it names, and map the table.
  *
  * Answers zero if the device has no MSI-X, if the BAR the capability names
- * holds no region, or if the table would run past the end of that region --
- * ⚠️ the last one checked rather than trusted, because table size and BAR
- * size come from two different registers written by two different people, and
- * a table that overruns its BAR is a kernel writing into whatever the next
- * region is.
+ * holds no region, or if the table could not be mapped.
  *
- * ⚠️ Leaves every entry MASKED, which is the state a reset device is already
- * in.  An entry is armed by pci_msix_arm() and by nothing else, so a device
- * cannot start interrupting between being probed and being given a vector.
+ * 🔴 IT DOES NOT CHECK THAT THE TABLE FITS INSIDE THAT BAR, and the reason is
+ * worth more than the check would be: knowing a BAR's SIZE means writing all
+ * ones into it and reading back what sticks, which is a write to a device
+ * nobody has claimed -- exactly the thing #513 exists to make decidable.  So
+ * this maps precisely what the table's own entry count needs, and a wrong
+ * offset reads as all-ones or faults rather than quietly reaching a
+ * neighbouring region.  ⚠️ An earlier version of this comment claimed the
+ * check; the code never did it.
+ *
+ * ⚠️ It does not mask the entries either.  A device out of reset has every
+ * entry masked and its function mask set, and probe leaves that alone -- so
+ * the guarantee is the hardware's and not this function's.  A device someone
+ * else already armed is not covered by either, which is what
+ * pci_msix_disarm() is for.
  */
 extern int pci_msix_probe(uint16_t segment, uint8_t bus, uint8_t dev,
 			  uint8_t func, struct pci_msix *out);
@@ -85,6 +92,24 @@ extern int pci_msix_probe(uint16_t segment, uint8_t bus, uint8_t dev,
  */
 extern void pci_msix_arm(const struct pci_msix *m, unsigned int entry,
 			 uint64_t address, uint32_t data);
+
+/*
+ * Stop the entry being used, whatever the device's own masks say.
+ *
+ * 🔴 THE CALLER MUST DO THIS BEFORE GIVING UP THE SLOT.  Releasing a
+ * message-signalled slot removes the handler and nothing else -- see
+ * device_md_msi_unregister(), which says so and cannot do better, because it
+ * does not know which device was programmed with the address.  A device left
+ * armed at a vector whose handler is gone raises an interrupt nobody claims,
+ * and an unclaimed vector falls through trap_dispatch() into the fault
+ * machinery and halts the machine.
+ *
+ * ⚠️ Masking the CAUSES in the device's own registers is not this.  That is a
+ * bit in a register belonging to the driver's half of the world, which the
+ * next thing to touch that device may set again; this is a bit in the table
+ * the kernel owns, and it stops the write at its source.
+ */
+extern void pci_msix_disarm(const struct pci_msix *m, unsigned int entry);
 
 /*
  * What the device thinks entry `entry' says, read back out of its own table.

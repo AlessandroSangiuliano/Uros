@@ -141,6 +141,15 @@ pci_msix_arm(const struct pci_msix *m, unsigned int entry, uint64_t address,
 }
 
 void
+pci_msix_disarm(const struct pci_msix *m, unsigned int entry)
+{
+	if (m == 0 || m->table == 0 || entry >= m->vectors)
+		return;
+
+	*msix_entry(m, entry, PCI_MSIX_ENTRY_CTL) = PCI_MSIX_ENTRY_MASKED;
+}
+
+void
 pci_msix_read(const struct pci_msix *m, unsigned int entry,
 	      uint64_t *address_out, uint32_t *data_out, uint32_t *control_out)
 {

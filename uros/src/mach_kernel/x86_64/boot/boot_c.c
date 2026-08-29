@@ -3698,6 +3698,15 @@ static void msi_selftest(void)
  * ⚠️ q35 only, and not as a limitation: the default board is an i440FX and
  * MSI-X is a 2009 property.  The board that has none must say so rather than
  * report a test that did not run as one that passed.
+ *
+ * ⚠️ THIS BOOT SPENDS TWO OF SIXTEEN MSI SLOTS, one here and one in the test
+ * above, and never gets them back.  That is not a leak but the rule in
+ * device_md_msi_unregister(): a slot is spent because this side cannot know
+ * whether some device is still programmed to write to it.  Here it CAN know,
+ * because the disarm below is what makes it so -- and the interface has no way
+ * to be told.  Naming the cost rather than absorbing it: the day a machine
+ * wants all sixteen, reclaiming one honestly means the kernel owning the
+ * device's table, which is where #457 is going anyway.
  */
 static void msix_table_selftest(void)
 {
@@ -3863,6 +3872,21 @@ static void msix_table_selftest(void)
 		      " — the table is programmed and unproven\r\n");
 	}
 
+	/*
+	 * 🔴 DISARM BEFORE RELEASING, and in this order.
+	 *
+	 * device_md_msi_unregister() takes the handler away and can do nothing
+	 * else: it does not know which device was programmed with the address.
+	 * A card left armed at a vector with no handler raises an interrupt
+	 * nobody claims -- and an unclaimed vector falls through
+	 * trap_dispatch() into the fault machinery and halts the machine.
+	 *
+	 * ⚠️ The IMC write above is NOT this.  That masks the causes in the
+	 * card's own registers, which is a bit the next thing to touch that
+	 * card may set again -- and hal_server now scans this bus.  This is a
+	 * bit in the table the kernel owns, and it stops the write at source.
+	 */
+	pci_msix_disarm(&m, 0);
 	device_md_msi_unregister(slot);
 }
 
