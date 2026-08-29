@@ -28,6 +28,8 @@
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
 #include <cpu/pci_cfg.h>
+#include <cpu/pci_msix.h>
+#include "pci_bar.h"		/* #457: the decode, in the kernel too */	/* #457: a device's own MSI-X table */
 #include <device/device_machdep.h>
 #include <device/pci.h>		/* #457: the capability list */	/* #457: claim a line as a driver does */
 #include <cpu/desc.h>
@@ -3679,6 +3681,191 @@ static void msi_selftest(void)
 	device_md_msi_unregister(slot);
 }
 
+/*
+ * A real device's MSI-X table, programmed from this side (#457).
+ *
+ * The test above proved the vector, the encoding and the delivery, and said
+ * plainly that it proved nothing about a device's table.  This is that second
+ * claim, and it is a different one: finding the table means decoding a base
+ * address register, following a three-bit BAR index and an offset, and
+ * mapping the result — and every one of those can be wrong in a way that
+ * lands the store on real memory and reports success.
+ *
+ * 🔑 So the entry is READ BACK out of the device's own table.  A store that
+ * went somewhere is not a table that was written, and the only thing that can
+ * tell them apart is the device answering with what it was given.
+ *
+ * ⚠️ q35 only, and not as a limitation: the default board is an i440FX and
+ * MSI-X is a 2009 property.  The board that has none must say so rather than
+ * report a test that did not run as one that passed.
+ */
+static void msix_table_selftest(void)
+{
+	struct pci_msix		m;
+	unsigned int		slot = 0, data = 0;
+	unsigned long long	addr = 0;
+	uint64_t		back_addr = 0;
+	uint32_t		back_data = 0, back_ctl = 0;
+	uint16_t		control;
+	unsigned		found = 0, dev, nic = 0;
+	uint32_t		id_of_msix_device = 0;
+	uint64_t		msix_regs_base = 0;
+
+	/* Whichever device on bus 0 has one; which device it is belongs to
+	 * the machine, and only that some device does belongs to us. */
+	for (dev = 0; dev < 32 && !found; dev++)
+		if (pci_cfg_find_cap(0, 0, (uint8_t)dev, 0, PCI_CAP_ID_MSIX)) {
+			nic = dev;
+			found = 1;
+		}
+
+	if (!found) {
+		kputs("UrMach x86-64: no device on this board offers MSI-X"
+		      " — nothing to program, which is what a 1996 chipset"
+		      " should say\r\n");
+		return;
+	}
+
+	id_of_msix_device = pci_cfg_read(0, 0, (uint8_t)nic, 0, PCI_VENDOR_ID);
+
+	/*
+	 * BAR 0 is where this family keeps its registers.  Read raw and
+	 * decoded, because a base address register is not an address until it
+	 * has been (#427).
+	 */
+	{
+		uint32_t		slots[PCI_NUM_BAR_SLOTS];
+		struct pci_bar_region	r[PCI_NUM_BAR_SLOTS];
+		unsigned int		n, i;
+
+		for (i = 0; i < PCI_NUM_BAR_SLOTS; i++)
+			slots[i] = pci_cfg_read(0, 0, (uint8_t)nic, 0,
+						PCI_BAR(i));
+		n = pci_bars_decode(slots, PCI_NUM_BAR_SLOTS, r,
+				    PCI_NUM_BAR_SLOTS);
+		for (i = 0; i < n; i++)
+			if (r[i].slot == 0 && !(r[i].flags & PCI_REGION_IO))
+				msix_regs_base = r[i].base;
+	}
+
+	if (!pci_msix_probe(0, 0, (uint8_t)nic, 0, &m)) {
+		kputs("UrMach x86-64: the MSI-X table could not be found"
+		      " — WRONG\r\n");
+		return;
+	}
+
+	if (!device_md_msi_register(msi_handler, &slot, &addr, &data)) {
+		kputs("UrMach x86-64: no message-signalled slot left to give"
+		      " the device — WRONG\r\n");
+		return;
+	}
+
+	pci_msix_arm(&m, 0, addr, data);
+	pci_msix_read(&m, 0, &back_addr, &back_data, &back_ctl);
+	pci_msix_enable(&m);
+
+	control = pci_cfg_read16(0, 0, (uint8_t)nic, 0,
+				 (uint16_t)(m.cap + PCI_MSIX_CONTROL));
+
+	kputs("UrMach x86-64: 00:");
+	kputdec(nic);
+	kputs(".0 has a ");
+	kputdec(m.vectors);
+	kputs("-entry table, and entry 0 reads back address ");
+	kputhex64(back_addr);
+	kputs(" value ");
+	kputhex64(back_data);
+	kputs(back_addr == addr && back_data == data
+	      && (back_ctl & PCI_MSIX_ENTRY_MASKED) == 0
+	      ? " — the device holds what the kernel gave it, unmasked\r\n"
+	      : " — WRONG, the write did not reach the table\r\n");
+
+	kputs("UrMach x86-64: its control word is now ");
+	kputhex64(control);
+	kputs((control & PCI_MSIX_CTL_ENABLE)
+	      && !(control & PCI_MSIX_CTL_FUNC_MASK)
+	      ? " — enabled and not function-masked, so the entry is the only"
+		" thing still deciding\r\n"
+	      : " — WRONG, the device will not use the table it was given\r\n");
+
+	/*
+	 * ── And now the device raises it ──────────────────────────────────
+	 *
+	 * 🔑 The third claim, and the one the other two cannot make: that the
+	 * DEVICE writes the address it was given.  Everything so far was this
+	 * side writing — the message test wrote the doorbell itself and the
+	 * table test read back its own store.  Neither shows a device using
+	 * the table.
+	 *
+	 * ⚠️ Register offsets are the 82574L's and this is gated on its vendor
+	 * id, because they are numbers out of one device's datasheet and not a
+	 * standard.  A board that puts a different card here must say it does
+	 * not know how to ring that card's bell rather than write 0x00E4 on
+	 * something else and call the silence a result.
+	 *
+	 *   IVAR  0x00E4  which MSI-X vector each cause uses, with a valid bit
+	 *                 per cause.  All of them to entry 0, because entry 0
+	 *                 is the one that was armed.
+	 *   IMS   0x00D0  the causes allowed to interrupt
+	 *   ICS   0x00C8  raise a cause, which is what makes this a test and
+	 *                 not a wait for a packet nobody is sending
+	 */
+	if (id_of_msix_device == 0x10D38086u) {
+		volatile uint32_t	*regs;
+		uint64_t		before = msi_hits;
+
+		regs = (volatile uint32_t *)(uintptr_t)
+		       pmap_map_device(msix_regs_base, 0x20000);
+		if (regs == 0) {
+			kputs("UrMach x86-64: the card's registers could not be"
+			      " mapped — WRONG\r\n");
+			device_md_msi_unregister(slot);
+			return;
+		}
+
+		regs[0x00E4 / 4] = 0x00080808u;	/* every cause -> entry 0  */
+		regs[0x00D0 / 4] = 0x01000004u;	/* link change, and Other  */
+		(void) regs[0x00C0 / 4];	/* ICR reads clear         */
+
+		regs[0x00C8 / 4] = 0x00000004u;	/* ring it                 */
+
+		for (unsigned spin = 0; spin < 5000000u
+		     && msi_hits == before; spin++)
+			cpu_pause();
+
+		/*
+		 * ⚠️ At least one, not exactly one.  A cause the card raises
+		 * may bring others with it, and how many times a device
+		 * interrupts is the device's business; that it interrupted at
+		 * all, on the slot this kernel gave it, is the claim.
+		 *
+		 * 🔑 And the SLOT is what makes it that claim.  The message
+		 * test above rang slot 16 by writing the doorbell itself; this
+		 * is slot 17, and the only thing on the machine that knows the
+		 * number 17 is the table entry the kernel wrote.
+		 */
+		kputs("UrMach x86-64: the card was asked to raise a link"
+		      " change, and slot ");
+		kputdec((unsigned)msi_slot_seen);
+		kputs(" ran ");
+		kputdec((unsigned)(msi_hits - before));
+		kputs(" times");
+		kputs(msi_hits - before >= 1 && msi_slot_seen == (int)slot
+		      ? " — a DEVICE wrote the address the kernel put in its"
+			" table, and it arrived as an interrupt\r\n"
+		      : " — WRONG, the table is programmed and the device does"
+			" not use it\r\n");
+
+		regs[0x00D8 / 4] = 0xFFFFFFFFu;	/* IMC: and be quiet again */
+	} else {
+		kputs("UrMach x86-64: the MSI-X device here is not an 82574L,"
+		      " so there is no bell this test knows how to ring"
+		      " — the table is programmed and unproven\r\n");
+	}
+
+	device_md_msi_unregister(slot);
+}
+
 static void ioapic_selftest(void)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
@@ -5060,6 +5247,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	pci_cfg_selftest();
 	pci_cap_selftest();
 	msi_selftest();
+	msix_table_selftest();
 	ioapic_selftest();
 	spl_selftest();
 	device_master_irq_selftest();
