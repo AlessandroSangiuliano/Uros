@@ -100,4 +100,68 @@
 #define	PCI_SUBCLASS_SATA	0x06
 #define	PCI_PROGIF_AHCI		0x01
 
+/*
+ * ── The capability list ──────────────────────────────────────────────
+ *
+ * A singly linked list inside configuration space: PCI_CAP_POINTER holds the
+ * offset of the first capability, each capability's first byte is its id and
+ * its second is the offset of the next, and zero ends it.
+ *
+ * ⚠️ The list is only there if PCI_STATUS says so.  A device without the
+ * capability-list bit has whatever the vendor left at 0x34, and following it
+ * walks arbitrary bytes of that device's own configuration space -- which
+ * reads as a capability of some id and is not one.
+ *
+ * ⚠️ And the offsets are DEVICE-relative and byte-granular, while the two
+ * mechanisms that reach configuration space both read dwords.  A capability
+ * at 0x52 is in the dword at 0x50, shifted.
+ */
+#define	PCI_STATUS_CAP_LIST	(1u << 4)	/* in PCI_STATUS */
+#define	PCI_CAP_POINTER		0x34
+
+#define	PCI_CAP_ID_MSI		0x05
+#define	PCI_CAP_ID_MSIX		0x11
+
+/*
+ * ── MSI-X ────────────────────────────────────────────────────────────
+ *
+ * 🔑 An interrupt that is not a wire.  The device is told an address and a
+ * value, and it raises its interrupt by WRITING that value to that address --
+ * so there is no pin, no routing table in the firmware's AML to interpret,
+ * and no sixteen-line ceiling.  Which is why this is the answer to a PCI
+ * device on a Q35 arriving on a global system interrupt of 16 or above.
+ *
+ * ⚠️ And it is why an MSI-X table a driver could write is the same hole as a
+ * DMA engine a driver could aim (#432/#511): the address is an ordinary
+ * memory address as far as the device is concerned.
+ *
+ * The capability itself is small -- a control word and two BAR references.
+ * The table it points at is in one of the device's own BARs, which is what
+ * `BIR' selects.
+ */
+#define	PCI_MSIX_CONTROL	0x02	/* 16 bits, from the capability */
+#define	PCI_MSIX_TABLE		0x04	/* BIR in bits 2:0, offset above */
+#define	PCI_MSIX_PBA		0x08	/* same shape, the pending array */
+
+#define	PCI_MSIX_CTL_TABLE_SIZE	0x07FFu	/* entries MINUS ONE, per the spec */
+#define	PCI_MSIX_CTL_FUNC_MASK	0x4000u	/* mask every vector, whatever the
+					 * per-entry bits say */
+#define	PCI_MSIX_CTL_ENABLE	0x8000u
+
+#define	PCI_MSIX_BIR_MASK	0x7u
+#define	PCI_MSIX_OFFSET_MASK	0xFFFFFFF8u
+
+/*
+ * One table entry, and the layout is the standard's rather than ours.
+ *
+ * ⚠️ `vector_control' bit 0 is a MASK, so a freshly reset entry is masked and
+ * an entry is armed by CLEARING a bit rather than setting one.
+ */
+#define	PCI_MSIX_ENTRY_SIZE	16
+#define	PCI_MSIX_ENTRY_ADDR_LO	0x0
+#define	PCI_MSIX_ENTRY_ADDR_HI	0x4
+#define	PCI_MSIX_ENTRY_DATA	0x8
+#define	PCI_MSIX_ENTRY_CTL	0xC
+#define	PCI_MSIX_ENTRY_MASKED	0x1u
+
 #endif	/* _DEVICE_PCI_H_ */

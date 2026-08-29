@@ -28,7 +28,8 @@
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
 #include <cpu/pci_cfg.h>
-#include <device/device_machdep.h>	/* #457: claim a line as a driver does */
+#include <device/device_machdep.h>
+#include <device/pci.h>		/* #457: the capability list */	/* #457: claim a line as a driver does */
 #include <cpu/desc.h>
 #include <cpu/ioapic.h>
 #include <ddb/cons.h>
@@ -3356,6 +3357,204 @@ static void pci_cfg_selftest(void)
 	      : " — WRONG, nothing answered where the host bridge has to be\r\n");
 }
 
+/*
+ * The capability list, and what the network card keeps in it (#457).
+ *
+ * 🔑 The two boards must answer DIFFERENTLY, and that is what makes this a
+ * test rather than a print.  QEMU puts a different network card on each:
+ *
+ *   default (i440FX)  8086:100e, an 82540EM — MSI, and no MSI-X
+ *   -machine q35      8086:10d3, an 82574L  — MSI-X, five vectors
+ *
+ * So a walk that always answered "found" and one that always answered
+ * "absent" would each be wrong on exactly one board, and neither could hide.
+ * ⚠️ Both halves of that are checked here for the same reason: a capability
+ * that is genuinely absent has to be reported absent, or the first thing this
+ * is used for is programming a table a device does not have.
+ *
+ * ⚠️ And the host bridge is asked as well, because it has no capability list
+ * at all — PCI_STATUS says so — and a walk that read 0x34 without consulting
+ * the status bit would follow whatever the vendor left there.
+ */
+#define	PCI_CAP_SEEN_MAX	16
+
+static void pci_cap_selftest(void)
+{
+	unsigned	listed = 0;	/* capabilities the devices list  */
+	unsigned	agreed = 0;	/*   ... the walk found, at the
+					 *       offset they were listed at */
+	unsigned	wrongly_found = 0;
+	unsigned	with_a_list = 0;
+	unsigned	msix_devices = 0;
+	unsigned	msix_vectors = 0;
+
+	/*
+	 * ⚠️ THE WHOLE BUS, and not a device chosen in advance.  The first
+	 * version of this asked the network card, because that is the card
+	 * with MSI-X -- and QEMU's 82540EM on the default board turns out to
+	 * expose no capability list at all, so on that board the test had no
+	 * positive control and reported a walk failure for a device that has
+	 * nothing to walk.  Which device carries capabilities is a property of
+	 * the machine; that the walk agrees with whatever does is not.
+	 */
+	for (unsigned dev = 0; dev < 32; dev++) {
+		for (unsigned fn = 0; fn < 8; fn++) {
+			uint8_t		seen_id[PCI_CAP_SEEN_MAX];
+			uint16_t	seen_at[PCI_CAP_SEEN_MAX];
+			unsigned	n_seen = 0;
+			unsigned	absent_id;
+			uint16_t	offset, msix;
+			uint32_t	vendor;
+			uint16_t	status;
+
+			vendor = pci_cfg_read(0, 0, (uint8_t)dev, (uint8_t)fn,
+					      PCI_VENDOR_ID);
+			if (vendor == 0xFFFFFFFFu)
+				continue;
+
+			/*
+			 * ⚠️ The test consults the status bit for the same
+			 * reason the subject does, and separately: without it
+			 * this walk would follow whatever 0x34 holds on a
+			 * device that has no list, and then report the subject
+			 * wrong for correctly finding nothing.
+			 */
+			status = pci_cfg_read16(0, 0, (uint8_t)dev,
+						(uint8_t)fn, PCI_STATUS);
+			if (status == 0xFFFFu || !(status & PCI_STATUS_CAP_LIST))
+				offset = 0;
+			else
+				offset = pci_cfg_read8(0, 0, (uint8_t)dev,
+						       (uint8_t)fn,
+						       PCI_CAP_POINTER) & 0xFCu;
+
+			/*
+			 * ⚠️ The test's OWN walk, deliberately.  Asking
+			 * pci_cfg_find_cap() what a list contains and then
+			 * checking it against itself would pass on any walk
+			 * that is wrong the same way twice.  Here the test
+			 * enumerates and the subject searches -- two shapes
+			 * over the same bytes.
+			 */
+			while (offset >= 0x40u && n_seen < PCI_CAP_SEEN_MAX) {
+				seen_at[n_seen] = offset;
+				seen_id[n_seen] = pci_cfg_read8(0, 0,
+						(uint8_t)dev, (uint8_t)fn,
+						offset);
+				n_seen++;
+				offset = pci_cfg_read8(0, 0, (uint8_t)dev,
+						(uint8_t)fn,
+						(uint16_t)(offset + 1)) & 0xFCu;
+			}
+
+			if (n_seen > 0)
+				with_a_list++;
+			listed += n_seen;
+
+			for (unsigned i = 0; i < n_seen; i++)
+				if (pci_cfg_find_cap(0, 0, (uint8_t)dev,
+						     (uint8_t)fn, seen_id[i])
+				    == seen_at[i])
+					agreed++;
+
+			/*
+			 * And one this device does NOT list must not be found.
+			 * Chosen from what the enumeration saw rather than
+			 * picked in advance: an id the device happens to have
+			 * would make the check pass for the wrong reason.
+			 */
+			for (absent_id = 1; absent_id < 0x40u; absent_id++) {
+				unsigned i;
+
+				for (i = 0; i < n_seen; i++)
+					if (seen_id[i] == absent_id)
+						break;
+				if (i == n_seen)
+					break;
+			}
+			if (pci_cfg_find_cap(0, 0, (uint8_t)dev, (uint8_t)fn,
+					     (uint8_t)absent_id) != 0)
+				wrongly_found++;
+
+			msix = pci_cfg_find_cap(0, 0, (uint8_t)dev, (uint8_t)fn,
+						PCI_CAP_ID_MSIX);
+			if (msix != 0) {
+				msix_devices++;
+				msix_vectors += (pci_cfg_read16(0, 0,
+						(uint8_t)dev, (uint8_t)fn,
+						(uint16_t)(msix + PCI_MSIX_CONTROL))
+						 & PCI_MSIX_CTL_TABLE_SIZE) + 1u;
+			}
+
+			if (fn == 0
+			    && !(pci_cfg_read(0, 0, (uint8_t)dev, 0,
+					      PCI_HEADER_TYPE) & 0x00800000u))
+				break;	/* not multi-function */
+		}
+	}
+
+	kputs("UrMach x86-64: bus 0 lists ");
+	kputdec(listed);
+	kputs(" capabilities across ");
+	kputdec(with_a_list);
+	kputs(" devices; the walk found ");
+	kputdec(agreed);
+	kputs(" at the listed offset and invented ");
+	kputdec(wrongly_found);
+	/*
+	 * ⚠️ The positive control is asked of the board that HAS one.  Not one
+	 * device on QEMU's i440FX exposes a capability list -- measured, not
+	 * assumed -- so demanding `listed > 0' there would report a walk
+	 * failure for a bus with nothing to walk.  Which is the first thing
+	 * this test did.
+	 *
+	 * The agreement itself is required on both, and holds vacuously on the
+	 * board with nothing: saying that out loud is the difference between a
+	 * check that passed and a check that did not run.
+	 */
+	if (agreed != listed || wrongly_found != 0)
+		kputs(" — WRONG, the walk and the devices disagree about the"
+		      " list\r\n");
+	else if (listed > 0)
+		kputs(" — every id a device lists, where it lists it, and"
+		      " nothing else\r\n");
+	else if (pci_cfg_is_ecam())
+		kputs(" — WRONG, a board with ECAM whose devices list"
+		      " nothing\r\n");
+	else
+		kputs(" — nothing on this 1996 chipset lists a capability, so"
+		      " the walk is exercised on q35 and not here\r\n");
+
+	/*
+	 * ── The two boards must answer differently ────────────────────────
+	 *
+	 * 🔑 MSI-X is a 2009 property and the default board models a chipset
+	 * from 1996.  So the same code must find a table on one board and
+	 * none on the other, and a walk that always answered "found" or always
+	 * "absent" would each be right on exactly one of them.
+	 *
+	 * ⚠️ An absent capability reported absent is half the claim and the
+	 * half that is easy to lose: the first thing this gets used for is
+	 * programming a table, and programming one that is not there writes
+	 * into whatever the BAR it names actually points at.
+	 */
+	kputs("UrMach x86-64: ");
+	kputdec(msix_devices);
+	kputs(" device(s) offer MSI-X, ");
+	kputdec(msix_vectors);
+	kputs(" vectors in total");
+	if (pci_cfg_is_ecam())
+		kputs(msix_devices > 0 && msix_vectors >= msix_devices
+		      ? " — a table to program, which this board has and the"
+			" other does not\r\n"
+		      : " — WRONG, no MSI-X on a board whose devices have it\r\n");
+	else
+		kputs(msix_devices == 0
+		      ? " — none, and this board's chipset predates it by"
+			" thirteen years\r\n"
+		      : " — WRONG, MSI-X found on a 1996 chipset\r\n");
+}
+
 static void ioapic_selftest(void)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
@@ -4735,6 +4934,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	tsc_selftest();
 	timer_selftest();
 	pci_cfg_selftest();
+	pci_cap_selftest();
 	ioapic_selftest();
 	spl_selftest();
 	device_master_irq_selftest();

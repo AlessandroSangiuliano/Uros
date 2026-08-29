@@ -71,4 +71,42 @@ extern void	pci_cfg_write(uint16_t segment, uint8_t bus, uint8_t dev,
  */
 extern int pci_cfg_is_ecam(void);
 
+/*
+ * Where a device keeps the capability with this id, or zero if it has none.
+ *
+ * 🔑 In the kernel and not in libpci beside the BAR decode, even though the
+ * list is as much a property of the bus as a BAR is.  The reason is what the
+ * first caller does with the answer: the MSI-X table is programmed with an
+ * address the device will WRITE to, so a driver that could write that table
+ * could aim the device at any address in the machine -- the same hole #432
+ * and #511 exist to close.  The walk lives where the writer lives.
+ *
+ * ⚠️ PCI_STATUS is consulted first.  A device without the capability-list bit
+ * has whatever its vendor happened to leave at 0x34, and following that walks
+ * arbitrary bytes of its own configuration space -- which reads as a
+ * capability of some id, of some length, pointing somewhere else.  There is
+ * no value that says "this is not a list"; only the status bit says it.
+ *
+ * ⚠️ Bounded, and not by taste.  The list is a chain of offsets a device
+ * supplies, so a device whose next-pointer points at itself is a hang in
+ * kernel context.  Configuration space is 256 bytes and a capability is at
+ * least two, so 48 hops is more than any conforming device can need and no
+ * loop can survive it.
+ */
+extern uint16_t pci_cfg_find_cap(uint16_t segment, uint8_t bus, uint8_t dev,
+				 uint8_t func, uint8_t cap_id);
+
+/*
+ * One byte and one 16-bit word out of configuration space, at any offset.
+ *
+ * The capability list is byte-granular and both mechanisms read dwords, so
+ * every reader of it would otherwise do the same shift-and-mask -- and a
+ * capability at 0x52 lives in the dword at 0x50, which is exactly the kind of
+ * arithmetic that is right in three places and wrong in the fourth.
+ */
+extern uint8_t	pci_cfg_read8(uint16_t segment, uint8_t bus, uint8_t dev,
+			      uint8_t func, uint16_t reg);
+extern uint16_t	pci_cfg_read16(uint16_t segment, uint8_t bus, uint8_t dev,
+			       uint8_t func, uint16_t reg);
+
 #endif	/* _X86_64_CPU_PCI_CFG_H_ */
