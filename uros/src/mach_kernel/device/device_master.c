@@ -59,7 +59,6 @@
 #include <device/device_machdep.h>
 #include <machine/spl.h>
 
-#include <chips/busses.h>
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <kern/kalloc.h>
@@ -88,17 +87,23 @@
 struct irq_forward irq_forward_table[IRQ_FORWARD_MAX];
 
 /*
- * Saved original interrupt handlers, so we can restore on unregister.
+ * ⚠️ What was on the line before is NOT saved here any more (#457).
+ *
+ * It used to be, in three arrays of intr_t, int and int -- i386's idea of a
+ * handler, of the argument it is called with, and of a priority level.  This
+ * file is machine-independent and held all three so that unregister could
+ * hand them back; the machine holds them now, because the shape of what was
+ * displaced is the machine's and unregister needs nothing but the line.
+ *
+ * Which also removed the last reason for <chips/busses.h> here.
  */
-static intr_t	irq_orig_handler[IRQ_FORWARD_MAX];
-static int	irq_orig_unit[IRQ_FORWARD_MAX];
-static int	irq_orig_spl[IRQ_FORWARD_MAX];
 
 /*
  * IRQ delivery is split in two halves:
  *
  *   top-half (irq_forward_handler):
- *      Runs in interrupt context (SPL6).  Just bumps a per-IRQ
+ *      Runs in interrupt context, at whatever level the machine gives
+ *      device lines.  Just bumps a per-IRQ
  *      pending counter and wakes the bottom-half thread.
  *
  *   bottom-half (irq_forward_thread):
@@ -371,20 +376,29 @@ ds_master_device_intr_register(
 	/* Spawn the bottom-half kthread on first registration. */
 	irq_forward_thread_start();
 
-	/*
-	 * Save the original handler and install our forwarder.
-	 */
 	s = splhigh();
 
-	reset_irq((int)irq,
-		  &irq_orig_unit[irq],
-		  &irq_orig_spl[irq],
-		  &irq_orig_handler[irq]);
-
+	/*
+	 * The table entry before the claim, because the claim is what makes
+	 * the handler reachable: on a machine that routes the line to another
+	 * processor, the first interrupt can arrive before this one returns,
+	 * and a top half that found active == 0 would drop it.
+	 */
 	irq_forward_table[irq].notify_port = notify_port;
 	irq_forward_table[irq].active = 1;
 
-	take_irq((int)irq, (int)irq, SPL6, (intr_t)irq_forward_handler);
+	if (!device_md_irq_register(irq, irq_forward_handler)) {
+		/*
+		 * The machine has no vector or no controller for this line.
+		 * Put the entry back rather than leaving a registration that
+		 * nothing can ever deliver to -- and do not call unregister,
+		 * which has nothing to undo.
+		 */
+		irq_forward_table[irq].notify_port = IP_NULL;
+		irq_forward_table[irq].active = 0;
+		splx(s);
+		return KERN_FAILURE;
+	}
 
 	splx(s);
 
@@ -412,12 +426,11 @@ ds_master_device_intr_unregister(
 	s = splhigh();
 
 	/*
-	 * Restore the original handler.
+	 * The line first, the entry second -- the mirror of register, and for
+	 * the mirror reason: until the line is given up an interrupt can still
+	 * arrive, and it must find an entry that still says where to send it.
 	 */
-	take_irq((int)irq,
-		 irq_orig_unit[irq],
-		 irq_orig_spl[irq],
-		 irq_orig_handler[irq]);
+	device_md_irq_unregister(irq);
 
 	irq_forward_table[irq].notify_port = IP_NULL;
 	irq_forward_table[irq].active = 0;
@@ -842,12 +855,18 @@ ds_master_device_io_port_write(
  * driver's RPC context, and return when the operator continues — the
  * calling server thread simply blocks for the debug session.
  *
- * Gated by the -K boot flag: when not armed we return KERN_FAILURE and
- * the driver delivers the byte as ordinary input instead.
+ * Gated by the debugger's own boot flag: when not armed we return
+ * KERN_FAILURE and the driver delivers the byte as ordinary input instead.
+ * Which flag that is belongs to the machine -- `-K' on i386, `-r' on x86-64,
+ * two debuggers with two ways of being asked for.
+ *
+ * ⚠️ #457: the arming flag, the pre-park and the entry are ONE machine-
+ * dependent operation, not a predicate this file acts on.  What has to happen
+ * around the entry differs between the machines -- see
+ * <device/device_machdep.h> -- and it used to be here as three externs
+ * declared beside the code, which is why enumerating this file's includes did
+ * not find it and the link did.
  */
-extern int	ddb_kbd_break_enabled;		/* -K (model_dep.c) */
-extern void	Debugger(const char *message);
-
 kern_return_t
 ds_master_device_ddb_break(
 	ipc_port_t		master_port)
@@ -858,35 +877,9 @@ ds_master_device_ddb_break(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	if (!ddb_kbd_break_enabled)
+	if (!device_md_debugger_break())
 		return KERN_FAILURE;
 
-#if	NCPUS > 1
-	/*
-	 * #382: park the other CPUs BEFORE anything slow happens on this
-	 * one.  A pre-park serial printf alone takes milliseconds; in
-	 * that window another CPU can start a TLB shootdown and wait
-	 * forever for this (about-to-stop) CPU's ack, wedging the other
-	 * CPUs inside the 0xF1 handler pre-EOI — the DDB session then
-	 * "works" but the box is already dead underneath (in-service
-	 * 0xF1 pins PPR at 0xF0: no device vector ever delivers again).
-	 * Also no printf before the park: with db_active still 0, a
-	 * parked CPU holding printf_lock would deadlock us right here.
-	 * kdb_trap skips its own park when the flag is already up and
-	 * clears it on the way out.
-	 */
-	{
-		extern volatile int ddb_nmi_park;
-		extern void lapic_send_nmi_all_excluding_self(void);
-
-		if (!ddb_nmi_park) {
-			ddb_nmi_park = 1;
-			lapic_send_nmi_all_excluding_self();
-		}
-	}
-#endif	/* NCPUS > 1 */
-
-	Debugger("console break");
 	printf("ddb: console break (Ctrl+D) session ended, resuming\n");
 	return KERN_SUCCESS;
 }

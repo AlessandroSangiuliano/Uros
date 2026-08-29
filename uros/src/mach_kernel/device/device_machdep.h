@@ -9,7 +9,7 @@
  *	device_master.c is fourteen RPCs through which a user-space driver
  *	reaches hardware, and almost none of it is machine-dependent: the port
  *	checks, the task lookups, the mapping and the interrupt bookkeeping are
- *	the same everywhere.  What differs is six operations, and they are
+ *	the same everywhere.  What differs is nine operations, and they are
  *	named here so the RPC file can be read without knowing which machine it
  *	is on.
  *
@@ -31,6 +31,14 @@
  *	  masking an interrupt  i386 has an 8259 behind an I/O APIC that may or
  *	                        may not be in use; x86-64 has no 8259 in the
  *	                        picture at all and masks the pin
+ *
+ *	  claiming a line       i386 writes a handler, a unit and a priority
+ *	                        into three parallel arrays the dispatch reads;
+ *	                        x86-64 picks a vector, claims it in the IDT
+ *	                        dispatch table and points an I/O APIC pin at it
+ *
+ *	  entering the          i386 must stop the other processors before it
+ *	  debugger              does; x86-64's debugger stops them itself
  */
 
 #ifndef	_DEVICE_DEVICE_MACHDEP_H_
@@ -86,5 +94,76 @@ extern void		device_md_irq_unmask(unsigned int irq);
 extern unsigned int	device_md_io_read(unsigned int port, unsigned int size);
 extern void		device_md_io_write(unsigned int port, unsigned int size,
 					   unsigned int value);
+
+/*
+ * What runs when the line fires.  Called with the interrupt number, in
+ * interrupt context, on whichever processor took it.
+ */
+typedef void	(*device_md_intr_t)(int irq);
+
+/*
+ * Make `handler' the thing that runs for `irq', and put back whatever was
+ * there before.
+ *
+ * 🔴 THERE IS NO PRIORITY ARGUMENT, and its absence is the design.
+ *
+ * i386 takes one -- take_irq(pic, unit, spl, intr) -- because there the level
+ * is a number kept beside the handler in intpri[], consulted by the dispatch
+ * in interrupt.S.  x86-64 cannot take one, because there a vector's priority
+ * class IS its top four bits (<cpu/spl.h>): choosing the vector is choosing
+ * the priority, and there is no second table to put a level in.  A machine
+ * handed SPL6 there would have to either ignore it -- an argument that is not
+ * an argument -- or route the line to a vector picked to match, which is
+ * choosing hardware from a software constant.
+ *
+ * So the operation says which line and what runs, and the machine answers at
+ * the level it has for devices.  That is what both of them meant anyway: the
+ * only value this file's caller ever passed was SPL6, once, for every line.
+ *
+ * 🔑 And the machine remembers what it displaced.  It used to be the caller
+ * that did, in three arrays of intr_t, unit and spl -- which is i386's idea of
+ * a handler, its idea of an argument, and a priority this machine does not
+ * have, all held in machine-independent code so that unregister could put
+ * them back.  Saved here, the shape of what was there is the machine's
+ * business and unregister needs no arguments beyond the line.
+ *
+ * Answers zero if the line cannot be claimed -- there is no vector for it, or
+ * no controller to route it through -- and in that case nothing was displaced
+ * and unregister must not be called.
+ *
+ * ⚠️ One handler per line.  Sharing an interrupt is a thing PCI does and this
+ * cannot express; the caller above enforces one registration per line, and
+ * the day that changes it changes here first.
+ */
+extern int		device_md_irq_register(unsigned int irq,
+					       device_md_intr_t handler);
+extern void		device_md_irq_unregister(unsigned int irq);
+
+/*
+ * The console driver saw the break key: stop here, if a debugger was asked
+ * for.  Answers whether it did -- zero means none is armed and the driver
+ * should deliver the byte as ordinary input.
+ *
+ * Returns when the operator continues, in the driver's own RPC context (#382).
+ *
+ * 🔑 The whole operation and not just "is the debugger armed", because what
+ * has to happen around the entry is not the same on the two machines.  i386
+ * stops the other processors HERE, before anything slow: with an NMI park
+ * done later, one of them can start a TLB shootdown in the window and wait
+ * for an acknowledgement from a processor that is about to stop.  x86-64's
+ * debugger stops them itself on the way in, so a second park here would be a
+ * park racing a park.  A predicate would have left that difference at the
+ * call site, in machine-independent code, spelt as an #if.
+ *
+ * ⚠️ THIS ONE WAS NOT FOUND BY READING THE INCLUDES.  The other eight
+ * announced themselves as <i386/...> at the top of device_master.c; this one
+ * declared `ddb_kbd_break_enabled', `ddb_nmi_park' and
+ * `lapic_send_nmi_all_excluding_self' as externs beside the code that used
+ * them, where an enumeration of the file's includes cannot see them.  It
+ * surfaced as three undefined symbols at link time, which is the check that
+ * did work -- and the reason the header says eight anywhere is a mistake this
+ * one corrected.
+ */
+extern int		device_md_debugger_break(void);
 
 #endif	/* _DEVICE_DEVICE_MACHDEP_H_ */
