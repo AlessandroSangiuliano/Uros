@@ -50,6 +50,13 @@
 				 * silent: one hardware bit, one header. */
 #include <i386/ipl.h>		/* SPLHI */
 #include <chips/busses.h>	/* intr_t */
+/*
+ * #457: the interface, so the compiler can compare it with what is below.
+ * Every name this file defines is declared there, and until this include
+ * existed the two could disagree indefinitely -- which is exactly what the
+ * last argument of the two irq stubs had been doing.
+ */
+#include <i386/AT386/mp/mp_v1_1.h>
 
 #define	AP_INTSTACK_BYTES	4096	/* INTSTACK_SIZE; locore.S sets this in assym */
 
@@ -405,9 +412,18 @@ boolean_t	mp_v1_1_initialized = FALSE;
  * unmasked — device IRQs limped along on driver polling while the clock
  * (hardclock on IRQ0, which cannot poll) never ticked, hanging every
  * MACH_RCV_TIMEOUT on SMP.
+ *
+ * ⚠️ #457: the last argument used to be `void *' here and `intr_t' -- which
+ * is void (*)(void) -- in the header autoconf.c calls through.  A pointer to
+ * a function and a pointer to an object are not the same type; they survive
+ * the trip only because this ABI passes both in the same register.  Nothing
+ * compared them, because the file that DEFINES these two did not include the
+ * header that DECLARES them: it took <chips/busses.h> for the intr_t of the
+ * array below and stopped there.  The include is now the check, which is the
+ * same arrangement #448 asked for and the same reason.
  */
 boolean_t
-mp_v1_1_take_irq(int pic, int unit, int spl, void *intr)
+mp_v1_1_take_irq(int pic, int unit, int spl, intr_t intr)
 {
 	(void)pic;
 	(void)unit;
@@ -417,7 +433,7 @@ mp_v1_1_take_irq(int pic, int unit, int spl, void *intr)
 }
 
 boolean_t
-mp_v1_1_reset_irq(int pic, int *unit, int *spl, void *intr)
+mp_v1_1_reset_irq(int pic, int *unit, int *spl, intr_t *intr)
 {
 	(void)pic;
 	(void)unit;
