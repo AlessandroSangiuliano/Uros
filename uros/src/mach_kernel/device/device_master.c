@@ -435,6 +435,28 @@ ds_master_device_intr_unregister(
 	irq_forward_table[irq].notify_port = IP_NULL;
 	irq_forward_table[irq].active = 0;
 
+	/*
+	 * 🔴 AND THE COUNT, or the bottom half spins for ever (#457).
+	 *
+	 * A front can arrive between the top half's increment and this
+	 * unregister, leaving irq_pending[irq] non-zero on a line that is no
+	 * longer active.  irq_forward_thread() then cannot make progress and
+	 * cannot stop: its drain loop skips the entry -- `pending == 0 ||
+	 * !active' -- without clearing it, so nothing is sent and `any' stays
+	 * FALSE; and the block below that loop refuses to sleep precisely
+	 * because some irq_pending[] is non-zero.  It cancels its own wait and
+	 * rescans, at full speed, with nothing left that could ever clear the
+	 * count.
+	 *
+	 * 🔑 Cleared HERE rather than tolerated in the loop, because a line
+	 * nobody is registered for has no pending notifications by definition:
+	 * this is where the state stops being true, so this is where it is not
+	 * allowed to become false.  Teaching the drain loop to skip it more
+	 * gracefully would have left the stranded count in existence and made
+	 * the spin depend on the shape of a `continue'.
+	 */
+	irq_pending[irq] = 0;
+
 	splx(s);
 
 	return KERN_SUCCESS;
