@@ -632,6 +632,38 @@ syscall_entry:
  * flags and the resume address.  Nothing is popped anywhere along here.
  */
 .Lreturn_the_slow_way:
+	/*
+	 * 🔴 THE RETURN IS NOT ATTEMPTED (#518).
+	 *
+	 * There is exactly one branch into here, and it is the canonical check
+	 * above -- so the only reason this path ever runs is that ring 3 asked
+	 * to resume at an address the processor will not resume at.  IRETQ
+	 * refuses it as surely as SYSRET does; the mitigation buys WHERE the
+	 * fault lands, on the kernel stack rather than on the caller's, which
+	 * is what makes it a crash instead of CVE-2012-0217.
+	 *
+	 * But nothing then handled that fault.  A #GP at kernel privilege with
+	 * no handler halts the machine -- and getting here costs an
+	 * unprivileged task one thread_set_state on a thread of its own, which
+	 * is a right any task has and a debugger uses all day.
+	 *
+	 * 🔑 So the return is not made.  The address is known bad before the
+	 * instruction that would refuse it, the thread is the one that asked,
+	 * and a fault the kernel is going to have to synthesise anyway is
+	 * synthesised here -- with the kernel's %gs still loaded, on the
+	 * kernel's stack, with the thread's user frame untouched for its
+	 * handler to read and repair.
+	 *
+	 * ⚠️ BEFORE the swapgs and the cli, deliberately.  Both were below this
+	 * point and both are wrong for a C call: %gs would be ring 3's, and
+	 * exception() sends a message and can block.
+	 *
+	 * ⚠️ Nothing is added to the fast path.  This is reached only by the
+	 * branch a program takes once, on its way to being told about it.
+	 */
+	call	syscall_return_noncanonical
+	ud2				/* exception() does not return */
+
 	cli
 	movq	TF_RSP(%rsp), %r10	/* the stack ring 3 came in on (#474) */
 	swapgs

@@ -1048,10 +1048,22 @@ the_thread_that_returns_badly(void *arg)
  * does this all day -- so nothing here is privileged.
  *
  * ⚠️ What is being tested is OUR branch and what follows it, not the
- * processor's misbehaviour.  Because the guard diverts before SYSRET ever
- * runs, the outcome is the same on AMD, on Intel, under TCG and under KVM.
- * An arm that needed the vendor difference would be an arm that only ran on
- * the machine nobody has.
+ * processor's misbehaviour.  The guard diverts before SYSRET ever runs, so the
+ * arm does not need the vendor difference and does not run only on the machine
+ * nobody has.
+ *
+ * 🔴 IT DID SAY "the outcome is the same under TCG and under KVM", AND THAT
+ * WAS FALSE.  It was measured, and the two disagreed completely: under KVM the
+ * kernel halted, and under TCG the arm reported a pass without the path ever
+ * being reached, because TCG does not raise the #GP that IRETQ owes a
+ * non-canonical target.  For as long as that sentence stood, nobody ran this
+ * arm anywhere it could fail -- and the halt it was written to catch was
+ * reachable by any task with a thread of its own (#518).
+ *
+ * 🔑 Which is this comment's own warning, three paragraphs up, landing on this
+ * comment: everything past that `jne' was assembled, linked and unproven, and
+ * the sentence claiming otherwise is what kept it that way.  A test's
+ * description of where it has run is part of the test.
  *
  * 🔥 And the expected end is not "no fault".  IRETQ refuses that address too;
  * the difference the mitigation buys is WHERE -- kernel stack still in place
