@@ -3901,26 +3901,49 @@ static void iommu_selftest(void)
 }
 
 /*
- * An interrupt with no wire behind it (#457).
+ * A claimed message-signalled vector, and what a processor can prove about one
+ * without a device (#457, corrected under KVM by #432).
  *
- * 🔑 Delivering an MSI is an ordinary 32-bit store.  Which means this test
- * needs no device at all: it asks for the address and the value a device
- * would be programmed to write, and then WRITES THEM ITSELF.  The processor
- * cannot tell the difference, because there is no difference — the local APIC
- * answers a physical address, and who put the bytes on the bus is not part of
- * what it sees.
+ * 🔴 A PROCESSOR CANNOT RING ITS OWN DOORBELL, AND THIS TEST USED TO.
  *
- * ⚠️ Which is also the limit of what this proves, and the limit is the point:
- * it proves the vector, the encoding and the delivery, and it proves NOTHING
- * about a device's MSI-X table being programmed correctly.  Those are two
- * claims and this is the first — the second needs a device to raise one, and
- * saying so here is what stops the first from being mistaken for both.
+ * It asked msi_claim_vector() for the address and the value a device would be
+ * programmed to write, and then wrote them itself — on the argument that the
+ * local APIC answers a physical address and does not care who put the bytes on
+ * the bus.  That argument is wrong, and the reason is worth more than the test
+ * was: 0xFEE00000 is BOTH the region the interrupt fabric decodes as messages
+ * AND the page the local APIC keeps its own registers in.  Which one a write
+ * lands on depends on where it came from.  A device's transaction arrives from
+ * the bus and is a message; a processor's store to its own APIC page is a
+ * register access, and the register at offset zero is the read-only APIC id.
  *
- * ⚠️ The store is to a mapping made for it rather than to lapic_probe_va().
- * For APIC id 0 the message address IS the local APIC's own base, so the
- * existing mapping would work — and would work by a coincidence of that id,
- * which is exactly the kind of thing that is right until the day a test runs
- * on the second processor.
+ * So the store was dropped, and this reported an interrupt anyway — because
+ * QEMU under TCG accepts it as a message.  Under KVM, whose local APIC is the
+ * host kernel's, it does not, and the same boot showed both halves in three
+ * lines: the processor's store ran the handler 0 times, and the 82574L's own
+ * write to the address this kernel put in its table ran it twice.
+ *
+ * ⚠️ THAT IS THE FINDING, AND IT OUTLIVES THE FIX.  Every MSI result this port
+ * has recorded before now was TCG, and one of them was measuring the emulator.
+ * 🔑 A device raising an interrupt and a processor pretending to be one are not
+ * the same experiment, and only one of them was ever a claim about hardware.
+ *
+ * What is left here is what a processor genuinely can establish about a
+ * claimed slot, and it is in two parts that are kept apart:
+ *
+ *	the ENCODING — that the address and value handed out are the ones a
+ *	device must be given, checked against the APIC base ACPI reported and
+ *	the id the APIC reports for itself.  Two sources, neither of them the
+ *	arithmetic being checked.
+ *
+ *	the VECTOR — that it is installed, reaches the handler with its slot
+ *	number, and is held by SPL_DEVICE.  Raised with a self-IPI, which is
+ *	how a processor raises a vector on real hardware and works on one
+ *	processor.
+ *
+ * ⚠️ And the third part is NOT here and cannot be: that a write to that address
+ * becomes an interrupt is a claim only a device can make, and msix_table_selftest()
+ * below is where it is made.  On a board with no MSI-X device it goes unmade,
+ * which that test says out loud rather than passing quietly.
  */
 static volatile uint64_t	msi_hits;
 static volatile int		msi_slot_seen;
@@ -3934,9 +3957,8 @@ static void msi_handler(int slot)
 static void msi_selftest(void)
 {
 	unsigned int		slot = 0, data = 0;
-	unsigned long long	addr = 0;
-	uint64_t		before, deferred_before;
-	volatile uint32_t	*doorbell;
+	unsigned long long	addr = 0, expect;
+	uint64_t		held, deferred_before;
 	int			had_interrupts;
 	spl_t			old;
 
@@ -3946,35 +3968,15 @@ static void msi_selftest(void)
 		return;
 	}
 
-	doorbell = (volatile uint32_t *)(uintptr_t)
-		   pmap_map_device(addr & ~0xFFFULL, 0x1000);
-	if (doorbell == 0) {
-		kputs("UrMach x86-64: the message address could not be mapped"
-		      " — WRONG\r\n");
-		device_md_msi_unregister(slot);
-		return;
-	}
-	doorbell = (volatile uint32_t *)((uintptr_t)doorbell
-					 + (uintptr_t)(addr & 0xFFFULL));
-
-	msi_hits = 0;
-	msi_slot_seen = -1;
-	had_interrupts = interrupts_enabled();
-	interrupts_enable();
-
 	/*
-	 * One store, and the interrupt is the store.  ⚠️ The read afterwards
-	 * is not decoration: the write is to device memory and the handler
-	 * runs on an interrupt, so without something that orders them the
-	 * count could be read before the store has left the processor.
+	 * The encoding, against two things that are not this arithmetic: the
+	 * APIC base the firmware reported through ACPI, and the id the local
+	 * APIC gives for itself.  A message reaches a processor by naming it in
+	 * bits 19:12 of the address, so an encoder that got the base right and
+	 * the id wrong would aim every device at processor zero -- which on a
+	 * uniprocessor is indistinguishable from working.
 	 */
-	*doorbell = data;
-	(void) *doorbell;
-
-	for (unsigned spin = 0; spin < 1000000u && msi_hits == 0; spin++)
-		cpu_pause();
-
-	before = msi_hits;
+	expect = acpi_lapic_base() | ((unsigned long long)lapic_id() << 12);
 
 	kputs("UrMach x86-64: slot ");
 	kputdec(slot);
@@ -3982,39 +3984,67 @@ static void msi_selftest(void)
 	kputhex64(addr);
 	kputs(" value ");
 	kputhex64(data);
-	kputs(", and one store to it ran the handler ");
-	kputdec((unsigned)before);
-	kputs(" time");
-	kputs(before == 1 && msi_slot_seen == (int)slot
-	      ? " — an interrupt arrived with nothing wired to anything\r\n"
-	      : " — WRONG, the message did not become an interrupt\r\n");
+	kputs(addr == expect && data >= 0x50u && data <= 0x5Fu
+	      ? " — this apic's own address, and a vector in the message"
+		" class\r\n"
+	      : " — WRONG, not the address a device must be given\r\n");
+
+	msi_hits = 0;
+	msi_slot_seen = -1;
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	/*
+	 * The vector, raised the way a processor raises one.  ⚠️ NOT by storing
+	 * to the message address: see the note above -- that store lands on
+	 * this processor's own APIC registers, and the only reason it ever
+	 * looked like an interrupt is that TCG let it.
+	 */
+	lapic_send_self((uint8_t)data);
+
+	for (unsigned spin = 0; spin < 1000000u && msi_hits == 0; spin++)
+		cpu_pause();
+
+	kputs("UrMach x86-64: raising it ran the handler ");
+	kputdec((unsigned)msi_hits);
+	kputs(" time, which saw slot ");
+	kputdec((unsigned)msi_slot_seen);
+	kputs(msi_hits == 1 && msi_slot_seen == (int)slot
+	      ? " — the claimed vector reaches the claimed slot\r\n"
+	      : " — WRONG, the vector and the slot do not match\r\n");
 
 	/*
 	 * And it obeys the priority level, which on this machine is not a
 	 * separate claim: the vector's class IS its priority, so an MSI at
 	 * class five is held by SPL_DEVICE exactly as a pinned line at class
 	 * four is.  ⚠️ Worth asking rather than deducing, because SPL_DEVICE
-	 * was FOUR until this change and four would have let these through --
-	 * a level named for devices that stopped one kind and not the other.
+	 * was FOUR until #457 and four would have let these through -- a level
+	 * named for devices that stopped one kind and not the other.
+	 *
+	 * ⚠️ The count is reset first so that "ran while held" is a count and
+	 * not a difference.  It used to be `before - 1', which on the boot
+	 * where the first delivery failed printed 4294967295 -- an unsigned
+	 * subtraction going the wrong way, in the line whose job was to report
+	 * the failure.
 	 */
+	msi_hits = 0;
 	deferred_before = spl_deferred_count();
 	old = splx(SPL_DEVICE);
-	*doorbell = data;
-	(void) *doorbell;
+	lapic_send_self((uint8_t)data);
 	for (unsigned spin = 0; spin < 1000000u; spin++)
 		cpu_pause();
-	before = msi_hits;
+	held = msi_hits;
 	splx(old);
 
 	kputs("UrMach x86-64: at the device level it was deferred ");
 	kputdec((unsigned)(spl_deferred_count() - deferred_before));
 	kputs(" time, ran ");
-	kputdec((unsigned)(before - 1));
+	kputdec((unsigned)held);
 	kputs(" while held and ");
-	kputdec((unsigned)(msi_hits - before));
+	kputdec((unsigned)(msi_hits - held));
 	kputs(" on lowering");
 	kputs(spl_deferred_count() - deferred_before == 1
-	      && before == 1 && msi_hits - before == 1
+	      && held == 0 && msi_hits == 1
 	      ? " — SPL_DEVICE covers the messages too, which is why it is"
 		" five\r\n"
 	      : " — WRONG, the device level does not hold a message\r\n");
