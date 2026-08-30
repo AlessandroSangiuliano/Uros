@@ -3643,6 +3643,28 @@ static void iommu_selftest(void)
 	iommu_discover();
 	units = iommu_unit_count();
 
+	/*
+	 * ⚠️ FIRST, AND ON EVERY BOARD — including the ones with no remapping
+	 * hardware, which is most of them.  Everything below this line depends
+	 * on the decode being right, and everything below this line is silent
+	 * on a machine with nothing to decode.  This is not.
+	 */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_decode_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" iommu words decoded and encoded, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — one read off real amd silicon, and the two"
+			   " vendors' empty entries still mean opposite"
+			   " things\r\n"
+			 : " — WRONG, the kernel disagrees with the"
+			   " specifications\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");
@@ -3753,17 +3775,16 @@ static void iommu_selftest(void)
 			remapping++;
 
 		/*
-		 * 🔴 An engine that confirmed itself but whose features were
-		 * not decoded, which is where AMD stands at stage 1.  Said in
-		 * its own words rather than printed as a row of zeros: "48
-		 * bits" and "0 bits" are both readings, and "nobody looked" is
-		 * not — and the three would be indistinguishable if the third
-		 * were rendered as the second.
+		 * 🔴 Zero page levels is a REFUSAL, not an absence: the
+		 * engine reported an encoding its reader does not know, and
+		 * the reader declined to invent the safest-looking width.
+		 * Said in its own words, because "48 bits", "0 bits" and
+		 * "nobody could read it" are three answers and the third must
+		 * not be rendered as the second.
 		 */
 		if (u->page_levels == 0) {
-			kputs("UrMach x86-64:     confirmed, but its feature"
-			      " register is recorded raw and NOT decoded"
-			      " — see cpu/iommu_amd.c\r\n");
+			kputs("UrMach x86-64:     ITS FEATURE REGISTER USES AN"
+			      " ENCODING THIS KERNEL DOES NOT KNOW\r\n");
 			kputs("UrMach x86-64:     caps ");
 			kputhex64(u->vendor_caps[0]);
 			kputs(" ");
@@ -3772,11 +3793,22 @@ static void iommu_selftest(void)
 			continue;
 		}
 
-		kputs("UrMach x86-64:     version ");
-		kputdec(u->version >> 4);
-		kputs(".");
-		kputdec(u->version & 0xF);
-		kputs(", translates ");
+		/*
+		 * ⚠️ AMD has no version register, so zero here is "there was
+		 * nothing to read" and not "version 0.0".  Its engine was
+		 * identified by the capability comparison instead, which is a
+		 * stronger claim than a version number.
+		 */
+		if (u->version) {
+			kputs("UrMach x86-64:     version ");
+			kputdec(u->version >> 4);
+			kputs(".");
+			kputdec(u->version & 0xF);
+			kputs(",");
+		} else {
+			kputs("UrMach x86-64:     no version register,");
+		}
+		kputs(" translates ");
 		kputdec(u->address_bits);
 		kputs(" bits, page tables");
 		for (unsigned l = 0; l < 8; l++)
@@ -3841,17 +3873,32 @@ static void iommu_selftest(void)
 	 * with nothing said.  A machine that claims nothing has to have no
 	 * engine that does; a machine that claims it has to have them all.
 	 */
-	kputs("UrMach x86-64:   interrupt remapping: firmware says ");
-	kputs(iommu_platform_interrupt_remapping() ? "yes" : "no");
-	kputs(", ");
-	kputdec(remapping);
-	kputs(" of ");
-	kputdec(answered);
-	kputs(" engine(s) agree");
-	kputs((iommu_platform_interrupt_remapping()
-	       ? (answered > 0 && remapping == answered)
-	       : (remapping == 0))
-	      ? "\r\n" : " — THEY DISAGREE\r\n");
+	{
+		int claim = iommu_platform_interrupt_remapping();
+
+		kputs("UrMach x86-64:   interrupt remapping: firmware ");
+		kputs(claim < 0 ? "does not say" : (claim ? "says yes"
+							  : "says no"));
+		kputs(", ");
+		kputdec(remapping);
+		kputs(" of ");
+		kputdec(answered);
+		kputs(" engine(s) support it");
+
+		/*
+		 * ⚠️ No comparison when the table said nothing.  AMD's carries
+		 * no platform flag, and the first version recorded that as
+		 * "no" -- so every AMD boot reported a disagreement between
+		 * the firmware and the engines where there were not two
+		 * statements to disagree.
+		 */
+		if (claim < 0)
+			kputs("\r\n");
+		else
+			kputs((claim ? (answered > 0 && remapping == answered)
+				     : (remapping == 0))
+			      ? "\r\n" : " — THEY DISAGREE\r\n");
+	}
 
 	/*
 	 * The other place the table and the silicon can disagree, and the one
@@ -3889,6 +3936,71 @@ static void iommu_selftest(void)
 			      ? "\r\n"
 			      : " — NO, AN ENGINE IS NARROWER THAN THE"
 				" MACHINE\r\n");
+	}
+
+	/*
+	 * 🔴 AND WHO IS COVERED BY NOBODY, which is the question stage 3 has to
+	 * answer before it can promise anything.  The engines are asked about
+	 * every function actually on the bus rather than the other way round:
+	 * a scope list read back to itself would agree with itself, and what
+	 * matters is the devices that appear in NO list.
+	 *
+	 * ⚠️ It is not a hypothetical.  QEMU's IVRS under KVM names seven
+	 * devices, has no catch-all, and does not mention the I/O APIC — while
+	 * the same QEMU under TCG does.  Measured both ways with the same
+	 * binary, so it is the accelerator and not this reader (#516).
+	 */
+	{
+		unsigned on_bus = 0, uncovered = 0;
+
+		for (unsigned d = 0; d < 32; d++)
+			for (unsigned f = 0; f < 8; f++) {
+				uint32_t vendor = pci_cfg_read(0, 0, (uint8_t)d,
+							       (uint8_t)f,
+							       PCI_VENDOR_ID);
+
+				if (vendor == 0xFFFFFFFFu)
+					continue;
+
+				on_bus++;
+				if (iommu_unit_for(0, 0, (uint8_t)d,
+						   (uint8_t)f) < 0) {
+					if (uncovered == 0)
+						kputs("UrMach x86-64:   NO"
+						      " ENGINE COVERS:");
+					uncovered++;
+					kputs(" 0:");
+					kputdec(d);
+					kputs(".");
+					kputdec(f);
+				}
+
+				/*
+				 * ⚠️ ALL EIGHT FUNCTIONS, ALWAYS.  The usual
+				 * rule is to skip 1 through 7 unless the
+				 * header type says multi-function, and every
+				 * other walk here does that.  Not this one:
+				 * its job is to name devices NOBODY polices,
+				 * and a device it never looked at is a device
+				 * it cannot report.  Erring toward extra
+				 * configuration reads at boot costs nothing;
+				 * erring the other way is an unpoliced device
+				 * that this line calls covered.
+				 *
+				 * It is not hypothetical — the first version
+				 * counted five functions on a bus with seven.
+				 */
+			}
+
+		if (uncovered)
+			kputs("\r\n");
+
+		kputs("UrMach x86-64:   ");
+		kputdec(on_bus - uncovered);
+		kputs(" of ");
+		kputdec(on_bus);
+		kputs(" devices on bus 0 have an engine responsible for them");
+		kputs(uncovered ? " — the rest are unpoliced\r\n" : "\r\n");
 	}
 
 	/*

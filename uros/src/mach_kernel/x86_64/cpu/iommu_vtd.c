@@ -224,6 +224,119 @@ static int read_scopes(const uint8_t *from, const uint8_t *end,
 }
 
 /*
+ * The two capability words, turned into the four things the description holds.
+ *
+ * Pure, and separate from the reading, so that iommu_decode_check() can run it
+ * against a captured value whose right answer is known -- see the note in
+ * <cpu/iommu_backend.h>.
+ */
+void iommu_vtd_decode(uint64_t cap, uint64_t ecap,
+		      unsigned *address_bits, uint32_t *page_levels,
+		      int *interrupt_remapping, int *coherent)
+{
+	unsigned sagaw = VTD_CAP_SAGAW(cap);
+	uint32_t levels = 0;
+
+	/*
+	 * SAGAW is a SET of supported widths, one bit each, and only three of
+	 * its five bits mean anything (Rev 5.20, CAP_REG bits 12:8):
+	 *
+	 *	bit 0  Reserved
+	 *	bit 1  39-bit AGAW, 3-level page table
+	 *	bit 2  48-bit AGAW, 4-level page table
+	 *	bit 3  57-bit AGAW, 5-level page table
+	 *	bit 4  Reserved
+	 *
+	 * 🔴 THIS LOOP RAN OVER ALL FIVE, mapping bit i to 2 + i levels, which
+	 * is right for the three that exist and invents a two-level table for
+	 * bit 0 and a six-level one for bit 4.  It was written from memory and
+	 * checked against the only value we can produce -- QEMU's 0x06, which
+	 * has both reserved bits CLEAR -- so the wrong half was never once
+	 * exercised.  A decode verified only where it happens to be right.
+	 *
+	 * ⚠️ The reserved bits are ignored rather than refused, and that is a
+	 * different judgement from AMD's HATS.  HATS is one encoded value, so
+	 * a reserved encoding makes the whole field unreadable; SAGAW is a set,
+	 * and a bit we do not understand does not spoil the ones we do.  What
+	 * it does mean is that this kernel cannot build the depth that bit is
+	 * claiming, which is exactly what leaving it out of the mask says.
+	 */
+	for (unsigned i = 1; i <= 3; i++)
+		if (sagaw & (1u << i))
+			levels |= 1u << (2 + i);
+
+	*address_bits = VTD_CAP_MGAW(cap) + 1u;
+	*page_levels = levels;
+	*interrupt_remapping = VTD_ECAP_IR(ecap);
+	*coherent = VTD_ECAP_COHERENT(ecap);
+}
+
+/*
+ * ── The root and context entries, which are stage 2's first structures ─
+ *
+ * Rev 5.20, Figures 9-1 and 9-3.  A root entry per bus points at a 4KB context
+ * table; a context entry per device/function says how that device's requests
+ * are translated.  Both are 128 bits, low word first.
+ *
+ * 🔴 AND THE ZERO ENTRY MEANS THE OPPOSITE OF AMD'S.  Here P=0 is NOT PRESENT
+ * and every request through it is blocked and faulted; there V=0 is "forwarded
+ * without translation".  An empty table is a closed door on this vendor and an
+ * open one on the other.  Two structures that look alike, initialised the same
+ * way, with opposite consequences -- and the dangerous direction is the one
+ * that looks configured and enforces nothing.
+ */
+#define	VTD_ROOT_PRESENT	(1ULL << 0)
+#define	VTD_CTX_PRESENT		(1ULL << 0)
+#define	VTD_CTX_TT_SHIFT	2		/* 10b = pass-through */
+#define	VTD_CTX_TT_PASSTHROUGH	2ULL
+/* AW is bits 66:64 and DID bits 87:72: the low word of the second half. */
+#define	VTD_CTX_AW_SHIFT	0
+#define	VTD_CTX_DID_SHIFT	8
+
+void iommu_vtd_root_entry(uint64_t context_table_pa, uint64_t out[2])
+{
+	out[0] = (context_table_pa & ~0xFFFULL) | VTD_ROOT_PRESENT;
+	out[1] = 0;
+}
+
+/*
+ * Pass-through for one device.
+ *
+ * ⚠️ `levels' is the DEEPEST the engine supports, not a choice.  The
+ * specification requires AW to name the largest AGAW the hardware reports when
+ * the type is pass-through, and the encoding is AGAW value = levels - 2, which
+ * happens to be the bit position that width occupies in SAGAW.
+ *
+ * 🔴 The caller must have checked ECAP[PT] first: pass-through is RESERVED on
+ * hardware that does not report it, which means an engine without it will fault
+ * on an entry that looks perfectly formed.  AMD has no such condition -- its
+ * translation-disabled mode is always available -- so this is one more place
+ * the two vendors do not mirror each other.
+ */
+void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
+				   uint64_t out[2])
+{
+	out[0] = VTD_CTX_PRESENT
+	       | (VTD_CTX_TT_PASSTHROUGH << VTD_CTX_TT_SHIFT);
+	out[1] = ((uint64_t)(levels - 2) & 7ULL) << VTD_CTX_AW_SHIFT
+	       | ((uint64_t)domain << VTD_CTX_DID_SHIFT);
+}
+
+/*
+ * Blocked: not present, which on this vendor is all it takes.
+ *
+ * ⚠️ NOT "present with an empty page table".  A second-stage pointer of zero
+ * is a pointer to physical page zero, and the engine would walk it as a page
+ * table -- reading whatever is there as translations.  Blocking by leaving a
+ * pointer null is how a table that blocks nothing gets written.
+ */
+void iommu_vtd_context_blocked(uint64_t out[2])
+{
+	out[0] = 0;
+	out[1] = 0;
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages
@@ -237,7 +350,8 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 	uint32_t version;
 	uint64_t cap, ecap;
 	uint32_t levels = 0;
-	unsigned sagaw;
+	unsigned bits = 0;
+	int ir = 0, coherent = 0;
 
 	regs = (volatile uint8_t *)(uintptr_t)pmap_map_device(base, size);
 	if (regs == 0)
@@ -257,19 +371,9 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 	cap = *(volatile uint64_t *)(regs + VTD_CAP);
 	ecap = *(volatile uint64_t *)(regs + VTD_ECAP);
 
-	/*
-	 * SAGAW bit i means an adjusted guest address width of 30 + 9i bits,
-	 * which is a page table of 2 + i levels.  Converted here rather than
-	 * reported raw so that the neutral description holds level counts and
-	 * not one vendor's encoding of them.
-	 */
-	sagaw = VTD_CAP_SAGAW(cap);
-	for (unsigned i = 0; i < 5; i++)
-		if (sagaw & (1u << i))
-			levels |= 1u << (2 + i);
+	iommu_vtd_decode(cap, ecap, &bits, &levels, &ir, &coherent);
 
-	iommu_record_hardware(index, version, VTD_CAP_MGAW(cap) + 1u, levels,
-			      VTD_ECAP_IR(ecap), VTD_ECAP_COHERENT(ecap),
+	iommu_record_hardware(index, version, bits, levels, ir, coherent,
 			      cap, ecap);
 }
 

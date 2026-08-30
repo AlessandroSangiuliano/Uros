@@ -10,7 +10,15 @@
 #   run-x86_64.sh 30 -smp 4
 #   run-x86_64.sh 20 -cpu max -m 2G
 #
-# Exit status: 0 the run passed · 1 the run failed · 2 refused to start.
+# Exit status: 0 the run passed · 1 the KERNEL failed · 2 this script refused
+# to start (another run is in flight) · 3 QEMU never ran, or ran and produced
+# nothing — which says something about the CALLER and nothing about the kernel.
+#
+# 🔑 Three and one are different findings and must not share a status, for the
+# same reason they must not share a sentence.  A rejected command line used to
+# come out as "the run was cut short, so the tests after that point did not
+# run" -- a statement about a boot that never happened -- and it was believed
+# six times in one session (#517).
 #
 # The pass-through exists for a reason: running qemu by hand to add a flag
 # skips the ISO rebuild, and the ISO is what boots. That mistake costs a
@@ -190,6 +198,35 @@ elif grep -aq "$TERMINATOR" "$LOG"; then
 		done
 	echo "  log: $LOG"
 	exit 1
+elif head -1 "$LOG" | grep -q '^qemu-system-x86_64: '; then
+	# 🔴 A REFUSAL TO START IS NOT A RESULT, and it used to be reported as
+	# one.  QEMU rejects a command line by printing one line and exiting,
+	# and every check below reads a log that never had a kernel in it --
+	# so the verdict came out as "the run was cut short, so the tests after
+	# that point did not run", which is a statement about a boot that never
+	# happened.  Six times in one session, each one investigated as though
+	# the kernel were at fault (#517).
+	#
+	# 🔑 The two are different findings and must not share a sentence: one
+	# says the kernel is wrong, the other says the CALLER is.  The line
+	# that was believed for hours came from a shell that does not
+	# word-split unquoted expansions, so `-smp 4' reached qemu as a single
+	# argument.  Nothing about the kernel was involved.
+	echo "  FAILED: qemu refused to start — this says nothing about the"
+	echo "          kernel, and the command line is where to look:"
+	sed -n '1,3p' "$LOG" | sed 's/^/    /'
+	echo "    (arguments passed through: $RUN_ARGS)"
+	echo "  log: $LOG"
+	exit 3
+elif [ ! -s "$LOG" ]; then
+	# Started, said nothing at all.  A third thing again: not a refusal,
+	# because qemu printed no complaint, and not a truncated boot, because
+	# there is nothing to truncate.
+	echo "  FAILED: qemu started and produced no output whatsoever — the"
+	echo "          serial console never carried a byte, so the kernel was"
+	echo "          never reached"
+	echo "  log: $LOG"
+	exit 3
 else
 	echo "  FAILED: the run reached neither setup_main nor an end it announces"
 	echo "          — it was cut short, so the tests after that point did not"
@@ -417,6 +454,15 @@ DONE_RE='boot_probe: the 64-bit boot image is running|No bootstrap code loaded w
 
 SECS=${1:-90}
 [ $# -gt 0 ] && shift
+
+# What the caller actually handed to qemu, kept for the verdict.
+#
+# ⚠️ In a variable and not read as "$*" where it is printed: the verdict runs
+# inside a function, where "$*" is the FUNCTION's arguments and comes out
+# empty.  Which is how the first version of the refusal message named no
+# arguments at all -- in the one line whose whole job is to show the caller
+# what it typed.
+RUN_ARGS="$*"
 
 ninja -C "$BUILD" uros_iso >/dev/null
 
