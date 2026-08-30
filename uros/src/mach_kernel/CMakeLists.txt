@@ -331,6 +331,9 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${UROS_CONFIG_INCLUDE}
     ${X86_64_MIG_DIR}
     ${X86_64_MIG_DIR}/mach
+    # #457: pci_bar.h, beside the decode it declares -- the stubs include it
+    # by quoted name from its own directory.
+    ${CMAKE_SOURCE_DIR}/src/lib/libpci
     )
   # -nostdinc drops the compiler's own freestanding headers too (stdint.h,
   # stddef.h); add just that directory back with -isystem so we get the
@@ -676,6 +679,13 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/device/device_init.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/device_master.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/device_machdep.c
+    # 🔑 #457: the SAME BAR decode hal_server uses, compiled into the
+    # kernel.  It is pure -- six raw slots in, regions out, no RPC and no
+    # allocation -- which is what #427 isolated it for and this is the
+    # first time both sides have it.  A second decoder here would be the
+    # fifth copy of the thing that file exists to have deleted.
+    ${CMAKE_SOURCE_DIR}/src/lib/libpci/pci_bar.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/cpu/pci_msix.c
     ${X86_64_MIG_DIR}/device/device_reply_user.c
     ${X86_64_MIG_DIR}/device/device_server.c
     ${CMAKE_CURRENT_SOURCE_DIR}/device/device_stubs.c

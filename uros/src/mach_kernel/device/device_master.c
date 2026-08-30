@@ -364,7 +364,16 @@ ds_master_device_intr_register(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	if (irq >= IRQ_FORWARD_MAX)
+	/*
+	 * ⚠️ LINES and not MAX.  The table is thirty-two slots as of #457, and
+	 * the upper half is message-signalled interrupts -- which have no line
+	 * number, are never asked for by one, and are allocated by
+	 * ds_master_device_msi_register() rather than named here.  Bounding
+	 * this by the table's size would let a driver claim a slot the kernel
+	 * hands out, and the machine would then refuse it for a different
+	 * reason and with a different code.
+	 */
+	if (irq >= IRQ_FORWARD_LINES)
 		return KERN_INVALID_ARGUMENT;
 
 	if (notify_port == IP_NULL)
@@ -402,6 +411,74 @@ ds_master_device_intr_register(
 
 	splx(s);
 
+	return KERN_SUCCESS;
+}
+
+/*
+ * A device's message-signalled interrupt (#457).
+ *
+ * 🔑 The same table, the same thread, the same notification.  What differs is
+ * only that this side did not choose the slot: the caller has no line number
+ * to give, because there is no line -- so the machine allocates one and hands
+ * it back, and everything after this point treats it as any other slot.
+ *
+ * ⚠️ Which is why the entry is filled in BEFORE the machine is asked.  The
+ * device is armed by device_md_msi_register(), and on a machine with more than
+ * one processor the first interrupt can arrive before that call returns; a top
+ * half that found active == 0 would drop it.  But the slot is not known until
+ * afterwards -- so the entry is written against the slot the machine answers
+ * with, and the window is closed by the forwarding table being checked under
+ * splhigh() rather than by an ordering this file could arrange.
+ */
+kern_return_t
+ds_master_device_msi_register(
+	ipc_port_t		master_port,
+	unsigned int		bus,
+	unsigned int		dev,
+	unsigned int		func,
+	unsigned int		entry,
+	ipc_port_t		notify_port,
+	unsigned int		*slot_out)
+{
+	kern_return_t	kr;
+	spl_t		s;
+	unsigned int	slot = 0;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (notify_port == IP_NULL || slot_out == 0)
+		return KERN_INVALID_ARGUMENT;
+
+	irq_forward_thread_start();
+
+	s = splhigh();
+
+	if (!device_md_msi_register(bus, dev, func, entry,
+				    irq_forward_handler, &slot)) {
+		splx(s);
+		return KERN_FAILURE;
+	}
+
+	/*
+	 * ⚠️ Bounded here as well as in the machine.  The slot is a number this
+	 * file indexes a table with, and "the machine would not answer a bad
+	 * one" is a claim about another file -- which is the arrangement that
+	 * stops holding the day a third machine answers.
+	 */
+	if (slot >= IRQ_FORWARD_MAX) {
+		device_md_msi_unregister(slot);
+		splx(s);
+		return KERN_FAILURE;
+	}
+
+	irq_forward_table[slot].notify_port = notify_port;
+	irq_forward_table[slot].active = 1;
+
+	splx(s);
+
+	*slot_out = slot;
 	return KERN_SUCCESS;
 }
 

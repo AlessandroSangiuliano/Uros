@@ -17,6 +17,7 @@
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <pmap/pmap.h>
 #include <kern/misc_protos.h>
+#include <device/pci.h>	/* the capability list, as the standard fixes it */
 
 /* The port pair.  Two 32-bit registers, and every access takes turns on them. */
 #define PCI_CONFIG_ADDRESS	0x0CF8
@@ -199,4 +200,89 @@ pci_cfg_write(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
 	     | ((uint32_t)func << 8)
 	     | ((uint32_t)reg & 0xFCu));
 	outl(PCI_CONFIG_DATA, value);
+}
+
+/*
+ * ── Reading less than a dword ────────────────────────────────────────
+ *
+ * Both mechanisms address dwords, and the capability list does not: its
+ * offsets are byte-granular, so a capability at 0x52 lives in the dword at
+ * 0x50, sixteen bits up.  Said once here rather than at every reader.
+ *
+ * ⚠️ Little-endian, which is a property of the bus and not only of this
+ * processor: PCI configuration space is defined little-endian, so the byte at
+ * offset n is bits 8n..8n+7 of the dword containing it whatever the CPU is.
+ */
+uint8_t
+pci_cfg_read8(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
+	      uint16_t reg)
+{
+	uint32_t dword = pci_cfg_read(segment, bus, dev, func, reg & ~3u);
+
+	return (uint8_t)(dword >> ((reg & 3u) * 8));
+}
+
+uint16_t
+pci_cfg_read16(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
+	       uint16_t reg)
+{
+	uint32_t dword = pci_cfg_read(segment, bus, dev, func, reg & ~3u);
+
+	return (uint16_t)(dword >> ((reg & 2u) * 8));
+}
+
+/*
+ * ── Walking the capability list ──────────────────────────────────────
+ *
+ * See <cpu/pci_cfg.h> for why this is in the kernel, why the status bit is
+ * consulted before the pointer, and why the walk is bounded.
+ */
+#define	PCI_CAP_MAX_HOPS	48
+
+uint16_t
+pci_cfg_find_cap(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
+		 uint8_t cap_id)
+{
+	uint16_t	status;
+	uint16_t	offset;
+	unsigned	hops;
+
+	status = pci_cfg_read16(segment, bus, dev, func, PCI_STATUS);
+
+	/*
+	 * ⚠️ 0xFFFF is what an absent function answers, and it has the
+	 * capability-list bit set.  Checked before the bit, or every empty
+	 * slot on the bus appears to have a list.
+	 */
+	if (status == 0xFFFFu || !(status & PCI_STATUS_CAP_LIST))
+		return 0;
+
+	offset = pci_cfg_read8(segment, bus, dev, func, PCI_CAP_POINTER);
+
+	for (hops = 0; hops < PCI_CAP_MAX_HOPS; hops++) {
+		uint8_t id;
+
+		/*
+		 * The list lives above the 64-byte standard header and inside
+		 * the 256-byte space, and the entries are dword-aligned.  A
+		 * pointer outside that is not a capability this walk can
+		 * follow -- and following it anyway is how a malformed device
+		 * makes the kernel read its own neighbours.
+		 */
+		offset &= 0xFCu;
+		if (offset < 0x40u)
+			return 0;
+
+		id = pci_cfg_read8(segment, bus, dev, func, offset);
+		if (id == cap_id)
+			return offset;
+
+		offset = pci_cfg_read8(segment, bus, dev, func,
+				       (uint16_t)(offset + 1));
+	}
+
+	printf("pci: %04x:%02x:%02x.%u capability list did not end in %u hops "
+	       "— giving up rather than following it\n",
+	       segment, bus, dev, func, PCI_CAP_MAX_HOPS);
+	return 0;
 }

@@ -80,6 +80,38 @@ routine device_intr_register(
 	);
 
 /*
+ * Ask for a device's message-signalled interrupt (#457).
+ *
+ * 🔴 THE DRIVER NEVER SEES AN ADDRESS, and that is the whole shape of this
+ * call.  An MSI-X table entry holds an address the DEVICE will write to, so a
+ * driver that could fill one in could point the device at page zero, at
+ * another task's pages, or at another processor's local APIC -- and no fault
+ * would be raised, because the write belongs to the device and not to the
+ * driver.  That is #432's hole for DMA and #511's for the master port,
+ * arriving through a third door.
+ *
+ * So the driver says WHICH DEVICE and WHICH ENTRY of that device's table, and
+ * the kernel finds the capability, allocates a vector, decides the address
+ * and the value, and writes them there itself.
+ *
+ * `slot' comes back in the same numbering as an IRQ, and is what
+ * device_intr_enable and device_intr_unregister take afterwards -- a driver
+ * that has one does not need to know which kind it is.
+ *
+ * ⚠️ Fails on a machine that has no MSI at all rather than pretending: i386
+ * reaches every device through a wire.
+ */
+routine device_msi_register(
+		master_port	: mach_port_t;
+	in	bus		: natural_t;
+	in	dev		: natural_t;
+	in	func		: natural_t;
+	in	entry		: natural_t;
+	in	notify_port	: mach_port_send_t;
+	out	slot		: natural_t
+	);
+
+/*
  * Unregister an IRQ notification.
  */
 routine device_intr_unregister(

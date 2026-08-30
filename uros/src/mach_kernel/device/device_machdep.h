@@ -166,4 +166,62 @@ extern void		device_md_irq_unregister(unsigned int irq);
  */
 extern int		device_md_debugger_break(void);
 
+/*
+ * ── An interrupt that is not a wire ──────────────────────────────────
+ *
+ * Claim a message-signalled interrupt: answer the address and the value a
+ * device must be programmed to WRITE in order to raise it, and make
+ * `handler' the thing that runs when it does.
+ *
+ * 🔑 Nothing is routed, because there is nothing to route.  A pin is a
+ * property of the machine's wiring that the firmware describes and the
+ * interrupt controller has to be told about; a message is an ordinary store
+ * to an ordinary address, and what makes it an interrupt is only where that
+ * address points.  Which is why this operation takes no device, no bus and no
+ * line: it hands out an address and a value, and who writes them is the
+ * caller's business.
+ *
+ * ⚠️ AND WHY IT IS THE KERNEL THAT PROGRAMS THE DEVICE.  The address is
+ * ordinary as far as the device is concerned, so a driver that could write
+ * its own MSI-X table could aim the device at any address in the machine --
+ * the same hole #432 and #511 exist to close.  This operation exists so that
+ * the caller above can be the kernel rather than the driver.
+ *
+ * 🔴 AND THE CALLER NEVER SEES THE ADDRESS.  It names a DEVICE and one of
+ * that device's table entries; the machine finds the capability, allocates a
+ * vector, decides the address and the value, and writes them into the
+ * device's table itself.  An interface that answered an address instead would
+ * be an interface whose caller could choose one -- and the caller above this
+ * is an RPC a user-space driver reaches.
+ *
+ * `slot' comes back as an interrupt number in the caller's own numbering,
+ * continuing the lines rather than starting a second space: from the
+ * forwarding table's point of view a notification slot is a notification
+ * slot, and whether it arrives on a pin or in a store is exactly what this
+ * file exists to keep out of that table.  So device_intr_enable() and the
+ * unregister below take it without knowing which kind it is.
+ *
+ * Answers zero if the machine has no message-signalled interrupts, if that
+ * device has none, or if there is no slot left.  ⚠️ i386 answers zero always
+ * and means it: this tree's i386 has no MSI at all, and a machine that cannot
+ * must say so rather than accept a request it will not honour.
+ */
+extern int		device_md_msi_register(unsigned int bus,
+					       unsigned int dev,
+					       unsigned int func,
+					       unsigned int entry,
+					       device_md_intr_t handler,
+					       unsigned int *slot_out);
+
+/*
+ * Give a message-signalled slot back.
+ *
+ * 🔴 Unlike a line, this has to reach the DEVICE.  Masking a pin stops
+ * delivery whatever the device does; here the address and the value are in
+ * the device's own table, so the machine must put the mask back there -- and
+ * it can, because it is the one that wrote them.  A device left armed at a
+ * vector whose handler is gone raises an interrupt nobody claims.
+ */
+extern void		device_md_msi_unregister(unsigned int slot);
+
 #endif	/* _DEVICE_DEVICE_MACHDEP_H_ */

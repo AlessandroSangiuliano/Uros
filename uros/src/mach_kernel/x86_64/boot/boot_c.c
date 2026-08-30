@@ -28,7 +28,10 @@
 #include <boot/multiboot2.h>
 #include <cpu/acpi.h>
 #include <cpu/pci_cfg.h>
-#include <device/device_machdep.h>	/* #457: claim a line as a driver does */
+#include <cpu/pci_msix.h>
+#include "pci_bar.h"		/* #457: the decode, in the kernel too */	/* #457: a device's own MSI-X table */
+#include <device/device_machdep.h>
+#include <device/pci.h>		/* #457: the capability list */	/* #457: claim a line as a driver does */
 #include <cpu/desc.h>
 #include <cpu/ioapic.h>
 #include <ddb/cons.h>
@@ -3356,6 +3359,537 @@ static void pci_cfg_selftest(void)
 	      : " — WRONG, nothing answered where the host bridge has to be\r\n");
 }
 
+/*
+ * The capability list, and what the network card keeps in it (#457).
+ *
+ * 🔑 The two boards must answer DIFFERENTLY, and that is what makes this a
+ * test rather than a print.  QEMU puts a different network card on each:
+ *
+ *   default (i440FX)  8086:100e, an 82540EM — MSI, and no MSI-X
+ *   -machine q35      8086:10d3, an 82574L  — MSI-X, five vectors
+ *
+ * So a walk that always answered "found" and one that always answered
+ * "absent" would each be wrong on exactly one board, and neither could hide.
+ * ⚠️ Both halves of that are checked here for the same reason: a capability
+ * that is genuinely absent has to be reported absent, or the first thing this
+ * is used for is programming a table a device does not have.
+ *
+ * ⚠️ And the host bridge is asked as well, because it has no capability list
+ * at all — PCI_STATUS says so — and a walk that read 0x34 without consulting
+ * the status bit would follow whatever the vendor left there.
+ */
+#define	PCI_CAP_SEEN_MAX	16
+
+static void pci_cap_selftest(void)
+{
+	unsigned	listed = 0;	/* capabilities the devices list  */
+	unsigned	agreed = 0;	/*   ... the walk found, at the
+					 *       offset they were listed at */
+	unsigned	wrongly_found = 0;
+	unsigned	with_a_list = 0;
+	unsigned	msix_devices = 0;
+	unsigned	msix_vectors = 0;
+
+	/*
+	 * ⚠️ THE WHOLE BUS, and not a device chosen in advance.  The first
+	 * version of this asked the network card, because that is the card
+	 * with MSI-X -- and QEMU's 82540EM on the default board turns out to
+	 * expose no capability list at all, so on that board the test had no
+	 * positive control and reported a walk failure for a device that has
+	 * nothing to walk.  Which device carries capabilities is a property of
+	 * the machine; that the walk agrees with whatever does is not.
+	 */
+	for (unsigned dev = 0; dev < 32; dev++) {
+		for (unsigned fn = 0; fn < 8; fn++) {
+			uint8_t		seen_id[PCI_CAP_SEEN_MAX];
+			uint16_t	seen_at[PCI_CAP_SEEN_MAX];
+			unsigned	n_seen = 0;
+			unsigned	absent_id;
+			uint16_t	offset, msix;
+			uint32_t	vendor;
+			uint16_t	status;
+
+			vendor = pci_cfg_read(0, 0, (uint8_t)dev, (uint8_t)fn,
+					      PCI_VENDOR_ID);
+			if (vendor == 0xFFFFFFFFu)
+				continue;
+
+			/*
+			 * ⚠️ The test consults the status bit for the same
+			 * reason the subject does, and separately: without it
+			 * this walk would follow whatever 0x34 holds on a
+			 * device that has no list, and then report the subject
+			 * wrong for correctly finding nothing.
+			 */
+			status = pci_cfg_read16(0, 0, (uint8_t)dev,
+						(uint8_t)fn, PCI_STATUS);
+			if (status == 0xFFFFu || !(status & PCI_STATUS_CAP_LIST))
+				offset = 0;
+			else
+				offset = pci_cfg_read8(0, 0, (uint8_t)dev,
+						       (uint8_t)fn,
+						       PCI_CAP_POINTER) & 0xFCu;
+
+			/*
+			 * ⚠️ The test's OWN walk, deliberately.  Asking
+			 * pci_cfg_find_cap() what a list contains and then
+			 * checking it against itself would pass on any walk
+			 * that is wrong the same way twice.  Here the test
+			 * enumerates and the subject searches -- two shapes
+			 * over the same bytes.
+			 */
+			while (offset >= 0x40u && n_seen < PCI_CAP_SEEN_MAX) {
+				seen_at[n_seen] = offset;
+				seen_id[n_seen] = pci_cfg_read8(0, 0,
+						(uint8_t)dev, (uint8_t)fn,
+						offset);
+				n_seen++;
+				offset = pci_cfg_read8(0, 0, (uint8_t)dev,
+						(uint8_t)fn,
+						(uint16_t)(offset + 1)) & 0xFCu;
+			}
+
+			if (n_seen > 0)
+				with_a_list++;
+			listed += n_seen;
+
+			for (unsigned i = 0; i < n_seen; i++)
+				if (pci_cfg_find_cap(0, 0, (uint8_t)dev,
+						     (uint8_t)fn, seen_id[i])
+				    == seen_at[i])
+					agreed++;
+
+			/*
+			 * And one this device does NOT list must not be found.
+			 * Chosen from what the enumeration saw rather than
+			 * picked in advance: an id the device happens to have
+			 * would make the check pass for the wrong reason.
+			 */
+			for (absent_id = 1; absent_id < 0x40u; absent_id++) {
+				unsigned i;
+
+				for (i = 0; i < n_seen; i++)
+					if (seen_id[i] == absent_id)
+						break;
+				if (i == n_seen)
+					break;
+			}
+			if (pci_cfg_find_cap(0, 0, (uint8_t)dev, (uint8_t)fn,
+					     (uint8_t)absent_id) != 0)
+				wrongly_found++;
+
+			msix = pci_cfg_find_cap(0, 0, (uint8_t)dev, (uint8_t)fn,
+						PCI_CAP_ID_MSIX);
+			if (msix != 0) {
+				msix_devices++;
+				msix_vectors += (pci_cfg_read16(0, 0,
+						(uint8_t)dev, (uint8_t)fn,
+						(uint16_t)(msix + PCI_MSIX_CONTROL))
+						 & PCI_MSIX_CTL_TABLE_SIZE) + 1u;
+			}
+
+			if (fn == 0
+			    && !(pci_cfg_read(0, 0, (uint8_t)dev, 0,
+					      PCI_HEADER_TYPE) & 0x00800000u))
+				break;	/* not multi-function */
+		}
+	}
+
+	kputs("UrMach x86-64: bus 0 lists ");
+	kputdec(listed);
+	kputs(" capabilities across ");
+	kputdec(with_a_list);
+	kputs(" devices; the walk found ");
+	kputdec(agreed);
+	kputs(" at the listed offset and invented ");
+	kputdec(wrongly_found);
+	/*
+	 * ⚠️ The positive control is asked of the board that HAS one.  Not one
+	 * device on QEMU's i440FX exposes a capability list -- measured, not
+	 * assumed -- so demanding `listed > 0' there would report a walk
+	 * failure for a bus with nothing to walk.  Which is the first thing
+	 * this test did.
+	 *
+	 * The agreement itself is required on both, and holds vacuously on the
+	 * board with nothing: saying that out loud is the difference between a
+	 * check that passed and a check that did not run.
+	 */
+	if (agreed != listed || wrongly_found != 0)
+		kputs(" — WRONG, the walk and the devices disagree about the"
+		      " list\r\n");
+	else if (listed > 0)
+		kputs(" — every id a device lists, where it lists it, and"
+		      " nothing else\r\n");
+	else if (pci_cfg_is_ecam())
+		kputs(" — WRONG, a board with ECAM whose devices list"
+		      " nothing\r\n");
+	else
+		kputs(" — nothing on this 1996 chipset lists a capability, so"
+		      " the walk is exercised on q35 and not here\r\n");
+
+	/*
+	 * ── The two boards must answer differently ────────────────────────
+	 *
+	 * 🔑 MSI-X is a 2009 property and the default board models a chipset
+	 * from 1996.  So the same code must find a table on one board and
+	 * none on the other, and a walk that always answered "found" or always
+	 * "absent" would each be right on exactly one of them.
+	 *
+	 * ⚠️ An absent capability reported absent is half the claim and the
+	 * half that is easy to lose: the first thing this gets used for is
+	 * programming a table, and programming one that is not there writes
+	 * into whatever the BAR it names actually points at.
+	 */
+	kputs("UrMach x86-64: ");
+	kputdec(msix_devices);
+	kputs(" device(s) offer MSI-X, ");
+	kputdec(msix_vectors);
+	kputs(" vectors in total");
+	if (pci_cfg_is_ecam())
+		kputs(msix_devices > 0 && msix_vectors >= msix_devices
+		      ? " — a table to program, which this board has and the"
+			" other does not\r\n"
+		      : " — WRONG, no MSI-X on a board whose devices have it\r\n");
+	else
+		kputs(msix_devices == 0
+		      ? " — none, and this board's chipset predates it by"
+			" thirteen years\r\n"
+		      : " — WRONG, MSI-X found on a 1996 chipset\r\n");
+}
+
+/*
+ * An interrupt with no wire behind it (#457).
+ *
+ * 🔑 Delivering an MSI is an ordinary 32-bit store.  Which means this test
+ * needs no device at all: it asks for the address and the value a device
+ * would be programmed to write, and then WRITES THEM ITSELF.  The processor
+ * cannot tell the difference, because there is no difference — the local APIC
+ * answers a physical address, and who put the bytes on the bus is not part of
+ * what it sees.
+ *
+ * ⚠️ Which is also the limit of what this proves, and the limit is the point:
+ * it proves the vector, the encoding and the delivery, and it proves NOTHING
+ * about a device's MSI-X table being programmed correctly.  Those are two
+ * claims and this is the first — the second needs a device to raise one, and
+ * saying so here is what stops the first from being mistaken for both.
+ *
+ * ⚠️ The store is to a mapping made for it rather than to lapic_probe_va().
+ * For APIC id 0 the message address IS the local APIC's own base, so the
+ * existing mapping would work — and would work by a coincidence of that id,
+ * which is exactly the kind of thing that is right until the day a test runs
+ * on the second processor.
+ */
+static volatile uint64_t	msi_hits;
+static volatile int		msi_slot_seen;
+
+static void msi_handler(int slot)
+{
+	msi_hits++;
+	msi_slot_seen = slot;
+}
+
+static void msi_selftest(void)
+{
+	unsigned int		slot = 0, data = 0;
+	unsigned long long	addr = 0;
+	uint64_t		before, deferred_before;
+	volatile uint32_t	*doorbell;
+	int			had_interrupts;
+	spl_t			old;
+
+	if (!msi_claim_vector(msi_handler, &slot, &addr, &data)) {
+		kputs("UrMach x86-64: no message-signalled interrupt to claim"
+		      " — WRONG\r\n");
+		return;
+	}
+
+	doorbell = (volatile uint32_t *)(uintptr_t)
+		   pmap_map_device(addr & ~0xFFFULL, 0x1000);
+	if (doorbell == 0) {
+		kputs("UrMach x86-64: the message address could not be mapped"
+		      " — WRONG\r\n");
+		device_md_msi_unregister(slot);
+		return;
+	}
+	doorbell = (volatile uint32_t *)((uintptr_t)doorbell
+					 + (uintptr_t)(addr & 0xFFFULL));
+
+	msi_hits = 0;
+	msi_slot_seen = -1;
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	/*
+	 * One store, and the interrupt is the store.  ⚠️ The read afterwards
+	 * is not decoration: the write is to device memory and the handler
+	 * runs on an interrupt, so without something that orders them the
+	 * count could be read before the store has left the processor.
+	 */
+	*doorbell = data;
+	(void) *doorbell;
+
+	for (unsigned spin = 0; spin < 1000000u && msi_hits == 0; spin++)
+		cpu_pause();
+
+	before = msi_hits;
+
+	kputs("UrMach x86-64: slot ");
+	kputdec(slot);
+	kputs(" answers address ");
+	kputhex64(addr);
+	kputs(" value ");
+	kputhex64(data);
+	kputs(", and one store to it ran the handler ");
+	kputdec((unsigned)before);
+	kputs(" time");
+	kputs(before == 1 && msi_slot_seen == (int)slot
+	      ? " — an interrupt arrived with nothing wired to anything\r\n"
+	      : " — WRONG, the message did not become an interrupt\r\n");
+
+	/*
+	 * And it obeys the priority level, which on this machine is not a
+	 * separate claim: the vector's class IS its priority, so an MSI at
+	 * class five is held by SPL_DEVICE exactly as a pinned line at class
+	 * four is.  ⚠️ Worth asking rather than deducing, because SPL_DEVICE
+	 * was FOUR until this change and four would have let these through --
+	 * a level named for devices that stopped one kind and not the other.
+	 */
+	deferred_before = spl_deferred_count();
+	old = splx(SPL_DEVICE);
+	*doorbell = data;
+	(void) *doorbell;
+	for (unsigned spin = 0; spin < 1000000u; spin++)
+		cpu_pause();
+	before = msi_hits;
+	splx(old);
+
+	kputs("UrMach x86-64: at the device level it was deferred ");
+	kputdec((unsigned)(spl_deferred_count() - deferred_before));
+	kputs(" time, ran ");
+	kputdec((unsigned)(before - 1));
+	kputs(" while held and ");
+	kputdec((unsigned)(msi_hits - before));
+	kputs(" on lowering");
+	kputs(spl_deferred_count() - deferred_before == 1
+	      && before == 1 && msi_hits - before == 1
+	      ? " — SPL_DEVICE covers the messages too, which is why it is"
+		" five\r\n"
+	      : " — WRONG, the device level does not hold a message\r\n");
+
+	if (!had_interrupts)
+		interrupts_disable();
+	device_md_msi_unregister(slot);
+}
+
+/*
+ * A real device's MSI-X table, programmed from this side (#457).
+ *
+ * The test above proved the vector, the encoding and the delivery, and said
+ * plainly that it proved nothing about a device's table.  This is that second
+ * claim, and it is a different one: finding the table means decoding a base
+ * address register, following a three-bit BAR index and an offset, and
+ * mapping the result — and every one of those can be wrong in a way that
+ * lands the store on real memory and reports success.
+ *
+ * 🔑 So the entry is READ BACK out of the device's own table.  A store that
+ * went somewhere is not a table that was written, and the only thing that can
+ * tell them apart is the device answering with what it was given.
+ *
+ * ⚠️ q35 only, and not as a limitation: the default board is an i440FX and
+ * MSI-X is a 2009 property.  The board that has none must say so rather than
+ * report a test that did not run as one that passed.
+ *
+ * ⚠️ THIS BOOT SPENDS TWO OF SIXTEEN MSI SLOTS, one here and one in the test
+ * above, and never gets them back.  That is not a leak but the rule in
+ * device_md_msi_unregister(): a slot is spent because this side cannot know
+ * whether some device is still programmed to write to it.  Here it CAN know,
+ * because the disarm below is what makes it so -- and the interface has no way
+ * to be told.  Naming the cost rather than absorbing it: the day a machine
+ * wants all sixteen, reclaiming one honestly means the kernel owning the
+ * device's table, which is where #457 is going anyway.
+ */
+static void msix_table_selftest(void)
+{
+	struct pci_msix		m;
+	unsigned int		slot = 0, data = 0;
+	unsigned long long	addr = 0;
+	uint64_t		back_addr = 0;
+	uint32_t		back_data = 0, back_ctl = 0;
+	uint16_t		control;
+	unsigned		found = 0, dev, nic = 0;
+	uint32_t		id_of_msix_device = 0;
+	uint64_t		msix_regs_base = 0;
+
+	/* Whichever device on bus 0 has one; which device it is belongs to
+	 * the machine, and only that some device does belongs to us. */
+	for (dev = 0; dev < 32 && !found; dev++)
+		if (pci_cfg_find_cap(0, 0, (uint8_t)dev, 0, PCI_CAP_ID_MSIX)) {
+			nic = dev;
+			found = 1;
+		}
+
+	if (!found) {
+		kputs("UrMach x86-64: no device on this board offers MSI-X"
+		      " — nothing to program, which is what a 1996 chipset"
+		      " should say\r\n");
+		return;
+	}
+
+	id_of_msix_device = pci_cfg_read(0, 0, (uint8_t)nic, 0, PCI_VENDOR_ID);
+
+	/*
+	 * BAR 0 is where this family keeps its registers.  Read raw and
+	 * decoded, because a base address register is not an address until it
+	 * has been (#427).
+	 */
+	{
+		uint32_t		slots[PCI_NUM_BAR_SLOTS];
+		struct pci_bar_region	r[PCI_NUM_BAR_SLOTS];
+		unsigned int		n, i;
+
+		for (i = 0; i < PCI_NUM_BAR_SLOTS; i++)
+			slots[i] = pci_cfg_read(0, 0, (uint8_t)nic, 0,
+						PCI_BAR(i));
+		n = pci_bars_decode(slots, PCI_NUM_BAR_SLOTS, r,
+				    PCI_NUM_BAR_SLOTS);
+		for (i = 0; i < n; i++)
+			if (r[i].slot == 0 && !(r[i].flags & PCI_REGION_IO))
+				msix_regs_base = r[i].base;
+	}
+
+	if (!pci_msix_probe(0, 0, (uint8_t)nic, 0, &m)) {
+		kputs("UrMach x86-64: the MSI-X table could not be found"
+		      " — WRONG\r\n");
+		return;
+	}
+
+	if (!msi_claim_vector(msi_handler, &slot, &addr, &data)) {
+		kputs("UrMach x86-64: no message-signalled slot left to give"
+		      " the device — WRONG\r\n");
+		return;
+	}
+
+	pci_msix_arm(&m, 0, addr, data);
+	pci_msix_read(&m, 0, &back_addr, &back_data, &back_ctl);
+	pci_msix_enable(&m);
+
+	control = pci_cfg_read16(0, 0, (uint8_t)nic, 0,
+				 (uint16_t)(m.cap + PCI_MSIX_CONTROL));
+
+	kputs("UrMach x86-64: 00:");
+	kputdec(nic);
+	kputs(".0 has a ");
+	kputdec(m.vectors);
+	kputs("-entry table, and entry 0 reads back address ");
+	kputhex64(back_addr);
+	kputs(" value ");
+	kputhex64(back_data);
+	kputs(back_addr == addr && back_data == data
+	      && (back_ctl & PCI_MSIX_ENTRY_MASKED) == 0
+	      ? " — the device holds what the kernel gave it, unmasked\r\n"
+	      : " — WRONG, the write did not reach the table\r\n");
+
+	kputs("UrMach x86-64: its control word is now ");
+	kputhex64(control);
+	kputs((control & PCI_MSIX_CTL_ENABLE)
+	      && !(control & PCI_MSIX_CTL_FUNC_MASK)
+	      ? " — enabled and not function-masked, so the entry is the only"
+		" thing still deciding\r\n"
+	      : " — WRONG, the device will not use the table it was given\r\n");
+
+	/*
+	 * ── And now the device raises it ──────────────────────────────────
+	 *
+	 * 🔑 The third claim, and the one the other two cannot make: that the
+	 * DEVICE writes the address it was given.  Everything so far was this
+	 * side writing — the message test wrote the doorbell itself and the
+	 * table test read back its own store.  Neither shows a device using
+	 * the table.
+	 *
+	 * ⚠️ Register offsets are the 82574L's and this is gated on its vendor
+	 * id, because they are numbers out of one device's datasheet and not a
+	 * standard.  A board that puts a different card here must say it does
+	 * not know how to ring that card's bell rather than write 0x00E4 on
+	 * something else and call the silence a result.
+	 *
+	 *   IVAR  0x00E4  which MSI-X vector each cause uses, with a valid bit
+	 *                 per cause.  All of them to entry 0, because entry 0
+	 *                 is the one that was armed.
+	 *   IMS   0x00D0  the causes allowed to interrupt
+	 *   ICS   0x00C8  raise a cause, which is what makes this a test and
+	 *                 not a wait for a packet nobody is sending
+	 */
+	if (id_of_msix_device == 0x10D38086u) {
+		volatile uint32_t	*regs;
+		uint64_t		before = msi_hits;
+
+		regs = (volatile uint32_t *)(uintptr_t)
+		       pmap_map_device(msix_regs_base, 0x20000);
+		if (regs == 0) {
+			kputs("UrMach x86-64: the card's registers could not be"
+			      " mapped — WRONG\r\n");
+			device_md_msi_unregister(slot);
+			return;
+		}
+
+		regs[0x00E4 / 4] = 0x00080808u;	/* every cause -> entry 0  */
+		regs[0x00D0 / 4] = 0x01000004u;	/* link change, and Other  */
+		(void) regs[0x00C0 / 4];	/* ICR reads clear         */
+
+		regs[0x00C8 / 4] = 0x00000004u;	/* ring it                 */
+
+		for (unsigned spin = 0; spin < 5000000u
+		     && msi_hits == before; spin++)
+			cpu_pause();
+
+		/*
+		 * ⚠️ At least one, not exactly one.  A cause the card raises
+		 * may bring others with it, and how many times a device
+		 * interrupts is the device's business; that it interrupted at
+		 * all, on the slot this kernel gave it, is the claim.
+		 *
+		 * 🔑 And the SLOT is what makes it that claim.  The message
+		 * test above rang slot 16 by writing the doorbell itself; this
+		 * is slot 17, and the only thing on the machine that knows the
+		 * number 17 is the table entry the kernel wrote.
+		 */
+		kputs("UrMach x86-64: the card was asked to raise a link"
+		      " change, and slot ");
+		kputdec((unsigned)msi_slot_seen);
+		kputs(" ran ");
+		kputdec((unsigned)(msi_hits - before));
+		kputs(" times");
+		kputs(msi_hits - before >= 1 && msi_slot_seen == (int)slot
+		      ? " — a DEVICE wrote the address the kernel put in its"
+			" table, and it arrived as an interrupt\r\n"
+		      : " — WRONG, the table is programmed and the device does"
+			" not use it\r\n");
+
+		regs[0x00D8 / 4] = 0xFFFFFFFFu;	/* IMC: and be quiet again */
+	} else {
+		kputs("UrMach x86-64: the MSI-X device here is not an 82574L,"
+		      " so there is no bell this test knows how to ring"
+		      " — the table is programmed and unproven\r\n");
+	}
+
+	/*
+	 * 🔴 DISARM BEFORE RELEASING, and in this order.
+	 *
+	 * device_md_msi_unregister() takes the handler away and can do nothing
+	 * else: it does not know which device was programmed with the address.
+	 * A card left armed at a vector with no handler raises an interrupt
+	 * nobody claims -- and an unclaimed vector falls through
+	 * trap_dispatch() into the fault machinery and halts the machine.
+	 *
+	 * ⚠️ The IMC write above is NOT this.  That masks the causes in the
+	 * card's own registers, which is a bit the next thing to touch that
+	 * card may set again -- and hal_server now scans this bus.  This is a
+	 * bit in the table the kernel owns, and it stops the write at source.
+	 */
+	pci_msix_disarm(&m, 0);
+	device_md_msi_unregister(slot);
+}
+
 static void ioapic_selftest(void)
 {
 	uint32_t gsi = acpi_irq_to_gsi(0);
@@ -4735,6 +5269,9 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	tsc_selftest();
 	timer_selftest();
 	pci_cfg_selftest();
+	pci_cap_selftest();
+	msi_selftest();
+	msix_table_selftest();
 	ioapic_selftest();
 	spl_selftest();
 	device_master_irq_selftest();

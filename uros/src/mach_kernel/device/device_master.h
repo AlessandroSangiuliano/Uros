@@ -40,9 +40,22 @@
 #define IRQ_NOTIFY_MSGH_BASE	3000
 
 /*
- * Maximum IRQ number we support for forwarding.
+ * How many notification slots there are.
+ *
+ * 🔑 SLOTS, and not IRQ numbers, as of #457.  The low sixteen are interrupt
+ * lines and a driver names them; the rest are message-signalled interrupts,
+ * which have no line number to be named by -- the kernel allocates one and
+ * hands it back.  Whether a slot arrives on a pin or in a store by the device
+ * is exactly what <device/device_machdep.h> exists to keep out of this file,
+ * so the table below does not distinguish them and neither does the thread
+ * that drains it.
+ *
+ * ⚠️ The number a driver may PASS is still bounded by what the machine has
+ * lines for, and that bound lives in the machine's own file.  This one bounds
+ * the table.
  */
-#define IRQ_FORWARD_MAX		16
+#define IRQ_FORWARD_LINES	16
+#define IRQ_FORWARD_MAX		32
 
 /*
  * Per-IRQ forwarding state, stored in irq_forward_table[].

@@ -258,3 +258,38 @@ device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
 	case 4:	outl((i386_ioport_t)port, (unsigned long)value); break;
 	}
 }
+
+/*
+ * 🔴 THIS MACHINE HAS NO MESSAGE-SIGNALLED INTERRUPTS, and says so.
+ *
+ * Not "not yet": this tree's i386 reaches interrupts through the 8259 and, on
+ * more than one processor, an I/O APIC programmed from the MP tables.  Neither
+ * is asked here.  What is missing is not code but a decision nobody has had to
+ * make, because every device this target drives is on a wire.
+ *
+ * ⚠️ Answering zero rather than handing back an address.  An address is a
+ * thing a caller programs a DEVICE with, and a plausible-looking one would be
+ * written to by real hardware -- which is a store into whatever happens to be
+ * at that physical address on a machine that never agreed to receive it.  The
+ * one honest answer a machine without the mechanism can give is that it does
+ * not have it.
+ */
+int
+device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
+		       unsigned int entry, device_md_intr_t handler,
+		       unsigned int *slot_out)
+{
+	(void)bus;
+	(void)dev;
+	(void)func;
+	(void)entry;
+	(void)handler;
+	(void)slot_out;
+	return 0;
+}
+
+void
+device_md_msi_unregister(unsigned int slot)
+{
+	(void)slot;
+}

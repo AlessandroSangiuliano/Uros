@@ -56,9 +56,17 @@
  *
  *   0x00..0x1F  the architectural exceptions
  *   0x40..0x4F  the legacy interrupt requests, on their I/O APIC pins
+ *   0x50..0x5F  message-signalled interrupts, which have no pin (#457)
  *   0xE0        one vector kept for exercising this path by hand
  *   0xF0..0xFE  processor-to-processor messages
  *   0xFF        the local APIC's spurious vector
+ *
+ * ⚠️ The message-signalled block is the class ABOVE the pinned one, and
+ * <cpu/spl.h>'s SPL_DEVICE covers both -- a level called "the device level"
+ * that stopped one kind of device interrupt and not the other would be a
+ * level whose name is wrong.  Sixteen of them, which is what one class holds;
+ * a machine that wants more takes another class and SPL_DEVICE follows it,
+ * because on this machine the vector IS the priority.
  *
  * The high end for the messages on purpose: the interrupt controller
  * prioritises by vector number, so a message that another processor is
