@@ -200,6 +200,8 @@ enum iommu_vendor iommu_discover(void)
 
 	if (iommu_vtd_read())
 		iommu_record_vendor(IOMMU_INTEL);
+	else if (iommu_amd_read())
+		iommu_record_vendor(IOMMU_AMD);
 	else
 		iommu_record_vendor(IOMMU_NONE);
 

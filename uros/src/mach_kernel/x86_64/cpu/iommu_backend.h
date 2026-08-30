@@ -27,6 +27,7 @@
  * description mixed with its own.
  */
 int iommu_vtd_read(void);		/* the DMAR  */
+int iommu_amd_read(void);		/* the IVRS  */
 
 /*
  * Start a unit, and get back the index that iommu_record_scope() will attach
@@ -56,11 +57,15 @@ void iommu_record_scope(const struct iommu_scope *scope);
 /*
  * What a reader learned from a unit's own registers.
  *
- * Called with the unit's index rather than "the last one" because a reader may
- * read the registers of every unit after walking the whole table, which is
- * what both of them in fact do -- the table walk and the register read are two
- * different kinds of failure and keeping them apart makes the self-test able
- * to say which one happened.
+ * Called with the unit's index rather than "the last one" because the two
+ * readers do this at different moments: the DMAR's walks the whole table and
+ * then follows each engine's base, while the IVRS's confirms each engine as it
+ * records it -- its own filter for duplicate descriptions of one engine would
+ * otherwise have to be repeated in a second pass, and a rule with two copies
+ * is a rule that gets fixed in one of them.
+ *
+ * Either way the table walk and the register read stay two distinguishable
+ * failures, which is what lets the self-test say which one happened.
  */
 void iommu_record_hardware(unsigned index, uint32_t version,
 			   unsigned address_bits, uint32_t page_levels,

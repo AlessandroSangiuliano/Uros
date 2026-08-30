@@ -3386,6 +3386,7 @@ static void pci_cap_selftest(void)
 	unsigned	listed = 0;	/* capabilities the devices list  */
 	unsigned	agreed = 0;	/*   ... the walk found, at the
 					 *       offset they were listed at */
+	unsigned	repeated = 0;	/* ids a device lists more than once */
 	unsigned	wrongly_found = 0;
 	unsigned	with_a_list = 0;
 	unsigned	msix_devices = 0;
@@ -3454,11 +3455,36 @@ static void pci_cap_selftest(void)
 				with_a_list++;
 			listed += n_seen;
 
-			for (unsigned i = 0; i < n_seen; i++)
+			/*
+			 * 🔴 The FIRST offset each id was listed at, because
+			 * that is what pci_cfg_find_cap() answers and a device
+			 * may list an id more than once -- which PCI permits
+			 * and vendor-specific capabilities do routinely.
+			 *
+			 * ⚠️ This asked about every occurrence until QEMU's
+			 * amd-iommu device turned up listing one twice, and
+			 * then reported the walk wrong for correctly answering
+			 * the first.  The walk was right; the expectation had
+			 * never been written down, on either side.  It is now
+			 * in <cpu/pci_cfg.h>, where the guarantee belongs.
+			 */
+			for (unsigned i = 0; i < n_seen; i++) {
+				unsigned j;
+
+				for (j = 0; j < i; j++)
+					if (seen_id[j] == seen_id[i])
+						break;
+
+				if (j < i) {
+					repeated++;
+					continue;
+				}
+
 				if (pci_cfg_find_cap(0, 0, (uint8_t)dev,
 						     (uint8_t)fn, seen_id[i])
 				    == seen_at[i])
 					agreed++;
+			}
 
 			/*
 			 * And one this device does NOT list must not be found.
@@ -3500,7 +3526,9 @@ static void pci_cap_selftest(void)
 	kputdec(listed);
 	kputs(" capabilities across ");
 	kputdec(with_a_list);
-	kputs(" devices; the walk found ");
+	kputs(" devices (");
+	kputdec(repeated);
+	kputs(" a repeated id); the walk found ");
 	kputdec(agreed);
 	kputs(" at the listed offset and invented ");
 	kputdec(wrongly_found);
@@ -3515,7 +3543,7 @@ static void pci_cap_selftest(void)
 	 * board with nothing: saying that out loud is the difference between a
 	 * check that passed and a check that did not run.
 	 */
-	if (agreed != listed || wrongly_found != 0)
+	if (agreed != listed - repeated || wrongly_found != 0)
 		kputs(" — WRONG, the walk and the devices disagree about the"
 		      " list\r\n");
 	else if (listed > 0)
@@ -3652,10 +3680,23 @@ static void iommu_selftest(void)
 		 * missing and a window twice the size it should be.  One of
 		 * those is invisible without the other, so both are shown.
 		 */
-		kputs(" window ");
-		kputdec(u->register_size);
-		kputs(u->covers_rest ? " bytes, covering everything else, "
-				     : " bytes, covering ");
+		/*
+		 * ⚠️ "not stated" and "zero bytes" are different answers and
+		 * must not print the same.  A DRHD gives a base and an extent;
+		 * an IVHD gives only a base, so a number here on an AMD
+		 * machine would be the reader's guess sitting in a field whose
+		 * other filler puts the firmware's statement.
+		 */
+		if (u->register_size) {
+			kputs(" window ");
+			kputdec(u->register_size);
+			kputs(" bytes, ");
+		} else {
+			kputs(" window size not stated, ");
+		}
+
+		kputs(u->covers_rest ? "covering everything else and "
+				     : "covering ");
 		kputdec(u->scope_count);
 		kputs(" named device(s)\r\n");
 
@@ -3710,6 +3751,26 @@ static void iommu_selftest(void)
 		answered++;
 		if (u->interrupt_remapping)
 			remapping++;
+
+		/*
+		 * 🔴 An engine that confirmed itself but whose features were
+		 * not decoded, which is where AMD stands at stage 1.  Said in
+		 * its own words rather than printed as a row of zeros: "48
+		 * bits" and "0 bits" are both readings, and "nobody looked" is
+		 * not — and the three would be indistinguishable if the third
+		 * were rendered as the second.
+		 */
+		if (u->page_levels == 0) {
+			kputs("UrMach x86-64:     confirmed, but its feature"
+			      " register is recorded raw and NOT decoded"
+			      " — see cpu/iommu_amd.c\r\n");
+			kputs("UrMach x86-64:     caps ");
+			kputhex64(u->vendor_caps[0]);
+			kputs(" ");
+			kputhex64(u->vendor_caps[1]);
+			kputs("\r\n");
+			continue;
+		}
 
 		kputs("UrMach x86-64:     version ");
 		kputdec(u->version >> 4);
@@ -3801,12 +3862,34 @@ static void iommu_selftest(void)
 	 * the exact hole #432 exists to close, reappearing inside the thing
 	 * that closes it.
 	 */
-	kputs("UrMach x86-64:   every engine reaches the platform's ");
-	kputdec(iommu_platform_address_bits());
-	kputs(" bits");
-	kputs(iommu_address_bits_ok(iommu_platform_address_bits())
-	      ? "\r\n"
-	      : " — NO, AN ENGINE IS NARROWER THAN THE MACHINE\r\n");
+	{
+		unsigned widths_read = 0;
+
+		for (unsigned i = 0; i < units; i++)
+			if (iommu_unit(i)->answered
+			    && iommu_unit(i)->address_bits)
+				widths_read++;
+
+		kputs("UrMach x86-64:   every engine reaches the platform's ");
+		kputdec(iommu_platform_address_bits());
+		kputs(" bits");
+
+		/*
+		 * ⚠️ Three outcomes and not two.  An engine whose width was
+		 * never decoded makes iommu_address_bits_ok() answer no --
+		 * correctly, since it refuses to promise what nobody read --
+		 * and printing that as "an engine is narrower" would report a
+		 * hardware finding where there is only an unfinished reader.
+		 */
+		if (widths_read < answered)
+			kputs(" — UNKNOWN, engine widths not decoded on this"
+			      " vendor\r\n");
+		else
+			kputs(iommu_address_bits_ok(iommu_platform_address_bits())
+			      ? "\r\n"
+			      : " — NO, AN ENGINE IS NARROWER THAN THE"
+				" MACHINE\r\n");
+	}
 
 	/*
 	 * And the sentence at the top, now that it can be said with evidence.
