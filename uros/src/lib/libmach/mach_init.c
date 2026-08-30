@@ -144,7 +144,14 @@ static int		mach_init(void)
         *  with the code below.
 	* This hack should disappear when gdb improves.
 	*/
-	if ((int)user_data.user_data == MACH_GDB_RUN_MAGIC_NUMBER) {
+	/*
+	 * ⚠️ uintptr_t and not int.  This compared the LOW HALF of a pointer
+	 * against the magic number on x86-64, so any address whose bottom
+	 * thirty-two bits happened to be 1 would have suspended the task --
+	 * rare, silent, and indistinguishable from a debugger attaching.
+	 * gcc said so; nothing else could have.
+	 */
+	if ((uintptr_t)user_data.user_data == MACH_GDB_RUN_MAGIC_NUMBER) {
 	    kern_return_t ret;
 	    user_data.user_data = 0;
 	    

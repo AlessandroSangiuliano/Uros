@@ -30,18 +30,7 @@ struct acpi_rsdp {
 	uint8_t  reserved[3];
 } __attribute__((packed));
 
-/* Every table starts with this, and every one of them is checksummed. */
-struct acpi_header {
-	char     signature[4];
-	uint32_t length;
-	uint8_t  revision;
-	uint8_t  checksum;
-	char     oem_id[6];
-	char     oem_table_id[8];
-	uint32_t oem_revision;
-	uint32_t creator_id;
-	uint32_t creator_revision;
-} __attribute__((packed));
+/* struct acpi_header is in <cpu/acpi.h>: table readers elsewhere need it. */
 
 /*
  * MCFG — where PCI configuration space is memory-mapped (#457).
@@ -346,6 +335,24 @@ static const struct acpi_header *find_table(uint64_t root_pa,
 	return 0;
 }
 
+/*
+ * The same walk, for a caller that is not in this file (#432).
+ *
+ * ⚠️ Zero here means "this machine has no such table", which for the IOMMU
+ * tables is the ordinary answer on most machines and not a failure.  It also
+ * means "the root was never found", and the two are not distinguished --
+ * because by the time anything asks, acpi_find_cpus() has either run and found
+ * a root or the machine has no ACPI at all, and a machine with no ACPI has no
+ * DMAR either.
+ */
+const struct acpi_header *acpi_find_table(const char *signature)
+{
+	if (root_table_pa == 0)
+		return 0;
+
+	return find_table(root_table_pa, root_entry_bytes, signature);
+}
+
 unsigned acpi_find_cpus(uint32_t mb2_info_pa)
 {
 	const struct mb2_tag *tag;
@@ -492,11 +499,7 @@ uint64_t acpi_ecam_base(uint16_t segment, uint8_t bus)
 	const struct acpi_mcfg *mcfg;
 	unsigned count;
 
-	if (root_table_pa == 0)
-		return 0;
-
-	mcfg = (const struct acpi_mcfg *)
-		find_table(root_table_pa, root_entry_bytes, "MCFG");
+	mcfg = (const struct acpi_mcfg *)acpi_find_table("MCFG");
 	if (mcfg == 0)
 		return 0;
 

@@ -293,6 +293,24 @@ typedef integer_t mach_msg_id_t;
 
 typedef unsigned int mach_msg_type_name_t;
 
+/*
+ * What a generated static template puts in a POLYMORPHIC descriptor's
+ * disposition, where the caller's own value is written over it before the
+ * message is ever sent (#514).
+ *
+ * 🔴 NOT MACH_MSG_TYPE_POLYMORPHIC, which is ~0 and does not fit: the
+ * descriptor keeps its disposition in an eight-bit field, on both targets, so
+ * every generated stub in the tree carried an initialiser that truncated --
+ * 38 of them in one i386 build, and gcc said so every time.  Harmless at
+ * runtime and therefore worse than a defect: a warning that is right and
+ * permanent is how a build log stops being read.
+ *
+ * 255 is what that truncation produced anyway, and it is not a valid
+ * disposition at any width, so it still says "nobody set this" -- which is the
+ * whole job of the sentinel -- without saying it out of range.
+ */
+#define MACH_MSG_TYPE_TEMPLATE_UNSET	((mach_msg_type_name_t) 0xFF)
+
 #define MACH_MSG_TYPE_MOVE_RECEIVE	16	/* Must hold receive rights */
 #define MACH_MSG_TYPE_MOVE_SEND		17	/* Must hold send rights */
 #define MACH_MSG_TYPE_MOVE_SEND_ONCE	18	/* Must hold sendonce rights */

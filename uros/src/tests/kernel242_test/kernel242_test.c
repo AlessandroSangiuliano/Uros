@@ -776,9 +776,14 @@ test_device_read(void)
 /* =========================================================================
  * i386/fpu.c  thread_set_state(i386_FLOAT_STATE)  -> alloc retry loop
  * ========================================================================= */
+/*
+ * ⚠️ `const', because the stub only reads it (#432).  A second copy of a
+ * signature by hand, which is why a corrected prototype arrives here as a
+ * compile error rather than as agreement.
+ */
 extern kern_return_t thread_set_state(mach_port_t target_act,
                                       int flavor,
-                                      thread_state_t new_state,
+                                      const natural_t *new_state,
                                       mach_msg_type_number_t new_state_count);
 extern kern_return_t thread_get_state(mach_port_t target_act,
                                       int flavor,

@@ -206,9 +206,22 @@ cap_use_local(const struct uros_cap *token,
     return urmach_cap_use(token, op, resource_id);
 }
 
+/*
+ * ⚠️ Hand-written, and it shadows the generated one rather than agreeing with
+ * it -- so it went stale the moment the stub's signature moved.  #432 made an
+ * in-line argument sent IN a `const' pointer, because that is what the stub
+ * does with it, and this declaration said `char *' and turned a corrected
+ * prototype into a link-time contradiction the compiler caught.
+ *
+ * 🔑 Kept and corrected rather than replaced with the generated header,
+ * because including it here would pull cap_server's whole interface into a
+ * library that wants one routine out of it.  The cost of that choice is
+ * exactly this: a second copy of a signature, which is a thing that has to be
+ * corrected in two places forever.
+ */
 extern kern_return_t mig_cap_provision_task(mach_port_t cap_server,
                                             mach_port_t task_port,
-                                            char *manifest,
+                                            const char *manifest,
                                             mach_msg_type_number_t manifestCnt,
                                             mach_port_t *task_cap_port);
 

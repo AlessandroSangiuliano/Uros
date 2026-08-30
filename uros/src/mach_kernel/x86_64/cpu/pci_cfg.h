@@ -92,6 +92,19 @@ extern int pci_cfg_is_ecam(void);
  * kernel context.  Configuration space is 256 bytes and a capability is at
  * least two, so 48 hops is more than any conforming device can need and no
  * loop can survive it.
+ *
+ * 🔴 THE FIRST OCCURRENCE, and a device may list an id MORE THAN ONCE.  PCI
+ * does not require ids to be unique in a chain and real devices are not --
+ * vendor-specific capabilities in particular come in twos and threes.  So this
+ * answers a place, not the only place, and a caller that needs every one of
+ * them has to walk the chain itself.
+ *
+ * ⚠️ Said here because it was not, and something was already relying on it:
+ * boot_c.c's capability check compared this against the offset each id was
+ * listed at, which is only the same question when no id repeats.  QEMU's
+ * amd-iommu device is the first thing on any board we run that lists one
+ * twice, and it turned that check red (#432) -- a walk that was right, against
+ * an expectation that was never stated.
  */
 extern uint16_t pci_cfg_find_cap(uint16_t segment, uint8_t bus, uint8_t dev,
 				 uint8_t func, uint8_t cap_id);

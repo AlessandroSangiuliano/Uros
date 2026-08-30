@@ -33,6 +33,7 @@
 #include <device/device_machdep.h>
 #include <device/pci.h>		/* #457: the capability list */	/* #457: claim a line as a driver does */
 #include <cpu/desc.h>
+#include <cpu/iommu.h>		/* #432: what polices DMA, if anything */
 #include <cpu/ioapic.h>
 #include <ddb/cons.h>
 #include <ddb/ddb.h>
@@ -3385,6 +3386,7 @@ static void pci_cap_selftest(void)
 	unsigned	listed = 0;	/* capabilities the devices list  */
 	unsigned	agreed = 0;	/*   ... the walk found, at the
 					 *       offset they were listed at */
+	unsigned	repeated = 0;	/* ids a device lists more than once */
 	unsigned	wrongly_found = 0;
 	unsigned	with_a_list = 0;
 	unsigned	msix_devices = 0;
@@ -3453,11 +3455,36 @@ static void pci_cap_selftest(void)
 				with_a_list++;
 			listed += n_seen;
 
-			for (unsigned i = 0; i < n_seen; i++)
+			/*
+			 * 🔴 The FIRST offset each id was listed at, because
+			 * that is what pci_cfg_find_cap() answers and a device
+			 * may list an id more than once -- which PCI permits
+			 * and vendor-specific capabilities do routinely.
+			 *
+			 * ⚠️ This asked about every occurrence until QEMU's
+			 * amd-iommu device turned up listing one twice, and
+			 * then reported the walk wrong for correctly answering
+			 * the first.  The walk was right; the expectation had
+			 * never been written down, on either side.  It is now
+			 * in <cpu/pci_cfg.h>, where the guarantee belongs.
+			 */
+			for (unsigned i = 0; i < n_seen; i++) {
+				unsigned j;
+
+				for (j = 0; j < i; j++)
+					if (seen_id[j] == seen_id[i])
+						break;
+
+				if (j < i) {
+					repeated++;
+					continue;
+				}
+
 				if (pci_cfg_find_cap(0, 0, (uint8_t)dev,
 						     (uint8_t)fn, seen_id[i])
 				    == seen_at[i])
 					agreed++;
+			}
 
 			/*
 			 * And one this device does NOT list must not be found.
@@ -3499,7 +3526,9 @@ static void pci_cap_selftest(void)
 	kputdec(listed);
 	kputs(" capabilities across ");
 	kputdec(with_a_list);
-	kputs(" devices; the walk found ");
+	kputs(" devices (");
+	kputdec(repeated);
+	kputs(" a repeated id); the walk found ");
 	kputdec(agreed);
 	kputs(" at the listed offset and invented ");
 	kputdec(wrongly_found);
@@ -3514,7 +3543,7 @@ static void pci_cap_selftest(void)
 	 * board with nothing: saying that out loud is the difference between a
 	 * check that passed and a check that did not run.
 	 */
-	if (agreed != listed || wrongly_found != 0)
+	if (agreed != listed - repeated || wrongly_found != 0)
 		kputs(" — WRONG, the walk and the devices disagree about the"
 		      " list\r\n");
 	else if (listed > 0)
@@ -3558,26 +3587,363 @@ static void pci_cap_selftest(void)
 }
 
 /*
- * An interrupt with no wire behind it (#457).
+ * What this machine has to police DMA with (#432, stage 1).
  *
- * 🔑 Delivering an MSI is an ordinary 32-bit store.  Which means this test
- * needs no device at all: it asks for the address and the value a device
- * would be programmed to write, and then WRITES THEM ITSELF.  The processor
- * cannot tell the difference, because there is no difference — the local APIC
- * answers a physical address, and who put the bytes on the bus is not part of
- * what it sees.
+ * 🔴 THE ONE SENTENCE THIS EXISTS TO MAKE SAYABLE: a userspace driver on a
+ * machine with no remapping hardware can reach all of physical memory, because
+ * it is handed the physical address of its buffer and the device writes
+ * wherever it is told.  Until this ran, the kernel could not tell you which
+ * kind of machine it was on — so every isolation property claimed for the
+ * driver model was enforced by the driver being well behaved, and nothing
+ * anywhere could say so out loud.
  *
- * ⚠️ Which is also the limit of what this proves, and the limit is the point:
- * it proves the vector, the encoding and the delivery, and it proves NOTHING
- * about a device's MSI-X table being programmed correctly.  Those are two
- * claims and this is the first — the second needs a device to raise one, and
- * saying so here is what stops the first from being mistaken for both.
+ * ⚠️ Nothing here changes how any device reaches memory.  It reads two kinds
+ * of thing that are easy to confuse and are kept apart on purpose:
  *
- * ⚠️ The store is to a mapping made for it rather than to lapic_probe_va().
- * For APIC id 0 the message address IS the local APIC's own base, so the
- * existing mapping would work — and would work by a coincidence of that id,
- * which is exactly the kind of thing that is right until the day a test runs
- * on the second processor.
+ *	the TABLE     — what the firmware says the machine has
+ *	the REGISTERS — what each engine says about itself
+ *
+ * A misparsed table produces plausible numbers by construction: they are real
+ * bytes from a real table, read one field over.  Reading the engine's own
+ * version register is the cheapest thing that cannot be fooled that way, and
+ * it is why the register base is followed rather than merely printed.
+ *
+ * ⚠️ Absence is a real answer here, and on both boards it is the one we get:
+ * QEMU builds a DMAR only when asked for `-device intel-iommu'.  Which means
+ * this check does NOT discriminate on an ordinary run — it is confirmed by the
+ * run that has one, and the line it prints says which kind of run this was so
+ * that a green board is never mistaken for a walk that worked.
+ *
+ * ── Which of these lines discriminate, measured rather than assumed ──────
+ *
+ * Moving one engine's register base a megabyte off, with everything else left
+ * alone, changed FOUR of them: the registers stopped answering, the two
+ * cross-checks below both fired, and the verdict went to "only in part".
+ *
+ * 🔑 And one line did NOT move: "the walk consumed the table exactly" stayed
+ * true with a base address that named nothing.  That is the limit of that
+ * check and it is worth knowing rather than discovering — it compares where
+ * the structures END, so it catches a misread LENGTH and cannot catch a
+ * misread FIELD.  The register read is what catches the second, which is why
+ * both are here and neither is enough.
+ */
+static void iommu_selftest(void)
+{
+	unsigned		units;
+	unsigned		answered = 0;
+	unsigned		remapping = 0;
+
+	/*
+	 * ⚠️ Asked twice on purpose.  iommu_discover() answers what it found,
+	 * and iommu_vendor() answers what it RECORDED, and everything after
+	 * this stage will only ever see the second -- so the reading below is
+	 * taken through the accessor a later caller would use rather than
+	 * through the return value only this one can see.
+	 */
+	iommu_discover();
+	units = iommu_unit_count();
+
+	if (iommu_vendor() == IOMMU_NONE) {
+		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
+		      " driver here can reach ALL of physical memory (#432)\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: dma remapping by ");
+	kputs(iommu_vendor() == IOMMU_INTEL ? "vt-d" : "amd-vi");
+	kputs(", ");
+	kputdec(units);
+	kputs(" engine(s), platform address width ");
+	kputdec(iommu_platform_address_bits());
+	kputs(" bits");
+	if (iommu_x2apic_discouraged())
+		kputs(", firmware asks for no x2apic");
+	kputs("\r\n");
+
+	for (unsigned i = 0; i < units; i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+
+		kputs("UrMach x86-64:   engine ");
+		kputdec(i);
+		kputs(" segment ");
+		kputdec(u->segment);
+		kputs(" at ");
+		kputhex64(u->register_base);
+		/*
+		 * ⚠️ The window SIZE is printed, and it is not decoration.
+		 *
+		 * In a DRHD the flags byte and the size byte are adjacent, and
+		 * reading them the wrong way round produces a result that
+		 * looks entirely reasonable from every other line here: the
+		 * base address is still right, so the registers still answer,
+		 * and the only two symptoms are a `covers everything' that is
+		 * missing and a window twice the size it should be.  One of
+		 * those is invisible without the other, so both are shown.
+		 */
+		/*
+		 * ⚠️ "not stated" and "zero bytes" are different answers and
+		 * must not print the same.  A DRHD gives a base and an extent;
+		 * an IVHD gives only a base, so a number here on an AMD
+		 * machine would be the reader's guess sitting in a field whose
+		 * other filler puts the firmware's statement.
+		 */
+		if (u->register_size) {
+			kputs(" window ");
+			kputdec(u->register_size);
+			kputs(" bytes, ");
+		} else {
+			kputs(" window size not stated, ");
+		}
+
+		kputs(u->covers_rest ? "covering everything else and "
+				     : "covering ");
+		kputdec(u->scope_count);
+		kputs(" named device(s)\r\n");
+
+		/*
+		 * And which ones.  Named rather than counted because stage 3
+		 * has to put each of them in a domain, and a device that was
+		 * counted and not named is a device nobody puts anywhere.
+		 */
+		if (u->scope_count) {
+			kputs("UrMach x86-64:    ");
+			for (unsigned s = 0; s < u->scope_count; s++) {
+				const struct iommu_scope *sc
+					= iommu_scope(u->scope_first + s);
+
+				kputs(" ");
+				kputdec(sc->bus);
+				kputs(":");
+				kputdec(sc->dev);
+				kputs(".");
+				kputdec(sc->func);
+				if (sc->kind == IOMMU_SCOPE_IOAPIC)
+					kputs("(ioapic)");
+				else if (sc->kind == IOMMU_SCOPE_HPET)
+					kputs("(hpet)");
+				else if (sc->kind == IOMMU_SCOPE_BRIDGE)
+					kputs("(bridge)");
+				/*
+				 * A path longer than one hop means the bus
+				 * above is where the ROUTE starts, not where
+				 * the device is.  Said here rather than
+				 * silently, because the two look identical.
+				 */
+				if (sc->depth > 1)
+					kputs("(behind bridges)");
+			}
+			kputs("\r\n");
+		}
+
+		if (!u->answered) {
+			/*
+			 * The table gave an address and nothing was there.
+			 * This is the failure the register read exists to
+			 * catch, so it is named rather than folded into a
+			 * count — a wrong base address and a missing engine
+			 * look identical from the table's side.
+			 */
+			kputs("UrMach x86-64:     ITS REGISTERS DID NOT ANSWER"
+			      " — the table's address names nothing\r\n");
+			continue;
+		}
+
+		answered++;
+		if (u->interrupt_remapping)
+			remapping++;
+
+		/*
+		 * 🔴 An engine that confirmed itself but whose features were
+		 * not decoded, which is where AMD stands at stage 1.  Said in
+		 * its own words rather than printed as a row of zeros: "48
+		 * bits" and "0 bits" are both readings, and "nobody looked" is
+		 * not — and the three would be indistinguishable if the third
+		 * were rendered as the second.
+		 */
+		if (u->page_levels == 0) {
+			kputs("UrMach x86-64:     confirmed, but its feature"
+			      " register is recorded raw and NOT decoded"
+			      " — see cpu/iommu_amd.c\r\n");
+			kputs("UrMach x86-64:     caps ");
+			kputhex64(u->vendor_caps[0]);
+			kputs(" ");
+			kputhex64(u->vendor_caps[1]);
+			kputs("\r\n");
+			continue;
+		}
+
+		kputs("UrMach x86-64:     version ");
+		kputdec(u->version >> 4);
+		kputs(".");
+		kputdec(u->version & 0xF);
+		kputs(", translates ");
+		kputdec(u->address_bits);
+		kputs(" bits, page tables");
+		for (unsigned l = 0; l < 8; l++)
+			if (u->page_levels & (1u << l)) {
+				kputs(" ");
+				kputdec(l);
+				kputs("-level");
+			}
+		kputs(u->coherent_walk ? ", coherent walks" : ", NON-coherent walks");
+		kputs(u->interrupt_remapping ? ", remaps interrupts\r\n"
+					     : ", no interrupt remapping\r\n");
+
+		kputs("UrMach x86-64:     caps ");
+		kputhex64(u->vendor_caps[0]);
+		kputs(" ");
+		kputhex64(u->vendor_caps[1]);
+		kputs("\r\n");
+	}
+
+	for (unsigned i = 0; i < iommu_reserved_count(); i++) {
+		const struct iommu_reserved *r = iommu_reserved(i);
+
+		/*
+		 * The regions firmware left devices running in.  Reported one
+		 * by one rather than counted, because stage 2 has to map every
+		 * one of them and a region that was counted and not named is a
+		 * region nobody maps.
+		 */
+		kputs("UrMach x86-64:   reserved ");
+		kputhex64(r->base);
+		kputs("..");
+		kputhex64(r->limit);
+		kputs(" for ");
+		kputdec(r->scope_count);
+		kputs(" device(s), which must keep reaching it\r\n");
+	}
+
+	/*
+	 * ⚠️ The two independent statements about where the structures end.
+	 * See iommu_walk_exact(): this is the only check here that a
+	 * misparsed table cannot pass by accident, because it compares this
+	 * reader's arithmetic against a number the firmware wrote.
+	 */
+	kputs("UrMach x86-64:   the walk ");
+	kputs(iommu_walk_exact()
+	      ? "consumed the table exactly"
+	      : "DID NOT ADD UP — structures were misread");
+	kputs(iommu_truncated() ? ", and there was more than fits\r\n"
+				: "\r\n");
+
+	/*
+	 * The table's claim against the silicon's.  A disagreement is a
+	 * finding and not a formality: #457 programs MSI-X tables from the
+	 * kernel precisely because nothing polices what a device writes to
+	 * 0xFEE00000, and whether that can ever become enforced rather than
+	 * conventional is exactly this bit.
+	 *
+	 * ⚠️ EVERY answered engine, not one of them.  The first version asked
+	 * whether any engine agreed, which on a machine with four engines and
+	 * one that remaps would have read as agreement -- and the devices
+	 * behind the other three would have had their interrupts unpoliced
+	 * with nothing said.  A machine that claims nothing has to have no
+	 * engine that does; a machine that claims it has to have them all.
+	 */
+	kputs("UrMach x86-64:   interrupt remapping: firmware says ");
+	kputs(iommu_platform_interrupt_remapping() ? "yes" : "no");
+	kputs(", ");
+	kputdec(remapping);
+	kputs(" of ");
+	kputdec(answered);
+	kputs(" engine(s) agree");
+	kputs((iommu_platform_interrupt_remapping()
+	       ? (answered > 0 && remapping == answered)
+	       : (remapping == 0))
+	      ? "\r\n" : " — THEY DISAGREE\r\n");
+
+	/*
+	 * The other place the table and the silicon can disagree, and the one
+	 * that costs a driver rather than an interrupt: how far an address may
+	 * travel on this machine against how far an engine can translate.  An
+	 * engine narrower than its platform is a device that can be handed an
+	 * address it will happily reach and no engine can police -- which is
+	 * the exact hole #432 exists to close, reappearing inside the thing
+	 * that closes it.
+	 */
+	{
+		unsigned widths_read = 0;
+
+		for (unsigned i = 0; i < units; i++)
+			if (iommu_unit(i)->answered
+			    && iommu_unit(i)->address_bits)
+				widths_read++;
+
+		kputs("UrMach x86-64:   every engine reaches the platform's ");
+		kputdec(iommu_platform_address_bits());
+		kputs(" bits");
+
+		/*
+		 * ⚠️ Three outcomes and not two.  An engine whose width was
+		 * never decoded makes iommu_address_bits_ok() answer no --
+		 * correctly, since it refuses to promise what nobody read --
+		 * and printing that as "an engine is narrower" would report a
+		 * hardware finding where there is only an unfinished reader.
+		 */
+		if (widths_read < answered)
+			kputs(" — UNKNOWN, engine widths not decoded on this"
+			      " vendor\r\n");
+		else
+			kputs(iommu_address_bits_ok(iommu_platform_address_bits())
+			      ? "\r\n"
+			      : " — NO, AN ENGINE IS NARROWER THAN THE"
+				" MACHINE\r\n");
+	}
+
+	/*
+	 * And the sentence at the top, now that it can be said with evidence.
+	 */
+	kputs("UrMach x86-64:   this machine could enforce driver isolation");
+	kputs(answered == units && units > 0 && iommu_walk_exact()
+	      ? " — #432 stages 2 and 3 have hardware to use\r\n"
+	      : " ONLY IN PART — see the lines above\r\n");
+}
+
+/*
+ * A claimed message-signalled vector, and what a processor can prove about one
+ * without a device (#457, corrected under KVM by #432).
+ *
+ * 🔴 A PROCESSOR CANNOT RING ITS OWN DOORBELL, AND THIS TEST USED TO.
+ *
+ * It asked msi_claim_vector() for the address and the value a device would be
+ * programmed to write, and then wrote them itself — on the argument that the
+ * local APIC answers a physical address and does not care who put the bytes on
+ * the bus.  That argument is wrong, and the reason is worth more than the test
+ * was: 0xFEE00000 is BOTH the region the interrupt fabric decodes as messages
+ * AND the page the local APIC keeps its own registers in.  Which one a write
+ * lands on depends on where it came from.  A device's transaction arrives from
+ * the bus and is a message; a processor's store to its own APIC page is a
+ * register access, and the register at offset zero is the read-only APIC id.
+ *
+ * So the store was dropped, and this reported an interrupt anyway — because
+ * QEMU under TCG accepts it as a message.  Under KVM, whose local APIC is the
+ * host kernel's, it does not, and the same boot showed both halves in three
+ * lines: the processor's store ran the handler 0 times, and the 82574L's own
+ * write to the address this kernel put in its table ran it twice.
+ *
+ * ⚠️ THAT IS THE FINDING, AND IT OUTLIVES THE FIX.  Every MSI result this port
+ * has recorded before now was TCG, and one of them was measuring the emulator.
+ * 🔑 A device raising an interrupt and a processor pretending to be one are not
+ * the same experiment, and only one of them was ever a claim about hardware.
+ *
+ * What is left here is what a processor genuinely can establish about a
+ * claimed slot, and it is in two parts that are kept apart:
+ *
+ *	the ENCODING — that the address and value handed out are the ones a
+ *	device must be given, checked against the APIC base ACPI reported and
+ *	the id the APIC reports for itself.  Two sources, neither of them the
+ *	arithmetic being checked.
+ *
+ *	the VECTOR — that it is installed, reaches the handler with its slot
+ *	number, and is held by SPL_DEVICE.  Raised with a self-IPI, which is
+ *	how a processor raises a vector on real hardware and works on one
+ *	processor.
+ *
+ * ⚠️ And the third part is NOT here and cannot be: that a write to that address
+ * becomes an interrupt is a claim only a device can make, and msix_table_selftest()
+ * below is where it is made.  On a board with no MSI-X device it goes unmade,
+ * which that test says out loud rather than passing quietly.
  */
 static volatile uint64_t	msi_hits;
 static volatile int		msi_slot_seen;
@@ -3591,9 +3957,8 @@ static void msi_handler(int slot)
 static void msi_selftest(void)
 {
 	unsigned int		slot = 0, data = 0;
-	unsigned long long	addr = 0;
-	uint64_t		before, deferred_before;
-	volatile uint32_t	*doorbell;
+	unsigned long long	addr = 0, expect;
+	uint64_t		held, deferred_before;
 	int			had_interrupts;
 	spl_t			old;
 
@@ -3603,35 +3968,15 @@ static void msi_selftest(void)
 		return;
 	}
 
-	doorbell = (volatile uint32_t *)(uintptr_t)
-		   pmap_map_device(addr & ~0xFFFULL, 0x1000);
-	if (doorbell == 0) {
-		kputs("UrMach x86-64: the message address could not be mapped"
-		      " — WRONG\r\n");
-		device_md_msi_unregister(slot);
-		return;
-	}
-	doorbell = (volatile uint32_t *)((uintptr_t)doorbell
-					 + (uintptr_t)(addr & 0xFFFULL));
-
-	msi_hits = 0;
-	msi_slot_seen = -1;
-	had_interrupts = interrupts_enabled();
-	interrupts_enable();
-
 	/*
-	 * One store, and the interrupt is the store.  ⚠️ The read afterwards
-	 * is not decoration: the write is to device memory and the handler
-	 * runs on an interrupt, so without something that orders them the
-	 * count could be read before the store has left the processor.
+	 * The encoding, against two things that are not this arithmetic: the
+	 * APIC base the firmware reported through ACPI, and the id the local
+	 * APIC gives for itself.  A message reaches a processor by naming it in
+	 * bits 19:12 of the address, so an encoder that got the base right and
+	 * the id wrong would aim every device at processor zero -- which on a
+	 * uniprocessor is indistinguishable from working.
 	 */
-	*doorbell = data;
-	(void) *doorbell;
-
-	for (unsigned spin = 0; spin < 1000000u && msi_hits == 0; spin++)
-		cpu_pause();
-
-	before = msi_hits;
+	expect = acpi_lapic_base() | ((unsigned long long)lapic_id() << 12);
 
 	kputs("UrMach x86-64: slot ");
 	kputdec(slot);
@@ -3639,39 +3984,67 @@ static void msi_selftest(void)
 	kputhex64(addr);
 	kputs(" value ");
 	kputhex64(data);
-	kputs(", and one store to it ran the handler ");
-	kputdec((unsigned)before);
-	kputs(" time");
-	kputs(before == 1 && msi_slot_seen == (int)slot
-	      ? " — an interrupt arrived with nothing wired to anything\r\n"
-	      : " — WRONG, the message did not become an interrupt\r\n");
+	kputs(addr == expect && data >= 0x50u && data <= 0x5Fu
+	      ? " — this apic's own address, and a vector in the message"
+		" class\r\n"
+	      : " — WRONG, not the address a device must be given\r\n");
+
+	msi_hits = 0;
+	msi_slot_seen = -1;
+	had_interrupts = interrupts_enabled();
+	interrupts_enable();
+
+	/*
+	 * The vector, raised the way a processor raises one.  ⚠️ NOT by storing
+	 * to the message address: see the note above -- that store lands on
+	 * this processor's own APIC registers, and the only reason it ever
+	 * looked like an interrupt is that TCG let it.
+	 */
+	lapic_send_self((uint8_t)data);
+
+	for (unsigned spin = 0; spin < 1000000u && msi_hits == 0; spin++)
+		cpu_pause();
+
+	kputs("UrMach x86-64: raising it ran the handler ");
+	kputdec((unsigned)msi_hits);
+	kputs(" time, which saw slot ");
+	kputdec((unsigned)msi_slot_seen);
+	kputs(msi_hits == 1 && msi_slot_seen == (int)slot
+	      ? " — the claimed vector reaches the claimed slot\r\n"
+	      : " — WRONG, the vector and the slot do not match\r\n");
 
 	/*
 	 * And it obeys the priority level, which on this machine is not a
 	 * separate claim: the vector's class IS its priority, so an MSI at
 	 * class five is held by SPL_DEVICE exactly as a pinned line at class
 	 * four is.  ⚠️ Worth asking rather than deducing, because SPL_DEVICE
-	 * was FOUR until this change and four would have let these through --
-	 * a level named for devices that stopped one kind and not the other.
+	 * was FOUR until #457 and four would have let these through -- a level
+	 * named for devices that stopped one kind and not the other.
+	 *
+	 * ⚠️ The count is reset first so that "ran while held" is a count and
+	 * not a difference.  It used to be `before - 1', which on the boot
+	 * where the first delivery failed printed 4294967295 -- an unsigned
+	 * subtraction going the wrong way, in the line whose job was to report
+	 * the failure.
 	 */
+	msi_hits = 0;
 	deferred_before = spl_deferred_count();
 	old = splx(SPL_DEVICE);
-	*doorbell = data;
-	(void) *doorbell;
+	lapic_send_self((uint8_t)data);
 	for (unsigned spin = 0; spin < 1000000u; spin++)
 		cpu_pause();
-	before = msi_hits;
+	held = msi_hits;
 	splx(old);
 
 	kputs("UrMach x86-64: at the device level it was deferred ");
 	kputdec((unsigned)(spl_deferred_count() - deferred_before));
 	kputs(" time, ran ");
-	kputdec((unsigned)(before - 1));
+	kputdec((unsigned)held);
 	kputs(" while held and ");
-	kputdec((unsigned)(msi_hits - before));
+	kputdec((unsigned)(msi_hits - held));
 	kputs(" on lowering");
 	kputs(spl_deferred_count() - deferred_before == 1
-	      && before == 1 && msi_hits - before == 1
+	      && held == 0 && msi_hits == 1
 	      ? " — SPL_DEVICE covers the messages too, which is why it is"
 		" five\r\n"
 	      : " — WRONG, the device level does not hold a message\r\n");
@@ -5270,6 +5643,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	timer_selftest();
 	pci_cfg_selftest();
 	pci_cap_selftest();
+	iommu_selftest();
 	msi_selftest();
 	msix_table_selftest();
 	ioapic_selftest();
