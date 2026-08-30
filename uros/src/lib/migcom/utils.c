@@ -260,12 +260,78 @@ WriteNameDecl(FILE *file, argument_t *arg)
     SafeString(file, arg->argVarName);
 }
 
+/*
+ * How a user-side parameter is spelled (#432).
+ *
+ * 🔴 A VARIABLE-LENGTH ARRAY SENT IN IS A POINTER, NOT AN ARRAY OF THE MAXIMUM.
+ *
+ * `type t = c_string[*:128]' has the ctype `char[128]', and every generated
+ * prototype used to declare the parameter that way.  It is the same type in C
+ * -- a parameter of array type is a pointer -- but the BOUND is a promise, and
+ * gcc reads it as one: passing "sig_test" to such a routine is nine bytes
+ * where the declaration says a hundred and twenty-eight are required.
+ *
+ *	warning: 'proc_register' accessing 128 bytes in a region of size 9
+ *
+ * Forty of those in one i386 build, and every one of them WRONG about the
+ * danger while being right about the declaration: the stub copies with
+ * mig_strncpy(), which stops at the terminator, and a variable array carries
+ * its own count.  Nothing reads past the caller's object.
+ *
+ * 🔑 So the fix is to stop the prototype claiming a size nobody needs, not to
+ * make forty callers hand over buffers nobody reads.  A warning that is right
+ * about the code and wrong about the risk is the most expensive kind: it is
+ * true, so it cannot be dismissed, and it is harmless, so it teaches people to
+ * skim the build log.
+ *
+ * ⚠️ BOTH DIRECTIONS, and the reason this comment once said otherwise is worth
+ * keeping.  It looked as though an `out' variable array must genuinely be the
+ * maximum, since the stub writes into it.  The stub says no:
+ *
+ *	if (Out0P->dataCnt > *dataCnt) {
+ *		memcpy(data, Out0P->data, *dataCnt);
+ *		return MIG_ARRAY_TOO_LARGE;
+ *	}
+ *	memcpy(data, Out0P->data, Out0P->dataCnt);
+ *
+ * The copy is bounded by *dataCnt -- what the CALLER said it could take -- not
+ * by the type's maximum.  So printf.c reading one byte of console into a
+ * one-byte object is correct, and the declaration calling it a 128-byte buffer
+ * was the only thing wrong with it.  🔑 A variable array's size travels in its
+ * count, in either direction; the maximum is a limit on the protocol, never a
+ * requirement on the caller's storage.
+ *
+ * ⚠️ FIXED arrays are untouched.  There the stub really does copy the whole
+ * declared length, there is no count to bound it, and the bound is the truth.
+ *
+ * `const' is the half that IS about direction: an argument only sent in is
+ * only read, so a caller holding a `const char *' was being made to cast it
+ * away, and four places in the tree did.
+ *
+ * ⚠️ And only where the element type is known.  A variable array whose element
+ * this cannot name keeps the old spelling rather than getting a guess: the
+ * point is to stop asserting a size, not to start asserting a type.
+ */
 void
 WriteUserVarDecl(FILE *file, argument_t *arg)
 {
     char *ref = arg->argByReferenceUser ? "*" : "";
+    register ipc_type_t *it = arg->argType;
 
-    fprintf(file, "\t%s %s", arg->argType->itUserType, ref);
+    if (!arg->argByReferenceUser
+	&& it->itInLine && it->itVarArray
+	&& it->itElement != itNULL)
+    {
+	boolean_t read_only = akCheck(arg->argKind, akbSendSnd)
+			   && !akCheck(arg->argKind, akbReturnRcv);
+
+	fprintf(file, "\t%s%s *", read_only ? "const " : "",
+		it->itElement->itUserType);
+	SafeString(file, arg->argVarName);
+	return;
+    }
+
+    fprintf(file, "\t%s %s", it->itUserType, ref);
 	SafeString(file, arg->argVarName);
 }
 
@@ -691,6 +757,36 @@ WriteTemplateDeclOut(FILE *file, register argument_t *arg)
     (*arg->argKPD_Template)(file, arg, FALSE);
 }
 
+/*
+ * The disposition a static template starts with (#514).
+ *
+ * For a concrete type it is the type's own name, which is what it will still
+ * be when the message goes out.  For a POLYMORPHIC one it is a placeholder --
+ * the caller's value is written over the field before the descriptor is sent,
+ * and the sentinel exists only so a reader can see the template's copy is not
+ * meant to be used.
+ *
+ * ⚠️ That placeholder used to be MACH_MSG_TYPE_POLYMORPHIC itself, whose
+ * expansion is ~0, and the field it lands in is eight bits wide -- so every
+ * generated stub in the tree carried a truncating initialiser and gcc said so,
+ * on BOTH targets.  It was harmless, which is exactly what made it worth
+ * fixing: a warning that is right and permanent teaches people to skim.
+ *
+ * MACH_MSG_TYPE_TEMPLATE_UNSET is 255, which is what the truncation produced
+ * anyway -- so this changes what the compiler is TOLD and not one byte of what
+ * it emits, and that is the check.
+ */
+static const char *
+TemplateDisposition(register ipc_type_t *it, boolean_t in)
+{
+    u_int name = in ? it->itInName : it->itOutName;
+
+    if (name == MACH_MSG_TYPE_POLYMORPHIC)
+	return "MACH_MSG_TYPE_TEMPLATE_UNSET";
+
+    return in ? it->itInNameStr : it->itOutNameStr;
+}
+
 void
 WriteTemplateKPD_port(FILE *file, register argument_t *arg, boolean_t in)
 {
@@ -709,8 +805,7 @@ WriteTemplateKPD_port(FILE *file, register argument_t *arg, boolean_t in)
      */
     fprintf(file, "\t\t/* pad1 = */\t\t{0},\n");
     fprintf(file, "\t\t/* pad2 = */\t\t0,\n");
-    fprintf(file, "\t\t/* disp = */\t\t%s,\n",
-	in ? it->itInNameStr: it->itOutNameStr);
+    fprintf(file, "\t\t/* disp = */\t\t%s,\n", TemplateDisposition(it, in));
     fprintf(file, "\t\t/* type = */\t\tMACH_MSG_PORT_DESCRIPTOR,\n");
 
     fprintf(file, "\t};\n");
@@ -768,8 +863,7 @@ WriteTemplateKPD_oolport(FILE *file, argument_t *arg, boolean_t in)
         (arg->argDeallocate == d_YES) ? "TRUE" : "FALSE");
     fprintf(file, "\t\t/* copy is meaningful only in overwrite mode */\n");
     fprintf(file, "\t\t/* copy = */\t\tMACH_MSG_PHYSICAL_COPY,\n");
-    fprintf(file, "\t\t/* disp = */\t\t%s,\n",
-	in ? it->itInNameStr: it->itOutNameStr);
+    fprintf(file, "\t\t/* disp = */\t\t%s,\n", TemplateDisposition(it, in));
     fprintf(file, "\t\t/* type = */\t\tMACH_MSG_OOL_PORTS_DESCRIPTOR,\n");
 
     fprintf(file, "\t};\n");
