@@ -4027,8 +4027,29 @@ static void iommu_selftest(void)
 			kputdec(t->devices);
 			kputs(" entries in ");
 			kputdec(t->frames);
-			kputs(" frames, every one read back — and nothing"
-			      " programmed\r\n");
+			kputs(" frames, every one read back\r\n");
+		}
+
+		/*
+		 * 🔴 AND ONLY NOW, AND ONLY IF ASKED.  `-I' on the boot
+		 * command line is what turns translation on.  A default boot
+		 * builds and enables nothing, so a machine this cannot survive
+		 * can still be booted to find out why — and the same kernel,
+		 * the same image and the same boot run twice is what makes
+		 * #432's "measure the cost rather than assume it" a thing
+		 * anyone can do.
+		 */
+		if (ok && boot_flag('I')) {
+			int on = iommu_enable_passthrough();
+
+			kputs("UrMach x86-64:   -I given: translation ");
+			kputs(on ? "IS ON, every device passing through —"
+				   " and the hardware says so\r\n"
+				 : "COULD NOT BE ENABLED — the engine did not"
+				   " confirm it\r\n");
+		} else if (ok) {
+			kputs("UrMach x86-64:   translation left OFF (pass"
+			      " -I to enable it) — nothing programmed\r\n");
 		}
 	}
 

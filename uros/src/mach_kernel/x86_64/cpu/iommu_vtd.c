@@ -460,6 +460,115 @@ int iommu_vtd_build(void)
 }
 
 /*
+ * ── Stage 2b: set the root pointer, invalidate, enable ───────────────
+ *
+ * Rev 5.20.  GCMD's bits are WRITE-ONLY and the register takes one command at
+ * a time, so each write must carry the state of everything already on --
+ * which is read out of GSTS, whose bits sit at the same positions.  🔑 A
+ * read-modify-write of GCMD itself would read zeros and turn off whatever was
+ * running.
+ */
+#define	VTD_GCMD	0x18
+#define	VTD_GSTS	0x1C
+#define	VTD_RTADDR	0x20
+#define	VTD_CCMD	0x28
+
+#define	VTD_GCMD_TE	(1ULL << 31)	/* translation enable            */
+#define	VTD_GCMD_SRTP	(1ULL << 30)	/* set root table pointer        */
+#define	VTD_GSTS_TES	(1ULL << 31)
+#define	VTD_GSTS_RTPS	(1ULL << 30)
+
+/* The bits of GSTS that describe state worth carrying into the next GCMD. */
+#define	VTD_GSTS_KEEP	0x96FFFFFFu
+
+#define	VTD_CCMD_ICC	(1ULL << 63)	/* invalidate context cache      */
+#define	VTD_CCMD_GLOBAL	(1ULL << 61)	/* ... globally                  */
+#define	VTD_IOTLB_IVT	(1ULL << 63)
+#define	VTD_IOTLB_GLOBAL (1ULL << 60)
+#define	VTD_ECAP_IRO(e)	((unsigned)((((e) >> 8) & 0x3FF) * 16))
+
+/*
+ * Spin until a bit settles, bounded.
+ *
+ * ⚠️ Bounded because this runs before any timer and an engine that never
+ * answers would hang the boot with nothing on the screen -- which is the one
+ * outcome worse than a failure, since it cannot be reported.
+ */
+static int wait_bit(volatile uint8_t *regs, unsigned off, uint64_t bit,
+		    int want, int wide)
+{
+	for (unsigned spin = 0; spin < 1000000u; spin++) {
+		uint64_t v = wide ? *(volatile uint64_t *)(regs + off)
+				  : *(volatile uint32_t *)(regs + off);
+
+		if (((v & bit) != 0) == (want != 0))
+			return 1;
+	}
+
+	return 0;
+}
+
+int iommu_vtd_enable(void)
+{
+	const struct iommu_tables *t = iommu_tables();
+	unsigned enabled = 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+		uint32_t keep;
+		unsigned iro;
+
+		if (!u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		/*
+		 * The root table, in legacy mode: TTM is bits 11:10 and zero
+		 * is what says so.  Written before SRTP, which is what makes
+		 * the engine read it.
+		 */
+		*(volatile uint64_t *)(regs + VTD_RTADDR) = t->root;
+
+		keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+		*(volatile uint32_t *)(regs + VTD_GCMD) =
+			keep | (uint32_t)VTD_GCMD_SRTP;
+		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_RTPS, 1, 0))
+			return 0;
+
+		/*
+		 * 🔴 INVALIDATE BEFORE ENABLING, both caches, globally.  The
+		 * engine may hold entries from whoever ran it before us --
+		 * firmware, or a previous boot that left it on -- and a
+		 * translation cached against a table we have replaced is a
+		 * device reaching memory by an old description.  Costs two
+		 * writes and two spins, once.
+		 */
+		*(volatile uint64_t *)(regs + VTD_CCMD) =
+			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
+		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
+			return 0;
+
+		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
+		*(volatile uint64_t *)(regs + iro + 8) =
+			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
+		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+			return 0;
+
+		keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+		*(volatile uint32_t *)(regs + VTD_GCMD) =
+			keep | (uint32_t)VTD_GCMD_TE;
+		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_TES, 1, 0))
+			return 0;
+
+		enabled++;
+	}
+
+	return enabled > 0;
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages
@@ -498,6 +607,7 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 
 	iommu_record_hardware(index, version, bits, levels, ir, coherent,
 			      cap, ecap);
+	iommu_record_registers(index, (uint64_t)(uintptr_t)regs);
 }
 
 int iommu_vtd_read(void)

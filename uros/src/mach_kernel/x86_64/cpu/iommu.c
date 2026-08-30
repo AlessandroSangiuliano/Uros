@@ -268,6 +268,40 @@ void iommu_record_tables(uint64_t root, uint64_t root_bytes,
 	built.verified = 1;
 }
 
+static int translating;
+
+void iommu_record_registers(unsigned index, uint64_t va)
+{
+	if (index < nunits)
+		units[index].register_va = va;
+}
+
+int iommu_translating(void)
+{
+	return translating;
+}
+
+/*
+ * ⚠️ The tables must exist first, and this checks rather than assumes.  An
+ * engine pointed at a table that was never built is pointed at whatever the
+ * allocator would have returned, which is the one mistake in this whole issue
+ * that cannot be reported afterwards -- the machine simply stops.
+ */
+int iommu_enable_passthrough(void)
+{
+	if (translating)
+		return 1;
+	if (!built.verified || built.root == 0)
+		return 0;
+
+	if (found_vendor == IOMMU_INTEL)
+		translating = iommu_vtd_enable();
+	else if (found_vendor == IOMMU_AMD)
+		translating = iommu_amd_enable();
+
+	return translating;
+}
+
 int iommu_build_passthrough(void)
 {
 	/*

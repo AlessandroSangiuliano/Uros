@@ -90,6 +90,21 @@ int iommu_vtd_build(void);
 int iommu_amd_build(void);
 
 /*
+ * Point the engines at those tables and enable translation, everything
+ * passing through.  Answers non-zero when the hardware confirms it is on.
+ *
+ * ⚠️ Confirmation is read from the hardware and not inferred from the writes
+ * succeeding.  Both vendors report their own state -- Intel in a status
+ * register, AMD by reading back the control -- and a write that was accepted
+ * and ignored is exactly the failure this cannot afford to call success.
+ */
+int iommu_vtd_enable(void);
+int iommu_amd_enable(void);
+
+/* Where a unit's registers were mapped, so stage 2 and 3 need not remap. */
+void iommu_record_registers(unsigned index, uint64_t va);
+
+/*
  * The domain every device is put in while everything passes through.
  *
  * ⚠️ One, and not zero.  Intel's specification reserves domain id zero on

@@ -144,6 +144,16 @@ struct iommu_unit {
 	unsigned	scope_first;	/* index into the flat scope array */
 	unsigned	scope_count;
 
+	/*
+	 * Where its registers were mapped, uncached, or zero if they were not.
+	 *
+	 * Kept because stage 2 writes them and stage 3 reads faults out of
+	 * them continuously -- mapping afresh each time would rebuild a
+	 * mapping that never changes, and the device region is a bump
+	 * allocator that never gives anything back.
+	 */
+	uint64_t	register_va;
+
 	/* ---- answered by the hardware ---- */
 	int		answered;
 	uint32_t	version;
@@ -388,6 +398,28 @@ struct iommu_tables {
 int iommu_build_passthrough(void);
 
 const struct iommu_tables *iommu_tables(void);
+
+/*
+ * ── Stage 2b: point the engines at those tables and let them run ─────
+ *
+ * 🔴 THE FIRST THING IN #432 THAT CAN STOP A MACHINE, and therefore the first
+ * that is asked for rather than assumed: it happens only when `-I' is on the
+ * boot command line.  A default boot builds the tables and enables nothing, so
+ * a machine that cannot survive this can still be booted to find out why.
+ *
+ * 🔑 And the flag is what makes the cost measurable at all.  #432 asks for the
+ * performance cost to be measured rather than assumed, and measuring it means
+ * the same kernel, the same image and the same boot, run twice.  A build-time
+ * switch would have given two kernels and a comparison between them.
+ *
+ * Every device passes through, so a machine on which this works behaves
+ * exactly as it did -- which is the point of stage 2, and also why a machine
+ * on which it does NOT work says so loudly rather than subtly.
+ */
+int iommu_enable_passthrough(void);
+
+/* Whether translation is on, and what the hardware says about it. */
+int iommu_translating(void);
 
 /*
  * Whether an address width, in bits, is one every unit can reach.
