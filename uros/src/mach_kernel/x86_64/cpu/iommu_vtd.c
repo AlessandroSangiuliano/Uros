@@ -569,6 +569,44 @@ int iommu_vtd_enable(void)
 }
 
 /*
+ * ── Stage 3: the second-stage paging entries ─────────────────────────
+ *
+ * Rev 5.20, section 9.8.  Read in bit 0, write in bit 1, the address in
+ * 51:12, and nothing that says which level this is -- here the level is the
+ * depth the walker reached the entry at, which is the ordinary arrangement and
+ * the opposite of AMD's.
+ *
+ * 🔑 The two formats agree on almost every position and disagree about what a
+ * table IS, which is the shape of difference that gets flattened by whoever
+ * writes the second one from the first.  <cpu/iommu_backend.h> keeps them as
+ * two encoders for that reason and not for symmetry.
+ *
+ * ⚠️ Permission is ANDed down the walk here too, so a directory needs read and
+ * write set for anything below it to be reachable.
+ */
+#define	VTD_SS_R		(1ULL << 0)
+#define	VTD_SS_W		(1ULL << 1)
+#define	VTD_SS_ADDR_MASK	0x000FFFFFFFFFF000ULL
+
+uint64_t iommu_vtd_ss_pte(uint64_t pa, int read, int write)
+{
+	return (pa & VTD_SS_ADDR_MASK)
+	     | (read ? VTD_SS_R : 0)
+	     | (write ? VTD_SS_W : 0);
+}
+
+/*
+ * A directory entry.  ⚠️ Bit 7 (page size) stays CLEAR: set, it would make
+ * this a large-page translation and the address a page frame rather than a
+ * table -- the same bits meaning something else entirely, with no complaint
+ * from anything until a device read the wrong memory.
+ */
+uint64_t iommu_vtd_ss_pde(uint64_t next_table_pa)
+{
+	return (next_table_pa & VTD_SS_ADDR_MASK) | VTD_SS_R | VTD_SS_W;
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages

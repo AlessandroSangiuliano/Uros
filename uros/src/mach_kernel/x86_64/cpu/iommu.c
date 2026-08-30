@@ -579,6 +579,41 @@ static int entries_agree(void)
 	iommu_vtd_root_entry(0x123456000ULL, c);
 	ok &= c[0] == 0x123456001ULL && c[1] == 0;
 
+	/*
+	 * ── The page-table entries (stage 3) ─────────────────────────
+	 *
+	 * 🔴 The AMD cases assert the Next Level field, which is the field
+	 * Intel does not have and the one a reader coming from Intel would
+	 * leave at zero.  Zero is legal there and means "this entry is the
+	 * translation" -- so a directory built without it would be read as a
+	 * mapping of the table it was supposed to point at, and the device
+	 * would reach the page table instead of the page.  Nothing would
+	 * complain.
+	 */
+	ok &= iommu_amd_pte(0x1000, 1, 1) == 0x6000000000001001ULL;
+	ok &= iommu_amd_pte(0x1000, 1, 0) == 0x2000000000001001ULL;
+	ok &= iommu_amd_pte(0x1000, 0, 0) == 0x0000000000001001ULL;
+
+	/* A directory at level two: 010b in bits 11:9, which is 0x400. */
+	ok &= iommu_amd_pde(0x2000, 2) == 0x6000000000002401ULL;
+
+	/* ⚠️ And a directory must NOT come out looking like a translation. */
+	ok &= (iommu_amd_pde(0x2000, 2) & (7ULL << 9)) != 0;
+
+	/* Intel's, where the level is the depth and no field says it. */
+	ok &= iommu_vtd_ss_pte(0x1000, 1, 1) == 0x1003ULL;
+	ok &= iommu_vtd_ss_pte(0x1000, 1, 0) == 0x1001ULL;
+	ok &= iommu_vtd_ss_pte(0x1000, 0, 0) == 0x1000ULL;
+	ok &= iommu_vtd_ss_pde(0x2000) == 0x2003ULL;
+
+	/*
+	 * ⚠️ Bit 7 clear in a directory.  Set, it is a large-page translation
+	 * and the address becomes a page frame -- the same bits meaning
+	 * something else, with nothing to complain until a device read the
+	 * wrong memory.
+	 */
+	ok &= (iommu_vtd_ss_pde(0x2000) & (1ULL << 7)) == 0;
+
 	return ok;
 }
 

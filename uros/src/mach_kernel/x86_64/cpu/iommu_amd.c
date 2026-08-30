@@ -553,6 +553,62 @@ int iommu_amd_enable(void)
 	return enabled > 0;
 }
 
+/*
+ * ── Stage 3: the page table itself ───────────────────────────────────
+ *
+ * Tables 17 and 18 of Rev 3.11.  Present in bit 0, the address in 51:12,
+ * read and write permission in 61 and 62 -- and, in bits 11:9, the thing that
+ * makes this NOT the processor's page table wearing different names:
+ *
+ *	Next Level.  Every entry says what LEVEL the table it points at is,
+ *	so a directory may point two levels down and the walker skips the
+ *	steps between.  000b and 111b mean the entry is a translation rather
+ *	than a directory.
+ *
+ * 🔑 Intel's second-stage entries carry no such field: there the level is the
+ * depth you reached it at.  So a builder that treated the two as one format
+ * with different bit positions would produce an AMD table whose every
+ * directory claimed to point at a translation.
+ *
+ * ⚠️ Permission is ANDed down the walk, and skipped levels count as ones.  A
+ * directory with IR and IW clear therefore blocks its whole subtree, which is
+ * how a range is denied without unmapping it -- and a directory built without
+ * them set permits nothing, which is the mistake that looks like a table that
+ * simply does not work.
+ */
+#define	AMD_PT_PR		(1ULL << 0)
+#define	AMD_PT_NEXT_SHIFT	9
+#define	AMD_PT_ADDR_MASK	0x000FFFFFFFFFF000ULL
+#define	AMD_PT_IR		(1ULL << 61)
+#define	AMD_PT_IW		(1ULL << 62)
+
+#define	AMD_PT_NEXT_TRANSLATION	0ULL	/* 000b: this entry IS the mapping */
+
+/* One 4-Kbyte page, with the permissions the caller asks for. */
+uint64_t iommu_amd_pte(uint64_t pa, int read, int write)
+{
+	return AMD_PT_PR
+	     | (pa & AMD_PT_ADDR_MASK)
+	     | (AMD_PT_NEXT_TRANSLATION << AMD_PT_NEXT_SHIFT)
+	     | (read ? AMD_PT_IR : 0)
+	     | (write ? AMD_PT_IW : 0);
+}
+
+/*
+ * A directory pointing at a table of level `next_level'.
+ *
+ * ⚠️ Always permissive.  The permissions that matter are the leaf's and the
+ * DTE's; a directory that withheld them would silently narrow everything below
+ * it, and the place to deny a range is the range, not the road to it.
+ */
+uint64_t iommu_amd_pde(uint64_t next_table_pa, unsigned next_level)
+{
+	return AMD_PT_PR
+	     | (next_table_pa & AMD_PT_ADDR_MASK)
+	     | ((uint64_t)(next_level & 7u) << AMD_PT_NEXT_SHIFT)
+	     | AMD_PT_IR | AMD_PT_IW;
+}
+
 /* A scope whose range is a single device: AMD's ordinary case. */
 static void one_device(uint16_t segment, uint16_t bdf, uint8_t kind,
 		       uint8_t enumeration_id)

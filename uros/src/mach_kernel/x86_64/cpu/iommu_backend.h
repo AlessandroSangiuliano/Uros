@@ -118,6 +118,29 @@ void iommu_record_tables(uint64_t root, uint64_t root_bytes,
 			 uint64_t command, uint64_t event,
 			 unsigned devices, unsigned contexts, unsigned frames);
 
+/*
+ * ── Stage 3: page-table entries ──────────────────────────────────────
+ *
+ * 🔴 TWO ENCODERS BECAUSE THEY ARE TWO FORMATS, not for symmetry.  The bit
+ * positions agree almost everywhere -- present low, address in 51:12,
+ * permissions -- and the two disagree about what a table IS: an AMD entry
+ * carries the LEVEL of the table it points at, so a directory may skip levels,
+ * and an Intel entry does not, because there the level is the depth.
+ *
+ * That is exactly the kind of difference that gets flattened by whoever writes
+ * the second one from the first, and the result would be an AMD table whose
+ * every directory claimed to be a translation.
+ *
+ * ⚠️ Both vendors AND permission down the walk, so a directory needs its
+ * permissions set for anything below to be reachable, and the place to deny a
+ * range is the range and not the road to it.
+ */
+uint64_t iommu_amd_pte(uint64_t pa, int read, int write);
+uint64_t iommu_amd_pde(uint64_t next_table_pa, unsigned next_level);
+
+uint64_t iommu_vtd_ss_pte(uint64_t pa, int read, int write);
+uint64_t iommu_vtd_ss_pde(uint64_t next_table_pa);
+
 void iommu_vtd_root_entry(uint64_t context_table_pa, uint64_t out[2]);
 void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
 				   uint64_t out[2]);
