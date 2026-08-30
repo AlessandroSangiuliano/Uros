@@ -20,6 +20,42 @@
 
 #include <stdint.h>
 
+/*
+ * Every ACPI table starts with this, and every one of them is checksummed.
+ *
+ * Out here rather than in acpi.c because a table reader that lives elsewhere
+ * -- the IOMMU's, #432 -- needs the length to know where the table ends, and
+ * the length is the only thing that says so.
+ */
+struct acpi_header {
+	char     signature[4];
+	uint32_t length;
+	uint8_t  revision;
+	uint8_t  checksum;
+	char     oem_id[6];
+	char     oem_table_id[8];
+	uint32_t oem_revision;
+	uint32_t creator_id;
+	uint32_t creator_revision;
+} __attribute__((packed));
+
+/*
+ * One table by signature, or zero if this machine has none of that kind.
+ *
+ * 🔑 The walk that finds it is the one #457 generalised out of find_madt() --
+ * checksum the root, step its packed entries, follow each to a header -- and
+ * the only thing that was ever specific to a table was its four characters.
+ * Exposing it is what keeps a second reader from making the 1.0-versus-2.0
+ * root-pointer decision a second time, which is a decision there is no reason
+ * to have two copies of and every reason to have one.
+ *
+ * ⚠️ Answers zero before acpi_find_cpus() has run: that is what remembers the
+ * root.  A table that fails its checksum stops the machine rather than being
+ * skipped, for the reason the walk has always done so -- a description of the
+ * hardware that does not add up is not a reason to look for a better one.
+ */
+const struct acpi_header *acpi_find_table(const char *signature);
+
 /* What one processor's MADT entry says about it. */
 struct acpi_cpu {
 	uint32_t apic_id;
