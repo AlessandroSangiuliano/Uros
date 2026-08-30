@@ -160,25 +160,66 @@ _Static_assert(sizeof(struct ivmd_header) == 32, "an IVMD is thirty-two bytes");
 #define	AMD_CAP_BASE_HIGH	0x08
 
 /*
- * The engine's feature register.
+ * ── The engine's own registers ────────────────────────────────────────
  *
- * 🔴 READ AND KEPT RAW, AND DELIBERATELY NOT DECODED.  The bits that say how
- * wide the engine translates, how deep a page table it will walk and whether
- * its walks are coherent are all in here, and their positions differ between
- * revisions of AMD's specification in ways I could not settle from the
- * document I had.  A decode written from memory would produce numbers of
- * exactly the shape this stage exists to distrust: real bits from a real
- * register, read one field over, agreeing with nothing but themselves.
+ * Field positions from AMD I/O Virtualization Technology (IOMMU)
+ * Specification, 48882-PUB Rev 3.11, Apr 2026 -- MMIO Offset 0030h and MMIO
+ * Offset 0018h.
  *
- * So the word is recorded whole, the neutral fields it would have filled are
- * left at zero, and iommu_selftest() says "not decoded" rather than printing a
- * width nobody established.  ⚠️ Stage 2 decodes it against the specification,
- * and until then iommu_address_bits_ok() answers no on this vendor -- which is
- * a refusal to promise, and is the correct answer to a question nobody has
- * looked up.
+ * 🔴 THE REVISION IS PART OF THE CITATION, AND NOT AS BOOKKEEPING.  Rev 2.62
+ * (Feb 2015) calls bits 2 and 5 of this register Reserved.  Rev 3.11 calls bit
+ * 2 XTSup and bit 5 GAPPISup, and the real AMD machine this was written on has
+ * bit 2 SET -- so a decode written from the older document would have reported
+ * "no x2APIC support" on hardware that has it, silently and forever.  A
+ * specification is a moving object and a register is not.
+ *
+ * ⚠️ The document itself is not in this tree: it is AMD's, distributed under
+ * its own agreement.  What is here is the citation and the field positions,
+ * which are facts about the silicon.
  */
 #define	AMD_REG_CONTROL		0x18
 #define	AMD_REG_EXT_FEATURE	0x30
+
+/* MMIO Offset 0030h, IOMMU Extended Feature Register, bits 15:0. */
+#define	AMD_EFR_PREFSUP(e)	(((e) >> 0) & 1)	/* PREFETCH command   */
+#define	AMD_EFR_PPRSUP(e)	(((e) >> 1) & 1)	/* peripheral page rq */
+#define	AMD_EFR_XTSUP(e)	(((e) >> 2) & 1)	/* x2APIC in the IRT  */
+#define	AMD_EFR_NXSUP(e)	(((e) >> 3) & 1)
+#define	AMD_EFR_GTSUP(e)	(((e) >> 4) & 1)	/* guest translation  */
+#define	AMD_EFR_IASUP(e)	(((e) >> 6) & 1)	/* INVALIDATE_ALL     */
+#define	AMD_EFR_GASUP(e)	(((e) >> 7) & 1)	/* guest virtual APIC */
+#define	AMD_EFR_HESUP(e)	(((e) >> 8) & 1)	/* hardware error regs*/
+#define	AMD_EFR_PCSUP(e)	(((e) >> 9) & 1)	/* perf counters      */
+
+/*
+ * HATS, bits 11:10 -- the deepest host page table this engine will walk.
+ *
+ *	00b = 4 levels   01b = 5 levels   10b = 6 levels   11b = Reserved
+ *
+ * 🔑 It is a MAXIMUM and not a fixed depth: DTE[Mode] selects 1 through 6 per
+ * device, and 000b means translation disabled altogether.  Which is why stage
+ * 2's identity domain needs no page table on this vendor at all -- the
+ * passthrough is a mode, not an identity mapping somebody has to build.
+ *
+ * ⚠️ The reserved encoding is REFUSED rather than clamped.  A newer engine
+ * that reports 11b means something this file has not read about, and answering
+ * "4 levels" to that would be inventing the safest-looking number.
+ */
+#define	AMD_EFR_HATS(e)		(((e) >> 10) & 3)
+#define	AMD_EFR_GATS(e)		(((e) >> 12) & 3)	/* same encoding, guest */
+
+/*
+ * MMIO Offset 0018h[Coherent], bit 10.
+ *
+ * ⚠️ NOT the same kind of thing as Intel's ECAP[C], and the description holds
+ * both in one field, so the difference is stated here rather than lost.  Intel
+ * reports a CAPABILITY -- whether the engine's page walks snoop the caches.
+ * AMD's is a CONTROL, read/write, reset to 1, and it covers the engine's reads
+ * of the DEVICE TABLE.  So a zero here does not mean the hardware cannot
+ * snoop; it means somebody turned it off, and the tables this kernel writes
+ * would have to be flushed before the engine is told about them.
+ */
+#define	AMD_CONTROL_COHERENT(c)	(((c) >> 10) & 1)
 
 static int is_ivhd(uint8_t type)
 {
@@ -228,6 +269,63 @@ static uint8_t highest_type_for(const uint8_t *from, const uint8_t *end,
 	}
 
 	return best;
+}
+
+/*
+ * The feature register, turned into the four things the description holds.
+ *
+ * Pure, and separate from the reading, so it can be checked without an AMD
+ * machine -- see <cpu/iommu_backend.h>.
+ */
+void iommu_amd_decode(uint64_t efr, uint64_t control,
+		      unsigned *address_bits, uint32_t *page_levels,
+		      int *interrupt_remapping, int *coherent)
+{
+	unsigned hats = AMD_EFR_HATS(efr);
+	unsigned deepest;
+
+	/*
+	 * 11b is reserved.  Refused, which the caller reads as "the register
+	 * said something this could not read" -- a width of zero is not a
+	 * width.
+	 */
+	if (hats == 3) {
+		*address_bits = 0;
+		*page_levels = 0;
+		*interrupt_remapping = 0;
+		*coherent = 0;
+		return;
+	}
+
+	deepest = 4 + hats;			/* 00b->4, 01b->5, 10b->6 */
+
+	/*
+	 * Every depth up to the maximum, because DTE[Mode] chooses one per
+	 * device and any value from 1 to the limit is legal.  Intel's SAGAW
+	 * names a set instead of a ceiling, which is why the description holds
+	 * a bitmask and not a number: the two vendors answer different
+	 * questions and the mask is what both can say.
+	 */
+	*page_levels = 0;
+	for (unsigned l = 1; l <= deepest; l++)
+		*page_levels |= 1u << l;
+
+	/*
+	 * The device virtual address space each depth reaches, from the
+	 * DTE[Mode] table: four levels is 48 bits, five is 57, six is 64.
+	 */
+	*address_bits = deepest == 6 ? 64u : (deepest == 5 ? 57u : 48u);
+
+	/*
+	 * 🔑 Always, on this vendor, and it is not an assumption.  An AMD-Vi
+	 * engine has an interrupt remapping table architecturally -- every DTE
+	 * carries an interrupt table root pointer -- which is why the register
+	 * has no bit for "is there one" and has one for whether that table can
+	 * hold x2APIC destinations.  XTSup is the refinement, not the switch.
+	 */
+	*interrupt_remapping = 1;
+
+	*coherent = AMD_CONTROL_COHERENT(control);
 }
 
 /* A scope whose range is a single device: AMD's ordinary case. */
@@ -371,6 +469,9 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	uint8_t		cap_id;
 	volatile uint8_t *regs;
 	uint64_t	control, features;
+	unsigned	bits = 0;
+	uint32_t	levels = 0;
+	int		ir = 0, coherent = 0;
 
 	if (h->cap_offset < 0x40)
 		return;
@@ -399,13 +500,17 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
 	features = *(volatile uint64_t *)(regs + AMD_REG_EXT_FEATURE);
 
+	iommu_amd_decode(features, control, &bits, &levels, &ir, &coherent);
+
 	/*
-	 * Zero width, zero levels, no claim about remapping or coherency: see
-	 * the note on AMD_REG_EXT_FEATURE.  What is being recorded here is
-	 * that the engine EXISTS and is where the table said, which is the
-	 * whole of what stage 1 set out to establish.
+	 * ⚠️ Version zero, because there is no version register to read.  The
+	 * engine's identity was established by the capability comparison
+	 * above, which is a stronger statement than a version number would
+	 * have been -- and putting a made-up number here so the field looks
+	 * filled is exactly what that comparison exists instead of.
 	 */
-	iommu_record_hardware(index, 0, 0, 0, 0, 0, features, control);
+	iommu_record_hardware(index, 0, bits, levels, ir, coherent,
+			      features, control);
 }
 
 int iommu_amd_read(void)
@@ -423,13 +528,15 @@ int iommu_amd_read(void)
 		return 0;
 
 	/*
-	 * ⚠️ No interrupt-remapping claim and no x2apic objection, because the
-	 * IVRS makes neither.  AMD's table states which wide-id modes are
-	 * SUPPORTED rather than asking that they be avoided, so answering no
-	 * here means "nobody objected" -- which is what <cpu/iommu.h> says it
-	 * means, and is why that had to be written down.
+	 * ⚠️ -1 for the interrupt-remapping claim, meaning THE TABLE DOES NOT
+	 * SAY, and no x2apic objection because the IVRS makes none.  AMD's
+	 * table states which wide-id modes are SUPPORTED rather than asking
+	 * that they be avoided, so answering "no" to either would be this
+	 * reader asserting something no firmware wrote -- and the first version
+	 * did exactly that, which made the cross-check against the engines
+	 * report a disagreement on every AMD boot.
 	 */
-	iommu_record_platform(IVINFO_PA_SIZE(ivrs->iv_info), 0, 0);
+	iommu_record_platform(IVINFO_PA_SIZE(ivrs->iv_info), -1, 0);
 
 	first_unit = iommu_unit_count();
 	exact = 1;

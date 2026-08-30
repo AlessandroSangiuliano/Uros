@@ -30,6 +30,30 @@ int iommu_vtd_read(void);		/* the DMAR  */
 int iommu_amd_read(void);		/* the IVRS  */
 
 /*
+ * ── The decode, separated from the reading ────────────────────────────
+ *
+ * Each vendor's capability words turned into the four things <cpu/iommu.h>
+ * holds.  Pure arithmetic: no register is touched, nothing is recorded, and
+ * the same word always gives the same answer.
+ *
+ * 🔑 SEPARATED SO THAT IT CAN BE CHECKED WITHOUT THE HARDWARE.  These are what
+ * iommu_decode_check() runs against captured values whose right answers are
+ * known -- including one read off a real AMD machine, whose decode another
+ * operating system published beside it.  A decode that only ever runs on the
+ * machine it was written for is a decode nobody can contradict.
+ *
+ * An `address_bits' of zero means the register said something these could not
+ * read -- a reserved encoding -- and is a refusal, not a width.
+ */
+void iommu_vtd_decode(uint64_t cap, uint64_t ecap,
+		      unsigned *address_bits, uint32_t *page_levels,
+		      int *interrupt_remapping, int *coherent);
+
+void iommu_amd_decode(uint64_t efr, uint64_t control,
+		      unsigned *address_bits, uint32_t *page_levels,
+		      int *interrupt_remapping, int *coherent);
+
+/*
  * Start a unit, and get back the index that iommu_record_scope() will attach
  * scopes to.  Answers -1 when there is no room, having set the truncation
  * flag -- and a reader that ignores the -1 will write into a unit that is not

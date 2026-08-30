@@ -242,9 +242,17 @@ enum iommu_vendor iommu_vendor(void);
 unsigned iommu_platform_address_bits(void);
 
 /*
- * The firmware says the platform can remap interrupts.  ⚠️ A claim about the
- * board, which an engine's own registers may not honour -- #457's MSI-X table
- * is policed only where both agree, so both are recorded.
+ * Whether the firmware says the platform can remap interrupts: 1 yes, 0 no,
+ * and **-1 when the table does not say**.
+ *
+ * ⚠️ THREE ANSWERS, because two would make one of them a lie.  Intel's DMAR
+ * carries a platform flag for this and AMD's IVRS carries nothing -- so
+ * reporting "no" on an AMD machine would be the description asserting
+ * something no firmware said, and the cross-check against the engines would
+ * fire on every AMD boot for a disagreement that does not exist.
+ *
+ * A claim about the board, which an engine's own registers may not honour --
+ * #457's MSI-X table is policed only where both agree, so both are recorded.
  */
 int iommu_platform_interrupt_remapping(void);
 
@@ -304,6 +312,45 @@ int iommu_truncated(void);
  * description rather than to the machine.
  */
 int iommu_walk_exact(void);
+
+/*
+ * Run each vendor's capability decode against values whose right answers were
+ * established somewhere other than this kernel.  Answers non-zero when all of
+ * them agree; `ran' and `wrong' may be zero if the counts are not wanted.
+ *
+ * 🔑 IT NEEDS NO IOMMU, AND THAT IS THE POINT.  The decode is the part most
+ * likely to be quietly wrong -- it turns a vendor's bits into numbers that
+ * look reasonable whatever they mean -- and it is also the part that a machine
+ * without remapping hardware could otherwise say nothing about.  Pure
+ * arithmetic over captured words runs on every board.
+ *
+ * ⚠️ It has already earned this: it caught a decode that read all five bits of
+ * Intel's SAGAW when only three of them exist, on the same day it was written,
+ * against a case no hardware we can run would ever have produced.
+ */
+int iommu_decode_check(unsigned *ran, unsigned *wrong);
+
+/*
+ * Which engine is responsible for one device, or -1 if none is.
+ *
+ * 🔴 -1 IS THE ANSWER THAT MATTERS.  A device no engine covers is a device
+ * nobody polices, and stage 3 must refuse to promise isolation for it rather
+ * than translate for the others and stay quiet about this one.  The question
+ * has to be askable before that stage can be honest, which is why it is here
+ * and not there.
+ *
+ * ⚠️ It is a real state and not a malformed table.  QEMU's IVRS under KVM
+ * names seven devices, no catch-all, and does not mention the I/O APIC at all
+ * -- while the same QEMU under TCG does.  So "covered by nobody" is something
+ * a firmware really writes, and something this had better be able to say.
+ *
+ * ⚠️ A bridge scope covers everything BEHIND it, and resolving that means
+ * reading secondary bus numbers out of configuration space.  This does not do
+ * that: a device behind a bridge named in a scope is reported as uncovered,
+ * which errs toward saying "unpoliced" about something that may be policed.
+ * The other direction would be the dangerous one.
+ */
+int iommu_unit_for(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func);
 
 /*
  * Whether an address width, in bits, is one every unit can reach.

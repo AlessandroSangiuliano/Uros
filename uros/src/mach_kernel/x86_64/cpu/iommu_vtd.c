@@ -224,6 +224,54 @@ static int read_scopes(const uint8_t *from, const uint8_t *end,
 }
 
 /*
+ * The two capability words, turned into the four things the description holds.
+ *
+ * Pure, and separate from the reading, so that iommu_decode_check() can run it
+ * against a captured value whose right answer is known -- see the note in
+ * <cpu/iommu_backend.h>.
+ */
+void iommu_vtd_decode(uint64_t cap, uint64_t ecap,
+		      unsigned *address_bits, uint32_t *page_levels,
+		      int *interrupt_remapping, int *coherent)
+{
+	unsigned sagaw = VTD_CAP_SAGAW(cap);
+	uint32_t levels = 0;
+
+	/*
+	 * SAGAW is a SET of supported widths, one bit each, and only three of
+	 * its five bits mean anything (Rev 5.20, CAP_REG bits 12:8):
+	 *
+	 *	bit 0  Reserved
+	 *	bit 1  39-bit AGAW, 3-level page table
+	 *	bit 2  48-bit AGAW, 4-level page table
+	 *	bit 3  57-bit AGAW, 5-level page table
+	 *	bit 4  Reserved
+	 *
+	 * 🔴 THIS LOOP RAN OVER ALL FIVE, mapping bit i to 2 + i levels, which
+	 * is right for the three that exist and invents a two-level table for
+	 * bit 0 and a six-level one for bit 4.  It was written from memory and
+	 * checked against the only value we can produce -- QEMU's 0x06, which
+	 * has both reserved bits CLEAR -- so the wrong half was never once
+	 * exercised.  A decode verified only where it happens to be right.
+	 *
+	 * ⚠️ The reserved bits are ignored rather than refused, and that is a
+	 * different judgement from AMD's HATS.  HATS is one encoded value, so
+	 * a reserved encoding makes the whole field unreadable; SAGAW is a set,
+	 * and a bit we do not understand does not spoil the ones we do.  What
+	 * it does mean is that this kernel cannot build the depth that bit is
+	 * claiming, which is exactly what leaving it out of the mask says.
+	 */
+	for (unsigned i = 1; i <= 3; i++)
+		if (sagaw & (1u << i))
+			levels |= 1u << (2 + i);
+
+	*address_bits = VTD_CAP_MGAW(cap) + 1u;
+	*page_levels = levels;
+	*interrupt_remapping = VTD_ECAP_IR(ecap);
+	*coherent = VTD_ECAP_COHERENT(ecap);
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages
@@ -237,7 +285,8 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 	uint32_t version;
 	uint64_t cap, ecap;
 	uint32_t levels = 0;
-	unsigned sagaw;
+	unsigned bits = 0;
+	int ir = 0, coherent = 0;
 
 	regs = (volatile uint8_t *)(uintptr_t)pmap_map_device(base, size);
 	if (regs == 0)
@@ -257,19 +306,9 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 	cap = *(volatile uint64_t *)(regs + VTD_CAP);
 	ecap = *(volatile uint64_t *)(regs + VTD_ECAP);
 
-	/*
-	 * SAGAW bit i means an adjusted guest address width of 30 + 9i bits,
-	 * which is a page table of 2 + i levels.  Converted here rather than
-	 * reported raw so that the neutral description holds level counts and
-	 * not one vendor's encoding of them.
-	 */
-	sagaw = VTD_CAP_SAGAW(cap);
-	for (unsigned i = 0; i < 5; i++)
-		if (sagaw & (1u << i))
-			levels |= 1u << (2 + i);
+	iommu_vtd_decode(cap, ecap, &bits, &levels, &ir, &coherent);
 
-	iommu_record_hardware(index, version, VTD_CAP_MGAW(cap) + 1u, levels,
-			      VTD_ECAP_IR(ecap), VTD_ECAP_COHERENT(ecap),
+	iommu_record_hardware(index, version, bits, levels, ir, coherent,
 			      cap, ecap);
 }
 
