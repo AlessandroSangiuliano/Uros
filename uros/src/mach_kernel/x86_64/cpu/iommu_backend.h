@@ -54,6 +54,27 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 		      int *interrupt_remapping, int *coherent);
 
 /*
+ * ── The entries stage 2 will write ───────────────────────────────────
+ *
+ * Pure encoders, for the same reason the decoders are pure: they can be
+ * checked against known bit patterns before anything is allocated, let alone
+ * before any engine is told about them.
+ *
+ * 🔴 THE TWO VENDORS' EMPTY ENTRIES MEAN OPPOSITE THINGS.  Intel's not-present
+ * context entry BLOCKS; AMD's invalid device table entry FORWARDS WITHOUT
+ * TRANSLATION.  So a table allocated and zeroed is a closed door on one
+ * machine and an open one on the other, and the paired `blocked' encoders
+ * exist so that neither is ever left to a zeroing.
+ */
+void iommu_amd_dte_passthrough(uint16_t domain, uint64_t out[4]);
+void iommu_amd_dte_blocked(uint16_t domain, uint64_t out[4]);
+
+void iommu_vtd_root_entry(uint64_t context_table_pa, uint64_t out[2]);
+void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
+				   uint64_t out[2]);
+void iommu_vtd_context_blocked(uint64_t out[2]);
+
+/*
  * Start a unit, and get back the index that iommu_record_scope() will attach
  * scopes to.  Answers -1 when there is no room, having set the truncation
  * flag -- and a reader that ignores the -1 will write into a unit that is not

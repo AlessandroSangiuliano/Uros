@@ -272,6 +272,71 @@ void iommu_vtd_decode(uint64_t cap, uint64_t ecap,
 }
 
 /*
+ * ── The root and context entries, which are stage 2's first structures ─
+ *
+ * Rev 5.20, Figures 9-1 and 9-3.  A root entry per bus points at a 4KB context
+ * table; a context entry per device/function says how that device's requests
+ * are translated.  Both are 128 bits, low word first.
+ *
+ * 🔴 AND THE ZERO ENTRY MEANS THE OPPOSITE OF AMD'S.  Here P=0 is NOT PRESENT
+ * and every request through it is blocked and faulted; there V=0 is "forwarded
+ * without translation".  An empty table is a closed door on this vendor and an
+ * open one on the other.  Two structures that look alike, initialised the same
+ * way, with opposite consequences -- and the dangerous direction is the one
+ * that looks configured and enforces nothing.
+ */
+#define	VTD_ROOT_PRESENT	(1ULL << 0)
+#define	VTD_CTX_PRESENT		(1ULL << 0)
+#define	VTD_CTX_TT_SHIFT	2		/* 10b = pass-through */
+#define	VTD_CTX_TT_PASSTHROUGH	2ULL
+/* AW is bits 66:64 and DID bits 87:72: the low word of the second half. */
+#define	VTD_CTX_AW_SHIFT	0
+#define	VTD_CTX_DID_SHIFT	8
+
+void iommu_vtd_root_entry(uint64_t context_table_pa, uint64_t out[2])
+{
+	out[0] = (context_table_pa & ~0xFFFULL) | VTD_ROOT_PRESENT;
+	out[1] = 0;
+}
+
+/*
+ * Pass-through for one device.
+ *
+ * ⚠️ `levels' is the DEEPEST the engine supports, not a choice.  The
+ * specification requires AW to name the largest AGAW the hardware reports when
+ * the type is pass-through, and the encoding is AGAW value = levels - 2, which
+ * happens to be the bit position that width occupies in SAGAW.
+ *
+ * 🔴 The caller must have checked ECAP[PT] first: pass-through is RESERVED on
+ * hardware that does not report it, which means an engine without it will fault
+ * on an entry that looks perfectly formed.  AMD has no such condition -- its
+ * translation-disabled mode is always available -- so this is one more place
+ * the two vendors do not mirror each other.
+ */
+void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
+				   uint64_t out[2])
+{
+	out[0] = VTD_CTX_PRESENT
+	       | (VTD_CTX_TT_PASSTHROUGH << VTD_CTX_TT_SHIFT);
+	out[1] = ((uint64_t)(levels - 2) & 7ULL) << VTD_CTX_AW_SHIFT
+	       | ((uint64_t)domain << VTD_CTX_DID_SHIFT);
+}
+
+/*
+ * Blocked: not present, which on this vendor is all it takes.
+ *
+ * ⚠️ NOT "present with an empty page table".  A second-stage pointer of zero
+ * is a pointer to physical page zero, and the engine would walk it as a page
+ * table -- reading whatever is there as translations.  Blocking by leaving a
+ * pointer null is how a table that blocks nothing gets written.
+ */
+void iommu_vtd_context_blocked(uint64_t out[2])
+{
+	out[0] = 0;
+	out[1] = 0;
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages

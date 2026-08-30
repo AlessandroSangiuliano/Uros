@@ -328,6 +328,62 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 	*coherent = AMD_CONTROL_COHERENT(control);
 }
 
+/*
+ * ── The device table entry, which is stage 2's first structure ────────
+ *
+ * 32 bytes per device id, from Table 7 of Rev 3.11.  Only the fields a
+ * pass-through or a blocked entry needs are named; the rest stay zero and are
+ * reserved or belong to features this kernel does not use yet.
+ *
+ * 🔴 A ZEROED DEVICE TABLE IS NOT A CLOSED DOOR.  V=0 means "all addresses are
+ * forwarded without translation; individual control fields are ignored" -- so
+ * an entry nobody filled in is a device with unrestricted access to memory,
+ * which is precisely today's behaviour and precisely what stage 3 exists to
+ * end.  Blocking takes MORE bits than allowing: V=1, TV=1, and both permission
+ * bits CLEAR.  Getting that backwards produces a table that looks configured
+ * and enforces nothing.
+ */
+#define	AMD_DTE_V		(1ULL << 0)	/* the entry is valid       */
+#define	AMD_DTE_TV		(1ULL << 1)	/* ... and so is its mode   */
+#define	AMD_DTE_MODE_SHIFT	9		/* 000b = translation off   */
+#define	AMD_DTE_IR		(1ULL << 61)	/* reads permitted          */
+#define	AMD_DTE_IW		(1ULL << 62)	/* writes permitted         */
+/* DomainID is bits 79:64, which is the low sixteen bits of the second word. */
+
+/*
+ * Pass-through: the device reaches memory exactly as it does today, but
+ * through an entry the kernel wrote and can change.
+ *
+ * 🔑 Mode 000b with V and TV SET, rather than the simpler V=0.  Both forward
+ * the address untranslated; only this one goes through the permission bits and
+ * carries a domain id, so it is the entry stage 3 narrows rather than a
+ * different entry stage 3 would have to replace.  Behaviourally identical to
+ * today and structurally one step from the answer, which is what #432's stage
+ * 2 asks for.
+ */
+void iommu_amd_dte_passthrough(uint16_t domain, uint64_t out[4])
+{
+	out[0] = AMD_DTE_V | AMD_DTE_TV | (0ULL << AMD_DTE_MODE_SHIFT)
+	       | AMD_DTE_IR | AMD_DTE_IW;
+	out[1] = domain;
+	out[2] = 0;
+	out[3] = 0;
+}
+
+/*
+ * Blocked: the device is described, and allowed nothing.
+ *
+ * ⚠️ Not the same as an empty entry, and that is the whole point of having
+ * this beside the one above.
+ */
+void iommu_amd_dte_blocked(uint16_t domain, uint64_t out[4])
+{
+	out[0] = AMD_DTE_V | AMD_DTE_TV | (0ULL << AMD_DTE_MODE_SHIFT);
+	out[1] = domain;
+	out[2] = 0;
+	out[3] = 0;
+}
+
 /* A scope whose range is a single device: AMD's ordinary case. */
 static void one_device(uint16_t segment, uint16_t bdf, uint8_t kind,
 		       uint8_t enumeration_id)

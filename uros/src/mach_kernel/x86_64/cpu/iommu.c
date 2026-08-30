@@ -297,6 +297,8 @@ int iommu_x2apic_discouraged(void)
  * the document, and a table that hid that behind two real-looking rows would
  * be claiming evidence it does not have.
  */
+static int entries_agree(void);		/* defined below, beside the scopes */
+
 struct decode_case {
 	const char	*what;
 	int		 amd;
@@ -392,12 +394,73 @@ int iommu_decode_check(unsigned *ran, unsigned *wrong)
 			bad++;
 	}
 
+	/*
+	 * The entry encoders travel with the decoders: both are the kernel's
+	 * reading of the same documents, and a boot that checks one and not
+	 * the other has verified the half that only reports.
+	 */
+	n++;
+	if (!entries_agree())
+		bad++;
+
 	if (ran)
 		*ran = n;
 	if (wrong)
 		*wrong = bad;
 
 	return bad == 0;
+}
+
+/*
+ * The entries stage 2 will write, against the bit patterns the specifications
+ * define.  Same discipline as the decode check and for a sharper reason: an
+ * entry is written once and read only by hardware, so a wrong bit does not
+ * produce a wrong answer -- it produces a device that is not policed, or one
+ * that faults on everything, and neither says which bit was wrong.
+ *
+ * 🔴 The first two cases are the asymmetry, asserted rather than remembered:
+ * a zeroed Intel context entry BLOCKS and a zeroed AMD device table entry
+ * FORWARDS.  If either of those ever stops being true, this says so before
+ * anything is allocated.
+ */
+static int entries_agree(void)
+{
+	uint64_t d[4], c[2];
+	int ok = 1;
+
+	/* AMD: valid, translation mode zero, both permissions, domain 1. */
+	iommu_amd_dte_passthrough(1, d);
+	ok &= d[0] == 0x6000000000000003ULL && d[1] == 1 && d[2] == 0
+	   && d[3] == 0;
+
+	/* Blocked is the same entry with the permission bits gone. */
+	iommu_amd_dte_blocked(1, d);
+	ok &= d[0] == 0x0000000000000003ULL && d[1] == 1;
+
+	/*
+	 * 🔴 And an AMD entry of all zeros is NOT blocked: V=0 forwards.  The
+	 * blocked encoder above must therefore differ from zero, or a table
+	 * that was merely allocated would be a table that permits everything.
+	 */
+	ok &= d[0] != 0;
+
+	/* Intel: present, pass-through, four levels means AW 010b, domain 1. */
+	iommu_vtd_context_passthrough(1, 4, c);
+	ok &= c[0] == 0x9ULL && c[1] == 0x102ULL;
+
+	/* 🔴 And here zero IS blocked, which is the opposite of above. */
+	iommu_vtd_context_blocked(c);
+	ok &= c[0] == 0 && c[1] == 0;
+
+	/* Five levels is AW 011b, and nothing else moves. */
+	iommu_vtd_context_passthrough(1, 5, c);
+	ok &= c[0] == 0x9ULL && c[1] == 0x103ULL;
+
+	/* A root entry keeps the pointer's page and sets present. */
+	iommu_vtd_root_entry(0x123456000ULL, c);
+	ok &= c[0] == 0x123456001ULL && c[1] == 0;
+
+	return ok;
 }
 
 /* Whether one scope's range contains this device. */

@@ -3655,11 +3655,14 @@ static void iommu_selftest(void)
 
 		kputs("UrMach x86-64: ");
 		kputdec(ran);
-		kputs(" capability words decoded, ");
+		kputs(" iommu words decoded and encoded, ");
 		kputdec(wrong);
 		kputs(" wrong");
-		kputs(ok ? " — including one read off real amd silicon\r\n"
-			 : " — WRONG, the decode disagrees with known answers\r\n");
+		kputs(ok ? " — one read off real amd silicon, and the two"
+			   " vendors' empty entries still mean opposite"
+			   " things\r\n"
+			 : " — WRONG, the kernel disagrees with the"
+			   " specifications\r\n");
 	}
 
 	if (iommu_vendor() == IOMMU_NONE) {
