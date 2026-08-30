@@ -2155,8 +2155,31 @@ WriteRPCRoutineArgDescriptor(FILE *file, register routine_t *rt)
     {
 	boolean_t compound = arg->argType->itStruct && arg->argType->itInLine;
 
-	if (RPCPort(arg) || RPCPortArray(arg) ||
-	    RPCFixedArray(arg) || RPCVariableArray(arg))
+	/*
+	 * 🔴 akbServerArg, and it was not tested here.
+	 *
+	 * rtCountArgDescriptors() counts an argument only when it is a server
+	 * argument AND a port or an array; this emitted one for every port or
+	 * array, server argument or not.  So the count and the emission were
+	 * two rules over the same list, and they disagreed: device_request's
+	 * subsystem declared arg_descriptor[9] and initialised FOURTEEN
+	 * groups, which gcc reported as five excess elements per translation
+	 * unit and quietly dropped.
+	 *
+	 * ⚠️ Dropping them was not the damage.  The routine table points each
+	 * routine at &subsystem.arg_descriptor[offset], and those offsets are
+	 * accumulated from the COUNT while the bodies were laid out by the
+	 * EMISSION -- so every routine after the first named a descriptor
+	 * belonging to some other argument.  A table that was wrong where it
+	 * fitted, not merely short where it did not.
+	 *
+	 * Which of the two rules is right is not the question: they have to be
+	 * the same rule, and the counter's is the one the offsets are built
+	 * from.
+	 */
+	if (akCheck(arg->argKind, akbServerArg)
+	    && (RPCPort(arg) || RPCPortArray(arg)
+		|| RPCFixedArray(arg) || RPCVariableArray(arg)))
 	{
 	    WriteRPCArgDescriptor(file, arg, offset);
 	    size = 4;
