@@ -718,7 +718,41 @@ void x86_64_backtrace(uint64_t rbp)
 		const uint64_t *frame;
 		uint64_t next, ret;
 
-		if ((rbp & 7) != 0 || !va_is_canonical(rbp))
+		/*
+		 * 🔴 A KERNEL ADDRESS, NOT MERELY A CANONICAL ONE (#518).
+		 *
+		 * This asked only for canonical, and the check below then
+		 * asked the KERNEL's pmap whether the frame was mapped -- while
+		 * the processor dereferences it under whatever cr3 is live,
+		 * which during a trap from a task is that TASK's.  For a
+		 * kernel address the two agree, because kernel mappings are in
+		 * every address space.  For a low one they do not:
+		 *
+		 *	boot.S leaves an identity map of the low 1 GiB in place,
+		 *	so pmap_extract(kernel_pmap, 0x118) answers YES, and the
+		 *	live user pmap has nothing there.
+		 *
+		 * So a garbage frame pointer in the user half passed a guard
+		 * that was asking about a different address space, and the
+		 * read faulted -- inside the fault reporter, which is the one
+		 * place a fault cannot be reported.  The machine halted.
+		 *
+		 * 🔑 Reachable from an unprivileged task: act_test arm 6 writes
+		 * a non-canonical rip into one of its own threads with
+		 * thread_set_state, the iretq refuses it, and the #GP arrives
+		 * here with a frame chain that is no longer a frame chain.
+		 * ⚠️ TCG does not raise that #GP, so the arm written to prove
+		 * this path has been passing without ever reaching it (#516).
+		 *
+		 * Requiring a kernel address removes the mismatch rather than
+		 * repairing one instance of it: this walker reports the
+		 * KERNEL's call chain, a frame pointer outside the kernel half
+		 * is not part of one, and every address that survives this
+		 * test is one the two pmaps agree about.  It also subsumes the
+		 * canonical check -- everything at or above the kernel half is
+		 * canonical by construction.
+		 */
+		if ((rbp & 7) != 0 || !va_is_kernel(rbp))
 			break;
 
 		/* Both words of the frame have to be there before either is read. */
@@ -1238,6 +1272,36 @@ x86_64_exception(int exc, int code, int subcode)
 	codes[1] = subcode;
 
 	exception(exc, codes, 2);
+	/*NOTREACHED*/
+}
+
+/*
+ * Ring 3 asked to resume at an address the processor will not resume at (#518).
+ *
+ * Called from the syscall return path's slow branch, which the canonical check
+ * takes and nothing else does.  The address in the thread's frame is
+ * non-canonical, so neither SYSRET nor IRETQ can deliver it: SYSRET would fault
+ * at kernel privilege on the CALLER's stack, which is CVE-2012-0217, and IRETQ
+ * faults at kernel privilege on ours -- safe, and until now unhandled, which
+ * halted the machine.
+ *
+ * 🔑 So the fault is synthesised instead of provoked.  It is the same fault the
+ * hardware would raise, given to the same thread, with the difference that the
+ * kernel is still in a state to give it: %gs is the kernel's, the stack is the
+ * kernel's, and the thread's user frame is exactly as ring 3 left it -- which
+ * is what its handler has to read to see the bad address and what it writes
+ * back to resume somewhere else.
+ *
+ * ⚠️ EXC_BAD_INSTRUCTION and not EXC_BAD_ACCESS: it is the general protection
+ * fault's own pair, the one every other #GP is given below, so a handler that
+ * recognises one recognises this.
+ *
+ * ⚠️ Does not return, for the reason x86_64_exception() does not.
+ */
+void
+syscall_return_noncanonical(void)
+{
+	x86_64_exception(EXC_BAD_INSTRUCTION, EXC_X86_64_GPFLT, 0);
 	/*NOTREACHED*/
 }
 
