@@ -29,6 +29,7 @@
 #include <cpu/ioapic.h>
 #include <cpu/lapic.h>	/* lapic_eoi, and which processor to route to */
 #include <cpu/pci_cfg.h>
+#include <cpu/pci_msix.h>	/* #457: a device's own table */
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
 #include <trap/trap.h>	/* the vector table, and the replay path */
@@ -321,9 +322,18 @@ device_md_debugger_break(void)
 
 static unsigned int	msi_next;	/* slots are handed out in order */
 
+/*
+ * Claim a vector and say what a device must write to reach it.
+ *
+ * 🔑 Exported for the boot self-test and for device_md_msi_register() below,
+ * and for nothing else.  It hands out an ADDRESS, which is the thing the
+ * contract above refuses to hand out -- the difference between the two is
+ * exactly who is trusted with it, and the answer is "this file and the test
+ * that has no device".
+ */
 int
-device_md_msi_register(device_md_intr_t handler, unsigned int *slot_out,
-		       unsigned long long *addr_out, unsigned int *data_out)
+msi_claim_vector(device_md_intr_t handler, unsigned int *slot_out,
+		 unsigned long long *addr_out, unsigned int *data_out)
 {
 	unsigned int	slot;
 	unsigned int	vector;
@@ -386,12 +396,90 @@ device_md_msi_register(device_md_intr_t handler, unsigned int *slot_out,
  * is not reused.  Sixteen of them, and reclaiming one honestly means the
  * kernel owning the device's table, which is where #457 is going anyway.
  */
-void
-device_md_msi_unregister(unsigned int slot)
+static void
+msi_release_vector(unsigned int slot)
 {
 	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS)
 		return;
 
 	irq_handler[slot] = 0;
 	trap_set_handler(DEVICE_MD_VECTOR(slot), 0);
+}
+
+/*
+ * ── And the operation the contract actually names ────────────────────
+ *
+ * The caller names a device and one of its table entries.  This finds the
+ * capability, claims a vector, decides the address and the value, and writes
+ * them into the device's table -- so no address ever crosses back, which is
+ * the whole reason the contract is shaped that way (<device/device_machdep.h>).
+ *
+ * ⚠️ The device is REMEMBERED, because unregister has to reach it.  Giving up
+ * a line means masking a pin and the controller stops delivering whatever the
+ * device does; here the address is in the device's own table and the only way
+ * to stop it is to put the mask back there.  Which this side can do, and only
+ * because it is the side that wrote them.
+ */
+static struct pci_msix	msi_device[DEVICE_MD_MSI_MAX];
+static unsigned int	msi_entry_of[DEVICE_MD_MSI_MAX];
+
+int
+device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
+		       unsigned int entry, device_md_intr_t handler,
+		       unsigned int *slot_out)
+{
+	struct pci_msix		m;
+	unsigned int		slot = 0, data = 0;
+	unsigned long long	addr = 0;
+
+	if (slot_out == 0 || handler == 0)
+		return 0;
+
+	if (!pci_msix_probe(0, (uint8_t)bus, (uint8_t)dev, (uint8_t)func, &m))
+		return 0;
+
+	if (entry >= m.vectors)
+		return 0;
+
+	if (!msi_claim_vector(handler, &slot, &addr, &data))
+		return 0;
+
+	/*
+	 * The table before the enable, so the device cannot be let loose on an
+	 * entry that has not been written yet -- and the entry is armed by
+	 * pci_msix_arm()'s last store, which is what makes "written" a moment
+	 * rather than a stretch.
+	 */
+	pci_msix_arm(&m, entry, addr, data);
+	pci_msix_enable(&m);
+
+	msi_device[slot - DEVICE_MD_MSI_BASE] = m;
+	msi_entry_of[slot - DEVICE_MD_MSI_BASE] = entry;
+
+	*slot_out = slot;
+	return 1;
+}
+
+void
+device_md_msi_unregister(unsigned int slot)
+{
+	unsigned int i;
+
+	if (slot < DEVICE_MD_MSI_BASE || slot >= DEVICE_MD_SLOTS)
+		return;
+
+	i = slot - DEVICE_MD_MSI_BASE;
+
+	/*
+	 * 🔴 The DEVICE first, and the handler second.  Between the two an
+	 * arriving message finds a handler that still knows what to do with it;
+	 * the other order leaves a window where the device is still armed at a
+	 * vector nobody claims, and an unclaimed vector halts the machine.
+	 */
+	if (msi_device[i].table != 0) {
+		pci_msix_disarm(&msi_device[i], msi_entry_of[i]);
+		msi_device[i].table = 0;
+	}
+
+	msi_release_vector(slot);
 }

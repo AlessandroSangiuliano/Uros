@@ -187,21 +187,41 @@ extern int		device_md_debugger_break(void);
  * the same hole #432 and #511 exist to close.  This operation exists so that
  * the caller above can be the kernel rather than the driver.
  *
+ * 🔴 AND THE CALLER NEVER SEES THE ADDRESS.  It names a DEVICE and one of
+ * that device's table entries; the machine finds the capability, allocates a
+ * vector, decides the address and the value, and writes them into the
+ * device's table itself.  An interface that answered an address instead would
+ * be an interface whose caller could choose one -- and the caller above this
+ * is an RPC a user-space driver reaches.
+ *
  * `slot' comes back as an interrupt number in the caller's own numbering,
  * continuing the lines rather than starting a second space: from the
  * forwarding table's point of view a notification slot is a notification
  * slot, and whether it arrives on a pin or in a store is exactly what this
- * file exists to keep out of that table.
+ * file exists to keep out of that table.  So device_intr_enable() and the
+ * unregister below take it without knowing which kind it is.
  *
- * Answers zero if the machine has no message-signalled interrupts, or none
- * left.  ⚠️ i386 answers zero always and means it: this tree's i386 has no
- * MSI at all, and a machine that cannot must say so rather than hand back an
- * address that is not one.
+ * Answers zero if the machine has no message-signalled interrupts, if that
+ * device has none, or if there is no slot left.  ⚠️ i386 answers zero always
+ * and means it: this tree's i386 has no MSI at all, and a machine that cannot
+ * must say so rather than accept a request it will not honour.
  */
-extern int		device_md_msi_register(device_md_intr_t handler,
-					       unsigned int *slot_out,
-					       unsigned long long *addr_out,
-					       unsigned int *data_out);
+extern int		device_md_msi_register(unsigned int bus,
+					       unsigned int dev,
+					       unsigned int func,
+					       unsigned int entry,
+					       device_md_intr_t handler,
+					       unsigned int *slot_out);
+
+/*
+ * Give a message-signalled slot back.
+ *
+ * 🔴 Unlike a line, this has to reach the DEVICE.  Masking a pin stops
+ * delivery whatever the device does; here the address and the value are in
+ * the device's own table, so the machine must put the mask back there -- and
+ * it can, because it is the one that wrote them.  A device left armed at a
+ * vector whose handler is gone raises an interrupt nobody claims.
+ */
 extern void		device_md_msi_unregister(unsigned int slot);
 
 #endif	/* _DEVICE_DEVICE_MACHDEP_H_ */

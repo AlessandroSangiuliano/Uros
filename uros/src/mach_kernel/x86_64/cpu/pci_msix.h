@@ -143,4 +143,22 @@ extern void pci_msix_read(const struct pci_msix *m, unsigned int entry,
  */
 extern void pci_msix_enable(const struct pci_msix *m);
 
+/*
+ * ── The vector half, which is not PCI's ──────────────────────────────
+ *
+ * Claim a message-signalled vector and answer what a device must WRITE to
+ * reach it.  Defined in cpu/device_machdep.c, where the slots and the
+ * trampoline live, and declared here because this is where the other half of
+ * the same story is -- a table entry is exactly an address and a value, and
+ * these are the address and the value.
+ *
+ * 🔴 It hands out an ADDRESS, which is the thing <device/device_machdep.h>
+ * refuses to hand out.  The difference between the two is not what they do
+ * but who may call them: this one is for the kernel, and for the boot
+ * self-test that has no device to program.  A driver reaches the other.
+ */
+extern int msi_claim_vector(void (*handler)(int), unsigned int *slot_out,
+			    unsigned long long *address_out,
+			    unsigned int *data_out);
+
 #endif	/* _X86_64_CPU_PCI_MSIX_H_ */

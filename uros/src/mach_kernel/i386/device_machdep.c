@@ -275,13 +275,16 @@ device_md_io_write(unsigned int port, unsigned int size, unsigned int value)
  * not have it.
  */
 int
-device_md_msi_register(device_md_intr_t handler, unsigned int *slot_out,
-		       unsigned long long *addr_out, unsigned int *data_out)
+device_md_msi_register(unsigned int bus, unsigned int dev, unsigned int func,
+		       unsigned int entry, device_md_intr_t handler,
+		       unsigned int *slot_out)
 {
+	(void)bus;
+	(void)dev;
+	(void)func;
+	(void)entry;
 	(void)handler;
 	(void)slot_out;
-	(void)addr_out;
-	(void)data_out;
 	return 0;
 }
 

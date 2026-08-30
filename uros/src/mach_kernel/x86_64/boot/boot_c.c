@@ -3597,7 +3597,7 @@ static void msi_selftest(void)
 	int			had_interrupts;
 	spl_t			old;
 
-	if (!device_md_msi_register(msi_handler, &slot, &addr, &data)) {
+	if (!msi_claim_vector(msi_handler, &slot, &addr, &data)) {
 		kputs("UrMach x86-64: no message-signalled interrupt to claim"
 		      " — WRONG\r\n");
 		return;
@@ -3763,7 +3763,7 @@ static void msix_table_selftest(void)
 		return;
 	}
 
-	if (!device_md_msi_register(msi_handler, &slot, &addr, &data)) {
+	if (!msi_claim_vector(msi_handler, &slot, &addr, &data)) {
 		kputs("UrMach x86-64: no message-signalled slot left to give"
 		      " the device — WRONG\r\n");
 		return;

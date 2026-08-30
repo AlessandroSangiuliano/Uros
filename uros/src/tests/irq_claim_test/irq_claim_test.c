@@ -89,10 +89,17 @@
 #define	ROUND_TRIPS		10
 
 /*
- * A line number the kernel must refuse.  IRQ_FORWARD_MAX is sixteen, so this
- * is one past the end rather than an absurd value -- the bound is what is
- * being checked, and an absurd value would pass a kernel that only rejects
- * absurd values.
+ * A line number the kernel must refuse.
+ *
+ * Sixteen is one past the last LINE, rather than an absurd value: the bound
+ * is what is being checked, and an absurd value would pass a kernel that only
+ * rejects absurd values.
+ *
+ * ⚠️ It is not one past the last SLOT.  The forwarding table is thirty-two
+ * entries as of #457 and the upper half is message-signalled interrupts --
+ * which the kernel hands out and a driver may not name.  Widening the table
+ * without narrowing this check would have let a driver claim slot 16 as
+ * though it were a line, and this arm is what says it cannot.
  */
 #define	OUT_OF_RANGE_IRQ	16u
 
@@ -314,6 +321,79 @@ arm_four_what_is_refused(void)
 	return passed;
 }
 
+/*
+ * [7] and [8]: an interrupt with no wire behind it, asked for from here.
+ *
+ * 🔑 The point of the call is what it does NOT take: there is no address in
+ * it anywhere.  An MSI-X table entry holds an address the DEVICE writes to,
+ * so a driver that could fill one in could aim the device at page zero or at
+ * another task's pages, and no fault would be raised because the write is the
+ * device's.  This says which device and which entry of its table; the kernel
+ * finds the capability, allocates a vector, decides the address and the value
+ * and writes them there.
+ *
+ * ⚠️ Every device is asked, rather than one being named.  Which device has
+ * MSI-X is a property of the machine -- QEMU puts an 82574L on a Q35 and an
+ * 82540EM on the default board, and only the first has a table -- while THAT
+ * THE COUNT MATCHES THE BOARD is a property of the kernel.  Naming a device
+ * would have made this a test of QEMU's defaults.
+ */
+static int
+arm_five_an_interrupt_with_no_wire(void)
+{
+	mach_port_t	port;
+	kern_return_t	kr;
+	unsigned int	slot = 0, accepted = 0, first_slot = 0;
+	unsigned int	dev;
+	int		released_ok = 1;
+
+	for (dev = 0; dev < 32; dev++) {
+		kr = mach_port_allocate(mach_task_self(),
+					MACH_PORT_RIGHT_RECEIVE, &port);
+		if (kr != KERN_SUCCESS)
+			break;
+
+		kr = device_msi_register(master_device, 0, dev, 0, 0, port,
+					 MACH_MSG_TYPE_MAKE_SEND, &slot);
+		if (kr != KERN_SUCCESS) {
+			release(port);
+			continue;
+		}
+
+		if (accepted == 0)
+			first_slot = slot;
+		accepted++;
+
+		if (device_intr_unregister(master_device, slot) != KERN_SUCCESS)
+			released_ok = 0;
+		release(port);
+	}
+
+	printf("irq_claim_test: [7] %u device(s) on bus 0 accepted a"
+	       " message-signalled interrupt, first at slot %u — %s\n",
+	       accepted, first_slot,
+	       accepted == 0
+	       ? "none, which is what a board with no MSI-X should say"
+	       : (first_slot >= 16
+		  ? "a slot the KERNEL chose, above the sixteen a driver can name"
+		  : "WRONG, that is a line number and a line was not asked for"));
+
+	printf("irq_claim_test: [8] giving them back answered %s — %s\n",
+	       released_ok ? "success" : "a failure",
+	       released_ok
+	       ? "the same unregister works for both kinds of slot"
+	       : "WRONG, a message-signalled slot cannot be released");
+
+	/*
+	 * ⚠️ Zero accepted is a PASS on a board with no MSI-X and a FAILURE on
+	 * one that has it, and this program cannot tell the boards apart -- so
+	 * it reports the count and lets the two runs be compared, rather than
+	 * inventing a verdict it has no evidence for.
+	 */
+	return released_ok
+	       && (accepted == 0 || first_slot >= 16) ? 2 : 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -336,7 +416,8 @@ main(int argc, char **argv)
 	passed += arm_two_round_trips();
 	passed += arm_three_nothing_was_delivered();
 	passed += arm_four_what_is_refused();
+	passed += arm_five_an_interrupt_with_no_wire();
 
-	printf("irq_claim_test: %d of 6 arms passed\n", passed);
-	return passed == 6 ? 0 : 1;
+	printf("irq_claim_test: %d of 8 arms passed\n", passed);
+	return passed == 8 ? 0 : 1;
 }
