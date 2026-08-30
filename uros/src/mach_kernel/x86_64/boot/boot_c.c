@@ -3671,6 +3671,17 @@ static void iommu_selftest(void)
 		return;
 	}
 
+	/*
+	 * ⚠️ A machine describing itself twice, if it ever happens.  The first
+	 * reader to find its table ends the search, so without this the second
+	 * table would go unmentioned and the choice would look like there had
+	 * been nothing to choose.
+	 */
+	if (iommu_both_tables())
+		kputs("UrMach x86-64: BOTH VENDORS' TABLES ARE PRESENT — this"
+		      " machine describes itself twice, and only one was"
+		      " read\r\n");
+
 	kputs("UrMach x86-64: dma remapping by ");
 	kputs(iommu_vendor() == IOMMU_INTEL ? "vt-d" : "amd-vi");
 	kputs(", ");

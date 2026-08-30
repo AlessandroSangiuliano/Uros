@@ -11,6 +11,7 @@
 
 #include <stdint.h>
 
+#include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
 
 /*
@@ -36,6 +37,7 @@ static enum iommu_vendor	found_vendor;
 static int			discovered;
 static int			truncated;
 static int			walk_exact;
+static int			both_tables;
 
 static unsigned			platform_address_bits;
 static int			platform_interrupt_remapping;
@@ -198,14 +200,53 @@ enum iommu_vendor iommu_discover(void)
 
 	discovered = 1;
 
-	if (iommu_vtd_read())
+	/*
+	 * ⚠️ The first reader to claim the machine ends it, on the assumption
+	 * that a machine has one vendor's tables or the other's and never
+	 * both.  That assumption is sound on conforming firmware and it was
+	 * SILENT: a machine describing both would have been read as Intel with
+	 * nothing said, because the second reader is never asked.
+	 *
+	 * So the other table is looked for anyway, and found is a FINDING.
+	 * The description does not try to hold two vendors -- that would be a
+	 * shape invented for a machine nobody has -- it holds the one it read
+	 * and says the other was there.
+	 *
+	 * 🔑 It costs one walk of the ACPI root table, once, in the branch
+	 * where a vendor was found, and nothing at all afterwards: this
+	 * function runs once at boot and the guard above is what makes that
+	 * true.  An assumption converted into an observation for the price of
+	 * twenty signature comparisons at boot.
+	 *
+	 * 🔴 AND THE TRUE BRANCH HAS NEVER RUN.  The lookup is exercised on
+	 * every boot with an engine -- it answers no on the Intel machine and
+	 * no on the AMD one, which is the arithmetic working -- but no machine
+	 * reachable from here can make it answer yes.  QEMU declines:
+	 *
+	 *	-device amd-iommu: QEMU does not support multiple vIOMMUs
+	 *	for x86 yet.
+	 *
+	 * ⚠️ So its silence is not evidence that no such machine exists.  It
+	 * is a report that has been wired up and never fired, which is a
+	 * different thing from a report that has fired and said no -- and
+	 * saying which is the whole reason this paragraph is here.
+	 */
+	if (iommu_vtd_read()) {
 		iommu_record_vendor(IOMMU_INTEL);
-	else if (iommu_amd_read())
+		both_tables = acpi_find_table("IVRS") != 0;
+	} else if (iommu_amd_read()) {
 		iommu_record_vendor(IOMMU_AMD);
-	else
+		both_tables = acpi_find_table("DMAR") != 0;
+	} else {
 		iommu_record_vendor(IOMMU_NONE);
+	}
 
 	return found_vendor;
+}
+
+int iommu_both_tables(void)
+{
+	return both_tables;
 }
 
 enum iommu_vendor iommu_vendor(void)

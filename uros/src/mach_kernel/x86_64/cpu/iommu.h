@@ -232,6 +232,25 @@ enum iommu_vendor iommu_discover(void);
 enum iommu_vendor iommu_vendor(void);
 
 /*
+ * The OTHER vendor's table was present too.
+ *
+ * 🔴 Which vendor a machine has is decided at RUN TIME and by the firmware,
+ * not at build time and not by the processor: both readers are always
+ * compiled, each asks ACPI for its own table by name, and the one that finds
+ * it claims the machine.  ⚠️ The CPU's vendor says nothing about it -- a VT-d
+ * engine on an AMD processor is an ordinary thing to emulate and this kernel
+ * reads it correctly, which is measured and not assumed.
+ *
+ * The first reader to succeed ends the search, on the assumption that a
+ * machine has one or the other.  This is that assumption looked at: conforming
+ * firmware writes one, so a machine with both is describing itself twice and
+ * the kernel is believing half of it.  Answering yes does not change which
+ * vendor was read -- it says the choice was made where there was something to
+ * choose.
+ */
+int iommu_both_tables(void);
+
+/*
  * ── What the TABLE said about the machine, not what an engine answered ──
  *
  * Kept apart from the per-unit fields deliberately.  These are the firmware's
