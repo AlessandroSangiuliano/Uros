@@ -33,6 +33,7 @@
 #include <device/device_machdep.h>
 #include <device/pci.h>		/* #457: the capability list */	/* #457: claim a line as a driver does */
 #include <cpu/desc.h>
+#include <cpu/iommu.h>		/* #432: what polices DMA, if anything */
 #include <cpu/ioapic.h>
 #include <ddb/cons.h>
 #include <ddb/ddb.h>
@@ -3558,6 +3559,265 @@ static void pci_cap_selftest(void)
 }
 
 /*
+ * What this machine has to police DMA with (#432, stage 1).
+ *
+ * 🔴 THE ONE SENTENCE THIS EXISTS TO MAKE SAYABLE: a userspace driver on a
+ * machine with no remapping hardware can reach all of physical memory, because
+ * it is handed the physical address of its buffer and the device writes
+ * wherever it is told.  Until this ran, the kernel could not tell you which
+ * kind of machine it was on — so every isolation property claimed for the
+ * driver model was enforced by the driver being well behaved, and nothing
+ * anywhere could say so out loud.
+ *
+ * ⚠️ Nothing here changes how any device reaches memory.  It reads two kinds
+ * of thing that are easy to confuse and are kept apart on purpose:
+ *
+ *	the TABLE     — what the firmware says the machine has
+ *	the REGISTERS — what each engine says about itself
+ *
+ * A misparsed table produces plausible numbers by construction: they are real
+ * bytes from a real table, read one field over.  Reading the engine's own
+ * version register is the cheapest thing that cannot be fooled that way, and
+ * it is why the register base is followed rather than merely printed.
+ *
+ * ⚠️ Absence is a real answer here, and on both boards it is the one we get:
+ * QEMU builds a DMAR only when asked for `-device intel-iommu'.  Which means
+ * this check does NOT discriminate on an ordinary run — it is confirmed by the
+ * run that has one, and the line it prints says which kind of run this was so
+ * that a green board is never mistaken for a walk that worked.
+ *
+ * ── Which of these lines discriminate, measured rather than assumed ──────
+ *
+ * Moving one engine's register base a megabyte off, with everything else left
+ * alone, changed FOUR of them: the registers stopped answering, the two
+ * cross-checks below both fired, and the verdict went to "only in part".
+ *
+ * 🔑 And one line did NOT move: "the walk consumed the table exactly" stayed
+ * true with a base address that named nothing.  That is the limit of that
+ * check and it is worth knowing rather than discovering — it compares where
+ * the structures END, so it catches a misread LENGTH and cannot catch a
+ * misread FIELD.  The register read is what catches the second, which is why
+ * both are here and neither is enough.
+ */
+static void iommu_selftest(void)
+{
+	unsigned		units;
+	unsigned		answered = 0;
+	unsigned		remapping = 0;
+
+	/*
+	 * ⚠️ Asked twice on purpose.  iommu_discover() answers what it found,
+	 * and iommu_vendor() answers what it RECORDED, and everything after
+	 * this stage will only ever see the second -- so the reading below is
+	 * taken through the accessor a later caller would use rather than
+	 * through the return value only this one can see.
+	 */
+	iommu_discover();
+	units = iommu_unit_count();
+
+	if (iommu_vendor() == IOMMU_NONE) {
+		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
+		      " driver here can reach ALL of physical memory (#432)\r\n");
+		return;
+	}
+
+	kputs("UrMach x86-64: dma remapping by ");
+	kputs(iommu_vendor() == IOMMU_INTEL ? "vt-d" : "amd-vi");
+	kputs(", ");
+	kputdec(units);
+	kputs(" engine(s), platform address width ");
+	kputdec(iommu_platform_address_bits());
+	kputs(" bits");
+	if (iommu_x2apic_discouraged())
+		kputs(", firmware asks for no x2apic");
+	kputs("\r\n");
+
+	for (unsigned i = 0; i < units; i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+
+		kputs("UrMach x86-64:   engine ");
+		kputdec(i);
+		kputs(" segment ");
+		kputdec(u->segment);
+		kputs(" at ");
+		kputhex64(u->register_base);
+		/*
+		 * ⚠️ The window SIZE is printed, and it is not decoration.
+		 *
+		 * In a DRHD the flags byte and the size byte are adjacent, and
+		 * reading them the wrong way round produces a result that
+		 * looks entirely reasonable from every other line here: the
+		 * base address is still right, so the registers still answer,
+		 * and the only two symptoms are a `covers everything' that is
+		 * missing and a window twice the size it should be.  One of
+		 * those is invisible without the other, so both are shown.
+		 */
+		kputs(" window ");
+		kputdec(u->register_size);
+		kputs(u->covers_rest ? " bytes, covering everything else, "
+				     : " bytes, covering ");
+		kputdec(u->scope_count);
+		kputs(" named device(s)\r\n");
+
+		/*
+		 * And which ones.  Named rather than counted because stage 3
+		 * has to put each of them in a domain, and a device that was
+		 * counted and not named is a device nobody puts anywhere.
+		 */
+		if (u->scope_count) {
+			kputs("UrMach x86-64:    ");
+			for (unsigned s = 0; s < u->scope_count; s++) {
+				const struct iommu_scope *sc
+					= iommu_scope(u->scope_first + s);
+
+				kputs(" ");
+				kputdec(sc->bus);
+				kputs(":");
+				kputdec(sc->dev);
+				kputs(".");
+				kputdec(sc->func);
+				if (sc->kind == IOMMU_SCOPE_IOAPIC)
+					kputs("(ioapic)");
+				else if (sc->kind == IOMMU_SCOPE_HPET)
+					kputs("(hpet)");
+				else if (sc->kind == IOMMU_SCOPE_BRIDGE)
+					kputs("(bridge)");
+				/*
+				 * A path longer than one hop means the bus
+				 * above is where the ROUTE starts, not where
+				 * the device is.  Said here rather than
+				 * silently, because the two look identical.
+				 */
+				if (sc->depth > 1)
+					kputs("(behind bridges)");
+			}
+			kputs("\r\n");
+		}
+
+		if (!u->answered) {
+			/*
+			 * The table gave an address and nothing was there.
+			 * This is the failure the register read exists to
+			 * catch, so it is named rather than folded into a
+			 * count — a wrong base address and a missing engine
+			 * look identical from the table's side.
+			 */
+			kputs("UrMach x86-64:     ITS REGISTERS DID NOT ANSWER"
+			      " — the table's address names nothing\r\n");
+			continue;
+		}
+
+		answered++;
+		if (u->interrupt_remapping)
+			remapping++;
+
+		kputs("UrMach x86-64:     version ");
+		kputdec(u->version >> 4);
+		kputs(".");
+		kputdec(u->version & 0xF);
+		kputs(", translates ");
+		kputdec(u->address_bits);
+		kputs(" bits, page tables");
+		for (unsigned l = 0; l < 8; l++)
+			if (u->page_levels & (1u << l)) {
+				kputs(" ");
+				kputdec(l);
+				kputs("-level");
+			}
+		kputs(u->coherent_walk ? ", coherent walks" : ", NON-coherent walks");
+		kputs(u->interrupt_remapping ? ", remaps interrupts\r\n"
+					     : ", no interrupt remapping\r\n");
+
+		kputs("UrMach x86-64:     caps ");
+		kputhex64(u->vendor_caps[0]);
+		kputs(" ");
+		kputhex64(u->vendor_caps[1]);
+		kputs("\r\n");
+	}
+
+	for (unsigned i = 0; i < iommu_reserved_count(); i++) {
+		const struct iommu_reserved *r = iommu_reserved(i);
+
+		/*
+		 * The regions firmware left devices running in.  Reported one
+		 * by one rather than counted, because stage 2 has to map every
+		 * one of them and a region that was counted and not named is a
+		 * region nobody maps.
+		 */
+		kputs("UrMach x86-64:   reserved ");
+		kputhex64(r->base);
+		kputs("..");
+		kputhex64(r->limit);
+		kputs(" for ");
+		kputdec(r->scope_count);
+		kputs(" device(s), which must keep reaching it\r\n");
+	}
+
+	/*
+	 * ⚠️ The two independent statements about where the structures end.
+	 * See iommu_walk_exact(): this is the only check here that a
+	 * misparsed table cannot pass by accident, because it compares this
+	 * reader's arithmetic against a number the firmware wrote.
+	 */
+	kputs("UrMach x86-64:   the walk ");
+	kputs(iommu_walk_exact()
+	      ? "consumed the table exactly"
+	      : "DID NOT ADD UP — structures were misread");
+	kputs(iommu_truncated() ? ", and there was more than fits\r\n"
+				: "\r\n");
+
+	/*
+	 * The table's claim against the silicon's.  A disagreement is a
+	 * finding and not a formality: #457 programs MSI-X tables from the
+	 * kernel precisely because nothing polices what a device writes to
+	 * 0xFEE00000, and whether that can ever become enforced rather than
+	 * conventional is exactly this bit.
+	 *
+	 * ⚠️ EVERY answered engine, not one of them.  The first version asked
+	 * whether any engine agreed, which on a machine with four engines and
+	 * one that remaps would have read as agreement -- and the devices
+	 * behind the other three would have had their interrupts unpoliced
+	 * with nothing said.  A machine that claims nothing has to have no
+	 * engine that does; a machine that claims it has to have them all.
+	 */
+	kputs("UrMach x86-64:   interrupt remapping: firmware says ");
+	kputs(iommu_platform_interrupt_remapping() ? "yes" : "no");
+	kputs(", ");
+	kputdec(remapping);
+	kputs(" of ");
+	kputdec(answered);
+	kputs(" engine(s) agree");
+	kputs((iommu_platform_interrupt_remapping()
+	       ? (answered > 0 && remapping == answered)
+	       : (remapping == 0))
+	      ? "\r\n" : " — THEY DISAGREE\r\n");
+
+	/*
+	 * The other place the table and the silicon can disagree, and the one
+	 * that costs a driver rather than an interrupt: how far an address may
+	 * travel on this machine against how far an engine can translate.  An
+	 * engine narrower than its platform is a device that can be handed an
+	 * address it will happily reach and no engine can police -- which is
+	 * the exact hole #432 exists to close, reappearing inside the thing
+	 * that closes it.
+	 */
+	kputs("UrMach x86-64:   every engine reaches the platform's ");
+	kputdec(iommu_platform_address_bits());
+	kputs(" bits");
+	kputs(iommu_address_bits_ok(iommu_platform_address_bits())
+	      ? "\r\n"
+	      : " — NO, AN ENGINE IS NARROWER THAN THE MACHINE\r\n");
+
+	/*
+	 * And the sentence at the top, now that it can be said with evidence.
+	 */
+	kputs("UrMach x86-64:   this machine could enforce driver isolation");
+	kputs(answered == units && units > 0 && iommu_walk_exact()
+	      ? " — #432 stages 2 and 3 have hardware to use\r\n"
+	      : " ONLY IN PART — see the lines above\r\n");
+}
+
+/*
  * An interrupt with no wire behind it (#457).
  *
  * 🔑 Delivering an MSI is an ordinary 32-bit store.  Which means this test
@@ -5270,6 +5530,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	timer_selftest();
 	pci_cfg_selftest();
 	pci_cap_selftest();
+	iommu_selftest();
 	msi_selftest();
 	msix_table_selftest();
 	ioapic_selftest();
