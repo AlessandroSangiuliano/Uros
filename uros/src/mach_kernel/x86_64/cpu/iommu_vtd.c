@@ -19,7 +19,12 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/pci_cfg.h>
+#include <pmap/bootmem.h>
+#include <pmap/layout.h>
 #include <pmap/pmap.h>
+
+#include <device/pci.h>		/* PCI_VENDOR_ID */
 
 /* ------------------------------------------------------------------ */
 /*  The table                                                           */
@@ -334,6 +339,124 @@ void iommu_vtd_context_blocked(uint64_t out[2])
 {
 	out[0] = 0;
 	out[1] = 0;
+}
+
+/*
+ * ── Stage 2a: the root and context tables, built and read back ───────
+ *
+ * A root table of 256 entries, one per bus, each pointing at a context table
+ * of 256 entries, one per device/function.  Both are 4KB and both are indexed
+ * by a byte, so neither needs a size field.
+ *
+ * ⚠️ A context table is allocated only for a bus that has a device on it.  The
+ * alternative is 256 of them, a megabyte, nearly all describing buses that do
+ * not exist -- and an absent bus needs no table because its root entry stays
+ * NOT PRESENT, which on this vendor already means blocked.  🔑 That is the
+ * asymmetry paying off in the direction that costs memory rather than safety:
+ * the same shortcut on AMD would leave devices forwarding untranslated.
+ */
+#define	VTD_BUSES		256u
+#define	VTD_DEVFNS		256u
+#define	VTD_ENTRY_WORDS		2u		/* 128 bits */
+#define	VTD_ECAP_PT(e)		((((e) >> 6) & 0x1) != 0)
+
+/* The deepest page table the engines all support, as a level count. */
+static unsigned deepest_level(void)
+{
+	uint32_t common = 0xFFFFFFFFu;
+	unsigned deepest = 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		common &= iommu_unit(i)->page_levels;
+
+	for (unsigned l = 0; l < 32; l++)
+		if (common & (1u << l))
+			deepest = l;
+
+	return deepest;
+}
+
+int iommu_vtd_build(void)
+{
+	uint64_t root_pa;
+	volatile uint64_t *root;
+	unsigned levels = deepest_level();
+	unsigned contexts = 0, devices = 0, frames = 1;
+
+	if (levels == 0)
+		return 0;
+
+	/*
+	 * 🔴 Pass-through is RESERVED on hardware that does not report it, and
+	 * an entry using it there faults on everything while looking perfectly
+	 * formed.  Asked of every engine, not the first: a machine whose
+	 * engines disagree has no single answer, and building for the ones
+	 * that can would leave the others faulting.
+	 */
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		if (!iommu_unit(i)->answered
+		    || !VTD_ECAP_PT(iommu_unit(i)->vendor_caps[1]))
+			return 0;
+
+	root_pa = boot_frame_alloc();
+	if (root_pa == 0)
+		return 0;
+
+	root = (volatile uint64_t *)(uintptr_t)phys_to_direct(root_pa);
+
+	for (unsigned bus = 0; bus < VTD_BUSES; bus++) {
+		uint64_t ctx_pa;
+		volatile uint64_t *ctx;
+		uint64_t entry[VTD_ENTRY_WORDS];
+		int present = 0;
+
+		for (unsigned d = 0; d < 32 && !present; d++)
+			for (unsigned f = 0; f < 8; f++)
+				if (pci_cfg_read(0, (uint8_t)bus, (uint8_t)d,
+						 (uint8_t)f, PCI_VENDOR_ID)
+				    != 0xFFFFFFFFu) {
+					present = 1;
+					break;
+				}
+
+		if (!present) {
+			/*
+			 * Left not present, which blocks.  Written rather than
+			 * assumed: see the note above about zeroed frames.
+			 */
+			root[bus * VTD_ENTRY_WORDS + 0] = 0;
+			root[bus * VTD_ENTRY_WORDS + 1] = 0;
+			continue;
+		}
+
+		ctx_pa = boot_frame_alloc();
+		if (ctx_pa == 0)
+			return 0;
+		frames++;
+
+		ctx = (volatile uint64_t *)(uintptr_t)phys_to_direct(ctx_pa);
+		iommu_vtd_context_passthrough(IOMMU_DOMAIN_PASSTHROUGH, levels,
+					      entry);
+
+		for (unsigned i = 0; i < VTD_DEVFNS; i++) {
+			ctx[i * VTD_ENTRY_WORDS + 0] = entry[0];
+			ctx[i * VTD_ENTRY_WORDS + 1] = entry[1];
+			devices++;
+		}
+
+		for (unsigned i = 0; i < VTD_DEVFNS; i++)
+			if (ctx[i * VTD_ENTRY_WORDS + 0] != entry[0]
+			    || ctx[i * VTD_ENTRY_WORDS + 1] != entry[1])
+				return 0;
+
+		iommu_vtd_root_entry(ctx_pa, entry);
+		root[bus * VTD_ENTRY_WORDS + 0] = entry[0];
+		root[bus * VTD_ENTRY_WORDS + 1] = entry[1];
+		contexts++;
+	}
+
+	iommu_record_tables(root_pa, 4096, 0, 0, devices, contexts, frames);
+	return 1;
 }
 
 /*

@@ -353,6 +353,43 @@ int iommu_decode_check(unsigned *ran, unsigned *wrong);
 int iommu_unit_for(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func);
 
 /*
+ * ── Stage 2a: the tables, built and read back, hardware untouched ────
+ *
+ * What was built.  All zero when nothing was, which is the state on a machine
+ * with no remapping hardware and on one where the frames could not be found.
+ */
+struct iommu_tables {
+	uint64_t	root;		/* device table (AMD) or root table   */
+	uint64_t	root_bytes;
+	uint64_t	command;	/* AMD's command buffer, else zero    */
+	uint64_t	event;		/* AMD's event log, else zero         */
+	unsigned	devices;	/* device entries actually written    */
+	unsigned	contexts;	/* Intel's per-bus tables, else zero  */
+	unsigned	frames;		/* what it cost, in 4K frames         */
+	int		verified;	/* every entry read back as written   */
+};
+
+/*
+ * Build the translation tables with every device passing through, and read
+ * them back.  Answers non-zero when they are built and verified.
+ *
+ * 🔴 NOT ONE REGISTER IS WRITTEN.  A machine that booted before this boots
+ * after it, unchanged, which is why it lands separately from the step that
+ * enables translation -- that step is the first in #432 that can stop a
+ * machine, and it should not arrive in the same commit as the arithmetic it
+ * depends on.
+ *
+ * ⚠️ Reading back is not a formality.  These structures are written once and
+ * read only by hardware, so a wrong entry produces no wrong answer: it
+ * produces a device that is not policed, or one that faults on everything,
+ * and neither says which entry was wrong.  The read-back is the last moment
+ * anything can be checked cheaply.
+ */
+int iommu_build_passthrough(void);
+
+const struct iommu_tables *iommu_tables(void);
+
+/*
  * Whether an address width, in bits, is one every unit can reach.
  *
  * Asked rather than derived by the caller because the answer is the MINIMUM

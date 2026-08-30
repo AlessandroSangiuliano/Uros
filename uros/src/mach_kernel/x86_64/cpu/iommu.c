@@ -248,6 +248,50 @@ int iommu_walk_exact(void)
 	return walk_exact;
 }
 
+/* ------------------------------------------------------------------ */
+/*  Stage 2a: the tables, built and read back, hardware untouched       */
+/* ------------------------------------------------------------------ */
+
+static struct iommu_tables built;
+
+void iommu_record_tables(uint64_t root, uint64_t root_bytes,
+			 uint64_t command, uint64_t event,
+			 unsigned devices, unsigned contexts, unsigned frames)
+{
+	built.root = root;
+	built.root_bytes = root_bytes;
+	built.command = command;
+	built.event = event;
+	built.devices = devices;
+	built.contexts = contexts;
+	built.frames = frames;
+	built.verified = 1;
+}
+
+int iommu_build_passthrough(void)
+{
+	/*
+	 * Once, and only where there is something to build for.  A machine
+	 * with no engine gets no tables -- two megabytes for hardware that
+	 * does not exist would be a cost paid by every machine to describe
+	 * what none of them has.
+	 */
+	if (built.verified)
+		return 1;
+	if (found_vendor == IOMMU_NONE)
+		return 0;
+
+	if (found_vendor == IOMMU_INTEL)
+		return iommu_vtd_build();
+
+	return iommu_amd_build();
+}
+
+const struct iommu_tables *iommu_tables(void)
+{
+	return &built;
+}
+
 unsigned iommu_platform_address_bits(void)
 {
 	return platform_address_bits;

@@ -4004,6 +4004,35 @@ static void iommu_selftest(void)
 	}
 
 	/*
+	 * Stage 2a: the tables that would be programmed, built and read back.
+	 *
+	 * 🔴 NOTHING IS PROGRAMMED.  This allocates, fills and verifies, and
+	 * writes not one engine register — so a machine that booted before it
+	 * boots after it.  Enabling translation is the next step and the first
+	 * one in #432 that can stop a machine, which is why it does not arrive
+	 * in the same boot as the arithmetic it depends on.
+	 */
+	{
+		int ok = iommu_build_passthrough();
+		const struct iommu_tables *t = iommu_tables();
+
+		kputs("UrMach x86-64:   passthrough tables ");
+		if (!ok) {
+			kputs("COULD NOT BE BUILT — no frames, or an engine"
+			      " that cannot pass through\r\n");
+		} else {
+			kputs("at ");
+			kputhex64(t->root);
+			kputs(", ");
+			kputdec(t->devices);
+			kputs(" entries in ");
+			kputdec(t->frames);
+			kputs(" frames, every one read back — and nothing"
+			      " programmed\r\n");
+		}
+	}
+
+	/*
 	 * And the sentence at the top, now that it can be said with evidence.
 	 */
 	kputs("UrMach x86-64:   this machine could enforce driver isolation");

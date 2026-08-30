@@ -29,6 +29,8 @@
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
 #include <cpu/pci_cfg.h>
+#include <pmap/bootmem.h>
+#include <pmap/layout.h>
 #include <pmap/pmap.h>
 
 /* ------------------------------------------------------------------ */
@@ -382,6 +384,79 @@ void iommu_amd_dte_blocked(uint16_t domain, uint64_t out[4])
 	out[1] = domain;
 	out[2] = 0;
 	out[3] = 0;
+}
+
+/*
+ * ── Stage 2a: the device table, built and read back ──────────────────
+ *
+ * One entry per 16-bit device id: 65536 entries of 32 bytes, two megabytes,
+ * which is the whole of what the Device Table Base register can describe and
+ * the whole of what this machine's own IVRS needs -- its device entries name
+ * ranges reaching ff:1f.7.
+ *
+ * 🔴 EVERY ENTRY IS WRITTEN, and the allocator's zeroing is not allowed to
+ * mean anything.  An all-zero entry has V=0, which forwards without
+ * translation; a table that was merely allocated is a table that permits
+ * everything, and it would look identical to one that had been configured.
+ */
+#define	AMD_DEVICE_IDS		65536u
+#define	AMD_DTE_WORDS		4u		/* 32 bytes */
+#define	AMD_DEVICE_TABLE_FRAMES	((AMD_DEVICE_IDS * AMD_DTE_WORDS * 8u) / 4096u)
+
+_Static_assert(AMD_DEVICE_TABLE_FRAMES == 512,
+	       "the device table is two megabytes, which is its architectural maximum");
+
+int iommu_amd_build(void)
+{
+	uint64_t table, command, event;
+	volatile uint64_t *dt;
+	uint64_t want[AMD_DTE_WORDS];
+	unsigned written = 0;
+
+	table = boot_frames_alloc(AMD_DEVICE_TABLE_FRAMES);
+	if (table == 0)
+		return 0;
+
+	/*
+	 * The command buffer and the event log, one frame each, which is the
+	 * smallest either may be.  Allocated here rather than in stage 2b
+	 * because an engine cannot be enabled without them and finding that
+	 * out with translation half on is not a discovery anyone wants.
+	 */
+	command = boot_frame_alloc();
+	event = boot_frame_alloc();
+	if (command == 0 || event == 0)
+		return 0;
+
+	dt = (volatile uint64_t *)(uintptr_t)phys_to_direct(table);
+	iommu_amd_dte_passthrough(IOMMU_DOMAIN_PASSTHROUGH, want);
+
+	for (unsigned i = 0; i < AMD_DEVICE_IDS; i++) {
+		dt[i * AMD_DTE_WORDS + 0] = want[0];
+		dt[i * AMD_DTE_WORDS + 1] = want[1];
+		dt[i * AMD_DTE_WORDS + 2] = want[2];
+		dt[i * AMD_DTE_WORDS + 3] = want[3];
+		written++;
+	}
+
+	/*
+	 * ⚠️ ALL of them read back, not a sample.  A sample is exactly the
+	 * check that misses the one entry a loop got wrong, and these are
+	 * written once and read only by hardware -- there is no later moment
+	 * when a wrong one produces a wrong answer instead of an unpoliced
+	 * device.
+	 */
+	for (unsigned i = 0; i < AMD_DEVICE_IDS; i++)
+		if (dt[i * AMD_DTE_WORDS + 0] != want[0]
+		    || dt[i * AMD_DTE_WORDS + 1] != want[1]
+		    || dt[i * AMD_DTE_WORDS + 2] != want[2]
+		    || dt[i * AMD_DTE_WORDS + 3] != want[3])
+			return 0;
+
+	iommu_record_tables(table, (uint64_t)AMD_DEVICE_TABLE_FRAMES * 4096u,
+			    command, event, written, 0,
+			    AMD_DEVICE_TABLE_FRAMES + 2u);
+	return 1;
 }
 
 /* A scope whose range is a single device: AMD's ordinary case. */
