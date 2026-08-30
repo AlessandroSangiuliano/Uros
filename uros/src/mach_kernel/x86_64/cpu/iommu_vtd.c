@@ -19,7 +19,12 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <cpu/pci_cfg.h>
+#include <pmap/bootmem.h>
+#include <pmap/layout.h>
 #include <pmap/pmap.h>
+
+#include <device/pci.h>		/* PCI_VENDOR_ID */
 
 /* ------------------------------------------------------------------ */
 /*  The table                                                           */
@@ -337,6 +342,233 @@ void iommu_vtd_context_blocked(uint64_t out[2])
 }
 
 /*
+ * ── Stage 2a: the root and context tables, built and read back ───────
+ *
+ * A root table of 256 entries, one per bus, each pointing at a context table
+ * of 256 entries, one per device/function.  Both are 4KB and both are indexed
+ * by a byte, so neither needs a size field.
+ *
+ * ⚠️ A context table is allocated only for a bus that has a device on it.  The
+ * alternative is 256 of them, a megabyte, nearly all describing buses that do
+ * not exist -- and an absent bus needs no table because its root entry stays
+ * NOT PRESENT, which on this vendor already means blocked.  🔑 That is the
+ * asymmetry paying off in the direction that costs memory rather than safety:
+ * the same shortcut on AMD would leave devices forwarding untranslated.
+ */
+#define	VTD_BUSES		256u
+#define	VTD_DEVFNS		256u
+#define	VTD_ENTRY_WORDS		2u		/* 128 bits */
+#define	VTD_ECAP_PT(e)		((((e) >> 6) & 0x1) != 0)
+
+/* The deepest page table the engines all support, as a level count. */
+static unsigned deepest_level(void)
+{
+	uint32_t common = 0xFFFFFFFFu;
+	unsigned deepest = 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		common &= iommu_unit(i)->page_levels;
+
+	for (unsigned l = 0; l < 32; l++)
+		if (common & (1u << l))
+			deepest = l;
+
+	return deepest;
+}
+
+int iommu_vtd_build(void)
+{
+	uint64_t root_pa;
+	volatile uint64_t *root;
+	unsigned levels = deepest_level();
+	unsigned contexts = 0, devices = 0, frames = 1;
+
+	if (levels == 0)
+		return 0;
+
+	/*
+	 * 🔴 Pass-through is RESERVED on hardware that does not report it, and
+	 * an entry using it there faults on everything while looking perfectly
+	 * formed.  Asked of every engine, not the first: a machine whose
+	 * engines disagree has no single answer, and building for the ones
+	 * that can would leave the others faulting.
+	 */
+	for (unsigned i = 0; i < iommu_unit_count(); i++)
+		if (!iommu_unit(i)->answered
+		    || !VTD_ECAP_PT(iommu_unit(i)->vendor_caps[1]))
+			return 0;
+
+	root_pa = boot_frame_alloc();
+	if (root_pa == 0)
+		return 0;
+
+	root = (volatile uint64_t *)(uintptr_t)phys_to_direct(root_pa);
+
+	for (unsigned bus = 0; bus < VTD_BUSES; bus++) {
+		uint64_t ctx_pa;
+		volatile uint64_t *ctx;
+		uint64_t entry[VTD_ENTRY_WORDS];
+		int present = 0;
+
+		for (unsigned d = 0; d < 32 && !present; d++)
+			for (unsigned f = 0; f < 8; f++)
+				if (pci_cfg_read(0, (uint8_t)bus, (uint8_t)d,
+						 (uint8_t)f, PCI_VENDOR_ID)
+				    != 0xFFFFFFFFu) {
+					present = 1;
+					break;
+				}
+
+		if (!present) {
+			/*
+			 * Left not present, which blocks.  Written rather than
+			 * assumed: see the note above about zeroed frames.
+			 */
+			root[bus * VTD_ENTRY_WORDS + 0] = 0;
+			root[bus * VTD_ENTRY_WORDS + 1] = 0;
+			continue;
+		}
+
+		ctx_pa = boot_frame_alloc();
+		if (ctx_pa == 0)
+			return 0;
+		frames++;
+
+		ctx = (volatile uint64_t *)(uintptr_t)phys_to_direct(ctx_pa);
+		iommu_vtd_context_passthrough(IOMMU_DOMAIN_PASSTHROUGH, levels,
+					      entry);
+
+		for (unsigned i = 0; i < VTD_DEVFNS; i++) {
+			ctx[i * VTD_ENTRY_WORDS + 0] = entry[0];
+			ctx[i * VTD_ENTRY_WORDS + 1] = entry[1];
+			devices++;
+		}
+
+		for (unsigned i = 0; i < VTD_DEVFNS; i++)
+			if (ctx[i * VTD_ENTRY_WORDS + 0] != entry[0]
+			    || ctx[i * VTD_ENTRY_WORDS + 1] != entry[1])
+				return 0;
+
+		iommu_vtd_root_entry(ctx_pa, entry);
+		root[bus * VTD_ENTRY_WORDS + 0] = entry[0];
+		root[bus * VTD_ENTRY_WORDS + 1] = entry[1];
+		contexts++;
+	}
+
+	iommu_record_tables(root_pa, 4096, 0, 0, devices, contexts, frames);
+	return 1;
+}
+
+/*
+ * ── Stage 2b: set the root pointer, invalidate, enable ───────────────
+ *
+ * Rev 5.20.  GCMD's bits are WRITE-ONLY and the register takes one command at
+ * a time, so each write must carry the state of everything already on --
+ * which is read out of GSTS, whose bits sit at the same positions.  🔑 A
+ * read-modify-write of GCMD itself would read zeros and turn off whatever was
+ * running.
+ */
+#define	VTD_GCMD	0x18
+#define	VTD_GSTS	0x1C
+#define	VTD_RTADDR	0x20
+#define	VTD_CCMD	0x28
+
+#define	VTD_GCMD_TE	(1ULL << 31)	/* translation enable            */
+#define	VTD_GCMD_SRTP	(1ULL << 30)	/* set root table pointer        */
+#define	VTD_GSTS_TES	(1ULL << 31)
+#define	VTD_GSTS_RTPS	(1ULL << 30)
+
+/* The bits of GSTS that describe state worth carrying into the next GCMD. */
+#define	VTD_GSTS_KEEP	0x96FFFFFFu
+
+#define	VTD_CCMD_ICC	(1ULL << 63)	/* invalidate context cache      */
+#define	VTD_CCMD_GLOBAL	(1ULL << 61)	/* ... globally                  */
+#define	VTD_IOTLB_IVT	(1ULL << 63)
+#define	VTD_IOTLB_GLOBAL (1ULL << 60)
+#define	VTD_ECAP_IRO(e)	((unsigned)((((e) >> 8) & 0x3FF) * 16))
+
+/*
+ * Spin until a bit settles, bounded.
+ *
+ * ⚠️ Bounded because this runs before any timer and an engine that never
+ * answers would hang the boot with nothing on the screen -- which is the one
+ * outcome worse than a failure, since it cannot be reported.
+ */
+static int wait_bit(volatile uint8_t *regs, unsigned off, uint64_t bit,
+		    int want, int wide)
+{
+	for (unsigned spin = 0; spin < 1000000u; spin++) {
+		uint64_t v = wide ? *(volatile uint64_t *)(regs + off)
+				  : *(volatile uint32_t *)(regs + off);
+
+		if (((v & bit) != 0) == (want != 0))
+			return 1;
+	}
+
+	return 0;
+}
+
+int iommu_vtd_enable(void)
+{
+	const struct iommu_tables *t = iommu_tables();
+	unsigned enabled = 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+		uint32_t keep;
+		unsigned iro;
+
+		if (!u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		/*
+		 * The root table, in legacy mode: TTM is bits 11:10 and zero
+		 * is what says so.  Written before SRTP, which is what makes
+		 * the engine read it.
+		 */
+		*(volatile uint64_t *)(regs + VTD_RTADDR) = t->root;
+
+		keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+		*(volatile uint32_t *)(regs + VTD_GCMD) =
+			keep | (uint32_t)VTD_GCMD_SRTP;
+		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_RTPS, 1, 0))
+			return 0;
+
+		/*
+		 * 🔴 INVALIDATE BEFORE ENABLING, both caches, globally.  The
+		 * engine may hold entries from whoever ran it before us --
+		 * firmware, or a previous boot that left it on -- and a
+		 * translation cached against a table we have replaced is a
+		 * device reaching memory by an old description.  Costs two
+		 * writes and two spins, once.
+		 */
+		*(volatile uint64_t *)(regs + VTD_CCMD) =
+			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
+		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
+			return 0;
+
+		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
+		*(volatile uint64_t *)(regs + iro + 8) =
+			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
+		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+			return 0;
+
+		keep = *(volatile uint32_t *)(regs + VTD_GSTS) & VTD_GSTS_KEEP;
+		*(volatile uint32_t *)(regs + VTD_GCMD) =
+			keep | (uint32_t)VTD_GCMD_TE;
+		if (!wait_bit(regs, VTD_GSTS, VTD_GSTS_TES, 1, 0))
+			return 0;
+
+		enabled++;
+	}
+
+	return enabled > 0;
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages
@@ -375,6 +607,7 @@ static void read_hardware(unsigned index, uint64_t base, uint64_t size)
 
 	iommu_record_hardware(index, version, bits, levels, ir, coherent,
 			      cap, ecap);
+	iommu_record_registers(index, (uint64_t)(uintptr_t)regs);
 }
 
 int iommu_vtd_read(void)

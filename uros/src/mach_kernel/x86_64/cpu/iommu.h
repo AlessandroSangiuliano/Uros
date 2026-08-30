@@ -144,6 +144,16 @@ struct iommu_unit {
 	unsigned	scope_first;	/* index into the flat scope array */
 	unsigned	scope_count;
 
+	/*
+	 * Where its registers were mapped, uncached, or zero if they were not.
+	 *
+	 * Kept because stage 2 writes them and stage 3 reads faults out of
+	 * them continuously -- mapping afresh each time would rebuild a
+	 * mapping that never changes, and the device region is a bump
+	 * allocator that never gives anything back.
+	 */
+	uint64_t	register_va;
+
 	/* ---- answered by the hardware ---- */
 	int		answered;
 	uint32_t	version;
@@ -351,6 +361,65 @@ int iommu_decode_check(unsigned *ran, unsigned *wrong);
  * The other direction would be the dangerous one.
  */
 int iommu_unit_for(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func);
+
+/*
+ * ── Stage 2a: the tables, built and read back, hardware untouched ────
+ *
+ * What was built.  All zero when nothing was, which is the state on a machine
+ * with no remapping hardware and on one where the frames could not be found.
+ */
+struct iommu_tables {
+	uint64_t	root;		/* device table (AMD) or root table   */
+	uint64_t	root_bytes;
+	uint64_t	command;	/* AMD's command buffer, else zero    */
+	uint64_t	event;		/* AMD's event log, else zero         */
+	unsigned	devices;	/* device entries actually written    */
+	unsigned	contexts;	/* Intel's per-bus tables, else zero  */
+	unsigned	frames;		/* what it cost, in 4K frames         */
+	int		verified;	/* every entry read back as written   */
+};
+
+/*
+ * Build the translation tables with every device passing through, and read
+ * them back.  Answers non-zero when they are built and verified.
+ *
+ * 🔴 NOT ONE REGISTER IS WRITTEN.  A machine that booted before this boots
+ * after it, unchanged, which is why it lands separately from the step that
+ * enables translation -- that step is the first in #432 that can stop a
+ * machine, and it should not arrive in the same commit as the arithmetic it
+ * depends on.
+ *
+ * ⚠️ Reading back is not a formality.  These structures are written once and
+ * read only by hardware, so a wrong entry produces no wrong answer: it
+ * produces a device that is not policed, or one that faults on everything,
+ * and neither says which entry was wrong.  The read-back is the last moment
+ * anything can be checked cheaply.
+ */
+int iommu_build_passthrough(void);
+
+const struct iommu_tables *iommu_tables(void);
+
+/*
+ * ── Stage 2b: point the engines at those tables and let them run ─────
+ *
+ * 🔴 THE FIRST THING IN #432 THAT CAN STOP A MACHINE, and therefore the first
+ * that is asked for rather than assumed: it happens only when `-I' is on the
+ * boot command line.  A default boot builds the tables and enables nothing, so
+ * a machine that cannot survive this can still be booted to find out why.
+ *
+ * 🔑 And the flag is what makes the cost measurable at all.  #432 asks for the
+ * performance cost to be measured rather than assumed, and measuring it means
+ * the same kernel, the same image and the same boot, run twice.  A build-time
+ * switch would have given two kernels and a comparison between them.
+ *
+ * Every device passes through, so a machine on which this works behaves
+ * exactly as it did -- which is the point of stage 2, and also why a machine
+ * on which it does NOT work says so loudly rather than subtly.
+ */
+int iommu_enable_passthrough(void);
+
+/* Whether translation is on, and what the hardware says about it. */
+int iommu_translating(void);
 
 /*
  * Whether an address width, in bits, is one every unit can reach.

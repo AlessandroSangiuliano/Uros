@@ -69,6 +69,55 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 void iommu_amd_dte_passthrough(uint16_t domain, uint64_t out[4]);
 void iommu_amd_dte_blocked(uint16_t domain, uint64_t out[4]);
 
+/*
+ * ── Building the tables (stage 2a) ───────────────────────────────────
+ *
+ * Allocate this vendor's translation structures and fill them so that every
+ * device passes through, then read them back.  Answers non-zero when the
+ * tables are built and verified.
+ *
+ * 🔴 PROGRAMS NO HARDWARE.  Not one register is written, so a machine that
+ * booted before this still boots after it -- which is what makes it worth
+ * landing on its own.  Pointing an engine at these and enabling translation is
+ * stage 2b, and it is the first step in #432 that can stop a machine.
+ *
+ * ⚠️ The frames arrive ZEROED, and on one of the two vendors that is already
+ * the wrong answer: an all-zero AMD device table entry forwards without
+ * translation.  Neither builder may rely on the allocator's zeroing to mean
+ * anything; both write every entry they intend.
+ */
+int iommu_vtd_build(void);
+int iommu_amd_build(void);
+
+/*
+ * Point the engines at those tables and enable translation, everything
+ * passing through.  Answers non-zero when the hardware confirms it is on.
+ *
+ * ⚠️ Confirmation is read from the hardware and not inferred from the writes
+ * succeeding.  Both vendors report their own state -- Intel in a status
+ * register, AMD by reading back the control -- and a write that was accepted
+ * and ignored is exactly the failure this cannot afford to call success.
+ */
+int iommu_vtd_enable(void);
+int iommu_amd_enable(void);
+
+/* Where a unit's registers were mapped, so stage 2 and 3 need not remap. */
+void iommu_record_registers(unsigned index, uint64_t va);
+
+/*
+ * The domain every device is put in while everything passes through.
+ *
+ * ⚠️ One, and not zero.  Intel's specification reserves domain id zero on
+ * hardware that reports Caching Mode, so zero is the one value that is not
+ * always a domain -- and a table built with it would work on most machines.
+ */
+#define	IOMMU_DOMAIN_PASSTHROUGH	1
+
+/* What a builder produced, for <cpu/iommu.h>'s struct iommu_tables. */
+void iommu_record_tables(uint64_t root, uint64_t root_bytes,
+			 uint64_t command, uint64_t event,
+			 unsigned devices, unsigned contexts, unsigned frames);
+
 void iommu_vtd_root_entry(uint64_t context_table_pa, uint64_t out[2]);
 void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
 				   uint64_t out[2]);

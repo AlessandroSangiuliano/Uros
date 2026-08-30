@@ -29,6 +29,8 @@
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
 #include <cpu/pci_cfg.h>
+#include <pmap/bootmem.h>
+#include <pmap/layout.h>
 #include <pmap/pmap.h>
 
 /* ------------------------------------------------------------------ */
@@ -384,6 +386,173 @@ void iommu_amd_dte_blocked(uint16_t domain, uint64_t out[4])
 	out[3] = 0;
 }
 
+/*
+ * ── Stage 2a: the device table, built and read back ──────────────────
+ *
+ * One entry per 16-bit device id: 65536 entries of 32 bytes, two megabytes,
+ * which is the whole of what the Device Table Base register can describe and
+ * the whole of what this machine's own IVRS needs -- its device entries name
+ * ranges reaching ff:1f.7.
+ *
+ * 🔴 EVERY ENTRY IS WRITTEN, and the allocator's zeroing is not allowed to
+ * mean anything.  An all-zero entry has V=0, which forwards without
+ * translation; a table that was merely allocated is a table that permits
+ * everything, and it would look identical to one that had been configured.
+ */
+#define	AMD_DEVICE_IDS		65536u
+#define	AMD_DTE_WORDS		4u		/* 32 bytes */
+#define	AMD_DEVICE_TABLE_FRAMES	((AMD_DEVICE_IDS * AMD_DTE_WORDS * 8u) / 4096u)
+
+_Static_assert(AMD_DEVICE_TABLE_FRAMES == 512,
+	       "the device table is two megabytes, which is its architectural maximum");
+
+int iommu_amd_build(void)
+{
+	uint64_t table, command, event;
+	volatile uint64_t *dt;
+	uint64_t want[AMD_DTE_WORDS];
+	unsigned written = 0;
+
+	table = boot_frames_alloc(AMD_DEVICE_TABLE_FRAMES);
+	if (table == 0)
+		return 0;
+
+	/*
+	 * The command buffer and the event log, one frame each, which is the
+	 * smallest either may be.  Allocated here rather than in stage 2b
+	 * because an engine cannot be enabled without them and finding that
+	 * out with translation half on is not a discovery anyone wants.
+	 */
+	command = boot_frame_alloc();
+	event = boot_frame_alloc();
+	if (command == 0 || event == 0)
+		return 0;
+
+	dt = (volatile uint64_t *)(uintptr_t)phys_to_direct(table);
+	iommu_amd_dte_passthrough(IOMMU_DOMAIN_PASSTHROUGH, want);
+
+	for (unsigned i = 0; i < AMD_DEVICE_IDS; i++) {
+		dt[i * AMD_DTE_WORDS + 0] = want[0];
+		dt[i * AMD_DTE_WORDS + 1] = want[1];
+		dt[i * AMD_DTE_WORDS + 2] = want[2];
+		dt[i * AMD_DTE_WORDS + 3] = want[3];
+		written++;
+	}
+
+	/*
+	 * ⚠️ ALL of them read back, not a sample.  A sample is exactly the
+	 * check that misses the one entry a loop got wrong, and these are
+	 * written once and read only by hardware -- there is no later moment
+	 * when a wrong one produces a wrong answer instead of an unpoliced
+	 * device.
+	 */
+	for (unsigned i = 0; i < AMD_DEVICE_IDS; i++)
+		if (dt[i * AMD_DTE_WORDS + 0] != want[0]
+		    || dt[i * AMD_DTE_WORDS + 1] != want[1]
+		    || dt[i * AMD_DTE_WORDS + 2] != want[2]
+		    || dt[i * AMD_DTE_WORDS + 3] != want[3])
+			return 0;
+
+	iommu_record_tables(table, (uint64_t)AMD_DEVICE_TABLE_FRAMES * 4096u,
+			    command, event, written, 0,
+			    AMD_DEVICE_TABLE_FRAMES + 2u);
+	return 1;
+}
+
+/*
+ * ── Stage 2b: point the engine at the table and let it run ───────────
+ *
+ * Rev 3.11, MMIO Offsets 0000h, 0008h, 0010h and 0018h.  The bases carry the
+ * physical address in bits 51:12 and their own length beside it: the device
+ * table as (n+1) 4-Kbyte pages in bits 8:0, the two buffers as a power of two
+ * in bits 59:56, where 1000b is the 256-entry minimum and anything smaller is
+ * reserved.
+ */
+#define	AMD_REG_DEVTAB		0x00
+#define	AMD_REG_CMDBUF		0x08
+#define	AMD_REG_EVTLOG		0x10
+#define	AMD_REG_CMDBUF_HEAD	0x2000
+#define	AMD_REG_CMDBUF_TAIL	0x2008
+
+#define	AMD_BASE_MASK		0x000FFFFFFFFFF000ULL
+#define	AMD_BUFLEN_256		(8ULL << 56)	/* 4 Kbytes, the minimum */
+
+#define	AMD_CTL_IOMMU_EN	(1ULL << 0)
+#define	AMD_CTL_EVENTLOG_EN	(1ULL << 2)
+#define	AMD_CTL_CMDBUF_EN	(1ULL << 12)
+
+int iommu_amd_enable(void)
+{
+	const struct iommu_tables *t = iommu_tables();
+	unsigned enabled = 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+		uint64_t control;
+
+		if (!u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		/*
+		 * 🔴 OFF FIRST, and not as ceremony.  Firmware may have left
+		 * this engine translating for its own devices, with its own
+		 * device table and its own caches -- and pointing a running
+		 * engine at a new table is asking it to use one description
+		 * while remembering another.  On QEMU it is always off; on the
+		 * machine this was written on the firmware runs it.
+		 */
+		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
+		control &= ~AMD_CTL_IOMMU_EN;
+		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
+
+		*(volatile uint64_t *)(regs + AMD_REG_DEVTAB) =
+			(t->root & AMD_BASE_MASK)
+			| ((t->root_bytes / 4096u) - 1u);
+
+		*(volatile uint64_t *)(regs + AMD_REG_CMDBUF) =
+			(t->command & AMD_BASE_MASK) | AMD_BUFLEN_256;
+		*(volatile uint64_t *)(regs + AMD_REG_EVTLOG) =
+			(t->event & AMD_BASE_MASK) | AMD_BUFLEN_256;
+
+		/*
+		 * The ring pointers, written rather than trusted.  They reset
+		 * to zero and writing the base is documented to reset them,
+		 * but "documented to reset" and "observed to be zero" are two
+		 * different statements and only one of them costs two stores.
+		 */
+		*(volatile uint64_t *)(regs + AMD_REG_CMDBUF_HEAD) = 0;
+		*(volatile uint64_t *)(regs + AMD_REG_CMDBUF_TAIL) = 0;
+
+		/*
+		 * ⚠️ The buffers BEFORE the engine.  An engine enabled without
+		 * an event log has nowhere to report the first thing that goes
+		 * wrong, which is precisely the moment one wants it -- and
+		 * #432 asks for a blocked DMA to be diagnosable rather than
+		 * silent.
+		 */
+		control |= AMD_CTL_CMDBUF_EN | AMD_CTL_EVENTLOG_EN;
+		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
+
+		control |= AMD_CTL_IOMMU_EN;
+		*(volatile uint64_t *)(regs + AMD_REG_CONTROL) = control;
+
+		/*
+		 * Read back, because a write that was accepted and ignored is
+		 * the failure this cannot afford to call success.
+		 */
+		control = *(volatile uint64_t *)(regs + AMD_REG_CONTROL);
+		if (!(control & AMD_CTL_IOMMU_EN))
+			return 0;
+
+		enabled++;
+	}
+
+	return enabled > 0;
+}
+
 /* A scope whose range is a single device: AMD's ordinary case. */
 static void one_device(uint16_t segment, uint16_t bdf, uint8_t kind,
 		       uint8_t enumeration_id)
@@ -548,8 +717,23 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	/*
 	 * Only now are the registers worth mapping: the address has been
 	 * stated twice, by two things that did not consult each other.
+	 *
+	 * 🔴 512 KBYTES, NOT ONE PAGE.  This mapped 0x1000 and stage 2b then
+	 * faulted on the command buffer head at offset 0x2000 -- the first
+	 * write past the page, in a boot that had reported everything about
+	 * this engine correctly.  An IVHD gives a base and no extent, and the
+	 * extent is not in the table at all: the specification puts it at
+	 * 16 Kbytes, or 512 Kbytes when the engine reports performance
+	 * counters, which is a bit of the feature register that cannot be read
+	 * until the registers are mapped.
+	 *
+	 * ⚠️ So the architectural maximum is mapped rather than the conditional
+	 * size.  It costs 128 pages of kernel address space per engine and
+	 * removes a bootstrap problem entirely -- and reading device space the
+	 * engine does not decode returns all-ones, which is a wrong answer
+	 * only to a question nothing here asks.
 	 */
-	regs = (volatile uint8_t *)(uintptr_t)pmap_map_device(h->base, 0x1000);
+	regs = (volatile uint8_t *)(uintptr_t)pmap_map_device(h->base, 0x80000);
 	if (regs == 0)
 		return;
 
@@ -567,6 +751,7 @@ static void confirm_engine(unsigned index, const struct ivhd_header *h)
 	 */
 	iommu_record_hardware(index, 0, bits, levels, ir, coherent,
 			      features, control);
+	iommu_record_registers(index, (uint64_t)(uintptr_t)regs);
 }
 
 int iommu_amd_read(void)

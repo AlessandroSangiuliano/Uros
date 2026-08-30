@@ -4004,6 +4004,56 @@ static void iommu_selftest(void)
 	}
 
 	/*
+	 * Stage 2a: the tables that would be programmed, built and read back.
+	 *
+	 * 🔴 NOTHING IS PROGRAMMED.  This allocates, fills and verifies, and
+	 * writes not one engine register — so a machine that booted before it
+	 * boots after it.  Enabling translation is the next step and the first
+	 * one in #432 that can stop a machine, which is why it does not arrive
+	 * in the same boot as the arithmetic it depends on.
+	 */
+	{
+		int ok = iommu_build_passthrough();
+		const struct iommu_tables *t = iommu_tables();
+
+		kputs("UrMach x86-64:   passthrough tables ");
+		if (!ok) {
+			kputs("COULD NOT BE BUILT — no frames, or an engine"
+			      " that cannot pass through\r\n");
+		} else {
+			kputs("at ");
+			kputhex64(t->root);
+			kputs(", ");
+			kputdec(t->devices);
+			kputs(" entries in ");
+			kputdec(t->frames);
+			kputs(" frames, every one read back\r\n");
+		}
+
+		/*
+		 * 🔴 AND ONLY NOW, AND ONLY IF ASKED.  `-I' on the boot
+		 * command line is what turns translation on.  A default boot
+		 * builds and enables nothing, so a machine this cannot survive
+		 * can still be booted to find out why — and the same kernel,
+		 * the same image and the same boot run twice is what makes
+		 * #432's "measure the cost rather than assume it" a thing
+		 * anyone can do.
+		 */
+		if (ok && boot_flag('I')) {
+			int on = iommu_enable_passthrough();
+
+			kputs("UrMach x86-64:   -I given: translation ");
+			kputs(on ? "IS ON, every device passing through —"
+				   " and the hardware says so\r\n"
+				 : "COULD NOT BE ENABLED — the engine did not"
+				   " confirm it\r\n");
+		} else if (ok) {
+			kputs("UrMach x86-64:   translation left OFF (pass"
+			      " -I to enable it) — nothing programmed\r\n");
+		}
+	}
+
+	/*
 	 * And the sentence at the top, now that it can be said with evidence.
 	 */
 	kputs("UrMach x86-64:   this machine could enforce driver isolation");
