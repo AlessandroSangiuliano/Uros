@@ -13,6 +13,8 @@
 
 #include <cpu/acpi.h>
 #include <cpu/iommu_backend.h>
+#include <pmap/bootmem.h>
+#include <pmap/layout.h>
 
 /*
  * Caps, and the flag that is what makes them safe.
@@ -752,3 +754,217 @@ int iommu_address_bits_ok(unsigned bits)
 	return 1;
 }
 
+/*
+ * ── Stage 3b: a page table, and the walk that reads it back ──────────
+ *
+ * The two vendors index their tables identically -- nine bits per level, the
+ * lowest twelve untranslated -- which is the one place they agree completely,
+ * both having taken it from the processor's own paging.  So the indexing is
+ * here, once, and everything the two disagree about is behind the decoders.
+ *
+ * ⚠️ Level 1 is the bottom.  Table 15 of AMD Rev 3.11 and §3.6 of Intel Rev
+ * 5.20 number them the same way, so an entry fetched from a level-L table is
+ * chosen by address bits (12 + 9L - 1):(12 + 9(L-1)).
+ */
+static unsigned level_index(uint64_t iova, unsigned level)
+{
+	return (unsigned)((iova >> (12u + 9u * (level - 1u))) & 511u);
+}
+
+static int pt_decode(enum iommu_vendor vendor, uint64_t entry, unsigned level,
+		     struct iommu_pt_step *step)
+{
+	if (vendor == IOMMU_INTEL)
+		return iommu_vtd_pt_decode(entry, level, step);
+
+	return iommu_amd_pt_decode(entry, level, step);
+}
+
+static uint64_t pt_pde(enum iommu_vendor vendor, uint64_t next_table_pa,
+		       unsigned next_level)
+{
+	if (vendor == IOMMU_INTEL)
+		return iommu_vtd_ss_pde(next_table_pa);
+
+	return iommu_amd_pde(next_table_pa, next_level);
+}
+
+static uint64_t pt_pte(enum iommu_vendor vendor, uint64_t pa, int read,
+		       int write)
+{
+	if (vendor == IOMMU_INTEL)
+		return iommu_vtd_ss_pte(pa, read, write);
+
+	return iommu_amd_pte(pa, read, write);
+}
+
+static volatile uint64_t *table_at(uint64_t pa)
+{
+	return (volatile uint64_t *)(uintptr_t)phys_to_direct(pa);
+}
+
+int iommu_domain_create(struct iommu_domain *d, enum iommu_vendor vendor,
+			uint16_t id, unsigned levels)
+{
+	if (vendor == IOMMU_NONE || levels < 2 || levels > 5)
+		return 0;
+
+	d->root = boot_frame_alloc();
+	if (d->root == 0)
+		return 0;
+
+	d->vendor = vendor;
+	d->levels = levels;
+	d->id = id;
+	d->frames = 1;
+	d->pages = 0;
+	return 1;
+}
+
+int iommu_domain_map(struct iommu_domain *d, uint64_t iova, uint64_t pa,
+		     uint64_t size, int read, int write)
+{
+	if (d->root == 0 || size == 0)
+		return 0;
+
+	/*
+	 * ⚠️ Refused rather than rounded.  A caller that asked to map half a
+	 * page meant something, and mapping the whole one would grant a device
+	 * reach over memory the caller never named.
+	 */
+	if (((iova | pa | size) & 0xFFFULL) != 0)
+		return 0;
+
+	for (uint64_t off = 0; off < size; off += 4096) {
+		uint64_t here = iova + off;
+		uint64_t table = d->root;
+		unsigned level = d->levels;
+
+		/*
+		 * Down to the bottom, building the road where there is none.
+		 * The descent reads each entry through the same decoder the
+		 * walk uses, so a directory this loop cannot understand is one
+		 * the walk could not have understood either.
+		 */
+		while (level > 1) {
+			volatile uint64_t *entries = table_at(table);
+			unsigned index = level_index(here, level);
+			struct iommu_pt_step step;
+			uint64_t below;
+
+			if (pt_decode(d->vendor, entries[index], level,
+				      &step)) {
+				/*
+				 * ⚠️ A translation here is a large page over
+				 * this address, and mapping inside it means
+				 * splitting it.  Refused: nothing here builds
+				 * one, so the split would be code no boot runs
+				 * -- and a splitter that is wrong leaves a
+				 * device reaching the memory either side.
+				 */
+				if (step.level == 0)
+					return 0;
+
+				table = step.next;
+				level = step.level;
+				continue;
+			}
+
+			below = boot_frame_alloc();
+			if (below == 0)
+				return 0;
+
+			d->frames++;
+			entries[index] = pt_pde(d->vendor, below, level - 1u);
+			table = below;
+			level--;
+		}
+
+		table_at(table)[level_index(here, 1)]
+			= pt_pte(d->vendor, pa + off, read, write);
+		d->pages++;
+	}
+
+	return 1;
+}
+
+int iommu_domain_walk(const struct iommu_domain *d, uint64_t iova,
+		      uint64_t *pa, int *read, int *write)
+{
+	uint64_t table = d->root;
+	unsigned level = d->levels;
+	int r = 1, w = 1;
+
+	if (d->root == 0)
+		return 0;
+
+	/*
+	 * ⚠️ Bounded by the depth, and the bound cannot be reached: every step
+	 * either ends the walk or moves to a strictly lower level, which the
+	 * decoders enforce.  It is written as a bound anyway so that a decoder
+	 * which ever stopped enforcing that stops this walk instead of the
+	 * machine.
+	 */
+	for (unsigned step_count = 0; step_count < d->levels; step_count++) {
+		struct iommu_pt_step step;
+		uint64_t entry = table_at(table)[level_index(iova, level)];
+
+		if (!pt_decode(d->vendor, entry, level, &step))
+			return 0;
+
+		/*
+		 * Both vendors AND permission down the whole walk, so a
+		 * directory that withholds one withholds it from everything
+		 * below.  Accumulated here rather than in the decoders because
+		 * it is the one rule the two formats state identically.
+		 */
+		r &= step.read;
+		w &= step.write;
+
+		if (step.level == 0) {
+			*pa = step.next | (iova & (iommu_level_span(level) - 1ULL));
+			*read = r;
+			*write = w;
+			return 1;
+		}
+
+		/*
+		 * 🔴 Levels the entry skipped must have been chosen by address
+		 * bits that are zero -- AMD Rev 3.11 §2.2.3, "if a translation
+		 * skips levels and any of the skipped virtual address bits are
+		 * non-zero, translation terminates with an IO_PAGE_FAULT".
+		 *
+		 * 🔑 Without this the walk would arrive at the table below
+		 * having never consumed the bits that chose it, index it with
+		 * the wrong ones, and land on a real entry.  The answer would
+		 * be a physical address, wrong, and shaped exactly like a right
+		 * one.  Intel cannot express a skip, so this is never true
+		 * there -- which is why the check that exercises it reports one
+		 * vendor and not two.
+		 */
+		if (step.level + 1u != level) {
+			/*
+			 * The levels passed over are step.level+1 up to
+			 * level-1, and the bits they would have been indexed
+			 * by are everything below this level's own down to
+			 * where the next one starts.
+			 */
+			uint64_t skipped = iommu_level_span(level)
+					 - iommu_level_span(step.level + 1u);
+
+			if ((iova & skipped) != 0)
+				return 0;
+		}
+
+		/*
+		 * ⚠️ The next level comes from the ENTRY and not from level-1.
+		 * On AMD the entry is where the answer lives, and a walk that
+		 * counted down instead of reading would be right on every table
+		 * this kernel builds and wrong on one built by anything else.
+		 */
+		table = step.next;
+		level = step.level;
+	}
+
+	return 0;
+}
