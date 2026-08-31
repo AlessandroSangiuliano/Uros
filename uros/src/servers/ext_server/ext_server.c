@@ -711,20 +711,46 @@ ds_ext2_sync(
 
 	/* Flush dirty metadata — iterate only dirty files (#385: under
 	 * of_lock, shared with open/close/write/writeback). */
+	/*
+	 * 🔴 #483: THE WHOLE LIST IS ATTEMPTED, and a failure no longer stops
+	 * the walk.
+	 *
+	 * It used to return on the first entry that failed.  So a failed sync
+	 * did not mean "this file did not make it" -- it meant an unknown
+	 * prefix made it, one file did not, and an unknown SUFFIX was never
+	 * tried.  That is a durability claim that is not true, and it is not
+	 * only a benchmark's problem: `proc: shutdown — syncing N mount(s)'
+	 * comes through here.
+	 *
+	 * 🔑 Every entry gets its turn and the failures are counted, so what a
+	 * caller learns is "n of m files did not reach the disk" rather than
+	 * "something went wrong somewhere".  A file that failed stays on the
+	 * dirty list, which is what makes the next sync try it again.
+	 */
 	pthread_mutex_lock(&mnt->of_lock);
 	{
 		int i = mnt->dirty_head;
+		int failed = 0, attempted = 0;
+
 		while (i >= 0) {
 			int next = mnt->open_files[i].dirty_next;
+
+			attempted++;
 			rc = ext2fs_flush_metadata(
 				mnt->open_files[i].private);
-			if (rc != 0) {
-				pthread_mutex_unlock(&mnt->of_lock);
-				return KERN_FAILURE;
-			}
-			if (!ext2fs_is_dirty(mnt->open_files[i].private))
+			if (rc != 0)
+				failed++;
+			else if (!ext2fs_is_dirty(mnt->open_files[i].private))
 				dirty_list_remove(mnt, i);
 			i = next;
+		}
+
+		if (failed != 0) {
+			pthread_mutex_unlock(&mnt->of_lock);
+			printf("ext2: sync: %d of %d file(s) did not reach the "
+			       "disk — they stay dirty and will be tried "
+			       "again\n", failed, attempted);
+			return KERN_FAILURE;
 		}
 	}
 	pthread_mutex_unlock(&mnt->of_lock);
