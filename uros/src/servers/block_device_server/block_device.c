@@ -67,10 +67,11 @@ blk_part_from_authed_handle(mach_port_t device)
 {
 	if (device == 0)
 		return NULL;
-	uint32_t magic = *(uint32_t *)(unsigned long)device;
+	uint32_t *magicp = blk_object_for(device);
+	uint32_t magic = magicp ? *magicp : 0;
 	if (magic != BLK_MAGIC_HANDLE)
 		return NULL;
-	struct blk_handle *h = (struct blk_handle *)(unsigned long)device;
+	struct blk_handle *h = blk_object_for(device);
 	/*
 	 * Issue #183: a handle whose cap was revoked stays linked in the
 	 * list (so explicit close / no-senders can still find it) but
@@ -146,7 +147,7 @@ ds_device_open(mach_port_t master, mach_port_t reply,
 	       security_token_t sec_token, dev_name_t name,
 	       mach_port_t *device)
 {
-	struct blk_partition *part = (struct blk_partition *)master;
+	struct blk_partition *part = blk_object_for(master);
 	if (part && part->recv_port != MACH_PORT_NULL)
 		*device = part->recv_port;
 	else
@@ -174,11 +175,12 @@ ds_device_close(mach_port_t device)
 	if (device == 0)
 		return KERN_SUCCESS;
 
-	uint32_t magic = *(uint32_t *)(unsigned long)device;
+	uint32_t *magicp = blk_object_for(device);
+	uint32_t magic = magicp ? *magicp : 0;
 	if (magic != BLK_MAGIC_HANDLE)
 		return KERN_SUCCESS;
 
-	struct blk_handle *h = (struct blk_handle *)(unsigned long)device;
+	struct blk_handle *h = blk_object_for(device);
 	mach_port_t name = h->recv_port;
 
 	struct blk_handle **pp = &blk_handles_head;
@@ -196,6 +198,7 @@ ds_device_close(mach_port_t device)
 	       (unsigned)name);
 
 	h->magic = 0;        /* poison so a stray msg can't reuse it */
+	blk_payload_release(h->payload);
 	free(h);
 
 	/*
@@ -235,7 +238,7 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 {
 	*device = MACH_PORT_NULL;
 
-	struct blk_partition *part = (struct blk_partition *)master;
+	struct blk_partition *part = blk_object_for(master);
 	if (!part || part->magic != BLK_MAGIC_PART)
 		return D_NO_SUCH_DEVICE;
 
@@ -294,8 +297,15 @@ ds_device_open_cap(mach_port_t master, mach_port_t reply,
 		free(h);
 		return kr;
 	}
+	h->payload = blk_payload_register(h);
+	if (h->payload == 0) {
+		(void)mach_port_mod_refs(mach_task_self(), hport,
+					 MACH_PORT_RIGHT_RECEIVE, -1);
+		free(h);
+		return KERN_RESOURCE_SHORTAGE;
+	}
 	(void)mach_port_set_protected_payload(mach_task_self(),
-					      hport, (unsigned long)h);
+					      hport, h->payload);
 	(void)mach_port_move_member(mach_task_self(), hport, port_set);
 	h->recv_port = hport;
 	h->next = blk_handles_head;
@@ -368,6 +378,7 @@ blk_handle_no_senders(mach_msg_header_t *in, mach_msg_header_t *out)
 		       (unsigned long long)h->cap_id,
 		       (unsigned)name);
 		h->magic = 0;        /* poison so a stray msg can't reuse it */
+		blk_payload_release(h->payload);
 		free(h);
 		(void)mach_port_destroy(mach_task_self(), name);
 	} else {
@@ -823,11 +834,12 @@ ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
 	struct blk_partition *part;
 	if (device == 0)
 		return D_NO_SUCH_DEVICE;
-	uint32_t magic = *(uint32_t *)(unsigned long)device;
+	uint32_t *magicp = blk_object_for(device);
+	uint32_t magic = magicp ? *magicp : 0;
 	if (magic == BLK_MAGIC_HANDLE)
-		part = ((struct blk_handle *)(unsigned long)device)->part;
+		part = ((struct blk_handle *)blk_object_for(device))->part;
 	else if (magic == BLK_MAGIC_PART)
-		part = (struct blk_partition *)(unsigned long)device;
+		part = blk_object_for(device);
 	else
 		return D_NO_SUCH_DEVICE;
 

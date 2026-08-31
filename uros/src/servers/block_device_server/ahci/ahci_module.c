@@ -180,7 +180,7 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	struct ahci_port_info *pi = &st->ports[port_idx];
 	int hba_port = pi->hba_port;
 	kern_return_t kr;
-	unsigned int dma_kva, dma_uva, dma_pa;
+	vm_address_t dma_kva, dma_uva, dma_pa;
 
 	kr = device_dma_alloc(st->master_device, 4096, &dma_kva, &dma_pa);
 	if (kr != KERN_SUCCESS) {
@@ -204,10 +204,22 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 
 	ahci_port_stop(st, hba_port);
 
-	port_write(st, hba_port, PORT_CLB,  pi->clb_pa);
-	port_write(st, hba_port, PORT_CLBU, 0);
-	port_write(st, hba_port, PORT_FB,   pi->fb_pa);
-	port_write(st, hba_port, PORT_FBU,  0);
+	/*
+	 * 🔴 THE UPPER HALVES ARE WRITTEN, not zeroed (#520).  They were
+	 * literal zeros, which on i386 was the only value they could have had
+	 * -- a physical address is 32 bits there, so the field and the constant
+	 * agreed.  Here the allocator may return a frame above 4 GiB and the
+	 * controller would have fetched its command list from the bottom of
+	 * memory instead: not a failure, a DMA to somewhere real.
+	 *
+	 * ⚠️ Order matters.  The specification has software write the low half
+	 * and then the upper, and the port must be stopped for either -- which
+	 * ahci_port_stop() above has just done.
+	 */
+	port_write(st, hba_port, PORT_CLB,  ahci_pa_lo(pi->clb_pa));
+	port_write(st, hba_port, PORT_CLBU, ahci_pa_hi(pi->clb_pa));
+	port_write(st, hba_port, PORT_FB,   ahci_pa_lo(pi->fb_pa));
+	port_write(st, hba_port, PORT_FBU,  ahci_pa_hi(pi->fb_pa));
 
 	port_write(st, hba_port, PORT_SERR, ~0u);
 	port_write(st, hba_port, PORT_IS,   ~0u);
@@ -477,7 +489,14 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		printf("ahci: device_mmio_map failed (kr=%d)\n", kr);
 		return -1;
 	}
-	printf("ahci: ABAR mapped at uva=0x%08X\n", (unsigned int)st->abar);
+	/*
+	 * ⚠️ %p and not %08X.  It was the latter, which on i386 printed the
+	 * whole address and here would print its bottom half -- the exact
+	 * "printed a vm_offset_t with %x" that <mach/x86_64/vm_types.h> names.
+	 * A diagnostic that lies about an address is worse than none: it is the
+	 * line somebody reads while looking for why a mapping is wrong.
+	 */
+	printf("ahci: ABAR mapped at uva=%p\n", (void *)st->abar);
 
 	/* Initial CT buffer (1 page) */
 	kr = device_dma_alloc(master_dev, 4096, &st->ct_kva, &st->ct_pa);
