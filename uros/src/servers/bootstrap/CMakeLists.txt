@@ -283,6 +283,20 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # run.  Last means every other verdict is already in the log when it does,
   # and the blame cannot land anywhere else.
   #
+  # ⚠️ IT WAS MOVED TO THE BOOT DISK AND MOVED BACK (#520, #521).  Loading it
+  # through the block device server works -- it was seen to load from
+  # /mach_servers and run every one of its arms -- but not reliably: when the
+  # load overlaps cap_test's own use of that server, a task faults with no
+  # exception server and the boot degrades.  Two runs each way, and the
+  # difference was three extra reads' worth of delay.
+  #
+  # A default that fails one time in two is worse than one that does not
+  # exercise a path: a red line nobody can rely on is how a suite stops being
+  # read.  So the disk is built and attached on every boot -- the block device
+  # server probes it, finds the partition and publishes it, which is more
+  # coverage than the nothing it had -- and the load moves back here until #521
+  # is answered.
+  #
   # cap_server (#495) is THIRD, and it is the first entry here that is a
   # server rather than a program that finishes: it is placed right after the
   # test that just proved the name service answers, because registering with

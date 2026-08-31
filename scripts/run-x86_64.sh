@@ -527,7 +527,30 @@ echo "=== accelerator: $ACCEL ==="
 : > "$LOG"
 
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS "$@" \
+# ── The boot disk (#520) ──────────────────────────────────────────────
+#
+# bootstrap's late servers live on it, not in the bundle, and the block device
+# server is what reaches them -- the stage-2 path.  Attached the way this target
+# should attach a disk: virtio, because there is no in-kernel driver here and
+# the driver that reads it is a userspace one.
+#
+# 🔴 `-boot d' is not optional once a disk is present.  QEMU prefers the hard
+# disk, and this one has an MBR with no boot code, so without it the machine
+# stops at "Booting from Hard Disk..." having never touched the ISO.
+#
+# Built on demand: it holds binaries the build just produced, and a stale disk
+# is a boot running yesterday's server with today's kernel.
+if [ ! -f "$BUILD/disk-x86_64.img" ] \
+   || [ "$BUILD/export/uros/x86_64/user/sbin/cow_test" -nt "$BUILD/disk-x86_64.img" ]; then
+	"$REPO/scripts/make-disk-x86_64.sh" >&2
+fi
+
+DISK_ARGS="-boot d
+	-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
+	-device virtio-blk-pci,drive=urosdisk"
+
+# shellcheck disable=SC2086
+qemu-system-x86_64 $CPU_ARGS $DISK_ARGS "$@" \
 	-cdrom "$BUILD/uros-x86_64.iso" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
 QPID=$!
