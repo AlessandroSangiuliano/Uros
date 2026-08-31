@@ -49,7 +49,32 @@ routine device_write_batch(
  * and passes their physical addresses.  The driver programs these
  * PAs directly into PRDT entries — no memcpy needed.
  */
-type dma_sg_addr_t = array[*:1024] of natural_t;
+/*
+ * ── Inline, and deliberately so (#520) ───────────────────────────────
+ *
+ * The sibling of this type in <device/device_master.defs> went OUT of line and
+ * this one did not, because they are used at opposite rates.  That one is the
+ * reply of an allocation: once per controller, once per mount.  This one is an
+ * argument of device_read_phys and device_write_phys, on EVERY disk request,
+ * carrying one to thirty-two addresses.
+ *
+ * 🔴 Out of line here would be a vm_map_copyin, a vm_map_copyout and a
+ * vm_deallocate -- page-table work and a kernel allocation -- to move eight
+ * bytes, per read.  And below a page the copy happens anyway, so it would buy
+ * the allocation AND the copy.
+ *
+ * ⚠️ The maximum costs only the STACK FRAME, not the wire: migcom copies and
+ * sends the actual count and sizes `union { Request; Reply; } Mess' on the
+ * declared maximum.  So widening the element doubles the frame unless the
+ * maximum comes down with it -- which is why the cap moved and not merely the
+ * type.
+ *
+ * 🔑 And the cap is PRDT_PER_SLOT, taken from the hardware rather than rounded.
+ * An AHCI command table describes at most that many pages per slot, so 1024 was
+ * four kilobytes of stack reserved for thirty-two times what the device will
+ * accept.  At 32 entries of vm_address_t the frame is 256 bytes.
+ */
+type dma_sg_addr_t = array[*:32] of vm_address_t;
 
 /*
  * Read sectors from disk, DMA-ing directly into caller-owned

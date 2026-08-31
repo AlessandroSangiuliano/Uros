@@ -375,18 +375,47 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	device_dma_free(st->master_device, st->data_kva, 4096);
 
 	n_pages = st->batch_slots * PRDT_PER_SLOT;
-	if (n_pages > 1024)
-		n_pages = 1024;
+	if (n_pages > AHCI_MAX_SG_PAGES)
+		n_pages = AHCI_MAX_SG_PAGES;
 
-	kr = device_dma_alloc_sg(st->master_device, n_pages,
-				 mach_task_self(),
-				 &st->data_kva, &st->data_uva,
-				 st->data_pa_list, &pa_count);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: scatter-gather alloc (%u pages) "
-		       "failed (kr=%d)\n", n_pages, kr);
-		return -1;
+	/*
+	 * #520: the list comes back OUT OF LINE now, so `pa_list' is memory
+	 * the kernel handed over and this task owns.  It is copied into the
+	 * driver's own array and released at once -- keeping it would mean a
+	 * live vm_allocate for the life of the controller, to hold what fits
+	 * in a struct field.
+	 */
+	{
+		vm_address_t *pa_list = NULL;
+
+		pa_count = 0;
+		kr = device_dma_alloc_sg(st->master_device, n_pages,
+					 mach_task_self(),
+					 &st->data_kva, &st->data_uva,
+					 &pa_list, &pa_count);
+		if (kr != KERN_SUCCESS) {
+			printf("ahci: scatter-gather alloc (%u pages) "
+			       "failed (kr=%d)\n", n_pages, kr);
+			return -1;
+		}
+
+		if (pa_count > AHCI_MAX_SG_PAGES)
+			pa_count = AHCI_MAX_SG_PAGES;
+
+		for (unsigned p = 0; p < pa_count; p++)
+			st->data_pa_list[p] = pa_list[p];
+
+		/*
+		 * ⚠️ Released whatever happens next.  Out-of-line memory a
+		 * receiver forgets is a leak of one allocation per mount,
+		 * which is the shape of leak that never gets noticed.
+		 */
+		(void) vm_deallocate(mach_task_self(),
+				     (vm_address_t)pa_list,
+				     (vm_size_t)pa_count
+				     * sizeof(vm_address_t));
 	}
+
 	st->data_n_pages = n_pages;
 	st->data_pa = st->data_pa_list[0];
 
@@ -683,7 +712,7 @@ ahci_mod_irq_handler(void *priv)
 static int
 ahci_mod_read_phys(void *priv, int disk, uint32_t lba,
 		   unsigned int count,
-		   unsigned int *phys_addrs, unsigned int n_pa,
+		   vm_address_t *phys_addrs, unsigned int n_pa,
 		   unsigned int total_bytes)
 {
 	struct ahci_state *st = (struct ahci_state *)priv;
@@ -694,7 +723,7 @@ ahci_mod_read_phys(void *priv, int disk, uint32_t lba,
 static int
 ahci_mod_write_phys(void *priv, int disk, uint32_t lba,
 		    unsigned int count,
-		    unsigned int *phys_addrs, unsigned int n_pa,
+		    vm_address_t *phys_addrs, unsigned int n_pa,
 		    unsigned int total_bytes)
 {
 	struct ahci_state *st = (struct ahci_state *)priv;

@@ -90,7 +90,12 @@ struct page_cache {
 	/* DMA pool: pre-allocated wired pages with known physical addrs */
 	vm_offset_t		pc_dma_pool;	  /* base VA (0 = no DMA) */
 	vm_size_t		pc_dma_pool_size; /* total pool bytes */
-	unsigned int		pc_dma_pa[4096];  /* per-page physical addrs */
+	/*
+	 * 🔴 vm_address_t since #520.  These feed pc_phys, which has always
+	 * been a vm_offset_t -- so the narrow half of the pair was silently
+	 * deciding how far a zero-copy read could reach.
+	 */
+	vm_address_t		pc_dma_pa[4096];  /* per-page physical addrs */
 	unsigned int		pc_dma_n_pages;	  /* number of DMA pages */
 	vm_size_t		pc_block_size;	  /* block size for slot calc */
 	struct page_cache_entry	*pc_hash[PAGE_CACHE_HASH_BUCKETS];
@@ -185,7 +190,7 @@ void page_cache_print_stats(struct page_cache *pc);
 struct page_cache *page_cache_create_dma(unsigned int max_entries,
 					 vm_size_t block_size,
 					 vm_offset_t pool_va,
-					 unsigned int *pa_list,
+					 vm_address_t *pa_list,
 					 unsigned int n_pages,
 					 page_cache_writeback_fn writeback,
 					 void *ctx);

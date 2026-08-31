@@ -148,7 +148,7 @@ struct block_driver_ops {
 	 */
 	int  (*read_sectors_phys)(void *priv, int disk, uint32_t lba,
 				  unsigned int count,
-				  unsigned int *phys_addrs,
+				  vm_address_t *phys_addrs,
 				  unsigned int n_pa,
 				  unsigned int total_bytes);
 
@@ -158,7 +158,7 @@ struct block_driver_ops {
 	 */
 	int  (*write_sectors_phys)(void *priv, int disk, uint32_t lba,
 				   unsigned int count,
-				   unsigned int *phys_addrs,
+				   vm_address_t *phys_addrs,
 				   unsigned int n_pa,
 				   unsigned int total_bytes);
 

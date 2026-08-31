@@ -43,6 +43,7 @@
 #include <ipc/ipc_port.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
+#include <vm/vm_user.h>	/* vm_allocate, for the out-of-line list (#520) */
 #include <vm/pmap.h>
 #include <device/device_master.h>
 #include <device/device_port.h>
@@ -647,6 +648,18 @@ ds_master_device_dma_free(
  * with individually allocated physical pages — perfect for building
  * multi-entry PRDTs (scatter-gather DMA).
  */
+/*
+ * ── The address list travels out of line (#520) ──────────────────────
+ *
+ * `paddrs' is a vm_map_copy_t handed to MIG, not a caller-supplied buffer, and
+ * every element is a full vm_address_t.  See the note on dma_sg_addr_t in
+ * <device/device_master.defs> for why the shape changed with the width.
+ *
+ * ⚠️ The ceiling on n_pages is gone with the inline array that imposed it.
+ * What bounds this now is the allocation itself: n_pages pages of wired kernel
+ * memory, which fails when there are not that many.  A number that was a
+ * message-layout limit pretending to be a policy is worse than no number.
+ */
 kern_return_t
 ds_master_device_dma_alloc_sg(
 	ipc_port_t		master_port,
@@ -654,8 +667,8 @@ ds_master_device_dma_alloc_sg(
 	ipc_port_t		task_port,
 	vm_address_t		*kva_out,
 	vm_address_t		*uva_out,
-	unsigned int		*paddrs,
-	unsigned int		*paddrs_count)
+	vm_address_t		**paddrs,
+	mach_msg_type_number_t	*paddrs_count)
 {
 	kern_return_t	kr;
 	task_t		task;
@@ -664,12 +677,15 @@ ds_master_device_dma_alloc_sg(
 	vm_map_t	map;
 	vm_offset_t	uva;
 	unsigned int	i;
+	vm_offset_t	list;
+	vm_size_t	list_bytes, list_size;
+	vm_map_copy_t	list_copy;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	if (n_pages == 0 || n_pages > 4096)
+	if (n_pages == 0)
 		return KERN_INVALID_ARGUMENT;
 
 	task = convert_port_to_task(task_port);
@@ -679,12 +695,41 @@ ds_master_device_dma_alloc_sg(
 	size = (vm_size_t)n_pages * PAGE_SIZE;
 
 	/*
+	 * The list first, because it is the cheapest thing to fail on and
+	 * failing after the mapping would mean unmapping it again.
+	 */
+	list_bytes = (vm_size_t)n_pages * sizeof(vm_address_t);
+	list_size = round_page(list_bytes);
+
+	kr = vm_allocate(ipc_kernel_map, &list, list_size, TRUE);
+	if (kr != KERN_SUCCESS) {
+		task_deallocate(task);
+		return kr;
+	}
+
+	/*
+	 * Wired while it is filled, and unwired before it is copied out --
+	 * the shape mach_port_names() uses, and for its reason: vm_map_copyin
+	 * on a wired range is not the same operation.
+	 */
+	kr = vm_map_wire(ipc_kernel_map, list, list + list_size,
+			 VM_PROT_READ | VM_PROT_WRITE, FALSE);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		task_deallocate(task);
+		return kr;
+	}
+
+	/*
 	 * Allocate wired kernel pages.  kmem_alloc_wired gives us
 	 * contiguous kernel VA but physical pages are allocated
 	 * individually — no contiguity requirement.
 	 */
 	kr = kmem_alloc_wired(kernel_map, &kva, size);
 	if (kr != KERN_SUCCESS) {
+		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
+				     FALSE);
+		kmem_free(ipc_kernel_map, list, list_size);
 		task_deallocate(task);
 		return kr;
 	}
@@ -701,6 +746,9 @@ ds_master_device_dma_alloc_sg(
 			  VM_PROT_READ | VM_PROT_WRITE,
 			  VM_INHERIT_NONE);
 	if (kr != KERN_SUCCESS) {
+		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
+				     FALSE);
+		kmem_free(ipc_kernel_map, list, list_size);
 		kmem_free(kernel_map, kva, size);
 		task_deallocate(task);
 		return kr;
@@ -724,17 +772,50 @@ ds_master_device_dma_alloc_sg(
 			 * silent bad mapping for a silent leak.
 			 */
 			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+			(void) vm_map_unwire(ipc_kernel_map, list,
+					     list + list_size, FALSE);
+			kmem_free(ipc_kernel_map, list, list_size);
 			kmem_free(kernel_map, kva, size);
 			task_deallocate(task);
 			return KERN_RESOURCE_SHORTAGE;
 		}
-		paddrs[i] = (unsigned int)pa;
+
+		/*
+		 * #520: whole, where this used to write `(unsigned int)pa'.
+		 * pmap_extract answers a vm_offset_t and the list now holds
+		 * one, so a page above four gigabytes is named rather than
+		 * silently folded into the low half of memory.
+		 */
+		((vm_address_t *)list)[i] = pa;
 	}
 
 	task_deallocate(task);
 
+	kr = vm_map_unwire(ipc_kernel_map, list, list + list_size, FALSE);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+		kmem_free(kernel_map, kva, size);
+		return kr;
+	}
+
+	/*
+	 * ⚠️ list_bytes and not list_size: the caller is handed exactly the
+	 * addresses it asked for, not the page the allocator rounded up to.
+	 * Copying the rounding out would hand a driver whatever the tail of
+	 * that page happened to contain, with a count that says it is data.
+	 */
+	kr = vm_map_copyin(ipc_kernel_map, list, list_bytes, TRUE, &list_copy);
+	if (kr != KERN_SUCCESS) {
+		kmem_free(ipc_kernel_map, list, list_size);
+		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+		kmem_free(kernel_map, kva, size);
+		return kr;
+	}
+
 	*kva_out = kva;			/* #427: no narrowing cast */
 	*uva_out = uva;
+	*paddrs = (vm_address_t *) list_copy;
 	*paddrs_count = n_pages;
 	return KERN_SUCCESS;
 }

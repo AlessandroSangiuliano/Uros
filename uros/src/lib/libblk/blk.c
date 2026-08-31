@@ -83,14 +83,14 @@ extern kern_return_t device_read_phys(
 	mach_port_t device,
 	dev_mode_t mode, recnum_t recnum,
 	io_buf_len_t bytes_wanted,
-	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	vm_address_t *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
 	io_buf_len_t *bytes_read) __attribute__((weak));
 
 extern kern_return_t device_write_phys(
 	mach_port_t device,
 	dev_mode_t mode, recnum_t recnum,
 	io_buf_len_t bytes_to_write,
-	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	vm_address_t *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
 	io_buf_len_t *bytes_written) __attribute__((weak));
 
 extern kern_return_t device_read_overwrite(
@@ -350,7 +350,7 @@ kern_return_t
 blk_read_phys(struct blk_dev *dev,
 	      recnum_t recnum,
 	      io_buf_len_t bytes_wanted,
-	      unsigned int *phys_addrs,
+	      vm_address_t *phys_addrs,
 	      unsigned int n_phys,
 	      io_buf_len_t *bytes_read)
 {
@@ -370,7 +370,7 @@ kern_return_t
 blk_write_phys(struct blk_dev *dev,
 	       recnum_t recnum,
 	       io_buf_len_t bytes_to_write,
-	       unsigned int *phys_addrs,
+	       vm_address_t *phys_addrs,
 	       unsigned int n_phys,
 	       io_buf_len_t *bytes_written)
 {

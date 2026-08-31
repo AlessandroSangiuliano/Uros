@@ -239,8 +239,8 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 					page_bytes = rem;
 			}
 
-			tbl->prdt[p].dba  = st->data_pa_list[page_idx];
-			tbl->prdt[p].dbau = 0;	/* natural_t: no upper half exists */
+			tbl->prdt[p].dba  = ahci_pa_lo(st->data_pa_list[page_idx]);
+			tbl->prdt[p].dbau = ahci_pa_hi(st->data_pa_list[page_idx]);
 			tbl->prdt[p].rsvd = 0;
 			tbl->prdt[p].dbc  = PRDT_DBC(page_bytes);
 			if (p == n_prdt - 1)
@@ -299,7 +299,7 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 int
 ahci_submit_phys(struct ahci_state *st, int port_idx,
 		 uint32_t start_lba, unsigned int nsectors,
-		 int write, natural_t *caller_pa,
+		 int write, vm_address_t *caller_pa,
 		 unsigned int n_pa, unsigned int total_bytes)
 {
 	int port = st->ports[port_idx].hba_port;
@@ -357,8 +357,8 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 	for (p = 0; p < n_prdt; p++) {
 		unsigned int chunk = bytes_left > 4096u ? 4096u : bytes_left;
 
-		tbl->prdt[p].dba  = caller_pa[p];
-		tbl->prdt[p].dbau = 0;	/* natural_t: no upper half exists */
+		tbl->prdt[p].dba  = ahci_pa_lo(caller_pa[p]);
+		tbl->prdt[p].dbau = ahci_pa_hi(caller_pa[p]);
 		tbl->prdt[p].rsvd = 0;
 		tbl->prdt[p].dbc  = PRDT_DBC(chunk);
 		if (p == n_prdt - 1)

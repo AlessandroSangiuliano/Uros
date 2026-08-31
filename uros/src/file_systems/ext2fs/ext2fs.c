@@ -164,14 +164,14 @@ extern kern_return_t device_read_phys(
 	mach_port_t device,
 	dev_mode_t mode, recnum_t recnum,
 	io_buf_len_t bytes_wanted,
-	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	vm_address_t *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
 	io_buf_len_t *bytes_read) __attribute__((weak));
 
 extern kern_return_t device_write_phys(
 	mach_port_t device,
 	dev_mode_t mode, recnum_t recnum,
 	io_buf_len_t bytes_to_write,
-	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	vm_address_t *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
 	io_buf_len_t *bytes_written) __attribute__((weak));
 
 /* ================================================================
@@ -229,7 +229,7 @@ ext2_dev_has_phys(struct device *dev)
 static inline kern_return_t
 ext2_dev_read_phys(struct device *dev, recnum_t recnum,
 		   io_buf_len_t bytes_wanted,
-		   unsigned int *phys_addrs, unsigned int n_phys,
+		   vm_address_t *phys_addrs, unsigned int n_phys,
 		   io_buf_len_t *bytes_read)
 {
 	if (dev->blk)
@@ -242,7 +242,7 @@ ext2_dev_read_phys(struct device *dev, recnum_t recnum,
 static inline kern_return_t
 ext2_dev_write_phys(struct device *dev, recnum_t recnum,
 		    io_buf_len_t bytes_to_write,
-		    unsigned int *phys_addrs, unsigned int n_phys,
+		    vm_address_t *phys_addrs, unsigned int n_phys,
 		    io_buf_len_t *bytes_written)
 {
 	if (dev->blk)
@@ -1098,7 +1098,7 @@ buf_read_file(
 				e = page_cache_alloc_entry(fp->f_dev.cache,
 							   disk_block);
 				if (e) {
-					unsigned int pa =
+					vm_address_t pa =
 						(unsigned int)e->pc_phys;
 					io_buf_len_t br;
 					rc = ext2_dev_read_phys(
@@ -1199,7 +1199,7 @@ fallback_read:
 					e = page_cache_alloc_entry(
 						fp->f_dev.cache, disk_block);
 					if (e) {
-						unsigned int pa =
+						vm_address_t pa =
 							(unsigned int)e->pc_phys;
 						io_buf_len_t br;
 						rc = ext2_dev_read_phys(

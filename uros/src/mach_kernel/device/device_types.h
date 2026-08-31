@@ -149,6 +149,7 @@ typedef	uint32		dev_mode_t;
  */
 typedef char *	io_buf_ptr_t;
 
+
 /*
  * IO buffer - in-line array of characters.
  */
@@ -176,7 +177,14 @@ typedef uint32		dev_flavor_t;
 typedef int		*dev_status_t;	/* Variable-length array of integers */
 #define	DEV_STATUS_MAX	(1024)		/* Maximum array size */
 
-typedef unsigned int	*dma_sg_addr_t;	/* Scatter-gather PA array (per-page) */
+/*
+ * Scatter-gather DMA: one physical address per 4 KiB page, out of line (#520).
+ *
+ * 🔴 vm_address_t and not `unsigned int'.  These are BYTE addresses, so the
+ * narrow element put a four-gigabyte ceiling on what a list could name -- on a
+ * kernel whose allocator can hand back a frame above it.
+ */
+typedef vm_address_t	*dma_sg_addr_t;
 #define	DMA_SG_ADDR_MAX	(256)		/* Maximum pages (1 MB) */
 
 typedef int		dev_status_data_t[DEV_STATUS_MAX];

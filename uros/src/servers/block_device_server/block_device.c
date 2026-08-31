@@ -742,7 +742,7 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		    mach_msg_type_name_t reply_poly,
 		    dev_mode_t mode, recnum_t recnum,
 		    io_buf_len_t bytes_wanted,
-		    unsigned int *phys_addrs,
+		    vm_address_t *phys_addrs,
 		    mach_msg_type_number_t phys_addrsCnt,
 		    io_buf_len_t *bytes_read)
 {
@@ -781,7 +781,7 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 		     mach_msg_type_name_t reply_poly,
 		     dev_mode_t mode, recnum_t recnum,
 		     io_buf_len_t bytes_to_write,
-		     unsigned int *phys_addrs,
+		     vm_address_t *phys_addrs,
 		     mach_msg_type_number_t phys_addrsCnt,
 		     io_buf_len_t *bytes_written)
 {

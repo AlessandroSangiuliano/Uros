@@ -66,6 +66,16 @@ struct ahci_port_info {
  * Scatter-gather: each slot uses PRDT_PER_SLOT pages (128 KB),
  * allowing multi-entry PRDTs with non-contiguous physical pages.
  */
+/*
+ * How many pages one scatter-gather allocation describes.  Four megabytes,
+ * which is the buffer this driver keeps for batched I/O.
+ *
+ * ⚠️ NOT the same number as PRDT_PER_SLOT, and they are easy to confuse: this
+ * bounds the ALLOCATION, that one bounds how many of its pages a single
+ * command table can name.
+ */
+#define AHCI_MAX_SG_PAGES	1024u
+
 #define SLOT_DATA_SIZE		(PRDT_PER_SLOT * 4096u)
 #define CT_STRIDE		640u
 #define SECTORS_PER_SLOT	(SLOT_DATA_SIZE / 512u)
@@ -87,22 +97,16 @@ struct ahci_state {
 	vm_address_t	data_kva, data_uva, data_pa;
 
 	/*
-	 * 🔴 natural_t, AND THAT IS THE WIRE'S WIDTH RATHER THAN A CHOICE.
-	 * device_dma_alloc_sg returns `dma_sg_addr_t = array[*:4096] of
-	 * natural_t', and natural_t is 32 bits on both targets on purpose --
-	 * mach_port_t is one.  So this array cannot hold a physical address
-	 * above 4 GiB no matter what type is written here, and widening it
-	 * would only move the truncation to the stub.
+	 * 🔴 vm_address_t since #520 moved dma_sg_addr_t out of line and
+	 * widened it.  It was natural_t, which was the WIRE's width and not a
+	 * choice: the reply used to be an inline array of 32-bit elements, so
+	 * no type written here could have held a page above four gigabytes.
 	 *
-	 * Spelled natural_t rather than `unsigned int' so that it says which
-	 * of the two it is: the same eight characters used to mean both, and
-	 * the whole of this port is the difference between them.
-	 *
-	 * ⚠️ The limit itself is #417's, and it is REAL here and not
-	 * theoretical -- see the note on the scatter-gather path in
-	 * ahci_io.c.
+	 * ⚠️ 8 KiB in BSS rather than 4, and it is BSS -- struct ahci_state is
+	 * static.  The same widening on the stack is what made the inline
+	 * array unaffordable in the first place.
 	 */
-	natural_t	data_pa_list[1024];
+	vm_address_t	data_pa_list[AHCI_MAX_SG_PAGES];
 	unsigned int	data_n_pages;
 
 	/* Batching parameters (set after IDENTIFY) */
@@ -178,14 +182,14 @@ int  ahci_submit_batch(struct ahci_state *st, int port_idx,
 		       int write);
 
 /*
- * ⚠️ `caller_pa' is natural_t and not vm_address_t: these addresses arrive
- * from a client over device_read_phys/device_write_phys, whose dma_sg_addr_t
- * is an array of natural_t.  Widening the parameter would claim a reach the
- * interface it is fed from does not have.
+ * `caller_pa' arrives from a client over device_read_phys/device_write_phys,
+ * whose dma_sg_addr_t is now an inline array of vm_address_t (#520) -- so the
+ * parameter's reach and the interface's are the same again, which is the only
+ * arrangement in which neither has to be remembered.
  */
 int  ahci_submit_phys(struct ahci_state *st, int port_idx,
 		      uint32_t start_lba, unsigned int nsectors,
-		      int write, natural_t *caller_pa,
+		      int write, vm_address_t *caller_pa,
 		      unsigned int n_pa, unsigned int total_bytes);
 
 #endif /* _AHCI_MODULE_H_ */

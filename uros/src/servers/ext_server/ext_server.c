@@ -269,7 +269,13 @@ ext2_writeback(void *ctx, daddr_t block, vm_offset_t data, vm_size_t size,
 	kern_return_t rc;
 
 	if (phys && blk_has_phys(wb->dev->blk)) {
-		unsigned int pa = (unsigned int)phys;
+		/*
+		 * #520: whole.  `phys' is a vm_offset_t and this cast used to
+		 * narrow it -- on i386 harmlessly, since the two are the same
+		 * type there, and on x86-64 by dropping the top half of a page
+		 * address into a DMA write.
+		 */
+		vm_address_t pa = phys;
 		rc = blk_write_phys(wb->dev->blk, recnum,
 				    (io_buf_len_t)size,
 				    &pa, 1, &bytes_written);
@@ -1496,9 +1502,17 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 
 			/* Upgrade to DMA-backed page cache */
 			{
-				unsigned int kva, uva;
-				unsigned int pa_list[4096];
-				mach_msg_type_number_t pa_cnt = 4096;
+				/*
+				 * #520: addresses are vm_address_t, and the
+				 * address list is OUT OF LINE -- so it is no
+				 * longer sixteen kilobytes of this frame on
+				 * top of the stub's own.  It is memory the
+				 * kernel handed over, and this task releases
+				 * it below.
+				 */
+				vm_address_t kva, uva;
+				vm_address_t *pa_list = NULL;
+				mach_msg_type_number_t pa_cnt = 0;
 				unsigned int n_entries = 4096;
 				unsigned int n_pages;
 				struct page_cache *dma_pc;
@@ -1511,9 +1525,10 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 					device_port, n_pages,
 					mach_task_self(),
 					&kva, &uva,
-					pa_list, &pa_cnt);
-				printf("ext2: DMA alloc: kr=%d kva=0x%x uva=0x%x n_pages=%u pa_cnt=%u\n",
-				       kr, kva, uva, n_pages, pa_cnt);
+					&pa_list, &pa_cnt);
+				printf("ext2: DMA alloc: kr=%d kva=0x%lx uva=0x%lx n_pages=%u pa_cnt=%u\n",
+				       kr, (unsigned long)kva,
+				       (unsigned long)uva, n_pages, pa_cnt);
 				if (kr == KERN_SUCCESS) {
 					dma_pc = page_cache_create_dma(
 						n_entries,
@@ -1547,6 +1562,22 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 					       "(kr=%d), using "
 					       "non-DMA cache\n", kr);
 				}
+
+				/*
+				 * ⚠️ #520: the out-of-line list is released on
+				 * every path, including the ones that just
+				 * failed.  page_cache_create_dma copies what
+				 * it needs, so nothing outlives this block --
+				 * and a receiver that forgets out-of-line
+				 * memory leaks one allocation per mount, which
+				 * is exactly the size of leak nobody notices.
+				 */
+				if (pa_list != NULL)
+					(void) vm_deallocate(
+						mach_task_self(),
+						(vm_address_t)pa_list,
+						(vm_size_t)pa_cnt
+						* sizeof(vm_address_t));
 			}
 
 			/* Set writeback on non-DMA cache if

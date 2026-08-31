@@ -149,11 +149,11 @@ routine device_intr_enable(
  * above four gigabytes and one that cannot -- and, sharper, between one that
  * can return a user virtual address and one that truncates it.
  *
- * ⚠️ dma_sg_addr_t below is the one that is NOT widened here.  It is an
- * INLINE array of addresses, and doubling its element takes the message from
- * 16 to 32 KiB; that is a message-layout question and belongs to #416.  Until
- * then, a scatter-gather list cannot describe a page above four gigabytes,
- * which is #417's subject and is written down rather than left to be found.
+ * ⚠️ dma_sg_addr_t below was the one NOT widened here, on the grounds that
+ * doubling an inline element took the message from 16 to 32 KiB.  That was
+ * right about the cost and wrong about the conclusion: the answer was to stop
+ * carrying it inline, not to keep it narrow.  Widened and moved out of line by
+ * #520 -- see the note on the type itself.
  *
  * What stays natural_t: bus, slot, func, reg, data, irq, the I/O port number
  * and n_pages.  They are numbers, not addresses.
@@ -220,7 +220,40 @@ routine device_mmio_unmap(
  * of physical addresses (one per page) for programming PRDTs.
  * Unlike device_dma_alloc, pages need NOT be physically contiguous.
  */
-type dma_sg_addr_t = array[*:4096] of natural_t;
+/*
+ * ── Out of line, and 64 bits wide (#520) ─────────────────────────────
+ *
+ * It was `array[*:4096] of natural_t' -- inline, and 32 bits per element on
+ * both targets.  Two things were wrong with that and only one of them was the
+ * width.
+ *
+ * 🔴 THE WIDTH.  Each element is the BYTE address of a 4 KiB page, so 32 bits
+ * put a ceiling of four gigabytes on what a scatter-gather list could name.  On
+ * a 64-bit kernel that is a hole, not a limitation: the allocator may hand back
+ * a frame above it and the list simply could not say so.
+ *
+ * 🔴 THE SHAPE, which is what made the width unaffordable.  A variable-length
+ * INLINE array costs its declared MAXIMUM as a stack frame -- migcom puts
+ * `union { Request; Reply; } Mess' on the stack -- while copying and sending
+ * only the actual count.  So 4096 elements were 16 KiB of frame in a 64 KiB
+ * thread stack, and widening them would have made it 32.  ext_server has its
+ * own pa_list[4096] in the calling frame on top of that: 32 KiB of 64, already,
+ * on i386.
+ *
+ * Out of line, the array travels as a memory region and the frame holds a
+ * pointer.  The cost is one vm_map_copyin per call, and this call happens once
+ * per controller or per mount -- it allocates a buffer, it does not transfer.
+ *
+ * ⚠️ NOT the right answer for the per-I/O lists.  device_read_phys and
+ * device_write_phys carry one to thirty-two addresses on EVERY disk request,
+ * and out-of-line there would be page-table work plus a kernel allocation to
+ * move eight bytes.  Those stay inline; see ahci_batch.defs, where the cap is
+ * PRDT_PER_SLOT and not a round number.
+ *
+ * ⚠️ THE CALLER MUST vm_deallocate WHAT IT GETS BACK.  That is the price of
+ * out-of-line memory and the one way this change can leak.
+ */
+type dma_sg_addr_t = ^array[] of vm_address_t;
 
 routine device_dma_alloc_sg(
 		master_port	: mach_port_t;
