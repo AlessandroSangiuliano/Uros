@@ -609,6 +609,79 @@ uint64_t iommu_amd_pde(uint64_t next_table_pa, unsigned next_level)
 	     | AMD_PT_IR | AMD_PT_IW;
 }
 
+/*
+ * ── Stage 3b: the same entry, read the way the engine reads it ───────
+ *
+ * Rev 3.11 §2.2.3, and every refusal below is a sentence from it rather than a
+ * precaution:
+ *
+ *	"A page translation entry is a page table entry with the Next Level
+ *	 field set to 0h or 7h.  A page directory entry is a page table entry
+ *	 with the Next Level field not equal to 0h or 7h."
+ *
+ *	"If a page table entry contains nonzero bits in any of the fields
+ *	 marked reserved, if the Next Level field is greater than or equal to
+ *	 the current page table entry table's level [...] translation
+ *	 terminates with an IO_PAGE_FAULT."
+ *
+ * 🔑 The second of those is the one worth having.  A directory whose Next Level
+ * did not decrease would send the walk back into a table it had already read,
+ * with different address bits, onto a real entry -- and the answer would be a
+ * physical address, wrong, and indistinguishable from a right one.
+ */
+int iommu_amd_pt_decode(uint64_t entry, unsigned level,
+			struct iommu_pt_step *step)
+{
+	unsigned next;
+
+	if ((entry & AMD_PT_PR) == 0)
+		return 0;
+
+	next = (unsigned)((entry >> AMD_PT_NEXT_SHIFT) & 7u);
+
+	step->next = entry & AMD_PT_ADDR_MASK;
+	step->read = (entry & AMD_PT_IR) != 0;
+	step->write = (entry & AMD_PT_IW) != 0;
+
+	/*
+	 * ⚠️ Present with neither permission is a real state here, and it is
+	 * not absence: the page is mapped and every access to it is refused.
+	 * Intel cannot say this at all, which is why the two decoders answer
+	 * differently to the same idea.
+	 */
+	if (next == AMD_PT_NEXT_TRANSLATION) {
+		/*
+		 * ⚠️ "if a page translation entry's physical address is not
+		 * aligned to a multiple of the appropriate page size for the
+		 * current page table entry page table's level [...] translation
+		 * terminates with an IO_PAGE_FAULT."  At level 1 the address
+		 * field cannot be misaligned; above it, it can, and an engine
+		 * refuses such an entry rather than rounding it down.
+		 */
+		if ((step->next & (iommu_level_span(level) - 1ULL)) != 0)
+			return 0;
+
+		step->level = 0;
+		return 1;
+	}
+
+	/*
+	 * 7h is the translation that carries its own page size, encoded as the
+	 * position of the first zero bit of the address.  REFUSED rather than
+	 * decoded: nothing here builds one, so decoding it would be a page-size
+	 * search that no boot ever runs -- and an unrun decode is the kind that
+	 * is wrong for years.
+	 */
+	if (next == 7)
+		return 0;
+
+	if (next >= level)
+		return 0;
+
+	step->level = next;
+	return 1;
+}
+
 /* A scope whose range is a single device: AMD's ordinary case. */
 static void one_device(uint16_t segment, uint16_t bdf, uint8_t kind,
 		       uint8_t enumeration_id)

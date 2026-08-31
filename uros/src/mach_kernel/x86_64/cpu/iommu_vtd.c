@@ -607,6 +607,75 @@ uint64_t iommu_vtd_ss_pde(uint64_t next_table_pa)
 }
 
 /*
+ * ── Stage 3b: the same entry, read the way the engine reads it ───────
+ *
+ * 🔴 THERE IS NO PRESENT BIT.  Rev 5.20 §3.7: "If a second-stage
+ * paging-structure entry's read and write permissions are both 0 or if the
+ * entry sets any reserved field, the entry is used neither to reference another
+ * paging-structure entry nor to map a page."
+ *
+ * So permission and presence are ONE question here and two on AMD, and the
+ * state "mapped, and every access refused" -- which an AMD entry says with PR=1
+ * and no IR or IW -- cannot be written down in this format at all.  A decoder
+ * carried across from the other vendor would read such an entry as a mapping
+ * with no permissions and hand back a physical address for an input the
+ * hardware faults on.
+ */
+#define	VTD_SS_PS		(1ULL << 7)
+
+int iommu_vtd_pt_decode(uint64_t entry, unsigned level,
+			struct iommu_pt_step *step)
+{
+	int read = (entry & VTD_SS_R) != 0;
+	int write = (entry & VTD_SS_W) != 0;
+
+	if (!read && !write)
+		return 0;
+
+	step->next = entry & VTD_SS_ADDR_MASK;
+	step->read = read;
+	step->write = write;
+
+	/*
+	 * At the bottom there is nowhere further to go, and Table 47 makes bit
+	 * 7 Ignored there -- so it is not consulted rather than required clear.
+	 */
+	if (level == 1) {
+		step->level = 0;
+		return 1;
+	}
+
+	if ((entry & VTD_SS_PS) != 0) {
+		/*
+		 * ⚠️ A large page, but only where one can exist.  §3.7 reserves
+		 * the page-size field in an SS-PML4E and an SS-PML5E, and a
+		 * reserved bit set makes the entry unusable rather than
+		 * generous -- so above level 3 this is a refusal and not a
+		 * 512-Gbyte page.
+		 */
+		if (level > 3)
+			return 0;
+
+		/*
+		 * ⚠️ And §3.7 reserves the address bits below the page it
+		 * claims to be -- "if the R or W fields of an SS-PDE is 1, and
+		 * the PS field in that SS-PDE is 1, bits 20:12 are reserved".
+		 * So a large page at an address that is not that size aligned
+		 * is refused, not rounded down.
+		 */
+		if ((step->next & (iommu_level_span(level) - 1ULL)) != 0)
+			return 0;
+
+		step->level = 0;
+		return 1;
+	}
+
+	/* No field says where to go next: the level is the depth. */
+	step->level = level - 1;
+	return 1;
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages

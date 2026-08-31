@@ -141,6 +141,55 @@ uint64_t iommu_amd_pde(uint64_t next_table_pa, unsigned next_level);
 uint64_t iommu_vtd_ss_pte(uint64_t pa, int read, int write);
 uint64_t iommu_vtd_ss_pde(uint64_t next_table_pa);
 
+/*
+ * ── Stage 3b: reading one entry back ─────────────────────────────────
+ *
+ * One step of a walk: what an engine learns from an entry it has just fetched
+ * out of a table at `level'.
+ *
+ * `level' here is where the walk goes NEXT, and zero means it does not go
+ * anywhere -- the entry is the translation, of the page size that belongs to
+ * the level it was found in.
+ */
+struct iommu_pt_step {
+	uint64_t	next;	/* the table below, or the page itself  */
+	unsigned	level;	/* level to index next; 0 = this is it   */
+	int		read;
+	int		write;
+};
+
+/*
+ * Bytes one entry at `level' covers, which is also the page size of a
+ * translation found there.  Nine address bits per level above the lowest
+ * twelve -- the one thing the two vendors agree about completely, both having
+ * taken it from the processor's own paging.
+ */
+static inline uint64_t iommu_level_span(unsigned level)
+{
+	return 1ULL << (12u + 9u * (level - 1u));
+}
+
+/*
+ * Decode one entry, answering zero when it translates nothing.
+ *
+ * 🔴 WRITTEN FROM THE FIGURES, NOT FROM THE ENCODERS ABOVE.  Builder and walker
+ * share these, so a decoder derived by inverting an encoder would let the two
+ * halves agree on the same wrong bit and call it verified.  What keeps them
+ * apart is that iommu_decode_check() feeds these literal words copied out of
+ * the specifications -- including words no encoder here produces.
+ *
+ * 🔴 AND "NOTHING" IS TWO DIFFERENT STATES.  AMD's PR bit is a separate
+ * question from its permissions, so an AMD entry can be present and deny
+ * everything; Intel has no present bit at all, and Rev 5.20 §3.7 makes R and W
+ * both zero mean the entry "is used neither to reference another
+ * paging-structure entry nor to map a page".  The same idea, spelt one way that
+ * distinguishes denial from absence and one way that cannot.
+ */
+int iommu_amd_pt_decode(uint64_t entry, unsigned level,
+			struct iommu_pt_step *step);
+int iommu_vtd_pt_decode(uint64_t entry, unsigned level,
+			struct iommu_pt_step *step);
+
 void iommu_vtd_root_entry(uint64_t context_table_pa, uint64_t out[2]);
 void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
 				   uint64_t out[2]);

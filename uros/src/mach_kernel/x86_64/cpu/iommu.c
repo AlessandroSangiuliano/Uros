@@ -614,6 +614,82 @@ static int entries_agree(void)
 	 */
 	ok &= (iommu_vtd_ss_pde(0x2000) & (1ULL << 7)) == 0;
 
+	/*
+	 * ── Reading them back (stage 3b) ─────────────────────────────
+	 *
+	 * 🔴 THE DECODERS AGAINST LITERALS, NEVER AGAINST THE ENCODERS ABOVE.
+	 * The builder and the walker share these decoders, so checking one
+	 * against the other would let both halves hold the same wrong bit and
+	 * call the result verified.  Every word below was copied out of a
+	 * figure, and several are words no encoder here can produce.
+	 */
+	{
+		struct iommu_pt_step s;
+
+		/* AMD Figure 9: PR, IR, IW, Next Level 000b -- a 4-Kbyte page. */
+		ok &= iommu_amd_pt_decode(0x6000000000001001ULL, 1, &s)
+		   && s.next == 0x1000ULL && s.level == 0 && s.read && s.write;
+
+		/* Figure 8: PR clear is not present, whatever else is set. */
+		ok &= !iommu_amd_pt_decode(0xFFFFFFFFFFFFFFFEULL, 1, &s);
+
+		/* Figure 10: Next Level 010b, found in a level-3 table. */
+		ok &= iommu_amd_pt_decode(0x6000000000002401ULL, 3, &s)
+		   && s.next == 0x2000ULL && s.level == 2;
+
+		/*
+		 * 🔴 The SAME word one level down is a fault, not a directory:
+		 * Rev 3.11 §2.2.3 makes a Next Level at or above the table's
+		 * own level an IO_PAGE_FAULT.  One word, two answers, and the
+		 * level is the only thing that told them apart.
+		 */
+		ok &= !iommu_amd_pt_decode(0x6000000000002401ULL, 2, &s);
+
+		/* 111b is the self-sized page: refused rather than guessed at. */
+		ok &= !iommu_amd_pt_decode(0x6000000000001E01ULL, 3, &s);
+
+		/*
+		 * 🔴 AMD says "mapped, and refused" -- PR set, no permissions.
+		 * Intel's identical-looking word says "not mapped".  The two
+		 * lines below are the same idea in the two formats, and they
+		 * disagree about whether there is a mapping at all.
+		 */
+		ok &= iommu_amd_pt_decode(0x0000000000001001ULL, 1, &s)
+		   && s.level == 0 && !s.read && !s.write;
+		ok &= !iommu_vtd_pt_decode(0x0000000000001000ULL, 1, &s);
+
+		/* Rev 5.20 Table 47: read in bit 0, write in bit 1. */
+		ok &= iommu_vtd_pt_decode(0x1003ULL, 1, &s)
+		   && s.next == 0x1000ULL && s.level == 0 && s.read && s.write;
+		ok &= iommu_vtd_pt_decode(0x1002ULL, 1, &s)
+		   && !s.read && s.write;
+
+		/* Table 46: bit 7 clear, so the level is the depth. */
+		ok &= iommu_vtd_pt_decode(0x2003ULL, 3, &s) && s.level == 2;
+
+		/* Table 45: bit 7 set at level 2 is a 2-Mbyte page. */
+		ok &= iommu_vtd_pt_decode(0x200083ULL, 2, &s)
+		   && s.next == 0x200000ULL && s.level == 0;
+
+		/*
+		 * ⚠️ And the same bit at level 4, where §3.7 reserves it, makes
+		 * the entry unusable rather than enormous.
+		 */
+		ok &= !iommu_vtd_pt_decode(0x200083ULL, 4, &s);
+
+		/*
+		 * 🔴 A large page whose address is not that size aligned is
+		 * REFUSED, on both vendors, and not quietly rounded down.  Both
+		 * specifications make those low address bits reserved, and a
+		 * reader that rounded would hand back an address the hardware
+		 * would have faulted on.
+		 */
+		ok &= !iommu_vtd_pt_decode(0x2083ULL, 2, &s);
+		ok &= !iommu_amd_pt_decode(0x6000000000002001ULL, 2, &s);
+		ok &= iommu_amd_pt_decode(0x6000000000200001ULL, 2, &s)
+		   && s.next == 0x200000ULL && s.level == 0;
+	}
+
 	return ok;
 }
 
@@ -675,3 +751,4 @@ int iommu_address_bits_ok(unsigned bits)
 
 	return 1;
 }
+
