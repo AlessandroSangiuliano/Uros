@@ -294,6 +294,8 @@ void iommu_vtd_decode(uint64_t cap, uint64_t ecap,
 #define	VTD_CTX_PRESENT		(1ULL << 0)
 #define	VTD_CTX_TT_SHIFT	2		/* 10b = pass-through */
 #define	VTD_CTX_TT_PASSTHROUGH	2ULL
+#define	VTD_CTX_TT_SECOND_STAGE	0ULL		/* 00b = walk SSPTPTR  */
+#define	VTD_CTX_SSPTPTR_MASK	0xFFFFFFFFFFFFF000ULL
 /* AW is bits 66:64 and DID bits 87:72: the low word of the second half. */
 #define	VTD_CTX_AW_SHIFT	0
 #define	VTD_CTX_DID_SHIFT	8
@@ -323,6 +325,37 @@ void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
 {
 	out[0] = VTD_CTX_PRESENT
 	       | (VTD_CTX_TT_PASSTHROUGH << VTD_CTX_TT_SHIFT);
+	out[1] = ((uint64_t)(levels - 2) & 7ULL) << VTD_CTX_AW_SHIFT
+	       | ((uint64_t)domain << VTD_CTX_DID_SHIFT);
+}
+
+/*
+ * ── Stage 3c: one device, translating through a table of its own ─────
+ *
+ * Translation type 00b, which Rev 5.20 Table 21 defines as: "Untranslated
+ * requests are translated using second-stage paging structures referenced
+ * through the SSPTPTR field.  Translated requests and Translation Requests are
+ * blocked."
+ *
+ * 🔑 THE SECOND SENTENCE IS HALF THE POINT.  A device with its own Device-TLB
+ * can present an address it says is already translated, and under 01b the
+ * engine would take its word for it -- so a driver that can talk to such a
+ * device could hand the hardware a physical address again and this whole issue
+ * would be back where it started.  00b refuses those, and it is chosen for
+ * that and not merely because 01b needs Device-TLB support.
+ *
+ * ⚠️ `levels' is this domain's depth and not the engine's deepest.  Under
+ * pass-through AW must name the largest the hardware reports; here it must name
+ * the table actually being pointed at, and an address above what it covers is
+ * blocked as a translation fault.  Same field, two different rules, and the
+ * pass-through encoder above is not a template for this one.
+ */
+void iommu_vtd_context_domain(uint16_t domain, unsigned levels,
+			      uint64_t root_pa, uint64_t out[2])
+{
+	out[0] = VTD_CTX_PRESENT
+	       | (VTD_CTX_TT_SECOND_STAGE << VTD_CTX_TT_SHIFT)
+	       | (root_pa & VTD_CTX_SSPTPTR_MASK);
 	out[1] = ((uint64_t)(levels - 2) & 7ULL) << VTD_CTX_AW_SHIFT
 	       | ((uint64_t)domain << VTD_CTX_DID_SHIFT);
 }

@@ -692,6 +692,46 @@ static int entries_agree(void)
 		   && s.next == 0x200000ULL && s.level == 0;
 	}
 
+	/*
+	 * ── The entries that point a device at a table (stage 3c) ────
+	 *
+	 * 🔴 The pass-through pair above and this pair differ in more than a
+	 * pointer, which is the reason they are four encoders and not two with
+	 * a parameter.  Intel's TYPE changes from 10b to 00b, and AMD's MODE
+	 * from "translation off" to a depth -- and on AMD the root pointer is
+	 * IGNORED in the entry above, so adding one to it would have produced
+	 * an entry that still forwarded everything untranslated.
+	 */
+	{
+		uint64_t c[2], d[4];
+
+		/* Intel: present, type 00b, the root in 63:12, AW 010b, dom 2. */
+		iommu_vtd_context_domain(2, 4, 0x123456000ULL, c);
+		ok &= c[0] == 0x123456001ULL && c[1] == 0x202ULL;
+
+		/* ⚠️ Type 00b means those two bits are CLEAR where 10b set one. */
+		ok &= (c[0] & 0xCULL) == 0;
+
+		/* AMD: valid, mode 100b for four levels, root, both permissions. */
+		iommu_amd_dte_domain(2, 4, 0x123456000ULL, d);
+		ok &= d[0] == 0x6000000123456803ULL && d[1] == 2
+		   && d[2] == 0 && d[3] == 0;
+
+		/* Three levels is mode 011b, and only that field moves. */
+		iommu_amd_dte_domain(2, 3, 0x123456000ULL, d);
+		ok &= d[0] == 0x6000000123456603ULL;
+
+		/*
+		 * 🔴 And neither may be mistaken for its pass-through twin: on
+		 * AMD that one has mode 000b and NO pointer, so an entry built
+		 * by adding a pointer to it would forward everything while
+		 * looking configured.
+		 */
+		iommu_amd_dte_passthrough(2, d);
+		ok &= (d[0] & (7ULL << 9)) == 0
+		   && (d[0] & 0x000FFFFFFFFFF000ULL) == 0;
+	}
+
 	return ok;
 }
 
@@ -833,6 +873,19 @@ int iommu_domain_map(struct iommu_domain *d, uint64_t iova, uint64_t pa,
 	 * reach over memory the caller never named.
 	 */
 	if (((iova | pa | size) & 0xFFFULL) != 0)
+		return 0;
+
+	/*
+	 * 🔴 AND NOTHING MAY EVER TRANSLATE INTO THE INTERRUPT RANGE.  Both
+	 * vendors say so in their own words -- see the citations in
+	 * <cpu/iommu_backend.h> -- and the reason is worse than a rule: that
+	 * range is the local APIC's, so a domain that mapped a device onto it
+	 * would let the device raise interrupts by writing its own DMA buffer.
+	 * Refused here, where every mapping passes, rather than trusted to
+	 * every future caller.
+	 */
+	if (pa + size > IOMMU_INTERRUPT_RANGE_BASE
+	    && pa <= IOMMU_INTERRUPT_RANGE_LIMIT)
 		return 0;
 
 	for (uint64_t off = 0; off < size; off += 4096) {
@@ -1226,6 +1279,28 @@ static unsigned check_one_vendor(enum iommu_vendor vendor, unsigned *walked)
 
 		(*walked)++;
 		if (iommu_domain_walk(&d, base - 4096u, &pa, &read, &write))
+			bad++;
+	}
+
+	/*
+	 * 🔴 AND A MAPPING ONTO THE INTERRUPT RANGE MUST BE REFUSED.  Both
+	 * vendors forbid it in their own words, and the consequence of allowing
+	 * it is a device that raises interrupts by writing its own buffer.
+	 * Asked at three places: one page below the range, which is legal; the
+	 * first page of it; and a range that merely overlaps its end.
+	 */
+	{
+		uint64_t away = base + (uint64_t)PT_CHECK_PAGES * 4096u;
+
+		if (!iommu_domain_map(&d, away, IOMMU_INTERRUPT_RANGE_BASE
+					       - 4096u, 4096u, 1, 1))
+			bad++;
+		if (iommu_domain_map(&d, away + 4096u,
+				     IOMMU_INTERRUPT_RANGE_BASE, 4096u, 1, 1))
+			bad++;
+		if (iommu_domain_map(&d, away + 8192u,
+				     IOMMU_INTERRUPT_RANGE_LIMIT + 1u - 4096u,
+				     8192u, 1, 1))
 			bad++;
 	}
 
