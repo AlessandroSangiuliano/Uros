@@ -530,9 +530,10 @@ echo "=== accelerator: $ACCEL ==="
 # ── The boot disk (#520) ──────────────────────────────────────────────
 #
 # bootstrap's late servers live on it, not in the bundle, and the block device
-# server is what reaches them -- the stage-2 path.  Attached the way this target
-# should attach a disk: virtio, because there is no in-kernel driver here and
-# the driver that reads it is a userspace one.
+# server is what reaches them -- the stage-2 path.  Attached over virtio, which
+# is this target's counterpart of the AHCI disk i386 boots from: on both, the
+# driver that reads it is a userspace module the block device server loads, and
+# on neither does the kernel have a disk driver of its own.
 #
 # 🔴 `-boot d' is not optional once a disk is present.  QEMU prefers the hard
 # disk, and this one has an MBR with no boot code, so without it the machine

@@ -14,29 +14,37 @@
 # ── Why there is a disk at all, when everything fits in the bundle ────
 #
 # bootstrap loads a server from the first back end that answers: the multiboot
-# bundle, then the block device server's boot partition, then -- on i386 -- the
-# kernel's own IDE driver.  The bundle is meant to be the MINIMUM needed to
+# bundle, then the block device server's boot partition, then a device opened on
+# the kernel's master port.  The bundle is meant to be the MINIMUM needed to
 # reach a disk, and everything after that is meant to come off the disk.
 #
-# 🔴 THERE IS NO THIRD BACK END HERE, AND THERE SHOULD NEVER BE ONE.  This
-# kernel has no in-kernel disk driver and the project's direction is that it
-# will not get one.  So on x86-64 the sequence is genuinely two stages rather
-# than three: the bundle for what must exist before any driver runs, and the
-# block device server for everything after.  That is not a reduction of i386's
-# arrangement -- it is that arrangement without the escape hatch that made the
-# microkernel claim untrue.
+# 🔑 AND THE ARRANGEMENT IS THE SAME ON BOTH TARGETS, which is worth saying
+# because the obvious guess is that it is not.  i386 does not reach its disk
+# through the kernel either: its dev_name_list[] holds console, time, rtclock,
+# a floppy, a tape and two network cards, and no disk at all.  It gets there
+# through the same block device server, which loads ahci.so -- a userspace
+# driver, the same shape as the virtio_blk.so this target loads.
 #
-# ── What is on it, and why that one ──────────────────────────────────
+# So the third back end reaches no disk on EITHER target.  What differs between
+# them is only which driver the block device server loads, and that is the
+# difference this file exists for: an image the virtio path can read.
 #
-# cow_test, which was the last entry of the bundle and is now the last entry of
-# the disk.  It is chosen because moving it changes NOTHING that a run reports:
-# the same program runs at the same point and prints the same lines, so the
-# self-test count is identical.
+# ── What is on it, and why nothing loads from it yet ─────────────────
 #
-# 🔑 Which is exactly what makes it a test of the path rather than of itself.
-# The verdict stays the same number while the route changes completely, so a
-# stage-2 that has stopped working cannot hide -- cow_test simply does not run,
-# and the count falls by everything it prints.
+# cow_test, which is also still in the bundle -- so bootstrap finds it there
+# first and this copy is not the one that runs.
+#
+# It was the other way round for one commit.  Moving it out of the bundle is
+# the right test of the path, because it changes NOTHING a run reports: the
+# same program runs at the same point and prints the same lines, so the verdict
+# stays the same number while the route changes completely, and a stage 2 that
+# has stopped working cannot hide.  It loaded, and ran every one of its arms.
+#
+# ⚠️ But not reliably -- see #521 -- so it went back in the bundle.  The disk is
+# still built and attached because the block device server then probes a real
+# disk, finds a partition and publishes it on every boot, which is more than
+# the nothing it had.  When #521 is answered, cow_test comes out of the bundle
+# and this copy becomes the one that runs.
 
 set -e
 
