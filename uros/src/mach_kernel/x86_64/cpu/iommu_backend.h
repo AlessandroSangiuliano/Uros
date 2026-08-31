@@ -190,6 +190,42 @@ int iommu_amd_pt_decode(uint64_t entry, unsigned level,
 int iommu_vtd_pt_decode(uint64_t entry, unsigned level,
 			struct iommu_pt_step *step);
 
+/*
+ * ── The ways an entry can be wrong, so the walk can prove it notices ──
+ *
+ * Each vendor names its own, because they are not the same mistakes: what makes
+ * a directory look like a page is a cleared Next Level on one machine and a set
+ * page-size bit on the other, and skipping a level is not expressible at all on
+ * Intel.
+ *
+ * Answers zero when this format cannot make that mistake -- which is a result
+ * and not a failure. 🔑 A format that cannot express a mistake cannot make it,
+ * and asking each vendor what it can get wrong is what keeps the missing case
+ * a written-down absence rather than one nobody thought to run.
+ */
+#define	IOMMU_ABLATE_ROAD_IS_DESTINATION	1	/* directory read as a page  */
+#define	IOMMU_ABLATE_DENY_ON_THE_ROAD		2	/* write denied on the way   */
+#define	IOMMU_ABLATE_SKIP_A_LEVEL		3	/* over bits that are not 0  */
+
+int iommu_amd_pt_ablate(unsigned kind, unsigned level, uint64_t *entry);
+int iommu_vtd_pt_ablate(unsigned kind, unsigned level, uint64_t *entry);
+
+/*
+ * A directory pointing at a table of level `next_level' when the level below
+ * this one is not that -- the level skipping AMD's format has and Intel's does
+ * not.  Answers zero where the format cannot express one.
+ *
+ * 🔴 THE ONLY LEGAL SKIP ANYTHING HERE BUILDS, and it exists to be walked.  A
+ * walk that refused every skip would pass an ablation that skips wrongly, pass
+ * every table this kernel builds -- none of which skip -- and be wrong about
+ * the one thing the two formats genuinely disagree on.  Proving the refusal
+ * needs a case that must be ACCEPTED beside it.
+ */
+int iommu_amd_pt_skip(uint64_t next_table_pa, unsigned next_level,
+		      uint64_t *entry);
+int iommu_vtd_pt_skip(uint64_t next_table_pa, unsigned next_level,
+		      uint64_t *entry);
+
 void iommu_vtd_root_entry(uint64_t context_table_pa, uint64_t out[2]);
 void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
 				   uint64_t out[2]);

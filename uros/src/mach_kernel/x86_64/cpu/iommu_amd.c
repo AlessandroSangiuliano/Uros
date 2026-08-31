@@ -682,6 +682,64 @@ int iommu_amd_pt_decode(uint64_t entry, unsigned level,
 	return 1;
 }
 
+/*
+ * The ways an AMD entry can be wrong.  See <cpu/iommu_backend.h>.
+ */
+int iommu_amd_pt_ablate(unsigned kind, unsigned level, uint64_t *entry)
+{
+	switch (kind) {
+	case IOMMU_ABLATE_ROAD_IS_DESTINATION:
+		/*
+		 * Next Level cleared: the directory becomes a translation, and
+		 * the address it carries -- the page table's own -- becomes the
+		 * page the device reaches.  This is the exact mistake a reader
+		 * coming from Intel's format makes, because there is no field
+		 * there to forget.
+		 *
+		 * ⚠️ Aligned down to this level's page size, deliberately, so
+		 * that the result is a WELL-FORMED entry translating to the
+		 * wrong place.  Left misaligned it would be refused as a
+		 * reserved-field violation, and the check would then be proving
+		 * that malformed entries are caught rather than that
+		 * well-formed wrong ones are.
+		 */
+		*entry &= ~(7ULL << AMD_PT_NEXT_SHIFT);
+		*entry &= ~(iommu_level_span(level) - 1ULL) | 0xFFFULL;
+		return 1;
+
+	case IOMMU_ABLATE_DENY_ON_THE_ROAD:
+		*entry &= ~AMD_PT_IW;
+		return 1;
+
+	case IOMMU_ABLATE_SKIP_A_LEVEL:
+		/*
+		 * One less than it should be, so the walk arrives at the table
+		 * below having never consumed the address bits that chose it.
+		 * The specification allows the skip and requires the skipped
+		 * bits to be zero; here they are not.
+		 */
+		if (((*entry >> AMD_PT_NEXT_SHIFT) & 7u) < 2u)
+			return 0;
+		*entry -= 1ULL << AMD_PT_NEXT_SHIFT;
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * The skip AMD's format is FOR: "This allows the IOMMU to skip page
+ * translation steps in cases where the virtual address often contains long
+ * strings of 0 bits, such as software architectures that allocate virtual
+ * memory sparsely."  Legal, and the walk must follow it.
+ */
+int iommu_amd_pt_skip(uint64_t next_table_pa, unsigned next_level,
+		      uint64_t *entry)
+{
+	*entry = iommu_amd_pde(next_table_pa, next_level);
+	return 1;
+}
+
 /* A scope whose range is a single device: AMD's ordinary case. */
 static void one_device(uint16_t segment, uint16_t bdf, uint8_t kind,
 		       uint8_t enumeration_id)

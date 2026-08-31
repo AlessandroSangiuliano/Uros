@@ -676,6 +676,56 @@ int iommu_vtd_pt_decode(uint64_t entry, unsigned level,
 }
 
 /*
+ * The ways an Intel entry can be wrong.  See <cpu/iommu_backend.h>.
+ */
+int iommu_vtd_pt_ablate(unsigned kind, unsigned level, uint64_t *entry)
+{
+	switch (kind) {
+	case IOMMU_ABLATE_ROAD_IS_DESTINATION:
+		/*
+		 * The page-size bit set on a directory: the table it points at
+		 * becomes the page the device reaches.  Same outcome as AMD's
+		 * cleared Next Level, arrived at from the opposite direction --
+		 * there a field is forgotten, here one is added.
+		 *
+		 * ⚠️ Aligned down for the same reason as AMD's: a misaligned
+		 * large page is refused as a reserved-field violation, and the
+		 * mistake worth catching is the one that stays well-formed.
+		 */
+		*entry |= VTD_SS_PS;
+		*entry &= ~(iommu_level_span(level) - 1ULL) | 0xFFFULL;
+		return 1;
+
+	case IOMMU_ABLATE_DENY_ON_THE_ROAD:
+		*entry &= ~VTD_SS_W;
+		return 1;
+	}
+
+	/*
+	 * 🔑 IOMMU_ABLATE_SKIP_A_LEVEL lands here, and answering no is the
+	 * point: this format has no field with which to skip a level, so it has
+	 * no way to skip one wrongly.  Said here, where the format is, rather
+	 * than by the check leaving one case out silently.
+	 */
+	return 0;
+}
+
+/*
+ * 🔑 And no legal skip either, for the same reason: a second-stage entry
+ * carries no field naming the level below it, so every walk here descends
+ * exactly one level per step.  What AMD spends three bits on, this format gets
+ * from the depth -- and what it gets for free it also cannot vary.
+ */
+int iommu_vtd_pt_skip(uint64_t next_table_pa, unsigned next_level,
+		      uint64_t *entry)
+{
+	(void)next_table_pa;
+	(void)next_level;
+	(void)entry;
+	return 0;
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages

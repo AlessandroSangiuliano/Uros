@@ -518,4 +518,16 @@ int iommu_domain_map(struct iommu_domain *d, uint64_t iova, uint64_t pa,
 int iommu_domain_walk(const struct iommu_domain *d, uint64_t iova,
 		      uint64_t *pa, int *read, int *write);
 
+/*
+ * Build one domain per vendor, map a range into each, and walk every page of
+ * it back.  `walked' counts the walks, `wrong' the ones that disagreed.
+ *
+ * 🔴 AND IT ABLATES ITSELF.  After the range verifies, it damages one directory
+ * entry in each of the ways that vendor's format allows, walks again, and
+ * requires the answer to CHANGE -- then restores it and requires it to change
+ * back.  A check that has never been seen to fail is a check nobody has tested,
+ * and this one is tested on every boot rather than once by whoever wrote it.
+ */
+int iommu_domain_check(unsigned *walked, unsigned *wrong);
+
 #endif	/* _X86_64_CPU_IOMMU_H_ */

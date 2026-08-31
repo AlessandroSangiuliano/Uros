@@ -968,3 +968,331 @@ int iommu_domain_walk(const struct iommu_domain *d, uint64_t iova,
 
 	return 0;
 }
+
+/*
+ * ── And the check that all of the above is worth anything ────────────
+ *
+ * Build a table for each vendor, map a range into it, walk every page back.
+ *
+ * 🔴 BOTH VENDORS ON EVERY MACHINE.  A page table is arithmetic and memory,
+ * and nothing here needs an engine -- so the AMD format is built and walked on
+ * Intel hardware and on machines with no remapping hardware at all.  The
+ * alternative is that each format is only ever exercised where its silicon is,
+ * which means the format that is wrong is the one this machine cannot run.
+ *
+ * The cost is twelve frames and about four thousand memory reads, once, at
+ * boot, on every board.
+ */
+#define	PT_CHECK_LEVELS		4u
+#define	PT_CHECK_PAGES		1025u
+#define	PT_CHECK_PA_BASE	0x00000000AB000000ULL
+
+/*
+ * 🔴 A DIFFERENT INDEX AT EVERY LEVEL, AND NONE OF THEM ZERO.  A range starting
+ * at zero has every index zero, so a walk with the shift wrong at one level
+ * reads entry zero of the right table and answers correctly.  This one puts 5,
+ * 4, 3 and 2 at levels 4 down to 1, so a wrong shift lands somewhere empty.
+ */
+static uint64_t check_iova(void)
+{
+	uint64_t v = 0;
+
+	for (unsigned l = 1; l <= PT_CHECK_LEVELS; l++)
+		v |= (uint64_t)(l + 1u) << (12u + 9u * (l - 1u));
+
+	return v;
+}
+
+/*
+ * 🔴 REVERSED, so that the mapping is not a function of the address.  An
+ * identity map cannot tell a walk that read the tables from a walk that
+ * returned its own argument, and an offset cannot tell it from one that added a
+ * constant.  Running backwards, the only way to get the right answer is to have
+ * read the entry.
+ */
+static uint64_t check_pa(unsigned page)
+{
+	return PT_CHECK_PA_BASE
+	     + (uint64_t)(PT_CHECK_PAGES - 1u - page) * 4096u;
+}
+
+/* Every third page read-only, so the permission bits are carried, not assumed. */
+static int check_write(unsigned page)
+{
+	return (page % 3u) != 0u;
+}
+
+static int pt_ablate(enum iommu_vendor vendor, unsigned kind, unsigned level,
+		     uint64_t *entry)
+{
+	if (vendor == IOMMU_INTEL)
+		return iommu_vtd_pt_ablate(kind, level, entry);
+
+	return iommu_amd_pt_ablate(kind, level, entry);
+}
+
+/* Where one address's entry lives at a given level, or nothing. */
+static volatile uint64_t *entry_at(const struct iommu_domain *d, uint64_t iova,
+				   unsigned want_level)
+{
+	uint64_t table = d->root;
+	unsigned level = d->levels;
+
+	while (level > want_level) {
+		struct iommu_pt_step step;
+
+		if (!pt_decode(d->vendor,
+			       table_at(table)[level_index(iova, level)],
+			       level, &step))
+			return 0;
+
+		if (step.level == 0)
+			return 0;
+
+		table = step.next;
+		level = step.level;
+	}
+
+	if (level != want_level)
+		return 0;
+
+	return &table_at(table)[level_index(iova, level)];
+}
+
+/*
+ * The damage, and what it should do.  `answers' is whether a walk still
+ * produces an address afterwards -- which is the whole difficulty with these
+ * structures: two of the three mistakes below leave the walk succeeding, at a
+ * different place, with nothing anywhere to say so.
+ */
+static const struct {
+	unsigned	kind;
+	unsigned	level;
+	int		answers;
+} pt_ablations[] = {
+	{ IOMMU_ABLATE_ROAD_IS_DESTINATION,	2, 1 },
+	{ IOMMU_ABLATE_DENY_ON_THE_ROAD,	2, 1 },
+	{ IOMMU_ABLATE_SKIP_A_LEVEL,		3, 0 },
+};
+
+static int pt_skip(enum iommu_vendor vendor, uint64_t next_table_pa,
+		   unsigned next_level, uint64_t *entry)
+{
+	if (vendor == IOMMU_INTEL)
+		return iommu_vtd_pt_skip(next_table_pa, next_level, entry);
+
+	return iommu_amd_pt_skip(next_table_pa, next_level, entry);
+}
+
+/*
+ * ── Skipping a level, the legal way and the illegal one ──────────────
+ *
+ * 🔴 ONE SKIP THAT MUST BE FOLLOWED, AND ONE THAT MUST BE REFUSED, and neither
+ * means anything without the other.
+ *
+ *	Without the accepted one, a walk that takes the next level from
+ *	`level - 1' instead of from the entry passes everything: no table this
+ *	kernel builds skips, and the ablation that skips wrongly is expected to
+ *	be refused anyway.  A walker that refused all skipping would score
+ *	perfectly.
+ *
+ *	Without the refused one, the rule that skipped address bits must be
+ *	zero -- AMD Rev 3.11 §2.2.3 -- is a guard that never fires.  It was
+ *	exactly that when this was first written: removing it changed no
+ *	answer, because the walk it should have stopped ran into an entry that
+ *	refused it for an unrelated reason.
+ *
+ * So the illegal skip is aimed at a page that IS there.  Then the only thing
+ * standing between the walk and a plausible wrong physical address is the rule
+ * being tested.
+ *
+ * ⚠️ Neither address is 2-Mbyte aligned, and neither has a zero index at the
+ * level below the skip.  Both are ways a walk that lost a level lands on
+ * something that happens to be right.
+ */
+#define	PT_CHECK_SKIP_PA	0x00000000AC001000ULL
+#define	PT_CHECK_DECOY_PA	0x00000000AD002000ULL
+
+static unsigned check_skipping(struct iommu_domain *d, uint64_t probe,
+			       unsigned *walked)
+{
+	uint64_t under = check_iova() & ~(iommu_level_span(3) - 1ULL);
+	uint64_t over_zeros = under | (7ULL << 12);
+
+	/*
+	 * The decoy sits at the index the illegal walk would use: `probe' has
+	 * bits 20:12 of its own, and this is the page they would find in the
+	 * table the skip arrives at.  Without it the illegal walk stops on an
+	 * empty entry and the rule under test never gets a turn.
+	 */
+	uint64_t decoy = under | (probe & (iommu_level_span(2) - 1ULL));
+
+	volatile uint64_t *directory;
+	struct iommu_pt_step step;
+	uint64_t below, saved, skipping, pa = 0;
+	int read = 0, write = 0;
+	unsigned bad = 0;
+
+	if (!iommu_domain_map(d, over_zeros, PT_CHECK_SKIP_PA, 4096u, 1, 1)
+	    || !iommu_domain_map(d, decoy, PT_CHECK_DECOY_PA, 4096u, 1, 1))
+		return 1;
+
+	/* The bottom table, found before the road to it is rewritten. */
+	{
+		volatile uint64_t *middle = entry_at(d, over_zeros, 2);
+
+		if (middle == 0 || !pt_decode(d->vendor, *middle, 2, &step)
+		    || step.level != 1)
+			return 1;
+
+		below = step.next;
+	}
+
+	directory = entry_at(d, over_zeros, 3);
+	if (directory == 0)
+		return 1;
+
+	saved = *directory;
+
+	if (!pt_skip(d->vendor, below, 1u, &skipping))
+		return 0;
+
+	*directory = skipping;
+
+	/* The legal one: the skipped bits are zero, so the page is found. */
+	(*walked)++;
+	if (!iommu_domain_walk(d, over_zeros, &pa, &read, &write)
+	    || pa != PT_CHECK_SKIP_PA || !read || !write)
+		bad++;
+
+	/*
+	 * 🔴 And the illegal one through the SAME entry: `probe' has a nonzero
+	 * index at the level being skipped, so the walk must refuse -- with a
+	 * mapped page waiting at the far end for it to find if it does not.
+	 */
+	(*walked)++;
+	if (iommu_domain_walk(d, probe, &pa, &read, &write))
+		bad++;
+
+	*directory = saved;
+	(*walked)++;
+	if (!iommu_domain_walk(d, over_zeros, &pa, &read, &write)
+	    || pa != PT_CHECK_SKIP_PA)
+		bad++;
+
+	return bad;
+}
+
+static unsigned check_one_vendor(enum iommu_vendor vendor, unsigned *walked)
+{
+	struct iommu_domain d;
+	uint64_t base = check_iova();
+	uint64_t probe = base + 4096u;		/* page 1: writable */
+	uint64_t good_pa = 0;
+	int good_read = 0, good_write = 0;
+	unsigned bad = 0;
+
+	if (!iommu_domain_create(&d, vendor, IOMMU_DOMAIN_PASSTHROUGH + 1u,
+				 PT_CHECK_LEVELS))
+		return 1;
+
+	for (unsigned i = 0; i < PT_CHECK_PAGES; i++)
+		if (!iommu_domain_map(&d, base + (uint64_t)i * 4096u,
+				      check_pa(i), 4096u, 1, check_write(i)))
+			return 1;
+
+	for (unsigned i = 0; i < PT_CHECK_PAGES; i++) {
+		uint64_t pa = 0;
+		int read = 0, write = 0;
+
+		(*walked)++;
+		if (!iommu_domain_walk(&d, base + (uint64_t)i * 4096u,
+				       &pa, &read, &write)
+		    || pa != check_pa(i) || !read
+		    || write != check_write(i))
+			bad++;
+	}
+
+	/*
+	 * 🔴 AND ONE ADDRESS THAT WAS NEVER MAPPED, WHICH MUST NOT ANSWER.
+	 * Every check above is a walk that succeeds, and a walk that answered
+	 * for everything would pass all thousand of them.  The page below the
+	 * range is in a table that exists, so this asks about an empty entry
+	 * and not about an empty table.
+	 */
+	{
+		uint64_t pa = 0;
+		int read = 0, write = 0;
+
+		(*walked)++;
+		if (iommu_domain_walk(&d, base - 4096u, &pa, &read, &write))
+			bad++;
+	}
+
+	if (!iommu_domain_walk(&d, probe, &good_pa, &good_read, &good_write))
+		return bad + 1u;
+
+	for (unsigned a = 0; a < sizeof(pt_ablations) / sizeof(pt_ablations[0]);
+	     a++) {
+		volatile uint64_t *slot
+			= entry_at(&d, probe, pt_ablations[a].level);
+		uint64_t saved, damaged, pa = 0;
+		int read = 0, write = 0, answered;
+
+		if (slot == 0) {
+			bad++;
+			continue;
+		}
+
+		saved = *slot;
+		damaged = saved;
+
+		/*
+		 * 🔑 A format that cannot express a mistake cannot make it.
+		 * Intel has no field with which to skip a level, so it has no
+		 * way to skip one wrongly, and that case is AMD's alone.
+		 */
+		if (!pt_ablate(vendor, pt_ablations[a].kind,
+			       pt_ablations[a].level, &damaged))
+			continue;
+
+		*slot = damaged;
+		(*walked)++;
+		answered = iommu_domain_walk(&d, probe, &pa, &read, &write);
+
+		if (answered != pt_ablations[a].answers)
+			bad++;
+		else if (answered && pa == good_pa && read == good_read
+			 && write == good_write)
+			bad++;		/* the damage changed nothing */
+
+		/*
+		 * ⚠️ And put it back, then walk again.  Without this the check
+		 * would leave a table it had broken and could not say whether
+		 * the walk noticed the damage or had simply stopped working.
+		 */
+		*slot = saved;
+		(*walked)++;
+		if (!iommu_domain_walk(&d, probe, &pa, &read, &write)
+		    || pa != good_pa || read != good_read
+		    || write != good_write)
+			bad++;
+	}
+
+	return bad + check_skipping(&d, probe, walked);
+}
+
+int iommu_domain_check(unsigned *walked, unsigned *wrong)
+{
+	unsigned n = 0, bad = 0;
+
+	bad += check_one_vendor(IOMMU_INTEL, &n);
+	bad += check_one_vendor(IOMMU_AMD, &n);
+
+	if (walked)
+		*walked = n;
+	if (wrong)
+		*wrong = bad;
+
+	return bad == 0;
+}
