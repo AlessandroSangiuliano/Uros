@@ -18,6 +18,7 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    ${UROS_MIG_TARGET_ARGS}
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
     -header ${EXT2_USER_H}
@@ -43,6 +44,7 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    ${UROS_MIG_TARGET_ARGS}
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
@@ -70,6 +72,7 @@ add_custom_command(
   COMMAND ${MIG_SCRIPT}
     -cpp ${CMAKE_C_COMPILER}
     -migcom $<TARGET_FILE:migcom>
+    ${UROS_MIG_TARGET_ARGS}
     -I${CMAKE_BINARY_DIR}/generated/include
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
