@@ -3665,6 +3665,29 @@ static void iommu_selftest(void)
 			   " specifications\r\n");
 	}
 
+	/*
+	 * ⚠️ AND HERE TOO, ON EVERY BOARD.  A page table is arithmetic and
+	 * memory: both vendors' formats are built and walked back on every
+	 * machine, including the ones with no engine to read them.  Otherwise
+	 * each format is only ever exercised where its silicon is, and the
+	 * format that is wrong is the one this machine cannot run.
+	 */
+	{
+		unsigned walked = 0, wrong = 0;
+		int ok = iommu_domain_check(&walked, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(walked);
+		kputs(" iommu page-table walks, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — both formats built and read back, each damaged"
+			   " in every way its own format allows, and amd's"
+			   " level skipping followed once and refused once\r\n"
+			 : " — WRONG, a table this kernel built does not read"
+			   " back the way it was written\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");

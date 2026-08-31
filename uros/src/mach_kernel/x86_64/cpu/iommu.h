@@ -450,4 +450,84 @@ int iommu_translating(void);
  */
 int iommu_address_bits_ok(unsigned bits);
 
+/*
+ * ── Stage 3b: a translation table, and the walk that reads it back ───
+ *
+ * A domain is a page table and the id the engine knows it by.  Stage 2 gave
+ * every device the same one and let it all pass through; this is the structure
+ * that can say something different about one address than about another, and
+ * it is the whole of what "isolation" eventually means.
+ *
+ * 🔴 THE VENDOR IS IN THE DOMAIN, not taken from the machine.  A page table is
+ * arithmetic and memory, and asking the machine which format to build would
+ * mean the AMD format is only ever built on AMD -- so the format that is wrong
+ * is the one nobody here can run, which is the one nobody would find out about.
+ * With the vendor named, both are built and walked on every boot.
+ */
+struct iommu_domain {
+	uint64_t		root;	/* the top-level table, physical    */
+	enum iommu_vendor	vendor;
+	unsigned		levels;	/* how deep the walk starts         */
+	uint16_t		id;	/* what an engine would call it     */
+	unsigned		frames;	/* what the table has cost so far   */
+	unsigned		pages;	/* 4 KiB pages mapped into it       */
+};
+
+/*
+ * An empty domain: one top-level table, nothing mapped, everything faulting.
+ *
+ * ⚠️ "Everything faulting" is true on both vendors here and it is NOT the same
+ * statement as stage 2's -- a zeroed page-table entry denies on both, while a
+ * zeroed DEVICE table entry denies on one and forwards on the other.  The
+ * asymmetry is in the tables that name devices, not in the tables that map
+ * addresses.
+ */
+int iommu_domain_create(struct iommu_domain *d, enum iommu_vendor vendor,
+			uint16_t id, unsigned levels);
+
+/*
+ * Map `size' bytes at `iova' onto `pa', building whatever levels are missing.
+ * Answers non-zero when the whole range is mapped.
+ *
+ * ⚠️ Fails PART WAY when it runs out of frames, and says so by answering zero
+ * rather than by undoing what it did.  A domain that is not attached to any
+ * device translates for nobody, so a half-built one is inert; the caller that
+ * would attach it is the one that has to check, and stage 3c is where that
+ * matters.
+ */
+int iommu_domain_map(struct iommu_domain *d, uint64_t iova, uint64_t pa,
+		     uint64_t size, int read, int write);
+
+/*
+ * Translate one address the way the engine would: from the root, indexing each
+ * level with the address's own bits, deciding from each ENTRY whether it is a
+ * road or a destination.  Answers zero when there is no translation.
+ *
+ * 🔑 THIS IS THE ONLY THING THAT CAN CONTRADICT THE BUILDER.  These tables are
+ * written once and read by hardware alone, so a builder that gets a field
+ * wrong produces no wrong answer -- it produces a device reaching memory that
+ * was never meant for it, and nothing on the machine says a word.  A walk that
+ * starts from the root physical address and remembers nothing else is the one
+ * reader available before the hardware becomes the reader.
+ *
+ * ⚠️ It must therefore not be the builder run backwards.  It shares the
+ * decoders with it, and those are checked against bit patterns copied out of
+ * the specifications rather than against the encoders -- which is what stops
+ * the two halves from agreeing on the same mistake.
+ */
+int iommu_domain_walk(const struct iommu_domain *d, uint64_t iova,
+		      uint64_t *pa, int *read, int *write);
+
+/*
+ * Build one domain per vendor, map a range into each, and walk every page of
+ * it back.  `walked' counts the walks, `wrong' the ones that disagreed.
+ *
+ * 🔴 AND IT ABLATES ITSELF.  After the range verifies, it damages one directory
+ * entry in each of the ways that vendor's format allows, walks again, and
+ * requires the answer to CHANGE -- then restores it and requires it to change
+ * back.  A check that has never been seen to fail is a check nobody has tested,
+ * and this one is tested on every boot rather than once by whoever wrote it.
+ */
+int iommu_domain_check(unsigned *walked, unsigned *wrong);
+
 #endif	/* _X86_64_CPU_IOMMU_H_ */

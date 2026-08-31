@@ -553,6 +553,193 @@ int iommu_amd_enable(void)
 	return enabled > 0;
 }
 
+/*
+ * ── Stage 3: the page table itself ───────────────────────────────────
+ *
+ * Tables 17 and 18 of Rev 3.11.  Present in bit 0, the address in 51:12,
+ * read and write permission in 61 and 62 -- and, in bits 11:9, the thing that
+ * makes this NOT the processor's page table wearing different names:
+ *
+ *	Next Level.  Every entry says what LEVEL the table it points at is,
+ *	so a directory may point two levels down and the walker skips the
+ *	steps between.  000b and 111b mean the entry is a translation rather
+ *	than a directory.
+ *
+ * 🔑 Intel's second-stage entries carry no such field: there the level is the
+ * depth you reached it at.  So a builder that treated the two as one format
+ * with different bit positions would produce an AMD table whose every
+ * directory claimed to point at a translation.
+ *
+ * ⚠️ Permission is ANDed down the walk, and skipped levels count as ones.  A
+ * directory with IR and IW clear therefore blocks its whole subtree, which is
+ * how a range is denied without unmapping it -- and a directory built without
+ * them set permits nothing, which is the mistake that looks like a table that
+ * simply does not work.
+ */
+#define	AMD_PT_PR		(1ULL << 0)
+#define	AMD_PT_NEXT_SHIFT	9
+#define	AMD_PT_ADDR_MASK	0x000FFFFFFFFFF000ULL
+#define	AMD_PT_IR		(1ULL << 61)
+#define	AMD_PT_IW		(1ULL << 62)
+
+#define	AMD_PT_NEXT_TRANSLATION	0ULL	/* 000b: this entry IS the mapping */
+
+/* One 4-Kbyte page, with the permissions the caller asks for. */
+uint64_t iommu_amd_pte(uint64_t pa, int read, int write)
+{
+	return AMD_PT_PR
+	     | (pa & AMD_PT_ADDR_MASK)
+	     | (AMD_PT_NEXT_TRANSLATION << AMD_PT_NEXT_SHIFT)
+	     | (read ? AMD_PT_IR : 0)
+	     | (write ? AMD_PT_IW : 0);
+}
+
+/*
+ * A directory pointing at a table of level `next_level'.
+ *
+ * ⚠️ Always permissive.  The permissions that matter are the leaf's and the
+ * DTE's; a directory that withheld them would silently narrow everything below
+ * it, and the place to deny a range is the range, not the road to it.
+ */
+uint64_t iommu_amd_pde(uint64_t next_table_pa, unsigned next_level)
+{
+	return AMD_PT_PR
+	     | (next_table_pa & AMD_PT_ADDR_MASK)
+	     | ((uint64_t)(next_level & 7u) << AMD_PT_NEXT_SHIFT)
+	     | AMD_PT_IR | AMD_PT_IW;
+}
+
+/*
+ * ── Stage 3b: the same entry, read the way the engine reads it ───────
+ *
+ * Rev 3.11 §2.2.3, and every refusal below is a sentence from it rather than a
+ * precaution:
+ *
+ *	"A page translation entry is a page table entry with the Next Level
+ *	 field set to 0h or 7h.  A page directory entry is a page table entry
+ *	 with the Next Level field not equal to 0h or 7h."
+ *
+ *	"If a page table entry contains nonzero bits in any of the fields
+ *	 marked reserved, if the Next Level field is greater than or equal to
+ *	 the current page table entry table's level [...] translation
+ *	 terminates with an IO_PAGE_FAULT."
+ *
+ * 🔑 The second of those is the one worth having.  A directory whose Next Level
+ * did not decrease would send the walk back into a table it had already read,
+ * with different address bits, onto a real entry -- and the answer would be a
+ * physical address, wrong, and indistinguishable from a right one.
+ */
+int iommu_amd_pt_decode(uint64_t entry, unsigned level,
+			struct iommu_pt_step *step)
+{
+	unsigned next;
+
+	if ((entry & AMD_PT_PR) == 0)
+		return 0;
+
+	next = (unsigned)((entry >> AMD_PT_NEXT_SHIFT) & 7u);
+
+	step->next = entry & AMD_PT_ADDR_MASK;
+	step->read = (entry & AMD_PT_IR) != 0;
+	step->write = (entry & AMD_PT_IW) != 0;
+
+	/*
+	 * ⚠️ Present with neither permission is a real state here, and it is
+	 * not absence: the page is mapped and every access to it is refused.
+	 * Intel cannot say this at all, which is why the two decoders answer
+	 * differently to the same idea.
+	 */
+	if (next == AMD_PT_NEXT_TRANSLATION) {
+		/*
+		 * ⚠️ "if a page translation entry's physical address is not
+		 * aligned to a multiple of the appropriate page size for the
+		 * current page table entry page table's level [...] translation
+		 * terminates with an IO_PAGE_FAULT."  At level 1 the address
+		 * field cannot be misaligned; above it, it can, and an engine
+		 * refuses such an entry rather than rounding it down.
+		 */
+		if ((step->next & (iommu_level_span(level) - 1ULL)) != 0)
+			return 0;
+
+		step->level = 0;
+		return 1;
+	}
+
+	/*
+	 * 7h is the translation that carries its own page size, encoded as the
+	 * position of the first zero bit of the address.  REFUSED rather than
+	 * decoded: nothing here builds one, so decoding it would be a page-size
+	 * search that no boot ever runs -- and an unrun decode is the kind that
+	 * is wrong for years.
+	 */
+	if (next == 7)
+		return 0;
+
+	if (next >= level)
+		return 0;
+
+	step->level = next;
+	return 1;
+}
+
+/*
+ * The ways an AMD entry can be wrong.  See <cpu/iommu_backend.h>.
+ */
+int iommu_amd_pt_ablate(unsigned kind, unsigned level, uint64_t *entry)
+{
+	switch (kind) {
+	case IOMMU_ABLATE_ROAD_IS_DESTINATION:
+		/*
+		 * Next Level cleared: the directory becomes a translation, and
+		 * the address it carries -- the page table's own -- becomes the
+		 * page the device reaches.  This is the exact mistake a reader
+		 * coming from Intel's format makes, because there is no field
+		 * there to forget.
+		 *
+		 * ⚠️ Aligned down to this level's page size, deliberately, so
+		 * that the result is a WELL-FORMED entry translating to the
+		 * wrong place.  Left misaligned it would be refused as a
+		 * reserved-field violation, and the check would then be proving
+		 * that malformed entries are caught rather than that
+		 * well-formed wrong ones are.
+		 */
+		*entry &= ~(7ULL << AMD_PT_NEXT_SHIFT);
+		*entry &= ~(iommu_level_span(level) - 1ULL) | 0xFFFULL;
+		return 1;
+
+	case IOMMU_ABLATE_DENY_ON_THE_ROAD:
+		*entry &= ~AMD_PT_IW;
+		return 1;
+
+	case IOMMU_ABLATE_SKIP_A_LEVEL:
+		/*
+		 * One less than it should be, so the walk arrives at the table
+		 * below having never consumed the address bits that chose it.
+		 * The specification allows the skip and requires the skipped
+		 * bits to be zero; here they are not.
+		 */
+		if (((*entry >> AMD_PT_NEXT_SHIFT) & 7u) < 2u)
+			return 0;
+		*entry -= 1ULL << AMD_PT_NEXT_SHIFT;
+		return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * The skip AMD's format is FOR: "This allows the IOMMU to skip page
+ * translation steps in cases where the virtual address often contains long
+ * strings of 0 bits, such as software architectures that allocate virtual
+ * memory sparsely."  Legal, and the walk must follow it.
+ */
+int iommu_amd_pt_skip(uint64_t next_table_pa, unsigned next_level,
+		      uint64_t *entry)
+{
+	*entry = iommu_amd_pde(next_table_pa, next_level);
+	return 1;
+}
+
 /* A scope whose range is a single device: AMD's ordinary case. */
 static void one_device(uint16_t segment, uint16_t bdf, uint8_t kind,
 		       uint8_t enumeration_id)

@@ -118,6 +118,114 @@ void iommu_record_tables(uint64_t root, uint64_t root_bytes,
 			 uint64_t command, uint64_t event,
 			 unsigned devices, unsigned contexts, unsigned frames);
 
+/*
+ * ── Stage 3: page-table entries ──────────────────────────────────────
+ *
+ * 🔴 TWO ENCODERS BECAUSE THEY ARE TWO FORMATS, not for symmetry.  The bit
+ * positions agree almost everywhere -- present low, address in 51:12,
+ * permissions -- and the two disagree about what a table IS: an AMD entry
+ * carries the LEVEL of the table it points at, so a directory may skip levels,
+ * and an Intel entry does not, because there the level is the depth.
+ *
+ * That is exactly the kind of difference that gets flattened by whoever writes
+ * the second one from the first, and the result would be an AMD table whose
+ * every directory claimed to be a translation.
+ *
+ * ⚠️ Both vendors AND permission down the walk, so a directory needs its
+ * permissions set for anything below to be reachable, and the place to deny a
+ * range is the range and not the road to it.
+ */
+uint64_t iommu_amd_pte(uint64_t pa, int read, int write);
+uint64_t iommu_amd_pde(uint64_t next_table_pa, unsigned next_level);
+
+uint64_t iommu_vtd_ss_pte(uint64_t pa, int read, int write);
+uint64_t iommu_vtd_ss_pde(uint64_t next_table_pa);
+
+/*
+ * ── Stage 3b: reading one entry back ─────────────────────────────────
+ *
+ * One step of a walk: what an engine learns from an entry it has just fetched
+ * out of a table at `level'.
+ *
+ * `level' here is where the walk goes NEXT, and zero means it does not go
+ * anywhere -- the entry is the translation, of the page size that belongs to
+ * the level it was found in.
+ */
+struct iommu_pt_step {
+	uint64_t	next;	/* the table below, or the page itself  */
+	unsigned	level;	/* level to index next; 0 = this is it   */
+	int		read;
+	int		write;
+};
+
+/*
+ * Bytes one entry at `level' covers, which is also the page size of a
+ * translation found there.  Nine address bits per level above the lowest
+ * twelve -- the one thing the two vendors agree about completely, both having
+ * taken it from the processor's own paging.
+ */
+static inline uint64_t iommu_level_span(unsigned level)
+{
+	return 1ULL << (12u + 9u * (level - 1u));
+}
+
+/*
+ * Decode one entry, answering zero when it translates nothing.
+ *
+ * 🔴 WRITTEN FROM THE FIGURES, NOT FROM THE ENCODERS ABOVE.  Builder and walker
+ * share these, so a decoder derived by inverting an encoder would let the two
+ * halves agree on the same wrong bit and call it verified.  What keeps them
+ * apart is that iommu_decode_check() feeds these literal words copied out of
+ * the specifications -- including words no encoder here produces.
+ *
+ * 🔴 AND "NOTHING" IS TWO DIFFERENT STATES.  AMD's PR bit is a separate
+ * question from its permissions, so an AMD entry can be present and deny
+ * everything; Intel has no present bit at all, and Rev 5.20 §3.7 makes R and W
+ * both zero mean the entry "is used neither to reference another
+ * paging-structure entry nor to map a page".  The same idea, spelt one way that
+ * distinguishes denial from absence and one way that cannot.
+ */
+int iommu_amd_pt_decode(uint64_t entry, unsigned level,
+			struct iommu_pt_step *step);
+int iommu_vtd_pt_decode(uint64_t entry, unsigned level,
+			struct iommu_pt_step *step);
+
+/*
+ * ── The ways an entry can be wrong, so the walk can prove it notices ──
+ *
+ * Each vendor names its own, because they are not the same mistakes: what makes
+ * a directory look like a page is a cleared Next Level on one machine and a set
+ * page-size bit on the other, and skipping a level is not expressible at all on
+ * Intel.
+ *
+ * Answers zero when this format cannot make that mistake -- which is a result
+ * and not a failure. 🔑 A format that cannot express a mistake cannot make it,
+ * and asking each vendor what it can get wrong is what keeps the missing case
+ * a written-down absence rather than one nobody thought to run.
+ */
+#define	IOMMU_ABLATE_ROAD_IS_DESTINATION	1	/* directory read as a page  */
+#define	IOMMU_ABLATE_DENY_ON_THE_ROAD		2	/* write denied on the way   */
+#define	IOMMU_ABLATE_SKIP_A_LEVEL		3	/* over bits that are not 0  */
+
+int iommu_amd_pt_ablate(unsigned kind, unsigned level, uint64_t *entry);
+int iommu_vtd_pt_ablate(unsigned kind, unsigned level, uint64_t *entry);
+
+/*
+ * A directory pointing at a table of level `next_level' when the level below
+ * this one is not that -- the level skipping AMD's format has and Intel's does
+ * not.  Answers zero where the format cannot express one.
+ *
+ * 🔴 THE ONLY LEGAL SKIP ANYTHING HERE BUILDS, and it exists to be walked.  A
+ * walk that refused every skip would pass an ablation that skips wrongly, pass
+ * every table this kernel builds -- none of which skip -- and be wrong about
+ * the one thing the two formats genuinely disagree on.  Proving the refusal
+ * needs a case that must be ACCEPTED beside it.
+ */
+int iommu_amd_pt_skip(uint64_t next_table_pa, unsigned next_level,
+		      uint64_t *entry);
+int iommu_vtd_pt_skip(uint64_t next_table_pa, unsigned next_level,
+		      uint64_t *entry);
+
 void iommu_vtd_root_entry(uint64_t context_table_pa, uint64_t out[2]);
 void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
 				   uint64_t out[2]);
