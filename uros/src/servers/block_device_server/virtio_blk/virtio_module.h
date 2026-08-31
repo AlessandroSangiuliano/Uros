@@ -57,6 +57,7 @@ struct virtio_state {
 	unsigned int	pci_bus, pci_slot, pci_func;
 	unsigned int	irq;
 	unsigned int	iobase;		/* BAR0 I/O port base, 16 bits wide */
+	unsigned int	config_off;	/* where the device config begins */
 
 	uint32_t	disk_sectors;
 

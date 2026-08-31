@@ -306,8 +306,24 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # and it would be a guard that can never fire, because the only task that
   # needs cap_server up already blocks until it is.  A second guard over the
   # same race hides which one is holding.
+  #
+  # block_device_server is LAST, and after hal_server rather than merely at the
+  # end (#520).  Two rules point the same way for once:
+  #
+  #   - it needs the HAL.  It looks "hal" up in the name server and calls
+  #     hal_register_driver, so ahead of hal_server it would find nothing.
+  #
+  #   - it is the entry most likely to end the run, which is where cow_test's
+  #     rule puts a thing.  It is the first task on this target that touches a
+  #     device with DMA: it loads a plug-in, probes PCI, allocates wired pages,
+  #     programs a controller and takes an interrupt.  Last means every other
+  #     verdict is already in the log when it does.
+  #
+  # ⚠️ It EXITS when it finds no partitions, and that is correct rather than a
+  # failure -- there is nothing to serve.  What it must not do is exit quietly:
+  # see the note in block_server.c on #400.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nblock_device_server block_device_server\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -330,10 +346,17 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             cow_test:${_SBIN}/cow_test
             hal_server:${_SBIN}/hal_server
             modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
+            block_device_server:${_SBIN}/block_device_server
+            # ⚠️ virtio_blk only, and ahci.so deliberately absent (#520).
+            # modload_load_class() loads whatever is in the class, so shipping
+            # ahci.so would bring it up too -- and #432's staging says one
+            # driver at a time.  Its widths were corrected; it is not started.
+            modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
     DEPENDS mkbundle name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
+            block_device_server virtio_blk_module
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + name_server + netname_test + irq_claim_test + cap_server + pthread_test + cap_test + dl_test + fault_test + act_test + cow_test + hal_server"
+    COMMENT "Bundle: bootstrap.conf + 11 tasks + hal_server + block_device_server"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})

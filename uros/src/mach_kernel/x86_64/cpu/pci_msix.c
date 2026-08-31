@@ -208,3 +208,50 @@ pci_msix_enable(const struct pci_msix *m)
 			      (uint16_t)m->cap, dword);
 	}
 }
+
+/*
+ * The opposite of the above, which did not exist (#520).
+ *
+ * 🔴 ENABLING WAS NOT UNDOABLE, and that is not a tidiness complaint.  A task
+ * that registered a message-signalled vector and gave it back left the DEVICE
+ * with MSI-X switched on: device_md_msi_unregister() disarmed the entry, which
+ * is the part that could deliver an interrupt, and nothing put the function's
+ * own enable bit back.
+ *
+ * 🔑 So a device that a test merely TOUCHED was handed to its driver in a state
+ * the driver never asked for -- and for one real device that state moves its
+ * registers.  A legacy virtio-pci device puts its device-specific
+ * configuration at offset 20 when MSI-X is disabled and at 24 when it is
+ * enabled, so virtio-blk read its capacity out of two MSI-X vector fields and
+ * reported 65535 sectors for a 32768-sector disk.  It was found because
+ * irq_claim_test walks every device on bus 0 offering one a vector, ten tasks
+ * before the driver starts.
+ *
+ * ⚠️ The bus-master bit is NOT put back.  Enabling set it because an MSI is a
+ * write by the device, but a device may be a bus master for a hundred reasons
+ * that have nothing to do with interrupts -- clearing it here would break DMA
+ * for a driver that never asked about MSI at all.  Undoing exactly what is
+ * being undone is the whole point of this function existing.
+ */
+void
+pci_msix_disable(const struct pci_msix *m)
+{
+	uint16_t	control;
+
+	if (m == 0 || m->table == 0)
+		return;
+
+	control = pci_cfg_read16(m->segment, m->bus, m->dev, m->func,
+				 (uint16_t)(m->cap + PCI_MSIX_CONTROL));
+	control &= (uint16_t)~PCI_MSIX_CTL_ENABLE;
+
+	/* Same read-modify-write of the other half as above, same reason. */
+	{
+		uint32_t dword = pci_cfg_read(m->segment, m->bus, m->dev,
+					      m->func, (uint16_t)m->cap);
+
+		dword = (dword & 0x0000FFFFu) | ((uint32_t)control << 16);
+		pci_cfg_write(m->segment, m->bus, m->dev, m->func,
+			      (uint16_t)m->cap, dword);
+	}
+}

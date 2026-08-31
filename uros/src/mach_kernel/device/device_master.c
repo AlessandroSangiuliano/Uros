@@ -476,6 +476,7 @@ ds_master_device_msi_register(
 
 	irq_forward_table[slot].notify_port = notify_port;
 	irq_forward_table[slot].active = 1;
+	irq_forward_table[slot].msi = 1;
 
 	splx(s);
 
@@ -508,10 +509,22 @@ ds_master_device_intr_unregister(
 	 * the mirror reason: until the line is given up an interrupt can still
 	 * arrive, and it must find an entry that still says where to send it.
 	 */
-	device_md_irq_unregister(irq);
+	/*
+	 * 🔴 The right one of the two (#520).  A message-signalled slot has to
+	 * be disarmed in the DEVICE; a line is masked at the pin.  This used to
+	 * call the line's release for both, and the line's release returns
+	 * without acting on anything above the sixteen lines -- so every MSI
+	 * slot ever given back was left armed at a vector whose handler had
+	 * just been released.
+	 */
+	if (irq_forward_table[irq].msi)
+		device_md_msi_unregister(irq);
+	else
+		device_md_irq_unregister(irq);
 
 	irq_forward_table[irq].notify_port = IP_NULL;
 	irq_forward_table[irq].active = 0;
+	irq_forward_table[irq].msi = 0;
 
 	/*
 	 * 🔴 AND THE COUNT, or the bottom half spins for ever (#457).
