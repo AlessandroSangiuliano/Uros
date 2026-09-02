@@ -249,6 +249,14 @@ void *blk_object_for(natural_t payload);
 /* Give an index back when the object it named is freed. */
 void blk_payload_release(natural_t payload);
 
+/*
+ * Read the disk back and check the bytes against the table this server
+ * built out of them (#520).  Called once, after the partitions are
+ * published and before the message loop, so a disk that cannot be read
+ * says so before anything depends on it.
+ */
+void blk_readback_selftest(void);
+
 struct blk_partition {
 	uint32_t	magic;			/* BLK_MAGIC_PART */
 	struct blk_controller	*ctrl;

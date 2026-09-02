@@ -964,3 +964,260 @@ ds_io_done_queue_terminate(mach_port_t queue)
 {
 	return D_INVALID_OPERATION;
 }
+
+/* ================================================================
+ * Read-back self-test (#520)
+ * ================================================================ */
+
+/*
+ * 🔑 THE POINT IS THE ORACLE, NOT THE READ.
+ *
+ * #520's done-when asks for "a read whose BYTES are checked, not merely a
+ * call that returns success", and the reason it is worded that way is that
+ * this server already had the other kind: cap_test issued a device_read,
+ * looked at the return code, threw the buffer away, and printed "ok".  Every
+ * defect this port was written to find -- an address that lost its top half,
+ * a DMA into a plausible wrong page, an LBA computed without the partition
+ * base -- returns KERN_SUCCESS and a buffer full of the wrong thing.
+ *
+ * So what matters is where the expected values come from.  All of them here
+ * were written by software that is not ours and does not know we exist:
+ *
+ *   sfdisk    wrote the MBR, its signature and its partition entries
+ *   mke2fs    wrote the ext2 superblock, its magic and its geometry
+ *
+ * and one of them was written by this server itself, at probe time, from the
+ * same bytes:
+ *
+ *   the partition table this server parsed and published
+ *
+ * ⚠️ Which is the check that pays.  A driver could return a buffer of the
+ * right shape from the wrong place and still show an ext2 magic -- there is
+ * one every 4 KiB on this disk.  It cannot make the MBR's `relsect' field
+ * equal the number this server independently arrived at unless it really
+ * read sector zero, because that is a 32-bit value held in two places that
+ * only agree if the read landed where it was asked to.
+ *
+ * ── Two reads, and why the second is not a duplicate ────────────────
+ *
+ * The MBR is at absolute LBA 0 and the superblock is 1024 bytes into the
+ * partition, which is somewhere else entirely.  A driver that ignored the
+ * LBA and returned one cached buffer for every request would pass a check
+ * that only ever looked at one place; here the two reads must come back
+ * DIFFERENT, and that is asserted rather than assumed.
+ *
+ * ── What is deliberately NOT required ───────────────────────────────
+ *
+ * The volume label.  It is printed because it is worth seeing, but nothing
+ * fails if it changes: tying a self-test to a string in a build script makes
+ * the script's next edit look like a driver defect.  The structural facts --
+ * a magic at a fixed offset, a geometry that fits inside its partition, a
+ * base sector held twice -- do not move when someone renames a disk.
+ *
+ * ⚠️ And ext2 itself is not required.  A partition that is not ext2 skips the
+ * filesystem half and SAYS SO, because a check that quietly does not run is
+ * indistinguishable from one that passed.
+ */
+
+#define EXT2_SB_OFFSET		1024u	/* superblock, bytes into the fs */
+#define EXT2_SB_MAGIC		0xEF53u
+#define EXT2_SB_OFF_BLOCKS	4u	/* s_blocks_count		*/
+#define EXT2_SB_OFF_LOGBSIZE	24u	/* s_log_block_size		*/
+#define EXT2_SB_OFF_MAGIC	56u	/* s_magic			*/
+#define EXT2_SB_OFF_LABEL	120u	/* s_volume_name, 16 bytes	*/
+
+static uint16_t
+rd16(const unsigned char *p, unsigned int off)
+{
+	return (uint16_t)(p[off] | ((uint16_t)p[off + 1] << 8));
+}
+
+static uint32_t
+rd32(const unsigned char *p, unsigned int off)
+{
+	return (uint32_t)p[off]
+	     | ((uint32_t)p[off + 1] << 8)
+	     | ((uint32_t)p[off + 2] << 16)
+	     | ((uint32_t)p[off + 3] << 24);
+}
+
+void
+blk_readback_selftest(void)
+{
+	struct blk_partition	*part;
+	struct blk_controller	*ctrl;
+	vm_offset_t		mbr = 0, fs = 0;
+	unsigned int		mbr_size = 0, fs_size = 0;
+	const unsigned char	*m, *f;
+	unsigned int		checks = 0, wrong = 0;
+	uint32_t		relsect, numsect, fs_blocks, bsize;
+	unsigned int		i, sb;
+	char			label[17];
+
+	if (n_partitions <= 0) {
+		printf("blk: read-back self-test did not run — no partition "
+		       "was published, so there is nothing to read\n");
+		return;
+	}
+
+	part = &partitions[0];
+	ctrl = part->ctrl;
+
+	if (ctrl == NULL || ctrl->ops == NULL
+	    || ctrl->ops->read_sectors == NULL) {
+		printf("blk: read-back self-test did not run — %s's driver "
+		       "offers no read_sectors\n", part->name);
+		return;
+	}
+
+	/*
+	 * Sector zero of the DISK, not of the partition: the MBR is what
+	 * this server parsed its table out of, and reading it back is how
+	 * the table gets checked against its own source.
+	 */
+	if (ctrl->ops->read_sectors(ctrl->priv, part->disk_index, 0, 1,
+				    &mbr, &mbr_size) < 0
+	    || mbr_size < SECTOR_SIZE) {
+		printf("blk: read-back self-test WRONG — the read of LBA 0 "
+		       "on %s failed\n", part->name);
+		if (mbr != 0)
+			vm_deallocate(mach_task_self(), mbr, mbr_size);
+		return;
+	}
+
+	/*
+	 * And the first 4 KiB of the PARTITION, which holds the ext2
+	 * superblock 1024 bytes in.  Eight sectors, so the read also
+	 * crosses more than one sector and the driver's count arithmetic
+	 * is exercised rather than only its LBA.
+	 */
+	if (ctrl->ops->read_sectors(ctrl->priv, part->disk_index,
+				    part->start_lba, 8, &fs, &fs_size) < 0
+	    || fs_size < 4096u) {
+		printf("blk: read-back self-test WRONG — the read of LBA %u "
+		       "on %s failed\n", (unsigned)part->start_lba,
+		       part->name);
+		vm_deallocate(mach_task_self(), mbr, mbr_size);
+		if (fs != 0)
+			vm_deallocate(mach_task_self(), fs, fs_size);
+		return;
+	}
+
+	m = (const unsigned char *)mbr;
+	f = (const unsigned char *)fs;
+
+	printf("blk: read-back self-test on %s (%s)\n",
+	       part->name, part->stable_name);
+
+	/* [1] sfdisk's signature, at the offset sfdisk put it. */
+	checks++;
+	if (rd16(m, 510) == MBR_MAGIC) {
+		printf("  [1] LBA 0 ends 0x%x — the boot sector signature, "
+		       "where a boot sector keeps it\n", (unsigned)MBR_MAGIC);
+	} else {
+		printf("  [1] WRONG — LBA 0 ends 0x%x, not the 0x%x a boot "
+		       "sector must end with\n",
+		       (unsigned)rd16(m, 510), (unsigned)MBR_MAGIC);
+		wrong++;
+	}
+
+	/*
+	 * [2] The one that pays.  The MBR entry this partition came from
+	 * says where it starts and how long it is; the server holds the
+	 * same two numbers, arrived at when it parsed that sector at probe
+	 * time.  They agree only if this read landed on sector zero.
+	 */
+	relsect = 0;
+	numsect = 0;
+	for (i = 0; i < MBR_NUMPART; i++) {
+		unsigned int e = MBR_BOOTSZ + i * 16u;
+
+		if (rd32(m, e + 8) == part->start_lba) {
+			relsect = rd32(m, e + 8);
+			numsect = rd32(m, e + 12);
+			break;
+		}
+	}
+	checks++;
+	if (relsect == part->start_lba && numsect == part->num_sectors) {
+		printf("  [2] the table says start=%u size=%u and the disk "
+		       "says the same — the read reached sector zero\n",
+		       (unsigned)relsect, (unsigned)numsect);
+	} else {
+		printf("  [2] WRONG — the server holds start=%u size=%u, the "
+		       "bytes at LBA 0 hold start=%u size=%u\n",
+		       (unsigned)part->start_lba,
+		       (unsigned)part->num_sectors,
+		       (unsigned)relsect, (unsigned)numsect);
+		wrong++;
+	}
+
+	/* [3] Two different places must give two different answers. */
+	checks++;
+	if (memcmp(m, f, SECTOR_SIZE) != 0) {
+		printf("  [3] LBA 0 and LBA %u came back different, so the "
+		       "driver is not answering every read from one buffer\n",
+		       (unsigned)part->start_lba);
+	} else {
+		printf("  [3] WRONG — LBA 0 and LBA %u came back byte for "
+		       "byte identical\n", (unsigned)part->start_lba);
+		wrong++;
+	}
+
+	/* [4] mke2fs's magic, at the offset mke2fs put it. */
+	sb = EXT2_SB_OFFSET;
+	checks++;
+	if (rd16(f, sb + EXT2_SB_OFF_MAGIC) == EXT2_SB_MAGIC) {
+		printf("  [4] +%u holds 0x%x — the ext2 superblock is where a "
+		       "filesystem writer puts one\n",
+		       sb + EXT2_SB_OFF_MAGIC, (unsigned)EXT2_SB_MAGIC);
+
+		for (i = 0; i < 16; i++)
+			label[i] = (char)f[sb + EXT2_SB_OFF_LABEL + i];
+		label[16] = '\0';
+
+		/*
+		 * [5] A third statement of the same physical fact.  sfdisk
+		 * said how many sectors the partition has; mke2fs, told
+		 * nothing but the size of the file it was handed, wrote a
+		 * block count.  The filesystem cannot be bigger than the
+		 * partition it is in, and if either read landed somewhere
+		 * else the two numbers have no reason to relate.
+		 */
+		bsize = 1024u << rd32(f, sb + EXT2_SB_OFF_LOGBSIZE);
+		fs_blocks = rd32(f, sb + EXT2_SB_OFF_BLOCKS);
+		checks++;
+		if (bsize >= 1024u && bsize <= 65536u
+		    && (uint64_t)fs_blocks * bsize / SECTOR_SIZE
+		       <= (uint64_t)part->num_sectors) {
+			printf("  [5] %u blocks of %u bytes fit inside %u "
+			       "sectors, label \"%s\" — the geometry two "
+			       "writers agree on\n",
+			       (unsigned)fs_blocks, (unsigned)bsize,
+			       (unsigned)part->num_sectors, label);
+		} else {
+			printf("  [5] WRONG — %u blocks of %u bytes do not "
+			       "fit inside %u sectors (label \"%s\")\n",
+			       (unsigned)fs_blocks, (unsigned)bsize,
+			       (unsigned)part->num_sectors, label);
+			wrong++;
+		}
+	} else {
+		printf("  [4] %s is not ext2 (0x%x at +%u, not 0x%x) — the "
+		       "filesystem half of this test DID NOT RUN\n",
+		       part->name,
+		       (unsigned)rd16(f, sb + EXT2_SB_OFF_MAGIC),
+		       sb + EXT2_SB_OFF_MAGIC, (unsigned)EXT2_SB_MAGIC);
+	}
+
+	if (wrong == 0)
+		printf("blk: read-back %u of %u — the bytes on the disk agree "
+		       "with the table this server built out of them\n",
+		       checks, checks);
+	else
+		printf("blk: read-back WRONG — %u of %u checks failed\n",
+		       wrong, checks);
+
+	vm_deallocate(mach_task_self(), mbr, mbr_size);
+	vm_deallocate(mach_task_self(), fs, fs_size);
+}
