@@ -45,6 +45,7 @@
 #include <mach/cap_types.h>
 #include <device/device.h>
 #include <device/device_types.h>
+#include "device_master.h"	/* #432: a device has one driver */
 #include <libcap.h>
 #include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
 
@@ -371,6 +372,73 @@ subsystem_name_is_not_a_pointer(void)
  * back to one on both kernels.  Leave it alive and the broken kernel goes
  * from two to one instead of from one to zero, and passes.
  */
+
+/*
+ * ── A device has one driver, and this task is not it (#432) ──────────
+ *
+ * 🔴 THE MASTER DEVICE PORT USED TO BE THE WHOLE ANSWER.  Any task holding it
+ * could name any bus/device/function and have memory mapped into THAT device's
+ * IOMMU domain -- and a page inside somebody else's device's domain is a page
+ * that DEVICE can reach, which is the one direction nothing else checks.  This
+ * program holds the master port and is not the block server, so it is the task
+ * that can prove the refusal.
+ *
+ * 🔴 AND IT ASKS BEFORE IT TRIES.  A device is claimed by the FIRST task that
+ * maps for it, so "try it and see" would STEAL any device nobody had claimed
+ * yet, and the driver that was going to claim it would be refused afterwards
+ * -- a self-test breaking the thing it checks.  device_dma_owned() answers the
+ * question without claiming, and exists for this.
+ *
+ * ⚠️ A boot where nothing is claimed yet reports that it DID NOT RUN and says
+ * so.  The order between this task and the block server is an interleaving and
+ * not an order (#425); silence would be indistinguishable from a pass.
+ */
+static int
+a_device_has_one_driver(mach_port_t device_port)
+{
+    kern_return_t kr;
+    natural_t     bdf, by_other = 0;
+    int           claimed = 0;
+    vm_address_t  kva = 0, dma = 0;
+
+    /*
+     * Bus zero, every function: whichever device the block server reached
+     * first is the one this borrows.  Found by search and not by a constant,
+     * because which slot a controller lands in is a property of the board and
+     * this runs on more than one.
+     */
+    for (bdf = 0; bdf < 0x100; bdf++) {
+        kr = device_dma_owned(device_port, bdf, &by_other);
+        if (kr == KERN_SUCCESS && by_other) {
+            claimed = 1;
+            break;
+        }
+    }
+
+    if (!claimed) {
+        printf("cap_test: [11] a device has one driver — DID NOT RUN, "
+               "nothing on bus 0 is driven by another task yet\n");
+        return 1;
+    }
+
+    kr = device_dma_alloc(device_port, bdf, 4096, &kva, &dma);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [11] WRONG — this task mapped memory for "
+               "%02x:%02x.%u, which another task drives\n",
+               (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+               (unsigned)(bdf & 7));
+        (void)device_dma_free(device_port, bdf, kva, 4096);
+        return 0;
+    }
+
+    printf("cap_test: [11] mapping memory for %02x:%02x.%u refused with "
+           "kr=%d — a device has one driver, and holding the master port "
+           "is no longer the whole answer\n",
+           (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+           (unsigned)(bdf & 7), kr);
+    return 1;
+}
+
 static int
 subsystem_survives_a_failed_allocation(void)
 {
@@ -931,6 +999,9 @@ main(int argc, char **argv)
         pass = 0;
 
     if (!subsystem_survives_a_failed_allocation())
+        pass = 0;
+
+    if (!a_device_has_one_driver(device_port))
         pass = 0;
 
     if (pass) {

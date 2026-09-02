@@ -1,8 +1,28 @@
 cmake_minimum_required(VERSION 3.16)
 project(cap_test C)
 
+# device_master.defs, user half: #432 gave the device master an access check
+# of its own -- a device has ONE driver -- and proving a REFUSAL needs a task
+# that is not the driver.  This one holds the master device port and starts
+# after the block server has claimed the disks, which is what makes it the
+# place the check can be seen to fire.
+#
+# ⚠️ add_mig_userland and NOT scripts/mig: that wrapper routes a flag it does
+# not know to the C preprocessor, so `-target x86_64' would reach cc instead of
+# migcom, which then defaults to i386 and emits stubs with the wrong message
+# layout, silently (#427).
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers)
+
+set(_CT_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
+set(CT_MIG_GENERATED)
+add_mig_userland(${UROS_UAPI_DIR}/device/device_master.defs ${_CT_OUT} CT_MIG)
+list(REMOVE_ITEM CT_MIG_GENERATED ${_CT_OUT}/device_master_server.c)
+
 add_executable(cap_test_server
-  cap_test.c
+  cap_test.c ${CT_MIG_GENERATED}
 )
 
 add_dependencies(cap_test_server mig_mach_public_headers)
@@ -21,6 +41,8 @@ target_compile_definitions(cap_test_server PRIVATE
 )
 
 target_include_directories(cap_test_server PRIVATE
+  ${_CT_OUT}
+  ${CMAKE_SOURCE_DIR}/uapi
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include

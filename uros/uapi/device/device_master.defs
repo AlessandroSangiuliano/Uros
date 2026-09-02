@@ -434,6 +434,26 @@ routine device_ddb_break(
  * `count' is since boot and does not wrap with the kernel's log; `address' is
  * the last one recorded and is meaningless when the count is zero.
  */
+/*
+ * Is this device already driven by ANOTHER task?
+ *
+ * 🔴 A QUESTION THAT DOES NOT CLAIM, and that is the whole reason it exists
+ * rather than a caller finding out by trying.  A device is claimed by the
+ * first task that maps memory for it, so "try it and see" is a test that
+ * STEALS the device when the answer is no -- and the driver that was going to
+ * claim it is then refused, which is a self-test breaking the thing it was
+ * checking.
+ *
+ * ⚠️ Answers zero for a device nobody drives AND for one this task drives
+ * itself.  Those are the two cases in which the caller may go on to map for
+ * it, which is what the caller is asking.
+ */
+routine device_dma_owned(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	out	by_other	: natural_t
+	);
+
 routine device_dma_faults(
 		master_port	: mach_port_t;
 	in	bdf		: natural_t;

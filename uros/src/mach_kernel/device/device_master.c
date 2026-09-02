@@ -296,6 +296,95 @@ check_master_port(ipc_port_t port)
 	return KERN_SUCCESS;
 }
 
+/*
+ * ── Which task drives which device (#432) ────────────────────────────
+ *
+ * 🔴 HOLDING THE MASTER PORT USED TO BE THE WHOLE ANSWER, and that is the gap
+ * #432 names: "a device capability carries the right to map memory for that
+ * device... rather than inventing an ad-hoc grant mechanism".  What existed
+ * was the ad-hoc mechanism -- any holder of the master port could name any
+ * bus/device/function and have memory mapped into ITS domain.  Which matters
+ * precisely because of what the rest of this issue built: a task that can
+ * grant for someone else's device can put a page it owns inside that device's
+ * domain, and then it is the DEVICE that reaches the page, which is the one
+ * kind of reach nothing else here checks.
+ *
+ * 🔑 This does not answer the capability question -- issuing a per-device
+ * token is cap_server's to do and needs a policy about WHO is entitled to a
+ * device, which is a decision and not an implementation.  What it does is
+ * remove the part that needs no policy at all: a device has ONE driver.  The
+ * first task to grant for a bus/device/function claims it, and a second task
+ * naming it is refused.
+ *
+ * ⚠️ Claimed and never released, deliberately.  A driver task that dies leaves
+ * its device claimed, and that is the safe direction: the alternative is a
+ * device whose domain still holds the dead driver's pages being handed to
+ * whoever asks next.  Releasing it properly means noticing the task died and
+ * tearing the domain down with it, which is real work and is not this.
+ */
+#define	DEVICE_MAX_CLAIMS	16
+
+static struct {
+	natural_t	bdf;
+	task_t		task;
+} device_claim[DEVICE_MAX_CLAIMS];
+
+static unsigned device_nclaims;
+
+/*
+ * Whether another task has claimed this device.  Asks and does not claim.
+ */
+static int
+device_claimed_by_other(natural_t bdf)
+{
+	task_t me = current_task();
+	unsigned i;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf)
+			return device_claim[i].task != me;
+
+	return 0;
+}
+
+/*
+ * Answers KERN_SUCCESS when this task may act on this device, claiming it if
+ * nobody has.
+ */
+static kern_return_t
+claim_device(natural_t bdf)
+{
+	task_t me = current_task();
+	unsigned i;
+
+	if (bdf == DEVICE_DMA_NO_BDF)
+		return KERN_SUCCESS;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf)
+			return device_claim[i].task == me
+			       ? KERN_SUCCESS : KERN_NO_ACCESS;
+
+	/*
+	 * ⚠️ Full is a REFUSAL and not a free-for-all.  A table that stopped
+	 * recording would let every device past the sixteenth be claimed by
+	 * anybody, which is the check silently turning itself off at the
+	 * moment there are enough devices for it to matter.
+	 */
+	if (device_nclaims >= DEVICE_MAX_CLAIMS)
+		return KERN_RESOURCE_SHORTAGE;
+
+	device_claim[device_nclaims].bdf = bdf;
+	device_claim[device_nclaims].task = me;
+	device_nclaims++;
+
+	printf("device: %02x:%02x.%u is now driven by task 0x%lx, and no "
+	       "other task may map memory for it\n",
+	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+	       (unsigned)(bdf & 7), (unsigned long)me);
+	return KERN_SUCCESS;
+}
+
 /* ---- PCI configuration space ---- */
 
 kern_return_t
@@ -651,6 +740,10 @@ ds_master_device_dma_alloc(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
+	kr = claim_device(bdf);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
 	if (size == 0)
 		return KERN_INVALID_ARGUMENT;
 
@@ -715,6 +808,10 @@ ds_master_device_dma_free(
 	kern_return_t kr;
 
 	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	kr = claim_device(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -793,6 +890,10 @@ ds_master_device_dma_alloc_sg(
 	vm_map_copy_t	list_copy;
 
 	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	kr = claim_device(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1296,6 +1397,10 @@ ds_master_device_dma_identity(
 	if (bdf == DEVICE_DMA_NO_BDF)
 		return KERN_INVALID_ARGUMENT;
 
+	kr = claim_device(bdf);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
 	/*
 	 * ⚠️ Success on a machine that polices nothing, and it means what it
 	 * says: physical addresses are what such a machine hands out anyway,
@@ -1314,5 +1419,21 @@ ds_master_device_dma_identity(
 	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 	       (unsigned)(bdf & 7));
 
+	return KERN_SUCCESS;
+}
+
+kern_return_t
+ds_master_device_dma_owned(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	natural_t		*by_other)
+{
+	kern_return_t kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	*by_other = (natural_t)device_claimed_by_other(bdf);
 	return KERN_SUCCESS;
 }
