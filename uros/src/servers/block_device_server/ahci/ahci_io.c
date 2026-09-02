@@ -286,9 +286,49 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 		}
 	}
 
-	printf("ahci: batch timed out  CI=0x%08X  SACT=0x%08X\n",
-	       port_read(st, port, PORT_CI),
-	       port_read(st, port, PORT_SACT));
+	/*
+	 * 🔴 A TIMEOUT THAT SAYS ONLY THAT IT TIMED OUT NAMES NOTHING.
+	 *
+	 * This printed CI and SACT, which together say "the slot is still
+	 * pending" -- the definition of the timeout, not evidence about it.
+	 * Everything that could distinguish the causes was one register read
+	 * away and was not read:
+	 *
+	 *   TFD   the drive's own status and error, if it answered at all
+	 *   SERR  a link that took an error is a different fault from a
+	 *         command the drive never liked
+	 *   IS    which interrupt reasons the port raised
+	 *   CMD   whether the engine is even running (CR) and receiving (FR)
+	 *   SSTS  whether the device is still present and communicating
+	 *
+	 * And the addresses the HBA was given, because a command that is
+	 * fetched from the wrong place cannot complete and looks exactly
+	 * like a drive that ignored it.  CLB is what the port was
+	 * programmed with; ctba is what slot zero's header points at.
+	 */
+	{
+		struct ahci_cmd_hdr *h0 =
+			(struct ahci_cmd_hdr *)st->ports[port_idx].clb_uva;
+
+		printf("ahci: batch timed out  CI=0x%08X SACT=0x%08X "
+		       "slots=%u ncq=%d\n",
+		       port_read(st, port, PORT_CI),
+		       port_read(st, port, PORT_SACT), nslots, port_ncq);
+		printf("      TFD=0x%08X SERR=0x%08X IS=0x%08X CMD=0x%08X "
+		       "SSTS=0x%08X\n",
+		       port_read(st, port, PORT_TFD),
+		       port_read(st, port, PORT_SERR),
+		       port_read(st, port, PORT_IS),
+		       port_read(st, port, PORT_CMD),
+		       port_read(st, port, PORT_SSTS));
+		printf("      CLB=0x%08X%08X  slot0 ctba=0x%08X%08X "
+		       "prdtl=%u opts=0x%04X prdbc=%u\n",
+		       port_read(st, port, PORT_CLBU),
+		       port_read(st, port, PORT_CLB),
+		       (unsigned)h0[0].ctbau, (unsigned)h0[0].ctba,
+		       (unsigned)h0[0].prdtl, (unsigned)h0[0].opts,
+		       (unsigned)h0[0].prdbc);
+	}
 	return -1;
 }
 

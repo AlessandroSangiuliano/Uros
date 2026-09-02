@@ -46,7 +46,35 @@
  */
 
 /* Static state — we support one AHCI controller for now */
-static struct ahci_state ahci_st;
+/*
+ * 🔴 ONE STATE PER CONTROLLER, and it used to be ONE STATE.
+ *
+ * `probe' hands the framework a pointer through *priv, and the framework
+ * keeps it in ctrl->priv for the life of that controller.  A single static
+ * instance meant every controller was handed the SAME pointer, so the second
+ * probe overwrote the first controller's ABAR, its port table, its DMA
+ * addresses and its disk geometry -- while the first controller's partitions
+ * were already registered and pointing at it.
+ *
+ * ⚠️ Invisible on i386 and on the default board, where there is exactly one
+ * ahci controller and a singleton is indistinguishable from a correct
+ * allocation.  q35 is what exposed it: that chipset has its own AHCI at
+ * 0:31.2 besides the one the command line adds, so a boot there probes twice.
+ *
+ * 🔑 And the way it announced itself was not a crash.  The second probe found
+ * no drive, failed, and left the shared state describing a port with nothing
+ * on it -- so the FIRST controller's next read timed out with SSTS=0 and the
+ * command engine stopped, on a port that had reported a disk and a running
+ * engine minutes earlier.  The register dump is what named it: hardware that
+ * says "no device" about a device it had just identified is not hardware
+ * that changed its mind.
+ *
+ * The slot is taken but not committed until probe succeeds, so a controller
+ * that fails to come up does not consume one.  Probes are sequential.
+ */
+static struct ahci_state ahci_st[MAX_CONTROLLERS];
+static unsigned ahci_n_states;
+
 
 /* ================================================================
  * PCI match — AHCI SATA controller (class 01:06:01)
@@ -439,7 +467,16 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	   const struct pci_bar_region *bars, unsigned int n_bars,
 	   void **priv)
 {
-	struct ahci_state *st = &ahci_st;
+	struct ahci_state *st;
+
+	if (ahci_n_states >= MAX_CONTROLLERS) {
+		printf("ahci: %u controllers already, and the framework holds "
+		       "no more — refusing to probe %u:%u.%u\n",
+		       ahci_n_states, bus, slot, func);
+		return -1;
+	}
+	st = &ahci_st[ahci_n_states];
+	memset(st, 0, sizeof(*st));
 	kern_return_t kr;
 	const struct pci_bar_region *abar_region;
 	uint64_t abar_phys;
@@ -591,6 +628,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 * clearing PORT_IS — no level-triggered storm.
 	 */
 	ahci_write(st, AHCI_GHC, ahci_read(st, AHCI_GHC) | GHC_IE);
+
+	ahci_n_states++;		/* committed: this controller came up */
 
 	*priv = st;
 	return 0;

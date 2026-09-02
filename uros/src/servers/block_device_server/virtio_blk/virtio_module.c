@@ -43,7 +43,35 @@
 /* The configuration header comes from <device/pci.h> (#427). */
 
 /* Static state — one virtio-blk controller */
-static struct virtio_state virtio_st;
+/*
+ * 🔴 ONE STATE PER CONTROLLER, and it used to be ONE STATE.
+ *
+ * `probe' hands the framework a pointer through *priv, and the framework
+ * keeps it in ctrl->priv for the life of that controller.  A single static
+ * instance meant every controller was handed the SAME pointer, so the second
+ * probe overwrote the first controller's ABAR, its port table, its DMA
+ * addresses and its disk geometry -- while the first controller's partitions
+ * were already registered and pointing at it.
+ *
+ * ⚠️ Invisible on i386 and on the default board, where there is exactly one
+ * virtio controller and a singleton is indistinguishable from a correct
+ * allocation.  q35 is what exposed it: that chipset has its own AHCI at
+ * 0:31.2 besides the one the command line adds, so a boot there probes twice.
+ *
+ * 🔑 And the way it announced itself was not a crash.  The second probe found
+ * no drive, failed, and left the shared state describing a port with nothing
+ * on it -- so the FIRST controller's next read timed out with SSTS=0 and the
+ * command engine stopped, on a port that had reported a disk and a running
+ * engine minutes earlier.  The register dump is what named it: hardware that
+ * says "no device" about a device it had just identified is not hardware
+ * that changed its mind.
+ *
+ * The slot is taken but not committed until probe succeeds, so a controller
+ * that fails to come up does not consume one.  Probes are sequential.
+ */
+static struct virtio_state virtio_st[MAX_CONTROLLERS];
+static unsigned virtio_n_states;
+
 
 /* ================================================================
  * I/O port accessors
@@ -327,7 +355,16 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	     const struct pci_bar_region *bars, unsigned int n_bars,
 	     void **priv)
 {
-	struct virtio_state *st = &virtio_st;
+	struct virtio_state *st;
+
+	if (virtio_n_states >= MAX_CONTROLLERS) {
+		printf("virtio: %u controllers already, and the framework holds "
+		       "no more — refusing to probe %u:%u.%u\n",
+		       virtio_n_states, bus, slot, func);
+		return -1;
+	}
+	st = &virtio_st[virtio_n_states];
+	memset(st, 0, sizeof(*st));
 	kern_return_t kr;
 	const struct pci_bar_region *io_region;
 	unsigned int cmd_reg, irq_reg;
@@ -438,6 +475,8 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	       st->disk_sectors, st->disk_sectors / 2048);
 	printf("virtio: status = 0x%02X\n",
 	       vio_read8(st, VIRTIO_PCI_STATUS));
+
+	virtio_n_states++;		/* committed: this controller came up */
 
 	*priv = st;
 	return 0;
