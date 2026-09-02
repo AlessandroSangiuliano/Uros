@@ -37,7 +37,7 @@
 int
 ahci_submit_cmd(struct ahci_state *st, int port_idx,
 		struct ata_fis_h2d *fis,
-		unsigned int buf_pa, unsigned int buf_size,
+		vm_address_t buf_pa, vm_size_t buf_size,
 		int write)
 {
 	int port = st->ports[port_idx].hba_port;
@@ -58,8 +58,8 @@ ahci_submit_cmd(struct ahci_state *st, int port_idx,
 		hdr[0].opts |= CMD_HDR_W;
 	hdr[0].prdtl = (buf_size > 0) ? 1 : 0;
 	hdr[0].prdbc = 0;
-	hdr[0].ctba  = st->ct_pa;
-	hdr[0].ctbau = 0;
+	hdr[0].ctba  = ahci_pa_lo(st->ct_pa);
+	hdr[0].ctbau = ahci_pa_hi(st->ct_pa);
 	for (i = 0; i < 4; i++)
 		hdr[0].rsvd[i] = 0;
 
@@ -67,8 +67,8 @@ ahci_submit_cmd(struct ahci_state *st, int port_idx,
 	memcpy(tbl->cfis, fis, 20);
 
 	if (buf_size > 0) {
-		tbl->prdt[0].dba  = buf_pa;
-		tbl->prdt[0].dbau = 0;
+		tbl->prdt[0].dba  = ahci_pa_lo(buf_pa);
+		tbl->prdt[0].dbau = ahci_pa_hi(buf_pa);
 		tbl->prdt[0].rsvd = 0;
 		tbl->prdt[0].dbc  = PRDT_DBC(buf_size) | PRDT_IOC;
 	}
@@ -192,8 +192,8 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 			hdr[slot].opts |= CMD_HDR_W;
 		hdr[slot].prdtl = n_prdt;
 		hdr[slot].prdbc = 0;
-		hdr[slot].ctba  = st->ct_pa + slot * CT_STRIDE;
-		hdr[slot].ctbau = 0;
+		hdr[slot].ctba  = ahci_pa_lo(st->ct_pa + slot * CT_STRIDE);
+		hdr[slot].ctbau = ahci_pa_hi(st->ct_pa + slot * CT_STRIDE);
 		hdr[slot].rsvd[0] = 0;
 		hdr[slot].rsvd[1] = 0;
 		hdr[slot].rsvd[2] = 0;
@@ -239,8 +239,8 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 					page_bytes = rem;
 			}
 
-			tbl->prdt[p].dba  = st->data_pa_list[page_idx];
-			tbl->prdt[p].dbau = 0;
+			tbl->prdt[p].dba  = ahci_pa_lo(st->data_pa_list[page_idx]);
+			tbl->prdt[p].dbau = ahci_pa_hi(st->data_pa_list[page_idx]);
 			tbl->prdt[p].rsvd = 0;
 			tbl->prdt[p].dbc  = PRDT_DBC(page_bytes);
 			if (p == n_prdt - 1)
@@ -299,7 +299,7 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 int
 ahci_submit_phys(struct ahci_state *st, int port_idx,
 		 uint32_t start_lba, unsigned int nsectors,
-		 int write, unsigned int *caller_pa,
+		 int write, vm_address_t *caller_pa,
 		 unsigned int n_pa, unsigned int total_bytes)
 {
 	int port = st->ports[port_idx].hba_port;
@@ -329,8 +329,8 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 		hdr[0].opts |= CMD_HDR_W;
 	hdr[0].prdtl = n_prdt;
 	hdr[0].prdbc = 0;
-	hdr[0].ctba  = st->ct_pa;
-	hdr[0].ctbau = 0;
+	hdr[0].ctba  = ahci_pa_lo(st->ct_pa);
+	hdr[0].ctbau = ahci_pa_hi(st->ct_pa);
 	hdr[0].rsvd[0] = 0;
 	hdr[0].rsvd[1] = 0;
 	hdr[0].rsvd[2] = 0;
@@ -357,8 +357,8 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 	for (p = 0; p < n_prdt; p++) {
 		unsigned int chunk = bytes_left > 4096u ? 4096u : bytes_left;
 
-		tbl->prdt[p].dba  = caller_pa[p];
-		tbl->prdt[p].dbau = 0;
+		tbl->prdt[p].dba  = ahci_pa_lo(caller_pa[p]);
+		tbl->prdt[p].dbau = ahci_pa_hi(caller_pa[p]);
 		tbl->prdt[p].rsvd = 0;
 		tbl->prdt[p].dbc  = PRDT_DBC(chunk);
 		if (p == n_prdt - 1)

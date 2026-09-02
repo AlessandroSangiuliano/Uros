@@ -477,8 +477,41 @@ device_md_msi_unregister(unsigned int slot)
 	 * vector nobody claims, and an unclaimed vector halts the machine.
 	 */
 	if (msi_device[i].table != 0) {
+		struct pci_msix	gone = msi_device[i];
+		unsigned int	j;
+		int		last = 1;
+
 		pci_msix_disarm(&msi_device[i], msi_entry_of[i]);
 		msi_device[i].table = 0;
+
+		/*
+		 * 🔴 AND THE FUNCTION'S OWN ENABLE BIT, which nothing used to
+		 * put back (#520).  Disarming the entry stops the interrupt;
+		 * it leaves the device MSI-X-enabled, and a device left in a
+		 * state its driver did not choose is a device whose registers
+		 * may not be where the driver looks for them.  A legacy
+		 * virtio-pci device moves its configuration by four bytes on
+		 * exactly this bit.
+		 *
+		 * ⚠️ Only when this was the LAST entry of that function.  The
+		 * enable is per function and the entries are per vector, so
+		 * clearing it with another vector still armed would silence an
+		 * interrupt nobody asked to silence.  Compared by bus address
+		 * rather than by mapping, because two slots of one device are
+		 * two records of the same function.
+		 */
+		for (j = 0; j < DEVICE_MD_MSI_MAX; j++)
+			if (msi_device[j].table != 0
+			    && msi_device[j].segment == gone.segment
+			    && msi_device[j].bus == gone.bus
+			    && msi_device[j].dev == gone.dev
+			    && msi_device[j].func == gone.func) {
+				last = 0;
+				break;
+			}
+
+		if (last)
+			pci_msix_disable(&gone);
 	}
 
 	msi_release_vector(slot);

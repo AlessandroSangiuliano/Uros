@@ -33,28 +33,48 @@
 
 #define DATA_BUF_SIZE	(128u * 1024u)
 
+/*
+ * 🔴 THE ADDRESSES ARE vm_address_t AND NOT `unsigned int' (#520).
+ *
+ * They were the latter, and on i386 that was right by accident: there
+ * <mach/i386/vm_types.h> makes vm_offset_t the same type as natural_t, so an
+ * address and a 32-bit number are one type and nothing could tell them apart.
+ *
+ * On x86-64 they are deliberately different -- <mach/x86_64/vm_types.h> keeps
+ * natural_t at 32 bits because mach_port_t is one, and widens vm_offset_t to
+ * 64 -- and that header says exactly what this struct was doing:
+ *
+ *	code that stored a pointer in a natural_t, or printed a vm_offset_t
+ *	with %x, compiles here and is wrong
+ *
+ * A kernel VA here is 0xffffffff8..., so every one of these was losing its top
+ * half.  ⚠️ And losing it QUIETLY: the truncated value is a perfectly good
+ * number, so the failure is a device programmed with an address that exists
+ * and is not the buffer.
+ */
 struct virtio_state {
 	mach_port_t	master_device;
 	unsigned int	pci_bus, pci_slot, pci_func;
 	unsigned int	irq;
-	unsigned int	iobase;		/* BAR0 I/O port base */
+	unsigned int	iobase;		/* BAR0 I/O port base, 16 bits wide */
+	unsigned int	config_off;	/* where the device config begins */
 
 	uint32_t	disk_sectors;
 
 	/* Virtqueue */
 	unsigned int	vq_size;
-	unsigned int	vq_kva, vq_uva, vq_pa;
-	unsigned int	vq_alloc_size;
+	vm_address_t	vq_kva, vq_uva, vq_pa;
+	vm_size_t	vq_alloc_size;
 
 	struct vring_desc  *vq_desc;
 	struct vring_avail *vq_avail;
 	struct vring_used  *vq_used;
 
 	/* Request header + status DMA buffer */
-	unsigned int	req_kva, req_uva, req_pa;
+	vm_address_t	req_kva, req_uva, req_pa;
 
 	/* Data DMA buffer */
-	unsigned int	data_kva, data_uva, data_pa;
+	vm_address_t	data_kva, data_uva, data_pa;
 
 	uint16_t	last_used_idx;
 };

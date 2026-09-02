@@ -55,8 +55,25 @@
 #define VIRTIO_PCI_STATUS		0x12	/* 8-bit, device status */
 #define VIRTIO_PCI_ISR			0x13	/* 8-bit, ISR status */
 
-/* Device-specific config starts at offset 0x14 (legacy, no MSI-X) */
-#define VIRTIO_PCI_CONFIG		0x14
+/*
+ * Where the device-specific configuration begins -- and it MOVES (#520).
+ *
+ * 🔴 The legacy virtio-pci layout puts two 16-bit MSI-X vector fields at 0x14
+ * when, and only when, MSI-X is ENABLED on the function.  The device config
+ * follows them.  So this is not one constant, it is two, and which one applies
+ * is a property of the device at the moment the driver looks.
+ *
+ * ⚠️ i386 could not have found this: it has no MSI-X at all, so 0x14 was
+ * always right there.  Here it was wrong, and quietly -- the driver read
+ * `msix_config' and `queue_msix_vector' as a capacity and reported 65535
+ * sectors, which is 0xFFFF, which is VIRTIO_MSI_NO_VECTOR, for a disk of
+ * 32768.  A plausible number for a plausible disk.
+ */
+#define VIRTIO_PCI_CONFIG		0x14	/* MSI-X disabled */
+#define VIRTIO_PCI_CONFIG_MSIX		0x18	/* MSI-X enabled  */
+
+/* The value both vector fields hold when no vector is assigned. */
+#define VIRTIO_MSI_NO_VECTOR		0xFFFF
 
 /* ================================================================
  * Device status bits

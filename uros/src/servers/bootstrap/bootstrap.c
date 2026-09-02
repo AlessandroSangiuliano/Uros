@@ -227,6 +227,13 @@ static mach_port_t bds_boot_handle = MACH_PORT_NULL;
 #define BOOT_DEV_NAME	"disk0a"
 
 /*
+ * How often stage 2 looks up from waiting to ask whether the server that would
+ * publish the partition is still alive.  A POLLING PERIOD, not a deadline: the
+ * wait ends on a fact and never on elapsed time.  See bootstrap_enter_stage2().
+ */
+#define STAGE2_POLL_MS	250
+
+/*
  * Strip the leading "/dev/<dev>/" component from a stage-1 path so it
  * can be passed to open_file_on_port(), which expects a path relative
  * to the device root.  Returns NULL if `path` doesn't start with
@@ -288,7 +295,7 @@ bootstrap_service_thread(void *arg)
  * doesn't race us for the netname notification message.
  */
 static void
-bootstrap_enter_stage2(void)
+bootstrap_enter_stage2(struct server *bds)
 {
 	struct uros_cap	tok;
 	char		tok_blob[CAP_TOKEN_MAX];
@@ -336,14 +343,50 @@ bootstrap_enter_stage2(void)
 		return;
 	}
 
-	kr = mach_msg(&nmsg.head, MACH_RCV_MSG,
-		      0, sizeof(nmsg), notify_port,
-		      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	if (kr != KERN_SUCCESS) {
-		printf("%s: stage-2: notification recv failed (%d)\n",
-		       program_name, kr);
-		(void)mach_port_destroy(bootstrap_self, notify_port);
-		return;
+	/*
+	 * 🔴 WAIT FOR THE PARTITION OR FOR THE SERVER TO DIE — never for a
+	 * number of seconds (#520).
+	 *
+	 * This used to be one MACH_MSG_TIMEOUT_NONE receive.  On i386 that is
+	 * harmless: there is always a disk, so the notification always comes.
+	 * On x86-64 a boot with no disk is ordinary, the block device server
+	 * exits when it finds no partitions, and bootstrap waited here for
+	 * ever -- stopping the server loop where it stood.
+	 *
+	 * 🔑 And the answer is NOT a timeout.  How long the probe takes is a
+	 * function of the accelerator and the clock, so a deadline would make
+	 * the boot's behaviour depend on CPU speed -- the thing #425 took out
+	 * of the harness for the same reason.  What ends the wait is a FACT:
+	 * either the partition is published, or the only task that could
+	 * publish it is gone.
+	 *
+	 * The interval below is a polling period and not a verdict.  A live
+	 * server that has not published yet is making progress and is waited
+	 * for however long it takes.
+	 */
+	for (;;) {
+		kr = mach_msg(&nmsg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT,
+			      0, sizeof(nmsg), notify_port,
+			      STAGE2_POLL_MS, MACH_PORT_NULL);
+		if (kr == KERN_SUCCESS)
+			break;
+
+		if (kr != MACH_RCV_TIMED_OUT) {
+			printf("%s: stage-2: notification recv failed (%d)\n",
+			       program_name, kr);
+			(void)mach_port_destroy(bootstrap_self, notify_port);
+			return;
+		}
+
+		if (bds != NULL && (bds->flags & SERVER_DIED_F)) {
+			printf("%s: stage-2: block_device_server exited "
+			       "without publishing '%s' — there is no disk, "
+			       "and on this target there is no third back end "
+			       "to fall through to\n",
+			       program_name, BOOT_DEV_NAME);
+			(void)mach_port_destroy(bootstrap_self, notify_port);
+			return;
+		}
 	}
 	disk_port = nmsg.service.name;
 	(void)mach_port_destroy(bootstrap_self, notify_port);
@@ -1109,9 +1152,22 @@ main(int argc, char **argv)
 	     * cap-authenticated handle that boot_open_file() will use for
 	     * every subsequent load in this loop.
 	     */
+	    /*
+	     * ⚠️ And only if anything is still to be loaded (#520).  Stage 2
+	     * exists to serve the servers that come AFTER the block device
+	     * server; when it is last -- which it is on x86-64 today -- there
+	     * is nothing to open through the handle, and entering would be
+	     * blocking for a capability nobody will use.
+	     */
 	    if (!stage2_active &&
-		strcmp(sp->symtab_name, "block_device_server") == 0)
-		bootstrap_enter_stage2();
+		strcmp(sp->symtab_name, "block_device_server") == 0) {
+		if (i + 1 < nservers)
+		    bootstrap_enter_stage2(sp);
+		else
+		    printf("%s: stage-2 not entered: nothing follows "
+			   "block_device_server, so no load needs the disk\n",
+			   program_name);
+	    }
 
 	    break;
 	    } /* end retry loop */
@@ -1958,10 +2014,18 @@ bootstrap_notify_dead_name(mach_port_t name)
 	printf("%s: '%s' task terminated\n", program_name, sp->server_name);
 	BOOTSTRAP_IO_UNLOCK();
 
-	if (sp->flags & SERVER_SERIALIZE_F) {
-	    sp->flags |= SERVER_DIED_F;
+	/*
+	 * 🔴 Recorded for EVERY server, not only the serialised ones (#520).
+	 * That a task died is a fact; `bootstrap_completed' below is a
+	 * contract, and only a server somebody waits for has one.  The flag
+	 * was set under the contract's guard because only those servers ever
+	 * read it -- and stage 2 now needs to know that the block device
+	 * server is gone, and it is not serialised.
+	 */
+	sp->flags |= SERVER_DIED_F;
+
+	if (sp->flags & SERVER_SERIALIZE_F)
 	    sp->bootstrap_completed = 1;
-	}
 
 	return KERN_SUCCESS;
 }

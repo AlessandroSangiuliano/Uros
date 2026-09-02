@@ -164,14 +164,14 @@ extern kern_return_t device_read_phys(
 	mach_port_t device,
 	dev_mode_t mode, recnum_t recnum,
 	io_buf_len_t bytes_wanted,
-	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	vm_address_t *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
 	io_buf_len_t *bytes_read) __attribute__((weak));
 
 extern kern_return_t device_write_phys(
 	mach_port_t device,
 	dev_mode_t mode, recnum_t recnum,
 	io_buf_len_t bytes_to_write,
-	unsigned int *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
+	vm_address_t *phys_addrs, mach_msg_type_number_t phys_addrsCnt,
 	io_buf_len_t *bytes_written) __attribute__((weak));
 
 /* ================================================================
@@ -229,7 +229,7 @@ ext2_dev_has_phys(struct device *dev)
 static inline kern_return_t
 ext2_dev_read_phys(struct device *dev, recnum_t recnum,
 		   io_buf_len_t bytes_wanted,
-		   unsigned int *phys_addrs, unsigned int n_phys,
+		   vm_address_t *phys_addrs, unsigned int n_phys,
 		   io_buf_len_t *bytes_read)
 {
 	if (dev->blk)
@@ -242,7 +242,7 @@ ext2_dev_read_phys(struct device *dev, recnum_t recnum,
 static inline kern_return_t
 ext2_dev_write_phys(struct device *dev, recnum_t recnum,
 		    io_buf_len_t bytes_to_write,
-		    unsigned int *phys_addrs, unsigned int n_phys,
+		    vm_address_t *phys_addrs, unsigned int n_phys,
 		    io_buf_len_t *bytes_written)
 {
 	if (dev->blk)
@@ -1098,7 +1098,7 @@ buf_read_file(
 				e = page_cache_alloc_entry(fp->f_dev.cache,
 							   disk_block);
 				if (e) {
-					unsigned int pa =
+					vm_address_t pa =
 						(unsigned int)e->pc_phys;
 					io_buf_len_t br;
 					rc = ext2_dev_read_phys(
@@ -1199,7 +1199,7 @@ fallback_read:
 					e = page_cache_alloc_entry(
 						fp->f_dev.cache, disk_block);
 					if (e) {
-						unsigned int pa =
+						vm_address_t pa =
 							(unsigned int)e->pc_phys;
 						io_buf_len_t br;
 						rc = ext2_dev_read_phys(
@@ -2748,12 +2748,56 @@ write_inode(ino_t inumber, struct ext2fs_file *fp)
 	struct ext2_vnode *vn = fp->f_vnode;
 	daddr_t disk_block;
 
-	if (!vn || vn->v_inode_blk == 0)
+	if (!vn) {
+		printf("ext2: write_inode %u: no vnode\n",
+		       (unsigned)inumber);
 		return KERN_FAILURE;
+	}
+
+	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
+
+	/*
+	 * 🔴 #483: READ THE BLOCK IF NOBODY HAS.  This used to return
+	 * KERN_FAILURE here, silently, and it is why ext2_sync() had never
+	 * once succeeded after a metadata-dirtying write -- in every captured
+	 * log back to 2026-07-21.
+	 *
+	 * 🔑 The cause is that a READ optimisation disabled the WRITE-BACK.
+	 * read_inode() checks the inode cache first and, on a hit, "copies the
+	 * cached inode directly without any device I/O" -- which is its whole
+	 * value.  But the first thing that path does is free_file_buffers(),
+	 * which clears f_inode_blk, and it returns without ever reading the
+	 * block that HOLDS the inode.  The vnode then inherits a zero, and
+	 * every flush of that inode fails for the life of the mount.
+	 *
+	 * ⚠️ Read HERE and not on the cache hit.  Reading it there would undo
+	 * exactly the I/O the cache exists to avoid, on every open of every
+	 * file, to serve a write-back that most of them never do.  Here it is
+	 * paid once, by the flush that needs it, beside a write it is already
+	 * doing.
+	 */
+	if (vn->v_inode_blk == 0) {
+		vm_offset_t		buf;
+		mach_msg_type_number_t	buf_size;
+		int			rc;
+
+		rc = ext2_dev_read(&fp->f_dev,
+				   (recnum_t) dbtorec(&fp->f_dev,
+					ext2_fsbtodb(fs, disk_block)),
+				   (int) EXT2_BLOCK_SIZE(fs),
+				   (char **)&buf, &buf_size);
+		if (rc != KERN_SUCCESS) {
+			printf("ext2: write_inode %u: its block could not be "
+			       "read back (rc=%d)\n", (unsigned)inumber, rc);
+			return rc;
+		}
+
+		vn->v_inode_blk = buf;
+		vn->v_inode_blk_size = buf_size;
+	}
 
 	serialize_inode(fp);
 
-	disk_block = ext2_ino2blk(fs, fp->f_gd, inumber);
 	return write_disk_block(fp, disk_block,
 				vn->v_inode_blk, EXT2_BLOCK_SIZE(fs));
 }
@@ -3249,17 +3293,29 @@ flush_metadata_locked(struct ext2fs_file *fp)
 	if (n_dirty == 1 || !ext2_dev_has_batch(&fp->f_dev)) {
 		if (vn->v_inode_dirty) {
 			rc = write_inode(vn->v_ino, fp);
-			if (rc != 0) return rc;
+			if (rc != 0) {
+				printf("ext2: flush: inode %u not written "
+				       "(rc=%d)\n", vn->v_ino, rc);
+				return rc;
+			}
 			vn->v_inode_dirty = 0;
 		}
 		if (vn->v_gd_dirty) {
 			rc = write_gd(fp);
-			if (rc != 0) return rc;
+			if (rc != 0) {
+				printf("ext2: flush: group descriptors not "
+				       "written (rc=%d)\n", rc);
+				return rc;
+			}
 			vn->v_gd_dirty = 0;
 		}
 		if (vn->v_super_dirty) {
 			rc = write_super(fp);
-			if (rc != 0) return rc;
+			if (rc != 0) {
+				printf("ext2: flush: superblock not written "
+				       "(rc=%d)\n", rc);
+				return rc;
+			}
 			vn->v_super_dirty = 0;
 		}
 		return 0;
@@ -3450,6 +3506,22 @@ flush_metadata_locked(struct ext2fs_file *fp)
 			vn->v_inode_dirty = 0;
 			vn->v_gd_dirty = 0;
 			vn->v_super_dirty = 0;
+		} else {
+			/*
+			 * 🔴 #483: it used to return here saying nothing.  A
+			 * caller learned that "a sync failed" and could not
+			 * learn what had not reached the disk -- and this
+			 * branch has never once succeeded, in every captured
+			 * log back to 2026-07-21.
+			 */
+			printf("ext2: flush: batch of %u block(s) for inode %u "
+			       "not written via %s (rc=%d)%s%s%s\n",
+			       n, vn->v_ino,
+			       fp->f_dev.blk ? "libblk" : "device_write_batch",
+			       rc,
+			       vn->v_inode_dirty ? " [inode]" : "",
+			       vn->v_gd_dirty ? " [group desc]" : "",
+			       vn->v_super_dirty ? " [superblock]" : "");
 		}
 		return rc;
 	}

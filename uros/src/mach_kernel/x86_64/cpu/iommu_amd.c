@@ -350,6 +350,7 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 #define	AMD_DTE_MODE_SHIFT	9		/* 000b = translation off   */
 #define	AMD_DTE_IR		(1ULL << 61)	/* reads permitted          */
 #define	AMD_DTE_IW		(1ULL << 62)	/* writes permitted         */
+#define	AMD_DTE_ROOT_MASK	0x000FFFFFFFFFF000ULL	/* bits 51:12       */
 /* DomainID is bits 79:64, which is the low sixteen bits of the second word. */
 
 /*
@@ -366,6 +367,35 @@ void iommu_amd_decode(uint64_t efr, uint64_t control,
 void iommu_amd_dte_passthrough(uint16_t domain, uint64_t out[4])
 {
 	out[0] = AMD_DTE_V | AMD_DTE_TV | (0ULL << AMD_DTE_MODE_SHIFT)
+	       | AMD_DTE_IR | AMD_DTE_IW;
+	out[1] = domain;
+	out[2] = 0;
+	out[3] = 0;
+}
+
+/*
+ * ── Stage 3c: one device, translating through a table of its own ─────
+ *
+ * Rev 3.11 Table 7.  Mode is the DEPTH of the page table, stated directly:
+ * 001b is one level, 100b is four, and 000b is the translation-disabled case
+ * the pass-through entry above uses.  Where Intel encodes an address width and
+ * leaves the depth implied, this names the depth and leaves the width implied
+ * -- the same asymmetry as the page-table entries, one level up.
+ *
+ * ⚠️ 111b is reserved AND REPORTED: "Mode=111b is reported as an event when
+ * V=1 and TV=1."  So a depth this kernel could not encode does not fail
+ * quietly here; it arrives in the event log, which is stage 3e's subject.
+ *
+ * ⚠️ The root pointer is IGNORED when Mode is 000b, which is why the
+ * pass-through entry can leave it zero and why this one cannot be written by
+ * adding a pointer to that one.
+ */
+void iommu_amd_dte_domain(uint16_t domain, unsigned levels, uint64_t root_pa,
+			  uint64_t out[4])
+{
+	out[0] = AMD_DTE_V | AMD_DTE_TV
+	       | ((uint64_t)(levels & 7u) << AMD_DTE_MODE_SHIFT)
+	       | (root_pa & AMD_DTE_ROOT_MASK)
 	       | AMD_DTE_IR | AMD_DTE_IW;
 	out[1] = domain;
 	out[2] = 0;

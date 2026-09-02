@@ -581,6 +581,14 @@ main(int argc, char **argv)
 		}
 	}
 
+	/*
+	 * 🔑 Before the message loop, not after: the first client of this
+	 * server is bootstrap looking for a server to run, and "the disk
+	 * could not be read" is a thing to learn from the server that owns
+	 * the disk rather than from the task that failed to load.
+	 */
+	blk_readback_selftest();
+
 	printf("blk: init complete, %d partition(s), "
 	       "entering message loop\n", n_partitions);
 

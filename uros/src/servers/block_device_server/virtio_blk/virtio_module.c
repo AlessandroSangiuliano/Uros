@@ -108,6 +108,67 @@ virtio_match(unsigned int vendor_device, unsigned int class_rev)
 }
 
 /* ================================================================
+ * Where the device configuration begins
+ * ================================================================ */
+
+/*
+ * 🔴 ASKED OF THE DEVICE, not assumed (#520).
+ *
+ * The legacy virtio-pci header grows two 16-bit MSI-X vector fields at offset
+ * 0x14 when MSI-X is enabled on the function, pushing the device-specific
+ * configuration from 0x14 to 0x18.  This driver assumed 0x14, which was right
+ * on i386 -- where there is no MSI-X to enable -- and wrong here.
+ *
+ * ⚠️ And "enabled" is not "present".  Every virtio device QEMU builds OFFERS
+ * MSI-X; what moves the registers is the enable bit in the capability's
+ * control word, which some other task may have set.  It was irq_claim_test:
+ * it walks every device on bus 0 offering each one a vector, ten tasks before
+ * this driver starts.  So this reads the bit rather than reasoning about who
+ * might have set it.
+ */
+static unsigned int
+virtio_config_offset(struct virtio_state *st)
+{
+	unsigned int	cap, hdr, reg;
+
+	/* Capabilities are optional; without the list there is no MSI-X. */
+	if (device_pci_config_read(st->master_device, st->pci_bus,
+				   st->pci_slot, st->pci_func,
+				   PCI_COMMAND, &reg) != KERN_SUCCESS
+	    || !(reg & (PCI_STATUS_CAP_LIST << 16)))
+		return VIRTIO_PCI_CONFIG;
+
+	if (device_pci_config_read(st->master_device, st->pci_bus,
+				   st->pci_slot, st->pci_func,
+				   PCI_CAP_POINTER, &reg) != KERN_SUCCESS)
+		return VIRTIO_PCI_CONFIG;
+
+	cap = reg & 0xFC;
+
+	/*
+	 * ⚠️ Bounded, and not by trusting the list to end.  A device whose
+	 * next-pointer loops would spin here forever; forty-eight is more
+	 * capabilities than a function can hold in the 192 bytes available to
+	 * them, so reaching it means the list is malformed.
+	 */
+	for (hdr = 0; cap >= 0x40 && hdr < 48; hdr++) {
+		if (device_pci_config_read(st->master_device, st->pci_bus,
+					   st->pci_slot, st->pci_func,
+					   cap, &reg) != KERN_SUCCESS)
+			break;
+
+		if ((reg & 0xFF) == PCI_CAP_ID_MSIX)
+			return (reg & (PCI_MSIX_CTL_ENABLE << 16))
+				? VIRTIO_PCI_CONFIG_MSIX
+				: VIRTIO_PCI_CONFIG;
+
+		cap = (reg >> 8) & 0xFC;
+	}
+
+	return VIRTIO_PCI_CONFIG;
+}
+
+/* ================================================================
  * Virtqueue setup
  * ================================================================ */
 
@@ -271,7 +332,7 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	const struct pci_bar_region *io_region;
 	unsigned int cmd_reg, irq_reg;
 	int i;
-	uint32_t host_features, cap_lo;
+	uint32_t host_features, cap_lo, cap_hi;
 
 	st->pci_bus  = bus;
 	st->pci_slot = slot;
@@ -347,11 +408,33 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		   VIRTIO_STATUS_ACKNOWLEDGE | VIRTIO_STATUS_DRIVER |
 		   VIRTIO_STATUS_DRIVER_OK);
 
-	/* Read capacity */
-	cap_lo = vio_read32(st, VIRTIO_PCI_CONFIG + 0);
+	/*
+	 * 🔴 WHERE the device config is, ASKED rather than assumed (#520).  See
+	 * virtio_config_offset(): a legacy virtio-pci device puts it at 20 when
+	 * MSI-X is disabled and at 24 when it is enabled, and this driver read
+	 * 20 unconditionally.
+	 */
+	st->config_off = virtio_config_offset(st);
+
+	/*
+	 * ⚠️ Both halves.  Capacity is 64 bits of 512-byte sectors and only the
+	 * low one used to be read -- which is a 2 TiB ceiling that nothing here
+	 * would have reported, since the number that came back was a perfectly
+	 * plausible size.
+	 */
+	cap_lo = vio_read32(st, st->config_off + 0);
+	cap_hi = vio_read32(st, st->config_off + 4);
+	if (cap_hi != 0) {
+		printf("virtio: capacity %u:%08X sectors exceeds what this "
+		       "driver addresses — refusing the disk\n",
+		       cap_hi, cap_lo);
+		return -1;
+	}
 	st->disk_sectors = cap_lo;
 
-	printf("virtio: capacity = %u sectors (%u MB)\n",
+	printf("virtio: config at +0x%02X (msi-x %s), capacity = %u sectors "
+	       "(%u MB)\n", st->config_off,
+	       st->config_off == VIRTIO_PCI_CONFIG_MSIX ? "on" : "off",
 	       st->disk_sectors, st->disk_sectors / 2048);
 	printf("virtio: status = 0x%02X\n",
 	       vio_read8(st, VIRTIO_PCI_STATUS));

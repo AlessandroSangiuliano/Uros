@@ -148,7 +148,7 @@ struct block_driver_ops {
 	 */
 	int  (*read_sectors_phys)(void *priv, int disk, uint32_t lba,
 				  unsigned int count,
-				  unsigned int *phys_addrs,
+				  vm_address_t *phys_addrs,
 				  unsigned int n_pa,
 				  unsigned int total_bytes);
 
@@ -158,7 +158,7 @@ struct block_driver_ops {
 	 */
 	int  (*write_sectors_phys)(void *priv, int disk, uint32_t lba,
 				   unsigned int count,
-				   unsigned int *phys_addrs,
+				   vm_address_t *phys_addrs,
 				   unsigned int n_pa,
 				   unsigned int total_bytes);
 
@@ -205,6 +205,58 @@ struct blk_controller {
 #define BLK_MAGIC_PART		0x424c4b50u	/* 'BLKP' */
 #define BLK_MAGIC_HANDLE	0x424c4b48u	/* 'BLKH' */
 
+/* ================================================================
+ * What a protected payload can carry (#520)
+ * ================================================================ */
+
+/*
+ * 🔴 THE PAYLOAD IS AN INDEX, BECAUSE IT CANNOT BE A POINTER.
+ *
+ * This server addresses its objects by protected payload: the kernel
+ * substitutes the payload into `msgh_local_port' on delivery, so the MIG stub's
+ * port argument arrives already carrying the object and no lookup is needed.
+ * That is what the mechanism is for, and it is worth keeping.
+ *
+ * What cannot be kept is putting a POINTER in it.  The payload is a
+ * `natural_t' in the port (`ip_protected_payload' in <ipc/ipc_port.h>) and it
+ * is delivered in `msgh_local_port', which is a mach_port_t field of the
+ * message header -- 32 bits on both targets, deliberately and permanently,
+ * because widening it would change the header ABI.  On i386 a pointer fitted
+ * and the cast was invisible; here the top half is simply gone, and what comes
+ * back is a valid-looking address in the low 4 GiB that points at nothing.
+ *
+ * So the payload names an entry in a table instead.  🔑 Which is also strictly
+ * safer than what it replaces: a payload the server did not issue now indexes
+ * a bounds-checked array and is refused, where before it was dereferenced.
+ *
+ * ⚠️ Zero is not an index.  A port with no payload set delivers zero, and the
+ * whole point is to tell that apart from a real object -- so the payload is
+ * `index + 1' and blk_object_for(0) answers NULL.
+ */
+#define BLK_MAX_PAYLOAD_OBJECTS	512
+
+/*
+ * Register an object and get the payload that names it, or zero when the table
+ * is full.  ⚠️ Zero must be checked: publishing a port whose payload was never
+ * issued would leave a port that answers every call with D_NO_SUCH_DEVICE, and
+ * no line anywhere saying why.
+ */
+natural_t blk_payload_register(void *object);
+
+/* The object a payload names, or NULL if it names none. */
+void *blk_object_for(natural_t payload);
+
+/* Give an index back when the object it named is freed. */
+void blk_payload_release(natural_t payload);
+
+/*
+ * Read the disk back and check the bytes against the table this server
+ * built out of them (#520).  Called once, after the partitions are
+ * published and before the message loop, so a disk that cannot be read
+ * says so before anything depends on it.
+ */
+void blk_readback_selftest(void);
+
 struct blk_partition {
 	uint32_t	magic;			/* BLK_MAGIC_PART */
 	struct blk_controller	*ctrl;
@@ -212,6 +264,7 @@ struct blk_partition {
 	uint32_t	start_lba;
 	uint32_t	num_sectors;
 	mach_port_t	recv_port;
+	natural_t	payload;		/* names it to blk_object_for() */
 	char		name[32];		/* driver-specific: e.g. "ahci0a" */
 	char		stable_name[32];	/* driver-agnostic: e.g. "disk0a" */
 };
@@ -226,6 +279,7 @@ struct blk_handle {
 	uint32_t		magic;		/* BLK_MAGIC_HANDLE */
 	struct blk_partition	*part;
 	mach_port_t		recv_port;
+	natural_t		payload;	/* names it to blk_object_for() */
 	uint64_t		cap_id;		/* matched against cap_revoke_notify */
 	int			revoked;	/* set by blk_cap_revoke_notify (#183) */
 	struct blk_handle	*next;		/* linked-list link, head in block_device.c */

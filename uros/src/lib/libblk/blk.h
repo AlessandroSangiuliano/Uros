@@ -107,7 +107,7 @@ kern_return_t blk_write(struct blk_dev *dev,
 kern_return_t blk_read_phys(struct blk_dev *dev,
 			    recnum_t recnum,
 			    io_buf_len_t bytes_wanted,
-			    unsigned int *phys_addrs,
+			    vm_address_t *phys_addrs,
 			    unsigned int n_phys,
 			    io_buf_len_t *bytes_read);
 
@@ -121,7 +121,7 @@ kern_return_t blk_read_phys(struct blk_dev *dev,
 kern_return_t blk_write_phys(struct blk_dev *dev,
 			     recnum_t recnum,
 			     io_buf_len_t bytes_to_write,
-			     unsigned int *phys_addrs,
+			     vm_address_t *phys_addrs,
 			     unsigned int n_phys,
 			     io_buf_len_t *bytes_written);
 

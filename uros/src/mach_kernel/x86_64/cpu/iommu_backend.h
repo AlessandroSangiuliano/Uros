@@ -232,6 +232,45 @@ void iommu_vtd_context_passthrough(uint16_t domain, unsigned levels,
 void iommu_vtd_context_blocked(uint64_t out[2]);
 
 /*
+ * ── Stage 3c: the entry that points a device at a table ──────────────
+ *
+ * The counterpart of the pass-through pair above, and NOT a variation on it:
+ * on one vendor the pass-through entry ignores the root pointer entirely, and
+ * on the other the width field means a different thing once translation is on.
+ * Written from the tables rather than by adding a pointer to what is there.
+ *
+ * `levels' is THIS DOMAIN'S depth, which under pass-through was the engine's
+ * deepest.  Same argument, opposite value.
+ */
+void iommu_vtd_context_domain(uint16_t domain, unsigned levels,
+			      uint64_t root_pa, uint64_t out[2]);
+void iommu_amd_dte_domain(uint16_t domain, unsigned levels, uint64_t root_pa,
+			  uint64_t out[4]);
+
+/*
+ * The range both vendors reserve for interrupts, which no translation may ever
+ * produce.
+ *
+ * 🔴 STATED SEPARATELY BY BOTH, WHICH IS WHY IT IS HERE AND NOT IN ONE READER.
+ *
+ *	Intel Rev 5.20 §3.15: "Software must not program paging-structure
+ *	entries to remap any address to the interrupt address range."
+ *
+ *	AMD Rev 3.11 §2.1.4.2: "The IOMMU should not be configured such that an
+ *	address translation results in a special address such as the interrupt
+ *	address range."
+ *
+ * ⚠️ And the same two sections rule out the obvious way to demonstrate this
+ * issue's whole point.  A single-DWORD write to FEEx_xxxxh is an INTERRUPT
+ * request on both vendors and "not subjected to DMA remapping (even if
+ * translation structures specify a mapping for this range)" -- so the MSI
+ * doorbell #457 already makes a device write cannot be blocked by any domain
+ * built here.  That hole is interrupt remapping's to close, not this one's.
+ */
+#define	IOMMU_INTERRUPT_RANGE_BASE	0xFEE00000ULL
+#define	IOMMU_INTERRUPT_RANGE_LIMIT	0xFEEFFFFFULL
+
+/*
  * Start a unit, and get back the index that iommu_record_scope() will attach
  * scopes to.  Answers -1 when there is no room, having set the truncation
  * flag -- and a reader that ignores the -1 will write into a unit that is not

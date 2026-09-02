@@ -63,6 +63,28 @@
 struct irq_forward {
 	ipc_port_t	notify_port;	/* send-right to userspace */
 	int		active;		/* nonzero if registered */
+
+	/*
+	 * 🔴 WHICH KIND OF SLOT THIS IS, because giving one back is not the
+	 * same operation for the two (#520).
+	 *
+	 * A line is released by masking a pin: the machine can do that knowing
+	 * nothing but the number.  A message-signalled slot lives in the
+	 * DEVICE's own table, so releasing it has to reach the device and put
+	 * the mask back there -- which is what device_md_msi_unregister() is
+	 * for, and it says so in <device/device_machdep.h>:
+	 *
+	 *	A device left armed at a vector whose handler is gone raises an
+	 *	interrupt nobody claims.
+	 *
+	 * 🔑 That function was written, was right, and was CALLED BY NOBODY on
+	 * the release path -- unregister went to device_md_irq_unregister(),
+	 * which returns without doing anything for a slot above the lines.  So
+	 * "giving them back answered success" was true and the devices stayed
+	 * armed.  Recorded here rather than derived from the slot number,
+	 * because the numbering is the machine's and this file is not.
+	 */
+	int		msi;		/* nonzero if a message, not a line */
 };
 
 extern struct irq_forward irq_forward_table[];

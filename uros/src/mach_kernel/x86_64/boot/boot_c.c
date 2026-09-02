@@ -3389,6 +3389,7 @@ static void pci_cap_selftest(void)
 	unsigned	repeated = 0;	/* ids a device lists more than once */
 	unsigned	wrongly_found = 0;
 	unsigned	with_a_list = 0;
+	unsigned	devices = 0;
 	unsigned	msix_devices = 0;
 	unsigned	msix_vectors = 0;
 
@@ -3415,6 +3416,8 @@ static void pci_cap_selftest(void)
 					      PCI_VENDOR_ID);
 			if (vendor == 0xFFFFFFFFu)
 				continue;
+
+			devices++;
 
 			/*
 			 * ⚠️ The test consults the status bit for the same
@@ -3533,57 +3536,80 @@ static void pci_cap_selftest(void)
 	kputs(" at the listed offset and invented ");
 	kputdec(wrongly_found);
 	/*
-	 * ⚠️ The positive control is asked of the board that HAS one.  Not one
-	 * device on QEMU's i440FX exposes a capability list -- measured, not
-	 * assumed -- so demanding `listed > 0' there would report a walk
-	 * failure for a bus with nothing to walk.  Which is the first thing
-	 * this test did.
+	 * ⚠️ The positive control used to be asked only of the board that had
+	 * one.  Not one device on QEMU's bare i440FX exposes a capability list
+	 * -- measured, not assumed -- so demanding `listed > 0' there reported
+	 * a walk failure for a bus with nothing to walk, which is the first
+	 * thing this test did.  The agreement was required on both boards and
+	 * held vacuously on that one.
 	 *
-	 * The agreement itself is required on both, and holds vacuously on the
-	 * board with nothing: saying that out loud is the difference between a
-	 * check that passed and a check that did not run.
+	 * 🔑 A vacuous half is a check that did not run, and it stopped being
+	 * necessary the moment this target booted off a virtio disk (#520):
+	 * that device lists capabilities on whichever board it is plugged
+	 * into, so `listed > 0' is now a demand both boards can meet.  It is
+	 * made of both, because a walk over an empty bus agrees with the
+	 * devices about everything.
 	 */
 	if (agreed != listed - repeated || wrongly_found != 0)
 		kputs(" — WRONG, the walk and the devices disagree about the"
 		      " list\r\n");
-	else if (listed > 0)
+	else if (listed == 0)
+		kputs(" — WRONG, not one device on this bus lists a"
+		      " capability, so the walk agreed about nothing\r\n");
+	else
 		kputs(" — every id a device lists, where it lists it, and"
 		      " nothing else\r\n");
-	else if (pci_cfg_is_ecam())
-		kputs(" — WRONG, a board with ECAM whose devices list"
-		      " nothing\r\n");
-	else
-		kputs(" — nothing on this 1996 chipset lists a capability, so"
-		      " the walk is exercised on q35 and not here\r\n");
 
 	/*
-	 * ── The two boards must answer differently ────────────────────────
+	 * ── Both answers must be exercised, and the board does not decide
+	 *    which ──────────────────────────────────────────────────────────
 	 *
-	 * 🔑 MSI-X is a 2009 property and the default board models a chipset
-	 * from 1996.  So the same code must find a table on one board and
-	 * none on the other, and a walk that always answered "found" or always
-	 * "absent" would each be right on exactly one of them.
+	 * 🔴 MSI-X IS A PROPERTY OF THE DEVICE, NOT OF THE CHIPSET.  This test
+	 * said it the other way round: MSI-X is a 2009 feature and the default
+	 * board models a chipset from 1996, so finding a table there was
+	 * reported WRONG.  The negative half of the claim was collected on
+	 * i440fx and the positive half on q35, and each board checked one.
 	 *
-	 * ⚠️ An absent capability reported absent is half the claim and the
-	 * half that is easy to lose: the first thing this gets used for is
-	 * programming a table, and programming one that is not there writes
-	 * into whatever the BAR it names actually points at.
+	 * ⚠️ Which held only while nothing modern was plugged in.  The run that
+	 * booted this target off a virtio disk (#520) put a device with an
+	 * MSI-X table on the 1996 board, and a test whose subject was correct
+	 * began to fail -- on i440fx alone, in the one configuration that
+	 * attached the disk.
+	 *
+	 * 🔑 The vector count named the culprit before anything else did: two
+	 * on one processor and five on four.  That is virtio-blk's config
+	 * vector plus one per queue, and a chipset's own devices do not gain
+	 * vectors when you add processors.  A number that moves with something
+	 * the claim says it does not depend on is the claim being wrong.
+	 *
+	 * So the claim is now made about the devices, which is what the loop
+	 * above was counting all along.  Both outcomes are required on BOTH
+	 * boards -- strictly more than before -- and a walk stuck on either
+	 * answer fails everywhere instead of passing on one board in two.
+	 *
+	 * ⚠️ The absent case is the half that is easy to lose, and the one that
+	 * costs: the first thing this gets used for is programming a table,
+	 * and programming one that is not there writes into whatever the BAR
+	 * it names actually points at.
 	 */
 	kputs("UrMach x86-64: ");
 	kputdec(msix_devices);
+	kputs(" of ");
+	kputdec(devices);
 	kputs(" device(s) offer MSI-X, ");
 	kputdec(msix_vectors);
 	kputs(" vectors in total");
-	if (pci_cfg_is_ecam())
-		kputs(msix_devices > 0 && msix_vectors >= msix_devices
-		      ? " — a table to program, which this board has and the"
-			" other does not\r\n"
-		      : " — WRONG, no MSI-X on a board whose devices have it\r\n");
+	if (msix_devices == 0)
+		kputs(" — WRONG, no device on this bus has a table, so the"
+		      " walk was never asked to find one\r\n");
+	else if (msix_devices >= devices)
+		kputs(" — WRONG, every device answered yes, so the absent"
+		      " case went unexercised\r\n");
+	else if (msix_vectors < msix_devices)
+		kputs(" — WRONG, a table found with no vectors in it\r\n");
 	else
-		kputs(msix_devices == 0
-		      ? " — none, and this board's chipset predates it by"
-			" thirteen years\r\n"
-		      : " — WRONG, MSI-X found on a 1996 chipset\r\n");
+		kputs(" — found on the devices that have one and absent on"
+		      " the devices that do not, from the same walk\r\n");
 }
 
 /*

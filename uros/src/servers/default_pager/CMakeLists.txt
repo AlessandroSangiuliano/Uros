@@ -35,6 +35,7 @@ function(dp_mig_defs DEFS_FILE STEM)
     COMMAND ${MIG_SCRIPT}
       -cpp ${CMAKE_C_COMPILER}
       -migcom $<TARGET_FILE:migcom>
+      ${UROS_MIG_TARGET_ARGS}
       ${CPP_FLAGS}
       -header  ${_userH}
       -sheader ${_serverH}

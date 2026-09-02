@@ -627,7 +627,7 @@ page_cache_sync(struct page_cache *pc)
 
 struct page_cache *
 page_cache_create_dma(unsigned int max_entries, vm_size_t block_size,
-		      vm_offset_t pool_va, unsigned int *pa_list,
+		      vm_offset_t pool_va, vm_address_t *pa_list,
 		      unsigned int n_pages,
 		      page_cache_writeback_fn writeback, void *ctx)
 {

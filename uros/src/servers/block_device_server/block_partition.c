@@ -35,6 +35,59 @@
 #include "block_server.h"
 
 /* ================================================================
+ * The payload table (#520) — see the comment in block_server.h
+ * ================================================================ */
+
+/*
+ * Slot zero is never handed out, so that a payload of zero -- which is what a
+ * port with no payload set delivers -- can mean "no object" and not "the first
+ * one".  The array is indexed by payload - 1.
+ */
+static void *blk_payload_objects[BLK_MAX_PAYLOAD_OBJECTS];
+
+natural_t
+blk_payload_register(void *object)
+{
+	unsigned i;
+
+	if (object == NULL)
+		return 0;
+
+	for (i = 0; i < BLK_MAX_PAYLOAD_OBJECTS; i++)
+		if (blk_payload_objects[i] == NULL) {
+			blk_payload_objects[i] = object;
+			return (natural_t)(i + 1);
+		}
+
+	/*
+	 * ⚠️ Reported and refused, rather than grown or wrapped.  A payload
+	 * table that wrapped would hand two ports the same name and the second
+	 * object would answer for the first -- a wrong disk, not an error.
+	 */
+	printf("blk: payload table full at %u objects — port not published\n",
+	       (unsigned)BLK_MAX_PAYLOAD_OBJECTS);
+	return 0;
+}
+
+void *
+blk_object_for(natural_t payload)
+{
+	if (payload == 0 || payload > BLK_MAX_PAYLOAD_OBJECTS)
+		return NULL;
+
+	return blk_payload_objects[payload - 1];
+}
+
+void
+blk_payload_release(natural_t payload)
+{
+	if (payload == 0 || payload > BLK_MAX_PAYLOAD_OBJECTS)
+		return;
+
+	blk_payload_objects[payload - 1] = NULL;
+}
+
+/* ================================================================
  * MBR parsing
  *
  * Reads sector 0, parses four primary MBR entries, populates
@@ -172,11 +225,17 @@ blk_register_partitions(void)
 			continue;
 		}
 
+		part->payload = blk_payload_register(part);
+		if (part->payload == 0)
+			continue;
+
 		kr = mach_port_set_protected_payload(mach_task_self(),
-			part->recv_port, (unsigned long)part);
+			part->recv_port, part->payload);
 		if (kr != KERN_SUCCESS) {
 			printf("blk: set_protected_payload failed for %s\n",
 			       part->name);
+			blk_payload_release(part->payload);
+			part->payload = 0;
 			continue;
 		}
 

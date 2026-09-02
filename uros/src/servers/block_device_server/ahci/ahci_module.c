@@ -180,7 +180,7 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	struct ahci_port_info *pi = &st->ports[port_idx];
 	int hba_port = pi->hba_port;
 	kern_return_t kr;
-	unsigned int dma_kva, dma_uva, dma_pa;
+	vm_address_t dma_kva, dma_uva, dma_pa;
 
 	kr = device_dma_alloc(st->master_device, 4096, &dma_kva, &dma_pa);
 	if (kr != KERN_SUCCESS) {
@@ -204,10 +204,22 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 
 	ahci_port_stop(st, hba_port);
 
-	port_write(st, hba_port, PORT_CLB,  pi->clb_pa);
-	port_write(st, hba_port, PORT_CLBU, 0);
-	port_write(st, hba_port, PORT_FB,   pi->fb_pa);
-	port_write(st, hba_port, PORT_FBU,  0);
+	/*
+	 * 🔴 THE UPPER HALVES ARE WRITTEN, not zeroed (#520).  They were
+	 * literal zeros, which on i386 was the only value they could have had
+	 * -- a physical address is 32 bits there, so the field and the constant
+	 * agreed.  Here the allocator may return a frame above 4 GiB and the
+	 * controller would have fetched its command list from the bottom of
+	 * memory instead: not a failure, a DMA to somewhere real.
+	 *
+	 * ⚠️ Order matters.  The specification has software write the low half
+	 * and then the upper, and the port must be stopped for either -- which
+	 * ahci_port_stop() above has just done.
+	 */
+	port_write(st, hba_port, PORT_CLB,  ahci_pa_lo(pi->clb_pa));
+	port_write(st, hba_port, PORT_CLBU, ahci_pa_hi(pi->clb_pa));
+	port_write(st, hba_port, PORT_FB,   ahci_pa_lo(pi->fb_pa));
+	port_write(st, hba_port, PORT_FBU,  ahci_pa_hi(pi->fb_pa));
 
 	port_write(st, hba_port, PORT_SERR, ~0u);
 	port_write(st, hba_port, PORT_IS,   ~0u);
@@ -363,18 +375,47 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	device_dma_free(st->master_device, st->data_kva, 4096);
 
 	n_pages = st->batch_slots * PRDT_PER_SLOT;
-	if (n_pages > 1024)
-		n_pages = 1024;
+	if (n_pages > AHCI_MAX_SG_PAGES)
+		n_pages = AHCI_MAX_SG_PAGES;
 
-	kr = device_dma_alloc_sg(st->master_device, n_pages,
-				 mach_task_self(),
-				 &st->data_kva, &st->data_uva,
-				 st->data_pa_list, &pa_count);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: scatter-gather alloc (%u pages) "
-		       "failed (kr=%d)\n", n_pages, kr);
-		return -1;
+	/*
+	 * #520: the list comes back OUT OF LINE now, so `pa_list' is memory
+	 * the kernel handed over and this task owns.  It is copied into the
+	 * driver's own array and released at once -- keeping it would mean a
+	 * live vm_allocate for the life of the controller, to hold what fits
+	 * in a struct field.
+	 */
+	{
+		vm_address_t *pa_list = NULL;
+
+		pa_count = 0;
+		kr = device_dma_alloc_sg(st->master_device, n_pages,
+					 mach_task_self(),
+					 &st->data_kva, &st->data_uva,
+					 &pa_list, &pa_count);
+		if (kr != KERN_SUCCESS) {
+			printf("ahci: scatter-gather alloc (%u pages) "
+			       "failed (kr=%d)\n", n_pages, kr);
+			return -1;
+		}
+
+		if (pa_count > AHCI_MAX_SG_PAGES)
+			pa_count = AHCI_MAX_SG_PAGES;
+
+		for (unsigned p = 0; p < pa_count; p++)
+			st->data_pa_list[p] = pa_list[p];
+
+		/*
+		 * ⚠️ Released whatever happens next.  Out-of-line memory a
+		 * receiver forgets is a leak of one allocation per mount,
+		 * which is the shape of leak that never gets noticed.
+		 */
+		(void) vm_deallocate(mach_task_self(),
+				     (vm_address_t)pa_list,
+				     (vm_size_t)pa_count
+				     * sizeof(vm_address_t));
 	}
+
 	st->data_n_pages = n_pages;
 	st->data_pa = st->data_pa_list[0];
 
@@ -477,7 +518,14 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		printf("ahci: device_mmio_map failed (kr=%d)\n", kr);
 		return -1;
 	}
-	printf("ahci: ABAR mapped at uva=0x%08X\n", (unsigned int)st->abar);
+	/*
+	 * ⚠️ %p and not %08X.  It was the latter, which on i386 printed the
+	 * whole address and here would print its bottom half -- the exact
+	 * "printed a vm_offset_t with %x" that <mach/x86_64/vm_types.h> names.
+	 * A diagnostic that lies about an address is worse than none: it is the
+	 * line somebody reads while looking for why a mapping is wrong.
+	 */
+	printf("ahci: ABAR mapped at uva=%p\n", (void *)st->abar);
 
 	/* Initial CT buffer (1 page) */
 	kr = device_dma_alloc(master_dev, 4096, &st->ct_kva, &st->ct_pa);
@@ -664,7 +712,7 @@ ahci_mod_irq_handler(void *priv)
 static int
 ahci_mod_read_phys(void *priv, int disk, uint32_t lba,
 		   unsigned int count,
-		   unsigned int *phys_addrs, unsigned int n_pa,
+		   vm_address_t *phys_addrs, unsigned int n_pa,
 		   unsigned int total_bytes)
 {
 	struct ahci_state *st = (struct ahci_state *)priv;
@@ -675,7 +723,7 @@ ahci_mod_read_phys(void *priv, int disk, uint32_t lba,
 static int
 ahci_mod_write_phys(void *priv, int disk, uint32_t lba,
 		    unsigned int count,
-		    unsigned int *phys_addrs, unsigned int n_pa,
+		    vm_address_t *phys_addrs, unsigned int n_pa,
 		    unsigned int total_bytes)
 {
 	struct ahci_state *st = (struct ahci_state *)priv;

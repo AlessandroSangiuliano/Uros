@@ -352,6 +352,30 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(servers/hal_server)
 endif()
 
+# block_device_server on x86-64 (#520), and the first task here that moves a
+# byte with a device.
+#
+# 🔑 IT IS NOT HERE FOR ITSELF.  #432's done-when asks that a driver run against
+# a real IOMMU domain and that an out-of-domain DMA be blocked and reported --
+# and nothing in this target's bundle does DMA at all.  hal_server enumerates
+# devices and reads their BARs; the only callers of device_dma_alloc in the tree
+# are this server's two modules and ext_server.  So the IOMMU could be built,
+# programmed and read back while the property it exists to provide stayed
+# undemonstrable for want of anything to demonstrate it on.
+#
+# ⚠️ And the obvious substitute does not work.  The MSI doorbell #457 makes a
+# device write IS a DMA write, but both vendors exclude it: a single-DWORD write
+# to FEEx_xxxxh is an interrupt request, "not subjected to DMA remapping (even
+# if translation structures specify a mapping for this range)".  See the
+# citations in <cpu/iommu_backend.h>.
+#
+# Nothing was holding it out but this file.  Every library it links is already
+# above the gate -- libdl and libmodload came across with #423 precisely because
+# four servers were waiting on them, and this is one of the four.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(servers/block_device_server)
+endif()
+
 # Everything below is userland; skip it wholesale on a non-i386 target.
 if(NOT UROS_USERLAND_ARCH_OK)
   message(STATUS "userland skipped: ${UROS_TARGET_ARCH} builds the kernel only (#406)")

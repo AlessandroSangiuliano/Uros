@@ -144,6 +144,18 @@ extern void pci_msix_read(const struct pci_msix *m, unsigned int entry,
 extern void pci_msix_enable(const struct pci_msix *m);
 
 /*
+ * Clear the function's MSI-X enable bit -- the half of the pair that was
+ * missing (#520).  Undoes pci_msix_enable()'s enable and NOT its bus-master
+ * bit, which a device may need for reasons unrelated to interrupts.
+ *
+ * ⚠️ Only when no entry of this device is still armed.  The bit is per
+ * FUNCTION and the entries are per vector, so clearing it while another
+ * driver's vector is live would silence an interrupt that nobody asked to
+ * silence.
+ */
+extern void pci_msix_disable(const struct pci_msix *m);
+
+/*
  * ── The vector half, which is not PCI's ──────────────────────────────
  *
  * Claim a message-signalled vector and answer what a device must WRITE to

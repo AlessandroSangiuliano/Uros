@@ -1,9 +1,11 @@
 #!/bin/sh
-# UrMach x86-64 dev loop (#406+): rebuild kernel + ISO, boot in QEMU, and say
-# whether the run was good.
+# UrMach x86-64 dev loop (#406+): rebuild the kernel, write the boot disk, boot
+# it in QEMU, and say whether the run was good.
 #
-# The image is ELF64 loaded by GRUB via multiboot2 — qemu's -kernel
-# multiboot1 loader rejects ELF64, so we boot a GRUB rescue ISO with -cdrom.
+# The image is ELF64 loaded by GRUB via multiboot2 — qemu's -kernel multiboot1
+# loader rejects ELF64, so something has to carry GRUB.  It used to be a rescue
+# ISO on -cdrom, with a separate data disk beside it; it is now the disk
+# itself, which is the whole of what QEMU is handed (#520).
 #
 # Usage: run-x86_64.sh [seconds] [extra qemu args...]
 #   run-x86_64.sh
@@ -21,9 +23,10 @@
 # six times in one session (#517).
 #
 # The pass-through exists for a reason: running qemu by hand to add a flag
-# skips the ISO rebuild, and the ISO is what boots. That mistake costs a
-# debugging session chasing a kernel that was fixed twenty minutes earlier —
-# so there is no reason to ever invoke qemu directly.
+# skips writing the disk, and the disk is what boots — every binary in the run
+# is inside it. That mistake costs a debugging session chasing a kernel that
+# was fixed twenty minutes earlier — so there is no reason to ever invoke qemu
+# directly.
 #
 # ---------------------------------------------------------------- #451
 # This script used to print the interesting lines and exit with grep's
@@ -464,7 +467,12 @@ SECS=${1:-90}
 # what it typed.
 RUN_ARGS="$*"
 
-ninja -C "$BUILD" uros_iso >/dev/null
+# What the disk image is made of.  Not `uros_iso': that target builds these
+# five and then spends a second and forty megabytes producing a CD that no
+# longer boots anything.  The ISO still exists as a target, for the bare-metal
+# and Bochs paths that have no disk.
+ninja -C "$BUILD" mach_kernel boot_probe name_server_bin bootstrap_server \
+	bootstrap_bundle >/dev/null
 
 # One run at a time, enforced rather than remembered.
 #
@@ -484,7 +492,7 @@ trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
 
 mkdir -p "$(dirname "$LOG")"
 killall qemu-system-x86_64 2>/dev/null || true
-echo "=== booting uros-x86_64.iso (watchdog ${SECS}s, a backstop only) $* ==="
+echo "=== booting disk-x86_64.img (watchdog ${SECS}s, a backstop only) $* ==="
 
 # The whole stream goes to the log; the console keeps seeing the lines it
 # always showed. The verdict reads the log, not the filtered view, because a
@@ -527,8 +535,29 @@ echo "=== accelerator: $ACCEL ==="
 : > "$LOG"
 
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS "$@" \
-	-cdrom "$BUILD/uros-x86_64.iso" \
+# ── The boot disk (#520) ──────────────────────────────────────────────
+#
+# 🔑 IT IS THE ONLY THING QEMU IS GIVEN.  GRUB lives in this image's MBR and
+# reads the kernel and the bundle out of its one ext2 partition; the block
+# device server then reads /mach_servers off the SAME partition, through
+# virtio_blk.so, once the bundle has started it.  There is no -cdrom, no
+# -kernel and no -initrd: nothing outside the disk takes part in the boot.
+#
+# ⚠️ Which is why `-boot d' is gone.  It was here because the disk had an MBR
+# with no boot code and QEMU, preferring the hard disk, would stop at "Booting
+# from Hard Disk..." having never touched the ISO.  The MBR has boot code now,
+# and that stop is the desired behaviour.
+#
+# Rebuilt every run, not on demand.  --entry N is written INTO the image, as
+# /boot/grub/entry.cfg, so a disk that is merely up to date with the binaries
+# can still be selecting yesterday's menu entry.  It costs about a second.
+"$REPO/scripts/make-disk-x86_64.sh" >&2
+
+DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
+	-device virtio-blk-pci,drive=urosdisk"
+
+# shellcheck disable=SC2086
+qemu-system-x86_64 $CPU_ARGS $DISK_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
 QPID=$!
 
