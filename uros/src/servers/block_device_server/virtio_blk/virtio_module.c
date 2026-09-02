@@ -221,8 +221,8 @@ virtqueue_setup(struct virtio_state *st)
 	kr = device_dma_alloc(st->master_device, st->vq_alloc_size,
 			      &st->vq_kva, &st->vq_pa);
 	if (kr != KERN_SUCCESS) {
-		printf("virtio: vq alloc failed (%u bytes)\n",
-		       st->vq_alloc_size);
+		printf("virtio: vq alloc failed (%lu bytes)\n",
+		       (unsigned long) st->vq_alloc_size);
 		return -1;
 	}
 	kr = device_dma_map_user(st->master_device, st->vq_kva,
@@ -241,8 +241,9 @@ virtqueue_setup(struct virtio_state *st)
 	used_off = VRING_USED_OFFSET(st->vq_size);
 	st->vq_used  = (struct vring_used *)(st->vq_uva + used_off);
 
-	printf("virtio: vq pa=0x%08X  desc=+0  avail=+0x%X  used=+0x%X\n",
-	       st->vq_pa, VRING_AVAIL_OFFSET(st->vq_size), used_off);
+	printf("virtio: vq pa=0x%08lX  desc=+0  avail=+0x%X  used=+0x%X\n",
+	       (unsigned long) st->vq_pa,
+	       VRING_AVAIL_OFFSET(st->vq_size), used_off);
 
 	vio_write32(st, VIRTIO_PCI_QUEUE_PFN, st->vq_pa / VRING_ALIGN);
 

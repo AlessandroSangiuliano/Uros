@@ -593,8 +593,9 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	st->data_pa_list[0] = st->data_pa;
 	st->data_n_pages = 1;
 
-	printf("ahci: DMA: ct pa=0x%08X data pa=0x%08X\n",
-	       st->ct_pa, st->data_pa);
+	printf("ahci: DMA: ct pa=0x%08lX data pa=0x%08lX\n",
+	       (unsigned long) st->ct_pa,
+	       (unsigned long) st->data_pa);
 
 	/* HBA reset + AHCI enable */
 	if (ahci_hba_reset(st) < 0)

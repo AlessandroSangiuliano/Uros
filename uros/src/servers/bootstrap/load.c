@@ -504,8 +504,9 @@ load_program_file(struct file	*fp,
 				 (vm_size_t)(alloc_end - alloc_start), FALSE);
 	    if (result) {
 		BOOTSTRAP_IO_LOCK();
-		printf("allocate user segments (%x,%x) failed\n",
-		       alloc_start, alloc_end);
+		printf("allocate user segments (%lx,%lx) failed\n",
+		       (unsigned long) alloc_start,
+		       (unsigned long) alloc_end);
 		BOOTSTRAP_IO_UNLOCK();
 		return (result);
 	    }
@@ -604,8 +605,9 @@ load_program_file(struct file	*fp,
 				FALSE);
 	    if (result) {
 		BOOTSTRAP_IO_LOCK();
-		printf("allocate text+data (%x,%x) failed\n", text_page_start,
-		       data_page_end);
+		printf("allocate text+data (%lx,%lx) failed\n",
+		       (unsigned long) text_page_start,
+		       (unsigned long) data_page_end);
 		BOOTSTRAP_IO_UNLOCK();
 		return (result);
 	    }
@@ -666,8 +668,9 @@ load_program_file(struct file	*fp,
 				FALSE);
 	    if (result) {
 		BOOTSTRAP_IO_LOCK();
-		printf("allocate text (%x,%x) failed\n", text_page_start,
-		       data_page_end);
+		printf("allocate text (%lx,%lx) failed\n",
+		       (unsigned long) text_page_start,
+		       (unsigned long) data_page_end);
 		BOOTSTRAP_IO_UNLOCK();
 		return (result);
 	    }
@@ -728,8 +731,9 @@ load_program_file(struct file	*fp,
 				FALSE);
 	    if (result) {
 		BOOTSTRAP_IO_LOCK();
-		printf("allocate data (%x,%x) failed\n", data_page_start,
-		       data_page_end);
+		printf("allocate data (%lx,%lx) failed\n",
+		       (unsigned long) data_page_start,
+		       (unsigned long) data_page_end);
 		BOOTSTRAP_IO_UNLOCK();
 		return (result);
 	    }
