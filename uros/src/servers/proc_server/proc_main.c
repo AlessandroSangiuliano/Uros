@@ -1610,7 +1610,7 @@ kern_return_t
 vfs_open(
     mach_port_t fs_port,
     mach_port_t client_task,
-    char *path,
+    vfs_path_t path,
     int flags,
     int mode,
     vfs_u64_t *handle_out,
@@ -1816,7 +1816,7 @@ vfs_fstat(mach_port_t fs_port, vfs_u64_t handle, vfs_stat_t *st)
 }
 
 kern_return_t
-vfs_stat(mach_port_t fs_port, char *path, vfs_stat_t *st)
+vfs_stat(mach_port_t fs_port, vfs_path_t path, vfs_stat_t *st)
 {
     proc_pid_t pid = 0;
     const char *tail;
@@ -1863,13 +1863,13 @@ kern_return_t vfs_readdir(mach_port_t fp, vfs_u64_t h, vfs_u64_t c,
 { (void)fp;(void)h;(void)c; *e=(pointer_t)0; *ec=0; *nc=0;
   return KERN_FAILURE; }
 
-kern_return_t vfs_unlink(mach_port_t fp, char *p) { (void)fp;(void)p;
+kern_return_t vfs_unlink(mach_port_t fp, vfs_path_t p) { (void)fp;(void)p;
   return KERN_FAILURE; }
-kern_return_t vfs_mkdir(mach_port_t fp, char *p, int m){ (void)fp;(void)p;
+kern_return_t vfs_mkdir(mach_port_t fp, vfs_path_t p, int m){ (void)fp;(void)p;
   (void)m; return KERN_FAILURE; }
-kern_return_t vfs_rmdir(mach_port_t fp, char *p) { (void)fp;(void)p;
+kern_return_t vfs_rmdir(mach_port_t fp, vfs_path_t p) { (void)fp;(void)p;
   return KERN_FAILURE; }
-kern_return_t vfs_rename(mach_port_t fp, char *o, char *n)
+kern_return_t vfs_rename(mach_port_t fp, vfs_path_t o, vfs_path_t n)
 { (void)fp;(void)o;(void)n; return KERN_FAILURE; }
 kern_return_t vfs_sync(mach_port_t fp) { (void)fp; return KERN_SUCCESS; }
 kern_return_t vfs_unmount(mach_port_t fp) { (void)fp; return KERN_SUCCESS; }

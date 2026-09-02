@@ -209,7 +209,7 @@ cap_acquire(mach_port_t             server,
             uint64_t                resource_id,
             uint64_t                ops,
             unsigned int            lifetime_ms,
-            char                   *token,
+            cap_token_t            token,
             mach_msg_type_number_t *token_len)
 {
     (void)server;
@@ -281,11 +281,11 @@ cap_acquire(mach_port_t             server,
 
 kern_return_t
 cap_derive(mach_port_t             server,
-           char                   *parent_buf,
+           cap_token_t            parent_buf,
            mach_msg_type_number_t  parent_len,
            uint64_t                reduced_ops,
            unsigned int            lifetime_ms,
-           char                   *child_buf,
+           cap_token_t            child_buf,
            mach_msg_type_number_t *child_len)
 {
     (void)server;
@@ -461,7 +461,7 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
 kern_return_t
 cap_provision_task(mach_port_t            server,
                    mach_port_t            task_port,
-                   char                  *manifest_buf,
+                   cap_manifest_blob_t   manifest_buf,
                    mach_msg_type_number_t manifest_len,
                    mach_port_t           *out_task_cap_port)
 {
@@ -524,7 +524,7 @@ cap_provision_task(mach_port_t            server,
 
 kern_return_t
 cap_verify(mach_port_t             server,
-           char                   *token_buf,
+           cap_token_t            token_buf,
            mach_msg_type_number_t  token_len,
            uint64_t                op,
            uint64_t                resource_id)

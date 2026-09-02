@@ -184,8 +184,20 @@ get_allocsize(size_t size, union header **flp)
 	vm_size_t allocsize;
 	union header *fl;
 
-	if (size >= kalloc_max)
+	if (size >= kalloc_max) {
+	    /*
+	     * ⚠️ A big allocation has no free list, and this used to return
+	     * without touching *flp -- leaving the caller's `fl' whatever the
+	     * stack held.  It was safe, but by an invariant nobody wrote down:
+	     * every caller happens to guard its use of fl with the same
+	     * comparison made here.  Saying NULL makes it safe by
+	     * construction, and turns a caller that forgets the guard into a
+	     * null dereference instead of a walk through a stale pointer.
+	     */
+	    if (flp != NULL)
+		*flp = NULL;
 	    return round_page(size);
+	}
 	allocsize = MINSIZE;
 	fl = kfree_list;
 	while (allocsize < size) {

@@ -338,7 +338,14 @@ FILE *uheader, *server, *user;
 int
 main(int argc, char *argv[])
 {
-    FILE *iheader, *sheader, *dheader;
+    /*
+     * ⚠️ Initialised, because each is opened under one `if' and used under
+     * another that happens to test the same thing.  The compiler cannot link
+     * the two, and it is right not to: the pairing is an invariant nobody
+     * wrote down.  NULL makes a mismatch a null dereference instead of a
+     * write through whatever the stack held.
+     */
+    FILE *iheader = NULL, *sheader = NULL, *dheader = NULL;
     time_t loc;
     extern string_t GenerationDate;
 
