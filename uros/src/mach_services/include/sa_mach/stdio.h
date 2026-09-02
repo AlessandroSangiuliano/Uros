@@ -36,7 +36,7 @@
 
 extern int	sprintf(char *, const char *, ...);
 extern int	snprintf(char *, size_t, const char *, ...);
-extern int	printf(const char *, ...);
+extern int	printf(const char *, ...) __attribute__((format(printf, 1, 2)));
 #ifndef MACH_OVERRIDE_VPRINTF
 #define MACH_OVERRIDE_VPRINTF
 /* Override only if not already declared by system stdio */
