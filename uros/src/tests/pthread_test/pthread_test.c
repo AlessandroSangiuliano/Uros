@@ -816,6 +816,71 @@ test_mutex_timedlock(void)
 }
 
 /* ----------------------------------------------------------------
+ * TSC timing for the two benchmarks below (#523)
+ * ---------------------------------------------------------------- */
+
+/*
+ * 🔴 THE WHOLE COUNTER.  `rdtsc' returns 64 bits in EDX:EAX and both of
+ * these benchmarks used to read `"=a"(start)' -- EAX alone, the high half
+ * discarded.  That is a difference modulo 2^32, which at 3.9 GHz wraps every
+ * 1.1 seconds, and a wrapped value is indistinguishable from a small one.
+ *
+ * ⚠️ [18] on i386 was wrapping, and reported i386 as 110x slower than x86-64
+ * at creating a thread.  The number was believed long enough to be written
+ * down.  What settled it was not reading the assembly: it was cutting the
+ * loop count from 1000 to 100 and finding the reported TOTAL unchanged --
+ * 983,177,000 against 921,955,771.  🔑 A total that does not scale with the
+ * iteration count is not a time, whatever the explanation.
+ *
+ * [15] was never near the wrap, because its loop is short.  It is fixed in
+ * the same pass anyway: it is the same instruction with the same defect, and
+ * what keeps it safe is an iteration count, which is a thing somebody edits.
+ */
+static unsigned long long
+tsc_now(void)
+{
+	unsigned int lo, hi;
+
+	__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+/*
+ * One line of the two benchmarks below, so the printing rule lives once.
+ *
+ * 🔑 `total / n' IS A PLAIN 64-BIT DIVIDE, and on i386 that is a call to
+ * __udivdi3 which this tree links no libgcc for.  It resolves anyway: #415
+ * wrote that helper, MIT and ours, and libmach compiles the KERNEL's copy
+ * rather than keeping a second one -- see the comment at
+ * lib/libmach/CMakeLists.txt around the divide64.c line.  Confirmed from the
+ * archive and not from the CMake:
+ *
+ *	nm libmach.a -> 00000000 T __udivdi3
+ *
+ * ⚠️ I wrote a shift-and-scale loop here first, to avoid a helper that was
+ * already present and already linked.  The rule about libgcc is real; the
+ * conclusion that the divide would not link was not checked.
+ *
+ * The 32-bit cast is checked rather than assumed, because an unrepresentable
+ * value quietly narrowed is the entire subject of #523 and it would be a poor
+ * joke to reintroduce it at the printf.  doprnt.c reads no `l' length
+ * modifier for integers, so %llu is not available to say it any other way.
+ */
+static void
+print_per_iter(const char *what, int n, unsigned long long total)
+{
+	unsigned long long	per = total / (unsigned int)n;
+
+	if ((per >> 32) != 0)
+		printf("  [%d] %s: %d iters, and the cost per iteration does "
+		       "not fit the 32 bits this printf can show\n",
+		       ++test_num, what, n);
+	else
+		printf("  [%d] %s: %d iters, %u cycles/pair\n",
+		       ++test_num, what, n, (unsigned int)per);
+}
+
+/* ----------------------------------------------------------------
  * Test 15: mutex fast-path benchmark
  * ---------------------------------------------------------------- */
 
@@ -823,21 +888,18 @@ static void
 test_mutex_bench(void)
 {
 	pthread_mutex_t bench_mtx = PTHREAD_MUTEX_INITIALIZER;
-	unsigned int start, end;
+	unsigned long long start, end;
 	int i;
 	int n = 100000;
 
-	/* rdtsc for timing */
-	__asm__ volatile("rdtsc" : "=a"(start) : : "edx");
+	start = tsc_now();
 	for (i = 0; i < n; i++) {
 		pthread_mutex_lock(&bench_mtx);
 		pthread_mutex_unlock(&bench_mtx);
 	}
-	__asm__ volatile("rdtsc" : "=a"(end) : : "edx");
+	end = tsc_now();
 
-	unsigned int cycles = end - start;
-	printf("  [%d] mutex uncontended: %u cycles / %d iters = %u cycles/pair\n",
-	       ++test_num, cycles, n, cycles / n);
+	print_per_iter("mutex uncontended", n, end - start);
 }
 
 /* ----------------------------------------------------------------
@@ -989,7 +1051,7 @@ thread_noop(void *arg)
 static void
 test_thread_pool_bench(void)
 {
-	unsigned int start, end;
+	unsigned long long start, end;
 	int i;
 	int n = 1000;
 	pthread_t th;
@@ -1001,16 +1063,14 @@ test_thread_pool_bench(void)
 	}
 
 	/* Benchmark: create+join with thread pool active */
-	__asm__ volatile("rdtsc" : "=a"(start) : : "edx");
+	start = tsc_now();
 	for (i = 0; i < n; i++) {
 		pthread_create(&th, NULL, thread_noop, NULL);
 		pthread_join(th, NULL);
 	}
-	__asm__ volatile("rdtsc" : "=a"(end) : : "edx");
+	end = tsc_now();
 
-	unsigned int cycles = end - start;
-	printf("  [%d] create/join (pooled): %u cycles / %d iters = %u cycles/pair\n",
-	       ++test_num, cycles, n, cycles / n);
+	print_per_iter("create/join (pooled)", n, end - start);
 }
 
 /* ----------------------------------------------------------------
