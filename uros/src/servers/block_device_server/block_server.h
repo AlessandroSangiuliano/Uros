@@ -265,6 +265,19 @@ void blk_payload_release(natural_t payload);
  */
 void blk_readback_selftest(void);
 
+/*
+ * What a read costs, in timestamp-counter cycles per sector, once per
+ * partition.
+ *
+ * 🔑 Cycles and not bytes per second: this server does not know the counter's
+ * frequency, and #432 wants a RATIO between two runs of the same boot, which
+ * needs no frequency.  Virtio is the control -- QEMU's transitional device
+ * does its DMA outside the emulated IOMMU and AHCI goes through it, so one
+ * boot measures both a treated and an untreated disk on the same machine at
+ * the same clock.
+ */
+void blk_read_bench(void);
+
 struct blk_partition {
 	uint32_t	magic;			/* BLK_MAGIC_PART */
 	struct blk_controller	*ctrl;

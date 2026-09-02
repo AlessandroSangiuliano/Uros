@@ -1042,6 +1042,128 @@ rd32(const unsigned char *p, unsigned int off)
 }
 
 static void blk_readback_one(struct blk_partition *part);
+static void blk_read_bench_one(struct blk_partition *part);
+
+/* ================================================================
+ * What a read costs, so #432's cost can be measured and not assumed
+ * ================================================================ */
+
+/*
+ * 🔴 IN CYCLES, AND DELIBERATELY NOT IN BYTES PER SECOND.  This server does
+ * not know the timestamp counter's frequency, and a throughput printed from a
+ * frequency nobody measured is a number with a unit it has not earned.  What
+ * #432 asks for is the COST OF TRANSLATION, which is a ratio between two runs
+ * of the same boot -- and a ratio of cycle counts is dimensionless and needs
+ * no frequency at all.
+ *
+ * 🔑 AND VIRTIO IS THE CONTROL GROUP, IN THE SAME BOOT.  QEMU's transitional
+ * virtio-blk does its DMA outside the emulated IOMMU, and AHCI is an ordinary
+ * bus master that goes through it.  So one boot produces both a treated and an
+ * untreated measurement of the same kernel on the same machine at the same
+ * clock: if the AHCI figures move between `-I' and no `-I' and the virtio
+ * figure does not, the difference is translation.  If both move, it is the
+ * boot.  A benchmark with no control cannot tell those apart, and the second
+ * is what a governor, a thermal limit or a busy host produces.
+ *
+ * ⚠️ It reads through the DRIVER and not through ds_device_read, so the
+ * readahead cache is not in the path: every iteration is a real transfer.  The
+ * buffer allocation and release are in the timing too -- they are the same on
+ * both sides of the comparison, and taking them out would mean timing
+ * something no caller can actually ask for.
+ */
+#define	BLK_BENCH_CHUNK		128u	/* sectors per read: 64 KiB   */
+#define	BLK_BENCH_ROUNDS	32u	/* 2 MiB per partition        */
+
+static unsigned long long
+blk_tsc(void)
+{
+	unsigned int lo, hi;
+
+	/*
+	 * 🔴 THE WHOLE COUNTER.  rdtsc answers in EDX:EAX and reading EAX
+	 * alone is a difference modulo 2^32 -- at 3.9 GHz that wraps every 1.1
+	 * seconds, and a wrapped value is indistinguishable from a small one.
+	 * #523 was one benchmark reading half of this and reporting i386 as
+	 * 110x slower than x86-64 at creating a thread.
+	 */
+	__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+void
+blk_read_bench(void)
+{
+	int	i;
+
+	if (n_partitions <= 0)
+		return;
+
+	for (i = 0; i < n_partitions; i++)
+		blk_read_bench_one(&partitions[i]);
+}
+
+static void
+blk_read_bench_one(struct blk_partition *part)
+{
+	struct blk_controller	*ctrl = part->ctrl;
+	unsigned long long	start, total;
+	unsigned int		round, done = 0;
+
+	if (ctrl == NULL || ctrl->ops == NULL
+	    || ctrl->ops->read_sectors == NULL)
+		return;
+
+	/*
+	 * ⚠️ Refused rather than truncated when the partition is too small.  A
+	 * benchmark that quietly read fewer sectors would still print a
+	 * per-sector figure, and two runs of different sizes would be compared
+	 * as if they were the same measurement.
+	 */
+	if (part->num_sectors < (uint32_t)(BLK_BENCH_CHUNK
+					    * BLK_BENCH_ROUNDS)) {
+		printf("blk: read bench did not run on %s — %u sectors is "
+		       "smaller than the %u this reads\n", part->name,
+		       (unsigned)part->num_sectors,
+		       BLK_BENCH_CHUNK * BLK_BENCH_ROUNDS);
+		return;
+	}
+
+	start = blk_tsc();
+
+	for (round = 0; round < BLK_BENCH_ROUNDS; round++) {
+		vm_offset_t	buf = 0;
+		unsigned int	got = 0;
+
+		if (ctrl->ops->read_sectors(ctrl->priv, part->disk_index,
+					    part->start_lba
+					    + round * BLK_BENCH_CHUNK,
+					    BLK_BENCH_CHUNK, &buf, &got) < 0) {
+			if (buf != 0)
+				vm_deallocate(mach_task_self(), buf, got);
+			break;
+		}
+
+		done += BLK_BENCH_CHUNK;
+		vm_deallocate(mach_task_self(), buf, got);
+	}
+
+	total = blk_tsc() - start;
+
+	/*
+	 * ⚠️ The count of sectors ACTUALLY read is printed beside the figure,
+	 * not assumed from the loop bound.  A run that stopped early otherwise
+	 * reports a per-sector cost computed over sectors it never read --
+	 * which is the shape of a fast-looking result that means the opposite.
+	 */
+	if (done == 0) {
+		printf("blk: read bench on %s read nothing\n", part->name);
+		return;
+	}
+
+	printf("blk: read bench %s — %u sectors in %llu cycles, "
+	       "%llu cycles/sector\n",
+	       part->name, done, total, total / done);
+}
 
 /*
  * 🔑 EVERY PARTITION, not the first one.

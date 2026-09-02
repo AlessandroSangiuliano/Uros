@@ -589,6 +589,16 @@ main(int argc, char **argv)
 	 */
 	blk_readback_selftest();
 
+	/*
+	 * And what a read COSTS, which is the half #432 still needs: its
+	 * done-when asks for the performance cost of translation to be
+	 * measured rather than assumed, and until this there was nothing in
+	 * the boot that timed a transfer at all.  The benchmarks this system
+	 * prints are traps and RPCs -- all CPU-bound, none of them touching
+	 * the DMA path an IOMMU is in.
+	 */
+	blk_read_bench();
+
 	printf("blk: init complete, %d partition(s), "
 	       "entering message loop\n", n_partitions);
 
