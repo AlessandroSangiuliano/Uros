@@ -1041,10 +1041,37 @@ rd32(const unsigned char *p, unsigned int off)
 	     | ((uint32_t)p[off + 3] << 24);
 }
 
+static void blk_readback_one(struct blk_partition *part);
+
+/*
+ * 🔑 EVERY PARTITION, not the first one.
+ *
+ * It checked partitions[0] until this target grew a second controller, and
+ * then the check ran on the virtio disk and said nothing at all about the
+ * AHCI one -- which is the disk that had a defect.  A test that covers the
+ * working half is how a defect stays in a tree that reports itself green.
+ *
+ * Each partition is a different driver's answer about a different disk, so
+ * each gets its own five checks and its own verdict line.
+ */
 void
 blk_readback_selftest(void)
 {
-	struct blk_partition	*part;
+	int	i;
+
+	if (n_partitions <= 0) {
+		printf("blk: read-back self-test did not run — no partition "
+		       "was published, so there is nothing to read\n");
+		return;
+	}
+
+	for (i = 0; i < n_partitions; i++)
+		blk_readback_one(&partitions[i]);
+}
+
+static void
+blk_readback_one(struct blk_partition *part)
+{
 	struct blk_controller	*ctrl;
 	vm_offset_t		mbr = 0, fs = 0;
 	unsigned int		mbr_size = 0, fs_size = 0;
@@ -1054,13 +1081,6 @@ blk_readback_selftest(void)
 	unsigned int		i, sb;
 	char			label[17];
 
-	if (n_partitions <= 0) {
-		printf("blk: read-back self-test did not run — no partition "
-		       "was published, so there is nothing to read\n");
-		return;
-	}
-
-	part = &partitions[0];
 	ctrl = part->ctrl;
 
 	if (ctrl == NULL || ctrl->ops == NULL
