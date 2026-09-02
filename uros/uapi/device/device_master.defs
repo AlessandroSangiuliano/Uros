@@ -159,12 +159,50 @@ routine device_intr_enable(
  * and n_pages.  They are numbers, not addresses.
  */
 
+
+/*
+ * ── Which device a DMA buffer is FOR (#432) ──────────────────────────
+ *
+ * 🔴 THE KERNEL DID NOT KNOW.  device_dma_alloc took a size and returned a
+ * physical address, and #457 closed leaving that written down as this issue's
+ * work: "a userspace driver server does DMA to a buffer it does not know the
+ * physical address of -- today it knows by construction".  It cannot stop
+ * knowing until the kernel can tell which device is going to read it, because
+ * that is what decides which IOMMU domain the buffer belongs in.
+ *
+ * So the three calls that hand out addresses a device will use now say whose
+ * device it is.  One argument and not three, because a bus/device/function
+ * triple has a canonical packing and a spare value:
+ *
+ *	bdf = (bus << 8) | (dev << 3) | func
+ *
+ * 🔑 DEVICE_DMA_NO_BDF is not zero.  Zero is a REAL address -- 0:0.0 is the
+ * host bridge on every machine this runs on -- so a caller that forgot the
+ * argument would have silently claimed to be it.  It is a value the packing
+ * cannot produce.
+ *
+ * ⚠️ And there is a caller that legitimately has no device: ext_server
+ * allocates scatter-gather pages that the BLOCK SERVER's disk will read,
+ * not any device of its own.  It passes DEVICE_DMA_NO_BDF, which today means
+ * what it has always meant -- an untranslated physical address.  That is the
+ * hole this issue exists to close and it is not closed by this change; the
+ * right shape is for the server that owns the device to do the mapping, and
+ * that is a protocol change with #498 in it.  Named here so it is not
+ * discovered later as a surprise.
+ *
+ * ⚠️ The constant itself lives in <device/device_types.h> and not here: MIG
+ * does not carry a #define from a .defs into the header it generates, so a
+ * definition here would be visible to nobody and the first caller to use it
+ * would fail to compile with a name that looks misspelt.
+ */
+
 /*
  * Allocate a physically contiguous DMA buffer.
  * Returns the kernel virtual address and the physical address.
  */
 routine device_dma_alloc(
 		master_port	: mach_port_t;
+	in	bdf		: natural_t;
 	in	size		: vm_size_t;
 	out	vaddr		: vm_address_t;
 	out	paddr		: vm_address_t
@@ -175,6 +213,7 @@ routine device_dma_alloc(
  */
 routine device_dma_free(
 		master_port	: mach_port_t;
+	in	bdf		: natural_t;
 	in	vaddr		: vm_address_t;
 	in	size		: vm_size_t
 	);
@@ -257,6 +296,7 @@ type dma_sg_addr_t = ^array[] of vm_address_t;
 
 routine device_dma_alloc_sg(
 		master_port	: mach_port_t;
+	in	bdf		: natural_t;
 	in	n_pages		: natural_t;
 	in	task_port	: mach_port_t;
 	out	kva		: vm_address_t;

@@ -1547,8 +1547,15 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 				if (n_pages > 4096)
 					n_pages = 4096;
 
+				/*
+				 * ⚠️ DEVICE_DMA_NO_BDF: these pages are read
+				 * by the BLOCK SERVER's disk and not by any
+				 * device this server owns, so there is no
+				 * bus/device/function it could name (#432).
+				 */
 				kr = device_dma_alloc_sg(
-					device_port, n_pages,
+					device_port, DEVICE_DMA_NO_BDF,
+					n_pages,
 					mach_task_self(),
 					&kva, &uva,
 					&pa_list, &pa_cnt);

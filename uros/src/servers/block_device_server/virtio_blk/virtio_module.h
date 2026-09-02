@@ -79,4 +79,14 @@ struct virtio_state {
 	uint16_t	last_used_idx;
 };
 
+
+/*
+ * The bus/device/function this controller sits at, packed the way
+ * device_master.defs wants it: (bus << 8) | (dev << 3) | func.  A DMA
+ * buffer says which device is going to read it (#432).
+ */
+#define	VIRTIO_BDF(st)	(((st)->pci_bus << 8) \
+			 | ((st)->pci_slot << 3) \
+			 | (st)->pci_func)
+
 #endif /* _VIRTIO_MODULE_H_ */

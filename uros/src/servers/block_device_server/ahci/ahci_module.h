@@ -229,4 +229,14 @@ int  ahci_submit_phys(struct ahci_state *st, int port_idx,
 		      int write, vm_address_t *caller_pa,
 		      unsigned int n_pa, unsigned int total_bytes);
 
+
+/*
+ * The bus/device/function this controller sits at, packed the way
+ * device_master.defs wants it: (bus << 8) | (dev << 3) | func.  A DMA
+ * buffer says which device is going to read it (#432).
+ */
+#define	AHCI_BDF(st)	(((st)->pci_bus << 8) \
+			 | ((st)->pci_slot << 3) \
+			 | (st)->pci_func)
+
 #endif /* _AHCI_MODULE_H_ */

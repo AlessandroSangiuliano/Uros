@@ -586,9 +586,33 @@ ds_master_device_intr_enable(
 
 /* ---- DMA buffer allocation ---- */
 
+
+/*
+ * ── What a DMA buffer's `bdf' says (#432) ────────────────────────────
+ *
+ * Which device is going to read the buffer.  That is the fact the kernel
+ * needs before it can put the pages in that device's IOMMU domain and hand
+ * back an address that means nothing outside it -- and until #457 closed,
+ * nothing anywhere carried it: device_dma_alloc took a size and gave back a
+ * physical address, so the isolation the driver model claims was enforced by
+ * the driver being well behaved.
+ *
+ * 🔴 IT IS CARRIED AND NOT YET ACTED ON.  These calls still return the
+ * physical address, exactly as before, so a machine that booted before this
+ * boots after it unchanged.  That is deliberate: the plumbing lands on its
+ * own, and the step that builds a domain per device is the one that can stop
+ * a machine.  There is no recorder here doing nothing to look busy -- the
+ * argument is simply not used yet, and each function says so.
+ *
+ * ⚠️ DEVICE_DMA_NO_BDF is a caller with no device of its own, and it is
+ * accepted rather than refused: ext_server allocates pages that the BLOCK
+ * SERVER's disk will read.  The right answer is for the server that owns the
+ * device to do the mapping, which is a protocol change this does not attempt.
+ */
 kern_return_t
 ds_master_device_dma_alloc(
 	ipc_port_t		master_port,
+	natural_t		bdf,
 	vm_size_t		size,
 	vm_address_t		*vaddr_out,
 	vm_address_t		*paddr_out)
@@ -596,6 +620,8 @@ ds_master_device_dma_alloc(
 	kern_return_t kr;
 	vm_offset_t kva;
 	vm_offset_t pa;
+
+	(void) bdf;		/* carried, not yet acted on -- see above */
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -632,10 +658,13 @@ ds_master_device_dma_alloc(
 kern_return_t
 ds_master_device_dma_free(
 	ipc_port_t		master_port,
+	natural_t		bdf,
 	vm_address_t		vaddr,
 	vm_size_t		size)
 {
 	kern_return_t kr;
+
+	(void) bdf;		/* carried, not yet acted on -- see above */
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -676,6 +705,7 @@ ds_master_device_dma_free(
 kern_return_t
 ds_master_device_dma_alloc_sg(
 	ipc_port_t		master_port,
+	natural_t		bdf,
 	unsigned int		n_pages,
 	ipc_port_t		task_port,
 	vm_address_t		*kva_out,
@@ -693,6 +723,8 @@ ds_master_device_dma_alloc_sg(
 	vm_offset_t	list;
 	vm_size_t	list_bytes, list_size;
 	vm_map_copy_t	list_copy;
+
+	(void) bdf;		/* carried, not yet acted on -- see above */
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)

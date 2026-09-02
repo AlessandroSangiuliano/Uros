@@ -222,7 +222,8 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	kern_return_t kr;
 	vm_address_t dma_kva, dma_uva, dma_pa;
 
-	kr = device_dma_alloc(st->master_device, 4096, &dma_kva, &dma_pa);
+	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), 4096,
+			      &dma_kva, &dma_pa);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: port %d CLB/FB alloc failed\n", hba_port);
 		return -1;
@@ -395,9 +396,9 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 
 	/* Release old user mapping before freeing kernel DMA buffer */
 	vm_deallocate(mach_task_self(), st->ct_uva, 4096);
-	device_dma_free(st->master_device, st->ct_kva, 4096);
+	device_dma_free(st->master_device, AHCI_BDF(st), st->ct_kva, 4096);
 
-	kr = device_dma_alloc(st->master_device, ct_size,
+	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), ct_size,
 			      &st->ct_kva, &st->ct_pa);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: CT realloc (%u bytes) failed\n", ct_size);
@@ -412,7 +413,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 
 	/* Release old user mapping before freeing kernel DMA buffer */
 	vm_deallocate(mach_task_self(), st->data_uva, 4096);
-	device_dma_free(st->master_device, st->data_kva, 4096);
+	device_dma_free(st->master_device, AHCI_BDF(st), st->data_kva, 4096);
 
 	n_pages = st->batch_slots * PRDT_PER_SLOT;
 	if (n_pages > AHCI_MAX_SG_PAGES)
@@ -429,7 +430,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 		vm_address_t *pa_list = NULL;
 
 		pa_count = 0;
-		kr = device_dma_alloc_sg(st->master_device, n_pages,
+		kr = device_dma_alloc_sg(st->master_device, AHCI_BDF(st), n_pages,
 					 mach_task_self(),
 					 &st->data_kva, &st->data_uva,
 					 &pa_list, &pa_count);
@@ -577,14 +578,16 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	printf("ahci: ABAR mapped at uva=%p\n", (void *)st->abar);
 
 	/* Initial CT buffer (1 page) */
-	kr = device_dma_alloc(master_dev, 4096, &st->ct_kva, &st->ct_pa);
+	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
+			      &st->ct_kva, &st->ct_pa);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_dev, st->ct_kva, 4096,
 				 mach_task_self(), &st->ct_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT map failed\n"); return -1; }
 
 	/* Initial data buffer (1 page) */
-	kr = device_dma_alloc(master_dev, 4096, &st->data_kva, &st->data_pa);
+	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
+			      &st->data_kva, &st->data_pa);
 	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_dev, st->data_kva, 4096,
 				 mach_task_self(), &st->data_uva);

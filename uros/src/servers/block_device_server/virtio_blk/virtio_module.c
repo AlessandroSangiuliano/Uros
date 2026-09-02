@@ -218,7 +218,8 @@ virtqueue_setup(struct virtio_state *st)
 	st->vq_alloc_size = VRING_TOTAL_SIZE(st->vq_size);
 	st->vq_alloc_size = (st->vq_alloc_size + 4095u) & ~4095u;
 
-	kr = device_dma_alloc(st->master_device, st->vq_alloc_size,
+	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st),
+			      st->vq_alloc_size,
 			      &st->vq_kva, &st->vq_pa);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: vq alloc failed (%lu bytes)\n",
@@ -248,7 +249,7 @@ virtqueue_setup(struct virtio_state *st)
 	vio_write32(st, VIRTIO_PCI_QUEUE_PFN, st->vq_pa / VRING_ALIGN);
 
 	/* Request header + status DMA buffer (1 page) */
-	kr = device_dma_alloc(st->master_device, 4096,
+	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st), 4096,
 			      &st->req_kva, &st->req_pa);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: req alloc failed\n");
@@ -262,7 +263,8 @@ virtqueue_setup(struct virtio_state *st)
 	}
 
 	/* Data DMA buffer */
-	kr = device_dma_alloc(st->master_device, DATA_BUF_SIZE,
+	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st),
+			      DATA_BUF_SIZE,
 			      &st->data_kva, &st->data_pa);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: data alloc failed\n");
