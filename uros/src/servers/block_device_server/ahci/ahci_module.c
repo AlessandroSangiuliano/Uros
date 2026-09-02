@@ -235,9 +235,9 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 		return -1;
 	}
 
-	pi->clb_pa  = dma_pa;
+	pi->clb_dma  = dma_pa;
 	pi->clb_uva = dma_uva;
-	pi->fb_pa   = dma_pa  + 1024;
+	pi->fb_dma   = dma_pa  + 1024;
 	pi->fb_uva  = dma_uva + 1024;
 	pi->dma_kva = dma_kva;
 
@@ -257,10 +257,10 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	 * and then the upper, and the port must be stopped for either -- which
 	 * ahci_port_stop() above has just done.
 	 */
-	port_write(st, hba_port, PORT_CLB,  ahci_pa_lo(pi->clb_pa));
-	port_write(st, hba_port, PORT_CLBU, ahci_pa_hi(pi->clb_pa));
-	port_write(st, hba_port, PORT_FB,   ahci_pa_lo(pi->fb_pa));
-	port_write(st, hba_port, PORT_FBU,  ahci_pa_hi(pi->fb_pa));
+	port_write(st, hba_port, PORT_CLB,  ahci_pa_lo(pi->clb_dma));
+	port_write(st, hba_port, PORT_CLBU, ahci_pa_hi(pi->clb_dma));
+	port_write(st, hba_port, PORT_FB,   ahci_pa_lo(pi->fb_dma));
+	port_write(st, hba_port, PORT_FBU,  ahci_pa_hi(pi->fb_dma));
 
 	port_write(st, hba_port, PORT_SERR, ~0u);
 	port_write(st, hba_port, PORT_IS,   ~0u);
@@ -298,7 +298,7 @@ ahci_identify(struct ahci_state *st, int port_idx)
 	fis.command  = ATA_CMD_IDENTIFY;
 	fis.device   = 0;
 
-	if (ahci_submit_cmd(st, port_idx, &fis, st->data_pa, 512, 0) < 0) {
+	if (ahci_submit_cmd(st, port_idx, &fis, st->data_dma, 512, 0) < 0) {
 		printf("ahci: IDENTIFY failed on port %d\n", pi->hba_port);
 		return -1;
 	}
@@ -399,7 +399,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	device_dma_free(st->master_device, AHCI_BDF(st), st->ct_kva, 4096);
 
 	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), ct_size,
-			      &st->ct_kva, &st->ct_pa);
+			      &st->ct_kva, &st->ct_dma);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: CT realloc (%u bytes) failed\n", ct_size);
 		return -1;
@@ -444,7 +444,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 			pa_count = AHCI_MAX_SG_PAGES;
 
 		for (unsigned p = 0; p < pa_count; p++)
-			st->data_pa_list[p] = pa_list[p];
+			st->data_dma_list[p] = pa_list[p];
 
 		/*
 		 * ⚠️ Released whatever happens next.  Out-of-line memory a
@@ -458,7 +458,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	}
 
 	st->data_n_pages = n_pages;
-	st->data_pa = st->data_pa_list[0];
+	st->data_dma = st->data_dma_list[0];
 
 	st->batch_data_size = st->batch_slots * SLOT_DATA_SIZE;
 	st->ra_sectors = st->batch_slots * SECTORS_PER_SLOT;
@@ -713,7 +713,7 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	/* Initial CT buffer (1 page) */
 	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
-			      &st->ct_kva, &st->ct_pa);
+			      &st->ct_kva, &st->ct_dma);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_dev, st->ct_kva, 4096,
 				 mach_task_self(), &st->ct_uva);
@@ -721,18 +721,18 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	/* Initial data buffer (1 page) */
 	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
-			      &st->data_kva, &st->data_pa);
+			      &st->data_kva, &st->data_dma);
 	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_dev, st->data_kva, 4096,
 				 mach_task_self(), &st->data_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: data map failed\n"); return -1; }
 
-	st->data_pa_list[0] = st->data_pa;
+	st->data_dma_list[0] = st->data_dma;
 	st->data_n_pages = 1;
 
-	printf("ahci: DMA: ct pa=0x%08lX data pa=0x%08lX\n",
-	       (unsigned long) st->ct_pa,
-	       (unsigned long) st->data_pa);
+	printf("ahci: DMA: ct at 0x%08lX, data at 0x%08lX — the addresses\n\t       the CONTROLLER is programmed with, not where the memory is\n",
+	       (unsigned long) st->ct_dma,
+	       (unsigned long) st->data_dma);
 
 	/* HBA reset + AHCI enable */
 	if (ahci_hba_reset(st) < 0)

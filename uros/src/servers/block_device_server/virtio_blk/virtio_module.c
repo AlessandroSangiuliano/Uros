@@ -218,9 +218,40 @@ virtqueue_setup(struct virtio_state *st)
 	st->vq_alloc_size = VRING_TOTAL_SIZE(st->vq_size);
 	st->vq_alloc_size = (st->vq_alloc_size + 4095u) & ~4095u;
 
+	/*
+	 * 🔴 THIS DEVICE MUST BE PROGRAMMED WITH PHYSICAL ADDRESSES, and it is
+	 * the SPECIFICATION that says so, not a limitation of this driver.
+	 *
+	 * The legacy virtio interface has no VIRTIO_F_ACCESS_PLATFORM to
+	 * negotiate, so there is no exchange in which a device could be told
+	 * that an address means something other than a physical one.  QEMU
+	 * says the same thing from its side: it refuses `iommu_platform=on' on
+	 * anything but a modern-only device, and its transitional virtio-blk
+	 * does its DMA outside the emulated IOMMU entirely.
+	 *
+	 * ⚠️ WITHOUT THIS LINE THE SYMPTOM IS `virtio: request timeout' AND
+	 * NOTHING ELSE.  #432 stage 3e made device_dma_alloc answer an IOVA;
+	 * this device writes that number onto the bus as a physical address,
+	 * the transfer lands on memory nobody mapped, and the queue never
+	 * completes.  There is no fault, because the device did exactly what
+	 * it was told.
+	 *
+	 * 🔑 It is NOT an opt-out of isolation: the queue and the buffers are
+	 * still granted, so this controller reaches them and nothing else.
+	 * What it gives up is not knowing where they are.  Closing that gap
+	 * means virtio 1.0, which is a rewrite of this file and not a line of
+	 * it.
+	 */
+	kr = device_dma_identity(st->master_device, VIRTIO_BDF(st));
+	if (kr != KERN_SUCCESS) {
+		printf("virtio: could not ask for physical addresses (kr=%d) "
+		       "— a legacy device cannot use any other kind\n", kr);
+		return -1;
+	}
+
 	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st),
 			      st->vq_alloc_size,
-			      &st->vq_kva, &st->vq_pa);
+			      &st->vq_kva, &st->vq_dma);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: vq alloc failed (%lu bytes)\n",
 		       (unsigned long) st->vq_alloc_size);
@@ -242,15 +273,15 @@ virtqueue_setup(struct virtio_state *st)
 	used_off = VRING_USED_OFFSET(st->vq_size);
 	st->vq_used  = (struct vring_used *)(st->vq_uva + used_off);
 
-	printf("virtio: vq pa=0x%08lX  desc=+0  avail=+0x%X  used=+0x%X\n",
-	       (unsigned long) st->vq_pa,
+	printf("virtio: vq at 0x%08lX  desc=+0  avail=+0x%X  used=+0x%X\n",
+	       (unsigned long) st->vq_dma,
 	       VRING_AVAIL_OFFSET(st->vq_size), used_off);
 
-	vio_write32(st, VIRTIO_PCI_QUEUE_PFN, st->vq_pa / VRING_ALIGN);
+	vio_write32(st, VIRTIO_PCI_QUEUE_PFN, st->vq_dma / VRING_ALIGN);
 
 	/* Request header + status DMA buffer (1 page) */
 	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st), 4096,
-			      &st->req_kva, &st->req_pa);
+			      &st->req_kva, &st->req_dma);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: req alloc failed\n");
 		return -1;
@@ -265,7 +296,7 @@ virtqueue_setup(struct virtio_state *st)
 	/* Data DMA buffer */
 	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st),
 			      DATA_BUF_SIZE,
-			      &st->data_kva, &st->data_pa);
+			      &st->data_kva, &st->data_dma);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: data alloc failed\n");
 		return -1;
@@ -304,13 +335,13 @@ virtio_blk_request(struct virtio_state *st, uint32_t type,
 	*status_ptr = 0xFF;
 
 	/* Descriptor 0: header */
-	st->vq_desc[0].addr  = (uint64_t)st->req_pa;
+	st->vq_desc[0].addr  = (uint64_t)st->req_dma;
 	st->vq_desc[0].len   = sizeof(struct virtio_blk_req_hdr);
 	st->vq_desc[0].flags = VRING_DESC_F_NEXT;
 	st->vq_desc[0].next  = 1;
 
 	/* Descriptor 1: data */
-	st->vq_desc[1].addr  = (uint64_t)(st->data_pa + data_offset);
+	st->vq_desc[1].addr  = (uint64_t)(st->data_dma + data_offset);
 	st->vq_desc[1].len   = data_len;
 	st->vq_desc[1].flags = VRING_DESC_F_NEXT;
 	if (type == VIRTIO_BLK_T_IN)
@@ -318,7 +349,7 @@ virtio_blk_request(struct virtio_state *st, uint32_t type,
 	st->vq_desc[1].next  = 2;
 
 	/* Descriptor 2: status */
-	st->vq_desc[2].addr  = (uint64_t)(st->req_pa + sizeof(*hdr));
+	st->vq_desc[2].addr  = (uint64_t)(st->req_dma + sizeof(*hdr));
 	st->vq_desc[2].len   = 1;
 	st->vq_desc[2].flags = VRING_DESC_F_WRITE;
 	st->vq_desc[2].next  = 0;

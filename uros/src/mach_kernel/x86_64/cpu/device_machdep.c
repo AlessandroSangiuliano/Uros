@@ -540,8 +540,9 @@ device_md_dma_isolates(void)
 
 int
 device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
-		    int read, int write)
+		    int read, int write, unsigned long *dma_addr)
 {
+	uint64_t iova = 0;
 	unsigned before;
 	int ok;
 
@@ -566,14 +567,56 @@ device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
 	 */
 	before = iommu_domain_count();
 	ok = iommu_grant((uint16_t)bdf, (uint64_t)pa, (uint64_t)size,
-			 read, write);
+			 read, write, &iova);
 
 	if (ok && iommu_domain_count() != before)
 		printf("iommu: %02x:%02x.%u is now in a domain of its own, "
-		       "reaching 0x%lx..0x%lx and nothing else\n",
+		       "and sees its first buffer at 0x%lx — an address that "
+		       "is not where the memory is\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-		       (unsigned)(bdf & 7), (unsigned long)pa,
-		       (unsigned long)(pa + size - 1));
+		       (unsigned)(bdf & 7), (unsigned long)iova);
+
+	if (ok && dma_addr != 0)
+		*dma_addr = (unsigned long)iova;
+
+	return ok;
+}
+
+int
+device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
+			  unsigned int n, int read, int write,
+			  unsigned long *dma_addr)
+{
+	uint64_t iova = 0;
+	unsigned before;
+	int ok;
+
+	if (bdf > 0xFFFFu)
+		return 0;
+
+	/*
+	 * 🔑 The list arrives as unsigned long and the engine wants uint64_t,
+	 * and on this machine those are the same width -- which is exactly why
+	 * the cast is written rather than the array passed straight through.
+	 * The day a target has them differ, this is the line that will not
+	 * compile instead of the one that silently reads half of each entry.
+	 */
+	_Static_assert(sizeof(unsigned long) == sizeof(uint64_t),
+		       "the page list is handed to the iommu unconverted");
+
+	before = iommu_domain_count();
+	ok = iommu_grant_pages((uint16_t)bdf, (const uint64_t *)pa, n,
+			       read, write, &iova);
+
+	if (ok && iommu_domain_count() != before)
+		printf("iommu: %02x:%02x.%u is now in a domain of its own, "
+		       "and sees its first buffer at 0x%lx — an address that "
+		       "is not where the memory is\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)iova);
+
+	if (ok && dma_addr != 0)
+		*dma_addr = (unsigned long)iova;
 
 	return ok;
 }
@@ -620,4 +663,13 @@ device_md_dma_confined(unsigned int bdf)
 		return 0;
 
 	return iommu_domain_of((uint16_t)bdf) != 0;
+}
+
+int
+device_md_dma_identity(unsigned int bdf)
+{
+	if (bdf > 0xFFFFu)
+		return 0;
+
+	return iommu_domain_identity((uint16_t)bdf);
 }

@@ -183,12 +183,13 @@ routine device_intr_enable(
  *
  * ⚠️ And there is a caller that legitimately has no device: ext_server
  * allocates scatter-gather pages that the BLOCK SERVER's disk will read,
- * not any device of its own.  It passes DEVICE_DMA_NO_BDF, which today means
- * what it has always meant -- an untranslated physical address.  That is the
- * hole this issue exists to close and it is not closed by this change; the
- * right shape is for the server that owns the device to do the mapping, and
- * that is a protocol change with #498 in it.  Named here so it is not
- * discovered later as a surprise.
+ * not any device of its own.  It passes DEVICE_DMA_NO_BDF and receives an
+ * untranslated physical address -- which the block server then programs into a
+ * disk that IS confined, so the transfer is refused and the fault names the
+ * page.  🔑 That is the hole working as designed rather than the hole being
+ * closed: before this it was made silently and succeeded.  The right shape is
+ * for the server that owns the device to do the mapping, which is a protocol
+ * change with #498 in it.
  *
  * ⚠️ The constant itself lives in <device/device_types.h> and not here: MIG
  * does not carry a #define from a .defs into the header it generates, so a
@@ -197,15 +198,70 @@ routine device_intr_enable(
  */
 
 /*
- * Allocate a physically contiguous DMA buffer.
- * Returns the kernel virtual address and the physical address.
+ * ── A device that cannot be given an address it must translate ───────
+ *
+ * Declare that this device must be programmed with PHYSICAL addresses, so its
+ * domain maps every grant at the address the memory is really at.
+ *
+ * 🔴 THIS IS NOT AN OPT-OUT OF ISOLATION.  The device is still confined: it
+ * reaches what it has been granted and nothing else, and every other address
+ * in the machine faults for it.  What it gives up is the second property #432
+ * stage 3e added -- not knowing where its memory is.  Confinement stops a
+ * device reaching elsewhere by accident; the IOVA stops it doing so on
+ * purpose, and this keeps the first and loses the second.
+ *
+ * 🔑 AND IT IS A REAL CONSTRAINT AND NOT A CONVENIENCE.  A LEGACY virtio
+ * device is specified to take physical addresses: without
+ * VIRTIO_F_ACCESS_PLATFORM there is no negotiation in which it could be told
+ * otherwise, and this tree's virtio driver is the legacy interface -- I/O port
+ * BAR0, configuration at 0x14.  Handed an IOVA it programs it as a physical
+ * address and the transfer lands nowhere, which is a request timeout and no
+ * other symptom.  The fix is virtio 1.0, and that is a driver rewrite.
+ *
+ * ⚠️ A driver could ask for this to learn its own physical addresses, and
+ * nothing here stops it.  That is why the kernel says so ON THE CONSOLE, once
+ * per device: a weakening that is announced is a weakening somebody can
+ * notice, and this interface has exactly one legitimate caller today.
+ *
+ * ⚠️ Must be called BEFORE the device's first device_dma_alloc.  The domain is
+ * created by the first grant, and a domain that already holds translated
+ * buffers cannot become an identity one without moving them.  Answers
+ * KERN_FAILURE if the device already has a domain.
+ */
+routine device_dma_identity(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t
+	);
+
+/*
+ * Allocate a physically contiguous DMA buffer.  Answers the kernel virtual
+ * address and THE ADDRESS THE DEVICE MUST BE PROGRAMMED WITH.
+ *
+ * 🔴🔴 `dma_addr' AND NOT `paddr', AND THE RENAME IS THE CHANGE (#432 stage
+ * 3e).  On a machine that confines this device it is an IOVA: a number that
+ * means something only inside that device's IOMMU domain.  Another device
+ * given it reaches nothing; the processor cannot use it at all; and the driver
+ * no longer knows where in physical memory its buffer is.  That was #457's
+ * closing clause and it is now true.
+ *
+ * 🔑 On a machine with no remapping hardware, or booted without it, the same
+ * field carries the physical address exactly as it always did.  One interface
+ * answers both, and no driver has to know which kind of machine it is on --
+ * which is why this is a change of MEANING and not of protocol.  The parameter
+ * has always been "the address to program"; it just used to have only one
+ * possible value.
+ *
+ * ⚠️ It is therefore NOT an address to hand to anything else.  device_dma_free
+ * and device_dma_map_user take the KERNEL address, and a caller that passed
+ * this one to a second server would be passing a number that is private to one
+ * device's domain.
  */
 routine device_dma_alloc(
 		master_port	: mach_port_t;
 	in	bdf		: natural_t;
 	in	size		: vm_size_t;
 	out	vaddr		: vm_address_t;
-	out	paddr		: vm_address_t
+	out	dma_addr	: vm_address_t
 	);
 
 /*
@@ -294,6 +350,20 @@ routine device_mmio_unmap(
  */
 type dma_sg_addr_t = ^array[] of vm_address_t;
 
+/*
+ * 🔴🔴 AND THE LIST IS ADDRESSES THE DEVICE USES, NOT PHYSICAL ONES (#432
+ * stage 3e).  On a machine that confines this device the pages are granted
+ * TOGETHER and get CONSECUTIVE addresses, so the list comes back as
+ * base, base+4096, base+8192, ...  -- a scatter-gather buffer that is
+ * scattered in physical memory and contiguous in the device's.
+ *
+ * 🔑 Which means a driver could program it as one region.  Nothing here does
+ * yet: they build the multi-entry PRDT they always built, which is still
+ * correct and is what a machine with no remapping hardware needs -- there the
+ * list is physical addresses and genuinely scattered.  A driver that wants the
+ * shorter descriptor has to check that the list is consecutive rather than
+ * assume it, and that is a driver-side change this does not make for it.
+ */
 routine device_dma_alloc_sg(
 		master_port	: mach_port_t;
 	in	bdf		: natural_t;
@@ -301,7 +371,7 @@ routine device_dma_alloc_sg(
 	in	task_port	: mach_port_t;
 	out	kva		: vm_address_t;
 	out	uva		: vm_address_t;
-	out	paddrs		: dma_sg_addr_t
+	out	dma_addrs	: dma_sg_addr_t
 	);
 
 /*

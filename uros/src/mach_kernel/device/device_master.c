@@ -602,11 +602,23 @@ ds_master_device_intr_enable(
  * the first such page is what takes the device off pass-through -- after which
  * it reaches what it has been granted and nothing else in the machine.
  *
- * 🔑 THE ADDRESS RETURNED DOES NOT CHANGE.  A grant maps the buffer at its own
- * physical address, so every driver goes on programming what it always did --
- * what changed is that every OTHER address now faults for that device.  The
- * step that makes the returned number meaningless outside the domain is a
- * separate one, because it is a protocol change and this is not.
+ * 🔴🔴 AND THE ADDRESS RETURNED IS NO LONGER THE PHYSICAL ONE (#432 stage 3e).
+ * It is the address the DEVICE must be programmed with: an IOVA, meaningless
+ * outside that device's domain -- another device given it reaches nothing, and
+ * the processor cannot use it at all.  #457 closed with the clause "a
+ * userspace driver server does DMA to a buffer it does not know the physical
+ * address of", and until this it knew by construction.
+ *
+ * 🔑 That closes the isolation in the second direction.  Confining a device to
+ * what it was granted stops it reaching elsewhere BY ACCIDENT; not telling it
+ * where its memory is stops it doing so ON PURPOSE, because the number it
+ * holds means nothing to anything else.
+ *
+ * ⚠️ On a machine that polices nothing the same field carries the physical
+ * address, exactly as before.  One interface, two machines, and no driver has
+ * to know which it is on -- which is what makes this a change of MEANING and
+ * not of protocol: the parameter is "the address to program", and it always
+ * was, it just used to have only one possible value.
  *
  * ⚠️ A machine with no remapping hardware, or booted without -I, answers no to
  * device_md_dma_isolates() and nothing below happens.  That is i386 always,
@@ -628,11 +640,12 @@ ds_master_device_dma_alloc(
 	natural_t		bdf,
 	vm_size_t		size,
 	vm_address_t		*vaddr_out,
-	vm_address_t		*paddr_out)
+	vm_address_t		*dma_out)
 {
 	kern_return_t kr;
 	vm_offset_t kva;
 	vm_offset_t pa;
+	vm_address_t dma;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -662,21 +675,33 @@ ds_master_device_dma_alloc(
 	}
 
 	/*
+	 * The physical address is what a machine with nothing to police DMA
+	 * hands out, and it is the FALLBACK here rather than the answer.
+	 */
+	dma = (vm_address_t)pa;
+
+	/*
 	 * ⚠️ The grant is a hard failure and not a warning.  A buffer the
 	 * device cannot reach is not a slower buffer -- it is one every
 	 * transfer into it faults on, at an address the driver believes it
 	 * owns, and the driver's own error path has no way to tell that from
 	 * the disk being broken.  Failing the allocation says it once, here.
 	 */
-	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()
-	    && !device_md_dma_grant(bdf, (unsigned long)pa,
-				    (unsigned long)size, TRUE, TRUE)) {
-		kmem_free(kernel_map, kva, size);
-		return KERN_FAILURE;
+	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
+		unsigned long iova = 0;
+
+		if (!device_md_dma_grant(bdf, (unsigned long)pa,
+					 (unsigned long)size, TRUE, TRUE,
+					 &iova)) {
+			kmem_free(kernel_map, kva, size);
+			return KERN_FAILURE;
+		}
+
+		dma = (vm_address_t)iova;
 	}
 
 	*vaddr_out = kva;		/* #427: no narrowing cast */
-	*paddr_out = pa;
+	*dma_out = dma;
 	return KERN_SUCCESS;
 }
 
@@ -736,7 +761,7 @@ ds_master_device_dma_free(
 /*
  * ── The address list travels out of line (#520) ──────────────────────
  *
- * `paddrs' is a vm_map_copy_t handed to MIG, not a caller-supplied buffer, and
+ * `dma_addrs' is a vm_map_copy_t handed to MIG, not a caller-supplied buffer, and
  * every element is a full vm_address_t.  See the note on dma_sg_addr_t in
  * <device/device_master.defs> for why the shape changed with the width.
  *
@@ -753,8 +778,8 @@ ds_master_device_dma_alloc_sg(
 	ipc_port_t		task_port,
 	vm_address_t		*kva_out,
 	vm_address_t		*uva_out,
-	vm_address_t		**paddrs,
-	mach_msg_type_number_t	*paddrs_count)
+	vm_address_t		**dma_addrs,
+	mach_msg_type_number_t	*dma_addrs_count)
 {
 	kern_return_t	kr;
 	task_t		task;
@@ -872,24 +897,37 @@ ds_master_device_dma_alloc_sg(
 		 * one, so a page above four gigabytes is named rather than
 		 * silently folded into the low half of memory.
 		 */
-		/*
-		 * 🔴 EVERY PAGE, ONE AT A TIME, because that is what a
-		 * scatter-gather buffer IS.  These pages are contiguous in the
-		 * kernel's address space and in the task's, and not in
-		 * physical memory -- granting the range from the first address
-		 * would map whatever lies between them, which is the ordinary
-		 * case here and could be anything.
-		 *
-		 * ⚠️ The failure path is the one above, whole: the range is
-		 * removed and the pages freed.  A partially granted
-		 * scatter-gather list is the worst of both -- the driver gets
-		 * an address list it believes, and the transfer faults on
-		 * whichever entry was not reached.
-		 */
-		if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()
-		    && !device_md_dma_grant(bdf, (unsigned long)pa,
-					    (unsigned long)PAGE_SIZE,
-					    TRUE, TRUE)) {
+		((vm_address_t *)list)[i] = pa;
+	}
+
+	/*
+	 * 🔴 ONE GRANT OVER THE WHOLE LIST, AFTER IT IS COLLECTED, and not one
+	 * per page inside the loop above.  These pages are contiguous in the
+	 * kernel's address space and in the task's and NOT in physical memory,
+	 * so a range granted from the first address would map whatever lies
+	 * between them -- and n separate grants would give the driver n
+	 * unrelated addresses and fill the kernel's record of what this device
+	 * holds a thousand times over.  Granted together they get consecutive
+	 * addresses: the scattering stays a fact about the machine.
+	 *
+	 * ⚠️ Which is why the list is REWRITTEN afterwards.  Up to here it
+	 * holds physical addresses, because that is what pmap_extract answers
+	 * and what a machine with no remapping hardware hands out; on one that
+	 * confines this device, every entry becomes the address the DEVICE
+	 * must be programmed with, and the physical addresses leave with the
+	 * loop.
+	 *
+	 * ⚠️ The failure path is the one above, whole: the range is removed
+	 * and the pages freed.  A partially granted scatter-gather list is the
+	 * worst of both -- the driver gets an address list it believes, and
+	 * the transfer faults on whichever entry was not reached.
+	 */
+	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
+		unsigned long iova = 0;
+
+		if (!device_md_dma_grant_pages(bdf,
+					       (const unsigned long *)list,
+					       n_pages, TRUE, TRUE, &iova)) {
 			(void) vm_map_remove(map, uva, uva + size,
 					     VM_MAP_NO_FLAGS);
 			(void) vm_map_unwire(ipc_kernel_map, list,
@@ -900,7 +938,10 @@ ds_master_device_dma_alloc_sg(
 			return KERN_RESOURCE_SHORTAGE;
 		}
 
-		((vm_address_t *)list)[i] = pa;
+		for (i = 0; i < n_pages; i++)
+			((vm_address_t *)list)[i] =
+				(vm_address_t)(iova + (unsigned long)i
+					       * PAGE_SIZE);
 	}
 
 	task_deallocate(task);
@@ -929,8 +970,8 @@ ds_master_device_dma_alloc_sg(
 
 	*kva_out = kva;			/* #427: no narrowing cast */
 	*uva_out = uva;
-	*paddrs = (vm_address_t *) list_copy;
-	*paddrs_count = n_pages;
+	*dma_addrs = (vm_address_t *) list_copy;
+	*dma_addrs_count = n_pages;
 	return KERN_SUCCESS;
 }
 
@@ -1216,5 +1257,62 @@ ds_master_device_dma_faults(
 	*confined = (natural_t)device_md_dma_confined(bdf);
 	*count = (natural_t)n;
 	*address = (vm_address_t)last;
+	return KERN_SUCCESS;
+}
+
+/*
+ * ── A device that must be programmed with physical addresses (#432) ──
+ *
+ * 🔴 NOT AN OPT-OUT OF ISOLATION, and the distinction is the whole of why this
+ * exists rather than a flag that says "leave me alone".  The device is still
+ * confined: its domain contains what it has been granted and nothing else, and
+ * every other address in the machine faults for it.  What it gives up is stage
+ * 3e -- not knowing where its memory is.
+ *
+ * 🔑 AND IT IS A CONSTRAINT AND NOT A PREFERENCE.  A legacy virtio device is
+ * SPECIFIED to take physical addresses: there is no VIRTIO_F_ACCESS_PLATFORM
+ * to negotiate on the legacy interface, so there is no exchange in which it
+ * could be told an address means something else.  Handed an IOVA it programs
+ * it as a physical address, the transfer lands on unmapped memory, and the
+ * only symptom is a request that never completes.  This tree's virtio driver
+ * is that interface; the fix is virtio 1.0, and that is a driver rewrite.
+ *
+ * ⚠️ A driver could ask for this in order to learn its own physical addresses,
+ * and nothing here prevents it.  So the kernel SAYS SO, once, on the console:
+ * a weakening that is announced is one somebody can notice, and this interface
+ * has exactly one legitimate caller today.
+ */
+kern_return_t
+ds_master_device_dma_identity(
+	ipc_port_t		master_port,
+	natural_t		bdf)
+{
+	kern_return_t kr;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (bdf == DEVICE_DMA_NO_BDF)
+		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * ⚠️ Success on a machine that polices nothing, and it means what it
+	 * says: physical addresses are what such a machine hands out anyway,
+	 * so the caller has been given exactly what it asked for.  Failing
+	 * here would make every driver carry a branch for the ordinary case.
+	 */
+	if (!device_md_dma_isolates())
+		return KERN_SUCCESS;
+
+	if (!device_md_dma_identity(bdf))
+		return KERN_FAILURE;
+
+	printf("iommu: %02x:%02x.%u asked to be programmed with PHYSICAL "
+	       "addresses — it is still confined to what it is granted, and "
+	       "it knows where that is\n",
+	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+	       (unsigned)(bdf & 7));
+
 	return KERN_SUCCESS;
 }

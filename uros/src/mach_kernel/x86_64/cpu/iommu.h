@@ -471,6 +471,19 @@ struct iommu_domain {
 	uint16_t		id;	/* what an engine would call it     */
 	unsigned		frames;	/* what the table has cost so far   */
 	unsigned		pages;	/* 4 KiB pages mapped into it       */
+
+	/*
+	 * The next address this domain will hand out (#432 stage 3e).
+	 *
+	 * 🔴 A BUMP AND NO FREE LIST, deliberately.  An IOVA space is 2^39
+	 * bytes at the shallowest depth this kernel will build, and a driver
+	 * that allocated a buffer a second would take nine thousand years to
+	 * exhaust it -- so reusing an address buys nothing and costs the one
+	 * property worth having here: an address that is never handed out
+	 * twice cannot be a stale mapping mistaken for a live one.  Running
+	 * out is REPORTED rather than wrapped.
+	 */
+	uint64_t		next_iova;
 };
 
 /*
@@ -651,16 +664,37 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong);
 #define	IOMMU_MAX_DEVICE_DOMAINS	16
 
 /*
- * Make `size' bytes of physical memory at `pa' reachable by `bdf', at the same
- * address.  Answers non-zero when the whole range is mapped and the device is
- * in its own domain.
+ * Where a domain's addresses start.
  *
- * 🔑 IOVA == PA, AND THAT IS NOT THE SAME AS PASS-THROUGH.  The addresses a
- * driver already holds go on working, so this stage changes no protocol -- but
- * the domain contains ONLY what has been granted, so every other address in
- * the machine now faults for this device.  The step that makes the address
- * itself meaningless outside the domain is the one after, and it is a change
- * to what device_dma_alloc RETURNS rather than to what it protects.
+ * 🔴 FOUR GIBIBYTES, AND THE VALUE IS PART OF THE POINT.  An IOVA has to be a
+ * number the driver cannot mistake for the physical address of its buffer, and
+ * the cheapest way to make that visible in a log is to put the window
+ * somewhere no buffer of ours lives.  It also has to fit the shallowest page
+ * table this kernel will build -- three levels reach 39 bits, and this needs
+ * 33.
+ *
+ * ⚠️ NOT ZERO, and not near it.  A driver that programs a device with an
+ * uninitialised field programs it with zero, and an IOVA space that begins at
+ * zero would translate that instead of faulting on it.
+ */
+#define	IOMMU_IOVA_BASE		0x0000000100000000ULL
+
+/*
+ * Make `size' bytes of physical memory at `pa' reachable by `bdf', and answer
+ * the address the DEVICE must be programmed with.  Non-zero on success.
+ *
+ * 🔴 THE ADDRESS THAT COMES BACK IS NOT THE PHYSICAL ONE, and that is this
+ * stage's whole content (#432 stage 3e).  #457 closed with the clause "a
+ * userspace driver server does DMA to a buffer it does not know the physical
+ * address of", and until now it knew by construction.  The IOVA is meaningless
+ * outside this device's domain: another device programmed with it reaches
+ * nothing, and the processor cannot use it at all.
+ *
+ * 🔑 So the isolation stops depending on the driver being well behaved in a
+ * second way.  Confining a device to what it was granted stops it reaching
+ * elsewhere BY ACCIDENT; not telling it where its memory is stops it doing so
+ * ON PURPOSE, because it no longer holds a number that means anything to any
+ * other device.
  *
  * ⚠️ Answering zero can mean the device is now in a domain that is missing
  * part of what was asked for.  The caller must treat a failed grant as a
@@ -668,11 +702,49 @@ int iommu_fault_decode_check(unsigned *ran, unsigned *wrong);
  * a device, and the fault it takes would name an address the driver believes
  * it owns.
  */
-int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write);
+int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
+		uint64_t *iova_out);
 
 /*
- * Take a granted range back.  Answers non-zero when the range was there and
- * is now unreachable to the device.
+ * The same for pages that are not physically contiguous: `n' frames, each
+ * mapped at consecutive addresses starting from the one answered.
+ *
+ * 🔑 ONE CALL AND ONE CONTIGUOUS WINDOW, not n grants.  A scatter-gather
+ * buffer is scattered in PHYSICAL memory and there is no reason for it to be
+ * scattered in the device's -- so what the driver receives is one address and
+ * a length, and the scattering stays a fact about the machine rather than
+ * something every driver has to carry.  It is also what keeps the record of
+ * the grant one entry instead of a thousand.
+ */
+int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
+		      int read, int write, uint64_t *iova_out);
+
+/*
+ * This device must be programmed with physical addresses: map its grants at
+ * the address the memory is really at.  Answers non-zero when the domain was
+ * opened that way.
+ *
+ * 🔴 STILL CONFINED, and that is the whole distinction.  An identity domain
+ * contains only what was granted, so every other address in the machine faults
+ * for this device exactly as before -- what is lost is that the driver knows
+ * where its buffer is.  #432 stage 3d is kept and stage 3e is given up, for a
+ * device that cannot accept what 3e hands out.
+ *
+ * ⚠️ Before the first grant only.  A domain that already holds translated
+ * buffers cannot become an identity one without moving them, and moving them
+ * means a device reading through addresses that changed under it.
+ */
+int iommu_domain_identity(uint16_t bdf);
+
+/*
+ * Take a granted range back, naming it by the PHYSICAL address it was granted
+ * from.  Answers non-zero when the range was there and is now unreachable.
+ *
+ * 🔑 BY THE PHYSICAL ADDRESS AND NOT BY THE IOVA, because the caller is a free
+ * path and what a free path has is the memory: device_dma_free is handed a
+ * kernel address, extracts the frame under it, and knows nothing about what
+ * any device was told.  Asking it for the IOVA would mean every caller keeping
+ * a table the kernel already has.
  *
  * ⚠️ The domain STAYS, and the device stays in it.  A device whose last buffer
  * is freed is a device between transfers, not a device that should go back to

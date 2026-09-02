@@ -318,13 +318,28 @@ device_md_dma_isolates(void)
 
 int
 device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
-		    int read, int write)
+		    int read, int write, unsigned long *dma_addr)
 {
 	(void)bdf;
 	(void)pa;
 	(void)size;
 	(void)read;
 	(void)write;
+	(void)dma_addr;
+	return 0;
+}
+
+int
+device_md_dma_grant_pages(unsigned int bdf, const unsigned long *pa,
+			  unsigned int n, int read, int write,
+			  unsigned long *dma_addr)
+{
+	(void)bdf;
+	(void)pa;
+	(void)n;
+	(void)read;
+	(void)write;
+	(void)dma_addr;
 	return 0;
 }
 
@@ -347,6 +362,13 @@ device_md_dma_faults(unsigned int bdf, unsigned long *last)
 
 int
 device_md_dma_confined(unsigned int bdf)
+{
+	(void)bdf;
+	return 0;
+}
+
+int
+device_md_dma_identity(unsigned int bdf)
 {
 	(void)bdf;
 	return 0;

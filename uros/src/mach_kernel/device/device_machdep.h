@@ -247,6 +247,12 @@ extern int		device_md_dma_isolates(void);
  * a caller with no device of its own and must not reach here -- there is
  * nothing to grant to.
  *
+ * 🔴 AND `*dma_addr' IS NOT THE PHYSICAL ADDRESS when the machine confines
+ * this device.  It is the address the DEVICE must be programmed with, which is
+ * what the caller wanted all along -- and on a machine that polices nothing it
+ * is the physical address, so one interface answers both and no caller has to
+ * know which kind of machine it is on.
+ *
  * ⚠️ The first grant for a device is what takes it OFF pass-through, so a
  * failure here can leave it in a domain missing part of what was asked for.
  * The caller must treat that as a failed allocation: a half-granted buffer is
@@ -258,7 +264,23 @@ extern int		device_md_dma_isolates(void);
 extern int		device_md_dma_grant(unsigned int bdf,
 					    unsigned long pa,
 					    unsigned long size,
-					    int read, int write);
+					    int read, int write,
+					    unsigned long *dma_addr);
+
+/*
+ * The same for `n' frames that are not physically contiguous: they are made
+ * reachable at CONSECUTIVE addresses starting from the one answered.
+ *
+ * 🔑 One call and one window.  A scatter-gather buffer is scattered in
+ * physical memory and there is no reason for it to be scattered in the
+ * device's -- so a driver receives one address and a length, and the
+ * scattering stays a fact about the machine.
+ */
+extern int		device_md_dma_grant_pages(unsigned int bdf,
+						  const unsigned long *pa,
+						  unsigned int n,
+						  int read, int write,
+						  unsigned long *dma_addr);
 
 /*
  * Take a granted range back.  Answers non-zero when the device can no longer
@@ -294,5 +316,14 @@ extern unsigned		device_md_dma_faults(unsigned int bdf,
  * buffer is still passing through on a machine that polices perfectly.
  */
 extern int		device_md_dma_confined(unsigned int bdf);
+
+/*
+ * Confine this device, but map its grants where the memory really is.
+ *
+ * ⚠️ Before its first grant only.  A domain that already holds translated
+ * buffers cannot become an identity one without moving them, and moving them
+ * means changing the addresses a device is reading through while it reads.
+ */
+extern int		device_md_dma_identity(unsigned int bdf);
 
 #endif	/* _DEVICE_DEVICE_MACHDEP_H_ */

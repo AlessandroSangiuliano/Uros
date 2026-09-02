@@ -1803,10 +1803,34 @@ static const struct fault_case fault_cases[] = {
  * would make "which domain refused this" unanswerable in exactly the case the
  * fault log exists for.
  */
+/*
+ * One grant, so it can be taken back.
+ *
+ * 🔑 KEYED BY THE PHYSICAL ADDRESS, because that is what a free path holds:
+ * device_dma_free is given a kernel address, extracts the frame under it, and
+ * knows nothing about what any device was told.  The IOVA is what this
+ * remembers FOR it.
+ *
+ * ⚠️ A scatter-gather grant is ONE record and not one per page -- its pages
+ * get consecutive addresses, so the window is a base and a length like any
+ * other, and `pa' is the first frame.  Without that a four-megabyte buffer
+ * would fill this table a thousand times over.
+ */
+struct iommu_granted {
+	uint64_t	pa;
+	uint64_t	iova;
+	uint64_t	size;
+};
+
+#define	IOMMU_MAX_GRANTS	16
+
 struct device_domain {
 	uint16_t		bdf;
 	int			used;
+	int			identity;	/* iova == pa, by request */
 	unsigned		faults;		/* refusals, never wrapping */
+	unsigned		ngrants;
+	struct iommu_granted	grants[IOMMU_MAX_GRANTS];
 	struct iommu_domain	domain;
 };
 
@@ -1897,7 +1921,19 @@ static unsigned domain_levels(void)
 	for (unsigned i = 0; i < nunits; i++)
 		common &= units[i].page_levels;
 
-	for (unsigned l = 2; l <= 5; l++)
+	/*
+	 * 🔴 FROM THREE AND NOT FROM TWO, because the depth has to reach the
+	 * addresses this kernel hands out.  Each level is nine bits over a
+	 * twelve-bit page: two levels reach 30 bits and IOMMU_IOVA_BASE needs
+	 * 33.  A two-level table would be built, verified, attached, and then
+	 * refuse every address in the window it exists to translate -- which
+	 * looks exactly like an engine that does not work.
+	 *
+	 * ⚠️ Shallowest of the ones that DO reach, not deepest: a level costs a
+	 * frame and a memory access on every walk, and the space beyond 39 bits
+	 * is space nothing here asks for.
+	 */
+	for (unsigned l = 3; l <= 5; l++)
 		if (common & (1u << l))
 			return l;
 
@@ -1915,7 +1951,7 @@ static unsigned domain_levels(void)
  * all of memory, and it would look exactly like a device that was never
  * attached until the first transfer failed.
  */
-static struct device_domain *domain_open(uint16_t bdf)
+static struct device_domain *domain_open(uint16_t bdf, int identity)
 {
 	struct device_domain *s;
 	unsigned levels = domain_levels();
@@ -1927,10 +1963,16 @@ static struct device_domain *domain_open(uint16_t bdf)
 	s = &device_domains[ndevice_domains];
 	s->used = 0;
 	s->bdf = bdf;
+	s->identity = identity;
+
+	s->ngrants = 0;
+	s->faults = 0;
 
 	if (!iommu_domain_create(&s->domain, found_vendor,
 				 (uint16_t)(ndevice_domains + 1u), levels))
 		return 0;
+
+	s->domain.next_iova = IOMMU_IOVA_BASE;
 
 	ok = found_vendor == IOMMU_INTEL
 	     ? iommu_vtd_attach(bdf, &s->domain)
@@ -1950,7 +1992,16 @@ static int domain_flush(const struct iommu_domain *d)
 					   : iommu_amd_flush(d);
 }
 
-int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write)
+/*
+ * The domain this device is in, opened if it has none, with room to record one
+ * more grant.  Null when any of those is not possible.
+ *
+ * 🔴 THE ROOM IS CHECKED BEFORE THE MAPPING, not after.  A grant that is made
+ * and cannot be recorded is memory the device can reach and nothing can take
+ * back -- the exact hole this issue exists to close, arrived at by running out
+ * of a table.
+ */
+static struct device_domain *domain_for_grant(uint16_t bdf)
 {
 	struct device_domain *s;
 
@@ -1959,14 +2010,141 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write)
 
 	s = domain_slot(bdf);
 	if (s == 0)
-		s = domain_open(bdf);
+		s = domain_open(bdf, 0);
 	if (s == 0)
 		return 0;
 
-	if (!iommu_domain_map(&s->domain, pa, pa, size, read, write))
+	return s->ngrants >= IOMMU_MAX_GRANTS ? 0 : s;
+}
+
+/*
+ * Take `size' bytes of address space out of the domain's window.
+ *
+ * ⚠️ Page aligned by construction: the caller's size is rounded and the base
+ * starts aligned, so the bump preserves it.  Written as an assertion of the
+ * invariant rather than a rounding, because a bump that quietly aligned would
+ * hide a caller passing a size the mapping is going to refuse anyway.
+ */
+static int iova_take(struct device_domain *s, uint64_t pa, uint64_t size,
+		     uint64_t *out)
+{
+	uint64_t iova = s->domain.next_iova;
+
+	if ((size & 0xFFFULL) != 0 || size == 0)
 		return 0;
 
-	return domain_flush(&s->domain);
+	/*
+	 * ⚠️ An identity domain hands back the physical address and takes
+	 * nothing out of the window.  Its grants are still recorded and still
+	 * revoked; what it does not do is translate.
+	 */
+	if (s->identity) {
+		*out = pa;
+		return 1;
+	}
+
+	/*
+	 * Running out is reported and not wrapped.  A wrapped bump hands out
+	 * an address that is still mapped to somebody else's buffer, and the
+	 * device would reach it perfectly.
+	 */
+	if (iova + size < iova)
+		return 0;
+
+	if (!iommu_address_bits_ok(64))
+		for (unsigned i = 0; i < nunits; i++)
+			if (units[i].address_bits < 64
+			    && (iova + size - 1) >= (1ULL << units[i].address_bits))
+				return 0;
+
+	s->domain.next_iova = iova + size;
+	*out = iova;
+	return 1;
+}
+
+static void grant_record(struct device_domain *s, uint64_t pa, uint64_t iova,
+			 uint64_t size)
+{
+	s->grants[s->ngrants].pa = pa;
+	s->grants[s->ngrants].iova = iova;
+	s->grants[s->ngrants].size = size;
+	s->ngrants++;
+}
+
+int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write,
+		uint64_t *iova_out)
+{
+	struct device_domain *s = domain_for_grant(bdf);
+	uint64_t iova;
+
+	if (s == 0 || iova_out == 0)
+		return 0;
+
+	if (!iova_take(s, pa, size, &iova))
+		return 0;
+
+	if (!iommu_domain_map(&s->domain, iova, pa, size, read, write))
+		return 0;
+
+	if (!domain_flush(&s->domain))
+		return 0;
+
+	grant_record(s, pa, iova, size);
+	*iova_out = iova;
+	return 1;
+}
+
+int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
+		      int read, int write, uint64_t *iova_out)
+{
+	struct device_domain *s = domain_for_grant(bdf);
+	uint64_t iova, size = (uint64_t)n * 4096u;
+
+	if (s == 0 || pa == 0 || n == 0 || iova_out == 0)
+		return 0;
+
+	if (!iova_take(s, pa[0], size, &iova))
+		return 0;
+
+	/*
+	 * 🔴 AN IDENTITY DOMAIN CANNOT TAKE A CONTIGUOUS WINDOW, because its
+	 * addresses are the frames' own and those are scattered.  Each page is
+	 * mapped where it is, and the caller is answered the first one -- so a
+	 * caller must read the page list rather than assume base + i * 4096,
+	 * which is exactly what it had to do before any of this existed.
+	 */
+	if (s->identity)
+		for (unsigned i = 0; i < n; i++) {
+			if (!iommu_domain_map(&s->domain, pa[i], pa[i], 4096u,
+					      read, write))
+				return 0;
+
+			if (!domain_flush(&s->domain))
+				return 0;
+
+			grant_record(s, pa[0], pa[0], size);
+			*iova_out = pa[0];
+			return 1;
+		}
+
+	/*
+	 * ⚠️ Fails PART WAY and says so, exactly as iommu_domain_map does: the
+	 * window was taken and some of it is mapped.  What makes that safe is
+	 * that the window is not recorded and the caller must treat a failed
+	 * grant as a failed allocation -- so nothing is ever told the address,
+	 * and an address nobody holds is unreachable whatever it maps.
+	 */
+	for (unsigned i = 0; i < n; i++)
+		if (!iommu_domain_map(&s->domain, iova + (uint64_t)i * 4096u,
+				      pa[i], 4096u, read, write))
+			return 0;
+
+	if (!domain_flush(&s->domain))
+		return 0;
+
+	grant_record(s, pa[0], iova, size);
+	*iova_out = iova;
+	return 1;
 }
 
 /*
@@ -1981,17 +2159,59 @@ int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write)
  * a device is using at that moment.  What it costs is a table that only grows,
  * for a driver that maps and unmaps the same buffers.
  */
+int iommu_domain_identity(uint16_t bdf)
+{
+	if (!iommu_can_isolate())
+		return 0;
+
+	/*
+	 * ⚠️ Refused when the device already has a domain, rather than
+	 * converted.  Buffers already granted are translated, and turning the
+	 * domain identity under them would change the addresses a device is
+	 * reading through while it is reading through them.
+	 */
+	if (domain_slot(bdf) != 0)
+		return 0;
+
+	return domain_open(bdf, 1) != 0;
+}
+
 int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
 {
 	struct device_domain *s = domain_slot(bdf);
+	unsigned i;
 
 	if (s == 0)
 		return 0;
 
-	if (!iommu_domain_map(&s->domain, pa, pa, size, 0, 0))
+	for (i = 0; i < s->ngrants; i++)
+		if (s->grants[i].pa == pa && s->grants[i].size == size)
+			break;
+
+	/*
+	 * ⚠️ A range nobody granted is answered NO rather than unmapped
+	 * anyway.  Unmapping an address this device was never given is either
+	 * a no-op or somebody else's window, and the second is a device losing
+	 * a buffer it is using -- which would appear as the disk failing, at a
+	 * moment decided by an unrelated free.
+	 */
+	if (i == s->ngrants)
 		return 0;
 
-	return domain_flush(&s->domain);
+	if (!iommu_domain_map(&s->domain, s->grants[i].iova, pa, size, 0, 0))
+		return 0;
+
+	if (!domain_flush(&s->domain))
+		return 0;
+
+	/*
+	 * The record goes, and the ADDRESS does not come back.  See next_iova:
+	 * an address handed out twice is a stale mapping that a device can
+	 * mistake for a live one, and the space is 2^39 bytes.
+	 */
+	s->grants[i] = s->grants[s->ngrants - 1];
+	s->ngrants--;
+	return 1;
 }
 
 int iommu_fault_decode_check(unsigned *ran, unsigned *wrong)
