@@ -95,7 +95,7 @@ BUILD="${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}"
 SBIN="$BUILD/export/uros/x86_64/user/sbin"
 BOOTDIR="$BUILD/export/uros/boot"
 DISK="${UROS_X86_64_DISK:-$BUILD/disk-x86_64.img}"
-AHCI_DISK="${UROS_X86_64_AHCI_DISK:-$BUILD/disk-x86_64-ahci.img}"
+AHCI_DISKS="${UROS_X86_64_AHCI_DISKS:-$BUILD/disk-x86_64-ahci.img $BUILD/disk-x86_64-ahci2.img}"
 GRUB_CFG="$REPO/uros/src/mach_kernel/x86_64/boot/grub.cfg"
 GRUB_LIB="${UROS_GRUB_I386_PC:-/usr/lib/grub/i386-pc}"
 
@@ -291,32 +291,48 @@ dd if="$PART_IMG" of="$DISK" bs="$SECT" seek="$PART_START" conv=notrunc status=n
 # filesystem because the read-back self-test in block_device.c checks the
 # bytes it finds against the partition table it parsed, and an ext2
 # superblock written by mke2fs is the external oracle that check needs.
+# 🔑 TWO OF THEM, ON TWO PORTS OF THE ONE CONTROLLER.
+#
+# One would exercise a controller with a disk; two exercise the PORT ARRAY,
+# which is the half that was capped at four for no reason anybody wrote down
+# and is now capped at what PxPI can express.  A driver that holds n ports and
+# is only ever shown one is a driver whose port handling is untested.
+#
+# ⚠️ Different labels, because the read-back self-test prints the label it
+# finds and two disks with the same one would make a wrong port look right.
 AHCI_MB=16
-AHCI_LABEL=ahci_test
 AHCI_PART_SECTS=$(( AHCI_MB * 1024 * 1024 / SECT - PART_START ))
-AHCI_PART="$WORK/ahci-part.img"
 
-truncate -s $(( AHCI_PART_SECTS * SECT )) "$AHCI_PART"
-mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -L "$AHCI_LABEL" -O filetype "$AHCI_PART"
+ahci_disk_n=0
+for AHCI_DISK in $AHCI_DISKS; do
+	ahci_disk_n=$(( ahci_disk_n + 1 ))
+	AHCI_LABEL="ahci_test$ahci_disk_n"
+	AHCI_PART="$WORK/ahci-part$ahci_disk_n.img"
 
-{
-	echo "mkdir /mach_servers"
-	echo "cd /mach_servers"
-	for s in $DISK_SERVERS; do
-		echo "write $SBIN/$s $s"
-	done
-} | debugfs -w -f /dev/stdin "$AHCI_PART" >/dev/null 2>&1
+	truncate -s $(( AHCI_PART_SECTS * SECT )) "$AHCI_PART"
+	mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -L "$AHCI_LABEL" \
+		-O filetype "$AHCI_PART"
 
-rm -f "$AHCI_DISK"
-truncate -s "${AHCI_MB}M" "$AHCI_DISK"
-sfdisk --quiet "$AHCI_DISK" <<EOF
+	{
+		echo "mkdir /mach_servers"
+		echo "cd /mach_servers"
+		for s in $DISK_SERVERS; do
+			echo "write $SBIN/$s $s"
+		done
+	} | debugfs -w -f /dev/stdin "$AHCI_PART" >/dev/null 2>&1
+
+	rm -f "$AHCI_DISK"
+	truncate -s "${AHCI_MB}M" "$AHCI_DISK"
+	sfdisk --quiet "$AHCI_DISK" <<EOF
 label: dos
 start=$PART_START, size=$AHCI_PART_SECTS, type=83
 EOF
-dd if="$AHCI_PART" of="$AHCI_DISK" bs="$SECT" seek="$PART_START" conv=notrunc status=none
+	dd if="$AHCI_PART" of="$AHCI_DISK" bs="$SECT" seek="$PART_START" \
+		conv=notrunc status=none
 
-echo "make-disk-x86_64: $AHCI_DISK — no grub, one ext2 partition at LBA $PART_START"
-echo "                  (label $AHCI_LABEL) for the AHCI controller"
+	echo "make-disk-x86_64: $AHCI_DISK — no grub, one ext2 partition at"
+	echo "                  LBA $PART_START (label $AHCI_LABEL), AHCI port $(( ahci_disk_n - 1 ))"
+done
 echo "make-disk-x86_64: $DISK — bootable, grub core at LBA 1 ($CORE_SECTS sectors),"
 echo "                  one ext2 partition at LBA $PART_START (label $PART_LABEL) holding:"
 for f in $BOOT_FILES; do

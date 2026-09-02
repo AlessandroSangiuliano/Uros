@@ -567,7 +567,9 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-device virtio-blk-pci,drive=urosdisk,bootindex=0
 	-device ich9-ahci,id=ahci0
 	-drive file=$BUILD/disk-x86_64-ahci.img,if=none,id=ahcidisk0,format=raw
-	-device ide-hd,drive=ahcidisk0,bus=ahci0.0,bootindex=1"
+	-device ide-hd,drive=ahcidisk0,bus=ahci0.0,bootindex=1
+	-drive file=$BUILD/disk-x86_64-ahci2.img,if=none,id=ahcidisk1,format=raw
+	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
 # shellcheck disable=SC2086
 qemu-system-x86_64 $CPU_ARGS $DISK_ARGS "$@" \
