@@ -553,8 +553,21 @@ echo "=== accelerator: $ACCEL ==="
 # can still be selecting yesterday's menu entry.  It costs about a second.
 "$REPO/scripts/make-disk-x86_64.sh" >&2
 
+# 🔴 `bootindex' on both, because with two disks the boot device stops being
+# obvious and starts being whatever SeaBIOS enumerates first.  Only one of
+# them has GRUB in its MBR, and which one boots is not a thing to leave to
+# enumeration order.
+#
+# The second disk is on ich9-ahci, the same controller i386 has used since
+# #224, and it is here for #432: `virtio-blk-pci' is a transitional device and
+# QEMU refuses `iommu_platform=on' on anything but a modern-only one, so the
+# legacy virtio driver cannot be placed behind the IOMMU at all.  AHCI is an
+# ordinary bus master with nothing to negotiate.
 DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
-	-device virtio-blk-pci,drive=urosdisk"
+	-device virtio-blk-pci,drive=urosdisk,bootindex=0
+	-device ich9-ahci,id=ahci0
+	-drive file=$BUILD/disk-x86_64-ahci.img,if=none,id=ahcidisk0,format=raw
+	-device ide-hd,drive=ahcidisk0,bus=ahci0.0,bootindex=1"
 
 # shellcheck disable=SC2086
 qemu-system-x86_64 $CPU_ARGS $DISK_ARGS "$@" \

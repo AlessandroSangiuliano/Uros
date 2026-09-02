@@ -95,6 +95,7 @@ BUILD="${UROS_BUILD_DIR:-$REPO/uros/build-x86_64}"
 SBIN="$BUILD/export/uros/x86_64/user/sbin"
 BOOTDIR="$BUILD/export/uros/boot"
 DISK="${UROS_X86_64_DISK:-$BUILD/disk-x86_64.img}"
+AHCI_DISK="${UROS_X86_64_AHCI_DISK:-$BUILD/disk-x86_64-ahci.img}"
 GRUB_CFG="$REPO/uros/src/mach_kernel/x86_64/boot/grub.cfg"
 GRUB_LIB="${UROS_GRUB_I386_PC:-/usr/lib/grub/i386-pc}"
 
@@ -271,6 +272,51 @@ dd if="$GRUB_LIB/boot.img" of="$DISK" bs=1 count=440 conv=notrunc status=none
 dd if="$WORK/core.img" of="$DISK" bs="$SECT" seek=1 conv=notrunc status=none
 dd if="$PART_IMG" of="$DISK" bs="$SECT" seek="$PART_START" conv=notrunc status=none
 
+# ── The second disk, on the other controller (#432) ──────────────────
+#
+# 🔴 IT EXISTS SO THAT A DRIVER THE IOMMU CAN POLICE HAS SOMETHING TO READ.
+# QEMU's `virtio-blk-pci' is a transitional device, and `iommu_platform=on' --
+# the property that makes a virtio device honour the IOMMU at all -- is
+# refused on anything but a modern-only one:
+#
+#   VIRTIO_F_IOMMU_PLATFORM was supported by neither legacy nor transitional
+#   device
+#
+# Our virtio driver is the legacy interface and cannot talk to a modern-only
+# device, so it cannot be placed behind the IOMMU.  AHCI is an ordinary PCI
+# bus master with nothing to negotiate, which is what #432's staging said from
+# the start.
+#
+# ⚠️ No GRUB and no /boot: this disk is never booted from.  It carries a
+# filesystem because the read-back self-test in block_device.c checks the
+# bytes it finds against the partition table it parsed, and an ext2
+# superblock written by mke2fs is the external oracle that check needs.
+AHCI_MB=16
+AHCI_LABEL=ahci_test
+AHCI_PART_SECTS=$(( AHCI_MB * 1024 * 1024 / SECT - PART_START ))
+AHCI_PART="$WORK/ahci-part.img"
+
+truncate -s $(( AHCI_PART_SECTS * SECT )) "$AHCI_PART"
+mke2fs -t ext2 -q -F -b 4096 -I 256 -r 1 -L "$AHCI_LABEL" -O filetype "$AHCI_PART"
+
+{
+	echo "mkdir /mach_servers"
+	echo "cd /mach_servers"
+	for s in $DISK_SERVERS; do
+		echo "write $SBIN/$s $s"
+	done
+} | debugfs -w -f /dev/stdin "$AHCI_PART" >/dev/null 2>&1
+
+rm -f "$AHCI_DISK"
+truncate -s "${AHCI_MB}M" "$AHCI_DISK"
+sfdisk --quiet "$AHCI_DISK" <<EOF
+label: dos
+start=$PART_START, size=$AHCI_PART_SECTS, type=83
+EOF
+dd if="$AHCI_PART" of="$AHCI_DISK" bs="$SECT" seek="$PART_START" conv=notrunc status=none
+
+echo "make-disk-x86_64: $AHCI_DISK — no grub, one ext2 partition at LBA $PART_START"
+echo "                  (label $AHCI_LABEL) for the AHCI controller"
 echo "make-disk-x86_64: $DISK — bootable, grub core at LBA 1 ($CORE_SECTS sectors),"
 echo "                  one ext2 partition at LBA $PART_START (label $PART_LABEL) holding:"
 for f in $BOOT_FILES; do

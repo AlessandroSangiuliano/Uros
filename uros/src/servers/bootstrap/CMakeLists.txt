@@ -361,14 +361,33 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             hal_server:${_SBIN}/hal_server
             modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
             block_device_server:${_SBIN}/block_device_server
-            # ⚠️ virtio_blk only, and ahci.so deliberately absent (#520).
-            # modload_load_class() loads whatever is in the class, so shipping
-            # ahci.so would bring it up too -- and #432's staging says one
-            # driver at a time.  Its widths were corrected; it is not started.
+            # ⚠️ BOTH drivers now, and ahci.so is here for #432 rather than
+            # for its own sake.  It was left out under #520 because
+            # modload_load_class() loads whatever is in the class and that
+            # issue's staging said one driver at a time.
+            #
+            # 🔴 What brought it back is a fact about QEMU, not a change of
+            # mind: `virtio-blk-pci' is a TRANSITIONAL device, and
+            # `iommu_platform=on' -- the property that makes a virtio device
+            # honour the IOMMU at all -- is refused on anything but a
+            # modern-only one.  QEMU says so on the command line:
+            #
+            #   VIRTIO_F_IOMMU_PLATFORM was supported by neither legacy nor
+            #   transitional device
+            #
+            # Our virtio driver is the legacy interface -- I/O port BAR0,
+            # config at 0x14 -- so it cannot talk to a modern-only device and
+            # therefore cannot be placed behind the IOMMU.  #432 needs a
+            # driver whose DMA the hardware actually polices, and AHCI is an
+            # ordinary PCI bus master with no opt-in to negotiate.
+            #
+            # 🔑 Which is what #432's own staging said from the start: "one
+            # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
+            modules/block/ahci.so:${_MOD}/block/ahci.so
     DEPENDS mkbundle name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
-            block_device_server virtio_blk_module
+            block_device_server virtio_blk_module ahci_module
             ${_CONF}
     COMMENT "Bundle: bootstrap.conf + 11 tasks + hal_server + block_device_server"
     VERBATIM)
