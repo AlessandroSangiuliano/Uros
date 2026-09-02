@@ -530,4 +530,208 @@ int iommu_domain_walk(const struct iommu_domain *d, uint64_t iova,
  */
 int iommu_domain_check(unsigned *walked, unsigned *wrong);
 
+/*
+ * ── Stage 3d: what the engine says when it refuses a DMA ─────────────
+ *
+ * 🔴 THIS IS THE HALF OF #432 THAT MAKES THE OTHER HALF WORTH HAVING.  A
+ * domain that blocks and says nothing turns one failure mode into another: a
+ * driver that reached memory it should not have becomes a driver whose
+ * transfer quietly did not happen, and the second is harder to diagnose than
+ * the first, not easier.  The issue asks for "a diagnosable event, not
+ * silence", and this is where the event is read.
+ *
+ * ⚠️ And it is a POLL, not an interrupt, on purpose for now.  An engine can
+ * raise a message-signalled interrupt when it records a fault, and it should
+ * -- but a reporter that only ever runs from an interrupt handler cannot be
+ * asked "has anything gone wrong since the last time I asked", which is the
+ * question a self-test needs and the question a driver's own retry path needs.
+ * The interrupt, when it lands, will call this.
+ */
+enum iommu_fault_kind {
+	IOMMU_FAULT_UNKNOWN = 0,
+	IOMMU_FAULT_PAGE,		/* no translation, or no permission  */
+	IOMMU_FAULT_ENTRY,		/* the device's own entry is unusable */
+	IOMMU_FAULT_HARDWARE		/* the engine failed to read a table  */
+};
+
+/*
+ * One refusal, as the engine recorded it.
+ *
+ * 🔑 `reason' is the VENDOR'S OWN CODE, kept raw, and `kind' is the reading of
+ * it.  Both, because the two answer different questions: the raw code is what
+ * a specification can be looked up against, and the kind is what a caller can
+ * branch on without knowing which vendor it is running on.  A structure that
+ * carried only the reading would have thrown away the evidence for it.
+ */
+struct iommu_fault {
+	uint64_t		address;   /* what the device asked for      */
+	uint16_t		source;	   /* bus:dev.func that asked         */
+	uint16_t		domain;	   /* or IOMMU_FAULT_NO_DOMAIN        */
+	uint8_t			reason;	   /* the vendor's own code, raw      */
+	uint8_t			kind;	   /* enum iommu_fault_kind           */
+	uint8_t			write;	   /* 1 a write, 0 a read             */
+	uint8_t			vendor;	   /* which encoding `reason' is in   */
+};
+
+/*
+ * Intel's fault record does not carry one, AMD's does.
+ *
+ * ⚠️ A sentinel and not zero, because zero is a domain id and one of ours:
+ * IOMMU_DOMAIN_PASSTHROUGH is the domain everything starts in, and reporting
+ * "domain 0" for a record that said nothing would name the wrong culprit in
+ * exactly the case that matters.
+ */
+#define	IOMMU_FAULT_NO_DOMAIN	0xFFFFu
+
+/*
+ * How many refusals this boot has seen, and the last IOMMU_FAULT_LOG of them.
+ *
+ * 🔑 A COUNT AND A RING, not one or the other.  The count is what a self-test
+ * compares before and after, and it must not saturate; the ring is what says
+ * WHICH, and it must not grow without bound in a kernel that has no allocator
+ * running when the first fault can arrive.  A design with only the ring cannot
+ * tell "none" from "more than fits", and that is the difference between a
+ * driver that is fine and a driver that is faulting on every transfer.
+ */
+#define	IOMMU_FAULT_LOG		16
+
+unsigned iommu_fault_count(void);
+const struct iommu_fault *iommu_fault(unsigned index);	/* oldest first */
+unsigned iommu_fault_logged(void);			/* how many the ring holds */
+
+/*
+ * Drain every engine's fault registers into the log.  Answers how many new
+ * ones were found.
+ *
+ * ⚠️ DRAIN, not peek: the records are cleared as they are read, because an
+ * engine with every record full stops recording and sets an overflow bit
+ * instead -- so a reader that left them in place would see the first sixteen
+ * faults of the boot forever and none of the ones being caused right now.
+ */
+unsigned iommu_fault_poll(void);
+
+/*
+ * An engine ran out of fault records before anyone drained them.
+ *
+ * Reported rather than folded into the count, because the two are different
+ * facts: the count says how many were read, and this says that the number is
+ * a floor rather than a total.
+ */
+int iommu_fault_overflowed(void);
+
+/*
+ * Decode fault records whose right answers were established from the
+ * specifications, on every boot and on every board.
+ *
+ * 🔑 Same argument as iommu_decode_check(), and a sharper one.  A fault record
+ * is read exactly when something has already gone wrong, which is the worst
+ * moment to find out that the reader has the source id in the wrong bits --
+ * and a machine that never faults never exercises it at all.  The bit patterns
+ * below are written from the figures, so the decode is tested on a machine
+ * with no remapping hardware and on one that has never refused anything.
+ */
+int iommu_fault_decode_check(unsigned *ran, unsigned *wrong);
+
+/*
+ * ── Stage 3d: a domain of its own, for one device ────────────────────
+ *
+ * 🔴 THIS IS WHERE #432 STOPS BEING A DESCRIPTION.  Everything before it built
+ * tables, read them back and let every device pass through -- true statements
+ * about arithmetic that changed nothing about what a device can reach.  From
+ * here a device reaches what it was GRANTED and nothing else, which is the
+ * property the userspace driver model has been claiming all along.
+ *
+ * The model is deliberately small: a device is named by its bus/device/
+ * function, its domain is created the first time anything is granted to it,
+ * and the grant is what moves it off pass-through.  There is no attach call in
+ * this header, because an attached domain with nothing in it is a device that
+ * has just lost its memory -- and an interface that lets a caller do that in
+ * two steps is an interface that will be half-done somewhere.
+ */
+#define	IOMMU_MAX_DEVICE_DOMAINS	16
+
+/*
+ * Make `size' bytes of physical memory at `pa' reachable by `bdf', at the same
+ * address.  Answers non-zero when the whole range is mapped and the device is
+ * in its own domain.
+ *
+ * 🔑 IOVA == PA, AND THAT IS NOT THE SAME AS PASS-THROUGH.  The addresses a
+ * driver already holds go on working, so this stage changes no protocol -- but
+ * the domain contains ONLY what has been granted, so every other address in
+ * the machine now faults for this device.  The step that makes the address
+ * itself meaningless outside the domain is the one after, and it is a change
+ * to what device_dma_alloc RETURNS rather than to what it protects.
+ *
+ * ⚠️ Answering zero can mean the device is now in a domain that is missing
+ * part of what was asked for.  The caller must treat a failed grant as a
+ * failed allocation -- there is no half-granted buffer that is safe to hand to
+ * a device, and the fault it takes would name an address the driver believes
+ * it owns.
+ */
+int iommu_grant(uint16_t bdf, uint64_t pa, uint64_t size, int read, int write);
+
+/*
+ * Take a granted range back.  Answers non-zero when the range was there and
+ * is now unreachable to the device.
+ *
+ * ⚠️ The domain STAYS, and the device stays in it.  A device whose last buffer
+ * is freed is a device between transfers, not a device that should go back to
+ * reaching all of memory -- and re-attaching pass-through under it would make
+ * every free a window.
+ */
+int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size);
+
+/*
+ * The domain a device is in, or null when it is still passing through.
+ *
+ * 🔑 Null IS the answer for most devices, and it is the one worth reporting: a
+ * device with no domain is a device this kernel is not policing, which is what
+ * #432 exists to stop being invisible.
+ */
+const struct iommu_domain *iommu_domain_of(uint16_t bdf);
+
+/* How many devices have been taken off pass-through. */
+unsigned iommu_domain_count(void);
+
+/*
+ * Drain the engines and print anything new.
+ *
+ * 🔴 THIS IS "a diagnosable event, not silence" (#432), and it is a POLL
+ * because the alternative is not ready.  An engine can raise a
+ * message-signalled interrupt when it records a fault -- VT-d through
+ * FECTL/FEDATA/FEADDR, AMD through its event-log interrupt -- and it should,
+ * because a poll reports late and a fault that arrives while a driver is
+ * spinning on a transfer is exactly the one it needs now.  What a poll does
+ * give is that no refusal goes unreported, which is the property worth having
+ * first.
+ *
+ * ⚠️ Answers how many were printed, and prints nothing when there is nothing.
+ * Cheap to call: one uncached register read per engine when no fault is
+ * pending, and none at all when no device is in a domain.
+ */
+unsigned iommu_fault_report(void);
+
+/*
+ * How many refusals this device has been given, and the last address it was
+ * refused.  Answers zero when it has never been refused.
+ *
+ * 🔑 PER DEVICE, because that is the question a DRIVER asks.  A transfer that
+ * failed has two ordinary explanations -- the device is broken, or the
+ * driver programmed an address it was never granted -- and they are told apart
+ * by nothing the device reports.  This is the second one, answered.
+ */
+unsigned iommu_faults_for(uint16_t bdf, uint64_t *last_address);
+
+/*
+ * Whether a domain could be given to a device at all on this machine.
+ *
+ * ⚠️ Asked rather than assumed, because there are four separate ways for the
+ * answer to be no and each of them is a real machine: no engine at all, an
+ * engine that did not answer, a description that was truncated, and
+ * translation not turned on.  A grant that failed for one of those is not a
+ * bug in the caller, and a caller that cannot tell them apart will report it
+ * as one.
+ */
+int iommu_can_isolate(void);
+
 #endif	/* _X86_64_CPU_IOMMU_H_ */

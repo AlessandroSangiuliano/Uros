@@ -271,6 +271,80 @@ void iommu_amd_dte_domain(uint16_t domain, unsigned levels, uint64_t root_pa,
 #define	IOMMU_INTERRUPT_RANGE_LIMIT	0xFEEFFFFFULL
 
 /*
+ * ── Stage 3d: reading a refusal out of an engine ─────────────────────
+ *
+ * The two vendors do not merely use different bit positions here: Intel keeps
+ * a small array of REGISTERS that hold the most recent faults and stop
+ * recording when they are full, and AMD writes variable-meaning ENTRIES into a
+ * ring in memory that it wraps around.  So one is read by scanning registers
+ * and clearing the ones that are set, and the other by following a head
+ * pointer -- and there is no shape both fit into that is not a lie about one
+ * of them.
+ *
+ * What they do share is the decode's inputs and outputs: two 64-bit words in,
+ * one struct iommu_fault out, no register access.  That is deliberately the
+ * part that is pure, because it is the part that can be checked on a machine
+ * that has never faulted -- see iommu_fault_decode_check().
+ *
+ * Answers non-zero when the words described a fault at all.  Zero means the
+ * record was empty, which for Intel is the ordinary state of a register nobody
+ * has faulted into.
+ */
+int iommu_vtd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out);
+int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out);
+
+/*
+ * Drain one engine's records, calling iommu_record_fault() for each.  Answers
+ * how many were found; sets `*overflowed' when the engine says it dropped
+ * some.
+ *
+ * ⚠️ The unit is passed by index and not by pointer because both readers need
+ * its capability words as well as its register mapping, and a caller that
+ * passed only the base address would have to re-derive where the records are.
+ */
+unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed);
+unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed);
+
+/* One decoded refusal, for the reader that found it. */
+void iommu_record_fault(const struct iommu_fault *f);
+
+/*
+ * ── Stage 3d: pointing a live engine at a new table ──────────────────
+ *
+ * Rewrite the entry the engine reads for `bdf' so that it walks `d', and make
+ * the engine forget what it cached about that device.  Answers non-zero when
+ * the entry was written and the invalidation completed.
+ *
+ * 🔴 THE INVALIDATION IS THE HALF THAT CANNOT BE SEEN TO BE MISSING.  Both
+ * engines cache the device's entry and its translations, and both are entitled
+ * to go on using what they cached -- so an attach without one produces a
+ * device that is in its new domain according to memory and in its old one
+ * according to the silicon, for an unbounded time, with every read-back
+ * agreeing.  It is the same shape as a TLB shootdown skipped (#350), and it
+ * fails the same way: correctly, until it does not.
+ *
+ * ⚠️ Structured as one call and not as "write the entry" plus "invalidate",
+ * because those two are only ever right together and an interface that can
+ * express one without the other will eventually be used that way.
+ */
+int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d);
+int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d);
+
+/*
+ * A mapping inside `d' changed; make the engine forget what it translated
+ * through the old one.
+ *
+ * 🔴 CALLED EVEN WHEN A PAGE GOES FROM ABSENT TO PRESENT.  The instinct is
+ * that only removals need invalidating -- nothing can have cached a
+ * translation that did not exist.  Both vendors are entitled to cache the
+ * ABSENCE: Intel says so through CAP.CM and AMD through its page directory
+ * cache, so a grant that skipped this would give a device a buffer the engine
+ * goes on refusing, and the fault would name a page the tables say is mapped.
+ */
+int iommu_vtd_flush(const struct iommu_domain *d);
+int iommu_amd_flush(const struct iommu_domain *d);
+
+/*
  * Start a unit, and get back the index that iommu_record_scope() will attach
  * scopes to.  Answers -1 when there is no room, having set the truncation
  * flag -- and a reader that ignores the -1 will write into a unit that is not

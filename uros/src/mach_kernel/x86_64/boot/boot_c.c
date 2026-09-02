@@ -3714,6 +3714,30 @@ static void iommu_selftest(void)
 			   " back the way it was written\r\n");
 	}
 
+	/*
+	 * ⚠️ AND THIS ONE ESPECIALLY ON EVERY BOARD (#432 stage 3d).  A fault
+	 * record is read exactly when something has already gone wrong, so on
+	 * a machine whose drivers behave the reader is never exercised at all
+	 * — and the first time it runs would be the first time anybody needed
+	 * it.  The words below were written from the two figures, and several
+	 * are records neither engine we can run would ever produce.
+	 */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_fault_decode_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" iommu fault records decoded, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — intel's two type bits told apart, and amd's"
+			   " direction refused where the entry does not carry"
+			   " one\r\n"
+			 : " — WRONG, a refusal would be reported as something"
+			   " it is not\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");
@@ -4107,6 +4131,52 @@ static void iommu_selftest(void)
 				   " and the hardware says so\r\n"
 				 : "COULD NOT BE ENABLED — the engine did not"
 				   " confirm it\r\n");
+
+			/*
+			 * 🔴 AND THE FIRST QUESTION AFTER TURNING IT ON IS
+			 * WHETHER ANYTHING WAS REFUSED (#432 stage 3d).  Under
+			 * pass-through the answer must be NONE — every device
+			 * reaches everything, so a fault here means an engine
+			 * is translating by a description this kernel did not
+			 * write.  The number is worth printing precisely
+			 * because it is expected to be zero: it is the
+			 * baseline the first real domain will be compared
+			 * against, and a reporter first read on the day it
+			 * matters is a reporter nobody trusts.
+			 */
+			if (on) {
+				unsigned faults = iommu_fault_poll();
+
+				kputs("UrMach x86-64:   ");
+				kputdec(faults);
+				kputs(" dma refusals recorded so far");
+				if (iommu_fault_overflowed())
+					kputs(" — AND THE ENGINE DROPPED SOME");
+				kputs(faults == 0
+				      ? " — which under pass-through is the"
+					" only right answer\r\n"
+				      : " — UNDER PASS-THROUGH, so an engine is"
+					" using a description this kernel did"
+					" not write\r\n");
+			}
+
+			/*
+			 * 🔴 AND WHETHER A DEVICE COULD BE CONFINED, ASKED OUT
+			 * LOUD.  Everything above says the hardware is there
+			 * and the tables are right; this is the one question a
+			 * driver's DMA path actually asks, and it has four
+			 * separate ways to answer no.  Without it, a machine
+			 * on which no device is ever confined looks exactly
+			 * like one on which none needed to be — which is a
+			 * silence, and it is how the first run of this stage
+			 * was read as working.
+			 */
+			kputs("UrMach x86-64:   a device could be confined to"
+			      " what it is granted: ");
+			kputs(iommu_can_isolate()
+			      ? "yes — the next dma allocation moves one\r\n"
+			      : "NO — see the four conditions in"
+				" iommu_can_isolate()\r\n");
 		} else if (ok) {
 			kputs("UrMach x86-64:   translation left OFF (pass"
 			      " -I to enable it) — nothing programmed\r\n");

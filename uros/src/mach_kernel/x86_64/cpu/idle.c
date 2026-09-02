@@ -48,6 +48,7 @@
 #include <kern/cpu_number.h>
 #include <kern/processor.h>
 #include <kern/thread.h>		/* THREAD_NULL */
+#include <cpu/iommu.h>			/* #432: what an engine refused */
 #include <cpu/quiet_census.h>		/* #476: who never ran */
 #include <mach/machine.h>		/* machine_info.avail_cpus */
 
@@ -69,6 +70,16 @@
  * common shape in a microkernel where a server replies almost immediately.
  */
 #define IDLE_HLT_GRACE		64
+
+/*
+ * How many passes of this loop between two polls of the remapping engines.  A
+ * round number and not a tuned one: large enough that an idle processor is not
+ * doing uncached reads back to back, small enough that a refusal nobody asks
+ * about still reaches the log while somebody is still reading it.
+ */
+#define IDLE_IOMMU_POLL_EVERY	4096u
+
+static unsigned idle_iommu_polls;
 
 /*
  * Cache-line apart, and per processor by index rather than through %gs.
@@ -118,6 +129,40 @@ machine_idle(int mycpu)
 	 * script.
 	 */
 	quiet_census_pass(mycpu);
+
+	/*
+	 * And whether an engine refused a device's DMA (#432 stage 3d).
+	 *
+	 * 🔑 The same argument as the two above, and one more: a refusal is
+	 * read out of memory-mapped registers, which is a thing to do in
+	 * thread context with interrupts on and not from an interrupt handler.
+	 * A machine with no device in a domain does not even read them.
+	 *
+	 * ⚠️ IT REPORTS LATE, AND THAT IS THE COST OF NOT BEING AN INTERRUPT.
+	 * A driver spinning on a transfer that will never complete keeps this
+	 * processor busy, so the refusal that explains it is printed when the
+	 * spin ends -- which is after the driver's own timeout has said
+	 * something less useful.  The engines can raise a message-signalled
+	 * interrupt for exactly this, #457 built what is needed to receive
+	 * one, and that is the next step rather than a missing one.
+	 */
+	/*
+	 * ⚠️ NOT ON EVERY PASS.  This loop turns thousands of times a second
+	 * on a processor with nothing to do, and the cheap path in there is
+	 * still an uncached register read per engine -- an idle processor
+	 * would become a stream of MMIO traffic.
+	 *
+	 * 🔥 The divider is HERE and not in the reporter, and it was in the
+	 * reporter for exactly one run.  The same function is what a driver
+	 * calls to ask whether the IOMMU refused its transfer, and there the
+	 * answer must be current: the engine had refused a DMA, the emulator
+	 * said so on its own console, and the kernel reported none because
+	 * this counter had not come round.  A rate limit inside a function is
+	 * a policy imposed on every caller, including the one that cannot have
+	 * it.
+	 */
+	if (++idle_iommu_polls % IDLE_IOMMU_POLL_EVERY == 0)
+		iommu_fault_report();
 
 	/*
 	 * Never while processors are still arriving.  Bring-up runs with
