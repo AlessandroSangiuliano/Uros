@@ -338,17 +338,21 @@ int  blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		   const char *prefix, int stable_disk_idx);
 void blk_register_partitions(void);
 
-/* ================================================================
- * RDTSC helper — shared by benchmark code
- * ================================================================ */
-
-static inline uint64_t
-rdtsc(void)
-{
-	uint64_t tsc;
-	__asm__ volatile("rdtsc" : "=A" (tsc));
-	return tsc;
-}
+/*
+ * The RDTSC helper that used to be here is gone (#523).
+ *
+ * 🔴 It was `__asm__ volatile("rdtsc" : "=A" (tsc))', which is correct on
+ * i386 -- there `"A"' is the EDX:EAX pair -- and WRONG on x86-64, where a
+ * 64-bit value is a single word and `"A"' selects one register.  The high
+ * half of the counter would have been dropped on the target this server was
+ * just ported to, silently, in a header that compiles either way.
+ *
+ * 🔑 And nothing called it.  Its comment said "shared by benchmark code" and
+ * no benchmark code in this server exists; a symbol never defined is a link
+ * error, one never called is silence.  Deleted rather than fixed, because a
+ * correct helper nobody uses is a correct helper nobody checks, and the
+ * kernel already keeps one in <time/tsc.h> for anyone who needs it.
+ */
 
 /* mach_port_set_protected_payload now comes from <mach/mach_port.h> (MIG-generated) */
 
