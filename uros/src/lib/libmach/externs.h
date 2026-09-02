@@ -40,9 +40,12 @@ extern char *mach_error_string_int(mach_error_t, boolean_t *);
 /* libc-style globals/helpers imported from libsa_mach (#106). */
 extern char	**__environment;
 
+/*
+ * The one formatter (#432 audit).  The `radix' parameter is gone with the
+ * `%r' conversion that was its only user, and both call sites passed 0.
+ */
 extern void	_doprnt(const char *,
 			va_list,
-			int,			/* default radix - for '%r' */
 			void (*)(void *, int),	/* character output */
 			void *);
 

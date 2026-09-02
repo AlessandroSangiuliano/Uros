@@ -47,610 +47,441 @@
  * MkLinux
  */
 
-#define EXPORT_BOOLEAN
+/*
+ * Copyright (c) 2026 Alessandro Sangiuliano (Slex) <alex22_7@hotmail.com>
+ * SPDX-License-Identifier: MIT
+ *
+ * doprnt.c — the formatter userland has, rewritten (#432 audit).
+ *
+ * ── What was here, and why none of it could be kept ──────────────────
+ *
+ * Steve Summit's 1987 formatter, whose own header says:
+ *
+ *	It accepts, but ignores, an `l' as in %ld, %lo, %lx, and %lu, and
+ *	therefore will not work correctly on machines for which
+ *	sizeof(long) != sizeof(int).
+ *
+ * That machine is x86-64.  Every conversion fetched an `unsigned int', so
+ * there was NO SPELLING that printed a 64-bit value: %x truncated, and %lx
+ * truncated identically while satisfying a compiler's format check.
+ *
+ * 🔴 AND IT WAS ONE OF THREE.  libmach/printf.c carries its OWN static
+ * _doprnt, with %p and with the length modifier honoured; kern/printf.c
+ * carries a third, taught the modifier by #415.  So inside this one library
+ * printf() and sprintf() ran different formatters with different conversion
+ * sets, and whether %p worked depended on whether you were printing to the
+ * console or to a string.  #415 fixed one copy of a defect that existed in
+ * three places, which is what having three copies does.
+ *
+ * ⚠️ None of that was visible because userland had no -Wall and printf had no
+ * format attribute.  Both are on now, and turning them on is what found this.
+ *
+ * ── What it implements, and how that was decided ─────────────────────
+ *
+ * By counting, not by taste.  Every printf-family call site in 575 userland
+ * files, format strings only:
+ *
+ *	%s 1407   %d 983   %u 386   %x 242   %X 40
+ *	%c 16     %% 8     %b 6     %p 4     %o 1
+ *
+ * So: s d i u o x X c p b B %, with flags, width, precision, and the length
+ * modifiers hh h l ll z t j.
+ *
+ * 🔑 %p was NOT in the old public formatter's switch at all.  Its four
+ * callers reached `default:', which prints the letter and DOES NOT CONSUME
+ * THE ARGUMENT -- so every following conversion in that call read the wrong
+ * one.  That is worse than a truncation: it is a desynchronised va_list.
+ *
+ * ── What was deleted, and how that was decided ───────────────────────
+ *
+ * The same way: nothing in those 575 files calls any of it.
+ *
+ *	%e %E %f %F %g %G   floating point, about 170 lines
+ *	%r %R               "default radix", the only user of the radix
+ *	                    parameter -- which is why the parameter is gone
+ *	                    too and both callers passed 0 anyway
+ *	%n                  writes through a caller's pointer; unused, and a
+ *	                    liability the moment a format string is not a
+ *	                    literal
+ *	%D %O %U            long forms, which %ld %lo %lu now cover honestly
+ *	%z %Z               Mach's SIGNED HEX.  ⚠️ Reclaimed as C's size_t
+ *	                    length modifier: a caller writing %zu meant
+ *	                    size_t, and would have got a hex number followed
+ *	                    by a literal `u'.
+ *
+ * ── Speed ────────────────────────────────────────────────────────────
+ *
+ * Digits come out by shifting for base 16 and 8, and a value that fits in 32
+ * bits is divided as a 32-bit value.  That matters on i386, where a 64-bit
+ * divide is a call to __udivdi3 (#415) -- per digit, on the path every
+ * diagnostic in the system takes.  The 64-bit divide is by a constant, so the
+ * compiler turns it into a multiply where it can.
+ */
+
 #include <mach/boolean.h>
 #include <stdarg.h>
-
 #include "externs.h"
 #include <string.h>
 
-/*
- *  Common code for printf et al.
- *
- *  The calling routine typically takes a variable number of arguments,
- *  and passes the address of the first one.  This implementation
- *  assumes a straightforward, stack implementation, aligned to the
- *  machine's wordsize.  Increasing addresses are assumed to point to
- *  successive arguments (left-to-right), as is the case for a machine
- *  with a downward-growing stack with arguments pushed right-to-left.
- *
- *  To write, for example, fprintf() using this routine, the code
- *
- *	fprintf(fd, format, args)
- *	FILE *fd;
- *	char *format;
- *	{
- *	_doprnt(format, &args, fd);
- *	}
- *
- *  would suffice.  (This example does not handle the fprintf's "return
- *  value" correctly, but who looks at the return value of fprintf
- *  anyway?)
- *
- *  This version implements the following printf features:
- *
- *	%d	decimal conversion
- *	%u	unsigned conversion
- *	%x	hexadecimal conversion
- *	%X	hexadecimal conversion with capital letters
- *	%o	octal conversion
- *	%c	character
- *	%s	string
- *	%m.n	field width, precision
- *	%-m.n	left adjustment
- *	%0m.n	zero-padding
- *	%*.*	width and precision taken from arguments
- *
- *  This version implements %f/%F (fixed decimal), %e/%E (scientific
- *  notation), and %g/%G (shorter of the two), with full support for
- *  width, precision, sign, padding, and the # flag.
- *  It accepts, but
- *  ignores, an `l' as in %ld, %lo, %lx, and %lu, and therefore will not
- *  work correctly on machines for which sizeof(long) != sizeof(int).
- *  It does not even parse %D, %O, or %U; you should be using %ld, %o and
- *  %lu if you mean long conversion.
- *
- *  As mentioned, this version does not return any reasonable value.
- *
- *  Permission is granted to use, modify, or propagate this code as
- *  long as this notice is incorporated.
- *
- *  Steve Summit 3/25/87
- */
+#define	FL_LEFT		0x01	/* -  */
+#define	FL_PLUS		0x02	/* +  */
+#define	FL_SPACE	0x04	/*    */
+#define	FL_ALT		0x08	/* #  */
+#define	FL_ZERO		0x10	/* 0  */
+
+#define	LEN_INT		0
+#define	LEN_LONG	1
+#define	LEN_LLONG	2
 
 /*
- * Added formats for decoding device registers:
- *
- * printf("reg = %b", regval, "<base><arg>*")
- *
- * where <base> is the output base expressed as a control character:
- * i.e. '\10' gives octal, '\20' gives hex.  Each <arg> is a sequence of
- * characters, the first of which gives the bit number to be inspected
- * (origin 1), and the rest (up to a control character (<= 32)) give the
- * name of the register.  Thus
- *	printf("reg = %b\n", 3, "\10\2BITTWO\1BITONE")
- * would produce
- *	reg = 3<BITTWO,BITONE>
- *
- * If the second character in <arg> is also a control character, it
- * indicates the last bit of a bit field.  In this case, printf will extract
- * bits <1> to <2> and print it.  Characters following the second control
- * character are printed before the bit field.
- *	printf("reg = %b\n", 0xb, "\10\4\3FIELD1=\2BITTWO\1BITONE")
- * would produce
- *	reg = b<FIELD1=2,BITONE>
+ * 2^64-1 is twenty digits in decimal and twenty-two in octal, and a leading
+ * "0x" or sign is emitted separately.  Twenty-four leaves room to be wrong by
+ * a little rather than by a lot.
  */
+#define	NUMBUF		24
+
+static const char digits_lower[] = "0123456789abcdef";
+static const char digits_upper[] = "0123456789ABCDEF";
+
 /*
- * Added for general use:
- *	#	prefix for alternate format:
- *		0x (0X) for hex
- *		leading 0 for octal
- *	+	print '+' if positive
- *	blank	print ' ' if positive
- *
- *	z	signed hexadecimal
- *	r	signed, 'radix'
- *	n	unsigned, 'radix'
- *
- *	D,U,O,Z	same as corresponding lower-case versions
- *		(compatibility)
+ * Write the digits of `v' in `base' into `out', most significant first, and
+ * return how many there are.  `out' holds at least NUMBUF.
  */
+static unsigned int
+to_digits(char *out, unsigned long long v, unsigned int base, const char *dig)
+{
+	char		tmp[NUMBUF];
+	unsigned int	n = 0;
+	unsigned int	i;
 
-#define isdigit(d) ((d) >= '0' && (d) <= '9')
-#define Ctod(c) ((c) - '0')
+	if (base == 16) {
+		do {
+			tmp[n++] = dig[v & 15u];
+			v >>= 4;
+		} while (v != 0);
+	} else if (base == 8) {
+		do {
+			tmp[n++] = dig[v & 7u];
+			v >>= 3;
+		} while (v != 0);
+	} else if (v <= 0xFFFFFFFFULL) {
+		unsigned int w = (unsigned int) v;
 
-#define MAXBUF (sizeof(long int) * 8)		 /* enough for binary */
+		do {
+			tmp[n++] = dig[w % 10u];
+			w /= 10u;
+		} while (w != 0);
+	} else {
+		do {
+			tmp[n++] = dig[v % 10ULL];
+			v /= 10ULL;
+		} while (v != 0);
+	}
+
+	for (i = 0; i < n; i++)
+		out[i] = tmp[n - 1 - i];
+	return n;
+}
 
 static void
-printnum(unsigned int	u,	/* number to print */
-	 int		base,
-	 void			(*putc)(void *, int),
-	 void			*putc_arg)
+pad(void (*putc)(void *, int), void *arg, char c, int n)
 {
-	char	buf[MAXBUF];	/* build number here */
-	char *	p = &buf[MAXBUF-1];
-	static char digs[] = "0123456789abcdef";
+	while (n-- > 0)
+		(*putc)(arg, c);
+}
 
-	do {
-	    *p-- = digs[u % base];
-	    u /= base;
-	} while (u != 0);
+/*
+ * The Mach register-decoding format, kept because six callers use it:
+ *
+ *	printf("reg = %b\n", regval, "\10\2BITTWO\1BITONE")
+ *
+ * The string's first byte is the base as a control character ('\10' octal,
+ * '\20' hex); each field after it is a bit number followed by its name, up to
+ * the next control character.
+ */
+static void
+print_bitfield(void (*putc)(void *, int), void *arg,
+	       unsigned long long v, const char *p)
+{
+	unsigned int	base = (unsigned int) *p++;
+	char		buf[NUMBUF];
+	unsigned int	n;
+	int		any = 0;
 
-	while (++p != &buf[MAXBUF])
-	    (*putc)(putc_arg, *p);
+	if (base != 8 && base != 16)
+		base = 16;
+	n = to_digits(buf, v, base, digits_lower);
+	for (unsigned int i = 0; i < n; i++)
+		(*putc)(arg, buf[i]);
+
+	while (*p != '\0') {
+		unsigned int bit = (unsigned int) *p++;
+
+		if (v & (1ULL << (bit - 1))) {
+			(*putc)(arg, any ? ',' : '<');
+			any = 1;
+			while (*p > 32)
+				(*putc)(arg, *p++);
+		} else {
+			while (*p > 32)
+				p++;
+		}
+	}
+	if (any)
+		(*putc)(arg, '>');
 }
 
 void
 _doprnt(const char *fmt,
-	va_list		args,
-	int		radix,			/* default radix - for '%r' */
- 	void		(*putc)(void *, int),	/* character output */
-	void		*putc_arg)		/* argument for putc */
+	va_list			args,
+	void			(*putc)(void *, int),
+	void			*putc_arg)
 {
-	int		length;
-	int		prec;
-	boolean_t	ladjust;
-	char		padc;
-	int		n;
-	unsigned int	u;
-	int		plus_sign;
-	int		sign_char;
-	boolean_t	altfmt;
-	int		base;
-	char		c;
-
 	while (*fmt != '\0') {
-	    if (*fmt != '%') {
-		(*putc)(putc_arg, *fmt++);
-		continue;
-	    }
+		unsigned int	flags = 0;
+		int		width = 0;
+		int		prec = -1;
+		int		lensize = LEN_INT;
+		unsigned int	base = 10;
+		int		is_signed = 0;
+		const char	*dig = digits_lower;
+		const char	*prefix = "";
+		char		sign = '\0';
+		char		numbuf[NUMBUF];
+		unsigned int	ndig = 0;
+		int		len;
 
-	    fmt++;
-
-	    length = 0;
-	    prec = -1;
-	    ladjust = FALSE;
-	    padc = ' ';
-	    plus_sign = 0;
-	    sign_char = 0;
-	    altfmt = FALSE;
-
-	    while (TRUE) {
-		if (*fmt == '#') {
-		    altfmt = TRUE;
-		    fmt++;
+		if (*fmt != '%') {
+			(*putc)(putc_arg, *fmt++);
+			continue;
 		}
-		else if (*fmt == '-') {
-		    ladjust = TRUE;
-		    fmt++;
-		}
-		else if (*fmt == '+') {
-		    plus_sign = '+';
-		    fmt++;
-		}
-		else if (*fmt == ' ') {
-		    if (plus_sign == 0)
-			plus_sign = ' ';
-		    fmt++;
-		}
-		else
-		    break;
-	    }
-
-	    if (*fmt == '0') {
-		padc = '0';
 		fmt++;
-	    }
 
-	    if (isdigit(*fmt)) {
-		while(isdigit(*fmt))
-		    length = 10 * length + Ctod(*fmt++);
-	    }
-	    else if (*fmt == '*') {
-		length = va_arg(args, int);
-		fmt++;
-		if (length < 0) {
-		    ladjust = !ladjust;
-		    length = -length;
+		/* Flags, in any order and any number. */
+		for (;;) {
+			if (*fmt == '-')		flags |= FL_LEFT;
+			else if (*fmt == '+')		flags |= FL_PLUS;
+			else if (*fmt == ' ')		flags |= FL_SPACE;
+			else if (*fmt == '#')		flags |= FL_ALT;
+			else if (*fmt == '0')		flags |= FL_ZERO;
+			else break;
+			fmt++;
 		}
-	    }
 
-	    if (*fmt == '.') {
-		fmt++;
-		if (isdigit(*fmt)) {
-		    prec = 0;
-		    while(isdigit(*fmt))
-			prec = 10 * prec + Ctod(*fmt++);
-		}
-		else if (*fmt == '*') {
-		    prec = va_arg(args, int);
-		    fmt++;
-		}
-	    }
-
-	    if (*fmt == 'l')
-		fmt++;	/* need it if sizeof(int) < sizeof(long) */
-
-	    switch(*fmt) {
-		case 'b':
-		case 'B':
-		{
-		    const char *p;
-		    boolean_t	  any;
-		    int  i;
-
-		    u = va_arg(args, unsigned int);
-		    p = va_arg(args, const char *);
-		    base = *p++;
-		    printnum(u, base, putc, putc_arg);
-
-		    if (u == 0)
-			break;
-
-		    any = FALSE;
-		    while (i = *p++) {
-			if (*p <= 32) {
-			    /*
-			     * Bit field
-			     */
-			    int j;
-			    if (any)
-				(*putc)(putc_arg, ',');
-			    else {
-				(*putc)(putc_arg, '<');
-				any = TRUE;
-			    }
-			    j = *p++;
-			    for (; (c = *p) > 32; p++)
-				(*putc)(putc_arg, c);
-			    printnum((unsigned)( (u>>(j-1)) & ((2<<(i-j))-1)),
-					base, putc, putc_arg);
+		/* Width. */
+		if (*fmt == '*') {
+			width = va_arg(args, int);
+			if (width < 0) {
+				flags |= FL_LEFT;
+				width = -width;
 			}
-			else if (u & (1<<(i-1))) {
-			    if (any)
-				(*putc)(putc_arg, ',');
-			    else {
-				(*putc)(putc_arg, '<');
-				any = TRUE;
-			    }
-			    for (; (c = *p) > 32; p++)
-				(*putc)(putc_arg, c);
-			}
-			else {
-			    for (; *p > 32; p++)
-				continue;
-			}
-		    }
-		    if (any)
-			(*putc)(putc_arg, '>');
-		    break;
+			fmt++;
+		} else {
+			while (*fmt >= '0' && *fmt <= '9')
+				width = width * 10 + (*fmt++ - '0');
 		}
+
+		/* Precision. */
+		if (*fmt == '.') {
+			fmt++;
+			prec = 0;
+			if (*fmt == '*') {
+				prec = va_arg(args, int);
+				fmt++;
+			} else {
+				while (*fmt >= '0' && *fmt <= '9')
+					prec = prec * 10 + (*fmt++ - '0');
+			}
+			if (prec < 0)
+				prec = -1;
+		}
+
+		/*
+		 * Length.  `h' and `hh' are accepted and deliberately not
+		 * acted on: default argument promotion has already widened a
+		 * short or a char to an int, so there is nothing narrower to
+		 * fetch.  Recorded rather than silently skipped -- which is
+		 * exactly how the `l' came to be ignored for thirty-nine
+		 * years.
+		 */
+		while (*fmt == 'h')
+			fmt++;
+		while (*fmt == 'l') {
+			lensize = (lensize == LEN_LONG) ? LEN_LLONG : LEN_LONG;
+			fmt++;
+		}
+		if (*fmt == 'z' || *fmt == 't' || *fmt == 'j') {
+			lensize = LEN_LONG;
+			fmt++;
+		}
+
+		switch (*fmt) {
+		case '\0':
+			/* A format ending in `%': emit it and stop. */
+			(*putc)(putc_arg, '%');
+			return;
+
+		case '%':
+			(*putc)(putc_arg, '%');
+			fmt++;
+			continue;
 
 		case 'c':
-		    c = va_arg(args, int);
-		    (*putc)(putc_arg, c);
-		    break;
+			pad(putc, putc_arg, ' ',
+			    (flags & FL_LEFT) ? 0 : width - 1);
+			(*putc)(putc_arg, (char) va_arg(args, int));
+			pad(putc, putc_arg, ' ',
+			    (flags & FL_LEFT) ? width - 1 : 0);
+			fmt++;
+			continue;
 
-		case 's':
-		{
-		    const char *p;
-		    const char *p2;
+		case 's': {
+			const char *s = va_arg(args, const char *);
 
-		    if (prec == -1)
-			prec = 0x7fffffff;	/* MAXINT */
-
-		    p = va_arg(args, char *);
-
-		    if (p == (char *)0)
-			p = "";
-
-		    if (length > 0 && !ladjust) {
-			n = 0;
-			p2 = p;
-
-			for (; *p != '\0' && n < prec; p++)
-			    n++;
-
-			p = p2;
-
-			while (n < length) {
-			    (*putc)(putc_arg, ' ');
-			    n++;
-			}
-		    }
-
-		    n = 0;
-
-		    while (*p != '\0') {
-			if (++n > prec)
-			    break;
-
-			(*putc)(putc_arg, *p++);
-		    }
-
-		    if (n < length && ladjust) {
-			while (n < length) {
-			    (*putc)(putc_arg, ' ');
-			    n++;
-			}
-		    }
-
-		    break;
+			if (s == 0)
+				s = "(null)";
+			len = 0;
+			while (s[len] != '\0' && (prec < 0 || len < prec))
+				len++;
+			pad(putc, putc_arg, ' ',
+			    (flags & FL_LEFT) ? 0 : width - len);
+			for (int i = 0; i < len; i++)
+				(*putc)(putc_arg, s[i]);
+			pad(putc, putc_arg, ' ',
+			    (flags & FL_LEFT) ? width - len : 0);
+			fmt++;
+			continue;
 		}
 
-		case 'o':
-		case 'O':
-		    base = 8;
-		    goto print_unsigned;
+		case 'b':
+		case 'B': {
+			unsigned long long v = (lensize == LEN_LLONG)
+				? va_arg(args, unsigned long long)
+				: (lensize == LEN_LONG)
+				? (unsigned long long) va_arg(args, unsigned long)
+				: (unsigned long long) va_arg(args, unsigned int);
+			const char *p = va_arg(args, const char *);
+
+			print_bitfield(putc, putc_arg, v, p);
+			fmt++;
+			continue;
+		}
+
+		case 'p': {
+			unsigned long long v =
+				(unsigned long long)(unsigned long)
+				va_arg(args, void *);
+
+			ndig = to_digits(numbuf, v, 16, digits_lower);
+			prefix = "0x";
+			break;
+		}
 
 		case 'd':
-		case 'D':
-		    base = 10;
-		    goto print_signed;
+		case 'i':
+			is_signed = 1;
+			base = 10;
+			break;
 
 		case 'u':
-		case 'U':
-		    base = 10;
-		    goto print_unsigned;
-
-		case 'x':
-		case 'X':
-		    base = 16;
-		    goto print_unsigned;
-
-		case 'z':
-		case 'Z':
-		    base = 16;
-		    goto print_signed;
-
-		case 'r':
-		case 'R':
-		    base = radix;
-		    goto print_signed;
-
-		case 'n':
-		    base = radix;
-		    goto print_unsigned;
-
-		print_signed:
-		    n = va_arg(args, int);
-		    if (n >= 0) {
-			u = n;
-			sign_char = plus_sign;
-		    }
-		    else {
-			u = -n;
-			sign_char = '-';
-		    }
-		    goto print_num;
-
-		print_unsigned:
-		    u = va_arg(args, unsigned int);
-		    goto print_num;
-
-		print_num:
-		{
-		    char	buf[MAXBUF];	/* build number here */
-		    char *	p = &buf[MAXBUF-1];
-		    static char digits[] = "0123456789abcdef";
-		    const char *prefix = 0;
-
-		    if (u != 0 && altfmt) {
-			if (base == 8)
-			    prefix = "0";
-			else if (base == 16)
-			    prefix = "0x";
-		    }
-
-		    do {
-			*p-- = digits[u % base];
-			u /= base;
-		    } while (u != 0);
-
-		    length -= (&buf[MAXBUF-1] - p);
-		    if (sign_char)
-			length--;
-		    if (prefix)
-			length -= strlen(prefix);
-
-		    if (padc == ' ' && !ladjust) {
-			/* blank padding goes before prefix */
-			while (--length >= 0)
-			    (*putc)(putc_arg, ' ');
-		    }
-		    if (sign_char)
-			(*putc)(putc_arg, sign_char);
-		    if (prefix)
-			while (*prefix)
-			    (*putc)(putc_arg, *prefix++);
-		    if (padc == '0') {
-			/* zero padding goes after sign and prefix */
-			while (--length >= 0)
-			    (*putc)(putc_arg, '0');
-		    }
-		    while (++p != &buf[MAXBUF])
-			(*putc)(putc_arg, *p);
-
-		    if (ladjust) {
-			while (--length >= 0)
-			    (*putc)(putc_arg, ' ');
-		    }
-		    break;
-		}
-
-
-		case 'f':
-		case 'F':
-		case 'e':
-		case 'E':
-		case 'g':
-		case 'G':
-		{
-		    /*
-		     * Floating-point output.  Supports %f (fixed decimal),
-		     * %e/%E (scientific notation), %g/%G (shorter of the two).
-		     * The # flag forces a decimal point and, for %g/%G, suppresses
-		     * trailing-zero stripping.
-		     */
-		    double		dval   = va_arg(args, double);
-		    boolean_t		dneg   = FALSE;
-		    unsigned long long	dint;
-		    double		dfrac;
-		    char		ibuf[24];	/* integer digits, null-terminated */
-		    char		fbuf[20];	/* fractional digits */
-		    char		expbuf[8];	/* exponent string, e.g. "e+03" */
-		    char		*ip;
-		    int			ilen, flen, elen;
-		    int			fi, use_e, strip_zeros;
-		    int			eval   = 0;
-		    int			total, show_frac, efrac, effprec;
-		    union { double d; unsigned long long u; } dchk;
-
-		    if (prec < 0)
-			prec = 6;
-
-		    /* Detect NaN/Inf without triggering FP comparison edge-cases */
-		    dchk.d = dval;
-		    if (((dchk.u >> 52) & 0x7FFULL) == 0x7FFULL) {
-			unsigned long long mant = dchk.u & 0x000FFFFFFFFFFFFFULL;
-			const char *sp = mant ? "nan"
-					      : (dchk.u >> 63 ? "-inf" : "inf");
-			int slen = mant ? 3 : (dchk.u >> 63 ? 4 : 3);
-			if (!ladjust)
-			    while (slen < length) { (*putc)(putc_arg, ' '); length--; }
-			while (*sp)
-			    (*putc)(putc_arg, *sp++);
-			if (ladjust)
-			    while (slen < length) { (*putc)(putc_arg, ' '); length--; }
+			base = 10;
 			break;
-		    }
 
-		    if (dval < 0.0) { dneg = TRUE; dval = -dval; }
+		case 'o':
+			base = 8;
+			if (flags & FL_ALT)
+				prefix = "0";
+			break;
 
-		    use_e       = (c == 'e' || c == 'E');
-		    strip_zeros = (c == 'g' || c == 'G');
-
-		    /* Compute decimal exponent of the value */
-		    if (dval != 0.0) {
-			double t = dval;
-			if (t >= 1.0) { while (t >= 10.0) { t /= 10.0; eval++; } }
-			else          { while (t <  1.0)  { t *= 10.0; eval--; } }
-		    }
-
-		    /* %g/%G: choose %e or %f; precision counts significant digits */
-		    if (strip_zeros) {
-			effprec = (prec == 0) ? 1 : prec;
-			use_e   = (eval < -4 || eval >= effprec);
-			prec    = use_e ? effprec - 1 : effprec - eval - 1;
-			if (prec < 0) prec = 0;
-		    }
-
-		    /* Normalise value to [1, 10) for %e output */
-		    if (use_e && dval != 0.0) {
-			if (eval > 0)
-			    for (fi = 0; fi < eval;  fi++) dval /= 10.0;
-			else
-			    for (fi = 0; fi < -eval; fi++) dval *= 10.0;
-		    }
-
-		    /* Separate integer and fractional parts */
-		    dint  = (unsigned long long)dval;
-		    dfrac = dval - (double)dint;
-
-		    /* Round to prec decimal places */
-		    {
-			double rnd = 0.5;
-			for (fi = 0; fi < prec; fi++) rnd /= 10.0;
-			dfrac += rnd;
-			if (dfrac >= 1.0) {
-			    dint++;
-			    dfrac -= 1.0;
-			    /* %e: renormalise if rounding produced 10.xxx */
-			    if (use_e && dint >= 10) {
-				dint = 1; dfrac = 0.0; eval++;
-			    }
-			}
-		    }
-
-		    /* Build fractional digit string */
-		    flen = (prec < (int)sizeof(fbuf)) ? prec : (int)sizeof(fbuf) - 1;
-		    for (fi = 0; fi < flen; fi++) {
-			int d;
-			dfrac *= 10.0;
-			d = (int)dfrac;
-			if (d > 9) d = 9;
-			fbuf[fi] = '0' + d;
-			dfrac -= (double)d;
-		    }
-
-		    /* Build integer digit string */
-		    ip = ibuf + sizeof(ibuf) - 1;
-		    *ip = '\0';
-		    if (dint == 0) {
-			*--ip = '0';
-		    } else {
-			unsigned long long t = dint;
-			while (t > 0) { *--ip = '0' + (int)(t % 10); t /= 10; }
-		    }
-		    ilen = (int)((ibuf + sizeof(ibuf) - 1) - ip);
-
-		    /* Build exponent string */
-		    elen = 0;
-		    if (use_e) {
-			int a = (eval >= 0) ? eval : -eval;
-			expbuf[elen++] = (c == 'E' || c == 'G') ? 'E' : 'e';
-			expbuf[elen++] = (eval >= 0) ? '+' : '-';
-			if (a >= 100) expbuf[elen++] = '0' + a / 100;
-			expbuf[elen++] = '0' + (a / 10) % 10;
-			expbuf[elen++] = '0' + a % 10;
-		    }
-
-		    /* %g/%G strips trailing fractional zeros (unless # flag) */
-		    if (strip_zeros && !altfmt)
-			while (flen > 0 && fbuf[flen - 1] == '0')
-			    flen--;
-
-		    /*
-		     * show_frac: whether to emit '.' and fractional digits.
-		     * efrac:     number of fractional digit positions to emit
-		     *            (fbuf contents + zero-padding).
-		     */
-		    show_frac = altfmt      ? 1
-			      : strip_zeros ? (flen > 0)
-			      :               (prec > 0);
-		    efrac = show_frac
-			    ? ((!strip_zeros || altfmt) ? prec : flen)
-			    : 0;
-
-		    total = (dneg || plus_sign ? 1 : 0)
-			  + ilen
-			  + (show_frac ? 1 + efrac : 0)
-			  + elen;
-
-		    /* Right-align: space padding before sign */
-		    if (!ladjust && padc == ' ')
-			while (total < length) { (*putc)(putc_arg, ' '); length--; }
-
-		    if (dneg)          (*putc)(putc_arg, '-');
-		    else if (plus_sign) (*putc)(putc_arg, plus_sign);
-
-		    /* Right-align: zero padding after sign */
-		    if (!ladjust && padc == '0')
-			while (total < length) { (*putc)(putc_arg, '0'); length--; }
-
-		    while (*ip) (*putc)(putc_arg, *ip++);
-
-		    if (show_frac) {
-			(*putc)(putc_arg, '.');
-			for (fi = 0; fi < flen; fi++) (*putc)(putc_arg, fbuf[fi]);
-			for (; fi < efrac; fi++)      (*putc)(putc_arg, '0');
-		    }
-
-		    for (fi = 0; fi < elen; fi++) (*putc)(putc_arg, expbuf[fi]);
-
-		    /* Left-align: trailing space padding */
-		    if (ladjust)
-			while (total < length) { (*putc)(putc_arg, ' '); length--; }
-		    break;
-		}
-
-		case '\0':
-		    fmt--;
-		    break;
+		case 'X':
+			dig = digits_upper;
+			/* FALLTHROUGH */
+		case 'x':
+			base = 16;
+			break;
 
 		default:
-		    (*putc)(putc_arg, *fmt);
-	    }
-	fmt++;
+			/*
+			 * An unknown conversion.  The character is emitted
+			 * and NO ARGUMENT IS CONSUMED, which is what the old
+			 * formatter did for %p -- so say it rather than
+			 * leaving the caller to discover a shifted va_list
+			 * from the values that follow.
+			 */
+			(*putc)(putc_arg, '%');
+			(*putc)(putc_arg, *fmt);
+			fmt++;
+			continue;
+		}
+
+		if (*fmt != 'p') {
+			if (is_signed) {
+				long long n = (lensize == LEN_LLONG)
+					? va_arg(args, long long)
+					: (lensize == LEN_LONG)
+					? (long long) va_arg(args, long)
+					: (long long) va_arg(args, int);
+				unsigned long long u;
+
+				if (n < 0) {
+					sign = '-';
+					/* -LLONG_MIN does not fit; negate in
+					 * the unsigned domain, where it does */
+					u = (unsigned long long) -(n + 1) + 1;
+				} else {
+					u = (unsigned long long) n;
+					if (flags & FL_PLUS)
+						sign = '+';
+					else if (flags & FL_SPACE)
+						sign = ' ';
+				}
+				ndig = to_digits(numbuf, u, base, dig);
+			} else {
+				unsigned long long u = (lensize == LEN_LLONG)
+					? va_arg(args, unsigned long long)
+					: (lensize == LEN_LONG)
+					? (unsigned long long)
+					  va_arg(args, unsigned long)
+					: (unsigned long long)
+					  va_arg(args, unsigned int);
+
+				if (base == 16 && (flags & FL_ALT) && u != 0)
+					prefix = (dig == digits_upper)
+						? "0X" : "0x";
+				ndig = to_digits(numbuf, u, base, dig);
+			}
+		}
+
+		/* Emit: [pad] [sign] [prefix] [zeros] digits [pad] */
+		{
+			int nprefix = (int) strlen(prefix);
+			int nzero = (prec > (int) ndig) ? prec - (int) ndig : 0;
+			int total = (int) ndig + nzero + nprefix
+				  + (sign != '\0' ? 1 : 0);
+
+			/*
+			 * `0' is ignored when a precision is given, which is
+			 * what C says and what stops "%08.3d" from padding
+			 * twice.
+			 */
+			if ((flags & FL_ZERO) && !(flags & FL_LEFT)
+			    && prec < 0 && width > total) {
+				nzero += width - total;
+				total = width;
+			}
+
+			if (!(flags & FL_LEFT))
+				pad(putc, putc_arg, ' ', width - total);
+			if (sign != '\0')
+				(*putc)(putc_arg, sign);
+			while (*prefix != '\0')
+				(*putc)(putc_arg, *prefix++);
+			pad(putc, putc_arg, '0', nzero);
+			for (unsigned int i = 0; i < ndig; i++)
+				(*putc)(putc_arg, numbuf[i]);
+			if (flags & FL_LEFT)
+				pad(putc, putc_arg, ' ', width - total);
+		}
+		fmt++;
 	}
 }
