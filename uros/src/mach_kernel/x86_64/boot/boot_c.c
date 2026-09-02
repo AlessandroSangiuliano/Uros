@@ -3982,6 +3982,43 @@ static void iommu_selftest(void)
 			kputs((claim ? (answered > 0 && remapping == answered)
 				     : (remapping == 0))
 			      ? "\r\n" : " — THEY DISAGREE\r\n");
+
+		/*
+		 * ── AND THE DECISION #432 ASKED FOR, TAKEN ───────────────
+		 *
+		 * That issue's scope says to decide whether interrupt
+		 * remapping belongs to it or to a follow-on, "but decide
+		 * rather than forget".  It does not belong to it, and the
+		 * reason is not effort:
+		 *
+		 * An MSI is a DMA WRITE to 0xFEE00000, so the hole #432 closes
+		 * for buffers is open for interrupts — and both specifications
+		 * put that range OUTSIDE any domain this issue builds.  Intel
+		 * Rev 5.20 §3.15 and AMD Rev 3.11 §2.1.4.2 both say a write
+		 * there is an interrupt request and is "not subjected to DMA
+		 * remapping (even if translation structures specify a mapping
+		 * for this range)".  So no arrangement of the page tables
+		 * built here could police it: it is a DIFFERENT mechanism with
+		 * its own table, its own enable bit, and its own interaction
+		 * with the APIC — the same size of bring-up risk as turning
+		 * translation on was, and not a finishing touch on it.
+		 *
+		 * 🔑 AND THE PROPERTY IS ALREADY ENFORCED ANOTHER WAY, which
+		 * is what makes deferring it a decision rather than a gap.
+		 * #457 put the MSI-X table in the KERNEL: device_msi_register
+		 * takes a bus/device/function and answers a slot number, and
+		 * no address crosses that interface in either direction.  What
+		 * defeats it is device_mmio_map, which will map any physical
+		 * page — so a driver holding the master port can map the MSI-X
+		 * BAR and write its own entry.  Closing THAT is #511 and #513,
+		 * it is needed whether or not the hardware ever remaps, and it
+		 * is where the work goes.
+		 */
+		kputs("UrMach x86-64:   interrupt remapping is NOT turned on"
+		      " — a message-signalled interrupt is a write the"
+		      " hardware exempts from every domain (#432), and what"
+		      " keeps the table honest is that the kernel writes it"
+		      " (#511, #513)\r\n");
 	}
 
 	/*
