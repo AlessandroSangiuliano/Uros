@@ -190,50 +190,633 @@ pad(void (*putc)(void *, int), void *arg, char c, int n)
 		(*putc)(arg, c);
 }
 
+
+/* ================================================================
+ * Floating point
+ * ================================================================ */
+
 /*
- * The Mach register-decoding format, kept because six callers use it:
+ * 🔴 REIMPLEMENTED. The 1987 branch this replaces
+ * was a hundred and seventy lines inside the switch and nobody had ever
+ * compared its output with anything.
  *
- *	printf("reg = %b\n", regval, "\10\2BITTWO\1BITONE")
+ * ⚠️ Digits come out through `long double', which on x86 carries a 64-bit
+ * significand -- about nineteen decimal digits, against the seventeen a
+ * double can need. Where the two disagree it will be in the last digit of a 
+ * very long conversion, and the harness says how often.
+ */
+
+/*
+ * 🔑 Sized for what %f of DBL_MAX actually needs: 309 integer digits plus the
+ * precision.
+ */
+#define	FLT_MAXDIG	460		/* significant digits we will produce */
+/*
+ * The most digits after the point this will emit.  A precision beyond it
+ * is CLAMPED rather than honoured: past nineteen significant digits a
+ * double has nothing left to say, and the alternative is a buffer whose
+ * size depends on a number the caller chooses.
+ */
+#define	FLT_MAXPREC	128
+
+
+/* ================================================================
+ * Exact decimal digits of a double
+ * ================================================================ */
+
+/* The obvious way -- normalise by dividing by ten until the value is in
+ * [1,10) and then peel digits off -- is what was here, and it is wrong in a
+ * way that shows on ordinary numbers: 255.5 is exact in binary, 2.555 is not,
+ * so after two divisions the digits are 2,5,5,4,9,9,... and "%.0f" printed
+ * 255 where every other C library prints 256.  No amount of extra precision
+ * fixes it; the error is introduced by the division itself.
+ *
+ * 🔑 So no division.  A double IS an exact rational: m * 2^k with m a 53-bit
+ * integer.  For k >= 0 the value is the integer m << k; for k < 0 it is
+ * (m >> s) + (m & (2^s - 1)) / 2^s.  Both halves are computed in binary and
+ * converted by repeated operations that are themselves exact:
+ *
+ *	integer part    divide the big value by 10^9, keep remainders
+ *	fraction        multiply the numerator by 10, take what crosses the
+ *	                binary point, and keep going
+ *
+ * Every digit produced this way is the digit the value actually has.  What
+ * is left over says whether the tail was zero, which is what round-half-to-
+ * even needs to tell an exact half from something just above it.
+ *
+ * The widest thing that must fit is 2^1023 * (2^53-1), just over 1076 bits.
+ */
+#define	BN_LIMBS	40			/* 1280 bits */
+
+struct bignat {
+	unsigned int	l[BN_LIMBS];		/* little-endian, 32-bit limbs */
+	int		n;			/* limbs in use */
+};
+
+static void
+bn_set_u64(struct bignat *b, unsigned long long v)
+{
+	int i;
+
+	for (i = 0; i < BN_LIMBS; i++)
+		b->l[i] = 0;
+	b->l[0] = (unsigned int)(v & 0xFFFFFFFFu);
+	b->l[1] = (unsigned int)(v >> 32);
+	b->n = (b->l[1] != 0) ? 2 : (b->l[0] != 0 ? 1 : 0);
+}
+
+static int
+bn_is_zero(const struct bignat *b)
+{
+	return b->n == 0;
+}
+
+static void
+bn_shl(struct bignat *b, int bits)
+{
+	int	words = bits / 32;
+	int	rest  = bits % 32;
+	int	i;
+
+	if (bn_is_zero(b) || bits <= 0)
+		return;
+
+	if (words > 0) {
+		for (i = BN_LIMBS - 1; i >= words; i--)
+			b->l[i] = b->l[i - words];
+		for (i = 0; i < words; i++)
+			b->l[i] = 0;
+		b->n += words;
+		if (b->n > BN_LIMBS)
+			b->n = BN_LIMBS;
+	}
+	if (rest > 0) {
+		unsigned int carry = 0;
+
+		for (i = 0; i < BN_LIMBS; i++) {
+			unsigned int nc = b->l[i] >> (32 - rest);
+
+			b->l[i] = (b->l[i] << rest) | carry;
+			carry = nc;
+		}
+	}
+	while (b->n < BN_LIMBS && b->l[b->n] != 0)
+		b->n++;
+	while (b->n > 0 && b->l[b->n - 1] == 0)
+		b->n--;
+}
+
+/* b /= d, returning the remainder.  d must fit in 32 bits. */
+static unsigned int
+bn_divmod_small(struct bignat *b, unsigned int d)
+{
+	unsigned long long	rem = 0;
+	int			i;
+
+	for (i = b->n - 1; i >= 0; i--) {
+		unsigned long long cur = (rem << 32) | b->l[i];
+
+		b->l[i] = (unsigned int)(cur / d);
+		rem = cur % d;
+	}
+	while (b->n > 0 && b->l[b->n - 1] == 0)
+		b->n--;
+	return (unsigned int) rem;
+}
+
+/* b *= m, m < 2^32. */
+static void
+bn_mul_small(struct bignat *b, unsigned int m)
+{
+	unsigned long long	carry = 0;
+	int			i;
+
+	for (i = 0; i < BN_LIMBS; i++) {
+		unsigned long long cur = (unsigned long long) b->l[i] * m
+				       + carry;
+
+		b->l[i] = (unsigned int)(cur & 0xFFFFFFFFu);
+		carry = cur >> 32;
+	}
+	b->n = BN_LIMBS;
+	while (b->n > 0 && b->l[b->n - 1] == 0)
+		b->n--;
+}
+
+/*
+ * The bits at or above `s', removed from b and returned.
+ *
+ * ⚠️ Called only just after a multiply by ten, so what sits above `s' is at
+ * most four bits -- a decimal digit.  The first version of this walked the
+ * limbs above and OR-ed them in RAW before the shifted read could use them,
+ * which corrupted the digit and zeroed the limb it needed: 1287 of 40000
+ * random doubles came out with wrong digits, and a hand-picked test of 725
+ * had found none of them.
+ */
+static unsigned int
+bn_take_above(struct bignat *b, int s)
+{
+	int		word = s / 32;
+	int		bit  = s % 32;
+	unsigned int	got;
+	int		i;
+
+	if (word >= BN_LIMBS)
+		return 0;
+
+	got = b->l[word] >> bit;
+	if (bit != 0 && word + 1 < BN_LIMBS)
+		got |= b->l[word + 1] << (32 - bit);
+
+	b->l[word] &= (bit == 0) ? 0u : ((1u << bit) - 1u);
+	for (i = word + 1; i < BN_LIMBS; i++)
+		b->l[i] = 0;
+
+	b->n = word + 1;
+	while (b->n > 0 && b->l[b->n - 1] == 0)
+		b->n--;
+	return got;
+}
+
+/*
+ * Up to `n' significant decimal digits of |dv|, exactly, with the decimal
+ * exponent of the first.  `*more' says whether anything nonzero follows.
+ * No rounding happens here: the caller rounds, because only it knows which
+ * digit it stopped at.
+ */
+static int
+float_digits(double dv, int n, char *out, int *exp10, int *more)
+{
+	union { double d; unsigned long long u; } c;
+	struct bignat		ip, fp;
+	unsigned long long	m;
+	int			k, s = 0;
+	char			ibuf[400];
+	int			ni = 0, nd = 0, e = 0, i;
+
+	c.d = dv;
+	m = c.u & 0x000FFFFFFFFFFFFFULL;
+	k = (int)((c.u >> 52) & 0x7FFULL);
+	if (k == 0)
+		k = -1074;
+	else {
+		m |= 0x0010000000000000ULL;
+		k = k - 1075;
+	}
+
+	bn_set_u64(&ip, 0);
+	bn_set_u64(&fp, 0);
+	if (m == 0) {
+		out[0] = '0'; out[1] = '\0';
+		*exp10 = 0; *more = 0;
+		return 1;
+	}
+
+	if (k >= 0) {
+		bn_set_u64(&ip, m);
+		bn_shl(&ip, k);
+	} else {
+		s = -k;
+		if (s < 64)
+			bn_set_u64(&ip, m >> s);
+		bn_set_u64(&fp, m & ((s >= 64) ? m : ((1ULL << s) - 1ULL)));
+	}
+
+	/* Integer digits, least significant first, then reversed. */
+	if (!bn_is_zero(&ip)) {
+		struct bignat t = ip;
+
+		while (!bn_is_zero(&t)) {
+			unsigned int r = bn_divmod_small(&t, 1000000000u);
+			int j;
+
+			for (j = 0; j < 9; j++) {
+				if (ni < (int)sizeof ibuf)
+					ibuf[ni++] = (char)('0' + r % 10u);
+				r /= 10u;
+			}
+		}
+		while (ni > 1 && ibuf[ni - 1] == '0')
+			ni--;
+	}
+
+	if (ni > 0) {
+		e = ni - 1;
+		for (i = 0; i < ni && nd < n; i++)
+			out[nd++] = ibuf[ni - 1 - i];
+		if (nd == n) {
+			/* anything left, integer or fraction, is "more" */
+			*more = (i < ni) || !bn_is_zero(&fp);
+			for (; i < ni && !*more; i++)
+				if (ibuf[ni - 1 - i] != '0')
+					*more = 1;
+			out[nd] = '\0';
+			*exp10 = e;
+			return nd;
+		}
+	}
+
+	/* Fraction digits: multiply by ten and take what crosses the point. */
+	{
+		int leading = (ni == 0);
+
+		while (nd < n && !bn_is_zero(&fp)) {
+			unsigned int d;
+
+			bn_mul_small(&fp, 10u);
+			d = bn_take_above(&fp, s);
+			if (leading && d == 0) {
+				e--;
+				continue;
+			}
+			leading = 0;
+			out[nd++] = (char)('0' + d);
+		}
+		if (leading) {
+			out[0] = '0'; out[1] = '\0';
+			*exp10 = 0; *more = 0;
+			return 1;
+		}
+		if (ni == 0)
+			e = e - 1;
+	}
+
+	*more = !bn_is_zero(&fp);
+	out[nd] = '\0';
+	*exp10 = e;
+	return nd;
+}
+
+/*
+ * `n' significant digits of |dv|, ROUNDED half to even, with the decimal
+ * exponent.  Returns how many digits are in `out'.
+ *
+ * 🔑 Half to even and not half up, because that is what IEEE 754 says.
+ */
+
+static int
+float_round(double dv, int n, char *out, int *exp10)
+{
+	int	more = 0, e = 0, got, i;
+
+	if (n < 1)
+		n = 1;
+	if (n > FLT_MAXDIG)
+		n = FLT_MAXDIG;
+
+	got = float_digits(dv, n + 1, out, &e, &more);
+	if (got <= n) {
+		out[got] = '\0';
+		*exp10 = e;
+		return got;
+	}
+
+	if (out[n] > '5'
+	    || (out[n] == '5' && (more || ((out[n - 1] - '0') & 1)))) {
+		for (i = n - 1; i >= 0; i--) {
+			if (out[i] != '9') { out[i]++; break; }
+			out[i] = '0';
+		}
+		if (i < 0) {
+			for (i = n - 1; i > 0; i--)
+				out[i] = out[i - 1];
+			out[0] = '1';
+			e++;
+		}
+	}
+	out[n] = '\0';
+	*exp10 = e;
+	return n;
+}
+
+static void
+print_float(double dv, int conv, int prec, int width, unsigned int flags,
+	    void (*putc)(void *, int), void *putc_arg)
+{
+	union { double d; unsigned long long u; } chk;
+	char		digs[FLT_MAXDIG + 2];
+	/*
+	 * ⚠️ Sized for %f of DBL_MAX, whose integer part is 309 digits.  The
+	 * first version of this held forty and smashed the stack on the very
+	 * first big value the differential harness handed it -- which is what
+	 * a harness is for.  309 digits, a point, the precision, a sign and
+	 * slack.
+	 */
+	char		body[309 + 1 + FLT_MAXPREC + 8];
+	int		nbody = 0;
+	int		e10 = 0;
+	int		upper = (conv == 'E' || conv == 'G' || conv == 'F');
+	int		style = (conv == 'f' || conv == 'F') ? 'f'
+			      : (conv == 'e' || conv == 'E') ? 'e' : 'g';
+	char		sign = '\0';
+	int		i;
+	int		total, padn;
+	int		strip = 0;
+
+	chk.d = dv;
+	if (chk.u >> 63)
+		sign = '-';
+	else if (flags & FL_PLUS)
+		sign = '+';
+	else if (flags & FL_SPACE)
+		sign = ' ';
+
+	/* NaN and infinity, spelled the way the conversion's case asks. */
+	if (((chk.u >> 52) & 0x7FFULL) == 0x7FFULL) {
+		const char *s = (chk.u & 0x000FFFFFFFFFFFFFULL)
+			? (upper ? "NAN" : "nan") : (upper ? "INF" : "inf");
+
+		total = 3 + (sign != '\0' ? 1 : 0);
+		if (!(flags & FL_LEFT))
+			pad(putc, putc_arg, ' ', width - total);
+		if (sign != '\0')
+			(*putc)(putc_arg, sign);
+		while (*s != '\0')
+			(*putc)(putc_arg, *s++);
+		if (flags & FL_LEFT)
+			pad(putc, putc_arg, ' ', width - total);
+		return;
+	}
+
+	if (prec < 0)
+		prec = 6;
+	if (prec > FLT_MAXPREC)
+		prec = FLT_MAXPREC;
+
+	{
+		double	v = (dv < 0.0) ? -dv : dv;
+		int	more = 0;
+		int	nd;
+
+		if (style == 'g') {
+			int sig = (prec == 0) ? 1 : prec;
+
+			(void) float_round(v, sig, digs, &e10);
+			/*
+			 * C's rule: scientific when the exponent is below -4
+			 * or not less than the precision; otherwise fixed,
+			 * with the precision becoming digits after the point.
+			 */
+			if (e10 < -4 || e10 >= sig) {
+				style = 'e';
+				prec = sig - 1;
+			} else {
+				style = 'f';
+				prec = sig - 1 - e10;
+				if (prec < 0)
+					prec = 0;
+			}
+			if (!(flags & FL_ALT))
+				strip = 1;	/* %g drops trailing zeros */
+		}
+
+		if (style == 'e') {
+			(void) float_round(v, prec + 1, digs, &e10);
+		} else {
+			int sig;
+
+			/*
+			 * Fixed notation asks for `prec' digits AFTER the
+			 * point, so how many significant digits that is
+			 * depends on where the point falls -- which has to be
+			 * learned without rounding first, or a value that
+			 * carries into a new decade moves the answer.
+			 */
+			nd = float_digits(v, 2, digs, &e10, &more);
+			sig = e10 + 1 + prec;
+
+			/*
+			 * ⚠️ `nd' and not just the buffer: the generator is
+			 * exact, so 0.5 comes back as ONE digit and digs[1]
+			 * is the terminator.  Reading it as a digit made an
+			 * exact half look like something above it, and
+			 * "%.0f" of 0.5 printed 1 instead of 0.
+			 */
+			if (sig >= 1) {
+				(void) float_round(v, sig, digs, &e10);
+			} else if (sig == 0
+				   && (digs[0] > '5'
+				       || (digs[0] == '5'
+					   && ((nd > 1 && digs[1] != '0')
+					       || more)))) {
+				/*
+				 * Every significant digit is below the last
+				 * place asked for, and the value still rounds
+				 * up into it: 0.667 at "%.0f" is 1.  An exact
+				 * half goes to even, and the digit it would
+				 * carry into is zero, so it stays 0.
+				 */
+				digs[0] = '1';
+				digs[1] = '\0';
+				e10 = e10 + 1;
+			} else {
+				digs[0] = '0';
+				digs[1] = '\0';
+				e10 = 0;
+			}
+		}
+	}
+
+	/* Lay the body out: digits, point, fraction, exponent. */
+	if (style == 'e') {
+		int nfrac = prec;
+		int ndig  = (int) strlen(digs);
+
+		/*
+		 * ⚠️ `digs' can be SHORTER than asked for: the generator is
+		 * exact, so 1.0 yields one digit and not prec+1 of them.  A
+		 * position past the end is a zero, and reading it out of the
+		 * buffer instead is what printed "1." for "%e" of 1.
+		 */
+		if (strip)
+			while (nfrac > 0
+			       && (nfrac >= ndig || digs[nfrac] == '0'))
+				nfrac--;
+		body[nbody++] = digs[0];
+		if (nfrac > 0 || (flags & FL_ALT)) {
+			body[nbody++] = '.';
+			for (i = 1; i <= nfrac; i++)
+				body[nbody++] = (i < ndig) ? digs[i] : '0';
+		}
+		body[nbody++] = (char)(upper ? 'E' : 'e');
+		body[nbody++] = (char)(e10 < 0 ? '-' : '+');
+		{
+			int a = e10 < 0 ? -e10 : e10;
+
+			if (a >= 100)
+				body[nbody++] = (char)('0' + a / 100);
+			body[nbody++] = (char)('0' + (a / 10) % 10);
+			body[nbody++] = (char)('0' + a % 10);
+		}
+	} else {
+		int ndig = (int) strlen(digs);
+		int nint = e10 + 1;
+		int nfrac = prec;
+		int k;
+
+		if (nint <= 0) {
+			body[nbody++] = '0';
+		} else {
+			for (k = 0; k < nint; k++)
+				body[nbody++] = (k < ndig) ? digs[k] : '0';
+		}
+
+		if (strip) {
+			/* Trailing zeros of the fraction go, and so does a
+			 * point with nothing after it. */
+			int last = nint + nfrac;
+
+			while (nfrac > 0) {
+				k = nint + nfrac - 1;
+				if (k >= 0 && k < ndig && digs[k] != '0')
+					break;
+				if (k >= ndig)
+					{ nfrac--; continue; }
+				if (k < 0)
+					break;
+				nfrac--;
+			}
+			(void) last;
+		}
+
+		if (nfrac > 0 || (flags & FL_ALT)) {
+			body[nbody++] = '.';
+			for (k = 0; k < nfrac; k++) {
+				int idx = nint + k;
+
+				body[nbody++] = (idx >= 0 && idx < ndig)
+					? digs[idx] : '0';
+			}
+		}
+	}
+
+	total = nbody + (sign != '\0' ? 1 : 0);
+	padn = width - total;
+
+	if (!(flags & FL_LEFT) && !(flags & FL_ZERO))
+		pad(putc, putc_arg, ' ', padn);
+	if (sign != '\0')
+		(*putc)(putc_arg, sign);
+	if (!(flags & FL_LEFT) && (flags & FL_ZERO))
+		pad(putc, putc_arg, '0', padn);
+	for (i = 0; i < nbody; i++)
+		(*putc)(putc_arg, body[i]);
+	if (flags & FL_LEFT)
+		pad(putc, putc_arg, ' ', padn);
+}
+
+
+/*
+ * Mach's register decoder: the value, then the names of the bits and the
+ * bit-fields that are set in it.
+ *
+ *	printf("reg = %b\n", 0xb, "\10\4\3FIELD1=\2BITTWO\1BITONE")
  *
  * The string's first byte is the base as a control character ('\10' octal,
- * '\20' hex); each field after it is a bit number followed by its name, up to
- * the next control character.
+ * '\20' hex); each entry after it is a bit number -- or a PAIR of them for a
+ * field -- followed by the name, up to the next control character.
+ *
+ * ⚠️ Kept, and kept whole.  Nothing calls it today: the six uses a census
+ * found were the worked examples in these very comments.  That makes it an
+ * unused FEATURE and not a duplicate, and only duplicates were the thing to
+ * delete.  A shorter version that handled single bits and dropped the fields
+ * was written first, which would have been a quiet loss of half of it.
  */
 static void
-print_bitfield(void (*putc)(void *, int), void *arg,
-	       unsigned long long v, const char *p)
+print_bitfield(unsigned long long u, const char *p, unsigned int base,
+	       void (*putc)(void *, int), void *putc_arg)
 {
-	unsigned int	base = (unsigned int) *p++;
 	char		buf[NUMBUF];
 	unsigned int	n;
 	int		any = 0;
+	int		i;
 
-	if (base != 8 && base != 16)
+	if (base != 8 && base != 16 && base != 10)
 		base = 16;
-	n = to_digits(buf, v, base, digits_lower);
-	for (unsigned int i = 0; i < n; i++)
-		(*putc)(arg, buf[i]);
 
-	while (*p != '\0') {
-		unsigned int bit = (unsigned int) *p++;
+	n = to_digits(buf, u, base, digits_lower);
+	for (i = 0; i < (int) n; i++)
+		(*putc)(putc_arg, buf[i]);
 
-		if (v & (1ULL << (bit - 1))) {
-			(*putc)(arg, any ? ',' : '<');
+	if (u == 0)
+		return;
+
+	while ((i = (unsigned char) *p++) != 0) {
+		if (*p <= 32 && *p != '\0') {
+			/* A field: this bit number and the next bound it. */
+			int j = (unsigned char) *p++;
+
+			(*putc)(putc_arg, any ? ',' : '<');
 			any = 1;
 			while (*p > 32)
-				(*putc)(arg, *p++);
+				(*putc)(putc_arg, *p++);
+			n = to_digits(buf,
+				      (u >> (j - 1)) & ((2ULL << (i - j)) - 1),
+				      base, digits_lower);
+			{
+				int k;
+
+				for (k = 0; k < (int) n; k++)
+					(*putc)(putc_arg, buf[k]);
+			}
+		} else if (u & (1ULL << (i - 1))) {
+			(*putc)(putc_arg, any ? ',' : '<');
+			any = 1;
+			while (*p > 32)
+				(*putc)(putc_arg, *p++);
 		} else {
 			while (*p > 32)
 				p++;
 		}
 	}
 	if (any)
-		(*putc)(arg, '>');
+		(*putc)(putc_arg, '>');
 }
 
 void
 _doprnt(const char *fmt,
 	va_list			args,
+	int			radix,	/* the base %r and %R print in */
 	void			(*putc)(void *, int),
 	void			*putc_arg)
 {
@@ -353,20 +936,6 @@ _doprnt(const char *fmt,
 			continue;
 		}
 
-		case 'b':
-		case 'B': {
-			unsigned long long v = (lensize == LEN_LLONG)
-				? va_arg(args, unsigned long long)
-				: (lensize == LEN_LONG)
-				? (unsigned long long) va_arg(args, unsigned long)
-				: (unsigned long long) va_arg(args, unsigned int);
-			const char *p = va_arg(args, const char *);
-
-			print_bitfield(putc, putc_arg, v, p);
-			fmt++;
-			continue;
-		}
-
 		case 'p': {
 			unsigned long long v =
 				(unsigned long long)(unsigned long)
@@ -383,14 +952,74 @@ _doprnt(const char *fmt,
 			base = 10;
 			break;
 
+		case 'D':
+			is_signed = 1;
+			base = 10;
+			lensize = LEN_LONG;
+			break;
+
+		case 'r':
+		case 'R':
+			/* The base the caller handed _doprnt. */
+			is_signed = 1;
+			base = (radix >= 2 && radix <= 16)
+				? (unsigned int) radix : 10;
+			break;
+
+		case 'n': {
+			/*
+			 * ⚠️ The one conversion here that WRITES THROUGH A
+			 * CALLER'S POINTER.  Kept because it is a feature and
+			 * not a duplicate, but it is a liability the moment a
+			 * format string stops being a literal, and several C
+			 * libraries have dropped it for exactly that.  Worth
+			 * revisiting deliberately rather than by accident.
+			 */
+			int *np = va_arg(args, int *);
+
+			if (np != 0)
+				*np = 0;	/* no count is tracked */
+			fmt++;
+			continue;
+		}
+
+		case 'b':
+		case 'B': {
+			unsigned long long v = (lensize == LEN_LLONG)
+			  ? va_arg(args, unsigned long long)
+			  : (lensize == LEN_LONG)
+			  ? (unsigned long long) va_arg(args, unsigned long)
+			  : (unsigned long long) va_arg(args, unsigned int);
+			const char *bp = va_arg(args, const char *);
+			unsigned int bbase = (unsigned int)(unsigned char) *bp++;
+
+			print_bitfield(v, bp, bbase, putc, putc_arg);
+			fmt++;
+			continue;
+		}
+
 		case 'u':
 			base = 10;
 			break;
 
+		case 'U':
+			base = 10;
+			lensize = LEN_LONG;
+			break;
+
+		case 'O':
+			base = 8;
+			lensize = LEN_LONG;
+			break;
+
 		case 'o':
 			base = 8;
-			if (flags & FL_ALT)
-				prefix = "0";
+			/*
+			 * ⚠️ `#' on octal is not a prefix, which is how this
+			 * was written. C says it raises the precision enough
+			 * to force a leading zero, so "%#o" of 0 is "0" and
+			 * not "00".  Decided below, once the digits exist.
+			 */
 			break;
 
 		case 'X':
@@ -399,6 +1028,17 @@ _doprnt(const char *fmt,
 		case 'x':
 			base = 16;
 			break;
+
+		case 'f':
+		case 'F':
+		case 'e':
+		case 'E':
+		case 'g':
+		case 'G':
+			print_float(va_arg(args, double), *fmt, prec, width,
+				    flags, putc, putc_arg);
+			fmt++;
+			continue;
 
 		default:
 			/*
@@ -449,6 +1089,19 @@ _doprnt(const char *fmt,
 					prefix = (dig == digits_upper)
 						? "0X" : "0x";
 				ndig = to_digits(numbuf, u, base, dig);
+				/*
+				 * ⚠️ ...and only when the precision has not
+				 * already supplied it.  C says `#' raises the
+				 * precision enough to force a leading zero,
+				 * so "%#.12o" of a ten-digit value already
+				 * has two and needs none added.  Adding one
+				 * anyway made 39 of 40000 random cases one
+				 * character too long.
+				 */
+				if (base == 8 && (flags & FL_ALT)
+				    && numbuf[0] != '0'
+				    && prec <= (int) ndig)
+					prefix = "0";
 			}
 		}
 

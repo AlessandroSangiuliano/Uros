@@ -128,3 +128,26 @@ __moddi3(int64_t n, int64_t d)
 
 	return (n < 0) ? (int64_t) ((uint64_t) 0 - ur) : (int64_t) ur;
 }
+
+/*
+ * Quotient AND remainder in one call.
+ *
+ * 🔑 A THIRD NAME FOR THE SAME OPERATION, and the compiler picks which one it
+ * asks for.  #415 supplied __udivdi3 and __umoddi3 because printf's long-long
+ * conversion needed them; code that wants both halves of one division makes
+ * gcc emit __udivmoddi4 instead, and a link then fails naming a symbol that
+ * looks like an oversight rather than a missing case of a decision already
+ * taken.
+ *
+ * It arrived with libmach's formatter, whose exact decimal conversion divides
+ * a big value by 10^9 and keeps the remainder -- the shape that asks for this
+ * one.  ⚠️ Nothing about it is new work: udivmod64() below has computed both
+ * since #415, and this is the entry point that says so.
+ */
+uint64_t __udivmoddi4(uint64_t n, uint64_t d, uint64_t *rem);
+
+uint64_t
+__udivmoddi4(uint64_t n, uint64_t d, uint64_t *rem)
+{
+	return udivmod64(n, d, rem);
+}

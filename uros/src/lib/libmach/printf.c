@@ -405,7 +405,7 @@ vprintf(const char *fmt, va_list args)
 	struct printf_state state;
 
 	state.index = state.total = 0;
-	_doprnt(fmt, args, outchar, (char *) &state);
+	_doprnt(fmt, args, 0, outchar, (char *) &state);
 
 	if (state.index != 0)
 	    flush(&state);

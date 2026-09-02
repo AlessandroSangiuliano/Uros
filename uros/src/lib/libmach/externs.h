@@ -46,6 +46,7 @@ extern char	**__environment;
  */
 extern void	_doprnt(const char *,
 			va_list,
+			int,			/* the base %r prints in */
 			void (*)(void *, int),	/* character output */
 			void *);
 

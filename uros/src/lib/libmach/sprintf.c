@@ -60,7 +60,7 @@ savechar(void *arg, int c)
 void
 vsprintf(char *s, const char *fmt, va_list args)
 {
-	_doprnt(fmt, args, savechar, &s);
+	_doprnt(fmt, args, 0, savechar, &s);
 	*s = 0;
 }
 
@@ -100,7 +100,7 @@ vsnprintf(char *s, size_t n, const char *fmt, va_list args)
 		return 0;
 	state.buf = s;
 	state.remaining = n;
-	_doprnt(fmt, args, savechar_n, &state);
+	_doprnt(fmt, args, 0, savechar_n, &state);
 	*state.buf = '\0';
 	return (state.buf - s);
 }
