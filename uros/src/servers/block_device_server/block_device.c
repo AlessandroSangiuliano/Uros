@@ -851,9 +851,51 @@ ds_device_get_status(mach_port_t device, dev_flavor_t flavor,
 		 * Returning sectors here was a latent bug that bounded the
 		 * default_pager swap to a few KB once paging moved through
 		 * BDS in Issue #184.
+		 *
+		 * ── The slot is an `int', and that is a 2 GiB ceiling (#420)
+		 *
+		 * 🔴 `dev_status_t' is `int *'.  A partition of 2 GiB or more
+		 * has a byte count that does not fit, and the cast that used
+		 * to be here turned it into a NEGATIVE number that every
+		 * caller then divided by the record size.  Nothing in the
+		 * tree has a partition that large yet, which is the only
+		 * reason it has never been seen.
+		 *
+		 * 🔑 AND IT IS #420's OWN DONE-WHEN, unnoticed: that issue
+		 * asks that a disk larger than 2 TiB "reports its true
+		 * capacity", and no disk above 2 GiB can report anything
+		 * true through this slot no matter how wide the block layer's
+		 * own sector types become.  Widening them is necessary and
+		 * not sufficient; the protocol has to move too.
+		 *
+		 * Until it does, say the one true thing the protocol can
+		 * express.  DEV_GET_SIZE_DEVICE_SIZE is documented as "0 if
+		 * unknown" in <device/device_types.h>, so an unrepresentable
+		 * size is reported as unknown -- a refusal in the protocol's
+		 * own vocabulary -- and the record size, which is still
+		 * answerable, is still answered.
 		 */
-		status[DEV_GET_SIZE_DEVICE_SIZE] =
-			(int)(part->num_sectors * SECTOR_SIZE);
+		/*
+		 * ⚠️ Derived from the destination type and not taken from
+		 * <limits.h>: #506 took the host's headers out of userland
+		 * and `-ffreestanding' does not put limits.h back, so an
+		 * include here would reintroduce exactly what that issue
+		 * removed.  `~0u >> 1' is the largest value an int slot can
+		 * carry, and it is one expression instead of a dependency.
+		 */
+		const uint64_t	slot_max = (uint64_t)(~0u >> 1);
+		uint64_t	bytes;
+
+		bytes = (uint64_t)part->num_sectors * SECTOR_SIZE;
+		if (bytes > slot_max) {
+			printf("blk: %s is %u sectors, and its size in bytes "
+			       "does not fit the int DEV_GET_SIZE returns — "
+			       "reporting it as unknown (#420)\n",
+			       part->name, (unsigned)part->num_sectors);
+			status[DEV_GET_SIZE_DEVICE_SIZE] = 0;
+		} else {
+			status[DEV_GET_SIZE_DEVICE_SIZE] = (int)bytes;
+		}
 		status[DEV_GET_SIZE_RECORD_SIZE] = (int)SECTOR_SIZE;
 		*status_count = DEV_GET_SIZE_COUNT;
 		return KERN_SUCCESS;
