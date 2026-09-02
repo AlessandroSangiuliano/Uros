@@ -46,6 +46,7 @@
 #include <device/device.h>
 #include <device/device_types.h>
 #include "device_master.h"	/* #432: a device has one driver */
+#include "ahci_batch.h"	/* #432: a disk reading into a page it does not own */
 #include <libcap.h>
 #include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
 
@@ -393,6 +394,79 @@ subsystem_name_is_not_a_pointer(void)
  * so.  The order between this task and the block server is an interleaving and
  * not an order (#425); silence would be indistinguishable from a pass.
  */
+
+/*
+ * ── A disk reads into a page belonging to a task with no device ──────
+ *
+ * 🔴 THIS IS THE `DEVICE_DMA_NO_BDF' HOLE, EXERCISED.  ext_server allocates a
+ * page cache and hands the block server the PHYSICAL addresses of it, because
+ * it owns no device and has no bus/device/function to name.  Once the disk is
+ * confined to what it was granted, those pages are in nobody's domain and the
+ * transfer is refused -- correct, diagnosable, and the filesystem stops.
+ *
+ * So this does exactly what ext_server does, in a test: allocate scatter-
+ * gather pages with DEVICE_DMA_NO_BDF, hand their addresses to a disk, and
+ * require the bytes to arrive.  What makes it work is the block server
+ * translating them through the kernel first -- the server that OWNS the device
+ * doing the mapping, which is the shape #432 asked for.
+ *
+ * 🔑 THE ORACLE IS NOT OURS.  0xEF53 at offset 1080 is the ext2 superblock
+ * magic, put there by mke2fs on the host when the image was built.  A test
+ * that checked a pattern it wrote itself would pass on a read that returned
+ * the buffer unchanged.
+ */
+static int
+a_disk_reads_into_a_foreign_page(mach_port_t device_port, mach_port_t handle,
+                                 const char *name)
+{
+    kern_return_t          kr;
+    vm_address_t           kva = 0, uva = 0;
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    io_buf_len_t           got = 0;
+    unsigned               magic;
+    int                    ok = 0;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt);
+    if (kr != KERN_SUCCESS || pa_cnt != 1) {
+        printf("cap_test: [12] a disk reads into a foreign page — DID NOT "
+               "RUN, no scatter-gather page (kr=%d)\n", (int)kr);
+        if (pa_list != NULL)
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                                pa_cnt * sizeof(vm_address_t));
+        return 1;
+    }
+
+    /*
+     * ⚠️ Wiped first, so "the read did nothing" cannot pass.  A page that
+     * arrives holding what the allocator left in it is a page nobody wrote.
+     */
+    memset((void *)uva, 0, 4096);
+
+    kr = device_read_phys(handle, D_READ, 0, 4096, pa_list, pa_cnt, &got);
+
+    magic = (unsigned)(((unsigned char *)uva)[1080])
+          | ((unsigned)(((unsigned char *)uva)[1081]) << 8);
+
+    if (kr == KERN_SUCCESS && magic == 0xEF53u) {
+        printf("cap_test: [12] %s DMA'd into a page this task owns and no "
+               "device was granted — 0x%x at +1080, the superblock magic "
+               "mke2fs wrote: the server that owns the disk mapped it\n",
+               name, magic);
+        ok = 1;
+    } else {
+        printf("cap_test: [12] WRONG — read of %s into a foreign page "
+               "answered kr=%d, %u bytes, and +1080 holds 0x%x rather than "
+               "0xef53\n", name, (int)kr, (unsigned)got, magic);
+    }
+
+    (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                        pa_cnt * sizeof(vm_address_t));
+    return ok;
+}
+
 static int
 a_device_has_one_driver(mach_port_t device_port)
 {
@@ -850,6 +924,11 @@ main(int argc, char **argv)
                 printf("cap_test: [3] positive open ok, handle=0x%x — "
                        "calling device_close\n",
                        (unsigned)handle);
+
+                if (!a_disk_reads_into_a_foreign_page(device_port, handle,
+                                                      found_name))
+                    pass = 0;
+
                 kern_return_t ckr2 = device_close(handle);
                 if (ckr2 == KERN_SUCCESS) {
                     printf("cap_test: [3] device_close ok — "

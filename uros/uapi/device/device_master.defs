@@ -448,6 +448,46 @@ routine device_ddb_break(
  * itself.  Those are the two cases in which the caller may go on to map for
  * it, which is what the caller is asking.
  */
+/*
+ * ── The server that owns the device does the mapping (#432) ──────────
+ *
+ * Make one page of a DMA buffer somebody ELSE allocated reachable by MY
+ * device, and answer the address to program.
+ *
+ * 🔴 THIS IS THE `DEVICE_DMA_NO_BDF' HOLE CLOSED.  ext_server allocates
+ * scatter-gather pages that the block server's disk reads, and names no device
+ * because it owns none -- so once that disk is confined the pages are in
+ * nobody's domain and every transfer into them is refused.  Correct,
+ * diagnosable, and useless.  The shape this issue asks for is that the server
+ * which owns the device maps them, and this is that call.
+ *
+ * 🔑 THE KERNEL VERIFIES THE PAGE.  `paddr' must belong to a live buffer this
+ * kernel allocated through device_dma_alloc or device_dma_alloc_sg -- anything
+ * else is refused.  Without that, "map this address for my device" would be a
+ * request to put ARBITRARY physical memory inside a device's reach, which is
+ * the whole thing being prevented.
+ *
+ * 🔑 And the WHOLE REGION is mapped on the first page of it, at consecutive
+ * addresses.  So the caller asks per page and pays once: after the first
+ * answer the rest are arithmetic, the kernel's record of the grant is one
+ * entry rather than a thousand, and the region is revoked in one step when its
+ * owner frees it.
+ *
+ * ⚠️ Only the task that drives `bdf' may call this — a device has one driver.
+ *
+ * ⚠️ It narrows and does not close.  Any holder of the master port can map any
+ * page the kernel allocated for DMA: not any page in the machine, which is
+ * where this started, but not only the ones somebody handed it either.  The
+ * difference is a capability naming the BUFFER, which is the design cap_server
+ * still owes this issue.
+ */
+routine device_dma_map_foreign(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	paddr		: vm_address_t;
+	out	dma_addr	: vm_address_t
+	);
+
 routine device_dma_owned(
 		master_port	: mach_port_t;
 	in	bdf		: natural_t;

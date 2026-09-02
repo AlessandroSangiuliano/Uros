@@ -14,12 +14,22 @@ project(cap_test C)
 set(UROS_MIG_USERLAND_INCLUDES
     -I${UROS_ARCH_INCLUDE}
     -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci
     -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers)
 
 set(_CT_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
 set(CT_MIG_GENERATED)
 add_mig_userland(${UROS_UAPI_DIR}/device/device_master.defs ${_CT_OUT} CT_MIG)
 list(REMOVE_ITEM CT_MIG_GENERATED ${_CT_OUT}/device_master_server.c)
+
+# ahci_batch.defs, user half: device_read_phys is how a client asks a disk to
+# DMA into pages the CLIENT owns, and #432 made that the interesting case --
+# the pages belong to a task with no device, and the disk is confined.
+set(CT_BATCH_GENERATED)
+add_mig_userland(${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci/ahci_batch.defs
+                 ${_CT_OUT} CT_BATCH)
+list(REMOVE_ITEM CT_BATCH_GENERATED ${_CT_OUT}/ahci_batch_server.c)
+list(APPEND CT_MIG_GENERATED ${CT_BATCH_GENERATED})
 
 add_executable(cap_test_server
   cap_test.c ${CT_MIG_GENERATED}
@@ -42,6 +52,7 @@ target_compile_definitions(cap_test_server PRIVATE
 
 target_include_directories(cap_test_server PRIVATE
   ${_CT_OUT}
+  ${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci
   ${CMAKE_SOURCE_DIR}/uapi
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_BINARY_DIR}/generated/include

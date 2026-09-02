@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "block_server.h"
+#include "device_master.h"	/* #432: map a client's page for my device */
 
 /*
  * UrMach capability verify trap (slot 37).  Declared here to keep BDS
@@ -737,6 +738,89 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
  * Zero-copy physical DMA read/write
  * ================================================================ */
 
+/* ================================================================
+ * A client's pages, made reachable by THIS server's device (#432)
+ * ================================================================ */
+
+/*
+ * 🔴 THE HOLE THIS CLOSES IS THE ONE #432 NAMED `DEVICE_DMA_NO_BDF'.
+ *
+ * ext_server allocates a scatter-gather page cache and passes the PHYSICAL
+ * addresses of those pages on every device_read_phys — because it owns no
+ * device and has no bus/device/function to name.  Once this server's disk is
+ * confined to what it was granted, those pages are in nobody's domain: the
+ * transfer is refused, the fault names the page, and the filesystem stops.
+ * Correct, diagnosable, and useless.
+ *
+ * 🔑 The shape the issue asks for is that the SERVER WHICH OWNS THE DEVICE
+ * does the mapping, and that server is this one.  So a client's physical
+ * address is translated here, into an address this controller can use, and
+ * the kernel is what checks that the page is one it handed out for DMA in the
+ * first place.
+ *
+ * 🔑 LAZILY, AND THAT IS WHY NO PROTOCOL CHANGED.  The alternative was for
+ * ext_server to register its buffer with this server once (#498) -- a new
+ * conversation between two servers, and a new thing for every future client to
+ * remember to do.  Translating on first sight needs neither: the addresses
+ * already arrive on every request, and the kernel maps the whole region behind
+ * the first page of it, so the cost is one call per page, once, and never
+ * again.
+ *
+ * ⚠️ Direct-mapped and small, with replacement rather than growth.  A miss
+ * costs one RPC that finds the region already mapped and answers arithmetic;
+ * an unbounded table would cost memory proportional to every client this
+ * server ever had.
+ */
+#define	BLK_DMA_CACHE		512u
+
+struct blk_dma_entry {
+	vm_address_t	pa;		/* zero when the slot is empty */
+	vm_address_t	dma;
+};
+
+static struct blk_dma_entry blk_dma_cache[MAX_CONTROLLERS][BLK_DMA_CACHE];
+
+static vm_address_t
+blk_dma_for(struct blk_controller *ctrl, vm_address_t pa)
+{
+	unsigned int	ci = (unsigned int)(ctrl - controllers);
+	unsigned int	slot = (unsigned int)((pa >> 12) & (BLK_DMA_CACHE - 1));
+	struct blk_dma_entry *e;
+	natural_t	bdf;
+	vm_address_t	dma = 0;
+	kern_return_t	kr;
+
+	if (ci >= MAX_CONTROLLERS)
+		return pa;
+
+	e = &blk_dma_cache[ci][slot];
+	if (e->pa == pa && e->pa != 0)
+		return e->dma;
+
+	bdf = (natural_t)((ctrl->pci_bus << 8) | (ctrl->pci_slot << 3)
+			  | ctrl->pci_func);
+
+	kr = device_dma_map_foreign(master_device, bdf, pa, &dma);
+	if (kr != KERN_SUCCESS) {
+		/*
+		 * ⚠️ The untranslated address is returned, and the transfer
+		 * will be refused by the engine rather than by this line.
+		 * Which is the right way round: a refusal the hardware makes
+		 * names the device and the page, and a silent substitution
+		 * here would turn a diagnosable event back into a timeout.
+		 */
+		printf("blk: the kernel would not map 0x%lx for %02x:%02x.%u "
+		       "(kr=%d) — the transfer will be refused\n",
+		       (unsigned long)pa, (unsigned)(bdf >> 8),
+		       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 7), kr);
+		return pa;
+	}
+
+	e->pa = pa;
+	e->dma = dma;
+	return dma;
+}
+
 kern_return_t
 ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		    mach_msg_type_name_t reply_poly,
@@ -764,13 +848,24 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 	if (recnum + nsectors > part->num_sectors)
 		return D_INVALID_SIZE;
 
-	if (ctrl->ops->read_sectors_phys(ctrl->priv,
+	{
+		vm_address_t	dma[32];
+		unsigned int	i;
+
+		if (phys_addrsCnt > 32)
+			return D_INVALID_SIZE;
+
+		for (i = 0; i < phys_addrsCnt; i++)
+			dma[i] = blk_dma_for(ctrl, phys_addrs[i]);
+
+		if (ctrl->ops->read_sectors_phys(ctrl->priv,
 					  part->disk_index,
 					  part->start_lba + recnum,
 					  nsectors,
-					  phys_addrs, phys_addrsCnt,
+					  dma, phys_addrsCnt,
 					  total) < 0)
-		return D_IO_ERROR;
+			return D_IO_ERROR;
+	}
 
 	*bytes_read = bytes_wanted;
 	return KERN_SUCCESS;

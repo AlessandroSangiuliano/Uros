@@ -675,6 +675,152 @@ ds_master_device_intr_enable(
 
 /* ---- DMA buffer allocation ---- */
 
+/*
+ * ── What the kernel handed out for DMA, and to whom (#432) ───────────
+ *
+ * 🔴 THE HOLE THIS CLOSES IS THE ONE #432 CALLED `DEVICE_DMA_NO_BDF'.
+ * ext_server allocates scatter-gather pages that the BLOCK SERVER's disk will
+ * read, and names no device because it owns none.  Once that disk is confined
+ * the pages are in nobody's domain, so the first transfer into them is
+ * refused -- correct, diagnosable, and useless: the filesystem stops working.
+ *
+ * The shape this issue asks for is that the server which OWNS the device does
+ * the mapping.  It cannot do that with raw physical addresses unless the
+ * kernel can tell a page it handed out for DMA from any other page in the
+ * machine -- otherwise "map this address for my device" is a request to put
+ * ARBITRARY physical memory inside a device's reach, which is the whole thing
+ * being prevented.  So the kernel remembers what it allocated.
+ *
+ * 🔑 A REGION AND NOT A PAGE.  A four-megabyte page cache is one region of a
+ * thousand frames, mapped for a device ONCE and given a thousand consecutive
+ * addresses -- so the record is one entry, the invalidation is one flush, and
+ * the driver's per-page question after the first is arithmetic.  A per-page
+ * record would have been a thousand entries per buffer in a table sized for
+ * sixteen.
+ *
+ * ⚠️ It narrows and does not close.  Any holder of the master port can map any
+ * page the kernel allocated for DMA -- not any page in the machine, which is
+ * where this started, but not only the ones somebody handed it either.  The
+ * difference between those two is a capability naming the BUFFER, and that is
+ * the same design cap_server owes this issue for devices.
+ */
+/*
+ * The biggest contiguous buffer this will record, in pages.  ⚠️ A CEILING and
+ * not a guess: the page list is built on the stack here, and a contiguous
+ * allocation big enough to overflow it is refused rather than left
+ * unrecorded.  Scatter-gather has no such limit -- its list is already in
+ * memory the kernel allocated for it.
+ */
+#define	DEVICE_CONTIG_MAX_PAGES	64
+
+#define	DEVICE_MAX_DMA_REGIONS	16
+#define	DEVICE_MAX_REGION_USERS	4
+
+struct dma_region {
+	vm_offset_t	kva;		/* zero when the slot is free    */
+	vm_size_t	size;
+	unsigned int	npages;
+	vm_offset_t	*pa;		/* npages entries, kalloc'd      */
+
+	/* Which devices have been given this region, and where. */
+	unsigned int	nusers;
+	struct {
+		natural_t	bdf;
+		vm_offset_t	dma;	/* address of page zero          */
+	} user[DEVICE_MAX_REGION_USERS];
+};
+
+static struct dma_region dma_region[DEVICE_MAX_DMA_REGIONS];
+
+/*
+ * Remember one allocation.  Answers zero when there is no room, and the caller
+ * must then fail the allocation: a region that is not recorded is one no
+ * device can ever be given, and one whose pages nothing will revoke.
+ */
+static int
+dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
+	       unsigned int npages)
+{
+	struct dma_region *r = 0;
+	unsigned int i;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva == 0) {
+			r = &dma_region[i];
+			break;
+		}
+
+	if (r == 0)
+		return 0;
+
+	r->pa = (vm_offset_t *) kalloc(npages * sizeof(vm_offset_t));
+	if (r->pa == 0)
+		return 0;
+
+	for (i = 0; i < npages; i++)
+		r->pa[i] = pa[i];
+
+	r->kva = kva;
+	r->size = size;
+	r->npages = npages;
+	r->nusers = 0;
+	return 1;
+}
+
+/* The region holding this physical page, and which page of it, or null. */
+static struct dma_region *
+dma_region_of(vm_offset_t pa, unsigned int *index)
+{
+	unsigned int i, p;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
+		if (dma_region[i].kva == 0)
+			continue;
+
+		for (p = 0; p < dma_region[i].npages; p++)
+			if (dma_region[i].pa[p] == (pa & ~(vm_offset_t)PAGE_MASK)) {
+				*index = p;
+				return &dma_region[i];
+			}
+	}
+
+	return 0;
+}
+
+/*
+ * Forget an allocation, taking it back from every device it was given to.
+ *
+ * 🔴 THE FOREIGN MAPPINGS GO FIRST, and they are the reason this exists rather
+ * than the free path simply revoking its own grant.  A region freed while
+ * another device's domain still maps it is memory the VM can hand to a task's
+ * stack while a disk can still write it -- which is the exact reach #432
+ * exists to remove, reached by freeing in the wrong order.
+ */
+static void
+dma_region_drop(vm_offset_t kva)
+{
+	unsigned int i, u;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
+		struct dma_region *r = &dma_region[i];
+
+		if (r->kva != kva)
+			continue;
+
+		for (u = 0; u < r->nusers; u++)
+			(void) device_md_dma_revoke(r->user[u].bdf,
+						    (unsigned long)r->pa[0],
+						    (unsigned long)r->size);
+
+		kfree((vm_offset_t)r->pa, r->npages * sizeof(vm_offset_t));
+		r->kva = 0;
+		r->pa = 0;
+		r->npages = 0;
+		r->nusers = 0;
+		return;
+	}
+}
+
 
 /*
  * ── What a DMA buffer's `bdf' says (#432) ────────────────────────────
@@ -780,12 +926,37 @@ ds_master_device_dma_alloc(
 	 * owns, and the driver's own error path has no way to tell that from
 	 * the disk being broken.  Failing the allocation says it once, here.
 	 */
+	/*
+	 * ⚠️ RECORDED BEFORE IT IS GRANTED, and failing to record fails the
+	 * allocation.  A region the kernel does not remember is one no other
+	 * server can ever be given and one whose foreign mappings nothing will
+	 * revoke -- so an unrecorded buffer is worse than no buffer.
+	 */
+	{
+		vm_offset_t	pages[DEVICE_CONTIG_MAX_PAGES];
+		unsigned int	n = (unsigned int)(size / PAGE_SIZE), i;
+
+		if (n == 0 || n > DEVICE_CONTIG_MAX_PAGES) {
+			kmem_free(kernel_map, kva, size);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+
+		for (i = 0; i < n; i++)
+			pages[i] = pa + (vm_offset_t)i * PAGE_SIZE;
+
+		if (!dma_region_add(kva, size, pages, n)) {
+			kmem_free(kernel_map, kva, size);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+	}
+
 	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
 		unsigned long iova = 0;
 
 		if (!device_md_dma_grant(bdf, (unsigned long)pa,
 					 (unsigned long)size, TRUE, TRUE,
 					 &iova)) {
+			dma_region_drop(kva);
 			kmem_free(kernel_map, kva, size);
 			return KERN_FAILURE;
 		}
@@ -839,6 +1010,15 @@ ds_master_device_dma_free(
 			(void) device_md_dma_revoke(bdf, (unsigned long)pa,
 						    (unsigned long)size);
 	}
+
+	/*
+	 * 🔴 AND EVERY DEVICE THIS REGION WAS LENT TO, before the memory goes
+	 * back.  The owner's own grant is above; this is the block server's
+	 * disk still reaching a filesystem's page cache.  Freed with either
+	 * one still mapped, the page returns to the VM and can become a task's
+	 * stack while a device can still write it.
+	 */
+	dma_region_drop((vm_offset_t)vaddr);
 
 	kmem_free(kernel_map, (vm_offset_t)vaddr, size);
 	return KERN_SUCCESS;
@@ -1023,12 +1203,32 @@ ds_master_device_dma_alloc_sg(
 	 * worst of both -- the driver gets an address list it believes, and
 	 * the transfer faults on whichever entry was not reached.
 	 */
+	/*
+	 * 🔴 RECORDED BEFORE THE LIST IS REWRITTEN, and this is the whole
+	 * reason the recording is here and not beside the allocation.  Below
+	 * this point `list' holds ADDRESSES THE DEVICE USES; the kernel's
+	 * record has to hold the physical frames, because that is what another
+	 * server will name when it asks to map this buffer for its own device.
+	 * A recording taken afterwards would remember one domain's IOVAs as if
+	 * they were physical memory.
+	 */
+	if (!dma_region_add(kva, size, (const vm_offset_t *)list, n_pages)) {
+		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
+				     FALSE);
+		kmem_free(ipc_kernel_map, list, list_size);
+		kmem_free(kernel_map, kva, size);
+		task_deallocate(task);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
 	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
 		unsigned long iova = 0;
 
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)list,
 					       n_pages, TRUE, TRUE, &iova)) {
+			dma_region_drop(kva);
 			(void) vm_map_remove(map, uva, uva + size,
 					     VM_MAP_NO_FLAGS);
 			(void) vm_map_unwire(ipc_kernel_map, list,
@@ -1435,5 +1635,91 @@ ds_master_device_dma_owned(
 		return kr;
 
 	*by_other = (natural_t)device_claimed_by_other(bdf);
+	return KERN_SUCCESS;
+}
+
+/*
+ * ── The server that owns the device maps somebody else's buffer ──────
+ *
+ * See the note on device_dma_map_foreign in <device/device_master.defs> for
+ * why this exists.  In one line: the block server's disk has to read the
+ * filesystem's page cache, and the filesystem owns no device to name.
+ */
+kern_return_t
+ds_master_device_dma_map_foreign(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	vm_address_t		paddr,
+	vm_address_t		*dma_addr)
+{
+	kern_return_t		kr;
+	struct dma_region	*r;
+	unsigned int		page, u;
+	unsigned long		base = 0;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (bdf == DEVICE_DMA_NO_BDF)
+		return KERN_INVALID_ARGUMENT;
+
+	/* A device has one driver, and only that driver may map for it. */
+	kr = claim_device(bdf);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	/*
+	 * 🔴 THE PAGE MUST BE ONE THIS KERNEL HANDED OUT FOR DMA.  Without
+	 * this the call is "put any physical address inside my device's
+	 * reach", which is the property the whole issue exists to create.
+	 */
+	r = dma_region_of((vm_offset_t)paddr, &page);
+	if (r == 0)
+		return KERN_INVALID_ADDRESS;
+
+	/*
+	 * ⚠️ On a machine that polices nothing, the physical address IS the
+	 * answer and no mapping happens.  Reported as success because that is
+	 * what it is: the caller asked for an address its device can use, and
+	 * on such a machine every address is one.
+	 */
+	if (!device_md_dma_isolates()) {
+		*dma_addr = paddr;
+		return KERN_SUCCESS;
+	}
+
+	for (u = 0; u < r->nusers; u++)
+		if (r->user[u].bdf == bdf) {
+			base = (unsigned long)r->user[u].dma;
+			break;
+		}
+
+	if (u == r->nusers) {
+		if (r->nusers >= DEVICE_MAX_REGION_USERS)
+			return KERN_RESOURCE_SHORTAGE;
+
+		/*
+		 * 🔑 THE WHOLE REGION AT ONCE, at consecutive addresses.  The
+		 * caller asks page by page and pays for it once: everything
+		 * after this is the arithmetic below.
+		 */
+		if (!device_md_dma_grant_pages(bdf,
+					       (const unsigned long *)r->pa,
+					       r->npages, TRUE, TRUE, &base))
+			return KERN_FAILURE;
+
+		r->user[r->nusers].bdf = bdf;
+		r->user[r->nusers].dma = (vm_offset_t)base;
+		r->nusers++;
+
+		printf("device: %02x:%02x.%u may now read a %u-page buffer it "
+		       "did not allocate, at 0x%lx — mapped by the server that "
+		       "owns the device, not by the one that owns the memory\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), r->npages, base);
+	}
+
+	*dma_addr = (vm_address_t)(base + (unsigned long)page * PAGE_SIZE);
 	return KERN_SUCCESS;
 }
