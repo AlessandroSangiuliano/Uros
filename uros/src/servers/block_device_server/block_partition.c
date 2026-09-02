@@ -120,6 +120,9 @@ blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		       "exposing whole disk\n",
 		       prefix, disk_idx, mbr->signature);
 		if (n_partitions >= MAX_PARTITIONS) {
+			printf("blk: the partition table is full at %d — %s "
+			       "disk %d is NOT being published\n",
+			       MAX_PARTITIONS, prefix, disk_idx);
 			vm_deallocate(mach_task_self(), buf, buf_size);
 			return 0;
 		}
@@ -170,8 +173,19 @@ blk_read_mbr(struct blk_controller *ctrl, int disk_idx,
 		if (p->systid != MBR_TYPE_LINUX &&
 		    p->systid != MBR_TYPE_LINUX_SWAP)
 			continue;
-		if (n_partitions >= MAX_PARTITIONS)
+		if (n_partitions >= MAX_PARTITIONS) {
+			/*
+			 * 🔴 Said, not skipped.  The limit is real and this
+			 * is where it bites; a partition that quietly does
+			 * not appear is indistinguishable from a disk that
+			 * does not have one.
+			 */
+			printf("blk: the partition table is full at %d — "
+			       "%s disk %d partition %d and any after it are "
+			       "NOT being published\n",
+			       MAX_PARTITIONS, prefix, disk_idx, i + 1);
 			break;
+		}
 
 		partitions[n_partitions].ctrl       = ctrl;
 		partitions[n_partitions].disk_index = disk_idx;

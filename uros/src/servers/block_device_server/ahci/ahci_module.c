@@ -181,8 +181,20 @@ ahci_port_scan(struct ahci_state *st)
 		if ((port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
 		    != SSTS_DET_PRESENT)
 			continue;
-		if (st->n_ports >= MAX_AHCI_PORTS)
+		if (st->n_ports >= MAX_AHCI_PORTS) {
+			/*
+			 * 🔴 A disk dropped without a word is a disk that does
+			 * not exist as far as anything above here can tell.
+			 * This used to `break' in silence, so a controller
+			 * with more ports than the driver holds simply had
+			 * fewer disks, and nothing anywhere said which ones.
+			 */
+			printf("ahci: PI reports more ports than the %u this "
+			       "driver holds — port %d and any after it are "
+			       "NOT being used\n",
+			       (unsigned)MAX_AHCI_PORTS, port);
 			break;
+		}
 
 		printf("ahci: device on port %d  sig=0x%08X\n",
 		       port, port_read(st, port, PORT_SIG));

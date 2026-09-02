@@ -31,11 +31,48 @@
 #include <mach.h>
 #include "ahci.h"
 
+/*
+ * ⚠️ Included here and not left to the .c file's include order, because the
+ * _Static_assert below needs MAX_DISKS_PER_CTRL and an assertion that
+ * silently does not compile is not an assertion.
+ */
+#include "../block_server.h"
+
 /* ================================================================
  * Per-port state
  * ================================================================ */
 
-#define MAX_AHCI_PORTS		4
+/*
+ * 🔴 THIRTY-TWO, BECAUSE THAT IS WHAT THE HARDWARE CAN HAVE.
+ *
+ * PxPI -- the Ports Implemented register -- is a 32-bit mask with one bit per
+ * port, so an AHCI controller has at most 32 and QEMU's ich9 already reports
+ * six (PI=0x3f).  This was 4, and nothing anywhere said why: `git log -S'
+ * finds it introduced by #396, a commit that MOVED the file.  It is an
+ * inherited number, not a decision, and a driver that stops looking after the
+ * fourth disk on a controller that has six is wrong on hardware we already
+ * boot on.
+ *
+ * ⚠️ The cost is the struct array and nothing else.  A port's command list
+ * and FIS area are allocated when the port is found to have a device, so
+ * ports that do not exist cost their ahci_port_info and no DMA.
+ */
+#define MAX_AHCI_PORTS		32
+
+/*
+ * 🔑 AND THE FRAMEWORK HAS TO BE ABLE TO HOLD THEM.
+ *
+ * get_disks() writes into an array the framework owns, bounded by
+ * MAX_DISKS_PER_CTRL, and these two numbers were equal by coincidence: they
+ * live in different files, neither mentions the other, and nothing tied
+ * them.  Raising this one alone -- the natural thing to do after reading the
+ * specification -- would have written past the end of ctrl->disks[].
+ *
+ * So the relationship is stated where it can fail at compile time rather
+ * than remembered.
+ */
+_Static_assert(MAX_AHCI_PORTS <= MAX_DISKS_PER_CTRL,
+	       "get_disks() fills an array of MAX_DISKS_PER_CTRL and no more");
 
 /*
  * 🔴 THE ADDRESSES ARE vm_address_t (#520), for the reason spelled out in

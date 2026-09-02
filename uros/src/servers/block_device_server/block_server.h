@@ -44,7 +44,15 @@
 #define SECTOR_SIZE		512u
 
 #define MAX_CONTROLLERS		8
-#define MAX_DISKS_PER_CTRL	4
+/*
+ * 🔴 What one controller can present.  AHCI's PxPI is a 32-bit mask, so a
+ * SATA controller has at most 32 ports and QEMU's ich9 already reports six.
+ * This was 4 and the AHCI driver's own port limit was also 4, in another file
+ * that did not mention this one -- equal by coincidence, and the coincidence
+ * was load-bearing: get_disks() fills this array.  ahci_module.h now says so
+ * in a _Static_assert.
+ */
+#define MAX_DISKS_PER_CTRL	32
 #define MAX_MBR_PARTS		4
 #define MAX_PARTITIONS		32
 
