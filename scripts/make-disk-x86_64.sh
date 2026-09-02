@@ -117,8 +117,11 @@ BOOT_ENTRY="${UROS_X86_64_BOOT_ENTRY:-0}"
 #   normal configfile          the menu, and grub.cfg's `source'
 #   multiboot2                 both `multiboot2' and `module2'
 #   boot serial terminal       the rest of what grub.cfg actually says
-#   search*                    find the partition by label when it is not hd0
 #   echo test ls cat halt      for the person at a rescue prompt
+#   search*                    NOT used by the boot -- see the prefix comment
+#                              below -- but kept for the rescue prompt, where
+#                              finding a partition by label is the first thing
+#                              anyone needs and no module can be loaded
 GRUB_MODULES="biosdisk part_msdos ext2 normal configfile multiboot2 boot
 	serial terminal search search_label search_fs_uuid search_fs_file
 	echo test ls cat halt reboot"
@@ -208,17 +211,39 @@ echo "set default=$BOOT_ENTRY" > "$WORK/entry.cfg"
 	done
 } | debugfs -w -f /dev/stdin "$PART_IMG" >/dev/null 2>&1
 
-# The prefix is where GRUB looks for grub.cfg once the core image is running.
+# ── Where GRUB looks for grub.cfg, and why there is nothing else here ──
 #
-# The embedded config runs before that and moves it: kern/main.c sets prefix
-# and root from the compiled-in value FIRST, so if the search finds nothing
-# $root still names the partition the BIOS booted from and the second line is
-# a no-op.  Which is the whole reason for doing it in this order -- on this
-# machine hd0 is the only disk, on the bare-metal one it is a USB stick and
-# the number is whatever the firmware felt like.
+# The prefix is compiled into the core image and that is the whole mechanism:
+# `(hd0,msdos1)/boot/grub'.  hd0 is not a guess -- GRUB's biosdisk numbers the
+# BIOS drives and hd0 is the one whose boot sector the firmware just ran, which
+# is this disk by construction, since this disk is the only thing QEMU is given
+# and on real hardware it is whatever the boot order picked.  One disk, one
+# partition, and the partition number is fixed by the sfdisk call below.
+#
+# 🔴 THERE IS NO `search' AND NO FALLBACK, AND THAT IS A LIMIT OF THE PARSER,
+# not a choice.  Three forms were written here before this one, each with a
+# comment explaining why it worked, and all three were refuted by running them:
+#
+#	search --set=root --label L	a failed search CLEARS root, so the
+#	set prefix=($root)/boot/grub	next line builds `()/boot/grub'
+#
+#	search --set=uros_root ...	a failed search raises a GRUB error
+#	if [ -n "$uros_root" ] ...	and the config stops at that line
+#
+#	if search --set=uros_root ...	`Unknown command `if'.'
+#
+# 🔑 The last one names the reason for all three.  The embedded config runs
+# BEFORE `normal' is loaded, and `normal' is what provides the script engine --
+# `if', `fi', `test', command status.  What runs it is the rescue parser, which
+# executes simple commands and nothing else.  A conditional fallback is not
+# expressible in this file, so the honest thing is to not pretend to have one.
+#
+# ⚠️ Found by accident, which is the part worth keeping: not by testing the
+# fallback, but by a disk damaged for an unrelated check that stopped
+# satisfying the search as a side effect.  Three commits' worth of reasoning
+# about a code path that had never once been executed.
 cat > "$WORK/embedded.cfg" <<EOF
-search --no-floppy --set=root --label $PART_LABEL
-set prefix=(\$root)/boot/grub
+set root=(hd0,msdos1)
 EOF
 
 grub-mkimage -O i386-pc -d "$GRUB_LIB" \
