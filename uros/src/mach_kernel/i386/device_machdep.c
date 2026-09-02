@@ -293,3 +293,61 @@ device_md_msi_unregister(unsigned int slot)
 {
 	(void)slot;
 }
+
+/*
+ * 🔴 THIS MACHINE DOES NOT POLICE DMA, and says so rather than failing later.
+ *
+ * i386 here has no IOMMU and there is no plan to give it one: #432's argument
+ * is that userspace drivers need remapping hardware to make their isolation a
+ * security property rather than a convention, and the hardware that argument
+ * is about is x86-64's.  So a driver on this target programs a device with a
+ * physical address and the device reaches all of physical memory -- which is
+ * what this tree has always done and is now, for the first time, a thing the
+ * kernel can be ASKED about instead of a thing nobody mentions.
+ *
+ * ⚠️ Which is why the grant answers zero and does not pretend to succeed.  A
+ * grant that returned success here would tell its caller a buffer is confined
+ * when nothing confines it, and the caller would report isolation it does not
+ * have -- a lie with a paper trail, which is worse than the honest gap.
+ */
+int
+device_md_dma_isolates(void)
+{
+	return 0;
+}
+
+int
+device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
+		    int read, int write)
+{
+	(void)bdf;
+	(void)pa;
+	(void)size;
+	(void)read;
+	(void)write;
+	return 0;
+}
+
+int
+device_md_dma_revoke(unsigned int bdf, unsigned long pa, unsigned long size)
+{
+	(void)bdf;
+	(void)pa;
+	(void)size;
+	return 0;
+}
+
+unsigned
+device_md_dma_faults(unsigned int bdf, unsigned long *last)
+{
+	(void)bdf;
+	(void)last;
+	return 0;
+}
+
+int
+device_md_dma_confined(unsigned int bdf)
+{
+	(void)bdf;
+	return 0;
+}

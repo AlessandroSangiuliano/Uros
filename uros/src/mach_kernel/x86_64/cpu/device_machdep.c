@@ -26,12 +26,14 @@
 #include <mach/boolean.h>	/* <ddb/ddb.h> declares in boolean_t */
 
 #include <cpu/acpi.h>
+#include <cpu/iommu.h>	/* #432: what polices DMA, if anything */
 #include <cpu/ioapic.h>
 #include <cpu/lapic.h>	/* lapic_eoi, and which processor to route to */
 #include <cpu/pci_cfg.h>
 #include <cpu/pci_msix.h>	/* #457: a device's own table */
 #include <cpu/regs.h>	/* inb/outl and the other widths */
 #include <ddb/ddb.h>	/* whether a debugger was asked for */
+#include <kern/misc_protos.h>	/* printf */
 #include <trap/trap.h>	/* the vector table, and the replay path */
 
 extern void	Debugger(const char *message);
@@ -515,4 +517,107 @@ device_md_msi_unregister(unsigned int slot)
 	}
 
 	msi_release_vector(slot);
+}
+
+/*
+ * ── What polices this machine's DMA (#432 stage 3d) ──────────────────
+ *
+ * The three calls device_master.c needs to confine a device, and the whole of
+ * what the machine-independent side has to know about remapping hardware: it
+ * asks whether there is any, and grants and revokes ranges by physical
+ * address.  Which vendor, how many engines, what a page table looks like and
+ * how an engine is made to forget are all below this line.
+ *
+ * 🔑 A DEVICE IS NAMED BY ITS BUS ADDRESS AND NOTHING ELSE.  That is the name
+ * an IOMMU indexes by, so it is the name that crosses here -- no handle, no
+ * pointer, nothing this kernel invented and would then have to translate.
+ */
+int
+device_md_dma_isolates(void)
+{
+	return iommu_can_isolate();
+}
+
+int
+device_md_dma_grant(unsigned int bdf, unsigned long pa, unsigned long size,
+		    int read, int write)
+{
+	unsigned before;
+	int ok;
+
+	/*
+	 * ⚠️ The width is checked here rather than trusted from the caller.  A
+	 * bdf is sixteen bits on the bus and the RPC that carries it is a
+	 * natural_t, so a caller with a stale idea of the encoding would index
+	 * the device table with a number that is not a device -- which on AMD
+	 * lands in a 65536-entry table and reaches whatever entry that is.
+	 */
+	if (bdf > 0xFFFFu)
+		return 0;
+
+	/*
+	 * 🔑 SAID ONCE PER DEVICE, on the grant that moves it.  A device
+	 * leaving pass-through is the single most consequential thing #432
+	 * does -- from that instant it reaches what it was given and nothing
+	 * else -- and it happens deep inside an RPC, at a moment no boot log
+	 * would otherwise mention.  Printing it on every grant would bury it;
+	 * printing it when the count of domains goes up names each device
+	 * exactly once.
+	 */
+	before = iommu_domain_count();
+	ok = iommu_grant((uint16_t)bdf, (uint64_t)pa, (uint64_t)size,
+			 read, write);
+
+	if (ok && iommu_domain_count() != before)
+		printf("iommu: %02x:%02x.%u is now in a domain of its own, "
+		       "reaching 0x%lx..0x%lx and nothing else\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)pa,
+		       (unsigned long)(pa + size - 1));
+
+	return ok;
+}
+
+int
+device_md_dma_revoke(unsigned int bdf, unsigned long pa, unsigned long size)
+{
+	if (bdf > 0xFFFFu)
+		return 0;
+
+	return iommu_revoke((uint16_t)bdf, (uint64_t)pa, (uint64_t)size);
+}
+
+unsigned
+device_md_dma_faults(unsigned int bdf, unsigned long *last)
+{
+	uint64_t address = 0;
+	unsigned n;
+
+	if (bdf > 0xFFFFu)
+		return 0;
+
+	/*
+	 * 🔴 DRAINED HERE, AND THAT IS THE POINT OF THE CALL.  The engines'
+	 * fault records are otherwise read when a processor next goes idle,
+	 * which is after the driver has given up -- so a driver asking "was I
+	 * refused" would be told no about the refusal it is asking about.
+	 * Reporting as well as draining, because the kernel's log is where
+	 * anybody reading this afterwards will look.
+	 */
+	(void) iommu_fault_report();
+
+	n = iommu_faults_for((uint16_t)bdf, &address);
+	if (n != 0 && last != 0)
+		*last = (unsigned long)address;
+
+	return n;
+}
+
+int
+device_md_dma_confined(unsigned int bdf)
+{
+	if (bdf > 0xFFFFu)
+		return 0;
+
+	return iommu_domain_of((uint16_t)bdf) != 0;
 }

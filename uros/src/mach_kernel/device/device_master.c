@@ -597,17 +597,30 @@ ds_master_device_intr_enable(
  * physical address, so the isolation the driver model claims was enforced by
  * the driver being well behaved.
  *
- * 🔴 IT IS CARRIED AND NOT YET ACTED ON.  These calls still return the
- * physical address, exactly as before, so a machine that booted before this
- * boots after it unchanged.  That is deliberate: the plumbing lands on its
- * own, and the step that builds a domain per device is the one that can stop
- * a machine.  There is no recorder here doing nothing to look busy -- the
- * argument is simply not used yet, and each function says so.
+ * 🔴 AND IT IS NOW ACTED ON, ON A MACHINE THAT CAN (#432 stage 3d).  Every
+ * page allocated for a named device is put in that device's IOMMU domain, and
+ * the first such page is what takes the device off pass-through -- after which
+ * it reaches what it has been granted and nothing else in the machine.
  *
- * ⚠️ DEVICE_DMA_NO_BDF is a caller with no device of its own, and it is
- * accepted rather than refused: ext_server allocates pages that the BLOCK
- * SERVER's disk will read.  The right answer is for the server that owns the
- * device to do the mapping, which is a protocol change this does not attempt.
+ * 🔑 THE ADDRESS RETURNED DOES NOT CHANGE.  A grant maps the buffer at its own
+ * physical address, so every driver goes on programming what it always did --
+ * what changed is that every OTHER address now faults for that device.  The
+ * step that makes the returned number meaningless outside the domain is a
+ * separate one, because it is a protocol change and this is not.
+ *
+ * ⚠️ A machine with no remapping hardware, or booted without -I, answers no to
+ * device_md_dma_isolates() and nothing below happens.  That is i386 always,
+ * and x86-64 by default: the isolation is opt-in until #432 closes, so a
+ * kernel that cannot survive it can still be booted to find out why.
+ *
+ * 🔴 DEVICE_DMA_NO_BDF IS A HOLE, AND IT IS NOW A VISIBLE ONE.  ext_server
+ * allocates pages that the BLOCK SERVER's disk will read, and names no device
+ * because it owns none -- so those pages are granted to nobody, and the first
+ * time a disk in a real domain is told to read into one, the transfer is
+ * REFUSED and the fault names the address.  That is the correct behaviour and
+ * an honest report of a protocol that is wrong: the server that owns the
+ * device has to be the one that maps.  Before this the same mistake was made
+ * silently and worked.
  */
 kern_return_t
 ds_master_device_dma_alloc(
@@ -620,8 +633,6 @@ ds_master_device_dma_alloc(
 	kern_return_t kr;
 	vm_offset_t kva;
 	vm_offset_t pa;
-
-	(void) bdf;		/* carried, not yet acted on -- see above */
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -650,6 +661,20 @@ ds_master_device_dma_alloc(
 		return KERN_FAILURE;
 	}
 
+	/*
+	 * ⚠️ The grant is a hard failure and not a warning.  A buffer the
+	 * device cannot reach is not a slower buffer -- it is one every
+	 * transfer into it faults on, at an address the driver believes it
+	 * owns, and the driver's own error path has no way to tell that from
+	 * the disk being broken.  Failing the allocation says it once, here.
+	 */
+	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()
+	    && !device_md_dma_grant(bdf, (unsigned long)pa,
+				    (unsigned long)size, TRUE, TRUE)) {
+		kmem_free(kernel_map, kva, size);
+		return KERN_FAILURE;
+	}
+
 	*vaddr_out = kva;		/* #427: no narrowing cast */
 	*paddr_out = pa;
 	return KERN_SUCCESS;
@@ -664,8 +689,6 @@ ds_master_device_dma_free(
 {
 	kern_return_t kr;
 
-	(void) bdf;		/* carried, not yet acted on -- see above */
-
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
 		return kr;
@@ -674,6 +697,26 @@ ds_master_device_dma_free(
 		return KERN_INVALID_ARGUMENT;
 
 	size = round_page(size);
+
+	/*
+	 * 🔴 REVOKED BEFORE THE MEMORY IS GIVEN BACK, and the order is the
+	 * whole of it.  Freed first, the page returns to the VM and can be
+	 * handed to anything -- a task's stack, another driver's buffer --
+	 * while the device is still able to write it, and for as long as
+	 * nobody happens to revoke.  That is precisely the reach this issue
+	 * exists to remove, arrived at by tidying up in the wrong order.
+	 *
+	 * ⚠️ The physical address is extracted while the mapping still exists,
+	 * for the same reason.  After kmem_free there is nothing to ask.
+	 */
+	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
+		vm_offset_t pa = pmap_extract(pmap_kernel(),
+					      (vm_offset_t)vaddr);
+
+		if (pa != 0)
+			(void) device_md_dma_revoke(bdf, (unsigned long)pa,
+						    (unsigned long)size);
+	}
 
 	kmem_free(kernel_map, (vm_offset_t)vaddr, size);
 	return KERN_SUCCESS;
@@ -723,8 +766,6 @@ ds_master_device_dma_alloc_sg(
 	vm_offset_t	list;
 	vm_size_t	list_bytes, list_size;
 	vm_map_copy_t	list_copy;
-
-	(void) bdf;		/* carried, not yet acted on -- see above */
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -831,6 +872,34 @@ ds_master_device_dma_alloc_sg(
 		 * one, so a page above four gigabytes is named rather than
 		 * silently folded into the low half of memory.
 		 */
+		/*
+		 * 🔴 EVERY PAGE, ONE AT A TIME, because that is what a
+		 * scatter-gather buffer IS.  These pages are contiguous in the
+		 * kernel's address space and in the task's, and not in
+		 * physical memory -- granting the range from the first address
+		 * would map whatever lies between them, which is the ordinary
+		 * case here and could be anything.
+		 *
+		 * ⚠️ The failure path is the one above, whole: the range is
+		 * removed and the pages freed.  A partially granted
+		 * scatter-gather list is the worst of both -- the driver gets
+		 * an address list it believes, and the transfer faults on
+		 * whichever entry was not reached.
+		 */
+		if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()
+		    && !device_md_dma_grant(bdf, (unsigned long)pa,
+					    (unsigned long)PAGE_SIZE,
+					    TRUE, TRUE)) {
+			(void) vm_map_remove(map, uva, uva + size,
+					     VM_MAP_NO_FLAGS);
+			(void) vm_map_unwire(ipc_kernel_map, list,
+					     list + list_size, FALSE);
+			kmem_free(ipc_kernel_map, list, list_size);
+			kmem_free(kernel_map, kva, size);
+			task_deallocate(task);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+
 		((vm_address_t *)list)[i] = pa;
 	}
 
@@ -1106,5 +1175,46 @@ ds_master_device_ddb_break(
 		return KERN_FAILURE;
 
 	printf("ddb: console break (Ctrl+D) session ended, resuming\n");
+	return KERN_SUCCESS;
+}
+
+/*
+ * ── Was it the IOMMU? (#432 stage 3d) ────────────────────────────────
+ *
+ * 🔑 A DRIVER'S FAILED TRANSFER HAS TWO ORDINARY EXPLANATIONS and the device
+ * reports neither.  Either the hardware stopped answering, or the driver
+ * programmed an address it was never granted -- and once #432 is doing its
+ * job, the second one produces exactly the symptoms of the first: no
+ * completion, no error bit, a command that simply never finishes.  The
+ * difference is written down in the engine's fault records, inside the kernel,
+ * where no driver can see it.
+ *
+ * 🔴 AND `confined' IS A SEPARATE FACT, not one that can be read off the
+ * count.  Zero refusals is the answer on a machine with no remapping hardware
+ * AND on a device that is behaving, and a self-test written to demonstrate the
+ * isolation must tell those apart -- otherwise "the DMA was allowed" reads as
+ * a pass on exactly the machine where it is the failure.
+ */
+kern_return_t
+ds_master_device_dma_faults(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	natural_t		*confined,
+	natural_t		*count,
+	vm_address_t		*address)
+{
+	kern_return_t kr;
+	unsigned long last = 0;
+	unsigned n;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	n = device_md_dma_faults(bdf, &last);
+
+	*confined = (natural_t)device_md_dma_confined(bdf);
+	*count = (natural_t)n;
+	*address = (vm_address_t)last;
 	return KERN_SUCCESS;
 }

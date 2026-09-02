@@ -338,3 +338,36 @@ routine device_io_port_write(
 routine device_ddb_break(
 		master_port	: mach_port_t
 	);
+
+/*
+ * ── Was it the IOMMU that refused my transfer? (#432 stage 3d) ────────
+ *
+ * How many DMA requests from this device the remapping hardware has blocked,
+ * and the last address it blocked.
+ *
+ * 🔴 A DRIVER CANNOT TELL THIS FROM A BROKEN DEVICE, and that is the whole
+ * reason this exists.  A transfer refused by the IOMMU does not complete: the
+ * command times out, the port reports nothing useful, and every symptom is
+ * identical to a disk that stopped answering.  What is different is knowable
+ * only inside the kernel, where the engine writes its fault records -- so
+ * either the kernel offers the answer or every driver debugs the wrong thing.
+ *
+ * 🔴 `confined' IS WHY THERE ARE THREE ANSWERS AND NOT TWO.  A count of zero
+ * means "the IOMMU did not refuse you", and that is true on a machine with no
+ * remapping hardware, on one booted without it, and on one where the device is
+ * behaving -- three states a driver must tell apart.  Without this field, a
+ * self-test that DEMONSTRATES the isolation cannot tell "the transfer was
+ * allowed because nothing polices this machine" from "the transfer was allowed
+ * although something does", and the second is a security failure while the
+ * first is a Tuesday.
+ *
+ * `count' is since boot and does not wrap with the kernel's log; `address' is
+ * the last one recorded and is meaningless when the count is zero.
+ */
+routine device_dma_faults(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	out	confined	: natural_t;
+	out	count		: natural_t;
+	out	address		: vm_address_t
+	);
