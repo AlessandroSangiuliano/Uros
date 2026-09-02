@@ -1071,8 +1071,48 @@ static void blk_read_bench_one(struct blk_partition *part);
  * both sides of the comparison, and taking them out would mean timing
  * something no caller can actually ask for.
  */
-#define	BLK_BENCH_CHUNK		128u	/* sectors per read: 64 KiB   */
-#define	BLK_BENCH_ROUNDS	32u	/* 2 MiB per partition        */
+/*
+ * 🔴🔴 ONE AGGREGATE OVER 32 READS DID NOT DISCRIMINATE, AND THIS IS WHAT
+ * REPLACED IT.  Five pairs of boots, medians: virtio (the control) moved
+ * -0.7%, and the two AHCI disks moved -5.5% and +6.1% -- in OPPOSITE
+ * DIRECTIONS -- while one arm's five samples ran 3807 to 7093, a spread of
+ * 1.9x.  An experiment discriminates only when the dispersion is smaller than
+ * the effect, and that one measured the host's file cache warming up.
+ *
+ * 🔑 So the median is taken INSIDE one boot, over rounds, and the first rounds
+ * are thrown away.  A cold host cache is one round now instead of a whole
+ * sample, and one boot answers with a figure instead of a guess -- which also
+ * means the boot-to-boot spread finally says something about boots.
+ *
+ * ── AND WHAT IT THEN MEASURED, WHICH IS NOT A NUMBER ──────────────────
+ *
+ * Five more pairs, medians of five boots each, KVM, governor at performance:
+ *
+ *	virtio (untreated control)	-3.2%	spread 26% / 12%
+ *	ahci0a				+0.9%	spread  9% / 15%
+ *	ahci1a				+0.6%	spread  9% /  9%
+ *
+ * The two TREATED disks now agree with each other and the untreated control
+ * moved further than either of them, in the other direction.  That is the
+ * signature of an effect below the noise, and the honest reading is that this
+ * instrument cannot resolve the cost of translation on this emulator.
+ *
+ * ⚠️ Normalising each boot by its own control made it WORSE -- spread 18% to
+ * 32%, and the two disks disagreeing by 5.7 points.  So the noise is not
+ * common to the devices within a boot, and dividing by the control adds
+ * variance instead of cancelling it.  Written down because it is the obvious
+ * next thing to try and it does not work here.
+ *
+ * 🔑 WHAT THE MEASUREMENT DOES ESTABLISH IS AN UPPER BOUND, and that is worth
+ * having: the cost is not large.  A kernel that had ended up mapping and
+ * unmapping per TRANSFER rather than per buffer would show a factor, not a
+ * percent, and this says it does not.  The number itself needs hardware --
+ * on silicon the engine's cost is an IOTLB lookup, and on an emulator it is
+ * whatever that emulator's software does, which is a fact about QEMU.
+ */
+#define	BLK_BENCH_CHUNK		64u	/* sectors per read: 32 KiB   */
+#define	BLK_BENCH_ROUNDS	64u	/* timed rounds, 2 MiB total  */
+#define	BLK_BENCH_WARMUP	8u	/* discarded: the host's cache */
 
 static unsigned long long
 blk_tsc(void)
@@ -1106,8 +1146,9 @@ static void
 blk_read_bench_one(struct blk_partition *part)
 {
 	struct blk_controller	*ctrl = part->ctrl;
+	unsigned long long	each[BLK_BENCH_ROUNDS];
 	unsigned long long	start, total;
-	unsigned int		round, done = 0;
+	unsigned int		round, done = 0, window;
 
 	if (ctrl == NULL || ctrl->ops == NULL
 	    || ctrl->ops->read_sectors == NULL)
@@ -1119,35 +1160,86 @@ blk_read_bench_one(struct blk_partition *part)
 	 * per-sector figure, and two runs of different sizes would be compared
 	 * as if they were the same measurement.
 	 */
-	if (part->num_sectors < (uint32_t)(BLK_BENCH_CHUNK
-					    * BLK_BENCH_ROUNDS)) {
+	if (part->num_sectors < (uint32_t)BLK_BENCH_CHUNK) {
 		printf("blk: read bench did not run on %s — %u sectors is "
-		       "smaller than the %u this reads\n", part->name,
-		       (unsigned)part->num_sectors,
-		       BLK_BENCH_CHUNK * BLK_BENCH_ROUNDS);
+		       "smaller than the %u one read takes\n", part->name,
+		       (unsigned)part->num_sectors, BLK_BENCH_CHUNK);
 		return;
 	}
 
-	start = blk_tsc();
+	/*
+	 * How many distinct chunks the partition holds, capped at the number
+	 * of rounds: a smaller partition is read round and round rather than
+	 * refused, and a larger one is not read further than the rounds go.
+	 * ⚠️ Both arms of a comparison therefore touch the SAME sectors, which
+	 * is what stops "the other disk is bigger" from being the finding.
+	 */
+	window = (unsigned)(part->num_sectors / BLK_BENCH_CHUNK);
+	if (window > BLK_BENCH_ROUNDS)
+		window = BLK_BENCH_ROUNDS;
 
-	for (round = 0; round < BLK_BENCH_ROUNDS; round++) {
+	/*
+	 * ⚠️ The window is read WARM and then read again, on purpose.  The
+	 * subject is what one transfer costs inside the machine -- the
+	 * driver's path, the engine's walk -- and not how fast the host can
+	 * fetch a block it has never seen.  Re-reading the same sectors keeps
+	 * the second out of the measurement; the guest caches nothing, because
+	 * this calls the DRIVER and the readahead cache is above it.
+	 */
+	for (round = 0; round < BLK_BENCH_WARMUP; round++) {
 		vm_offset_t	buf = 0;
 		unsigned int	got = 0;
 
 		if (ctrl->ops->read_sectors(ctrl->priv, part->disk_index,
 					    part->start_lba
-					    + round * BLK_BENCH_CHUNK,
+					    + (round % window) * BLK_BENCH_CHUNK,
+					    BLK_BENCH_CHUNK, &buf, &got) < 0) {
+			if (buf != 0)
+				vm_deallocate(mach_task_self(), buf, got);
+			printf("blk: read bench on %s failed warming up\n",
+			       part->name);
+			return;
+		}
+		vm_deallocate(mach_task_self(), buf, got);
+	}
+
+	for (round = 0; round < BLK_BENCH_ROUNDS; round++) {
+		vm_offset_t	buf = 0;
+		unsigned int	got = 0;
+
+		start = blk_tsc();
+		if (ctrl->ops->read_sectors(ctrl->priv, part->disk_index,
+					    part->start_lba
+					    + (round % window) * BLK_BENCH_CHUNK,
 					    BLK_BENCH_CHUNK, &buf, &got) < 0) {
 			if (buf != 0)
 				vm_deallocate(mach_task_self(), buf, got);
 			break;
 		}
+		each[round] = blk_tsc() - start;
 
 		done += BLK_BENCH_CHUNK;
 		vm_deallocate(mach_task_self(), buf, got);
 	}
 
-	total = blk_tsc() - start;
+	/*
+	 * Insertion sort, because sixty-four elements do not need anything
+	 * else and a sort with a bug in it would produce a median that is
+	 * merely one of the samples -- which looks entirely reasonable.
+	 */
+	{
+		unsigned a, b;
+
+		for (a = 1; a < round; a++) {
+			unsigned long long v = each[a];
+
+			for (b = a; b > 0 && each[b - 1] > v; b--)
+				each[b] = each[b - 1];
+			each[b] = v;
+		}
+	}
+
+	total = round == 0 ? 0 : each[round / 2];
 
 	/*
 	 * ⚠️ The count of sectors ACTUALLY read is printed beside the figure,
@@ -1160,9 +1252,16 @@ blk_read_bench_one(struct blk_partition *part)
 		return;
 	}
 
-	printf("blk: read bench %s — %u sectors in %llu cycles, "
-	       "%llu cycles/sector\n",
-	       part->name, done, total, total / done);
+	/*
+	 * ⚠️ The MEDIAN round and the FASTEST one, both.  The median is the
+	 * figure to compare; the fastest is what says whether the median is a
+	 * cost or an interruption -- when they are far apart, something else
+	 * was running and the number is about the host.
+	 */
+	printf("blk: read bench %s — %u rounds of %u sectors, median %llu "
+	       "cycles (%llu/sector), fastest %llu\n",
+	       part->name, round, BLK_BENCH_CHUNK, total,
+	       total / BLK_BENCH_CHUNK, each[0]);
 }
 
 /*
