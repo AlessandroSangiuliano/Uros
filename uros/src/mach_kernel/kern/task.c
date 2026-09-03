@@ -372,6 +372,7 @@
 #include <kern/assert.h>
 #include <kern/sync_lock.h>
 #include <kern/sync_sema.h>
+#include <device/device_master.h>	/* #513: a dying task's devices */
 #if	MACH_KDB
 #include <ddb/db_sym.h>
 #endif	/* MACH_KDB */
@@ -1120,6 +1121,28 @@ task_terminate(
                 task_lock(task);
         }
         task_unlock(task);
+
+	/*
+	 *	Give back the hardware this task was driving (#513).
+	 *
+	 *	🔴 HERE, AND NOT ON THE FREE PATH.  device_master holds a reference
+	 *	on the task for every DMA region it recorded, so this task's count
+	 *	cannot reach zero until this call has run: a hook in task_free()
+	 *	would be waiting for an event only the hook itself can cause.
+	 *
+	 *	🔑 And here rather than earlier: the threads are gone, so nothing
+	 *	of this task can be inside a device RPC while its claims are being
+	 *	dropped, and its vm_map is still alive for the buffer mappings to
+	 *	be taken down through.
+	 *
+	 *	🔑 ABOVE ipc_task_terminate(), AND THAT ORDER IS OBSERVABLE.  The
+	 *	task port becomes a dead name in there, so every dead-name
+	 *	notification in the system -- bootstrap's, and the HAL's for a
+	 *	driver port -- is delivered AFTER this has run.  Anyone who learns
+	 *	of the death that way is therefore guaranteed the devices are
+	 *	already back, with no handshake needed to say so.
+	 */
+	device_master_task_terminating(task);
 
 	/*
 	 *	Destroy all synchronizers owned by the task.

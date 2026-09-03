@@ -32,6 +32,7 @@
 #include <mach/kern_return.h>
 #include <mach/mach_types.h>
 #include <ipc/ipc_port.h>
+#include <stdint.h>
 
 /*
  * Interrupt notification message sent to userspace drivers.
@@ -94,5 +95,33 @@ extern struct irq_forward irq_forward_table[];
  * Called from device_init().
  */
 extern void	device_master_init(void);
+
+/*
+ * ── What the rest of the kernel has to tell this file ────────────────
+ *
+ * Both of these take authority away, and neither can be an IPC notification:
+ * what they withdraw is MATERIALISED -- an IOMMU domain is a page table the
+ * device walks without consulting anything -- so a teardown that waited for a
+ * message would leave a window in which the authority is void and the device
+ * is still reaching.
+ *
+ * ⚠️ DECLARED HERE, not `extern' at each call site.  They were, and a
+ * declaration written beside the caller is one the compiler never compares
+ * against the definition: the two halves agree by inspection until the day
+ * somebody changes one of them.
+ */
+
+/* A revoked capability takes the mappings it bought with it (#432). */
+extern void	device_master_cap_revoked(uint64_t cap_id);
+
+/*
+ * A dying task gives back its devices and its DMA buffers (#513).
+ *
+ * 🔴 Called from task_terminate() and NOT from task_free().  This file holds a
+ * reference on the task for every region it recorded, so the reference count
+ * cannot reach zero until this has run -- a hook on the free path would be
+ * waiting for an event only the hook itself can cause.
+ */
+extern void	device_master_task_terminating(task_t task);
 
 #endif /* _DEVICE_DEVICE_MASTER_H_ */
