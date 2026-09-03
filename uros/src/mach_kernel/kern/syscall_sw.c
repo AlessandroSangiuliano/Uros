@@ -335,7 +335,16 @@ mach_trap_t	mach_trap_table[] = {
 	MACH_TRAP(urmach_cap_register, 1),	/* 40 */
 	MACH_TRAP(kern_invalid, 0),		/* 41 rsvd for init_process */
 	MACH_TRAP(urmach_futex, 5),		/* 42 (#324 futex) */
-	MACH_TRAP(not_implemented, 0),		/* 43 */
+
+	/*
+	 * 🔑 A TRAP AND NOT AN RPC, for the same reason the four capability
+	 * calls above are (#432).  cap_server asks this while deciding whether
+	 * to issue a capability -- inside its own message loop, with a client
+	 * waiting -- and a server that had to send a message to answer a
+	 * message would be a server that can deadlock against itself.
+	 */
+	MACH_TRAP(urmach_dma_region_owner, 3),	/* 43 (#432) */
+
 	MACH_TRAP(not_implemented, 0),		/* 44 */
 	MACH_TRAP(not_implemented, 0),		/* 45 */
 	MACH_TRAP(not_implemented, 0),		/* 46 */

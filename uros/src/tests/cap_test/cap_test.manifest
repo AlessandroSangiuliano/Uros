@@ -30,6 +30,17 @@ name cap_test
 # virtio_blk0a the board happens to have, so `any' is what it means.
 required 4 any 0x3
 
+# RESOURCE_DMA_BUFFER (10), any buffer, READ|WRITE by a device (0x3).
+#
+# 🔑 `any' is the ONLY thing this line can honestly say, and that is a fact
+# about the resource and not a looseness.  A manifest is written before the
+# system runs; a DMA buffer exists for four milliseconds.  So the policy
+# says whether this task may hold buffer capabilities AT ALL, and the
+# KERNEL says whether the particular buffer is this task's to give away --
+# which it can, because it made the allocation.  Neither half is asked to
+# know something it has no way of knowing.
+required 10 any 0x3
+
 # ── And deliberately NOT this ────────────────────────────────────────
 #
 # required 5 0x010601 0x7    RESOURCE_PCI_DEVICE, SATA AHCI, DMA|MMIO|IRQ

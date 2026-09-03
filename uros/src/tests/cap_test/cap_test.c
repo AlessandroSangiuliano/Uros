@@ -511,6 +511,42 @@ a_disk_reads_into_a_foreign_page(mach_port_t device_port, mach_port_t handle,
     }
 
     /*
+     * ── The consent, which is the whole of #432's second gap ─────────
+     *
+     * 🔴 KNOWING THE ADDRESS IS NOT BEING GIVEN THE BUFFER.  The block server
+     * is about to program this page's physical address into a disk, and the
+     * kernel will only map it for that disk if somebody holding a capability
+     * for the buffer asks.  This task owns the region, so cap_server will
+     * issue it one -- after asking the KERNEL whether this task really is the
+     * owner, which is the half a policy file cannot know.
+     *
+     * ⚠️ And then it is HANDED OVER.  The block server keeps the capability,
+     * not the buffer: a delegation of use, revocable by this task without the
+     * server being asked.
+     */
+    {
+        struct uros_cap buf_cap;
+
+        memset(&buf_cap, 0, sizeof(buf_cap));
+        kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                         CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
+                         0, &buf_cap);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [12] WRONG — cap_server would not issue a "
+                   "capability for region %llu this task owns (kr=%d)\n",
+                   (unsigned long long)region_id, (int)kr);
+            goto out;
+        }
+
+        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [12] WRONG — the block server would not take "
+                   "the capability (kr=%d)\n", (int)kr);
+            goto out;
+        }
+    }
+
+    /*
      * ⚠️ Wiped first, so "the read did nothing" cannot pass.  A page that
      * arrives holding what the allocator left in it is a page nobody wrote.
      */
@@ -533,6 +569,7 @@ a_disk_reads_into_a_foreign_page(mach_port_t device_port, mach_port_t handle,
                "0xef53\n", name, (int)kr, (unsigned)got, magic);
     }
 
+out:
     (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
     (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
                         pa_cnt * sizeof(vm_address_t));

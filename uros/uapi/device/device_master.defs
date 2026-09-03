@@ -487,11 +487,18 @@ routine device_ddb_break(
  * diagnosable, and useless.  The shape this issue asks for is that the server
  * which owns the device maps them, and this is that call.
  *
- * 🔑 THE KERNEL VERIFIES THE PAGE.  `paddr' must belong to a live buffer this
- * kernel allocated through device_dma_alloc or device_dma_alloc_sg -- anything
- * else is refused.  Without that, "map this address for my device" would be a
- * request to put ARBITRARY physical memory inside a device's reach, which is
- * the whole thing being prevented.
+ * 🔑 AND THE CALLER MUST PRESENT A CAPABILITY FOR THE BUFFER, which is what
+ * makes this a delegation rather than an assertion.  `paddr' must belong to a
+ * live region this kernel allocated, AND `token' must be a capability naming
+ * that region -- issued by cap_server to the region's OWNER, who gave it away
+ * on purpose.
+ *
+ * ⚠️ The address check alone was not enough and the difference is the point.
+ * It narrowed "any physical page" to "any page the kernel allocated for DMA",
+ * which is still every other server's buffers: a driver could put a
+ * filesystem's page cache inside its device's reach without the filesystem
+ * ever having offered it.  The capability is what turns "I know where it is"
+ * into "somebody gave it to me".
  *
  * 🔑 And the WHOLE REGION is mapped on the first page of it, at consecutive
  * addresses.  So the caller asks per page and pays once: after the first
@@ -511,6 +518,7 @@ routine device_dma_map_foreign(
 		master_port	: mach_port_t;
 	in	bdf		: natural_t;
 	in	paddr		: vm_address_t;
+	in	token		: cap_token_t;
 	out	dma_addr	: vm_address_t
 	);
 

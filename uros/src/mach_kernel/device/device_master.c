@@ -64,6 +64,14 @@
 #include <kern/thread.h>
 #include <kern/kalloc.h>
 #include <kern/cap.h>		/* #432: a capability for a device's kind */
+#include <kern/ipc_mig.h>
+/*
+ * ⚠️ Declared here rather than found in a header: port_name_to_task is defined
+ * in kern/ipc_mig.c and named in no header this file can reach.  Written out
+ * so the day one appears, this line is the one that stops compiling instead of
+ * the one that silently shadows it.
+ */
+extern task_t port_name_to_task(mach_port_t name);
 
 /*
  * #448: the interface, so the compiler can compare it with what is below.
@@ -1744,10 +1752,13 @@ ds_master_device_dma_map_foreign(
 	ipc_port_t		master_port,
 	natural_t		bdf,
 	vm_address_t		paddr,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt,
 	vm_address_t		*dma_addr)
 {
 	kern_return_t		kr;
 	struct dma_region	*r;
+	struct uros_cap		cap;
 	unsigned int		page, u;
 	unsigned long		base = 0;
 
@@ -1771,6 +1782,29 @@ ds_master_device_dma_map_foreign(
 	r = dma_region_of((vm_offset_t)paddr, &page);
 	if (r == 0)
 		return KERN_INVALID_ADDRESS;
+
+	/*
+	 * 🔴 AND A CAPABILITY FOR THAT REGION, WHICH IS THE DELEGATION.
+	 * Knowing the address is not the same as having been given the buffer:
+	 * before this, a driver could put another server's page cache inside
+	 * its device's reach on the strength of an address it happened to see.
+	 * The token says the region's OWNER handed it over.
+	 */
+	if (tokenCnt != sizeof(struct uros_cap))
+		return KERN_INVALID_ARGUMENT;
+
+	memcpy(&cap, token, sizeof(cap));
+
+	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_DMA_DEVICE_WRITE,
+				 r->id);
+	if (kr != KERN_SUCCESS) {
+		printf("device: %02x:%02x.%u showed no capability for DMA "
+		       "region %lu (kr=%d) — knowing an address is not being "
+		       "given the buffer\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)r->id, (int)kr);
+		return KERN_NO_ACCESS;
+	}
 
 	/*
 	 * ⚠️ On a machine that polices nothing, the physical address IS the
@@ -1974,4 +2008,51 @@ device_master_cap_revoked(uint64_t cap_id)
 		device_nclaims--;
 		i--;
 	}
+}
+
+/*
+ * ── Does this task own that DMA region? (#432) ───────────────────────
+ *
+ * 🔴 THE HALF cap_server CANNOT KNOW.  Issuing a capability for a buffer means
+ * deciding two things: may this task hold buffer capabilities at all, which is
+ * its manifest and cap_server's business; and is THIS buffer that task's to
+ * give away, which is a fact about an allocation the kernel made and nobody
+ * else has ever been told.
+ *
+ * 🔑 Same shape as the device half.  There the manifest names a class and the
+ * kernel reads the class off the hardware; here the manifest permits the KIND
+ * of authority and the kernel supplies the instance.  Neither side is asked to
+ * know something it has no way of knowing, which is why neither has to be
+ * trusted about it.
+ *
+ * ⚠️ `task' is a name in the CALLER's space -- cap_server's -- and not a
+ * global anything.  It is the send right cap_provision_task was handed and
+ * that interface has carried since #216 as "informational for now (audit /
+ * future cross-reference)".  This is that cross-reference.
+ */
+kern_return_t
+urmach_dma_region_owner(
+	uint64_t		region_id,
+	mach_port_name_t	task)
+{
+	task_t		t;
+	unsigned int	i;
+	kern_return_t	kr = KERN_INVALID_ARGUMENT;
+
+	if (region_id == 0)
+		return KERN_INVALID_ARGUMENT;
+
+	t = port_name_to_task(task);
+	if (t == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0 && dma_region[i].id == region_id) {
+			kr = dma_region[i].owner == t
+			     ? KERN_SUCCESS : KERN_NO_ACCESS;
+			break;
+		}
+
+	task_deallocate(t);
+	return kr;
 }

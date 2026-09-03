@@ -21,6 +21,7 @@
 struct cap_manifest_slot {
     int            in_use;
     mach_port_t    port;       /* per-task cap_port receive name */
+    mach_port_t    task;       /* the task it was provisioned for (#432) */
     void          *blob;       /* owned copy, freed on uninstall */
     uint32_t       len;
 };
@@ -101,6 +102,7 @@ cap_manifest_validate(const void *blob, uint32_t blob_len,
 
 int
 cap_manifest_table_install(mach_port_t task_cap_port,
+                           mach_port_t task_port,
                            const void *blob, uint32_t blob_len)
 {
     int slot = -1;
@@ -130,9 +132,20 @@ cap_manifest_table_install(mach_port_t task_cap_port,
 
     g_table[slot].in_use = 1;
     g_table[slot].port   = task_cap_port;
+    g_table[slot].task   = task_port;
     g_table[slot].blob   = copy;
     g_table[slot].len    = blob_len;
     return CAP_ERR_NONE;
+}
+
+mach_port_t
+cap_manifest_table_task(mach_port_t task_cap_port)
+{
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].port == task_cap_port)
+            return g_table[i].task;
+
+    return MACH_PORT_NULL;
 }
 
 const cap_manifest_header_t *

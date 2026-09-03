@@ -45,7 +45,15 @@ int cap_manifest_validate(const void *blob, uint32_t blob_len,
  * can free its own buffer.  Returns CAP_ERR_NONE,
  * CAP_ERR_NO_MANIFEST_SLOT, or CAP_ERR_NO_MEMORY.
  */
+/*
+ * ⚠️ `task_port' is remembered, and #216 said it would be: cap_provision_task
+ * carries it as "informational for now (audit / future cross-reference)".
+ * #432 is that cross-reference -- issuing a capability for a DMA buffer means
+ * asking the KERNEL whether the requesting task owns it, and the requester is
+ * known here only as a port.
+ */
 int cap_manifest_table_install(mach_port_t task_cap_port,
+                               mach_port_t task_port,
                                const void *blob, uint32_t blob_len);
 
 /*
@@ -55,6 +63,9 @@ int cap_manifest_table_install(mach_port_t task_cap_port,
  */
 const cap_manifest_header_t *
 cap_manifest_table_get(mach_port_t task_cap_port);
+
+/* The task behind that cap_port, or MACH_PORT_NULL. */
+mach_port_t cap_manifest_table_task(mach_port_t task_cap_port);
 
 /*
  * Helper: does the given manifest declare `type + resource_id + ops' in its

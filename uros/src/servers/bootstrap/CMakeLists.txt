@@ -408,7 +408,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
             modules/block/ahci.so:${_MOD}/block/ahci.so
-    DEPENDS mkbundle cap_test_manifest name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
+    # 🔥 THE FILE AND NOT THE TARGET.  `DEPENDS cap_test_manifest' is an
+    # ORDERING dependency: ninja runs that target first and never notices that
+    # its output changed, so the bundle went on shipping a stale manifest while
+    # the export tree held the new one.  The symptom was a policy denial for a
+    # line the source file plainly contained.
+    DEPENDS mkbundle ${_CAPTEST_CMF} name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
             ${_CONF}

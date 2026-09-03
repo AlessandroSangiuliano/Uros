@@ -234,7 +234,41 @@ cap_acquire(mach_port_t             server,
         g_request_local_port != cap_port) {
         const cap_manifest_header_t *m =
             cap_manifest_table_get(g_request_local_port);
-        if (m && !cap_manifest_allows(m, resource_type, resource_id, ops)) {
+        /*
+         * 🔴 A DMA BUFFER'S INSTANCE IS THE KERNEL'S TO ANSWER, not this
+         * server's (#432).  A manifest can name a device class or a mount
+         * point because those exist before the policy is written; it cannot
+         * name a buffer that will exist for four milliseconds.  So the
+         * manifest says whether this task may hold buffer capabilities AT ALL
+         * -- checked below with CAP_MANIFEST_ANY_ID, because that is the only
+         * thing it can honestly say -- and the kernel says whether THIS buffer
+         * is that task's to give away.
+         *
+         * ⚠️ Neither half is trusted about the other's question, which is what
+         * makes it a check rather than a formality: this server cannot know
+         * who allocated a region, and the kernel cannot read a manifest.
+         */
+        if (resource_type == RESOURCE_DMA_BUFFER) {
+            mach_port_t owner = cap_manifest_table_task(g_request_local_port);
+            kern_return_t okr;
+
+            if (m && !cap_manifest_allows(m, resource_type,
+                                          CAP_MANIFEST_ANY_ID, ops)) {
+                printf("cap: DENY (manifest) port=0x%x dma buffer "
+                       "ops=0x%llx\n", (unsigned)g_request_local_port,
+                       (unsigned long long)ops);
+                return CAP_ERR_NOT_IN_MANIFEST;
+            }
+
+            okr = urmach_dma_region_owner(resource_id, owner);
+            if (okr != KERN_SUCCESS) {
+                printf("cap: DENY (not the owner) port=0x%x region=%llu "
+                       "kr=%d\n", (unsigned)g_request_local_port,
+                       (unsigned long long)resource_id, (int)okr);
+                return CAP_ERR_NOT_IN_MANIFEST;
+            }
+        } else if (m && !cap_manifest_allows(m, resource_type, resource_id,
+                                             ops)) {
             printf("cap: DENY (manifest) port=0x%x rtype=%u id=0x%llx "
                    "ops=0x%llx\n",
                    (unsigned)g_request_local_port, resource_type,
@@ -493,7 +527,6 @@ cap_provision_task(mach_port_t            server,
     int vrc;
 
     (void)server;
-    (void)task_port;        /* informational for now (audit) */
     *out_task_cap_port = MACH_PORT_NULL;
 
     vrc = cap_manifest_validate(manifest_buf, (uint32_t)manifest_len, NULL);
@@ -520,7 +553,7 @@ cap_provision_task(mach_port_t            server,
         return CAP_ERR_INTERNAL;
     }
 
-    vrc = cap_manifest_table_install(new_port, manifest_buf,
+    vrc = cap_manifest_table_install(new_port, task_port, manifest_buf,
                                      (uint32_t)manifest_len);
     if (vrc != CAP_ERR_NONE) {
         (void)mach_port_destroy(mach_task_self(), new_port);

@@ -68,6 +68,20 @@ typedef enum {
     RESOURCE_SERIAL        = 7,
     RESOURCE_FRAMEBUFFER   = 8,
     RESOURCE_BUDGET        = 9,
+
+    /*
+     * A buffer the kernel allocated for DMA (#432).
+     *
+     * 🔑 THE RESOURCE IS THE BUFFER AND THE ID IS ITS REGION ID, which is a
+     * number the kernel mints and never repeats.  It is the one resource type
+     * here whose instances the POLICY cannot know in advance -- a manifest can
+     * name a device class or a mount point, and it cannot name a buffer that
+     * will exist for four milliseconds -- so the manifest says whether a task
+     * may hold buffer capabilities at all, and the kernel says whether this
+     * particular one is that task's to give away.
+     */
+    RESOURCE_DMA_BUFFER    = 10,
+
     RESOURCE_TYPE_MAX
 } cap_resource_type_t;
 
@@ -108,6 +122,14 @@ typedef enum {
 #define CAP_OP_PCI_DMA_MAP   0x0000000000000001ULL  /* map memory for it   */
 #define CAP_OP_PCI_MMIO_MAP  0x0000000000000002ULL  /* map its registers   */
 #define CAP_OP_PCI_IRQ       0x0000000000000004ULL  /* claim its interrupt */
+
+/*
+ * RESOURCE_DMA_BUFFER (#432).  What the HOLDER of the capability may ask a
+ * device to do with the buffer -- not what the owner may do with it, which is
+ * ordinary memory and needs no capability at all.
+ */
+#define CAP_OP_DMA_DEVICE_READ   0x0000000000000001ULL  /* device reads it  */
+#define CAP_OP_DMA_DEVICE_WRITE  0x0000000000000002ULL  /* device writes it */
 
 /* RESOURCE_FILE (reserved for v2) */
 #define CAP_OP_FILE_READ     0x0000000000000001ULL

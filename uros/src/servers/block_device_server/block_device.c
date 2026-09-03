@@ -780,6 +780,60 @@ struct blk_dma_entry {
 
 static struct blk_dma_entry blk_dma_cache[MAX_CONTROLLERS][BLK_DMA_CACHE];
 
+/*
+ * The capabilities clients have handed this server for their buffers (#432).
+ *
+ * 🔑 A FEW PER CONTROLLER AND TRIED IN TURN, because this server has no way to
+ * tell which client a physical address belongs to until the kernel says so.
+ * The kernel does know -- it matches the token against the region containing
+ * the page -- so the honest thing here is to offer what it has been given and
+ * let the side that can decide, decide.
+ *
+ * ⚠️ Full REPLACES the oldest rather than refusing.  A client that registers
+ * and goes away would otherwise pin a slot forever, and the cost of losing a
+ * live one is a mapping that has to be re-established, not a wrong answer:
+ * the kernel refuses a token that does not name the region.
+ */
+#define	BLK_MAX_CLIENT_CAPS	4
+
+static struct {
+	char		token[CAP_TOKEN_MAX];
+	unsigned int	len;
+} blk_client_cap[MAX_CONTROLLERS][BLK_MAX_CLIENT_CAPS];
+
+static unsigned int blk_client_cap_next[MAX_CONTROLLERS];
+
+kern_return_t
+ds_device_register_dma(mach_port_t device, mach_port_t reply,
+		       mach_msg_type_name_t reply_poly,
+		       char *token, mach_msg_type_number_t tokenCnt)
+{
+	struct blk_partition	*part = blk_part_from_authed_handle(device);
+	unsigned int		ci, slot;
+
+	(void)reply;
+	(void)reply_poly;
+
+	if (!part || part->ctrl == NULL)
+		return KERN_NO_ACCESS;
+	if (tokenCnt == 0 || tokenCnt > CAP_TOKEN_MAX)
+		return KERN_INVALID_ARGUMENT;
+
+	ci = (unsigned int)(part->ctrl - controllers);
+	if (ci >= MAX_CONTROLLERS)
+		return KERN_INVALID_ARGUMENT;
+
+	slot = blk_client_cap_next[ci] % BLK_MAX_CLIENT_CAPS;
+	memcpy(blk_client_cap[ci][slot].token, token, tokenCnt);
+	blk_client_cap[ci][slot].len = tokenCnt;
+	blk_client_cap_next[ci]++;
+
+	printf("blk: a client handed %s a capability for a buffer it will "
+	       "DMA into (%u bytes, slot %u)\n", part->name,
+	       (unsigned)tokenCnt, slot);
+	return KERN_SUCCESS;
+}
+
 static vm_address_t
 blk_dma_for(struct blk_controller *ctrl, vm_address_t pa)
 {
@@ -800,7 +854,24 @@ blk_dma_for(struct blk_controller *ctrl, vm_address_t pa)
 	bdf = (natural_t)((ctrl->pci_bus << 8) | (ctrl->pci_slot << 3)
 			  | ctrl->pci_func);
 
-	kr = device_dma_map_foreign(master_device, bdf, pa, &dma);
+	/*
+	 * ⚠️ Every capability this controller has been handed, in turn.  This
+	 * server cannot tell which client owns a page; the KERNEL can, because
+	 * it matches the token against the region the page is in.  So the
+	 * choice is made by the side that can make it.
+	 */
+	kr = KERN_NO_ACCESS;
+	for (unsigned int c = 0; c < BLK_MAX_CLIENT_CAPS; c++) {
+		if (blk_client_cap[ci][c].len == 0)
+			continue;
+
+		kr = device_dma_map_foreign(master_device, bdf, pa,
+					    blk_client_cap[ci][c].token,
+					    blk_client_cap[ci][c].len, &dma);
+		if (kr == KERN_SUCCESS)
+			break;
+	}
+
 	if (kr != KERN_SUCCESS) {
 		/*
 		 * ⚠️ The untranslated address is returned, and the transfer
