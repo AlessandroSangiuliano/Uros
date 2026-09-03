@@ -117,22 +117,22 @@ arm(int n, const char *what, int ok)
 }
 
 /*
- * 🔴 END THE TASK, RATHER THAN RETURNING FROM main() AND HOPING.
+ * 🔴 END THE TASK, RATHER THAN RETURNING FROM main().
  *
- * ⚠️ MEASURED, not assumed: with `return' here neither role's task ever
- * terminated.  The kernel hook this program exists to exercise was never
- * reached, the sixteen regions were still held at the end of the boot, and
- * bootstrap never printed `task terminated' for either instance.
+ * ⚠️ This is how the defect in libpthreads was found, and the reason survives
+ * it.  With `return' here neither role's task ever terminated: crt0 calls
+ * _threadlib_exit_routine() before exit(), that is pthread_exit(), and a
+ * JOINABLE thread waited there on its own death futex for a joiner that the
+ * main thread of a program nobody joins does not have.  The kernel hook this
+ * program exists to exercise was never reached and the sixteen regions were
+ * still held at the end of the boot.
  *
- * crt0 calls _threadlib_exit_routine() before exit(), which is pthread_exit(),
- * and a JOINABLE thread waits there on its own death futex for a joiner that,
- * for the main thread of a program nobody joins, does not exist.  _exit() is
- * task_terminate() and nothing else.
- *
- * 🔑 Which is the right dependency for this test in any case: what is being
- * measured is what the KERNEL does when a task dies, and routing that through
- * the thread library's opinion of how a C program ends would put libpthreads
- * inside the experiment.
+ * pthread_exit() ends the process when it is the last thread now, so `return'
+ * would work.  This stays because it is the right dependency for THIS test:
+ * what is being measured is what the KERNEL does when a task dies, and routing
+ * that through the thread library's opinion of how a C program ends would put
+ * libpthreads inside the experiment -- and this program is the only thing that
+ * would notice if it broke again.
  */
 static void
 die(void)

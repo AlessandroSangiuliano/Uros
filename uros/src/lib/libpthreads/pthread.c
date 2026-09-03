@@ -30,6 +30,7 @@
 #include "pthread_internals.h"
 #include <threadlib_init.h>
 #include <stdio.h>	/* For printf(). */
+#include <stdlib.h>	/* For exit() -- see _pthread_live_count below. */
 #include <errno.h>	/* For __mach_errno_addr() prototype. */
 #include <mach/thread_info.h>	/* For THREAD_SCHED_RR_INFO (#153). */
 
@@ -224,6 +225,58 @@ struct _pool_entry {
 static struct _pool_entry _thread_pool[_THREAD_POOL_MAX];
 static int _thread_pool_count;		/* Number of threads in pool */
 static pthread_lock_t _thread_pool_lock = 0;	/* Protects pool */
+
+/*
+ * ── How many pthreads are still live, and why anybody cares (#513) ────
+ *
+ * 🔴 RETURNING FROM main() DID NOT TERMINATE THE TASK, on either target, for
+ * every program in the tree.  crt0 calls _threadlib_exit_routine() before
+ * exit(); that is pthread_exit(); and a JOINABLE thread waits there on its own
+ * death futex until a joiner harvests its exit value.  Nobody joins a main
+ * thread, so it waited for ever and exit() was never reached.
+ *
+ * ⚠️ The symptom was silence, which is why it lasted.  A test printed its
+ * verdict, the suite read it, and the task simply stayed -- holding its ports,
+ * its address space, and (once #513 gave the kernel something to hold) its DMA
+ * regions and its devices, until the machine went down.
+ *
+ * 🔑 POSIX says what to do and the code was only missing the case: "the process
+ * shall exit ... after the last thread has been terminated".  A joinable thread
+ * that is the LAST one cannot be joined by anybody, so waiting is not caution,
+ * it is a deadlock with one participant.
+ *
+ * ⚠️ Counted here rather than fixed in crt0.  Making a main() return call
+ * exit() directly is also POSIX -- and it would kill detached threads that are
+ * still running, which is a change to every multi-threaded program in the tree
+ * and not the defect being fixed.  This way nothing changes for a process that
+ * still has threads.
+ *
+ * A PARKED thread is not live: it has already been through pthread_exit and
+ * decremented.  What is counted is pthreads created and not yet exited, which
+ * is what the POSIX sentence is about.
+ */
+static int _pthread_live_count = 1;	/* the main thread, before any create */
+static pthread_lock_t _pthread_live_lock = 0;
+
+/* Answers nonzero when the caller was the last one. */
+static int
+_pthread_live_leave(void)
+{
+	int last;
+
+	LOCK(_pthread_live_lock);
+	last = (--_pthread_live_count <= 0);
+	UNLOCK(_pthread_live_lock);
+	return last;
+}
+
+static void
+_pthread_live_enter(void)
+{
+	LOCK(_pthread_live_lock);
+	_pthread_live_count++;
+	UNLOCK(_pthread_live_lock);
+}
 
 /*
  * _pthread_pool_trampoline — entry point for recycled threads.
@@ -817,6 +870,7 @@ pthread_create(pthread_t *thread,
 			t->fun = start_routine;
 			/* Wake the parked thread (bump its seq) — it will run
 			 * _pthread_pool_trampoline and read fun/arg. */
+			_pthread_live_enter();
 			(*wake_word)++;
 			_pthread_futex_wake_one(wake_word);
 			return (ESUCCESS);
@@ -848,10 +902,18 @@ pthread_create(pthread_t *thread,
 		/* Now set it up to execute */
 		_pthread_setup(t, _pthread_body, stack);
 		/* Send it on it's way */
+		/*
+		 * ⚠️ Counted BEFORE the resume, not after.  The new thread can
+		 * run to completion -- and decrement -- before this one gets
+		 * back here, and an increment that arrived afterwards would
+		 * leave the count one too high for ever.
+		 */
+		_pthread_live_enter();
 		MACH_CALL(thread_resume(kernel_thread), kern_res);
 		if (kern_res != KERN_SUCCESS)
 		{
 			printf("Can't resume thread: %d\n", kern_res);
+			(void) _pthread_live_leave();
 			res = EINVAL; /* Need better error here? */
 			break;
 		}
@@ -909,6 +971,22 @@ pthread_exit(void *value_ptr)
 		self->cleanup_stack = handler->next;
 	}
 	_pthread_tsd_cleanup(self);
+
+	/*
+	 * 🔴 THE LAST THREAD ENDS THE PROCESS, and does not wait to be joined.
+	 * See _pthread_live_count: a joinable thread blocks below until a
+	 * joiner harvests its exit value, and for the last thread in the
+	 * process there is nobody left who could.  That is where every task in
+	 * this system used to stop -- alive, holding everything it held, with
+	 * its verdict already printed.
+	 *
+	 * ⚠️ Status 0, which is what POSIX specifies for this case, and not the
+	 * value handed to pthread_exit: that one is a THREAD's result and only
+	 * a joiner is entitled to read it.
+	 */
+	if (_pthread_live_leave())
+		exit(0);
+
 	LOCK(self->lock);
 	if (self->detached == PTHREAD_CREATE_JOINABLE)
 	{
