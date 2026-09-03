@@ -722,6 +722,26 @@ struct dma_region {
 	unsigned int	npages;
 	vm_offset_t	*pa;		/* npages entries, kalloc'd      */
 
+	/*
+	 * 🔥 WHERE ELSE THIS MEMORY IS MAPPED, AND A PANIC A USER TASK COULD
+	 * REACH.  device_dma_alloc_sg enters its pages into the caller's map
+	 * with pmap_enter(..., wired), and device_dma_free frees the KERNEL
+	 * side -- so freeing an sg buffer while the task still holds it hands
+	 * the pages back to the VM with a wired mapping outstanding, and the
+	 * next teardown finds it:
+	 *
+	 *	panic(cpu 0): pmap_remove_all removing a wired page
+	 *
+	 * ⚠️ Nothing hit it because nothing ever freed a scatter-gather
+	 * buffer: the drivers allocate theirs once and keep them.  It took a
+	 * test that did, and it panicked i386 from a userland RPC.
+	 *
+	 * So the region remembers the task it was mapped into, holding a
+	 * reference, and the free takes that mapping down first.
+	 */
+	task_t		task;		/* null for a contiguous buffer  */
+	vm_offset_t	uva;
+
 	/* Which devices have been given this region, and where. */
 	unsigned int	nusers;
 	struct {
@@ -739,7 +759,7 @@ static struct dma_region dma_region[DEVICE_MAX_DMA_REGIONS];
  */
 static int
 dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
-	       unsigned int npages)
+	       unsigned int npages, task_t task, vm_offset_t uva)
 {
 	struct dma_region *r = 0;
 	unsigned int i;
@@ -764,6 +784,12 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	r->size = size;
 	r->npages = npages;
 	r->nusers = 0;
+	r->task = task;
+	r->uva = uva;
+
+	if (task != TASK_NULL)
+		task_reference(task);
+
 	return 1;
 }
 
@@ -811,6 +837,19 @@ dma_region_drop(vm_offset_t kva)
 			(void) device_md_dma_revoke(r->user[u].bdf,
 						    (unsigned long)r->pa[0],
 						    (unsigned long)r->size);
+
+		/*
+		 * 🔴 THE TASK'S MAPPING BEFORE THE PAGES.  See the note on
+		 * `task' above: the other order hands wired pages back to the
+		 * VM and panics the kernel from a userland RPC.
+		 */
+		if (r->task != TASK_NULL) {
+			(void) vm_map_remove(r->task->map, r->uva,
+					     r->uva + r->size,
+					     VM_MAP_NO_FLAGS);
+			task_deallocate(r->task);
+			r->task = TASK_NULL;
+		}
 
 		kfree((vm_offset_t)r->pa, r->npages * sizeof(vm_offset_t));
 		r->kva = 0;
@@ -944,7 +983,7 @@ ds_master_device_dma_alloc(
 		for (i = 0; i < n; i++)
 			pages[i] = pa + (vm_offset_t)i * PAGE_SIZE;
 
-		if (!dma_region_add(kva, size, pages, n)) {
+		if (!dma_region_add(kva, size, pages, n, TASK_NULL, 0)) {
 			kmem_free(kernel_map, kva, size);
 			return KERN_RESOURCE_SHORTAGE;
 		}
@@ -1212,7 +1251,8 @@ ds_master_device_dma_alloc_sg(
 	 * A recording taken afterwards would remember one domain's IOVAs as if
 	 * they were physical memory.
 	 */
-	if (!dma_region_add(kva, size, (const vm_offset_t *)list, n_pages)) {
+	if (!dma_region_add(kva, size, (const vm_offset_t *)list, n_pages,
+			    task, uva)) {
 		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
