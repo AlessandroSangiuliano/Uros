@@ -82,6 +82,7 @@ NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
 CAP_TEST="$SBIN/cap_test"
 IRQ_CLAIM_TEST="$SBIN/irq_claim_test"
+DMA_RECLAIM_TEST="$SBIN/dma_reclaim_test"
 GPUSTAT="$SBIN/gpustat"
 HAL_SERVER="$SBIN/hal_server"
 BLOCK_DEVICE_SERVER="$SBIN/block_device_server"
@@ -136,6 +137,17 @@ CAP_TEST_CONF_LINE=""
 # failure here is a missing log rather than a wrong one.
 IRQ_CLAIM_TEST_CONF_LINE=""
 [ -f "$IRQ_CLAIM_TEST" ] && IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
+# #513: lo stesso binario DUE volte -- il primo riempie la tavola delle regioni
+# DMA e MUORE tenendola, il secondo la ritrova resa dal kernel.  Una restituzione
+# non si dimostra con un'assenza: serve qualcun altro a cui venga data.
+#
+# 🔴 PRIMA di hal_server e block_device_server, non in fondo con gli altri test.
+# L'hog prende OGNI slot libero, e i due `-w' serializzano la coppia -- messo
+# dopo i driver affamerebbe chi il disco lo usa davvero, che e' un modo di
+# rompere la suite matura per collaudare un'altra cosa.
+DMA_RECLAIM_CONF_LINES=""
+[ -f "$DMA_RECLAIM_TEST" ] && DMA_RECLAIM_CONF_LINES="-w dma_reclaim_test dma_reclaim_test hog
+-w dma_reclaim_test dma_reclaim_test check"
 KERNEL242_TEST_CONF_LINE=""
 [ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="kernel242_test kernel242_test"
 SIG_TEST_CONF_LINE=""
@@ -174,6 +186,7 @@ if [ "$MINIMAL" = "1" ]; then
     PTHREAD_TEST_LINE=""
     CAP_TEST_CONF_LINE=""
     IRQ_CLAIM_TEST_CONF_LINE=""
+    DMA_RECLAIM_CONF_LINES=""
     KERNEL242_TEST_CONF_LINE=""
     SIG_TEST_CONF_LINE=""
     GPUSTAT_CONF_LINE=""
@@ -200,6 +213,7 @@ fi
 # file e' uno di QUATTRO che scrivono la stessa riga.
 cat > "$BOOTSTRAP_CONF" <<CONF
 name_server name_server
+${DMA_RECLAIM_CONF_LINES}
 ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
 ${CHAR_SERVER_CONF_LINE}
@@ -224,6 +238,7 @@ CONF
 ARGS=(-o "$BUNDLE_OUT")
 ARGS+=("bootstrap.conf:$BOOTSTRAP_CONF")
 ARGS+=("name_server:$NAME_SERVER")
+[ -f "$DMA_RECLAIM_TEST" ] && ARGS+=("dma_reclaim_test:$DMA_RECLAIM_TEST")
 [ -f "$CAP_SERVER" ] && ARGS+=("cap_server:$CAP_SERVER")
 ARGS+=("hal_server:$HAL_SERVER")
 ARGS+=("block_device_server:$BLOCK_DEVICE_SERVER")

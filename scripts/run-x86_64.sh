@@ -359,6 +359,13 @@ must_report 'cap_test: starting' 'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILE
 must_report 'dl_test: starting' 'dl_test: [0-9]* of [0-9]* arms passed' \
 	'It loads a shared object through libdl and follows pointers the loader relocated (#423).  A wrong relocation is a plausible pointer, so its failure mode is a fault partway through rather than a WRONG line -- which looks exactly like a run that ended early.'
 
+# 🔑 Only the CHECKER instance is judged, and that is the whole arrangement:
+# the bundle names this binary twice, and the first one exists to DIE holding
+# the DMA region table so the second can find it given back (#513).  A hog that
+# reported arms would be reporting on a fixture.
+must_report 'dma_reclaim: started' 'dma_reclaim: [0-9]* of [0-9]* arms passed' \
+	'It waits for the slots a dead task was holding, so on a kernel that does not release them it does not print a WRONG line -- it waits out its bound and then says so.  Silence instead means it never got that far.'
+
 
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
@@ -740,6 +747,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'act_test: started'     'act_test: [0-9]* of [0-9]* arms passed' \
 		'cap_test: starting'    'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)' \
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
+		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
 		sleep 1
 		break

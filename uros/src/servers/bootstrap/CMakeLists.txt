@@ -271,6 +271,26 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # is why it is early rather than last: a halt there is unmistakable, where the
   # same halt at the end would look like a run that simply finished.
   #
+  # dma_reclaim_test appears TWICE and consecutively, and the pair is placed
+  # here -- ahead of everything that allocates a DMA buffer -- because the
+  # first of the two exits holding the WHOLE region table (#513).
+  #
+  # 🔴 BOTH LINES CARRY `-w', AND THAT FLAG IS THE EXPERIMENT.  bootstrap
+  # blocks on a `-w' entry until it sends bootstrap_completed() or DIES, so:
+  # the checker is not created until the hog is gone, which is what makes the
+  # reclaim observable at all; and nothing else in the bundle runs while
+  # either of them holds the table, which is what keeps cap_test's own DMA
+  # arms and the block server's buffers out of the measurement.
+  #
+  # 🔑 It is one binary named twice rather than two programs, because the two
+  # roles must fill the table by exactly the same code: a checker that
+  # allocated differently from the hog would be comparing two measurements
+  # instead of taking one twice.  argv[1] picks the role.
+  #
+  # ⚠️ Ahead of cap_server, unlike cap_test, because it asks for nothing:
+  # DEVICE_DMA_NO_BDF names no device, so no capability is checked and the
+  # program has no manifest.
+  #
   # pthread_test is FOURTH, and it is the biggest program here by an order of
   # magnitude (#425).  It goes after the two that only send messages and before
   # the three that fault, kill threads and fork on purpose: it does nothing
@@ -337,7 +357,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # failure -- there is nothing to serve.  What it must not do is exit quietly:
   # see the note in block_server.c on #400.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nblock_device_server block_device_server\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\n-w dma_reclaim_test dma_reclaim_test hog\n-w dma_reclaim_test dma_reclaim_test check\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nblock_device_server block_device_server\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -374,6 +394,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             irq_claim_test:${_SBIN}/irq_claim_test
+            # ⚠️ ONE entry for two configuration lines.  bootstrap resolves a
+            # line's path against the bundle, and both lines name the same
+            # path -- the roles differ by argv, not by image.  A second copy
+            # under a second name would make the hog and the checker two
+            # programs that merely look alike.
+            dma_reclaim_test:${_SBIN}/dma_reclaim_test
             cap_server:${_SBIN}/cap_server
             pthread_test:${_SBIN}/pthread_test
             cap_test:${_SBIN}/cap_test
@@ -413,11 +439,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # its output changed, so the bundle went on shipping a stale manifest while
     # the export tree held the new one.  The symptom was a policy denial for a
     # line the source file plainly contained.
-    DEPENDS mkbundle ${_CAPTEST_CMF} name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
+    DEPENDS mkbundle ${_CAPTEST_CMF} name_server_bin netname_test_bin irq_claim_test_bin
+            dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + 11 tasks + hal_server + block_device_server"
+    COMMENT "Bundle: bootstrap.conf + 12 tasks + hal_server + block_device_server"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})
