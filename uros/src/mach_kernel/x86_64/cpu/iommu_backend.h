@@ -345,6 +345,24 @@ int iommu_vtd_flush(const struct iommu_domain *d);
 int iommu_amd_flush(const struct iommu_domain *d);
 
 /*
+ * Take a device out of its domain and leave it reaching NOTHING.
+ *
+ * 🔴 BLOCKED AND NOT PASS-THROUGH, which is the whole content of the call.  A
+ * device whose driver's capability was revoked has just lost its authority; if
+ * detaching restored the pass-through entry it started in, the revocation
+ * would have GIVEN it all of memory.  A revocation that widens what something
+ * can reach is worse than no revocation, because it is one somebody trusted.
+ *
+ * ⚠️ The domain's page tables are left where they are.  Nothing walks them any
+ * more -- the device's entry does not point at them -- and freeing them means
+ * knowing no engine still holds a cached translation through them, which is
+ * what the invalidation here establishes and what a later reuse would have to
+ * establish again.  Frames are cheaper than that argument.
+ */
+int iommu_vtd_detach(uint16_t bdf);
+int iommu_amd_detach(uint16_t bdf);
+
+/*
  * Start a unit, and get back the index that iommu_record_scope() will attach
  * scopes to.  Answers -1 when there is no room, having set the truncation
  * flag -- and a reader that ignores the -1 will write into a unit that is not

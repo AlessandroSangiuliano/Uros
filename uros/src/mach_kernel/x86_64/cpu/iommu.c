@@ -2176,6 +2176,36 @@ int iommu_domain_identity(uint16_t bdf)
 	return domain_open(bdf, 1) != 0;
 }
 
+int iommu_domain_release(uint16_t bdf)
+{
+	struct device_domain *s = domain_slot(bdf);
+	unsigned i;
+	int ok;
+
+	if (s == 0)
+		return 0;
+
+	ok = found_vendor == IOMMU_INTEL ? iommu_vtd_detach(bdf)
+					 : iommu_amd_detach(bdf);
+	if (!ok)
+		return 0;
+
+	/*
+	 * ⚠️ The slot goes even though the tables stay.  What the slot records
+	 * is that a device is IN a domain, and after the detach it is not --
+	 * leaving it would make iommu_domain_of() answer with a domain nothing
+	 * points at, which is a lie that reads like bookkeeping.
+	 */
+	for (i = 0; i < ndevice_domains; i++)
+		if (&device_domains[i] == s) {
+			device_domains[i] = device_domains[ndevice_domains - 1];
+			ndevice_domains--;
+			break;
+		}
+
+	return 1;
+}
+
 int iommu_revoke(uint16_t bdf, uint64_t pa, uint64_t size)
 {
 	struct device_domain *s = domain_slot(bdf);

@@ -100,10 +100,11 @@ static int n_modules;
 
 /* Forward declaration */
 static int claim_device_for_driver(unsigned int bus, unsigned int slot,
-				   unsigned int func, unsigned int class_rev);
+				   unsigned int func, unsigned int class_rev,
+				   uint64_t *cap_id_out);
 static void pci_probe_module(const struct block_driver_ops *ops,
 			     unsigned int bus, unsigned int slot,
-			     unsigned int func);
+			     unsigned int func, uint64_t claimed_cap_id);
 
 /* ================================================================
  * HAL notification callback — invoked by hal_notify_server()
@@ -120,6 +121,7 @@ hal_device_added(mach_port_t driver_port,
 		 unsigned int irq)
 {
 	int m;
+	uint64_t claimed_cap_id = 0;
 
 	(void)driver_port;
 	(void)irq;
@@ -148,13 +150,14 @@ hal_device_added(mach_port_t driver_port,
 		 * touched the device -- reset it, mapped its registers, armed
 		 * its interrupt -- before anyone asked.
 		 */
-		if (!claim_device_for_driver(bus, slot, func, class_rev)) {
+		if (!claim_device_for_driver(bus, slot, func, class_rev,
+					     &claimed_cap_id)) {
 			printf("blk: %u:%u.%u NOT claimed — %s will not probe "
 			       "it\n", bus, slot, func, ops->name);
 			break;
 		}
 
-		pci_probe_module(ops, bus, slot, func);
+		pci_probe_module(ops, bus, slot, func, claimed_cap_id);
 		break;
 	}
 
@@ -183,7 +186,7 @@ hal_device_added(mach_port_t driver_port,
  */
 static int
 claim_device_for_driver(unsigned int bus, unsigned int slot, unsigned int func,
-			unsigned int class_rev)
+			unsigned int class_rev, uint64_t *cap_id_out)
 {
 	struct uros_cap	tok;
 	kern_return_t	kr;
@@ -207,6 +210,15 @@ claim_device_for_driver(unsigned int bus, unsigned int slot, unsigned int func,
 		return 0;
 	}
 
+	/*
+	 * ⚠️ ONE CAPABILITY PER CONTROLLER, and it matters that cap_server
+	 * mints a fresh one on every request even for the same class.  Giving
+	 * a device back means revoking the capability behind it, and one token
+	 * shared between two controllers would take both.
+	 */
+	if (cap_id_out != NULL)
+		*cap_id_out = tok.cap_id;
+
 	return 1;
 }
 
@@ -216,7 +228,8 @@ claim_device_for_driver(unsigned int bus, unsigned int slot, unsigned int func,
  */
 static void
 pci_probe_module(const struct block_driver_ops *ops,
-		 unsigned int bus, unsigned int slot, unsigned int func)
+		 unsigned int bus, unsigned int slot, unsigned int func,
+		 uint64_t claimed_cap_id)
 {
 	struct blk_controller *ctrl = &controllers[n_controllers];
 	kern_return_t kr;
@@ -285,6 +298,60 @@ pci_probe_module(const struct block_driver_ops *ops,
 	if (rc < 0) {
 		printf("blk: %s probe failed at PCI %u:%u.%u\n",
 		       ops->name, bus, slot, func);
+
+		/*
+		 * 🔑 AND THE DEVICE GOES BACK, which is both the right thing
+		 * and the thing that shows revocation works.  A driver that
+		 * could not bring a controller up is holding a claim it will
+		 * never use, and on this machine a claim is not bookkeeping:
+		 * it is an IOMMU domain the device can still reach memory
+		 * through.  Revoking the capability is what takes that away --
+		 * the kernel tears the domain down inside urmach_cap_revoke,
+		 * and leaves the device reaching NOTHING rather than back on
+		 * pass-through.
+		 *
+		 * ⚠️ The capability is this controller's own.  cap_server mints
+		 * a fresh one per request even for the same class, so this
+		 * gives back one device and not every device of its kind.
+		 */
+		if (claimed_cap_id != 0) {
+			natural_t	bdf = (natural_t)((bus << 8)
+							  | (slot << 3) | func);
+			vm_address_t	kva = 0, dma = 0;
+			kern_return_t	rkr, akr;
+
+			rkr = cap_revoke(claimed_cap_id);
+
+			/*
+			 * 🔴 PROVED BY BEING REFUSED, and not by asking.
+			 * device_dma_owned answers "is another task driving
+			 * this" -- and THIS server was the one driving it, so
+			 * it answers no whether the claim was dropped or is
+			 * still standing.  A check that cannot distinguish the
+			 * two outcomes is not a check, and this one read as a
+			 * pass for one run before it was noticed.
+			 *
+			 * Asking for a DMA buffer can only succeed if the
+			 * claim is still there.
+			 */
+			akr = device_dma_alloc(master_device, bdf, 4096,
+					       &kva, &dma);
+			if (akr == KERN_SUCCESS) {
+				printf("blk: gave %u:%u.%u back (cap_revoke "
+				       "kr=%d) and STILL got a DMA buffer for "
+				       "it — the revocation did not reach the "
+				       "kernel\n", bus, slot, func, (int)rkr);
+				(void) device_dma_free(master_device, bdf,
+						       kva, 4096);
+			} else {
+				printf("blk: gave %u:%u.%u back — cap_revoke "
+				       "kr=%d, and the kernel now refuses this "
+				       "server a DMA buffer for it (kr=%d): "
+				       "the domain went with the "
+				       "capability\n", bus, slot, func,
+				       (int)rkr, (int)akr);
+			}
+		}
 		return;
 	}
 

@@ -673,3 +673,12 @@ device_md_dma_identity(unsigned int bdf)
 
 	return iommu_domain_identity((uint16_t)bdf);
 }
+
+int
+device_md_dma_release(unsigned int bdf)
+{
+	if (bdf > 0xFFFFu)
+		return 0;
+
+	return iommu_domain_release((uint16_t)bdf);
+}

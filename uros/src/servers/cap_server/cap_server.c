@@ -42,6 +42,7 @@
 #include <mach/mach_port.h>
 #include <mach/message.h>
 #include <mach/cap_types.h>
+#include <mach/mach_traps.h>	/* urmach_cap_revoke (#432) */
 #include <mach_init.h>
 #include <sa_mach.h>
 #include <stdio.h>
@@ -368,6 +369,25 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
 
         cap_table_mark_revoked(e);
         revoked++;
+
+        /*
+         * 🔴 AND TELL THE KERNEL, WHICH NOBODY WAS DOING.  This server marks
+         * its OWN copy of the token; the copy a holder presents is unchanged
+         * and still says revoked=0.  urmach_cap_verify falls back to the
+         * kernel's revocation table for exactly that reason -- and nothing
+         * had ever populated it, so a revoked capability went on verifying.
+         *
+         * ⚠️ The trap has existed since #216 (syscall_sw.c slot 39) and was
+         * declared in <mach/mach_traps.h> beside the three that are used.  A
+         * revocation that reaches every subscriber by IPC and never reaches
+         * the kernel is a revocation the enforcement point does not hear.
+         *
+         * 🔑 It is also what withdraws authority that has been MATERIALISED:
+         * a capability turned into an IOMMU domain is not consulted again, so
+         * the kernel tearing that domain down inside this trap is the only
+         * moment the device stops reaching (#432).
+         */
+        (void)urmach_cap_revoke(id);
 
         /* Enqueue every child via the sibling chain.  Siblings are
          * distinct cap_ids so they fit linearly in the stack budget. */

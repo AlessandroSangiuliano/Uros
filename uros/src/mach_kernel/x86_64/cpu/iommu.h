@@ -737,6 +737,30 @@ int iommu_grant_pages(uint16_t bdf, const uint64_t *pa, unsigned n,
 int iommu_domain_identity(uint16_t bdf);
 
 /*
+ * Take this device out of its domain and leave it reaching NOTHING.
+ *
+ * 🔴 BLOCKED AND NOT PASS-THROUGH.  The caller is a revocation: something has
+ * just decided this driver may no longer drive this device.  Restoring the
+ * pass-through entry the device started in would make that revocation GIVE it
+ * all of memory -- a widening dressed as a withdrawal, and one somebody
+ * trusted.
+ *
+ * 🔑 THIS IS WHAT A MATERIALISED CAPABILITY OWES.  A capability that is
+ * checked on every use is revoked by refusing the next one; a capability that
+ * is turned into a MAPPING -- which is what a domain is, and what a page table
+ * has always been -- can only be revoked by tearing the mapping down.  Without
+ * this call the token could be revoked and the device would keep its reach,
+ * which is the difference between a capability system and a capability-shaped
+ * one.
+ *
+ * ⚠️ The page tables are left allocated.  Nothing walks them once the device's
+ * entry stops pointing at them, and freeing them would mean establishing that
+ * no engine holds a cached translation through them -- which the invalidation
+ * here does establish, and which a later reuse would have to establish again.
+ */
+int iommu_domain_release(uint16_t bdf);
+
+/*
  * Take a granted range back, naming it by the PHYSICAL address it was granted
  * from.  Answers non-zero when the range was there and is now unreachable.
  *

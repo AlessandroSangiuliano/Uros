@@ -850,6 +850,64 @@ int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
 	return attached > 0;
 }
 
+int iommu_vtd_detach(uint16_t bdf)
+{
+	const struct iommu_tables *t = iommu_tables();
+	unsigned bus = (unsigned)(bdf >> 8);
+	unsigned devfn = (unsigned)(bdf & 0xFF);
+	volatile uint64_t *root, *ctx;
+	uint64_t ctx_pa, entry[VTD_ENTRY_WORDS];
+	unsigned detached = 0;
+
+	if (t == 0 || t->root == 0)
+		return 0;
+
+	root = (volatile uint64_t *)(uintptr_t)phys_to_direct(t->root);
+	if ((root[bus * VTD_ENTRY_WORDS + 0] & VTD_ROOT_PRESENT) == 0)
+		return 0;
+
+	ctx_pa = root[bus * VTD_ENTRY_WORDS + 0] & VTD_CTX_SSPTPTR_MASK;
+	ctx = (volatile uint64_t *)(uintptr_t)phys_to_direct(ctx_pa);
+
+	iommu_vtd_context_blocked(entry);
+
+	/*
+	 * 🔴 THE PRESENT BIT FIRST HERE, WHICH IS THE OPPOSITE OF ATTACH.
+	 * Attaching writes the pointer before the bit that makes it live;
+	 * detaching must clear that bit before the pointer, or an engine
+	 * reading between the two stores finds an entry that is still present
+	 * and no longer points anywhere.
+	 */
+	ctx[devfn * VTD_ENTRY_WORDS + 0] = entry[0];
+	ctx[devfn * VTD_ENTRY_WORDS + 1] = entry[1];
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+		unsigned iro;
+
+		if (u == 0 || !u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		*(volatile uint64_t *)(regs + VTD_CCMD) =
+			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
+		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
+			return 0;
+
+		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
+		*(volatile uint64_t *)(regs + iro + 8) =
+			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
+		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+			return 0;
+
+		detached++;
+	}
+
+	return detached > 0;
+}
+
 /*
  * A mapping changed inside a domain that is already attached.
  *

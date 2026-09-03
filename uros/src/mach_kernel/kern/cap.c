@@ -46,6 +46,9 @@
 
 #include <mach/etap_events.h>
 
+/* #432: a revoked capability must take its mappings with it. */
+extern void device_master_cap_revoked(uint64_t cap_id);
+
 /* --- state ---------------------------------------------------------- */
 
 #define CAP_STATE_BUCKETS       256
@@ -304,6 +307,22 @@ urmach_cap_revoke(uint64_t cap_id)
     }
     e->flags |= CAP_FLAG_REVOKED;
     simple_unlock(&cap_lock);
+
+    /*
+     * 🔴 AND THE MAPPINGS THIS TOKEN BOUGHT, torn down (#432).
+     *
+     * Marking the id revoked withdraws it from everything that CHECKS it on
+     * use.  A capability that was turned into a MAPPING is not checked again:
+     * an IOMMU domain is a page table, and the device walks it whether or not
+     * the token behind it is still good.  So the withdrawal has to reach the
+     * mapping, and this is where the kernel knows first.
+     *
+     * ⚠️ OUTSIDE cap_lock, deliberately.  The teardown writes engine registers
+     * and spins on them, and holding a simple lock the whole machine's
+     * capability checks contend for while doing memory-mapped I/O is a
+     * serialisation nobody would find by reading either side alone.
+     */
+    device_master_cap_revoked(cap_id);
     return KERN_SUCCESS;
 }
 

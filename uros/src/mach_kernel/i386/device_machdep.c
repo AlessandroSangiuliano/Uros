@@ -373,3 +373,10 @@ device_md_dma_identity(unsigned int bdf)
 	(void)bdf;
 	return 0;
 }
+
+int
+device_md_dma_release(unsigned int bdf)
+{
+	(void)bdf;
+	return 0;
+}

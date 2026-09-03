@@ -326,4 +326,13 @@ extern int		device_md_dma_confined(unsigned int bdf);
  */
 extern int		device_md_dma_identity(unsigned int bdf);
 
+/*
+ * Take this device out of its domain and leave it reaching nothing.
+ *
+ * 🔴 NOTHING, and not what it started with.  The caller is a revocation, and a
+ * revocation that put the device back on pass-through would have widened its
+ * reach rather than withdrawn it.
+ */
+extern int		device_md_dma_release(unsigned int bdf);
+
 #endif	/* _DEVICE_DEVICE_MACHDEP_H_ */

@@ -999,6 +999,54 @@ int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d)
 	return attached > 0;
 }
 
+int iommu_amd_detach(uint16_t bdf)
+{
+	const struct iommu_tables *t = iommu_tables();
+	volatile uint64_t *dt;
+	uint64_t want[AMD_DTE_WORDS];
+	unsigned detached = 0;
+
+	if (t == 0 || t->root == 0 || t->command == 0)
+		return 0;
+
+	dt = (volatile uint64_t *)(uintptr_t)phys_to_direct(t->root);
+
+	/*
+	 * ⚠️ The domain id is the one this device WAS in, and it does not
+	 * matter what it is: a blocked entry translates nothing, so the field
+	 * names a domain nobody will ever walk.  Written from the existing
+	 * entry so the log of what happened stays readable.
+	 */
+	iommu_amd_dte_blocked((uint16_t)(dt[bdf * AMD_DTE_WORDS + 1] & 0xFFFF),
+			      want);
+
+	/* Valid last on attach; valid FIRST to go here.  See the VT-d note. */
+	dt[bdf * AMD_DTE_WORDS + 0] = want[0];
+	dt[bdf * AMD_DTE_WORDS + 1] = want[1];
+	dt[bdf * AMD_DTE_WORDS + 2] = want[2];
+	dt[bdf * AMD_DTE_WORDS + 3] = want[3];
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+
+		if (u == 0 || !u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (!amd_command(regs, t, AMD_CMD_INVALIDATE_DEVTAB | bdf, 0))
+			return 0;
+
+		if (!amd_completion_wait(regs, t))
+			return 0;
+
+		detached++;
+	}
+
+	return detached > 0;
+}
+
 /*
  * A mapping changed inside a domain that is already attached.
  *

@@ -328,6 +328,7 @@ check_master_port(ipc_port_t port)
 static struct {
 	natural_t	bdf;
 	task_t		task;
+	uint64_t	cap_id;		/* the token that established it */
 } device_claim[DEVICE_MAX_CLAIMS];
 
 static unsigned device_nclaims;
@@ -1844,6 +1845,7 @@ ds_master_device_claim(
 
 	device_claim[device_nclaims].bdf = bdf;
 	device_claim[device_nclaims].task = me;
+	device_claim[device_nclaims].cap_id = cap.cap_id;
 	device_nclaims++;
 
 	printf("device: %02x:%02x.%u (class 0x%06lx) is now driven by task "
@@ -1852,4 +1854,66 @@ ds_master_device_claim(
 	       (unsigned)(bdf & 7), (unsigned long)class_id,
 	       (unsigned long)me);
 	return KERN_SUCCESS;
+}
+
+/*
+ * ── A revoked capability takes the device with it (#432) ─────────────
+ *
+ * 🔴 THIS IS WHAT A MATERIALISED CAPABILITY OWES.  A capability that is
+ * checked on every use is revoked by refusing the next one.  A capability that
+ * is turned into a MAPPING -- and an IOMMU domain is a page table, which is
+ * what a mapping has always been -- keeps working after its token is revoked,
+ * because nothing consults the token again.  The only way to withdraw it is to
+ * tear the mapping down, and that is this.
+ *
+ * Without it the whole arrangement is capability-SHAPED rather than a
+ * capability system: authority that cannot be withdrawn is not authority that
+ * was granted, it is authority that was released.
+ *
+ * 🔑 CALLED FROM THE KERNEL'S OWN REVOKE, NOT FROM AN IPC NOTIFICATION.
+ * urmach_cap_revoke is a trap that only cap_server may make, so the kernel
+ * learns of a revocation BEFORE anybody it would have to tell -- and a
+ * teardown that waited for a message would leave a window in which the token
+ * is void and the device still reaching.  cap_server's cap_revoke_notify fan-
+ * out still happens, for the servers that hold handles; this is the half no
+ * message could do in time.
+ *
+ * ⚠️ The device is left BLOCKED and not passing through.  See
+ * iommu_domain_release(): a revocation that restored the entry the device
+ * started in would have widened its reach, which is worse than not revoking
+ * because somebody trusted it.
+ */
+void
+device_master_cap_revoked(uint64_t cap_id)
+{
+	unsigned i;
+
+	for (i = 0; i < device_nclaims; i++) {
+		natural_t bdf;
+
+		if (device_claim[i].cap_id != cap_id)
+			continue;
+
+		bdf = device_claim[i].bdf;
+
+		printf("device: the capability behind %02x:%02x.%u was revoked "
+		       "— the claim is dropped and the device is left reaching "
+		       "nothing\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7));
+
+		(void) device_md_dma_release(bdf);
+
+		/*
+		 * ⚠️ Compacted, and the loop index is NOT advanced: the entry
+		 * moved into this slot has not been looked at.  One token can
+		 * stand behind more than one device -- a driver acquires a
+		 * capability for a CLASS and claims every instance of it with
+		 * the same one -- so a revocation that stopped at the first
+		 * match would leave the rest reaching.
+		 */
+		device_claim[i] = device_claim[device_nclaims - 1];
+		device_nclaims--;
+		i--;
+	}
 }
