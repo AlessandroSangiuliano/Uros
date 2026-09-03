@@ -525,12 +525,20 @@ routine device_dma_map_foreign(
  * different sources: one is a signed statement about the task, the other is
  * the hardware answering for itself.
  *
- * 🔴 AND EVERY DMA CALL AFTERWARDS REQUIRES THE CLAIM, NOT THE TOKEN.
- * Verifying a token means an HMAC-SHA256 and a lock the whole machine shares;
- * doing that per transfer would put a global serialisation point on the
- * hottest path in the system.  The claim is a pointer comparison, and the
- * question it answers -- "is this still my device" -- cannot change between
- * transfers.
+ * 🔴 AND WHAT IS CHECKED AFTERWARDS IS THE CLAIM, ON THE BUFFER CALLS ONLY.
+ * Five of them ask -- dma_alloc, dma_free, dma_alloc_sg, dma_identity and
+ * dma_map_foreign -- and every one is about obtaining or releasing memory.
+ * Verifying a token instead would mean an HMAC-SHA256 under a lock the whole
+ * machine shares, on a path that runs once per buffer; the claim is a pointer
+ * comparison, and the question it answers cannot change in between.
+ *
+ * 🔑 A TRANSFER IS CHECKED BY NEITHER, BECAUSE A TRANSFER DOES NOT COME HERE.
+ * A userspace driver reads a disk by writing an address into the device's own
+ * descriptor and poking a register: no system call, nothing for the kernel to
+ * see, and therefore no place to put a check.  That is not a gap in this
+ * design -- it IS the design, and it is the entire reason #432 exists.  The
+ * only thing that can police that transfer is the hardware, which is what the
+ * domain the claim gives access to is for.
  *
  * ⚠️ On a machine with no manifest shipped, cap_server issues freely and this
  * check passes: enforcement is always on, and how strict it is depends on the
