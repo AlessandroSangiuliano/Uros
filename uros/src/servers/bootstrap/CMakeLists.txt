@@ -344,10 +344,33 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # adding a second program's behaviour to the measurement.  That was an
   # experiment and is not a configuration: it belongs in the issue and in
   # ~/uros-tests, not in what the build ships.
+  # ── The first policy this build has ever shipped (#432) ─────────────
+  #
+  # 🔴 A .cmf IS WHAT TURNS cap_server FROM A MECHANISM INTO A POLICY, and
+  # this target shipped none.  i386 has compiled and shipped manifests for a
+  # while -- cpustat, ush, hello_exec, dlopen_test, virtual_terminal_server,
+  # through scripts/make-bundle.sh -- so cap_server provisions from them on
+  # every i386 boot.  x86-64 shipped none because mkmanifest was built only
+  # under UROS_USERLAND_ARCH_OK: the mechanism was absent from this TARGET,
+  # not from the system.
+  #
+  # ⚠️ Which is a correction.  This was first written as "none was ever
+  # compiled", reached by a search that could not have found the answer:
+  # `find -name "*.cmf" -not -path "*/build*"' looks for compiled output
+  # everywhere except where compiled output goes.
+  #
+  # ⚠️ The bundle entry name must be "<symtab>.cmf" exactly: bootstrap builds
+  # that string from the name in bootstrap.conf and looks it up.  A file
+  # shipped under any other name is a policy nobody reads, which is worse than
+  # no policy because it looks like one.
+  set(_CAPTEST_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/cap_test.cmf")
+
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
             bootstrap.conf:${_CONF}
+            cap_test.cmf:${_CAPTEST_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             irq_claim_test:${_SBIN}/irq_claim_test
@@ -385,7 +408,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
             modules/block/ahci.so:${_MOD}/block/ahci.so
-    DEPENDS mkbundle name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
+    DEPENDS mkbundle cap_test_manifest name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
             ${_CONF}

@@ -415,6 +415,76 @@ subsystem_name_is_not_a_pointer(void)
  * that checked a pattern it wrote itself would pass on a read that returned
  * the buffer unchanged.
  */
+
+/*
+ * ── The manifest refuses what it does not declare (#432) ─────────────
+ *
+ * 🔴 THE FIRST TIME THIS SYSTEM'S POLICY FILE HAS EVER BEEN READ.  The
+ * manifest machinery has existed since #216 -- a compiler, a validator, a
+ * per-task table, bootstrap's lookup of "<symtab>.cmf" in the bundle -- and
+ * not one .cmf was ever compiled or shipped, so cap_manifest_allows()
+ * answered "permissive, no manifest" on every boot of this system's life and
+ * the enforcement branch in cap_server called itself dead in its own comment.
+ *
+ * cap_test.manifest declares RESOURCE_BLK_DEVICE and nothing else.  This
+ * program legitimately opens partitions with block-device capabilities --
+ * arms [3] and [5] do -- and has no business driving PCI hardware: it is a
+ * test, not a driver.  So asking for a PCI capability must come back DENIED,
+ * and the denial is the policy being enforced rather than described.
+ *
+ * 🔑 WHICH IS THE OTHER HALF OF ARM [11].  That one shows the kernel refusing
+ * a device somebody else drives; this one shows cap_server refusing the
+ * capability that would have let this task claim one at all.  Together they
+ * answer "who may drive this device": the manifest says what KIND, the claim
+ * says which INSTANCE, and neither is a policy alone.
+ *
+ * ⚠️ A boot where this task has no manifest reports that it DID NOT RUN.
+ * cap_server is permissive without one, so a token would come back and prove
+ * nothing -- and a pass on the permissive path is exactly the silence this
+ * arm exists to break.
+ */
+static int
+the_manifest_refuses_what_it_does_not_declare(void)
+{
+    struct uros_cap tok_blk, tok_pci;
+    kern_return_t   kr_blk, kr_pci;
+
+    memset(&tok_blk, 0, sizeof(tok_blk));
+    memset(&tok_pci, 0, sizeof(tok_pci));
+
+    /*
+     * ⚠️ THE DECLARED ONE FIRST, and it is not a formality.  A denial proves
+     * the policy is enforced only if something is also ALLOWED -- otherwise
+     * "cap_server said no" is indistinguishable from cap_server being absent,
+     * broken, or refusing everything.  One yes and one no from the same
+     * server, in the same breath, is what makes the no mean something.
+     */
+    kr_blk = cap_request(RESOURCE_BLK_DEVICE, 0,
+                         CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok_blk);
+
+    kr_pci = cap_request(RESOURCE_PCI_DEVICE, 0x010601,
+                         CAP_OP_PCI_DMA_MAP, 0, &tok_pci);
+
+    if (kr_blk != KERN_SUCCESS) {
+        printf("cap_test: [13] the manifest — DID NOT RUN, cap_server would "
+               "not issue even the declared block-device capability "
+               "(kr=%d)\n", (int)kr_blk);
+        return 1;
+    }
+
+    if (kr_pci == KERN_SUCCESS) {
+        printf("cap_test: [13] WRONG — cap_server issued a PCI-device "
+               "capability to a task whose manifest declares only block "
+               "devices\n");
+        return 0;
+    }
+
+    printf("cap_test: [13] block devices ALLOWED and PCI devices REFUSED "
+           "(kr=%d) by the same cap_server in the same breath — the manifest "
+           "is a policy and not a description\n", (int)kr_pci);
+    return 1;
+}
+
 static int
 a_disk_reads_into_a_foreign_page(mach_port_t device_port, mach_port_t handle,
                                  const char *name)
@@ -1081,6 +1151,9 @@ main(int argc, char **argv)
         pass = 0;
 
     if (!a_device_has_one_driver(device_port))
+        pass = 0;
+
+    if (!the_manifest_refuses_what_it_does_not_declare())
         pass = 0;
 
     if (pass) {

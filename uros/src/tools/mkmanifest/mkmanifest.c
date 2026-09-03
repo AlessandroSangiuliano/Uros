@@ -85,22 +85,41 @@ static void
 parse_entry(const char *kw, char *args, cap_manifest_entry_t *out_arr,
             unsigned *out_count, int lineno)
 {
-    char *type_s, *ops_s, *end;
-    unsigned long long type, ops;
+    char *type_s, *id_s, *ops_s, *end;
+    unsigned long long type, id, ops;
 
     if (*out_count >= CAP_MANIFEST_MAX_ENTRIES)
         die("line %d: too many %s entries (max %d)",
             lineno, kw, CAP_MANIFEST_MAX_ENTRIES);
 
+    /*
+     * 🔴 THREE FIELDS IN v2, AND A TWO-FIELD LINE IS REFUSED RATHER THAN
+     * READ AS "ANY".  A manifest written for version 1 means "any resource of
+     * this type", and accepting it silently here would compile a file whose
+     * author was describing one world into a policy for another -- the exact
+     * shape of a permission that is wider than the person who wrote it
+     * believes.  The refusal names the line; adding `any' is one word.
+     */
     type_s = strtok(args, " \t");
+    id_s   = strtok(NULL, " \t");
     ops_s  = strtok(NULL, " \t");
-    if (!type_s || !ops_s)
-        die("line %d: %s needs <type> <ops>", lineno, kw);
+    if (!type_s || !id_s || !ops_s)
+        die("line %d: %s needs <type> <id|any> <ops> — v2 added the resource "
+            "id, and a v1 line meant `any'", lineno, kw);
 
     errno = 0;
     type = strtoull(type_s, &end, 0);
     if (errno || *end || type > 0xffffffffULL)
         die("line %d: bad type '%s'", lineno, type_s);
+
+    if (strcmp(id_s, "any") == 0) {
+        id = CAP_MANIFEST_ANY_ID;
+    } else {
+        errno = 0;
+        id = strtoull(id_s, &end, 0);
+        if (errno || *end)
+            die("line %d: bad resource id '%s'", lineno, id_s);
+    }
 
     errno = 0;
     ops = strtoull(ops_s, &end, 0);
@@ -108,6 +127,7 @@ parse_entry(const char *kw, char *args, cap_manifest_entry_t *out_arr,
         die("line %d: bad ops '%s'", lineno, ops_s);
 
     out_arr[*out_count].type = (uint32_t)type;
+    out_arr[*out_count].resource_id = id;
     out_arr[*out_count]._pad = 0;
     out_arr[*out_count].ops  = (uint64_t)ops;
     (*out_count)++;

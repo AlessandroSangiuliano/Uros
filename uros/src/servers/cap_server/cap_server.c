@@ -233,9 +233,11 @@ cap_acquire(mach_port_t             server,
         g_request_local_port != cap_port) {
         const cap_manifest_header_t *m =
             cap_manifest_table_get(g_request_local_port);
-        if (m && !cap_manifest_allows(m, resource_type, ops)) {
-            printf("cap: DENY (manifest) port=0x%x rtype=%u ops=0x%llx\n",
+        if (m && !cap_manifest_allows(m, resource_type, resource_id, ops)) {
+            printf("cap: DENY (manifest) port=0x%x rtype=%u id=0x%llx "
+                   "ops=0x%llx\n",
                    (unsigned)g_request_local_port, resource_type,
+                   (unsigned long long)resource_id,
                    (unsigned long long)ops);
             return CAP_ERR_NOT_IN_MANIFEST;
         }
@@ -637,7 +639,35 @@ main(int argc, char **argv)
     bootstrap_completed(bootstrap_port, mach_task_self());
 
     printf("cap: entering message loop\n");
-    mach_msg_server(cap_demux, 8192, cap_port_set, MACH_MSG_OPTION_NONE);
+
+    /*
+     * A LIMIT REMOVED, AND NOT A DEFECT OBSERVED — the distinction is the
+     * point of writing this down.
+     *
+     * cap_provision_task carries the manifest as an INLINE array bounded at
+     * CAP_MANIFEST_MAX_BYTES, so a blob near that bound makes a message near
+     * sixteen kilobytes, against a receive buffer of eight.  Such a message
+     * cannot be received, no reply is ever sent, and the caller blocks
+     * forever.  Every manifest this tree ships is under a hundred bytes, so
+     * nothing has ever come close.
+     *
+     * 🔥 AND THAT IS A CORRECTION.  This was first written as the diagnosis of
+     * a hang -- bootstrap stopped after cap_provision_task, with every task it
+     * had already started still running -- and the hang went away when this
+     * changed.  It was not this: putting 8192 back leaves provisioning working
+     * and the manifest enforced.  MIG sends the ACTUAL length of a
+     * variable-length inline array, not its maximum; the sixteen kilobytes are
+     * the stack frame of the generated stub, not the message.  The hang has
+     * the shape of #522 -- one task blocked while the rest of the system
+     * continues -- and no cause established here.
+     *
+     * 🔑 Derived and not guessed: the biggest thing the interface can carry,
+     * plus room for the header, the descriptors and the trailer.  A number
+     * chosen by looking at today's messages stops being right the next time
+     * one grows.
+     */
+    mach_msg_server(cap_demux, CAP_MANIFEST_MAX_BYTES + 2048, cap_port_set,
+                    MACH_MSG_OPTION_NONE);
 
     printf("cap: mach_msg_server exited unexpectedly\n");
     return 1;

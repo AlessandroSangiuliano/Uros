@@ -63,6 +63,7 @@
 #include <kern/sched_prim.h>
 #include <kern/thread.h>
 #include <kern/kalloc.h>
+#include <kern/cap.h>		/* #432: a capability for a device's kind */
 
 /*
  * #448: the interface, so the compiler can compare it with what is below.
@@ -348,11 +349,16 @@ device_claimed_by_other(natural_t bdf)
 }
 
 /*
- * Answers KERN_SUCCESS when this task may act on this device, claiming it if
- * nobody has.
+ * May this task act on this device?
+ *
+ * 🔴 IT NO LONGER CLAIMS.  A device is claimed by device_claim(), which is
+ * where a capability is presented; this only answers whether the claim already
+ * belongs to the caller.  The two used to be one function, and the difference
+ * is the whole of the policy: first-come-first-served is not an entitlement,
+ * it is the absence of one.
  */
 static kern_return_t
-claim_device(natural_t bdf)
+check_claim(natural_t bdf)
 {
 	task_t me = current_task();
 	unsigned i;
@@ -366,23 +372,12 @@ claim_device(natural_t bdf)
 			       ? KERN_SUCCESS : KERN_NO_ACCESS;
 
 	/*
-	 * ⚠️ Full is a REFUSAL and not a free-for-all.  A table that stopped
-	 * recording would let every device past the sixteenth be claimed by
-	 * anybody, which is the check silently turning itself off at the
-	 * moment there are enough devices for it to matter.
+	 * ⚠️ An UNCLAIMED device is refused too, and that is not the same
+	 * answer wearing the same code by accident: a driver that has not
+	 * presented a capability for this device's kind has exactly as much
+	 * right to map memory for it as one that presented somebody else's.
 	 */
-	if (device_nclaims >= DEVICE_MAX_CLAIMS)
-		return KERN_RESOURCE_SHORTAGE;
-
-	device_claim[device_nclaims].bdf = bdf;
-	device_claim[device_nclaims].task = me;
-	device_nclaims++;
-
-	printf("device: %02x:%02x.%u is now driven by task 0x%lx, and no "
-	       "other task may map memory for it\n",
-	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
-	       (unsigned)(bdf & 7), (unsigned long)me);
-	return KERN_SUCCESS;
+	return KERN_NO_ACCESS;
 }
 
 /* ---- PCI configuration space ---- */
@@ -925,7 +920,7 @@ ds_master_device_dma_alloc(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	kr = claim_device(bdf);
+	kr = check_claim(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1021,7 +1016,7 @@ ds_master_device_dma_free(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	kr = claim_device(bdf);
+	kr = check_claim(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1112,7 +1107,7 @@ ds_master_device_dma_alloc_sg(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	kr = claim_device(bdf);
+	kr = check_claim(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1637,7 +1632,7 @@ ds_master_device_dma_identity(
 	if (bdf == DEVICE_DMA_NO_BDF)
 		return KERN_INVALID_ARGUMENT;
 
-	kr = claim_device(bdf);
+	kr = check_claim(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1705,7 +1700,7 @@ ds_master_device_dma_map_foreign(
 		return KERN_INVALID_ARGUMENT;
 
 	/* A device has one driver, and only that driver may map for it. */
-	kr = claim_device(bdf);
+	kr = check_claim(bdf);
 	if (kr != KERN_SUCCESS)
 		return kr;
 
@@ -1761,5 +1756,100 @@ ds_master_device_dma_map_foreign(
 	}
 
 	*dma_addr = (vm_address_t)(base + (unsigned long)page * PAGE_SIZE);
+	return KERN_SUCCESS;
+}
+
+/*
+ * ── Claiming a device, by showing a capability for its kind (#432) ───
+ *
+ * See the note on device_claim in <device/device_master.defs>.  In one line:
+ * the token says what KIND of hardware this driver is for, and the claim says
+ * which instance of it this task got — and neither is a policy alone.
+ */
+kern_return_t
+ds_master_device_claim(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	cap_token_t		token,
+	mach_msg_type_number_t	tokenCnt)
+{
+	kern_return_t		kr;
+	struct uros_cap		cap;
+	unsigned int		class_word;
+	uint64_t		class_id;
+	task_t			me = current_task();
+	unsigned		i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	if (bdf == DEVICE_DMA_NO_BDF || bdf > 0xFFFFu)
+		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * ⚠️ The blob's length is checked against the struct rather than
+	 * trusted: MIG bounds it at CAP_TOKEN_MAX, which is the WIRE cap and
+	 * deliberately larger than the token so the stubs stay frozen while
+	 * the struct evolves.  A short blob copied into a struct would be a
+	 * token whose tail is whatever was on the stack.
+	 */
+	if (tokenCnt != sizeof(struct uros_cap))
+		return KERN_INVALID_ARGUMENT;
+
+	memcpy(&cap, token, sizeof(cap));
+
+	/*
+	 * 🔑 THE CLASS COMES FROM THE HARDWARE, NOT FROM THE CALLER.  The
+	 * token is a signed statement about the task; this is the device
+	 * answering for itself, out of its own configuration space.  A caller
+	 * that named its own class would be presenting a capability for
+	 * whatever it had one for.
+	 *
+	 * Register 0x08 is revision in 7:0 and class code in 31:8 — base
+	 * class, sub-class and programming interface.
+	 */
+	class_word = device_md_pci_read((unsigned)(bdf >> 8),
+					(unsigned)((bdf >> 3) & 0x1F),
+					(unsigned)(bdf & 7), 0x08);
+
+	if (class_word == 0xFFFFFFFFu)
+		return KERN_INVALID_ARGUMENT;	/* nothing is there */
+
+	class_id = (uint64_t)(class_word >> 8);
+
+	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
+	if (kr != KERN_SUCCESS) {
+		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — its "
+		       "capability does not cover class 0x%06lx (kr=%d)\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7), (unsigned long)me,
+		       (unsigned long)class_id, (int)kr);
+		return KERN_NO_ACCESS;
+	}
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf)
+			return device_claim[i].task == me
+			       ? KERN_SUCCESS : KERN_NO_ACCESS;
+
+	/*
+	 * ⚠️ Full is a REFUSAL and not a free-for-all.  A table that stopped
+	 * recording would leave every device past the sixteenth claimable by
+	 * anybody -- the check turning itself off exactly when there are
+	 * enough devices for it to matter.
+	 */
+	if (device_nclaims >= DEVICE_MAX_CLAIMS)
+		return KERN_RESOURCE_SHORTAGE;
+
+	device_claim[device_nclaims].bdf = bdf;
+	device_claim[device_nclaims].task = me;
+	device_nclaims++;
+
+	printf("device: %02x:%02x.%u (class 0x%06lx) is now driven by task "
+	       "0x%lx, which showed a capability for that class\n",
+	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+	       (unsigned)(bdf & 7), (unsigned long)class_id,
+	       (unsigned long)me);
 	return KERN_SUCCESS;
 }

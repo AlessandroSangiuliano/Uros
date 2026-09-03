@@ -46,6 +46,8 @@
 #include <device/device.h>
 #include <device/device_types.h>
 #include <servers/netname.h>
+#include <libcap.h>			/* #432: a capability for a device's class */
+#include "device_master.h"	/* #432: device_claim */
 #include <stdio.h>
 #include <string.h>
 #include "block_server.h"
@@ -97,6 +99,8 @@ static const struct block_driver_ops *modules[MAX_MODULES + 1];
 static int n_modules;
 
 /* Forward declaration */
+static int claim_device_for_driver(unsigned int bus, unsigned int slot,
+				   unsigned int func, unsigned int class_rev);
 static void pci_probe_module(const struct block_driver_ops *ops,
 			     unsigned int bus, unsigned int slot,
 			     unsigned int func);
@@ -136,11 +140,74 @@ hal_device_added(mach_port_t driver_port,
 		       "class=0x%08x matched by %s\n",
 		       bus, slot, func, vendor_device, class_rev, ops->name);
 
+		/*
+		 * 🔴 CLAIMED BEFORE PROBED, and refused means not probed.
+		 * Matching a driver to a device is this server saying which
+		 * hardware it thinks it can handle; the claim is the KERNEL
+		 * saying whether it may.  A probe that ran first would have
+		 * touched the device -- reset it, mapped its registers, armed
+		 * its interrupt -- before anyone asked.
+		 */
+		if (!claim_device_for_driver(bus, slot, func, class_rev)) {
+			printf("blk: %u:%u.%u NOT claimed — %s will not probe "
+			       "it\n", bus, slot, func, ops->name);
+			break;
+		}
+
 		pci_probe_module(ops, bus, slot, func);
 		break;
 	}
 
 	return KERN_SUCCESS;
+}
+
+
+/*
+ * ── May this server drive this device? (#432) ────────────────────────
+ *
+ * 🔑 THE TOKEN IS FOR THE CLASS AND THE CLAIM IS FOR THE INSTANCE, which is
+ * the split the manifest cannot make on its own: a policy file knows what kind
+ * of hardware a driver is for, and cannot know what is plugged in.  So this
+ * asks cap_server for a capability covering the device's CLASS -- out of this
+ * server's own manifest -- and hands it to the kernel, which reads the class
+ * back out of the device's configuration space and requires the two to agree.
+ *
+ * ⚠️ `class_rev' is the register: class code in 31:8, revision in 7:0.  The
+ * capability names the class, so the revision goes -- a driver is for a kind
+ * of device and not for a stepping of it.
+ *
+ * ⚠️ A machine with no manifest shipped gets a token for the asking, and this
+ * passes.  Enforcement is always on; how strict it is, is what the policy file
+ * decides.  The alternative -- turning the check off when there is no policy
+ * -- is a mechanism that is absent exactly when somebody starts relying on it.
+ */
+static int
+claim_device_for_driver(unsigned int bus, unsigned int slot, unsigned int func,
+			unsigned int class_rev)
+{
+	struct uros_cap	tok;
+	kern_return_t	kr;
+	natural_t	bdf = (natural_t)((bus << 8) | (slot << 3) | func);
+
+	memset(&tok, 0, sizeof(tok));
+
+	kr = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)(class_rev >> 8),
+			 CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
+			 | CAP_OP_PCI_IRQ, 0, &tok);
+	if (kr != KERN_SUCCESS) {
+		printf("blk: cap_server would not issue a capability for "
+		       "class 0x%06x (kr=%d)\n", class_rev >> 8, (int)kr);
+		return 0;
+	}
+
+	kr = device_claim(master_device, bdf, (char *)&tok, sizeof(tok));
+	if (kr != KERN_SUCCESS) {
+		printf("blk: the kernel refused this server the claim on "
+		       "%u:%u.%u (kr=%d)\n", bus, slot, func, (int)kr);
+		return 0;
+	}
+
+	return 1;
 }
 
 /*

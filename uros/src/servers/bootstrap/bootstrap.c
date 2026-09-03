@@ -64,6 +64,7 @@
 #include <mach/mach_host.h>
 #include <mach/exc_server.h>
 #include <mach/module_pool.h>
+#include <mach/thread_switch.h>	/* #432: wait for cap_server to register */
 #include "bundle.h"
 #include <mach/bootstrap_server.h>
 
@@ -495,6 +496,23 @@ provision_cap_port_for_child(task_port_t child_task,
 	if (!bundle_active() || symtab_name == NULL || *symtab_name == '\0')
 		return 0;
 
+	/*
+	 * 🔥 libcap REACHES cap_server THROUGH `name_server_port', AND THIS
+	 * FILE WIRED IT IN STAGE 2 -- which runs after every stage-1 task has
+	 * already been created.  So during the only window in which a manifest
+	 * can be installed, bootstrap's own name-server slot was null and the
+	 * lookup could not succeed however long it waited.
+	 *
+	 * ⚠️ The comment in bootstrap_stage2() explains exactly why the slot
+	 * needs wiring -- "mach_init_ports never populates it for bootstrap
+	 * (no TASK_BOOTSTRAP_PORT to inherit from)" -- and wires it three
+	 * hundred lines and one boot phase away from the caller that needs it
+	 * first.  Nothing noticed, because until #432 shipped a .cmf this
+	 * function returned before ever reaching a cap_server call.
+	 */
+	if (name_server_port == MACH_PORT_NULL)
+		name_server_port = bootstrap_name_server_port();
+
 	if (snprintf(path, sizeof(path), "%s.cmf", symtab_name)
 	    >= (int)sizeof(path))
 		return 0;	/* name too long for our path buffer */
@@ -529,8 +547,35 @@ provision_cap_port_for_child(task_port_t child_task,
 		return 0;
 	}
 
-	kr = cap_provision(child_task, blob, (unsigned int)sz,
-			   &cap_port);
+	/*
+	 * 🔥 AND IT HAS TO WAIT FOR cap_server, WHICH IS A TASK THIS FILE
+	 * STARTED.  #216 provisions at task-CREATION time and cap_server is
+	 * itself created here, so the first child with a manifest is offered
+	 * one before cap_server has registered its name -- cap_provision then
+	 * answers CAP_ERR_INTERNAL, bootstrap falls back to "the legacy
+	 * permissive path", and the task runs with no policy at all.
+	 *
+	 * ⚠️ INVISIBLE UNTIL #432 SHIPPED THE FIRST .cmf.  Nothing had a
+	 * manifest, so this call had never once been reached with a blob to
+	 * hand over: the fallback message was the only outcome anyone had
+	 * seen, and it reads like an expected one.
+	 *
+	 * 🔑 A BOUNDED WAIT AND NOT A LOOP.  A task whose manifest comes
+	 * before cap_server in bootstrap.conf would otherwise hang the boot
+	 * waiting for a server that is behind it in the queue -- so this gives
+	 * up, says so, and the fallback happens as before.  The count is
+	 * yields and not seconds: what it waits for is a task getting to run,
+	 * and how long that takes is the scheduler's business.
+	 */
+	for (int tries = 0; tries < 200; tries++) {
+		kr = cap_provision(child_task, blob, (unsigned int)sz,
+				   &cap_port);
+		if (kr != CAP_ERR_INTERNAL)
+			break;
+
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+	}
+
 	free(blob);
 	if (kr != KERN_SUCCESS || cap_port == MACH_PORT_NULL) {
 		BOOTSTRAP_IO_LOCK();

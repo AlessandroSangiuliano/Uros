@@ -39,6 +39,18 @@ subsystem
 #include <mach/mach_types.defs>
 #include <device/device_types.defs>
 
+/*
+ * A capability token, as an opaque blob (#432, #216).
+ *
+ * ⚠️ Declared here rather than imported from cap_server.defs, which is a
+ * different subsystem: what crosses this interface is the same BYTES and not
+ * the same MIG type, and a cross-subsystem type import would tie this
+ * interface's wire format to that one's.  CAP_TOKEN_MAX is the bound both
+ * agree on, and <mach/cap_types.h> is where it is stated once.
+ */
+type cap_token_t = array[*:256] of char;
+import <mach/cap_types.h>;
+
 serverprefix	ds_master_;
 
 /*
@@ -486,6 +498,50 @@ routine device_dma_map_foreign(
 	in	bdf		: natural_t;
 	in	paddr		: vm_address_t;
 	out	dma_addr	: vm_address_t
+	);
+
+/*
+ * ── Claim a device, by presenting a capability for its KIND (#432) ───
+ *
+ * 🔴 THIS IS WHERE "MAY I DRIVE THIS DEVICE" IS ASKED, and it is asked ONCE.
+ * Holding the master device port used to be the whole answer: any task with it
+ * could name any bus/device/function and have memory mapped into that device's
+ * domain -- and a page inside somebody else's device's domain is a page that
+ * DEVICE can reach, which is the one direction nothing else in this system
+ * checks.
+ *
+ * 🔑 THE TOKEN NAMES A CLASS, NOT A DEVICE, and the split is deliberate.  A
+ * bus/device/function is a property of the BOARD -- this tree's AHCI is
+ * 00:04.0 with one command line and 00:1f.2 with another -- so a policy naming
+ * one would have to be rewritten per machine.  The token says what KIND of
+ * device this task may drive, out of its manifest; the CLAIM says it got this
+ * one first.  Neither is a policy alone:
+ *
+ *	the manifest   what kind of hardware this driver is for
+ *	the claim      which instance of it this task got
+ *
+ * The kernel reads the class out of the device's own configuration space and
+ * requires the token to name it, so the two halves are checked against
+ * different sources: one is a signed statement about the task, the other is
+ * the hardware answering for itself.
+ *
+ * 🔴 AND EVERY DMA CALL AFTERWARDS REQUIRES THE CLAIM, NOT THE TOKEN.
+ * Verifying a token means an HMAC-SHA256 and a lock the whole machine shares;
+ * doing that per transfer would put a global serialisation point on the
+ * hottest path in the system.  The claim is a pointer comparison, and the
+ * question it answers -- "is this still my device" -- cannot change between
+ * transfers.
+ *
+ * ⚠️ On a machine with no manifest shipped, cap_server issues freely and this
+ * check passes: enforcement is always on, and how strict it is depends on the
+ * policy file.  That is the honest arrangement -- the mechanism does not
+ * pretend the policy exists, and the policy does not need the mechanism to be
+ * turned on twice.
+ */
+routine device_claim(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	token		: cap_token_t
 	);
 
 routine device_dma_owned(

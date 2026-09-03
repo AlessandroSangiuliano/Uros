@@ -82,3 +82,31 @@ set_target_properties(cap_test_server PROPERTIES
   OUTPUT_NAME "cap_test"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The manifest (#432) — the first policy this test is subject to.
+# ===========================================================================
+#
+# 🔑 Compiled HERE and consumed in two different ways, because the two targets
+# assemble their bundle with two different tools.  x86-64's bundle is built by
+# CMake in servers/bootstrap and names the .cmf directly; i386's is built by
+# scripts/make-bundle.sh, which picks manifests out of the export tree.  This
+# rule writes to the export tree, and the bootstrap rule reads from it -- so
+# the file is produced once and both bundles ship the same bytes.
+set(CAPTEST_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/cap_test.manifest)
+set(CAPTEST_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/cap_test.cmf")
+
+add_custom_command(
+  OUTPUT ${CAPTEST_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${CAPTEST_MANIFEST_OUT}
+          ${CAPTEST_MANIFEST_SRC}
+  DEPENDS mkmanifest ${CAPTEST_MANIFEST_SRC}
+  COMMENT "mkmanifest: cap_test.manifest -> cap_test.cmf"
+  VERBATIM
+)
+
+add_custom_target(cap_test_manifest ALL DEPENDS ${CAPTEST_MANIFEST_OUT})
+add_dependencies(cap_test_server cap_test_manifest)

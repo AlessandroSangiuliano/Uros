@@ -152,7 +152,7 @@ cap_manifest_table_get(mach_port_t task_cap_port)
 
 int
 cap_manifest_allows(const cap_manifest_header_t *m,
-                    uint32_t type, uint64_t ops)
+                    uint32_t type, uint64_t resource_id, uint64_t ops)
 {
     const cap_manifest_entry_t *req;
     uint32_t i;
@@ -164,6 +164,21 @@ cap_manifest_allows(const cap_manifest_header_t *m,
                                          m->required_offset);
     for (i = 0; i < m->required_count; i++) {
         if (req[i].type != type) continue;
+
+        /*
+         * 🔴 THE INSTANCE AS WELL AS THE KIND (v2).  A version-1 entry could
+         * only say "block devices, with READ" -- so a task allowed one block
+         * device was allowed every block device, and the manifest constrained
+         * the KIND of authority without constraining its extent.
+         *
+         * CAP_MANIFEST_ANY_ID is what every v1 entry meant, and it is spelt
+         * rather than implied: an entry that names a resource names it, and
+         * one that means "any" says so.
+         */
+        if (req[i].resource_id != CAP_MANIFEST_ANY_ID &&
+            req[i].resource_id != resource_id)
+            continue;
+
         /* All requested ops must be subset of declared ops. */
         if ((ops & ~req[i].ops) == 0)
             return 1;

@@ -202,6 +202,31 @@ cap_init(void)
     printf("cap: subsystem initialized (slots 37-40)\n");
 }
 
+/*
+ * The same check, on a token that is ALREADY IN KERNEL MEMORY.
+ *
+ * 🔴 SEPARATE FROM urmach_cap_verify BECAUSE THAT ONE COPIES IN.  It is a
+ * trap: its argument is a user pointer, and cap_copyin_token() is what makes
+ * that safe.  A kernel caller passing a kernel pointer to it would be asking
+ * copyin to read kernel memory as if it were the caller's -- which on this
+ * machine happens to work and is a fault waiting for the day it does not.
+ *
+ * The caller here is device_master.c, whose token arrived through MIG and is
+ * therefore already in a kernel message buffer, checked and bounded (#432).
+ */
+kern_return_t
+cap_check_in_kernel(const struct uros_cap *token,
+                    uint32_t op,
+                    uint64_t resource_id)
+{
+    kern_return_t kr;
+
+    simple_lock(&cap_lock);
+    kr = cap_check_locked(token, op, resource_id);
+    simple_unlock(&cap_lock);
+    return kr;
+}
+
 kern_return_t
 urmach_cap_verify(const struct uros_cap *user_token,
                   uint32_t op,

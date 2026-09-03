@@ -82,6 +82,33 @@ typedef enum {
 #define CAP_OP_BLK_WRITE     0x0000000000000002ULL
 #define CAP_OP_BLK_IOCTL     0x0000000000000004ULL
 
+/*
+ * RESOURCE_PCI_DEVICE (#432).
+ *
+ * 🔴 THE RESOURCE ID IS THE DEVICE CLASS, NOT THE BUS ADDRESS, and that is the
+ * decision this namespace exists to record.  A bus/device/function is a
+ * property of the BOARD -- this tree's AHCI is 00:04.0 with one command line
+ * and 00:1f.2 with another -- so a policy naming one would have to be
+ * rewritten per machine, which is a policy file that is wrong somewhere by
+ * construction.  A class code is a property of the device KIND: one manifest,
+ * every machine.
+ *
+ * 🔑 Which makes the manifest half of a two-part check, deliberately.  It says
+ * what KIND of device a driver may drive; it cannot say which instance,
+ * because it does not know what is plugged in.  The other half is the device
+ * master's claim -- a device has one driver, first come -- and neither alone
+ * is a policy.
+ *
+ * The class is the upper 24 bits of the PCI class-code register: base class,
+ * sub-class and programming interface, as configuration space reports them.
+ *
+ *	0x010601	SATA, AHCI 1.0		0x010000	SCSI
+ *	0x020000	Ethernet		0x0c0330	USB xHCI
+ */
+#define CAP_OP_PCI_DMA_MAP   0x0000000000000001ULL  /* map memory for it   */
+#define CAP_OP_PCI_MMIO_MAP  0x0000000000000002ULL  /* map its registers   */
+#define CAP_OP_PCI_IRQ       0x0000000000000004ULL  /* claim its interrupt */
+
 /* RESOURCE_FILE (reserved for v2) */
 #define CAP_OP_FILE_READ     0x0000000000000001ULL
 #define CAP_OP_FILE_WRITE    0x0000000000000002ULL

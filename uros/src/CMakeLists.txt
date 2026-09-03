@@ -157,6 +157,15 @@ endif()
 # block above has not already added it.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tools/mkbundle)
+
+  # And mkmanifest beside it, for the same reason and since #432.
+  #
+  # It is the same kind of tool -- it reads a text file and writes an archive
+  # of fixed-width little-endian records -- and it is now on the critical path
+  # rather than an optional extra: a manifest is what turns cap_server from a
+  # mechanism into a policy, and a target that cannot compile one has the
+  # mechanism and never the policy.
+  add_subdirectory(tools/mkmanifest)
 endif()
 
 # Kernel build.  Both targets need migcom first: since #416 the x86-64 kernel

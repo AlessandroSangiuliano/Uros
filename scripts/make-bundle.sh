@@ -73,6 +73,10 @@ MANIFESTS="$BUILD_DIR/export/uros/$ARCH/user/manifests"
 # hands to cap_server at task_create time.  Optional — servers
 # without a .cmf fall back to the legacy permissive cap_server path.
 HELLO_SERVER_CMF="$MANIFESTS/hello_server.cmf"
+# #432: cap_test is the first task whose manifest REFUSES it something — see
+# src/tests/cap_test/cap_test.manifest.  Shipped on both targets, out of the
+# same export directory, so the two bundles carry the same bytes.
+CAP_TEST_CMF="$MANIFESTS/cap_test.cmf"
 
 NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
@@ -226,6 +230,7 @@ ARGS+=("block_device_server:$BLOCK_DEVICE_SERVER")
 ARGS+=("default_pager:$DEFAULT_PAGER")
 ARGS+=("hello_server:$HELLO_SERVER")
 [ -f "$HELLO_SERVER_CMF" ] && ARGS+=("hello_server.cmf:$HELLO_SERVER_CMF")
+[ -f "$CAP_TEST_CMF" ] && ARGS+=("cap_test.cmf:$CAP_TEST_CMF")
 ARGS+=("ipc_bench:$IPC_BENCH")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
