@@ -49,6 +49,18 @@ subsystem
  * agree on, and <mach/cap_types.h> is where it is stated once.
  */
 type cap_token_t = array[*:256] of char;
+
+/*
+ * A DMA region's identity (#432).
+ *
+ * ⚠️ SIXTY-FOUR BITS ON BOTH TARGETS, which vm_address_t is not: it is a
+ * pointer width, thirty-two on i386.  An id that narrowed there would start
+ * repeating after four billion allocations on the target where the buffers are
+ * smallest -- and a repeated id is a capability that outlives the buffer it
+ * was issued against.
+ */
+type dma_region_id_t = unsigned64 ctype: cap_u64_t;
+
 import <mach/cap_types.h>;
 
 serverprefix	ds_master_;
@@ -273,7 +285,8 @@ routine device_dma_alloc(
 	in	bdf		: natural_t;
 	in	size		: vm_size_t;
 	out	vaddr		: vm_address_t;
-	out	dma_addr	: vm_address_t
+	out	dma_addr	: vm_address_t;
+	out	region_id	: dma_region_id_t
 	);
 
 /*
@@ -383,7 +396,8 @@ routine device_dma_alloc_sg(
 	in	task_port	: mach_port_t;
 	out	kva		: vm_address_t;
 	out	uva		: vm_address_t;
-	out	dma_addrs	: dma_sg_addr_t
+	out	dma_addrs	: dma_sg_addr_t;
+	out	region_id	: dma_region_id_t
 	);
 
 /*

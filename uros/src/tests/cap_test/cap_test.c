@@ -494,11 +494,13 @@ a_disk_reads_into_a_foreign_page(mach_port_t device_port, mach_port_t handle,
     vm_address_t          *pa_list = NULL;
     mach_msg_type_number_t pa_cnt = 0;
     io_buf_len_t           got = 0;
+    uint64_t               region_id = 0;
     unsigned               magic;
     int                    ok = 0;
 
     kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
-                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt);
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
     if (kr != KERN_SUCCESS || pa_cnt != 1) {
         printf("cap_test: [12] a disk reads into a foreign page — DID NOT "
                "RUN, no scatter-gather page (kr=%d)\n", (int)kr);
@@ -544,6 +546,7 @@ a_device_has_one_driver(mach_port_t device_port)
     natural_t     bdf, by_other = 0;
     int           claimed = 0;
     vm_address_t  kva = 0, dma = 0;
+    uint64_t      region = 0;
 
     /*
      * Bus zero, every function: whichever device the block server reached
@@ -565,7 +568,7 @@ a_device_has_one_driver(mach_port_t device_port)
         return 1;
     }
 
-    kr = device_dma_alloc(device_port, bdf, 4096, &kva, &dma);
+    kr = device_dma_alloc(device_port, bdf, 4096, &kva, &dma, &region);
     if (kr == KERN_SUCCESS) {
         printf("cap_test: [11] WRONG — this task mapped memory for "
                "%02x:%02x.%u, which another task drives\n",

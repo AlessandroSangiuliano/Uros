@@ -719,6 +719,28 @@ struct dma_region {
 	vm_offset_t	*pa;		/* npages entries, kalloc'd      */
 
 	/*
+	 * ── What makes this buffer nameable, and whose it is (#432) ──
+	 *
+	 * 🔴 A REGION NEEDS AN IDENTITY BEFORE ANYONE CAN BE GIVEN A
+	 * CAPABILITY FOR IT.  device_dma_map_foreign takes a physical address
+	 * and checks only that the kernel allocated it for DMA -- so any
+	 * holder of the master port can put anybody's DMA buffer inside its
+	 * own device's reach.  That is narrower than "all of physical memory",
+	 * which is where this started, and it is not "only what somebody
+	 * handed me".  Closing the difference means the buffer has a NAME a
+	 * capability can carry, and an OWNER whose consent that capability
+	 * represents.
+	 *
+	 * 🔑 The id never repeats, and that is the whole of its safety: a
+	 * region freed and its slot reused would otherwise inherit the
+	 * capabilities issued against the buffer that used to be there.  Sixty
+	 * -four bits at one allocation per microsecond is six hundred thousand
+	 * years, so the counter is not a thing that needs a policy.
+	 */
+	uint64_t	id;
+	task_t		owner;		/* who allocated it; holds a ref */
+
+	/*
 	 * 🔥 WHERE ELSE THIS MEMORY IS MAPPED, AND A PANIC A USER TASK COULD
 	 * REACH.  device_dma_alloc_sg enters its pages into the caller's map
 	 * with pmap_enter(..., wired), and device_dma_free frees the KERNEL
@@ -749,13 +771,21 @@ struct dma_region {
 static struct dma_region dma_region[DEVICE_MAX_DMA_REGIONS];
 
 /*
+ * ⚠️ Starts at one.  Zero is the answer dma_region_owner() gives for a region
+ * that does not exist, and an id that could also be zero would make "no such
+ * buffer" and "the first buffer" the same reply.
+ */
+static uint64_t dma_region_next_id = 1;
+
+/*
  * Remember one allocation.  Answers zero when there is no room, and the caller
  * must then fail the allocation: a region that is not recorded is one no
  * device can ever be given, and one whose pages nothing will revoke.
  */
 static int
 dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
-	       unsigned int npages, task_t task, vm_offset_t uva)
+	       unsigned int npages, task_t task, vm_offset_t uva,
+	       uint64_t *id_out)
 {
 	struct dma_region *r = 0;
 	unsigned int i;
@@ -782,9 +812,24 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	r->nusers = 0;
 	r->task = task;
 	r->uva = uva;
+	r->id = dma_region_next_id++;
+
+	/*
+	 * ⚠️ The OWNER and the mapped-into task are recorded separately even
+	 * though they are the same today.  One is "who may say who else may
+	 * read this" and the other is "whose address space has to be taken
+	 * down before the pages go back": a contiguous buffer has the second
+	 * and not the first, and conflating them would make a free path decide
+	 * a question about authority.
+	 */
+	r->owner = current_task();
+	task_reference(r->owner);
 
 	if (task != TASK_NULL)
 		task_reference(task);
+
+	if (id_out != 0)
+		*id_out = r->id;
 
 	return 1;
 }
@@ -847,8 +892,14 @@ dma_region_drop(vm_offset_t kva)
 			r->task = TASK_NULL;
 		}
 
+		if (r->owner != TASK_NULL) {
+			task_deallocate(r->owner);
+			r->owner = TASK_NULL;
+		}
+
 		kfree((vm_offset_t)r->pa, r->npages * sizeof(vm_offset_t));
 		r->kva = 0;
+		r->id = 0;
 		r->pa = 0;
 		r->npages = 0;
 		r->nusers = 0;
@@ -910,12 +961,14 @@ ds_master_device_dma_alloc(
 	natural_t		bdf,
 	vm_size_t		size,
 	vm_address_t		*vaddr_out,
-	vm_address_t		*dma_out)
+	vm_address_t		*dma_out,
+	uint64_t		*region_id_out)
 {
 	kern_return_t kr;
 	vm_offset_t kva;
 	vm_offset_t pa;
 	vm_address_t dma;
+	uint64_t region_id = 0;
 
 	kr = check_master_port(master_port);
 	if (kr != KERN_SUCCESS)
@@ -979,7 +1032,8 @@ ds_master_device_dma_alloc(
 		for (i = 0; i < n; i++)
 			pages[i] = pa + (vm_offset_t)i * PAGE_SIZE;
 
-		if (!dma_region_add(kva, size, pages, n, TASK_NULL, 0)) {
+		if (!dma_region_add(kva, size, pages, n, TASK_NULL, 0,
+				    &region_id)) {
 			kmem_free(kernel_map, kva, size);
 			return KERN_RESOURCE_SHORTAGE;
 		}
@@ -1001,6 +1055,7 @@ ds_master_device_dma_alloc(
 
 	*vaddr_out = kva;		/* #427: no narrowing cast */
 	*dma_out = dma;
+	*region_id_out = region_id;
 	return KERN_SUCCESS;
 }
 
@@ -1091,8 +1146,10 @@ ds_master_device_dma_alloc_sg(
 	vm_address_t		*kva_out,
 	vm_address_t		*uva_out,
 	vm_address_t		**dma_addrs,
-	mach_msg_type_number_t	*dma_addrs_count)
+	mach_msg_type_number_t	*dma_addrs_count,
+	uint64_t		*region_id_out)
 {
+	uint64_t	region_id = 0;
 	kern_return_t	kr;
 	task_t		task;
 	vm_offset_t	kva;
@@ -1248,7 +1305,7 @@ ds_master_device_dma_alloc_sg(
 	 * they were physical memory.
 	 */
 	if (!dma_region_add(kva, size, (const vm_offset_t *)list, n_pages,
-			    task, uva)) {
+			    task, uva, &region_id)) {
 		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
@@ -1309,6 +1366,7 @@ ds_master_device_dma_alloc_sg(
 	*uva_out = uva;
 	*dma_addrs = (vm_address_t *) list_copy;
 	*dma_addrs_count = n_pages;
+	*region_id_out = region_id;
 	return KERN_SUCCESS;
 }
 

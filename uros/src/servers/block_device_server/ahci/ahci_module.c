@@ -73,6 +73,16 @@
  * that fails to come up does not consume one.  Probes are sequential.
  */
 static struct ahci_state ahci_st[MAX_CONTROLLERS];
+
+/*
+ * ⚠️ The region id is answered and discarded here.  It exists so a buffer's
+ * OWNER can be given a capability naming it (#432), and this driver is the
+ * owner of its own buffers: nobody else ever asks to map them.  Named rather
+ * than passed as a null so that the day one of these is handed to another
+ * server, the line that has to change is visible.
+ */
+static uint64_t unused_region;
+
 static unsigned ahci_n_states;
 
 
@@ -223,7 +233,7 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	vm_address_t dma_kva, dma_uva, dma_pa;
 
 	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), 4096,
-			      &dma_kva, &dma_pa);
+			      &dma_kva, &dma_pa, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: port %d CLB/FB alloc failed\n", hba_port);
 		return -1;
@@ -399,7 +409,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	device_dma_free(st->master_device, AHCI_BDF(st), st->ct_kva, 4096);
 
 	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), ct_size,
-			      &st->ct_kva, &st->ct_dma);
+			      &st->ct_kva, &st->ct_dma, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: CT realloc (%u bytes) failed\n", ct_size);
 		return -1;
@@ -433,7 +443,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 		kr = device_dma_alloc_sg(st->master_device, AHCI_BDF(st), n_pages,
 					 mach_task_self(),
 					 &st->data_kva, &st->data_uva,
-					 &pa_list, &pa_count);
+					 &pa_list, &pa_count, &unused_region);
 		if (kr != KERN_SUCCESS) {
 			printf("ahci: scatter-gather alloc (%u pages) "
 			       "failed (kr=%d)\n", n_pages, kr);
@@ -542,7 +552,7 @@ ahci_iommu_selftest(struct ahci_state *st)
 	}
 
 	kr = device_dma_alloc(st->master_device, DEVICE_DMA_NO_BDF, 4096,
-			      &kva, &pa);
+			      &kva, &pa, &unused_region);
 	if (kr != KERN_SUCCESS)
 		return;
 
@@ -713,7 +723,7 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	/* Initial CT buffer (1 page) */
 	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
-			      &st->ct_kva, &st->ct_dma);
+			      &st->ct_kva, &st->ct_dma, &unused_region);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_dev, st->ct_kva, 4096,
 				 mach_task_self(), &st->ct_uva);
@@ -721,7 +731,7 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 
 	/* Initial data buffer (1 page) */
 	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
-			      &st->data_kva, &st->data_dma);
+			      &st->data_kva, &st->data_dma, &unused_region);
 	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_dev, st->data_kva, 4096,
 				 mach_task_self(), &st->data_uva);

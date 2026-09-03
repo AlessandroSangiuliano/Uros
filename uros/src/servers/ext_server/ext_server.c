@@ -1537,6 +1537,7 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 				 * it below.
 				 */
 				vm_address_t kva, uva;
+				uint64_t region_id = 0;
 				vm_address_t *pa_list = NULL;
 				mach_msg_type_number_t pa_cnt = 0;
 				unsigned int n_entries = 4096;
@@ -1558,7 +1559,7 @@ mount_partition(struct mount_context *mnt, const char *driver_name,
 					n_pages,
 					mach_task_self(),
 					&kva, &uva,
-					&pa_list, &pa_cnt);
+					&pa_list, &pa_cnt, &region_id);
 				printf("ext2: DMA alloc: kr=%d kva=0x%lx uva=0x%lx n_pages=%u pa_cnt=%u\n",
 				       kr, (unsigned long)kva,
 				       (unsigned long)uva, n_pages, pa_cnt);

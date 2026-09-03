@@ -39,6 +39,15 @@
 #include <device/pci.h>
 #include "device_master.h"
 
+/*
+ * ⚠️ The region id is answered and discarded here.  It exists so a buffer's
+ * OWNER can be given a capability naming it (#432), and this driver is the
+ * owner of its own buffers: nobody else ever asks to map them.  Named rather
+ * than passed as a null so that the day one of these is handed to another
+ * server, the line that has to change is visible.
+ */
+static uint64_t unused_region;
+
 /* PCI configuration registers */
 /* The configuration header comes from <device/pci.h> (#427). */
 
@@ -251,7 +260,7 @@ virtqueue_setup(struct virtio_state *st)
 
 	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st),
 			      st->vq_alloc_size,
-			      &st->vq_kva, &st->vq_dma);
+			      &st->vq_kva, &st->vq_dma, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: vq alloc failed (%lu bytes)\n",
 		       (unsigned long) st->vq_alloc_size);
@@ -281,7 +290,7 @@ virtqueue_setup(struct virtio_state *st)
 
 	/* Request header + status DMA buffer (1 page) */
 	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st), 4096,
-			      &st->req_kva, &st->req_dma);
+			      &st->req_kva, &st->req_dma, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: req alloc failed\n");
 		return -1;
@@ -296,7 +305,7 @@ virtqueue_setup(struct virtio_state *st)
 	/* Data DMA buffer */
 	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st),
 			      DATA_BUF_SIZE,
-			      &st->data_kva, &st->data_dma);
+			      &st->data_kva, &st->data_dma, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: data alloc failed\n");
 		return -1;

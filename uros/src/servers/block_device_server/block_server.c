@@ -318,6 +318,7 @@ pci_probe_module(const struct block_driver_ops *ops,
 			natural_t	bdf = (natural_t)((bus << 8)
 							  | (slot << 3) | func);
 			vm_address_t	kva = 0, dma = 0;
+			uint64_t	probe_region = 0;
 			kern_return_t	rkr, akr;
 
 			rkr = cap_revoke(claimed_cap_id);
@@ -335,7 +336,7 @@ pci_probe_module(const struct block_driver_ops *ops,
 			 * claim is still there.
 			 */
 			akr = device_dma_alloc(master_device, bdf, 4096,
-					       &kva, &dma);
+					       &kva, &dma, &probe_region);
 			if (akr == KERN_SUCCESS) {
 				printf("blk: gave %u:%u.%u back (cap_revoke "
 				       "kr=%d) and STILL got a DMA buffer for "
