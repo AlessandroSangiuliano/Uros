@@ -759,6 +759,388 @@ int iommu_vtd_pt_skip(uint64_t next_table_pa, unsigned next_level,
 }
 
 /*
+ * ── Stage 3d: moving one device into a domain, live ──────────────────
+ *
+ * The root table stays where stage 2 put it and so do the context tables; what
+ * changes is ONE context entry, from the pass-through pair to the pair that
+ * names a second-stage root.  Then the engine is told to forget the device.
+ *
+ * 🔴 CONTEXT CACHE FIRST, IOTLB SECOND, AND NOT THE OTHER WAY.  The context
+ * entry is what says which page table to walk; the IOTLB holds translations
+ * produced by walking the OLD one.  Invalidating the IOTLB first leaves a
+ * window in which the engine can re-walk through the stale context entry and
+ * repopulate it -- small, real, and impossible to see afterwards, because what
+ * it produces is a device that still reaches its old memory and a set of
+ * tables that say it should not.
+ *
+ * ⚠️ Global, and not device-selective, which this engine also offers.  An
+ * attach happens once per device, at its first grant, and a global
+ * invalidation costs two register writes and two bounded spins -- against a
+ * device-selective one whose SID and DID fields are two more chances to be
+ * wrong in a way that produces a correct-looking machine.  The moment attach
+ * is on a path that runs often, this is the thing to sharpen.
+ */
+int iommu_vtd_attach(uint16_t bdf, const struct iommu_domain *d)
+{
+	const struct iommu_tables *t = iommu_tables();
+	unsigned bus = (unsigned)(bdf >> 8);
+	unsigned devfn = (unsigned)(bdf & 0xFF);
+	volatile uint64_t *root, *ctx;
+	uint64_t ctx_pa, entry[VTD_ENTRY_WORDS];
+	unsigned attached = 0;
+
+	if (t == 0 || t->root == 0 || d == 0 || d->root == 0)
+		return 0;
+
+	root = (volatile uint64_t *)(uintptr_t)phys_to_direct(t->root);
+
+	/*
+	 * ⚠️ A bus stage 2 found nothing on has no context table, and a device
+	 * that turned up afterwards cannot be attached rather than being
+	 * attached into a table that is not there.  Reported by answering no:
+	 * the caller is granting memory, and a grant that silently did not
+	 * take effect is the failure this whole issue exists to remove.
+	 */
+	if ((root[bus * VTD_ENTRY_WORDS + 0] & VTD_ROOT_PRESENT) == 0)
+		return 0;
+
+	ctx_pa = root[bus * VTD_ENTRY_WORDS + 0] & VTD_CTX_SSPTPTR_MASK;
+	ctx = (volatile uint64_t *)(uintptr_t)phys_to_direct(ctx_pa);
+
+	iommu_vtd_context_domain(d->id, d->levels, d->root, entry);
+
+	/*
+	 * 🔴 THE HIGH WORD BEFORE THE LOW ONE, because the low one carries
+	 * Present.  Written the other way round, an engine that read the entry
+	 * between the two stores would find it present, pointing at this
+	 * domain's root, with a domain id and address width that are still the
+	 * pass-through entry's -- a valid-looking entry nobody wrote.
+	 */
+	ctx[devfn * VTD_ENTRY_WORDS + 1] = entry[1];
+	ctx[devfn * VTD_ENTRY_WORDS + 0] = entry[0];
+
+	if (ctx[devfn * VTD_ENTRY_WORDS + 0] != entry[0]
+	    || ctx[devfn * VTD_ENTRY_WORDS + 1] != entry[1])
+		return 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+		unsigned iro;
+
+		if (u == 0 || !u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		*(volatile uint64_t *)(regs + VTD_CCMD) =
+			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
+		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
+			return 0;
+
+		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
+		*(volatile uint64_t *)(regs + iro + 8) =
+			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
+		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+			return 0;
+
+		attached++;
+	}
+
+	return attached > 0;
+}
+
+int iommu_vtd_detach(uint16_t bdf)
+{
+	const struct iommu_tables *t = iommu_tables();
+	unsigned bus = (unsigned)(bdf >> 8);
+	unsigned devfn = (unsigned)(bdf & 0xFF);
+	volatile uint64_t *root, *ctx;
+	uint64_t ctx_pa, entry[VTD_ENTRY_WORDS];
+	unsigned detached = 0;
+
+	if (t == 0 || t->root == 0)
+		return 0;
+
+	root = (volatile uint64_t *)(uintptr_t)phys_to_direct(t->root);
+	if ((root[bus * VTD_ENTRY_WORDS + 0] & VTD_ROOT_PRESENT) == 0)
+		return 0;
+
+	ctx_pa = root[bus * VTD_ENTRY_WORDS + 0] & VTD_CTX_SSPTPTR_MASK;
+	ctx = (volatile uint64_t *)(uintptr_t)phys_to_direct(ctx_pa);
+
+	iommu_vtd_context_blocked(entry);
+
+	/*
+	 * 🔴 THE PRESENT BIT FIRST HERE, WHICH IS THE OPPOSITE OF ATTACH.
+	 * Attaching writes the pointer before the bit that makes it live;
+	 * detaching must clear that bit before the pointer, or an engine
+	 * reading between the two stores finds an entry that is still present
+	 * and no longer points anywhere.
+	 */
+	ctx[devfn * VTD_ENTRY_WORDS + 0] = entry[0];
+	ctx[devfn * VTD_ENTRY_WORDS + 1] = entry[1];
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+		unsigned iro;
+
+		if (u == 0 || !u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		*(volatile uint64_t *)(regs + VTD_CCMD) =
+			VTD_CCMD_ICC | VTD_CCMD_GLOBAL;
+		if (!wait_bit(regs, VTD_CCMD, VTD_CCMD_ICC, 0, 1))
+			return 0;
+
+		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
+		*(volatile uint64_t *)(regs + iro + 8) =
+			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
+		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+			return 0;
+
+		detached++;
+	}
+
+	return detached > 0;
+}
+
+/*
+ * A mapping changed inside a domain that is already attached.
+ *
+ * 🔴 AND IT IS NEEDED EVEN WHEN THE CHANGE IS NOT-PRESENT TO PRESENT.  Rev
+ * 5.20 §6.1: when CAP.CM is Set, hardware caches non-present entries too, and
+ * software must invalidate after making one present.  QEMU's engine can report
+ * CM either way and a physical one usually reports it clear -- so a kernel
+ * that skipped this would work on the machine it was written on and fail on
+ * the machine it was tested on, or the other way round.  One invalidation per
+ * grant, on a path that runs once per buffer.
+ *
+ * ⚠️ Global, though the domain is named and this engine offers a
+ * domain-selective form -- IOTLB_REG's IIRG field with the DID beside it.  The
+ * argument is the one on attach above: a field that is not written cannot be
+ * written wrongly, and until grants are frequent the difference is two spins.
+ */
+int iommu_vtd_flush(const struct iommu_domain *d)
+{
+	unsigned flushed = 0;
+
+	if (d == 0)
+		return 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+		unsigned iro;
+
+		if (u == 0 || !u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+		iro = VTD_ECAP_IRO(u->vendor_caps[1]);
+
+		*(volatile uint64_t *)(regs + iro + 8) =
+			VTD_IOTLB_IVT | VTD_IOTLB_GLOBAL;
+		if (!wait_bit(regs, iro + 8, VTD_IOTLB_IVT, 0, 1))
+			return 0;
+
+		flushed++;
+	}
+
+	return flushed > 0;
+}
+
+/*
+ * ── Stage 3d: the fault recording registers ──────────────────────────
+ *
+ * Rev 5.20 §11.4.7.6, Figure 11-15.  A fault record is 128 bits, and there are
+ * CAP.NFR+1 of them starting at CAP.FRO -- which is an offset in SIXTEEN-BYTE
+ * units and not in bytes, the same shape as ECAP.IRO above and the same trap.
+ *
+ *	127	F	this record holds a fault
+ *	126	T1	type, high bit
+ *	103:96	FR	fault reason
+ *	92	T2	type, low bit
+ *	79:64	SID	the requester: bus:dev.func
+ *	63:12	FI	the address that was refused, page aligned
+ *
+ * 🔴 THE HIGH HALF IS READ FIRST, AND THE SPECIFICATION SAYS SO.  §11.4.7.6
+ * note 1: "Hardware updates to this register may be disassembled as multiple
+ * doubleword writes", and software must see F set before believing the rest.
+ * A reader that took the low half first can read an address the engine has not
+ * finished writing -- and it would be right almost every time, which is the
+ * worst frequency for a defect to have.
+ *
+ * ⚠️ {T1,T2} is TWO bits in this revision and was one in earlier ones: 00b
+ * write, 01b page request, 10b read, 11b atomic.  A reader that kept the old
+ * single-bit T would call every AtomicOp a read -- a wrong answer that looks
+ * entirely reasonable in a log.
+ */
+#define	VTD_FSTS		0x34
+#define	VTD_FSTS_PFO		(1u << 0)	/* records were dropped   */
+#define	VTD_FSTS_PPF		(1u << 1)	/* at least one is set    */
+
+#define	VTD_CAP_NFR(c)		((unsigned)((((c) >> 40) & 0xFF) + 1u))
+#define	VTD_CAP_FRO(c)		((unsigned)((((c) >> 24) & 0x3FF) * 16u))
+
+#define	VTD_FR_F		(1ULL << 63)
+#define	VTD_FR_T1		(1ULL << 62)
+#define	VTD_FR_T2		(1ULL << 28)
+#define	VTD_FR_REASON(h)	((uint8_t)(((h) >> 32) & 0xFF))
+#define	VTD_FR_SID(h)		((uint16_t)((h) & 0xFFFF))
+#define	VTD_FR_ADDRESS(l)	((l) & ~0xFFFULL)
+
+/*
+ * Rev 5.20 Table 30, the conditions and the codes they are reported with.
+ *
+ * ⚠️ Only the ones this kernel can cause are read into a kind; everything else
+ * stays IOMMU_FAULT_UNKNOWN with its raw code intact.  A table that mapped
+ * every code to something would be inventing a reading for codes that arrive
+ * from features we do not use, and the raw number is the thing a specification
+ * can be looked up against.
+ *
+ * 🔴 Ah AND Ch ARE NOT THE SAME MISTAKE, and this file said they were until
+ * the table was read: a non-zero reserved field in a ROOT entry is Ah (LRT.3)
+ * and one in a second-stage PAGING entry is Ch (LSS.2).  Two different halves
+ * of the machine got wrong, reported one bit apart.
+ */
+#define	VTD_FR_ROOT_NOT_PRESENT		0x01	/* LRT.2                    */
+#define	VTD_FR_CONTEXT_NOT_PRESENT	0x02	/* LCT.2                    */
+#define	VTD_FR_CONTEXT_INVALID		0x03	/* LCT.4: AW, TT, SSPTPTR   */
+#define	VTD_FR_ADDRESS_TOO_WIDE		0x04	/* LGN.1                    */
+#define	VTD_FR_WRITE_DENIED		0x05	/* LGN.2: walked, said no   */
+#define	VTD_FR_READ_DENIED		0x06	/* LGN.3                    */
+#define	VTD_FR_PAGE_TABLE_UNREADABLE	0x07	/* LSS.1: engine's own read */
+#define	VTD_FR_ROOT_UNREADABLE		0x08	/* LRT.1                    */
+#define	VTD_FR_CONTEXT_UNREADABLE	0x09	/* LCT.1                    */
+#define	VTD_FR_ROOT_RESERVED		0x0A	/* LRT.3                    */
+#define	VTD_FR_CONTEXT_RESERVED		0x0B	/* LCT.3                    */
+#define	VTD_FR_PAGE_ENTRY_RESERVED	0x0C	/* LSS.2                    */
+#define	VTD_FR_TRANSLATION_BLOCKED	0x0D	/* LCT.5                    */
+
+static uint8_t vtd_fault_kind(uint8_t reason)
+{
+	switch (reason) {
+	case VTD_FR_WRITE_DENIED:
+	case VTD_FR_READ_DENIED:
+	case VTD_FR_PAGE_ENTRY_RESERVED:
+	case VTD_FR_ADDRESS_TOO_WIDE:
+		return IOMMU_FAULT_PAGE;
+
+	case VTD_FR_ROOT_NOT_PRESENT:
+	case VTD_FR_CONTEXT_NOT_PRESENT:
+	case VTD_FR_CONTEXT_INVALID:
+	case VTD_FR_ROOT_RESERVED:
+	case VTD_FR_CONTEXT_RESERVED:
+	case VTD_FR_TRANSLATION_BLOCKED:
+		return IOMMU_FAULT_ENTRY;
+
+	case VTD_FR_PAGE_TABLE_UNREADABLE:
+	case VTD_FR_ROOT_UNREADABLE:
+	case VTD_FR_CONTEXT_UNREADABLE:
+		return IOMMU_FAULT_HARDWARE;
+
+	default:
+		return IOMMU_FAULT_UNKNOWN;
+	}
+}
+
+int iommu_vtd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
+{
+	unsigned type;
+
+	if (!(hi & VTD_FR_F))
+		return 0;
+
+	type = (unsigned)(((hi & VTD_FR_T1) ? 2u : 0u)
+			  | ((hi & VTD_FR_T2) ? 1u : 0u));
+
+	out->address = VTD_FR_ADDRESS(lo);
+	out->source = VTD_FR_SID(hi);
+	out->domain = IOMMU_FAULT_NO_DOMAIN;
+	out->reason = VTD_FR_REASON(hi);
+	out->kind = vtd_fault_kind(out->reason);
+	out->write = type == 0;
+	out->vendor = IOMMU_INTEL;
+	return 1;
+}
+
+unsigned iommu_vtd_fault_drain(unsigned unit, int *overflowed)
+{
+	const struct iommu_unit *u = iommu_unit(unit);
+	volatile uint8_t *regs;
+	unsigned records, base, found = 0;
+	uint32_t status;
+
+	if (u == 0 || !u->answered || u->register_va == 0)
+		return 0;
+
+	regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+	records = VTD_CAP_NFR(u->vendor_caps[0]);
+	base = VTD_CAP_FRO(u->vendor_caps[0]);
+
+	status = *(volatile uint32_t *)(regs + VTD_FSTS);
+	if (status & VTD_FSTS_PFO) {
+		if (overflowed)
+			*overflowed = 1;
+
+		/*
+		 * 🔴 CLEARED, or the engine records nothing further.  §11.4.7.1
+		 * PFO: "When this field is Set, hardware does not record any
+		 * new faults until software clears this field" -- so a reader
+		 * that only reported the overflow would turn one lost fault
+		 * into every subsequent one.
+		 */
+		*(volatile uint32_t *)(regs + VTD_FSTS) = VTD_FSTS_PFO;
+	}
+
+	/*
+	 * PPF is the OR of every record's F, so a clear one means there is
+	 * nothing to walk -- one uncached read instead of NFR+1 of them, on
+	 * the path that runs on every poll and finds nothing almost always.
+	 */
+	if (!(status & VTD_FSTS_PPF))
+		return 0;
+
+	/*
+	 * ⚠️ Every record, and not only the one FSTS.FRI names.  That field
+	 * says where the FIRST pending fault was recorded, which is where to
+	 * start if one wants them in order -- it is not a count, and a reader
+	 * that treated it as one would drain a single record per poll and
+	 * leave the rest to overflow.
+	 */
+	for (unsigned i = 0; i < records; i++) {
+		volatile uint64_t *rec =
+			(volatile uint64_t *)(regs + base + i * 16u);
+		uint64_t hi = rec[1];
+		struct iommu_fault f;
+
+		if (!(hi & VTD_FR_F))
+			continue;
+
+		if (!iommu_vtd_fault_decode(rec[0], hi, &f))
+			continue;
+
+		iommu_record_fault(&f);
+		found++;
+
+		/*
+		 * F is RW1CS, and this is the only write.  ⚠️ PPF is NOT
+		 * written: §11.4.7.1 makes it read-only and computes it as the
+		 * OR of the F fields, so it goes away when these do -- writing
+		 * a one into a read-only bit is a store that reads as tidy and
+		 * means nothing.
+		 */
+		rec[1] = VTD_FR_F;
+	}
+
+	return found;
+}
+
+/*
  * Ask one engine what it can do.
  *
  * ⚠️ The registers are mapped uncached and never unmapped.  A handful of pages

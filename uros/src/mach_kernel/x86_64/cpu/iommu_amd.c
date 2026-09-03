@@ -32,6 +32,7 @@
 #include <pmap/bootmem.h>
 #include <pmap/layout.h>
 #include <pmap/pmap.h>
+#include <kern/misc_protos.h>
 
 /* ------------------------------------------------------------------ */
 /*  The table                                                           */
@@ -507,6 +508,15 @@ int iommu_amd_build(void)
 #define	AMD_BASE_MASK		0x000FFFFFFFFFF000ULL
 #define	AMD_BUFLEN_256		(8ULL << 56)	/* 4 Kbytes, the minimum */
 
+/*
+ * What AMD_BUFLEN_256 means in bytes, which the drain has to know to wrap.
+ *
+ * 🔑 One constant and not two, because the length is written into a register
+ * as a power-of-two CODE and read back by the reader as a MODULUS -- two
+ * spellings of one fact, and the kind that gets changed in one place.
+ */
+#define	AMD_EVENT_LOG_BYTES	4096u
+
 #define	AMD_CTL_IOMMU_EN	(1ULL << 0)
 #define	AMD_CTL_EVENTLOG_EN	(1ULL << 2)
 #define	AMD_CTL_CMDBUF_EN	(1ULL << 12)
@@ -768,6 +778,494 @@ int iommu_amd_pt_skip(uint64_t next_table_pa, unsigned next_level,
 {
 	*entry = iommu_amd_pde(next_table_pa, next_level);
 	return 1;
+}
+
+/*
+ * ── Stage 3d: moving one device into a domain, live ──────────────────
+ *
+ * 🔴 AMD DOES NOT INVALIDATE THROUGH A REGISTER.  Intel writes a command word
+ * into CCMD and spins on a bit; this engine reads COMMANDS out of a ring in
+ * memory and answers by writing a semaphore.  So the whole of the invalidation
+ * here is a queue, a doorbell and a store to wait on -- three moving parts
+ * where the other vendor has one -- and folding the two into a common shape
+ * would have meant inventing a register for AMD or a queue for Intel.
+ *
+ * Rev 3.11 §2.4: COMPLETION_WAIT (01h), INVALIDATE_DEVTAB_ENTRY (02h) and
+ * INVALIDATE_IOMMU_PAGES (03h), each a 128-bit entry whose opcode lives in
+ * bits 31:28 of its second dword -- bits 63:60 of the low quadword here.
+ */
+#define	AMD_CMD_COMPLETION_WAIT		(1ULL << 60)
+#define	AMD_CMD_INVALIDATE_DEVTAB	(2ULL << 60)
+#define	AMD_CMD_INVALIDATE_PAGES	(3ULL << 60)
+
+#define	AMD_CMD_WAIT_STORE		(1ULL << 0)	/* s: write the data */
+#define	AMD_CMD_PAGES_S			(1ULL << 0)	/* size from address */
+#define	AMD_CMD_PAGES_PDE		(1ULL << 1)	/* directories too   */
+
+#define	AMD_COMMAND_BUFFER_BYTES	4096u
+
+/*
+ * Both rings' head and tail live in bits 18:4 of their registers -- §3.3.6 for
+ * the command buffer and §3.3.8 for the event log.  🔑 One definition, because
+ * they are one fact about this engine and not two that happen to agree.
+ */
+#define	AMD_RING_PTR_MASK		0x7FFF0ULL
+
+/*
+ * §2.4.3 Table 36: with S set, the size of the invalidation is decided by the
+ * first ZERO bit above bit 12 -- so an address of all ones names the whole
+ * space, and this is how a domain is emptied in one command.
+ *
+ * ⚠️ Bit 63 is left clear because the address the command carries is a system
+ * physical address of at most 52 bits; setting every bit to the top would be
+ * naming a width the field does not have.
+ */
+#define	AMD_CMD_PAGES_ALL		0x7FFFFFFFFFFFF000ULL
+
+/*
+ * The semaphore COMPLETION_WAIT stores into.
+ *
+ * One frame for the life of the machine, taken the first time anything is
+ * invalidated.  🔑 It cannot be an ordinary kernel variable: the engine writes
+ * it by DMA, so what is needed is a PHYSICAL address, and a static in .data
+ * would mean asking the pmap to extract one on a path that runs with the
+ * command ring half-armed.  A frame is one call and one number.
+ */
+static uint64_t amd_wait_pa;
+
+static volatile uint64_t *amd_wait_cell(void)
+{
+	if (amd_wait_pa == 0) {
+		amd_wait_pa = pmap_table_frame();
+		if (amd_wait_pa == 0)
+			return 0;
+	}
+
+	return (volatile uint64_t *)(uintptr_t)phys_to_direct(amd_wait_pa);
+}
+
+/*
+ * Put one command in the ring and ring the doorbell.  Answers zero when the
+ * ring is full, which this kernel's use cannot produce -- two commands at a
+ * time into 256 slots -- and which is checked rather than assumed, because the
+ * failure it prevents is overwriting a command the engine has not read.
+ */
+static int amd_command(volatile uint8_t *regs, const struct iommu_tables *t,
+		       uint64_t lo, uint64_t hi)
+{
+	volatile uint64_t *ring =
+		(volatile uint64_t *)(uintptr_t)phys_to_direct(t->command);
+	uint64_t tail = *(volatile uint64_t *)(regs + AMD_REG_CMDBUF_TAIL)
+			& AMD_RING_PTR_MASK;
+	uint64_t head = *(volatile uint64_t *)(regs + AMD_REG_CMDBUF_HEAD)
+			& AMD_RING_PTR_MASK;
+	uint64_t next = (tail + 16u) % AMD_COMMAND_BUFFER_BYTES;
+
+	if (next == head)
+		return 0;
+
+	ring[tail / 8u + 0] = lo;
+	ring[tail / 8u + 1] = hi;
+
+	*(volatile uint64_t *)(regs + AMD_REG_CMDBUF_TAIL) = next;
+	return 1;
+}
+
+/*
+ * Wait for everything queued so far to have finished, by asking the engine to
+ * store a value we can watch.
+ *
+ * ⚠️ The cell is set to something the engine will not write BEFORE the command
+ * is queued.  A wait that armed the cell after the doorbell could see the
+ * store, overwrite it, and then spin forever on a command that had already
+ * completed -- and it would do so rarely, which is the frequency that gets a
+ * bounded spin blamed for hardware being slow.
+ */
+static int amd_completion_wait(volatile uint8_t *regs,
+			       const struct iommu_tables *t)
+{
+	volatile uint64_t *cell = amd_wait_cell();
+	static uint64_t token;
+
+	if (cell == 0)
+		return 0;
+
+	token++;
+	*cell = 0;
+
+	if (!amd_command(regs,
+			 t,
+			 AMD_CMD_COMPLETION_WAIT | AMD_CMD_WAIT_STORE
+			 | (amd_wait_pa & 0x00000000FFFFFFF8ULL)
+			 | ((amd_wait_pa >> 32) & 0x000FFFFFULL) << 32,
+			 token))
+		return 0;
+
+	for (unsigned spin = 0; spin < 10000000u; spin++)
+		if (*cell == token)
+			return 1;
+
+	return 0;
+}
+
+/*
+ * 🔴🔴 IT ONLY POLICES WHEN ASKED, AND THAT IS THE EMULATOR AND NOT THE
+ * SPECIFICATION.  QEMU's `-device amd-iommu' takes `dma-remap', and it
+ * defaults to OFF -- so with the plain device this engine accepts the device
+ * table, the command buffer and the event log, reports IommuEn set, completes
+ * a COMPLETION_WAIT we queue, and then lets every device reach all of memory.
+ *
+ * ⚠️ WHICH LOOKS EXACTLY LIKE A KERNEL THAT BUILT ITS TABLES AND POLICES
+ * NOTHING, and was read that way here for three ablations: a DTE that blocks
+ * everything, a domain that maps nothing, and a Mode field of 111b that Rev
+ * 3.11 reserves.  None of them changed anything, and the third seemed to
+ * settle it -- a malformed entry that produces no event is an entry nothing
+ * read.  It was the switch.  `-device amd-iommu,dma-remap=on' refuses the
+ * out-of-domain DMA on the first attempt.
+ *
+ * 🔑 So the isolation is DEMONSTRATED on both vendors, and the AMD half of it
+ * cost one line of `-device amd-iommu,help'.
+ *
+ * ⚠️ WHAT THIS EMULATOR DOES NOT REPORT IS THE FAULTING ADDRESS.  Its
+ * IO_PAGE_FAULT entries come out as lo=0x200a000000000020, hi=0 -- the
+ * DeviceID right, the event code right, the address quadword ZERO, and bits
+ * 51 and 49 set where Figure 56 puts I (interrupt request) and NX.  Two runs
+ * that faulted at two DIFFERENT addresses produced BYTE-IDENTICAL words, which
+ * is what says the address is absent rather than misplaced.  The decode below
+ * follows Rev 3.11 and is therefore unconfirmed in those two fields until it
+ * runs on the machine this file's feature register was read off.
+ */
+int iommu_amd_attach(uint16_t bdf, const struct iommu_domain *d)
+{
+	const struct iommu_tables *t = iommu_tables();
+	volatile uint64_t *dt;
+	uint64_t want[AMD_DTE_WORDS];
+	unsigned attached = 0;
+
+	if (t == 0 || t->root == 0 || t->command == 0 || d == 0 || d->root == 0)
+		return 0;
+
+	dt = (volatile uint64_t *)(uintptr_t)phys_to_direct(t->root);
+	iommu_amd_dte_domain(d->id, d->levels, d->root, want);
+
+	/*
+	 * 🔴 THE THREE HIGH WORDS BEFORE THE ONE THAT CARRIES V, for the same
+	 * reason Intel's Present goes last -- and §3.2.2.1 asks for exactly
+	 * this: change the entry, then set V, then invalidate.  An engine that
+	 * read a half-written entry would find it valid and pointing at a
+	 * table with a mode field from the previous entry.
+	 */
+	dt[bdf * AMD_DTE_WORDS + 1] = want[1];
+	dt[bdf * AMD_DTE_WORDS + 2] = want[2];
+	dt[bdf * AMD_DTE_WORDS + 3] = want[3];
+	dt[bdf * AMD_DTE_WORDS + 0] = want[0];
+
+	if (dt[bdf * AMD_DTE_WORDS + 0] != want[0]
+	    || dt[bdf * AMD_DTE_WORDS + 1] != want[1])
+		return 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+
+		if (u == 0 || !u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		/*
+		 * The device table entry first, then the translations that
+		 * were produced through the old one -- and §2.4.2 says the
+		 * second is required and not optional: "When removing a device
+		 * from a domain, software must issue INVALIDATE_IOMMU_PAGES
+		 * for the associated DomainID."
+		 */
+		if (!amd_command(regs, t, AMD_CMD_INVALIDATE_DEVTAB | bdf, 0))
+			return 0;
+
+		if (!amd_command(regs, t,
+				 AMD_CMD_INVALIDATE_PAGES
+				 | ((uint64_t)d->id << 32),
+				 AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S
+				 | AMD_CMD_PAGES_PDE))
+			return 0;
+
+		if (!amd_completion_wait(regs, t))
+			return 0;
+
+		attached++;
+	}
+
+	return attached > 0;
+}
+
+int iommu_amd_detach(uint16_t bdf)
+{
+	const struct iommu_tables *t = iommu_tables();
+	volatile uint64_t *dt;
+	uint64_t want[AMD_DTE_WORDS];
+	unsigned detached = 0;
+
+	if (t == 0 || t->root == 0 || t->command == 0)
+		return 0;
+
+	dt = (volatile uint64_t *)(uintptr_t)phys_to_direct(t->root);
+
+	/*
+	 * ⚠️ The domain id is the one this device WAS in, and it does not
+	 * matter what it is: a blocked entry translates nothing, so the field
+	 * names a domain nobody will ever walk.  Written from the existing
+	 * entry so the log of what happened stays readable.
+	 */
+	iommu_amd_dte_blocked((uint16_t)(dt[bdf * AMD_DTE_WORDS + 1] & 0xFFFF),
+			      want);
+
+	/* Valid last on attach; valid FIRST to go here.  See the VT-d note. */
+	dt[bdf * AMD_DTE_WORDS + 0] = want[0];
+	dt[bdf * AMD_DTE_WORDS + 1] = want[1];
+	dt[bdf * AMD_DTE_WORDS + 2] = want[2];
+	dt[bdf * AMD_DTE_WORDS + 3] = want[3];
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+
+		if (u == 0 || !u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (!amd_command(regs, t, AMD_CMD_INVALIDATE_DEVTAB | bdf, 0))
+			return 0;
+
+		if (!amd_completion_wait(regs, t))
+			return 0;
+
+		detached++;
+	}
+
+	return detached > 0;
+}
+
+/*
+ * A mapping changed inside a domain that is already attached.
+ *
+ * Domain-selective, which this engine's command takes for free -- the DomainID
+ * is a field of INVALIDATE_IOMMU_PAGES and there is no cheaper form to fall
+ * back to.  ⚠️ Still the WHOLE domain and not the range that changed: sizing
+ * the invalidation is Table 14's first-zero-bit encoding, which is worth
+ * getting right the day grants are on a hot path and is a wrong answer that
+ * looks right if it is got wrong today.
+ */
+int iommu_amd_flush(const struct iommu_domain *d)
+{
+	const struct iommu_tables *t = iommu_tables();
+	unsigned flushed = 0;
+
+	if (t == 0 || t->command == 0 || d == 0)
+		return 0;
+
+	for (unsigned i = 0; i < iommu_unit_count(); i++) {
+		const struct iommu_unit *u = iommu_unit(i);
+		volatile uint8_t *regs;
+
+		if (u == 0 || !u->answered || u->register_va == 0)
+			return 0;
+
+		regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+
+		if (!amd_command(regs, t,
+				 AMD_CMD_INVALIDATE_PAGES
+				 | ((uint64_t)d->id << 32),
+				 AMD_CMD_PAGES_ALL | AMD_CMD_PAGES_S
+				 | AMD_CMD_PAGES_PDE))
+			return 0;
+
+		if (!amd_completion_wait(regs, t))
+			return 0;
+
+		flushed++;
+	}
+
+	return flushed > 0;
+}
+
+/*
+ * ── Stage 3d: the event log ──────────────────────────────────────────
+ *
+ * Rev 3.11 §2.5.  The engine reports by WRITING TO MEMORY, not by filling
+ * registers, and that is the deep difference from Intel: there is a ring of
+ * 128-bit entries between a head this kernel advances and a tail the engine
+ * advances, and the entry's meaning depends on a four-bit code inside it.
+ *
+ * IO_PAGE_FAULT, Figure 56:
+ *
+ *	+00 15:0	DeviceID	the requester
+ *	+00 19:16	PASID[19:16]
+ *	+04 15:0	D/P		DomainID, when PASID is not in use
+ *	+04 24		TR		this was a translation request
+ *	+04 23		RZ		a reserved bit was not zero
+ *	+04 22		PE		the permissions were not there
+ *	+04 21		RW		1 write, 0 read
+ *	+04 20		PR		the page was marked present
+ *	+04 19		I		this was an interrupt request
+ *	+04 31:28	EventCode	0010b for this event
+ *	+08, +12	Address		what the device asked for
+ *
+ * 🔴 THE FLAGS ARE ONLY MEANINGFUL WHEN PR IS SET, and the specification says
+ * so field by field: "RW is only meaningful when PR=1, TR=0, and I=0".  PR=0
+ * is the ordinary blocked DMA -- the page simply is not there -- and reading
+ * RW out of that entry gives a direction the engine never claimed.  So the
+ * decode reports the direction only when the entry carries one, and a caller
+ * that wants to know reads `kind' first.
+ *
+ * ⚠️ D/P IS THE DOMAIN ONLY WHEN GN IS CLEAR.  With guest translation in use
+ * the same sixteen bits are a PASID, and this kernel uses no PASIDs -- but
+ * "we do not use it" is a property of today, so GN is checked rather than
+ * assumed, and an entry that carries a PASID reports no domain at all.
+ */
+#define	AMD_EVT_DEVICE(l)	((uint16_t)((l) & 0xFFFF))
+#define	AMD_EVT_DOMAIN(l)	((uint16_t)(((l) >> 32) & 0xFFFF))
+#define	AMD_EVT_CODE(l)		((unsigned)(((l) >> 60) & 0xF))
+
+#define	AMD_EVT_GN		(1ULL << 48)	/* +04 bit 16 */
+#define	AMD_EVT_I		(1ULL << 51)	/* +04 bit 19 */
+#define	AMD_EVT_PR		(1ULL << 52)	/* +04 bit 20 */
+#define	AMD_EVT_RW		(1ULL << 53)	/* +04 bit 21 */
+#define	AMD_EVT_TR		(1ULL << 56)	/* +04 bit 24 */
+
+/* Table 42, the event codes.  Only the ones a refusal arrives as. */
+#define	AMD_EVT_ILLEGAL_DTE		0x1
+#define	AMD_EVT_IO_PAGE_FAULT		0x2
+#define	AMD_EVT_DEV_TAB_HW_ERROR	0x3
+#define	AMD_EVT_PAGE_TAB_HW_ERROR	0x4
+#define	AMD_EVT_INVALID_DEVICE_REQUEST	0x8
+
+int iommu_amd_fault_decode(uint64_t lo, uint64_t hi, struct iommu_fault *out)
+{
+	unsigned code = AMD_EVT_CODE(lo);
+	uint8_t kind;
+
+	switch (code) {
+	case AMD_EVT_IO_PAGE_FAULT:
+	case AMD_EVT_INVALID_DEVICE_REQUEST:
+		kind = IOMMU_FAULT_PAGE;
+		break;
+
+	case AMD_EVT_ILLEGAL_DTE:
+		kind = IOMMU_FAULT_ENTRY;
+		break;
+
+	case AMD_EVT_DEV_TAB_HW_ERROR:
+	case AMD_EVT_PAGE_TAB_HW_ERROR:
+		kind = IOMMU_FAULT_HARDWARE;
+		break;
+
+	/*
+	 * 🔴 0000b is RESERVED, which is what an unwritten ring slot reads as.
+	 * The ring is memory this kernel allocated and never clears, so "the
+	 * engine has not written here yet" and "the engine wrote a zero event"
+	 * are the same bytes -- and only the head and tail pointers tell them
+	 * apart.  Answering no here means a caller that lost track of the
+	 * pointers reports nothing rather than a fault at address zero from
+	 * device 0000, which is the shape of a wrong answer that gets believed.
+	 */
+	case 0:
+		return 0;
+
+	default:
+		kind = IOMMU_FAULT_UNKNOWN;
+		break;
+	}
+
+	out->address = hi;
+	out->source = AMD_EVT_DEVICE(lo);
+	out->domain = (lo & AMD_EVT_GN) ? IOMMU_FAULT_NO_DOMAIN
+				        : AMD_EVT_DOMAIN(lo);
+	out->reason = (uint8_t)code;
+	out->kind = kind;
+	out->write = (lo & AMD_EVT_PR) && !(lo & AMD_EVT_TR)
+		     && !(lo & AMD_EVT_I) && (lo & AMD_EVT_RW);
+	out->vendor = IOMMU_AMD;
+	return 1;
+}
+
+/*
+ * §2.5: head is where software reads next, tail is where the engine writes
+ * next, equal means empty, and both are 128-bit-aligned offsets in bits 18:4
+ * of their registers.
+ */
+#define	AMD_REG_EVTLOG_HEAD	0x2010
+#define	AMD_REG_EVTLOG_TAIL	0x2018
+#define	AMD_REG_STATUS		0x2020
+
+#define	AMD_STATUS_EVT_OVERFLOW	(1ULL << 0)	/* RW1C */
+#define	AMD_STATUS_EVT_INT	(1ULL << 1)	/* RW1C */
+
+unsigned iommu_amd_fault_drain(unsigned unit, int *overflowed)
+{
+	const struct iommu_unit *u = iommu_unit(unit);
+	const struct iommu_tables *t = iommu_tables();
+	volatile uint8_t *regs;
+	volatile uint8_t *log;
+	uint64_t head, tail, status;
+	unsigned found = 0;
+
+	if (u == 0 || !u->answered || u->register_va == 0)
+		return 0;
+	if (t == 0 || t->event == 0)
+		return 0;
+
+	regs = (volatile uint8_t *)(uintptr_t)u->register_va;
+	log = (volatile uint8_t *)(uintptr_t)phys_to_direct(t->event);
+
+	status = *(volatile uint64_t *)(regs + AMD_REG_STATUS);
+	if (status & AMD_STATUS_EVT_OVERFLOW && overflowed)
+		*overflowed = 1;
+
+	head = *(volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD)
+	       & AMD_RING_PTR_MASK;
+	tail = *(volatile uint64_t *)(regs + AMD_REG_EVTLOG_TAIL)
+	       & AMD_RING_PTR_MASK;
+
+	while (head != tail) {
+		volatile uint64_t *e = (volatile uint64_t *)(log + head);
+		struct iommu_fault f;
+
+		if (iommu_amd_fault_decode(e[0], e[1], &f)) {
+			iommu_record_fault(&f);
+			found++;
+		}
+
+		/*
+		 * ⚠️ The slot is zeroed as it is consumed, so that a later
+		 * reader looking at raw memory cannot mistake a stale entry
+		 * for a live one.  The ring is a kernel frame and nothing else
+		 * writes it, so this costs two stores and removes a whole
+		 * class of "where did that fault come from".
+		 */
+		e[0] = 0;
+		e[1] = 0;
+
+		head = (head + 16u) % AMD_EVENT_LOG_BYTES;
+	}
+
+	*(volatile uint64_t *)(regs + AMD_REG_EVTLOG_HEAD) = head;
+
+	/*
+	 * The overflow bit last, and only after the ring has been emptied:
+	 * §2.5.1 has the engine discard every event while it is set, so
+	 * clearing it before making room would restart logging into a full
+	 * ring and set it again.
+	 */
+	if (status & AMD_STATUS_EVT_OVERFLOW)
+		*(volatile uint64_t *)(regs + AMD_REG_STATUS) =
+			AMD_STATUS_EVT_OVERFLOW;
+	if (status & AMD_STATUS_EVT_INT)
+		*(volatile uint64_t *)(regs + AMD_REG_STATUS) =
+			AMD_STATUS_EVT_INT;
+
+	return found;
 }
 
 /* A scope whose range is a single device: AMD's ordinary case. */

@@ -58,8 +58,8 @@ ahci_submit_cmd(struct ahci_state *st, int port_idx,
 		hdr[0].opts |= CMD_HDR_W;
 	hdr[0].prdtl = (buf_size > 0) ? 1 : 0;
 	hdr[0].prdbc = 0;
-	hdr[0].ctba  = ahci_pa_lo(st->ct_pa);
-	hdr[0].ctbau = ahci_pa_hi(st->ct_pa);
+	hdr[0].ctba  = ahci_pa_lo(st->ct_dma);
+	hdr[0].ctbau = ahci_pa_hi(st->ct_dma);
 	for (i = 0; i < 4; i++)
 		hdr[0].rsvd[i] = 0;
 
@@ -115,7 +115,7 @@ ahci_read_sectors_hw(struct ahci_state *st, int port_idx,
 	fis.sector_count_exp = (count >> 8) & 0xFF;
 
 	return ahci_submit_cmd(st, port_idx, &fis,
-			       st->data_pa, (unsigned int)count * 512, 0);
+			       st->data_dma, (unsigned int)count * 512, 0);
 }
 
 /* ================================================================
@@ -141,7 +141,7 @@ ahci_write_sectors_hw(struct ahci_state *st, int port_idx,
 	fis.sector_count_exp = (count >> 8) & 0xFF;
 
 	return ahci_submit_cmd(st, port_idx, &fis,
-			       st->data_pa, (unsigned int)count * 512, 1);
+			       st->data_dma, (unsigned int)count * 512, 1);
 }
 
 /* ================================================================
@@ -192,8 +192,8 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 			hdr[slot].opts |= CMD_HDR_W;
 		hdr[slot].prdtl = n_prdt;
 		hdr[slot].prdbc = 0;
-		hdr[slot].ctba  = ahci_pa_lo(st->ct_pa + slot * CT_STRIDE);
-		hdr[slot].ctbau = ahci_pa_hi(st->ct_pa + slot * CT_STRIDE);
+		hdr[slot].ctba  = ahci_pa_lo(st->ct_dma + slot * CT_STRIDE);
+		hdr[slot].ctbau = ahci_pa_hi(st->ct_dma + slot * CT_STRIDE);
 		hdr[slot].rsvd[0] = 0;
 		hdr[slot].rsvd[1] = 0;
 		hdr[slot].rsvd[2] = 0;
@@ -239,8 +239,8 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 					page_bytes = rem;
 			}
 
-			tbl->prdt[p].dba  = ahci_pa_lo(st->data_pa_list[page_idx]);
-			tbl->prdt[p].dbau = ahci_pa_hi(st->data_pa_list[page_idx]);
+			tbl->prdt[p].dba  = ahci_pa_lo(st->data_dma_list[page_idx]);
+			tbl->prdt[p].dbau = ahci_pa_hi(st->data_dma_list[page_idx]);
 			tbl->prdt[p].rsvd = 0;
 			tbl->prdt[p].dbc  = PRDT_DBC(page_bytes);
 			if (p == n_prdt - 1)
@@ -286,9 +286,49 @@ ahci_submit_batch(struct ahci_state *st, int port_idx,
 		}
 	}
 
-	printf("ahci: batch timed out  CI=0x%08X  SACT=0x%08X\n",
-	       port_read(st, port, PORT_CI),
-	       port_read(st, port, PORT_SACT));
+	/*
+	 * 🔴 A TIMEOUT THAT SAYS ONLY THAT IT TIMED OUT NAMES NOTHING.
+	 *
+	 * This printed CI and SACT, which together say "the slot is still
+	 * pending" -- the definition of the timeout, not evidence about it.
+	 * Everything that could distinguish the causes was one register read
+	 * away and was not read:
+	 *
+	 *   TFD   the drive's own status and error, if it answered at all
+	 *   SERR  a link that took an error is a different fault from a
+	 *         command the drive never liked
+	 *   IS    which interrupt reasons the port raised
+	 *   CMD   whether the engine is even running (CR) and receiving (FR)
+	 *   SSTS  whether the device is still present and communicating
+	 *
+	 * And the addresses the HBA was given, because a command that is
+	 * fetched from the wrong place cannot complete and looks exactly
+	 * like a drive that ignored it.  CLB is what the port was
+	 * programmed with; ctba is what slot zero's header points at.
+	 */
+	{
+		struct ahci_cmd_hdr *h0 =
+			(struct ahci_cmd_hdr *)st->ports[port_idx].clb_uva;
+
+		printf("ahci: batch timed out  CI=0x%08X SACT=0x%08X "
+		       "slots=%u ncq=%d\n",
+		       port_read(st, port, PORT_CI),
+		       port_read(st, port, PORT_SACT), nslots, port_ncq);
+		printf("      TFD=0x%08X SERR=0x%08X IS=0x%08X CMD=0x%08X "
+		       "SSTS=0x%08X\n",
+		       port_read(st, port, PORT_TFD),
+		       port_read(st, port, PORT_SERR),
+		       port_read(st, port, PORT_IS),
+		       port_read(st, port, PORT_CMD),
+		       port_read(st, port, PORT_SSTS));
+		printf("      CLB=0x%08X%08X  slot0 ctba=0x%08X%08X "
+		       "prdtl=%u opts=0x%04X prdbc=%u\n",
+		       port_read(st, port, PORT_CLBU),
+		       port_read(st, port, PORT_CLB),
+		       (unsigned)h0[0].ctbau, (unsigned)h0[0].ctba,
+		       (unsigned)h0[0].prdtl, (unsigned)h0[0].opts,
+		       (unsigned)h0[0].prdbc);
+	}
 	return -1;
 }
 
@@ -329,8 +369,8 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 		hdr[0].opts |= CMD_HDR_W;
 	hdr[0].prdtl = n_prdt;
 	hdr[0].prdbc = 0;
-	hdr[0].ctba  = ahci_pa_lo(st->ct_pa);
-	hdr[0].ctbau = ahci_pa_hi(st->ct_pa);
+	hdr[0].ctba  = ahci_pa_lo(st->ct_dma);
+	hdr[0].ctbau = ahci_pa_hi(st->ct_dma);
 	hdr[0].rsvd[0] = 0;
 	hdr[0].rsvd[1] = 0;
 	hdr[0].rsvd[2] = 0;

@@ -3714,6 +3714,30 @@ static void iommu_selftest(void)
 			   " back the way it was written\r\n");
 	}
 
+	/*
+	 * ⚠️ AND THIS ONE ESPECIALLY ON EVERY BOARD (#432 stage 3d).  A fault
+	 * record is read exactly when something has already gone wrong, so on
+	 * a machine whose drivers behave the reader is never exercised at all
+	 * — and the first time it runs would be the first time anybody needed
+	 * it.  The words below were written from the two figures, and several
+	 * are records neither engine we can run would ever produce.
+	 */
+	{
+		unsigned ran = 0, wrong = 0;
+		int ok = iommu_fault_decode_check(&ran, &wrong);
+
+		kputs("UrMach x86-64: ");
+		kputdec(ran);
+		kputs(" iommu fault records decoded, ");
+		kputdec(wrong);
+		kputs(" wrong");
+		kputs(ok ? " — intel's two type bits told apart, and amd's"
+			   " direction refused where the entry does not carry"
+			   " one\r\n"
+			 : " — WRONG, a refusal would be reported as something"
+			   " it is not\r\n");
+	}
+
 	if (iommu_vendor() == IOMMU_NONE) {
 		kputs("UrMach x86-64: no dma remapping hardware — a userspace"
 		      " driver here can reach ALL of physical memory (#432)\r\n");
@@ -3958,6 +3982,43 @@ static void iommu_selftest(void)
 			kputs((claim ? (answered > 0 && remapping == answered)
 				     : (remapping == 0))
 			      ? "\r\n" : " — THEY DISAGREE\r\n");
+
+		/*
+		 * ── AND THE DECISION #432 ASKED FOR, TAKEN ───────────────
+		 *
+		 * That issue's scope says to decide whether interrupt
+		 * remapping belongs to it or to a follow-on, "but decide
+		 * rather than forget".  It does not belong to it, and the
+		 * reason is not effort:
+		 *
+		 * An MSI is a DMA WRITE to 0xFEE00000, so the hole #432 closes
+		 * for buffers is open for interrupts — and both specifications
+		 * put that range OUTSIDE any domain this issue builds.  Intel
+		 * Rev 5.20 §3.15 and AMD Rev 3.11 §2.1.4.2 both say a write
+		 * there is an interrupt request and is "not subjected to DMA
+		 * remapping (even if translation structures specify a mapping
+		 * for this range)".  So no arrangement of the page tables
+		 * built here could police it: it is a DIFFERENT mechanism with
+		 * its own table, its own enable bit, and its own interaction
+		 * with the APIC — the same size of bring-up risk as turning
+		 * translation on was, and not a finishing touch on it.
+		 *
+		 * 🔑 AND THE PROPERTY IS ALREADY ENFORCED ANOTHER WAY, which
+		 * is what makes deferring it a decision rather than a gap.
+		 * #457 put the MSI-X table in the KERNEL: device_msi_register
+		 * takes a bus/device/function and answers a slot number, and
+		 * no address crosses that interface in either direction.  What
+		 * defeats it is device_mmio_map, which will map any physical
+		 * page — so a driver holding the master port can map the MSI-X
+		 * BAR and write its own entry.  Closing THAT is #511 and #513,
+		 * it is needed whether or not the hardware ever remaps, and it
+		 * is where the work goes.
+		 */
+		kputs("UrMach x86-64:   interrupt remapping is NOT turned on"
+		      " — a message-signalled interrupt is a write the"
+		      " hardware exempts from every domain (#432), and what"
+		      " keeps the table honest is that the kernel writes it"
+		      " (#511, #513)\r\n");
 	}
 
 	/*
@@ -4107,6 +4168,52 @@ static void iommu_selftest(void)
 				   " and the hardware says so\r\n"
 				 : "COULD NOT BE ENABLED — the engine did not"
 				   " confirm it\r\n");
+
+			/*
+			 * 🔴 AND THE FIRST QUESTION AFTER TURNING IT ON IS
+			 * WHETHER ANYTHING WAS REFUSED (#432 stage 3d).  Under
+			 * pass-through the answer must be NONE — every device
+			 * reaches everything, so a fault here means an engine
+			 * is translating by a description this kernel did not
+			 * write.  The number is worth printing precisely
+			 * because it is expected to be zero: it is the
+			 * baseline the first real domain will be compared
+			 * against, and a reporter first read on the day it
+			 * matters is a reporter nobody trusts.
+			 */
+			if (on) {
+				unsigned faults = iommu_fault_poll();
+
+				kputs("UrMach x86-64:   ");
+				kputdec(faults);
+				kputs(" dma refusals recorded so far");
+				if (iommu_fault_overflowed())
+					kputs(" — AND THE ENGINE DROPPED SOME");
+				kputs(faults == 0
+				      ? " — which under pass-through is the"
+					" only right answer\r\n"
+				      : " — UNDER PASS-THROUGH, so an engine is"
+					" using a description this kernel did"
+					" not write\r\n");
+			}
+
+			/*
+			 * 🔴 AND WHETHER A DEVICE COULD BE CONFINED, ASKED OUT
+			 * LOUD.  Everything above says the hardware is there
+			 * and the tables are right; this is the one question a
+			 * driver's DMA path actually asks, and it has four
+			 * separate ways to answer no.  Without it, a machine
+			 * on which no device is ever confined looks exactly
+			 * like one on which none needed to be — which is a
+			 * silence, and it is how the first run of this stage
+			 * was read as working.
+			 */
+			kputs("UrMach x86-64:   a device could be confined to"
+			      " what it is granted: ");
+			kputs(iommu_can_isolate()
+			      ? "yes — the next dma allocation moves one\r\n"
+			      : "NO — see the four conditions in"
+				" iommu_can_isolate()\r\n");
 		} else if (ok) {
 			kputs("UrMach x86-64:   translation left OFF (pass"
 			      " -I to enable it) — nothing programmed\r\n");

@@ -46,6 +46,9 @@
 
 #include <mach/etap_events.h>
 
+/* #432: a revoked capability must take its mappings with it. */
+extern void device_master_cap_revoked(uint64_t cap_id);
+
 /* --- state ---------------------------------------------------------- */
 
 #define CAP_STATE_BUCKETS       256
@@ -202,6 +205,31 @@ cap_init(void)
     printf("cap: subsystem initialized (slots 37-40)\n");
 }
 
+/*
+ * The same check, on a token that is ALREADY IN KERNEL MEMORY.
+ *
+ * 🔴 SEPARATE FROM urmach_cap_verify BECAUSE THAT ONE COPIES IN.  It is a
+ * trap: its argument is a user pointer, and cap_copyin_token() is what makes
+ * that safe.  A kernel caller passing a kernel pointer to it would be asking
+ * copyin to read kernel memory as if it were the caller's -- which on this
+ * machine happens to work and is a fault waiting for the day it does not.
+ *
+ * The caller here is device_master.c, whose token arrived through MIG and is
+ * therefore already in a kernel message buffer, checked and bounded (#432).
+ */
+kern_return_t
+cap_check_in_kernel(const struct uros_cap *token,
+                    uint32_t op,
+                    uint64_t resource_id)
+{
+    kern_return_t kr;
+
+    simple_lock(&cap_lock);
+    kr = cap_check_locked(token, op, resource_id);
+    simple_unlock(&cap_lock);
+    return kr;
+}
+
 kern_return_t
 urmach_cap_verify(const struct uros_cap *user_token,
                   uint32_t op,
@@ -279,6 +307,22 @@ urmach_cap_revoke(uint64_t cap_id)
     }
     e->flags |= CAP_FLAG_REVOKED;
     simple_unlock(&cap_lock);
+
+    /*
+     * 🔴 AND THE MAPPINGS THIS TOKEN BOUGHT, torn down (#432).
+     *
+     * Marking the id revoked withdraws it from everything that CHECKS it on
+     * use.  A capability that was turned into a MAPPING is not checked again:
+     * an IOMMU domain is a page table, and the device walks it whether or not
+     * the token behind it is still good.  So the withdrawal has to reach the
+     * mapping, and this is where the kernel knows first.
+     *
+     * ⚠️ OUTSIDE cap_lock, deliberately.  The teardown writes engine registers
+     * and spins on them, and holding a simple lock the whole machine's
+     * capability checks contend for while doing memory-mapped I/O is a
+     * serialisation nobody would find by reading either side alone.
+     */
+    device_master_cap_revoked(cap_id);
     return KERN_SUCCESS;
 }
 

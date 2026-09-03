@@ -39,6 +39,30 @@ subsystem
 #include <mach/mach_types.defs>
 #include <device/device_types.defs>
 
+/*
+ * A capability token, as an opaque blob (#432, #216).
+ *
+ * ⚠️ Declared here rather than imported from cap_server.defs, which is a
+ * different subsystem: what crosses this interface is the same BYTES and not
+ * the same MIG type, and a cross-subsystem type import would tie this
+ * interface's wire format to that one's.  CAP_TOKEN_MAX is the bound both
+ * agree on, and <mach/cap_types.h> is where it is stated once.
+ */
+type cap_token_t = array[*:256] of char;
+
+/*
+ * A DMA region's identity (#432).
+ *
+ * ⚠️ SIXTY-FOUR BITS ON BOTH TARGETS, which vm_address_t is not: it is a
+ * pointer width, thirty-two on i386.  An id that narrowed there would start
+ * repeating after four billion allocations on the target where the buffers are
+ * smallest -- and a repeated id is a capability that outlives the buffer it
+ * was issued against.
+ */
+type dma_region_id_t = unsigned64 ctype: cap_u64_t;
+
+import <mach/cap_types.h>;
+
 serverprefix	ds_master_;
 
 /*
@@ -159,15 +183,110 @@ routine device_intr_enable(
  * and n_pages.  They are numbers, not addresses.
  */
 
+
 /*
- * Allocate a physically contiguous DMA buffer.
- * Returns the kernel virtual address and the physical address.
+ * ── Which device a DMA buffer is FOR (#432) ──────────────────────────
+ *
+ * 🔴 THE KERNEL DID NOT KNOW.  device_dma_alloc took a size and returned a
+ * physical address, and #457 closed leaving that written down as this issue's
+ * work: "a userspace driver server does DMA to a buffer it does not know the
+ * physical address of -- today it knows by construction".  It cannot stop
+ * knowing until the kernel can tell which device is going to read it, because
+ * that is what decides which IOMMU domain the buffer belongs in.
+ *
+ * So the three calls that hand out addresses a device will use now say whose
+ * device it is.  One argument and not three, because a bus/device/function
+ * triple has a canonical packing and a spare value:
+ *
+ *	bdf = (bus << 8) | (dev << 3) | func
+ *
+ * 🔑 DEVICE_DMA_NO_BDF is not zero.  Zero is a REAL address -- 0:0.0 is the
+ * host bridge on every machine this runs on -- so a caller that forgot the
+ * argument would have silently claimed to be it.  It is a value the packing
+ * cannot produce.
+ *
+ * ⚠️ And there is a caller that legitimately has no device: ext_server
+ * allocates scatter-gather pages that the BLOCK SERVER's disk will read,
+ * not any device of its own.  It passes DEVICE_DMA_NO_BDF and receives an
+ * untranslated physical address -- which the block server then programs into a
+ * disk that IS confined, so the transfer is refused and the fault names the
+ * page.  🔑 That is the hole working as designed rather than the hole being
+ * closed: before this it was made silently and succeeded.  The right shape is
+ * for the server that owns the device to do the mapping, which is a protocol
+ * change with #498 in it.
+ *
+ * ⚠️ The constant itself lives in <device/device_types.h> and not here: MIG
+ * does not carry a #define from a .defs into the header it generates, so a
+ * definition here would be visible to nobody and the first caller to use it
+ * would fail to compile with a name that looks misspelt.
+ */
+
+/*
+ * ── A device that cannot be given an address it must translate ───────
+ *
+ * Declare that this device must be programmed with PHYSICAL addresses, so its
+ * domain maps every grant at the address the memory is really at.
+ *
+ * 🔴 THIS IS NOT AN OPT-OUT OF ISOLATION.  The device is still confined: it
+ * reaches what it has been granted and nothing else, and every other address
+ * in the machine faults for it.  What it gives up is the second property #432
+ * stage 3e added -- not knowing where its memory is.  Confinement stops a
+ * device reaching elsewhere by accident; the IOVA stops it doing so on
+ * purpose, and this keeps the first and loses the second.
+ *
+ * 🔑 AND IT IS A REAL CONSTRAINT AND NOT A CONVENIENCE.  A LEGACY virtio
+ * device is specified to take physical addresses: without
+ * VIRTIO_F_ACCESS_PLATFORM there is no negotiation in which it could be told
+ * otherwise, and this tree's virtio driver is the legacy interface -- I/O port
+ * BAR0, configuration at 0x14.  Handed an IOVA it programs it as a physical
+ * address and the transfer lands nowhere, which is a request timeout and no
+ * other symptom.  The fix is virtio 1.0, and that is a driver rewrite.
+ *
+ * ⚠️ A driver could ask for this to learn its own physical addresses, and
+ * nothing here stops it.  That is why the kernel says so ON THE CONSOLE, once
+ * per device: a weakening that is announced is a weakening somebody can
+ * notice, and this interface has exactly one legitimate caller today.
+ *
+ * ⚠️ Must be called BEFORE the device's first device_dma_alloc.  The domain is
+ * created by the first grant, and a domain that already holds translated
+ * buffers cannot become an identity one without moving them.  Answers
+ * KERN_FAILURE if the device already has a domain.
+ */
+routine device_dma_identity(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t
+	);
+
+/*
+ * Allocate a physically contiguous DMA buffer.  Answers the kernel virtual
+ * address and THE ADDRESS THE DEVICE MUST BE PROGRAMMED WITH.
+ *
+ * 🔴🔴 `dma_addr' AND NOT `paddr', AND THE RENAME IS THE CHANGE (#432 stage
+ * 3e).  On a machine that confines this device it is an IOVA: a number that
+ * means something only inside that device's IOMMU domain.  Another device
+ * given it reaches nothing; the processor cannot use it at all; and the driver
+ * no longer knows where in physical memory its buffer is.  That was #457's
+ * closing clause and it is now true.
+ *
+ * 🔑 On a machine with no remapping hardware, or booted without it, the same
+ * field carries the physical address exactly as it always did.  One interface
+ * answers both, and no driver has to know which kind of machine it is on --
+ * which is why this is a change of MEANING and not of protocol.  The parameter
+ * has always been "the address to program"; it just used to have only one
+ * possible value.
+ *
+ * ⚠️ It is therefore NOT an address to hand to anything else.  device_dma_free
+ * and device_dma_map_user take the KERNEL address, and a caller that passed
+ * this one to a second server would be passing a number that is private to one
+ * device's domain.
  */
 routine device_dma_alloc(
 		master_port	: mach_port_t;
+	in	bdf		: natural_t;
 	in	size		: vm_size_t;
 	out	vaddr		: vm_address_t;
-	out	paddr		: vm_address_t
+	out	dma_addr	: vm_address_t;
+	out	region_id	: dma_region_id_t
 	);
 
 /*
@@ -175,6 +294,7 @@ routine device_dma_alloc(
  */
 routine device_dma_free(
 		master_port	: mach_port_t;
+	in	bdf		: natural_t;
 	in	vaddr		: vm_address_t;
 	in	size		: vm_size_t
 	);
@@ -255,13 +375,29 @@ routine device_mmio_unmap(
  */
 type dma_sg_addr_t = ^array[] of vm_address_t;
 
+/*
+ * 🔴🔴 AND THE LIST IS ADDRESSES THE DEVICE USES, NOT PHYSICAL ONES (#432
+ * stage 3e).  On a machine that confines this device the pages are granted
+ * TOGETHER and get CONSECUTIVE addresses, so the list comes back as
+ * base, base+4096, base+8192, ...  -- a scatter-gather buffer that is
+ * scattered in physical memory and contiguous in the device's.
+ *
+ * 🔑 Which means a driver could program it as one region.  Nothing here does
+ * yet: they build the multi-entry PRDT they always built, which is still
+ * correct and is what a machine with no remapping hardware needs -- there the
+ * list is physical addresses and genuinely scattered.  A driver that wants the
+ * shorter descriptor has to check that the list is consecutive rather than
+ * assume it, and that is a driver-side change this does not make for it.
+ */
 routine device_dma_alloc_sg(
 		master_port	: mach_port_t;
+	in	bdf		: natural_t;
 	in	n_pages		: natural_t;
 	in	task_port	: mach_port_t;
 	out	kva		: vm_address_t;
 	out	uva		: vm_address_t;
-	out	paddrs		: dma_sg_addr_t
+	out	dma_addrs	: dma_sg_addr_t;
+	out	region_id	: dma_region_id_t
 	);
 
 /*
@@ -297,4 +433,157 @@ routine device_io_port_write(
  */
 routine device_ddb_break(
 		master_port	: mach_port_t
+	);
+
+/*
+ * ── Was it the IOMMU that refused my transfer? (#432 stage 3d) ────────
+ *
+ * How many DMA requests from this device the remapping hardware has blocked,
+ * and the last address it blocked.
+ *
+ * 🔴 A DRIVER CANNOT TELL THIS FROM A BROKEN DEVICE, and that is the whole
+ * reason this exists.  A transfer refused by the IOMMU does not complete: the
+ * command times out, the port reports nothing useful, and every symptom is
+ * identical to a disk that stopped answering.  What is different is knowable
+ * only inside the kernel, where the engine writes its fault records -- so
+ * either the kernel offers the answer or every driver debugs the wrong thing.
+ *
+ * 🔴 `confined' IS WHY THERE ARE THREE ANSWERS AND NOT TWO.  A count of zero
+ * means "the IOMMU did not refuse you", and that is true on a machine with no
+ * remapping hardware, on one booted without it, and on one where the device is
+ * behaving -- three states a driver must tell apart.  Without this field, a
+ * self-test that DEMONSTRATES the isolation cannot tell "the transfer was
+ * allowed because nothing polices this machine" from "the transfer was allowed
+ * although something does", and the second is a security failure while the
+ * first is a Tuesday.
+ *
+ * `count' is since boot and does not wrap with the kernel's log; `address' is
+ * the last one recorded and is meaningless when the count is zero.
+ */
+/*
+ * Is this device already driven by ANOTHER task?
+ *
+ * 🔴 A QUESTION THAT DOES NOT CLAIM, and that is the whole reason it exists
+ * rather than a caller finding out by trying.  A device is claimed by the
+ * first task that maps memory for it, so "try it and see" is a test that
+ * STEALS the device when the answer is no -- and the driver that was going to
+ * claim it is then refused, which is a self-test breaking the thing it was
+ * checking.
+ *
+ * ⚠️ Answers zero for a device nobody drives AND for one this task drives
+ * itself.  Those are the two cases in which the caller may go on to map for
+ * it, which is what the caller is asking.
+ */
+/*
+ * ── The server that owns the device does the mapping (#432) ──────────
+ *
+ * Make one page of a DMA buffer somebody ELSE allocated reachable by MY
+ * device, and answer the address to program.
+ *
+ * 🔴 THIS IS THE `DEVICE_DMA_NO_BDF' HOLE CLOSED.  ext_server allocates
+ * scatter-gather pages that the block server's disk reads, and names no device
+ * because it owns none -- so once that disk is confined the pages are in
+ * nobody's domain and every transfer into them is refused.  Correct,
+ * diagnosable, and useless.  The shape this issue asks for is that the server
+ * which owns the device maps them, and this is that call.
+ *
+ * 🔑 AND THE CALLER MUST PRESENT A CAPABILITY FOR THE BUFFER, which is what
+ * makes this a delegation rather than an assertion.  `paddr' must belong to a
+ * live region this kernel allocated, AND `token' must be a capability naming
+ * that region -- issued by cap_server to the region's OWNER, who gave it away
+ * on purpose.
+ *
+ * ⚠️ The address check alone was not enough and the difference is the point.
+ * It narrowed "any physical page" to "any page the kernel allocated for DMA",
+ * which is still every other server's buffers: a driver could put a
+ * filesystem's page cache inside its device's reach without the filesystem
+ * ever having offered it.  The capability is what turns "I know where it is"
+ * into "somebody gave it to me".
+ *
+ * 🔑 And the WHOLE REGION is mapped on the first page of it, at consecutive
+ * addresses.  So the caller asks per page and pays once: after the first
+ * answer the rest are arithmetic, the kernel's record of the grant is one
+ * entry rather than a thousand, and the region is revoked in one step when its
+ * owner frees it.
+ *
+ * ⚠️ Only the task that drives `bdf' may call this — a device has one driver.
+ *
+ * ⚠️ It narrows and does not close.  Any holder of the master port can map any
+ * page the kernel allocated for DMA: not any page in the machine, which is
+ * where this started, but not only the ones somebody handed it either.  The
+ * difference is a capability naming the BUFFER, which is the design cap_server
+ * still owes this issue.
+ */
+routine device_dma_map_foreign(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	paddr		: vm_address_t;
+	in	token		: cap_token_t;
+	out	dma_addr	: vm_address_t
+	);
+
+/*
+ * ── Claim a device, by presenting a capability for its KIND (#432) ───
+ *
+ * 🔴 THIS IS WHERE "MAY I DRIVE THIS DEVICE" IS ASKED, and it is asked ONCE.
+ * Holding the master device port used to be the whole answer: any task with it
+ * could name any bus/device/function and have memory mapped into that device's
+ * domain -- and a page inside somebody else's device's domain is a page that
+ * DEVICE can reach, which is the one direction nothing else in this system
+ * checks.
+ *
+ * 🔑 THE TOKEN NAMES A CLASS, NOT A DEVICE, and the split is deliberate.  A
+ * bus/device/function is a property of the BOARD -- this tree's AHCI is
+ * 00:04.0 with one command line and 00:1f.2 with another -- so a policy naming
+ * one would have to be rewritten per machine.  The token says what KIND of
+ * device this task may drive, out of its manifest; the CLAIM says it got this
+ * one first.  Neither is a policy alone:
+ *
+ *	the manifest   what kind of hardware this driver is for
+ *	the claim      which instance of it this task got
+ *
+ * The kernel reads the class out of the device's own configuration space and
+ * requires the token to name it, so the two halves are checked against
+ * different sources: one is a signed statement about the task, the other is
+ * the hardware answering for itself.
+ *
+ * 🔴 AND WHAT IS CHECKED AFTERWARDS IS THE CLAIM, ON THE BUFFER CALLS ONLY.
+ * Five of them ask -- dma_alloc, dma_free, dma_alloc_sg, dma_identity and
+ * dma_map_foreign -- and every one is about obtaining or releasing memory.
+ * Verifying a token instead would mean an HMAC-SHA256 under a lock the whole
+ * machine shares, on a path that runs once per buffer; the claim is a pointer
+ * comparison, and the question it answers cannot change in between.
+ *
+ * 🔑 A TRANSFER IS CHECKED BY NEITHER, BECAUSE A TRANSFER DOES NOT COME HERE.
+ * A userspace driver reads a disk by writing an address into the device's own
+ * descriptor and poking a register: no system call, nothing for the kernel to
+ * see, and therefore no place to put a check.  That is not a gap in this
+ * design -- it IS the design, and it is the entire reason #432 exists.  The
+ * only thing that can police that transfer is the hardware, which is what the
+ * domain the claim gives access to is for.
+ *
+ * ⚠️ On a machine with no manifest shipped, cap_server issues freely and this
+ * check passes: enforcement is always on, and how strict it is depends on the
+ * policy file.  That is the honest arrangement -- the mechanism does not
+ * pretend the policy exists, and the policy does not need the mechanism to be
+ * turned on twice.
+ */
+routine device_claim(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	token		: cap_token_t
+	);
+
+routine device_dma_owned(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	out	by_other	: natural_t
+	);
+
+routine device_dma_faults(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	out	confined	: natural_t;
+	out	count		: natural_t;
+	out	address		: vm_address_t
 	);

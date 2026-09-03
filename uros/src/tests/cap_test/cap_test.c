@@ -45,6 +45,8 @@
 #include <mach/cap_types.h>
 #include <device/device.h>
 #include <device/device_types.h>
+#include "device_master.h"	/* #432: a device has one driver */
+#include "ahci_batch.h"	/* #432: a disk reading into a page it does not own */
 #include <libcap.h>
 #include "sha256.h"     /* Issue #180: SHA-NI dispatch query + KAT */
 
@@ -371,6 +373,256 @@ subsystem_name_is_not_a_pointer(void)
  * back to one on both kernels.  Leave it alive and the broken kernel goes
  * from two to one instead of from one to zero, and passes.
  */
+
+/*
+ * ── A device has one driver, and this task is not it (#432) ──────────
+ *
+ * 🔴 THE MASTER DEVICE PORT USED TO BE THE WHOLE ANSWER.  Any task holding it
+ * could name any bus/device/function and have memory mapped into THAT device's
+ * IOMMU domain -- and a page inside somebody else's device's domain is a page
+ * that DEVICE can reach, which is the one direction nothing else checks.  This
+ * program holds the master port and is not the block server, so it is the task
+ * that can prove the refusal.
+ *
+ * 🔴 AND IT ASKS BEFORE IT TRIES.  A device is claimed by the FIRST task that
+ * maps for it, so "try it and see" would STEAL any device nobody had claimed
+ * yet, and the driver that was going to claim it would be refused afterwards
+ * -- a self-test breaking the thing it checks.  device_dma_owned() answers the
+ * question without claiming, and exists for this.
+ *
+ * ⚠️ A boot where nothing is claimed yet reports that it DID NOT RUN and says
+ * so.  The order between this task and the block server is an interleaving and
+ * not an order (#425); silence would be indistinguishable from a pass.
+ */
+
+/*
+ * ── A disk reads into a page belonging to a task with no device ──────
+ *
+ * 🔴 THIS IS THE `DEVICE_DMA_NO_BDF' HOLE, EXERCISED.  ext_server allocates a
+ * page cache and hands the block server the PHYSICAL addresses of it, because
+ * it owns no device and has no bus/device/function to name.  Once the disk is
+ * confined to what it was granted, those pages are in nobody's domain and the
+ * transfer is refused -- correct, diagnosable, and the filesystem stops.
+ *
+ * So this does exactly what ext_server does, in a test: allocate scatter-
+ * gather pages with DEVICE_DMA_NO_BDF, hand their addresses to a disk, and
+ * require the bytes to arrive.  What makes it work is the block server
+ * translating them through the kernel first -- the server that OWNS the device
+ * doing the mapping, which is the shape #432 asked for.
+ *
+ * 🔑 THE ORACLE IS NOT OURS.  0xEF53 at offset 1080 is the ext2 superblock
+ * magic, put there by mke2fs on the host when the image was built.  A test
+ * that checked a pattern it wrote itself would pass on a read that returned
+ * the buffer unchanged.
+ */
+
+/*
+ * ── The manifest refuses what it does not declare (#432) ─────────────
+ *
+ * 🔴 THE FIRST TIME THIS SYSTEM'S POLICY FILE HAS EVER BEEN READ.  The
+ * manifest machinery has existed since #216 -- a compiler, a validator, a
+ * per-task table, bootstrap's lookup of "<symtab>.cmf" in the bundle -- and
+ * not one .cmf was ever compiled or shipped, so cap_manifest_allows()
+ * answered "permissive, no manifest" on every boot of this system's life and
+ * the enforcement branch in cap_server called itself dead in its own comment.
+ *
+ * cap_test.manifest declares RESOURCE_BLK_DEVICE and nothing else.  This
+ * program legitimately opens partitions with block-device capabilities --
+ * arms [3] and [5] do -- and has no business driving PCI hardware: it is a
+ * test, not a driver.  So asking for a PCI capability must come back DENIED,
+ * and the denial is the policy being enforced rather than described.
+ *
+ * 🔑 WHICH IS THE OTHER HALF OF ARM [11].  That one shows the kernel refusing
+ * a device somebody else drives; this one shows cap_server refusing the
+ * capability that would have let this task claim one at all.  Together they
+ * answer "who may drive this device": the manifest says what KIND, the claim
+ * says which INSTANCE, and neither is a policy alone.
+ *
+ * ⚠️ A boot where this task has no manifest reports that it DID NOT RUN.
+ * cap_server is permissive without one, so a token would come back and prove
+ * nothing -- and a pass on the permissive path is exactly the silence this
+ * arm exists to break.
+ */
+static int
+the_manifest_refuses_what_it_does_not_declare(void)
+{
+    struct uros_cap tok_blk, tok_pci;
+    kern_return_t   kr_blk, kr_pci;
+
+    memset(&tok_blk, 0, sizeof(tok_blk));
+    memset(&tok_pci, 0, sizeof(tok_pci));
+
+    /*
+     * ⚠️ THE DECLARED ONE FIRST, and it is not a formality.  A denial proves
+     * the policy is enforced only if something is also ALLOWED -- otherwise
+     * "cap_server said no" is indistinguishable from cap_server being absent,
+     * broken, or refusing everything.  One yes and one no from the same
+     * server, in the same breath, is what makes the no mean something.
+     */
+    kr_blk = cap_request(RESOURCE_BLK_DEVICE, 0,
+                         CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok_blk);
+
+    kr_pci = cap_request(RESOURCE_PCI_DEVICE, 0x010601,
+                         CAP_OP_PCI_DMA_MAP, 0, &tok_pci);
+
+    if (kr_blk != KERN_SUCCESS) {
+        printf("cap_test: [13] the manifest — DID NOT RUN, cap_server would "
+               "not issue even the declared block-device capability "
+               "(kr=%d)\n", (int)kr_blk);
+        return 1;
+    }
+
+    if (kr_pci == KERN_SUCCESS) {
+        printf("cap_test: [13] WRONG — cap_server issued a PCI-device "
+               "capability to a task whose manifest declares only block "
+               "devices\n");
+        return 0;
+    }
+
+    printf("cap_test: [13] block devices ALLOWED and PCI devices REFUSED "
+           "(kr=%d) by the same cap_server in the same breath — the manifest "
+           "is a policy and not a description\n", (int)kr_pci);
+    return 1;
+}
+
+static int
+a_disk_reads_into_a_foreign_page(mach_port_t device_port, mach_port_t handle,
+                                 const char *name)
+{
+    kern_return_t          kr;
+    vm_address_t           kva = 0, uva = 0;
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    io_buf_len_t           got = 0;
+    uint64_t               region_id = 0;
+    unsigned               magic;
+    int                    ok = 0;
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
+    if (kr != KERN_SUCCESS || pa_cnt != 1) {
+        printf("cap_test: [12] a disk reads into a foreign page — DID NOT "
+               "RUN, no scatter-gather page (kr=%d)\n", (int)kr);
+        if (pa_list != NULL)
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                                pa_cnt * sizeof(vm_address_t));
+        return 1;
+    }
+
+    /*
+     * ── The consent, which is the whole of #432's second gap ─────────
+     *
+     * 🔴 KNOWING THE ADDRESS IS NOT BEING GIVEN THE BUFFER.  The block server
+     * is about to program this page's physical address into a disk, and the
+     * kernel will only map it for that disk if somebody holding a capability
+     * for the buffer asks.  This task owns the region, so cap_server will
+     * issue it one -- after asking the KERNEL whether this task really is the
+     * owner, which is the half a policy file cannot know.
+     *
+     * ⚠️ And then it is HANDED OVER.  The block server keeps the capability,
+     * not the buffer: a delegation of use, revocable by this task without the
+     * server being asked.
+     */
+    {
+        struct uros_cap buf_cap;
+
+        memset(&buf_cap, 0, sizeof(buf_cap));
+        kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                         CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
+                         0, &buf_cap);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [12] WRONG — cap_server would not issue a "
+                   "capability for region %llu this task owns (kr=%d)\n",
+                   (unsigned long long)region_id, (int)kr);
+            goto out;
+        }
+
+        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [12] WRONG — the block server would not take "
+                   "the capability (kr=%d)\n", (int)kr);
+            goto out;
+        }
+    }
+
+    /*
+     * ⚠️ Wiped first, so "the read did nothing" cannot pass.  A page that
+     * arrives holding what the allocator left in it is a page nobody wrote.
+     */
+    memset((void *)uva, 0, 4096);
+
+    kr = device_read_phys(handle, D_READ, 0, 4096, pa_list, pa_cnt, &got);
+
+    magic = (unsigned)(((unsigned char *)uva)[1080])
+          | ((unsigned)(((unsigned char *)uva)[1081]) << 8);
+
+    if (kr == KERN_SUCCESS && magic == 0xEF53u) {
+        printf("cap_test: [12] %s DMA'd into a page this task owns and no "
+               "device was granted — 0x%x at +1080, the superblock magic "
+               "mke2fs wrote: the server that owns the disk mapped it\n",
+               name, magic);
+        ok = 1;
+    } else {
+        printf("cap_test: [12] WRONG — read of %s into a foreign page "
+               "answered kr=%d, %u bytes, and +1080 holds 0x%x rather than "
+               "0xef53\n", name, (int)kr, (unsigned)got, magic);
+    }
+
+out:
+    (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                        pa_cnt * sizeof(vm_address_t));
+    return ok;
+}
+
+static int
+a_device_has_one_driver(mach_port_t device_port)
+{
+    kern_return_t kr;
+    natural_t     bdf, by_other = 0;
+    int           claimed = 0;
+    vm_address_t  kva = 0, dma = 0;
+    uint64_t      region = 0;
+
+    /*
+     * Bus zero, every function: whichever device the block server reached
+     * first is the one this borrows.  Found by search and not by a constant,
+     * because which slot a controller lands in is a property of the board and
+     * this runs on more than one.
+     */
+    for (bdf = 0; bdf < 0x100; bdf++) {
+        kr = device_dma_owned(device_port, bdf, &by_other);
+        if (kr == KERN_SUCCESS && by_other) {
+            claimed = 1;
+            break;
+        }
+    }
+
+    if (!claimed) {
+        printf("cap_test: [11] a device has one driver — DID NOT RUN, "
+               "nothing on bus 0 is driven by another task yet\n");
+        return 1;
+    }
+
+    kr = device_dma_alloc(device_port, bdf, 4096, &kva, &dma, &region);
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [11] WRONG — this task mapped memory for "
+               "%02x:%02x.%u, which another task drives\n",
+               (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+               (unsigned)(bdf & 7));
+        (void)device_dma_free(device_port, bdf, kva, 4096);
+        return 0;
+    }
+
+    printf("cap_test: [11] mapping memory for %02x:%02x.%u refused with "
+           "kr=%d — a device has one driver, and holding the master port "
+           "is no longer the whole answer\n",
+           (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+           (unsigned)(bdf & 7), kr);
+    return 1;
+}
+
 static int
 subsystem_survives_a_failed_allocation(void)
 {
@@ -782,6 +1034,11 @@ main(int argc, char **argv)
                 printf("cap_test: [3] positive open ok, handle=0x%x — "
                        "calling device_close\n",
                        (unsigned)handle);
+
+                if (!a_disk_reads_into_a_foreign_page(device_port, handle,
+                                                      found_name))
+                    pass = 0;
+
                 kern_return_t ckr2 = device_close(handle);
                 if (ckr2 == KERN_SUCCESS) {
                     printf("cap_test: [3] device_close ok — "
@@ -931,6 +1188,12 @@ main(int argc, char **argv)
         pass = 0;
 
     if (!subsystem_survives_a_failed_allocation())
+        pass = 0;
+
+    if (!a_device_has_one_driver(device_port))
+        pass = 0;
+
+    if (!the_manifest_refuses_what_it_does_not_declare())
         pass = 0;
 
     if (pass) {

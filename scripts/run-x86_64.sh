@@ -7,10 +7,12 @@
 # ISO on -cdrom, with a separate data disk beside it; it is now the disk
 # itself, which is the whole of what QEMU is handed (#520).
 #
-# Usage: run-x86_64.sh [seconds] [extra qemu args...]
+# Usage: run-x86_64.sh [--iommu intel|amd] [--entry N] [seconds] [qemu args...]
 #   run-x86_64.sh
 #   run-x86_64.sh 30 -smp 4
 #   run-x86_64.sh 20 -cpu max -m 2G
+#   run-x86_64.sh --iommu intel --entry 16 200      translation ON
+#   run-x86_64.sh --iommu intel --entry 14 200      the same board, translation off
 #
 # Exit status: 0 the run passed · 1 the KERNEL failed · 2 this script refused
 # to start (another run is in flight) · 3 QEMU never ran, or ran and produced
@@ -395,12 +397,63 @@ fi
 # machine-independent kernel; entry 2 is the terminal double-fault self-test,
 # which cannot share a boot with it.  Without this the other entries are
 # unreachable, because grub.cfg has timeout=0.
-if [ "${1:-}" = "--entry" ]; then
-	[ -n "${2:-}" ] || { echo "usage: $0 --entry <n> [seconds] [qemu args]" >&2; exit 2; }
-	UROS_X86_64_BOOT_ENTRY=$2
-	export UROS_X86_64_BOOT_ENTRY
-	shift 2
-fi
+#
+# ── --iommu intel|amd: put remapping hardware on the board (#432) ──────────
+#
+# 🔴 IT PUTS THE ENGINE THERE AND DOES NOT TURN TRANSLATION ON.  That is `-I'
+# on the kernel command line, which is menu entry 16 -- and keeping the two
+# separate is the whole point, because #432 asks for the cost of translation
+# to be measured rather than assumed and a measurement needs two runs that
+# differ in ONE thing.
+#
+#	./scripts/run-x86_64.sh --iommu intel --entry 14 200   translation off
+#	./scripts/run-x86_64.sh --iommu intel --entry 16 200   translation on
+#
+# Same board, same devices, same emulated hardware doing the same work per
+# DMA; the only difference is whether the kernel programmed the engine.
+# Comparing entry 16 against a run with NO vIOMMU device would measure the
+# emulator's device model as well, and report the sum as the IOMMU's cost.
+#
+# 🔴🔴 AND `amd-iommu' DOES NOT REMAP DMA UNLESS ASKED.  Its `dma-remap'
+# property defaults to OFF, while `intel-iommu' remaps with no options at all
+# -- so the plain device accepts the device table, the command buffer and the
+# event log, completes the invalidation commands we queue, and then lets every
+# DMA through.  That cost three ablations that were each correct and each
+# useless, because all three were ablating a mechanism that was disarmed.  It
+# is spelt out here so it is spelt right every time.
+#
+# ⚠️ q35 is added only when the caller named no machine.  `intel-iommu'
+# requires it; a caller who chose i440fx on purpose gets their board and
+# qemu's own refusal, which is a clearer answer than this quietly overriding
+# them.
+# ⚠️ A LOOP AND NOT TWO `if's IN A ROW, because the order the two flags are
+# typed in is not something a caller should have to remember.  Written as two
+# sequential tests, `--iommu intel --entry 16' would have silently left
+# --entry unread and booted the default menu entry -- a run that looks fine and
+# answers a different question, which is the failure this file exists to stop.
+IOMMU_ARGS=""
+IOMMU_NAME="none"
+
+while :; do
+	case "${1:-}" in
+	--entry)
+		[ -n "${2:-}" ] || { echo "usage: $0 [--iommu intel|amd] [--entry <n>] [seconds] [qemu args]" >&2; exit 2; }
+		UROS_X86_64_BOOT_ENTRY=$2
+		export UROS_X86_64_BOOT_ENTRY
+		shift 2 ;;
+	--iommu)
+		case "${2:-}" in
+		intel)	IOMMU_ARGS="-device intel-iommu" ;;
+		amd)	IOMMU_ARGS="-device amd-iommu,dma-remap=on" ;;
+		*)	echo "usage: $0 [--iommu intel|amd] [--entry <n>] [seconds] [qemu args]" >&2
+			exit 2 ;;
+		esac
+		IOMMU_NAME=$2
+		shift 2 ;;
+	*)
+		break ;;
+	esac
+done
 
 # ── The seconds are a BACKSTOP, not the instrument (#408) ──────────────────
 #
@@ -532,6 +585,25 @@ case " $* " in
 esac
 echo "=== accelerator: $ACCEL ==="
 
+# The board, when --iommu asked for an engine and the caller named none.
+#
+# ⚠️ Only then.  `intel-iommu' requires q35 and the default `pc' is a 1996
+# i440FX; a caller who named a machine on purpose gets theirs, and qemu's own
+# refusal, which says more than this silently overriding them would.
+if [ -n "$IOMMU_ARGS" ]; then
+	case " $* " in
+	*" -machine "*|*" -M "*)	: ;;
+	*)				IOMMU_ARGS="-machine q35 $IOMMU_ARGS" ;;
+	esac
+fi
+
+# 🔑 Said out loud for the same reason the accelerator is (#477): a run whose
+# board is not on the screen is a result somebody will later have to guess the
+# conditions of.  "none" is an answer -- entry 16 on a board with no engine
+# builds tables and enables nothing, which is a real thing to want and a
+# terrible thing to mistake for translation being on.
+echo "=== iommu on the board: $IOMMU_NAME ==="
+
 : > "$LOG"
 
 # shellcheck disable=SC2086
@@ -553,11 +625,26 @@ echo "=== accelerator: $ACCEL ==="
 # can still be selecting yesterday's menu entry.  It costs about a second.
 "$REPO/scripts/make-disk-x86_64.sh" >&2
 
+# 🔴 `bootindex' on both, because with two disks the boot device stops being
+# obvious and starts being whatever SeaBIOS enumerates first.  Only one of
+# them has GRUB in its MBR, and which one boots is not a thing to leave to
+# enumeration order.
+#
+# The second disk is on ich9-ahci, the same controller i386 has used since
+# #224, and it is here for #432: `virtio-blk-pci' is a transitional device and
+# QEMU refuses `iommu_platform=on' on anything but a modern-only one, so the
+# legacy virtio driver cannot be placed behind the IOMMU at all.  AHCI is an
+# ordinary bus master with nothing to negotiate.
 DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
-	-device virtio-blk-pci,drive=urosdisk"
+	-device virtio-blk-pci,drive=urosdisk,bootindex=0
+	-device ich9-ahci,id=ahci0
+	-drive file=$BUILD/disk-x86_64-ahci.img,if=none,id=ahcidisk0,format=raw
+	-device ide-hd,drive=ahcidisk0,bus=ahci0.0,bootindex=1
+	-drive file=$BUILD/disk-x86_64-ahci2.img,if=none,id=ahcidisk1,format=raw
+	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $DISK_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $DISK_ARGS $IOMMU_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
 QPID=$!
 

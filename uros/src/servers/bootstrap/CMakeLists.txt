@@ -344,10 +344,33 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # adding a second program's behaviour to the measurement.  That was an
   # experiment and is not a configuration: it belongs in the issue and in
   # ~/uros-tests, not in what the build ships.
+  # ── The first policy this build has ever shipped (#432) ─────────────
+  #
+  # 🔴 A .cmf IS WHAT TURNS cap_server FROM A MECHANISM INTO A POLICY, and
+  # this target shipped none.  i386 has compiled and shipped manifests for a
+  # while -- cpustat, ush, hello_exec, dlopen_test, virtual_terminal_server,
+  # through scripts/make-bundle.sh -- so cap_server provisions from them on
+  # every i386 boot.  x86-64 shipped none because mkmanifest was built only
+  # under UROS_USERLAND_ARCH_OK: the mechanism was absent from this TARGET,
+  # not from the system.
+  #
+  # ⚠️ Which is a correction.  This was first written as "none was ever
+  # compiled", reached by a search that could not have found the answer:
+  # `find -name "*.cmf" -not -path "*/build*"' looks for compiled output
+  # everywhere except where compiled output goes.
+  #
+  # ⚠️ The bundle entry name must be "<symtab>.cmf" exactly: bootstrap builds
+  # that string from the name in bootstrap.conf and looks it up.  A file
+  # shipped under any other name is a policy nobody reads, which is worse than
+  # no policy because it looks like one.
+  set(_CAPTEST_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/cap_test.cmf")
+
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}
             bootstrap.conf:${_CONF}
+            cap_test.cmf:${_CAPTEST_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             irq_claim_test:${_SBIN}/irq_claim_test
@@ -361,14 +384,38 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             hal_server:${_SBIN}/hal_server
             modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
             block_device_server:${_SBIN}/block_device_server
-            # ⚠️ virtio_blk only, and ahci.so deliberately absent (#520).
-            # modload_load_class() loads whatever is in the class, so shipping
-            # ahci.so would bring it up too -- and #432's staging says one
-            # driver at a time.  Its widths were corrected; it is not started.
+            # ⚠️ BOTH drivers now, and ahci.so is here for #432 rather than
+            # for its own sake.  It was left out under #520 because
+            # modload_load_class() loads whatever is in the class and that
+            # issue's staging said one driver at a time.
+            #
+            # 🔴 What brought it back is a fact about QEMU, not a change of
+            # mind: `virtio-blk-pci' is a TRANSITIONAL device, and
+            # `iommu_platform=on' -- the property that makes a virtio device
+            # honour the IOMMU at all -- is refused on anything but a
+            # modern-only one.  QEMU says so on the command line:
+            #
+            #   VIRTIO_F_IOMMU_PLATFORM was supported by neither legacy nor
+            #   transitional device
+            #
+            # Our virtio driver is the legacy interface -- I/O port BAR0,
+            # config at 0x14 -- so it cannot talk to a modern-only device and
+            # therefore cannot be placed behind the IOMMU.  #432 needs a
+            # driver whose DMA the hardware actually polices, and AHCI is an
+            # ordinary PCI bus master with no opt-in to negotiate.
+            #
+            # 🔑 Which is what #432's own staging said from the start: "one
+            # driver at a time, starting with AHCI".
             modules/block/virtio_blk.so:${_MOD}/block/virtio_blk.so
-    DEPENDS mkbundle name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
+            modules/block/ahci.so:${_MOD}/block/ahci.so
+    # 🔥 THE FILE AND NOT THE TARGET.  `DEPENDS cap_test_manifest' is an
+    # ORDERING dependency: ninja runs that target first and never notices that
+    # its output changed, so the bundle went on shipping a stale manifest while
+    # the export tree held the new one.  The symptom was a policy denial for a
+    # line the source file plainly contained.
+    DEPENDS mkbundle ${_CAPTEST_CMF} name_server_bin netname_test_bin irq_claim_test_bin cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
-            block_device_server virtio_blk_module
+            block_device_server virtio_blk_module ahci_module
             ${_CONF}
     COMMENT "Bundle: bootstrap.conf + 11 tasks + hal_server + block_device_server"
     VERBATIM)

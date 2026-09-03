@@ -31,11 +31,48 @@
 #include <mach.h>
 #include "ahci.h"
 
+/*
+ * ⚠️ Included here and not left to the .c file's include order, because the
+ * _Static_assert below needs MAX_DISKS_PER_CTRL and an assertion that
+ * silently does not compile is not an assertion.
+ */
+#include "../block_server.h"
+
 /* ================================================================
  * Per-port state
  * ================================================================ */
 
-#define MAX_AHCI_PORTS		4
+/*
+ * 🔴 THIRTY-TWO, BECAUSE THAT IS WHAT THE HARDWARE CAN HAVE.
+ *
+ * PxPI -- the Ports Implemented register -- is a 32-bit mask with one bit per
+ * port, so an AHCI controller has at most 32 and QEMU's ich9 already reports
+ * six (PI=0x3f).  This was 4, and nothing anywhere said why: `git log -S'
+ * finds it introduced by #396, a commit that MOVED the file.  It is an
+ * inherited number, not a decision, and a driver that stops looking after the
+ * fourth disk on a controller that has six is wrong on hardware we already
+ * boot on.
+ *
+ * ⚠️ The cost is the struct array and nothing else.  A port's command list
+ * and FIS area are allocated when the port is found to have a device, so
+ * ports that do not exist cost their ahci_port_info and no DMA.
+ */
+#define MAX_AHCI_PORTS		32
+
+/*
+ * 🔑 AND THE FRAMEWORK HAS TO BE ABLE TO HOLD THEM.
+ *
+ * get_disks() writes into an array the framework owns, bounded by
+ * MAX_DISKS_PER_CTRL, and these two numbers were equal by coincidence: they
+ * live in different files, neither mentions the other, and nothing tied
+ * them.  Raising this one alone -- the natural thing to do after reading the
+ * specification -- would have written past the end of ctrl->disks[].
+ *
+ * So the relationship is stated where it can fail at compile time rather
+ * than remembered.
+ */
+_Static_assert(MAX_AHCI_PORTS <= MAX_DISKS_PER_CTRL,
+	       "get_disks() fills an array of MAX_DISKS_PER_CTRL and no more");
 
 /*
  * 🔴 THE ADDRESSES ARE vm_address_t (#520), for the reason spelled out in
@@ -53,8 +90,8 @@ struct ahci_port_info {
 	uint32_t	disk_sectors;
 	int		ncq_supported;
 	unsigned int	ncq_depth;
-	vm_address_t	clb_pa, clb_uva;
-	vm_address_t	fb_pa,  fb_uva;
+	vm_address_t	clb_dma, clb_uva;
+	vm_address_t	fb_dma,  fb_uva;
 	vm_address_t	dma_kva;
 };
 
@@ -91,10 +128,10 @@ struct ahci_state {
 	int			n_ports;
 
 	/* Shared CT buffer */
-	vm_address_t	ct_kva, ct_uva, ct_pa;
+	vm_address_t	ct_kva, ct_uva, ct_dma;
 
 	/* Shared data buffer (scatter-gather) */
-	vm_address_t	data_kva, data_uva, data_pa;
+	vm_address_t	data_kva, data_uva, data_dma;
 
 	/*
 	 * 🔴 vm_address_t since #520 moved dma_sg_addr_t out of line and
@@ -106,7 +143,7 @@ struct ahci_state {
 	 * static.  The same widening on the stack is what made the inline
 	 * array unaffordable in the first place.
 	 */
-	vm_address_t	data_pa_list[AHCI_MAX_SG_PAGES];
+	vm_address_t	data_dma_list[AHCI_MAX_SG_PAGES];
 	unsigned int	data_n_pages;
 
 	/* Batching parameters (set after IDENTIFY) */
@@ -191,5 +228,15 @@ int  ahci_submit_phys(struct ahci_state *st, int port_idx,
 		      uint32_t start_lba, unsigned int nsectors,
 		      int write, vm_address_t *caller_pa,
 		      unsigned int n_pa, unsigned int total_bytes);
+
+
+/*
+ * The bus/device/function this controller sits at, packed the way
+ * device_master.defs wants it: (bus << 8) | (dev << 3) | func.  A DMA
+ * buffer says which device is going to read it (#432).
+ */
+#define	AHCI_BDF(st)	(((st)->pci_bus << 8) \
+			 | ((st)->pci_slot << 3) \
+			 | (st)->pci_func)
 
 #endif /* _AHCI_MODULE_H_ */

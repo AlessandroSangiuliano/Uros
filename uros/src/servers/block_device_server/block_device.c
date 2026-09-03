@@ -38,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "block_server.h"
+#include "device_master.h"	/* #432: map a client's page for my device */
 
 /*
  * UrMach capability verify trap (slot 37).  Declared here to keep BDS
@@ -737,6 +738,160 @@ ds_device_write_batch(mach_port_t device, mach_port_t reply,
  * Zero-copy physical DMA read/write
  * ================================================================ */
 
+/* ================================================================
+ * A client's pages, made reachable by THIS server's device (#432)
+ * ================================================================ */
+
+/*
+ * 🔴 THE HOLE THIS CLOSES IS THE ONE #432 NAMED `DEVICE_DMA_NO_BDF'.
+ *
+ * ext_server allocates a scatter-gather page cache and passes the PHYSICAL
+ * addresses of those pages on every device_read_phys — because it owns no
+ * device and has no bus/device/function to name.  Once this server's disk is
+ * confined to what it was granted, those pages are in nobody's domain: the
+ * transfer is refused, the fault names the page, and the filesystem stops.
+ * Correct, diagnosable, and useless.
+ *
+ * 🔑 The shape the issue asks for is that the SERVER WHICH OWNS THE DEVICE
+ * does the mapping, and that server is this one.  So a client's physical
+ * address is translated here, into an address this controller can use, and
+ * the kernel is what checks that the page is one it handed out for DMA in the
+ * first place.
+ *
+ * 🔑 LAZILY, AND THAT IS WHY NO PROTOCOL CHANGED.  The alternative was for
+ * ext_server to register its buffer with this server once (#498) -- a new
+ * conversation between two servers, and a new thing for every future client to
+ * remember to do.  Translating on first sight needs neither: the addresses
+ * already arrive on every request, and the kernel maps the whole region behind
+ * the first page of it, so the cost is one call per page, once, and never
+ * again.
+ *
+ * ⚠️ Direct-mapped and small, with replacement rather than growth.  A miss
+ * costs one RPC that finds the region already mapped and answers arithmetic;
+ * an unbounded table would cost memory proportional to every client this
+ * server ever had.
+ */
+#define	BLK_DMA_CACHE		512u
+
+struct blk_dma_entry {
+	vm_address_t	pa;		/* zero when the slot is empty */
+	vm_address_t	dma;
+};
+
+static struct blk_dma_entry blk_dma_cache[MAX_CONTROLLERS][BLK_DMA_CACHE];
+
+/*
+ * The capabilities clients have handed this server for their buffers (#432).
+ *
+ * 🔑 A FEW PER CONTROLLER AND TRIED IN TURN, because this server has no way to
+ * tell which client a physical address belongs to until the kernel says so.
+ * The kernel does know -- it matches the token against the region containing
+ * the page -- so the honest thing here is to offer what it has been given and
+ * let the side that can decide, decide.
+ *
+ * ⚠️ Full REPLACES the oldest rather than refusing.  A client that registers
+ * and goes away would otherwise pin a slot forever, and the cost of losing a
+ * live one is a mapping that has to be re-established, not a wrong answer:
+ * the kernel refuses a token that does not name the region.
+ */
+#define	BLK_MAX_CLIENT_CAPS	4
+
+static struct {
+	char		token[CAP_TOKEN_MAX];
+	unsigned int	len;
+} blk_client_cap[MAX_CONTROLLERS][BLK_MAX_CLIENT_CAPS];
+
+static unsigned int blk_client_cap_next[MAX_CONTROLLERS];
+
+kern_return_t
+ds_device_register_dma(mach_port_t device, mach_port_t reply,
+		       mach_msg_type_name_t reply_poly,
+		       char *token, mach_msg_type_number_t tokenCnt)
+{
+	struct blk_partition	*part = blk_part_from_authed_handle(device);
+	unsigned int		ci, slot;
+
+	(void)reply;
+	(void)reply_poly;
+
+	if (!part || part->ctrl == NULL)
+		return KERN_NO_ACCESS;
+	if (tokenCnt == 0 || tokenCnt > CAP_TOKEN_MAX)
+		return KERN_INVALID_ARGUMENT;
+
+	ci = (unsigned int)(part->ctrl - controllers);
+	if (ci >= MAX_CONTROLLERS)
+		return KERN_INVALID_ARGUMENT;
+
+	slot = blk_client_cap_next[ci] % BLK_MAX_CLIENT_CAPS;
+	memcpy(blk_client_cap[ci][slot].token, token, tokenCnt);
+	blk_client_cap[ci][slot].len = tokenCnt;
+	blk_client_cap_next[ci]++;
+
+	printf("blk: a client handed %s a capability for a buffer it will "
+	       "DMA into (%u bytes, slot %u)\n", part->name,
+	       (unsigned)tokenCnt, slot);
+	return KERN_SUCCESS;
+}
+
+static vm_address_t
+blk_dma_for(struct blk_controller *ctrl, vm_address_t pa)
+{
+	unsigned int	ci = (unsigned int)(ctrl - controllers);
+	unsigned int	slot = (unsigned int)((pa >> 12) & (BLK_DMA_CACHE - 1));
+	struct blk_dma_entry *e;
+	natural_t	bdf;
+	vm_address_t	dma = 0;
+	kern_return_t	kr;
+
+	if (ci >= MAX_CONTROLLERS)
+		return pa;
+
+	e = &blk_dma_cache[ci][slot];
+	if (e->pa == pa && e->pa != 0)
+		return e->dma;
+
+	bdf = (natural_t)((ctrl->pci_bus << 8) | (ctrl->pci_slot << 3)
+			  | ctrl->pci_func);
+
+	/*
+	 * ⚠️ Every capability this controller has been handed, in turn.  This
+	 * server cannot tell which client owns a page; the KERNEL can, because
+	 * it matches the token against the region the page is in.  So the
+	 * choice is made by the side that can make it.
+	 */
+	kr = KERN_NO_ACCESS;
+	for (unsigned int c = 0; c < BLK_MAX_CLIENT_CAPS; c++) {
+		if (blk_client_cap[ci][c].len == 0)
+			continue;
+
+		kr = device_dma_map_foreign(master_device, bdf, pa,
+					    blk_client_cap[ci][c].token,
+					    blk_client_cap[ci][c].len, &dma);
+		if (kr == KERN_SUCCESS)
+			break;
+	}
+
+	if (kr != KERN_SUCCESS) {
+		/*
+		 * ⚠️ The untranslated address is returned, and the transfer
+		 * will be refused by the engine rather than by this line.
+		 * Which is the right way round: a refusal the hardware makes
+		 * names the device and the page, and a silent substitution
+		 * here would turn a diagnosable event back into a timeout.
+		 */
+		printf("blk: the kernel would not map 0x%lx for %02x:%02x.%u "
+		       "(kr=%d) — the transfer will be refused\n",
+		       (unsigned long)pa, (unsigned)(bdf >> 8),
+		       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 7), kr);
+		return pa;
+	}
+
+	e->pa = pa;
+	e->dma = dma;
+	return dma;
+}
+
 kern_return_t
 ds_device_read_phys(mach_port_t device, mach_port_t reply,
 		    mach_msg_type_name_t reply_poly,
@@ -764,13 +919,24 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 	if (recnum + nsectors > part->num_sectors)
 		return D_INVALID_SIZE;
 
-	if (ctrl->ops->read_sectors_phys(ctrl->priv,
+	{
+		vm_address_t	dma[32];
+		unsigned int	i;
+
+		if (phys_addrsCnt > 32)
+			return D_INVALID_SIZE;
+
+		for (i = 0; i < phys_addrsCnt; i++)
+			dma[i] = blk_dma_for(ctrl, phys_addrs[i]);
+
+		if (ctrl->ops->read_sectors_phys(ctrl->priv,
 					  part->disk_index,
 					  part->start_lba + recnum,
 					  nsectors,
-					  phys_addrs, phys_addrsCnt,
+					  dma, phys_addrsCnt,
 					  total) < 0)
-		return D_IO_ERROR;
+			return D_IO_ERROR;
+	}
 
 	*bytes_read = bytes_wanted;
 	return KERN_SUCCESS;
@@ -1041,10 +1207,258 @@ rd32(const unsigned char *p, unsigned int off)
 	     | ((uint32_t)p[off + 3] << 24);
 }
 
+static void blk_readback_one(struct blk_partition *part);
+static void blk_read_bench_one(struct blk_partition *part);
+
+/* ================================================================
+ * What a read costs, so #432's cost can be measured and not assumed
+ * ================================================================ */
+
+/*
+ * 🔴 IN CYCLES, AND DELIBERATELY NOT IN BYTES PER SECOND.  This server does
+ * not know the timestamp counter's frequency, and a throughput printed from a
+ * frequency nobody measured is a number with a unit it has not earned.  What
+ * #432 asks for is the COST OF TRANSLATION, which is a ratio between two runs
+ * of the same boot -- and a ratio of cycle counts is dimensionless and needs
+ * no frequency at all.
+ *
+ * 🔑 AND VIRTIO IS THE CONTROL GROUP, IN THE SAME BOOT.  QEMU's transitional
+ * virtio-blk does its DMA outside the emulated IOMMU, and AHCI is an ordinary
+ * bus master that goes through it.  So one boot produces both a treated and an
+ * untreated measurement of the same kernel on the same machine at the same
+ * clock: if the AHCI figures move between `-I' and no `-I' and the virtio
+ * figure does not, the difference is translation.  If both move, it is the
+ * boot.  A benchmark with no control cannot tell those apart, and the second
+ * is what a governor, a thermal limit or a busy host produces.
+ *
+ * ⚠️ It reads through the DRIVER and not through ds_device_read, so the
+ * readahead cache is not in the path: every iteration is a real transfer.  The
+ * buffer allocation and release are in the timing too -- they are the same on
+ * both sides of the comparison, and taking them out would mean timing
+ * something no caller can actually ask for.
+ */
+/*
+ * 🔴🔴 ONE AGGREGATE OVER 32 READS DID NOT DISCRIMINATE, AND THIS IS WHAT
+ * REPLACED IT.  Five pairs of boots, medians: virtio (the control) moved
+ * -0.7%, and the two AHCI disks moved -5.5% and +6.1% -- in OPPOSITE
+ * DIRECTIONS -- while one arm's five samples ran 3807 to 7093, a spread of
+ * 1.9x.  An experiment discriminates only when the dispersion is smaller than
+ * the effect, and that one measured the host's file cache warming up.
+ *
+ * 🔑 So the median is taken INSIDE one boot, over rounds, and the first rounds
+ * are thrown away.  A cold host cache is one round now instead of a whole
+ * sample, and one boot answers with a figure instead of a guess -- which also
+ * means the boot-to-boot spread finally says something about boots.
+ *
+ * ── AND WHAT IT THEN MEASURED, WHICH IS NOT A NUMBER ──────────────────
+ *
+ * Five more pairs, medians of five boots each, KVM, governor at performance:
+ *
+ *	virtio (untreated control)	-3.2%	spread 26% / 12%
+ *	ahci0a				+0.9%	spread  9% / 15%
+ *	ahci1a				+0.6%	spread  9% /  9%
+ *
+ * The two TREATED disks now agree with each other and the untreated control
+ * moved further than either of them, in the other direction.  That is the
+ * signature of an effect below the noise, and the honest reading is that this
+ * instrument cannot resolve the cost of translation on this emulator.
+ *
+ * ⚠️ Normalising each boot by its own control made it WORSE -- spread 18% to
+ * 32%, and the two disks disagreeing by 5.7 points.  So the noise is not
+ * common to the devices within a boot, and dividing by the control adds
+ * variance instead of cancelling it.  Written down because it is the obvious
+ * next thing to try and it does not work here.
+ *
+ * 🔑 WHAT THE MEASUREMENT DOES ESTABLISH IS AN UPPER BOUND, and that is worth
+ * having: the cost is not large.  A kernel that had ended up mapping and
+ * unmapping per TRANSFER rather than per buffer would show a factor, not a
+ * percent, and this says it does not.  The number itself needs hardware --
+ * on silicon the engine's cost is an IOTLB lookup, and on an emulator it is
+ * whatever that emulator's software does, which is a fact about QEMU.
+ */
+#define	BLK_BENCH_CHUNK		64u	/* sectors per read: 32 KiB   */
+#define	BLK_BENCH_ROUNDS	64u	/* timed rounds, 2 MiB total  */
+#define	BLK_BENCH_WARMUP	8u	/* discarded: the host's cache */
+
+static unsigned long long
+blk_tsc(void)
+{
+	unsigned int lo, hi;
+
+	/*
+	 * 🔴 THE WHOLE COUNTER.  rdtsc answers in EDX:EAX and reading EAX
+	 * alone is a difference modulo 2^32 -- at 3.9 GHz that wraps every 1.1
+	 * seconds, and a wrapped value is indistinguishable from a small one.
+	 * #523 was one benchmark reading half of this and reporting i386 as
+	 * 110x slower than x86-64 at creating a thread.
+	 */
+	__asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+	return ((unsigned long long)hi << 32) | lo;
+}
+
+void
+blk_read_bench(void)
+{
+	int	i;
+
+	if (n_partitions <= 0)
+		return;
+
+	for (i = 0; i < n_partitions; i++)
+		blk_read_bench_one(&partitions[i]);
+}
+
+static void
+blk_read_bench_one(struct blk_partition *part)
+{
+	struct blk_controller	*ctrl = part->ctrl;
+	unsigned long long	each[BLK_BENCH_ROUNDS];
+	unsigned long long	start, total;
+	unsigned int		round, done = 0, window;
+
+	if (ctrl == NULL || ctrl->ops == NULL
+	    || ctrl->ops->read_sectors == NULL)
+		return;
+
+	/*
+	 * ⚠️ Refused rather than truncated when the partition is too small.  A
+	 * benchmark that quietly read fewer sectors would still print a
+	 * per-sector figure, and two runs of different sizes would be compared
+	 * as if they were the same measurement.
+	 */
+	if (part->num_sectors < (uint32_t)BLK_BENCH_CHUNK) {
+		printf("blk: read bench did not run on %s — %u sectors is "
+		       "smaller than the %u one read takes\n", part->name,
+		       (unsigned)part->num_sectors, BLK_BENCH_CHUNK);
+		return;
+	}
+
+	/*
+	 * How many distinct chunks the partition holds, capped at the number
+	 * of rounds: a smaller partition is read round and round rather than
+	 * refused, and a larger one is not read further than the rounds go.
+	 * ⚠️ Both arms of a comparison therefore touch the SAME sectors, which
+	 * is what stops "the other disk is bigger" from being the finding.
+	 */
+	window = (unsigned)(part->num_sectors / BLK_BENCH_CHUNK);
+	if (window > BLK_BENCH_ROUNDS)
+		window = BLK_BENCH_ROUNDS;
+
+	/*
+	 * ⚠️ The window is read WARM and then read again, on purpose.  The
+	 * subject is what one transfer costs inside the machine -- the
+	 * driver's path, the engine's walk -- and not how fast the host can
+	 * fetch a block it has never seen.  Re-reading the same sectors keeps
+	 * the second out of the measurement; the guest caches nothing, because
+	 * this calls the DRIVER and the readahead cache is above it.
+	 */
+	for (round = 0; round < BLK_BENCH_WARMUP; round++) {
+		vm_offset_t	buf = 0;
+		unsigned int	got = 0;
+
+		if (ctrl->ops->read_sectors(ctrl->priv, part->disk_index,
+					    part->start_lba
+					    + (round % window) * BLK_BENCH_CHUNK,
+					    BLK_BENCH_CHUNK, &buf, &got) < 0) {
+			if (buf != 0)
+				vm_deallocate(mach_task_self(), buf, got);
+			printf("blk: read bench on %s failed warming up\n",
+			       part->name);
+			return;
+		}
+		vm_deallocate(mach_task_self(), buf, got);
+	}
+
+	for (round = 0; round < BLK_BENCH_ROUNDS; round++) {
+		vm_offset_t	buf = 0;
+		unsigned int	got = 0;
+
+		start = blk_tsc();
+		if (ctrl->ops->read_sectors(ctrl->priv, part->disk_index,
+					    part->start_lba
+					    + (round % window) * BLK_BENCH_CHUNK,
+					    BLK_BENCH_CHUNK, &buf, &got) < 0) {
+			if (buf != 0)
+				vm_deallocate(mach_task_self(), buf, got);
+			break;
+		}
+		each[round] = blk_tsc() - start;
+
+		done += BLK_BENCH_CHUNK;
+		vm_deallocate(mach_task_self(), buf, got);
+	}
+
+	/*
+	 * Insertion sort, because sixty-four elements do not need anything
+	 * else and a sort with a bug in it would produce a median that is
+	 * merely one of the samples -- which looks entirely reasonable.
+	 */
+	{
+		unsigned a, b;
+
+		for (a = 1; a < round; a++) {
+			unsigned long long v = each[a];
+
+			for (b = a; b > 0 && each[b - 1] > v; b--)
+				each[b] = each[b - 1];
+			each[b] = v;
+		}
+	}
+
+	total = round == 0 ? 0 : each[round / 2];
+
+	/*
+	 * ⚠️ The count of sectors ACTUALLY read is printed beside the figure,
+	 * not assumed from the loop bound.  A run that stopped early otherwise
+	 * reports a per-sector cost computed over sectors it never read --
+	 * which is the shape of a fast-looking result that means the opposite.
+	 */
+	if (done == 0) {
+		printf("blk: read bench on %s read nothing\n", part->name);
+		return;
+	}
+
+	/*
+	 * ⚠️ The MEDIAN round and the FASTEST one, both.  The median is the
+	 * figure to compare; the fastest is what says whether the median is a
+	 * cost or an interruption -- when they are far apart, something else
+	 * was running and the number is about the host.
+	 */
+	printf("blk: read bench %s — %u rounds of %u sectors, median %llu "
+	       "cycles (%llu/sector), fastest %llu\n",
+	       part->name, round, BLK_BENCH_CHUNK, total,
+	       total / BLK_BENCH_CHUNK, each[0]);
+}
+
+/*
+ * 🔑 EVERY PARTITION, not the first one.
+ *
+ * It checked partitions[0] until this target grew a second controller, and
+ * then the check ran on the virtio disk and said nothing at all about the
+ * AHCI one -- which is the disk that had a defect.  A test that covers the
+ * working half is how a defect stays in a tree that reports itself green.
+ *
+ * Each partition is a different driver's answer about a different disk, so
+ * each gets its own five checks and its own verdict line.
+ */
 void
 blk_readback_selftest(void)
 {
-	struct blk_partition	*part;
+	int	i;
+
+	if (n_partitions <= 0) {
+		printf("blk: read-back self-test did not run — no partition "
+		       "was published, so there is nothing to read\n");
+		return;
+	}
+
+	for (i = 0; i < n_partitions; i++)
+		blk_readback_one(&partitions[i]);
+}
+
+static void
+blk_readback_one(struct blk_partition *part)
+{
 	struct blk_controller	*ctrl;
 	vm_offset_t		mbr = 0, fs = 0;
 	unsigned int		mbr_size = 0, fs_size = 0;
@@ -1054,13 +1468,6 @@ blk_readback_selftest(void)
 	unsigned int		i, sb;
 	char			label[17];
 
-	if (n_partitions <= 0) {
-		printf("blk: read-back self-test did not run — no partition "
-		       "was published, so there is nothing to read\n");
-		return;
-	}
-
-	part = &partitions[0];
 	ctrl = part->ctrl;
 
 	if (ctrl == NULL || ctrl->ops == NULL

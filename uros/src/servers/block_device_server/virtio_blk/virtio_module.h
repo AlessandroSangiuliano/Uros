@@ -63,7 +63,7 @@ struct virtio_state {
 
 	/* Virtqueue */
 	unsigned int	vq_size;
-	vm_address_t	vq_kva, vq_uva, vq_pa;
+	vm_address_t	vq_kva, vq_uva, vq_dma;
 	vm_size_t	vq_alloc_size;
 
 	struct vring_desc  *vq_desc;
@@ -71,12 +71,22 @@ struct virtio_state {
 	struct vring_used  *vq_used;
 
 	/* Request header + status DMA buffer */
-	vm_address_t	req_kva, req_uva, req_pa;
+	vm_address_t	req_kva, req_uva, req_dma;
 
 	/* Data DMA buffer */
-	vm_address_t	data_kva, data_uva, data_pa;
+	vm_address_t	data_kva, data_uva, data_dma;
 
 	uint16_t	last_used_idx;
 };
+
+
+/*
+ * The bus/device/function this controller sits at, packed the way
+ * device_master.defs wants it: (bus << 8) | (dev << 3) | func.  A DMA
+ * buffer says which device is going to read it (#432).
+ */
+#define	VIRTIO_BDF(st)	(((st)->pci_bus << 8) \
+			 | ((st)->pci_slot << 3) \
+			 | (st)->pci_func)
 
 #endif /* _VIRTIO_MODULE_H_ */

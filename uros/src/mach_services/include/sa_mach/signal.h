@@ -74,11 +74,50 @@ typedef unsigned long	sigset_t;
 /*
  * Signal set manipulation (POSIX.1)
  */
-#define sigemptyset(set)	(*(set) = 0, 0)
-#define sigfillset(set)		(*(set) = ~0UL, 0)
-#define sigaddset(set, sig)	(*(set) |=  (1UL << ((sig) - 1)), 0)
-#define sigdelset(set, sig)	(*(set) &= ~(1UL << ((sig) - 1)), 0)
-#define sigismember(set, sig)	((*(set) & (1UL << ((sig) - 1))) != 0)
+/*
+ * ⚠️ Functions and not macros, since the audit in #432 turned -Wall on.
+ *
+ * These were `(*(set) = 0, 0)' -- a comma expression whose right operand is
+ * the POSIX return value.  Correct C, and a warning at every call site that
+ * uses one as a statement and ignores the result, which is most of them: the
+ * compiler is telling the truth about the `0' having no effect there.
+ *
+ * As inline functions they return the same value, the argument is typed, and
+ * a caller that ignores it is doing nothing unusual.
+ */
+static inline int
+sigemptyset(sigset_t *set)
+{
+	*set = 0;
+	return 0;
+}
+
+static inline int
+sigfillset(sigset_t *set)
+{
+	*set = ~0UL;
+	return 0;
+}
+
+static inline int
+sigaddset(sigset_t *set, int sig)
+{
+	*set |= (1UL << (sig - 1));
+	return 0;
+}
+
+static inline int
+sigdelset(sigset_t *set, int sig)
+{
+	*set &= ~(1UL << (sig - 1));
+	return 0;
+}
+
+static inline int
+sigismember(const sigset_t *set, int sig)
+{
+	return (*set & (1UL << (sig - 1))) != 0;
+}
 
 /*
  * How to change the signal mask (pthread_sigmask 'how' argument)

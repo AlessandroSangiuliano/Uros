@@ -1,8 +1,38 @@
 cmake_minimum_required(VERSION 3.16)
 project(cap_test C)
 
+# device_master.defs, user half: #432 gave the device master an access check
+# of its own -- a device has ONE driver -- and proving a REFUSAL needs a task
+# that is not the driver.  This one holds the master device port and starts
+# after the block server has claimed the disks, which is what makes it the
+# place the check can be seen to fire.
+#
+# ⚠️ add_mig_userland and NOT scripts/mig: that wrapper routes a flag it does
+# not know to the C preprocessor, so `-target x86_64' would reach cc instead of
+# migcom, which then defaults to i386 and emits stubs with the wrong message
+# layout, silently (#427).
+set(UROS_MIG_USERLAND_INCLUDES
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -I${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci
+    -I${CMAKE_SOURCE_DIR}/src/mach_services/include/servers)
+
+set(_CT_OUT ${CMAKE_CURRENT_BINARY_DIR}/mig)
+set(CT_MIG_GENERATED)
+add_mig_userland(${UROS_UAPI_DIR}/device/device_master.defs ${_CT_OUT} CT_MIG)
+list(REMOVE_ITEM CT_MIG_GENERATED ${_CT_OUT}/device_master_server.c)
+
+# ahci_batch.defs, user half: device_read_phys is how a client asks a disk to
+# DMA into pages the CLIENT owns, and #432 made that the interesting case --
+# the pages belong to a task with no device, and the disk is confined.
+set(CT_BATCH_GENERATED)
+add_mig_userland(${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci/ahci_batch.defs
+                 ${_CT_OUT} CT_BATCH)
+list(REMOVE_ITEM CT_BATCH_GENERATED ${_CT_OUT}/ahci_batch_server.c)
+list(APPEND CT_MIG_GENERATED ${CT_BATCH_GENERATED})
+
 add_executable(cap_test_server
-  cap_test.c
+  cap_test.c ${CT_MIG_GENERATED}
 )
 
 add_dependencies(cap_test_server mig_mach_public_headers)
@@ -21,6 +51,9 @@ target_compile_definitions(cap_test_server PRIVATE
 )
 
 target_include_directories(cap_test_server PRIVATE
+  ${_CT_OUT}
+  ${CMAKE_SOURCE_DIR}/src/servers/block_device_server/ahci
+  ${CMAKE_SOURCE_DIR}/uapi
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_BINARY_DIR}/generated/include
   ${CMAKE_SOURCE_DIR}/src/mach_services/include
@@ -49,3 +82,31 @@ set_target_properties(cap_test_server PROPERTIES
   OUTPUT_NAME "cap_test"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The manifest (#432) — the first policy this test is subject to.
+# ===========================================================================
+#
+# 🔑 Compiled HERE and consumed in two different ways, because the two targets
+# assemble their bundle with two different tools.  x86-64's bundle is built by
+# CMake in servers/bootstrap and names the .cmf directly; i386's is built by
+# scripts/make-bundle.sh, which picks manifests out of the export tree.  This
+# rule writes to the export tree, and the bootstrap rule reads from it -- so
+# the file is produced once and both bundles ship the same bytes.
+set(CAPTEST_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/cap_test.manifest)
+set(CAPTEST_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/cap_test.cmf")
+
+add_custom_command(
+  OUTPUT ${CAPTEST_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${CAPTEST_MANIFEST_OUT}
+          ${CAPTEST_MANIFEST_SRC}
+  DEPENDS mkmanifest ${CAPTEST_MANIFEST_SRC}
+  COMMENT "mkmanifest: cap_test.manifest -> cap_test.cmf"
+  VERBATIM
+)
+
+add_custom_target(cap_test_manifest ALL DEPENDS ${CAPTEST_MANIFEST_OUT})
+add_dependencies(cap_test_server cap_test_manifest)

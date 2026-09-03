@@ -46,6 +46,8 @@
 #include <device/device.h>
 #include <device/device_types.h>
 #include <servers/netname.h>
+#include <libcap.h>			/* #432: a capability for a device's class */
+#include "device_master.h"	/* #432: device_claim */
 #include <stdio.h>
 #include <string.h>
 #include "block_server.h"
@@ -97,9 +99,12 @@ static const struct block_driver_ops *modules[MAX_MODULES + 1];
 static int n_modules;
 
 /* Forward declaration */
+static int claim_device_for_driver(unsigned int bus, unsigned int slot,
+				   unsigned int func, unsigned int class_rev,
+				   uint64_t *cap_id_out);
 static void pci_probe_module(const struct block_driver_ops *ops,
 			     unsigned int bus, unsigned int slot,
-			     unsigned int func);
+			     unsigned int func, uint64_t claimed_cap_id);
 
 /* ================================================================
  * HAL notification callback — invoked by hal_notify_server()
@@ -116,6 +121,7 @@ hal_device_added(mach_port_t driver_port,
 		 unsigned int irq)
 {
 	int m;
+	uint64_t claimed_cap_id = 0;
 
 	(void)driver_port;
 	(void)irq;
@@ -136,11 +142,84 @@ hal_device_added(mach_port_t driver_port,
 		       "class=0x%08x matched by %s\n",
 		       bus, slot, func, vendor_device, class_rev, ops->name);
 
-		pci_probe_module(ops, bus, slot, func);
+		/*
+		 * 🔴 CLAIMED BEFORE PROBED, and refused means not probed.
+		 * Matching a driver to a device is this server saying which
+		 * hardware it thinks it can handle; the claim is the KERNEL
+		 * saying whether it may.  A probe that ran first would have
+		 * touched the device -- reset it, mapped its registers, armed
+		 * its interrupt -- before anyone asked.
+		 */
+		if (!claim_device_for_driver(bus, slot, func, class_rev,
+					     &claimed_cap_id)) {
+			printf("blk: %u:%u.%u NOT claimed — %s will not probe "
+			       "it\n", bus, slot, func, ops->name);
+			break;
+		}
+
+		pci_probe_module(ops, bus, slot, func, claimed_cap_id);
 		break;
 	}
 
 	return KERN_SUCCESS;
+}
+
+
+/*
+ * ── May this server drive this device? (#432) ────────────────────────
+ *
+ * 🔑 THE TOKEN IS FOR THE CLASS AND THE CLAIM IS FOR THE INSTANCE, which is
+ * the split the manifest cannot make on its own: a policy file knows what kind
+ * of hardware a driver is for, and cannot know what is plugged in.  So this
+ * asks cap_server for a capability covering the device's CLASS -- out of this
+ * server's own manifest -- and hands it to the kernel, which reads the class
+ * back out of the device's configuration space and requires the two to agree.
+ *
+ * ⚠️ `class_rev' is the register: class code in 31:8, revision in 7:0.  The
+ * capability names the class, so the revision goes -- a driver is for a kind
+ * of device and not for a stepping of it.
+ *
+ * ⚠️ A machine with no manifest shipped gets a token for the asking, and this
+ * passes.  Enforcement is always on; how strict it is, is what the policy file
+ * decides.  The alternative -- turning the check off when there is no policy
+ * -- is a mechanism that is absent exactly when somebody starts relying on it.
+ */
+static int
+claim_device_for_driver(unsigned int bus, unsigned int slot, unsigned int func,
+			unsigned int class_rev, uint64_t *cap_id_out)
+{
+	struct uros_cap	tok;
+	kern_return_t	kr;
+	natural_t	bdf = (natural_t)((bus << 8) | (slot << 3) | func);
+
+	memset(&tok, 0, sizeof(tok));
+
+	kr = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)(class_rev >> 8),
+			 CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
+			 | CAP_OP_PCI_IRQ, 0, &tok);
+	if (kr != KERN_SUCCESS) {
+		printf("blk: cap_server would not issue a capability for "
+		       "class 0x%06x (kr=%d)\n", class_rev >> 8, (int)kr);
+		return 0;
+	}
+
+	kr = device_claim(master_device, bdf, (char *)&tok, sizeof(tok));
+	if (kr != KERN_SUCCESS) {
+		printf("blk: the kernel refused this server the claim on "
+		       "%u:%u.%u (kr=%d)\n", bus, slot, func, (int)kr);
+		return 0;
+	}
+
+	/*
+	 * ⚠️ ONE CAPABILITY PER CONTROLLER, and it matters that cap_server
+	 * mints a fresh one on every request even for the same class.  Giving
+	 * a device back means revoking the capability behind it, and one token
+	 * shared between two controllers would take both.
+	 */
+	if (cap_id_out != NULL)
+		*cap_id_out = tok.cap_id;
+
+	return 1;
 }
 
 /*
@@ -149,7 +228,8 @@ hal_device_added(mach_port_t driver_port,
  */
 static void
 pci_probe_module(const struct block_driver_ops *ops,
-		 unsigned int bus, unsigned int slot, unsigned int func)
+		 unsigned int bus, unsigned int slot, unsigned int func,
+		 uint64_t claimed_cap_id)
 {
 	struct blk_controller *ctrl = &controllers[n_controllers];
 	kern_return_t kr;
@@ -218,6 +298,61 @@ pci_probe_module(const struct block_driver_ops *ops,
 	if (rc < 0) {
 		printf("blk: %s probe failed at PCI %u:%u.%u\n",
 		       ops->name, bus, slot, func);
+
+		/*
+		 * 🔑 AND THE DEVICE GOES BACK, which is both the right thing
+		 * and the thing that shows revocation works.  A driver that
+		 * could not bring a controller up is holding a claim it will
+		 * never use, and on this machine a claim is not bookkeeping:
+		 * it is an IOMMU domain the device can still reach memory
+		 * through.  Revoking the capability is what takes that away --
+		 * the kernel tears the domain down inside urmach_cap_revoke,
+		 * and leaves the device reaching NOTHING rather than back on
+		 * pass-through.
+		 *
+		 * ⚠️ The capability is this controller's own.  cap_server mints
+		 * a fresh one per request even for the same class, so this
+		 * gives back one device and not every device of its kind.
+		 */
+		if (claimed_cap_id != 0) {
+			natural_t	bdf = (natural_t)((bus << 8)
+							  | (slot << 3) | func);
+			vm_address_t	kva = 0, dma = 0;
+			uint64_t	probe_region = 0;
+			kern_return_t	rkr, akr;
+
+			rkr = cap_revoke(claimed_cap_id);
+
+			/*
+			 * 🔴 PROVED BY BEING REFUSED, and not by asking.
+			 * device_dma_owned answers "is another task driving
+			 * this" -- and THIS server was the one driving it, so
+			 * it answers no whether the claim was dropped or is
+			 * still standing.  A check that cannot distinguish the
+			 * two outcomes is not a check, and this one read as a
+			 * pass for one run before it was noticed.
+			 *
+			 * Asking for a DMA buffer can only succeed if the
+			 * claim is still there.
+			 */
+			akr = device_dma_alloc(master_device, bdf, 4096,
+					       &kva, &dma, &probe_region);
+			if (akr == KERN_SUCCESS) {
+				printf("blk: gave %u:%u.%u back (cap_revoke "
+				       "kr=%d) and STILL got a DMA buffer for "
+				       "it — the revocation did not reach the "
+				       "kernel\n", bus, slot, func, (int)rkr);
+				(void) device_dma_free(master_device, bdf,
+						       kva, 4096);
+			} else {
+				printf("blk: gave %u:%u.%u back — cap_revoke "
+				       "kr=%d, and the kernel now refuses this "
+				       "server a DMA buffer for it (kr=%d): "
+				       "the domain went with the "
+				       "capability\n", bus, slot, func,
+				       (int)rkr, (int)akr);
+			}
+		}
 		return;
 	}
 
@@ -588,6 +723,16 @@ main(int argc, char **argv)
 	 * the disk rather than from the task that failed to load.
 	 */
 	blk_readback_selftest();
+
+	/*
+	 * And what a read COSTS, which is the half #432 still needs: its
+	 * done-when asks for the performance cost of translation to be
+	 * measured rather than assumed, and until this there was nothing in
+	 * the boot that timed a transfer at all.  The benchmarks this system
+	 * prints are traps and RPCs -- all CPU-bound, none of them touching
+	 * the DMA path an IOMMU is in.
+	 */
+	blk_read_bench();
 
 	printf("blk: init complete, %d partition(s), "
 	       "entering message loop\n", n_partitions);

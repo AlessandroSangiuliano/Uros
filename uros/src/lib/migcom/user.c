@@ -1933,7 +1933,6 @@ WriteExtractArgValueNormal(FILE *file, register argument_t *arg)
 
 	    fprintf(file, "\t\t%s%s = Out%dP->%s;\n",
 		     countRef, count->argVarName, count->argReplyPos, count->argMsgField);
-	    fprintf(file, "");
 	    WriteReturnMsgError(file, arg->argRoutine, TRUE, arg, "MIG_ARRAY_TOO_LARGE");
 
 	    fprintf(file, "\t}\n");

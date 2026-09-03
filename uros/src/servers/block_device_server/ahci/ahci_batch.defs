@@ -26,6 +26,14 @@ type batch_size_array_t   = array[*:16] of unsigned32;
 import "ahci_batch_types.h";
 
 /*
+ * ⚠️ Declared here and not imported from cap_server.defs, which is a different
+ * subsystem: what crosses this interface is the same BYTES and not the same
+ * MIG type.  CAP_TOKEN_MAX is where the bound is stated once.
+ */
+type cap_token_t = array[*:256] of char;
+import <mach/cap_types.h>;
+
+/*
  * Write multiple blocks to the device in a single IPC message.
  *
  * recnums[i] = starting sector for write i
@@ -81,6 +89,31 @@ type dma_sg_addr_t = array[*:32] of vm_address_t;
  * physical pages.  phys_addrs[] lists one PA per 4 KB page
  * (or one PA for sub-page transfers like 1 KB blocks).
  */
+/*
+ * ── Hand this server a capability for a buffer it will DMA into (#432) ──
+ *
+ * 🔴 THE CALL THAT TURNS "I KNOW WHERE IT IS" INTO "SOMEBODY GAVE IT TO ME".
+ * device_read_phys carries the PHYSICAL addresses of the caller's pages, and
+ * this server programs them into a disk.  Once that disk is confined to what
+ * it was granted, the pages have to be mapped for it -- and the kernel will
+ * only do that for a caller holding a capability naming the buffer, issued by
+ * cap_server to the buffer's OWNER.
+ *
+ * 🔑 REGISTERED ONCE, NOT CARRIED PER REQUEST.  A token is 256 bytes on the
+ * wire and a disk request is a hot path; the addresses already arrive on every
+ * request, so what is missing is only the consent, and consent does not change
+ * between reads.
+ *
+ * ⚠️ The caller keeps the capability.  This is a delegation of USE, not of
+ * ownership: revoking the capability tears the mapping down through
+ * urmach_cap_revoke, and this server is not asked and does not have to agree.
+ */
+routine device_register_dma(
+		device		: mach_port_t;
+	sreplyport reply_port	: reply_port_t;
+	in	token		: cap_token_t
+	);
+
 routine device_read_phys(
 		device		: mach_port_t;
 	sreplyport reply_port	: reply_port_t;

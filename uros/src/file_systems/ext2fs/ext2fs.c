@@ -1451,7 +1451,7 @@ read_fs(
 	 * read-only compatible features can be safely ignored.
 	 */
 	if (fs->s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_SUPP) {
-		printf("ext2: unsupported incompat features 0x%lx\n",
+		printf("ext2: unsupported incompat features 0x%x\n",
 		       fs->s_feature_incompat & ~EXT2_FEATURE_INCOMPAT_SUPP);
 		(void) vm_deallocate(mach_task_self(), buf, buf_size);
 		return (FS_INVALID_FS);
@@ -3294,8 +3294,9 @@ flush_metadata_locked(struct ext2fs_file *fp)
 		if (vn->v_inode_dirty) {
 			rc = write_inode(vn->v_ino, fp);
 			if (rc != 0) {
-				printf("ext2: flush: inode %u not written "
-				       "(rc=%d)\n", vn->v_ino, rc);
+				printf("ext2: flush: inode %lu not written "
+				       "(rc=%d)\n",
+				       (unsigned long) vn->v_ino, rc);
 				return rc;
 			}
 			vn->v_inode_dirty = 0;
@@ -3514,9 +3515,9 @@ flush_metadata_locked(struct ext2fs_file *fp)
 			 * branch has never once succeeded, in every captured
 			 * log back to 2026-07-21.
 			 */
-			printf("ext2: flush: batch of %u block(s) for inode %u "
+			printf("ext2: flush: batch of %u block(s) for inode %lu "
 			       "not written via %s (rc=%d)%s%s%s\n",
-			       n, vn->v_ino,
+			       n, (unsigned long) vn->v_ino,
 			       fp->f_dev.blk ? "libblk" : "device_write_batch",
 			       rc,
 			       vn->v_inode_dirty ? " [inode]" : "",

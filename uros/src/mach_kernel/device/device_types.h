@@ -200,6 +200,17 @@ typedef int		dev_status_data_t[DEV_STATUS_MAX];
 #define	DEV_GET_SIZE_COUNT		2
 
 /*
+ * The bus/device/function a DMA buffer is allocated FOR, packed as
+ * (bus << 8) | (dev << 3) | func, and the value that means "no device of my
+ * own" (#432).
+ *
+ * 🔑 Not zero.  0:0.0 is the host bridge on every machine this runs on, so a
+ * caller that forgot the argument would have silently claimed to be it.  This
+ * is a value the packing cannot produce.
+ */
+#define	DEVICE_DMA_NO_BDF		0xFFFFFFFFu
+
+/*
  * Device error codes
  */
 typedef	int		io_return_t;

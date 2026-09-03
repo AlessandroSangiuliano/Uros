@@ -224,4 +224,115 @@ extern int		device_md_msi_register(unsigned int bus,
  */
 extern void		device_md_msi_unregister(unsigned int slot);
 
+/*
+ * ── What polices a device's DMA, if anything (#432) ──────────────────
+ *
+ * Whether this machine can confine a device to the memory it has been given.
+ *
+ * 🔴 A QUESTION AND NOT AN ASSUMPTION, because both answers are ordinary.  A
+ * machine with no remapping hardware, or with translation left off, is a
+ * machine on which a userspace driver reaches all of physical memory -- which
+ * is what this tree did everywhere until now and still does on i386.  The
+ * caller's job is to say so, not to pretend either way.
+ */
+extern int		device_md_dma_isolates(void);
+
+/*
+ * Make `size' bytes of physical memory at `pa' reachable by the device at
+ * `bdf', and by nothing else new.  Answers non-zero when it is done.
+ *
+ * 🔑 The device is named as a packed bus/device/function because that is the
+ * name the HARDWARE knows it by: an IOMMU indexes its tables by the requester
+ * id on the bus, not by any handle this kernel invented.  DEVICE_DMA_NO_BDF is
+ * a caller with no device of its own and must not reach here -- there is
+ * nothing to grant to.
+ *
+ * 🔴 AND `*dma_addr' IS NOT THE PHYSICAL ADDRESS when the machine confines
+ * this device.  It is the address the DEVICE must be programmed with, which is
+ * what the caller wanted all along -- and on a machine that polices nothing it
+ * is the physical address, so one interface answers both and no caller has to
+ * know which kind of machine it is on.
+ *
+ * ⚠️ The first grant for a device is what takes it OFF pass-through, so a
+ * failure here can leave it in a domain missing part of what was asked for.
+ * The caller must treat that as a failed allocation: a half-granted buffer is
+ * one a device will fault on at an address its driver believes it owns.
+ *
+ * i386 answers zero, and device_md_dma_isolates() answering zero is what says
+ * that is a property of the machine rather than a failure.
+ */
+extern int		device_md_dma_grant(unsigned int bdf,
+					    unsigned long pa,
+					    unsigned long size,
+					    int read, int write,
+					    unsigned long *dma_addr);
+
+/*
+ * The same for `n' frames that are not physically contiguous: they are made
+ * reachable at CONSECUTIVE addresses starting from the one answered.
+ *
+ * 🔑 One call and one window.  A scatter-gather buffer is scattered in
+ * physical memory and there is no reason for it to be scattered in the
+ * device's -- so a driver receives one address and a length, and the
+ * scattering stays a fact about the machine.
+ */
+extern int		device_md_dma_grant_pages(unsigned int bdf,
+						  const unsigned long *pa,
+						  unsigned int n,
+						  int read, int write,
+						  unsigned long *dma_addr);
+
+/*
+ * Take a granted range back.  Answers non-zero when the device can no longer
+ * reach it.
+ *
+ * ⚠️ The device stays in its domain.  A device whose last buffer is freed is a
+ * device between transfers, and putting it back on pass-through would make
+ * every free a window in which it reaches everything again.
+ */
+extern int		device_md_dma_revoke(unsigned int bdf,
+					     unsigned long pa,
+					     unsigned long size);
+
+/*
+ * How many of this device's DMA requests the machine has refused, and the last
+ * address it refused.  Zero when it has refused none, and zero on a machine
+ * that refuses nothing because it polices nothing.
+ *
+ * ⚠️ `*last' is left alone when the answer is zero, rather than being cleared.
+ * A caller that ignored the count and read the address would then see whatever
+ * it had put there itself -- which is a wrong answer it wrote, and far easier
+ * to trace than a zero that looks like an address.
+ */
+extern unsigned		device_md_dma_faults(unsigned int bdf,
+					     unsigned long *last);
+
+/*
+ * Whether this device is confined to what it has been granted right now.
+ *
+ * 🔑 Not the same question as device_md_dma_isolates(), and the difference is
+ * the one that matters: that one says the MACHINE could confine a device, this
+ * one says THIS device is confined.  A device that has never asked for a DMA
+ * buffer is still passing through on a machine that polices perfectly.
+ */
+extern int		device_md_dma_confined(unsigned int bdf);
+
+/*
+ * Confine this device, but map its grants where the memory really is.
+ *
+ * ⚠️ Before its first grant only.  A domain that already holds translated
+ * buffers cannot become an identity one without moving them, and moving them
+ * means changing the addresses a device is reading through while it reads.
+ */
+extern int		device_md_dma_identity(unsigned int bdf);
+
+/*
+ * Take this device out of its domain and leave it reaching nothing.
+ *
+ * 🔴 NOTHING, and not what it started with.  The caller is a revocation, and a
+ * revocation that put the device back on pass-through would have widened its
+ * reach rather than withdrawn it.
+ */
+extern int		device_md_dma_release(unsigned int bdf);
+
 #endif	/* _DEVICE_DEVICE_MACHDEP_H_ */

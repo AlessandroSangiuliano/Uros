@@ -176,4 +176,22 @@ kern_return_t	urmach_cap_use(const struct uros_cap *, uint32_t, uint64_t);
 kern_return_t	urmach_cap_register(const struct uros_cap *);
 kern_return_t	urmach_cap_revoke(uint64_t);
 
+/*
+ * Does `task' own the DMA region named by `region_id'? (#432)
+ *
+ * 🔑 THE HALF cap_server CANNOT KNOW.  Issuing a capability for a DMA buffer
+ * decides two things: may this task hold buffer capabilities at all, which is
+ * its manifest and cap_server's business, and is THIS buffer that task's to
+ * give away, which is a fact about an allocation only the kernel was told
+ * about.
+ *
+ * ⚠️ `task' is a name in the CALLER's port space -- the send right
+ * cap_provision_task was handed, which that interface has carried since #216
+ * as "informational for now (audit / future cross-reference)".
+ *
+ * KERN_SUCCESS when it owns it, KERN_NO_ACCESS when another task does,
+ * KERN_INVALID_ARGUMENT when there is no such region or no such task.
+ */
+kern_return_t	urmach_dma_region_owner(uint64_t, mach_port_name_t);
+
 #endif	/* _MACH_MACH_TRAPS_H_ */

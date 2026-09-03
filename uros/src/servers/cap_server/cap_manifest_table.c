@@ -21,6 +21,7 @@
 struct cap_manifest_slot {
     int            in_use;
     mach_port_t    port;       /* per-task cap_port receive name */
+    mach_port_t    task;       /* the task it was provisioned for (#432) */
     void          *blob;       /* owned copy, freed on uninstall */
     uint32_t       len;
 };
@@ -101,6 +102,7 @@ cap_manifest_validate(const void *blob, uint32_t blob_len,
 
 int
 cap_manifest_table_install(mach_port_t task_cap_port,
+                           mach_port_t task_port,
                            const void *blob, uint32_t blob_len)
 {
     int slot = -1;
@@ -130,9 +132,20 @@ cap_manifest_table_install(mach_port_t task_cap_port,
 
     g_table[slot].in_use = 1;
     g_table[slot].port   = task_cap_port;
+    g_table[slot].task   = task_port;
     g_table[slot].blob   = copy;
     g_table[slot].len    = blob_len;
     return CAP_ERR_NONE;
+}
+
+mach_port_t
+cap_manifest_table_task(mach_port_t task_cap_port)
+{
+    for (uint32_t i = 0; i < CAP_MANIFEST_TABLE_SIZE; i++)
+        if (g_table[i].in_use && g_table[i].port == task_cap_port)
+            return g_table[i].task;
+
+    return MACH_PORT_NULL;
 }
 
 const cap_manifest_header_t *
@@ -152,7 +165,7 @@ cap_manifest_table_get(mach_port_t task_cap_port)
 
 int
 cap_manifest_allows(const cap_manifest_header_t *m,
-                    uint32_t type, uint64_t ops)
+                    uint32_t type, uint64_t resource_id, uint64_t ops)
 {
     const cap_manifest_entry_t *req;
     uint32_t i;
@@ -164,6 +177,21 @@ cap_manifest_allows(const cap_manifest_header_t *m,
                                          m->required_offset);
     for (i = 0; i < m->required_count; i++) {
         if (req[i].type != type) continue;
+
+        /*
+         * 🔴 THE INSTANCE AS WELL AS THE KIND (v2).  A version-1 entry could
+         * only say "block devices, with READ" -- so a task allowed one block
+         * device was allowed every block device, and the manifest constrained
+         * the KIND of authority without constraining its extent.
+         *
+         * CAP_MANIFEST_ANY_ID is what every v1 entry meant, and it is spelt
+         * rather than implied: an entry that names a resource names it, and
+         * one that means "any" says so.
+         */
+        if (req[i].resource_id != CAP_MANIFEST_ANY_ID &&
+            req[i].resource_id != resource_id)
+            continue;
+
         /* All requested ops must be subset of declared ops. */
         if ((ops & ~req[i].ops) == 0)
             return 1;

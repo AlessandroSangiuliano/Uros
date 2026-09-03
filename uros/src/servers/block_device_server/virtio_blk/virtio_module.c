@@ -39,11 +39,48 @@
 #include <device/pci.h>
 #include "device_master.h"
 
+/*
+ * ⚠️ The region id is answered and discarded here.  It exists so a buffer's
+ * OWNER can be given a capability naming it (#432), and this driver is the
+ * owner of its own buffers: nobody else ever asks to map them.  Named rather
+ * than passed as a null so that the day one of these is handed to another
+ * server, the line that has to change is visible.
+ */
+static uint64_t unused_region;
+
 /* PCI configuration registers */
 /* The configuration header comes from <device/pci.h> (#427). */
 
 /* Static state — one virtio-blk controller */
-static struct virtio_state virtio_st;
+/*
+ * 🔴 ONE STATE PER CONTROLLER, and it used to be ONE STATE.
+ *
+ * `probe' hands the framework a pointer through *priv, and the framework
+ * keeps it in ctrl->priv for the life of that controller.  A single static
+ * instance meant every controller was handed the SAME pointer, so the second
+ * probe overwrote the first controller's ABAR, its port table, its DMA
+ * addresses and its disk geometry -- while the first controller's partitions
+ * were already registered and pointing at it.
+ *
+ * ⚠️ Invisible on i386 and on the default board, where there is exactly one
+ * virtio controller and a singleton is indistinguishable from a correct
+ * allocation.  q35 is what exposed it: that chipset has its own AHCI at
+ * 0:31.2 besides the one the command line adds, so a boot there probes twice.
+ *
+ * 🔑 And the way it announced itself was not a crash.  The second probe found
+ * no drive, failed, and left the shared state describing a port with nothing
+ * on it -- so the FIRST controller's next read timed out with SSTS=0 and the
+ * command engine stopped, on a port that had reported a disk and a running
+ * engine minutes earlier.  The register dump is what named it: hardware that
+ * says "no device" about a device it had just identified is not hardware
+ * that changed its mind.
+ *
+ * The slot is taken but not committed until probe succeeds, so a controller
+ * that fails to come up does not consume one.  Probes are sequential.
+ */
+static struct virtio_state virtio_st[MAX_CONTROLLERS];
+static unsigned virtio_n_states;
+
 
 /* ================================================================
  * I/O port accessors
@@ -190,11 +227,43 @@ virtqueue_setup(struct virtio_state *st)
 	st->vq_alloc_size = VRING_TOTAL_SIZE(st->vq_size);
 	st->vq_alloc_size = (st->vq_alloc_size + 4095u) & ~4095u;
 
-	kr = device_dma_alloc(st->master_device, st->vq_alloc_size,
-			      &st->vq_kva, &st->vq_pa);
+	/*
+	 * 🔴 THIS DEVICE MUST BE PROGRAMMED WITH PHYSICAL ADDRESSES, and it is
+	 * the SPECIFICATION that says so, not a limitation of this driver.
+	 *
+	 * The legacy virtio interface has no VIRTIO_F_ACCESS_PLATFORM to
+	 * negotiate, so there is no exchange in which a device could be told
+	 * that an address means something other than a physical one.  QEMU
+	 * says the same thing from its side: it refuses `iommu_platform=on' on
+	 * anything but a modern-only device, and its transitional virtio-blk
+	 * does its DMA outside the emulated IOMMU entirely.
+	 *
+	 * ⚠️ WITHOUT THIS LINE THE SYMPTOM IS `virtio: request timeout' AND
+	 * NOTHING ELSE.  #432 stage 3e made device_dma_alloc answer an IOVA;
+	 * this device writes that number onto the bus as a physical address,
+	 * the transfer lands on memory nobody mapped, and the queue never
+	 * completes.  There is no fault, because the device did exactly what
+	 * it was told.
+	 *
+	 * 🔑 It is NOT an opt-out of isolation: the queue and the buffers are
+	 * still granted, so this controller reaches them and nothing else.
+	 * What it gives up is not knowing where they are.  Closing that gap
+	 * means virtio 1.0, which is a rewrite of this file and not a line of
+	 * it.
+	 */
+	kr = device_dma_identity(st->master_device, VIRTIO_BDF(st));
 	if (kr != KERN_SUCCESS) {
-		printf("virtio: vq alloc failed (%u bytes)\n",
-		       st->vq_alloc_size);
+		printf("virtio: could not ask for physical addresses (kr=%d) "
+		       "— a legacy device cannot use any other kind\n", kr);
+		return -1;
+	}
+
+	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st),
+			      st->vq_alloc_size,
+			      &st->vq_kva, &st->vq_dma, &unused_region);
+	if (kr != KERN_SUCCESS) {
+		printf("virtio: vq alloc failed (%lu bytes)\n",
+		       (unsigned long) st->vq_alloc_size);
 		return -1;
 	}
 	kr = device_dma_map_user(st->master_device, st->vq_kva,
@@ -213,14 +282,15 @@ virtqueue_setup(struct virtio_state *st)
 	used_off = VRING_USED_OFFSET(st->vq_size);
 	st->vq_used  = (struct vring_used *)(st->vq_uva + used_off);
 
-	printf("virtio: vq pa=0x%08X  desc=+0  avail=+0x%X  used=+0x%X\n",
-	       st->vq_pa, VRING_AVAIL_OFFSET(st->vq_size), used_off);
+	printf("virtio: vq at 0x%08lX  desc=+0  avail=+0x%X  used=+0x%X\n",
+	       (unsigned long) st->vq_dma,
+	       VRING_AVAIL_OFFSET(st->vq_size), used_off);
 
-	vio_write32(st, VIRTIO_PCI_QUEUE_PFN, st->vq_pa / VRING_ALIGN);
+	vio_write32(st, VIRTIO_PCI_QUEUE_PFN, st->vq_dma / VRING_ALIGN);
 
 	/* Request header + status DMA buffer (1 page) */
-	kr = device_dma_alloc(st->master_device, 4096,
-			      &st->req_kva, &st->req_pa);
+	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st), 4096,
+			      &st->req_kva, &st->req_dma, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: req alloc failed\n");
 		return -1;
@@ -233,8 +303,9 @@ virtqueue_setup(struct virtio_state *st)
 	}
 
 	/* Data DMA buffer */
-	kr = device_dma_alloc(st->master_device, DATA_BUF_SIZE,
-			      &st->data_kva, &st->data_pa);
+	kr = device_dma_alloc(st->master_device, VIRTIO_BDF(st),
+			      DATA_BUF_SIZE,
+			      &st->data_kva, &st->data_dma, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("virtio: data alloc failed\n");
 		return -1;
@@ -273,13 +344,13 @@ virtio_blk_request(struct virtio_state *st, uint32_t type,
 	*status_ptr = 0xFF;
 
 	/* Descriptor 0: header */
-	st->vq_desc[0].addr  = (uint64_t)st->req_pa;
+	st->vq_desc[0].addr  = (uint64_t)st->req_dma;
 	st->vq_desc[0].len   = sizeof(struct virtio_blk_req_hdr);
 	st->vq_desc[0].flags = VRING_DESC_F_NEXT;
 	st->vq_desc[0].next  = 1;
 
 	/* Descriptor 1: data */
-	st->vq_desc[1].addr  = (uint64_t)(st->data_pa + data_offset);
+	st->vq_desc[1].addr  = (uint64_t)(st->data_dma + data_offset);
 	st->vq_desc[1].len   = data_len;
 	st->vq_desc[1].flags = VRING_DESC_F_NEXT;
 	if (type == VIRTIO_BLK_T_IN)
@@ -287,7 +358,7 @@ virtio_blk_request(struct virtio_state *st, uint32_t type,
 	st->vq_desc[1].next  = 2;
 
 	/* Descriptor 2: status */
-	st->vq_desc[2].addr  = (uint64_t)(st->req_pa + sizeof(*hdr));
+	st->vq_desc[2].addr  = (uint64_t)(st->req_dma + sizeof(*hdr));
 	st->vq_desc[2].len   = 1;
 	st->vq_desc[2].flags = VRING_DESC_F_WRITE;
 	st->vq_desc[2].next  = 0;
@@ -327,7 +398,16 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	     const struct pci_bar_region *bars, unsigned int n_bars,
 	     void **priv)
 {
-	struct virtio_state *st = &virtio_st;
+	struct virtio_state *st;
+
+	if (virtio_n_states >= MAX_CONTROLLERS) {
+		printf("virtio: %u controllers already, and the framework holds "
+		       "no more — refusing to probe %u:%u.%u\n",
+		       virtio_n_states, bus, slot, func);
+		return -1;
+	}
+	st = &virtio_st[virtio_n_states];
+	memset(st, 0, sizeof(*st));
 	kern_return_t kr;
 	const struct pci_bar_region *io_region;
 	unsigned int cmd_reg, irq_reg;
@@ -438,6 +518,8 @@ virtio_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	       st->disk_sectors, st->disk_sectors / 2048);
 	printf("virtio: status = 0x%02X\n",
 	       vio_read8(st, VIRTIO_PCI_STATUS));
+
+	virtio_n_states++;		/* committed: this controller came up */
 
 	*priv = st;
 	return 0;

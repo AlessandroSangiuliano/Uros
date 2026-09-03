@@ -1,0 +1,49 @@
+# cap_test manifest — the first policy this system has ever shipped (#432).
+#
+# 🔴 IT IS HERE TO BE REFUSED SOMETHING.  cap_test legitimately asks
+# cap_server for block-device capabilities: arms [3] and [5] open a
+# partition with one.  It has no business driving PCI hardware -- it is a
+# test, not a driver -- and #432's whole argument is that the right to map
+# memory for a device must come from somewhere other than holding the
+# master device port.  This file is that somewhere, and the arm that asks
+# for a PCI capability must come back denied.
+#
+# ⚠️ AND IT IS THE FIRST ON x86-64, WHICH IS NOT THE SAME AS THE FIRST.
+# i386 has compiled and shipped manifests for a while -- cpustat, ush,
+# hello_exec, dlopen_test, virtual_terminal_server -- and cap_server
+# provisions from them on every i386 boot.  x86-64 shipped none, because
+# mkmanifest was built only for the target whose userland is complete: the
+# mechanism was absent from this target rather than from the system.
+#
+# 🔥 The first version of this comment said the machinery had "never once
+# run", which was false and was reached by a search that could not have
+# found the answer -- `find -name "*.cmf" -not -path "*/build*"', looking
+# for compiled output everywhere except where compiled output goes.
+
+name cap_test
+
+# RESOURCE_BLK_DEVICE (4), any device, CAP_OP_BLK_READ|WRITE (0x3).
+#
+# ⚠️ `any' and not a device id, and the difference is now sayable: v2 gave
+# an entry a resource_id, so "block devices" and "THIS block device" stopped
+# being the same sentence.  cap_test opens whichever of ahci0a and
+# virtio_blk0a the board happens to have, so `any' is what it means.
+required 4 any 0x3
+
+# RESOURCE_DMA_BUFFER (10), any buffer, READ|WRITE by a device (0x3).
+#
+# 🔑 `any' is the ONLY thing this line can honestly say, and that is a fact
+# about the resource and not a looseness.  A manifest is written before the
+# system runs; a DMA buffer exists for four milliseconds.  So the policy
+# says whether this task may hold buffer capabilities AT ALL, and the
+# KERNEL says whether the particular buffer is this task's to give away --
+# which it can, because it made the allocation.  Neither half is asked to
+# know something it has no way of knowing.
+required 10 any 0x3
+
+# ── And deliberately NOT this ────────────────────────────────────────
+#
+# required 5 0x010601 0x7    RESOURCE_PCI_DEVICE, SATA AHCI, DMA|MMIO|IRQ
+#
+# The line above is what block_device_server would declare.  Its absence
+# here is the policy, and cap_test [13] is what reads it back.

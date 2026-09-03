@@ -79,7 +79,16 @@ dl_bootstrap_self(void)
 	vm_offset_t load_bias;
 	struct dl_object *obj = &self_obj;
 
-	if (&_DYNAMIC[0] == NULL || &__ehdr_start[0] == NULL) {
+	/*
+	 * ⚠️ `_DYNAMIC' and not `&_DYNAMIC[0]', which is the same address and
+	 * not the same question.  Both symbols are weak, so a null address is
+	 * exactly what a non-PIE binary gives and this test is the point of
+	 * declaring them that way -- but indexing the array first loses the
+	 * weakness as far as the compiler is concerned, and it folded the
+	 * whole condition to false.  The guard has never fired, in either
+	 * direction, since it was written.
+	 */
+	if (_DYNAMIC == NULL || __ehdr_start == NULL) {
 		snprintf(dl_error_msg, DL_ERRMSG_SIZE,
 			 "dl_bootstrap_self: _DYNAMIC / __ehdr_start missing "
 			 "(not built as -pie?)");

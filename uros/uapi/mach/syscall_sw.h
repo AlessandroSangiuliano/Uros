@@ -153,6 +153,21 @@ kernel_trap(urmach_thread_set_cleartid,-51,1)
  */
 kernel_trap(urmach_futex,-42,5)
 
+/*
+ *	urmach_dma_region_owner (#432) — does this task own that DMA region?
+ *
+ *	🔑 A TRAP AND NOT AN RPC, for the same reason the four capability calls
+ *	above are: cap_server asks it while deciding whether to issue a
+ *	capability -- inside its own message loop, with a client waiting -- and
+ *	a server that had to send a message to answer a message is a server
+ *	that can deadlock against itself.
+ *
+ *	⚠️ Three argument words and not two: the region id is sixty-four bits,
+ *	which is two words on i386 and one on x86-64, and the trap table's
+ *	count is in words.  See <mach/mach_traps.h>.
+ */
+kernel_trap(urmach_dma_region_owner,-43,3)
+
 kernel_trap(mach_reply_port,-26,0)
 kernel_trap(mach_thread_self,-27,0)
 kernel_trap(mach_task_self,-28,0)

@@ -42,6 +42,7 @@
 #include <mach/mach_port.h>
 #include <mach/message.h>
 #include <mach/cap_types.h>
+#include <mach/mach_traps.h>	/* urmach_cap_revoke (#432) */
 #include <mach_init.h>
 #include <sa_mach.h>
 #include <stdio.h>
@@ -209,7 +210,7 @@ cap_acquire(mach_port_t             server,
             uint64_t                resource_id,
             uint64_t                ops,
             unsigned int            lifetime_ms,
-            char                   *token,
+            cap_token_t            token,
             mach_msg_type_number_t *token_len)
 {
     (void)server;
@@ -233,9 +234,45 @@ cap_acquire(mach_port_t             server,
         g_request_local_port != cap_port) {
         const cap_manifest_header_t *m =
             cap_manifest_table_get(g_request_local_port);
-        if (m && !cap_manifest_allows(m, resource_type, ops)) {
-            printf("cap: DENY (manifest) port=0x%x rtype=%u ops=0x%llx\n",
+        /*
+         * 🔴 A DMA BUFFER'S INSTANCE IS THE KERNEL'S TO ANSWER, not this
+         * server's (#432).  A manifest can name a device class or a mount
+         * point because those exist before the policy is written; it cannot
+         * name a buffer that will exist for four milliseconds.  So the
+         * manifest says whether this task may hold buffer capabilities AT ALL
+         * -- checked below with CAP_MANIFEST_ANY_ID, because that is the only
+         * thing it can honestly say -- and the kernel says whether THIS buffer
+         * is that task's to give away.
+         *
+         * ⚠️ Neither half is trusted about the other's question, which is what
+         * makes it a check rather than a formality: this server cannot know
+         * who allocated a region, and the kernel cannot read a manifest.
+         */
+        if (resource_type == RESOURCE_DMA_BUFFER) {
+            mach_port_t owner = cap_manifest_table_task(g_request_local_port);
+            kern_return_t okr;
+
+            if (m && !cap_manifest_allows(m, resource_type,
+                                          CAP_MANIFEST_ANY_ID, ops)) {
+                printf("cap: DENY (manifest) port=0x%x dma buffer "
+                       "ops=0x%llx\n", (unsigned)g_request_local_port,
+                       (unsigned long long)ops);
+                return CAP_ERR_NOT_IN_MANIFEST;
+            }
+
+            okr = urmach_dma_region_owner(resource_id, owner);
+            if (okr != KERN_SUCCESS) {
+                printf("cap: DENY (not the owner) port=0x%x region=%llu "
+                       "kr=%d\n", (unsigned)g_request_local_port,
+                       (unsigned long long)resource_id, (int)okr);
+                return CAP_ERR_NOT_IN_MANIFEST;
+            }
+        } else if (m && !cap_manifest_allows(m, resource_type, resource_id,
+                                             ops)) {
+            printf("cap: DENY (manifest) port=0x%x rtype=%u id=0x%llx "
+                   "ops=0x%llx\n",
                    (unsigned)g_request_local_port, resource_type,
+                   (unsigned long long)resource_id,
                    (unsigned long long)ops);
             return CAP_ERR_NOT_IN_MANIFEST;
         }
@@ -281,11 +318,11 @@ cap_acquire(mach_port_t             server,
 
 kern_return_t
 cap_derive(mach_port_t             server,
-           char                   *parent_buf,
+           cap_token_t            parent_buf,
            mach_msg_type_number_t  parent_len,
            uint64_t                reduced_ops,
            unsigned int            lifetime_ms,
-           char                   *child_buf,
+           cap_token_t            child_buf,
            mach_msg_type_number_t *child_len)
 {
     (void)server;
@@ -366,6 +403,25 @@ cap_revoke(mach_port_t server, uint64_t cap_id)
 
         cap_table_mark_revoked(e);
         revoked++;
+
+        /*
+         * 🔴 AND TELL THE KERNEL, WHICH NOBODY WAS DOING.  This server marks
+         * its OWN copy of the token; the copy a holder presents is unchanged
+         * and still says revoked=0.  urmach_cap_verify falls back to the
+         * kernel's revocation table for exactly that reason -- and nothing
+         * had ever populated it, so a revoked capability went on verifying.
+         *
+         * ⚠️ The trap has existed since #216 (syscall_sw.c slot 39) and was
+         * declared in <mach/mach_traps.h> beside the three that are used.  A
+         * revocation that reaches every subscriber by IPC and never reaches
+         * the kernel is a revocation the enforcement point does not hear.
+         *
+         * 🔑 It is also what withdraws authority that has been MATERIALISED:
+         * a capability turned into an IOMMU domain is not consulted again, so
+         * the kernel tearing that domain down inside this trap is the only
+         * moment the device stops reaching (#432).
+         */
+        (void)urmach_cap_revoke(id);
 
         /* Enqueue every child via the sibling chain.  Siblings are
          * distinct cap_ids so they fit linearly in the stack budget. */
@@ -461,7 +517,7 @@ cap_subscribe_revoke(mach_port_t server, mach_port_t notify_port)
 kern_return_t
 cap_provision_task(mach_port_t            server,
                    mach_port_t            task_port,
-                   char                  *manifest_buf,
+                   cap_manifest_blob_t   manifest_buf,
                    mach_msg_type_number_t manifest_len,
                    mach_port_t           *out_task_cap_port)
 {
@@ -471,7 +527,6 @@ cap_provision_task(mach_port_t            server,
     int vrc;
 
     (void)server;
-    (void)task_port;        /* informational for now (audit) */
     *out_task_cap_port = MACH_PORT_NULL;
 
     vrc = cap_manifest_validate(manifest_buf, (uint32_t)manifest_len, NULL);
@@ -498,7 +553,7 @@ cap_provision_task(mach_port_t            server,
         return CAP_ERR_INTERNAL;
     }
 
-    vrc = cap_manifest_table_install(new_port, manifest_buf,
+    vrc = cap_manifest_table_install(new_port, task_port, manifest_buf,
                                      (uint32_t)manifest_len);
     if (vrc != CAP_ERR_NONE) {
         (void)mach_port_destroy(mach_task_self(), new_port);
@@ -524,7 +579,7 @@ cap_provision_task(mach_port_t            server,
 
 kern_return_t
 cap_verify(mach_port_t             server,
-           char                   *token_buf,
+           cap_token_t            token_buf,
            mach_msg_type_number_t  token_len,
            uint64_t                op,
            uint64_t                resource_id)
@@ -637,7 +692,35 @@ main(int argc, char **argv)
     bootstrap_completed(bootstrap_port, mach_task_self());
 
     printf("cap: entering message loop\n");
-    mach_msg_server(cap_demux, 8192, cap_port_set, MACH_MSG_OPTION_NONE);
+
+    /*
+     * A LIMIT REMOVED, AND NOT A DEFECT OBSERVED — the distinction is the
+     * point of writing this down.
+     *
+     * cap_provision_task carries the manifest as an INLINE array bounded at
+     * CAP_MANIFEST_MAX_BYTES, so a blob near that bound makes a message near
+     * sixteen kilobytes, against a receive buffer of eight.  Such a message
+     * cannot be received, no reply is ever sent, and the caller blocks
+     * forever.  Every manifest this tree ships is under a hundred bytes, so
+     * nothing has ever come close.
+     *
+     * 🔥 AND THAT IS A CORRECTION.  This was first written as the diagnosis of
+     * a hang -- bootstrap stopped after cap_provision_task, with every task it
+     * had already started still running -- and the hang went away when this
+     * changed.  It was not this: putting 8192 back leaves provisioning working
+     * and the manifest enforced.  MIG sends the ACTUAL length of a
+     * variable-length inline array, not its maximum; the sixteen kilobytes are
+     * the stack frame of the generated stub, not the message.  The hang has
+     * the shape of #522 -- one task blocked while the rest of the system
+     * continues -- and no cause established here.
+     *
+     * 🔑 Derived and not guessed: the biggest thing the interface can carry,
+     * plus room for the header, the descriptors and the trailer.  A number
+     * chosen by looking at today's messages stops being right the next time
+     * one grows.
+     */
+    mach_msg_server(cap_demux, CAP_MANIFEST_MAX_BYTES + 2048, cap_port_set,
+                    MACH_MSG_OPTION_NONE);
 
     printf("cap: mach_msg_server exited unexpectedly\n");
     return 1;

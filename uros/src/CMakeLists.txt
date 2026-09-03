@@ -27,6 +27,40 @@ set(OSFMK_SRC_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 # sets itself is a no-op, and its zero stays zero either way.
 add_compile_options(-ffreestanding)
 
+# ── -Wall, which userland did not have (#432 audit) ──────────────────
+#
+# 🔴 THE KERNEL HAS HAD IT ALL ALONG AND USERLAND HAD NOTHING.  A server's
+# compile line carried no -W flag of any kind, so "zero warnings on both
+# targets" -- a number this project reports after every change -- was measured
+# with the diagnostics switched off for everything outside the kernel.
+#
+# 🔑 What it was hiding is the class this port exists to find.  printf here is
+# declared without a format attribute, so a `%x' on a 64-bit value said
+# nothing; the block device server alone had four, each printing the low half
+# of an address and calling it the address.  Adding the attribute without
+# -Wall would have changed nothing, and -Wall without the attribute would have
+# found none of them: the two halves only work together.
+# ⚠️ AND THE SUPPRESSIONS ARE THE KERNEL'S, deliberately.  Turning -Wall on
+# produced 523 diagnostics on i386 and 190 on x86-64 -- too many to read in
+# one sitting, and leaving them would break the "zero warnings" invariant that
+# is how a regression gets noticed here.  So the same staging the kernel used:
+# -Wall on, the noisy categories named and silenced, and each one removed as
+# its findings are cleared.  A suppression that is written down is a debt; a
+# missing -Wall is not even that.
+#
+# 🔴 What is NOT suppressed is the reason for the change: -Wformat, which with
+# printf's new format attribute is what catches a 64-bit value printed through
+# a 32-bit conversion.  Nor dangling-else, maybe-uninitialized, unused-value,
+# address or array-parameter, which name real defects and are few.
+add_compile_options(-Wall
+  -Wno-missing-braces
+  -Wno-parentheses
+  -Wno-pointer-sign
+  -Wno-unused-but-set-variable
+  -Wno-unused-function
+  -Wno-unused-variable
+  -Wno-strict-aliasing)
+
 # The ODE export directory uses pseudo-symlinks ("link ppc") for mach/machine.
 # Create a real symlink in the build tree instead: mach/machine -> the
 # target architecture's mach headers (#404 made it per-target; it was
@@ -123,6 +157,15 @@ endif()
 # block above has not already added it.
 if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tools/mkbundle)
+
+  # And mkmanifest beside it, for the same reason and since #432.
+  #
+  # It is the same kind of tool -- it reads a text file and writes an archive
+  # of fixed-width little-endian records -- and it is now on the critical path
+  # rather than an optional extra: a manifest is what turns cap_server from a
+  # mechanism into a policy, and a target that cannot compile one has the
+  # mechanism and never the policy.
+  add_subdirectory(tools/mkmanifest)
 endif()
 
 # Kernel build.  Both targets need migcom first: since #416 the x86-64 kernel

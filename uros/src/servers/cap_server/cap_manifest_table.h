@@ -45,7 +45,15 @@ int cap_manifest_validate(const void *blob, uint32_t blob_len,
  * can free its own buffer.  Returns CAP_ERR_NONE,
  * CAP_ERR_NO_MANIFEST_SLOT, or CAP_ERR_NO_MEMORY.
  */
+/*
+ * ⚠️ `task_port' is remembered, and #216 said it would be: cap_provision_task
+ * carries it as "informational for now (audit / future cross-reference)".
+ * #432 is that cross-reference -- issuing a capability for a DMA buffer means
+ * asking the KERNEL whether the requesting task owns it, and the requester is
+ * known here only as a port.
+ */
 int cap_manifest_table_install(mach_port_t task_cap_port,
+                               mach_port_t task_port,
                                const void *blob, uint32_t blob_len);
 
 /*
@@ -56,13 +64,22 @@ int cap_manifest_table_install(mach_port_t task_cap_port,
 const cap_manifest_header_t *
 cap_manifest_table_get(mach_port_t task_cap_port);
 
+/* The task behind that cap_port, or MACH_PORT_NULL. */
+mach_port_t cap_manifest_table_task(mach_port_t task_cap_port);
+
 /*
- * Helper: does the given manifest declare `type+ops` in its
- * `caps_required` list?  Returns 1 when allowed, 0 when not.
- * NULL manifest is treated as permissive (returns 1) so callers
- * can pass through the legacy path without special-casing.
+ * Helper: does the given manifest declare `type + resource_id + ops' in its
+ * `caps_required' list?  Returns 1 when allowed, 0 when not.  NULL manifest is
+ * treated as permissive (returns 1) so callers can pass through the legacy
+ * path without special-casing.
+ *
+ * 🔴 `resource_id' IS THE V2 ADDITION.  A version-1 manifest could say "block
+ * devices, with READ" and could not say WHICH -- so a task allowed one was
+ * allowed all of them, and the file constrained the kind of authority without
+ * constraining its extent.  An entry declaring CAP_MANIFEST_ANY_ID means what
+ * every v1 entry meant, and says so.
  */
 int cap_manifest_allows(const cap_manifest_header_t *m,
-                        uint32_t type, uint64_t ops);
+                        uint32_t type, uint64_t resource_id, uint64_t ops);
 
 #endif /* _CAP_MANIFEST_TABLE_H_ */

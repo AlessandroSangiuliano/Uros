@@ -54,6 +54,17 @@ extern void cap_init(void);
  * authorizes `op` on `resource_id`, and that it has not been revoked or
  * expired.  Pure check — no side effects on the token or on kernel state.
  */
+/*
+ * Verify a token that is already in kernel memory.
+ *
+ * ⚠️ Not urmach_cap_verify: that is a TRAP and copies its argument in from
+ * user space.  A kernel caller has nothing to copy, and handing a kernel
+ * pointer to a copyin is a fault waiting for the machine that checks.
+ */
+extern kern_return_t cap_check_in_kernel(const struct uros_cap *token,
+                                         uint32_t op,
+                                         uint64_t resource_id);
+
 extern kern_return_t urmach_cap_verify(const struct uros_cap *user_token,
                                        uint32_t op,
                                        uint64_t resource_id);

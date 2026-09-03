@@ -25,7 +25,7 @@
 /* ------------------------------------------------------------------ */
 
 #define CAP_MANIFEST_MAGIC      0x464D4355u   /* 'UCMF' little-endian */
-#define CAP_MANIFEST_VERSION    1u
+#define CAP_MANIFEST_VERSION    2u
 
 /*
  * Maximum sane sizes — cap_server uses these to bound a single
@@ -40,17 +40,51 @@
 /*
  * One declared capability requirement or delegation right.
  *
- *   type  — cap_resource_type_t enum value (see <mach/cap_types.h>)
- *   ops   — uint64 bitmask, per-type namespace
+ *   type         — cap_resource_type_t enum value (see <mach/cap_types.h>)
+ *   resource_id  — WHICH resource of that type, or CAP_MANIFEST_ANY_ID
+ *   ops          — uint64 bitmask, per-type namespace
  *
- * sizeof == 16; 8-byte aligned so a blob written by mkmanifest on a
+ * 🔴 `resource_id' IS VERSION 2, AND IT IS WHAT MAKES A MANIFEST A POLICY.
+ * Version 1 could say "this task may acquire block-device capabilities with
+ * READ" and could NOT say which block device -- so a task allowed one was
+ * allowed all of them, and the manifest constrained the KIND of authority
+ * without constraining its extent.  #432 is where that stopped being
+ * acceptable: a driver entitled to one PCI device was thereby entitled to
+ * every PCI device in the machine, which is the isolation the whole issue
+ * exists to create, given back by the file that was supposed to grant it.
+ *
+ * 🔑 WHAT THE ID MEANS IS THE RESOURCE TYPE'S BUSINESS, and for
+ * RESOURCE_PCI_DEVICE it is the device CLASS and not the bus address.  A
+ * bus/device/function is a property of the BOARD -- this tree's AHCI is
+ * 00:04.0 on one machine and 00:1f.2 on another -- so a manifest naming one
+ * would be a policy file that has to be rewritten per machine.  A class code
+ * is a property of the DEVICE KIND, and one manifest works everywhere.
+ *
+ * ⚠️ Which is also why the manifest is only half the check.  It says what kind
+ * of device a driver may drive; it cannot say which instance, because it does
+ * not know what is plugged in.  The other half is the device master's claim --
+ * a device has one driver, first come.  See #432.
+ *
+ * sizeof == 24; 8-byte aligned so a blob written by mkmanifest on a
  * 64-bit host parses identically on the i386 target.
  */
 typedef struct cap_manifest_entry {
     uint32_t  type;
     uint32_t  _pad;
+    uint64_t  resource_id;
     uint64_t  ops;
 } cap_manifest_entry_t;
+
+/*
+ * "Any resource of this type", which is what every version-1 entry meant.
+ *
+ * ⚠️ NOT zero.  Zero is a resource id -- and a plausible one: it is device
+ * 00:00.0, class 0x000000, the first of anything.  An entry that forgot the
+ * field would otherwise have named a real resource and been quietly narrower
+ * than its author meant, which is the failure that looks like the policy
+ * working.
+ */
+#define CAP_MANIFEST_ANY_ID     0xFFFFFFFFFFFFFFFFULL
 
 /*
  * Compiled manifest blob layout:
@@ -109,7 +143,7 @@ typedef struct cap_manifest_header {
  * so -- "version bumps only on incompatible format changes (e.g. entry width
  * change)".  A width change nobody noticed would not bump anything.
  */
-_Static_assert(sizeof(cap_manifest_entry_t) == 16,
+_Static_assert(sizeof(cap_manifest_entry_t) == 24,
 	       "a manifest entry's width is implicit in every offset and count "
 	       "in the header; changing it is a format version bump");
 _Static_assert(sizeof(cap_manifest_header_t) == 48,

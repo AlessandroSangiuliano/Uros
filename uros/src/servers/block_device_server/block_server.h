@@ -44,7 +44,15 @@
 #define SECTOR_SIZE		512u
 
 #define MAX_CONTROLLERS		8
-#define MAX_DISKS_PER_CTRL	4
+/*
+ * 🔴 What one controller can present.  AHCI's PxPI is a 32-bit mask, so a
+ * SATA controller has at most 32 ports and QEMU's ich9 already reports six.
+ * This was 4 and the AHCI driver's own port limit was also 4, in another file
+ * that did not mention this one -- equal by coincidence, and the coincidence
+ * was load-bearing: get_disks() fills this array.  ahci_module.h now says so
+ * in a _Static_assert.
+ */
+#define MAX_DISKS_PER_CTRL	32
 #define MAX_MBR_PARTS		4
 #define MAX_PARTITIONS		32
 
@@ -256,6 +264,19 @@ void blk_payload_release(natural_t payload);
  * says so before anything depends on it.
  */
 void blk_readback_selftest(void);
+
+/*
+ * What a read costs, in timestamp-counter cycles per sector, once per
+ * partition.
+ *
+ * 🔑 Cycles and not bytes per second: this server does not know the counter's
+ * frequency, and #432 wants a RATIO between two runs of the same boot, which
+ * needs no frequency.  Virtio is the control -- QEMU's transitional device
+ * does its DMA outside the emulated IOMMU and AHCI goes through it, so one
+ * boot measures both a treated and an untreated disk on the same machine at
+ * the same clock.
+ */
+void blk_read_bench(void);
 
 struct blk_partition {
 	uint32_t	magic;			/* BLK_MAGIC_PART */

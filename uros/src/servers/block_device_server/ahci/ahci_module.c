@@ -46,7 +46,45 @@
  */
 
 /* Static state — we support one AHCI controller for now */
-static struct ahci_state ahci_st;
+/*
+ * 🔴 ONE STATE PER CONTROLLER, and it used to be ONE STATE.
+ *
+ * `probe' hands the framework a pointer through *priv, and the framework
+ * keeps it in ctrl->priv for the life of that controller.  A single static
+ * instance meant every controller was handed the SAME pointer, so the second
+ * probe overwrote the first controller's ABAR, its port table, its DMA
+ * addresses and its disk geometry -- while the first controller's partitions
+ * were already registered and pointing at it.
+ *
+ * ⚠️ Invisible on i386 and on the default board, where there is exactly one
+ * ahci controller and a singleton is indistinguishable from a correct
+ * allocation.  q35 is what exposed it: that chipset has its own AHCI at
+ * 0:31.2 besides the one the command line adds, so a boot there probes twice.
+ *
+ * 🔑 And the way it announced itself was not a crash.  The second probe found
+ * no drive, failed, and left the shared state describing a port with nothing
+ * on it -- so the FIRST controller's next read timed out with SSTS=0 and the
+ * command engine stopped, on a port that had reported a disk and a running
+ * engine minutes earlier.  The register dump is what named it: hardware that
+ * says "no device" about a device it had just identified is not hardware
+ * that changed its mind.
+ *
+ * The slot is taken but not committed until probe succeeds, so a controller
+ * that fails to come up does not consume one.  Probes are sequential.
+ */
+static struct ahci_state ahci_st[MAX_CONTROLLERS];
+
+/*
+ * ⚠️ The region id is answered and discarded here.  It exists so a buffer's
+ * OWNER can be given a capability naming it (#432), and this driver is the
+ * owner of its own buffers: nobody else ever asks to map them.  Named rather
+ * than passed as a null so that the day one of these is handed to another
+ * server, the line that has to change is visible.
+ */
+static uint64_t unused_region;
+
+static unsigned ahci_n_states;
+
 
 /* ================================================================
  * PCI match — AHCI SATA controller (class 01:06:01)
@@ -153,8 +191,20 @@ ahci_port_scan(struct ahci_state *st)
 		if ((port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
 		    != SSTS_DET_PRESENT)
 			continue;
-		if (st->n_ports >= MAX_AHCI_PORTS)
+		if (st->n_ports >= MAX_AHCI_PORTS) {
+			/*
+			 * 🔴 A disk dropped without a word is a disk that does
+			 * not exist as far as anything above here can tell.
+			 * This used to `break' in silence, so a controller
+			 * with more ports than the driver holds simply had
+			 * fewer disks, and nothing anywhere said which ones.
+			 */
+			printf("ahci: PI reports more ports than the %u this "
+			       "driver holds — port %d and any after it are "
+			       "NOT being used\n",
+			       (unsigned)MAX_AHCI_PORTS, port);
 			break;
+		}
 
 		printf("ahci: device on port %d  sig=0x%08X\n",
 		       port, port_read(st, port, PORT_SIG));
@@ -182,7 +232,8 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	kern_return_t kr;
 	vm_address_t dma_kva, dma_uva, dma_pa;
 
-	kr = device_dma_alloc(st->master_device, 4096, &dma_kva, &dma_pa);
+	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), 4096,
+			      &dma_kva, &dma_pa, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: port %d CLB/FB alloc failed\n", hba_port);
 		return -1;
@@ -194,9 +245,9 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 		return -1;
 	}
 
-	pi->clb_pa  = dma_pa;
+	pi->clb_dma  = dma_pa;
 	pi->clb_uva = dma_uva;
-	pi->fb_pa   = dma_pa  + 1024;
+	pi->fb_dma   = dma_pa  + 1024;
 	pi->fb_uva  = dma_uva + 1024;
 	pi->dma_kva = dma_kva;
 
@@ -216,10 +267,10 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	 * and then the upper, and the port must be stopped for either -- which
 	 * ahci_port_stop() above has just done.
 	 */
-	port_write(st, hba_port, PORT_CLB,  ahci_pa_lo(pi->clb_pa));
-	port_write(st, hba_port, PORT_CLBU, ahci_pa_hi(pi->clb_pa));
-	port_write(st, hba_port, PORT_FB,   ahci_pa_lo(pi->fb_pa));
-	port_write(st, hba_port, PORT_FBU,  ahci_pa_hi(pi->fb_pa));
+	port_write(st, hba_port, PORT_CLB,  ahci_pa_lo(pi->clb_dma));
+	port_write(st, hba_port, PORT_CLBU, ahci_pa_hi(pi->clb_dma));
+	port_write(st, hba_port, PORT_FB,   ahci_pa_lo(pi->fb_dma));
+	port_write(st, hba_port, PORT_FBU,  ahci_pa_hi(pi->fb_dma));
 
 	port_write(st, hba_port, PORT_SERR, ~0u);
 	port_write(st, hba_port, PORT_IS,   ~0u);
@@ -257,7 +308,7 @@ ahci_identify(struct ahci_state *st, int port_idx)
 	fis.command  = ATA_CMD_IDENTIFY;
 	fis.device   = 0;
 
-	if (ahci_submit_cmd(st, port_idx, &fis, st->data_pa, 512, 0) < 0) {
+	if (ahci_submit_cmd(st, port_idx, &fis, st->data_dma, 512, 0) < 0) {
 		printf("ahci: IDENTIFY failed on port %d\n", pi->hba_port);
 		return -1;
 	}
@@ -355,10 +406,10 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 
 	/* Release old user mapping before freeing kernel DMA buffer */
 	vm_deallocate(mach_task_self(), st->ct_uva, 4096);
-	device_dma_free(st->master_device, st->ct_kva, 4096);
+	device_dma_free(st->master_device, AHCI_BDF(st), st->ct_kva, 4096);
 
-	kr = device_dma_alloc(st->master_device, ct_size,
-			      &st->ct_kva, &st->ct_pa);
+	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), ct_size,
+			      &st->ct_kva, &st->ct_dma, &unused_region);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: CT realloc (%u bytes) failed\n", ct_size);
 		return -1;
@@ -372,7 +423,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 
 	/* Release old user mapping before freeing kernel DMA buffer */
 	vm_deallocate(mach_task_self(), st->data_uva, 4096);
-	device_dma_free(st->master_device, st->data_kva, 4096);
+	device_dma_free(st->master_device, AHCI_BDF(st), st->data_kva, 4096);
 
 	n_pages = st->batch_slots * PRDT_PER_SLOT;
 	if (n_pages > AHCI_MAX_SG_PAGES)
@@ -389,10 +440,10 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 		vm_address_t *pa_list = NULL;
 
 		pa_count = 0;
-		kr = device_dma_alloc_sg(st->master_device, n_pages,
+		kr = device_dma_alloc_sg(st->master_device, AHCI_BDF(st), n_pages,
 					 mach_task_self(),
 					 &st->data_kva, &st->data_uva,
-					 &pa_list, &pa_count);
+					 &pa_list, &pa_count, &unused_region);
 		if (kr != KERN_SUCCESS) {
 			printf("ahci: scatter-gather alloc (%u pages) "
 			       "failed (kr=%d)\n", n_pages, kr);
@@ -403,7 +454,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 			pa_count = AHCI_MAX_SG_PAGES;
 
 		for (unsigned p = 0; p < pa_count; p++)
-			st->data_pa_list[p] = pa_list[p];
+			st->data_dma_list[p] = pa_list[p];
 
 		/*
 		 * ⚠️ Released whatever happens next.  Out-of-line memory a
@@ -417,7 +468,7 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	}
 
 	st->data_n_pages = n_pages;
-	st->data_pa = st->data_pa_list[0];
+	st->data_dma = st->data_dma_list[0];
 
 	st->batch_data_size = st->batch_slots * SLOT_DATA_SIZE;
 	st->ra_sectors = st->batch_slots * SECTORS_PER_SLOT;
@@ -430,6 +481,140 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 }
 
 /* ================================================================
+ * The isolation, demonstrated rather than asserted (#432 stage 3d)
+ * ================================================================ */
+
+/*
+ * Ask this controller to read a sector into a page it was never granted, and
+ * require the transfer to FAIL.
+ *
+ * 🔴 THIS IS THE DONE-WHEN OF #432 AND NOT A DECORATION.  Everything else in
+ * that issue can be true of a kernel that quietly polices nothing: the tables
+ * are built, they read back, the engine says translation is on, and every
+ * driver goes on working -- which is also exactly what happens if the domain
+ * is never consulted.  The only observation that tells the two apart is a DMA
+ * that is REFUSED, and it has to be one this code caused on purpose.
+ *
+ * 🔑 THE TARGET PAGE IS SAFE, AND CHOOSING IT WAS THE WHOLE DESIGN.  It is a
+ * page allocated with DEVICE_DMA_NO_BDF -- real memory, wired, owned by this
+ * server, and in NO device's domain.  So:
+ *
+ *   - if the isolation works, the read is refused and nothing is written;
+ *   - if it does not, one sector lands in a page of OUR OWN that nothing
+ *     reads.
+ *
+ * ⚠️ Every other candidate is worse.  An address past the top of memory fails
+ * for a reason that is not the IOMMU; a page granted to another device
+ * corrupts that device's buffer when the isolation is absent; an arbitrary
+ * physical address corrupts the kernel.  A test whose failure mode is "the
+ * machine is now wrong somewhere else" cannot be run on every boot.
+ *
+ * ⚠️ And it says so and moves on when the machine does not remap.  A default
+ * boot, an i386, a board with no engine: device_dma_faults answers zero
+ * because nothing was refused, which is indistinguishable from "the transfer
+ * worked" -- so the verdict is read from whether the machine CAN refuse,
+ * asked before the attempt rather than inferred from it.
+ */
+static void
+ahci_iommu_selftest(struct ahci_state *st)
+{
+	vm_address_t	kva = 0, pa = 0;
+	natural_t	confined = 0, before = 0, after = 0;
+	vm_address_t	refused = 0;
+	kern_return_t	kr;
+	int		rc;
+
+	if (st->n_ports == 0)
+		return;
+
+	/*
+	 * 🔑 ASKED BEFORE, so that "no faults" afterwards means something.  A
+	 * count read only after the attempt cannot tell a refusal that
+	 * happened from one that happened earlier, and cannot tell either from
+	 * a machine that never refuses anything.
+	 */
+	kr = device_dma_faults(st->master_device, AHCI_BDF(st),
+			       &confined, &before, &refused);
+	if (kr != KERN_SUCCESS)
+		return;
+
+	/*
+	 * 🔴 AND IF THIS DEVICE IS NOT CONFINED, THERE IS NOTHING TO
+	 * DEMONSTRATE.  A default boot, an i386, a board with no engine: the
+	 * DMA below would succeed, and printing "nothing is policing its DMA"
+	 * there is true and useless -- an alarm on every boot of every machine
+	 * that never asked to be policed.  Said once, quietly, and skipped.
+	 */
+	if (!confined) {
+		printf("ahci: [iommu] this controller is not in a domain — "
+		       "its DMA reaches all of memory, as it always has\n");
+		return;
+	}
+
+	kr = device_dma_alloc(st->master_device, DEVICE_DMA_NO_BDF, 4096,
+			      &kva, &pa, &unused_region);
+	if (kr != KERN_SUCCESS)
+		return;
+
+	printf("ahci: [iommu] asking port 0 to read one sector into "
+	       "0x%08lX, a page granted to no device\n", (unsigned long)pa);
+
+	{
+		struct ata_fis_h2d fis;
+
+		memset(&fis, 0, sizeof(fis));
+		fis.fis_type	= FIS_TYPE_H2D;
+		fis.flags	= FIS_H2D_FLAG_CMD;
+		fis.command	= ATA_CMD_READ_DMA_EXT;
+		fis.device	= ATA_DEV_LBA;
+		fis.sector_count = 1;
+
+		rc = ahci_submit_cmd(st, 0, &fis, pa, 512, 0);
+	}
+
+	kr = device_dma_faults(st->master_device, AHCI_BDF(st),
+			       &confined, &after, &refused);
+
+	/*
+	 * 🔥 AND THE COMMAND REPORTS SUCCESS.  rc comes back 0: the controller
+	 * cleared CI, raised no task-file error, and told this driver the read
+	 * was done -- while not one byte reached memory.  That is not a defect
+	 * in the engine or in AHCI; a DMA write refused on the bus is not an
+	 * ATA error, and there is nowhere for the device to put it.
+	 *
+	 * 🔑 WHICH IS THE ARGUMENT FOR device_dma_faults() IN ONE LINE.  Every
+	 * symptom available to a driver says the transfer worked, so a driver
+	 * that could not ask the kernel would go looking for a corrupt disk.
+	 */
+	if (kr == KERN_SUCCESS && after > before && refused != 0)
+		printf("ahci: [iommu] REFUSED at 0x%08lX — and the command "
+		       "returned %d, so the DEVICE never noticed: the domain "
+		       "is enforced, and only the kernel can say so\n",
+		       (unsigned long)refused, rc);
+	/*
+	 * ⚠️ REFUSED, AND THE ENGINE DID NOT SAY WHERE.  Reported apart from
+	 * the case above rather than printed as "at 0x00000000", which is an
+	 * address and would be read as one.  It is what QEMU's amd-iommu does:
+	 * the refusal is real and the address quadword of its event is zero.
+	 */
+	else if (kr == KERN_SUCCESS && after > before)
+		printf("ahci: [iommu] REFUSED %u time(s), and the command "
+		       "returned %d — but the engine recorded no address, so "
+		       "the refusal is known and the page is not\n",
+		       (unsigned)(after - before), rc);
+	else if (rc < 0)
+		printf("ahci: [iommu] the transfer failed (%d) and no refusal "
+		       "was recorded — blocked, but not by anything that "
+		       "said so\n", rc);
+	else
+		printf("ahci: [iommu] the transfer SUCCEEDED into a page this "
+		       "device was never granted, though the kernel says it "
+		       "is confined — THE DOMAIN IS BUILT AND NOT ENFORCED\n");
+
+	device_dma_free(st->master_device, DEVICE_DMA_NO_BDF, kva, 4096);
+}
+
+/* ================================================================
  * Probe — full AHCI controller initialisation
  * ================================================================ */
 
@@ -439,7 +624,16 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	   const struct pci_bar_region *bars, unsigned int n_bars,
 	   void **priv)
 {
-	struct ahci_state *st = &ahci_st;
+	struct ahci_state *st;
+
+	if (ahci_n_states >= MAX_CONTROLLERS) {
+		printf("ahci: %u controllers already, and the framework holds "
+		       "no more — refusing to probe %u:%u.%u\n",
+		       ahci_n_states, bus, slot, func);
+		return -1;
+	}
+	st = &ahci_st[ahci_n_states];
+	memset(st, 0, sizeof(*st));
 	kern_return_t kr;
 	const struct pci_bar_region *abar_region;
 	uint64_t abar_phys;
@@ -528,24 +722,27 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	printf("ahci: ABAR mapped at uva=%p\n", (void *)st->abar);
 
 	/* Initial CT buffer (1 page) */
-	kr = device_dma_alloc(master_dev, 4096, &st->ct_kva, &st->ct_pa);
+	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
+			      &st->ct_kva, &st->ct_dma, &unused_region);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_dev, st->ct_kva, 4096,
 				 mach_task_self(), &st->ct_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: CT map failed\n"); return -1; }
 
 	/* Initial data buffer (1 page) */
-	kr = device_dma_alloc(master_dev, 4096, &st->data_kva, &st->data_pa);
+	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
+			      &st->data_kva, &st->data_dma, &unused_region);
 	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
 	kr = device_dma_map_user(master_dev, st->data_kva, 4096,
 				 mach_task_self(), &st->data_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: data map failed\n"); return -1; }
 
-	st->data_pa_list[0] = st->data_pa;
+	st->data_dma_list[0] = st->data_dma;
 	st->data_n_pages = 1;
 
-	printf("ahci: DMA: ct pa=0x%08X data pa=0x%08X\n",
-	       st->ct_pa, st->data_pa);
+	printf("ahci: DMA: ct at 0x%08lX, data at 0x%08lX — the addresses\n\t       the CONTROLLER is programmed with, not where the memory is\n",
+	       (unsigned long) st->ct_dma,
+	       (unsigned long) st->data_dma);
 
 	/* HBA reset + AHCI enable */
 	if (ahci_hba_reset(st) < 0)
@@ -591,6 +788,10 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 * clearing PORT_IS — no level-triggered storm.
 	 */
 	ahci_write(st, AHCI_GHC, ahci_read(st, AHCI_GHC) | GHC_IE);
+
+	ahci_iommu_selftest(st);
+
+	ahci_n_states++;		/* committed: this controller came up */
 
 	*priv = st;
 	return 0;
