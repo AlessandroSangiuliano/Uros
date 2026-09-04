@@ -254,6 +254,23 @@ static int _pthread_live_count = 1;	/* the main thread, before any create */
 static pthread_lock_t _pthread_live_lock = 0;
 
 /*
+ * How many threads are asleep below waiting to be joined.
+ *
+ * 🔑 THEY HAVE TERMINATED IN THE SENSE THE STANDARD MEANS -- cleanup handlers
+ * run, exit value published -- and still hold a kernel thread, which is this
+ * implementation's trade for the pool.  So they must be subtracted from the
+ * kernel's answer too, or two orphans hold each other hostage: each sees the
+ * other's kernel thread, concludes somebody is still running, and neither ever
+ * ends the process.
+ *
+ * ⚠️ A remainder of zero is safe and not merely likely.  If every thread left
+ * is parked or asleep here, no thread is running that could call pthread_join
+ * or pthread_create -- so nobody can ever arrive to reap them, and nobody can
+ * wake a parked thread to do it either.
+ */
+static int _pthread_exiting_count;
+
+/*
  * How long a thread waiting to be joined sleeps before asking the kernel
  * whether anybody is left who could join it.  Long, because the answer only
  * matters to a thread that is never going to be joined at all, and a thread
@@ -289,7 +306,7 @@ _pthread_only_thread_left(void)
 {
 	thread_act_array_t	list = 0;
 	mach_msg_type_number_t	n = 0, i;
-	int			parked, alone;
+	int			parked, exiting, alone;
 
 	if (task_threads(mach_task_self(), &list, &n) != KERN_SUCCESS)
 		return 0;
@@ -298,7 +315,16 @@ _pthread_only_thread_left(void)
 	parked = _thread_pool_count;
 	UNLOCK(_thread_pool_lock);
 
-	alone = ((int) n - parked) <= 1;
+	LOCK(_pthread_live_lock);
+	exiting = _pthread_exiting_count;
+	UNLOCK(_pthread_live_lock);
+
+	/*
+	 * The caller is in `exiting' as well, which is why this is <= 0 and not
+	 * <= 1: what is being asked is whether anything is left that could
+	 * still run, and the asker is not.
+	 */
+	alone = ((int) n - parked - exiting) <= 0;
 
 	for (i = 0; i < n; i++)
 		(void) mach_port_deallocate(mach_task_self(), list[i]);
@@ -1076,6 +1102,10 @@ pthread_exit(void *value_ptr)
 		 * never reaches the timeout, so the join-heavy path -- which
 		 * is the one that is measured -- makes no extra call at all.
 		 */
+		LOCK(_pthread_live_lock);
+		_pthread_exiting_count++;
+		UNLOCK(_pthread_live_lock);
+
 		while (*PTH_FW(self->death) == 0) {
 			(void) _pthread_futex_wait(PTH_FW(self->death), 0,
 						   _PTHREAD_ORPHAN_CHECK_MS);
@@ -1084,6 +1114,10 @@ pthread_exit(void *value_ptr)
 			if (_pthread_only_thread_left())
 				exit(0);
 		}
+
+		LOCK(_pthread_live_lock);
+		_pthread_exiting_count--;
+		UNLOCK(_pthread_live_lock);
 	} else
 		UNLOCK(self->lock);
 	/* #324: nothing to destroy — joiners/death/sig_sem are futex words
