@@ -31,30 +31,44 @@
 #include <stdio.h>
 #include "hal_server.h"
 
-static struct hal_device_info registry[HAL_MAX_DEVICES];
-static int n_registry;
-
 /*
- * Who reported binding each device (#513).
+ * ── One entry, two halves, and only one of them travels (#513) ───────
  *
- * 🔑 BESIDE THE RECORD AND NOT IN IT.  hal_list_devices hands the record out as
- * untyped out-of-line bytes, and a port name copied that way is a number in the
- * HAL's namespace that means nothing in the reader's -- a right cannot travel
- * in a byte array.  What the reader is owed is the STATE, which is in the
- * record; who holds the device is the HAL's own business, and this is where it
- * keeps it.
+ * 🔴 THE DRIVER'S HALF IS NOT IN struct hal_device_info, deliberately.  That
+ * record is what a SCAN produces and hal_registry_add() refreshes it wholesale
+ * every time a rescan sees the same BDF -- so a field the scan cannot produce,
+ * kept in it, survives only because somebody remembered to copy it across.  That
+ * is the defect #427 described in the `status' field it removed, rebuilt with a
+ * guard in front of it.  Out here the refresh cannot reach it at all.
+ *
+ * 🔑 AND IN THE SAME STRUCT RATHER THAN IN PARALLEL ARRAYS, which is where this
+ * went first.  Three arrays keyed by position agree only while nothing is ever
+ * removed or reordered -- an invariant this file happened to satisfy and did not
+ * state, which is the same kind of promise the record-refresh above was.  One
+ * entry cannot desynchronise from itself.
+ *
+ * ⚠️ `port' also has to stay off the wire for a second reason: hal_list_devices
+ * hands `info' out as untyped out-of-line bytes, and a port name copied that way
+ * is a number in the HAL's namespace that means nothing in the reader's.  A
+ * right cannot travel in a byte array.
  */
-static mach_port_t driver_port[HAL_MAX_DEVICES];
-static uint32_t    driver_state[HAL_MAX_DEVICES];
+struct hal_entry {
+	struct hal_device_info	info;	/* what the scan found -- on the wire */
+	uint32_t		state;	/* HAL_DEV_*, what a driver reported  */
+	mach_port_t		port;	/* who reported it; the HAL's own     */
+};
+
+static struct hal_entry registry[HAL_MAX_DEVICES];
+static int n_registry;
 
 static int
 find_index(unsigned int bus, unsigned int slot, unsigned int func)
 {
 	int i;
 	for (i = 0; i < n_registry; i++) {
-		if (registry[i].bus == bus &&
-		    registry[i].slot == slot &&
-		    registry[i].func == func)
+		if (registry[i].info.bus == bus &&
+		    registry[i].info.slot == slot &&
+		    registry[i].info.func == func)
 			return i;
 	}
 	return -1;
@@ -76,20 +90,12 @@ hal_registry_add(const struct hal_device_info *dev)
 		 * relies on this to keep hal_rescan idempotent when no
 		 * topology changed.
 		 *
-		 * 🔑 AND IT STAYS WHOLESALE, which is the point of keeping the
-		 * driver state out of this record (#513).  A scan reports what
-		 * the bus says; who bound the device is not in here to be
-		 * overwritten, so the refresh cannot lose it and nobody has to
-		 * remember that it must not.
-		 *
-		 * ⚠️ That is the defect #427 described in the `status' field it
-		 * removed -- a rescan resetting a value on a device already
-		 * bound -- and it could not be demonstrated there because the
-		 * value the refresh overwrote was the value it wrote.  Fixing
-		 * it by copying the field across would have left the same line
-		 * one edit away from doing it again.
+		 * 🔑 AND IT ASSIGNS `.info' RATHER THAN THE ENTRY (#513).  A
+		 * scan reports what the bus says; what a driver reported is in
+		 * the same struct and outside this assignment, so the refresh
+		 * cannot lose it and nobody has to remember that it must not.
 		 */
-		registry[existing] = *dev;
+		registry[existing].info = *dev;
 		return HAL_REGISTRY_ADD_EXISTING;
 	}
 
@@ -99,9 +105,9 @@ hal_registry_add(const struct hal_device_info *dev)
 		return HAL_REGISTRY_ADD_ERROR;
 	}
 
-	registry[n_registry] = *dev;
-	driver_state[n_registry] = HAL_DEV_UNCLAIMED;
-	driver_port[n_registry] = MACH_PORT_NULL;
+	registry[n_registry].info = *dev;
+	registry[n_registry].state = HAL_DEV_UNCLAIMED;
+	registry[n_registry].port = MACH_PORT_NULL;
 	n_registry++;
 	return HAL_REGISTRY_ADD_NEW;
 }
@@ -116,7 +122,7 @@ hal_registry_set_driver_state(unsigned int bus, unsigned int slot,
 	if (i < 0)
 		return -1;
 
-	driver_state[i] = state;
+	registry[i].state = state;
 
 	/*
 	 * ⚠️ The port is remembered only for a device that is HELD.  A driver
@@ -124,7 +130,7 @@ hal_registry_set_driver_state(unsigned int bus, unsigned int slot,
 	 * cap_revoke in block_server.c -- so keeping its port here would make
 	 * a later dead-name release a device it does not have.
 	 */
-	driver_port[i] = (state == HAL_DEV_BOUND) ? port : MACH_PORT_NULL;
+	registry[i].port = (state == HAL_DEV_BOUND) ? port : MACH_PORT_NULL;
 	return 0;
 }
 
@@ -137,7 +143,7 @@ hal_registry_driver_state(unsigned int bus, unsigned int slot,
 	if (i < 0)
 		return -1;
 
-	*state = driver_state[i];
+	*state = registry[i].state;
 	return 0;
 }
 
@@ -146,7 +152,7 @@ hal_registry_is_bound(unsigned int bus, unsigned int slot, unsigned int func)
 {
 	int i = find_index(bus, slot, func);
 
-	return i >= 0 && driver_state[i] == HAL_DEV_BOUND;
+	return i >= 0 && registry[i].state == HAL_DEV_BOUND;
 }
 
 int
@@ -158,15 +164,15 @@ hal_registry_release_driver(mach_port_t port)
 		return 0;
 
 	for (i = 0; i < n_registry; i++) {
-		if (driver_port[i] != port)
+		if (registry[i].port != port)
 			continue;
 
 		printf("hal: %u:%u.%u released — the driver that bound it is "
-		       "gone\n", registry[i].bus, registry[i].slot,
-		       registry[i].func);
+		       "gone\n", registry[i].info.bus, registry[i].info.slot,
+		       registry[i].info.func);
 
-		driver_state[i] = HAL_DEV_UNCLAIMED;
-		driver_port[i] = MACH_PORT_NULL;
+		registry[i].state = HAL_DEV_UNCLAIMED;
+		registry[i].port = MACH_PORT_NULL;
 		released++;
 	}
 
@@ -183,13 +189,13 @@ const struct hal_device_info *
 hal_registry_get(unsigned int bus, unsigned int slot, unsigned int func)
 {
 	int i = find_index(bus, slot, func);
-	return (i >= 0) ? &registry[i] : NULL;
+	return (i >= 0) ? &registry[i].info : NULL;
 }
 
 int
 hal_registry_copy_all(struct hal_device_info *out, unsigned int max)
 {
-	unsigned int n;
+	unsigned int n, i;
 
 	if (out == NULL)
 		return 0;
@@ -197,7 +203,15 @@ hal_registry_copy_all(struct hal_device_info *out, unsigned int max)
 	n = (unsigned int)n_registry;
 	if (n > max)
 		n = max;
-	if (n != 0)
-		memcpy(out, registry, n * sizeof(*out));
+
+	/*
+	 * ⚠️ Copied one at a time, and that is the cost of the entry above:
+	 * `info' is no longer the whole element, so a single memcpy of the
+	 * array would hand the caller this server's port names as if they were
+	 * device fields.  128 entries is not a loop worth avoiding.
+	 */
+	for (i = 0; i < n; i++)
+		out[i] = registry[i].info;
+
 	return (int)n;
 }
