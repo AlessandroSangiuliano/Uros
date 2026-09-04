@@ -370,7 +370,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # failure -- there is nothing to serve.  What it must not do is exit quietly:
   # see the note in block_server.c on #400.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\n-w dma_reclaim_test dma_reclaim_test holder\n-w dma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without

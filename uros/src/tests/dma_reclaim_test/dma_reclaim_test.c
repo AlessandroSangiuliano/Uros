@@ -49,16 +49,33 @@
  *
  * So the two are joined at both ends:
  *
- *  1. the holder's line carries `-w', and the holder calls bootstrap_completed()
- *     AFTER it has filled the table.  bootstrap does not create the checker
- *     until that message arrives, so the checker is guaranteed to start with
- *     the table already full.  ⚠️ It is the message and not the death that is
- *     waited on: a `-w' entry that only dies wedges bootstrap, which is a
- *     defect of its own and not this program's to work around.
+ *  1. each registers a port under a NAME and waits for the other's, so neither
+ *     can run past a partner that does not exist yet.  🔥 A one-sided wait was
+ *     tried and caught failing: the name server drops a registration when its
+ *     port dies, so a checker that looked AFTER the holder was gone found
+ *     nothing and measured nothing -- `no holder ever came and went'.  The
+ *     holder therefore does not begin taking anything until the checker holds a
+ *     right on it, which is what makes the death observable at all.
  *
- *  2. the checker then waits for ROOM.  It cannot appear except by the holder
- *     dying and the kernel taking its regions back, because nothing else in
- *     the bundle is running at that point and the holder frees nothing.
+ *  2. the checker then waits for that port to become a DEAD NAME, which is the
+ *     holder's death said by the kernel rather than guessed at -- and, because
+ *     device_master_task_terminating() runs above ipc_task_terminate(), a dead
+ *     name is delivered only after the reclaim has already happened.
+ *
+ * ⚠️ The right the checker holds is what survives the name server dropping the
+ * entry: a dead name is dead in THIS task's space, and no server has to agree.
+ *
+ * 🔥 THE `-w' FLAG WAS TRIED FIRST AND HAD TO GO.  It works -- bootstrap holds
+ * the checker back until the holder says it is done -- and it makes this pair
+ * able to stop the whole boot.  A run was caught where pthread_test hung in its
+ * thread-pool arm (#522): the holder was waiting on an RPC to a HAL that was
+ * waiting for a processor, bootstrap was waiting on the holder, and
+ * block_device_server was never started at all.
+ *
+ * ⚠️ #522 is not this program's defect, and turning it from one program's hang
+ * into a dead boot IS.  An intermittent red that takes the whole suite with it
+ * is how a suite stops being read.  Waiting on a name keeps every consequence
+ * inside this pair.
  *
  * ⚠️ The wait is BOUNDED.  On a kernel with no reclaim the room never comes,
  * and a test that waited for ever would report a hang instead of a failure.
@@ -134,8 +151,23 @@
 #define HAL_WAIT_TRIES	100
 #define HAL_WAIT_MS	100
 
+/*
+ * The name the holder puts up when it has taken everything, and that the
+ * checker waits for -- first to appear, then to die with its task.
+ */
+#define HOLDER_NAME	"dma_reclaim_holder"
+#define CHECKER_NAME	"dma_reclaim_checker"
+
 static mach_port_t	hal_port;
 static mach_port_t	driver_port;
+
+/*
+ * ⚠️ A PORT OF ITS OWN for the handshake, and not the one the HAL knows about.
+ * The device half can fail -- no HAL, no capability -- and the buffer arms must
+ * still be measurable, so what the checker waits on cannot be a port that only
+ * exists when the HAL answered.
+ */
+static mach_port_t	holder_port;
 
 static mach_port_t	device_port;
 
@@ -351,6 +383,78 @@ claim_the_bridge(void)
 	return 1;
 }
 
+
+/*
+ * ── Waiting for the holder, without holding the boot up (#513) ───────
+ *
+ * 🔴 TWO EDGES, AND BOTH ARE NEEDED.  The name appearing says the holder has
+ * taken everything it is going to take -- it puts the name up last -- so the
+ * checker cannot get in front of it.  The name going DEAD says the holder's
+ * task is gone, which is the kernel's statement and not an inference from a
+ * timer.
+ *
+ * 🔑 And a dead name arrives only after device_master_task_terminating() has
+ * run, because that hook is called from task_terminate() above
+ * ipc_task_terminate() -- the call that makes the port dead.  So by the time
+ * this returns, the regions and the claim are already back, with no handshake
+ * between the two programs at all.
+ *
+ * ⚠️ Bounded at both edges: a holder that never registers, or never dies,
+ * makes this report a failure rather than hang the run.
+ */
+static int
+wait_for_the_holder_to_go(void)
+{
+	mach_port_t	p = MACH_PORT_NULL;
+	mach_port_t	mine = MACH_PORT_NULL;
+	unsigned	t;
+
+	/*
+	 * Find the holder while it is still alive -- it is waiting for us and
+	 * will not begin until it sees our own name below.
+	 */
+	for (t = 0; t < RECLAIM_TRIES; t++) {
+		if (netname_look_up(name_server_port, "", HOLDER_NAME, &p)
+		    == NETNAME_SUCCESS && p != MACH_PORT_NULL)
+			break;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+				     RECLAIM_WAIT_MS);
+	}
+
+	if (p == MACH_PORT_NULL)
+		return 0;
+
+	/*
+	 * 🔑 AND NOW TELL IT TO GO.  The right on `p' is already in this task's
+	 * space, so from here the holder may die whenever it likes: a dead name
+	 * is dead HERE, and the name server dropping its entry -- which it does
+	 * as soon as the port dies -- cannot take the observation away.
+	 */
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			       &mine) != KERN_SUCCESS)
+		return 0;
+
+	if (netname_check_in(name_server_port, CHECKER_NAME, MACH_PORT_NULL,
+			     mine) != NETNAME_SUCCESS)
+		return 0;
+
+	for (t = 0; t < RECLAIM_TRIES; t++) {
+		mach_port_type_t type = 0;
+
+		if (mach_port_type(mach_task_self(), p, &type) != KERN_SUCCESS)
+			break;
+		if (type & MACH_PORT_TYPE_DEAD_NAME) {
+			(void) mach_port_deallocate(mach_task_self(), p);
+			return 1;
+		}
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
+				     RECLAIM_WAIT_MS);
+	}
+
+	(void) mach_port_deallocate(mach_task_self(), p);
+	return 0;
+}
+
 /* Strictly increasing, and therefore also all distinct. */
 static int
 ids_are_monotonic(const uint64_t *id, unsigned n)
@@ -384,6 +488,49 @@ main(int argc, char **argv)
 	role = (argc > 1 && argv[1] != 0) ? argv[1] : "holder";
 
 	if (strcmp(role, "check") != 0) {
+		unsigned	t;
+		mach_port_t	peer = MACH_PORT_NULL;
+
+		/*
+		 * 🔴 THE NAME GOES UP FIRST, AND THEN IT WAITS.  Registering
+		 * after taking everything is what a one-sided handshake would
+		 * do, and it loses the race it exists to settle: the checker
+		 * has to be holding a right on this port BEFORE this task dies,
+		 * or there is nothing for it to watch die.
+		 */
+		if (mach_port_allocate(mach_task_self(),
+				       MACH_PORT_RIGHT_RECEIVE, &holder_port)
+		    != KERN_SUCCESS)
+			die();
+
+		if (netname_check_in(name_server_port, HOLDER_NAME,
+				     MACH_PORT_NULL, holder_port)
+		    != NETNAME_SUCCESS) {
+			printf("dma_reclaim: could not register \"%s\"\n",
+			       HOLDER_NAME);
+			die();
+		}
+
+		for (t = 0; t < RECLAIM_TRIES; t++) {
+			if (netname_look_up(name_server_port, "", CHECKER_NAME,
+					    &peer) == NETNAME_SUCCESS
+			    && peer != MACH_PORT_NULL)
+				break;
+			(void) thread_switch(MACH_PORT_NULL,
+					     SWITCH_OPTION_WAIT,
+					     RECLAIM_WAIT_MS);
+		}
+
+		if (peer == MACH_PORT_NULL) {
+			printf("dma_reclaim: the checker never appeared — "
+			       "taking nothing\n");
+			die();
+		}
+
+		(void) mach_port_deallocate(mach_task_self(), peer);
+		printf("dma_reclaim: the checker is watching; taking "
+		       "everything now\n");
+
 		/*
 		 * The fixture, not a test.  It reports what it took so the
 		 * checker's number can be read against a real one.
@@ -422,13 +569,18 @@ main(int argc, char **argv)
 		 * holder was supposed to be holding, and measure the two tasks
 		 * racing instead of the kernel reclaiming.
 		 */
-		printf("dma_reclaim: releasing bootstrap\n");
-		(void) bootstrap_completed(bootstrap_port, mach_task_self());
-
+		printf("dma_reclaim: dying now\n");
 		die();
 	}
 
 	printf("\n=== DMA reclaim (#513): the task that comes after ===\n");
+
+	if (!wait_for_the_holder_to_go()) {
+		printf("dma_reclaim: no holder ever came and went — nothing "
+		       "measured\n");
+		printf("dma_reclaim: 0 of 5 arms passed\n");
+		die();
+	}
 	/*
 	 * ⚠️ `started' and `N of M arms passed' are what run-x86_64.sh pairs to
 	 * decide this program answered at all.  🔑 Only the CHECKER says them:

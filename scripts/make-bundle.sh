@@ -148,8 +148,8 @@ IRQ_CLAIM_TEST_CONF_LINE=""
 # OGNI slot DMA libero, quindi dopo il block server affamerebbe chi il disco lo
 # usa davvero.  I due `-w' serializzano la coppia.
 DMA_RECLAIM_CONF_LINES=""
-[ -f "$DMA_RECLAIM_TEST" ] && DMA_RECLAIM_CONF_LINES="-w dma_reclaim_test dma_reclaim_test holder
--w dma_reclaim_test dma_reclaim_test check"
+[ -f "$DMA_RECLAIM_TEST" ] && DMA_RECLAIM_CONF_LINES="dma_reclaim_test dma_reclaim_test holder
+dma_reclaim_test dma_reclaim_test check"
 KERNEL242_TEST_CONF_LINE=""
 [ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="kernel242_test kernel242_test"
 SIG_TEST_CONF_LINE=""
