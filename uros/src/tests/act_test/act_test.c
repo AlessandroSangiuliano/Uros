@@ -1322,13 +1322,16 @@ main(int argc, char **argv)
 	printf("act_test: %d of 6 arms passed\n", passed);
 
 	/*
-	 * ⚠️ Does not exit.  There is no proc server on this target to reap a
-	 * task and nothing waits for this one, so returning would take the
-	 * last thread out from under a program whose output the boot log is
-	 * still the record of.  It stops here on purpose.
+	 * 🔴 IT ENDS -- see the note at the end of fault_test's main for why
+	 * the reason that used to be here was never true (#513).
+	 *
+	 * ⚠️ This said exit() for one commit, because arm one KILLS a thread
+	 * with thread_terminate and does not join it, so libpthreads' count of
+	 * live threads never comes back down and a `return' waited to be joined
+	 * by a thread the kernel had destroyed.  That was treating the symptom:
+	 * a return from main() is exit() by definition, and it is crt0's path
+	 * that had to say so.  It does now, so this is a plain return again --
+	 * which is what every other program in the bundle writes.
 	 */
-	for (;;)
-		nap(1000);
-
-	return 0;
+	return passed == 6 ? 0 : 1;
 }

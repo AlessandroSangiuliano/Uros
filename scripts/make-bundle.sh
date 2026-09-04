@@ -77,11 +77,13 @@ HELLO_SERVER_CMF="$MANIFESTS/hello_server.cmf"
 # src/tests/cap_test/cap_test.manifest.  Shipped on both targets, out of the
 # same export directory, so the two bundles carry the same bytes.
 CAP_TEST_CMF="$MANIFESTS/cap_test.cmf"
+DMA_RECLAIM_CMF="$MANIFESTS/dma_reclaim_test.cmf"
 
 NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
 CAP_TEST="$SBIN/cap_test"
 IRQ_CLAIM_TEST="$SBIN/irq_claim_test"
+DMA_RECLAIM_TEST="$SBIN/dma_reclaim_test"
 GPUSTAT="$SBIN/gpustat"
 HAL_SERVER="$SBIN/hal_server"
 BLOCK_DEVICE_SERVER="$SBIN/block_device_server"
@@ -136,6 +138,18 @@ CAP_TEST_CONF_LINE=""
 # failure here is a missing log rather than a wrong one.
 IRQ_CLAIM_TEST_CONF_LINE=""
 [ -f "$IRQ_CLAIM_TEST" ] && IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
+# #513: lo stesso binario DUE volte -- il primo riempie la tavola delle regioni
+# DMA e MUORE tenendola, il secondo la ritrova resa dal kernel.  Una restituzione
+# non si dimostra con un'assenza: serve qualcun altro a cui venga data.
+#
+# 🔴 DOPO hal_server e PRIMA di block_device_server, deciso dai due lati: il
+# primo dei due deve morire da DRIVER -- si registra, rivendica l'host bridge e
+# lo riporta -- quindi prima dell'hal non avrebbe con chi registrarsi; e prende
+# OGNI slot DMA libero, quindi dopo il block server affamerebbe chi il disco lo
+# usa davvero.  I due `-w' serializzano la coppia.
+DMA_RECLAIM_CONF_LINES=""
+[ -f "$DMA_RECLAIM_TEST" ] && DMA_RECLAIM_CONF_LINES="dma_reclaim_test dma_reclaim_test holder
+dma_reclaim_test dma_reclaim_test check"
 KERNEL242_TEST_CONF_LINE=""
 [ -f "$KERNEL242_TEST" ] && KERNEL242_TEST_CONF_LINE="kernel242_test kernel242_test"
 SIG_TEST_CONF_LINE=""
@@ -174,6 +188,7 @@ if [ "$MINIMAL" = "1" ]; then
     PTHREAD_TEST_LINE=""
     CAP_TEST_CONF_LINE=""
     IRQ_CLAIM_TEST_CONF_LINE=""
+    DMA_RECLAIM_CONF_LINES=""
     KERNEL242_TEST_CONF_LINE=""
     SIG_TEST_CONF_LINE=""
     GPUSTAT_CONF_LINE=""
@@ -204,6 +219,7 @@ ${CAP_SERVER_CONF_LINE}
 ${GPU_SERVER_CONF_LINE}
 ${CHAR_SERVER_CONF_LINE}
 hal_server hal_server
+${DMA_RECLAIM_CONF_LINES}
 ${IPC_BENCH_STAGE1_LINE}
 block_device_server block_device_server
 default_pager default_pager disk0c
@@ -224,6 +240,7 @@ CONF
 ARGS=(-o "$BUNDLE_OUT")
 ARGS+=("bootstrap.conf:$BOOTSTRAP_CONF")
 ARGS+=("name_server:$NAME_SERVER")
+[ -f "$DMA_RECLAIM_TEST" ] && ARGS+=("dma_reclaim_test:$DMA_RECLAIM_TEST")
 [ -f "$CAP_SERVER" ] && ARGS+=("cap_server:$CAP_SERVER")
 ARGS+=("hal_server:$HAL_SERVER")
 ARGS+=("block_device_server:$BLOCK_DEVICE_SERVER")
@@ -231,6 +248,7 @@ ARGS+=("default_pager:$DEFAULT_PAGER")
 ARGS+=("hello_server:$HELLO_SERVER")
 [ -f "$HELLO_SERVER_CMF" ] && ARGS+=("hello_server.cmf:$HELLO_SERVER_CMF")
 [ -f "$CAP_TEST_CMF" ] && ARGS+=("cap_test.cmf:$CAP_TEST_CMF")
+[ -f "$DMA_RECLAIM_CMF" ] && ARGS+=("dma_reclaim_test.cmf:$DMA_RECLAIM_CMF")
 ARGS+=("ipc_bench:$IPC_BENCH")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")

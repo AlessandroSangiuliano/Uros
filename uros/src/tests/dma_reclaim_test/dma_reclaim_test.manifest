@@ -1,0 +1,29 @@
+# dma_reclaim_test manifest — what a task that dies is allowed to hold (#513).
+#
+# 🔴 THE POINT OF THIS PROGRAM IS TO DIE HOLDING THINGS, so the policy has to
+# let it hold them first.  Its two halves are the same binary: one fills the DMA
+# region table and claims a device, then dies; the other finds both given back.
+#
+# ⚠️ Read the class line together with cap_test's manifest, which says the
+# opposite on purpose.  That one declares NO PCI device so its arm [13] can read
+# back a refusal; this one declares one so the claim can actually happen.  A
+# mechanism is only shown to be a policy when the same file can say yes and no.
+
+name dma_reclaim_test
+
+# RESOURCE_DMA_BUFFER (10), any buffer, device READ|WRITE (0x3).
+required 10 any 0x3
+
+# RESOURCE_PCI_DEVICE (5), class 0x060000 -- the HOST BRIDGE -- DMA|MMIO|IRQ.
+#
+# 🔑 The class and not a bus address, which is what makes one manifest work on
+# both boards: this tree's AHCI is 00:04.0 under one QEMU command line and
+# 00:1f.2 under another, and the host bridge is 0:0.0 under every one of them
+# because that is where a host bridge goes.
+#
+# ⚠️ THE HOST BRIDGE AND NOT THE DISK CONTROLLER, deliberately.  This program
+# abandons what it claims.  If the release being measured did not work, claiming
+# the AHCI would take the boot disk with it -- a test that breaks the suite when
+# it fails is one nobody keeps reading.  Nothing drives the host bridge, so a
+# failure here is loud in this program's own arms and nowhere else.
+required 5 0x060000 0x7

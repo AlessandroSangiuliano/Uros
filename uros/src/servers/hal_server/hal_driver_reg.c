@@ -55,6 +55,28 @@ hal_driver_reg_add(uint32_t class_mask, uint32_t class_match,
 	return -1;
 }
 
+/*
+ * Is this one of the ports a driver registered with? (#513)
+ *
+ * ⚠️ Asked of the table and not of the port itself.  A send right proves the
+ * sender has one, which anybody who was handed it has; what makes a report
+ * credible is that this HAL gave THAT port a device to look at.
+ */
+int
+hal_driver_reg_known(mach_port_t port)
+{
+	int i;
+
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < HAL_MAX_DRIVER_REGS; i++)
+		if (regs[i].in_use && regs[i].driver_port == port)
+			return 1;
+
+	return 0;
+}
+
 static void
 notify_one(const struct hal_driver_reg *reg,
 	   const struct hal_device_info *dev)
@@ -105,6 +127,20 @@ void
 hal_driver_reg_handle_dead_name(mach_port_t dead_port)
 {
 	int i, cleared = 0;
+
+	/*
+	 * 🔴 THE DEVICES FIRST, AND THE SUBSCRIPTION AFTER (#513).  What a dead
+	 * driver leaves behind is not only a port nobody answers: it is every
+	 * device the registry still reports as bound to it, which is the
+	 * question a rescan has to ask before it may touch one.
+	 *
+	 * ⚠️ This releases the HAL's RECORD and not the kernel's claim.  The
+	 * kernel drops that itself, inside task_terminate, before this
+	 * notification could possibly arrive -- see the note there on why the
+	 * ordering is not a race.  Two records of the same fact, and the one
+	 * that gates DMA is not this one.
+	 */
+	(void) hal_registry_release_driver(dead_port);
 
 	for (i = 0; i < HAL_MAX_DRIVER_REGS; i++) {
 		if (!regs[i].in_use)

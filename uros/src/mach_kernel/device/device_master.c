@@ -325,11 +325,32 @@ check_master_port(ipc_port_t port)
  * first task to grant for a bus/device/function claims it, and a second task
  * naming it is refused.
  *
- * ⚠️ Claimed and never released, deliberately.  A driver task that dies leaves
- * its device claimed, and that is the safe direction: the alternative is a
- * device whose domain still holds the dead driver's pages being handed to
- * whoever asks next.  Releasing it properly means noticing the task died and
- * tearing the domain down with it, which is real work and is not this.
+ * 🔴 THE `task' FIELD IS COMPARED AND NEVER DEREFERENCED, and that is what
+ * decides how a dead driver has to be handled.  This comment used to say the
+ * claim was deliberately never released, and that leaving a dead driver's
+ * device claimed was "the safe direction".  It was the unsafe one (#513):
+ *
+ *	the pointer is stored WITHOUT a reference;
+ *	nothing ever dereferences it -- `claim.task == me' is the only use;
+ *	tasks come from a zone, so zfree()/zalloc() RECYCLE the address.
+ *
+ * ⇒ A later, unrelated task allocated into the dead driver's block compares
+ * equal and INHERITS the claim -- the IOMMU domain included.  🔑 It is not a
+ * use-after-free, and that is why it survived: nothing is dereferenced, so
+ * there is no invalid access for a checker or a fault to catch.  A silent
+ * false match reads exactly like a correct one.
+ *
+ * ⇒ TWO ANSWERS, AND THE SECOND IS THE ONE THAT MAKES IT IMPOSSIBLE.
+ * device_master_task_terminating() drops the entry when its owner dies, which
+ * empties the window; and the entry now HOLDS A REFERENCE on the task, so the
+ * address cannot be handed to anybody else while this table still names it.
+ * The first keeps the invariant, the second means the code cannot break it --
+ * and if the release ever regressed, the failure would be a device stuck
+ * claimed by a task that is gone, which is the direction the old comment
+ * claimed and did not have.
+ *
+ * ⚠️ The same shape as dma_region's `owner' three hundred lines down, which has
+ * held a reference since #432 for exactly this reason.
  */
 #define	DEVICE_MAX_CLAIMS	16
 
@@ -1938,6 +1959,7 @@ ds_master_device_claim(
 	device_claim[device_nclaims].bdf = bdf;
 	device_claim[device_nclaims].task = me;
 	device_claim[device_nclaims].cap_id = cap.cap_id;
+	task_reference(me);
 	device_nclaims++;
 
 	printf("device: %02x:%02x.%u (class 0x%06lx) is now driven by task "
@@ -1995,6 +2017,7 @@ device_master_cap_revoked(uint64_t cap_id)
 		       (unsigned)(bdf & 7));
 
 		(void) device_md_dma_release(bdf);
+		task_deallocate(device_claim[i].task);
 
 		/*
 		 * ⚠️ Compacted, and the loop index is NOT advanced: the entry
@@ -2004,6 +2027,103 @@ device_master_cap_revoked(uint64_t cap_id)
 		 * the same one -- so a revocation that stopped at the first
 		 * match would leave the rest reaching.
 		 */
+		device_claim[i] = device_claim[device_nclaims - 1];
+		device_nclaims--;
+		i--;
+	}
+}
+
+/*
+ * ── A driver that dies gives back what it was holding (#513) ─────────
+ *
+ * 🔴 THE OTHER WAY A MATERIALISED CAPABILITY ENDS.  device_master_cap_revoked
+ * above handles the deliberate withdrawal; this one handles the driver simply
+ * ceasing to exist, which is the commoner event and had no path at all.  What
+ * a dead driver left behind was all three of:
+ *
+ *	its CLAIM, keyed on a task_t that the zone allocator will hand to
+ *	somebody else -- see the note on device_claim[] for why a pointer that
+ *	is only ever compared is the dangerous kind;
+ *
+ *	its DOMAIN, a page table its device keeps walking, since nothing
+ *	consults a token to do that;
+ *
+ *	its BUFFERS, wired pages plus a task reference this file holds -- so
+ *	the task struct itself could never be freed either.
+ *
+ * 🔑 THE BUFFERS BEFORE THE CLAIMS, and it is the same order device_dma_free
+ * has for the same reason.  Dropping a region revokes the ranges lent to OTHER
+ * devices, whose domains belong to servers that are still running and must be
+ * reached one range at a time.  The dying task's own domain is not unmapped
+ * range by range: releasing the claim detaches the device, which takes every
+ * grant it held at once.
+ *
+ * ⚠️ The device is left detached and NOT restored to pass-through, for the
+ * reason iommu_domain_release() gives: a teardown that put the device back
+ * where it started would have widened its reach at the moment its driver died.
+ * A new driver that claims it builds a fresh domain.
+ */
+void
+device_master_task_terminating(task_t task)
+{
+	unsigned int i;
+
+	if (task == TASK_NULL)
+		return;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
+		struct dma_region	*r = &dma_region[i];
+		vm_offset_t		kva;
+		vm_size_t		size;
+
+		if (r->kva == 0)
+			continue;
+		if (r->owner != task && r->task != task)
+			continue;
+
+		kva = r->kva;
+		size = r->size;
+
+		printf("device: task 0x%lx died holding DMA region %llu (%lu "
+		       "bytes, lent to %u device%s) — taking it back\n",
+		       (unsigned long)task, (unsigned long long)r->id,
+		       (unsigned long)size, r->nusers,
+		       r->nusers == 1 ? "" : "s");
+
+		/*
+		 * ⚠️ The mapping in the dying task's own address space goes
+		 * down in here, before the pages do.  Its map is still alive:
+		 * this file's reference is one of the ones keeping it so, and
+		 * that is exactly why the hook cannot live on the free path.
+		 */
+		dma_region_drop(kva);
+		kmem_free(kernel_map, kva, size);
+	}
+
+	for (i = 0; i < device_nclaims; i++) {
+		natural_t	bdf;
+
+		if (device_claim[i].task != task)
+			continue;
+
+		bdf = device_claim[i].bdf;
+
+		printf("device: task 0x%lx died driving %02x:%02x.%u — the "
+		       "claim is dropped and the device is left reaching "
+		       "nothing\n", (unsigned long)task,
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 7));
+
+		(void) device_md_dma_release(bdf);
+
+		/*
+		 * ⚠️ The reference this entry held goes with it, and the caller
+		 * of task_terminate() still has one -- so the struct this is
+		 * running inside does not go away underneath it.
+		 */
+		task_deallocate(device_claim[i].task);
+
+		/* Compacted; see device_master_cap_revoked() on the index. */
 		device_claim[i] = device_claim[device_nclaims - 1];
 		device_nclaims--;
 		i--;

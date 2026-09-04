@@ -204,6 +204,33 @@ pthread_mutex_t		io_mutex;
 pthread_cond_t		io_condition;
 boolean_t		io_in_progress;
 
+/*
+ * ── Waiting for a `-w' server to be up (#513) ────────────────────────
+ *
+ * 🔴 THE FLAG IS SET BY ONE THREAD AND WAITED ON BY ANOTHER, and until this
+ * pair existed the waiter could not see it.  The `-w' loop used to run
+ * mach_msg_server_once() on bootstrap_set and re-test the flag after each
+ * message -- but bootstrap_service_thread() is receiving from that SAME port
+ * set, so the message that sets the flag is as likely to be taken by the
+ * service thread as by the waiter.  When it was, the waiter stayed blocked
+ * inside mach_msg with no timeout, waiting for a message that had already
+ * been delivered to somebody else, and the boot stopped where it stood.
+ *
+ * 🔑 It is the classic shape of two halves that have to agree: the condition
+ * was correct, the wake-up was correct, and nothing connected them.  A server
+ * that ANSWERS -- name_server, which sends bootstrap_completed() -- happened to
+ * survive it, because its message usually reached the waiter; a server that
+ * merely DIES could not, because the notification is one message and losing
+ * the draw is permanent.
+ *
+ * ⚠️ Which is why the comment on bootstrap_service_thread() -- "the old in-line
+ * mach_msg_server_once is kept for code-path compatibility but isn't exercised
+ * by any current bootstrap.conf" -- was true when it was written and stopped
+ * being true with #492, which put `-w' on the name server.
+ */
+static pthread_mutex_t	start_mutex;
+static pthread_cond_t	start_condition;
+
 /* ================================================================
  * Stage-2 boot path (Issue #185)
  *
@@ -256,15 +283,34 @@ strip_dev_prefix(const char *path)
 }
 
 /*
+ * A `-w' server is up -- because it said so, or because it died (#513).
+ *
+ * ⚠️ Every writer of bootstrap_completed goes through here.  There are three,
+ * in three different threads, and one of them is a notification handler: a
+ * plain store in any of them is a wake-up the waiter can miss.
+ */
+static void
+server_mark_completed(struct server *sp)
+{
+	pthread_mutex_lock(&start_mutex);
+	sp->bootstrap_completed = 1;
+	pthread_cond_broadcast(&start_condition);
+	pthread_mutex_unlock(&start_mutex);
+}
+
+/*
  * service_thread — runs the bootstrap demux loop on bootstrap_set so
  * the main thread can make synchronous RPCs (cap_request, netname_notify,
  * device_open_cap …) without deadlocking against children that need
  * bootstrap to answer their own bootstrap_ports / service_checkin /
  * bootstrap_get_module requests.  Started once, right after service_init.
  *
- * SERVER_SERIALIZE_F flag's old in-line mach_msg_server_once at the
- * bottom of the load loop is kept for code-path compatibility but isn't
- * exercised by any current bootstrap.conf.
+ * ⚠️ IT RECEIVES FROM bootstrap_set, WHICH IS WHY THE `-w' WAIT MUST NOT.
+ * This comment used to say the SERVER_SERIALIZE_F path "isn't exercised by any
+ * current bootstrap.conf", and that stopped being true with #492.  Two threads
+ * receiving from one port set share the messages out between them, so a waiter
+ * that also received here would lose the one it was waiting for whenever this
+ * loop got it first.  See start_condition (#513).
  */
 static void *
 bootstrap_service_thread(void *arg)
@@ -634,6 +680,8 @@ main(int argc, char **argv)
 	 */
 	pthread_cond_init(&io_condition, NULL);
 	pthread_mutex_init(&io_mutex, NULL);
+	pthread_cond_init(&start_condition, NULL);
+	pthread_mutex_init(&start_mutex, NULL);
 
 	/*
 	 * Get master host and device ports
@@ -1159,33 +1207,30 @@ main(int argc, char **argv)
 		panic("thread_resume 0x%x", kr);
 
 	    /*
-	     * If we are supposed to wait for this server to startup,
-	     * spin on handling messages until we get a bootstrap_completed
-	     * message.
+	     * If we are supposed to wait for this server to start up, wait
+	     * until it says so with bootstrap_completed() -- or until it dies,
+	     * which bootstrap_notify_dead_name() reports the same way.
+	     *
+	     * 🔴 WAIT ON THE FLAG AND NOT ON A MESSAGE (#513).  This loop used
+	     * to run mach_msg_server_once() on bootstrap_set and re-test the
+	     * flag after each message it handled itself.  bootstrap_service_thread
+	     * receives from that same port set, so whichever thread got to the
+	     * message decided whether this one ever woke: with the service
+	     * thread taking it, the flag was set and this loop stayed blocked
+	     * inside mach_msg with no timeout, for ever.
+	     *
+	     * ⚠️ A server that ANSWERS mostly survived that -- its reply is an
+	     * RPC this thread was likely to be the one receiving.  A server that
+	     * merely DIES could not: the dead-name notification is a single
+	     * message, and losing the draw once is losing it permanently.  The
+	     * boot then stopped with no panic and nothing printed, which is the
+	     * shape of failure this is worst at.
 	     */
 	    if (sp->flags & SERVER_SERIALIZE_F) {
-#ifdef DEBUG
-		int count = 0;
-		BOOTSTRAP_IO_LOCK();
-		printf("%s: Serializing wait on server %s\n",
-		       program_name, sp->server_name);
-		BOOTSTRAP_IO_UNLOCK();
-#endif
-		while (!sp->bootstrap_completed) {
-		    (void) mach_msg_server_once(bootstrap_demux,
-						bootstrap_msg_size,
-						bootstrap_set,
-						MACH_MSG_OPTION_NONE);
-#ifdef DEBUG
-		    count++;
-#endif
-		}
-#ifdef DEBUG
-		BOOTSTRAP_IO_LOCK();
-		printf("%s: Serializing wait completed; message count %d\n",
-		       program_name, count);
-		BOOTSTRAP_IO_UNLOCK();
-#endif
+		pthread_mutex_lock(&start_mutex);
+		while (!sp->bootstrap_completed)
+		    pthread_cond_wait(&start_condition, &start_mutex);
+		pthread_mutex_unlock(&start_mutex);
 	    }
 	    (void) mach_port_deallocate(bootstrap_self, user_thread);
 
@@ -1834,7 +1879,7 @@ do_bootstrap_completed(mach_port_t bootstrap,
 	}
 	if (i == nservers)
 	    return KERN_INVALID_ARGUMENT;
-	sp->bootstrap_completed = 1;
+	server_mark_completed(sp);
 	return KERN_SUCCESS;
 }
 
@@ -2070,7 +2115,7 @@ bootstrap_notify_dead_name(mach_port_t name)
 	sp->flags |= SERVER_DIED_F;
 
 	if (sp->flags & SERVER_SERIALIZE_F)
-	    sp->bootstrap_completed = 1;
+	    server_mark_completed(sp);
 
 	return KERN_SUCCESS;
 }
@@ -2188,7 +2233,7 @@ data_device_loop(void)
 		break;
 	    continue;
 	}
-	sp->bootstrap_completed = 1;
+	server_mark_completed(sp);
 	sp->mapbase = addr;
 	sp->mapsize = size;
 

@@ -376,6 +376,20 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/cap_test)
 endif()
 
+# What a task that dies leaves behind (#513).
+#
+# 🔑 It is ONE binary that the bundle names TWICE, because a reclaim cannot be
+# shown by an absence: "the dead task's regions are gone" and "it never had
+# any" are the same observation.  The first run fills the region table and
+# exits holding it; the second finds room, or does not.
+#
+# It needs no capability and no device -- DEVICE_DMA_NO_BDF names neither -- so
+# it is placed ahead of cap_server rather than beside the things it resembles,
+# and runs on any machine whether or not there is remapping hardware.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/dma_reclaim_test)
+endif()
+
 # hal_server on x86-64 (#427), and STARTED as of #457.
 #
 # 🔑 "It compiles" and "it runs" are two steps, and #427 took the first: every
@@ -557,6 +571,14 @@ endif()
 if(OSFMK_BUILD_CAP_TEST)
   add_subdirectory(tests/cap_test)
 endif()
+
+# What a task that dies leaves behind (#513).
+#
+# ⚠️ Unconditional, like kernel242_test and sig_test beside it, and NOT behind
+# a nineteenth OSFMK_BUILD_ knob.  The defect it measures is machine-
+# independent kernel bookkeeping, so there is no configuration of this target
+# where the question stops being worth asking.
+add_subdirectory(tests/dma_reclaim_test)
 
 # Build kernel242_test (#242 no-goto kernel exerciser)
 add_subdirectory(tests/kernel242_test)

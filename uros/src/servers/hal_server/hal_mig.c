@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "hal_server.h"
+#include "device_master.h"	/* #513: ask the kernel who holds it */
 
 kern_return_t
 hal_list_devices(mach_port_t hal_port,
@@ -178,5 +179,130 @@ hal_rescan(mach_port_t hal_port)
 {
 	(void)hal_port;
 	hal_run_discovery();
+	return KERN_SUCCESS;
+}
+
+/*
+ * ── A driver says what happened, and the HAL checks it (#513) ────────
+ *
+ * 🔴 THE ONE FACT THE HAL CANNOT GET ANYWHERE ELSE is whether the probe
+ * worked.  The kernel knows who HOLDS a device and the bus knows what is
+ * plugged into it; whether a controller came up is a fact about the driver, and
+ * before this routine there was nowhere for it to go.
+ *
+ * 🔑 BELIEVED ONLY AS FAR AS IT CAN BE CHECKED, and the two halves are checked
+ * against different parties:
+ *
+ *	the REPORTER -- against the HAL's own subscription table, so a report
+ *	from a port this HAL never handed a device to is refused;
+ *
+ *	the CLAIM -- against the KERNEL, because device_claim() is a
+ *	transaction with it and nobody else's record of it is authoritative.
+ *
+ * Without the second, this registry would be a second claim table free to
+ * disagree with the one that actually gates DMA -- the failure #427 removed a
+ * field for, moved one server along.
+ *
+ * ⚠️ device_dma_owned answers "is somebody OTHER THAN THE CALLER driving this",
+ * and that is the right question here for a reason worth keeping: the HAL is
+ * not a driver and never claims anything, so for it the answer is exactly "does
+ * a driver hold this device".  It is the same call that answered nothing useful
+ * in block_server.c -- where the caller WAS the driver -- and the difference is
+ * who is asking, not what is asked.
+ */
+kern_return_t
+hal_report_probe(mach_port_t hal_port,
+		 unsigned int bus, unsigned int slot, unsigned int func,
+		 mach_port_t driver_port, unsigned int outcome)
+{
+	const struct hal_device_info	*d;
+	natural_t			by_other = 0;
+	natural_t			bdf;
+
+	(void)hal_port;
+
+	/*
+	 * 🔴 THE RIGHT IS GIVEN BACK ONLY ON THE PATH THAT RETURNS SUCCESS, and
+	 * that is a rule about mach_msg_server rather than about this routine.
+	 * When a demux answers anything but KERN_SUCCESS, the loop in
+	 * libmach/mach_msg_server.c calls mach_msg_destroy() on the whole
+	 * REQUEST -- every port right in it included.  A routine that also
+	 * released one would be the second release of the same right.
+	 *
+	 * 🔥 Which is not theory: it took the subscription with it.  The right
+	 * arriving here coalesces into the name the driver registered with, so
+	 * one over-release destroyed that name -- and the next report from the
+	 * same driver arrived under a fresh one and was refused as a stranger.
+	 * One controller worked, the second did not, and nothing said why.
+	 */
+
+	if (!hal_driver_reg_known(driver_port)) {
+		printf("hal: probe report for %u:%u.%u REFUSED — port 0x%x is "
+		       "not a registered driver\n", bus, slot, func,
+		       (unsigned int)driver_port);
+		return KERN_NO_ACCESS;
+	}
+
+	d = hal_registry_get(bus, slot, func);
+	if (d == NULL) {
+		printf("hal: probe report for %u:%u.%u REFUSED — no such "
+		       "device in the registry\n", bus, slot, func);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	if (outcome != HAL_DEV_BOUND && outcome != HAL_DEV_PROBE_FAILED)
+		return KERN_INVALID_ARGUMENT;
+
+	if (outcome == HAL_DEV_BOUND) {
+		bdf = (natural_t)((bus << 8) | (slot << 3) | func);
+
+		if (device_dma_owned(master_device, bdf, &by_other)
+		    != KERN_SUCCESS || by_other == 0) {
+			printf("hal: %u:%u.%u reported BOUND and the kernel "
+			       "does not have it claimed — not recorded\n",
+			       bus, slot, func);
+			return KERN_FAILURE;
+		}
+	}
+
+	(void) hal_registry_set_driver_state(bus, slot, func,
+					     (uint32_t)outcome, driver_port);
+
+	printf("hal: %u:%u.%u is %s\n", bus, slot, func,
+	       outcome == HAL_DEV_BOUND
+	       ? "bound to a driver, and the kernel agrees it is held"
+	       : "unclaimed again — its driver probed and failed");
+
+	/*
+	 * ⚠️ And on THIS path it must be released, because nothing else will.
+	 * The subscription table already holds the right that matters; a driver
+	 * reporting once per controller per boot would otherwise leave one
+	 * behind every time.
+	 */
+	(void) mach_port_deallocate(mach_task_self(), driver_port);
+	return KERN_SUCCESS;
+}
+
+/*
+ * ── Which devices have drivers (#513) ────────────────────────────────
+ *
+ * ⚠️ A device that is present and unclaimed answers HAL_DEV_UNCLAIMED and
+ * SUCCESS.  "Nothing has bound it" is an answer, and the servers that will ask
+ * this -- to decide whether re-probing a device is safe -- need to tell it apart
+ * from "no such device", which is the error.
+ */
+kern_return_t
+hal_get_device_state(mach_port_t hal_port,
+		     unsigned int bus, unsigned int slot, unsigned int func,
+		     unsigned int *state)
+{
+	uint32_t s = HAL_DEV_UNCLAIMED;
+
+	(void)hal_port;
+
+	if (hal_registry_driver_state(bus, slot, func, &s) < 0)
+		return KERN_INVALID_ARGUMENT;
+
+	*state = (unsigned int)s;
 	return KERN_SUCCESS;
 }

@@ -47,7 +47,7 @@
 #include <mach/etap_events.h>
 
 /* #432: a revoked capability must take its mappings with it. */
-extern void device_master_cap_revoked(uint64_t cap_id);
+#include <device/device_master.h>
 
 /* --- state ---------------------------------------------------------- */
 
