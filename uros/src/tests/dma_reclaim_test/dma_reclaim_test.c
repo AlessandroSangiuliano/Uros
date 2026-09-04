@@ -268,6 +268,19 @@ become_a_driver(void)
 	kern_return_t	kr;
 	int		tries;
 
+	/*
+	 * 🔴 EVERY STEP SAYS IT IS ABOUT TO HAPPEN, and that is not decoration.
+	 * This program's line carries `-w', so bootstrap does not go on until it
+	 * says it is done -- which means any call here that does not return stops
+	 * the whole boot.  Three of them are RPCs to other servers, and a MIG RPC
+	 * has no timeout.
+	 *
+	 * ⚠️ A boot was caught stopping exactly here, with the header printed and
+	 * nothing after it, and the log could not say which call it was in.  A
+	 * fixture whose failure is fatal has to narrate.
+	 */
+	printf("dma_reclaim: looking the HAL up\n");
+
 	for (tries = 0; ; tries++) {
 		kr = netname_look_up(name_server_port, "", "hal", &hal_port);
 		if (kr == NETNAME_SUCCESS)
@@ -287,6 +300,8 @@ become_a_driver(void)
 	if (mach_port_insert_right(mach_task_self(), driver_port, driver_port,
 				   MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS)
 		return 0;
+
+	printf("dma_reclaim: registering with the HAL\n");
 
 	kr = hal_register_driver(hal_port, BRIDGE_MASK, BRIDGE_MATCH,
 				 driver_port);
@@ -311,6 +326,9 @@ claim_the_bridge(void)
 
 	memset(&tok, 0, sizeof(tok));
 
+	printf("dma_reclaim: asking cap_server for class 0x%06lx\n",
+	       (unsigned long)BRIDGE_CLASS);
+
 	kr = cap_request(RESOURCE_PCI_DEVICE, BRIDGE_CLASS,
 			 CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
 			 | CAP_OP_PCI_IRQ, 0, &tok);
@@ -320,6 +338,8 @@ claim_the_bridge(void)
 		       (unsigned long)BRIDGE_CLASS, (int)kr);
 		return 0;
 	}
+
+	printf("dma_reclaim: claiming 0:0.0 from the kernel\n");
 
 	kr = device_claim(device_port, BRIDGE_BDF, (char *)&tok, sizeof(tok));
 	if (kr != KERN_SUCCESS) {
@@ -380,6 +400,8 @@ main(int argc, char **argv)
 		if (become_a_driver() && claim_the_bridge()) {
 			kern_return_t rkr;
 
+			printf("dma_reclaim: reporting the bind to the HAL\n");
+
 			rkr = hal_report_probe(hal_port, 0, 0, 0, driver_port,
 					       HAL_DEV_BOUND);
 			printf("dma_reclaim: the holder holds 0:0.0 and told the "
@@ -400,6 +422,7 @@ main(int argc, char **argv)
 		 * holder was supposed to be holding, and measure the two tasks
 		 * racing instead of the kernel reclaiming.
 		 */
+		printf("dma_reclaim: releasing bootstrap\n");
 		(void) bootstrap_completed(bootstrap_port, mach_task_self());
 
 		die();
