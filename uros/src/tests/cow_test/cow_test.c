@@ -669,24 +669,21 @@ main(int argc, char **argv)
 	printf("cow_test: %d of 3 arms passed\n", passed);
 
 	/*
-	 * ⚠️ Does not exit, for the same reason fault_test does not: there is
-	 * no proc_server on this target to reap a task, and returning would
-	 * take the only thread out from under a program whose output the boot
-	 * log is still the record of.
+	 * 🔴 IT ENDS -- see the note at the end of fault_test's main for why
+	 * the reason that used to be here was never true (#513).
 	 *
-	 * It blocks in the kernel on a port nothing holds a send right to,
-	 * rather than spinning: a task that ends its life burning a processor
-	 * would change every measurement taken after it on this boot.
+	 * 🔑 And ending is worth more HERE than anywhere else in the bundle.
+	 * The old park was chosen so this task would not burn a processor,
+	 * "because a task that ends its life burning a processor would change
+	 * every measurement taken after it on this boot" -- and a task that
+	 * ends its life ASLEEP still holds its address space, which for the
+	 * copy-on-write test is the mirror plus everything the arms faulted
+	 * into being.  This program runs last precisely so the measurements
+	 * come before it; leaving its map behind was the same argument left
+	 * half finished.
+	 *
+	 * This program is single-threaded, so it is the last thread and the
+	 * task goes with it.
 	 */
-	(void) mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
-				  &quiet);
-
-	for (;;) {
-		mach_msg_header_t	junk;
-
-		(void) mach_msg(&junk, MACH_RCV_MSG, 0, sizeof junk, quiet,
-				MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-	}
-
-	return 0;
+	return passed == 3 ? 0 : 1;
 }

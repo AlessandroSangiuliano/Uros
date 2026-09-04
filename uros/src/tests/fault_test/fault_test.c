@@ -444,14 +444,23 @@ main(int argc, char **argv)
 	printf("fault_test: %d of 3 arms passed\n", passed);
 
 	/*
-	 * ⚠️ Does not exit.  There is no proc_server on this target to reap a
-	 * task and nothing waits for this one, so returning would take the
-	 * only thread out from under a program whose output the boot log is
-	 * still the record of.  It stops here on purpose.
+	 * 🔴 IT ENDS, and the note that used to be here said it must not.
+	 *
+	 * That note read: "returning would take the only thread out from under
+	 * a program whose output the boot log is still the record of".  The
+	 * premise was FALSE when it was written -- returning terminated
+	 * nothing, because crt0 routes it through pthread_exit(), where a
+	 * joinable main thread waited for a joiner it does not have (#513).  So
+	 * this loop was guarding against something that could not happen, while
+	 * the task it was protecting stayed alive holding its ports and its
+	 * address space for the rest of the boot either way.
+	 *
+	 * ⚠️ It is TRUE now, and returning is still right: printf reaches the
+	 * console synchronously, so by this line the log already has every word
+	 * this program is the record of.  There is nothing left to be taken out
+	 * from under.
+	 *
+	 * The exception thread is joined in arm two, so this is the last one.
 	 */
-	for (;;)
-		(void) mach_msg_server_once(exc_server, 4096, exc_port,
-					    MACH_MSG_OPTION_NONE);
-
-	return 0;
+	return passed == 3 ? 0 : 1;
 }
