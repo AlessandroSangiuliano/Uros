@@ -26,6 +26,9 @@ set(BLK_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/src/lib/libdl
   # The BAR decode's type, shared with the HAL that produces it (#427).
   ${CMAKE_SOURCE_DIR}/src/lib/libpci
+  # hal_state.h -- the three values the HAL sets and this server reports
+  # (#513).  One header rather than a copy per server: see the note in it.
+  ${CMAKE_SOURCE_DIR}/src/servers/hal_server
   ${CMAKE_SOURCE_DIR}/src/lib/libgpu_console
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include

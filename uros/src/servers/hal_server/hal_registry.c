@@ -34,6 +34,19 @@
 static struct hal_device_info registry[HAL_MAX_DEVICES];
 static int n_registry;
 
+/*
+ * Who reported binding each device (#513).
+ *
+ * 🔑 BESIDE THE RECORD AND NOT IN IT.  hal_list_devices hands the record out as
+ * untyped out-of-line bytes, and a port name copied that way is a number in the
+ * HAL's namespace that means nothing in the reader's -- a right cannot travel
+ * in a byte array.  What the reader is owed is the STATE, which is in the
+ * record; who holds the device is the HAL's own business, and this is where it
+ * keeps it.
+ */
+static mach_port_t driver_port[HAL_MAX_DEVICES];
+static uint32_t    driver_state[HAL_MAX_DEVICES];
+
 static int
 find_index(unsigned int bus, unsigned int slot, unsigned int func)
 {
@@ -57,10 +70,25 @@ hal_registry_add(const struct hal_device_info *dev)
 
 	existing = find_index(dev->bus, dev->slot, dev->func);
 	if (existing >= 0) {
-		/* Same BDF: refresh the entry but report as duplicate so
+		/*
+		 * Same BDF: refresh the entry but report as duplicate so
 		 * the caller does not fire a fresh hal_device_added.  #173
 		 * relies on this to keep hal_rescan idempotent when no
-		 * topology changed. */
+		 * topology changed.
+		 *
+		 * 🔑 AND IT STAYS WHOLESALE, which is the point of keeping the
+		 * driver state out of this record (#513).  A scan reports what
+		 * the bus says; who bound the device is not in here to be
+		 * overwritten, so the refresh cannot lose it and nobody has to
+		 * remember that it must not.
+		 *
+		 * ⚠️ That is the defect #427 described in the `status' field it
+		 * removed -- a rescan resetting a value on a device already
+		 * bound -- and it could not be demonstrated there because the
+		 * value the refresh overwrote was the value it wrote.  Fixing
+		 * it by copying the field across would have left the same line
+		 * one edit away from doing it again.
+		 */
 		registry[existing] = *dev;
 		return HAL_REGISTRY_ADD_EXISTING;
 	}
@@ -71,8 +99,78 @@ hal_registry_add(const struct hal_device_info *dev)
 		return HAL_REGISTRY_ADD_ERROR;
 	}
 
-	registry[n_registry++] = *dev;
+	registry[n_registry] = *dev;
+	driver_state[n_registry] = HAL_DEV_UNCLAIMED;
+	driver_port[n_registry] = MACH_PORT_NULL;
+	n_registry++;
 	return HAL_REGISTRY_ADD_NEW;
+}
+
+int
+hal_registry_set_driver_state(unsigned int bus, unsigned int slot,
+			      unsigned int func, uint32_t state,
+			      mach_port_t port)
+{
+	int i = find_index(bus, slot, func);
+
+	if (i < 0)
+		return -1;
+
+	driver_state[i] = state;
+
+	/*
+	 * ⚠️ The port is remembered only for a device that is HELD.  A driver
+	 * that reported a failure has given the device back -- see the
+	 * cap_revoke in block_server.c -- so keeping its port here would make
+	 * a later dead-name release a device it does not have.
+	 */
+	driver_port[i] = (state == HAL_DEV_BOUND) ? port : MACH_PORT_NULL;
+	return 0;
+}
+
+int
+hal_registry_driver_state(unsigned int bus, unsigned int slot,
+			  unsigned int func, uint32_t *state)
+{
+	int i = find_index(bus, slot, func);
+
+	if (i < 0)
+		return -1;
+
+	*state = driver_state[i];
+	return 0;
+}
+
+int
+hal_registry_is_bound(unsigned int bus, unsigned int slot, unsigned int func)
+{
+	int i = find_index(bus, slot, func);
+
+	return i >= 0 && driver_state[i] == HAL_DEV_BOUND;
+}
+
+int
+hal_registry_release_driver(mach_port_t port)
+{
+	int i, released = 0;
+
+	if (port == MACH_PORT_NULL)
+		return 0;
+
+	for (i = 0; i < n_registry; i++) {
+		if (driver_port[i] != port)
+			continue;
+
+		printf("hal: %u:%u.%u released — the driver that bound it is "
+		       "gone\n", registry[i].bus, registry[i].slot,
+		       registry[i].func);
+
+		driver_state[i] = HAL_DEV_UNCLAIMED;
+		driver_port[i] = MACH_PORT_NULL;
+		released++;
+	}
+
+	return released;
 }
 
 int

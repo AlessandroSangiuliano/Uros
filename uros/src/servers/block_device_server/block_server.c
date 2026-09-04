@@ -55,6 +55,7 @@
 #include "device_server.h"
 #include "ahci_batch_server.h"
 #include "hal.h"
+#include <hal_state.h>	/* #513: HAL_DEV_* -- the same three numbers the HAL sets */
 #include "hal_notify_server.h"
 #include "cap_revoke_server.h"
 #include "gpu_console.h"
@@ -105,6 +106,10 @@ static int claim_device_for_driver(unsigned int bus, unsigned int slot,
 static void pci_probe_module(const struct block_driver_ops *ops,
 			     unsigned int bus, unsigned int slot,
 			     unsigned int func, uint64_t claimed_cap_id);
+static void report_and_read_back(unsigned int bus, unsigned int slot,
+				 unsigned int func, unsigned int outcome);
+static void rescan_leaves_bound_devices_alone(void);
+static void claim_this_server_does_not_have(void);
 
 /* ================================================================
  * HAL notification callback — invoked by hal_notify_server()
@@ -223,6 +228,154 @@ claim_device_for_driver(unsigned int bus, unsigned int slot, unsigned int func,
 }
 
 /*
+ * ── Telling the HAL what happened, and reading it back (#513) ────────
+ *
+ * 🔴 THE READ-BACK IS THE POINT, and it is what the removed `status' field
+ * could never have produced.  That one was reported by two RPCs and set by
+ * nothing, so every reader saw its initial value and believed it.  What shows
+ * this one carries information is a client reading a value a client SET -- and
+ * a second device, in the same breath, still reading the initial one.
+ *
+ * ⚠️ 0:0.0 is the control and it is chosen rather than convenient: the host
+ * bridge is on every board this runs on, it is in the registry because the scan
+ * found it, and no driver will ever claim it.  A control that was absent would
+ * make this arm pass by returning an error, which is the shape of proof this
+ * whole issue exists to avoid.
+ */
+static void
+report_and_read_back(unsigned int bus, unsigned int slot, unsigned int func,
+		     unsigned int outcome)
+{
+	kern_return_t	kr;
+	unsigned int	got = 0, control = 0;
+
+	kr = hal_report_probe(hal_service_port, bus, slot, func,
+			      hal_driver_port, outcome);
+	if (kr != KERN_SUCCESS) {
+		printf("blk: the HAL would not record %u:%u.%u as %u "
+		       "(kr=%d)\n", bus, slot, func, outcome, (int)kr);
+		return;
+	}
+
+	if (hal_get_device_state(hal_service_port, bus, slot, func, &got)
+	    != KERN_SUCCESS) {
+		printf("blk: the HAL has no state for %u:%u.%u\n",
+		       bus, slot, func);
+		return;
+	}
+
+	if (hal_get_device_state(hal_service_port, 0, 0, 0, &control)
+	    != KERN_SUCCESS)
+		control = (unsigned int)-1;
+
+	if (got == outcome && control == HAL_DEV_UNCLAIMED)
+		printf("blk: the HAL says %u:%u.%u is %u and 0:0.0 is still "
+		       "%u — the registry reports a value a client set, and "
+		       "one it did not\n",
+		       bus, slot, func, got, control);
+	else
+		printf("blk: WRONG — reported %u for %u:%u.%u, read back %u; "
+		       "the unclaimed control 0:0.0 reads %u\n",
+		       outcome, bus, slot, func, got, control);
+
+	if (outcome == HAL_DEV_BOUND)
+		claim_this_server_does_not_have();
+}
+
+/*
+ * ── Making the HAL's check fire, rather than assuming it would (#513) ─
+ *
+ * 🔴 A GUARD THAT IS ALWAYS TRUE IS WORSE THAN NO GUARD.  Every report this
+ * server makes is honest, so the HAL's "ask the kernel whether it is really
+ * held" would answer yes on every boot for ever and never be seen to do
+ * anything.  The only way to know it discriminates is to make it say no.
+ *
+ * So: report BOUND for the host bridge, which this server has not claimed and
+ * would not know what to do with.  The report is well formed and comes from a
+ * registered driver port -- everything the HAL could check about the REPORTER
+ * passes -- so the only thing that can refuse it is the kernel's answer about
+ * the DEVICE.
+ *
+ * ⚠️ And the refusal is confirmed by a reading, not by a return code alone: a
+ * call that failed for some other reason returns an error too.  0:0.0 must
+ * still read UNCLAIMED afterwards, which says the registry was not written.
+ */
+static void
+claim_this_server_does_not_have(void)
+{
+	kern_return_t	kr;
+	unsigned int	state = (unsigned int)-1;
+
+	kr = hal_report_probe(hal_service_port, 0, 0, 0, hal_driver_port,
+			      HAL_DEV_BOUND);
+
+	if (hal_get_device_state(hal_service_port, 0, 0, 0, &state)
+	    != KERN_SUCCESS)
+		state = (unsigned int)-1;
+
+	if (kr != KERN_SUCCESS && state == HAL_DEV_UNCLAIMED)
+		printf("blk: the HAL refused this server's claim on 0:0.0 "
+		       "(kr=%d) and left it %u — it checks the kernel and does "
+		       "not take a driver's word\n", (int)kr, state);
+	else
+		printf("blk: WRONG — the HAL accepted a claim on 0:0.0 that "
+		       "this server does not hold (kr=%d), and it now reads "
+		       "%u\n", (int)kr, state);
+}
+
+/*
+ * ── A rescan must not forget who owns what (#513) ────────────────────
+ *
+ * 🔴 THE DEFECT THIS ANSWERS COULD NOT BE OBSERVED BEFORE.  hal_registry_add()
+ * refreshes a known device wholesale on every scan, and this server calls
+ * hal_rescan() on every boot -- so any field the scan does not produce was
+ * silently reset.  #427 found that reasoning about the `status' field it was
+ * removing and could not demonstrate it: the value the refresh overwrote was
+ * the value it wrote, so the loss was invisible.  With a field a client sets,
+ * the same line is a real loss and this is the arm that sees it.
+ *
+ * ⚠️ Run AFTER the probes, which is the whole point.  The rescan this server
+ * already did inside hal_subscribe() happens before anything is bound, so it
+ * could never have shown this: it asked the question while the answer was
+ * still the default.
+ */
+static void
+rescan_leaves_bound_devices_alone(void)
+{
+	unsigned int	before = 0, after = 0;
+	kern_return_t	kr;
+	unsigned int	bus, slot, func;
+
+	if (n_controllers == 0)
+		return;
+
+	bus  = controllers[0].pci_bus;
+	slot = controllers[0].pci_slot;
+	func = controllers[0].pci_func;
+
+	if (hal_get_device_state(hal_service_port, bus, slot, func, &before)
+	    != KERN_SUCCESS)
+		return;
+
+	kr = hal_rescan(hal_service_port);
+
+	if (hal_get_device_state(hal_service_port, bus, slot, func, &after)
+	    != KERN_SUCCESS) {
+		printf("blk: WRONG — %u:%u.%u vanished from the registry "
+		       "across a rescan\n", bus, slot, func);
+		return;
+	}
+
+	if (before == HAL_DEV_BOUND && after == before)
+		printf("blk: a rescan (kr=%d) left %u:%u.%u bound — the "
+		       "refresh no longer overwrites what the scan does not "
+		       "produce\n", (int)kr, bus, slot, func);
+	else
+		printf("blk: WRONG — %u:%u.%u was %u before the rescan and %u "
+		       "after\n", bus, slot, func, before, after);
+}
+
+/*
  * Probe a matched PCI device: allocate IRQ port, call module probe,
  * enumerate disks, parse MBR for each disk.
  */
@@ -299,6 +452,8 @@ pci_probe_module(const struct block_driver_ops *ops,
 		printf("blk: %s probe failed at PCI %u:%u.%u\n",
 		       ops->name, bus, slot, func);
 
+		report_and_read_back(bus, slot, func, HAL_DEV_PROBE_FAILED);
+
 		/*
 		 * 🔑 AND THE DEVICE GOES BACK, which is both the right thing
 		 * and the thing that shows revocation works.  A driver that
@@ -372,6 +527,8 @@ pci_probe_module(const struct block_driver_ops *ops,
 	       ops->name, bus, slot, func, nd);
 
 	n_controllers++;
+
+	report_and_read_back(bus, slot, func, HAL_DEV_BOUND);
 
 	/*
 	 * Stable disk numbering (Issue #184): give every disk a global
@@ -667,6 +824,8 @@ main(int argc, char **argv)
 		return 1;
 
 	hal_drain_replay();
+
+	rescan_leaves_bound_devices_alone();
 
 	if (n_partitions == 0) {
 		/*

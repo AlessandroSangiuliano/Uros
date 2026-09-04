@@ -52,25 +52,29 @@
 #define HAL_MAX_BARS		6
 
 /* ================================================================
- * Device status — removed (#427)
+ * Which devices have drivers (#513)
  *
- * There were four values.  Every scan set the record to UNBOUND and nothing
- * ever set anything else: hal_registry_set_status() existed and no code
- * called it, so the field was delivered by get_device_info and by
- * hal_device_added, printed by the registry dump, and was the same number
- * forever.  Its one consumer discarded it explicitly -- `(void)status;' in
- * block_server.c.
+ * #427 removed a four-value `status' field because nothing could change it:
+ * every scan wrote UNBOUND, hal_registry_set_status() was called by no code,
+ * and its one consumer discarded it explicitly -- `(void)status;'.  🔑 A field
+ * two RPCs report and nothing can change is worse than a field that is not
+ * there, because a reader believes it.
  *
- * 🔑 A field two RPCs report and nothing can change is worse than a field
- * that is not there, because a reader believes it.  Worse still, a rescan
- * refreshed the whole record and so would have reset any status that HAD
- * been set, silently, on a device already bound -- a defect that could not
- * be observed only because the value it overwrote was the value it wrote.
+ * 🔴 SO THESE THREE VALUES EXIST ONLY BECAUSE EACH ONE IS WRITTEN BY SOMEBODY.
+ * A driver reports the outcome of its probe through hal_report_probe(), which
+ * is the RPC that did not exist and is why the old field could not work.  There
+ * is deliberately no PROBING state: nothing would set it, and a fourth value
+ * nobody writes would put back exactly what was removed.
  *
- * ⚠️ What it was reaching for is real: a registry that knows which devices
- * have drivers.  That needs a driver to say so -- there is no such RPC --
- * and it is device lifecycle, not BAR decoding.  #513.
+ * ⚠️ And BOUND is not taken on the driver's word.  Claiming a device is a
+ * transaction with the KERNEL -- device_claim() in <device/device_master.defs>
+ * -- so the HAL asks the kernel whether the device is really held before it
+ * records that it is.  A registry that believed its clients would be a second
+ * claim table able to disagree with the real one, which is the same failure
+ * moved one server along.
  * ================================================================ */
+
+#include <hal_state.h>		/* HAL_DEV_* -- shared with the drivers */
 
 /* ================================================================
  * Device record
@@ -114,6 +118,22 @@ struct hal_device_info {
 	 */
 	uint32_t		n_bars;
 	struct pci_bar_region	bars[HAL_MAX_BARS];
+
+	/*
+	 * 🔴 WHICH DRIVER BOUND THIS DEVICE IS NOT IN HERE, and #513 put it
+	 * here first and moved it out.  This record is what a SCAN produces --
+	 * what the bus says about a device -- and hal_registry_add() refreshes
+	 * it wholesale every time a rescan sees the same BDF.  A field the scan
+	 * cannot produce, kept in the record the scan overwrites, survives only
+	 * because somebody remembered to copy it across; and that is the defect
+	 * #427 described in the field it removed, rebuilt with a guard in front
+	 * of it.
+	 *
+	 * 🔑 Kept beside the registry instead, where the refresh cannot reach
+	 * it: impossible rather than remembered.  hal_get_device_state() is how
+	 * it is read, and it is a separate routine for a second reason -- this
+	 * one changes while a machine runs and everything above it does not.
+	 */
 };
 
 /* ================================================================
@@ -183,6 +203,33 @@ const struct hal_device_info *hal_registry_get(unsigned int bus,
 int  hal_registry_copy_all(struct hal_device_info *out, unsigned int max);
 
 /* ================================================================
+ * Which device has which driver (#513)
+ * ================================================================ */
+
+/*
+ * Record the outcome a driver reported.  `driver_port' is remembered next to
+ * the device -- not in the record above -- so a driver that dies can have its
+ * devices released without asking anybody.
+ */
+int  hal_registry_set_driver_state(unsigned int bus, unsigned int slot,
+				   unsigned int func, uint32_t state,
+				   mach_port_t driver_port);
+
+/* HAL_DEV_* for one device, or -1 if there is no such device. */
+int  hal_registry_driver_state(unsigned int bus, unsigned int slot,
+			       unsigned int func, uint32_t *state);
+
+/*
+ * Release every device bound by this driver port and answer how many.  Called
+ * when the kernel says the port is dead.
+ */
+int  hal_registry_release_driver(mach_port_t driver_port);
+
+/* Whether any driver is bound to this device -- for the rescan guard. */
+int  hal_registry_is_bound(unsigned int bus, unsigned int slot,
+			   unsigned int func);
+
+/* ================================================================
  * Driver subscription API (hal_driver_reg.c)
  * ================================================================ */
 
@@ -203,6 +250,11 @@ void hal_driver_reg_replay(int reg_slot);
  * the demux when the kernel delivers a MACH_NOTIFY_DEAD_NAME).
  */
 void hal_driver_reg_handle_dead_name(mach_port_t dead_port);
+/*
+ * Whether this port is one a driver registered with (#513).  A probe report
+ * from a port the HAL never subscribed is refused.
+ */
+int  hal_driver_reg_known(mach_port_t port);
 
 /* ================================================================
  * Global state (defined in hal_server.c)

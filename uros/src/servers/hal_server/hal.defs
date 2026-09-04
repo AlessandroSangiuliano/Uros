@@ -80,3 +80,48 @@ routine get_device_bars(
 	in	func		: unsigned;
 	out	bars		: pointer_t, Dealloc;
 	out	n_bars		: unsigned);
+
+/*
+ * #513 — a driver says what happened when it probed a device.
+ *
+ * 🔴 THE OUTCOME IS THE ONE FACT NOBODY ELSE HAS.  The kernel knows who HOLDS a
+ * device -- device_claim() is a transaction with it -- and the bus knows what is
+ * plugged in.  Whether a driver brought a controller up is a fact about the
+ * driver, and until this routine existed there was no way for it to reach the
+ * registry: hal_register_driver subscribes to a class, hal_device_added is a
+ * simpleroutine with no reply, and a driver probed and was never asked again.
+ *
+ * ⚠️ `driver_port' is the port the driver registered with, and the HAL matches
+ * it against its subscription table rather than trusting the report's contents.
+ * A report from a port the HAL never handed a device to is refused.
+ *
+ * 🔑 AND A SUCCESS IS CHECKED AGAINST THE KERNEL.  Recording BOUND on the
+ * driver's word would make this registry a second claim table, free to disagree
+ * with the one that actually gates DMA -- which is the failure #427 removed a
+ * field for, moved one server along.  So the HAL asks whether the device is
+ * really held before it believes the report.
+ *
+ * Appended at the end so the existing msg ids stay stable.
+ */
+routine report_probe(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	in	driver_port	: mach_port_t;
+	in	outcome		: unsigned);
+
+/*
+ * #513 — which devices have drivers, which is what a HAL is for.
+ *
+ * ⚠️ Its own routine rather than another out-parameter on get_device_info,
+ * because this one changes while a machine runs and the rest of that record
+ * does not.  A reader that wanted the current state would have had to re-read
+ * the vendor and the class to get it.
+ */
+routine get_device_state(
+		hal_port	: mach_port_t;
+	in	bus		: unsigned;
+	in	slot		: unsigned;
+	in	func		: unsigned;
+	out	state		: unsigned);
