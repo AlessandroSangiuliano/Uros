@@ -340,8 +340,17 @@ check_master_port(ipc_port_t port)
  * there is no invalid access for a checker or a fault to catch.  A silent
  * false match reads exactly like a correct one.
  *
- * device_master_task_terminating() is the answer, and it is why the field can
- * stay reference-free: the entry does not outlive the task.
+ * ⇒ TWO ANSWERS, AND THE SECOND IS THE ONE THAT MAKES IT IMPOSSIBLE.
+ * device_master_task_terminating() drops the entry when its owner dies, which
+ * empties the window; and the entry now HOLDS A REFERENCE on the task, so the
+ * address cannot be handed to anybody else while this table still names it.
+ * The first keeps the invariant, the second means the code cannot break it --
+ * and if the release ever regressed, the failure would be a device stuck
+ * claimed by a task that is gone, which is the direction the old comment
+ * claimed and did not have.
+ *
+ * ⚠️ The same shape as dma_region's `owner' three hundred lines down, which has
+ * held a reference since #432 for exactly this reason.
  */
 #define	DEVICE_MAX_CLAIMS	16
 
@@ -1950,6 +1959,7 @@ ds_master_device_claim(
 	device_claim[device_nclaims].bdf = bdf;
 	device_claim[device_nclaims].task = me;
 	device_claim[device_nclaims].cap_id = cap.cap_id;
+	task_reference(me);
 	device_nclaims++;
 
 	printf("device: %02x:%02x.%u (class 0x%06lx) is now driven by task "
@@ -2007,6 +2017,7 @@ device_master_cap_revoked(uint64_t cap_id)
 		       (unsigned)(bdf & 7));
 
 		(void) device_md_dma_release(bdf);
+		task_deallocate(device_claim[i].task);
 
 		/*
 		 * ⚠️ Compacted, and the loop index is NOT advanced: the entry
@@ -2104,6 +2115,13 @@ device_master_task_terminating(task_t task)
 		       (unsigned)(bdf & 7));
 
 		(void) device_md_dma_release(bdf);
+
+		/*
+		 * ⚠️ The reference this entry held goes with it, and the caller
+		 * of task_terminate() still has one -- so the struct this is
+		 * running inside does not go away underneath it.
+		 */
+		task_deallocate(device_claim[i].task);
 
 		/* Compacted; see device_master_cap_revoked() on the index. */
 		device_claim[i] = device_claim[device_nclaims - 1];

@@ -20,6 +20,15 @@ set(DR_MIG_GENERATED)
 add_mig_userland(${UROS_UAPI_DIR}/device/device_master.defs ${_DR_OUT} DR_MIG)
 list(REMOVE_ITEM DR_MIG_GENERATED ${_DR_OUT}/device_master_server.c)
 
+# hal.defs, user half: the second half of #513 needs a task that BINDS a device
+# and then dies, so this program registers as a driver, reports a probe, and is
+# gone -- which is the only way the HAL's dead-name release has a witness.
+set(DR_HAL_GENERATED)
+add_mig_userland(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
+                 ${_DR_OUT} DR_HAL)
+list(REMOVE_ITEM DR_HAL_GENERATED ${_DR_OUT}/hal_server.c)
+list(APPEND DR_MIG_GENERATED ${DR_HAL_GENERATED})
+
 add_executable(dma_reclaim_test_server
   dma_reclaim_test.c ${DR_MIG_GENERATED}
 )
@@ -40,6 +49,8 @@ target_compile_definitions(dma_reclaim_test_server PRIVATE
 
 target_include_directories(dma_reclaim_test_server PRIVATE
   ${_DR_OUT}
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
+  ${CMAKE_SOURCE_DIR}/src/servers/hal_server
   ${CMAKE_SOURCE_DIR}/uapi
   ${CMAKE_SOURCE_DIR}/src/lib/libpthreads
   ${CMAKE_BINARY_DIR}/generated/include
@@ -52,6 +63,8 @@ target_include_directories(dma_reclaim_test_server PRIVATE
 target_link_libraries(dma_reclaim_test_server PRIVATE
   -Wl,--start-group
   libpthreads
+  libnetname
+  libcap
   libmach
   -Wl,--end-group
 )
@@ -66,3 +79,35 @@ set_target_properties(dma_reclaim_test_server PROPERTIES
   OUTPUT_NAME "dma_reclaim_test"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The manifest — what this program is allowed to hold (#513)
+# ===========================================================================
+#
+# 🔴 IT DECLARES A PCI DEVICE, which cap_test's manifest deliberately does not.
+# The two say opposite things on purpose: cap_test [13] reads back a REFUSAL for
+# a class it never declared, and this one has to be ISSUED one, because the
+# second half of #513 is a task that really claims a device and then dies.
+#
+# ⚠️ The class is the HOST BRIDGE and that is a safety decision, not a
+# convenience.  This program takes a device and abandons it; picking the disk
+# controller would mean that a release which did not work takes the boot disk
+# with it, and a test that breaks the mature suite when it fails is a test
+# nobody will keep.  0:0.0 is on every board these targets run on and no driver
+# will ever want it.
+set(DR_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/dma_reclaim_test.manifest)
+set(DR_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/dma_reclaim_test.cmf")
+
+add_custom_command(
+  OUTPUT ${DR_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${DR_MANIFEST_OUT} ${DR_MANIFEST_SRC}
+  DEPENDS mkmanifest ${DR_MANIFEST_SRC}
+  COMMENT "mkmanifest: dma_reclaim_test.manifest -> dma_reclaim_test.cmf"
+  VERBATIM
+)
+
+add_custom_target(dma_reclaim_test_manifest ALL DEPENDS ${DR_MANIFEST_OUT})
+add_dependencies(dma_reclaim_test_server dma_reclaim_test_manifest)

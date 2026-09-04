@@ -572,14 +572,21 @@ hal_subscribe(void)
 	 * lines before the lookup.  Same two events, opposite order -- a
 	 * plain startup race (#460).
 	 *
-	 * Losing that race used to end main() with a single printf, and a
-	 * server whose main() returns does NOT die: the crt calls
-	 * pthread_exit(), the last thread parks in the libpthreads pool, and
-	 * the task stays alive answering nothing.  So 'disk0a' was never
-	 * registered, bootstrap sat in "stage-2: waiting for 'disk0a'"
-	 * forever, no test ever ran, and all four processors went idle --
-	 * a boot that looks hung from outside with nothing in the log to say
-	 * why.  That is the whole early-wedge mode of #460.
+	 * Losing that race used to end main() with a single printf, and at the
+	 * time a server whose main() returned did NOT die: crt0 called
+	 * pthread_exit(), where a joinable main thread waited to be joined by
+	 * a joiner that does not exist, and the task stayed alive answering
+	 * nothing.  So 'disk0a' was never registered, bootstrap sat in
+	 * "stage-2: waiting for 'disk0a'" forever, no test ever ran, and all
+	 * four processors went idle -- a boot that looks hung from outside
+	 * with nothing in the log to say why.  That is the whole early-wedge
+	 * mode of #460.
+	 *
+	 * ⚠️ THAT HALF IS FIXED AND THE WAIT IS STILL RIGHT (#513).  A return
+	 * from main() is exit() now, so the task would die rather than linger
+	 * -- which turns a silent wedge into a server that is simply gone, and
+	 * bootstrap still waits for a name nobody will register.  What removes
+	 * the failure is winning the race, not how loudly losing it ends.
 	 */
 	for (tries = 0; ; tries++) {
 		kr = netname_look_up(name_server_port, "", "hal",
