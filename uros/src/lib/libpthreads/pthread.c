@@ -253,6 +253,61 @@ static pthread_lock_t _thread_pool_lock = 0;	/* Protects pool */
 static int _pthread_live_count = 1;	/* the main thread, before any create */
 static pthread_lock_t _pthread_live_lock = 0;
 
+/*
+ * How long a thread waiting to be joined sleeps before asking the kernel
+ * whether anybody is left who could join it.  Long, because the answer only
+ * matters to a thread that is never going to be joined at all, and a thread
+ * that IS joined never reaches the timeout.
+ */
+#define _PTHREAD_ORPHAN_CHECK_MS	2000
+
+/*
+ * ── The kernel's answer to "is anybody else left?" (#513) ────────────
+ *
+ * 🔴 THE COUNTER ABOVE CANNOT SEE A THREAD THE KERNEL TOOK AWAY, so where being
+ * wrong means sleeping for ever, ask the party that can.  task_threads() is the
+ * authority: a thread destroyed by thread_terminate is gone from it, whether or
+ * not it ever ran a line of this library.
+ *
+ * 🔑 PARKED THREADS ARE SUBTRACTED, and that is what makes the two answers
+ * comparable.  A pooled thread is a live KERNEL thread and a dead pthread -- it
+ * has already been through pthread_exit -- so counting kernel threads alone
+ * would say "somebody is still here" about a process whose every pthread has
+ * finished.
+ *
+ * ⚠️ It answers NO when it cannot tell.  A failed RPC, and every path that does
+ * not reach the end, leaves the process running: this decision can only be
+ * allowed to err in the direction the counter errs, which is towards a process
+ * that outlives its work rather than one that ends before it.
+ *
+ * ⚠️ Every right it is handed is given back.  task_threads() returns a send
+ * right per thread in out-of-line memory, and a caller that drops them leaks
+ * one port per call on a path that runs once per stuck thread per two seconds.
+ */
+static int
+_pthread_only_thread_left(void)
+{
+	thread_act_array_t	list = 0;
+	mach_msg_type_number_t	n = 0, i;
+	int			parked, alone;
+
+	if (task_threads(mach_task_self(), &list, &n) != KERN_SUCCESS)
+		return 0;
+
+	LOCK(_thread_pool_lock);
+	parked = _thread_pool_count;
+	UNLOCK(_thread_pool_lock);
+
+	alone = ((int) n - parked) <= 1;
+
+	for (i = 0; i < n; i++)
+		(void) mach_port_deallocate(mach_task_self(), list[i]);
+	(void) vm_deallocate(mach_task_self(), (vm_address_t) list,
+			     n * sizeof (*list));
+
+	return alone;
+}
+
 /* Answers nonzero when the caller was the last one. */
 static int
 _pthread_live_leave(void)
@@ -1006,10 +1061,29 @@ pthread_exit(void *value_ptr)
 		UNLOCK(self->lock);
 		if (num_joiners > 0)
 			_pthread_futex_wake_all(PTH_FW(self->joiners));
-		/* Wait on the death futex until the joiner that harvests our
-		 * exit value releases us by setting it non-zero. */
-		while (*PTH_FW(self->death) == 0)
-			(void) _pthread_futex_wait(PTH_FW(self->death), 0, 0);
+		/*
+		 * Wait on the death futex until the joiner that harvests our
+		 * exit value releases us by setting it non-zero.
+		 *
+		 * 🔴 BOUNDED, BECAUSE THE JOINER MAY NOT EXIST (#513).  The
+		 * count above is blind to a thread the kernel terminated, so
+		 * it can read high for ever and leave the last real thread
+		 * sleeping here for a joiner that was destroyed.  On each
+		 * timeout ask the kernel instead, which knows.
+		 *
+		 * 🔑 The cost is on the thread that is stuck and on no other.
+		 * A thread whose joiner arrives is woken by the futex and
+		 * never reaches the timeout, so the join-heavy path -- which
+		 * is the one that is measured -- makes no extra call at all.
+		 */
+		while (*PTH_FW(self->death) == 0) {
+			(void) _pthread_futex_wait(PTH_FW(self->death), 0,
+						   _PTHREAD_ORPHAN_CHECK_MS);
+			if (*PTH_FW(self->death) != 0)
+				break;
+			if (_pthread_only_thread_left())
+				exit(0);
+		}
 	} else
 		UNLOCK(self->lock);
 	/* #324: nothing to destroy — joiners/death/sig_sem are futex words
