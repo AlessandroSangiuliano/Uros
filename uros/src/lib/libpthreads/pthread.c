@@ -229,31 +229,26 @@ static pthread_lock_t _thread_pool_lock = 0;	/* Protects pool */
 /*
  * ── How many pthreads are still live, and why anybody cares (#513) ────
  *
- * 🔴 RETURNING FROM main() DID NOT TERMINATE THE TASK, on either target, for
- * every program in the tree.  crt0 calls _threadlib_exit_routine() before
- * exit(); that is pthread_exit(); and a JOINABLE thread waits there on its own
- * death futex until a joiner harvests its exit value.  Nobody joins a main
- * thread, so it waited for ever and exit() was never reached.
+ * 🔑 POSIX: "the process shall exit ... after the last thread has been
+ * terminated".  A JOINABLE thread that calls pthread_exit() waits below to be
+ * joined -- and the LAST thread in a process cannot be joined by anybody, so
+ * waiting there is not caution, it is a deadlock with one participant.
  *
- * ⚠️ The symptom was silence, which is why it lasted.  A test printed its
- * verdict, the suite read it, and the task simply stayed -- holding its ports,
- * its address space, and (once #513 gave the kernel something to hold) its DMA
- * regions and its devices, until the machine went down.
- *
- * 🔑 POSIX says what to do and the code was only missing the case: "the process
- * shall exit ... after the last thread has been terminated".  A joinable thread
- * that is the LAST one cannot be joined by anybody, so waiting is not caution,
- * it is a deadlock with one participant.
- *
- * ⚠️ Counted here rather than fixed in crt0.  Making a main() return call
- * exit() directly is also POSIX -- and it would kill detached threads that are
- * still running, which is a change to every multi-threaded program in the tree
- * and not the defect being fixed.  This way nothing changes for a process that
- * still has threads.
+ * ⚠️ This is NOT what fixed `return' from main(): that is _pthread_exit_routine
+ * below, where the standard's other sentence lives.  This counter answers the
+ * remaining case, a program that calls pthread_exit() by name and happens to be
+ * the last one.
  *
  * A PARKED thread is not live: it has already been through pthread_exit and
  * decremented.  What is counted is pthreads created and not yet exited, which
  * is what the POSIX sentence is about.
+ *
+ * ⚠️ A thread the kernel TAKES AWAY -- thread_terminate on a pthread, as
+ * act_test does on purpose -- never runs pthread_exit and is never subtracted.
+ * A library cannot see that, and the error is one-directional: the count only
+ * ever reads HIGH, so it can refuse to end a process and never end one early.
+ * Such a thread has already left the pthread model anyway; it skips its cleanup
+ * handlers and its TSD destructors too, which matters more than the count.
  */
 static int _pthread_live_count = 1;	/* the main thread, before any create */
 static pthread_lock_t _pthread_live_lock = 0;
@@ -958,19 +953,31 @@ pthread_detach(pthread_t thread)
 /*
  * Terminate a thread.
  */
-void 
-pthread_exit(void *value_ptr)
+/*
+ * The per-thread teardown both exits owe: cleanup handlers, innermost first,
+ * then the thread-specific data destructors.
+ */
+static void
+_pthread_run_thread_cleanup(pthread_t self)
 {
-	pthread_t self = pthread_self();
 	struct _pthread_handler_rec *handler;
-	kern_return_t kern_res;
-	int num_joiners;
+
 	while ((handler = self->cleanup_stack) != 0)
 	{
 		(handler->routine)(handler->arg);
 		self->cleanup_stack = handler->next;
 	}
 	_pthread_tsd_cleanup(self);
+}
+
+void 
+pthread_exit(void *value_ptr)
+{
+	pthread_t self = pthread_self();
+	kern_return_t kern_res;
+	int num_joiners;
+
+	_pthread_run_thread_cleanup(self);
 
 	/*
 	 * 🔴 THE LAST THREAD ENDS THE PROCESS, and does not wait to be joined.
@@ -1642,10 +1649,36 @@ __mach_errno_addr(void)
 vm_offset_t (*_thread_init_routine)(void) = pthread_init;
 vm_offset_t (*_threadlib_init_routine)(void) = pthread_init;
 
+/*
+ * ── What crt0 does when main() RETURNS (#513) ────────────────────────
+ *
+ * 🔴 RETURNING FROM main() IS exit(), NOT pthread_exit(), and routing it
+ * through the latter is what left every task in this system alive.  The two
+ * are different operations and C says which one this is: "a return from the
+ * initial call to the main function is equivalent to calling exit with the
+ * value returned by the main function as its argument".  exit() ends the
+ * PROCESS.  pthread_exit() ends one thread and lets the others run -- and a
+ * joinable thread waits there to be joined, which for a main thread nobody
+ * holds means for ever.
+ *
+ * ⚠️ The symptom was silence, which is why it lasted.  A program printed its
+ * verdict, the suite read it, and the task stayed -- holding its ports, its
+ * address space and, once #513 gave the kernel something to hold, its DMA
+ * regions and its devices, until the machine went down.
+ *
+ * 🔑 A program that really wants the other meaning still has it: calling
+ * pthread_exit() from main() by name says "let the others finish", and that is
+ * exactly the difference the standard draws between the two.  What is fixed
+ * here is that `return' no longer says it by accident.
+ *
+ * The cleanup handlers and TSD destructors still run: they are the main
+ * thread's, and exiting the process is not a reason to skip them.
+ */
 static void
 _pthread_exit_routine(int status)
 {
-	pthread_exit((void *)(long)status);
+	_pthread_run_thread_cleanup(pthread_self());
+	exit(status);
 }
 
 void (*_threadlib_exit_routine)(int) = _pthread_exit_routine;

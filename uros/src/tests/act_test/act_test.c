@@ -46,7 +46,6 @@
 #include <mach/mach_host.h>
 
 #include <stdio.h>
-#include <stdlib.h>	/* exit() -- see the end of main() */
 #include <pthread.h>
 
 #include "exc_server.h"
@@ -1326,19 +1325,13 @@ main(int argc, char **argv)
 	 * 🔴 IT ENDS -- see the note at the end of fault_test's main for why
 	 * the reason that used to be here was never true (#513).
 	 *
-	 * 🔑 exit() AND NOT return, and this is the one program here where the
-	 * difference is real.  Arm one KILLS a thread with thread_terminate and
-	 * deliberately does not join it, so that pthread never runs
-	 * pthread_exit and libpthreads' count of live threads never comes back
-	 * down.  A return would go to pthread_exit, find the count above zero,
-	 * conclude that somebody else is still running, and wait to be joined
-	 * by a thread the kernel destroyed.
-	 *
-	 * ⚠️ Which is a real limit of that counter and not a fault of this
-	 * test: a library cannot see a thread the kernel took away.  The count
-	 * only ever errs HIGH -- it can refuse to end a process, never end one
-	 * early -- and a program that kills its own threads has to say when it
-	 * is finished.  This one says it here.
+	 * ⚠️ This said exit() for one commit, because arm one KILLS a thread
+	 * with thread_terminate and does not join it, so libpthreads' count of
+	 * live threads never comes back down and a `return' waited to be joined
+	 * by a thread the kernel had destroyed.  That was treating the symptom:
+	 * a return from main() is exit() by definition, and it is crt0's path
+	 * that had to say so.  It does now, so this is a plain return again --
+	 * which is what every other program in the bundle writes.
 	 */
-	exit(passed == 6 ? 0 : 1);
+	return passed == 6 ? 0 : 1;
 }
