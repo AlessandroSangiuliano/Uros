@@ -267,6 +267,8 @@ check_high_device(int n)
 {
 	const struct hal_device_info	*dev = NULL;
 	const struct pci_bar_region	*high = NULL;
+	const struct hal_device_info	*writable_dev = NULL;
+	const struct pci_bar_region	*writable = NULL;
 	vm_offset_t			buf = 0;
 	mach_msg_type_number_t		bytes = 0;
 	unsigned int			n_bars = 0;
@@ -274,13 +276,58 @@ check_high_device(int n)
 	int				i;
 	unsigned int			b;
 
-	for (i = 0; i < n && high == NULL; i++)
-		for (b = 0; b < before[i].n_bars; b++)
-			if (before[i].bars[b].base > 0xFFFFFFFFull) {
+	/*
+	 * ── Which high region, and it is not "the first one" ─────────
+	 *
+	 * 🔴 THIS PROGRAM WROTE INTO THE BOOT DISK CONTROLLER'S REGISTERS, and it
+	 * did so with a guard in front of it.  The rule was "write only to a
+	 * PREFETCHABLE region", on the standard's own reasoning that prefetchable
+	 * means memory-like -- no side effects on read, writes may be merged.  On
+	 * the board that provides a high device, the two-gigabyte BAR pushes
+	 * virtio-blk's modern register aperture above four gigabytes too, and QEMU
+	 * marks that aperture prefetchable.  So the first high region belonged to
+	 * the disk we had booted from, and the guard said yes.
+	 *
+	 * 🔑 THE DEVICE'S CLASS IS THE ANSWER THE FLAG WAS PRETENDING TO BE.  A
+	 * class 5 memory controller declares itself to BE memory; a mass storage
+	 * controller does not, whatever it marks its apertures.  And the second
+	 * half of the question is #513's: the HAL is asked whether anything is
+	 * DRIVING the device, because "this is memory" and "nobody is using it"
+	 * are two facts and only one of them is on the bus.
+	 *
+	 * ⚠️ Mapping is separated from writing rather than made conditional with
+	 * it.  A mapping that is never touched costs the device nothing, so the
+	 * arms about reaching a high address still run on whatever is up there;
+	 * only the pattern needs somewhere it is allowed to go.
+	 */
+	for (i = 0; i < n; i++)
+		for (b = 0; b < before[i].n_bars; b++) {
+			unsigned int state = HAL_DEV_BOUND;
+
+			if (before[i].bars[b].base <= 0xFFFFFFFFull)
+				continue;
+
+			if (high == NULL) {
 				dev = &before[i];
 				high = &before[i].bars[b];
-				break;
 			}
+
+			if (PCI_CLASS_OF(before[i].class_rev)
+			    != PCI_CLASS_MEMORY)
+				continue;
+
+			if (hal_get_device_state(hal_port, before[i].bus,
+						 before[i].slot, before[i].func,
+						 &state) != KERN_SUCCESS)
+				continue;
+			if (state != HAL_DEV_UNCLAIMED)
+				continue;
+
+			if (writable == NULL) {
+				writable_dev = &before[i];
+				writable = &before[i].bars[b];
+			}
+		}
 
 	if (high == NULL)
 		return 0;
@@ -290,6 +337,13 @@ check_high_device(int n)
 	print_u64("base=", high->base);
 	print_u64("  size=", high->size);
 	printf("\n");
+
+	if (writable != NULL)
+		printf("hal_bar: %02u:%02u.%u bar%u is a RAM controller's, and "
+		       "the HAL says nobody is driving it — that is the one "
+		       "this writes through\n",
+		       writable_dev->bus, writable_dev->slot,
+		       writable_dev->func, writable->slot);
 
 	/*
 	 * [6] It took two slots, and the slot after it is NOT a region of its
@@ -396,14 +450,36 @@ check_high_device(int n)
 		 * Only reading back a pattern through the mapping can tell the
 		 * two apart, and only if the pattern is written through it.
 		 *
-		 * ⚠️ Written ONLY to a prefetchable region.  Prefetchable is
-		 * the standard's own word for "behaves like memory": no side
-		 * effects on read, and writes may be merged.  A region without
-		 * that bit is a set of device registers, and this program has
-		 * no business writing to registers of a device it does not
-		 * drive.
+		 * ⚠️ Through the region chosen above, which may not be the one
+		 * just mapped.  See the note on the search: the first high
+		 * region on the board that provides one belongs to the disk
+		 * this booted from.
 		 */
-		if (high->flags & PCI_REGION_PREFETCH) {
+		kr = device_mmio_unmap(my_device_port, uva, page,
+				       mach_task_self());
+		arm("[10] and it unmaps", kr == KERN_SUCCESS,
+		    "device_mmio_unmap could not be given back the address it "
+		    "handed out");
+
+		if (writable == NULL) {
+			printf("hal_bar: no high region belongs to a RAM "
+			       "controller nobody is driving, so nothing is "
+			       "written through one — the pattern arms did not "
+			       "run\n");
+			return 1;
+		}
+
+		kr = device_mmio_map(my_device_port,
+				     (vm_address_t)writable->base,
+				     page, mach_task_self(), &uva);
+		if (kr != KERN_SUCCESS) {
+			arm("[11] what is written through the mapping reads "
+			    "back", 0, "the region that may be written would "
+			    "not map");
+			return 1;
+		}
+
+		{
 			volatile uint32_t *w = (volatile uint32_t *)uva;
 			uint32_t	pattern = 0x5A3C96E1u;
 			uint32_t	readback;
@@ -412,29 +488,29 @@ check_high_device(int n)
 			w[1] = ~pattern;
 			readback = w[0];
 
-			arm("[10] what is written through the mapping reads "
+			arm("[11] what is written through the mapping reads "
 			    "back", readback == pattern && w[1] == ~pattern,
 			    "the mapping succeeded and does not reach the "
 			    "memory the device answers for");
 
 			/*
-			 * [11] The far end of the region is a different page.
+			 * [12] The far end of the region is a different page.
 			 * A truncated base would put both mappings inside the
 			 * low four gigabytes, where they can land on the same
 			 * RAM; the two patterns would then overwrite each
 			 * other.
 			 */
-			if (high->size > page) {
+			if (writable->size > page) {
 				kr = device_mmio_map(my_device_port,
-					(vm_address_t)(high->base
-						       + high->size - page),
+					(vm_address_t)(writable->base
+						       + writable->size - page),
 					page, mach_task_self(), &uva_far);
 				if (kr == KERN_SUCCESS) {
 					volatile uint32_t *f =
 						(volatile uint32_t *)uva_far;
 
 					f[0] = 0xC0FFEE00u;
-					arm("[11] the far end of the region is "
+					arm("[12] the far end of the region is "
 					    "somewhere else",
 					    f[0] == 0xC0FFEE00u
 					    && w[0] == pattern,
@@ -444,23 +520,16 @@ check_high_device(int n)
 						uva_far, page,
 						mach_task_self());
 				} else {
-					arm("[11] the far end of the region is "
+					arm("[12] the far end of the region is "
 					    "somewhere else", 0,
 					    "the last page of the region would "
 					    "not map");
 				}
 			}
-		} else {
-			printf("hal_bar: the region is not prefetchable, so "
-			       "nothing is written through it — it is device "
-			       "registers, not memory\n");
 		}
 
-		kr = device_mmio_unmap(my_device_port, uva, page,
-				       mach_task_self());
-		arm("[12] and it unmaps", kr == KERN_SUCCESS,
-		    "device_mmio_unmap could not be given back the address it "
-		    "handed out");
+		(void) device_mmio_unmap(my_device_port, uva, page,
+					 mach_task_self());
 	}
 
 	return 1;

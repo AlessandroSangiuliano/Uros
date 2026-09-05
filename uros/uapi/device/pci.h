@@ -134,6 +134,16 @@
 
 #define	PCI_CLASS_STORAGE	0x01
 #define	PCI_CLASS_DISPLAY	0x03
+
+/*
+ * 🔑 A device that says it IS memory.  Class 5 subclass 0 is a RAM controller,
+ * and the distinction matters to anything deciding whether a region may be
+ * WRITTEN to: the prefetchable bit is not that answer, because a device is free
+ * to mark a register aperture prefetchable and QEMU's virtio does exactly that.
+ * What the device declares itself to be is the answer.
+ */
+#define	PCI_CLASS_MEMORY	0x05
+#define	PCI_SUBCLASS_RAM	0x00
 #define	PCI_SUBCLASS_SATA	0x06
 #define	PCI_PROGIF_AHCI		0x01
 
