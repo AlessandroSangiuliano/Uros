@@ -120,6 +120,22 @@ struct ahci_port_info {
 struct ahci_state {
 	volatile uint32_t	*abar;
 
+	/*
+	 * How much of it there is, MEASURED by the HAL (#427).
+	 *
+	 * 🔑 It used to be a constant, and the constant was wrong on the board
+	 * these suites boot on: 8 KiB mapped over a region the controller
+	 * answers for 4 KiB of.  The second page was somebody else's physical
+	 * memory, reachable through this driver's pointer, and nothing said so
+	 * because a mapping does not have to be a device to succeed.
+	 *
+	 * ⚠️ Kept rather than used once: the port registers are a stride into
+	 * this region, so "does port N exist" and "is port N inside what the
+	 * device decodes" are two questions, and only the first one used to be
+	 * asked.
+	 */
+	vm_size_t	abar_size;
+
 	unsigned int	pci_bus, pci_slot, pci_func;
 	unsigned int	ahci_irq;
 	mach_port_t	master_device;

@@ -239,8 +239,18 @@ struct ata_fis_h2d {
  */
 #define PRDT_PER_SLOT		32
 
-/* AHCI ABAR size (covers 32 ports: 0x100 + 32*0x80 = 0x1100) */
-#define AHCI_ABAR_SIZE		8192		/* 8 KB, 2 pages */
+/*
+ * 🔴 THERE IS NO ABAR SIZE CONSTANT ANY MORE (#427).
+ *
+ * It was 8192, "covers 32 ports: 0x100 + 32*0x80 = 0x1100", and it was a
+ * ceiling used as a measurement.  A controller with six ports answers for
+ * 4 KiB, and mapping two pages over it put a page of somebody else's physical
+ * memory behind this driver's register pointer.
+ *
+ * The size is measured by the HAL and travels in the region record; the driver
+ * maps what the device answers for and checks each port against it.  AHCI_PORT_
+ * BASE above is the floor -- below that there is not even a host control block.
+ */
 
 /* Maximum ports and command slots */
 #define AHCI_MAX_PORTS		32
