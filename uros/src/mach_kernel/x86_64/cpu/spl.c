@@ -31,6 +31,27 @@ int spl_defer(unsigned vector)
 	 * the level on its way out — finding a note that is not yet there.
 	 */
 	p->pending[vector >> 6] |= 1ULL << (vector & 63);
+
+	/*
+	 * 🔑 THE TIMER IS COUNTED, NOT MERELY NOTED (#522).
+	 *
+	 * One bit per vector is exactly right for a device: an interrupt that
+	 * arrived twice while its class was masked has one condition to
+	 * service, and running the handler once services it.  The tick is not a
+	 * condition, it is a time base -- two ticks collapsing into one bit is
+	 * time that never happened, and the boot's own check saw it as 82 ticks
+	 * where it had asked for 100.
+	 *
+	 * ⚠️ Capped, and the cap is a real answer rather than a formality: a
+	 * level held for a very long time would otherwise queue an unbounded
+	 * burst to be replayed back-to-back with interrupts off, which is a
+	 * worse failure than the drift it is avoiding.  The saturation is
+	 * visible in `deferred' against `replayed'.
+	 */
+	if (vector == LAPIC_TIMER_VECTOR
+	    && p->pending_ticks < SPL_MAX_PENDING_TICKS)
+		p->pending_ticks++;
+
 	p->deferred++;
 	return 1;
 }
@@ -67,6 +88,24 @@ static void spl_replay(struct percpu *p)
 			return;
 
 		p->pending[found >> 6] &= ~(1ULL << (found & 63));
+
+		/*
+		 * The tick is replayed once per tick that was owed, so that
+		 * lowering the level gives back the time the level held (#522).
+		 * Every other vector is replayed once, because once is what its
+		 * bit means.
+		 */
+		if (found == LAPIC_TIMER_VECTOR) {
+			unsigned owed = p->pending_ticks;
+
+			p->pending_ticks = 0;
+			while (owed-- > 0) {
+				p->replayed++;
+				trap_replay_vector(found);
+			}
+			continue;
+		}
+
 		p->replayed++;
 		trap_replay_vector(found);
 	}
