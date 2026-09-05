@@ -390,6 +390,22 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(tests/dma_reclaim_test)
 endif()
 
+# What the HAL says about a device's regions, and whether one above four
+# gigabytes can be reached (#427).
+#
+# 🔑 Two halves with different requirements, in one program on purpose.  The
+# sizes are checked on whatever board is booting -- a size that arrives at all
+# is evidence the probe ran, and one that survives a hal_rescan is evidence it
+# did not run twice.  The high half needs a device placed above four gigabytes,
+# which no board here does by itself and which the invocation in the program's
+# header provides.
+#
+# ⚠️ Splitting them would give the second one its own binary that almost never
+# runs, and a check that almost never runs is a check nobody notices losing.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(tests/hal_bar_test)
+endif()
+
 # hal_server on x86-64 (#427), and STARTED as of #457.
 #
 # 🔑 "It compiles" and "it runs" are two steps, and #427 took the first: every
@@ -579,6 +595,15 @@ endif()
 # independent kernel bookkeeping, so there is no configuration of this target
 # where the question stops being worth asking.
 add_subdirectory(tests/dma_reclaim_test)
+
+# What the HAL says about a device's regions (#427).
+#
+# ⚠️ Built here too, and it is not the same experiment.  On this target
+# vm_address_t is exactly 32 bits, so a device above four gigabytes can be
+# DISCOVERED and named but not mapped -- and that the region record carries the
+# whole address anyway is the point: it is fixed at 64 bits on both targets so
+# that a machine which cannot reach such a device can still say it is there.
+add_subdirectory(tests/hal_bar_test)
 
 # Build kernel242_test (#242 no-goto kernel exerciser)
 add_subdirectory(tests/kernel242_test)

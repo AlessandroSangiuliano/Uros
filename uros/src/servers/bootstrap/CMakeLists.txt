@@ -286,12 +286,14 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # taking slots from the one task on this target that moves bytes with a
   # device.
   #
-  # 🔴 BOTH LINES CARRY `-w', AND THAT FLAG IS THE EXPERIMENT.  bootstrap
-  # blocks on a `-w' entry until it sends bootstrap_completed() or DIES, so:
-  # the checker is not created until the hog is gone, which is what makes the
-  # reclaim observable at all; and nothing else in the bundle runs while
-  # either of them holds the table, which is what keeps cap_test's own DMA
-  # arms and the block server's buffers out of the measurement.
+  # 🔴 NEITHER LINE CARRIES `-w', AND IT WAS TRIED FIRST.  bootstrap blocks on
+  # a `-w' entry until it sends bootstrap_completed() or dies, which gave the
+  # ordering the experiment needs -- and gave this pair the power to stop the
+  # whole boot.  A run was caught where the holder was waiting on an RPC to a
+  # HAL that was waiting for a processor (#522), bootstrap was waiting on the
+  # holder, and block_device_server was never started at all.  The two now meet
+  # by NAME instead, each registering a port and waiting for the other's, so
+  # every consequence of one of them hanging stays inside the pair.
   #
   # 🔑 It is one binary named twice rather than two programs, because the two
   # roles must fill the table by exactly the same code: a checker that
@@ -370,7 +372,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # failure -- there is nothing to serve.  What it must not do is exit quietly:
   # see the note in block_server.c on #400.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -426,6 +428,12 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             hal_server:${_SBIN}/hal_server
             modules/hal/pci_scan.so:${_MOD}/hal/pci_scan.so
             block_device_server:${_SBIN}/block_device_server
+            # #427: last, and after the block server on purpose.  It
+            # issues a hal_rescan, and the state a rescan that touched
+            # devices would damage is the one where two controllers are
+            # BOUND -- so running it before them would be asking the
+            # question when the answer cannot be wrong.
+            hal_bar_test:${_SBIN}/hal_bar_test
             # ⚠️ BOTH drivers now, and ahci.so is here for #432 rather than
             # for its own sake.  It was left out under #520 because
             # modload_load_class() loads whatever is in the class and that
@@ -460,8 +468,9 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
             block_device_server virtio_blk_module ahci_module
+            hal_bar_test_server
             ${_CONF}
-    COMMENT "Bundle: bootstrap.conf + 12 tasks + hal_server + block_device_server"
+    COMMENT "Bundle: bootstrap.conf + 13 tasks + hal_server + block_device_server"
     VERBATIM)
 
   add_custom_target(bootstrap_bundle ALL DEPENDS ${_BUNDLE})

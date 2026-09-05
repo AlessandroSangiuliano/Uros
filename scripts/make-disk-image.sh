@@ -104,6 +104,7 @@ PTHREAD_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/pthread_test"
 CAP_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_server"
 CAP_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/cap_test"
 IRQ_CLAIM_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/irq_claim_test"
+HAL_BAR_TEST="$BUILD_DIR/export/uros/$ARCH/user/sbin/hal_bar_test"
 GPUSTAT="$BUILD_DIR/export/uros/$ARCH/user/sbin/gpustat"
 EXEC_SERVER="$BUILD_DIR/export/uros/$ARCH/user/sbin/exec_server"
 HELLO_EXEC="$BUILD_DIR/export/uros/$ARCH/user/sbin/hello_exec"
@@ -211,6 +212,13 @@ fi
 # #457: claims an interrupt line and gives it back.  ⚠️ On a kernel where
 # the release halts, nothing after its FIRST line is ever printed -- so a
 # failure here is a missing log rather than a wrong one.
+HAL_BAR_TEST_CONF_LINE=""
+if [ -f "$HAL_BAR_TEST" ]; then
+    # #427: what the HAL says about BARs, after the block server so its rescan
+    # runs with controllers bound.
+    HAL_BAR_TEST_CONF_LINE="hal_bar_test hal_bar_test"
+fi
+
 IRQ_CLAIM_TEST_CONF_LINE=""
 if [ -f "$IRQ_CLAIM_TEST" ]; then
     IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
@@ -266,6 +274,7 @@ if [ "$MINIMAL" = "1" ]; then
     PTHREAD_TEST_LINE=""
     CAP_TEST_CONF_LINE=""
     IRQ_CLAIM_TEST_CONF_LINE=""
+    HAL_BAR_TEST_CONF_LINE=""
     GPUSTAT_CONF_LINE=""
 else
     HELLO_SERVER_LINE="hello_server hello_server"
@@ -292,6 +301,7 @@ ${IPC_BENCH_LINE}
 ${PTHREAD_TEST_LINE}
 ${CAP_TEST_CONF_LINE}
 ${IRQ_CLAIM_TEST_CONF_LINE}
+${HAL_BAR_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
 ${USH_CONF_LINE}
 CONF
@@ -357,6 +367,11 @@ if [ -f "$CAP_SERVER" ]; then
 fi
 # #457: claims an interrupt line and gives it back.  ⚠️ On a kernel where
 # the release halts, nothing after its FIRST line is ever printed.
+HAL_BAR_TEST_WRITE_LINE=""
+if [ -f "$HAL_BAR_TEST" ]; then
+    HAL_BAR_TEST_WRITE_LINE="write $HAL_BAR_TEST hal_bar_test"
+fi
+
 IRQ_CLAIM_TEST_WRITE_LINE=""
 if [ -f "$IRQ_CLAIM_TEST" ]; then
     IRQ_CLAIM_TEST_WRITE_LINE="write $IRQ_CLAIM_TEST irq_claim_test"
@@ -514,6 +529,7 @@ write $PTHREAD_TEST pthread_test
 ${CAP_SERVER_WRITE_LINE}
 ${CAP_TEST_WRITE_LINE}
 ${IRQ_CLAIM_TEST_WRITE_LINE}
+${HAL_BAR_TEST_WRITE_LINE}
 ${GPUSTAT_WRITE_LINE}
 ${EXEC_SERVER_WRITE_LINE}
 ${PROC_SERVER_WRITE_LINE}

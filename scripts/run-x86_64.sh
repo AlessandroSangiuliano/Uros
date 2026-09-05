@@ -366,6 +366,15 @@ must_report 'dl_test: starting' 'dl_test: [0-9]* of [0-9]* arms passed' \
 must_report 'dma_reclaim: started' 'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 	'It waits for the slots a dead task was holding, so on a kernel that does not release them it does not print a WRONG line -- it waits out its bound and then says so.  Silence instead means it never got that far.'
 
+# 🔑 Its arm COUNT is not fixed, and that is deliberate (#427).  The sizes are
+# checked on any board; the arms about a device above four gigabytes run only
+# when one is placed there on purpose -- see the header of the test.  So the
+# pattern asks for a verdict and not for a number: a run that reported "9 of 9"
+# because the high device was absent is a true statement, and demanding a fixed
+# count would turn it into a failure.
+must_report 'hal_bar: started' 'hal_bar: [0-9]* of [0-9]* arms passed' \
+	'It reads the region records the HAL measured and asks for a rescan.  A HAL that never probed does not fail loudly -- it reports regions of size zero -- so the absence of this verdict means the program did not reach the end, which is a different finding from a wrong size.'
+
 
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
@@ -748,6 +757,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'cap_test: starting'    'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)' \
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
+		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
 		sleep 1
 		break

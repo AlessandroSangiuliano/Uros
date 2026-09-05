@@ -88,6 +88,7 @@ hal_run_discovery(void)
 		const struct hal_discovery_ops *ops = discovery[m];
 		int n, i;
 		int new_devs = 0;
+		int measured = 0;
 
 		if (ops->init != NULL && ops->init(master_device) < 0) {
 			printf("hal: module %s init failed\n", ops->name);
@@ -120,12 +121,14 @@ hal_run_discovery(void)
 			 * out for itself is a second site that can disagree.
 			 */
 			if (ops->measure != NULL
-			    && ops->measure(&scan_buf[i]) == 0)
+			    && ops->measure(&scan_buf[i]) == 0) {
 				hal_registry_set_sizes(scan_buf[i].bus,
 						       scan_buf[i].slot,
 						       scan_buf[i].func,
 						       scan_buf[i].bars,
 						       scan_buf[i].n_bars);
+				measured++;
+			}
 
 			/* #173: only fresh devices trigger hal_device_added
 			 * — repeated rescans over a stable bus stay quiet. */
@@ -133,8 +136,18 @@ hal_run_discovery(void)
 			new_devs++;
 		}
 
-		printf("hal: module %s scanned %d device(s) (%d new)\n",
-		       ops->name, n, new_devs);
+		/*
+		 * 🔑 `measured' is here so that "a rescan does not touch the
+		 * device" is a thing the LOG says rather than a thing the code
+		 * is believed about (#427).  Every rescan after the first has
+		 * to print zero, and there is nowhere else a reader could see
+		 * that: a repeated probe restores what it wrote, so the sizes
+		 * it produces the second time are identical to the first.  An
+		 * effect that leaves no trace needs its cause counted.
+		 */
+		printf("hal: module %s scanned %d device(s) "
+		       "(%d new, %d measured)\n",
+		       ops->name, n, new_devs, measured);
 	}
 }
 
