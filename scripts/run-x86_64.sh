@@ -580,6 +580,27 @@ case " $* " in
 *)		CPU_ARGS="-cpu max" ;;
 esac
 
+# ── How much memory, and it was never said (#427) ─────────────────────
+#
+# 🔴 THIS SCRIPT PASSED NO -m AT ALL, so every x86-64 run this port has made
+# ran on whatever qemu defaults to -- 128 MiB.  i386's run-qemu.sh has said
+# `-m 512M' since it was written, so the two targets were not being given the
+# same machine, and nothing anywhere said which one either of them had.
+#
+# ⚠️ It is not only a matter of room.  How much RAM a guest has decides where
+# its PHYSICAL addresses stop being memory, and that changes what an experiment
+# means: a mapping of physical 0x80000000 reaches the PCI hole on a 512 MiB
+# machine and ordinary RAM on a four-gigabyte one.  The #427 ablation that
+# narrows a physical address to 32 bits lands on exactly that address, so a
+# default nobody chose was deciding whether the check could fail at all.
+#
+# Same shape as the two above: a default that is stated, and a command line
+# that wins over it.
+case " $* " in
+*" -m "*)	MEM_ARGS="" ;;
+*)		MEM_ARGS="-m 512M" ;;
+esac
+
 # 🔥 And WHICH ACCELERATOR, said out loud (#477).
 #
 # This script has never passed -enable-kvm, so every x86-64 run this port has
@@ -619,6 +640,7 @@ fi
 # builds tables and enables nothing, which is a real thing to want and a
 # terrible thing to mistake for translation being on.
 echo "=== iommu on the board: $IOMMU_NAME ==="
+echo "=== memory: ${MEM_ARGS:-from the command line} ==="
 
 : > "$LOG"
 
@@ -660,7 +682,7 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $DISK_ARGS $IOMMU_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
 QPID=$!
 
