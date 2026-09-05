@@ -61,9 +61,18 @@ typedef unsigned int spl_t;
  * Everything through, and nothing maskable through.
  *
  * SPLHI is fifteen and not sixteen on purpose: class fifteen is where the
- * cross-processor calls and the timer live, and a level that blocked those
- * would let one processor stop answering the others while it held a lock —
- * which is a deadlock rather than a priority.
+ * cross-processor calls live, and a level that blocked those would let one
+ * processor stop answering the others while it held a lock — which is a
+ * deadlock rather than a priority.
+ *
+ * ⚠️ THE TIMER USED TO BE IN THAT CLASS TOO, and this comment used to name it
+ * alongside the messages as if the same argument covered both.  It does not.
+ * Nothing waits on a tick, so deferring one costs latency; a processor that
+ * stops answering an IPI costs the machine.  And the machine-independent
+ * scheduler is written on the promise that splsched() stops the clock -- so
+ * the tick landing inside a run queue critical section made the handler ask
+ * for a lock the interrupted path already held.  Moved to class fourteen,
+ * where this level defers it (#522).
  */
 #define SPL0		0u
 
@@ -82,6 +91,16 @@ typedef unsigned int spl_t;
  */
 #define SPL_DEVICE	5u
 #define SPLHI		14u
+
+/*
+ * How many deferred ticks are remembered before the count saturates (#522).
+ *
+ * ⚠️ A cap and not a queue: past this many, the level has been held long
+ * enough that replaying every owed tick back-to-back with interrupts off
+ * would be a worse failure than the drift.  Saturation shows as `deferred'
+ * outrunning `replayed'.
+ */
+#define SPL_MAX_PENDING_TICKS	64u
 
 /* The class a vector belongs to, which is the hardware's own definition. */
 #define spl_of_vector(v)	((unsigned)(v) >> 4)

@@ -167,7 +167,37 @@ void lapic_send_nmi(uint32_t apic_id);
  * The 8254 keeps one job: being a frequency that names itself, so this one
  * can be measured. See <time/pit.h>.
  */
-#define LAPIC_TIMER_VECTOR	0xF0
+/*
+ * ── The class it lives in is the whole of whether splsched works (#522) ──
+ *
+ * 🔴 THE TIMER WAS AT 0xF0, WHICH IS CLASS FIFTEEN, AND SPLHI IS FOURTEEN.  A
+ * vector is deferred when its class is at or below the level, so the tick was
+ * the one interrupt `splsched()' did not stop -- on a machine whose entire
+ * machine-independent scheduler is written on the promise that it does.
+ * <kern/sched_prim.h> states it outright: "interrupts below splsched() must be
+ * prevented when holding".
+ *
+ * 🔥 The bill arrived as a boot that stops dead with the processor spinning:
+ * run_queue_enqueue() holds the run queue lock, the tick lands inside the
+ * critical section, and hertz_tick -> timeout_tick -> thread_wakeup_prim ->
+ * thread_setrun -> run_queue_enqueue asks for the SAME lock.  hw_lock_lock()
+ * disables preemption but does not mask interrupts, so on one processor the
+ * holder is the interrupted path and nothing can ever release it.  Caught with
+ * both frames on one stack, either side of trap_common.
+ *
+ * ⚠️ The class fifteen exemption is right, and it is right about the OTHER
+ * things in that class.  A processor must keep answering cross-processor calls
+ * while it holds a lock, or one processor's critical section stops the machine
+ * -- see <cpu/spl.h>.  The timer is not one of those: nothing waits on a tick,
+ * and every kernel that has ever had an splclock has blocked it.
+ *
+ * 🔑 Deferring it costs nothing new, because the machinery already exists and
+ * is already used: spl_defer() records the vector, spl_replay() runs it when
+ * the level drops, and clock_event_tick() already has the branch for arriving
+ * that way -- `frame->cs == 0' with its own counter.  What changes is that the
+ * branch now gets taken by the tick as well as by the device vectors.
+ */
+#define LAPIC_TIMER_VECTOR	0xE1
 #define LAPIC_CALIBRATE_US	20000u
 
 /*

@@ -58,8 +58,18 @@
  *   0x40..0x4F  the legacy interrupt requests, on their I/O APIC pins
  *   0x50..0x5F  message-signalled interrupts, which have no pin (#457)
  *   0xE0        one vector kept for exercising this path by hand
- *   0xF0..0xFE  processor-to-processor messages
+ *   0xE1        the local APIC timer (#522)
+ *   0xF1..0xFE  processor-to-processor messages
  *   0xFF        the local APIC's spurious vector
+ *
+ * 🔴 THE TIMER IS IN CLASS FOURTEEN AND THE MESSAGES ARE IN FIFTEEN, and the
+ * boundary between those two classes is what SPLHI means.  A vector is
+ * deferred when its class is at or below the level, so class fifteen is
+ * everything splsched() must NOT stop -- a processor that stopped answering
+ * its neighbours while holding a lock would be a deadlock rather than a
+ * priority.  The tick was at 0xF0, inside that exemption, and it is the one
+ * interrupt the machine-independent scheduler is written on the promise that
+ * splsched() stops.  It cost a self-deadlock on the run queue lock (#522).
  *
  * ⚠️ The message-signalled block is the class ABOVE the pinned one, and
  * <cpu/spl.h>'s SPL_DEVICE covers both -- a level called "the device level"
