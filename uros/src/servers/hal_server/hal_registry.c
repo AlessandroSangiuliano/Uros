@@ -83,20 +83,55 @@ hal_registry_add(const struct hal_device_info *dev)
 		return HAL_REGISTRY_ADD_ERROR;
 
 	existing = find_index(dev->bus, dev->slot, dev->func);
+	if (existing >= 0
+	    && registry[existing].info.vendor_device == dev->vendor_device) {
+		/*
+		 * ── Same BDF, same device: the entry is left ALONE (#427) ────
+		 *
+		 * 🔴 IT USED TO BE REFRESHED WHOLESALE, and that cannot survive
+		 * a record with a MEASURED field in it.  A scan cannot produce
+		 * a size -- sizes are probed, once, because probing writes to
+		 * the device -- so a refresh from a fresh scan would put zeros
+		 * back over every size the HAL had measured, on the first
+		 * hal_rescan of the boot.  The version of this that copies them
+		 * across is a step somebody has to remember; not assigning is a
+		 * step that cannot be forgotten.
+		 *
+		 * 🔑 And nothing is lost, because THIS RECORD IS THE MASTER
+		 * COPY AND NOT A CACHE.  Configuration space holds where a
+		 * device must be, not where it is: a reset or a D3 transition
+		 * zeroes the BARs, and the right value afterwards is the one
+		 * that was saved here, not the one the bus now reports.  The
+		 * refresh was writing back what it had just read from the same
+		 * place, which is why removing it changes nothing observable.
+		 *
+		 * The caller still hears EXISTING, so #173 keeps its property:
+		 * a rescan over a stable bus fires no hal_device_added.
+		 */
+		return HAL_REGISTRY_ADD_EXISTING;
+	}
+
 	if (existing >= 0) {
 		/*
-		 * Same BDF: refresh the entry but report as duplicate so
-		 * the caller does not fire a fresh hal_device_added.  #173
-		 * relies on this to keep hal_rescan idempotent when no
-		 * topology changed.
+		 * ⚠️ Same BDF, DIFFERENT device.  Not a refresh: whatever this
+		 * entry described is gone, and everything the HAL knows about
+		 * it -- the driver that bound it, the sizes it measured -- is
+		 * about a device that is no longer there.
 		 *
-		 * 🔑 AND IT ASSIGNS `.info' RATHER THAN THE ENTRY (#513).  A
-		 * scan reports what the bus says; what a driver reported is in
-		 * the same struct and outside this assignment, so the refresh
-		 * cannot lose it and nobody has to remember that it must not.
+		 * 🔑 Reported as NEW rather than as a duplicate, and said out
+		 * loud.  It is the only path on which re-measuring a known BDF
+		 * is the right thing to do, and the subscribers have to hear
+		 * about a device they have never been told about.
 		 */
+		printf("hal: %u:%u.%u changed device: 0x%08x is now 0x%08x\n",
+		       dev->bus, dev->slot, dev->func,
+		       registry[existing].info.vendor_device,
+		       dev->vendor_device);
+
 		registry[existing].info = *dev;
-		return HAL_REGISTRY_ADD_EXISTING;
+		registry[existing].state = HAL_DEV_UNCLAIMED;
+		registry[existing].port = MACH_PORT_NULL;
+		return HAL_REGISTRY_ADD_NEW;
 	}
 
 	if (n_registry >= HAL_MAX_DEVICES) {
@@ -110,6 +145,38 @@ hal_registry_add(const struct hal_device_info *dev)
 	registry[n_registry].port = MACH_PORT_NULL;
 	n_registry++;
 	return HAL_REGISTRY_ADD_NEW;
+}
+
+/*
+ * ── The sizes, written back after the one measurement (#427) ─────────
+ *
+ * 🔑 ONLY THE SIZES.  The caller hands over the region list it measured, and
+ * this takes the one field the measurement produced and nothing else: a region
+ * list that came back differing in any other way is a device that changed
+ * underneath the probe, and copying the whole list would let that overwrite the
+ * addresses the registry is the master copy of.
+ *
+ * ⚠️ Matched by the SLOT a region starts at, not by its index.  The two are
+ * different numbers on any device with a 64-bit BAR -- a region at index 1 can
+ * start at slot 2 -- and indexing was the shape of the defect in ahci_module.c
+ * this issue had to fix once already.
+ */
+int
+hal_registry_set_sizes(unsigned int bus, unsigned int slot, unsigned int func,
+		       const struct pci_bar_region *measured, unsigned int n)
+{
+	int		i = find_index(bus, slot, func);
+	unsigned int	m, k;
+
+	if (i < 0 || measured == NULL)
+		return -1;
+
+	for (m = 0; m < n; m++)
+		for (k = 0; k < registry[i].info.n_bars; k++)
+			if (registry[i].info.bars[k].slot == measured[m].slot)
+				registry[i].info.bars[k].size = measured[m].size;
+
+	return 0;
 }
 
 int

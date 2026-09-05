@@ -46,11 +46,48 @@
 #define	PCI_CLASS_REV		0x08
 #define	PCI_HEADER_TYPE		0x0E
 #define	PCI_BAR0		0x10
+
+/*
+ * ⚠️ 0x0E is a BYTE offset and configuration space is reached a dword at a
+ * time, so the header type arrives in the third byte of the dword at 0x0C.
+ * Named here rather than shifted at the call site: an off-by-one-byte shift
+ * reads the latency timer, which is a small number and looks like a type.
+ */
+#define	PCI_HDR_DWORD		0x0C
+#define	PCI_HEADER_TYPE_OF(d)	(((d) >> 16) & 0xFFu)
+
 #define	PCI_BAR(n)		(PCI_BAR0 + (n) * 4u)
 #define	PCI_INTERRUPT_LINE	0x3C
 
 /* The BAR slots a type 0 header has.  SLOTS, not regions -- see below. */
 #define	PCI_NUM_BAR_SLOTS	6
+
+/*
+ * ── What kind of header this is, and how many BAR slots that leaves ──
+ *
+ * 🔴 A BRIDGE HAS TWO, AND THE FOUR AFTER THEM ARE NOT BARs.  From 0x18 on, a
+ * type 1 header holds the primary, secondary and subordinate bus numbers and
+ * the I/O and memory windows the bridge forwards -- so a reader that assumes
+ * six decodes a bus topology as if it were addresses, and a WRITER that
+ * assumes six reprograms the windows every device behind the bridge is reached
+ * through.
+ *
+ * ⚠️ Which is the difference between this being untidy and being dangerous.
+ * Reading six slots on a bridge produced regions nobody used; measuring six
+ * writes all ones into them.  The count has to come from the header type
+ * before anything touches a slot.
+ *
+ * Bit 7 of the byte is not part of the type: it says the device has other
+ * functions, which is a different question and is asked elsewhere.
+ */
+#define	PCI_HEADER_TYPE_MASK	0x7Fu
+#define	PCI_HEADER_MULTIFUNC	0x80u
+
+#define	PCI_HEADER_TYPE_NORMAL	0x00u	/* an ordinary device: six slots */
+#define	PCI_HEADER_TYPE_BRIDGE	0x01u	/* PCI-to-PCI: two, then the windows */
+#define	PCI_HEADER_TYPE_CARDBUS	0x02u	/* one, and a layout of its own */
+
+#define	PCI_NUM_BAR_SLOTS_BRIDGE	2
 
 /* ── The command register ─────────────────────────────────────────── */
 #define	PCI_CMD_IO_ENABLE	(1u << 0)

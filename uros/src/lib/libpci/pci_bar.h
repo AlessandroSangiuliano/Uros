@@ -69,9 +69,15 @@
  * width follows the target would make the two targets' wire formats differ for
  * no reason anyone asked for.
  *
- * `size' is zero until something probes it.  The size of a region is not read,
- * it is measured -- write all ones, read back, restore -- and that is a WRITE
- * to the device, so it does not belong in a decode.
+ * `size' is zero as the decode leaves it, and is filled in by whoever can
+ * reach the bus.  The size of a region is not read, it is measured -- write all
+ * ones, read back, restore -- and that is a WRITE to the device, so it does not
+ * belong in a decode.  pci_bar_size_from_probe() below is the arithmetic half
+ * of that measurement; hal_server's pci_scan module is the half that writes.
+ *
+ * ⚠️ A size of zero therefore means "nobody measured this one", and it is not
+ * the same statement as a base of zero.  A consumer that maps a region has to
+ * treat it as a refusal rather than as an empty region.
  */
 struct pci_bar_region {
 	uint64_t	base;
