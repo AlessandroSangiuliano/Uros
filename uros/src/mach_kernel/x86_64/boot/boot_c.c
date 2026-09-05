@@ -4921,14 +4921,45 @@ static void spl_selftest(void)
 	      ? " — raised, it is held and not lost\r\n"
 	      : " — WRONG, the level does not hold interrupts\r\n");
 
-	kputs("UrMach x86-64: lowering replayed ");
-	kputdec((unsigned)(spl_replayed_count() - replayed_before));
-	kputs(" of them, handler ran ");
-	kputdec((unsigned)handled_after);
-	kputs(" more time");
-	kputs(spl_replayed_count() - replayed_before == 1 && handled_after == 1
-	      ? " — once, however many were held\r\n"
-	      : " — WRONG, the replay is not exactly one\r\n");
+	/*
+	 * ── One replay per tick held, and it used to be one full stop (#522) ──
+	 *
+	 * 🔴 THIS CHECK ASSERTED THE DEFECT.  It read "once, however many were
+	 * held", which is exactly right for a device -- an interrupt that
+	 * arrived three times while masked has one condition to service -- and
+	 * exactly wrong for the vector it was measuring.  A tick is not a
+	 * condition, it is a TIME BASE, and three ticks collapsing into one
+	 * replay is time that never happened.
+	 *
+	 * 🔥 It was not hypothetical for long.  The moment the timer moved into
+	 * a class splsched() defers (which is what closed #522's self-deadlock
+	 * on the run queue lock), the boot's own tick check asked for 100 ticks
+	 * in 200 ms and counted 82.  This test passed throughout, because it
+	 * was asking for the collapse.
+	 *
+	 * ⚠️ Saturation is allowed for, and is not a failure: spl_defer() caps
+	 * the count at SPL_MAX_PENDING_TICKS, so a level held long enough gives
+	 * back the cap rather than an unbounded burst.  At 500 Hz over 20 ms
+	 * this test holds about ten, well under it.
+	 */
+	{
+		uint64_t held = deferred_after - deferred_before;
+		uint64_t given = spl_replayed_count() - replayed_before;
+		uint64_t owed = held < SPL_MAX_PENDING_TICKS
+			      ? held : SPL_MAX_PENDING_TICKS;
+
+		kputs("UrMach x86-64: lowering replayed ");
+		kputdec((unsigned)given);
+		kputs(" of the ");
+		kputdec((unsigned)held);
+		kputs(" held, handler ran ");
+		kputdec((unsigned)handled_after);
+		kputs(" more times");
+		kputs(given == owed && handled_after == owed
+		      ? " — one per tick held, because a tick is a time base\r\n"
+		      : " — WRONG, the ticks held and the ticks given back do "
+			"not match\r\n");
+	}
 }
 
 /*
