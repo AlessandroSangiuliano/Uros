@@ -83,6 +83,7 @@ NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
 CAP_TEST="$SBIN/cap_test"
 IRQ_CLAIM_TEST="$SBIN/irq_claim_test"
+HAL_BAR_TEST="$SBIN/hal_bar_test"
 DMA_RECLAIM_TEST="$SBIN/dma_reclaim_test"
 GPUSTAT="$SBIN/gpustat"
 HAL_SERVER="$SBIN/hal_server"
@@ -138,6 +139,13 @@ CAP_TEST_CONF_LINE=""
 # failure here is a missing log rather than a wrong one.
 IRQ_CLAIM_TEST_CONF_LINE=""
 [ -f "$IRQ_CLAIM_TEST" ] && IRQ_CLAIM_TEST_CONF_LINE="irq_claim_test irq_claim_test"
+
+# #427: what the HAL says about BARs.  After block_device_server, so the rescan
+# it issues happens with two controllers BOUND -- which is the state a rescan
+# that touched devices would damage, and the only state in which "it does not"
+# is worth measuring.
+HAL_BAR_TEST_CONF_LINE=""
+[ -f "$HAL_BAR_TEST" ] && HAL_BAR_TEST_CONF_LINE="hal_bar_test hal_bar_test"
 # #513: lo stesso binario DUE volte -- il primo riempie la tavola delle regioni
 # DMA e MUORE tenendola, il secondo la ritrova resa dal kernel.  Una restituzione
 # non si dimostra con un'assenza: serve qualcun altro a cui venga data.
@@ -188,6 +196,7 @@ if [ "$MINIMAL" = "1" ]; then
     PTHREAD_TEST_LINE=""
     CAP_TEST_CONF_LINE=""
     IRQ_CLAIM_TEST_CONF_LINE=""
+    HAL_BAR_TEST_CONF_LINE=""
     DMA_RECLAIM_CONF_LINES=""
     KERNEL242_TEST_CONF_LINE=""
     SIG_TEST_CONF_LINE=""
@@ -231,6 +240,7 @@ ${IPC_BENCH_LINE}
 ${PTHREAD_TEST_LINE}
 ${CAP_TEST_CONF_LINE}
 ${IRQ_CLAIM_TEST_CONF_LINE}
+${HAL_BAR_TEST_CONF_LINE}
 ${KERNEL242_TEST_CONF_LINE}
 ${SIG_TEST_CONF_LINE}
 ${GPUSTAT_CONF_LINE}
@@ -256,6 +266,7 @@ ARGS+=("pthread_test:$PTHREAD_TEST")
 [ -f "$PROC_SERVER" ] && ARGS+=("proc_server:$PROC_SERVER")
 [ -f "$CAP_TEST" ] && ARGS+=("cap_test:$CAP_TEST")
 [ -f "$IRQ_CLAIM_TEST" ] && ARGS+=("irq_claim_test:$IRQ_CLAIM_TEST")
+[ -f "$HAL_BAR_TEST" ] && ARGS+=("hal_bar_test:$HAL_BAR_TEST")
 [ -f "$KERNEL242_TEST" ] && ARGS+=("kernel242_test:$KERNEL242_TEST")
 [ -f "$SIG_TEST" ] && ARGS+=("sig_test:$SIG_TEST")
 [ -f "$GPUSTAT" ] && ARGS+=("gpustat:$GPUSTAT")

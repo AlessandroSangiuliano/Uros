@@ -366,6 +366,15 @@ must_report 'dl_test: starting' 'dl_test: [0-9]* of [0-9]* arms passed' \
 must_report 'dma_reclaim: started' 'dma_reclaim: [0-9]* of [0-9]* arms passed' \
 	'It waits for the slots a dead task was holding, so on a kernel that does not release them it does not print a WRONG line -- it waits out its bound and then says so.  Silence instead means it never got that far.'
 
+# 🔑 Its arm COUNT is not fixed, and that is deliberate (#427).  The sizes are
+# checked on any board; the arms about a device above four gigabytes run only
+# when one is placed there on purpose -- see the header of the test.  So the
+# pattern asks for a verdict and not for a number: a run that reported "9 of 9"
+# because the high device was absent is a true statement, and demanding a fixed
+# count would turn it into a failure.
+must_report 'hal_bar: started' 'hal_bar: [0-9]* of [0-9]* arms passed' \
+	'It reads the region records the HAL measured and asks for a rescan.  A HAL that never probed does not fail loudly -- it reports regions of size zero -- so the absence of this verdict means the program did not reach the end, which is a different finding from a wrong size.'
+
 
 # And the one that must report on EVERY boot that gets far enough, which is a
 # different claim: it has no "started" line to pair with, because it runs
@@ -571,6 +580,27 @@ case " $* " in
 *)		CPU_ARGS="-cpu max" ;;
 esac
 
+# ── How much memory, and it was never said (#427) ─────────────────────
+#
+# 🔴 THIS SCRIPT PASSED NO -m AT ALL, so every x86-64 run this port has made
+# ran on whatever qemu defaults to -- 128 MiB.  i386's run-qemu.sh has said
+# `-m 512M' since it was written, so the two targets were not being given the
+# same machine, and nothing anywhere said which one either of them had.
+#
+# ⚠️ It is not only a matter of room.  How much RAM a guest has decides where
+# its PHYSICAL addresses stop being memory, and that changes what an experiment
+# means: a mapping of physical 0x80000000 reaches the PCI hole on a 512 MiB
+# machine and ordinary RAM on a four-gigabyte one.  The #427 ablation that
+# narrows a physical address to 32 bits lands on exactly that address, so a
+# default nobody chose was deciding whether the check could fail at all.
+#
+# Same shape as the two above: a default that is stated, and a command line
+# that wins over it.
+case " $* " in
+*" -m "*)	MEM_ARGS="" ;;
+*)		MEM_ARGS="-m 512M" ;;
+esac
+
 # 🔥 And WHICH ACCELERATOR, said out loud (#477).
 #
 # This script has never passed -enable-kvm, so every x86-64 run this port has
@@ -610,6 +640,7 @@ fi
 # builds tables and enables nothing, which is a real thing to want and a
 # terrible thing to mistake for translation being on.
 echo "=== iommu on the board: $IOMMU_NAME ==="
+echo "=== memory: ${MEM_ARGS:-from the command line} ==="
 
 : > "$LOG"
 
@@ -651,7 +682,7 @@ DISK_ARGS="-drive file=$BUILD/disk-x86_64.img,if=none,id=urosdisk,format=raw
 	-device ide-hd,drive=ahcidisk1,bus=ahci0.1,bootindex=2"
 
 # shellcheck disable=SC2086
-qemu-system-x86_64 $CPU_ARGS $DISK_ARGS $IOMMU_ARGS "$@" \
+qemu-system-x86_64 $CPU_ARGS $MEM_ARGS $DISK_ARGS $IOMMU_ARGS "$@" \
 	-nographic -serial mon:stdio -no-reboot > "$LOG" 2>&1 &
 QPID=$!
 
@@ -748,6 +779,7 @@ while kill -0 "$QPID" 2>/dev/null; do
 		'cap_test: starting'    'cap_test: \(ALL TESTS PASSED\|SOME TESTS FAILED\)' \
 		'dl_test: starting'     'dl_test: [0-9]* of [0-9]* arms passed' \
 		'dma_reclaim: started'  'dma_reclaim: [0-9]* of [0-9]* arms passed' \
+		'hal_bar: started'      'hal_bar: [0-9]* of [0-9]* arms passed' \
 		'cow_test: started'     'cow_test: [0-9]* of [0-9]* arms passed'; then
 		sleep 1
 		break

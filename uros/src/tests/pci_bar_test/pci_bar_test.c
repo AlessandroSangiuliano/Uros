@@ -256,6 +256,109 @@ main(void)
 		    "wrote more regions than the caller had room for");
 	}
 
+	/*
+	 * ── The size, which is measured and not read (#427) ──────────
+	 *
+	 * The mutation half -- disable the decoding, write all ones, read back,
+	 * put the address back -- needs the bus.  This half is arithmetic, and
+	 * the arms below are the read-backs a device would have given, so the
+	 * arithmetic is judged here rather than on whatever hardware happens to
+	 * be plugged in.
+	 */
+
+	/*
+	 * [8] Four kilobytes of 32-bit memory: the ordinary case, and the one
+	 * every formula gets right.  It is here so the arms that follow are read
+	 * as differences from something that works.
+	 *
+	 * ⚠️ The low four bits come back as the ORIGINAL flags, not as ones:
+	 * they are read-only, so a write of all ones does not reach them.  A
+	 * computation that forgot to mask them off would answer 1 byte.
+	 */
+	{
+		struct pci_bar_region reg = { 0, 0, 0, 0 };
+
+		arm_u64("[8] 32-bit memory, 4 KiB",
+			pci_bar_size_from_probe(&reg, 0xFFFFF000u, 0),
+			0x1000ull, "the writable field is bits 31:12");
+		arm("[8] one slot", pci_bar_region_slots(&reg) == 1,
+		    "a 32-bit region was said to occupy two slots");
+	}
+
+	/*
+	 * [9] 🔥 THE ARM THAT SEPARATES THE TWO FORMULAS.  An I/O BAR on a device
+	 * that decodes sixteen bits reads back zeros in its top half, so the
+	 * writable field is NOT every bit above the size.
+	 *
+	 * `~value + 1' over that read-back gives 0xFFFF0020 -- four gigabytes
+	 * minus a bit, for a thirty-two byte port range -- and it gives it
+	 * quietly, because a size is a number and every number looks like an
+	 * answer.  The lowest set bit gives 0x20.
+	 *
+	 * This is not a hypothetical device: it is the shape of the SATA
+	 * controller's BAR4 on the board these suites boot on.
+	 */
+	{
+		struct pci_bar_region reg = { 0, 0, PCI_REGION_IO, 0 };
+
+		arm_u64("[9] I/O BAR, 32 bytes, upper half unimplemented",
+			pci_bar_size_from_probe(&reg, 0x0000FFE1u, 0),
+			0x20ull,
+			"complementing the read-back turns 32 bytes into 4 GiB");
+	}
+
+	/*
+	 * [10] The two-gigabyte 64-bit region this issue's last box is about.
+	 * The read-back spans both slots, and the size does not fit in the lower
+	 * one alone.
+	 */
+	{
+		struct pci_bar_region reg = {
+			0, 0, PCI_REGION_MEM_64 | PCI_REGION_PREFETCH, 2
+		};
+
+		arm_u64("[10] 64-bit region, 2 GiB",
+			pci_bar_size_from_probe(&reg, 0x8000000Cu, 0xFFFFFFFFu),
+			0x80000000ull, "the upper slot did not enter the size");
+		arm("[10] two slots", pci_bar_region_slots(&reg) == 2,
+		    "a 64-bit region was said to occupy one slot, so the "
+		    "measurement would have written ones to only half of it");
+	}
+
+	/*
+	 * [11] A region LARGER than four gigabytes, where the whole answer lives
+	 * in the upper slot.
+	 *
+	 * 🔑 An arithmetic done in 32 bits does not merely truncate this one, it
+	 * answers ZERO -- every writable bit is above the boundary -- and a size
+	 * of zero reads as "no such region" rather than as a wrong number.  A
+	 * defect that turns a device into an absence is the kind nobody goes
+	 * looking for.
+	 */
+	{
+		struct pci_bar_region reg = { 0, 0, PCI_REGION_MEM_64, 0 };
+
+		arm_u64("[11] 64-bit region, 8 GiB",
+			pci_bar_size_from_probe(&reg, 0x0000000Cu, 0xFFFFFFFEu),
+			0x200000000ull,
+			"a region bigger than four gigabytes came back as none");
+	}
+
+	/*
+	 * [12] Nothing writable at all: the honest answer is zero, and it has to
+	 * be reached before the arithmetic rather than by it.  Complementing a
+	 * read-back of zero gives four gigabytes, which is the largest wrong
+	 * answer this function can produce and the one an unimplemented BAR
+	 * would produce on every device that has one.
+	 */
+	{
+		struct pci_bar_region reg = { 0, 0, 0, 0 };
+
+		arm_u64("[12] nothing writable is size zero",
+			pci_bar_size_from_probe(&reg, 0x00000000u, 0),
+			0ull, "an unimplemented BAR was sized at 4 GiB");
+	}
+
 	printf("pci_bar_test: %d of %d arms passed\n", passed, passed + failed);
 
 	/*

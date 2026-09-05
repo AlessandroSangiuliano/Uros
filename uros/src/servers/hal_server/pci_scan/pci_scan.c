@@ -28,10 +28,18 @@
  * caller-supplied array as a fully populated hal_device_info record
  * (BARs and IRQ line included).
  *
- * This module is pure discovery — it reads PCI configuration space
- * but never programs BARs or writes command registers.  Ownership of
- * the device is later handed off to a driver server, which will enable
- * memory/bus-master and map the BARs itself.
+ * The scan is pure discovery — it reads configuration space and writes
+ * nothing.  The MEASUREMENT below it is not, and that is the whole reason the
+ * two are separate entry points: a region's size cannot be read, only probed,
+ * and probing writes.  Ownership of the device is still handed off to a driver
+ * server afterwards, which enables memory/bus-master for itself; what it no
+ * longer has to do is find out where its device is and how big it is.
+ *
+ * ⚠️ The comment here used to say this module "never programs BARs or writes
+ * command registers", and it was true of every line above.  It stopped being
+ * true the moment a size had to be a number rather than a constant in a
+ * driver's header, and a file that describes what it used to do is worse than
+ * one that describes nothing.
  */
 
 #include <mach.h>
@@ -64,8 +72,9 @@ static int
 read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
 		struct hal_device_info *dev)
 {
-	unsigned int vendor_device, class_rev, irq_reg, bar;
+	unsigned int vendor_device, class_rev, irq_reg, bar, hdr;
 	uint32_t raw_bars[PCI_NUM_BAR_SLOTS];
+	unsigned int nslots;
 	kern_return_t kr;
 	int i;
 
@@ -94,7 +103,45 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
 	dev->irq = (kr == KERN_SUCCESS) ? (irq_reg & 0xFFu) : 0;
 
 	/*
-	 * The BARs: read all six slots, then decode them into regions (#427).
+	 * How many of the six slots are BARs at all.
+	 *
+	 * 🔴 A PCI-to-PCI bridge has TWO, and 0x18 onwards holds its bus
+	 * numbers and the I/O and memory windows it forwards.  Decoding six on
+	 * one of those turns a bus topology into addresses; and once the size
+	 * is MEASURED rather than assumed, writing all ones into slot 2 of a
+	 * bridge reprograms the window every device behind it is reached
+	 * through.  So the count is settled from the header type before
+	 * anything reads a slot, let alone writes one.
+	 *
+	 * ⚠️ A header type this code does not know gets ZERO slots rather than
+	 * six.  CardBus is the only other one defined and its layout is not
+	 * this one; a type nobody has seen is a device saying something we
+	 * cannot act on, and six is the answer that would be acted on.
+	 */
+	kr = device_pci_config_read(pci_master_device,
+				    bus, slot, func,
+				    PCI_HDR_DWORD, &hdr);
+	if (kr != KERN_SUCCESS)
+		return -1;
+
+	switch (PCI_HEADER_TYPE_OF(hdr) & PCI_HEADER_TYPE_MASK) {
+	case PCI_HEADER_TYPE_NORMAL:
+		nslots = PCI_NUM_BAR_SLOTS;
+		break;
+	case PCI_HEADER_TYPE_BRIDGE:
+		nslots = PCI_NUM_BAR_SLOTS_BRIDGE;
+		break;
+	default:
+		printf("pci_scan: %02u:%02u.%u header type 0x%02x is not one "
+		       "this reads BARs from\n", bus, slot, func,
+		       PCI_HEADER_TYPE_OF(hdr) & PCI_HEADER_TYPE_MASK);
+		nslots = 0;
+		break;
+	}
+
+	/*
+	 * The BARs: read the slots this header has, then decode them into
+	 * regions (#427).
 	 *
 	 * 🔑 Two steps and not one, and the split is the fix.  What comes off
 	 * the bus is six 32-bit slots; what a driver needs is a list of
@@ -109,7 +156,8 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
 	 * not arrive is not a region, and inventing one would hand a driver an
 	 * address that no device answered for.
 	 */
-	for (i = 0; i < PCI_NUM_BAR_SLOTS; i++) {
+	memset(raw_bars, 0, sizeof(raw_bars));
+	for (i = 0; i < (int)nslots; i++) {
 		kr = device_pci_config_read(pci_master_device,
 					    bus, slot, func,
 					    PCI_BAR(i), &bar);
@@ -150,10 +198,141 @@ read_pci_device(unsigned int bus, unsigned int slot, unsigned int func,
 			       raw_bars[3], raw_bars[4], raw_bars[5]);
 	}
 
-	dev->n_bars = pci_bars_decode(raw_bars, PCI_NUM_BAR_SLOTS,
+	dev->n_bars = pci_bars_decode(raw_bars, nslots,
 				      dev->bars, HAL_MAX_BARS);
 
 	return 1;
+}
+
+/*
+ * ── Measuring a region, which is the one thing here that WRITES ──────
+ *
+ * 🔑 A SIZE IS NOT A FIELD.  Configuration space says where a device is, never
+ * how much of the address space it answers for; that is discovered by writing
+ * all ones into the BAR and reading back which bits the device refused to take.
+ * The bits it hardwires to zero are the ones below its size.
+ *
+ * 🔴 SO THE MEASUREMENT MOVES THE DEVICE, for as long as it takes to read the
+ * answer back.  Between the write and the restore the BAR names an address the
+ * device does not belong at, and if it were decoding it would answer for
+ * somebody else's memory.  Hence the command register: the device's decoding is
+ * switched OFF around the whole pass and put back afterwards, which is what
+ * makes this safe rather than merely quick.
+ *
+ * ⚠️ And it is why this runs once, at first discovery.  hal_rescan is a public
+ * RPC that block_server calls on every boot; a probe on that path would disable
+ * a disk that is in use, on demand, from a caller that only wanted to know
+ * whether anything new appeared.  hal_run_discovery() calls this only for a BDF
+ * the registry had never seen.
+ */
+static int
+pci_scan_measure(struct hal_device_info *dev)
+{
+	unsigned int	cmd_status, cmd, r;
+	kern_return_t	kr;
+
+	if (dev == NULL)
+		return -1;
+	if (pci_master_device == MACH_PORT_NULL)
+		return -1;
+	if (dev->n_bars == 0)
+		return 0;
+
+	kr = device_pci_config_read(pci_master_device,
+				    dev->bus, dev->slot, dev->func,
+				    PCI_COMMAND, &cmd_status);
+	if (kr != KERN_SUCCESS)
+		return -1;
+
+	/*
+	 * ⚠️ THE UPPER HALF OF THIS DWORD IS THE STATUS REGISTER, AND ITS BITS
+	 * ARE CLEARED BY WRITING ONE.  So the value read back cannot be written
+	 * back: a device with a signalled error would have that error erased by
+	 * the act of putting its command register the way it was.  Only the low
+	 * sixteen bits are ever written here, and zeros in the top half reach
+	 * status bits as "leave alone".
+	 */
+	cmd = cmd_status & 0xFFFFu;
+
+	kr = device_pci_config_write(pci_master_device,
+				     dev->bus, dev->slot, dev->func,
+				     PCI_COMMAND,
+				     cmd & ~(PCI_CMD_IO_ENABLE
+					     | PCI_CMD_MEM_ENABLE));
+	if (kr != KERN_SUCCESS)
+		return -1;
+
+	for (r = 0; r < dev->n_bars; r++) {
+		struct pci_bar_region	*reg = &dev->bars[r];
+		unsigned int		nslots = pci_bar_region_slots(reg);
+		unsigned int		lo = 0, hi = 0;
+		unsigned int		probe_lo = 0, probe_hi = 0;
+		unsigned int		check = 0;
+
+		/*
+		 * ⚠️ Both halves are written before either is read back, and
+		 * both are restored after.  A 64-bit region's size can be
+		 * larger than four gigabytes, so the answer is not in the lower
+		 * slot at all -- and restoring the lower half before reading
+		 * the upper one would measure a BAR that is half moved.
+		 */
+		(void) device_pci_config_read(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot), &lo);
+		if (nslots == 2)
+			(void) device_pci_config_read(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot + 1), &hi);
+
+		(void) device_pci_config_write(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot), 0xFFFFFFFFu);
+		if (nslots == 2)
+			(void) device_pci_config_write(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot + 1),
+					      0xFFFFFFFFu);
+
+		(void) device_pci_config_read(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot), &probe_lo);
+		if (nslots == 2)
+			(void) device_pci_config_read(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot + 1), &probe_hi);
+
+		(void) device_pci_config_write(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot), lo);
+		if (nslots == 2)
+			(void) device_pci_config_write(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot + 1), hi);
+
+		/*
+		 * 🔥 The restore is READ BACK, because it is the step whose
+		 * failure is silent and permanent.  Everything else here can go
+		 * wrong and cost a wrong size; this one leaves the device at an
+		 * address nobody will look for it at, and the driver that finds
+		 * nothing there hours later has no way back to this loop.
+		 */
+		(void) device_pci_config_read(pci_master_device,
+					      dev->bus, dev->slot, dev->func,
+					      PCI_BAR(reg->slot), &check);
+		if (check != lo)
+			printf("pci_scan: %02u:%02u.%u bar%u DID NOT TAKE ITS "
+			       "ADDRESS BACK: wrote 0x%08x, reads 0x%08x\n",
+			       dev->bus, dev->slot, dev->func, reg->slot,
+			       lo, check);
+
+		reg->size = pci_bar_size_from_probe(reg, (uint32_t)probe_lo,
+						    (uint32_t)probe_hi);
+	}
+
+	(void) device_pci_config_write(pci_master_device,
+				       dev->bus, dev->slot, dev->func,
+				       PCI_COMMAND, cmd);
+	return 0;
 }
 
 static int
@@ -198,4 +377,5 @@ const struct hal_discovery_ops pci_scan_discovery_ops = {
 	.name = "pci_scan",
 	.init = pci_scan_init,
 	.scan = pci_scan_scan,
+	.measure = pci_scan_measure,
 };

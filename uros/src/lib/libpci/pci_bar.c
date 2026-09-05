@@ -118,3 +118,39 @@ pci_bars_decode(const uint32_t *slots, unsigned int nslots,
 
 	return n;
 }
+
+unsigned int
+pci_bar_region_slots(const struct pci_bar_region *r)
+{
+	if (r == NULL)
+		return 0;
+
+	return (r->flags & PCI_REGION_MEM_64) ? 2u : 1u;
+}
+
+uint64_t
+pci_bar_size_from_probe(const struct pci_bar_region *r, uint32_t lo, uint32_t hi)
+{
+	uint64_t	writable;
+
+	if (r == NULL)
+		return 0;
+
+	if (r->flags & PCI_REGION_IO)
+		writable = (uint64_t)(lo & PCI_BAR_IO_ADDR_MASK);
+	else if (r->flags & PCI_REGION_MEM_64)
+		writable = ((uint64_t)lo | ((uint64_t)hi << 32))
+			 & ~(uint64_t)0xFu;
+	else
+		writable = (uint64_t)(lo & PCI_BAR_MEM_ADDR_MASK);
+
+	if (writable == 0)
+		return 0;
+
+	/*
+	 * The lowest set bit.  See the header: the writable bits of a BAR are a
+	 * contiguous field at the top, so the first one that survived the write
+	 * of all ones is the region's size.
+	 */
+	return writable & (~writable + 1);
+}

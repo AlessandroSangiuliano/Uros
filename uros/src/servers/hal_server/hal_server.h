@@ -112,9 +112,11 @@ struct hal_device_info {
 	 * would have written a truncated address more carefully, with every
 	 * guard still green.
 	 *
-	 * `size' is zero until something probes it; see pci_bar.h for why a
-	 * size is measured rather than read, and hal_registry_add() for why the
-	 * measurement happens once.
+	 * `size' is filled in by the measurement, which happens once: see
+	 * pci_bar.h for why a size is probed rather than read, and
+	 * hal_registry_add() for why a rescan no longer touches this record at
+	 * all -- a refresh from a fresh scan would put zeros back over every
+	 * size the HAL had measured.
 	 */
 	uint32_t		n_bars;
 	struct pci_bar_region	bars[HAL_MAX_BARS];
@@ -158,16 +160,35 @@ struct hal_driver_reg {
  * module exports a symbol <name>_discovery_ops of this type; the
  * loader (libmodload) strips ".so" and appends the suffix.
  *
- * init()  — one-time setup; the module stashes master_device if it
- *           needs kernel PCI config RPCs.
- * scan()  — fills up to max entries in out[] and returns how many
- *           devices were discovered (>=0) or -1 on fatal error.
+ * init()    — one-time setup; the module stashes master_device if it
+ *             needs kernel PCI config RPCs.
+ * scan()    — fills up to max entries in out[] and returns how many
+ *             devices were discovered (>=0) or -1 on fatal error.
+ * measure() — fill in the sizes of one device's regions.  Optional.
  * ================================================================ */
 
 struct hal_discovery_ops {
 	const char	*name;
 	int  (*init)(mach_port_t master_device);
 	int  (*scan)(struct hal_device_info *out, unsigned int max);
+
+	/*
+	 * 🔴 SEPARATE FROM scan() BECAUSE IT WRITES, and that is the only
+	 * reason.  A region's size is not a field anywhere in configuration
+	 * space: it is found by writing all ones into the BAR, reading back
+	 * which bits the device refused, and putting the address back -- so
+	 * measuring a device moves it, briefly, and has to be done with its
+	 * decoding switched off.
+	 *
+	 * ⚠️ Which is why the orchestrator calls it only for a BDF the registry
+	 * had never seen.  hal_rescan is a public RPC that runs on every boot;
+	 * folding this into scan() would mean disabling a disk that is in use
+	 * because somebody asked whether anything new had appeared.
+	 *
+	 * NULL for a back-end whose regions carry their own extent -- nothing
+	 * is skipped silently, the size simply stays 0, which is what it means.
+	 */
+	int  (*measure)(struct hal_device_info *dev);
 };
 
 /* ================================================================
@@ -185,6 +206,16 @@ struct hal_discovery_ops {
 #define HAL_REGISTRY_ADD_NEW		1
 
 int  hal_registry_add(const struct hal_device_info *dev);
+
+/*
+ * Record the sizes a measurement produced, for a device already in the
+ * registry.  Only the sizes: see the definition for why the rest of the
+ * measured record is not copied, and why the match is by slot.
+ */
+int  hal_registry_set_sizes(unsigned int bus, unsigned int slot,
+			    unsigned int func,
+			    const struct pci_bar_region *measured,
+			    unsigned int n);
 /*
  * #173: trigger a fresh discovery pass on demand.  Reuses the same
  * machinery as the initial boot scan; only devices whose BDF was not

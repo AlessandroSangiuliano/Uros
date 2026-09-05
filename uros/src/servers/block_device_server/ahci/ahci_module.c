@@ -188,6 +188,29 @@ ahci_port_scan(struct ahci_state *st)
 	for (port = 0; port < AHCI_MAX_PORTS; port++) {
 		if (!(pi & (1u << port)))
 			continue;
+
+		/*
+		 * 🔑 "PI says this port exists" and "this port's registers are
+		 * inside what the device decodes" are two different statements,
+		 * and only the first one was being made (#427).  The mapping is
+		 * now the measured size of the ABAR rather than a constant big
+		 * enough for any controller, so a port beyond it is a read past
+		 * the end of the region -- which is exactly the case the old
+		 * constant hid by mapping a page the device does not own.
+		 *
+		 * ⚠️ A disagreement between PI and the BAR size is the device
+		 * contradicting itself, so it is said out loud rather than
+		 * skipped: whichever of the two is wrong, somebody wants to
+		 * know which controller said it.
+		 */
+		if (AHCI_PORT_BASE + ((unsigned)port + 1) * AHCI_PORT_SIZE
+		    > st->abar_size) {
+			printf("ahci: PI claims port %d, whose registers end "
+			       "past the 0x%X bytes the ABAR measures — not "
+			       "using it\n", port, (unsigned)st->abar_size);
+			continue;
+		}
+
 		if ((port_read(st, port, PORT_SSTS) & SSTS_DET_MASK)
 		    != SSTS_DET_PRESENT)
 			continue;
@@ -672,9 +695,38 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		return -1;
 	}
 	abar_phys = abar_region->base;
-	printf("ahci: ABAR phys = 0x%08X%08X\n",
+	printf("ahci: ABAR phys = 0x%08X%08X  size = 0x%08X%08X\n",
 	       (unsigned int)(abar_phys >> 32),
-	       (unsigned int)(abar_phys & 0xFFFFFFFFu));
+	       (unsigned int)(abar_phys & 0xFFFFFFFFu),
+	       (unsigned int)(abar_region->size >> 32),
+	       (unsigned int)(abar_region->size & 0xFFFFFFFFu));
+
+	/*
+	 * 🔴 THE SIZE IS THE DEVICE'S ANSWER, NOT THIS DRIVER'S GUESS (#427).
+	 *
+	 * This mapped a constant 8 KiB, on the grounds that 0x100 + 32 * 0x80
+	 * covers every port a controller can have.  The controller these suites
+	 * boot on answers for 4 KiB, so the second page of the mapping was
+	 * whatever physical memory happens to follow the ABAR -- reachable
+	 * through `st->abar', writable, and silent, because a mapping does not
+	 * have to reach a device to succeed.
+	 *
+	 * ⚠️ A size of zero means nobody measured it, and that is refused rather
+	 * than treated as a small region: it is the answer a HAL that skipped
+	 * the probe gives, and mapping zero bytes would fail later and further
+	 * away.  Below 0x100 there is not even a generic host control block, so
+	 * the driver could not read CAP to find out what it is talking to.
+	 */
+	if (abar_region->size < AHCI_PORT_BASE) {
+		printf("ahci: BAR5 measures 0x%08X%08X bytes, which is less "
+		       "than the 0x%X a host control block occupies — refusing "
+		       "to drive it\n",
+		       (unsigned int)(abar_region->size >> 32),
+		       (unsigned int)(abar_region->size & 0xFFFFFFFFu),
+		       AHCI_PORT_BASE);
+		return -1;
+	}
+	st->abar_size = (vm_size_t)abar_region->size;
 
 	/* Enable PCI bus master + memory space */
 	kr = device_pci_config_read(master_dev, bus, slot, func,
@@ -706,7 +758,7 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 * goes in whole and the user address comes back whole.
 	 */
 	kr = device_mmio_map(master_dev, (vm_address_t)abar_phys,
-			     AHCI_ABAR_SIZE,
+			     st->abar_size,
 			     mach_task_self(), (vm_address_t *)&st->abar);
 	if (kr != KERN_SUCCESS) {
 		printf("ahci: device_mmio_map failed (kr=%d)\n", kr);
