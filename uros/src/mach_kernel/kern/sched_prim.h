@@ -195,12 +195,37 @@ extern void		clear_wait_locked(
 				int			result,
 				boolean_t		interrupt_only);
 
+/*
+ * ── Giving back the raise assert_wait() took (#490) ──────────────────
+ *
+ * 🔑 ONE PLACE THAT BOTH SIDES CALL, rather than a rule at 67 call sites.
+ * assert_wait() disables preemption so that the thread cannot be put to sleep
+ * between declaring its wait and releasing the lock it still holds; this is
+ * what gives that back, and it is called from every way out of the window --
+ * thread_block_reason() when it commits, and clear_wait() when the wait is
+ * abandoned instead.
+ *
+ * ⚠️ It checks that the thread is the CURRENT one, because clear_wait() is
+ * mostly called on somebody else: the level belongs to a processor, and the
+ * one that owes it is the processor the waiter is on.
+ *
+ * On a machine with no preemption level this is nothing at all, and nothing is
+ * emitted -- which is how i386's generated code stays identical.
+ */
+#if	MACHINE_PREEMPTION_LEVEL
+extern void	assert_wait_preempt_release(
+				thread_t	thread);
+#else	/* !MACHINE_PREEMPTION_LEVEL */
+#define		assert_wait_preempt_release(Th)	do { } while (0)
+#endif	/* MACHINE_PREEMPTION_LEVEL */
+
 #define		clear_wait(Th,Res,Iable)			\
 		{	spl_t s = splsched();			\
 			thread_lock(Th);			\
 			clear_wait_locked(Th,Res,Iable);	\
 			thread_unlock(Th);			\
 			splx(s);				\
+			assert_wait_preempt_release(Th);	\
 		}
 
 

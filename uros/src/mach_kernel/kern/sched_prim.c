@@ -770,8 +770,70 @@ __assert_wait(
 		thread->sleep_stamp = sched_tick;
 		thread_unlock(thread);
 	}
+
+#if	MACHINE_PREEMPTION_LEVEL
+	/*
+	 * 🔴 THE WAIT IS DECLARED, AND THE CALLER STILL HOLDS ITS LOCK (#490).
+	 *
+	 * What follows this function, at every one of its callers, is
+	 * `unlock(l); thread_block()' -- Mach's own idiom, and the macro
+	 * thread_sleep_mutex() in <kern/sched_prim.h> spells it out.  Between
+	 * here and that block the thread is TH_WAIT and owns the lock, so on a
+	 * machine that preempts in kernel mode an AST here finds a thread that
+	 * has already declared a wait: thread_block_reason() puts it to sleep
+	 * holding the lock, and every later taker waits for ever.  Caught twice
+	 * in the debugger, both times two threads on one activation -- one
+	 * asleep on its lock, the other suspended inside special_handler().
+	 *
+	 * 🔑 Raised HERE and not at the 67 callers.  Every existing
+	 * assert_wait/unlock/block sequence becomes safe without being touched,
+	 * and one written tomorrow in the old style is safe when it is written.
+	 * Auditing the callers is the weaker fix for the reason it always is:
+	 * it works until the sixty-eighth.
+	 *
+	 * ⚠️ Before splx(), not after.  splx() lowers the level and replays what
+	 * was deferred at it, which is precisely the moment an arriving tick
+	 * could take the AST this exists to refuse.
+	 */
+	disable_preemption();
+	thread->wait_preempt = TRUE;
+#endif	/* MACHINE_PREEMPTION_LEVEL */
+
 	splx(s);
 }
+
+#if	MACHINE_PREEMPTION_LEVEL
+/*
+ * Give back what the assert above took.  See <kern/sched_prim.h> for why this
+ * is one function called from both ways out of the window rather than a rule.
+ */
+void
+assert_wait_preempt_release(thread_t thread)
+{
+	/*
+	 * ⚠️ Only for the thread that owes it, and only on its own processor.
+	 * clear_wait() is mostly called on somebody ELSE -- a waker reaching
+	 * into a sleeper -- and lowering this processor's level for a raise
+	 * another processor took would be a level released twice.
+	 */
+	if (thread != current_thread())
+		return;
+	if (!thread->wait_preempt)
+		return;
+
+	thread->wait_preempt = FALSE;
+
+	/*
+	 * ⚠️ _no_check, deliberately.  The two callers are both about to do
+	 * their own AST work -- thread_block_reason() is on its way into the
+	 * scheduler and clear_wait()'s caller returns through a trap -- so
+	 * taking one here would be taking it in the middle of somebody's
+	 * critical section for no gain.  Whether the checking form should act
+	 * on an urgent AST at all is #462, and it is not this window.
+	 */
+	enable_preemption_no_check();
+}
+#endif	/* MACHINE_PREEMPTION_LEVEL */
 
 void
 assert_wait(
@@ -1834,6 +1896,20 @@ thread_block_reason(
 	s = splsched();
 
 	mp_disable_preemption();
+
+	/*
+	 * 🔑 AFTER this function's own raise and not before, so the level never
+	 * passes through zero on the way (#490).  What assert_wait() took is
+	 * given back here because the window it was protecting ends exactly
+	 * here: from this point the thread is committed to the scheduler, which
+	 * is where being taken off the processor is the intended outcome rather
+	 * than the defect.
+	 *
+	 * ⚠️ Unconditional, and it is a no-op for a thread that declared no
+	 * wait -- thread_block() is called by plenty that did not.
+	 */
+	assert_wait_preempt_release(thread);
+
 	myprocessor = current_processor();
 
 	thread_lock(thread);
