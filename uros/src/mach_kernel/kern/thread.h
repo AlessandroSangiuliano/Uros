@@ -523,6 +523,30 @@ typedef struct thread_shuttle {
 	 */
 	vm_offset_t	futex_uaddr;
 
+#if	MACHINE_PREEMPTION_LEVEL
+	/*
+	 * ── The preemption raise that assert_wait() took, and this thread
+	 *    still owes back (#490) ─────────────────────────────────────────
+	 *
+	 * 🔴 THE WINDOW IS MACH'S OWN IDIOM.  `assert_wait(e); unlock(l);
+	 * thread_block()' leaves the thread TH_WAIT and STILL HOLDING THE LOCK
+	 * between the first statement and the second.  On a machine that
+	 * preempts in kernel mode, an AST there finds a thread that has already
+	 * declared a wait, so thread_block_reason() puts it to sleep holding the
+	 * lock -- and every later taker of that lock waits for ever.
+	 *
+	 * 🔑 A FLAG AND NOT A COUNT, because __assert_wait() panics on a second
+	 * assert: there is at most one of these outstanding per thread, and a
+	 * count would invite the reader to think otherwise.
+	 *
+	 * ⚠️ Per THREAD while the level it owns is per PROCESSOR, and the two
+	 * pair only because preemption is off between them: the thread cannot
+	 * change processor while it owes this, so the raise and its release are
+	 * always on the same one.
+	 */
+	boolean_t	wait_preempt;
+#endif	/* MACHINE_PREEMPTION_LEVEL */
+
 	/*
 	 * End of thread_shuttle proper
 	 */

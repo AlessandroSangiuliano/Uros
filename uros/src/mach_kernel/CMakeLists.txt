@@ -181,6 +181,7 @@ if(UROS_TARGET_ARCH STREQUAL "x86_64")
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/ast_test.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/wait_preempt_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.S
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/trap/entry_test.c
     ${CMAKE_CURRENT_SOURCE_DIR}/x86_64/sync/lock.c)

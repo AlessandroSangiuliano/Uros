@@ -39,6 +39,7 @@
 #include <ddb/cont_probe.h>	/* #428: -L, a thread with a continuation */
 #include <ddb/ddb.h>		/* #428: -B, Debugger() from ordinary context */
 #include <trap/ast_test.h>	/* #463: -A, what a ring-0 return may take */
+#include <trap/wait_preempt_test.h>	/* #490: -W, and what it may block */
 #include <pmap/pmap.h>		/* #455: -C, the pmap under concurrency */
 #include <trap/trap.h>		/* trap_set_handler */
 
@@ -300,6 +301,18 @@ machine_processors_ready(void)
 		 */
 		if (boot_flag('A') && want > 1)
 			kernel_ast_test();
+
+		/*
+		 * -W: may a preemption AST sleep a thread that has declared a
+		 * wait and still holds a lock? (#490)
+		 *
+		 * Next to -A because it is the same window seen from the other
+		 * side: that one asks what a ring-0 return may RUN, this one
+		 * what it may BLOCK.  Same requirement of a second processor,
+		 * and it returns so the boot goes on.
+		 */
+		if (boot_flag('W') && want > 1)
+			kernel_wait_preempt_test();
 
 		/*
 		 * -M: what concurrency does to a pmap with no locking (#455).
