@@ -245,6 +245,27 @@ struct percpu {
 	 * beside an MMIO store that is already thousands of times dearer.
 	 */
 	uint64_t acked;
+
+	/*
+	 * How many ticks were deferred and are still owed (#522).
+	 *
+	 * 🔴 THE BITMAP CANNOT HOLD THIS.  `pending' is one bit per vector,
+	 * which is exactly right for a device: an interrupt that arrived twice
+	 * while masked has one condition to service, and replaying its handler
+	 * once services it.  The timer is the one vector where the OCCURRENCES
+	 * are the meaning -- it is a time base, not a condition -- so two ticks
+	 * collapsing into one bit is time that never happened.
+	 *
+	 * 🔥 Measured the moment the tick became deferrable: the boot's own
+	 * check asked for 100 ticks in 200 ms and counted 82.  A deadlock
+	 * traded for a clock that loses a fifth of itself is not a trade.
+	 *
+	 * ⚠️ At the END, like loaded_pmap and syscall_tsc above and for the
+	 * same reason: the offsets asserted below are what the assembly entry
+	 * paths use.
+	 */
+	uint32_t pending_ticks;
+	uint32_t reserved_ticks;
 };
 
 /*
