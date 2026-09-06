@@ -1068,6 +1068,14 @@ trap_take_ast(struct trap_frame *frame)
 	 * counter exists precisely to mark the spans in which a processor must
 	 * not be taken away, and every path that holds something raises it.
 	 *
+	 * ⚠️ THAT LAST CLAUSE WAS NOT TRUE WHEN IT WAS WRITTEN, and #490 is
+	 * what made it so.  assert_wait() is a path that holds something --
+	 * the caller still owns its lock, and the thread is already TH_WAIT --
+	 * and it did not raise the level, so this guard was asked about a span
+	 * it could not see.  A comment that states the property the code is
+	 * missing reads as coverage, which is how the window survived #463
+	 * being closed against the same instrument.
+	 *
 	 * Consulting it rather than refusing ring 0 outright, because until
 	 * #422 brings up userland every thread this kernel has IS a kernel
 	 * thread -- a rule of "ring 3 only" would mean nothing is ever
