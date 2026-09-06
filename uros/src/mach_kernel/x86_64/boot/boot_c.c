@@ -4891,7 +4891,6 @@ static void spl_selftest(void)
 
 	pit_delay_us(20000);
 	handled_while = ticks[me] - handled_before;
-	deferred_after = spl_deferred_count();
 
 	/*
 	 * ⚠️ Stop the timer *before* lowering, or the count of what the replay
@@ -4905,6 +4904,17 @@ static void spl_selftest(void)
 	 * held, which is the whole claim.
 	 */
 	lapic_timer_stop();
+
+	/*
+	 * ⚠️ COUNTED AFTER THE TIMER IS STOPPED, and the other order was wrong
+	 * for the same reason the raise-before-snapshot above is (#522).  A tick
+	 * deferred between the reading and the stop is held but not counted, so
+	 * the replay gives back one more than the test believes was owed --
+	 * "replayed 11 of the 10 held", seen once in twenty boots at -smp 4.
+	 * With the timer stopped nothing further can be deferred, so this
+	 * reading is final.
+	 */
+	deferred_after = spl_deferred_count();
 
 	splx(old);
 	handled_after = ticks[me] - handled_before - handled_while;
