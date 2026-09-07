@@ -1276,6 +1276,32 @@ x86_64_exception(int exc, int code, int subcode)
 {
 	exception_data_type_t	codes[EXCEPTION_CODE_MAX];
 
+	/*
+	 * 🔥 INTERRUPTS ON, and the syscall path already learned this rule
+	 * (#411, x86_64/syscall/entry.S): "anything that blocks cannot be
+	 * woken, and anything that needs the other processors deadlocks
+	 * outright.  Found as `ipi: a cross-call with interrupts off would
+	 * deadlock'."  It was found there from a page fault inside a copyin
+	 * that wanted a TLB shootdown; here it was found from a task dying
+	 * with no exception server, whose termination frees DMA memory and
+	 * wants the same shootdown (#527).
+	 *
+	 * 🔑 UNCONDITIONAL, and that is a statement about who exception() is
+	 * for.  It is raised on behalf of ring 3 and only ring 3 -- the two
+	 * callers below stand inside `(frame->cs & 3) == USER_RPL', and
+	 * syscall_return_noncanonical() is reached only from a SYSRET that was
+	 * about to go there -- and ring 3 cannot have had interrupts off.  So
+	 * there is no case in which the interrupted context wanted them
+	 * disabled, and none in which the kernel may keep them so: everything
+	 * under exception() takes locks, sends messages and can block.
+	 *
+	 * ⚠️ Not paired with a disable, unlike fault_in() above.  exception()
+	 * does not return -- it ends in the way back to ring 3 or in the
+	 * thread's termination -- so there is no path on which the trap
+	 * handler's "interrupts off" invariant has to be put back.
+	 */
+	interrupts_enable();
+
 	codes[0] = code;
 	codes[1] = subcode;
 

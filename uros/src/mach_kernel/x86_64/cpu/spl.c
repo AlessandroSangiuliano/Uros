@@ -138,6 +138,21 @@ spl_t splx(spl_t level)
 	return old;
 }
 
+/*
+ * The ticks this processor still owes.
+ *
+ * 🔑 A BACKLOG, not a total, and the difference is what the deferral check got
+ * wrong (#522): `deferred' counts every vector ever held, for the life of the
+ * boot, while this is what the next lowering will actually give back.  A test
+ * that took two snapshots of the first and compared them with replays of the
+ * second was comparing a rate with a level, and read "replayed 11 of the 10
+ * held" whenever a tick had been owed before it started looking.
+ */
+unsigned int spl_pending_ticks(void)
+{
+	return percpu()->pending_ticks;
+}
+
 uint64_t spl_deferred_count(void)
 {
 	return percpu()->deferred;

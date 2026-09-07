@@ -136,6 +136,9 @@ static inline spl_t spl0(void)
  */
 int spl_defer(unsigned vector);
 
+/* The ticks this processor still owes; see the definition (#522). */
+unsigned int spl_pending_ticks(void);
+
 /*
  * ── The names the machine-independent tree calls (#453) ───────────────
  *
