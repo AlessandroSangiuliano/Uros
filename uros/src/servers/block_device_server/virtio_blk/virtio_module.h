@@ -34,6 +34,21 @@
 #define DATA_BUF_SIZE	(128u * 1024u)
 
 /*
+ * How many caller-supplied physical pages one request can carry (#529).
+ *
+ * 🔑 Thirty-two because that is what the caller can send: ds_device_read_phys()
+ * in block_device.c copies the list into `vm_address_t dma[32]' and refuses a
+ * longer one.  Matching it means this driver refuses exactly the requests the
+ * server would already have refused, instead of introducing a second, lower
+ * ceiling that nobody reading either file would find.
+ *
+ * ⚠️ The descriptor ring has to hold these plus a header and a status, and the
+ * queue size is the device's to choose -- so the fit is checked against
+ * st->vq_size at submission and not assumed here.
+ */
+#define VIRTIO_PHYS_SEGS_MAX	32u
+
+/*
  * 🔴 THE ADDRESSES ARE vm_address_t AND NOT `unsigned int' (#520).
  *
  * They were the latter, and on i386 that was right by accident: there
