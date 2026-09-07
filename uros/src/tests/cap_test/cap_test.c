@@ -949,29 +949,60 @@ main(int argc, char **argv)
      * failing the suite (boot may not have published partitions yet
      * when cap_test runs).
      */
-    static const char * const candidates[] = { "ahci0a", "virtio_blk0a" };
+    /*
+     * ── The subject is chosen, not raced for (#529) ───────────────────
+     *
+     * 🔴 THIS USED TO TAKE WHICHEVER NAME APPEARED FIRST, and that decided
+     * what arm [12] was testing.  The block server publishes 'virtio_blk0a'
+     * and then 'ahci0a', so a lookup landing between the two saw only one of
+     * them -- and the arm's verdict became a report of when it happened to
+     * look.  Twelve boots in twenty failed that way at -smp 4, on this branch
+     * and on the baseline alike.
+     *
+     * 🔑 So each candidate gets the WHOLE budget before the next is
+     * considered.  The list is a preference, not a race, and the first entry
+     * is the boot disk on purpose: it is the partition every server is loaded
+     * from, and it is the one the capability path had never been exercised on
+     * -- virtio-blk carried no physical DMA entry points until this same
+     * issue added them.
+     *
+     * ⚠️ The total wait is unchanged.  One thousand passes each rather than
+     * two thousand over both, so a machine with neither disk waits exactly as
+     * long as it used to and a machine with the preferred one answers just as
+     * fast.
+     */
+    static const char * const candidates[] = { "virtio_blk0a", "ahci0a" };
     mach_port_t part_port = MACH_PORT_NULL;
     const char *found_name = NULL;
     /* Poll patiently for a BDS partition: HAL replay + MBR parse runs
      * in parallel with ipc_bench holding the CPU for several seconds.
      * The generous bound keeps the test stable across boot reordering
      * without hanging forever when no disk is present. */
-    for (int tries = 0; tries < 2000 && found_name == NULL; tries++) {
-        for (unsigned i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+    for (unsigned i = 0;
+         i < sizeof(candidates) / sizeof(candidates[0]) && found_name == NULL;
+         i++) {
+        for (int tries = 0; tries < 1000; tries++) {
             if (netname_look_up(name_server_port, "",
                                 (char *)candidates[i], &part_port) == KERN_SUCCESS) {
                 found_name = candidates[i];
                 break;
             }
+            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 50);
         }
         if (found_name == NULL)
-            thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT, 50);
+            printf("cap_test: '%s' never appeared in the name server; "
+                   "trying the next candidate\n", candidates[i]);
     }
 
     if (found_name == NULL) {
         printf("cap_test: [2] device_open_cap negative — "
                "SKIPPED (no BDS partition in name server)\n");
     } else {
+        printf("cap_test: the disk arms run on '%s'%s\n", found_name,
+               found_name == candidates[0]
+               ? ", the boot disk, as intended"
+               : " — NOT the preferred disk, so [12] is about a different "
+                 "controller than usual");
         char zero_tok[CAP_TOKEN_MAX];
         memset(zero_tok, 0, sizeof(zero_tok));
 

@@ -326,14 +326,50 @@ virtqueue_setup(struct virtio_state *st)
  * Submit a single virtio-blk request (polling)
  * ================================================================ */
 
+/*
+ * One request, with the data carried by `n_seg' descriptors rather than one
+ * (#529).
+ *
+ * 🔑 The chain was already the general shape: header, data, status, linked by
+ * `next'.  Scatter-gather is that chain with the middle repeated, so this is
+ * the one submission path and the single-buffer case below is a caller of it
+ * with one segment.  Two copies of a descriptor ring, kept in step by whoever
+ * remembers, is what this tree keeps paying for.
+ *
+ * The segments arrive already translated for this controller -- the block
+ * server ran each one through blk_dma_for(), which asks the KERNEL to match
+ * the page against the capabilities this controller holds.  For a legacy
+ * virtio device that answer is the physical address itself (see the note on
+ * device_dma_identity() in virtio_probe), but it is still an answer: a page no
+ * capability covers does not come back, so the authorisation happens whether
+ * or not there is a translation to perform.
+ */
 static int
-virtio_blk_request(struct virtio_state *st, uint32_t type,
-		   uint64_t sector, unsigned int data_offset,
-		   unsigned int data_len)
+virtio_blk_request_sg(struct virtio_state *st, uint32_t type, uint64_t sector,
+		      const uint64_t *seg_addr, const unsigned int *seg_len,
+		      unsigned int n_seg)
 {
 	struct virtio_blk_req_hdr *hdr;
 	uint8_t *status_ptr;
+	unsigned int i, status_idx;
 	int timeout;
+
+	if (n_seg == 0)
+		return -1;
+
+	/*
+	 * ⚠️ Refused, not truncated.  A short chain would read part of what was
+	 * asked for and report success, which is the failure this server cannot
+	 * see: the caller gets a buffer whose tail is whatever was in it.
+	 */
+	if (n_seg + 2u > st->vq_size) {
+		printf("virtio: %u segments plus header and status do not fit "
+		       "in a queue of %u — refusing rather than shortening the "
+		       "transfer\n", n_seg, st->vq_size);
+		return -1;
+	}
+
+	status_idx = n_seg + 1u;
 
 	hdr = (struct virtio_blk_req_hdr *)st->req_uva;
 	hdr->type = type;
@@ -349,19 +385,21 @@ virtio_blk_request(struct virtio_state *st, uint32_t type,
 	st->vq_desc[0].flags = VRING_DESC_F_NEXT;
 	st->vq_desc[0].next  = 1;
 
-	/* Descriptor 1: data */
-	st->vq_desc[1].addr  = (uint64_t)(st->data_dma + data_offset);
-	st->vq_desc[1].len   = data_len;
-	st->vq_desc[1].flags = VRING_DESC_F_NEXT;
-	if (type == VIRTIO_BLK_T_IN)
-		st->vq_desc[1].flags |= VRING_DESC_F_WRITE;
-	st->vq_desc[1].next  = 2;
+	/* Descriptors 1 .. n_seg: the data, in the order the caller gave it */
+	for (i = 0; i < n_seg; i++) {
+		st->vq_desc[1 + i].addr  = seg_addr[i];
+		st->vq_desc[1 + i].len   = seg_len[i];
+		st->vq_desc[1 + i].flags = VRING_DESC_F_NEXT;
+		if (type == VIRTIO_BLK_T_IN)
+			st->vq_desc[1 + i].flags |= VRING_DESC_F_WRITE;
+		st->vq_desc[1 + i].next  = (uint16_t)(2 + i);
+	}
 
-	/* Descriptor 2: status */
-	st->vq_desc[2].addr  = (uint64_t)(st->req_dma + sizeof(*hdr));
-	st->vq_desc[2].len   = 1;
-	st->vq_desc[2].flags = VRING_DESC_F_WRITE;
-	st->vq_desc[2].next  = 0;
+	/* Descriptor n_seg + 1: status */
+	st->vq_desc[status_idx].addr  = (uint64_t)(st->req_dma + sizeof(*hdr));
+	st->vq_desc[status_idx].len   = 1;
+	st->vq_desc[status_idx].flags = VRING_DESC_F_WRITE;
+	st->vq_desc[status_idx].next  = 0;
 
 	st->vq_avail->ring[st->vq_avail->idx % st->vq_size] = 0;
 	__asm__ volatile("" ::: "memory");
@@ -386,6 +424,22 @@ virtio_blk_request(struct virtio_state *st, uint32_t type,
 
 	printf("virtio: request timeout\n");
 	return -1;
+}
+
+/*
+ * The bounce-buffer request: one segment, which is this driver's own data
+ * page at an offset.  Everything the read and write paths below do goes
+ * through here, and through the chain above, so there is one place where a
+ * descriptor is built.
+ */
+static int
+virtio_blk_request(struct virtio_state *st, uint32_t type,
+		   uint64_t sector, unsigned int data_offset,
+		   unsigned int data_len)
+{
+	uint64_t	addr = (uint64_t)(st->data_dma + data_offset);
+
+	return virtio_blk_request_sg(st, type, sector, &addr, &data_len, 1);
 }
 
 /* ================================================================
@@ -611,6 +665,102 @@ virtio_mod_write_sectors(void *priv, int disk, uint32_t lba,
 	return 0;
 }
 
+/*
+ * ── Reading and writing the caller's own pages (#529) ─────────────────
+ *
+ * 🔴 THESE WERE NULL, AND THE HOLE WAS NOT WHERE IT LOOKED.  The block server
+ * answers D_INVALID_OPERATION for a driver with no physical path, so
+ * device_read_phys on this controller failed -- and this controller owns the
+ * BOOT disk, the partition every server is loaded from.  Which means the whole
+ * arrangement #432 built, where a client owns a page, gets a capability over
+ * it, hands that to the block server and the disk writes into it, had never
+ * been exercised on the one disk that matters.  It ran on the two AHCI test
+ * disks and nowhere else.
+ *
+ * ⚠️ There was a plausible reason for the NULL and it is the wrong one.  A
+ * legacy virtio device cannot be handed an IOVA -- that is the specification,
+ * see device_dma_identity() in virtio_probe() -- so it is tempting to conclude
+ * that it cannot take caller-supplied addresses either.  It is the opposite:
+ * these entry points are handed PHYSICAL addresses, which is exactly and only
+ * what this device can use.  The NULL was nobody having written it.
+ *
+ * 🔑 And the authorisation still happens.  blk_dma_for() asks the kernel to
+ * match each page against the capabilities this controller holds, and a page
+ * no capability covers does not come back.  What identity mapping gives up is
+ * the isolation -- the device could physically reach elsewhere -- not the
+ * permission check.
+ *
+ * The segment convention is AHCI's, because it is the caller's: one entry per
+ * page, up to 4096 bytes each, the last one carrying the remainder.
+ */
+static int
+virtio_submit_phys(struct virtio_state *st, uint32_t type, uint32_t lba,
+		   vm_address_t *phys_addrs, unsigned int n_pa,
+		   unsigned int total_bytes)
+{
+	uint64_t	addr[VIRTIO_PHYS_SEGS_MAX];
+	unsigned int	len[VIRTIO_PHYS_SEGS_MAX];
+	unsigned int	i, left;
+
+	if (n_pa == 0 || total_bytes == 0)
+		return -1;
+
+	if (n_pa > VIRTIO_PHYS_SEGS_MAX) {
+		printf("virtio: %u physical segments asked for and this driver "
+		       "carries %u — refusing rather than transferring part of "
+		       "the request\n", n_pa, VIRTIO_PHYS_SEGS_MAX);
+		return -1;
+	}
+
+	left = total_bytes;
+	for (i = 0; i < n_pa; i++) {
+		unsigned int chunk = left > 4096u ? 4096u : left;
+
+		addr[i] = (uint64_t)phys_addrs[i];
+		len[i]  = chunk;
+		left   -= chunk;
+	}
+
+	/*
+	 * ⚠️ The pages have to account for the bytes.  A list too short for
+	 * what was asked would otherwise submit a chain that transfers less
+	 * than `total_bytes' and report success.
+	 */
+	if (left != 0) {
+		printf("virtio: %u pages cover %u bytes but %u were asked for "
+		       "— refusing\n", n_pa, total_bytes - left, total_bytes);
+		return -1;
+	}
+
+	return virtio_blk_request_sg(st, type, (uint64_t)lba, addr, len, n_pa);
+}
+
+static int
+virtio_mod_read_phys(void *priv, int disk, uint32_t lba, unsigned int count,
+		     vm_address_t *phys_addrs, unsigned int n_pa,
+		     unsigned int total_bytes)
+{
+	struct virtio_state *st = (struct virtio_state *)priv;
+
+	(void)disk;
+	(void)count;
+	return virtio_submit_phys(st, VIRTIO_BLK_T_IN, lba,
+				  phys_addrs, n_pa, total_bytes);
+}
+
+static int
+virtio_mod_write_phys(void *priv, int disk, uint32_t lba, unsigned int count,
+		      vm_address_t *phys_addrs, unsigned int n_pa,
+		      unsigned int total_bytes)
+{
+	struct virtio_state *st = (struct virtio_state *)priv;
+
+	(void)disk;
+	(void)count;
+	return virtio_submit_phys(st, VIRTIO_BLK_T_OUT, lba,
+				  phys_addrs, n_pa, total_bytes);
+}
+
 static void
 virtio_mod_irq_handler(void *priv)
 {
@@ -631,7 +781,7 @@ const struct block_driver_ops virtio_blk_module_ops = {
 	.read_sectors		= virtio_mod_read_sectors,
 	.write_sectors		= virtio_mod_write_sectors,
 	.irq_handler		= virtio_mod_irq_handler,
-	.read_sectors_phys	= NULL,
-	.write_sectors_phys	= NULL,
+	.read_sectors_phys	= virtio_mod_read_phys,
+	.write_sectors_phys	= virtio_mod_write_phys,
 	.write_batch		= NULL,
 };
