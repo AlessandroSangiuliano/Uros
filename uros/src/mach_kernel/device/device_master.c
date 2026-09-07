@@ -1449,6 +1449,8 @@ ds_master_device_dma_map_user(
 	ipc_port_t		task_port,
 	vm_address_t		*uva_out)
 {
+	struct dma_region *region;
+	unsigned int	page;
 	task_t		task;
 	vm_offset_t	uva;
 	vm_offset_t	pa;
