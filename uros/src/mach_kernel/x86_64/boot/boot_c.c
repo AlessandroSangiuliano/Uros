@@ -4982,6 +4982,92 @@ static void spl_selftest(void)
 }
 
 /*
+ * ── What masking costs on the hottest path there is (#528) ────────────
+ *
+ * A spin lock's acquire and release are called more often than almost
+ * anything else in a kernel, and #528 put a pushfq, a cli, two %gs-relative
+ * reads and a conditional sti inside them.  "It is only a few instructions"
+ * is an argument, and the issue's second done-when refuses arguments: the
+ * number goes in either way.
+ *
+ * UNCONTENDED, one processor, nothing else asking.  That is the case where
+ * the added instructions are the whole of the cost — under contention the
+ * exchange and the cache line dominate and would hide them, which would make
+ * the measurement flattering rather than informative.
+ *
+ * 🔴 THE MEDIAN OF SEVEN ROUNDS, not the mean and not one run.  A tick
+ * landing inside a round adds a handler's worth of cycles to that round, and
+ * a mean would spread it across the answer instead of leaving it outside.
+ *
+ * ⚠️ INTERRUPTS ARE LEFT ON.  Measuring with them off would take the tick out
+ * of the rounds and also take out the sti the release has to do — which is
+ * measuring a version of the lock that was not built.
+ *
+ * ⚠️ And the accelerator decides whether this number means anything.  Under
+ * TCG a cli, an sti and a pushfq are each a helper call while the exchange is
+ * an inlined operation, so the ratio between them is the emulator's and not
+ * the machine's.  Read this one under KVM, and read both sides of a
+ * comparison under the same one (#468).
+ */
+#define LOCK_COST_ROUNDS	7u
+#define LOCK_COST_ITERS		200000u
+
+static void lock_cost_bench(void)
+{
+	hw_lock_data_t	l;
+	uint64_t	round[LOCK_COST_ROUNDS];
+	uint64_t	per100;
+
+	if (tsc_hz() == 0) {
+		kputs("UrMach x86-64: no calibrated TSC, so the lock's cost "
+		      "is not measured (#528)\r\n");
+		return;
+	}
+
+	hw_lock_init(&l);
+
+	for (unsigned r = 0; r < LOCK_COST_ROUNDS; r++) {
+		uint64_t t0 = rdtsc();
+
+		for (unsigned i = 0; i < LOCK_COST_ITERS; i++) {
+			hw_lock_lock(&l);
+			hw_lock_unlock(&l);
+		}
+
+		/* Hundredths, because a pair costs tens of cycles and the
+		 * difference this measures is a few of them. */
+		round[r] = (rdtsc() - t0) * 100u / LOCK_COST_ITERS;
+	}
+
+	for (unsigned i = 1; i < LOCK_COST_ROUNDS; i++) {
+		uint64_t v = round[i];
+		unsigned j = i;
+
+		while (j > 0 && round[j - 1] > v) {
+			round[j] = round[j - 1];
+			j--;
+		}
+		round[j] = v;
+	}
+
+	per100 = round[LOCK_COST_ROUNDS / 2];
+
+	kputs("UrMach x86-64: an uncontended hw_lock acquire and release "
+	      "costs ");
+	kputdec((unsigned)(per100 / 100));
+	kputs(".");
+	if (per100 % 100 < 10)
+		kputs("0");
+	kputdec((unsigned)(per100 % 100));
+	kputs(" cycles, median of ");
+	kputdec(LOCK_COST_ROUNDS);
+	kputs(" rounds of ");
+	kputdec(LOCK_COST_ITERS);
+	kputs(" — the price of masking, measured rather than argued (#528)"
+	      "\r\n");
+}
+
+/*
  * And the same tick on every processor (#409).
  *
  * This is the claim the local APIC timer was chosen for, and it is not the
@@ -6027,6 +6113,7 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	msix_table_selftest();
 	ioapic_selftest();
 	spl_selftest();
+	lock_cost_bench();
 	device_master_irq_selftest();
 	panic_format_selftest();
 	msg_abi_selftest();
