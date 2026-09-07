@@ -4859,6 +4859,7 @@ static void spl_selftest(void)
 {
 	uint64_t handled_before, handled_while, handled_after;
 	uint64_t deferred_before, deferred_after, replayed_before, ran_at_spl0;
+	unsigned int owed_ticks;
 	uint32_t me = cpu_apic_id();
 	spl_t old;
 
@@ -4916,6 +4917,17 @@ static void spl_selftest(void)
 	 */
 	deferred_after = spl_deferred_count();
 
+	/*
+	 * 🔑 WHAT THE LOWERING WILL GIVE BACK is the BACKLOG, not the
+	 * difference of two lifetime counters (#522).  `deferred' counts every
+	 * vector this processor has ever held; the replay hands back the ticks
+	 * still owed, and a tick owed from before this test started looking is
+	 * in the second and not in the first.  Comparing them read "replayed 11
+	 * of the 10 held" in three boots out of twenty -- a level measured
+	 * against a rate.
+	 */
+	owed_ticks = spl_pending_ticks();
+
 	splx(old);
 	handled_after = ticks[me] - handled_before - handled_while;
 	ran_at_spl0 = handled_before;
@@ -4953,21 +4965,18 @@ static void spl_selftest(void)
 	 * this test holds about ten, well under it.
 	 */
 	{
-		uint64_t held = deferred_after - deferred_before;
 		uint64_t given = spl_replayed_count() - replayed_before;
-		uint64_t owed = held < SPL_MAX_PENDING_TICKS
-			      ? held : SPL_MAX_PENDING_TICKS;
 
 		kputs("UrMach x86-64: lowering replayed ");
 		kputdec((unsigned)given);
 		kputs(" of the ");
-		kputdec((unsigned)held);
-		kputs(" held, handler ran ");
+		kputdec((unsigned)owed_ticks);
+		kputs(" owed, handler ran ");
 		kputdec((unsigned)handled_after);
 		kputs(" more times");
-		kputs(given == owed && handled_after == owed
-		      ? " — one per tick held, because a tick is a time base\r\n"
-		      : " — WRONG, the ticks held and the ticks given back do "
+		kputs(given == owed_ticks && handled_after == owed_ticks
+		      ? " — one per tick owed, because a tick is a time base\r\n"
+		      : " — WRONG, the ticks owed and the ticks given back do "
 			"not match\r\n");
 	}
 }
