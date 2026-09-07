@@ -8,10 +8,43 @@
 #include <stdint.h>
 
 #include <kern/cpu_data.h>	/* #461: the preemption level */
+#include <cpu/percpu.h>		/* #528: the interrupt-masked section */
 #include <cpu/regs.h>
 #include <sync/atomic.h>
 #include <sync/barrier.h>
 #include <sync/lock.h>
+
+/*
+ * ── Interrupts are masked for the length of the hold (#528) ───────────
+ *
+ * Preemption counting (#461) stops the scheduler taking a holder off its
+ * processor.  It says nothing about an INTERRUPT, which lands on the holder's
+ * own processor and runs a handler that may want the same lock -- and on one
+ * processor the holder is the interrupted path, so nothing can ever release
+ * it.  #522 met exactly that: run_queue_enqueue() holding the run queue lock,
+ * the tick landing inside the section, and the tick's handler arriving back at
+ * run_queue_enqueue() for the same lock.
+ *
+ * #522 closed it by moving the timer into a class splsched() defers.  That is
+ * a fix for one interrupt; this is the fix for the mechanism, and it is what
+ * every kernel that takes a spin lock from interrupt context does --
+ * spin_lock_irqsave in Linux, the IPL raised inside the lock in the BSDs.
+ *
+ * 🔑 THE PAIRING IS STRUCTURAL.  The state to restore lives in the processor's
+ * own block as a count plus the flag as it was at the outermost entry, so no
+ * caller carries a token it could drop, and a lock taken inside a handler
+ * leaves interrupts off when it is dropped because that is what the count
+ * says.  See <cpu/percpu.h>.
+ *
+ * ⚠️ AND THE SPIN RUNS WITH THE CALLER'S OWN INTERRUPT STATE, not with them
+ * masked.  A waiter is not a holder: it has nothing to protect, and masking
+ * while it waits is what would turn this into a worse deadlock than the one it
+ * closes.  ipi_call_others() takes this very lock and then stands still until
+ * every other processor has answered -- so a second processor spinning here
+ * with interrupts masked would never take the message the first is waiting
+ * for, and the first would panic saying a processor never answered.  Masking
+ * belongs to the section, and a spin is not one.
+ */
 
 void hw_lock_init(hw_lock_t l)
 {
@@ -29,12 +62,16 @@ unsigned int hw_lock_try(hw_lock_t l)
 	 * Preemption is raised before the attempt and dropped again if the
 	 * attempt fails, so that the successful path leaves exactly what
 	 * hw_lock_lock() leaves and the caller cannot tell the two apart (#461).
+	 * Interrupts likewise (#528): a conditional acquisition that succeeded
+	 * is a hold, and a hold is a masked section.
 	 */
 	disable_preemption();
+	percpu_intr_disable();
 
 	if (atomic_swap8(l, 1) == 0)
 		return 1;
 
+	percpu_intr_enable();
 	enable_preemption_no_check();
 	return 0;
 }
@@ -58,8 +95,16 @@ void hw_lock_lock(hw_lock_t l)
 	disable_preemption();
 
 	for (;;) {
+		percpu_intr_disable();
+
 		if (atomic_swap8(l, 1) == 0)
 			return;
+
+		/*
+		 * Not ours, so this processor is a waiter and not a holder —
+		 * and a waiter must be able to answer (#528, see above).
+		 */
+		percpu_intr_enable();
 
 		/*
 		 * Spin on a plain read, not on the exchange.
@@ -110,6 +155,14 @@ void hw_lock_unlock(hw_lock_t l)
 	 * unlock in the kernel is a place a thread can vanish -- including the
 	 * ones called with interrupts off.
 	 */
+	/*
+	 * Interrupts back first, then preemption: the mirror of the acquire,
+	 * where preemption is the outer of the two (#528).  Whether they
+	 * actually come back is the count's answer, not this function's -- a
+	 * lock taken inside a handler, or inside another lock, leaves them
+	 * masked, which is the whole point of counting.
+	 */
+	percpu_intr_enable();
 	enable_preemption_no_check();
 }
 

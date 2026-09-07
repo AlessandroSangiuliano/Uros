@@ -4982,6 +4982,182 @@ static void spl_selftest(void)
 }
 
 /*
+ * ── What masking costs on the hottest path there is (#528) ────────────
+ *
+ * A spin lock's acquire and release are called more often than almost
+ * anything else in a kernel, and #528 put a pushfq, a cli, two %gs-relative
+ * reads and a conditional sti inside them.  "It is only a few instructions"
+ * is an argument, and the issue's second done-when refuses arguments: the
+ * number goes in either way.
+ *
+ * UNCONTENDED, one processor, nothing else asking.  That is the case where
+ * the added instructions are the whole of the cost — under contention the
+ * exchange and the cache line dominate and would hide them, which would make
+ * the measurement flattering rather than informative.
+ *
+ * 🔴 THE MEDIAN OF SEVEN ROUNDS, not the mean and not one run.  A tick
+ * landing inside a round adds a handler's worth of cycles to that round, and
+ * a mean would spread it across the answer instead of leaving it outside.
+ *
+ * ⚠️ INTERRUPTS ARE LEFT ON.  Measuring with them off would take the tick out
+ * of the rounds and also take out the sti the release has to do — which is
+ * measuring a version of the lock that was not built.
+ *
+ * ⚠️ And the accelerator decides whether this number means anything.  Under
+ * TCG a cli, an sti and a pushfq are each a helper call while the exchange is
+ * an inlined operation, so the ratio between them is the emulator's and not
+ * the machine's.  Read this one under KVM, and read both sides of a
+ * comparison under the same one (#468).
+ */
+#define LOCK_COST_ROUNDS	7u
+#define LOCK_COST_ITERS		200000u
+
+static void lock_cost_bench(void)
+{
+	hw_lock_data_t	l;
+	uint64_t	round[LOCK_COST_ROUNDS];
+	uint64_t	per100;
+
+	if (tsc_hz() == 0) {
+		kputs("UrMach x86-64: no calibrated TSC, so the lock's cost "
+		      "is not measured (#528)\r\n");
+		return;
+	}
+
+	hw_lock_init(&l);
+
+	for (unsigned r = 0; r < LOCK_COST_ROUNDS; r++) {
+		uint64_t t0 = rdtsc();
+
+		for (unsigned i = 0; i < LOCK_COST_ITERS; i++) {
+			hw_lock_lock(&l);
+			hw_lock_unlock(&l);
+		}
+
+		/* Hundredths, because a pair costs tens of cycles and the
+		 * difference this measures is a few of them. */
+		round[r] = (rdtsc() - t0) * 100u / LOCK_COST_ITERS;
+	}
+
+	for (unsigned i = 1; i < LOCK_COST_ROUNDS; i++) {
+		uint64_t v = round[i];
+		unsigned j = i;
+
+		while (j > 0 && round[j - 1] > v) {
+			round[j] = round[j - 1];
+			j--;
+		}
+		round[j] = v;
+	}
+
+	per100 = round[LOCK_COST_ROUNDS / 2];
+
+	kputs("UrMach x86-64: an uncontended hw_lock acquire and release "
+	      "costs ");
+	kputdec((unsigned)(per100 / 100));
+	kputs(".");
+	if (per100 % 100 < 10)
+		kputs("0");
+	kputdec((unsigned)(per100 % 100));
+	kputs(" cycles, median of ");
+	kputdec(LOCK_COST_ROUNDS);
+	kputs(" rounds of ");
+	kputdec(LOCK_COST_ITERS);
+	kputs(" — the price of masking, measured rather than argued (#528)"
+	      "\r\n");
+}
+
+/*
+ * ── The pairing, checked rather than described (#528) ─────────────────
+ *
+ * <cpu/percpu.h> claims three things about the interrupt-masked section, and
+ * every one of them is the kind of claim that stays true until somebody edits
+ * the file:
+ *
+ *   - nesting holds the mask until the LAST section ends, and it is a count
+ *     rather than a flag saved in each lock, so releasing OUT OF ORDER is
+ *     safe;
+ *   - a section entered with interrupts already off leaves them off;
+ *   - the count comes back to zero, so a lock cannot leak the mask.
+ *
+ * 🔑 THE OUT-OF-ORDER RELEASE IS THE ARM THAT DECIDES.  A flag stashed in the
+ * lock word passes every in-order test anyone would think to write, and fails
+ * this one on the first try: releasing the outer lock would restore the state
+ * it found -- interrupts on -- while the inner one is still held.  That is why
+ * percpu.h names the case, and why naming it is not the same as checking it.
+ *
+ * ⚠️ It refuses to run rather than pass if interrupts are already off when it
+ * starts.  Every arm is about what happens to the flag, so a run that begins
+ * with the flag in the wrong state measures nothing.
+ */
+static void intr_nest_selftest(void)
+{
+	hw_lock_data_t	a, b;
+	int		off_in_a, off_in_b, off_after_outer, on_after_inner;
+	int		off_when_entered_off, on_after_entered_off;
+	unsigned	level_before, level_after;
+
+	if (!interrupts_enabled()) {
+		kputs("UrMach x86-64: interrupts are already off here, so the "
+		      "masked section cannot be checked and nothing is claimed "
+		      "(#528)\r\n");
+		return;
+	}
+
+	hw_lock_init(&a);
+	hw_lock_init(&b);
+	level_before = percpu_intr_level();
+
+	/*
+	 * Two sections, and the OUTER lock released first.  The mask has to
+	 * survive until the inner one is dropped.
+	 */
+	hw_lock_lock(&a);
+	off_in_a = !interrupts_enabled();
+
+	hw_lock_lock(&b);
+	off_in_b = !interrupts_enabled();
+
+	hw_lock_unlock(&a);
+	off_after_outer = !interrupts_enabled();
+
+	hw_lock_unlock(&b);
+	on_after_inner = interrupts_enabled();
+
+	/*
+	 * And one entered from a context that already had them off, which is
+	 * what an interrupt handler is.  Dropping the lock must not hand
+	 * interrupts to a handler that never had them.
+	 */
+	interrupts_disable();
+	hw_lock_lock(&a);
+	hw_lock_unlock(&a);
+	off_when_entered_off = !interrupts_enabled();
+	interrupts_enable();
+	on_after_entered_off = interrupts_enabled();
+
+	level_after = percpu_intr_level();
+
+	kputs("UrMach x86-64: nested masked sections — inside the outer ");
+	kputs(off_in_a ? "off" : "ON");
+	kputs(", inside the inner ");
+	kputs(off_in_b ? "off" : "ON");
+	kputs(", after releasing the OUTER first ");
+	kputs(off_after_outer ? "still off" : "ON");
+	kputs(", after the inner ");
+	kputs(on_after_inner ? "on" : "OFF");
+	kputs(", and one entered with them off left them ");
+	kputs(off_when_entered_off ? "off" : "ON");
+
+	kputs(off_in_a && off_in_b && off_after_outer && on_after_inner
+	      && off_when_entered_off && on_after_entered_off
+	      && level_before == 0 && level_after == 0
+	      ? " — the mask is the processor's count, not a flag in the "
+		"lock\r\n"
+	      : " — WRONG, the pairing is not what percpu.h says it is\r\n");
+}
+
+/*
  * And the same tick on every processor (#409).
  *
  * This is the claim the local APIC timer was chosen for, and it is not the
@@ -6027,6 +6203,8 @@ void x86_64_boot(uint32_t magic, uint32_t info)
 	msix_table_selftest();
 	ioapic_selftest();
 	spl_selftest();
+	intr_nest_selftest();
+	lock_cost_bench();
 	device_master_irq_selftest();
 	panic_format_selftest();
 	msg_abi_selftest();

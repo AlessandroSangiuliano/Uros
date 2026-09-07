@@ -33,10 +33,14 @@
 #define PERCPU_SYSCALL_RET_CYC	128
 #define PERCPU_SYSCALL_RET_CNT	136
 #define PERCPU_SYSCALL_RET_MARK	144
+#define PERCPU_INTR_LEVEL	176
+#define PERCPU_INTR_SAVED_IF	180
 
 #ifndef __ASSEMBLER__
 
 #include <stdint.h>
+
+#include <cpu/regs.h>
 
 struct percpu {
 	/*
@@ -266,6 +270,31 @@ struct percpu {
 	 */
 	uint32_t pending_ticks;
 	uint32_t reserved_ticks;
+
+	/*
+	 * How deep this processor is inside an interrupt-masked section, and
+	 * what the flag was when it entered the outermost one (#528).
+	 *
+	 * 🔑 A COUNT AND A SAVED FLAG, not a flag saved in each lock.  Storing
+	 * the caller's interrupt state in the lock word would be one word less
+	 * of per-CPU data and would be wrong the first time two locks are
+	 * released out of order: releasing the outer one would restore the
+	 * state it found -- interrupts on -- while the inner one is still held.
+	 * A count belongs to the processor, and the processor is what the
+	 * interrupt flag belongs to as well.
+	 *
+	 * ⚠️ The saved flag is written only on the 0 -> 1 transition, so a
+	 * section entered from interrupt context (where the gate has already
+	 * cleared IF) records zero and leaves interrupts off on the way out.
+	 * That is the property the whole thing exists for: a lock taken in a
+	 * handler must not enable interrupts when it is dropped.
+	 *
+	 * ⚠️ At the END, like loaded_pmap and syscall_tsc above and for the
+	 * same reason: the offsets asserted below are what the assembly entry
+	 * paths use.
+	 */
+	uint32_t intr_level;
+	uint32_t intr_saved_if;
 };
 
 /*
@@ -291,6 +320,10 @@ _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_count)
 	       == PERCPU_SYSCALL_RET_CNT, "percpu syscall_ret_count moved");
 _Static_assert(__builtin_offsetof(struct percpu, syscall_ret_mark)
 	       == PERCPU_SYSCALL_RET_MARK, "percpu syscall_ret_mark moved");
+_Static_assert(__builtin_offsetof(struct percpu, intr_level)
+	       == PERCPU_INTR_LEVEL, "percpu intr_level moved");
+_Static_assert(__builtin_offsetof(struct percpu, intr_saved_if)
+	       == PERCPU_INTR_SAVED_IF, "percpu intr_saved_if moved");
 
 /*
  * Two halves, and the split is not tidiness.
@@ -376,6 +409,71 @@ static inline uint32_t percpu_preempt_level(void)
 	__asm__ volatile("movl %%gs:%c1, %0"
 			 : "=r"(d) : "i"(PERCPU_PREEMPT_LEVEL));
 	return d;
+}
+
+/*
+ * Masking this processor's interrupts for the length of a critical section,
+ * and letting them back in when the last one ends (#528).
+ *
+ * 🔴 WHY A SPIN LOCK NEEDS THIS AT ALL.  Preemption counting stops the
+ * scheduler taking the holder off the processor; it does nothing about an
+ * INTERRUPT, which arrives on the holder's own processor and runs a handler
+ * that may ask for the same lock.  On one processor the holder is the
+ * interrupted path, so the handler waits for a lock that cannot be released
+ * until the handler returns.  That is #522's deadlock, and it is why every
+ * kernel that takes a spin lock from interrupt context masks: Linux calls it
+ * spin_lock_irqsave, the BSDs raise the IPL inside the lock.
+ *
+ * ⚠️ THE FLAG IS READ BEFORE IT IS CLEARED, and an interrupt may land between
+ * the two.  It is harmless and worth saying why: the handler's own sections
+ * are balanced, so it returns the level to where it found it, and the iret
+ * restores IF to the value just sampled.  What must not happen is the
+ * reverse order -- clearing first and sampling after -- which would record
+ * every section as having been entered with interrupts off.
+ *
+ * Plain increments through %gs, for percpu_preempt_disable()'s reason: the
+ * counter belongs to one processor, and after the cli nothing on this
+ * processor can land between the read and the write anyway.
+ */
+static inline uint32_t percpu_intr_level(void)
+{
+	uint32_t d;
+
+	__asm__ volatile("movl %%gs:%c1, %0"
+			 : "=r"(d) : "i"(PERCPU_INTR_LEVEL));
+	return d;
+}
+
+static inline void percpu_intr_disable(void)
+{
+	uint32_t saved = (read_rflags() & RFLAGS_IF) != 0;
+
+	interrupts_disable();
+
+	if (percpu_intr_level() == 0)
+		__asm__ volatile("movl %0, %%gs:%c1"
+				 : : "r"(saved), "i"(PERCPU_INTR_SAVED_IF)
+				 : "memory");
+
+	__asm__ volatile("incl %%gs:%c0"
+			 : : "i"(PERCPU_INTR_LEVEL) : "memory");
+}
+
+static inline void percpu_intr_enable(void)
+{
+	uint32_t saved;
+
+	__asm__ volatile("decl %%gs:%c0"
+			 : : "i"(PERCPU_INTR_LEVEL) : "memory");
+
+	if (percpu_intr_level() != 0)
+		return;
+
+	__asm__ volatile("movl %%gs:%c1, %0"
+			 : "=r"(saved) : "i"(PERCPU_INTR_SAVED_IF));
+
+	if (saved)
+		interrupts_enable();
 }
 
 #endif	/* __ASSEMBLER__ */

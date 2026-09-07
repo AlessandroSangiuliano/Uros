@@ -77,6 +77,21 @@ call_exc_serv(
          * we setup the return address manually to arrange a
          * return to exception_return_wrapper();
          */
+        /*
+         * ⚠️ `jmp *%1' and not `jmp %1'.  In AT&T syntax the asterisk is what
+         * says INDIRECT -- jump to the address held in the operand -- and
+         * without it the line reads as a direct jump to a label whose name is
+         * a register, which is not a thing.  GAS guesses the intended meaning,
+         * assembles the same two bytes, and says so once per translation unit
+         * that includes this header:
+         *
+         *	machine_rpc.h:83: Warning: indirect jmp without `*'
+         *
+         * Three of them in a clean i386 build, and they were the only warnings
+         * left in either tree.  Written out rather than silenced because the
+         * next person to read this asm has to know the jump is indirect, and
+         * because a warning nobody fixes is a warning nobody reads (#528).
+         */
         new_sp -= 1;
         new_sp[0] = (int)exception_return_wrapper;
 
@@ -84,7 +99,7 @@ call_exc_serv(
         	"movl  %0, %%ebx;                       \
                  xchgl %%ebx, %%esp;                    \
                  movl  $0, %%ebp;                       \
-                 jmp   %1"
+                 jmp   *%1"
                 :
                 : "g" (new_sp), "S" (func)
                 : "%ebx", "%eax", "%edx", "cc", "memory");
