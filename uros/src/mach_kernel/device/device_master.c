@@ -807,6 +807,19 @@ static struct dma_region dma_region[DEVICE_MAX_DMA_REGIONS];
 static uint64_t dma_region_next_id = 1;
 
 /*
+ * How many regions have been taken back from tasks that died holding them
+ * (#530).
+ *
+ * 🔴 THE ONLY NUMBER THAT ANSWERS THE QUESTION.  "Were a dead task's regions
+ * all given back?" cannot be answered by counting what a later task manages to
+ * allocate: the table is shared, so a slot another task legitimately holds and
+ * a slot that was never reclaimed look identical from out there.  This side
+ * knows which slots were the dead task's, and this is it saying so in a number
+ * rather than only in a printf.
+ */
+static uint64_t dma_regions_reclaimed;
+
+/*
  * Remember one allocation.  Answers zero when there is no room, and the caller
  * must then fail the allocation: a region that is not recorded is one no
  * device can ever be given, and one whose pages nothing will revoke.
@@ -1772,7 +1785,8 @@ kern_return_t
 ds_master_device_dma_table(
 	ipc_port_t		master_port,
 	natural_t		*total,
-	natural_t		*in_use)
+	natural_t		*in_use,
+	natural_t		*reclaimed)
 {
 	kern_return_t	kr;
 	unsigned int	i, used = 0;
@@ -1787,6 +1801,7 @@ ds_master_device_dma_table(
 
 	*total = (natural_t) DEVICE_MAX_DMA_REGIONS;
 	*in_use = (natural_t) used;
+	*reclaimed = (natural_t) dma_regions_reclaimed;
 	return KERN_SUCCESS;
 }
 
@@ -2143,6 +2158,7 @@ device_master_task_terminating(task_t task)
 		 */
 		dma_region_drop(kva);
 		kmem_free(kernel_map, kva, size);
+		dma_regions_reclaimed++;
 	}
 
 	for (i = 0; i < device_nclaims; i++) {

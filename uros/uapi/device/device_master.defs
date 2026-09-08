@@ -611,5 +611,6 @@ routine device_dma_faults(
 routine device_dma_table(
 		master_port	: mach_port_t;
 	out	total		: natural_t;
-	out	in_use		: natural_t
+	out	in_use		: natural_t;
+	out	reclaimed	: natural_t
 	);

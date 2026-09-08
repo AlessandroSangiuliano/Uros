@@ -570,6 +570,7 @@ main(int argc, char **argv)
 	uint64_t	id[MAX_TRIES];
 	unsigned	n, n2, waited;
 	unsigned	held = 0, total = 0, in_use = 0, free_then = 0;
+	unsigned	reclaimed = 0;
 	const char	*role;
 	kern_return_t	kr;
 	mach_port_t	host_port, wired, paged, security;
@@ -743,12 +744,14 @@ main(int argc, char **argv)
 	 * is how many were free to get.  With `in_use' the shortfall stops
 	 * being a mystery and becomes arithmetic.
 	 */
-	if (device_dma_table(device_port, &total, &in_use) != KERN_SUCCESS) {
+	if (device_dma_table(device_port, &total, &in_use, &reclaimed)
+	    != KERN_SUCCESS) {
 		printf("dma_reclaim:     the kernel would not say how big the "
 		       "table is, so the count below is a share and not a "
 		       "measurement\n");
 		total = 0;
 		in_use = 0;
+		reclaimed = 0;
 	}
 
 	n = fill_table(kva, id, MAX_TRIES);
@@ -760,21 +763,49 @@ main(int argc, char **argv)
 	free_then = (total > in_use) ? total - in_use : 0;
 
 	printf("dma_reclaim:     room after %u ms; the holder took %u, the "
-	       "kernel gave them back, %u of the %u slots were still held by "
-	       "somebody else, and this task took %u of the %u that were "
-	       "free\n",
-	       waited * RECLAIM_WAIT_MS, held, in_use, total, n, free_then);
+	       "kernel took back %u, %u of the %u slots were held by somebody "
+	       "else, and this task got %u of the %u that were free\n",
+	       waited * RECLAIM_WAIT_MS, held, reclaimed, in_use, total, n,
+	       free_then);
 
 	/*
-	 * ⚠️ THE ARM IS `EVERY FREE SLOT', NOT `THE WHOLE TABLE'.  The second
-	 * is not this task's to claim and never was.  Whether all of the
-	 * holder's own regions came back is a question only the kernel can
-	 * answer -- it is the one that knows which slots were the dead task's
-	 * -- and it answers it in device_master.c, a line per region taken
-	 * back.
+	 * 🔴 THE ARM IS THE KERNEL'S COUNT, AND NOTHING THIS TASK MANAGED TO
+	 * ALLOCATE.
+	 *
+	 * Two earlier versions of this arm were wrong in the same way and it
+	 * is worth writing down, because both looked right:
+	 *
+	 *   `the whole table' -- the table is SHARED, so a slot another task
+	 *   legitimately holds and a slot that was never given back look
+	 *   identical from here.  Thirteen of sixteen read as a defect for
+	 *   months while the kernel was giving back all sixteen.
+	 *
+	 *   `every slot that was free' -- and then in_use was read as if it
+	 *   were a reservation, which the comment beside device_dma_table()
+	 *   says in as many words that it is not.  Anything may allocate
+	 *   between that answer and the end of the fill, and at -smp 4
+	 *   something does: ten taken of eleven free, and the arm failed for
+	 *   the table doing exactly what it is for.
+	 *
+	 * 🔑 What is being tested is what the KERNEL did, so the number has to
+	 * come from the kernel.  It is the only side that knows which slots
+	 * belonged to the dead task.  `at least as many as the holder held'
+	 * rather than `exactly': the count is for the whole boot, and any
+	 * other task that died holding a region is entitled to be in it.
 	 */
-	arm(1, "a dead task's regions come back and the next task gets them "
-	       "all", total != 0 && n == free_then && n > 0);
+	arm(1, "a dead task's regions are all taken back",
+	    held != 0 && reclaimed >= held);
+
+	/*
+	 * ⚠️ Reported and NOT armed.  This is the number the shared table makes
+	 * meaningless as a verdict, and it stays in the log because it is what
+	 * explains a short count to whoever reads one.
+	 */
+	if (total != 0 && n < free_then)
+		printf("dma_reclaim:     %u of the %u free slots went to "
+		       "somebody else while this task was filling — the table "
+		       "is shared and that is not a defect\n",
+		       free_then - n, free_then);
 
 	/*
 	 * 🔑 THE SLOTS ARE REUSED AND THE NAMES ARE NOT, which is the property
