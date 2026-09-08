@@ -117,6 +117,24 @@ struct ahci_port_info {
 #define CT_STRIDE		640u
 #define SECTORS_PER_SLOT	(SLOT_DATA_SIZE / 512u)
 
+/*
+ * What the probe allocates before it knows how big the controller is, and
+ * therefore what the driver still has when the bigger pair cannot be
+ * allocated (#531).
+ *
+ * 🔴 THE FALLBACK USED TO CLAIM `SLOT_DATA_SIZE' HERE, which is thirty-two
+ * pages.  The probe allocates ONE.  So "falling back to one slot" described a
+ * 128 KB data buffer over a 4 KB one, and the driver walked off the end of it
+ * -- the second dangling assertion in the same failure path, found by forcing
+ * the allocation to fail after the first was fixed.
+ *
+ * 🔑 Written once and used by both the probe and the fallback, so the two
+ * cannot drift: the size of a buffer and the size the code believes it has are
+ * exactly the kind of pair this tree keeps finding out of step.
+ */
+#define AHCI_PROBE_BUF_BYTES	4096u
+#define AHCI_PROBE_SECTORS	(AHCI_PROBE_BUF_BYTES / 512u)
+
 struct ahci_state {
 	volatile uint32_t	*abar;
 

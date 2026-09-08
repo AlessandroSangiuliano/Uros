@@ -531,12 +531,14 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	 * called once; if a second caller ever appears, the old size has to
 	 * be carried in the state rather than written here.
 	 */
-	(void) vm_deallocate(mach_task_self(), st->ct_uva, 4096);
+	(void) vm_deallocate(mach_task_self(), st->ct_uva,
+			     AHCI_PROBE_BUF_BYTES);
 	(void) device_dma_free(st->master_device, AHCI_BDF(st),
-			       st->ct_kva, 4096);
-	(void) vm_deallocate(mach_task_self(), st->data_uva, 4096);
+			       st->ct_kva, AHCI_PROBE_BUF_BYTES);
+	(void) vm_deallocate(mach_task_self(), st->data_uva,
+			     AHCI_PROBE_BUF_BYTES);
 	(void) device_dma_free(st->master_device, AHCI_BDF(st),
-			       st->data_kva, 4096);
+			       st->data_kva, AHCI_PROBE_BUF_BYTES);
 
 	st->ct_kva = new_ct_kva;
 	st->ct_dma = new_ct_dma;
@@ -839,10 +841,11 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	if (kr != KERN_SUCCESS) { printf("ahci: CT map failed\n"); return -1; }
 
 	/* Initial data buffer (1 page) */
-	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
+	kr = device_dma_alloc(master_dev, AHCI_BDF(st), AHCI_PROBE_BUF_BYTES,
 			      &st->data_kva, &st->data_dma, &unused_region);
 	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
-	kr = device_dma_map_user(master_dev, st->data_kva, 4096,
+	kr = device_dma_map_user(master_dev, st->data_kva,
+				 AHCI_PROBE_BUF_BYTES,
 				 mach_task_self(), &st->data_uva);
 	if (kr != KERN_SUCCESS) { printf("ahci: data map failed\n"); return -1; }
 
@@ -898,12 +901,14 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 		 * kernel panicked reclaiming the DMA region it still held --
 		 * from a failed allocation.
 		 */
-		printf("ahci: DMA realloc failed, falling back to 1 slot — "
-		       "the buffers the probe made are still the ones in "
-		       "use\n");
+		printf("ahci: DMA realloc failed, falling back to the probe's "
+		       "single page — %u bytes of data, %u sectors of "
+		       "readahead\n",
+		       AHCI_PROBE_BUF_BYTES, AHCI_PROBE_SECTORS);
 		st->batch_slots = 1;
-		st->batch_data_size = SLOT_DATA_SIZE;
-		st->ra_sectors = SECTORS_PER_SLOT;
+		st->batch_data_size = AHCI_PROBE_BUF_BYTES;
+		st->ra_sectors = AHCI_PROBE_SECTORS;
+		st->data_n_pages = 1;
 	}
 
 	/*
