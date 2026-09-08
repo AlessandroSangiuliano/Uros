@@ -1652,9 +1652,23 @@ vm_page_release(
 	 * cost is a lock rather than a comparison and has never been measured.
 	 * The measurement decides it.
 	 */
-	if (pmap_page_still_mapped(mem->phys_addr))
+	if (pmap_page_still_mapped(mem->phys_addr)) {
+		/*
+		 * ⚠️ Reported BEFORE the panic, because a panic message is one
+		 * line and this is a list (#531).  Naming the page was never
+		 * enough: what has to be known is which pmap still has it and
+		 * at what address, and the pv list the check just walked holds
+		 * both.
+		 */
+		extern void pmap_page_report_mappings(vm_offset_t phys);
+
+		printf("vm_page_release: page 0x%lx is about to be freed and "
+		       "somebody still maps it (#385/#531)\n",
+		       (unsigned long) mem->phys_addr);
+		pmap_page_report_mappings(mem->phys_addr);
 		panic("vm_page_release: page 0x%lx still mapped (#385)",
 		      (unsigned long) mem->phys_addr);
+	}
 
 #if	VM_PAGE_POISON
 	/*

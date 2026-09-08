@@ -1551,6 +1551,52 @@ pmap_page_still_mapped(
 }
 
 /*
+ * Who still maps this page (#531).
+ *
+ * 🔴 THE GUARD ABOVE SAID `STILL MAPPED' AND STOPPED THERE, which names the
+ * page and not the mapping -- and the mapping is the question.  A page that
+ * reaches vm_page_release() with a live pv list has been left mapped by
+ * somebody, and the list holds exactly who: a pmap and a virtual address per
+ * entry.  It was walked to produce a boolean and then discarded.
+ *
+ * ⚠️ Called only from the panic path, so it walks the list a second time on
+ * purpose: the check stays exactly what it was, and this is a separate
+ * question asked separately.  Nor does it take the pv lock -- the caller is on
+ * its way to a panic, and a report that could deadlock instead of printing
+ * would be worse than a report that races.
+ */
+void
+pmap_page_report_mappings(
+	vm_offset_t phys)
+{
+	pv_entry_t	pv;
+	unsigned int	n = 0;
+
+	if (!pmap_initialized || !pmap_valid_page(phys)) {
+		printf("  page 0x%lx is not one the pv index covers — nothing "
+		       "can be said about who maps it\n",
+		       (unsigned long) phys);
+		return;
+	}
+
+	for (pv = pai_to_pvh(pa_index(phys));
+	     pv != PV_ENTRY_NULL && n < 8;
+	     pv = pv->next) {
+		if (pv->pmap == PMAP_NULL)
+			continue;
+		printf("  still mapped by pmap %p%s at va 0x%lx\n",
+		       (void *) pv->pmap,
+		       pv->pmap == kernel_pmap ? " (the KERNEL's)" : "",
+		       (unsigned long) pv->va);
+		n++;
+	}
+
+	if (n == 0)
+		printf("  the pv list says mapped but every entry is "
+		       "PMAP_NULL — the list and the check disagree\n");
+}
+
+/*
  *	Create and return a physical map.
  *
  *	If the size specified for the map
