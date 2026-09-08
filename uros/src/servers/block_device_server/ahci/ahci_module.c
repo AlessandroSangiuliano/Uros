@@ -416,10 +416,44 @@ ahci_identify(struct ahci_state *st, int port_idx)
 static int
 ahci_realloc_batch_buffers(struct ahci_state *st)
 {
-	kern_return_t kr;
-	unsigned int ct_size;
-	unsigned int n_pages;
-	mach_msg_type_number_t pa_count = 1024;
+	kern_return_t	kr;
+	unsigned int	ct_size;
+	unsigned int	n_pages;
+
+	/*
+	 * 🔴 THE NEW BUFFERS ARE BUILT BESIDE THE OLD ONES, NOT ON TOP OF THEM
+	 * (#531).
+	 *
+	 * This used to free first and allocate second.  When the allocation
+	 * then failed it returned -1 with `st->ct_uva' and `st->ct_kva' still
+	 * holding the addresses it had just released -- and the caller's
+	 * "fall back to one slot" adjusts the SIZES and not the pointers.  The
+	 * driver went on to use a mapping that no longer existed:
+	 *
+	 *	ahci: CT realloc (20480 bytes) failed
+	 *	ahci: DMA realloc failed, falling back to 1 slot
+	 *	exception_no_server: terminating task ... code[1]=0x29000
+	 *
+	 * 0x29000 was the page right after the ABAR at 0x28000, which is
+	 * exactly where the mapping it had just deallocated used to be.  The
+	 * block server died, and the kernel then panicked reclaiming the DMA
+	 * region it was still holding -- so a failed allocation took the whole
+	 * machine down.
+	 *
+	 * 🔑 The allocation that fails is not an unlikely one.  The region
+	 * table is shared and finite (sixteen slots), so ANY task holding
+	 * several of them makes this path the ordinary case rather than the
+	 * exceptional one.  It was reached by dma_reclaim_test doing exactly
+	 * what it is for.
+	 *
+	 * ⚠️ So on every failure the old buffers must still be there and still
+	 * be mapped: this returns -1 having changed nothing.
+	 */
+	vm_address_t	new_ct_kva = 0, new_ct_dma = 0, new_ct_uva = 0;
+	vm_address_t	new_data_kva = 0, new_data_uva = 0;
+	vm_address_t	new_list[AHCI_MAX_SG_PAGES];
+	unsigned int	new_pages = 0;
+	mach_msg_type_number_t pa_count = 0;
 
 	if (st->batch_slots <= 1)
 		return 0;
@@ -427,49 +461,44 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 	ct_size = st->batch_slots * CT_STRIDE;
 	ct_size = (ct_size + 4095u) & ~4095u;
 
-	/* Release old user mapping before freeing kernel DMA buffer */
-	vm_deallocate(mach_task_self(), st->ct_uva, 4096);
-	device_dma_free(st->master_device, AHCI_BDF(st), st->ct_kva, 4096);
-
 	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), ct_size,
-			      &st->ct_kva, &st->ct_dma, &unused_region);
+			      &new_ct_kva, &new_ct_dma, &unused_region);
 	if (kr != KERN_SUCCESS) {
-		printf("ahci: CT realloc (%u bytes) failed\n", ct_size);
-		return -1;
-	}
-	kr = device_dma_map_user(st->master_device, st->ct_kva, ct_size,
-				 mach_task_self(), &st->ct_uva);
-	if (kr != KERN_SUCCESS) {
-		printf("ahci: CT remap failed\n");
+		printf("ahci: CT realloc (%u bytes) failed (kr=%d) — keeping "
+		       "the buffers it already had\n", ct_size, (int)kr);
 		return -1;
 	}
 
-	/* Release old user mapping before freeing kernel DMA buffer */
-	vm_deallocate(mach_task_self(), st->data_uva, 4096);
-	device_dma_free(st->master_device, AHCI_BDF(st), st->data_kva, 4096);
+	kr = device_dma_map_user(st->master_device, new_ct_kva, ct_size,
+				 mach_task_self(), &new_ct_uva);
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: CT remap failed (kr=%d) — keeping the buffers "
+		       "it already had\n", (int)kr);
+		(void) device_dma_free(st->master_device, AHCI_BDF(st),
+				       new_ct_kva, ct_size);
+		return -1;
+	}
 
 	n_pages = st->batch_slots * PRDT_PER_SLOT;
 	if (n_pages > AHCI_MAX_SG_PAGES)
 		n_pages = AHCI_MAX_SG_PAGES;
 
-	/*
-	 * #520: the list comes back OUT OF LINE now, so `pa_list' is memory
-	 * the kernel handed over and this task owns.  It is copied into the
-	 * driver's own array and released at once -- keeping it would mean a
-	 * live vm_allocate for the life of the controller, to hold what fits
-	 * in a struct field.
-	 */
 	{
 		vm_address_t *pa_list = NULL;
 
-		pa_count = 0;
-		kr = device_dma_alloc_sg(st->master_device, AHCI_BDF(st), n_pages,
-					 mach_task_self(),
-					 &st->data_kva, &st->data_uva,
+		kr = device_dma_alloc_sg(st->master_device, AHCI_BDF(st),
+					 n_pages, mach_task_self(),
+					 &new_data_kva, &new_data_uva,
 					 &pa_list, &pa_count, &unused_region);
 		if (kr != KERN_SUCCESS) {
-			printf("ahci: scatter-gather alloc (%u pages) "
-			       "failed (kr=%d)\n", n_pages, kr);
+			printf("ahci: scatter-gather alloc (%u pages) failed "
+			       "(kr=%d) — keeping the buffers it already "
+			       "had\n", n_pages, (int)kr);
+			(void) vm_deallocate(mach_task_self(), new_ct_uva,
+					     ct_size);
+			(void) device_dma_free(st->master_device,
+					       AHCI_BDF(st), new_ct_kva,
+					       ct_size);
 			return -1;
 		}
 
@@ -477,7 +506,8 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 			pa_count = AHCI_MAX_SG_PAGES;
 
 		for (unsigned p = 0; p < pa_count; p++)
-			st->data_dma_list[p] = pa_list[p];
+			new_list[p] = pa_list[p];
+		new_pages = (unsigned int) pa_count;
 
 		/*
 		 * ⚠️ Released whatever happens next.  Out-of-line memory a
@@ -489,6 +519,33 @@ ahci_realloc_batch_buffers(struct ahci_state *st)
 				     (vm_size_t)pa_count
 				     * sizeof(vm_address_t));
 	}
+
+	/*
+	 * Everything the controller will need exists.  Only now do the old
+	 * buffers go, and only now does any field of `st' change -- so there
+	 * is no instant at which the state describes memory that is not
+	 * there.
+	 *
+	 * ⚠️ The old ones are the probe's, which are one page each.  That is
+	 * the only size they are ever allocated at, and this function is
+	 * called once; if a second caller ever appears, the old size has to
+	 * be carried in the state rather than written here.
+	 */
+	(void) vm_deallocate(mach_task_self(), st->ct_uva, 4096);
+	(void) device_dma_free(st->master_device, AHCI_BDF(st),
+			       st->ct_kva, 4096);
+	(void) vm_deallocate(mach_task_self(), st->data_uva, 4096);
+	(void) device_dma_free(st->master_device, AHCI_BDF(st),
+			       st->data_kva, 4096);
+
+	st->ct_kva = new_ct_kva;
+	st->ct_dma = new_ct_dma;
+	st->ct_uva = new_ct_uva;
+	st->data_kva = new_data_kva;
+	st->data_uva = new_data_uva;
+
+	for (unsigned p = 0; p < new_pages; p++)
+		st->data_dma_list[p] = new_list[p];
 
 	st->data_n_pages = n_pages;
 	st->data_dma = st->data_dma_list[0];
@@ -827,7 +884,23 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	       st->batch_slots, st->batch_data_size / 1024, st->ra_sectors);
 
 	if (ahci_realloc_batch_buffers(st) < 0) {
-		printf("ahci: DMA realloc failed, falling back to 1 slot\n");
+		/*
+		 * 🔑 THIS IS ONLY CORRECT BECAUSE THE FAILURE CHANGED NOTHING
+		 * (#531).  What is being restored here are the SIZES; the
+		 * buffers themselves are the probe's single-page ones, still
+		 * allocated and still mapped, because ahci_realloc_batch_
+		 * buffers() now builds the new pair beside the old and frees
+		 * the old only once both have succeeded.
+		 *
+		 * ⚠️ When it freed first, these three lines described one-slot
+		 * buffers that did not exist, and the next use of st->ct_uva
+		 * faulted on an unmapped page.  The block server died and the
+		 * kernel panicked reclaiming the DMA region it still held --
+		 * from a failed allocation.
+		 */
+		printf("ahci: DMA realloc failed, falling back to 1 slot — "
+		       "the buffers the probe made are still the ones in "
+		       "use\n");
 		st->batch_slots = 1;
 		st->batch_data_size = SLOT_DATA_SIZE;
 		st->ra_sectors = SECTORS_PER_SLOT;
