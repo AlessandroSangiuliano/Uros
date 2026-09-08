@@ -18,6 +18,7 @@
 #include <mach/machine/vm_param.h>
 #include <vm/pmap.h>
 
+#include <kern/misc_protos.h>		/* printf, for the mapping report (#531) */
 #include <kern/rcu.h>			/* the grace periods below (#455) */
 #include <sync/atomic.h>		/* atomic_cmpxchg64 (#455) */
 
@@ -565,6 +566,49 @@ boolean_t
 pmap_page_still_mapped(vm_offset_t paddr)
 {
 	return !pmap_verify_free(paddr);
+}
+
+/*
+ * Who still maps this page (#531).
+ *
+ * 🔴 THE GUARD SAID `STILL MAPPED' AND STOPPED THERE, which names the page and
+ * not the mapping -- and the mapping is the whole question.  A page reaching
+ * vm_page_release() with a live pv list has been left mapped by somebody, and
+ * the list holds exactly who: a pmap and a virtual address per entry.  It was
+ * being walked to produce a boolean and then thrown away.
+ *
+ * ⚠️ Called only from the panic path, so the cost is irrelevant and the
+ * pv list is walked a second time on purpose rather than threaded through the
+ * boolean -- the check stays what it was, and this is a separate question
+ * asked separately.
+ */
+void
+pmap_page_report_mappings(vm_offset_t paddr)
+{
+	pv_entry_t	pv;
+	unsigned	n = 0;
+
+	if (!pv_managed((uint64_t) paddr)) {
+		printf("  page 0x%lx is outside the pv index — nothing can be "
+		       "said about who maps it\n", (unsigned long) paddr);
+		return;
+	}
+
+	for (pv = pv_head((uint64_t) paddr);
+	     pv != PV_ENTRY_NULL && n < 8;
+	     pv = pv->next) {
+		if (pv->pmap == PMAP_NULL)
+			continue;
+		printf("  still mapped by pmap %p%s at va 0x%lx\n",
+		       (void *) pv->pmap,
+		       pv->pmap == pmap_kernel() ? " (the KERNEL's)" : "",
+		       (unsigned long) pv->va);
+		n++;
+	}
+
+	if (n == 0)
+		printf("  the pv count is non-zero but every entry is "
+		       "PMAP_NULL — the list and the count disagree\n");
 }
 
 /*
