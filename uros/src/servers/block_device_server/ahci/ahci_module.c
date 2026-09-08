@@ -964,32 +964,52 @@ ahci_mod_read_sectors(void *priv, int disk, uint32_t lba,
 	unsigned int total = count * SECTOR_SIZE;
 	unsigned int offset, chunk;
 
-	for (offset = 0; offset < total; offset += chunk) {
-		unsigned int batch_sects;
-
-		chunk = total - offset;
-		if (chunk > st->batch_data_size)
-			chunk = st->batch_data_size;
-		batch_sects = chunk / SECTOR_SIZE;
-
-		if (ahci_submit_batch(st, disk,
-				      lba + offset / SECTOR_SIZE,
-				      batch_sects, 0) < 0)
-			return -1;
-	}
-
 	/*
-	 * Data is in the DMA buffer (st->data_uva).
-	 * Allocate a user buffer and copy it out.
+	 * 🔴 EACH CHUNK IS COPIED OUT AS IT ARRIVES, and it used to be one
+	 * memcpy of `total' AFTER the loop (#531).
+	 *
+	 * Every round of the loop reads into the SAME bounce buffer, so a
+	 * transfer that needed more than one round left only the last chunk
+	 * there -- and the copy afterwards took `total' bytes from a buffer
+	 * holding `chunk'.  Two defects in one line: the caller was handed
+	 * whatever followed the buffer in place of everything but the tail,
+	 * and the read ran off the end of the mapping.
+	 *
+	 * ⚠️ It was invisible in the ordinary configuration and that is the
+	 * whole reason it lasted: batch_data_size is four megabytes there and
+	 * readahead is capped at the same figure, so the loop runs exactly
+	 * once and `total == chunk'.  It fires the moment the driver falls
+	 * back to the probe's single page -- which, until the two commits
+	 * before this one, it never survived long enough to do.
 	 */
 	{
-		kern_return_t kr;
-		vm_offset_t out;
+		kern_return_t	kr;
+		vm_offset_t	out;
 
 		kr = vm_allocate(mach_task_self(), &out, total, TRUE);
 		if (kr != KERN_SUCCESS)
 			return -1;
-		memcpy((void *)out, (void *)st->data_uva, total);
+
+		for (offset = 0; offset < total; offset += chunk) {
+			unsigned int batch_sects;
+
+			chunk = total - offset;
+			if (chunk > st->batch_data_size)
+				chunk = st->batch_data_size;
+			batch_sects = chunk / SECTOR_SIZE;
+
+			if (ahci_submit_batch(st, disk,
+					      lba + offset / SECTOR_SIZE,
+					      batch_sects, 0) < 0) {
+				(void) vm_deallocate(mach_task_self(), out,
+						     total);
+				return -1;
+			}
+
+			memcpy((void *)(out + offset),
+			       (void *)st->data_uva, chunk);
+		}
+
 		*buf = out;
 		*buf_size = total;
 	}
