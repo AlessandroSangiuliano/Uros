@@ -190,7 +190,8 @@ void exception_try_task(
 	exception_data_t	code,
 	mach_msg_type_number_t	codeCnt);
 
-void exception_no_server(void);
+void exception_no_server(exception_type_t, exception_data_t,
+			 mach_msg_type_number_t);
 
 kern_return_t alert_exception_try_task(
 	exception_type_t	exception,
@@ -813,7 +814,7 @@ exception_try_task(
 	}
 	if (!IP_VALID(exc_port)) {
 		itk_unlock(task);
-		exception_no_server();
+		exception_no_server(exception, code, codeCnt);
 		/*NOTREACHED*/
 		return;
 	}
@@ -823,7 +824,7 @@ exception_try_task(
 	itk_unlock(task);
 	if (!ip_active(exc_port)) {
 		ip_unlock(exc_port);
-		exception_no_server();
+		exception_no_server(exception, code, codeCnt);
 		/*NOTREACHED*/
 		return;
 	}
@@ -1112,7 +1113,7 @@ exception_try_task(
 		panic ("bad behavior!");
 	}/* switch */
 
-	exception_no_server();
+	exception_no_server(exception, code, codeCnt);
 	/*NOTREACHED*/
 }
 
@@ -1131,9 +1132,13 @@ exception_try_task(
  */
 
 void
-exception_no_server(void)
+exception_no_server(
+	exception_type_t	exception,
+	exception_data_t	code,
+	mach_msg_type_number_t	codeCnt)
 {
 	register ipc_thread_t self = current_thread();
+	mach_msg_type_number_t	i;
 
 	/*
 	 *	If this thread is being terminated, cooperate.
@@ -1172,8 +1177,25 @@ exception_no_server(void)
 	 *	All else failed; terminate task.
 	 */
 
-	printf("exception_no_server: terminating task %p\n",
-	       (void *)self->top_act->task);
+	/*
+	 * 🔴 THE TASK POINTER WAS THE WHOLE MESSAGE, and the header of this
+	 * file has claimed since 1994 that it "print[s] an informative
+	 * message".  A task dying with no exception server is the last thing
+	 * anybody hears about it, so what that line does not say is not
+	 * recoverable afterwards -- and what it did not say was WHY.
+	 *
+	 * 🔑 The codes carry it.  For EXC_BAD_ACCESS code[0] is the
+	 * kern_return and code[1] is the faulting address, so the thing worth
+	 * knowing is already in the arguments this function was being handed
+	 * and throwing away.  No machine-dependent register access is needed
+	 * to say it (#531).
+	 */
+	printf("exception_no_server: terminating task %p — exception %d,",
+	       (void *)self->top_act->task, (int)exception);
+	for (i = 0; i < codeCnt; i++)
+		printf(" code[%u]=0x%lx", (unsigned)i,
+		       (unsigned long)code[i]);
+	printf("\n");
 	(void) task_terminate(self->top_act->task);
 	thread_terminate_self();
 	/*NOTREACHED*/
