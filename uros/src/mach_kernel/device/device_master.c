@@ -807,6 +807,19 @@ static struct dma_region dma_region[DEVICE_MAX_DMA_REGIONS];
 static uint64_t dma_region_next_id = 1;
 
 /*
+ * How many regions have been taken back from tasks that died holding them
+ * (#530).
+ *
+ * 🔴 THE ONLY NUMBER THAT ANSWERS THE QUESTION.  "Were a dead task's regions
+ * all given back?" cannot be answered by counting what a later task manages to
+ * allocate: the table is shared, so a slot another task legitimately holds and
+ * a slot that was never reclaimed look identical from out there.  This side
+ * knows which slots were the dead task's, and this is it saying so in a number
+ * rather than only in a printf.
+ */
+static uint64_t dma_regions_reclaimed;
+
+/*
  * Remember one allocation.  Answers zero when there is no room, and the caller
  * must then fail the allocation: a region that is not recorded is one no
  * device can ever be given, and one whose pages nothing will revoke.
@@ -1747,6 +1760,51 @@ ds_master_device_dma_identity(
 	return KERN_SUCCESS;
 }
 
+/*
+ * How big the region table is, and how much of it is taken (#530).
+ *
+ * 🔴 A TEST WAS COMPARING ITS OWN SHARE WITH THE TOTAL.  dma_reclaim_test
+ * filled the table after a holder died and treated what it got as the whole
+ * table; the table is shared, so another task holding three regions made it
+ * report thirteen of sixteen and call the reclaim short.  The kernel had given
+ * back all sixteen and said so, one printed line per region, and nothing
+ * compared the two.
+ *
+ * 🔑 What a caller needs to know is not how many it got but how many there
+ * were to get.  `in_use' read before a fill turns a short count from a mystery
+ * into arithmetic.
+ *
+ * ⚠️ A count of a moment and not a reservation -- see the note in
+ * <device/device_master.defs>.  It is also why this takes no lock: every
+ * answer it could give is already stale when the caller reads it, so a lock
+ * would buy a consistency the interface does not promise.  The slots are
+ * whole words written by one processor at a time, so the count cannot be
+ * torn, only out of date.
+ */
+kern_return_t
+ds_master_device_dma_table(
+	ipc_port_t		master_port,
+	natural_t		*total,
+	natural_t		*in_use,
+	natural_t		*reclaimed)
+{
+	kern_return_t	kr;
+	unsigned int	i, used = 0;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0)
+			used++;
+
+	*total = (natural_t) DEVICE_MAX_DMA_REGIONS;
+	*in_use = (natural_t) used;
+	*reclaimed = (natural_t) dma_regions_reclaimed;
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 ds_master_device_dma_owned(
 	ipc_port_t		master_port,
@@ -2100,6 +2158,7 @@ device_master_task_terminating(task_t task)
 		 */
 		dma_region_drop(kva);
 		kmem_free(kernel_map, kva, size);
+		dma_regions_reclaimed++;
 	}
 
 	for (i = 0; i < device_nclaims; i++) {

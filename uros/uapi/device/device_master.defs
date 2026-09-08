@@ -587,3 +587,30 @@ routine device_dma_faults(
 	out	count		: natural_t;
 	out	address		: vm_address_t
 	);
+
+/*
+ * How big the DMA region table is, and how much of it is in use right now
+ * (#530).
+ *
+ * 🔴 IT EXISTS BECAUSE A TEST WAS COMPARING ITS OWN SHARE WITH THE TOTAL.
+ * dma_reclaim_test filled the table after a holder died and treated the count
+ * it got as the whole table -- but the table is shared, so any other task
+ * holding a region made the count short, and "short" was read as a defect.  At
+ * -smp 4 it read thirteen of sixteen and the kernel had given back all
+ * sixteen, which it says itself, one line per region.
+ *
+ * 🔑 The number a test needs is not how many IT got, it is how many were
+ * there to get.  With this it can say `I took every free slot' instead of
+ * `I took fewer than I expected', and the two are different claims.
+ *
+ * ⚠️ A reading of a moment, like device_dma_owned above it.  Anything may
+ * allocate between this answer and the caller acting on it -- which is
+ * precisely the effect it exists to make visible, so it must not be used as a
+ * reservation.
+ */
+routine device_dma_table(
+		master_port	: mach_port_t;
+	out	total		: natural_t;
+	out	in_use		: natural_t;
+	out	reclaimed	: natural_t
+	);

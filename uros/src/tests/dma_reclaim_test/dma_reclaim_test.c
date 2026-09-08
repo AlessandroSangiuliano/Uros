@@ -125,6 +125,7 @@
 #define RECLAIM_TRIES	500
 #define RECLAIM_WAIT_MS	10
 
+
 /*
  * ── The device this program takes and abandons (#513) ────────────────
  *
@@ -206,6 +207,90 @@ static void
 die(void)
 {
 	_exit(0);
+}
+
+/*
+ * ── The number the checker cannot measure for itself (#530) ───────────
+ *
+ * 🔴 THE HOLDER'S COUNT WAS PRINTED AND NEVER SENT.  The comment beside
+ * fill_table() in the holder said it reported what it took "so the checker's
+ * number can be read against a real one" -- and the reading was left to
+ * whoever happened to look at the log.  Nobody did, for months: at `-smp 4'
+ * the checker was getting thirteen of sixteen and reporting five arms out of
+ * five.
+ *
+ * 🔑 The channel already existed.  The two halves find each other by name to
+ * synchronise -- the holder waits for the checker to appear before it takes
+ * anything -- so the send right is already in the holder's hands and the
+ * receive right already in the checker's.  What was missing was putting the
+ * number on it.
+ *
+ * ⚠️ It has to come from the holder rather than from a constant here.  The
+ * table's size is private to device_master.c and this program must not learn
+ * it: an arm written against a hardcoded sixteen would start failing for the
+ * wrong reason the day the table is resized.  What is compared is what came
+ * back against what was taken, which is a fact about this boot.
+ */
+struct reclaim_msg {
+	mach_msg_header_t	head;
+	NDR_record_t		ndr;
+	natural_t		held;
+};
+
+/* Room for the trailer the kernel appends on the receiving side. */
+struct reclaim_rcv {
+	struct reclaim_msg	msg;
+	mach_msg_trailer_t	trailer;
+};
+
+#define RECLAIM_MSG_ID	530
+
+static void
+tell_the_checker(mach_port_t peer, unsigned n)
+{
+	struct reclaim_msg m;
+
+	memset(&m, 0, sizeof(m));
+	m.head.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+	m.head.msgh_size = sizeof(m);
+	m.head.msgh_remote_port = peer;
+	m.head.msgh_local_port = MACH_PORT_NULL;
+	m.head.msgh_id = RECLAIM_MSG_ID;
+	m.ndr = NDR_record;
+	m.held = (natural_t) n;
+
+	/*
+	 * ⚠️ Reported and not fatal.  This program's job here is to die holding
+	 * the table; a checker that never hears the number says so itself and
+	 * fails its own arm, which is a better failure than a fixture that
+	 * stops before it can die.
+	 */
+	if (mach_msg(&m.head, MACH_SEND_MSG | MACH_SEND_TIMEOUT, sizeof(m), 0,
+		     MACH_PORT_NULL, 1000, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		printf("dma_reclaim: could not tell the checker how many were "
+		       "taken\n");
+}
+
+/* Answers zero if the number never arrived, and the arms then say so. */
+static int
+hear_from_the_holder(mach_port_t mine, unsigned *held)
+{
+	struct reclaim_rcv r;
+
+	if (mine == MACH_PORT_NULL)
+		return 0;
+
+	memset(&r, 0, sizeof(r));
+
+	if (mach_msg(&r.msg.head, MACH_RCV_MSG | MACH_RCV_TIMEOUT, 0,
+		     sizeof(r), mine, 5000, MACH_PORT_NULL) != MACH_MSG_SUCCESS)
+		return 0;
+
+	if (r.msg.head.msgh_id != RECLAIM_MSG_ID || r.msg.held == 0)
+		return 0;
+
+	*held = (unsigned) r.msg.held;
+	return 1;
 }
 
 /* Take one slot.  Answers zero and leaves nothing behind on a refusal. */
@@ -403,11 +488,19 @@ claim_the_bridge(void)
  * makes this report a failure rather than hang the run.
  */
 static int
-wait_for_the_holder_to_go(void)
+wait_for_the_holder_to_go(mach_port_t *keep)
 {
 	mach_port_t	p = MACH_PORT_NULL;
 	mach_port_t	mine = MACH_PORT_NULL;
 	unsigned	t;
+
+	/*
+	 * ⚠️ The receive right is handed back rather than dropped here (#530).
+	 * The holder sends the size of the table it took down this same port on
+	 * its way out, and that message has to survive the rendezvous that
+	 * carried it.
+	 */
+	*keep = MACH_PORT_NULL;
 
 	/*
 	 * Find the holder while it is still alive -- it is waiting for us and
@@ -437,6 +530,8 @@ wait_for_the_holder_to_go(void)
 	if (netname_check_in(name_server_port, CHECKER_NAME, MACH_PORT_NULL,
 			     mine) != NETNAME_SUCCESS)
 		return 0;
+
+	*keep = mine;
 
 	for (t = 0; t < RECLAIM_TRIES; t++) {
 		mach_port_type_t type = 0;
@@ -474,9 +569,12 @@ main(int argc, char **argv)
 	vm_address_t	kva[MAX_TRIES];
 	uint64_t	id[MAX_TRIES];
 	unsigned	n, n2, waited;
+	unsigned	held = 0, total = 0, in_use = 0, free_then = 0;
+	unsigned	reclaimed = 0;
 	const char	*role;
 	kern_return_t	kr;
 	mach_port_t	host_port, wired, paged, security;
+	mach_port_t	from_holder = MACH_PORT_NULL;
 
 	kr = bootstrap_ports(bootstrap_port, &host_port, &device_port,
 			     &wired, &paged, &security);
@@ -527,15 +625,20 @@ main(int argc, char **argv)
 			die();
 		}
 
-		(void) mach_port_deallocate(mach_task_self(), peer);
 		printf("dma_reclaim: the checker is watching; taking "
 		       "everything now\n");
 
 		/*
-		 * The fixture, not a test.  It reports what it took so the
-		 * checker's number can be read against a real one.
+		 * The fixture, not a test.  What it took is SENT to the
+		 * checker, not merely printed (#530): the checker cannot
+		 * measure the table's size for itself -- that number is
+		 * private to device_master.c -- so without this the arms
+		 * downstream have nothing to compare their own count against,
+		 * and thirteen of sixteen reads as a pass.
 		 */
 		n = fill_table(kva, id, MAX_TRIES);
+		tell_the_checker(peer, n);
+		(void) mach_port_deallocate(mach_task_self(), peer);
 
 		printf("\n=== DMA reclaim (#513): the task that dies ===\n");
 
@@ -575,7 +678,7 @@ main(int argc, char **argv)
 
 	printf("\n=== DMA reclaim (#513): the task that comes after ===\n");
 
-	if (!wait_for_the_holder_to_go()) {
+	if (!wait_for_the_holder_to_go(&from_holder)) {
 		printf("dma_reclaim: no holder ever came and went — nothing "
 		       "measured\n");
 		printf("dma_reclaim: 0 of 5 arms passed\n");
@@ -590,16 +693,28 @@ main(int argc, char **argv)
 	printf("dma_reclaim: started\n");
 
 	/*
-	 * 🔴 THE ARM.  This task was not created until the holder had filled the
-	 * table and said so, and the holder frees nothing.  So room appearing here
-	 * has exactly one possible cause: the holder died and the kernel took its
-	 * regions back.
+	 * 🔴 THE ARM, AND IT USED TO BE THE WRONG HALF OF IT (#530).
+	 *
+	 * This task was not created until the holder had filled the table and
+	 * said so, and the holder frees nothing.  So room appearing here has
+	 * exactly one possible cause: the holder died and the kernel took its
+	 * regions back.  That was the whole test -- **room**, not the regions.
+	 *
+	 * 🔥 At `-smp 4' the checker was getting thirteen of the sixteen the
+	 * holder had taken and reporting five arms out of five.  The count was
+	 * printed on the next line and compared with nothing.
+	 *
+	 * So the arm is now `all of them', against the number the holder sends
+	 * down the rendezvous it already had.  And when they are not all there
+	 * at once the two explanations -- still arriving, or gone -- are made
+	 * to predict different things: freeing and refilling after a bounded
+	 * wait separates a reclaim that had not finished from one that lost
+	 * something.
 	 */
 	waited = wait_for_room();
-	arm(1, "a dead task's DMA regions are given back",
-	    waited < RECLAIM_TRIES);
 
 	if (waited >= RECLAIM_TRIES) {
+		arm(1, "a dead task's DMA regions are all given back", 0);
 		/*
 		 * ⚠️ Said rather than skipped.  The remaining arms need a
 		 * region to work with, so on a kernel without the reclaim they
@@ -616,9 +731,81 @@ main(int argc, char **argv)
 		die();
 	}
 
+	/*
+	 * 🔴 HOW MANY THERE WERE TO GET, ASKED BEFORE TAKING ANY (#530).
+	 *
+	 * The table is SHARED.  This program used to fill it and treat the
+	 * count as the whole table, so any other task holding a region made the
+	 * count short -- and short was read as the reclaim having lost
+	 * something.  At `-smp 4' it read thirteen of sixteen while the kernel
+	 * had given back all sixteen and said so, one printed line per region.
+	 *
+	 * 🔑 The count that means something is not how many this task got, it
+	 * is how many were free to get.  With `in_use' the shortfall stops
+	 * being a mystery and becomes arithmetic.
+	 */
+	if (device_dma_table(device_port, &total, &in_use, &reclaimed)
+	    != KERN_SUCCESS) {
+		printf("dma_reclaim:     the kernel would not say how big the "
+		       "table is, so the count below is a share and not a "
+		       "measurement\n");
+		total = 0;
+		in_use = 0;
+		reclaimed = 0;
+	}
+
 	n = fill_table(kva, id, MAX_TRIES);
-	printf("dma_reclaim:     room after %u ms, and the table holds %u "
-	       "region%s\n", waited * RECLAIM_WAIT_MS, n, n == 1 ? "" : "s");
+
+	if (!hear_from_the_holder(from_holder, &held))
+		printf("dma_reclaim:     the holder never said how many it "
+		       "took, so this run can report room and nothing more\n");
+
+	free_then = (total > in_use) ? total - in_use : 0;
+
+	printf("dma_reclaim:     room after %u ms; the holder took %u, the "
+	       "kernel took back %u, %u of the %u slots were held by somebody "
+	       "else, and this task got %u of the %u that were free\n",
+	       waited * RECLAIM_WAIT_MS, held, reclaimed, in_use, total, n,
+	       free_then);
+
+	/*
+	 * 🔴 THE ARM IS THE KERNEL'S COUNT, AND NOTHING THIS TASK MANAGED TO
+	 * ALLOCATE.
+	 *
+	 * Two earlier versions of this arm were wrong in the same way and it
+	 * is worth writing down, because both looked right:
+	 *
+	 *   `the whole table' -- the table is SHARED, so a slot another task
+	 *   legitimately holds and a slot that was never given back look
+	 *   identical from here.  Thirteen of sixteen read as a defect for
+	 *   months while the kernel was giving back all sixteen.
+	 *
+	 *   `every slot that was free' -- and then in_use was read as if it
+	 *   were a reservation, which the comment beside device_dma_table()
+	 *   says in as many words that it is not.  Anything may allocate
+	 *   between that answer and the end of the fill, and at -smp 4
+	 *   something does: ten taken of eleven free, and the arm failed for
+	 *   the table doing exactly what it is for.
+	 *
+	 * 🔑 What is being tested is what the KERNEL did, so the number has to
+	 * come from the kernel.  It is the only side that knows which slots
+	 * belonged to the dead task.  `at least as many as the holder held'
+	 * rather than `exactly': the count is for the whole boot, and any
+	 * other task that died holding a region is entitled to be in it.
+	 */
+	arm(1, "a dead task's regions are all taken back",
+	    held != 0 && reclaimed >= held);
+
+	/*
+	 * ⚠️ Reported and NOT armed.  This is the number the shared table makes
+	 * meaningless as a verdict, and it stays in the log because it is what
+	 * explains a short count to whoever reads one.
+	 */
+	if (total != 0 && n < free_then)
+		printf("dma_reclaim:     %u of the %u free slots went to "
+		       "somebody else while this task was filling — the table "
+		       "is shared and that is not a defect\n",
+		       free_then - n, free_then);
 
 	/*
 	 * 🔑 THE SLOTS ARE REUSED AND THE NAMES ARE NOT, which is the property
