@@ -747,22 +747,34 @@ main(int argc, char **argv)
 		       "took, so this run can report room and nothing more\n");
 
 	/*
-	 * ⚠️ Free and refill rather than take more, because `taking more' is
-	 * not the same measurement: the table refuses when it is full, so a
-	 * second fill on top of the first would answer zero whether the
-	 * missing slots had arrived or not.  Emptying it first asks the
-	 * question the arm is about -- how many are there NOW.
+	 * 🔴 TAKE MORE, NEVER FREE.  The first version of this freed the table
+	 * and refilled it to re-measure, on the argument that "a second fill on
+	 * top of the first would answer zero whether the missing slots had
+	 * arrived or not".  That argument is FALSE -- a full table refuses, an
+	 * arrived slot is taken, so an incremental take answers exactly the
+	 * question -- and it cost the measurement: freeing thirteen and
+	 * refilling gave back nine, then nine again, because the free-and-
+	 * refill cycle loses slots of its own.  The probe was destroying what
+	 * it was counting and reporting the result as the kernel's.
+	 *
+	 * 🔑 A probe that changes what it measures cannot separate hypotheses,
+	 * however carefully the hypotheses were written down.
+	 *
+	 * (The loss on free-and-refill is real and is what arm [3] below has
+	 * been reporting all along, read as "the control failed".)
 	 */
 	at_once = n;
-	settled = n;
-	while (held != 0 && settled < held && settle_ms < SETTLE_MS_MAX) {
-		free_table(kva, settled);
+	while (held != 0 && n < held && n < MAX_TRIES
+	       && settle_ms < SETTLE_MS_MAX) {
+		if (take_one(&kva[n], &id[n])) {
+			n++;
+			continue;
+		}
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
 				     RECLAIM_WAIT_MS);
 		settle_ms += RECLAIM_WAIT_MS;
-		settled = fill_table(kva, id, MAX_TRIES);
 	}
-	n = settled;
+	settled = n;
 
 	printf("dma_reclaim:     room after %u ms, and the table holds %u "
 	       "region%s of the %u the holder took\n",
