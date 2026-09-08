@@ -125,16 +125,6 @@
 #define RECLAIM_TRIES	500
 #define RECLAIM_WAIT_MS	10
 
-/*
- * And how long it goes on asking once SOME have come back (#530).
- *
- * 🔑 A separate bound from RECLAIM_TRIES, because it answers a different
- * question.  That one asks whether the reclaim happens at all and has to be
- * generous.  This one asks whether a reclaim already under way finishes, and
- * a second is already enormous for a table of sixteen: if the rest have not
- * arrived by then, `still arriving' has stopped being an explanation.
- */
-#define SETTLE_MS_MAX	1000u
 
 /*
  * ── The device this program takes and abandons (#513) ────────────────
@@ -579,7 +569,7 @@ main(int argc, char **argv)
 	vm_address_t	kva[MAX_TRIES];
 	uint64_t	id[MAX_TRIES];
 	unsigned	n, n2, waited;
-	unsigned	held = 0, settled = 0, settle_ms = 0, at_once = 0;
+	unsigned	held = 0, total = 0, in_use = 0, free_then = 0;
 	const char	*role;
 	kern_return_t	kr;
 	mach_port_t	host_port, wired, paged, security;
@@ -740,59 +730,51 @@ main(int argc, char **argv)
 		die();
 	}
 
+	/*
+	 * 🔴 HOW MANY THERE WERE TO GET, ASKED BEFORE TAKING ANY (#530).
+	 *
+	 * The table is SHARED.  This program used to fill it and treat the
+	 * count as the whole table, so any other task holding a region made the
+	 * count short -- and short was read as the reclaim having lost
+	 * something.  At `-smp 4' it read thirteen of sixteen while the kernel
+	 * had given back all sixteen and said so, one printed line per region.
+	 *
+	 * 🔑 The count that means something is not how many this task got, it
+	 * is how many were free to get.  With `in_use' the shortfall stops
+	 * being a mystery and becomes arithmetic.
+	 */
+	if (device_dma_table(device_port, &total, &in_use) != KERN_SUCCESS) {
+		printf("dma_reclaim:     the kernel would not say how big the "
+		       "table is, so the count below is a share and not a "
+		       "measurement\n");
+		total = 0;
+		in_use = 0;
+	}
+
 	n = fill_table(kva, id, MAX_TRIES);
 
 	if (!hear_from_the_holder(from_holder, &held))
 		printf("dma_reclaim:     the holder never said how many it "
 		       "took, so this run can report room and nothing more\n");
 
-	/*
-	 * 🔴 TAKE MORE, NEVER FREE.  The first version of this freed the table
-	 * and refilled it to re-measure, on the argument that "a second fill on
-	 * top of the first would answer zero whether the missing slots had
-	 * arrived or not".  That argument is FALSE -- a full table refuses, an
-	 * arrived slot is taken, so an incremental take answers exactly the
-	 * question -- and it cost the measurement: freeing thirteen and
-	 * refilling gave back nine, then nine again, because the free-and-
-	 * refill cycle loses slots of its own.  The probe was destroying what
-	 * it was counting and reporting the result as the kernel's.
-	 *
-	 * 🔑 A probe that changes what it measures cannot separate hypotheses,
-	 * however carefully the hypotheses were written down.
-	 *
-	 * (The loss on free-and-refill is real and is what arm [3] below has
-	 * been reporting all along, read as "the control failed".)
-	 */
-	at_once = n;
-	while (held != 0 && n < held && n < MAX_TRIES
-	       && settle_ms < SETTLE_MS_MAX) {
-		if (take_one(&kva[n], &id[n])) {
-			n++;
-			continue;
-		}
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_WAIT,
-				     RECLAIM_WAIT_MS);
-		settle_ms += RECLAIM_WAIT_MS;
-	}
-	settled = n;
+	free_then = (total > in_use) ? total - in_use : 0;
 
-	printf("dma_reclaim:     room after %u ms, and the table holds %u "
-	       "region%s of the %u the holder took\n",
-	       waited * RECLAIM_WAIT_MS, n, n == 1 ? "" : "s", held);
-
-	arm(1, "a dead task's DMA regions are all given back",
-	    held != 0 && n == held);
+	printf("dma_reclaim:     room after %u ms; the holder took %u, the "
+	       "kernel gave them back, %u of the %u slots were still held by "
+	       "somebody else, and this task took %u of the %u that were "
+	       "free\n",
+	       waited * RECLAIM_WAIT_MS, held, in_use, total, n, free_then);
 
 	/*
-	 * 🔑 The two explanations, told apart rather than argued about.  Both
-	 * predict a short first reading; only one of them predicts that
-	 * waiting changes it.
+	 * ⚠️ THE ARM IS `EVERY FREE SLOT', NOT `THE WHOLE TABLE'.  The second
+	 * is not this task's to claim and never was.  Whether all of the
+	 * holder's own regions came back is a question only the kernel can
+	 * answer -- it is the one that knows which slots were the dead task's
+	 * -- and it answers it in device_master.c, a line per region taken
+	 * back.
 	 */
-	if (held != 0 && at_once < held)
-		printf("dma_reclaim:     %s — %u at once, %u after a further "
-		       "%u ms\n",
-		       n == held ? "LATE and not lost" : "LOST",
-		       at_once, n, settle_ms);
+	arm(1, "a dead task's regions come back and the next task gets them "
+	       "all", total != 0 && n == free_then && n > 0);
 
 	/*
 	 * 🔑 THE SLOTS ARE REUSED AND THE NAMES ARE NOT, which is the property

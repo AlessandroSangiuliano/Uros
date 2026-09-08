@@ -1747,6 +1747,49 @@ ds_master_device_dma_identity(
 	return KERN_SUCCESS;
 }
 
+/*
+ * How big the region table is, and how much of it is taken (#530).
+ *
+ * 🔴 A TEST WAS COMPARING ITS OWN SHARE WITH THE TOTAL.  dma_reclaim_test
+ * filled the table after a holder died and treated what it got as the whole
+ * table; the table is shared, so another task holding three regions made it
+ * report thirteen of sixteen and call the reclaim short.  The kernel had given
+ * back all sixteen and said so, one printed line per region, and nothing
+ * compared the two.
+ *
+ * 🔑 What a caller needs to know is not how many it got but how many there
+ * were to get.  `in_use' read before a fill turns a short count from a mystery
+ * into arithmetic.
+ *
+ * ⚠️ A count of a moment and not a reservation -- see the note in
+ * <device/device_master.defs>.  It is also why this takes no lock: every
+ * answer it could give is already stale when the caller reads it, so a lock
+ * would buy a consistency the interface does not promise.  The slots are
+ * whole words written by one processor at a time, so the count cannot be
+ * torn, only out of date.
+ */
+kern_return_t
+ds_master_device_dma_table(
+	ipc_port_t		master_port,
+	natural_t		*total,
+	natural_t		*in_use)
+{
+	kern_return_t	kr;
+	unsigned int	i, used = 0;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+		if (dma_region[i].kva != 0)
+			used++;
+
+	*total = (natural_t) DEVICE_MAX_DMA_REGIONS;
+	*in_use = (natural_t) used;
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 ds_master_device_dma_owned(
 	ipc_port_t		master_port,
