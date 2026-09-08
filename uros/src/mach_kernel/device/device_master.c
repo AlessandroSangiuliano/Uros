@@ -2144,11 +2144,28 @@ device_master_task_terminating(task_t task)
 		kva = r->kva;
 		size = r->size;
 
+		/*
+		 * ⚠️ WHO IT WAS MAPPED FOR, AND NOT JUST THAT IT WAS (#531).
+		 *
+		 * The reclaim panics in vm_page_release with a page somebody
+		 * still maps, and the guard there now names the pmap and the
+		 * address.  What that cannot say is what this side BELIEVED it
+		 * was unmapping -- and the two together are what separate "the
+		 * removal did not work" from "there was a second mapping this
+		 * region never recorded".  One slot for one task is the shape
+		 * #527 already found once in this file.
+		 */
 		printf("device: task 0x%lx died holding DMA region %llu (%lu "
-		       "bytes, lent to %u device%s) — taking it back\n",
+		       "bytes, lent to %u device%s, owner 0x%lx, mapped for "
+		       "task 0x%lx at uva 0x%lx pmap %p) — taking it back\n",
 		       (unsigned long)task, (unsigned long long)r->id,
 		       (unsigned long)size, r->nusers,
-		       r->nusers == 1 ? "" : "s");
+		       r->nusers == 1 ? "" : "s",
+		       (unsigned long)r->owner,
+		       (unsigned long)r->task,
+		       (unsigned long)r->uva,
+		       r->task != TASK_NULL && r->task->map != VM_MAP_NULL
+		       ? (void *)r->task->map->pmap : (void *)0);
 
 		/*
 		 * ⚠️ The mapping in the dying task's own address space goes
