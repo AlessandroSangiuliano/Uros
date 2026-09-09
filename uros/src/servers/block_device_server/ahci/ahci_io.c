@@ -353,6 +353,35 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 	if (nsectors == 0 || n_pa == 0)
 		return -1;
 
+	/*
+	 * 🔑 A LIST THIS SLOT CANNOT DESCRIBE IS AN ERROR, NOT A SHORTER
+	 * TRANSFER.  This used to clamp n_prdt to PRDT_PER_SLOT in silence.
+	 * The clamp could not fire, and the reason it could not was an
+	 * accident: PRDT_PER_SLOT is 32 here and the caller's own array is
+	 * 32 entries in another file, with nothing tying the two together.
+	 * Refusing instead lets the two ceilings differ without anybody being
+	 * lied to -- which is the point, because one of them will move.
+	 */
+	if (n_pa > PRDT_PER_SLOT) {
+		printf("ahci: phys refused — %u pages do not fit a command "
+		       "table of %u entries\n", n_pa, (unsigned)PRDT_PER_SLOT);
+		return -1;
+	}
+
+	/*
+	 * And the descriptors have to account for the bytes the command FIS
+	 * is about to ask the drive for.  The sector count below is written
+	 * from `nsectors' whatever the table says, so a page list that falls
+	 * short tells the drive to move more than the table describes.
+	 */
+	if ((uint64_t)n_pa * 4096u < (uint64_t)total_bytes) {
+		printf("ahci: phys refused — %u pages hold %llu bytes and %u "
+		       "were asked for\n", n_pa,
+		       (unsigned long long)((uint64_t)n_pa * 4096u),
+		       total_bytes);
+		return -1;
+	}
+
 	for (i = 0; i < 1000000; i++)
 		if (!(port_read(st, port, PORT_TFD) &
 		      (PORT_TFD_STS_BSY | PORT_TFD_STS_DRQ)))
@@ -360,9 +389,15 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 
 	port_write(st, port, PORT_IS, ~0u);
 
-	n_prdt = n_pa;
-	if (n_prdt > PRDT_PER_SLOT)
-		n_prdt = PRDT_PER_SLOT;
+	/*
+	 * ⚠️ The table is as long as the BYTES need, not as long as the list.
+	 * Filling one entry per page given would leave a trailing entry with a
+	 * zero chunk, and PRDT_DBC encodes count-1, so a zero becomes 0x3FFFFF
+	 * -- a four-megabyte descriptor pointing at a page the caller offered
+	 * for nothing.  A list longer than the request is not an error; using
+	 * all of it would be.
+	 */
+	n_prdt = (total_bytes + 4095u) / 4096u;
 
 	hdr[0].opts  = CMD_HDR_CFL(5);
 	if (write)
@@ -410,15 +445,48 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 
 	for (i = 0; i < 5000000; i++) {
 		uint32_t is = port_read(st, port, PORT_IS);
-		if (is & PORT_IS_TFES) {
-			printf("ahci: phys task file error  IS=0x%08X  "
-			       "TFD=0x%08X\n",
-			       is, port_read(st, port, PORT_TFD));
-			port_write(st, port, PORT_IS, PORT_IS_TFES);
+
+		/*
+		 * 🔴 CI CLEARING IS NOT THE SAME AS THE TRANSFER HAVING
+		 * HAPPENED.  This loop used to watch one error bit and then
+		 * call CI==0 success, so a command the HBA abandoned partway
+		 * -- most of all one whose PRD table was shorter than the
+		 * sector count it was issued with -- returned KERN_SUCCESS
+		 * with the caller's later pages untouched.
+		 */
+		if (is & PORT_IS_FATAL) {
+			printf("ahci: phys command failed  IS=0x%08X%s  "
+			       "TFD=0x%08X SERR=0x%08X  prdtl=%u prdbc=%u "
+			       "wanted=%u\n",
+			       is, (is & PORT_IS_OFS) ? " (OVERFLOW)" : "",
+			       port_read(st, port, PORT_TFD),
+			       port_read(st, port, PORT_SERR),
+			       (unsigned)hdr[0].prdtl,
+			       (unsigned)hdr[0].prdbc, total_bytes);
+			port_write(st, port, PORT_IS, is & PORT_IS_FATAL);
 			return -1;
 		}
-		if (!(port_read(st, port, PORT_CI) & 1))
+		if (!(port_read(st, port, PORT_CI) & 1)) {
+			/*
+			 * The HBA writes back how many bytes it actually
+			 * moved.  Comparing it with what was asked for costs
+			 * one read and does not depend on the controller
+			 * raising an error bit at all -- which matters,
+			 * because whether a given HBA (or emulation of one)
+			 * reports overflow is a property of that HBA.
+			 */
+			unsigned int moved = (unsigned int)hdr[0].prdbc;
+
+			if (moved != total_bytes) {
+				printf("ahci: phys short transfer  moved=%u "
+				       "wanted=%u  prdtl=%u pages=%u "
+				       "IS=0x%08X\n",
+				       moved, total_bytes,
+				       (unsigned)hdr[0].prdtl, n_pa, is);
+				return -1;
+			}
 			return 0;
+		}
 	}
 
 	printf("ahci: phys timed out  CI=0x%08X\n",

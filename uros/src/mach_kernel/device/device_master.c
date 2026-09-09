@@ -831,11 +831,24 @@ static uint64_t dma_regions_reclaimed;
 static uint64_t dma_regions_freed;
 
 /*
- * Remember one allocation.  Answers zero when there is no room, and the caller
- * must then fail the allocation: a region that is not recorded is one no
- * device can ever be given, and one whose pages nothing will revoke.
+ * Remember one allocation.  A failure here must fail the allocation: a region
+ * that is not recorded is one no device can ever be given, and one whose pages
+ * nothing will revoke.
+ *
+ * 🔑 TWO REFUSALS THAT USED TO LOOK LIKE ONE.  This answered zero both when
+ * the sixteen-slot table was full and when the kernel could not find a few
+ * bytes, and the caller turned both into KERN_RESOURCE_SHORTAGE -- so a
+ * driver whose probe died could not tell a table that is momentarily full,
+ * which is a normal condition every boot while dma_reclaim_test holds it, from
+ * a machine that is out of memory, which is not.  They are different answers
+ * and they get different codes: KERN_NO_SPACE for the table, and
+ * KERN_RESOURCE_SHORTAGE for the memory.
+ *
+ * ⚠️ Not a printf.  The full table is reached in EVERY boot on purpose, so a
+ * diagnostic here fires three or four times a boot in runs that are entirely
+ * healthy -- the caller is the one that knows whether being refused matters.
  */
-static int
+static kern_return_t
 dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	       unsigned int npages, task_t task, vm_offset_t uva,
 	       uint64_t *id_out)
@@ -850,11 +863,11 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 		}
 
 	if (r == 0)
-		return 0;
+		return KERN_NO_SPACE;
 
 	r->pa = (vm_offset_t *) kalloc(npages * sizeof(vm_offset_t));
 	if (r->pa == 0)
-		return 0;
+		return KERN_RESOURCE_SHORTAGE;
 
 	for (i = 0; i < npages; i++)
 		r->pa[i] = pa[i];
@@ -884,7 +897,7 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 	if (id_out != 0)
 		*id_out = r->id;
 
-	return 1;
+	return KERN_SUCCESS;
 }
 
 /* The region holding this physical page, and which page of it, or null. */
@@ -1085,10 +1098,11 @@ ds_master_device_dma_alloc(
 		for (i = 0; i < n; i++)
 			pages[i] = pa + (vm_offset_t)i * PAGE_SIZE;
 
-		if (!dma_region_add(kva, size, pages, n, TASK_NULL, 0,
-				    &region_id)) {
+		kr = dma_region_add(kva, size, pages, n, TASK_NULL, 0,
+				    &region_id);
+		if (kr != KERN_SUCCESS) {
 			kmem_free(kernel_map, kva, size);
-			return KERN_RESOURCE_SHORTAGE;
+			return kr;
 		}
 	}
 
@@ -1336,14 +1350,15 @@ ds_master_device_dma_alloc_sg(
 	 * mapped for nobody, and its pages were freed with a live user mapping
 	 * on them.  One writer now, and it is the function that maps.
 	 */
-	if (!dma_region_add(kva, size, (const vm_offset_t *)list, n_pages,
-			    TASK_NULL, 0, &region_id)) {
+	kr = dma_region_add(kva, size, (const vm_offset_t *)list, n_pages,
+			    TASK_NULL, 0, &region_id);
+	if (kr != KERN_SUCCESS) {
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
 		kmem_free(ipc_kernel_map, list, list_size);
 		kmem_free(kernel_map, kva, size);
 		task_deallocate(task);
-		return KERN_RESOURCE_SHORTAGE;
+		return kr;
 	}
 
 	/*

@@ -834,6 +834,35 @@ ds_device_register_dma(mach_port_t device, mach_port_t reply,
 	return KERN_SUCCESS;
 }
 
+/*
+ * ── The two arguments that have to agree (#532) ──────────────────────────
+ *
+ * A physical-DMA request carries a list of pages and a count of bytes, and
+ * they arrive as separate arguments from a caller this server does not
+ * trust.  Every bound the two entry points checked was about the disk or
+ * about the local array; none was about the arithmetic that decides whether
+ * the transfer can happen at all.
+ *
+ * 🔑 This is the place to check it because it is where the two arguments
+ * first meet.  Both drivers refuse a short list of their own now, but a
+ * driver that forgets to is then only as wrong as its own transfer, and the
+ * next driver written starts from zero again.
+ */
+#define BLK_PHYS_PAGES_MAX	32
+
+static int
+blk_pages_cover(mach_msg_type_number_t npages, unsigned int total,
+		const char *what)
+{
+	if ((uint64_t)npages * 4096u >= (uint64_t)total)
+		return 1;
+
+	printf("blk: %s of %u bytes refused — %u page(s) hold %llu\n",
+	       what, total, (unsigned)npages,
+	       (unsigned long long)((uint64_t)npages * 4096u));
+	return 0;
+}
+
 static vm_address_t
 blk_dma_for(struct blk_controller *ctrl, vm_address_t pa)
 {
@@ -919,11 +948,14 @@ ds_device_read_phys(mach_port_t device, mach_port_t reply,
 	if (recnum + nsectors > part->num_sectors)
 		return D_INVALID_SIZE;
 
+	if (!blk_pages_cover(phys_addrsCnt, total, "read"))
+		return D_INVALID_SIZE;
+
 	{
-		vm_address_t	dma[32];
+		vm_address_t	dma[BLK_PHYS_PAGES_MAX];
 		unsigned int	i;
 
-		if (phys_addrsCnt > 32)
+		if (phys_addrsCnt > BLK_PHYS_PAGES_MAX)
 			return D_INVALID_SIZE;
 
 		for (i = 0; i < phys_addrsCnt; i++)
@@ -969,15 +1001,39 @@ ds_device_write_phys(mach_port_t device, mach_port_t reply,
 	if (recnum + nsectors > part->num_sectors)
 		return D_INVALID_SIZE;
 
+	if (!blk_pages_cover(phys_addrsCnt, total, "write"))
+		return D_INVALID_SIZE;
+
 	ra_invalidate(part);
 
-	if (ctrl->ops->write_sectors_phys(ctrl->priv,
-					   part->disk_index,
-					   part->start_lba + recnum,
-					   nsectors,
-					   phys_addrs, phys_addrsCnt,
-					   total) < 0)
-		return D_IO_ERROR;
+	{
+		vm_address_t	dma[BLK_PHYS_PAGES_MAX];
+		unsigned int	i;
+
+		if (phys_addrsCnt > BLK_PHYS_PAGES_MAX)
+			return D_INVALID_SIZE;
+
+		/*
+		 * 🔴 THE WRITE HALF HANDED OVER UNTRANSLATED ADDRESSES.  The
+		 * read half has always mapped each page through blk_dma_for()
+		 * -- which is what asks the kernel for a device address the
+		 * IOMMU will accept -- and this one passed the caller's raw
+		 * physical addresses straight to the controller.  With a
+		 * translating unit in front of the device those are somebody
+		 * else's addresses or nobody's, and the two halves of one pair
+		 * were speaking different languages.
+		 */
+		for (i = 0; i < phys_addrsCnt; i++)
+			dma[i] = blk_dma_for(ctrl, phys_addrs[i]);
+
+		if (ctrl->ops->write_sectors_phys(ctrl->priv,
+						   part->disk_index,
+						   part->start_lba + recnum,
+						   nsectors,
+						   dma, phys_addrsCnt,
+						   total) < 0)
+			return D_IO_ERROR;
+	}
 
 	*bytes_written = bytes_to_write;
 	return KERN_SUCCESS;

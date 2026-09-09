@@ -258,13 +258,15 @@ ahci_port_init(struct ahci_state *st, int port_idx)
 	kr = device_dma_alloc(st->master_device, AHCI_BDF(st), 4096,
 			      &dma_kva, &dma_pa, &unused_region);
 	if (kr != KERN_SUCCESS) {
-		printf("ahci: port %d CLB/FB alloc failed\n", hba_port);
+		printf("ahci: port %d CLB/FB alloc of 4096 bytes failed "
+		       "(kr=%d)\n", hba_port, (int)kr);
 		return -1;
 	}
 	kr = device_dma_map_user(st->master_device, dma_kva, 4096,
 				 mach_task_self(), &dma_uva);
 	if (kr != KERN_SUCCESS) {
-		printf("ahci: port %d CLB/FB map failed\n", hba_port);
+		printf("ahci: port %d CLB/FB map of 4096 bytes failed "
+		       "(kr=%d)\n", hba_port, (int)kr);
 		return -1;
 	}
 
@@ -832,22 +834,46 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 */
 	printf("ahci: ABAR mapped at uva=%p\n", (void *)st->abar);
 
+	/*
+	 * ⚠️ These four say what was asked for and what came back.  They used
+	 * to say only that they had failed, and each of them ends the probe --
+	 * the whole controller leaves the run, with its disks, and the only
+	 * trace is one line that names no cause.  Roughly half of the -smp 4
+	 * boots in every campaign since #529 have taken one of these paths and
+	 * nobody could tell from a log which resource had run out.
+	 */
+
 	/* Initial CT buffer (1 page) */
 	kr = device_dma_alloc(master_dev, AHCI_BDF(st), 4096,
 			      &st->ct_kva, &st->ct_dma, &unused_region);
-	if (kr != KERN_SUCCESS) { printf("ahci: CT alloc failed\n"); return -1; }
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: CT alloc of 4096 bytes failed (kr=%d)\n",
+		       (int)kr);
+		return -1;
+	}
 	kr = device_dma_map_user(master_dev, st->ct_kva, 4096,
 				 mach_task_self(), &st->ct_uva);
-	if (kr != KERN_SUCCESS) { printf("ahci: CT map failed\n"); return -1; }
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: CT map of 4096 bytes failed (kr=%d)\n", (int)kr);
+		return -1;
+	}
 
 	/* Initial data buffer (1 page) */
 	kr = device_dma_alloc(master_dev, AHCI_BDF(st), AHCI_PROBE_BUF_BYTES,
 			      &st->data_kva, &st->data_dma, &unused_region);
-	if (kr != KERN_SUCCESS) { printf("ahci: data alloc failed\n"); return -1; }
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: data alloc of %u bytes failed (kr=%d)\n",
+		       (unsigned)AHCI_PROBE_BUF_BYTES, (int)kr);
+		return -1;
+	}
 	kr = device_dma_map_user(master_dev, st->data_kva,
 				 AHCI_PROBE_BUF_BYTES,
 				 mach_task_self(), &st->data_uva);
-	if (kr != KERN_SUCCESS) { printf("ahci: data map failed\n"); return -1; }
+	if (kr != KERN_SUCCESS) {
+		printf("ahci: data map of %u bytes failed (kr=%d)\n",
+		       (unsigned)AHCI_PROBE_BUF_BYTES, (int)kr);
+		return -1;
+	}
 
 	st->data_dma_list[0] = st->data_dma;
 	st->data_n_pages = 1;

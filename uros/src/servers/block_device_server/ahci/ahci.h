@@ -103,18 +103,35 @@
 #define PORT_CMD_FR		(1u << 14)	/* FIS Receive Running */
 #define PORT_CMD_CR		(1u << 15)	/* Command List Running */
 
-/* PORT_IS bits */
+/* PORT_IS bits (AHCI 1.3.1, 3.3.5 "Port x Interrupt Status") */
 #define PORT_IS_DHRS		(1u << 0)	/* Device to Host FIS */
 #define PORT_IS_PSS		(1u << 1)	/* PIO Setup FIS */
 #define PORT_IS_DSS		(1u << 2)	/* DMA Setup FIS */
 #define PORT_IS_SDBS		(1u << 3)	/* Set Device Bits FIS */
+/*
+ * Overflow: the device tried to move more data than the PRD table
+ * describes.  This is the status a command raises when it is issued with a
+ * sector count larger than the sum of its descriptors, which is exactly the
+ * mistake a caller makes by handing over a page list too short for the bytes
+ * it asked for.  Without it, CI clears and a short transfer reads as success.
+ */
+#define PORT_IS_OFS		(1u << 24)	/* Overflow Status */
+#define PORT_IS_INFS		(1u << 26)	/* Interface Non-fatal Error */
+#define PORT_IS_IFS		(1u << 27)	/* Interface Fatal Error */
+#define PORT_IS_HBDS		(1u << 28)	/* Host Bus Data Error */
+#define PORT_IS_HBFS		(1u << 29)	/* Host Bus Fatal Error */
 #define PORT_IS_TFES		(1u << 30)	/* Task File Error */
+
+/* The reasons a command must be abandoned rather than waited out. */
+#define PORT_IS_FATAL		(PORT_IS_TFES | PORT_IS_HBFS | PORT_IS_HBDS \
+				 | PORT_IS_IFS | PORT_IS_OFS)
 
 /* PORT_IE bits — mirror PORT_IS */
 #define PORT_IE_DHRE		(1u << 0)
 #define PORT_IE_PSE		(1u << 1)
 #define PORT_IE_DSE		(1u << 2)
 #define PORT_IE_SDBE		(1u << 3)
+#define PORT_IE_OFE		(1u << 24)
 #define PORT_IE_TFEE		(1u << 30)
 
 /* PORT_TFD bits */
