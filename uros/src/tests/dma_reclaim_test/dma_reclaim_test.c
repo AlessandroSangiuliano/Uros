@@ -939,31 +939,54 @@ main(int argc, char **argv)
 		 */
 		vm_address_t	kva = 0, dma = 0;
 		uint64_t	rid = 0;
-		int		refused_before, claimed, allowed_after;
+		kern_return_t	kr_before, kr_after;
+		int		claimed;
 
-		refused_before = device_dma_alloc(device_port, BRIDGE_BDF,
-						  REGION_BYTES, &kva, &dma,
-						  &rid) != KERN_SUCCESS;
-		if (!refused_before)
+		/*
+		 * ⚠️ WHICH refusal, not whether there was one.  This used to
+		 * read any failure of device_dma_alloc as "refused for want of
+		 * a claim" -- and that call also fails for want of a SLOT,
+		 * because the region table is shared and finite.  One boot in
+		 * twenty at -smp 4 reported "after: refused" with the claim
+		 * taken, which is the table being full and not the kernel
+		 * withholding the device.
+		 *
+		 * 🔑 The two answers are already distinct: KERN_NO_ACCESS is
+		 * check_claim() refusing, KERN_RESOURCE_SHORTAGE is the table.
+		 * Reading a coarse answer as a fine one is the mistake this
+		 * whole test has been rebuilt to stop making.
+		 */
+		kr_before = device_dma_alloc(device_port, BRIDGE_BDF,
+					     REGION_BYTES, &kva, &dma, &rid);
+		if (kr_before == KERN_SUCCESS)
 			(void) device_dma_free(device_port, BRIDGE_BDF, kva,
 					       REGION_BYTES);
 
 		claimed = claim_the_bridge();
 
-		allowed_after = device_dma_alloc(device_port, BRIDGE_BDF,
-						 REGION_BYTES, &kva, &dma,
-						 &rid) == KERN_SUCCESS;
-		if (allowed_after)
+		kr_after = device_dma_alloc(device_port, BRIDGE_BDF,
+					    REGION_BYTES, &kva, &dma, &rid);
+		if (kr_after == KERN_SUCCESS)
 			(void) device_dma_free(device_port, BRIDGE_BDF, kva,
 					       REGION_BYTES);
 
-		arm(5, "the kernel let go, and this task had not inherited it",
-		    refused_before && claimed && allowed_after);
-		printf("dma_reclaim:     0:0.0 before the claim: %s; claim: "
-		       "%s; after: %s\n",
-		       refused_before ? "refused" : "GRANTED — inherited",
-		       claimed ? "taken" : "refused",
-		       allowed_after ? "allowed" : "refused");
+		printf("dma_reclaim:     0:0.0 before the claim: kr=%d; "
+		       "claim: %s; after: kr=%d\n",
+		       (int)kr_before, claimed ? "taken" : "refused",
+		       (int)kr_after);
+
+		if ((kr_before != KERN_NO_ACCESS && kr_before != KERN_SUCCESS)
+		    || (kr_after != KERN_SUCCESS
+			&& kr_after != KERN_NO_ACCESS))
+			printf("dma_reclaim: [5] the kernel let go — NOT "
+			       "DECIDED: a buffer was refused for something "
+			       "other than the claim, and this arm is about "
+			       "the claim\n");
+		else
+			arm(5, "the kernel let go, and this task had not "
+			       "inherited it",
+			    kr_before == KERN_NO_ACCESS && claimed
+			    && kr_after == KERN_SUCCESS);
 	} else {
 		printf("dma_reclaim: [4] and [5] cannot run: no HAL\n");
 		n_fail += 2;
