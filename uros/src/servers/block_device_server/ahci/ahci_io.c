@@ -353,6 +353,35 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 	if (nsectors == 0 || n_pa == 0)
 		return -1;
 
+	/*
+	 * 🔑 A LIST THIS SLOT CANNOT DESCRIBE IS AN ERROR, NOT A SHORTER
+	 * TRANSFER.  This used to clamp n_prdt to PRDT_PER_SLOT in silence.
+	 * The clamp could not fire, and the reason it could not was an
+	 * accident: PRDT_PER_SLOT is 32 here and the caller's own array is
+	 * 32 entries in another file, with nothing tying the two together.
+	 * Refusing instead lets the two ceilings differ without anybody being
+	 * lied to -- which is the point, because one of them will move.
+	 */
+	if (n_pa > PRDT_PER_SLOT) {
+		printf("ahci: phys refused — %u pages do not fit a command "
+		       "table of %u entries\n", n_pa, (unsigned)PRDT_PER_SLOT);
+		return -1;
+	}
+
+	/*
+	 * And the descriptors have to account for the bytes the command FIS
+	 * is about to ask the drive for.  The sector count below is written
+	 * from `nsectors' whatever the table says, so a page list that falls
+	 * short tells the drive to move more than the table describes.
+	 */
+	if ((uint64_t)n_pa * 4096u < (uint64_t)total_bytes) {
+		printf("ahci: phys refused — %u pages hold %llu bytes and %u "
+		       "were asked for\n", n_pa,
+		       (unsigned long long)((uint64_t)n_pa * 4096u),
+		       total_bytes);
+		return -1;
+	}
+
 	for (i = 0; i < 1000000; i++)
 		if (!(port_read(st, port, PORT_TFD) &
 		      (PORT_TFD_STS_BSY | PORT_TFD_STS_DRQ)))
@@ -360,9 +389,15 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 
 	port_write(st, port, PORT_IS, ~0u);
 
-	n_prdt = n_pa;
-	if (n_prdt > PRDT_PER_SLOT)
-		n_prdt = PRDT_PER_SLOT;
+	/*
+	 * ⚠️ The table is as long as the BYTES need, not as long as the list.
+	 * Filling one entry per page given would leave a trailing entry with a
+	 * zero chunk, and PRDT_DBC encodes count-1, so a zero becomes 0x3FFFFF
+	 * -- a four-megabyte descriptor pointing at a page the caller offered
+	 * for nothing.  A list longer than the request is not an error; using
+	 * all of it would be.
+	 */
+	n_prdt = (total_bytes + 4095u) / 4096u;
 
 	hdr[0].opts  = CMD_HDR_CFL(5);
 	if (write)
