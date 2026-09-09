@@ -222,22 +222,49 @@ test_cond_broadcast(void)
  * Test 4: thread-specific data (TSD)
  * ---------------------------------------------------------------- */
 
+#define TSD_THREADS	2
+#define TSD_BASE	100
+
 static pthread_key_t tsd_key;
-static int tsd_destructor_called;
+
+/*
+ * ── One slot per thread, and why a counter could not work (#536) ────────
+ *
+ * 🔴 THIS WAS A SINGLE `int' INCREMENTED BY BOTH DESTRUCTORS.  They run as
+ * their threads exit, so `tsd_destructor_called++' is a read-modify-write
+ * from two processors: both destructors running and one increment being lost
+ * produces `called 1 times (expected 2)', which is exactly the message that
+ * was seen once in 544 boots at -smp 4.
+ *
+ * 🔑 So the arm could not tell apart the two things it exists to separate --
+ * a destructor libpthreads failed to call, and an increment this test lost.
+ * Its verdict was the same either way, and the rarity argued for neither.
+ *
+ * ⚠️ Separate slots and not an atomic counter.  A counter answers "how many
+ * ran", and what the test means is that EACH thread's destructor ran: with
+ * one number, one thread's destructor running twice while the other's never
+ * does is indistinguishable from success.  The destructor is handed the
+ * value that was stored, so it can say which thread it is being called for
+ * without asking anybody.
+ */
+static volatile int tsd_destructor_seen[TSD_THREADS];
 
 static void
 tsd_destructor(void *val)
 {
-	tsd_destructor_called++;
+	int id = (int)(long)val - TSD_BASE;
+
+	if (id >= 0 && id < TSD_THREADS)
+		tsd_destructor_seen[id] = 1;
 }
 
 static void *
 thread_tsd(void *arg)
 {
 	int id = (int)(long)arg;
-	pthread_setspecific(tsd_key, (void *)(long)(id + 100));
+	pthread_setspecific(tsd_key, (void *)(long)(id + TSD_BASE));
 	int val = (int)(long)pthread_getspecific(tsd_key);
-	if (val != id + 100)
+	if (val != id + TSD_BASE)
 		pass = 0;
 	return NULL;
 }
@@ -247,21 +274,29 @@ test_tsd(void)
 {
 	pthread_t t1, t2;
 
-	tsd_destructor_called = 0;
+	tsd_destructor_seen[0] = 0;
+	tsd_destructor_seen[1] = 0;
 	pthread_key_create(&tsd_key, tsd_destructor);
 
-	pthread_create(&t1, NULL, thread_tsd, (void *)1);
-	pthread_create(&t2, NULL, thread_tsd, (void *)2);
+	pthread_create(&t1, NULL, thread_tsd, (void *)0);
+	pthread_create(&t2, NULL, thread_tsd, (void *)1);
 	pthread_join(t1, NULL);
 	pthread_join(t2, NULL);
 
-	/* Each thread should have called the destructor */
-	if (tsd_destructor_called >= 2)
+	/*
+	 * Both joins have returned, so both threads have finished exiting and
+	 * the reads below need no synchronisation of their own.
+	 */
+	if (tsd_destructor_seen[0] && tsd_destructor_seen[1])
 		test_ok("TSD key/get/set/destructor");
 	else {
 		char buf[80];
-		snprintf(buf, sizeof(buf), "destructor called %d times (expected 2)",
-			 tsd_destructor_called);
+		snprintf(buf, sizeof(buf),
+			 "destructor not called for thread %s%s%s",
+			 tsd_destructor_seen[0] ? "" : "0",
+			 (!tsd_destructor_seen[0] && !tsd_destructor_seen[1])
+				? " and " : "",
+			 tsd_destructor_seen[1] ? "" : "1");
 		test_fail("TSD destructor", buf);
 	}
 
