@@ -1156,6 +1156,16 @@ ds_master_device_dma_free(
 	return KERN_SUCCESS;
 }
 
+/*
+ * The one function that maps physical pages into a task, and records having
+ * done it (#531).  Defined below, next to the other user-mapping entry
+ * points; declared here because the scatter-gather allocator is the first
+ * caller in the file.
+ */
+static kern_return_t map_pages_into_task(task_t, vm_offset_t,
+					 const vm_offset_t *, unsigned int,
+					 vm_offset_t *);
+
 /* ---- Scatter-gather DMA allocation ---- */
 
 /*
@@ -1196,7 +1206,6 @@ ds_master_device_dma_alloc_sg(
 	task_t		task;
 	vm_offset_t	kva;
 	vm_size_t	size;
-	vm_map_t	map;
 	vm_offset_t	uva;
 	unsigned int	i;
 	vm_offset_t	list;
@@ -1261,59 +1270,17 @@ ds_master_device_dma_alloc_sg(
 	}
 
 	/*
-	 * Map pages contiguously into the user task.
-	 * Reserve a VA range, then wire in each physical page.
+	 * Collect the physical frames.  Only collect: the mapping is made
+	 * below, by the one function that makes mappings (#531).
+	 *
+	 * #520: whole, where this used to write `(unsigned int)pa'.
+	 * pmap_extract answers a vm_offset_t and the list now holds one, so a
+	 * page above four gigabytes is named rather than silently folded into
+	 * the low half of memory.
 	 */
-	map = task->map;
-	uva = 0;
-	kr = vm_map_enter(map, &uva, size, 0, TRUE,
-			  VM_OBJECT_NULL, (vm_offset_t)0, FALSE,
-			  VM_PROT_READ | VM_PROT_WRITE,
-			  VM_PROT_READ | VM_PROT_WRITE,
-			  VM_INHERIT_NONE);
-	if (kr != KERN_SUCCESS) {
-		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
-				     FALSE);
-		kmem_free(ipc_kernel_map, list, list_size);
-		kmem_free(kernel_map, kva, size);
-		task_deallocate(task);
-		return kr;
-	}
-
-	for (i = 0; i < n_pages; i++) {
-		vm_offset_t pa = pmap_extract(pmap_kernel(),
-					      kva + i * PAGE_SIZE);
-		/*
-		 * #407: the answer was being dropped three lines below this
-		 * routine's own error handling.  A mapping that does not
-		 * happen and is not reported hands the task an address it
-		 * will fault on, with KERN_SUCCESS to say all is well.
-		 */
-		if (pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
-			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
-			/*
-			 * vm_map_enter above already took the range, and the
-			 * pages entered before this one are in it.  Releasing
-			 * the range drops both; leaving it would trade a
-			 * silent bad mapping for a silent leak.
-			 */
-			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
-			(void) vm_map_unwire(ipc_kernel_map, list,
-					     list + list_size, FALSE);
-			kmem_free(ipc_kernel_map, list, list_size);
-			kmem_free(kernel_map, kva, size);
-			task_deallocate(task);
-			return KERN_RESOURCE_SHORTAGE;
-		}
-
-		/*
-		 * #520: whole, where this used to write `(unsigned int)pa'.
-		 * pmap_extract answers a vm_offset_t and the list now holds
-		 * one, so a page above four gigabytes is named rather than
-		 * silently folded into the low half of memory.
-		 */
-		((vm_address_t *)list)[i] = pa;
-	}
+	for (i = 0; i < n_pages; i++)
+		((vm_address_t *)list)[i] =
+			pmap_extract(pmap_kernel(), kva + i * PAGE_SIZE);
 
 	/*
 	 * 🔴 ONE GRANT OVER THE WHOLE LIST, AFTER IT IS COLLECTED, and not one
@@ -1346,9 +1313,19 @@ ds_master_device_dma_alloc_sg(
 	 * A recording taken afterwards would remember one domain's IOVAs as if
 	 * they were physical memory.
 	 */
+	/*
+	 * 🔑 THE REGION IS CREATED UNMAPPED, AND map_pages_into_task() BELOW
+	 * RECORDS THE MAPPING (#531).
+	 *
+	 * It used to be created already carrying `task' and `uva', which made
+	 * this the second place in the file that wrote that pair -- and the
+	 * other one, device_dma_map_user(), did not write it at all.  A region
+	 * allocated by one call and mapped by another therefore read back as
+	 * mapped for nobody, and its pages were freed with a live user mapping
+	 * on them.  One writer now, and it is the function that maps.
+	 */
 	if (!dma_region_add(kva, size, (const vm_offset_t *)list, n_pages,
-			    task, uva, &region_id)) {
-		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+			    TASK_NULL, 0, &region_id)) {
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
 		kmem_free(ipc_kernel_map, list, list_size);
@@ -1357,15 +1334,36 @@ ds_master_device_dma_alloc_sg(
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
+	/*
+	 * ⚠️ After the region exists, so the helper has something to record
+	 * into, and before the grant below rewrites the list into IOVAs -- the
+	 * mapping wants the physical frames, like the record does.
+	 */
+	kr = map_pages_into_task(task, 0, (const vm_offset_t *)list, n_pages,
+				 &uva);
+	if (kr != KERN_SUCCESS) {
+		dma_region_drop(kva);
+		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
+				     FALSE);
+		kmem_free(ipc_kernel_map, list, list_size);
+		kmem_free(kernel_map, kva, size);
+		task_deallocate(task);
+		return kr;
+	}
+
 	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
 		unsigned long iova = 0;
 
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)list,
 					       n_pages, TRUE, TRUE, &iova)) {
+			/*
+			 * dma_region_drop() takes the user mapping down
+			 * itself now that the region records it (#531);
+			 * removing the range here as well would be a second
+			 * removal of a range that may since be somebody's.
+			 */
 			dma_region_drop(kva);
-			(void) vm_map_remove(map, uva, uva + size,
-					     VM_MAP_NO_FLAGS);
 			(void) vm_map_unwire(ipc_kernel_map, list,
 					     list + list_size, FALSE);
 			kmem_free(ipc_kernel_map, list, list_size);
@@ -1385,7 +1383,9 @@ ds_master_device_dma_alloc_sg(
 	kr = vm_map_unwire(ipc_kernel_map, list, list + list_size, FALSE);
 	if (kr != KERN_SUCCESS) {
 		kmem_free(ipc_kernel_map, list, list_size);
-		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+		/* The region owns the user mapping now, so it takes it down
+		 * along with itself (#531). */
+		dma_region_drop(kva);
 		kmem_free(kernel_map, kva, size);
 		return kr;
 	}
@@ -1399,7 +1399,9 @@ ds_master_device_dma_alloc_sg(
 	kr = vm_map_copyin(ipc_kernel_map, list, list_bytes, TRUE, &list_copy);
 	if (kr != KERN_SUCCESS) {
 		kmem_free(ipc_kernel_map, list, list_size);
-		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+		/* The region owns the user mapping now, so it takes it down
+		 * along with itself (#531). */
+		dma_region_drop(kva);
 		kmem_free(kernel_map, kva, size);
 		return kr;
 	}
