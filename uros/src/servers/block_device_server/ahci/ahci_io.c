@@ -410,15 +410,48 @@ ahci_submit_phys(struct ahci_state *st, int port_idx,
 
 	for (i = 0; i < 5000000; i++) {
 		uint32_t is = port_read(st, port, PORT_IS);
-		if (is & PORT_IS_TFES) {
-			printf("ahci: phys task file error  IS=0x%08X  "
-			       "TFD=0x%08X\n",
-			       is, port_read(st, port, PORT_TFD));
-			port_write(st, port, PORT_IS, PORT_IS_TFES);
+
+		/*
+		 * 🔴 CI CLEARING IS NOT THE SAME AS THE TRANSFER HAVING
+		 * HAPPENED.  This loop used to watch one error bit and then
+		 * call CI==0 success, so a command the HBA abandoned partway
+		 * -- most of all one whose PRD table was shorter than the
+		 * sector count it was issued with -- returned KERN_SUCCESS
+		 * with the caller's later pages untouched.
+		 */
+		if (is & PORT_IS_FATAL) {
+			printf("ahci: phys command failed  IS=0x%08X%s  "
+			       "TFD=0x%08X SERR=0x%08X  prdtl=%u prdbc=%u "
+			       "wanted=%u\n",
+			       is, (is & PORT_IS_OFS) ? " (OVERFLOW)" : "",
+			       port_read(st, port, PORT_TFD),
+			       port_read(st, port, PORT_SERR),
+			       (unsigned)hdr[0].prdtl,
+			       (unsigned)hdr[0].prdbc, total_bytes);
+			port_write(st, port, PORT_IS, is & PORT_IS_FATAL);
 			return -1;
 		}
-		if (!(port_read(st, port, PORT_CI) & 1))
+		if (!(port_read(st, port, PORT_CI) & 1)) {
+			/*
+			 * The HBA writes back how many bytes it actually
+			 * moved.  Comparing it with what was asked for costs
+			 * one read and does not depend on the controller
+			 * raising an error bit at all -- which matters,
+			 * because whether a given HBA (or emulation of one)
+			 * reports overflow is a property of that HBA.
+			 */
+			unsigned int moved = (unsigned int)hdr[0].prdbc;
+
+			if (moved != total_bytes) {
+				printf("ahci: phys short transfer  moved=%u "
+				       "wanted=%u  prdtl=%u pages=%u "
+				       "IS=0x%08X\n",
+				       moved, total_bytes,
+				       (unsigned)hdr[0].prdtl, n_pa, is);
+				return -1;
+			}
 			return 0;
+		}
 	}
 
 	printf("ahci: phys timed out  CI=0x%08X\n",
