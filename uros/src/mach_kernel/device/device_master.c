@@ -820,6 +820,17 @@ static uint64_t dma_region_next_id = 1;
 static uint64_t dma_regions_reclaimed;
 
 /*
+ * How many regions an explicit device_dma_free() has given back (#530).
+ *
+ * 🔑 The same argument as the reclaim counter above, for the arm that is the
+ * control of it: "an explicit free returns the slots" cannot be checked by
+ * freeing n and counting how many can be taken afterwards, because the table
+ * is shared and somebody else's allocation is indistinguishable from a slot
+ * that never came back.  This side knows how many it released.
+ */
+static uint64_t dma_regions_freed;
+
+/*
  * Remember one allocation.  Answers zero when there is no room, and the caller
  * must then fail the allocation: a region that is not recorded is one no
  * device can ever be given, and one whose pages nothing will revoke.
@@ -1151,6 +1162,7 @@ ds_master_device_dma_free(
 	 * stack while a device can still write it.
 	 */
 	dma_region_drop((vm_offset_t)vaddr);
+	dma_regions_freed++;
 
 	kmem_free(kernel_map, (vm_offset_t)vaddr, size);
 	return KERN_SUCCESS;
@@ -1923,7 +1935,8 @@ ds_master_device_dma_table(
 	ipc_port_t		master_port,
 	natural_t		*total,
 	natural_t		*in_use,
-	natural_t		*reclaimed)
+	natural_t		*reclaimed,
+	natural_t		*freed)
 {
 	kern_return_t	kr;
 	unsigned int	i, used = 0;
@@ -1939,6 +1952,7 @@ ds_master_device_dma_table(
 	*total = (natural_t) DEVICE_MAX_DMA_REGIONS;
 	*in_use = (natural_t) used;
 	*reclaimed = (natural_t) dma_regions_reclaimed;
+	*freed = (natural_t) dma_regions_freed;
 	return KERN_SUCCESS;
 }
 

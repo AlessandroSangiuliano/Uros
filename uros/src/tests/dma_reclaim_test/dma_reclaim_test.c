@@ -582,7 +582,7 @@ main(int argc, char **argv)
 	uint64_t	id[MAX_TRIES];
 	unsigned	n, n2, waited;
 	unsigned	held = 0, total = 0, in_use = 0, free_then = 0;
-	unsigned	reclaimed = 0;
+	unsigned	reclaimed = 0, freed = 0;
 	const char	*role;
 	kern_return_t	kr;
 	mach_port_t	host_port, wired, paged, security;
@@ -756,7 +756,7 @@ main(int argc, char **argv)
 	 * is how many were free to get.  With `in_use' the shortfall stops
 	 * being a mystery and becomes arithmetic.
 	 */
-	if (device_dma_table(device_port, &total, &in_use, &reclaimed)
+	if (device_dma_table(device_port, &total, &in_use, &reclaimed, &freed)
 	    != KERN_SUCCESS) {
 		printf("dma_reclaim:     the kernel would not say how big the "
 		       "table is, so the count below is a share and not a "
@@ -764,6 +764,7 @@ main(int argc, char **argv)
 		total = 0;
 		in_use = 0;
 		reclaimed = 0;
+		freed = 0;
 	}
 
 	n = fill_table(kva, id, MAX_TRIES);
@@ -841,10 +842,37 @@ main(int argc, char **argv)
 	 * its free path are working and the defect is in the death hook alone
 	 * -- which is a different finding from "DMA allocation is broken", and
 	 * the two are otherwise indistinguishable from one refused call.
+	 *
+	 * 🔴 AND IT IS THE KERNEL'S COUNT, for the reason arm [1] is (#530).
+	 * This used to free n regions, refill, and require n back -- on a
+	 * SHARED table, where somebody else's allocation and a slot that never
+	 * came back are the same observation from here.  It failed in two
+	 * boots out of twenty at -smp 4 for the table being shared, which is
+	 * not a defect, and the failure was being read as the control doing
+	 * its job.
+	 *
+	 * ⚠️ The refill still happens, because the arms after this one need a
+	 * full table; what changed is that its count is reported and not
+	 * armed.
 	 */
-	free_table(kva, n);
-	n2 = fill_table(kva, id, MAX_TRIES);
-	arm(3, "control: an explicit free returns the same slots", n2 == n);
+	{
+		unsigned before = 0, after = 0, ignore = 0;
+
+		(void) device_dma_table(device_port, &ignore, &ignore,
+					&ignore, &before);
+		free_table(kva, n);
+		(void) device_dma_table(device_port, &ignore, &ignore,
+					&ignore, &after);
+
+		n2 = fill_table(kva, id, MAX_TRIES);
+
+		printf("dma_reclaim:     freed %u, the kernel says it released "
+		       "%u, and %u of them could be taken again\n",
+		       n, after - before, n2);
+
+		arm(3, "control: an explicit free gives every slot back",
+		    after - before == n);
+	}
 	free_table(kva, n2);
 
 	/*
