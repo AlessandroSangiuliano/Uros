@@ -598,9 +598,17 @@ out:
  * second half, and the arm would be reporting a broken path as a working
  * check.
  */
+/*
+ * The last 4096-byte block of the AHCI test partitions, which are 30720
+ * sectors.  It is past everything mke2fs and the loader put near the front,
+ * and it is read and put back afterwards, so the number only has to be
+ * inside the partition.
+ */
+#define SCRATCH_BLOCK	30712u
+
 static int
 the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
-                             const char *name)
+                             const char *name, int scratch)
 {
     struct uros_cap        tok, buf_cap;
     security_token_t       null_sec = { { 0, 0 } };
@@ -695,6 +703,82 @@ the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
            "page list has to cover the byte count\n",
            name, (unsigned)pa_cnt, (int)kr);
     ok = 1;
+
+    /*
+     * ── The write half, on a disk it is allowed to touch ─────────────────
+     *
+     * The refusal above is the same code on both paths, but the ADDRESSES
+     * are not: the read half maps every page through the kernel before
+     * handing it to the controller and the write half did not, so only a
+     * transfer that actually happens can tell whether the write half is
+     * speaking the same language.  Read and write must agree about one
+     * block, which needs no oracle outside the pair.
+     *
+     * ⚠️ The block is read first and put back afterwards, so the arm leaves
+     * the disk as it found it even though the image is rebuilt every run.
+     * And it runs only where `scratch' says it may: the boot disk is the
+     * partition every server is still being loaded from.
+     */
+    if (!scratch) {
+        printf("cap_test: [14] %s is the boot disk — the write transfer is "
+               "not attempted there, so the write path is covered here only "
+               "by its refusal\n", name);
+        goto out;
+    }
+
+    {
+        static unsigned char saved[4096];
+        unsigned int         i;
+        int                  same = 1;
+
+        memset((void *)uva, 0, 4096);
+        kr = device_read_phys(handle, D_READ, SCRATCH_BLOCK, 4096,
+                              pa_list, pa_cnt, &got);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [14] WRONG — %s could not read the scratch "
+                   "block (kr=%d)\n", name, (int)kr);
+            ok = 0;
+            goto out;
+        }
+        memcpy(saved, (const void *)uva, 4096);
+
+        for (i = 0; i < 4096; i++)
+            ((unsigned char *)uva)[i] = (unsigned char)(i * 7u + 0x5Au);
+
+        kr = device_write_phys(handle, D_WRITE, SCRATCH_BLOCK, 4096,
+                               pa_list, pa_cnt, &got);
+        if (kr != KERN_SUCCESS || got != 4096) {
+            printf("cap_test: [14] WRONG — %s refused a covered physical "
+                   "write (kr=%d, %u bytes)\n", name, (int)kr,
+                   (unsigned)got);
+            ok = 0;
+            goto out;
+        }
+
+        memset((void *)uva, 0, 4096);
+        kr = device_read_phys(handle, D_READ, SCRATCH_BLOCK, 4096,
+                              pa_list, pa_cnt, &got);
+        for (i = 0; i < 4096 && same; i++)
+            if (((unsigned char *)uva)[i]
+                != (unsigned char)(i * 7u + 0x5Au))
+                same = 0;
+
+        if (kr != KERN_SUCCESS || !same) {
+            printf("cap_test: [14] WRONG — %s read back something else "
+                   "after a physical write (kr=%d, first difference at "
+                   "%u)\n", name, (int)kr, i ? i - 1 : 0);
+            ok = 0;
+        } else {
+            printf("cap_test: [14] %s wrote a block through physical "
+                   "addresses and read the same bytes back — the write "
+                   "half's addresses reach the disk\n", name);
+        }
+
+        /* Put it back, whatever happened above. */
+        memcpy((void *)uva, saved, 4096);
+        (void)device_write_phys(handle, D_WRITE, SCRATCH_BLOCK, 4096,
+                                pa_list, pa_cnt, &got);
+    }
 
 out:
     (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
@@ -1371,7 +1455,12 @@ main(int argc, char **argv)
                    "run on that controller\n", candidates[i]);
             continue;
         }
-        if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i]))
+        /*
+         * Index 0 is the boot disk by construction of this list, and it is
+         * the one partition the write half must not touch.
+         */
+        if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i],
+                                          i != 0))
             pass = 0;
         (void)mach_port_deallocate(mach_task_self(), p);
     }
