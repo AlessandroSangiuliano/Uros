@@ -204,6 +204,31 @@ policy_allows_v1(mach_port_t sender,
  * MIG synthesizes the out/in array lengths as mach_msg_type_number_t.
  * ============================================================ */
 
+/*
+ * ── The census that has to come before the permissive path can go ──────
+ *
+ * 🔑 "No manifest means no capability" is where this ends, and it is the
+ * right end.  What makes it expensive is not the rule but the DISCOVERY:
+ * ten manifests exist in a tree with dozens of tasks, so switching it off
+ * blind turns every task that was relying on the legacy path into a runtime
+ * red, found one boot at a time.
+ *
+ * ⚠️ So the legacy path says who is on it.  One boot produces the list of
+ * manifests that have to be written, and after that the permissive path can
+ * be removed against an enumeration rather than against hope.  A grant is
+ * not a failure and this is not a warning -- it is a census, and it stops
+ * being printed when there is nothing left to count.
+ */
+static void
+census_permissive(unsigned int resource_type, uint64_t resource_id,
+                  uint64_t ops)
+{
+    printf("cap: census — port=0x%x was served with NO MANIFEST: rtype=%u "
+           "id=0x%llx ops=0x%llx\n",
+           (unsigned)g_request_local_port, resource_type,
+           (unsigned long long)resource_id, (unsigned long long)ops);
+}
+
 kern_return_t
 cap_acquire(mach_port_t             server,
             unsigned int            resource_type,
@@ -230,6 +255,13 @@ cap_acquire(mach_port_t             server,
      * branch is dead — no client has been migrated yet, every
      * request still lands on the well-known port.
      */
+    if (g_request_local_port == MACH_PORT_NULL ||
+        g_request_local_port == cap_port)
+        printf("cap: census — WELL-KNOWN port request, no manifest is even "
+               "looked up: rtype=%u id=0x%llx ops=0x%llx\n",
+               resource_type, (unsigned long long)resource_id,
+               (unsigned long long)ops);
+
     if (g_request_local_port != MACH_PORT_NULL &&
         g_request_local_port != cap_port) {
         const cap_manifest_header_t *m =
@@ -252,13 +284,15 @@ cap_acquire(mach_port_t             server,
             mach_port_t owner = cap_manifest_table_task(g_request_local_port);
             kern_return_t okr;
 
-            if (m && !cap_manifest_allows(m, resource_type,
-                                          CAP_MANIFEST_ANY_ID, ops)) {
+            if (!cap_manifest_allows(m, resource_type,
+                                     CAP_MANIFEST_ANY_ID, ops)) {
                 printf("cap: DENY (manifest) port=0x%x dma buffer "
                        "ops=0x%llx\n", (unsigned)g_request_local_port,
                        (unsigned long long)ops);
                 return CAP_ERR_NOT_IN_MANIFEST;
             }
+            if (!m)
+                census_permissive(resource_type, resource_id, ops);
 
             okr = urmach_dma_region_owner(resource_id, owner);
             if (okr != KERN_SUCCESS) {
@@ -267,14 +301,16 @@ cap_acquire(mach_port_t             server,
                        (unsigned long long)resource_id, (int)okr);
                 return CAP_ERR_NOT_IN_MANIFEST;
             }
-        } else if (m && !cap_manifest_allows(m, resource_type, resource_id,
-                                             ops)) {
-            printf("cap: DENY (manifest) port=0x%x rtype=%u id=0x%llx "
-                   "ops=0x%llx\n",
+        } else if (!cap_manifest_allows(m, resource_type, resource_id, ops)) {
+            printf("cap: DENY (%s) port=0x%x rtype=%u id=0x%llx "
+                   "ops=0x%llx\n", m ? "manifest" : "no manifest, and "
+                   "hardware needs one",
                    (unsigned)g_request_local_port, resource_type,
                    (unsigned long long)resource_id,
                    (unsigned long long)ops);
             return CAP_ERR_NOT_IN_MANIFEST;
+        } else if (!m) {
+            census_permissive(resource_type, resource_id, ops);
         }
     }
 

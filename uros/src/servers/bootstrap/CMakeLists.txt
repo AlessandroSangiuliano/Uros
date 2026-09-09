@@ -402,6 +402,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/cap_test.cmf")
   set(_DMARECLAIM_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/dma_reclaim_test.cmf")
+  # #511: the task that drives the disks, which had no policy file and
+  # therefore never reached the manifest check at all.
+  set(_BDS_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/block_device_server.cmf")
 
   add_custom_command(
     OUTPUT ${_BUNDLE}
@@ -409,6 +413,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             bootstrap.conf:${_CONF}
             cap_test.cmf:${_CAPTEST_CMF}
             dma_reclaim_test.cmf:${_DMARECLAIM_CMF}
+            block_device_server.cmf:${_BDS_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             irq_claim_test:${_SBIN}/irq_claim_test
@@ -463,7 +468,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # its output changed, so the bundle went on shipping a stale manifest while
     # the export tree held the new one.  The symptom was a policy denial for a
     # line the source file plainly contained.
-    DEPENDS mkbundle ${_CAPTEST_CMF} ${_DMARECLAIM_CMF}
+    DEPENDS mkbundle ${_CAPTEST_CMF} ${_DMARECLAIM_CMF} ${_BDS_CMF}
             name_server_bin netname_test_bin irq_claim_test_bin
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module

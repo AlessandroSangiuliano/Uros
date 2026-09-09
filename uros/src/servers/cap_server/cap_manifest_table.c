@@ -170,8 +170,38 @@ cap_manifest_allows(const cap_manifest_header_t *m,
     const cap_manifest_entry_t *req;
     uint32_t i;
 
+    /*
+     * ── What "this task shipped no manifest" means (#511) ──────────────
+     *
+     * 🔴 IT MEANT "ALLOW EVERYTHING", and it meant it at the CALL SITES:
+     * both of them read `if (m && !cap_manifest_allows(...))', so with no
+     * manifest this predicate was never reached at all.  Ten manifests
+     * exist in a tree with dozens of tasks, and none of them belongs to a
+     * server that drives hardware -- so the one policy file this system has
+     * was silent about exactly the tasks it most needed to speak for, and
+     * any check downstream of it was a guard that could not fail for them.
+     *
+     * 🔑 The decision lives HERE now, in the one function that answers the
+     * question, rather than in a `m &&' repeated at every place that asks
+     * it.  While it was spelt at the call sites, a third call site added
+     * later would have got the old answer by default and nobody would have
+     * had to decide anything.
+     *
+     * ⚠️ Hardware needs an explicit grant; nothing else changes yet.  A
+     * task may still open files and block devices without shipping a
+     * policy -- the legacy path, and how most of the tree works.  The end
+     * state is that no manifest means no capability at all, and getting
+     * there is a matter of knowing WHICH tasks are relying on the legacy
+     * path: cap_server reports each one it serves, so a boot produces the
+     * list instead of the change producing runtime failures.
+     *
+     * ⚠️ RESOURCE_DMA_BUFFER is deliberately not hardware for this purpose.
+     * A buffer is not a device: which buffer a task may hand to a device is
+     * the kernel's answer, because it made the allocation and knows whose
+     * it is, and check_claim() polices the device side of the same call.
+     */
     if (!m)
-        return 1;       /* permissive: no manifest -> legacy path */
+        return type != RESOURCE_PCI_DEVICE;
 
     req = (const cap_manifest_entry_t *)((const char *)m +
                                          m->required_offset);
