@@ -820,6 +820,17 @@ static uint64_t dma_region_next_id = 1;
 static uint64_t dma_regions_reclaimed;
 
 /*
+ * How many regions an explicit device_dma_free() has given back (#530).
+ *
+ * 🔑 The same argument as the reclaim counter above, for the arm that is the
+ * control of it: "an explicit free returns the slots" cannot be checked by
+ * freeing n and counting how many can be taken afterwards, because the table
+ * is shared and somebody else's allocation is indistinguishable from a slot
+ * that never came back.  This side knows how many it released.
+ */
+static uint64_t dma_regions_freed;
+
+/*
  * Remember one allocation.  Answers zero when there is no room, and the caller
  * must then fail the allocation: a region that is not recorded is one no
  * device can ever be given, and one whose pages nothing will revoke.
@@ -1151,10 +1162,21 @@ ds_master_device_dma_free(
 	 * stack while a device can still write it.
 	 */
 	dma_region_drop((vm_offset_t)vaddr);
+	dma_regions_freed++;
 
 	kmem_free(kernel_map, (vm_offset_t)vaddr, size);
 	return KERN_SUCCESS;
 }
+
+/*
+ * The one function that maps physical pages into a task, and records having
+ * done it (#531).  Defined below, next to the other user-mapping entry
+ * points; declared here because the scatter-gather allocator is the first
+ * caller in the file.
+ */
+static kern_return_t map_pages_into_task(task_t, vm_offset_t,
+					 const vm_offset_t *, unsigned int,
+					 vm_offset_t *);
 
 /* ---- Scatter-gather DMA allocation ---- */
 
@@ -1196,7 +1218,6 @@ ds_master_device_dma_alloc_sg(
 	task_t		task;
 	vm_offset_t	kva;
 	vm_size_t	size;
-	vm_map_t	map;
 	vm_offset_t	uva;
 	unsigned int	i;
 	vm_offset_t	list;
@@ -1261,59 +1282,17 @@ ds_master_device_dma_alloc_sg(
 	}
 
 	/*
-	 * Map pages contiguously into the user task.
-	 * Reserve a VA range, then wire in each physical page.
+	 * Collect the physical frames.  Only collect: the mapping is made
+	 * below, by the one function that makes mappings (#531).
+	 *
+	 * #520: whole, where this used to write `(unsigned int)pa'.
+	 * pmap_extract answers a vm_offset_t and the list now holds one, so a
+	 * page above four gigabytes is named rather than silently folded into
+	 * the low half of memory.
 	 */
-	map = task->map;
-	uva = 0;
-	kr = vm_map_enter(map, &uva, size, 0, TRUE,
-			  VM_OBJECT_NULL, (vm_offset_t)0, FALSE,
-			  VM_PROT_READ | VM_PROT_WRITE,
-			  VM_PROT_READ | VM_PROT_WRITE,
-			  VM_INHERIT_NONE);
-	if (kr != KERN_SUCCESS) {
-		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
-				     FALSE);
-		kmem_free(ipc_kernel_map, list, list_size);
-		kmem_free(kernel_map, kva, size);
-		task_deallocate(task);
-		return kr;
-	}
-
-	for (i = 0; i < n_pages; i++) {
-		vm_offset_t pa = pmap_extract(pmap_kernel(),
-					      kva + i * PAGE_SIZE);
-		/*
-		 * #407: the answer was being dropped three lines below this
-		 * routine's own error handling.  A mapping that does not
-		 * happen and is not reported hands the task an address it
-		 * will fault on, with KERN_SUCCESS to say all is well.
-		 */
-		if (pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
-			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
-			/*
-			 * vm_map_enter above already took the range, and the
-			 * pages entered before this one are in it.  Releasing
-			 * the range drops both; leaving it would trade a
-			 * silent bad mapping for a silent leak.
-			 */
-			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
-			(void) vm_map_unwire(ipc_kernel_map, list,
-					     list + list_size, FALSE);
-			kmem_free(ipc_kernel_map, list, list_size);
-			kmem_free(kernel_map, kva, size);
-			task_deallocate(task);
-			return KERN_RESOURCE_SHORTAGE;
-		}
-
-		/*
-		 * #520: whole, where this used to write `(unsigned int)pa'.
-		 * pmap_extract answers a vm_offset_t and the list now holds
-		 * one, so a page above four gigabytes is named rather than
-		 * silently folded into the low half of memory.
-		 */
-		((vm_address_t *)list)[i] = pa;
-	}
+	for (i = 0; i < n_pages; i++)
+		((vm_address_t *)list)[i] =
+			pmap_extract(pmap_kernel(), kva + i * PAGE_SIZE);
 
 	/*
 	 * 🔴 ONE GRANT OVER THE WHOLE LIST, AFTER IT IS COLLECTED, and not one
@@ -1346,9 +1325,19 @@ ds_master_device_dma_alloc_sg(
 	 * A recording taken afterwards would remember one domain's IOVAs as if
 	 * they were physical memory.
 	 */
+	/*
+	 * 🔑 THE REGION IS CREATED UNMAPPED, AND map_pages_into_task() BELOW
+	 * RECORDS THE MAPPING (#531).
+	 *
+	 * It used to be created already carrying `task' and `uva', which made
+	 * this the second place in the file that wrote that pair -- and the
+	 * other one, device_dma_map_user(), did not write it at all.  A region
+	 * allocated by one call and mapped by another therefore read back as
+	 * mapped for nobody, and its pages were freed with a live user mapping
+	 * on them.  One writer now, and it is the function that maps.
+	 */
 	if (!dma_region_add(kva, size, (const vm_offset_t *)list, n_pages,
-			    task, uva, &region_id)) {
-		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+			    TASK_NULL, 0, &region_id)) {
 		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
 				     FALSE);
 		kmem_free(ipc_kernel_map, list, list_size);
@@ -1357,15 +1346,36 @@ ds_master_device_dma_alloc_sg(
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
+	/*
+	 * ⚠️ After the region exists, so the helper has something to record
+	 * into, and before the grant below rewrites the list into IOVAs -- the
+	 * mapping wants the physical frames, like the record does.
+	 */
+	kr = map_pages_into_task(task, 0, (const vm_offset_t *)list, n_pages,
+				 &uva);
+	if (kr != KERN_SUCCESS) {
+		dma_region_drop(kva);
+		(void) vm_map_unwire(ipc_kernel_map, list, list + list_size,
+				     FALSE);
+		kmem_free(ipc_kernel_map, list, list_size);
+		kmem_free(kernel_map, kva, size);
+		task_deallocate(task);
+		return kr;
+	}
+
 	if (bdf != DEVICE_DMA_NO_BDF && device_md_dma_isolates()) {
 		unsigned long iova = 0;
 
 		if (!device_md_dma_grant_pages(bdf,
 					       (const unsigned long *)list,
 					       n_pages, TRUE, TRUE, &iova)) {
+			/*
+			 * dma_region_drop() takes the user mapping down
+			 * itself now that the region records it (#531);
+			 * removing the range here as well would be a second
+			 * removal of a range that may since be somebody's.
+			 */
 			dma_region_drop(kva);
-			(void) vm_map_remove(map, uva, uva + size,
-					     VM_MAP_NO_FLAGS);
 			(void) vm_map_unwire(ipc_kernel_map, list,
 					     list + list_size, FALSE);
 			kmem_free(ipc_kernel_map, list, list_size);
@@ -1385,7 +1395,9 @@ ds_master_device_dma_alloc_sg(
 	kr = vm_map_unwire(ipc_kernel_map, list, list + list_size, FALSE);
 	if (kr != KERN_SUCCESS) {
 		kmem_free(ipc_kernel_map, list, list_size);
-		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+		/* The region owns the user mapping now, so it takes it down
+		 * along with itself (#531). */
+		dma_region_drop(kva);
 		kmem_free(kernel_map, kva, size);
 		return kr;
 	}
@@ -1399,7 +1411,9 @@ ds_master_device_dma_alloc_sg(
 	kr = vm_map_copyin(ipc_kernel_map, list, list_bytes, TRUE, &list_copy);
 	if (kr != KERN_SUCCESS) {
 		kmem_free(ipc_kernel_map, list, list_size);
-		(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+		/* The region owns the user mapping now, so it takes it down
+		 * along with itself (#531). */
+		dma_region_drop(kva);
 		kmem_free(kernel_map, kva, size);
 		return kr;
 	}
@@ -1415,18 +1429,81 @@ ds_master_device_dma_alloc_sg(
 /* ---- User-space DMA and MMIO mapping ---- */
 
 /*
- * Helper: reserve a VA range in a task's map and wire in physical pages.
+ * Put `npages' physical pages into a task's map, and REMEMBER having done it.
+ *
+ * ── Why the remembering lives here (#531) ─────────────────────────────
+ *
+ * 🔴 THERE WERE THREE WAYS INTO A TASK'S MAP AND TWO PLACES THAT RECORDED.
+ * device_dma_map_user and device_mmio_map came through this helper;
+ * device_dma_alloc_sg had its own copy of the loop because its pages are not
+ * contiguous.  The record was written by dma_region_add() at creation -- which
+ * only the scatter-gather path reaches, since it maps as it allocates -- so a
+ * region allocated by one call and mapped by another read back as `mapped for
+ * task 0x0' for ever, and dma_region_drop() skipped its vm_map_remove().  The
+ * pages went back to the VM with a live user mapping and vm_page_release
+ * refused to free one.
+ *
+ * 🔑 The field even said so, in words: `task' was documented as null for a
+ * contiguous buffer.  That was TRUE when it was written -- the field was invented for the sg path
+ * and the panic it fixed -- and became false the day device_dma_map_user
+ * started mapping contiguous regions into tasks.  Nobody came back to the
+ * comment, because nothing made them.
+ *
+ * So the recording is not something a mapping function must remember to do:
+ * it is what this function does, and it is the only function that maps.
+ * `pa_list' is NULL for a contiguous run from `phys_base', which is the only
+ * difference the two former callers had.
+ *
+ * ⚠️ AND A MAPPING THAT CANNOT BE RECORDED IS NOT MADE.  If the pages belong
+ * to a region that already has its one slot filled, this fails rather than
+ * mapping and staying quiet -- staying quiet is precisely what produced the
+ * panic.  Pages belonging to no region at all are a different thing and are
+ * allowed: that is device_mmio_map putting a BAR in a driver's map, and there
+ * is nothing to record.
  */
 static kern_return_t
-map_phys_into_task(task_t		task,
-		   vm_offset_t		phys_base,	/* page-aligned */
-		   vm_size_t		size,		/* page-aligned */
-		   vm_offset_t		*uva_out)
+map_pages_into_task(task_t		task,
+		    vm_offset_t		phys_base,	/* page-aligned */
+		    const vm_offset_t	*pa_list,	/* null: contiguous */
+		    unsigned int	npages,
+		    vm_offset_t		*uva_out)
 {
-	vm_map_t	map = task->map;
-	vm_offset_t	uva = 0;
-	kern_return_t	kr;
-	vm_offset_t	i;
+	vm_map_t		map = task->map;
+	vm_offset_t		uva = 0;
+	vm_size_t		size = (vm_size_t) npages * PAGE_SIZE;
+	struct dma_region	*region;
+	unsigned int		page;
+	kern_return_t		kr;
+	unsigned int		i;
+
+	if (npages == 0)
+		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * Asked BEFORE anything is mapped, so a region that cannot take the
+	 * record costs nothing to refuse.
+	 */
+	region = dma_region_of(pa_list ? pa_list[0] : phys_base, &page);
+	if (region != 0) {
+		if (region->task != TASK_NULL) {
+			printf("device: refusing to map region %llu again: it "
+			       "is already mapped for task 0x%lx at uva 0x%lx, "
+			       "and a region records one mapping\n",
+			       (unsigned long long)region->id,
+			       (unsigned long)region->task,
+			       (unsigned long)region->uva);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		if (size != region->size) {
+			printf("device: refusing to map %lu bytes of region "
+			       "%llu, which is %lu: the record covers the "
+			       "whole region or nothing\n",
+			       (unsigned long)size,
+			       (unsigned long long)region->id,
+			       (unsigned long)region->size);
+			return KERN_INVALID_ARGUMENT;
+		}
+	}
 
 	kr = vm_map_enter(map, &uva, size, 0, TRUE,
 			  VM_OBJECT_NULL, (vm_offset_t)0, FALSE,
@@ -1436,14 +1513,30 @@ map_phys_into_task(task_t		task,
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	/* #407: same as above -- report rather than hand back a hole, and give
-	 * back the range vm_map_enter just took rather than abandon it. */
-	for (i = 0; i < size; i += PAGE_SIZE)
-		if (pmap_enter(map->pmap, uva + i, phys_base + i,
+	/* #407: report rather than hand back a hole, and give back the range
+	 * vm_map_enter just took rather than abandon it. */
+	for (i = 0; i < npages; i++) {
+		vm_offset_t pa = pa_list ? pa_list[i]
+					 : phys_base + i * PAGE_SIZE;
+
+		if (pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
 			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
-			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+			(void) vm_map_remove(map, uva, uva + size,
+					     VM_MAP_NO_FLAGS);
 			return KERN_RESOURCE_SHORTAGE;
 		}
+	}
+
+	if (region != 0) {
+		/*
+		 * Its own reference: the caller's is the caller's to drop, and
+		 * dma_region_drop() gives this one back when it takes the
+		 * mapping down.
+		 */
+		task_reference(task);
+		region->task = task;
+		region->uva = uva;
+	}
 
 	*uva_out = uva;
 	return KERN_SUCCESS;
@@ -1486,7 +1579,62 @@ ds_master_device_dma_map_user(
 		return KERN_FAILURE;
 	}
 
-	kr = map_phys_into_task(task, pa, round_page(size), &uva);
+	/*
+	 * ── The mapping is RECORDED, and it never was (#531) ─────────────
+	 *
+	 * 🔴 THIS FUNCTION MAPPED AND REMEMBERED NOTHING.  `region' and `page'
+	 * were declared right above and never assigned -- the fossil of a
+	 * version that did.  So a region's `task'/`uva' pair was written in
+	 * exactly one place, dma_region_add(), which means only the
+	 * scatter-gather allocator ever recorded one: it maps as it allocates.
+	 * A region from device_dma_alloc() and mapped afterwards by this call
+	 * read back as `mapped for task 0x0' for ever.
+	 *
+	 * 🔥 And dma_region_drop() skips its vm_map_remove() when there is no
+	 * task recorded, so those pages went back to the VM with a live user
+	 * mapping still on them.  The bill is a panic in vm_page_release:
+	 *
+	 *	device: ... died holding DMA region 50 (12288 bytes,
+	 *	        mapped for task 0x0 at uva 0x0 pmap 0x0)
+	 *	  still mapped by pmap 0xffffc000013c5f20 at va 0x19000
+	 *	panic: vm_page_release: page 0x2544000 still mapped (#385)
+	 *
+	 * -- the block server's virtio queue, allocated by one call and mapped
+	 * by this one, which is the ordinary way a driver gets a ring it can
+	 * both read and hand to a device.
+	 *
+	 * ⚠️ A kva that belongs to no region is REFUSED rather than mapped.
+	 * Mapping one would be handing a task an arbitrary piece of kernel
+	 * memory with nothing recording it -- and nothing here can revoke what
+	 * it did not write down.
+	 */
+	/*
+	 * ⚠️ THIS ENTRY POINT'S OWN CONTRACT: it maps a DMA buffer, so a kva
+	 * belonging to no region is refused rather than mapped.  Mapping one
+	 * would hand a task an arbitrary piece of kernel memory, and nothing
+	 * here can revoke what it did not write down.  The helper below allows
+	 * it, because device_mmio_map goes through the same code and a BAR is
+	 * exactly that: physical memory with no region behind it.
+	 */
+	region = dma_region_of(pa, &page);
+	if (region == 0) {
+		printf("device: dma_map_user refuses kva 0x%lx (phys 0x%lx): "
+		       "no DMA region holds that page\n",
+		       (unsigned long)kva, (unsigned long)pa);
+		task_deallocate(task);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/*
+	 * ⚠️ ONE SLOT, SO ONE MAPPING, AND THE WHOLE REGION.  Both are checked
+	 * rather than assumed: a second mapping would overwrite the first and
+	 * orphan it, and a partial one would leave dma_region_drop() removing
+	 * a range wider than what was mapped -- which on a task's map is not a
+	 * no-op, it is somebody else's mapping.
+	 */
+	kr = map_pages_into_task(task, pa, 0,
+				 (unsigned int)(round_page(size) / PAGE_SIZE),
+				 &uva);
 	task_deallocate(task);
 	if (kr != KERN_SUCCESS)
 		return kr;
@@ -1530,7 +1678,8 @@ ds_master_device_mmio_map(
 	page_offset = (vm_offset_t)phys_addr - phys_base;
 	round_sz    = round_page(page_offset + size);
 
-	kr = map_phys_into_task(task, phys_base, round_sz, &uva);
+	kr = map_pages_into_task(task, phys_base, 0,
+				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
 	task_deallocate(task);
 	if (kr != KERN_SUCCESS)
 		return kr;
@@ -1786,7 +1935,8 @@ ds_master_device_dma_table(
 	ipc_port_t		master_port,
 	natural_t		*total,
 	natural_t		*in_use,
-	natural_t		*reclaimed)
+	natural_t		*reclaimed,
+	natural_t		*freed)
 {
 	kern_return_t	kr;
 	unsigned int	i, used = 0;
@@ -1802,6 +1952,73 @@ ds_master_device_dma_table(
 	*total = (natural_t) DEVICE_MAX_DMA_REGIONS;
 	*in_use = (natural_t) used;
 	*reclaimed = (natural_t) dma_regions_reclaimed;
+	*freed = (natural_t) dma_regions_freed;
+	return KERN_SUCCESS;
+}
+
+/*
+ * Does the task that receives on `driver' hold the claim on `bdf' (#533)?
+ *
+ * 🔴 THE QUESTION device_dma_owned() COULD NOT ANSWER, AND WAS BEING ASKED.
+ * That one compares against the CALLER, so for a caller that never claims
+ * anything -- the HAL -- it degrades into "does anybody hold it".  The HAL
+ * used that to decide whether to believe a driver reporting BOUND, and "a
+ * driver holds it" is not "THIS driver holds it": while dma_reclaim_test held
+ * the host bridge, the block server's report about that same device was
+ * accepted and the registry recorded the wrong driver.
+ *
+ * 🔑 A PORT IS AN IDENTITY THAT CANNOT BE FORGED.  Only the driver's own task
+ * receives on the port it registered with, so this resolves that port to its
+ * receiving space and compares it with the space of the task that made the
+ * claim.  The security token would not have done: every task in this system
+ * inherits DEFAULT_USER_SECURITY_TOKEN, so it tells nobody apart.
+ *
+ * ⚠️ `held' is 0 both for "no claim" and for "somebody else's claim", because
+ * neither is permission to record a driver and the caller asking this does not
+ * need them apart.  A caller that does should ask for that instead of reading
+ * it out of this one -- which is the mistake this call exists to end.
+ */
+kern_return_t
+ds_master_device_claim_holder(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	ipc_port_t		driver,
+	natural_t		*held)
+{
+	kern_return_t	kr;
+	ipc_space_t	space = IS_NULL;
+	unsigned	i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	*held = 0;
+
+	if (!IP_VALID(driver))
+		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * ⚠️ Under the port lock, and only while it is active: a port in
+	 * transit or in limbo has no receiver, and reading the union then
+	 * would answer with a destination port as if it were a space.
+	 */
+	ip_lock(driver);
+	if (ip_active(driver))
+		space = driver->ip_receiver;
+	ip_unlock(driver);
+
+	if (space == IS_NULL)
+		return KERN_SUCCESS;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf) {
+			*held = (device_claim[i].task != TASK_NULL
+				 && device_claim[i].task->itk_space == space)
+				? 1u : 0u;
+			return KERN_SUCCESS;
+		}
+
 	return KERN_SUCCESS;
 }
 

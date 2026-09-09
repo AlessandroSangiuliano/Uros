@@ -612,5 +612,35 @@ routine device_dma_table(
 		master_port	: mach_port_t;
 	out	total		: natural_t;
 	out	in_use		: natural_t;
-	out	reclaimed	: natural_t
+	out	reclaimed	: natural_t;
+	out	freed		: natural_t
+	);
+
+/*
+ * Does the task that receives on `driver' hold the claim on `bdf' (#533)?
+ *
+ * 🔴 device_dma_owned() CANNOT ANSWER THIS AND WAS BEING ASKED IT.  It answers
+ * "is somebody OTHER THAN THE CALLER driving this", so for a caller that never
+ * claims anything -- the HAL -- it degrades to "does ANYBODY hold it".  The
+ * HAL used that to decide whether to believe a driver's report of BOUND, and
+ * "a driver holds it" is not "THIS driver holds it": while a test held the
+ * host bridge, the block server's report about that device was accepted, and
+ * the registry recorded the wrong driver.  Its own arm caught it.
+ *
+ * 🔑 The identity has to be one the reporter cannot forge, and a port is one:
+ * only the driver's own task receives on the port it registered with, so the
+ * kernel resolves that port to its receiving space and compares it with the
+ * space of the task that made the claim.  The security token would not do --
+ * every task in this system inherits the same one.
+ *
+ * ⚠️ Answers 0 for `no claim at all' as well as for `claimed by somebody
+ * else', because the caller asking this question does not need to tell those
+ * apart: neither of them is permission to record a driver.  A caller that does
+ * need the difference should ask for it rather than read it out of this.
+ */
+routine device_claim_holder(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	driver		: mach_port_t;
+	out	held		: natural_t
 	);

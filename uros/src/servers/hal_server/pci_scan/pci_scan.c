@@ -332,6 +332,48 @@ pci_scan_measure(struct hal_device_info *dev)
 	(void) device_pci_config_write(pci_master_device,
 				       dev->bus, dev->slot, dev->func,
 				       PCI_COMMAND, cmd);
+
+	/*
+	 * ── A BAR that measures zero is not a region ─────────────────────
+	 *
+	 * 🔑 THE MEASUREMENT IS THE AUTHORITY, and #427 said so about the
+	 * size: a size is not read, it is measured.  The same sentence decides
+	 * whether the region EXISTS.  The scan creates one from a raw BAR
+	 * whose value is non-zero, which is a reading; if writing all ones
+	 * then gives back nothing writable, the device decodes nothing there
+	 * and there is no region to report.
+	 *
+	 * 🔥 It is not hypothetical: about one boot in twenty the PIIX3 ISA
+	 * bridge at 00:01.0 came through with `regions=1' where every other
+	 * boot has zero, and hal_bar's arm [2] caught it -- `a region arrived
+	 * with size 0, which is what a HAL that never probed reports'.  The
+	 * arm was right and the HAL had probed; what it had not done is act on
+	 * the answer.
+	 *
+	 * ⚠️ Dropped rather than published with a zero, because everything
+	 * downstream treats a region as a thing it can map.  A driver handed a
+	 * region of no size asks the kernel to map nothing, and what comes
+	 * back is an error nobody can trace to a BAR that was never there.
+	 */
+	{
+		unsigned int	kept = 0;
+
+		for (r = 0; r < dev->n_bars; r++) {
+			if (dev->bars[r].size == 0) {
+				printf("pci_scan: %02u:%02u.%u bar%u decodes "
+				       "nothing — dropping the region the scan "
+				       "made from its raw value\n",
+				       dev->bus, dev->slot, dev->func,
+				       dev->bars[r].slot);
+				continue;
+			}
+			if (kept != r)
+				dev->bars[kept] = dev->bars[r];
+			kept++;
+		}
+		dev->n_bars = kept;
+	}
+
 	return 0;
 }
 
