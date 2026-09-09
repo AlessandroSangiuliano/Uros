@@ -1517,6 +1517,14 @@ ds_master_device_dma_map_user(
 	 */
 	region = dma_region_of(pa, &page);
 	if (region == 0) {
+		/*
+		 * ⚠️ A refusal that does not say why is what this tree keeps
+		 * paying for.  These three are new (#531) and each one can
+		 * stop a driver's probe, so each says which it was.
+		 */
+		printf("device: dma_map_user refuses kva 0x%lx (phys 0x%lx): "
+		       "no DMA region holds that page\n",
+		       (unsigned long)kva, (unsigned long)pa);
 		task_deallocate(task);
 		return KERN_INVALID_ARGUMENT;
 	}
@@ -1529,11 +1537,21 @@ ds_master_device_dma_map_user(
 	 * no-op, it is somebody else's mapping.
 	 */
 	if (region->task != TASK_NULL) {
+		printf("device: dma_map_user refuses region %llu: already "
+		       "mapped for task 0x%lx at uva 0x%lx, and there is one "
+		       "slot\n", (unsigned long long)region->id,
+		       (unsigned long)region->task,
+		       (unsigned long)region->uva);
 		task_deallocate(task);
 		return KERN_RESOURCE_SHORTAGE;
 	}
 
 	if (round_page(size) != region->size) {
+		printf("device: dma_map_user refuses region %llu: asked for "
+		       "%lu bytes of a region of %lu\n",
+		       (unsigned long long)region->id,
+		       (unsigned long)round_page(size),
+		       (unsigned long)region->size);
 		task_deallocate(task);
 		return KERN_INVALID_ARGUMENT;
 	}
