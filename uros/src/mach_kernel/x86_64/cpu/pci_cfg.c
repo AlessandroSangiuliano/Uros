@@ -18,6 +18,58 @@
 #include <pmap/pmap.h>
 #include <kern/misc_protos.h>
 #include <device/pci.h>	/* the capability list, as the standard fixes it */
+#include <sync/atomic.h>	/* the port-pair lock below */
+
+/*
+ * ── The address and the data are two ports, and the pair is one access ──
+ *
+ * 🔴 IT WAS NOT SERIALISED.  A legacy configuration access writes the address
+ * to 0xCF8 and then reads the datum from 0xCFC.  Anything that writes 0xCF8
+ * between those two instructions makes the read answer about a DIFFERENT
+ * device -- and the caller has no way to know, because the value it gets is a
+ * perfectly well-formed register.
+ *
+ * 🔥 The bill was paid three times before it was recognised, all at -smp 4 and
+ * never uniprocessor: a BAR that appeared on the PIIX3 ISA bridge, which has
+ * none; a NINTH device in a scan of a machine with eight; and a region whose
+ * measured size came back zero.  Each was read as its own defect.  They are one
+ * defect: a read that answered about somebody else.
+ *
+ * 🔑 ECAM does not need this -- there the whole access is one memory reference,
+ * which is the real reason to prefer it and not just its speed.  So the lock is
+ * taken only on the port path.
+ *
+ * ⚠️ It does NOT use simple_lock, and that is deliberate: this runs before
+ * percpu_activate(), and the machine-independent lock package reaches %gs for
+ * its preemption and interrupt counters.  A lock that cannot be taken during
+ * early enumeration is a lock this file cannot use.  The flag is saved and
+ * restored by hand for the same reason -- and it also closes the case that has
+ * nothing to do with SMP: an interrupt landing between the two instructions on
+ * one processor.
+ */
+static volatile uint8_t	pci_cfg_port_lock;
+
+static inline uint64_t
+pci_cfg_port_enter(void)
+{
+	uint64_t flags = read_rflags();
+
+	interrupts_disable();
+	while (atomic_swap8(&pci_cfg_port_lock, 1) != 0)
+		cpu_pause();
+
+	return flags;
+}
+
+static inline void
+pci_cfg_port_leave(uint64_t flags)
+{
+	__asm__ volatile("" ::: "memory");
+	pci_cfg_port_lock = 0;
+
+	if (flags & RFLAGS_IF)
+		interrupts_enable();
+}
 
 /* The port pair.  Two 32-bit registers, and every access takes turns on them. */
 #define PCI_CONFIG_ADDRESS	0x0CF8
@@ -153,13 +205,21 @@ pci_cfg_read(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
 	if (segment != 0)
 		return 0xFFFFFFFFu;
 
-	outl(PCI_CONFIG_ADDRESS,
-	     PCI_CONFIG_ENABLE
-	     | ((uint32_t)bus << 16)
-	     | ((uint32_t)dev << 11)
-	     | ((uint32_t)func << 8)
-	     | ((uint32_t)reg & 0xFCu));
-	return inl(PCI_CONFIG_DATA);
+	{
+		uint64_t	flags = pci_cfg_port_enter();
+		uint32_t	value;
+
+		outl(PCI_CONFIG_ADDRESS,
+		     PCI_CONFIG_ENABLE
+		     | ((uint32_t)bus << 16)
+		     | ((uint32_t)dev << 11)
+		     | ((uint32_t)func << 8)
+		     | ((uint32_t)reg & 0xFCu));
+		value = inl(PCI_CONFIG_DATA);
+
+		pci_cfg_port_leave(flags);
+		return value;
+	}
 }
 
 void
@@ -193,13 +253,19 @@ pci_cfg_write(uint16_t segment, uint8_t bus, uint8_t dev, uint8_t func,
 		return;
 	}
 
-	outl(PCI_CONFIG_ADDRESS,
-	     PCI_CONFIG_ENABLE
-	     | ((uint32_t)bus << 16)
-	     | ((uint32_t)dev << 11)
-	     | ((uint32_t)func << 8)
-	     | ((uint32_t)reg & 0xFCu));
-	outl(PCI_CONFIG_DATA, value);
+	{
+		uint64_t	flags = pci_cfg_port_enter();
+
+		outl(PCI_CONFIG_ADDRESS,
+		     PCI_CONFIG_ENABLE
+		     | ((uint32_t)bus << 16)
+		     | ((uint32_t)dev << 11)
+		     | ((uint32_t)func << 8)
+		     | ((uint32_t)reg & 0xFCu));
+		outl(PCI_CONFIG_DATA, value);
+
+		pci_cfg_port_leave(flags);
+	}
 }
 
 /*
