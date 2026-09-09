@@ -406,6 +406,21 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # therefore never reached the manifest check at all.
   set(_BDS_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/block_device_server.cmf")
+  # #511: and the root, which provisions everyone else and was the last task
+  # left on the permissive path.
+  set(_BOOTSTRAP_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/bootstrap.cmf")
+
+  add_custom_command(
+    OUTPUT ${_BOOTSTRAP_CMF}
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+    COMMAND $<TARGET_FILE:mkmanifest> -o ${_BOOTSTRAP_CMF}
+            ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap.manifest
+    DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap.manifest
+    COMMENT "mkmanifest: bootstrap.manifest -> bootstrap.cmf"
+    VERBATIM
+  )
 
   add_custom_command(
     OUTPUT ${_BUNDLE}
@@ -414,6 +429,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             cap_test.cmf:${_CAPTEST_CMF}
             dma_reclaim_test.cmf:${_DMARECLAIM_CMF}
             block_device_server.cmf:${_BDS_CMF}
+            bootstrap.cmf:${_BOOTSTRAP_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             irq_claim_test:${_SBIN}/irq_claim_test
@@ -469,6 +485,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # the export tree held the new one.  The symptom was a policy denial for a
     # line the source file plainly contained.
     DEPENDS mkbundle ${_CAPTEST_CMF} ${_DMARECLAIM_CMF} ${_BDS_CMF}
+            ${_BOOTSTRAP_CMF}
             name_server_bin netname_test_bin irq_claim_test_bin
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module

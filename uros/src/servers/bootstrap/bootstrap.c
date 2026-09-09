@@ -438,6 +438,36 @@ bootstrap_enter_stage2(struct server *bds)
 	disk_port = nmsg.service.name;
 	(void)mach_port_destroy(bootstrap_self, notify_port);
 
+	/*
+	 * ── The root provisions itself, and there is no paradox in it (#511) ──
+	 *
+	 * 🔴 THE ONE TASK LEFT ON THE PERMISSIVE PATH WAS THIS ONE.  Everything
+	 * bootstrap starts gets a per-task cap port stamped from a manifest in
+	 * the bundle; bootstrap shipped no manifest, so libcap fell back to the
+	 * well-known cap_server -- which is reachable by any task that looks the
+	 * name up, and is therefore authority held by NAME and not by RIGHT.
+	 * That is the same sentence #511 makes about the master device port.
+	 *
+	 * 🔑 Provisioning the root is the same operation with the same argument
+	 * shape: cap_provision_task takes the task's port, and this task has
+	 * one.  It only has to be done before the answer is needed.
+	 *
+	 * ⚠️ AND THAT IS WHY IT IS HERE, immediately above the only cap_request
+	 * bootstrap makes.  libcap caches whichever server port it resolves on
+	 * first use, so provisioning after the request would leave the
+	 * well-known port cached for the rest of the boot and make bootstrap.cmf
+	 * a policy nobody reads -- worse than no policy, because it looks like
+	 * one.
+	 *
+	 * ⚠️ Best-effort, like the child path.  A boot where cap_server never
+	 * came up must still be able to say so through the existing failure
+	 * message below rather than stopping here.
+	 */
+	if (provision_cap_port_for_child(mach_task_self(), "bootstrap")) {
+		(void)task_get_special_port(mach_task_self(), TASK_CAP_PORT,
+					    &mach_cap_port);
+	}
+
 	kr = cap_request(RESOURCE_BLK_DEVICE,
 			 cap_name_hash(BOOT_DEV_NAME),
 			 CAP_OP_BLK_READ | CAP_OP_BLK_WRITE,
