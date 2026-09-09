@@ -1415,18 +1415,81 @@ ds_master_device_dma_alloc_sg(
 /* ---- User-space DMA and MMIO mapping ---- */
 
 /*
- * Helper: reserve a VA range in a task's map and wire in physical pages.
+ * Put `npages' physical pages into a task's map, and REMEMBER having done it.
+ *
+ * ── Why the remembering lives here (#531) ─────────────────────────────
+ *
+ * 🔴 THERE WERE THREE WAYS INTO A TASK'S MAP AND TWO PLACES THAT RECORDED.
+ * device_dma_map_user and device_mmio_map came through this helper;
+ * device_dma_alloc_sg had its own copy of the loop because its pages are not
+ * contiguous.  The record was written by dma_region_add() at creation -- which
+ * only the scatter-gather path reaches, since it maps as it allocates -- so a
+ * region allocated by one call and mapped by another read back as `mapped for
+ * task 0x0' for ever, and dma_region_drop() skipped its vm_map_remove().  The
+ * pages went back to the VM with a live user mapping and vm_page_release
+ * refused to free one.
+ *
+ * 🔑 The field even said so, in words: `task' was documented as null for a
+ * contiguous buffer.  That was TRUE when it was written -- the field was invented for the sg path
+ * and the panic it fixed -- and became false the day device_dma_map_user
+ * started mapping contiguous regions into tasks.  Nobody came back to the
+ * comment, because nothing made them.
+ *
+ * So the recording is not something a mapping function must remember to do:
+ * it is what this function does, and it is the only function that maps.
+ * `pa_list' is NULL for a contiguous run from `phys_base', which is the only
+ * difference the two former callers had.
+ *
+ * ⚠️ AND A MAPPING THAT CANNOT BE RECORDED IS NOT MADE.  If the pages belong
+ * to a region that already has its one slot filled, this fails rather than
+ * mapping and staying quiet -- staying quiet is precisely what produced the
+ * panic.  Pages belonging to no region at all are a different thing and are
+ * allowed: that is device_mmio_map putting a BAR in a driver's map, and there
+ * is nothing to record.
  */
 static kern_return_t
-map_phys_into_task(task_t		task,
-		   vm_offset_t		phys_base,	/* page-aligned */
-		   vm_size_t		size,		/* page-aligned */
-		   vm_offset_t		*uva_out)
+map_pages_into_task(task_t		task,
+		    vm_offset_t		phys_base,	/* page-aligned */
+		    const vm_offset_t	*pa_list,	/* null: contiguous */
+		    unsigned int	npages,
+		    vm_offset_t		*uva_out)
 {
-	vm_map_t	map = task->map;
-	vm_offset_t	uva = 0;
-	kern_return_t	kr;
-	vm_offset_t	i;
+	vm_map_t		map = task->map;
+	vm_offset_t		uva = 0;
+	vm_size_t		size = (vm_size_t) npages * PAGE_SIZE;
+	struct dma_region	*region;
+	unsigned int		page;
+	kern_return_t		kr;
+	unsigned int		i;
+
+	if (npages == 0)
+		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * Asked BEFORE anything is mapped, so a region that cannot take the
+	 * record costs nothing to refuse.
+	 */
+	region = dma_region_of(pa_list ? pa_list[0] : phys_base, &page);
+	if (region != 0) {
+		if (region->task != TASK_NULL) {
+			printf("device: refusing to map region %llu again: it "
+			       "is already mapped for task 0x%lx at uva 0x%lx, "
+			       "and a region records one mapping\n",
+			       (unsigned long long)region->id,
+			       (unsigned long)region->task,
+			       (unsigned long)region->uva);
+			return KERN_RESOURCE_SHORTAGE;
+		}
+		if (size != region->size) {
+			printf("device: refusing to map %lu bytes of region "
+			       "%llu, which is %lu: the record covers the "
+			       "whole region or nothing\n",
+			       (unsigned long)size,
+			       (unsigned long long)region->id,
+			       (unsigned long)region->size);
+			return KERN_INVALID_ARGUMENT;
+		}
+	}
 
 	kr = vm_map_enter(map, &uva, size, 0, TRUE,
 			  VM_OBJECT_NULL, (vm_offset_t)0, FALSE,
@@ -1436,14 +1499,30 @@ map_phys_into_task(task_t		task,
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	/* #407: same as above -- report rather than hand back a hole, and give
-	 * back the range vm_map_enter just took rather than abandon it. */
-	for (i = 0; i < size; i += PAGE_SIZE)
-		if (pmap_enter(map->pmap, uva + i, phys_base + i,
+	/* #407: report rather than hand back a hole, and give back the range
+	 * vm_map_enter just took rather than abandon it. */
+	for (i = 0; i < npages; i++) {
+		vm_offset_t pa = pa_list ? pa_list[i]
+					 : phys_base + i * PAGE_SIZE;
+
+		if (pmap_enter(map->pmap, uva + i * PAGE_SIZE, pa,
 			       VM_PROT_READ | VM_PROT_WRITE, TRUE) != 0) {
-			(void) vm_map_remove(map, uva, uva + size, VM_MAP_NO_FLAGS);
+			(void) vm_map_remove(map, uva, uva + size,
+					     VM_MAP_NO_FLAGS);
 			return KERN_RESOURCE_SHORTAGE;
 		}
+	}
+
+	if (region != 0) {
+		/*
+		 * Its own reference: the caller's is the caller's to drop, and
+		 * dma_region_drop() gives this one back when it takes the
+		 * mapping down.
+		 */
+		task_reference(task);
+		region->task = task;
+		region->uva = uva;
+	}
 
 	*uva_out = uva;
 	return KERN_SUCCESS;
@@ -1515,13 +1594,16 @@ ds_master_device_dma_map_user(
 	 * memory with nothing recording it -- and nothing here can revoke what
 	 * it did not write down.
 	 */
+	/*
+	 * ⚠️ THIS ENTRY POINT'S OWN CONTRACT: it maps a DMA buffer, so a kva
+	 * belonging to no region is refused rather than mapped.  Mapping one
+	 * would hand a task an arbitrary piece of kernel memory, and nothing
+	 * here can revoke what it did not write down.  The helper below allows
+	 * it, because device_mmio_map goes through the same code and a BAR is
+	 * exactly that: physical memory with no region behind it.
+	 */
 	region = dma_region_of(pa, &page);
 	if (region == 0) {
-		/*
-		 * ⚠️ A refusal that does not say why is what this tree keeps
-		 * paying for.  These three are new (#531) and each one can
-		 * stop a driver's probe, so each says which it was.
-		 */
 		printf("device: dma_map_user refuses kva 0x%lx (phys 0x%lx): "
 		       "no DMA region holds that page\n",
 		       (unsigned long)kva, (unsigned long)pa);
@@ -1536,39 +1618,12 @@ ds_master_device_dma_map_user(
 	 * a range wider than what was mapped -- which on a task's map is not a
 	 * no-op, it is somebody else's mapping.
 	 */
-	if (region->task != TASK_NULL) {
-		printf("device: dma_map_user refuses region %llu: already "
-		       "mapped for task 0x%lx at uva 0x%lx, and there is one "
-		       "slot\n", (unsigned long long)region->id,
-		       (unsigned long)region->task,
-		       (unsigned long)region->uva);
-		task_deallocate(task);
-		return KERN_RESOURCE_SHORTAGE;
-	}
-
-	if (round_page(size) != region->size) {
-		printf("device: dma_map_user refuses region %llu: asked for "
-		       "%lu bytes of a region of %lu\n",
-		       (unsigned long long)region->id,
-		       (unsigned long)round_page(size),
-		       (unsigned long)region->size);
-		task_deallocate(task);
-		return KERN_INVALID_ARGUMENT;
-	}
-
-	kr = map_phys_into_task(task, pa, round_page(size), &uva);
-	if (kr != KERN_SUCCESS) {
-		task_deallocate(task);
+	kr = map_pages_into_task(task, pa, 0,
+				 (unsigned int)(round_page(size) / PAGE_SIZE),
+				 &uva);
+	task_deallocate(task);
+	if (kr != KERN_SUCCESS)
 		return kr;
-	}
-
-	/*
-	 * The reference is KEPT: dma_region_drop() needs the map to still
-	 * exist when it removes the mapping, and it gives the reference back
-	 * itself.
-	 */
-	region->task = task;
-	region->uva = uva;
 
 	*uva_out = uva;			/* #427: no narrowing cast */
 	return KERN_SUCCESS;
@@ -1609,7 +1664,8 @@ ds_master_device_mmio_map(
 	page_offset = (vm_offset_t)phys_addr - phys_base;
 	round_sz    = round_page(page_offset + size);
 
-	kr = map_phys_into_task(task, phys_base, round_sz, &uva);
+	kr = map_pages_into_task(task, phys_base, 0,
+				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
 	task_deallocate(task);
 	if (kr != KERN_SUCCESS)
 		return kr;
