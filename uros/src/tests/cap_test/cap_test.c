@@ -443,6 +443,131 @@ subsystem_name_is_not_a_pointer(void)
  * nothing -- and a pass on the permissive path is exactly the silence this
  * arm exists to break.
  */
+/*
+ * ── [15] The master device port is a way around the manifest (#511) ──────
+ *
+ * 🔴 THIS TASK'S OWN POLICY FILE SAYS IT MAY NOT DRIVE PCI HARDWARE, and
+ * says so on purpose: cap_test.manifest carries the line
+ *
+ *	# required 5 0x010601 0x7    RESOURCE_PCI_DEVICE, SATA AHCI, ...
+ *
+ * commented out, with "its absence here is the policy" written beside it.
+ * Arm [13] above reads that refusal back from cap_server and passes.
+ *
+ * 🔑 And then this arm does the thing anyway, because holding the master
+ * device port is enough.  A device is addressed by three integers -- bus,
+ * slot, function -- which is a NAME and not a right, and `device_mmio_map'
+ * takes a physical address with nothing to establish that it names a device
+ * rather than somebody's memory.  The policy is not wrong; it is bypassed.
+ *
+ * 🔥 THE VALUE IS THE ORACLE.  Scanning configuration space for a class this
+ * task is forbidden and then mapping the BAR it finds could still be argued
+ * to have landed somewhere harmless.  So the arm reads the controller's
+ * version register through the mapping and requires the number the AHCI
+ * driver -- another task, which does hold that device -- printed for itself
+ * earlier in the same boot.  A matching version says the mapping reached
+ * that device's registers and not a plausible-looking page.
+ *
+ * ⚠️ Read-only, and one page.  What is being shown is that the range can be
+ * reached at all; writing another server's controller registers would prove
+ * the same thing and break the boot doing it.
+ *
+ * ⚠️ WHEN THIS ARM STARTS FAILING, THAT IS #511 BEING FIXED.  It is written
+ * to be inverted: after the fix a task without the bus right must be refused
+ * here, and done-when 2 of that issue requires the same call from a holder
+ * of the right to succeed -- otherwise a refusal and a call that was never
+ * going to work look identical.
+ */
+#define PCI_CFG_VENDOR		0x00
+#define PCI_CFG_CLASS		0x08
+#define PCI_CFG_BAR5		0x24
+#define AHCI_CLASS_SATA		0x0106		/* class 01, subclass 06 */
+#define AHCI_VS_REG		0x10
+
+static int
+the_master_port_bypasses_the_manifest(mach_port_t device_port)
+{
+    natural_t    bus, slot, func, data = 0;
+    natural_t    found_bus = 0, found_slot = 0, found_func = 0;
+    natural_t    bar5 = 0;
+    vm_address_t uva = 0;
+    int          found = 0, mapped = 0, ok = 0;
+    unsigned     version;
+
+    /*
+     * Configuration space, read by name.  Nothing was consulted about
+     * whether this task may look at these devices.
+     */
+    for (bus = 0; bus < 1 && !found; bus++)
+        for (slot = 0; slot < 32 && !found; slot++)
+            for (func = 0; func < 8 && !found; func++) {
+                if (device_pci_config_read(device_port, bus, slot, func,
+                                           PCI_CFG_VENDOR, &data)
+                    != KERN_SUCCESS)
+                    continue;
+                if (data == 0xFFFFFFFFu || data == 0)
+                    continue;
+                if (device_pci_config_read(device_port, bus, slot, func,
+                                           PCI_CFG_CLASS, &data)
+                    != KERN_SUCCESS)
+                    continue;
+                if ((data >> 16) != AHCI_CLASS_SATA)
+                    continue;
+                found_bus = bus; found_slot = slot; found_func = func;
+                found = 1;
+            }
+
+    if (!found) {
+        printf("cap_test: [15] #511 — DID NOT RUN, no SATA controller in "
+               "configuration space (the scan itself was not refused)\n");
+        return 1;
+    }
+
+    if (device_pci_config_read(device_port, found_bus, found_slot, found_func,
+                               PCI_CFG_BAR5, &bar5) != KERN_SUCCESS) {
+        printf("cap_test: [15] #511 — DID NOT RUN, BAR5 unreadable\n");
+        return 1;
+    }
+    bar5 &= ~0xFu;
+
+    if (bar5 == 0) {
+        printf("cap_test: [15] #511 — DID NOT RUN, BAR5 is zero\n");
+        return 1;
+    }
+
+    if (device_mmio_map(device_port, (vm_address_t)bar5, 4096,
+                        mach_task_self(), &uva) != KERN_SUCCESS || uva == 0) {
+        printf("cap_test: [15] #511 CLOSED — a task whose manifest declares "
+               "no PCI device was refused the mapping of %u:%u.%u BAR5 "
+               "(0x%08X)\n",
+               (unsigned)found_bus, (unsigned)found_slot,
+               (unsigned)found_func, (unsigned)bar5);
+        return 1;
+    }
+    mapped = 1;
+
+    version = *(volatile unsigned *)(uva + AHCI_VS_REG);
+
+    if (version == 0x00010000u || version == 0x00010100u
+        || version == 0x00010200u || version == 0x00010300u) {
+        printf("cap_test: [15] #511 OPEN — this task declares no PCI device "
+               "and read version 0x%08X out of %u:%u.%u BAR5 (0x%08X), which "
+               "another server holds: the master port is a way around the "
+               "manifest\n",
+               version, (unsigned)found_bus, (unsigned)found_slot,
+               (unsigned)found_func, (unsigned)bar5);
+        ok = 1;
+    } else {
+        printf("cap_test: [15] #511 — the mapping succeeded but 0x%08X is no "
+               "AHCI version, so it is NOT evidence about where it landed\n",
+               version);
+    }
+
+    if (mapped)
+        (void)device_mmio_unmap(device_port, uva, 4096, mach_task_self());
+    return ok;
+}
+
 static int
 the_manifest_refuses_what_it_does_not_declare(void)
 {
@@ -1438,6 +1563,9 @@ main(int argc, char **argv)
         pass = 0;
 
     if (!the_manifest_refuses_what_it_does_not_declare())
+        pass = 0;
+
+    if (!the_master_port_bypasses_the_manifest(device_port))
         pass = 0;
 
     /*
