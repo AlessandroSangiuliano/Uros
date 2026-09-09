@@ -576,6 +576,135 @@ out:
     return ok;
 }
 
+/*
+ * ── [14] The pages and the byte count are two arguments, and nobody made
+ *    them agree (#532) ──────────────────────────────────────────────────
+ *
+ * A zero-copy read carries a list of physical pages and a count of bytes.
+ * Those are two independent numbers from two independent arguments, and
+ * `n * 4096` has to be at least the second of them.  Nothing checked it: a
+ * one-page list with eight thousand bytes asked for was accepted, the drive
+ * was told to move sixteen sectors, and the descriptor table described four.
+ *
+ * 🔑 The arm runs on EVERY partition it is given rather than on the first
+ * one that answers.  That is not thoroughness for its own sake: the disk
+ * arms have always run on the preferred disk, which is virtio-blk, so the
+ * AHCI physical entry points have been in the driver's ops table since they
+ * were written with no client ever reaching them.  A refusal that exists in
+ * one driver and not the other is exactly the drift this is here to catch.
+ *
+ * ⚠️ The covered read runs FIRST and must succeed.  Without it, a server
+ * that refused every physical read for some unrelated reason would pass the
+ * second half, and the arm would be reporting a broken path as a working
+ * check.
+ */
+static int
+the_bytes_must_fit_the_pages(mach_port_t device_port, mach_port_t part_port,
+                             const char *name)
+{
+    struct uros_cap        tok, buf_cap;
+    security_token_t       null_sec = { { 0, 0 } };
+    char                   blob[CAP_TOKEN_MAX];
+    mach_port_t            handle = MACH_PORT_NULL;
+    kern_return_t          kr;
+    vm_address_t           kva = 0, uva = 0;
+    vm_address_t          *pa_list = NULL;
+    mach_msg_type_number_t pa_cnt = 0;
+    io_buf_len_t           got = 0;
+    uint64_t               region_id = 0;
+    unsigned               magic;
+    int                    ok = 0;
+
+    kr = cap_request(RESOURCE_BLK_DEVICE, cap_name_hash(name),
+                     CAP_OP_BLK_READ | CAP_OP_BLK_WRITE, 0, &tok);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [14] %s — DID NOT RUN, no block capability "
+               "(kr=%d)\n", name, (int)kr);
+        return 1;
+    }
+
+    memcpy(blob, &tok, sizeof(tok));
+    kr = device_open_cap(part_port, MACH_PORT_NULL, D_READ | D_WRITE,
+                         null_sec, (char *)name, blob,
+                         (mach_msg_type_number_t)sizeof(tok), &handle);
+    if (kr != KERN_SUCCESS || handle == MACH_PORT_NULL) {
+        printf("cap_test: [14] %s — DID NOT RUN, open refused (kr=%d)\n",
+               name, (int)kr);
+        return 1;
+    }
+
+    kr = device_dma_alloc_sg(device_port, DEVICE_DMA_NO_BDF, 1,
+                             mach_task_self(), &kva, &uva, &pa_list, &pa_cnt,
+                             &region_id);
+    if (kr != KERN_SUCCESS || pa_cnt != 1) {
+        printf("cap_test: [14] %s — DID NOT RUN, no scatter-gather page "
+               "(kr=%d)\n", name, (int)kr);
+        if (pa_list != NULL)
+            (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                                pa_cnt * sizeof(vm_address_t));
+        (void)device_close(handle);
+        (void)mach_port_deallocate(mach_task_self(), handle);
+        return 1;
+    }
+
+    memset(&buf_cap, 0, sizeof(buf_cap));
+    kr = cap_request(RESOURCE_DMA_BUFFER, region_id,
+                     CAP_OP_DMA_DEVICE_READ | CAP_OP_DMA_DEVICE_WRITE,
+                     0, &buf_cap);
+    if (kr == KERN_SUCCESS)
+        kr = device_register_dma(handle, (char *)&buf_cap, sizeof(buf_cap));
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [14] %s — DID NOT RUN, the buffer was not handed "
+               "over (kr=%d)\n", name, (int)kr);
+        goto out;
+    }
+
+    /* One page, one page's worth of bytes: the request that fits. */
+    memset((void *)uva, 0, 4096);
+    kr = device_read_phys(handle, D_READ, 0, 4096, pa_list, pa_cnt, &got);
+    magic = (unsigned)(((unsigned char *)uva)[1080])
+          | ((unsigned)(((unsigned char *)uva)[1081]) << 8);
+
+    if (kr != KERN_SUCCESS || got != 4096 || magic != 0xEF53u) {
+        printf("cap_test: [14] WRONG — %s refused a request its pages DO "
+               "cover: kr=%d, %u bytes, +1080 holds 0x%x rather than "
+               "0xef53\n", name, (int)kr, (unsigned)got, magic);
+        goto out;
+    }
+    printf("cap_test: [14] %s moved 4096 bytes into one page — the covered "
+           "request works, so a refusal below is about the size and not "
+           "about the path\n", name);
+
+    /*
+     * Two pages' worth of bytes, one page offered.  The drive would be told
+     * to move sixteen sectors into a table describing four thousand bytes.
+     */
+    memset((void *)uva, 0, 4096);
+    got = 0;
+    kr = device_read_phys(handle, D_READ, 0, 8192, pa_list, pa_cnt, &got);
+
+    if (kr == KERN_SUCCESS) {
+        printf("cap_test: [14] WRONG — %s accepted 8192 bytes into %u page "
+               "and reported %u bytes read: the transfer that happened is "
+               "smaller than the one that was asked for\n",
+               name, (unsigned)pa_cnt, (unsigned)got);
+        goto out;
+    }
+
+    printf("cap_test: [14] %s refused 8192 bytes into %u page (kr=%d) — the "
+           "page list has to cover the byte count\n",
+           name, (unsigned)pa_cnt, (int)kr);
+    ok = 1;
+
+out:
+    (void)device_dma_free(device_port, DEVICE_DMA_NO_BDF, kva, 4096);
+    (void)vm_deallocate(mach_task_self(), (vm_address_t)pa_list,
+                        pa_cnt * sizeof(vm_address_t));
+    (void)device_close(handle);
+    (void)mach_port_deallocate(mach_task_self(), handle);
+    return ok;
+}
+
 static int
 a_device_has_one_driver(mach_port_t device_port)
 {
@@ -1226,6 +1355,26 @@ main(int argc, char **argv)
 
     if (!the_manifest_refuses_what_it_does_not_declare())
         pass = 0;
+
+    /*
+     * #532 runs last and on every candidate.  By this point the name server
+     * has had the whole test's worth of time, so a partition that is absent
+     * here is absent, not late -- and a short budget is enough to say so.
+     */
+    for (unsigned i = 0;
+         i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        mach_port_t p = MACH_PORT_NULL;
+
+        if (netname_look_up(name_server_port, "", (char *)candidates[i], &p)
+            != KERN_SUCCESS) {
+            printf("cap_test: [14] '%s' is not registered — the arm did not "
+                   "run on that controller\n", candidates[i]);
+            continue;
+        }
+        if (!the_bytes_must_fit_the_pages(device_port, p, candidates[i]))
+            pass = 0;
+        (void)mach_port_deallocate(mach_task_self(), p);
+    }
 
     if (pass) {
         printf("cap_test: ALL TESTS PASSED\n");
