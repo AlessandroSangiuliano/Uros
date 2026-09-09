@@ -102,6 +102,7 @@
 					 * extern beside the call: see the note
 					 * in <device/device_master.h> */
 #include <device/device_types.h>	/* DEVICE_DMA_NO_BDF */
+#include <device/test_bdf.h>		/* the device the tests may take (#533) */
 #include <mach_init.h>			/* name_server_port */
 #include <mach/cap_types.h>
 #include <libcap.h>			/* cap_request */
@@ -136,13 +137,24 @@
  * breaks the mature suite when it fails is a test nobody keeps reading.
  *
  * 🔑 0:0.0 is on every board either target runs on, because that is where a
- * host bridge goes, and no driver will ever want it.  Its class is what the
- * manifest names; the kernel reads the same value out of the device's own
- * configuration space and requires the two to agree, so naming the wrong one
- * here fails loudly rather than claiming something else.
+ * host bridge goes.  Its class is what the manifest names; the kernel reads the
+ * same value out of the device's own configuration space and requires the two
+ * to agree, so naming the wrong one here fails loudly rather than claiming
+ * something else.
+ *
+ * 🔴 THIS USED TO SAY "AND NO DRIVER WILL EVER WANT IT" AND STOP THERE (#533).
+ * True, and not the question: block_device_server used the same device as the
+ * control half of an arm about a device NOBODY claims -- reasoning its way to
+ * 0:0.0 from the same two facts, months apart, with neither file mentioning
+ * the other.  This program claiming it is exactly what neither sentence
+ * considered, and at -smp 4 the overlap failed three boots in twenty.
+ *
+ * The address now comes from <device/test_bdf.h>, which says what it is
+ * reserved for, so the next programme that needs a device nobody wants finds
+ * the answer instead of deriving it a third time.
  */
-#define BRIDGE_BDF	0u
-#define BRIDGE_CLASS	0x060000ULL
+#define BRIDGE_BDF	UROS_TEST_CLAIM_BDF
+#define BRIDGE_CLASS	UROS_TEST_CLAIM_CLASS
 
 /* Matches base class 6 -- bridges -- which is what the HAL notifies us about. */
 #define BRIDGE_MASK	0xFF000000u

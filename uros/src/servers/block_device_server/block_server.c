@@ -56,6 +56,7 @@
 #include "ahci_batch_server.h"
 #include "hal.h"
 #include <hal_state.h>	/* #513: HAL_DEV_* -- the same three numbers the HAL sets */
+#include <device/test_bdf.h>		/* which device the tests take (#533) */
 #include "hal_notify_server.h"
 #include "cap_revoke_server.h"
 #include "gpu_console.h"
@@ -237,10 +238,24 @@ claim_device_for_driver(unsigned int bus, unsigned int slot, unsigned int func,
  * a second device, in the same breath, still reading the initial one.
  *
  * ⚠️ 0:0.0 is the control and it is chosen rather than convenient: the host
- * bridge is on every board this runs on, it is in the registry because the scan
- * found it, and no driver will ever claim it.  A control that was absent would
- * make this arm pass by returning an error, which is the shape of proof this
- * whole issue exists to avoid.
+ * bridge is on every board this runs on, and it is in the registry because the
+ * scan found it.  A control that was absent would make this arm pass by
+ * returning an error, which is the shape of proof this whole issue exists to
+ * avoid.
+ *
+ * 🔴 IT USED TO SAY "AND NO DRIVER WILL EVER CLAIM IT", WHICH IS TRUE AND WAS
+ * NOT THE QUESTION (#533).  dma_reclaim_test claims exactly this device, on
+ * purpose, and dies holding it -- it needs a device whose claim being
+ * mishandled cannot cost the boot disk, and 0:0.0 is the only function present
+ * on both of this project's boards.  So the control is claimed for part of
+ * every boot, and at -smp 4 the two overlapped in three boots out of twenty.
+ *
+ * 🔑 THE ARM WAS TWO CLAIMS IN ONE.  "The registry reports the value I set" is
+ * always checkable; "and not one I did not set" needs the control to be free
+ * to be a control.  They are now separated, so the first is never lost to the
+ * second -- and the second CHECKS its premise rather than assuming it, which
+ * is what turned somebody else's legitimate claim into this server reporting
+ * WRONG.  See <device/test_bdf.h>.
  */
 static void
 report_and_read_back(unsigned int bus, unsigned int slot, unsigned int func,
@@ -264,19 +279,37 @@ report_and_read_back(unsigned int bus, unsigned int slot, unsigned int func,
 		return;
 	}
 
-	if (hal_get_device_state(hal_service_port, 0, 0, 0, &control)
-	    != KERN_SUCCESS)
-		control = (unsigned int)-1;
-
-	if (got == outcome && control == HAL_DEV_UNCLAIMED)
-		printf("blk: the HAL says %u:%u.%u is %u and 0:0.0 is still "
-		       "%u — the registry reports a value a client set, and "
-		       "one it did not\n",
-		       bus, slot, func, got, control);
+	/* The half that is always answerable: what was set is what is read. */
+	if (got == outcome)
+		printf("blk: the HAL says %u:%u.%u is %u — the registry "
+		       "reports the value this client set\n",
+		       bus, slot, func, got);
 	else
-		printf("blk: WRONG — reported %u for %u:%u.%u, read back %u; "
-		       "the unclaimed control 0:0.0 reads %u\n",
-		       outcome, bus, slot, func, got, control);
+		printf("blk: WRONG — reported %u for %u:%u.%u and read back "
+		       "%u\n", outcome, bus, slot, func, got);
+
+	/*
+	 * And the half that needs a control, which is only a control while
+	 * nobody has claimed it (#533).
+	 */
+	if (hal_get_device_state(hal_service_port, UROS_TEST_CLAIM_BUS,
+				 UROS_TEST_CLAIM_SLOT, UROS_TEST_CLAIM_FUNC,
+				 &control) != KERN_SUCCESS)
+		printf("blk: the HAL has no state for the control %u:%u.%u, "
+		       "so nothing is claimed about a value nobody set\n",
+		       UROS_TEST_CLAIM_BUS, UROS_TEST_CLAIM_SLOT,
+		       UROS_TEST_CLAIM_FUNC);
+	else if (control != HAL_DEV_UNCLAIMED)
+		printf("blk: the control %u:%u.%u reads %u — somebody holds "
+		       "it, which is what <device/test_bdf.h> reserves it for, "
+		       "so this arm does not run this boot\n",
+		       UROS_TEST_CLAIM_BUS, UROS_TEST_CLAIM_SLOT,
+		       UROS_TEST_CLAIM_FUNC, control);
+	else if (got == outcome)
+		printf("blk: and %u:%u.%u still reads %u — the registry "
+		       "reports a value a client set, and one it did not\n",
+		       UROS_TEST_CLAIM_BUS, UROS_TEST_CLAIM_SLOT,
+		       UROS_TEST_CLAIM_FUNC, control);
 
 	if (outcome == HAL_DEV_BOUND)
 		claim_this_server_does_not_have();
@@ -306,21 +339,55 @@ claim_this_server_does_not_have(void)
 	kern_return_t	kr;
 	unsigned int	state = (unsigned int)-1;
 
-	kr = hal_report_probe(hal_service_port, 0, 0, 0, hal_driver_port,
-			      HAL_DEV_BOUND);
+	/*
+	 * ⚠️ THE PREMISE FIRST (#533).  This arm is about a claim on a device
+	 * this server does not hold -- so it needs a device NOBODY holds, and
+	 * <device/test_bdf.h> reserves this one for tests that take it and die.
+	 * Asking afterwards whether it came back UNCLAIMED cannot tell "the HAL
+	 * refused and left it alone" from "somebody else has it", and reading
+	 * the second as a failure is what made this print WRONG on three boots
+	 * in twenty at -smp 4.
+	 */
+	if (hal_get_device_state(hal_service_port, UROS_TEST_CLAIM_BUS,
+				 UROS_TEST_CLAIM_SLOT, UROS_TEST_CLAIM_FUNC,
+				 &state) != KERN_SUCCESS) {
+		printf("blk: the HAL has no state for %u:%u.%u, so the refusal "
+		       "arm has no device to be refused on\n",
+		       UROS_TEST_CLAIM_BUS, UROS_TEST_CLAIM_SLOT,
+		       UROS_TEST_CLAIM_FUNC);
+		return;
+	}
 
-	if (hal_get_device_state(hal_service_port, 0, 0, 0, &state)
-	    != KERN_SUCCESS)
+	if (state != HAL_DEV_UNCLAIMED) {
+		printf("blk: %u:%u.%u reads %u before this server asks for it "
+		       "— somebody holds the device <device/test_bdf.h> "
+		       "reserves, so the refusal arm does not run this boot\n",
+		       UROS_TEST_CLAIM_BUS, UROS_TEST_CLAIM_SLOT,
+		       UROS_TEST_CLAIM_FUNC, state);
+		return;
+	}
+
+	kr = hal_report_probe(hal_service_port, UROS_TEST_CLAIM_BUS,
+			      UROS_TEST_CLAIM_SLOT, UROS_TEST_CLAIM_FUNC,
+			      hal_driver_port, HAL_DEV_BOUND);
+
+	if (hal_get_device_state(hal_service_port, UROS_TEST_CLAIM_BUS,
+				 UROS_TEST_CLAIM_SLOT, UROS_TEST_CLAIM_FUNC,
+				 &state) != KERN_SUCCESS)
 		state = (unsigned int)-1;
 
 	if (kr != KERN_SUCCESS && state == HAL_DEV_UNCLAIMED)
-		printf("blk: the HAL refused this server's claim on 0:0.0 "
+		printf("blk: the HAL refused this server's claim on %u:%u.%u "
 		       "(kr=%d) and left it %u — it checks the kernel and does "
-		       "not take a driver's word\n", (int)kr, state);
+		       "not take a driver's word\n",
+		       UROS_TEST_CLAIM_BUS, UROS_TEST_CLAIM_SLOT,
+		       UROS_TEST_CLAIM_FUNC, (int)kr, state);
 	else
-		printf("blk: WRONG — the HAL accepted a claim on 0:0.0 that "
+		printf("blk: WRONG — the HAL accepted a claim on %u:%u.%u that "
 		       "this server does not hold (kr=%d), and it now reads "
-		       "%u\n", (int)kr, state);
+		       "%u\n",
+		       UROS_TEST_CLAIM_BUS, UROS_TEST_CLAIM_SLOT,
+		       UROS_TEST_CLAIM_FUNC, (int)kr, state);
 }
 
 /*
