@@ -1486,10 +1486,71 @@ ds_master_device_dma_map_user(
 		return KERN_FAILURE;
 	}
 
+	/*
+	 * ── The mapping is RECORDED, and it never was (#531) ─────────────
+	 *
+	 * 🔴 THIS FUNCTION MAPPED AND REMEMBERED NOTHING.  `region' and `page'
+	 * were declared right above and never assigned -- the fossil of a
+	 * version that did.  So a region's `task'/`uva' pair was written in
+	 * exactly one place, dma_region_add(), which means only the
+	 * scatter-gather allocator ever recorded one: it maps as it allocates.
+	 * A region from device_dma_alloc() and mapped afterwards by this call
+	 * read back as `mapped for task 0x0' for ever.
+	 *
+	 * 🔥 And dma_region_drop() skips its vm_map_remove() when there is no
+	 * task recorded, so those pages went back to the VM with a live user
+	 * mapping still on them.  The bill is a panic in vm_page_release:
+	 *
+	 *	device: ... died holding DMA region 50 (12288 bytes,
+	 *	        mapped for task 0x0 at uva 0x0 pmap 0x0)
+	 *	  still mapped by pmap 0xffffc000013c5f20 at va 0x19000
+	 *	panic: vm_page_release: page 0x2544000 still mapped (#385)
+	 *
+	 * -- the block server's virtio queue, allocated by one call and mapped
+	 * by this one, which is the ordinary way a driver gets a ring it can
+	 * both read and hand to a device.
+	 *
+	 * ⚠️ A kva that belongs to no region is REFUSED rather than mapped.
+	 * Mapping one would be handing a task an arbitrary piece of kernel
+	 * memory with nothing recording it -- and nothing here can revoke what
+	 * it did not write down.
+	 */
+	region = dma_region_of(pa, &page);
+	if (region == 0) {
+		task_deallocate(task);
+		return KERN_INVALID_ARGUMENT;
+	}
+
+	/*
+	 * ⚠️ ONE SLOT, SO ONE MAPPING, AND THE WHOLE REGION.  Both are checked
+	 * rather than assumed: a second mapping would overwrite the first and
+	 * orphan it, and a partial one would leave dma_region_drop() removing
+	 * a range wider than what was mapped -- which on a task's map is not a
+	 * no-op, it is somebody else's mapping.
+	 */
+	if (region->task != TASK_NULL) {
+		task_deallocate(task);
+		return KERN_RESOURCE_SHORTAGE;
+	}
+
+	if (round_page(size) != region->size) {
+		task_deallocate(task);
+		return KERN_INVALID_ARGUMENT;
+	}
+
 	kr = map_phys_into_task(task, pa, round_page(size), &uva);
-	task_deallocate(task);
-	if (kr != KERN_SUCCESS)
+	if (kr != KERN_SUCCESS) {
+		task_deallocate(task);
 		return kr;
+	}
+
+	/*
+	 * The reference is KEPT: dma_region_drop() needs the map to still
+	 * exist when it removes the mapping, and it gives the reference back
+	 * itself.
+	 */
+	region->task = task;
+	region->uva = uva;
 
 	*uva_out = uva;			/* #427: no narrowing cast */
 	return KERN_SUCCESS;
