@@ -851,6 +851,28 @@ main(int argc, char **argv)
 	 * not a defect, and the failure was being read as the control doing
 	 * its job.
 	 *
+	 * 🔴🔴 AND THEN IT MADE THE SAME MISTAKE ONE LINE LOWER (#535).  Taking
+	 * the count from the kernel fixed the numerator and left the
+	 * comparison exact: `released == freed' on a counter that is GLOBAL,
+	 * so any other task freeing a region in the same window makes the
+	 * kernel's delta larger than this task's count.  `freed 16, the kernel
+	 * says it released 18' -- and the paragraph above, claiming the shared
+	 * table had been accounted for, is what made it read as settled.
+	 *
+	 * 🔑 So the predicate is arm [1]'s: AT LEAST as many as this task
+	 * freed, never exactly.
+	 *
+	 * ⚠️ And `n2' -- how many could be taken again -- is NOT added to it,
+	 * however much it looks like the missing strength.  That is the first
+	 * version of this arm word for word: on a shared table another task
+	 * may take a slot between the free and the refill, and requiring n
+	 * back would fail for the table doing what it is for.  The refill is
+	 * reported and stays unarmed for the same reason it always did.
+	 *
+	 * ⚠️ It went unseen until a per-task bound on the table (#535) left
+	 * other tasks holding regions during this window.  While one task
+	 * could take every slot, nobody else had anything to free here.
+	 *
 	 * ⚠️ The refill still happens, because the arms after this one need a
 	 * full table; what changed is that its count is reported and not
 	 * armed.
@@ -871,7 +893,7 @@ main(int argc, char **argv)
 		       n, after - before, n2);
 
 		arm(3, "control: an explicit free gives every slot back",
-		    after - before == n);
+		    after - before >= n);
 	}
 	free_table(kva, n2);
 

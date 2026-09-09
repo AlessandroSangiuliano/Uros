@@ -738,7 +738,36 @@ ds_master_device_intr_enable(
  */
 #define	DEVICE_CONTIG_MAX_PAGES	64
 
-#define	DEVICE_MAX_DMA_REGIONS	16
+/*
+ * ── The table, and how much of it one task may hold (#535) ───────────────
+ *
+ * 🔴 A GLOBAL TABLE ANY TASK CAN EMPTY IS A DENIAL OF SERVICE, and it was
+ * being reached by accident every boot.  dma_reclaim_test asks for regions
+ * until it is refused -- which is its job: it is the fixture that checks a
+ * dead task's regions come back -- and a driver probing inside that window
+ * was told there was no room and gave up its controller for the whole boot.
+ * Roughly half the -smp 4 boots lost the AHCI controller, its two disks and
+ * everything downstream of them, in every campaign since #529.
+ *
+ * 🔑 A BIGGER TABLE CANNOT FIX THAT.  A task whose contract is "take
+ * everything" takes sixty-four slots as readily as sixteen, so the size is
+ * not the variable that decides; what decides is that no one task can be the
+ * one holding all of them.  The bound is the fix and the size follows from
+ * it, in that order.
+ *
+ * The numbers are measured and not chosen.  block_device_server peaks at
+ * NINE regions held at once -- both AHCI ports, the virtio queues, and the
+ * buffers that are reallocated during a probe -- so the per-task bound has
+ * to be comfortably above nine, and the table has to leave nine free after
+ * the greediest tasks have taken all they may.  The fixture is two tasks
+ * that both fill, so 64 - 2*16 = 32 still covers the busiest real one.
+ *
+ * ⚠️ It is a bound per TASK and not per driver.  Every block driver is a
+ * module inside one server, so that server asks as a single task for every
+ * controller it owns.
+ */
+#define	DEVICE_MAX_DMA_REGIONS		64
+#define	DEVICE_MAX_REGIONS_PER_TASK	16
 #define	DEVICE_MAX_REGION_USERS	4
 
 struct dma_region {
@@ -864,6 +893,29 @@ dma_region_add(vm_offset_t kva, vm_size_t size, const vm_offset_t *pa,
 
 	if (r == 0)
 		return KERN_NO_SPACE;
+
+	/*
+	 * 🔑 A THIRD ANSWER, because it is a different question.  "The table
+	 * is full" is somebody else's doing and may be over in a moment, so a
+	 * caller that waits is being sensible.  "You already hold as many as
+	 * you may" is about this caller and will never come right by waiting.
+	 * A driver has to be able to tell them apart to know whether trying
+	 * again is a strategy or a spin.
+	 *
+	 * ⚠️ And it is an authority answer rather than a scarcity one.  The
+	 * machine has room; this task is not allowed it.
+	 */
+	{
+		task_t		me = current_task();
+		unsigned int	held = 0, j;
+
+		for (j = 0; j < DEVICE_MAX_DMA_REGIONS; j++)
+			if (dma_region[j].kva != 0 && dma_region[j].owner == me)
+				held++;
+
+		if (held >= DEVICE_MAX_REGIONS_PER_TASK)
+			return KERN_NO_ACCESS;
+	}
 
 	r->pa = (vm_offset_t *) kalloc(npages * sizeof(vm_offset_t));
 	if (r->pa == 0)
