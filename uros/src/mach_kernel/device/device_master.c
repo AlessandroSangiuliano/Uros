@@ -1956,6 +1956,72 @@ ds_master_device_dma_table(
 	return KERN_SUCCESS;
 }
 
+/*
+ * Does the task that receives on `driver' hold the claim on `bdf' (#533)?
+ *
+ * 🔴 THE QUESTION device_dma_owned() COULD NOT ANSWER, AND WAS BEING ASKED.
+ * That one compares against the CALLER, so for a caller that never claims
+ * anything -- the HAL -- it degrades into "does anybody hold it".  The HAL
+ * used that to decide whether to believe a driver reporting BOUND, and "a
+ * driver holds it" is not "THIS driver holds it": while dma_reclaim_test held
+ * the host bridge, the block server's report about that same device was
+ * accepted and the registry recorded the wrong driver.
+ *
+ * 🔑 A PORT IS AN IDENTITY THAT CANNOT BE FORGED.  Only the driver's own task
+ * receives on the port it registered with, so this resolves that port to its
+ * receiving space and compares it with the space of the task that made the
+ * claim.  The security token would not have done: every task in this system
+ * inherits DEFAULT_USER_SECURITY_TOKEN, so it tells nobody apart.
+ *
+ * ⚠️ `held' is 0 both for "no claim" and for "somebody else's claim", because
+ * neither is permission to record a driver and the caller asking this does not
+ * need them apart.  A caller that does should ask for that instead of reading
+ * it out of this one -- which is the mistake this call exists to end.
+ */
+kern_return_t
+ds_master_device_claim_holder(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	ipc_port_t		driver,
+	natural_t		*held)
+{
+	kern_return_t	kr;
+	ipc_space_t	space = IS_NULL;
+	unsigned	i;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	*held = 0;
+
+	if (!IP_VALID(driver))
+		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * ⚠️ Under the port lock, and only while it is active: a port in
+	 * transit or in limbo has no receiver, and reading the union then
+	 * would answer with a destination port as if it were a space.
+	 */
+	ip_lock(driver);
+	if (ip_active(driver))
+		space = driver->ip_receiver;
+	ip_unlock(driver);
+
+	if (space == IS_NULL)
+		return KERN_SUCCESS;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf) {
+			*held = (device_claim[i].task != TASK_NULL
+				 && device_claim[i].task->itk_space == space)
+				? 1u : 0u;
+			return KERN_SUCCESS;
+		}
+
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 ds_master_device_dma_owned(
 	ipc_port_t		master_port,

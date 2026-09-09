@@ -203,12 +203,23 @@ hal_rescan(mach_port_t hal_port)
  * disagree with the one that actually gates DMA -- the failure #427 removed a
  * field for, moved one server along.
  *
- * ⚠️ device_dma_owned answers "is somebody OTHER THAN THE CALLER driving this",
- * and that is the right question here for a reason worth keeping: the HAL is
- * not a driver and never claims anything, so for it the answer is exactly "does
- * a driver hold this device".  It is the same call that answered nothing useful
- * in block_server.c -- where the caller WAS the driver -- and the difference is
- * who is asking, not what is asked.
+ * 🔴 IT USED TO ASK device_dma_owned, AND THAT WAS THE WRONG QUESTION (#533).
+ * That call answers "is somebody OTHER THAN THE CALLER driving this", and the
+ * HAL is not a driver and never claims anything -- so for it the answer
+ * degraded into "does ANYBODY hold this device".  The comment here said so and
+ * called it right.
+ *
+ * 🔑 "A driver holds it" is not "THIS driver holds it".  While dma_reclaim_test
+ * held the host bridge, this routine accepted the block server's report of
+ * BOUND for that same device and recorded the wrong driver against it -- which
+ * is precisely what block_server's own arm is written to catch, and it caught
+ * it, about one boot in twenty at -smp 4.
+ *
+ * ⚠️ The identity has to be one the reporter cannot forge.  A security token
+ * would not do: every task in this system inherits the same one.  A PORT does
+ * -- only the driver's task receives on the port it registered with -- so the
+ * kernel is asked to resolve that port to its receiving space and compare it
+ * with the space of the task that made the claim.
  */
 kern_return_t
 hal_report_probe(mach_port_t hal_port,
@@ -256,11 +267,12 @@ hal_report_probe(mach_port_t hal_port,
 	if (outcome == HAL_DEV_BOUND) {
 		bdf = (natural_t)((bus << 8) | (slot << 3) | func);
 
-		if (device_dma_owned(master_device, bdf, &by_other)
-		    != KERN_SUCCESS || by_other == 0) {
+		if (device_claim_holder(master_device, bdf, driver_port,
+					&by_other) != KERN_SUCCESS
+		    || by_other == 0) {
 			printf("hal: %u:%u.%u reported BOUND and the kernel "
-			       "does not have it claimed — not recorded\n",
-			       bus, slot, func);
+			       "does not have it claimed BY THAT DRIVER — not "
+			       "recorded\n", bus, slot, func);
 			return KERN_FAILURE;
 		}
 	}
