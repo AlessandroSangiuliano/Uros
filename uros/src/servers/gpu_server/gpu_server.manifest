@@ -1,0 +1,22 @@
+# gpu_server manifest — the policy for the task that drives the display (#511).
+#
+# 🔴 IT HAD NONE, and until this issue it did not need one: mapping the VGA
+# text buffer at 0xB8000 required nothing but the master device port, and the
+# module said so in as many words -- `(void)dev; legacy VGA: HAL hint not
+# used'.  A physical range belongs to a device now, so the window is mapped
+# for whoever holds a display-class device, and this server has to be one.
+#
+# ⚠️ The text buffer is NOT one of this device's BARs.  It is a legacy window,
+# fixed at 0xB8000 since the PC, and the kernel attributes it by CLASS rather
+# than by any register the device carries.  That is why the line below names a
+# class and why it is the class that matters.
+
+name gpu_server
+
+# RESOURCE_PCI_DEVICE (5), class 0x030000 -- VGA-compatible display -- MMIO.
+#
+# 🔑 MMIO alone, and no DMA and no IRQ, because that is all this server does:
+# it maps a window and writes characters into it.  A manifest that declared
+# the full 0x7 out of symmetry with block_device_server would be granting
+# authority nobody asked for, which is the habit this file exists to break.
+required 5 0x030000 0x2

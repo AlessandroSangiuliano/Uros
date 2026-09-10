@@ -2407,10 +2407,39 @@ ds_master_device_claim(
 
 	class_id = (uint64_t)(class_word >> 8);
 
+	/*
+	 * 🔴 THE OP CHECKED HERE WAS CAP_OP_PCI_DMA_MAP, ALWAYS (#511).
+	 *
+	 * So claiming any device at all required DMA authority over it, and a
+	 * server that only wants to map a device's registers had to be granted
+	 * the right to program its DMA engine in order to say the device was
+	 * its own.  gpu_server is exactly that server: it maps the VGA text
+	 * window and does nothing else, its manifest declares MMIO alone, and
+	 * the claim was refused for an op it never asked to use.
+	 *
+	 * 🔑 A CLAIM IS NOT AN OPERATION.  It says "this device is mine", and
+	 * what may be done with it is what the capability's ops say.  So the
+	 * check here is that the capability covers this device's class and
+	 * carries at least one thing one can do to a device -- and WHICH thing
+	 * is the question the operations themselves have to ask.
+	 *
+	 * ⚠️ That finer half is not done here: device_dma_alloc and
+	 * device_mmio_map check that the caller holds the CLAIM, not that its
+	 * capability carries the matching op.  Naming it rather than implying
+	 * it, because a check that looks complete and is not is how this file
+	 * got the arrangement above.
+	 */
 	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
+	if (kr != KERN_SUCCESS)
+		kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_MMIO_MAP,
+					 class_id);
+	if (kr != KERN_SUCCESS)
+		kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_IRQ,
+					 class_id);
 	if (kr != KERN_SUCCESS) {
 		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — its "
-		       "capability does not cover class 0x%06lx (kr=%d)\n",
+		       "capability does not cover class 0x%06lx with any "
+		       "device operation (kr=%d)\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 7), (unsigned long)me,
 		       (unsigned long)class_id, (int)kr);

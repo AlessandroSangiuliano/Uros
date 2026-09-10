@@ -50,7 +50,10 @@
 #include <gpu/gpu_types.h>
 
 #include "../gpu_server.h"
-#include "device_master.h"	/* MIG: device_mmio_map */
+#include "device_master.h"	/* MIG: device_mmio_map, device_claim */
+#include <mach/cap_types.h>	/* RESOURCE_PCI_DEVICE, CAP_OP_PCI_* (#511) */
+#include <libcap.h>		/* cap_request (#511) */
+#include "hal_server.h"	/* struct hal_device_info — the device to claim (#511) */
 
 /* ============================================================
  * VGA constants
@@ -109,6 +112,23 @@ struct vga_surface {
 
 struct vga_priv {
 	int			attached;
+	/*
+	 * ── The device this module drives, kept rather than discarded (#511) ──
+	 *
+	 * 🔴 vga_probe() TOOK THE HAL'S DEVICE AND THREW IT AWAY: `(void)dev;
+	 * legacy VGA: HAL hint not used'.  True while mapping 0xB8000 needed
+	 * nothing but the master device port -- and that was the defect.  A
+	 * physical range now belongs to a device, and the kernel will only map
+	 * it for the task that has claimed that device, so this module has to
+	 * know which device it is driving and say so.
+	 *
+	 * ⚠️ The text buffer is not one of this device's BARs.  It is a legacy
+	 * window, and the kernel attributes it by CLASS: whoever holds a
+	 * display-class device may map it.  That is why the class is kept too.
+	 */
+	natural_t		bdf;
+	unsigned int		class_rev;
+	uint64_t		cap_id;
 	volatile uint16_t	*fb;		/* mapped VGA VRAM (0xB8000) */
 	struct vga_surface	surf[VGA_NSURFACES];
 	unsigned int		active;		/* surface currently on screen */
@@ -370,9 +390,15 @@ vga_surf_putc(struct vga_surface *s, char ch)
 static void *
 vga_probe(const struct hal_device_info *dev)
 {
-	(void)dev;	/* legacy VGA: HAL hint not used — see header */
 	if (vga_priv_singleton.attached)
 		return NULL;	/* single-instance guard */
+
+	if (dev != NULL) {
+		vga_priv_singleton.bdf = (natural_t)((dev->bus << 8)
+						     | (dev->slot << 3)
+						     | dev->func);
+		vga_priv_singleton.class_rev = dev->class_rev;
+	}
 	return &vga_priv_singleton;
 }
 
@@ -382,6 +408,40 @@ vga_attach(void *priv)
 	struct vga_priv *p = (struct vga_priv *)priv;
 	natural_t uva = 0;
 	kern_return_t kr;
+
+	/*
+	 * The claim comes first, because the mapping below is granted on the
+	 * strength of it (#511).  A capability for the CLASS, from this
+	 * server's manifest, presented to the kernel for this INSTANCE --
+	 * which the kernel re-reads out of the device's own configuration
+	 * space rather than taking on trust.
+	 */
+	{
+		struct uros_cap tok;
+
+		memset(&tok, 0, sizeof(tok));
+		kr = cap_request(RESOURCE_PCI_DEVICE,
+				 (uint64_t)(p->class_rev >> 8),
+				 CAP_OP_PCI_MMIO_MAP, 0, &tok);
+		if (kr != KERN_SUCCESS) {
+			printf("vga: cap_server would not issue a capability "
+			       "for class 0x%06x (kr=%d)\n",
+			       p->class_rev >> 8, (int)kr);
+			return -1;
+		}
+
+		kr = device_claim(gpu_device_port, p->bdf,
+				  (char *)&tok, sizeof(tok));
+		if (kr != KERN_SUCCESS) {
+			printf("vga: the kernel refused this server the claim "
+			       "on %u:%u.%u (kr=%d)\n",
+			       (unsigned)(p->bdf >> 8),
+			       (unsigned)((p->bdf >> 3) & 0x1F),
+			       (unsigned)(p->bdf & 0x7), (int)kr);
+			return -1;
+		}
+		p->cap_id = tok.cap_id;
+	}
 
 	kr = device_mmio_map(gpu_device_port,
 			     VGA_TEXT_PHYS, VGA_TEXT_SIZE,

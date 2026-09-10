@@ -92,6 +92,9 @@ BOOTSTRAP_CMF="$MANIFESTS/bootstrap.cmf"
 # boot stands on.
 DEFAULT_PAGER_CMF="$MANIFESTS/default_pager.cmf"
 EXT_SERVER_CMF="$MANIFESTS/ext_server.cmf"
+# #511: and the display server, which claims a display-class device so the
+# kernel will map the legacy VGA text window at 0xB8000 for it.
+GPU_SERVER_CMF="$MANIFESTS/gpu_server.cmf"
 
 NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
@@ -277,6 +280,7 @@ ARGS+=("hello_server:$HELLO_SERVER")
 [ -f "$BOOTSTRAP_CMF" ] && ARGS+=("bootstrap.cmf:$BOOTSTRAP_CMF")
 [ -f "$DEFAULT_PAGER_CMF" ] && ARGS+=("default_pager.cmf:$DEFAULT_PAGER_CMF")
 [ -f "$EXT_SERVER_CMF" ] && ARGS+=("ext_server.cmf:$EXT_SERVER_CMF")
+[ -f "$GPU_SERVER_CMF" ] && ARGS+=("gpu_server.cmf:$GPU_SERVER_CMF")
 ARGS+=("ipc_bench:$IPC_BENCH")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
