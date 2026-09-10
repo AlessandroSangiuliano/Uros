@@ -1800,6 +1800,32 @@ ds_master_device_dma_map_user(
 	if (kva == 0 || size == 0)
 		return KERN_INVALID_ARGUMENT;
 
+	/*
+	 * 🔑 THE REGION HAS TO BE THIS TASK'S (#511).  Holding the master
+	 * device port was the whole of the authority here, so any task that
+	 * asked bootstrap for it could map ANOTHER server's DMA buffer into a
+	 * task of its choosing -- the same defect as mmio_map's, one argument
+	 * over, and it needs no claim to answer: the kernel made the
+	 * allocation and recorded who asked for it.
+	 */
+	{
+		task_t		me = current_task();
+		unsigned int	i;
+		int		mine = 0;
+
+		for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+			if (dma_region[i].kva == kva) {
+				mine = dma_region[i].owner == me;
+				break;
+			}
+
+		if (!mine) {
+			printf("device_dma_map_user: 0x%lx is not a region "
+			       "this task allocated\n", (unsigned long)kva);
+			return KERN_NO_ACCESS;
+		}
+	}
+
 	task = convert_port_to_task(task_port);
 	if (task == TASK_NULL)
 		return KERN_INVALID_ARGUMENT;
