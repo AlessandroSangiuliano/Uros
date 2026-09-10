@@ -1457,14 +1457,29 @@ test_explicit_sched(void)
  * boot at -smp 4 that cap_test never reached its verdict.  An instrument that
  * changes the run it is measuring is measuring something else.
  *
- * 🔴 100000 WAS CHOSEN AGAINST THE WORST CASE THEN OBSERVED AND IT WAS NOT
- * ENOUGH.  Six boots with the lock ablated: five caught it, and the sixth ran
- * the whole 100000 under KVM and reported no collision at all -- an
+ * 🔴 ONE BOOT IS NOT THE UNIT OF EVIDENCE, AND PRETENDING IT IS COST TWO
+ * WRONG BOUNDS.  100000 was first chosen against the largest count seen so
+ * far, and a later ablated boot ran all of it and reported nothing -- an
  * instrument built not to lie, saying green on a tree with the defect in it.
- * The counts to first collision were 129, 522, 1768 under TCG and 1994,
- * 11047, 13881, 14423, 20453, 96694 under KVM, so the tail is long and 100000
- * sits inside it.  The bound below is set from a measured distribution, not
- * from the largest number seen so far.
+ *
+ * 🔑 Twelve ablated boots under KVM settled it, and the shape of the answer
+ * matters more than the rate.  First collision at 7, 17596, 33738, 53734,
+ * 68877, 75309, 90739, 98433, and four boots that saw none: spread evenly
+ * across the whole range, which is what a CONSTANT HAZARD PER ALLOCATION
+ * looks like and not what a tail looks like.  So detection is memoryless,
+ * about 1.1 expected collisions per 100000 allocations, and the bound is no
+ * longer a guess: P(detect) = 1 - e^-(N/90000).  100000 gives two boots in
+ * three; ten boots of a campaign give better than 99.99%.
+ *
+ * ⚠️ Which is why the bound stays small.  Buying certainty inside one boot
+ * costs every boot -- 400000 for 99% -- while the campaign that already runs
+ * buys the same certainty for nothing.  The arm reports its own rate so a
+ * single green boot is never read as an all-clear.
+ *
+ * ⚠️ And a third outcome exists: one ablated boot started pthread_test and
+ * never reached any verdict, which is the corrupted free list killing the
+ * task rather than the detector catching it.  That is evidence FOR the
+ * defect, and counting it as a miss would understate the arm.
  */
 #define MR_THREADS	4
 #define MR_ITERS	25000		/* x MR_THREADS = 100000 allocations */
@@ -1533,14 +1548,18 @@ malloc_race_thread(void *arg)
 			p[k] = a->id;
 
 		/*
-		 * ⚠️ THERE WAS A YIELD HERE AND IT MADE THE ARM WORSE.  The
-		 * reasoning written next to it was that yielding widens the
-		 * window for another thread to be inside malloc -- but what it
-		 * actually does is stop this thread from being inside malloc,
-		 * which is the opposite.  What this arm needs is four threads
-		 * in the allocator at the same instant, and the way to get
-		 * that is to leave them alone.
+		 * ⚠️ THIS YIELD WAS REMOVED ONCE, ON THE ARGUMENT THAT IT TAKES
+		 * THE THREAD OUT OF THE ALLOCATOR RATHER THAN WIDENING THE
+		 * WINDOW, AND THE ARGUMENT WAS WRITTEN DOWN AS A FINDING
+		 * BEFORE IT WAS MEASURED.  It is not one: 8 of 12 with it, 5
+		 * of 9 without, which at these sizes does not tell the two
+		 * apart.  It stays because it costs nothing measurable and it
+		 * is what keeps the stamp check alive -- without it the stamp
+		 * never fires and only the published pointer does, leaving one
+		 * detector where there were two.
 		 */
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 0);
+
 		for (k = 0; k < MR_WORDS; k++)
 			if (p[k] != a->id)
 				bad_stamp = 1;
@@ -1615,7 +1634,9 @@ test_malloc_under_threads(void)
 	}
 
 	printf("  [%d] malloc under threads: %u allocations across %d threads,"
-	       " no block had two owners (%u refused)\n",
+	       " no block had two owners (%u refused) — measured to catch an"
+	       " unlocked allocator 2 boots in 3, so one pass is not an"
+	       " all-clear\n",
 	       ++test_num, iters, MR_THREADS, nulls);
 }
 
