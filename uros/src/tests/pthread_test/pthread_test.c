@@ -30,6 +30,7 @@
 
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>			/* malloc/free — the subject of [24] */
 #include <sys/timers.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
@@ -1420,6 +1421,271 @@ test_explicit_sched(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 24: one block belongs to one caller (#540)
+ *
+ * 🔥 THE DEFECT THIS ARM EXISTS FOR IS NOT REACHABLE BY A CAMPAIGN.  It was
+ * found once in fifty-two boots -- bootstrap relocated pci_scan.so while it
+ * had asked for irq_claim_test, because both threads were handed the same
+ * sixteen-byte block -- and forty boots straight after it showed nothing.  A
+ * green campaign after a fix would be indistinguishable from a green campaign
+ * with the defect still in, so the fix has to be verified against something
+ * that can provoke it on purpose.
+ *
+ * 🔑 The check is a PRESENCE, not an absence: a thread stamps its own id into
+ * the block it was given and reads it back.  A different id there is not a
+ * statistic, it is another thread's write into memory this one owns.
+ *
+ * ⚠️ On the first collision every thread stops.  The point is already made,
+ * and going on means writing through a pointer somebody else has freed --
+ * which corrupts the free list and can take the task down before it can say
+ * what it saw.
+ *
+ * 🔴 THIS ARM DETECTS ON A MULTIPROCESSOR ONLY.  At -smp 1 it ran 800000
+ * allocations under both accelerators and found nothing, on the same tree
+ * where -smp 4 found a collision in the first few hundred.  That is a limit
+ * of the instrument and NOT a finding about uniprocessors: the same
+ * read-modify-write of a global is still there, and a timer interrupt landing
+ * between the two halves is all it takes.  A pass here says nothing about
+ * -smp 1, and this comment exists so nobody reads it as though it did.
+ * ---------------------------------------------------------------- */
+
+/*
+ * ⚠️ THE COUNT IS A COST WHEN THE DEFECT IS ABSENT AND FREE WHEN IT IS
+ * PRESENT, because a collision stops every thread.  At 200000 each the arm
+ * finished in a fraction of a second while the race was still there, and then,
+ * once the allocator was fixed, ran the whole 800000 and ate enough of a TCG
+ * boot at -smp 4 that cap_test never reached its verdict.  An instrument that
+ * changes the run it is measuring is measuring something else.
+ *
+ * 🔴 ONE BOOT IS NOT THE UNIT OF EVIDENCE, AND PRETENDING IT IS COST TWO
+ * WRONG BOUNDS.  100000 was first chosen against the largest count seen so
+ * far, and a later ablated boot ran all of it and reported nothing -- an
+ * instrument built not to lie, saying green on a tree with the defect in it.
+ *
+ * 🔑 Twelve ablated boots under KVM settled it, and the shape of the answer
+ * matters more than the rate.  First collision at 7, 17596, 33738, 53734,
+ * 68877, 75309, 90739, 98433, and four boots that saw none: spread evenly
+ * across the whole range, which is what a CONSTANT HAZARD PER ALLOCATION
+ * looks like and not what a tail looks like.  So detection is memoryless,
+ * about 1.1 expected collisions per 100000 allocations, and the bound is no
+ * longer a guess: P(detect) = 1 - e^-(N/90000).  100000 gives two boots in
+ * three; ten boots of a campaign give better than 99.99%.
+ *
+ * ⚠️ Which is why the bound stays small.  Buying certainty inside one boot
+ * costs every boot -- 400000 for 99% -- while the campaign that already runs
+ * buys the same certainty for nothing.  The arm reports its own rate so a
+ * single green boot is never read as an all-clear.
+ *
+ * ⚠️ And a third outcome exists: one ablated boot started pthread_test and
+ * never reached any verdict, which is the corrupted free list killing the
+ * task rather than the detector catching it.  That is evidence FOR the
+ * defect, and counting it as a miss would understate the arm.
+ */
+#define MR_THREADS	4
+#define MR_ITERS	25000		/* x MR_THREADS = 100000 allocations */
+#define MR_WORDS	4
+
+struct mr_arg {
+	unsigned int	idx;
+	unsigned int	id;
+	unsigned int	iters;		/* how far this thread got */
+	unsigned int	shared;		/* two threads published one block */
+	unsigned int	overwritten;	/* the stamp came back somebody else's */
+	unsigned int	nulls;
+};
+
+static volatile int	mr_stop;
+
+/*
+ * 🔑 TWO DETECTORS, BECAUSE THE FIRST ONE MISSES HALF OF WHAT IT LOOKS FOR.
+ * Reading back a stamp only shows a collision when the other thread wrote
+ * between this thread's write and its read; when it writes first, this thread
+ * overwrites the evidence and sees its own id.  The ablation showed the cost
+ * of that directly -- with the free list unguarded the first collision turned
+ * up after 4 allocations under TCG but after 96694 under KVM, against a bound
+ * of 100000.  A bound that a real defect clears by three percent is a bound
+ * that the next run gets past.
+ *
+ * So each thread also PUBLISHES the block it is holding, and looks at what
+ * the others published.  Two live pointers being equal is not a symptom of
+ * the defect, it is the defect, and it does not depend on who wrote first.
+ * The slot is cleared before the free, so a pointer that has been given back
+ * can never be mistaken for one still held.
+ */
+static void * volatile	mr_live[MR_THREADS];
+
+static void *
+malloc_race_thread(void *arg)
+{
+	struct mr_arg	*a = (struct mr_arg *)arg;
+	unsigned int	i, k;
+
+	for (i = 0; i < MR_ITERS && !mr_stop; i++) {
+		volatile unsigned int *p;
+		int		 bad = 0, bad_stamp = 0;
+
+		p = (volatile unsigned int *)malloc(MR_WORDS * sizeof(*p));
+		if (p == NULL) {
+			a->nulls++;
+			continue;
+		}
+
+		/*
+		 * Published before the others are read, and both with full
+		 * ordering: if two threads hold this block, whichever of them
+		 * scans last is certain to see the other's slot.
+		 */
+		__atomic_store_n(&mr_live[a->idx], (void *)p, __ATOMIC_SEQ_CST);
+		for (k = 0; k < MR_THREADS; k++)
+			if (k != a->idx
+			    && __atomic_load_n(&mr_live[k], __ATOMIC_SEQ_CST)
+			       == (void *)p) {
+				a->shared++;
+				bad = 1;
+			}
+
+		for (k = 0; k < MR_WORDS; k++)
+			p[k] = a->id;
+
+		/*
+		 * ⚠️ THIS YIELD WAS REMOVED ONCE, ON THE ARGUMENT THAT IT TAKES
+		 * THE THREAD OUT OF THE ALLOCATOR RATHER THAN WIDENING THE
+		 * WINDOW, AND THE ARGUMENT WAS WRITTEN DOWN AS A FINDING
+		 * BEFORE IT WAS MEASURED.  It is not one: 8 of 12 with it, 5
+		 * of 9 without, which at these sizes does not tell the two
+		 * apart.  It stays because it costs nothing measurable and it
+		 * is what keeps the stamp check alive -- without it the stamp
+		 * never fires and only the published pointer does, leaving one
+		 * detector where there were two.
+		 */
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 0);
+
+		for (k = 0; k < MR_WORDS; k++)
+			if (p[k] != a->id)
+				bad_stamp = 1;
+		if (bad_stamp) {
+			a->overwritten++;	/* one event, not one per word */
+			bad = 1;
+		}
+
+		if (bad) {
+			mr_stop = 1;
+			a->iters = i + 1;
+			__atomic_store_n(&mr_live[a->idx], NULL,
+					 __ATOMIC_SEQ_CST);
+			return NULL;
+		}
+
+		__atomic_store_n(&mr_live[a->idx], NULL, __ATOMIC_SEQ_CST);
+		free((void *)p);
+	}
+
+	a->iters = i;
+	return NULL;
+}
+
+static void
+test_malloc_under_threads(void)
+{
+	pthread_t	th[MR_THREADS];
+	struct mr_arg	a[MR_THREADS];
+	unsigned int	i;
+	unsigned int	shared = 0, overwritten = 0, nulls = 0, iters = 0;
+	char		buf[160];
+
+	mr_stop = 0;
+	for (i = 0; i < MR_THREADS; i++) {
+		mr_live[i] = NULL;
+		a[i].idx = i;
+		a[i].id = 0xA5A50000u + i;
+		a[i].iters = 0;
+		a[i].shared = 0;
+		a[i].overwritten = 0;
+		a[i].nulls = 0;
+	}
+
+	for (i = 0; i < MR_THREADS; i++)
+		if (pthread_create(&th[i], NULL, malloc_race_thread,
+				   &a[i]) != 0) {
+			test_fail("malloc under threads",
+				  "pthread_create failed");
+			mr_stop = 1;
+			while (i-- > 0)
+				pthread_join(th[i], NULL);
+			return;
+		}
+
+	for (i = 0; i < MR_THREADS; i++) {
+		pthread_join(th[i], NULL);
+		shared += a[i].shared;
+		overwritten += a[i].overwritten;
+		nulls += a[i].nulls;
+		iters += a[i].iters;
+	}
+
+	if (shared != 0 || overwritten != 0) {
+		snprintf(buf, sizeof(buf),
+			 "a block held two owners after %u allocation(s) "
+			 "across %d threads — %u seen as two live pointers, "
+			 "%u as a stamp read back wrong",
+			 iters, MR_THREADS, shared, overwritten);
+		test_fail("malloc under threads", buf);
+		return;
+	}
+
+	printf("  [%d] malloc under threads: %u allocations across %d threads,"
+	       " no block had two owners (%u refused) — measured to catch an"
+	       " unlocked allocator 2 boots in 3, so one pass is not an"
+	       " all-clear\n",
+	       ++test_num, iters, MR_THREADS, nulls);
+}
+
+/* ----------------------------------------------------------------
+ * Test 25: what the lock costs the caller who never contends for it (#540)
+ *
+ * 🔑 EVERY SINGLE-THREADED PROGRAM IN THE SYSTEM NOW PAYS FOR SERIALISATION
+ * IT WILL NEVER NEED, and "an exchange is cheap" is an assertion until it is
+ * a number.  One thread, no contention, the same shape as [15] so the two can
+ * be read against each other: this is the whole price of #540 on the path
+ * that is not the reason for #540.
+ *
+ * ⚠️ It is a cost per pair and not a percentage, because a percentage would
+ * need a baseline from a tree that no longer exists.  To turn it into one,
+ * ablate the lock and read this line again on the same machine.
+ *
+ * 🔴 THAT WAS DONE, AND THE ANSWER IS NOT SMALL: median of five boots each
+ * under KVM, 96 cycles with the lock against 47 without.  The lock DOUBLES an
+ * uncontended pair, +49 cycles, which is the two locked exchanges a pair now
+ * pays -- one in malloc, one in free.  For scale, [15] measures a pthread
+ * mutex lock/unlock pair at 255 in the same boot, so an allocation still costs
+ * well under half of that; and this is the number that would justify a
+ * per-thread cache, not a feeling that one would be nice.
+ * ---------------------------------------------------------------- */
+
+static void
+test_malloc_bench(void)
+{
+	unsigned long long	start, end;
+	void			*p;
+	int			i;
+	int			n = 100000;
+
+	/* Warm the free list so the bump-pointer and vm_map paths are not
+	   what gets measured. */
+	p = malloc(32);
+	free(p);
+
+	start = tsc_now();
+	for (i = 0; i < n; i++) {
+		p = malloc(32);
+		free(p);
+	}
+	end = tsc_now();
+
+	print_per_iter("malloc/free uncontended", n, end - start);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -1465,6 +1731,8 @@ main(int argc, char **argv)
 	test_setschedprio();
 	test_setschedparam();
 	test_explicit_sched();
+	test_malloc_under_threads();
+	test_malloc_bench();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
