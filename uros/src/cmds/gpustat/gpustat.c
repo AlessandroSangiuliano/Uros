@@ -78,6 +78,11 @@ main(int argc, char **argv)
 		return 1;
 
 	printf_init(device_port);
+	/*
+	 * 🔴 AND GIVEN BACK (#511).  Bus authority, wanted to open a console.
+	 * See the note above printf_init() in libmach/printf.c.
+	 */
+	(void) mach_port_deallocate(mach_task_self(), device_port);
 
 	/* Wait until both cap_server and gpu_server are registered.
 	 * bootstrap.conf launch ordering doesn't guarantee we run last,
