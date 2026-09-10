@@ -2139,6 +2139,80 @@ ds_master_device_mmio_map(
 	return KERN_SUCCESS;
 }
 
+
+/*
+ * device_region_map — map one of a claimed device's regions (#511).
+ *
+ * 🔑 The caller says WHICH region and cannot say where it is.  The kernel
+ * measured the device's regions when it was handed over, so both the address
+ * and the width come from the hardware rather than from an argument -- there
+ * is nothing here that could name somebody else's memory.
+ */
+kern_return_t
+ds_master_device_region_map(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	natural_t		index,
+	ipc_port_t		task_port,
+	vm_address_t		*uva_out,
+	vm_size_t		*size_out)
+{
+	task_t		task;
+	task_t		me = current_task();
+	kern_return_t	kr;
+	unsigned	i;
+	vm_offset_t	phys_base, uva;
+	vm_size_t	round_sz;
+	unsigned int	page_offset;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf)
+			break;
+
+	if (i == device_nclaims || device_claim[i].task != me) {
+		printf("device_region_map: %u:%u.%u is not this task's\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 0x7));
+		return KERN_NO_ACCESS;
+	}
+
+	if (index >= device_claim[i].nregions)
+		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * ⚠️ An I/O region has no address to map.  Refusing says so, where
+	 * mapping its base as if it were memory would hand back a window onto
+	 * whatever physical memory happens to live at that number.
+	 */
+	if (device_claim[i].region[index].is_io)
+		return KERN_INVALID_ARGUMENT;
+
+	task = convert_port_to_task(task_port);
+	if (task == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	phys_base   = trunc_page((vm_offset_t)
+				 device_claim[i].region[index].base);
+	page_offset = (unsigned int)(device_claim[i].region[index].base
+				     - phys_base);
+	round_sz    = round_page(page_offset
+				 + device_claim[i].region[index].size);
+
+	kr = map_pages_into_task(task, phys_base, 0,
+				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
+	task_deallocate(task);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	*uva_out  = uva + page_offset;
+	*size_out = (vm_size_t)device_claim[i].region[index].size;
+	return KERN_SUCCESS;
+}
+
 /*
  * device_mmio_unmap — remove an MMIO mapping from a user task.
  */
