@@ -630,6 +630,68 @@ ds_master_device_pci_config_write(
 
 /* ---- Interrupt forwarding ---- */
 
+
+/*
+ * Is this interrupt line a claimed device's, and is that claim this task's?
+ * (#511)
+ *
+ * 🔴 device_intr_register CHECKED THE MASTER PORT AND A BOUND.  So any task
+ * bootstrap handed the port to could take the line a running driver's device
+ * raises -- there is one handler per line, so taking it means the driver
+ * stops getting its interrupts, and the driver is not told.
+ *
+ * 🔑 NOT "a claim is required", which would be the wrong rule.  Three kinds
+ * of caller ask for a line and only one of them owns a PCI device:
+ *
+ *   a driver whose device raises that line -- the case this protects;
+ *   char_server, whose serial and keyboard lines are ISA legacy and belong
+ *   to no PCI device at all;
+ *   irq_claim_test, which deliberately takes a line NOBODY drives, because
+ *   what it is testing is the claim mechanism itself.
+ *
+ * So the rule is about the line's OWNER and not about the caller's holdings:
+ * if a claimed device raises it, it is that task's; otherwise the existing
+ * one-handler-per-line rule is the whole of the arbitration, as it was.
+ *
+ * ⚠️ Register 0x3C is the interrupt LINE, which is what the device was
+ * programmed with rather than what it is wired to.  That is the number this
+ * RPC is asked for, so it is the number to compare -- but it is written by
+ * firmware and a device that was never programmed reads 0 or 0xFF, so those
+ * two answers are not treated as owning line 0 or line 255.
+ */
+static kern_return_t
+check_irq_owner(unsigned int irq)
+{
+	task_t		me = current_task();
+	unsigned	i;
+
+	for (i = 0; i < device_nclaims; i++) {
+		natural_t	bdf = device_claim[i].bdf;
+		unsigned int	line;
+
+		if (bdf == DEVICE_BDF_BUS)
+			continue;
+
+		line = device_md_pci_read((unsigned)(bdf >> 8),
+					  (unsigned)((bdf >> 3) & 0x1F),
+					  (unsigned)(bdf & 0x7), 0x3C) & 0xFF;
+
+		if (line == 0 || line == 0xFF || line != irq)
+			continue;
+
+		if (device_claim[i].task == me)
+			return KERN_SUCCESS;
+
+		printf("device_intr_register: irq %u is raised by %u:%u.%u, "
+		       "which another task holds\n", irq,
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 0x7));
+		return KERN_NO_ACCESS;
+	}
+
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 ds_master_device_intr_register(
 	ipc_port_t		master_port,
@@ -654,6 +716,10 @@ ds_master_device_intr_register(
 	 */
 	if (irq >= IRQ_FORWARD_LINES)
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_irq_owner(irq);
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	if (notify_port == IP_NULL)
 		return KERN_INVALID_ARGUMENT;
@@ -1991,6 +2057,73 @@ ds_master_device_mmio_unmap(
 
 /* ---- I/O port access ---- */
 
+
+/*
+ * Is this I/O port inside a claimed device's I/O BAR, and is that claim this
+ * task's? (#511)
+ *
+ * 🔴 device_io_port_read/write CHECKED THE SIZE.  An x86 I/O port is the
+ * other way into a device -- the virtio driver programs its whole queue
+ * through BAR0 that way -- and any task holding the master device port could
+ * write any port on the machine.
+ *
+ * ⚠️ AN I/O BAR CARRIES ITS SIZE NOWHERE READABLE either, for the reason the
+ * memory side gives: a size is measured by writing ones and reading back
+ * (#427), which cannot be done to a device in use.  So what is compared is
+ * the BASE, and a port inside a claimed device's decode window but past its
+ * first address is not attributed -- see the note on the span in
+ * check_mmio_phys().  The rule below is therefore "is this port some claimed
+ * device's base", which catches the driver asking for its own device and
+ * refuses a stranger naming an address it has no business with.
+ *
+ * 🔑 A port belonging to NO claimed device stays reachable, and that is the
+ * same decision check_irq_owner() makes: the legacy devices -- the serial
+ * lines, the keyboard, the PIC and the PIT -- are behind no PCI BAR, and a
+ * rule that refused everything unattributed would take the console with it.
+ */
+static kern_return_t
+check_io_port(unsigned int port)
+{
+	task_t		me = current_task();
+	unsigned	i, b;
+
+	for (i = 0; i < device_nclaims; i++) {
+		natural_t	bdf = device_claim[i].bdf;
+
+		if (bdf == DEVICE_BDF_BUS)
+			continue;
+
+		for (b = 0; b < 6; b++) {
+			unsigned int lo = device_md_pci_read(
+				(unsigned)(bdf >> 8),
+				(unsigned)((bdf >> 3) & 0x1F),
+				(unsigned)(bdf & 0x7), 0x10 + b * 4);
+			unsigned int base;
+
+			if (lo == 0 || lo == 0xFFFFFFFFu)
+				continue;
+			if (!(lo & 1))
+				continue;	/* a memory BAR, not I/O */
+
+			base = lo & ~0x3u;
+			if (base == 0 || base != port)
+				continue;
+
+			if (device_claim[i].task == me)
+				return KERN_SUCCESS;
+
+			printf("device_io_port: 0x%x is %u:%u.%u's, which "
+			       "another task holds\n", port,
+			       (unsigned)(bdf >> 8),
+			       (unsigned)((bdf >> 3) & 0x1F),
+			       (unsigned)(bdf & 0x7));
+			return KERN_NO_ACCESS;
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 ds_master_device_io_port_read(
 	ipc_port_t		master_port,
@@ -2006,6 +2139,10 @@ ds_master_device_io_port_read(
 
 	if (size != 1 && size != 2 && size != 4)
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_io_port(port);
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	*data_out = device_md_io_read(port, size);
 	return KERN_SUCCESS;
@@ -2026,6 +2163,10 @@ ds_master_device_io_port_write(
 
 	if (size != 1 && size != 2 && size != 4)
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_io_port(port);
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	device_md_io_write(port, size, data);
 	return KERN_SUCCESS;
