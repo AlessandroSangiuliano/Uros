@@ -354,10 +354,40 @@ check_master_port(ipc_port_t port)
  */
 #define	DEVICE_MAX_CLAIMS	16
 
+/*
+ * ── What the kernel learns about a device when it is claimed (#511) ──────
+ *
+ * 🔴 THE KERNEL DID NOT KNOW WHERE A DEVICE'S REGISTERS WERE, and two checks
+ * were crippled by it in the same way.  device_mmio_map could compare the
+ * page a mapping STARTS on and not bound its span; device_io_port could
+ * compare a port against a BAR's base and not its range, so a driver reading
+ * its own registers at base+offset matched nothing and passed by default.
+ *
+ * 🔑 A size is not read, it is MEASURED -- write all ones into the slot, read
+ * back what sticks, put the original value again (#427).  That is a write to
+ * a live device, which is why the HAL is the only thing that has ever done
+ * it and why the kernel could not simply ask the hardware whenever it liked.
+ *
+ * ⚠️ But there is exactly one instant when it is safe, and it is this one:
+ * the claim is the moment the device changes hands.  It is granted only when
+ * nobody holds the device, so at that point no driver is programming it and
+ * no transfer is in flight -- and the decode is switched off around the probe
+ * anyway, so the window never moves while it is answering.
+ */
+#define	DEVICE_MAX_REGIONS	6
+
 static struct {
 	natural_t	bdf;
 	task_t		task;
 	uint64_t	cap_id;		/* the token that established it */
+
+	/* Measured once, when the device was handed over. */
+	struct {
+		uint64_t	base;
+		uint64_t	size;
+		int		is_io;
+	} region[DEVICE_MAX_REGIONS];
+	unsigned int	nregions;
 } device_claim[DEVICE_MAX_CLAIMS];
 
 static unsigned device_nclaims;
@@ -412,37 +442,29 @@ device_class_of(natural_t bdf)
  * Does this claimed device answer for `phys'?
  */
 static int
-device_owns_phys(natural_t bdf, vm_offset_t phys)
+device_owns_phys(unsigned int claim, vm_offset_t phys)
 {
-	unsigned int bus  = (unsigned)(bdf >> 8);
-	unsigned int slot = (unsigned)((bdf >> 3) & 0x1F);
-	unsigned int func = (unsigned)(bdf & 0x7);
+	natural_t    bdf = device_claim[claim].bdf;
 	unsigned int b;
 
 	if (phys >= VGA_LEGACY_BASE && phys < VGA_LEGACY_END)
 		return device_class_of(bdf) == PCI_CLASS_DISPLAY;
 
-	for (b = 0; b < 6; b++) {
-		unsigned int lo = device_md_pci_read(bus, slot, func,
-						     0x10 + b * 4);
-		uint64_t base;
+	/*
+	 * 🔑 THE WHOLE REGION AND NOT ITS FIRST PAGE.  This compared the page
+	 * a mapping started on, because the kernel did not know how big a
+	 * region was and a size cannot be read.  It is measured at claim time
+	 * now, so the question "is this address inside that device" has an
+	 * answer instead of an approximation of one.
+	 */
+	for (b = 0; b < device_claim[claim].nregions; b++) {
+		uint64_t base = device_claim[claim].region[b].base;
+		uint64_t size = device_claim[claim].region[b].size;
 
-		if (lo == 0 || lo == 0xFFFFFFFFu)
+		if (device_claim[claim].region[b].is_io)
 			continue;
-		if (lo & 1)
-			continue;		/* an I/O BAR, not memory */
 
-		base = (uint64_t)(lo & ~0xFu);
-
-		/* A 64-bit BAR carries its top half in the next slot. */
-		if (((lo >> 1) & 3) == 2) {
-			unsigned int hi = device_md_pci_read(bus, slot, func,
-							     0x10 + (b + 1) * 4);
-			base |= (uint64_t)hi << 32;
-			b++;
-		}
-
-		if (base != 0 && trunc_page((vm_offset_t)base) == trunc_page(phys))
+		if ((uint64_t)phys >= base && (uint64_t)phys < base + size)
 			return 1;
 	}
 
@@ -468,7 +490,7 @@ check_mmio_phys(vm_offset_t phys)
 	unsigned i;
 
 	for (i = 0; i < device_nclaims; i++) {
-		if (!device_owns_phys(device_claim[i].bdf, phys))
+		if (!device_owns_phys(i, phys))
 			continue;
 
 		if (device_claim[i].task == me)
@@ -630,6 +652,97 @@ ds_master_device_pci_config_write(
 
 /* ---- Interrupt forwarding ---- */
 
+
+
+/*
+ * Measure a device's regions, once, at the instant it is claimed (#511).
+ *
+ * The sequence is the one <pci_bar.h> describes: write all ones into the
+ * slot, read back what stuck, put the original value again.  Zeros come back
+ * exactly where the device does not decode, so the size is the low run of
+ * writable bits plus one.
+ *
+ * ⚠️ THE DECODE IS SWITCHED OFF AROUND IT.  Writing ones into a BAR moves the
+ * device's window to the top of the address space for as long as it takes to
+ * read it back, and a device still answering there would answer at the wrong
+ * address.  Command register bit 0 is I/O decode and bit 1 is memory decode;
+ * both go off and both come back.
+ *
+ * ⚠️ A slot that answers zero is unimplemented and is not a region.  A size
+ * of zero and "nobody measured this" are the same value, which is why the
+ * count below is what says how many there are rather than the array's length.
+ */
+static void
+measure_regions(unsigned int idx, natural_t bdf)
+{
+	unsigned int bus  = (unsigned)(bdf >> 8);
+	unsigned int slot = (unsigned)((bdf >> 3) & 0x1F);
+	unsigned int func = (unsigned)(bdf & 0x7);
+	unsigned int cmd, b, n = 0;
+
+	device_claim[idx].nregions = 0;
+
+	cmd = device_md_pci_read(bus, slot, func, 0x04);
+	device_md_pci_write(bus, slot, func, 0x04, cmd & ~0x3u);
+
+	for (b = 0; b < 6 && n < DEVICE_MAX_REGIONS; b++) {
+		unsigned int	reg = 0x10 + b * 4;
+		unsigned int	lo, probe, hi = 0, probe_hi = 0;
+		uint64_t	base, size;
+		int		is64, is_io;
+
+		lo = device_md_pci_read(bus, slot, func, reg);
+		if (lo == 0 || lo == 0xFFFFFFFFu)
+			continue;
+
+		is_io = (lo & 1) != 0;
+		is64  = !is_io && ((lo >> 1) & 3) == 2;
+
+		if (is64)
+			hi = device_md_pci_read(bus, slot, func, reg + 4);
+
+		device_md_pci_write(bus, slot, func, reg, 0xFFFFFFFFu);
+		probe = device_md_pci_read(bus, slot, func, reg);
+		device_md_pci_write(bus, slot, func, reg, lo);
+
+		if (is64) {
+			device_md_pci_write(bus, slot, func, reg + 4,
+					    0xFFFFFFFFu);
+			probe_hi = device_md_pci_read(bus, slot, func,
+						      reg + 4);
+			device_md_pci_write(bus, slot, func, reg + 4, hi);
+		}
+
+		if (is_io) {
+			base = (uint64_t)(lo & ~0x3u);
+			size = (uint64_t)((~(probe & ~0x3u) & 0xFFFFu) + 1);
+		} else {
+			base = (uint64_t)(lo & ~0xFu);
+			size = (uint64_t)(~(probe & ~0xFu)) & 0xFFFFFFFFu;
+			if (is64) {
+				base |= (uint64_t)hi << 32;
+				size |= (uint64_t)(~probe_hi) << 32;
+			}
+			size += 1;
+		}
+
+		if (base != 0 && size != 0 && size != 1) {
+			device_claim[idx].region[n].base  = base;
+			device_claim[idx].region[n].size  = size;
+			device_claim[idx].region[n].is_io = is_io;
+			n++;
+		}
+
+		if (is64)
+			b++;
+	}
+
+	device_md_pci_write(bus, slot, func, 0x04, cmd);
+	device_claim[idx].nregions = n;
+
+	printf("device: %u:%u.%u handed over with %u region(s) measured\n",
+	       bus, slot, func, n);
+}
 
 /*
  * Is this interrupt line a claimed device's, and is that claim this task's?
@@ -2067,14 +2180,12 @@ ds_master_device_mmio_unmap(
  * through BAR0 that way -- and any task holding the master device port could
  * write any port on the machine.
  *
- * ⚠️ AN I/O BAR CARRIES ITS SIZE NOWHERE READABLE either, for the reason the
- * memory side gives: a size is measured by writing ones and reading back
- * (#427), which cannot be done to a device in use.  So what is compared is
- * the BASE, and a port inside a claimed device's decode window but past its
- * first address is not attributed -- see the note on the span in
- * check_mmio_phys().  The rule below is therefore "is this port some claimed
- * device's base", which catches the driver asking for its own device and
- * refuses a stranger naming an address it has no business with.
+ * 🔑 THE WHOLE WINDOW, not its first address.  This compared the BASE while
+ * the kernel had no way to know how wide an I/O BAR was -- so virtio reading
+ * its registers at base+offset matched nothing and passed by default, and the
+ * check caught a stranger at the front door and not one that stepped
+ * sideways.  The regions are measured when the device is claimed now, so the
+ * range is the range.
  *
  * 🔑 A port belonging to NO claimed device stays reachable, and that is the
  * same decision check_irq_owner() makes: the legacy devices -- the serial
@@ -2088,35 +2199,27 @@ check_io_port(unsigned int port)
 	unsigned	i, b;
 
 	for (i = 0; i < device_nclaims; i++) {
-		natural_t	bdf = device_claim[i].bdf;
-
-		if (bdf == DEVICE_BDF_BUS)
+		if (device_claim[i].bdf == DEVICE_BDF_BUS)
 			continue;
 
-		for (b = 0; b < 6; b++) {
-			unsigned int lo = device_md_pci_read(
-				(unsigned)(bdf >> 8),
-				(unsigned)((bdf >> 3) & 0x1F),
-				(unsigned)(bdf & 0x7), 0x10 + b * 4);
-			unsigned int base;
+		for (b = 0; b < device_claim[i].nregions; b++) {
+			uint64_t base = device_claim[i].region[b].base;
+			uint64_t size = device_claim[i].region[b].size;
 
-			if (lo == 0 || lo == 0xFFFFFFFFu)
+			if (!device_claim[i].region[b].is_io)
 				continue;
-			if (!(lo & 1))
-				continue;	/* a memory BAR, not I/O */
-
-			base = lo & ~0x3u;
-			if (base == 0 || base != port)
+			if ((uint64_t)port < base
+			    || (uint64_t)port >= base + size)
 				continue;
 
 			if (device_claim[i].task == me)
 				return KERN_SUCCESS;
 
-			printf("device_io_port: 0x%x is %u:%u.%u's, which "
-			       "another task holds\n", port,
-			       (unsigned)(bdf >> 8),
-			       (unsigned)((bdf >> 3) & 0x1F),
-			       (unsigned)(bdf & 0x7));
+			printf("device_io_port: 0x%x is inside %u:%u.%u's "
+			       "window, which another task holds\n", port,
+			       (unsigned)(device_claim[i].bdf >> 8),
+			       (unsigned)((device_claim[i].bdf >> 3) & 0x1F),
+			       (unsigned)(device_claim[i].bdf & 0x7));
 			return KERN_NO_ACCESS;
 		}
 	}
@@ -2682,6 +2785,18 @@ ds_master_device_claim(
 	device_claim[device_nclaims].bdf = bdf;
 	device_claim[device_nclaims].task = me;
 	device_claim[device_nclaims].cap_id = cap.cap_id;
+
+	/*
+	 * 🔑 MEASURED HERE AND NOWHERE ELSE, because this is the one instant
+	 * it is safe: the device has just changed hands and nobody is driving
+	 * it yet.  Everything downstream that has to know where this device's
+	 * registers are -- the span of a mapping, the range of an I/O port --
+	 * reads what this leaves behind.  The bus itself has no regions.
+	 */
+	if (bdf != DEVICE_BDF_BUS)
+		measure_regions(device_nclaims, bdf);
+	else
+		device_claim[device_nclaims].nregions = 0;
 	task_reference(me);
 	device_nclaims++;
 
