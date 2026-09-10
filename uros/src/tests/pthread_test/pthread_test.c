@@ -1662,13 +1662,26 @@ test_malloc_under_threads(void)
  * per-thread cache, not a feeling that one would be nice.
  * ---------------------------------------------------------------- */
 
-static void
-test_malloc_bench(void)
+/*
+ * ⚠️ TWO MEASUREMENTS, AND WHEN EACH IS TAKEN IS THE POINT (#542).  The
+ * allocator skips its lock entirely until this task has made a thread, so a
+ * bench that runs at the end of pthread_test can only ever see the locked
+ * path.  The unlocked one has to be timed before the first pthread_create,
+ * and it is: same program, same boot, same machine, which is a far better
+ * comparison than two boots of two trees.
+ */
+static unsigned long long	mb_single_total;
+static int			mb_single_n;
+static int			mb_single_mt;	/* flag as it stood then */
+
+#define MB_ITERS	100000
+
+static unsigned long long
+malloc_bench_run(int n)
 {
 	unsigned long long	start, end;
 	void			*p;
 	int			i;
-	int			n = 100000;
 
 	/* Warm the free list so the bump-pointer and vm_map paths are not
 	   what gets measured. */
@@ -1682,7 +1695,48 @@ test_malloc_bench(void)
 	}
 	end = tsc_now();
 
-	print_per_iter("malloc/free uncontended", n, end - start);
+	return end - start;
+}
+
+/* Called first thing in main(), before any thread exists. */
+static void
+malloc_bench_single(void)
+{
+	mb_single_mt = _malloc_is_multithreaded();
+	mb_single_n = MB_ITERS;
+	mb_single_total = malloc_bench_run(MB_ITERS);
+}
+
+static void
+test_malloc_bench(void)
+{
+	unsigned long long	locked = malloc_bench_run(MB_ITERS);
+	unsigned long long	per_locked = locked / MB_ITERS;
+	unsigned long long	per_single = (mb_single_n != 0)
+					     ? mb_single_total / (unsigned int)mb_single_n
+					     : 0;
+
+	printf("  [%d] malloc/free uncontended: %d iters, %u cycles/pair with"
+	       " the lock, %u before this task had a thread\n",
+	       ++test_num, MB_ITERS, (unsigned int)per_locked,
+	       (unsigned int)per_single);
+
+	/*
+	 * 🔑 The flag checked from both sides.  Stuck at one is safe and
+	 * silently useless; stuck at zero is #540 again.  A passing boot shows
+	 * neither unless something asks.
+	 */
+	if (mb_single_mt != 0)
+		test_fail("allocator fast path",
+			  "this task already counted as multithreaded before "
+			  "it made a thread — the fast path never runs");
+	else if (_malloc_is_multithreaded() == 0)
+		test_fail("allocator fast path",
+			  "this task made threads and the allocator still "
+			  "thinks it is alone — #540 is open again");
+	else
+		test_ok("allocator fast path off before the first thread, on "
+			"after");
 }
 
 /* ----------------------------------------------------------------
@@ -1696,6 +1750,13 @@ main(int argc, char **argv)
 	 * on the QEMU/VGA window too, not only the serial console.  Async
 	 * because servers launch in parallel and gpu_server may not be
 	 * netname-registered yet. */
+	/*
+	 * ⚠️ BEFORE gpu_console_init_async, which is async because it starts a
+	 * thread.  This has to be the first thing main() does or the number it
+	 * takes is the locked one under another name (#542).
+	 */
+	malloc_bench_single();
+
 	(void)gpu_console_init_async("pthread_test", 100u, 50u);
 
 	printf("pthread_test: starting\n");
