@@ -231,6 +231,34 @@ mach_print_code(kern_return_t code)
 	mach_print(buf);
 }
 
+/*
+ * ── What printf_init does with the port, and what the caller owes it
+ *    afterwards (#511) ─────────────────────────────────────────────────
+ *
+ * 🔑 THE MASTER DEVICE PORT IS BUS AUTHORITY, and printf wants it for one
+ * thing: opening "console".  After that the console port is what is written
+ * to, and the master port is never consulted here again.
+ *
+ * 🔴 SO A TASK THAT ONLY PRINTS SHOULD RELEASE IT.  bootstrap_ports() hands
+ * the same port to every task that asks -- twenty-nine callers in this tree,
+ * and twenty-two of them use it for nothing but this call.  Holding a right
+ * that confers configuration space, MMIO, DMA and interrupts in order to
+ * write characters is authority kept for no reason, and this project has a
+ * rule about that: a right acquired and no longer needed is released.  Five
+ * hundred and twelve send rights never given back once wedged the task after
+ * them.
+ *
+ * ⚠️ printf_init does NOT release it itself, and must not: the caller passed
+ * a name it may still be using -- block_device_server, hal_server, gpu_server
+ * and char_server all keep it to drive hardware -- and deallocating here
+ * would invalidate their name too.  Whether the port is still wanted is the
+ * caller's fact, so the release is the caller's line.
+ *
+ * ⚠️ And this is "granted, then given back", not "never granted": between
+ * bootstrap_ports() and the release the task does hold bus authority.
+ * Closing that window means bootstrap not handing it over at all, which is a
+ * different change with an ABI to move.
+ */
 void
 printf_init(mach_port_t device_server_port)
 {

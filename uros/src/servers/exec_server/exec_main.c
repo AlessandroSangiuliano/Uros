@@ -115,6 +115,12 @@ main(int argc, char **argv)
         return 1;
 
     printf_init(device_port);
+    /*
+     * 🔴 AND GIVEN BACK (#511).  That port is bus authority -- configuration
+     * space, MMIO, DMA, interrupts -- and this task wanted it to open a
+     * console.  See the note above printf_init() in libmach/printf.c.
+     */
+    (void) mach_port_deallocate(mach_task_self(), device_port);
     panic_init(host_port);
 
     printf("\n=== exec_server " EXEC_SERVER_VERSION_STRING " ===\n");
