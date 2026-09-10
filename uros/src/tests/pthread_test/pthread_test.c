@@ -1441,8 +1441,23 @@ test_explicit_sched(void)
  * what it saw.
  * ---------------------------------------------------------------- */
 
+/*
+ * ⚠️ THE COUNT IS A COST WHEN THE DEFECT IS ABSENT AND FREE WHEN IT IS
+ * PRESENT, because a collision stops every thread.  At 200000 each the arm
+ * finished in a fraction of a second while the race was still there -- it
+ * stopped at 582 allocations -- and then, once the allocator was fixed, ran
+ * the whole 800000 and ate enough of a TCG boot at -smp 4 that cap_test never
+ * reached its verdict.  An instrument that changes the run it is measuring is
+ * measuring something else.
+ *
+ * 🔑 So the count is chosen against the worst case actually observed: the
+ * race took 14423 allocations to show under KVM and 582 under TCG.  100000
+ * leaves seven times the margin over the worse of the two, and is what the
+ * ablation is run against -- a bound that has never been shown to catch the
+ * defect is a bound nobody has any reason to trust.
+ */
 #define MR_THREADS	4
-#define MR_ITERS	200000
+#define MR_ITERS	25000		/* x MR_THREADS = 100000 allocations */
 #define MR_WORDS	4
 
 struct mr_arg {
