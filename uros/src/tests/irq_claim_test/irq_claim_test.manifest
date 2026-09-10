@@ -1,0 +1,33 @@
+# irq_claim_test manifest — the device this test is allowed to own (#511).
+#
+# 🔴 IT USED TO NEED NONE, and its arm [7] is what that cost.  That arm asks
+# every device on bus zero for a message-signalled interrupt, on the grounds
+# that "which device has MSI-X is a property of the machine" -- true, and it
+# required an authority no test should have: an MSI is programmed into the
+# DEVICE's own table, so asking for one is a write to whoever owns it.
+#
+# ⚠️ WITHOUT THIS FILE THE ARM DEGRADED INSTEAD OF FAILING.  Every device
+# refused, `accepted' reached zero, and the verdict for zero is "none, which
+# is what a board with no MSI-X should say" -- a sentence that is false here
+# and that the program has no way to tell from the true one.  A guard that
+# stops measuring while still passing is the shape this tree keeps finding.
+#
+# 🔑 THE NETWORK CARD, and it is chosen for the same reason dma_reclaim_test
+# chose the host bridge: nothing drives it.  There is no network driver in
+# this tree -- that is the epic #479 -- so a test may hold it without taking
+# anything away from anybody, and QEMU gives it an MSI-X table on Q35.
+#
+# ⚠️ The CLASS and not an address.  The card is 00:03.0 under one QEMU command
+# line and elsewhere under another; the kernel re-reads the class out of the
+# device's own configuration space and requires it to agree with what is
+# declared here, so naming the wrong one fails loudly.
+
+name irq_claim_test
+
+# RESOURCE_PCI_DEVICE (5), class 0x020000 -- an Ethernet controller -- IRQ.
+#
+# 🔑 IRQ alone.  This test does not map the card's registers and does not
+# program its DMA; it asks for an interrupt and gives it back.  A manifest
+# that declared 0x7 out of symmetry with the drivers would be granting
+# authority nobody asked for.
+required 5 0x020000 0x4

@@ -37,6 +37,20 @@ set(IQ_MIG_GENERATED)
 add_mig_userland(${UROS_UAPI_DIR}/device/device_master.defs ${_IQ_OUT} IQ_MIG)
 list(REMOVE_ITEM IQ_MIG_GENERATED ${_IQ_OUT}/device_master_server.c)
 
+# hal.defs, because a program cannot find its own device any more (#511).
+#
+# 🔑 A message-signalled interrupt is programmed into the DEVICE's own table,
+# so asking for one is now a write to whoever owns that device -- which means
+# this test has to own one.  And it cannot discover which device to own by
+# reading configuration space, because reading configuration space is itself
+# something only an owner or the bus scanner may do.  So it asks the HAL, the
+# same way every driver in the tree does.
+set(IQ_HAL_GENERATED)
+add_mig_userland(${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs
+                 ${_IQ_OUT} IQ_HAL)
+list(REMOVE_ITEM IQ_HAL_GENERATED ${_IQ_OUT}/hal_server.c)
+list(APPEND IQ_MIG_GENERATED ${IQ_HAL_GENERATED})
+
 add_executable(irq_claim_test_bin
   irq_claim_test.c ${IQ_MIG_GENERATED})
 
@@ -49,6 +63,15 @@ target_compile_definitions(irq_claim_test_bin PRIVATE MACH_IPC_COMPAT=0)
 # ⚠️ ${_IQ_OUT} first: the generated stubs include each other by quoted name.
 target_include_directories(irq_claim_test_bin PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  # 🔴 THE HAL'S OWN DIRECTORY BEFORE THE GENERATED ONE, AND THE ORDER IS
+  # LOAD-BEARING -- hal_bar_test's file says the same thing and paid for it
+  # first.  migcom writes a `hal_server.h' of its own, the server half of
+  # hal.defs, and that is also the name of the header defining struct
+  # hal_device_info.  Generated directory first and this program compiles
+  # against a header full of MIG declarations with the record it is written
+  # about left an incomplete type.
+  ${CMAKE_SOURCE_DIR}/src/servers/hal_server
+  ${CMAKE_SOURCE_DIR}/src/lib/libpci
   ${_IQ_OUT}
   ${CMAKE_SOURCE_DIR}/src/mach_services/include/sa_mach
   ${CMAKE_SOURCE_DIR}/src/lib/libmach
@@ -58,12 +81,15 @@ target_include_directories(irq_claim_test_bin PRIVATE
   ${CMAKE_SOURCE_DIR}/uapi
   ${UROS_ARCH_INCLUDE}
   ${_K}
+  ${CMAKE_SOURCE_DIR}/src/lib/libcap
   ${CMAKE_SOURCE_DIR}/include)
 
 target_link_libraries(irq_claim_test_bin PRIVATE
   -Wl,--start-group
   libpthreads
   libmach
+  libcap
+  libnetname
   -Wl,--end-group)
 add_dependencies(irq_claim_test_bin libmach libpthreads mig_mach_public_headers)
 
@@ -77,3 +103,26 @@ set_target_properties(irq_claim_test_bin PROPERTIES
   OUTPUT_NAME "irq_claim_test"
   RUNTIME_OUTPUT_DIRECTORY
     "${CMAKE_BINARY_DIR}/export/uros/${UROS_TARGET_ARCH}/user/sbin")
+
+# ===========================================================================
+# The manifest (#511)
+# ===========================================================================
+#
+# Without it arm [7] does not fail, it DEGRADES: every device refuses, the
+# count reaches zero, and zero has a passing verdict of its own.
+set(IQ_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/irq_claim_test.cmf")
+
+add_custom_command(
+  OUTPUT ${IQ_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${IQ_MANIFEST_OUT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/irq_claim_test.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/irq_claim_test.manifest
+  COMMENT "mkmanifest: irq_claim_test.manifest -> irq_claim_test.cmf"
+  VERBATIM
+)
+
+add_custom_target(irq_claim_test_manifest ALL DEPENDS ${IQ_MANIFEST_OUT})
+add_dependencies(irq_claim_test_bin irq_claim_test_manifest)

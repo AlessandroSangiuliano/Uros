@@ -66,6 +66,29 @@ struct irq_forward {
 	int		active;		/* nonzero if registered */
 
 	/*
+	 * ── Who registered it, holding a reference (#511) ─────────────────
+	 *
+	 * 🔴 THE TABLE DID NOT KNOW.  device_intr_unregister took any active
+	 * line and device_intr_enable unmasked any line, so a task holding
+	 * the master device port could take a running driver's interrupts
+	 * away -- and the driver is not told: its notifications simply stop.
+	 *
+	 * 🔑 A REFERENCE AND NOT A BARE task_t, for the reason #513 found the
+	 * hard way: a pointer that is only ever COMPARED, never dereferenced,
+	 * matches a later unrelated task once the zone recycles the block.
+	 * Nothing invalid is accessed, so no checker and no fault catches it;
+	 * a false match reads exactly like a correct one.  The reference makes
+	 * the address unreusable while this table still names it.
+	 *
+	 * ⚠️ Which means the line has to be released when its owner dies, or
+	 * the reference pins the task struct for ever -- see
+	 * device_master_task_terminating(), which did not touch this table
+	 * and left a dead driver's line registered with a send right to a
+	 * port nobody receives on.
+	 */
+	task_t		owner;
+
+	/*
 	 * 🔴 WHICH KIND OF SLOT THIS IS, because giving one back is not the
 	 * same operation for the two (#520).
 	 *

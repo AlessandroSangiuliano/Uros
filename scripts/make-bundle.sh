@@ -98,6 +98,7 @@ GPU_SERVER_CMF="$MANIFESTS/gpu_server.cmf"
 # #511: and the scanner, which holds the BUS rather than a device -- the only
 # task in the tree that reads configuration space it has not claimed.
 HAL_SERVER_CMF="$MANIFESTS/hal_server.cmf"
+IRQ_CLAIM_CMF="$MANIFESTS/irq_claim_test.cmf"
 
 NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
@@ -285,6 +286,7 @@ ARGS+=("hello_server:$HELLO_SERVER")
 [ -f "$EXT_SERVER_CMF" ] && ARGS+=("ext_server.cmf:$EXT_SERVER_CMF")
 [ -f "$GPU_SERVER_CMF" ] && ARGS+=("gpu_server.cmf:$GPU_SERVER_CMF")
 [ -f "$HAL_SERVER_CMF" ] && ARGS+=("hal_server.cmf:$HAL_SERVER_CMF")
+[ -f "$IRQ_CLAIM_CMF" ] && ARGS+=("irq_claim_test.cmf:$IRQ_CLAIM_CMF")
 ARGS+=("ipc_bench:$IPC_BENCH")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")

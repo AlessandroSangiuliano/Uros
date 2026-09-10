@@ -76,6 +76,14 @@
 #include <stdio.h>
 
 #include "device_master.h"
+#include "hal_server.h"		/* struct hal_device_info (#511) */
+#include "hal.h"		/* the user half of hal.defs (#511) */
+#include <mach/cap_types.h>	/* RESOURCE_PCI_DEVICE, CAP_OP_PCI_IRQ (#511) */
+#include <libcap.h>		/* cap_request (#511) */
+#include <mach_init.h>		/* name_server_port */
+#include <mach/thread_switch.h>
+#include <servers/netname.h>
+#include <string.h>
 
 /*
  * The line under test, and how many times the round trip is made.
@@ -103,7 +111,15 @@
  */
 #define	OUT_OF_RANGE_IRQ	16u
 
-static mach_port_t	master_device;
+/*
+ * ⚠️ NOT static any more, and not by choice: <hal_server.h> declares a
+ * `master_device' of its own -- the HAL's, extern -- and this file now
+ * includes it in order to learn which device it may own.  Two objects of the
+ * same name where one was private is a collision the linker would have
+ * resolved silently in one direction or the other; the compiler catches it
+ * only because one of them is static.
+ */
+mach_port_t	master_device;
 
 /*
  * A receive right to be told about, and a send right to hand over.
@@ -338,60 +354,160 @@ arm_four_what_is_refused(void)
  * THE COUNT MATCHES THE BOARD is a property of the kernel.  Naming a device
  * would have made this a test of QEMU's defaults.
  */
+#define IQ_NET_CLASS	0x020000u
+#define IQ_HAL_TRIES	200
+
+/*
+ * ── The device this test owns, named by the HAL (#511) ───────────────────
+ *
+ * 🔑 A PROGRAM CANNOT FIND ITS OWN DEVICE ANY MORE, and that is not an
+ * obstacle put in its way -- it is the point.  Reading configuration space
+ * is something only a device's owner or the bus scanner may do, so
+ * discovering what to own by reading it would be the circle #511 exists to
+ * break.  The HAL enumerates; everybody else is told.
+ */
+static int
+own_the_network_card(natural_t *bdf_out)
+{
+	mach_port_t		hal_port = MACH_PORT_NULL;
+	vm_offset_t		buf = 0;
+	mach_msg_type_number_t	bytes = 0;
+	unsigned int		n = 0, i;
+	const struct hal_device_info *devs;
+	struct uros_cap		tok;
+	kern_return_t		kr;
+	natural_t		bdf = 0;
+	unsigned int		class_rev = 0;
+	int			found = 0, tries;
+
+	for (tries = 0; tries < IQ_HAL_TRIES; tries++) {
+		if (netname_look_up(name_server_port, "", (char *)"hal",
+				    &hal_port) == KERN_SUCCESS)
+			break;
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+	}
+	if (hal_port == MACH_PORT_NULL) {
+		printf("irq_claim_test: the HAL never appeared\n");
+		return 0;
+	}
+
+	if (hal_list_devices(hal_port, &buf, &bytes, &n) != KERN_SUCCESS) {
+		printf("irq_claim_test: hal_list_devices refused\n");
+		return 0;
+	}
+
+	devs = (const struct hal_device_info *)buf;
+	for (i = 0; i < n; i++)
+		if ((devs[i].class_rev >> 8) == IQ_NET_CLASS) {
+			bdf = (natural_t)((devs[i].bus << 8)
+					  | (devs[i].slot << 3) | devs[i].func);
+			class_rev = devs[i].class_rev;
+			found = 1;
+			break;
+		}
+
+	if (bytes != 0)
+		(void) vm_deallocate(mach_task_self(), buf, bytes);
+	if (!found) {
+		printf("irq_claim_test: the HAL listed %u device(s) and none "
+		       "of class 0x%06x\n", n, IQ_NET_CLASS);
+		return 0;
+	}
+
+	memset(&tok, 0, sizeof(tok));
+	kr = cap_request(RESOURCE_PCI_DEVICE, (uint64_t)(class_rev >> 8),
+			 CAP_OP_PCI_IRQ, 0, &tok);
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: cap_server would not issue a "
+		       "capability for class 0x%06x (kr=%d)\n",
+		       class_rev >> 8, (int)kr);
+		return 0;
+	}
+
+	kr = device_claim(master_device, bdf, (char *)&tok, sizeof(tok));
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: the kernel refused the claim on "
+		       "%u:%u.%u (kr=%d)\n", (unsigned)(bdf >> 8),
+		       (unsigned)((bdf >> 3) & 0x1F), (unsigned)(bdf & 0x7),
+		       (int)kr);
+		return 0;
+	}
+
+	*bdf_out = bdf;
+	return 1;
+}
+
+/*
+ * ⚠️ THIS USED TO SWEEP ALL THIRTY-TWO SLOTS, asking each for a
+ * message-signalled interrupt, and the comment above it explained that
+ * naming a device would have made this a test of QEMU's defaults.  That was
+ * right about the reasoning and wrong about the authority: an MSI is
+ * programmed into the DEVICE's own table, so the sweep was writing to
+ * hardware belonging to other servers.
+ *
+ * 🔑 So it asks the one device it OWNS.  What it loses is the count across
+ * the board; what it keeps is the thing the count was evidence for -- that a
+ * slot the kernel chose comes back above the sixteen a driver can name, and
+ * that the same unregister releases both kinds.
+ */
 static int
 arm_five_an_interrupt_with_no_wire(void)
 {
 	mach_port_t	port;
 	kern_return_t	kr;
-	unsigned int	slot = 0, accepted = 0, first_slot = 0;
-	unsigned int	dev;
+	unsigned int	slot = 0;
+	natural_t	bdf = 0;
 	int		released_ok = 1;
 
-	for (dev = 0; dev < 32; dev++) {
-		kr = mach_port_allocate(mach_task_self(),
-					MACH_PORT_RIGHT_RECEIVE, &port);
-		if (kr != KERN_SUCCESS)
-			break;
-
-		kr = device_msi_register(master_device, 0, dev, 0, 0, port,
-					 MACH_MSG_TYPE_MAKE_SEND, &slot);
-		if (kr != KERN_SUCCESS) {
-			release(port);
-			continue;
-		}
-
-		if (accepted == 0)
-			first_slot = slot;
-		accepted++;
-
-		if (device_intr_unregister(master_device, slot) != KERN_SUCCESS)
-			released_ok = 0;
-		release(port);
+	if (!own_the_network_card(&bdf)) {
+		printf("irq_claim_test: [7] DID NOT RUN — no device of class "
+		       "0x%06x this task may own, so a message-signalled "
+		       "interrupt cannot be asked for without writing to "
+		       "somebody else's hardware\n", IQ_NET_CLASS);
+		printf("irq_claim_test: [8] DID NOT RUN — nothing was taken, "
+		       "so there is nothing to give back\n");
+		return 2;
 	}
 
-	printf("irq_claim_test: [7] %u device(s) on bus 0 accepted a"
-	       " message-signalled interrupt, first at slot %u — %s\n",
-	       accepted, first_slot,
-	       accepted == 0
-	       ? "none, which is what a board with no MSI-X should say"
-	       : (first_slot >= 16
-		  ? "a slot the KERNEL chose, above the sixteen a driver can name"
-		  : "WRONG, that is a line number and a line was not asked for"));
+	kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+				&port);
+	if (kr != KERN_SUCCESS)
+		return 0;
 
-	printf("irq_claim_test: [8] giving them back answered %s — %s\n",
+	kr = device_msi_register(master_device, (bdf >> 8), (bdf >> 3) & 0x1F,
+				 bdf & 0x7, 0, port,
+				 MACH_MSG_TYPE_MAKE_SEND, &slot);
+	if (kr != KERN_SUCCESS) {
+		printf("irq_claim_test: [7] %u:%u.%u, which this task owns, "
+		       "refused a message-signalled interrupt (kr=%d) — which "
+		       "is what a board with no MSI-X table should say\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 0x7), (int)kr);
+		printf("irq_claim_test: [8] DID NOT RUN — nothing was taken, "
+		       "so there is nothing to give back\n");
+		release(port);
+		return 2;
+	}
+
+	if (device_intr_unregister(master_device, slot) != KERN_SUCCESS)
+		released_ok = 0;
+	release(port);
+
+	printf("irq_claim_test: [7] %u:%u.%u, which this task owns, accepted a"
+	       " message-signalled interrupt at slot %u — %s\n",
+	       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+	       (unsigned)(bdf & 0x7), slot,
+	       slot >= 16
+	       ? "a slot the KERNEL chose, above the sixteen a driver can name"
+	       : "WRONG, that is a line number and a line was not asked for");
+
+	printf("irq_claim_test: [8] giving it back answered %s — %s\n",
 	       released_ok ? "success" : "a failure",
 	       released_ok
 	       ? "the same unregister works for both kinds of slot"
 	       : "WRONG, a message-signalled slot cannot be released");
 
-	/*
-	 * ⚠️ Zero accepted is a PASS on a board with no MSI-X and a FAILURE on
-	 * one that has it, and this program cannot tell the boards apart -- so
-	 * it reports the count and lets the two runs be compared, rather than
-	 * inventing a verdict it has no evidence for.
-	 */
-	return released_ok
-	       && (accepted == 0 || first_slot >= 16) ? 2 : 0;
+	return (released_ok && slot >= 16) ? 2 : 0;
 }
 
 int
@@ -401,9 +517,8 @@ main(int argc, char **argv)
 	mach_port_t	root_wired, root_paged, security;
 	kern_return_t	kr;
 	int		passed = 0;
-
-	(void) argc;
-	(void) argv;
+	int		msi_half = (argc > 1 && argv[1] != 0
+				    && argv[1][0] == 'm');
 
 	kr = bootstrap_ports(bootstrap_port, &host, &master_device,
 			     &root_wired, &root_paged, &security);
@@ -412,12 +527,38 @@ main(int argc, char **argv)
 		return 1;
 	}
 
-	passed += arm_one_claim_and_release();
-	passed += arm_two_round_trips();
-	passed += arm_three_nothing_was_delivered();
-	passed += arm_four_what_is_refused();
-	passed += arm_five_an_interrupt_with_no_wire();
+	/*
+	 * ── Two halves, and where each one sits in the boot is the reason ──
+	 *
+	 * 🔴 THIS PROGRAM USED TO BE ONE ENTRY, THIRD, and its position was
+	 * load-bearing: bootstrap.conf's own note says a halt in it is
+	 * unmistakable there, where the same halt at the end would look like a
+	 * run that simply finished.  What could halt is GIVING A LINE BACK,
+	 * which is the first four arms.
+	 *
+	 * 🔑 And #511 gave the fifth arm two dependencies the first four do
+	 * not have: it must own a device to ask it for a message-signalled
+	 * interrupt, so it needs cap_server for the capability and the HAL to
+	 * learn which device -- both of which start much later.  One entry
+	 * could not be in both places.
+	 *
+	 * ⚠️ So the halves run as two entries, chosen by argv, the way
+	 * dma_reclaim_test's holder and checker already do.  The line arms
+	 * keep the position their failure mode needs; the MSI arms move to
+	 * where the servers they depend on are running.
+	 */
+	if (!msi_half) {
+		passed += arm_one_claim_and_release();
+		passed += arm_two_round_trips();
+		passed += arm_three_nothing_was_delivered();
+		passed += arm_four_what_is_refused();
 
-	printf("irq_claim_test: %d of 8 arms passed\n", passed);
-	return passed == 8 ? 0 : 1;
+		printf("irq_claim_test: %d of 6 line arms passed\n", passed);
+		return passed == 6 ? 0 : 1;
+	}
+
+	passed += arm_five_an_interrupt_with_no_wire();
+	printf("irq_claim_test: %d of 2 message-signalled arms passed\n",
+	       passed);
+	return passed == 2 ? 0 : 1;
 }

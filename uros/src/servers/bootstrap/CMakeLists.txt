@@ -291,13 +291,26 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # in the log rather than separated by three programs that fault and kill
   # threads on purpose.
   #
-  # irq_claim_test is THIRD, beside netname_test and by the same rule: it only
-  # makes RPCs and reads the answers, so it belongs at the harmless end (#457).
+  # irq_claim_test appears TWICE, and for the opposite reason to
+  # dma_reclaim_test's pair: not because the two halves must observe each
+  # other, but because they cannot be in the same place (#511).
+  #
+  # Its line arms are THIRD, beside netname_test and by the same rule: they
+  # only make RPCs and read the answers, so they belong at the harmless end
+  # (#457).
   # ⚠️ It is the one entry here whose failure mode is not a wrong line but a
   # MISSING one -- on a kernel where giving an interrupt back halts, nothing
   # after its first line is ever printed, including every entry below it.  That
   # is why it is early rather than last: a halt there is unmistakable, where the
   # same halt at the end would look like a run that simply finished.
+  #
+  # 🔴 AND ITS MESSAGE-SIGNALLED ARMS ARE AFTER hal_server, because they can no
+  # longer be third.  Asking a device for an MSI writes into THAT DEVICE's
+  # table, so #511 requires the asker to own the device -- which means a
+  # capability from cap_server and, before that, the HAL to say which device
+  # exists.  Both start later than third.  Keeping one entry would have meant
+  # either losing the halt-detection above or the arms running with nothing
+  # they need; the split keeps each half where its own reason puts it.
   #
   # dma_reclaim_test appears TWICE and consecutively, and where the pair sits
   # is decided from both ends (#513).
@@ -400,7 +413,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # failure -- there is nothing to serve.  What it must not do is exit quietly:
   # see the note in block_server.c on #400.
   file(GENERATE OUTPUT ${_CONF}
-       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n")
+       CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n")
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
@@ -434,6 +447,10 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # therefore never reached the manifest check at all.
   set(_BDS_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/block_device_server.cmf")
+  # #511: the test that owns the network card, so its MSI arm fails instead of
+  # degrading when it owns nothing.
+  set(_IRQ_CMF
+    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/irq_claim_test.cmf")
   # #511: the scanner, which holds the BUS rather than any one device.
   set(_HAL_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/hal_server.cmf")
@@ -446,6 +463,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
             block_device_server.cmf:${_BDS_CMF}
             bootstrap.cmf:${_BOOTSTRAP_CMF}
             hal_server.cmf:${_HAL_CMF}
+            irq_claim_test.cmf:${_IRQ_CMF}
             name_server:${_SBIN}/name_server
             netname_test:${_SBIN}/netname_test
             irq_claim_test:${_SBIN}/irq_claim_test
@@ -501,7 +519,7 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     # the export tree held the new one.  The symptom was a policy denial for a
     # line the source file plainly contained.
     DEPENDS mkbundle ${_CAPTEST_CMF} ${_DMARECLAIM_CMF} ${_BDS_CMF}
-            ${_BOOTSTRAP_CMF} ${_HAL_CMF}
+            ${_BOOTSTRAP_CMF} ${_HAL_CMF} ${_IRQ_CMF}
             name_server_bin netname_test_bin irq_claim_test_bin
             dma_reclaim_test_server cap_server_bin pthread_test_server
             cap_test_server dl_test_bin fault_test_bin act_test_bin cow_test_bin hal_server hal_pci_scan_module
