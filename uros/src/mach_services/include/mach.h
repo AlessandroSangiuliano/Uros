@@ -84,6 +84,42 @@ extern mach_msg_return_t	mach_msg_receive(mach_msg_header_t *);
 
 extern mach_msg_return_t	mach_msg_send(mach_msg_header_t *);
 
+/*
+ * ── The allocator's single-threaded fast path (#542) ──────────────────────
+ *
+ * malloc and free skip their lock while this task has never held a second
+ * thread, which is worth 96 cycles a pair against 47 and covers all but four
+ * programs in the system.  Anybody who creates a thread IN THIS TASK must say
+ * so BEFORE creating it -- afterwards is too late, because a thread can be
+ * made running and could allocate before the creator returns.
+ *
+ * 🔴 IT CANNOT LIVE IN THE THREAD LIBRARY, however obvious that looks:
+ * libposix-uros' clone, kernel242_test and tgdb all call
+ * thread_create(mach_task_self(), ...) themselves, and a flag only libpthreads
+ * maintained would tell those tasks they were alone while they ran two threads
+ * -- which is #540 again, reopened where nobody would think to look.
+ *
+ * ⚠️ Forgetting the call is not left to memory: scripts/thread-create-notify-check.py
+ * fails on any thread_create(mach_task_self(), ...) that does not have it.
+ *
+ * 🔴 WEAK, BECAUSE NOT EVERY PROGRAM HAS THIS ALLOCATOR, and the linker said
+ * so before any argument did.  libmach_core.a carries no malloc at all -- what
+ * links it gets musl's -- and on i386 default_pager ships its own kalloc.c and
+ * defines malloc and free itself.  A hard reference dragged libmach's malloc.o
+ * into those links and collided.  So the call compiles to nothing where this
+ * allocator is absent, which is also the truth: there is no flag there to set.
+ */
+extern void			_malloc_note_thread_created(void)
+					__attribute__((weak));
+extern int			_malloc_is_multithreaded(void);
+
+static inline void
+mach_note_thread_created(void)
+{
+	if (_malloc_note_thread_created != 0)
+		_malloc_note_thread_created();
+}
+
 extern mach_msg_return_t	mach_msg_server_once(boolean_t (*)
 						     (mach_msg_header_t *,
 						      mach_msg_header_t *),

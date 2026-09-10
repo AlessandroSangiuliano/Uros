@@ -282,6 +282,8 @@ rthread_kernel_bind(rthread_t th, boolean_t resume)
 	TR_DECL("rthread_kernel_bind");
 	tr3("th = %x resume = %d",th, resume);
 
+	/* #542: before, not after — see mach.h. */
+	mach_note_thread_created();
 	MACH_CALL(thread_create(mach_task_self(), &kernel_thread), r);
 	th->wired = kernel_thread;
 	rthread_setup(th, kernel_thread, (rthread_fn_t) rthread_body);

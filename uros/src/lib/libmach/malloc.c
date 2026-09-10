@@ -87,14 +87,79 @@
  * spinner burns the timeslice, so a spinner that never yields would be a
  * livelock.  Uniprocessor and multiprocessor are both first class here.
  */
+/*
+ * ── And what it cost the programs that never needed it (#542) ────────────
+ *
+ * 🔴 THE LOCK DOUBLES AN UNCONTENDED PAIR: 96 cycles against 47, measured as
+ * the median of five boots each with it and with it ablated.  That is paid by
+ * every program in the system, and all but four of them have one thread.
+ *
+ * 🔑 WHICH IS WHY THERE IS NO PER-THREAD CACHE HERE.  A cache would speed up
+ * the multithreaded servers, and they are not the ones paying: a task with one
+ * thread cannot race itself, so what it needs is not a faster lock but no lock.
+ * The flag below says whether this task has ever had a second thread, and when
+ * it has not, malloc and free take no atomic at all.
+ *
+ * ⚠️ IT IS SET BY thread_create, NOT BY THE THREAD LIBRARY, and that is the
+ * whole reason it can be trusted.  Setting it in libpthreads was the obvious
+ * design and it is wrong: kernel242_test, libposix-uros' clone and tgdb all
+ * call thread_create(mach_task_self(), ...) directly, and a flag that only
+ * libpthreads set would tell those three tasks they had one thread while they
+ * ran two -- reopening #540 exactly where nobody would think to look.  The
+ * flag belongs on the call that makes the statement false.
+ *
+ * ⚠️ Set BEFORE the thread is made, never after, because thread_create_running
+ * comes back with the thread already running and it could allocate before the
+ * caller returns.  Never cleared: a task that had two threads is treated as
+ * multithreaded for ever, which is the safe direction and costs a task that
+ * joins everybody nothing it was not already paying.
+ *
+ * ⚠️ AND ONE ASSUMPTION, WRITTEN DOWN BECAUSE IT IS CHECKABLE AND NOT
+ * OBVIOUS: this holds only while nobody creates a SECOND thread in a task
+ * from outside it.  Today bootstrap and exec_server each create exactly one
+ * thread in a task they have just made -- that task's first -- so no task
+ * gains a second thread it did not ask for.  If that ever changes, this flag
+ * becomes a lie and #540 comes back.  pthread_test's arm checks the flag is
+ * actually set once threads exist, so the optimisation cannot quietly undo
+ * the fix it sits on top of.
+ */
 #define	KALLOC_SPINS	64
 
 static volatile int	kalloc_lock;
+static volatile int	kalloc_multithreaded;
+
+/* Declared in externs.h; called before the thread exists. */
+void
+_malloc_note_thread_created(void)
+{
+	__atomic_store_n(&kalloc_multithreaded, 1, __ATOMIC_SEQ_CST);
+}
+
+/*
+ * 🔑 Exists so a test can check the flag from BOTH sides.  A flag stuck at one
+ * is safe and silently useless -- the fast path never runs and nobody notices;
+ * a flag stuck at zero is #540 again.  Neither shows up in a passing boot
+ * unless something asks, so pthread_test asks.
+ */
+int
+_malloc_is_multithreaded(void)
+{
+	return __atomic_load_n(&kalloc_multithreaded, __ATOMIC_ACQUIRE);
+}
 
 static void
 kalloc_lock_acquire(void)
 {
 	unsigned int	spins = 0;
+
+	/*
+	 * 🔑 No thread has been made in this task, so nobody can be inside the
+	 * allocator but the caller.  The transition cannot be straddled: the
+	 * flag is set by a thread that is inside thread_create at the time,
+	 * and a task with one thread has nobody else who could be in here.
+	 */
+	if (__atomic_load_n(&kalloc_multithreaded, __ATOMIC_ACQUIRE) == 0)
+		return;
 
 	while (__atomic_exchange_n(&kalloc_lock, 1, __ATOMIC_ACQUIRE) != 0) {
 		if (++spins < KALLOC_SPINS) {
@@ -108,6 +173,14 @@ kalloc_lock_acquire(void)
 	}
 }
 
+/*
+ * 🔑 Unconditional on purpose, where the acquire is not.  A release is a plain
+ * store on this machine, not the locked exchange that costs, so branching on
+ * the flag would buy nothing; and reading the flag here rather than there
+ * would be the one way to get this wrong -- acquire skipping the lock and
+ * release then clearing one that somebody else holds.  Storing zero to a word
+ * that is already zero is what the single-threaded case does, and it is free.
+ */
 static void
 kalloc_lock_release(void)
 {

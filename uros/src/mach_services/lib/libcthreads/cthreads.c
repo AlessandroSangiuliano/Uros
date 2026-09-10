@@ -441,6 +441,8 @@ cthread_create(cthread_fn_t func, void *arg)
 	tr1("Creating new kernel thread");
 	cthread_status.kernel_threads++;
 	cthread_unlock();
+	/* #542: before, not after — see mach.h. */
+	mach_note_thread_created();
 	MACH_CALL(thread_create(mach_task_self(), &n), r);
 	child->context = cthread_stack_base(child, CTHREAD_STACK_OFFSET);
 	cthread_setup(child, n, (cthread_fn_t)cthread_body);

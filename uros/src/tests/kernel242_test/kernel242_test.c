@@ -335,6 +335,8 @@ test_thread_terminate(void)
     kern_return_t kr;
 
     BEGIN_TEST("thread_create + thread_terminate");
+    /* #542: before, not after — see mach.h. */
+    mach_note_thread_created();
     kr = thread_create(mach_task_self(), &th);
     EXPECT_KR(kr, KERN_SUCCESS, "thread_create");
     /* Thread is suspended at creation; terminating it hits the
