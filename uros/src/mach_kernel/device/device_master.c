@@ -363,6 +363,131 @@ static struct {
 static unsigned device_nclaims;
 
 /*
+ * ── Whose device is this physical address? (#511) ────────────────────────
+ *
+ * 🔴 device_mmio_map USED TO CHECK THAT THE ADDRESS WAS NOT ZERO.  Holding
+ * the master device port was the whole of the authority, so any task that
+ * asked bootstrap for it could map any physical range, read-write, into any
+ * task it held a port for.  cap_test demonstrates it in one boot: it reads
+ * the AHCI's BAR5 out of configuration space, maps it, and reads back the
+ * controller's version register -- a device another server holds, from a
+ * task whose own manifest declares no PCI device at all.
+ *
+ * 🔑 The answer is not a list of allowed addresses.  It is that a physical
+ * range belongs to a DEVICE, and the kernel already records which task has
+ * claimed which device.  So the question becomes one the claim table can
+ * answer: which claimed device does this address belong to, and is that
+ * claim this task's?
+ *
+ * Two ways an address belongs to a device, and both are needed:
+ *
+ *   a BAR, read out of the device's own configuration space.  Read-only:
+ *   ⚠️ the SIZE of a BAR cannot be read, it has to be measured by writing
+ *   ones into it and reading back what sticks (#427), and doing that to a
+ *   device a driver is using would take the machine down.  So the base is
+ *   what is compared, and see the note on the span below.
+ *
+ *   a LEGACY WINDOW, which is device memory that no BAR describes.  The
+ *   VGA text buffer at 0xB8000 is the one this tree maps: gpu_server's vga
+ *   module attaches to it, and a rule written only about BARs would have
+ *   refused the i386 console -- found by counting what mmio_map is actually
+ *   asked for on both targets rather than by reasoning about what it should
+ *   be asked for.
+ */
+#define	VGA_LEGACY_BASE		0xA0000u
+#define	VGA_LEGACY_END		0xC0000u
+#define	PCI_CLASS_DISPLAY	0x03u
+
+static natural_t
+device_class_of(natural_t bdf)
+{
+	unsigned int class_word = device_md_pci_read((unsigned)(bdf >> 8),
+						     (unsigned)((bdf >> 3) & 0x1F),
+						     (unsigned)(bdf & 0x7),
+						     0x08);
+	return (natural_t)(class_word >> 24);
+}
+
+/*
+ * Does this claimed device answer for `phys'?
+ */
+static int
+device_owns_phys(natural_t bdf, vm_offset_t phys)
+{
+	unsigned int bus  = (unsigned)(bdf >> 8);
+	unsigned int slot = (unsigned)((bdf >> 3) & 0x1F);
+	unsigned int func = (unsigned)(bdf & 0x7);
+	unsigned int b;
+
+	if (phys >= VGA_LEGACY_BASE && phys < VGA_LEGACY_END)
+		return device_class_of(bdf) == PCI_CLASS_DISPLAY;
+
+	for (b = 0; b < 6; b++) {
+		unsigned int lo = device_md_pci_read(bus, slot, func,
+						     0x10 + b * 4);
+		uint64_t base;
+
+		if (lo == 0 || lo == 0xFFFFFFFFu)
+			continue;
+		if (lo & 1)
+			continue;		/* an I/O BAR, not memory */
+
+		base = (uint64_t)(lo & ~0xFu);
+
+		/* A 64-bit BAR carries its top half in the next slot. */
+		if (((lo >> 1) & 3) == 2) {
+			unsigned int hi = device_md_pci_read(bus, slot, func,
+							     0x10 + (b + 1) * 4);
+			base |= (uint64_t)hi << 32;
+			b++;
+		}
+
+		if (base != 0 && trunc_page((vm_offset_t)base) == trunc_page(phys))
+			return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * May this task map this physical address?
+ *
+ * ⚠️ THE SPAN IS NOT BOUNDED YET, AND SAYING SO IS PART OF THE FIX.  What is
+ * compared is the page the mapping starts on; a caller that holds a device
+ * legitimately can still ask for more pages than that device has.  Bounding
+ * it needs the region SIZES, which only the HAL knows because only the HAL
+ * measures them -- and it does not tell the kernel.  Closing the difference
+ * is the other half and it is written down rather than implied, because a
+ * check that looks complete and is not is the shape this file has been bitten
+ * by twice.
+ */
+static kern_return_t
+check_mmio_phys(vm_offset_t phys)
+{
+	task_t me = current_task();
+	unsigned i;
+
+	for (i = 0; i < device_nclaims; i++) {
+		if (!device_owns_phys(device_claim[i].bdf, phys))
+			continue;
+
+		if (device_claim[i].task == me)
+			return KERN_SUCCESS;
+
+		printf("device_mmio_map: 0x%lx belongs to %u:%u.%u, which is "
+		       "claimed by another task\n", (unsigned long)phys,
+		       (unsigned)(device_claim[i].bdf >> 8),
+		       (unsigned)((device_claim[i].bdf >> 3) & 0x1F),
+		       (unsigned)(device_claim[i].bdf & 0x7));
+		return KERN_NO_ACCESS;
+	}
+
+	printf("device_mmio_map: 0x%lx belongs to no device this task has "
+	       "claimed\n", (unsigned long)phys);
+	return KERN_NO_ACCESS;
+}
+
+/*
  * Whether another task has claimed this device.  Asks and does not claim.
  */
 static int
@@ -1744,6 +1869,12 @@ ds_master_device_mmio_map(
 	phys_base   = trunc_page((vm_offset_t)phys_addr);
 	page_offset = (vm_offset_t)phys_addr - phys_base;
 	round_sz    = round_page(page_offset + size);
+
+	kr = check_mmio_phys(phys_base);
+	if (kr != KERN_SUCCESS) {
+		task_deallocate(task);
+		return kr;
+	}
 
 	kr = map_pages_into_task(task, phys_base, 0,
 				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
