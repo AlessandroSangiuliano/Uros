@@ -24,6 +24,12 @@ set(GPU_INCLUDE_DIRS
   ${CMAKE_SOURCE_DIR}/src/lib/libmodload
   # libcap headers (#197 cap_verify)
   ${CMAKE_SOURCE_DIR}/src/lib/libcap
+  # #511: the HAL names the display device, because a module now has to claim
+  # the device whose legacy window it maps.  hal_bar_test reaches the struct
+  # the same way.
+  ${CMAKE_SOURCE_DIR}/src/servers/hal_server
+  ${CMAKE_SOURCE_DIR}/src/lib/libpci
+  ${CMAKE_BINARY_DIR}/generated/hal_mig
   # Generated includes (mach/machine -> i386 symlink)
   ${CMAKE_BINARY_DIR}/generated/include
   # Mach services include (mach.h, sa_mach.h, stdio.h, string.h)
@@ -73,6 +79,40 @@ add_custom_command(
     ${DEVICE_MASTER_DEFS}
   DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${DEVICE_MASTER_DEFS}
   COMMENT "MIG: device_master.defs (user stubs for gpu_server modules)"
+  VERBATIM
+)
+
+# ===========================================================================
+# MIG: hal.defs — the HAL names the display device (#511)
+# ===========================================================================
+#
+# 🔑 The core has always been handed hal_port and has always ignored it, on
+# the grounds that "the vga module does not need HAL -- it claims the legacy
+# VGA framebuffer unconditionally".  That stopped being true when a physical
+# range began belonging to a device: the module has to name the device whose
+# legacy window it maps, and only the HAL knows which one that is.
+
+set(HAL_DEFS ${CMAKE_SOURCE_DIR}/src/servers/hal_server/hal.defs)
+set(GHAL_USER_C   ${CMAKE_CURRENT_BINARY_DIR}/hal_user.c)
+set(GHAL_USER_H   ${CMAKE_CURRENT_BINARY_DIR}/hal.h)
+set(GHAL_SERVER_C ${CMAKE_CURRENT_BINARY_DIR}/hal_server_mig.c)
+set(GHAL_SERVER_H ${CMAKE_CURRENT_BINARY_DIR}/hal_server_mig.h)
+
+add_custom_command(
+  OUTPUT ${GHAL_USER_C} ${GHAL_USER_H} ${GHAL_SERVER_C} ${GHAL_SERVER_H}
+  COMMAND ${MIG_SCRIPT}
+    -cpp ${CMAKE_C_COMPILER}
+    -migcom $<TARGET_FILE:migcom>
+    ${UROS_MIG_TARGET_ARGS}
+    -I${UROS_ARCH_INCLUDE}
+    -I${CMAKE_SOURCE_DIR}/src/mach_kernel
+    -header ${GHAL_USER_H}
+    -sheader ${GHAL_SERVER_H}
+    -user ${GHAL_USER_C}
+    -server ${GHAL_SERVER_C}
+    ${HAL_DEFS}
+  DEPENDS migcom ${UROS_MIG_COMMON_DEFS} ${HAL_DEFS}
+  COMMENT "MIG: hal.defs (user stubs for gpu_server discovery)"
   VERBATIM
 )
 
@@ -151,8 +191,10 @@ set_source_files_properties(
 
 add_executable(gpu_server
   ${GPU_SOURCES}
+  ${GHAL_USER_C}    # #511: hal_list_devices, so the core can name the display
   ${GPU_USER_H}     # marker — ensures MIG runs before compiling sources
   ${GPU_SERVER_H}
+  ${GHAL_USER_H}
 )
 
 add_dependencies(gpu_server mig_mach_public_headers gpu_vga_module
@@ -196,3 +238,26 @@ set_target_properties(gpu_server PROPERTIES
   OUTPUT_NAME "gpu_server"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The manifest (#511)
+# ===========================================================================
+#
+# The policy that lets this server claim a display device, which is what the
+# kernel now requires before it will map the legacy VGA window for it.
+set(GPU_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/gpu_server.cmf")
+
+add_custom_command(
+  OUTPUT ${GPU_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${GPU_MANIFEST_OUT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/gpu_server.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/gpu_server.manifest
+  COMMENT "mkmanifest: gpu_server.manifest -> gpu_server.cmf"
+  VERBATIM
+)
+
+add_custom_target(gpu_server_manifest ALL DEPENDS ${GPU_MANIFEST_OUT})
+add_dependencies(gpu_server gpu_server_manifest)

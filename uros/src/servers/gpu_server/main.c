@@ -24,6 +24,7 @@
 #include <mach/message.h>
 #include <mach/mig_errors.h>
 #include <mach/notify.h>
+#include <mach/thread_switch.h>	/* the bounded HAL wait (#511) */
 #include <sa_mach.h>
 #include <servers/netname.h>
 #include <device/device.h>
@@ -205,24 +206,40 @@ subscribe_to_cap_revoke(void)
 }
 
 /* ================================================================
- * Optional HAL handle for discovery
+ * The HAL handle for discovery
  *
- * In 0.1.0 the only display is legacy VGA which the vga module
- * (#195) probes without HAL.  Looking up "hal" here is best-effort:
- * if HAL is up, future modules (bochs_dispi, intel_gen, ...) will
- * need it.
+ * 🔴 THIS WAS ONE LOOKUP AND NO WAIT, and the comment that stood here
+ * said why: "the only display is legacy VGA which the vga module probes
+ * without HAL".  Once the kernel began asking whose device a physical
+ * range is (#511), the vga module needs the HAL to tell it which device
+ * it is driving -- and a single lookup loses to the HAL's own startup.
+ * Measured, not guessed: gpu_server printed "HAL not available", the HAL
+ * registered its name three lines later, and the module failed to attach
+ * for want of a device the machine had.
+ *
+ * 🔑 A BOUNDED WAIT AND NOT A LOOP, for the reason bootstrap's
+ * provisioning wait gives: a boot where the HAL genuinely is not there
+ * must reach the same place it reached before rather than hanging.  The
+ * count is yields, not seconds -- what is being waited for is a task
+ * getting to run, and how long that takes is the scheduler's business.
  * ================================================================ */
+
+#define GPU_HAL_WAIT_TRIES	200
 
 static mach_port_t
 lookup_hal_optional(void)
 {
 	mach_port_t hal_port = MACH_PORT_NULL;
-	kern_return_t kr;
+	int tries;
 
-	kr = netname_look_up(name_server_port, "", "hal", &hal_port);
-	if (kr != KERN_SUCCESS)
-		return MACH_PORT_NULL;
-	return hal_port;
+	for (tries = 0; tries < GPU_HAL_WAIT_TRIES; tries++) {
+		if (netname_look_up(name_server_port, "", "hal", &hal_port)
+		    == KERN_SUCCESS)
+			return hal_port;
+
+		(void)thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 1);
+	}
+	return MACH_PORT_NULL;
 }
 
 /* ================================================================

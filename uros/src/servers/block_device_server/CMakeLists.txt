@@ -297,3 +297,35 @@ set_target_properties(block_device_server PROPERTIES
   OUTPUT_NAME "block_device_server"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The manifest (#511) — the policy for the task that drives the disks
+# ===========================================================================
+#
+# 🔴 THIS SERVER SHIPPED NO POLICY FILE, and that is not the same as being
+# given a permissive answer by one.  libcap prefers the per-task cap port
+# bootstrap stamps into TASK_CAP_PORT and falls back to the well-known
+# cap_server when none was provisioned; bootstrap provisions one only for a
+# task that ships a manifest.  So this server never reached the manifest
+# check at all, and took two PCI-device capabilities per boot with nothing
+# consulted about whether it may.
+#
+# Written to the export tree, like cap_test's, because the two targets
+# assemble their bundle with two different tools and both read from there.
+set(BDS_MANIFEST_SRC ${CMAKE_CURRENT_SOURCE_DIR}/block_device_server.manifest)
+set(BDS_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/block_device_server.cmf")
+
+add_custom_command(
+  OUTPUT ${BDS_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${BDS_MANIFEST_OUT}
+          ${BDS_MANIFEST_SRC}
+  DEPENDS mkmanifest ${BDS_MANIFEST_SRC}
+  COMMENT "mkmanifest: block_device_server.manifest -> block_device_server.cmf"
+  VERBATIM
+)
+
+add_custom_target(block_device_server_manifest ALL DEPENDS ${BDS_MANIFEST_OUT})
+add_dependencies(block_device_server block_device_server_manifest)

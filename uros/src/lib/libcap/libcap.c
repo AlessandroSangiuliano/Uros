@@ -59,6 +59,26 @@ cap_server_port(void)
     mach_port_t port;
     kern_return_t kr;
 
+    /*
+     * 🔴 THE PER-TASK PORT WINS OVER THE CACHE, AND IT DID NOT (#511).
+     *
+     * The cache used to be consulted first, so whichever server port was
+     * resolved on the FIRST call was the one this task used for the rest of
+     * its life -- and for a task whose per-task port arrives after that
+     * first call, the pinned one is the well-known permissive server.
+     *
+     * bootstrap is exactly that task, and it is not a corner case: it calls
+     * cap_provision for every child it starts, which resolves and caches the
+     * well-known port long before it provisions ITSELF.  Its own request
+     * then went to the permissive server while its manifest sat unread.
+     *
+     * 🔑 So the cache is for the netname lookup, which is the expensive part
+     * and the only part worth remembering.  A per-task port is authority and
+     * is checked every time.
+     */
+    if (mach_cap_port != MACH_PORT_NULL)
+        return mach_cap_port;
+
     if (cached_cap_port != MACH_PORT_NULL)
         return cached_cap_port;
 

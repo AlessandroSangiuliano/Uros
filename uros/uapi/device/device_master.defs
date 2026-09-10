@@ -644,3 +644,36 @@ routine device_claim_holder(
 	in	driver		: mach_port_t;
 	out	held		: natural_t
 	);
+
+/*
+ * Map one of a claimed device's regions into a task (#511).
+ *
+ * 🔴 THE ADDRESS WAS THE ARGUMENT, AND THAT WAS THE DEFECT.  device_mmio_map
+ * takes a physical address, so a driver had to find out where its own
+ * registers were -- out of configuration space, by name -- and then ask for
+ * that number.  Two operations that need authority, and the second of them
+ * could name anything at all.
+ *
+ * 🔑 A REGION IS NOT AN ADDRESS, IT IS THE Nth THING THIS DEVICE DECODES.  The
+ * kernel measured them when the device was handed over, so it knows where the
+ * region is and how wide; the caller says WHICH, and cannot say where.  There
+ * is no argument here that could name somebody else's memory.
+ *
+ * ⚠️ The size is an out parameter and not an in one.  A caller that passed a
+ * length would be asserting something it read somewhere, and the point of
+ * this call is that it asserts nothing: the kernel answers with what the
+ * device actually decodes.
+ *
+ * ⚠️ `index' is the region's position among the ones that EXIST, not a BAR
+ * slot number.  Six slots are not six regions -- a 64-bit memory BAR occupies
+ * two of them -- so a caller counting slots would name a different region on
+ * a device that has one.
+ */
+routine device_region_map(
+		master_port	: mach_port_t;
+	in	bdf		: natural_t;
+	in	index		: natural_t;
+	in	task_port	: mach_port_t;
+	out	uva		: vm_address_t;
+	out	size		: vm_size_t
+	);

@@ -285,6 +285,7 @@ device_master_init(void)
 	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
 		irq_forward_table[i].notify_port = IP_NULL;
 		irq_forward_table[i].active = 0;
+		irq_forward_table[i].owner = TASK_NULL;
 	}
 }
 
@@ -354,13 +355,196 @@ check_master_port(ipc_port_t port)
  */
 #define	DEVICE_MAX_CLAIMS	16
 
+/*
+ * ── What the kernel learns about a device when it is claimed (#511) ──────
+ *
+ * 🔴 THE KERNEL DID NOT KNOW WHERE A DEVICE'S REGISTERS WERE, and two checks
+ * were crippled by it in the same way.  device_mmio_map could compare the
+ * page a mapping STARTS on and not bound its span; device_io_port could
+ * compare a port against a BAR's base and not its range, so a driver reading
+ * its own registers at base+offset matched nothing and passed by default.
+ *
+ * 🔑 A size is not read, it is MEASURED -- write all ones into the slot, read
+ * back what sticks, put the original value again (#427).  That is a write to
+ * a live device, which is why the HAL is the only thing that has ever done
+ * it and why the kernel could not simply ask the hardware whenever it liked.
+ *
+ * ⚠️ But there is exactly one instant when it is safe, and it is this one:
+ * the claim is the moment the device changes hands.  It is granted only when
+ * nobody holds the device, so at that point no driver is programming it and
+ * no transfer is in flight -- and the decode is switched off around the probe
+ * anyway, so the window never moves while it is answering.
+ */
+/*
+ * ── The tables have no SMP serialisation, and never had (#511) ───────────
+ *
+ * 🔴 THERE IS NOT ONE simple_lock IN THIS FILE.  Every table here is guarded
+ * by splhigh(), which blocks interrupts ON THE LOCAL PROCESSOR and serialises
+ * nothing between processors.  So the claim table is walked by one processor
+ * while another compacts it, and a reader can see an entry HALF COPIED --
+ * device_master_task_terminating() releases a claim with
+ *
+ *	device_claim[i] = device_claim[device_nclaims - 1];
+ *
+ * which is a struct assignment, not an atomic one.
+ *
+ * ⚠️ It worked by accident on i386 and not by design anywhere: that target is
+ * a uniprocessor in practice and MACH_RT is 0, so nothing preempts a kernel
+ * path there.  x86-64 at -smp 4 has neither excuse.
+ *
+ * 🔑 AND MAKING THE ENTRY BIGGER IS WHAT MADE IT REACHABLE.  The measured
+ * regions took this struct from about twenty-four bytes to about a hundred and
+ * seventy, so the copy stopped being a couple of stores and became a memcpy --
+ * and a race whose window grew sevenfold went from never seen in eighty boots
+ * to twice in ten.  It read as `claimed by task 0x0': the bdf of the entry
+ * being moved in, with a task field the copy had not reached yet.
+ *
+ * ⚠️ AND A LOCK IS NOT WHAT THIS ISSUE ADDS.  Twelve functions here touch the
+ * table and several call each other; a simple_lock in this kernel masks
+ * interrupts (#528), a configuration access takes a lock of its own (#531),
+ * and mapping pages must not happen holding either.  That is a change with its
+ * own shape and its own issue.  What is done below is narrower and sound: the
+ * release stops MOVING entries, so there is nothing to tear, and a new entry
+ * publishes itself by writing the field every lookup matches on LAST.
+ */
+#define	DEVICE_MAX_REGIONS	6
+
 static struct {
 	natural_t	bdf;
 	task_t		task;
 	uint64_t	cap_id;		/* the token that established it */
+
+	/* Measured once, when the device was handed over. */
+	struct {
+		uint64_t	base;
+		uint64_t	size;
+		int		is_io;
+	} region[DEVICE_MAX_REGIONS];
+	unsigned int	nregions;
 } device_claim[DEVICE_MAX_CLAIMS];
 
 static unsigned device_nclaims;
+
+/*
+ * ── Whose device is this physical address? (#511) ────────────────────────
+ *
+ * 🔴 device_mmio_map USED TO CHECK THAT THE ADDRESS WAS NOT ZERO.  Holding
+ * the master device port was the whole of the authority, so any task that
+ * asked bootstrap for it could map any physical range, read-write, into any
+ * task it held a port for.  cap_test demonstrates it in one boot: it reads
+ * the AHCI's BAR5 out of configuration space, maps it, and reads back the
+ * controller's version register -- a device another server holds, from a
+ * task whose own manifest declares no PCI device at all.
+ *
+ * 🔑 The answer is not a list of allowed addresses.  It is that a physical
+ * range belongs to a DEVICE, and the kernel already records which task has
+ * claimed which device.  So the question becomes one the claim table can
+ * answer: which claimed device does this address belong to, and is that
+ * claim this task's?
+ *
+ * Two ways an address belongs to a device, and both are needed:
+ *
+ *   a BAR, read out of the device's own configuration space.  Read-only:
+ *   ⚠️ the SIZE of a BAR cannot be read, it has to be measured by writing
+ *   ones into it and reading back what sticks (#427), and doing that to a
+ *   device a driver is using would take the machine down.  So the base is
+ *   what is compared, and see the note on the span below.
+ *
+ *   a LEGACY WINDOW, which is device memory that no BAR describes.  The
+ *   VGA text buffer at 0xB8000 is the one this tree maps: gpu_server's vga
+ *   module attaches to it, and a rule written only about BARs would have
+ *   refused the i386 console -- found by counting what mmio_map is actually
+ *   asked for on both targets rather than by reasoning about what it should
+ *   be asked for.
+ */
+#define	VGA_LEGACY_BASE		0xA0000u
+#define	VGA_LEGACY_END		0xC0000u
+#define	PCI_CLASS_DISPLAY	0x03u
+
+static natural_t
+device_class_of(natural_t bdf)
+{
+	unsigned int class_word = device_md_pci_read((unsigned)(bdf >> 8),
+						     (unsigned)((bdf >> 3) & 0x1F),
+						     (unsigned)(bdf & 0x7),
+						     0x08);
+	return (natural_t)(class_word >> 24);
+}
+
+/*
+ * Does this claimed device answer for `phys'?
+ */
+static int
+device_owns_phys(unsigned int claim, vm_offset_t phys)
+{
+	natural_t    bdf = device_claim[claim].bdf;
+	unsigned int b;
+
+	if (phys >= VGA_LEGACY_BASE && phys < VGA_LEGACY_END)
+		return device_class_of(bdf) == PCI_CLASS_DISPLAY;
+
+	/*
+	 * 🔑 THE WHOLE REGION AND NOT ITS FIRST PAGE.  This compared the page
+	 * a mapping started on, because the kernel did not know how big a
+	 * region was and a size cannot be read.  It is measured at claim time
+	 * now, so the question "is this address inside that device" has an
+	 * answer instead of an approximation of one.
+	 */
+	for (b = 0; b < device_claim[claim].nregions; b++) {
+		uint64_t base = device_claim[claim].region[b].base;
+		uint64_t size = device_claim[claim].region[b].size;
+
+		if (device_claim[claim].region[b].is_io)
+			continue;
+
+		if ((uint64_t)phys >= base && (uint64_t)phys < base + size)
+			return 1;
+	}
+
+	return 0;
+}
+
+/*
+ * May this task map this physical address?
+ *
+ * ⚠️ THE SPAN IS NOT BOUNDED YET, AND SAYING SO IS PART OF THE FIX.  What is
+ * compared is the page the mapping starts on; a caller that holds a device
+ * legitimately can still ask for more pages than that device has.  Bounding
+ * it needs the region SIZES, which only the HAL knows because only the HAL
+ * measures them -- and it does not tell the kernel.  Closing the difference
+ * is the other half and it is written down rather than implied, because a
+ * check that looks complete and is not is the shape this file has been bitten
+ * by twice.
+ */
+static kern_return_t
+check_mmio_phys(vm_offset_t phys)
+{
+	task_t me = current_task();
+	unsigned i;
+
+	for (i = 0; i < device_nclaims; i++) {
+		/* A released entry is left in place; its owner is null. */
+		if (device_claim[i].task == TASK_NULL)
+			continue;
+
+		if (!device_owns_phys(i, phys))
+			continue;
+
+		if (device_claim[i].task == me)
+			return KERN_SUCCESS;
+
+		printf("device_mmio_map: 0x%lx belongs to %u:%u.%u, which is "
+		       "claimed by another task\n", (unsigned long)phys,
+		       (unsigned)(device_claim[i].bdf >> 8),
+		       (unsigned)((device_claim[i].bdf >> 3) & 0x1F),
+		       (unsigned)(device_claim[i].bdf & 0x7));
+		return KERN_NO_ACCESS;
+	}
+
+	printf("device_mmio_map: 0x%lx belongs to no device this task has "
+	       "claimed\n", (unsigned long)phys);
+	return KERN_NO_ACCESS;
+}
 
 /*
  * Whether another task has claimed this device.  Asks and does not claim.
@@ -397,9 +581,24 @@ check_claim(natural_t bdf)
 		return KERN_SUCCESS;
 
 	for (i = 0; i < device_nclaims; i++)
-		if (device_claim[i].bdf == bdf)
-			return device_claim[i].task == me
-			       ? KERN_SUCCESS : KERN_NO_ACCESS;
+		if (device_claim[i].bdf == bdf) {
+			if (device_claim[i].task == me)
+				return KERN_SUCCESS;
+
+			/*
+			 * ⚠️ This refusal was silent, and a claim refused for
+			 * no reason a log can name is how dma_reclaim [5]
+			 * looked while it was being investigated.
+			 */
+			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
+			       "it is claimed by task 0x%lx (entry %u of %u)\n",
+			       (unsigned)(bdf >> 8),
+			       (unsigned)((bdf >> 3) & 0x1F),
+			       (unsigned)(bdf & 7), (unsigned long)me,
+			       (unsigned long)device_claim[i].task,
+			       i, device_nclaims);
+			return KERN_NO_ACCESS;
+		}
 
 	/*
 	 * ⚠️ An UNCLAIMED device is refused too, and that is not the same
@@ -408,6 +607,37 @@ check_claim(natural_t bdf)
 	 * right to map memory for it as one that presented somebody else's.
 	 */
 	return KERN_NO_ACCESS;
+}
+
+/*
+ * May this task look at this device's configuration space? (#511)
+ *
+ * 🔴 IT USED TO BE "DOES IT HOLD THE MASTER PORT", so a device was addressed
+ * by three integers and answered to anybody -- a name and not a right.
+ * cap_test walks the whole bus with it in one boot.
+ *
+ * 🔑 TWO AUTHORITIES AND NOT ONE, because enumeration is not the same act as
+ * driving.  A driver reads the configuration space of the device it has
+ * CLAIMED.  A scanner reads everything, and has to, because the whole point
+ * of a scan is the devices nobody has claimed yet -- so it holds the BUS,
+ * which its manifest grants by naming PCI devices with no instance.
+ *
+ * On the evidence of the tree there is exactly one of each kind: pci_scan.c
+ * does the scanning, and every other caller is a driver looking at the
+ * controller it already holds.
+ */
+static kern_return_t
+check_cfg_access(natural_t bdf)
+{
+	task_t me = current_task();
+	unsigned i;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == DEVICE_BDF_BUS
+		    && device_claim[i].task == me)
+			return KERN_SUCCESS;
+
+	return check_claim(bdf);
 }
 
 /* ---- PCI configuration space ---- */
@@ -430,6 +660,10 @@ ds_master_device_pci_config_read(
 
 	if (bus > 255 || slot > 31 || func > 7 || (reg & 3))
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	*data = device_md_pci_read(bus, slot, func, reg);
 	return KERN_SUCCESS;
@@ -457,6 +691,10 @@ ds_master_device_pci_config_write(
 	if (bus > 255 || slot > 31 || func > 7 || (reg & 3))
 		return KERN_INVALID_ARGUMENT;
 
+	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
+	if (kr != KERN_SUCCESS)
+		return kr;
+
 	device_md_pci_write(bus, slot, func, reg, data);
 	return KERN_SUCCESS;
 #else
@@ -466,12 +704,229 @@ ds_master_device_pci_config_write(
 
 /* ---- Interrupt forwarding ---- */
 
+
+
+/*
+ * Measure a device's regions, once, at the instant it is claimed (#511).
+ *
+ * The sequence is the one <pci_bar.h> describes: write all ones into the
+ * slot, read back what stuck, put the original value again.  Zeros come back
+ * exactly where the device does not decode, so the size is the low run of
+ * writable bits plus one.
+ *
+ * ⚠️ THE DECODE IS SWITCHED OFF AROUND IT.  Writing ones into a BAR moves the
+ * device's window to the top of the address space for as long as it takes to
+ * read it back, and a device still answering there would answer at the wrong
+ * address.  Command register bit 0 is I/O decode and bit 1 is memory decode;
+ * both go off and both come back.
+ *
+ * ⚠️ A slot that answers zero is unimplemented and is not a region.  A size
+ * of zero and "nobody measured this" are the same value, which is why the
+ * count below is what says how many there are rather than the array's length.
+ */
+static void
+measure_regions(unsigned int idx, natural_t bdf)
+{
+	unsigned int bus  = (unsigned)(bdf >> 8);
+	unsigned int slot = (unsigned)((bdf >> 3) & 0x1F);
+	unsigned int func = (unsigned)(bdf & 0x7);
+	unsigned int cmd, b, n = 0, hdr, nslots;
+
+	device_claim[idx].nregions = 0;
+
+	/*
+	 * 🔴 HOW MANY SLOTS ARE BARS DEPENDS ON THE HEADER TYPE, and probing
+	 * six of them unconditionally is a write to registers that are not
+	 * BARs on most of the devices in a machine.
+	 *
+	 * ⚠️ A type 1 header -- a bridge -- has TWO BARs and then, from 0x18
+	 * onwards, its BUS NUMBERS and its memory and I/O windows.  Writing
+	 * all ones there does not measure anything: it reprograms which buses
+	 * the bridge forwards.  The first device anything in this tree claims
+	 * is the HOST BRIDGE, so this was not a corner case -- it was the
+	 * common one, and it showed as a boot that reached idle and would not
+	 * finish plus a claim refused for no reason a log could name.
+	 *
+	 * ⚠️ Anything that is neither type 0 nor type 1 gets no probe at all.
+	 * A header this code does not know the shape of is one it must not
+	 * write into, and reporting no regions is the honest answer for it.
+	 */
+	hdr = (device_md_pci_read(bus, slot, func, 0x0C) >> 16) & 0x7F;
+	if (hdr == 0)
+		nslots = 6;
+	else if (hdr == 1)
+		nslots = 2;
+	else {
+		printf("device: %u:%u.%u has header type %u — its regions are "
+		       "not measured, because writing into a header this "
+		       "kernel does not know the shape of is not a "
+		       "measurement\n", bus, slot, func, hdr);
+		return;
+	}
+
+	/*
+	 * 🔴 NOTHING IS WRITTEN TO A DEVICE WITH NO BARS TO MEASURE, and that
+	 * includes its command register.
+	 *
+	 * Switching the decode off is safe for a controller whose window is
+	 * about to be probed and it is NOT safe in general: the first device
+	 * anything claims here is the HOST BRIDGE, whose BARs read zero -- so
+	 * not one of them was probed -- and clearing ITS memory-decode bit
+	 * turns off the thing that decodes memory for the bus.  It showed as
+	 * a boot that reached idle and would not finish, and as
+	 * dma_reclaim [5] failing two boots in eight against zero in eighty
+	 * before this function existed.
+	 *
+	 * ⚠️ So the slots are read first, and a device that has nothing to
+	 * measure is left exactly as it was found.  A write for no reason is
+	 * still a write.
+	 */
+	for (b = 0; b < nslots; b++) {
+		unsigned int lo = device_md_pci_read(bus, slot, func,
+						     0x10 + b * 4);
+		if (lo != 0 && lo != 0xFFFFFFFFu)
+			break;
+	}
+	if (b == nslots) {
+		printf("device: %u:%u.%u has no regions to measure — nothing "
+		       "was written to it\n", bus, slot, func);
+		return;
+	}
+
+	cmd = device_md_pci_read(bus, slot, func, 0x04);
+	device_md_pci_write(bus, slot, func, 0x04, cmd & ~0x3u);
+
+	for (b = 0; b < nslots && n < DEVICE_MAX_REGIONS; b++) {
+		unsigned int	reg = 0x10 + b * 4;
+		unsigned int	lo, probe, hi = 0, probe_hi = 0;
+		uint64_t	base, size;
+		int		is64, is_io;
+
+		lo = device_md_pci_read(bus, slot, func, reg);
+		if (lo == 0 || lo == 0xFFFFFFFFu)
+			continue;
+
+		is_io = (lo & 1) != 0;
+		is64  = !is_io && ((lo >> 1) & 3) == 2;
+
+		if (is64)
+			hi = device_md_pci_read(bus, slot, func, reg + 4);
+
+		device_md_pci_write(bus, slot, func, reg, 0xFFFFFFFFu);
+		probe = device_md_pci_read(bus, slot, func, reg);
+		device_md_pci_write(bus, slot, func, reg, lo);
+
+		if (is64) {
+			device_md_pci_write(bus, slot, func, reg + 4,
+					    0xFFFFFFFFu);
+			probe_hi = device_md_pci_read(bus, slot, func,
+						      reg + 4);
+			device_md_pci_write(bus, slot, func, reg + 4, hi);
+		}
+
+		if (is_io) {
+			base = (uint64_t)(lo & ~0x3u);
+			size = (uint64_t)((~(probe & ~0x3u) & 0xFFFFu) + 1);
+		} else {
+			base = (uint64_t)(lo & ~0xFu);
+			size = (uint64_t)(~(probe & ~0xFu)) & 0xFFFFFFFFu;
+			if (is64) {
+				base |= (uint64_t)hi << 32;
+				size |= (uint64_t)(~probe_hi) << 32;
+			}
+			size += 1;
+		}
+
+		if (base != 0 && size != 0 && size != 1) {
+			device_claim[idx].region[n].base  = base;
+			device_claim[idx].region[n].size  = size;
+			device_claim[idx].region[n].is_io = is_io;
+			n++;
+		}
+
+		if (is64)
+			b++;
+	}
+
+	device_md_pci_write(bus, slot, func, 0x04, cmd);
+	device_claim[idx].nregions = n;
+
+	printf("device: %u:%u.%u handed over with %u region(s) measured\n",
+	       bus, slot, func, n);
+}
+
+/*
+ * Is this interrupt line a claimed device's, and is that claim this task's?
+ * (#511)
+ *
+ * 🔴 device_intr_register CHECKED THE MASTER PORT AND A BOUND.  So any task
+ * bootstrap handed the port to could take the line a running driver's device
+ * raises -- there is one handler per line, so taking it means the driver
+ * stops getting its interrupts, and the driver is not told.
+ *
+ * 🔑 NOT "a claim is required", which would be the wrong rule.  Three kinds
+ * of caller ask for a line and only one of them owns a PCI device:
+ *
+ *   a driver whose device raises that line -- the case this protects;
+ *   char_server, whose serial and keyboard lines are ISA legacy and belong
+ *   to no PCI device at all;
+ *   irq_claim_test, which deliberately takes a line NOBODY drives, because
+ *   what it is testing is the claim mechanism itself.
+ *
+ * So the rule is about the line's OWNER and not about the caller's holdings:
+ * if a claimed device raises it, it is that task's; otherwise the existing
+ * one-handler-per-line rule is the whole of the arbitration, as it was.
+ *
+ * ⚠️ Register 0x3C is the interrupt LINE, which is what the device was
+ * programmed with rather than what it is wired to.  That is the number this
+ * RPC is asked for, so it is the number to compare -- but it is written by
+ * firmware and a device that was never programmed reads 0 or 0xFF, so those
+ * two answers are not treated as owning line 0 or line 255.
+ */
+static kern_return_t
+check_irq_owner(unsigned int irq)
+{
+	task_t		me = current_task();
+	unsigned	i;
+
+	for (i = 0; i < device_nclaims; i++) {
+		/* A released entry is left in place; its owner is null. */
+		if (device_claim[i].task == TASK_NULL)
+			continue;
+
+		natural_t	bdf = device_claim[i].bdf;
+		unsigned int	line;
+
+		if (bdf == DEVICE_BDF_BUS)
+			continue;
+
+		line = device_md_pci_read((unsigned)(bdf >> 8),
+					  (unsigned)((bdf >> 3) & 0x1F),
+					  (unsigned)(bdf & 0x7), 0x3C) & 0xFF;
+
+		if (line == 0 || line == 0xFF || line != irq)
+			continue;
+
+		if (device_claim[i].task == me)
+			return KERN_SUCCESS;
+
+		printf("device_intr_register: irq %u is raised by %u:%u.%u, "
+		       "which another task holds\n", irq,
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 0x7));
+		return KERN_NO_ACCESS;
+	}
+
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 ds_master_device_intr_register(
 	ipc_port_t		master_port,
 	unsigned int		irq,
 	ipc_port_t		notify_port)
 {
+	task_t me = current_task();
 	kern_return_t kr;
 	spl_t s;
 
@@ -490,6 +945,10 @@ ds_master_device_intr_register(
 	 */
 	if (irq >= IRQ_FORWARD_LINES)
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_irq_owner(irq);
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	if (notify_port == IP_NULL)
 		return KERN_INVALID_ARGUMENT;
@@ -510,6 +969,8 @@ ds_master_device_intr_register(
 	 */
 	irq_forward_table[irq].notify_port = notify_port;
 	irq_forward_table[irq].active = 1;
+	irq_forward_table[irq].owner = me;
+	task_reference(me);
 
 	if (!device_md_irq_register(irq, irq_forward_handler)) {
 		/*
@@ -520,6 +981,8 @@ ds_master_device_intr_register(
 		 */
 		irq_forward_table[irq].notify_port = IP_NULL;
 		irq_forward_table[irq].active = 0;
+		irq_forward_table[irq].owner = TASK_NULL;
+		task_deallocate(me);
 		splx(s);
 		return KERN_FAILURE;
 	}
@@ -555,6 +1018,7 @@ ds_master_device_msi_register(
 	ipc_port_t		notify_port,
 	unsigned int		*slot_out)
 {
+	task_t		me = current_task();
 	kern_return_t	kr;
 	spl_t		s;
 	unsigned int	slot = 0;
@@ -565,6 +1029,20 @@ ds_master_device_msi_register(
 
 	if (notify_port == IP_NULL || slot_out == 0)
 		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * 🔑 THE DEVICE IS NAMED, so the question is the ordinary one: is it
+	 * this task's?  A message-signalled interrupt is programmed into the
+	 * DEVICE's own table, so registering one is a write to whoever's
+	 * device this is -- unlike a line, which is a property of the
+	 * controller and can belong to nothing at all.
+	 */
+	kr = check_claim((natural_t)((bus << 8) | (dev << 3) | func));
+	if (kr != KERN_SUCCESS) {
+		printf("device_msi_register: %u:%u.%u is not this task's\n",
+		       bus, dev, func);
+		return kr;
+	}
 
 	irq_forward_thread_start();
 
@@ -591,6 +1069,18 @@ ds_master_device_msi_register(
 	irq_forward_table[slot].notify_port = notify_port;
 	irq_forward_table[slot].active = 1;
 	irq_forward_table[slot].msi = 1;
+	/*
+	 * 🔑 THE OWNER, like a line's (#511) -- and this is the half that was
+	 * found by the arm rather than by reading.  Recording it on the line
+	 * path and not here left every message-signalled slot owned by
+	 * nobody, so giving one back was refused: irq_claim_test's arm [8]
+	 * said "a message-signalled slot cannot be released" and it was right.
+	 *
+	 * ⚠️ An owner recorded in one of two places that fill the same table is
+	 * the shape #531 spent a day on.  Both fill it now.
+	 */
+	irq_forward_table[slot].owner = me;
+	task_reference(me);
 
 	splx(s);
 
@@ -615,6 +1105,18 @@ ds_master_device_intr_unregister(
 
 	if (!irq_forward_table[irq].active)
 		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * 🔑 THE LINE IS GIVEN BACK BY WHOEVER TOOK IT (#511).  Any active
+	 * line used to do, so a task holding the master device port could
+	 * stop a running driver's interrupts -- and the driver is not told,
+	 * its notifications simply cease.
+	 */
+	if (irq_forward_table[irq].owner != current_task()) {
+		printf("device_intr_unregister: irq %u was registered by "
+		       "another task\n", irq);
+		return KERN_NO_ACCESS;
+	}
 
 	s = splhigh();
 
@@ -662,6 +1164,16 @@ ds_master_device_intr_unregister(
 	 */
 	irq_pending[irq] = 0;
 
+	/* The reference this line held on its owner goes back with it. */
+	if (irq_forward_table[irq].owner != TASK_NULL) {
+		task_t owner = irq_forward_table[irq].owner;
+
+		irq_forward_table[irq].owner = TASK_NULL;
+		splx(s);
+		task_deallocate(owner);
+		return KERN_SUCCESS;
+	}
+
 	splx(s);
 
 	return KERN_SUCCESS;
@@ -691,6 +1203,16 @@ ds_master_device_intr_enable(
 		return KERN_INVALID_ARGUMENT;
 
 	s = splhigh();
+	/*
+	 * The same question as unregister's, for the same reason: unmasking a
+	 * line is an act on somebody's device.
+	 */
+	if (irq_forward_table[irq].owner != current_task()) {
+		printf("device_intr_enable: irq %u was registered by another "
+		       "task\n", irq);
+		return KERN_NO_ACCESS;
+	}
+
 	if (irq_forward_mask_safe((int)irq))
 		device_md_irq_unmask(irq);
 	splx(s);
@@ -1636,6 +2158,32 @@ ds_master_device_dma_map_user(
 	if (kva == 0 || size == 0)
 		return KERN_INVALID_ARGUMENT;
 
+	/*
+	 * 🔑 THE REGION HAS TO BE THIS TASK'S (#511).  Holding the master
+	 * device port was the whole of the authority here, so any task that
+	 * asked bootstrap for it could map ANOTHER server's DMA buffer into a
+	 * task of its choosing -- the same defect as mmio_map's, one argument
+	 * over, and it needs no claim to answer: the kernel made the
+	 * allocation and recorded who asked for it.
+	 */
+	{
+		task_t		me = current_task();
+		unsigned int	i;
+		int		mine = 0;
+
+		for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++)
+			if (dma_region[i].kva == kva) {
+				mine = dma_region[i].owner == me;
+				break;
+			}
+
+		if (!mine) {
+			printf("device_dma_map_user: 0x%lx is not a region "
+			       "this task allocated\n", (unsigned long)kva);
+			return KERN_NO_ACCESS;
+		}
+	}
+
 	task = convert_port_to_task(task_port);
 	if (task == TASK_NULL)
 		return KERN_INVALID_ARGUMENT;
@@ -1745,6 +2293,12 @@ ds_master_device_mmio_map(
 	page_offset = (vm_offset_t)phys_addr - phys_base;
 	round_sz    = round_page(page_offset + size);
 
+	kr = check_mmio_phys(phys_base);
+	if (kr != KERN_SUCCESS) {
+		task_deallocate(task);
+		return kr;
+	}
+
 	kr = map_pages_into_task(task, phys_base, 0,
 				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
 	task_deallocate(task);
@@ -1761,6 +2315,80 @@ ds_master_device_mmio_map(
 	 * defect can have -- right until the low four gigabytes are busy.
 	 */
 	*uva_out = uva + page_offset;
+	return KERN_SUCCESS;
+}
+
+
+/*
+ * device_region_map — map one of a claimed device's regions (#511).
+ *
+ * 🔑 The caller says WHICH region and cannot say where it is.  The kernel
+ * measured the device's regions when it was handed over, so both the address
+ * and the width come from the hardware rather than from an argument -- there
+ * is nothing here that could name somebody else's memory.
+ */
+kern_return_t
+ds_master_device_region_map(
+	ipc_port_t		master_port,
+	natural_t		bdf,
+	natural_t		index,
+	ipc_port_t		task_port,
+	vm_address_t		*uva_out,
+	vm_size_t		*size_out)
+{
+	task_t		task;
+	task_t		me = current_task();
+	kern_return_t	kr;
+	unsigned	i;
+	vm_offset_t	phys_base, uva;
+	vm_size_t	round_sz;
+	unsigned int	page_offset;
+
+	kr = check_master_port(master_port);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == bdf)
+			break;
+
+	if (i == device_nclaims || device_claim[i].task != me) {
+		printf("device_region_map: %u:%u.%u is not this task's\n",
+		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
+		       (unsigned)(bdf & 0x7));
+		return KERN_NO_ACCESS;
+	}
+
+	if (index >= device_claim[i].nregions)
+		return KERN_INVALID_ARGUMENT;
+
+	/*
+	 * ⚠️ An I/O region has no address to map.  Refusing says so, where
+	 * mapping its base as if it were memory would hand back a window onto
+	 * whatever physical memory happens to live at that number.
+	 */
+	if (device_claim[i].region[index].is_io)
+		return KERN_INVALID_ARGUMENT;
+
+	task = convert_port_to_task(task_port);
+	if (task == TASK_NULL)
+		return KERN_INVALID_ARGUMENT;
+
+	phys_base   = trunc_page((vm_offset_t)
+				 device_claim[i].region[index].base);
+	page_offset = (unsigned int)(device_claim[i].region[index].base
+				     - phys_base);
+	round_sz    = round_page(page_offset
+				 + device_claim[i].region[index].size);
+
+	kr = map_pages_into_task(task, phys_base, 0,
+				 (unsigned int)(round_sz / PAGE_SIZE), &uva);
+	task_deallocate(task);
+	if (kr != KERN_SUCCESS)
+		return kr;
+
+	*uva_out  = uva + page_offset;
+	*size_out = (vm_size_t)device_claim[i].region[index].size;
 	return KERN_SUCCESS;
 }
 
@@ -1795,6 +2423,67 @@ ds_master_device_mmio_unmap(
 
 /* ---- I/O port access ---- */
 
+
+/*
+ * Is this I/O port inside a claimed device's I/O BAR, and is that claim this
+ * task's? (#511)
+ *
+ * 🔴 device_io_port_read/write CHECKED THE SIZE.  An x86 I/O port is the
+ * other way into a device -- the virtio driver programs its whole queue
+ * through BAR0 that way -- and any task holding the master device port could
+ * write any port on the machine.
+ *
+ * 🔑 THE WHOLE WINDOW, not its first address.  This compared the BASE while
+ * the kernel had no way to know how wide an I/O BAR was -- so virtio reading
+ * its registers at base+offset matched nothing and passed by default, and the
+ * check caught a stranger at the front door and not one that stepped
+ * sideways.  The regions are measured when the device is claimed now, so the
+ * range is the range.
+ *
+ * 🔑 A port belonging to NO claimed device stays reachable, and that is the
+ * same decision check_irq_owner() makes: the legacy devices -- the serial
+ * lines, the keyboard, the PIC and the PIT -- are behind no PCI BAR, and a
+ * rule that refused everything unattributed would take the console with it.
+ */
+static kern_return_t
+check_io_port(unsigned int port)
+{
+	task_t		me = current_task();
+	unsigned	i, b;
+
+	for (i = 0; i < device_nclaims; i++) {
+		/* A released entry is left in place; its owner is null. */
+		if (device_claim[i].task == TASK_NULL)
+			continue;
+
+		if (device_claim[i].bdf == DEVICE_BDF_BUS)
+			continue;
+
+		for (b = 0; b < device_claim[i].nregions; b++) {
+			uint64_t base = device_claim[i].region[b].base;
+			uint64_t size = device_claim[i].region[b].size;
+
+			if (!device_claim[i].region[b].is_io)
+				continue;
+			if ((uint64_t)port < base
+			    || (uint64_t)port >= base + size)
+				continue;
+
+			if (device_claim[i].task == me)
+				return KERN_SUCCESS;
+
+			printf("device_io_port: 0x%x is inside %u:%u.%u's "
+			       "window, which another task holds\n", port,
+			       (unsigned)(device_claim[i].bdf >> 8),
+			       (unsigned)((device_claim[i].bdf >> 3) & 0x1F),
+			       (unsigned)(device_claim[i].bdf & 0x7));
+			return KERN_NO_ACCESS;
+		}
+	}
+
+	return KERN_SUCCESS;
+}
+
 kern_return_t
 ds_master_device_io_port_read(
 	ipc_port_t		master_port,
@@ -1810,6 +2499,10 @@ ds_master_device_io_port_read(
 
 	if (size != 1 && size != 2 && size != 4)
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_io_port(port);
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	*data_out = device_md_io_read(port, size);
 	return KERN_SUCCESS;
@@ -1830,6 +2523,10 @@ ds_master_device_io_port_write(
 
 	if (size != 1 && size != 2 && size != 4)
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_io_port(port);
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	device_md_io_write(port, size, data);
 	return KERN_SUCCESS;
@@ -2242,7 +2939,7 @@ ds_master_device_claim(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	if (bdf == DEVICE_DMA_NO_BDF || bdf > 0xFFFFu)
+	if (bdf != DEVICE_BDF_BUS && (bdf == DEVICE_DMA_NO_BDF || bdf > 0xFFFFu))
 		return KERN_INVALID_ARGUMENT;
 
 	/*
@@ -2267,19 +2964,61 @@ ds_master_device_claim(
 	 * Register 0x08 is revision in 7:0 and class code in 31:8 — base
 	 * class, sub-class and programming interface.
 	 */
-	class_word = device_md_pci_read((unsigned)(bdf >> 8),
-					(unsigned)((bdf >> 3) & 0x1F),
-					(unsigned)(bdf & 7), 0x08);
+	if (bdf == DEVICE_BDF_BUS) {
+		/*
+		 * 🔑 THE BUS HAS NO CONFIGURATION SPACE OF ITS OWN, so there
+		 * is no class to read out of the hardware and nothing for the
+		 * capability to be matched against instance by instance.  What
+		 * is required instead is a capability for PCI devices with NO
+		 * instance named -- CAP_MANIFEST_ANY_ID -- which is a manifest
+		 * saying "all of them" rather than "this one", and is the only
+		 * shape of that sentence a policy file can write.
+		 */
+		class_id = CAP_MANIFEST_ANY_ID;
+	} else {
+		class_word = device_md_pci_read((unsigned)(bdf >> 8),
+						(unsigned)((bdf >> 3) & 0x1F),
+						(unsigned)(bdf & 7), 0x08);
 
-	if (class_word == 0xFFFFFFFFu)
-		return KERN_INVALID_ARGUMENT;	/* nothing is there */
+		if (class_word == 0xFFFFFFFFu)
+			return KERN_INVALID_ARGUMENT;	/* nothing is there */
 
-	class_id = (uint64_t)(class_word >> 8);
+		class_id = (uint64_t)(class_word >> 8);
+	}
 
+	/*
+	 * 🔴 THE OP CHECKED HERE WAS CAP_OP_PCI_DMA_MAP, ALWAYS (#511).
+	 *
+	 * So claiming any device at all required DMA authority over it, and a
+	 * server that only wants to map a device's registers had to be granted
+	 * the right to program its DMA engine in order to say the device was
+	 * its own.  gpu_server is exactly that server: it maps the VGA text
+	 * window and does nothing else, its manifest declares MMIO alone, and
+	 * the claim was refused for an op it never asked to use.
+	 *
+	 * 🔑 A CLAIM IS NOT AN OPERATION.  It says "this device is mine", and
+	 * what may be done with it is what the capability's ops say.  So the
+	 * check here is that the capability covers this device's class and
+	 * carries at least one thing one can do to a device -- and WHICH thing
+	 * is the question the operations themselves have to ask.
+	 *
+	 * ⚠️ That finer half is not done here: device_dma_alloc and
+	 * device_mmio_map check that the caller holds the CLAIM, not that its
+	 * capability carries the matching op.  Naming it rather than implying
+	 * it, because a check that looks complete and is not is how this file
+	 * got the arrangement above.
+	 */
 	kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_DMA_MAP, class_id);
+	if (kr != KERN_SUCCESS)
+		kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_MMIO_MAP,
+					 class_id);
+	if (kr != KERN_SUCCESS)
+		kr = cap_check_in_kernel(&cap, (uint32_t)CAP_OP_PCI_IRQ,
+					 class_id);
 	if (kr != KERN_SUCCESS) {
 		printf("device: %02x:%02x.%u REFUSED to task 0x%lx — its "
-		       "capability does not cover class 0x%06lx (kr=%d)\n",
+		       "capability does not cover class 0x%06lx with any "
+		       "device operation (kr=%d)\n",
 		       (unsigned)(bdf >> 8), (unsigned)((bdf >> 3) & 0x1F),
 		       (unsigned)(bdf & 7), (unsigned long)me,
 		       (unsigned long)class_id, (int)kr);
@@ -2287,9 +3026,24 @@ ds_master_device_claim(
 	}
 
 	for (i = 0; i < device_nclaims; i++)
-		if (device_claim[i].bdf == bdf)
-			return device_claim[i].task == me
-			       ? KERN_SUCCESS : KERN_NO_ACCESS;
+		if (device_claim[i].bdf == bdf) {
+			if (device_claim[i].task == me)
+				return KERN_SUCCESS;
+
+			/*
+			 * ⚠️ This refusal was silent, and a claim refused for
+			 * no reason a log can name is how dma_reclaim [5]
+			 * looked while it was being investigated.
+			 */
+			printf("device: %02x:%02x.%u REFUSED to task 0x%lx — "
+			       "it is claimed by task 0x%lx (entry %u of %u)\n",
+			       (unsigned)(bdf >> 8),
+			       (unsigned)((bdf >> 3) & 0x1F),
+			       (unsigned)(bdf & 7), (unsigned long)me,
+			       (unsigned long)device_claim[i].task,
+			       i, device_nclaims);
+			return KERN_NO_ACCESS;
+		}
 
 	/*
 	 * ⚠️ Full is a REFUSAL and not a free-for-all.  A table that stopped
@@ -2297,14 +3051,55 @@ ds_master_device_claim(
 	 * anybody -- the check turning itself off exactly when there are
 	 * enough devices for it to matter.
 	 */
-	if (device_nclaims >= DEVICE_MAX_CLAIMS)
+	/*
+	 * A free slot, which a release leaves behind in place rather than
+	 * closing up.  device_nclaims is the high-water mark: the table is
+	 * walked to it and free entries are skipped by their null owner.
+	 */
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].task == TASK_NULL)
+			break;
+
+	if (i == device_nclaims && device_nclaims >= DEVICE_MAX_CLAIMS)
 		return KERN_RESOURCE_SHORTAGE;
 
-	device_claim[device_nclaims].bdf = bdf;
-	device_claim[device_nclaims].task = me;
-	device_claim[device_nclaims].cap_id = cap.cap_id;
+	/*
+	 * 🔑 THE bdf IS WRITTEN LAST, and that is what publishes the entry.
+	 * Every lookup in this file matches on it, so a reader either does not
+	 * see this claim yet or sees it complete -- never a bdf whose owner has
+	 * not been stored.  Filling it first is what the old order did.
+	 */
+	device_claim[i].task = me;
+	device_claim[i].cap_id = cap.cap_id;
+	device_claim[i].nregions = 0;
+	device_claim[i].bdf = bdf;
+
+	/*
+	 * 🔑 MEASURED HERE AND NOWHERE ELSE, because this is the one instant
+	 * it is safe: the device has just changed hands and nobody is driving
+	 * it yet.  Everything downstream that has to know where this device's
+	 * registers are -- the span of a mapping, the range of an I/O port --
+	 * reads what this leaves behind.  The bus itself has no regions.
+	 */
+	if (bdf != DEVICE_BDF_BUS)
+		measure_regions(i, bdf);
 	task_reference(me);
-	device_nclaims++;
+	if (i == device_nclaims)
+		device_nclaims++;
+
+	if (bdf == DEVICE_BDF_BUS) {
+		/*
+		 * ⚠️ A DIFFERENT SENTENCE, because the ordinary one is false
+		 * here.  Decoding the bus sentinel as bus/slot/func printed
+		 * `ffffff:1f.6 (class 0xffffffffffffffff)' -- an address no
+		 * machine has and a class no device reports, in a line whose
+		 * whole job is to say who got what.
+		 */
+		printf("device: the BUS is now scanned by task 0x%lx, which "
+		       "showed a capability for PCI devices with no instance "
+		       "named\n", (unsigned long)me);
+		return KERN_SUCCESS;
+	}
 
 	printf("device: %02x:%02x.%u (class 0x%06lx) is now driven by task "
 	       "0x%lx, which showed a capability for that class\n",
@@ -2371,8 +3166,10 @@ device_master_cap_revoked(uint64_t cap_id)
 		 * the same one -- so a revocation that stopped at the first
 		 * match would leave the rest reaching.
 		 */
-		device_claim[i] = device_claim[device_nclaims - 1];
-		device_nclaims--;
+		/* Freed in place, for the reason task_terminating() gives. */
+		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
+		device_claim[i].task = TASK_NULL;
+		device_claim[i].nregions = 0;
 		i--;
 	}
 }
@@ -2414,6 +3211,51 @@ device_master_task_terminating(task_t task)
 
 	if (task == TASK_NULL)
 		return;
+
+	/*
+	 * ── The interrupt lines first (#511) ──────────────────────────────
+	 *
+	 * 🔴 THIS HOOK DID NOT TOUCH THE FORWARDING TABLE.  A driver that died
+	 * left its line registered, with a send right to a port nobody
+	 * receives on -- so the line stayed taken, no new driver could have
+	 * it, and every front raised on it queued a notification into a dead
+	 * port.  The regions and the claims were released here from the start;
+	 * the interrupts were not, and nobody noticed because until now the
+	 * table recorded no owner to release them by.
+	 *
+	 * ⚠️ And now it must, because the entry holds a REFERENCE on its
+	 * owner: a line never given back would pin the task struct for ever,
+	 * which is the second half of the same defect #513 found in the
+	 * regions.
+	 *
+	 * ⚠️ Before the buffers, because a device whose driver is gone should
+	 * stop being able to raise an interrupt before its memory is taken
+	 * out from under it.
+	 */
+	for (i = 0; i < IRQ_FORWARD_MAX; i++) {
+		spl_t	s;
+		task_t	owner;
+
+		if (irq_forward_table[i].owner != task)
+			continue;
+
+		s = splhigh();
+		if (irq_forward_table[i].active) {
+			device_md_irq_mask(i);
+			irq_forward_table[i].active = 0;
+			irq_forward_table[i].notify_port = IP_NULL;
+			irq_pending[i] = 0;
+		}
+		owner = irq_forward_table[i].owner;
+		irq_forward_table[i].owner = TASK_NULL;
+		splx(s);
+
+		printf("device: task 0x%lx died holding irq %u — the line is "
+		       "given back\n", (unsigned long)task, (unsigned)i);
+
+		if (owner != TASK_NULL)
+			task_deallocate(owner);
+	}
 
 	for (i = 0; i < DEVICE_MAX_DMA_REGIONS; i++) {
 		struct dma_region	*r = &dma_region[i];
@@ -2485,10 +3327,33 @@ device_master_task_terminating(task_t task)
 		 */
 		task_deallocate(device_claim[i].task);
 
-		/* Compacted; see device_master_cap_revoked() on the index. */
-		device_claim[i] = device_claim[device_nclaims - 1];
-		device_nclaims--;
-		i--;
+		/*
+		 * 🔴 MARKED FREE, NOT COMPACTED (#511).  This used to be
+		 *
+		 *	device_claim[i] = device_claim[device_nclaims - 1];
+		 *
+		 * a struct assignment racing every processor that walks this
+		 * table -- there is no lock in this file, only splhigh(),
+		 * which serialises nothing between processors.  A reader could
+		 * see an entry half copied and did: `claimed by task 0x0', the
+		 * bdf of the entry moving in with a task field the copy had not
+		 * reached.  It never showed in eighty boots and showed twice in
+		 * ten once the measured regions made the struct seven times
+		 * bigger.
+		 *
+		 * 🔑 Freeing in place moves nothing, so there is nothing to
+		 * tear.  The bdf is cleared FIRST, which is the field every
+		 * lookup matches on: a reader either sees the entry it was
+		 * looking for or does not see it, and never sees somebody
+		 * else's device wearing this one's owner.
+		 *
+		 * ⚠️ This is not a fix for the file's lack of serialisation,
+		 * which is real and wider than this table.  It removes the
+		 * window this issue opened; the rest belongs to its own issue.
+		 */
+		device_claim[i].bdf = DEVICE_DMA_NO_BDF;
+		device_claim[i].task = TASK_NULL;
+		device_claim[i].nregions = 0;
 	}
 }
 

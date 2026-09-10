@@ -1,0 +1,49 @@
+# block_device_server manifest — the policy for the task that drives the disks
+# (#511).
+#
+# 🔴 IT HAD NONE, AND THAT IS WHY IT NEEDED ONE.  libcap prefers the per-task
+# cap port bootstrap stamps into TASK_CAP_PORT and falls back to the
+# well-known cap_server when no per-task port was provisioned -- and bootstrap
+# provisions one only for a task that ships a manifest.  So a server with no
+# policy file did not get a permissive answer from the manifest check: it
+# never reached the check at all.
+#
+# 🔑 The census that found this counted three requests arriving on the
+# well-known port in one boot, two of them RESOURCE_PCI_DEVICE -- this task
+# claiming its two controllers, with nothing consulted about whether it may.
+# The one task on the machine that most needed a policy was the one with no
+# way to be subject to one.
+#
+# ⚠️ Two classes and not two addresses, for the reason dma_reclaim_test's
+# manifest gives: this tree's AHCI is 00:04.0 under one QEMU command line and
+# 00:1f.2 under another, and a manifest is written before the machine exists.
+# The kernel reads the class out of the device's own configuration space and
+# requires it to agree with what was declared, so naming a class is a claim
+# about the KIND of hardware this server drives, checked against the hardware.
+
+name block_device_server
+
+# RESOURCE_PCI_DEVICE (5), class 0x010601 -- SATA AHCI -- DMA|MMIO|IRQ (0x7).
+#
+# The ich9-ahci controller and its two disks.  block_server.c asks for exactly
+# this with `cap_request(RESOURCE_PCI_DEVICE, class_rev >> 8, ...)', so the
+# number here is the one the hardware reports and not a name chosen twice.
+required 5 0x010601 0x7
+
+# RESOURCE_PCI_DEVICE (5), class 0x010000 -- SCSI mass storage -- DMA|MMIO|IRQ.
+#
+# ⚠️ This is virtio-blk, which reports itself as SCSI rather than as anything
+# virtio-shaped.  It is the BOOT disk: refusing it here would take the whole
+# boot with it, which is the loudest possible way to find out that a class
+# number was wrong.
+required 5 0x010000 0x7
+
+# RESOURCE_DMA_BUFFER (10), any buffer, device READ|WRITE (0x3).
+#
+# 🔑 `any' is the only honest thing this line can say, and that is a fact
+# about the resource rather than a looseness: a manifest is written before the
+# system runs and a DMA buffer exists for four milliseconds.  This says
+# whether the task may hold buffer capabilities at all; the KERNEL says
+# whether a particular buffer is this task's to give away, because it made the
+# allocation.
+required 10 any 0x3

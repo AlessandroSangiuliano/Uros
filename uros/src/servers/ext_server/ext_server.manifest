@@ -1,0 +1,23 @@
+# ext_server manifest — the policy for the task that mounts the root (#511).
+#
+# 🔴 FOUND THE SAME WAY default_pager's WAS, and it failed harder: the root
+# filesystem is the thing the rest of the boot is standing on.
+#
+#	ext2: cap_request(ahci0a) failed (2413)
+#	bootstrap: '.../ext_server' task terminated
+#
+# ⚠️ It does not run on x86-64 yet -- that is #498 -- so it is compiled on both
+# targets and shipped in i386's bundle only.  When it crosses, the .cmf has to
+# be named in the x86-64 bundle rule as well: a manifest that exists in the
+# export tree and is not in the bundle is a policy nobody reads, which is worse
+# than none because it looks like one.
+
+name ext_server
+
+# RESOURCE_BLK_DEVICE (4), any device, READ|WRITE (0x3).
+#
+# ⚠️ `any', because which partition holds the root is a boot argument: it is
+# `ahci0a' under one bootstrap.conf and something else under another.  This
+# says the server may open a block device read-write; which one is the boot's
+# decision, and the capability it is issued names the instance.
+required 4 any 0x3

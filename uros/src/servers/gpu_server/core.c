@@ -23,6 +23,8 @@
 #include <string.h>
 #include <mach/cap_types.h>
 #include "gpu_server.h"
+#include "hal_server.h"	/* struct hal_device_info (#511) */
+#include "hal.h"		/* the user half of hal.defs (#511) */
 
 /* ================================================================
  * Device table
@@ -100,12 +102,59 @@ gpu_core_dev_copy_all(struct gpu_device_info *out, unsigned int max)
 /* ================================================================
  * Discovery
  *
- * In 0.1.0 the vga module (#195) does not need HAL — it claims the
- * legacy VGA framebuffer unconditionally.  Future modules call
- * hal_list_devices on hal_port and probe each DISPLAY-class entry;
- * for now we just call every loaded module's probe() with a NULL
- * hint, matching the legacy-VGA fallback in design doc §8.1.
+ * 🔴 THIS USED TO PASS NULL AND IGNORE hal_port, and the comment that
+ * stood here said why: "the vga module does not need HAL -- it claims the
+ * legacy VGA framebuffer unconditionally".  That was true while mapping
+ * 0xB8000 needed nothing but the master device port, and it is what #511
+ * takes away.  A physical range belongs to a device now, and the kernel
+ * maps it only for the task holding that device's claim -- so a module
+ * that does not know which device it is driving cannot drive it.
+ *
+ * 🔑 The HAL was already being passed in and thrown away.  Asking it for
+ * the display-class device is the thing the old comment said future
+ * modules would do; the future is a module that has to name its device
+ * in order to touch it.
+ *
+ * ⚠️ A NULL hint is still passed when the HAL has nothing, and that is
+ * not a fallback to the old behaviour -- the module will simply fail to
+ * claim and say so.  What it preserves is a boot with no HAL reaching
+ * the same place it reached before, rather than stopping here.
  * ================================================================ */
+
+#define GPU_HAL_MAX_DEVS	64
+#define PCI_CLASS_DISPLAY_BYTE	0x03u
+
+static const struct hal_device_info *
+find_display_device(mach_port_t hal_port,
+		    struct hal_device_info *out, unsigned int max)
+{
+	vm_offset_t                   buf = 0;
+	mach_msg_type_number_t        bytes = 0;
+	unsigned int                  n = 0, i;
+	const struct hal_device_info *devs;
+	const struct hal_device_info *found = NULL;
+
+	if (hal_port == MACH_PORT_NULL)
+		return NULL;
+
+	if (hal_list_devices(hal_port, &buf, &bytes, &n) != KERN_SUCCESS)
+		return NULL;
+
+	devs = (const struct hal_device_info *)buf;
+	if (n > max)
+		n = max;
+	for (i = 0; i < n; i++)
+		if ((devs[i].class_rev >> 24) == PCI_CLASS_DISPLAY_BYTE) {
+			out[0] = devs[i];
+			found = &out[0];
+			break;
+		}
+
+	/* The registry arrives out-of-line and is given back either way. */
+	if (bytes != 0)
+		(void)vm_deallocate(mach_task_self(), buf, bytes);
+	return found;
+}
 
 void
 gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
@@ -113,14 +162,25 @@ gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
 		       mach_port_t hal_port)
 {
 	unsigned int m;
-
-	(void)hal_port;	/* used by future modules; silenced for 0.1.0 */
+	struct hal_device_info        display;
+	const struct hal_device_info *hint;
 
 	if (modules == NULL || n_modules == 0) {
 		printf("gpu_server: no back-end modules loaded — discovery "
 		       "skipped\n");
 		return;
 	}
+
+	hint = find_display_device(hal_port, &display, GPU_HAL_MAX_DEVS);
+	if (hint != NULL)
+		printf("gpu_server: HAL names %u:%u.%u class 0x%06x as the "
+		       "display device\n",
+		       (unsigned)hint->bus, (unsigned)hint->slot,
+		       (unsigned)hint->func,
+		       (unsigned)(hint->class_rev >> 8));
+	else
+		printf("gpu_server: the HAL named no display device — a "
+		       "module that must claim one will say so\n");
 
 	for (m = 0; m < n_modules; m++) {
 		const gpu_module_ops_t *ops = modules[m];
@@ -139,7 +199,7 @@ gpu_core_run_discovery(const gpu_module_ops_t * const *modules,
 		}
 		if (ops->probe == NULL)
 			continue;
-		priv = ops->probe(NULL);
+		priv = ops->probe(hint);
 		if (priv == NULL)
 			continue;
 

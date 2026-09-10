@@ -710,6 +710,11 @@ main(int argc, char **argv)
         != KERN_SUCCESS)
         return 1;
     printf_init(device);
+    /*
+     * 🔴 AND GIVEN BACK (#511).  Bus authority, wanted to open a console.
+     * See the note above printf_init() in libmach/printf.c.
+     */
+    (void) mach_port_deallocate(mach_task_self(), device);
 
     printf("\n=== sig_test (proc_server v0.2.0/v0.3.0/v0.4.0 / #238 + #239 + #240) ===\n");
     wait_for_proc_server();

@@ -170,8 +170,37 @@ cap_manifest_allows(const cap_manifest_header_t *m,
     const cap_manifest_entry_t *req;
     uint32_t i;
 
+    /*
+     * ── What "this task shipped no manifest" means (#511) ──────────────
+     *
+     * 🔴 IT MEANT "ALLOW EVERYTHING", and it meant it at the CALL SITES:
+     * both of them read `if (m && !cap_manifest_allows(...))', so with no
+     * manifest this predicate was never reached at all.  Ten manifests
+     * exist in a tree with dozens of tasks, and none of them belongs to a
+     * server that drives hardware -- so the one policy file this system has
+     * was silent about exactly the tasks it most needed to speak for, and
+     * any check downstream of it was a guard that could not fail for them.
+     *
+     * 🔑 The decision lives HERE now, in the one function that answers the
+     * question, rather than in a `m &&' repeated at every place that asks
+     * it.  While it was spelt at the call sites, a third call site added
+     * later would have got the old answer by default and nobody would have
+     * had to decide anything.
+     *
+     * 🔑 NO MANIFEST NOW MEANS NO CAPABILITY, full stop, and it got there
+     * in two steps on purpose.  The first refused hardware alone, which was
+     * free -- the census said no request relied on the legacy path for
+     * anything else.  The second is this one, taken once the census read
+     * zero for every resource: three requests before, from two tasks, none
+     * after those two were given policy files.
+     *
+     * ⚠️ Reaching this with a null manifest is now a task holding a
+     * per-task cap port whose manifest is not in the table, which is a
+     * broken installation rather than a policy question.  Refusing is the
+     * only honest answer to it.
+     */
     if (!m)
-        return 1;       /* permissive: no manifest -> legacy path */
+        return 0;
 
     req = (const cap_manifest_entry_t *)((const char *)m +
                                          m->required_offset);

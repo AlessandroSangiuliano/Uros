@@ -1,0 +1,34 @@
+# bootstrap manifest — the policy for the task that provisions everyone else's
+# (#511).
+#
+# 🔴 THE ROOT IS NOT AN EXCEPTION, IT IS JUST FIRST.  bootstrap looks a
+# `<symtab>.cmf' out of the boot bundle for every task it creates, asks
+# cap_server for a per-task port, and stamps it into the child as
+# TASK_CAP_PORT.  It had no manifest of its own, so it was the one task that
+# went on using the well-known cap_server -- the permissive path, reachable by
+# any task that looks the name up, which is authority held by NAME and not by
+# RIGHT: the same sentence this issue makes about the master device port.
+#
+# 🔑 There is no paradox in the root provisioning itself.  It provisions every
+# other task by calling cap_provision_task with that task's port; calling it
+# with its own port is the same operation with the same argument shape.  It
+# simply has to do itself before it needs the answer.
+#
+# ⚠️ AND IT MUST HAPPEN BEFORE THE FIRST cap_request.  libcap caches whichever
+# server port it resolved on first use, so a bootstrap that provisioned itself
+# after asking for something would hold the well-known port for the rest of
+# the boot and this file would be a policy nobody reads.
+
+name bootstrap
+
+# RESOURCE_BLK_DEVICE (4), any device, READ|WRITE (0x3).
+#
+# The boot device.  bootstrap asks for a capability on BOOT_DEV_NAME so it can
+# open the partition stage 2 is loaded from -- the one request it makes, and
+# the last line in the census of the permissive path.
+#
+# ⚠️ `any' and not the hash of BOOT_DEV_NAME, because the name of the boot
+# device is a boot argument: it is `virtio_blk0a' under one command line and
+# something else under another, and a manifest that named one of them would be
+# a policy about which disk the machine happened to boot from.
+required 4 any 0x3

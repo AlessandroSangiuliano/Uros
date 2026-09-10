@@ -720,6 +720,8 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	memset(st, 0, sizeof(*st));
 	kern_return_t kr;
 	const struct pci_bar_region *abar_region;
+	unsigned int abar_index;
+	vm_size_t abar_mapped_size = 0;
 	uint64_t abar_phys;
 	unsigned int cmd_reg, irq_reg;
 	int i;
@@ -745,9 +747,12 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 * and not something this file should be asserting on its own.
 	 */
 	abar_region = NULL;
+	abar_index  = 0;
 	for (i = 0; i < (int)n_bars; i++)
-		if (bars[i].slot == 5 && !(bars[i].flags & PCI_REGION_IO))
+		if (bars[i].slot == 5 && !(bars[i].flags & PCI_REGION_IO)) {
 			abar_region = &bars[i];
+			abar_index  = (unsigned int)i;
+		}
 
 	if (abar_region == NULL) {
 		printf("ahci: no memory region at BAR slot 5 among %u "
@@ -818,11 +823,40 @@ ahci_probe(unsigned int bus, unsigned int slot, unsigned int func,
 	 * the RPC now carries vm_address_t in and out, so the physical address
 	 * goes in whole and the user address comes back whole.
 	 */
-	kr = device_mmio_map(master_dev, (vm_address_t)abar_phys,
-			     st->abar_size,
-			     mach_task_self(), (vm_address_t *)&st->abar);
+	/*
+	 * ── The region, not the address (#511) ───────────────────────────
+	 *
+	 * 🔴 THIS USED TO PASS A PHYSICAL ADDRESS, which meant the driver had
+	 * to find out where its own registers were and then ask for that
+	 * number -- and the number could have been anybody's.  It says WHICH
+	 * region now, and the kernel supplies both the address and the width
+	 * from what it measured when it handed the device over.
+	 *
+	 * 🔑 AND THE TWO DECODES CHECK EACH OTHER.  The HAL's list and the
+	 * kernel's are built by different code walking the same slots, so the
+	 * position of the ABAR in one is the position in the other -- which is
+	 * a coincidence until something compares them.  The size that comes
+	 * back is compared with the size the HAL measured, so two decodes that
+	 * disagreed would say so here rather than handing this driver a window
+	 * onto a different region of its own device.
+	 *
+	 * ⚠️ The comment above this one warns that slot 5 is not region 5.
+	 * That is exactly the confusion this comparison exists to catch.
+	 */
+	kr = device_region_map(master_dev, AHCI_BDF(st), abar_index,
+			       mach_task_self(),
+			       (vm_address_t *)&st->abar, &abar_mapped_size);
 	if (kr != KERN_SUCCESS) {
-		printf("ahci: device_mmio_map failed (kr=%d)\n", kr);
+		printf("ahci: device_region_map(region %u) failed (kr=%d)\n",
+		       abar_index, (int)kr);
+		return -1;
+	}
+	if ((uint64_t)abar_mapped_size != abar_region->size) {
+		printf("ahci: region %u is %llu bytes to the kernel and %llu "
+		       "to the HAL — the two decodes disagree, so this is not "
+		       "the ABAR\n", abar_index,
+		       (unsigned long long)abar_mapped_size,
+		       (unsigned long long)abar_region->size);
 		return -1;
 	}
 	/*

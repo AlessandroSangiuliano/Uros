@@ -43,6 +43,11 @@
 #include <servers/netname.h>
 #include <stdio.h>
 #include <string.h>
+#include <mach/cap_types.h>	/* RESOURCE_PCI_DEVICE, CAP_OP_PCI_* (#511) */
+#include <mach/cap_manifest.h>	/* CAP_MANIFEST_ANY_ID (#511) */
+#include <device/device_types.h>	/* DEVICE_BDF_BUS (#511) */
+#include <libcap.h>		/* cap_request (#511) */
+#include "device_master.h"	/* MIG: device_claim (#511) */
 #include "hal_server.h"
 #include "hal_server_mig.h"
 #include "modload.h"
@@ -249,6 +254,49 @@ main(int argc, char **argv)
 	master_device = device_port;
 
 	printf("\n=== HAL server ===\n");
+
+	/*
+	 * ── The bus is claimed before anything is scanned (#511) ──────────
+	 *
+	 * 🔴 CONFIGURATION SPACE USED TO ANSWER ANYONE holding the master
+	 * device port, so a device was addressed by three integers -- a name
+	 * and not a right.  A driver may read its own device's configuration
+	 * space because it holds that device's claim; a scanner cannot, and
+	 * must not have to, because the devices a scan is for are exactly the
+	 * ones nobody has claimed yet.
+	 *
+	 * 🔑 So the BUS is what this task holds, granted by a manifest that
+	 * names PCI devices with no instance.  It is asked for here, before
+	 * the first module runs, because everything this server does after
+	 * this line reads configuration space.
+	 *
+	 * ⚠️ A failure is reported and the server carries on.  What follows
+	 * will fail loudly and specifically -- a scan that finds nothing says
+	 * so -- and stopping here would replace a diagnosis with a silence.
+	 */
+	{
+		struct uros_cap tok;
+		kern_return_t   ckr;
+
+		memset(&tok, 0, sizeof(tok));
+		ckr = cap_request(RESOURCE_PCI_DEVICE, CAP_MANIFEST_ANY_ID,
+				  CAP_OP_PCI_DMA_MAP | CAP_OP_PCI_MMIO_MAP
+				  | CAP_OP_PCI_IRQ, 0, &tok);
+		if (ckr != KERN_SUCCESS)
+			printf("hal: cap_server would not issue a capability "
+			       "for the bus (kr=%d) — configuration space "
+			       "will be refused\n", (int)ckr);
+		else {
+			ckr = device_claim(master_device, DEVICE_BDF_BUS,
+					   (char *)&tok, sizeof(tok));
+			if (ckr != KERN_SUCCESS)
+				printf("hal: the kernel refused this server "
+				       "the bus (kr=%d)\n", (int)ckr);
+			else
+				printf("hal: the bus is this server's — "
+				       "configuration space may be scanned\n");
+		}
+	}
 
 	/* Allocate the service port. */
 	kr = mach_port_allocate(mach_task_self(),

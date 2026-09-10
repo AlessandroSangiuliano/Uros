@@ -230,8 +230,72 @@ cap_acquire(mach_port_t             server,
      * branch is dead — no client has been migrated yet, every
      * request still lands on the well-known port.
      */
-    if (g_request_local_port != MACH_PORT_NULL &&
-        g_request_local_port != cap_port) {
+    /*
+     * ── The well-known port does not issue capabilities (#511) ─────────
+     *
+     * 🔴 IT USED TO, AND THAT WAS THE PERMISSIVE PATH ITSELF.  A request
+     * arriving here has no per-task port behind it, so there is no manifest
+     * to look up and nothing was consulted about whether the caller may have
+     * what it asked for.  Worse, the port is reachable by ANY task that
+     * looks CAP_SERVER_NETNAME up in the name server -- authority held by
+     * name and not by right, which is the sentence this issue makes about
+     * the master device port, in the server that exists to prevent it.
+     *
+     * 🔑 REMOVED AGAINST A COUNT AND NOT AGAINST A HOPE.  cap_server spent a
+     * boot reporting every request the legacy path served: three, from two
+     * tasks.  block_device_server was given a manifest, bootstrap was made to
+     * provision itself, and the count went to zero.  Deleting a fallback that
+     * nothing uses is a different act from deleting one that something might.
+     *
+     * ⚠️ Acquisition only.  cap_provision_task must still answer here,
+     * because bootstrap provisions its children before it has a port of its
+     * own -- that call is how per-task ports come to exist, so requiring one
+     * to make one would have no first step.
+     *
+     * 🔴 AND ONLY FOR A MODELLED RESOURCE TYPE, which is not a softening.
+     * This RPC is being used for two different things.  One is authority
+     * over something the enum in <mach/cap_types.h> names.  The other is an
+     * opaque TAG -- libgpu_console asks with 'GPU\0' and char_server with
+     * 'CHR\0', using a token as a presence marker for a resource this server
+     * models nothing about; policy_allows_v1 says as much a few lines above,
+     * and warned that refusing unknown types breaks them.
+     *
+     * A tag is not a capability, and its travelling through this door is the
+     * defect rather than the reason to leave the door open.  Refusing it here
+     * would have stopped the i386 console -- measured, not guessed: the
+     * blanket refusal took `ush' with it -- while proving nothing about
+     * authority, so the taggers keep the legacy path until they stop asking
+     * for capabilities they are not using as capabilities.
+     *
+     * ⚠️ A CENSUS IS OF ONE TARGET.  This branch's count was taken on
+     * x86-64, where the tag path does not run, and it read zero; on i386 it
+     * is fifteen requests in one boot.  The number was right and the
+     * conclusion drawn from it was not.
+     */
+    /*
+     * 🔑 ONE EXEMPTION, IN ONE PLACE.  This was first written as two -- the
+     * well-known-port refusal skipped unmodelled types and the manifest rule
+     * did not -- so a tag arriving on the legacy path passed the first gate
+     * and was refused by the second.  An exemption spelt twice is an
+     * exemption that will disagree with itself.
+     *
+     * ⚠️ The whole authority gate is inside this one condition, so an
+     * unmodelled type does not reach any of it.  Written as an early jump
+     * first, which this tree does not allow, and the condition is the better
+     * shape anyway: it says what the block is for.
+     */
+    if (resource_type < RESOURCE_TYPE_MAX) {
+
+    if (g_request_local_port == MACH_PORT_NULL ||
+        g_request_local_port == cap_port) {
+        printf("cap: DENY (well-known port issues no capabilities) rtype=%u "
+               "id=0x%llx ops=0x%llx\n",
+               resource_type, (unsigned long long)resource_id,
+               (unsigned long long)ops);
+        return CAP_ERR_NOT_IN_MANIFEST;
+    }
+
+    {
         const cap_manifest_header_t *m =
             cap_manifest_table_get(g_request_local_port);
         /*
@@ -252,8 +316,8 @@ cap_acquire(mach_port_t             server,
             mach_port_t owner = cap_manifest_table_task(g_request_local_port);
             kern_return_t okr;
 
-            if (m && !cap_manifest_allows(m, resource_type,
-                                          CAP_MANIFEST_ANY_ID, ops)) {
+            if (!cap_manifest_allows(m, resource_type,
+                                     CAP_MANIFEST_ANY_ID, ops)) {
                 printf("cap: DENY (manifest) port=0x%x dma buffer "
                        "ops=0x%llx\n", (unsigned)g_request_local_port,
                        (unsigned long long)ops);
@@ -267,16 +331,18 @@ cap_acquire(mach_port_t             server,
                        (unsigned long long)resource_id, (int)okr);
                 return CAP_ERR_NOT_IN_MANIFEST;
             }
-        } else if (m && !cap_manifest_allows(m, resource_type, resource_id,
-                                             ops)) {
-            printf("cap: DENY (manifest) port=0x%x rtype=%u id=0x%llx "
-                   "ops=0x%llx\n",
+        } else if (!cap_manifest_allows(m, resource_type, resource_id, ops)) {
+            printf("cap: DENY (%s) port=0x%x rtype=%u id=0x%llx "
+                   "ops=0x%llx\n", m ? "manifest" : "no manifest, and "
+                   "hardware needs one",
                    (unsigned)g_request_local_port, resource_type,
                    (unsigned long long)resource_id,
                    (unsigned long long)ops);
             return CAP_ERR_NOT_IN_MANIFEST;
         }
     }
+
+    }	/* resource_type < RESOURCE_TYPE_MAX */
 
     struct cap_entry *e = (struct cap_entry *)malloc(sizeof(*e));
     if (!e) return CAP_ERR_NO_MEMORY;
@@ -621,6 +687,12 @@ main(int argc, char **argv)
         _exit(1);
 
     printf_init(device_port);
+    /*
+     * 🔴 AND GIVEN BACK (#511).  That port is bus authority -- configuration
+     * space, MMIO, DMA, interrupts -- and this task wanted it to open a
+     * console.  See the note above printf_init() in libmach/printf.c.
+     */
+    (void) mach_port_deallocate(mach_task_self(), device_port);
     panic_init(host_port);
 
     printf("\n=== cap_server (UrMach capability) ===\n");
