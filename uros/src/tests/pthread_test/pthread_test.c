@@ -30,6 +30,7 @@
 
 #include <pthread.h>
 #include <stdio.h>
+#include <stdlib.h>			/* malloc/free — the subject of [24] */
 #include <sys/timers.h>
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
@@ -1420,6 +1421,134 @@ test_explicit_sched(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 24: one block belongs to one caller (#540)
+ *
+ * 🔥 THE DEFECT THIS ARM EXISTS FOR IS NOT REACHABLE BY A CAMPAIGN.  It was
+ * found once in fifty-two boots -- bootstrap relocated pci_scan.so while it
+ * had asked for irq_claim_test, because both threads were handed the same
+ * sixteen-byte block -- and forty boots straight after it showed nothing.  A
+ * green campaign after a fix would be indistinguishable from a green campaign
+ * with the defect still in, so the fix has to be verified against something
+ * that can provoke it on purpose.
+ *
+ * 🔑 The check is a PRESENCE, not an absence: a thread stamps its own id into
+ * the block it was given and reads it back.  A different id there is not a
+ * statistic, it is another thread's write into memory this one owns.
+ *
+ * ⚠️ On the first collision every thread stops.  The point is already made,
+ * and going on means writing through a pointer somebody else has freed --
+ * which corrupts the free list and can take the task down before it can say
+ * what it saw.
+ * ---------------------------------------------------------------- */
+
+#define MR_THREADS	4
+#define MR_ITERS	200000
+#define MR_WORDS	4
+
+struct mr_arg {
+	unsigned int	id;
+	unsigned int	iters;		/* how far this thread got */
+	unsigned int	collisions;
+	unsigned int	nulls;
+};
+
+static volatile int	mr_stop;
+
+static void *
+malloc_race_thread(void *arg)
+{
+	struct mr_arg	*a = (struct mr_arg *)arg;
+	unsigned int	i, k;
+
+	for (i = 0; i < MR_ITERS && !mr_stop; i++) {
+		volatile unsigned int *p;
+		int		 bad = 0;
+
+		p = (volatile unsigned int *)malloc(MR_WORDS * sizeof(*p));
+		if (p == NULL) {
+			a->nulls++;
+			continue;
+		}
+
+		for (k = 0; k < MR_WORDS; k++)
+			p[k] = a->id;
+
+		/*
+		 * The window another thread has to be inside malloc during.
+		 * Yielding widens it, and is what makes the arm mean the same
+		 * thing on a uniprocessor, where two threads cannot be in the
+		 * allocator at the same instant but can still be interleaved
+		 * in the middle of it.
+		 */
+		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 0);
+
+		for (k = 0; k < MR_WORDS; k++)
+			if (p[k] != a->id)
+				bad = 1;
+
+		if (bad) {
+			a->collisions++;
+			mr_stop = 1;
+			a->iters = i + 1;
+			return NULL;
+		}
+
+		free((void *)p);
+	}
+
+	a->iters = i;
+	return NULL;
+}
+
+static void
+test_malloc_under_threads(void)
+{
+	pthread_t	th[MR_THREADS];
+	struct mr_arg	a[MR_THREADS];
+	unsigned int	i;
+	unsigned int	collisions = 0, nulls = 0, iters = 0;
+	char		buf[120];
+
+	mr_stop = 0;
+	for (i = 0; i < MR_THREADS; i++) {
+		a[i].id = 0xA5A50000u + i;
+		a[i].iters = 0;
+		a[i].collisions = 0;
+		a[i].nulls = 0;
+	}
+
+	for (i = 0; i < MR_THREADS; i++)
+		if (pthread_create(&th[i], NULL, malloc_race_thread,
+				   &a[i]) != 0) {
+			test_fail("malloc under threads",
+				  "pthread_create failed");
+			mr_stop = 1;
+			while (i-- > 0)
+				pthread_join(th[i], NULL);
+			return;
+		}
+
+	for (i = 0; i < MR_THREADS; i++) {
+		pthread_join(th[i], NULL);
+		collisions += a[i].collisions;
+		nulls += a[i].nulls;
+		iters += a[i].iters;
+	}
+
+	if (collisions != 0) {
+		snprintf(buf, sizeof(buf),
+			 "%u block(s) held two owners after %u allocation(s) "
+			 "across %d threads", collisions, iters, MR_THREADS);
+		test_fail("malloc under threads", buf);
+		return;
+	}
+
+	printf("  [%d] malloc under threads: %u allocations across %d threads,"
+	       " no block had two owners (%u refused)\n",
+	       ++test_num, iters, MR_THREADS, nulls);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -1465,6 +1594,7 @@ main(int argc, char **argv)
 	test_setschedprio();
 	test_setschedparam();
 	test_explicit_sched();
+	test_malloc_under_threads();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
