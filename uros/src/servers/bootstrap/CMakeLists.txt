@@ -234,6 +234,34 @@ if(UROS_ABLATE_422_RELOC)
   target_compile_definitions(bootstrap_server PRIVATE ABLATE_422_RELOC=1)
 endif()
 
+# ===========================================================================
+# The root's own manifest (#511)
+# ===========================================================================
+#
+# 🔴 OUTSIDE THE BUNDLE GUARD, DELIBERATELY.  Everything that assembles the
+# x86-64 bundle sits inside `if(NOT UROS_TARGET_ARCH STREQUAL "i386")', and
+# this rule was written in there first -- so the file existed on one target and
+# not the other, and on i386 bootstrap went on being refused a capability for
+# the boot device by a policy that had never been compiled.  i386's bundle is
+# assembled by scripts/make-bundle.sh out of the export tree, so the manifest
+# has to be BUILT on both targets even though only one of them names it here.
+set(_BOOTSTRAP_CMF
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/bootstrap.cmf")
+
+add_custom_command(
+  OUTPUT ${_BOOTSTRAP_CMF}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${_BOOTSTRAP_CMF}
+          ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap.manifest
+  COMMENT "mkmanifest: bootstrap.manifest -> bootstrap.cmf"
+  VERBATIM
+)
+
+add_custom_target(bootstrap_manifest ALL DEPENDS ${_BOOTSTRAP_CMF})
+add_dependencies(bootstrap_server bootstrap_manifest)
+
 if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   set(_BUNDLE ${CMAKE_BINARY_DIR}/bootstrap.bundle)
   set(_CONF   ${CMAKE_CURRENT_BINARY_DIR}/bootstrap.conf)
@@ -406,22 +434,6 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # therefore never reached the manifest check at all.
   set(_BDS_CMF
     "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/block_device_server.cmf")
-  # #511: and the root, which provisions everyone else and was the last task
-  # left on the permissive path.
-  set(_BOOTSTRAP_CMF
-    "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/bootstrap.cmf")
-
-  add_custom_command(
-    OUTPUT ${_BOOTSTRAP_CMF}
-    COMMAND ${CMAKE_COMMAND} -E make_directory
-            "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
-    COMMAND $<TARGET_FILE:mkmanifest> -o ${_BOOTSTRAP_CMF}
-            ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap.manifest
-    DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/bootstrap.manifest
-    COMMENT "mkmanifest: bootstrap.manifest -> bootstrap.cmf"
-    VERBATIM
-  )
-
   add_custom_command(
     OUTPUT ${_BUNDLE}
     COMMAND $<TARGET_FILE:mkbundle> -o ${_BUNDLE}

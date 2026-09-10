@@ -175,3 +175,28 @@ set_target_properties(default_pager_server PROPERTIES
   OUTPUT_NAME "default_pager"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The manifest (#511)
+# ===========================================================================
+#
+# Written to the export tree, which is where both bundle assemblers read from:
+# CMake names the .cmf directly for x86-64, scripts/make-bundle.sh picks it out
+# of the tree for i386.  Compiled on both targets even where the server does
+# not yet run, so the file is never the thing that is missing.
+set(default_pager_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/default_pager.cmf")
+
+add_custom_command(
+  OUTPUT ${default_pager_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${default_pager_MANIFEST_OUT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/default_pager.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/default_pager.manifest
+  COMMENT "mkmanifest: default_pager.manifest -> default_pager.cmf"
+  VERBATIM
+)
+
+add_custom_target(default_pager_manifest ALL DEPENDS ${default_pager_MANIFEST_OUT})
+add_dependencies(default_pager_server default_pager_manifest)

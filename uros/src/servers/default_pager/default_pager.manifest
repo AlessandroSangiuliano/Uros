@@ -1,0 +1,24 @@
+# default_pager manifest — the policy for the task that owns backing store
+# (#511).
+#
+# 🔴 FOUND BY A CENSUS OF THE OTHER TARGET.  The permissive path was removed
+# after counting what it served on x86-64, where the count reached zero.  This
+# server does not run there.  On i386 it does, and it was refused a capability
+# for its swap device the first boot after the removal:
+#
+#	(default_pager): cap_request('disk0c') FAILED: 2413
+#	(default_pager): couldn't add device disk0c
+#
+# 🔑 A census is of one target, the same way a baseline is of one machine. The
+# number was right and the conclusion drawn from it was not.
+
+name default_pager
+
+# RESOURCE_BLK_DEVICE (4), any device, READ|WRITE (0x3).
+#
+# ⚠️ `any' and not the hash of `disk0c'.  Which partition backs paging is an
+# argument in bootstrap.conf -- argv[1] on this server's command line -- so a
+# manifest that named one would be a policy about a configuration file rather
+# than about this server.  What it may do is open a block device for reading
+# and writing; WHICH one is decided by whoever configured the boot.
+required 4 any 0x3

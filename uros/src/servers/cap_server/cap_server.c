@@ -251,7 +251,41 @@ cap_acquire(mach_port_t             server,
      * because bootstrap provisions its children before it has a port of its
      * own -- that call is how per-task ports come to exist, so requiring one
      * to make one would have no first step.
+     *
+     * 🔴 AND ONLY FOR A MODELLED RESOURCE TYPE, which is not a softening.
+     * This RPC is being used for two different things.  One is authority
+     * over something the enum in <mach/cap_types.h> names.  The other is an
+     * opaque TAG -- libgpu_console asks with 'GPU\0' and char_server with
+     * 'CHR\0', using a token as a presence marker for a resource this server
+     * models nothing about; policy_allows_v1 says as much a few lines above,
+     * and warned that refusing unknown types breaks them.
+     *
+     * A tag is not a capability, and its travelling through this door is the
+     * defect rather than the reason to leave the door open.  Refusing it here
+     * would have stopped the i386 console -- measured, not guessed: the
+     * blanket refusal took `ush' with it -- while proving nothing about
+     * authority, so the taggers keep the legacy path until they stop asking
+     * for capabilities they are not using as capabilities.
+     *
+     * ⚠️ A CENSUS IS OF ONE TARGET.  This branch's count was taken on
+     * x86-64, where the tag path does not run, and it read zero; on i386 it
+     * is fifteen requests in one boot.  The number was right and the
+     * conclusion drawn from it was not.
      */
+    /*
+     * 🔑 ONE EXEMPTION, IN ONE PLACE.  This was first written as two -- the
+     * well-known-port refusal skipped unmodelled types and the manifest rule
+     * did not -- so a tag arriving on the legacy path passed the first gate
+     * and was refused by the second.  An exemption spelt twice is an
+     * exemption that will disagree with itself.
+     *
+     * ⚠️ The whole authority gate is inside this one condition, so an
+     * unmodelled type does not reach any of it.  Written as an early jump
+     * first, which this tree does not allow, and the condition is the better
+     * shape anyway: it says what the block is for.
+     */
+    if (resource_type < RESOURCE_TYPE_MAX) {
+
     if (g_request_local_port == MACH_PORT_NULL ||
         g_request_local_port == cap_port) {
         printf("cap: DENY (well-known port issues no capabilities) rtype=%u "
@@ -307,6 +341,8 @@ cap_acquire(mach_port_t             server,
             return CAP_ERR_NOT_IN_MANIFEST;
         }
     }
+
+    }	/* resource_type < RESOURCE_TYPE_MAX */
 
     struct cap_entry *e = (struct cap_entry *)malloc(sizeof(*e));
     if (!e) return CAP_ERR_NO_MEMORY;

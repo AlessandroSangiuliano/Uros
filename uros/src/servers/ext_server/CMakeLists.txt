@@ -217,3 +217,28 @@ set_target_properties(ext_server_bin PROPERTIES
   OUTPUT_NAME "ext_server"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The manifest (#511)
+# ===========================================================================
+#
+# Written to the export tree, which is where both bundle assemblers read from:
+# CMake names the .cmf directly for x86-64, scripts/make-bundle.sh picks it out
+# of the tree for i386.  Compiled on both targets even where the server does
+# not yet run, so the file is never the thing that is missing.
+set(ext_server_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/ext_server.cmf")
+
+add_custom_command(
+  OUTPUT ${ext_server_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${ext_server_MANIFEST_OUT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/ext_server.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/ext_server.manifest
+  COMMENT "mkmanifest: ext_server.manifest -> ext_server.cmf"
+  VERBATIM
+)
+
+add_custom_target(ext_server_manifest ALL DEPENDS ${ext_server_MANIFEST_OUT})
+add_dependencies(ext_server_bin ext_server_manifest)

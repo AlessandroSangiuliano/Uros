@@ -78,6 +78,20 @@ HELLO_SERVER_CMF="$MANIFESTS/hello_server.cmf"
 # same export directory, so the two bundles carry the same bytes.
 CAP_TEST_CMF="$MANIFESTS/cap_test.cmf"
 DMA_RECLAIM_CMF="$MANIFESTS/dma_reclaim_test.cmf"
+# #511: the task that drives the disks, and the root that provisions everyone
+# else.  Both had no policy file, so neither ever reached the manifest check --
+# and with the permissive path gone, a task with no per-task cap port is
+# refused.  On this target the bundle is assembled here rather than by CMake,
+# so a manifest added there is not shipped here unless it is named here too.
+BDS_CMF="$MANIFESTS/block_device_server.cmf"
+BOOTSTRAP_CMF="$MANIFESTS/bootstrap.cmf"
+# #511: and the two servers that only run on THIS target, which is why the
+# census taken on x86-64 could not see them.  default_pager opens its backing
+# store and ext_server mounts the root; both were refused the first boot after
+# the permissive path went, and the root filesystem is what the rest of the
+# boot stands on.
+DEFAULT_PAGER_CMF="$MANIFESTS/default_pager.cmf"
+EXT_SERVER_CMF="$MANIFESTS/ext_server.cmf"
 
 NAME_SERVER="$SBIN/name_server"
 CAP_SERVER="$SBIN/cap_server"
@@ -259,6 +273,10 @@ ARGS+=("hello_server:$HELLO_SERVER")
 [ -f "$HELLO_SERVER_CMF" ] && ARGS+=("hello_server.cmf:$HELLO_SERVER_CMF")
 [ -f "$CAP_TEST_CMF" ] && ARGS+=("cap_test.cmf:$CAP_TEST_CMF")
 [ -f "$DMA_RECLAIM_CMF" ] && ARGS+=("dma_reclaim_test.cmf:$DMA_RECLAIM_CMF")
+[ -f "$BDS_CMF" ] && ARGS+=("block_device_server.cmf:$BDS_CMF")
+[ -f "$BOOTSTRAP_CMF" ] && ARGS+=("bootstrap.cmf:$BOOTSTRAP_CMF")
+[ -f "$DEFAULT_PAGER_CMF" ] && ARGS+=("default_pager.cmf:$DEFAULT_PAGER_CMF")
+[ -f "$EXT_SERVER_CMF" ] && ARGS+=("ext_server.cmf:$EXT_SERVER_CMF")
 ARGS+=("ipc_bench:$IPC_BENCH")
 ARGS+=("ext_server:$EXT2_SERVER")
 ARGS+=("pthread_test:$PTHREAD_TEST")
