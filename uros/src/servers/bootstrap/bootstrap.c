@@ -142,6 +142,21 @@ static int
 provision_cap_port_for_child(task_port_t child_task,
 			     const char *symtab_name);
 
+/*
+ * Has cap_server been started yet? (#511)
+ *
+ * 🔑 It decides which of two very different things a failed provisioning is.
+ * A task listed BEFORE cap_server cannot be provisioned -- there is nothing to
+ * ask -- and that is the arrangement working: such a task is early precisely
+ * because it needs nothing.  A task listed AFTER one that is running and still
+ * not provisioned is a fault.
+ *
+ * ⚠️ Without the distinction the message is the same in both cases, and it is
+ * printed on every healthy boot.  A line that cries wolf once a boot is a line
+ * that stops being read, which is how the real one gets missed.
+ */
+static int	cap_server_started;
+
 char	*boot_device = (char *)BOOT_DEVICE_NAME;
 
 boolean_t bootstrap_demux(mach_msg_header_t *, mach_msg_header_t *);
@@ -643,7 +658,30 @@ provision_cap_port_for_child(task_port_t child_task,
 	 * yields and not seconds: what it waits for is a task getting to run,
 	 * and how long that takes is the scheduler's business.
 	 */
-	for (int tries = 0; tries < 200; tries++) {
+	/*
+	 * 🔴 THE BOUND WAS TWO HUNDRED AND IT WAS CALIBRATED FOR A FALLBACK
+	 * THAT NO LONGER EXISTS (#511).
+	 *
+	 * Giving up here used to mean "this task runs on the legacy permissive
+	 * path", which cost it nothing.  The well-known cap port issues no
+	 * capabilities now, so giving up means the task is REFUSED everything
+	 * its manifest would have allowed -- and the race is not hypothetical:
+	 * under KVM, where the whole boot is faster, bootstrap lost it for
+	 * cap_test in eight boots out of twelve while TCG lost it in none.
+	 *
+	 * 🔑 A BOUND THAT IS NOT A DEADLINE.  What is waited for is cap_server
+	 * getting to run, and how long that takes is the scheduler's and the
+	 * accelerator's business -- which is exactly why two hundred yields
+	 * meant one thing under one emulator and another under the next.  The
+	 * count is large enough that losing it means something is wrong rather
+	 * than merely slow, and it still gives up: a task whose manifest comes
+	 * BEFORE cap_server in the queue must not hang the boot waiting for a
+	 * server that is behind it.
+	 *
+	 * ⚠️ And when it does give up it now says what that costs, because the
+	 * old message named the fallback rather than the consequence.
+	 */
+	for (int tries = 0; tries < 20000; tries++) {
 		kr = cap_provision(child_task, blob, (unsigned int)sz,
 				   &cap_port);
 		if (kr != CAP_ERR_INTERNAL)
@@ -655,9 +693,17 @@ provision_cap_port_for_child(task_port_t child_task,
 	free(blob);
 	if (kr != KERN_SUCCESS || cap_port == MACH_PORT_NULL) {
 		BOOTSTRAP_IO_LOCK();
-		printf("%s: %s: cap_provision_task failed (%d) — "
-		       "falling back to legacy cap_server path\n",
-		       program_name, symtab_name, kr);
+		if (!cap_server_started)
+			printf("%s: %s: no per-task cap port — it is listed "
+			       "ahead of cap_server, so there was nobody to "
+			       "ask.  Its manifest goes unread and any "
+			       "capability it wants would be refused\n",
+			       program_name, symtab_name);
+		else
+			printf("%s: %s: cap_provision_task failed (%d) — it "
+			       "ships a manifest and will run WITHOUT one, so "
+			       "every capability it asks for is refused\n",
+			       program_name, symtab_name, kr);
 		BOOTSTRAP_IO_UNLOCK();
 		return 0;
 	}
@@ -1160,6 +1206,15 @@ main(int argc, char **argv)
 	     * before.
 	     */
 	    (void)provision_cap_port_for_child(user_task, sp->symtab_name);
+
+	    /*
+	     * Recorded AFTER the child is created, because what matters to the
+	     * next one is that the server exists to be asked -- not that it has
+	     * finished starting, which is what the wait inside the call above
+	     * is for.
+	     */
+	    if (strcmp(sp->symtab_name, "cap_server") == 0)
+		cap_server_started = 1;
 
 	    kr = thread_create(user_task, &user_thread);
 	    if (kr != KERN_SUCCESS)
