@@ -535,6 +535,37 @@ check_claim(natural_t bdf)
 	return KERN_NO_ACCESS;
 }
 
+/*
+ * May this task look at this device's configuration space? (#511)
+ *
+ * 🔴 IT USED TO BE "DOES IT HOLD THE MASTER PORT", so a device was addressed
+ * by three integers and answered to anybody -- a name and not a right.
+ * cap_test walks the whole bus with it in one boot.
+ *
+ * 🔑 TWO AUTHORITIES AND NOT ONE, because enumeration is not the same act as
+ * driving.  A driver reads the configuration space of the device it has
+ * CLAIMED.  A scanner reads everything, and has to, because the whole point
+ * of a scan is the devices nobody has claimed yet -- so it holds the BUS,
+ * which its manifest grants by naming PCI devices with no instance.
+ *
+ * On the evidence of the tree there is exactly one of each kind: pci_scan.c
+ * does the scanning, and every other caller is a driver looking at the
+ * controller it already holds.
+ */
+static kern_return_t
+check_cfg_access(natural_t bdf)
+{
+	task_t me = current_task();
+	unsigned i;
+
+	for (i = 0; i < device_nclaims; i++)
+		if (device_claim[i].bdf == DEVICE_BDF_BUS
+		    && device_claim[i].task == me)
+			return KERN_SUCCESS;
+
+	return check_claim(bdf);
+}
+
 /* ---- PCI configuration space ---- */
 
 kern_return_t
@@ -555,6 +586,10 @@ ds_master_device_pci_config_read(
 
 	if (bus > 255 || slot > 31 || func > 7 || (reg & 3))
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	*data = device_md_pci_read(bus, slot, func, reg);
 	return KERN_SUCCESS;
@@ -581,6 +616,10 @@ ds_master_device_pci_config_write(
 
 	if (bus > 255 || slot > 31 || func > 7 || (reg & 3))
 		return KERN_INVALID_ARGUMENT;
+
+	kr = check_cfg_access((natural_t)((bus << 8) | (slot << 3) | func));
+	if (kr != KERN_SUCCESS)
+		return kr;
 
 	device_md_pci_write(bus, slot, func, reg, data);
 	return KERN_SUCCESS;
@@ -2373,7 +2412,7 @@ ds_master_device_claim(
 	if (kr != KERN_SUCCESS)
 		return kr;
 
-	if (bdf == DEVICE_DMA_NO_BDF || bdf > 0xFFFFu)
+	if (bdf != DEVICE_BDF_BUS && (bdf == DEVICE_DMA_NO_BDF || bdf > 0xFFFFu))
 		return KERN_INVALID_ARGUMENT;
 
 	/*
@@ -2398,14 +2437,27 @@ ds_master_device_claim(
 	 * Register 0x08 is revision in 7:0 and class code in 31:8 — base
 	 * class, sub-class and programming interface.
 	 */
-	class_word = device_md_pci_read((unsigned)(bdf >> 8),
-					(unsigned)((bdf >> 3) & 0x1F),
-					(unsigned)(bdf & 7), 0x08);
+	if (bdf == DEVICE_BDF_BUS) {
+		/*
+		 * 🔑 THE BUS HAS NO CONFIGURATION SPACE OF ITS OWN, so there
+		 * is no class to read out of the hardware and nothing for the
+		 * capability to be matched against instance by instance.  What
+		 * is required instead is a capability for PCI devices with NO
+		 * instance named -- CAP_MANIFEST_ANY_ID -- which is a manifest
+		 * saying "all of them" rather than "this one", and is the only
+		 * shape of that sentence a policy file can write.
+		 */
+		class_id = CAP_MANIFEST_ANY_ID;
+	} else {
+		class_word = device_md_pci_read((unsigned)(bdf >> 8),
+						(unsigned)((bdf >> 3) & 0x1F),
+						(unsigned)(bdf & 7), 0x08);
 
-	if (class_word == 0xFFFFFFFFu)
-		return KERN_INVALID_ARGUMENT;	/* nothing is there */
+		if (class_word == 0xFFFFFFFFu)
+			return KERN_INVALID_ARGUMENT;	/* nothing is there */
 
-	class_id = (uint64_t)(class_word >> 8);
+		class_id = (uint64_t)(class_word >> 8);
+	}
 
 	/*
 	 * 🔴 THE OP CHECKED HERE WAS CAP_OP_PCI_DMA_MAP, ALWAYS (#511).

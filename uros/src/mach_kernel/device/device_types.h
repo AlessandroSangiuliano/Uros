@@ -211,6 +211,29 @@ typedef int		dev_status_data_t[DEV_STATUS_MAX];
 #define	DEVICE_DMA_NO_BDF		0xFFFFFFFFu
 
 /*
+ * THE BUS ITSELF, as something that can be claimed (#511).
+ *
+ * 🔴 Configuration space used to answer anyone holding the master device
+ * port, and a device was addressed there by three integers -- a NAME, not a
+ * right.  A driver may now read and write its own device's configuration
+ * space because it holds that device's claim; but enumeration is a different
+ * authority, because the whole point of a scan is to look at devices nobody
+ * has claimed yet.
+ *
+ * 🔑 So the bus is claimable, by a task whose manifest declares PCI devices
+ * with no instance named -- `required 5 any' -- which is the only honest way
+ * to say "this task's business is all of them".  The HAL is that task, and on
+ * the evidence of a whole tree it is the only one: pci_scan.c does the
+ * reading, and every other caller of configuration space is a driver looking
+ * at the controller it has already claimed.
+ *
+ * ⚠️ A value the packing cannot produce, like the one above, and a DIFFERENT
+ * one -- "no device of my own" and "all of them" are opposite statements and
+ * sharing a sentinel would make them the same argument.
+ */
+#define	DEVICE_BDF_BUS			0xFFFFFFFEu
+
+/*
  * Device error codes
  */
 typedef	int		io_return_t;

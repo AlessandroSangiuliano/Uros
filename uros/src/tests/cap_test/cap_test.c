@@ -495,9 +495,28 @@ the_master_port_bypasses_the_manifest(mach_port_t device_port)
     unsigned     version;
 
     /*
-     * Configuration space, read by name.  Nothing was consulted about
-     * whether this task may look at these devices.
+     * Configuration space, read by name.
+     *
+     * 🔴 THE REFUSAL HAS TO BE TOLD FROM AN EMPTY BUS.  This arm first
+     * reported "no SATA controller in configuration space" when every read
+     * was being denied -- a true sentence about what it saw and a useless
+     * one about why, and it PASSED while proving nothing.  A guard that
+     * cannot fail is worse than none, and this one had quietly become one
+     * the moment the thing it tests started working.
      */
+    {
+        kern_return_t probe = device_pci_config_read(device_port, 0, 0, 0,
+                                                     PCI_CFG_VENDOR, &data);
+
+        if (probe == KERN_NO_ACCESS) {
+            printf("cap_test: [15] #511 CLOSED (configuration space) — this "
+                   "task holds no device and no bus, and reading 0:0.0 was "
+                   "refused: a device is addressed by a right and not by "
+                   "three integers\n");
+            return 1;
+        }
+    }
+
     for (bus = 0; bus < 1 && !found; bus++)
         for (slot = 0; slot < 32 && !found; slot++)
             for (func = 0; func < 8 && !found; func++) {

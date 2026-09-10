@@ -1,0 +1,27 @@
+# hal_server manifest — the policy for the task that enumerates the bus (#511).
+#
+# 🔴 ENUMERATION IS NOT DRIVING, and that is the whole reason this file says
+# something no other manifest says.  A driver reads the configuration space of
+# the device it has CLAIMED; a scanner reads everything, and has to, because
+# the devices a scan is for are precisely the ones nobody has claimed yet.
+#
+# 🔑 `any' is the honest form of that sentence and the only one available: a
+# manifest is written before the machine exists, so a scanner cannot name the
+# devices it will find.  The kernel turns this into a claim on DEVICE_BDF_BUS
+# -- the bus itself, which has no configuration space of its own and so is
+# matched against no hardware class.
+#
+# ⚠️ On the evidence of the whole tree this is the only task that needs it.
+# pci_scan.c does the scanning; every other caller of configuration space is a
+# driver looking at the controller it already holds.  If a second task ever
+# needs this line, that is the moment to ask whether it should be a scanner.
+
+name hal_server
+
+# RESOURCE_PCI_DEVICE (5), ANY device, DMA|MMIO|IRQ (0x7).
+#
+# ⚠️ The full 0x7 here, unlike gpu_server's MMIO-only line, and for a reason
+# rather than out of symmetry: measuring a BAR means WRITING ones into it and
+# reading back what sticks (#427), so the scanner writes configuration space
+# as well as reading it -- twelve reads and six writes in pci_scan.c.
+required 5 any 0x7

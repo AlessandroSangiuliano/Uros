@@ -234,3 +234,26 @@ set_target_properties(hal_server PROPERTIES
   OUTPUT_NAME "hal_server"
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/sbin"
 )
+
+# ===========================================================================
+# The manifest (#511)
+# ===========================================================================
+#
+# The policy that lets the HAL claim the BUS, which is what configuration
+# space now requires of a task that reads devices it has not claimed.
+set(HAL_MANIFEST_OUT
+  "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests/hal_server.cmf")
+
+add_custom_command(
+  OUTPUT ${HAL_MANIFEST_OUT}
+  COMMAND ${CMAKE_COMMAND} -E make_directory
+          "${CMAKE_BINARY_DIR}/export/${EXPORT_PLATFORM}/${UROS_TARGET_ARCH}/user/manifests"
+  COMMAND $<TARGET_FILE:mkmanifest> -o ${HAL_MANIFEST_OUT}
+          ${CMAKE_CURRENT_SOURCE_DIR}/hal_server.manifest
+  DEPENDS mkmanifest ${CMAKE_CURRENT_SOURCE_DIR}/hal_server.manifest
+  COMMENT "mkmanifest: hal_server.manifest -> hal_server.cmf"
+  VERBATIM
+)
+
+add_custom_target(hal_server_manifest ALL DEPENDS ${HAL_MANIFEST_OUT})
+add_dependencies(hal_server hal_server_manifest)
