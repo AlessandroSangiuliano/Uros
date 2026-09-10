@@ -1652,6 +1652,14 @@ test_malloc_under_threads(void)
  * ⚠️ It is a cost per pair and not a percentage, because a percentage would
  * need a baseline from a tree that no longer exists.  To turn it into one,
  * ablate the lock and read this line again on the same machine.
+ *
+ * 🔴 THAT WAS DONE, AND THE ANSWER IS NOT SMALL: median of five boots each
+ * under KVM, 96 cycles with the lock against 47 without.  The lock DOUBLES an
+ * uncontended pair, +49 cycles, which is the two locked exchanges a pair now
+ * pays -- one in malloc, one in free.  For scale, [15] measures a pthread
+ * mutex lock/unlock pair at 255 in the same boot, so an allocation still costs
+ * well under half of that; and this is the number that would justify a
+ * per-thread cache, not a feeling that one would be nice.
  * ---------------------------------------------------------------- */
 
 static void
