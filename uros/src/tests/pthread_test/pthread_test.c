@@ -1461,13 +1461,33 @@ test_explicit_sched(void)
 #define MR_WORDS	4
 
 struct mr_arg {
+	unsigned int	idx;
 	unsigned int	id;
 	unsigned int	iters;		/* how far this thread got */
-	unsigned int	collisions;
+	unsigned int	shared;		/* two threads published one block */
+	unsigned int	overwritten;	/* the stamp came back somebody else's */
 	unsigned int	nulls;
 };
 
 static volatile int	mr_stop;
+
+/*
+ * 🔑 TWO DETECTORS, BECAUSE THE FIRST ONE MISSES HALF OF WHAT IT LOOKS FOR.
+ * Reading back a stamp only shows a collision when the other thread wrote
+ * between this thread's write and its read; when it writes first, this thread
+ * overwrites the evidence and sees its own id.  The ablation showed the cost
+ * of that directly -- with the free list unguarded the first collision turned
+ * up after 4 allocations under TCG but after 96694 under KVM, against a bound
+ * of 100000.  A bound that a real defect clears by three percent is a bound
+ * that the next run gets past.
+ *
+ * So each thread also PUBLISHES the block it is holding, and looks at what
+ * the others published.  Two live pointers being equal is not a symptom of
+ * the defect, it is the defect, and it does not depend on who wrote first.
+ * The slot is cleared before the free, so a pointer that has been given back
+ * can never be mistaken for one still held.
+ */
+static void * volatile	mr_live[MR_THREADS];
 
 static void *
 malloc_race_thread(void *arg)
@@ -1485,6 +1505,20 @@ malloc_race_thread(void *arg)
 			continue;
 		}
 
+		/*
+		 * Published before the others are read, and both with full
+		 * ordering: if two threads hold this block, whichever of them
+		 * scans last is certain to see the other's slot.
+		 */
+		__atomic_store_n(&mr_live[a->idx], (void *)p, __ATOMIC_SEQ_CST);
+		for (k = 0; k < MR_THREADS; k++)
+			if (k != a->idx
+			    && __atomic_load_n(&mr_live[k], __ATOMIC_SEQ_CST)
+			       == (void *)p) {
+				a->shared++;
+				bad = 1;
+			}
+
 		for (k = 0; k < MR_WORDS; k++)
 			p[k] = a->id;
 
@@ -1498,16 +1532,20 @@ malloc_race_thread(void *arg)
 		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 0);
 
 		for (k = 0; k < MR_WORDS; k++)
-			if (p[k] != a->id)
+			if (p[k] != a->id) {
+				a->overwritten++;
 				bad = 1;
+			}
 
 		if (bad) {
-			a->collisions++;
 			mr_stop = 1;
 			a->iters = i + 1;
+			__atomic_store_n(&mr_live[a->idx], NULL,
+					 __ATOMIC_SEQ_CST);
 			return NULL;
 		}
 
+		__atomic_store_n(&mr_live[a->idx], NULL, __ATOMIC_SEQ_CST);
 		free((void *)p);
 	}
 
@@ -1521,14 +1559,17 @@ test_malloc_under_threads(void)
 	pthread_t	th[MR_THREADS];
 	struct mr_arg	a[MR_THREADS];
 	unsigned int	i;
-	unsigned int	collisions = 0, nulls = 0, iters = 0;
-	char		buf[120];
+	unsigned int	shared = 0, overwritten = 0, nulls = 0, iters = 0;
+	char		buf[160];
 
 	mr_stop = 0;
 	for (i = 0; i < MR_THREADS; i++) {
+		mr_live[i] = NULL;
+		a[i].idx = i;
 		a[i].id = 0xA5A50000u + i;
 		a[i].iters = 0;
-		a[i].collisions = 0;
+		a[i].shared = 0;
+		a[i].overwritten = 0;
 		a[i].nulls = 0;
 	}
 
@@ -1545,15 +1586,18 @@ test_malloc_under_threads(void)
 
 	for (i = 0; i < MR_THREADS; i++) {
 		pthread_join(th[i], NULL);
-		collisions += a[i].collisions;
+		shared += a[i].shared;
+		overwritten += a[i].overwritten;
 		nulls += a[i].nulls;
 		iters += a[i].iters;
 	}
 
-	if (collisions != 0) {
+	if (shared != 0 || overwritten != 0) {
 		snprintf(buf, sizeof(buf),
-			 "%u block(s) held two owners after %u allocation(s) "
-			 "across %d threads", collisions, iters, MR_THREADS);
+			 "a block held two owners after %u allocation(s) "
+			 "across %d threads — %u seen as two live pointers, "
+			 "%u as a stamp read back wrong",
+			 iters, MR_THREADS, shared, overwritten);
 		test_fail("malloc under threads", buf);
 		return;
 	}
