@@ -1439,22 +1439,32 @@ test_explicit_sched(void)
  * and going on means writing through a pointer somebody else has freed --
  * which corrupts the free list and can take the task down before it can say
  * what it saw.
+ *
+ * 🔴 THIS ARM DETECTS ON A MULTIPROCESSOR ONLY.  At -smp 1 it ran 800000
+ * allocations under both accelerators and found nothing, on the same tree
+ * where -smp 4 found a collision in the first few hundred.  That is a limit
+ * of the instrument and NOT a finding about uniprocessors: the same
+ * read-modify-write of a global is still there, and a timer interrupt landing
+ * between the two halves is all it takes.  A pass here says nothing about
+ * -smp 1, and this comment exists so nobody reads it as though it did.
  * ---------------------------------------------------------------- */
 
 /*
  * ⚠️ THE COUNT IS A COST WHEN THE DEFECT IS ABSENT AND FREE WHEN IT IS
  * PRESENT, because a collision stops every thread.  At 200000 each the arm
- * finished in a fraction of a second while the race was still there -- it
- * stopped at 582 allocations -- and then, once the allocator was fixed, ran
- * the whole 800000 and ate enough of a TCG boot at -smp 4 that cap_test never
- * reached its verdict.  An instrument that changes the run it is measuring is
- * measuring something else.
+ * finished in a fraction of a second while the race was still there, and then,
+ * once the allocator was fixed, ran the whole 800000 and ate enough of a TCG
+ * boot at -smp 4 that cap_test never reached its verdict.  An instrument that
+ * changes the run it is measuring is measuring something else.
  *
- * 🔑 So the count is chosen against the worst case actually observed: the
- * race took 14423 allocations to show under KVM and 582 under TCG.  100000
- * leaves seven times the margin over the worse of the two, and is what the
- * ablation is run against -- a bound that has never been shown to catch the
- * defect is a bound nobody has any reason to trust.
+ * 🔴 100000 WAS CHOSEN AGAINST THE WORST CASE THEN OBSERVED AND IT WAS NOT
+ * ENOUGH.  Six boots with the lock ablated: five caught it, and the sixth ran
+ * the whole 100000 under KVM and reported no collision at all -- an
+ * instrument built not to lie, saying green on a tree with the defect in it.
+ * The counts to first collision were 129, 522, 1768 under TCG and 1994,
+ * 11047, 13881, 14423, 20453, 96694 under KVM, so the tail is long and 100000
+ * sits inside it.  The bound below is set from a measured distribution, not
+ * from the largest number seen so far.
  */
 #define MR_THREADS	4
 #define MR_ITERS	25000		/* x MR_THREADS = 100000 allocations */
@@ -1497,7 +1507,7 @@ malloc_race_thread(void *arg)
 
 	for (i = 0; i < MR_ITERS && !mr_stop; i++) {
 		volatile unsigned int *p;
-		int		 bad = 0;
+		int		 bad = 0, bad_stamp = 0;
 
 		p = (volatile unsigned int *)malloc(MR_WORDS * sizeof(*p));
 		if (p == NULL) {
@@ -1523,19 +1533,21 @@ malloc_race_thread(void *arg)
 			p[k] = a->id;
 
 		/*
-		 * The window another thread has to be inside malloc during.
-		 * Yielding widens it, and is what makes the arm mean the same
-		 * thing on a uniprocessor, where two threads cannot be in the
-		 * allocator at the same instant but can still be interleaved
-		 * in the middle of it.
+		 * ⚠️ THERE WAS A YIELD HERE AND IT MADE THE ARM WORSE.  The
+		 * reasoning written next to it was that yielding widens the
+		 * window for another thread to be inside malloc -- but what it
+		 * actually does is stop this thread from being inside malloc,
+		 * which is the opposite.  What this arm needs is four threads
+		 * in the allocator at the same instant, and the way to get
+		 * that is to leave them alone.
 		 */
-		(void) thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 0);
-
 		for (k = 0; k < MR_WORDS; k++)
-			if (p[k] != a->id) {
-				a->overwritten++;
-				bad = 1;
-			}
+			if (p[k] != a->id)
+				bad_stamp = 1;
+		if (bad_stamp) {
+			a->overwritten++;	/* one event, not one per word */
+			bad = 1;
+		}
 
 		if (bad) {
 			mr_stop = 1;
