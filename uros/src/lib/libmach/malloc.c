@@ -56,7 +56,63 @@
  */
 
 #include <mach.h>
+#include <mach/mach_traps.h>		/* swtch_pri — see kalloc_lock_acquire */
 #include <stdlib.h>
+
+/*
+ * ── One block belongs to one caller (#540) ───────────────────────────────
+ *
+ * 🔴 EVERY PIECE OF STATE BELOW IS FILE-SCOPE AND WAS REACHED BY ANY NUMBER
+ * OF THREADS WITHOUT SERIALISATION.  bootstrap starts its demuxer thread
+ * before the first server is launched -- deliberately, and the comment there
+ * says why -- so two threads calling malloc at once is the normal case for
+ * every server that answers messages while doing work: bootstrap,
+ * default_pager, ext_server, name_server.
+ *
+ * What that cost, once in fifty-two boots: two sixteen-byte allocations were
+ * handed the same block, and bootstrap relocated pci_scan.so while it had
+ * asked for irq_claim_test.
+ *
+ * 🔑 The lock is built here, out of a compiler atomic and a Mach trap, and
+ * not out of a pthread mutex.  libmach is linked into programs that do not
+ * link libpthreads at all -- crt0 itself comes from here -- so an allocator
+ * that needed the thread library would make every program need it.  The
+ * first attempt used thread_switch() and the linker said so at once:
+ * `undefined reference to thread_switch' from name_server, which links
+ * libmach and nothing else.  swtch_pri() is a trap, and it is already here.
+ *
+ * ⚠️ Bounded spin THEN yield, in that order and not either alone.  The
+ * critical sections are a handful of instructions, so on a multiprocessor
+ * spinning wins; on a uniprocessor the holder cannot make progress while a
+ * spinner burns the timeslice, so a spinner that never yields would be a
+ * livelock.  Uniprocessor and multiprocessor are both first class here.
+ */
+#define	KALLOC_SPINS	64
+
+static volatile int	kalloc_lock;
+
+static void
+kalloc_lock_acquire(void)
+{
+	unsigned int	spins = 0;
+
+	while (__atomic_exchange_n(&kalloc_lock, 1, __ATOMIC_ACQUIRE) != 0) {
+		if (++spins < KALLOC_SPINS) {
+#if defined(__i386__) || defined(__x86_64__)
+			__builtin_ia32_pause();
+#endif
+			continue;
+		}
+		spins = 0;
+		(void) swtch_pri(0);
+	}
+}
+
+static void
+kalloc_lock_release(void)
+{
+	__atomic_store_n(&kalloc_lock, 0, __ATOMIC_RELEASE);
+}
 
 /*
  *	All allocations of size less than kalloc_max are rounded to the
@@ -220,6 +276,13 @@ malloc(size_t size)
 	if (size <= 0)
 		return NULL;
 
+	/*
+	 * ⚠️ The lazy init is inside the lock, and that is not tidiness.  Two
+	 * threads could both read FALSE and both run kalloc_init(), which
+	 * clears every free list head -- losing every block on them, and
+	 * handing the second caller a list the first is already walking.
+	 */
+	kalloc_lock_acquire();
 	if (!kalloc_initialized) {
 	    kalloc_init();
 	    kalloc_initialized = TRUE;
@@ -242,8 +305,17 @@ malloc(size_t size)
 	    else {
 		addr = kget_space(allocsize);
 	    }
+	    kalloc_lock_release();
 	}
 	else {
+	    /*
+	     * 🔑 Released first: a page-sized request touches nothing this
+	     * lock protects, and holding it across vm_allocate would stall
+	     * every eight-byte allocation in the task for a kernel call that
+	     * has nothing to do with them.
+	     */
+	    kalloc_lock_release();
+
 	    /* This will allocate page 0 if it is free, but the header
 	       will prevent us from returning a 0 pointer.  */
 	    if (vm_allocate(mach_task_self(), (vm_offset_t *)&addr,
@@ -269,6 +341,8 @@ free(void *data)
 		return;
 
 	addr = ((union header *)data) - 1;
+
+	kalloc_lock_acquire();
 	freesize = get_allocsize(addr->size, &fl);
 
 	if (freesize < kalloc_max) {
@@ -296,8 +370,10 @@ free(void *data)
 #endif
 	    addr->next = fl->next;
 	    fl->next = addr;
+	    kalloc_lock_release();
 	}
 	else {
+	    kalloc_lock_release();
 	    (void) vm_deallocate(mach_task_self(), (vm_offset_t)addr,
 				 freesize);
 	}
@@ -343,12 +419,20 @@ realloc(void *data, size_t size)
 		/* Simple case: shrinking from a whole page or pages to less
 		   than a page.  */
 	    } else {
+		/*
+		 * ⚠️ The test and the assignment have to be one indivisible
+		 * step: "am I the last block handed out" stops being true the
+		 * instant another thread is handed one.
+		 */
+		kalloc_lock_acquire();
 		if (vmaddr + oldsize == kalloc_next_space) {
 		    /* Shrinking the last item in the current page.  */
 		    kalloc_next_space = vmaddr + allocsize;
+		    kalloc_lock_release();
 		    addr->size = allocsize;
 		    return data;
 		}
+		kalloc_lock_release();
 		/* Simple case: shrinking enough to fit in a smaller power
 		   of two.  */
 	    }
@@ -379,18 +463,28 @@ realloc(void *data, size_t size)
 		/* Growing from a within-page size to a larger within-page
 		   size.  Frequently the item being grown is the last one
 		   allocated so try to avoid copies in that case.  */
+		kalloc_lock_acquire();
 		if (vmaddr + oldsize == kalloc_next_space) {
 		    if (vmaddr + allocsize <= kalloc_end_of_space) {
 			kalloc_next_space = vmaddr + allocsize;
+			kalloc_lock_release();
 			addr->size = allocsize;
 			return data;
 		    } else {
+			/*
+			 * 🔑 Held across vm_allocate here, unlike the big
+			 * path in malloc: this call is only worth making
+			 * while this block is still the last one handed out,
+			 * and letting go to make it would decide on an answer
+			 * that another thread has already changed.
+			 */
 			newaddr = round_page(vmaddr);
 			if (vm_allocate(mach_task_self(), &newaddr,
 					vm_page_size, FALSE)
 			    == KERN_SUCCESS) {
 			    kalloc_next_space = vmaddr + allocsize;
 			    kalloc_end_of_space = newaddr + vm_page_size;
+			    kalloc_lock_release();
 			    addr->size = allocsize;
 			    return (void *) (addr + 1);
 			}
@@ -399,6 +493,7 @@ realloc(void *data, size_t size)
 			   unavailable.  */
 		    }
 		}
+		kalloc_lock_release();
 		/* Simple case: growing a within-page object that is not the
 		   last object allocated. */
 	    }
