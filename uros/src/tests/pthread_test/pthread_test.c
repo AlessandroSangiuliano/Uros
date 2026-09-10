@@ -1641,6 +1641,43 @@ test_malloc_under_threads(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 25: what the lock costs the caller who never contends for it (#540)
+ *
+ * 🔑 EVERY SINGLE-THREADED PROGRAM IN THE SYSTEM NOW PAYS FOR SERIALISATION
+ * IT WILL NEVER NEED, and "an exchange is cheap" is an assertion until it is
+ * a number.  One thread, no contention, the same shape as [15] so the two can
+ * be read against each other: this is the whole price of #540 on the path
+ * that is not the reason for #540.
+ *
+ * ⚠️ It is a cost per pair and not a percentage, because a percentage would
+ * need a baseline from a tree that no longer exists.  To turn it into one,
+ * ablate the lock and read this line again on the same machine.
+ * ---------------------------------------------------------------- */
+
+static void
+test_malloc_bench(void)
+{
+	unsigned long long	start, end;
+	void			*p;
+	int			i;
+	int			n = 100000;
+
+	/* Warm the free list so the bump-pointer and vm_map paths are not
+	   what gets measured. */
+	p = malloc(32);
+	free(p);
+
+	start = tsc_now();
+	for (i = 0; i < n; i++) {
+		p = malloc(32);
+		free(p);
+	}
+	end = tsc_now();
+
+	print_per_iter("malloc/free uncontended", n, end - start);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -1687,6 +1724,7 @@ main(int argc, char **argv)
 	test_setschedparam();
 	test_explicit_sched();
 	test_malloc_under_threads();
+	test_malloc_bench();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);
