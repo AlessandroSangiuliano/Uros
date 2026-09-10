@@ -204,31 +204,6 @@ policy_allows_v1(mach_port_t sender,
  * MIG synthesizes the out/in array lengths as mach_msg_type_number_t.
  * ============================================================ */
 
-/*
- * ── The census that has to come before the permissive path can go ──────
- *
- * 🔑 "No manifest means no capability" is where this ends, and it is the
- * right end.  What makes it expensive is not the rule but the DISCOVERY:
- * ten manifests exist in a tree with dozens of tasks, so switching it off
- * blind turns every task that was relying on the legacy path into a runtime
- * red, found one boot at a time.
- *
- * ⚠️ So the legacy path says who is on it.  One boot produces the list of
- * manifests that have to be written, and after that the permissive path can
- * be removed against an enumeration rather than against hope.  A grant is
- * not a failure and this is not a warning -- it is a census, and it stops
- * being printed when there is nothing left to count.
- */
-static void
-census_permissive(unsigned int resource_type, uint64_t resource_id,
-                  uint64_t ops)
-{
-    printf("cap: census — port=0x%x was served with NO MANIFEST: rtype=%u "
-           "id=0x%llx ops=0x%llx\n",
-           (unsigned)g_request_local_port, resource_type,
-           (unsigned long long)resource_id, (unsigned long long)ops);
-}
-
 kern_return_t
 cap_acquire(mach_port_t             server,
             unsigned int            resource_type,
@@ -255,15 +230,38 @@ cap_acquire(mach_port_t             server,
      * branch is dead — no client has been migrated yet, every
      * request still lands on the well-known port.
      */
+    /*
+     * ── The well-known port does not issue capabilities (#511) ─────────
+     *
+     * 🔴 IT USED TO, AND THAT WAS THE PERMISSIVE PATH ITSELF.  A request
+     * arriving here has no per-task port behind it, so there is no manifest
+     * to look up and nothing was consulted about whether the caller may have
+     * what it asked for.  Worse, the port is reachable by ANY task that
+     * looks CAP_SERVER_NETNAME up in the name server -- authority held by
+     * name and not by right, which is the sentence this issue makes about
+     * the master device port, in the server that exists to prevent it.
+     *
+     * 🔑 REMOVED AGAINST A COUNT AND NOT AGAINST A HOPE.  cap_server spent a
+     * boot reporting every request the legacy path served: three, from two
+     * tasks.  block_device_server was given a manifest, bootstrap was made to
+     * provision itself, and the count went to zero.  Deleting a fallback that
+     * nothing uses is a different act from deleting one that something might.
+     *
+     * ⚠️ Acquisition only.  cap_provision_task must still answer here,
+     * because bootstrap provisions its children before it has a port of its
+     * own -- that call is how per-task ports come to exist, so requiring one
+     * to make one would have no first step.
+     */
     if (g_request_local_port == MACH_PORT_NULL ||
-        g_request_local_port == cap_port)
-        printf("cap: census — WELL-KNOWN port request, no manifest is even "
-               "looked up: rtype=%u id=0x%llx ops=0x%llx\n",
+        g_request_local_port == cap_port) {
+        printf("cap: DENY (well-known port issues no capabilities) rtype=%u "
+               "id=0x%llx ops=0x%llx\n",
                resource_type, (unsigned long long)resource_id,
                (unsigned long long)ops);
+        return CAP_ERR_NOT_IN_MANIFEST;
+    }
 
-    if (g_request_local_port != MACH_PORT_NULL &&
-        g_request_local_port != cap_port) {
+    {
         const cap_manifest_header_t *m =
             cap_manifest_table_get(g_request_local_port);
         /*
@@ -291,8 +289,6 @@ cap_acquire(mach_port_t             server,
                        (unsigned long long)ops);
                 return CAP_ERR_NOT_IN_MANIFEST;
             }
-            if (!m)
-                census_permissive(resource_type, resource_id, ops);
 
             okr = urmach_dma_region_owner(resource_id, owner);
             if (okr != KERN_SUCCESS) {
@@ -309,8 +305,6 @@ cap_acquire(mach_port_t             server,
                    (unsigned long long)resource_id,
                    (unsigned long long)ops);
             return CAP_ERR_NOT_IN_MANIFEST;
-        } else if (!m) {
-            census_permissive(resource_type, resource_id, ops);
         }
     }
 

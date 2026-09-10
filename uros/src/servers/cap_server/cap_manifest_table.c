@@ -187,21 +187,20 @@ cap_manifest_allows(const cap_manifest_header_t *m,
      * later would have got the old answer by default and nobody would have
      * had to decide anything.
      *
-     * ⚠️ Hardware needs an explicit grant; nothing else changes yet.  A
-     * task may still open files and block devices without shipping a
-     * policy -- the legacy path, and how most of the tree works.  The end
-     * state is that no manifest means no capability at all, and getting
-     * there is a matter of knowing WHICH tasks are relying on the legacy
-     * path: cap_server reports each one it serves, so a boot produces the
-     * list instead of the change producing runtime failures.
+     * 🔑 NO MANIFEST NOW MEANS NO CAPABILITY, full stop, and it got there
+     * in two steps on purpose.  The first refused hardware alone, which was
+     * free -- the census said no request relied on the legacy path for
+     * anything else.  The second is this one, taken once the census read
+     * zero for every resource: three requests before, from two tasks, none
+     * after those two were given policy files.
      *
-     * ⚠️ RESOURCE_DMA_BUFFER is deliberately not hardware for this purpose.
-     * A buffer is not a device: which buffer a task may hand to a device is
-     * the kernel's answer, because it made the allocation and knows whose
-     * it is, and check_claim() polices the device side of the same call.
+     * ⚠️ Reaching this with a null manifest is now a task holding a
+     * per-task cap port whose manifest is not in the table, which is a
+     * broken installation rather than a policy question.  Refusing is the
+     * only honest answer to it.
      */
     if (!m)
-        return type != RESOURCE_PCI_DEVICE;
+        return 0;
 
     req = (const cap_manifest_entry_t *)((const char *)m +
                                          m->required_offset);
