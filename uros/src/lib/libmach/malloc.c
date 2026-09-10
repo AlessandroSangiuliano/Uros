@@ -346,28 +346,30 @@ free(void *data)
 	freesize = get_allocsize(addr->size, &fl);
 
 	if (freesize < kalloc_max) {
-#if 0
 	    /*
-	     * #223 — double-free guard.  Originally added when cap_server
-	     * crashed in malloc+0x83 after ~15 cap_acquire calls and the
-	     * trace looked like the same block being pushed twice onto the
-	     * freelist.  Later investigation showed the pattern was actually
-	     * normal LIFO recycling (alloc/free on a hot loop returning the
-	     * same address) and that the real cause was the libmach printf
-	     * %llu bug fixed in 8846e1d.  Keep this here, dormant: if the
-	     * symptom reappears we re-enable it and add the
-	     * _malloc_dbl_free_hit() instrumentation back to capture the
-	     * caller PC.  Walk is O(N) on the per-bucket freelist; free()
-	     * is not hot.
+	     * ── #223's dormant double-free guard used to sit here (#540) ──
+	     *
+	     * It walked this bucket's free list looking for the block being
+	     * freed and returned early if it found it, and it was left `#if 0'
+	     * with a note saying it would be switched back on if the symptom
+	     * ever returned.
+	     *
+	     * ⚠️ THE TEMPTING CONCLUSION IS THE WRONG ONE.  #223's trace
+	     * "looked like the same block being pushed twice onto the
+	     * freelist", and #540 is exactly that happening for real -- so it
+	     * is very easy to say #223 was right all along and switch the
+	     * guard back on.  It was not: cap_server, where that crash
+	     * happened, creates no threads at all, so this defect cannot have
+	     * been its cause.  #223's own answer -- normal LIFO recycling, with
+	     * the real fault in the printf %llu bug -- still stands.
+	     *
+	     * 🔑 So it goes for reasons of its own.  Written as it was, its
+	     * early return now leaves this lock held: a dormant guard turned
+	     * into a deadlock waiting for somebody to enable it.  And a guard
+	     * that is switched off, carrying a promise about when it would be
+	     * switched on, is not a guard -- it reads as cover for a property
+	     * the code does not have.  git remembers it if it is ever wanted.
 	     */
-	    {
-		union header *p;
-		for (p = fl->next; p != NULL; p = p->next) {
-		    if (p == addr)
-			return;	/* drop the duplicate push */
-		}
-	    }
-#endif
 	    addr->next = fl->next;
 	    fl->next = addr;
 	    kalloc_lock_release();
