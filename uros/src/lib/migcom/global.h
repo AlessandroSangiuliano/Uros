@@ -129,6 +129,13 @@ extern string_t yyinname;
 extern void init_global();
 
 extern string_t UserFilePrefix;
+/*
+ * The kernel traps a generated user stub may try before building a message
+ * (#543).  See traplist.c for why MIG is told rather than left to guess.
+ */
+extern boolean_t TrapListHas(const char *name, int argc);
+extern boolean_t TrapListActive(void);
+
 extern string_t UserHeaderFileName;
 extern string_t ServerHeaderFileName;
 extern string_t InternalHeaderFileName;

@@ -359,6 +359,11 @@ WriteIncludes(FILE *file)
 	if (!IsKernelUser) {
 	    fprintf(file, "#include <mach/mach_traps.h>\n");
 	    fprintf(file, "#include <mach/mach_interface.h>\n");
+	    /* #543: prototypes for the traps the stubs try first.  Emitted
+	       only when there are any, so a build without -traplist produces
+	       exactly the file it produced before. */
+	    if (TrapListActive())
+		fprintf(file, "#include <mach/mach_syscalls.h>\n");
 	}
     } else {
 	fprintf(file, "#include <string.h>\n");
@@ -2594,6 +2599,71 @@ InitKPD_Disciplines(argument_t *args)
  *  Writes all the code comprising a routine body. Called by
  *  WriteUser for each routine.
  *************************************************************/
+/*
+ * ── Try the kernel trap before building a message (#543) ─────────────────
+ *
+ * 🔑 THIS IS WHERE THE FAST PATH GOES, and putting it here is the whole point.
+ * The trap wrappers have existed in libmach since the port -- 118 of them, with
+ * the kernel implementing every one -- and nothing called them, because the
+ * ms_*.c layer that was supposed to was never compiled.  Emitting the attempt
+ * inside the stub MIG already generates means no caller changes, no symbol is
+ * renamed, nothing depends on link order, and a routine that gains a trap
+ * tomorrow gains the fast path with it.
+ *
+ * 🔑 MACH_SEND_INTERRUPTED IS NOT AN ERROR HERE.  Every one of these traps
+ * resolves its port arguments against the caller's space and answers that code
+ * when the name does not name one of this kernel's own objects -- interposed,
+ * proxied, or belonging to another kernel.  It means "not mine", and the only
+ * correct response is to carry on and send the message, which is what keeps a
+ * trap from narrowing what Mach can do.  Any other return, success or failure,
+ * is the answer.
+ *
+ * ⚠️ Emitted only when the trap's arity matches the stub's.  The compiler
+ * checks the types, because <mach/mach_syscalls.h> declares every trap, but it
+ * can only check a call that was emitted -- and a call with the wrong number of
+ * arguments against a prototype MIG never saw is how a frame gets read past its
+ * end.  Both checks, or neither is worth having.
+ */
+static void
+WriteTrapFastPath(FILE *file, register routine_t *rt)
+{
+    register argument_t *arg;
+    char	trap[512];
+    int		argc = 0;
+
+    if (!TrapListActive())
+	return;
+
+    /*
+     * A one-way routine has no reply and so no return value to compare, and
+     * nothing to fall back to in a meaningful sense.
+     */
+    if (rt->rtOneWay)
+	return;
+    if (!streql(ReturnTypeStr(rt), "kern_return_t"))
+	return;
+
+    for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)
+	if (akCheck(arg->argKind, akbUserArg))
+	    argc++;
+
+    if (snprintf(trap, sizeof(trap), "syscall_%s", rt->rtName)
+	    >= (int) sizeof(trap))
+	return;
+    if (!TrapListHas(trap, argc))
+	return;
+
+    fprintf(file, "    {\n");
+    fprintf(file, "\t/* #543: the trap first, the message only if it says "
+		  "the port is not this kernel's. */\n");
+    fprintf(file, "\tkern_return_t __mig_trap_kr = %s(", trap);
+    WriteList(file, rt->rtArgs, WriteNameDecl, akbUserArg, ", ", "");
+    fprintf(file, ");\n");
+    fprintf(file, "\tif (__mig_trap_kr != MACH_SEND_INTERRUPTED)\n");
+    fprintf(file, "\t\treturn __mig_trap_kr;\n");
+    fprintf(file, "    }\n\n");
+}
+
 static void
 WriteRoutine(FILE *file, register routine_t *rt)
 {
@@ -2608,6 +2678,9 @@ WriteRoutine(FILE *file, register routine_t *rt)
     /* Use the RPC trap for user-user and user-kernel RPC */
     if (UseRPCTrap)
 	WriteRPCRoutine(file, rt);
+
+    /* #543: try the kernel trap before paying for a message */
+    WriteTrapFastPath(file, rt);
 
     fprintf(file, "    {\n");
 

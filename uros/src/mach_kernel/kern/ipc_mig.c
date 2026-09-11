@@ -1447,7 +1447,7 @@ kern_return_t
 syscall_thread_create_running(
         mach_port_t         	parent_task,
         int                     flavor,
-        thread_state_t          new_state,
+        const natural_t         *new_state,
         natural_t               new_state_count,
         mach_port_t             *child_thread)          /* OUT */
 {
@@ -1466,7 +1466,7 @@ syscall_thread_create_running(
 		task_deallocate(task);
 		return(KERN_INVALID_ARGUMENT);
 	}
-	if (copyin((char *)new_state, (char *)t_state,
+	if (copyin((const char *)new_state, (char *)t_state,
 					new_state_count*sizeof(natural_t))) {
 		task_deallocate(task);
 		return KERN_INVALID_ADDRESS;
@@ -1944,7 +1944,7 @@ kern_return_t
 syscall_thread_set_state(
 	mach_port_t		thread,
 	int			flavor,
-	thread_state_t		state,
+	const natural_t		*state,
 	mach_msg_type_number_t	state_count)
 {
 	thread_act_t	act;
@@ -1959,7 +1959,7 @@ syscall_thread_set_state(
 		act_deallocate(act);
 		return(KERN_INVALID_ARGUMENT);
 	}
-	if (copyin((char *) state, (char *) th_state,
+	if (copyin((const char *) state, (char *) th_state,
 		   state_count * sizeof (natural_t))) {
 		act_deallocate(act);
 		return KERN_INVALID_ADDRESS;

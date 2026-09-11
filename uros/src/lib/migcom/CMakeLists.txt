@@ -37,6 +37,7 @@ set(MIGCOM_SOURCES
   ${SRC_DIR}/server.c
   ${SRC_DIR}/statement.c
   ${SRC_DIR}/target.c
+  ${SRC_DIR}/traplist.c
   ${SRC_DIR}/string.c
   ${SRC_DIR}/type.c
   ${SRC_DIR}/user.c
@@ -63,9 +64,34 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/ident.c
   COMMENT "Generating ident.c"
 )
 
+# ── The traps migcom may short-circuit to (#543) ──────────────────────────
+#
+# 🔑 GENERATED HERE AND COMPILED IN, not passed on a command line.  This build
+# invokes migcom 82 times from more than twenty hand-written rules with no
+# funnel between them, so an option would have had to be added to every one and
+# the next rule added would have gone without it -- silently.  Baked into the
+# tool, it cannot be forgotten and it cannot drift: the DEPENDS below rebuilds
+# the table whenever syscall_sw.h changes, which is the file that defines the
+# traps in the first place.
+set(TRAPS_INC ${CMAKE_CURRENT_BINARY_DIR}/traps.inc)
+set(SYSCALL_SW ${CMAKE_SOURCE_DIR}/../uros/uapi/mach/syscall_sw.h)
+if(NOT EXISTS ${SYSCALL_SW})
+  set(SYSCALL_SW ${CMAKE_SOURCE_DIR}/uapi/mach/syscall_sw.h)
+endif()
+add_custom_command(
+  OUTPUT ${TRAPS_INC}
+  COMMAND ${CMAKE_SOURCE_DIR}/../scripts/gen-trap-list.py --c
+          ${SYSCALL_SW} ${TRAPS_INC}
+  DEPENDS ${SYSCALL_SW} ${CMAKE_SOURCE_DIR}/../scripts/gen-trap-list.py
+  COMMENT "MIG: trap table from syscall_sw.h"
+  VERBATIM
+)
+list(APPEND MIGCOM_SOURCES ${TRAPS_INC})
+
 add_executable(migcom ${MIGCOM_SOURCES})
 
 target_include_directories(migcom BEFORE PRIVATE
+  ${CMAKE_CURRENT_BINARY_DIR}
   # migcom ships a local stub mach/boolean.h that has no
   # <mach/machine/boolean.h> indirection (it's a host tool, the real
   # Mach types are irrelevant).  Must come *before* uapi/ which the
