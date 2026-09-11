@@ -1751,6 +1751,202 @@ test_malloc_bench(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 27: what a kernel trap costs against an RPC (#543)
+ *
+ * 🔑 mach_port_allocate IS THE RIGHT SUBJECT.  It is the most frequent thing a
+ * capability system does, it has a real trap (number 72), and until #543 every
+ * call built a 36-byte Request, called mach_msg, waited for a 40-byte Reply and
+ * unpacked it, while syscall_mach_port_allocate sat compiled in libmach with
+ * nobody calling it.
+ *
+ * ⚠️ THE TWO PATHS CANNOT BE TIMED IN ONE BOOT, and that is the whole
+ * difficulty.  With the fast path emitted, the message path is never taken --
+ * there is nothing left to compare against.  So the comparison is between two
+ * builds, made with and without MIG_TRAP_SKIP=mach_port, which is the shape of
+ * measurement that was invalid earlier in this same work: two batches with the
+ * machine free to change speed between them.
+ *
+ * 🔑 What makes it valid here is a CONTROL INSIDE THE EXPERIMENT.  Arms [15]
+ * and [25] measure a pthread mutex pair and a malloc/free pair, and neither
+ * touches mach_port_allocate.  If those two read the same in both builds, the
+ * difference in this arm is the fast path; if they move as well, the machine
+ * moved and the run says nothing.  Read all three numbers or none.
+ *
+ * 🔴 And the clock must be pinned.  This machine has constant_tsc: the counter
+ * ticks at a fixed rate while the core moves between 1.4 and 3.0 GHz, so a
+ * cycles-per-pair read from it is TIME.  The same line of code has measured 93
+ * and 33 on this tree.
+ * ---------------------------------------------------------------- */
+
+static void
+bench_one(const char *what, int n, unsigned long long total)
+{
+	print_per_iter(what, n, total);
+}
+
+/*
+ * 🔴 IT SAYS WHICH CALL FAILED AND WITH WHAT.  The first version printed
+ * "task_info did not complete" and returned, which is two defects in one line:
+ * a failure with no kern_return_t is a failure nobody can act on, and the early
+ * return made task_info's failure hide thread_create's number for the whole
+ * batch it was in.  A bench that stops at the first thing that goes wrong
+ * measures less than one that carries on and says what went wrong.
+ */
+static void
+bench_failed(const char *what, int done, kern_return_t kr)
+{
+	char	buf[120];
+
+	snprintf(buf, sizeof(buf),
+		 "%s stopped after %d iteration(s), kr=%d (0x%x)",
+		 what, done, (int)kr, (unsigned)kr);
+	test_fail("trap bench", buf);
+}
+
+static void
+test_trap_vs_rpc_bench(void)
+{
+	unsigned long long	start, end;
+	mach_port_t		p;
+	vm_offset_t		addr;
+	kern_return_t		kr = KERN_SUCCESS;
+	int			i;
+
+	/*
+	 * ── mach_port_allocate + mach_port_destroy ──
+	 * The most frequent thing a capability system does.
+	 */
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			       &p) == KERN_SUCCESS)
+		(void) mach_port_destroy(mach_task_self(), p);
+	start = tsc_now();
+	for (i = 0; i < 20000; i++) {
+		kr = mach_port_allocate(mach_task_self(),
+					MACH_PORT_RIGHT_RECEIVE, &p);
+		if (kr != KERN_SUCCESS)
+			break;
+		kr = mach_port_destroy(mach_task_self(), p);
+		if (kr != KERN_SUCCESS)
+			break;
+	}
+	end = tsc_now();
+	if (i != 20000)
+		bench_failed("mach_port_allocate+destroy", i, kr);
+	else
+		bench_one("mach_port_allocate+destroy", 20000, end - start);
+
+	/*
+	 * ── vm_allocate + vm_deallocate ──
+	 * One page, the path malloc itself takes for a large block.
+	 */
+	addr = 0;
+	if (vm_allocate(mach_task_self(), &addr, 4096, TRUE) == KERN_SUCCESS)
+		(void) vm_deallocate(mach_task_self(), addr, 4096);
+	start = tsc_now();
+	for (i = 0; i < 20000; i++) {
+		addr = 0;
+		kr = vm_allocate(mach_task_self(), &addr, 4096, TRUE);
+		if (kr != KERN_SUCCESS)
+			break;
+		kr = vm_deallocate(mach_task_self(), addr, 4096);
+		if (kr != KERN_SUCCESS)
+			break;
+	}
+	end = tsc_now();
+	if (i != 20000)
+		bench_failed("vm_allocate+deallocate", i, kr);
+	else
+		bench_one("vm_allocate+deallocate", 20000, end - start);
+
+	/*
+	 * ── vm_protect ──
+	 * One call per iteration, alternating the protection so nothing is
+	 * optimised away and the map entry is really touched.
+	 */
+	addr = 0;
+	if (vm_allocate(mach_task_self(), &addr, 4096, TRUE) != KERN_SUCCESS) {
+		test_fail("trap bench", "vm_allocate for the protect bench");
+		return;
+	}
+	start = tsc_now();
+	for (i = 0; i < 20000; i++) {
+		vm_prot_t prot = (i & 1) ? VM_PROT_READ
+					 : (VM_PROT_READ | VM_PROT_WRITE);
+		kr = vm_protect(mach_task_self(), addr, 4096, FALSE, prot);
+		if (kr != KERN_SUCCESS)
+			break;
+	}
+	end = tsc_now();
+	(void) vm_deallocate(mach_task_self(), addr, 4096);
+	if (i != 20000)
+		bench_failed("vm_protect (one call)", i, kr);
+	else
+		bench_one("vm_protect (one call)", 20000, end - start);
+
+	/*
+	 * ── task_info ──
+	 * Read-only, with an out array: the shape where a message has to carry
+	 * a reply body back and a trap copies out directly.
+	 */
+	{
+		struct task_basic_info	info;
+		mach_msg_type_number_t	cnt;
+
+		start = tsc_now();
+		for (i = 0; i < 20000; i++) {
+			cnt = TASK_BASIC_INFO_COUNT;
+			kr = task_info(mach_task_self(), TASK_BASIC_INFO,
+				       (task_info_t)&info, &cnt);
+			if (kr != KERN_SUCCESS)
+				break;
+		}
+		end = tsc_now();
+		if (i != 20000)
+			bench_failed("task_info (one call)", i, kr);
+		else
+			bench_one("task_info (one call)", 20000, end - start);
+	}
+
+	/*
+	 * ── thread_create + thread_terminate ──
+	 * Far heavier than the rest, so fewer iterations: what is being asked
+	 * is what fraction of a costly operation the message path was.
+	 */
+	{
+		mach_port_t	th;
+		int		made = 0;
+
+		start = tsc_now();
+		for (i = 0; i < 2000; i++) {
+			/*
+			 * #542: before, not after — see mach.h.  This task
+			 * plainly has threads by the time an arm numbered in
+			 * the thirties runs, so the flag is long since set and
+			 * nothing here depends on the call.  It is here because
+			 * "it happens to be fine at this call site" is the
+			 * reasoning the rule exists to refuse, and the checker
+			 * that caught this omission has no exemption list on
+			 * purpose.
+			 */
+			mach_note_thread_created();
+			kr = thread_create(mach_task_self(), &th);
+			if (kr != KERN_SUCCESS)
+				break;
+			kr = thread_terminate(th);
+			if (kr != KERN_SUCCESS)
+				break;
+			(void) mach_port_deallocate(mach_task_self(), th);
+			made++;
+		}
+		end = tsc_now();
+		if (made != 2000)
+			bench_failed("thread_create+terminate", made, kr);
+		else
+			bench_one("thread_create+terminate", 2000, end - start);
+	}
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -1805,6 +2001,7 @@ main(int argc, char **argv)
 	test_explicit_sched();
 	test_malloc_under_threads();
 	test_malloc_bench();
+	test_trap_vs_rpc_bench();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);

@@ -130,12 +130,20 @@ extern kern_return_t syscall_vm_region(
 				mach_port_t		*object_name);
 
 
+/*
+ * 🔑 `const natural_t *' AND NOT `thread_state_t' (#543).  The same operation
+ * is declared twice in this system -- here as a trap, and in mach.defs as an
+ * RPC -- and the two disagreed: MIG renders an `in' array as `const natural_t *'
+ * because the stub only reads it, while this said `unsigned int *'.  The kernel
+ * side only copies IN from it, so const is the accurate one, and the compiler
+ * found the disagreement the moment a generated stub started calling the trap.
+ */
 extern kern_return_t syscall_thread_create_running(
-				mach_port_t	parent_task,
-				int		flavor,
-				thread_state_t	new_state,
-				natural_t	new_state_count,
-				mach_port_t	*child_thread);
+				mach_port_t		parent_task,
+				int			flavor,
+				const natural_t		*new_state,
+				natural_t		new_state_count,
+				mach_port_t		*child_thread);
 
 extern kern_return_t syscall_vm_read_overwrite(
 				mach_port_t	target_map,
@@ -395,10 +403,11 @@ extern kern_return_t urmach_thread_set_cleartid(
 extern kern_return_t syscall_thread_abort_safely(
 				mach_port_t	target_thread);
 
+/* const, for the reason given at syscall_thread_create_running (#543). */
 extern kern_return_t syscall_thread_set_state(
 				mach_port_t		target_thread,
 				int			flavor,
-				thread_state_t		state,
+				const natural_t		*state,
 				mach_msg_type_number_t	state_count);
 
 extern kern_return_t syscall_thread_suspend(

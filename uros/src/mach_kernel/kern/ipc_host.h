@@ -147,6 +147,10 @@ extern ipc_port_t convert_clock_ctrl_to_port(
 	clock_t		clock);
 
 /* Convert from a clock name to a clock pointer */
+/* Convert a port NAME to the privileged host; nothing else will do (#543) */
+extern host_t port_name_to_host_priv(
+	mach_port_t	name);
+
 extern clock_t port_name_to_clock(
 	mach_port_t	clock_name);
 

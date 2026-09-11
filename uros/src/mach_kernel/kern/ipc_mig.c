@@ -1052,6 +1052,64 @@ port_name_to_host(
 	}
 }
 
+/*
+ *	Routine:	port_name_to_host_priv
+ *	Purpose:
+ *		Like port_name_to_host, but only the PRIVILEGED host port will
+ *		do.
+ *	Conditions:
+ *		Nothing locked.
+ *
+ * 🔴 WHY THIS EXISTS (#543).  port_name_to_host above accepts IKOT_HOST *or*
+ * IKOT_HOST_PRIV, and two traps used it for arguments their RPC twins declare
+ * as `host_priv_t' -- syscall_vm_wire and syscall_host_statistics.  MIG's
+ * server side converts those with convert_port_to_host_priv, which takes only
+ * the privileged port; the traps took either.  So a trap accepted a credential
+ * its own RPC refuses, and every task holds the weaker one: mach_host_self().
+ *
+ * ⚠️ It was unreachable only because nothing called the traps.  The moment the
+ * generated stubs started trying them, libflipc2's "best-effort" vm_wire --
+ * which passes mach_host_self() and discards the result -- stopped failing
+ * harmlessly and started wiring pages, and the kernel panicked in
+ * pmap_remove_all removing one of them.  A privilege check that nothing
+ * exercises is not a check that holds; it is a check nobody has tested.
+ */
+host_t
+port_name_to_host_priv(
+	mach_port_t	name)
+{
+	ipc_port_t	port;
+	host_t		host;
+
+	fast_send_right_lookup(name, port, goto abort);
+	/* port is locked */
+
+	if (ip_active(port) && (ip_kotype(port) == IKOT_HOST_PRIV))
+		host = (host_t) port->ip_kobject;
+	else
+		host = HOST_NULL;
+
+	ip_unlock(port);
+	return host;
+
+    abort: {
+	ipc_port_t	kern_port;
+	kern_return_t	kr;
+
+	kr = ipc_object_copyin(current_space(), name,
+			       MACH_MSG_TYPE_COPY_SEND,
+			       (ipc_object_t *) &kern_port);
+	if (kr != KERN_SUCCESS)
+		return HOST_NULL;
+
+	host = convert_port_to_host_priv(kern_port);
+	if (IP_VALID(kern_port))
+		ipc_port_release_send(kern_port);
+
+	return host;
+	}
+}
+
 vm_object_t
 port_name_to_vm_object(
 	mach_port_t	name)
@@ -1292,7 +1350,8 @@ syscall_vm_wire(
 	host_t			host;
 	kern_return_t		result;
 
-	host = port_name_to_host(host_port);
+	/* #543: host_priv_t in mach_host.defs, so the privileged port only. */
+	host = port_name_to_host_priv(host_port);
 	if (host == HOST_NULL)
 		return MACH_SEND_INTERRUPTED;
 	map = port_name_to_map(target_map);
@@ -1447,7 +1506,7 @@ kern_return_t
 syscall_thread_create_running(
         mach_port_t         	parent_task,
         int                     flavor,
-        thread_state_t          new_state,
+        const natural_t         *new_state,
         natural_t               new_state_count,
         mach_port_t             *child_thread)          /* OUT */
 {
@@ -1466,7 +1525,7 @@ syscall_thread_create_running(
 		task_deallocate(task);
 		return(KERN_INVALID_ARGUMENT);
 	}
-	if (copyin((char *)new_state, (char *)t_state,
+	if (copyin((const char *)new_state, (char *)t_state,
 					new_state_count*sizeof(natural_t))) {
 		task_deallocate(task);
 		return KERN_INVALID_ADDRESS;
@@ -1944,7 +2003,7 @@ kern_return_t
 syscall_thread_set_state(
 	mach_port_t		thread,
 	int			flavor,
-	thread_state_t		state,
+	const natural_t		*state,
 	mach_msg_type_number_t	state_count)
 {
 	thread_act_t	act;
@@ -1959,7 +2018,7 @@ syscall_thread_set_state(
 		act_deallocate(act);
 		return(KERN_INVALID_ARGUMENT);
 	}
-	if (copyin((char *) state, (char *) th_state,
+	if (copyin((const char *) state, (char *) th_state,
 		   state_count * sizeof (natural_t))) {
 		act_deallocate(act);
 		return KERN_INVALID_ADDRESS;
@@ -1985,7 +2044,8 @@ syscall_host_statistics(
 	mach_msg_type_number_t	cnt, our_cnt;
 	kern_return_t		kr;
 
-	host = port_name_to_host(host_port);
+	/* #543: host_priv_t in mach_host.defs, so the privileged port only. */
+	host = port_name_to_host_priv(host_port);
 	if (host == HOST_NULL) {
 		return MACH_SEND_INTERRUPTED;
 	}

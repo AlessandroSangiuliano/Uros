@@ -138,8 +138,6 @@ WriteIncludes(FILE *file, boolean_t isuser)
     fprintf(file, "#include <mach/mach_types.h>\n");
     fprintf(file, "#include <mach/message.h>\n");
     fprintf(file, "#include <mach/mig_errors.h>\n");
-    if (ShortCircuit && Target->mt_rpc_trap)
-	    fprintf(file, "#include <mach/rpc.h>\n");
     if (isuser && IsKernelUser) {
 	    fprintf(file, "#include <ipc/ipc_port.h>\n");
 	    fprintf(file, "#include <kern/ipc_mig.h>\n");

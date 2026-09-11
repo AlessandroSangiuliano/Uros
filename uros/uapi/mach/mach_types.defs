@@ -262,18 +262,37 @@ type vm_sync_t = int;
 type thread_flavor_t		= int;
 type thread_info_t		= array[*:12] of integer_t;
 
-		/* task_info_t: this inline array can hold any of:
-		 * task_basic_info_t (8 ints)
-		 * task_events_info_t (7 ints)
-		 * task_thread_times_info_t (4 ints)
-		 * policy_timeshare_info_t (5 ints)
-		 * policy_fifo_info_t (4 ints)
-		 * policy_rr_info_t (5 ints)
-		 * If other task_info flavors are added, this
-		 * definition may need to be changed. (See
-		 * mach/task_info.h and mach/policy.h) */
+		/*
+		 * task_info_t: this inline array must hold the largest flavor,
+		 * counted in natural_t.  Measured on x86-64, not assumed:
+		 *   task_basic_info_t         12   (was 8 at 32-bit widths)
+		 *   task_events_info_t         7
+		 *   task_thread_times_info_t   4
+		 *   policy_timeshare_info_t    5
+		 *   policy_fifo_info_t         4
+		 *   policy_rr_info_t           5
+		 *
+		 * 🔴 IT SAID 8, AND THAT WAS TRUE OF i386 ONLY.  The old note
+		 * here said the bound might need changing "if other task_info
+		 * flavors are added" -- and what broke it was not a new flavor
+		 * but a new word size: vm_size_t and time_value_t are eight
+		 * bytes at 64-bit, so task_basic_info needs twelve naturals,
+		 * not eight.
+		 *
+		 * ⚠️ What that cost: the generated stub caps the count at the
+		 * bound, so task_info(TASK_BASIC_INFO) sent 8, the kernel's
+		 * `*task_info_count < TASK_BASIC_INFO_COUNT' refused it, and
+		 * the call has NEVER once succeeded through the message path on
+		 * x86-64.  It appeared to work only because syscall_task_info
+		 * ignores the caller's count and uses a buffer of its own.
+		 *
+		 * 🔑 A bound like this is a MEASUREMENT of the widest flavor,
+		 * and writing it as a literal is what let it go stale in
+		 * silence.  If a flavor grows past twelve, the same thing
+		 * happens again and nothing says so.
+		 */
 type task_flavor_t		= int;
-type task_info_t		= array[*:8] of integer_t;
+type task_info_t		= array[*:12] of integer_t;
 
 type memory_object_t = mach_port_t ctype: mach_port_t
 #if	KERNEL_SERVER

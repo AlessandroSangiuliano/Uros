@@ -315,12 +315,6 @@ parseArgs(int argc, char *argv[])
 		else
 		    fatal("unknown flag: '%s'", argv[0]);
 		break;
-	      case 'x':
-		ShortCircuit = TRUE;
-		break;
-	      case 'X':
-		ShortCircuit = FALSE;
-		break;
 	      default:
 		fatal("unknown flag: '%s'", argv[0]);
 		/*NOTREACHED*/

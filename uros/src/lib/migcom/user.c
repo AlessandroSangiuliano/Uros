@@ -359,6 +359,11 @@ WriteIncludes(FILE *file)
 	if (!IsKernelUser) {
 	    fprintf(file, "#include <mach/mach_traps.h>\n");
 	    fprintf(file, "#include <mach/mach_interface.h>\n");
+	    /* #543: prototypes for the traps the stubs try first.  Emitted
+	       only when there are any, so a build without -traplist produces
+	       exactly the file it produced before. */
+	    if (TrapListActive())
+		fprintf(file, "#include <mach/mach_syscalls.h>\n");
 	}
     } else {
 	fprintf(file, "#include <string.h>\n");
@@ -369,8 +374,6 @@ WriteIncludes(FILE *file)
 	fprintf(file, "#include <mach/mach_types.h>\n");
 	fprintf(file, "#include <mach/message.h>\n");
 	fprintf(file, "#include <mach/mig_errors.h>\n");
-	if (ShortCircuit && Target->mt_rpc_trap)
-		fprintf(file, "#include <mach/rpc.h>\n");
 	if (IsKernelUser) {
 	    fprintf(file, "#include <ipc/ipc_port.h>\n");
 	    fprintf(file, "#include <kern/ipc_mig.h>\n");
@@ -2501,144 +2504,6 @@ WriteShortCircOutArgAfter(FILE *file, register argument_t *arg)
 }
 
 
-static void
-WriteShortCircRPC(FILE *file, register routine_t *rt)
-{
-    register argument_t *arg;
-    register int server_argc, i;
-    boolean_t ShortCircOkay = TRUE;
-    boolean_t first_OOL_arg = TRUE;
-
-    fprintf(file, "    if (0 /* Should be: !(%s & 0x3) XXX */) {\n",
-						rt->rtRequestPort->argVarName);
-
-    if (rt->rtOneWay) {
-	/* Do not short-circuit simple routines: */
-	ShortCircOkay = FALSE;
-    } else {
-	/* Scan for any types we can't yet handle.  If found, give up on short-
-	 * circuiting and fall back to mach_msg:
-	 */
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)  {
-	    if (arg->argFlags & flMaybeDealloc) {
-		ShortCircOkay = FALSE;
-		break;
-	    }
-	    /* Can't yet handle ports: */
-	    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD) &&
-		    (arg->argKPD_Type == MACH_MSG_PORT_DESCRIPTOR ||
-		     arg->argKPD_Type == MACH_MSG_OOL_PORTS_DESCRIPTOR)) {
-		ShortCircOkay = FALSE;
-		break;
-	    }
-	}
-    }
-
-    if (ShortCircOkay) {
-
-	fprintf(file,
-	  "      rpc_subsystem_t subsystem = ((rpc_port_t)%s)->rp_subsystem;\n",
-					rt->rtRequestPort->argVarName);
-	fprintf(file, "\n");
-	fprintf(file, "      if (subsystem && subsystem->start == %d) {\n",
-		       SubsystemBase);
-	fprintf(file, "\tkern_return_t rtn;\n");
-	fprintf(file, "\n");
-
-	/* Declare temp vars for out-of-line array args, and for all array
-	 * args, if -maxonstack has forced us to allocate in-line arrays
-	 * off the stack:
-	 */
-	rt->rtTempBytesOnStack = 0;
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)  {
-	    arg->argTempOnStack = FALSE;
-	    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD) &&
-			    arg->argKPD_Type == MACH_MSG_OOL_DESCRIPTOR) {
-		if (first_OOL_arg) {
-			/* Need a garbage temporary to hold the datacount
-			 * returned by vm_read, which we always ignore:
-			 */
-			fprintf(file,
-			    "\tmach_msg_type_number_t _MIG_Ignore_Count_;\n");
-			first_OOL_arg = FALSE;
-		}
-	    } else if (!rt->rtMessOnStack &&
-		    arg->argType->itNumber > 1 && !arg->argType->itStruct) {
-	    } else
-		continue;
-	    fprintf(file, "\tchar *_%sTemp_;\n", arg->argVarName);
-	    rt->rtTempBytesOnStack += sizeof(char *);
-	}
-
-	/* Process the IN arguments, in order: */
-
-	fprintf(file, "\t/* Pre-Process the IN arguments: */\n");
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext) {
-	    if (argIsIn(arg))
-		WriteShortCircInArgBefore(file, arg);
-	    if (argIsOut(arg))
-		WriteShortCircOutArgBefore(file, arg);
-	}
-	fprintf(file, "\n");
-
-	/* Count the number of server args: */
-	server_argc = 0;
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)
-	    if (akCheck(arg->argKind, akbServerArg))
-		    server_argc++;
-
-	/* Call RPC_SIMPLE to switch to server stack and function: */
-	i = 0;
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)  {
-	    if (akIdent(arg->argKind) == akeRequestPort) {
-		    fprintf(file, "\trtn = RPC_SIMPLE(%s, %d, %d, (",
-			    arg->argVarName, rt->rtNumber + SubsystemBase,
-			    server_argc);
-		    fprintf(file, "%s", arg->argVarName);
-	    } else if (akCheck(arg->argKind, akbServerArg)) {
-		    if (i++ % 6 == 0)
-			fprintf(file, ",\n\t\t");
-		    else
-			fprintf(file, ", ");
-		    fprintf(file, "%s", arg->argVarName);
-	    }
-	}
-	fprintf(file, "));\n");
-	fprintf(file, "\n");
-
-	/* Process the IN and OUT arguments, in order: */
-	fprintf(file, "\t/* Post-Process the IN and OUT arguments: */\n");
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)  {
-	    if (argIsIn(arg))
-		WriteShortCircInArgAfter(file, arg);
-	    if (argIsOut(arg))
-		WriteShortCircOutArgAfter(file, arg);
-	}
-	fprintf(file, "\n");
-
-	fprintf(file, "\treturn rtn;\n");
-	fprintf(file, "      }\n");
-    }
-
-    /* In latest design, the following is not necessary, because in
-     * kernel-loaded tasks, the Mach port name is the same as the handle
-     * used by the RPC mechanism, namely a pointer to the ipc_port, and
-     * in user-mode tasks, the Mach port name gets renamed to be a pointer
-     * to the user-mode rpc_port_t struct.
-     */
-#if	0
-	if (IsKernelUser)
-	    fprintf(file, "      %s = (ipc_port_t)%s->rp_receiver_name;\n",
-					    rt->rtRequestPort->argVarName,
-					    rt->rtRequestPort->argVarName);
-	else
-	    fprintf(file, "      %s = ((rpc_port_t)%s)->rp_receiver_name;\n",
-					    rt->rtRequestPort->argVarName,
-					    rt->rtRequestPort->argVarName);
-#endif
-
-    fprintf(file, "    }\n");
-}
 
 static void
 WriteStubDecl(FILE *file, register routine_t *rt)
@@ -2734,6 +2599,71 @@ InitKPD_Disciplines(argument_t *args)
  *  Writes all the code comprising a routine body. Called by
  *  WriteUser for each routine.
  *************************************************************/
+/*
+ * ── Try the kernel trap before building a message (#543) ─────────────────
+ *
+ * 🔑 THIS IS WHERE THE FAST PATH GOES, and putting it here is the whole point.
+ * The trap wrappers have existed in libmach since the port -- 118 of them, with
+ * the kernel implementing every one -- and nothing called them, because the
+ * ms_*.c layer that was supposed to was never compiled.  Emitting the attempt
+ * inside the stub MIG already generates means no caller changes, no symbol is
+ * renamed, nothing depends on link order, and a routine that gains a trap
+ * tomorrow gains the fast path with it.
+ *
+ * 🔑 MACH_SEND_INTERRUPTED IS NOT AN ERROR HERE.  Every one of these traps
+ * resolves its port arguments against the caller's space and answers that code
+ * when the name does not name one of this kernel's own objects -- interposed,
+ * proxied, or belonging to another kernel.  It means "not mine", and the only
+ * correct response is to carry on and send the message, which is what keeps a
+ * trap from narrowing what Mach can do.  Any other return, success or failure,
+ * is the answer.
+ *
+ * ⚠️ Emitted only when the trap's arity matches the stub's.  The compiler
+ * checks the types, because <mach/mach_syscalls.h> declares every trap, but it
+ * can only check a call that was emitted -- and a call with the wrong number of
+ * arguments against a prototype MIG never saw is how a frame gets read past its
+ * end.  Both checks, or neither is worth having.
+ */
+static void
+WriteTrapFastPath(FILE *file, register routine_t *rt)
+{
+    register argument_t *arg;
+    char	trap[512];
+    int		argc = 0;
+
+    if (!TrapListActive())
+	return;
+
+    /*
+     * A one-way routine has no reply and so no return value to compare, and
+     * nothing to fall back to in a meaningful sense.
+     */
+    if (rt->rtOneWay)
+	return;
+    if (!streql(ReturnTypeStr(rt), "kern_return_t"))
+	return;
+
+    for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)
+	if (akCheck(arg->argKind, akbUserArg))
+	    argc++;
+
+    if (snprintf(trap, sizeof(trap), "syscall_%s", rt->rtName)
+	    >= (int) sizeof(trap))
+	return;
+    if (!TrapListHas(trap, argc))
+	return;
+
+    fprintf(file, "    {\n");
+    fprintf(file, "\t/* #543: the trap first, the message only if it says "
+		  "the port is not this kernel's. */\n");
+    fprintf(file, "\tkern_return_t __mig_trap_kr = %s(", trap);
+    WriteList(file, rt->rtArgs, WriteNameDecl, akbUserArg, ", ", "");
+    fprintf(file, ");\n");
+    fprintf(file, "\tif (__mig_trap_kr != MACH_SEND_INTERRUPTED)\n");
+    fprintf(file, "\t\treturn __mig_trap_kr;\n");
+    fprintf(file, "    }\n\n");
+}
+
 static void
 WriteRoutine(FILE *file, register routine_t *rt)
 {
@@ -2749,9 +2679,8 @@ WriteRoutine(FILE *file, register routine_t *rt)
     if (UseRPCTrap)
 	WriteRPCRoutine(file, rt);
 
-    /* write the code for doing a short-circuited RPC: */
-    if (ShortCircuit && Target->mt_rpc_trap)
-	WriteShortCircRPC(file, rt);
+    /* #543: try the kernel trap before paying for a message */
+    WriteTrapFastPath(file, rt);
 
     fprintf(file, "    {\n");
 
