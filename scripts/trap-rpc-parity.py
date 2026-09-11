@@ -70,7 +70,12 @@ PORTISH = re.compile(r'\b(mach_port_t|ipc_port_t|task_port_t|thread_port_t|'
 def trap_names(root: Path):
     text = (root / TRAP_TABLE).read_text(errors='replace')
     names = []
-    for m in re.finditer(r'MACH_TRAP\(\s*([A-Za-z_]\w*)', text):
+    # ⚠️ MACH_TRAP_STACK TOO, and missing it was not cosmetic: clock_sleep_trap
+    # is one of the seven, and it is the one entry in the table that
+    # dereferences a converted port without checking it first.  A matcher that
+    # cannot see a form proves nothing about that form, and the seven it could
+    # not see included mach_msg_overwrite_trap and urmach_msg.
+    for m in re.finditer(r'MACH_TRAP(?:_STACK)?\(\s*([A-Za-z_]\w*)', text):
         n = m.group(1)
         if n not in PLACEHOLDERS and n not in names:
             names.append(n)

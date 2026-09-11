@@ -238,8 +238,22 @@ syscall_clock_get_time(
 
 	/*
 	 * Convert the trap parameters.
+	 *
+	 * 🔑 CLOCK_NULL IS NOT AN ERROR HERE, IT IS "NOT MINE" (#543).  The name
+	 * did not resolve to a clock object of this kernel -- it may be a port
+	 * this kernel does not own at all, interposed or proxied, and the
+	 * message path handles that case perfectly well.  Answering
+	 * KERN_INVALID_ARGUMENT would turn something Mach supports into a
+	 * failure; MACH_SEND_INTERRUPTED is what tells libmach's wrapper to send
+	 * the message instead, which is the whole reason a trap is allowed to be
+	 * a shortcut.
+	 *
+	 * ⚠️ clock_get_time() refuses CLOCK_NULL, so nothing unsafe was reachable
+	 * before this check existed.  That is not why it is here.
 	 */
 	clock = port_name_to_clock(clock_name);
+	if (clock == CLOCK_NULL)
+		return MACH_SEND_INTERRUPTED;
 
 	/*
 	 * Call the actual clock_get_time routine.
@@ -463,8 +477,26 @@ clock_sleep_trap(
 
 	/*
 	 * Convert the trap parameters.
+	 *
+	 * 🔴 THIS WAS SAFE BY AN INVARIANT NOBODY WROTE DOWN (#543).  The result
+	 * went unchecked into clock_sleep(), and further down this function
+	 * `clock->cl_ops->c_gettime' is dereferenced -- reached only when the
+	 * return value is neither KERN_INVALID_ARGUMENT nor KERN_FAILURE.  It
+	 * held because clock_sleep() refuses CLOCK_NULL with exactly the first of
+	 * those, so a null never got that far.  Two functions had to keep
+	 * agreeing, in two places, for a null dereference in the kernel to stay
+	 * out of reach of any task that can call trap 62.
+	 *
+	 * ⚠️ And unlike clock_get_time, this one answers KERN_INVALID_ARGUMENT
+	 * rather than MACH_SEND_INTERRUPTED, because clock_sleep has NO RPC twin
+	 * -- clock.defs declares only clock_get_time.  Telling a caller to fall
+	 * back to a message path that does not exist would be the mirror-image
+	 * mistake of the one above.
 	 */
 	clock = port_name_to_clock(clock_name);
+	if (clock == CLOCK_NULL)
+		return KERN_INVALID_ARGUMENT;
+
 	swtime.tv_sec  = sleep_sec;
 	swtime.tv_nsec = sleep_nsec;
 
