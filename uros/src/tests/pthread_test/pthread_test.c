@@ -2084,8 +2084,34 @@ test_trap_sweep(void)
 	SWEEP("device_write", 500, ({ mach_msg_type_number_t n;
 		device_write(MACH_PORT_NULL, 0, 0, (io_buf_ptr_t)mem, 512,
 			     &n); }));
-	SWEEP("kernel_task_create", 500, ({ mach_port_t k;
+	/*
+	 * ⚠️ ONCE, NOT 500 TIMES, and two calls rather than one.
+	 *
+	 * With a non-zero map_size this costs 9.93M cycles and answers
+	 * KERN_INVALID_ADDRESS; with map_size 0 it costs 33.7k and succeeds.
+	 * The difference is one branch: a non-zero size goes through
+	 * kmem_suballoc with anywhere=FALSE at the caller's address, and the
+	 * address this sweep passes is 0, which nothing in the system passes.
+	 *
+	 * 🔴 THE 9.93M IS NOT WHAT kmem_suballoc COSTS.  Measured inside the
+	 * kernel, the four calls a boot really makes -- all anywhere=TRUE --
+	 * total 15660 cycles, about 11 microseconds, and the largest of them
+	 * carves out 480 MB for 10500.  A "4096-byte" call costing a thousand
+	 * times a 480 MB one was the sign that the two were not the same
+	 * operation, and it was read as a defect first.
+	 *
+	 * 🔑 Both calls stay because the ASYMMETRY is the finding and it is not
+	 * explained: why the branch that succeeds with size 0 fails with size
+	 * 4096.  It is dead API -- the code beside it clones a symbol table for
+	 * OSF's in-kernel servers -- so it is recorded rather than chased.
+	 *
+	 * And once, not 500 times: each call builds a whole task, and a test
+	 * that runs on every boot has no business doing that in a loop.
+	 */
+	SWEEP("kernel_task_create", 1, ({ mach_port_t k;
 		kernel_task_create(me, 0, 4096, &k); }));
+	SWEEP("kernel_task_create(size0)", 1, ({ mach_port_t k;
+		kernel_task_create(me, 0, 0, &k); }));
 	SWEEP("thread_depress_abort", 2000,
 	      thread_depress_abort(mach_thread_self()));
 
