@@ -37,6 +37,8 @@
 #include <mach/policy.h>		/* POLICY_TIMESHARE_INFO (#153) */
 #include <mach/thread_info.h>		/* THREAD_SCHED_TIMESHARE_INFO (#153) */
 #include <mach.h>			/* thread_info() user stub (#153) */
+#include <mach/mach_host.h>		/* vm_wire, vm_remap, thread_* (#548) */
+#include <device/device.h>		/* device_read/write (#548) */
 #include <mach/clock.h>			/* host_get_clock_service, REALTIME_CLOCK */
 #include <signal.h>
 #include <mach/port.h>
@@ -1947,6 +1949,329 @@ test_trap_vs_rpc_bench(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 32: every accelerated routine, through whichever path this build has
+ *
+ * 🔑 THE CALLS DO NOT HAVE TO SUCCEED.  THEY HAVE TO AGREE.  #543 gave 44
+ * routines a trap fast path, measured five of them, and found that one of the
+ * five -- task_info(TASK_BASIC_INFO) -- had never once worked through the
+ * message path on x86-64.  One in five.  The other thirty-nine had never been
+ * looked at, because until #543 the trap layer was compiled and uncalled.
+ *
+ * So this prints a kern_return_t for each, and the same binary is run in a
+ * build with the fast paths and in one built with MIG_TRAP_SKIP=syscall_.
+ * A routine that answers differently on the two paths is the task_info defect,
+ * and that is the one shape already known to be real.  host_statistics refused
+ * for want of the privileged port and device_read refused for want of a device
+ * are both fine -- as long as each refuses the same way twice.
+ *
+ * ⚠️ Its limit, said rather than implied: agreeing on a return code is not
+ * agreeing on everything.  Both paths could answer KERN_SUCCESS and do
+ * different things.  This catches the class that has already bitten.
+ *
+ * ⚠️ And it lives in pthread_test for the timing machinery and because this
+ * program runs on every boot -- not because it is about threads.  A test task
+ * of its own would need a bootstrap.conf entry and a manifest, which is work
+ * that belongs to the sweep and not to its first version.
+ * ---------------------------------------------------------------- */
+
+/*
+ * 🔴 THE COUNT EXISTS BECAUSE TWO LINES WENT MISSING.  The first run of this
+ * sweep printed 44 lines where the source has 46: vm_map and task_create
+ * produced nothing at all -- no fragment, no garbled remains, which rules out
+ * the interleaving of #544 and points at #510, printf dropping output on a
+ * device error and reporting the length as though it had not.
+ *
+ * 🔑 This sweep's whole deliverable is a LIST TO DIFF, so a line that vanishes
+ * at random is worse than a wrong line: the diff shows a difference that is not
+ * there, and whoever reads it goes looking for a defect in the kernel.  The
+ * counter makes the loss detectable -- compare the tally at the end against the
+ * number of lines received, and a mismatch says "this run lost output" instead
+ * of "these two routines differ".
+ */
+static int sweep_count;
+
+static void
+sweep_report(const char *name, int n, unsigned long long cycles,
+	     kern_return_t kr)
+{
+	sweep_count++;
+	printf("  sweep %-30s kr=%-6d %u cycles\n", name, (int)kr,
+	       (unsigned)(cycles / (unsigned)n));
+}
+
+#define SWEEP(nm, n, expr)	do {					\
+	unsigned long long s_ = tsc_now();				\
+	kern_return_t k_ = KERN_SUCCESS;				\
+	int i_;								\
+	for (i_ = 0; i_ < (n); i_++)					\
+		k_ = (expr);						\
+	sweep_report(nm, (n), tsc_now() - s_, k_);			\
+} while (0)
+
+static void
+test_trap_sweep(void)
+{
+	mach_port_t		me = mach_task_self();
+	mach_port_t		host = mach_host_self();
+	mach_port_t		port = MACH_PORT_NULL;
+	mach_port_t		pset = MACH_PORT_NULL;
+	mach_port_t		child = MACH_PORT_NULL;
+	mach_port_t		cthread = MACH_PORT_NULL;
+	mach_port_t		clk = MACH_PORT_NULL;
+	vm_offset_t		mem = 0;
+	kern_return_t		kr;
+
+	printf("  sweep: every routine #543 accelerated, one line each\n");
+
+	/* ── objects this sweep owns, so the destructive calls have a safe
+	   subject ── */
+	(void) mach_port_allocate(me, MACH_PORT_RIGHT_RECEIVE, &port);
+	(void) mach_port_allocate(me, MACH_PORT_RIGHT_PORT_SET, &pset);
+	(void) vm_allocate(me, &mem, 4096, TRUE);
+	kr = task_create(me, NULL, 0, FALSE, &child);
+	if (kr == KERN_SUCCESS) {
+		mach_note_thread_created();	/* #542 */
+		(void) thread_create(child, &cthread);
+	}
+	(void) host_get_clock_service(host, REALTIME_CLOCK, &clk);
+
+	/* ── the ones that are safe to repeat ── */
+	SWEEP("clock_get_time", 2000, ({ tvalspec_t tv;
+		clock_get_time(clk, &tv); }));
+	SWEEP("task_info", 2000, ({ struct task_basic_info bi;
+		mach_msg_type_number_t c = TASK_BASIC_INFO_COUNT;
+		task_info(me, TASK_BASIC_INFO, (task_info_t)&bi, &c); }));
+	SWEEP("thread_info", 2000, ({ struct thread_basic_info ti;
+		mach_msg_type_number_t c = THREAD_BASIC_INFO_COUNT;
+		thread_info(mach_thread_self(), THREAD_BASIC_INFO,
+			    (thread_info_t)&ti, &c); }));
+	SWEEP("vm_region", 2000, ({ vm_address_t a = mem; vm_size_t sz;
+		vm_region_basic_info_data_t bi;
+		mach_msg_type_number_t c = VM_REGION_BASIC_INFO_COUNT;
+		mach_port_t obj = MACH_PORT_NULL;
+		vm_region(me, &a, &sz, VM_REGION_BASIC_INFO,
+			  (vm_region_info_t)&bi, &c, &obj); }));
+	SWEEP("vm_protect", 2000,
+	      vm_protect(me, mem, 4096, FALSE,
+			 (i_ & 1) ? VM_PROT_READ
+				  : (VM_PROT_READ | VM_PROT_WRITE)));
+	/*
+	 * ⚠️ THE PROTECT SWEEP ABOVE LEFT THE PAGE READ-ONLY.  It alternates on
+	 * i_, the count is even, so the last iteration sets VM_PROT_READ -- and
+	 * vm_write further down then failed, differently on the two paths, and
+	 * was very nearly reported as a disagreement between them.  An artefact
+	 * of the test has to be removed before anything it produces is called a
+	 * finding.
+	 */
+	(void) vm_protect(me, mem, 4096, FALSE,
+			  VM_PROT_READ | VM_PROT_WRITE);
+
+	SWEEP("vm_msync", 2000, vm_msync(me, mem, 4096, VM_SYNC_ASYNCHRONOUS));
+	SWEEP("vm_behavior_set", 2000,
+	      vm_behavior_set(me, mem, 4096, VM_BEHAVIOR_DEFAULT));
+	SWEEP("vm_machine_attribute", 2000, ({ vm_machine_attribute_val_t v =
+		MATTR_VAL_GET;
+		vm_machine_attribute(me, mem, 4096, MATTR_CACHE, &v); }));
+	SWEEP("vm_write", 2000, vm_write(me, mem, (vm_offset_t)&kr,
+					 sizeof(kr)));
+	SWEEP("host_statistics", 500, ({ host_basic_info_data_t hi;
+		mach_msg_type_number_t c = HOST_BASIC_INFO_COUNT;
+		host_statistics(host, HOST_BASIC_INFO, (host_info_t)&hi, &c); }));
+	SWEEP("vm_wire", 500,
+	      vm_wire(host, me, mem, 4096, VM_PROT_READ | VM_PROT_WRITE));
+	SWEEP("device_read", 500, ({ io_buf_ptr_t d; mach_msg_type_number_t n;
+		device_read(MACH_PORT_NULL, 0, 0, 512, &d, &n); }));
+	SWEEP("device_write", 500, ({ mach_msg_type_number_t n;
+		device_write(MACH_PORT_NULL, 0, 0, (io_buf_ptr_t)mem, 512,
+			     &n); }));
+	/*
+	 * ⚠️ ONCE, NOT 500 TIMES, and two calls rather than one.
+	 *
+	 * With a non-zero map_size this costs 9.93M cycles and answers
+	 * KERN_INVALID_ADDRESS; with map_size 0 it costs 33.7k and succeeds.
+	 * The difference is one branch: a non-zero size goes through
+	 * kmem_suballoc with anywhere=FALSE at the caller's address, and the
+	 * address this sweep passes is 0, which nothing in the system passes.
+	 *
+	 * 🔴 THE 9.93M IS NOT WHAT kmem_suballoc COSTS.  Measured inside the
+	 * kernel, the four calls a boot really makes -- all anywhere=TRUE --
+	 * total 15660 cycles, about 11 microseconds, and the largest of them
+	 * carves out 480 MB for 10500.  A "4096-byte" call costing a thousand
+	 * times a 480 MB one was the sign that the two were not the same
+	 * operation, and it was read as a defect first.
+	 *
+	 * 🔑 Both calls stay because the ASYMMETRY is the finding and it is not
+	 * explained: why the branch that succeeds with size 0 fails with size
+	 * 4096.  It is dead API -- the code beside it clones a symbol table for
+	 * OSF's in-kernel servers -- so it is recorded rather than chased.
+	 *
+	 * And once, not 500 times: each call builds a whole task, and a test
+	 * that runs on every boot has no business doing that in a loop.
+	 */
+	SWEEP("kernel_task_create", 1, ({ mach_port_t k;
+		kernel_task_create(me, 0, 4096, &k); }));
+	SWEEP("kernel_task_create(size0)", 1, ({ mach_port_t k;
+		kernel_task_create(me, 0, 0, &k); }));
+	SWEEP("thread_depress_abort", 2000,
+	      thread_depress_abort(mach_thread_self()));
+
+	/* ── port operations, each on something this sweep made ── */
+	SWEEP("mach_port_allocate", 2000, ({ mach_port_t q;
+		kern_return_t r = mach_port_allocate(me,
+				MACH_PORT_RIGHT_RECEIVE, &q);
+		if (r == KERN_SUCCESS) (void)mach_port_destroy(me, q); r; }));
+	SWEEP("mach_port_destroy", 2000, ({ mach_port_t q;
+		kern_return_t r = mach_port_allocate(me,
+				MACH_PORT_RIGHT_RECEIVE, &q);
+		if (r == KERN_SUCCESS) r = mach_port_destroy(me, q); r; }));
+	SWEEP("mach_port_allocate_name", 2000, ({ mach_port_t nm = 0x4000u;
+		kern_return_t r = mach_port_allocate_name(me,
+				MACH_PORT_RIGHT_RECEIVE, nm);
+		if (r == KERN_SUCCESS) (void)mach_port_destroy(me, nm); r; }));
+	SWEEP("mach_port_allocate_qos", 2000, ({ mach_port_qos_t q;
+		mach_port_t nm;
+		memset(&q, 0, sizeof(q));
+		kern_return_t r = mach_port_allocate_qos(me,
+				MACH_PORT_RIGHT_RECEIVE, &q, &nm);
+		if (r == KERN_SUCCESS) (void)mach_port_destroy(me, nm); r; }));
+	SWEEP("mach_port_allocate_full", 500, ({ mach_port_qos_t q;
+		mach_port_t nm = MACH_PORT_NULL;
+		memset(&q, 0, sizeof(q));
+		kern_return_t r = mach_port_allocate_full(me,
+				MACH_PORT_RIGHT_RECEIVE, MACH_PORT_NULL,
+				&q, &nm);
+		if (r == KERN_SUCCESS) (void)mach_port_destroy(me, nm); r; }));
+	SWEEP("mach_port_allocate_subsystem", 500, ({ mach_port_t nm;
+		kern_return_t r = mach_port_allocate_subsystem(me,
+				MACH_PORT_NULL, &nm);
+		if (r == KERN_SUCCESS) (void)mach_port_destroy(me, nm); r; }));
+	/*
+	 * ⚠️ ONE NAME, REUSED, INSTEAD OF A RANGE PICKED OUT OF THE AIR.  The
+	 * first version numbered names 0x5000 upwards and reported kr=13
+	 * (name exists) -- and worse, two DIFFERENT codes across runs of the
+	 * same build, which read as an unstable routine when it was an unstable
+	 * test.  A sweep whose own arguments are not deterministic cannot tell
+	 * anyone anything about the thing it is sweeping.
+	 */
+	SWEEP("mach_port_insert_right", 2000, ({ mach_port_t nm = 0x5000u;
+		kern_return_t r = mach_port_insert_right(me, nm, port,
+				MACH_MSG_TYPE_MAKE_SEND);
+		if (r == KERN_SUCCESS)
+			(void)mach_port_deallocate(me, nm); r; }));
+	SWEEP("mach_port_deallocate", 2000, ({ mach_port_t nm = 0x5000u;
+		kern_return_t r = mach_port_insert_right(me, nm, port,
+				MACH_MSG_TYPE_MAKE_SEND);
+		if (r == KERN_SUCCESS) r = mach_port_deallocate(me, nm); r; }));
+	SWEEP("mach_port_mod_refs", 2000,
+	      mach_port_mod_refs(me, port, MACH_PORT_RIGHT_RECEIVE, 0));
+	SWEEP("mach_port_move_member", 2000,
+	      mach_port_move_member(me, port, (i_ & 1) ? pset
+						       : MACH_PORT_NULL));
+	SWEEP("mach_port_rename", 2000, ({ mach_port_t a = 0x7000u, b = 0x7001u;
+		kern_return_t r = mach_port_allocate_name(me,
+				MACH_PORT_RIGHT_RECEIVE, a);
+		if (r == KERN_SUCCESS) {
+			r = mach_port_rename(me, a, b);
+			(void)mach_port_destroy(me,
+					r == KERN_SUCCESS ? b : a);
+		} r; }));
+	SWEEP("mach_port_request_notification", 2000, ({ mach_port_t prev;
+		mach_port_request_notification(me, port,
+			MACH_NOTIFY_NO_SENDERS, 0, port,
+			MACH_MSG_TYPE_MAKE_SEND_ONCE, &prev); }));
+
+	/* ── vm pairs ── */
+	SWEEP("vm_allocate", 2000, ({ vm_offset_t a = 0;
+		kern_return_t r = vm_allocate(me, &a, 4096, TRUE);
+		if (r == KERN_SUCCESS) (void)vm_deallocate(me, a, 4096); r; }));
+	SWEEP("vm_deallocate", 2000, ({ vm_offset_t a = 0;
+		kern_return_t r = vm_allocate(me, &a, 4096, TRUE);
+		if (r == KERN_SUCCESS) r = vm_deallocate(me, a, 4096); r; }));
+	SWEEP("vm_map", 2000, ({ vm_offset_t a = 0;
+		kern_return_t r = vm_map(me, &a, 4096, 0, TRUE,
+				MEMORY_OBJECT_NULL, 0, FALSE,
+				VM_PROT_READ | VM_PROT_WRITE, VM_PROT_ALL,
+				VM_INHERIT_DEFAULT);
+		if (r == KERN_SUCCESS) (void)vm_deallocate(me, a, 4096); r; }));
+	SWEEP("vm_remap", 500, ({ vm_offset_t a = 0;
+		vm_prot_t cur, max;
+		kern_return_t r = vm_remap(me, &a, 4096, 0, TRUE, me, mem,
+				FALSE, &cur, &max, VM_INHERIT_DEFAULT);
+		if (r == KERN_SUCCESS) (void)vm_deallocate(me, a, 4096); r; }));
+
+	/* ── task and thread, on the child so nothing here kills the test ── */
+	SWEEP("task_create", 200, ({ mach_port_t c2;
+		kern_return_t r = task_create(me, NULL, 0, FALSE, &c2);
+		if (r == KERN_SUCCESS) (void)task_terminate(c2); r; }));
+	SWEEP("task_terminate", 200, ({ mach_port_t c2;
+		kern_return_t r = task_create(me, NULL, 0, FALSE, &c2);
+		if (r == KERN_SUCCESS) r = task_terminate(c2); r; }));
+	SWEEP("task_suspend", 500, task_suspend(child));
+	SWEEP("task_info(child)", 500, ({ struct task_basic_info bi;
+		mach_msg_type_number_t c = TASK_BASIC_INFO_COUNT;
+		task_info(child, TASK_BASIC_INFO, (task_info_t)&bi, &c); }));
+	SWEEP("task_set_special_port", 500,
+	      task_set_special_port(child, TASK_BOOTSTRAP_PORT,
+				    MACH_PORT_NULL));
+	SWEEP("task_set_exception_ports", 500,
+	      task_set_exception_ports(child, EXC_MASK_BAD_ACCESS,
+				       MACH_PORT_NULL, EXCEPTION_DEFAULT, 0));
+	SWEEP("task_set_port_space", 500, task_set_port_space(child, 64));
+	SWEEP("thread_create", 200, ({ mach_port_t th;
+		mach_note_thread_created();
+		kern_return_t r = thread_create(child, &th);
+		if (r == KERN_SUCCESS) (void)thread_terminate(th); r; }));
+	SWEEP("thread_terminate", 200, ({ mach_port_t th;
+		mach_note_thread_created();
+		kern_return_t r = thread_create(child, &th);
+		if (r == KERN_SUCCESS) r = thread_terminate(th); r; }));
+	SWEEP("thread_create_running", 200, ({ mach_port_t th;
+		natural_t st[4] = { 0, 0, 0, 0 };
+		mach_note_thread_created();
+		/* A deliberately invalid flavor: the answer must be the same
+		   refusal on both paths, and no thread starts running with a
+		   state this test has no business inventing. */
+		thread_create_running(child, 0x7fffffff, st, 4, &th); }));
+	SWEEP("thread_suspend", 500, thread_suspend(cthread));
+	SWEEP("thread_abort_safely", 500, thread_abort_safely(cthread));
+	SWEEP("thread_info(child)", 500, ({ struct thread_basic_info ti;
+		mach_msg_type_number_t c = THREAD_BASIC_INFO_COUNT;
+		thread_info(cthread, THREAD_BASIC_INFO,
+			    (thread_info_t)&ti, &c); }));
+	SWEEP("thread_set_exception_ports", 500,
+	      thread_set_exception_ports(cthread, EXC_MASK_BAD_ACCESS,
+					 MACH_PORT_NULL, EXCEPTION_DEFAULT, 0));
+	SWEEP("thread_set_state", 500, ({ natural_t st[4] = { 0, 0, 0, 0 };
+		thread_set_state(cthread, 0x7fffffff, st, 4); }));
+
+	/* ── tear down what the sweep made ── */
+	if (cthread != MACH_PORT_NULL) {
+		(void) thread_terminate(cthread);
+		(void) mach_port_deallocate(me, cthread);
+	}
+	if (child != MACH_PORT_NULL) {
+		(void) task_terminate(child);
+		(void) mach_port_deallocate(me, child);
+	}
+	if (mem != 0)
+		(void) vm_deallocate(me, mem, 4096);
+	if (pset != MACH_PORT_NULL)
+		(void) mach_port_destroy(me, pset);
+	if (port != MACH_PORT_NULL)
+		(void) mach_port_destroy(me, port);
+
+	/*
+	 * ⚠️ Printed LAST and read FIRST.  If the number of `sweep' lines a
+	 * reader has does not equal this, the run lost console output and the
+	 * lines it does have cannot be diffed against another run.
+	 */
+	printf("  sweep: %d routines swept — a reader with fewer than %d "
+	       "'sweep' lines has lost output, not found a difference\n",
+	       sweep_count, sweep_count);
+	test_ok("trap sweep: every accelerated routine called, kr reported");
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -2002,6 +2327,7 @@ main(int argc, char **argv)
 	test_malloc_under_threads();
 	test_malloc_bench();
 	test_trap_vs_rpc_bench();
+	test_trap_sweep();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);

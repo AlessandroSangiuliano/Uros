@@ -460,7 +460,15 @@ type policy_t			= int;
 		 * policy_fifo_info_t (4 ints)
 		 * policy_rr_info_t (5 ints) */
 type policy_base_t		= array[*:5] of integer_t;
-type policy_info_t		= array[*:2] of integer_t;
+/*
+ * 🔴 WAS 2, AND POLICY_TIMESHARE_INFO NEEDS 5 (#548).  Same class as
+ * vm_region_info_t above and task_info_t: a bound that is really a measurement
+ * of the widest flavor, written as a literal, and stale ever since the word
+ * size changed.  Found by the census in scripts/mig-array-bounds-check.py, not
+ * by anything failing -- nothing in Uros calls it yet, which is the only
+ * reason it has not bitten.
+ */
+type policy_info_t		= array[*:5] of integer_t;
 type policy_limit_t		= array[*:1] of integer_t;
 
 type ledger_port_t = mach_port_t ctype: mach_port_t
@@ -506,12 +514,25 @@ type security_token_t		= struct[2] of MACH_MSG_TYPE_INTEGER_32
 type memory_object_flavor_t	= int;
 type memory_object_info_t	= array[*:6] of int;
 
-		/* vm_region_info_t: variable-size inline array that can hold:
-		 * vm_region_basic_info_t (8 ints)
-		 * If other flavors are added, this definition may
-		 * need to be changed. (see mach/vm_region.h) */
+		/*
+		 * vm_region_info_t: must hold the widest flavor, counted in
+		 * int.  Measured on x86-64:
+		 *   vm_region_basic_info_t   10   (was 8 at 32-bit widths)
+		 *
+		 * 🔴 IT SAID 8, AND THE OLD NOTE SAID TO REVISIT IT "IF OTHER
+		 * FLAVORS ARE ADDED".  No flavor was added; vm_offset_t became
+		 * eight bytes, the struct went from 28 to 40, and the bound did
+		 * not move.  The generated stub caps the count at the bound, so
+		 * vm_region has been answering KERN_INVALID_ARGUMENT through the
+		 * message path on this target ever since -- found by #548's
+		 * sweep, which called it through the trap and through the
+		 * message and got 0 from one and 4 from the other.
+		 *
+		 * 🔑 Checked by scripts/mig-array-bounds-check.py rather than by
+		 * a comment asking to be remembered.
+		 */
 type vm_region_flavor_t		= int;
-type vm_region_info_t		= array[*:8] of int;
+type vm_region_info_t		= array[*:10] of int;
 
 type exception_mask_t		= int;
 type exception_behavior_t	= int;
