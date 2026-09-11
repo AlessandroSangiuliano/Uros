@@ -49,16 +49,23 @@ IMPL = 'uros/src/mach_kernel/kern/ipc_mig.c'
 
 PLACEHOLDERS = {'not_implemented', 'kern_invalid', 'null_port'}
 
-# The conversions that stand in for what the IPC path does before the demux.
+# ── What counts as resolving a port, and why this is not a list of names ──
 #
-# ⚠️ ipc_object_copyin IS ONE OF THEM, and leaving it out made this report
-# accuse syscall_vm_remap of doing no check at all.  It does the check in the
-# most faithful form of the three: ipc_object_copyin(current_space(), ...) is
-# literally what the IPC path runs when it marshals a port into a message.  A
-# census that does not know a valid shape produces false alarms, and false
-# alarms are how a check teaches people to ignore it.
-CONVERT = re.compile(r'\bport_name_to_\w+\s*\(|\bconvert_port_to_\w+\s*\(|'
-                     r'\bipc_object_copyin\s*\(')
+# 🔴 THIS WAS A LIST OF FUNCTION NAMES AND IT WAS WRONG FOUR TIMES.  Each time
+# a trap was reported as checking nothing, and each time the trap was fine and
+# the list was short: ipc_object_copyin (syscall_vm_remap),
+# ipc_port_translate_send (syscall_thread_switch), and the raw
+# `current_act()->task->itk_space' of mach_msg_overwrite_trap, which does not
+# call a conversion helper because it IS the path that converts.
+#
+# 🔑 So what is looked for is the PROPERTY and not the spelling: does this trap
+# reach the CALLER'S SPACE?  A name is only a name until it is resolved against
+# a space, and every honest form of that resolution has to mention one.  A new
+# helper invented tomorrow still will.
+SPACE = re.compile(r'\bcurrent_space\s*\(|\bitk_space\b|'
+                   r'\bport_name_to_\w+\s*\(|\bconvert_port_to_\w+\s*\(|'
+                   r'\bipc_object_copyin\s*\(|\bipc_port_translate\w*\s*\(')
+CONVERT = SPACE
 FALLBACK = re.compile(r'\bMACH_SEND_INTERRUPTED\b')
 # A port-shaped argument: if a trap takes one of these it has something to
 # resolve.  Deliberately generous -- a false "has a port" costs a read, a
@@ -159,8 +166,19 @@ def main(root: Path) -> int:
             notfb.append((n, 'converts, but answers an error instead of '
                              'MACH_SEND_INTERRUPTED', calls_in(body, n)[:3]))
         else:
-            suspect.append((n, 'NO conversion of a port argument',
-                            calls_in(body, n)[:3]))
+            # 🔑 A trap may resolve by DELEGATION: urmach_msg's whole body is a
+            # call to mach_msg_overwrite_trap, which reaches the caller's space
+            # itself.  Reporting it as checking nothing is true of its text and
+            # false of its behaviour, and a report that is true of the text is
+            # not what anybody wants from this.
+            via = [c for c in calls_in(body, n)
+                   if c in impl and SPACE.search(impl[c])]
+            if via:
+                clean.append((n, f'resolves via {via[0]}()',
+                              calls_in(body, n)[:3]))
+            else:
+                suspect.append((n, 'NO conversion of a port argument',
+                                calls_in(body, n)[:3]))
 
     print(f'traps in the table (placeholders removed): {len(names)}')
     print(f'  defined in the kernel: {len(names) - len(absent)}')
