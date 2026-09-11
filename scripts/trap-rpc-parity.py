@@ -135,6 +135,221 @@ def calls_in(body: str, own: str):
     return seen
 
 
+# ── Does the trap convert to the SAME thing the RPC converts to? (#543) ───
+#
+# 🔴 THE CHECK ABOVE MISSED A PRIVILEGE ESCALATION AND THIS ONE EXISTS BECAUSE
+# OF IT.  syscall_vm_wire converted its host argument with port_name_to_host,
+# which accepts IKOT_HOST *or* IKOT_HOST_PRIV, while mach_host.defs declares
+# that argument `host_priv_t' -- and MIG's server side converts host_priv_t with
+# convert_port_to_host_priv, which takes only the privileged port.  So the trap
+# accepted a credential its own RPC refuses, and every task holds the weaker
+# one.  syscall_host_statistics had it too: both routines declaring host_priv_t
+# and having a trap were wrong, two out of two.
+#
+# 🔑 The authority for "what should this convert to" is not a table written
+# here.  It is the `intran:' clause on the type in the .defs -- the same
+# declaration MIG's server side is generated from.  Reading it means this check
+# cannot disagree with the RPC, because it is asking the RPC.
+#
+# ⚠️ The trap spells it port_name_to_FOO where the server side says
+# convert_port_to_FOO.  The two names are the same fact, so either satisfies the
+# requirement; anything else is the finding.
+
+# ⚠️ NOT ONE REGEX OVER THE FILE.  The first version was
+#   type\s+(\w+)\s*=.*?intran:  with re.S
+# and `.*?' happily crossed from one type declaration into the next, pairing
+# `recnum_t' with dev_port_lookup() and `thread_state_flavor_t' with
+# convert_port_to_map().  Every one of those was a false alarm, and a check
+# that cries wolf is a check people learn to skip.  A type declaration ends at
+# its `;', so the text is split there first and each piece asked on its own.
+TYPE_NAME = re.compile(r'\btype\s+(\w+)\s*=')
+INTRAN_IN = re.compile(r'intran:\s*\w+\s+(\w+)\s*\(')
+# routine NAME( arg : type; ... );
+ROUTINE = re.compile(r'^\s*(?:simpleroutine|routine)\s+(\w+)\s*\((.*?)\)\s*;',
+                     re.S | re.M)
+
+
+def defs_files(root: Path):
+    return sorted((root / 'uros/uapi').rglob('*.defs'))
+
+
+def intran_map(root: Path):
+    """MIG type name -> the converter its server side uses."""
+    out = {}
+    for f in defs_files(root):
+        for chunk in f.read_text(errors='replace').split(';'):
+            nm = TYPE_NAME.search(chunk)
+            it = INTRAN_IN.search(chunk)
+            if nm and it:
+                out[nm.group(1)] = it.group(1)
+    return out
+
+
+def routine_port_types(root: Path):
+    """routine name -> list of declared argument type names."""
+    out = {}
+    for f in defs_files(root):
+        for m in ROUTINE.finditer(f.read_text(errors='replace')):
+            args = []
+            for part in m.group(2).split(';'):
+                if ':' not in part:
+                    continue
+                lhs, ty = part.split(':', 1)
+                # ⚠️ `out' AND `inout' ARGUMENTS ARE RESULTS, NOT INPUTS, and
+                # counting them was pure noise: thread_create's second argument
+                # is `out child_act : thread_act_t', so the report accused the
+                # trap of not converting a port it is supposed to PRODUCE.  MIG
+                # translates those with outtran, in the other direction.
+                if re.search(r'\b(out|inout)\b', lhs):
+                    continue
+                ty = re.split(r'[,\s]', ty.strip(), 1)[0]
+                args.append(ty)
+            out.setdefault(m.group(1), args)
+    return out
+
+
+IKOT = re.compile(r'\bIKOT_[A-Z0-9_]+\b')
+HELPER = re.compile(r'\b(port_name_to_\w+|convert_port_to_\w+|\w+_lookup)\s*\(')
+
+
+CALLS = re.compile(r'\b([a-z_]\w*)\s*\(')
+
+
+def kinds_of(fn: str, impl, depth: int = 3, seen=None) -> set:
+    """
+    The IKOT_* kinds a conversion helper is willing to accept.
+
+    ⚠️ FOLLOWS DELEGATION, because most converters do not do the test
+    themselves.  convert_port_to_task() names no IKOT_* at all: it calls
+    ref_task_port_locked(), and the kind check is in there.  Reading one level
+    only would have left 41 of 55 arguments unjudged and called that an answer.
+    """
+    if seen is None:
+        seen = set()
+    if fn in seen or depth <= 0:
+        return set()
+    seen.add(fn)
+    body = impl.get(fn)
+    if not body:
+        return set()
+    kinds = set(IKOT.findall(body))
+    if kinds:
+        return kinds
+    for callee in CALLS.findall(body):
+        if callee == fn or callee in ('if', 'while', 'for', 'return',
+                                      'sizeof', 'assert'):
+            continue
+        kinds |= kinds_of(callee, impl, depth - 1, seen)
+    return kinds
+
+
+def check_converters(root: Path, names, impl) -> int:
+    """
+    🔴 NOT A COMPARISON OF NAMES.  The first version of this compared the helper
+    the trap calls against the one the .defs names in `intran:', and it reported
+    syscall_device_read as wrong: the .defs says dev_port_lookup() and the trap
+    calls port_name_to_device().  Those are the same check -- both accept
+    IKOT_DEVICE and take a reference -- differing only in that the trap also
+    translates the name, which on the message path the IPC layer has already
+    done.  A name table would need an entry for every such pair and would be
+    wrong again the next time somebody adds a helper.
+
+    🔑 So what is compared is what each side ACCEPTS.  A trap must not accept a
+    port kind its RPC twin would refuse, and that is exactly the defect this
+    check was written after: syscall_vm_wire took IKOT_HOST or IKOT_HOST_PRIV
+    where convert_port_to_host_priv takes only the second, so any task's
+    mach_host_self() got in.
+
+    ⚠️ Still textual, still a census.  It reads which IKOT_* names appear in each
+    helper's body; it cannot see logic that rejects a kind some other way.  What
+    it does is make the vm_wire class of defect impossible to keep, which is
+    more than reading 104 traps by hand achieved.
+    """
+    intran = intran_map(root)
+    routines = routine_port_types(root)
+    bad = []
+    checked = 0
+    unjudged = []
+
+    for trap in names:
+        if not trap.startswith('syscall_') or trap not in impl:
+            continue
+        rpc = trap[len('syscall_'):]
+        if rpc not in routines:
+            continue
+        body = impl[trap]
+        helpers = set(HELPER.findall(body))
+
+        for ty in routines[rpc]:
+            conv = intran.get(ty)
+            if not conv or conv == 'null_conversion':
+                continue
+            wanted = kinds_of(conv, impl)
+            if not wanted:
+                # 🔴 SAID OUT LOUD, NOT SKIPPED.  The intran's body names no
+                # IKOT_*, so this argument cannot be judged here -- and a count
+                # of what was checked, with no count of what was not, reads as
+                # coverage it does not have.  That mistake cost this file a
+                # rewrite once already.
+                unjudged.append((trap, ty, conv))
+                continue
+            checked += 1
+
+            # Any helper this trap calls that stays within what the RPC allows?
+            ok = False
+            widest = None
+            for h in helpers:
+                direct = set(IKOT.findall(impl.get(h, '')))
+                got = direct or kinds_of(h, impl)
+                if not got:
+                    continue
+                if got <= wanted:
+                    ok = True
+                    break
+                if got & wanted:
+                    # 🔑 TWO STRENGTHS OF EVIDENCE, and conflating them makes
+                    # the strong one unbelievable.  When the helper names both
+                    # kinds ITSELF, it plainly accepts both -- that is
+                    # port_name_to_host with IKOT_HOST and IKOT_HOST_PRIV, and
+                    # it is a finding.  When the extra kind only turns up by
+                    # following what the helper calls, it may belong to an
+                    # unrelated path: port_name_to_subsystem reaches IKOT_NONE
+                    # through its fallback, and reporting that as an escalation
+                    # is how a check loses its authority.
+                    widest = (h, got, bool(direct))
+            if not ok and widest is not None:
+                bad.append((trap, ty, conv, sorted(wanted), widest))
+
+    print()
+    print(f'── what each side accepts: {checked} converted argument(s) ──')
+    strong = [b for b in bad if b[4][2]]
+    weak = [b for b in bad if not b[4][2]]
+
+    if strong:
+        print('🔴 THE TRAP ACCEPTS A PORT KIND ITS RPC TWIN REFUSES:')
+        for trap, ty, conv, wanted, (h, got, _) in strong:
+            print(f'  {trap}')
+            print(f'      argument declared {ty}; {conv}() accepts '
+                  f'{", ".join(wanted)}')
+            print(f'      {h}() names {", ".join(sorted(set(got) - set(wanted)))}'
+                  f' itself, so it takes that too')
+    if weak:
+        print('⚠️ WORTH A READ — the extra kind appears only through what the '
+              'helper calls, which may be an unrelated path:')
+        for trap, ty, conv, wanted, (h, got, _) in weak:
+            print(f'  {trap}: {ty} — {conv}() accepts {", ".join(wanted)}, '
+                  f'{h}() reaches {", ".join(sorted(set(got) - set(wanted)))}')
+    if not bad:
+        print('  no trap accepts a kind its RPC twin would refuse')
+    if unjudged:
+        print(f'\n  ⚠️ {len(unjudged)} argument(s) NOT judged — the converter'
+              f' the .defs names does not test an IKOT_* kind in its own body,'
+              f' so this check has nothing to compare:')
+        for trap, ty, conv in unjudged:
+            print(f'       {trap}: {ty} via {conv}()')
+    return len(bad)
+
+
 def main(root: Path) -> int:
     names = trap_names(root)
     impl = bodies(root)
@@ -204,6 +419,8 @@ def main(root: Path) -> int:
         print('\nno definition found anywhere in the kernel:')
         for n in absent:
             print(f'  {n}')
+
+    check_converters(root, names, impl)
 
     # ⚠️ Exit 0 even with suspects.  This is a census that tells a person where
     # to read, not a gate: failing the build on it would say the question has
