@@ -2055,6 +2055,17 @@ test_trap_sweep(void)
 	      vm_protect(me, mem, 4096, FALSE,
 			 (i_ & 1) ? VM_PROT_READ
 				  : (VM_PROT_READ | VM_PROT_WRITE)));
+	/*
+	 * ⚠️ THE PROTECT SWEEP ABOVE LEFT THE PAGE READ-ONLY.  It alternates on
+	 * i_, the count is even, so the last iteration sets VM_PROT_READ -- and
+	 * vm_write further down then failed, differently on the two paths, and
+	 * was very nearly reported as a disagreement between them.  An artefact
+	 * of the test has to be removed before anything it produces is called a
+	 * finding.
+	 */
+	(void) vm_protect(me, mem, 4096, FALSE,
+			  VM_PROT_READ | VM_PROT_WRITE);
+
 	SWEEP("vm_msync", 2000, vm_msync(me, mem, 4096, VM_SYNC_ASYNCHRONOUS));
 	SWEEP("vm_behavior_set", 2000,
 	      vm_behavior_set(me, mem, 4096, VM_BEHAVIOR_DEFAULT));
@@ -2087,8 +2098,7 @@ test_trap_sweep(void)
 		kern_return_t r = mach_port_allocate(me,
 				MACH_PORT_RIGHT_RECEIVE, &q);
 		if (r == KERN_SUCCESS) r = mach_port_destroy(me, q); r; }));
-	SWEEP("mach_port_allocate_name", 2000, ({ mach_port_t nm =
-		0x4000u + (mach_port_t)i_;
+	SWEEP("mach_port_allocate_name", 2000, ({ mach_port_t nm = 0x4000u;
 		kern_return_t r = mach_port_allocate_name(me,
 				MACH_PORT_RIGHT_RECEIVE, nm);
 		if (r == KERN_SUCCESS) (void)mach_port_destroy(me, nm); r; }));
@@ -2109,14 +2119,20 @@ test_trap_sweep(void)
 		kern_return_t r = mach_port_allocate_subsystem(me,
 				MACH_PORT_NULL, &nm);
 		if (r == KERN_SUCCESS) (void)mach_port_destroy(me, nm); r; }));
-	SWEEP("mach_port_insert_right", 2000, ({ mach_port_t nm =
-		0x5000u + (mach_port_t)i_;
+	/*
+	 * ⚠️ ONE NAME, REUSED, INSTEAD OF A RANGE PICKED OUT OF THE AIR.  The
+	 * first version numbered names 0x5000 upwards and reported kr=13
+	 * (name exists) -- and worse, two DIFFERENT codes across runs of the
+	 * same build, which read as an unstable routine when it was an unstable
+	 * test.  A sweep whose own arguments are not deterministic cannot tell
+	 * anyone anything about the thing it is sweeping.
+	 */
+	SWEEP("mach_port_insert_right", 2000, ({ mach_port_t nm = 0x5000u;
 		kern_return_t r = mach_port_insert_right(me, nm, port,
 				MACH_MSG_TYPE_MAKE_SEND);
 		if (r == KERN_SUCCESS)
 			(void)mach_port_deallocate(me, nm); r; }));
-	SWEEP("mach_port_deallocate", 2000, ({ mach_port_t nm =
-		0x6000u + (mach_port_t)i_;
+	SWEEP("mach_port_deallocate", 2000, ({ mach_port_t nm = 0x5000u;
 		kern_return_t r = mach_port_insert_right(me, nm, port,
 				MACH_MSG_TYPE_MAKE_SEND);
 		if (r == KERN_SUCCESS) r = mach_port_deallocate(me, nm); r; }));
