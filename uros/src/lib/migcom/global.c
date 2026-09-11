@@ -115,7 +115,6 @@ boolean_t UseMsgRPC = TRUE;
 boolean_t GenSymTab = FALSE;
 boolean_t UseEventLogger = FALSE;
 boolean_t BeAnsiC = TRUE;
-boolean_t ShortCircuit = TRUE;
 boolean_t UseRPCTrap = FALSE;
 boolean_t TestRPCTrap= FALSE;
 

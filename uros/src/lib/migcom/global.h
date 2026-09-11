@@ -101,7 +101,6 @@ extern boolean_t UseMsgRPC;
 extern boolean_t GenSymTab;
 extern boolean_t UseEventLogger;
 extern boolean_t BeAnsiC;
-extern boolean_t ShortCircuit;
 extern boolean_t UseRPCTrap;
 extern boolean_t TestRPCTrap;
 

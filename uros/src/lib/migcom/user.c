@@ -369,8 +369,6 @@ WriteIncludes(FILE *file)
 	fprintf(file, "#include <mach/mach_types.h>\n");
 	fprintf(file, "#include <mach/message.h>\n");
 	fprintf(file, "#include <mach/mig_errors.h>\n");
-	if (ShortCircuit && Target->mt_rpc_trap)
-		fprintf(file, "#include <mach/rpc.h>\n");
 	if (IsKernelUser) {
 	    fprintf(file, "#include <ipc/ipc_port.h>\n");
 	    fprintf(file, "#include <kern/ipc_mig.h>\n");
@@ -2501,144 +2499,6 @@ WriteShortCircOutArgAfter(FILE *file, register argument_t *arg)
 }
 
 
-static void
-WriteShortCircRPC(FILE *file, register routine_t *rt)
-{
-    register argument_t *arg;
-    register int server_argc, i;
-    boolean_t ShortCircOkay = TRUE;
-    boolean_t first_OOL_arg = TRUE;
-
-    fprintf(file, "    if (0 /* Should be: !(%s & 0x3) XXX */) {\n",
-						rt->rtRequestPort->argVarName);
-
-    if (rt->rtOneWay) {
-	/* Do not short-circuit simple routines: */
-	ShortCircOkay = FALSE;
-    } else {
-	/* Scan for any types we can't yet handle.  If found, give up on short-
-	 * circuiting and fall back to mach_msg:
-	 */
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)  {
-	    if (arg->argFlags & flMaybeDealloc) {
-		ShortCircOkay = FALSE;
-		break;
-	    }
-	    /* Can't yet handle ports: */
-	    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD) &&
-		    (arg->argKPD_Type == MACH_MSG_PORT_DESCRIPTOR ||
-		     arg->argKPD_Type == MACH_MSG_OOL_PORTS_DESCRIPTOR)) {
-		ShortCircOkay = FALSE;
-		break;
-	    }
-	}
-    }
-
-    if (ShortCircOkay) {
-
-	fprintf(file,
-	  "      rpc_subsystem_t subsystem = ((rpc_port_t)%s)->rp_subsystem;\n",
-					rt->rtRequestPort->argVarName);
-	fprintf(file, "\n");
-	fprintf(file, "      if (subsystem && subsystem->start == %d) {\n",
-		       SubsystemBase);
-	fprintf(file, "\tkern_return_t rtn;\n");
-	fprintf(file, "\n");
-
-	/* Declare temp vars for out-of-line array args, and for all array
-	 * args, if -maxonstack has forced us to allocate in-line arrays
-	 * off the stack:
-	 */
-	rt->rtTempBytesOnStack = 0;
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)  {
-	    arg->argTempOnStack = FALSE;
-	    if (akCheck(arg->argKind, akbSendKPD|akbReturnKPD) &&
-			    arg->argKPD_Type == MACH_MSG_OOL_DESCRIPTOR) {
-		if (first_OOL_arg) {
-			/* Need a garbage temporary to hold the datacount
-			 * returned by vm_read, which we always ignore:
-			 */
-			fprintf(file,
-			    "\tmach_msg_type_number_t _MIG_Ignore_Count_;\n");
-			first_OOL_arg = FALSE;
-		}
-	    } else if (!rt->rtMessOnStack &&
-		    arg->argType->itNumber > 1 && !arg->argType->itStruct) {
-	    } else
-		continue;
-	    fprintf(file, "\tchar *_%sTemp_;\n", arg->argVarName);
-	    rt->rtTempBytesOnStack += sizeof(char *);
-	}
-
-	/* Process the IN arguments, in order: */
-
-	fprintf(file, "\t/* Pre-Process the IN arguments: */\n");
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext) {
-	    if (argIsIn(arg))
-		WriteShortCircInArgBefore(file, arg);
-	    if (argIsOut(arg))
-		WriteShortCircOutArgBefore(file, arg);
-	}
-	fprintf(file, "\n");
-
-	/* Count the number of server args: */
-	server_argc = 0;
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)
-	    if (akCheck(arg->argKind, akbServerArg))
-		    server_argc++;
-
-	/* Call RPC_SIMPLE to switch to server stack and function: */
-	i = 0;
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)  {
-	    if (akIdent(arg->argKind) == akeRequestPort) {
-		    fprintf(file, "\trtn = RPC_SIMPLE(%s, %d, %d, (",
-			    arg->argVarName, rt->rtNumber + SubsystemBase,
-			    server_argc);
-		    fprintf(file, "%s", arg->argVarName);
-	    } else if (akCheck(arg->argKind, akbServerArg)) {
-		    if (i++ % 6 == 0)
-			fprintf(file, ",\n\t\t");
-		    else
-			fprintf(file, ", ");
-		    fprintf(file, "%s", arg->argVarName);
-	    }
-	}
-	fprintf(file, "));\n");
-	fprintf(file, "\n");
-
-	/* Process the IN and OUT arguments, in order: */
-	fprintf(file, "\t/* Post-Process the IN and OUT arguments: */\n");
-	for (arg = rt->rtArgs; arg != argNULL; arg = arg->argNext)  {
-	    if (argIsIn(arg))
-		WriteShortCircInArgAfter(file, arg);
-	    if (argIsOut(arg))
-		WriteShortCircOutArgAfter(file, arg);
-	}
-	fprintf(file, "\n");
-
-	fprintf(file, "\treturn rtn;\n");
-	fprintf(file, "      }\n");
-    }
-
-    /* In latest design, the following is not necessary, because in
-     * kernel-loaded tasks, the Mach port name is the same as the handle
-     * used by the RPC mechanism, namely a pointer to the ipc_port, and
-     * in user-mode tasks, the Mach port name gets renamed to be a pointer
-     * to the user-mode rpc_port_t struct.
-     */
-#if	0
-	if (IsKernelUser)
-	    fprintf(file, "      %s = (ipc_port_t)%s->rp_receiver_name;\n",
-					    rt->rtRequestPort->argVarName,
-					    rt->rtRequestPort->argVarName);
-	else
-	    fprintf(file, "      %s = ((rpc_port_t)%s)->rp_receiver_name;\n",
-					    rt->rtRequestPort->argVarName,
-					    rt->rtRequestPort->argVarName);
-#endif
-
-    fprintf(file, "    }\n");
-}
 
 static void
 WriteStubDecl(FILE *file, register routine_t *rt)
@@ -2748,10 +2608,6 @@ WriteRoutine(FILE *file, register routine_t *rt)
     /* Use the RPC trap for user-user and user-kernel RPC */
     if (UseRPCTrap)
 	WriteRPCRoutine(file, rt);
-
-    /* write the code for doing a short-circuited RPC: */
-    if (ShortCircuit && Target->mt_rpc_trap)
-	WriteShortCircRPC(file, rt);
 
     fprintf(file, "    {\n");
 
