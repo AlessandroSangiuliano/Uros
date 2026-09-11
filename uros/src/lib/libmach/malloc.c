@@ -90,9 +90,21 @@
 /*
  * ── And what it cost the programs that never needed it (#542) ────────────
  *
- * 🔴 THE LOCK DOUBLES AN UNCONTENDED PAIR: 96 cycles against 47, measured as
- * the median of five boots each with it and with it ablated.  That is paid by
+ * 🔴 THE LOCK COSTS 35 CYCLES ON AN UNCONTENDED PAIR: 93 against 58, medians
+ * of ten boots with the CPU pinned at 1.4 GHz and boost off.  That is paid by
  * every program in the system, and all but four of them have one thread.
+ *
+ * ⚠️ THE FIRST ANSWER TO THIS WAS 96 AGAINST 47, AND IT WAS WRONG.  Not
+ * arithmetic -- design: five boots with the lock, then five without, and the
+ * medians compared across the two batches.  The TSC on this machine is
+ * constant_tsc, so it ticks at a fixed rate while the core moves between 1.4
+ * and 3.0 GHz; a "cycles per pair" read that way is TIME, and the same line of
+ * code read 93 in one batch and 33 in another.  🔑 Repetition does not make a
+ * comparison valid, it makes an invalid one precise.  The control has to be
+ * inside the measurement: here both numbers come from one boot, and a run with
+ * the flag forced to 1 -- identical code at both points -- shows the two
+ * positions differ by zero, which is what licenses reading their difference as
+ * the lock.
  *
  * 🔑 WHICH IS WHY THERE IS NO PER-THREAD CACHE HERE.  A cache would speed up
  * the multithreaded servers, and they are not the ones paying: a task with one

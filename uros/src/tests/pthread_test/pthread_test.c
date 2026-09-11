@@ -1653,13 +1653,24 @@ test_malloc_under_threads(void)
  * need a baseline from a tree that no longer exists.  To turn it into one,
  * ablate the lock and read this line again on the same machine.
  *
- * 🔴 THAT WAS DONE, AND THE ANSWER IS NOT SMALL: median of five boots each
- * under KVM, 96 cycles with the lock against 47 without.  The lock DOUBLES an
- * uncontended pair, +49 cycles, which is the two locked exchanges a pair now
- * pays -- one in malloc, one in free.  For scale, [15] measures a pthread
- * mutex lock/unlock pair at 255 in the same boot, so an allocation still costs
- * well under half of that; and this is the number that would justify a
- * per-thread cache, not a feeling that one would be nice.
+ * 🔴 THAT WAS DONE, AND IT TOOK THREE GOES TO GET AN ANSWER THAT HOLDS.  The
+ * lock costs 35 cycles on an uncontended pair: 93 against 58, medians of ten
+ * boots with the CPU pinned at 1.4 GHz and boost off.
+ *
+ * ⚠️ The first answer was 96 against 47 and the second was "no difference at
+ * all", and both were the same broken instrument.  This machine has
+ * constant_tsc: the counter ticks at a fixed rate while the core moves between
+ * 1.4 and 3.0 GHz, so a cycles-per-pair read from it is TIME.  The same line of
+ * code measured 93 in one batch and 33 in another, and comparing medians ACROSS
+ * batches -- five boots locked, then five ablated -- let the machine's speed
+ * into the difference.  🔑 Repetition does not make a comparison valid; it
+ * makes an invalid one precise.
+ *
+ * 🔑 What makes these two numbers comparable is not that there are ten of them.
+ * It is that they come from ONE boot each, and that a control run with the flag
+ * forced to 1 -- identical code at both points -- measured the two positions as
+ * differing by zero across ten boots.  Without that control the difference
+ * below could just as well have been the cost of starting a program.
  * ---------------------------------------------------------------- */
 
 /*
