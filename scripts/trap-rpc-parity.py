@@ -127,7 +127,7 @@ def main(root: Path) -> int:
     names = trap_names(root)
     impl = bodies(root)
 
-    clean, suspect, absent = [], [], []
+    clean, notfb, suspect, absent = [], [], [], []
 
     for n in names:
         body = impl.get(n)
@@ -141,13 +141,21 @@ def main(root: Path) -> int:
             clean.append((n, 'takes no port', calls_in(body, n)[:3]))
         elif converts and falls_back:
             clean.append((n, 'converts + falls back', calls_in(body, n)[:3]))
+        elif converts:
+            # 🔑 SAFE IS NOT THE SAME AS USABLE, and this class is the reason
+            # the script reports three outcomes instead of two.
+            # syscall_clock_get_time converts its port properly and
+            # clock_get_time refuses CLOCK_NULL, so nothing is reachable that
+            # should not be -- and wiring it up would still be wrong.  Returning
+            # an error where the message path would have carried the call turns
+            # a case Mach handles (a port that is not this kernel's object --
+            # interposed, proxied, remote) into a failure.  The fallback is not
+            # politeness; it is what keeps a trap from narrowing the system.
+            notfb.append((n, 'converts, but answers an error instead of '
+                             'MACH_SEND_INTERRUPTED', calls_in(body, n)[:3]))
         else:
-            why = []
-            if not converts:
-                why.append('NO conversion')
-            if not falls_back:
-                why.append('no MACH_SEND_INTERRUPTED')
-            suspect.append((n, ', '.join(why), calls_in(body, n)[:3]))
+            suspect.append((n, 'NO conversion of a port argument',
+                            calls_in(body, n)[:3]))
 
     print(f'traps in the table (placeholders removed): {len(names)}')
     print(f'  defined in the kernel: {len(names) - len(absent)}')
@@ -155,12 +163,20 @@ def main(root: Path) -> int:
     print()
 
     if suspect:
-        print('🔴 MUST BE READ BY A PERSON BEFORE BEING USED:')
+        print('🔴 DANGEROUS UNTIL READ — takes a port and does not resolve it:')
         for n, why, c in suspect:
             print(f'  {n}\n      {why}\n      calls: {", ".join(c) or "-"}')
         print()
 
-    print(f'pattern-clean: {len(clean)}  ·  suspect: {len(suspect)}')
+    if notfb:
+        print('⚠️ SAFE BUT NOT A CANDIDATE — would turn a handled case into an '
+              'error:')
+        for n, why, c in notfb:
+            print(f'  {n}\n      {why}\n      calls: {", ".join(c) or "-"}')
+        print()
+
+    print(f'candidates: {len(clean)}  ·  safe-not-candidate: {len(notfb)}'
+          f'  ·  dangerous: {len(suspect)}')
     if absent:
         print('\nno definition found anywhere in the kernel:')
         for n in absent:
