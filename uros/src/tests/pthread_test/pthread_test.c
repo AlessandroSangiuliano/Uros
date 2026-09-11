@@ -1918,6 +1918,17 @@ test_trap_vs_rpc_bench(void)
 
 		start = tsc_now();
 		for (i = 0; i < 2000; i++) {
+			/*
+			 * #542: before, not after — see mach.h.  This task
+			 * plainly has threads by the time an arm numbered in
+			 * the thirties runs, so the flag is long since set and
+			 * nothing here depends on the call.  It is here because
+			 * "it happens to be fine at this call site" is the
+			 * reasoning the rule exists to refuse, and the checker
+			 * that caught this omission has no exemption list on
+			 * purpose.
+			 */
+			mach_note_thread_created();
 			kr = thread_create(mach_task_self(), &th);
 			if (kr != KERN_SUCCESS)
 				break;
