@@ -1653,22 +1653,46 @@ test_malloc_under_threads(void)
  * need a baseline from a tree that no longer exists.  To turn it into one,
  * ablate the lock and read this line again on the same machine.
  *
- * 🔴 THAT WAS DONE, AND THE ANSWER IS NOT SMALL: median of five boots each
- * under KVM, 96 cycles with the lock against 47 without.  The lock DOUBLES an
- * uncontended pair, +49 cycles, which is the two locked exchanges a pair now
- * pays -- one in malloc, one in free.  For scale, [15] measures a pthread
- * mutex lock/unlock pair at 255 in the same boot, so an allocation still costs
- * well under half of that; and this is the number that would justify a
- * per-thread cache, not a feeling that one would be nice.
+ * 🔴 THAT WAS DONE, AND IT TOOK THREE GOES TO GET AN ANSWER THAT HOLDS.  The
+ * lock costs 35 cycles on an uncontended pair: 93 against 58, medians of ten
+ * boots with the CPU pinned at 1.4 GHz and boost off.
+ *
+ * ⚠️ The first answer was 96 against 47 and the second was "no difference at
+ * all", and both were the same broken instrument.  This machine has
+ * constant_tsc: the counter ticks at a fixed rate while the core moves between
+ * 1.4 and 3.0 GHz, so a cycles-per-pair read from it is TIME.  The same line of
+ * code measured 93 in one batch and 33 in another, and comparing medians ACROSS
+ * batches -- five boots locked, then five ablated -- let the machine's speed
+ * into the difference.  🔑 Repetition does not make a comparison valid; it
+ * makes an invalid one precise.
+ *
+ * 🔑 What makes these two numbers comparable is not that there are ten of them.
+ * It is that they come from ONE boot each, and that a control run with the flag
+ * forced to 1 -- identical code at both points -- measured the two positions as
+ * differing by zero across ten boots.  Without that control the difference
+ * below could just as well have been the cost of starting a program.
  * ---------------------------------------------------------------- */
 
-static void
-test_malloc_bench(void)
+/*
+ * ⚠️ TWO MEASUREMENTS, AND WHEN EACH IS TAKEN IS THE POINT (#542).  The
+ * allocator skips its lock entirely until this task has made a thread, so a
+ * bench that runs at the end of pthread_test can only ever see the locked
+ * path.  The unlocked one has to be timed before the first pthread_create,
+ * and it is: same program, same boot, same machine, which is a far better
+ * comparison than two boots of two trees.
+ */
+static unsigned long long	mb_single_total;
+static int			mb_single_n;
+static int			mb_single_mt;	/* flag as it stood then */
+
+#define MB_ITERS	100000
+
+static unsigned long long
+malloc_bench_run(int n)
 {
 	unsigned long long	start, end;
 	void			*p;
 	int			i;
-	int			n = 100000;
 
 	/* Warm the free list so the bump-pointer and vm_map paths are not
 	   what gets measured. */
@@ -1682,7 +1706,48 @@ test_malloc_bench(void)
 	}
 	end = tsc_now();
 
-	print_per_iter("malloc/free uncontended", n, end - start);
+	return end - start;
+}
+
+/* Called first thing in main(), before any thread exists. */
+static void
+malloc_bench_single(void)
+{
+	mb_single_mt = _malloc_is_multithreaded();
+	mb_single_n = MB_ITERS;
+	mb_single_total = malloc_bench_run(MB_ITERS);
+}
+
+static void
+test_malloc_bench(void)
+{
+	unsigned long long	locked = malloc_bench_run(MB_ITERS);
+	unsigned long long	per_locked = locked / MB_ITERS;
+	unsigned long long	per_single = (mb_single_n != 0)
+					     ? mb_single_total / (unsigned int)mb_single_n
+					     : 0;
+
+	printf("  [%d] malloc/free uncontended: %d iters, %u cycles/pair with"
+	       " the lock, %u before this task had a thread\n",
+	       ++test_num, MB_ITERS, (unsigned int)per_locked,
+	       (unsigned int)per_single);
+
+	/*
+	 * 🔑 The flag checked from both sides.  Stuck at one is safe and
+	 * silently useless; stuck at zero is #540 again.  A passing boot shows
+	 * neither unless something asks.
+	 */
+	if (mb_single_mt != 0)
+		test_fail("allocator fast path",
+			  "this task already counted as multithreaded before "
+			  "it made a thread — the fast path never runs");
+	else if (_malloc_is_multithreaded() == 0)
+		test_fail("allocator fast path",
+			  "this task made threads and the allocator still "
+			  "thinks it is alone — #540 is open again");
+	else
+		test_ok("allocator fast path off before the first thread, on "
+			"after");
 }
 
 /* ----------------------------------------------------------------
@@ -1696,6 +1761,13 @@ main(int argc, char **argv)
 	 * on the QEMU/VGA window too, not only the serial console.  Async
 	 * because servers launch in parallel and gpu_server may not be
 	 * netname-registered yet. */
+	/*
+	 * ⚠️ BEFORE gpu_console_init_async, which is async because it starts a
+	 * thread.  This has to be the first thing main() does or the number it
+	 * takes is the locked one under another name (#542).
+	 */
+	malloc_bench_single();
+
 	(void)gpu_console_init_async("pthread_test", 100u, 50u);
 
 	printf("pthread_test: starting\n");

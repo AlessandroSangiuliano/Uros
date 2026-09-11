@@ -961,6 +961,11 @@ pthread_create(pthread_t *thread,
 		/* Thread structure lives at base of stack */
 		t = (pthread_t)STACK_SELF(stack);
 		*thread = t;
+		/* #542: before, not after — see mach.h.  From here on this
+		   task can hold two threads, so the allocator must stop
+		   skipping its lock. */
+		mach_note_thread_created();
+
 		/* Create the Mach thread for this thread */
 		MACH_CALL(thread_create(mach_task_self(), &kernel_thread), kern_res);
 		if (kern_res != KERN_SUCCESS)

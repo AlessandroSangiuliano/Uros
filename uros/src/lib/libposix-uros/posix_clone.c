@@ -151,6 +151,8 @@ __uros_clone(int (*fn)(void *),
 
     /* 1. Create the kernel thread, suspended. */
     mach_port_t new_thread = MACH_PORT_NULL;
+    /* #542: before, not after — see mach.h. */
+    mach_note_thread_created();
     kr = thread_create(mach_task_self(), &new_thread);
     if (kr != KERN_SUCCESS) {
         TRACE("thread_create failed");

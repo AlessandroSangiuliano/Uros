@@ -62,6 +62,9 @@ tgdb_thread_create(vm_offset_t entry)
 		if (th->thread == MACH_PORT_NULL)
 			break;
 
+	/* #542: before, not after — see mach.h. */
+	mach_note_thread_created();
+
 	if((rc = thread_create(mach_task_self(), &th->thread)) != KERN_SUCCESS) {
 		printf("tgdb: thread_create returned %d\n", rc);
 		return 0;
