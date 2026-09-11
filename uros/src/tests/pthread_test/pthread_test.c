@@ -1751,6 +1751,72 @@ test_malloc_bench(void)
 }
 
 /* ----------------------------------------------------------------
+ * Test 27: what a kernel trap costs against an RPC (#543)
+ *
+ * 🔑 mach_port_allocate IS THE RIGHT SUBJECT.  It is the most frequent thing a
+ * capability system does, it has a real trap (number 72), and until #543 every
+ * call built a 36-byte Request, called mach_msg, waited for a 40-byte Reply and
+ * unpacked it, while syscall_mach_port_allocate sat compiled in libmach with
+ * nobody calling it.
+ *
+ * ⚠️ THE TWO PATHS CANNOT BE TIMED IN ONE BOOT, and that is the whole
+ * difficulty.  With the fast path emitted, the message path is never taken --
+ * there is nothing left to compare against.  So the comparison is between two
+ * builds, made with and without MIG_TRAP_SKIP=mach_port, which is the shape of
+ * measurement that was invalid earlier in this same work: two batches with the
+ * machine free to change speed between them.
+ *
+ * 🔑 What makes it valid here is a CONTROL INSIDE THE EXPERIMENT.  Arms [15]
+ * and [25] measure a pthread mutex pair and a malloc/free pair, and neither
+ * touches mach_port_allocate.  If those two read the same in both builds, the
+ * difference in this arm is the fast path; if they move as well, the machine
+ * moved and the run says nothing.  Read all three numbers or none.
+ *
+ * 🔴 And the clock must be pinned.  This machine has constant_tsc: the counter
+ * ticks at a fixed rate while the core moves between 1.4 and 3.0 GHz, so a
+ * cycles-per-pair read from it is TIME.  The same line of code has measured 93
+ * and 33 on this tree.
+ * ---------------------------------------------------------------- */
+
+static void
+test_port_alloc_bench(void)
+{
+	unsigned long long	start, end;
+	mach_port_t		p;
+	int			i, ok = 0;
+	int			n = 20000;
+
+	/* Warm: the first allocation in a space pays for growth, not for the
+	   path being measured. */
+	if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE,
+			       &p) == KERN_SUCCESS)
+		(void) mach_port_destroy(mach_task_self(), p);
+
+	start = tsc_now();
+	for (i = 0; i < n; i++) {
+		if (mach_port_allocate(mach_task_self(),
+				       MACH_PORT_RIGHT_RECEIVE,
+				       &p) != KERN_SUCCESS)
+			break;
+		if (mach_port_destroy(mach_task_self(), p) != KERN_SUCCESS)
+			break;
+		ok++;
+	}
+	end = tsc_now();
+
+	if (ok != n) {
+		char buf[96];
+		snprintf(buf, sizeof(buf),
+			 "only %d of %d allocate/destroy pairs completed",
+			 ok, n);
+		test_fail("port allocate bench", buf);
+		return;
+	}
+
+	print_per_iter("mach_port_allocate/destroy", n, end - start);
+}
+
+/* ----------------------------------------------------------------
  * main
  * ---------------------------------------------------------------- */
 
@@ -1805,6 +1871,7 @@ main(int argc, char **argv)
 	test_explicit_sched();
 	test_malloc_under_threads();
 	test_malloc_bench();
+	test_port_alloc_bench();
 
 	if (pass)
 		printf("pthread_test: ALL %d TESTS PASSED\n", test_num);

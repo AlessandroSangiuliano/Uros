@@ -37,6 +37,7 @@
 # Uso:
 #   scripts/gen-trap-list.py [--c] <syscall_sw.h> [output]
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -89,6 +90,27 @@ def main(argv) -> int:
         return 1
 
     entries = [(n, seen[n]) for n in sorted(seen)]
+
+    # ── The ablation switch (#543) ────────────────────────────────────────
+    #
+    # 🔑 COMMITTED, NOT RE-ADDED FROM MEMORY EACH TIME.  MIG_TRAP_SKIP omits
+    # every trap whose name contains one of the given words, so a build can be
+    # made with a fast path missing.  It is what isolated syscall_vm_wire as
+    # the cause of a kernel panic -- 44 routines had a fast path, excluding that
+    # one made i386 boot clean -- and it is how the cost of a trap against an
+    # RPC is measured at all, because with the fast path in place the message
+    # path is no longer taken and there is nothing to compare it to.
+    #
+    # ⚠️ It prints what it left out.  An ablation that does not say so is
+    # indistinguishable from one that did not happen, and a measurement against
+    # a tree you believe is ablated and is not answers a different question.
+    skip = os.environ.get('MIG_TRAP_SKIP', '').split()
+    if skip:
+        before = len(entries)
+        entries = [(n, a) for n, a in entries
+                   if not any(s in n for s in skip)]
+        print(f'gen-trap-list: {before - len(entries)} trap(s) omitted for '
+              f'MIG_TRAP_SKIP={" ".join(skip)}', file=sys.stderr)
     lines = [as_c(entries)] if emit_c else \
             [f'{n} {a}\n' for n, a in entries]
     if len(argv) > 2:
