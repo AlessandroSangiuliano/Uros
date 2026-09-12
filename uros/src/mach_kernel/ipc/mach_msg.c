@@ -1097,6 +1097,16 @@ mach_msg_overwrite_trap(
 		ikm_check_initialized(kmsg, IKM_SAVED_KMSG_SIZE);
 
 		hdr = &kmsg->ikm_header;
+
+		/*
+		 * #392: a buffer, without having allocated one.  The phase is
+		 * the cache hit and the four tests above it, and it is a column
+		 * of its own because the issue claims the mmot path "already
+		 * has half the L4 win" -- the allocation avoided -- and a claim
+		 * of that shape is worth a number rather than a sentence.
+		 */
+		SP_MARK(SP_GET);
+
 		if (copyinmsg((char *) msg, (char *) hdr, send_size)) {
 			if (kmsg->ikm_size != IKM_SAVED_KMSG_SIZE ||
 			    KMSG_IS_RT(kmsg) || !ikm_cache_put(kmsg))
@@ -1110,9 +1120,17 @@ mach_msg_overwrite_trap(
 		/* naturally align the message before tacking on the trailer */
 		trailer = (mach_msg_format_0_trailer_t *) ((vm_offset_t) hdr +
                                                   send_size);
-		bcopy(  (char *)&trailer_template, 
-			(char *)trailer, 
+		bcopy(  (char *)&trailer_template,
+			(char *)trailer,
 			sizeof(trailer_template));
+
+		/*
+		 * 🔥 #392: THE SEND-SIDE COPY, and half of the ceiling on what
+		 * register-IPC (#391) could ever reclaim.  The trailer template
+		 * is in here with it deliberately -- it is copied for the same
+		 * reason and would go away with it.
+		 */
+		SP_MARK(SP_COPYIN);
 
 	    fast_copyin:
 		/*
@@ -1344,6 +1362,17 @@ mach_msg_overwrite_trap(
 			}
 
 		    fast_copyin_cached:
+			/*
+			 * #392: two names turned into two locked ports, by
+			 * whichever of the three routes got there -- the
+			 * per-thread cache, the lock-free resolve (#331), or
+			 * the table under the space lock.  One column for all
+			 * three, because what the issue asks is what resolution
+			 * COSTS, and a breakdown by route would need the routes
+			 * counted to be read at all.
+			 */
+			SP_MARK(SP_RESOLVE);
+
 			assert(dest_port->ip_srights > 0);
 			dest_port->ip_srights++;
 			ip_reference(dest_port);
@@ -1600,6 +1629,18 @@ mach_msg_overwrite_trap(
 			}
 		    }
 
+			/*
+			 * #392: the same phase boundary as the request arm's,
+			 * on the arm a SERVER takes -- reply out, receive the
+			 * next request.  Without it a server thread's
+			 * breakdown prints a zero under `resolve' and the
+			 * whole lookup under `queue', which reads as "naming
+			 * is free on this side" rather than as "nobody marked
+			 * it".  Both ends of an RPC walk this function and the
+			 * columns have to mean the same thing on both.
+			 */
+			SP_MARK(SP_RESOLVE);
+
 			is_write_unlock(space);
 			io_reference(rcv_object);
 			imq_lock(rcv_mqueue);
@@ -1626,6 +1667,13 @@ mach_msg_overwrite_trap(
 		/*NOTREACHED*/
 
 	    fast_send_receive:
+		/*
+		 * #392: the rights taken, the queue limits checked and both
+		 * message queues locked.  Everything from here on is the
+		 * hand-off, which has three columns of its own.
+		 */
+		SP_MARK(SP_QUEUE);
+
 		/*
 		 *	optimized ipc_mqueue_send/ipc_mqueue_receive
 		 *
@@ -1838,6 +1886,14 @@ mach_msg_overwrite_trap(
 		c_mach_msg_trap_switch_fast++;
 
 		/*
+		 * #392: and this sample is a sample of THIS path, which the
+		 * dump needs in order to take its median over one shape rather
+		 * than over a window mixing hand-offs with traps that fell off
+		 * at the first test.
+		 */
+		SP_HANDOFF();
+
+		/*
 		 *	Safe to unlock dest_port now that we are
 		 *	committed to this path, because we hold
 		 *	dest_mqueue locked.
@@ -1950,9 +2006,32 @@ mach_msg_overwrite_trap(
 			    mp_enable_preemption();
 			    timer_switch(&receiver->system_timer);
 			    disable_preemption();
+
+			    /*
+			     * #392: THE THIRD WAY A THREAD LEAVES AND COMES
+			     * BACK, and the reason the two in sched_prim.c are
+			     * not enough.  This path calls switch_context()
+			     * itself -- that is what makes it a hand-off -- so
+			     * neither thread_invoke() nor thread_continue() is
+			     * on the way out or on the way in.  Without these
+			     * three lines the sender's whole sleep, which is
+			     * the SERVER's execution time, is charged to
+			     * whatever phase was open, and the one measurement
+			     * this issue exists for reads as a claim phase of
+			     * three hundred thousand cycles.
+			     *
+			     * The stamp goes into the RECEIVER's sample: it is
+			     * the far side of the switch, and only the thread
+			     * being switched to can close it.
+			     */
+			    SP_BLOCKED(self, receiver, SP_CLAIM);
+
 			    old_thread = switch_context(self, 0, receiver);
 			    assert(old_thread != self);
+
+			    SP_BACK();		/* the sleep ends at the stamp */
 			    thread_dispatch(old_thread);
+			    SP_SWITCHED();	/* and the switch ends here    */
 			    enable_preemption();
 			}
 
@@ -2072,6 +2151,15 @@ mach_msg_overwrite_trap(
 	    }
 
 	    fast_copyout:
+		/*
+		 * #392: awake with a reply in hand.  The stretch that closes
+		 * here is the waking-up bookkeeping -- why did we wake, the
+		 * destination's message count, the trailer -- and it is
+		 * separate from the copyout because it is the part that exists
+		 * only because the thread slept.
+		 */
+		SP_MARK(SP_RESUME);
+
 		/*
 		 *	Nothing locked and no references held, except
 		 *	we have kmsg with msgh_seqno filled in.  Must
@@ -2321,6 +2409,15 @@ mach_msg_overwrite_trap(
 
 	    fast_put:
 		/*
+		 * #392: the header translated -- the ports in the message
+		 * turned into names in the receiving space, rights installed.
+		 * 🔑 This is the phase register-IPC does NOT remove: a
+		 * capability carried in a register is still a capability that
+		 * has to be entered into a space.
+		 */
+		SP_MARK(SP_COPYOUT);
+
+		/*
 		 * We have the reply message data in kmsg,
 		 * and the reply message size (plus trailer size)
 		 * in reply_size.  Just need to copy it out to the
@@ -2341,6 +2438,15 @@ mach_msg_overwrite_trap(
 		    KMSG_IS_RT(kmsg) || !ikm_cache_put(kmsg)) {
 			ikm_free(kmsg);
 		}
+
+		/*
+		 * 🔥 #392: THE RECEIVE-SIDE COPY, the other half of #391's
+		 * ceiling.  Returning the buffer to the cache is in the same
+		 * column: it is the counterpart of SP_GET and it disappears
+		 * with the copy it belongs to.
+		 */
+		SP_MARK(SP_PUT);
+
 		return(mr);
 
 
