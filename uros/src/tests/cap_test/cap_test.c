@@ -1322,23 +1322,27 @@ a_wired_page_can_be_given_back(mach_port_t host_priv)
     }
 
     /*
-     * Probe 5 -- the one that actually reaches it.
+     * Probe 5 -- a lazy copy over the wired page.  It does not reach the guard
+     * either, and that is recorded rather than tidied away.
      *
-     * 🔴 Probe 4 does not, and the reason is worth keeping: vm_remap with
-     * copy = TRUE copies EAGERLY, so the write through the copy finds a page of
-     * its own and never faults over the original.  A probe built from the right
-     * idea and the wrong primitive passes, and passing is what it looks like.
+     * The idea: vm_remap with copy = TRUE (probe 4) copies EAGERLY, so the
+     * write through the copy finds a page of its own and never faults over the
+     * original.  A LAZY copy should behave differently, and vm_read is how a
+     * task arms one on its own memory -- vm_map_copyin sets the source object
+     * to copy-delay and drops the source mappings to read-only, so the next
+     * write through the wired mapping should be a copy-on-write fault whose
+     * source page is the wired page itself.
      *
-     * 🔑 What is needed is a LAZY copy, and vm_read is how a task arms one on
-     * its own memory: vm_map_copyin sets the source object to copy-delay and
-     * drops the source mappings to read-only.  The next WRITE through the wired
-     * mapping is then a copy-on-write fault whose source page is the wired page
-     * itself -- and that path severs the source in every space that holds it.
+     * 🔴 IT IS NOT.  Ablation says so: with the vm_fault.c fix removed, this
+     * probe survives on both targets, while the FLIPC bufgroup bench on i386
+     * panics in the same build.  So something between vm_read and the fault
+     * materialises the copy, and this probe measures the wrong thing.
      *
-     * ⚠️ Dropping a wired mapping to read-only is itself allowed: pmap_protect
-     * only adjusts statistics for a wired PTE.  It is pmap_page_protect, on the
-     * physical page, that refuses -- which is why the write and not the vm_read
-     * is the moment of truth.
+     * ⚠️ Kept because it cost two wrong attempts to establish, and the next
+     * person to want a copy-on-write over a wired page from one task will
+     * reach for exactly these two primitives.  🔑 The only witness there is at
+     * the moment is ipc_bench's wired FLIPC pool, which the x86-64 bundle does
+     * not carry -- so this arm cannot yet fail on that target at all.
      */
     {
         vm_address_t   a5 = 0;
