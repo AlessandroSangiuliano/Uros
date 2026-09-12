@@ -243,6 +243,16 @@ if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
   add_subdirectory(lib/libflipc2)
 endif()
 
+# ipc_bench on x86-64 (#552), beside the tests rather than behind
+# OSFMK_BUILD_IPC_BENCH, which is the i386 switch.
+#
+# ⚠️ Built but NOT in the bundle: servers/bootstrap's bundle is a curated list
+# and putting ipc_bench in it changes what every campaign boots. That call wants
+# the cost of adding it measured first.
+if(OSFMK_BUILD_KERNEL AND NOT UROS_USERLAND_ARCH_OK)
+  add_subdirectory(bench/ipc_bench)
+endif()
+
 # libsa_fs and libblk, ahead of the gate (#422).
 #
 # Stage 2: the filesystem bootstrap reads server images from once the bundle

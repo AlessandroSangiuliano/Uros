@@ -47,7 +47,7 @@
 #include <mach/clock_types.h>
 #include <mach/thread_switch.h>
 #include <mach/mach_syscalls.h>	/* syscall_thread_switch */
-#include <mach/i386/thread_status.h>
+#include <mach/machine/thread_status.h>	/* #552: this machine's, not i386's */
 #include <sa_mach.h>
 #include <pthread.h>
 #include <device/device.h>
@@ -588,8 +588,6 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     mach_port_t			child_recv_port;	/* child receives */
     mach_port_t			parent_recv_port;	/* parent receives replies */
     vm_offset_t			child_stack;
-    struct i386_thread_state	state;
-    mach_msg_type_number_t	state_count;
     tvalspec_t			t0, t1;
     int				i;
     bench_recv_buf_t		send_buf;
@@ -662,22 +660,14 @@ bench_inter_rpc(const char *label, int send_size, int iters)
     if (kr) { printf("  %s: insert child send failed %d\n", label, kr); return; }
 
     /*
-     * Step 5: Create thread in child and set i386 registers.
+     * Step 5: Create thread in child and give it a pc and a stack.
      */
     kr = thread_create(child_task, &child_thread);
     if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return; }
 
-    state_count = i386_THREAD_STATE_COUNT;
-    kr = thread_get_state(child_thread, i386_THREAD_STATE,
-			  (thread_state_t)&state, &state_count);
-    if (kr) { printf("  %s: get_state failed %d\n", label, kr); return; }
-
-    state.eip  = (unsigned int)child_echo_entry;
-    state.uesp = (unsigned int)(child_stack + CHILD_STACK_SIZE);
-
-    kr = thread_set_state(child_thread, i386_THREAD_STATE,
-			  (thread_state_t)&state, i386_THREAD_STATE_COUNT);
-    if (kr) { printf("  %s: set_state failed %d\n", label, kr); return; }
+    kr = bench_child_thread_start(child_thread, child_echo_entry,
+				  child_stack + CHILD_STACK_SIZE);
+    if (kr) { printf("  %s: child thread start failed %d\n", label, kr); return; }
 
     /*
      * Step 6: Start child thread.
@@ -1205,8 +1195,6 @@ bench_pp_inter(const char *label, int send_size, int use_pp, int iters)
     mach_port_t			child_recv_port;
     mach_port_t			parent_recv_port;
     vm_offset_t			child_stack;
-    struct i386_thread_state	state;
-    mach_msg_type_number_t	state_count;
     tvalspec_t			t0, t1;
     int				i;
     static bench_recv_buf_t	send_buf;
@@ -1263,17 +1251,9 @@ bench_pp_inter(const char *label, int send_size, int use_pp, int iters)
     kr = thread_create(child_task, &child_thread);
     if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return; }
 
-    state_count = i386_THREAD_STATE_COUNT;
-    kr = thread_get_state(child_thread, i386_THREAD_STATE,
-			  (thread_state_t)&state, &state_count);
-    if (kr) { printf("  %s: get_state failed %d\n", label, kr); return; }
-
-    state.eip  = (unsigned int)child_echo_entry;
-    state.uesp = (unsigned int)(child_stack + CHILD_STACK_SIZE);
-
-    kr = thread_set_state(child_thread, i386_THREAD_STATE,
-			  (thread_state_t)&state, i386_THREAD_STATE_COUNT);
-    if (kr) { printf("  %s: set_state failed %d\n", label, kr); return; }
+    kr = bench_child_thread_start(child_thread, child_echo_entry,
+				  child_stack + CHILD_STACK_SIZE);
+    if (kr) { printf("  %s: child thread start failed %d\n", label, kr); return; }
 
     kr = thread_resume(child_thread);
     if (kr) { printf("  %s: thread_resume failed %d\n", label, kr); return; }
@@ -1807,8 +1787,6 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
     mach_port_t			child_recv_port;
     mach_port_t			parent_recv_port;
     vm_offset_t			child_stack;
-    struct i386_thread_state	state;
-    mach_msg_type_number_t	state_count;
     tvalspec_t			t0, t1;
     int				i;
     bench_ool_send_msg_t	send_buf;
@@ -1856,13 +1834,11 @@ bench_ool_inter_rpc(const char *label, vm_size_t ool_size, int iters)
     kr = thread_create(child_task, &child_thread);
     if (kr) { printf("  %s: thread_create failed %d\n", label, kr); return; }
 
-    state_count = i386_THREAD_STATE_COUNT;
-    thread_get_state(child_thread, i386_THREAD_STATE,
-		     (thread_state_t)&state, &state_count);
-    state.eip  = (unsigned int)child_ool_echo_entry;
-    state.uesp = (unsigned int)(child_stack + CHILD_STACK_SIZE);
-    thread_set_state(child_thread, i386_THREAD_STATE,
-		     (thread_state_t)&state, i386_THREAD_STATE_COUNT);
+    if (bench_child_thread_start(child_thread, child_ool_echo_entry,
+				 child_stack + CHILD_STACK_SIZE)) {
+	printf("  %s: child thread start failed\n", label);
+	return;
+    }
     thread_resume(child_thread);
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, 10);
 
@@ -2746,8 +2722,19 @@ main(int argc, char **argv)
     /* libvfs smoke test (#220 v0.1) — hangs off the FLIPC suite gate
      * for now; pure correctness, not a perf bench. */
     if (suites & SUITE_FLIPC2) {
+	/*
+	 * #552: libvfs does not build for x86-64 yet -- migcom sums field
+	 * sizes without alignment padding and fs_stat's reply comes out four
+	 * bytes short at -m64 (#553).  ⚠️ SAID rather than skipped: a suite
+	 * that prints nothing cannot be told from one that passed.
+	 */
+#if defined(__x86_64__)
+	printf("\n--- libvfs smoke: SKIPPED, libvfs is not built for x86-64 "
+	       "(#553) ---\n");
+#else
 	extern void bench_libvfs_smoke(void);
 	bench_libvfs_smoke();
+#endif
     }
 
     /* exec_server smoke test (#228 v0.1.0) — same FLIPC gate. */
@@ -2758,8 +2745,13 @@ main(int argc, char **argv)
 
     /* proc_server smoke test (#237 v0.1.0) — same FLIPC gate. */
     if (suites & SUITE_FLIPC2) {
+#if defined(__x86_64__)
+	printf("\n--- proc smoke: SKIPPED, it links libvfs, which is not built "
+	       "for x86-64 (#553) ---\n");
+#else
 	extern void bench_proc_smoke(void);
 	bench_proc_smoke();
+#endif
     }
 
     printf("=== Benchmark complete ===\n");

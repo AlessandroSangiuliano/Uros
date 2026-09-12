@@ -78,6 +78,14 @@
 extern mach_port_t flipc2_clock_port;
 extern mach_port_t flipc2_host_priv_port;	/* #546 */
 
+/*
+ * #552: set a fresh thread's program counter and stack on either machine.
+ * The caller resumes it.  Defined in flipc2_bench_common.c.
+ */
+kern_return_t bench_child_thread_start(mach_port_t thread,
+				       void (*entry)(void),
+				       vm_offset_t stack_top);
+
 void flipc2_get_time(tvalspec_t *tv);
 unsigned long flipc2_elapsed_ns(const tvalspec_t *before,
                                 const tvalspec_t *after);

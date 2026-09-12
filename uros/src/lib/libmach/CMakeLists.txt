@@ -203,7 +203,27 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   list(REMOVE_ITEM _MACH_C
     ${CMAKE_CURRENT_SOURCE_DIR}/strtod.c)           # needs float.h macros
 
-  add_library(libmach STATIC ${_traps_pp} ${_MACH_C} ${LIBMACH_MIG_GENERATED})
+  # bzero, which is memset.c compiled a SECOND time (#552).
+  #
+  # 🔑 i386 gets both from i386/memset.s -- one SSE2 file providing memset and
+  # bzero.  There is no such assembly here, and memset.c yields whichever of the
+  # two its -DBZERO switch selects, so a single compilation leaves bzero
+  # undefined.  ipc_bench's mem_bench is what noticed: it times bzero AS
+  # DISTINCT from memset, which is the reason not to quietly point one at the
+  # other -- a benchmark whose subject has been substituted measures the
+  # substitute.
+  #
+  # An OBJECT library rather than a copied source file: two compilations of one
+  # file cannot live in one target, and a second copy of the code would be a
+  # second thing to keep in step.
+  add_library(libmach_bzero OBJECT ${CMAKE_CURRENT_SOURCE_DIR}/memset.c)
+  target_compile_definitions(libmach_bzero PRIVATE BZERO)
+  target_compile_options(libmach_bzero PRIVATE ${UROS_ARCH_FLAGS}
+    $<$<COMPILE_LANGUAGE:C>:-std=gnu11 -D_BSD -fno-builtin
+                            -mstack-protector-guard=global -include stdint.h>)
+
+  add_library(libmach STATIC ${_traps_pp} ${_MACH_C} ${LIBMACH_MIG_GENERATED}
+                             $<TARGET_OBJECTS:libmach_bzero>)
   add_dependencies(libmach mig_mach_public_headers)
   set_target_properties(libmach PROPERTIES
     OUTPUT_NAME "mach"
