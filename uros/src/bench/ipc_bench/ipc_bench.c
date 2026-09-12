@@ -48,6 +48,7 @@
 #include <mach/thread_switch.h>
 #include <mach/mach_syscalls.h>	/* syscall_thread_switch */
 #include <mach/machine/thread_status.h>	/* #552: this machine's, not i386's */
+#include <mach/machine/port_name.h>	/* #552: MACH_PORT_GEN_BITS is the target's */
 #include <sa_mach.h>
 #include <pthread.h>
 #include <device/device.h>
@@ -75,11 +76,35 @@ extern kern_return_t mach_port_set_protected_payload(
 #define CHILD_STACK_SIZE	(64 * 1024)	/* 64 KB */
 
 /*
- * Well-known port names inserted into the child task's IPC space
- * for the inter-task benchmark.
+ * Well-known port names inserted into the child task's IPC space for the
+ * inter-task benchmark.
+ *
+ * 🔴 BUILT FROM AN INDEX, NOT WRITTEN AS A NUMBER (#552).
+ *
+ * They used to be the literals 0x1503 and 0x1603.  A port name is an index and
+ * a generation packed into one word, and how wide the generation is belongs to
+ * the target: eight bits on i386, TEN on x86-64 (#413 widened it, because a name
+ * and the entry bits that hold it must be the same width).  So those two
+ * literals are indices 21 and 22 on i386 -- two entries -- and index 5 and index
+ * 5 on x86-64, the SAME ENTRY.  The second insert answered KERN_NAME_EXISTS and
+ * the whole inter-task suite printed nothing but an error, on every size.
+ *
+ * 🔑 The assertion below is the point, not the fix.  Deriving the names from
+ * indices makes them right on both targets today; the _Static_assert makes a
+ * collision IMPOSSIBLE to reintroduce on the next target, where the field may be
+ * a third width.  A comment saying "keep these apart" would have been read and
+ * believed, exactly like the one that said to revisit an array bound "if other
+ * flavors are added" while a word size broke it.
  */
-#define CHILD_RECV_NAME		((mach_port_t) 0x1503)
-#define CHILD_SEND_NAME		((mach_port_t) 0x1603)
+#define CHILD_RECV_INDEX	0x15
+#define CHILD_SEND_INDEX	0x16
+#define CHILD_RECV_NAME		((mach_port_t) MACH_PORT_MAKE(CHILD_RECV_INDEX, 0))
+#define CHILD_SEND_NAME		((mach_port_t) MACH_PORT_MAKE(CHILD_SEND_INDEX, 0))
+
+_Static_assert(MACH_PORT_INDEX(CHILD_RECV_NAME)
+	    != MACH_PORT_INDEX(CHILD_SEND_NAME),
+	"the two child port names land on one entry: this target's generation "
+	"field is wide enough to swallow the difference between the indices");
 
 /* ===================================================================
  * Global ports

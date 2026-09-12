@@ -24,6 +24,7 @@
 #define FLIPC2_BENCH_H
 
 #include <flipc2.h>
+#include <mach/machine/port_name.h>	/* #552: MACH_PORT_GEN_BITS is the target's */
 #include <mach/port.h>
 #include <mach/clock_types.h>
 #include <pthread.h>
@@ -58,8 +59,21 @@
 #define FLIPC2_CHILD_STACK_SIZE (64 * 1024)
 
 /* Well-known child port names (must not collide with ipc_bench's) */
-#define FLIPC2_CHILD_SEM_FWD   ((mach_port_t) 0x2503)
-#define FLIPC2_CHILD_SEM_REV   ((mach_port_t) 0x2603)
+/*
+ * 🔴 Same defect as ipc_bench.c's pair, same fix (#552): 0x2503 and 0x2603 are
+ * indices 37 and 38 where the generation is eight bits wide and index 9 TWICE
+ * where it is ten.  Built from indices, and the assertion is what keeps it
+ * true on a target whose field is a third width.
+ */
+#define FLIPC2_CHILD_SEM_FWD_INDEX  0x25
+#define FLIPC2_CHILD_SEM_REV_INDEX  0x26
+#define FLIPC2_CHILD_SEM_FWD   ((mach_port_t) MACH_PORT_MAKE(FLIPC2_CHILD_SEM_FWD_INDEX, 0))
+#define FLIPC2_CHILD_SEM_REV   ((mach_port_t) MACH_PORT_MAKE(FLIPC2_CHILD_SEM_REV_INDEX, 0))
+
+_Static_assert(MACH_PORT_INDEX(FLIPC2_CHILD_SEM_FWD)
+	    != MACH_PORT_INDEX(FLIPC2_CHILD_SEM_REV),
+	"the two child semaphore names land on one entry: this target's "
+	"generation field swallows the difference between the indices");
 
 /* Game simulation constants */
 #define GAME_DRAW_CMDS_PER_FRAME  60
