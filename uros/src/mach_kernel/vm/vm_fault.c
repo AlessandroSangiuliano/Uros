@@ -2483,6 +2483,49 @@ FastPmapEnter:
 				pmap_page_protect(cur_m->phys_addr,
 						  VM_PROT_NONE);
 			FP_MARK(FP_PROTECT);
+			
+			/*
+			 * 🔥 #557: THE WIRING BELONGS TO THE MAPPING, SO IT
+			 * MOVES WITH THE SUBSTITUTION.
+			 *
+			 * This fault has just put a NEW page at vaddr and is about
+			 * to enter it with PMAP_ENTER(..., wired) -- so the page
+			 * table says wired while vm_page's count still belongs to
+			 * the OLD page, which this mapping no longer maps.  Then
+			 * vm_fault_unwire() asks vm_fault_page() for the page at
+			 * that offset, gets the new one, and unwires a count of
+			 * zero:
+			 *
+			 *   Assertion failed: vm/vm_resident.c, line 2054:
+			 *                     mem->wire_count > 0
+			 *
+			 * measured with the caller named -- vm_fault_unwire+0x1EF,
+			 * the vm_page_unwire(result_page) in its else branch.
+			 *
+			 * 🔑 This is not a new rule.  Forty lines below,
+			 * FastPmapEnter does exactly this when change_wiring is
+			 * set: `if (wired) vm_page_wire(m); else
+			 * vm_page_unwire(m);'.  The wiring follows whatever page
+			 * the fault resolves at that (map, address).  A
+			 * copy-on-write write fault has change_wiring FALSE and
+			 * `wired' TRUE, and that combination is the one case where
+			 * the page under a wired mapping changes and nothing moved
+			 * the count.
+			 *
+			 * ⚠️ A TRANSFER, not a wire: the old page is unwired
+			 * because THIS mapping stops mapping it, and the count is
+			 * per page across all of them -- so a pool wired by two
+			 * tasks goes 2 -> 1 and keeps the other holder's wiring,
+			 * which is the whole reason #546 stopped severing it.
+			 *
+			 * Both objects and the page queues are held here, which is
+			 * what these two calls require.
+			 */
+			if (wired) {
+				vm_page_wire(m);
+				if (cur_m->wire_count > 0)
+					vm_page_unwire(cur_m);
+			}
 			vm_page_unlock_queues();
 
 			PAGE_WAKEUP_DONE(cur_m);
