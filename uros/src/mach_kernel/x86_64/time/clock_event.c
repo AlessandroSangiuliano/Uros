@@ -35,6 +35,9 @@
 #include <kern/cpu_number.h>		/* cpu_number */
 #include <kern/cpu_data.h>		/* #459: disable_preemption */
 #include <kern/rcu.h>		/* the tick's quiescent state (#455) */
+
+/* Stamped here, read by x86_64/time/clock_dev.c's wall_gettime (#318). */
+extern volatile uint64_t	wall_tsc_at_tick;
 #include <cpus.h>			/* NCPUS */
 #include <trap/trap.h>			/* struct trap_frame */
 #include <mach/machine/vm_types.h>	/* vm_offset_t */
@@ -640,6 +643,20 @@ clock_event_tick(struct trap_frame *frame)
 		ddb_poll_console(frame);
 
 	disable_preemption();
+
+	/*
+	 * The anchor the wall clock interpolates from (#318, the mechanism
+	 * #344 built for i386).
+	 *
+	 * ⚠️ HERE and not beside ddb_poll_console above: that call touches the
+	 * UART and can take milliseconds, and an anchor stamped before it would
+	 * be that far behind the moment the kept time actually moves.  The
+	 * advance happens inside hertz_tick() -- utime_tick(), master processor
+	 * only -- so the stamp belongs immediately before it, and on the same
+	 * processor for the same reason.
+	 */
+	if (cpu == (unsigned) master_cpu)
+		wall_tsc_at_tick = rdtsc();
 
 	/*
 	 * ⚠️ The full rip, not its low half.  #453 widened this argument to
