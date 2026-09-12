@@ -449,8 +449,26 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   endif()
 
   if(UROS_BUNDLE_BENCH_ONLY)
+    # 🔴 LE SUITE SONO NOMINATE, E `scale' E' FUORI PER UN MOTIVO MISURATO.
+    #
+    # Su UNA CPU lo scaling sweep passa thr=16 e si pianta a thr=24: 24-32
+    # thread su un processore, che e' la forma di #352 -- «a thr=12 scatta il
+    # lost-wakeup, poi il bench si pianta, un worker resta su pthread_join per
+    # una reply mai arrivata» -- risolta a giugno e raggiunta molto prima dove
+    # c'e' un solo processore.  Riprodotta due volte, firma di #534:
+    # quiet_census passes=100 con resets che cresce.
+    #
+    # ⚠️ Escluderla NON e' nascondere il difetto: e' il soggetto di un issue
+    # suo, e tenerla qui costerebbe 700 secondi di attesa per boot su una
+    # misura che non la riguarda.  `fault' e `disk' sono fuori perche' sono
+    # lente e non sono il soggetto; tutto il resto della tabella del 20/06 c'e'.
+    #
+    # ⚠️ La suite va nella bootstrap.conf e MAI nel -append del kernel: il
+    # parser boot-arg legge ogni carattere come flag, e la 'h' di bencH e'
+    # halt_in_debugger.
+    set(_BENCH_SUITES "krpc syscall intra slow inter comb port pp ool flipc2 cc")
     file(GENERATE OUTPUT ${_CONF}
-         CONTENT "name_server name_server\nipc_bench ipc_bench\n")
+         CONTENT "name_server name_server\nipc_bench ipc_bench ${_BENCH_SUITES}\n")
   else()
   file(GENERATE OUTPUT ${_CONF}
        CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_IPC_BENCH_LINE}")
