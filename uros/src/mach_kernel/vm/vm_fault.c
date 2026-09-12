@@ -2091,6 +2091,7 @@ vm_fault(
 	register
 	vm_offset_t		cur_offset;
 	vm_page_t		cur_m;
+	boolean_t		source_wired;	/* #546 */
 	vm_object_t		new_object;
 
 
@@ -2435,6 +2436,40 @@ FastPmapEnter:
 			 */
 			vm_page_lock_queues();
 			FP_MARK(FP_QLOCK);
+			/*
+			 * 🔴 #546: A WIRED SOURCE PAGE IS NOT OURS TO TAKE
+			 * APART.
+			 *
+			 * The revoke below severs this page in EVERY space that
+			 * holds it.  When one of those mappings is wired, that is
+			 * somebody else's promise being broken by our fault: i386
+			 * refuses outright ("pmap_remove_all removing a wired
+			 * page") and x86-64 did it silently, which is worse.  A
+			 * task writing to its own copy-on-write view must not be
+			 * able to unwire another task's memory -- and it could,
+			 * measured with the caller named: vm_fault+0x2e7, pmap=user,
+			 * reached as soon as FLIPC wired a pool it shares.
+			 *
+			 * 🔑 The revoke exists for exactly one reason: the
+			 * vm_object_collapse() below may free this page as
+			 * "covered", and vm_page_free() does NOT spare a wired page
+			 * -- it zeroes wire_count and frees it -- so a mapping left
+			 * live over it is #385's freed-but-still-readable page.
+			 * Declining BOTH removes the reason together with the harm:
+			 * the faulter already holds its private copy, and
+			 * FastPmapEnter installs it at vaddr, so neither call is
+			 * needed to finish this fault.  The collapse is an
+			 * optimisation and comes round again on the next one.
+			 *
+			 * ⚠️ wire_count and not the PTE's wired bit, because the
+			 * question is whether ANY mapping of this page is wired:
+			 * pmap_page_protect acts on all of them at once.
+			 * vm_page_deactivate() on the next line asks the very same
+			 * thing and returns without touching a wired page.  This
+			 * call simply never asked.
+			 */
+			source_wired = (cur_m->wire_count != 0);
+			
 			vm_page_deactivate(cur_m);
 			m->dirty = TRUE;
 			FP_MARK(FP_QDEACT);
@@ -2444,8 +2479,9 @@ FastPmapEnter:
 			 * space that had it, so its cost is a function of how
 			 * many spaces those are, not of this fault.
 			 */
-			pmap_page_protect(cur_m->phys_addr,
-					  VM_PROT_NONE);
+			if (!source_wired)
+				pmap_page_protect(cur_m->phys_addr,
+						  VM_PROT_NONE);
 			FP_MARK(FP_PROTECT);
 			vm_page_unlock_queues();
 
@@ -2461,7 +2497,9 @@ FastPmapEnter:
 
 			vm_object_paging_end(object);
 			FP_MARK(FP_QREL);
-			vm_object_collapse(object);
+			/* #546: declined when the source page is wired -- see above. */
+			if (!source_wired)
+				vm_object_collapse(object);
 			FP_MARK(FP_COLLAPSE);
 			vm_object_paging_begin(object);
 			vm_object_unlock(object);
