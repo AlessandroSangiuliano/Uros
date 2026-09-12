@@ -1527,9 +1527,32 @@ flipc2_endpoint_disconnect(
 
 /*
  * Create a buffer group with the given pool size and slot size.
+ *
+ * host_priv says whether the pool is to be WIRED, and it is a parameter rather
+ * than something the library arranges for itself (#546).
+ *
+ * 🔴 It used to wire with mach_host_self() under a comment saying
+ * "best-effort".  vm_wire is declared host_priv_t, mach_host_self() returns the
+ * unprivileged host port, so the call was refused every single time and the
+ * refusal was discarded by a (void).  FLIPC's fast-path pools have been
+ * pageable for the whole life of this code and nothing said so -- a page fault
+ * in the middle of a path whose entire claim is that it does not enter the
+ * kernel.
+ *
+ * 🔑 A library cannot hold a privileged port and should not try, so the caller
+ * decides and the caller is asked.  That is why this is a parameter and not a
+ * flipc2_set_wiring_port() to be called first: a setter can be forgotten, and
+ * a library that silently does nothing when it is forgotten is the defect this
+ * replaces, not a fix for it.
+ *
+ *   MACH_PORT_NULL  the pool stays pageable, deliberately and on the record.
+ *   a host_priv port the pool is wired, and FLIPC2_ERR_RESOURCE_SHORTAGE is
+ *                   returned if it could not be -- a caller that asked for
+ *                   wiring is not handed an unwired pool with a success code.
  */
 flipc2_return_t
 flipc2_bufgroup_create(
+    mach_port_t         host_priv,
     uint32_t            pool_size,
     uint32_t            slot_size,
     flipc2_bufgroup_t  *bg);

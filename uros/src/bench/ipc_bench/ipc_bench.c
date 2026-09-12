@@ -2741,7 +2741,7 @@ main(int argc, char **argv)
      * FLIPC v2 shared-memory channel benchmarks
      * --------------------------------------------------------- */
     if (suites & SUITE_FLIPC2)
-	bench_flipc2_run(clock_port);
+	bench_flipc2_run(clock_port, host_port);
 
     /* libvfs smoke test (#220 v0.1) — hangs off the FLIPC suite gate
      * for now; pure correctness, not a perf bench. */

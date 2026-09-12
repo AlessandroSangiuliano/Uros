@@ -40,6 +40,7 @@
 #include <mach/mach_syscalls.h>	/* #472: trap 100, called directly */
 #include <mach/rpc.h>		/* #478: struct rpc_subsystem */
 #include <mach/bootstrap.h>
+#include <mach/mach_host.h>	/* #546: vm_wire, vm_remap */
 #include <mach/mach_traps.h>
 #include <mach/thread_switch.h>
 #include <mach/cap_types.h>
@@ -1134,6 +1135,260 @@ mig_check_fires(const char *label, mach_port_t dest,
     return 1;
 }
 
+/*
+ * #546: [16] a wired page that its owner gives back.
+ *
+ * 🔴 THIS ARM CANNOT REPORT ITS OWN FAILURE.  The defect it looks for is
+ *
+ *	panic(cpu N): pmap_remove_all removing a wired page
+ *
+ * so when it fires the test is gone and nothing after it runs.  That is why
+ * every probe announces itself BEFORE acting and confirms itself after: the
+ * line that has no partner names the probe that killed the machine, and a log
+ * with all the pairs is the pass.  A verdict computed at the end would only
+ * ever be reached by the runs that had nothing to report.
+ *
+ * ⚠️ And the first thing checked is that vm_wire SUCCEEDED.  #546's second
+ * finding is a caller whose wiring never once happened because it asked with
+ * the unprivileged host port and threw the answer away -- a probe that never
+ * wires cannot panic, and would pass for the wrong reason forever.  The port
+ * used here is the one bootstrap_ports hands out, which the kernel builds from
+ * realhost.host_priv_self, so the call is expected to be accepted; if it is
+ * refused, that is reported as the arm not having run.
+ */
+static boolean_t
+a_wired_page_can_be_given_back(mach_port_t host_priv)
+{
+    const vm_size_t size = 3 * 4096;	/* more than one page, deliberately */
+    boolean_t	    ok   = 1;
+
+    /*
+     * Probe 1 -- the issue's own words: wire your own memory, then free it.
+     */
+    vm_address_t a = 0;
+    kern_return_t kr = vm_allocate(mach_task_self(), &a, size, TRUE);
+
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [16] vm_allocate FAIL kr=%d — the arm did not run\n",
+               (int)kr);
+        return 0;
+    }
+
+    /* Resident before wired: an unfaulted page has no mapping to wire. */
+    memset((void *)a, 0x5a, size);
+
+    kr = vm_wire(host_priv, mach_task_self(), a, size,
+                 VM_PROT_READ | VM_PROT_WRITE);
+    if (kr != KERN_SUCCESS) {
+        printf("cap_test: [16] vm_wire refused kr=%d — the arm did not run "
+               "(it needs the privileged host port, see #546)\n", (int)kr);
+        (void)vm_deallocate(mach_task_self(), a, size);
+        return 0;
+    }
+    printf("cap_test: [16] wired 0x%lx+%lu\n",
+           (unsigned long)a, (unsigned long)size);
+
+    printf("cap_test: [16] probe 1: deallocating a wired range\n");
+    kr = vm_deallocate(mach_task_self(), a, size);
+    printf("cap_test: [16] probe 1 survived, kr=%d\n", (int)kr);
+    if (kr != KERN_SUCCESS)
+        ok = 0;
+
+    /*
+     * Probe 2 and 3 -- the same physical pages reachable through two mappings,
+     * one of them wired.
+     *
+     * 🔑 The kernel clears the wired bit for ONE map and one address
+     * (vm_fault_unwire calls pmap_change_wiring(pmap, va, FALSE)), then acts
+     * on the PHYSICAL page for every map that holds it
+     * (pmap_page_protect).  Those two are not the same set, so a second
+     * mapping of a wired page is the shape where the accounting and the page
+     * tables can disagree.  vm_remap with copy = FALSE is how a task can build
+     * that shape without a memory object of its own.
+     *
+     * Both orders are tried because which side is torn down first decides
+     * which of the two is still wired when the physical page is touched.
+     */
+    for (int first_b = 0; first_b < 2; first_b++) {
+        vm_address_t b = 0;
+        vm_prot_t    cur = VM_PROT_NONE, max = VM_PROT_NONE;
+
+        a = 0;
+        kr = vm_allocate(mach_task_self(), &a, size, TRUE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe %d: vm_allocate FAIL kr=%d\n",
+                   2 + first_b, (int)kr);
+            ok = 0;
+            continue;
+        }
+        memset((void *)a, 0xa5, size);
+
+        kr = vm_remap(mach_task_self(), &b, size, 0, TRUE,
+                      mach_task_self(), a, FALSE,
+                      &cur, &max, VM_INHERIT_NONE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe %d: vm_remap kr=%d — no second "
+                   "mapping, probe skipped\n", 2 + first_b, (int)kr);
+            (void)vm_deallocate(mach_task_self(), a, size);
+            continue;
+        }
+
+        kr = vm_wire(host_priv, mach_task_self(), a, size,
+                     VM_PROT_READ | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe %d: vm_wire refused kr=%d\n",
+                   2 + first_b, (int)kr);
+            (void)vm_deallocate(mach_task_self(), b, size);
+            (void)vm_deallocate(mach_task_self(), a, size);
+            ok = 0;
+            continue;
+        }
+
+        printf("cap_test: [16] probe %d: two mappings 0x%lx and 0x%lx, "
+               "0x%lx wired, freeing %s first\n",
+               2 + first_b, (unsigned long)a, (unsigned long)b,
+               (unsigned long)a, first_b ? "the unwired one" : "the wired one");
+
+        if (first_b) {
+            (void)vm_deallocate(mach_task_self(), b, size);
+            (void)vm_deallocate(mach_task_self(), a, size);
+        } else {
+            (void)vm_deallocate(mach_task_self(), a, size);
+            (void)vm_deallocate(mach_task_self(), b, size);
+        }
+        printf("cap_test: [16] probe %d survived\n", 2 + first_b);
+    }
+
+    /*
+     * Probe 4 -- copy-on-write over a wired page, which is the shape that can
+     * actually reach the guard.
+     *
+     * 🔑 The two probes above cannot: vm_map_delete unwires the entry it is
+     * about to remove, and memory_object_lock_page refuses outright when
+     * m->wire_count is non-zero.  The copy-on-write fault does neither.  When
+     * it substitutes a fresh page it severs the SOURCE page's mappings in every
+     * space that holds it -- vm_fault.c's pmap_page_protect(cur_m, VM_PROT_NONE),
+     * deliberately unconditional since #385, because a mapping left live over a
+     * page about to be freed is how a page on the free list stays readable.
+     *
+     * So: wire a range, make a copy-on-write mapping of it, then write through
+     * the copy.  The source page is wired and mapped, and the fault revokes it.
+     *
+     * ⚠️ The read before the write is part of the shape, not caution: the PTE
+     * the revoke has to find is the one a prior read fault installed.
+     */
+    {
+        vm_address_t a4 = 0, b4 = 0;
+        vm_prot_t    cur = VM_PROT_NONE, max = VM_PROT_NONE;
+        volatile char *p;
+
+        kr = vm_allocate(mach_task_self(), &a4, size, TRUE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 4: vm_allocate FAIL kr=%d\n", (int)kr);
+            return 0;
+        }
+        memset((void *)a4, 0x3c, size);
+
+        kr = vm_wire(host_priv, mach_task_self(), a4, size,
+                     VM_PROT_READ | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 4: vm_wire refused kr=%d\n", (int)kr);
+            (void)vm_deallocate(mach_task_self(), a4, size);
+            return 0;
+        }
+
+        kr = vm_remap(mach_task_self(), &b4, size, 0, TRUE,
+                      mach_task_self(), a4, TRUE,	/* copy = TRUE */
+                      &cur, &max, VM_INHERIT_NONE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 4: vm_remap(copy) kr=%d — probe "
+                   "skipped\n", (int)kr);
+            (void)vm_deallocate(mach_task_self(), a4, size);
+            return ok;
+        }
+
+        p = (volatile char *)b4;
+        printf("cap_test: [16] probe 4: read the copy at 0x%lx: 0x%02x\n",
+               (unsigned long)b4, (unsigned)(unsigned char)p[0]);
+
+        printf("cap_test: [16] probe 4: writing through a copy-on-write "
+               "mapping of a WIRED page\n");
+        for (vm_size_t off = 0; off < size; off += 4096)
+            p[off] = 0x77;
+        printf("cap_test: [16] probe 4 survived\n");
+
+        (void)vm_deallocate(mach_task_self(), b4, size);
+        (void)vm_deallocate(mach_task_self(), a4, size);
+    }
+
+    /*
+     * Probe 5 -- a lazy copy over the wired page.  It does not reach the guard
+     * either, and that is recorded rather than tidied away.
+     *
+     * The idea: vm_remap with copy = TRUE (probe 4) copies EAGERLY, so the
+     * write through the copy finds a page of its own and never faults over the
+     * original.  A LAZY copy should behave differently, and vm_read is how a
+     * task arms one on its own memory -- vm_map_copyin sets the source object
+     * to copy-delay and drops the source mappings to read-only, so the next
+     * write through the wired mapping should be a copy-on-write fault whose
+     * source page is the wired page itself.
+     *
+     * 🔴 IT IS NOT.  Ablation says so: with the vm_fault.c fix removed, this
+     * probe survives on both targets, while the FLIPC bufgroup bench on i386
+     * panics in the same build.  So something between vm_read and the fault
+     * materialises the copy, and this probe measures the wrong thing.
+     *
+     * ⚠️ Kept because it cost two wrong attempts to establish, and the next
+     * person to want a copy-on-write over a wired page from one task will
+     * reach for exactly these two primitives.  🔑 The only witness there is at
+     * the moment is ipc_bench's wired FLIPC pool, which the x86-64 bundle does
+     * not carry -- so this arm cannot yet fail on that target at all.
+     */
+    {
+        vm_address_t   a5 = 0;
+        vm_offset_t    copy = 0;
+        mach_msg_type_number_t got = 0;
+        volatile char *p;
+
+        kr = vm_allocate(mach_task_self(), &a5, size, TRUE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 5: vm_allocate FAIL kr=%d\n", (int)kr);
+            return 0;
+        }
+        memset((void *)a5, 0x69, size);
+
+        kr = vm_wire(host_priv, mach_task_self(), a5, size,
+                     VM_PROT_READ | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 5: vm_wire refused kr=%d\n", (int)kr);
+            (void)vm_deallocate(mach_task_self(), a5, size);
+            return 0;
+        }
+
+        kr = vm_read(mach_task_self(), a5, size, &copy, &got);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 5: vm_read kr=%d — no lazy copy, "
+                   "probe skipped\n", (int)kr);
+            (void)vm_deallocate(mach_task_self(), a5, size);
+            return ok;
+        }
+        printf("cap_test: [16] probe 5: lazy copy armed (%u bytes)\n",
+               (unsigned)got);
+
+        printf("cap_test: [16] probe 5: writing through the WIRED mapping "
+               "with a copy outstanding\n");
+        p = (volatile char *)a5;
+        for (vm_size_t off = 0; off < size; off += 4096)
+            p[off] = 0x11;
+        printf("cap_test: [16] probe 5 survived\n");
+
+        (void)vm_deallocate(mach_task_self(), copy, got);
+        (void)vm_deallocate(mach_task_self(), a5, size);
+    }
+
+    return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1585,6 +1840,13 @@ main(int argc, char **argv)
         pass = 0;
 
     if (!the_master_port_bypasses_the_manifest(device_port))
+        pass = 0;
+
+    /*
+     * #546.  host_port is the PRIVILEGED host port: do_bootstrap_ports builds
+     * it from realhost.host_priv_self, so vm_wire is expected to accept it.
+     */
+    if (!a_wired_page_can_be_given_back(host_port))
         pass = 0;
 
     /*

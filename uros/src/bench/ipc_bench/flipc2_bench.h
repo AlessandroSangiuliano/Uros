@@ -76,6 +76,7 @@
 /* ------------------------------------------------------------------ */
 
 extern mach_port_t flipc2_clock_port;
+extern mach_port_t flipc2_host_priv_port;	/* #546 */
 
 void flipc2_get_time(tvalspec_t *tv);
 unsigned long flipc2_elapsed_ns(const tvalspec_t *before,
@@ -197,6 +198,6 @@ void bench_flipc2_mpsc(void);
 void bench_futex_pingpong(void);
 
 /* Main entry point */
-void bench_flipc2_run(mach_port_t clock_port);
+void bench_flipc2_run(mach_port_t clock_port, mach_port_t host_priv);
 
 #endif /* FLIPC2_BENCH_H */

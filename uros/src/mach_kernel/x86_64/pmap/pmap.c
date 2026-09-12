@@ -998,8 +998,34 @@ void pmap_page_protect(uint64_t pa, vm_prot_t prot)
 		 * every time rather than holding a pointer across the change.
 		 */
 		while ((pv = pv_head(pa)) != PV_ENTRY_NULL
-		       && pv->pmap != PMAP_NULL)
+		       && pv->pmap != PMAP_NULL) {
+			/*
+			 * 🔴 #546: THE SAME INVARIANT i386 HAS ASSERTED
+			 * ALL ALONG, AND THIS TARGET DID NOT.
+			 *
+			 * Removing a wired mapping breaks the promise the
+			 * wiring made: the holder may touch that address where
+			 * a fault is not allowed to happen.  intel/pmap.c
+			 * panics here ("pmap_remove_all removing a wired
+			 * page"); this loop just unmapped it, so the same
+			 * defect showed as a crash on one target and as
+			 * nothing at all on the other -- and nothing at all is
+			 * worse, because it surfaces later as a fault on
+			 * memory somebody was promised.
+			 *
+			 * 🔑 It is the VM's job not to get here.  The route
+			 * that did was the copy-on-write fault severing a
+			 * wired source page (fixed in vm_fault.c); this is the
+			 * witness that says so, and without it the next route
+			 * would be silent again.
+			 */
+			if (pmap_is_wired(pv->pmap, pv->va))
+				panic("pmap_page_protect: removing a wired "
+				      "page, va 0x%lx pa 0x%lx",
+				      (unsigned long) pv->va,
+				      (unsigned long) pa);
 			pmap_forget(pv->pmap, pv->va);
+		}
 		return;
 	}
 

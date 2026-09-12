@@ -17,9 +17,10 @@
 #include <stdio.h>
 
 void
-bench_flipc2_run(mach_port_t clock_port)
+bench_flipc2_run(mach_port_t clock_port, mach_port_t host_priv)
 {
     flipc2_clock_port = clock_port;
+    flipc2_host_priv_port = host_priv;	/* #546: the bufgroups get wired */
 
     printf("\n=== FLIPC v2 Benchmarks ===\n");
 
