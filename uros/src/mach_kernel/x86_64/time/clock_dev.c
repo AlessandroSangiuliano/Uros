@@ -54,6 +54,7 @@
 #include <kern/clock.h>
 #include <kern/posixtime.h>		/* bbc_gettime, utime_get, utime_set */
 #include <kern/time_out.h>		/* tick -- microseconds per tick */
+#include <x86_64/time/tsc.h>		/* rdtsc, tsc_hz -- the sub-tick ruler */
 
 /*
  * ⚠️ <sys/time.h> is deliberately not included, although it is where the rest
@@ -114,10 +115,75 @@ wall_init(void)
 	return (0);
 }
 
+/*
+ * 🔥 THE TICK IS NOT THE RESOLUTION -- SUB-TICK INTERPOLATION FROM THE TSC.
+ *
+ * utime_get() returns a variable the tick advances, so without this the finest
+ * distinguishable reading is one tick: ten milliseconds.  Every elapsed time a
+ * program computes from this clock then comes out a whole multiple of 10000
+ * microseconds, and a benchmark reports figures like "11.00 us/op" whose two
+ * decimals are arithmetic on a single tick.  Anything cheaper than a tick
+ * measures as ZERO -- ipc_bench timed 16384 trap calls at 0 us.
+ *
+ * 🔑 THIS EXACT SYMPTOM WAS DIAGNOSED AND FIXED ONCE ALREADY, on i386, in #344:
+ * "numeri grossolani (3.00/2.00/2.00/2.00 us arrotondati = fallback mtime)".
+ * The fix there is rtc_subtick_nsec() in i386/rtclock.c, and this is the same
+ * mechanism written for this machine: the tick handler stamps the TSC when it
+ * advances the kept time, and a reader converts the distance since that stamp.
+ *
+ * ⚠️ Clamped to one tick, and that clamp is not defensive tidiness.  A stale
+ * anchor -- a tick that was late, or a processor whose TSC is not phase-locked
+ * to the stamping one (#318) -- would otherwise add an arbitrary amount to a
+ * wall clock, and a clock that jumps forward breaks every deadline computed
+ * across the jump in the direction that does not time out.
+ *
+ * ⚠️ i386 carries the same property and so does this: the interpolation can
+ * overshoot the next tick by whatever a late tick costs, so the clock is not
+ * strictly monotonic across a tick boundary.  Bounded by one tick, which is
+ * why the bound exists; a clock that cannot go backwards at all is a different
+ * design and not what #344 built.
+ */
+volatile uint64_t	wall_tsc_at_tick;	/* stamped by the tick (master cpu) */
+
+static uint32_t
+wall_subtick_nsec(uint64_t anchor)
+{
+	uint64_t	hz = tsc_hz();
+	uint64_t	per_us, delta, maxd, ns, cap;
+
+	/*
+	 * Zero when the calibration did not run or its two runs disagreed.  Then
+	 * the tick is all there is, and saying so by returning nothing beats
+	 * interpolating with a rate nobody measured.
+	 */
+	if (hz == 0)
+		return (0);
+
+	per_us = hz / 1000000ULL;		/* TSC counts per microsecond */
+	if (per_us == 0)
+		return (0);
+
+	delta = rdtsc() - anchor;
+	maxd  = per_us * (uint64_t) tick;	/* one tick's worth of counts */
+	if (delta > maxd)
+		delta = maxd;
+
+	ns  = (delta * 1000ULL) / per_us;
+	cap = (uint64_t) tick * NSEC_PER_USEC;
+	if (ns > cap)
+		ns = cap;
+
+	return ((uint32_t) ns);
+}
+
 static kern_return_t
 wall_gettime(tvalspec_t *cur_time)
 {
 	time_value_t	now;
+	uint64_t	a0, a1, ns;
+	unsigned int	sec;
+	uint32_t	sub;
+	int		tries = 0;
 
 	/*
 	 * utime_get() carries the seqlock the mapped copy was built for, so
@@ -125,11 +191,35 @@ wall_gettime(tvalspec_t *cur_time)
 	 * and the seconds being carried.  That matters more than resolution:
 	 * a clock that goes a second backwards makes every deadline computed
 	 * across the jump wrong in the direction that does not time out.
+	 *
+	 * 🔴 The anchor needs its own agreement with that reading, and the
+	 * seqlock does not cover it.  A tick landing between the two would pair
+	 * the OLD kept time with the NEW anchor, and the sum would go backwards
+	 * by almost a whole tick -- which is precisely the failure the seqlock
+	 * exists to prevent, reintroduced one variable along.  So the anchor is
+	 * read on both sides and the pair is retaken if it moved.
 	 */
-	utime_get(&now);
+	do {
+		a0 = wall_tsc_at_tick;
+		utime_get(&now);
+		sub = wall_subtick_nsec(a0);
+		a1 = wall_tsc_at_tick;
+	} while (a0 != a1 && ++tries < 4);
 
-	cur_time->tv_sec  = (unsigned int) now.seconds;
-	cur_time->tv_nsec = (clock_res_t) (now.microseconds * NSEC_PER_USEC);
+	ns  = (uint64_t) now.microseconds * NSEC_PER_USEC + sub;
+	sec = (unsigned int) now.seconds;
+
+	/*
+	 * The carry is not theoretical: microseconds runs to 999999, which is
+	 * 999999000 nanoseconds, and one tick more than that is past a second.
+	 */
+	if (ns >= (uint64_t) NSEC_PER_SEC) {
+		sec += (unsigned int) (ns / NSEC_PER_SEC);
+		ns  %= NSEC_PER_SEC;
+	}
+
+	cur_time->tv_sec  = sec;
+	cur_time->tv_nsec = (clock_res_t) ns;
 	return (KERN_SUCCESS);
 }
 
@@ -165,12 +255,30 @@ wall_getattr(
 
 	case CLOCK_GET_TIME_RES:
 		/*
-		 * The tick, in nanoseconds.  `tick' is microseconds per tick
-		 * and is what utime_tick() adds, so this is the real distance
-		 * between two distinguishable readings -- not the width of the
-		 * field they are returned in.
+		 * 🔑 THE ANSWER CHANGED WHEN THE CLOCK DID, AND THAT IS PART OF
+		 * THE CHANGE, NOT A FOLLOW-UP.
+		 *
+		 * This used to answer `tick' -- ten milliseconds -- and that was
+		 * the truth while wall_gettime() returned a variable the tick
+		 * advanced.  With the sub-tick interpolation above, two readings
+		 * a microsecond apart are distinguishable, so continuing to
+		 * report the tick would understate the clock by four orders of
+		 * magnitude to every caller that asks before deciding whether
+		 * this clock can measure what it wants.
+		 *
+		 * One microsecond rather than a nanosecond: the conversion
+		 * divides by TSC-counts-per-MICROsecond, an integer, so the
+		 * quotient is nanoseconds computed from a microsecond ruler.
+		 * Claiming nanosecond resolution would be claiming the field
+		 * width, which is exactly what the old comment here warned
+		 * against.
+		 *
+		 * ⚠️ Falls back to the tick when the calibration did not run:
+		 * then the interpolation returns nothing and the tick really is
+		 * the resolution.
 		 */
-		*attr = (int) (tick * NSEC_PER_USEC);
+		*attr = tsc_hz() ? (int) NSEC_PER_USEC
+				 : (int) (tick * NSEC_PER_USEC);
 		break;
 
 	default:
