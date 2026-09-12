@@ -1259,6 +1259,68 @@ a_wired_page_can_be_given_back(mach_port_t host_priv)
         printf("cap_test: [16] probe %d survived\n", 2 + first_b);
     }
 
+    /*
+     * Probe 4 -- copy-on-write over a wired page, which is the shape that can
+     * actually reach the guard.
+     *
+     * 🔑 The two probes above cannot: vm_map_delete unwires the entry it is
+     * about to remove, and memory_object_lock_page refuses outright when
+     * m->wire_count is non-zero.  The copy-on-write fault does neither.  When
+     * it substitutes a fresh page it severs the SOURCE page's mappings in every
+     * space that holds it -- vm_fault.c's pmap_page_protect(cur_m, VM_PROT_NONE),
+     * deliberately unconditional since #385, because a mapping left live over a
+     * page about to be freed is how a page on the free list stays readable.
+     *
+     * So: wire a range, make a copy-on-write mapping of it, then write through
+     * the copy.  The source page is wired and mapped, and the fault revokes it.
+     *
+     * ⚠️ The read before the write is part of the shape, not caution: the PTE
+     * the revoke has to find is the one a prior read fault installed.
+     */
+    {
+        vm_address_t a4 = 0, b4 = 0;
+        vm_prot_t    cur = VM_PROT_NONE, max = VM_PROT_NONE;
+        volatile char *p;
+
+        kr = vm_allocate(mach_task_self(), &a4, size, TRUE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 4: vm_allocate FAIL kr=%d\n", (int)kr);
+            return 0;
+        }
+        memset((void *)a4, 0x3c, size);
+
+        kr = vm_wire(host_priv, mach_task_self(), a4, size,
+                     VM_PROT_READ | VM_PROT_WRITE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 4: vm_wire refused kr=%d\n", (int)kr);
+            (void)vm_deallocate(mach_task_self(), a4, size);
+            return 0;
+        }
+
+        kr = vm_remap(mach_task_self(), &b4, size, 0, TRUE,
+                      mach_task_self(), a4, TRUE,	/* copy = TRUE */
+                      &cur, &max, VM_INHERIT_NONE);
+        if (kr != KERN_SUCCESS) {
+            printf("cap_test: [16] probe 4: vm_remap(copy) kr=%d — probe "
+                   "skipped\n", (int)kr);
+            (void)vm_deallocate(mach_task_self(), a4, size);
+            return ok;
+        }
+
+        p = (volatile char *)b4;
+        printf("cap_test: [16] probe 4: read the copy at 0x%lx: 0x%02x\n",
+               (unsigned long)b4, (unsigned)(unsigned char)p[0]);
+
+        printf("cap_test: [16] probe 4: writing through a copy-on-write "
+               "mapping of a WIRED page\n");
+        for (vm_size_t off = 0; off < size; off += 4096)
+            p[off] = 0x77;
+        printf("cap_test: [16] probe 4 survived\n");
+
+        (void)vm_deallocate(mach_task_self(), b4, size);
+        (void)vm_deallocate(mach_task_self(), a4, size);
+    }
+
     return ok;
 }
 
