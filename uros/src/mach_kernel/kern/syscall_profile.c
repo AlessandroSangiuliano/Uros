@@ -58,6 +58,22 @@ extern unsigned int	c_mmot_combined_S_R;
 extern unsigned int	c_mach_msg_trap_switch_fast;
 
 /*
+ * 🔥 AND THE SAME QUESTION ASKED OF THE INSTRUMENT ITSELF.
+ *
+ * With the counters above, twelve columns of zeroes alongside eighty thousand
+ * hand-offs says the path is walked and the marks are not firing -- which is
+ * two possibilities again, one line further down: the mark SITES are not being
+ * reached, or they are reached with no sample open on that thread.
+ *
+ * These count both, per phase, kernel-wide.  A site with hits and no slices is
+ * a sample that was not open; a site with no hits at all is a route through
+ * mach_msg that does not pass where the mark was put.  Three lines of counters
+ * to keep an absence from being explained instead of divided.
+ */
+static unsigned int	sp_site[SP_PHASES];
+static unsigned int	sp_site_shut[SP_PHASES];
+
+/*
  * ⚠️ Named for the WORK and not for the function, and the two copies are named
  * as copies.  A reader deciding #391 has to be able to find them without
  * knowing that ipc_kmsg_get() is where a message is copied in.
@@ -209,10 +225,10 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 	 * benchmark those fell in is the difference between a startup number
 	 * and a steady-state one.
 	 */
-	printf("syscall_profile trap %d dump %u, window %u = traps %u..%u of "
-	       "%u this thread made (%u slept, %u dropped), %d of %d took the "
-	       "hand-off; %u marks x %u cyc = %u of instrument\n",
-	       syscall_profile_trap, p->ndumps, p->nwindows,
+	printf("syscall_profile trap %d thread %p dump %u, window %u = traps "
+	       "%u..%u of %u this thread made (%u slept, %u dropped), %d of %d "
+	       "took the hand-off; %u marks x %u cyc = %u of instrument\n",
+	       syscall_profile_trap, p->self, p->ndumps, p->nwindows,
 	       p->nseen - SP_SAMPLES + 1, p->nseen, p->nseen,
 	       p->nblocked, p->ndropped, nhot, (int) SP_SAMPLES,
 	       (unsigned int) SP_MARKS, sp_pair_cost,
@@ -318,6 +334,28 @@ syscall_profile_dump(struct syscall_profile_thread *p)
 		printf(" of the same %u\n", work);
 	}
 
+	/*
+	 * ⚠️ Printed only while some site is dark, so that a working instrument
+	 * does not spend a line a dump saying it is working.
+	 */
+	/*
+	 * ⚠️ Printed only when THIS breakdown has nothing in it, which is the
+	 * case where the reader needs to know whether the instrument or the
+	 * path is the reason.  A dump with slices does not spend a line saying
+	 * the instrument works.
+	 */
+	if (p->sample[median][SP_GET] == 0 &&
+	    p->sample[median][SP_RESOLVE] == 0 &&
+	    p->sample[median][SP_QUEUE] == 0) {
+		printf("syscall_profile   this thread marked nothing; sites "
+		       "kernel-wide (reached/of those with no sample open):");
+		for (ph = 0; ph < SP_PHASES; ph++)
+			if (sp_site[ph] != 0)
+				printf(" %s=%u/%u", sp_name[ph], sp_site[ph],
+				       sp_site_shut[ph]);
+		printf("\n");
+	}
+
 	if (p->ndumps >= SP_MAX_DUMPS)
 		printf("syscall_profile: %u breakdowns printed, no more from "
 		       "this thread\n", p->ndumps);
@@ -338,6 +376,7 @@ syscall_profile_enter(int trap_number)
 	if (trap_number != syscall_profile_trap || t == THREAD_NULL)
 		return;
 
+	t->syscall_profile.self = (const void *) t;
 	syscall_profile_begin(&t->syscall_profile, syscall_profile_entry_tsc());
 	/*
 	 * The entry phase closes HERE, at the first instruction that could
@@ -408,8 +447,11 @@ syscall_profile_phase(int phase)
 {
 	thread_t	t = current_thread();
 
-	if (t == THREAD_NULL)
+	sp_site[phase]++;
+	if (t == THREAD_NULL || !t->syscall_profile.open) {
+		sp_site_shut[phase]++;
 		return;
+	}
 
 	syscall_profile_mark(&t->syscall_profile, phase);
 }

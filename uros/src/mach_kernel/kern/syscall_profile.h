@@ -40,18 +40,28 @@
  *
  * 🔑 WHY FURTHER.  Comparing x86-64 against the 20/06 i386 baseline on one
  * machine, under one accelerator, at one clock, the gap did not track message
- * SIZE at all -- 4096 bytes is within noise of a null message on every row --
- * it tracked how many THREAD SWITCHES the path does:
+ * SIZE at all -- 4096 bytes is within noise of a null message on every row:
  *
- *	comb   (no switch)		1.16x	  trap mach_null   3.7x FASTER
- *	inter  (switch + address space)	1.38x	  port alloc+free  3.4x FASTER
- *	slow   (receiver parked)	1.46x
- *	intra  (switch, same space)	1.48x
+ *	comb   1.16x slower, and FASTER at four processors
+ *	inter  1.38x	slow  1.46x	intra  1.48x
+ *	trap mach_null 3.7x FASTER    port alloc+destroy 3.4x FASTER
  *
- * A breakdown that folds "claim the receiver", "the switch" and "the sleep"
- * into one hand-off column cannot separate those candidates, and separating
- * them is the whole reason the issue is open.  [#482: a bucket whose number is
- * too big for its name gets divided, not explained]
+ * ❌ The first reading of that table was "the gap tracks how many THREAD
+ * SWITCHES the path does", with comb as the row that does not switch.  That is
+ * WRONG and the benchmark's own source says so: comb is the only suite that
+ * issues a combined send-and-receive, so it is the only one that reaches this
+ * hot path at all -- and reaching it means switching DIRECTLY to the receiver.
+ * The other three send and receive in two separate traps, which cannot take
+ * this path and wake their peer through the run queue instead.
+ *
+ * 🔑 So the axis is not how many switches, it is WHICH MECHANISM: a direct
+ * hand-off against a run-queue round trip.  comb, the row that uses the
+ * hand-off, is the row that degraded least.
+ *
+ * Either way the hand-off needs dividing -- a column folding "claim the
+ * receiver", "the switch" and "the sleep" together cannot separate what is
+ * inside it.  [#482: a bucket whose number is too big for its name gets
+ * divided, not explained]
  *
  * ⚠️ And the two copies get a column each, named for the copy and not for the
  * function around it, because their SUM is the ceiling on what register-IPC
@@ -194,7 +204,7 @@
  * A cap on how many times a thread prints.  A boot makes tens of thousands of
  * traps; an instrument that fills the log is one nobody reads.
  */
-#define	SP_MAX_DUMPS	8
+#define	SP_MAX_DUMPS	16
 
 /*
  * 🔥 AND WHICH WINDOWS THOSE ARE, which is not a detail: with the cap alone
@@ -216,6 +226,13 @@
  *
  * ⚠️ A dump cannot name the suite it landed in.  It names the window and the
  * trap numbers, and the log's own suite headers say where those fall.
+ *
+ * 🔑 Sixteen dumps and not eight, for a reason that is about the SUBJECT and
+ * not about the instrument: ipc_bench's busiest thread makes tens of thousands
+ * of traps, and only one of its suites uses a combined send-and-receive -- the
+ * only kind of trap that can reach the hand-off.  Stopping at window 128 stops
+ * before it.  Threads that make fewer traps than that still print fewer dumps;
+ * the cap costs nothing where it is not reached.
  */
 #define	SP_WINDOW_DUE(w)	((w) != 0 && ((w) & ((w) - 1)) == 0)
 
@@ -267,6 +284,17 @@ struct syscall_profile_thread {
 	 * lock here would be a lock taken inside the interval being measured.
 	 */
 	uint64_t	switch_in;
+	/*
+	 * Whose breakdown this is.
+	 *
+	 * 🔥 Added because a run printed two hundred dumps that were
+	 * indistinguishable from each other, and the question that mattered --
+	 * WHICH of the twenty-five threads these sixteen traps belonged to --
+	 * had no answer anywhere in the output.  Only one kind of thread in
+	 * that run takes the hot path; without a name, its breakdown could not
+	 * be found among the ones that do not.
+	 */
+	const void	*self;
 	uint32_t	slice[SP_PHASES];
 	uint32_t	sample[SP_SAMPLES][SP_PHASES];
 	uint32_t	total[SP_SAMPLES];
