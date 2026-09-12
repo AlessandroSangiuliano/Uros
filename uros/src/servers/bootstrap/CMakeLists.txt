@@ -425,6 +425,19 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
   # so every other verdict is already in the log when it starts.
   option(UROS_BUNDLE_IPC_BENCH
          "Put ipc_bench in the x86-64 bundle (slow; for measuring it)" OFF)
+
+  # 🔴 AND THE BENCH ALONE, WHICH IS HOW JUNE'S NUMBERS WERE TAKEN.
+  #
+  # The photographs of the July baselines all carry the same three lines:
+  #
+  #     bundle: 3 entries -- bootstrap.conf, name_server, ipc_bench
+  #
+  # The benchmark had the machine to itself.  Run inside the ordinary bundle it
+  # shares the machine with a dozen tasks doing DMA, page faults and PCI probes
+  # WHILE IT MEASURES, and the figures that come out are not comparable with
+  # those -- which is exactly the mistake a table of both invites.
+  option(UROS_BUNDLE_BENCH_ONLY
+         "Bundle only name_server + ipc_bench, the way the baselines were taken" OFF)
   if(UROS_BUNDLE_IPC_BENCH)
     set(_IPC_BENCH_LINE "ipc_bench ipc_bench\n")
     set(_IPC_BENCH_FILE "ipc_bench:${_SBIN}/ipc_bench")
@@ -435,8 +448,13 @@ if(NOT UROS_TARGET_ARCH STREQUAL "i386")
     set(_IPC_BENCH_DEP  "")
   endif()
 
+  if(UROS_BUNDLE_BENCH_ONLY)
+    file(GENERATE OUTPUT ${_CONF}
+         CONTENT "name_server name_server\nipc_bench ipc_bench\n")
+  else()
   file(GENERATE OUTPUT ${_CONF}
        CONTENT "name_server name_server\nnetname_test netname_test\nirq_claim_test irq_claim_test\ncap_server cap_server\npthread_test pthread_test\ncap_test cap_test\ndl_test dl_test\nfault_test fault_test\nact_test act_test\ncow_test cow_test\nhal_server hal_server\nirq_claim_test irq_claim_test msi\ndma_reclaim_test dma_reclaim_test holder\ndma_reclaim_test dma_reclaim_test check\nblock_device_server block_device_server\nhal_bar_test hal_bar_test\n${_IPC_BENCH_LINE}")
+  endif()
 
   # ⚠️ It was briefly six while #476 was being hunted -- three copies of the
   # same image under three names, to multiply the STARTING of a task without
